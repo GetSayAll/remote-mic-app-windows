@@ -3,6 +3,7 @@ import {
   audioPhaseLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
+  formatUsageDuration,
   type AudioPhase,
   type ConnectionPhase,
   type DiagnosticReport,
@@ -116,5 +117,14 @@ describe("diagnostic report presentation", () => {
     expect(formatted.connection.generation).toBe(2);
     expect(formatted).not.toHaveProperty("remoteName");
     expect(formatted.audio).not.toHaveProperty("selectedEndpointName");
+  });
+});
+
+describe("usage statistics presentation", () => {
+  it("formats seconds, minutes and hours without exposing fractional samples", () => {
+    expect(formatUsageDuration(12.4)).toBe("12秒");
+    expect(formatUsageDuration(125)).toBe("2分5秒");
+    expect(formatUsageDuration(3_661)).toBe("1小时1分钟");
+    expect(formatUsageDuration(Number.NaN)).toBe("0秒");
   });
 });

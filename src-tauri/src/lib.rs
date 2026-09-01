@@ -6,11 +6,13 @@ use sayall_windows::{
 };
 use serde::Serialize;
 use settings::SettingsStore;
-use std::sync::RwLock;
+use statistics::{StatisticsRuntime, UsageStatisticsSummary};
+use std::sync::{Arc, RwLock};
 use tauri::Manager;
 
 mod diagnostics;
 mod settings;
+mod statistics;
 
 use diagnostics::DiagnosticReport;
 
@@ -26,6 +28,7 @@ struct AppState {
     platform: WindowsPlatform,
     settings: SettingsStore,
     button_mappings: RwLock<ButtonMappings>,
+    statistics: Arc<StatisticsRuntime>,
 }
 
 #[tauri::command]
@@ -41,6 +44,16 @@ fn get_diagnostic_report(state: tauri::State<'_, AppState>) -> DiagnosticReport 
     let platform = state.platform.snapshot();
     let send_input = state.platform.send_input_snapshot();
     DiagnosticReport::capture(env!("CARGO_PKG_VERSION"), &platform, &send_input)
+}
+
+#[tauri::command]
+async fn get_usage_statistics(
+    state: tauri::State<'_, AppState>,
+) -> Result<UsageStatisticsSummary, String> {
+    let statistics = Arc::clone(&state.statistics);
+    tauri::async_runtime::spawn_blocking(move || statistics.summary())
+        .await
+        .map_err(|error| format!("读取使用统计任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -228,6 +241,10 @@ pub fn run() {
                 }
             };
             let platform = WindowsPlatform::default();
+            let statistics = Arc::new(StatisticsRuntime::new(
+                settings.clone(),
+                platform.usage_counters(),
+            ));
             let button_mappings = match settings.load_button_mappings() {
                 Ok(mappings) => mappings,
                 Err(error) => {
@@ -260,12 +277,14 @@ pub fn run() {
                 platform,
                 settings,
                 button_mappings: RwLock::new(button_mappings),
+                statistics,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_runtime_snapshot,
             get_diagnostic_report,
+            get_usage_statistics,
             scan_paired_remotes,
             get_connection_snapshot,
             connect_remote,

@@ -2588,6 +2588,7 @@ dependencies = [
 name = "sayall-windows-app"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "sayall-core",
  "sayall-windows",
  "serde",
