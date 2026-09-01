@@ -5,7 +5,7 @@
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
 - 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连、睡眠恢复、Raw Input 和本机使用统计代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连、睡眠恢复、Raw Input、本机使用统计和 Windows 10 1809 双层版本门禁代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
 
 ## 测试前准备
 
@@ -15,6 +15,17 @@
 4. 若测试虚拟麦克风，单独安装 VB-CABLE，并重启 Windows。
 5. 准备记事本和至少一个真实语音输入应用。
 6. 保存测试开始前的应用日志。
+
+## 用例零：Windows 版本门禁
+
+1. 在低于 Windows 10 1809（build 17763）的隔离虚拟机运行 NSIS 安装器。
+2. 确认安装器显示最低版本提示并退出，应用文件、快捷方式和卸载条目均未创建；WebView2 bootstrapper 是否已发生动作需单独记录。
+3. 将已解压的应用 exe 直接复制到同一虚拟机并运行。
+4. 在 Windows 10 1809 x64 和当前 Windows 11 x64 分别安装并启动同一候选。
+
+预期：低于 build 17763 时，安装器在复制应用文件前以退出码 1633 失败关闭；直接运行 exe 时在创建 WebView、BLE、WASAPI 或 Raw Input 资源前显示原生中英文提示并退出。Windows 10 1809 和更高版本不触发版本拒绝，继续进入正常安装与启动流程。
+
+失败判定：只在文档声明最低版本；低版本仍复制应用文件或启动后台平台线程；直接运行 exe 崩溃、静默退出或进入主界面；Windows 10 1809 被误拒绝；把 CI 编译或纯逻辑测试表述为已完成上述虚拟机/真机验收。
 
 ## 用例一：首次连接
 
@@ -185,6 +196,13 @@
 - Vue 组件覆盖今日、本周、全部切换、时长格式、最近 7 天数据和零数据空状态；900 × 620 与 1080 × 720 浏览器检查无横向溢出，新增统计界面最终字号不小于 16px，控制台零 warning/error；
 - `x86_64-pc-windows-msvc` 目标下 `sayall-windows` 平台层静态检查通过；完整 Tauri Host 交叉检查在 Mac 上仍受缺少 `llvm-rc` 限制，交由 `windows-latest` CI 验证；
 - Windows/RC003 真实按键计数、真实语音计数、跨自然日、退出落盘和升级保留均为 deferred，必须执行用例十一后才能称为真机通过。
+
+2026-09-02 在 Apple Silicon Mac 上完成 Windows 10 1809 版本门禁实现级验证：
+
+- 纯 Rust 版本比较覆盖 Windows 10 build 17762 拒绝、17763 边界接受、更新 Windows 10 build 和未来主版本接受；
+- `sayall-windows` 的 `x86_64-pc-windows-msvc` 静态检查通过，确认 `RtlGetVersion` 封装与原生 `MessageBoxW` 代码可编译；
+- Tauri 配置解析、macOS workspace 测试/检查、前端 8 项测试、生产构建和 `tauri build --no-bundle` 通过；
+- NSIS hook 的实际编译交由 Windows CI；低版本安装提示、退出码 1633、直接运行 exe、Windows 10 1809 接受和 Windows 11 接受仍为 deferred，必须执行用例零后才能称为运行验收通过。
 
 以上结果只证明 Tauri Windows NSIS 未签名 Preview 可在干净 Windows Runner 生成且产物身份、摘要和来源元数据一致；不能证明安装、升级、卸载、WinRT 运行时、真实 RC003、WASAPI、Raw Input 或 SendInput 已经通过，这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
