@@ -1,3 +1,4 @@
+use crate::UsageStatistics;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -18,12 +19,13 @@ pub struct AppSettings {
     pub voice_trigger_mode: VoiceTriggerMode,
     pub launch_at_login: bool,
     pub open_window_at_launch: bool,
+    pub usage_statistics: UsageStatistics,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             selected_remote_id: None,
             audio_endpoint_id: None,
             audio_endpoint_name: None,
@@ -31,17 +33,20 @@ impl Default for AppSettings {
             voice_trigger_mode: VoiceTriggerMode::Hold,
             launch_at_login: false,
             open_window_at_launch: true,
+            usage_statistics: UsageStatistics::default(),
         }
     }
 }
 
 impl AppSettings {
     pub fn normalized(mut self) -> Self {
+        self.schema_version = Self::default().schema_version;
         self.gain_db = if self.gain_db.is_finite() {
             self.gain_db.clamp(0.0, 24.0)
         } else {
             0.0
         };
+        self.usage_statistics = self.usage_statistics.normalized();
         self
     }
 }
@@ -67,8 +72,11 @@ mod tests {
             r#"{"schema_version":1,"audio_endpoint_id":"endpoint-1","gain_db":0.0,"voice_trigger_mode":"hold","launch_at_login":false,"open_window_at_launch":true}"#,
         )
         .unwrap();
+        let settings = settings.normalized();
 
         assert_eq!(settings.audio_endpoint_id.as_deref(), Some("endpoint-1"));
         assert_eq!(settings.audio_endpoint_name, None);
+        assert_eq!(settings.schema_version, 2);
+        assert_eq!(settings.usage_statistics, UsageStatistics::default());
     }
 }

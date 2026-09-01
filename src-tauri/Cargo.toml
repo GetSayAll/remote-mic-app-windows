@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.4", features = [] }
 
 [dependencies]
+chrono.workspace = true
 sayall-core = { path = "../crates/sayall-core" }
 sayall-windows = { path = "../crates/sayall-windows" }
 serde.workspace = true

@@ -2,6 +2,7 @@ use raw_input::{RawInputPhase, RawInputSnapshot};
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -120,6 +121,38 @@ pub struct ConnectionSnapshot {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageCounterSnapshot {
+    pub button_presses: u64,
+    pub voice_sessions: u64,
+    pub voice_samples: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct UsageCounters {
+    state: Mutex<UsageCounterSnapshot>,
+}
+
+impl UsageCounters {
+    pub fn snapshot(&self) -> UsageCounterSnapshot {
+        lock(&self.state).to_owned()
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_button_presses(&self, count: u64) {
+        let mut state = lock(&self.state);
+        state.button_presses = state.button_presses.saturating_add(count);
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_voice_session(&self, samples: u64) {
+        let mut state = lock(&self.state);
+        state.voice_sessions = state.voice_sessions.saturating_add(1);
+        state.voice_samples = state.voice_samples.saturating_add(samples);
+    }
+}
+
 impl Default for ConnectionSnapshot {
     fn default() -> Self {
         Self {
@@ -138,14 +171,15 @@ impl Default for ConnectionSnapshot {
 
 #[derive(Clone)]
 pub struct WindowsPlatform {
+    usage: Arc<UsageCounters>,
     #[cfg(windows)]
-    runtime: std::sync::Arc<ble::BleRuntime>,
+    runtime: Arc<ble::BleRuntime>,
     #[cfg(windows)]
-    audio: std::sync::Arc<audio::AudioRuntime>,
+    audio: Arc<audio::AudioRuntime>,
     #[cfg(windows)]
-    raw_input: std::sync::Arc<raw_input_windows::RawInputRuntime>,
+    raw_input: Arc<raw_input_windows::RawInputRuntime>,
     #[cfg(windows)]
-    send_input: std::sync::Arc<send_input_windows::SendInputRuntime>,
+    send_input: Arc<send_input_windows::SendInputRuntime>,
 }
 
 impl fmt::Debug for WindowsPlatform {
@@ -160,13 +194,15 @@ impl fmt::Debug for WindowsPlatform {
 
 impl Default for WindowsPlatform {
     fn default() -> Self {
+        let usage = Arc::new(UsageCounters::default());
         #[cfg(windows)]
         {
-            let audio = std::sync::Arc::new(audio::AudioRuntime::new());
-            let runtime = std::sync::Arc::new(ble::BleRuntime::new(std::sync::Arc::clone(&audio)));
-            let raw_input = std::sync::Arc::new(raw_input_windows::RawInputRuntime::new());
-            let send_input = std::sync::Arc::new(send_input_windows::SendInputRuntime::new());
+            let audio = Arc::new(audio::AudioRuntime::new());
+            let runtime = Arc::new(ble::BleRuntime::new(Arc::clone(&audio), Arc::clone(&usage)));
+            let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(Arc::clone(&usage)));
+            let send_input = Arc::new(send_input_windows::SendInputRuntime::new());
             Self {
+                usage,
                 runtime,
                 audio,
                 raw_input,
@@ -176,12 +212,16 @@ impl Default for WindowsPlatform {
 
         #[cfg(not(windows))]
         {
-            Self {}
+            Self { usage }
         }
     }
 }
 
 impl WindowsPlatform {
+    pub fn usage_counters(&self) -> Arc<UsageCounters> {
+        Arc::clone(&self.usage)
+    }
+
     pub fn snapshot(&self) -> PlatformSnapshot {
         #[cfg(windows)]
         {
@@ -417,6 +457,12 @@ impl WindowsPlatform {
     }
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
     matches!(
         raw_name.trim().to_lowercase().as_str(),
@@ -555,6 +601,23 @@ mod tests {
         ));
         assert!(is_virtual_cable_output_name("VB-Audio Virtual Cable"));
         assert!(!is_virtual_cable_output_name("Speakers (Realtek Audio)"));
+    }
+
+    #[test]
+    fn usage_counters_keep_voice_session_and_sample_updates_consistent() {
+        let counters = UsageCounters::default();
+        counters.record_button_presses(2);
+        counters.record_voice_session(16_000);
+        counters.record_voice_session(8_000);
+
+        assert_eq!(
+            counters.snapshot(),
+            UsageCounterSnapshot {
+                button_presses: 2,
+                voice_sessions: 2,
+                voice_samples: 24_000,
+            }
+        );
     }
 
     #[cfg(not(windows))]
