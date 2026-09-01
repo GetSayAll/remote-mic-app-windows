@@ -5,7 +5,7 @@
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
 - 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连与睡眠恢复代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连、睡眠恢复和 Raw Input 代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
 
 ## 测试前准备
 
@@ -78,9 +78,16 @@
 
 ## 用例六：可靠按键
 
-逐个测试 Windows 公共 API 能稳定收到的按键：按下、释放、长按、重复、快速连续和映射关闭。
+1. 在“按键”页面点击“启动监听”。
+2. 确认页面只匹配一个 RC003 Raw Input 设备路径；零个或多个匹配时记录错误并停止，不得自动选择第一个。
+3. 逐个测试 Windows 公共 API 能稳定收到的按键：按下、释放、持续按住、系统重复、快速连续。
+4. 对同一实体按键核对原始事件数和语义边沿数，确认 Keyboard 与 HID 同时报告时不会产生两次语义按下。
+5. 按住普通按键时点击“停止监听”，再重新启动监听。
+6. 按住并释放语音键，确认普通按键最近边沿和语义边沿计数不因语音键变化。
 
-预期：一次实体动作只产生一次语义动作；普通键盘不被拦截；语音键不进入普通手势识别。
+预期：监听使用隐藏 message-only window 和 `RIDEV_INPUTSINK`；每个事件都按启动时唯一选中的完整设备路径过滤；一次实体动作只产生一次语义按下和一次语义释放；重复 key-down 不重复触发；停止时释放仍处于按下状态的普通键；线程未能停止时页面必须显示失败，不能伪装为已关闭；普通键盘不被映射；语音键不进入普通动作路径。
+
+失败判定：零匹配仍显示就绪、多个匹配时取第一个、其他键盘改变最近按键、一次按住产生多次语义按下、Keyboard/HID 双路径重复触发、停止后残留按下状态、语音键进入普通按键统计或动作路径。
 
 ## 用例七：安装升级
 
@@ -108,10 +115,12 @@
 - Vue 导航与连接阶段映射测试、类型检查和 Vite 生产构建；
 - 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；
 - 浏览器控制台零错误；
-- `sayall-core` 22 项测试；macOS `sayall-windows` 5 项平台边界/退避测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度和电源回调转发测试；
+- `sayall-core` 22 项测试；macOS `sayall-windows` 13 项平台边界、退避和 Raw Input 纯逻辑测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度、电源回调转发、Raw Input 纯逻辑测试和完整 Tauri Host 编译；
+- Raw Input 自动化覆盖两种 Windows 设备路径、零/多匹配 fail-closed、6/7/9 字节 HID 报告、RAWHID 批量拆分、重复 key-down、Keyboard/HID 双来源并集、停止释放和语音键隔离；隐藏窗口和真实事件形态仍需 Windows/RC003 验收；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
-- `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI 平台层交叉静态检查。
+- `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI/Raw Input 平台层交叉静态检查。
+- Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC003 报告。
 
 以上结果不能证明 Tauri Windows 包、WinRT 运行时、真实 RC003、WASAPI、Raw Input、SendInput 或安装升级已经通过；这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。

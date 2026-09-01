@@ -1,3 +1,4 @@
+use raw_input::{RawInputPhase, RawInputSnapshot};
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -9,6 +10,9 @@ mod audio;
 mod ble;
 #[cfg(windows)]
 mod power;
+pub mod raw_input;
+#[cfg(windows)]
+mod raw_input_windows;
 #[cfg(any(windows, test))]
 mod reconnect;
 
@@ -25,6 +29,7 @@ pub struct PlatformSnapshot {
     pub verification_status: String,
     pub connection: ConnectionSnapshot,
     pub audio: AudioSnapshot,
+    pub raw_input: RawInputSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +139,8 @@ pub struct WindowsPlatform {
     runtime: std::sync::Arc<ble::BleRuntime>,
     #[cfg(windows)]
     audio: std::sync::Arc<audio::AudioRuntime>,
+    #[cfg(windows)]
+    raw_input: std::sync::Arc<raw_input_windows::RawInputRuntime>,
 }
 
 impl fmt::Debug for WindowsPlatform {
@@ -152,7 +159,12 @@ impl Default for WindowsPlatform {
         {
             let audio = std::sync::Arc::new(audio::AudioRuntime::new());
             let runtime = std::sync::Arc::new(ble::BleRuntime::new(std::sync::Arc::clone(&audio)));
-            Self { runtime, audio }
+            let raw_input = std::sync::Arc::new(raw_input_windows::RawInputRuntime::new());
+            Self {
+                runtime,
+                audio,
+                raw_input,
+            }
         }
 
         #[cfg(not(windows))]
@@ -168,6 +180,7 @@ impl WindowsPlatform {
         {
             let connection = self.connection_snapshot();
             let audio = self.audio_snapshot();
+            let raw_input = self.raw_input_snapshot();
             PlatformSnapshot {
                 platform: "windows".to_owned(),
                 windows_api_available: true,
@@ -180,13 +193,14 @@ impl WindowsPlatform {
                     audio.phase,
                     AudioPhase::Ready | AudioPhase::Streaming | AudioPhase::Draining
                 ),
-                raw_input_ready: false,
+                raw_input_ready: raw_input.phase == RawInputPhase::Ready,
                 send_input_ready: false,
                 verification_status:
-                    "BLE/ATVV/WASAPI、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
+                    "BLE/ATVV/WASAPI/Raw Input、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
                         .to_owned(),
                 connection,
                 audio,
+                raw_input,
             }
         }
 
@@ -205,6 +219,10 @@ impl WindowsPlatform {
                 audio: AudioSnapshot {
                     phase: AudioPhase::Unsupported,
                     ..AudioSnapshot::default()
+                },
+                raw_input: RawInputSnapshot {
+                    phase: RawInputPhase::Unsupported,
+                    ..RawInputSnapshot::default()
                 },
             }
         }
@@ -323,6 +341,45 @@ impl WindowsPlatform {
             }
         }
     }
+
+    pub fn raw_input_snapshot(&self) -> RawInputSnapshot {
+        #[cfg(windows)]
+        {
+            self.raw_input.snapshot()
+        }
+
+        #[cfg(not(windows))]
+        {
+            RawInputSnapshot {
+                phase: RawInputPhase::Unsupported,
+                ..RawInputSnapshot::default()
+            }
+        }
+    }
+
+    pub fn start_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.raw_input.start()
+        }
+
+        #[cfg(not(windows))]
+        {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.raw_input.stop()
+        }
+
+        #[cfg(not(windows))]
+        {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
 }
 
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
@@ -427,6 +484,8 @@ pub enum PlatformError {
     Audio(String),
     #[error("BLE cleanup failed: {0}")]
     BleCleanup(String),
+    #[error("Raw Input failed: {0}")]
+    RawInput(String),
 }
 
 #[cfg(test)]
