@@ -1,0 +1,19 @@
+[package]
+name = "sayall-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+futures = "0.3"
+windows = { version = "0.62", features = [
+    "Devices_Bluetooth",
+    "Devices_Enumeration",
+    "Foundation",
+    "Win32_System_WinRT",
+] }
