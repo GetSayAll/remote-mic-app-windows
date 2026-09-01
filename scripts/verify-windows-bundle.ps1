@@ -40,7 +40,9 @@ New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
 $copiedInstaller = Join-Path $artifactDirectory $installer.Name
 Copy-Item -LiteralPath $installer.FullName -Destination $copiedInstaller -Force
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $copiedInstaller).Hash.ToLowerInvariant()
-"$hash  $($installer.Name)" | Set-Content -Encoding ASCII (Join-Path $artifactDirectory "SHA256SUMS.txt")
+$checksumPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
+$utf8WithoutBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText($checksumPath, "$hash  $($installer.Name)`n", $utf8WithoutBom)
 
 $metadata = [ordered]@{
     productName = $config.productName
