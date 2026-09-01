@@ -8,6 +8,8 @@ The RC003 product photo bundled as `public/RC003-remote-photo.png` was supplied 
 
 Tauri, Vue, windows-rs and other package dependencies remain under their respective upstream licenses. The lockfiles and generated release inventory are the authoritative list for a particular build.
 
+The `wasapi` Rust crate is used under the MIT License. Copyright remains with its upstream authors; the dependency version and transitive inventory are recorded in `Cargo.lock`.
+
 ## VB-CABLE
 
 VB-CABLE is developed by VB-Audio and is separately licensed Donationware. It is not committed to this repository and must not be silently installed. Users may obtain it from <https://vb-audio.com/Cable/>.

@@ -67,6 +67,10 @@ impl AtvvVoicePipeline {
         self.session.generation()
     }
 
+    pub fn session_id(&self) -> Option<u8> {
+        self.session.session_id()
+    }
+
     pub fn set_gain_db(&mut self, gain_db: f32) {
         self.gain_db = if gain_db.is_finite() {
             gain_db.clamp(0.0, 24.0)

@@ -4,6 +4,8 @@ use std::fmt;
 use thiserror::Error;
 
 #[cfg(windows)]
+mod audio;
+#[cfg(windows)]
 mod ble;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +20,7 @@ pub struct PlatformSnapshot {
     pub send_input_ready: bool,
     pub verification_status: String,
     pub connection: ConnectionSnapshot,
+    pub audio: AudioSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +29,52 @@ pub struct PairedRemote {
     pub id: String,
     pub name: String,
     pub is_supported_candidate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioEndpoint {
+    pub id: String,
+    pub name: String,
+    pub is_virtual_cable_candidate: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioPhase {
+    #[default]
+    Unconfigured,
+    Ready,
+    Streaming,
+    Draining,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioSnapshot {
+    pub phase: AudioPhase,
+    pub selected_endpoint_id: Option<String>,
+    pub selected_endpoint_name: Option<String>,
+    pub queued_samples: u64,
+    pub submitted_samples: u64,
+    pub generation: u64,
+    pub last_error: Option<String>,
+}
+
+impl Default for AudioSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: AudioPhase::Unconfigured,
+            selected_endpoint_id: None,
+            selected_endpoint_name: None,
+            queued_samples: 0,
+            submitted_samples: 0,
+            generation: 0,
+            last_error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +122,8 @@ impl Default for ConnectionSnapshot {
 pub struct WindowsPlatform {
     #[cfg(windows)]
     runtime: std::sync::Arc<ble::BleRuntime>,
+    #[cfg(windows)]
+    audio: std::sync::Arc<audio::AudioRuntime>,
 }
 
 impl fmt::Debug for WindowsPlatform {
@@ -80,15 +131,23 @@ impl fmt::Debug for WindowsPlatform {
         formatter
             .debug_struct("WindowsPlatform")
             .field("connection", &self.connection_snapshot())
+            .field("audio", &self.audio_snapshot())
             .finish()
     }
 }
 
 impl Default for WindowsPlatform {
     fn default() -> Self {
-        Self {
-            #[cfg(windows)]
-            runtime: std::sync::Arc::new(ble::BleRuntime::new()),
+        #[cfg(windows)]
+        {
+            let audio = std::sync::Arc::new(audio::AudioRuntime::new());
+            let runtime = std::sync::Arc::new(ble::BleRuntime::new(std::sync::Arc::clone(&audio)));
+            Self { runtime, audio }
+        }
+
+        #[cfg(not(windows))]
+        {
+            Self {}
         }
     }
 }
@@ -98,6 +157,7 @@ impl WindowsPlatform {
         #[cfg(windows)]
         {
             let connection = self.connection_snapshot();
+            let audio = self.audio_snapshot();
             PlatformSnapshot {
                 platform: "windows".to_owned(),
                 windows_api_available: true,
@@ -106,12 +166,16 @@ impl WindowsPlatform {
                     connection.phase,
                     ConnectionPhase::Ready | ConnectionPhase::Streaming | ConnectionPhase::Draining
                 ),
-                wasapi_ready: false,
+                wasapi_ready: matches!(
+                    audio.phase,
+                    AudioPhase::Ready | AudioPhase::Streaming | AudioPhase::Draining
+                ),
                 raw_input_ready: false,
                 send_input_ready: false,
-                verification_status: "BLE/ATVV 已实现，等待 Windows 主机与 RC003 真机验证"
-                    .to_owned(),
+                verification_status:
+                    "BLE/ATVV/WASAPI 代码已实现，等待 Windows 主机与 RC003 真机验证".to_owned(),
                 connection,
+                audio,
             }
         }
 
@@ -127,6 +191,10 @@ impl WindowsPlatform {
                 send_input_ready: false,
                 verification_status: "当前主机不是 Windows，仅可验证界面与纯 Rust 核心".to_owned(),
                 connection: ConnectionSnapshot::default(),
+                audio: AudioSnapshot {
+                    phase: AudioPhase::Unsupported,
+                    ..AudioSnapshot::default()
+                },
             }
         }
     }
@@ -171,6 +239,49 @@ impl WindowsPlatform {
             Err(PlatformError::UnsupportedPlatform)
         }
     }
+
+    pub fn list_audio_endpoints(&self) -> Result<Vec<AudioEndpoint>, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.audio.list_endpoints()
+        }
+
+        #[cfg(not(windows))]
+        {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn select_audio_endpoint(
+        &self,
+        endpoint_id: String,
+    ) -> Result<AudioSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.audio.select_endpoint(endpoint_id)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = endpoint_id;
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn audio_snapshot(&self) -> AudioSnapshot {
+        #[cfg(windows)]
+        {
+            self.audio.snapshot()
+        }
+
+        #[cfg(not(windows))]
+        {
+            AudioSnapshot {
+                phase: AudioPhase::Unsupported,
+                ..AudioSnapshot::default()
+            }
+        }
+    }
 }
 
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
@@ -184,6 +295,11 @@ pub fn is_supported_remote_name(raw_name: &str) -> bool {
             | "小米蓝牙遥控器2 pro"
             | "arn9"
     )
+}
+
+pub fn is_virtual_cable_output_name(raw_name: &str) -> bool {
+    let normalized = raw_name.trim().to_lowercase();
+    normalized.contains("cable input") || normalized.contains("vb-audio virtual cable")
 }
 
 #[cfg(windows)]
@@ -252,6 +368,22 @@ pub enum PlatformError {
     Gatt(String),
     #[error("ATVV protocol failed: {0}")]
     Protocol(String),
+    #[error("WASAPI audio worker is unavailable")]
+    AudioWorkerUnavailable,
+    #[error("WASAPI operation timed out")]
+    AudioOperationTimedOut,
+    #[error("select an output endpoint before starting voice")]
+    AudioEndpointNotSelected,
+    #[error("WASAPI output is busy with an active voice session")]
+    AudioBusy,
+    #[error("WASAPI audio belongs to another voice session")]
+    AudioSessionMismatch,
+    #[error("WASAPI voice session was interrupted")]
+    AudioSessionInterrupted,
+    #[error("WASAPI PCM queue exceeded its bounded capacity")]
+    AudioQueueOverflow,
+    #[error("WASAPI failed: {0}")]
+    Audio(String),
 }
 
 #[cfg(test)]
@@ -277,6 +409,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recognizes_virtual_cable_output_without_auto_selecting_other_devices() {
+        assert!(is_virtual_cable_output_name(
+            "CABLE Input (VB-Audio Virtual Cable)"
+        ));
+        assert!(is_virtual_cable_output_name("VB-Audio Virtual Cable"));
+        assert!(!is_virtual_cable_output_name("Speakers (Realtek Audio)"));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn non_windows_host_reports_unsupported_instead_of_fake_devices() {
@@ -290,5 +431,10 @@ mod tests {
             platform.connect_remote("device".to_owned()),
             Err(PlatformError::UnsupportedPlatform)
         );
+        assert_eq!(
+            platform.list_audio_endpoints(),
+            Err(PlatformError::UnsupportedPlatform)
+        );
+        assert_eq!(platform.audio_snapshot().phase, AudioPhase::Unsupported);
     }
 }

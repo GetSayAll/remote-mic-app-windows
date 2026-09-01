@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { connectionPhaseLabel, type ConnectionPhase } from "./bridge";
+import {
+  audioPhaseLabel,
+  connectionPhaseLabel,
+  type AudioPhase,
+  type ConnectionPhase,
+} from "./bridge";
 
 describe("connection phase presentation", () => {
   it("covers every serialized Rust connection phase", () => {
@@ -25,6 +30,26 @@ describe("connection phase presentation", () => {
       "正在结束本次语音",
       "RC003 已断开",
       "连接失败",
+    ]);
+  });
+
+  it("covers every serialized Rust audio phase", () => {
+    const phases: AudioPhase[] = [
+      "unconfigured",
+      "ready",
+      "streaming",
+      "draining",
+      "failed",
+      "unsupported",
+    ];
+
+    expect(phases.map(audioPhaseLabel)).toEqual([
+      "尚未选择输出端点",
+      "WASAPI 已就绪",
+      "正在写入 Windows 音频端点",
+      "正在排空 Windows 音频缓冲",
+      "WASAPI 输出失败",
+      "当前环境不支持 WASAPI",
     ]);
   });
 });
