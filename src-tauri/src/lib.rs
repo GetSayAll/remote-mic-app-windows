@@ -9,7 +9,10 @@ use settings::SettingsStore;
 use std::sync::RwLock;
 use tauri::Manager;
 
+mod diagnostics;
 mod settings;
+
+use diagnostics::DiagnosticReport;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +34,13 @@ fn get_runtime_snapshot(state: tauri::State<'_, AppState>) -> RuntimeSnapshot {
         app_version: env!("CARGO_PKG_VERSION"),
         platform: state.platform.snapshot(),
     }
+}
+
+#[tauri::command]
+fn get_diagnostic_report(state: tauri::State<'_, AppState>) -> DiagnosticReport {
+    let platform = state.platform.snapshot();
+    let send_input = state.platform.send_input_snapshot();
+    DiagnosticReport::capture(env!("CARGO_PKG_VERSION"), &platform, &send_input)
 }
 
 #[tauri::command]
@@ -255,6 +265,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_runtime_snapshot,
+            get_diagnostic_report,
             scan_paired_remotes,
             get_connection_snapshot,
             connect_remote,
