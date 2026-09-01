@@ -138,6 +138,8 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - 普通按键单击、双击和长按；
 - 语音键保持即时生命周期。
 
+当前实现状态：批量 SendInput 引擎、最多四键快捷键、左右修饰键物理 scan code、扩展键标记、部分提交与未知交付状态回滚，以及独立 `button-mappings.json` 持久化和运行时热加载已实现。按键页面只允许用户显式测试已保存快捷键。Raw Input 事件尚不自动触发 SendInput：Windows Raw Input 不能按设备阻止前台程序已经收到的原始 Keyboard 事件，真机确认 RC003 的 Keyboard/HID-only/双路径行为前自动串联会有重复输入风险。
+
 ### 阶段 D：产品化
 
 - Onboarding；

@@ -1,10 +1,12 @@
-use sayall_windows::raw_input::RawInputSnapshot;
+use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
+use sayall_windows::send_input::{ButtonAction, ButtonMappings, SendInputSnapshot};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
 };
 use serde::Serialize;
 use settings::SettingsStore;
+use std::sync::RwLock;
 use tauri::Manager;
 
 mod settings;
@@ -20,6 +22,7 @@ struct RuntimeSnapshot {
 struct AppState {
     platform: WindowsPlatform,
     settings: SettingsStore,
+    button_mappings: RwLock<ButtonMappings>,
 }
 
 #[tauri::command]
@@ -150,6 +153,57 @@ async fn stop_raw_input(state: tauri::State<'_, AppState>) -> Result<RawInputSna
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
+    state
+        .button_mappings
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[tauri::command]
+async fn save_button_mappings(
+    mappings: ButtonMappings,
+    state: tauri::State<'_, AppState>,
+) -> Result<ButtonMappings, String> {
+    let settings = state.settings.clone();
+    let saved =
+        tauri::async_runtime::spawn_blocking(move || settings.save_button_mappings(mappings))
+            .await
+            .map_err(|error| format!("保存按键映射任务失败：{error}"))??;
+    *state
+        .button_mappings
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = saved.clone();
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn test_button_mapping(
+    button: RemoteButton,
+    state: tauri::State<'_, AppState>,
+) -> Result<SendInputSnapshot, String> {
+    let action = state
+        .button_mappings
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .action(button);
+    let ButtonAction::Shortcut { chord } = action else {
+        return Err("该按键当前未配置快捷键".to_owned());
+    };
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
+        .await
+        .map_err(|error| format!("测试快捷键任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_send_input_snapshot(state: tauri::State<'_, AppState>) -> SendInputSnapshot {
+    state.platform.send_input_snapshot()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -164,6 +218,13 @@ pub fn run() {
                 }
             };
             let platform = WindowsPlatform::default();
+            let button_mappings = match settings.load_button_mappings() {
+                Ok(mappings) => mappings,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ButtonMappings::default()
+                }
+            };
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (
@@ -185,7 +246,11 @@ pub fn run() {
             #[cfg(not(windows))]
             let _ = saved_settings;
 
-            app.manage(AppState { platform, settings });
+            app.manage(AppState {
+                platform,
+                settings,
+                button_mappings: RwLock::new(button_mappings),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -199,7 +264,11 @@ pub fn run() {
             select_audio_endpoint,
             get_raw_input_snapshot,
             start_raw_input,
-            stop_raw_input
+            stop_raw_input,
+            get_button_mappings,
+            save_button_mappings,
+            test_button_mapping,
+            get_send_input_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SayAll Windows app");
