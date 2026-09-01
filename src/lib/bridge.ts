@@ -127,6 +127,55 @@ export interface RuntimeSnapshot {
   platform: PlatformSnapshot;
 }
 
+export interface DiagnosticReport {
+  schemaVersion: number;
+  appVersion: string;
+  platform: string;
+  verificationStatus: string;
+  capabilities: {
+    windowsApiAvailable: boolean;
+    bleScanAvailable: boolean;
+    bleVoiceReady: boolean;
+    wasapiReady: boolean;
+    rawInputReady: boolean;
+    sendInputReady: boolean;
+  };
+  connection: {
+    phase: ConnectionPhase;
+    capabilitiesConfirmed: boolean;
+    sampleRate: number | null;
+    frameSize: number | null;
+    decodedSamples: number;
+    generation: number;
+    reconnectAttempt: number;
+    powerNotificationsAvailable: boolean;
+    errorPresent: boolean;
+  };
+  audio: {
+    phase: AudioPhase;
+    endpointConfigured: boolean;
+    queuedSamples: number;
+    submittedSamples: number;
+    generation: number;
+    errorPresent: boolean;
+  };
+  rawInput: {
+    phase: RawInputPhase;
+    matchedDeviceCount: number;
+    rawEventCount: number;
+    semanticEdgeCount: number;
+    lastButton: RemoteButton | null;
+    lastIsPressed: boolean | null;
+    errorPresent: boolean;
+  };
+  sendInput: {
+    available: boolean;
+    submittedBatches: number;
+    submittedEvents: number;
+    errorPresent: boolean;
+  };
+}
+
 export interface PairedRemote {
   id: string;
   name: string;
@@ -185,6 +234,67 @@ export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
     return browserSnapshot;
   }
   return invoke<RuntimeSnapshot>("get_runtime_snapshot");
+}
+
+export async function getDiagnosticReport(): Promise<DiagnosticReport> {
+  if (!isTauriRuntime()) {
+    return {
+      schemaVersion: 1,
+      appVersion: browserSnapshot.appVersion,
+      platform: browserSnapshot.platform.platform,
+      verificationStatus: browserSnapshot.platform.verificationStatus,
+      capabilities: {
+        windowsApiAvailable: false,
+        bleScanAvailable: false,
+        bleVoiceReady: false,
+        wasapiReady: false,
+        rawInputReady: false,
+        sendInputReady: false,
+      },
+      connection: {
+        phase: browserSnapshot.platform.connection.phase,
+        capabilitiesConfirmed: false,
+        sampleRate: null,
+        frameSize: null,
+        decodedSamples: 0,
+        generation: 0,
+        reconnectAttempt: 0,
+        powerNotificationsAvailable: false,
+        errorPresent: false,
+      },
+      audio: {
+        phase: browserSnapshot.platform.audio.phase,
+        endpointConfigured: false,
+        queuedSamples: 0,
+        submittedSamples: 0,
+        generation: 0,
+        errorPresent: false,
+      },
+      rawInput: {
+        phase: browserSnapshot.platform.rawInput.phase,
+        matchedDeviceCount: 0,
+        rawEventCount: 0,
+        semanticEdgeCount: 0,
+        lastButton: null,
+        lastIsPressed: null,
+        errorPresent: false,
+      },
+      sendInput: {
+        available: false,
+        submittedBatches: 0,
+        submittedEvents: 0,
+        errorPresent: false,
+      },
+    };
+  }
+  return invoke<DiagnosticReport>("get_diagnostic_report");
+}
+
+export function formatDiagnosticReport(
+  report: DiagnosticReport,
+  generatedAt = new Date().toISOString(),
+): string {
+  return JSON.stringify({ generatedAt, ...report }, null, 2);
 }
 
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {

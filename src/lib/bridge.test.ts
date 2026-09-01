@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   audioPhaseLabel,
   connectionPhaseLabel,
+  formatDiagnosticReport,
   type AudioPhase,
   type ConnectionPhase,
+  type DiagnosticReport,
 } from "./bridge";
 
 describe("connection phase presentation", () => {
@@ -55,5 +57,64 @@ describe("connection phase presentation", () => {
       "WASAPI 输出失败",
       "当前环境不支持 WASAPI",
     ]);
+  });
+});
+
+describe("diagnostic report presentation", () => {
+  it("adds an explicit generation time without changing the captured report", () => {
+    const report: DiagnosticReport = {
+      schemaVersion: 1,
+      appVersion: "0.1.0",
+      platform: "windows",
+      verificationStatus: "待真机验证",
+      capabilities: {
+        windowsApiAvailable: true,
+        bleScanAvailable: true,
+        bleVoiceReady: false,
+        wasapiReady: false,
+        rawInputReady: false,
+        sendInputReady: true,
+      },
+      connection: {
+        phase: "disconnected",
+        capabilitiesConfirmed: false,
+        sampleRate: null,
+        frameSize: null,
+        decodedSamples: 0,
+        generation: 2,
+        reconnectAttempt: 1,
+        powerNotificationsAvailable: true,
+        errorPresent: false,
+      },
+      audio: {
+        phase: "unconfigured",
+        endpointConfigured: false,
+        queuedSamples: 0,
+        submittedSamples: 0,
+        generation: 0,
+        errorPresent: false,
+      },
+      rawInput: {
+        phase: "stopped",
+        matchedDeviceCount: 0,
+        rawEventCount: 0,
+        semanticEdgeCount: 0,
+        lastButton: null,
+        lastIsPressed: null,
+        errorPresent: false,
+      },
+      sendInput: {
+        available: true,
+        submittedBatches: 0,
+        submittedEvents: 0,
+        errorPresent: false,
+      },
+    };
+
+    const formatted = JSON.parse(formatDiagnosticReport(report, "2026-09-01T00:00:00.000Z"));
+    expect(formatted.generatedAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(formatted.connection.generation).toBe(2);
+    expect(formatted).not.toHaveProperty("remoteName");
+    expect(formatted.audio).not.toHaveProperty("selectedEndpointName");
   });
 });
