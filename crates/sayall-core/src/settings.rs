@@ -8,10 +8,12 @@ pub enum VoiceTriggerMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub schema_version: u32,
     pub selected_remote_id: Option<String>,
     pub audio_endpoint_id: Option<String>,
+    pub audio_endpoint_name: Option<String>,
     pub gain_db: f32,
     pub voice_trigger_mode: VoiceTriggerMode,
     pub launch_at_login: bool,
@@ -24,6 +26,7 @@ impl Default for AppSettings {
             schema_version: 1,
             selected_remote_id: None,
             audio_endpoint_id: None,
+            audio_endpoint_name: None,
             gain_db: 0.0,
             voice_trigger_mode: VoiceTriggerMode::Hold,
             launch_at_login: false,
@@ -56,5 +59,16 @@ mod tests {
         .normalized();
         assert_eq!(settings.gain_db, 24.0);
         assert_eq!(settings.voice_trigger_mode, VoiceTriggerMode::Hold);
+    }
+
+    #[test]
+    fn older_settings_without_endpoint_name_remain_compatible() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"schema_version":1,"audio_endpoint_id":"endpoint-1","gain_db":0.0,"voice_trigger_mode":"hold","launch_at_login":false,"open_window_at_launch":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.audio_endpoint_id.as_deref(), Some("endpoint-1"));
+        assert_eq!(settings.audio_endpoint_name, None);
     }
 }

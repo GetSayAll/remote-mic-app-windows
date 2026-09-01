@@ -82,6 +82,18 @@ impl AudioRuntime {
         })
     }
 
+    pub fn restore_endpoint(
+        &self,
+        endpoint_id: String,
+        expected_name: String,
+    ) -> Result<AudioSnapshot, PlatformError> {
+        self.request(REQUEST_TIMEOUT, |reply| AudioMessage::RestoreEndpoint {
+            endpoint_id,
+            expected_name,
+            reply,
+        })
+    }
+
     pub fn begin_session(&self, generation: u64) -> Result<AudioSnapshot, PlatformError> {
         self.request(REQUEST_TIMEOUT, |reply| AudioMessage::BeginSession {
             generation,
@@ -147,6 +159,11 @@ enum AudioMessage {
         endpoint_id: String,
         reply: Sender<Result<AudioSnapshot, PlatformError>>,
     },
+    RestoreEndpoint {
+        endpoint_id: String,
+        expected_name: String,
+        reply: Sender<Result<AudioSnapshot, PlatformError>>,
+    },
     BeginSession {
         generation: u64,
         reply: Sender<Result<AudioSnapshot, PlatformError>>,
@@ -209,15 +226,7 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     queue.clear();
                     match AudioSink::open(&endpoint_id) {
                         Ok(opened) => {
-                            let snapshot = AudioSnapshot {
-                                phase: AudioPhase::Ready,
-                                selected_endpoint_id: Some(endpoint_id),
-                                selected_endpoint_name: Some(opened.name.clone()),
-                                queued_samples: 0,
-                                submitted_samples: 0,
-                                generation: 0,
-                                last_error: None,
-                            };
+                            let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
                             sink = Some(opened);
                             *lock(&state) = snapshot.clone();
                             let _ = reply.send(Ok(snapshot));
@@ -227,6 +236,25 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                             let _ = reply.send(Err(error));
                         }
                     }
+                }
+                AudioMessage::RestoreEndpoint {
+                    endpoint_id,
+                    expected_name,
+                    reply,
+                } => {
+                    if pending_drain.is_some()
+                        || matches!(
+                            lock(&state).phase,
+                            AudioPhase::Streaming | AudioPhase::Draining
+                        )
+                    {
+                        let _ = reply.send(Err(PlatformError::AudioBusy));
+                        continue;
+                    }
+                    sink = None;
+                    queue.clear();
+                    let snapshot = restore_endpoint(&mut sink, &state, endpoint_id, expected_name);
+                    let _ = reply.send(Ok(snapshot));
                 }
                 AudioMessage::BeginSession { generation, reply } => {
                     let result = begin_session(&mut sink, &mut queue, &state, generation);
@@ -366,6 +394,92 @@ fn list_endpoints() -> Result<Vec<AudioEndpoint>, PlatformError> {
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
     Ok(endpoints)
+}
+
+fn restore_endpoint(
+    sink: &mut Option<AudioSink>,
+    state: &Arc<Mutex<AudioSnapshot>>,
+    endpoint_id: String,
+    expected_name: String,
+) -> AudioSnapshot {
+    let endpoints = match list_endpoints() {
+        Ok(endpoints) => endpoints,
+        Err(error) => {
+            let snapshot = configured_failure_snapshot(
+                endpoint_id,
+                expected_name,
+                format!("无法验证上次选择的输出端点：{error}"),
+            );
+            *lock(state) = snapshot.clone();
+            return snapshot;
+        }
+    };
+    if let Err(error) = validate_restored_endpoint(&endpoints, &endpoint_id, &expected_name) {
+        let snapshot = configured_failure_snapshot(endpoint_id, expected_name, error);
+        *lock(state) = snapshot.clone();
+        return snapshot;
+    }
+
+    match AudioSink::open(&endpoint_id) {
+        Ok(opened) => {
+            let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
+            *sink = Some(opened);
+            *lock(state) = snapshot.clone();
+            snapshot
+        }
+        Err(error) => {
+            let snapshot = configured_failure_snapshot(
+                endpoint_id,
+                expected_name,
+                format!("恢复上次选择的输出端点失败：{error}"),
+            );
+            *lock(state) = snapshot.clone();
+            snapshot
+        }
+    }
+}
+
+fn validate_restored_endpoint(
+    endpoints: &[AudioEndpoint],
+    endpoint_id: &str,
+    expected_name: &str,
+) -> Result<(), String> {
+    let Some(endpoint) = endpoints.iter().find(|endpoint| endpoint.id == endpoint_id) else {
+        return Err("上次选择的输出端点当前不可用，请重新选择".to_owned());
+    };
+    if endpoint.name != expected_name {
+        return Err(format!(
+            "上次选择的输出端点名称已变为“{}”；为避免输出到错误设备，请重新选择",
+            endpoint.name
+        ));
+    }
+    Ok(())
+}
+
+fn ready_snapshot(endpoint_id: String, endpoint_name: String) -> AudioSnapshot {
+    AudioSnapshot {
+        phase: AudioPhase::Ready,
+        selected_endpoint_id: Some(endpoint_id),
+        selected_endpoint_name: Some(endpoint_name),
+        queued_samples: 0,
+        submitted_samples: 0,
+        generation: 0,
+        last_error: None,
+    }
+}
+
+fn configured_failure_snapshot(
+    endpoint_id: String,
+    endpoint_name: String,
+    error: String,
+) -> AudioSnapshot {
+    AudioSnapshot {
+        phase: AudioPhase::Failed,
+        selected_endpoint_id: Some(endpoint_id),
+        selected_endpoint_name: Some(endpoint_name),
+        last_error: Some(error),
+        ..AudioSnapshot::default()
+    }
 }
 
 fn begin_session(
@@ -657,5 +771,29 @@ mod tests {
             Err(PlatformError::AudioQueueOverflow)
         );
         assert_eq!(queue.len(), MAX_QUEUE_SAMPLES);
+    }
+
+    #[test]
+    fn persisted_endpoint_requires_the_same_stable_id_and_name() {
+        let endpoints = vec![AudioEndpoint {
+            id: "endpoint-1".to_owned(),
+            name: "CABLE Input".to_owned(),
+            is_virtual_cable_candidate: true,
+        }];
+
+        assert_eq!(
+            validate_restored_endpoint(&endpoints, "endpoint-1", "CABLE Input"),
+            Ok(())
+        );
+        assert!(
+            validate_restored_endpoint(&endpoints, "missing", "CABLE Input")
+                .unwrap_err()
+                .contains("当前不可用")
+        );
+        assert!(
+            validate_restored_endpoint(&endpoints, "endpoint-1", "Old Name")
+                .unwrap_err()
+                .contains("名称已变")
+        );
     }
 }

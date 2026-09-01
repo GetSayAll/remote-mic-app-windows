@@ -70,6 +70,7 @@ Application State
 ### 3.3 Tauri Host
 
 Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 ATVV 或处理音频帧。主程序保持普通用户权限。
+设备专属设置写入本应用自己的 Tauri 配置目录；音频端点同时保存稳定 endpoint ID 与用户选择时的名称，不跨设备同步，也不读取 Windows 默认输出配置。启动恢复必须先验证两者一致。
 
 ### 3.4 可选高级 Helper
 
@@ -126,7 +127,7 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - WASAPI；
 - 会话排空、重连和错误恢复。
 
-当前实现状态：候选扫描、GATT 连接与通知、ATVV 能力、ADPCM/PCM、连接代次隔离，以及显式端点 WASAPI 输出和基于 padding 的会话排空代码已落地并通过静态与纯逻辑检查；端点选择持久化、自动重连、Windows 运行、VB-CABLE 回环和 RC003 真机验证尚未完成。
+当前实现状态：候选扫描、GATT 连接与通知、ATVV 能力、ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空，以及稳定 endpoint ID + 原名称持久化恢复代码已落地并通过静态与纯逻辑检查。恢复时端点缺失或名称变化会失败关闭，绝不退回系统默认输出；自动重连、Windows 运行、VB-CABLE 回环和 RC003 真机验证尚未完成。
 
 ### 阶段 C：可靠按键
 
