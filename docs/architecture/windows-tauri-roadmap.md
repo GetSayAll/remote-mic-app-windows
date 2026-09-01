@@ -150,6 +150,8 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 
 安装包采用 Tauri NSIS current-user 模式，固定应用 identifier、publisher、开始菜单目录和禁止降级策略。普通 CI 只生成明确标记为 unsigned 的短期 Preview artifact，并同时输出 SHA-256 与 source commit 元数据；该 artifact 只证明可打包，不能替代 Authenticode、SmartScreen、安装升级或真实应用验收。
 
+权限页已接入只读运行诊断摘要：Tauri Host 从现有平台快照提取能力、阶段、代次和计数，并在 Rust 边界直接丢弃设备 ID、蓝牙地址、HID 路径、遥控器名称、音频端点身份、错误原文和用户内容。页面只在用户主动操作后生成并复制可见 JSON；该能力不是持久日志，也不代表任何 Windows 真机路径已通过。
+
 ### 阶段 E：实验性完整 HID
 
 单独研究返回和音量键，不阻塞 Preview。模拟、驱动存在或 HID Tap ready 都不能代替真实按下/释放验收。
