@@ -148,6 +148,8 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - 安装、升级、卸载和更新；
 - 自签 Authenticode、证书指纹和 SHA-256。
 
+安装包采用 Tauri NSIS current-user 模式，固定应用 identifier、publisher、开始菜单目录和禁止降级策略。普通 CI 只生成明确标记为 unsigned 的短期 Preview artifact，并同时输出 SHA-256 与 source commit 元数据；该 artifact 只证明可打包，不能替代 Authenticode、SmartScreen、安装升级或真实应用验收。
+
 ### 阶段 E：实验性完整 HID
 
 单独研究返回和音量键，不阻塞 Preview。模拟、驱动存在或 HID Tap ready 都不能代替真实按下/释放验收。

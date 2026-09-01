@@ -110,6 +110,19 @@
 
 失败判定：逐键分别调用 SendInput、按键释放顺序与按下相同、部分失败后修饰键卡住、无效或超过四键的映射被保存、测试失败仍显示成功、未完成真机来源确认就自动把 Raw Input 边沿注入前台应用。
 
+## 用例九：NSIS Preview 安装包
+
+1. 从对应 Windows CI Run 下载名称包含精确 source commit 的 `sayall-windows-unsigned-preview-*` artifact。
+2. 确认 artifact 只包含一个 `*-setup.exe`、`SHA256SUMS.txt` 和 `build-metadata.json`。
+3. 重新计算安装器 SHA-256，并与两份记录逐字匹配。
+4. 确认 metadata 中 productName、identifier、publisher、版本和 source commit 与仓库一致，且 `signatureStatus` 为 `NotSigned`、`distributionStatus` 为 `unsigned-ci-preview-not-for-public-release`。
+5. 仅在隔离的 Windows 测试用户中运行安装器，确认默认按当前用户安装、开始菜单只有一个“无线麦 SayAll”入口，并记录实际安装目录。
+6. 启动、退出、再次启动后执行卸载，确认程序文件和开始菜单入口移除；用户设置保留/移除行为需记录，不能猜测。
+
+预期：CI 从干净提交构建唯一 NSIS 包；校验脚本拒绝错误产品身份、多个安装器、异常小文件、签名状态不符合当前 CI 边界或摘要不一致。安装器无需管理员权限，不允许用旧版本覆盖新版本。
+
+失败判定：artifact 无法绑定精确 commit、存在多个候选安装器、SHA-256 不一致、CI 包意外带未知签名、安装器要求全局管理员权限、同一版本产生多个安装条目、把未签名 artifact 当作公开发布包。
+
 ## 日志收集
 
 日志不得包含语音内容、识别文字、真实蓝牙地址、完整 HID 路径、窗口标题或个人文档路径。报告应包含 Commit、版本、时间段、Windows 版本和失败步骤。
