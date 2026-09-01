@@ -28,12 +28,31 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "GetSayAll",
+    "category": "Productivity",
+    "shortDescription": "把 RC003 遥控器的语音和按键桥接到 Windows",
+    "longDescription": "无线麦 SayAll Windows 版通过公开 Windows API 接收 RC003 遥控器的语音和普通按键。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "startMenuFolder": "无线麦 SayAll"
+      }
+    }
   }
 }
