@@ -80,6 +80,9 @@ nav { display: grid; gap: 4px; }
 .card p { line-height: 1.6; }
 .muted { color: var(--muted); }
 .card-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.button-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.mapping-heading { margin-top: 26px; }
+.error-text { margin: 12px 0 0; color: #9b312f; font-size: 16px; }
 .primary-button, .secondary-button, .device-list button {
   min-height: 34px;
   padding: 7px 13px;

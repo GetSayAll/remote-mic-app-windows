@@ -1,3 +1,4 @@
+use sayall_windows::raw_input::RawInputSnapshot;
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
@@ -121,6 +122,34 @@ async fn select_audio_endpoint(
     .map_err(|error| format!("选择音频端点任务失败：{error}"))?
 }
 
+#[tauri::command]
+async fn get_raw_input_snapshot(
+    state: tauri::State<'_, AppState>,
+) -> Result<RawInputSnapshot, String> {
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.raw_input_snapshot())
+        .await
+        .map_err(|error| format!("读取 Raw Input 状态失败：{error}"))
+}
+
+#[tauri::command]
+async fn start_raw_input(state: tauri::State<'_, AppState>) -> Result<RawInputSnapshot, String> {
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.start_raw_input())
+        .await
+        .map_err(|error| format!("启动 Raw Input 任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn stop_raw_input(state: tauri::State<'_, AppState>) -> Result<RawInputSnapshot, String> {
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.stop_raw_input())
+        .await
+        .map_err(|error| format!("停止 Raw Input 任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -167,7 +196,10 @@ pub fn run() {
             disconnect_remote,
             list_audio_endpoints,
             get_audio_snapshot,
-            select_audio_endpoint
+            select_audio_endpoint,
+            get_raw_input_snapshot,
+            start_raw_input,
+            stop_raw_input
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SayAll Windows app");
