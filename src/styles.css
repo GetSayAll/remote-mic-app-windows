@@ -134,6 +134,28 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .metric-card span { display: block; color: var(--muted); font-size: 16px; }
 .metric-card strong { display: inline-block; margin: 15px 8px 0 0; font-size: 34px; font-variant-numeric: tabular-nums; }
 .metric-card small { color: var(--muted); font-size: 16px; }
+.duration-card strong { font-size: 28px; }
+.statistics-header-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.period-switch { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 11px; background: rgba(255, 255, 255, 0.72); }
+.period-switch button { min-width: 66px; min-height: 34px; padding: 6px 12px; border: 0; border-radius: 8px; color: #4d5360; background: transparent; cursor: pointer; font-size: 16px; font-weight: 600; }
+.period-switch button.active { color: white; background: var(--accent); }
+.usage-chart-card { margin-top: 18px; }
+.usage-chart-card .card-title-row p { margin: 3px 0 0; font-size: 16px; }
+.chart-legend { display: flex; gap: 12px; color: var(--muted); font-size: 16px; white-space: nowrap; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 9px; height: 9px; border-radius: 999px; }
+.button-dot { background: #666bd5; }
+.voice-dot { background: #49a66f; }
+.usage-day-list { display: grid; gap: 12px; margin-top: 22px; }
+.usage-day-row { display: grid; grid-template-columns: 90px minmax(160px, 1fr) 160px; align-items: center; gap: 14px; min-height: 34px; }
+.usage-day-label, .usage-day-value { font-size: 16px; }
+.usage-day-label { color: #424856; font-weight: 600; }
+.usage-day-value { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.usage-bars { display: grid; gap: 5px; }
+.usage-bar-track { height: 7px; overflow: hidden; border-radius: 999px; background: #eceef3; }
+.usage-bar { display: block; height: 100%; border-radius: inherit; }
+.button-bar { background: #666bd5; }
+.voice-bar { background: #49a66f; }
 .empty-state { padding: 64px 20px; text-align: center; }
 .empty-icon { color: #8b8fdc; font-size: 34px; }
 .empty-state h2 { margin-top: 14px; }
@@ -177,4 +199,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   .app-shell { grid-template-columns: 210px minmax(0, 1fr); }
   .content { padding: 38px 28px 50px; }
   .two-column, .remote-layout { grid-template-columns: 1fr; }
+  .statistics-header { display: grid; }
+  .statistics-header-actions { justify-content: flex-start; }
+  .usage-day-row { grid-template-columns: 82px minmax(120px, 1fr); }
+  .usage-day-value { grid-column: 2; text-align: left; }
 }
