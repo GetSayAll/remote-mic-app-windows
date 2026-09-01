@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "无线麦主窗口的最小权限",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
