@@ -127,6 +127,24 @@ export interface RuntimeSnapshot {
   platform: PlatformSnapshot;
 }
 
+export interface UsageTotals {
+  buttonPresses: number;
+  voiceSessions: number;
+  voiceSeconds: number;
+}
+
+export interface DatedUsage {
+  localDate: string;
+  usage: UsageTotals;
+}
+
+export interface UsageStatisticsSummary {
+  today: UsageTotals;
+  thisWeek: UsageTotals;
+  total: UsageTotals;
+  recentDays: DatedUsage[];
+}
+
 export interface DiagnosticReport {
   schemaVersion: number;
   appVersion: string;
@@ -229,6 +247,28 @@ function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+function emptyUsageStatistics(): UsageStatisticsSummary {
+  const recentDays = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setHours(12, 0, 0, 0);
+    date.setDate(date.getDate() - (6 - index));
+    return {
+      localDate: [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, "0"),
+        String(date.getDate()).padStart(2, "0"),
+      ].join("-"),
+      usage: { buttonPresses: 0, voiceSessions: 0, voiceSeconds: 0 },
+    };
+  });
+  return {
+    today: { buttonPresses: 0, voiceSessions: 0, voiceSeconds: 0 },
+    thisWeek: { buttonPresses: 0, voiceSessions: 0, voiceSeconds: 0 },
+    total: { buttonPresses: 0, voiceSessions: 0, voiceSeconds: 0 },
+    recentDays,
+  };
+}
+
 export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
   if (!isTauriRuntime()) {
     return browserSnapshot;
@@ -288,6 +328,25 @@ export async function getDiagnosticReport(): Promise<DiagnosticReport> {
     };
   }
   return invoke<DiagnosticReport>("get_diagnostic_report");
+}
+
+export async function getUsageStatistics(): Promise<UsageStatisticsSummary> {
+  if (!isTauriRuntime()) {
+    return emptyUsageStatistics();
+  }
+  return invoke<UsageStatisticsSummary>("get_usage_statistics");
+}
+
+export function formatUsageDuration(durationSeconds: number): string {
+  const totalSeconds = Number.isFinite(durationSeconds)
+    ? Math.max(0, Math.round(durationSeconds))
+    : 0;
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}小时${minutes}分钟`;
+  if (minutes > 0) return `${minutes}分${seconds}秒`;
+  return `${seconds}秒`;
 }
 
 export function formatDiagnosticReport(
