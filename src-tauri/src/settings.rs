@@ -1,4 +1,4 @@
-use sayall_core::AppSettings;
+use sayall_core::{AppSettings, UsageStatistics};
 use sayall_windows::send_input::ButtonMappings;
 use std::fs;
 use std::io::ErrorKind;
@@ -47,6 +47,32 @@ impl SettingsStore {
     pub fn save_selected_remote_id(&self, device_id: String) -> Result<(), String> {
         self.update("保存 RC003 设备设置", move |settings| {
             settings.selected_remote_id = Some(device_id);
+        })
+    }
+
+    pub fn usage_statistics(&self) -> Result<UsageStatistics, String> {
+        self.load().map(|settings| settings.usage_statistics)
+    }
+
+    pub fn record_usage(
+        &self,
+        local_date: String,
+        button_presses: u64,
+        voice_sessions: u64,
+        voice_seconds: f64,
+    ) -> Result<(), String> {
+        if button_presses == 0 && voice_sessions == 0 && voice_seconds <= 0.0 {
+            return Ok(());
+        }
+        self.update("保存本机使用统计", move |settings| {
+            settings
+                .usage_statistics
+                .record_button_presses(&local_date, button_presses);
+            settings.usage_statistics.record_voice_sessions(
+                &local_date,
+                voice_sessions,
+                voice_seconds,
+            );
         })
     }
 
@@ -120,11 +146,15 @@ mod tests {
 
     #[test]
     fn settings_round_trip_preserves_stable_endpoint_identity() {
+        let mut usage_statistics = UsageStatistics::default();
+        usage_statistics.record_button_presses("2026-09-01", 3);
+        usage_statistics.record_voice_sessions("2026-09-01", 2, 4.5);
         let settings = AppSettings {
             selected_remote_id: Some("test-remote-id".to_owned()),
             audio_endpoint_id: Some("test-endpoint-id".to_owned()),
             audio_endpoint_name: Some("CABLE Input (Test)".to_owned()),
             gain_db: 6.0,
+            usage_statistics,
             ..AppSettings::default()
         };
 

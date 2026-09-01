@@ -2,7 +2,7 @@ use crate::raw_input::{
     normalize_device_path, parse_raw_hid_body, select_single_device_path, ButtonEdge,
     ButtonStateMerger, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
 };
-use crate::PlatformError;
+use crate::{PlatformError, UsageCounters};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -35,13 +35,15 @@ thread_local! {
 #[derive(Debug)]
 pub struct RawInputRuntime {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
+    usage: Arc<UsageCounters>,
     control: Mutex<Option<ListenerControl>>,
 }
 
 impl RawInputRuntime {
-    pub fn new() -> Self {
+    pub fn new(usage: Arc<UsageCounters>) -> Self {
         Self {
             snapshot: Arc::new(Mutex::new(RawInputSnapshot::default())),
+            usage,
             control: Mutex::new(None),
         }
     }
@@ -75,11 +77,12 @@ impl RawInputRuntime {
         let hwnd = Arc::new(AtomicIsize::new(0));
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let snapshot = Arc::clone(&self.snapshot);
+        let usage = Arc::clone(&self.usage);
         let thread_stop = Arc::clone(&stop_requested);
         let thread_hwnd = Arc::clone(&hwnd);
         let join = thread::Builder::new()
             .name("sayall-raw-input".to_owned())
-            .spawn(move || listener_thread(snapshot, thread_stop, thread_hwnd, ready_sender))
+            .spawn(move || listener_thread(snapshot, usage, thread_stop, thread_hwnd, ready_sender))
             .map_err(|error| PlatformError::RawInput(error.to_string()))?;
         let mut control = ListenerControl {
             stop_requested,
@@ -137,7 +140,7 @@ impl RawInputRuntime {
 
 impl Default for RawInputRuntime {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(UsageCounters::default()))
     }
 }
 
@@ -186,16 +189,19 @@ struct ListenerContext {
     selected_path: String,
     merger: ButtonStateMerger,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
+    usage: Arc<UsageCounters>,
 }
 
 fn listener_thread(
     snapshot: Arc<Mutex<RawInputSnapshot>>,
+    usage: Arc<UsageCounters>,
     stop_requested: Arc<AtomicBool>,
     hwnd_slot: Arc<AtomicIsize>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) {
     let result = run_listener(
         Arc::clone(&snapshot),
+        Arc::clone(&usage),
         Arc::clone(&stop_requested),
         Arc::clone(&hwnd_slot),
         &ready,
@@ -206,7 +212,11 @@ fn listener_thread(
     hwnd_slot.store(0, Ordering::Release);
     THREAD_CONTEXT.with(|slot| {
         if let Some(mut context) = slot.borrow_mut().take() {
-            record_edges(&context.snapshot, context.merger.release_all());
+            record_edges(
+                &context.snapshot,
+                &context.usage,
+                context.merger.release_all(),
+            );
         }
     });
 
@@ -228,6 +238,7 @@ fn listener_thread(
 
 fn run_listener(
     snapshot: Arc<Mutex<RawInputSnapshot>>,
+    usage: Arc<UsageCounters>,
     stop_requested: Arc<AtomicBool>,
     hwnd_slot: Arc<AtomicIsize>,
     ready: &mpsc::SyncSender<Result<(), String>>,
@@ -242,6 +253,7 @@ fn run_listener(
             selected_path: normalize_device_path(&selected_path),
             merger: ButtonStateMerger::default(),
             snapshot: Arc::clone(&snapshot),
+            usage: Arc::clone(&usage),
         });
     });
 
@@ -450,7 +462,7 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         } else {
             Vec::new()
         };
-        record_edges(&context.snapshot, edges);
+        record_edges(&context.snapshot, &context.usage, edges);
         Ok(())
     })
 }
@@ -512,12 +524,17 @@ fn get_device_name(device: windows::Win32::Foundation::HANDLE) -> Result<String,
     Ok(String::from_utf16_lossy(&buffer[..length]))
 }
 
-fn record_edges(snapshot: &Arc<Mutex<RawInputSnapshot>>, edges: Vec<ButtonEdge>) {
+fn record_edges(
+    snapshot: &Arc<Mutex<RawInputSnapshot>>,
+    usage: &UsageCounters,
+    edges: Vec<ButtonEdge>,
+) {
     if edges.is_empty() {
         return;
     }
     let mut state = snapshot.lock().unwrap();
     state.semantic_edge_count += edges.len() as u64;
+    usage.record_button_presses(edges.iter().filter(|edge| edge.is_pressed).count() as u64);
     if let Some(last) = edges.last() {
         state.last_button = Some(last.button);
         state.last_is_pressed = Some(last.is_pressed);

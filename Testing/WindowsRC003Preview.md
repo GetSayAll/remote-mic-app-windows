@@ -5,7 +5,7 @@
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
 - 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连、睡眠恢复和 Raw Input 代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连、睡眠恢复、Raw Input 和本机使用统计代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
 
 ## 测试前准备
 
@@ -135,6 +135,20 @@
 
 失败判定：摘要包含任何设备或用户身份、路径、端点名称或错误原文；状态与当前快照不一致；浏览器预览被描述为 Windows 可用；未点击时自动读取或复制；剪贴板写入失败仍提示成功；页面出现横向溢出或中文小于 12pt。
 
+## 用例十一：本机使用统计
+
+1. 记录测试前“统计”页面今日、本周和全部的按键次数、语音次数与语音时长。
+2. 启动 Raw Input，执行 10 次普通按键完整按下/释放；包含持续按住产生的系统重复，以及 Keyboard/HID 双路径同时报告的按键。
+3. 按住并释放语音键 3 次，确认语音键不增加普通按键次数。
+4. 完成 2 次包含真实音频、且 WASAPI 排空成功的语音会话；另制造 1 次端点失败或断连中断的语音会话。
+5. 保持统计页打开，确认数据在约 1 秒内更新；依次切换今日、本周和全部，并核对最近 7 天对应本机日期。
+6. 退出并重新启动应用，确认统计不丢失、不重复累计；跨本机自然日后重复一次普通按键和一次完整语音。
+7. 从上一候选版本升级后再次启动，确认旧设置、按键映射和已有统计仍保留。
+
+预期：每个去重后的普通按键语义按下只增加 1 次；系统重复、对应释放、语音键和 Keyboard/HID 双路径不重复累计。只有 `STREAM_STOP` 后 WASAPI 排空及 ATVV drain 均成功的会话增加语音次数；语音时长按该会话 16 kHz 已解码采样数折算。每日数据按本机日期保存，页面提供今日、本周、全部与最近 7 天汇总；退出前最后增量落盘，重启和升级不重置或重复。`usage_statistics` 统计字段不得包含设备 ID、蓝牙地址、HID 路径、遥控器/按键名称、端点身份、语音内容、识别文字或第三方 App 上下文；应用原有的用户明确选择设备设置按既有配置边界保存。
+
+失败判定：一次实体按键增加多次、语音键进入普通按键统计、中断会话被记为完成、页面只显示进程内计数而重启归零、升级丢失或重复统计、日期跨天错误、统计文件含任何设备或用户内容、统计写入阻塞 BLE/Raw Input 回调而造成语音或按键响应退化。
+
 ## 日志收集
 
 日志不得包含语音内容、识别文字、真实蓝牙地址、完整 HID 路径、窗口标题或个人文档路径。报告应包含 Commit、版本、时间段、Windows 版本和失败步骤。
@@ -161,6 +175,16 @@
 - Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC003 报告。
 - Windows CI Run [`33522534257`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33522534257) 通过并生成 artifact `sayall-windows-unsigned-preview-e11e460f15287468c01225a8ab86b302d59f09d4`；下载后确认只有一个 4,565,134 字节 NSIS 安装器、`SHA256SUMS.txt` 和 `build-metadata.json`，UTF-8 中文文件名可由 macOS `shasum -a 256 -c` 校验，安装器实算 SHA-256 与两份记录一致为 `e1cccf73c8b20487874eadb12eb9823635f52a0d7664c07fe6b8928532d246d6`，metadata 标记 `NotSigned` 和 `unsigned-ci-preview-not-for-public-release`。
 - main Windows CI Run [`33525406955`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33525406955) 从 merge commit `94923dea303a66604b61ca2572fd13d9d48a9d60` 生成同边界 artifact 并通过下载后 SHA-256、metadata、PE/NSIS 文件类型和 UTF-8 校验文件复验。
+- main Windows CI Run [`33529876579`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33529876579) 从诊断功能 merge commit `f8a65d33c31283c3db9e7964d9a9a36bc1e9f6c3` 成功完成前端、Rust、Windows Host、NSIS 和 artifact 上传；下载后确认唯一安装器为 4,561,376 字节，SHA-256 为 `cfddc29da4ed40d543039c545a0ab23993165243b95bf4b7335d98ff5ed848b3`，metadata 来源提交、`NotSigned` 和 `unsigned-ci-preview-not-for-public-release` 均一致。
+
+2026-09-02 在 Apple Silicon Mac 上完成本机使用统计实现级验证：
+
+- `sayall-core` 覆盖每日批量累计、今日/周/总汇总、饱和计数、非法持久时长归一化和旧 `settings.json` schema 迁移；
+- Windows 平台计数覆盖普通按键按下次数、完整语音会话次数和 16 kHz 采样累计；语音只在成功排空后提交统计，中断路径清除未完成采样；
+- Tauri 统计层覆盖进程计数增量、采样到秒换算、周一起始的本周汇总和最近 7 天日期桶；文件写入由独立后台线程执行，不进入 BLE、WASAPI 或 Raw Input 回调；
+- Vue 组件覆盖今日、本周、全部切换、时长格式、最近 7 天数据和零数据空状态；900 × 620 与 1080 × 720 浏览器检查无横向溢出，新增统计界面最终字号不小于 16px，控制台零 warning/error；
+- `x86_64-pc-windows-msvc` 目标下 `sayall-windows` 平台层静态检查通过；完整 Tauri Host 交叉检查在 Mac 上仍受缺少 `llvm-rc` 限制，交由 `windows-latest` CI 验证；
+- Windows/RC003 真实按键计数、真实语音计数、跨自然日、退出落盘和升级保留均为 deferred，必须执行用例十一后才能称为真机通过。
 
 以上结果只证明 Tauri Windows NSIS 未签名 Preview 可在干净 Windows Runner 生成且产物身份、摘要和来源元数据一致；不能证明安装、升级、卸载、WinRT 运行时、真实 RC003、WASAPI、Raw Input 或 SendInput 已经通过，这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
