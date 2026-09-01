@@ -146,8 +146,9 @@
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
 - `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI/Raw Input 平台层交叉静态检查。
 - Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC003 报告。
+- Windows CI Run [`33522534257`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33522534257) 通过并生成 artifact `sayall-windows-unsigned-preview-e11e460f15287468c01225a8ab86b302d59f09d4`；下载后确认只有一个 4,565,134 字节 NSIS 安装器、`SHA256SUMS.txt` 和 `build-metadata.json`，UTF-8 中文文件名可由 macOS `shasum -a 256 -c` 校验，安装器实算 SHA-256 与两份记录一致为 `e1cccf73c8b20487874eadb12eb9823635f52a0d7664c07fe6b8928532d246d6`，metadata 标记 `NotSigned` 和 `unsigned-ci-preview-not-for-public-release`。
 
-以上结果不能证明 Tauri Windows 包、WinRT 运行时、真实 RC003、WASAPI、Raw Input、SendInput 或安装升级已经通过；这些用例仍为 deferred。
+以上结果只证明 Tauri Windows NSIS 未签名 Preview 可在干净 Windows Runner 生成且产物身份、摘要和来源元数据一致；不能证明安装、升级、卸载、WinRT 运行时、真实 RC003、WASAPI、Raw Input 或 SendInput 已经通过，这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
 
 本次新增动态连接阶段、连接/断开控件、重连/睡眠状态、睡眠恢复通知状态和 WASAPI 端点选择后，应用内浏览器仍没有可用实例，未能重新执行截图、控制台和点击回归；上述 900 × 620、1080 × 720 记录只覆盖此前的静态页面骨架。本次新界面目前仅通过 Vue 类型检查、连接/音频阶段映射测试和 Vite 生产构建。
