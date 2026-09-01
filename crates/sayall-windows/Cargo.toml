@@ -19,5 +19,8 @@ windows = { version = "0.62", features = [
     "Devices_Enumeration",
     "Foundation",
     "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_Power",
     "Win32_System_WinRT",
+    "Win32_UI_WindowsAndMessaging",
 ] }

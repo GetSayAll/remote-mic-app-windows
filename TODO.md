@@ -9,6 +9,7 @@
 - [x] 实现 WinRT 已配对设备扫描、GATT 连接/释放、ATVV 通知和 PCM 解码代码路径；Windows 与 RC003 运行验收仍待完成。
 - [x] 将真实连接阶段、能力与解码采样计数接入 Tauri IPC 和连接页面。
 - [x] 实现显式 WASAPI 输出端点枚举、选择、16 kHz PCM 写入、有界队列和真实 padding 排空代码路径。
+- [x] 实现 RC003 选择持久化、意外断连指数退避重连和 Windows 睡眠/恢复通知代码路径；真机恢复仍待验收。
 - [ ] 在 Windows 主机编译 Tauri 安装包。
 - [ ] 使用真实 RC003 验证 BLE 配对、连接、断开和重连。
 - [ ] 验证 `STREAM_START → AUDIO → STREAM_STOP` 首次会话完整可用。

@@ -66,6 +66,7 @@ Application State
 ### 3.2 `sayall-windows`
 
 只包含 Windows 公共 API。所有 Windows 句柄、COM、WinRT、HID 和音频资源必须有明确生命周期。BLE 回调和音频回调不得执行阻塞文件或进程操作。
+RC003 断连由 BLE 工作线程统一清理后进入 2–30 秒指数退避；用户主动断开只停止本次运行的重连。Windows 电源回调只投递事件，睡眠前的 GATT/音频释放与恢复后的重新发现仍在同一工作线程串行完成，旧 connection generation 回调继续丢弃。
 
 ### 3.3 Tauri Host
 
@@ -127,7 +128,7 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - WASAPI；
 - 会话排空、重连和错误恢复。
 
-当前实现状态：候选扫描、GATT 连接与通知、ATVV 能力、ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空，以及稳定 endpoint ID + 原名称持久化恢复代码已落地并通过静态与纯逻辑检查。恢复时端点缺失或名称变化会失败关闭，绝不退回系统默认输出；自动重连、Windows 运行、VB-CABLE 回环和 RC003 真机验证尚未完成。
+当前实现状态：候选扫描、GATT 连接与通知、ATVV 能力、ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空、稳定 endpoint ID + 原名称恢复，以及 RC003 选择持久化、2–30 秒退避重连和 Windows 睡眠/恢复通知代码已落地并通过静态与纯逻辑检查。音频端点缺失或名称变化会失败关闭；BLE 清理、重连和恢复都不接受旧代次回调。Windows 运行、真实睡眠恢复、VB-CABLE 回环和 RC003 真机验证尚未完成。
 
 ### 阶段 C：可靠按键
 

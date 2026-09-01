@@ -28,6 +28,8 @@ const emptyConnection = (): ConnectionSnapshot => ({
   voiceState: "idle",
   decodedSamples: 0,
   generation: 0,
+  reconnectAttempt: 0,
+  powerNotificationsAvailable: false,
   lastError: null,
 });
 
@@ -72,9 +74,16 @@ watch(
 );
 
 const connectionActive = computed(() =>
-  ["connecting", "discovering", "awaiting_capabilities", "ready", "streaming", "draining"].includes(
-    connection.value.phase,
-  ),
+  [
+    "connecting",
+    "discovering",
+    "awaiting_capabilities",
+    "ready",
+    "streaming",
+    "draining",
+    "reconnecting",
+    "suspended",
+  ].includes(connection.value.phase),
 );
 
 const atvvReady = computed(() =>
@@ -171,7 +180,7 @@ async function disconnect() {
   operationMessage.value = "";
   try {
     connection.value = await disconnectRemote();
-    operationMessage.value = "RC003 连接已释放";
+    operationMessage.value = "RC003 连接已释放，本次运行已停止自动重连";
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -341,6 +350,10 @@ onUnmounted(() => {
             <span>{{ wasapiReady ? audioPhaseLabel(audio.phase) : "等待明确选择" }}</span>
           </div>
           <div class="setting-row"><strong>本次会话代次</strong><span>{{ connection.generation }}</span></div>
+          <div class="setting-row">
+            <strong>睡眠恢复通知</strong>
+            <span>{{ connection.powerNotificationsAvailable ? "Windows API 已注册" : "当前不可用" }}</span>
+          </div>
         </div>
         <div class="info-callout" :class="{ warning: !wasapiReady }">
           {{

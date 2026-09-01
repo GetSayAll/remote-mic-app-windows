@@ -56,10 +56,15 @@ async fn connect_remote(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionSnapshot, String> {
     let platform = state.platform.clone();
-    tauri::async_runtime::spawn_blocking(move || platform.connect_remote(device_id))
-        .await
-        .map_err(|error| format!("连接任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        settings.save_selected_remote_id(device_id.clone())?;
+        platform
+            .connect_remote(device_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("连接任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -138,6 +143,13 @@ pub fn run() {
             ) {
                 if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
                     eprintln!("恢复已保存的音频端点失败：{error}");
+                }
+            }
+
+            #[cfg(windows)]
+            if let Some(device_id) = saved_settings.selected_remote_id {
+                if let Err(error) = platform.restore_remote(device_id) {
+                    eprintln!("恢复已保存的 RC003 失败：{error}");
                 }
             }
 
