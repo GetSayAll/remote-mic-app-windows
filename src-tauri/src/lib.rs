@@ -229,6 +229,13 @@ fn get_send_input_snapshot(state: tauri::State<'_, AppState>) -> SendInputSnapsh
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    if let Err(error) = sayall_windows::compatibility::check_current_windows() {
+        sayall_windows::compatibility::show_unsupported_windows_message(error);
+        eprintln!("{error}");
+        return;
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             let settings_path = app.path().app_config_dir()?.join("settings.json");
