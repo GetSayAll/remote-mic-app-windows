@@ -9,6 +9,7 @@ use thiserror::Error;
 mod audio;
 #[cfg(windows)]
 mod ble;
+pub mod compatibility;
 #[cfg(windows)]
 mod power;
 pub mod raw_input;

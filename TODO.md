@@ -13,12 +13,13 @@
 - [x] 在 Windows 主机编译 Tauri NSIS Preview 安装包；Windows CI 已生成并复验绑定精确来源 Commit、SHA-256 和未签名状态的 artifact，安装、升级、卸载与正式签名仍待完成。
 - [x] 提供去标识化运行诊断摘要和页面内复制入口；自动化已证明不导出设备身份、路径、端点名称或错误原文，Windows WebView 剪贴板仍待运行验收。
 - [x] 持久化并展示仅保存在本机的每日按键次数、完整语音会话次数和语音采样时长；Windows/RC003 真实事件计数与升级保留仍待真机验收。
+- [x] 对低于 Windows 10 1809（build 17763）的系统增加 NSIS 安装与应用启动双层拒绝门禁；Windows 10 1809 / Windows 11 提示和安装行为仍待真机验收。
 - [ ] 使用真实 RC003 验证 BLE 配对、连接、断开和重连。
 - [ ] 验证 `STREAM_START → AUDIO → STREAM_STOP` 首次会话完整可用。
 - [ ] 在 Windows 真机验证 WASAPI 端点初始化、VB-CABLE 回环、欠载恢复与完整尾音。
 - [x] 持久化用户选择的输出端点，并在端点消失或更名时失败关闭；Windows 运行时恢复仍待真机验收。
 - [x] 实现设备路径 fail-closed、隐藏消息窗口、Keyboard/HID 双来源合并和停止释放的 Raw Input 代码路径；Windows 与 RC003 真机按键验收仍待完成。
 - [ ] 实现按键映射保存、热加载和 SendInput：独立映射文件、显式热加载、批量 SendInput、部分提交回滚和界面测试已完成；真实 Raw Input 边沿自动执行须等待 Windows/RC003 确认 Keyboard/HID 事件形态，避免重复输入。
-- [ ] 完成 Windows 10/11 安装、升级和卸载验证。
+- [ ] 完成 Windows 10 1809 / Windows 11 安装、升级和卸载验证。
 - [ ] 建立自签 Authenticode、证书指纹和 SHA-256 发布流程。
 - [ ] 单独评估返回键、音量键等完整 HID 实验能力。
