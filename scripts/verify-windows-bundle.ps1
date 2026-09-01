@@ -31,7 +31,7 @@ if (-not (Test-Path -LiteralPath $installerHooksPath -PathType Leaf)) {
     throw "NSIS installer hooks file is missing: $installerHooksPath"
 }
 $installerHooks = Get-Content -Raw -Encoding UTF8 $installerHooksPath
-if ($installerHooks -notmatch '(?m)^!define SAYALL_MINIMUM_WINDOWS_BUILD 17763$') {
+if ($installerHooks -notmatch '(?m)^!define SAYALL_MINIMUM_WINDOWS_BUILD 17763\r?$') {
     throw "NSIS installer minimum Windows build must remain 17763"
 }
 if (
