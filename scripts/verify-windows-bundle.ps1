@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repositoryRoot "src-tauri/tauri.conf.json"
+$compatibilitySourcePath = Join-Path $repositoryRoot "crates/sayall-windows/src/compatibility.rs"
 $bundleDirectory = Join-Path $repositoryRoot "target/release/bundle/nsis"
 $artifactDirectory = Join-Path $repositoryRoot "artifacts/windows-preview"
 
@@ -20,6 +21,30 @@ if ($config.bundle.windows.nsis.installMode -ne "currentUser") {
 }
 if ($config.bundle.windows.allowDowngrades -ne $false) {
     throw "Windows installer must reject downgrades"
+}
+$expectedInstallerHooks = "windows/installer-hooks.nsh"
+if ($config.bundle.windows.nsis.installerHooks -ne $expectedInstallerHooks) {
+    throw "NSIS installer must reference $expectedInstallerHooks"
+}
+$installerHooksPath = Join-Path (Split-Path -Parent $configPath) $expectedInstallerHooks
+if (-not (Test-Path -LiteralPath $installerHooksPath -PathType Leaf)) {
+    throw "NSIS installer hooks file is missing: $installerHooksPath"
+}
+$installerHooks = Get-Content -Raw -Encoding UTF8 $installerHooksPath
+if ($installerHooks -notmatch '(?m)^!define SAYALL_MINIMUM_WINDOWS_BUILD 17763$') {
+    throw "NSIS installer minimum Windows build must remain 17763"
+}
+if (
+    $installerHooks -notmatch 'NSIS_HOOK_PREINSTALL' -or
+    $installerHooks -notmatch 'AtLeastBuild' -or
+    $installerHooks -notmatch 'SetErrorLevel 1633' -or
+    $installerHooks -notmatch '(?m)^\s*Quit\s*$'
+) {
+    throw "NSIS installer must reject unsupported Windows versions before copying app files"
+}
+$compatibilitySource = Get-Content -Raw -Encoding UTF8 $compatibilitySourcePath
+if ($compatibilitySource -notmatch 'WindowsVersion::new\(10, 0, 17_763\)') {
+    throw "Runtime and NSIS minimum Windows versions must both remain Windows 10 build 17763"
 }
 
 $installers = @(Get-ChildItem -Path $bundleDirectory -Filter "*-setup.exe" -File)
