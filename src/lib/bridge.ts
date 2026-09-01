@@ -66,6 +66,27 @@ export interface RawInputSnapshot {
   lastError: string | null;
 }
 
+export type KeyCode = string;
+
+export interface KeyChord {
+  keys: KeyCode[];
+}
+
+export type ButtonAction =
+  | { type: "disabled" }
+  | { type: "shortcut"; chord: KeyChord };
+
+export interface ButtonMappings {
+  actions: Partial<Record<RemoteButton, ButtonAction>>;
+}
+
+export interface SendInputSnapshot {
+  available: boolean;
+  submittedBatches: number;
+  submittedEvents: number;
+  lastError: string | null;
+}
+
 export interface AtvvCapabilities {
   version: number;
   codecs: number;
@@ -234,6 +255,34 @@ export async function stopRawInput(): Promise<RawInputSnapshot> {
     throw new Error("当前是浏览器预览，无法停止 Windows Raw Input");
   }
   return invoke<RawInputSnapshot>("stop_raw_input");
+}
+
+export async function getButtonMappings(): Promise<ButtonMappings> {
+  if (!isTauriRuntime()) {
+    return { actions: {} };
+  }
+  return invoke<ButtonMappings>("get_button_mappings");
+}
+
+export async function saveButtonMappings(mappings: ButtonMappings): Promise<ButtonMappings> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法保存 Windows 按键映射");
+  }
+  return invoke<ButtonMappings>("save_button_mappings", { mappings });
+}
+
+export async function testButtonMapping(button: RemoteButton): Promise<SendInputSnapshot> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法执行 Windows SendInput");
+  }
+  return invoke<SendInputSnapshot>("test_button_mapping", { button });
+}
+
+export async function getSendInputSnapshot(): Promise<SendInputSnapshot> {
+  if (!isTauriRuntime()) {
+    return { available: false, submittedBatches: 0, submittedEvents: 0, lastError: null };
+  }
+  return invoke<SendInputSnapshot>("get_send_input_snapshot");
 }
 
 export function connectionPhaseLabel(phase: ConnectionPhase): string {

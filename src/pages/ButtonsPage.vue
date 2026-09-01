@@ -1,19 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
+  getButtonMappings,
   getRawInputSnapshot,
+  getSendInputSnapshot,
+  saveButtonMappings,
   startRawInput,
   stopRawInput,
+  testButtonMapping,
+  type ButtonAction,
+  type ButtonMappings,
+  type KeyCode,
   type RawInputSnapshot,
   type RemoteButton,
+  type SendInputSnapshot,
 } from "../lib/bridge";
-
-const mappings = [
-  ["方向键", "Raw Input 已建立，等待 RC003 真机确认"],
-  ["OK / 首页 / 菜单", "语义边沿已建立，尚未配置动作"],
-  ["电视 / 电源", "实验能力，不进入首版承诺"],
-  ["返回 / 音量", "Windows 公共 API 可用性待验证"],
-];
 
 const buttonLabels: Record<RemoteButton, string> = {
   back: "返回",
@@ -31,9 +32,29 @@ const buttonLabels: Record<RemoteButton, string> = {
   volume_down: "音量减",
 };
 
+const buttons = Object.keys(buttonLabels) as RemoteButton[];
+const presets: Array<{ label: string; keys: KeyCode[] }> = [
+  { label: "关闭", keys: [] },
+  { label: "Enter", keys: ["enter"] },
+  { label: "Esc", keys: ["escape"] },
+  { label: "↑", keys: ["up"] },
+  { label: "↓", keys: ["down"] },
+  { label: "←", keys: ["left"] },
+  { label: "→", keys: ["right"] },
+  { label: "Home", keys: ["home"] },
+  { label: "菜单", keys: ["apps"] },
+  { label: "Ctrl+C", keys: ["control", "c"] },
+  { label: "Ctrl+V", keys: ["control", "v"] },
+  { label: "Win+D", keys: ["left_windows", "d"] },
+];
+
 const snapshot = ref<RawInputSnapshot | null>(null);
 const errorMessage = ref<string | null>(null);
 const busy = ref(false);
+const mappings = ref<ButtonMappings>({ actions: {} });
+const selectedButton = ref<RemoteButton>("up");
+const mappingMessage = ref<string | null>(null);
+const sendInput = ref<SendInputSnapshot | null>(null);
 let refreshTimer: number | null = null;
 
 const phaseLabel = computed(() => {
@@ -89,8 +110,58 @@ async function stopListener(): Promise<void> {
   }
 }
 
+function selectedAction(): ButtonAction {
+  return mappings.value.actions[selectedButton.value] ?? { type: "disabled" };
+}
+
+function applyPreset(keys: KeyCode[]): void {
+  mappings.value.actions[selectedButton.value] = keys.length
+    ? { type: "shortcut", chord: { keys: [...keys] } }
+    : { type: "disabled" };
+  mappingMessage.value = "映射已修改，点击保存后生效";
+}
+
+function actionLabel(button: RemoteButton): string {
+  const action = mappings.value.actions[button];
+  if (!action || action.type === "disabled") return "关闭";
+  return action.chord.keys.join(" + ");
+}
+
+async function saveMappings(): Promise<void> {
+  busy.value = true;
+  mappingMessage.value = null;
+  try {
+    mappings.value = await saveButtonMappings(mappings.value);
+    mappingMessage.value = "按键映射已保存并热加载";
+  } catch (error) {
+    mappingMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function testMapping(): Promise<void> {
+  busy.value = true;
+  mappingMessage.value = null;
+  try {
+    sendInput.value = await testButtonMapping(selectedButton.value);
+    mappingMessage.value = "测试快捷键已通过一次批量 SendInput 提交";
+  } catch (error) {
+    mappingMessage.value = error instanceof Error ? error.message : String(error);
+    sendInput.value = await getSendInputSnapshot();
+  } finally {
+    busy.value = false;
+  }
+}
+
 onMounted(async () => {
-  await refresh();
+  const [loadedMappings, loadedSendInput] = await Promise.all([
+    getButtonMappings(),
+    getSendInputSnapshot(),
+    refresh(),
+  ]);
+  mappings.value = loadedMappings;
+  sendInput.value = loadedSendInput;
   refreshTimer = window.setInterval(() => {
     if (snapshot.value?.phase === "ready") {
       void refresh();
@@ -180,14 +251,49 @@ onUnmounted(() => {
 
         <div class="card-title-row mapping-heading">
           <h2>映射状态</h2>
-          <button class="secondary-button" type="button" disabled>编辑映射</button>
+          <button class="primary-button" type="button" :disabled="busy" @click="saveMappings">
+            保存映射
+          </button>
         </div>
-        <div class="setting-list">
-          <div v-for="mapping in mappings" :key="mapping[0]" class="setting-row">
-            <strong>{{ mapping[0] }}</strong>
-            <span>{{ mapping[1] }}</span>
-          </div>
+        <div class="mapping-button-grid">
+          <button
+            v-for="button in buttons"
+            :key="button"
+            type="button"
+            :class="{ selected: selectedButton === button }"
+            @click="selectedButton = button"
+          >
+            <strong>{{ buttonLabels[button] }}</strong>
+            <span>{{ actionLabel(button) }}</span>
+          </button>
         </div>
+        <h3 class="mapping-subtitle">{{ buttonLabels[selectedButton] }} 的快捷键</h3>
+        <div class="preset-grid">
+          <button
+            v-for="preset in presets"
+            :key="preset.label"
+            class="secondary-button"
+            type="button"
+            :disabled="busy"
+            @click="applyPreset(preset.keys)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <div class="button-row mapping-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="busy || selectedAction().type === 'disabled' || !sendInput?.available"
+            @click="testMapping"
+          >
+            测试当前快捷键
+          </button>
+        </div>
+        <p v-if="mappingMessage" class="operation-message">{{ mappingMessage }}</p>
+        <p class="muted mapping-note">
+          当前只保存并显式测试快捷键。真实 RC003 尚未确认原始 Keyboard/HID 路径前，不会自动注入，避免方向键等被执行两次。
+        </p>
         <div class="info-callout">
           语音键不会加入双击等待或长按阈值，避免增加首个响应延迟。
         </div>

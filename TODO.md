@@ -16,7 +16,7 @@
 - [ ] 在 Windows 真机验证 WASAPI 端点初始化、VB-CABLE 回环、欠载恢复与完整尾音。
 - [x] 持久化用户选择的输出端点，并在端点消失或更名时失败关闭；Windows 运行时恢复仍待真机验收。
 - [x] 实现设备路径 fail-closed、隐藏消息窗口、Keyboard/HID 双来源合并和停止释放的 Raw Input 代码路径；Windows 与 RC003 真机按键验收仍待完成。
-- [ ] 实现按键映射保存、热加载和 SendInput。
+- [ ] 实现按键映射保存、热加载和 SendInput：独立映射文件、显式热加载、批量 SendInput、部分提交回滚和界面测试已完成；真实 Raw Input 边沿自动执行须等待 Windows/RC003 确认 Keyboard/HID 事件形态，避免重复输入。
 - [ ] 完成 Windows 10/11 安装、升级和卸载验证。
 - [ ] 建立自签 Authenticode、证书指纹和 SHA-256 发布流程。
 - [ ] 单独评估返回键、音量键等完整 HID 实验能力。
