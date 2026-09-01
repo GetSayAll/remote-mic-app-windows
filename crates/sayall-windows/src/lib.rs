@@ -196,7 +196,7 @@ impl WindowsPlatform {
                 raw_input_ready: raw_input.phase == RawInputPhase::Ready,
                 send_input_ready: false,
                 verification_status:
-                    "BLE/ATVV/WASAPI、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
+                    "BLE/ATVV/WASAPI/Raw Input、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
                         .to_owned(),
                 connection,
                 audio,
