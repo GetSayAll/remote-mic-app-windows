@@ -39,6 +39,33 @@ export interface AudioSnapshot {
   lastError: string | null;
 }
 
+export type RawInputPhase = "stopped" | "starting" | "ready" | "failed" | "unsupported";
+
+export type RemoteButton =
+  | "back"
+  | "ok"
+  | "tv"
+  | "home"
+  | "right"
+  | "left"
+  | "down"
+  | "up"
+  | "menu"
+  | "power"
+  | "volume_mute"
+  | "volume_up"
+  | "volume_down";
+
+export interface RawInputSnapshot {
+  phase: RawInputPhase;
+  matchedDeviceCount: number;
+  rawEventCount: number;
+  semanticEdgeCount: number;
+  lastButton: RemoteButton | null;
+  lastIsPressed: boolean | null;
+  lastError: string | null;
+}
+
 export interface AtvvCapabilities {
   version: number;
   codecs: number;
@@ -71,6 +98,7 @@ export interface PlatformSnapshot {
   verificationStatus: string;
   connection: ConnectionSnapshot;
   audio: AudioSnapshot;
+  rawInput: RawInputSnapshot;
 }
 
 export interface RuntimeSnapshot {
@@ -113,6 +141,15 @@ const browserSnapshot: RuntimeSnapshot = {
       queuedSamples: 0,
       submittedSamples: 0,
       generation: 0,
+      lastError: null,
+    },
+    rawInput: {
+      phase: "unsupported",
+      matchedDeviceCount: 0,
+      rawEventCount: 0,
+      semanticEdgeCount: 0,
+      lastButton: null,
+      lastIsPressed: null,
       lastError: null,
     },
   },
@@ -176,6 +213,27 @@ export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnap
     throw new Error("当前是浏览器预览，无法选择 Windows 音频端点");
   }
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
+}
+
+export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
+  if (!isTauriRuntime()) {
+    return browserSnapshot.platform.rawInput;
+  }
+  return invoke<RawInputSnapshot>("get_raw_input_snapshot");
+}
+
+export async function startRawInput(): Promise<RawInputSnapshot> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法启动 Windows Raw Input");
+  }
+  return invoke<RawInputSnapshot>("start_raw_input");
+}
+
+export async function stopRawInput(): Promise<RawInputSnapshot> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法停止 Windows Raw Input");
+  }
+  return invoke<RawInputSnapshot>("stop_raw_input");
 }
 
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
