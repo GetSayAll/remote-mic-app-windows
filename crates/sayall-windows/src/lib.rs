@@ -15,6 +15,9 @@ pub mod raw_input;
 mod raw_input_windows;
 #[cfg(any(windows, test))]
 mod reconnect;
+pub mod send_input;
+#[cfg(windows)]
+mod send_input_windows;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +144,8 @@ pub struct WindowsPlatform {
     audio: std::sync::Arc<audio::AudioRuntime>,
     #[cfg(windows)]
     raw_input: std::sync::Arc<raw_input_windows::RawInputRuntime>,
+    #[cfg(windows)]
+    send_input: std::sync::Arc<send_input_windows::SendInputRuntime>,
 }
 
 impl fmt::Debug for WindowsPlatform {
@@ -160,10 +165,12 @@ impl Default for WindowsPlatform {
             let audio = std::sync::Arc::new(audio::AudioRuntime::new());
             let runtime = std::sync::Arc::new(ble::BleRuntime::new(std::sync::Arc::clone(&audio)));
             let raw_input = std::sync::Arc::new(raw_input_windows::RawInputRuntime::new());
+            let send_input = std::sync::Arc::new(send_input_windows::SendInputRuntime::new());
             Self {
                 runtime,
                 audio,
                 raw_input,
+                send_input,
             }
         }
 
@@ -194,7 +201,7 @@ impl WindowsPlatform {
                     AudioPhase::Ready | AudioPhase::Streaming | AudioPhase::Draining
                 ),
                 raw_input_ready: raw_input.phase == RawInputPhase::Ready,
-                send_input_ready: false,
+                send_input_ready: self.send_input_snapshot().available,
                 verification_status:
                     "BLE/ATVV/WASAPI/Raw Input、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
                         .to_owned(),
@@ -380,6 +387,34 @@ impl WindowsPlatform {
             Err(PlatformError::UnsupportedPlatform)
         }
     }
+
+    pub fn send_input_snapshot(&self) -> send_input::SendInputSnapshot {
+        #[cfg(windows)]
+        {
+            self.send_input.snapshot()
+        }
+
+        #[cfg(not(windows))]
+        {
+            send_input::SendInputSnapshot::default()
+        }
+    }
+
+    pub fn test_shortcut(
+        &self,
+        chord: send_input::KeyChord,
+    ) -> Result<send_input::SendInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.send_input.tap(chord)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = chord;
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
 }
 
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
@@ -486,6 +521,8 @@ pub enum PlatformError {
     BleCleanup(String),
     #[error("Raw Input failed: {0}")]
     RawInput(String),
+    #[error("SendInput failed: {0}")]
+    SendInput(String),
 }
 
 #[cfg(test)]

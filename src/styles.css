@@ -83,6 +83,15 @@ nav { display: grid; gap: 4px; }
 .button-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .mapping-heading { margin-top: 26px; }
 .error-text { margin: 12px 0 0; color: #9b312f; font-size: 16px; }
+.mapping-button-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.mapping-button-grid button { min-height: 58px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; background: #f7f7fa; text-align: left; cursor: pointer; }
+.mapping-button-grid button.selected { border-color: #777be0; background: #eeeeff; }
+.mapping-button-grid strong, .mapping-button-grid span { display: block; font-size: 14px; }
+.mapping-button-grid span { margin-top: 4px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.mapping-subtitle { margin: 20px 0 10px; font-size: 16px; }
+.preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mapping-actions { margin-top: 12px; }
+.mapping-note { margin: 12px 0 0; font-size: 14px; }
 .primary-button, .secondary-button, .device-list button {
   min-height: 34px;
   padding: 7px 13px;
