@@ -5,7 +5,7 @@
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
 - 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM / WASAPI 与端点持久化恢复代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连与睡眠恢复代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
 
 ## 测试前准备
 
@@ -48,15 +48,17 @@
 
 ## 用例四：断开和恢复
 
-分别验证：
+1. 建立 ATVV 就绪连接后，让遥控器断电或离开蓝牙范围，记录重连阶段和每次尝试间隔。
+2. 保持设备不可用至少 70 秒，确认间隔按约 2、4、8、16、30、30 秒封顶，而不是忙循环。
+3. 让遥控器恢复可用，确认一次成功能力协商后重连计数归零，第一次语音即可使用。
+4. 点击“断开”，保持应用运行至少 35 秒，确认本次运行不再自动重连；重新选择设备后恢复自动重连。
+5. ATVV 就绪时让 Windows 睡眠再唤醒，确认页面先显示睡眠释放，再重新经历连接、发现、能力确认。
+6. 关闭再打开 Windows 蓝牙，重复步骤 1～3。
+7. 应用退出再启动，确认自动恢复上次明确选择的 RC003；若首次失败，继续按退避策略重试。
 
-- 遥控器休眠再唤醒；
-- Windows 蓝牙关闭再打开；
-- 遥控器断开再连接；
-- Windows 睡眠再唤醒；
-- 应用退出再启动。
+预期：每次失败或睡眠都先释放通知、GATT service、device、ATVV pipeline 和活动音频；旧会话通知不会改变新会话；主动断开不会在本次运行反弹连接；恢复后第一次语音正常，不要求清配置。
 
-预期：资源完整释放，恢复后第一次语音正常，不要求清配置。
+失败判定：无间隔忙重试、清理失败后覆盖式创建新代次、主动断开后自动反弹、睡眠后仍显示旧会话就绪、恢复后需要第二次或第三次语音才成功。
 
 ## 用例五：音频端点
 
@@ -106,7 +108,7 @@
 - Vue 导航与连接阶段映射测试、类型检查和 Vite 生产构建；
 - 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；
 - 浏览器控制台零错误；
-- `sayall-core` 22 项测试；macOS `sayall-windows` 3 项平台边界测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列与持久端点身份校验测试；
+- `sayall-core` 22 项测试；macOS `sayall-windows` 5 项平台边界/退避测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度和电源回调转发测试；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
 - `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI 平台层交叉静态检查。
@@ -114,4 +116,4 @@
 以上结果不能证明 Tauri Windows 包、WinRT 运行时、真实 RC003、WASAPI、Raw Input、SendInput 或安装升级已经通过；这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
 
-本次新增动态连接阶段、连接/断开控件和 WASAPI 端点选择后，应用内浏览器仍没有可用实例，未能重新执行截图、控制台和点击回归；上述 900 × 620、1080 × 720 记录只覆盖此前的静态页面骨架。本次新界面目前仅通过 Vue 类型检查、连接/音频阶段映射测试和 Vite 生产构建。
+本次新增动态连接阶段、连接/断开控件、重连/睡眠状态、睡眠恢复通知状态和 WASAPI 端点选择后，应用内浏览器仍没有可用实例，未能重新执行截图、控制台和点击回归；上述 900 × 620、1080 × 720 记录只覆盖此前的静态页面骨架。本次新界面目前仅通过 Vue 类型检查、连接/音频阶段映射测试和 Vite 生产构建。

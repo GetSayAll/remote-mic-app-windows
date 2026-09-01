@@ -16,6 +16,8 @@ describe("connection phase presentation", () => {
       "ready",
       "streaming",
       "draining",
+      "reconnecting",
+      "suspended",
       "disconnected",
       "failed",
     ];
@@ -28,6 +30,8 @@ describe("connection phase presentation", () => {
       "BLE / ATVV 已就绪",
       "正在接收 RC003 语音",
       "正在结束本次语音",
+      "正在等待重新连接 RC003",
+      "Windows 已进入睡眠",
       "RC003 已断开",
       "连接失败",
     ]);

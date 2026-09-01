@@ -8,6 +8,8 @@ export type ConnectionPhase =
   | "ready"
   | "streaming"
   | "draining"
+  | "reconnecting"
+  | "suspended"
   | "disconnected"
   | "failed";
 
@@ -53,6 +55,8 @@ export interface ConnectionSnapshot {
   voiceState: VoiceSessionState;
   decodedSamples: number;
   generation: number;
+  reconnectAttempt: number;
+  powerNotificationsAvailable: boolean;
   lastError: string | null;
 }
 
@@ -98,6 +102,8 @@ const browserSnapshot: RuntimeSnapshot = {
       voiceState: "idle",
       decodedSamples: 0,
       generation: 0,
+      reconnectAttempt: 0,
+      powerNotificationsAvailable: false,
       lastError: null,
     },
     audio: {
@@ -181,6 +187,8 @@ export function connectionPhaseLabel(phase: ConnectionPhase): string {
     ready: "BLE / ATVV 已就绪",
     streaming: "正在接收 RC003 语音",
     draining: "正在结束本次语音",
+    reconnecting: "正在等待重新连接 RC003",
+    suspended: "Windows 已进入睡眠",
     disconnected: "RC003 已断开",
     failed: "连接失败",
   }[phase];

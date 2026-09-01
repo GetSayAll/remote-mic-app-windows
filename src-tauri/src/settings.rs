@@ -2,18 +2,28 @@ use sayall_core::AppSettings;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
+    access: Arc<Mutex<()>>,
 }
 
 impl SettingsStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            access: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn load(&self) -> Result<AppSettings, String> {
+        let _guard = lock(&self.access);
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&self) -> Result<AppSettings, String> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(AppSettings::default()),
@@ -27,16 +37,35 @@ impl SettingsStore {
         endpoint_id: String,
         endpoint_name: String,
     ) -> Result<(), String> {
-        let mut settings = self.load()?;
+        self.update("保存音频端点设置", move |settings| {
+            settings.audio_endpoint_id = Some(endpoint_id);
+            settings.audio_endpoint_name = Some(endpoint_name);
+        })
+    }
+
+    pub fn save_selected_remote_id(&self, device_id: String) -> Result<(), String> {
+        self.update("保存 RC003 设备设置", move |settings| {
+            settings.selected_remote_id = Some(device_id);
+        })
+    }
+
+    fn update(&self, operation: &str, update: impl FnOnce(&mut AppSettings)) -> Result<(), String> {
+        let _guard = lock(&self.access);
+        let mut settings = self.load_unlocked()?;
         settings.schema_version = AppSettings::default().schema_version;
-        settings.audio_endpoint_id = Some(endpoint_id);
-        settings.audio_endpoint_name = Some(endpoint_name);
+        update(&mut settings);
         let contents = serialize_settings(&settings)?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
         }
-        fs::write(&self.path, contents).map_err(|error| format!("保存音频端点设置失败：{error}"))
+        fs::write(&self.path, contents).map_err(|error| format!("{operation}失败：{error}"))
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn parse_settings(contents: &str) -> Result<AppSettings, String> {
@@ -56,6 +85,7 @@ mod tests {
     #[test]
     fn settings_round_trip_preserves_stable_endpoint_identity() {
         let settings = AppSettings {
+            selected_remote_id: Some("test-remote-id".to_owned()),
             audio_endpoint_id: Some("test-endpoint-id".to_owned()),
             audio_endpoint_name: Some("CABLE Input (Test)".to_owned()),
             gain_db: 6.0,

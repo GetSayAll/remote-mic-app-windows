@@ -7,6 +7,10 @@ use thiserror::Error;
 mod audio;
 #[cfg(windows)]
 mod ble;
+#[cfg(windows)]
+mod power;
+#[cfg(any(windows, test))]
+mod reconnect;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +92,8 @@ pub enum ConnectionPhase {
     Ready,
     Streaming,
     Draining,
+    Reconnecting,
+    Suspended,
     Disconnected,
     Failed,
 }
@@ -101,6 +107,8 @@ pub struct ConnectionSnapshot {
     pub voice_state: VoiceSessionState,
     pub decoded_samples: u64,
     pub generation: u64,
+    pub reconnect_attempt: u32,
+    pub power_notifications_available: bool,
     pub last_error: Option<String>,
 }
 
@@ -113,6 +121,8 @@ impl Default for ConnectionSnapshot {
             voice_state: VoiceSessionState::Idle,
             decoded_samples: 0,
             generation: 0,
+            reconnect_attempt: 0,
+            power_notifications_available: false,
             last_error: None,
         }
     }
@@ -173,7 +183,8 @@ impl WindowsPlatform {
                 raw_input_ready: false,
                 send_input_ready: false,
                 verification_status:
-                    "BLE/ATVV/WASAPI 代码已实现，等待 Windows 主机与 RC003 真机验证".to_owned(),
+                    "BLE/ATVV/WASAPI、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
+                        .to_owned(),
                 connection,
                 audio,
             }
@@ -236,6 +247,19 @@ impl WindowsPlatform {
 
         #[cfg(not(windows))]
         {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn restore_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.runtime.restore(device_id)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = device_id;
             Err(PlatformError::UnsupportedPlatform)
         }
     }
@@ -401,6 +425,8 @@ pub enum PlatformError {
     AudioQueueOverflow,
     #[error("WASAPI failed: {0}")]
     Audio(String),
+    #[error("BLE cleanup failed: {0}")]
+    BleCleanup(String),
 }
 
 #[cfg(test)]
