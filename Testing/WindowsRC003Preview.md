@@ -115,11 +115,12 @@
 - Vue 导航与连接阶段映射测试、类型检查和 Vite 生产构建；
 - 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；
 - 浏览器控制台零错误；
-- `sayall-core` 22 项测试；macOS `sayall-windows` 13 项平台边界、退避和 Raw Input 纯逻辑测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度和电源回调转发测试；
+- `sayall-core` 22 项测试；macOS `sayall-windows` 13 项平台边界、退避和 Raw Input 纯逻辑测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度、电源回调转发、Raw Input 纯逻辑测试和完整 Tauri Host 编译；
 - Raw Input 自动化覆盖两种 Windows 设备路径、零/多匹配 fail-closed、6/7/9 字节 HID 报告、RAWHID 批量拆分、重复 key-down、Keyboard/HID 双来源并集、停止释放和语音键隔离；隐藏窗口和真实事件形态仍需 Windows/RC003 验收；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
-- `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI 平台层交叉静态检查。
+- `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI/Raw Input 平台层交叉静态检查。
+- Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC003 报告。
 
 以上结果不能证明 Tauri Windows 包、WinRT 运行时、真实 RC003、WASAPI、Raw Input、SendInput 或安装升级已经通过；这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
