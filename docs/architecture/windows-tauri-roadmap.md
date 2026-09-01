@@ -148,7 +148,7 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - 安装、升级、卸载和更新；
 - 自签 Authenticode、证书指纹和 SHA-256。
 
-安装包采用 Tauri NSIS current-user 模式，固定应用 identifier、publisher、开始菜单目录和禁止降级策略。普通 CI 只生成明确标记为 unsigned 的短期 Preview artifact，并同时输出 SHA-256 与 source commit 元数据；该 artifact 只证明可打包，不能替代 Authenticode、SmartScreen、安装升级或真实应用验收。
+安装包采用 Tauri NSIS current-user 模式，固定应用 identifier、publisher、开始菜单目录和禁止降级策略。最低系统版本统一定义为 Windows 10 1809（build 17763）：NSIS 在复制应用文件前通过官方 installer hook 拒绝更低 build，Tauri Host 在创建 WebView、BLE、WASAPI 和 Raw Input 资源前再次读取真实系统版本并失败关闭，覆盖绕过安装器直接运行 exe 的情况。普通 CI 校验 hook 路径与门槛值，并只生成明确标记为 unsigned 的短期 Preview artifact；该 artifact 只证明代码和打包结构可构建，不能替代 Windows 10 1809 / Windows 11 上的提示、安装升级、Authenticode 或 SmartScreen 真机验收。
 
 权限页已接入只读运行诊断摘要：Tauri Host 从现有平台快照提取能力、阶段、代次和计数，并在 Rust 边界直接丢弃设备 ID、蓝牙地址、HID 路径、遥控器名称、音频端点身份、错误原文和用户内容。页面只在用户主动操作后生成并复制可见 JSON；该能力不是持久日志，也不代表任何 Windows 真机路径已通过。
 
@@ -174,6 +174,7 @@ Mac 开发机不能证明：
 - WASAPI 和 VB-CABLE；
 - SendInput 对真实目标应用有效；
 - Windows 安装、升级、签名和 SmartScreen；
+- Windows 10 1809 / Windows 11 的安装与启动版本门禁提示；
 - 真实语音首次会话完整可用。
 
 这些项目必须在 Windows 主机按 `Testing/WindowsRC003Preview.md` 完成。

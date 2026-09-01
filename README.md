@@ -13,6 +13,7 @@
 - 可区分连接、特征发现、能力确认、就绪、流式接收、排空、断开和失败的真实状态界面；
 - 设备路径限定的 Raw Input、批量 SendInput、映射持久化与显式快捷键测试；
 - 仅保存在本机的每日按键、完整语音会话和语音时长统计，以及今日、本周、全部和最近 7 天展示；
+- Windows 10 1809（build 17763）安装与启动双层版本门禁；
 - Windows CI 可生成带 SHA-256 和来源元数据的未签名 NSIS Preview artifact；
 - Windows CI、来源归属和真机测试手册。
 
@@ -40,7 +41,7 @@ sayall-windows    WinRT BLE、Raw Input、SendInput、WASAPI
 - Visual Studio Build Tools，包含“使用 C++ 的桌面开发”；
 - WebView2 Runtime。
 
-Mac 可以运行前端构建和纯 Rust 测试，但不能证明 WinRT BLE、Raw Input、WASAPI、安装器或 RC003 真机行为。
+Mac 可以运行前端构建和纯 Rust 测试，但不能证明 WinRT BLE、Raw Input、WASAPI、安装器版本提示或 RC003 真机行为。
 当前平台层已通过 `x86_64-pc-windows-msvc` 交叉静态检查；这只能证明 WinRT、WASAPI API 符号和类型可编译，Windows 运行时、VB-CABLE 回环与 RC003 真机结果仍以 Windows CI 和测试手册为准。
 
 ## 本地检查

@@ -50,6 +50,7 @@
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": true,
         "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/installer-hooks.nsh",
         "uninstallerIcon": "icons/icon.ico",
         "startMenuFolder": "无线麦 SayAll"
       }
