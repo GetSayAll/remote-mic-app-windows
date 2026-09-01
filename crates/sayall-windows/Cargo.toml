@@ -12,6 +12,7 @@ thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 futures = "0.3"
+wasapi = "0.24"
 windows = { version = "0.62", features = [
     "Devices_Bluetooth",
     "Devices_Bluetooth_GenericAttributeProfile",

@@ -1,4 +1,7 @@
-use sayall_windows::{ConnectionSnapshot, PairedRemote, PlatformSnapshot, WindowsPlatform};
+use sayall_windows::{
+    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
+    WindowsPlatform,
+};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +68,37 @@ async fn disconnect_remote(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn list_audio_endpoints(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AudioEndpoint>, String> {
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.list_audio_endpoints())
+        .await
+        .map_err(|error| format!("枚举音频端点任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_audio_snapshot(state: tauri::State<'_, AppState>) -> Result<AudioSnapshot, String> {
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.audio_snapshot())
+        .await
+        .map_err(|error| format!("读取音频状态失败：{error}"))
+}
+
+#[tauri::command]
+async fn select_audio_endpoint(
+    endpoint_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AudioSnapshot, String> {
+    let platform = state.platform.clone();
+    tauri::async_runtime::spawn_blocking(move || platform.select_audio_endpoint(endpoint_id))
+        .await
+        .map_err(|error| format!("选择音频端点任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -74,7 +108,10 @@ pub fn run() {
             scan_paired_remotes,
             get_connection_snapshot,
             connect_remote,
-            disconnect_remote
+            disconnect_remote,
+            list_audio_endpoints,
+            get_audio_snapshot,
+            select_audio_endpoint
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SayAll Windows app");

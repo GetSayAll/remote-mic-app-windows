@@ -5,7 +5,7 @@
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
 - 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM 代码路径已实现；Windows、RC003、WASAPI 真机验收 deferred
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI 代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
 
 ## 测试前准备
 
@@ -60,12 +60,17 @@
 
 ## 用例五：音频端点
 
-1. 不安装 VB-CABLE。
-2. 安装但不选择 CABLE Input。
-3. 正确选择 CABLE Input。
-4. 语音期间切换或禁用端点。
+1. 不安装 VB-CABLE，点击“读取输出端点”，确认不会伪造 CABLE Input。
+2. 安装 VB-CABLE 但不选择端点，按下语音键。
+3. 明确选择 CABLE Input，确认页面显示“WASAPI 已就绪”。
+4. 完成一次语音，观察“写入”“排空”阶段和已提交采样数。
+5. 在 CABLE Output 侧录制或监听，确认首尾完整且没有重复。
+6. 语音期间尝试切换端点，然后在空闲时切换。
+7. 禁用或移除当前端点后再次开始语音。
 
-预期：缺少端点时失败关闭且提示准确；正确端点时音频进入 CABLE Output；应用不修改 Windows 默认输入或输出。
+预期：缺少或未选择端点时语音失败关闭但 BLE 连接保持；语音期间禁止切换；正确端点时 16 kHz PCM 进入 CABLE Input，并可从 CABLE Output 收到；`STREAM_STOP` 后等待 WASAPI padding 清零再结束会话；端点失效后提示准确。应用不读取或修改 Windows 默认输入、输出。
+
+失败判定：自动使用默认扬声器、端点名称相同导致误选、队列无限增长、停止时直接丢弃尾音、端点失败后仍显示系统语音可用。
 
 ## 用例六：可靠按键
 
@@ -99,12 +104,12 @@
 - Vue 导航与连接阶段映射测试、类型检查和 Vite 生产构建；
 - 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；
 - 浏览器控制台零错误；
-- `sayall-core` 21 项测试与 `sayall-windows` 2 项测试；
+- `sayall-core` 21 项测试；macOS `sayall-windows` 3 项平台边界测试；Windows CI 额外运行 WASAPI generation 与有界队列测试；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
-- `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV 平台层交叉静态检查。
+- `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI 平台层交叉静态检查。
 
 以上结果不能证明 Tauri Windows 包、WinRT 运行时、真实 RC003、WASAPI、Raw Input、SendInput 或安装升级已经通过；这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
 
-本次新增动态连接阶段和连接/断开控件后，应用内浏览器没有可用实例，未能重新执行截图、控制台和点击回归；上述 900 × 620、1080 × 720 记录只覆盖此前的静态页面骨架。本次新界面目前仅通过 Vue 类型检查、阶段映射测试和 Vite 生产构建。
+本次新增动态连接阶段、连接/断开控件和 WASAPI 端点选择后，应用内浏览器仍没有可用实例，未能重新执行截图、控制台和点击回归；上述 900 × 620、1080 × 720 记录只覆盖此前的静态页面骨架。本次新界面目前仅通过 Vue 类型检查、连接/音频阶段映射测试和 Vite 生产构建。

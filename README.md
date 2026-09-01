@@ -7,10 +7,11 @@
 - Mac 原版风格的设置界面骨架；
 - ATVV、IMA/DVI ADPCM 和语音会话纯 Rust 核心；
 - WinRT 已配对设备扫描、GATT 连接/通知/释放和 RC003 到 PCM 的会话管线；
+- 用户明确选择端点的 WASAPI 共享模式输出、有界 PCM 队列和 padding 排空；
 - 可区分连接、特征发现、能力确认、就绪、流式接收、排空、断开和失败的真实状态界面；
 - Windows CI、来源归属和真机测试手册。
 
-当前代码尚未在 Windows 主机和真实 RC003 上完成运行验收，也尚未接入 WASAPI 音频端点，因此不提供可安装版本，不能作为系统麦克风使用。
+当前代码尚未在 Windows 主机和真实 RC003 上完成运行验收，VB-CABLE 回环也未验证，因此不提供可安装版本，不能宣称已经可作为系统麦克风使用。
 
 ## 技术结构
 
@@ -35,7 +36,7 @@ sayall-windows    WinRT BLE、Raw Input、SendInput、WASAPI
 - WebView2 Runtime。
 
 Mac 可以运行前端构建和纯 Rust 测试，但不能证明 WinRT BLE、Raw Input、WASAPI、安装器或 RC003 真机行为。
-当前平台层已通过 `x86_64-pc-windows-msvc` 交叉静态检查；这只能证明 Windows API 符号和类型可编译，Windows 运行时与 RC003 真机结果仍以 Windows CI 和测试手册为准。
+当前平台层已通过 `x86_64-pc-windows-msvc` 交叉静态检查；这只能证明 WinRT、WASAPI API 符号和类型可编译，Windows 运行时、VB-CABLE 回环与 RC003 真机结果仍以 Windows CI 和测试手册为准。
 
 ## 本地检查
 

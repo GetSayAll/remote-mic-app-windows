@@ -1,4 +1,4 @@
-use crate::{ConnectionPhase, ConnectionSnapshot, PlatformError};
+use crate::{audio::AudioRuntime, ConnectionPhase, ConnectionSnapshot, PlatformError};
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
 use std::sync::{
@@ -34,14 +34,14 @@ pub struct BleRuntime {
 }
 
 impl BleRuntime {
-    pub fn new() -> Self {
+    pub fn new(audio: Arc<AudioRuntime>) -> Self {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let worker_state = Arc::clone(&state);
         let worker_sender = sender.clone();
         let worker = thread::Builder::new()
             .name("sayall-ble".to_owned())
-            .spawn(move || worker_loop(receiver, worker_sender, worker_state));
+            .spawn(move || worker_loop(receiver, worker_sender, worker_state, audio));
 
         match worker {
             Ok(worker) => Self {
@@ -129,6 +129,7 @@ fn worker_loop(
     receiver: Receiver<WorkerMessage>,
     sender: Sender<WorkerMessage>,
     state: Arc<Mutex<ConnectionSnapshot>>,
+    audio: Arc<AudioRuntime>,
 ) {
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         *lock(&state) = failed_snapshot(format!("WinRT 初始化失败：{error}"));
@@ -148,6 +149,7 @@ fn worker_loop(
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         capabilities_deadline = None;
                         connection_generation = connection_generation.wrapping_add(1);
+                        let _ = audio.interrupt_session();
                         close_session(&mut session);
                         pipeline.interrupt();
                         *lock(&state) = failed_snapshot("等待 RC003 返回 ATVV 能力超时".to_owned());
@@ -166,6 +168,7 @@ fn worker_loop(
             WorkerMessage::Connect { device_id, reply } => {
                 capabilities_deadline = None;
                 connection_generation = connection_generation.wrapping_add(1);
+                let _ = audio.interrupt_session();
                 close_session(&mut session);
                 pipeline.interrupt();
                 pipeline = AtvvVoicePipeline::default();
@@ -196,6 +199,7 @@ fn worker_loop(
             WorkerMessage::Disconnect { reply } => {
                 capabilities_deadline = None;
                 connection_generation = connection_generation.wrapping_add(1);
+                let _ = audio.interrupt_session();
                 close_session(&mut session);
                 pipeline.interrupt();
                 let snapshot = ConnectionSnapshot::default();
@@ -207,7 +211,7 @@ fn worker_loop(
                 bytes,
             } => {
                 if message_generation == connection_generation {
-                    handle_control(&mut session, &mut pipeline, &state, &bytes);
+                    handle_control(&mut session, &mut pipeline, &state, &audio, &bytes);
                     let phase = lock(&state).phase;
                     if phase != ConnectionPhase::AwaitingCapabilities {
                         capabilities_deadline = None;
@@ -224,7 +228,7 @@ fn worker_loop(
                 bytes,
             } => {
                 if message_generation == connection_generation {
-                    handle_audio(&mut pipeline, &state, &bytes);
+                    handle_audio(&mut session, &mut pipeline, &state, &audio, &bytes);
                 }
             }
             WorkerMessage::ConnectionChanged {
@@ -236,6 +240,7 @@ fn worker_loop(
                 {
                     capabilities_deadline = None;
                     connection_generation = connection_generation.wrapping_add(1);
+                    let _ = audio.interrupt_session();
                     close_session(&mut session);
                     pipeline.interrupt();
                     let mut snapshot = lock(&state);
@@ -253,6 +258,7 @@ fn worker_loop(
                 }
             }
             WorkerMessage::Shutdown => {
+                let _ = audio.interrupt_session();
                 close_session(&mut session);
                 pipeline.interrupt();
                 break;
@@ -265,8 +271,12 @@ fn handle_control(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
+    audio: &AudioRuntime,
     bytes: &[u8],
 ) {
+    if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
+        return;
+    }
     let output = match pipeline.handle_control(bytes) {
         Ok(output) => output,
         Err(error) => {
@@ -303,9 +313,23 @@ fn handle_control(
                 }
             }
         }
-        PipelineOutput::StreamStarted { generation, .. } => {
+        PipelineOutput::StreamStarted {
+            session_id,
+            generation,
+        } => {
             if let Some(session) = session {
                 session.microphone_opened = true;
+            }
+            if let Err(error) = audio.begin_session(generation) {
+                abort_voice_session(
+                    session,
+                    pipeline,
+                    state,
+                    audio,
+                    Some(session_id),
+                    error.to_string(),
+                );
+                return;
             }
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Streaming;
@@ -322,6 +346,10 @@ fn handle_control(
                 snapshot.phase = ConnectionPhase::Draining;
                 snapshot.voice_state = VoiceSessionState::Draining;
             }
+            if let Err(error) = audio.finish_session(generation) {
+                abort_voice_session(session, pipeline, state, audio, None, error.to_string());
+                return;
+            }
             if let Err(error) = pipeline.complete_drain(generation) {
                 lock(state).last_error = Some(error.to_string());
                 return;
@@ -337,19 +365,45 @@ fn handle_control(
 }
 
 fn handle_audio(
+    session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
+    audio: &AudioRuntime,
     bytes: &[u8],
 ) {
+    if pipeline.state() != VoiceSessionState::Streaming {
+        return;
+    }
+    if let Some(error) = audio.failure() {
+        abort_voice_session(
+            session,
+            pipeline,
+            state,
+            audio,
+            pipeline.session_id(),
+            error,
+        );
+        return;
+    }
     match pipeline.handle_audio(bytes) {
         Ok(PipelineOutput::Samples {
             generation,
             samples,
         }) => {
+            let sample_count = samples.len();
+            if let Err(error) = audio.enqueue_samples(generation, samples) {
+                abort_voice_session(
+                    session,
+                    pipeline,
+                    state,
+                    audio,
+                    pipeline.session_id(),
+                    error.to_string(),
+                );
+                return;
+            }
             let mut snapshot = lock(state);
-            snapshot.decoded_samples = snapshot
-                .decoded_samples
-                .saturating_add(samples.len() as u64);
+            snapshot.decoded_samples = snapshot.decoded_samples.saturating_add(sample_count as u64);
             snapshot.generation = generation;
         }
         Ok(_) => {}
@@ -357,6 +411,31 @@ fn handle_audio(
             lock(state).last_error = Some(error.to_string());
         }
     }
+}
+
+fn abort_voice_session(
+    session: &mut Option<BleSession>,
+    pipeline: &mut AtvvVoicePipeline,
+    state: &Arc<Mutex<ConnectionSnapshot>>,
+    audio: &AudioRuntime,
+    session_id: Option<u8>,
+    error: String,
+) {
+    if let (Some(connected), Some(capabilities), Some(session_id)) =
+        (session.as_mut(), pipeline.capabilities(), session_id)
+    {
+        let _ = connected.request_microphone_close(capabilities.version, session_id);
+    }
+    let _ = audio.interrupt_session();
+    pipeline.interrupt();
+    let mut snapshot = lock(state);
+    snapshot.phase = if snapshot.capabilities.is_some() {
+        ConnectionPhase::Ready
+    } else {
+        ConnectionPhase::Failed
+    };
+    snapshot.voice_state = VoiceSessionState::Idle;
+    snapshot.last_error = Some(error);
 }
 
 fn close_session(session: &mut Option<BleSession>) {
@@ -508,6 +587,22 @@ impl BleSession {
             .ok_or_else(|| PlatformError::Protocol("无法编码 MIC_OPEN".to_owned()))?;
         self.write(&command)?;
         self.microphone_opened = true;
+        Ok(())
+    }
+
+    fn request_microphone_close(
+        &mut self,
+        version: u16,
+        session_id: u8,
+    ) -> Result<(), PlatformError> {
+        let command = AtvvCommand::MicrophoneClose {
+            version,
+            session_id,
+        }
+        .encode()
+        .ok_or_else(|| PlatformError::Protocol("无法编码 MIC_CLOSE".to_owned()))?;
+        self.write(&command)?;
+        self.microphone_opened = false;
         Ok(())
     }
 
