@@ -123,6 +123,18 @@
 
 失败判定：artifact 无法绑定精确 commit、存在多个候选安装器、SHA-256 不一致、CI 包意外带未知签名、安装器要求全局管理员权限、同一版本产生多个安装条目、把未签名 artifact 当作公开发布包。
 
+## 用例十：隐私安全诊断摘要
+
+1. 依次在未连接、连接中、ATVV 就绪、语音流式、排空、断开和失败状态打开“权限”页面。
+2. 点击“生成摘要”，确认页面内 JSON 的阶段、能力、代次和计数与同一时刻的连接、音频、Raw Input 和 SendInput 状态一致。
+3. 搜索摘要，确认不存在真实设备 ID、蓝牙地址、完整 HID 路径、遥控器名称、音频端点 ID/名称、错误原文、窗口标题、语音内容或用户文本。
+4. 点击“复制摘要”，粘贴到本地记事本，确认内容与页面内可见 JSON 逐字一致。
+5. 在 900 × 620 和 1080 × 720 窗口重复生成，确认权限状态、按钮、摘要和滚动均可访问，没有横向裁切。
+
+预期：摘要由当前运行快照即时生成，不读取其他 App 或系统私有数据；敏感字段在 Rust 诊断结构生成阶段即被排除。复制失败必须显示错误，不能显示成功或静默上传。
+
+失败判定：摘要包含任何设备或用户身份、路径、端点名称或错误原文；状态与当前快照不一致；浏览器预览被描述为 Windows 可用；未点击时自动读取或复制；剪贴板写入失败仍提示成功；页面出现横向溢出或中文小于 12pt。
+
 ## 日志收集
 
 日志不得包含语音内容、识别文字、真实蓝牙地址、完整 HID 路径、窗口标题或个人文档路径。报告应包含 Commit、版本、时间段、Windows 版本和失败步骤。
@@ -137,18 +149,20 @@
 
 2026-09-01 在 Apple Silicon Mac 上完成：
 
-- Vue 导航与连接阶段映射测试、类型检查和 Vite 生产构建；
-- 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；
+- Vue 导航、连接阶段映射、诊断格式和权限页复制组件测试、类型检查和 Vite 生产构建；
+- 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；权限页无横向溢出，诊断摘要可在页面内生成和滚动；
 - 浏览器控制台零错误；
-- `sayall-core` 22 项测试；macOS `sayall-windows` 13 项平台边界、退避和 Raw Input 纯逻辑测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度、电源回调转发、Raw Input 纯逻辑测试和完整 Tauri Host 编译；
+- `sayall-core` 22 项测试；macOS `sayall-windows` 20 项平台边界、退避、Raw Input 和 SendInput 纯逻辑测试；Tauri 设置与诊断 4 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度、电源回调转发、Raw Input 纯逻辑测试和完整 Tauri Host 编译；
+- 诊断隐私测试使用设备名称、蓝牙地址、端点身份、用户路径、HID 路径和后端错误作为敏感夹具，序列化摘要均未包含这些值；浏览器生成摘要也未出现 `remoteName`、`selectedEndpointId`、`selectedEndpointName` 或 `lastError` 字段；
 - Raw Input 自动化覆盖两种 Windows 设备路径、零/多匹配 fail-closed、6/7/9 字节 HID 报告、RAWHID 批量拆分、重复 key-down、Keyboard/HID 双来源并集、停止释放和语音键隔离；隐藏窗口和真实事件形态仍需 Windows/RC003 验收；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
 - `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI/Raw Input 平台层交叉静态检查。
 - Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC003 报告。
 - Windows CI Run [`33522534257`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33522534257) 通过并生成 artifact `sayall-windows-unsigned-preview-e11e460f15287468c01225a8ab86b302d59f09d4`；下载后确认只有一个 4,565,134 字节 NSIS 安装器、`SHA256SUMS.txt` 和 `build-metadata.json`，UTF-8 中文文件名可由 macOS `shasum -a 256 -c` 校验，安装器实算 SHA-256 与两份记录一致为 `e1cccf73c8b20487874eadb12eb9823635f52a0d7664c07fe6b8928532d246d6`，metadata 标记 `NotSigned` 和 `unsigned-ci-preview-not-for-public-release`。
+- main Windows CI Run [`33525406955`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33525406955) 从 merge commit `94923dea303a66604b61ca2572fd13d9d48a9d60` 生成同边界 artifact 并通过下载后 SHA-256、metadata、PE/NSIS 文件类型和 UTF-8 校验文件复验。
 
 以上结果只证明 Tauri Windows NSIS 未签名 Preview 可在干净 Windows Runner 生成且产物身份、摘要和来源元数据一致；不能证明安装、升级、卸载、WinRT 运行时、真实 RC003、WASAPI、Raw Input 或 SendInput 已经通过，这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
 
-本次新增动态连接阶段、连接/断开控件、重连/睡眠状态、睡眠恢复通知状态和 WASAPI 端点选择后，应用内浏览器仍没有可用实例，未能重新执行截图、控制台和点击回归；上述 900 × 620、1080 × 720 记录只覆盖此前的静态页面骨架。本次新界面目前仅通过 Vue 类型检查、连接/音频阶段映射测试和 Vite 生产构建。
+诊断复制已通过前端组件测试确认向 Clipboard API 写入完整可见摘要；应用内浏览器的剪贴板回读与页面 Clipboard API 不共享同一自动化通道，因此不能把浏览器提示当作真实 Windows WebView 剪贴板验收。Windows 安装包中的生成、复制和记事本逐字比对仍为 deferred。
