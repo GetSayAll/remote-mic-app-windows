@@ -95,9 +95,15 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .badge { display: inline-flex; align-items: center; min-height: 32px; padding: 5px 10px; border-radius: 999px; font-size: 16px; font-weight: 600; }
 .badge.pending { color: #656b78; background: #e9eaf0; }
 .badge.warning { color: #965a12; background: #fff0d7; }
+.badge.success { color: #267148; background: #e5f5eb; }
+.badge.active { color: #4b4fc2; background: #ececff; }
+.badge.error { color: #9b312f; background: #ffe9e8; }
 .status-dot { display: inline-block; width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #49a66f; }
 .status-dot.pending { background: #989eaa; }
 .status-dot.warning { background: #e6a33e; box-shadow: 0 0 0 4px rgba(230, 163, 62, 0.12); }
+.status-dot.success { background: #49a66f; box-shadow: 0 0 0 4px rgba(73, 166, 111, 0.12); }
+.status-dot.active { background: #686ce1; box-shadow: 0 0 0 4px rgba(104, 108, 225, 0.14); }
+.status-dot.error { background: #d35e5b; box-shadow: 0 0 0 4px rgba(211, 94, 91, 0.12); }
 .status-panel { display: flex; align-items: flex-start; gap: 11px; margin-top: 22px; padding: 14px; border-radius: 10px; background: #f6f7fa; }
 .status-panel strong, .status-panel small { display: block; }
 .status-panel strong { font-size: 16px; font-weight: 600; }
@@ -124,6 +130,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .device-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
 .device-list strong, .device-list small { display: block; }
 .device-list small { margin-top: 3px; color: var(--muted); font-size: 16px; }
+.status-action { margin-left: auto; }
+.scan-summary { margin: 16px 0 0; font-size: 16px; }
+.operation-message { margin: 10px 0 0; color: #565abf; font-size: 16px; }
 .permission-list { padding: 6px 22px; }
 .permission-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--border); }
 .permission-row:last-child { border-bottom: 0; }
