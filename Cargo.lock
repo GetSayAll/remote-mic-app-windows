@@ -2567,6 +2567,7 @@ name = "sayall-windows"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "sayall-core",
  "serde",
  "thiserror 2.0.20",
  "windows 0.62.2",

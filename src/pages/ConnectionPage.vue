@@ -1,16 +1,84 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import type { PairedRemote, RuntimeSnapshot } from "../lib/bridge";
-import { scanPairedRemotes } from "../lib/bridge";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import type {
+  ConnectionSnapshot,
+  PairedRemote,
+  RuntimeSnapshot,
+} from "../lib/bridge";
+import {
+  connectRemote,
+  connectionPhaseLabel,
+  disconnectRemote,
+  getConnectionSnapshot,
+  scanPairedRemotes,
+} from "../lib/bridge";
 
-defineProps<{ runtime: RuntimeSnapshot | null }>();
+const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 
+const emptyConnection = (): ConnectionSnapshot => ({
+  phase: "idle",
+  remoteName: null,
+  capabilities: null,
+  voiceState: "idle",
+  decodedSamples: 0,
+  generation: 0,
+  lastError: null,
+});
+
+const connection = ref<ConnectionSnapshot>(emptyConnection());
 const scanning = ref(false);
+const connectingDeviceId = ref("");
+const disconnecting = ref(false);
 const devices = ref<PairedRemote[]>([]);
 const scanMessage = ref("尚未扫描");
+const operationMessage = ref("");
+let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+watch(
+  () => props.runtime?.platform.connection,
+  (snapshot) => {
+    if (snapshot) connection.value = snapshot;
+  },
+  { immediate: true },
+);
+
+const connectionActive = computed(() =>
+  ["connecting", "discovering", "awaiting_capabilities", "ready", "streaming", "draining"].includes(
+    connection.value.phase,
+  ),
+);
+
+const atvvReady = computed(() =>
+  ["ready", "streaming", "draining"].includes(connection.value.phase),
+);
+
+const phaseTone = computed(() => {
+  if (connection.value.phase === "failed") return "error";
+  if (connection.value.phase === "streaming") return "active";
+  if (connection.value.phase === "ready") return "success";
+  if (connectionActive.value) return "warning";
+  return "pending";
+});
+
+const phaseDetail = computed(() => {
+  if (connection.value.lastError) return connection.value.lastError;
+  if (connection.value.capabilities) {
+    return `${connection.value.capabilities.sampleRate / 1000} kHz · 帧 ${connection.value.capabilities.frameSize} 字节 · 已解码 ${connection.value.decodedSamples.toLocaleString()} 个采样`;
+  }
+  return "必须经过服务发现、通知订阅和能力确认，才会进入 ATVV 就绪";
+});
+
+async function refreshConnection() {
+  try {
+    connection.value = await getConnectionSnapshot();
+  } catch (error) {
+    operationMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
 
 async function scan() {
   scanning.value = true;
+  operationMessage.value = "";
   scanMessage.value = "正在读取 Windows 已配对的 BLE 设备…";
   try {
     devices.value = await scanPairedRemotes();
@@ -24,6 +92,42 @@ async function scan() {
     scanning.value = false;
   }
 }
+
+async function connect(device: PairedRemote) {
+  connectingDeviceId.value = device.id;
+  operationMessage.value = "";
+  try {
+    connection.value = await connectRemote(device.id);
+    operationMessage.value = "已建立 BLE 会话，正在等待 RC003 返回 ATVV 能力";
+  } catch (error) {
+    operationMessage.value = error instanceof Error ? error.message : String(error);
+    await refreshConnection();
+  } finally {
+    connectingDeviceId.value = "";
+  }
+}
+
+async function disconnect() {
+  disconnecting.value = true;
+  operationMessage.value = "";
+  try {
+    connection.value = await disconnectRemote();
+    operationMessage.value = "RC003 连接已释放";
+  } catch (error) {
+    operationMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    disconnecting.value = false;
+  }
+}
+
+onMounted(() => {
+  void refreshConnection();
+  pollTimer = setInterval(() => void refreshConnection(), 1_000);
+});
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer);
+});
 </script>
 
 <template>
@@ -31,9 +135,9 @@ async function scan() {
     <header class="page-header">
       <div>
         <h1>连接与语音</h1>
-        <p>只有完成 GATT 特征发现、通知订阅和 ATVV 能力确认后，设备才能进入语音就绪。</p>
+        <p>连接状态来自实际 WinRT GATT 会话；BLE / ATVV 就绪不等于系统麦克风已经可用。</p>
       </div>
-      <span class="badge pending">{{ runtime?.platform.verificationStatus ?? "正在读取运行状态" }}</span>
+      <span class="badge" :class="phaseTone">{{ connectionPhaseLabel(connection.phase) }}</span>
     </header>
 
     <div class="two-column">
@@ -43,18 +147,46 @@ async function scan() {
             <h2>RC003 蓝牙连接</h2>
             <p class="muted">只扫描 Windows 中已经配对、且名称在白名单内的 BLE 设备。</p>
           </div>
-          <button class="primary-button" type="button" :disabled="scanning || !runtime?.platform.bleScanAvailable" @click="scan">
+          <button
+            class="primary-button"
+            type="button"
+            :disabled="scanning || connectionActive || !runtime?.platform.bleScanAvailable"
+            @click="scan"
+          >
             {{ scanning ? "扫描中…" : "扫描已配对设备" }}
           </button>
         </div>
-        <div class="status-panel">
-          <span class="status-dot" :class="runtime?.platform.bleScanAvailable ? 'warning' : 'pending'"></span>
-          <div><strong>{{ scanMessage }}</strong><small>不会仅凭发现设备名称显示“语音可用”</small></div>
+
+        <div class="status-panel" aria-live="polite">
+          <span class="status-dot" :class="phaseTone"></span>
+          <div>
+            <strong>{{ connection.remoteName ?? connectionPhaseLabel(connection.phase) }}</strong>
+            <small>{{ phaseDetail }}</small>
+          </div>
+          <button
+            v-if="connectionActive"
+            class="secondary-button status-action"
+            type="button"
+            :disabled="disconnecting"
+            @click="disconnect"
+          >
+            {{ disconnecting ? "断开中…" : "断开" }}
+          </button>
         </div>
+
+        <p class="muted scan-summary">{{ scanMessage }}</p>
+        <p v-if="operationMessage" class="operation-message">{{ operationMessage }}</p>
+
         <ul v-if="devices.length" class="device-list">
           <li v-for="device in devices" :key="device.id">
             <div><strong>{{ device.name }}</strong><small>已配对候选设备</small></div>
-            <button type="button" disabled>连接（下一阶段）</button>
+            <button
+              type="button"
+              :disabled="connectionActive || Boolean(connectingDeviceId)"
+              @click="connect(device)"
+            >
+              {{ connectingDeviceId === device.id ? "连接中…" : "连接" }}
+            </button>
           </li>
         </ul>
       </article>
@@ -62,12 +194,15 @@ async function scan() {
       <article class="card">
         <h2>语音输出</h2>
         <div class="setting-list compact">
-          <div class="setting-row"><strong>ATVV / 16 kHz</strong><span>纯 Rust 协议测试已建立</span></div>
-          <div class="setting-row"><strong>WASAPI 端点</strong><span>等待 Windows 实现与验证</span></div>
-          <div class="setting-row"><strong>增益</strong><span>0 dB</span></div>
+          <div class="setting-row">
+            <strong>ATVV / 16 kHz</strong>
+            <span>{{ atvvReady ? "BLE 会话已就绪" : "等待能力确认" }}</span>
+          </div>
+          <div class="setting-row"><strong>WASAPI 端点</strong><span>尚未实现</span></div>
+          <div class="setting-row"><strong>本次会话代次</strong><span>{{ connection.generation }}</span></div>
         </div>
         <div class="info-callout warning">
-          当前版本不会修改系统默认输入或输出，也不会静默安装 VB-CABLE。
+          当前阶段只验证 RC003 到 PCM 的链路，尚未把音频写入 Windows 音频端点，因此不能作为系统麦克风使用。
         </div>
       </article>
     </div>

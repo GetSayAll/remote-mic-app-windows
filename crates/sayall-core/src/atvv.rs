@@ -11,6 +11,51 @@ impl AtvvUuids {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtvvControlEvent {
+    Capabilities(AtvvCapabilities),
+    MicrophoneOpenRequested,
+    StreamStarted {
+        interaction: Option<u8>,
+        codec: Option<u8>,
+        session_id: u8,
+    },
+    StreamStopped,
+    DecoderSync {
+        predictor: i16,
+        step_index: u8,
+    },
+    Unknown {
+        opcode: u8,
+    },
+}
+
+impl AtvvControlEvent {
+    pub fn parse(bytes: &[u8]) -> Result<Self, AtvvError> {
+        let opcode = *bytes.first().ok_or(AtvvError::PacketTooShort)?;
+        match opcode {
+            0x0B => Ok(Self::Capabilities(AtvvCapabilities::parse(bytes)?)),
+            0x08 => Ok(Self::MicrophoneOpenRequested),
+            0x04 => Ok(Self::StreamStarted {
+                interaction: bytes.get(1).copied(),
+                codec: bytes.get(2).copied(),
+                session_id: bytes.get(3).copied().unwrap_or(0),
+            }),
+            0x00 => Ok(Self::StreamStopped),
+            0x0A => {
+                if bytes.len() < 7 {
+                    return Err(AtvvError::PacketTooShort);
+                }
+                Ok(Self::DecoderSync {
+                    predictor: i16::from_be_bytes([bytes[4], bytes[5]]),
+                    step_index: bytes[6],
+                })
+            }
+            _ => Ok(Self::Unknown { opcode }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtvvCommand {
     GetCapabilitiesV10,
     MicrophoneOpen { version: u16, codec: u8 },
@@ -41,6 +86,7 @@ impl AtvvCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AtvvCapabilities {
     pub version: u16,
     pub codecs: u8,
@@ -174,6 +220,37 @@ mod tests {
             }
             .encode(),
             None
+        );
+    }
+
+    #[test]
+    fn parses_stream_and_decoder_control_events() {
+        assert_eq!(
+            AtvvControlEvent::parse(&[0x04, 0x03, 0x02, 0x07]).unwrap(),
+            AtvvControlEvent::StreamStarted {
+                interaction: Some(0x03),
+                codec: Some(0x02),
+                session_id: 0x07,
+            }
+        );
+        assert_eq!(
+            AtvvControlEvent::parse(&[0x0A, 0, 0, 0, 0xFF, 0x9C, 12]).unwrap(),
+            AtvvControlEvent::DecoderSync {
+                predictor: -100,
+                step_index: 12,
+            }
+        );
+        assert_eq!(
+            AtvvControlEvent::parse(&[0x55]).unwrap(),
+            AtvvControlEvent::Unknown { opcode: 0x55 }
+        );
+    }
+
+    #[test]
+    fn rejects_short_decoder_sync() {
+        assert_eq!(
+            AtvvControlEvent::parse(&[0x0A, 0, 0]),
+            Err(AtvvError::PacketTooShort)
         );
     }
 }

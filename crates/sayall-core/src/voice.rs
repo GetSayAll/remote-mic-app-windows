@@ -46,6 +46,10 @@ impl VoiceSession {
         self.generation
     }
 
+    pub fn session_id(&self) -> Option<u8> {
+        self.session_id
+    }
+
     pub fn accepted_samples(&self) -> u64 {
         self.accepted_samples
     }
