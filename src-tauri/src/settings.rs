@@ -1,4 +1,5 @@
 use sayall_core::AppSettings;
+use sayall_windows::send_input::ButtonMappings;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -47,6 +48,41 @@ impl SettingsStore {
         self.update("保存 RC003 设备设置", move |settings| {
             settings.selected_remote_id = Some(device_id);
         })
+    }
+
+    pub fn load_button_mappings(&self) -> Result<ButtonMappings, String> {
+        let _guard = lock(&self.access);
+        let path = self.button_mappings_path();
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(ButtonMappings::default())
+            }
+            Err(error) => return Err(format!("读取按键映射失败：{error}")),
+        };
+        serde_json::from_str::<ButtonMappings>(&contents)
+            .map_err(|error| format!("解析按键映射失败：{error}"))?
+            .normalized()
+            .map_err(|error| format!("按键映射无效：{error}"))
+    }
+
+    pub fn save_button_mappings(&self, mappings: ButtonMappings) -> Result<ButtonMappings, String> {
+        let _guard = lock(&self.access);
+        let mappings = mappings
+            .normalized()
+            .map_err(|error| format!("按键映射无效：{error}"))?;
+        let path = self.button_mappings_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
+        }
+        let contents = serde_json::to_vec_pretty(&mappings)
+            .map_err(|error| format!("序列化按键映射失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))?;
+        Ok(mappings)
+    }
+
+    fn button_mappings_path(&self) -> PathBuf {
+        self.path.with_file_name("button-mappings.json")
     }
 
     fn update(&self, operation: &str, update: impl FnOnce(&mut AppSettings)) -> Result<(), String> {
@@ -113,5 +149,24 @@ mod tests {
         assert_eq!(decoded.gain_db, 12.0);
         assert!(decoded.launch_at_login);
         assert!(!decoded.open_window_at_launch);
+    }
+
+    #[test]
+    fn button_mapping_json_round_trip_preserves_typed_shortcut() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::{ButtonAction, KeyChord, KeyCode};
+
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Control, KeyCode::Enter],
+                },
+            },
+        );
+        let encoded = serde_json::to_string(&mappings).unwrap();
+        let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, mappings);
     }
 }
