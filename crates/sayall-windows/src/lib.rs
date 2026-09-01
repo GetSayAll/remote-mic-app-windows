@@ -268,6 +268,23 @@ impl WindowsPlatform {
         }
     }
 
+    pub fn restore_audio_endpoint(
+        &self,
+        endpoint_id: String,
+        expected_name: String,
+    ) -> Result<AudioSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.audio.restore_endpoint(endpoint_id, expected_name)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (endpoint_id, expected_name);
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
     pub fn audio_snapshot(&self) -> AudioSnapshot {
         #[cfg(windows)]
         {

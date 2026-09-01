@@ -2568,6 +2568,7 @@ name = "sayall-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -2587,8 +2588,10 @@ dependencies = [
 name = "sayall-windows-app"
 version = "0.1.0"
 dependencies = [
+ "sayall-core",
  "sayall-windows",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
 ]

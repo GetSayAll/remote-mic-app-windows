@@ -5,7 +5,7 @@
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
 - 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM / WASAPI 代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI 与端点持久化恢复代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
 
 ## 测试前准备
 
@@ -66,11 +66,13 @@
 4. 完成一次语音，观察“写入”“排空”阶段和已提交采样数。
 5. 在 CABLE Output 侧录制或监听，确认首尾完整且没有重复。
 6. 语音期间尝试切换端点，然后在空闲时切换。
-7. 禁用或移除当前端点后再次开始语音。
+7. 退出并重新启动无线麦，确认仍恢复同一个 endpoint ID 和名称，且没有改用系统默认输出。
+8. 禁用或移除当前端点后重新启动，再次开始语音。
+9. 让同一个 endpoint ID 的显示名称发生变化后重新启动；如果驱动无法稳定复现该状态，记录为 deferred，不得用另一个 ID 替代。
 
-预期：缺少或未选择端点时语音失败关闭但 BLE 连接保持；语音期间禁止切换；正确端点时 16 kHz PCM 进入 CABLE Input，并可从 CABLE Output 收到；`STREAM_STOP` 后等待 WASAPI padding 清零再结束会话；端点失效后提示准确。应用不读取或修改 Windows 默认输入、输出。
+预期：缺少或未选择端点时语音失败关闭但 BLE 连接保持；语音期间禁止切换；正确端点时 16 kHz PCM 进入 CABLE Input，并可从 CABLE Output 收到；`STREAM_STOP` 后等待 WASAPI padding 清零再结束会话；重启只恢复稳定 ID 与原名称都一致的端点；端点缺失或名称变化时保留原选择用于提示，但 WASAPI 不进入就绪，也不退回系统默认输出。应用不读取或修改 Windows 默认输入、输出。
 
-失败判定：自动使用默认扬声器、端点名称相同导致误选、队列无限增长、停止时直接丢弃尾音、端点失败后仍显示系统语音可用。
+失败判定：自动使用默认扬声器、只按名称匹配导致误选、端点 ID 或名称变化后仍自动恢复、队列无限增长、停止时直接丢弃尾音、端点失败后仍显示系统语音可用。
 
 ## 用例六：可靠按键
 
@@ -104,7 +106,7 @@
 - Vue 导航与连接阶段映射测试、类型检查和 Vite 生产构建；
 - 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；
 - 浏览器控制台零错误；
-- `sayall-core` 21 项测试；macOS `sayall-windows` 3 项平台边界测试；Windows CI 额外运行 WASAPI generation 与有界队列测试；
+- `sayall-core` 22 项测试；macOS `sayall-windows` 3 项平台边界测试；Tauri 设置序列化 2 项测试；Windows CI 额外运行 WASAPI generation、有界队列与持久端点身份校验测试；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
 - `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI 平台层交叉静态检查。

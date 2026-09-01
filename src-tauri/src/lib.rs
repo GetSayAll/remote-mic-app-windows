@@ -3,6 +3,10 @@ use sayall_windows::{
     WindowsPlatform,
 };
 use serde::Serialize;
+use settings::SettingsStore;
+use tauri::Manager;
+
+mod settings;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,9 +15,10 @@ struct RuntimeSnapshot {
     platform: PlatformSnapshot,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AppState {
     platform: WindowsPlatform,
+    settings: SettingsStore,
 }
 
 #[tauri::command]
@@ -93,16 +98,55 @@ async fn select_audio_endpoint(
     state: tauri::State<'_, AppState>,
 ) -> Result<AudioSnapshot, String> {
     let platform = state.platform.clone();
-    tauri::async_runtime::spawn_blocking(move || platform.select_audio_endpoint(endpoint_id))
-        .await
-        .map_err(|error| format!("选择音频端点任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = platform
+            .select_audio_endpoint(endpoint_id)
+            .map_err(|error| error.to_string())?;
+        let (Some(id), Some(name)) = (
+            snapshot.selected_endpoint_id.clone(),
+            snapshot.selected_endpoint_name.clone(),
+        ) else {
+            return Err("WASAPI 已初始化，但未返回所选端点身份".to_owned());
+        };
+        settings.save_audio_endpoint(id, name)?;
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|error| format!("选择音频端点任务失败：{error}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState::default())
+        .setup(|app| {
+            let settings_path = app.path().app_config_dir()?.join("settings.json");
+            let settings = SettingsStore::new(settings_path);
+            let saved_settings = match settings.load() {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("{error}");
+                    Default::default()
+                }
+            };
+            let platform = WindowsPlatform::default();
+
+            #[cfg(windows)]
+            if let (Some(endpoint_id), Some(endpoint_name)) = (
+                saved_settings.audio_endpoint_id,
+                saved_settings.audio_endpoint_name,
+            ) {
+                if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
+                    eprintln!("恢复已保存的音频端点失败：{error}");
+                }
+            }
+
+            #[cfg(not(windows))]
+            let _ = saved_settings;
+
+            app.manage(AppState { platform, settings });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_runtime_snapshot,
             scan_paired_remotes,
