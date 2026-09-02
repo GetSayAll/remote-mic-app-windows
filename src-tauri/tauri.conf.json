@@ -31,8 +31,8 @@
     "targets": ["nsis"],
     "publisher": "GetSayAll",
     "category": "Productivity",
-    "shortDescription": "把 RC003 遥控器的语音和按键桥接到 Windows",
-    "longDescription": "无线麦 SayAll Windows 版通过公开 Windows API 接收 RC003 遥控器的语音和普通按键。",
+    "shortDescription": "把 RC001/RC003 遥控器的语音和按键桥接到 Windows",
+    "longDescription": "无线麦 SayAll Windows 版通过公开 Windows API 接收 RC001 和 RC003 遥控器的语音和普通按键。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

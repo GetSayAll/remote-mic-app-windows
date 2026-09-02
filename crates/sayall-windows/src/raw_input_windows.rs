@@ -490,7 +490,7 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
             continue;
         }
         if let Ok(path) = get_device_name(device.hDevice) {
-            if crate::raw_input::device_path_matches_rc003(&path) {
+            if crate::raw_input::device_path_matches_xiaomi_remote(&path) {
                 paths.push(path);
             }
         }

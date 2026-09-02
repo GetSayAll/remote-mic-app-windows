@@ -69,14 +69,14 @@ async function copyDiagnostic() {
     <article class="card permission-list">
       <div class="permission-row">
         <div class="permission-icon">BT</div>
-        <div><strong>Bluetooth LE</strong><p>读取已配对设备，并在后续阶段连接 RC003 GATT 服务。</p></div>
+        <div><strong>Bluetooth LE</strong><p>读取已配对设备，连接 RC001/RC003 GATT 服务并读取标准型号特征。</p></div>
         <span class="badge" :class="bluetoothStatus.tone">
           {{ bluetoothStatus.label }}
         </span>
       </div>
       <div class="permission-row">
         <div class="permission-icon">IN</div>
-        <div><strong>Raw Input 与 SendInput</strong><p>只匹配 RC003 设备路径；自动映射仍等待真机事件形态确认。</p></div>
+        <div><strong>Raw Input 与 SendInput</strong><p>只匹配 RC001/RC003 设备族路径；两种型号的自动映射均等待真机事件形态确认。</p></div>
         <span class="badge" :class="inputStatus.tone">{{ inputStatus.label }}</span>
       </div>
       <div class="permission-row">
