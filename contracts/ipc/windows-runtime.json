@@ -1,0 +1,69 @@
+{
+  "platformSnapshot": {
+    "platform": "windows",
+    "windowsApiAvailable": true,
+    "bleScanAvailable": true,
+    "bleVoiceReady": true,
+    "wasapiReady": true,
+    "rawInputReady": true,
+    "sendInputReady": true,
+    "verificationStatus": "fixture-only",
+    "connection": {
+      "phase": "ready",
+      "remoteName": "Xiaomi Bluetooth Remote 2",
+      "remoteModel": "rc001",
+      "capabilities": {
+        "version": 256,
+        "codecs": 1,
+        "interaction": 1,
+        "frameSize": 120,
+        "selectedCodec": 1,
+        "sampleRate": 16000
+      },
+      "voiceState": "idle",
+      "decodedSamples": 240,
+      "generation": 7,
+      "reconnectAttempt": 2,
+      "powerNotificationsAvailable": true,
+      "lastError": null
+    },
+    "audio": {
+      "phase": "ready",
+      "selectedEndpointId": "fixture-endpoint-id",
+      "selectedEndpointName": "Fixture Virtual Cable",
+      "queuedSamples": 80,
+      "submittedSamples": 160,
+      "generation": 4,
+      "lastError": null
+    },
+    "rawInput": {
+      "phase": "ready",
+      "matchedDeviceCount": 1,
+      "rawEventCount": 12,
+      "semanticEdgeCount": 8,
+      "lastButton": "home",
+      "lastIsPressed": true,
+      "lastError": null
+    }
+  },
+  "pairedRemotes": [
+    {
+      "id": "fixture-rc001",
+      "name": "Xiaomi Bluetooth Remote 2",
+      "model": "rc001",
+      "isSupportedCandidate": true
+    },
+    {
+      "id": "fixture-rc003",
+      "name": "Xiaomi Bluetooth Remote 2 Pro",
+      "model": "rc003",
+      "isSupportedCandidate": true
+    },
+    {
+      "id": "fixture-unknown",
+      "name": "Approved Fixture Remote",
+      "model": "unknown",
+      "isSupportedCandidate": true
+    }
+  ]
+}
