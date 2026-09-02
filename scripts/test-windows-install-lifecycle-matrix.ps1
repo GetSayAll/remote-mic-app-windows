@@ -290,9 +290,11 @@ try {
     $appProcess.WaitForExit()
     $appProcess = $null
 
-    # `/P` makes Tauri's NSIS passive page execute its version comparison so
-    # allowDowngrades=false rejects the lower-version installer before copying.
-    $downgradeExitCode = Invoke-Installer $predecessorInstaller.FullName @("/S", "/P")
+    $expectedDowngradeExitCode = 1638
+    $downgradeExitCode = Invoke-Installer $predecessorInstaller.FullName
+    if ($downgradeExitCode -ne $expectedDowngradeExitCode) {
+        throw "Downgrade installer returned $downgradeExitCode instead of $expectedDowngradeExitCode"
+    }
     $afterDowngrade = Get-SingleInstallation $currentVersion
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $afterDowngrade.AppExecutable).Hash -ne $currentExecutableHash) {
         throw "Downgrade attempt replaced the current executable"
@@ -328,7 +330,7 @@ try {
 - current-version convergence installer passes: `$upgradePasses`
 - exact settings, mapping and usage-statistics fixture preservation: passed
 - upgraded process alive for 8 seconds: passed
-- predecessor re-run did not replace `$currentVersion` (exit code `$downgradeExitCode`): passed
+- predecessor `/S` re-run was rejected with exit code `$downgradeExitCode` and did not replace `$currentVersion`: passed
 - final uninstall removed program identity and retained user data: passed
 
 This does not validate visible installer UI, real historical binaries, SmartScreen, or Windows 10 1809 / Windows 11 desktop behavior.
