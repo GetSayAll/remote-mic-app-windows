@@ -40,8 +40,8 @@ function Get-SayAllUninstallEntries {
     @($entries)
 }
 
-function Invoke-Installer([string] $path, [int] $timeoutSeconds = 45) {
-    $process = Start-Process -FilePath $path -ArgumentList "/S" -PassThru
+function Invoke-Installer([string] $path, [string[]] $arguments = @("/S"), [int] $timeoutSeconds = 45) {
+    $process = Start-Process -FilePath $path -ArgumentList $arguments -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
     while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 250
@@ -183,7 +183,9 @@ try {
     $settingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
     $mappingsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mappingsPath).Hash
 
-    $upgradeExitCode = Invoke-Installer $currentInstaller.FullName
+    # Tauri's updater-compatible mode bypasses the asynchronous old-uninstaller
+    # cleanup that can race a normal silent reinstall.
+    $upgradeExitCode = Invoke-Installer $currentInstaller.FullName @("/S", "/UPDATE")
     if ($upgradeExitCode -ne 0) { throw "Current upgrade failed with exit code $upgradeExitCode" }
     Start-Sleep -Seconds 2
     $upgradeEntries = @(Get-SayAllUninstallEntries)
@@ -196,7 +198,7 @@ try {
         # NSIS may finish the previous uninstaller just after the first installer returns.
         # A second idempotent current-version install is the bounded convergence step.
         Start-Sleep -Seconds 5
-        $upgradeExitCode = Invoke-Installer $currentInstaller.FullName
+        $upgradeExitCode = Invoke-Installer $currentInstaller.FullName @("/S", "/UPDATE")
         if ($upgradeExitCode -ne 0) { throw "Current upgrade convergence install failed with exit code $upgradeExitCode" }
         $upgradePasses = 2
     }
@@ -247,7 +249,7 @@ try {
         }
     }
 
-    Write-Host "Verified NSIS lifecycle matrix: $predecessorVersion -> $currentVersion -> downgrade rejected -> uninstall"
+    Write-Host "Verified NSIS lifecycle matrix: $predecessorVersion -> $currentVersion (/UPDATE) -> downgrade rejected -> uninstall"
     Write-Host "Current-version convergence installer passes: $upgradePasses"
     Write-Host "Downgrade installer exit code: $downgradeExitCode; installed version remained $currentVersion"
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
@@ -255,7 +257,7 @@ try {
 ### Windows NSIS lifecycle matrix
 
 - predecessor `$predecessorVersion` current-user install: passed
-- upgrade to `$currentVersion` with one uninstall entry and one shortcut: passed
+- updater-compatible `/S /UPDATE` upgrade to `$currentVersion` with one uninstall entry and one shortcut: passed
 - current-version convergence installer passes: `$upgradePasses`
 - exact settings, mapping and usage-statistics fixture preservation: passed
 - upgraded process alive for 8 seconds: passed
