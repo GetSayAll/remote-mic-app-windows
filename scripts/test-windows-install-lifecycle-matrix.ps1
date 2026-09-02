@@ -90,12 +90,22 @@ function Invoke-SilentUninstall($entry) {
 }
 
 function Get-SingleInstallation([Version] $expectedVersion) {
-    $entries = @(Get-SayAllUninstallEntries)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $entries = @()
+    $entry = $null
+    $actualVersion = $null
+    do {
+        $entries = @(Get-SayAllUninstallEntries)
+        if ($entries.Count -eq 1) {
+            $entry = $entries[0]
+            $actualVersion = [Version](Get-PropertyValue $entry "DisplayVersion")
+            if ($actualVersion -eq $expectedVersion) { break }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
     if ($entries.Count -ne 1) {
         throw "Expected one SayAll uninstall entry, found $($entries.Count)"
     }
-    $entry = $entries[0]
-    $actualVersion = [Version](Get-PropertyValue $entry "DisplayVersion")
     if ($actualVersion -ne $expectedVersion) {
         throw "Installed version $actualVersion does not match expected $expectedVersion"
     }
