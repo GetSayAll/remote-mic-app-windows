@@ -42,6 +42,14 @@ if (
 ) {
     throw "NSIS installer must reject unsupported Windows versions before copying app files"
 }
+if (
+    $installerHooks -notmatch '(?m)^!define SAYALL_DOWNGRADE_ERROR_LEVEL 1638\r?$' -or
+    $installerHooks -notmatch 'ReadRegStr \$R8 SHCTX "\$\{UNINSTKEY\}" "DisplayVersion"' -or
+    $installerHooks -notmatch 'nsis_tauri_utils::SemverCompare "\$\{VERSION\}" \$R8' -or
+    $installerHooks -notmatch 'SetErrorLevel \$\{SAYALL_DOWNGRADE_ERROR_LEVEL\}'
+) {
+    throw "NSIS preinstall hook must reject silent downgrades before copying app files"
+}
 $compatibilitySource = Get-Content -Raw -Encoding UTF8 $compatibilitySourcePath
 if ($compatibilitySource -notmatch 'WindowsVersion::new\(10, 0, 17_763\)') {
     throw "Runtime and NSIS minimum Windows versions must both remain Windows 10 build 17763"
