@@ -4,7 +4,7 @@
 
 无线麦 Windows 版在公开仓库 `GetSayAll/remote-mic-app-windows` 中独立开发，采用 Rust、Tauri 2 和 Vue 3。macOS 继续使用 SwiftUI/AppKit；两端独立构建、签名、打包、测试和发布。
 
-本仓库不 fork `mwlt/Voice_VibeCoding`，也不基于其某个提交继续 Git 历史。该项目、PR #249、ZSTDJan Windows 版本和 Vibe Flow 只作为带来源的架构、实现和故障经验参考。
+`mwlt/Voice_VibeCoding`、PR #249、ZSTDJan Windows 版本和 Vibe Flow 只作为带来源的架构、实现和故障经验参考。
 
 Windows UI 的唯一产品设计基准是无线麦 macOS 原版。Windows 使用本地标题栏、Segoe UI Variable、系统 Accent 和 WebView2，不模拟 macOS 红黄绿窗口按钮或 Liquid Glass。
 
