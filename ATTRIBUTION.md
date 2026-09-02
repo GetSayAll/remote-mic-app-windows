@@ -1,6 +1,6 @@
 # 来源与归属
 
-本仓库是独立建立的 Windows Rust/Tauri 工程，不是任何现有仓库的 Git fork。
+本仓库是面向 Windows 的 Rust/Tauri 工程。
 
 ## 产品与 UI 基准
 
