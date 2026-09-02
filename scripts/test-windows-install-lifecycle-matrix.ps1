@@ -117,9 +117,10 @@ function Get-SingleInstallation([Version] $expectedVersion) {
 function Assert-SingleShortcut {
     $startMenuRoot = [Environment]::GetFolderPath("StartMenu")
     $directory = Join-Path (Join-Path $startMenuRoot "Programs") $startMenuFolderName
-    $shortcuts = if (Test-Path -LiteralPath $directory -PathType Container) {
-        @(Get-ChildItem -LiteralPath $directory -Filter "*.lnk" -File -Recurse)
-    } else { @() }
+    $shortcuts = @()
+    if (Test-Path -LiteralPath $directory -PathType Container) {
+        $shortcuts = @(Get-ChildItem -LiteralPath $directory -Filter "*.lnk" -File -Recurse)
+    }
     if ($shortcuts.Count -ne 1 -or $shortcuts[0].Name -ne "$productName.lnk") {
         throw "Expected exactly one SayAll Start Menu shortcut"
     }
