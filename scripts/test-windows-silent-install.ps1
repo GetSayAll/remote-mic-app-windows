@@ -96,7 +96,7 @@ $installers = @(Get-ChildItem -LiteralPath $bundleDirectory -Filter "*-setup.exe
 if ($installers.Count -ne 1) {
     throw "Expected exactly one NSIS installer, found $($installers.Count)"
 }
-if ((Get-SayAllUninstallEntries).Count -ne 0) {
+if (@(Get-SayAllUninstallEntries).Count -ne 0) {
     throw "A SayAll installation already exists before the CI lifecycle test"
 }
 
@@ -106,7 +106,7 @@ try {
         throw "Silent SayAll install failed with exit code $($installerProcess.ExitCode)"
     }
 
-    $entries = Get-SayAllUninstallEntries
+    $entries = @(Get-SayAllUninstallEntries)
     if ($entries.Count -ne 1) {
         throw "Expected one current-user SayAll uninstall entry after install, found $($entries.Count)"
     }
@@ -164,7 +164,7 @@ try {
     Invoke-SilentUninstall $entry
     $normalUninstallCompleted = $true
 
-    if ((Get-SayAllUninstallEntries).Count -ne 0) {
+    if (@(Get-SayAllUninstallEntries).Count -ne 0) {
         throw "SayAll uninstall registry entry remains after silent uninstall"
     }
     if (Test-Path -LiteralPath $appExecutable) {
@@ -202,7 +202,7 @@ This does not validate visible UI rendering, SmartScreen, Windows 10 1809, real 
         Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
     }
     if (-not $normalUninstallCompleted) {
-        foreach ($remainingEntry in Get-SayAllUninstallEntries) {
+        foreach ($remainingEntry in @(Get-SayAllUninstallEntries)) {
             try {
                 Invoke-SilentUninstall $remainingEntry
             } catch {
