@@ -10,6 +10,9 @@ sayall-core = { path = "../sayall-core" }
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 futures = "0.3"
 wasapi = "0.24"
