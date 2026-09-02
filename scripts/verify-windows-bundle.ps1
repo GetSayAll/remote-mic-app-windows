@@ -5,6 +5,7 @@ $configPath = Join-Path $repositoryRoot "src-tauri/tauri.conf.json"
 $compatibilitySourcePath = Join-Path $repositoryRoot "crates/sayall-windows/src/compatibility.rs"
 $bundleDirectory = Join-Path $repositoryRoot "target/release/bundle/nsis"
 $artifactDirectory = Join-Path $repositoryRoot "artifacts/windows-preview"
+$applicationPath = Join-Path $repositoryRoot "target/release/sayall-windows-app.exe"
 
 $config = Get-Content -Raw -Encoding UTF8 $configPath | ConvertFrom-Json
 if ($config.productName -ne "无线麦 SayAll") {
@@ -54,6 +55,27 @@ $compatibilitySource = Get-Content -Raw -Encoding UTF8 $compatibilitySourcePath
 if ($compatibilitySource -notmatch 'WindowsVersion::new\(10, 0, 17_763\)') {
     throw "Runtime and NSIS minimum Windows versions must both remain Windows 10 build 17763"
 }
+
+if (-not (Test-Path -LiteralPath $applicationPath -PathType Leaf)) {
+    throw "Release application executable is missing: $applicationPath"
+}
+$applicationBytes = [System.IO.File]::ReadAllBytes($applicationPath)
+if ($applicationBytes.Length -lt 0x100 -or $applicationBytes[0] -ne 0x4D -or $applicationBytes[1] -ne 0x5A) {
+    throw "Release application is not a valid PE executable: $applicationPath"
+}
+$peOffset = [BitConverter]::ToInt32($applicationBytes, 0x3C)
+if ($peOffset -lt 0 -or $peOffset + 0x5C -gt $applicationBytes.Length) {
+    throw "Release application has an invalid PE header: $applicationPath"
+}
+if ($applicationBytes[$peOffset] -ne 0x50 -or $applicationBytes[$peOffset + 1] -ne 0x45 -or $applicationBytes[$peOffset + 2] -ne 0 -or $applicationBytes[$peOffset + 3] -ne 0) {
+    throw "Release application is missing the PE signature: $applicationPath"
+}
+$optionalHeaderOffset = $peOffset + 24
+$subsystem = [BitConverter]::ToUInt16($applicationBytes, $optionalHeaderOffset + 68)
+if ($subsystem -ne 2) {
+    throw "Release application must use the Windows GUI subsystem (2), observed $subsystem"
+}
+Write-Host "Verified Windows GUI subsystem for $([System.IO.Path]::GetFileName($applicationPath))"
 
 $installers = @(Get-ChildItem -Path $bundleDirectory -Filter "*-setup.exe" -File)
 if ($installers.Count -ne 1) {
