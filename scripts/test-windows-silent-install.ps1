@@ -120,7 +120,7 @@ try {
         throw "Installed SayAll version $installedVersion does not match $($config.version)"
     }
 
-    $installLocation = [IO.Path]::GetFullPath($registeredInstallLocation).TrimEnd('\')
+    $installLocation = [IO.Path]::GetFullPath($registeredInstallLocation.Trim().Trim('"')).TrimEnd('\')
     $localAppDataRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd('\')
     if (-not $installLocation.StartsWith("$localAppDataRoot\", [StringComparison]::OrdinalIgnoreCase)) {
         throw "Current-user installer wrote outside LOCALAPPDATA: $installLocation"
