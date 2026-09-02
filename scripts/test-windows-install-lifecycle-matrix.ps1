@@ -290,7 +290,9 @@ try {
     $appProcess.WaitForExit()
     $appProcess = $null
 
-    $downgradeExitCode = Invoke-Installer $predecessorInstaller.FullName
+    # `/P` makes Tauri's NSIS passive page execute its version comparison so
+    # allowDowngrades=false rejects the lower-version installer before copying.
+    $downgradeExitCode = Invoke-Installer $predecessorInstaller.FullName @("/S", "/P")
     $afterDowngrade = Get-SingleInstallation $currentVersion
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $afterDowngrade.AppExecutable).Hash -ne $currentExecutableHash) {
         throw "Downgrade attempt replaced the current executable"
