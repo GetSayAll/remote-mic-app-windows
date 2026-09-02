@@ -141,7 +141,9 @@
 
 失败判定：artifact 无法绑定精确 commit、存在多个候选安装器、SHA-256 不一致、CI 包意外带未知签名、静默安装非零退出、安装到当前用户目录之外、卸载条目或开始菜单入口不唯一、应用进程立即退出、静默卸载残留程序文件或误删设置标记、安装器要求全局管理员权限、把未签名 artifact 当作公开发布包。
 
-当前自动化状态：第 2 项生命周期矩阵此前失败在降级用例：Tauri 2.11.1 的 `/S` 静默模式不会执行负责设置版本比较结果的重装页，`/S /P` 仍属于 silent，因而内置 `allowDowngrades=false` 检查均未阻止 predecessor。现已在既有 preinstall hook 中直接读取本产品 `DisplayVersion` 并以 Tauri SemVer 比较器拒绝旧版本，静默拒绝约定退出码为 1638，待 Windows CI 重新验证；在矩阵通过前不得进入 Authenticode 发布演练。
+当前自动化状态：第 2 项生命周期矩阵此前失败在降级用例：Tauri 2.11.1 的 `/S` 静默模式不会执行负责设置版本比较结果的重装页，`/S /P` 仍属于 silent，因而内置 `allowDowngrades=false` 检查均未阻止 predecessor。现已在既有 preinstall hook 中直接读取本产品 `DisplayVersion` 并以 Tauri SemVer 比较器拒绝旧版本，静默拒绝约定退出码为 1638；Windows CI 已通过，详见下方 Run 记录。该结果仍不替代真机验收。
+
+已完成：Windows CI Run [`33637195089`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33637195089) 通过全部生命周期步骤。`0.0.1` predecessor 以 `/S` 安装，`0.1.0` 以 `/S /UPDATE` 升级；随后 predecessor `/S` 被 preinstall SemVer 门禁拒绝并返回 1638，安装版本仍为 `0.1.0`，主程序、设置、映射、统计和单一安装身份均未变化；最终静默卸载移除程序、快捷方式和卸载条目并保留用户数据。该 Run 仍不替代可见安装界面、SmartScreen、Windows 10 1809 / Windows 11 真机或历史二进制兼容性验收。第 3 项 Authenticode 演练可在此矩阵通过后开始。
 
 ## 用例十：隐私安全诊断摘要
 
