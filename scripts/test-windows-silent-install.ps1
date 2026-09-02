@@ -113,11 +113,19 @@ try {
     $entry = $entries[0]
     $registeredInstallLocation = Get-PropertyValue $entry "InstallLocation"
     $installedVersion = Get-PropertyValue $entry "DisplayVersion"
+    $mainBinaryName = Get-PropertyValue $entry "MainBinaryName"
     if ([string]::IsNullOrWhiteSpace($registeredInstallLocation)) {
         throw "SayAll uninstall entry has no InstallLocation"
     }
     if ($installedVersion -ne $config.version) {
         throw "Installed SayAll version $installedVersion does not match $($config.version)"
+    }
+    if (
+        [string]::IsNullOrWhiteSpace($mainBinaryName) -or
+        [IO.Path]::GetFileName($mainBinaryName) -ne $mainBinaryName -or
+        [IO.Path]::GetExtension($mainBinaryName) -ne ".exe"
+    ) {
+        throw "SayAll uninstall entry has an invalid MainBinaryName: $mainBinaryName"
     }
 
     $installLocation = [IO.Path]::GetFullPath($registeredInstallLocation.Trim().Trim('"')).TrimEnd('\')
@@ -138,11 +146,10 @@ try {
     if ($shortcuts.Count -ne 1) {
         throw "Expected one SayAll Start Menu shortcut, found $($shortcuts.Count)"
     }
-    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcuts[0].FullName)
-    $appExecutable = [IO.Path]::GetFullPath($shortcut.TargetPath)
-    if (-not $appExecutable.StartsWith("$installLocation\", [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Start Menu shortcut points outside the SayAll install directory: $appExecutable"
+    if ($shortcuts[0].Name -ne "$productName.lnk") {
+        throw "Unexpected SayAll Start Menu shortcut name: $($shortcuts[0].Name)"
     }
+    $appExecutable = Join-Path $installLocation $mainBinaryName
     if (-not (Test-Path -LiteralPath $appExecutable -PathType Leaf)) {
         throw "Installed SayAll executable is missing: $appExecutable"
     }
