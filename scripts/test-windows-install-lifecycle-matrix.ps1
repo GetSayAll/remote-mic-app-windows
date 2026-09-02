@@ -175,6 +175,11 @@ try {
 
     $upgradeExitCode = Invoke-Installer $currentInstaller.FullName
     if ($upgradeExitCode -ne 0) { throw "Current upgrade failed with exit code $upgradeExitCode" }
+    $upgradeEntries = @(Get-SayAllUninstallEntries)
+    Write-Host "After current installer: $($upgradeEntries.Count) matching uninstall entries"
+    foreach ($upgradeEntry in $upgradeEntries) {
+        Write-Host "- DisplayVersion=$((Get-PropertyValue $upgradeEntry 'DisplayVersion')); InstallLocation=$((Get-PropertyValue $upgradeEntry 'InstallLocation'))"
+    }
     $currentInstallation = Get-SingleInstallation $currentVersion
     if ($currentInstallation.InstallLocation -ne $initialInstallLocation) {
         throw "Upgrade changed install location from $initialInstallLocation to $($currentInstallation.InstallLocation)"
