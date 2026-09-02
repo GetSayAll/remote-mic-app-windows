@@ -89,6 +89,20 @@ function Invoke-SilentUninstall($entry) {
     }
 }
 
+function Wait-ProcessesExit([string[]] $paths, [int] $timeoutSeconds = 120) {
+    $normalizedPaths = @($paths | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\').ToLowerInvariant() })
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    do {
+        $running = @(Get-CimInstance Win32_Process -Filter "Name='uninstall.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $path = Get-PropertyValue $_ "ExecutablePath"
+            $null -ne $path -and $normalizedPaths -contains ([IO.Path]::GetFullPath($path).TrimEnd('\').ToLowerInvariant())
+        })
+        if ($running.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Previous uninstaller process did not exit within $timeoutSeconds seconds"
+}
+
 function Get-SingleInstallation([Version] $expectedVersion) {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $entries = @()
@@ -187,6 +201,9 @@ try {
     # cleanup that can race a normal silent reinstall.
     $upgradeExitCode = Invoke-Installer $currentInstaller.FullName @("/S", "/UPDATE")
     if ($upgradeExitCode -ne 0) { throw "Current upgrade failed with exit code $upgradeExitCode" }
+    Wait-ProcessesExit @(
+        (Join-Path $initialInstallLocation "uninstall.exe")
+    )
     $upgradePasses = 1
     $upgradeDeadline = [DateTime]::UtcNow.AddSeconds(120)
     $lastRetryAt = $null
