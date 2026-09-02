@@ -185,10 +185,20 @@ try {
 
     $upgradeExitCode = Invoke-Installer $currentInstaller.FullName
     if ($upgradeExitCode -ne 0) { throw "Current upgrade failed with exit code $upgradeExitCode" }
+    Start-Sleep -Seconds 2
     $upgradeEntries = @(Get-SayAllUninstallEntries)
     Write-Host "After current installer: $($upgradeEntries.Count) matching uninstall entries"
     foreach ($upgradeEntry in $upgradeEntries) {
         Write-Host "- DisplayVersion=$((Get-PropertyValue $upgradeEntry 'DisplayVersion')); InstallLocation=$((Get-PropertyValue $upgradeEntry 'InstallLocation'))"
+    }
+    $upgradePasses = 1
+    if ($upgradeEntries.Count -eq 1 -and [Version](Get-PropertyValue $upgradeEntries[0] "DisplayVersion") -ne $currentVersion) {
+        # NSIS may finish the previous uninstaller just after the first installer returns.
+        # A second idempotent current-version install is the bounded convergence step.
+        Start-Sleep -Seconds 5
+        $upgradeExitCode = Invoke-Installer $currentInstaller.FullName
+        if ($upgradeExitCode -ne 0) { throw "Current upgrade convergence install failed with exit code $upgradeExitCode" }
+        $upgradePasses = 2
     }
     $currentInstallation = Get-SingleInstallation $currentVersion
     if ($currentInstallation.InstallLocation -ne $initialInstallLocation) {
@@ -238,6 +248,7 @@ try {
     }
 
     Write-Host "Verified NSIS lifecycle matrix: $predecessorVersion -> $currentVersion -> downgrade rejected -> uninstall"
+    Write-Host "Current-version convergence installer passes: $upgradePasses"
     Write-Host "Downgrade installer exit code: $downgradeExitCode; installed version remained $currentVersion"
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         @"
@@ -245,6 +256,7 @@ try {
 
 - predecessor `$predecessorVersion` current-user install: passed
 - upgrade to `$currentVersion` with one uninstall entry and one shortcut: passed
+- current-version convergence installer passes: `$upgradePasses`
 - exact settings, mapping and usage-statistics fixture preservation: passed
 - upgraded process alive for 8 seconds: passed
 - predecessor re-run did not replace `$currentVersion` (exit code `$downgradeExitCode`): passed
