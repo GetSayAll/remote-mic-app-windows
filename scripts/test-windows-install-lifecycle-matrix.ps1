@@ -41,7 +41,9 @@ function Get-SayAllUninstallEntries {
 }
 
 function Invoke-Installer([string] $path, [string[]] $arguments = @("/S"), [int] $timeoutSeconds = 45) {
-    $process = Start-Process -FilePath $path -ArgumentList $arguments -PassThru
+    $argumentString = [string]::Join(" ", $arguments)
+    Write-Host "Invoking installer: $([IO.Path]::GetFileName($path)) $argumentString"
+    $process = Start-Process -FilePath $path -ArgumentList $argumentString -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
     while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 250
