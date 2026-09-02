@@ -56,6 +56,10 @@ jobs:
         timeout-minutes: 3
         run: ./scripts/test-windows-runtime-simulation.ps1
 
+      - name: Build predecessor NSIS upgrade fixture
+        shell: pwsh
+        run: ./scripts/build-windows-upgrade-fixture.ps1
+
       - name: Build unsigned NSIS preview installer
         run: pnpm tauri build --bundles nsis
 
@@ -66,6 +70,11 @@ jobs:
       - name: Verify installer identity and create checksums
         shell: pwsh
         run: ./scripts/verify-windows-bundle.ps1
+
+      - name: Test install upgrade downgrade and uninstall matrix
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/test-windows-install-lifecycle-matrix.ps1
 
       - name: Test silent current-user install and uninstall
         shell: pwsh
