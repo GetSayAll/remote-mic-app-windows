@@ -15,27 +15,42 @@ $reportDirectory = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 $simulationId = [Guid]::NewGuid().ToString('N')
 $reportPath = Join-Path $reportDirectory "sayall-runtime-simulation-$simulationId.json"
 $stateDirectory = Join-Path $reportDirectory "sayall-runtime-simulation-state-$simulationId"
+$stdoutPath = Join-Path $reportDirectory "sayall-runtime-simulation-$simulationId.stdout.log"
+$stderrPath = Join-Path $reportDirectory "sayall-runtime-simulation-$simulationId.stderr.log"
 $env:SAYALL_WINDOWS_RUNTIME_SIMULATION = "1"
 $env:SAYALL_RUNTIME_SIMULATION_REPORT = $reportPath
 $env:SAYALL_RUNTIME_SIMULATION_STATE_DIR = $stateDirectory
 $appProcess = $null
 
+function Write-SimulationProcessLogs {
+    foreach ($path in @($stdoutPath, $stderrPath)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Write-Host "Runtime simulation process log: $path"
+            Get-Content -Encoding UTF8 -LiteralPath $path | Write-Host
+        }
+    }
+}
+
 try {
-    $appProcess = Start-Process -FilePath $appExecutable -PassThru
+    $appProcess = Start-Process -FilePath $appExecutable -PassThru `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not $appProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 250
         $appProcess.Refresh()
     }
     if (-not $appProcess.HasExited) {
+        Write-SimulationProcessLogs
         throw "Windows Tauri/WebView runtime simulation did not finish within 60 seconds"
     }
     if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        Write-SimulationProcessLogs
         throw "Windows runtime simulation did not write its report"
     }
 
     $report = Get-Content -Raw -Encoding UTF8 -LiteralPath $reportPath | ConvertFrom-Json
     if ($appProcess.ExitCode -ne 0) {
+        Write-SimulationProcessLogs
         throw "Windows runtime simulation exited with code $($appProcess.ExitCode): $($report.error)"
     }
     if ($report.passed -ne $true) {

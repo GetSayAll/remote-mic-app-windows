@@ -49,8 +49,7 @@ jobs:
         shell: pwsh
         run: |
           $env:VITE_SAYALL_RUNTIME_SIMULATION = "1"
-          pnpm build
-          cargo build --release -p sayall-windows-app --features runtime-simulation
+          pnpm tauri build --no-bundle --features runtime-simulation
 
       - name: Test Windows Tauri WebView and IPC runtime simulation
         shell: pwsh
