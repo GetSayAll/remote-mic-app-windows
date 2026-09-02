@@ -179,6 +179,15 @@
 
 ## 当前自动化记录
 
+2026-09-02 在 `windows-latest` 完成 NSIS 静默安装与卸载生命周期验证：
+
+- Windows CI Run [`33593663937`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33593663937) 从提交 `5f01fa41cfbd15b967a760e490b9343260e768a6` 构建 `无线麦 SayAll_0.1.0_x64-setup.exe`，SHA-256 为 `a9fa2bfbfd519189629abc3ed91d5a811752081452d93c475c62129dd1e16e44`；
+- `/S` 安装以普通 Runner 用户完成，唯一卸载条目位于 HKCU，安装目录为 `C:\Users\runneradmin\AppData\Local\无线麦 SayAll`，开始菜单文件夹内只有一个 `无线麦 SayAll.lnk`；
+- 安装后的主进程持续运行 8 秒，未立即崩溃；测试随后关闭进程，并使用卸载注册表中的真实命令执行 `/S` 卸载；
+- 卸载后程序目录、开始菜单文件夹和卸载条目均移除，`%APPDATA%\app.getsayall.remote-mic.windows` 中的测试标记保留，确认默认静默卸载不删除 Tauri `app_config_dir`；
+- Run [`33591214805`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33591214805) 在安装前暴露空注册表结果的 PowerShell 数组边界，Run [`33592013119`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33592013119) 暴露带引号 `InstallLocation`，Run [`33592799733`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33592799733) 暴露非交互 Runner 无法通过 WScript 读取快捷方式目标；三项均按实际 Tauri NSIS 注册表契约修正；
+- 该结果不证明可见安装/卸载界面、语言选择、SmartScreen、Windows 10 1809、Windows 11 真实桌面、签名发布包、RC001/RC003 或第三方应用已经通过。
+
 2026-09-02 在 Apple Silicon Mac 上完成 Rust ↔ TypeScript IPC 契约快照验证：
 
 - 同一份 JSON 夹具覆盖完整 `PlatformSnapshot`、嵌套连接/音频/Raw Input 快照，以及 RC001、RC003、unknown 三种 `PairedRemote`；
