@@ -52,6 +52,11 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-windows-bundle.ps1
 
+      - name: Test silent current-user install and uninstall
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/test-windows-silent-install.ps1
+
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
         with:
