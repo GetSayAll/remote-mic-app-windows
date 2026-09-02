@@ -2579,6 +2579,7 @@ dependencies = [
  "futures",
  "sayall-core",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "wasapi",
  "windows 0.62.2",
