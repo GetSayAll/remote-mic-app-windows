@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import { getRuntimeSnapshot, type RuntimeSnapshot } from "./lib/bridge";
 import type { PageId } from "./navigation";
@@ -12,6 +12,7 @@ import StatisticsPage from "./pages/StatisticsPage.vue";
 const activePage = ref<PageId>("connection");
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
+let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 
 const activeComponent = computed(() => ({
   buttons: ButtonsPage,
@@ -22,11 +23,22 @@ const activeComponent = computed(() => ({
 })[activePage.value]);
 
 onMounted(async () => {
-  try {
-    runtime.value = await getRuntimeSnapshot();
-  } catch (error) {
-    loadError.value = error instanceof Error ? error.message : String(error);
-  }
+  const refreshRuntime = async () => {
+    try {
+      runtime.value = await getRuntimeSnapshot();
+      loadError.value = "";
+    } catch (error) {
+      loadError.value = error instanceof Error ? error.message : String(error);
+    }
+  };
+  await refreshRuntime();
+  runtimePollTimer = setInterval(() => {
+    void refreshRuntime();
+  }, 1_000);
+});
+
+onUnmounted(() => {
+  if (runtimePollTimer) clearInterval(runtimePollTimer);
 });
 </script>
 
