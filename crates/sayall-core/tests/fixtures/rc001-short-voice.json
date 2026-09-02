@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "sayall.rc001-short-voice",
+  "sourceScenario": "GetSayAll/hardware-simulation@65248499cac7da3ad46cd0c11dca1478f7733255:rc001-short-voice.json",
+  "modelNumber": "RC001",
+  "capabilitiesHex": "0b010002030078",
+  "events": [
+    {
+      "atMilliseconds": 100,
+      "channel": "control",
+      "valueHex": "04030207"
+    },
+    {
+      "atMilliseconds": 110,
+      "channel": "audio",
+      "valueHex": "11111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "atMilliseconds": 120,
+      "channel": "audio",
+      "valueHex": "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "atMilliseconds": 150,
+      "channel": "control",
+      "valueHex": "00"
+    }
+  ],
+  "expected": {
+    "sessionId": 7,
+    "frameSize": 120,
+    "decodedSamples": 240
+  }
+}
