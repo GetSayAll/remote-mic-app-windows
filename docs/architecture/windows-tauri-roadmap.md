@@ -73,6 +73,8 @@ RC001/RC003 断连由 BLE 工作线程统一清理后进入 2–30 秒指数退�
 Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 ATVV 或处理音频帧。主程序保持普通用户权限。
 设备专属设置写入本应用自己的 Tauri 配置目录；音频端点同时保存稳定 endpoint ID 与用户选择时的名称，不跨设备同步，也不读取 Windows 默认输出配置。启动恢复必须先验证两者一致。
 
+Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯一实现仍是 `WindowsPlatform`；仅显式启用 `runtime-simulation` feature 且设置专用环境变量的 CI 构建可注入确定性平台。仿真实现复用 `sayall-core` ATVV 管线，并只记录 SendInput，不访问真实 BLE、WASAPI、Raw Input 或桌面输入。仿真专用前端入口和 command 必须从普通生产构建中消失。
+
 ### 3.4 可选高级 Helper
 
 返回、独立音量等 Windows 不稳定提供的 HID usage 单独评估。需要提权的能力必须是可选 Helper，并且失败时不能影响 BLE 语音和可靠按键。
