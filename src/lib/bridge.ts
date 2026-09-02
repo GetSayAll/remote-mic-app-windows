@@ -15,6 +15,8 @@ export type ConnectionPhase =
 
 export type VoiceSessionState = "idle" | "streaming" | "draining";
 
+export type RemoteModel = "rc001" | "rc003" | "unknown";
+
 export type AudioPhase =
   | "unconfigured"
   | "ready"
@@ -99,6 +101,7 @@ export interface AtvvCapabilities {
 export interface ConnectionSnapshot {
   phase: ConnectionPhase;
   remoteName: string | null;
+  remoteModel: RemoteModel;
   capabilities: AtvvCapabilities | null;
   voiceState: VoiceSessionState;
   decodedSamples: number;
@@ -197,6 +200,7 @@ export interface DiagnosticReport {
 export interface PairedRemote {
   id: string;
   name: string;
+  model: RemoteModel;
   isSupportedCandidate: boolean;
 }
 
@@ -210,10 +214,11 @@ const browserSnapshot: RuntimeSnapshot = {
     wasapiReady: false,
     rawInputReady: false,
     sendInputReady: false,
-    verificationStatus: "浏览器预览仅展示界面，不代表 Windows 或 RC003 已通过",
+    verificationStatus: "浏览器预览仅展示界面，不代表 Windows 或 RC001/RC003 已通过",
     connection: {
       phase: "idle",
       remoteName: null,
+      remoteModel: "unknown",
       capabilities: null,
       voiceState: "idle",
       decodedSamples: 0,
@@ -457,17 +462,25 @@ export async function getSendInputSnapshot(): Promise<SendInputSnapshot> {
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
   return {
     idle: "尚未连接",
-    connecting: "正在打开 RC003",
+    connecting: "正在打开遥控器",
     discovering: "正在发现 ATVV 服务与特征",
     awaiting_capabilities: "正在确认 ATVV 能力",
     ready: "BLE / ATVV 已就绪",
-    streaming: "正在接收 RC003 语音",
+    streaming: "正在接收遥控器语音",
     draining: "正在结束本次语音",
-    reconnecting: "正在等待重新连接 RC003",
+    reconnecting: "正在等待重新连接遥控器",
     suspended: "Windows 已进入睡眠",
-    disconnected: "RC003 已断开",
+    disconnected: "遥控器已断开",
     failed: "连接失败",
   }[phase];
+}
+
+export function remoteModelLabel(model: RemoteModel): string {
+  return {
+    rc001: "小米蓝牙遥控器 2（RC001）",
+    rc003: "小米蓝牙遥控器 2 Pro（RC003）",
+    unknown: "型号待设备确认",
+  }[model];
 }
 
 export function audioPhaseLabel(phase: AudioPhase): string {

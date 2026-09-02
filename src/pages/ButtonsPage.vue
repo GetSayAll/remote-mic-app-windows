@@ -14,7 +14,10 @@ import {
   type RawInputSnapshot,
   type RemoteButton,
   type SendInputSnapshot,
+  type RuntimeSnapshot,
 } from "../lib/bridge";
+
+defineProps<{ runtime: RuntimeSnapshot | null }>();
 
 const buttonLabels: Record<RemoteButton, string> = {
   back: "返回",
@@ -191,11 +194,11 @@ onUnmounted(() => {
     <div class="two-column remote-layout">
       <article class="card remote-card">
         <div class="remote-photo-wrap">
-          <img src="/RC003-remote-photo.png" alt="小米蓝牙遥控器 2 Pro" />
+          <img src="/RC003-remote-photo.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" />
         </div>
         <div>
-          <h2>小米蓝牙遥控器 2 Pro</h2>
-          <p class="muted">型号 RC003 · 语音键始终是按下开始、释放结束</p>
+          <h2>小米蓝牙遥控器 2 / 2 Pro</h2>
+          <p class="muted">RC003 实物图仅作 2 Pro 示意 · RC001 按键以 Windows 真机验收为准</p>
         </div>
       </article>
 
@@ -292,7 +295,7 @@ onUnmounted(() => {
         </div>
         <p v-if="mappingMessage" class="operation-message">{{ mappingMessage }}</p>
         <p class="muted mapping-note">
-          当前只保存并显式测试快捷键。真实 RC003 尚未确认原始 Keyboard/HID 路径前，不会自动注入，避免方向键等被执行两次。
+          当前只保存并显式测试快捷键。真实 RC001/RC003 尚未分别确认原始 Keyboard/HID 路径前，不会自动注入，避免方向键等被执行两次。
         </p>
         <div class="info-callout">
           语音键不会加入双击等待或长按阈值，避免增加首个响应延迟。

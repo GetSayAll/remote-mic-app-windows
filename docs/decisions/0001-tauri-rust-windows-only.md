@@ -5,7 +5,7 @@
 
 ## 背景
 
-现有 macOS 产品深度依赖 Apple 平台 API，不适合为了 Windows 重写。已有 Windows 候选分别使用 Python/Qt、C# 和 Rust/Tauri，证明 RC003 Windows 路线可行，但各自包含不同的维护、权限和来源风险。
+现有 macOS 产品深度依赖 Apple 平台 API，不适合为了 Windows 重写。已有 Windows 候选分别使用 Python/Qt、C# 和 Rust/Tauri，证明小米 ATVV 语音遥控器的 Windows 路线可行，但各自包含不同的维护、权限和来源风险。
 
 ## 决策
 

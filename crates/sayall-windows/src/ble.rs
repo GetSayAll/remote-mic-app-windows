@@ -1,6 +1,7 @@
 use crate::{
-    audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff, ConnectionPhase,
-    ConnectionSnapshot, PlatformError, UsageCounters,
+    audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff,
+    remote_model_from_model_number, remote_model_from_name, ConnectionPhase, ConnectionSnapshot,
+    PlatformError, RemoteModel, UsageCounters,
 };
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
@@ -27,6 +28,8 @@ const SERVICE_UUID: GUID = GUID::from_u128(0xab5e00015a214f05bc7daf01f617b664);
 const TRANSMIT_UUID: GUID = GUID::from_u128(0xab5e00025a214f05bc7daf01f617b664);
 const AUDIO_UUID: GUID = GUID::from_u128(0xab5e00035a214f05bc7daf01f617b664);
 const CONTROL_UUID: GUID = GUID::from_u128(0xab5e00045a214f05bc7daf01f617b664);
+const DEVICE_INFORMATION_SERVICE_UUID: GUID = GUID::from_u128(0x0000180a00001000800000805f9b34fb);
+const MODEL_NUMBER_UUID: GUID = GUID::from_u128(0x00002a2400001000800000805f9b34fb);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
@@ -204,11 +207,12 @@ fn worker_loop(
                                     &state,
                                     &mut backoff,
                                     &mut reconnect_deadline,
-                                    "等待 RC003 返回 ATVV 能力超时",
+                                    "等待小米语音遥控器返回 ATVV 能力超时",
                                 );
                             } else {
-                                *lock(&state) =
-                                    failed_snapshot("等待 RC003 返回 ATVV 能力超时".to_owned());
+                                *lock(&state) = failed_snapshot(
+                                    "等待小米语音遥控器返回 ATVV 能力超时".to_owned(),
+                                );
                             }
                         } else if reconnect_deadline.is_some_and(|deadline| deadline <= now) {
                             reconnect_deadline = None;
@@ -333,7 +337,7 @@ fn worker_loop(
                     ConnectionSnapshot {
                         phase: ConnectionPhase::Suspended,
                         last_error: Some(
-                            "Windows 当前处于睡眠状态，恢复后将重新连接 RC003".to_owned(),
+                            "Windows 当前处于睡眠状态，恢复后将重新连接小米语音遥控器".to_owned(),
                         ),
                         ..ConnectionSnapshot::default()
                     }
@@ -341,7 +345,7 @@ fn worker_loop(
                     reconnect_deadline = Some(Instant::now());
                     ConnectionSnapshot {
                         phase: ConnectionPhase::Reconnecting,
-                        last_error: Some("正在恢复上次选择的 RC003".to_owned()),
+                        last_error: Some("正在恢复上次选择的小米语音遥控器".to_owned()),
                         ..ConnectionSnapshot::default()
                     }
                 };
@@ -442,13 +446,13 @@ fn worker_loop(
                             &state,
                             &mut backoff,
                             &mut reconnect_deadline,
-                            "RC003 蓝牙连接已断开",
+                            "小米语音遥控器蓝牙连接已断开",
                         );
                     } else {
                         let mut snapshot = lock(&state);
                         snapshot.phase = ConnectionPhase::Disconnected;
                         snapshot.voice_state = VoiceSessionState::Idle;
-                        snapshot.last_error = Some("RC003 蓝牙连接已断开".to_owned());
+                        snapshot.last_error = Some("小米语音遥控器蓝牙连接已断开".to_owned());
                     }
                 }
             }
@@ -497,11 +501,12 @@ fn worker_loop(
                     );
                     continue;
                 }
-                let previous_name = lock(&state).remote_name.clone();
+                let previous = lock(&state).clone();
                 *lock(&state) = ConnectionSnapshot {
                     phase: ConnectionPhase::Suspended,
-                    remote_name: previous_name,
-                    last_error: Some("Windows 已进入睡眠，RC003 资源已释放".to_owned()),
+                    remote_name: previous.remote_name,
+                    remote_model: previous.remote_model,
+                    last_error: Some("Windows 已进入睡眠，小米语音遥控器资源已释放".to_owned()),
                     ..ConnectionSnapshot::default()
                 };
             }
@@ -513,11 +518,12 @@ fn worker_loop(
                 backoff.reset();
                 if preferred_device_id.is_some() {
                     reconnect_deadline = Some(Instant::now());
-                    let previous_name = lock(&state).remote_name.clone();
+                    let previous = lock(&state).clone();
                     *lock(&state) = ConnectionSnapshot {
                         phase: ConnectionPhase::Reconnecting,
-                        remote_name: previous_name,
-                        last_error: Some("Windows 已恢复，正在重新连接 RC003".to_owned()),
+                        remote_name: previous.remote_name,
+                        remote_model: previous.remote_model,
+                        last_error: Some("Windows 已恢复，正在重新连接小米语音遥控器".to_owned()),
                         ..ConnectionSnapshot::default()
                     };
                 } else {
@@ -556,16 +562,19 @@ fn attempt_connection(
     capabilities_deadline: &mut Option<Instant>,
 ) -> Result<ConnectionSnapshot, PlatformError> {
     invalidate_connection(session, pipeline, audio, connection_generation)?;
-    let previous_name = reconnecting
-        .then(|| lock(state).remote_name.clone())
-        .flatten();
+    let previous = reconnecting.then(|| lock(state).clone());
     *lock(state) = ConnectionSnapshot {
         phase: if reconnecting {
             ConnectionPhase::Reconnecting
         } else {
             ConnectionPhase::Connecting
         },
-        remote_name: previous_name,
+        remote_name: previous
+            .as_ref()
+            .and_then(|snapshot| snapshot.remote_name.clone()),
+        remote_model: previous
+            .as_ref()
+            .map_or(RemoteModel::Unknown, |snapshot| snapshot.remote_model),
         reconnect_attempt,
         ..ConnectionSnapshot::default()
     };
@@ -574,6 +583,7 @@ fn attempt_connection(
     let snapshot = ConnectionSnapshot {
         phase: ConnectionPhase::AwaitingCapabilities,
         remote_name: Some(connected.name.clone()),
+        remote_model: connected.model,
         reconnect_attempt,
         ..ConnectionSnapshot::default()
     };
@@ -840,6 +850,7 @@ fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> 
 
 struct BleSession {
     name: String,
+    model: RemoteModel,
     device: BluetoothLEDevice,
     service: GattDeviceService,
     transmit: GattCharacteristic,
@@ -864,10 +875,17 @@ impl BleSession {
             BluetoothLEDevice::FromIdAsync(&HSTRING::from(device_id)).map_err(windows_error)?,
         )?;
         let name = device.Name().map_err(windows_error)?.to_string();
+        let inferred_model = remote_model_from_name(&name);
+        let model = if inferred_model == RemoteModel::Unknown {
+            read_remote_model(&device).unwrap_or(RemoteModel::Unknown)
+        } else {
+            inferred_model
+        };
         {
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Discovering;
             snapshot.remote_name = Some(name.clone());
+            snapshot.remote_model = model;
             snapshot.last_error = None;
         }
         let service = find_service(&device, SERVICE_UUID)?;
@@ -932,6 +950,7 @@ impl BleSession {
 
         let connected = Self {
             name,
+            model,
             device,
             service,
             transmit,
@@ -1164,6 +1183,61 @@ fn find_characteristic(
         return Err(PlatformError::VoiceCharacteristicMissing(label));
     }
     characteristics.GetAt(0).map_err(windows_error)
+}
+
+fn read_remote_model(device: &BluetoothLEDevice) -> Option<RemoteModel> {
+    let result = block_on(
+        device
+            .GetGattServicesForUuidWithCacheModeAsync(
+                DEVICE_INFORMATION_SERVICE_UUID,
+                BluetoothCacheMode::Uncached,
+            )
+            .ok()?,
+    )
+    .ok()?;
+    if result.Status().ok()? != GattCommunicationStatus::Success {
+        return None;
+    }
+    let services = result.Services().ok()?;
+    if services.Size().ok()? != 1 {
+        return None;
+    }
+    let service = services.GetAt(0).ok()?;
+    let model = read_model_number(&service);
+    let _ = service.Close();
+    model
+}
+
+fn read_model_number(service: &GattDeviceService) -> Option<RemoteModel> {
+    let result = block_on(
+        service
+            .GetCharacteristicsForUuidWithCacheModeAsync(
+                MODEL_NUMBER_UUID,
+                BluetoothCacheMode::Uncached,
+            )
+            .ok()?,
+    )
+    .ok()?;
+    if result.Status().ok()? != GattCommunicationStatus::Success {
+        return None;
+    }
+    let characteristics = result.Characteristics().ok()?;
+    if characteristics.Size().ok()? != 1 {
+        return None;
+    }
+    let characteristic = characteristics.GetAt(0).ok()?;
+    let value = block_on(
+        characteristic
+            .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)
+            .ok()?,
+    )
+    .ok()?;
+    if value.Status().ok()? != GattCommunicationStatus::Success {
+        return None;
+    }
+    let bytes = buffer_to_vec(&value.Value().ok()?).ok()?;
+    let model_number = String::from_utf8(bytes).ok()?;
+    remote_model_from_model_number(&model_number)
 }
 
 fn buffer_to_vec(buffer: &IBuffer) -> windows::core::Result<Vec<u8>> {
