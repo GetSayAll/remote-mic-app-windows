@@ -18,7 +18,7 @@
 - [x] 持久化并展示仅保存在本机的每日按键次数、完整语音会话次数和语音采样时长；Windows/RC001/RC003 真实事件计数与升级保留仍待真机验收。
 - [x] 对低于 Windows 10 1809（build 17763）的系统增加 NSIS 安装与应用启动双层拒绝门禁；Windows 10 1809 / Windows 11 提示和安装行为仍待真机验收。
 - [x] 在 Windows CI 对 NSIS Preview 执行 `/S` 当前用户安装、启动存活、`/S` 卸载及设置保留边界验证；该自动化不代替可见安装界面、SmartScreen、Windows 10 1809 或真实用户环境验收。
-- [ ] 在 Windows CI 使用仅测试构建可启用的平台仿真，验证真实 WebView JavaScript → Tauri IPC → Rust command、五页导航、RC001/RC003 扫描、首次 RC001 语音、音频端点、Raw Input、映射、诊断和资源释放闭环；不得把仿真状态表述为真实 Windows API 或硬件通过。
+- [x] 在 Windows CI 使用仅测试构建可启用的平台仿真，验证真实 WebView JavaScript → Tauri IPC → Rust command、五页导航、RC001/RC003 扫描、首次 RC001 语音、音频端点、Raw Input、映射、诊断和资源释放闭环；生产 NSIS 已验证不含仿真入口，该结果不代表真实 Windows API 或硬件通过。
 - [ ] 使用真实 RC001 验证型号识别、BLE 配对、连接、断开、重连和首次语音。
 - [ ] 使用真实 RC003 验证型号识别、BLE 配对、连接、断开、重连和首次语音。
 - [ ] 验证 `STREAM_START → AUDIO → STREAM_STOP` 首次会话完整可用。
