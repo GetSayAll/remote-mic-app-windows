@@ -178,6 +178,13 @@
 
 ## 当前自动化记录
 
+2026-09-02 在 Apple Silicon Mac 上完成 Rust ↔ TypeScript IPC 契约快照验证：
+
+- 同一份 JSON 夹具覆盖完整 `PlatformSnapshot`、嵌套连接/音频/Raw Input 快照，以及 RC001、RC003、unknown 三种 `PairedRemote`；
+- Rust 测试从真实结构序列化并与夹具结构级全等比较，同时拒绝任何 snake_case IPC 字段；
+- TypeScript 测试使用前端接口装载同一夹具，核对枚举白名单、精确字段集合、`remoteModel` 和 `isSupportedCandidate` 的 camelCase 边界；
+- 该结果只证明仓库两端静态类型和序列化契约一致，不证明 Tauri command、Windows WebView、WinRT 或真机运行时数据已经通过。
+
 2026-09-02 在 Apple Silicon Mac 上完成 RC001 协议场景回放：
 
 - 从 `GetSayAll/hardware-simulation@65248499cac7da3ad46cd0c11dca1478f7733255` 的 RC001 短语音场景提取纯 ATVV JSON 夹具，保留 `STREAM_START`、40 + 80 字节音频拆包和 `STREAM_STOP`；
