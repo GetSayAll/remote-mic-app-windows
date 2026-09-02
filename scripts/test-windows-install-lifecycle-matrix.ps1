@@ -187,20 +187,38 @@ try {
     # cleanup that can race a normal silent reinstall.
     $upgradeExitCode = Invoke-Installer $currentInstaller.FullName @("/S", "/UPDATE")
     if ($upgradeExitCode -ne 0) { throw "Current upgrade failed with exit code $upgradeExitCode" }
-    Start-Sleep -Seconds 2
-    $upgradeEntries = @(Get-SayAllUninstallEntries)
-    Write-Host "After current installer: $($upgradeEntries.Count) matching uninstall entries"
-    foreach ($upgradeEntry in $upgradeEntries) {
-        Write-Host "- DisplayVersion=$((Get-PropertyValue $upgradeEntry 'DisplayVersion')); InstallLocation=$((Get-PropertyValue $upgradeEntry 'InstallLocation'))"
-    }
     $upgradePasses = 1
-    if ($upgradeEntries.Count -eq 1 -and [Version](Get-PropertyValue $upgradeEntries[0] "DisplayVersion") -ne $currentVersion) {
-        # NSIS may finish the previous uninstaller just after the first installer returns.
-        # A second idempotent current-version install is the bounded convergence step.
-        Start-Sleep -Seconds 5
-        $upgradeExitCode = Invoke-Installer $currentInstaller.FullName @("/S", "/UPDATE")
-        if ($upgradeExitCode -ne 0) { throw "Current upgrade convergence install failed with exit code $upgradeExitCode" }
-        $upgradePasses = 2
+    $upgradeDeadline = [DateTime]::UtcNow.AddSeconds(120)
+    $lastRetryAt = $null
+    $stableSince = $null
+    $stableWindowSeconds = 40
+    do {
+        $upgradeEntries = @(Get-SayAllUninstallEntries)
+        $observedVersion = $null
+        if ($upgradeEntries.Count -eq 1) {
+            $observedVersion = [Version](Get-PropertyValue $upgradeEntries[0] "DisplayVersion")
+            Write-Host "Upgrade convergence observation: DisplayVersion=$observedVersion"
+            if ($observedVersion -eq $currentVersion) {
+                if ($null -eq $stableSince) { $stableSince = [DateTime]::UtcNow }
+                if (([DateTime]::UtcNow - $stableSince).TotalSeconds -ge $stableWindowSeconds) { break }
+            } else {
+                $stableSince = $null
+                $canRetry = $upgradePasses -lt 3 -and ($null -eq $lastRetryAt -or ([DateTime]::UtcNow - $lastRetryAt).TotalSeconds -ge 10)
+                if ($canRetry) {
+                    Write-Host "Observed stale installed version $observedVersion; rerunning current updater-compatible installer"
+                    $upgradeExitCode = Invoke-Installer $currentInstaller.FullName @("/S", "/UPDATE")
+                    if ($upgradeExitCode -ne 0) { throw "Current upgrade convergence install failed with exit code $upgradeExitCode" }
+                    $upgradePasses++
+                    $lastRetryAt = [DateTime]::UtcNow
+                }
+            }
+        } else {
+            $stableSince = $null
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $upgradeDeadline)
+    if ($null -eq $stableSince -or ([DateTime]::UtcNow - $stableSince).TotalSeconds -lt $stableWindowSeconds) {
+        throw "Current installation did not remain at version $currentVersion for $stableWindowSeconds seconds"
     }
     $currentInstallation = Get-SingleInstallation $currentVersion
     if ($currentInstallation.InstallLocation -ne $initialInstallLocation) {
