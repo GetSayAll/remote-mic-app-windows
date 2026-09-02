@@ -4,6 +4,7 @@ import {
   connectionPhaseLabel,
   formatDiagnosticReport,
   formatUsageDuration,
+  remoteModelLabel,
   type AudioPhase,
   type ConnectionPhase,
   type DiagnosticReport,
@@ -27,17 +28,23 @@ describe("connection phase presentation", () => {
 
     expect(phases.map(connectionPhaseLabel)).toEqual([
       "尚未连接",
-      "正在打开 RC003",
+      "正在打开遥控器",
       "正在发现 ATVV 服务与特征",
       "正在确认 ATVV 能力",
       "BLE / ATVV 已就绪",
-      "正在接收 RC003 语音",
+      "正在接收遥控器语音",
       "正在结束本次语音",
-      "正在等待重新连接 RC003",
+      "正在等待重新连接遥控器",
       "Windows 已进入睡眠",
-      "RC003 已断开",
+      "遥控器已断开",
       "连接失败",
     ]);
+  });
+
+  it("展示 RC001、RC003 和未知型号", () => {
+    expect(remoteModelLabel("rc001")).toBe("小米蓝牙遥控器 2（RC001）");
+    expect(remoteModelLabel("rc003")).toBe("小米蓝牙遥控器 2 Pro（RC003）");
+    expect(remoteModelLabel("unknown")).toBe("型号待设备确认");
   });
 
   it("covers every serialized Rust audio phase", () => {

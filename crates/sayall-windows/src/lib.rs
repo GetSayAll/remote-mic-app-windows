@@ -42,7 +42,17 @@ pub struct PlatformSnapshot {
 pub struct PairedRemote {
     pub id: String,
     pub name: String,
+    pub model: RemoteModel,
     pub is_supported_candidate: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteModel {
+    Rc001,
+    Rc003,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +123,7 @@ pub enum ConnectionPhase {
 pub struct ConnectionSnapshot {
     pub phase: ConnectionPhase,
     pub remote_name: Option<String>,
+    pub remote_model: RemoteModel,
     pub capabilities: Option<AtvvCapabilities>,
     pub voice_state: VoiceSessionState,
     pub decoded_samples: u64,
@@ -159,6 +170,7 @@ impl Default for ConnectionSnapshot {
         Self {
             phase: ConnectionPhase::Idle,
             remote_name: None,
+            remote_model: RemoteModel::Unknown,
             capabilities: None,
             voice_state: VoiceSessionState::Idle,
             decoded_samples: 0,
@@ -244,7 +256,7 @@ impl WindowsPlatform {
                 raw_input_ready: raw_input.phase == RawInputPhase::Ready,
                 send_input_ready: self.send_input_snapshot().available,
                 verification_status:
-                    "BLE/ATVV/WASAPI/Raw Input、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC003 真机验证"
+                    "BLE/ATVV/WASAPI/Raw Input、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC001/RC003 真机验证"
                         .to_owned(),
                 connection,
                 audio,
@@ -477,6 +489,26 @@ pub fn is_supported_remote_name(raw_name: &str) -> bool {
     )
 }
 
+pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
+    match raw_name.trim().to_lowercase().as_str() {
+        "xiaomi bluetooth remote 2" | "小米蓝牙遥控器2" => RemoteModel::Rc001,
+        "xiaomi bluetooth remote 2 pro" | "小米蓝牙遥控器2 pro" | "arn9" => {
+            RemoteModel::Rc003
+        }
+        _ => RemoteModel::Unknown,
+    }
+}
+
+pub fn remote_model_from_model_number(model_number: &str) -> Option<RemoteModel> {
+    let normalized = model_number.trim().to_uppercase();
+    match normalized.as_str() {
+        "RC001" => Some(RemoteModel::Rc001),
+        "RC003" => Some(RemoteModel::Rc003),
+        value if value.contains("ARN9") => Some(RemoteModel::Rc003),
+        _ => None,
+    }
+}
+
 pub fn is_virtual_cable_output_name(raw_name: &str) -> bool {
     let normalized = raw_name.trim().to_lowercase();
     normalized.contains("cable input") || normalized.contains("vb-audio virtual cable")
@@ -513,6 +545,7 @@ fn scan_paired_remotes() -> Result<Vec<PairedRemote>, PlatformError> {
         }
         remotes.push(PairedRemote {
             id: device.Id().map_err(windows_error)?.to_string(),
+            model: remote_model_from_name(&name),
             name,
             is_supported_candidate: true,
         });
@@ -540,11 +573,11 @@ pub enum PlatformError {
     WorkerUnavailable,
     #[error("BLE operation timed out")]
     OperationTimedOut,
-    #[error("RC003 GATT service is missing")]
+    #[error("Xiaomi voice remote GATT service is missing")]
     VoiceServiceMissing,
-    #[error("RC003 GATT characteristic {0} is missing")]
+    #[error("Xiaomi voice remote GATT characteristic {0} is missing")]
     VoiceCharacteristicMissing(&'static str),
-    #[error("RC003 GATT operation failed: {0}")]
+    #[error("Xiaomi voice remote GATT operation failed: {0}")]
     Gatt(String),
     #[error("ATVV protocol failed: {0}")]
     Protocol(String),
@@ -593,6 +626,29 @@ mod tests {
         for name in ["", "Mi Mouse", "MI RC2", "小米", "Unknown Remote"] {
             assert!(!is_supported_remote_name(name), "unexpected match: {name}");
         }
+    }
+
+    #[test]
+    fn identifies_rc001_and_rc003_without_guessing_generic_names() {
+        assert_eq!(
+            remote_model_from_name("Xiaomi Bluetooth Remote 2"),
+            RemoteModel::Rc001
+        );
+        assert_eq!(
+            remote_model_from_name("Xiaomi Bluetooth Remote 2 Pro"),
+            RemoteModel::Rc003
+        );
+        assert_eq!(remote_model_from_name("MI RC"), RemoteModel::Unknown);
+
+        assert_eq!(
+            remote_model_from_model_number(" RC001\r\n"),
+            Some(RemoteModel::Rc001)
+        );
+        assert_eq!(
+            remote_model_from_model_number("RC003"),
+            Some(RemoteModel::Rc003)
+        );
+        assert_eq!(remote_model_from_model_number("RC002"), None);
     }
 
     #[test]
