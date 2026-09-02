@@ -11,7 +11,6 @@
 
 - Windows 在 `GetSayAll/remote-mic-app-windows` 独立维护；
 - 使用 Rust、Tauri 2、Vue 3；
-- 不 fork 外部 Windows 项目；
 - UI 以 macOS 原版为产品基准；
 - 基础语音只使用 Windows 公共 API，不依赖管理员权限或进程注入；
 - 完整 HID 作为可选实验能力。
