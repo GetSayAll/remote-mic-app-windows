@@ -27,5 +27,6 @@
 - [x] 实现设备路径 fail-closed、隐藏消息窗口、Keyboard/HID 双来源合并和停止释放的 Raw Input 代码路径；Windows 与 RC001/RC003 真机按键验收仍待完成。
 - [ ] 实现按键映射保存、热加载和 SendInput：独立映射文件、显式热加载、批量 SendInput、部分提交回滚和界面测试已完成；真实 Raw Input 边沿自动执行须分别等待 Windows/RC001/RC003 确认 Keyboard/HID 事件形态，避免重复输入。
 - [ ] 完成 Windows 10 1809 / Windows 11 安装、升级和卸载验证。
+- [x] 在 Windows CI 构建较低版本 NSIS 候选，验证当前用户安装、升级后单一安装身份、设置/映射/统计逐字节保留、降级不替换当前版本和最终卸载保留用户数据；该矩阵不代表真实历史二进制、可见安装界面或 Windows 10 1809 / Windows 11 真机验收。Tauri 2.11.1 静默页不会可靠设置内置降级检查所依赖的版本比较结果，已在既有 preinstall hook 中增加独立 SemVer 门禁；Run 33637195089 通过并确认 predecessor `/S` 返回 1638、当前 0.1.0 与用户数据保持不变。
 - [ ] 建立自签 Authenticode、证书指纹和 SHA-256 发布流程。
 - [ ] 单独评估返回键、音量键等完整 HID 实验能力。
