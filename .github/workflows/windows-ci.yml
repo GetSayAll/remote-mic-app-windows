@@ -45,8 +45,23 @@ jobs:
       - name: Check Windows Tauri host
         run: cargo check --workspace
 
+      - name: Build Windows runtime simulation
+        shell: pwsh
+        run: |
+          $env:VITE_SAYALL_RUNTIME_SIMULATION = "1"
+          pnpm tauri build --no-bundle --features runtime-simulation
+
+      - name: Test Windows Tauri WebView and IPC runtime simulation
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./scripts/test-windows-runtime-simulation.ps1
+
       - name: Build unsigned NSIS preview installer
         run: pnpm tauri build --bundles nsis
+
+      - name: Verify runtime simulation is absent from production build
+        shell: pwsh
+        run: ./scripts/verify-runtime-simulation-isolation.ps1
 
       - name: Verify installer identity and create checksums
         shell: pwsh

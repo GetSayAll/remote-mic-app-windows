@@ -167,6 +167,19 @@
 
 失败判定：一次实体按键增加多次、语音键进入普通按键统计、中断会话被记为完成、页面只显示进程内计数而重启归零、升级丢失或重复统计、日期跨天错误、统计文件含任何设备或用户内容、统计写入阻塞 BLE/Raw Input 回调而造成语音或按键响应退化。
 
+## 用例十二：Windows Tauri/WebView 运行时仿真
+
+1. 以 `runtime-simulation` Cargo feature 和 `VITE_SAYALL_RUNTIME_SIMULATION=1` 构建专用测试程序；普通构建不得包含仿真前端入口或仿真专用 Tauri command。
+2. 在 `windows-latest` 启动该程序，并设置唯一的运行报告路径；不得向真实桌面发送 SendInput，也不得尝试扫描真实 BLE、音频或 HID 设备。
+3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、渲染 RC001/RC003 扫描结果、连接 RC001、选择仿真 CABLE Input、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
+4. 依次打开按键、统计、权限、关于和连接与语音页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`。
+5. 通过测试专用 command 驱动纯 Rust ATVV 管线完成首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN`，确认得到 240 个采样、generation 为 1、连接和音频均回到 ready。
+6. 停止 Raw Input 并断开，确认最终快照为 `rawInput.phase = stopped` 和 `connection.phase = disconnected`；程序写入报告并自行以成功退出码结束。
+
+预期：真实 Windows WebView、Tauri invoke 和 Rust command 边界完成闭环；五个侧栏页面均能挂载；RC001/RC003 和 IPC camelCase 数据可被 Vue 消费；测试专用 SendInput 只记录批次和事件数，不向桌面注入；普通生产构建经字符串检查不包含仿真平台名称或仿真 command。
+
+失败判定：只调用 Rust 单元测试或浏览器预览而没有启动 Windows Tauri WebView；普通构建能启用仿真；测试误调用真实 BLE/WASAPI/Raw Input/SendInput；WebView 进程存活但没有完成报告；把仿真 240 个采样、就绪状态或页面渲染表述为 RC001/RC003 真机通过。
+
 ## 日志收集
 
 日志不得包含语音内容、识别文字、真实蓝牙地址、完整 HID 路径、窗口标题或个人文档路径。报告应包含 Commit、版本、时间段、Windows 版本和失败步骤。
@@ -174,10 +187,20 @@
 ## 验证边界
 
 - Mac 自动化：前端构建、Rust 核心测试、格式化和静态检查。
-- Windows CI：Windows 编译、自动化测试、当前用户静默安装/启动存活/静默卸载和设置目录保留边界；不包含可见安装界面、SmartScreen、Windows 10 1809、真实硬件或第三方应用验收。
+- Windows CI：Windows 编译、自动化测试、测试专用 Tauri/WebView/IPC 仿真、当前用户静默安装/启动存活/静默卸载和设置目录保留边界；不包含可见安装界面、SmartScreen、Windows 10 1809、真实硬件或第三方应用验收。
 - 用户/维护者：RC001 与 RC003 分别的型号识别、蓝牙、音频、Raw Input、输入法、睡眠和安装升级真机验收。
 
 ## 当前自动化记录
+
+2026-09-02 在 `windows-latest` 完成 Tauri/WebView/IPC 运行时仿真：
+
+- Windows CI Run [`33611750471`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33611750471) 使用 Tauri CLI 构建仅测试 feature 程序，并在真实 Windows WebView 中完成 11 个结构化步骤；
+- WebView JavaScript 通过真实 Tauri IPC 读取仿真快照，渲染 RC001/RC003 扫描结果，连接 RC001、选择仿真 CABLE Input、启动 Raw Input、保存映射并由非注入式 SendInput 记录器验证 Ctrl+C 四事件；
+- 五个侧栏页面均完成导航和挂载，权限页生成平台标记为 `windows-ci-simulation` 的去标识化诊断摘要，统计 IPC 返回最近七天结构；
+- 首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN` 通过纯 Rust ATVV 管线得到 240 个采样和 generation 1，随后 Raw Input 与连接状态均完成释放；
+- 同一 Run 重新构建普通 NSIS，二进制和前端资源均确认不含仿真平台名或仿真 command，并继续通过静默安装/卸载回归；
+- Run [`33610428178`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33610428178) 首次暴露直接 `cargo build` 生成开发协议程序会等待 Vite dev server；改为 `tauri build --no-bundle --features runtime-simulation` 后修复；
+- 该结果不访问真实 WinRT BLE、WASAPI、Raw Input 或桌面 SendInput，不代表 RC001/RC003、音质、VB-CABLE 或真实按键已经通过。
 
 2026-09-02 在 `windows-latest` 完成 NSIS 静默安装与卸载生命周期验证：
 
