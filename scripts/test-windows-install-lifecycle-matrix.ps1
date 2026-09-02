@@ -51,7 +51,31 @@ function Invoke-Installer([string] $path, [string[]] $arguments = @("/S"), [int]
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "Installer did not finish within $timeoutSeconds seconds: $path"
     }
+    Wait-ProcessTreeExit $process.Id
     $process.ExitCode
+}
+
+function Wait-ProcessTreeExit([int] $rootProcessId, [int] $timeoutSeconds = 120) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    do {
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+        $descendantIds = [System.Collections.Generic.HashSet[int]]::new()
+        $null = $descendantIds.Add($rootProcessId)
+        do {
+            $changed = $false
+            foreach ($processInfo in $processes) {
+                if ($descendantIds.Contains([int]$processInfo.ParentProcessId) -and $descendantIds.Add([int]$processInfo.ProcessId)) {
+                    $changed = $true
+                }
+            }
+        } while ($changed)
+        $liveDescendants = @($processes | Where-Object {
+            $_.ProcessId -ne $rootProcessId -and $descendantIds.Contains([int]$_.ProcessId)
+        })
+        if ($liveDescendants.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Installer child process tree did not exit within $timeoutSeconds seconds (root PID $rootProcessId)"
 }
 
 function Split-ExecutableCommand([string] $command) {
