@@ -192,6 +192,16 @@
 
 ## 当前自动化记录
 
+2026-09-02 在 `windows-latest` 完成 Tauri/WebView/IPC 运行时仿真：
+
+- Windows CI Run [`33611750471`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33611750471) 使用 Tauri CLI 构建仅测试 feature 程序，并在真实 Windows WebView 中完成 11 个结构化步骤；
+- WebView JavaScript 通过真实 Tauri IPC 读取仿真快照，渲染 RC001/RC003 扫描结果，连接 RC001、选择仿真 CABLE Input、启动 Raw Input、保存映射并由非注入式 SendInput 记录器验证 Ctrl+C 四事件；
+- 五个侧栏页面均完成导航和挂载，权限页生成平台标记为 `windows-ci-simulation` 的去标识化诊断摘要，统计 IPC 返回最近七天结构；
+- 首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN` 通过纯 Rust ATVV 管线得到 240 个采样和 generation 1，随后 Raw Input 与连接状态均完成释放；
+- 同一 Run 重新构建普通 NSIS，二进制和前端资源均确认不含仿真平台名或仿真 command，并继续通过静默安装/卸载回归；
+- Run [`33610428178`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33610428178) 首次暴露直接 `cargo build` 生成开发协议程序会等待 Vite dev server；改为 `tauri build --no-bundle --features runtime-simulation` 后修复；
+- 该结果不访问真实 WinRT BLE、WASAPI、Raw Input 或桌面 SendInput，不代表 RC001/RC003、音质、VB-CABLE 或真实按键已经通过。
+
 2026-09-02 在 `windows-latest` 完成 NSIS 静默安装与卸载生命周期验证：
 
 - Windows CI Run [`33593663937`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33593663937) 从提交 `5f01fa41cfbd15b967a760e490b9343260e768a6` 构建 `无线麦 SayAll_0.1.0_x64-setup.exe`，SHA-256 为 `a9fa2bfbfd519189629abc3ed91d5a811752081452d93c475c62129dd1e16e44`；
