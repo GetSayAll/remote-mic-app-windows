@@ -133,12 +133,13 @@
 2. 确认 artifact 只包含一个 `*-setup.exe`、`SHA256SUMS.txt` 和 `build-metadata.json`。
 3. 重新计算安装器 SHA-256，并与两份记录逐字匹配。
 4. 确认 metadata 中 productName、identifier、publisher、版本和 source commit 与仓库一致，且 `signatureStatus` 为 `NotSigned`、`distributionStatus` 为 `unsigned-ci-preview-not-for-public-release`。
-5. 仅在隔离的 Windows 测试用户中运行安装器，确认默认按当前用户安装、开始菜单只有一个“无线麦 SayAll”入口，并记录实际安装目录。
-6. 启动、退出、再次启动后执行卸载，确认程序文件和开始菜单入口移除；用户设置保留/移除行为需记录，不能猜测。
+5. 确认 Windows CI 的 `Test silent current-user install and uninstall` 步骤通过：`/S` 安装后只有一个 HKCU 卸载条目、安装目录位于当前用户 `LOCALAPPDATA`、开始菜单只有一个入口，已安装进程持续运行 8 秒后由测试关闭。
+6. 确认同一步骤使用注册表中的真实卸载命令执行 `/S` 卸载，程序目录、开始菜单和卸载条目均移除；位于 Tauri `app_config_dir` 的测试标记仍保留，证明默认静默卸载不会删除当前用户设置目录。
+7. 仍需在隔离的 Windows 测试用户中手动运行安装器，检查可见语言选择、安装界面、开始菜单启动、退出、再次启动和卸载界面；不得用 CI 进程存活代替可见 UI 验收。
 
-预期：CI 从干净提交构建唯一 NSIS 包；校验脚本拒绝错误产品身份、多个安装器、异常小文件、签名状态不符合当前 CI 边界或摘要不一致。安装器无需管理员权限，不允许用旧版本覆盖新版本。
+预期：CI 从干净提交构建唯一 NSIS 包；校验脚本拒绝错误产品身份、多个安装器、异常小文件、签名状态不符合当前 CI 边界或摘要不一致。静默生命周期必须证明当前用户安装、单一卸载条目、单一开始菜单入口、进程不立即崩溃、程序文件完整卸载和设置目录默认保留。安装器无需管理员权限，不允许用旧版本覆盖新版本。
 
-失败判定：artifact 无法绑定精确 commit、存在多个候选安装器、SHA-256 不一致、CI 包意外带未知签名、安装器要求全局管理员权限、同一版本产生多个安装条目、把未签名 artifact 当作公开发布包。
+失败判定：artifact 无法绑定精确 commit、存在多个候选安装器、SHA-256 不一致、CI 包意外带未知签名、静默安装非零退出、安装到当前用户目录之外、卸载条目或开始菜单入口不唯一、应用进程立即退出、静默卸载残留程序文件或误删设置标记、安装器要求全局管理员权限、把未签名 artifact 当作公开发布包。
 
 ## 用例十：隐私安全诊断摘要
 
@@ -173,10 +174,19 @@
 ## 验证边界
 
 - Mac 自动化：前端构建、Rust 核心测试、格式化和静态检查。
-- Windows CI：Windows 编译和自动化测试，不包含真实硬件。
+- Windows CI：Windows 编译、自动化测试、当前用户静默安装/启动存活/静默卸载和设置目录保留边界；不包含可见安装界面、SmartScreen、Windows 10 1809、真实硬件或第三方应用验收。
 - 用户/维护者：RC001 与 RC003 分别的型号识别、蓝牙、音频、Raw Input、输入法、睡眠和安装升级真机验收。
 
 ## 当前自动化记录
+
+2026-09-02 在 `windows-latest` 完成 NSIS 静默安装与卸载生命周期验证：
+
+- Windows CI Run [`33593663937`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33593663937) 从提交 `5f01fa41cfbd15b967a760e490b9343260e768a6` 构建 `无线麦 SayAll_0.1.0_x64-setup.exe`，SHA-256 为 `a9fa2bfbfd519189629abc3ed91d5a811752081452d93c475c62129dd1e16e44`；
+- `/S` 安装以普通 Runner 用户完成，唯一卸载条目位于 HKCU，安装目录为 `C:\Users\runneradmin\AppData\Local\无线麦 SayAll`，开始菜单文件夹内只有一个 `无线麦 SayAll.lnk`；
+- 安装后的主进程持续运行 8 秒，未立即崩溃；测试随后关闭进程，并使用卸载注册表中的真实命令执行 `/S` 卸载；
+- 卸载后程序目录、开始菜单文件夹和卸载条目均移除，`%APPDATA%\app.getsayall.remote-mic.windows` 中的测试标记保留，确认默认静默卸载不删除 Tauri `app_config_dir`；
+- Run [`33591214805`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33591214805) 在安装前暴露空注册表结果的 PowerShell 数组边界，Run [`33592013119`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33592013119) 暴露带引号 `InstallLocation`，Run [`33592799733`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33592799733) 暴露非交互 Runner 无法通过 WScript 读取快捷方式目标；三项均按实际 Tauri NSIS 注册表契约修正；
+- 该结果不证明可见安装/卸载界面、语言选择、SmartScreen、Windows 10 1809、Windows 11 真实桌面、签名发布包、RC001/RC003 或第三方应用已经通过。
 
 2026-09-02 在 Apple Silicon Mac 上完成 Rust ↔ TypeScript IPC 契约快照验证：
 
