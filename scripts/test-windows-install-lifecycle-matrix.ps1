@@ -205,16 +205,20 @@ try {
         (Join-Path $initialInstallLocation "uninstall.exe")
     )
     $upgradePasses = 1
-    $upgradeDeadline = [DateTime]::UtcNow.AddSeconds(120)
+    $upgradeDeadline = [DateTime]::UtcNow.AddSeconds(240)
     $lastRetryAt = $null
+    $lastObservedVersion = $null
     $stableSince = $null
-    $stableWindowSeconds = 40
+    $stableWindowSeconds = 90
     do {
         $upgradeEntries = @(Get-SayAllUninstallEntries)
         $observedVersion = $null
         if ($upgradeEntries.Count -eq 1) {
             $observedVersion = [Version](Get-PropertyValue $upgradeEntries[0] "DisplayVersion")
-            Write-Host "Upgrade convergence observation: DisplayVersion=$observedVersion"
+            if ($observedVersion -ne $lastObservedVersion) {
+                Write-Host "Upgrade convergence observation: DisplayVersion=$observedVersion"
+                $lastObservedVersion = $observedVersion
+            }
             if ($observedVersion -eq $currentVersion) {
                 if ($null -eq $stableSince) { $stableSince = [DateTime]::UtcNow }
                 if (([DateTime]::UtcNow - $stableSince).TotalSeconds -ge $stableWindowSeconds) { break }
