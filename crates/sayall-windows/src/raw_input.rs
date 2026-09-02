@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-pub const RC003_VENDOR_ID: u16 = 0x2717;
-pub const RC003_PRODUCT_ID: u16 = 0x32B8;
+pub const XIAOMI_REMOTE_VENDOR_ID: u16 = 0x2717;
+pub const XIAOMI_REMOTE_PRODUCT_ID: u16 = 0x32B8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,9 +73,9 @@ impl RawKeyboardEvent {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RawInputDecodeError {
-    #[error("unsupported RC003 HID report shape: {0} bytes")]
+    #[error("unsupported Xiaomi voice remote HID report shape: {0} bytes")]
     UnsupportedReportShape(usize),
-    #[error("invalid RC003 HID report prefix")]
+    #[error("invalid Xiaomi voice remote HID report prefix")]
     InvalidReportPrefix,
     #[error("RAWHID body is shorter than its 8-byte header")]
     RawHidBodyTooShort,
@@ -87,7 +87,7 @@ pub enum RawInputDecodeError {
     TruncatedRawHidBody { expected: usize, actual: usize },
 }
 
-pub fn device_path_matches_rc003(path: &str) -> bool {
+pub fn device_path_matches_xiaomi_remote(path: &str) -> bool {
     let normalized = normalize_device_path(path);
     let classic = normalized.contains("vid_2717") && normalized.contains("pid_32b8");
     let ble = (normalized.contains("dev_vid&002717") || normalized.contains("dev_vid&012717"))
@@ -102,7 +102,7 @@ pub fn normalize_device_path(path: &str) -> String {
 pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathError> {
     let matches: Vec<_> = paths
         .iter()
-        .filter(|path| device_path_matches_rc003(path))
+        .filter(|path| device_path_matches_xiaomi_remote(path))
         .collect();
     match matches.as_slice() {
         [] => Err(DevicePathError::Missing),
@@ -113,9 +113,9 @@ pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathE
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DevicePathError {
-    #[error("no RC003 Raw Input device path was found")]
+    #[error("no RC001/RC003 Raw Input device path was found")]
     Missing,
-    #[error("found {0} RC003 Raw Input device paths; refusing to choose one")]
+    #[error("found {0} RC001/RC003 Raw Input device paths; refusing to choose one")]
     Ambiguous(usize),
 }
 
@@ -298,14 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn matches_both_windows_rc003_device_path_shapes() {
-        assert!(device_path_matches_rc003(
+    fn matches_both_windows_xiaomi_remote_device_path_shapes() {
+        assert!(device_path_matches_xiaomi_remote(
             r"\\?\HID#VID_2717&PID_32B8&REV_00A4#instance"
         ));
-        assert!(device_path_matches_rc003(
+        assert!(device_path_matches_xiaomi_remote(
             r"\\?\HID#{1812}_Dev_VID&012717_PID&32B8_REV&00A4_instance"
         ));
-        assert!(!device_path_matches_rc003(
+        assert!(!device_path_matches_xiaomi_remote(
             r"\\?\HID#VID_2717&PID_0001#instance"
         ));
     }
