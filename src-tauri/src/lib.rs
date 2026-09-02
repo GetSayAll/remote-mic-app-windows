@@ -273,7 +273,7 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(device_id) = saved_settings.selected_remote_id {
                 if let Err(error) = platform.restore_remote(device_id) {
-                    eprintln!("恢复已保存的 RC003 失败：{error}");
+                    eprintln!("恢复已保存的小米语音遥控器失败：{error}");
                 }
             }
 

@@ -10,7 +10,7 @@ Windows UI 的唯一产品设计基准是无线麦 macOS 原版。Windows 使用
 
 ## 2. 产品范围
 
-第一阶段只支持小米蓝牙语音遥控器 2 Pro / RC003：
+第一阶段支持小米蓝牙遥控器 2 / RC001 和小米蓝牙遥控器 2 Pro / RC003：
 
 - WinRT BLE 发现、连接和重连；
 - ATVV 能力协商和 16 kHz IMA/DVI ADPCM；
@@ -66,7 +66,7 @@ Application State
 ### 3.2 `sayall-windows`
 
 只包含 Windows 公共 API。所有 Windows 句柄、COM、WinRT、HID 和音频资源必须有明确生命周期。BLE 回调和音频回调不得执行阻塞文件或进程操作。
-RC003 断连由 BLE 工作线程统一清理后进入 2–30 秒指数退避；用户主动断开只停止本次运行的重连。Windows 电源回调只投递事件，睡眠前的 GATT/音频释放与恢复后的重新发现仍在同一工作线程串行完成，旧 connection generation 回调继续丢弃。
+RC001/RC003 断连由 BLE 工作线程统一清理后进入 2–30 秒指数退避；用户主动断开只停止本次运行的重连。连接时优先从已批准设备名识别型号，名称不足以判定时可选读取标准 Device Information / Model Number（2A24）；型号未知不阻断共用 ATVV 路径。Windows 电源回调只投递事件，睡眠前的 GATT/音频释放与恢复后的重新发现仍在同一工作线程串行完成，旧 connection generation 回调继续丢弃。
 
 ### 3.3 Tauri Host
 
@@ -119,7 +119,7 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - 来源矩阵；
 - Mac 可运行的纯逻辑测试。
 
-### 阶段 B：RC003 语音核心
+### 阶段 B：RC001 / RC003 语音核心
 
 - 唯一候选发现；
 - GATT 特征发现和通知；
@@ -128,7 +128,7 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - WASAPI；
 - 会话排空、重连和错误恢复。
 
-当前实现状态：候选扫描、GATT 连接与通知、ATVV 能力、ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空、稳定 endpoint ID + 原名称恢复，以及 RC003 选择持久化、2–30 秒退避重连和 Windows 睡眠/恢复通知代码已落地并通过静态与纯逻辑检查。音频端点缺失或名称变化会失败关闭；BLE 清理、重连和恢复都不接受旧代次回调。Raw Input 已建立精确设备路径选择、隐藏消息窗口、Keyboard/HID 报告解析、双来源并集去重和停止释放代码路径；语音键在此层明确排除，继续由 ATVV 独占。Windows 运行、真实睡眠恢复、VB-CABLE 回环和 RC003 真机验证尚未完成。
+当前实现状态：候选扫描、设备名与 2A24 型号识别、GATT 连接与通知、ATVV 能力、RC001/RC003 共用的高半字节优先 ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空、稳定 endpoint ID + 原名称恢复，以及遥控器选择持久化、2–30 秒退避重连和 Windows 睡眠/恢复通知代码已落地并通过静态与纯逻辑检查。音频端点缺失或名称变化会失败关闭；BLE 清理、重连和恢复都不接受旧代次回调。Raw Input 已建立共用 VID/PID 设备族路径选择、隐藏消息窗口、Keyboard/HID 报告解析、双来源并集去重和停止释放代码路径；语音键在此层明确排除，继续由 ATVV 独占。Windows 运行、真实睡眠恢复、VB-CABLE 回环和 RC001/RC003 真机验证尚未完成。
 
 ### 阶段 C：可靠按键
 
@@ -138,7 +138,7 @@ Tauri Host 负责应用生命周期、IPC、托盘和窗口，不直接解析 AT
 - 普通按键单击、双击和长按；
 - 语音键保持即时生命周期。
 
-当前实现状态：批量 SendInput 引擎、最多四键快捷键、左右修饰键物理 scan code、扩展键标记、部分提交与未知交付状态回滚，以及独立 `button-mappings.json` 持久化和运行时热加载已实现。按键页面只允许用户显式测试已保存快捷键。Raw Input 事件尚不自动触发 SendInput：Windows Raw Input 不能按设备阻止前台程序已经收到的原始 Keyboard 事件，真机确认 RC003 的 Keyboard/HID-only/双路径行为前自动串联会有重复输入风险。
+当前实现状态：批量 SendInput 引擎、最多四键快捷键、左右修饰键物理 scan code、扩展键标记、部分提交与未知交付状态回滚，以及独立 `button-mappings.json` 持久化和运行时热加载已实现。按键页面只允许用户显式测试已保存快捷键。Raw Input 事件尚不自动触发 SendInput：Windows Raw Input 不能按设备阻止前台程序已经收到的原始 Keyboard 事件，真机分别确认 RC001 和 RC003 的 Keyboard/HID-only/双路径行为前自动串联会有重复输入风险。
 
 ### 阶段 D：产品化
 
@@ -169,7 +169,7 @@ Mac 开发机可以证明：
 
 Mac 开发机不能证明：
 
-- WinRT BLE 能连接 RC003；
+- WinRT BLE 能分别识别并连接 RC001 和 RC003；
 - Windows Raw Input 报告；
 - WASAPI 和 VB-CABLE；
 - SendInput 对真实目标应用有效；

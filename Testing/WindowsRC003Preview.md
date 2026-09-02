@@ -1,16 +1,17 @@
-# Windows RC003 Preview 测试手册
+# Windows RC001 / RC003 Preview 测试手册
 
 ## 适用范围
 
 - 仓库：`GetSayAll/remote-mic-app-windows`
 - 平台：Windows 10 1809+ / Windows 11 x64
-- 硬件：小米蓝牙语音遥控器 2 Pro / RC003
-- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、端点持久化、退避重连、睡眠恢复、Raw Input、本机使用统计和 Windows 10 1809 双层版本门禁代码路径已实现；Windows、RC003、VB-CABLE 真机验收 deferred
+- 硬件 A：小米蓝牙遥控器 2 / RC001
+- 硬件 B：小米蓝牙遥控器 2 Pro / RC003
+- 当前状态：WinRT BLE / ATVV / PCM / WASAPI、设备名与 2A24 型号识别、端点持久化、退避重连、睡眠恢复、Raw Input、本机使用统计和 Windows 10 1809 双层版本门禁代码路径已实现；Windows、RC001、RC003、VB-CABLE 真机验收均为 deferred
 
 ## 测试前准备
 
 1. 记录 Commit、版本、Windows 版本和电脑蓝牙适配器。
-2. 准备真实 RC003，并确认可以在 Windows 蓝牙设置中完成配对。
+2. 分别准备真实 RC001 和 RC003，并确认两者都可以在 Windows 蓝牙设置中完成配对。不得用其中一种型号的结果代替另一种。
 3. 安装待测构建。
 4. 若测试虚拟麦克风，单独安装 VB-CABLE，并重启 Windows。
 5. 准备记事本和至少一个真实语音输入应用。
@@ -29,21 +30,24 @@
 
 ## 用例一：首次连接
 
-1. 启动无线麦。
-2. 打开“连接与语音”。
-3. 点击扫描。
-4. 选择 RC003 并连接。
+1. 只配对 RC001，启动无线麦并打开“连接与语音”。
+2. 点击扫描，选择 RC001 并连接。
+3. 确认界面显示“小米蓝牙遥控器 2（RC001）”。
+4. 断开并移除 RC001 配对，改为只配对 RC003，重复扫描和连接。
+5. 确认界面显示“小米蓝牙遥控器 2 Pro（RC003）”。
+6. 对于名称只能归入白名单、不能确定型号的设备，确认连接时尝试读取标准 Model Number（2A24）；读取失败时显示“型号待设备确认”，但不因此阻断 ATVV。
 
-预期：只显示精确匹配的 RC003；零个或多个候选时不猜测。页面依次反映连接、特征发现、能力确认和就绪状态；只有收到有效 16 kHz ATVV 能力后才显示“BLE / ATVV 已就绪”。
+预期：只显示名称在批准白名单内的 RC001/RC003 候选；零个或多个候选时不猜测。型号来自精确设备名或标准 2A24，不使用两者共用的 HID VID/PID 猜测。页面依次反映连接、特征发现、能力确认和就绪状态；只有收到有效 16 kHz ATVV 能力后才显示“BLE / ATVV 已就绪”。
 
-失败判定：仅进程运行或发现设备名称就显示 ATVV 就绪；把 ATVV 就绪显示成系统麦克风可用；连接失败后需要清配置或重装。
+失败判定：RC001 被标成 RC003，或 RC003 被标成 RC001；仅凭共用 HID VID/PID 判定型号；2A24 不可读时拒绝原本可用的 ATVV；仅进程运行或发现设备名称就显示 ATVV 就绪；把 ATVV 就绪显示成系统麦克风可用；连接失败后需要清配置或重装。
 
 ## 用例二：首次语音会话
 
 1. 确认连接页显示“BLE / ATVV 已就绪”。
-2. 按住 RC003 语音键并说一整句。
-3. 观察页面进入“正在接收 RC003 语音”，确认解码采样数增加。
+2. 按住当前型号的语音键并说一整句。
+3. 观察页面进入“正在接收遥控器语音”，确认解码采样数增加。
 4. 释放语音键。
+5. 分别使用 RC001 和 RC003 重复步骤 1–4，两者都必须在第一次会话成功。
 
 预期：第一次会话即完成一组 `STREAM_START → AUDIO → STREAM_STOP`；会话代次只增加一次；解码采样数增加；释放后回到 ATVV 就绪。WASAPI 完成前不要求文本框收到语音。
 
@@ -65,7 +69,8 @@
 4. 点击“断开”，保持应用运行至少 35 秒，确认本次运行不再自动重连；重新选择设备后恢复自动重连。
 5. ATVV 就绪时让 Windows 睡眠再唤醒，确认页面先显示睡眠释放，再重新经历连接、发现、能力确认。
 6. 关闭再打开 Windows 蓝牙，重复步骤 1～3。
-7. 应用退出再启动，确认自动恢复上次明确选择的 RC003；若首次失败，继续按退避策略重试。
+7. 应用退出再启动，确认自动恢复上次明确选择的遥控器及其已识别型号；若首次失败，继续按退避策略重试。
+8. 分别使用 RC001 和 RC003 完整执行本用例。
 
 预期：每次失败或睡眠都先释放通知、GATT service、device、ATVV pipeline 和活动音频；旧会话通知不会改变新会话；主动断开不会在本次运行反弹连接；恢复后第一次语音正常，不要求清配置。
 
@@ -90,11 +95,12 @@
 ## 用例六：可靠按键
 
 1. 在“按键”页面点击“启动监听”。
-2. 确认页面只匹配一个 RC003 Raw Input 设备路径；零个或多个匹配时记录错误并停止，不得自动选择第一个。
+2. 确认页面只匹配一个 RC001/RC003 共用设备族的 Raw Input 路径；零个或多个匹配时记录错误并停止，不得自动选择第一个。
 3. 逐个测试 Windows 公共 API 能稳定收到的按键：按下、释放、持续按住、系统重复、快速连续。
 4. 对同一实体按键核对原始事件数和语义边沿数，确认 Keyboard 与 HID 同时报告时不会产生两次语义按下。
 5. 按住普通按键时点击“停止监听”，再重新启动监听。
 6. 按住并释放语音键，确认普通按键最近边沿和语义边沿计数不因语音键变化。
+7. 分别使用 RC001 和 RC003 完整执行步骤 1–6，单独记录两种型号的 Keyboard、HID-only 或双路径报告形态。
 
 预期：监听使用隐藏 message-only window 和 `RIDEV_INPUTSINK`；每个事件都按启动时唯一选中的完整设备路径过滤；一次实体动作只产生一次语义按下和一次语义释放；重复 key-down 不重复触发；停止时释放仍处于按下状态的普通键；线程未能停止时页面必须显示失败，不能伪装为已关闭；普通键盘不被映射；语音键不进入普通动作路径。
 
@@ -117,7 +123,7 @@
 4. 测试左右修饰键、方向键、Home/Delete 等扩展键，并核对按下顺序和逆序释放。
 5. 通过自动化故障注入模拟 SendInput 只提交部分事件以及调用后抛出未知错误。
 
-预期：一个快捷键的全部按下和逆序释放通过一次 SendInput 批量调用提交；部分提交只释放可能已按下或尚未释放的键；未知交付状态逐键 best-effort 释放全部可能按下的键并报告失败；保存后无需重启即可用于显式测试。真实 RC003 边沿当前不会自动执行映射。
+预期：一个快捷键的全部按下和逆序释放通过一次 SendInput 批量调用提交；部分提交只释放可能已按下或尚未释放的键；未知交付状态逐键 best-effort 释放全部可能按下的键并报告失败；保存后无需重启即可用于显式测试。真实 RC001/RC003 边沿当前都不会自动执行映射。
 
 失败判定：逐键分别调用 SendInput、按键释放顺序与按下相同、部分失败后修饰键卡住、无效或超过四键的映射被保存、测试失败仍显示成功、未完成真机来源确认就自动把 Raw Input 边沿注入前台应用。
 
@@ -168,9 +174,17 @@
 
 - Mac 自动化：前端构建、Rust 核心测试、格式化和静态检查。
 - Windows CI：Windows 编译和自动化测试，不包含真实硬件。
-- 用户/维护者：RC003、蓝牙、音频、输入法、睡眠和安装升级真机验收。
+- 用户/维护者：RC001 与 RC003 分别的型号识别、蓝牙、音频、Raw Input、输入法、睡眠和安装升级真机验收。
 
 ## 当前自动化记录
+
+2026-09-02 在 Apple Silicon Mac 上完成 RC001 支持实现级验证：
+
+- 对照 macOS `b233a88cc4457b00413dda6b37ec8b4af12c5121` 的设备档案、标准 2A24 型号识别和 RC001 首次短语音路径；
+- Rust 单元测试覆盖 RC001/RC003 名称、`RC001` / `RC003` Model Number、通用名称不猜测型号、两种型号高半字节优先 ADPCM，以及 RC001 无需主动 `MIC_OPEN` 的 `STREAM_START → AUDIO → STREAM_STOP`；
+- `sayall-core` 25 项、macOS `sayall-windows` 24 项、Tauri Host 6 项测试通过，`cargo check --workspace` 和 `x86_64-pc-windows-msvc` 平台层交叉静态检查通过；
+- Vue 4 个测试文件共 9 项测试、TypeScript 类型检查、Vite 生产构建和 `tauri build --no-bundle` 通过；
+- 以上结果只证明型号字段、WinRT API 类型、共用 ATVV 管线和界面可编译且自动化通过。真实 Windows 上的 RC001 与 RC003 设备名/2A24 值、首次语音、按键报告、睡眠恢复和 VB-CABLE 回环均为 deferred。
 
 2026-09-01 在 Apple Silicon Mac 上完成：
 
@@ -179,11 +193,11 @@
 - 浏览器控制台零错误；
 - `sayall-core` 22 项测试；macOS `sayall-windows` 20 项平台边界、退避、Raw Input 和 SendInput 纯逻辑测试；Tauri 设置与诊断 4 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度、电源回调转发、Raw Input 纯逻辑测试和完整 Tauri Host 编译；
 - 诊断隐私测试使用设备名称、蓝牙地址、端点身份、用户路径、HID 路径和后端错误作为敏感夹具，序列化摘要均未包含这些值；浏览器生成摘要也未出现 `remoteName`、`selectedEndpointId`、`selectedEndpointName` 或 `lastError` 字段；
-- Raw Input 自动化覆盖两种 Windows 设备路径、零/多匹配 fail-closed、6/7/9 字节 HID 报告、RAWHID 批量拆分、重复 key-down、Keyboard/HID 双来源并集、停止释放和语音键隔离；隐藏窗口和真实事件形态仍需 Windows/RC003 验收；
+- Raw Input 自动化覆盖两种 Windows 设备路径、零/多匹配 fail-closed、6/7/9 字节 HID 报告、RAWHID 批量拆分、重复 key-down、Keyboard/HID 双来源并集、停止释放和语音键隔离；隐藏窗口和真实事件形态仍需 Windows/RC001/RC003 分别验收；
 - 纯 Rust 首次 `CAPS → STREAM_START → AUDIO → STREAM_STOP → DRAIN`、同步帧、8 kHz 拒绝和流外音频测试；
 - macOS 全 workspace `cargo test`、`cargo check` 和格式化检查；
 - `x86_64-pc-windows-msvc` 目标下 WinRT BLE/GATT/ATVV/WASAPI/Raw Input 平台层交叉静态检查。
-- Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC003 报告。
+- Windows CI Run [`33516627294`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33516627294) 通过；该结果证明 Windows 代码和 Tauri Host 可编译、自动化可运行，不证明隐藏窗口收到真实 RC001 或 RC003 报告。
 - Windows CI Run [`33522534257`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33522534257) 通过并生成 artifact `sayall-windows-unsigned-preview-e11e460f15287468c01225a8ab86b302d59f09d4`；下载后确认只有一个 4,565,134 字节 NSIS 安装器、`SHA256SUMS.txt` 和 `build-metadata.json`，UTF-8 中文文件名可由 macOS `shasum -a 256 -c` 校验，安装器实算 SHA-256 与两份记录一致为 `e1cccf73c8b20487874eadb12eb9823635f52a0d7664c07fe6b8928532d246d6`，metadata 标记 `NotSigned` 和 `unsigned-ci-preview-not-for-public-release`。
 - main Windows CI Run [`33525406955`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33525406955) 从 merge commit `94923dea303a66604b61ca2572fd13d9d48a9d60` 生成同边界 artifact 并通过下载后 SHA-256、metadata、PE/NSIS 文件类型和 UTF-8 校验文件复验。
 - main Windows CI Run [`33529876579`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33529876579) 从诊断功能 merge commit `f8a65d33c31283c3db9e7964d9a9a36bc1e9f6c3` 成功完成前端、Rust、Windows Host、NSIS 和 artifact 上传；下载后确认唯一安装器为 4,561,376 字节，SHA-256 为 `cfddc29da4ed40d543039c545a0ab23993165243b95bf4b7335d98ff5ed848b3`，metadata 来源提交、`NotSigned` 和 `unsigned-ci-preview-not-for-public-release` 均一致。
@@ -195,7 +209,7 @@
 - Tauri 统计层覆盖进程计数增量、采样到秒换算、周一起始的本周汇总和最近 7 天日期桶；文件写入由独立后台线程执行，不进入 BLE、WASAPI 或 Raw Input 回调；
 - Vue 组件覆盖今日、本周、全部切换、时长格式、最近 7 天数据和零数据空状态；900 × 620 与 1080 × 720 浏览器检查无横向溢出，新增统计界面最终字号不小于 16px，控制台零 warning/error；
 - `x86_64-pc-windows-msvc` 目标下 `sayall-windows` 平台层静态检查通过；完整 Tauri Host 交叉检查在 Mac 上仍受缺少 `llvm-rc` 限制，交由 `windows-latest` CI 验证；
-- Windows/RC003 真实按键计数、真实语音计数、跨自然日、退出落盘和升级保留均为 deferred，必须执行用例十一后才能称为真机通过。
+- Windows/RC001/RC003 真实按键计数、真实语音计数、跨自然日、退出落盘和升级保留均为 deferred，必须对两种型号执行用例十一后才能称为真机通过。
 
 2026-09-02 在 Apple Silicon Mac 上完成 Windows 10 1809 版本门禁实现级验证：
 
@@ -204,7 +218,7 @@
 - Tauri 配置解析、macOS workspace 测试/检查、前端 8 项测试、生产构建和 `tauri build --no-bundle` 通过；
 - NSIS hook 的实际编译交由 Windows CI；低版本安装提示、退出码 1633、直接运行 exe、Windows 10 1809 接受和 Windows 11 接受仍为 deferred，必须执行用例零后才能称为运行验收通过。
 
-以上结果只证明 Tauri Windows NSIS 未签名 Preview 可在干净 Windows Runner 生成且产物身份、摘要和来源元数据一致；不能证明安装、升级、卸载、WinRT 运行时、真实 RC003、WASAPI、Raw Input 或 SendInput 已经通过，这些用例仍为 deferred。
+以上结果只证明 Tauri Windows NSIS 未签名 Preview 可在干净 Windows Runner 生成且产物身份、摘要和来源元数据一致；不能证明安装、升级、卸载、WinRT 运行时、真实 RC001/RC003、WASAPI、Raw Input 或 SendInput 已经通过，这些用例仍为 deferred。
 macOS 上对完整 Tauri Host 的 Windows 目标交叉检查需要 `llvm-rc`，本机未提供该 Windows 资源编译器，因此完整 Host 由 `windows-latest` CI 验证。
 
 诊断复制已通过前端组件测试确认向 Clipboard API 写入完整可见摘要；应用内浏览器的剪贴板回读与页面 Clipboard API 不共享同一自动化通道，因此不能把浏览器提示当作真实 Windows WebView 剪贴板验收。Windows 安装包中的生成、复制和记事本逐字比对仍为 deferred。

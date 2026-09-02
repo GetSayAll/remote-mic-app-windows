@@ -276,6 +276,34 @@ mod tests {
     }
 
     #[test]
+    fn runs_rc001_short_voice_without_microphone_open() {
+        let mut pipeline = AtvvVoicePipeline::default();
+        assert!(matches!(
+            pipeline.handle_control(&CAPS).unwrap(),
+            PipelineOutput::Ready(_)
+        ));
+        assert!(matches!(
+            pipeline.handle_control(&[0x04, 0x03, 0x02, 0x01]).unwrap(),
+            PipelineOutput::StreamStarted {
+                session_id: 1,
+                generation: 1,
+            }
+        ));
+        assert!(matches!(
+            pipeline.handle_audio(&[0x11; 4]).unwrap(),
+            PipelineOutput::Samples { generation: 1, .. }
+        ));
+        assert!(matches!(
+            pipeline.handle_control(&[0x00]).unwrap(),
+            PipelineOutput::StreamStopped {
+                session_id: 1,
+                generation: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn applies_sync_to_next_complete_frame() {
         let mut pipeline = AtvvVoicePipeline::default();
         pipeline.handle_control(&CAPS).unwrap();

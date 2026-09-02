@@ -15,6 +15,7 @@ import {
   getAudioSnapshot,
   getConnectionSnapshot,
   listAudioEndpoints,
+  remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
 } from "../lib/bridge";
@@ -24,6 +25,7 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emptyConnection = (): ConnectionSnapshot => ({
   phase: "idle",
   remoteName: null,
+  remoteModel: "unknown",
   capabilities: null,
   voiceState: "idle",
   decodedSamples: 0,
@@ -152,7 +154,7 @@ async function scan() {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
       ? `找到 ${devices.value.length} 个已批准名称的候选设备`
-      : "没有找到已配对且名称精确匹配的 RC003 候选设备";
+      : "没有找到已配对且名称精确匹配的 RC001/RC003 候选设备";
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
@@ -166,7 +168,7 @@ async function connect(device: PairedRemote) {
   operationMessage.value = "";
   try {
     connection.value = await connectRemote(device.id);
-    operationMessage.value = "已建立 BLE 会话，正在等待 RC003 返回 ATVV 能力";
+    operationMessage.value = "已建立 BLE 会话，正在等待遥控器返回 ATVV 能力";
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
     await refreshConnection();
@@ -180,7 +182,7 @@ async function disconnect() {
   operationMessage.value = "";
   try {
     connection.value = await disconnectRemote();
-    operationMessage.value = "RC003 连接已释放，本次运行已停止自动重连";
+    operationMessage.value = "遥控器连接已释放，本次运行已停止自动重连";
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -246,7 +248,7 @@ onUnmounted(() => {
       <article class="card">
         <div class="card-title-row">
           <div>
-            <h2>RC003 蓝牙连接</h2>
+            <h2>RC001 / RC003 蓝牙连接</h2>
             <p class="muted">只扫描 Windows 中已经配对、且名称在白名单内的 BLE 设备。</p>
           </div>
           <button
@@ -281,7 +283,7 @@ onUnmounted(() => {
 
         <ul v-if="devices.length" class="device-list">
           <li v-for="device in devices" :key="device.id">
-            <div><strong>{{ device.name }}</strong><small>已配对候选设备</small></div>
+            <div><strong>{{ device.name }}</strong><small>{{ remoteModelLabel(device.model) }}</small></div>
             <button
               type="button"
               :disabled="connectionActive || Boolean(connectingDeviceId)"
@@ -297,7 +299,7 @@ onUnmounted(() => {
         <div class="card-title-row">
           <div>
             <h2>Windows 语音输出</h2>
-            <p class="muted">选择要接收 RC003 PCM 的输出端点，例如 CABLE Input。</p>
+            <p class="muted">选择要接收遥控器 PCM 的输出端点，例如 CABLE Input。</p>
           </div>
           <button
             class="secondary-button"
@@ -342,6 +344,10 @@ onUnmounted(() => {
 
         <div class="setting-list compact">
           <div class="setting-row">
+            <strong>设备型号</strong>
+            <span>{{ remoteModelLabel(connection.remoteModel) }}</span>
+          </div>
+          <div class="setting-row">
             <strong>ATVV / 16 kHz</strong>
             <span>{{ atvvReady ? "BLE 会话已就绪" : "等待能力确认" }}</span>
           </div>
@@ -358,7 +364,7 @@ onUnmounted(() => {
         <div class="info-callout" :class="{ warning: !wasapiReady }">
           {{
             wasapiReady
-              ? "所选端点已通过 WASAPI 初始化；仍需在 Windows 上完成真实 RC003 与 VB-CABLE 回环验收。"
+              ? "所选端点已通过 WASAPI 初始化；仍需在 Windows 上分别完成真实 RC001、RC003 与 VB-CABLE 回环验收。"
               : "请明确选择输出端点。无线麦不会静默安装 VB-CABLE，也不会修改系统默认输入或输出。"
           }}
         </div>

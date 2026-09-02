@@ -19,6 +19,7 @@ const runtime: RuntimeSnapshot = {
     connection: {
       phase: "idle",
       remoteName: null,
+      remoteModel: "unknown",
       capabilities: null,
       voiceState: "idle",
       decodedSamples: 0,

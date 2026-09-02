@@ -45,7 +45,7 @@ impl SettingsStore {
     }
 
     pub fn save_selected_remote_id(&self, device_id: String) -> Result<(), String> {
-        self.update("保存 RC003 设备设置", move |settings| {
+        self.update("保存小米语音遥控器设置", move |settings| {
             settings.selected_remote_id = Some(device_id);
         })
     }

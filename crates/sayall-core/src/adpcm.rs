@@ -94,7 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_rc003_high_nibble_first() {
+    fn decodes_rc001_and_rc003_high_nibble_first() {
         let mut decoder = ImaAdpcmDecoder::default();
         assert_eq!(decoder.decode(&[0x11]), vec![1, 2]);
         decoder.reset(0, 0);

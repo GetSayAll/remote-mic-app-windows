@@ -163,7 +163,7 @@ onUnmounted(() => {
     <article v-else-if="!loading" class="card empty-state">
       <div class="empty-icon">▥</div>
       <h2>暂无可展示的数据</h2>
-      <p>连接 RC003 并完成真实语音会话或普通按键监听后，这里会显示仅保存在本机的每日汇总。</p>
+      <p>连接 RC001 或 RC003 并完成真实语音会话或普通按键监听后，这里会显示仅保存在本机的每日汇总。</p>
     </article>
   </section>
 </template>
