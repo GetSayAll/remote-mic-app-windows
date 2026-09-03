@@ -2,6 +2,8 @@
 
 !define SAYALL_MINIMUM_WINDOWS_BUILD 17763
 !define SAYALL_DOWNGRADE_ERROR_LEVEL 1638
+!define SAYALL_VB_CABLE_SERVICE_KEY "SYSTEM\CurrentControlSet\Services\VBAudioVACMME"
+!define SAYALL_VB_CABLE_DOWNLOAD_URL "https://vb-audio.com/Cable/"
 
 !macro NSIS_HOOK_PREINSTALL
   ${IfNot} ${AtLeastBuild} ${SAYALL_MINIMUM_WINDOWS_BUILD}
@@ -25,5 +27,19 @@
     ${EndIf}
   ${EndIf}
   Pop $R9
+  Pop $R8
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  Push $R8
+  ReadRegStr $R8 HKLM "${SAYALL_VB_CABLE_SERVICE_KEY}" "DisplayName"
+  ${If} $R8 == ""
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONINFORMATION|MB_YESNO "无线麦需要 VB-CABLE 把遥控器语音传给输入法和语音软件。VB-CABLE 由 VB-Audio 提供，属于 Donationware，安装需要管理员权限，完成后必须重启 Windows。$\r$\n$\r$\n是否现在打开 VB-CABLE 官方下载页面？$\r$\n$\r$\nSayAll requires VB-CABLE for speech input. Installation requires administrator permission and a Windows restart. Open the official download page now?" IDYES sayall_vb_cable_open IDNO sayall_vb_cable_done
+sayall_vb_cable_open:
+      ExecShell "open" "${SAYALL_VB_CABLE_DOWNLOAD_URL}"
+sayall_vb_cable_done:
+    ${EndIf}
+  ${EndIf}
   Pop $R8
 !macroend

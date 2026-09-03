@@ -22,3 +22,4 @@ sayall-windows = { path = "../crates/sayall-windows" }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.8", features = [] }
+tauri-plugin-opener = "2.5.5"

@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+
+export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 
 export type ConnectionPhase =
   | "idle"
@@ -408,6 +411,14 @@ export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnap
     throw new Error("当前是浏览器预览，无法选择 Windows 音频端点");
   }
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
+}
+
+export async function openVbCableDownloadPage(): Promise<void> {
+  if (!isTauriRuntime()) {
+    window.open(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await openUrl(VB_CABLE_DOWNLOAD_URL);
 }
 
 export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
