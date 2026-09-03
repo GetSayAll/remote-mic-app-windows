@@ -14,6 +14,7 @@
 - 设备路径限定的 Raw Input、批量 SendInput、映射持久化与显式快捷键测试；
 - 仅保存在本机的每日按键、完整语音会话和语音时长统计，以及今日、本周、全部和最近 7 天展示；
 - Windows 10 1809（build 17763）安装与启动双层版本门禁；
+- 可见安装完成后的 VB-CABLE 缺失提示、官方下载入口，以及首次启动时唯一 CABLE Input 的自动检测和配置；
 - Windows CI 可生成带 SHA-256 和来源元数据的未签名 NSIS Preview artifact；
 - Windows CI、来源归属和真机测试手册。
 

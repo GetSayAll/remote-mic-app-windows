@@ -51,6 +51,16 @@ if (
 ) {
     throw "NSIS preinstall hook must reject silent downgrades before copying app files"
 }
+if (
+    $installerHooks -notmatch 'NSIS_HOOK_POSTINSTALL' -or
+    $installerHooks -notmatch 'SYSTEM\\CurrentControlSet\\Services\\VBAudioVACMME' -or
+    $installerHooks -notmatch 'ReadRegStr \$R8 HKLM' -or
+    $installerHooks -notmatch '\$\{IfNot\} \$\{Silent\}' -or
+    $installerHooks -notmatch 'https://vb-audio\.com/Cable/' -or
+    $installerHooks -notmatch 'ExecShell "open"'
+) {
+    throw "NSIS postinstall hook must detect VB-CABLE and offer its official page only in interactive installs"
+}
 $compatibilitySource = Get-Content -Raw -Encoding UTF8 $compatibilitySourcePath
 if ($compatibilitySource -notmatch 'WindowsVersion::new\(10, 0, 17_763\)') {
     throw "Runtime and NSIS minimum Windows versions must both remain Windows 10 build 17763"
