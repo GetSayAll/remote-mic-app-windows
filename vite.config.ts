@@ -7,6 +7,9 @@ export default defineConfig({
   server: {
     port: 2430,
     strictPort: true,
+    watch: {
+      ignored: ["**/target/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
 });
