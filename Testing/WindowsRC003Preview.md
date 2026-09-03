@@ -13,7 +13,7 @@
 1. 记录 Commit、版本、Windows 版本和电脑蓝牙适配器。
 2. 分别准备真实 RC001 和 RC003，并确认两者都可以在 Windows 蓝牙设置中完成配对。不得用其中一种型号的结果代替另一种。
 3. 安装待测构建。
-4. 若测试虚拟麦克风，当前 Preview 仍需从 VB-Audio 官方页面单独安装 VB-CABLE，并重启 Windows；自动集成安装待取得作者授权后再实现。
+4. 若系统尚未安装 VB-CABLE，在 SayAll 可见安装结束提示中选择打开 VB-Audio 官方页面；下载 Pack45，解压后以管理员身份运行对应架构的 Setup，并重启 Windows。SayAll 不复制、下载或执行第三方驱动包。
 5. 准备记事本和至少一个真实语音输入应用。
 6. 保存测试开始前的应用日志。
 
@@ -78,15 +78,17 @@
 
 ## 用例五：音频端点
 
-1. 不安装 VB-CABLE，点击“读取输出端点”，确认不会伪造 CABLE Input。
-2. 安装 VB-CABLE 但不选择端点，按下语音键。
-3. 明确选择 CABLE Input，确认页面显示“WASAPI 已就绪”。
-4. 完成一次语音，观察“写入”“排空”阶段和已提交采样数。
-5. 在 CABLE Output 侧录制或监听，确认首尾完整且没有重复。
-6. 语音期间尝试切换端点，然后在空闲时切换。
-7. 退出并重新启动无线麦，确认仍恢复同一个 endpoint ID 和名称，且没有改用系统默认输出。
-8. 禁用或移除当前端点后重新启动，再次开始语音。
-9. 让同一个 endpoint ID 的显示名称发生变化后重新启动；如果驱动无法稳定复现该状态，记录为 deferred，不得用另一个 ID 替代。
+1. 不安装 VB-CABLE，启动 SayAll，确认连接页自动检测但不会伪造 CABLE Input，并显示“需要安装 VB-CABLE”、官方下载和重新检测入口。
+2. 点击“打开官方下载页”，确认由系统默认浏览器打开 `https://vb-audio.com/Cable/`，没有在 WebView 内替换 SayAll 页面。
+3. 从官方页面安装 Pack45，但先不重启；点击“重新检测”，分别记录端点是否出现，不把偶然出现视为无需重启。
+4. 重启 Windows 后启动 SayAll，确认自动检测到唯一的 CABLE Input；若此前没有保存其他音频端点，应自动选择并显示“WASAPI 已就绪”。
+5. 如果此前明确保存过其他输出端点，确认自动检测不会覆盖已有选择，再手动选择 CABLE Input。
+6. 按下语音键完成一次语音会话。
+7. 在 CABLE Output 侧录制或监听，确认首尾完整且没有重复。
+8. 语音期间尝试切换端点，然后在空闲时切换。
+9. 退出并重新启动无线麦，确认仍恢复同一个 endpoint ID 和名称，且没有改用系统默认输出。
+10. 禁用或移除当前端点后重新启动，再次开始语音。
+11. 让同一个 endpoint ID 的显示名称发生变化后重新启动；如果驱动无法稳定复现该状态，记录为 deferred，不得用另一个 ID 替代。
 
 预期：缺少或未选择端点时语音失败关闭但 BLE 连接保持；语音期间禁止切换；正确端点时 16 kHz PCM 进入 CABLE Input，并可从 CABLE Output 收到；`STREAM_STOP` 后等待 WASAPI padding 清零再结束会话；重启只恢复稳定 ID 与原名称都一致的端点；端点缺失或名称变化时保留原选择用于提示，但 WASAPI 不进入就绪，也不退回系统默认输出。应用不读取或修改 Windows 默认输入、输出。
 
@@ -135,9 +137,11 @@
 4. 确认 metadata 中 productName、identifier、publisher、版本和 source commit 与仓库一致，且 `signatureStatus` 为 `NotSigned`、`distributionStatus` 为 `unsigned-ci-preview-not-for-public-release`。
 5. 确认 Windows CI 的 `Test silent current-user install and uninstall` 步骤通过：`/S` 安装后只有一个 HKCU 卸载条目、安装目录位于当前用户 `LOCALAPPDATA`、开始菜单只有一个入口，已安装进程持续运行 8 秒后由测试关闭。
 6. 确认同一步骤使用注册表中的真实卸载命令执行 `/S` 卸载，程序目录、开始菜单和卸载条目均移除；位于 Tauri `app_config_dir` 的测试标记仍保留，证明默认静默卸载不会删除当前用户设置目录。
-7. 仍需在隔离的 Windows 测试用户中手动运行安装器，检查可见语言选择、安装界面、开始菜单启动、退出、再次启动和卸载界面；不得用 CI 进程存活代替可见 UI 验收。
+7. 在未安装 VB-CABLE 的隔离 Windows 测试用户中手动运行可见安装器，确认安装完成后提示 VB-Audio、Donationware、管理员权限和必须重启；选择“是”只打开官方页面，选择“否”仍能完成 SayAll 安装。
+8. 安装 VB-CABLE 后重新运行 SayAll 安装器，确认检测到 `VBAudioVACMME` 服务后不再显示缺失提示；不得仅通过伪造普通用户注册表值冒充驱动安装。
+9. 确认 `/S` 静默安装、升级和 CI 不弹消息框、不打开浏览器；继续检查可见语言选择、安装界面、开始菜单启动、退出、再次启动和卸载界面。
 
-预期：CI 从干净提交构建唯一 NSIS 包；校验脚本拒绝错误产品身份、多个安装器、异常小文件、签名状态不符合当前 CI 边界或摘要不一致。静默生命周期必须证明当前用户安装、使用 Tauri updater 兼容的 `/S /UPDATE` 升级路径在等待旧卸载器退出并经过有界稳定窗口后收敛、单一卸载条目、单一开始菜单入口、进程不立即崩溃、程序文件完整卸载和设置目录默认保留。安装器无需管理员权限，不允许用旧版本覆盖新版本。
+预期：CI 从干净提交构建唯一 NSIS 包；校验脚本拒绝错误产品身份、多个安装器、异常小文件、签名状态不符合当前 CI 边界或摘要不一致。静默生命周期必须证明当前用户安装、使用 Tauri updater 兼容的 `/S /UPDATE` 升级路径在等待旧卸载器退出并经过有界稳定窗口后收敛、单一卸载条目、单一开始菜单入口、进程不立即崩溃、程序文件完整卸载和设置目录默认保留。SayAll 安装器本身无需管理员权限；用户另行启动的 VB-CABLE 官方驱动安装需要 UAC。安装器不允许用旧版本覆盖新版本。
 
 失败判定：artifact 无法绑定精确 commit、存在多个候选安装器、SHA-256 不一致、CI 包意外带未知签名、静默安装非零退出、安装到当前用户目录之外、卸载条目或开始菜单入口不唯一、应用进程立即退出、静默卸载残留程序文件或误删设置标记、安装器要求全局管理员权限、把未签名 artifact 当作公开发布包。
 
@@ -175,7 +179,7 @@
 
 1. 以 `runtime-simulation` Cargo feature 和 `VITE_SAYALL_RUNTIME_SIMULATION=1` 构建专用测试程序；普通构建不得包含仿真前端入口或仿真专用 Tauri command。
 2. 在 `windows-latest` 启动该程序，并设置唯一的运行报告路径；不得向真实桌面发送 SendInput，也不得尝试扫描真实 BLE、音频或 HID 设备。
-3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、渲染 RC001/RC003 扫描结果、连接 RC001、选择仿真 CABLE Input、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
+3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、首次检测并自动选择唯一仿真 CABLE Input、渲染 RC001/RC003 扫描结果、连接 RC001、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
 4. 依次打开按键、统计、权限、关于和连接与语音页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`。
 5. 通过测试专用 command 驱动纯 Rust ATVV 管线完成首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN`，确认得到 240 个采样、generation 为 1、连接和音频均回到 ready。
 6. 停止 Raw Input 并断开，确认最终快照为 `rawInput.phase = stopped` 和 `connection.phase = disconnected`；程序写入报告并自行以成功退出码结束。
