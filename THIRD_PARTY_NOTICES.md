@@ -12,7 +12,7 @@ The `wasapi` Rust crate is used under the MIT License. Copyright remains with it
 
 ## VB-CABLE
 
-VB-CABLE is developed by VB-Audio and is separately licensed Donationware. Its installer package permits unmodified redistribution but prohibits integrating it into another software installation procedure without author agreement. It is therefore not bundled or automatically installed by the current Windows preview. Users may obtain it from <https://vb-audio.com/Cable/>.
+VB-CABLE is developed by VB-Audio and is separately licensed Donationware. The current Windows preview does not copy, bundle, download or execute its driver package. Interactive SayAll installs and the application may direct users to the official page at <https://vb-audio.com/Cable/>. VB-CABLE installation requires administrator permission and, according to its Pack45 instructions, a Windows restart.
 
 ## Reference implementations
 

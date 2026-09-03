@@ -15,6 +15,7 @@ import {
   getAudioSnapshot,
   getConnectionSnapshot,
   listAudioEndpoints,
+  openVbCableDownloadPage,
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
@@ -55,7 +56,9 @@ const scanMessage = ref("尚未扫描");
 const operationMessage = ref("");
 const audioEndpoints = ref<AudioEndpoint[]>([]);
 const scanningAudio = ref(false);
+const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
+const openingVbCablePage = ref(false);
 const audioMessage = ref("尚未读取 Windows 输出端点");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -97,6 +100,12 @@ const audioBusy = computed(() => ["streaming", "draining"].includes(audio.value.
 const wasapiReady = computed(() =>
   ["ready", "streaming", "draining"].includes(audio.value.phase),
 );
+
+const virtualCableEndpoints = computed(() =>
+  audioEndpoints.value.filter((endpoint) => endpoint.isVirtualCableCandidate),
+);
+
+const virtualCableInstalled = computed(() => virtualCableEndpoints.value.length > 0);
 
 const phaseTone = computed(() => {
   if (connection.value.phase === "failed") return "error";
@@ -141,8 +150,10 @@ async function refreshConnection() {
 async function refreshAudio() {
   try {
     audio.value = await getAudioSnapshot();
+    return true;
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
+    return false;
   }
 }
 
@@ -190,28 +201,43 @@ async function disconnect() {
   }
 }
 
-async function scanAudio() {
+async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
   scanningAudio.value = true;
   audioMessage.value = "正在枚举 Windows 活动输出端点…";
   try {
     audioEndpoints.value = await listAudioEndpoints();
-    audioMessage.value = audioEndpoints.value.length
-      ? `找到 ${audioEndpoints.value.length} 个活动输出端点`
-      : "没有找到可用的 Windows 输出端点";
+    audioScanComplete.value = true;
+    const virtualCables = audioEndpoints.value.filter(
+      (endpoint) => endpoint.isVirtualCableCandidate,
+    );
+    if (virtualCables.length === 1 && autoSelectVirtualCable && !audio.value.selectedEndpointId) {
+      await chooseAudioEndpoint(virtualCables[0], true);
+      return;
+    }
+    audioMessage.value = virtualCables.length
+      ? `已检测到 ${virtualCables.length} 个 VB-CABLE 输出端点`
+      : "未检测到 VB-CABLE；安装完成后需要重启 Windows，再重新检测";
   } catch (error) {
     audioEndpoints.value = [];
+    audioScanComplete.value = true;
     audioMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
     scanningAudio.value = false;
   }
 }
 
-async function chooseAudioEndpoint(endpoint: AudioEndpoint) {
+async function scanAudio() {
+  await detectAudioEndpoints(false);
+}
+
+async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
   selectingEndpointId.value = endpoint.id;
   audioMessage.value = "正在初始化所选 WASAPI 输出端点…";
   try {
     audio.value = await selectAudioEndpoint(endpoint.id);
-    audioMessage.value = `已选择 ${endpoint.name}`;
+    audioMessage.value = automatic
+      ? `已自动选择 ${endpoint.name}`
+      : `已选择 ${endpoint.name}`;
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
     await refreshAudio();
@@ -220,9 +246,26 @@ async function chooseAudioEndpoint(endpoint: AudioEndpoint) {
   }
 }
 
+async function openVbCablePage() {
+  openingVbCablePage.value = true;
+  try {
+    await openVbCableDownloadPage();
+    audioMessage.value = "已打开 VB-CABLE 官方下载页面；安装时需要管理员权限，完成后请重启 Windows";
+  } catch (error) {
+    audioMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    openingVbCablePage.value = false;
+  }
+}
+
+async function initializeAudio() {
+  const restoredAudio = await refreshAudio();
+  await detectAudioEndpoints(restoredAudio);
+}
+
 onMounted(() => {
   void refreshConnection();
-  void refreshAudio();
+  void initializeAudio();
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -305,7 +348,7 @@ onUnmounted(() => {
             class="secondary-button"
             type="button"
             :disabled="scanningAudio || audioBusy || !runtime?.platform.windowsApiAvailable"
-            @click="scanAudio"
+            @click="scanAudio()"
           >
             {{ scanningAudio ? "读取中…" : "读取输出端点" }}
           </button>
@@ -361,11 +404,27 @@ onUnmounted(() => {
             <span>{{ connection.powerNotificationsAvailable ? "Windows API 已注册" : "当前不可用" }}</span>
           </div>
         </div>
-        <div class="info-callout" :class="{ warning: !wasapiReady }">
+        <div v-if="audioScanComplete && !virtualCableInstalled" class="info-callout warning vb-cable-callout">
+          <div>
+            <strong>需要安装 VB-CABLE</strong>
+            <p>它由 VB-Audio 提供，属于 Donationware。安装需要管理员权限，完成后必须重启 Windows。</p>
+          </div>
+          <div class="button-row">
+            <button class="primary-button" type="button" :disabled="openingVbCablePage" @click="openVbCablePage">
+              {{ openingVbCablePage ? "正在打开…" : "打开官方下载页" }}
+            </button>
+            <button class="secondary-button" type="button" :disabled="scanningAudio" @click="scanAudio()">
+              重新检测
+            </button>
+          </div>
+        </div>
+        <div v-else class="info-callout" :class="{ warning: !wasapiReady }">
           {{
             wasapiReady
               ? "所选端点已通过 WASAPI 初始化；仍需在 Windows 上分别完成真实 RC001、RC003 与 VB-CABLE 回环验收。"
-              : "请明确选择输出端点。无线麦不会静默安装 VB-CABLE，也不会修改系统默认输入或输出。"
+              : virtualCableInstalled
+                ? "已检测到 VB-CABLE。请选择 CABLE Input；在输入法或语音软件中选择 CABLE Output。"
+                : "正在检测 VB-CABLE 音频端点。"
           }}
         </div>
       </article>

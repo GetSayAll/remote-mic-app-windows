@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   audioPhaseLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
   formatUsageDuration,
+  openVbCableDownloadPage,
   remoteModelLabel,
+  VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
   type ConnectionPhase,
   type DiagnosticReport,
@@ -133,5 +135,16 @@ describe("usage statistics presentation", () => {
     expect(formatUsageDuration(125)).toBe("2分5秒");
     expect(formatUsageDuration(3_661)).toBe("1小时1分钟");
     expect(formatUsageDuration(Number.NaN)).toBe("0秒");
+  });
+});
+
+describe("VB-CABLE download guidance", () => {
+  it("opens only the official VB-Audio page in browser preview", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    await openVbCableDownloadPage();
+
+    expect(open).toHaveBeenCalledWith(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
+    open.mockRestore();
   });
 });

@@ -287,71 +287,73 @@ pub fn run() {
         return;
     }
 
-    let builder = tauri::Builder::default().setup(|app| {
-        #[cfg(feature = "runtime-simulation")]
-        let settings_path = if runtime_simulation_requested() {
-            let directory =
-                std::env::var_os("SAYALL_RUNTIME_SIMULATION_STATE_DIR").ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "缺少 Windows CI 仿真设置目录",
-                    )
-                })?;
-            std::path::PathBuf::from(directory).join("settings.json")
-        } else {
-            app.path().app_config_dir()?.join("settings.json")
-        };
-        #[cfg(not(feature = "runtime-simulation"))]
-        let settings_path = app.path().app_config_dir()?.join("settings.json");
-        let settings = SettingsStore::new(settings_path);
-        let saved_settings = match settings.load() {
-            Ok(settings) => settings,
-            Err(error) => {
-                eprintln!("{error}");
-                Default::default()
-            }
-        };
-        let platform = create_platform();
-        let statistics = Arc::new(StatisticsRuntime::new(
-            settings.clone(),
-            platform.usage_counters(),
-        ));
-        let button_mappings = match settings.load_button_mappings() {
-            Ok(mappings) => mappings,
-            Err(error) => {
-                eprintln!("{error}");
-                ButtonMappings::default()
-            }
-        };
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            #[cfg(feature = "runtime-simulation")]
+            let settings_path = if runtime_simulation_requested() {
+                let directory = std::env::var_os("SAYALL_RUNTIME_SIMULATION_STATE_DIR")
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "缺少 Windows CI 仿真设置目录",
+                        )
+                    })?;
+                std::path::PathBuf::from(directory).join("settings.json")
+            } else {
+                app.path().app_config_dir()?.join("settings.json")
+            };
+            #[cfg(not(feature = "runtime-simulation"))]
+            let settings_path = app.path().app_config_dir()?.join("settings.json");
+            let settings = SettingsStore::new(settings_path);
+            let saved_settings = match settings.load() {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("{error}");
+                    Default::default()
+                }
+            };
+            let platform = create_platform();
+            let statistics = Arc::new(StatisticsRuntime::new(
+                settings.clone(),
+                platform.usage_counters(),
+            ));
+            let button_mappings = match settings.load_button_mappings() {
+                Ok(mappings) => mappings,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ButtonMappings::default()
+                }
+            };
 
-        #[cfg(windows)]
-        if let (Some(endpoint_id), Some(endpoint_name)) = (
-            saved_settings.audio_endpoint_id,
-            saved_settings.audio_endpoint_name,
-        ) {
-            if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
-                eprintln!("恢复已保存的音频端点失败：{error}");
+            #[cfg(windows)]
+            if let (Some(endpoint_id), Some(endpoint_name)) = (
+                saved_settings.audio_endpoint_id,
+                saved_settings.audio_endpoint_name,
+            ) {
+                if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
+                    eprintln!("恢复已保存的音频端点失败：{error}");
+                }
             }
-        }
 
-        #[cfg(windows)]
-        if let Some(device_id) = saved_settings.selected_remote_id {
-            if let Err(error) = platform.restore_remote(device_id) {
-                eprintln!("恢复已保存的小米语音遥控器失败：{error}");
+            #[cfg(windows)]
+            if let Some(device_id) = saved_settings.selected_remote_id {
+                if let Err(error) = platform.restore_remote(device_id) {
+                    eprintln!("恢复已保存的小米语音遥控器失败：{error}");
+                }
             }
-        }
 
-        #[cfg(not(windows))]
-        let _ = saved_settings;
+            #[cfg(not(windows))]
+            let _ = saved_settings;
 
-        app.manage(AppState {
-            platform,
-            settings,
-            button_mappings: RwLock::new(button_mappings),
-            statistics,
+            app.manage(AppState {
+                platform,
+                settings,
+                button_mappings: RwLock::new(button_mappings),
+                statistics,
+            });
+            Ok(())
         });
-        Ok(())
-    });
 
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![

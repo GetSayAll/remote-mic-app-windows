@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   connectRemote,
   disconnectRemote,
+  getAudioSnapshot,
   getDiagnosticReport,
   getRuntimeSnapshot,
   getUsageStatistics,
   listAudioEndpoints,
   saveButtonMappings,
   scanPairedRemotes,
-  selectAudioEndpoint,
   startRawInput,
   stopRawInput,
   testButtonMapping,
@@ -91,16 +91,25 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(connection.capabilities?.sampleRate === 16_000, "RC001 仿真能力不是 16 kHz");
   steps.push("RC001 连接 command 返回 16 kHz ATVV 就绪状态");
 
-  await clickButton("读取输出端点");
   await waitFor(
     () => (document.body.textContent?.includes("CABLE Input (CI Simulation)") ? true : null),
     "仿真音频端点",
   );
+  await waitFor(
+    () =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>("button")).some((button) =>
+        button.textContent?.trim().includes("当前端点"),
+      )
+        ? true
+        : null,
+    "自动选择仿真 CABLE Input",
+  );
   const endpoints = await listAudioEndpoints();
   assert(endpoints.length === 1, "仿真音频端点数量异常");
-  const audio = await selectAudioEndpoint(endpoints[0].id);
+  const audio = await getAudioSnapshot();
   assert(audio.phase === "ready", "仿真音频端点没有进入 WASAPI 就绪");
-  steps.push("连接页面和 IPC 完成显式音频端点选择");
+  assert(audio.selectedEndpointId === endpoints[0].id, "仿真 CABLE Input 没有被自动选择");
+  steps.push("连接页面首次检测并自动选择唯一的仿真 CABLE Input");
 
   await openPage("按键");
   await clickButton("启动监听");
