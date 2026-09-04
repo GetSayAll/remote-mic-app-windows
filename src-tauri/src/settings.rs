@@ -237,20 +237,38 @@ mod tests {
     #[test]
     fn button_mapping_json_round_trip_preserves_typed_shortcut() {
         use sayall_windows::raw_input::RemoteButton;
-        use sayall_windows::send_input::{ButtonAction, KeyChord, KeyCode};
+        use sayall_windows::send_input::{
+            ButtonAction, ButtonActions, ButtonTrigger, KeyChord, KeyCode,
+        };
 
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
             RemoteButton::Ok,
-            ButtonAction::Shortcut {
-                chord: KeyChord {
-                    keys: vec![KeyCode::Control, KeyCode::Enter],
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Control, KeyCode::Enter],
+                    },
+                },
+                double: ButtonAction::Disabled,
+                long: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Escape],
+                    },
                 },
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();
         let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, mappings);
+        assert_eq!(
+            decoded.action_for(RemoteButton::Ok, ButtonTrigger::Single),
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Control, KeyCode::Enter],
+                }
+            }
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import contract from "../../contracts/ipc/windows-runtime.json";
 import type {
   AudioPhase,
+  ButtonTrigger,
   ConnectionPhase,
   PairedRemote,
   PlatformSnapshot,
@@ -56,6 +57,7 @@ const remoteButtons = [
   "volume_up",
   "volume_down",
 ] as const satisfies readonly RemoteButton[];
+const buttonTriggers = ["single", "double", "long"] as const satisfies readonly ButtonTrigger[];
 
 describe("Rust and TypeScript IPC contract", () => {
   it("loads the shared platform snapshot through the frontend types", () => {
@@ -79,6 +81,22 @@ describe("Rust and TypeScript IPC contract", () => {
           fixture.rawInput.lastButton === null
             ? null
             : memberOf(fixture.rawInput.lastButton, remoteButtons),
+        activeButtons: fixture.rawInput.activeButtons.map((button) =>
+          memberOf(button, remoteButtons),
+        ),
+      },
+      buttonMapping: {
+        ...fixture.buttonMapping,
+        lastFired:
+          fixture.buttonMapping.lastFired === null
+            ? null
+            : {
+                button: memberOf(fixture.buttonMapping.lastFired.button, remoteButtons),
+                trigger: memberOf(
+                  fixture.buttonMapping.lastFired.trigger,
+                  buttonTriggers,
+                ),
+              },
       },
     };
 
@@ -95,6 +113,7 @@ describe("Rust and TypeScript IPC contract", () => {
       "connection",
       "audio",
       "rawInput",
+      "buttonMapping",
     ]);
     expectExactKeys(platformSnapshot.connection, [
       "phase",
@@ -132,6 +151,17 @@ describe("Rust and TypeScript IPC contract", () => {
       "semanticEdgeCount",
       "lastButton",
       "lastIsPressed",
+      "activeButtons",
+      "lastError",
+    ]);
+    expectExactKeys(platformSnapshot.buttonMapping, [
+      "enabled",
+      "gateActive",
+      "listenerActive",
+      "swallowedEdges",
+      "leakedDowns",
+      "firedGestures",
+      "lastFired",
       "lastError",
     ]);
     expectNoSnakeCaseKeys(platformSnapshot);
