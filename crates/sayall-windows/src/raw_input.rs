@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::time::Duration;
 use thiserror::Error;
 
 pub const XIAOMI_REMOTE_VENDOR_ID: u16 = 0x2717;
@@ -21,6 +22,49 @@ pub enum RemoteButton {
     VolumeMute,
     VolumeUp,
     VolumeDown,
+}
+
+/// 语义按键的稳定顺序：key_gate 的映射位掩码、UI 画布布局都依赖该表。
+pub const ALL_BUTTONS: [RemoteButton; 13] = [
+    RemoteButton::Back,
+    RemoteButton::Ok,
+    RemoteButton::Tv,
+    RemoteButton::Home,
+    RemoteButton::Right,
+    RemoteButton::Left,
+    RemoteButton::Down,
+    RemoteButton::Up,
+    RemoteButton::Menu,
+    RemoteButton::Power,
+    RemoteButton::VolumeMute,
+    RemoteButton::VolumeUp,
+    RemoteButton::VolumeDown,
+];
+
+impl RemoteButton {
+    /// 在 [`ALL_BUTTONS`] 中的序号（0..12），用于门控位掩码。
+    pub fn ordinal(self) -> usize {
+        ALL_BUTTONS
+            .iter()
+            .position(|button| *button == self)
+            .expect("ALL_BUTTONS covers every RemoteButton variant")
+    }
+
+    /// 按住连发间隔（单击动作的自动重复），对齐 Mac 原版 HIDRemoteScheduler：
+    /// 返回 50ms、方向键/音量± 100ms、其余按键不连发。仅当该键只配置了单击
+    /// （未配置双击/长按）时由手势引擎启用。
+    pub fn repeat_interval(self) -> Option<Duration> {
+        match self {
+            Self::Back => Some(Duration::from_millis(50)),
+            Self::Up
+            | Self::Down
+            | Self::Left
+            | Self::Right
+            | Self::VolumeUp
+            | Self::VolumeDown => Some(Duration::from_millis(100)),
+            Self::Ok | Self::Tv | Self::Home | Self::Menu | Self::Power | Self::VolumeMute => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +94,8 @@ pub struct RawInputSnapshot {
     pub semantic_edge_count: u64,
     pub last_button: Option<RemoteButton>,
     pub last_is_pressed: Option<bool>,
+    /// 当前处于按下状态的语义按键（由映射引擎维护，用于 UI 高亮对账）。
+    pub active_buttons: Vec<RemoteButton>,
     pub last_error: Option<String>,
 }
 
@@ -232,14 +278,40 @@ impl ButtonStateMerger {
         edges_between(&before, &self.active_buttons())
     }
 
+    /// 应用已经归因到遥控器的键盘边沿（key_gate 吞下的原始键）。
+    /// 返回并集变化产生的语义边沿（与 [`Self::update_keyboard`] 一致）。
+    pub fn apply_keyboard_button_edge(
+        &mut self,
+        button: RemoteButton,
+        is_pressed: bool,
+    ) -> Vec<ButtonEdge> {
+        let before = self.active_buttons();
+        if is_pressed {
+            self.keyboard.insert(button);
+        } else {
+            self.keyboard.remove(&button);
+        }
+        edges_between(&before, &self.active_buttons())
+    }
+
+    /// 当前按下的语义按键集合（两个来源的并集）。
+    pub fn active_button_set(&self) -> BTreeSet<RemoteButton> {
+        self.active_buttons()
+    }
+
     pub fn update_hid_report(
         &mut self,
         report: &[u8],
     ) -> Result<Vec<ButtonEdge>, RawInputDecodeError> {
         let usages = decode_report_usages(report)?;
+        Ok(self.update_hid_usages(usages))
+    }
+
+    /// 应用一份 HID 报文的 usage 集合（绝对状态），返回语义边沿。
+    pub fn update_hid_usages(&mut self, usages: BTreeSet<u16>) -> Vec<ButtonEdge> {
         let before = self.active_buttons();
         self.hid = usages.into_iter().filter_map(button_for_usage).collect();
-        Ok(edges_between(&before, &self.active_buttons()))
+        edges_between(&before, &self.active_buttons())
     }
 
     pub fn release_all(&mut self) -> Vec<ButtonEdge> {

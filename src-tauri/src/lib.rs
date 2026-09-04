@@ -1,5 +1,8 @@
+use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
-use sayall_windows::send_input::{ButtonAction, ButtonMappings, KeyChord, SendInputSnapshot};
+use sayall_windows::send_input::{
+    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
+};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
@@ -7,7 +10,7 @@ use sayall_windows::{
 use serde::Serialize;
 use settings::SettingsStore;
 use std::sync::{Arc, RwLock};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 mod diagnostics;
 mod platform;
@@ -27,7 +30,6 @@ struct RuntimeSnapshot {
 struct AppState {
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
-    button_mappings: RwLock<ButtonMappings>,
 }
 
 #[tauri::command]
@@ -167,11 +169,7 @@ async fn stop_raw_input(state: tauri::State<'_, AppState>) -> Result<RawInputSna
 
 #[tauri::command]
 fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
-    state
-        .button_mappings
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+    state.platform.button_mappings()
 }
 
 #[tauri::command]
@@ -180,35 +178,56 @@ async fn save_button_mappings(
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
     let settings = state.settings.clone();
-    let saved =
-        tauri::async_runtime::spawn_blocking(move || settings.save_button_mappings(mappings))
-            .await
-            .map_err(|error| format!("保存按键映射任务失败：{error}"))??;
-    *state
-        .button_mappings
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = saved.clone();
+    let platform = Arc::clone(&state.platform);
+    let saved = tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
+        let saved = settings.save_button_mappings(mappings)?;
+        // 持久化成功后热加载到引擎与门控（保存即生效）。
+        platform.set_button_mappings(saved.clone());
+        Ok(saved)
+    })
+    .await
+    .map_err(|error| format!("保存按键映射任务失败：{error}"))??;
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn reset_button_mappings(
+    state: tauri::State<'_, AppState>,
+) -> Result<ButtonMappings, String> {
+    let settings = state.settings.clone();
+    let platform = Arc::clone(&state.platform);
+    let saved = tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
+        let saved = settings.save_button_mappings(ButtonMappings::default())?;
+        platform.set_button_mappings(saved.clone());
+        Ok(saved)
+    })
+    .await
+    .map_err(|error| format!("恢复默认按键映射任务失败：{error}"))??;
     Ok(saved)
 }
 
 #[tauri::command]
 async fn test_button_mapping(
     button: RemoteButton,
+    trigger: ButtonTrigger,
     state: tauri::State<'_, AppState>,
 ) -> Result<SendInputSnapshot, String> {
-    let action = state
-        .button_mappings
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .action(button);
+    let action = state.platform.button_mappings().action_for(button, trigger);
     let ButtonAction::Shortcut { chord } = action else {
-        return Err("该按键当前未配置快捷键".to_owned());
+        return Err("该触发方式当前未配置快捷键".to_owned());
     };
     let platform = Arc::clone(&state.platform);
     tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
         .await
         .map_err(|error| format!("测试快捷键任务失败：{error}"))?
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_button_mapping_snapshot(
+    state: tauri::State<'_, AppState>,
+) -> sayall_windows::button_mapping::ButtonMappingSnapshot {
+    state.platform.button_mapping_snapshot()
 }
 
 #[tauri::command]
@@ -280,6 +299,42 @@ fn create_platform() -> Arc<dyn PlatformRuntime> {
     Arc::new(WindowsPlatform::default())
 }
 
+/// 语义按键边沿/手势 → Tauri 事件（button-edge / button-gesture）。
+/// 引擎线程回调，Emitter::emit 线程安全。
+fn register_button_events(platform: &Arc<dyn PlatformRuntime>, app: tauri::AppHandle) {
+    let edge_app = app.clone();
+    platform.subscribe_button_edges(Arc::new(move |edge| {
+        let _ = edge_app.emit("button-edge", &edge);
+    }));
+    let gesture_app = app;
+    platform.subscribe_button_gestures(Arc::new(move |gesture| {
+        let _ = gesture_app.emit("button-gesture", &gesture);
+    }));
+}
+
+/// Raw Input 监听自愈监督线程：启动尝试一次（遥控器休眠时可能失败）；
+/// 此后每 10 秒巡检，phase=Failed（启动失败或监听线程意外退出）时自动重启。
+/// Stopped（用户在按键页显式停止）不重启；成功后保持低频巡检自愈。
+fn spawn_raw_input_supervisor(platform: Arc<dyn PlatformRuntime>) {
+    std::thread::Builder::new()
+        .name("sayall-raw-input-supervisor".to_owned())
+        .spawn(move || {
+            let mut initial_attempt_pending = true;
+            loop {
+                let phase = platform.raw_input_snapshot().phase;
+                let should_start = phase == sayall_windows::raw_input::RawInputPhase::Failed
+                    || (initial_attempt_pending
+                        && phase == sayall_windows::raw_input::RawInputPhase::Stopped);
+                if should_start {
+                    let _ = platform.start_raw_input();
+                }
+                initial_attempt_pending = false;
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+        })
+        .ok();
+}
+
 #[cfg(feature = "runtime-simulation")]
 fn runtime_simulation_requested() -> bool {
     std::env::var_os("SAYALL_WINDOWS_RUNTIME_SIMULATION").as_deref()
@@ -329,6 +384,8 @@ pub fn run() {
                     ButtonMappings::default()
                 }
             };
+            // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
+            platform.set_button_mappings(button_mappings);
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (
@@ -358,11 +415,14 @@ pub fn run() {
             #[cfg(not(windows))]
             let _ = saved_settings;
 
-            app.manage(AppState {
-                platform,
-                settings,
-                button_mappings: RwLock::new(button_mappings),
-            });
+            // 语义按键边沿与手势事件 → 前端（画布高亮与单击/双击/长按反馈）。
+            register_button_events(&platform, app.handle().clone());
+
+            // Raw Input 监听自愈：启动即尝试，失败（遥控器休眠/未连接）进入
+            // 10 秒重试循环；用户在按键页显式停止（Stopped）时不重试。
+            spawn_raw_input_supervisor(Arc::clone(&platform));
+
+            app.manage(AppState { platform, settings });
             Ok(())
         });
 
@@ -382,7 +442,9 @@ pub fn run() {
         stop_raw_input,
         get_button_mappings,
         save_button_mappings,
+        reset_button_mappings,
         test_button_mapping,
+        get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
@@ -405,7 +467,9 @@ pub fn run() {
         stop_raw_input,
         get_button_mappings,
         save_button_mappings,
+        reset_button_mappings,
         test_button_mapping,
+        get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey
