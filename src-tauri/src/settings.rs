@@ -1,5 +1,5 @@
 use sayall_core::{AppSettings, UsageStatistics};
-use sayall_windows::send_input::ButtonMappings;
+use sayall_windows::send_input::{ButtonMappings, KeyChord};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -107,8 +107,61 @@ impl SettingsStore {
         Ok(mappings)
     }
 
+    pub fn load_voice_hold_hotkey(&self) -> Result<Option<KeyChord>, String> {
+        let _guard = lock(&self.access);
+        self.load_voice_hold_hotkey_unlocked()
+    }
+
+    /// v1 默认按住说话快捷键：左 Ctrl + 左 Win（适配微信输入法的默认语音热键）。
+    pub fn default_voice_hold_hotkey() -> Option<KeyChord> {
+        Some(KeyChord {
+            keys: vec![
+                sayall_windows::send_input::KeyCode::LeftControl,
+                sayall_windows::send_input::KeyCode::LeftWindows,
+            ],
+        })
+    }
+
+    fn load_voice_hold_hotkey_unlocked(&self) -> Result<Option<KeyChord>, String> {
+        let path = self.voice_hold_hotkey_path();
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(Self::default_voice_hold_hotkey())
+            }
+            Err(error) => return Err(format!("读取按住说话快捷键失败：{error}")),
+        };
+        serde_json::from_str::<Option<KeyChord>>(&contents)
+            .map_err(|error| format!("解析按住说话快捷键失败：{error}"))
+    }
+
+    pub fn save_voice_hold_hotkey(
+        &self,
+        hotkey: Option<KeyChord>,
+    ) -> Result<Option<KeyChord>, String> {
+        let _guard = lock(&self.access);
+        if let Some(chord) = &hotkey {
+            chord
+                .clone()
+                .validated()
+                .map_err(|error| format!("按住说话快捷键无效：{error}"))?;
+        }
+        let path = self.voice_hold_hotkey_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
+        }
+        let contents = serde_json::to_vec_pretty(&hotkey)
+            .map_err(|error| format!("序列化按住说话快捷键失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("保存按住说话快捷键失败：{error}"))?;
+        Ok(hotkey)
+    }
+
     fn button_mappings_path(&self) -> PathBuf {
         self.path.with_file_name("button-mappings.json")
+    }
+
+    fn voice_hold_hotkey_path(&self) -> PathBuf {
+        self.path.with_file_name("voice-hold-hotkey.json")
     }
 
     fn update(&self, operation: &str, update: impl FnOnce(&mut AppSettings)) -> Result<(), String> {
@@ -198,5 +251,43 @@ mod tests {
         let encoded = serde_json::to_string(&mappings).unwrap();
         let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, mappings);
+    }
+
+    #[test]
+    fn voice_hold_hotkey_round_trips_and_validates_chord() {
+        let store = SettingsStore::new(std::env::temp_dir().join(format!(
+            "sayall-test-voice-hold-{}.json",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(store.voice_hold_hotkey_path());
+
+        // 缺省文件 = v1 默认（左 Ctrl + 左 Win）
+        let default = store.load_voice_hold_hotkey().unwrap();
+        assert_eq!(default, SettingsStore::default_voice_hold_hotkey());
+        assert_eq!(
+            default.unwrap().keys,
+            vec![
+                sayall_windows::send_input::KeyCode::LeftControl,
+                sayall_windows::send_input::KeyCode::LeftWindows,
+            ]
+        );
+
+        let right_alt = KeyChord {
+            keys: vec![sayall_windows::send_input::KeyCode::RightAlt],
+        };
+        let saved = store
+            .save_voice_hold_hotkey(Some(right_alt.clone()))
+            .unwrap();
+        assert_eq!(saved, Some(right_alt.clone()));
+        assert_eq!(store.load_voice_hold_hotkey().unwrap(), Some(right_alt));
+
+        let disabled = store.save_voice_hold_hotkey(None).unwrap();
+        assert_eq!(disabled, None);
+        assert_eq!(store.load_voice_hold_hotkey().unwrap(), None);
+
+        let invalid = KeyChord { keys: vec![] };
+        assert!(store.save_voice_hold_hotkey(Some(invalid)).is_err());
+
+        let _ = std::fs::remove_file(store.voice_hold_hotkey_path());
     }
 }

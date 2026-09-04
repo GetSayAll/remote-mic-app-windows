@@ -101,7 +101,7 @@ Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯�
 
 ### ZSTDJan Windows 版本
 
-参考 WinRT 缓存、PortAudio/WASAPI 端点、Raw Input、安装器和许可证门禁。其硬件结论需要本项目独立复验。
+参考 WinRT 缓存、PortAudio/WASAPI 端点、Raw Input、安装器和许可证门禁；其语音页按语音程序配置"按住说话快捷键"（按下注入、松开释放）是本仓库按住说话快捷键设置的产品参考。其硬件结论需要本项目独立复验。
 
 ### Vibe Flow
 
@@ -109,7 +109,7 @@ Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯�
 
 ### Voice VibeCoding
 
-参考 Rust/Tauri 结构、windows-rs、音频占用策略和窗口恢复。不得继承 Git 历史、品牌、配置目录或未经审计的 VB-CABLE、Frida、WinUHid 二进制。
+参考 Rust/Tauri 结构、windows-rs、音频占用策略和窗口恢复；其语音键按住注入 Hold 语义（按下先快捷键 DOWN、松手统一释放、SendInput 互斥降级）是本仓库按住说话快捷键注入时序的参考。不得继承 Git 历史、品牌、配置目录或未经审计的 VB-CABLE、Frida、WinUHid 二进制。
 
 ## 6. 开发阶段
 
@@ -130,7 +130,7 @@ Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯�
 - WASAPI；
 - 会话排空、重连和错误恢复。
 
-当前实现状态：候选扫描、设备名与 2A24 型号识别、GATT 连接与通知、ATVV 能力、RC001/RC003 共用的高半字节优先 ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空、稳定 endpoint ID + 原名称恢复，以及遥控器选择持久化、2–30 秒退避重连和 Windows 睡眠/恢复通知代码已落地并通过静态与纯逻辑检查。音频端点缺失或名称变化会失败关闭；BLE 清理、重连和恢复都不接受旧代次回调。Raw Input 已建立共用 VID/PID 设备族路径选择、隐藏消息窗口、Keyboard/HID 报告解析、双来源并集去重和停止释放代码路径；语音键在此层明确排除，继续由 ATVV 独占。Windows 运行、真实睡眠恢复、VB-CABLE 回环和 RC001/RC003 真机验证尚未完成。
+当前实现状态：候选扫描、设备名与 2A24 型号识别、GATT 连接与通知、ATVV 能力、RC001/RC003 共用的高半字节优先 ADPCM/PCM、连接代次隔离、显式端点 WASAPI 输出、基于 padding 的会话排空、稳定 endpoint ID + 原名称恢复，以及遥控器选择持久化、2–30 秒退避重连和 Windows 睡眠/恢复通知代码已落地并通过静态与纯逻辑检查。音频端点缺失或名称变化会失败关闭；BLE 清理、重连和恢复都不接受旧代次回调。Raw Input 已建立共用 VID/PID 设备族路径选择、隐藏消息窗口、Keyboard/HID 报告解析、双来源并集去重和停止释放代码路径；语音键在此层明确排除，继续由 ATVV 独占。在 ATVV 层新增了用户显式配置的按住说话快捷键（如右 Alt）：按下先注入 DOWN 再开始音频会话，释放统一注入 UP，断连、睡眠、中止和退出全部强制释放，注入不替代语音会话（来源见 ATTRIBUTION：ZSTDJan 按程序配置按住说话快捷键、Voice_VibeCoding 的按下先 DOWN/松手统一释放 Hold 语义）。已确认的兼容性边界：仅使用 SendInput 公共 API，不采用参考实现中的驱动级注入（WinUHid）或管理员权限，因此对过滤模拟按键的输入法内置热键（如豆包固定的"长按右 Alt"）无效，见 Bugs/2026-09-04。Windows 运行、真实睡眠恢复、VB-CABLE 回环、快捷键成对注入和 RC001/RC003 真机验证尚未完成。
 
 ### 阶段 C：可靠按键
 
@@ -156,9 +156,11 @@ Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯�
 
 使用统计已按长期边界接入：Windows 平台层只维护线程安全的累计计数，不在 BLE、WASAPI 或 Raw Input 回调中写文件；Tauri Host 在后台合并增量并写入本应用 `settings.json`。普通按键只统计去重后的语义按下边沿，语音只在 WASAPI 排空和 ATVV drain 都成功后记录一次，并按 16 kHz 已解码采样折算时长。核心层只保存每日汇总，不保存设备、端点、按键名称、语音内容或应用上下文；统计页沿用 Mac 原版的今日、本周、全部和最近 7 天信息层级。真实 Windows 事件和升级保留仍按测试手册验收。
 
-### 阶段 E：实验性完整 HID
+### 阶段 E：实验性完整 HID 与增强注入
 
 单独研究返回和音量键，不阻塞 Preview。模拟、驱动存在或 HID Tap ready 都不能代替真实按下/释放验收。
+
+按住说话快捷键与按键映射的真机结果（Bugs/2026-09-04）确认了 IME 对模拟按键的过滤边界。按 ADR 0002（docs/decisions/0002-dual-track-injection-optional-helper.md）设立双轨架构：默认轨保持主程序 SendInput；增强轨为独立、显式安装的提权 Helper，负责按设备吞掉遥控器原始按键并以虚拟键盘驱动执行"与物理按键等价"的注入。驱动来源按序评估 WinUHid 审计、微软公开样例自研、暂缓；未经审计的 WinUHid 二进制不得进入仓库。前置条件：真机物理按键对照 + RC001/RC003 Keyboard/HID 事件形态确认。
 
 ## 7. 验证边界
 
