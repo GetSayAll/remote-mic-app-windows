@@ -4,6 +4,7 @@ import type {
   AudioEndpoint,
   AudioSnapshot,
   ConnectionSnapshot,
+  KeyChord,
   PairedRemote,
   RuntimeSnapshot,
 } from "../lib/bridge";
@@ -14,11 +15,14 @@ import {
   disconnectRemote,
   getAudioSnapshot,
   getConnectionSnapshot,
+  getVoiceHoldHotkey,
   listAudioEndpoints,
   openVbCableDownloadPage,
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
+  setVoiceHoldHotkey,
+  voiceHoldHotkeyLabel,
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -60,7 +64,50 @@ const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
 const audioMessage = ref("尚未读取 Windows 输出端点");
+const voiceHotkey = ref<KeyChord | null>(null);
+const savingVoiceHotkey = ref(false);
+const voiceHotkeyMessage = ref("按住说话快捷键尚未读取");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
+  { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
+  { label: "关闭", keys: [] },
+  { label: "Windows 语音输入", keys: ["left_windows", "h"] },
+];
+
+const activeVoiceHotkeyKeys = computed(() =>
+  voiceHotkey.value ? [...voiceHotkey.value.keys].sort().join("+") : "",
+);
+
+function presetIsActive(keys: string[]): boolean {
+  return [...keys].sort().join("+") === activeVoiceHotkeyKeys.value;
+}
+
+async function applyVoiceHotkey(keys: string[]) {
+  savingVoiceHotkey.value = true;
+  voiceHotkeyMessage.value = "";
+  try {
+    voiceHotkey.value = await setVoiceHoldHotkey(
+      keys.length ? { keys: [...keys] } : null,
+    );
+    voiceHotkeyMessage.value = voiceHotkey.value
+      ? `按住说话快捷键已设为 ${voiceHoldHotkeyLabel(voiceHotkey.value)}`
+      : "按住说话快捷键已关闭，语音键仅输出语音";
+  } catch (error) {
+    voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
+    await refreshVoiceHotkey();
+  } finally {
+    savingVoiceHotkey.value = false;
+  }
+}
+
+async function refreshVoiceHotkey() {
+  try {
+    voiceHotkey.value = await getVoiceHoldHotkey();
+  } catch (error) {
+    voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
 
 watch(
   () => props.runtime?.platform.connection,
@@ -266,6 +313,7 @@ async function initializeAudio() {
 onMounted(() => {
   void refreshConnection();
   void initializeAudio();
+  void refreshVoiceHotkey();
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -403,7 +451,29 @@ onUnmounted(() => {
             <strong>睡眠恢复通知</strong>
             <span>{{ connection.powerNotificationsAvailable ? "Windows API 已注册" : "当前不可用" }}</span>
           </div>
+          <div class="setting-row">
+            <strong>按住说话快捷键</strong>
+            <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
+          </div>
         </div>
+        <div class="card-title-row voice-hotkey-row">
+          <p class="muted">按住说话快捷键：按下语音键 = 按下该快捷键并开始传声，松开 = 释放；语音写入所选输出端点，由目标程序识别成文字。v1 默认适配微信输入法（左 Ctrl+左 Win）。</p>
+          <p class="muted">微信输入法使用步骤：① 输出端点选择 CABLE Input；② 微信输入法的麦克风设为 CABLE Output（在其"语音输入"设置里；若无此项，把系统默认录音设备设为 CABLE Output）；③ 在目标应用的文本框内切换到微信输入法（看任务栏输入指示器确认）；④ 按住遥控器语音键约半秒以上说话，松开等待文字上屏（需联网，云端识别）。快按不出文字是微信输入法自身的最短按住要求，不是故障。应用会自动屏蔽遥控器语音键附带的 F5 键盘事件（否则微信输入法会把快捷键判定为无效），物理键盘的 F5 不受影响。</p>
+        </div>
+        <div class="button-row voice-hotkey-presets">
+          <button
+            v-for="preset in voiceHotkeyPresets"
+            :key="preset.label"
+            :class="presetIsActive(preset.keys) ? 'primary-button' : 'secondary-button'"
+            type="button"
+            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys)"
+            @click="applyVoiceHotkey(preset.keys)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
+
         <div v-if="audioScanComplete && !virtualCableInstalled" class="info-callout warning vb-cable-callout">
           <div>
             <strong>需要安装 VB-CABLE</strong>

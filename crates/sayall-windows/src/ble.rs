@@ -1,13 +1,14 @@
 use crate::{
     audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff,
-    remote_model_from_model_number, remote_model_from_name, ConnectionPhase, ConnectionSnapshot,
-    PlatformError, RemoteModel, UsageCounters,
+    remote_model_from_model_number, remote_model_from_name, send_input::KeyChord,
+    send_input_windows::SendInputRuntime, ConnectionPhase, ConnectionSnapshot, PlatformError,
+    RemoteModel, UsageCounters,
 };
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
 use std::sync::{
     mpsc::{self, Receiver, Sender},
-    Arc, Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard, OnceLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -34,6 +35,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+/// ATVV 麦克风会话延长节拍：遥控器固件对未续期的会话只推约 5-6 秒音频
+/// （2026-09-04 RC003 实测：两次长按 12.95s/8.32s 各只解码 ~5.7s，
+/// 恰为免费窗口；RC001 短按从不触窗）。宿主须周期发送 MIC_EXTEND(0x0E)
+/// 续期，2.5s 间隔留足余量。
+const MICROPHONE_EXTEND_INTERVAL: Duration = Duration::from_millis(2500);
 
 pub struct BleRuntime {
     sender: Sender<WorkerMessage>,
@@ -43,14 +49,29 @@ pub struct BleRuntime {
 }
 
 impl BleRuntime {
-    pub fn new(audio: Arc<AudioRuntime>, usage: Arc<UsageCounters>) -> Self {
+    pub fn new(
+        audio: Arc<AudioRuntime>,
+        usage: Arc<UsageCounters>,
+        send_input: Arc<SendInputRuntime>,
+        voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let worker_state = Arc::clone(&state);
         let worker_sender = sender.clone();
         let worker = thread::Builder::new()
             .name("sayall-ble".to_owned())
-            .spawn(move || worker_loop(receiver, worker_sender, worker_state, audio, usage));
+            .spawn(move || {
+                worker_loop(
+                    receiver,
+                    worker_sender,
+                    worker_state,
+                    audio,
+                    usage,
+                    send_input,
+                    voice_hold_hotkey,
+                )
+            });
 
         match worker {
             Ok(worker) => {
@@ -162,6 +183,8 @@ fn worker_loop(
     state: Arc<Mutex<ConnectionSnapshot>>,
     audio: Arc<AudioRuntime>,
     usage: Arc<UsageCounters>,
+    send_input: Arc<SendInputRuntime>,
+    voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
 ) {
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         *lock(&state) = failed_snapshot(format!("WinRT 初始化失败：{error}"));
@@ -177,9 +200,14 @@ fn worker_loop(
     let mut preferred_device_id: Option<String> = None;
     let mut system_suspended = false;
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
+    let mut held_hotkey: Option<KeyChord> = None;
+    let mut extend_deadline: Option<Instant> = None;
 
     loop {
-        let deadline = nearest_deadline(capabilities_deadline, reconnect_deadline);
+        let deadline = nearest_deadline(
+            nearest_deadline(capabilities_deadline, reconnect_deadline),
+            extend_deadline,
+        );
         let message = match deadline {
             Some(deadline) => {
                 match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -192,6 +220,8 @@ fn worker_loop(
                                 &mut session,
                                 &mut pipeline,
                                 &audio,
+                                &send_input,
+                                &mut held_hotkey,
                                 &mut connection_generation,
                             ) {
                                 stop_reconnect_after_cleanup_failure(
@@ -225,6 +255,8 @@ fn worker_loop(
                                     &sender,
                                     &state,
                                     &audio,
+                                    &send_input,
+                                    &mut held_hotkey,
                                     &mut session,
                                     &mut pipeline,
                                     &mut connection_generation,
@@ -246,6 +278,36 @@ fn worker_loop(
                                             &mut reconnect_deadline,
                                             &error.to_string(),
                                         );
+                                    }
+                                }
+                            }
+                        } else if extend_deadline.is_some_and(|deadline| deadline <= now) {
+                            extend_deadline = None;
+                            // MIC_EXTEND 续期：仅在流式会话进行中发送；编码失败
+                            // （协议版本 <0x0100 不支持延长）则不再排期，避免空转。
+                            if pipeline.state() == VoiceSessionState::Streaming {
+                                if let (Some(connected), Some(capabilities), Some(session_id)) = (
+                                    session.as_ref(),
+                                    pipeline.capabilities(),
+                                    pipeline.session_id(),
+                                ) {
+                                    if let Some(command) =
+                                        (AtvvCommand::MicrophoneExtend {
+                                            version: capabilities.version,
+                                            session_id,
+                                        })
+                                        .encode()
+                                    {
+                                        match connected.write(&command) {
+                                            Ok(()) => {
+                                                extend_deadline =
+                                                    Some(now + MICROPHONE_EXTEND_INTERVAL);
+                                            }
+                                            Err(error) => {
+                                                lock(&state).last_error =
+                                                    Some(format!("发送 MIC_EXTEND 失败：{error}"));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -275,6 +337,8 @@ fn worker_loop(
                     &sender,
                     &state,
                     &audio,
+                    &send_input,
+                    &mut held_hotkey,
                     &mut session,
                     &mut pipeline,
                     &mut connection_generation,
@@ -310,6 +374,8 @@ fn worker_loop(
                     &mut session,
                     &mut pipeline,
                     &audio,
+                    &send_input,
+                    &mut held_hotkey,
                     &mut connection_generation,
                 );
                 match result {
@@ -362,8 +428,12 @@ fn worker_loop(
                         &mut pipeline,
                         &state,
                         &audio,
+                        &send_input,
+                        &voice_hold_hotkey,
+                        &mut held_hotkey,
                         &usage,
                         &mut active_voice_samples,
+                        &mut extend_deadline,
                         &bytes,
                     );
                     let phase = lock(&state).phase;
@@ -383,6 +453,8 @@ fn worker_loop(
                             &mut session,
                             &mut pipeline,
                             &audio,
+                            &send_input,
+                            &mut held_hotkey,
                             &mut connection_generation,
                         ) {
                             stop_reconnect_after_cleanup_failure(
@@ -414,6 +486,8 @@ fn worker_loop(
                         &mut pipeline,
                         &state,
                         &audio,
+                        &send_input,
+                        &mut held_hotkey,
                         &mut active_voice_samples,
                         &bytes,
                     );
@@ -431,6 +505,8 @@ fn worker_loop(
                         &mut session,
                         &mut pipeline,
                         &audio,
+                        &send_input,
+                        &mut held_hotkey,
                         &mut connection_generation,
                     ) {
                         stop_reconnect_after_cleanup_failure(
@@ -466,6 +542,8 @@ fn worker_loop(
                         &mut session,
                         &mut pipeline,
                         &audio,
+                        &send_input,
+                        &mut held_hotkey,
                         &mut connection_generation,
                     ) {
                         stop_reconnect_after_cleanup_failure(
@@ -491,6 +569,8 @@ fn worker_loop(
                     &mut session,
                     &mut pipeline,
                     &audio,
+                    &send_input,
+                    &mut held_hotkey,
                     &mut connection_generation,
                 ) {
                     stop_reconnect_after_cleanup_failure(
@@ -531,6 +611,7 @@ fn worker_loop(
                 }
             }
             WorkerMessage::Shutdown => {
+                release_voice_hold_hotkey(&send_input, &mut held_hotkey);
                 let _ = audio.interrupt_session();
                 let _ = close_session(&mut session);
                 pipeline.interrupt();
@@ -556,12 +637,21 @@ fn attempt_connection(
     sender: &Sender<WorkerMessage>,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
+    send_input: &SendInputRuntime,
+    held_hotkey: &mut Option<KeyChord>,
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
     connection_generation: &mut u64,
     capabilities_deadline: &mut Option<Instant>,
 ) -> Result<ConnectionSnapshot, PlatformError> {
-    invalidate_connection(session, pipeline, audio, connection_generation)?;
+    invalidate_connection(
+        session,
+        pipeline,
+        audio,
+        send_input,
+        held_hotkey,
+        connection_generation,
+    )?;
     let previous = reconnecting.then(|| lock(state).clone());
     *lock(state) = ConnectionSnapshot {
         phase: if reconnecting {
@@ -597,9 +687,12 @@ fn invalidate_connection(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
     audio: &AudioRuntime,
+    send_input: &SendInputRuntime,
+    held_hotkey: &mut Option<KeyChord>,
     connection_generation: &mut u64,
 ) -> Result<(), PlatformError> {
     *connection_generation = connection_generation.wrapping_add(1);
+    release_voice_hold_hotkey(send_input, held_hotkey);
     let mut cleanup_errors = Vec::new();
     if let Err(error) = audio.interrupt_session() {
         cleanup_errors.push(format!("音频中断：{error}"));
@@ -654,8 +747,12 @@ fn handle_control(
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
+    send_input: &SendInputRuntime,
+    voice_hold_hotkey: &Mutex<Option<KeyChord>>,
+    held_hotkey: &mut Option<KeyChord>,
     usage: &UsageCounters,
     active_voice_samples: &mut u64,
+    extend_deadline: &mut Option<Instant>,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -705,12 +802,42 @@ fn handle_control(
             if let Some(session) = session {
                 session.microphone_opened = true;
             }
+            // 排定 MIC_EXTEND 续期节拍：遥控器固件只给约 5-6 秒免费音频窗口，
+            // 未续期即停止推流（RC003 长按实测掐断，RC001 短按不触窗）。
+            *extend_deadline = Some(Instant::now() + MICROPHONE_EXTEND_INTERVAL);
+            // 遥控器语音键同时以 HID 键盘 F5 上报，会让微信输入法的语音和弦
+            // 因“额外按键”被拒绝：会话期间武装 F5 抑制器（见 key_suppressor）。
+            // 注意：必须武装 key_suppressor（lib.rs 实际启动的抑制器）；
+            // 2026-09-04 曾因误接未启动的 voice_key_suppressor 模块导致 F5
+            // 泄漏进和弦、微信输入法拒绝触发（evidence/p 复盘）。
+            crate::key_suppressor::set_session_active(true);
+            // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
+            // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
+            if let Some(chord) = lock(voice_hold_hotkey).clone() {
+                if let Err(error) = send_input.press(&chord) {
+                    abort_voice_session(
+                        session,
+                        pipeline,
+                        state,
+                        audio,
+                        send_input,
+                        held_hotkey,
+                        active_voice_samples,
+                        Some(session_id),
+                        format!("按住说话快捷键注入失败：{error}"),
+                    );
+                    return;
+                }
+                *held_hotkey = Some(chord);
+            }
             if let Err(error) = audio.begin_session(generation) {
                 abort_voice_session(
                     session,
                     pipeline,
                     state,
                     audio,
+                    send_input,
+                    held_hotkey,
                     active_voice_samples,
                     Some(session_id),
                     error.to_string(),
@@ -727,6 +854,11 @@ fn handle_control(
             if let Some(session) = session {
                 session.microphone_opened = false;
             }
+            // 会话结束：取消 MIC_EXTEND 续期节拍（中止路径的过期节拍会在触发时
+            // 自行检查会话状态并清除，无需逐处清理）。
+            *extend_deadline = None;
+            // 松手统一释放：无论音频排空是否成功，先释放按住的快捷键。
+            release_voice_hold_hotkey(send_input, held_hotkey);
             {
                 let mut snapshot = lock(state);
                 snapshot.phase = ConnectionPhase::Draining;
@@ -738,6 +870,8 @@ fn handle_control(
                     pipeline,
                     state,
                     audio,
+                    send_input,
+                    held_hotkey,
                     active_voice_samples,
                     None,
                     error.to_string(),
@@ -765,6 +899,8 @@ fn handle_audio(
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
+    send_input: &SendInputRuntime,
+    held_hotkey: &mut Option<KeyChord>,
     active_voice_samples: &mut u64,
     bytes: &[u8],
 ) {
@@ -777,6 +913,8 @@ fn handle_audio(
             pipeline,
             state,
             audio,
+            send_input,
+            held_hotkey,
             active_voice_samples,
             pipeline.session_id(),
             error,
@@ -795,6 +933,8 @@ fn handle_audio(
                     pipeline,
                     state,
                     audio,
+                    send_input,
+                    held_hotkey,
                     active_voice_samples,
                     pipeline.session_id(),
                     error.to_string(),
@@ -818,10 +958,13 @@ fn abort_voice_session(
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
+    send_input: &SendInputRuntime,
+    held_hotkey: &mut Option<KeyChord>,
     active_voice_samples: &mut u64,
     session_id: Option<u8>,
     error: String,
 ) {
+    release_voice_hold_hotkey(send_input, held_hotkey);
     if let (Some(connected), Some(capabilities), Some(session_id)) =
         (session.as_mut(), pipeline.capabilities(), session_id)
     {
@@ -838,6 +981,17 @@ fn abort_voice_session(
     };
     snapshot.voice_state = VoiceSessionState::Idle;
     snapshot.last_error = Some(error);
+}
+
+/// 统一释放按住说话快捷键：只在当前持有和弦时发送一次反向 UP 边沿，
+/// 并立即清除持有状态，保证断连、睡眠、中止和退出路径不会留下粘住的按键。
+/// 释放失败会记录在 SendInput 快照的 last_error 中，由诊断摘要呈现。
+/// 同时解除语音键 F5 抑制器的会话武装（覆盖停止/中止/断连/退出全部路径）。
+fn release_voice_hold_hotkey(send_input: &SendInputRuntime, held_hotkey: &mut Option<KeyChord>) {
+    crate::key_suppressor::set_session_active(false);
+    if let Some(chord) = held_hotkey.take() {
+        let _ = send_input.release(&chord);
+    }
 }
 
 fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> {
@@ -972,6 +1126,7 @@ impl BleSession {
     }
 
     fn write(&self, bytes: &[u8]) -> Result<(), PlatformError> {
+        gatt_log("T", bytes);
         let writer = DataWriter::new().map_err(windows_error)?;
         writer.WriteBytes(bytes).map_err(windows_error)?;
         let buffer = writer.DetachBuffer().map_err(windows_error)?;
@@ -1075,6 +1230,44 @@ enum WorkerChannel {
     Control,
 }
 
+/// ATVV 诊断日志（环境变量 SAYALL_GATT_LOG=<文件路径> 开启，默认关闭）：
+/// 记录每条 GATT 通知（A=音频/C=控制）与应用发出的每条 TRANSMIT 写入（T），
+/// 含墙钟毫秒、长度与前 24 字节十六进制。用于 RC001/RC003 报文格式取证，
+/// 不含设备身份信息。
+fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
+    static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    SINK
+        .get_or_init(|| {
+            let path = std::env::var_os("SAYALL_GATT_LOG")?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+                .map(Mutex::new)
+        })
+        .as_ref()
+}
+
+fn gatt_log(kind: &str, bytes: &[u8]) {
+    use std::io::Write as _;
+    if let Some(sink) = gatt_sink() {
+        if let Ok(mut file) = sink.lock() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            let preview: String = bytes
+                .iter()
+                .take(24)
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(file, "{kind} {now_ms} len={:3} b=[{preview}]", bytes.len());
+        }
+    }
+}
+
 fn subscribe(
     characteristic: &GattCharacteristic,
     sender: Sender<WorkerMessage>,
@@ -1090,6 +1283,13 @@ fn subscribe(
                 .and_then(|buffer| buffer_to_vec(&buffer));
             match result {
                 Ok(bytes) => {
+                    gatt_log(
+                        match channel {
+                            WorkerChannel::Audio => "A",
+                            WorkerChannel::Control => "C",
+                        },
+                        &bytes,
+                    );
                     let message = match channel {
                         WorkerChannel::Audio => WorkerMessage::Audio {
                             connection_generation,

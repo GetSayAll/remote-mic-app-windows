@@ -11,6 +11,8 @@ mod audio;
 mod ble;
 pub mod compatibility;
 #[cfg(windows)]
+mod key_suppressor;
+#[cfg(windows)]
 mod power;
 pub mod raw_input;
 #[cfg(windows)]
@@ -185,6 +187,9 @@ impl Default for ConnectionSnapshot {
 #[derive(Clone)]
 pub struct WindowsPlatform {
     usage: Arc<UsageCounters>,
+    voice_hold_hotkey: Arc<Mutex<Option<send_input::KeyChord>>>,
+    #[cfg(windows)]
+    voice_key_suppressor: Arc<key_suppressor::VoiceKeySuppressor>,
     #[cfg(windows)]
     runtime: Arc<ble::BleRuntime>,
     #[cfg(windows)]
@@ -208,14 +213,25 @@ impl fmt::Debug for WindowsPlatform {
 impl Default for WindowsPlatform {
     fn default() -> Self {
         let usage = Arc::new(UsageCounters::default());
+        let voice_hold_hotkey = Arc::new(Mutex::new(None));
         #[cfg(windows)]
         {
             let audio = Arc::new(audio::AudioRuntime::new());
-            let runtime = Arc::new(ble::BleRuntime::new(Arc::clone(&audio), Arc::clone(&usage)));
-            let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(Arc::clone(&usage)));
             let send_input = Arc::new(send_input_windows::SendInputRuntime::new());
+            // 语音键 F5 抑制器与 BLE 工作线程通过模块级静态状态协作，
+            // 这里只负责随平台生命周期启动/停止。
+            let voice_key_suppressor = Arc::new(key_suppressor::VoiceKeySuppressor::start());
+            let runtime = Arc::new(ble::BleRuntime::new(
+                Arc::clone(&audio),
+                Arc::clone(&usage),
+                Arc::clone(&send_input),
+                Arc::clone(&voice_hold_hotkey),
+            ));
+            let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(Arc::clone(&usage)));
             Self {
                 usage,
+                voice_hold_hotkey,
+                voice_key_suppressor,
                 runtime,
                 audio,
                 raw_input,
@@ -225,7 +241,10 @@ impl Default for WindowsPlatform {
 
         #[cfg(not(windows))]
         {
-            Self { usage }
+            Self {
+                usage,
+                voice_hold_hotkey,
+            }
         }
     }
 }
@@ -233,6 +252,14 @@ impl Default for WindowsPlatform {
 impl WindowsPlatform {
     pub fn usage_counters(&self) -> Arc<UsageCounters> {
         Arc::clone(&self.usage)
+    }
+
+    pub fn voice_hold_hotkey(&self) -> Option<send_input::KeyChord> {
+        lock(&self.voice_hold_hotkey).clone()
+    }
+
+    pub fn set_voice_hold_hotkey(&self, hotkey: Option<send_input::KeyChord>) {
+        *lock(&self.voice_hold_hotkey) = hotkey;
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {

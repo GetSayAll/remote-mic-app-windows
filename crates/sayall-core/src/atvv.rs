@@ -215,6 +215,14 @@ mod tests {
         );
         assert_eq!(
             AtvvCommand::MicrophoneExtend {
+                version: 0x0100,
+                session_id: 7
+            }
+            .encode(),
+            Some(vec![0x0E, 7])
+        );
+        assert_eq!(
+            AtvvCommand::MicrophoneExtend {
                 version: 1,
                 session_id: 7
             }

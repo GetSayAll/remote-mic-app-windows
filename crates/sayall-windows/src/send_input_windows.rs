@@ -1,4 +1,7 @@
-use crate::send_input::{send_key_tap_with, KeyChord, PlannedKeyEvent, SendInputSnapshot};
+use crate::send_input::{
+    plan_key_down, plan_key_up, send_key_edges_spaced_with, send_key_tap_with, KeyChord,
+    PlannedKeyEvent, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
+};
 use crate::PlatformError;
 use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard};
@@ -28,6 +31,35 @@ impl SendInputRuntime {
 
     pub fn tap(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
         let result = send_key_tap_with(&chord, real_send_input_batch);
+        self.record(result, "SendInput")
+    }
+
+    /// Submit the key-down edges of a chord (voice-key hold-to-talk press).
+    /// One SendInput call per edge with HOLD_CHORD_EVENT_GAP spacing: WeType
+    /// rejects zero-gap batched Ctrl+Win chords (evidence/p, 2026-09-04).
+    pub fn press(&self, chord: &KeyChord) -> Result<SendInputSnapshot, PlatformError> {
+        let events =
+            plan_key_down(chord).map_err(|error| PlatformError::SendInput(error.to_string()))?;
+        let result =
+            send_key_edges_spaced_with(&events, HOLD_CHORD_EVENT_GAP, real_send_input_batch);
+        self.record(result, "SendInput key-down")
+    }
+
+    /// Submit the key-up edges of a chord in reverse order (voice-key release),
+    /// with the same per-event spacing as `press` for symmetric edge timing.
+    pub fn release(&self, chord: &KeyChord) -> Result<SendInputSnapshot, PlatformError> {
+        let events =
+            plan_key_up(chord).map_err(|error| PlatformError::SendInput(error.to_string()))?;
+        let result =
+            send_key_edges_spaced_with(&events, HOLD_CHORD_EVENT_GAP, real_send_input_batch);
+        self.record(result, "SendInput key-up")
+    }
+
+    fn record(
+        &self,
+        result: Result<usize, crate::send_input::SendInputError>,
+        operation: &'static str,
+    ) -> Result<SendInputSnapshot, PlatformError> {
         let mut snapshot = lock(&self.snapshot);
         match result {
             Ok(events) => {
@@ -37,7 +69,7 @@ impl SendInputRuntime {
                 Ok(snapshot.clone())
             }
             Err(error) => {
-                snapshot.last_error = Some(error.to_string());
+                snapshot.last_error = Some(format!("{operation}：{error}"));
                 Err(PlatformError::SendInput(error.to_string()))
             }
         }
@@ -111,5 +143,19 @@ mod tests {
         assert!(keyboard.dwFlags.contains(KEYEVENTF_SCANCODE));
         assert!(keyboard.dwFlags.contains(KEYEVENTF_EXTENDEDKEY));
         assert!(keyboard.dwFlags.contains(KEYEVENTF_KEYUP));
+    }
+
+    #[test]
+    fn right_alt_down_uses_extended_scan_code_without_key_up_flag() {
+        let input = build_input(PlannedKeyEvent {
+            key: KeyCode::RightAlt,
+            is_key_up: false,
+        });
+        let keyboard = unsafe { input.Anonymous.ki };
+        assert_eq!(keyboard.wVk.0, 0);
+        assert_eq!(keyboard.wScan, 0x38);
+        assert!(keyboard.dwFlags.contains(KEYEVENTF_SCANCODE));
+        assert!(keyboard.dwFlags.contains(KEYEVENTF_EXTENDEDKEY));
+        assert!(!keyboard.dwFlags.contains(KEYEVENTF_KEYUP));
     }
 }

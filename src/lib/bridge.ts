@@ -470,6 +470,52 @@ export async function getSendInputSnapshot(): Promise<SendInputSnapshot> {
   return invoke<SendInputSnapshot>("get_send_input_snapshot");
 }
 
+export async function getVoiceHoldHotkey(): Promise<KeyChord | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<KeyChord | null>("get_voice_hold_hotkey");
+}
+
+export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyChord | null> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法保存按住说话快捷键");
+  }
+  return invoke<KeyChord | null>("set_voice_hold_hotkey", { hotkey });
+}
+
+const voiceHotkeyKeyLabels: Record<string, string> = {
+  control: "Ctrl",
+  left_control: "左 Ctrl",
+  right_control: "右 Ctrl",
+  shift: "Shift",
+  left_shift: "左 Shift",
+  right_shift: "右 Shift",
+  alt: "Alt",
+  left_alt: "左 Alt",
+  right_alt: "右 Alt",
+  left_windows: "左 Win",
+  right_windows: "右 Win",
+  enter: "Enter",
+  escape: "Esc",
+  space: "空格",
+  tab: "Tab",
+  apps: "菜单键",
+};
+
+function voiceHotkeyKeyLabel(code: string): string {
+  const known = voiceHotkeyKeyLabels[code];
+  if (known) return known;
+  const digit = /^digit([0-9])$/.exec(code);
+  if (digit) return digit[1];
+  return code.toUpperCase();
+}
+
+export function voiceHoldHotkeyLabel(hotkey: KeyChord | null): string {
+  if (!hotkey || hotkey.keys.length === 0) return "关闭";
+  return hotkey.keys.map(voiceHotkeyKeyLabel).join(" + ");
+}
+
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
   return {
     idle: "尚未连接",
