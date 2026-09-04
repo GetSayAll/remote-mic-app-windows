@@ -28,9 +28,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// （旧系统无此 API 时无副作用）。
 pub fn disable_background_power_throttling() -> Result<(), PlatformError> {
     use windows::Win32::System::Threading::{
-        SetProcessInformation, PROCESS_INFORMATION_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
-        PROCESS_POWER_THROTTLING_STATE,
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
     };
     let state = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -40,8 +40,8 @@ pub fn disable_background_power_throttling() -> Result<(), PlatformError> {
     };
     unsafe {
         SetProcessInformation(
-            windows::Win32::Foundation::GetCurrentProcess(),
-            PROCESS_INFORMATION_CLASS::ProcessPowerThrottling,
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
             &state as *const PROCESS_POWER_THROTTLING_STATE as *const c_void,
             size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
         )
