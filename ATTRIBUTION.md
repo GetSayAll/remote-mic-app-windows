@@ -30,6 +30,7 @@
 - **WeType/微信输入法语音快捷键形态**：默认按住 Ctrl+Win（微信电脑版 4.1.7+ 同款，可于微信"设置→快捷键"自定义；新浪财经/光明网/callmysoft 报道）；社区帖（linux.do/t/topic/2409202，2026-06-15，早于 2.1.3，引自搜索摘要）称 WeType 语音快捷键"必须以 Ctrl/Alt/Shift 开头，不能设独立单键"——**待 2.1.3 真机复核**；ghxi 评论区提到"单击 Ctrl 触发"模式（懒加载未复核）。讯飞输入法 PC 版默认 F6 单键+长按说话（pconline/3DM/ghxi 教程）——竞品基线，未实测其延迟。
 - **竞品/社区对"面板出现延迟"的讨论**：未找到任何量化"按下→微信电平图出现"的公开评测（横评均测识别速度/准确率）；游戏侧有 PTT 激活延迟 1s-5s 的社区案例（Overwatch 官方论坛、Valorant Reddit），第三方全局钩子（如 Razer Synapse）可使 PTT 延迟 3-5s——排查本机钩子干扰的依据。
 - **本专项实测结论（evidence/p，2026-09-05）**：注入→WeType 开麦（ConsentStore 精确 FILETIME 判据）稳定 ~163ms（13 试验 ±5ms），端点预热无效；两型号遥控器实际均直接 0x04 开始推流（历史 GATT 日志 0x08 计数为 0，无可并行的开麦往返）；0x04 通知早于 HID F5 键盘事件 60-90ms 到达（evidence/p 2026-09-04 取证），当前"0x04 到达即注入"已是链路最早合法触发点。剩余 ~215-245ms = BLE/固件（~30-60ms）+ 和弦间隔（20ms）+ WeType 内部处理（~163ms，外部不可合法压缩）。
+- **macOS 版输入目的地/输入源设计（HD838A/remote-mic-app，本机 clone `Documents\Codex\remote-mic-app`）**：`VoiceInputDestinationCoordinator.swift`——语音触发由"聚焦目的地就绪"门控（AX 系统级聚焦快照：role ∈ {AXTextArea/AXTextField/AXComboBox} + enabled + editable + 非保护内容 + 语义文本不含 password/search/设置 等敏感词；不就绪 UI 提示等待/不可用，5s 超时不注入）；`PreferredInputSourceMonitor`——保证配置的语音工具是活动输入源。**Windows 版 IME 专项（2026-09-05）借鉴其输入源职责**：实测 WeType 语音热键仅在自身为会话活动输入法时生效（微软拼音活跃 2/2 不触发、切回 2/2 恢复、激活后零延迟注入 3/3 触发，evidence/p），已实现 `ime.rs`（TSF `ActivateProfile` + `TF_IPPMF_FORSESSION` 会话级激活，公开 API，失败不阻断）。macOS 的 AX 聚焦目的地门控在 Windows 未采用——焦点实验证明 WeType 开麦不依赖文本焦点（6/6，桌面/资源管理器照常触发），聚焦门控留给未来 UIA 版本按需评估。
 
 ## BLE 僵死链路自动恢复调研来源（2026-09-05，重连健壮性专项）
 
