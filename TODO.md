@@ -44,3 +44,7 @@
 
 - **BLE 僵死链路自动恢复（bluetooth_radio.rs，新增）**：应用被强杀后 OS 侧 GATT/HID 链路或服务缓存可能僵死，普通重试永不恢复（真机取证 + Qt 论坛同结论：关开蓝牙是唯一有效公开 API 手段）。重连循环连续失败 5 次（约 60s）自动关开蓝牙无线电一次（Off→2s→On），每僵死周期最多 2 次防抖动，UI 提示全程可见；WinRT Radio API 未打包进程可用、无需提权（真机验证：开关周期后重连立即成功）。详见 docs\investigations\evidence\p\FINDINGS.md 2026-09-05 节与 ATTRIBUTION.md BLE 恢复调研来源。
 - 语音键 F5 抑制器补防粘键配对（VVC 同款"DOWN 漏进 OS 则 UP 必放行"）：按下沿 60ms 有界等待超时泄漏时，释放沿放行，杜绝"F5 粘住→和弦全部被拒"的整机失效模式。
+
+### 2026-09-05 IME 专项
+
+- **语音"无法唤起"根因 = 会话活动输入法不是微信输入法**（WeType 语音热键仅在自身活跃时生效；焦点无关，桌面/资源管理器聚焦 6/6 照常开麦）。修复（ime.rs）：注入和弦前用公开 TSF API 会话级激活 WeType（TF_IPPMF_FORSESSION，零延迟 3/3 实证），失败不阻断。参考 macOS 版 PreferredInputSourceMonitor 职责设计。

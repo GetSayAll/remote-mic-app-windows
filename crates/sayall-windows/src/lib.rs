@@ -13,6 +13,8 @@ mod ble;
 mod bluetooth_radio;
 pub mod compatibility;
 #[cfg(windows)]
+mod ime;
+#[cfg(windows)]
 mod key_suppressor;
 #[cfg(windows)]
 mod power;
