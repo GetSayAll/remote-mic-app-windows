@@ -17,6 +17,8 @@ pub mod button_mapping;
 pub mod compatibility;
 pub mod key_gate;
 #[cfg(windows)]
+mod ime;
+#[cfg(windows)]
 mod key_suppressor;
 #[cfg(windows)]
 mod power;
