@@ -61,6 +61,13 @@ export type RemoteButton =
   | "volume_up"
   | "volume_down";
 
+export type ButtonTrigger = "single" | "double" | "long";
+
+export interface ButtonEdge {
+  button: RemoteButton;
+  isPressed: boolean;
+}
+
 export interface RawInputSnapshot {
   phase: RawInputPhase;
   matchedDeviceCount: number;
@@ -68,6 +75,7 @@ export interface RawInputSnapshot {
   semanticEdgeCount: number;
   lastButton: RemoteButton | null;
   lastIsPressed: boolean | null;
+  activeButtons: RemoteButton[];
   lastError: string | null;
 }
 
@@ -81,8 +89,32 @@ export type ButtonAction =
   | { type: "disabled" }
   | { type: "shortcut"; chord: KeyChord };
 
+/** 每键三列（单击/双击/长按），对齐 Mac 原版 ButtonTrigger。 */
+export interface ButtonActions {
+  single: ButtonAction;
+  double: ButtonAction;
+  long: ButtonAction;
+}
+
 export interface ButtonMappings {
-  actions: Partial<Record<RemoteButton, ButtonAction>>;
+  enabled: boolean;
+  actions: Partial<Record<RemoteButton, ButtonActions>>;
+}
+
+export interface FiredGesture {
+  button: RemoteButton;
+  trigger: ButtonTrigger;
+}
+
+export interface ButtonMappingSnapshot {
+  enabled: boolean;
+  gateActive: boolean;
+  listenerActive: boolean;
+  swallowedEdges: number;
+  leakedDowns: number;
+  firedGestures: number;
+  lastFired: FiredGesture | null;
+  lastError: string | null;
 }
 
 export interface SendInputSnapshot {
@@ -126,6 +158,7 @@ export interface PlatformSnapshot {
   connection: ConnectionSnapshot;
   audio: AudioSnapshot;
   rawInput: RawInputSnapshot;
+  buttonMapping: ButtonMappingSnapshot;
 }
 
 export interface RuntimeSnapshot {
@@ -180,6 +213,15 @@ export interface DiagnosticReport {
     submittedEvents: number;
     errorPresent: boolean;
   };
+  buttonMapping: {
+    enabled: boolean;
+    gateActive: boolean;
+    listenerActive: boolean;
+    swallowedEdges: number;
+    leakedDowns: number;
+    firedGestures: number;
+    errorPresent: boolean;
+  };
 }
 
 export interface PairedRemote {
@@ -228,6 +270,17 @@ const browserSnapshot: RuntimeSnapshot = {
       semanticEdgeCount: 0,
       lastButton: null,
       lastIsPressed: null,
+      activeButtons: [],
+      lastError: null,
+    },
+    buttonMapping: {
+      enabled: true,
+      gateActive: false,
+      listenerActive: false,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      lastFired: null,
       lastError: null,
     },
   },
@@ -291,6 +344,15 @@ export async function getDiagnosticReport(): Promise<DiagnosticReport> {
         available: false,
         submittedBatches: 0,
         submittedEvents: 0,
+        errorPresent: false,
+      },
+      buttonMapping: {
+        enabled: true,
+        gateActive: false,
+        listenerActive: false,
+        swallowedEdges: 0,
+        leakedDowns: 0,
+        firedGestures: 0,
         errorPresent: false,
       },
     };
@@ -385,7 +447,7 @@ export async function stopRawInput(): Promise<RawInputSnapshot> {
 
 export async function getButtonMappings(): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
-    return { actions: {} };
+    return { enabled: true, actions: {} };
   }
   return invoke<ButtonMappings>("get_button_mappings");
 }
@@ -397,11 +459,65 @@ export async function saveButtonMappings(mappings: ButtonMappings): Promise<Butt
   return invoke<ButtonMappings>("save_button_mappings", { mappings });
 }
 
-export async function testButtonMapping(button: RemoteButton): Promise<SendInputSnapshot> {
+export async function resetButtonMappings(): Promise<ButtonMappings> {
+  if (!isTauriRuntime()) {
+    return { enabled: true, actions: {} };
+  }
+  return invoke<ButtonMappings>("reset_button_mappings");
+}
+
+export async function testButtonMapping(
+  button: RemoteButton,
+  trigger: ButtonTrigger,
+): Promise<SendInputSnapshot> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法执行 Windows SendInput");
   }
-  return invoke<SendInputSnapshot>("test_button_mapping", { button });
+  return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger });
+}
+
+export async function getButtonMappingSnapshot(): Promise<ButtonMappingSnapshot> {
+  if (!isTauriRuntime()) {
+    return {
+      enabled: true,
+      gateActive: false,
+      listenerActive: false,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      lastFired: null,
+      lastError: null,
+    };
+  }
+  return invoke<ButtonMappingSnapshot>("get_button_mapping_snapshot");
+}
+
+/** 订阅语义按键边沿（画布高亮数据源）；浏览器预览下为空订阅。 */
+export async function subscribeButtonEdges(
+  handler: (edge: ButtonEdge) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<ButtonEdge>("button-edge", (event) => handler(event.payload));
+  return () => {
+    void unlisten();
+  };
+}
+
+/** 订阅已触发手势（单击/双击/长按反馈）；浏览器预览下为空订阅。 */
+export async function subscribeButtonGestures(
+  handler: (gesture: FiredGesture) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<FiredGesture>("button-gesture", (event) => handler(event.payload));
+  return () => {
+    void unlisten();
+  };
 }
 
 export async function getSendInputSnapshot(): Promise<SendInputSnapshot> {
@@ -490,4 +606,78 @@ export function audioPhaseLabel(phase: AudioPhase): string {
     failed: "WASAPI 输出失败",
     unsupported: "当前环境不支持 WASAPI",
   }[phase];
+}
+
+export const buttonLabels: Record<RemoteButton, string> = {
+  back: "返回",
+  ok: "确定",
+  tv: "TV",
+  home: "主页",
+  right: "右",
+  left: "左",
+  down: "下",
+  up: "上",
+  menu: "菜单",
+  power: "电源",
+  volume_mute: "静音",
+  volume_up: "音量+",
+  volume_down: "音量−",
+};
+
+export function buttonLabel(button: RemoteButton): string {
+  return buttonLabels[button];
+}
+
+export function buttonTriggerLabel(trigger: ButtonTrigger): string {
+  return {
+    single: "单击",
+    double: "双击",
+    long: "长按",
+  }[trigger];
+}
+
+const keyLabels: Record<string, string> = {
+  ...voiceHotkeyKeyLabels,
+  backspace: "退格",
+  page_up: "Page Up",
+  page_down: "Page Down",
+  end: "End",
+  insert: "Insert",
+  delete: "Delete",
+  left: "←",
+  up: "↑",
+  right: "→",
+  down: "↓",
+  volume_mute: "静音",
+  volume_down: "音量−",
+  volume_up: "音量+",
+  f1: "F1",
+  f2: "F2",
+  f3: "F3",
+  f4: "F4",
+  f5: "F5",
+  f6: "F6",
+  f7: "F7",
+  f8: "F8",
+  f9: "F9",
+  f10: "F10",
+  f11: "F11",
+  f12: "F12",
+};
+
+export function keyLabel(code: KeyCode): string {
+  const known = keyLabels[code];
+  if (known) return known;
+  const digit = /^digit([0-9])$/.exec(code);
+  if (digit) return digit[1];
+  return code.toUpperCase();
+}
+
+export function chordLabel(chord: KeyChord): string {
+  return chord.keys.map(keyLabel).join(" + ");
+}
+
+export function actionSummary(action: ButtonAction | undefined): string {
+  if (!action || action.type === "disabled") return "未设置";
+  return chordLabel(action.chord);
 }

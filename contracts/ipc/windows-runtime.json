@@ -43,6 +43,20 @@
       "semanticEdgeCount": 8,
       "lastButton": "home",
       "lastIsPressed": true,
+      "activeButtons": ["home"],
+      "lastError": null
+    },
+    "buttonMapping": {
+      "enabled": true,
+      "gateActive": true,
+      "listenerActive": true,
+      "swallowedEdges": 4,
+      "leakedDowns": 0,
+      "firedGestures": 3,
+      "lastFired": {
+        "button": "home",
+        "trigger": "single"
+      },
       "lastError": null
     }
   },
