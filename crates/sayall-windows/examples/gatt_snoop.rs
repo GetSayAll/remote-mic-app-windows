@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::core::GUID;
-use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
-    GattCharacteristic, GattCharacteristicProperties, GattValueChangedEventArgs,
+    GattCharacteristic, GattCharacteristicProperties,
     GattClientCharacteristicConfigurationDescriptorValue, GattCommunicationStatus,
-    GattDeviceService,
+    GattDeviceService, GattValueChangedEventArgs,
 };
+use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice};
 use windows::Devices::Enumeration::DeviceInformation;
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, IBuffer};
@@ -88,10 +88,9 @@ fn main() {
     let service = {
         let selector =
             GattDeviceService::GetDeviceSelectorFromUuid(SERVICE_UUID).expect("选择器失败");
-        let operation =
-            DeviceInformation::FindAllAsyncAqsFilter(&selector).expect("枚举接口失败");
-        let collection = futures::executor::block_on(operation.into_future())
-            .expect("等待接口枚举失败");
+        let operation = DeviceInformation::FindAllAsyncAqsFilter(&selector).expect("枚举接口失败");
+        let collection =
+            futures::executor::block_on(operation.into_future()).expect("等待接口枚举失败");
         let count = collection.Size().unwrap();
         let address_hex = format!("{address:012X}");
         let mut matched: Option<windows::core::HSTRING> = None;
@@ -139,8 +138,7 @@ fn main() {
                     },
                 )
                 .expect(label);
-            let candidate =
-                futures::executor::block_on(operation.into_future()).expect(label);
+            let candidate = futures::executor::block_on(operation.into_future()).expect(label);
             let status = candidate.Status().unwrap();
             if status == GattCommunicationStatus::Success {
                 let characteristics = candidate.Characteristics().unwrap();
@@ -172,25 +170,22 @@ fn main() {
         let sink = Arc::clone(&sink);
         let running = Arc::clone(&running);
         let start = start;
-        let handler =
-            TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
-                move |_, args| {
-                    if !running.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    if let Some(args) = args.as_ref() {
-                        if let Ok(bytes) =
-                            args.CharacteristicValue().and_then(|b| buffer_to_vec(&b))
-                        {
-                            let line = log_line("A", &start, &bytes);
-                            if let Ok(mut file) = sink.lock() {
-                                let _ = file.write_all(line.as_bytes());
-                            }
+        let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
+            move |_, args| {
+                if !running.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                if let Some(args) = args.as_ref() {
+                    if let Ok(bytes) = args.CharacteristicValue().and_then(|b| buffer_to_vec(&b)) {
+                        let line = log_line("A", &start, &bytes);
+                        if let Ok(mut file) = sink.lock() {
+                            let _ = file.write_all(line.as_bytes());
                         }
                     }
-                    Ok(())
-                },
-            );
+                }
+                Ok(())
+            },
+        );
         if let Ok(token) = audio.ValueChanged(&handler) {
             audio_token = Some(token);
         }
@@ -199,25 +194,22 @@ fn main() {
         let sink = Arc::clone(&sink);
         let running = Arc::clone(&running);
         let start = start;
-        let handler =
-            TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
-                move |_, args| {
-                    if !running.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    if let Some(args) = args.as_ref() {
-                        if let Ok(bytes) =
-                            args.CharacteristicValue().and_then(|b| buffer_to_vec(&b))
-                        {
-                            let line = log_line("C", &start, &bytes);
-                            if let Ok(mut file) = sink.lock() {
-                                let _ = file.write_all(line.as_bytes());
-                            }
+        let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
+            move |_, args| {
+                if !running.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                if let Some(args) = args.as_ref() {
+                    if let Ok(bytes) = args.CharacteristicValue().and_then(|b| buffer_to_vec(&b)) {
+                        let line = log_line("C", &start, &bytes);
+                        if let Ok(mut file) = sink.lock() {
+                            let _ = file.write_all(line.as_bytes());
                         }
                     }
-                    Ok(())
-                },
-            );
+                }
+                Ok(())
+            },
+        );
         if let Ok(token) = control.ValueChanged(&handler) {
             control_token = Some(token);
         }
@@ -234,8 +226,7 @@ fn main() {
         let operation = characteristic
             .WriteClientCharacteristicConfigurationDescriptorAsync(value)
             .expect("CCCD 写入失败");
-        let status =
-            futures::executor::block_on(operation.into_future()).expect("CCCD 等待失败");
+        let status = futures::executor::block_on(operation.into_future()).expect("CCCD 等待失败");
         assert_eq!(status, GattCommunicationStatus::Success, "CCCD 写入失败");
     }
 
