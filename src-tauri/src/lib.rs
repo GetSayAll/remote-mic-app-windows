@@ -1,5 +1,5 @@
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
-use sayall_windows::send_input::{ButtonAction, ButtonMappings, SendInputSnapshot};
+use sayall_windows::send_input::{ButtonAction, ButtonMappings, KeyChord, SendInputSnapshot};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
@@ -229,6 +229,27 @@ fn get_send_input_snapshot(state: tauri::State<'_, AppState>) -> SendInputSnapsh
     state.platform.send_input_snapshot()
 }
 
+#[tauri::command]
+fn get_voice_hold_hotkey(state: tauri::State<'_, AppState>) -> Option<KeyChord> {
+    state.platform.voice_hold_hotkey()
+}
+
+#[tauri::command]
+async fn set_voice_hold_hotkey(
+    hotkey: Option<KeyChord>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<KeyChord>, String> {
+    let platform = Arc::clone(&state.platform);
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let saved = settings.save_voice_hold_hotkey(hotkey)?;
+        platform.set_voice_hold_hotkey(saved.clone());
+        Ok(saved)
+    })
+    .await
+    .map_err(|error| format!("保存按住说话快捷键任务失败：{error}"))?
+}
+
 #[cfg(feature = "runtime-simulation")]
 #[tauri::command]
 fn run_runtime_simulation_voice_session(
@@ -343,6 +364,14 @@ pub fn run() {
                 }
             }
 
+            match settings.load_voice_hold_hotkey() {
+                Ok(hotkey) => platform.set_voice_hold_hotkey(hotkey),
+                Err(error) => {
+                    eprintln!("{error}");
+                    platform.set_voice_hold_hotkey(None);
+                }
+            }
+
             #[cfg(not(windows))]
             let _ = saved_settings;
 
@@ -374,6 +403,8 @@ pub fn run() {
         save_button_mappings,
         test_button_mapping,
         get_send_input_snapshot,
+        get_voice_hold_hotkey,
+        set_voice_hold_hotkey,
         run_runtime_simulation_voice_session,
         complete_runtime_simulation_smoke
     ]);
@@ -395,7 +426,9 @@ pub fn run() {
         get_button_mappings,
         save_button_mappings,
         test_button_mapping,
-        get_send_input_snapshot
+        get_send_input_snapshot,
+        get_voice_hold_hotkey,
+        set_voice_hold_hotkey
     ]);
 
     builder

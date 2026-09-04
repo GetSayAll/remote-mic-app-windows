@@ -1,10 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::thread;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::raw_input::RemoteButton;
 
 const MAX_CHORD_KEYS: usize = 4;
+
+/// Gap between consecutive edges of a held-chord submission (voice hold hotkey).
+///
+/// WeType 2.1.3.18 does not recognize Ctrl+Win injected as one zero-gap
+/// SendInput batch: the modifier DOWN edge and the second key DOWN edge must be
+/// separated in time, otherwise the voice session never starts. Per-event
+/// submission with an 80 ms gap triggers reliably (2/2 runs, mic ConsentStore
+/// ground truth; see docs/investigations/evidence/p/FINDINGS.md, 2026-09-04,
+/// A-fail/B-pass alternating sequence).
+pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(80);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -355,6 +367,44 @@ fn best_effort_release(
     }
 }
 
+/// Submit pre-planned key edges (for example a held Ctrl+Win voice-hotkey
+/// chord) one event per SendInput call, sleeping `gap` between consecutive
+/// events. IME voice hotkeys (WeType) reject zero-gap batched chords, so the
+/// edges of a held chord must be spaced; 80 ms is the empirically validated
+/// gap (evidence/p). If an event fails to land, the events that did land are
+/// rolled back best-effort so a held hotkey never stays stuck.
+pub fn send_key_edges_spaced_with(
+    events: &[PlannedKeyEvent],
+    gap: Duration,
+    mut sender: impl FnMut(&[PlannedKeyEvent]) -> Result<usize, String>,
+) -> Result<usize, SendInputError> {
+    if events.is_empty() {
+        return Err(SendInputError::EmptyChord);
+    }
+    let mut delivered: Vec<KeyCode> = Vec::with_capacity(events.len());
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 && !gap.is_zero() {
+            thread::sleep(gap);
+        }
+        let sent = match sender(std::slice::from_ref(event)) {
+            Ok(sent) => sent,
+            Err(error) => {
+                best_effort_release(delivered.iter().rev().copied(), &mut sender);
+                return Err(SendInputError::Backend(error));
+            }
+        };
+        if sent == 0 {
+            best_effort_release(delivered.iter().rev().copied(), &mut sender);
+            return Err(SendInputError::PartialDelivery {
+                sent: delivered.len(),
+                expected: events.len(),
+            });
+        }
+        delivered.push(event.key);
+    }
+    Ok(events.len())
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SendInputError {
     #[error("a shortcut must contain at least one key")]
@@ -485,6 +535,90 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[1][0].key, KeyCode::D);
         assert_eq!(calls[2][0].key, KeyCode::LeftWindows);
+    }
+
+    #[test]
+    fn spaced_edge_submission_sends_one_event_per_call_and_rolls_back_on_failure() {
+        let down = [
+            PlannedKeyEvent {
+                key: KeyCode::LeftControl,
+                is_key_up: false,
+            },
+            PlannedKeyEvent {
+                key: KeyCode::LeftWindows,
+                is_key_up: false,
+            },
+        ];
+
+        // Happy path: one SendInput call per event, no batch merging.
+        let mut calls = Vec::new();
+        let sent = send_key_edges_spaced_with(&down, Duration::ZERO, |events| {
+            calls.push(events.to_vec());
+            Ok(events.len())
+        })
+        .unwrap();
+        assert_eq!(sent, 2);
+        assert_eq!(calls, vec![vec![down[0].clone()], vec![down[1].clone()]]);
+
+        // Backend failure on the second event rolls back the first key.
+        let mut calls = Vec::new();
+        let result = send_key_edges_spaced_with(&down, Duration::ZERO, |events| {
+            calls.push(events.to_vec());
+            if calls.len() == 1 {
+                Ok(1)
+            } else {
+                Err("stuck".to_owned())
+            }
+        });
+        assert_eq!(result, Err(SendInputError::Backend("stuck".to_owned())));
+        assert_eq!(
+            calls,
+            vec![
+                vec![down[0].clone()],
+                vec![down[1].clone()],
+                vec![PlannedKeyEvent {
+                    key: KeyCode::LeftControl,
+                    is_key_up: true,
+                }],
+            ]
+        );
+
+        // Zero delivery on the second event reports partial delivery and rolls back.
+        let mut calls = Vec::new();
+        let result = send_key_edges_spaced_with(&down, Duration::ZERO, |events| {
+            calls.push(events.to_vec());
+            Ok(if calls.len() == 1 { 1 } else { 0 })
+        });
+        assert_eq!(
+            result,
+            Err(SendInputError::PartialDelivery {
+                sent: 1,
+                expected: 2
+            })
+        );
+        assert_eq!(
+            calls,
+            vec![
+                vec![down[0].clone()],
+                vec![down[1].clone()],
+                vec![PlannedKeyEvent {
+                    key: KeyCode::LeftControl,
+                    is_key_up: true,
+                }],
+            ]
+        );
+
+        assert_eq!(
+            send_key_edges_spaced_with(&[], Duration::ZERO, |_| Ok(0)),
+            Err(SendInputError::EmptyChord)
+        );
+    }
+
+    #[test]
+    fn right_alt_uses_extended_alt_scan_code_and_virtual_key() {
+        assert_eq!(KeyCode::RightAlt.virtual_key(), 0xA5);
+        assert_eq!(KeyCode::RightAlt.physical_scan_code(), Some((0x38, true)));
+        assert!(KeyCode::RightAlt.is_extended());
     }
 
     #[test]
