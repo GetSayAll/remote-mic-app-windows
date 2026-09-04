@@ -11,12 +11,14 @@ const MAX_CHORD_KEYS: usize = 4;
 /// Gap between consecutive edges of a held-chord submission (voice hold hotkey).
 ///
 /// WeType 2.1.3.18 does not recognize Ctrl+Win injected as one zero-gap
-/// SendInput batch: the modifier DOWN edge and the second key DOWN edge must be
-/// separated in time, otherwise the voice session never starts. Per-event
-/// submission with an 80 ms gap triggers reliably (2/2 runs, mic ConsentStore
-/// ground truth; see docs/investigations/evidence/p/FINDINGS.md, 2026-09-04,
-/// A-fail/B-pass alternating sequence).
-pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(80);
+/// SendInput batch: the modifier DOWN edge and the second key DOWN edge must
+/// be separated in time, otherwise the voice session never starts. Per-event
+/// submission with a small gap triggers reliably; 20 ms was validated at 4/4
+/// (20/40/60 ms all 4/4, zero-gap batch 0/2; see
+/// docs/investigations/evidence/p and
+/// Testing\investigation\p-chord-gap-experiment.ps1, 2026-09-04). Keep this
+/// gap small: it sits on the critical path of every voice-key press.
+pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
