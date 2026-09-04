@@ -141,13 +141,7 @@ mod windows_impl {
                     let is_key_up = matches!(message, 0x0101 | 0x0105);
                     if is_key_up {
                         let hold = HOLD_PAIRING.swap(HOLD_NONE, Ordering::Relaxed);
-                        if decide(
-                            VK_F5,
-                            true,
-                            session_active(),
-                            armed(),
-                            hold,
-                        ) {
+                        if decide(VK_F5, true, session_active(), armed(), hold) {
                             return LRESULT(1);
                         }
                         // DOWN 沿曾泄漏进 OS（或配对未知）：放行 UP，防止粘键。
@@ -186,8 +180,7 @@ mod windows_impl {
     /// 钩子链头 bump：先挂新钩（立即成为链头），再卸旧钩——重叠安装无吞键空窗
     /// （Voice_VibeCoding 同款技巧）。新钩安装失败时保留旧钩。
     fn bump_to_chain_head(current: &mut Option<HHOOK>) {
-        if let Ok(new_hook) =
-            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
+        if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
         {
             let old = current.replace(new_hook);
             if let Some(old) = old {
@@ -282,9 +275,7 @@ mod windows_impl {
             };
             let _ = thread_id_tx.send(GetCurrentThreadId());
 
-            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0"
-                .encode_utf16()
-                .collect();
+            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0".encode_utf16().collect();
             let class_name_ptr = PCWSTR(class_name.as_ptr());
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(raw_wnd_proc),
@@ -344,10 +335,8 @@ mod windows_impl {
                 dwFlags: RIDEV_REMOVE,
                 hwndTarget: HWND::default(),
             }];
-            let _ = RegisterRawInputDevices(
-                &removals,
-                std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-            );
+            let _ =
+                RegisterRawInputDevices(&removals, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
             let _ = DestroyWindow(hwnd);
             let _ = UnregisterClassW(class_name_ptr, Some(instance));
         }
@@ -450,8 +439,7 @@ mod windows_impl {
             let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
             if thread_id != 0 {
                 unsafe {
-                    let _ =
-                        PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
+                    let _ = PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
                 }
             }
         } else {
@@ -473,8 +461,7 @@ mod windows_impl {
             }
             if self.raw_thread_id != 0 {
                 unsafe {
-                    let _ =
-                        PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+                    let _ = PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
                 }
             }
             if let Some(worker) = self.worker.take() {
@@ -499,7 +486,13 @@ mod tests {
     fn only_remote_or_session_f5_down_is_swallowed() {
         // DOWN 沿：非 F5 一律透传；F5 仅在会话或武装时吞（配对状态不参与）。
         assert!(!super::decide(0x41, false, false, false, super::HOLD_NONE));
-        assert!(!super::decide(0x41, true, true, true, super::HOLD_SWALLOWED_ALL));
+        assert!(!super::decide(
+            0x41,
+            true,
+            true,
+            true,
+            super::HOLD_SWALLOWED_ALL
+        ));
         assert!(!super::decide(0x74, false, false, false, super::HOLD_NONE));
         assert!(super::decide(0x74, false, true, false, super::HOLD_NONE));
         assert!(super::decide(0x74, false, false, true, super::HOLD_NONE));
@@ -510,10 +503,22 @@ mod tests {
         // UP 沿只认配对（VVC 同款防粘键：DOWN 漏进 OS 则 UP 必放行）：
         // 全吞的按住才吞对应 UP；已泄漏/配对未知一律放行，即使会话与武装
         // 仍生效也不吞——DOWN 已进 OS，UP 跟进才能解除 OS 键态。
-        assert!(super::decide(0x74, true, false, false, super::HOLD_SWALLOWED_ALL));
+        assert!(super::decide(
+            0x74,
+            true,
+            false,
+            false,
+            super::HOLD_SWALLOWED_ALL
+        ));
         assert!(!super::decide(0x74, true, true, true, super::HOLD_LEAKED));
         assert!(!super::decide(0x74, true, true, true, super::HOLD_NONE));
-        assert!(!super::decide(0x41, true, true, true, super::HOLD_SWALLOWED_ALL));
+        assert!(!super::decide(
+            0x41,
+            true,
+            true,
+            true,
+            super::HOLD_SWALLOWED_ALL
+        ));
     }
 
     #[test]
@@ -532,7 +537,13 @@ mod tests {
             super::track_down(super::HOLD_SWALLOWED_ALL, false),
             super::HOLD_LEAKED
         );
-        assert_eq!(super::track_down(super::HOLD_LEAKED, true), super::HOLD_LEAKED);
-        assert_eq!(super::track_down(super::HOLD_NONE, false), super::HOLD_LEAKED);
+        assert_eq!(
+            super::track_down(super::HOLD_LEAKED, true),
+            super::HOLD_LEAKED
+        );
+        assert_eq!(
+            super::track_down(super::HOLD_NONE, false),
+            super::HOLD_LEAKED
+        );
     }
 }

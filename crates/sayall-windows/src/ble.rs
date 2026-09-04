@@ -302,8 +302,7 @@ fn worker_loop(
                                                     crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
                                                 ));
                                             }
-                                            match crate::bluetooth_radio::cycle_bluetooth_radio()
-                                            {
+                                            match crate::bluetooth_radio::cycle_bluetooth_radio() {
                                                 Ok(()) => {
                                                     lock(&state).last_error = Some(
                                                         "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
@@ -339,12 +338,11 @@ fn worker_loop(
                                     pipeline.capabilities(),
                                     pipeline.session_id(),
                                 ) {
-                                    if let Some(command) =
-                                        (AtvvCommand::MicrophoneExtend {
-                                            version: capabilities.version,
-                                            session_id,
-                                        })
-                                        .encode()
+                                    if let Some(command) = (AtvvCommand::MicrophoneExtend {
+                                        version: capabilities.version,
+                                        session_id,
+                                    })
+                                    .encode()
                                     {
                                         match connected.write(&command) {
                                             Ok(()) => {
@@ -1289,17 +1287,16 @@ enum WorkerChannel {
 /// 不含设备身份信息。
 fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
     static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    SINK
-        .get_or_init(|| {
-            let path = std::env::var_os("SAYALL_GATT_LOG")?;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-                .map(Mutex::new)
-        })
-        .as_ref()
+    SINK.get_or_init(|| {
+        let path = std::env::var_os("SAYALL_GATT_LOG")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(Mutex::new)
+    })
+    .as_ref()
 }
 
 fn gatt_log(kind: &str, bytes: &[u8]) {
