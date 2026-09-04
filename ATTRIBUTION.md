@@ -18,4 +18,24 @@
 - `QL-4/RemoteMapper`，main 提交 `25ca0c13cf2ff2caf7caae3d9690f9629b7c0df0`（另有 `driverless-keymap` 分支）：小米蓝牙遥控器 → 微信输入法（WeType）语音录入的完整端到端先例——按住语音键唤起 WeType 录入并送入音频，松开结束录入并恢复系统原默认麦克风。可借鉴结论：(1) **双分支分层**：`main` 含 KMDF HID lower filter（需 TESTSIGNING），`driverless-keymap` 无驱动直接交付、但缺返回/音量±三个键（被 kbdhid.sys 丢弃）且 LL 钩子映射会误吞物理键盘同名键——印证本仓库"基础路径免驱动 + 增强轨驱动"分层与"LL 钩子无来源设备 ID"的既有判断；(2) **MiRemoteHidFilter 驱动做法**：extension INF 精确绑定 VID 0x2717 / PID 0x32B8（不匹配其他键盘），修复 kbdhid.sys 丢弃的 usage 0x80/0x81/0xF1，并把普通键改写为 F13–F19、语音键 HID F5 改写为 F20，从源头规避误吞物理键盘同名键；实现为转发 `IRP_MJ_READ`、下层完成后原地等长改写 Report ID 0x01 的 `report[3]`（实测报告格式 `01 00 00 <usage> 00 ...`，report[1]=modifiers、report[2]=reserved），不改 Report Descriptor / Report ID / 报告长度；HVCI 开启下 Windows 11 x64 八键验收通过（KMDF 1.15 + WDK 10.0.26100，过 PREfast/InfVerif/ApiValidator/Inf2Cat）；其"KMDF 正式发布需 Hardware Dev Center attestation/WHCP、UMDF 2 迁移未实现"的结论与本仓库 ADR 0002 签名成本结论互证；(3) **VB-Cable 音频路径**：遥控器音频经 CABLE Input/Output 转发、临时切换系统默认录音设备喂给 WeType——依赖第三方虚拟声卡驱动和默认设备切换，违反本仓库基础路径边界，仅作增强轨/目标 App 适配参考。排除项：其语音键支持单击/双击/长按配置，违反本仓库"语音键只支持按下开始、释放结束"规则，语音键不借鉴；`keymap.json` + 托盘双击映射面板（单击/双击/长按可配、保存即生效、旧 `keymap.txt` 自动迁移）可作普通键映射产品化参考。
 - `wasapi-rs` 0.24.0：MIT 许可的 Windows Core Audio 安全封装，用于端点枚举、共享模式渲染与 padding 查询。
 
+## 延迟调研来源（2026-09-05，语音键按下→电平图出现优化专项）
+
+按仓库规则（实现前先调研），本专项调研结论与边界记录如下；对应实测见 `docs/investigations/evidence/p/FINDINGS.md`（端点预热对照实验）：
+
+- **业界 PTT"按下→开麦"模式**：可查证的主流实现均为"音频链路常驻 + 按键只做门控"（Mumble 持续采集+传输模式门控 `mumble.info/documentation/user/audio-settings/`；Zoom 会议内按住空格解除静音 `support.zoom.com` KB0063250；Discord PTT Release Delay 滑杆，页面被反爬，引自搜索摘要）。本仓库渲染端点常驻打开（`audio.rs` SelectEndpoint 打开后跨会话复用）与此一致。
+- **WASAPI 冷启动与端点电源**：微软 PortCls 文档——音频设备空闲（示例 1s）进入 D3，恢复 D0 规格要求 ≤35ms/≤300ms（`learn.microsoft.com/windows-hardware/design/device-experiences/audio-subsystem-power-management-for-modern-standby-platforms`）；JUCE 论坛实测 WASAPI 设备冷创建 2-3s、Initialize 数百 ms（`forum.juce.com/t/wasapi-2-3s-delays-on-creating-audio-devices/54971`）；StackOverflow `IAudioClient::Start` 通常 5-6ms（被 Cloudflare 拦截，引自摘要）。**"跨进程保温端点让第三方 Initialize 更快"无公开量化先例**——本仓库已用持锁对照实验自行量化：对 WeType 开麦延迟无效（冷/热中位数差 0.3ms，evidence/p，2026-09-05），该方向就此关闭。
+- **WeType/微信输入法语音快捷键形态**：默认按住 Ctrl+Win（微信电脑版 4.1.7+ 同款，可于微信"设置→快捷键"自定义；新浪财经/光明网/callmysoft 报道）；社区帖（linux.do/t/topic/2409202，2026-06-15，早于 2.1.3，引自搜索摘要）称 WeType 语音快捷键"必须以 Ctrl/Alt/Shift 开头，不能设独立单键"——**待 2.1.3 真机复核**；ghxi 评论区提到"单击 Ctrl 触发"模式（懒加载未复核）。讯飞输入法 PC 版默认 F6 单键+长按说话（pconline/3DM/ghxi 教程）——竞品基线，未实测其延迟。
+- **竞品/社区对"面板出现延迟"的讨论**：未找到任何量化"按下→微信电平图出现"的公开评测（横评均测识别速度/准确率）；游戏侧有 PTT 激活延迟 1s-5s 的社区案例（Overwatch 官方论坛、Valorant Reddit），第三方全局钩子（如 Razer Synapse）可使 PTT 延迟 3-5s——排查本机钩子干扰的依据。
+- **本专项实测结论（evidence/p，2026-09-05）**：注入→WeType 开麦（ConsentStore 精确 FILETIME 判据）稳定 ~163ms（13 试验 ±5ms），端点预热无效；两型号遥控器实际均直接 0x04 开始推流（历史 GATT 日志 0x08 计数为 0，无可并行的开麦往返）；0x04 通知早于 HID F5 键盘事件 60-90ms 到达（evidence/p 2026-09-04 取证），当前"0x04 到达即注入"已是链路最早合法触发点。剩余 ~215-245ms = BLE/固件（~30-60ms）+ 和弦间隔（20ms）+ WeType 内部处理（~163ms，外部不可合法压缩）。
+
+## BLE 僵死链路自动恢复调研来源（2026-09-05，重连健壮性专项）
+
+场景：应用被强杀（未走正常关闭）后 Windows 侧残留僵死 GATT/HID 链路或服务缓存，普通重试永不恢复（本机真机取证：CCCD 订阅写入 E_ABORT、HID 接口从系统消失；examples\radio_probe 与 examples\gatt_snoop 探针复现）。已实现 `bluetooth_radio.rs` 自动恢复（重连循环连续失败达 5 次时关开蓝牙无线电一次，每周期最多 2 次），真机验证：无线电开关周期后重连循环立即成功（Testing\investigation\sayall-gatt-20260905-live.log T/C 能力交换取证）。关键参考：
+
+- **微软官方 GATT 客户端文档**（Dispose 后系统"小超时"自动断开、重建设备对象按需重连；BluetoothLEDevice.Close 仅当本应用是唯一持有者才关连接）：`learn.microsoft.com/windows/apps/develop/devices-sensors/gatt-client`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.close`
+- **MS Q&A 99038**（只 Dispose 设备不 Dispose 服务则无法重连）、**MS Q&A 2280559**（RPA 解析滞后导致进程重启后首次 GetGattServicesAsync 必 Unreachable，官方建议 3 次重试 ×1s + Uncached）、**MS Q&A 1685221**（FromBluetoothAddressAsync 返回 null 僵死 bug，Win11 2024.01D 已修；MaintainConnection 遇 bond 丢失会重连循环）
+- **Qt 论坛 156281**（实测：OS 侧服务缓存僵死，重启应用无效，**关开蓝牙是唯一有效修复**——与本机取证一致，是本仓库选择无线电恢复的直接依据）：`forum.qt.io/topic/156281`
+- **Bleak winrt client 源码**（Unreachable 重试 10×1s；断开全量清理序列 CCCD=None→退订→逐服务 Close 带 0.1s 防挂起延迟）、**btleplug winrtble**（Uncached 触发连接、特征发现 5s 超时回退 Cached——#325：部分驱动 Uncached 请求无限挂起，本仓库 connect 尚无该超时，列为后续加固项）、**微软官方 BluetoothLE 示例 Scenario2_Client**（FromIdAsync→RequestAccessAsync→Uncached 发现→清理序列）
+- **Windows.Devices.Radios.Radio**（RequestAccessAsync 文档要求 + 可能弹同意框；本机实测未打包桌面进程 SetStateAsync 直接 RadioAccessStatus=Allowed 无需提权；本仓库为避免无人值守弹框，不调 RequestAccessAsync，被拒时按错误上报走人工提示）
+
 外部实现只作为带来源的参考。第三方应用进程注入、私有配置读取和来源不明二进制不进入稳定主路径。
