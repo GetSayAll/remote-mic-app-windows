@@ -30,6 +30,8 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn send_input_snapshot(&self) -> SendInputSnapshot;
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
+    fn voice_hold_hotkey(&self) -> Option<KeyChord>;
+    fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
 
     #[cfg(feature = "runtime-simulation")]
     fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
@@ -107,6 +109,14 @@ impl PlatformRuntime for WindowsPlatform {
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
         self.test_shortcut(chord)
     }
+
+    fn voice_hold_hotkey(&self) -> Option<KeyChord> {
+        WindowsPlatform::voice_hold_hotkey(self)
+    }
+
+    fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>) {
+        WindowsPlatform::set_voice_hold_hotkey(self, hotkey)
+    }
 }
 
 #[cfg(feature = "runtime-simulation")]
@@ -114,7 +124,7 @@ mod simulation {
     use super::*;
     use sayall_core::{AtvvCapabilities, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
     use sayall_windows::raw_input::{RawInputPhase, RemoteButton};
-    use sayall_windows::send_input::plan_key_tap;
+    use sayall_windows::send_input::{plan_key_tap, KeyChord};
     use sayall_windows::{AudioPhase, ConnectionPhase, RemoteModel};
     use std::sync::{Mutex, MutexGuard};
 
@@ -149,6 +159,7 @@ mod simulation {
     pub struct SimulatedPlatform {
         usage: Arc<UsageCounters>,
         state: Mutex<SimulationState>,
+        voice_hold_hotkey: Mutex<Option<KeyChord>>,
     }
 
     impl SimulatedPlatform {
@@ -343,6 +354,14 @@ mod simulation {
                 .saturating_add(planned.len() as u64);
             state.send_input.last_error = None;
             Ok(state.send_input.clone())
+        }
+
+        fn voice_hold_hotkey(&self) -> Option<KeyChord> {
+            lock(&self.voice_hold_hotkey).clone()
+        }
+
+        fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>) {
+            *lock(&self.voice_hold_hotkey) = hotkey;
         }
 
         fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
