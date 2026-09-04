@@ -867,6 +867,13 @@ fn handle_control(
             // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
+                // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
+                // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
+                // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
+                // 行为注入（不比现状更差）。
+                if let Err(error) = crate::ime::activate_wetype_session() {
+                    lock(state).last_error = Some(error);
+                }
                 if let Err(error) = send_input.press(&chord) {
                     abort_voice_session(
                         session,
