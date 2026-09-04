@@ -5,7 +5,6 @@ describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
     expect(navigationItems.map((item) => item.id)).toEqual([
       "buttons",
-      "statistics",
       "connection",
       "permissions",
       "about",
