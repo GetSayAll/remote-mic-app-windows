@@ -2,7 +2,7 @@
 
 ## v1 决策（2026-09-04）
 
-- 第一版只做微信输入法听写：按住说话快捷键默认 左Ctrl+左Win（适配微信输入法默认语音热键）；语音可用 = 按住语音键 → 注入快捷键 → ATVV 音频经 CABLE Input → 微信输入法麦克风（CABLE Output）→ 云端识别 → 文字上屏。端到端链路音频段已本机实证（调查报告 evidence/n）；注入段配方约束已本机实证（evidence/p：WeType 拒绝单批零间隔和弦，须逐事件注入、两键间隔 ≥80ms，应用已按此修复，Bugs\2026-09-04-wetype-zero-gap-injection.md）；**RC001 遥控器端到端真机 passed（2026-09-04，用户确认文字上屏；用户侧前提=输出端点选 CABLE Input + 系统默认录音设备切 CABLE Output，应用不修改系统默认设备）**；RC003 真机待验。豆包（注入判死四层闭环）与 WinUHid 增强轨延后，见 ADR 0002 与 docs/investigations/2026-09-04-avoid-driver-signing-input-paths-final.md。
+- 第一版只做微信输入法听写：按住说话快捷键默认 左Ctrl+左Win（适配微信输入法默认语音热键）；语音可用 = 按住语音键 → 注入快捷键 → ATVV 音频经 CABLE Input → 微信输入法麦克风（CABLE Output）→ 云端识别 → 文字上屏。端到端链路音频段已本机实证（调查报告 evidence/n）；注入段配方约束已本机实证（evidence/p：WeType 拒绝单批零间隔和弦，须逐事件注入；间隔 20/40/60ms 均 4/4 触发、零间隔 0/2，默认取 20ms 压低按键延迟，Bugs\2026-09-04-wetype-zero-gap-injection.md）；**延迟账目已量化（2026-09-05，evidence/p 端点预热对照实验）**：注入→WeType 开麦固定 ~163ms（冷/热端点中位数差 0.3ms，预热无效；WeType 内部处理，第三方边界不可干预），两型号实际均直接 0x04 推流（无开麦往返可并行），0x04 早于 HID F5 60-90ms（触发点已最早），全链 ≈215-245ms 其中应用侧仅和弦 20ms 可控——**应用侧延迟优化到此收敛**；RC001 遥控器端到端真机 passed（2026-09-04，用户确认文字上屏；用户侧前提=输出端点选 CABLE Input + 系统默认录音设备切 CABLE Output，应用不修改系统默认设备）；RC003 真机待验。豆包（注入判死四层闭环）与 WinUHid 增强轨延后，见 ADR 0002 与 docs/investigations/2026-09-04-avoid-driver-signing-input-paths-final.md。
 
 ## Windows RC001 / RC003
 
@@ -39,3 +39,8 @@
 - [ ] 建立自签 Authenticode、证书指纹和 SHA-256 发布流程。
 - [ ] 单独评估返回键、音量键等完整 HID 实验能力。
 - [ ] 按 ADR 0002 立项可选 Helper（虚拟键盘驱动 + 按设备吞键）：物理按键对照已完成（2026-09-04，豆包/微信物理可唤起、注入不可，见 Bugs/2026-09-04）；待完成 RC001/RC003 按键形态真机确认；驱动来源初查完成（cgutman/WinUHid，MIT，源码小可审计，无预编译 Release 需自构建签名），详见路线图阶段 E；不得进入基础路径，不阻塞 Preview。
+
+### 2026-09-05 附加
+
+- **BLE 僵死链路自动恢复（bluetooth_radio.rs，新增）**：应用被强杀后 OS 侧 GATT/HID 链路或服务缓存可能僵死，普通重试永不恢复（真机取证 + Qt 论坛同结论：关开蓝牙是唯一有效公开 API 手段）。重连循环连续失败 5 次（约 60s）自动关开蓝牙无线电一次（Off→2s→On），每僵死周期最多 2 次防抖动，UI 提示全程可见；WinRT Radio API 未打包进程可用、无需提权（真机验证：开关周期后重连立即成功）。详见 docs\investigations\evidence\p\FINDINGS.md 2026-09-05 节与 ATTRIBUTION.md BLE 恢复调研来源。
+- 语音键 F5 抑制器补防粘键配对（VVC 同款"DOWN 漏进 OS 则 UP 必放行"）：按下沿 60ms 有界等待超时泄漏时，释放沿放行，杜绝"F5 粘住→和弦全部被拒"的整机失效模式。
