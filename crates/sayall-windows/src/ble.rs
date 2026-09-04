@@ -202,6 +202,9 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 僵死链路自动恢复计数：连续失败达标后关开一次蓝牙无线电（每个僵死
+    // 周期最多 bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES 次）。
+    let mut radio_recovery_cycles: u32 = 0;
 
     loop {
         let deadline = nearest_deadline(
@@ -278,6 +281,51 @@ fn worker_loop(
                                             &mut reconnect_deadline,
                                             &error.to_string(),
                                         );
+                                        // 僵死链路自动恢复（2026-09-05 真机取证：
+                                        // 应用强杀后 OS 侧链路/缓存可能僵死，普通
+                                        // 重试永不恢复，公开 API 中只有关开蓝牙
+                                        // 无线电能触达修复；调研与验证见
+                                        // ATTRIBUTION.md 与 Testing\investigation）。
+                                        // 连续失败达标且未超次数上限时执行一次，
+                                        // 影响本机所有蓝牙设备约 2-4 秒。
+                                        if crate::bluetooth_radio::should_cycle(
+                                            backoff.attempt(),
+                                            radio_recovery_cycles,
+                                        ) {
+                                            radio_recovery_cycles += 1;
+                                            {
+                                                let mut snapshot = lock(&state);
+                                                snapshot.last_error = Some(format!(
+                                                    "连续 {} 次重连失败，正在自动重启蓝牙无线电以清除僵死链路（第 {}/{} 次）…",
+                                                    backoff.attempt(),
+                                                    radio_recovery_cycles,
+                                                    crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
+                                                ));
+                                            }
+                                            match crate::bluetooth_radio::cycle_bluetooth_radio()
+                                            {
+                                                Ok(()) => {
+                                                    lock(&state).last_error = Some(
+                                                        "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
+                                                            .to_owned(),
+                                                    );
+                                                }
+                                                Err(radio_error) => {
+                                                    lock(&state).last_error = Some(format!(
+                                                        "蓝牙自动恢复失败：{radio_error}。请检查遥控器电量，或手动开关一次蓝牙后重试。"
+                                                    ));
+                                                }
+                                            }
+                                            // 无论成功失败：重置退避节奏并快速重试，
+                                            // 避免在已恢复的链路上继续长间隔等待。
+                                            backoff.reset();
+                                            {
+                                                let mut snapshot = lock(&state);
+                                                snapshot.reconnect_attempt = 0;
+                                            }
+                                            reconnect_deadline =
+                                                Some(Instant::now() + Duration::from_secs(2));
+                                        }
                                     }
                                 }
                             }
@@ -330,6 +378,7 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
+                radio_recovery_cycles = 0;
                 let result = attempt_connection(
                     &device_id,
                     false,
@@ -370,6 +419,7 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
+                radio_recovery_cycles = 0;
                 let result = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -398,6 +448,7 @@ fn worker_loop(
             WorkerMessage::Restore { device_id, reply } => {
                 preferred_device_id = Some(device_id);
                 backoff.reset();
+                radio_recovery_cycles = 0;
                 reconnect_deadline = None;
                 let snapshot = if system_suspended {
                     ConnectionSnapshot {
@@ -442,6 +493,7 @@ fn worker_loop(
                     }
                     if phase == ConnectionPhase::Ready {
                         backoff.reset();
+                        radio_recovery_cycles = 0;
                         lock(&state).reconnect_attempt = 0;
                     }
                     if phase == ConnectionPhase::Failed {
@@ -596,6 +648,7 @@ fn worker_loop(
                 }
                 system_suspended = false;
                 backoff.reset();
+                radio_recovery_cycles = 0;
                 if preferred_device_id.is_some() {
                     reconnect_deadline = Some(Instant::now());
                     let previous = lock(&state).clone();

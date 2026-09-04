@@ -34,6 +34,11 @@ impl ReconnectBackoff {
             .min(self.max_delay);
         (self.attempt, delay)
     }
+
+    /// 当前连续失败次数（自上次成功/重置起）。
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
 }
 
 #[cfg(test)]

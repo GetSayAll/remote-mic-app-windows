@@ -9,6 +9,8 @@ use thiserror::Error;
 mod audio;
 #[cfg(windows)]
 mod ble;
+#[cfg(windows)]
+mod bluetooth_radio;
 pub mod compatibility;
 #[cfg(windows)]
 mod key_suppressor;
