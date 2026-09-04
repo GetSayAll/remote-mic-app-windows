@@ -7,7 +7,6 @@ import AboutPage from "./pages/AboutPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
-import StatisticsPage from "./pages/StatisticsPage.vue";
 
 const activePage = ref<PageId>("connection");
 const runtime = ref<RuntimeSnapshot | null>(null);
@@ -16,7 +15,6 @@ let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 
 const activeComponent = computed(() => ({
   buttons: ButtonsPage,
-  statistics: StatisticsPage,
   connection: ConnectionPage,
   permissions: PermissionsPage,
   about: AboutPage,

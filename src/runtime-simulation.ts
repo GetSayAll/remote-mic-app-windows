@@ -5,7 +5,6 @@ import {
   getAudioSnapshot,
   getDiagnosticReport,
   getRuntimeSnapshot,
-  getUsageStatistics,
   listAudioEndpoints,
   saveButtonMappings,
   scanPairedRemotes,
@@ -128,11 +127,6 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(sendInput.submittedBatches === 1, "仿真 SendInput 没有提交唯一批次");
   assert(sendInput.submittedEvents === 4, "Ctrl+C 仿真没有生成四个按下/释放事件");
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");
-
-  await openPage("统计");
-  const statistics = await getUsageStatistics();
-  assert(statistics.recentDays.length === 7, "统计 IPC 没有返回最近七天结构");
-  steps.push("统计页面和统计 IPC 在 Windows WebView 运行时可用");
 
   await openPage("权限");
   await clickButton("生成摘要");
