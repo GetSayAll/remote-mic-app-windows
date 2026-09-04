@@ -227,10 +227,10 @@ fn worker_loop(
                                 &mut held_hotkey,
                                 &mut connection_generation,
                             ) {
-                                stop_reconnect_after_cleanup_failure(
+                                keep_reconnecting_after_cleanup_failure(
                                     &state,
                                     &mut preferred_device_id,
-                                    &mut reconnect_deadline,
+                                    &mut backoff,                                    &mut reconnect_deadline,
                                     &error,
                                 );
                                 continue;
@@ -268,10 +268,10 @@ fn worker_loop(
                                 if let Err(error) = result {
                                     connection_generation = connection_generation.wrapping_add(1);
                                     if matches!(error, PlatformError::BleCleanup(_)) {
-                                        stop_reconnect_after_cleanup_failure(
+                                        keep_reconnecting_after_cleanup_failure(
                                             &state,
                                             &mut preferred_device_id,
-                                            &mut reconnect_deadline,
+                                            &mut backoff,                                            &mut reconnect_deadline,
                                             &error,
                                         );
                                     } else {
@@ -396,10 +396,10 @@ fn worker_loop(
                 if let Err(error) = &result {
                     connection_generation = connection_generation.wrapping_add(1);
                     if matches!(error, PlatformError::BleCleanup(_)) {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut reconnect_deadline,
+                            &mut backoff,                            &mut reconnect_deadline,
                             error,
                         );
                     } else {
@@ -435,10 +435,10 @@ fn worker_loop(
                         let _ = reply.send(Ok(snapshot));
                     }
                     Err(error) => {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut reconnect_deadline,
+                            &mut backoff,                            &mut reconnect_deadline,
                             &error,
                         );
                         let _ = reply.send(Err(error));
@@ -509,10 +509,10 @@ fn worker_loop(
                             &mut held_hotkey,
                             &mut connection_generation,
                         ) {
-                            stop_reconnect_after_cleanup_failure(
+                            keep_reconnecting_after_cleanup_failure(
                                 &state,
                                 &mut preferred_device_id,
-                                &mut reconnect_deadline,
+                                &mut backoff,                                &mut reconnect_deadline,
                                 &cleanup_error,
                             );
                             continue;
@@ -561,10 +561,10 @@ fn worker_loop(
                         &mut held_hotkey,
                         &mut connection_generation,
                     ) {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut reconnect_deadline,
+                            &mut backoff,                            &mut reconnect_deadline,
                             &error,
                         );
                         continue;
@@ -598,10 +598,10 @@ fn worker_loop(
                         &mut held_hotkey,
                         &mut connection_generation,
                     ) {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut reconnect_deadline,
+                            &mut backoff,                            &mut reconnect_deadline,
                             &cleanup_error,
                         );
                         continue;
@@ -625,10 +625,10 @@ fn worker_loop(
                     &mut held_hotkey,
                     &mut connection_generation,
                 ) {
-                    stop_reconnect_after_cleanup_failure(
+                    keep_reconnecting_after_cleanup_failure(
                         &state,
                         &mut preferred_device_id,
-                        &mut reconnect_deadline,
+                        &mut backoff,                        &mut reconnect_deadline,
                         &error,
                     );
                     continue;
@@ -762,17 +762,31 @@ fn invalidate_connection(
     }
 }
 
-fn stop_reconnect_after_cleanup_failure(
+/// 清理旧会话失败时的处理（2026-09-05 修正：旧实现直接清空首选设备并
+/// **停止自动重连**，提示"本次运行已停止自动重连"——把"清理失败"升级成
+/// "必须重启应用"，违反用户侧零介入原则（AGENTS.md 运维与自愈节）。
+/// RC003 真机实证：链路掉线后清理失败时应用彻底躺平，直到人工重启进程
+/// 才恢复）。新行为：记录清理错误并照常排定重连——下次重连的
+/// invalidate_connection 会再次尝试清理（幂等），叠加清理的风险远小于
+/// "停止重连=确定性人工介入"的损失。
+fn keep_reconnecting_after_cleanup_failure(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     preferred_device_id: &mut Option<String>,
+    backoff: &mut ReconnectBackoff,
     reconnect_deadline: &mut Option<Instant>,
     error: &PlatformError,
 ) {
-    *preferred_device_id = None;
-    *reconnect_deadline = None;
-    *lock(state) = failed_snapshot(format!(
-        "{error}；为避免新旧 BLE 会话重叠，本次运行已停止自动重连"
-    ));
+    if preferred_device_id.is_some() {
+        schedule_reconnect(
+            state,
+            backoff,
+            reconnect_deadline,
+            &format!("{error}；旧会话清理失败，将继续重试并再次清理"),
+        );
+    } else {
+        *reconnect_deadline = None;
+        *lock(state) = failed_snapshot(error.to_string());
+    }
 }
 
 fn schedule_reconnect(
@@ -1591,21 +1605,41 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_failure_cancels_runtime_reconnect_target() {
+    fn cleanup_failure_keeps_retrying_with_scheduled_reconnect() {
+        // 2026-09-05 修正：清理失败不再清空首选设备、不再停止重连——
+        // 记录错误并照常排定下次重连（零介入原则）。
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let mut preferred = Some("device-id".to_owned());
+        let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
         let mut deadline = Some(Instant::now() + Duration::from_secs(2));
         let error = PlatformError::BleCleanup("retained owner".to_owned());
 
-        stop_reconnect_after_cleanup_failure(&state, &mut preferred, &mut deadline, &error);
+        keep_reconnecting_after_cleanup_failure(
+            &state,
+            &mut preferred,
+            &mut backoff,
+            &mut deadline,
+            &error,
+        );
 
-        assert_eq!(preferred, None);
-        assert_eq!(deadline, None);
+        assert_eq!(preferred, Some("device-id".to_owned()));
+        assert!(deadline.is_some());
         let snapshot = lock(&state).clone();
-        assert_eq!(snapshot.phase, ConnectionPhase::Failed);
-        assert!(snapshot
-            .last_error
-            .unwrap()
-            .contains("本次运行已停止自动重连"));
+        assert_eq!(snapshot.phase, ConnectionPhase::Reconnecting);
+        assert_eq!(snapshot.reconnect_attempt, 1);
+        assert!(snapshot.last_error.unwrap().contains("继续重试"));
+
+        // 无首选设备（用户已断开）时：不排定重连，只报失败。
+        let mut preferred_none: Option<String> = None;
+        let mut deadline2 = Some(Instant::now() + Duration::from_secs(2));
+        keep_reconnecting_after_cleanup_failure(
+            &state,
+            &mut preferred_none,
+            &mut backoff,
+            &mut deadline2,
+            &error,
+        );
+        assert_eq!(deadline2, None);
+        assert_eq!(lock(&state).phase, ConnectionPhase::Failed);
     }
 }
