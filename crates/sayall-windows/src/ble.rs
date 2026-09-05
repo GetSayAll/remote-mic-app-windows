@@ -512,15 +512,10 @@ fn worker_loop(
                     if snapshot.phase == ConnectionPhase::Reconnecting {
                         snapshot.reconnect_attempt = 0;
                     }
-                    // WeType 钩子休眠预热点火（2026-09-05 实证：遥控器闲置
-                    // 2.5-4 分钟钩子即休眠，首按必失败；复活延迟 1.4-11s）。
-                    // 遥控器唤醒到用户首按约有 1-3s 空窗——此刻先 cycle 一
-                    // 次，把复活计时提前，减少首按落在复活窗口内的概率。
-                    // 仅长闲置（遥控器断连后重连）触发；短闲置场景由
-                    // 会话内的重试阶梯兜底。工作线程此刻无会话，阻塞
-                    // ~0.7s 无碍。
-                    let prewarm = crate::ime::cycle_wetype_profile();
-                    gatt_note(format!("wetype_prewarm source=wake_reconnect result={prewarm:?}"));
+                    // 注：不在此处做 WeType 预热点火（曾基于"钩子休眠"假设
+                    // 加入，2026-09-05 晚证伪：首按失败实为 20ms 和弦间隔
+                    // 回归（cef24d3），已回退 80ms；且唤醒瞬间 cycle 存在和弦
+                    // 撞上配置切换重绑窗口的自伤风险，已移除）。
                 }
             }
             WorkerMessage::RetryVoiceChord { attempt, epoch } => {
