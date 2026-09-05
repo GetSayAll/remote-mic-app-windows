@@ -30,6 +30,8 @@ mod reconnect;
 pub mod send_input;
 #[cfg(windows)]
 pub(crate) mod send_input_windows;
+#[cfg(windows)]
+mod wetype_revive;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

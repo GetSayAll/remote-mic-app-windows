@@ -938,6 +938,64 @@ fn handle_control(
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
                 *held_hotkey = Some(chord);
+                // WeType 热键休眠检测与自动唤醒（2026-09-05 实证：WeType
+                // 可能"TSF 激活但热键钩子失效"，只有打开其自身窗口才复活）：
+                // 注入后 ~700ms 用 ConsentStore 开麦时间戳验证其真的响应了
+                // 本次语音；未响应则对其进程解除后台节流（公开 API）并复查。
+                // 异步执行，不阻塞音频会话；全部落日志。
+                {
+                    let state = Arc::clone(state);
+                    let baseline = crate::wetype_revive::wetype_mic_start();
+                    gatt_note(format!(
+                        "wetype_check armed session={session_id} baseline={:?}",
+                        baseline
+                    ));
+                    std::thread::Builder::new()
+                        .name("sayall-wetype-check".to_owned())
+                        .spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(700));
+                            let still_streaming = {
+                                let snapshot = lock(&state);
+                                snapshot.voice_state == VoiceSessionState::Streaming
+                            };
+                            if !still_streaming {
+                                // 会话已结束：无需验证/唤醒（避免误判与误伤）。
+                                gatt_note("wetype_check skipped reason=session_ended".to_owned());
+                                return;
+                            }
+                            let now = crate::wetype_revive::wetype_mic_start();
+                            let reacted = match (baseline, now) {
+                                (Some(base), Some(current)) => current > base,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            };
+                            if reacted {
+                                gatt_note("wetype_check reacted=true".to_owned());
+                                return;
+                            }
+                            gatt_note("wetype_check reacted=false reviving".to_owned());
+                            let results = crate::wetype_revive::unthrottle_wetype_processes();
+                            gatt_note(format!(
+                                "wetype_unthrottle results=[{}]",
+                                results.join("; ")
+                            ));
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                            let after = crate::wetype_revive::wetype_mic_start();
+                            let revived = match (baseline, after) {
+                                (Some(base), Some(current)) => current > base,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            };
+                            gatt_note(format!("wetype_check after_revive={revived}"));
+                            if !revived {
+                                lock(&state).last_error = Some(
+                                    "微信输入法热键未响应（已尝试自动唤醒）。可打开一次微信输入法的任意界面（如设置页）恢复其监听，然后重试"
+                                        .to_owned(),
+                                );
+                            }
+                        })
+                        .ok();
+                }
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(
