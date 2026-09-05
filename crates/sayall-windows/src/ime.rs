@@ -97,6 +97,110 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
     result
 }
 
+/// TSF 配置切换唤醒（2026-09-05 方案迭代）：制造一次输入法配置变更事件
+/// （切到其他输入法 → 短暂停 → 切回微信输入法），用于唤醒微信输入法
+/// 休眠的热键钩子——打开其设置页能唤醒的公开 API 等效路径。
+///
+/// 背景：跨进程 `SetProcessInformation(ProcessPowerThrottling)` 实测返回
+/// E_INVALIDARG（不支持作用于其他进程，2026-09-05 15:04 真机），原"解除
+/// 微信进程节流"方案不可行；配置切换激活事件是其窗口激活之外唯一可由
+/// 本应用触发的公开事件源。
+///
+/// 返回结果描述（用于日志）：切换用的临时输入法 CLSID 与两步激活结果。
+pub fn cycle_wetype_profile() -> Result<String, String> {
+    let (sender, receiver) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("sayall-ime-cycle".to_owned())
+        .spawn(move || {
+            let outcome = sta_cycle_wetype_profile();
+            let _ = sender.send(outcome);
+        })
+        .map_err(|error| format!("创建切换线程失败：{error}"))?;
+    match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err("切换输入法配置超时（500ms）".to_owned()),
+    }
+}
+
+fn sta_cycle_wetype_profile() -> Result<String, String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::TextServices::{TF_IPP_FLAG_ENABLED, TF_PROFILETYPE_INPUTPROCESSOR};
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if hr.is_err() && hr != windows::core::HRESULT(1) {
+            return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
+        }
+        let result = (|| {
+            let manager: ITfInputProcessorProfileMgr =
+                CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            // 枚举 zh-CN 输入法，找一个非 WeType 的已启用处理器配置。
+            let enumerator = manager
+                .EnumProfiles(LANGID_ZH_CN)
+                .map_err(|error| format!("枚举输入法配置失败：{error}"))?;
+            let mut alternative: Option<(GUID, GUID)> = None;
+            let mut profiles = [TF_INPUTPROCESSORPROFILE::default(); 16];
+            let mut fetched: u32 = 0;
+            loop {
+                if enumerator
+                    .Next(&mut profiles, &mut fetched)
+                    .is_err()
+                    || fetched == 0
+                {
+                    break;
+                }
+                for profile in &profiles[..fetched as usize] {
+                    if profile.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR
+                        && profile.clsid != WETYPE_CLSID
+                        && profile.dwFlags & TF_IPP_FLAG_ENABLED != 0
+                    {
+                        alternative = Some((profile.clsid, profile.guidProfile));
+                        break;
+                    }
+                }
+                if alternative.is_some() || (fetched as usize) < profiles.len() {
+                    break;
+                }
+            }
+            let Some((alt_clsid, alt_profile)) = alternative else {
+                return Err("无可用作切换的其他输入法配置".to_owned());
+            };
+            // 第一步：切到临时输入法（制造配置变更事件）。
+            manager
+                .ActivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    LANGID_ZH_CN,
+                    &alt_clsid,
+                    &alt_profile,
+                    HKL::default(),
+                    TF_IPPMF_FORSESSION,
+                )
+                .map_err(|error| format!("切换到临时输入法失败：{error}"))?;
+            std::thread::sleep(SESSION_REBIND_SETTLE);
+            // 第二步：切回微信输入法。
+            manager
+                .ActivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    LANGID_ZH_CN,
+                    &WETYPE_CLSID,
+                    &WETYPE_PROFILE,
+                    HKL::default(),
+                    TF_IPPMF_FORSESSION,
+                )
+                .map_err(|error| format!("切回微信输入法失败：{error}"))?;
+            Ok(format!(
+                "switched via clsid={:08X} and back to WeType",
+                alt_clsid.data1
+            ))
+        })();
+        CoUninitialize();
+        result
+    }
+}
+
 /// 前台进程名（诊断用，不含窗口标题/路径等隐私信息）。
 fn foreground_process_name() -> Option<String> {
     use windows::core::PWSTR;

@@ -168,6 +168,10 @@ pub(crate) enum WorkerMessage {
     /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
     /// GATT 重连耗 3 秒，期间按键全部无响应）。
     WakeReconnect,
+    /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
+    /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
+    /// 串行执行，与会话结束路径无竞态。
+    RetryVoiceChord,
     Control {
         connection_generation: u64,
         bytes: Vec<u8>,
@@ -496,6 +500,32 @@ fn worker_loop(
                     }
                 }
             }
+            WorkerMessage::RetryVoiceChord => {
+                // 微信输入法热键休眠的自动重试（同一次按住内完成）：
+                // 释放旧和弦边沿 → 重注入。在工作线程内串行执行，与
+                // StreamStopped/中止路径无竞态；仅在会话仍在流式时执行。
+                let chord_configured = lock(&voice_hold_hotkey).clone();
+                let old_held = held_hotkey.take();
+                if let (Some(chord), Some(old)) = (chord_configured, old_held) {
+                    if pipeline.state() == VoiceSessionState::Streaming {
+                        let _ = send_input.release(&old);
+                        match send_input.press(&chord) {
+                            Ok(_) => {
+                                gatt_note("chord_retry result=ok".to_owned());
+                                held_hotkey = Some(chord);
+                                spawn_wetype_check(&state, sender.clone(), true);
+                            }
+                            Err(error) => {
+                                gatt_note(format!("chord_retry result=err err={error}"));
+                            }
+                        }
+                    } else {
+                        gatt_note("chord_retry skipped reason=not_streaming".to_owned());
+                    }
+                } else {
+                    gatt_note("chord_retry skipped reason=no_chord".to_owned());
+                }
+            }
             WorkerMessage::Control {
                 connection_generation: message_generation,
                 bytes,
@@ -512,6 +542,7 @@ fn worker_loop(
                         &usage,
                         &mut active_voice_samples,
                         &mut extend_deadline,
+                        &sender,
                         &bytes,
                     );
                     let phase = lock(&state).phase;
@@ -847,6 +878,7 @@ fn handle_control(
     usage: &UsageCounters,
     active_voice_samples: &mut u64,
     extend_deadline: &mut Option<Instant>,
+    sender: &Sender<WorkerMessage>,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -938,64 +970,8 @@ fn handle_control(
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
                 *held_hotkey = Some(chord);
-                // WeType 热键休眠检测与自动唤醒（2026-09-05 实证：WeType
-                // 可能"TSF 激活但热键钩子失效"，只有打开其自身窗口才复活）：
-                // 注入后 ~700ms 用 ConsentStore 开麦时间戳验证其真的响应了
-                // 本次语音；未响应则对其进程解除后台节流（公开 API）并复查。
-                // 异步执行，不阻塞音频会话；全部落日志。
-                {
-                    let state = Arc::clone(state);
-                    let baseline = crate::wetype_revive::wetype_mic_start();
-                    gatt_note(format!(
-                        "wetype_check armed session={session_id} baseline={:?}",
-                        baseline
-                    ));
-                    std::thread::Builder::new()
-                        .name("sayall-wetype-check".to_owned())
-                        .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(700));
-                            let still_streaming = {
-                                let snapshot = lock(&state);
-                                snapshot.voice_state == VoiceSessionState::Streaming
-                            };
-                            if !still_streaming {
-                                // 会话已结束：无需验证/唤醒（避免误判与误伤）。
-                                gatt_note("wetype_check skipped reason=session_ended".to_owned());
-                                return;
-                            }
-                            let now = crate::wetype_revive::wetype_mic_start();
-                            let reacted = match (baseline, now) {
-                                (Some(base), Some(current)) => current > base,
-                                (None, Some(_)) => true,
-                                _ => false,
-                            };
-                            if reacted {
-                                gatt_note("wetype_check reacted=true".to_owned());
-                                return;
-                            }
-                            gatt_note("wetype_check reacted=false reviving".to_owned());
-                            let results = crate::wetype_revive::unthrottle_wetype_processes();
-                            gatt_note(format!(
-                                "wetype_unthrottle results=[{}]",
-                                results.join("; ")
-                            ));
-                            std::thread::sleep(std::time::Duration::from_millis(400));
-                            let after = crate::wetype_revive::wetype_mic_start();
-                            let revived = match (baseline, after) {
-                                (Some(base), Some(current)) => current > base,
-                                (None, Some(_)) => true,
-                                _ => false,
-                            };
-                            gatt_note(format!("wetype_check after_revive={revived}"));
-                            if !revived {
-                                lock(&state).last_error = Some(
-                                    "微信输入法热键未响应（已尝试自动唤醒）。可打开一次微信输入法的任意界面（如设置页）恢复其监听，然后重试"
-                                        .to_owned(),
-                                );
-                            }
-                        })
-                        .ok();
-                }
+                // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
+                spawn_wetype_check(state, sender.clone(), false);
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(
@@ -1466,6 +1442,76 @@ pub(crate) fn gatt_note(note: String) {
             let _ = writeln!(file, "N {now_ms} len=  0 note={note}");
         }
     }
+}
+
+/// WeType 热键休眠检测与同一次按住内的自动恢复（2026-09-05 实证闭环）：
+/// - 实证：WeType 可能"TSF 激活但热键钩子休眠"（LWin 穿透、无 0xFC、
+///   不开麦），打开其设置页立即复活；跨进程解除节流不可行
+///   （SetProcessInformation 对其他进程 E_INVALIDARG，15:04 真机）。
+/// - 检测：和弦注入后 ~700ms 读 ConsentStore 开麦时间戳验证 WeType 真的
+///   响应了本次语音（公开可观测判据）。
+/// - 恢复：首次未响应 → TSF 配置切换唤醒（ime::cycle_wetype_profile，
+///   公开 API 制造激活事件）→ 请求工作线程释放旧和弦并重注入
+///   （WorkerMessage::RetryVoiceChord，工作线程串行执行无竞态）→
+///   重注入后再次检测；二次仍未响应才提示人工（打开微信输入法界面）。
+/// 全程落 gatt_note 日志；检测线程尽力而为，绝不阻塞语音会话。
+fn spawn_wetype_check(
+    state: &Arc<Mutex<ConnectionSnapshot>>,
+    sender: Sender<WorkerMessage>,
+    retry: bool,
+) {
+    let state = Arc::clone(state);
+    let baseline = crate::wetype_revive::wetype_mic_start();
+    gatt_note(format!(
+        "wetype_check armed retry={retry} baseline={baseline:?}"
+    ));
+    std::thread::Builder::new()
+        .name("sayall-wetype-check".to_owned())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let still_streaming = {
+                let snapshot = lock(&state);
+                snapshot.voice_state == VoiceSessionState::Streaming
+            };
+            if !still_streaming {
+                // 会话已结束：无需验证/唤醒（避免误判与误伤）。
+                gatt_note("wetype_check skipped reason=session_ended".to_owned());
+                return;
+            }
+            let now = crate::wetype_revive::wetype_mic_start();
+            let reacted = match (baseline, now) {
+                (Some(base), Some(current)) => current > base,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if reacted {
+                gatt_note(format!("wetype_check reacted=true retry={retry}"));
+                return;
+            }
+            if retry {
+                // 二次未响应：放弃自动恢复，提示人工（唯一兜底）。
+                gatt_note("wetype_check final=not_reacted".to_owned());
+                lock(&state).last_error = Some(
+                    "微信输入法热键休眠，自动唤醒重试后仍未响应。可打开一次微信输入法的任意界面（如设置页）恢复其监听后重试"
+                        .to_owned(),
+                );
+                return;
+            }
+            gatt_note("wetype_check reacted=false reviving".to_owned());
+            let revive = crate::ime::cycle_wetype_profile();
+            gatt_note(format!("wetype_revive result={revive:?}"));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let still = {
+                let snapshot = lock(&state);
+                snapshot.voice_state == VoiceSessionState::Streaming
+            };
+            if !still {
+                gatt_note("wetype_check skipped_retry reason=session_ended".to_owned());
+                return;
+            }
+            let _ = sender.send(WorkerMessage::RetryVoiceChord);
+        })
+        .ok();
 }
 
 fn subscribe(
