@@ -361,8 +361,7 @@ pub fn run() {
         use windows::core::w;
         use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
         use windows::Win32::System::Threading::CreateMutexW;
-        const SINGLE_INSTANCE_MUTEX: windows::core::PCWSTR =
-            w!("SayAll.Windows.SingleInstance");
+        const SINGLE_INSTANCE_MUTEX: windows::core::PCWSTR = w!("SayAll.Windows.SingleInstance");
         match unsafe { CreateMutexW(None, false, SINGLE_INSTANCE_MUTEX) } {
             Ok(handle) => {
                 // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=

@@ -44,7 +44,7 @@ fn activate(
 
 fn inject_chord() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_TYPE, INPUT_0, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        SendInput, INPUT, INPUT_0, INPUT_TYPE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         KEYEVENTF_SCANCODE, VIRTUAL_KEY,
     };
     unsafe {
@@ -146,9 +146,12 @@ fn sta_activate(clsid: &GUID, profile: &GUID) -> Result<(), String> {
             return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
         }
         let result = (|| {
-            let manager: ITfInputProcessorProfileMgr =
-                CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
-                    .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
             manager
                 .ActivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,

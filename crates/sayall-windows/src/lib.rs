@@ -15,9 +15,9 @@ mod bluetooth_radio;
 mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
-pub mod key_gate;
 #[cfg(windows)]
 mod ime;
+pub mod key_gate;
 #[cfg(windows)]
 mod key_suppressor;
 #[cfg(windows)]

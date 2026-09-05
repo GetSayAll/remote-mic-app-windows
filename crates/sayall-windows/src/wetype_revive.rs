@@ -36,8 +36,7 @@ pub fn wetype_mic_start() -> Option<u64> {
             &mut root,
         )
     }
-    .0
-        != 0
+    .0 != 0
     {
         return None;
     }
@@ -57,8 +56,7 @@ pub fn wetype_mic_start() -> Option<u64> {
                 None,
             )
         }
-        .0
-            != 0
+        .0 != 0
         {
             break;
         }
@@ -78,8 +76,7 @@ pub fn wetype_mic_start() -> Option<u64> {
                 &mut key,
             )
         }
-        .0
-            != 0
+        .0 != 0
         {
             continue;
         }
