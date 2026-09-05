@@ -32,11 +32,11 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 
 /** 画布几何：与 Mac 原版 RemoteMappingCanvas 对齐（等比设计稿，组件内固定坐标系）。 */
 const CANVAS_WIDTH = 780;
-const CANVAS_HEIGHT = 570;
+const CANVAS_HEIGHT = 572;
 const REMOTE_WIDTH = 202;
 const REMOTE_HEIGHT = 410;
 const CARD_WIDTH = 262;
-const CARD_HEIGHT = 64;
+const CARD_HEIGHT = 72;
 const REMOTE_LEFT = (CANVAS_WIDTH - REMOTE_WIDTH) / 2;
 const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
 
@@ -586,7 +586,7 @@ onUnmounted(() => {
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
-            <span>{{ actionSummary(actionOf(placement.button, trigger)) }}</span>
+            <span :title="actionSummary(actionOf(placement.button, trigger))">{{ actionSummary(actionOf(placement.button, trigger)) }}</span>
           </button>
         </div>
       </article>

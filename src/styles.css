@@ -202,7 +202,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
    画布在窄窗口右列卡片被裁切，实测内容区 647px 时溢出 84px）。 */
 .mapping-canvas {
   position: relative;
-  margin: 0 0 calc(-570px * (1 - var(--map-scale))) auto;
+  margin: 0 0 calc(-572px * (1 - var(--map-scale))) auto;
   margin-left: calc((100% - 780px * var(--map-scale)) / 2);
   flex: 0 0 auto;
   --map-scale: min(1, (100vw - 313px) / 780px, 100vh / 640px);
@@ -218,30 +218,30 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .remote-photo img { width: 100%; height: 100%; object-fit: cover; user-select: none; }
 .anchor-dot { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: #ef9420; box-shadow: 0 0 0 3px rgba(239, 148, 32, 0.28); opacity: 0; pointer-events: none; transition: opacity 0.06s; }
 .anchor-dot.visible { opacity: 1; }
-.mapping-card { position: absolute; width: 262px; height: 64px; padding: 7px 10px; border-radius: 10px; border: 1px solid rgba(31, 36, 48, 0.15); background: rgba(31, 36, 48, 0.035); cursor: pointer; transition: background 0.08s, border-color 0.08s; }
+.mapping-card { position: absolute; width: 262px; height: 72px; padding: 6px 10px; border-radius: 10px; border: 1px solid rgba(31, 36, 48, 0.15); background: rgba(31, 36, 48, 0.035); cursor: pointer; transition: background 0.08s, border-color 0.08s; }
 .mapping-card.left { left: 0; }
 .mapping-card.right { right: 0; }
 .mapping-card:hover { background: rgba(255, 255, 255, 0.75); }
 .mapping-card.selected { background: rgba(95, 98, 219, 0.1); border-color: rgba(95, 98, 219, 0.45); }
 .mapping-card.active { background: rgba(239, 148, 32, 0.12); border-color: rgba(239, 148, 32, 0.65); }
 .mapping-card.flashed { box-shadow: 0 0 0 2px rgba(239, 148, 32, 0.55); }
-.mapping-card-title { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
-.mapping-card-title strong { font-size: 13px; }
-.mapping-icon { width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 5px; background: rgba(95, 98, 219, 0.12); color: #575bc6; font-size: 11px; }
+.mapping-card-title { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+.mapping-card-title strong { font-size: 12.5px; }
+.mapping-icon { width: 17px; height: 17px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 5px; background: rgba(95, 98, 219, 0.12); color: #575bc6; font-size: 11px; }
 .mapping-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
-.mapping-cell { min-width: 0; padding: 3px 6px; border: 1px solid rgba(31, 36, 48, 0.1); border-radius: 6px; background: rgba(255, 255, 255, 0.55); text-align: left; cursor: pointer; }
+.mapping-cell { min-width: 0; padding: 2.5px 5px; border: 1px solid rgba(31, 36, 48, 0.1); border-radius: 6px; background: rgba(255, 255, 255, 0.55); text-align: left; cursor: pointer; }
 .mapping-cell:hover { border-color: rgba(95, 98, 219, 0.4); }
-.mapping-cell small { display: block; font-size: 12px; color: var(--muted); line-height: 1.2; }
+.mapping-cell small { display: block; font-size: 11px; color: var(--muted); line-height: 1.2; }
+/* 单行省略（完整文字放 title 悬停提示）：72px 卡片装不下两行，
+   2026-09-05 实测两行时内容 59.4px > 内容盒 50px，格子整体溢出卡片下边框。 */
 .mapping-cell span {
   display: block;
   font-size: 11.5px;
   line-height: 1.25;
   color: var(--muted);
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
   overflow: hidden;
-  word-break: break-all;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mapping-cell.set span { font-weight: 600; color: #3437a5; }
 .mapping-cell.editing { border-color: var(--accent); background: rgba(95, 98, 219, 0.12); }
