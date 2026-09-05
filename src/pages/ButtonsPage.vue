@@ -608,7 +608,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
-        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
+        <img src="/RC003-remote-photo.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"
