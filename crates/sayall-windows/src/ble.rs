@@ -7,6 +7,7 @@ use crate::{
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
 use std::sync::{
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender},
     Arc, Mutex, MutexGuard, OnceLock,
 };
@@ -171,8 +172,9 @@ pub(crate) enum WorkerMessage {
     /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
     /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
     /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
-    /// 检测轮次（1 起，见 spawn_wetype_check 的实测依据注释）。
-    RetryVoiceChord { attempt: u32 },
+    /// 检测轮次（1 起）；`epoch` 为 armed 时的语音会话纪元（防跨会话
+    /// 误伤，见 worker_loop 中 voice_session_epoch 注释）。
+    RetryVoiceChord { attempt: u32, epoch: u64 },
     Control {
         connection_generation: u64,
         bytes: Vec<u8>,
@@ -219,6 +221,13 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 语音会话纪元：每次会话开始（StreamStarted）+1。wetype_check 重试
+    // 阶梯（最长 ~7.4s）用它区分"本会话仍在流式"与"旧会话已结束、
+    // 新会话已开始"——仅看全局 voice_state 会把新会话误判为旧会话，
+    // 导致旧阶梯释放并重按新会话（可能已成功开麦）的和弦（2026-09-05
+    // 17:35 实测：用户失败后 0.7s 即再按）。阶梯线程在关键点核对
+    // armed 时的纪元，不符即退出，让新会话自带的新一轮检测接管。
+    let voice_session_epoch: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     // 僵死链路自动恢复计数：连续失败达标后关开一次蓝牙无线电（每个僵死
     // 周期最多 bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES 次）。
     let mut radio_recovery_cycles: u32 = 0;
@@ -505,31 +514,42 @@ fn worker_loop(
                     }
                 }
             }
-            WorkerMessage::RetryVoiceChord { attempt } => {
+            WorkerMessage::RetryVoiceChord { attempt, epoch } => {
                 // 微信输入法热键休眠的自动重试（同一次按住内完成）：
                 // 释放旧和弦边沿 → 重注入。在工作线程内串行执行，与
-                // StreamStopped/中止路径无竞态；仅在会话仍在流式时执行。
+                // StreamStopped/中止路径无竞态；仅在会话仍在流式且纪元
+                // 未变（未被新会话替换）时执行。
                 let chord_configured = lock(&voice_hold_hotkey).clone();
                 let old_held = held_hotkey.take();
                 if let (Some(chord), Some(old)) = (chord_configured, old_held) {
-                    if pipeline.state() == VoiceSessionState::Streaming {
+                    if pipeline.state() == VoiceSessionState::Streaming
+                        && voice_session_epoch.load(Ordering::SeqCst) == epoch
+                    {
                         let _ = send_input.release(&old);
                         match send_input.press(&chord) {
                             Ok(_) => {
                                 gatt_note(format!(
-                                    "chord_retry result=ok attempt={attempt}"
+                                    "chord_retry result=ok attempt={attempt} epoch={epoch}"
                                 ));
                                 held_hotkey = Some(chord);
-                                spawn_wetype_check(&state, sender.clone(), attempt);
+                                spawn_wetype_check(
+                                    &state,
+                                    sender.clone(),
+                                    attempt,
+                                    epoch,
+                                    &voice_session_epoch,
+                                );
                             }
                             Err(error) => {
                                 gatt_note(format!(
-                                    "chord_retry result=err attempt={attempt} err={error}"
+                                    "chord_retry result=err attempt={attempt} epoch={epoch} err={error}"
                                 ));
                             }
                         }
                     } else {
-                        gatt_note("chord_retry skipped reason=not_streaming".to_owned());
+                        gatt_note(format!(
+                            "chord_retry skipped reason=stale epoch={epoch}"
+                        ));
                     }
                 } else {
                     gatt_note("chord_retry skipped reason=no_chord".to_owned());
@@ -552,6 +572,7 @@ fn worker_loop(
                         &mut active_voice_samples,
                         &mut extend_deadline,
                         &sender,
+                        &voice_session_epoch,
                         &bytes,
                     );
                     let phase = lock(&state).phase;
@@ -892,6 +913,7 @@ fn handle_control(
     active_voice_samples: &mut u64,
     extend_deadline: &mut Option<Instant>,
     sender: &Sender<WorkerMessage>,
+    voice_session_epoch: &Arc<AtomicU64>,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -937,6 +959,9 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            // 语音会话纪元 +1：本轮 wetype_check 阶梯以此为 armed 纪元，
+            // 后续新会话会使旧阶梯的核对失效（防跨会话误伤）。
+            let epoch = voice_session_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             *active_voice_samples = 0;
             if let Some(session) = session {
                 session.microphone_opened = true;
@@ -984,7 +1009,9 @@ fn handle_control(
                 ));
                 *held_hotkey = Some(chord);
                 // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
-                spawn_wetype_check(state, sender.clone(), 0);
+                // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
+                // 传入，防旧阶梯跨会话误伤新会话的和弦。
+                spawn_wetype_check(state, sender.clone(), 0, epoch, voice_session_epoch);
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(
@@ -1485,23 +1512,34 @@ fn spawn_wetype_check(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     sender: Sender<WorkerMessage>,
     attempt: u32,
+    epoch: u64,
+    epoch_ref: &Arc<AtomicU64>,
 ) {
     let state = Arc::clone(state);
+    let epoch_ref = Arc::clone(epoch_ref);
     let baseline = crate::wetype_revive::wetype_mic_start();
     gatt_note(format!(
-        "wetype_check armed attempt={attempt} baseline={baseline:?}"
+        "wetype_check armed attempt={attempt} epoch={epoch} baseline={baseline:?}"
     ));
     std::thread::Builder::new()
         .name("sayall-wetype-check".to_owned())
         .spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(WETYPE_CHECK_DELAY_MS));
-            let still_streaming = {
+            let (still_streaming, same_session) = {
                 let snapshot = lock(&state);
-                snapshot.voice_state == VoiceSessionState::Streaming
+                (
+                    snapshot.voice_state == VoiceSessionState::Streaming,
+                    epoch_ref.load(Ordering::SeqCst) == epoch,
+                )
             };
-            if !still_streaming {
-                // 会话已结束：无需验证/唤醒（避免误判与误伤）。
-                gatt_note("wetype_check skipped reason=session_ended".to_owned());
+            if !still_streaming || !same_session {
+                // 会话已结束或已被新会话替换：无需验证/唤醒（避免误判与
+                // 误伤——旧阶梯释放/重按新会话的和弦会打断其听写）。
+                gatt_note(if same_session {
+                    "wetype_check skipped reason=session_ended".to_owned()
+                } else {
+                    format!("wetype_check skipped reason=session_replaced epoch={epoch}")
+                });
                 return;
             }
             let now = crate::wetype_revive::wetype_mic_start();
@@ -1512,7 +1550,7 @@ fn spawn_wetype_check(
             };
             if reacted {
                 gatt_note(format!(
-                    "wetype_check reacted=true attempt={attempt}"
+                    "wetype_check reacted=true attempt={attempt} epoch={epoch}"
                 ));
                 return;
             }
@@ -1528,26 +1566,36 @@ fn spawn_wetype_check(
                 return;
             }
             gatt_note(format!(
-                "wetype_check reacted=false attempt={attempt} reviving"
+                "wetype_check reacted=false attempt={attempt} epoch={epoch} reviving"
             ));
             let revive = crate::ime::cycle_wetype_profile();
             gatt_note(format!(
-                "wetype_revive result={revive:?} attempt={attempt}"
+                "wetype_revive result={revive:?} attempt={attempt} epoch={epoch}"
             ));
             std::thread::sleep(std::time::Duration::from_millis(
                 WETYPE_RETRY_SETTLE_MS[attempt as usize],
             ));
-            let still = {
+            let (still, same_session) = {
                 let snapshot = lock(&state);
-                snapshot.voice_state == VoiceSessionState::Streaming
+                (
+                    snapshot.voice_state == VoiceSessionState::Streaming,
+                    epoch_ref.load(Ordering::SeqCst) == epoch,
+                )
             };
-            if !still {
-                gatt_note("wetype_check skipped_retry reason=session_ended".to_owned());
+            if !still || !same_session {
+                gatt_note(if same_session {
+                    "wetype_check skipped_retry reason=session_ended".to_owned()
+                } else {
+                    format!(
+                        "wetype_check skipped_retry reason=session_replaced epoch={epoch}"
+                    )
+                });
                 return;
             }
             let next_attempt = attempt + 1;
             let _ = sender.send(WorkerMessage::RetryVoiceChord {
                 attempt: next_attempt,
+                epoch,
             });
         })
         .ok();
