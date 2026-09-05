@@ -887,6 +887,9 @@ fn handle_control(
                     lock(state).last_error = Some(error);
                 }
                 if let Err(error) = send_input.press(&chord) {
+                    gatt_note(format!(
+                        "chord_press result=err session={session_id} err={error}"
+                    ));
                     abort_voice_session(
                         session,
                         pipeline,
@@ -900,9 +903,22 @@ fn handle_control(
                     );
                     return;
                 }
+                // 功能点日志：成功按下（含会话号，与 C 04 行对齐即可归因）。
+                gatt_note(format!(
+                    "chord_press result=ok session={session_id} gap_ms={}",
+                    crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
+                ));
                 *held_hotkey = Some(chord);
+            } else {
+                // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
+                gatt_note(format!(
+                    "chord_press result=skipped session={session_id} reason=no_hotkey"
+                ));
             }
             if let Err(error) = audio.begin_session(generation) {
+                gatt_note(format!(
+                    "audio_begin result=err session={session_id} err={error}"
+                ));
                 abort_voice_session(
                     session,
                     pipeline,
@@ -1062,7 +1078,16 @@ fn abort_voice_session(
 fn release_voice_hold_hotkey(send_input: &SendInputRuntime, held_hotkey: &mut Option<KeyChord>) {
     crate::key_suppressor::set_session_active(false);
     if let Some(chord) = held_hotkey.take() {
-        let _ = send_input.release(&chord);
+        // 功能点日志：释放结果（与 chord_press 成对，粘键排查的另一半）。
+        let result = send_input.release(&chord);
+        gatt_note(format!(
+            "chord_release result={} err={}",
+            if result.is_ok() { "ok" } else { "err" },
+            result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+        ));
     }
 }
 
@@ -1335,6 +1360,23 @@ fn gatt_log(kind: &str, bytes: &[u8]) {
                 .collect::<Vec<_>>()
                 .join(" ");
             let _ = writeln!(file, "{kind} {now_ms} len={:3} b=[{preview}]", bytes.len());
+        }
+    }
+}
+
+/// 功能点结构化诊断标记（同 SAYALL_GATT_LOG 开关；AGENTS.md"功能点必须自带
+/// 日志"规范）：语音链路的分支决策、外部调用结果与关键耗时以 "N" 标记
+/// 行落盘，报障后一次日志拉取即可定位环节。格式与 gatt_log 对齐：
+/// `N <墙钟ms> len=  0 note=<结构化键值>`。
+pub(crate) fn gatt_note(note: String) {
+    use std::io::Write as _;
+    if let Some(sink) = gatt_sink() {
+        if let Ok(mut file) = sink.lock() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(file, "N {now_ms} len=  0 note={note}");
         }
     }
 }
