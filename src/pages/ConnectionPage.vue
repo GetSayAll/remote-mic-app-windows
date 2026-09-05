@@ -59,6 +59,7 @@ const devices = ref<PairedRemote[]>([]);
 const scanMessage = ref("尚未扫描");
 const operationMessage = ref("");
 const audioEndpoints = ref<AudioEndpoint[]>([]);
+const showEndpointList = ref(false);
 const scanningAudio = ref(false);
 const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
@@ -275,6 +276,8 @@ async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
 
 async function scanAudio() {
   await detectAudioEndpoints(false);
+  // 用户主动读取端点 = 想看列表；选好即收起（每次只用一个端点）。
+  showEndpointList.value = audioEndpoints.value.length > 0;
 }
 
 async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
@@ -285,6 +288,7 @@ async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
     audioMessage.value = automatic
       ? `已自动选择 ${endpoint.name}`
       : `已选择 ${endpoint.name}`;
+    showEndpointList.value = false;
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
     await refreshAudio();
@@ -330,7 +334,7 @@ onUnmounted(() => {
     <header class="page-header">
       <div>
         <h1>连接与语音</h1>
-        <p>连接状态来自实际 WinRT GATT 会话；BLE / ATVV 就绪不等于系统麦克风已经可用。</p>
+        <p>连接状态来自实际 WinRT GATT 会话；语音输出走你明确选择的端点，不改动系统默认设备。</p>
       </div>
       <span class="badge" :class="phaseTone">{{ connectionPhaseLabel(connection.phase) }}</span>
     </header>
@@ -384,6 +388,48 @@ onUnmounted(() => {
             </button>
           </li>
         </ul>
+
+        <div class="setting-list compact two-col">
+          <div class="setting-row">
+            <strong>设备型号</strong>
+            <span>{{ remoteModelLabel(connection.remoteModel) }}</span>
+          </div>
+          <div class="setting-row">
+            <strong>ATVV / 16 kHz</strong>
+            <span>{{ atvvReady ? "BLE 会话已就绪" : "等待能力确认" }}</span>
+          </div>
+          <div class="setting-row">
+            <strong>睡眠恢复通知</strong>
+            <span>{{ connection.powerNotificationsAvailable ? "已注册" : "当前不可用" }}</span>
+          </div>
+          <div class="setting-row">
+            <strong>按住说话快捷键</strong>
+            <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
+          </div>
+        </div>
+        <p class="muted voice-hotkey-row">按住说话：按下语音键 = 按下该快捷键并开始传声，松开 = 释放；语音写入右侧所选输出端点，由目标程序识别成文字。v1 默认适配微信输入法（左 Ctrl+左 Win）。</p>
+        <div class="button-row voice-hotkey-presets">
+          <button
+            v-for="preset in voiceHotkeyPresets"
+            :key="preset.label"
+            :class="presetIsActive(preset.keys) ? 'primary-button' : 'secondary-button'"
+            type="button"
+            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys)"
+            @click="applyVoiceHotkey(preset.keys)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
+        <details class="usage-hint-details">
+          <summary>微信输入法使用步骤（点开查看）</summary>
+          <ol>
+            <li>输出端点选择 CABLE Input；</li>
+            <li>微信输入法的麦克风设为 CABLE Output（在其"语音输入"设置里；若无此项，把系统默认录音设备设为 CABLE Output）；</li>
+            <li>在目标应用的文本框内切换到微信输入法（看任务栏输入指示器确认）；</li>
+            <li>按住遥控器语音键约半秒以上说话，松开等待文字上屏（需联网，云端识别）。快按不出文字是微信输入法自身的最短按住要求，不是故障。应用会自动屏蔽遥控器语音键附带的 F5 键盘事件，物理键盘的 F5 不受影响。</li>
+          </ol>
+        </details>
       </article>
 
       <article class="card">
@@ -411,7 +457,19 @@ onUnmounted(() => {
         </div>
 
         <p class="muted scan-summary">{{ audioMessage }}</p>
-        <ul v-if="audioEndpoints.length" class="device-list endpoint-list">
+        <div v-if="audioEndpoints.length" class="endpoint-select-row">
+          <button
+            class="secondary-button"
+            type="button"
+            @click="showEndpointList = !showEndpointList"
+          >
+            {{ showEndpointList ? "收起端点列表" : audio.selectedEndpointId ? "更换端点" : "选择端点" }}
+          </button>
+          <span v-if="!showEndpointList" class="muted endpoint-count">
+            共 {{ audioEndpoints.length }} 个端点可选
+          </span>
+        </div>
+        <ul v-if="showEndpointList && audioEndpoints.length" class="device-list endpoint-list">
           <li v-for="endpoint in audioEndpoints" :key="endpoint.id">
             <div>
               <strong>{{ endpoint.name }}</strong>
@@ -433,46 +491,13 @@ onUnmounted(() => {
           </li>
         </ul>
 
-        <div class="setting-list compact">
-          <div class="setting-row">
-            <strong>设备型号</strong>
-            <span>{{ remoteModelLabel(connection.remoteModel) }}</span>
-          </div>
-          <div class="setting-row">
-            <strong>ATVV / 16 kHz</strong>
-            <span>{{ atvvReady ? "BLE 会话已就绪" : "等待能力确认" }}</span>
-          </div>
+        <div class="setting-list compact two-col">
           <div class="setting-row">
             <strong>WASAPI 端点</strong>
             <span>{{ wasapiReady ? audioPhaseLabel(audio.phase) : "等待明确选择" }}</span>
           </div>
-          <div class="setting-row"><strong>本次会话代次</strong><span>{{ connection.generation }}</span></div>
-          <div class="setting-row">
-            <strong>睡眠恢复通知</strong>
-            <span>{{ connection.powerNotificationsAvailable ? "Windows API 已注册" : "当前不可用" }}</span>
-          </div>
-          <div class="setting-row">
-            <strong>按住说话快捷键</strong>
-            <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
-          </div>
+          <div class="setting-row"><strong>会话代次</strong><span>{{ connection.generation }}</span></div>
         </div>
-        <div class="card-title-row voice-hotkey-row">
-          <p class="muted">按住说话快捷键：按下语音键 = 按下该快捷键并开始传声，松开 = 释放；语音写入所选输出端点，由目标程序识别成文字。v1 默认适配微信输入法（左 Ctrl+左 Win）。</p>
-          <p class="muted">微信输入法使用步骤：① 输出端点选择 CABLE Input；② 微信输入法的麦克风设为 CABLE Output（在其"语音输入"设置里；若无此项，把系统默认录音设备设为 CABLE Output）；③ 在目标应用的文本框内切换到微信输入法（看任务栏输入指示器确认）；④ 按住遥控器语音键约半秒以上说话，松开等待文字上屏（需联网，云端识别）。快按不出文字是微信输入法自身的最短按住要求，不是故障。应用会自动屏蔽遥控器语音键附带的 F5 键盘事件（否则微信输入法会把快捷键判定为无效），物理键盘的 F5 不受影响。</p>
-        </div>
-        <div class="button-row voice-hotkey-presets">
-          <button
-            v-for="preset in voiceHotkeyPresets"
-            :key="preset.label"
-            :class="presetIsActive(preset.keys) ? 'primary-button' : 'secondary-button'"
-            type="button"
-            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys)"
-            @click="applyVoiceHotkey(preset.keys)"
-          >
-            {{ preset.label }}
-          </button>
-        </div>
-        <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
 
         <div v-if="audioScanComplete && !virtualCableInstalled" class="info-callout warning vb-cable-callout">
           <div>

@@ -32,6 +32,14 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
     fn voice_hold_hotkey(&self) -> Option<KeyChord>;
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
+    fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
+    fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
+    fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
+    fn subscribe_button_edges(&self, callback: sayall_windows::button_mapping::ButtonEdgeCallback);
+    fn subscribe_button_gestures(
+        &self,
+        callback: sayall_windows::button_mapping::ButtonGestureCallback,
+    );
 
     #[cfg(feature = "runtime-simulation")]
     fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
@@ -117,6 +125,29 @@ impl PlatformRuntime for WindowsPlatform {
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>) {
         WindowsPlatform::set_voice_hold_hotkey(self, hotkey)
     }
+
+    fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
+        WindowsPlatform::button_mappings(self)
+    }
+
+    fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
+        WindowsPlatform::set_button_mappings(self, mappings)
+    }
+
+    fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot {
+        WindowsPlatform::button_mapping_snapshot(self)
+    }
+
+    fn subscribe_button_edges(&self, callback: sayall_windows::button_mapping::ButtonEdgeCallback) {
+        WindowsPlatform::subscribe_button_edges(self, callback)
+    }
+
+    fn subscribe_button_gestures(
+        &self,
+        callback: sayall_windows::button_mapping::ButtonGestureCallback,
+    ) {
+        WindowsPlatform::subscribe_button_gestures(self, callback)
+    }
 }
 
 #[cfg(feature = "runtime-simulation")]
@@ -160,6 +191,7 @@ mod simulation {
         usage: Arc<UsageCounters>,
         state: Mutex<SimulationState>,
         voice_hold_hotkey: Mutex<Option<KeyChord>>,
+        button_mappings: Mutex<sayall_windows::send_input::ButtonMappings>,
     }
 
     impl SimulatedPlatform {
@@ -240,6 +272,7 @@ mod simulation {
                 connection: state.connection.clone(),
                 audio: state.audio.clone(),
                 raw_input: state.raw_input.clone(),
+                button_mapping: self.button_mapping_snapshot(),
             }
         }
 
@@ -327,6 +360,7 @@ mod simulation {
                 semantic_edge_count: 2,
                 last_button: Some(RemoteButton::Ok),
                 last_is_pressed: Some(false),
+                active_buttons: Vec::new(),
                 last_error: None,
             };
             Ok(state.raw_input.clone())
@@ -362,6 +396,41 @@ mod simulation {
 
         fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>) {
             *lock(&self.voice_hold_hotkey) = hotkey;
+        }
+
+        fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
+            lock(&self.button_mappings).clone()
+        }
+
+        fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
+            *lock(&self.button_mappings) = mappings;
+        }
+
+        fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot {
+            sayall_windows::button_mapping::ButtonMappingSnapshot {
+                enabled: lock(&self.button_mappings).enabled,
+                gate_active: false,
+                listener_active: false,
+                swallowed_edges: 0,
+                leaked_downs: 0,
+                fired_gestures: 0,
+                last_fired: None,
+                last_error: None,
+            }
+        }
+
+        fn subscribe_button_edges(
+            &self,
+            _callback: sayall_windows::button_mapping::ButtonEdgeCallback,
+        ) {
+            // CI 仿真不产生真实按键边沿。
+        }
+
+        fn subscribe_button_gestures(
+            &self,
+            _callback: sayall_windows::button_mapping::ButtonGestureCallback,
+        ) {
+            // CI 仿真不产生真实手势。
         }
 
         fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {

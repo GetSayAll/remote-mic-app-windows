@@ -118,6 +118,15 @@ describe("diagnostic report presentation", () => {
         submittedEvents: 0,
         errorPresent: false,
       },
+      buttonMapping: {
+        enabled: true,
+        gateActive: false,
+        listenerActive: false,
+        swallowedEdges: 0,
+        leakedDowns: 0,
+        firedGestures: 0,
+        errorPresent: false,
+      },
     };
 
     const formatted = JSON.parse(formatDiagnosticReport(report, "2026-09-01T00:00:00.000Z"));

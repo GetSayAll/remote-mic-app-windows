@@ -1,0 +1,345 @@
+From bc7b7b3dac7336a943d3eb62774057bc0b1683d0 Mon Sep 17 00:00:00 2001
+From: Andy <hd838a@outlook.com>
+Date: Sat, 5 Sep 2026 05:45:32 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?style:=20=E5=AF=B9=E9=BD=90=20rustfmt=201.9?=
+ =?UTF-8?q?.0=20=E6=A0=BC=E5=BC=8F=EF=BC=88ble/key=5Fsuppressor/gatt=5Fsno?=
+ =?UTF-8?q?op=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+仅格式化差异（行折叠与导入排序），无语义变化。main 上这三个文件由
+较早版本 rustfmt 格式化，当前 stable rustfmt（1.9.0-stable, 2026-08-18）
+的 cargo fmt --check 会失败；本提交使仓库在当前 stable 下 fmt 干净。
+---
+ crates/sayall-windows/examples/gatt_snoop.rs | 81 +++++++++-----------
+ crates/sayall-windows/src/ble.rs             | 35 ++++-----
+ crates/sayall-windows/src/key_suppressor.rs  | 61 +++++++++------
+ 3 files changed, 88 insertions(+), 89 deletions(-)
+
+diff --git a/crates/sayall-windows/examples/gatt_snoop.rs b/crates/sayall-windows/examples/gatt_snoop.rs
+index b4a1dab..44e359f 100644
+--- a/crates/sayall-windows/examples/gatt_snoop.rs
++++ b/crates/sayall-windows/examples/gatt_snoop.rs
+@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
+ 
+ use windows::core::GUID;
+-use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice};
+ use windows::Devices::Bluetooth::GenericAttributeProfile::{
+-    GattCharacteristic, GattCharacteristicProperties, GattValueChangedEventArgs,
++    GattCharacteristic, GattCharacteristicProperties,
+     GattClientCharacteristicConfigurationDescriptorValue, GattCommunicationStatus,
+-    GattDeviceService,
++    GattDeviceService, GattValueChangedEventArgs,
+ };
++use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice};
+ use windows::Devices::Enumeration::DeviceInformation;
+ use windows::Foundation::TypedEventHandler;
+ use windows::Storage::Streams::{DataReader, IBuffer};
+@@ -88,10 +88,9 @@ fn main() {
+     let service = {
+         let selector =
+             GattDeviceService::GetDeviceSelectorFromUuid(SERVICE_UUID).expect("选择器失败");
+-        let operation =
+-            DeviceInformation::FindAllAsyncAqsFilter(&selector).expect("枚举接口失败");
+-        let collection = futures::executor::block_on(operation.into_future())
+-            .expect("等待接口枚举失败");
++        let operation = DeviceInformation::FindAllAsyncAqsFilter(&selector).expect("枚举接口失败");
++        let collection =
++            futures::executor::block_on(operation.into_future()).expect("等待接口枚举失败");
+         let count = collection.Size().unwrap();
+         let address_hex = format!("{address:012X}");
+         let mut matched: Option<windows::core::HSTRING> = None;
+@@ -139,8 +138,7 @@ fn main() {
+                     },
+                 )
+                 .expect(label);
+-            let candidate =
+-                futures::executor::block_on(operation.into_future()).expect(label);
++            let candidate = futures::executor::block_on(operation.into_future()).expect(label);
+             let status = candidate.Status().unwrap();
+             if status == GattCommunicationStatus::Success {
+                 let characteristics = candidate.Characteristics().unwrap();
+@@ -172,25 +170,22 @@ fn main() {
+         let sink = Arc::clone(&sink);
+         let running = Arc::clone(&running);
+         let start = start;
+-        let handler =
+-            TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
+-                move |_, args| {
+-                    if !running.load(Ordering::Relaxed) {
+-                        return Ok(());
+-                    }
+-                    if let Some(args) = args.as_ref() {
+-                        if let Ok(bytes) =
+-                            args.CharacteristicValue().and_then(|b| buffer_to_vec(&b))
+-                        {
+-                            let line = log_line("A", &start, &bytes);
+-                            if let Ok(mut file) = sink.lock() {
+-                                let _ = file.write_all(line.as_bytes());
+-                            }
++        let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
++            move |_, args| {
++                if !running.load(Ordering::Relaxed) {
++                    return Ok(());
++                }
++                if let Some(args) = args.as_ref() {
++                    if let Ok(bytes) = args.CharacteristicValue().and_then(|b| buffer_to_vec(&b)) {
++                        let line = log_line("A", &start, &bytes);
++                        if let Ok(mut file) = sink.lock() {
++                            let _ = file.write_all(line.as_bytes());
+                         }
+                     }
+-                    Ok(())
+-                },
+-            );
++                }
++                Ok(())
++            },
++        );
+         if let Ok(token) = audio.ValueChanged(&handler) {
+             audio_token = Some(token);
+         }
+@@ -199,25 +194,22 @@ fn main() {
+         let sink = Arc::clone(&sink);
+         let running = Arc::clone(&running);
+         let start = start;
+-        let handler =
+-            TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
+-                move |_, args| {
+-                    if !running.load(Ordering::Relaxed) {
+-                        return Ok(());
+-                    }
+-                    if let Some(args) = args.as_ref() {
+-                        if let Ok(bytes) =
+-                            args.CharacteristicValue().and_then(|b| buffer_to_vec(&b))
+-                        {
+-                            let line = log_line("C", &start, &bytes);
+-                            if let Ok(mut file) = sink.lock() {
+-                                let _ = file.write_all(line.as_bytes());
+-                            }
++        let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
++            move |_, args| {
++                if !running.load(Ordering::Relaxed) {
++                    return Ok(());
++                }
++                if let Some(args) = args.as_ref() {
++                    if let Ok(bytes) = args.CharacteristicValue().and_then(|b| buffer_to_vec(&b)) {
++                        let line = log_line("C", &start, &bytes);
++                        if let Ok(mut file) = sink.lock() {
++                            let _ = file.write_all(line.as_bytes());
+                         }
+                     }
+-                    Ok(())
+-                },
+-            );
++                }
++                Ok(())
++            },
++        );
+         if let Ok(token) = control.ValueChanged(&handler) {
+             control_token = Some(token);
+         }
+@@ -234,8 +226,7 @@ fn main() {
+         let operation = characteristic
+             .WriteClientCharacteristicConfigurationDescriptorAsync(value)
+             .expect("CCCD 写入失败");
+-        let status =
+-            futures::executor::block_on(operation.into_future()).expect("CCCD 等待失败");
++        let status = futures::executor::block_on(operation.into_future()).expect("CCCD 等待失败");
+         assert_eq!(status, GattCommunicationStatus::Success, "CCCD 写入失败");
+     }
+ 
+diff --git a/crates/sayall-windows/src/ble.rs b/crates/sayall-windows/src/ble.rs
+index dbb2954..bc90379 100644
+--- a/crates/sayall-windows/src/ble.rs
++++ b/crates/sayall-windows/src/ble.rs
+@@ -302,8 +302,7 @@ fn worker_loop(
+                                                     crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
+                                                 ));
+                                             }
+-                                            match crate::bluetooth_radio::cycle_bluetooth_radio()
+-                                            {
++                                            match crate::bluetooth_radio::cycle_bluetooth_radio() {
+                                                 Ok(()) => {
+                                                     lock(&state).last_error = Some(
+                                                         "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
+@@ -339,12 +338,11 @@ fn worker_loop(
+                                     pipeline.capabilities(),
+                                     pipeline.session_id(),
+                                 ) {
+-                                    if let Some(command) =
+-                                        (AtvvCommand::MicrophoneExtend {
+-                                            version: capabilities.version,
+-                                            session_id,
+-                                        })
+-                                        .encode()
++                                    if let Some(command) = (AtvvCommand::MicrophoneExtend {
++                                        version: capabilities.version,
++                                        session_id,
++                                    })
++                                    .encode()
+                                     {
+                                         match connected.write(&command) {
+                                             Ok(()) => {
+@@ -1289,17 +1287,16 @@ enum WorkerChannel {
+ /// 不含设备身份信息。
+ fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
+     static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+-    SINK
+-        .get_or_init(|| {
+-            let path = std::env::var_os("SAYALL_GATT_LOG")?;
+-            std::fs::OpenOptions::new()
+-                .create(true)
+-                .append(true)
+-                .open(path)
+-                .ok()
+-                .map(Mutex::new)
+-        })
+-        .as_ref()
++    SINK.get_or_init(|| {
++        let path = std::env::var_os("SAYALL_GATT_LOG")?;
++        std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(path)
++            .ok()
++            .map(Mutex::new)
++    })
++    .as_ref()
+ }
+ 
+ fn gatt_log(kind: &str, bytes: &[u8]) {
+diff --git a/crates/sayall-windows/src/key_suppressor.rs b/crates/sayall-windows/src/key_suppressor.rs
+index e2f4734..d780c1f 100644
+--- a/crates/sayall-windows/src/key_suppressor.rs
++++ b/crates/sayall-windows/src/key_suppressor.rs
+@@ -141,13 +141,7 @@ mod windows_impl {
+                     let is_key_up = matches!(message, 0x0101 | 0x0105);
+                     if is_key_up {
+                         let hold = HOLD_PAIRING.swap(HOLD_NONE, Ordering::Relaxed);
+-                        if decide(
+-                            VK_F5,
+-                            true,
+-                            session_active(),
+-                            armed(),
+-                            hold,
+-                        ) {
++                        if decide(VK_F5, true, session_active(), armed(), hold) {
+                             return LRESULT(1);
+                         }
+                         // DOWN 沿曾泄漏进 OS（或配对未知）：放行 UP，防止粘键。
+@@ -186,8 +180,7 @@ mod windows_impl {
+     /// 钩子链头 bump：先挂新钩（立即成为链头），再卸旧钩——重叠安装无吞键空窗
+     /// （Voice_VibeCoding 同款技巧）。新钩安装失败时保留旧钩。
+     fn bump_to_chain_head(current: &mut Option<HHOOK>) {
+-        if let Ok(new_hook) =
+-            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
++        if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
+         {
+             let old = current.replace(new_hook);
+             if let Some(old) = old {
+@@ -282,9 +275,7 @@ mod windows_impl {
+             };
+             let _ = thread_id_tx.send(GetCurrentThreadId());
+ 
+-            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0"
+-                .encode_utf16()
+-                .collect();
++            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0".encode_utf16().collect();
+             let class_name_ptr = PCWSTR(class_name.as_ptr());
+             let wc = WNDCLASSW {
+                 lpfnWndProc: Some(raw_wnd_proc),
+@@ -344,10 +335,8 @@ mod windows_impl {
+                 dwFlags: RIDEV_REMOVE,
+                 hwndTarget: HWND::default(),
+             }];
+-            let _ = RegisterRawInputDevices(
+-                &removals,
+-                std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+-            );
++            let _ =
++                RegisterRawInputDevices(&removals, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+             let _ = DestroyWindow(hwnd);
+             let _ = UnregisterClassW(class_name_ptr, Some(instance));
+         }
+@@ -450,8 +439,7 @@ mod windows_impl {
+             let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
+             if thread_id != 0 {
+                 unsafe {
+-                    let _ =
+-                        PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
++                    let _ = PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
+                 }
+             }
+         } else {
+@@ -473,8 +461,7 @@ mod windows_impl {
+             }
+             if self.raw_thread_id != 0 {
+                 unsafe {
+-                    let _ =
+-                        PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
++                    let _ = PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+                 }
+             }
+             if let Some(worker) = self.worker.take() {
+@@ -499,7 +486,13 @@ mod tests {
+     fn only_remote_or_session_f5_down_is_swallowed() {
+         // DOWN 沿：非 F5 一律透传；F5 仅在会话或武装时吞（配对状态不参与）。
+         assert!(!super::decide(0x41, false, false, false, super::HOLD_NONE));
+-        assert!(!super::decide(0x41, true, true, true, super::HOLD_SWALLOWED_ALL));
++        assert!(!super::decide(
++            0x41,
++            true,
++            true,
++            true,
++            super::HOLD_SWALLOWED_ALL
++        ));
+         assert!(!super::decide(0x74, false, false, false, super::HOLD_NONE));
+         assert!(super::decide(0x74, false, true, false, super::HOLD_NONE));
+         assert!(super::decide(0x74, false, false, true, super::HOLD_NONE));
+@@ -510,10 +503,22 @@ mod tests {
+         // UP 沿只认配对（VVC 同款防粘键：DOWN 漏进 OS 则 UP 必放行）：
+         // 全吞的按住才吞对应 UP；已泄漏/配对未知一律放行，即使会话与武装
+         // 仍生效也不吞——DOWN 已进 OS，UP 跟进才能解除 OS 键态。
+-        assert!(super::decide(0x74, true, false, false, super::HOLD_SWALLOWED_ALL));
++        assert!(super::decide(
++            0x74,
++            true,
++            false,
++            false,
++            super::HOLD_SWALLOWED_ALL
++        ));
+         assert!(!super::decide(0x74, true, true, true, super::HOLD_LEAKED));
+         assert!(!super::decide(0x74, true, true, true, super::HOLD_NONE));
+-        assert!(!super::decide(0x41, true, true, true, super::HOLD_SWALLOWED_ALL));
++        assert!(!super::decide(
++            0x41,
++            true,
++            true,
++            true,
++            super::HOLD_SWALLOWED_ALL
++        ));
+     }
+ 
+     #[test]
+@@ -532,7 +537,13 @@ mod tests {
+             super::track_down(super::HOLD_SWALLOWED_ALL, false),
+             super::HOLD_LEAKED
+         );
+-        assert_eq!(super::track_down(super::HOLD_LEAKED, true), super::HOLD_LEAKED);
+-        assert_eq!(super::track_down(super::HOLD_NONE, false), super::HOLD_LEAKED);
++        assert_eq!(
++            super::track_down(super::HOLD_LEAKED, true),
++            super::HOLD_LEAKED
++        );
++        assert_eq!(
++            super::track_down(super::HOLD_NONE, false),
++            super::HOLD_LEAKED
++        );
+     }
+ }
+-- 
+2.51.1.windows.1
+

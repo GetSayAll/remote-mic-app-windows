@@ -1,3 +1,4 @@
+use button_mapping::{ButtonMappingRuntime, ButtonMappingSnapshot, MappingInjector};
 use raw_input::{RawInputPhase, RawInputSnapshot};
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,12 @@ mod audio;
 mod ble;
 #[cfg(windows)]
 mod bluetooth_radio;
+mod button_gestures;
+pub mod button_mapping;
 pub mod compatibility;
+#[cfg(windows)]
+mod ime;
+pub mod key_gate;
 #[cfg(windows)]
 mod key_suppressor;
 #[cfg(windows)]
@@ -23,7 +29,9 @@ mod raw_input_windows;
 mod reconnect;
 pub mod send_input;
 #[cfg(windows)]
-mod send_input_windows;
+pub(crate) mod send_input_windows;
+#[cfg(windows)]
+mod wetype_revive;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +47,7 @@ pub struct PlatformSnapshot {
     pub connection: ConnectionSnapshot,
     pub audio: AudioSnapshot,
     pub raw_input: RawInputSnapshot,
+    pub button_mapping: ButtonMappingSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,8 +199,16 @@ impl Default for ConnectionSnapshot {
 pub struct WindowsPlatform {
     usage: Arc<UsageCounters>,
     voice_hold_hotkey: Arc<Mutex<Option<send_input::KeyChord>>>,
+    button_mapping: Arc<ButtonMappingRuntime>,
+    raw_input_snapshot: Arc<Mutex<RawInputSnapshot>>,
+    // 抑制器与门控句柄"持有即运行"：字段本身不被读取，随平台生命周期保活
+    //（Drop 时停止钩子线程）。
     #[cfg(windows)]
+    #[allow(dead_code)]
     voice_key_suppressor: Arc<key_suppressor::VoiceKeySuppressor>,
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    key_gate: Arc<key_gate::KeyGate>,
     #[cfg(windows)]
     runtime: Arc<ble::BleRuntime>,
     #[cfg(windows)]
@@ -212,28 +229,66 @@ impl fmt::Debug for WindowsPlatform {
     }
 }
 
+/// 非必须注入器（非 Windows 主机）：注入请求直接失败，保持"不伪造能力"边界。
+#[cfg(not(windows))]
+#[derive(Debug)]
+struct UnsupportedInjector;
+
+#[cfg(not(windows))]
+impl MappingInjector for UnsupportedInjector {
+    fn tap(&self, _chord: &send_input::KeyChord) -> Result<(), String> {
+        Err("SendInput 仅在 Windows 上可用".to_owned())
+    }
+}
+
 impl Default for WindowsPlatform {
     fn default() -> Self {
         let usage = Arc::new(UsageCounters::default());
         let voice_hold_hotkey = Arc::new(Mutex::new(None));
+        let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
         #[cfg(windows)]
         {
+            // 后台节流豁免（2026-09-05 根因修复）：后台驻留被 Windows 节流
+            // 会让吞键归因变慢（F5 泄漏→和弦被拒）与链路 3 秒级劣化；
+            // 幂等、尽力而为，失败不阻断启动。
+            let _ = power::disable_background_power_throttling();
             let audio = Arc::new(audio::AudioRuntime::new());
             let send_input = Arc::new(send_input_windows::SendInputRuntime::new());
+            let injector: Arc<dyn MappingInjector> = Arc::new(
+                button_mapping::SendInputInjector::new(Arc::clone(&send_input)),
+            );
+            let button_mapping = Arc::new(ButtonMappingRuntime::new(
+                injector,
+                Arc::clone(&usage),
+                Arc::clone(&raw_input_snapshot),
+            ));
             // 语音键 F5 抑制器与 BLE 工作线程通过模块级静态状态协作，
             // 这里只负责随平台生命周期启动/停止。
             let voice_key_suppressor = Arc::new(key_suppressor::VoiceKeySuppressor::start());
+            // 按键映射门控钩子：随平台启动常驻，未配置映射时对所有键透传。
+            let key_gate = Arc::new(key_gate::KeyGate::start());
             let runtime = Arc::new(ble::BleRuntime::new(
                 Arc::clone(&audio),
                 Arc::clone(&usage),
                 Arc::clone(&send_input),
                 Arc::clone(&voice_hold_hotkey),
             ));
-            let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(Arc::clone(&usage)));
+            let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
+                Arc::clone(&raw_input_snapshot),
+                button_mapping.sender(),
+            ));
+            // 遥控器 HID 活动通知接线（断连时遥控器醒来按键 → 立即重连）。
+            let wake_runtime = Arc::clone(&runtime);
+            key_suppressor::set_remote_hid_activity_notify(Box::new(move || {
+                wake_runtime.wake_reconnect();
+            }));
             Self {
                 usage,
                 voice_hold_hotkey,
+                button_mapping,
+                raw_input_snapshot,
                 voice_key_suppressor,
+                key_gate,
                 runtime,
                 audio,
                 raw_input,
@@ -243,9 +298,19 @@ impl Default for WindowsPlatform {
 
         #[cfg(not(windows))]
         {
+            let mut initial = raw_input_snapshot.lock().unwrap();
+            initial.phase = RawInputPhase::Unsupported;
+            drop(initial);
+            let button_mapping = Arc::new(ButtonMappingRuntime::new(
+                Arc::new(UnsupportedInjector),
+                Arc::clone(&usage),
+                Arc::clone(&raw_input_snapshot),
+            ));
             Self {
                 usage,
                 voice_hold_hotkey,
+                button_mapping,
+                raw_input_snapshot,
             }
         }
     }
@@ -290,6 +355,7 @@ impl WindowsPlatform {
                 connection,
                 audio,
                 raw_input,
+                button_mapping: self.button_mapping_snapshot(),
             }
         }
 
@@ -309,12 +375,33 @@ impl WindowsPlatform {
                     phase: AudioPhase::Unsupported,
                     ..AudioSnapshot::default()
                 },
-                raw_input: RawInputSnapshot {
-                    phase: RawInputPhase::Unsupported,
-                    ..RawInputSnapshot::default()
-                },
+                raw_input: self.raw_input_snapshot(),
+                button_mapping: self.button_mapping_snapshot(),
             }
         }
+    }
+
+    /// 更新按键映射：持久化由 Tauri 层负责，这里热加载到引擎并同步门控配置。
+    pub fn set_button_mappings(&self, mappings: send_input::ButtonMappings) {
+        self.button_mapping.set_mappings(mappings);
+    }
+
+    pub fn button_mappings(&self) -> send_input::ButtonMappings {
+        self.button_mapping.mappings()
+    }
+
+    pub fn button_mapping_snapshot(&self) -> ButtonMappingSnapshot {
+        self.button_mapping.snapshot()
+    }
+
+    /// 订阅语义按键边沿（画布高亮数据源）。
+    pub fn subscribe_button_edges(&self, callback: button_mapping::ButtonEdgeCallback) {
+        self.button_mapping.subscribe_button_edges(callback);
+    }
+
+    /// 订阅已触发手势（单击/双击/长按反馈）。
+    pub fn subscribe_button_gestures(&self, callback: button_mapping::ButtonGestureCallback) {
+        self.button_mapping.subscribe_button_gestures(callback);
     }
 
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
@@ -432,17 +519,21 @@ impl WindowsPlatform {
     }
 
     pub fn raw_input_snapshot(&self) -> RawInputSnapshot {
-        #[cfg(windows)]
-        {
-            self.raw_input.snapshot()
-        }
-
+        let snapshot = self
+            .raw_input_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         #[cfg(not(windows))]
         {
             RawInputSnapshot {
                 phase: RawInputPhase::Unsupported,
-                ..RawInputSnapshot::default()
+                ..snapshot
             }
+        }
+        #[cfg(windows)]
+        {
+            snapshot
         }
     }
 
