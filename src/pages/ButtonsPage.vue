@@ -672,7 +672,7 @@ onUnmounted(() => {
             :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
             :title="
               UNMAPPABLE_BUTTONS.has(placement.button)
-                ? '此按键在 Windows 上暂不支持自定义，按键功能保持原样'
+                ? '此按键暂不支持自定义，按键功能保持原样'
                 : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}`
             "
             @click.stop="openEditor(placement.button, trigger)"

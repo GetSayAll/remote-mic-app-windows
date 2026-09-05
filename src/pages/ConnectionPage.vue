@@ -64,7 +64,7 @@ const scanningAudio = ref(false);
 const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
-const audioMessage = ref("尚未读取 Windows 输出端点");
+const audioMessage = ref("尚未读取语音设备");
 const voiceHotkey = ref<KeyChord | null>(null);
 const savingVoiceHotkey = ref(false);
 const voiceHotkeyMessage = ref("尚未读取快捷键设置");
@@ -73,7 +73,7 @@ let pollTimer: ReturnType<typeof setInterval> | undefined;
 const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
   { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
   { label: "关闭", keys: [] },
-  { label: "Windows 语音输入", keys: ["left_windows", "h"] },
+  { label: "系统语音输入", keys: ["left_windows", "h"] },
 ];
 
 const activeVoiceHotkeyKeys = computed(() =>
@@ -204,12 +204,12 @@ async function refreshAudio() {
 async function scan() {
   scanning.value = true;
   operationMessage.value = "";
-  scanMessage.value = "正在读取 Windows 已配对的 BLE 设备…";
+  scanMessage.value = "正在寻找小米遥控器…";
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
-      ? `找到 ${devices.value.length} 个已批准名称的候选设备`
-      : "没有找到已配对且名称精确匹配的 RC001/RC003 候选设备";
+      ? `找到 ${devices.value.length} 个已配对的小米遥控器`
+      : "没有找到已配对的小米遥控器";
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
@@ -247,7 +247,7 @@ async function disconnect() {
 
 async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
   scanningAudio.value = true;
-  audioMessage.value = "正在枚举 Windows 活动输出端点…";
+  audioMessage.value = "正在读取语音设备…";
   try {
     audioEndpoints.value = await listAudioEndpoints();
     audioScanComplete.value = true;
@@ -259,8 +259,8 @@ async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
       return;
     }
     audioMessage.value = virtualCables.length
-      ? `已检测到 ${virtualCables.length} 个 VB-CABLE 输出端点`
-      : "未检测到 VB-CABLE；安装完成后需要重启 Windows，再重新检测";
+      ? `已检测到 ${virtualCables.length} 个 VB-CABLE 语音设备`
+      : "未检测到 VB-CABLE；安装完成后需要重启电脑，再重新检测";
   } catch (error) {
     audioEndpoints.value = [];
     audioScanComplete.value = true;
@@ -297,7 +297,7 @@ async function openVbCablePage() {
   openingVbCablePage.value = true;
   try {
     await openVbCableDownloadPage();
-    audioMessage.value = "已打开 VB-CABLE 官方下载页面；安装时需要管理员权限，完成后请重启 Windows";
+    audioMessage.value = "已打开 VB-CABLE 官方下载页面；安装时需要管理员权限，完成后请重启电脑";
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -339,7 +339,7 @@ onUnmounted(() => {
         <div class="card-title-row">
           <div>
             <h2>遥控器连接</h2>
-            <p class="muted">连接在 Windows 蓝牙设置里配对过的小米遥控器。</p>
+            <p class="muted">连接已配对的小米遥控器。</p>
           </div>
           <button
             class="primary-button"
