@@ -174,7 +174,10 @@ pub(crate) enum WorkerMessage {
     /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
     /// 检测轮次（1 起）；`epoch` 为 armed 时的语音会话纪元（防跨会话
     /// 误伤，见 worker_loop 中 voice_session_epoch 注释）。
-    RetryVoiceChord { attempt: u32, epoch: u64 },
+    RetryVoiceChord {
+        attempt: u32,
+        epoch: u64,
+    },
     Control {
         connection_generation: u64,
         bytes: Vec<u8>,
@@ -551,9 +554,7 @@ fn worker_loop(
                             }
                         }
                     } else {
-                        gatt_note(format!(
-                            "chord_retry skipped reason=stale epoch={epoch}"
-                        ));
+                        gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
                     }
                 } else {
                     gatt_note("chord_retry skipped reason=no_chord".to_owned());

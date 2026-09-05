@@ -36,8 +36,8 @@ use std::time::Duration;
 use windows::core::GUID;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
-    ITfInputProcessorProfileMgr, TF_IPPMF_FORSESSION, TF_PROFILETYPE_INPUTPROCESSOR,
-    TF_INPUTPROCESSORPROFILE, GUID_TFCAT_TIP_KEYBOARD,
+    ITfInputProcessorProfileMgr, GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
+    TF_IPPMF_FORSESSION, TF_PROFILETYPE_INPUTPROCESSOR,
 };
 
 /// TF_InputProcessorProfiles（msctf.dll，公开 COM 类）。
@@ -89,7 +89,10 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
     // 日志拉取即可定位是热/冷路径、查询、激活还是等待环节。
     crate::ble::gatt_note(format!(
         "ime_activation outcome={:?} elapsed_ms={} foreground={} err={}",
-        result.as_ref().map(|outcome| format!("{outcome:?}")).unwrap_or_else(|error| error.clone()),
+        result
+            .as_ref()
+            .map(|outcome| format!("{outcome:?}"))
+            .unwrap_or_else(|error| error.clone()),
         started.elapsed().as_millis(),
         foreground_process_name().unwrap_or_else(|| "unknown".to_owned()),
         result.is_err(),
@@ -134,9 +137,12 @@ fn sta_cycle_wetype_profile() -> Result<String, String> {
             return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
         }
         let result = (|| {
-            let manager: ITfInputProcessorProfileMgr =
-                CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
-                    .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
             // 枚举 zh-CN 输入法，找一个非 WeType 的已启用处理器配置。
             let enumerator = manager
                 .EnumProfiles(LANGID_ZH_CN)
@@ -145,11 +151,7 @@ fn sta_cycle_wetype_profile() -> Result<String, String> {
             let mut profiles = [TF_INPUTPROCESSORPROFILE::default(); 16];
             let mut fetched: u32 = 0;
             loop {
-                if enumerator
-                    .Next(&mut profiles, &mut fetched)
-                    .is_err()
-                    || fetched == 0
-                {
+                if enumerator.Next(&mut profiles, &mut fetched).is_err() || fetched == 0 {
                     break;
                 }
                 for profile in &profiles[..fetched as usize] {
@@ -208,9 +210,7 @@ fn foreground_process_name() -> Option<String> {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     unsafe {
         let foreground = GetForegroundWindow();
         if foreground.0.is_null() {
@@ -257,9 +257,12 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
             return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
         }
         let result = (|| {
-            let manager: ITfInputProcessorProfileMgr =
-                CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
-                    .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
             let mut profile = TF_INPUTPROCESSORPROFILE::default();
             let query = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile);
             let active_is_wetype = match &query {
