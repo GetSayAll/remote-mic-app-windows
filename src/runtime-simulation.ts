@@ -76,7 +76,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
 
   await clickButton("扫描已配对设备");
   await waitFor(
-    () => (document.body.textContent?.includes("找到 2 个已批准名称的候选设备") ? true : null),
+    () => (document.body.textContent?.includes("找到 2 个已配对的小米遥控器") ? true : null),
     "RC001/RC003 扫描结果",
   );
   const remotes = await scanPairedRemotes();

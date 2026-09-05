@@ -249,7 +249,7 @@ const browserSnapshot: RuntimeSnapshot = {
     wasapiReady: false,
     rawInputReady: false,
     sendInputReady: false,
-    verificationStatus: "浏览器预览仅展示界面，不代表 Windows 或 RC001/RC003 已通过",
+    verificationStatus: "浏览器预览仅展示界面，不代表真机已通过",
     connection: {
       phase: "idle",
       remoteName: null,
@@ -377,7 +377,7 @@ export function formatDiagnosticReport(
 
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法调用 Windows 蓝牙 API");
+    throw new Error("当前是浏览器预览，无法读取已配对设备");
   }
   return invoke<PairedRemote[]>("scan_paired_remotes");
 }
@@ -391,21 +391,21 @@ export async function getConnectionSnapshot(): Promise<ConnectionSnapshot> {
 
 export async function connectRemote(deviceId: string): Promise<ConnectionSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法连接 Windows 蓝牙设备");
+    throw new Error("当前是浏览器预览，无法连接遥控器");
   }
   return invoke<ConnectionSnapshot>("connect_remote", { deviceId });
 }
 
 export async function disconnectRemote(): Promise<ConnectionSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法断开 Windows 蓝牙设备");
+    throw new Error("当前是浏览器预览，无法断开遥控器");
   }
   return invoke<ConnectionSnapshot>("disconnect_remote");
 }
 
 export async function listAudioEndpoints(): Promise<AudioEndpoint[]> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法枚举 Windows 音频端点");
+    throw new Error("当前是浏览器预览，无法读取音频设备");
   }
   return invoke<AudioEndpoint[]>("list_audio_endpoints");
 }
@@ -419,7 +419,7 @@ export async function getAudioSnapshot(): Promise<AudioSnapshot> {
 
 export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法选择 Windows 音频端点");
+    throw new Error("当前是浏览器预览，无法选择音频设备");
   }
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
 }
@@ -441,14 +441,14 @@ export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
 
 export async function startRawInput(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法启动 Windows Raw Input");
+    throw new Error("当前是浏览器预览，无法启动按键监听");
   }
   return invoke<RawInputSnapshot>("start_raw_input");
 }
 
 export async function stopRawInput(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法停止 Windows Raw Input");
+    throw new Error("当前是浏览器预览，无法停止按键监听");
   }
   return invoke<RawInputSnapshot>("stop_raw_input");
 }
@@ -462,7 +462,7 @@ export async function getButtonMappings(): Promise<ButtonMappings> {
 
 export async function saveButtonMappings(mappings: ButtonMappings): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法保存 Windows 按键映射");
+    throw new Error("当前是浏览器预览，无法保存按键映射");
   }
   return invoke<ButtonMappings>("save_button_mappings", { mappings });
 }
@@ -479,7 +479,7 @@ export async function testButtonMapping(
   trigger: ButtonTrigger,
 ): Promise<SendInputSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法执行 Windows SendInput");
+    throw new Error("当前是浏览器预览，无法执行按键测试");
   }
   return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger });
 }

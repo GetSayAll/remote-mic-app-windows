@@ -15,7 +15,7 @@ const runtime: RuntimeSnapshot = {
     wasapiReady: false,
     rawInputReady: false,
     sendInputReady: false,
-    verificationStatus: "浏览器预览不代表 Windows 真机通过",
+    verificationStatus: "浏览器预览不代表真机通过",
     connection: {
       phase: "idle",
       remoteName: null,
