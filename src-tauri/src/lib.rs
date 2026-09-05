@@ -213,14 +213,31 @@ async fn test_button_mapping(
     state: tauri::State<'_, AppState>,
 ) -> Result<SendInputSnapshot, String> {
     let action = state.platform.button_mappings().action_for(button, trigger);
-    let ButtonAction::Shortcut { chord } = action else {
-        return Err("该触发方式当前未配置快捷键".to_owned());
-    };
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
+    match action {
+        ButtonAction::Shortcut { chord } => {
+            tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
+                .await
+                .map_err(|error| format!("测试快捷键任务失败：{error}"))?
+                .map_err(|error| error.to_string())
+        }
+        ButtonAction::OpenApp { target } => tauri::async_runtime::spawn_blocking(move || {
+            platform
+                .launch_app(&target)
+                .map(|_| SendInputSnapshot::default())
+        })
         .await
-        .map_err(|error| format!("测试快捷键任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("测试打开应用任务失败：{error}"))?
+        .map_err(|error| error.to_string()),
+        ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn list_preset_apps(
+    state: tauri::State<'_, AppState>,
+) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
+    state.platform.preset_apps()
 }
 
 #[tauri::command]
@@ -533,6 +550,7 @@ pub fn run() {
         save_button_mappings,
         reset_button_mappings,
         test_button_mapping,
+        list_preset_apps,
         get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
@@ -558,6 +576,7 @@ pub fn run() {
         save_button_mappings,
         reset_button_mappings,
         test_button_mapping,
+        list_preset_apps,
         get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,

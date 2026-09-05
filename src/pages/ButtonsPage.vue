@@ -8,6 +8,8 @@ import {
   chordLabel,
   getButtonMappingSnapshot,
   getButtonMappings,
+  listPresetApps,
+  registerPresetAppNames,
   resetButtonMappings,
   saveButtonMappings,
   startRawInput,
@@ -23,6 +25,7 @@ import {
   type ButtonTrigger,
   type FiredGesture,
   type KeyCode,
+  type PresetAppInfo,
   type RawInputPhase,
   type RemoteButton,
   type RuntimeSnapshot,
@@ -169,6 +172,8 @@ const VOICE_ICON_STROKES = ["M6.3 11.5a5.7 5.7 0 0 0 11.4 0", "M12 17.2v3.8"];
 
 const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
+/** 已安装的预设应用（打开应用动作可选列表）。 */
+const presetApps = ref<PresetAppInfo[]>([]);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -215,6 +220,12 @@ function actionsOf(button: RemoteButton): ButtonActions {
 
 function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
   return actionsOf(button)[trigger];
+}
+
+/** 当前编辑格的打开应用目标（非 open_app 动作返回 null，模板类型收窄用）。 */
+function openAppTargetOf(button: RemoteButton, trigger: ButtonTrigger): string | null {
+  const action = actionOf(button, trigger);
+  return action.type === "open_app" ? action.target : null;
 }
 
 function selectButton(button: RemoteButton): void {
@@ -481,10 +492,13 @@ const connectionInfo = computed(() => props.runtime?.platform.connection);
 onMounted(async () => {
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
-  const [loaded, snapshot] = await Promise.all([
+  const [loaded, snapshot, apps] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
+    listPresetApps().catch(() => [] as PresetAppInfo[]),
   ]);
+  presetApps.value = apps.filter((app) => app.installed);
+  registerPresetAppNames(presetApps.value);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -735,6 +749,22 @@ onUnmounted(() => {
           disabled
         >
           {{ group.label }}
+        </button>
+        <button v-if="presetApps.length" class="chip group-label" type="button" disabled>
+          打开应用
+        </button>
+      </div>
+      <div v-if="presetApps.length" class="preset-grid">
+        <button
+          v-for="app in presetApps"
+          :key="app.id"
+          class="chip"
+          :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.id }"
+          type="button"
+          title="已运行则切到该应用窗口，未运行则启动"
+          @click="applyAction({ type: 'open_app', target: app.id })"
+        >
+          {{ app.name }}
         </button>
       </div>
       <div v-for="group in PRESET_GROUPS" :key="group.label" class="preset-grid">

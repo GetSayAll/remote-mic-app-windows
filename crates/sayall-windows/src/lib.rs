@@ -6,6 +6,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
+pub mod app_launcher;
 #[cfg(windows)]
 mod audio;
 #[cfg(windows)]
