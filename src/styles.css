@@ -25,14 +25,16 @@ body {
   font-size: 16px;
 }
 
-.app-shell { display: grid; grid-template-columns: 246px minmax(0, 1fr); min-height: 100vh; }
+/* 侧栏对齐 macOS SettingsView：宽 108px、图标 21 semibold、文字 13 semibold、
+   选中 = 强调色 + 10% 背景（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
+.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); min-height: 100vh; }
 .sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 18px 14px;
+  padding: 10px 4px;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
   backdrop-filter: blur(24px);
@@ -44,27 +46,28 @@ body {
   background: linear-gradient(145deg, #7d7ff0, #5054cd);
   box-shadow: 0 8px 20px rgba(80, 84, 205, 0.25);
 }
-nav { display: grid; gap: 6px; }
+nav { display: grid; gap: 4px; }
 .nav-item {
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: 10px 6px;
+  gap: 7px;
+  padding: 12px 2px;
   border: 0;
-  border-radius: 9px;
-  color: #3d4350;
+  border-radius: 0;
+  color: #5c6270;
   background: transparent;
   text-align: center;
   cursor: pointer;
   font-size: 13px;
-  line-height: 1.25;
+  font-weight: 600;
+  line-height: 1.2;
 }
-.nav-item:hover { background: rgba(255, 255, 255, 0.7); }
-.nav-item.active { color: #3437a5; background: rgba(255, 255, 255, 0.96); box-shadow: 0 2px 9px rgba(35, 40, 55, 0.07); font-weight: 600; }
-.nav-icon { color: #666bd5; text-align: center; font-size: 20px; line-height: 1; }
-.sidebar-footer { margin-top: auto; padding: 12px; color: var(--muted); font-size: 12px; }
+.nav-item:hover { background: rgba(120, 126, 150, 0.08); }
+.nav-item.active { color: var(--accent); background: rgba(80, 84, 205, 0.10); }
+.nav-icon { width: 21px; height: 21px; display: block; }
+.sidebar-footer { margin-top: auto; padding: 10px 4px; color: var(--muted); font-size: 12px; text-align: center; }
 
 .content { min-width: 0; padding: 22px clamp(22px, 3vw, 40px) 26px; overflow: auto; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
@@ -196,16 +199,17 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .toggle-input:checked { background: var(--accent); }
 .toggle-input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(20, 25, 40, 0.25); transition: left 0.15s; }
 .toggle-input:checked::after { left: 16px; }
-/* 画布自适应：宽度按视口可用宽（侧栏 246 + 内容左右 padding 67 预留）、
-   高度按 640 视口目标，二者与 1 取最小作为统一缩放；左边原点 + 居中负
-   边距让视觉画布始终水平居中且不产生横向滚动（2026-09-05：780px 固定
-   画布在窄窗口右列卡片被裁切，实测内容区 647px 时溢出 84px）。 */
+/* 画布对齐 Mac RemoteMappingLayout：高度 570、宽度流式（占满容器，
+   卡宽 = clamp((容器宽-260)/2, 270, 300)）；容器不足最小画布 800px 时
+   （小于最小窗口 980 的恢复态窗口）按视口连续缩放兜底，左边原点。 */
 .mapping-canvas {
   position: relative;
-  margin: 0 0 calc(-572px * (1 - var(--map-scale))) auto;
-  margin-left: calc((100% - 780px * var(--map-scale)) / 2);
+  width: 100%;
+  min-width: 800px;
+  height: 570px;
+  margin-bottom: calc(-570px * (1 - var(--map-scale)));
   flex: 0 0 auto;
-  --map-scale: min(1, (100vw - 313px) / 780px, 100vh / 640px);
+  --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 640px);
   transform: scale(var(--map-scale));
   transform-origin: top left;
 }
@@ -213,42 +217,47 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .mapping-connections path { stroke: rgba(105, 112, 128, 0.4); stroke-width: 1; }
 .mapping-connections path.selected { stroke: var(--accent); stroke-width: 1.6; }
 .mapping-connections path.active { stroke: rgba(233, 138, 43, 0.85); stroke-width: 1.6; }
+.mapping-connections polygon { fill: rgba(105, 112, 128, 0.4); }
+.mapping-connections polygon.selected { fill: var(--accent); }
+.mapping-connections polygon.active { fill: rgba(233, 138, 43, 0.85); }
 /* 遥控器图无底板（PNG 自带透明背景）；连线画在图之上（z-index 高于照片）。 */
-.remote-photo { position: absolute; z-index: 1; width: 202px; height: 410px; margin: 0; border-radius: 14px; overflow: hidden; left: 289px; top: 80px; }
+.remote-photo { position: absolute; z-index: 1; width: 202px; height: 410px; margin: 0; border-radius: 14px; overflow: hidden; top: 80px; }
 .remote-photo img { width: 100%; height: 100%; object-fit: cover; user-select: none; }
-.anchor-dot { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: #ef9420; box-shadow: 0 0 0 3px rgba(239, 148, 32, 0.28); opacity: 0; pointer-events: none; transition: opacity 0.06s; }
+/* 锚点橙点对齐 Mac：8px 纯圆点（无光环）。 */
+.anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #ef9420; opacity: 0; pointer-events: none; transition: opacity 0.06s; }
 .anchor-dot.visible { opacity: 1; }
-.mapping-card { position: absolute; width: 262px; height: 72px; padding: 6px 10px; border-radius: 10px; border: 1px solid rgba(31, 36, 48, 0.15); background: rgba(31, 36, 48, 0.035); cursor: pointer; transition: background 0.08s, border-color 0.08s; }
+.mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid rgba(31, 36, 48, 0.15); background: rgba(31, 36, 48, 0.035); cursor: pointer; transition: background 0.08s, border-color 0.08s; }
 .mapping-card.left { left: 0; }
 .mapping-card.right { right: 0; }
 .mapping-card:hover { background: rgba(255, 255, 255, 0.75); }
 .mapping-card.selected { background: rgba(95, 98, 219, 0.1); border-color: rgba(95, 98, 219, 0.45); }
 .mapping-card.active { background: rgba(239, 148, 32, 0.12); border-color: rgba(239, 148, 32, 0.65); }
 .mapping-card.flashed { box-shadow: 0 0 0 2px rgba(239, 148, 32, 0.55); }
-.mapping-card-title { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
-.mapping-card-title strong { font-size: 12.5px; }
-.mapping-icon { width: 17px; height: 17px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 5px; background: rgba(95, 98, 219, 0.12); color: #575bc6; font-size: 11px; }
+.mapping-card-title { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.mapping-card-title strong { font-size: 13px; font-weight: 600; }
+.mapping-icon { width: 15px; height: 15px; flex: 0 0 auto; color: #575bc6; }
 .mapping-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
-.mapping-cell { min-width: 0; padding: 2.5px 5px; border: 1px solid rgba(31, 36, 48, 0.1); border-radius: 6px; background: rgba(255, 255, 255, 0.55); text-align: left; cursor: pointer; }
-.mapping-cell:hover { border-color: rgba(95, 98, 219, 0.4); }
-.mapping-cell small { display: block; font-size: 11px; color: var(--muted); line-height: 1.2; }
-/* 单行省略（完整文字放 title 悬停提示）：72px 卡片装不下两行，
-   2026-09-05 实测两行时内容 59.4px > 内容盒 50px，格子整体溢出卡片下边框。 */
+.mapping-cell { min-width: 0; padding: 4px 5px; border: 0; border-radius: 5px; background: rgba(31, 36, 48, 0.06); text-align: center; cursor: pointer; }
+.mapping-cell:hover { background: rgba(31, 36, 48, 0.1); }
+.mapping-cell small { display: block; font-size: 12px; font-weight: 500; color: var(--muted); line-height: 1.2; }
+/* 单行省略（完整文字放 title 悬停提示，Mac 同款 lineLimit(1)+help）。 */
 .mapping-cell span {
   display: block;
-  font-size: 11.5px;
-  line-height: 1.25;
+  font-size: 12px;
+  line-height: 1.2;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mapping-cell.set span { font-weight: 600; color: #3437a5; }
-.mapping-cell.editing { border-color: var(--accent); background: rgba(95, 98, 219, 0.12); }
-.mapping-cell.flashed { border-color: #ef9420; background: rgba(239, 148, 32, 0.2); }
+.mapping-cell:first-child span { font-weight: 600; }
+.mapping-cell.set span { color: #3437a5; }
+.mapping-cell.editing { background: rgba(95, 98, 219, 0.14); }
+.mapping-cell.flashed { background: rgba(239, 148, 32, 0.2); }
 .voice-card { cursor: default; }
 .voice-card .mapping-card-title { margin-bottom: 3px; }
-.voice-badge { margin-left: auto; font-size: 12px; min-height: 20px; padding: 2px 8px; }
+.voice-badge { margin-left: auto; font-size: 12px; font-weight: 600; min-height: 20px; padding: 2px 6px; }
+.voice-badge.active { color: #b4611a; background: rgba(239, 148, 32, 0.14); }
 .voice-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.3; }
 .mapping-editor { margin-top: 10px; }
 .mapping-editor h2 { margin: 0 0 3px; }
@@ -280,7 +289,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .endpoint-count { font-size: 12.5px; }
 
 @media (max-width: 1020px) {
-  .app-shell { grid-template-columns: 210px minmax(0, 1fr); }
   .content { padding: 20px 22px 26px; }
   .two-column { grid-template-columns: 1fr; }
   .usage-day-row { grid-template-columns: 82px minmax(120px, 1fr); }
