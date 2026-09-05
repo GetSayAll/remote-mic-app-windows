@@ -8,14 +8,6 @@ const emit = defineEmits<{ select: [page: PageId] }>();
 
 <template>
   <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">S</div>
-      <div>
-        <strong>无线麦</strong>
-        <span>SayAll for Windows</span>
-      </div>
-    </div>
-
     <nav aria-label="设置页面">
       <button
         v-for="item in navigationItems"
