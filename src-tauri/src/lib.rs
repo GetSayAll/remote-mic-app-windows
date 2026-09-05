@@ -396,13 +396,9 @@ pub fn run() {
                 let show = MenuItem::with_id(app, "tray-show", "显示主界面", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show, &quit])?;
-                let icon = app
-                    .default_window_icon()
-                    .cloned()
-                    .ok_or_else(|| std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "缺少应用图标，无法创建托盘",
-                    ))?;
+                let icon = app.default_window_icon().cloned().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "缺少应用图标，无法创建托盘")
+                })?;
                 TrayIconBuilder::with_id("sayall-tray")
                     .icon(icon)
                     .menu(&menu)
