@@ -275,6 +275,11 @@ impl Default for WindowsPlatform {
                 Arc::clone(&raw_input_snapshot),
                 button_mapping.sender(),
             ));
+            // 遥控器 HID 活动通知接线（断连时遥控器醒来按键 → 立即重连）。
+            let wake_runtime = Arc::clone(&runtime);
+            key_suppressor::set_remote_hid_activity_notify(Box::new(move || {
+                wake_runtime.wake_reconnect();
+            }));
             Self {
                 usage,
                 voice_hold_hotkey,
