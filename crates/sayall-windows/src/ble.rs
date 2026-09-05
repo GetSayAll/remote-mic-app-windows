@@ -111,6 +111,12 @@ impl BleRuntime {
         self.request(|reply| WorkerMessage::Restore { device_id, reply })
     }
 
+    /// 遥控器 HID 活动触发的立即重连（断连状态下遥控器醒来按键时，
+    /// 由 key_suppressor 归因回调调用；尽力而为，队列满即丢弃）。
+    pub fn wake_reconnect(&self) {
+        let _ = self.sender.send(WorkerMessage::WakeReconnect);
+    }
+
     fn request(
         &self,
         make_message: impl FnOnce(Sender<Result<ConnectionSnapshot, PlatformError>>) -> WorkerMessage,
@@ -156,6 +162,12 @@ pub(crate) enum WorkerMessage {
         device_id: String,
         reply: Sender<Result<ConnectionSnapshot, PlatformError>>,
     },
+    /// 遥控器 HID 活动观察（key_suppressor 归因线程回调）：断连状态下
+    /// 遥控器醒来按键时，其 HID 事件先于 GATT 可达——立即触发重连
+    /// （清零退避），把"按下→应用恢复"的空窗从最长一个退避周期
+    /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
+    /// GATT 重连耗 3 秒，期间按键全部无响应）。
+    WakeReconnect,
     Control {
         connection_generation: u64,
         bytes: Vec<u8>,
@@ -466,6 +478,23 @@ fn worker_loop(
                 };
                 *lock(&state) = snapshot.clone();
                 let _ = reply.send(Ok(snapshot));
+            }
+            WorkerMessage::WakeReconnect => {
+                // 遥控器 HID 活动（正在按键）：仅当无活动会话、有首选设备、
+                // 未挂起时立即重试连接；清零退避让下一次尝试马上发生。
+                if session.is_none()
+                    && preferred_device_id.is_some()
+                    && !system_suspended
+                    && reconnect_deadline.is_some()
+                {
+                    gatt_note("wake_reconnect triggered=hidi backoff_reset=true".to_owned());
+                    backoff.reset();
+                    reconnect_deadline = Some(Instant::now());
+                    let mut snapshot = lock(&state);
+                    if snapshot.phase == ConnectionPhase::Reconnecting {
+                        snapshot.reconnect_attempt = 0;
+                    }
+                }
             }
             WorkerMessage::Control {
                 connection_generation: message_generation,

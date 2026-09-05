@@ -71,6 +71,10 @@ mod windows_impl {
     static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ARMED_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
     static SWALLOW_MASTER: AtomicBool = AtomicBool::new(false);
+    /// 遥控器 HID 活动通知（lib.rs 接线到 BleRuntime::wake_reconnect）：
+    /// 归因线程观察到遥控器键盘事件时回调。用于断连状态下遥控器醒来
+    /// 按键时立即触发重连（HID 先于 GATT 可达，2026-09-05 实证）。
+    static REMOTE_HID_ACTIVITY_NOTIFY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
     /// 防粘键配对状态（仅钩子线程读写）：0=无按住/配对未知，1=本次按住的
     /// DOWN 沿全部被本钩子吞下，2=任一 DOWN 沿已泄漏进 OS。UP 沿只在 1 时
     /// 吞下（VVC 同款：DOWN 漏进 OS 则 UP 必放行）。
@@ -233,7 +237,17 @@ mod windows_impl {
         };
         if device_path_matches_xiaomi_remote(&path) {
             ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
+            // 遥控器 HID 活动：通知 BLE 运行时立即重连（断连场景下遥控器
+            // 醒来的第一个按键就应触发重试，而不是等退避周期）。
+            if let Some(notify) = REMOTE_HID_ACTIVITY_NOTIFY.get() {
+                notify();
+            }
         }
+    }
+
+    /// 注册遥控器 HID 活动回调（lib.rs 启动时接线；重复注册保持首个）。
+    pub fn set_remote_hid_activity_notify(callback: Box<dyn Fn() + Send + Sync>) {
+        let _ = REMOTE_HID_ACTIVITY_NOTIFY.set(callback);
     }
 
     // ---- Raw Input 归因线程（独立消息窗口 + 消息泵） ----
@@ -475,7 +489,7 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{set_session_active, VoiceKeySuppressor};
+pub use windows_impl::{set_remote_hid_activity_notify, set_session_active, VoiceKeySuppressor};
 
 #[cfg(all(windows, test))]
 pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL};
