@@ -170,8 +170,9 @@ pub(crate) enum WorkerMessage {
     WakeReconnect,
     /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
     /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
-    /// 串行执行，与会话结束路径无竞态。
-    RetryVoiceChord,
+    /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
+    /// 检测轮次（1 起，见 spawn_wetype_check 的实测依据注释）。
+    RetryVoiceChord { attempt: u32 },
     Control {
         connection_generation: u64,
         bytes: Vec<u8>,
@@ -246,7 +247,8 @@ fn worker_loop(
                                 keep_reconnecting_after_cleanup_failure(
                                     &state,
                                     &mut preferred_device_id,
-                                    &mut backoff,                                    &mut reconnect_deadline,
+                                    &mut backoff,
+                                    &mut reconnect_deadline,
                                     &error,
                                 );
                                 continue;
@@ -287,7 +289,8 @@ fn worker_loop(
                                         keep_reconnecting_after_cleanup_failure(
                                             &state,
                                             &mut preferred_device_id,
-                                            &mut backoff,                                            &mut reconnect_deadline,
+                                            &mut backoff,
+                                            &mut reconnect_deadline,
                                             &error,
                                         );
                                     } else {
@@ -413,7 +416,8 @@ fn worker_loop(
                         keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut backoff,                            &mut reconnect_deadline,
+                            &mut backoff,
+                            &mut reconnect_deadline,
                             error,
                         );
                     } else {
@@ -452,7 +456,8 @@ fn worker_loop(
                         keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut backoff,                            &mut reconnect_deadline,
+                            &mut backoff,
+                            &mut reconnect_deadline,
                             &error,
                         );
                         let _ = reply.send(Err(error));
@@ -500,7 +505,7 @@ fn worker_loop(
                     }
                 }
             }
-            WorkerMessage::RetryVoiceChord => {
+            WorkerMessage::RetryVoiceChord { attempt } => {
                 // 微信输入法热键休眠的自动重试（同一次按住内完成）：
                 // 释放旧和弦边沿 → 重注入。在工作线程内串行执行，与
                 // StreamStopped/中止路径无竞态；仅在会话仍在流式时执行。
@@ -511,12 +516,16 @@ fn worker_loop(
                         let _ = send_input.release(&old);
                         match send_input.press(&chord) {
                             Ok(_) => {
-                                gatt_note("chord_retry result=ok".to_owned());
+                                gatt_note(format!(
+                                    "chord_retry result=ok attempt={attempt}"
+                                ));
                                 held_hotkey = Some(chord);
-                                spawn_wetype_check(&state, sender.clone(), true);
+                                spawn_wetype_check(&state, sender.clone(), attempt);
                             }
                             Err(error) => {
-                                gatt_note(format!("chord_retry result=err err={error}"));
+                                gatt_note(format!(
+                                    "chord_retry result=err attempt={attempt} err={error}"
+                                ));
                             }
                         }
                     } else {
@@ -570,7 +579,8 @@ fn worker_loop(
                             keep_reconnecting_after_cleanup_failure(
                                 &state,
                                 &mut preferred_device_id,
-                                &mut backoff,                                &mut reconnect_deadline,
+                                &mut backoff,
+                                &mut reconnect_deadline,
                                 &cleanup_error,
                             );
                             continue;
@@ -622,7 +632,8 @@ fn worker_loop(
                         keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut backoff,                            &mut reconnect_deadline,
+                            &mut backoff,
+                            &mut reconnect_deadline,
                             &error,
                         );
                         continue;
@@ -659,7 +670,8 @@ fn worker_loop(
                         keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
-                            &mut backoff,                            &mut reconnect_deadline,
+                            &mut backoff,
+                            &mut reconnect_deadline,
                             &cleanup_error,
                         );
                         continue;
@@ -686,7 +698,8 @@ fn worker_loop(
                     keep_reconnecting_after_cleanup_failure(
                         &state,
                         &mut preferred_device_id,
-                        &mut backoff,                        &mut reconnect_deadline,
+                        &mut backoff,
+                        &mut reconnect_deadline,
                         &error,
                     );
                     continue;
@@ -971,7 +984,7 @@ fn handle_control(
                 ));
                 *held_hotkey = Some(chord);
                 // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
-                spawn_wetype_check(state, sender.clone(), false);
+                spawn_wetype_check(state, sender.clone(), 0);
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(
@@ -1450,25 +1463,38 @@ pub(crate) fn gatt_note(note: String) {
 ///   （SetProcessInformation 对其他进程 E_INVALIDARG，15:04 真机）。
 /// - 检测：和弦注入后 ~700ms 读 ConsentStore 开麦时间戳验证 WeType 真的
 ///   响应了本次语音（公开可观测判据）。
-/// - 恢复：首次未响应 → TSF 配置切换唤醒（ime::cycle_wetype_profile，
-///   公开 API 制造激活事件）→ 请求工作线程释放旧和弦并重注入
-///   （WorkerMessage::RetryVoiceChord，工作线程串行执行无竞态）→
-///   重注入后再次检测；二次仍未响应才提示人工（打开微信输入法界面）。
-/// 全程落 gatt_note 日志；检测线程尽力而为，绝不阻塞语音会话。
+/// - 恢复（重试阶梯，全部基于 2026-09-05 16:44-17:35 七次真实休眠发作
+///   的 kb-live.log/ConsentStore 持锁解码实测，非推测常量）：
+///   - 配置切换（ime::cycle_wetype_profile，公开 API）确实能复活钩子；
+///   - 复活延迟实测 ∈ (300ms, ~6s]，典型 1.3-2.3s（七次发作中用户在
+///     cycle 后 1.28/1.68/1.85/1.9/2.28s 的再按全部成功）；
+///   - cycle 后 +300ms 的重注入 7/7 失败（过早）——据此第一轮重试
+///     延迟取 2000ms，第二轮（再次 cycle 后）取 3000ms；
+///   - 每轮：检测未响应 → cycle → 等待 → 请求工作线程释放旧和弦并
+///     重注入（WorkerMessage::RetryVoiceChord{attempt}，串行无竞态）→
+///     下一轮检测；两轮重试都未响应才提示人工（打开微信输入法界面）。
+/// 全程落 gatt_note 日志（含 attempt 轮次）；检测线程尽力而为，绝不
+/// 阻塞语音会话。
+const WETYPE_CHECK_DELAY_MS: u64 = 700;
+/// 每轮重注入距上一轮 cycle 完成的等待（实测依据见函数头注释）。
+const WETYPE_RETRY_SETTLE_MS: [u64; 2] = [2000, 3000];
+/// 最大重注入轮次（检测共 attempt 0..=2 三轮）。
+const WETYPE_RETRY_MAX_ATTEMPT: u32 = 2;
+
 fn spawn_wetype_check(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     sender: Sender<WorkerMessage>,
-    retry: bool,
+    attempt: u32,
 ) {
     let state = Arc::clone(state);
     let baseline = crate::wetype_revive::wetype_mic_start();
     gatt_note(format!(
-        "wetype_check armed retry={retry} baseline={baseline:?}"
+        "wetype_check armed attempt={attempt} baseline={baseline:?}"
     ));
     std::thread::Builder::new()
         .name("sayall-wetype-check".to_owned())
         .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(700));
+            std::thread::sleep(std::time::Duration::from_millis(WETYPE_CHECK_DELAY_MS));
             let still_streaming = {
                 let snapshot = lock(&state);
                 snapshot.voice_state == VoiceSessionState::Streaming
@@ -1485,22 +1511,32 @@ fn spawn_wetype_check(
                 _ => false,
             };
             if reacted {
-                gatt_note(format!("wetype_check reacted=true retry={retry}"));
+                gatt_note(format!(
+                    "wetype_check reacted=true attempt={attempt}"
+                ));
                 return;
             }
-            if retry {
-                // 二次未响应：放弃自动恢复，提示人工（唯一兜底）。
-                gatt_note("wetype_check final=not_reacted".to_owned());
+            if attempt >= WETYPE_RETRY_MAX_ATTEMPT {
+                // 最后一轮仍未响应：放弃自动恢复，提示人工（唯一兜底）。
+                gatt_note(format!(
+                    "wetype_check final=not_reacted attempts={WETYPE_RETRY_MAX_ATTEMPT}"
+                ));
                 lock(&state).last_error = Some(
                     "微信输入法热键休眠，自动唤醒重试后仍未响应。可打开一次微信输入法的任意界面（如设置页）恢复其监听后重试"
                         .to_owned(),
                 );
                 return;
             }
-            gatt_note("wetype_check reacted=false reviving".to_owned());
+            gatt_note(format!(
+                "wetype_check reacted=false attempt={attempt} reviving"
+            ));
             let revive = crate::ime::cycle_wetype_profile();
-            gatt_note(format!("wetype_revive result={revive:?}"));
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            gatt_note(format!(
+                "wetype_revive result={revive:?} attempt={attempt}"
+            ));
+            std::thread::sleep(std::time::Duration::from_millis(
+                WETYPE_RETRY_SETTLE_MS[attempt as usize],
+            ));
             let still = {
                 let snapshot = lock(&state);
                 snapshot.voice_state == VoiceSessionState::Streaming
@@ -1509,7 +1545,10 @@ fn spawn_wetype_check(
                 gatt_note("wetype_check skipped_retry reason=session_ended".to_owned());
                 return;
             }
-            let _ = sender.send(WorkerMessage::RetryVoiceChord);
+            let next_attempt = attempt + 1;
+            let _ = sender.send(WorkerMessage::RetryVoiceChord {
+                attempt: next_attempt,
+            });
         })
         .ok();
 }
