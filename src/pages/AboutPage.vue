@@ -15,7 +15,7 @@ defineProps<{ runtime: RuntimeSnapshot | null }>();
     <article class="card about-card">
       <div class="app-icon">S</div>
       <div>
-        <h2>无线麦 SayAll Windows 版</h2>
+        <h2>无线麦 SayAll</h2>
         <p>版本 {{ runtime?.appVersion ?? "0.1.0" }} · Rust + Tauri 2 + Vue 3</p>
         <p class="muted">GPL-3.0-only · 独立公开仓库，不继承参考项目的 Git 历史。</p>
       </div>

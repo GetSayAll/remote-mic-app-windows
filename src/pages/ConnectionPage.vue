@@ -59,6 +59,7 @@ const devices = ref<PairedRemote[]>([]);
 const scanMessage = ref("尚未扫描");
 const operationMessage = ref("");
 const audioEndpoints = ref<AudioEndpoint[]>([]);
+const showEndpointList = ref(false);
 const scanningAudio = ref(false);
 const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
@@ -275,6 +276,8 @@ async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
 
 async function scanAudio() {
   await detectAudioEndpoints(false);
+  // 用户主动读取端点 = 想看列表；选好即收起（每次只用一个端点）。
+  showEndpointList.value = audioEndpoints.value.length > 0;
 }
 
 async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
@@ -285,6 +288,7 @@ async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
     audioMessage.value = automatic
       ? `已自动选择 ${endpoint.name}`
       : `已选择 ${endpoint.name}`;
+    showEndpointList.value = false;
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
     await refreshAudio();
@@ -453,7 +457,19 @@ onUnmounted(() => {
         </div>
 
         <p class="muted scan-summary">{{ audioMessage }}</p>
-        <ul v-if="audioEndpoints.length" class="device-list endpoint-list">
+        <div v-if="audioEndpoints.length" class="endpoint-select-row">
+          <button
+            class="secondary-button"
+            type="button"
+            @click="showEndpointList = !showEndpointList"
+          >
+            {{ showEndpointList ? "收起端点列表" : audio.selectedEndpointId ? "更换端点" : "选择端点" }}
+          </button>
+          <span v-if="!showEndpointList" class="muted endpoint-count">
+            共 {{ audioEndpoints.length }} 个端点可选
+          </span>
+        </div>
+        <ul v-if="showEndpointList && audioEndpoints.length" class="device-list endpoint-list">
           <li v-for="endpoint in audioEndpoints" :key="endpoint.id">
             <div>
               <strong>{{ endpoint.name }}</strong>

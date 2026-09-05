@@ -25,29 +25,25 @@ body {
   font-size: 16px;
 }
 
-.app-shell { display: grid; grid-template-columns: 246px minmax(0, 1fr); min-height: 100vh; }.sidebar {
+.app-shell { display: grid; grid-template-columns: 246px minmax(0, 1fr); min-height: 100vh; }
+.sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 24px 14px 18px;
+  padding: 18px 14px;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
   backdrop-filter: blur(24px);
 }
-.brand { display: flex; align-items: center; gap: 12px; padding: 0 10px 28px; }
-.brand-mark, .app-icon {
+.app-icon {
   display: grid;
   place-items: center;
   color: white;
   background: linear-gradient(145deg, #7d7ff0, #5054cd);
   box-shadow: 0 8px 20px rgba(80, 84, 205, 0.25);
 }
-.brand-mark { width: 38px; height: 38px; border-radius: 11px; font-size: 19px; font-weight: 700; }
-.brand strong, .brand span { display: block; }
-.brand strong { font-size: 16px; }
-.brand span { margin-top: 2px; color: var(--muted); font-size: 12px; }
 nav { display: grid; gap: 4px; }
 .nav-item {
   width: 100%;
@@ -254,6 +250,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .voice-hotkey-row p { margin: 0; font-size: 13px; }
 .voice-hotkey-presets { justify-content: flex-start; margin-top: 8px; }
 .endpoint-list li small { font-size: 12.5px; }
+.endpoint-select-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.endpoint-count { font-size: 12.5px; }
 
 @media (max-width: 940px) {
   .app-shell { grid-template-columns: 210px minmax(0, 1fr); }
