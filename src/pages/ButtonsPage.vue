@@ -8,6 +8,8 @@ import {
   chordLabel,
   getButtonMappingSnapshot,
   getButtonMappings,
+  listPresetApps,
+  registerPresetAppNames,
   resetButtonMappings,
   saveButtonMappings,
   startRawInput,
@@ -23,6 +25,7 @@ import {
   type ButtonTrigger,
   type FiredGesture,
   type KeyCode,
+  type PresetAppInfo,
   type RawInputPhase,
   type RemoteButton,
   type RuntimeSnapshot,
@@ -77,6 +80,18 @@ const VOICE_PLACEMENT: Placement = {
   targetY: 0.07,
 };
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
+
+/**
+ * 暂不支持自定义的按键：返回/音量+/音量− 三键的输入事件不进入
+ * Windows 输入栈（2026-09-05 调查归档，
+ * docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md），
+ * 配置无法生效，界面禁用编辑（卡片保留、已有配置保留显示）。
+ */
+const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set([
+  "back",
+  "volume_up",
+  "volume_down",
+]);
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
@@ -157,6 +172,8 @@ const VOICE_ICON_STROKES = ["M6.3 11.5a5.7 5.7 0 0 0 11.4 0", "M12 17.2v3.8"];
 
 const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
+/** 已安装的预设应用（打开应用动作可选列表）。 */
+const presetApps = ref<PresetAppInfo[]>([]);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -203,6 +220,12 @@ function actionsOf(button: RemoteButton): ButtonActions {
 
 function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
   return actionsOf(button)[trigger];
+}
+
+/** 当前编辑格的打开应用目标（非 open_app 动作返回 null，模板类型收窄用）。 */
+function openAppTargetOf(button: RemoteButton, trigger: ButtonTrigger): string | null {
+  const action = actionOf(button, trigger);
+  return action.type === "open_app" ? action.target : null;
 }
 
 function selectButton(button: RemoteButton): void {
@@ -298,7 +321,7 @@ async function restoreDefaults(): Promise<void> {
     const saved = await resetButtonMappings();
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    statusMessage.value = "已恢复默认（全部按键透传原始行为）";
+    statusMessage.value = "已恢复默认（全部按键保持原始行为）";
   } catch (error) {
     statusMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -438,7 +461,7 @@ function phaseLabel(phase: RawInputPhase | undefined): string {
     case "stopped":
       return "监听已停止";
     case "unsupported":
-      return "当前环境不可用";
+      return "当前环境暂不支持";
     default:
       return "正在读取状态";
   }
@@ -469,10 +492,13 @@ const connectionInfo = computed(() => props.runtime?.platform.connection);
 onMounted(async () => {
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
-  const [loaded, snapshot] = await Promise.all([
+  const [loaded, snapshot, apps] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
+    listPresetApps().catch(() => [] as PresetAppInfo[]),
   ]);
+  presetApps.value = apps.filter((app) => app.installed);
+  registerPresetAppNames(presetApps.value);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -541,12 +567,11 @@ onUnmounted(() => {
       <div>
         <div class="mapping-title-row">
           <h1>按键映射</h1>
-          <label class="toggle-row">
+          <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
             <span>启用自定义按键功能</span>
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
           </label>
         </div>
-        <p>遥控器除语音键外的 12 个按键可自定义单击、双击与长按动作；语音键保持按住说话，不参与映射。</p>
       </div>
       <div class="mapping-header-controls">
         <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
@@ -644,6 +669,12 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
+            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
+            :title="
+              UNMAPPABLE_BUTTONS.has(placement.button)
+                ? '此按键暂不支持自定义，按键功能保持原样'
+                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}`
+            "
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
@@ -708,7 +739,7 @@ onUnmounted(() => {
           type="button"
           @click="applyAction({ type: 'disabled' })"
         >
-          关闭（透传原始按键）
+          关闭（保持原始按键）
         </button>
         <button
           v-for="group in PRESET_GROUPS"
@@ -718,6 +749,22 @@ onUnmounted(() => {
           disabled
         >
           {{ group.label }}
+        </button>
+        <button v-if="presetApps.length" class="chip group-label" type="button" disabled>
+          打开应用
+        </button>
+      </div>
+      <div v-if="presetApps.length" class="preset-grid">
+        <button
+          v-for="app in presetApps"
+          :key="app.id"
+          class="chip"
+          :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.id }"
+          type="button"
+          title="已运行则切到该应用窗口，未运行则启动"
+          @click="applyAction({ type: 'open_app', target: app.id })"
+        >
+          {{ app.name }}
         </button>
       </div>
       <div v-for="group in PRESET_GROUPS" :key="group.label" class="preset-grid">
@@ -766,13 +813,9 @@ onUnmounted(() => {
         >
           {{ rawInput?.phase === "ready" ? "停止监听" : "启动监听" }}
         </button>
-        <small v-if="mappingSnapshot">
-          · 已吞 {{ mappingSnapshot.swallowedEdges }} / 泄漏 {{ mappingSnapshot.leakedDowns }} / 触发
-          {{ mappingSnapshot.firedGestures }} 次
-        </small>
-        <small v-if="mappingSnapshot && !mappings.enabled" class="muted"> · 总开关关闭（全部透传）</small>
+        <small v-if="mappingSnapshot && !mappings.enabled" class="muted"> · 总开关关闭（按键保持原样）</small>
       </div>
-      <label class="toggle-row">
+      <label class="toggle-row" title="开启后，操作实体遥控器不会切换正在编辑的按键。">
         <span>锁定当前按键</span>
         <input v-model="lockSelection" type="checkbox" class="toggle-input" />
       </label>

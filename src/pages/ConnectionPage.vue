@@ -64,16 +64,16 @@ const scanningAudio = ref(false);
 const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
-const audioMessage = ref("尚未读取 Windows 输出端点");
+const audioMessage = ref("尚未读取语音设备");
 const voiceHotkey = ref<KeyChord | null>(null);
 const savingVoiceHotkey = ref(false);
-const voiceHotkeyMessage = ref("按住说话快捷键尚未读取");
+const voiceHotkeyMessage = ref("尚未读取快捷键设置");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
   { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
   { label: "关闭", keys: [] },
-  { label: "Windows 语音输入", keys: ["left_windows", "h"] },
+  { label: "系统语音输入", keys: ["left_windows", "h"] },
 ];
 
 const activeVoiceHotkeyKeys = computed(() =>
@@ -165,10 +165,8 @@ const phaseTone = computed(() => {
 
 const phaseDetail = computed(() => {
   if (connection.value.lastError) return connection.value.lastError;
-  if (connection.value.capabilities) {
-    return `${connection.value.capabilities.sampleRate / 1000} kHz · 帧 ${connection.value.capabilities.frameSize} 字节 · 已解码 ${connection.value.decodedSamples.toLocaleString()} 个采样`;
-  }
-  return "必须经过服务发现、通知订阅和能力确认，才会进入 ATVV 就绪";
+  if (connection.value.capabilities) return "语音功能已确认，可以按住遥控器语音键说话";
+  return "连接后即可使用遥控器语音键";
 });
 
 const audioTone = computed(() => {
@@ -181,10 +179,8 @@ const audioTone = computed(() => {
 
 const audioDetail = computed(() => {
   if (audio.value.lastError) return audio.value.lastError;
-  if (audio.value.selectedEndpointName) {
-    return `已提交 ${audio.value.submittedSamples.toLocaleString()} 个采样 · 队列 ${audio.value.queuedSamples.toLocaleString()}`;
-  }
-  return "无线麦不会自动使用或修改系统默认输出，必须在这里明确选择端点";
+  if (audio.value.selectedEndpointName) return "语音会写入选中的设备";
+  return "不会自动改动系统默认设备，需要在这里明确选择";
 });
 
 async function refreshConnection() {
@@ -208,12 +204,12 @@ async function refreshAudio() {
 async function scan() {
   scanning.value = true;
   operationMessage.value = "";
-  scanMessage.value = "正在读取 Windows 已配对的 BLE 设备…";
+  scanMessage.value = "正在寻找小米遥控器…";
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
-      ? `找到 ${devices.value.length} 个已批准名称的候选设备`
-      : "没有找到已配对且名称精确匹配的 RC001/RC003 候选设备";
+      ? `找到 ${devices.value.length} 个已配对的小米遥控器`
+      : "没有找到已配对的小米遥控器";
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
@@ -227,7 +223,7 @@ async function connect(device: PairedRemote) {
   operationMessage.value = "";
   try {
     connection.value = await connectRemote(device.id);
-    operationMessage.value = "已建立 BLE 会话，正在等待遥控器返回 ATVV 能力";
+    operationMessage.value = "已连接，正在确认语音功能";
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
     await refreshConnection();
@@ -251,7 +247,7 @@ async function disconnect() {
 
 async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
   scanningAudio.value = true;
-  audioMessage.value = "正在枚举 Windows 活动输出端点…";
+  audioMessage.value = "正在读取语音设备…";
   try {
     audioEndpoints.value = await listAudioEndpoints();
     audioScanComplete.value = true;
@@ -263,8 +259,8 @@ async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
       return;
     }
     audioMessage.value = virtualCables.length
-      ? `已检测到 ${virtualCables.length} 个 VB-CABLE 输出端点`
-      : "未检测到 VB-CABLE；安装完成后需要重启 Windows，再重新检测";
+      ? `已检测到 ${virtualCables.length} 个 VB-CABLE 语音设备`
+      : "未检测到 VB-CABLE；安装完成后需要重启电脑，再重新检测";
   } catch (error) {
     audioEndpoints.value = [];
     audioScanComplete.value = true;
@@ -282,7 +278,7 @@ async function scanAudio() {
 
 async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
   selectingEndpointId.value = endpoint.id;
-  audioMessage.value = "正在初始化所选 WASAPI 输出端点…";
+  audioMessage.value = "正在打开语音设备…";
   try {
     audio.value = await selectAudioEndpoint(endpoint.id);
     audioMessage.value = automatic
@@ -301,7 +297,7 @@ async function openVbCablePage() {
   openingVbCablePage.value = true;
   try {
     await openVbCableDownloadPage();
-    audioMessage.value = "已打开 VB-CABLE 官方下载页面；安装时需要管理员权限，完成后请重启 Windows";
+    audioMessage.value = "已打开 VB-CABLE 官方下载页面；安装时需要管理员权限，完成后请重启电脑";
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -334,7 +330,6 @@ onUnmounted(() => {
     <header class="page-header">
       <div>
         <h1>连接与语音</h1>
-        <p>连接状态来自实际 WinRT GATT 会话；语音输出走你明确选择的端点，不改动系统默认设备。</p>
       </div>
       <span class="badge" :class="phaseTone">{{ connectionPhaseLabel(connection.phase) }}</span>
     </header>
@@ -343,8 +338,8 @@ onUnmounted(() => {
       <article class="card">
         <div class="card-title-row">
           <div>
-            <h2>RC001 / RC003 蓝牙连接</h2>
-            <p class="muted">只扫描 Windows 中已经配对、且名称在白名单内的 BLE 设备。</p>
+            <h2>遥控器连接</h2>
+            <p class="muted">连接已配对的小米遥控器。</p>
           </div>
           <button
             class="primary-button"
@@ -395,19 +390,19 @@ onUnmounted(() => {
             <span>{{ remoteModelLabel(connection.remoteModel) }}</span>
           </div>
           <div class="setting-row">
-            <strong>ATVV / 16 kHz</strong>
-            <span>{{ atvvReady ? "BLE 会话已就绪" : "等待能力确认" }}</span>
+            <strong>语音按键</strong>
+            <span>{{ atvvReady ? "已就绪" : "正在确认" }}</span>
           </div>
           <div class="setting-row">
-            <strong>睡眠恢复通知</strong>
-            <span>{{ connection.powerNotificationsAvailable ? "已注册" : "当前不可用" }}</span>
+            <strong>睡眠唤醒自动重连</strong>
+            <span>{{ connection.powerNotificationsAvailable ? "已启用" : "暂不可用" }}</span>
           </div>
           <div class="setting-row">
             <strong>按住说话快捷键</strong>
             <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
           </div>
         </div>
-        <p class="muted voice-hotkey-row">按住说话：按下语音键 = 按下该快捷键并开始传声，松开 = 释放；语音写入右侧所选输出端点，由目标程序识别成文字。v1 默认适配微信输入法（左 Ctrl+左 Win）。</p>
+        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：左 Ctrl + 左 Win。</p>
         <div class="button-row voice-hotkey-presets">
           <button
             v-for="preset in voiceHotkeyPresets"
@@ -424,10 +419,10 @@ onUnmounted(() => {
         <details class="usage-hint-details">
           <summary>微信输入法使用步骤（点开查看）</summary>
           <ol>
-            <li>输出端点选择 CABLE Input；</li>
-            <li>微信输入法的麦克风设为 CABLE Output（在其"语音输入"设置里；若无此项，把系统默认录音设备设为 CABLE Output）；</li>
+            <li>语音设备选择 CABLE Input；</li>
+            <li>在微信输入法的语音设置里，把麦克风设为 CABLE Output；若没有这个选项，把系统默认录音设备设为 CABLE Output；</li>
             <li>在目标应用的文本框内切换到微信输入法（看任务栏输入指示器确认）；</li>
-            <li>按住遥控器语音键约半秒以上说话，松开等待文字上屏（需联网，云端识别）。快按不出文字是微信输入法自身的最短按住要求，不是故障。应用会自动屏蔽遥控器语音键附带的 F5 键盘事件，物理键盘的 F5 不受影响。</li>
+            <li>按住遥控器语音键约半秒以上再说话，松开后等待文字出现（需要联网）。快速点按不出文字是微信输入法自己的最短按住要求，不是故障。遥控器语音键自带的 F5 按键会被应用自动屏蔽，物理键盘的 F5 不受影响。</li>
           </ol>
         </details>
       </article>
@@ -435,8 +430,8 @@ onUnmounted(() => {
       <article class="card">
         <div class="card-title-row">
           <div>
-            <h2>Windows 语音输出</h2>
-            <p class="muted">选择要接收遥控器 PCM 的输出端点，例如 CABLE Input。</p>
+            <h2>语音设备</h2>
+            <p class="muted">选择语音写入的设备。使用微信输入法请选 CABLE Input。</p>
           </div>
           <button
             class="secondary-button"
@@ -444,7 +439,7 @@ onUnmounted(() => {
             :disabled="scanningAudio || audioBusy || !runtime?.platform.windowsApiAvailable"
             @click="scanAudio()"
           >
-            {{ scanningAudio ? "读取中…" : "读取输出端点" }}
+            {{ scanningAudio ? "读取中…" : "刷新设备列表" }}
           </button>
         </div>
 
@@ -463,17 +458,17 @@ onUnmounted(() => {
             type="button"
             @click="showEndpointList = !showEndpointList"
           >
-            {{ showEndpointList ? "收起端点列表" : audio.selectedEndpointId ? "更换端点" : "选择端点" }}
+            {{ showEndpointList ? "收起列表" : audio.selectedEndpointId ? "更换设备" : "选择设备" }}
           </button>
           <span v-if="!showEndpointList" class="muted endpoint-count">
-            共 {{ audioEndpoints.length }} 个端点可选
+            共 {{ audioEndpoints.length }} 个设备可选
           </span>
         </div>
         <ul v-if="showEndpointList && audioEndpoints.length" class="device-list endpoint-list">
           <li v-for="endpoint in audioEndpoints" :key="endpoint.id">
             <div>
               <strong>{{ endpoint.name }}</strong>
-              <small>{{ endpoint.isVirtualCableCandidate ? "虚拟麦克风候选端点" : "普通 Windows 输出端点" }}</small>
+              <small>{{ endpoint.isVirtualCableCandidate ? "推荐（微信输入法等语音工具使用）" : "其他音频设备" }}</small>
             </div>
             <button
               type="button"
@@ -482,9 +477,9 @@ onUnmounted(() => {
             >
               {{
                 selectingEndpointId === endpoint.id
-                  ? "初始化中…"
+                  ? "正在启用…"
                   : audio.selectedEndpointId === endpoint.id
-                    ? "当前端点"
+                    ? "当前设备"
                     : "选择"
               }}
             </button>
@@ -493,16 +488,15 @@ onUnmounted(() => {
 
         <div class="setting-list compact two-col">
           <div class="setting-row">
-            <strong>WASAPI 端点</strong>
-            <span>{{ wasapiReady ? audioPhaseLabel(audio.phase) : "等待明确选择" }}</span>
+            <strong>语音设备</strong>
+            <span>{{ wasapiReady ? audioPhaseLabel(audio.phase) : "待选择" }}</span>
           </div>
-          <div class="setting-row"><strong>会话代次</strong><span>{{ connection.generation }}</span></div>
         </div>
 
         <div v-if="audioScanComplete && !virtualCableInstalled" class="info-callout warning vb-cable-callout">
           <div>
             <strong>需要安装 VB-CABLE</strong>
-            <p>它由 VB-Audio 提供，属于 Donationware。安装需要管理员权限，完成后必须重启 Windows。</p>
+            <p>由 VB-Audio 提供的免费虚拟声卡。安装需要管理员权限，完成后需重启电脑。</p>
           </div>
           <div class="button-row">
             <button class="primary-button" type="button" :disabled="openingVbCablePage" @click="openVbCablePage">
@@ -516,10 +510,10 @@ onUnmounted(() => {
         <div v-else class="info-callout" :class="{ warning: !wasapiReady }">
           {{
             wasapiReady
-              ? "所选端点已通过 WASAPI 初始化；仍需在 Windows 上分别完成真实 RC001、RC003 与 VB-CABLE 回环验收。"
+              ? "语音设备已就绪。"
               : virtualCableInstalled
-                ? "已检测到 VB-CABLE。请选择 CABLE Input；在输入法或语音软件中选择 CABLE Output。"
-                : "正在检测 VB-CABLE 音频端点。"
+                ? "已检测到 VB-CABLE。这里选择 CABLE Input；在微信输入法的语音设置里选择 CABLE Output。"
+                : "正在检测 VB-CABLE…"
           }}
         </div>
       </article>

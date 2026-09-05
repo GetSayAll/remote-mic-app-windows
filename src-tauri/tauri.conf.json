@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "无线麦 SayAll",
-        "width": 1120,
-        "height": 800,
-        "minWidth": 980,
+        "width": 1029,
+        "height": 732,
+        "minWidth": 1029,
         "minHeight": 732,
         "decorations": true,
         "resizable": true,

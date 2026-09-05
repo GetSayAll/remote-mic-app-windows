@@ -53,6 +53,8 @@ pub enum EngineMessage {
 /// 动作注入器抽象（生产实现包装 `SendInputRuntime`，测试实现记录调用）。
 pub trait MappingInjector: Send + Sync {
     fn tap(&self, chord: &KeyChord) -> Result<(), String>;
+    /// 打开/激活预设应用（生产实现调用 app_launcher）。
+    fn launch_app(&self, target: &str) -> Result<(), String>;
 }
 
 /// 生产注入器：批量 SendInput tap（DOWN+UP），部分交付时由 send_input 层回滚。
@@ -73,6 +75,10 @@ impl MappingInjector for SendInputInjector {
             .tap(chord.clone())
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    fn launch_app(&self, target: &str) -> Result<(), String> {
+        crate::app_launcher::activate_or_launch(target)
     }
 }
 
@@ -486,29 +492,42 @@ fn fire_gesture(
         ));
         return;
     }
-    let ButtonAction::Shortcut { chord } = action else {
-        crate::ble::gatt_note(format!(
-            "map_skip_inject reason=action_not_shortcut button={:?} trigger={:?}",
-            button, trigger
-        ));
-        return;
-    };
-    crate::ble::gatt_note(format!(
-        "map_fire button={:?} trigger={:?} chord={}",
-        button,
-        trigger,
-        chord
-            .keys
-            .iter()
-            .map(|key| format!("{key:?}"))
-            .collect::<Vec<_>>()
-            .join("+")
-    ));
-    match injector.tap(&chord) {
-        Ok(()) => crate::ble::gatt_note("map_inject result=ok".to_owned()),
-        Err(error) => {
-            crate::ble::gatt_note(format!("map_inject result=err error={error}"));
-            lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
+    match action {
+        ButtonAction::Disabled => {}
+        ButtonAction::Shortcut { chord } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={:?} trigger={:?} action=shortcut chord={}",
+                button,
+                trigger,
+                chord
+                    .keys
+                    .iter()
+                    .map(|key| format!("{key:?}"))
+                    .collect::<Vec<_>>()
+                    .join("+")
+            ));
+            match injector.tap(&chord) {
+                Ok(()) => crate::ble::gatt_note("map_inject result=ok".to_owned()),
+                Err(error) => {
+                    crate::ble::gatt_note(format!("map_inject result=err error={error}"));
+                    lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
+                }
+            }
+        }
+        ButtonAction::OpenApp { target } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={:?} trigger={:?} action=open_app target={target}",
+                button, trigger
+            ));
+            match injector.launch_app(&target) {
+                Ok(()) => crate::ble::gatt_note(format!("map_launch result=ok target={target}")),
+                Err(error) => {
+                    crate::ble::gatt_note(format!(
+                        "map_launch result=err target={target} error={error}"
+                    ));
+                    lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
+                }
+            }
         }
     }
 }
@@ -545,10 +564,11 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
-    /// 测试注入器：记录 tap 的和弦。
+    /// 测试注入器：记录 tap 的和弦与打开应用的目标。
     #[derive(Debug, Default)]
     struct RecordingInjector {
         taps: StdMutex<Vec<KeyChord>>,
+        launches: StdMutex<Vec<String>>,
         fail: bool,
     }
 
@@ -558,6 +578,14 @@ mod tests {
                 return Err("注入失败（测试）".to_owned());
             }
             self.taps.lock().unwrap().push(chord.clone());
+            Ok(())
+        }
+
+        fn launch_app(&self, target: &str) -> Result<(), String> {
+            if self.fail {
+                return Err("打开应用失败（测试）".to_owned());
+            }
+            self.launches.lock().unwrap().push(target.to_owned());
             Ok(())
         }
     }
@@ -634,6 +662,50 @@ mod tests {
         assert_eq!(snapshot.active_buttons, Vec::new());
         assert_eq!(snapshot.semantic_edge_count, 2);
         assert_eq!(snapshot.last_button, Some(RemoteButton::Ok));
+    }
+
+    /// 打开应用动作：门控运行时，手势触发应调用 launch_app 而非 tap。
+    #[test]
+    fn open_app_action_launches_instead_of_tap() {
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::OpenApp {
+                    target: "notepad".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.launches.lock().unwrap().as_slice(),
+            &["notepad".to_owned()],
+            "打开应用动作应调用 launch_app"
+        );
+        assert!(
+            injector.taps.lock().unwrap().is_empty(),
+            "打开应用动作不得注入按键"
+        );
+        drop(gate);
     }
 
     #[test]

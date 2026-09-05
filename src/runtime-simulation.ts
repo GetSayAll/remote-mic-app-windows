@@ -76,7 +76,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
 
   await clickButton("扫描已配对设备");
   await waitFor(
-    () => (document.body.textContent?.includes("找到 2 个已批准名称的候选设备") ? true : null),
+    () => (document.body.textContent?.includes("找到 2 个已配对的小米遥控器") ? true : null),
     "RC001/RC003 扫描结果",
   );
   const remotes = await scanPairedRemotes();
@@ -96,11 +96,11 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     () => (document.body.textContent?.includes("CABLE Input (CI Simulation)") ? true : null),
     "仿真音频端点",
   );
-  // 端点列表默认收起（用户每次只用一个）：自动选择后以"更换端点"入口呈现。
+  // 端点列表默认收起（用户每次只用一个）：自动选择后以"更换设备"入口呈现。
   await waitFor(
     () =>
       Array.from(document.querySelectorAll<HTMLButtonElement>("button")).some((button) =>
-        button.textContent?.trim().includes("更换端点"),
+        button.textContent?.trim().includes("更换设备"),
       )
         ? true
         : null,
