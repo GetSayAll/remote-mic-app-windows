@@ -979,6 +979,14 @@ fn handle_control(
             // 2026-09-04 曾因误接未启动的 voice_key_suppressor 模块导致 F5
             // 泄漏进和弦、微信输入法拒绝触发（evidence/p 复盘）。
             crate::key_suppressor::set_session_active(true);
+            // F5 解粘保险（2026-09-05 21:08 实证链路）：断连重连场景下
+            // 首个 F5 D 在 0x04 之前泄漏进 OS（重连需 ~3s，武装不可能
+            // 提前），其 UP 沿若丢失则 OS 键态 F5 永久按下——后续和弦
+            // 全部变成 F5+Ctrl+Win 三键被拒。注入一个 F5 UP 清理：
+            // 干净场景（本抑制器全吞）下该 UP 也会被吞（配对规则），
+            // 仅在确有泄漏时放行到 OS——恰好只在需要时生效。
+            send_input.release_stuck_f5();
+            std::thread::sleep(Duration::from_millis(20));
             // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
@@ -1631,6 +1639,17 @@ fn subscribe(
                         },
                         &bytes,
                     );
+                    // 控制通知（遥控器按键活动，含语音会话 0x04）：在此刻
+                    // ——GATT 回调线程，刚被事件唤醒、不经工作线程队列——
+                    // 直接武装 F5 抑制宽限。遥控器闲置后首按时应用自身被
+                    // 后台节流，工作线程的 set_session_active 可拖 ~120ms，
+                    // F5 的 60ms 有界等待等不到它而泄漏（2026-09-05 21:08
+                    // 实证：F5 D 泄漏 3ms 后和弦注入 → 三键拒绝 → 首按
+                    // 失败）。HID F5 正常比 0x04 晚 60-90ms 到达，落在
+                    // 250ms 宽限内被即时吞下。
+                    if matches!(channel, WorkerChannel::Control) {
+                        crate::key_suppressor::arm_grace();
+                    }
                     let message = match channel {
                         WorkerChannel::Audio => WorkerMessage::Audio {
                             connection_generation,
