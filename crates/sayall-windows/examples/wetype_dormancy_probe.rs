@@ -32,6 +32,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let phase = args.get(1).map(String::as_str).unwrap_or("ladder");
     match phase {
+        "cycle" => {
+            // 仅配置切换（无和弦注入）——保活实验用。
+            let r = cycle_profile();
+            println!("cycle_only: {r:?}");
+        }
         "cycle-test" => {
             // 健全性实验（钩子活着时）：cycle profile 后立即注入和弦，
             // 验证切换不破坏触发（v2 复活路径的前提）。

@@ -512,6 +512,15 @@ fn worker_loop(
                     if snapshot.phase == ConnectionPhase::Reconnecting {
                         snapshot.reconnect_attempt = 0;
                     }
+                    // WeType 钩子休眠预热点火（2026-09-05 实证：遥控器闲置
+                    // 2.5-4 分钟钩子即休眠，首按必失败；复活延迟 1.4-11s）。
+                    // 遥控器唤醒到用户首按约有 1-3s 空窗——此刻先 cycle 一
+                    // 次，把复活计时提前，减少首按落在复活窗口内的概率。
+                    // 仅长闲置（遥控器断连后重连）触发；短闲置场景由
+                    // 会话内的重试阶梯兜底。工作线程此刻无会话，阻塞
+                    // ~0.7s 无碍。
+                    let prewarm = crate::ime::cycle_wetype_profile();
+                    gatt_note(format!("wetype_prewarm source=wake_reconnect result={prewarm:?}"));
                 }
             }
             WorkerMessage::RetryVoiceChord { attempt, epoch } => {
@@ -1503,10 +1512,14 @@ pub(crate) fn gatt_note(note: String) {
 /// 全程落 gatt_note 日志（含 attempt 轮次）；检测线程尽力而为，绝不
 /// 阻塞语音会话。
 const WETYPE_CHECK_DELAY_MS: u64 = 700;
-/// 每轮重注入距上一轮 cycle 完成的等待（实测依据见函数头注释）。
-const WETYPE_RETRY_SETTLE_MS: [u64; 2] = [2000, 3000];
-/// 最大重注入轮次（检测共 attempt 0..=2 三轮）。
-const WETYPE_RETRY_MAX_ATTEMPT: u32 = 2;
+/// 每轮重注入距上一轮 cycle 完成的等待。实测依据（2026-09-05 20:15-20:27
+/// 七次发作 + 16:44-17:35 七次，sayall-diag.log/kb-live 解码）：复活延迟
+/// 分布 1.4/1.45/2.24/3.2/3.4/5.3/>10.4s——[2,3] 两轮只覆盖前三种且实测
+/// 4 次重试 0 命中（用户总在重试前松开再按）；扩为 [2,3,5] 三轮覆盖除
+/// >10.4s 离群点外的全部观测值（按住约 13s 内完成整个阶梯）。
+const WETYPE_RETRY_SETTLE_MS: [u64; 3] = [2000, 3000, 5000];
+/// 最大重注入轮次（检测共 attempt 0..=3 四轮）。
+const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
 
 fn spawn_wetype_check(
     state: &Arc<Mutex<ConnectionSnapshot>>,
