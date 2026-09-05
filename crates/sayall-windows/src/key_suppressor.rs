@@ -71,6 +71,12 @@ mod windows_impl {
     static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ARMED_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
     static SWALLOW_MASTER: AtomicBool = AtomicBool::new(false);
+    /// 抑制器决策计数（AGENTS.md 功能点日志规范；仅钩子线程原子递增，
+    /// 会话开始时由工作线程快照落盘——钩子线程绝不做文件 IO）。
+    static F5_DOWN_SEEN: AtomicU64 = AtomicU64::new(0);
+    static F5_DOWN_SWALLOWED: AtomicU64 = AtomicU64::new(0);
+    static F5_DOWN_LEAKED: AtomicU64 = AtomicU64::new(0);
+    static F5_DOWN_WAITED_ARMED_LATE: AtomicU64 = AtomicU64::new(0);
     /// 遥控器 HID 活动通知（lib.rs 接线到 BleRuntime::wake_reconnect）：
     /// 归因线程观察到遥控器键盘事件时回调。用于断连状态下遥控器醒来
     /// 按键时立即触发重连（HID 先于 GATT 可达，2026-09-05 实证）。
@@ -152,7 +158,8 @@ mod windows_impl {
                         return CallNextHookEx(None, code, wparam, lparam);
                     }
                     // DOWN 沿：先试武装状态，未武装则 60ms 有界等待。
-                    let swallowed = if swallow_ready() {
+                    let waited = !swallow_ready();
+                    let swallowed = if !waited {
                         true
                     } else {
                         let deadline = now_ms() + BOUNDED_WAIT_MS;
@@ -166,6 +173,15 @@ mod windows_impl {
                         }
                         armed_late
                     };
+                    if waited && swallowed {
+                        F5_DOWN_WAITED_ARMED_LATE.fetch_add(1, Ordering::Relaxed);
+                    }
+                    F5_DOWN_SEEN.fetch_add(1, Ordering::Relaxed);
+                    if swallowed {
+                        F5_DOWN_SWALLOWED.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        F5_DOWN_LEAKED.fetch_add(1, Ordering::Relaxed);
+                    }
                     let hold = HOLD_PAIRING.load(Ordering::Relaxed);
                     let next = track_down(hold, swallowed);
                     HOLD_PAIRING.store(next, Ordering::Relaxed);
@@ -443,6 +459,19 @@ mod windows_impl {
         }
     }
 
+    /// GATT 控制通知到达时立即武装宽限（供 BLE 回调线程调用）。
+    ///
+    /// 背景（2026-09-05 21:08 实证，kb-live/live13 交叉）：遥控器闲置后
+    /// 首按，应用自身被后台节流——0x04 经工作线程队列到
+    /// set_session_active 的链路可拖到 ~120ms，而 F5 的 60ms 有界等待
+    /// 提前超时 → F5 D 泄漏进 OS → 和弦变成 F5+Ctrl+Win 三键被微信输入法
+    /// 拒绝（首按失败）。GATT 回调线程因刚被事件唤醒不受队列延迟，在
+    /// 此直接武装，F5 D（正常比 0x04 晚 60-90ms 到达）落在 250ms 宽限内
+    /// 被即时吞下。
+    pub fn arm_grace() {
+        ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
+    }
+
     /// ATVV 语音会话起止（模块级，供 BleRuntime 工作线程调用）：
     /// 会话期间吞 F5；结束时保留 250ms 宽限覆盖晚到的释放沿。
     /// 会话开始同时请求钩子链头 bump——微信输入法等目标若在本应用之后
@@ -450,6 +479,15 @@ mod windows_impl {
     pub fn set_session_active(active: bool) {
         if active {
             SESSION_ACTIVE.store(true, Ordering::Relaxed);
+            // 功能点日志：抑制器决策计数快照（自应用启动累计），首按
+            // 失败类报障一次日志拉取即可归因（泄漏/等待超时/即时吞下）。
+            crate::ble::gatt_note(format!(
+                "suppressor_stats seen={} swallowed={} leaked={} waited_late={}",
+                F5_DOWN_SEEN.load(Ordering::Relaxed),
+                F5_DOWN_SWALLOWED.load(Ordering::Relaxed),
+                F5_DOWN_LEAKED.load(Ordering::Relaxed),
+                F5_DOWN_WAITED_ARMED_LATE.load(Ordering::Relaxed),
+            ));
             let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
             if thread_id != 0 {
                 unsafe {
@@ -489,7 +527,9 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{set_remote_hid_activity_notify, set_session_active, VoiceKeySuppressor};
+pub use windows_impl::{
+    arm_grace, set_remote_hid_activity_notify, set_session_active, VoiceKeySuppressor,
+};
 
 #[cfg(all(windows, test))]
 pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL};
