@@ -337,6 +337,13 @@ fn engine_worker(
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
+                crate::ble::gatt_note(format!(
+                    "map_reset source={}",
+                    match message {
+                        EngineMessage::ListenerStopped => "listener_stopped",
+                        _ => "device_removed",
+                    }
+                ));
                 // 释放全部按住状态：取消所有手势计时，不触发动作。
                 recognizer.release_all();
                 let edges = merger.release_all();
@@ -358,6 +365,17 @@ fn engine_worker(
             EngineMessage::MappingsChanged => {
                 let mappings = read_lock(&mappings).clone();
                 recognizer.configure(&mappings);
+                let configured = crate::raw_input::ALL_BUTTONS
+                    .iter()
+                    .filter(|button| {
+                        crate::button_gestures::GestureConfig::for_button(&mappings, **button)
+                            .is_some()
+                    })
+                    .count();
+                crate::ble::gatt_note(format!(
+                    "map_reconfig enabled={} buttons_configured={}",
+                    mappings.enabled, configured
+                ));
             }
             EngineMessage::Shutdown => break,
         }
@@ -381,6 +399,15 @@ fn handle_edges(
     if edges.is_empty() {
         return;
     }
+    crate::ble::gatt_note(format!(
+        "map_edges count={} detail={}",
+        edges.len(),
+        edges
+            .iter()
+            .map(|edge| format!("{:?}={}", edge.button, edge.is_pressed))
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
     let press_count = edges.iter().filter(|edge| edge.is_pressed).count() as u64;
     usage.record_button_presses(press_count);
     {
@@ -441,6 +468,10 @@ fn fire_gesture(
     // 门控未运行时不注入：原始键未被吞（或无法归因），注入会造成双输入。
     if !mappings.enabled || !key_gate::is_gate_thread_alive() {
         if mappings.enabled {
+            crate::ble::gatt_note(format!(
+                "map_skip_inject reason=gate_not_alive enabled={} gate_alive=false button={:?} trigger={:?}",
+                mappings.enabled, button, trigger
+            ));
             let mut state = lock_state(state);
             state.last_error =
                 Some("按键映射门控未运行，已保持观察模式（不注入，避免双输入）".to_owned());
@@ -449,13 +480,36 @@ fn fire_gesture(
     }
     let action = mappings.action_for(button, trigger);
     if action == ButtonAction::Disabled {
+        crate::ble::gatt_note(format!(
+            "map_skip_inject reason=action_disabled button={:?} trigger={:?}",
+            button, trigger
+        ));
         return;
     }
     let ButtonAction::Shortcut { chord } = action else {
+        crate::ble::gatt_note(format!(
+            "map_skip_inject reason=action_not_shortcut button={:?} trigger={:?}",
+            button, trigger
+        ));
         return;
     };
-    if let Err(error) = injector.tap(&chord) {
-        lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
+    crate::ble::gatt_note(format!(
+        "map_fire button={:?} trigger={:?} chord={}",
+        button,
+        trigger,
+        chord
+            .keys
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .collect::<Vec<_>>()
+            .join("+")
+    ));
+    match injector.tap(&chord) {
+        Ok(()) => crate::ble::gatt_note("map_inject result=ok".to_owned()),
+        Err(error) => {
+            crate::ble::gatt_note(format!("map_inject result=err error={error}"));
+            lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
+        }
     }
 }
 
