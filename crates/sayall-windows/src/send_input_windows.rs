@@ -55,6 +55,33 @@ impl SendInputRuntime {
         self.record(result, "SendInput key-up")
     }
 
+    /// 注入单个 F5 释放沿，清理可能粘在 OS 键态的 F5（2026-09-05 21:08
+    /// 实证链路：断连重连场景首个遥控器 F5 D 在武装前泄漏进 OS，若其
+    /// UP 沿丢失，OS 认为 F5 持续按下，后续语音和弦全部被微信输入法按
+    /// "三键同按"拒绝）。配对规则保证该 UP 仅在确有泄漏时放行到 OS：
+    /// 干净场景（本应用抑制器已吞下全部 F5 DOWN）下它同样被吞，无副作用。
+    pub fn release_stuck_f5(&self) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+            KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        };
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0x74),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        unsafe {
+            let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+
     fn record(
         &self,
         result: Result<usize, crate::send_input::SendInputError>,

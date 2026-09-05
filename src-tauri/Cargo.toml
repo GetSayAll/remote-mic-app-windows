@@ -22,3 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.8", features = [] }
 tauri-plugin-opener = "2.5.5"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

@@ -18,7 +18,12 @@ const MAX_CHORD_KEYS: usize = 4;
 /// docs/investigations/evidence/p and
 /// Testing\investigation\p-chord-gap-experiment.ps1, 2026-09-04). Keep this
 /// gap small: it sits on the critical path of every voice-key press.
-pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(20);
+/// 80 ms = 字段验证稳定值（PR #16 release 4918d61）；20ms（cef24d3 2026-09-05）
+/// 在微信输入法钩子冷/节流状态下首按必失败——用户实证遥控器闲置后首按
+/// 失败、再按成功稳定复现（7 次发作取证 sayall-diag.log 20:15-20:27）；
+/// 20ms 的"4/4 验证"全部为热状态连续测试，未覆盖冷态。回退恢复 80ms。
+/// "WeType 休眠"调查整体发生于 20ms 回归之后，其现象学与冷态拒绝一致。
+pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(80);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,24 +247,165 @@ pub enum ButtonAction {
     },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonTrigger {
+    Single,
+    Double,
+    Long,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButtonActions {
+    pub single: ButtonAction,
+    pub double: ButtonAction,
+    pub long: ButtonAction,
+}
+
+impl Default for ButtonActions {
+    fn default() -> Self {
+        Self {
+            single: ButtonAction::Disabled,
+            double: ButtonAction::Disabled,
+            long: ButtonAction::Disabled,
+        }
+    }
+}
+
+impl ButtonActions {
+    pub fn trigger(&self, trigger: ButtonTrigger) -> &ButtonAction {
+        match trigger {
+            ButtonTrigger::Single => &self.single,
+            ButtonTrigger::Double => &self.double,
+            ButtonTrigger::Long => &self.long,
+        }
+    }
+
+    /// 任一触发方式配置了动作：key_gate 以此决定是否吞掉该按键的原始键入。
+    pub fn any_configured(&self) -> bool {
+        self.single != ButtonAction::Disabled
+            || self.double != ButtonAction::Disabled
+            || self.long != ButtonAction::Disabled
+    }
+}
+
+/// 兼容旧版单动作映射文件（actions 值为 ButtonAction 而非三列 ButtonActions）：
+/// 旧格式动作迁移为单击列。ButtonAction 是内部标签 `{"type": ...}`，与三列
+/// 结构（single/double/long 键齐全）在 JSON 形状上无歧义。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ButtonActionsWire {
+    Cells(ButtonActionsCells),
+    Legacy(ButtonAction),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ButtonActionsCells {
+    single: ButtonAction,
+    double: ButtonAction,
+    long: ButtonAction,
+}
+
+impl From<ButtonActionsWire> for ButtonActions {
+    fn from(wire: ButtonActionsWire) -> Self {
+        match wire {
+            ButtonActionsWire::Cells(cells) => Self {
+                single: cells.single,
+                double: cells.double,
+                long: cells.long,
+            },
+            ButtonActionsWire::Legacy(action) => Self {
+                single: action,
+                ..Self::default()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ButtonMappings {
-    pub actions: BTreeMap<RemoteButton, ButtonAction>,
+    /// 自定义按键功能总开关（UI 的"启用自定义按键功能"）。
+    pub enabled: bool,
+    pub actions: BTreeMap<RemoteButton, ButtonActions>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl Default for ButtonMappings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            actions: BTreeMap::new(),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ButtonMappings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            #[serde(default = "default_enabled")]
+            enabled: bool,
+            actions: Option<BTreeMap<RemoteButton, ButtonActionsWire>>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let actions = wire
+            .actions
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(button, cell)| (button, ButtonActions::from(cell)))
+            .collect();
+        Ok(Self {
+            enabled: wire.enabled,
+            actions,
+        })
+    }
 }
 
 impl ButtonMappings {
     pub fn normalized(mut self) -> Result<Self, SendInputError> {
-        for action in self.actions.values_mut() {
-            if let ButtonAction::Shortcut { chord } = action {
-                *chord = chord.clone().validated()?;
+        for actions in self.actions.values_mut() {
+            for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+                if let ButtonAction::Shortcut { chord } = action {
+                    *chord = chord.clone().validated()?;
+                }
             }
         }
         Ok(self)
     }
 
-    pub fn action(&self, button: RemoteButton) -> ButtonAction {
+    pub fn actions(&self, button: RemoteButton) -> ButtonActions {
         self.actions.get(&button).cloned().unwrap_or_default()
+    }
+
+    #[allow(dead_code)]
+    pub fn action(&self, button: RemoteButton) -> ButtonAction {
+        self.actions(button).single
+    }
+
+    pub fn action_for(&self, button: RemoteButton, trigger: ButtonTrigger) -> ButtonAction {
+        self.actions(button).trigger(trigger).clone()
+    }
+
+    /// 已配置（任意触发方式有动作）的按键位掩码：key_gate 的无锁快照。
+    pub fn mapped_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        if !self.enabled {
+            return mask;
+        }
+        for (button, actions) in &self.actions {
+            if actions.any_configured() {
+                mask |= 1u64 << button.ordinal();
+            }
+        }
+        mask
     }
 }
 
@@ -642,13 +788,96 @@ mod tests {
     #[test]
     fn missing_button_mapping_is_disabled_and_invalid_chords_fail_closed() {
         let mappings = ButtonMappings::default();
-        assert_eq!(mappings.action(RemoteButton::Up), ButtonAction::Disabled);
+        assert_eq!(
+            mappings.action_for(RemoteButton::Up, ButtonTrigger::Single),
+            ButtonAction::Disabled
+        );
+        assert_eq!(mappings.mapped_mask(), 0);
 
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
             RemoteButton::Up,
-            ButtonAction::Shortcut { chord: chord(&[]) },
+            ButtonActions {
+                single: ButtonAction::Shortcut { chord: chord(&[]) },
+                ..ButtonActions::default()
+            },
         );
         assert_eq!(mappings.normalized(), Err(SendInputError::EmptyChord));
+    }
+
+    #[test]
+    fn legacy_single_action_mappings_migrate_to_the_single_cell() {
+        // 旧版 button-mappings.json：actions 值是单动作对象。
+        let legacy = serde_json::json!({
+            "actions": {
+                "ok": { "type": "shortcut", "chord": { "keys": ["enter"] } },
+                "up": { "type": "disabled" }
+            }
+        });
+        let mappings: ButtonMappings = serde_json::from_value(legacy).unwrap();
+        assert!(mappings.enabled, "缺省 enabled 必须默认开启");
+        assert_eq!(
+            mappings.actions(RemoteButton::Ok).single,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Enter]
+                }
+            }
+        );
+        assert_eq!(
+            mappings.action_for(RemoteButton::Ok, ButtonTrigger::Double),
+            ButtonAction::Disabled
+        );
+        assert_eq!(
+            mappings.action_for(RemoteButton::Ok, ButtonTrigger::Long),
+            ButtonAction::Disabled
+        );
+        assert_eq!(
+            mappings.mapped_mask(),
+            1u64 << RemoteButton::Ok.ordinal(),
+            "迁移后的单击配置应计入吞键掩码"
+        );
+    }
+
+    #[test]
+    fn mapped_mask_requires_enabled_and_any_configured_cell() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                long: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Escape]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let expected_bit = 1u64 << RemoteButton::Back.ordinal();
+        assert_eq!(mappings.mapped_mask(), expected_bit);
+
+        let disabled = ButtonMappings {
+            enabled: false,
+            actions: mappings.actions.clone(),
+        };
+        assert_eq!(disabled.mapped_mask(), 0, "总开关关闭时不吞任何键");
+    }
+
+    #[test]
+    fn three_cell_mappings_round_trip_through_json() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::LeftWindows, KeyCode::D]),
+                },
+                double: ButtonAction::Disabled,
+                long: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Control, KeyCode::C]),
+                },
+            },
+        );
+        let encoded = serde_json::to_string(&mappings).unwrap();
+        let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, mappings);
     }
 }

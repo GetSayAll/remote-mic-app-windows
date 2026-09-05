@@ -1,5 +1,7 @@
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
+use sayall_windows::button_mapping::{ButtonMappingSnapshot, FiredGesture};
 use sayall_windows::raw_input::{RawInputPhase, RawInputSnapshot, RemoteButton};
+use sayall_windows::send_input::ButtonTrigger;
 use sayall_windows::{
     AudioPhase, AudioSnapshot, ConnectionPhase, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     RemoteModel,
@@ -53,6 +55,20 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 semantic_edge_count: 8,
                 last_button: Some(RemoteButton::Home),
                 last_is_pressed: Some(true),
+                active_buttons: vec![RemoteButton::Home],
+                last_error: None,
+            },
+            button_mapping: ButtonMappingSnapshot {
+                enabled: true,
+                gate_active: true,
+                listener_active: true,
+                swallowed_edges: 4,
+                leaked_downs: 0,
+                fired_gestures: 3,
+                last_fired: Some(FiredGesture {
+                    button: RemoteButton::Home,
+                    trigger: ButtonTrigger::Single,
+                }),
                 last_error: None,
             },
         },
