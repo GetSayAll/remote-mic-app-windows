@@ -24,6 +24,11 @@
   CI verify 连续 10 次失败（run #64-#73），阻塞 PR #19 合入近一天才发现。
   发现漂移先 `cargo fmt` 并作为独立 style 提交；CI 全量流水线约 19 分钟，
   格式问题拖到 CI 才暴露反馈太慢。
+- **push 前跑 `scripts/ci-preflight.ps1`（2026-09-05 新增）**：本地镜像 CI
+  verify 的前 6 个快速步骤（前端依赖/测试/构建 + fmt/Rust 测试/check），
+  约 1-2 分钟；通过即等价于 CI 的这些步骤必过。发布前加 `-Full` 追加
+  runtime-simulation 构建。纯文档/非功能改动（**.md、docs/、Testing/、
+  artifacts/）不触发 CI（workflow paths-ignore）。
 - 每个独立工作项一个 commit，只包含该工作项的内容；交付时报告完整 SHA、
   Push 状态与验证命令（引用 macOS 原版"worktree、提交和清理"不变量）。
 - 工作必须中途暂停或移交时：先在功能分支上 commit，并在提交信息中注明
