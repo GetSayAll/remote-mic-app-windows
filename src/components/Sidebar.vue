@@ -74,7 +74,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 
     <div class="sidebar-footer">
       <span class="status-dot pending"></span>
-      Windows Preview
+      预览版
     </div>
   </aside>
 </template>
