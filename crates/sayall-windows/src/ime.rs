@@ -70,6 +70,7 @@ pub enum WeTypeActivation {
 /// （BLE 工作线程，MTA）透明。返回 Err 时调用方记录提示后仍按原行为
 /// 注入——激活失败不阻断语音。
 pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
+    let started = std::time::Instant::now();
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("sayall-ime-activate".to_owned())
@@ -80,9 +81,60 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
         .map_err(|error| format!("创建激活线程失败：{error}"))?;
     // 有界等待，不 join：超时说明激活异常缓慢，按失败处理继续注入；
     // 线程在后台自然结束（若激活迟到，惠及下一次按键）。
-    match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
+    let result = match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
         Ok(result) => result,
         Err(_) => Err("激活微信输入法超时（500ms）".to_owned()),
+    };
+    // 功能点日志（AGENTS.md）：决策结果 + 耗时 + 前台进程，报障时一次
+    // 日志拉取即可定位是热/冷路径、查询、激活还是等待环节。
+    crate::ble::gatt_note(format!(
+        "ime_activation outcome={:?} elapsed_ms={} foreground={} err={}",
+        result.as_ref().map(|outcome| format!("{outcome:?}")).unwrap_or_else(|error| error.clone()),
+        started.elapsed().as_millis(),
+        foreground_process_name().unwrap_or_else(|| "unknown".to_owned()),
+        result.is_err(),
+    ));
+    result
+}
+
+/// 前台进程名（诊断用，不含窗口标题/路径等隐私信息）。
+fn foreground_process_name() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return None;
+        }
+        let mut process_id: u32 = 0;
+        GetWindowThreadProcessId(foreground, Some(&mut process_id));
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let mut buffer = [0u16; 512];
+        let mut size = buffer.len() as u32;
+        let queried = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
+        if !queried {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buffer[..size as usize]);
+        Some(
+            full.rsplit(['\\', '/'])
+                .next()
+                .unwrap_or("unknown")
+                .to_owned(),
+        )
     }
 }
 
@@ -104,7 +156,19 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
             let manager: ITfInputProcessorProfileMgr =
                 CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
                     .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
-            if session_has_wetype(&manager)? {
+            let mut profile = TF_INPUTPROCESSORPROFILE::default();
+            let query = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile);
+            let active_is_wetype = match &query {
+                Ok(()) => profile.clsid == WETYPE_CLSID && profile.guidProfile == WETYPE_PROFILE,
+                Err(_) => false,
+            };
+            // 功能点日志：查询结果（活动输入法 CLSID 前缀）——冷/热判定依据。
+            crate::ble::gatt_note(format!(
+                "ime_query ok={} active_is_wetype={active_is_wetype} active_clsid={:08X}",
+                query.is_ok(),
+                profile.clsid.data1,
+            ));
+            if active_is_wetype {
                 return Ok(WeTypeActivation::AlreadyActive);
             }
             manager
@@ -123,16 +187,5 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
         })();
         CoUninitialize();
         result
-    }
-}
-
-/// 当前会话的活动输入法是否已是 WeType（查询失败按"不是"处理，
-/// 走激活路径——宁可多激活一次也不误判热路径）。
-fn session_has_wetype(manager: &ITfInputProcessorProfileMgr) -> Result<bool, String> {
-    let mut profile = TF_INPUTPROCESSORPROFILE::default();
-    let active = unsafe { manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile) };
-    match active {
-        Ok(()) => Ok(profile.clsid == WETYPE_CLSID && profile.guidProfile == WETYPE_PROFILE),
-        Err(_) => Ok(false),
     }
 }
