@@ -97,7 +97,7 @@ function cardTop(placement: Placement): number {
   return placement.targetY * CANVAS_HEIGHT - CARD_HEIGHT / 2;
 }
 
-/** 卡片朝向遥控器一侧的边缘中点（连线终点）。 */
+/** 卡片朝向遥控器一侧的边缘中点（箭头/连线的落点基准）。 */
 function cardEdgePoint(placement: Placement): { x: number; y: number } {
   return {
     x: placement.side === "left" ? cardWidth.value : canvasWidth.value - cardWidth.value,
@@ -105,9 +105,17 @@ function cardEdgePoint(placement: Placement): { x: number; y: number } {
   };
 }
 
+/** 连线与箭头一体化：线画到箭头底部（距卡边 13px），箭头补足到距卡边 7px，
+ * 整体读作一条带箭头的连线（线不再穿过箭头延伸到卡片边缘）。 */
+function lineEndPoint(placement: Placement): { x: number; y: number } {
+  const edge = cardEdgePoint(placement);
+  const direction = placement.side === "left" ? -1 : 1;
+  return { x: edge.x - direction * 13, y: edge.y };
+}
+
 function connectionPath(placement: Placement): string {
   const start = anchorPoint(placement);
-  const end = cardEdgePoint(placement);
+  const end = lineEndPoint(placement);
   const direction = placement.side === "left" ? -1 : 1;
   const distance = Math.min(70, Math.max(34, Math.abs(end.x - start.x) * 0.58));
   const endpointDistance = Math.min(42, Math.max(24, distance * 0.6));
@@ -116,8 +124,8 @@ function connectionPath(placement: Placement): string {
   return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} C ${control1.x.toFixed(1)} ${control1.y.toFixed(1)}, ${control2.x.toFixed(1)} ${control2.y.toFixed(1)}, ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
 }
 
-/** 连线箭头（Mac RemoteMappingLayout.arrowTip 同款：距卡片边 7px，
- * 朝卡片方向的三角，底宽 12px/半高 4px）。 */
+/** 箭头（与连线同色同类）：尖端距卡片边 7px、底宽 12px/半高 4px，
+ * 底部与连线终点重合（整体一条连线）。 */
 function arrowPolygon(placement: Placement): string {
   const edge = cardEdgePoint(placement);
   const direction = placement.side === "left" ? -1 : 1;
@@ -527,9 +535,17 @@ onUnmounted(() => {
 
 <template>
   <section class="buttons-page">
+    <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
+         （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
       <div>
-        <h1>按键映射</h1>
+        <div class="mapping-title-row">
+          <h1>按键映射</h1>
+          <label class="toggle-row">
+            <span>启用自定义按键功能</span>
+            <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
+          </label>
+        </div>
         <p>遥控器除语音键外的 12 个按键可自定义单击、双击与长按动作；语音键保持按住说话，不参与映射。</p>
       </div>
       <div class="mapping-header-controls">
@@ -537,18 +553,6 @@ onUnmounted(() => {
           <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
           <span>{{ connectionInfo?.remoteName ?? "未连接遥控器" }}</span>
         </div>
-        <label class="toggle-row">
-          <span>启用自定义按键功能</span>
-          <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
-        </label>
-        <button
-          class="primary-button"
-          type="button"
-          :disabled="busy || !dirty"
-          @click="persist('按键映射已保存并即时生效')"
-        >
-          {{ dirty ? "保存映射" : "已保存" }}
-        </button>
       </div>
     </header>
 
@@ -683,6 +687,14 @@ onUnmounted(() => {
           </p>
         </div>
         <div class="button-row">
+          <button
+            class="primary-button"
+            type="button"
+            :disabled="busy || !dirty"
+            @click="persist('按键映射已保存并即时生效')"
+          >
+            {{ dirty ? "保存映射" : "已保存" }}
+          </button>
           <button class="secondary-button" type="button" :disabled="busy" @click="testCurrentAction">
             测试一次
           </button>

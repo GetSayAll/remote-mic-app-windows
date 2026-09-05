@@ -190,8 +190,10 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .error-banner { margin-bottom: 20px; padding: 12px 14px; border-radius: 8px; color: #9b312f; background: #ffe9e8; }
 
 /* ---- 按键映射页（Mac RemoteMappingCanvas 对标） ---- */
-.buttons-page .page-header h1 { font-size: 24px; margin-bottom: 4px; }
-.buttons-page .page-header p { font-size: 13px; max-width: 560px; }
+/* 头部对齐 Mac mappingPage：标题 + 启用开关居左同行，遥控器状态最右。 */
+.mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.buttons-page .page-header h1 { font-size: 24px; margin: 0; }
+.buttons-page .page-header p { font-size: 13px; max-width: 560px; margin: 4px 0 0; }
 .mapping-header-controls { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
 .device-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255, 255, 255, 0.72); font-size: 13px; white-space: nowrap; }
 .toggle-row { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
