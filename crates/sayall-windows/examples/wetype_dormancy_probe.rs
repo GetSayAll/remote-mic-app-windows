@@ -14,8 +14,8 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
-    ITfInputProcessorProfileMgr, TF_IPP_FLAG_ENABLED, TF_IPPMF_FORSESSION,
-    TF_PROFILETYPE_INPUTPROCESSOR, TF_INPUTPROCESSORPROFILE,
+    ITfInputProcessorProfileMgr, TF_INPUTPROCESSORPROFILE, TF_IPPMF_FORSESSION,
+    TF_IPP_FLAG_ENABLED, TF_PROFILETYPE_INPUTPROCESSOR,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
@@ -29,6 +29,27 @@ const WETYPE_PROFILE: GUID = GUID::from_u128(0x607fdf85_fcc8_4dbd_a365_41296f980
 const LANGID_ZH_CN: u16 = 0x0804;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let phase = args.get(1).map(String::as_str).unwrap_or("ladder");
+    match phase {
+        "cycle-test" => {
+            // 健全性实验（钩子活着时）：cycle profile 后立即注入和弦，
+            // 验证切换不破坏触发（v2 复活路径的前提）。
+            println!("=== cycle-test (hook expected alive) ===");
+            let before = mic_start();
+            let r = cycle_profile();
+            println!("cycle_profile: {r:?}");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            inject_chord();
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            let after = mic_start();
+            println!("chord after cycle: mic_opened={}", opened(before, after));
+        }
+        _ => ladder(),
+    }
+}
+
+fn ladder() {
     println!("=== WeType revive ladder probe ===");
     let before = mic_start();
     println!("baseline={before:?}");
@@ -171,68 +192,93 @@ if ($found) { Write-Output $found } else { Write-Output -1 }
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
-    text.trim().parse::<i64>().ok().and_then(|v| {
-        if v > 0 {
-            Some(v as u64)
-        } else {
-            None
-        }
-    })
+    text.trim()
+        .parse::<i64>()
+        .ok()
+        .and_then(|v| if v > 0 { Some(v as u64) } else { None })
 }
 
 fn cycle_profile() -> Result<String, String> {
+    // 与应用 ime.rs 相同的 STA 纪律：ActivateProfile 必须在 CoInitializeEx(STA)
+    // 线程上调用（MTA 返回 S_OK 但不生效的陷阱，2026-09-05 实锤）。
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("probe-sta-cycle".to_owned())
+        .spawn(move || {
+            let result = sta_cycle_profile();
+            let _ = sender.send(result);
+        })
+        .map_err(|e| format!("spawn: {e}"))?;
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .map_err(|_| "sta cycle timeout".to_owned())?
+}
+
+fn sta_cycle_profile() -> Result<String, String> {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     unsafe {
-        let manager: ITfInputProcessorProfileMgr =
-            CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| format!("CoCreateInstance: {e}"))?;
-        let enumerator = manager
-            .EnumProfiles(LANGID_ZH_CN)
-            .map_err(|e| format!("EnumProfiles: {e}"))?;
-        let mut profiles = [TF_INPUTPROCESSORPROFILE::default(); 16];
-        let mut fetched: u32 = 0;
-        let mut alternative: Option<(GUID, GUID)> = None;
-        loop {
-            if enumerator.Next(&mut profiles, &mut fetched).is_err() || fetched == 0 {
-                break;
-            }
-            for p in &profiles[..fetched as usize] {
-                if p.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR
-                    && p.clsid != WETYPE_CLSID
-                    && p.dwFlags & TF_IPP_FLAG_ENABLED != 0
-                {
-                    alternative = Some((p.clsid, p.guidProfile));
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if hr.is_err() && hr != windows::core::HRESULT(1) {
+            return Err(format!("CoInitializeEx(STA) failed: {hr:?}"));
+        }
+        let result = (|| {
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|e| format!("CoCreateInstance: {e}"))?;
+            let enumerator = manager
+                .EnumProfiles(LANGID_ZH_CN)
+                .map_err(|e| format!("EnumProfiles: {e}"))?;
+            let mut profiles = [TF_INPUTPROCESSORPROFILE::default(); 16];
+            let mut fetched: u32 = 0;
+            let mut alternative: Option<(GUID, GUID)> = None;
+            loop {
+                if enumerator.Next(&mut profiles, &mut fetched).is_err() || fetched == 0 {
+                    break;
+                }
+                for p in &profiles[..fetched as usize] {
+                    if p.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR
+                        && p.clsid != WETYPE_CLSID
+                        && p.dwFlags & TF_IPP_FLAG_ENABLED != 0
+                    {
+                        alternative = Some((p.clsid, p.guidProfile));
+                        break;
+                    }
+                }
+                if alternative.is_some() || (fetched as usize) < profiles.len() {
                     break;
                 }
             }
-            if alternative.is_some() || (fetched as usize) < profiles.len() {
-                break;
-            }
-        }
-        let Some((alt_clsid, alt_profile)) = alternative else {
-            return Err("no alternative profile".to_owned());
-        };
-        manager
-            .ActivateProfile(
-                TF_PROFILETYPE_INPUTPROCESSOR,
-                LANGID_ZH_CN,
-                &alt_clsid,
-                &alt_profile,
-                HKL::default(),
-                TF_IPPMF_FORSESSION,
-            )
-            .map_err(|e| format!("activate alt: {e}"))?;
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        manager
-            .ActivateProfile(
-                TF_PROFILETYPE_INPUTPROCESSOR,
-                LANGID_ZH_CN,
-                &WETYPE_CLSID,
-                &WETYPE_PROFILE,
-                HKL::default(),
-                TF_IPPMF_FORSESSION,
-            )
-            .map_err(|e| format!("activate wetype: {e}"))?;
-        Ok(format!("switched via {:08X}", alt_clsid.data1))
+            let Some((alt_clsid, alt_profile)) = alternative else {
+                return Err("no alternative profile".to_owned());
+            };
+            manager
+                .ActivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    LANGID_ZH_CN,
+                    &alt_clsid,
+                    &alt_profile,
+                    HKL::default(),
+                    TF_IPPMF_FORSESSION,
+                )
+                .map_err(|e| format!("activate alt: {e}"))?;
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            manager
+                .ActivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    LANGID_ZH_CN,
+                    &WETYPE_CLSID,
+                    &WETYPE_PROFILE,
+                    HKL::default(),
+                    TF_IPPMF_FORSESSION,
+                )
+                .map_err(|e| format!("activate wetype: {e}"))?;
+            Ok(format!("switched via {:08X}", alt_clsid.data1))
+        })();
+        CoUninitialize();
+        result
     }
 }
 
@@ -281,7 +327,7 @@ fn wetype_update_pid() -> Option<u32> {
 
 fn inject_chord() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_TYPE, INPUT_0, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        SendInput, INPUT, INPUT_0, INPUT_TYPE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         KEYEVENTF_SCANCODE, VIRTUAL_KEY,
     };
     unsafe {
