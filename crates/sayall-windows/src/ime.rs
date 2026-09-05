@@ -8,23 +8,27 @@
 //!   的会话里 WeType 不活跃，语音键表现为"无法唤起"（与输入框聚焦无关：
 //!   桌面/资源管理器聚焦 6/6 照常触发，p-focus-experiment.ps1）。
 //! - **COM 套间陷阱（2026-09-05 MTA 探针实锤，examples\ime_probe_mta.rs）**：
-//!   `ActivateProfile` 从 MTA 线程调用返回 S_OK 但**不生效**（和弦照常注入、
-//!   微信无反应、麦克风不开）；必须从 STA 线程调用才真正切换。早期实验在
-//!   PowerShell（STA）里验证通过，部署后应用从 BLE 工作线程（MTA）调用——
-//!   修复形同虚设，真机表现为"部分会话和弦干净但微信无反应"（0xFC 缺席、
-//!   LWin 穿透）。修复：在临时 STA 线程上执行激活。
+//!   `ActivateProfile` 从 MTA 线程调用返回 S_OK 但**不生效**；必须从 STA
+//!   线程调用才真正切换。早期实验在 PowerShell（STA）里验证通过，部署后
+//!   应用从 BLE 工作线程（MTA）调用——修复形同虚设。
+//! - **冷切换重绑延迟（2026-09-05 真机日志实锤，kb-live.log 10:31:40 会话）**：
+//!   会话从未激活过 WeType 时，`ActivateProfile` 返回后目标应用的输入法
+//!   会话重绑是异步的——紧跟的和弦落在旧会话（LWin 穿透、无 0xFC、微信
+//!   无反应）；第二次起会话已是 WeType，立即触发。表现为"首次按失败、
+//!   第二次起正常"。修复：先用 `GetActiveProfile` 判定当前会话状态——
+//!   已是 WeType（热路径）零延迟注入；需要切换（冷路径）才激活并等待
+//!   重绑窗口后再返回。
 //!
 //! 方案（参考 macOS 版 PreferredInputSourceMonitor 的"保证语音工具是活动
 //! 输入源"职责设计）：注入和弦前，在临时 STA 线程上用公开 TSF API
-//! （ITfInputProcessorProfileMgr::ActivateProfile + TF_IPPMF_FORSESSION
-//! 会话级标志——只影响当前应用会话，不改其他应用的输入法记忆）把 WeType
-//! 激活为当前会话输入法。实测：STA 激活后零延迟注入即触发（无需 settling
-//! 等待，不增加按键延迟）。
+//! （ITfInputProcessorProfileMgr + TF_IPPMF_FORSESSION 会话级标志——只影响
+//! 当前应用会话，不改其他应用的输入法记忆）确保 WeType 为当前会话输入法。
 //!
 //! 护栏：激活失败或超时只记录提示并按原行为注入（绝不比现状更差）；幂等
 //! ——WeType 已活跃时重复激活无害；STA 线程一次性的（创建→调用→退出，
-//! 全部同线程内完成，无跨套间封送、无需消息泵），join 有界（500ms）防卡
-//! BLE 工作线程；仅在配置了按住说话快捷键的语音会话上调用。
+//! 全部同线程内完成，无跨套间封送、无需消息泵），通信走 channel 有界
+//! 等待（500ms）防卡 BLE 工作线程；仅在配置了按住说话快捷键的语音会话上
+//! 调用。
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -33,6 +37,7 @@ use windows::core::GUID;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
     ITfInputProcessorProfileMgr, TF_IPPMF_FORSESSION, TF_PROFILETYPE_INPUTPROCESSOR,
+    TF_INPUTPROCESSORPROFILE, GUID_TFCAT_TIP_KEYBOARD,
 };
 
 /// TF_InputProcessorProfiles（msctf.dll，公开 COM 类）。
@@ -46,34 +51,45 @@ const WETYPE_PROFILE: GUID = GUID::from_u128(0x607fdf85_fcc8_4dbd_a365_41296f980
 const LANGID_ZH_CN: u16 = 0x0804;
 /// STA 激活线程的有界等待：正常 <10ms，500ms 只是防卡上限。
 const ACTIVATION_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// 冷切换后的会话重绑等待：`ActivateProfile` 返回 ≠ 目标应用完成输入法
+/// 重绑（2026-09-05 首按失败实证）；热路径不付此代价。
+const SESSION_REBIND_SETTLE: Duration = Duration::from_millis(50);
 
-/// 把微信输入法激活为当前会话的活动输入法（幂等）。
+/// 激活结果：AlreadyActive = 会话已是 WeType（调用方可零延迟注入）；
+/// Switched = 本次执行了会话切换（含重绑等待）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeTypeActivation {
+    AlreadyActive,
+    Switched,
+}
+
+/// 确保微信输入法是当前会话的活动输入法（幂等）。
 ///
 /// 必须在 STA 线程上执行（MTA 调用返回 S_OK 但不生效，见模块注释）；
-/// 本函数自行创建临时 STA 线程并 join，对调用方（BLE 工作线程，MTA）透明。
-/// 返回 Err 时调用方记录提示后仍按原行为注入——激活失败不阻断语音。
-pub fn activate_wetype_session() -> Result<(), String> {
+/// 本函数自行创建临时 STA 线程并经 channel 有界等待结果，对调用方
+/// （BLE 工作线程，MTA）透明。返回 Err 时调用方记录提示后仍按原行为
+/// 注入——激活失败不阻断语音。
+pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
     let (sender, receiver) = mpsc::channel();
-    let worker = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("sayall-ime-activate".to_owned())
         .spawn(move || {
-            let outcome = sta_activate_wetype();
+            let outcome = sta_ensure_wetype();
             let _ = sender.send(outcome);
         })
         .map_err(|error| format!("创建激活线程失败：{error}"))?;
-    if worker.join().is_err() {
-        return Err("激活线程异常退出".to_owned());
-    }
+    // 有界等待，不 join：超时说明激活异常缓慢，按失败处理继续注入；
+    // 线程在后台自然结束（若激活迟到，惠及下一次按键）。
     match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
         Ok(result) => result,
         Err(_) => Err("激活微信输入法超时（500ms）".to_owned()),
     }
 }
 
-/// 临时 STA 线程体：CoInitializeEx(STA) → CoCreateInstance →
-/// ActivateProfile → CoUninitialize。全部调用在本线程内完成（无跨套间
-/// 封送，无需消息泵）。
-fn sta_activate_wetype() -> Result<(), String> {
+/// 临时 STA 线程体：CoInitializeEx(STA) → 查询活动输入法 →
+/// （需要时）ActivateProfile + 重绑等待 → CoUninitialize。
+/// 全部调用在本线程内完成（无跨套间封送，无需消息泵）。
+fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
@@ -88,6 +104,9 @@ fn sta_activate_wetype() -> Result<(), String> {
             let manager: ITfInputProcessorProfileMgr =
                 CoCreateInstance(&CLSID_TF_INPUT_PROCESSOR_PROFILES, None, CLSCTX_INPROC_SERVER)
                     .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            if session_has_wetype(&manager)? {
+                return Ok(WeTypeActivation::AlreadyActive);
+            }
             manager
                 .ActivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,
@@ -97,9 +116,23 @@ fn sta_activate_wetype() -> Result<(), String> {
                     HKL::default(),
                     TF_IPPMF_FORSESSION,
                 )
-                .map_err(|error| format!("激活微信输入法会话失败：{error}"))
+                .map_err(|error| format!("激活微信输入法会话失败：{error}"))?;
+            // 冷切换：等目标应用完成输入法会话重绑再放行注入。
+            std::thread::sleep(SESSION_REBIND_SETTLE);
+            Ok(WeTypeActivation::Switched)
         })();
         CoUninitialize();
         result
+    }
+}
+
+/// 当前会话的活动输入法是否已是 WeType（查询失败按"不是"处理，
+/// 走激活路径——宁可多激活一次也不误判热路径）。
+fn session_has_wetype(manager: &ITfInputProcessorProfileMgr) -> Result<bool, String> {
+    let mut profile = TF_INPUTPROCESSORPROFILE::default();
+    let active = unsafe { manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile) };
+    match active {
+        Ok(()) => Ok(profile.clsid == WETYPE_CLSID && profile.guidProfile == WETYPE_PROFILE),
+        Err(_) => Ok(false),
     }
 }
