@@ -43,3 +43,12 @@
 - **Windows.Devices.Radios.Radio**（RequestAccessAsync 文档要求 + 可能弹同意框；本机实测未打包桌面进程 SetStateAsync 直接 RadioAccessStatus=Allowed 无需提权；本仓库为避免无人值守弹框，不调 RequestAccessAsync，被拒时按错误上报走人工提示）
 
 外部实现只作为带来源的参考。第三方应用进程注入、私有配置读取和来源不明二进制不进入稳定主路径。
+
+## WeType 热键休眠自动恢复调研来源（2026-09-05，热键休眠专项 v2）
+
+场景：WeType 2.1.3.18 后台约 40 分钟后"TSF 存活但全局键盘钩子休眠"——和弦注入 LWin 穿透、无 0xFC、ConsentStore 时间戳不动；打开 WeType 任意自身界面立即复活（kb-live 会话 23-26 真机取证）。跨进程 `SetProcessInformation(ProcessPowerThrottling)` 解除节流**真机证伪**（对其他进程 E_INVALIDARG 0x80070057，wetype_service 打开即 0x80070005，15:04 live12 取证），该路线已从 `wetype_revive.rs` 移除。v2 已实现（`ble.rs` + `ime.rs`）：检测（注入后 700ms ConsentStore 时间戳未动）→ TSF 配置切换唤醒（`cycle_wetype_profile`：激活微软拼音 80ms 后切回，公开 API）→ 300ms 后经 `WorkerMessage::RetryVoiceChord` 在工作线程释放旧和弦并重注入 → 二次检测未响应才提示人工。关键参考与实测：
+
+- **TSF profile 管理 API**（`ITfInputProcessorProfileMgr::ActivateProfile`/`EnumProfiles`，`TF_IPPMF_FORSESSION` 会话级激活）：微软官方文档 `learn.microsoft.com/windows/win32/api/msctf/nf-msctf-itfinputprocessorprofilemgr-activateprofile`。选择理由：切换配置会向所有 TSF 感知进程广播激活事件，是唯一能从外部触达 WeType 的公开 API 路径。
+- **会话 47 真机实测（live13，2026-09-05 15:21）**：休眠中按键 → 检测未响应 → 配置切换返回 Ok（切微软拼音 clsid 9D2B2E2B 再切回）→ **346ms 后重注入未开麦**（ConsentStore 时间戳保持 15:08:13）；至 15:30:23 探针和弦时钩子已复活——**复活时刻落在 (346ms, 8.9min] 区间内，无法区分"配置切换延迟复活"与"期间用户打字自然唤醒"**。延迟常量维持 300ms 不动（仓库规则：时序类改动必须持锁实测），待自然休眠窗口用 `examples/wetype_dormancy_probe.rs` 阶梯探针（cycle profile 1s 稳定 / PostMessage / SendMessageTimeout / SetForegroundWindow 四机制）隔离实测后定值。
+- **`SetProcessInformation` 权限边界**：微软文档明确 ProcessPowerThrottling 仅作用于调用进程自身；对其他进程返回 E_INVALIDARG。真机取证一致（live12）。
+- **WeType 进程布局（本机取证）**：开麦方为 `wetype_update.exe`（ConsentStore 条目，拥有顶层窗口 StatusBarWnd）；另有 wetype_service/wetype_server/wetype_renderer。休眠的是钩子所在后台进程，TSF DLL 运行于前台应用进程内不受影响——这解释了为何 TSF 路径（中文输入）存活而全局钩子休眠。
