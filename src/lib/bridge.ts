@@ -87,7 +87,15 @@ export interface KeyChord {
 
 export type ButtonAction =
   | { type: "disabled" }
-  | { type: "shortcut"; chord: KeyChord };
+  | { type: "shortcut"; chord: KeyChord }
+  | { type: "open_app"; target: string };
+
+/** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
+export interface PresetAppInfo {
+  id: string;
+  name: string;
+  installed: boolean;
+}
 
 /** 每键三列（单击/双击/长按），对齐 Mac 原版 ButtonTrigger。 */
 export interface ButtonActions {
@@ -476,6 +484,22 @@ export async function testButtonMapping(
   return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger });
 }
 
+export async function listPresetApps(): Promise<PresetAppInfo[]> {
+  if (!isTauriRuntime()) {
+    // 浏览器预览：展示完整预设表（仅渲染验证）。
+    return [
+      { id: "wechat", name: "微信", installed: true },
+      { id: "edge", name: "Edge 浏览器", installed: true },
+      { id: "chrome", name: "Chrome 浏览器", installed: true },
+      { id: "notepad", name: "记事本", installed: true },
+      { id: "calc", name: "计算器", installed: true },
+      { id: "explorer", name: "文件资源管理器", installed: true },
+      { id: "netease_music", name: "网易云音乐", installed: true },
+    ];
+  }
+  return invoke<PresetAppInfo[]>("list_preset_apps");
+}
+
 export async function getButtonMappingSnapshot(): Promise<ButtonMappingSnapshot> {
   if (!isTauriRuntime()) {
     return {
@@ -677,7 +701,20 @@ export function chordLabel(chord: KeyChord): string {
   return chord.keys.map(keyLabel).join(" + ");
 }
 
+/** 预设应用显示名（页面加载 listPresetApps 后更新；测试可注入）。 */
+const presetAppNames: Map<string, string> = new Map();
+
+export function registerPresetAppNames(apps: Array<{ id: string; name: string }>): void {
+  presetAppNames.clear();
+  for (const app of apps) {
+    presetAppNames.set(app.id, app.name);
+  }
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
+  if (action.type === "open_app") {
+    return `打开${presetAppNames.get(action.target) ?? action.target}`;
+  }
   return chordLabel(action.chord);
 }
