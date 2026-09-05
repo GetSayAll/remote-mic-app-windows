@@ -349,6 +349,40 @@ pub fn run() {
         eprintln!("{error}");
         return;
     }
+    // 单实例守卫（2026-09-05 实证：双实例并存——开发构建与已部署版抢遥控器
+    // 连接、抑制器互扰、抢不到连接的实例还会周期性无线电重启杀掉对方的
+    // 连接）。命名互斥体跨进程互斥；已存在实例时本次启动直接退出。
+    // 注意：互斥体名不得含反斜杠——对象管理器会把名字按路径解析，要求
+    // 父对象目录存在（"SayAll\Windows\…" 直接 ERROR_PATH_NOT_FOUND，
+    // 2026-09-05 探针实证）；创建失败按 fail-closed 处理（退出）——
+    // 双实例的危害（互扰+互杀连接）远大于极端情况下的误拦。
+    #[cfg(windows)]
+    {
+        use windows::core::w;
+        use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+        const SINGLE_INSTANCE_MUTEX: windows::core::PCWSTR =
+            w!("SayAll.Windows.SingleInstance");
+        match unsafe { CreateMutexW(None, false, SINGLE_INSTANCE_MUTEX) } {
+            Ok(handle) => {
+                // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=
+                // ERROR_ALREADY_EXISTS（不是失败）；其余残留错误值无意义。
+                if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                    eprintln!("SayAll 已在运行：单实例守卫阻止了第二个实例启动");
+                    unsafe {
+                        let _ = CloseHandle(handle);
+                    }
+                    return;
+                }
+                // 故意持有互斥体句柄不关闭：进程存活期间保持占有，退出时由系统释放。
+                std::mem::forget(handle);
+            }
+            Err(error) => {
+                eprintln!("单实例互斥体创建失败：{error}（fail-closed 退出）");
+                return;
+            }
+        }
+    }
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
