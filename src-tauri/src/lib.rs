@@ -386,6 +386,54 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // 托盘图标：主窗口关闭后驻留；菜单 = 显示主界面 / 退出；
+            // 左键点击托盘 = 显示并聚焦主窗口（Mac StatusIcon 同款行为）。
+            #[cfg(all(windows, not(feature = "runtime-simulation")))]
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+                let show = MenuItem::with_id(app, "tray-show", "显示主界面", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show, &quit])?;
+                let icon = app
+                    .default_window_icon()
+                    .cloned()
+                    .ok_or_else(|| std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "缺少应用图标，无法创建托盘",
+                    ))?;
+                TrayIconBuilder::with_id("sayall-tray")
+                    .icon(icon)
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .tooltip("无线麦 SayAll")
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "tray-show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "tray-quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .build(app)?;
+            }
+
             #[cfg(feature = "runtime-simulation")]
             let settings_path = if runtime_simulation_requested() {
                 let directory = std::env::var_os("SAYALL_RUNTIME_SIMULATION_STATE_DIR")
@@ -457,6 +505,18 @@ pub fn run() {
 
             app.manage(AppState { platform, settings });
             Ok(())
+        });
+
+    let builder = builder
+        // 关闭主窗口 → 隐藏到托盘驻留（托盘菜单"退出"才真正退出；
+        // 退出走 Tauri 正常事件循环结束，平台组件 Drop 清理照常执行）。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
         });
 
     #[cfg(feature = "runtime-simulation")]

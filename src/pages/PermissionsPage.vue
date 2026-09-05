@@ -14,20 +14,20 @@ const generatingDiagnostic = ref(false);
 
 const bluetoothStatus = computed(() => {
   if (props.runtime?.platform.bleVoiceReady) return { tone: "success", label: "语音链路已就绪" };
-  if (props.runtime?.platform.bleScanAvailable) return { tone: "warning", label: "API 可用，待真机验证" };
-  return { tone: "pending", label: "当前主机不可用" };
+  if (props.runtime?.platform.bleScanAvailable) return { tone: "warning", label: "待验证" };
+  return { tone: "pending", label: "当前电脑不支持" };
 });
 
 const inputStatus = computed(() => {
-  if (props.runtime?.platform.rawInputReady) return { tone: "success", label: "Raw Input 已运行" };
-  if (props.runtime?.platform.windowsApiAvailable) return { tone: "warning", label: "可启动，待真机验证" };
-  return { tone: "pending", label: "当前主机不可用" };
+  if (props.runtime?.platform.rawInputReady) return { tone: "success", label: "已运行" };
+  if (props.runtime?.platform.windowsApiAvailable) return { tone: "warning", label: "待验证" };
+  return { tone: "pending", label: "当前电脑不支持" };
 });
 
 const audioStatus = computed(() => {
-  if (props.runtime?.platform.wasapiReady) return { tone: "success", label: "WASAPI 已就绪" };
-  if (props.runtime?.platform.windowsApiAvailable) return { tone: "warning", label: "待选择输出端点" };
-  return { tone: "pending", label: "当前主机不可用" };
+  if (props.runtime?.platform.wasapiReady) return { tone: "success", label: "已就绪" };
+  if (props.runtime?.platform.windowsApiAvailable) return { tone: "warning", label: "待选择设备" };
+  return { tone: "pending", label: "当前电脑不支持" };
 });
 
 async function generateDiagnostic() {
@@ -62,39 +62,34 @@ async function copyDiagnostic() {
     <header class="page-header">
       <div>
         <h1>权限</h1>
-        <p>主程序保持普通用户权限，只使用 Windows 公共 API；状态只代表当前运行时，不替代真机验收。</p>
       </div>
     </header>
 
     <article class="card permission-list">
       <div class="permission-row">
         <div class="permission-icon">BT</div>
-        <div><strong>Bluetooth LE</strong><p>读取已配对设备，连接 RC001/RC003 GATT 服务并读取标准型号特征。</p></div>
+        <div><strong>蓝牙</strong><p>读取已配对的遥控器并建立连接。</p></div>
         <span class="badge" :class="bluetoothStatus.tone">
           {{ bluetoothStatus.label }}
         </span>
       </div>
       <div class="permission-row">
         <div class="permission-icon">IN</div>
-        <div><strong>Raw Input 与 SendInput</strong><p>只匹配 RC001/RC003 设备族路径；两种型号的自动映射均等待真机事件形态确认。</p></div>
+        <div><strong>按键监听与模拟</strong><p>只监听小米遥控器的按键；按键模拟仅在自定义映射启用时使用。</p></div>
         <span class="badge" :class="inputStatus.tone">{{ inputStatus.label }}</span>
       </div>
       <div class="permission-row">
         <div class="permission-icon">AU</div>
-        <div><strong>音频端点</strong><p>用户明确选择 WASAPI 输出端点，不更改系统默认设备。</p></div>
+        <div><strong>音频设备</strong><p>语音设备由你明确选择，不改动系统默认设备。</p></div>
         <span class="badge" :class="audioStatus.tone">{{ audioStatus.label }}</span>
       </div>
     </article>
-
-    <div class="info-callout">
-      基础语音路径不依赖 Frida、管理员权限、第三方 App 私有配置或虚拟 HID 驱动。
-    </div>
 
     <article class="card diagnostics-card">
       <div class="card-title-row">
         <div>
           <h2>诊断摘要</h2>
-          <p class="muted">只包含阶段、能力、代次和计数；不包含设备 ID、蓝牙地址、HID 路径、音频端点名称、错误原文、窗口标题、语音或用户文本。</p>
+          <p class="muted">摘要不含设备地址、语音内容等隐私信息，可放心复制发给开发者排查问题。</p>
         </div>
         <div class="button-row">
           <button class="secondary-button" type="button" :disabled="generatingDiagnostic" @click="generateDiagnostic">

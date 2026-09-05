@@ -78,6 +78,18 @@ const VOICE_PLACEMENT: Placement = {
 };
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 
+/**
+ * 暂不支持自定义的按键：返回/音量+/音量− 三键的输入事件不进入
+ * Windows 输入栈（2026-09-05 调查归档，
+ * docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md），
+ * 配置无法生效，界面禁用编辑（卡片保留、已有配置保留显示）。
+ */
+const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set([
+  "back",
+  "volume_up",
+  "volume_down",
+]);
+
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
     x: remoteLeft.value + REMOTE_WIDTH * placement.anchor[0],
@@ -298,7 +310,7 @@ async function restoreDefaults(): Promise<void> {
     const saved = await resetButtonMappings();
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    statusMessage.value = "已恢复默认（全部按键透传原始行为）";
+    statusMessage.value = "已恢复默认（全部按键保持原始行为）";
   } catch (error) {
     statusMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -438,7 +450,7 @@ function phaseLabel(phase: RawInputPhase | undefined): string {
     case "stopped":
       return "监听已停止";
     case "unsupported":
-      return "当前环境不可用";
+      return "当前环境暂不支持";
     default:
       return "正在读取状态";
   }
@@ -541,12 +553,11 @@ onUnmounted(() => {
       <div>
         <div class="mapping-title-row">
           <h1>按键映射</h1>
-          <label class="toggle-row">
+          <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
             <span>启用自定义按键功能</span>
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
           </label>
         </div>
-        <p>遥控器除语音键外的 12 个按键可自定义单击、双击与长按动作；语音键保持按住说话，不参与映射。</p>
       </div>
       <div class="mapping-header-controls">
         <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
@@ -583,7 +594,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
-        <img src="/RC003-remote-photo.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
+        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"
@@ -644,6 +655,12 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
+            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
+            :title="
+              UNMAPPABLE_BUTTONS.has(placement.button)
+                ? '此按键在 Windows 上暂不支持自定义，按键功能保持原样'
+                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}`
+            "
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
@@ -708,7 +725,7 @@ onUnmounted(() => {
           type="button"
           @click="applyAction({ type: 'disabled' })"
         >
-          关闭（透传原始按键）
+          关闭（保持原始按键）
         </button>
         <button
           v-for="group in PRESET_GROUPS"
@@ -766,13 +783,9 @@ onUnmounted(() => {
         >
           {{ rawInput?.phase === "ready" ? "停止监听" : "启动监听" }}
         </button>
-        <small v-if="mappingSnapshot">
-          · 已吞 {{ mappingSnapshot.swallowedEdges }} / 泄漏 {{ mappingSnapshot.leakedDowns }} / 触发
-          {{ mappingSnapshot.firedGestures }} 次
-        </small>
-        <small v-if="mappingSnapshot && !mappings.enabled" class="muted"> · 总开关关闭（全部透传）</small>
+        <small v-if="mappingSnapshot && !mappings.enabled" class="muted"> · 总开关关闭（按键保持原样）</small>
       </div>
-      <label class="toggle-row">
+      <label class="toggle-row" title="开启后，操作实体遥控器不会切换正在编辑的按键。">
         <span>锁定当前按键</span>
         <input v-model="lockSelection" type="checkbox" class="toggle-input" />
       </label>

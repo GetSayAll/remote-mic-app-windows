@@ -218,8 +218,9 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     gestureHandler!({ button: "ok", trigger: "single" });
     await vi.waitFor(() => {
-      if (!wrapper.text().includes("触发 1 次")) {
-        throw new Error("页脚统计未更新");
+      // 手势反馈 = 对应格子出现闪烁态（flashed），600ms 后自动消失。
+      if (!wrapper.find(".mapping-cell.flashed").exists()) {
+        throw new Error("手势触发后格子未出现闪烁反馈");
       }
     });
   });

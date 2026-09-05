@@ -576,14 +576,14 @@ export function voiceHoldHotkeyLabel(hotkey: KeyChord | null): string {
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
   return {
     idle: "尚未连接",
-    connecting: "正在打开遥控器",
-    discovering: "正在发现 ATVV 服务与特征",
-    awaiting_capabilities: "正在确认 ATVV 能力",
-    ready: "BLE / ATVV 已就绪",
-    streaming: "正在接收遥控器语音",
+    connecting: "正在连接遥控器",
+    discovering: "正在连接遥控器",
+    awaiting_capabilities: "正在确认语音功能",
+    ready: "已连接",
+    streaming: "正在接收语音",
     draining: "正在结束本次语音",
-    reconnecting: "正在等待重新连接遥控器",
-    suspended: "Windows 已进入睡眠",
+    reconnecting: "正在等待遥控器重连",
+    suspended: "电脑已进入睡眠",
     disconnected: "遥控器已断开",
     failed: "连接失败",
   }[phase];
@@ -591,20 +591,20 @@ export function connectionPhaseLabel(phase: ConnectionPhase): string {
 
 export function remoteModelLabel(model: RemoteModel): string {
   return {
-    rc001: "小米蓝牙遥控器 2（RC001）",
-    rc003: "小米蓝牙遥控器 2 Pro（RC003）",
-    unknown: "型号待设备确认",
+    rc001: "小米蓝牙遥控器 2",
+    rc003: "小米蓝牙遥控器 2 Pro",
+    unknown: "连接后显示",
   }[model];
 }
 
 export function audioPhaseLabel(phase: AudioPhase): string {
   return {
-    unconfigured: "尚未选择输出端点",
-    ready: "WASAPI 已就绪",
-    streaming: "正在写入 Windows 音频端点",
-    draining: "正在排空 Windows 音频缓冲",
-    failed: "WASAPI 输出失败",
-    unsupported: "当前环境不支持 WASAPI",
+    unconfigured: "尚未选择设备",
+    ready: "已就绪",
+    streaming: "正在写入语音",
+    draining: "正在结束",
+    failed: "语音设备出错",
+    unsupported: "当前环境不支持语音设备",
   }[phase];
 }
 
