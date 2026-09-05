@@ -48,12 +48,18 @@ Mac 可以运行前端构建和纯 Rust 测试，但不能证明 WinRT BLE、Raw
 ## 本地检查
 
 ```bash
+# 一键前置自检（推荐，push 前跑，约 1-2 分钟；通过 = CI 的快速步骤必过）
+powershell -ExecutionPolicy Bypass -File scripts\ci-preflight.ps1
+
+# 或分步执行：
 pnpm install
 pnpm test
 pnpm build
 cargo test --workspace
 cargo fmt --all -- --check
 ```
+
+发布前深度自检：`ci-preflight.ps1 -Full`（追加 runtime-simulation 构建）。纯文档/非功能改动（**.md、docs/、Testing/、artifacts/）不触发 CI。完整提交纪律见 [BRANCH_MANAGEMENT.md](BRANCH_MANAGEMENT.md)。
 
 Windows 主机上的完整检查和双型号真机步骤见 [Testing/WindowsRC003Preview.md](Testing/WindowsRC003Preview.md)。
 
