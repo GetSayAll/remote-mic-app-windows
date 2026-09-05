@@ -77,6 +77,14 @@ function anchorPoint(placement: Placement): { x: number; y: number } {
   };
 }
 
+/** 照片容器内相对坐标（锚点橙点渲染在 .remote-photo 内部，坐标系是照片自身）。 */
+function photoAnchorPoint(placement: Placement): { x: number; y: number } {
+  return {
+    x: REMOTE_WIDTH * placement.anchor[0],
+    y: REMOTE_HEIGHT * placement.anchor[1],
+  };
+}
+
 function cardTop(placement: Placement): number {
   return placement.targetY * CANVAS_HEIGHT - CARD_HEIGHT / 2;
 }
@@ -516,6 +524,11 @@ onUnmounted(() => {
           :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
           fill="none"
         />
+        <path
+          :d="connectionPath(VOICE_PLACEMENT)"
+          :class="{ active: voiceActive }"
+          fill="none"
+        />
       </svg>
 
       <figure class="remote-photo">
@@ -526,16 +539,16 @@ onUnmounted(() => {
           class="anchor-dot"
           :class="{ visible: activeButtons.has(placement.button) }"
           :style="{
-            left: `${anchorPoint(placement).x - 5}px`,
-            top: `${anchorPoint(placement).y - 5}px`,
+            left: `${photoAnchorPoint(placement).x - 5}px`,
+            top: `${photoAnchorPoint(placement).y - 5}px`,
           }"
         ></span>
         <span
           class="anchor-dot voice"
           :class="{ visible: voiceActive }"
           :style="{
-            left: `${anchorPoint(VOICE_PLACEMENT).x - 5}px`,
-            top: `${anchorPoint(VOICE_PLACEMENT).y - 5}px`,
+            left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 5}px`,
+            top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 5}px`,
           }"
         ></span>
       </figure>
@@ -579,7 +592,7 @@ onUnmounted(() => {
       </article>
 
       <article
-        class="mapping-card voice-card"
+        class="mapping-card voice-card right"
         :class="{ active: voiceActive }"
         :style="{ top: `${cardTop(VOICE_PLACEMENT)}px` }"
       >
