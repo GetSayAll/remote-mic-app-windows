@@ -18,7 +18,12 @@ const MAX_CHORD_KEYS: usize = 4;
 /// docs/investigations/evidence/p and
 /// Testing\investigation\p-chord-gap-experiment.ps1, 2026-09-04). Keep this
 /// gap small: it sits on the critical path of every voice-key press.
-pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(20);
+/// 80 ms = 字段验证稳定值（PR #16 release 4918d61）；20ms（cef24d3 2026-09-05）
+/// 在微信输入法钩子冷/节流状态下首按必失败——用户实证遥控器闲置后首按
+/// 失败、再按成功稳定复现（7 次发作取证 sayall-diag.log 20:15-20:27）；
+/// 20ms 的"4/4 验证"全部为热状态连续测试，未覆盖冷态。回退恢复 80ms。
+/// "WeType 休眠"调查整体发生于 20ms 回归之后，其现象学与冷态拒绝一致。
+pub const HOLD_CHORD_EVENT_GAP: Duration = Duration::from_millis(80);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
