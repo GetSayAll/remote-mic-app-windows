@@ -30,15 +30,23 @@ import {
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 
-/** 画布几何：与 Mac 原版 RemoteMappingCanvas 对齐（等比设计稿，组件内固定坐标系）。 */
-const CANVAS_WIDTH = 780;
-const CANVAS_HEIGHT = 572;
+/** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
+ * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
+ * 与 Mac cardWidth(for:) 同公式；容器不足最小画布 800px 时由 CSS
+ * --map-scale 连续缩放兜底（小于最小窗口的恢复态窗口）。 */
+const CANVAS_MIN_WIDTH = 800;
+const CANVAS_HEIGHT = 570;
 const REMOTE_WIDTH = 202;
 const REMOTE_HEIGHT = 410;
-const CARD_WIDTH = 262;
 const CARD_HEIGHT = 72;
-const REMOTE_LEFT = (CANVAS_WIDTH - REMOTE_WIDTH) / 2;
 const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
+
+const canvasEl = ref<HTMLElement | null>(null);
+const canvasWidth = ref(CANVAS_MIN_WIDTH);
+const cardWidth = computed(() =>
+  Math.min(300, Math.max(270, (canvasWidth.value - 260) / 2)),
+);
+const remoteLeft = computed(() => (canvasWidth.value - REMOTE_WIDTH) / 2);
 
 interface Placement {
   button: RemoteButton;
@@ -72,7 +80,7 @@ const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
-    x: REMOTE_LEFT + REMOTE_WIDTH * placement.anchor[0],
+    x: remoteLeft.value + REMOTE_WIDTH * placement.anchor[0],
     y: REMOTE_TOP + REMOTE_HEIGHT * placement.anchor[1],
   };
 }
@@ -92,7 +100,7 @@ function cardTop(placement: Placement): number {
 /** 卡片朝向遥控器一侧的边缘中点（连线终点）。 */
 function cardEdgePoint(placement: Placement): { x: number; y: number } {
   return {
-    x: placement.side === "left" ? CARD_WIDTH : CANVAS_WIDTH - CARD_WIDTH,
+    x: placement.side === "left" ? cardWidth.value : canvasWidth.value - cardWidth.value,
     y: placement.targetY * CANVAS_HEIGHT,
   };
 }
@@ -108,21 +116,36 @@ function connectionPath(placement: Placement): string {
   return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} C ${control1.x.toFixed(1)} ${control1.y.toFixed(1)}, ${control2.x.toFixed(1)} ${control2.y.toFixed(1)}, ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
 }
 
-const buttonIcons: Record<RemoteButton, string> = {
-  power: "⏻",
-  up: "▲",
-  down: "▼",
-  left: "◀",
-  right: "▶",
-  ok: "◎",
-  back: "↩",
-  home: "⌂",
-  menu: "☰",
-  tv: "▭",
-  volume_up: "＋",
-  volume_down: "－",
-  volume_mute: "∅",
+/** 连线箭头（Mac RemoteMappingLayout.arrowTip 同款：距卡片边 7px，
+ * 朝卡片方向的三角，底宽 12px/半高 4px）。 */
+function arrowPolygon(placement: Placement): string {
+  const edge = cardEdgePoint(placement);
+  const direction = placement.side === "left" ? -1 : 1;
+  const tip = { x: edge.x - direction * 7, y: edge.y };
+  const baseX = tip.x - direction * 6;
+  return `${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${baseX.toFixed(1)},${(tip.y - 4).toFixed(1)} ${baseX.toFixed(1)},${(tip.y + 4).toFixed(1)}`;
+}
+
+/** 按键图标：SVG path 组（24x24 视窗），形状对齐 Mac RemoteMappingCanvas
+ * 的 SF Symbols（power/chevron/circle.circle/uturn/speaker/house/line.3/tv）。 */
+const buttonIcons: Record<RemoteButton, string[]> = {
+  power: ["M12 3v8", "M7.2 6.4a7 7 0 1 0 9.6 0"],
+  up: ["M6 14.5l6-6 6 6"],
+  down: ["M6 9.5l6 6 6-6"],
+  left: ["M14.5 6l-6 6 6 6"],
+  right: ["M9.5 6l6 6-6 6"],
+  ok: ["M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z", "M12 10a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8z"],
+  back: ["M9 13.5L4 8.5l5-5", "M4 8.5h10.2a5.5 5.5 0 0 1 0 11H11"],
+  home: ["M3.5 11.2L12 3.5l8.5 7.7", "M6 9.5V20.5h12V9.5", "M10 20.5v-5.5h4v5.5"],
+  menu: ["M4 6h16", "M4 12h16", "M4 18h16"],
+  tv: ["M3 7.5h18a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8.5a1 1 0 0 1 1-1z", "M17 3l-5 4-5-4"],
+  volume_up: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
+  volume_down: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15 12h5.5"],
+  volume_mute: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
 };
+/** 语音键图标（Mac mic.fill：实心话筒）。 */
+const VOICE_ICON_FILLED = "M12 2.8a3.4 3.4 0 0 1 3.4 3.4v5.6a3.4 3.4 0 0 1-6.8 0V6.2A3.4 3.4 0 0 1 12 2.8z";
+const VOICE_ICON_STROKES = ["M6.3 11.5a5.7 5.7 0 0 0 11.4 0", "M12 17.2v3.8"];
 
 const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
@@ -142,6 +165,7 @@ let unlistenEdges: (() => void) | null = null;
 let unlistenGestures: (() => void) | null = null;
 let snapshotTimer: number | null = null;
 let flashTimer: number | null = null;
+let resizeObserver: ResizeObserver | null = null;
 
 const dirty = computed(
   () => JSON.stringify(mappings.value) !== JSON.stringify(savedSnapshot.value),
@@ -476,6 +500,18 @@ onMounted(async () => {
       activeButtons.value = new Set(rawInput.value.activeButtons);
     }
   }, 1_000);
+
+  // 流式画布：观测容器宽（不足最小画布 800px 时保持 800 由 CSS 缩放兜底）。
+  // jsdom 测试环境无 ResizeObserver，跳过观测。
+  if (canvasEl.value && typeof ResizeObserver !== "undefined") {
+    canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, canvasEl.value.clientWidth);
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, Math.round(entry.contentRect.width));
+      }
+    });
+    resizeObserver.observe(canvasEl.value);
+  }
 });
 
 onUnmounted(() => {
@@ -485,6 +521,7 @@ onUnmounted(() => {
   unlistenGestures?.();
   if (snapshotTimer !== null) window.clearInterval(snapshotTimer);
   if (flashTimer !== null) window.clearTimeout(flashTimer);
+  resizeObserver?.disconnect();
 });
 </script>
 
@@ -515,23 +552,33 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div class="mapping-canvas" :style="{ width: `${CANVAS_WIDTH}px`, height: `${CANVAS_HEIGHT}px` }">
-      <svg class="mapping-connections" :width="CANVAS_WIDTH" :height="CANVAS_HEIGHT" aria-hidden="true">
-        <path
-          v-for="placement in PLACEMENTS"
-          :key="placement.button"
-          :d="connectionPath(placement)"
-          :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
-          fill="none"
-        />
+    <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
+      <svg
+        class="mapping-connections"
+        :width="canvasWidth"
+        :height="CANVAS_HEIGHT"
+        aria-hidden="true"
+      >
+        <template v-for="placement in PLACEMENTS" :key="placement.button">
+          <path
+            :d="connectionPath(placement)"
+            :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
+            fill="none"
+          />
+          <polygon
+            :points="arrowPolygon(placement)"
+            :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
+          />
+        </template>
         <path
           :d="connectionPath(VOICE_PLACEMENT)"
           :class="{ active: voiceActive }"
           fill="none"
         />
+        <polygon :points="arrowPolygon(VOICE_PLACEMENT)" :class="{ active: voiceActive }" />
       </svg>
 
-      <figure class="remote-photo">
+      <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
         <img src="/RC003-remote-photo.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
@@ -539,16 +586,16 @@ onUnmounted(() => {
           class="anchor-dot"
           :class="{ visible: activeButtons.has(placement.button) }"
           :style="{
-            left: `${photoAnchorPoint(placement).x - 5}px`,
-            top: `${photoAnchorPoint(placement).y - 5}px`,
+            left: `${photoAnchorPoint(placement).x - 4}px`,
+            top: `${photoAnchorPoint(placement).y - 4}px`,
           }"
         ></span>
         <span
           class="anchor-dot voice"
           :class="{ visible: voiceActive }"
           :style="{
-            left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 5}px`,
-            top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 5}px`,
+            left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 4}px`,
+            top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 4}px`,
           }"
         ></span>
       </figure>
@@ -564,11 +611,21 @@ onUnmounted(() => {
           active: activeButtons.has(placement.button),
           flashed: firedFlash?.button === placement.button,
         }"
-        :style="{ top: `${cardTop(placement)}px` }"
+        :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
         @click="selectButton(placement.button)"
       >
         <div class="mapping-card-title">
-          <span class="mapping-icon" aria-hidden="true">{{ buttonIcons[placement.button] }}</span>
+          <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              v-for="(path, index) in buttonIcons[placement.button]"
+              :key="index"
+              :d="path"
+              stroke="currentColor"
+              stroke-width="1.9"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
           <strong>{{ buttonLabels[placement.button] }}</strong>
         </div>
         <div class="mapping-cells">
@@ -594,12 +651,23 @@ onUnmounted(() => {
       <article
         class="mapping-card voice-card right"
         :class="{ active: voiceActive }"
-        :style="{ top: `${cardTop(VOICE_PLACEMENT)}px` }"
+        :style="{ top: `${cardTop(VOICE_PLACEMENT)}px`, width: `${cardWidth}px` }"
       >
         <div class="mapping-card-title">
-          <span class="mapping-icon" aria-hidden="true">🎤</span>
+          <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path :d="VOICE_ICON_FILLED" fill="currentColor" />
+            <path
+              v-for="(path, index) in VOICE_ICON_STROKES"
+              :key="index"
+              :d="path"
+              stroke="currentColor"
+              stroke-width="1.9"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
           <strong>语音键</strong>
-          <span class="badge pending voice-badge">按住说话</span>
+          <span class="badge pending voice-badge" :class="{ active: voiceActive }">按住说话</span>
         </div>
         <p class="voice-note">按下开始、松开结束；不参与自定义映射，不加双击/长按延迟。</p>
       </article>
