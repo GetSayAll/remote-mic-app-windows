@@ -30,6 +30,10 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn send_input_snapshot(&self) -> SendInputSnapshot;
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
+    /// 预设应用清单（含安装状态）。
+    fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
+    /// 打开/激活预设应用（测试按钮与引擎共用路径）。
+    fn launch_app(&self, target: &str) -> Result<(), PlatformError>;
     fn voice_hold_hotkey(&self) -> Option<KeyChord>;
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
@@ -116,6 +120,15 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
         self.test_shortcut(chord)
+    }
+
+    fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
+        sayall_windows::app_launcher::probe_preset_apps()
+    }
+
+    fn launch_app(&self, target: &str) -> Result<(), PlatformError> {
+        sayall_windows::app_launcher::activate_or_launch(target)
+            .map_err(|error| PlatformError::SendInput(error.to_string()))
     }
 
     fn voice_hold_hotkey(&self) -> Option<KeyChord> {
@@ -388,6 +401,23 @@ mod simulation {
                 .saturating_add(planned.len() as u64);
             state.send_input.last_error = None;
             Ok(state.send_input.clone())
+        }
+
+        fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
+            // CI 仿真环境：预设表全部标记为可用，验证 UI 渲染路径。
+            sayall_windows::app_launcher::PRESET_APPS
+                .iter()
+                .map(|app| sayall_windows::app_launcher::PresetAppInfo {
+                    id: app.id.to_owned(),
+                    name: app.name.to_owned(),
+                    installed: true,
+                })
+                .collect()
+        }
+
+        fn launch_app(&self, _target: &str) -> Result<(), PlatformError> {
+            // 仿真环境不真实启动应用（CI 无桌面会话语义）。
+            Ok(())
         }
 
         fn voice_hold_hotkey(&self) -> Option<KeyChord> {

@@ -245,6 +245,10 @@ pub enum ButtonAction {
     Shortcut {
         chord: KeyChord,
     },
+    /// 打开/激活预设应用（Mac presetApplication 对齐；target = 预设 id）。
+    OpenApp {
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
