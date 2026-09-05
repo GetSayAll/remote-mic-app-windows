@@ -75,7 +75,7 @@ describe("permissions diagnostics", () => {
   it("shows truthful unsupported states and copies the generated privacy-safe report", async () => {
     const wrapper = mount(PermissionsPage, { props: { runtime } });
     expect(wrapper.text()).not.toContain("尚未实现");
-    expect(wrapper.text()).toContain("当前主机不可用");
+    expect(wrapper.text()).toContain("当前电脑不支持");
 
     const buttons = wrapper.findAll(".diagnostics-card button");
     await buttons[0].trigger("click");

@@ -8,16 +8,15 @@ defineProps<{ runtime: RuntimeSnapshot | null }>();
     <header class="page-header">
       <div>
         <h1>关于</h1>
-        <p>把 RC001 / RC003 的按键和麦克风连接到 Windows。</p>
       </div>
     </header>
 
     <article class="card about-card">
-      <div class="app-icon">S</div>
+      <img class="app-logo" src="/app-logo.png" alt="无线麦 SayAll 应用图标" />
       <div>
         <h2>无线麦 SayAll</h2>
-        <p>版本 {{ runtime?.appVersion ?? "0.1.0" }} · Rust + Tauri 2 + Vue 3</p>
-        <p class="muted">GPL-3.0-only · 独立公开仓库，不继承参考项目的 Git 历史。</p>
+        <p>版本 {{ runtime?.appVersion ?? "0.1.0" }}</p>
+        <p class="muted">开源许可 GPL-3.0。</p>
       </div>
     </article>
 
