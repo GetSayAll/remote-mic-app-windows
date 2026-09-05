@@ -244,6 +244,10 @@ impl Default for WindowsPlatform {
         let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
         #[cfg(windows)]
         {
+            // 后台节流豁免（2026-09-05 根因修复）：后台驻留被 Windows 节流
+            // 会让吞键归因变慢（F5 泄漏→和弦被拒）与链路 3 秒级劣化；
+            // 幂等、尽力而为，失败不阻断启动。
+            let _ = power::disable_background_power_throttling();
             let audio = Arc::new(audio::AudioRuntime::new());
             let send_input = Arc::new(send_input_windows::SendInputRuntime::new());
             let injector: Arc<dyn MappingInjector> = Arc::new(
