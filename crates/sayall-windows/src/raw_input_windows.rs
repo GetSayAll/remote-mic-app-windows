@@ -1,12 +1,15 @@
+use crate::button_mapping::EngineMessage;
+use crate::key_gate;
 use crate::raw_input::{
-    normalize_device_path, parse_raw_hid_body, select_single_device_path, ButtonEdge,
-    ButtonStateMerger, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
+    button_for_usage, decode_report_usages, normalize_device_path, parse_raw_hid_body,
+    select_single_device_path, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
 };
-use crate::{PlatformError, UsageCounters};
+use crate::PlatformError;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,17 +18,24 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
-    HRAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RAWKEYBOARD, RIDEV_INPUTSINK,
-    RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
+    HRAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RAWKEYBOARD, RIDEV_DEVNOTIFY,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW,
     PostQuitMessage, RegisterClassW, TranslateMessage, UnregisterClassW, HWND_MESSAGE, MSG,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT, WNDCLASSW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE,
+    WNDCLASSW,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+/// 监听器观察到遥控器活动后武装 key_gate 的宽限（毫秒）。
+const GATE_ARM_GRACE_MS: u64 = 250;
+/// WM_INPUT_DEVICE_CHANGE 的 wParam 取值（windows crate 未导出）：
+/// GIDC_ARRIVAL=1（设备接入）、GIDC_REMOVAL=2（设备移除）。
+const GIDC_ARRIVAL: u32 = 1;
+const GIDC_REMOVAL: u32 = 2;
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
@@ -35,15 +45,17 @@ thread_local! {
 #[derive(Debug)]
 pub struct RawInputRuntime {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    usage: Arc<UsageCounters>,
+    engine: Mutex<Option<Sender<EngineMessage>>>,
     control: Mutex<Option<ListenerControl>>,
 }
 
 impl RawInputRuntime {
-    pub fn new(usage: Arc<UsageCounters>) -> Self {
+    pub fn new(snapshot: Arc<Mutex<RawInputSnapshot>>, engine: Sender<EngineMessage>) -> Self {
+        // 监听器把语义事件交给映射引擎，被 key_gate 吞掉的键盘边沿由钩子线程
+        // 直接投递（见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）。
         Self {
-            snapshot: Arc::new(Mutex::new(RawInputSnapshot::default())),
-            usage,
+            snapshot,
+            engine: Mutex::new(Some(engine)),
             control: Mutex::new(None),
         }
     }
@@ -77,12 +89,19 @@ impl RawInputRuntime {
         let hwnd = Arc::new(AtomicIsize::new(0));
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let snapshot = Arc::clone(&self.snapshot);
-        let usage = Arc::clone(&self.usage);
         let thread_stop = Arc::clone(&stop_requested);
         let thread_hwnd = Arc::clone(&hwnd);
+        let engine = self
+            .engine
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| mpsc::channel().0);
         let join = thread::Builder::new()
             .name("sayall-raw-input".to_owned())
-            .spawn(move || listener_thread(snapshot, usage, thread_stop, thread_hwnd, ready_sender))
+            .spawn(move || {
+                listener_thread(snapshot, engine, thread_stop, thread_hwnd, ready_sender)
+            })
             .map_err(|error| PlatformError::RawInput(error.to_string()))?;
         let mut control = ListenerControl {
             stop_requested,
@@ -93,6 +112,8 @@ impl RawInputRuntime {
         match ready_receiver.recv_timeout(START_TIMEOUT) {
             Ok(Ok(())) => {
                 *control_slot = Some(control);
+                // 监听器就绪后 key_gate 才具备归因来源（HID 报文武装）。
+                key_gate::set_listener_active(true);
                 Ok(self.snapshot())
             }
             Ok(Err(error)) => {
@@ -124,6 +145,7 @@ impl RawInputRuntime {
             if snapshot.phase != RawInputPhase::Unsupported {
                 snapshot.phase = RawInputPhase::Stopped;
             }
+            key_gate::set_listener_active(false);
             return Ok(snapshot.clone());
         };
 
@@ -134,13 +156,17 @@ impl RawInputRuntime {
             *control_slot = Some(control);
             return Err(PlatformError::RawInput(error));
         }
+        key_gate::set_listener_active(false);
         Ok(self.snapshot())
     }
 }
 
 impl Default for RawInputRuntime {
     fn default() -> Self {
-        Self::new(Arc::new(UsageCounters::default()))
+        Self::new(
+            Arc::new(Mutex::new(RawInputSnapshot::default())),
+            mpsc::channel().0,
+        )
     }
 }
 
@@ -187,21 +213,20 @@ fn wait_for_thread(control: &mut ListenerControl, timeout: Duration) -> bool {
 
 struct ListenerContext {
     selected_path: String,
-    merger: ButtonStateMerger,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    usage: Arc<UsageCounters>,
+    engine: Sender<EngineMessage>,
 }
 
 fn listener_thread(
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    usage: Arc<UsageCounters>,
+    engine: Sender<EngineMessage>,
     stop_requested: Arc<AtomicBool>,
     hwnd_slot: Arc<AtomicIsize>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) {
     let result = run_listener(
         Arc::clone(&snapshot),
-        Arc::clone(&usage),
+        engine.clone(),
         Arc::clone(&stop_requested),
         Arc::clone(&hwnd_slot),
         &ready,
@@ -211,12 +236,9 @@ fn listener_thread(
     }
     hwnd_slot.store(0, Ordering::Release);
     THREAD_CONTEXT.with(|slot| {
-        if let Some(mut context) = slot.borrow_mut().take() {
-            record_edges(
-                &context.snapshot,
-                &context.usage,
-                context.merger.release_all(),
-            );
+        if let Some(context) = slot.borrow_mut().take() {
+            // 监听器退出：引擎释放全部按住状态（取消手势计时，不触发动作）。
+            let _ = context.engine.send(EngineMessage::ListenerStopped);
         }
     });
 
@@ -234,26 +256,28 @@ fn listener_thread(
             state.last_error = Some(error);
         }
     }
+    state.active_buttons.clear();
+    key_gate::set_listener_active(false);
 }
 
 fn run_listener(
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    usage: Arc<UsageCounters>,
+    engine: Sender<EngineMessage>,
     stop_requested: Arc<AtomicBool>,
     hwnd_slot: Arc<AtomicIsize>,
     ready: &mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), String> {
     let paths = enumerate_matching_device_paths()?;
     {
-        snapshot.lock().unwrap().matched_device_count = paths.len() as u32;
+        let mut snapshot = snapshot.lock().unwrap();
+        snapshot.matched_device_count = paths.len() as u32;
     }
     let selected_path = select_single_device_path(&paths).map_err(|error| error.to_string())?;
     THREAD_CONTEXT.with(|slot| {
         *slot.borrow_mut() = Some(ListenerContext {
             selected_path: normalize_device_path(&selected_path),
-            merger: ButtonStateMerger::default(),
             snapshot: Arc::clone(&snapshot),
-            usage: Arc::clone(&usage),
+            engine,
         });
     });
 
@@ -306,13 +330,13 @@ fn run_listener(
         RAWINPUTDEVICE {
             usUsagePage: 0x01,
             usUsage: 0x06,
-            dwFlags: RIDEV_INPUTSINK,
+            dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
             hwndTarget: window,
         },
         RAWINPUTDEVICE {
             usUsagePage: 0x0C,
             usUsage: 0x01,
-            dwFlags: RIDEV_INPUTSINK,
+            dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
             hwndTarget: window,
         },
     ];
@@ -391,6 +415,14 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_INPUT_DEVICE_CHANGE => {
+            // 设备热插拔通知（RIDEV_DEVNOTIFY）：遥控器断连/睡眠会让 HID 设备
+            // 接口消失，按住中的按键不会再有释放报文——通知引擎强制释放。
+            if wparam.0 as u32 == GIDC_REMOVAL || wparam.0 as u32 == GIDC_ARRIVAL {
+                handle_device_change(HRAWINPUT(lparam.0 as *mut c_void));
+            }
+            LRESULT(0)
+        }
         WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -401,6 +433,20 @@ unsafe extern "system" fn window_proc(
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
     }
+}
+
+fn handle_device_change(handle: HRAWINPUT) {
+    let device_path = match get_device_name(windows::Win32::Foundation::HANDLE(handle.0)) {
+        Ok(path) => normalize_device_path(&path),
+        Err(_) => return,
+    };
+    THREAD_CONTEXT.with(|slot| {
+        if let Some(context) = slot.borrow().as_ref() {
+            if device_path == context.selected_path {
+                let _ = context.engine.send(EngineMessage::DeviceRemoved);
+            }
+        }
+    });
 }
 
 fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
@@ -424,6 +470,11 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         return Err("GetRawInputData returned an incomplete packet".to_owned());
     }
     let header = unsafe { bytes.as_ptr().cast::<RAWINPUTHEADER>().read_unaligned() };
+    // 注入事件（hDevice 为空）不属于任何遥控器设备：静默忽略，
+    // 避免把 GetRawInputDeviceInfoW(NULL) 的错误写入诊断快照。
+    if header.hDevice.is_invalid() || header.hDevice.0.is_null() {
+        return Ok(());
+    }
     let device_path = get_device_name(header.hDevice)?;
     let body = &bytes[header_size as usize..];
 
@@ -437,32 +488,36 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         }
         context.snapshot.lock().unwrap().raw_event_count += 1;
 
-        let edges = if header.dwType == RIM_TYPEKEYBOARD.0 {
+        if header.dwType == RIM_TYPEKEYBOARD.0 {
             if body.len() < size_of::<RAWKEYBOARD>() {
                 return Err("RAWKEYBOARD packet is truncated".to_owned());
             }
             let keyboard = unsafe { body.as_ptr().cast::<RAWKEYBOARD>().read_unaligned() };
-            context.merger.update_keyboard(RawKeyboardEvent {
+            let event = RawKeyboardEvent {
                 make_code: keyboard.MakeCode,
                 flags: keyboard.Flags,
                 virtual_key: keyboard.VKey,
                 message: keyboard.Message,
-            })
-        } else if header.dwType == RIM_TYPEHID.0 {
-            let mut edges = Vec::new();
-            for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
-                edges.extend(
-                    context
-                        .merger
-                        .update_hid_report(report)
-                        .map_err(|error| error.to_string())?,
-                );
+            };
+            // 透传的键盘事件交给引擎合并；同时武装 key_gate
+            // （覆盖键盘-only 按键的重复沿与首沿泄漏后的续期）。
+            if let Some(button) = event.button() {
+                key_gate::arm_button(button, GATE_ARM_GRACE_MS);
             }
-            edges
-        } else {
-            Vec::new()
-        };
-        record_edges(&context.snapshot, &context.usage, edges);
+            let _ = context.engine.send(EngineMessage::Keyboard(event));
+        } else if header.dwType == RIM_TYPEHID.0 {
+            for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
+                let usages = decode_report_usages(report).map_err(|error| error.to_string())?;
+                // HID 报文（独立管线，不受键盘 LL 钩子影响）到达即武装
+                // 对应按键：其键盘孪生事件在钩子里据此归因吞键。
+                for usage in &usages {
+                    if let Some(button) = button_for_usage(*usage) {
+                        key_gate::arm_button(button, GATE_ARM_GRACE_MS);
+                    }
+                }
+                let _ = context.engine.send(EngineMessage::HidUsages(usages));
+            }
+        }
         Ok(())
     })
 }
@@ -522,23 +577,6 @@ fn get_device_name(device: windows::Win32::Foundation::HANDLE) -> Result<String,
         .position(|character| *character == 0)
         .unwrap_or(buffer.len());
     Ok(String::from_utf16_lossy(&buffer[..length]))
-}
-
-fn record_edges(
-    snapshot: &Arc<Mutex<RawInputSnapshot>>,
-    usage: &UsageCounters,
-    edges: Vec<ButtonEdge>,
-) {
-    if edges.is_empty() {
-        return;
-    }
-    let mut state = snapshot.lock().unwrap();
-    state.semantic_edge_count += edges.len() as u64;
-    usage.record_button_presses(edges.iter().filter(|edge| edge.is_pressed).count() as u64);
-    if let Some(last) = edges.last() {
-        state.last_button = Some(last.button);
-        state.last_is_pressed = Some(last.is_pressed);
-    }
 }
 
 fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {

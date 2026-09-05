@@ -71,6 +71,16 @@ mod windows_impl {
     static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ARMED_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
     static SWALLOW_MASTER: AtomicBool = AtomicBool::new(false);
+    /// 抑制器决策计数（AGENTS.md 功能点日志规范；仅钩子线程原子递增，
+    /// 会话开始时由工作线程快照落盘——钩子线程绝不做文件 IO）。
+    static F5_DOWN_SEEN: AtomicU64 = AtomicU64::new(0);
+    static F5_DOWN_SWALLOWED: AtomicU64 = AtomicU64::new(0);
+    static F5_DOWN_LEAKED: AtomicU64 = AtomicU64::new(0);
+    static F5_DOWN_WAITED_ARMED_LATE: AtomicU64 = AtomicU64::new(0);
+    /// 遥控器 HID 活动通知（lib.rs 接线到 BleRuntime::wake_reconnect）：
+    /// 归因线程观察到遥控器键盘事件时回调。用于断连状态下遥控器醒来
+    /// 按键时立即触发重连（HID 先于 GATT 可达，2026-09-05 实证）。
+    static REMOTE_HID_ACTIVITY_NOTIFY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
     /// 防粘键配对状态（仅钩子线程读写）：0=无按住/配对未知，1=本次按住的
     /// DOWN 沿全部被本钩子吞下，2=任一 DOWN 沿已泄漏进 OS。UP 沿只在 1 时
     /// 吞下（VVC 同款：DOWN 漏进 OS 则 UP 必放行）。
@@ -141,20 +151,15 @@ mod windows_impl {
                     let is_key_up = matches!(message, 0x0101 | 0x0105);
                     if is_key_up {
                         let hold = HOLD_PAIRING.swap(HOLD_NONE, Ordering::Relaxed);
-                        if decide(
-                            VK_F5,
-                            true,
-                            session_active(),
-                            armed(),
-                            hold,
-                        ) {
+                        if decide(VK_F5, true, session_active(), armed(), hold) {
                             return LRESULT(1);
                         }
                         // DOWN 沿曾泄漏进 OS（或配对未知）：放行 UP，防止粘键。
                         return CallNextHookEx(None, code, wparam, lparam);
                     }
                     // DOWN 沿：先试武装状态，未武装则 60ms 有界等待。
-                    let swallowed = if swallow_ready() {
+                    let waited = !swallow_ready();
+                    let swallowed = if !waited {
                         true
                     } else {
                         let deadline = now_ms() + BOUNDED_WAIT_MS;
@@ -168,6 +173,15 @@ mod windows_impl {
                         }
                         armed_late
                     };
+                    if waited && swallowed {
+                        F5_DOWN_WAITED_ARMED_LATE.fetch_add(1, Ordering::Relaxed);
+                    }
+                    F5_DOWN_SEEN.fetch_add(1, Ordering::Relaxed);
+                    if swallowed {
+                        F5_DOWN_SWALLOWED.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        F5_DOWN_LEAKED.fetch_add(1, Ordering::Relaxed);
+                    }
                     let hold = HOLD_PAIRING.load(Ordering::Relaxed);
                     let next = track_down(hold, swallowed);
                     HOLD_PAIRING.store(next, Ordering::Relaxed);
@@ -186,8 +200,7 @@ mod windows_impl {
     /// 钩子链头 bump：先挂新钩（立即成为链头），再卸旧钩——重叠安装无吞键空窗
     /// （Voice_VibeCoding 同款技巧）。新钩安装失败时保留旧钩。
     fn bump_to_chain_head(current: &mut Option<HHOOK>) {
-        if let Ok(new_hook) =
-            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
+        if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
         {
             let old = current.replace(new_hook);
             if let Some(old) = old {
@@ -240,7 +253,17 @@ mod windows_impl {
         };
         if device_path_matches_xiaomi_remote(&path) {
             ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
+            // 遥控器 HID 活动：通知 BLE 运行时立即重连（断连场景下遥控器
+            // 醒来的第一个按键就应触发重试，而不是等退避周期）。
+            if let Some(notify) = REMOTE_HID_ACTIVITY_NOTIFY.get() {
+                notify();
+            }
         }
+    }
+
+    /// 注册遥控器 HID 活动回调（lib.rs 启动时接线；重复注册保持首个）。
+    pub fn set_remote_hid_activity_notify(callback: Box<dyn Fn() + Send + Sync>) {
+        let _ = REMOTE_HID_ACTIVITY_NOTIFY.set(callback);
     }
 
     // ---- Raw Input 归因线程（独立消息窗口 + 消息泵） ----
@@ -282,9 +305,7 @@ mod windows_impl {
             };
             let _ = thread_id_tx.send(GetCurrentThreadId());
 
-            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0"
-                .encode_utf16()
-                .collect();
+            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0".encode_utf16().collect();
             let class_name_ptr = PCWSTR(class_name.as_ptr());
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(raw_wnd_proc),
@@ -344,10 +365,8 @@ mod windows_impl {
                 dwFlags: RIDEV_REMOVE,
                 hwndTarget: HWND::default(),
             }];
-            let _ = RegisterRawInputDevices(
-                &removals,
-                std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-            );
+            let _ =
+                RegisterRawInputDevices(&removals, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
             let _ = DestroyWindow(hwnd);
             let _ = UnregisterClassW(class_name_ptr, Some(instance));
         }
@@ -440,6 +459,19 @@ mod windows_impl {
         }
     }
 
+    /// GATT 控制通知到达时立即武装宽限（供 BLE 回调线程调用）。
+    ///
+    /// 背景（2026-09-05 21:08 实证，kb-live/live13 交叉）：遥控器闲置后
+    /// 首按，应用自身被后台节流——0x04 经工作线程队列到
+    /// set_session_active 的链路可拖到 ~120ms，而 F5 的 60ms 有界等待
+    /// 提前超时 → F5 D 泄漏进 OS → 和弦变成 F5+Ctrl+Win 三键被微信输入法
+    /// 拒绝（首按失败）。GATT 回调线程因刚被事件唤醒不受队列延迟，在
+    /// 此直接武装，F5 D（正常比 0x04 晚 60-90ms 到达）落在 250ms 宽限内
+    /// 被即时吞下。
+    pub fn arm_grace() {
+        ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
+    }
+
     /// ATVV 语音会话起止（模块级，供 BleRuntime 工作线程调用）：
     /// 会话期间吞 F5；结束时保留 250ms 宽限覆盖晚到的释放沿。
     /// 会话开始同时请求钩子链头 bump——微信输入法等目标若在本应用之后
@@ -447,11 +479,19 @@ mod windows_impl {
     pub fn set_session_active(active: bool) {
         if active {
             SESSION_ACTIVE.store(true, Ordering::Relaxed);
+            // 功能点日志：抑制器决策计数快照（自应用启动累计），首按
+            // 失败类报障一次日志拉取即可归因（泄漏/等待超时/即时吞下）。
+            crate::ble::gatt_note(format!(
+                "suppressor_stats seen={} swallowed={} leaked={} waited_late={}",
+                F5_DOWN_SEEN.load(Ordering::Relaxed),
+                F5_DOWN_SWALLOWED.load(Ordering::Relaxed),
+                F5_DOWN_LEAKED.load(Ordering::Relaxed),
+                F5_DOWN_WAITED_ARMED_LATE.load(Ordering::Relaxed),
+            ));
             let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
             if thread_id != 0 {
                 unsafe {
-                    let _ =
-                        PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
+                    let _ = PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
                 }
             }
         } else {
@@ -473,8 +513,7 @@ mod windows_impl {
             }
             if self.raw_thread_id != 0 {
                 unsafe {
-                    let _ =
-                        PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+                    let _ = PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
                 }
             }
             if let Some(worker) = self.worker.take() {
@@ -488,7 +527,9 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{set_session_active, VoiceKeySuppressor};
+pub use windows_impl::{
+    arm_grace, set_remote_hid_activity_notify, set_session_active, VoiceKeySuppressor,
+};
 
 #[cfg(all(windows, test))]
 pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL};
@@ -499,7 +540,13 @@ mod tests {
     fn only_remote_or_session_f5_down_is_swallowed() {
         // DOWN 沿：非 F5 一律透传；F5 仅在会话或武装时吞（配对状态不参与）。
         assert!(!super::decide(0x41, false, false, false, super::HOLD_NONE));
-        assert!(!super::decide(0x41, true, true, true, super::HOLD_SWALLOWED_ALL));
+        assert!(!super::decide(
+            0x41,
+            true,
+            true,
+            true,
+            super::HOLD_SWALLOWED_ALL
+        ));
         assert!(!super::decide(0x74, false, false, false, super::HOLD_NONE));
         assert!(super::decide(0x74, false, true, false, super::HOLD_NONE));
         assert!(super::decide(0x74, false, false, true, super::HOLD_NONE));
@@ -510,10 +557,22 @@ mod tests {
         // UP 沿只认配对（VVC 同款防粘键：DOWN 漏进 OS 则 UP 必放行）：
         // 全吞的按住才吞对应 UP；已泄漏/配对未知一律放行，即使会话与武装
         // 仍生效也不吞——DOWN 已进 OS，UP 跟进才能解除 OS 键态。
-        assert!(super::decide(0x74, true, false, false, super::HOLD_SWALLOWED_ALL));
+        assert!(super::decide(
+            0x74,
+            true,
+            false,
+            false,
+            super::HOLD_SWALLOWED_ALL
+        ));
         assert!(!super::decide(0x74, true, true, true, super::HOLD_LEAKED));
         assert!(!super::decide(0x74, true, true, true, super::HOLD_NONE));
-        assert!(!super::decide(0x41, true, true, true, super::HOLD_SWALLOWED_ALL));
+        assert!(!super::decide(
+            0x41,
+            true,
+            true,
+            true,
+            super::HOLD_SWALLOWED_ALL
+        ));
     }
 
     #[test]
@@ -532,7 +591,13 @@ mod tests {
             super::track_down(super::HOLD_SWALLOWED_ALL, false),
             super::HOLD_LEAKED
         );
-        assert_eq!(super::track_down(super::HOLD_LEAKED, true), super::HOLD_LEAKED);
-        assert_eq!(super::track_down(super::HOLD_NONE, false), super::HOLD_LEAKED);
+        assert_eq!(
+            super::track_down(super::HOLD_LEAKED, true),
+            super::HOLD_LEAKED
+        );
+        assert_eq!(
+            super::track_down(super::HOLD_NONE, false),
+            super::HOLD_LEAKED
+        );
     }
 }

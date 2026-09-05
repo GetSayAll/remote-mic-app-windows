@@ -7,6 +7,7 @@ use crate::{
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
 use std::sync::{
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender},
     Arc, Mutex, MutexGuard, OnceLock,
 };
@@ -111,6 +112,12 @@ impl BleRuntime {
         self.request(|reply| WorkerMessage::Restore { device_id, reply })
     }
 
+    /// 遥控器 HID 活动触发的立即重连（断连状态下遥控器醒来按键时，
+    /// 由 key_suppressor 归因回调调用；尽力而为，队列满即丢弃）。
+    pub fn wake_reconnect(&self) {
+        let _ = self.sender.send(WorkerMessage::WakeReconnect);
+    }
+
     fn request(
         &self,
         make_message: impl FnOnce(Sender<Result<ConnectionSnapshot, PlatformError>>) -> WorkerMessage,
@@ -155,6 +162,21 @@ pub(crate) enum WorkerMessage {
     Restore {
         device_id: String,
         reply: Sender<Result<ConnectionSnapshot, PlatformError>>,
+    },
+    /// 遥控器 HID 活动观察（key_suppressor 归因线程回调）：断连状态下
+    /// 遥控器醒来按键时，其 HID 事件先于 GATT 可达——立即触发重连
+    /// （清零退避），把"按下→应用恢复"的空窗从最长一个退避周期
+    /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
+    /// GATT 重连耗 3 秒，期间按键全部无响应）。
+    WakeReconnect,
+    /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
+    /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
+    /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
+    /// 检测轮次（1 起）；`epoch` 为 armed 时的语音会话纪元（防跨会话
+    /// 误伤，见 worker_loop 中 voice_session_epoch 注释）。
+    RetryVoiceChord {
+        attempt: u32,
+        epoch: u64,
     },
     Control {
         connection_generation: u64,
@@ -202,6 +224,13 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 语音会话纪元：每次会话开始（StreamStarted）+1。wetype_check 重试
+    // 阶梯（最长 ~7.4s）用它区分"本会话仍在流式"与"旧会话已结束、
+    // 新会话已开始"——仅看全局 voice_state 会把新会话误判为旧会话，
+    // 导致旧阶梯释放并重按新会话（可能已成功开麦）的和弦（2026-09-05
+    // 17:35 实测：用户失败后 0.7s 即再按）。阶梯线程在关键点核对
+    // armed 时的纪元，不符即退出，让新会话自带的新一轮检测接管。
+    let voice_session_epoch: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     // 僵死链路自动恢复计数：连续失败达标后关开一次蓝牙无线电（每个僵死
     // 周期最多 bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES 次）。
     let mut radio_recovery_cycles: u32 = 0;
@@ -227,9 +256,10 @@ fn worker_loop(
                                 &mut held_hotkey,
                                 &mut connection_generation,
                             ) {
-                                stop_reconnect_after_cleanup_failure(
+                                keep_reconnecting_after_cleanup_failure(
                                     &state,
                                     &mut preferred_device_id,
+                                    &mut backoff,
                                     &mut reconnect_deadline,
                                     &error,
                                 );
@@ -268,9 +298,10 @@ fn worker_loop(
                                 if let Err(error) = result {
                                     connection_generation = connection_generation.wrapping_add(1);
                                     if matches!(error, PlatformError::BleCleanup(_)) {
-                                        stop_reconnect_after_cleanup_failure(
+                                        keep_reconnecting_after_cleanup_failure(
                                             &state,
                                             &mut preferred_device_id,
+                                            &mut backoff,
                                             &mut reconnect_deadline,
                                             &error,
                                         );
@@ -302,8 +333,7 @@ fn worker_loop(
                                                     crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
                                                 ));
                                             }
-                                            match crate::bluetooth_radio::cycle_bluetooth_radio()
-                                            {
+                                            match crate::bluetooth_radio::cycle_bluetooth_radio() {
                                                 Ok(()) => {
                                                     lock(&state).last_error = Some(
                                                         "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
@@ -339,12 +369,11 @@ fn worker_loop(
                                     pipeline.capabilities(),
                                     pipeline.session_id(),
                                 ) {
-                                    if let Some(command) =
-                                        (AtvvCommand::MicrophoneExtend {
-                                            version: capabilities.version,
-                                            session_id,
-                                        })
-                                        .encode()
+                                    if let Some(command) = (AtvvCommand::MicrophoneExtend {
+                                        version: capabilities.version,
+                                        session_id,
+                                    })
+                                    .encode()
                                     {
                                         match connected.write(&command) {
                                             Ok(()) => {
@@ -396,9 +425,10 @@ fn worker_loop(
                 if let Err(error) = &result {
                     connection_generation = connection_generation.wrapping_add(1);
                     if matches!(error, PlatformError::BleCleanup(_)) {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
+                            &mut backoff,
                             &mut reconnect_deadline,
                             error,
                         );
@@ -435,9 +465,10 @@ fn worker_loop(
                         let _ = reply.send(Ok(snapshot));
                     }
                     Err(error) => {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
+                            &mut backoff,
                             &mut reconnect_deadline,
                             &error,
                         );
@@ -469,6 +500,66 @@ fn worker_loop(
                 *lock(&state) = snapshot.clone();
                 let _ = reply.send(Ok(snapshot));
             }
+            WorkerMessage::WakeReconnect => {
+                // 遥控器 HID 活动（正在按键）：仅当无活动会话、有首选设备、
+                // 未挂起时立即重试连接；清零退避让下一次尝试马上发生。
+                if session.is_none()
+                    && preferred_device_id.is_some()
+                    && !system_suspended
+                    && reconnect_deadline.is_some()
+                {
+                    gatt_note("wake_reconnect triggered=hidi backoff_reset=true".to_owned());
+                    backoff.reset();
+                    reconnect_deadline = Some(Instant::now());
+                    let mut snapshot = lock(&state);
+                    if snapshot.phase == ConnectionPhase::Reconnecting {
+                        snapshot.reconnect_attempt = 0;
+                    }
+                    // 注：不在此处做 WeType 预热点火（曾基于"钩子休眠"假设
+                    // 加入，2026-09-05 晚证伪：首按失败实为 20ms 和弦间隔
+                    // 回归（cef24d3），已回退 80ms；且唤醒瞬间 cycle 存在和弦
+                    // 撞上配置切换重绑窗口的自伤风险，已移除）。
+                }
+            }
+            WorkerMessage::RetryVoiceChord { attempt, epoch } => {
+                // 微信输入法热键休眠的自动重试（同一次按住内完成）：
+                // 释放旧和弦边沿 → 重注入。在工作线程内串行执行，与
+                // StreamStopped/中止路径无竞态；仅在会话仍在流式且纪元
+                // 未变（未被新会话替换）时执行。
+                let chord_configured = lock(&voice_hold_hotkey).clone();
+                let old_held = held_hotkey.take();
+                if let (Some(chord), Some(old)) = (chord_configured, old_held) {
+                    if pipeline.state() == VoiceSessionState::Streaming
+                        && voice_session_epoch.load(Ordering::SeqCst) == epoch
+                    {
+                        let _ = send_input.release(&old);
+                        match send_input.press(&chord) {
+                            Ok(_) => {
+                                gatt_note(format!(
+                                    "chord_retry result=ok attempt={attempt} epoch={epoch}"
+                                ));
+                                held_hotkey = Some(chord);
+                                spawn_wetype_check(
+                                    &state,
+                                    sender.clone(),
+                                    attempt,
+                                    epoch,
+                                    &voice_session_epoch,
+                                );
+                            }
+                            Err(error) => {
+                                gatt_note(format!(
+                                    "chord_retry result=err attempt={attempt} epoch={epoch} err={error}"
+                                ));
+                            }
+                        }
+                    } else {
+                        gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
+                    }
+                } else {
+                    gatt_note("chord_retry skipped reason=no_chord".to_owned());
+                }
+            }
             WorkerMessage::Control {
                 connection_generation: message_generation,
                 bytes,
@@ -485,6 +576,8 @@ fn worker_loop(
                         &usage,
                         &mut active_voice_samples,
                         &mut extend_deadline,
+                        &sender,
+                        &voice_session_epoch,
                         &bytes,
                     );
                     let phase = lock(&state).phase;
@@ -509,9 +602,10 @@ fn worker_loop(
                             &mut held_hotkey,
                             &mut connection_generation,
                         ) {
-                            stop_reconnect_after_cleanup_failure(
+                            keep_reconnecting_after_cleanup_failure(
                                 &state,
                                 &mut preferred_device_id,
+                                &mut backoff,
                                 &mut reconnect_deadline,
                                 &cleanup_error,
                             );
@@ -561,9 +655,10 @@ fn worker_loop(
                         &mut held_hotkey,
                         &mut connection_generation,
                     ) {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
+                            &mut backoff,
                             &mut reconnect_deadline,
                             &error,
                         );
@@ -598,9 +693,10 @@ fn worker_loop(
                         &mut held_hotkey,
                         &mut connection_generation,
                     ) {
-                        stop_reconnect_after_cleanup_failure(
+                        keep_reconnecting_after_cleanup_failure(
                             &state,
                             &mut preferred_device_id,
+                            &mut backoff,
                             &mut reconnect_deadline,
                             &cleanup_error,
                         );
@@ -625,9 +721,10 @@ fn worker_loop(
                     &mut held_hotkey,
                     &mut connection_generation,
                 ) {
-                    stop_reconnect_after_cleanup_failure(
+                    keep_reconnecting_after_cleanup_failure(
                         &state,
                         &mut preferred_device_id,
+                        &mut backoff,
                         &mut reconnect_deadline,
                         &error,
                     );
@@ -762,17 +859,31 @@ fn invalidate_connection(
     }
 }
 
-fn stop_reconnect_after_cleanup_failure(
+/// 清理旧会话失败时的处理（2026-09-05 修正：旧实现直接清空首选设备并
+/// **停止自动重连**，提示"本次运行已停止自动重连"——把"清理失败"升级成
+/// "必须重启应用"，违反用户侧零介入原则（AGENTS.md 运维与自愈节）。
+/// RC003 真机实证：链路掉线后清理失败时应用彻底躺平，直到人工重启进程
+/// 才恢复）。新行为：记录清理错误并照常排定重连——下次重连的
+/// invalidate_connection 会再次尝试清理（幂等），叠加清理的风险远小于
+/// "停止重连=确定性人工介入"的损失。
+fn keep_reconnecting_after_cleanup_failure(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     preferred_device_id: &mut Option<String>,
+    backoff: &mut ReconnectBackoff,
     reconnect_deadline: &mut Option<Instant>,
     error: &PlatformError,
 ) {
-    *preferred_device_id = None;
-    *reconnect_deadline = None;
-    *lock(state) = failed_snapshot(format!(
-        "{error}；为避免新旧 BLE 会话重叠，本次运行已停止自动重连"
-    ));
+    if preferred_device_id.is_some() {
+        schedule_reconnect(
+            state,
+            backoff,
+            reconnect_deadline,
+            &format!("{error}；旧会话清理失败，将继续重试并再次清理"),
+        );
+    } else {
+        *reconnect_deadline = None;
+        *lock(state) = failed_snapshot(error.to_string());
+    }
 }
 
 fn schedule_reconnect(
@@ -806,6 +917,8 @@ fn handle_control(
     usage: &UsageCounters,
     active_voice_samples: &mut u64,
     extend_deadline: &mut Option<Instant>,
+    sender: &Sender<WorkerMessage>,
+    voice_session_epoch: &Arc<AtomicU64>,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -851,6 +964,9 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            // 语音会话纪元 +1：本轮 wetype_check 阶梯以此为 armed 纪元，
+            // 后续新会话会使旧阶梯的核对失效（防跨会话误伤）。
+            let epoch = voice_session_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             *active_voice_samples = 0;
             if let Some(session) = session {
                 session.microphone_opened = true;
@@ -864,10 +980,28 @@ fn handle_control(
             // 2026-09-04 曾因误接未启动的 voice_key_suppressor 模块导致 F5
             // 泄漏进和弦、微信输入法拒绝触发（evidence/p 复盘）。
             crate::key_suppressor::set_session_active(true);
+            // F5 解粘保险（2026-09-05 21:08 实证链路）：断连重连场景下
+            // 首个 F5 D 在 0x04 之前泄漏进 OS（重连需 ~3s，武装不可能
+            // 提前），其 UP 沿若丢失则 OS 键态 F5 永久按下——后续和弦
+            // 全部变成 F5+Ctrl+Win 三键被拒。注入一个 F5 UP 清理：
+            // 干净场景（本抑制器全吞）下该 UP 也会被吞（配对规则），
+            // 仅在确有泄漏时放行到 OS——恰好只在需要时生效。
+            send_input.release_stuck_f5();
+            std::thread::sleep(Duration::from_millis(20));
             // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
+                // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
+                // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
+                // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
+                // 行为注入（不比现状更差）。
+                if let Err(error) = crate::ime::activate_wetype_session() {
+                    lock(state).last_error = Some(error);
+                }
                 if let Err(error) = send_input.press(&chord) {
+                    gatt_note(format!(
+                        "chord_press result=err session={session_id} err={error}"
+                    ));
                     abort_voice_session(
                         session,
                         pipeline,
@@ -881,9 +1015,26 @@ fn handle_control(
                     );
                     return;
                 }
+                // 功能点日志：成功按下（含会话号，与 C 04 行对齐即可归因）。
+                gatt_note(format!(
+                    "chord_press result=ok session={session_id} gap_ms={}",
+                    crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
+                ));
                 *held_hotkey = Some(chord);
+                // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
+                // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
+                // 传入，防旧阶梯跨会话误伤新会话的和弦。
+                spawn_wetype_check(state, sender.clone(), 0, epoch, voice_session_epoch);
+            } else {
+                // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
+                gatt_note(format!(
+                    "chord_press result=skipped session={session_id} reason=no_hotkey"
+                ));
             }
             if let Err(error) = audio.begin_session(generation) {
+                gatt_note(format!(
+                    "audio_begin result=err session={session_id} err={error}"
+                ));
                 abort_voice_session(
                     session,
                     pipeline,
@@ -1043,7 +1194,16 @@ fn abort_voice_session(
 fn release_voice_hold_hotkey(send_input: &SendInputRuntime, held_hotkey: &mut Option<KeyChord>) {
     crate::key_suppressor::set_session_active(false);
     if let Some(chord) = held_hotkey.take() {
-        let _ = send_input.release(&chord);
+        // 功能点日志：释放结果（与 chord_press 成对，粘键排查的另一半）。
+        let result = send_input.release(&chord);
+        gatt_note(format!(
+            "chord_release result={} err={}",
+            if result.is_ok() { "ok" } else { "err" },
+            result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+        ));
     }
 }
 
@@ -1289,17 +1449,16 @@ enum WorkerChannel {
 /// 不含设备身份信息。
 fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
     static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    SINK
-        .get_or_init(|| {
-            let path = std::env::var_os("SAYALL_GATT_LOG")?;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-                .map(Mutex::new)
-        })
-        .as_ref()
+    SINK.get_or_init(|| {
+        let path = std::env::var_os("SAYALL_GATT_LOG")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(Mutex::new)
+    })
+    .as_ref()
 }
 
 fn gatt_log(kind: &str, bytes: &[u8]) {
@@ -1319,6 +1478,144 @@ fn gatt_log(kind: &str, bytes: &[u8]) {
             let _ = writeln!(file, "{kind} {now_ms} len={:3} b=[{preview}]", bytes.len());
         }
     }
+}
+
+/// 功能点结构化诊断标记（同 SAYALL_GATT_LOG 开关；AGENTS.md"功能点必须自带
+/// 日志"规范）：语音链路的分支决策、外部调用结果与关键耗时以 "N" 标记
+/// 行落盘，报障后一次日志拉取即可定位环节。格式与 gatt_log 对齐：
+/// `N <墙钟ms> len=  0 note=<结构化键值>`。
+pub(crate) fn gatt_note(note: String) {
+    use std::io::Write as _;
+    if let Some(sink) = gatt_sink() {
+        if let Ok(mut file) = sink.lock() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(file, "N {now_ms} len=  0 note={note}");
+        }
+    }
+}
+
+/// WeType 热键休眠检测与同一次按住内的自动恢复（2026-09-05 实证闭环）：
+/// - 实证：WeType 可能"TSF 激活但热键钩子休眠"（LWin 穿透、无 0xFC、
+///   不开麦），打开其设置页立即复活；跨进程解除节流不可行
+///   （SetProcessInformation 对其他进程 E_INVALIDARG，15:04 真机）。
+/// - 检测：和弦注入后 ~700ms 读 ConsentStore 开麦时间戳验证 WeType 真的
+///   响应了本次语音（公开可观测判据）。
+/// - 恢复（重试阶梯，全部基于 2026-09-05 16:44-17:35 七次真实休眠发作
+///   的 kb-live.log/ConsentStore 持锁解码实测，非推测常量）：
+///   - 配置切换（ime::cycle_wetype_profile，公开 API）确实能复活钩子；
+///   - 复活延迟实测 ∈ (300ms, ~6s]，典型 1.3-2.3s（七次发作中用户在
+///     cycle 后 1.28/1.68/1.85/1.9/2.28s 的再按全部成功）；
+///   - cycle 后 +300ms 的重注入 7/7 失败（过早）——据此第一轮重试
+///     延迟取 2000ms，第二轮（再次 cycle 后）取 3000ms；
+///   - 每轮：检测未响应 → cycle → 等待 → 请求工作线程释放旧和弦并
+///     重注入（WorkerMessage::RetryVoiceChord{attempt}，串行无竞态）→
+///     下一轮检测；两轮重试都未响应才提示人工（打开微信输入法界面）。
+/// 全程落 gatt_note 日志（含 attempt 轮次）；检测线程尽力而为，绝不
+/// 阻塞语音会话。
+const WETYPE_CHECK_DELAY_MS: u64 = 700;
+/// 每轮重注入距上一轮 cycle 完成的等待。实测依据（2026-09-05 20:15-20:27
+/// 七次发作 + 16:44-17:35 七次，sayall-diag.log/kb-live 解码）：复活延迟
+/// 分布 1.4/1.45/2.24/3.2/3.4/5.3/>10.4s——[2,3] 两轮只覆盖前三种且实测
+/// 4 次重试 0 命中（用户总在重试前松开再按）；扩为 [2,3,5] 三轮覆盖除
+/// >10.4s 离群点外的全部观测值（按住约 13s 内完成整个阶梯）。
+const WETYPE_RETRY_SETTLE_MS: [u64; 3] = [2000, 3000, 5000];
+/// 最大重注入轮次（检测共 attempt 0..=3 四轮）。
+const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
+
+fn spawn_wetype_check(
+    state: &Arc<Mutex<ConnectionSnapshot>>,
+    sender: Sender<WorkerMessage>,
+    attempt: u32,
+    epoch: u64,
+    epoch_ref: &Arc<AtomicU64>,
+) {
+    let state = Arc::clone(state);
+    let epoch_ref = Arc::clone(epoch_ref);
+    let baseline = crate::wetype_revive::wetype_mic_start();
+    gatt_note(format!(
+        "wetype_check armed attempt={attempt} epoch={epoch} baseline={baseline:?}"
+    ));
+    std::thread::Builder::new()
+        .name("sayall-wetype-check".to_owned())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(WETYPE_CHECK_DELAY_MS));
+            let (still_streaming, same_session) = {
+                let snapshot = lock(&state);
+                (
+                    snapshot.voice_state == VoiceSessionState::Streaming,
+                    epoch_ref.load(Ordering::SeqCst) == epoch,
+                )
+            };
+            if !still_streaming || !same_session {
+                // 会话已结束或已被新会话替换：无需验证/唤醒（避免误判与
+                // 误伤——旧阶梯释放/重按新会话的和弦会打断其听写）。
+                gatt_note(if same_session {
+                    "wetype_check skipped reason=session_ended".to_owned()
+                } else {
+                    format!("wetype_check skipped reason=session_replaced epoch={epoch}")
+                });
+                return;
+            }
+            let now = crate::wetype_revive::wetype_mic_start();
+            let reacted = match (baseline, now) {
+                (Some(base), Some(current)) => current > base,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if reacted {
+                gatt_note(format!(
+                    "wetype_check reacted=true attempt={attempt} epoch={epoch}"
+                ));
+                return;
+            }
+            if attempt >= WETYPE_RETRY_MAX_ATTEMPT {
+                // 最后一轮仍未响应：放弃自动恢复，提示人工（唯一兜底）。
+                gatt_note(format!(
+                    "wetype_check final=not_reacted attempts={WETYPE_RETRY_MAX_ATTEMPT}"
+                ));
+                lock(&state).last_error = Some(
+                    "微信输入法热键休眠，自动唤醒重试后仍未响应。可打开一次微信输入法的任意界面（如设置页）恢复其监听后重试"
+                        .to_owned(),
+                );
+                return;
+            }
+            gatt_note(format!(
+                "wetype_check reacted=false attempt={attempt} epoch={epoch} reviving"
+            ));
+            let revive = crate::ime::cycle_wetype_profile();
+            gatt_note(format!(
+                "wetype_revive result={revive:?} attempt={attempt} epoch={epoch}"
+            ));
+            std::thread::sleep(std::time::Duration::from_millis(
+                WETYPE_RETRY_SETTLE_MS[attempt as usize],
+            ));
+            let (still, same_session) = {
+                let snapshot = lock(&state);
+                (
+                    snapshot.voice_state == VoiceSessionState::Streaming,
+                    epoch_ref.load(Ordering::SeqCst) == epoch,
+                )
+            };
+            if !still || !same_session {
+                gatt_note(if same_session {
+                    "wetype_check skipped_retry reason=session_ended".to_owned()
+                } else {
+                    format!(
+                        "wetype_check skipped_retry reason=session_replaced epoch={epoch}"
+                    )
+                });
+                return;
+            }
+            let next_attempt = attempt + 1;
+            let _ = sender.send(WorkerMessage::RetryVoiceChord {
+                attempt: next_attempt,
+                epoch,
+            });
+        })
+        .ok();
 }
 
 fn subscribe(
@@ -1343,6 +1640,17 @@ fn subscribe(
                         },
                         &bytes,
                     );
+                    // 控制通知（遥控器按键活动，含语音会话 0x04）：在此刻
+                    // ——GATT 回调线程，刚被事件唤醒、不经工作线程队列——
+                    // 直接武装 F5 抑制宽限。遥控器闲置后首按时应用自身被
+                    // 后台节流，工作线程的 set_session_active 可拖 ~120ms，
+                    // F5 的 60ms 有界等待等不到它而泄漏（2026-09-05 21:08
+                    // 实证：F5 D 泄漏 3ms 后和弦注入 → 三键拒绝 → 首按
+                    // 失败）。HID F5 正常比 0x04 晚 60-90ms 到达，落在
+                    // 250ms 宽限内被即时吞下。
+                    if matches!(channel, WorkerChannel::Control) {
+                        crate::key_suppressor::arm_grace();
+                    }
                     let message = match channel {
                         WorkerChannel::Audio => WorkerMessage::Audio {
                             connection_generation,
@@ -1591,21 +1899,41 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_failure_cancels_runtime_reconnect_target() {
+    fn cleanup_failure_keeps_retrying_with_scheduled_reconnect() {
+        // 2026-09-05 修正：清理失败不再清空首选设备、不再停止重连——
+        // 记录错误并照常排定下次重连（零介入原则）。
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let mut preferred = Some("device-id".to_owned());
+        let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
         let mut deadline = Some(Instant::now() + Duration::from_secs(2));
         let error = PlatformError::BleCleanup("retained owner".to_owned());
 
-        stop_reconnect_after_cleanup_failure(&state, &mut preferred, &mut deadline, &error);
+        keep_reconnecting_after_cleanup_failure(
+            &state,
+            &mut preferred,
+            &mut backoff,
+            &mut deadline,
+            &error,
+        );
 
-        assert_eq!(preferred, None);
-        assert_eq!(deadline, None);
+        assert_eq!(preferred, Some("device-id".to_owned()));
+        assert!(deadline.is_some());
         let snapshot = lock(&state).clone();
-        assert_eq!(snapshot.phase, ConnectionPhase::Failed);
-        assert!(snapshot
-            .last_error
-            .unwrap()
-            .contains("本次运行已停止自动重连"));
+        assert_eq!(snapshot.phase, ConnectionPhase::Reconnecting);
+        assert_eq!(snapshot.reconnect_attempt, 1);
+        assert!(snapshot.last_error.unwrap().contains("继续重试"));
+
+        // 无首选设备（用户已断开）时：不排定重连，只报失败。
+        let mut preferred_none: Option<String> = None;
+        let mut deadline2 = Some(Instant::now() + Duration::from_secs(2));
+        keep_reconnecting_after_cleanup_failure(
+            &state,
+            &mut preferred_none,
+            &mut backoff,
+            &mut deadline2,
+            &error,
+        );
+        assert_eq!(deadline2, None);
+        assert_eq!(lock(&state).phase, ConnectionPhase::Failed);
     }
 }

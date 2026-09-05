@@ -4,11 +4,11 @@ import {
   disconnectRemote,
   getAudioSnapshot,
   getDiagnosticReport,
+  getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
   saveButtonMappings,
   scanPairedRemotes,
-  startRawInput,
   stopRawInput,
   testButtonMapping,
   type PlatformSnapshot,
@@ -64,6 +64,8 @@ async function openPage(label: string, heading = label): Promise<void> {
 }
 
 async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
+  // 应用默认打开"按键"页（对齐 Mac 页序），先导航到连接与语音完成连接旅程。
+  await openPage("连接与语音");
   await waitFor(
     () => (document.querySelector("h1")?.textContent?.trim() === "连接与语音" ? true : null),
     "连接与语音首页",
@@ -94,10 +96,11 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     () => (document.body.textContent?.includes("CABLE Input (CI Simulation)") ? true : null),
     "仿真音频端点",
   );
+  // 端点列表默认收起（用户每次只用一个）：自动选择后以"更换端点"入口呈现。
   await waitFor(
     () =>
       Array.from(document.querySelectorAll<HTMLButtonElement>("button")).some((button) =>
-        button.textContent?.trim().includes("当前端点"),
+        button.textContent?.trim().includes("更换端点"),
       )
         ? true
         : null,
@@ -110,20 +113,36 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(audio.selectedEndpointId === endpoints[0].id, "仿真 CABLE Input 没有被自动选择");
   steps.push("连接页面首次检测并自动选择唯一的仿真 CABLE Input");
 
-  await openPage("按键");
-  await clickButton("启动监听");
-  await waitFor(() => (buttonWithText("停止监听") ? true : null), "Raw Input 就绪状态");
-  const rawInput = await startRawInput();
+  await openPage("按键", "按键映射");
+  await waitFor(
+    () => (document.body.textContent?.includes("按键监听已就绪") ? true : null),
+    "Raw Input 就绪状态（随应用自愈启动）",
+  );
+  const rawInput = await getRawInputSnapshot();
   assert(rawInput.phase === "ready", "仿真 Raw Input 没有进入就绪");
   assert(rawInput.semanticEdgeCount === 2, "仿真 Raw Input 语义边沿数量异常");
-  steps.push("按键页面通过 IPC 启动并展示 Raw Input 仿真状态");
+  steps.push("按键页面随应用启动展示 Raw Input 仿真状态");
+  assert(
+    document.body.textContent?.includes("语音键"),
+    "按键画布没有渲染语音键卡片",
+  );
+  assert(
+    Array.from(document.querySelectorAll(".mapping-cell")).length === 36,
+    "按键画布没有渲染 12 键 × 3 触发方式的单元格",
+  );
+  steps.push("按键映射画布渲染 12 张按键卡与三列触发单元格");
 
   await saveButtonMappings({
+    enabled: true,
     actions: {
-      ok: { type: "shortcut", chord: { keys: ["left_control", "c"] } },
+      ok: {
+        single: { type: "shortcut", chord: { keys: ["left_control", "c"] } },
+        double: { type: "disabled" },
+        long: { type: "disabled" },
+      },
     },
   });
-  const sendInput = await testButtonMapping("ok");
+  const sendInput = await testButtonMapping("ok", "single");
   assert(sendInput.submittedBatches === 1, "仿真 SendInput 没有提交唯一批次");
   assert(sendInput.submittedEvents === 4, "Ctrl+C 仿真没有生成四个按下/释放事件");
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");

@@ -15,6 +15,7 @@ pub struct DiagnosticReport {
     pub audio: AudioDiagnostic,
     pub raw_input: RawInputDiagnostic,
     pub send_input: SendInputDiagnostic,
+    pub button_mapping: ButtonMappingDiagnostic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -74,6 +75,18 @@ pub struct SendInputDiagnostic {
     pub error_present: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButtonMappingDiagnostic {
+    pub enabled: bool,
+    pub gate_active: bool,
+    pub listener_active: bool,
+    pub swallowed_edges: u64,
+    pub leaked_downs: u64,
+    pub fired_gestures: u64,
+    pub error_present: bool,
+}
+
 impl DiagnosticReport {
     pub fn capture(
         app_version: &str,
@@ -129,6 +142,15 @@ impl DiagnosticReport {
                 submitted_events: send_input.submitted_events,
                 error_present: send_input.last_error.is_some(),
             },
+            button_mapping: ButtonMappingDiagnostic {
+                enabled: platform.button_mapping.enabled,
+                gate_active: platform.button_mapping.gate_active,
+                listener_active: platform.button_mapping.listener_active,
+                swallowed_edges: platform.button_mapping.swallowed_edges,
+                leaked_downs: platform.button_mapping.leaked_downs,
+                fired_gestures: platform.button_mapping.fired_gestures,
+                error_present: platform.button_mapping.last_error.is_some(),
+            },
         }
     }
 }
@@ -171,7 +193,18 @@ mod tests {
                 semantic_edge_count: 2,
                 last_button: Some(RemoteButton::Ok),
                 last_is_pressed: Some(false),
+                active_buttons: Vec::new(),
                 last_error: Some("\\\\?\\HID#private-device-path".to_owned()),
+            },
+            button_mapping: sayall_windows::button_mapping::ButtonMappingSnapshot {
+                enabled: true,
+                gate_active: true,
+                listener_active: true,
+                swallowed_edges: 3,
+                leaked_downs: 1,
+                fired_gestures: 2,
+                last_fired: None,
+                last_error: Some("内部注入细节".to_owned()),
             },
         };
         let send_input = SendInputSnapshot {
@@ -199,6 +232,7 @@ mod tests {
             "private-path",
             "private-device-path",
             "private SendInput backend details",
+            "内部注入细节",
         ] {
             assert!(!json.contains(secret), "diagnostic leaked {secret}");
         }

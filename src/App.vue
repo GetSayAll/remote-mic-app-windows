@@ -8,7 +8,7 @@ import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 
-const activePage = ref<PageId>("connection");
+const activePage = ref<PageId>("buttons");
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
