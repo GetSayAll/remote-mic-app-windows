@@ -406,13 +406,15 @@ fn handle_edges(
         return;
     }
     crate::ble::gatt_note(format!(
-        "map_edges count={} detail={}",
+        "map_edges count={} detail={} gate(sw={} lk={})",
         edges.len(),
         edges
             .iter()
             .map(|edge| format!("{:?}={}", edge.button, edge.is_pressed))
             .collect::<Vec<_>>()
-            .join(",")
+            .join(","),
+        key_gate::swallowed_edge_count(),
+        key_gate::leaked_down_count()
     ));
     let press_count = edges.iter().filter(|edge| edge.is_pressed).count() as u64;
     usage.record_button_presses(press_count);
