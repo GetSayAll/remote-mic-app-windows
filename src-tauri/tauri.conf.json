@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "GetSayAll",
     "category": "Productivity",
     "shortDescription": "把 RC001/RC003 遥控器的语音和按键桥接到 Windows",
@@ -53,6 +54,17 @@
         "installerHooks": "windows/installer-hooks.nsh",
         "uninstallerIcon": "icons/icon.ico",
         "startMenuFolder": "无线麦 SayAll"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM4NDkyQTNFOUNFRTVFRApSV1R0NWM3cG81S0VESEhqSjRNSkdOR05LakxzNnp1R0duVjk4UGw2TTNwMmhlZjUxc0FtUnhHZAo=",
+      "endpoints": [
+        "https://github.com/GetSayAll/remote-mic-app-windows/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }
