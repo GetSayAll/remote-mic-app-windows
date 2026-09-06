@@ -127,8 +127,8 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
             if activate_running(app.exe_names) {
                 return Ok(());
             }
-            let exe = std::env::current_exe()
-                .map_err(|error| format!("获取自身路径失败：{error}"))?;
+            let exe =
+                std::env::current_exe().map_err(|error| format!("获取自身路径失败：{error}"))?;
             return launch_explicit(&exe.to_string_lossy(), None, None);
         }
         if activate_running(app.exe_names) {
@@ -160,8 +160,10 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 if activate_running(&[&exe_name]) {
                     return Ok(());
                 }
-                let arguments = (!resolved.arguments.is_empty()).then_some(resolved.arguments.clone());
-                let dir = (!resolved.working_dir.is_empty()).then_some(resolved.working_dir.clone());
+                let arguments =
+                    (!resolved.arguments.is_empty()).then_some(resolved.arguments.clone());
+                let dir =
+                    (!resolved.working_dir.is_empty()).then_some(resolved.working_dir.clone());
                 return launch_explicit(&resolved.exe_path, arguments.as_deref(), dir.as_deref());
             }
         }
@@ -186,12 +188,12 @@ fn resolve_lnk(lnk_path: &str) -> Option<ResolvedShortcut> {
         .name("sayall-resolve-lnk".to_owned())
         .spawn(move || {
             use windows::core::{Interface, PCWSTR};
+            use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
             use windows::Win32::System::Com::{
                 CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
                 COINIT_APARTMENTTHREADED,
             };
             use windows::Win32::System::Com::{IPersistFile, STGM_READ};
-            use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
             use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
             unsafe {
@@ -199,32 +201,28 @@ fn resolve_lnk(lnk_path: &str) -> Option<ResolvedShortcut> {
                     return None;
                 }
             }
-            let result = (|| {
-                unsafe {
-                    let shell_link: IShellLinkW =
-                        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
-                    let persist: IPersistFile = shell_link.cast().ok()?;
-                    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-                    persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
-                    let mut file_buf = [0u16; 1040];
-                    let mut find_data = WIN32_FIND_DATAW::default();
-                    shell_link
-                        .GetPath(&mut file_buf, &mut find_data, 0)
-                        .ok()?;
-                    let mut args_buf = [0u16; 1040];
-                    shell_link.GetArguments(&mut args_buf).ok()?;
-                    let mut dir_buf = [0u16; 1040];
-                    shell_link.GetWorkingDirectory(&mut dir_buf).ok()?;
-                    let take = |buf: &[u16]| -> String {
-                        let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-                        String::from_utf16_lossy(&buf[..len])
-                    };
-                    Some(ResolvedShortcut {
-                        exe_path: take(&file_buf),
-                        arguments: take(&args_buf),
-                        working_dir: take(&dir_buf),
-                    })
-                }
+            let result = (|| unsafe {
+                let shell_link: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+                let persist: IPersistFile = shell_link.cast().ok()?;
+                let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+                persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+                let mut file_buf = [0u16; 1040];
+                let mut find_data = WIN32_FIND_DATAW::default();
+                shell_link.GetPath(&mut file_buf, &mut find_data, 0).ok()?;
+                let mut args_buf = [0u16; 1040];
+                shell_link.GetArguments(&mut args_buf).ok()?;
+                let mut dir_buf = [0u16; 1040];
+                shell_link.GetWorkingDirectory(&mut dir_buf).ok()?;
+                let take = |buf: &[u16]| -> String {
+                    let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+                    String::from_utf16_lossy(&buf[..len])
+                };
+                Some(ResolvedShortcut {
+                    exe_path: take(&file_buf),
+                    arguments: take(&args_buf),
+                    working_dir: take(&dir_buf),
+                })
             })();
             unsafe {
                 CoUninitialize();
@@ -441,7 +439,11 @@ fn launch_path(path: &str) -> Result<(), String> {
 /// 启动后短暂保活线程：覆盖 shell 异步派生链路（.lnk 场景），避免
 /// 线程退出中止挂起的启动（2026-09-06 实证）。
 #[cfg(windows)]
-fn launch_explicit(target: &str, arguments: Option<&str>, working_dir: Option<&str>) -> Result<(), String> {
+fn launch_explicit(
+    target: &str,
+    arguments: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<(), String> {
     let target = target.to_owned();
     let arguments = arguments.map(str::to_owned);
     let working_dir = working_dir.map(str::to_owned);
@@ -458,9 +460,7 @@ fn launch_explicit(target: &str, arguments: Option<&str>, working_dir: Option<&s
                     windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
                 );
             }
-            let to_wide = |text: &str| -> Vec<u16> {
-                text.encode_utf16().chain(Some(0)).collect()
-            };
+            let to_wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
             let wide = to_wide(&target);
             let verb = to_wide("open");
             let args = arguments.as_deref().map(to_wide);
@@ -512,11 +512,11 @@ pub fn pick_custom_app() -> Option<CustomAppPick> {
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER,
                 COINIT_APARTMENTTHREADED,
             };
+            use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
             use windows::Win32::UI::Shell::{
-                FileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, IFileOpenDialog,
+                FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
                 SIGDN_FILESYSPATH,
             };
-            use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 
             unsafe {
                 let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -535,16 +535,17 @@ pub fn pick_custom_app() -> Option<CustomAppPick> {
                     let _ = dialog.SetTitle(PCWSTR(title.as_ptr()));
                     let filter_spec: Vec<u16> =
                         "*.exe;*.lnk".encode_utf16().chain(Some(0)).collect();
-                    let filter_name: Vec<u16> =
-                        "应用程序 (.exe, .lnk)".encode_utf16().chain(Some(0)).collect();
+                    let filter_name: Vec<u16> = "应用程序 (.exe, .lnk)"
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
                     let filters = [COMDLG_FILTERSPEC {
                         pszName: PCWSTR(filter_name.as_ptr()),
                         pszSpec: PCWSTR(filter_spec.as_ptr()),
                     }];
                     let _ = dialog.SetFileTypes(&filters);
                     let options = dialog.GetOptions().ok()?;
-                    let _ = dialog
-                        .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                    let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
                     if dialog.Show(None).is_err() {
                         return None; // 用户取消
                     }
@@ -604,7 +605,10 @@ mod tests {
         assert!(is_custom_path_target(r"C:\Apps\快捷方式.lnk"));
         assert!(is_custom_path_target("D:/dir/app.exe"));
         assert!(!is_custom_path_target("wechat"), "预设 id 不是路径");
-        assert!(!is_custom_path_target(r"C:\Apps\readme.txt"), "仅支持 exe/lnk");
+        assert!(
+            !is_custom_path_target(r"C:\Apps\readme.txt"),
+            "仅支持 exe/lnk"
+        );
         assert!(!is_custom_path_target("CAppsapp.exe"), "不含路径分隔符");
     }
 
@@ -636,38 +640,34 @@ mod tests {
             .name("sayall-lnk-create".to_owned())
             .spawn(move || {
                 use windows::core::{Interface, PCWSTR};
+                use windows::Win32::System::Com::IPersistFile;
                 use windows::Win32::System::Com::{
                     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
                     COINIT_APARTMENTTHREADED,
                 };
-                use windows::Win32::System::Com::IPersistFile;
                 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
                 unsafe {
                     if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
                         return false;
                     }
                 }
-                let ok = (|| {
-                    unsafe {
-                        let link: IShellLinkW =
-                            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
-                        let target: Vec<u16> =
-                            notepad.to_string_lossy().encode_utf16().chain(Some(0)).collect();
-                        link.SetPath(PCWSTR(target.as_ptr())).ok()?;
-                        let args: Vec<u16> = "/k test".encode_utf16().chain(Some(0)).collect();
-                        link.SetArguments(PCWSTR(args.as_ptr())).ok()?;
-                        let dir: Vec<u16> = r"C:\Windows"
-                            .encode_utf16()
-                            .chain(Some(0))
-                            .collect();
-                        link.SetWorkingDirectory(PCWSTR(dir.as_ptr())).ok()?;
-                        let persist: IPersistFile = link.cast().ok()?;
-                        let lnk_wide: Vec<u16> = lnk.encode_utf16().chain(Some(0)).collect();
-                        persist
-                            .Save(PCWSTR(lnk_wide.as_ptr()), true)
-                            .ok()?;
-                        Some(())
-                    }
+                let ok = (|| unsafe {
+                    let link: IShellLinkW =
+                        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+                    let target: Vec<u16> = notepad
+                        .to_string_lossy()
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                    link.SetPath(PCWSTR(target.as_ptr())).ok()?;
+                    let args: Vec<u16> = "/k test".encode_utf16().chain(Some(0)).collect();
+                    link.SetArguments(PCWSTR(args.as_ptr())).ok()?;
+                    let dir: Vec<u16> = r"C:\Windows".encode_utf16().chain(Some(0)).collect();
+                    link.SetWorkingDirectory(PCWSTR(dir.as_ptr())).ok()?;
+                    let persist: IPersistFile = link.cast().ok()?;
+                    let lnk_wide: Vec<u16> = lnk.encode_utf16().chain(Some(0)).collect();
+                    persist.Save(PCWSTR(lnk_wide.as_ptr()), true).ok()?;
+                    Some(())
                 })()
                 .is_some();
                 unsafe {
@@ -684,13 +684,19 @@ mod tests {
         let _ = std::fs::remove_file(&lnk_path);
         let resolved = resolved.expect("解析测试快捷方式失败");
         assert!(
-            resolved.exe_path.to_ascii_lowercase().contains("notepad.exe"),
+            resolved
+                .exe_path
+                .to_ascii_lowercase()
+                .contains("notepad.exe"),
             "解析出的目标应为记事本，实际：{}",
             resolved.exe_path
         );
         assert_eq!(resolved.arguments, "/k test");
         assert!(
-            resolved.working_dir.to_ascii_lowercase().contains("windows"),
+            resolved
+                .working_dir
+                .to_ascii_lowercase()
+                .contains("windows"),
             "解析出的工作目录应包含 Windows，实际：{}",
             resolved.working_dir
         );
@@ -721,34 +727,34 @@ mod tests {
                     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
                     COINIT_APARTMENTTHREADED,
                 };
-                use windows::Win32::UI::Shell::{
-                    FileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, IFileOpenDialog,
-                };
                 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+                use windows::Win32::UI::Shell::{
+                    FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+                };
 
                 unsafe {
                     if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
                         return false;
                     }
                 }
-                let usable = (|| {
-                    unsafe {
-                        let dialog: IFileOpenDialog =
-                            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-                        let title: Vec<u16> = "测试".encode_utf16().chain(Some(0)).collect();
-                        dialog.SetTitle(PCWSTR(title.as_ptr())).ok()?;
-                        let spec: Vec<u16> = "*.exe;*.lnk".encode_utf16().chain(Some(0)).collect();
-                        let name: Vec<u16> = "应用".encode_utf16().chain(Some(0)).collect();
-                        let filters = [COMDLG_FILTERSPEC {
-                            pszName: PCWSTR(name.as_ptr()),
-                            pszSpec: PCWSTR(spec.as_ptr()),
-                        }];
-                        dialog.SetFileTypes(&filters).ok()?;
-                        dialog
-                            .SetOptions(dialog.GetOptions().ok()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
-                            .ok()?;
-                        Some(())
-                    }
+                let usable = (|| unsafe {
+                    let dialog: IFileOpenDialog =
+                        CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                    let title: Vec<u16> = "测试".encode_utf16().chain(Some(0)).collect();
+                    dialog.SetTitle(PCWSTR(title.as_ptr())).ok()?;
+                    let spec: Vec<u16> = "*.exe;*.lnk".encode_utf16().chain(Some(0)).collect();
+                    let name: Vec<u16> = "应用".encode_utf16().chain(Some(0)).collect();
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(name.as_ptr()),
+                        pszSpec: PCWSTR(spec.as_ptr()),
+                    }];
+                    dialog.SetFileTypes(&filters).ok()?;
+                    dialog
+                        .SetOptions(
+                            dialog.GetOptions().ok()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST,
+                        )
+                        .ok()?;
+                    Some(())
                 })()
                 .is_some();
                 unsafe {
