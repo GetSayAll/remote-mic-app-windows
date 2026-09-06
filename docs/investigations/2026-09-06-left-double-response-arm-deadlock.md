@@ -84,6 +84,33 @@ powershell -ExecutionPolicy Bypass -File Testing\probe-rc003-hid-gatt.ps1 <out> 
 - **VK_SLEEP（电源键）**：孤立按压泄漏原生 VK_SLEEP 时真实 PC 会触发系统
   睡眠（本 VM 已禁睡眠未复现）；电源键被映射时建议后续采用直接归因策略。
 
+## 修复记录（2026-09-06 深夜，第三轮：预设注入链路真机验证）
+
+用户标准修订：配置的动作必须**真实生效**（逐项真机验证），而非按"严格
+单响应"最坏情况理论屏蔽；打开应用对所有可见按键开放。
+
+- **注入链路真机验证探针**（examples/preset_inject_probe.rs）：37 个和弦
+  （全部 34 个预设 + 右Alt 扫描码路径与三键和弦两个自定义代表 + Win+L
+  只规划）经应用真实管线（SendInputRuntime::tap → plan_key_tap →
+  SendInput 批次）注入，WH_KEYBOARD_LL 捕获比对事件序列（DOWN 依序 +
+  逆序 UP、VK、注入标记）。焦点安全：注入目标为探针拉起的空白记事本
+  （Ctrl+字母族排在焦点劫持者 Alt+Tab/Win+D/搜索/截图之前），副作用
+  和弦验证后注入 Esc/还原组合清理。
+- **结果：36 PASS / 0 FAIL / 1 SKIP**（Win+L 只规划比对——真机注入会
+  锁定会话且无法自动恢复；机制由同族 Win 和弦覆盖，锁定效果留待用户
+  单次人工确认）。
+- **通用修饰键的 LL 层形态**（首轮 14 个"FAIL"的真相）：Ctrl/Shift/Alt
+  以扫描码注入（物理身份=左手变体，physical_modifier_identity_is_explicit
+  单测同源），Windows 在 LL 层合成为 VK_LCONTROL/LSHIFT/LMENU（0xA2/
+  0xA0/0xA4）——序列/顺序/配对其余全部一致，注入完全正确。
+- **UI 定稿**：解除 7f265f1 的能力矩阵门控——所有可见按键 × 所有操作
+  （含打开应用、自定义快捷键、双击/长按）开放；RC003/未知型号的返回/
+  音量±保持格子禁用（输入栈不可见，配置无法生效）；武装族（确定/方向/
+  主页）与 TV 编辑器显示"冷首按附带原生动作"信息提示（不门控）。
+  bridge.ts 的 shortcutCapability/identityShortcutByButton 保留为提示与
+  文档依据；openAppCapability 删除（全开放后无意义）。
+- send_input_windows 模块改 pub（探针复用应用真实注入管线）。
+
 ## 修复记录（2026-09-06 晚，第二轮：其他按键）
 
 用户验证菜单键修复通过后要求处理其余按键。按 VK 形态分三类处置（全部

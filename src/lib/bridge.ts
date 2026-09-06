@@ -731,21 +731,18 @@ export const identityShortcutByButton: Partial<Record<RemoteButton, KeyCode>> = 
 export type ShortcutCapability = "all" | "identity" | "none";
 
 /**
- * 按键 × 触发 × 型号 的"保证单响应"能力矩阵（2026-09-06 定稿，依据
- * docs/investigations/2026-09-06-left-double-response-arm-deadlock.md 修复
- * 记录与 2026-09-05-rc003-back-volume-buttons-invisible.md）：
+ * 按键 × 触发 × 型号 的"单响应能力"判定（2026-09-06 定稿；注入链路已由
+ * examples/preset_inject_probe.rs 真机验证 36/36 全部正确——所有可见按键
+ * 的所有配置均真实生效，本矩阵**只用于编辑器的信息提示**，不做门控）：
  *
- * - **直接归因族**（原始键从不泄漏进 OS，吞键门控无需武装）：
- *   电源（VK 0xFF/0x5F）、菜单（VK_APPS）、RC001 的返回/音量±（VK 0xFF
- *   厂商键族）→ 任意触发 × 任意动作均单响应，全开放；
- * - **武装族常见物理 VK**（确定 Enter/方向/Home）：孤立冷首按原始键必
- *   泄漏（结构性武装死锁，公开 API 内不可根除）→ 仅"单击=同键映射"由
- *   泄漏对冲保证单响应；双击/长按的原生泄漏发生在首按边沿（组合语义
- *   尚未可知时原生动作已交付），无法对冲 → 不可配置；
- * - **TV**（OEM_3 `~/~）无对应 KeyCode，同键映射不可表达 → 无保证配置；
- * - **RC003 的返回/音量±**不进入 Windows 输入栈（真机实证零事件）→
- *   不可映射；RC001 上三键以 VK 0xFF 族到达（可见且直接归因）→ 全开放
- *   （RC001 真机验收未做，届时按实证修订）。未知型号按 RC003 保守处理。
+ * - **all**（直接归因族：电源 VK 0xFF/0x5F、菜单 VK_APPS、RC001 返回/
+ *   音量± VK 0xFF 族）：原始键从不泄漏 → 任意配置严格单响应；
+ * - **identity**（武装族常见物理 VK：确定/方向/主页）：孤立冷首按原始键
+ *   必泄漏（结构性武装死锁，公开 API 内不可根除）→ 同键映射由泄漏对冲
+ *   保证单响应，其他映射"配置动作正常执行 + 冷首按附带一次原生动作"；
+ * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与 RC003/未知型号的
+ *   返回/音量±（输入栈不可见，配置无法生效——这部分仍以格子禁用表达，
+ *   见 ButtonsPage 的 UNMAPPABLE_BUTTONS）。
  */
 export function shortcutCapability(
   button: RemoteButton,
@@ -769,16 +766,8 @@ export function shortcutCapability(
     // RC003/未知：返回/音量±输入栈不可见；TV 无同键映射可表达。
     return "none";
   }
-  // 武装族（确定/方向/主页）：仅单击可配同键映射。
+  // 武装族（确定/方向/主页）：单击可配同键映射（对冲单响应）。
   return trigger === "single" ? "identity" : "none";
-}
-
-/**
- * 打开应用能力：仅直接归因族保证单响应——其余按键冷首按会先泄漏原生
- * 动作（如确定键的 Enter）再打开应用，构成双响应。
- */
-export function openAppCapability(button: RemoteButton, model: RemoteModel): boolean {
-  return shortcutCapability(button, "single", model) === "all";
 }
 
 const keyLabels: Record<string, string> = {
