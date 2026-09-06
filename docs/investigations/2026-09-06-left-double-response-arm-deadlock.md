@@ -83,3 +83,29 @@ powershell -ExecutionPolicy Bypass -File Testing\probe-rc003-hid-gatt.ps1 <out> 
   纯函数单测），需随下一轮真机验证一并确认。
 - **VK_SLEEP（电源键）**：孤立按压泄漏原生 VK_SLEEP 时真实 PC 会触发系统
   睡眠（本 VM 已禁睡眠未复现）；电源键被映射时建议后续采用直接归因策略。
+
+## 修复记录（2026-09-06 晚，菜单键报障驱动）
+
+用户报障：菜单键配置映射（Ctrl+V）后，每次按压同时执行原生上下文菜单指令
+与映射动作。remote-capture 日志（Testing/investigation/remote-capture.log
+19:35:39 会话）实证：孤立按压的 VK_APPS（0x5D）DOWN/UP 全部泄漏进 OS
+（RAW 事件 corr=LL 配对可见），映射引擎另行注入 Ctrl+V——与左键双响应同根因
+（武装死锁结构性残留，>4s 间隔必泄漏）。
+
+- **VK_APPS 纳入直接归因族**（key_gate.rs `direct_attributed`）：菜单键与
+  VK 0xFF 厂商键同款无需武装直接吞，孤立首按不再泄漏。理由：物理键盘仅
+  全尺寸键盘右 Ctrl 旁的上下文菜单键会产生 VK_APPS，实际极罕见；映射已
+  配置即表达替换意图（调查档案"待决事项"中 VK_SLEEP 建议的同款策略）。
+  代价：菜单键已映射且门控就绪（遥控器连接中）期间，物理键盘上下文菜单键
+  同样触发映射动作；取消映射即恢复透传。
+- **UP 配对残留修复**（`take_up_pairing`）：UP 沿无论吞放都消费配对条目，
+  上述"后续发现"第一项落地，泄漏污染不再跨按住残留。
+- 单元测试：`menu_vk_apps_is_directly_attributed_without_arming`、
+  `up_edge_consumes_pairing_entry_even_when_leaked`（key_gate.rs，纯函数
+  decide/direct_attributed/take_up_pairing）。
+- VK_SLEEP（电源键）直接归因仍保持待决（用户当前电源键未映射，无报障驱动；
+  若映射电源键需先行决策）。
+- 方向/Enter/Home/TV 等常见物理键 VK 的孤立首按泄漏仍是结构性残留
+  （Helper 轨解决），其中原生动作与映射动作肉眼可见叠加的键：左键（原生
+  左移+映射退格）、TV 键（原生输入 ` + 映射快捷键）、Home/Ok（原生动作
+  常与映射相同故不可见）。
