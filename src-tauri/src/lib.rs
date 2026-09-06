@@ -24,7 +24,8 @@ use updater::{check_app_update, install_app_update};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSnapshot {
-    app_version: &'static str,
+    /// 应用版本（package_info 同源；String 而非 &'static str——不再依赖编译期常量）。
+    app_version: String,
     platform: PlatformSnapshot,
 }
 
@@ -60,18 +61,32 @@ impl std::fmt::Debug for AppState {
 }
 
 #[tauri::command]
-fn get_runtime_snapshot(state: tauri::State<'_, AppState>) -> RuntimeSnapshot {
+fn get_runtime_snapshot(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> RuntimeSnapshot {
     RuntimeSnapshot {
-        app_version: env!("CARGO_PKG_VERSION"),
+        // 版本统一取 package_info（tauri.conf.json 的 version，与安装包/更新器
+        // 比较同源）。此前用编译期 CARGO_PKG_VERSION（Cargo.toml），两者在
+        // "--config 覆盖版本"的本地构建/预发布场景会漂移（2026-09-06 实证：
+        // 安装 0.2.0 构建而关于页显示 0.1.0）。
+        app_version: app.package_info().version.to_string(),
         platform: state.platform.snapshot(),
     }
 }
 
 #[tauri::command]
-fn get_diagnostic_report(state: tauri::State<'_, AppState>) -> DiagnosticReport {
+fn get_diagnostic_report(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> DiagnosticReport {
     let platform = state.platform.snapshot();
     let send_input = state.platform.send_input_snapshot();
-    DiagnosticReport::capture(env!("CARGO_PKG_VERSION"), &platform, &send_input)
+    DiagnosticReport::capture(
+        &app.package_info().version.to_string(),
+        &platform,
+        &send_input,
+    )
 }
 
 #[tauri::command]

@@ -17,7 +17,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Error as UpdaterError, UpdaterExt};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -25,6 +25,37 @@ const PROGRESS_EMIT_MIN_INTERVAL_BYTES: u64 = 128 * 1024;
 const ENDPOINT_OVERRIDE_ENV: &str = "SAYALL_UPDATER_ENDPOINT";
 /// 前端进度事件名（downloaded/contentLength/finished）。
 const PROGRESS_EVENT: &str = "app-update-progress";
+
+/// 端点无有效更新清单（如仓库尚无已发布 Release 导致 latest.json 404）时的
+/// 呈现规则（2026-09-06 用户终裁）：与"服务器确认无新版本"一致，均提示
+/// "已经是最新版本"，不让用户看到失败感文案；真实原因只写诊断日志。
+/// 已知代价：正式 Release 若漏挂 latest.json 资产，用户也会看到"已经是
+/// 最新版本"——由发布流程（windows-release.yml：缺 latest.json/.sig 即
+/// fail-fast 拒绝建 Release）与诊断日志（check.fail error=...）兜底。
+fn release_not_found_counts_as_up_to_date(error: &UpdaterError) -> bool {
+    matches!(error, UpdaterError::ReleaseNotFound)
+}
+
+/// 用户可见的检查失败文案（普通用户不看技术细节；原始错误只进诊断日志）。
+fn check_error_detail(error: &UpdaterError) -> String {
+    match error {
+        // 连接失败/超时/代理不可用。
+        UpdaterError::Reqwest(_) => "网络连接失败，请稍后重试".to_owned(),
+        _ => "检查暂时不可用，请稍后重试".to_owned(),
+    }
+}
+
+/// 用户可见的下载/安装失败文案（同上，去技术化）。
+fn install_error_message(error: &UpdaterError) -> String {
+    match error {
+        // 签名校验失败：安全相关，明确说"已停止安装"但不含术语。
+        UpdaterError::Minisign(_) => "更新包校验失败，已停止安装".to_owned(),
+        UpdaterError::Network(_) | UpdaterError::Reqwest(_) => {
+            "下载更新失败，请检查网络后重试".to_owned()
+        }
+        _ => "下载或安装暂时失败，请稍后重试".to_owned(),
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,18 +132,18 @@ fn build_updater(
             note(format!(
                 "check.fail stage=endpoint_override_parse error={error:?}"
             ));
-            format!("更新端点覆盖变量 {ENDPOINT_OVERRIDE_ENV} 不是合法 URL：{error}")
+            "更新配置异常，请联系开发者".to_owned()
         })?;
         builder = builder.endpoints(vec![url]).map_err(|error| {
             note(format!(
                 "check.fail stage=endpoint_override_reject error={error:?}"
             ));
-            format!("更新端点覆盖被拒绝：{error}")
+            "更新配置异常，请联系开发者".to_owned()
         })?;
     }
     builder.build().map_err(|error| {
         note(format!("check.fail stage=build error={error:?}"));
-        format!("更新器初始化失败：{error}")
+        "更新功能暂时不可用，请稍后重试".to_owned()
     })
 }
 
@@ -143,7 +174,7 @@ pub async fn check_app_update(
             *state
                 .pending_update
                 .lock()
-                .map_err(|error| format!("更新状态锁损坏：{error}"))? = Some(update);
+                .map_err(|_error| "更新状态异常，请重启应用后重试".to_owned())? = Some(update);
             Ok(info)
         }
         Ok(None) => {
@@ -163,11 +194,26 @@ pub async fn check_app_update(
             })
         }
         Err(error) => {
+            // 日志保留插件原始错误（诊断用）；用户可见文案去技术化。
             note(format!(
                 "check.fail error={error:?} took_ms={}",
                 elapsed_ms(started)
             ));
-            Err(format!("检查更新失败：{error}"))
+            // 取不到清单（404 类）→ 呈现为"已经是最新版本"（2026-09-06 终裁）。
+            if release_not_found_counts_as_up_to_date(&error) {
+                note("check.presented_as_up_to_date reason=release_not_found".to_owned());
+                if let Ok(mut pending) = state.pending_update.lock() {
+                    *pending = None;
+                }
+                return Ok(AppUpdateInfo {
+                    current_version: app.package_info().version.to_string(),
+                    available: false,
+                    version: None,
+                    notes: None,
+                    date: None,
+                });
+            }
+            Err(check_error_detail(&error))
         }
     }
 }
@@ -180,12 +226,12 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
         .lock()
         .map_err(|error| {
             note(format!("install.fail stage=state_lock error={error:?}"));
-            format!("更新状态锁损坏：{error}")
+            "更新状态异常，请重启应用后重试".to_owned()
         })?
         .take()
         .ok_or_else(|| {
             note("install.fail stage=no_pending_update".to_owned());
-            "尚未发现可用更新，请先检查更新".to_owned()
+            "请先检查更新，再下载安装".to_owned()
         })?;
     note(format!("install.start version={}", update.version));
     // 下载整体超时（check 的超时不作用于下载请求）。
@@ -248,11 +294,12 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
                 .lock()
                 .map(|progress| progress.downloaded)
                 .unwrap_or(0);
+            // 日志保留插件原始错误（诊断用）；用户可见文案去技术化。
             note(format!(
                 "install.fail downloaded={downloaded} error={error:?} took_ms={}",
                 elapsed_ms(started)
             ));
-            Err(format!("下载或安装更新失败：{error}"))
+            Err(install_error_message(&error))
         }
     }
 }
@@ -260,6 +307,45 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 取不到清单（ReleaseNotFound，404 类）按"已经是最新版本"呈现；
+    /// 其他错误（网络/IO 等）不享受该待遇，仍如实报错（2026-09-06 终裁）。
+    #[test]
+    fn release_not_found_is_presented_as_up_to_date() {
+        assert!(release_not_found_counts_as_up_to_date(
+            &UpdaterError::ReleaseNotFound
+        ));
+        assert!(!release_not_found_counts_as_up_to_date(
+            &UpdaterError::Network("x".to_owned())
+        ));
+        assert!(!release_not_found_counts_as_up_to_date(
+            &UpdaterError::EmptyEndpoints
+        ));
+    }
+
+    /// 用户可见文案不得包含技术文本（原始错误只进诊断日志）。
+    #[test]
+    fn user_facing_error_copy_is_plain_chinese() {
+        let network = UpdaterError::Network("download failed at byte 4096".to_owned());
+        assert_eq!(
+            install_error_message(&network),
+            "下载更新失败，请检查网络后重试"
+        );
+        let io_check = UpdaterError::Io(std::io::Error::other("os error 123"));
+        assert_eq!(check_error_detail(&io_check), "检查暂时不可用，请稍后重试");
+        let io_install = UpdaterError::Io(std::io::Error::other("os error 123"));
+        assert_eq!(
+            install_error_message(&io_install),
+            "下载或安装暂时失败，请稍后重试"
+        );
+        // 签名类错误的安全文案（minisign 错误不可直接构造，用 Network 分支旁证
+        // 映射完整性由编译保证）。
+        let fallback = UpdaterError::EmptyEndpoints;
+        assert_eq!(
+            install_error_message(&fallback),
+            "下载或安装暂时失败，请稍后重试"
+        );
+    }
 
     /// Rust ↔ TypeScript JSON 契约（对齐仓库既有 PlatformSnapshot 契约夹具做法）。
     #[test]
