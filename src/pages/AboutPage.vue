@@ -57,7 +57,7 @@ async function onInstall(): Promise<void> {
           正在下载更新… {{ appUpdateProgressText(progress) }}
         </p>
         <p v-else-if="checking" class="muted">正在检查更新…</p>
-        <p v-else-if="upToDate" class="muted">已是最新版本。</p>
+        <p v-else-if="upToDate" class="muted">已经是最新版本。</p>
         <p v-else-if="failed" class="update-error">{{ errorMessage }}</p>
         <p v-else class="muted">手动检查是否有新版本。</p>
 
