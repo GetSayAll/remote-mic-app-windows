@@ -309,7 +309,7 @@ const browserSnapshot: RuntimeSnapshot = {
   },
 };
 
-function isTauriRuntime(): boolean {
+export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
@@ -503,6 +503,7 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
   if (!isTauriRuntime()) {
     // 浏览器预览：展示完整预设表（仅渲染验证）。
     return [
+      { id: "sayall", name: "无线麦", installed: true },
       { id: "wechat", name: "微信", installed: true },
       { id: "edge", name: "Edge 浏览器", installed: true },
       { id: "chrome", name: "Chrome 浏览器", installed: true },
@@ -634,7 +635,7 @@ const voiceHotkeyKeyLabels: Record<string, string> = {
   escape: "Esc",
   space: "空格",
   tab: "Tab",
-  apps: "菜单键",
+  apps: "右键菜单",
 };
 
 function voiceHotkeyKeyLabel(code: string): string {
@@ -728,6 +729,9 @@ const keyLabels: Record<string, string> = {
   volume_mute: "静音",
   volume_down: "音量−",
   volume_up: "音量+",
+  media_play_pause: "播放/暂停",
+  media_prev: "上一首",
+  media_next: "下一首",
   f1: "F1",
   f2: "F2",
   f3: "F3",
@@ -767,7 +771,33 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
   if (action.type === "open_app") {
-    return `打开${presetAppNames.get(action.target) ?? action.target}`;
+    const known = presetAppNames.get(action.target);
+    if (known) return `打开${known}`;
+    // 自定义应用：target 为路径，取文件名去扩展名作展示名。
+    const base = action.target.split(/[\\/]/).pop() ?? action.target;
+    const stem = base.replace(/\.(exe|lnk)$/i, "");
+    return `打开${stem || action.target}`;
   }
   return chordLabel(action.chord);
+}
+
+/** 自定义应用选择结果（pick_custom_app 命令返回）。 */
+export interface CustomAppPick {
+  name: string;
+  path: string;
+}
+
+/**
+ * 打开原生文件选择器选择自定义应用（.exe/.lnk）。
+ * 用户取消或浏览器预览环境返回 null。
+ */
+export async function pickCustomApp(): Promise<CustomAppPick | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  try {
+    return await invoke<CustomAppPick | null>("pick_custom_app");
+  } catch {
+    return null;
+  }
 }

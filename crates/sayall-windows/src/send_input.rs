@@ -58,6 +58,9 @@ pub enum KeyCode {
     VolumeMute,
     VolumeDown,
     VolumeUp,
+    MediaPrev,
+    MediaNext,
+    MediaPlayPause,
     A,
     B,
     C,
@@ -189,6 +192,9 @@ impl KeyCode {
             Self::VolumeMute => 0xAD,
             Self::VolumeDown => 0xAE,
             Self::VolumeUp => 0xAF,
+            Self::MediaPrev => 0xB1,
+            Self::MediaNext => 0xB0,
+            Self::MediaPlayPause => 0xB3,
         }
     }
 
@@ -223,6 +229,9 @@ impl KeyCode {
                 | Self::VolumeMute
                 | Self::VolumeDown
                 | Self::VolumeUp
+                | Self::MediaPrev
+                | Self::MediaNext
+                | Self::MediaPlayPause
                 | Self::RightControl
                 | Self::RightAlt
                 | Self::LeftWindows
