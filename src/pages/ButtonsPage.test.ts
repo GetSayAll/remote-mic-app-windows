@@ -109,8 +109,18 @@ const runtime: RuntimeSnapshot = {
   },
 };
 
-async function mountPage(): Promise<VueWrapper> {
-  const wrapper = mount(ButtonsPage, { props: { runtime } });
+async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promise<VueWrapper> {
+  const snapshot =
+    model === "rc003"
+      ? runtime
+      : {
+          ...runtime,
+          platform: {
+            ...runtime.platform,
+            connection: { ...runtime.platform.connection, remoteModel: model },
+          },
+        };
+  const wrapper = mount(ButtonsPage, { props: { runtime: snapshot } });
   await vi.waitFor(() => {
     if (!edgeHandler || !gestureHandler) throw new Error("事件订阅未完成");
   });
@@ -235,5 +245,85 @@ describe("buttons mapping page", () => {
         throw new Error("手势触发后格子未出现闪烁反馈");
       }
     });
+  });
+
+  /** 编辑器内按标签找 chip 并返回其禁用态。 */
+  function chipState(wrapper: VueWrapper, label: string): boolean {
+    const chip = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((element) => element.text().includes(label));
+    expect(chip, `未找到 chip：${label}`).toBeDefined();
+    return (chip!.element as HTMLButtonElement).disabled;
+  }
+
+  async function openCell(
+    wrapper: VueWrapper,
+    cardLabel: string,
+    triggerIndex: number,
+  ): Promise<void> {
+    const card = wrapper.findAll(".mapping-card").find((c) => c.text().includes(cardLabel));
+    expect(card, `未找到卡片：${cardLabel}`).toBeDefined();
+    await card!.findAll(".mapping-cell")[triggerIndex]!.trigger("click");
+    expect(wrapper.find(".mapping-editor").exists()).toBe(true);
+  }
+
+  it("能力矩阵门控：确定·单击仅同键映射（Enter）可配，其余操作禁用", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "确定", 0);
+    expect(chipState(wrapper, "Enter")).toBe(false);
+    expect(chipState(wrapper, "Home")).toBe(true);
+    expect(chipState(wrapper, "空格")).toBe(true);
+    expect(chipState(wrapper, "退格")).toBe(true);
+    expect(chipState(wrapper, "粘贴")).toBe(true);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(true);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).toContain("同键映射");
+    // 禁用按键始终可用（受限格的恢复路径）。
+    const disable = wrapper.findAll("button").find((b) => b.text() === "禁用按键");
+    expect((disable!.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("能力矩阵门控：确定·双击/长按仅可禁用（原生泄漏无法对冲组合语义）", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "确定", 1);
+    expect(chipState(wrapper, "Enter")).toBe(true);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(true);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(true);
+  });
+
+  it("能力矩阵门控：TV 无任何可配动作（无同键映射可表达）", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "TV", 0);
+    expect(chipState(wrapper, "Enter")).toBe(true);
+    expect(chipState(wrapper, "静音")).toBe(true);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(true);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(true);
+  });
+
+  it("能力矩阵门控：电源/菜单全开放（直接归因族冷首按不泄漏）", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "电源", 2);
+    expect(chipState(wrapper, "Esc")).toBe(false);
+    expect(chipState(wrapper, "截图")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+  });
+
+  it("型号感知：RC003 返回/音量±格子禁用，RC001 开放可编辑", async () => {
+    const rc003 = await mountPage("rc003");
+    const backCell = rc003
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    expect((backCell.element as HTMLButtonElement).disabled).toBe(true);
+
+    const rc001 = await mountPage("rc001");
+    const backCellRc001 = rc001
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    expect((backCellRc001.element as HTMLButtonElement).disabled).toBe(false);
+    await backCellRc001.trigger("click");
+    expect(chipState(rc001, "Enter")).toBe(false);
   });
 });

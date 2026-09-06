@@ -3,13 +3,64 @@ import {
   audioPhaseLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
+  identityShortcutByButton,
+  openAppCapability,
   openVbCableDownloadPage,
   remoteModelLabel,
+  shortcutCapability,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
   type ConnectionPhase,
   type DiagnosticReport,
 } from "./bridge";
+
+describe("mapping capability matrix（保证单响应能力矩阵）", () => {
+  it("直接归因族（电源/菜单/RC001 返回与音量±）全部触发与动作开放", () => {
+    expect(shortcutCapability("power", "long", "rc003")).toBe("all");
+    expect(shortcutCapability("power", "single", "rc003")).toBe("all");
+    expect(shortcutCapability("menu", "double", "rc003")).toBe("all");
+    expect(shortcutCapability("back", "single", "rc001")).toBe("all");
+    expect(shortcutCapability("volume_up", "long", "rc001")).toBe("all");
+    expect(shortcutCapability("volume_down", "double", "rc001")).toBe("all");
+    expect(openAppCapability("power", "rc003")).toBe(true);
+    expect(openAppCapability("menu", "rc003")).toBe(true);
+    expect(openAppCapability("back", "rc001")).toBe(true);
+  });
+
+  it("武装族（确定/方向/主页）仅单击可配同键映射，双击/长按不可配", () => {
+    expect(shortcutCapability("ok", "single", "rc003")).toBe("identity");
+    expect(shortcutCapability("ok", "double", "rc003")).toBe("none");
+    expect(shortcutCapability("ok", "long", "rc003")).toBe("none");
+    expect(shortcutCapability("up", "single", "rc003")).toBe("identity");
+    expect(shortcutCapability("down", "single", "rc001")).toBe("identity");
+    expect(shortcutCapability("left", "double", "rc001")).toBe("none");
+    expect(shortcutCapability("right", "long", "rc001")).toBe("none");
+    expect(shortcutCapability("home", "single", "rc003")).toBe("identity");
+    expect(openAppCapability("ok", "rc003")).toBe(false);
+    expect(openAppCapability("up", "rc003")).toBe(false);
+  });
+
+  it("TV 无同键映射可表达；RC003 的返回/音量±输入栈不可见；未知型号按 RC003 保守", () => {
+    expect(shortcutCapability("tv", "single", "rc003")).toBe("none");
+    expect(shortcutCapability("tv", "long", "rc001")).toBe("none");
+    expect(shortcutCapability("back", "single", "rc003")).toBe("none");
+    expect(shortcutCapability("volume_up", "single", "rc003")).toBe("none");
+    expect(shortcutCapability("volume_down", "single", "unknown")).toBe("none");
+    expect(shortcutCapability("back", "single", "unknown")).toBe("none");
+    expect(openAppCapability("tv", "rc003")).toBe(false);
+  });
+
+  it("identityShortcutByButton 对齐 Rust native_key（泄漏对冲判定依据）", () => {
+    expect(identityShortcutByButton.ok).toBe("enter");
+    expect(identityShortcutByButton.up).toBe("up");
+    expect(identityShortcutByButton.down).toBe("down");
+    expect(identityShortcutByButton.left).toBe("left");
+    expect(identityShortcutByButton.right).toBe("right");
+    expect(identityShortcutByButton.home).toBe("home");
+    expect(identityShortcutByButton.tv).toBeUndefined();
+    expect(identityShortcutByButton.power).toBeUndefined();
+  });
+});
 
 describe("connection phase presentation", () => {
   it("covers every serialized Rust connection phase", () => {
