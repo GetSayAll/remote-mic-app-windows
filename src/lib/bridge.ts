@@ -714,6 +714,73 @@ export function buttonTriggerLabel(trigger: ButtonTrigger): string {
   }[trigger];
 }
 
+/**
+ * 武装族按键的"同键映射"表（对齐 crates/sayall-windows/src/send_input.rs
+ * 的 native_key）：映射动作与原生动作相同时，映射引擎的泄漏对冲保证
+ * 冷首按单响应（原生动作已交付，引擎跳过注入）。
+ */
+export const identityShortcutByButton: Partial<Record<RemoteButton, KeyCode>> = {
+  ok: "enter",
+  up: "up",
+  down: "down",
+  left: "left",
+  right: "right",
+  home: "home",
+};
+
+export type ShortcutCapability = "all" | "identity" | "none";
+
+/**
+ * 按键 × 触发 × 型号 的"保证单响应"能力矩阵（2026-09-06 定稿，依据
+ * docs/investigations/2026-09-06-left-double-response-arm-deadlock.md 修复
+ * 记录与 2026-09-05-rc003-back-volume-buttons-invisible.md）：
+ *
+ * - **直接归因族**（原始键从不泄漏进 OS，吞键门控无需武装）：
+ *   电源（VK 0xFF/0x5F）、菜单（VK_APPS）、RC001 的返回/音量±（VK 0xFF
+ *   厂商键族）→ 任意触发 × 任意动作均单响应，全开放；
+ * - **武装族常见物理 VK**（确定 Enter/方向/Home）：孤立冷首按原始键必
+ *   泄漏（结构性武装死锁，公开 API 内不可根除）→ 仅"单击=同键映射"由
+ *   泄漏对冲保证单响应；双击/长按的原生泄漏发生在首按边沿（组合语义
+ *   尚未可知时原生动作已交付），无法对冲 → 不可配置；
+ * - **TV**（OEM_3 `~/~）无对应 KeyCode，同键映射不可表达 → 无保证配置；
+ * - **RC003 的返回/音量±**不进入 Windows 输入栈（真机实证零事件）→
+ *   不可映射；RC001 上三键以 VK 0xFF 族到达（可见且直接归因）→ 全开放
+ *   （RC001 真机验收未做，届时按实证修订）。未知型号按 RC003 保守处理。
+ */
+export function shortcutCapability(
+  button: RemoteButton,
+  trigger: ButtonTrigger,
+  model: RemoteModel,
+): ShortcutCapability {
+  if (
+    button === "power" ||
+    button === "menu" ||
+    (model === "rc001" &&
+      (button === "back" || button === "volume_up" || button === "volume_down"))
+  ) {
+    return "all";
+  }
+  if (
+    button === "back" ||
+    button === "volume_up" ||
+    button === "volume_down" ||
+    button === "tv"
+  ) {
+    // RC003/未知：返回/音量±输入栈不可见；TV 无同键映射可表达。
+    return "none";
+  }
+  // 武装族（确定/方向/主页）：仅单击可配同键映射。
+  return trigger === "single" ? "identity" : "none";
+}
+
+/**
+ * 打开应用能力：仅直接归因族保证单响应——其余按键冷首按会先泄漏原生
+ * 动作（如确定键的 Enter）再打开应用，构成双响应。
+ */
+export function openAppCapability(button: RemoteButton, model: RemoteModel): boolean {
+  return shortcutCapability(button, "single", model) === "all";
+}
+
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
   backspace: "退格",
