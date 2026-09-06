@@ -239,6 +239,21 @@ export interface PairedRemote {
   isSupportedCandidate: boolean;
 }
 
+/** 应用内更新（Rust updater command 契约，camelCase 对齐 src-tauri/src/updater.rs）。 */
+export interface AppUpdateInfo {
+  currentVersion: string;
+  available: boolean;
+  version: string | null;
+  notes: string | null;
+  date: string | null;
+}
+
+export interface AppUpdateProgress {
+  downloaded: number;
+  contentLength: number | null;
+  finished: boolean;
+}
+
 const browserSnapshot: RuntimeSnapshot = {
   appVersion: "0.1.0",
   platform: {
@@ -563,6 +578,44 @@ export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyCh
     throw new Error("当前是浏览器预览，无法保存按住说话快捷键");
   }
   return invoke<KeyChord | null>("set_voice_hold_hotkey", { hotkey });
+}
+
+/** 检查应用更新；浏览器预览下返回"无更新"占位（不发起网络请求）。 */
+export async function checkAppUpdate(): Promise<AppUpdateInfo> {
+  if (!isTauriRuntime()) {
+    return {
+      currentVersion: browserSnapshot.appVersion,
+      available: false,
+      version: null,
+      notes: null,
+      date: null,
+    };
+  }
+  return invoke<AppUpdateInfo>("check_app_update");
+}
+
+/** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */
+export async function installAppUpdate(): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法安装更新");
+  }
+  await invoke("install_app_update");
+}
+
+/** 订阅更新下载进度；浏览器预览下为空订阅。 */
+export async function subscribeAppUpdateProgress(
+  handler: (progress: AppUpdateProgress) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<AppUpdateProgress>("app-update-progress", (event) =>
+    handler(event.payload),
+  );
+  return () => {
+    void unlisten();
+  };
 }
 
 const voiceHotkeyKeyLabels: Record<string, string> = {

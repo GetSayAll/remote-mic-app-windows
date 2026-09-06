@@ -1,0 +1,86 @@
+name: Windows Release
+
+# 正式发布管线（应用内更新通道）：
+# 1. push 形如 v0.2.0 的 tag 触发；
+# 2. 用仓库 Secret TAURI_SIGNING_PRIVATE_KEY 构建 minisign 签名的 NSIS 安装器
+#    （缺 Secret 直接失败——禁止用一次性密钥发布正式更新包）；
+# 3. 生成 latest.json（updater 静态清单）并把资产重命名为纯 ASCII 文件名；
+# 4. 创建 DRAFT Release 并挂载资产——人工核对后点 Publish 才对全量用户生效
+#    （releases/latest/download/latest.json 只统计已发布的稳定 Release）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify updater signing secret is present
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "缺少 TAURI_SIGNING_PRIVATE_KEY 仓库 Secret：正式 Release 必须用正式更新签名密钥构建（私钥丢失即无法再向存量用户推送更新，请先在 GitHub Secrets 配置并本地备份私钥）"
+          }
+          Write-Host "正式更新签名密钥已就绪"
+
+      - name: Build signed NSIS installer
+        run: pnpm tauri build --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 密码变量缺失时 tauri build 会交互式等待输入（无 TTY 的 CI 上挂死，
+          # 2026-09-06 本机矩阵实验实证）；正式密钥为无密码密钥，Secret 未配置时
+          # 此处求值为空字符串，实测空字符串 + 无密码密钥可免交互完成签名。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Generate updater manifest and stage release assets
+        shell: pwsh
+        run: ./scripts/generate-updater-manifest.ps1 -Tag $env:GITHUB_REF_NAME
+
+      - name: Show staged assets before release (delete-free verification)
+        shell: pwsh
+        run: |
+          Write-Host "将上传到 Draft Release $env:GITHUB_REF_NAME 的资产清单："
+          Get-ChildItem -LiteralPath "artifacts/windows-release" -File |
+            ForEach-Object { Write-Host ("- {0} ({1} bytes)" -f $_.Name, $_.Length) }
+
+      - name: Create draft GitHub release with assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = Get-ChildItem -LiteralPath "artifacts/windows-release" -File | ForEach-Object { $_.FullName }
+          $notes = @"
+          无线麦 SayAll Windows 版 $tag
+
+          - 应用内更新通道资产：latest.json + SayAll-Windows-x64-setup.exe(.sig)（minisign 签名，应用内检查更新自动验签安装）
+          - 校验和见 SHA256SUMS.txt
+          - Authenticode 代码签名仍待建立（首次运行可能触发 SmartScreen 提示）
+          - 人工核对后 Publish 本草稿：Publish 即对全量用户开启本版本更新（releases/latest 指向最新已发布稳定版）
+          "@
+          gh release create $tag --draft --title "无线麦 SayAll Windows $tag" --notes $notes @assets
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create 失败（exit $LASTEXITCODE；若 Release 已存在请人工核对后处理，本流程不做任何删除/覆盖）"
+          }
+          Write-Host "Draft Release $tag 已创建并挂载资产，等待人工核对与 Publish"
