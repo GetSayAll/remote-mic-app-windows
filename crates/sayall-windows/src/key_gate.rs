@@ -10,8 +10,8 @@
 //!   双源汇入引擎的 `ButtonStateMerger` 并集去重。
 //! - 归因（遥控器 vs 物理键盘）：LL 钩子事件无设备信息。两条通路：
 //!   1. 直接归因族：VK 0xFF 族（厂商键：返回/电源/音量）物理键盘不会产生；
-//!      VK_APPS（0x5D 菜单键，2026-09-06 纳入）物理键盘仅全尺寸键盘右 Ctrl
-//!      旁的上下文菜单键、实际极罕见。两者无需武装直接吞（见
+//!      VK_APPS（0x5D 菜单键）与 VK_SLEEP（0x5F 电源键睡眠形态，均
+//!      2026-09-06 纳入）物理键盘实际极罕见。三者无需武装直接吞（见
 //!      docs/investigations/2026-09-06-left-double-response-arm-deadlock.md
 //!      的结构性武装死锁：孤立按压首沿在 60ms 有界等待内无法武装必泄漏）；
 //!   2. 其余 VK（方向/Enter/Home/TV/睡眠/音量 VK）需"武装"：Raw Input
@@ -42,9 +42,9 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, SetTimer, SetWindowsHookExW,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, SetWindowsHookExW,
         TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-        WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
+        PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -60,10 +60,10 @@ mod windows_impl {
     /// 续期）全部正确吞下。代价：遥控器按键后 4s 内物理键盘同 VK 按压
     /// 会被误吞（用户已确认接受）。
     ///
-    /// 直接归因族（[`direct_attributed`]，VK 0xFF + VK_APPS）不受此死锁
-    /// 约束：无需武装即可吞，孤立首按也不泄漏。方向/Enter/Home/TV 等
+    /// 直接归因族（[`direct_attributed`]，VK 0xFF + VK_APPS + VK_SLEEP）
+    /// 不受此死锁约束：无需武装即可吞，孤立首按也不泄漏。方向/Enter/Home/TV 等
     /// 常见物理键 VK 不能直接归因，>4s 间隔的孤立首按泄漏仍是结构性残留
-    /// （Helper 轨解决）。
+    /// （Helper 轨解决；同键映射的泄漏由映射引擎对冲，见 button_mapping.rs）。
     const ARM_GRACE_MS: u64 = 4_000;
     /// 链头 bump 的线程消息（WM_APP 私有区，与 key_suppressor 错开）。
     const WM_HOOK_BUMP: u32 = WM_APP + 0x61;
@@ -115,8 +115,12 @@ mod windows_impl {
     ///   代价：菜单键已映射且门控就绪期间，物理键盘的上下文菜单键按压
     ///   同样被吞并触发映射动作（用户配置映射即表达替换意图；取消映射
     ///   即恢复透传）。
+    /// - VK_SLEEP 0x5F（电源键 VK_SLEEP 形态，2026-09-06 纳入）：物理键盘
+    ///   罕见睡眠键；孤立按压泄漏原生 VK_SLEEP 会直接触发系统睡眠
+    ///   （2026-09-06 调查档案待决事项的落地，本机 RC003 电源键实测走
+    ///   VK 0xFF+make 0x5E 形态，本条覆盖其余固件形态）。
     pub fn direct_attributed(vk_code: u32) -> bool {
-        vk_code == 0xFF || vk_code == 0x5D
+        vk_code == 0xFF || vk_code == 0x5D || vk_code == 0x5F
     }
 
     fn armed(button: RemoteButton) -> bool {
@@ -285,6 +289,12 @@ mod windows_impl {
 
     fn hook_thread(thread_id_tx: mpsc::Sender<u64>) {
         unsafe {
+            // 先创建线程消息队列再通知启动完成（2026-09-06 单测隔离运行实证）：
+            // Drop 的 PostThreadMessageW(WM_QUIT) 在目标线程尚无消息队列时投递
+            // 失败且不报错 → join() 永久挂起（应用退出挂死的同源竞态）。
+            // PeekMessageW(PM_NOREMOVE) 强制创建队列，保证 WM_QUIT 必达。
+            let mut probe = MSG::default();
+            let _ = PeekMessageW(&mut probe, None, 0, 0, PM_NOREMOVE);
             let instance: HINSTANCE = match GetModuleHandleW(None) {
                 Ok(module) => module.into(),
                 Err(_) => return,
@@ -345,6 +355,14 @@ mod windows_impl {
                 .spawn(move || hook_thread(thread_id_tx))
                 .ok();
             let thread_id = thread_id_rx.recv().unwrap_or(0);
+            // 有界等待钩子线程完成安装（GATE_ACTIVE=true）再返回：调用方
+            // （含 is_gate_thread_alive 判定与 Drop 的 WM_QUIT 投递）不应
+            // 观察到半初始化的门控。钩子安装失败时超时返回（调用方看到
+            // 死门控，fail-visible）。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while !GATE_ACTIVE.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             KeyGate { worker, thread_id }
         }
 
@@ -519,6 +537,8 @@ mod tests {
         assert!(!windows_impl::direct_attributed(0xC0));
         assert!(!windows_impl::direct_attributed(0x0D));
         assert!(windows_impl::direct_attributed(0xFF));
+        // 电源键 VK_SLEEP 形态：罕见物理键，直接归因（防孤立泄漏触发系统睡眠）。
+        assert!(windows_impl::direct_attributed(0x5F));
     }
 
     #[cfg(windows)]
