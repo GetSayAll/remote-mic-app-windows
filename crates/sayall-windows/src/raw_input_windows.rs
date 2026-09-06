@@ -31,7 +31,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// 监听器观察到遥控器活动后武装 key_gate 的宽限（毫秒）。
-const GATE_ARM_GRACE_MS: u64 = 250;
+/// 2026-09-06 与 key_gate::ARM_GRACE_MS 一致提升为 4s：RC003 键盘孪生
+/// 孤立按压首沿泄漏后由此武装，4s 内后续按压不再泄漏（修复左键双响应，
+/// 见 docs/investigations/2026-09-06-left-double-response-arm-deadlock.md）。
+const GATE_ARM_GRACE_MS: u64 = 4_000;
 /// WM_INPUT_DEVICE_CHANGE 的 wParam 取值（windows crate 未导出）：
 /// GIDC_ARRIVAL=1（设备接入）、GIDC_REMOVAL=2（设备移除）。
 const GIDC_ARRIVAL: u32 = 1;
