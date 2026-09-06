@@ -488,6 +488,7 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
   if (!isTauriRuntime()) {
     // 浏览器预览：展示完整预设表（仅渲染验证）。
     return [
+      { id: "sayall", name: "无线麦", installed: true },
       { id: "wechat", name: "微信", installed: true },
       { id: "edge", name: "Edge 浏览器", installed: true },
       { id: "chrome", name: "Chrome 浏览器", installed: true },
