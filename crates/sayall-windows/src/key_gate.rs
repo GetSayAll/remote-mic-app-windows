@@ -47,7 +47,15 @@ mod windows_impl {
     const BOUNDED_WAIT_MS: u64 = 60;
     /// 监听器观察到遥控器按键活动后的武装宽限（覆盖同一次物理按键的
     /// HID 报文→键盘事件跨线程交接与紧邻的重复事件）。
-    const ARM_GRACE_MS: u64 = 250;
+    ///
+    /// 2026-09-06 提升至 4s（用户选定的修复策略，见
+    /// docs/investigations/2026-09-06-left-double-response-arm-deadlock.md）：
+    /// RC003 键盘孪生事件在钩子 60ms 有界等待内结构性无法武装（WM_INPUT
+    /// 在钩子链返回后才投递，hw_swallow_probe 实证），孤立按压的首沿必
+    /// 泄漏一次并经由 Raw Input 武装；此后 4s 内的后续按压（含吞键自我
+    /// 续期）全部正确吞下。代价：遥控器按键后 4s 内物理键盘同 VK 按压
+    /// 会被误吞（用户已确认接受）。
+    const ARM_GRACE_MS: u64 = 4_000;
     /// 链头 bump 的线程消息（WM_APP 私有区，与 key_suppressor 错开）。
     const WM_HOOK_BUMP: u32 = WM_APP + 0x61;
     const BUMP_TIMER_ID: usize = 0x6A71;
