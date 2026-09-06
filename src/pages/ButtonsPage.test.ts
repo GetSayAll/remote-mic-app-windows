@@ -147,7 +147,7 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).toContain("确定 · 单击");
   });
 
-  it("applies a preset to the editing target and persists on save", async () => {
+  it("applies a preset to the editing target and auto-persists (对齐 Mac 即时保存)", async () => {
     const wrapper = await mountPage();
     const powerCard = wrapper
       .findAll(".mapping-card")
@@ -156,17 +156,13 @@ describe("buttons mapping page", () => {
 
     const editor = wrapper.find(".mapping-editor");
     expect(editor.text()).toContain("电源 · 长按");
+    // 点击 Esc 预设即自动保存（无需保存按钮）。
     const chips = editor.findAll(".chip");
     const escapeChip = chips.find((chip) => chip.text() === "Esc");
     await escapeChip!.trigger("click");
-
-    const saveButton = wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("保存映射"));
-    await saveButton!.trigger("click");
     await vi.waitFor(() => {
       if (vi.mocked(saveButtonMappings).mock.calls.length === 0) {
-        throw new Error("保存未触发");
+        throw new Error("自动保存未触发");
       }
     });
     const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
@@ -174,6 +170,22 @@ describe("buttons mapping page", () => {
     };
     expect(saved.actions.power!.long.type).toBe("shortcut");
     expect(saved.actions.power!.long.chord!.keys).toEqual(["escape"]);
+
+    // 禁用按键按钮：禁用当前格并自动保存。
+    const disableButton = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "禁用按键");
+    expect(disableButton).toBeDefined();
+    await disableButton!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length < 2) {
+        throw new Error("禁用后未自动保存");
+      }
+    });
+    const disabledSaved = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+      actions: Record<string, { long: { type: string } }>;
+    };
+    expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
   it("highlights the card for a pressed physical button and clears it on release", async () => {

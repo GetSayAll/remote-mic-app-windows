@@ -87,14 +87,5 @@ async function onInstall(): Promise<void> {
         </div>
       </div>
     </article>
-
-    <article class="card">
-      <h2>当前边界</h2>
-      <div class="setting-list compact">
-        <div class="setting-row"><strong>产品设计基准</strong><span>无线麦原版</span></div>
-        <div class="setting-row"><strong>支持设备</strong><span>RC001 / RC003（待真机验收）</span></div>
-        <div class="setting-row"><strong>状态</strong><span>{{ runtime?.platform.verificationStatus ?? "读取中" }}</span></div>
-      </div>
-    </article>
   </section>
 </template>
