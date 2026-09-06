@@ -87,7 +87,15 @@ export interface KeyChord {
 
 export type ButtonAction =
   | { type: "disabled" }
-  | { type: "shortcut"; chord: KeyChord };
+  | { type: "shortcut"; chord: KeyChord }
+  | { type: "open_app"; target: string };
+
+/** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
+export interface PresetAppInfo {
+  id: string;
+  name: string;
+  installed: boolean;
+}
 
 /** 每键三列（单击/双击/长按），对齐 Mac 原版 ButtonTrigger。 */
 export interface ButtonActions {
@@ -241,7 +249,7 @@ const browserSnapshot: RuntimeSnapshot = {
     wasapiReady: false,
     rawInputReady: false,
     sendInputReady: false,
-    verificationStatus: "浏览器预览仅展示界面，不代表 Windows 或 RC001/RC003 已通过",
+    verificationStatus: "浏览器预览仅展示界面，不代表真机已通过",
     connection: {
       phase: "idle",
       remoteName: null,
@@ -369,7 +377,7 @@ export function formatDiagnosticReport(
 
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法调用 Windows 蓝牙 API");
+    throw new Error("当前是浏览器预览，无法读取已配对设备");
   }
   return invoke<PairedRemote[]>("scan_paired_remotes");
 }
@@ -383,21 +391,21 @@ export async function getConnectionSnapshot(): Promise<ConnectionSnapshot> {
 
 export async function connectRemote(deviceId: string): Promise<ConnectionSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法连接 Windows 蓝牙设备");
+    throw new Error("当前是浏览器预览，无法连接遥控器");
   }
   return invoke<ConnectionSnapshot>("connect_remote", { deviceId });
 }
 
 export async function disconnectRemote(): Promise<ConnectionSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法断开 Windows 蓝牙设备");
+    throw new Error("当前是浏览器预览，无法断开遥控器");
   }
   return invoke<ConnectionSnapshot>("disconnect_remote");
 }
 
 export async function listAudioEndpoints(): Promise<AudioEndpoint[]> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法枚举 Windows 音频端点");
+    throw new Error("当前是浏览器预览，无法读取音频设备");
   }
   return invoke<AudioEndpoint[]>("list_audio_endpoints");
 }
@@ -411,7 +419,7 @@ export async function getAudioSnapshot(): Promise<AudioSnapshot> {
 
 export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法选择 Windows 音频端点");
+    throw new Error("当前是浏览器预览，无法选择音频设备");
   }
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
 }
@@ -433,14 +441,14 @@ export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
 
 export async function startRawInput(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法启动 Windows Raw Input");
+    throw new Error("当前是浏览器预览，无法启动按键监听");
   }
   return invoke<RawInputSnapshot>("start_raw_input");
 }
 
 export async function stopRawInput(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法停止 Windows Raw Input");
+    throw new Error("当前是浏览器预览，无法停止按键监听");
   }
   return invoke<RawInputSnapshot>("stop_raw_input");
 }
@@ -454,7 +462,7 @@ export async function getButtonMappings(): Promise<ButtonMappings> {
 
 export async function saveButtonMappings(mappings: ButtonMappings): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法保存 Windows 按键映射");
+    throw new Error("当前是浏览器预览，无法保存按键映射");
   }
   return invoke<ButtonMappings>("save_button_mappings", { mappings });
 }
@@ -471,9 +479,25 @@ export async function testButtonMapping(
   trigger: ButtonTrigger,
 ): Promise<SendInputSnapshot> {
   if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法执行 Windows SendInput");
+    throw new Error("当前是浏览器预览，无法执行按键测试");
   }
   return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger });
+}
+
+export async function listPresetApps(): Promise<PresetAppInfo[]> {
+  if (!isTauriRuntime()) {
+    // 浏览器预览：展示完整预设表（仅渲染验证）。
+    return [
+      { id: "wechat", name: "微信", installed: true },
+      { id: "edge", name: "Edge 浏览器", installed: true },
+      { id: "chrome", name: "Chrome 浏览器", installed: true },
+      { id: "notepad", name: "记事本", installed: true },
+      { id: "calc", name: "计算器", installed: true },
+      { id: "explorer", name: "文件资源管理器", installed: true },
+      { id: "netease_music", name: "网易云音乐", installed: true },
+    ];
+  }
+  return invoke<PresetAppInfo[]>("list_preset_apps");
 }
 
 export async function getButtonMappingSnapshot(): Promise<ButtonMappingSnapshot> {
@@ -576,14 +600,14 @@ export function voiceHoldHotkeyLabel(hotkey: KeyChord | null): string {
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
   return {
     idle: "尚未连接",
-    connecting: "正在打开遥控器",
-    discovering: "正在发现 ATVV 服务与特征",
-    awaiting_capabilities: "正在确认 ATVV 能力",
-    ready: "BLE / ATVV 已就绪",
-    streaming: "正在接收遥控器语音",
+    connecting: "正在连接遥控器",
+    discovering: "正在连接遥控器",
+    awaiting_capabilities: "正在确认语音功能",
+    ready: "已连接",
+    streaming: "正在接收语音",
     draining: "正在结束本次语音",
-    reconnecting: "正在等待重新连接遥控器",
-    suspended: "Windows 已进入睡眠",
+    reconnecting: "正在等待遥控器重连",
+    suspended: "电脑已进入睡眠",
     disconnected: "遥控器已断开",
     failed: "连接失败",
   }[phase];
@@ -591,20 +615,20 @@ export function connectionPhaseLabel(phase: ConnectionPhase): string {
 
 export function remoteModelLabel(model: RemoteModel): string {
   return {
-    rc001: "小米蓝牙遥控器 2（RC001）",
-    rc003: "小米蓝牙遥控器 2 Pro（RC003）",
-    unknown: "型号待设备确认",
+    rc001: "小米蓝牙遥控器 2",
+    rc003: "小米蓝牙遥控器 2 Pro",
+    unknown: "连接后显示",
   }[model];
 }
 
 export function audioPhaseLabel(phase: AudioPhase): string {
   return {
-    unconfigured: "尚未选择输出端点",
-    ready: "WASAPI 已就绪",
-    streaming: "正在写入 Windows 音频端点",
-    draining: "正在排空 Windows 音频缓冲",
-    failed: "WASAPI 输出失败",
-    unsupported: "当前环境不支持 WASAPI",
+    unconfigured: "尚未选择设备",
+    ready: "已就绪",
+    streaming: "正在写入语音",
+    draining: "正在结束",
+    failed: "语音设备出错",
+    unsupported: "当前环境不支持语音设备",
   }[phase];
 }
 
@@ -677,7 +701,20 @@ export function chordLabel(chord: KeyChord): string {
   return chord.keys.map(keyLabel).join(" + ");
 }
 
+/** 预设应用显示名（页面加载 listPresetApps 后更新；测试可注入）。 */
+const presetAppNames: Map<string, string> = new Map();
+
+export function registerPresetAppNames(apps: Array<{ id: string; name: string }>): void {
+  presetAppNames.clear();
+  for (const app of apps) {
+    presetAppNames.set(app.id, app.name);
+  }
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
+  if (action.type === "open_app") {
+    return `打开${presetAppNames.get(action.target) ?? action.target}`;
+  }
   return chordLabel(action.chord);
 }

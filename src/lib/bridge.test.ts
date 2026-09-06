@@ -29,23 +29,23 @@ describe("connection phase presentation", () => {
 
     expect(phases.map(connectionPhaseLabel)).toEqual([
       "尚未连接",
-      "正在打开遥控器",
-      "正在发现 ATVV 服务与特征",
-      "正在确认 ATVV 能力",
-      "BLE / ATVV 已就绪",
-      "正在接收遥控器语音",
+      "正在连接遥控器",
+      "正在连接遥控器",
+      "正在确认语音功能",
+      "已连接",
+      "正在接收语音",
       "正在结束本次语音",
-      "正在等待重新连接遥控器",
-      "Windows 已进入睡眠",
+      "正在等待遥控器重连",
+      "电脑已进入睡眠",
       "遥控器已断开",
       "连接失败",
     ]);
   });
 
   it("展示 RC001、RC003 和未知型号", () => {
-    expect(remoteModelLabel("rc001")).toBe("小米蓝牙遥控器 2（RC001）");
-    expect(remoteModelLabel("rc003")).toBe("小米蓝牙遥控器 2 Pro（RC003）");
-    expect(remoteModelLabel("unknown")).toBe("型号待设备确认");
+    expect(remoteModelLabel("rc001")).toBe("小米蓝牙遥控器 2");
+    expect(remoteModelLabel("rc003")).toBe("小米蓝牙遥控器 2 Pro");
+    expect(remoteModelLabel("unknown")).toBe("连接后显示");
   });
 
   it("covers every serialized Rust audio phase", () => {
@@ -59,12 +59,12 @@ describe("connection phase presentation", () => {
     ];
 
     expect(phases.map(audioPhaseLabel)).toEqual([
-      "尚未选择输出端点",
-      "WASAPI 已就绪",
-      "正在写入 Windows 音频端点",
-      "正在排空 Windows 音频缓冲",
-      "WASAPI 输出失败",
-      "当前环境不支持 WASAPI",
+      "尚未选择设备",
+      "已就绪",
+      "正在写入语音",
+      "正在结束",
+      "语音设备出错",
+      "当前环境不支持语音设备",
     ]);
   });
 });
