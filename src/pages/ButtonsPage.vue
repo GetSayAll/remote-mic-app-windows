@@ -9,6 +9,7 @@ import {
   getButtonMappingSnapshot,
   getButtonMappings,
   listPresetApps,
+  pickCustomApp,
   registerPresetAppNames,
   resetButtonMappings,
   saveButtonMappings,
@@ -228,6 +229,33 @@ function openAppTargetOf(button: RemoteButton, trigger: ButtonTrigger): string |
   return action.type === "open_app" ? action.target : null;
 }
 
+/** 预设 id 集合（区分预设与自定义路径目标）。 */
+const presetAppIds = computed(() => new Set(presetApps.value.map((app) => app.id)));
+
+/** 已在映射中使用过的自定义应用（路径目标，去重；跨格可复选）。 */
+const customApps = computed<Array<{ path: string; name: string }>>(() => {
+  const seen = new Map<string, string>();
+  for (const actions of Object.values(mappings.value.actions)) {
+    for (const action of Object.values(actions)) {
+      if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
+        const base = action.target.split(/[\\/]/).pop() ?? action.target;
+        const name = base.replace(/\.(exe|lnk)$/i, "") || action.target;
+        if (!seen.has(action.target)) {
+          seen.set(action.target, name);
+        }
+      }
+    }
+  }
+  return [...seen.entries()].map(([path, name]) => ({ path, name }));
+});
+
+/** 打开原生文件选择器添加自定义应用，并应用到当前编辑格。 */
+async function addCustomApp(): Promise<void> {
+  const pick = await pickCustomApp();
+  if (!pick || !editingTarget.value) return;
+  applyAction({ type: "open_app", target: pick.path });
+}
+
 function selectButton(button: RemoteButton): void {
   selectedButton.value = button;
 }
@@ -252,6 +280,11 @@ function applyAction(action: ButtonAction): void {
   statusMessage.value = "映射已修改，点击保存后生效";
 }
 
+/**
+ * 预设快捷键分组（对齐 Mac `ButtonActionCategory` 的 basicKeys/systemAndMedia，
+ * 并按 Windows 语义适配：Home/End/PageUp/PageDown 属低频导航键、Mac 端基础
+ * 按键列表亦无此四键，故移除；复制族从系统组移入基础组，对齐 Mac basicKeys）。
+ */
 const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: KeyCode[] }> }> = [
   {
     label: "基础按键",
@@ -261,32 +294,40 @@ const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: 
       { label: "空格", keys: ["space"] },
       { label: "Tab", keys: ["tab"] },
       { label: "退格", keys: ["backspace"] },
+      { label: "删除", keys: ["delete"] },
       { label: "↑", keys: ["up"] },
       { label: "↓", keys: ["down"] },
       { label: "←", keys: ["left"] },
       { label: "→", keys: ["right"] },
-      { label: "Home", keys: ["home"] },
-      { label: "End", keys: ["end"] },
-      { label: "PageUp", keys: ["page_up"] },
-      { label: "PageDown", keys: ["page_down"] },
-      { label: "Delete", keys: ["delete"] },
-      { label: "菜单键", keys: ["apps"] },
+      { label: "复制", keys: ["control", "c"] },
+      { label: "粘贴", keys: ["control", "v"] },
+      { label: "剪切", keys: ["control", "x"] },
+      { label: "全选", keys: ["control", "a"] },
+      { label: "撤销", keys: ["control", "z"] },
+      { label: "重做", keys: ["control", "y"] },
+      { label: "查找", keys: ["control", "f"] },
+      { label: "保存", keys: ["control", "s"] },
+      { label: "发送", keys: ["control", "enter"] },
+      { label: "换行", keys: ["shift", "enter"] },
+      { label: "右键菜单", keys: ["apps"] },
+      { label: "刷新", keys: ["f5"] },
     ],
   },
   {
     label: "系统与媒体",
     items: [
+      { label: "切换窗口", keys: ["alt", "tab"] },
       { label: "显示桌面", keys: ["left_windows", "d"] },
+      { label: "关闭窗口", keys: ["control", "w"] },
       { label: "锁定", keys: ["left_windows", "l"] },
-      { label: "复制", keys: ["control", "c"] },
-      { label: "粘贴", keys: ["control", "v"] },
-      { label: "剪切", keys: ["control", "x"] },
-      { label: "撤销", keys: ["control", "z"] },
-      { label: "全选", keys: ["control", "a"] },
+      { label: "搜索", keys: ["left_windows", "s"] },
+      { label: "截图", keys: ["left_windows", "shift", "s"] },
       { label: "静音", keys: ["volume_mute"] },
       { label: "音量+", keys: ["volume_up"] },
       { label: "音量−", keys: ["volume_down"] },
-      { label: "F5", keys: ["f5"] },
+      { label: "播放/暂停", keys: ["media_play_pause"] },
+      { label: "上一首", keys: ["media_prev"] },
+      { label: "下一首", keys: ["media_next"] },
     ],
   },
 ];
@@ -608,7 +649,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
-        <img src="/RC003-remote-photo.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
+        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"
@@ -732,7 +773,7 @@ onUnmounted(() => {
           <button class="secondary-button" type="button" @click="editingTarget = null">关闭</button>
         </div>
       </div>
-      <div class="preset-groups">
+      <div class="action-sections">
         <button
           class="chip"
           :class="{ selected: actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"
@@ -741,56 +782,75 @@ onUnmounted(() => {
         >
           关闭（保持原始按键）
         </button>
-        <button
-          v-for="group in PRESET_GROUPS"
-          :key="group.label"
-          class="chip group-label"
-          type="button"
-          disabled
-        >
-          {{ group.label }}
-        </button>
-        <button v-if="presetApps.length" class="chip group-label" type="button" disabled>
-          打开应用
-        </button>
-      </div>
-      <div v-if="presetApps.length" class="preset-grid">
-        <button
-          v-for="app in presetApps"
-          :key="app.id"
-          class="chip"
-          :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.id }"
-          type="button"
-          title="已运行则切到该应用窗口，未运行则启动"
-          @click="applyAction({ type: 'open_app', target: app.id })"
-        >
-          {{ app.name }}
-        </button>
-      </div>
-      <div v-for="group in PRESET_GROUPS" :key="group.label" class="preset-grid">
-        <button
-          v-for="preset in group.items"
-          :key="preset.label"
-          class="chip"
-          :class="{ selected: isActivePreset(preset.keys) }"
-          type="button"
-          @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
-        >
-          {{ preset.label }}
-        </button>
-      </div>
-      <div class="custom-shortcut-row">
-        <button
-          class="chip"
-          :class="{ selected: capturingShortcut }"
-          type="button"
-          @click="capturingShortcut = !capturingShortcut"
-        >
-          {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
-        </button>
-        <span v-if="capturingShortcut" class="capture-display">
-          {{ captureDisplay.length ? captureDisplay.join(" + ") : "请按下快捷键组合" }}
-        </span>
+
+        <section v-for="group in PRESET_GROUPS" :key="group.label" class="action-section">
+          <h4 class="action-section-title">{{ group.label }}</h4>
+          <div class="preset-grid">
+            <button
+              v-for="preset in group.items"
+              :key="preset.label"
+              class="chip"
+              :class="{ selected: isActivePreset(preset.keys) }"
+              type="button"
+              @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
+            >
+              {{ preset.label }}
+            </button>
+          </div>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">打开应用</h4>
+          <div class="preset-grid">
+            <button
+              v-for="app in presetApps"
+              :key="app.id"
+              class="chip"
+              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.id }"
+              type="button"
+              title="已运行则切到该应用窗口，未运行则启动"
+              @click="applyAction({ type: 'open_app', target: app.id })"
+            >
+              {{ app.name }}
+            </button>
+            <button
+              v-for="app in customApps"
+              :key="app.path"
+              class="chip"
+              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
+              type="button"
+              title="自定义应用（按路径启动）"
+              @click="applyAction({ type: 'open_app', target: app.path })"
+            >
+              {{ app.name }}
+            </button>
+            <button
+              class="chip add-app"
+              type="button"
+              title="从本机选择任意程序或快捷方式"
+              @click="addCustomApp"
+            >
+              ＋ 添加应用
+            </button>
+          </div>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">自定义</h4>
+          <div class="custom-shortcut-row">
+            <button
+              class="chip"
+              :class="{ selected: capturingShortcut }"
+              type="button"
+              @click="capturingShortcut = !capturingShortcut"
+            >
+              {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
+            </button>
+            <span v-if="capturingShortcut" class="capture-display">
+              {{ captureDisplay.length ? captureDisplay.join(" + ") : "请按下快捷键组合" }}
+            </span>
+          </div>
+        </section>
       </div>
       <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
         未配置双击与长按时，单击在按下瞬间触发（零延迟）；返回/方向/音量键按住会连续触发。
