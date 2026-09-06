@@ -646,9 +646,6 @@ export const buttonLabels: Record<RemoteButton, string> = {
   power: "电源",
   volume_mute: "静音",
   volume_up: "音量+",
-  media_play_pause: "播放/暂停",
-  media_prev: "上一首",
-  media_next: "下一首",
   volume_down: "音量−",
 };
 
