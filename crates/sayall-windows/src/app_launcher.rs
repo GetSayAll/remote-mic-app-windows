@@ -113,9 +113,12 @@ fn is_custom_path_target(target: &str) -> bool {
         && (lower.ends_with(".exe") || lower.ends_with(".lnk"))
 }
 
-/// 激活已运行的应用窗口；未运行则启动。支持预设 id 与自定义路径
-/// （.exe：按文件名探测已运行实例；.lnk：直接 ShellExecuteW 启动，
-/// 已运行检测不适用于快捷方式目标，属 v1 已知边界）。
+/// 激活已运行的应用窗口；未运行则启动。支持预设 id 与自定义路径。
+/// 自定义 .exe：按文件名探测已运行实例后直接启动；
+/// 自定义 .lnk：先解析快捷方式（目标 exe/参数/工作目录），按解析结果
+/// 激活或直接启动——不经 shell 的 .lnk 异步链路（短命线程退出会中止
+/// 该链路，2026-09-06 实证：ShellExecuteW 对 .lnk 返回成功但应用未启动）；
+/// 解析失败退回原路径 ShellExecuteW。
 #[cfg(windows)]
 pub fn activate_or_launch(id: &str) -> Result<(), String> {
     if let Some(app) = preset_app(id) {
@@ -126,7 +129,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
             }
             let exe = std::env::current_exe()
                 .map_err(|error| format!("获取自身路径失败：{error}"))?;
-            return launch_path(&exe.to_string_lossy());
+            return launch_explicit(&exe.to_string_lossy(), None, None);
         }
         if activate_running(app.exe_names) {
             return Ok(());
@@ -138,16 +141,98 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
         if !path.exists() {
             return Err(format!("应用不存在：{id}"));
         }
-        let exe_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if id.to_ascii_lowercase().ends_with(".exe") && activate_running(&[&exe_name]) {
-            return Ok(());
+        if id.to_ascii_lowercase().ends_with(".exe") {
+            let exe_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if activate_running(&[&exe_name]) {
+                return Ok(());
+            }
+            return launch_explicit(id, None, None);
+        }
+        if let Some(resolved) = resolve_lnk(id) {
+            if !resolved.exe_path.is_empty() {
+                let exe_name = std::path::Path::new(&resolved.exe_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if activate_running(&[&exe_name]) {
+                    return Ok(());
+                }
+                let arguments = (!resolved.arguments.is_empty()).then_some(resolved.arguments.clone());
+                let dir = (!resolved.working_dir.is_empty()).then_some(resolved.working_dir.clone());
+                return launch_explicit(&resolved.exe_path, arguments.as_deref(), dir.as_deref());
+            }
         }
         return launch_path(id);
     }
     Err(format!("未知预设应用：{id}"))
+}
+
+/// 快捷方式解析结果（.lnk → 目标 exe/参数/工作目录）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedShortcut {
+    exe_path: String,
+    arguments: String,
+    working_dir: String,
+}
+
+/// 解析 .lnk 快捷方式（STA COM 线程内 IShellLinkW + IPersistFile）。
+#[cfg(windows)]
+fn resolve_lnk(lnk_path: &str) -> Option<ResolvedShortcut> {
+    let path = lnk_path.to_owned();
+    let handle = std::thread::Builder::new()
+        .name("sayall-resolve-lnk".to_owned())
+        .spawn(move || {
+            use windows::core::{Interface, PCWSTR};
+            use windows::Win32::System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_APARTMENTTHREADED,
+            };
+            use windows::Win32::System::Com::{IPersistFile, STGM_READ};
+            use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+            use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+            unsafe {
+                if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+                    return None;
+                }
+            }
+            let result = (|| {
+                unsafe {
+                    let shell_link: IShellLinkW =
+                        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+                    let persist: IPersistFile = shell_link.cast().ok()?;
+                    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+                    persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+                    let mut file_buf = [0u16; 1040];
+                    let mut find_data = WIN32_FIND_DATAW::default();
+                    shell_link
+                        .GetPath(&mut file_buf, &mut find_data, 0)
+                        .ok()?;
+                    let mut args_buf = [0u16; 1040];
+                    shell_link.GetArguments(&mut args_buf).ok()?;
+                    let mut dir_buf = [0u16; 1040];
+                    shell_link.GetWorkingDirectory(&mut dir_buf).ok()?;
+                    let take = |buf: &[u16]| -> String {
+                        let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+                        String::from_utf16_lossy(&buf[..len])
+                    };
+                    Some(ResolvedShortcut {
+                        exe_path: take(&file_buf),
+                        arguments: take(&args_buf),
+                        working_dir: take(&dir_buf),
+                    })
+                }
+            })();
+            unsafe {
+                CoUninitialize();
+            }
+            result
+        })
+        .ok()?;
+    handle.join().ok().flatten()
 }
 
 #[cfg(not(windows))]
@@ -349,7 +434,17 @@ fn launch_path(_path: &str) -> Result<(), String> {
 /// 按完整路径启动（短命 COM 线程内 ShellExecuteW，支持 .exe/.lnk）。
 #[cfg(windows)]
 fn launch_path(path: &str) -> Result<(), String> {
-    let target = path.to_owned();
+    launch_explicit(path, None, None)
+}
+
+/// 按完整路径启动（可带参数与工作目录；短命 COM 线程内 ShellExecuteW）。
+/// 启动后短暂保活线程：覆盖 shell 异步派生链路（.lnk 场景），避免
+/// 线程退出中止挂起的启动（2026-09-06 实证）。
+#[cfg(windows)]
+fn launch_explicit(target: &str, arguments: Option<&str>, working_dir: Option<&str>) -> Result<(), String> {
+    let target = target.to_owned();
+    let arguments = arguments.map(str::to_owned);
+    let working_dir = working_dir.map(str::to_owned);
     let handle = std::thread::Builder::new()
         .name("sayall-app-launch-path".to_owned())
         .spawn(move || {
@@ -363,18 +458,33 @@ fn launch_path(path: &str) -> Result<(), String> {
                     windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
                 );
             }
-            let wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
-            let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+            let to_wide = |text: &str| -> Vec<u16> {
+                text.encode_utf16().chain(Some(0)).collect()
+            };
+            let wide = to_wide(&target);
+            let verb = to_wide("open");
+            let args = arguments.as_deref().map(to_wide);
+            let dir = working_dir.as_deref().map(to_wide);
+            let args_ptr = args
+                .as_ref()
+                .map(|v| PCWSTR(v.as_ptr()))
+                .unwrap_or(PCWSTR::null());
+            let dir_ptr = dir
+                .as_ref()
+                .map(|v| PCWSTR(v.as_ptr()))
+                .unwrap_or(PCWSTR::null());
             let result = unsafe {
                 ShellExecuteW(
                     None,
                     PCWSTR(verb.as_ptr()),
                     PCWSTR(wide.as_ptr()),
-                    None,
-                    None,
+                    args_ptr,
+                    dir_ptr,
                     SW_SHOWNORMAL,
                 )
             };
+            // 保活：给 shell 的异步派生留出完成窗口。
+            std::thread::sleep(std::time::Duration::from_millis(80));
             unsafe {
                 windows::Win32::System::Com::CoUninitialize();
             }
@@ -503,6 +613,87 @@ mod tests {
     fn activate_or_launch_rejects_unknown_non_path() {
         let result = activate_or_launch("nonexistent-app");
         assert!(result.is_err(), "未知预设 id 应报错");
+    }
+
+    /// .lnk 解析往返：COM 创建临时快捷方式（指向记事本，带参数与工作
+    /// 目录）→ resolve_lnk 解析 → 断言三元组一致。
+    #[test]
+    #[cfg(windows)]
+    fn lnk_resolution_round_trips() {
+        let notepad = {
+            let root = std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+            root.join("System32").join("notepad.exe")
+        };
+        if !notepad.exists() {
+            // 裁剪系统可能无记事本：跳过而非失败（探测行为=按机器如实报告）。
+            return;
+        }
+        let lnk_path = std::env::temp_dir().join("sayall-lnk-roundtrip-test.lnk");
+        let lnk = lnk_path.to_string_lossy().to_string();
+        let created = std::thread::Builder::new()
+            .name("sayall-lnk-create".to_owned())
+            .spawn(move || {
+                use windows::core::{Interface, PCWSTR};
+                use windows::Win32::System::Com::{
+                    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                    COINIT_APARTMENTTHREADED,
+                };
+                use windows::Win32::System::Com::IPersistFile;
+                use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+                unsafe {
+                    if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+                        return false;
+                    }
+                }
+                let ok = (|| {
+                    unsafe {
+                        let link: IShellLinkW =
+                            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+                        let target: Vec<u16> =
+                            notepad.to_string_lossy().encode_utf16().chain(Some(0)).collect();
+                        link.SetPath(PCWSTR(target.as_ptr())).ok()?;
+                        let args: Vec<u16> = "/k test".encode_utf16().chain(Some(0)).collect();
+                        link.SetArguments(PCWSTR(args.as_ptr())).ok()?;
+                        let dir: Vec<u16> = r"C:\Windows"
+                            .encode_utf16()
+                            .chain(Some(0))
+                            .collect();
+                        link.SetWorkingDirectory(PCWSTR(dir.as_ptr())).ok()?;
+                        let persist: IPersistFile = link.cast().ok()?;
+                        let lnk_wide: Vec<u16> = lnk.encode_utf16().chain(Some(0)).collect();
+                        persist
+                            .Save(PCWSTR(lnk_wide.as_ptr()), true)
+                            .ok()?;
+                        Some(())
+                    }
+                })()
+                .is_some();
+                unsafe {
+                    CoUninitialize();
+                }
+                ok
+            })
+            .expect("spawn create thread failed")
+            .join()
+            .expect("create thread panicked");
+        assert!(created, "创建测试快捷方式失败");
+
+        let resolved = resolve_lnk(&lnk_path.to_string_lossy());
+        let _ = std::fs::remove_file(&lnk_path);
+        let resolved = resolved.expect("解析测试快捷方式失败");
+        assert!(
+            resolved.exe_path.to_ascii_lowercase().contains("notepad.exe"),
+            "解析出的目标应为记事本，实际：{}",
+            resolved.exe_path
+        );
+        assert_eq!(resolved.arguments, "/k test");
+        assert!(
+            resolved.working_dir.to_ascii_lowercase().contains("windows"),
+            "解析出的工作目录应包含 Windows，实际：{}",
+            resolved.working_dir
+        );
     }
 
     #[test]
