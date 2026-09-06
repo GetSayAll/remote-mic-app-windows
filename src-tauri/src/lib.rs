@@ -240,6 +240,12 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
+/// 原生文件选择器：选择自定义应用（.exe/.lnk）。用户取消返回 null。
+#[tauri::command]
+fn pick_custom_app() -> Option<sayall_windows::app_launcher::CustomAppPick> {
+    sayall_windows::app_launcher::pick_custom_app()
+}
+
 #[tauri::command]
 fn get_button_mapping_snapshot(
     state: tauri::State<'_, AppState>,
@@ -551,6 +557,7 @@ pub fn run() {
         reset_button_mappings,
         test_button_mapping,
         list_preset_apps,
+        pick_custom_app,
         get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
@@ -577,6 +584,7 @@ pub fn run() {
         reset_button_mappings,
         test_button_mapping,
         list_preset_apps,
+        pick_custom_app,
         get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,

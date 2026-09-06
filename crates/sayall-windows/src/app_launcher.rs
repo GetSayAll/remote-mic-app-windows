@@ -27,8 +27,14 @@ pub struct PresetApp {
     pub exe_names: &'static [&'static str],
 }
 
-/// 预设应用表（对齐 Mac 预设 + Windows 常见项）。
+/// 预设应用表（对齐 Mac 预设 + Windows 常见项）。无线麦自身排首位
+/// （对齐 Mac `PresetApplication.remoteMic`，恒为已安装）。
 pub const PRESET_APPS: &[PresetApp] = &[
+    PresetApp {
+        id: "sayall",
+        name: "无线麦",
+        exe_names: &["sayall-windows-app.exe"],
+    },
     PresetApp {
         id: "wechat",
         name: "微信",
@@ -71,6 +77,7 @@ pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
 }
 
 /// 探测预设应用安装状态（System32 直存或 App Paths 注册表命中）。
+/// 无线麦自身恒为已安装（映射运行时它必然在运行）。
 #[cfg(windows)]
 pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     PRESET_APPS
@@ -78,7 +85,7 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
         .map(|app| PresetAppInfo {
             id: app.id.to_owned(),
             name: app.name.to_owned(),
-            installed: app.exe_names.iter().any(|exe| exe_resolvable(exe)),
+            installed: app.id == "sayall" || app.exe_names.iter().any(|exe| exe_resolvable(exe)),
         })
         .collect()
 }
@@ -88,14 +95,59 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     Vec::new()
 }
 
-/// 激活已运行的预设应用窗口；未运行则启动。
+/// 自定义应用选择结果（`pick_custom_app` 命令返回）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomAppPick {
+    /// 展示名（文件名去扩展名）。
+    pub name: String,
+    /// 完整路径（.exe/.lnk）。作为 `OpenApp.target` 持久化。
+    pub path: String,
+}
+
+/// 判断 OpenApp 目标是否为自定义路径（非预设 id）。
+#[cfg(windows)]
+fn is_custom_path_target(target: &str) -> bool {
+    let lower = target.to_ascii_lowercase();
+    (lower.contains('\\') || lower.contains('/'))
+        && (lower.ends_with(".exe") || lower.ends_with(".lnk"))
+}
+
+/// 激活已运行的应用窗口；未运行则启动。支持预设 id 与自定义路径
+/// （.exe：按文件名探测已运行实例；.lnk：直接 ShellExecuteW 启动，
+/// 已运行检测不适用于快捷方式目标，属 v1 已知边界）。
 #[cfg(windows)]
 pub fn activate_or_launch(id: &str) -> Result<(), String> {
-    let app = preset_app(id).ok_or_else(|| format!("未知预设应用：{id}"))?;
-    if activate_running(app.exe_names) {
-        return Ok(());
+    if let Some(app) = preset_app(id) {
+        if app.id == "sayall" {
+            // 自身：恒已运行；激活失败（窗口隐藏等）时用自身 exe 路径重启拉起。
+            if activate_running(app.exe_names) {
+                return Ok(());
+            }
+            let exe = std::env::current_exe()
+                .map_err(|error| format!("获取自身路径失败：{error}"))?;
+            return launch_path(&exe.to_string_lossy());
+        }
+        if activate_running(app.exe_names) {
+            return Ok(());
+        }
+        return launch_new(app.exe_names);
     }
-    launch_new(app.exe_names)
+    if is_custom_path_target(id) {
+        let path = std::path::Path::new(id);
+        if !path.exists() {
+            return Err(format!("应用不存在：{id}"));
+        }
+        let exe_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if id.to_ascii_lowercase().ends_with(".exe") && activate_running(&[&exe_name]) {
+            return Ok(());
+        }
+        return launch_path(id);
+    }
+    Err(format!("未知预设应用：{id}"))
 }
 
 #[cfg(not(windows))]
@@ -289,6 +341,128 @@ fn launch_new(exe_names: &[&str]) -> Result<(), String> {
         .unwrap_or_else(|_| Err("启动线程异常退出".to_owned()))
 }
 
+#[cfg(not(windows))]
+fn launch_path(_path: &str) -> Result<(), String> {
+    Err("打开应用仅在 Windows 上可用".to_owned())
+}
+
+/// 按完整路径启动（短命 COM 线程内 ShellExecuteW，支持 .exe/.lnk）。
+#[cfg(windows)]
+fn launch_path(path: &str) -> Result<(), String> {
+    let target = path.to_owned();
+    let handle = std::thread::Builder::new()
+        .name("sayall-app-launch-path".to_owned())
+        .spawn(move || {
+            use windows::core::PCWSTR;
+            use windows::Win32::UI::Shell::ShellExecuteW;
+            use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+            unsafe {
+                let _ = windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                );
+            }
+            let wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+            let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+            let result = unsafe {
+                ShellExecuteW(
+                    None,
+                    PCWSTR(verb.as_ptr()),
+                    PCWSTR(wide.as_ptr()),
+                    None,
+                    None,
+                    SW_SHOWNORMAL,
+                )
+            };
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+            if result.0 as usize > 32 {
+                Ok(())
+            } else {
+                Err(format!("ShellExecuteW 返回 {result:?}"))
+            }
+        })
+        .map_err(|error| format!("启动线程失败：{error}"))?;
+    handle
+        .join()
+        .unwrap_or_else(|_| Err("启动线程异常退出".to_owned()))
+}
+
+/// 原生文件选择器：选择自定义应用（.exe/.lnk）。
+/// 在短命 STA COM 线程内运行 IFileOpenDialog，避免占用调用方套间。
+#[cfg(windows)]
+pub fn pick_custom_app() -> Option<CustomAppPick> {
+    let handle = std::thread::Builder::new()
+        .name("sayall-pick-app".to_owned())
+        .spawn(|| {
+            use windows::core::PCWSTR;
+            use windows::Win32::System::Com::{
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER,
+                COINIT_APARTMENTTHREADED,
+            };
+            use windows::Win32::UI::Shell::{
+                FileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, IFileOpenDialog,
+                SIGDN_FILESYSPATH,
+            };
+            use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+
+            unsafe {
+                let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                if hr.is_err() {
+                    return None;
+                }
+            }
+            let result = (|| -> Option<CustomAppPick> {
+                unsafe {
+                    let dialog: IFileOpenDialog =
+                        match CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) {
+                            Ok(dialog) => dialog,
+                            Err(_) => return None,
+                        };
+                    let title: Vec<u16> = "选择应用".encode_utf16().chain(Some(0)).collect();
+                    let _ = dialog.SetTitle(PCWSTR(title.as_ptr()));
+                    let filter_spec: Vec<u16> =
+                        "*.exe;*.lnk".encode_utf16().chain(Some(0)).collect();
+                    let filter_name: Vec<u16> =
+                        "应用程序 (.exe, .lnk)".encode_utf16().chain(Some(0)).collect();
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(filter_name.as_ptr()),
+                        pszSpec: PCWSTR(filter_spec.as_ptr()),
+                    }];
+                    let _ = dialog.SetFileTypes(&filters);
+                    let options = dialog.GetOptions().ok()?;
+                    let _ = dialog
+                        .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                    if dialog.Show(None).is_err() {
+                        return None; // 用户取消
+                    }
+                    let item = dialog.GetResult().ok()?;
+                    let path_pwstr = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+                    let path = path_pwstr.to_string().ok()?;
+                    CoTaskMemFree(Some(path_pwstr.0 as _));
+                    let name = std::path::Path::new(&path)
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.clone());
+                    Some(CustomAppPick { name, path })
+                }
+            })();
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+            result
+        })
+        .ok()?;
+    handle.join().ok().flatten()
+}
+
+#[cfg(not(windows))]
+pub fn pick_custom_app() -> Option<CustomAppPick> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +485,90 @@ mod tests {
     fn preset_app_lookup_rejects_unknown() {
         assert!(preset_app("wechat").is_some());
         assert!(preset_app("nonexistent-app").is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn custom_path_targets_are_recognized() {
+        assert!(is_custom_path_target(r"C:\Apps\Tool.exe"));
+        assert!(is_custom_path_target(r"C:\Apps\快捷方式.lnk"));
+        assert!(is_custom_path_target("D:/dir/app.exe"));
+        assert!(!is_custom_path_target("wechat"), "预设 id 不是路径");
+        assert!(!is_custom_path_target(r"C:\Apps\readme.txt"), "仅支持 exe/lnk");
+        assert!(!is_custom_path_target("CAppsapp.exe"), "不含路径分隔符");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn activate_or_launch_rejects_unknown_non_path() {
+        let result = activate_or_launch("nonexistent-app");
+        assert!(result.is_err(), "未知预设 id 应报错");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn sayall_preset_is_always_installed() {
+        let apps = probe_preset_apps();
+        let sayall = apps
+            .iter()
+            .find(|app| app.id == "sayall")
+            .expect("无线麦自身应在预设表首位");
+        assert!(sayall.installed, "无线麦自身恒为已安装");
+        assert_eq!(apps[0].id, "sayall", "对齐 Mac：自身排首位");
+    }
+
+    /// COM 文件对话框管线（创建+标题+过滤器+选项）可用性探针；
+    /// Show 的交互行为由真机 UI 验证，此处验证 COM 对象链路本身。
+    #[test]
+    #[cfg(windows)]
+    fn file_dialog_com_pipeline_is_usable() {
+        let ok = std::thread::Builder::new()
+            .name("sayall-dialog-probe".to_owned())
+            .spawn(|| {
+                use windows::core::PCWSTR;
+                use windows::Win32::System::Com::{
+                    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                    COINIT_APARTMENTTHREADED,
+                };
+                use windows::Win32::UI::Shell::{
+                    FileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, IFileOpenDialog,
+                };
+                use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+
+                unsafe {
+                    if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+                        return false;
+                    }
+                }
+                let usable = (|| {
+                    unsafe {
+                        let dialog: IFileOpenDialog =
+                            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                        let title: Vec<u16> = "测试".encode_utf16().chain(Some(0)).collect();
+                        dialog.SetTitle(PCWSTR(title.as_ptr())).ok()?;
+                        let spec: Vec<u16> = "*.exe;*.lnk".encode_utf16().chain(Some(0)).collect();
+                        let name: Vec<u16> = "应用".encode_utf16().chain(Some(0)).collect();
+                        let filters = [COMDLG_FILTERSPEC {
+                            pszName: PCWSTR(name.as_ptr()),
+                            pszSpec: PCWSTR(spec.as_ptr()),
+                        }];
+                        dialog.SetFileTypes(&filters).ok()?;
+                        dialog
+                            .SetOptions(dialog.GetOptions().ok()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
+                            .ok()?;
+                        Some(())
+                    }
+                })()
+                .is_some();
+                unsafe {
+                    CoUninitialize();
+                }
+                usable
+            })
+            .expect("spawn probe thread failed")
+            .join()
+            .expect("probe thread panicked");
+        assert!(ok, "IFileOpenDialog COM 管线应可用");
     }
 
     #[test]
