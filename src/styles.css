@@ -182,6 +182,38 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .about-card p { margin: 3px 0 0; font-size: 13.5px; }
 .error-banner { margin-bottom: 20px; padding: 12px 14px; border-radius: 8px; color: #9b312f; background: #ffe9e8; }
 
+/* ---- 应用内更新（关于页面板 + 顶部横幅） ---- */
+.update-panel { display: flex; flex-direction: column; gap: 10px; }
+.update-panel p { margin: 0; }
+.update-notes { font-size: 13px; white-space: pre-line; }
+.update-error { color: #9b312f; font-size: 13.5px; }
+.update-actions { display: flex; gap: 8px; }
+.update-progress { height: 8px; overflow: hidden; border-radius: 999px; background: #eceef3; }
+.update-progress-bar { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.2s; }
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  color: #3f448a;
+  background: #ececff;
+  font-size: 13.5px;
+}
+.update-banner .link-button {
+  min-height: 26px;
+  padding: 2px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.update-banner .link-button:hover { background: rgba(95, 98, 219, 0.12); }
+
 /* ---- 按键映射页（Mac RemoteMappingCanvas 对标） ---- */
 /* 头部对齐 Mac mappingPage：标题 + 启用开关居左同行，遥控器状态最右。 */
 .mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }

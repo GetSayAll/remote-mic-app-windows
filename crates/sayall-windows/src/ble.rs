@@ -1484,7 +1484,9 @@ fn gatt_log(kind: &str, bytes: &[u8]) {
 /// 日志"规范）：语音链路的分支决策、外部调用结果与关键耗时以 "N" 标记
 /// 行落盘，报障后一次日志拉取即可定位环节。格式与 gatt_log 对齐：
 /// `N <墙钟ms> len=  0 note=<结构化键值>`。
-pub(crate) fn gatt_note(note: String) {
+/// 2026-09-05 起对 src-tauri 应用层公开（应用内更新流程等非 GATT 功能点
+/// 复用同一日志载体与格式），保持"一次日志拉取"覆盖全部功能点。
+pub fn gatt_note(note: String) {
     use std::io::Write as _;
     if let Some(sink) = gatt_sink() {
         if let Ok(mut file) = sink.lock() {

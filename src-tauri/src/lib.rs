@@ -15,9 +15,11 @@ use tauri::{Emitter, Manager};
 mod diagnostics;
 mod platform;
 mod settings;
+mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
+use updater::{check_app_update, install_app_update};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,10 +28,35 @@ struct RuntimeSnapshot {
     platform: PlatformSnapshot,
 }
 
-#[derive(Debug)]
 struct AppState {
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
+    /// check_app_update 暂存的待安装更新（install_app_update 取走）。
+    /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
+    pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppState")
+            .field("platform", &self.platform)
+            .field("settings", &self.settings)
+            .field(
+                "pending_update",
+                &if self
+                    .pending_update
+                    .lock()
+                    .map(|u| u.is_some())
+                    .unwrap_or(false)
+                {
+                    "Some"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
+    }
 }
 
 #[tauri::command]
@@ -402,6 +429,8 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 应用内更新（GitHub Releases 静态 latest.json + minisign 验签）。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // 托盘图标：主窗口关闭后驻留；菜单 = 显示主界面 / 退出；
             // 左键点击托盘 = 显示并聚焦主窗口（Mac StatusIcon 同款行为）。
@@ -516,7 +545,11 @@ pub fn run() {
             // 10 秒重试循环；用户在按键页显式停止（Stopped）时不重试。
             spawn_raw_input_supervisor(Arc::clone(&platform));
 
-            app.manage(AppState { platform, settings });
+            app.manage(AppState {
+                platform,
+                settings,
+                pending_update: std::sync::Mutex::new(None),
+            });
             Ok(())
         });
 
@@ -555,6 +588,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        check_app_update,
+        install_app_update,
         run_runtime_simulation_voice_session,
         complete_runtime_simulation_smoke
     ]);
@@ -580,7 +615,9 @@ pub fn run() {
         get_button_mapping_snapshot,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
-        set_voice_hold_hotkey
+        set_voice_hold_hotkey,
+        check_app_update,
+        install_app_update
     ]);
 
     builder
