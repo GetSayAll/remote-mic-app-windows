@@ -84,7 +84,39 @@ powershell -ExecutionPolicy Bypass -File Testing\probe-rc003-hid-gatt.ps1 <out> 
 - **VK_SLEEP（电源键）**：孤立按压泄漏原生 VK_SLEEP 时真实 PC 会触发系统
   睡眠（本 VM 已禁睡眠未复现）；电源键被映射时建议后续采用直接归因策略。
 
-## 修复记录（2026-09-06 晚，菜单键报障驱动）
+## 修复记录（2026-09-06 晚，第二轮：其他按键）
+
+用户验证菜单键修复通过后要求处理其余按键。按 VK 形态分三类处置（全部
+remote-capture 日志实测 RC003 键形态：返回/电源/音量走 VK 0xFF 族=已直接
+归因不泄漏；方向/确定/Home/TV 走常见物理 VK=武装死锁泄漏；菜单 0x5D 已修）：
+
+- **VK_SLEEP（0x5F）纳入直接归因族**：电源键的 VK_SLEEP 固件形态。本机
+  RC003 实测走 VK 0xFF+make 0x5E（已直接归因），本条覆盖其余形态，消除
+  "映射电源键后孤立按压直接触发系统睡眠"的隐患（上轮待决事项落地）。
+- **同键映射泄漏对冲**（button_mapping.rs + send_input.rs `native_key`）：
+  常见物理 VK（方向/Enter/Home）不能直接归因（物理键盘常用，吞了会劫持
+  物理键），孤立首按泄漏无法根除——改为对冲：泄漏路径
+  （`EngineMessage::Keyboard`，监听器按设备路径过滤=遥控器专用）的按压
+  标记"原生已交付"，若映射动作与原生动作相同（右→右、确定→Enter、
+  上→上）则该次 Single 跳过注入（原生已交付，注入即双响应）。Long/
+  Double/按住连发/不同键映射始终注入（原生无法交付组合语义与连发）。
+  效果：确定/右/上（及任何同键映射）冷首按单响应；左→退格、下→左、
+  TV→快捷键等不同键映射的冷首按原生动作仍泄漏（结构性残留，Helper 轨）。
+- **KeyGate 启停竞态修复**（生产级，单测隔离运行实证）：`KeyGate::start()`
+  在钩子线程完成初始化（GATE_ACTIVE=true）前返回，且 Drop 的
+  PostThreadMessageW(WM_QUIT) 在线程消息队列未创建时投递失败且不报错 →
+  join() 永久挂起（应用退出挂死的同源竞态）。修复：hook_thread 入口先
+  PeekMessageW(PM_NOREMOVE) 强制创建队列再通知启动；start() 有界等待
+  GATE_ACTIVE（500ms）再返回，调用方不再观察到半初始化门控。
+- 单元测试：`leak_suppression_suite`（泄漏对冲五场景：同键首击不注入/
+  门控路径对照注入/不同键映射注入/双击窗口补发单击对冲/泄漏按住连发
+  注入）、`native_key_covers_common_keys_and_none_for_vendor_and_tv`、
+  `direct_attributed(0x5F)` 断言。隔离×3 + 全量×2 运行稳定通过
+  （cargo test -p sayall-windows 71+1 passed）。
+- fmt：本轮三个文件合规；app_launcher.rs / hw_swallow_probe.rs 的存量
+  格式差异属其他在途工作项，未触碰。
+
+## 修复记录（2026-09-06 晚，第一轮：菜单键报障驱动）
 
 用户报障：菜单键配置映射（Ctrl+V）后，每次按压同时执行原生上下文菜单指令
 与映射动作。remote-capture 日志（Testing/investigation/remote-capture.log
@@ -103,9 +135,8 @@ powershell -ExecutionPolicy Bypass -File Testing\probe-rc003-hid-gatt.ps1 <out> 
 - 单元测试：`menu_vk_apps_is_directly_attributed_without_arming`、
   `up_edge_consumes_pairing_entry_even_when_leaked`（key_gate.rs，纯函数
   decide/direct_attributed/take_up_pairing）。
-- VK_SLEEP（电源键）直接归因仍保持待决（用户当前电源键未映射，无报障驱动；
-  若映射电源键需先行决策）。
+- VK_SLEEP（电源键）直接归因（第一轮时待决，第二轮已落地，见上）。
 - 方向/Enter/Home/TV 等常见物理键 VK 的孤立首按泄漏仍是结构性残留
-  （Helper 轨解决），其中原生动作与映射动作肉眼可见叠加的键：左键（原生
-  左移+映射退格）、TV 键（原生输入 ` + 映射快捷键）、Home/Ok（原生动作
-  常与映射相同故不可见）。
+  （Helper 轨解决；同键映射已由第二轮泄漏对冲覆盖），其中原生动作与
+  映射动作肉眼可见叠加的键：左键（原生左移+映射退格）、TV 键（原生
+  输入 ` + 映射快捷键）、Home/Ok（原生动作常与映射相同，对冲后单响应）。
