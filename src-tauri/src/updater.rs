@@ -1,0 +1,323 @@
+//! 应用内更新（tauri-plugin-updater + GitHub Releases 静态 latest.json）。
+//!
+//! 设计要点（关键行为均已对插件源码核对，见 ATTRIBUTION.md 2026-09-05 更新调研节）：
+//! - 检查与安装全部走 Rust 侧：前端只调用本模块的两个 command，
+//!   便于把全部分支决策、外部调用结果与耗时写入 SAYALL_GATT_LOG 诊断日志。
+//! - Windows 上 `download_and_install` 内部会 `std::process::exit(0)`（Drop 清理
+//!   不会执行），因此 BLE 断开等成对清理必须注册在 `on_before_exit` 回调里，
+//!   而不是依赖进程退出路径——2026-09-05"部署不得强杀"教训的更新版。
+//! - 安装器以 passive（/P + /UPDATE + /R）运行：显示进度条、装完自动重启应用。
+//! - 端点来自 tauri.conf.json（GitHub Releases latest.json）；环境变量
+//!   `SAYALL_UPDATER_ENDPOINT` 可覆盖端点（release 构建强制 https，仅用于
+//!   本地/开发验证，正式配置不含任何 dangerous 开关）。
+//! - 超时：检查请求 30s；下载 20 分钟（安装器 ~10-20MB，慢速链路兜底）。
+
+use crate::AppState;
+use serde::Serialize;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_updater::UpdaterExt;
+
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const PROGRESS_EMIT_MIN_INTERVAL_BYTES: u64 = 128 * 1024;
+const ENDPOINT_OVERRIDE_ENV: &str = "SAYALL_UPDATER_ENDPOINT";
+/// 前端进度事件名（downloaded/contentLength/finished）。
+const PROGRESS_EVENT: &str = "app-update-progress";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfo {
+    pub current_version: String,
+    pub available: bool,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    downloaded: u64,
+    content_length: Option<u64>,
+    finished: bool,
+}
+
+/// 下载进度共享状态（on_chunk 与 on_download_finish 两个闭包共用，
+/// 避免可变/不可变借用冲突）。
+#[derive(Debug, Default)]
+struct DownloadProgressState {
+    downloaded: u64,
+    content_length: Option<u64>,
+    last_emitted: u64,
+}
+
+/// 功能点日志（AGENTS.md 规范）：与语音链路共用 SAYALL_GATT_LOG 载体，
+/// `N <ms> len=  0 note=updater.<事件> <键值>` 结构化标记，不含设备身份/路径。
+fn note(detail: String) {
+    #[cfg(windows)]
+    sayall_windows::gatt_note(format!("updater.{detail}"));
+    #[cfg(not(windows))]
+    let _ = detail;
+}
+
+fn elapsed_ms(started: Instant) -> u128 {
+    started.elapsed().as_millis()
+}
+
+/// 构建更新器：注册安装前清理回调 + 端点覆盖 + 检查超时。
+fn build_updater(
+    app: &AppHandle,
+    platform: Arc<dyn crate::platform::PlatformRuntime>,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let mut builder = app.updater_builder().timeout(CHECK_TIMEOUT);
+    // on_before_exit 在安装器启动前、std::process::exit(0) 前同步执行：
+    // 显式断开 BLE 链路（正常断开序列 CCCD 退订/服务释放），避免残留
+    // 未关闭的 GATT 会话把链路留成僵死状态。
+    builder = builder.on_before_exit(move || {
+        let started = Instant::now();
+        let outcome = if platform.disconnect_remote().is_ok() {
+            "ok"
+        } else {
+            "err"
+        };
+        note(format!(
+            "install.before_exit disconnect={outcome} took_ms={}",
+            elapsed_ms(started)
+        ));
+    });
+    if let Some(endpoint) = std::env::var_os(ENDPOINT_OVERRIDE_ENV) {
+        let endpoint = endpoint
+            .to_string_lossy()
+            .trim()
+            .trim_matches('"')
+            .to_owned();
+        note(format!("check.endpoint_override url={endpoint}"));
+        // 2026-09-05 E2E 实证：早期失败路径若不打点，日志里只剩 check.start +
+        // endpoint_override 便无下文，无法"一次日志拉取定位环节"——以下每个
+        // 失败分支都必须落 note（含 release 构建拒绝 http 端点的 fail-closed 路径）。
+        let url = endpoint.parse().map_err(|error| {
+            note(format!(
+                "check.fail stage=endpoint_override_parse error={error:?}"
+            ));
+            format!("更新端点覆盖变量 {ENDPOINT_OVERRIDE_ENV} 不是合法 URL：{error}")
+        })?;
+        builder = builder.endpoints(vec![url]).map_err(|error| {
+            note(format!(
+                "check.fail stage=endpoint_override_reject error={error:?}"
+            ));
+            format!("更新端点覆盖被拒绝：{error}")
+        })?;
+    }
+    builder.build().map_err(|error| {
+        note(format!("check.fail stage=build error={error:?}"));
+        format!("更新器初始化失败：{error}")
+    })
+}
+
+#[tauri::command]
+pub async fn check_app_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppUpdateInfo, String> {
+    let started = Instant::now();
+    note("check.start source=command".to_owned());
+    let platform = Arc::clone(&state.platform);
+    let updater = build_updater(&app, platform)?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let info = AppUpdateInfo {
+                current_version: update.current_version.clone(),
+                available: true,
+                version: Some(update.version.clone()),
+                notes: update.body.clone(),
+                date: update.date.map(|date| date.to_string()),
+            };
+            note(format!(
+                "check.ok available=true current={} latest={} took_ms={}",
+                update.current_version,
+                update.version,
+                elapsed_ms(started)
+            ));
+            *state
+                .pending_update
+                .lock()
+                .map_err(|error| format!("更新状态锁损坏：{error}"))? = Some(update);
+            Ok(info)
+        }
+        Ok(None) => {
+            note(format!(
+                "check.ok available=false took_ms={}",
+                elapsed_ms(started)
+            ));
+            if let Ok(mut pending) = state.pending_update.lock() {
+                *pending = None;
+            }
+            Ok(AppUpdateInfo {
+                current_version: app.package_info().version.to_string(),
+                available: false,
+                version: None,
+                notes: None,
+                date: None,
+            })
+        }
+        Err(error) => {
+            note(format!(
+                "check.fail error={error:?} took_ms={}",
+                elapsed_ms(started)
+            ));
+            Err(format!("检查更新失败：{error}"))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let started = Instant::now();
+    let mut update = state
+        .pending_update
+        .lock()
+        .map_err(|error| {
+            note(format!("install.fail stage=state_lock error={error:?}"));
+            format!("更新状态锁损坏：{error}")
+        })?
+        .take()
+        .ok_or_else(|| {
+            note("install.fail stage=no_pending_update".to_owned());
+            "尚未发现可用更新，请先检查更新".to_owned()
+        })?;
+    note(format!("install.start version={}", update.version));
+    // 下载整体超时（check 的超时不作用于下载请求）。
+    update.timeout = Some(DOWNLOAD_TIMEOUT);
+
+    let progress = Arc::new(Mutex::new(DownloadProgressState::default()));
+    let chunk_progress = Arc::clone(&progress);
+    let chunk_app = app.clone();
+    let finish_progress = Arc::clone(&progress);
+    let finish_app = app.clone();
+
+    let result = update
+        .download_and_install(
+            move |chunk_length, total| {
+                let Ok(mut progress) = chunk_progress.lock() else {
+                    return;
+                };
+                progress.downloaded += chunk_length as u64;
+                progress.content_length = total;
+                // 限频上报：每 128KB 一次，避免 IPC 洪泛。
+                if progress.downloaded - progress.last_emitted >= PROGRESS_EMIT_MIN_INTERVAL_BYTES {
+                    progress.last_emitted = progress.downloaded;
+                    let _ = chunk_app.emit(
+                        PROGRESS_EVENT,
+                        &AppUpdateProgress {
+                            downloaded: progress.downloaded,
+                            content_length: progress.content_length,
+                            finished: false,
+                        },
+                    );
+                }
+            },
+            move || {
+                let snapshot = finish_progress.lock().map(|progress| AppUpdateProgress {
+                    downloaded: progress.downloaded,
+                    content_length: progress.content_length,
+                    finished: true,
+                });
+                if let Ok(payload) = snapshot {
+                    let _ = finish_app.emit(PROGRESS_EVENT, &payload);
+                    note(format!(
+                        "install.download_done bytes={} took_ms={}",
+                        payload.downloaded,
+                        elapsed_ms(started)
+                    ));
+                }
+            },
+        )
+        .await;
+
+    match result {
+        Ok(()) => {
+            // Windows 上安装成功时进程在 install 内部 exit(0)，此分支仅在
+            // 非 Windows（本项目不涉及）或未来行为变化时到达。
+            note("install.completed_after_return".to_owned());
+            Ok(())
+        }
+        Err(error) => {
+            let downloaded = progress
+                .lock()
+                .map(|progress| progress.downloaded)
+                .unwrap_or(0);
+            note(format!(
+                "install.fail downloaded={downloaded} error={error:?} took_ms={}",
+                elapsed_ms(started)
+            ));
+            Err(format!("下载或安装更新失败：{error}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rust ↔ TypeScript JSON 契约（对齐仓库既有 PlatformSnapshot 契约夹具做法）。
+    #[test]
+    fn app_update_info_serializes_camel_case() {
+        let info = AppUpdateInfo {
+            current_version: "0.1.0".to_owned(),
+            available: true,
+            version: Some("0.2.0".to_owned()),
+            notes: Some("修复若干问题".to_owned()),
+            date: Some("2026-09-05T12:00:00Z".to_owned()),
+        };
+        let json = serde_json::to_string(&info).expect("序列化 AppUpdateInfo 失败");
+        assert!(
+            json.contains("\"currentVersion\":\"0.1.0\""),
+            "字段应为 camelCase：{json}"
+        );
+        assert!(json.contains("\"available\":true"), "{json}");
+        assert!(json.contains("\"version\":\"0.2.0\""), "{json}");
+        assert!(json.contains("\"notes\":\"修复若干问题\""), "{json}");
+        assert!(json.contains("\"date\":\"2026-09-05T12:00:00Z\""), "{json}");
+    }
+
+    #[test]
+    fn app_update_progress_serializes_camel_case() {
+        let progress = AppUpdateProgress {
+            downloaded: 4096,
+            content_length: Some(1_048_576),
+            finished: false,
+        };
+        let json = serde_json::to_string(&progress).expect("序列化 AppUpdateProgress 失败");
+        assert!(
+            json.contains("\"downloaded\":4096") && json.contains("\"contentLength\":1048576"),
+            "字段应为 camelCase：{json}"
+        );
+        assert!(json.contains("\"finished\":false"), "{json}");
+    }
+
+    /// 功能点日志必须真实落盘（AGENTS.md"一次日志拉取定位环节"规范；2026-09-05
+    /// E2E 实证：release 构建拒绝 http 端点的早期失败路径漏打点导致日志无下文）。
+    /// 通过 SAYALL_GATT_LOG 环境变量开 sink 后调用 note()，断言标记行写入文件。
+    #[cfg(windows)]
+    #[test]
+    fn updater_notes_land_in_diagnostic_log() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-updater-note-test-{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        // 本测试二进制内无其他代码先初始化 gatt_sink（OnceLock 首次调用生效）。
+        // SAFETY: 测试进程内单线程操作该环境变量，其余测试不读取它。
+        unsafe { std::env::set_var("SAYALL_GATT_LOG", &path) };
+        note("check.fail stage=endpoint_override_parse error=probe".to_owned());
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        unsafe { std::env::remove_var("SAYALL_GATT_LOG") };
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            contents.contains("note=updater.check.fail stage=endpoint_override_parse"),
+            "updater 功能点日志未落盘：{contents}"
+        );
+    }
+}

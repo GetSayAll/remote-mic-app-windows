@@ -17,6 +17,8 @@ mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
 #[cfg(windows)]
+pub use ble::gatt_note;
+#[cfg(windows)]
 mod ime;
 pub mod key_gate;
 #[cfg(windows)]

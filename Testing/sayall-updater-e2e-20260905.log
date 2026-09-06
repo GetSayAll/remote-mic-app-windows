@@ -1,0 +1,14 @@
+N 1788627655632 len=  0 note=updater.check.start source=command
+N 1788627655633 len=  0 note=updater.check.endpoint_override url=http://127.0.0.1:8787/latest.json
+N 1788627655799 len=  0 note=updater.check.ok available=true current=0.1.0 latest=0.2.0 took_ms=166
+N 1788627656296 len=  0 note=updater.install.start version=0.2.0
+N 1788627657266 len=  0 note=updater.install.download_done bytes=5311360 took_ms=969
+N 1788627657851 len=  0 note=updater.install.fail downloaded=5311360 error=Minisign(InvalidSignature) took_ms=1554
+N 1788628122317 len=  0 note=updater.check.start source=command
+N 1788628122317 len=  0 note=updater.check.endpoint_override url=http://127.0.0.1:8787/latest.json
+N 1788628122357 len=  0 note=updater.check.ok available=true current=0.1.0 latest=0.2.0 took_ms=40
+N 1788628122701 len=  0 note=updater.install.start version=0.2.0
+N 1788628123990 len=  0 note=updater.install.download_done bytes=6166058 took_ms=1289
+N 1788628124840 len=  0 note=updater.install.before_exit disconnect=ok took_ms=0
+N 1788628160910 len=  0 note=updater.check.start source=command
+N 1788628160910 len=  0 note=updater.check.endpoint_override url=http://127.0.0.1:8787/latest.json
