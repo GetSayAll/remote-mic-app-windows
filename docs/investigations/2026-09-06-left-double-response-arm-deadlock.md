@@ -65,3 +65,21 @@
 cargo run -p sayall-windows --example hw_swallow_probe [seconds]
 powershell -ExecutionPolicy Bypass -File Testing\probe-rc003-hid-gatt.ps1 <out> <seconds>
 ```
+
+## 真机验证（2026-09-06，修复后便携实例实测）
+
+7 次左键按压（间隔 2.4/4.5/1.5/2.9/2.3/10s），gate(sw/lk) 计数：
+- 泄漏 3 次（冷启动首按、4.5s 与 10s 间隔的孤立按压）＝全部 >4s 间隔，符合设计边界；
+- 吞下 4 次（<4s 间隔全部单响应，sw 逐一递增，自我续期维持会话）。
+修复前同等按压 7/7 全部双响应；修复后泄漏仅剩结构性首按（>4s 间隔）。
+
+## 后续发现（未修，待独立验证轮）
+
+- **UP 配对污染跨按住残留**：track_down 的"泄漏污染"条目在 UP 放行后未清除
+  （key_gate.rs UP 路径仅在 swallow=true 时 remove），任一次泄漏后，该键后续
+  所有"吞下按压"的原生 UP 都会漏进 OS（stray keyup）。对方向/Enter/VK_SLEEP
+  类按键无实际影响（应用忽略无配对 keyup；睡眠由 DOWN 触发），但偏离
+  "本次按住污染"的设计意图。修复方向：UP 沿无论吞放都清除条目（一行改动 +
+  纯函数单测），需随下一轮真机验证一并确认。
+- **VK_SLEEP（电源键）**：孤立按压泄漏原生 VK_SLEEP 时真实 PC 会触发系统
+  睡眠（本 VM 已禁睡眠未复现）；电源键被映射时建议后续采用直接归因策略。
