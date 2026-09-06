@@ -17,7 +17,6 @@ import {
   stopRawInput,
   subscribeButtonEdges,
   subscribeButtonGestures,
-  testButtonMapping,
   type ButtonAction,
   type ButtonActions,
   type ButtonEdge,
@@ -277,7 +276,8 @@ function applyAction(action: ButtonAction): void {
   actions[target.trigger] = action;
   next.actions[target.button] = actions;
   mappings.value = next;
-  statusMessage.value = "映射已修改，点击保存后生效";
+  // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。
+  void persist();
 }
 
 /**
@@ -340,14 +340,16 @@ function isActivePreset(keys: KeyCode[]): boolean {
   return action.chord.keys.join("+") === keys.join("+");
 }
 
-async function persist(message: string): Promise<void> {
+async function persist(message?: string): Promise<void> {
   busy.value = true;
   statusMessage.value = null;
   try {
     const saved = await saveButtonMappings(mappings.value);
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    statusMessage.value = message;
+    if (message) {
+      statusMessage.value = message;
+    }
   } catch (error) {
     statusMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -363,21 +365,6 @@ async function restoreDefaults(): Promise<void> {
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     statusMessage.value = "已恢复默认（全部按键保持原始行为）";
-  } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function testCurrentAction(): Promise<void> {
-  const target = editingTarget.value;
-  if (!target) return;
-  busy.value = true;
-  statusMessage.value = null;
-  try {
-    await testButtonMapping(target.button, target.trigger);
-    statusMessage.value = "已通过 SendInput 提交一次测试";
   } catch (error) {
     statusMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -714,12 +701,12 @@ onUnmounted(() => {
             :title="
               UNMAPPABLE_BUTTONS.has(placement.button)
                 ? '此按键暂不支持自定义，按键功能保持原样'
-                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}`
+                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
             "
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
-            <span :title="actionSummary(actionOf(placement.button, trigger))">{{ actionSummary(actionOf(placement.button, trigger)) }}</span>
+            <span>{{ actionSummary(actionOf(placement.button, trigger)) }}</span>
           </button>
         </div>
       </article>
@@ -753,36 +740,23 @@ onUnmounted(() => {
       <div class="card-title-row">
         <div>
           <h2>{{ buttonLabel(editingTarget.button) }} · {{ buttonTriggerLabel(editingTarget.trigger) }}</h2>
-          <p class="muted">
-            当前：{{ actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }} ·
-            点击选择新动作，保存后立即生效
-          </p>
+          <p class="muted">当前：{{ actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }}</p>
         </div>
         <div class="button-row">
           <button
-            class="primary-button"
+            class="secondary-button editor-disable-btn"
+            :class="{ 'is-active': actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"
             type="button"
-            :disabled="busy || !dirty"
-            @click="persist('按键映射已保存并即时生效')"
+            :disabled="busy"
+            title="只禁用当前格子的映射，此按键恢复原始行为"
+            @click="applyAction({ type: 'disabled' })"
           >
-            {{ dirty ? "保存映射" : "已保存" }}
-          </button>
-          <button class="secondary-button" type="button" :disabled="busy" @click="testCurrentAction">
-            测试一次
+            禁用按键
           </button>
           <button class="secondary-button" type="button" @click="editingTarget = null">关闭</button>
         </div>
       </div>
       <div class="action-sections">
-        <button
-          class="chip"
-          :class="{ selected: actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"
-          type="button"
-          @click="applyAction({ type: 'disabled' })"
-        >
-          清除映射（保持原始按键）
-        </button>
-
         <section v-for="group in PRESET_GROUPS" :key="group.label" class="action-section">
           <h4 class="action-section-title">{{ group.label }}</h4>
           <div class="preset-grid">
@@ -792,6 +766,7 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: isActivePreset(preset.keys) }"
               type="button"
+              :title="chordLabel({ keys: preset.keys })"
               @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
             >
               {{ preset.label }}
