@@ -780,7 +780,7 @@ onUnmounted(() => {
           type="button"
           @click="applyAction({ type: 'disabled' })"
         >
-          关闭（保持原始按键）
+          清除映射（保持原始按键）
         </button>
 
         <section v-for="group in PRESET_GROUPS" :key="group.label" class="action-section">
