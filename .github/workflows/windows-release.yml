@@ -48,6 +48,10 @@ jobs:
         run: pnpm tauri build --bundles nsis
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 密码变量缺失时 tauri build 会交互式等待输入（无 TTY 的 CI 上挂死，
+          # 2026-09-06 本机矩阵实验实证）；正式密钥为无密码密钥，Secret 未配置时
+          # 此处求值为空字符串，实测空字符串 + 无密码密钥可免交互完成签名。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Generate updater manifest and stage release assets
         shell: pwsh
