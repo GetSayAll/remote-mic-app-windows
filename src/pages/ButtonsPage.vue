@@ -10,7 +10,6 @@ import {
   getButtonMappings,
   identityShortcutByButton,
   listPresetApps,
-  openAppCapability,
   pickCustomApp,
   registerPresetAppNames,
   resetButtonMappings,
@@ -33,7 +32,6 @@ import {
   type RemoteButton,
   type RemoteModel,
   type RuntimeSnapshot,
-  type ShortcutCapability,
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -280,16 +278,6 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
 function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
   if (!target) return;
-  // 能力矩阵守卫（UI 禁用之外的双保险）：不保证单响应的动作拒绝落盘，
-  // 并提示原因（已有配置的加载/回显不受影响）。
-  if (action.type === "open_app" && !editingOpenApp.value) {
-    statusMessage.value = "此按键不支持打开应用：冷首按会先触发原生动作";
-    return;
-  }
-  if (action.type === "shortcut" && !presetAllowed(action.chord.keys)) {
-    statusMessage.value = "此按键仅支持保证单响应的映射（同键映射）";
-    return;
-  }
   const next: ButtonMappings = {
     ...mappings.value,
     actions: { ...mappings.value.actions },
@@ -366,49 +354,23 @@ function isActivePreset(keys: KeyCode[]): boolean {
 }
 
 /**
- * 编辑格能力（见 bridge.ts shortcutCapability 的矩阵文档）：保证单响应的
- * 配置才开放——直接归因族全开放；武装族仅单击=同键映射；其余不可配置。
+ * 单响应提示（信息性，不做门控）：武装族（确定/方向/主页，按按键判定、
+ * 任意触发均适用）与 TV 的孤立冷首按会附带一次原生按键动作（结构性
+ * 泄漏，调查已归档）；4 秒内连按与直接归因族（电源/菜单等）严格单响应，
+ * 同键映射由泄漏对冲保证单响应。
  */
-const editingCapability = computed<ShortcutCapability>(() =>
-  editingTarget.value
-    ? shortcutCapability(
-        editingTarget.value.button,
-        editingTarget.value.trigger,
-        remoteModel.value,
-      )
-    : "none",
-);
-
-const editingOpenApp = computed<boolean>(() =>
-  editingTarget.value
-    ? openAppCapability(editingTarget.value.button, remoteModel.value)
-    : false,
-);
-
-const editingIdentity = computed<KeyCode | null>(() =>
-  editingTarget.value ? (identityShortcutByButton[editingTarget.value.button] ?? null) : null,
-);
-
-/** 预设快捷键是否可用于当前编辑格（identity 档仅放行单键同键映射）。 */
-function presetAllowed(keys: KeyCode[]): boolean {
-  if (editingCapability.value === "all") return true;
-  if (editingCapability.value === "identity") {
-    const identity = editingIdentity.value;
-    return identity !== null && keys.length === 1 && keys[0] === identity;
-  }
-  return false;
-}
-
-/** 能力受限时的编辑器说明（解释为什么选项被禁用）。 */
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
-  if (editingCapability.value === "all") return null;
-  if (editingCapability.value === "identity") {
-    const identity = editingIdentity.value;
+  const button = editingTarget.value.button;
+  if (shortcutCapability(button, "single", remoteModel.value) === "identity") {
+    const identity = identityShortcutByButton[button];
     const label = identity ? chordLabel({ keys: [identity] }) : "";
-    return `此按键冷首按的原生动作会泄漏进系统，仅"同键映射（${label}）"由引擎对冲为单响应；双击/长按与其他动作无法保证单响应，不可配置。`;
+    return `提示：此按键闲置约 4 秒后的首次按压会附带一次原生按键动作（结构性泄漏，调查已归档）；4 秒内连按严格单响应，单击配置为同键映射（${label}）时由引擎对冲为单响应。`;
   }
-  return "此按键无法保证映射单响应（原生动作冷首按泄漏且无法对冲，或输入事件不进入系统），仅可禁用。";
+  if (button === "tv") {
+    return "提示：此按键闲置约 4 秒后的首次按压会附带一次 ` 原生输入（结构性泄漏，调查已归档）；4 秒内连按严格单响应。";
+  }
+  return null;
 });
 
 async function persist(message?: string): Promise<void> {
@@ -838,12 +800,7 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: isActivePreset(preset.keys) }"
               type="button"
-              :disabled="!presetAllowed(preset.keys)"
-              :title="
-                presetAllowed(preset.keys)
-                  ? chordLabel({ keys: preset.keys })
-                  : '此组合在该按键上无法保证单响应（冷首按会与原生动作双执行）'
-              "
+              :title="chordLabel({ keys: preset.keys })"
               @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
             >
               {{ preset.label }}
@@ -860,12 +817,7 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.id }"
               type="button"
-              :disabled="!editingOpenApp"
-              :title="
-                editingOpenApp
-                  ? '已运行则切到该应用窗口，未运行则启动'
-                  : '此按键不支持打开应用（冷首按会先触发原生动作）'
-              "
+              title="已运行则切到该应用窗口，未运行则启动"
               @click="applyAction({ type: 'open_app', target: app.id })"
             >
               {{ app.name }}
@@ -876,7 +828,6 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               type="button"
-              :disabled="!editingOpenApp"
               title="自定义应用（按路径启动）"
               @click="applyAction({ type: 'open_app', target: app.path })"
             >
@@ -885,7 +836,6 @@ onUnmounted(() => {
             <button
               class="chip add-app"
               type="button"
-              :disabled="!editingOpenApp"
               title="从本机选择任意程序或快捷方式"
               @click="addCustomApp"
             >
@@ -901,12 +851,6 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: capturingShortcut }"
               type="button"
-              :disabled="editingCapability !== 'all'"
-              :title="
-                editingCapability === 'all'
-                  ? undefined
-                  : '此按键仅支持保证单响应的映射（同键映射），不支持自定义快捷键'
-              "
               @click="capturingShortcut = !capturingShortcut"
             >
               {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}

@@ -267,46 +267,43 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").exists()).toBe(true);
   }
 
-  it("能力矩阵门控：确定·单击仅同键映射（Enter）可配，其余操作禁用", async () => {
+  it("全开放：确定·单击所有操作可配（注入链路已真机验证）+ 单响应提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "确定", 0);
     expect(chipState(wrapper, "Enter")).toBe(false);
-    expect(chipState(wrapper, "Home")).toBe(true);
-    expect(chipState(wrapper, "空格")).toBe(true);
-    expect(chipState(wrapper, "退格")).toBe(true);
-    expect(chipState(wrapper, "粘贴")).toBe(true);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(true);
-    expect(chipState(wrapper, "＋ 添加应用")).toBe(true);
-    expect(wrapper.find(".mapping-editor").text()).toContain("同键映射");
-    // 禁用按键始终可用（受限格的恢复路径）。
-    const disable = wrapper.findAll("button").find((b) => b.text() === "禁用按键");
-    expect((disable!.element as HTMLButtonElement).disabled).toBe(false);
+    expect(chipState(wrapper, "Home")).toBe(false);
+    expect(chipState(wrapper, "空格")).toBe(false);
+    expect(chipState(wrapper, "粘贴")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    // 武装族按键显示冷首按原生副作用提示（信息性，不门控）。
+    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
   });
 
-  it("能力矩阵门控：确定·双击/长按仅可禁用（原生泄漏无法对冲组合语义）", async () => {
+  it("全开放：确定·双击与 TV 所有操作可配 + 各自的单响应提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "确定", 1);
-    expect(chipState(wrapper, "Enter")).toBe(true);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(true);
-    expect(chipState(wrapper, "＋ 添加应用")).toBe(true);
-  });
+    expect(chipState(wrapper, "Enter")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
 
-  it("能力矩阵门控：TV 无任何可配动作（无同键映射可表达）", async () => {
-    const wrapper = await mountPage();
     await openCell(wrapper, "TV", 0);
-    expect(chipState(wrapper, "Enter")).toBe(true);
-    expect(chipState(wrapper, "静音")).toBe(true);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(true);
-    expect(chipState(wrapper, "＋ 添加应用")).toBe(true);
+    expect(chipState(wrapper, "Enter")).toBe(false);
+    expect(chipState(wrapper, "静音")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).toContain("` 原生输入");
   });
 
-  it("能力矩阵门控：电源/菜单全开放（直接归因族冷首按不泄漏）", async () => {
+  it("电源（直接归因族）全开放且无单响应提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "电源", 2);
     expect(chipState(wrapper, "Esc")).toBe(false);
     expect(chipState(wrapper, "截图")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 
   it("型号感知：RC003 返回/音量±格子禁用，RC001 开放可编辑", async () => {
@@ -325,5 +322,7 @@ describe("buttons mapping page", () => {
     expect((backCellRc001.element as HTMLButtonElement).disabled).toBe(false);
     await backCellRc001.trigger("click");
     expect(chipState(rc001, "Enter")).toBe(false);
+    // RC001 的直接归因族按键无单响应提示。
+    expect(rc001.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 });
