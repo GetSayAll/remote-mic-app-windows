@@ -154,7 +154,7 @@ describe("VB-CABLE first-launch guidance", () => {
 
     expect(mocks.selectAudioEndpoint).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("需要安装 VB-CABLE");
-    expect(wrapper.text()).toContain("完成后必须重启 Windows");
+    expect(wrapper.text()).toContain("完成后需重启电脑");
 
     await wrapper.get(".vb-cable-callout .primary-button").trigger("click");
     await flushPromises();
