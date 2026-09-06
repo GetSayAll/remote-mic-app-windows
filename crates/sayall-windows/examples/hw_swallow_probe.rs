@@ -182,7 +182,10 @@ mod windows_impl {
             Ok(module) => module.into(),
             Err(_) => return,
         };
-        let class_name_wide: Vec<u16> = "SayAllHwSwallowProbe".encode_utf16().chain(Some(0)).collect();
+        let class_name_wide: Vec<u16> = "SayAllHwSwallowProbe"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
         let class_name_ptr = PCWSTR(class_name_wide.as_ptr());
         let window_class = WNDCLASSW {
             lpfnWndProc: Some(raw_wnd_proc),
@@ -216,11 +219,7 @@ mod windows_impl {
             dwFlags: RIDEV_INPUTSINK,
             hwndTarget: window,
         }];
-        if RegisterRawInputDevices(
-            &devices,
-            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-        )
-        .is_err()
+        if RegisterRawInputDevices(&devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32).is_err()
         {
             return;
         }
