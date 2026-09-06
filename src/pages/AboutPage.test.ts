@@ -149,13 +149,31 @@ describe("about page update panel", () => {
 
   it("失败时展示错误并提供重试检查", async () => {
     phase.value = "failed";
-    errorMessage.value = "检查更新失败：网络错误";
+    errorMessage.value = "网络连接失败，请稍后重试";
     const wrapper = mount(AboutPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.text()).toContain("检查更新失败：网络错误");
+    expect(wrapper.text()).toContain("网络连接失败，请稍后重试");
     const retry = wrapper.findAll("button").find((b) => b.text().includes("重试检查"));
     expect(retry).toBeDefined();
     await retry!.trigger("click");
     expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("服务器确认无更新时显示已经是最新版本", async () => {
+    phase.value = "up-to-date";
+    info.value = {
+      currentVersion: "0.2.0",
+      available: false,
+      version: null,
+      notes: null,
+      date: null,
+    };
+    const wrapper = mount(AboutPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已经是最新版本。");
+    const installButton = wrapper
+      .findAll("button")
+      .find((b) => b.text().includes("下载并安装"));
+    expect(installButton).toBeUndefined();
   });
 });
