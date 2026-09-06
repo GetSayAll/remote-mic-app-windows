@@ -9,8 +9,12 @@
 //!   由本钩子直接喂给映射引擎（`ButtonEdge`），未被吞的由 Raw Input 监听器喂，
 //!   双源汇入引擎的 `ButtonStateMerger` 并集去重。
 //! - 归因（遥控器 vs 物理键盘）：LL 钩子事件无设备信息。两条通路：
-//!   1. VK 0xFF 族（厂商键：返回/电源/音量）物理键盘不会产生 → 直接归因；
-//!   2. 其余 VK（方向/Enter/Home/菜单/TV/睡眠/音量 VK）需"武装"：Raw Input
+//!   1. 直接归因族：VK 0xFF 族（厂商键：返回/电源/音量）物理键盘不会产生；
+//!      VK_APPS（0x5D 菜单键，2026-09-06 纳入）物理键盘仅全尺寸键盘右 Ctrl
+//!      旁的上下文菜单键、实际极罕见。两者无需武装直接吞（见
+//!      docs/investigations/2026-09-06-left-double-response-arm-deadlock.md
+//!      的结构性武装死锁：孤立按压首沿在 60ms 有界等待内无法武装必泄漏）；
+//!   2. 其余 VK（方向/Enter/Home/TV/睡眠/音量 VK）需"武装"：Raw Input
 //!      监听器观察到该按键的 HID 报文（独立管线，不受键盘 LL 钩子影响）后
 //!      武装对应按键；钩子在按下沿做 60ms 有界等待（key_suppressor 同款，
 //!      覆盖监听线程消息泵的调度延迟）。RIT 先投递 WM_INPUT 再调用钩子，
@@ -55,6 +59,11 @@ mod windows_impl {
     /// 泄漏一次并经由 Raw Input 武装；此后 4s 内的后续按压（含吞键自我
     /// 续期）全部正确吞下。代价：遥控器按键后 4s 内物理键盘同 VK 按压
     /// 会被误吞（用户已确认接受）。
+    ///
+    /// 直接归因族（[`direct_attributed`]，VK 0xFF + VK_APPS）不受此死锁
+    /// 约束：无需武装即可吞，孤立首按也不泄漏。方向/Enter/Home/TV 等
+    /// 常见物理键 VK 不能直接归因，>4s 间隔的孤立首按泄漏仍是结构性残留
+    /// （Helper 轨解决）。
     const ARM_GRACE_MS: u64 = 4_000;
     /// 链头 bump 的线程消息（WM_APP 私有区，与 key_suppressor 错开）。
     const WM_HOOK_BUMP: u32 = WM_APP + 0x61;
@@ -97,6 +106,19 @@ mod windows_impl {
         mask != 0 && (mask >> button.ordinal()) & 1 == 1
     }
 
+    /// 直接归因族（无需武装即可吞）：
+    /// - VK 0xFF（厂商键：返回/电源/音量）：物理键盘不会产生未分配 VK；
+    /// - VK_APPS 0x5D（菜单键）：物理键盘仅全尺寸键盘右 Ctrl 旁的上下文
+    ///   菜单键，实际极罕见。2026-09-06 纳入（用户报障：菜单键配置映射后
+    ///   原生上下文菜单与映射动作双执行）：RC003 上该键走键盘孪生事件，
+    ///   孤立按压首沿结构性无法武装（武装死锁），每次必泄漏原生菜单指令。
+    ///   代价：菜单键已映射且门控就绪期间，物理键盘的上下文菜单键按压
+    ///   同样被吞并触发映射动作（用户配置映射即表达替换意图；取消映射
+    ///   即恢复透传）。
+    pub fn direct_attributed(vk_code: u32) -> bool {
+        vk_code == 0xFF || vk_code == 0x5D
+    }
+
     fn armed(button: RemoteButton) -> bool {
         let until = ARMED_UNTIL_MS[button.ordinal()].load(Ordering::Relaxed);
         until != 0 && now_ms() < until
@@ -113,7 +135,8 @@ mod windows_impl {
     ///
     /// - 注入事件一律放行；
     /// - 未映射/总开关关闭/监听器停止 → 放行（替换语义不生效=原始行为）；
-    /// - VK 0xFF 族直接归因（物理键盘不产生未分配 VK）；其余按下沿按武装归因；
+    /// - 直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键，见 [`direct_attributed`]）
+    ///   无需武装；其余按下沿按武装归因；
     /// - 释放沿只看按住配对：本次按住的 DOWN 全被吞才吞 UP（防粘键规则）。
     #[allow(clippy::too_many_arguments)]
     pub fn decide(
@@ -144,6 +167,13 @@ mod windows_impl {
             Some(false) => false,
             _ => down_swallowed,
         }
+    }
+
+    /// 取走一次按住的配对裁决（UP 沿无论吞放都消费条目，纯函数供单测）：
+    /// true=本次按住的 DOWN 全部被吞（吞 UP）；false/缺失=放行 UP。
+    /// 条目在 UP 沿必定清除——泄漏污染不跨按住残留。
+    pub fn take_up_pairing(pairing: &mut HashMap<(u16, u16), bool>, key: (u16, u16)) -> bool {
+        pairing.remove(&key).unwrap_or(false)
     }
 
     fn feed_edge(button: RemoteButton, is_pressed: bool) {
@@ -187,25 +217,22 @@ mod windows_impl {
         }
 
         if is_key_up {
+            // UP 沿无论吞放都消费配对条目：泄漏污染只在"本次按住"内生效
+            //（2026-09-06 调查档案"后续发现"的修复——此前泄漏后的条目跨按住
+            // 残留，导致后续被正确吞下的按压仍漏出原生 UP）。
             let swallow = HOLD_PAIRING.with(|pairing| {
-                pairing
-                    .borrow()
-                    .get(&(vk_code as u16, make_code))
-                    .copied()
-                    .unwrap_or(false)
+                take_up_pairing(&mut pairing.borrow_mut(), (vk_code as u16, make_code))
             });
             if swallow {
-                HOLD_PAIRING.with(|pairing| {
-                    pairing.borrow_mut().remove(&(vk_code as u16, make_code));
-                });
                 SWALLOWED_EDGES.fetch_add(1, Ordering::Relaxed);
                 feed_edge(button, false);
             }
             return swallow;
         }
 
-        // 按下沿：VK 0xFF 族直接归因；其余等待武装（有界 60ms）。
-        let attributed = if vk_code == 0xFF {
+        // 按下沿：直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键）无需武装；
+        // 其余等待武装（有界 60ms）。
+        let attributed = if direct_attributed(vk_code) {
             true
         } else if armed(button) {
             true
@@ -470,6 +497,46 @@ mod tests {
         assert!(decide(
             0xFF, 0x6A, false, false, true, false, HOLD_NONE, true
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn menu_vk_apps_is_directly_attributed_without_arming() {
+        // VK_APPS（0x5D）菜单键：物理键盘极罕见，纳入直接归因族——
+        // 孤立首按（无武装）也吞，原生上下文菜单指令不再泄漏进 OS
+        //（RC003 武装死锁的结构性残留，2026-09-06 用户报障菜单键双响应）。
+        assert!(windows_impl::direct_attributed(0x5D));
+        // 直接归因 → 未武装也吞。
+        assert!(decide(
+            0x5D, 0x5D, false, false, true, false, HOLD_NONE, true
+        ));
+        // 与 0xFF 族同款：注入的 VK_APPS 一律放行（防自吞反馈环）。
+        assert!(!decide(
+            0x5D, 0x5D, false, true, true, false, HOLD_NONE, true
+        ));
+        // 常见物理键 VK 不纳入直接归因（Home 0x24 / TV OEM_3 0xC0 / Enter 0x0D）。
+        assert!(!windows_impl::direct_attributed(0x24));
+        assert!(!windows_impl::direct_attributed(0xC0));
+        assert!(!windows_impl::direct_attributed(0x0D));
+        assert!(windows_impl::direct_attributed(0xFF));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn up_edge_consumes_pairing_entry_even_when_leaked() {
+        // UP 沿无论吞放都消费配对条目（take_up_pairing）：
+        // 泄漏污染只在"本次按住"内生效，不跨按住残留。
+        let mut pairing = std::collections::HashMap::new();
+        // 第一次按住：DOWN 泄漏（false）→ UP 放行且条目被消费。
+        pairing.insert((0x5D, 0x5D), false);
+        assert!(!windows_impl::take_up_pairing(&mut pairing, (0x5D, 0x5D)));
+        assert!(pairing.is_empty(), "泄漏条目必须在 UP 沿清除");
+        // 第二次按住：DOWN 全吞 → UP 吞（不受上一次泄漏污染）。
+        pairing.insert((0x5D, 0x5D), true);
+        assert!(windows_impl::take_up_pairing(&mut pairing, (0x5D, 0x5D)));
+        assert!(pairing.is_empty(), "全吞条目同样在 UP 沿清除");
+        // 配对未知（钩子中途启动）→ 放行。
+        assert!(!windows_impl::take_up_pairing(&mut pairing, (0x5D, 0x5D)));
     }
 
     #[cfg(windows)]
