@@ -103,6 +103,14 @@ const UNMAPPABLE_BUTTONS = computed<ReadonlySet<RemoteButton>>(() => {
   return new Set<RemoteButton>(["back", "volume_up", "volume_down"]);
 });
 
+/**
+ * 策略性不支持自定义的按键（2026-09-07 用户决策，与型号无关）：左键——
+ * 不同键映射的孤立冷首按必附带一次原生方向动作（结构性泄漏，无法在软件
+ * 层消除），左键保持原生方向键行为，不提供配置入口；存量左键配置由后端
+ * （settings 持久化层 + 映射引擎）双重剥离。
+ */
+const NON_CUSTOMIZABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>(["left"]);
+
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
     x: remoteLeft.value + REMOTE_WIDTH * placement.anchor[0],
@@ -354,21 +362,21 @@ function isActivePreset(keys: KeyCode[]): boolean {
 }
 
 /**
- * 单响应提示（信息性，不做门控）：武装族（确定/方向/主页，按按键判定、
- * 任意触发均适用）与 TV 的孤立冷首按会附带一次原生按键动作（结构性
- * 泄漏，调查已归档）；4 秒内连按与直接归因族（电源/菜单等）严格单响应，
- * 同键映射由泄漏对冲保证单响应。
+ * 编辑器提示（信息性）：Home/TV 已落地"遥控器优先"（2026-09-07 方案 C）——
+ * 已配置映射且遥控器连接期间原生按键被接管，任意按压（含闲置后首次）严格
+ * 单响应；确定/方向的同键映射仍由泄漏对冲保证单响应，其余配置冷首按附带
+ * 一次原生动作（结构性泄漏）。
  */
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  if (button === "home" || button === "tv") {
+    return "提示：保存后本按键启用“遥控器优先”——遥控器连接期间原生按键（Home / `）被接管，任意按压（含闲置后首次）严格单响应；此期间物理键盘上的对应按键将触发映射动作，断开遥控器或删除本键映射即恢复原生。";
+  }
   if (shortcutCapability(button, "single", remoteModel.value) === "identity") {
     const identity = identityShortcutByButton[button];
     const label = identity ? chordLabel({ keys: [identity] }) : "";
     return `提示：此按键闲置约 4 秒后的首次按压会附带一次原生按键动作（结构性泄漏，调查已归档）；4 秒内连按严格单响应，单击配置为同键映射（${label}）时由引擎对冲为单响应。`;
-  }
-  if (button === "tv") {
-    return "提示：此按键闲置约 4 秒后的首次按压会附带一次 ` 原生输入（结构性泄漏，调查已归档）；4 秒内连按严格单响应。";
   }
   return null;
 });
@@ -730,11 +738,16 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
+            :disabled="
+              UNMAPPABLE_BUTTONS.has(placement.button) ||
+              NON_CUSTOMIZABLE_BUTTONS.has(placement.button)
+            "
             :title="
               UNMAPPABLE_BUTTONS.has(placement.button)
                 ? '此按键暂不支持自定义，按键功能保持原样'
-                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
+                : NON_CUSTOMIZABLE_BUTTONS.has(placement.button)
+                  ? '左键不支持自定义映射：避免闲置后首次按压同时触发原生方向动作与映射动作；按键保持原生方向键行为'
+                  : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
             "
             @click.stop="openEditor(placement.button, trigger)"
           >

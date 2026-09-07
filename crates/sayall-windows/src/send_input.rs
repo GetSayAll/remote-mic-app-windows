@@ -384,6 +384,11 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 
 impl ButtonMappings {
     pub fn normalized(mut self) -> Result<Self, SendInputError> {
+        // 左键不支持自定义映射（2026-09-07 用户决策）：不同键映射的孤立
+        // 冷首按必泄漏原生方向动作（结构性残留，无法在软件层消除），策略
+        // 上移除左键自定义——恒原生透传。持久化层与引擎层（set_mappings）
+        // 双重剥离，存量配置在加载/保存时自动清除。
+        self.actions.remove(&RemoteButton::Left);
         for actions in self.actions.values_mut() {
             for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
                 if let ButtonAction::Shortcut { chord } = action {
@@ -931,5 +936,37 @@ mod tests {
         let encoded = serde_json::to_string(&mappings).unwrap();
         let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, mappings);
+    }
+
+    #[test]
+    fn normalized_strips_left_button_customization() {
+        // 左键不支持自定义（2026-09-07 用户决策）：normalized() 在持久化层
+        // 剥离左键配置（存量配置加载/保存时自动清除），其余按键不受影响。
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Left,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Backspace]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::LeftWindows, KeyCode::D]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let normalized = mappings.normalized().unwrap();
+        assert!(
+            !normalized.actions.contains_key(&RemoteButton::Left),
+            "左键自定义必须被策略剥离"
+        );
+        assert!(normalized.actions.contains_key(&RemoteButton::Tv));
+        assert_eq!(normalized.mapped_mask(), 1u64 << RemoteButton::Tv.ordinal());
     }
 }
