@@ -422,6 +422,28 @@ impl ButtonMappings {
     }
 }
 
+/// 遥控器按键的"原生 Windows 动作"等价键：按键映射引擎的泄漏对冲依据
+/// （见 button_mapping.rs 与 2026-09-06 调查档案修复记录）。映射动作与
+/// 原生动作相同（如 右→右、确定→Enter）且该次按压走了泄漏路径（原始键
+/// 已进 OS）时，注入会被跳过——原生动作已交付，注入即双响应。
+/// 厂商键（返回/电源 VK 0xFF 族，Windows 无默认动作）、TV（OEM_3 `~/~）
+/// 无对应 KeyCode → None：这些键的映射动作无法由原生覆盖。
+pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
+    Some(match button {
+        RemoteButton::Ok => KeyCode::Enter,
+        RemoteButton::Home => KeyCode::Home,
+        RemoteButton::Right => KeyCode::Right,
+        RemoteButton::Left => KeyCode::Left,
+        RemoteButton::Down => KeyCode::Down,
+        RemoteButton::Up => KeyCode::Up,
+        RemoteButton::Menu => KeyCode::Apps,
+        RemoteButton::VolumeMute => KeyCode::VolumeMute,
+        RemoteButton::VolumeUp => KeyCode::VolumeUp,
+        RemoteButton::VolumeDown => KeyCode::VolumeDown,
+        RemoteButton::Back | RemoteButton::Tv | RemoteButton::Power => return None,
+    })
+}
+
 impl KeyChord {
     pub fn validated(self) -> Result<Self, SendInputError> {
         if self.keys.is_empty() {
@@ -597,6 +619,23 @@ mod tests {
         KeyChord {
             keys: keys.to_vec(),
         }
+    }
+
+    #[test]
+    fn native_key_covers_common_keys_and_none_for_vendor_and_tv() {
+        // 泄漏对冲依据：常见键的原生动作可由同键映射覆盖（泄漏路径免注入）。
+        assert_eq!(native_key(RemoteButton::Ok), Some(KeyCode::Enter));
+        assert_eq!(native_key(RemoteButton::Home), Some(KeyCode::Home));
+        assert_eq!(native_key(RemoteButton::Up), Some(KeyCode::Up));
+        assert_eq!(native_key(RemoteButton::Down), Some(KeyCode::Down));
+        assert_eq!(native_key(RemoteButton::Left), Some(KeyCode::Left));
+        assert_eq!(native_key(RemoteButton::Right), Some(KeyCode::Right));
+        assert_eq!(native_key(RemoteButton::Menu), Some(KeyCode::Apps));
+        // 厂商键（Windows 无默认动作）与 TV（OEM_3 `~/~ 无对应 KeyCode）：
+        // 原生无法覆盖，泄漏路径只能注入（结构性双响应残留，Helper 轨解决）。
+        assert_eq!(native_key(RemoteButton::Back), None);
+        assert_eq!(native_key(RemoteButton::Power), None);
+        assert_eq!(native_key(RemoteButton::Tv), None);
     }
 
     #[test]
