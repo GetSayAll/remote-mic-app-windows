@@ -18,7 +18,11 @@
 - Windows CI 可生成带 SHA-256 和来源元数据的未签名 NSIS Preview artifact；
 - Windows CI、来源归属和真机测试手册。
 
-当前代码尚未在 Windows 主机上分别完成真实 RC001 和 RC003 运行验收，VB-CABLE 回环也未验证，因此不提供公开可安装版本，不能宣称已经可作为系统麦克风使用。CI 生成的 NSIS 仅用于验证打包结构，明确未签名、短期保留，不得作为公开发布包交付。
+RC003（小米蓝牙遥控器 2 Pro）已在 Windows 上完成普通用户路径验收：全新安装、连接、VB-CABLE 输出及微信输入法语音转文字均实际通过。RC001 的 Windows 真机验收仍为 `deferred`，不能据此宣称 RC001 已通过。公开的 v0.2.1 是预览版，包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
+
+## 用户安装与配置
+
+首次安装、遥控器配对、VB-CABLE、语音输入软件、按键映射、更新和排障步骤见 [安装与配置指南](docs/installation-and-configuration.md)。文档同时给出了 AI Agent 的安全执行边界与可验证的完成标准。
 
 ## 技术结构
 
