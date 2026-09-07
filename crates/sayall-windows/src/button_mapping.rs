@@ -15,6 +15,14 @@
 //!   进系统；此时注入会造成双输入，因此引擎保持观察模式）；
 //! - 监听器停止/设备移除 → 释放全部按住状态并取消计时（不触发动作）；
 //! - 语音键不参与映射（RemoteButton 无语音键条目，保持 ATVV 实时生命周期）。
+//!
+//! 泄漏对冲（2026-09-06 调查档案修复记录，结构性武装死锁的缓解）：常见
+//! 物理 VK（方向/Enter/Home/TV）不能直接归因（见 key_gate.rs），孤立首按
+//! 的原始键必泄漏进 OS。泄漏路径（[`EngineMessage::Keyboard`]，监听器按
+//! 设备路径过滤，只含遥控器事件）的按压会把该键标记为"原生已交付"：
+//! 若映射动作与原生动作相同（右→右 等，见 [`native_key`]），该次 Single
+//! 跳过注入——冷首按单响应；Long/Double 与按住连发始终注入（原生无法
+//! 交付组合语义/连发）。
 
 use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -29,7 +37,7 @@ use crate::key_gate;
 use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
-use crate::send_input::{ButtonAction, ButtonMappings, ButtonTrigger, KeyChord};
+use crate::send_input::{native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord};
 use crate::UsageCounters;
 
 /// 引擎消息（监听器/门控/宿主 → 引擎线程）。
@@ -260,6 +268,11 @@ fn engine_worker(
     let mut merger = ButtonStateMerger::default();
     let mut recognizer = GestureRecognizer::new();
     recognizer.configure(&read_lock(&mappings).clone());
+    // 泄漏对冲标记：本次按住的原始键已泄漏进 OS（原生动作已交付）的按键。
+    // 由 [`EngineMessage::Keyboard`]（泄漏路径）的按压边沿置位，Single 同键
+    // 映射触发时消费并跳过注入；门控吞下的按压（[`EngineMessage::GateEdge`]）
+    // 置位前清除。见模块文档"泄漏对冲"。
+    let mut native_pending: BTreeSet<RemoteButton> = BTreeSet::new();
 
     loop {
         let timeout = recognizer
@@ -278,6 +291,7 @@ fn engine_worker(
                             &state,
                             &gesture_callbacks,
                             &injector,
+                            &mut native_pending,
                         );
                     }
                     continue;
@@ -294,6 +308,12 @@ fn engine_worker(
             EngineMessage::Keyboard(event) => {
                 let now = Instant::now();
                 let edges = merger.update_keyboard(event);
+                // 泄漏路径的按压边沿：原生动作已进 OS，标记待对冲。
+                for edge in &edges {
+                    if edge.is_pressed {
+                        native_pending.insert(edge.button);
+                    }
+                }
                 handle_edges(
                     edges,
                     now,
@@ -306,6 +326,7 @@ fn engine_worker(
                     &gesture_callbacks,
                     &injector,
                     &usage,
+                    &mut native_pending,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -323,11 +344,16 @@ fn engine_worker(
                     &gesture_callbacks,
                     &injector,
                     &usage,
+                    &mut native_pending,
                 );
             }
             EngineMessage::GateEdge(edge) => {
                 let now = Instant::now();
                 let edges = merger.apply_keyboard_button_edge(edge.button, edge.is_pressed);
+                // 门控吞下的按压：原生动作未进 OS，清除待对冲标记。
+                if edge.is_pressed {
+                    native_pending.remove(&edge.button);
+                }
                 handle_edges(
                     edges,
                     now,
@@ -340,6 +366,7 @@ fn engine_worker(
                     &gesture_callbacks,
                     &injector,
                     &usage,
+                    &mut native_pending,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
@@ -353,6 +380,7 @@ fn engine_worker(
                 // 释放全部按住状态：取消所有手势计时，不触发动作。
                 recognizer.release_all();
                 let edges = merger.release_all();
+                native_pending.clear();
                 let now = Instant::now();
                 handle_edges(
                     edges,
@@ -366,11 +394,14 @@ fn engine_worker(
                     &gesture_callbacks,
                     &injector,
                     &usage,
+                    &mut native_pending,
                 );
             }
             EngineMessage::MappingsChanged => {
                 let mappings = read_lock(&mappings).clone();
                 recognizer.configure(&mappings);
+                // 配置变化重置全部手势状态：挂起的泄漏对冲标记一并失效。
+                native_pending.clear();
                 let configured = crate::raw_input::ALL_BUTTONS
                     .iter()
                     .filter(|button| {
@@ -401,6 +432,7 @@ fn handle_edges(
     gesture_callbacks: &Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: &Arc<dyn MappingInjector>,
     usage: &Arc<UsageCounters>,
+    native_pending: &mut BTreeSet<RemoteButton>,
 ) {
     if edges.is_empty() {
         return;
@@ -449,11 +481,13 @@ fn handle_edges(
                 state,
                 gesture_callbacks,
                 injector,
+                native_pending,
             );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fire_gesture(
     button: RemoteButton,
     trigger: ButtonTrigger,
@@ -461,6 +495,7 @@ fn fire_gesture(
     state: &Arc<Mutex<EngineState>>,
     gesture_callbacks: &Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: &Arc<dyn MappingInjector>,
+    native_pending: &mut BTreeSet<RemoteButton>,
 ) {
     let fired = FiredGesture { button, trigger };
     {
@@ -493,6 +528,24 @@ fn fire_gesture(
             button, trigger
         ));
         return;
+    }
+    // 泄漏对冲：该按住的原始键已泄漏进 OS（原生动作已交付）。Single 且映射
+    // 动作与原生动作相同（右→右 等）时跳过注入（原生已交付，注入即双响应）；
+    // 其余触发（Long/Double/连发/不同动作）始终注入——原生无法交付组合
+    // 语义与连发。标记在此消费，对冲只作用于本次按住的首个 Single。
+    if native_pending.remove(&button) {
+        if trigger == ButtonTrigger::Single {
+            let native_covers = matches!(&action, ButtonAction::Shortcut { chord }
+                if chord.keys.len() == 1
+                    && native_key(button).is_some_and(|native| chord.keys[0] == native));
+            if native_covers {
+                crate::ble::gatt_note(format!(
+                    "map_skip_inject reason=native_covers_action button={:?} trigger=single",
+                    button
+                ));
+                return;
+            }
+        }
     }
     match action {
         ButtonAction::Disabled => {}
@@ -614,6 +667,189 @@ mod tests {
             _ => 0x0028,
         };
         BTreeSet::from([usage])
+    }
+
+    /// 泄漏路径的遥控器键盘事件（监听器按设备路径过滤后投递给引擎的形态）。
+    fn keyboard_event(virtual_key: u16, message: u32) -> RawKeyboardEvent {
+        RawKeyboardEvent {
+            make_code: 0,
+            flags: 0,
+            virtual_key,
+            message,
+        }
+    }
+
+    const KEYDOWN: u32 = 0x0100;
+    const KEYUP: u32 = 0x0101;
+
+    /// 泄漏对冲套件（2026-09-06 调查档案修复记录）：泄漏路径
+    /// （[`EngineMessage::Keyboard`]，监听器按设备路径过滤=遥控器专用）的
+    /// 按压边沿把该键标记为"原生已交付"——同键映射（上→上）的 Single
+    /// 跳过注入（原生动作已进 OS），连发/不同键映射/门控路径照常注入。
+    ///
+    /// 并行测试下其它用例（open_app）会启停自己的 KeyGate 并拉低共享的
+    /// GATE_ACTIVE：先让出起跑窗口，且每个场景前确保门控存活（先完整
+    /// 退出旧门控再启动新门控，避免 Drop 的 GATE_ACTIVE=false 覆盖新值）。
+    #[test]
+    fn leak_suppression_suite() {
+        // 起跑让位：等其它启停门控的用例完成，避免共享 GATE_ACTIVE 抖动。
+        std::thread::sleep(Duration::from_millis(500));
+        let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
+        let ensure_gate = |gate: &mut Option<crate::key_gate::KeyGate>| {
+            if !crate::key_gate::is_gate_thread_alive() {
+                *gate = None;
+                std::thread::sleep(Duration::from_millis(50));
+                *gate = Some(crate::key_gate::KeyGate::start());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+        );
+        let single = |key: KeyCode| ButtonAction::Shortcut {
+            chord: KeyChord { keys: vec![key] },
+        };
+        let mut mappings = ButtonMappings::default();
+        // 上→上：同键映射（泄漏对冲目标）。
+        mappings.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: single(KeyCode::Up),
+                ..ButtonActions::default()
+            },
+        );
+        // 右→右：同键映射，作为门控路径的对照组。
+        mappings.actions.insert(
+            RemoteButton::Right,
+            ButtonActions {
+                single: single(KeyCode::Right),
+                ..ButtonActions::default()
+            },
+        );
+        // 左→退格：不同键映射（原生无法覆盖，泄漏路径也必须注入）。
+        mappings.actions.insert(
+            RemoteButton::Left,
+            ButtonActions {
+                single: single(KeyCode::Backspace),
+                ..ButtonActions::default()
+            },
+        );
+        // 确定→Enter 单击 + 空格 双击：双击窗口补发单击的对冲场景。
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: single(KeyCode::Enter),
+                double: single(KeyCode::Space),
+                long: ButtonAction::Disabled,
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        let taps = || injector.taps.lock().unwrap().clone();
+
+        // 场景 1：泄漏路径的同键映射（上→上）首击不注入（原生已交付）。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYDOWN)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(
+            taps().is_empty(),
+            "泄漏路径同键映射的首击应由原生覆盖，不注入"
+        );
+        // 连发起始（350ms）前释放，避免连发干扰后续断言。
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYUP)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 场景 2（对照）：门控路径的同键映射（右→右）照常注入。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Right,
+                is_pressed: true,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            taps().as_slice(),
+            &[KeyChord {
+                keys: vec![KeyCode::Right]
+            }],
+            "门控路径（已吞键）的同键映射必须注入"
+        );
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Right,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 场景 3：泄漏路径的不同键映射（左→退格）照常注入。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x25, KEYDOWN)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            taps().as_slice(),
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::Right]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Backspace]
+                },
+            ],
+            "泄漏路径的不同键映射必须注入"
+        );
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x25, KEYUP)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 场景 4：泄漏路径的双击窗口补发单击（确定→Enter）由原生覆盖，不注入。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x0D, KEYDOWN)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x0D, KEYUP)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(450));
+        let after_window = taps();
+        assert_eq!(
+            after_window.len(),
+            2,
+            "双击窗口超时补发的同键单击应由原生覆盖：{after_window:?}"
+        );
+
+        // 场景 5：泄漏按住的连发照常注入（遥控器不自动重复，连发由引擎交付）。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYDOWN)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        let count = taps().len();
+        assert!(
+            count >= 4,
+            "泄漏按住的连发应注入（350/450/550/650ms），实际 {count} 次"
+        );
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYUP)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        drop(runtime);
+        drop(gate);
     }
 
     #[test]

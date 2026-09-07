@@ -109,8 +109,18 @@ const runtime: RuntimeSnapshot = {
   },
 };
 
-async function mountPage(): Promise<VueWrapper> {
-  const wrapper = mount(ButtonsPage, { props: { runtime } });
+async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promise<VueWrapper> {
+  const snapshot =
+    model === "rc003"
+      ? runtime
+      : {
+          ...runtime,
+          platform: {
+            ...runtime.platform,
+            connection: { ...runtime.platform.connection, remoteModel: model },
+          },
+        };
+  const wrapper = mount(ButtonsPage, { props: { runtime: snapshot } });
   await vi.waitFor(() => {
     if (!edgeHandler || !gestureHandler) throw new Error("事件订阅未完成");
   });
@@ -235,5 +245,84 @@ describe("buttons mapping page", () => {
         throw new Error("手势触发后格子未出现闪烁反馈");
       }
     });
+  });
+
+  /** 编辑器内按标签找 chip 并返回其禁用态。 */
+  function chipState(wrapper: VueWrapper, label: string): boolean {
+    const chip = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((element) => element.text().includes(label));
+    expect(chip, `未找到 chip：${label}`).toBeDefined();
+    return (chip!.element as HTMLButtonElement).disabled;
+  }
+
+  async function openCell(
+    wrapper: VueWrapper,
+    cardLabel: string,
+    triggerIndex: number,
+  ): Promise<void> {
+    const card = wrapper.findAll(".mapping-card").find((c) => c.text().includes(cardLabel));
+    expect(card, `未找到卡片：${cardLabel}`).toBeDefined();
+    await card!.findAll(".mapping-cell")[triggerIndex]!.trigger("click");
+    expect(wrapper.find(".mapping-editor").exists()).toBe(true);
+  }
+
+  it("全开放：确定·单击所有操作可配（注入链路已真机验证）+ 单响应提示", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "确定", 0);
+    expect(chipState(wrapper, "Enter")).toBe(false);
+    expect(chipState(wrapper, "Home")).toBe(false);
+    expect(chipState(wrapper, "空格")).toBe(false);
+    expect(chipState(wrapper, "粘贴")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    // 武装族按键显示冷首按原生副作用提示（信息性，不门控）。
+    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
+  });
+
+  it("全开放：确定·双击与 TV 所有操作可配 + 各自的单响应提示", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "确定", 1);
+    expect(chipState(wrapper, "Enter")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
+
+    await openCell(wrapper, "TV", 0);
+    expect(chipState(wrapper, "Enter")).toBe(false);
+    expect(chipState(wrapper, "静音")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).toContain("` 原生输入");
+  });
+
+  it("电源（直接归因族）全开放且无单响应提示", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "电源", 2);
+    expect(chipState(wrapper, "Esc")).toBe(false);
+    expect(chipState(wrapper, "截图")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
+  });
+
+  it("型号感知：RC003 返回/音量±格子禁用，RC001 开放可编辑", async () => {
+    const rc003 = await mountPage("rc003");
+    const backCell = rc003
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    expect((backCell.element as HTMLButtonElement).disabled).toBe(true);
+
+    const rc001 = await mountPage("rc001");
+    const backCellRc001 = rc001
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    expect((backCellRc001.element as HTMLButtonElement).disabled).toBe(false);
+    await backCellRc001.trigger("click");
+    expect(chipState(rc001, "Enter")).toBe(false);
+    // RC001 的直接归因族按键无单响应提示。
+    expect(rc001.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 });

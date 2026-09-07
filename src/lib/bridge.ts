@@ -714,6 +714,62 @@ export function buttonTriggerLabel(trigger: ButtonTrigger): string {
   }[trigger];
 }
 
+/**
+ * 武装族按键的"同键映射"表（对齐 crates/sayall-windows/src/send_input.rs
+ * 的 native_key）：映射动作与原生动作相同时，映射引擎的泄漏对冲保证
+ * 冷首按单响应（原生动作已交付，引擎跳过注入）。
+ */
+export const identityShortcutByButton: Partial<Record<RemoteButton, KeyCode>> = {
+  ok: "enter",
+  up: "up",
+  down: "down",
+  left: "left",
+  right: "right",
+  home: "home",
+};
+
+export type ShortcutCapability = "all" | "identity" | "none";
+
+/**
+ * 按键 × 触发 × 型号 的"单响应能力"判定（2026-09-06 定稿；注入链路已由
+ * examples/preset_inject_probe.rs 真机验证 36/36 全部正确——所有可见按键
+ * 的所有配置均真实生效，本矩阵**只用于编辑器的信息提示**，不做门控）：
+ *
+ * - **all**（直接归因族：电源 VK 0xFF/0x5F、菜单 VK_APPS、RC001 返回/
+ *   音量± VK 0xFF 族）：原始键从不泄漏 → 任意配置严格单响应；
+ * - **identity**（武装族常见物理 VK：确定/方向/主页）：孤立冷首按原始键
+ *   必泄漏（结构性武装死锁，公开 API 内不可根除）→ 同键映射由泄漏对冲
+ *   保证单响应，其他映射"配置动作正常执行 + 冷首按附带一次原生动作"；
+ * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与 RC003/未知型号的
+ *   返回/音量±（输入栈不可见，配置无法生效——这部分仍以格子禁用表达，
+ *   见 ButtonsPage 的 UNMAPPABLE_BUTTONS）。
+ */
+export function shortcutCapability(
+  button: RemoteButton,
+  trigger: ButtonTrigger,
+  model: RemoteModel,
+): ShortcutCapability {
+  if (
+    button === "power" ||
+    button === "menu" ||
+    (model === "rc001" &&
+      (button === "back" || button === "volume_up" || button === "volume_down"))
+  ) {
+    return "all";
+  }
+  if (
+    button === "back" ||
+    button === "volume_up" ||
+    button === "volume_down" ||
+    button === "tv"
+  ) {
+    // RC003/未知：返回/音量±输入栈不可见；TV 无同键映射可表达。
+    return "none";
+  }
+  // 武装族（确定/方向/主页）：单击可配同键映射（对冲单响应）。
+  return trigger === "single" ? "identity" : "none";
+}
+
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
   backspace: "退格",
