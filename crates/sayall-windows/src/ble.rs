@@ -21,6 +21,7 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::{
 };
 use windows::Devices::Bluetooth::{
     BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice,
+    BluetoothLEPreferredConnectionParameters, BluetoothLEPreferredConnectionParametersRequest,
 };
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
@@ -1263,6 +1264,9 @@ struct BleSession {
     audio_token: i64,
     control_token: i64,
     connection_token: i64,
+    /// ThroughputOptimized 连接参数请求（2026-09-07 新增）：持有以维持偏好
+    /// 生效；Windows 11 前的宿主上请求失败时为 None（降级默认参数）。
+    params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
     microphone_opened: bool,
     closed: bool,
     cleanup_failure: Option<String>,
@@ -1278,6 +1282,32 @@ impl BleSession {
         let device = block_on(
             BluetoothLEDevice::FromIdAsync(&HSTRING::from(device_id)).map_err(windows_error)?,
         )?;
+        // 连接参数吞吐优化（2026-09-07）：RC001 送达率实测仅 ~52%（18 会话
+        // 全部 39%-68%，同 09-04 RC003 初次配对的 55% 症状；09-04 RC001
+        // 基准为 100%）。ThroughputOptimized 收紧连接间隔，提升 15ms/120B
+        // 音频帧的实时送达；对两型号统一生效（RC003 只会更好）。
+        // Windows 11（22000+）起可用：旧宿主调用失败降级默认参数，不阻断
+        // 连接，结果落 gatt_note（"功能点必须自带日志"）。
+        let params_request = match BluetoothLEPreferredConnectionParameters::ThroughputOptimized() {
+            Ok(parameters) => match device.RequestPreferredConnectionParameters(&parameters) {
+                Ok(request) => {
+                    gatt_note("conn_params result=ok mode=throughput_optimized".to_owned());
+                    Some(request)
+                }
+                Err(error) => {
+                    gatt_note(format!(
+                        "conn_params result=unavailable err={error} mode=throughput_optimized"
+                    ));
+                    None
+                }
+            },
+            Err(error) => {
+                gatt_note(format!(
+                    "conn_params result=unavailable err={error} mode=throughput_optimized"
+                ));
+                None
+            }
+        };
         let name = device.Name().map_err(windows_error)?.to_string();
         let inferred_model = remote_model_from_name(&name);
         let model = if inferred_model == RemoteModel::Unknown {
@@ -1364,6 +1394,7 @@ impl BleSession {
             audio_token,
             control_token,
             connection_token,
+            params_request,
             microphone_opened: false,
             closed: false,
             cleanup_failure: None,
@@ -1453,6 +1484,10 @@ impl BleSession {
         // notification disable remains best-effort in that expected state.
         let _ = disable_notifications(&self.audio);
         let _ = disable_notifications(&self.control);
+        // 连接参数请求先于设备释放（request 活跃期与 device 绑定）。
+        if let Some(request) = self.params_request.take() {
+            let _ = request.Close();
+        }
         if let Err(error) = self.service.Close() {
             errors.push(format!("关闭 GATT service：{error}"));
         }
