@@ -325,23 +325,27 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 
-  it("型号感知：RC003 返回/音量±格子禁用，RC001 开放可编辑", async () => {
-    const rc003 = await mountPage("rc003");
-    const backCell = rc003
-      .findAll(".mapping-card")
-      .find((c) => c.text().includes("返回"))!
-      .findAll(".mapping-cell")[0]!;
-    expect((backCell.element as HTMLButtonElement).disabled).toBe(true);
-
-    const rc001 = await mountPage("rc001");
-    const backCellRc001 = rc001
-      .findAll(".mapping-card")
-      .find((c) => c.text().includes("返回"))!
-      .findAll(".mapping-cell")[0]!;
-    expect((backCellRc001.element as HTMLButtonElement).disabled).toBe(false);
-    await backCellRc001.trigger("click");
-    expect(chipState(rc001, "Enter")).toBe(false);
-    // RC001 的直接归因族按键无单响应提示。
-    expect(rc001.find(".mapping-editor").text()).not.toContain("原生按键动作");
+  it("返回/音量±全型号禁用（2026-09-07 用户决策：RC001 同样不开放）", async () => {
+    for (const model of ["rc003", "rc001", "unknown"] as const) {
+      const wrapper = await mountPage(model);
+      const backCell = wrapper
+        .findAll(".mapping-card")
+        .find((c) => c.text().includes("返回"))!
+        .findAll(".mapping-cell")[0]!;
+      expect(
+        (backCell.element as HTMLButtonElement).disabled,
+        `${model} 返回格子应禁用`,
+      ).toBe(true);
+      const volumeCell = wrapper
+        .findAll(".mapping-card")
+        .find((c) => c.text().includes("音量"))!
+        .findAll(".mapping-cell")[0]!;
+      expect(
+        (volumeCell.element as HTMLButtonElement).disabled,
+        `${model} 音量格子应禁用`,
+      ).toBe(true);
+      await backCell.trigger("click");
+      expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+    }
   });
 });

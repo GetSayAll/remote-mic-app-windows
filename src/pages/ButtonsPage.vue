@@ -90,18 +90,17 @@ const remoteModel = computed<RemoteModel>(
 );
 
 /**
- * 输入栈不可见的按键（卡片保留、格子禁用、已有配置保留显示）：
- * 返回/音量± 在 RC003 上不进入 Windows 输入栈（2026-09-05 调查归档，
- * docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md），
- * 配置无法生效；RC001 上三键以 VK 0xFF 厂商键族到达（可见且直接归因），
- * 可正常映射。未知型号按 RC003 保守处理。
+ * 不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
+ * 返回/音量±——RC003 上不进 Windows 输入栈（配置无法生效，2026-09-05
+ * 调查归档 docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md）；
+ * RC001 上虽以 VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而
+ * 不开放配置。存量配置由后端（settings 持久化层 + 映射引擎）双重剥离。
  */
-const UNMAPPABLE_BUTTONS = computed<ReadonlySet<RemoteButton>>(() => {
-  if (remoteModel.value === "rc001") {
-    return new Set<RemoteButton>();
-  }
-  return new Set<RemoteButton>(["back", "volume_up", "volume_down"]);
-});
+const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
+  "back",
+  "volume_up",
+  "volume_down",
+]);
 
 /**
  * 策略性不支持自定义的按键（2026-09-07 用户决策，与型号无关）：左键——
