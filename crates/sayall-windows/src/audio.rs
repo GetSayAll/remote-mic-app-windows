@@ -5,7 +5,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wasapi::{
     AudioClient, AudioRenderClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
 };
@@ -18,6 +18,7 @@ const MESSAGE_QUEUE_CAPACITY: usize = 32;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+const SESSION_MUTE_WATCH_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct AudioRuntime {
     sender: SyncSender<AudioMessage>,
@@ -497,6 +498,7 @@ fn begin_session(
     ) {
         return Err(PlatformError::AudioBusy);
     }
+    active_sink.ensure_unmuted("begin_session")?;
     active_sink
         .reset()
         .map_err(|error| audio_error("重置 WASAPI 会话", error))?;
@@ -597,10 +599,14 @@ fn fail_audio(
 }
 
 struct AudioSink {
+    endpoint_id: String,
     name: String,
     client: AudioClient,
     render_client: AudioRenderClient,
+    session_volumes: Vec<windows::Win32::Media::Audio::ISimpleAudioVolume>,
+    is_virtual_cable: bool,
     started: bool,
+    last_session_mute_check: Instant,
 }
 
 impl AudioSink {
@@ -613,6 +619,8 @@ impl AudioSink {
         let name = device
             .get_friendlyname()
             .map_err(|error| audio_error("读取所选端点名称", error))?;
+        let is_virtual_cable = crate::is_virtual_cable_output_name(&name);
+        ensure_cable_endpoint_unmuted(endpoint_id, is_virtual_cable, "open")?;
         let mut client = device
             .get_iaudioclient()
             .map_err(|error| audio_error("创建 WASAPI 客户端", error))?;
@@ -637,15 +645,100 @@ impl AudioSink {
                 },
             )
             .map_err(|error| audio_error("初始化 16 kHz WASAPI 输出", error))?;
+        if is_virtual_cable {
+            client
+                .get_audiosessioncontrol()
+                .and_then(|control| control.set_ducking_preference(true))
+                .map_err(|error| audio_error("关闭 SayAll 会话的系统通信自动静音", error))?;
+            crate::ble::gatt_note(
+                "session_ducking_optout checkpoint=open result=ok enabled=true".to_owned(),
+            );
+        }
         let render_client = client
             .get_audiorenderclient()
             .map_err(|error| audio_error("创建 WASAPI 渲染客户端", error))?;
-        Ok(Self {
+        let mut sink = Self {
+            endpoint_id: endpoint_id.to_owned(),
             name,
             client,
             render_client,
+            session_volumes: Vec::new(),
+            is_virtual_cable,
             started: false,
-        })
+            last_session_mute_check: Instant::now(),
+        };
+        sink.ensure_session_unmuted("open", true)?;
+        Ok(sink)
+    }
+
+    fn ensure_unmuted(&mut self, checkpoint: &'static str) -> Result<(), PlatformError> {
+        ensure_cable_endpoint_unmuted(&self.endpoint_id, self.is_virtual_cable, checkpoint)?;
+        self.ensure_session_unmuted(checkpoint, true)
+    }
+
+    fn ensure_session_unmuted(
+        &mut self,
+        checkpoint: &'static str,
+        log_already_ok: bool,
+    ) -> Result<(), PlatformError> {
+        if !self.is_virtual_cable {
+            return Ok(());
+        }
+        let started = Instant::now();
+        self.last_session_mute_check = started;
+        if self.session_volumes.is_empty() {
+            self.session_volumes = process_audio_session_volumes(&self.endpoint_id)
+                .map_err(|error| audio_error("查找 SayAll 音频会话", error))?;
+        }
+        if self.session_volumes.is_empty() {
+            crate::ble::gatt_note(format!(
+                "session_unmute checkpoint={checkpoint} result=not_found elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            return Ok(());
+        }
+
+        let mut muted_before = 0_usize;
+        let mut muted_after = 0_usize;
+        let mut minimum_level = 1.0_f32;
+        for volume in &self.session_volumes {
+            let was_muted = unsafe { volume.GetMute() }
+                .map_err(|error| audio_error("读取 SayAll 会话静音状态", error))?
+                .as_bool();
+            minimum_level = minimum_level.min(
+                unsafe { volume.GetMasterVolume() }
+                    .map_err(|error| audio_error("读取 SayAll 会话音量", error))?,
+            );
+            if was_muted {
+                muted_before += 1;
+                unsafe { volume.SetMute(false, std::ptr::null()) }
+                    .map_err(|error| audio_error("解除 SayAll 会话静音", error))?;
+            }
+            if unsafe { volume.GetMute() }
+                .map_err(|error| audio_error("确认 SayAll 会话静音状态", error))?
+                .as_bool()
+            {
+                muted_after += 1;
+            }
+        }
+        if muted_after > 0 {
+            return Err(PlatformError::Audio(format!(
+                "SayAll 音频会话解除静音后仍有 {muted_after} 个会话处于静音"
+            )));
+        }
+        if muted_before > 0 || log_already_ok {
+            let result = if muted_before > 0 {
+                "unmuted"
+            } else {
+                "already_ok"
+            };
+            crate::ble::gatt_note(format!(
+                "session_unmute checkpoint={checkpoint} result={result} sessions={} muted_before={muted_before} muted_after={muted_after} min_level={minimum_level:.3} elapsed_ms={}",
+                self.session_volumes.len(),
+                started.elapsed().as_millis()
+            ));
+        }
+        Ok(())
     }
 
     fn is_active(&self) -> bool {
@@ -653,6 +746,9 @@ impl AudioSink {
     }
 
     fn pump(&mut self, queue: &mut VecDeque<i16>, draining: bool) -> Result<usize, PlatformError> {
+        if self.started && self.last_session_mute_check.elapsed() >= SESSION_MUTE_WATCH_INTERVAL {
+            self.ensure_session_unmuted("stream_watch", false)?;
+        }
         if !self.started && queue.len() < PREBUFFER_SAMPLES && !draining {
             return Ok(0);
         }
@@ -676,6 +772,7 @@ impl AudioSink {
                 .start_stream()
                 .map_err(|error| audio_error("启动 WASAPI 音频流", error))?;
             self.started = true;
+            self.ensure_session_unmuted("after_start", true)?;
         }
         Ok(frames)
     }
@@ -703,10 +800,128 @@ impl AudioSink {
     }
 }
 
+fn process_audio_session_volumes(
+    endpoint_id: &str,
+) -> windows::core::Result<Vec<windows::Win32::Media::Audio::ISimpleAudioVolume>> {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+        MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+    let device = unsafe { enumerator.GetDevice(&windows::core::HSTRING::from(endpoint_id)) }?;
+    let manager: IAudioSessionManager2 = unsafe { device.Activate(CLSCTX_ALL, None) }?;
+    let sessions = unsafe { manager.GetSessionEnumerator() }?;
+    let count = unsafe { sessions.GetCount() }?;
+    let process_id = std::process::id();
+    let mut volumes = Vec::new();
+    for index in 0..count {
+        let Ok(control) = (unsafe { sessions.GetSession(index) }) else {
+            continue;
+        };
+        let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+            continue;
+        };
+        if unsafe { control2.GetProcessId() }.ok() != Some(process_id) {
+            continue;
+        }
+        if let Ok(volume) = control.cast::<ISimpleAudioVolume>() {
+            volumes.push(volume);
+        }
+    }
+    Ok(volumes)
+}
+
 impl Drop for AudioSink {
     fn drop(&mut self) {
         let _ = self.reset();
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EndpointMuteStatus {
+    was_muted: bool,
+    is_muted: bool,
+    level: f32,
+}
+
+fn ensure_cable_endpoint_unmuted(
+    endpoint_id: &str,
+    is_virtual_cable: bool,
+    checkpoint: &'static str,
+) -> Result<(), PlatformError> {
+    if !is_virtual_cable {
+        crate::ble::gatt_note(format!(
+            "endpoint_unmute checkpoint={checkpoint} result=skipped reason=non_cable"
+        ));
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    match ensure_endpoint_unmuted(endpoint_id) {
+        Ok(status) => {
+            let result = if status.was_muted {
+                "unmuted"
+            } else {
+                "already_ok"
+            };
+            crate::ble::gatt_note(format!(
+                "endpoint_unmute checkpoint={checkpoint} result={result} was_muted={} is_muted={} level={:.3} elapsed_ms={}",
+                status.was_muted,
+                status.is_muted,
+                status.level,
+                started.elapsed().as_millis()
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "endpoint_unmute checkpoint={checkpoint} result=failed elapsed_ms={} err={error}",
+                started.elapsed().as_millis()
+            ));
+            Err(audio_error("检查并恢复 CABLE Input 静音状态", error))
+        }
+    }
+}
+
+fn endpoint_volume(
+    endpoint_id: &str,
+) -> windows::core::Result<windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume> {
+    use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+    let device = unsafe { enumerator.GetDevice(&windows::core::HSTRING::from(endpoint_id)) }?;
+    unsafe { device.Activate(CLSCTX_ALL, None) }
+}
+
+/// CABLE Input 是内部传输端点：若端点主静音被外部改写，则在开流和每次语音
+/// 会话开始前恢复。只解除静音，不改用户设置的音量标量；设置后必须读回确认。
+fn ensure_endpoint_unmuted(endpoint_id: &str) -> windows::core::Result<EndpointMuteStatus> {
+    use windows::Win32::Foundation::E_FAIL;
+
+    let volume = endpoint_volume(endpoint_id)?;
+    let was_muted = unsafe { volume.GetMute()?.as_bool() };
+    let level = unsafe { volume.GetMasterVolumeLevelScalar()? };
+    if was_muted {
+        unsafe { volume.SetMute(false, std::ptr::null()) }?;
+    }
+    let is_muted = unsafe { volume.GetMute()?.as_bool() };
+    if is_muted {
+        return Err(windows::core::Error::new(
+            E_FAIL,
+            "CABLE Input 解除静音后读回仍为静音",
+        ));
+    }
+    Ok(EndpointMuteStatus {
+        was_muted,
+        is_muted,
+        level,
+    })
 }
 
 fn audio_error(operation: &'static str, error: impl std::fmt::Display) -> PlatformError {
@@ -738,6 +953,65 @@ impl Drop for WasapiApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    struct RestoreEndpointMute {
+        endpoint_id: String,
+        muted: bool,
+    }
+
+    #[cfg(windows)]
+    impl Drop for RestoreEndpointMute {
+        fn drop(&mut self) {
+            if let Ok(volume) = endpoint_volume(&self.endpoint_id) {
+                let _ = unsafe { volume.SetMute(self.muted, std::ptr::null()) };
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    struct RestoreProcessSessionMutes {
+        volumes: Vec<(windows::Win32::Media::Audio::ISimpleAudioVolume, bool)>,
+    }
+
+    #[cfg(windows)]
+    impl Drop for RestoreProcessSessionMutes {
+        fn drop(&mut self) {
+            for (volume, muted) in &self.volumes {
+                let _ = unsafe { volume.SetMute(*muted, std::ptr::null()) };
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn endpoint_muted(endpoint_id: &str) -> windows::core::Result<bool> {
+        let volume = endpoint_volume(endpoint_id)?;
+        unsafe { volume.GetMute().map(|value| value.as_bool()) }
+    }
+
+    #[cfg(windows)]
+    fn set_endpoint_muted(endpoint_id: &str, muted: bool) -> windows::core::Result<()> {
+        let volume = endpoint_volume(endpoint_id)?;
+        unsafe { volume.SetMute(muted, std::ptr::null()) }
+    }
+
+    #[cfg(windows)]
+    fn set_process_sessions_muted(endpoint_id: &str, muted: bool) -> windows::core::Result<usize> {
+        let volumes = process_audio_session_volumes(endpoint_id)?;
+        for volume in &volumes {
+            unsafe { volume.SetMute(muted, std::ptr::null()) }?;
+        }
+        Ok(volumes.len())
+    }
+
+    #[cfg(windows)]
+    fn process_sessions_are_unmuted(endpoint_id: &str) -> windows::core::Result<bool> {
+        let volumes = process_audio_session_volumes(endpoint_id)?;
+        Ok(!volumes.is_empty()
+            && volumes
+                .iter()
+                .all(|volume| unsafe { volume.GetMute() }.is_ok_and(|muted| !muted.as_bool())))
+    }
 
     fn streaming_state(generation: u64) -> Arc<Mutex<AudioSnapshot>> {
         Arc::new(Mutex::new(AudioSnapshot {
@@ -795,5 +1069,96 @@ mod tests {
                 .unwrap_err()
                 .contains("名称已变")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires SAYALL_TEST_CABLE_ENDPOINT_ID and mutates that endpoint's mute state"]
+    fn cable_endpoint_unmutes_on_open_and_each_session() {
+        let endpoint_id = std::env::var("SAYALL_TEST_CABLE_ENDPOINT_ID")
+            .expect("set SAYALL_TEST_CABLE_ENDPOINT_ID to the CABLE Input render endpoint");
+        wasapi::initialize_mta()
+            .ok()
+            .expect("initialize test COM apartment");
+        let _apartment = WasapiApartment;
+        let original_mute = endpoint_muted(&endpoint_id).expect("read initial endpoint mute");
+        let _restore = RestoreEndpointMute {
+            endpoint_id: endpoint_id.clone(),
+            muted: original_mute,
+        };
+
+        let runtime = AudioRuntime::new();
+        let endpoint = runtime
+            .list_endpoints()
+            .expect("list render endpoints")
+            .into_iter()
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .expect("configured endpoint must be active");
+        assert!(
+            endpoint.is_virtual_cable_candidate,
+            "test endpoint must be a recognized virtual CABLE render endpoint"
+        );
+
+        set_endpoint_muted(&endpoint_id, true).expect("mute endpoint before open");
+        runtime
+            .select_endpoint(endpoint_id.clone())
+            .expect("opening CABLE endpoint should self-heal mute");
+        assert!(!endpoint_muted(&endpoint_id).expect("read mute after open"));
+        let session_volumes = process_audio_session_volumes(&endpoint_id)
+            .expect("enumerate the initialized SayAll test session");
+        let _restore_sessions = RestoreProcessSessionMutes {
+            volumes: session_volumes
+                .iter()
+                .map(|volume| {
+                    (
+                        volume.clone(),
+                        unsafe { volume.GetMute() }
+                            .expect("read original SayAll test session mute")
+                            .as_bool(),
+                    )
+                })
+                .collect(),
+        };
+
+        assert!(
+            set_process_sessions_muted(&endpoint_id, true)
+                .expect("mute SayAll session before begin")
+                > 0,
+            "the initialized render session should be enumerable"
+        );
+
+        set_endpoint_muted(&endpoint_id, true).expect("mute endpoint after it is already open");
+        runtime
+            .begin_session(1)
+            .expect("beginning a session should self-heal endpoint and session mute");
+        assert!(!endpoint_muted(&endpoint_id).expect("read mute after begin_session"));
+        assert!(
+            process_sessions_are_unmuted(&endpoint_id).expect("read session mute after begin"),
+            "begin_session should unmute the SayAll session"
+        );
+
+        set_process_sessions_muted(&endpoint_id, true)
+            .expect("mute SayAll session before stream start");
+        runtime
+            .enqueue_samples(1, vec![0; PREBUFFER_SAMPLES])
+            .expect("enqueue enough samples to start the stream");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            process_sessions_are_unmuted(&endpoint_id)
+                .expect("read session mute after stream start"),
+            "starting the stream should unmute the SayAll session again"
+        );
+
+        set_process_sessions_muted(&endpoint_id, true)
+            .expect("mute SayAll session while streaming");
+        std::thread::sleep(SESSION_MUTE_WATCH_INTERVAL + Duration::from_millis(50));
+        assert!(
+            process_sessions_are_unmuted(&endpoint_id)
+                .expect("read session mute after stream watch"),
+            "the stream watch should recover a later session mute"
+        );
+        runtime
+            .interrupt_session()
+            .expect("clean up test audio session");
     }
 }
