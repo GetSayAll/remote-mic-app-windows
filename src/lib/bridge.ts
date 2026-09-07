@@ -737,12 +737,18 @@ export type ShortcutCapability = "all" | "identity" | "none";
  *
  * - **all**（直接归因族：电源 VK 0xFF/0x5F、菜单 VK_APPS、RC001 返回/
  *   音量± VK 0xFF 族）：原始键从不泄漏 → 任意配置严格单响应；
- * - **identity**（武装族常见物理 VK：确定/方向/主页）：孤立冷首按原始键
+ * - **identity**（武装族常见物理 VK：确定/方向）：孤立冷首按原始键
  *   必泄漏（结构性武装死锁，公开 API 内不可根除）→ 同键映射由泄漏对冲
  *   保证单响应，其他映射"配置动作正常执行 + 冷首按附带一次原生动作"；
  * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与 RC003/未知型号的
  *   返回/音量±（输入栈不可见，配置无法生效——这部分仍以格子禁用表达，
  *   见 ButtonsPage 的 UNMAPPABLE_BUTTONS）。
+ *
+ * 2026-09-07 增补（方案 C"遥控器优先"落地，key_gate 常驻抑制族）：
+ * Home/TV 已配置映射且遥控器连接期间原生按键被接管——任意按压（含孤立
+ * 冷首按）严格单响应，本矩阵的 identity/none 标注对这两键仅剩编辑参考
+ * 意义（见 ButtonsPage capabilityNote 的接管提示）。左键已策略性移除
+ * 自定义（NON_CUSTOMIZABLE_BUTTONS），不再进入本矩阵的编辑路径。
  */
 export function shortcutCapability(
   button: RemoteButton,
