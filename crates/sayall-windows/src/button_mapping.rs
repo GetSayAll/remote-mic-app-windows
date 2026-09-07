@@ -213,11 +213,9 @@ impl ButtonMappingRuntime {
 
     /// 更新按键映射：热加载到引擎 + 同步门控吞键配置。
     pub fn set_mappings(&self, mappings: ButtonMappings) {
-        let mut mappings = mappings;
-        // 左键不支持自定义（2026-09-07 用户决策）：不同键映射的孤立冷首按
-        // 必泄漏原生方向动作（结构性残留），策略上移除左键自定义——恒原生
-        // 透传。normalized() 已在持久化层剥离，此处兜底直连调用路径。
-        mappings.actions.remove(&RemoteButton::Left);
+        // 策略性不支持的按键（左键/返回/音量±，2026-09-07 用户决策）统一
+        // 剥离：normalized() 已在持久化层剥离，此处兜底直连调用路径。
+        let mappings = mappings.without_unsupported_buttons();
         *self
             .mappings
             .write()
@@ -1119,9 +1117,10 @@ mod tests {
     }
 
     #[test]
-    fn set_mappings_strips_left_button_and_sets_persistent_mask() {
-        // 左键策略剥离 + 常驻掩码联动：即使调用方传入左键配置（存量配置/
-        // 直连路径），引擎与门控都不得保留。
+    fn set_mappings_strips_unsupported_buttons_and_sets_persistent_mask() {
+        // 策略性不支持的按键（左键/返回/音量±，2026-09-07 用户决策）剥离 +
+        // 常驻掩码联动：即使调用方传入这些键的配置（存量配置/直连路径），
+        // 引擎与门控都不得保留。
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
@@ -1140,6 +1139,17 @@ mod tests {
             },
         );
         mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Escape],
+                    },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings.actions.insert(
             RemoteButton::Tv,
             ButtonActions {
                 single: ButtonAction::Shortcut {
@@ -1152,10 +1162,17 @@ mod tests {
         );
         runtime.set_mappings(mappings);
         let effective = runtime.mappings();
-        assert!(
-            !effective.actions.contains_key(&RemoteButton::Left),
-            "左键自定义必须被策略剥离"
-        );
+        for button in [
+            RemoteButton::Left,
+            RemoteButton::Back,
+            RemoteButton::VolumeUp,
+            RemoteButton::VolumeDown,
+        ] {
+            assert!(
+                !effective.actions.contains_key(&button),
+                "{button:?} 自定义必须被策略剥离"
+            );
+        }
         assert_eq!(
             effective
                 .actions
@@ -1167,9 +1184,13 @@ mod tests {
                 },
             }),
         );
-        // 引擎侧左键动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
+        // 引擎侧被剥离按键的动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
         assert_eq!(
             effective.action_for(RemoteButton::Left, ButtonTrigger::Single),
+            ButtonAction::Disabled,
+        );
+        assert_eq!(
+            effective.action_for(RemoteButton::Back, ButtonTrigger::Single),
             ButtonAction::Disabled,
         );
     }
