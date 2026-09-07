@@ -29,6 +29,7 @@
 - [ ] 使用真实 RC003 验证型号识别、BLE 配对、连接、断开、重连和首次语音。
 - [ ] 验证 `STREAM_START → AUDIO → STREAM_STOP` 首次会话完整可用。
 - [ ] 在 Windows 真机验证 WASAPI 端点初始化、VB-CABLE 回环、欠载恢复与完整尾音。
+- [x] CABLE Input 双层静音自愈：端点主静音使用 `IAudioEndpointVolume`；音量合成器里的 SayAll 应用会话静音使用 `ISimpleAudioVolume`，只匹配当前进程在已选 CABLE 端点上的会话。初始化、会话开始、流启动后检查，推流期间每 100ms 低频检查，必要时解除静音并读回；两层均不修改音量。2026-09-07 Windows 真实 CABLE Input 受控复现 passed：端点 open/begin 两检查点，以及应用会话 begin/after_start/stream_watch 三检查点均成功从 muted 恢复到 unmuted；随后真实 RC001 连续 9 次语音均复现“流启动约半秒后会话被外部重新静音”，监视路径 9/9 捕获并恢复为 unmuted（2765 个音频包），9 次开始/停止与快捷键按下/释放均成对；修复版 NSIS 本地包由用户复测确认 RC001 语音功能 passed。边界：完整 RC003 → CABLE → 输入法语音链仍按上一项真机验收。
 - [x] 在可见 NSIS 安装完成后检测 VB-CABLE 服务，未安装时说明第三方来源、管理员权限和重启要求并打开官方下载页；应用首次启动复检唯一 CABLE Input 并在无既有选择时自动配置。静默安装不打开网页，真实安装/重启仍待真机验收。
 - [ ] 如未来需要捆绑或自动执行 VB-CABLE 驱动包，先取得与 Pack45 内附许可一致的作者书面授权，并实现来源校验、显式 UAC、结果检测和重启流程。
 - [x] 持久化用户选择的输出端点，并在端点消失或更名时失败关闭；Windows 运行时恢复仍待真机验收。
