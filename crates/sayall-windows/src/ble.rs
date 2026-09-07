@@ -463,6 +463,9 @@ fn worker_loop(
                     Ok(()) => {
                         let snapshot = ConnectionSnapshot::default();
                         *lock(&state) = snapshot.clone();
+                        crate::key_gate::set_remote_connected(gate_remote_connected(
+                            snapshot.phase,
+                        ));
                         let _ = reply.send(Ok(snapshot));
                     }
                     Err(error) => {
@@ -499,6 +502,7 @@ fn worker_loop(
                     }
                 };
                 *lock(&state) = snapshot.clone();
+                crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
                 let _ = reply.send(Ok(snapshot));
             }
             WorkerMessage::WakeReconnect => {
@@ -675,6 +679,9 @@ fn worker_loop(
                     } else {
                         let mut snapshot = lock(&state);
                         snapshot.phase = ConnectionPhase::Disconnected;
+                        crate::key_gate::set_remote_connected(gate_remote_connected(
+                            snapshot.phase,
+                        ));
                         snapshot.voice_state = VoiceSessionState::Idle;
                         snapshot.last_error = Some("小米语音遥控器蓝牙连接已断开".to_owned());
                     }
@@ -707,6 +714,7 @@ fn worker_loop(
                         schedule_reconnect(&state, &mut backoff, &mut reconnect_deadline, &error);
                     } else {
                         *lock(&state) = failed_snapshot(error);
+                        crate::key_gate::set_remote_connected(false);
                     }
                 }
             }
@@ -739,6 +747,7 @@ fn worker_loop(
                     last_error: Some("Windows 已进入睡眠，小米语音遥控器资源已释放".to_owned()),
                     ..ConnectionSnapshot::default()
                 };
+                crate::key_gate::set_remote_connected(false);
             }
             WorkerMessage::SystemResumed => {
                 if !system_suspended {
@@ -757,8 +766,10 @@ fn worker_loop(
                         last_error: Some("Windows 已恢复，正在重新连接小米语音遥控器".to_owned()),
                         ..ConnectionSnapshot::default()
                     };
+                    crate::key_gate::set_remote_connected(true);
                 } else {
                     *lock(&state) = ConnectionSnapshot::default();
+                    crate::key_gate::set_remote_connected(false);
                 }
             }
             WorkerMessage::Shutdown => {
@@ -770,6 +781,22 @@ fn worker_loop(
             }
         }
     }
+}
+
+/// 连接相位 → 门控"遥控器在线"判定：常驻抑制键（Home/TV"遥控器优先"，
+/// key_gate.rs）仅在线时接管原生输入；离线（含 Connecting/Discovering 建
+/// 链途中、Failed、Disconnected、Suspended）恢复物理键盘原生透传。
+/// Reconnecting 视为在线：短暂断链期间保持接管稳定，避免遥控器按压在
+/// 重连间隙退回双响应（2026-09-07 方案 C 落地决策）。
+fn gate_remote_connected(phase: ConnectionPhase) -> bool {
+    matches!(
+        phase,
+        ConnectionPhase::AwaitingCapabilities
+            | ConnectionPhase::Ready
+            | ConnectionPhase::Streaming
+            | ConnectionPhase::Draining
+            | ConnectionPhase::Reconnecting
+    )
 }
 
 fn nearest_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
@@ -819,6 +846,7 @@ fn attempt_connection(
         reconnect_attempt,
         ..ConnectionSnapshot::default()
     };
+    crate::key_gate::set_remote_connected(reconnecting);
 
     let connected = BleSession::connect(device_id, sender.clone(), state, *connection_generation)?;
     let snapshot = ConnectionSnapshot {
@@ -829,6 +857,7 @@ fn attempt_connection(
         ..ConnectionSnapshot::default()
     };
     *lock(state) = snapshot.clone();
+    crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
     *session = Some(connected);
     *capabilities_deadline = Some(Instant::now() + CAPABILITIES_TIMEOUT);
     Ok(snapshot)
@@ -884,6 +913,7 @@ fn keep_reconnecting_after_cleanup_failure(
     } else {
         *reconnect_deadline = None;
         *lock(state) = failed_snapshot(error.to_string());
+        crate::key_gate::set_remote_connected(false);
     }
 }
 
@@ -897,6 +927,7 @@ fn schedule_reconnect(
     *reconnect_deadline = Some(Instant::now() + delay);
     let mut snapshot = lock(state);
     snapshot.phase = ConnectionPhase::Reconnecting;
+    crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
     snapshot.capabilities = None;
     snapshot.voice_state = VoiceSessionState::Idle;
     snapshot.generation = 0;
@@ -932,6 +963,7 @@ fn handle_control(
             snapshot.last_error = Some(error.to_string());
             if snapshot.phase == ConnectionPhase::AwaitingCapabilities {
                 snapshot.phase = ConnectionPhase::Failed;
+                crate::key_gate::set_remote_connected(false);
                 snapshot.voice_state = VoiceSessionState::Idle;
             }
             return;
@@ -942,6 +974,7 @@ fn handle_control(
         PipelineOutput::Ready(capabilities) => {
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Ready;
+            crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
             snapshot.capabilities = Some(capabilities);
             snapshot.voice_state = VoiceSessionState::Idle;
             snapshot.last_error = None;
@@ -1051,6 +1084,7 @@ fn handle_control(
             }
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Streaming;
+            crate::key_gate::set_remote_connected(true);
             snapshot.voice_state = VoiceSessionState::Streaming;
             snapshot.generation = generation;
             snapshot.last_error = None;
@@ -1067,6 +1101,7 @@ fn handle_control(
             {
                 let mut snapshot = lock(state);
                 snapshot.phase = ConnectionPhase::Draining;
+                crate::key_gate::set_remote_connected(true);
                 snapshot.voice_state = VoiceSessionState::Draining;
             }
             if let Err(error) = audio.finish_session(generation) {
@@ -1091,6 +1126,7 @@ fn handle_control(
             *active_voice_samples = 0;
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Ready;
+            crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
             snapshot.voice_state = VoiceSessionState::Idle;
         }
         PipelineOutput::DecoderSynchronized { .. }
@@ -1184,6 +1220,7 @@ fn abort_voice_session(
     } else {
         ConnectionPhase::Failed
     };
+    crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
     snapshot.voice_state = VoiceSessionState::Idle;
     snapshot.last_error = Some(error);
 }
@@ -1281,6 +1318,7 @@ impl BleSession {
         {
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Discovering;
+            crate::key_gate::set_remote_connected(gate_remote_connected(snapshot.phase));
             snapshot.remote_name = Some(name.clone());
             snapshot.remote_model = model;
             snapshot.last_error = None;
