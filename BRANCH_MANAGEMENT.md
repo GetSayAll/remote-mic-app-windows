@@ -29,6 +29,11 @@
   约 1-2 分钟；通过即等价于 CI 的这些步骤必过。发布前加 `-Full` 追加
   runtime-simulation 构建。纯文档/非功能改动（**.md、docs/、Testing/、
   artifacts/）不触发 CI（workflow paths-ignore）。
+- **合入 PR 后不重复跑已验证的测试（2026-09-07 新增）**：PR 分支上已按上述
+  规范跑过 ci-preflight（或全量验证）的改动，合入 main 后不再本地重复跑
+  同一套测试——CI 会在 main 上复验，有问题会暴露；重复跑只消耗时间，
+  不产生新信息。仅当合入过程产生了新代码状态（冲突解决、cherry-pick
+  补提交、rebase 改写）时才需重新验证。
 - 每个独立工作项一个 commit，只包含该工作项的内容；交付时报告完整 SHA、
   Push 状态与验证命令（引用 macOS 原版"worktree、提交和清理"不变量）。
 - 工作必须中途暂停或移交时：先在功能分支上 commit，并在提交信息中注明
