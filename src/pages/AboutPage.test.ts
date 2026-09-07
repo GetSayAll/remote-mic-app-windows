@@ -99,6 +99,8 @@ describe("about page update panel", () => {
     const wrapper = mount(AboutPage, { props: { runtime } });
     expect(wrapper.text()).toContain("软件更新");
     expect(wrapper.text()).toContain("手动检查是否有新版本");
+    expect(wrapper.text()).not.toContain("开源许可");
+    expect(wrapper.text()).not.toContain("GPL-3.0");
     const button = wrapper.findAll("button").find((b) => b.text().includes("检查更新"));
     expect(button).toBeDefined();
   });
