@@ -14,13 +14,10 @@ import {
 } from "./bridge";
 
 describe("mapping capability matrix（单响应判定，用于信息提示）", () => {
-  it("直接归因族（电源/菜单/RC001 返回与音量±）全部触发单响应", () => {
+  it("直接归因族（电源/菜单）全部触发单响应", () => {
     expect(shortcutCapability("power", "long", "rc003")).toBe("all");
     expect(shortcutCapability("power", "single", "rc003")).toBe("all");
     expect(shortcutCapability("menu", "double", "rc003")).toBe("all");
-    expect(shortcutCapability("back", "single", "rc001")).toBe("all");
-    expect(shortcutCapability("volume_up", "long", "rc001")).toBe("all");
-    expect(shortcutCapability("volume_down", "double", "rc001")).toBe("all");
   });
 
   it("武装族（确定/方向/主页）单击可同键对冲，双击/长按判定为附带原生动作", () => {
@@ -34,13 +31,16 @@ describe("mapping capability matrix（单响应判定，用于信息提示）", 
     expect(shortcutCapability("home", "single", "rc003")).toBe("identity");
   });
 
-  it("TV 与 RC003 不可见键判定为附带原生动作/不可见；未知型号按 RC003 保守", () => {
+  it("TV 与返回/音量±全型号判定为不可配（2026-09-07 用户决策：两型号行为一致）", () => {
     expect(shortcutCapability("tv", "single", "rc003")).toBe("none");
     expect(shortcutCapability("tv", "long", "rc001")).toBe("none");
     expect(shortcutCapability("back", "single", "rc003")).toBe("none");
     expect(shortcutCapability("volume_up", "single", "rc003")).toBe("none");
     expect(shortcutCapability("volume_down", "single", "unknown")).toBe("none");
     expect(shortcutCapability("back", "single", "unknown")).toBe("none");
+    expect(shortcutCapability("back", "single", "rc001")).toBe("none");
+    expect(shortcutCapability("volume_up", "long", "rc001")).toBe("none");
+    expect(shortcutCapability("volume_down", "double", "rc001")).toBe("none");
   });
 
   it("identityShortcutByButton 对齐 Rust native_key（泄漏对冲判定依据）", () => {
