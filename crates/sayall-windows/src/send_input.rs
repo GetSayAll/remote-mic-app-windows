@@ -383,20 +383,36 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
-    pub fn normalized(mut self) -> Result<Self, SendInputError> {
-        // 左键不支持自定义映射（2026-09-07 用户决策）：不同键映射的孤立
-        // 冷首按必泄漏原生方向动作（结构性残留，无法在软件层消除），策略
-        // 上移除左键自定义——恒原生透传。持久化层与引擎层（set_mappings）
-        // 双重剥离，存量配置在加载/保存时自动清除。
-        self.actions.remove(&RemoteButton::Left);
-        for actions in self.actions.values_mut() {
+    /// 策略性不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
+    /// - 左键：不同键映射的孤立冷首按必泄漏原生方向动作（结构性残留，
+    ///   无法在软件层消除）→ 恒原生透传；
+    /// - 返回/音量±：RC003 输入栈不可见（配置无法生效）；RC001 虽以
+    ///   VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而不开放。
+    ///
+    /// 持久化层（[`Self::normalized`]）与引擎层（button_mapping 的
+    /// `set_mappings`）双重剥离，存量配置在加载/保存时自动清除。
+    pub(crate) fn without_unsupported_buttons(mut self) -> Self {
+        for button in [
+            RemoteButton::Left,
+            RemoteButton::Back,
+            RemoteButton::VolumeUp,
+            RemoteButton::VolumeDown,
+        ] {
+            self.actions.remove(&button);
+        }
+        self
+    }
+
+    pub fn normalized(self) -> Result<Self, SendInputError> {
+        let mut this = self.without_unsupported_buttons();
+        for actions in this.actions.values_mut() {
             for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
                 if let ButtonAction::Shortcut { chord } = action {
                     *chord = chord.clone().validated()?;
                 }
             }
         }
-        Ok(self)
+        Ok(this)
     }
 
     pub fn actions(&self, button: RemoteButton) -> ButtonActions {
@@ -939,19 +955,25 @@ mod tests {
     }
 
     #[test]
-    fn normalized_strips_left_button_customization() {
-        // 左键不支持自定义（2026-09-07 用户决策）：normalized() 在持久化层
-        // 剥离左键配置（存量配置加载/保存时自动清除），其余按键不受影响。
+    fn normalized_strips_unsupported_button_customization() {
+        // 策略性不支持的按键（2026-09-07 用户决策，全型号一致）：normalized()
+        // 在持久化层剥离 左键/返回/音量± 配置（存量配置加载/保存时自动清除），
+        // 其余按键不受影响。
         let mut mappings = ButtonMappings::default();
-        mappings.actions.insert(
-            RemoteButton::Left,
-            ButtonActions {
-                single: ButtonAction::Shortcut {
-                    chord: chord(&[KeyCode::Backspace]),
-                },
-                ..ButtonActions::default()
+        let single_escape = ButtonActions {
+            single: ButtonAction::Shortcut {
+                chord: chord(&[KeyCode::Escape]),
             },
-        );
+            ..ButtonActions::default()
+        };
+        for button in [
+            RemoteButton::Left,
+            RemoteButton::Back,
+            RemoteButton::VolumeUp,
+            RemoteButton::VolumeDown,
+        ] {
+            mappings.actions.insert(button, single_escape.clone());
+        }
         mappings.actions.insert(
             RemoteButton::Tv,
             ButtonActions {
@@ -962,10 +984,17 @@ mod tests {
             },
         );
         let normalized = mappings.normalized().unwrap();
-        assert!(
-            !normalized.actions.contains_key(&RemoteButton::Left),
-            "左键自定义必须被策略剥离"
-        );
+        for button in [
+            RemoteButton::Left,
+            RemoteButton::Back,
+            RemoteButton::VolumeUp,
+            RemoteButton::VolumeDown,
+        ] {
+            assert!(
+                !normalized.actions.contains_key(&button),
+                "{button:?} 自定义必须被策略剥离"
+            );
+        }
         assert!(normalized.actions.contains_key(&RemoteButton::Tv));
         assert_eq!(normalized.mapped_mask(), 1u64 << RemoteButton::Tv.ordinal());
     }

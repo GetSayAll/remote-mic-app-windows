@@ -735,13 +735,13 @@ export type ShortcutCapability = "all" | "identity" | "none";
  * examples/preset_inject_probe.rs 真机验证 36/36 全部正确——所有可见按键
  * 的所有配置均真实生效，本矩阵**只用于编辑器的信息提示**，不做门控）：
  *
- * - **all**（直接归因族：电源 VK 0xFF/0x5F、菜单 VK_APPS、RC001 返回/
- *   音量± VK 0xFF 族）：原始键从不泄漏 → 任意配置严格单响应；
+ * - **all**（直接归因族：电源 VK 0xFF/0x5F、菜单 VK_APPS）：原始键
+ *   从不泄漏 → 任意配置严格单响应；
  * - **identity**（武装族常见物理 VK：确定/方向）：孤立冷首按原始键
  *   必泄漏（结构性武装死锁，公开 API 内不可根除）→ 同键映射由泄漏对冲
  *   保证单响应，其他映射"配置动作正常执行 + 冷首按附带一次原生动作"；
- * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与 RC003/未知型号的
- *   返回/音量±（输入栈不可见，配置无法生效——这部分仍以格子禁用表达，
+ * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与返回/音量±（RC003
+ *   输入栈不可见；RC001 虽可达但 2026-09-07 起全型号禁用——格子禁用，
  *   见 ButtonsPage 的 UNMAPPABLE_BUTTONS）。
  *
  * 2026-09-07 增补（方案 C"遥控器优先"落地，key_gate 常驻抑制族）：
@@ -753,14 +753,9 @@ export type ShortcutCapability = "all" | "identity" | "none";
 export function shortcutCapability(
   button: RemoteButton,
   trigger: ButtonTrigger,
-  model: RemoteModel,
+  _model: RemoteModel,
 ): ShortcutCapability {
-  if (
-    button === "power" ||
-    button === "menu" ||
-    (model === "rc001" &&
-      (button === "back" || button === "volume_up" || button === "volume_down"))
-  ) {
+  if (button === "power" || button === "menu") {
     return "all";
   }
   if (
@@ -769,10 +764,10 @@ export function shortcutCapability(
     button === "volume_down" ||
     button === "tv"
   ) {
-    // RC003/未知：返回/音量±输入栈不可见；TV 无同键映射可表达。
+    // 返回/音量±全型号禁用（2026-09-07 用户决策）；TV 无同键映射可表达。
     return "none";
   }
-  // 武装族（确定/方向/主页）：单击可配同键映射（对冲单响应）。
+  // 武装族（确定/方向）：单击可配同键映射（对冲单响应）。
   return trigger === "single" ? "identity" : "none";
 }
 
