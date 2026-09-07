@@ -73,7 +73,6 @@ let pollTimer: ReturnType<typeof setInterval> | undefined;
 const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
   { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
   { label: "关闭", keys: [] },
-  { label: "系统语音输入", keys: ["left_windows", "h"] },
 ];
 
 const activeVoiceHotkeyKeys = computed(() =>
