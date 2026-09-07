@@ -8,13 +8,17 @@
 //! - **LL 钩子吞掉的事件不会再投递给 Raw Input**。因此被吞键盘事件的语义边沿
 //!   由本钩子直接喂给映射引擎（`ButtonEdge`），未被吞的由 Raw Input 监听器喂，
 //!   双源汇入引擎的 `ButtonStateMerger` 并集去重。
-//! - 归因（遥控器 vs 物理键盘）：LL 钩子事件无设备信息。两条通路：
+//! - 归因（遥控器 vs 物理键盘）：LL 钩子事件无设备信息。三条通路：
 //!   1. 直接归因族：VK 0xFF 族（厂商键：返回/电源/音量）物理键盘不会产生；
 //!      VK_APPS（0x5D 菜单键）与 VK_SLEEP（0x5F 电源键睡眠形态，均
 //!      2026-09-06 纳入）物理键盘实际极罕见。三者无需武装直接吞（见
 //!      docs/investigations/2026-09-06-left-double-response-arm-deadlock.md
 //!      的结构性武装死锁：孤立按压首沿在 60ms 有界等待内无法武装必泄漏）；
-//!   2. 其余 VK（方向/Enter/Home/TV/睡眠/音量 VK）需"武装"：Raw Input
+//!   2. 常驻抑制族（"遥控器优先"，2026-09-07 用户选定方案 C 落地）：Home/TV
+//!      已映射且遥控器在线（`set_remote_connected`，ble.rs 相位提交点同步）
+//!      时无需武装直接吞——孤立首按不再泄漏，代价是物理键盘 Home/` 在
+//!      遥控器连接期间被接管（用户确认接受；断开连接或取消映射即恢复）；
+//!   3. 其余 VK（方向/Enter/音量 VK）需"武装"：Raw Input
 //!      监听器观察到该按键的 HID 报文（独立管线，不受键盘 LL 钩子影响）后
 //!      武装对应按键；钩子在按下沿做 60ms 有界等待（key_suppressor 同款，
 //!      覆盖监听线程消息泵的调度延迟）。RIT 先投递 WM_INPUT 再调用钩子，
@@ -73,6 +77,12 @@ mod windows_impl {
     static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static MAPPED_MASK: AtomicU64 = AtomicU64::new(0);
+    /// 常驻抑制掩码（"遥控器优先"）：遥 online 期间无需武装直接吞。
+    /// 由映射引擎在映射变化时写入（当前仅 Home/TV，见 button_mapping.rs）。
+    static PERSISTENT_MASK: AtomicU64 = AtomicU64::new(0);
+    /// 遥控器在线状态（BLE 连接相位推导，ble.rs 在相位提交点同步）。
+    /// 常驻抑制键仅在线时接管；离线恢复物理键盘原生透传（不劫持）。
+    static REMOTE_CONNECTED: AtomicBool = AtomicBool::new(false);
     static LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SWALLOWED_EDGES: AtomicU64 = AtomicU64::new(0);
     static LEAKED_DOWNS: AtomicU64 = AtomicU64::new(0);
@@ -104,6 +114,17 @@ mod windows_impl {
     fn mapped(button: RemoteButton) -> bool {
         let mask = MAPPED_MASK.load(Ordering::Relaxed);
         mask != 0 && (mask >> button.ordinal()) & 1 == 1
+    }
+
+    /// 常驻抑制键（"遥控器优先"）：位掩码由映射引擎写入（已映射的 Home/TV）。
+    fn persistent(button: RemoteButton) -> bool {
+        let mask = PERSISTENT_MASK.load(Ordering::Relaxed);
+        mask != 0 && (mask >> button.ordinal()) & 1 == 1
+    }
+
+    /// 遥控器在线（BLE 连接相位推导，ble.rs 同步）。
+    fn remote_connected() -> bool {
+        REMOTE_CONNECTED.load(Ordering::Relaxed)
     }
 
     /// 直接归因族（无需武装即可吞）：
@@ -139,8 +160,9 @@ mod windows_impl {
     ///
     /// - 注入事件一律放行；
     /// - 未映射/总开关关闭/监听器停止 → 放行（替换语义不生效=原始行为）；
-    /// - 直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键，见 [`direct_attributed`]）
-    ///   无需武装；其余按下沿按武装归因；
+    /// - 无需武装即可归因（直接归因族 VK 0xFF/0x5D/0x5F，或常驻抑制键
+    ///   Home/TV 已映射且遥控器在线——调用方把两者折算进本参数）→ 吞；
+    /// - 其余按下沿按武装归因；
     /// - 释放沿只看按住配对：本次按住的 DOWN 全被吞才吞 UP（防粘键规则）。
     #[allow(clippy::too_many_arguments)]
     pub fn decide(
@@ -234,9 +256,11 @@ mod windows_impl {
             return swallow;
         }
 
-        // 按下沿：直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键）无需武装；
-        // 其余等待武装（有界 60ms）。
-        let attributed = if direct_attributed(vk_code) {
+        // 按下沿：直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键 + VK_SLEEP）与
+        // 常驻抑制键（Home/TV"遥控器优先"：已映射 + 遥控器在线）无需武装；
+        // 其余等待武装（有界 60ms）。常驻抑制键跳过有界等待，响应零额外延迟。
+        let attributed = if direct_attributed(vk_code) || (persistent(button) && remote_connected())
+        {
             true
         } else if armed(button) {
             true
@@ -345,6 +369,8 @@ mod windows_impl {
         pub fn start() -> KeyGate {
             ENABLED.store(false, Ordering::Relaxed);
             MAPPED_MASK.store(0, Ordering::Relaxed);
+            PERSISTENT_MASK.store(0, Ordering::Relaxed);
+            REMOTE_CONNECTED.store(false, Ordering::Relaxed);
             LISTENER_ACTIVE.store(false, Ordering::Relaxed);
             for slot in &ARMED_UNTIL_MS {
                 slot.store(0, Ordering::Relaxed);
@@ -397,6 +423,20 @@ mod windows_impl {
         MAPPED_MASK.store(mapped_mask, Ordering::Relaxed);
     }
 
+    /// 更新常驻抑制掩码（"遥控器优先"，映射引擎在映射变化时调用）：
+    /// 当前为已映射的 Home/TV 位。仅在掩码位命中且遥控器在线时，
+    /// 该键按下沿无需武装直接吞（跳过 60ms 有界等待，零额外延迟）。
+    pub fn set_persistent_mask(mask: u64) {
+        PERSISTENT_MASK.store(mask, Ordering::Relaxed);
+    }
+
+    /// 同步遥控器在线状态（ble.rs 在连接相位提交点调用）：
+    /// 在线时常驻抑制键接管（吞 + 引擎执行映射动作）；离线时恢复
+    /// 原生透传（物理键盘 Home/` 不被劫持）。
+    pub fn set_remote_connected(connected: bool) {
+        REMOTE_CONNECTED.store(connected, Ordering::Relaxed);
+    }
+
     /// Raw Input 监听器起止：监听器停止时门控不吞任何键（无归因来源）。
     pub fn set_listener_active(active: bool) {
         LISTENER_ACTIVE.store(active, Ordering::Relaxed);
@@ -440,8 +480,8 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     arm_button, configure, decide, is_gate_thread_alive, leaked_down_count, listener_active,
-    set_edge_sink, set_listener_active, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
-    HOLD_SWALLOWED_ALL,
+    set_edge_sink, set_listener_active, set_persistent_mask, set_remote_connected,
+    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -462,6 +502,8 @@ mod fallback {
     }
 
     pub fn configure(_enabled: bool, _mapped_mask: u64) {}
+    pub fn set_persistent_mask(_mask: u64) {}
+    pub fn set_remote_connected(_connected: bool) {}
     pub fn set_listener_active(_active: bool) {}
     pub fn arm_button(_button: RemoteButton, _grace_ms: u64) {}
     pub fn set_edge_sink(_sink: std::sync::Arc<dyn Fn(ButtonEdge) + Send + Sync>) {}
@@ -539,6 +581,31 @@ mod tests {
         assert!(windows_impl::direct_attributed(0xFF));
         // 电源键 VK_SLEEP 形态：罕见物理键，直接归因（防孤立泄漏触发系统睡眠）。
         assert!(windows_impl::direct_attributed(0x5F));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistent_suppression_folds_into_no_arm_attribution() {
+        // 常驻抑制键（Home/TV"遥控器优先"）在钩子层折算进"无需武装归因"参数：
+        // 已映射 + 遥控器在线 → 未武装也吞（孤立冷首按单响应，2026-09-07 方案 C）。
+        assert!(decide(
+            0xC0, 0x35, false, false, true, false, HOLD_NONE, true
+        ));
+        // UP 沿仍按配对裁决：DOWN 全吞 → UP 吞（防粘键规则不变）。
+        assert!(decide(
+            0xC0,
+            0x35,
+            true,
+            false,
+            true,
+            false,
+            HOLD_SWALLOWED_ALL,
+            true
+        ));
+        // 注入一律放行（自家注入与其他程序注入不受常驻抑制影响）。
+        assert!(!decide(
+            0xC0, 0x35, false, true, true, false, HOLD_NONE, true
+        ));
     }
 
     #[cfg(windows)]
