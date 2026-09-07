@@ -117,6 +117,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.selectAudioEndpoint).toHaveBeenCalledWith(cableEndpoint.id);
     expect(wrapper.text()).toContain("已自动选择 CABLE Input");
     expect(wrapper.text()).not.toContain("需要安装 VB-CABLE");
+    expect(wrapper.text()).not.toContain("系统语音输入");
     wrapper.unmount();
   });
 

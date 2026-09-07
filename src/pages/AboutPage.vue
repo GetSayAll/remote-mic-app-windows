@@ -37,7 +37,6 @@ async function onInstall(): Promise<void> {
       <div>
         <h2>无线麦 SayAll</h2>
         <p>版本 {{ runtime?.appVersion ?? "0.1.0" }}</p>
-        <p class="muted">开源许可 GPL-3.0。</p>
       </div>
     </article>
 
