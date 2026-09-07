@@ -5,7 +5,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wasapi::{
     AudioClient, AudioRenderClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
 };
@@ -497,6 +497,7 @@ fn begin_session(
     ) {
         return Err(PlatformError::AudioBusy);
     }
+    active_sink.ensure_unmuted("begin_session")?;
     active_sink
         .reset()
         .map_err(|error| audio_error("重置 WASAPI 会话", error))?;
@@ -597,9 +598,11 @@ fn fail_audio(
 }
 
 struct AudioSink {
+    endpoint_id: String,
     name: String,
     client: AudioClient,
     render_client: AudioRenderClient,
+    is_virtual_cable: bool,
     started: bool,
 }
 
@@ -613,6 +616,8 @@ impl AudioSink {
         let name = device
             .get_friendlyname()
             .map_err(|error| audio_error("读取所选端点名称", error))?;
+        let is_virtual_cable = crate::is_virtual_cable_output_name(&name);
+        ensure_cable_endpoint_unmuted(endpoint_id, is_virtual_cable, "open")?;
         let mut client = device
             .get_iaudioclient()
             .map_err(|error| audio_error("创建 WASAPI 客户端", error))?;
@@ -641,11 +646,17 @@ impl AudioSink {
             .get_audiorenderclient()
             .map_err(|error| audio_error("创建 WASAPI 渲染客户端", error))?;
         Ok(Self {
+            endpoint_id: endpoint_id.to_owned(),
             name,
             client,
             render_client,
+            is_virtual_cable,
             started: false,
         })
+    }
+
+    fn ensure_unmuted(&self, checkpoint: &'static str) -> Result<(), PlatformError> {
+        ensure_cable_endpoint_unmuted(&self.endpoint_id, self.is_virtual_cable, checkpoint)
     }
 
     fn is_active(&self) -> bool {
@@ -709,6 +720,89 @@ impl Drop for AudioSink {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EndpointMuteStatus {
+    was_muted: bool,
+    is_muted: bool,
+    level: f32,
+}
+
+fn ensure_cable_endpoint_unmuted(
+    endpoint_id: &str,
+    is_virtual_cable: bool,
+    checkpoint: &'static str,
+) -> Result<(), PlatformError> {
+    if !is_virtual_cable {
+        crate::ble::gatt_note(format!(
+            "endpoint_unmute checkpoint={checkpoint} result=skipped reason=non_cable"
+        ));
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    match ensure_endpoint_unmuted(endpoint_id) {
+        Ok(status) => {
+            let result = if status.was_muted {
+                "unmuted"
+            } else {
+                "already_ok"
+            };
+            crate::ble::gatt_note(format!(
+                "endpoint_unmute checkpoint={checkpoint} result={result} was_muted={} is_muted={} level={:.3} elapsed_ms={}",
+                status.was_muted,
+                status.is_muted,
+                status.level,
+                started.elapsed().as_millis()
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "endpoint_unmute checkpoint={checkpoint} result=failed elapsed_ms={} err={error}",
+                started.elapsed().as_millis()
+            ));
+            Err(audio_error("检查并恢复 CABLE Input 静音状态", error))
+        }
+    }
+}
+
+fn endpoint_volume(
+    endpoint_id: &str,
+) -> windows::core::Result<windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume> {
+    use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+    let device = unsafe { enumerator.GetDevice(&windows::core::HSTRING::from(endpoint_id)) }?;
+    unsafe { device.Activate(CLSCTX_ALL, None) }
+}
+
+/// CABLE Input 是内部传输端点：若端点主静音被外部改写，则在开流和每次语音
+/// 会话开始前恢复。只解除静音，不改用户设置的音量标量；设置后必须读回确认。
+fn ensure_endpoint_unmuted(endpoint_id: &str) -> windows::core::Result<EndpointMuteStatus> {
+    use windows::Win32::Foundation::E_FAIL;
+
+    let volume = endpoint_volume(endpoint_id)?;
+    let was_muted = unsafe { volume.GetMute()?.as_bool() };
+    let level = unsafe { volume.GetMasterVolumeLevelScalar()? };
+    if was_muted {
+        unsafe { volume.SetMute(false, std::ptr::null()) }?;
+    }
+    let is_muted = unsafe { volume.GetMute()?.as_bool() };
+    if is_muted {
+        return Err(windows::core::Error::new(
+            E_FAIL,
+            "CABLE Input 解除静音后读回仍为静音",
+        ));
+    }
+    Ok(EndpointMuteStatus {
+        was_muted,
+        is_muted,
+        level,
+    })
+}
+
 fn audio_error(operation: &'static str, error: impl std::fmt::Display) -> PlatformError {
     PlatformError::Audio(format!("{operation}失败：{error}"))
 }
@@ -738,6 +832,33 @@ impl Drop for WasapiApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    struct RestoreEndpointMute {
+        endpoint_id: String,
+        muted: bool,
+    }
+
+    #[cfg(windows)]
+    impl Drop for RestoreEndpointMute {
+        fn drop(&mut self) {
+            if let Ok(volume) = endpoint_volume(&self.endpoint_id) {
+                let _ = unsafe { volume.SetMute(self.muted, std::ptr::null()) };
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn endpoint_muted(endpoint_id: &str) -> windows::core::Result<bool> {
+        let volume = endpoint_volume(endpoint_id)?;
+        unsafe { volume.GetMute().map(|value| value.as_bool()) }
+    }
+
+    #[cfg(windows)]
+    fn set_endpoint_muted(endpoint_id: &str, muted: bool) -> windows::core::Result<()> {
+        let volume = endpoint_volume(endpoint_id)?;
+        unsafe { volume.SetMute(muted, std::ptr::null()) }
+    }
 
     fn streaming_state(generation: u64) -> Arc<Mutex<AudioSnapshot>> {
         Arc::new(Mutex::new(AudioSnapshot {
@@ -795,5 +916,49 @@ mod tests {
                 .unwrap_err()
                 .contains("名称已变")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires SAYALL_TEST_CABLE_ENDPOINT_ID and mutates that endpoint's mute state"]
+    fn cable_endpoint_unmutes_on_open_and_each_session() {
+        let endpoint_id = std::env::var("SAYALL_TEST_CABLE_ENDPOINT_ID")
+            .expect("set SAYALL_TEST_CABLE_ENDPOINT_ID to the CABLE Input render endpoint");
+        wasapi::initialize_mta()
+            .ok()
+            .expect("initialize test COM apartment");
+        let _apartment = WasapiApartment;
+        let original_mute = endpoint_muted(&endpoint_id).expect("read initial endpoint mute");
+        let _restore = RestoreEndpointMute {
+            endpoint_id: endpoint_id.clone(),
+            muted: original_mute,
+        };
+
+        let runtime = AudioRuntime::new();
+        let endpoint = runtime
+            .list_endpoints()
+            .expect("list render endpoints")
+            .into_iter()
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .expect("configured endpoint must be active");
+        assert!(
+            endpoint.is_virtual_cable_candidate,
+            "test endpoint must be a recognized virtual CABLE render endpoint"
+        );
+
+        set_endpoint_muted(&endpoint_id, true).expect("mute endpoint before open");
+        runtime
+            .select_endpoint(endpoint_id.clone())
+            .expect("opening CABLE endpoint should self-heal mute");
+        assert!(!endpoint_muted(&endpoint_id).expect("read mute after open"));
+
+        set_endpoint_muted(&endpoint_id, true).expect("mute endpoint after it is already open");
+        runtime
+            .begin_session(1)
+            .expect("beginning a session should self-heal mute again");
+        assert!(!endpoint_muted(&endpoint_id).expect("read mute after begin_session"));
+        runtime
+            .interrupt_session()
+            .expect("clean up test audio session");
     }
 }
