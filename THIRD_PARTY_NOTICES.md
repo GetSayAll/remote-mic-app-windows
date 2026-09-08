@@ -1,5 +1,9 @@
 # Third-party notices
 
+## SayAll App Logo and App Icon
+
+`public/app-logo.png`、`public/favicon.png` 以及 `src-tauri/icons/` 下的应用图标属于 HD838A 保留版权的专有品牌资产。它们不属于本项目 GPL-3.0-only 软件代码许可范围，复制、改编或用于其他项目须遵守 [LOGO-LICENSE.md](LOGO-LICENSE.md)。
+
 ## RC003 product photo
 
 The RC003 product photo bundled as `public/RC003-remote-photo.png` was supplied by the user on 2026-07-17 for the physical-button mapping interface. Copyright and trademark rights in the photo and depicted products remain with their respective owners. GPL-3.0-only does not grant additional rights to this image or the Xiaomi marks.

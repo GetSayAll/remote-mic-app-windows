@@ -8,6 +8,10 @@
 - 有意排除：Swift/SwiftPM、CoreBluetooth、AppKit/SwiftUI、Developer ID/Apple 公证、Sparkle、DMG/PKG、Apple Team ID、macOS/iOS/Web 专属流程，以及任何 macOS 私有路径或凭据。
 - 迁移文档：`LOGGING.md`、`RELEASING.md`、`TECHNICAL.md`、`TROUBLESHOOTING.md`、`Bugs/README.md` 与 `Testing/WindowsRelease*.md`。这些文件记录的是规范与经验，不复制参考仓库业务代码。
 
+## App Logo 版权
+
+- App Logo 与 App Icon 沿用 `HD838A/remote-mic-app` 的版权边界：属于 HD838A 保留版权的专有品牌资产，不纳入 GPL-3.0-only；Windows 版适用范围和授权条件见 [LOGO-LICENSE.md](LOGO-LICENSE.md)。
+
 ## 产品与 UI 基准
 
 - `HD838A/remote-mic-app`：无线麦 macOS 原版的信息架构、产品文案、RC003 图片、RC001/RC003 型号识别、ATVV 行为和测试边界；RC001 支持参考提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`。
