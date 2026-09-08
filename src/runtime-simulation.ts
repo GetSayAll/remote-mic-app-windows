@@ -164,6 +164,29 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   steps.push("权限页面生成去标识化运行诊断摘要");
 
   await openPage("关于");
+  const darkTheme = await waitFor(
+    () =>
+      document.querySelector<HTMLInputElement>('input[name="theme-preference"][value="dark"]:not(:disabled)'),
+    "深色外观选项可用",
+  );
+  darkTheme.click();
+  await waitFor(
+    () => (document.documentElement.dataset.theme === "dark" ? true : null),
+    "深色外观应用",
+  );
+  assert(darkTheme.checked, "深色外观保存后没有保持选中");
+  assert(!document.querySelector('[role="alert"]'), "深色外观保存后显示错误");
+
+  const systemTheme = await waitFor(
+    () =>
+      document.querySelector<HTMLInputElement>('input[name="theme-preference"][value="system"]:not(:disabled)'),
+    "系统外观选项可用",
+  );
+  systemTheme.click();
+  await waitFor(() => (systemTheme.checked && !systemTheme.disabled ? true : null), "系统外观恢复");
+  assert(!document.querySelector('[role="alert"]'), "恢复系统外观后显示错误");
+  steps.push("关于页深色/系统外观经 Windows WebView、Tauri capability 与设置持久化闭环");
+
   await openPage("连接与语音");
   steps.push("五个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
