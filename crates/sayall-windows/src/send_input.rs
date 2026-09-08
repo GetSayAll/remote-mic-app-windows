@@ -383,9 +383,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
-    /// 策略性不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
-    /// - 左键：不同键映射的孤立冷首按必泄漏原生方向动作（结构性残留，
-    ///   无法在软件层消除）→ 恒原生透传；
+    /// 策略性不支持自定义的按键（全型号一致）：
     /// - 返回/音量±：RC003 输入栈不可见（配置无法生效）；RC001 虽以
     ///   VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而不开放。
     ///
@@ -393,7 +391,6 @@ impl ButtonMappings {
     /// `set_mappings`）双重剥离，存量配置在加载/保存时自动清除。
     pub(crate) fn without_unsupported_buttons(mut self) -> Self {
         for button in [
-            RemoteButton::Left,
             RemoteButton::Back,
             RemoteButton::VolumeUp,
             RemoteButton::VolumeDown,
@@ -956,9 +953,8 @@ mod tests {
 
     #[test]
     fn normalized_strips_unsupported_button_customization() {
-        // 策略性不支持的按键（2026-09-07 用户决策，全型号一致）：normalized()
-        // 在持久化层剥离 左键/返回/音量± 配置（存量配置加载/保存时自动清除），
-        // 其余按键不受影响。
+        // 策略性不支持的按键：normalized() 在持久化层剥离返回/音量±配置；
+        // 左键自 2026-09-08 起与其余方向键同样允许映射，不得再被剥离。
         let mut mappings = ButtonMappings::default();
         let single_escape = ButtonActions {
             single: ButtonAction::Shortcut {
@@ -966,8 +962,10 @@ mod tests {
             },
             ..ButtonActions::default()
         };
+        mappings
+            .actions
+            .insert(RemoteButton::Left, single_escape.clone());
         for button in [
-            RemoteButton::Left,
             RemoteButton::Back,
             RemoteButton::VolumeUp,
             RemoteButton::VolumeDown,
@@ -984,8 +982,11 @@ mod tests {
             },
         );
         let normalized = mappings.normalized().unwrap();
+        assert!(
+            normalized.actions.contains_key(&RemoteButton::Left),
+            "左键映射必须保留"
+        );
         for button in [
-            RemoteButton::Left,
             RemoteButton::Back,
             RemoteButton::VolumeUp,
             RemoteButton::VolumeDown,
@@ -996,6 +997,9 @@ mod tests {
             );
         }
         assert!(normalized.actions.contains_key(&RemoteButton::Tv));
-        assert_eq!(normalized.mapped_mask(), 1u64 << RemoteButton::Tv.ordinal());
+        assert_eq!(
+            normalized.mapped_mask(),
+            (1u64 << RemoteButton::Left.ordinal()) | (1u64 << RemoteButton::Tv.ordinal())
+        );
     }
 }

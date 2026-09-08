@@ -128,7 +128,7 @@ struct EngineState {
 /// "方案空间"节）：仅 Home/TV——物理键盘 Home/` 低频，遥控器在线期间的
 /// 接管代价可接受，换取这两键孤立冷首按也严格单响应（无需武装直接吞，
 /// 跳过 60ms 有界等待，零额外延迟）。方向/Enter 等物理高频键不纳入
-///（接管=劫持物理键盘，用户按原话仅要求 Home/TV 与左键策略）。
+///（接管=劫持物理键盘；左键与其他方向键使用逐键武装机制）。
 pub(crate) fn persistent_suppress_mask(mapped_mask: u64) -> u64 {
     mapped_mask & ((1u64 << RemoteButton::Home.ordinal()) | (1u64 << RemoteButton::Tv.ordinal()))
 }
@@ -213,7 +213,7 @@ impl ButtonMappingRuntime {
 
     /// 更新按键映射：热加载到引擎 + 同步门控吞键配置。
     pub fn set_mappings(&self, mappings: ButtonMappings) {
-        // 策略性不支持的按键（左键/返回/音量±，2026-09-07 用户决策）统一
+        // 策略性不支持的按键（返回/音量±）统一
         // 剥离：normalized() 已在持久化层剥离，此处兜底直连调用路径。
         let mappings = mappings.without_unsupported_buttons();
         *self
@@ -746,8 +746,7 @@ mod tests {
                 ..ButtonActions::default()
             },
         );
-        // 左→退格：不同键映射——2026-09-07 起左键被策略剥离（见场景 3），
-        // 保留此配置用于验证剥离生效。
+        // 左→退格：不同键映射（泄漏路径仍须注入配置动作）。
         mappings.actions.insert(
             RemoteButton::Left,
             ButtonActions {
@@ -809,9 +808,8 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(50));
 
-        // 场景 3：左键不支持自定义（2026-09-07 用户决策）。即使配置了
-        // 左→退格，set_mappings 也策略性剥离左键映射——泄漏路径不注入，
-        // 保持原生方向键透传（消除冷首按"原生左移+退格"双响应）。
+        // 场景 3：泄漏路径的不同键映射（左→退格）照常注入。冷首按会
+        // 同时包含原生左移，这是与上/下/右/确定相同的结构性边界。
         ensure_gate(&mut gate);
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x25, KEYDOWN)))
@@ -819,10 +817,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(
             taps().as_slice(),
-            &[KeyChord {
-                keys: vec![KeyCode::Right]
-            },],
-            "左键映射已被策略剥离：泄漏路径不注入（原生方向键透传）"
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::Right]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Backspace]
+                },
+            ],
+            "泄漏路径的左键不同键映射必须注入"
         );
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x25, KEYUP)))
@@ -842,8 +845,8 @@ mod tests {
         let after_window = taps();
         assert_eq!(
             after_window.len(),
-            1,
-            "双击窗口超时补发的同键单击应由原生覆盖；左键已被策略剥离不再注入：{after_window:?}"
+            2,
+            "双击窗口超时补发的同键单击应由原生覆盖：{after_window:?}"
         );
 
         // 场景 5：泄漏按住的连发照常注入（遥控器不自动重复，连发由引擎交付）。
@@ -1118,9 +1121,7 @@ mod tests {
 
     #[test]
     fn set_mappings_strips_unsupported_buttons_and_sets_persistent_mask() {
-        // 策略性不支持的按键（左键/返回/音量±，2026-09-07 用户决策）剥离 +
-        // 常驻掩码联动：即使调用方传入这些键的配置（存量配置/直连路径），
-        // 引擎与门控都不得保留。
+        // 返回/音量±仍被策略剥离；左键映射必须保留并进入普通逐键武装机制。
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
@@ -1162,8 +1163,11 @@ mod tests {
         );
         runtime.set_mappings(mappings);
         let effective = runtime.mappings();
+        assert!(
+            effective.actions.contains_key(&RemoteButton::Left),
+            "左键自定义必须保留"
+        );
         for button in [
-            RemoteButton::Left,
             RemoteButton::Back,
             RemoteButton::VolumeUp,
             RemoteButton::VolumeDown,
@@ -1184,11 +1188,15 @@ mod tests {
                 },
             }),
         );
-        // 引擎侧被剥离按键的动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
         assert_eq!(
             effective.action_for(RemoteButton::Left, ButtonTrigger::Single),
-            ButtonAction::Disabled,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Backspace],
+                },
+            },
         );
+        // 引擎侧被剥离按键的动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
         assert_eq!(
             effective.action_for(RemoteButton::Back, ButtonTrigger::Single),
             ButtonAction::Disabled,

@@ -296,23 +296,21 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).toContain("遥控器优先");
   });
 
-  it("左键不支持自定义（2026-09-07 策略）：格子禁用且不打开编辑器", async () => {
+  it("左键与其余方向键同样开放自定义并显示结构性泄漏提示", async () => {
     const wrapper = await mountPage();
-    const leftCell = wrapper
-      .findAll(".mapping-card")
-      .find((c) => c.text().includes("左"))!
-      .findAll(".mapping-cell")[0]!;
-    expect((leftCell.element as HTMLButtonElement).disabled).toBe(true);
-    await leftCell.trigger("click");
-    expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+    await openCell(wrapper, "左", 0);
+    expect(chipState(wrapper, "←")).toBe(false);
+    expect(chipState(wrapper, "退格")).toBe(false);
+    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
 
-    // 策略与型号无关：RC001 上左键同样禁用。
+    // 与型号无关：RC001 上左键同样开放。
     const rc001 = await mountPage("rc001");
     const leftCellRc001 = rc001
       .findAll(".mapping-card")
       .find((c) => c.text().includes("左"))!
       .findAll(".mapping-cell")[0]!;
-    expect((leftCellRc001.element as HTMLButtonElement).disabled).toBe(true);
+    expect((leftCellRc001.element as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("电源（直接归因族）全开放且无单响应提示", async () => {
