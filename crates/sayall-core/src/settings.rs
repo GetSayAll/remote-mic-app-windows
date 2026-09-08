@@ -8,6 +8,15 @@ pub enum VoiceTriggerMode {
     Hold,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -20,13 +29,14 @@ pub struct AppSettings {
     pub launch_at_login: bool,
     pub open_window_at_launch: bool,
     pub check_prerelease_updates: bool,
+    pub theme_preference: ThemePreference,
     pub usage_statistics: UsageStatistics,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             selected_remote_id: None,
             audio_endpoint_id: None,
             audio_endpoint_name: None,
@@ -35,6 +45,7 @@ impl Default for AppSettings {
             launch_at_login: false,
             open_window_at_launch: true,
             check_prerelease_updates: false,
+            theme_preference: ThemePreference::System,
             usage_statistics: UsageStatistics::default(),
         }
     }
@@ -78,8 +89,26 @@ mod tests {
 
         assert_eq!(settings.audio_endpoint_id.as_deref(), Some("endpoint-1"));
         assert_eq!(settings.audio_endpoint_name, None);
-        assert_eq!(settings.schema_version, 2);
+        assert_eq!(settings.schema_version, 3);
         assert!(!settings.check_prerelease_updates);
+        assert_eq!(settings.theme_preference, ThemePreference::System);
         assert_eq!(settings.usage_statistics, UsageStatistics::default());
+    }
+
+    #[test]
+    fn theme_preferences_round_trip() {
+        for preference in [
+            ThemePreference::System,
+            ThemePreference::Light,
+            ThemePreference::Dark,
+        ] {
+            let settings = AppSettings {
+                theme_preference: preference,
+                ..AppSettings::default()
+            };
+            let encoded = serde_json::to_string(&settings).unwrap();
+            let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.normalized().theme_preference, preference);
+        }
     }
 }

@@ -19,6 +19,10 @@ const check = vi.fn<() => Promise<void>>();
 const install = vi.fn<() => Promise<void>>();
 const loadUpdatePreferences = vi.fn<() => Promise<void>>();
 const setIncludePrereleases = vi.fn<(enabled: boolean) => Promise<void>>();
+const themePreference = ref<"system" | "light" | "dark">("system");
+const themeBusy = ref(false);
+const themeError = ref("");
+const setThemePreference = vi.fn<(value: "system" | "light" | "dark") => Promise<void>>();
 
 vi.mock("../lib/app-update", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/app-update")>();
@@ -39,6 +43,15 @@ vi.mock("../lib/app-update", async (importOriginal) => {
     }),
   };
 });
+
+vi.mock("../lib/theme", () => ({
+  useTheme: () => ({
+    preference: themePreference,
+    busy: themeBusy,
+    errorMessage: themeError,
+    setThemePreference,
+  }),
+}));
 
 const runtime: RuntimeSnapshot = {
   appVersion: "0.1.0",
@@ -108,6 +121,32 @@ describe("about page update panel", () => {
     install.mockReset();
     loadUpdatePreferences.mockReset();
     setIncludePrereleases.mockReset();
+    themePreference.value = "system";
+    themeBusy.value = false;
+    themeError.value = "";
+    setThemePreference.mockReset();
+  });
+
+  it("外观选择器提供系统、浅色、深色三档并立即保存", async () => {
+    const wrapper = mount(AboutPage, { props: { runtime } });
+    const radios = wrapper.findAll<HTMLInputElement>('input[name="theme-preference"]');
+
+    expect(radios.map((radio) => radio.attributes("value"))).toEqual([
+      "system",
+      "light",
+      "dark",
+    ]);
+    expect(radios[0].element.checked).toBe(true);
+    expect(wrapper.text()).toContain("跟随 Windows 的应用颜色模式");
+
+    await radios[2].setValue(true);
+    expect(setThemePreference).toHaveBeenCalledWith("dark");
+  });
+
+  it("外观设置失败时显示就地错误", () => {
+    themeError.value = "外观设置保存失败，请稍后重试。";
+    const wrapper = mount(AboutPage, { props: { runtime } });
+    expect(wrapper.get('[role="alert"]').text()).toContain("外观设置保存失败");
   });
 
   it("预览版更新开关默认关闭并保存用户选择", async () => {
