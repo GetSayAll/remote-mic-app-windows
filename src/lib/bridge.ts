@@ -252,6 +252,8 @@ export interface AppUpdatePreferences {
   includePrereleases: boolean;
 }
 
+export type ThemePreference = "system" | "light" | "dark";
+
 export interface AppUpdateProgress {
   downloaded: number;
   contentLength: number | null;
@@ -613,6 +615,42 @@ export async function setAppUpdatePreferences(
     return { includePrereleases };
   }
   return invoke<AppUpdatePreferences>("set_app_update_preferences", { includePrereleases });
+}
+
+export async function getThemePreference(operationId: string): Promise<ThemePreference> {
+  if (!isTauriRuntime()) {
+    return "system";
+  }
+  return invoke<ThemePreference>("get_theme_preference", { operationId });
+}
+
+export async function saveThemePreference(
+  preference: ThemePreference,
+  operationId: string,
+): Promise<ThemePreference> {
+  if (!isTauriRuntime()) {
+    return preference;
+  }
+  return invoke<ThemePreference>("set_theme_preference", { preference, operationId });
+}
+
+export interface ThemeResultReport {
+  operationId: string;
+  action: "initialize" | "change";
+  preference: ThemePreference;
+  resolvedTheme: "light" | "dark";
+  terminalResult: "passed" | "failed";
+  reason:
+    | "applied"
+    | "preference_load_failed"
+    | "native_apply_failed"
+    | "apply_or_save_failed";
+  elapsedMs: number;
+}
+
+export async function reportThemeResult(report: ThemeResultReport): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("report_theme_result", { report });
 }
 
 /** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */

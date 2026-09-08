@@ -150,7 +150,7 @@ Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯�
 - 安装、升级、卸载和更新；
 - 自签 Authenticode、证书指纹和 SHA-256。
 
-Windows 深色模式方案已于 2026-09-08 获用户批准开发：“关于”页面提供“系统 / 浅色 / 深色”三档选择器，默认跟随 Windows，选择立即生效并通过现有设置文件持久化；主题只作用于 Tauri 窗口与 Vue CSS，不重建页面，也不触碰 BLE、音频、Raw Input 或按键服务。调研、schema 迁移、令牌范围、日志和 Windows 10/11 真机矩阵见 `docs/plan/2026-09-08-windows-dark-mode.md`；未实际验收前不得标记为 passed。
+Windows 深色模式已于 2026-09-08 实现：“关于”页面提供“系统 / 浅色 / 深色”三档选择器，默认跟随 Windows，选择立即生效并通过现有设置文件持久化；主题只作用于 Tauri 窗口与 Vue CSS，不重建页面，也不触碰 BLE、音频、Raw Input 或按键服务。自动测试、正式浏览器渲染和完整 7 步预检 passed；因本机安装版正在运行且不得强杀，Windows Tauri 原生标题栏、重启保持及 RC001/RC003 保持连接切换验收 deferred。调研、schema 迁移、令牌范围、日志与逐项证据见 `docs/plan/2026-09-08-windows-dark-mode.md`。
 
 安装包采用 Tauri NSIS current-user 模式，固定应用 identifier、publisher、开始菜单目录和禁止降级策略。最低系统版本统一定义为 Windows 10 1809（build 17763）：NSIS 在复制应用文件前通过官方 installer hook 拒绝更低 build，Tauri Host 在创建 WebView、BLE、WASAPI 和 Raw Input 资源前再次读取真实系统版本并失败关闭，覆盖绕过安装器直接运行 exe 的情况。普通 CI 校验 hook 路径与门槛值，并只生成明确标记为 unsigned 的短期 Preview artifact；该 artifact 只证明代码和打包结构可构建，不能替代 Windows 10 1809 / Windows 11 上的提示、安装升级、Authenticode 或 SmartScreen 真机验收。
 

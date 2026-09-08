@@ -7,7 +7,7 @@ use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
@@ -19,6 +19,7 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
+use sayall_core::ThemePreference;
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
@@ -323,6 +324,183 @@ async fn set_voice_hold_hotkey(
     .map_err(|error| format!("保存按住说话快捷键任务失败：{error}"))?
 }
 
+#[tauri::command]
+async fn get_theme_preference(
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ThemePreference, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "theme_preference operation_id={operation_id} action=load phase=requested"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.load().map(|settings| settings.theme_preference)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取外观设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(preference) => sayall_windows::gatt_note(format!(
+            "theme_preference operation_id={operation_id} action=load phase=persisted result=passed preference={} elapsed_ms={}",
+            theme_preference_name(*preference),
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "theme_preference operation_id={operation_id} action=load phase=persisted result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
+async fn set_theme_preference(
+    preference: ThemePreference,
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ThemePreference, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "theme_preference operation_id={operation_id} action=save phase=requested preference={}",
+        theme_preference_name(preference)
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_theme_preference(preference)?;
+        Ok(preference)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存外观设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(saved) => sayall_windows::gatt_note(format!(
+            "theme_preference operation_id={operation_id} action=save phase=persisted result=passed preference={} elapsed_ms={}",
+            theme_preference_name(*saved),
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "theme_preference operation_id={operation_id} action=save phase=persisted result=failed preference={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            theme_preference_name(preference),
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ThemeAction {
+    Initialize,
+    Change,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EffectiveTheme {
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ThemeTerminalResult {
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ThemeResultReason {
+    Applied,
+    PreferenceLoadFailed,
+    NativeApplyFailed,
+    ApplyOrSaveFailed,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemeResultReport {
+    operation_id: String,
+    action: ThemeAction,
+    preference: ThemePreference,
+    resolved_theme: EffectiveTheme,
+    terminal_result: ThemeTerminalResult,
+    reason: ThemeResultReason,
+    elapsed_ms: u64,
+}
+
+#[tauri::command]
+fn report_theme_result(report: ThemeResultReport) {
+    sayall_windows::gatt_note(format!(
+        "theme_preference operation_id={} action={} phase=completed preference={} resolved={} terminal_result={} reason={} elapsed_ms={}",
+        sanitized_theme_operation_id(&report.operation_id),
+        theme_action_name(report.action),
+        theme_preference_name(report.preference),
+        effective_theme_name(report.resolved_theme),
+        theme_terminal_result_name(report.terminal_result),
+        theme_result_reason_name(report.reason),
+        report.elapsed_ms
+    ));
+}
+
+fn sanitized_theme_operation_id(operation_id: &str) -> &str {
+    if !operation_id.is_empty()
+        && operation_id.len() <= 48
+        && operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        operation_id
+    } else {
+        "invalid"
+    }
+}
+
+fn theme_action_name(action: ThemeAction) -> &'static str {
+    match action {
+        ThemeAction::Initialize => "initialize",
+        ThemeAction::Change => "change",
+    }
+}
+
+fn effective_theme_name(theme: EffectiveTheme) -> &'static str {
+    match theme {
+        EffectiveTheme::Light => "light",
+        EffectiveTheme::Dark => "dark",
+    }
+}
+
+fn theme_terminal_result_name(result: ThemeTerminalResult) -> &'static str {
+    match result {
+        ThemeTerminalResult::Passed => "passed",
+        ThemeTerminalResult::Failed => "failed",
+    }
+}
+
+fn theme_result_reason_name(reason: ThemeResultReason) -> &'static str {
+    match reason {
+        ThemeResultReason::Applied => "applied",
+        ThemeResultReason::PreferenceLoadFailed => "preference_load_failed",
+        ThemeResultReason::NativeApplyFailed => "native_apply_failed",
+        ThemeResultReason::ApplyOrSaveFailed => "apply_or_save_failed",
+    }
+}
+
+fn theme_preference_name(preference: ThemePreference) -> &'static str {
+    match preference {
+        ThemePreference::System => "system",
+        ThemePreference::Light => "light",
+        ThemePreference::Dark => "dark",
+    }
+}
+
 #[cfg(feature = "runtime-simulation")]
 #[tauri::command]
 fn run_runtime_simulation_voice_session(
@@ -612,6 +790,9 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_theme_preference,
+        set_theme_preference,
+        report_theme_result,
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,
@@ -643,6 +824,9 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_theme_preference,
+        set_theme_preference,
+        report_theme_result,
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,

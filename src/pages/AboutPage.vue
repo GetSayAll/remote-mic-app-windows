@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
-import type { RuntimeSnapshot } from "../lib/bridge";
+import type { RuntimeSnapshot, ThemePreference } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
+import { useTheme } from "../lib/theme";
 
 defineProps<{ runtime: RuntimeSnapshot | null }>();
 
@@ -18,6 +19,18 @@ const {
   loadUpdatePreferences,
   setIncludePrereleases,
 } = useAppUpdate();
+const {
+  preference: themePreference,
+  busy: themeBusy,
+  errorMessage: themeError,
+  setThemePreference,
+} = useTheme();
+
+const themeOptions: Array<{ value: ThemePreference; label: string }> = [
+  { value: "system", label: "系统" },
+  { value: "light", label: "浅色" },
+  { value: "dark", label: "深色" },
+];
 
 const checking = computed(() => phase.value === "checking");
 const installing = computed(() => phase.value === "downloading" || phase.value === "installing");
@@ -39,6 +52,10 @@ async function onPreviewToggle(event: Event): Promise<void> {
   await setIncludePrereleases((event.target as HTMLInputElement).checked);
 }
 
+async function onThemeChange(event: Event): Promise<void> {
+  await setThemePreference((event.target as HTMLInputElement).value as ThemePreference);
+}
+
 onMounted(() => {
   void loadUpdatePreferences();
 });
@@ -58,6 +75,33 @@ onMounted(() => {
         <h2>无线麦 SayAll</h2>
         <p>版本 {{ runtime?.appVersion ?? "0.1.0" }}</p>
       </div>
+    </article>
+
+    <article class="card appearance-card">
+      <h2>外观</h2>
+      <p class="muted">选择应用的显示模式。</p>
+      <div class="theme-selector" role="radiogroup" aria-label="显示模式">
+        <label
+          v-for="option in themeOptions"
+          :key="option.value"
+          class="theme-option"
+          :class="{ selected: themePreference === option.value }"
+        >
+          <input
+            type="radio"
+            name="theme-preference"
+            :value="option.value"
+            :checked="themePreference === option.value"
+            :disabled="themeBusy"
+            @change="onThemeChange"
+          />
+          <span>{{ option.label }}</span>
+        </label>
+      </div>
+      <p class="muted appearance-note">
+        {{ themePreference === "system" ? "跟随 Windows 的应用颜色模式。" : "该选择会在重启后保持。" }}
+      </p>
+      <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
     </article>
 
     <article class="card">

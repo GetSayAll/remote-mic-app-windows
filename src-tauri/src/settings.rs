@@ -1,4 +1,4 @@
-use sayall_core::{AppSettings, UsageStatistics};
+use sayall_core::{AppSettings, ThemePreference, UsageStatistics};
 use sayall_windows::send_input::{ButtonMappings, KeyChord};
 use std::fs;
 use std::io::ErrorKind;
@@ -53,6 +53,12 @@ impl SettingsStore {
     pub fn save_check_prerelease_updates(&self, enabled: bool) -> Result<(), String> {
         self.update("保存预览版更新设置", move |settings| {
             settings.check_prerelease_updates = enabled;
+        })
+    }
+
+    pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
+        self.update("保存外观设置", move |settings| {
+            settings.theme_preference = preference;
         })
     }
 
@@ -239,6 +245,29 @@ mod tests {
         assert!(decoded.launch_at_login);
         assert!(!decoded.open_window_at_launch);
         assert!(!decoded.check_prerelease_updates);
+        assert_eq!(decoded.theme_preference, ThemePreference::System);
+    }
+
+    #[test]
+    fn theme_preference_defaults_to_system_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-theme-preference-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert_eq!(
+            store.load().unwrap().theme_preference,
+            ThemePreference::System
+        );
+        store.save_theme_preference(ThemePreference::Dark).unwrap();
+        assert_eq!(
+            store.load().unwrap().theme_preference,
+            ThemePreference::Dark
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Windows 深色模式适配方案
 
-状态：**已批准，开发中**
+状态：**已实现；自动测试与浏览器实测 passed，原生运行验收部分 deferred**
 
 基线：`origin/main` `1335b82b0028690340c7a604af058bf0e40958a0`（v0.2.2，2026-09-08 拉取）
 
@@ -108,11 +108,11 @@ feature=theme event=preference_changed preference=system|light|dark result=ok|er
 feature=theme event=fallback reason=theme_unavailable|listener_failed resolved=light|dark
 ```
 
-日志不包含个人路径、设备身份或用户内容。当前前端使用 `console.info/warn` 记录结构化事件；生产常驻日志系统落地后再接入统一载体。主题失败必须 fail-soft：维持最后一次有效主题，首次失败则由 CSS 媒体查询决定。
+日志不包含个人路径、设备身份或用户内容。前端使用 `console.info/warn` 记录即时事件，并通过 Tauri IPC 将初始化/切换操作的唯一终态写入 `SAYALL_GATT_LOG`；同一 `operation_id` 关联请求、设置落盘与界面应用结果，区分 `passed`、`failed`、原因及耗时。主题失败必须 fail-soft：维持最后一次有效主题，首次失败则由 CSS 媒体查询决定。
 
 `src/main.ts` 在 `app.mount()` 之前初始化主题，避免 Vue 已显示后才切色。`App.vue` 不保存主题业务状态，防止主题变化触发页面组件重建。
 
-主题偏好的权威来源是 Rust `SettingsStore`。前端只保留当前会话响应式状态；浏览器预览用内存默认值模拟，不把测试偏好冒充桌面端持久化成功。
+主题偏好的权威来源是 Rust `SettingsStore`。前端另在 WebView `localStorage` 保存一份只读启动镜像，`index.html` 在加载应用脚本前用它决定首帧颜色，避免固定深色重启时先出现浅色白闪；主题控制器随后以 Rust 设置校准镜像。镜像损坏或不可用时按“系统”回退，绝不反向覆盖 Rust 权威设置。浏览器预览只用内存默认值模拟 IPC，不把测试偏好冒充桌面端持久化成功。
 
 ### 4.3 “关于”页面选择器
 
@@ -240,3 +240,30 @@ RC001 与 RC003 不需要各自验证配色，但必须至少各完成一次“�
 3. Windows 10/11 与 RC001/RC003 相关真机项按事实标记；
 4. 日志能区分主题来源、初始化、实时变化和回退原因；
 5. 独立功能提交，只含夜间模式适配与对应文档证据。
+
+## 8. 实现与验证记录（2026-09-08）
+
+已实现：
+
+- “关于”页面三档选择器、即时切换、保存中禁用与失败回滚；
+- `AppSettings` schema 3 与旧设置默认迁移为“系统”；
+- Tauri 主题偏好读写命令及 `SAYALL_GATT_LOG` 结构化记录，以同一 `operation_id` 关联请求、落盘和唯一界面终态；
+- Tauri 应用级固定主题/取消覆盖、系统主题事件和浏览器媒体查询；
+- 首帧 `localStorage` 镜像与 Rust 权威设置校准；
+- 浅色/深色语义令牌、四页状态色、焦点与高对比模式基础样式。
+
+验证结果：
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| `scripts/ci-preflight.ps1 -Full` 7 步 | passed | 前端测试、构建、Rust fmt/workspace test/check、Windows runtime-simulation release 构建全部通过 |
+| Vue/Vitest | passed | 9 个文件、52 项测试；含三档选择、系统变化、固定深色、保存失败回滚 |
+| Rust workspace | passed | 121 项通过、2 项既有条件测试 ignored；含 schema 迁移与三档序列化/持久化 |
+| 正式前端构建 | passed | `vue-tsc --noEmit` 与 Vite production build |
+| Windows Chrome 1029×732 渲染 | passed | 四页深色无横向溢出，浅/深/系统唯一选中，系统浅→深实时跟随，console error/warn 为 0 |
+| 基础对比度探针 | passed | 浅色主文字/页面 14.23:1、次级文字/卡片 4.96:1、选中文字/强调色 4.93:1 |
+| Windows Tauri/WebView 仿真运行 | deferred | 本机已有安装版 SayAll 运行，单实例守卫拒绝测试程序；按部署规则未强杀正在连接的应用 |
+| Windows 10/11 原生标题栏、重启保持 | deferred | 需可正常退出安装版后的独占运行窗口 |
+| RC001/RC003 保持连接时切换主题 | deferred | 本轮未打断用户当前遥控器会话做型号级验收 |
+
+浏览器 QA 使用系统 Chrome，因为本会话未提供 Browser 插件且 Playwright 自带 Chromium 未安装；通过 Playwright 1.62.1 驱动现有 Chrome，未修改项目依赖。
