@@ -12,8 +12,13 @@ const phase: Ref<AppUpdatePhase> = ref("idle");
 const info = ref<Awaited<ReturnType<typeof useAppUpdate>>["info"]["value"]>(null);
 const errorMessage = ref("");
 const progress = ref({ downloaded: 0, contentLength: null as number | null, finished: false });
+const includePrereleases = ref(false);
+const preferenceBusy = ref(false);
+const preferenceError = ref("");
 const check = vi.fn<() => Promise<void>>();
 const install = vi.fn<() => Promise<void>>();
+const loadUpdatePreferences = vi.fn<() => Promise<void>>();
+const setIncludePrereleases = vi.fn<(enabled: boolean) => Promise<void>>();
 
 vi.mock("../lib/app-update", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/app-update")>();
@@ -24,8 +29,13 @@ vi.mock("../lib/app-update", async (importOriginal) => {
       info,
       errorMessage,
       progress,
+      includePrereleases,
+      preferenceBusy,
+      preferenceError,
       check,
       install,
+      loadUpdatePreferences,
+      setIncludePrereleases,
     }),
   };
 });
@@ -91,8 +101,25 @@ describe("about page update panel", () => {
     info.value = null;
     errorMessage.value = "";
     progress.value = { downloaded: 0, contentLength: null, finished: false };
+    includePrereleases.value = false;
+    preferenceBusy.value = false;
+    preferenceError.value = "";
     check.mockReset();
     install.mockReset();
+    loadUpdatePreferences.mockReset();
+    setIncludePrereleases.mockReset();
+  });
+
+  it("预览版更新开关默认关闭并保存用户选择", async () => {
+    const wrapper = mount(AboutPage, { props: { runtime } });
+    await flushPromises();
+    expect(loadUpdatePreferences).toHaveBeenCalledTimes(1);
+    const toggle = wrapper.find<HTMLInputElement>('input[type="checkbox"]');
+    expect(toggle.element.checked).toBe(false);
+
+    await toggle.setValue(true);
+    expect(setIncludePrereleases).toHaveBeenCalledWith(true);
+    expect(wrapper.text()).toContain("预览版包含新功能");
   });
 
   it("初始状态显示手动检查入口", () => {

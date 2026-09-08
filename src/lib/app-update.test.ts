@@ -6,6 +6,8 @@ import type { AppUpdateInfo } from "./bridge";
 
 const checkAppUpdate = vi.fn<() => Promise<AppUpdateInfo>>();
 const installAppUpdate = vi.fn<() => Promise<void>>();
+const getAppUpdatePreferences = vi.fn();
+const setAppUpdatePreferences = vi.fn();
 const progressHandlers: Array<(progress: unknown) => void> = [];
 const subscribeAppUpdateProgress = vi.fn(
   (handler: (progress: unknown) => void) => {
@@ -19,7 +21,10 @@ vi.mock("./bridge", async (importOriginal) => {
   return {
     ...actual,
     checkAppUpdate: () => checkAppUpdate(),
+    getAppUpdatePreferences: () => getAppUpdatePreferences(),
     installAppUpdate: () => installAppUpdate(),
+    setAppUpdatePreferences: (includePrereleases: boolean) =>
+      setAppUpdatePreferences(includePrereleases),
     subscribeAppUpdateProgress: (handler: (progress: unknown) => void) =>
       subscribeAppUpdateProgress(handler),
   };
@@ -52,8 +57,37 @@ describe("app update shared state", () => {
     resetAppUpdateForTests();
     checkAppUpdate.mockReset();
     installAppUpdate.mockReset();
+    getAppUpdatePreferences.mockReset();
+    setAppUpdatePreferences.mockReset();
     subscribeAppUpdateProgress.mockClear();
     progressHandlers.length = 0;
+  });
+
+  it("预览版更新默认关闭，加载并保存后切换检查通道", async () => {
+    getAppUpdatePreferences.mockResolvedValue({ includePrereleases: false });
+    setAppUpdatePreferences.mockResolvedValue({ includePrereleases: true });
+    const {
+      includePrereleases,
+      preferenceError,
+      loadUpdatePreferences,
+      setIncludePrereleases,
+    } = useAppUpdate();
+
+    await loadUpdatePreferences();
+    expect(includePrereleases.value).toBe(false);
+    await setIncludePrereleases(true);
+    expect(setAppUpdatePreferences).toHaveBeenCalledWith(true);
+    expect(includePrereleases.value).toBe(true);
+    expect(preferenceError.value).toBe("");
+  });
+
+  it("预览版设置保存失败时回滚开关并显示错误", async () => {
+    setAppUpdatePreferences.mockRejectedValue(new Error("保存失败"));
+    const { includePrereleases, preferenceError, setIncludePrereleases } = useAppUpdate();
+
+    await setIncludePrereleases(true);
+    expect(includePrereleases.value).toBe(false);
+    expect(preferenceError.value).toContain("保存失败");
   });
 
   it("手动检查发现新版本：进入 available 且横幅可见", async () => {

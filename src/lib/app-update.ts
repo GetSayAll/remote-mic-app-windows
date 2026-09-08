@@ -1,7 +1,9 @@
 import { computed, ref } from "vue";
 import {
   checkAppUpdate,
+  getAppUpdatePreferences,
   installAppUpdate,
+  setAppUpdatePreferences,
   subscribeAppUpdateProgress,
   type AppUpdateInfo,
   type AppUpdateProgress,
@@ -30,8 +32,12 @@ const info = ref<AppUpdateInfo | null>(null);
 const errorMessage = ref("");
 const progress = ref<AppUpdateProgress>({ downloaded: 0, contentLength: null, finished: false });
 const bannerDismissed = ref(false);
+const includePrereleases = ref(false);
+const preferenceBusy = ref(false);
+const preferenceError = ref("");
 let progressUnsubscribe: (() => void) | null = null;
 let autoCheckDone = false;
+let preferenceLoaded = false;
 
 /** 顶部横幅可见：仅"有更新且用户未忽略"，且当前不在关于页时由 App.vue 自行隐藏。 */
 const bannerVisible = computed(
@@ -95,6 +101,43 @@ function dismissBanner(): void {
   bannerDismissed.value = true;
 }
 
+async function loadUpdatePreferences(): Promise<void> {
+  if (preferenceLoaded) return;
+  preferenceLoaded = true;
+  preferenceBusy.value = true;
+  preferenceError.value = "";
+  try {
+    const saved = await getAppUpdatePreferences();
+    includePrereleases.value = saved.includePrereleases;
+  } catch (error) {
+    preferenceLoaded = false;
+    preferenceError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    preferenceBusy.value = false;
+  }
+}
+
+async function setIncludePrereleases(enabled: boolean): Promise<void> {
+  const previous = includePrereleases.value;
+  includePrereleases.value = enabled;
+  preferenceBusy.value = true;
+  preferenceError.value = "";
+  try {
+    const saved = await setAppUpdatePreferences(enabled);
+    includePrereleases.value = saved.includePrereleases;
+    info.value = null;
+    bannerDismissed.value = false;
+    if (phase.value !== "downloading" && phase.value !== "installing") {
+      phase.value = "idle";
+    }
+  } catch (error) {
+    includePrereleases.value = previous;
+    preferenceError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    preferenceBusy.value = false;
+  }
+}
+
 /** 启动静默检查（每次应用生命周期至多一次；失败无声）。 */
 async function runStartupSilentCheck(): Promise<void> {
   if (autoCheckDone) {
@@ -111,9 +154,13 @@ export function resetAppUpdateForTests(): void {
   errorMessage.value = "";
   progress.value = { downloaded: 0, contentLength: null, finished: false };
   bannerDismissed.value = false;
+  includePrereleases.value = false;
+  preferenceBusy.value = false;
+  preferenceError.value = "";
   progressUnsubscribe?.();
   progressUnsubscribe = null;
   autoCheckDone = false;
+  preferenceLoaded = false;
 }
 
 export function useAppUpdate() {
@@ -123,9 +170,14 @@ export function useAppUpdate() {
     errorMessage,
     progress,
     bannerVisible,
+    includePrereleases,
+    preferenceBusy,
+    preferenceError,
     check,
     install,
     dismissBanner,
+    loadUpdatePreferences,
+    setIncludePrereleases,
     runStartupSilentCheck,
   };
 }

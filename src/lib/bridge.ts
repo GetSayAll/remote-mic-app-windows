@@ -248,6 +248,10 @@ export interface AppUpdateInfo {
   date: string | null;
 }
 
+export interface AppUpdatePreferences {
+  includePrereleases: boolean;
+}
+
 export interface AppUpdateProgress {
   downloaded: number;
   contentLength: number | null;
@@ -593,6 +597,22 @@ export async function checkAppUpdate(): Promise<AppUpdateInfo> {
     };
   }
   return invoke<AppUpdateInfo>("check_app_update");
+}
+
+export async function getAppUpdatePreferences(): Promise<AppUpdatePreferences> {
+  if (!isTauriRuntime()) {
+    return { includePrereleases: false };
+  }
+  return invoke<AppUpdatePreferences>("get_app_update_preferences");
+}
+
+export async function setAppUpdatePreferences(
+  includePrereleases: boolean,
+): Promise<AppUpdatePreferences> {
+  if (!isTauriRuntime()) {
+    return { includePrereleases };
+  }
+  return invoke<AppUpdatePreferences>("set_app_update_preferences", { includePrereleases });
 }
 
 /** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */

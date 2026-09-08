@@ -1,11 +1,23 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted } from "vue";
 import type { RuntimeSnapshot } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 
 defineProps<{ runtime: RuntimeSnapshot | null }>();
 
-const { phase, info, errorMessage, progress, check, install } = useAppUpdate();
+const {
+  phase,
+  info,
+  errorMessage,
+  progress,
+  includePrereleases,
+  preferenceBusy,
+  preferenceError,
+  check,
+  install,
+  loadUpdatePreferences,
+  setIncludePrereleases,
+} = useAppUpdate();
 
 const checking = computed(() => phase.value === "checking");
 const installing = computed(() => phase.value === "downloading" || phase.value === "installing");
@@ -22,6 +34,14 @@ async function onCheck(): Promise<void> {
 async function onInstall(): Promise<void> {
   await install();
 }
+
+async function onPreviewToggle(event: Event): Promise<void> {
+  await setIncludePrereleases((event.target as HTMLInputElement).checked);
+}
+
+onMounted(() => {
+  void loadUpdatePreferences();
+});
 </script>
 
 <template>
@@ -43,6 +63,18 @@ async function onInstall(): Promise<void> {
     <article class="card">
       <h2>软件更新</h2>
       <p class="muted">更新包来自 GitHub Releases，下载后自动安装并重启应用。</p>
+      <label class="toggle-row" title="开启后，检查更新时也会包含尚在测试中的预览版本。">
+        <input
+          type="checkbox"
+          class="toggle-input"
+          :checked="includePrereleases"
+          :disabled="preferenceBusy || checking || installing"
+          @change="onPreviewToggle"
+        />
+        检查预览版更新
+      </label>
+      <p class="muted">默认关闭。预览版包含新功能，但稳定性可能低于正式版。</p>
+      <p v-if="preferenceError" class="update-error">{{ preferenceError }}</p>
       <div class="update-panel">
         <template v-if="updateAvailable">
           <p>

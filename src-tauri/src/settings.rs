@@ -50,6 +50,12 @@ impl SettingsStore {
         })
     }
 
+    pub fn save_check_prerelease_updates(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存预览版更新设置", move |settings| {
+            settings.check_prerelease_updates = enabled;
+        })
+    }
+
     pub fn usage_statistics(&self) -> Result<UsageStatistics, String> {
         self.load().map(|settings| settings.usage_statistics)
     }
@@ -232,6 +238,23 @@ mod tests {
         assert_eq!(decoded.gain_db, 12.0);
         assert!(decoded.launch_at_login);
         assert!(!decoded.open_window_at_launch);
+        assert!(!decoded.check_prerelease_updates);
+    }
+
+    #[test]
+    fn prerelease_update_preference_defaults_off_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-update-preference-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(!store.load().unwrap().check_prerelease_updates);
+        store.save_check_prerelease_updates(true).unwrap();
+        assert!(store.load().unwrap().check_prerelease_updates);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
