@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$wd = "$PSScriptRoot\.."
+$wd = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;

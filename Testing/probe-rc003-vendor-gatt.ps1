@@ -1,8 +1,9 @@
 ﻿# 订阅小米遥控器（RC003）厂商 GATT 服务的全部特征值通知，
 # 记录按键报文（返回/音量+/音量- 等不进 Windows HID 栈的按键）。
 # 通知处理走 Register-ObjectEvent（PS 事件子系统，跨线程可靠）。
-# 用法: probe-rc003-vendor-gatt.ps1 <输出文件> <运行秒数>
+# 用法: probe-rc003-vendor-gatt.ps1 <MAC> <输出文件> <运行秒数>
 param(
+    [Parameter(Mandatory = $true)][string]$Mac,
     [Parameter(Mandatory = $true)][string]$OutFile,
     [Parameter(Mandatory = $true)][int]$Seconds
 )
@@ -32,10 +33,11 @@ function Await($op, $resultType) {
     $task.Result
 }
 
-# 遥控器 MAC <redacted-mac> -> ulong（高位在前）
-$addrBytes = [byte[]](0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-$addr = [UInt64]0
-foreach ($b in $addrBytes) { $addr = ($addr -shl 8) -bor $b }
+$normalizedMac = ($Mac -replace '[:-]', '').Trim()
+if ($normalizedMac -notmatch '^[0-9A-Fa-f]{12}$') {
+    throw "MAC 格式无效：请传入 12 位十六进制地址"
+}
+$addr = [Convert]::ToUInt64($normalizedMac, 16)
 
 $writer = New-Object System.IO.StreamWriter($OutFile, $true, (New-Object System.Text.UTF8Encoding($false)))
 $writer.WriteLine("--- gatt probe start $((Get-Date).ToString('HH:mm:ss')) ---")

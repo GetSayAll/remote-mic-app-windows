@@ -1,7 +1,8 @@
 ﻿# 探针：订阅 RC003 的 HID 服务（0x1812）全部可通知特征值（重点 0x2A4D Report），
 # 验证"应用侧 GATT 订阅能否独立于 OS HID 栈收到按键报文"（左键双响应修复的路线 B）。
-# 用法: probe-rc003-hid-gatt.ps1 <输出文件> <运行秒数>
+# 用法: probe-rc003-hid-gatt.ps1 <MAC> <输出文件> <运行秒数>
 param(
+    [Parameter(Mandatory = $true)][string]$Mac,
     [Parameter(Mandatory = $true)][string]$OutFile,
     [Parameter(Mandatory = $true)][int]$Seconds
 )
@@ -29,10 +30,11 @@ function Await($op, $resultType) {
     $task.Result
 }
 
-# 遥控器地址（从 raw input 设备路径 Dev_ 段取得）
-$addrBytes = [byte[]](0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-$addr = [UInt64]0
-foreach ($b in $addrBytes) { $addr = ($addr -shl 8) -bor $b }
+$normalizedMac = ($Mac -replace '[:-]', '').Trim()
+if ($normalizedMac -notmatch '^[0-9A-Fa-f]{12}$') {
+    throw "MAC 格式无效：请传入 12 位十六进制地址"
+}
+$addr = [Convert]::ToUInt64($normalizedMac, 16)
 
 $writer = New-Object System.IO.StreamWriter($OutFile, $true, (New-Object System.Text.UTF8Encoding($false)))
 $writer.WriteLine("--- hid gatt probe start $((Get-Date).ToString('HH:mm:ss.fff')) ---")

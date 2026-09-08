@@ -3,6 +3,10 @@ dist/
 target/
 src-tauri/target/
 src-tauri/gen/
+.env
+.env.*
+credentials.json
+*-secret.*
 .playwright-cli/
 .DS_Store
 *.log

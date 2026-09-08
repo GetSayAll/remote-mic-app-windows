@@ -1,5 +1,5 @@
 param(
-    [string]$LogPath = "$PSScriptRoot\..\Testing\llmon.log",
+    [string]$LogPath = "$PSScriptRoot\llmon.log",
     [int]$Seconds = 180
 )
 $ErrorActionPreference = 'Continue'

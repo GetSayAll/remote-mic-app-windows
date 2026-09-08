@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$wd = "$PSScriptRoot\.."
+$wd = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ts = Get-Date -Format 'HHmmss'
 Add-Type @'
 using System;

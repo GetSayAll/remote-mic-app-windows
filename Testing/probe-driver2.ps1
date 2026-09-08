@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$wd = "$PSScriptRoot\.."
+$wd = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$wd\Testing\probe-hookmon.ps1",'30' -WindowStyle Hidden
 Start-Sleep -Seconds 3
 

@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$wd = "$PSScriptRoot\.."
+$wd = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type @'

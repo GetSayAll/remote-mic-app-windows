@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$wd = "$PSScriptRoot\.."
+$wd = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $stamp = Get-Date -Format 'HHmmss'
 $logPath = "$wd\Testing\hookmon-$stamp.log"
 
