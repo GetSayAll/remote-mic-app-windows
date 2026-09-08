@@ -19,7 +19,9 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
-use updater::{check_app_update, install_app_update};
+use updater::{
+    check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -610,6 +612,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_app_update_preferences,
+        set_app_update_preferences,
         check_app_update,
         install_app_update,
         run_runtime_simulation_voice_session,
@@ -639,6 +643,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_app_update_preferences,
+        set_app_update_preferences,
         check_app_update,
         install_app_update
     ]);

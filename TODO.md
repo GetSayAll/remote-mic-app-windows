@@ -43,7 +43,7 @@
 
 ### 2026-09-05 附加
 
-- **应用内更新（tauri-plugin-updater + GitHub Releases，新增）**：关于页"检查更新"手动入口 + 启动静默检查（失败完全无声）+ 下载进度 + passive 安装自动重启；更新通道仅依赖 GitHub（`releases/latest/download/latest.json` 静态清单，minisign 强制验签）。安装器启动前经 `on_before_exit` 显式断开 BLE 链路（插件在 Windows 上 `std::process::exit(0)` 不走 Drop 清理）。待完成边界：① 首个正式 Release（含 latest.json + ASCII 重命名资产）发布前 `releases/latest` 端点 404（检查静默失败属预期）；② GitHub Secret `TAURI_SIGNING_PRIVATE_KEY` 未配置时 CI 用一次性密钥兜底、正式 Release workflow 直接失败；③ Authenticode 代码签名仍待建立（updater minisign 验签独立于 Authenticode）；④ 大陆访问 GitHub 的网络可用性未量化（插件支持多端点兜底与系统代理，已留扩展位）。参考与源码核对记录见 ATTRIBUTION.md 更新调研节。
+- **应用内更新（tauri-plugin-updater + GitHub Releases，新增）**：关于页"检查更新"手动入口 + 启动静默检查（失败完全无声）+ 下载进度 + passive 安装自动重启；默认稳定通道使用 `releases/latest/download/latest.json`，用户可显式开启“检查预览版更新”，经 GitHub Releases Atom feed 选择最高 SemVer 的已发布版本（包含 Pre-release）；开关默认关闭并持久化，两个通道均由 minisign 强制验签。安装器启动前经 `on_before_exit` 显式断开 BLE 链路（插件在 Windows 上 `std::process::exit(0)` 不走 Drop 清理）。待完成边界：① 已安装 0.2.1 不含预览通道开关，无法自行发现 Pre-release，0.2.2 首次引导需单独处理；② GitHub Secret `TAURI_SIGNING_PRIVATE_KEY` 未配置时 CI 用一次性密钥兜底、正式 Release workflow 直接失败；③ Authenticode 代码签名仍待建立（updater minisign 验签独立于 Authenticode）；④ 大陆访问 GitHub 的网络可用性未量化（插件支持多端点兜底与系统代理，已留扩展位）。参考与源码核对记录见 ATTRIBUTION.md 更新调研节。
 - **BLE 僵死链路自动恢复（bluetooth_radio.rs，新增）**：应用被强杀后 OS 侧 GATT/HID 链路或服务缓存可能僵死，普通重试永不恢复（真机取证 + Qt 论坛同结论：关开蓝牙是唯一有效公开 API 手段）。重连循环连续失败 5 次（约 60s）自动关开蓝牙无线电一次（Off→2s→On），每僵死周期最多 2 次防抖动，UI 提示全程可见；WinRT Radio API 未打包进程可用、无需提权（真机验证：开关周期后重连立即成功）。详见 docs\investigations\evidence\p\FINDINGS.md 2026-09-05 节与 ATTRIBUTION.md BLE 恢复调研来源。
 - 语音键 F5 抑制器补防粘键配对（VVC 同款"DOWN 漏进 OS 则 UP 必放行"）：按下沿 60ms 有界等待超时泄漏时，释放沿放行，杜绝"F5 粘住→和弦全部被拒"的整机失效模式。
 

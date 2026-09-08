@@ -19,6 +19,7 @@ pub struct AppSettings {
     pub voice_trigger_mode: VoiceTriggerMode,
     pub launch_at_login: bool,
     pub open_window_at_launch: bool,
+    pub check_prerelease_updates: bool,
     pub usage_statistics: UsageStatistics,
 }
 
@@ -33,6 +34,7 @@ impl Default for AppSettings {
             voice_trigger_mode: VoiceTriggerMode::Hold,
             launch_at_login: false,
             open_window_at_launch: true,
+            check_prerelease_updates: false,
             usage_statistics: UsageStatistics::default(),
         }
     }
@@ -77,6 +79,7 @@ mod tests {
         assert_eq!(settings.audio_endpoint_id.as_deref(), Some("endpoint-1"));
         assert_eq!(settings.audio_endpoint_name, None);
         assert_eq!(settings.schema_version, 2);
+        assert!(!settings.check_prerelease_updates);
         assert_eq!(settings.usage_statistics, UsageStatistics::default());
     }
 }

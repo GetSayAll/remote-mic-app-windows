@@ -2833,6 +2833,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -3127,8 +3128,12 @@ dependencies = [
 name = "sayall-windows-app"
 version = "0.2.1"
 dependencies = [
+ "quick-xml",
+ "reqwest",
+ "rustls",
  "sayall-core",
  "sayall-windows",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

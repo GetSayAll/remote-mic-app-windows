@@ -7,13 +7,15 @@
 //!   不会执行），因此 BLE 断开等成对清理必须注册在 `on_before_exit` 回调里，
 //!   而不是依赖进程退出路径——2026-09-05"部署不得强杀"教训的更新版。
 //! - 安装器以 passive（/P + /UPDATE + /R）运行：显示进度条、装完自动重启应用。
-//! - 端点来自 tauri.conf.json（GitHub Releases latest.json）；环境变量
+//! - 默认端点来自 tauri.conf.json（GitHub Releases stable latest.json）；用户
+//!   显式开启预览版后，通过 GitHub Releases Atom feed 选择最高 SemVer 的已发布
+//!   Release（包含 Pre-release）并在运行时覆盖为其 latest.json；环境变量
 //!   `SAYALL_UPDATER_ENDPOINT` 可覆盖端点（release 构建强制 https，仅用于
 //!   本地/开发验证，正式配置不含任何 dangerous 开关）。
 //! - 超时：检查请求 30s；下载 20 分钟（安装器 ~10-20MB，慢速链路兜底）。
 
 use crate::AppState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
@@ -23,6 +25,10 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const PROGRESS_EMIT_MIN_INTERVAL_BYTES: u64 = 128 * 1024;
 const ENDPOINT_OVERRIDE_ENV: &str = "SAYALL_UPDATER_ENDPOINT";
+const PREVIEW_RELEASES_FEED: &str =
+    "https://github.com/GetSayAll/remote-mic-app-windows/releases.atom";
+const PREVIEW_MANIFEST_NAME: &str = "latest.json";
+const RELEASE_DOWNLOAD_PATH_PREFIX: &str = "/GetSayAll/remote-mic-app-windows/releases/download/";
 /// 前端进度事件名（downloaded/contentLength/finished）。
 const PROGRESS_EVENT: &str = "app-update-progress";
 
@@ -69,6 +75,43 @@ pub struct AppUpdateInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppUpdatePreferences {
+    pub include_prereleases: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleasesFeed {
+    #[serde(rename = "entry", default)]
+    entries: Vec<ReleaseFeedEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseFeedEntry {
+    #[serde(rename = "link", default)]
+    links: Vec<ReleaseFeedLink>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseFeedLink {
+    #[serde(rename = "@rel")]
+    rel: String,
+    #[serde(rename = "@href")]
+    href: String,
+}
+
+enum UpdateEndpoint {
+    ConfiguredStable,
+    Runtime(reqwest::Url),
+    NoPublishedPreview,
+}
+
+#[derive(Debug)]
+enum PreviewManifestError {
+    InvalidReleaseUrl,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppUpdateProgress {
     downloaded: u64,
     content_length: Option<u64>,
@@ -97,10 +140,143 @@ fn elapsed_ms(started: Instant) -> u128 {
     started.elapsed().as_millis()
 }
 
+fn preview_manifest_endpoint(
+    feed: &ReleasesFeed,
+) -> Result<Option<(reqwest::Url, String)>, PreviewManifestError> {
+    // 开关语义是“包含预览版”，不是“只看预览版”：在所有已发布的正式版
+    // 与预览版中按 SemVer 取最高版本，避免较旧预览版遮住较新的正式版。
+    // GitHub Releases Atom feed 不包含 Draft；tag 从公开的 alternate 链接读取。
+    let Some((tag, _)) = feed
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let href = entry
+                .links
+                .iter()
+                .find(|link| link.rel == "alternate")?
+                .href
+                .trim_end_matches('/');
+            let tag = href.strip_prefix(
+                "https://github.com/GetSayAll/remote-mic-app-windows/releases/tag/",
+            )?;
+            semver::Version::parse(tag.trim_start_matches('v'))
+                .ok()
+                .map(|version| (tag.to_owned(), version))
+        })
+        .max_by(|(_, left), (_, right)| left.cmp(right))
+    else {
+        return Ok(None);
+    };
+    let url = format!(
+        "https://github.com/GetSayAll/remote-mic-app-windows/releases/download/{tag}/{PREVIEW_MANIFEST_NAME}"
+    )
+    .parse::<reqwest::Url>()
+    .map_err(|_| PreviewManifestError::InvalidReleaseUrl)?;
+    let trusted = url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.path().starts_with(RELEASE_DOWNLOAD_PATH_PREFIX);
+    if !trusted {
+        return Err(PreviewManifestError::InvalidReleaseUrl);
+    }
+    Ok(Some((url, tag)))
+}
+
+async fn resolve_update_endpoint(include_prereleases: bool) -> Result<UpdateEndpoint, String> {
+    if let Some(endpoint) = std::env::var_os(ENDPOINT_OVERRIDE_ENV) {
+        let endpoint = endpoint
+            .to_string_lossy()
+            .trim()
+            .trim_matches('"')
+            .to_owned();
+        note(format!("check.endpoint_override url={endpoint}"));
+        let url = endpoint.parse().map_err(|error| {
+            note(format!(
+                "check.fail stage=endpoint_override_parse error={error:?}"
+            ));
+            "更新配置异常，请联系开发者".to_owned()
+        })?;
+        return Ok(UpdateEndpoint::Runtime(url));
+    }
+    if !include_prereleases {
+        return Ok(UpdateEndpoint::ConfiguredStable);
+    }
+
+    let started = Instant::now();
+    note("check.preview_resolve_start".to_owned());
+    // tauri-plugin-updater 在构建 Updater 时会安装相同的 ring provider；预览
+    // 通道需先访问 GitHub feed，因此在构建 reqwest Client 前完成同一初始化。
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        note("check.fail channel=preview stage=tls_provider".to_owned());
+        return Err("预览版更新暂时不可用，请稍后重试".to_owned());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(CHECK_TIMEOUT)
+        .user_agent("SayAll-Windows-Updater")
+        .build()
+        .map_err(|error| {
+            note(format!(
+                "check.fail channel=preview stage=client_build error={error:?}"
+            ));
+            "预览版更新暂时不可用，请稍后重试".to_owned()
+        })?;
+    let response = client
+        .get(PREVIEW_RELEASES_FEED)
+        .header("Accept", "application/atom+xml")
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| {
+            note(format!(
+                "check.fail channel=preview stage=releases_request error={error:?} took_ms={}",
+                elapsed_ms(started)
+            ));
+            "网络连接失败，请稍后重试".to_owned()
+        })?;
+    let feed_xml = response.text().await.map_err(|error| {
+        note(format!(
+            "check.fail channel=preview stage=releases_read error={error:?} took_ms={}",
+            elapsed_ms(started)
+        ));
+        "预览版更新暂时不可用，请稍后重试".to_owned()
+    })?;
+    let feed = quick_xml::de::from_str::<ReleasesFeed>(&feed_xml).map_err(|error| {
+        note(format!(
+            "check.fail channel=preview stage=releases_parse error={error:?} took_ms={}",
+            elapsed_ms(started)
+        ));
+        "预览版更新暂时不可用，请稍后重试".to_owned()
+    })?;
+    let preview = preview_manifest_endpoint(&feed).map_err(|error| {
+        note(format!(
+            "check.fail channel=preview stage=manifest_url error={error:?}"
+        ));
+        "预览版更新暂时不可用，请稍后重试".to_owned()
+    })?;
+    match preview {
+        Some((url, tag)) => {
+            note(format!(
+                "check.preview_resolved tag={tag} asset={PREVIEW_MANIFEST_NAME}"
+            ));
+            Ok(UpdateEndpoint::Runtime(url))
+        }
+        None => {
+            note(format!(
+                "check.preview_resolved available=false took_ms={}",
+                elapsed_ms(started)
+            ));
+            Ok(UpdateEndpoint::NoPublishedPreview)
+        }
+    }
+}
+
 /// 构建更新器：注册安装前清理回调 + 端点覆盖 + 检查超时。
 fn build_updater(
     app: &AppHandle,
     platform: Arc<dyn crate::platform::PlatformRuntime>,
+    runtime_endpoint: Option<reqwest::Url>,
 ) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app.updater_builder().timeout(CHECK_TIMEOUT);
     // on_before_exit 在安装器启动前、std::process::exit(0) 前同步执行：
@@ -118,25 +294,10 @@ fn build_updater(
             elapsed_ms(started)
         ));
     });
-    if let Some(endpoint) = std::env::var_os(ENDPOINT_OVERRIDE_ENV) {
-        let endpoint = endpoint
-            .to_string_lossy()
-            .trim()
-            .trim_matches('"')
-            .to_owned();
-        note(format!("check.endpoint_override url={endpoint}"));
-        // 2026-09-05 E2E 实证：早期失败路径若不打点，日志里只剩 check.start +
-        // endpoint_override 便无下文，无法"一次日志拉取定位环节"——以下每个
-        // 失败分支都必须落 note（含 release 构建拒绝 http 端点的 fail-closed 路径）。
-        let url = endpoint.parse().map_err(|error| {
+    if let Some(endpoint) = runtime_endpoint {
+        builder = builder.endpoints(vec![endpoint]).map_err(|error| {
             note(format!(
-                "check.fail stage=endpoint_override_parse error={error:?}"
-            ));
-            "更新配置异常，请联系开发者".to_owned()
-        })?;
-        builder = builder.endpoints(vec![url]).map_err(|error| {
-            note(format!(
-                "check.fail stage=endpoint_override_reject error={error:?}"
+                "check.fail stage=runtime_endpoint_reject error={error:?}"
             ));
             "更新配置异常，请联系开发者".to_owned()
         })?;
@@ -153,9 +314,39 @@ pub async fn check_app_update(
     state: State<'_, AppState>,
 ) -> Result<AppUpdateInfo, String> {
     let started = Instant::now();
-    note("check.start source=command".to_owned());
+    let include_prereleases = state
+        .settings
+        .load()
+        .map_err(|error| {
+            note(format!("check.fail stage=preference_load error={error:?}"));
+            "读取更新设置失败，请稍后重试".to_owned()
+        })?
+        .check_prerelease_updates;
+    let channel = if include_prereleases {
+        "preview"
+    } else {
+        "stable"
+    };
+    note(format!("check.start source=command channel={channel}"));
+    let endpoint = resolve_update_endpoint(include_prereleases).await?;
+    if matches!(&endpoint, UpdateEndpoint::NoPublishedPreview) {
+        if let Ok(mut pending) = state.pending_update.lock() {
+            *pending = None;
+        }
+        return Ok(AppUpdateInfo {
+            current_version: app.package_info().version.to_string(),
+            available: false,
+            version: None,
+            notes: None,
+            date: None,
+        });
+    }
     let platform = Arc::clone(&state.platform);
-    let updater = build_updater(&app, platform)?;
+    let runtime_endpoint = match endpoint {
+        UpdateEndpoint::Runtime(url) => Some(url),
+        UpdateEndpoint::ConfiguredStable | UpdateEndpoint::NoPublishedPreview => None,
+    };
+    let updater = build_updater(&app, platform, runtime_endpoint)?;
     match updater.check().await {
         Ok(Some(update)) => {
             let info = AppUpdateInfo {
@@ -216,6 +407,56 @@ pub async fn check_app_update(
             Err(check_error_detail(&error))
         }
     }
+}
+
+#[tauri::command]
+pub fn get_app_update_preferences(
+    state: State<'_, AppState>,
+) -> Result<AppUpdatePreferences, String> {
+    let include_prereleases = state
+        .settings
+        .load()
+        .map_err(|error| {
+            note(format!("preference.load result=failed error={error:?}"));
+            "读取预览版更新设置失败，请稍后重试".to_owned()
+        })?
+        .check_prerelease_updates;
+    note(format!(
+        "preference.load include_prereleases={include_prereleases}"
+    ));
+    Ok(AppUpdatePreferences {
+        include_prereleases,
+    })
+}
+
+#[tauri::command]
+pub async fn set_app_update_preferences(
+    include_prereleases: bool,
+    state: State<'_, AppState>,
+) -> Result<AppUpdatePreferences, String> {
+    let settings = state.settings.clone();
+    let save_result = tauri::async_runtime::spawn_blocking(move || {
+        settings.save_check_prerelease_updates(include_prereleases)
+    })
+    .await
+    .map_err(|error| {
+        note(format!(
+            "preference.save result=task_failed include_prereleases={include_prereleases} error={error:?}"
+        ));
+        "保存预览版更新设置失败，请稍后重试".to_owned()
+    })?;
+    save_result.map_err(|error| {
+        note(format!(
+            "preference.save result=write_failed include_prereleases={include_prereleases} error={error:?}"
+        ));
+        "保存预览版更新设置失败，请稍后重试".to_owned()
+    })?;
+    note(format!(
+        "preference.save result=ok include_prereleases={include_prereleases}"
+    ));
+    Ok(AppUpdatePreferences {
+        include_prereleases,
+    })
 }
 
 #[tauri::command]
@@ -307,6 +548,72 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feed(tags: &[&str]) -> ReleasesFeed {
+        ReleasesFeed {
+            entries: tags
+                .iter()
+                .map(|tag| ReleaseFeedEntry {
+                    links: vec![ReleaseFeedLink {
+                        rel: "alternate".to_owned(),
+                        href: format!(
+                            "https://github.com/GetSayAll/remote-mic-app-windows/releases/tag/{tag}"
+                        ),
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn preview_channel_includes_prereleases_and_uses_highest_version() {
+        let releases = feed(&["v0.2.1", "v0.2.2", "v0.2.0"]);
+        let (endpoint, tag) = preview_manifest_endpoint(&releases).unwrap().unwrap();
+        assert_eq!(tag, "v0.2.2");
+        assert_eq!(
+            endpoint.as_str(),
+            "https://github.com/GetSayAll/remote-mic-app-windows/releases/download/v0.2.2/latest.json"
+        );
+    }
+
+    #[test]
+    fn preview_channel_ignores_foreign_and_non_semver_links() {
+        let releases = ReleasesFeed {
+            entries: vec![ReleaseFeedEntry {
+                links: vec![
+                    ReleaseFeedLink {
+                        rel: "alternate".to_owned(),
+                        href: "https://example.com/releases/tag/v9.9.9".to_owned(),
+                    },
+                    ReleaseFeedLink {
+                        rel: "self".to_owned(),
+                        href: "https://github.com/GetSayAll/remote-mic-app-windows/releases/tag/not-a-version"
+                            .to_owned(),
+                    },
+                ],
+            }],
+        };
+        assert!(preview_manifest_endpoint(&releases).unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_channel_reports_no_published_release() {
+        let releases = feed(&[]);
+        assert!(preview_manifest_endpoint(&releases).unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "访问 GitHub 公共 Releases Feed，仅在发布前显式运行"]
+    fn live_preview_channel_resolves_a_signed_manifest_endpoint() {
+        let endpoint = tauri::async_runtime::block_on(resolve_update_endpoint(true)).unwrap();
+        let UpdateEndpoint::Runtime(url) = endpoint else {
+            panic!("当前应存在已发布的预览版清单")
+        };
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("github.com"));
+        assert!(url.path().starts_with(RELEASE_DOWNLOAD_PATH_PREFIX));
+        assert!(url.path().ends_with("/latest.json"));
+    }
 
     /// 取不到清单（ReleaseNotFound，404 类）按"已经是最新版本"呈现；
     /// 其他错误（网络/IO 等）不享受该待遇，仍如实报错（2026-09-06 终裁）。
