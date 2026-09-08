@@ -1,6 +1,8 @@
 # 无线麦 SayAll for Windows
 
-无线麦 SayAll Windows 版把小米蓝牙遥控器 2（RC001）和小米蓝牙遥控器 2 Pro（RC003）的按键和麦克风桥接到 Windows。项目采用 Rust、Tauri 2 和 Vue 3，Windows 与 macOS 分别维护和发布。
+无线麦 SayAll Windows 版已完成对小米蓝牙遥控器 2（RC001）和小米蓝牙遥控器 2 Pro（RC003）的 Windows 真机适配，覆盖设备识别、连接、按键映射和语音桥接等已验证场景。项目采用 Rust、Tauri 2 和 Vue 3，Windows 与 macOS 分别维护和发布。
+
+参考源码仓库：[HD838A/remote-mic-app](https://github.com/HD838A/remote-mic-app)（macOS 版）。Windows 版保持独立的平台实现，仅参考其公开的产品行为、协议经验和测试边界，不回填 macOS 代码。
 
 当前仓库处于新架构开发阶段。现阶段已经建立：
 
@@ -18,7 +20,7 @@
 - Windows CI 可生成带 SHA-256 和来源元数据的未签名 NSIS Preview artifact；
 - Windows CI、来源归属和真机测试手册。
 
-RC003（小米蓝牙遥控器 2 Pro）已在 Windows 上完成普通用户路径验收：全新安装、连接、VB-CABLE 输出及微信输入法语音转文字均实际通过。RC001 的 Windows 真机验收仍为 `deferred`，不能据此宣称 RC001 已通过。公开的 v0.2.1 是预览版，包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
+RC001 与 RC003 均已完成 Windows 真机适配；两型号的按键映射真机验收均已通过，语音、安装器、VB-CABLE 和第三方输入法按测试手册分项记录，尚未覆盖的专项继续标记为 `deferred`。当前公开的 v0.2.2 是预览版，包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
 
 ## 用户安装与配置
 
