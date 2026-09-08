@@ -552,9 +552,9 @@ fn worker_loop(
                                     &voice_session_epoch,
                                 );
                             }
-                            Err(error) => {
+                            Err(_) => {
                                 gatt_note(format!(
-                                    "chord_retry result=err attempt={attempt} epoch={epoch} err={error}"
+                                    "chord_retry result=err attempt={attempt} epoch={epoch} error_domain=send_input error_code=retry_failed reason=injection_failed retryable=true"
                                 ));
                             }
                         }
@@ -1034,7 +1034,7 @@ fn handle_control(
                 }
                 if let Err(error) = send_input.press(&chord) {
                     gatt_note(format!(
-                        "chord_press result=err session={session_id} err={error}"
+                        "chord_press result=err session={session_id} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true"
                     ));
                     abort_voice_session(
                         session,
@@ -1067,7 +1067,7 @@ fn handle_control(
             }
             if let Err(error) = audio.begin_session(generation) {
                 gatt_note(format!(
-                    "audio_begin result=err session={session_id} err={error}"
+                    "audio_begin result=err session={session_id} error_domain=audio error_code=begin_failed reason=wasapi_rejected retryable=true"
                 ));
                 abort_voice_session(
                     session,
@@ -1235,12 +1235,20 @@ fn release_voice_hold_hotkey(send_input: &SendInputRuntime, held_hotkey: &mut Op
         // 功能点日志：释放结果（与 chord_press 成对，粘键排查的另一半）。
         let result = send_input.release(&chord);
         gatt_note(format!(
-            "chord_release result={} err={}",
+            "chord_release result={} error_domain={} error_code={} reason={} retryable={}",
             if result.is_ok() { "ok" } else { "err" },
-            result
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_default(),
+            if result.is_ok() { "none" } else { "send_input" },
+            if result.is_ok() {
+                "none"
+            } else {
+                "release_failed"
+            },
+            if result.is_ok() {
+                "released"
+            } else {
+                "backend_rejected"
+            },
+            result.is_err(),
         ));
     }
 }
@@ -1294,17 +1302,17 @@ impl BleSession {
                     gatt_note("conn_params result=ok mode=throughput_optimized".to_owned());
                     Some(request)
                 }
-                Err(error) => {
-                    gatt_note(format!(
-                        "conn_params result=unavailable err={error} mode=throughput_optimized"
-                    ));
+                Err(_) => {
+                    gatt_note(
+                        "conn_params result=unavailable error_domain=bluetooth error_code=request_failed reason=connection_parameter_api_failed retryable=true mode=throughput_optimized".to_owned(),
+                    );
                     None
                 }
             },
-            Err(error) => {
-                gatt_note(format!(
-                    "conn_params result=unavailable err={error} mode=throughput_optimized"
-                ));
+            Err(_) => {
+                gatt_note(
+                    "conn_params result=unavailable error_domain=bluetooth error_code=request_failed reason=connection_parameter_api_failed retryable=true mode=throughput_optimized".to_owned(),
+                );
                 None
             }
         };
@@ -1516,14 +1524,46 @@ enum WorkerChannel {
     Control,
 }
 
-/// ATVV 诊断日志（环境变量 SAYALL_GATT_LOG=<文件路径> 开启，默认关闭）：
-/// 记录每条 GATT 通知（A=音频/C=控制）与应用发出的每条 TRANSMIT 写入（T），
-/// 含墙钟毫秒、长度与前 24 字节十六进制。用于 RC001/RC003 报文格式取证，
-/// 不含设备身份信息。
+#[derive(Debug, Clone)]
+pub struct DiagnosticLogMetadata {
+    pub app_version: String,
+    pub app_build: String,
+    pub source_revision: String,
+    pub build_channel: String,
+    pub release_tag: String,
+}
+
+static DIAGNOSTIC_LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+static DIAGNOSTIC_LOG_METADATA: OnceLock<DiagnosticLogMetadata> = OnceLock::new();
+
+/// 在任何功能组件启动前配置生产诊断日志。环境变量仍可覆盖路径，方便受控取证；
+/// 正式应用由宿主传入 LocalAppData 下的固定路径，日志内容绝不打印该路径。
+pub fn initialize_diagnostic_log(
+    default_path: std::path::PathBuf,
+    metadata: DiagnosticLogMetadata,
+) -> bool {
+    let path = std::env::var_os("SAYALL_GATT_LOG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(default_path);
+    let parent_ready = path
+        .parent()
+        .map(|parent| std::fs::create_dir_all(parent).is_ok())
+        .unwrap_or(false);
+    let _ = DIAGNOSTIC_LOG_PATH.set(path);
+    let _ = DIAGNOSTIC_LOG_METADATA.set(metadata);
+    parent_ready && gatt_sink().is_some()
+}
+
+/// ATVV 诊断日志（宿主默认写入 LocalAppData；SAYALL_GATT_LOG 可覆盖路径）。
+/// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
+/// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。
 fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
     static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
     SINK.get_or_init(|| {
-        let path = std::env::var_os("SAYALL_GATT_LOG")?;
+        let path = DIAGNOSTIC_LOG_PATH
+            .get()
+            .cloned()
+            .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?;
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1536,19 +1576,34 @@ fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
 
 fn gatt_log(kind: &str, bytes: &[u8]) {
     use std::io::Write as _;
+    // 原始音频包既是高频数据又可能承载语音内容，生产诊断日志绝不落盘。
+    // 会话级音频统计由 audio.rs 在开始、排空、失败时聚合记录。
+    if kind == "A" {
+        return;
+    }
     if let Some(sink) = gatt_sink() {
         if let Ok(mut file) = sink.lock() {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
+            let timestamp = utc_timestamp();
+            let metadata = DIAGNOSTIC_LOG_METADATA.get();
             let preview: String = bytes
                 .iter()
                 .take(24)
                 .map(|byte| format!("{byte:02X}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let _ = writeln!(file, "{kind} {now_ms} len={:3} b=[{preview}]", bytes.len());
+            let _ = writeln!(
+                file,
+                "{timestamp} pid={} ver={} build={} component=gatt event=packet direction={kind} byte_count={} preview=[{preview}]",
+                std::process::id(),
+                metadata
+                    .map(|value| value.app_version.as_str())
+                    .unwrap_or("unknown"),
+                metadata
+                    .map(|value| value.app_build.as_str())
+                    .unwrap_or("unknown"),
+                bytes.len()
+            );
+            let _ = file.flush();
         }
     }
 }
@@ -1563,13 +1618,53 @@ pub fn gatt_note(note: String) {
     use std::io::Write as _;
     if let Some(sink) = gatt_sink() {
         if let Ok(mut file) = sink.lock() {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
-            let _ = writeln!(file, "N {now_ms} len=  0 note={note}");
+            let timestamp = utc_timestamp();
+            let metadata = DIAGNOSTIC_LOG_METADATA.get();
+            let _ = writeln!(
+                file,
+                "{timestamp} pid={} ver={} build={} source_revision={} build_channel={} release_tag={} {note}",
+                std::process::id(),
+                metadata.map(|value| value.app_version.as_str()).unwrap_or("unknown"),
+                metadata.map(|value| value.app_build.as_str()).unwrap_or("unknown"),
+                metadata.map(|value| value.source_revision.as_str()).unwrap_or("unknown"),
+                metadata.map(|value| value.build_channel.as_str()).unwrap_or("unknown"),
+                metadata.map(|value| value.release_tag.as_str()).unwrap_or("unknown"),
+            );
+            let _ = file.flush();
         }
     }
+}
+
+fn utc_timestamp() -> String {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format_utc_timestamp(duration)
+}
+
+fn format_utc_timestamp(duration: std::time::Duration) -> String {
+    let total_seconds = duration.as_secs() as i64;
+    let days = total_seconds.div_euclid(86_400);
+    let seconds_of_day = total_seconds.rem_euclid(86_400);
+    // Howard Hinnant 的 civil_from_days 算法；避免为日志时间戳引入运行时依赖。
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{:03}Z",
+        duration.subsec_millis()
+    )
 }
 
 /// WeType 热键休眠检测与同一次按住内的自动恢复（2026-09-05 实证闭环）：
@@ -1942,6 +2037,18 @@ impl Drop for WinRtApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_timestamp_is_utc_iso_8601_with_milliseconds() {
+        assert_eq!(
+            format_utc_timestamp(std::time::Duration::from_millis(0)),
+            "1970-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            format_utc_timestamp(std::time::Duration::from_millis(1_773_446_400_123)),
+            "2026-03-14T00:00:00.123Z"
+        );
+    }
 
     #[test]
     fn reconnect_schedule_reports_attempt_and_exponential_delay() {

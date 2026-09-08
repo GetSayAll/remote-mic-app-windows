@@ -222,33 +222,92 @@ async fn save_button_mappings(
     mappings: ButtonMappings,
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
+    let started = std::time::Instant::now();
+    let summary = button_mapping_log_summary(&mappings);
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=button_mapping action=save phase=requested {summary}"
+    ));
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
-    let saved = tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-        let saved = settings.save_button_mappings(mappings)?;
-        // 持久化成功后热加载到引擎与门控（保存即生效）。
-        platform.set_button_mappings(saved.clone());
-        Ok(saved)
-    })
-    .await
-    .map_err(|error| format!("保存按键映射任务失败：{error}"))??;
-    Ok(saved)
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
+            let saved = settings.save_button_mappings(mappings)?;
+            // 持久化成功后热加载到引擎与门控（保存即生效）。
+            platform.set_button_mappings(saved.clone());
+            Ok(saved)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("保存按键映射任务失败：{error}")),
+        };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=passed {} elapsed_ms={}",
+            button_mapping_log_summary(saved),
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
 }
 
 #[tauri::command]
 async fn reset_button_mappings(
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(
+        "shortcut_settings feature=button_mapping action=reset phase=requested".to_owned(),
+    );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
-    let saved = tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-        let saved = settings.save_button_mappings(ButtonMappings::default())?;
-        platform.set_button_mappings(saved.clone());
-        Ok(saved)
-    })
-    .await
-    .map_err(|error| format!("恢复默认按键映射任务失败：{error}"))??;
-    Ok(saved)
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
+            let saved = settings.save_button_mappings(ButtonMappings::default())?;
+            platform.set_button_mappings(saved.clone());
+            Ok(saved)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("恢复默认按键映射任务失败：{error}")),
+        };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "shortcut_settings feature=button_mapping action=reset phase=completed terminal_result=passed {} elapsed_ms={}",
+            button_mapping_log_summary(saved),
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=button_mapping action=reset phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=defaults_persistence_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
+    let mut shortcut_count = 0_usize;
+    let mut open_app_count = 0_usize;
+    let mut disabled_count = 0_usize;
+    for actions in mappings.actions.values() {
+        for action in [&actions.single, &actions.double, &actions.long] {
+            match action {
+                ButtonAction::Shortcut { .. } => shortcut_count += 1,
+                ButtonAction::OpenApp { .. } => open_app_count += 1,
+                ButtonAction::Disabled => disabled_count += 1,
+            }
+        }
+    }
+    format!(
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} disabled_cell_count={disabled_count}",
+        mappings.enabled,
+        mappings.actions.len()
+    )
 }
 
 #[tauri::command]
@@ -305,7 +364,13 @@ fn get_send_input_snapshot(state: tauri::State<'_, AppState>) -> SendInputSnapsh
 
 #[tauri::command]
 fn get_voice_hold_hotkey(state: tauri::State<'_, AppState>) -> Option<KeyChord> {
-    state.platform.voice_hold_hotkey()
+    let hotkey = state.platform.voice_hold_hotkey();
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_hold action=load phase=completed terminal_result=passed enabled={} key_count={}",
+        hotkey.is_some(),
+        hotkey.as_ref().map(|chord| chord.keys.len()).unwrap_or(0)
+    ));
+    hotkey
 }
 
 #[tauri::command]
@@ -313,15 +378,70 @@ async fn set_voice_hold_hotkey(
     hotkey: Option<KeyChord>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<KeyChord>, String> {
+    let started = std::time::Instant::now();
+    let enabled = hotkey.is_some();
+    let key_count = hotkey.as_ref().map(|chord| chord.keys.len()).unwrap_or(0);
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_hold action=save phase=requested enabled={enabled} key_count={key_count}"
+    ));
     let platform = Arc::clone(&state.platform);
     let settings = state.settings.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = match tauri::async_runtime::spawn_blocking(move || {
         let saved = settings.save_voice_hold_hotkey(hotkey)?;
         platform.set_voice_hold_hotkey(saved.clone());
         Ok(saved)
     })
     .await
-    .map_err(|error| format!("保存按住说话快捷键任务失败：{error}"))?
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存按住说话快捷键任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(_) => format!(
+            "shortcut_settings feature=voice_hold action=save phase=completed terminal_result=passed enabled={enabled} key_count={key_count} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=voice_hold action=save phase=completed terminal_result=failed enabled={enabled} key_count={key_count} error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrontendDiagnosticEvent {
+    event: String,
+    phase: String,
+    result: String,
+    reason: String,
+    elapsed_ms: u64,
+}
+
+#[tauri::command]
+fn report_frontend_event(report: FrontendDiagnosticEvent) {
+    sayall_windows::gatt_note(format!(
+        "frontend event={} phase={} result={} reason={} elapsed_ms={}",
+        diagnostic_token(&report.event),
+        diagnostic_token(&report.phase),
+        diagnostic_token(&report.result),
+        diagnostic_token(&report.reason),
+        report.elapsed_ms
+    ));
+}
+
+fn diagnostic_token(value: &str) -> &str {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        value
+    } else {
+        "invalid"
+    }
 }
 
 #[tauri::command]
@@ -588,8 +708,38 @@ fn runtime_simulation_requested() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let log_path = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("SayAll")
+        .join("Logs")
+        .join("sayall-diagnostic.log");
+    let log_ready = sayall_windows::initialize_diagnostic_log(
+        log_path,
+        sayall_windows::DiagnosticLogMetadata {
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_build: option_env!("SAYALL_APP_BUILD")
+                .unwrap_or("unknown")
+                .to_owned(),
+            source_revision: env!("SAYALL_SOURCE_REVISION").to_owned(),
+            build_channel: option_env!("SAYALL_BUILD_CHANNEL")
+                .unwrap_or("unknown")
+                .to_owned(),
+            release_tag: option_env!("SAYALL_RELEASE_TAG")
+                .unwrap_or("unknown")
+                .to_owned(),
+        },
+    );
+    sayall_windows::gatt_note(format!(
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=1 process_architecture={} windows_version=unknown windows_build=unknown",
+        if log_ready { "passed" } else { "failed" },
+        std::env::consts::ARCH
+    ));
     #[cfg(windows)]
     if let Err(error) = sayall_windows::compatibility::check_current_windows() {
+        sayall_windows::gatt_note(
+            "app_lifecycle event=compatibility_check phase=completed terminal_result=failed error_domain=windows error_code=unsupported_version reason=os_requirement_not_met retryable=false".to_owned(),
+        );
         sayall_windows::compatibility::show_unsupported_windows_message(error);
         eprintln!("{error}");
         return;
@@ -612,6 +762,9 @@ pub fn run() {
                 // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=
                 // ERROR_ALREADY_EXISTS（不是失败）；其余残留错误值无意义。
                 if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                    sayall_windows::gatt_note(
+                        "app_lifecycle event=single_instance phase=completed terminal_result=failed error_domain=process error_code=already_running reason=existing_instance retryable=false".to_owned(),
+                    );
                     eprintln!("SayAll 已在运行：单实例守卫阻止了第二个实例启动");
                     unsafe {
                         let _ = CloseHandle(handle);
@@ -620,8 +773,15 @@ pub fn run() {
                 }
                 // 故意持有互斥体句柄不关闭：进程存活期间保持占有，退出时由系统释放。
                 std::mem::forget(handle);
+                sayall_windows::gatt_note(
+                    "app_lifecycle event=single_instance phase=completed terminal_result=passed"
+                        .to_owned(),
+                );
             }
             Err(error) => {
+                sayall_windows::gatt_note(
+                    "app_lifecycle event=single_instance phase=completed terminal_result=failed error_domain=windows error_code=mutex_create_failed reason=guard_unavailable retryable=true".to_owned(),
+                );
                 eprintln!("单实例互斥体创建失败：{error}（fail-closed 退出）");
                 return;
             }
@@ -632,7 +792,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 应用内更新（GitHub Releases 静态 latest.json + minisign 验签）。
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_page_load(|webview, payload| {
+            let phase = match payload.event() {
+                tauri::webview::PageLoadEvent::Started => "started",
+                tauri::webview::PageLoadEvent::Finished => "finished",
+            };
+            sayall_windows::gatt_note(format!(
+                "webview event=document_load phase={phase} result=passed main_window={}",
+                webview.label() == "main"
+            ));
+        })
         .setup(|app| {
+            sayall_windows::gatt_note(
+                "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
+            );
             // 托盘图标：主窗口关闭后驻留；菜单 = 显示主界面 / 退出；
             // 左键点击托盘 = 显示并聚焦主窗口（Mac StatusIcon 同款行为）。
             #[cfg(all(windows, not(feature = "runtime-simulation")))]
@@ -694,16 +867,33 @@ pub fn run() {
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             let settings = SettingsStore::new(settings_path);
             let saved_settings = match settings.load() {
-                Ok(settings) => settings,
+                Ok(settings) => {
+                    sayall_windows::gatt_note(
+                        "settings feature=application action=load phase=completed terminal_result=passed".to_owned(),
+                    );
+                    settings
+                }
                 Err(error) => {
+                    sayall_windows::gatt_note(
+                        "settings feature=application action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                    );
                     eprintln!("{error}");
                     Default::default()
                 }
             };
             let platform = create_platform();
             let button_mappings = match settings.load_button_mappings() {
-                Ok(mappings) => mappings,
+                Ok(mappings) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed {}",
+                        button_mapping_log_summary(&mappings)
+                    ));
+                    mappings
+                }
                 Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                    );
                     eprintln!("{error}");
                     ButtonMappings::default()
                 }
@@ -717,6 +907,9 @@ pub fn run() {
                 saved_settings.audio_endpoint_name,
             ) {
                 if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
+                    sayall_windows::gatt_note(
+                        "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
+                    );
                     eprintln!("恢复已保存的音频端点失败：{error}");
                 }
             }
@@ -729,8 +922,18 @@ pub fn run() {
             }
 
             match settings.load_voice_hold_hotkey() {
-                Ok(hotkey) => platform.set_voice_hold_hotkey(hotkey),
+                Ok(hotkey) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=voice_hold action=load phase=completed terminal_result=passed enabled={} key_count={}",
+                        hotkey.is_some(),
+                        hotkey.as_ref().map(|chord| chord.keys.len()).unwrap_or(0)
+                    ));
+                    platform.set_voice_hold_hotkey(hotkey)
+                }
                 Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=voice_hold action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=disabled_fallback retryable=true".to_owned(),
+                    );
                     eprintln!("{error}");
                     platform.set_voice_hold_hotkey(None);
                 }
@@ -751,6 +954,9 @@ pub fn run() {
                 settings,
                 pending_update: std::sync::Mutex::new(None),
             });
+            sayall_windows::gatt_note(
+                "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
+            );
             Ok(())
         });
 
@@ -797,6 +1003,7 @@ pub fn run() {
         set_app_update_preferences,
         check_app_update,
         install_app_update,
+        report_frontend_event,
         run_runtime_simulation_voice_session,
         complete_runtime_simulation_smoke
     ]);
@@ -830,10 +1037,17 @@ pub fn run() {
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,
-        install_app_update
+        install_app_update,
+        report_frontend_event
     ]);
 
-    builder
-        .run(tauri::generate_context!())
-        .expect("failed to run SayAll Windows app");
+    if let Err(_) = builder.run(tauri::generate_context!()) {
+        sayall_windows::gatt_note(
+            "app_lifecycle event=event_loop phase=completed terminal_result=failed error_domain=tauri error_code=run_failed reason=event_loop_failed retryable=false".to_owned(),
+        );
+        panic!("failed to run SayAll Windows app");
+    }
+    sayall_windows::gatt_note(
+        "app_lifecycle event=process_exit phase=completed terminal_result=passed".to_owned(),
+    );
 }

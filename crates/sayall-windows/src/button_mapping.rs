@@ -580,21 +580,30 @@ fn fire_gesture(
             match injector.tap(&chord) {
                 Ok(()) => crate::ble::gatt_note("map_inject result=ok".to_owned()),
                 Err(error) => {
-                    crate::ble::gatt_note(format!("map_inject result=err error={error}"));
+                    crate::ble::gatt_note("map_inject result=err error_domain=send_input error_code=injection_failed reason=backend_rejected retryable=true".to_owned());
                     lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
                 }
             }
         }
         ButtonAction::OpenApp { target } => {
+            let target_kind = if target.contains('\\') || target.contains('/') {
+                "custom"
+            } else {
+                "preset"
+            };
             crate::ble::gatt_note(format!(
-                "map_fire button={:?} trigger={:?} action=open_app target={target}",
-                button, trigger
+                "map_fire button={:?} trigger={:?} action=open_app target_kind={target_kind}",
+                button, trigger,
             ));
             match injector.launch_app(&target) {
-                Ok(()) => crate::ble::gatt_note(format!("map_launch result=ok target={target}")),
+                Ok(()) => crate::ble::gatt_note(format!(
+                    "map_launch result=ok target_kind={}",
+                    target_kind
+                )),
                 Err(error) => {
                     crate::ble::gatt_note(format!(
-                        "map_launch result=err target={target} error={error}"
+                        "map_launch result=err target_kind={} error_domain=shell error_code=launch_failed reason=target_unavailable retryable=true",
+                        target_kind
                     ));
                     lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
                 }
