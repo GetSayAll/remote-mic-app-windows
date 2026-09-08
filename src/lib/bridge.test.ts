@@ -26,6 +26,7 @@ describe("mapping capability matrix（单响应判定，用于信息提示）", 
     expect(shortcutCapability("ok", "long", "rc003")).toBe("none");
     expect(shortcutCapability("up", "single", "rc003")).toBe("identity");
     expect(shortcutCapability("down", "single", "rc001")).toBe("identity");
+    expect(shortcutCapability("left", "single", "rc003")).toBe("identity");
     expect(shortcutCapability("left", "double", "rc001")).toBe("none");
     expect(shortcutCapability("right", "long", "rc001")).toBe("none");
     expect(shortcutCapability("home", "single", "rc003")).toBe("identity");

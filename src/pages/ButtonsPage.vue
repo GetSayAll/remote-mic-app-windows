@@ -102,14 +102,6 @@ const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
   "volume_down",
 ]);
 
-/**
- * 策略性不支持自定义的按键（2026-09-07 用户决策，与型号无关）：左键——
- * 不同键映射的孤立冷首按必附带一次原生方向动作（结构性泄漏，无法在软件
- * 层消除），左键保持原生方向键行为，不提供配置入口；存量左键配置由后端
- * （settings 持久化层 + 映射引擎）双重剥离。
- */
-const NON_CUSTOMIZABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>(["left"]);
-
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
     x: remoteLeft.value + REMOTE_WIDTH * placement.anchor[0],
@@ -737,16 +729,11 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="
-              UNMAPPABLE_BUTTONS.has(placement.button) ||
-              NON_CUSTOMIZABLE_BUTTONS.has(placement.button)
-            "
+            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
             :title="
               UNMAPPABLE_BUTTONS.has(placement.button)
                 ? '此按键暂不支持自定义，按键功能保持原样'
-                : NON_CUSTOMIZABLE_BUTTONS.has(placement.button)
-                  ? '左键不支持自定义映射：避免闲置后首次按压同时触发原生方向动作与映射动作；按键保持原生方向键行为'
-                  : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
+                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
             "
             @click.stop="openEditor(placement.button, trigger)"
           >

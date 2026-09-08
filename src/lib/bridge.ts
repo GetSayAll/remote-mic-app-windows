@@ -747,8 +747,8 @@ export type ShortcutCapability = "all" | "identity" | "none";
  * 2026-09-07 增补（方案 C"遥控器优先"落地，key_gate 常驻抑制族）：
  * Home/TV 已配置映射且遥控器连接期间原生按键被接管——任意按压（含孤立
  * 冷首按）严格单响应，本矩阵的 identity/none 标注对这两键仅剩编辑参考
- * 意义（见 ButtonsPage capabilityNote 的接管提示）。左键已策略性移除
- * 自定义（NON_CUSTOMIZABLE_BUTTONS），不再进入本矩阵的编辑路径。
+ * 意义（见 ButtonsPage capabilityNote 的接管提示）。左键自 2026-09-08
+ * 起恢复为与上/下/右/确定相同的逐键武装与泄漏对冲机制。
  */
 export function shortcutCapability(
   button: RemoteButton,
