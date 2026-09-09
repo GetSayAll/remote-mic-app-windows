@@ -6,9 +6,11 @@ import {
   buttonLabels,
   buttonTriggerLabel,
   chordLabel,
+  exportButtonMappingConfiguration,
   getButtonMappingSnapshot,
   getButtonMappings,
   identityShortcutByButton,
+  importButtonMappingConfiguration,
   listPresetApps,
   pickCustomApp,
   registerPresetAppNames,
@@ -397,6 +399,41 @@ async function restoreDefaults(): Promise<void> {
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     statusMessage.value = "已恢复默认（全部按键保持原始行为）";
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function saveConfiguration(): Promise<void> {
+  await persist("配置已保存并生效");
+}
+
+async function exportConfiguration(): Promise<void> {
+  busy.value = true;
+  statusMessage.value = null;
+  try {
+    const exported = await exportButtonMappingConfiguration();
+    if (exported) statusMessage.value = "按键映射配置已导出";
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function importConfiguration(): Promise<void> {
+  busy.value = true;
+  statusMessage.value = null;
+  try {
+    const imported = await importButtonMappingConfiguration();
+    if (!imported) return;
+    mappings.value = imported;
+    savedSnapshot.value = JSON.parse(JSON.stringify(imported)) as ButtonMappings;
+    editingTarget.value = null;
+    mappingSnapshot.value = await getButtonMappingSnapshot();
+    statusMessage.value = "按键映射配置已导入并生效";
   } catch (error) {
     statusMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -889,6 +926,15 @@ onUnmounted(() => {
       </label>
       <span class="muted lock-hint">按遥控器时保持当前编辑项</span>
       <div class="button-row">
+        <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
+          保存配置
+        </button>
+        <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
+          导入配置…
+        </button>
+        <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
+          导出配置…
+        </button>
         <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
           恢复默认
         </button>

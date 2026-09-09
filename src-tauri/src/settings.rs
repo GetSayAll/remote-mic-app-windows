@@ -2,13 +2,23 @@ use sayall_core::{AppSettings, ThemePreference, UsageStatistics};
 use sayall_windows::send_input::{ButtonMappings, KeyChord};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
     access: Arc<Mutex<()>>,
+}
+
+const BUTTON_MAPPING_EXPORT_VERSION: u32 = 1;
+const MAX_BUTTON_MAPPING_IMPORT_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ButtonMappingConfiguration {
+    format_version: u32,
+    button_mappings: ButtonMappings,
 }
 
 impl SettingsStore {
@@ -117,6 +127,45 @@ impl SettingsStore {
             .map_err(|error| format!("序列化按键映射失败：{error}"))?;
         fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))?;
         Ok(mappings)
+    }
+
+    pub fn export_button_mappings(
+        &self,
+        path: &Path,
+        mappings: ButtonMappings,
+    ) -> Result<(), String> {
+        let mappings = mappings
+            .normalized()
+            .map_err(|error| format!("按键映射无效：{error}"))?;
+        let configuration = ButtonMappingConfiguration {
+            format_version: BUTTON_MAPPING_EXPORT_VERSION,
+            button_mappings: mappings,
+        };
+        // serde_json::Value 的对象键按序输出，使同一配置便于比对和版本管理。
+        let value = serde_json::to_value(configuration)
+            .map_err(|error| format!("序列化按键映射配置失败：{error}"))?;
+        let contents = serde_json::to_vec_pretty(&value)
+            .map_err(|error| format!("序列化按键映射配置失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("写入按键映射配置失败：{error}"))
+    }
+
+    pub fn import_button_mappings(&self, path: &Path) -> Result<ButtonMappings, String> {
+        let metadata =
+            fs::metadata(path).map_err(|error| format!("读取按键映射配置失败：{error}"))?;
+        if metadata.len() > MAX_BUTTON_MAPPING_IMPORT_BYTES {
+            return Err("按键映射配置文件过大".to_owned());
+        }
+        let contents = fs::read(path).map_err(|error| format!("读取按键映射配置失败：{error}"))?;
+        let configuration: ButtonMappingConfiguration = serde_json::from_slice(&contents)
+            .map_err(|error| format!("解析按键映射配置失败：{error}"))?;
+        if configuration.format_version != BUTTON_MAPPING_EXPORT_VERSION {
+            return Err(format!(
+                "不支持的按键映射配置版本：{}",
+                configuration.format_version
+            ));
+        }
+        // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
+        self.save_button_mappings(configuration.button_mappings)
     }
 
     pub fn load_voice_hold_hotkey(&self) -> Result<Option<KeyChord>, String> {
@@ -321,6 +370,61 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn exported_button_mapping_configuration_is_stable_versioned_and_rejects_before_mutation() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::{ButtonAction, ButtonActions, KeyChord, KeyCode};
+
+        let base = std::env::temp_dir().join(format!(
+            "sayall-test-button-mapping-config-{}",
+            std::process::id()
+        ));
+        let settings_path = base.join("settings.json");
+        let export_path = base.join("mapping.json");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = SettingsStore::new(settings_path);
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Power,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Escape],
+                    },
+                },
+                double: ButtonAction::Disabled,
+                long: ButtonAction::Disabled,
+            },
+        );
+
+        store
+            .export_button_mappings(&export_path, mappings.clone())
+            .unwrap();
+        let exported: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&export_path).unwrap()).unwrap();
+        assert_eq!(exported["formatVersion"], 1);
+        assert!(exported.get("buttonMappings").is_some());
+        let first_export = std::fs::read(&export_path).unwrap();
+        store
+            .export_button_mappings(&export_path, mappings.clone())
+            .unwrap();
+        assert_eq!(std::fs::read(&export_path).unwrap(), first_export);
+        assert_eq!(
+            store.import_button_mappings(&export_path).unwrap(),
+            mappings
+        );
+
+        std::fs::write(
+            &export_path,
+            br#"{"formatVersion":99,"buttonMappings":{"enabled":false,"actions":{}}}"#,
+        )
+        .unwrap();
+        assert!(store.import_button_mappings(&export_path).is_err());
+        assert_eq!(store.load_button_mappings().unwrap(), mappings);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

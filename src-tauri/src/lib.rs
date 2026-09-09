@@ -290,6 +290,89 @@ async fn reset_button_mappings(
     result
 }
 
+#[tauri::command]
+async fn export_button_mapping_configuration(
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(
+        "shortcut_settings feature=button_mapping action=export phase=requested".to_owned(),
+    );
+    let settings = state.settings.clone();
+    let mappings = state.platform.button_mappings();
+    let result = match tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let Some(path) = sayall_windows::file_dialog::pick_button_mapping_export_path()? else {
+            return Ok(false);
+        };
+        settings.export_button_mappings(&path, mappings)?;
+        Ok(true)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("导出按键映射配置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(true) => format!(
+            "shortcut_settings feature=button_mapping action=export phase=completed terminal_result=passed elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Ok(false) => format!(
+            "shortcut_settings feature=button_mapping action=export phase=completed terminal_result=cancelled elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=button_mapping action=export phase=completed terminal_result=failed error_domain=settings error_code=export_failed reason=dialog_or_write_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+#[tauri::command]
+async fn import_button_mapping_configuration(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<ButtonMappings>, String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(
+        "shortcut_settings feature=button_mapping action=import phase=requested".to_owned(),
+    );
+    let settings = state.settings.clone();
+    let platform = Arc::clone(&state.platform);
+    let result = match tauri::async_runtime::spawn_blocking(
+        move || -> Result<Option<ButtonMappings>, String> {
+            let Some(path) = sayall_windows::file_dialog::pick_button_mapping_import_path()? else {
+                return Ok(None);
+            };
+            let imported = settings.import_button_mappings(&path)?;
+            // 文件完整校验并持久化成功后才热加载，失败时运行态保持原值。
+            platform.set_button_mappings(imported.clone());
+            Ok(Some(imported))
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("导入按键映射配置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(Some(imported)) => format!(
+            "shortcut_settings feature=button_mapping action=import phase=completed terminal_result=passed {} elapsed_ms={}",
+            button_mapping_log_summary(imported),
+            started.elapsed().as_millis()
+        ),
+        Ok(None) => format!(
+            "shortcut_settings feature=button_mapping action=import phase=completed terminal_result=cancelled elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=button_mapping action=import phase=completed terminal_result=failed error_domain=settings error_code=import_failed reason=dialog_read_parse_validation_or_persistence_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
 fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut shortcut_count = 0_usize;
     let mut open_app_count = 0_usize;
@@ -989,6 +1072,8 @@ pub fn run() {
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
+        export_button_mapping_configuration,
+        import_button_mapping_configuration,
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
@@ -1024,6 +1109,8 @@ pub fn run() {
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
+        export_button_mapping_configuration,
+        import_button_mapping_configuration,
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,

@@ -16,6 +16,7 @@
 
 - `HD838A/remote-mic-app`：无线麦 macOS 原版的信息架构、产品文案、RC003 图片、RC001/RC003 型号识别、ATVV 行为和测试边界；RC001 支持参考提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`。
   - 2026-09-05 按键映射功能移植补充（均为语义移植，非代码复制）：`RemoteButtonGestureRecognizer` + `HIDRemoteScheduler` 的手势参数（双击窗口 300ms、长按 550ms、连发起始 350ms、返回 50ms/方向与音量 100ms 连发）与"按配置动态启用双击/长按识别、未配置时单击零延迟"的语义；`KeyboardEventSuppressor` 的预测式武装 + 有限窗口匹配吞键模型；`RemoteMappingCanvas` 的按键卡片布局表（锚点/目标 Y 坐标逐键移植）与三态高亮（按下=橙、选中=强调、普通=中性）；`MappingSelectionPolicy` 的"锁定当前按键"默认值。Mac 版 `KeyboardEventSuppressor` 的 UP 沿无配对兜底（DOWN 泄漏+UP 吞下=粘键缺陷）未移植——Windows 版沿用本仓库 2026-09-05 规则（DOWN 漏进 OS 则 UP 必放行）。
+  - 2026-09-09 按键映射配置导入导出补充（本地 Mac 仓库 HEAD `feba1d6`，语义参考，未复制代码）：参考 `AppSettings.exportedConfigurationData/importConfiguration` 的版本化 JSON、导入前完整解码校验与一次性应用，以及 `SettingsView.exportConfiguration/importConfiguration` 的系统文件选择器、用户取消静默、成功/失败反馈。Windows 版仅迁移按键映射，不导入 Mac 专属设置或统计；格式使用独立 `formatVersion: 1` + `buttonMappings` 契约，不宣称与 Mac 配置文件互通。
 - RC003 图片 SHA-256：`658d9333853958c13ff721eb76e1a6816c1dbea16006a84e8577ad410812549f`。
 
 ## Windows 行为与测试参考
