@@ -18,6 +18,7 @@ mod bluetooth_radio;
 mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
+pub mod file_dialog;
 #[cfg(windows)]
 pub use ble::{gatt_note, initialize_diagnostic_log, DiagnosticLogMetadata};
 #[cfg(windows)]

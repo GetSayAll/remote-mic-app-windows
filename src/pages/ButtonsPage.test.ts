@@ -33,6 +33,17 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       lastError: null,
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    exportButtonMappingConfiguration: vi.fn(async () => true),
+    importButtonMappingConfiguration: vi.fn(async () => ({
+      enabled: false,
+      actions: {
+        power: {
+          single: { type: "shortcut", chord: { keys: ["escape"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    })),
     resetButtonMappings: vi.fn(async () => ({ enabled: true, actions: {} })),
     testButtonMapping: vi.fn(async () => ({
       available: true,
@@ -51,7 +62,11 @@ vi.mock("../lib/bridge", async (importOriginal) => {
   };
 });
 
-import { saveButtonMappings } from "../lib/bridge";
+import {
+  exportButtonMappingConfiguration,
+  importButtonMappingConfiguration,
+  saveButtonMappings,
+} from "../lib/bridge";
 import type { RuntimeSnapshot } from "../lib/bridge";
 
 const runtime: RuntimeSnapshot = {
@@ -131,6 +146,8 @@ beforeEach(() => {
   edgeHandler = null;
   gestureHandler = null;
   vi.mocked(saveButtonMappings).mockClear();
+  vi.mocked(exportButtonMappingConfiguration).mockClear();
+  vi.mocked(importButtonMappingConfiguration).mockClear();
 });
 
 describe("buttons mapping page", () => {
@@ -141,6 +158,28 @@ describe("buttons mapping page", () => {
     const voiceCard = wrapper.find(".voice-card");
     expect(voiceCard.text()).toContain("语音键");
     expect(voiceCard.text()).toContain("按住说话");
+  });
+
+  it("saves, exports and imports a versioned mapping configuration from the footer", async () => {
+    const wrapper = await mountPage();
+    const button = (label: string) =>
+      wrapper.findAll(".mapping-footer button").find((item) => item.text() === label)!;
+
+    await button("保存配置").trigger("click");
+    await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    expect(wrapper.text()).toContain("配置已保存并生效");
+
+    await button("导出配置…").trigger("click");
+    await vi.waitFor(() => expect(exportButtonMappingConfiguration).toHaveBeenCalledOnce());
+    expect(wrapper.text()).toContain("按键映射配置已导出");
+
+    await button("导入配置…").trigger("click");
+    await vi.waitFor(() => expect(importButtonMappingConfiguration).toHaveBeenCalledOnce());
+    expect(wrapper.text()).toContain("按键映射配置已导入并生效");
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    expect(powerCard.text()).toContain("Esc");
   });
 
   it("marks configured cells and opens the editor with the correct target", async () => {

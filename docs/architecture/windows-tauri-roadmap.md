@@ -142,6 +142,8 @@ Tauri command 只依赖宿主内的 `PlatformRuntime` 接口。普通构建唯�
 
 当前实现状态（2026-09-05 按键映射功能完成）：三列映射（单击/双击/长按，Mac 原版 `RemoteButtonGestureRecognizer` 同款 300/550/350ms 参数与"按配置动态启用"语义）已落地——`button_gestures.rs` 纯状态机、`button_mapping.rs` 映射引擎（双源合并：Raw Input 监听器的 HID 报文与透传键盘边沿 + `key_gate.rs` 门控钩子喂入的被吞键盘边沿；本机探针实证 LL 吞键会阻断同一事件的 Raw Input 投递，见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）、`key_gate.rs` WH_KEYBOARD_LL 门控（VK 0xFF 厂商键直接归因；其余键由 HID 报文武装 + 60ms 有界等待归因；DOWN 漏进 OS 则 UP 必放行的边沿配对；LLKHF_INJECTED 免疫；链头 bump；未配置映射/总开关关闭一律透传）。动作注入为 SendInput tap（零间隔批量，部分交付回滚由 send_input 层保证）；按住连发对齐 Mac（返回 50ms、方向/音量 100ms）。按键页重构为 Mac `RemoteMappingCanvas` 对标画布（遥控器实物图 + 12 卡 + 语音卡 + 贝塞尔连线 + 三态高亮：按下=橙/选中=强调；单击/双击/长按单元格编辑 + 预设芯片 + 自定义快捷键录入 + 锁定当前按键），映射保存即热加载（引擎 + 门控同步）。旧版单动作 button-mappings.json 自动迁移为单击列（真机验证：用户既有 OK→Enter 配置迁移成功显示）。Raw Input 监听随应用自愈启动（10 秒重试；用户显式停止不重启），真机验证：RC003 已配对主机上开机即"按键监听已就绪"；设备热移除通知（RIDEV_DEVNOTIFY）触发引擎释放全部按住状态。Windows 主机已验证：cargo test 93 项、vitest 18 项、四页 UI 初始视口全覆盖（UIA 遍历 0 折叠元素）、监听自愈启动；实体按键的吞键/手势注入回路与 RC001 未在本轮真机验收（RC003 已配对就绪，待用户按遥控器复核；已知边界：映射键的物理键盘同键在 60ms 归因窗口内可能被误吞——VVC 同款取舍；管理员权限前台窗口中 UIPI 钩子不可见，映射退化为观察模式防双输入）。
 
+2026-09-09 增加按键映射配置迁移：页面保留自动保存并提供显式保存状态反馈，通过 Windows 公共 `IFileOpenDialog` / `IFileSaveDialog` 导入导出版本化 JSON。导入文件限制为 1 MiB，先完成版本、按钮、动作和快捷键校验，再写入应用配置并热加载；失败或取消不替换当前运行态。该文件仅承载 Windows 按键映射，不包含设备身份、音频、统计或 Mac 专属配置，也不承诺与 macOS 文件互通。
+
 ### 阶段 D：产品化
 
 - Onboarding；

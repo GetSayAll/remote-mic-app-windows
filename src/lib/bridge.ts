@@ -495,6 +495,22 @@ export async function resetButtonMappings(): Promise<ButtonMappings> {
   return invoke<ButtonMappings>("reset_button_mappings");
 }
 
+/** 返回 false 表示用户在系统文件选择器中取消。 */
+export async function exportButtonMappingConfiguration(): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法导出按键映射配置");
+  }
+  return invoke<boolean>("export_button_mapping_configuration");
+}
+
+/** 返回 null 表示用户在系统文件选择器中取消。 */
+export async function importButtonMappingConfiguration(): Promise<ButtonMappings | null> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法导入按键映射配置");
+  }
+  return invoke<ButtonMappings | null>("import_button_mapping_configuration");
+}
+
 export async function testButtonMapping(
   button: RemoteButton,
   trigger: ButtonTrigger,
