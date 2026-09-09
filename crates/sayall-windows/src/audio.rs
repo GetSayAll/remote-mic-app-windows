@@ -370,13 +370,19 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     pending_drain = Some((generation, reply));
                 }
                 AudioMessage::Interrupt { reply } => {
-                    let generation = lock(&state).generation;
+                    // Read both fields under one guard. MutexGuard temporaries in the
+                    // format! arguments live until the statement ends, so locking the
+                    // same non-reentrant mutex twice there deadlocks the audio worker.
+                    let (generation, submitted_samples) = {
+                        let snapshot = lock(&state);
+                        (snapshot.generation, snapshot.submitted_samples)
+                    };
                     let started = Instant::now();
                     crate::ble::gatt_note(format!(
                         "audio_session generation={} action=interrupt phase=requested queued_samples={} submitted_samples={}",
-                        lock(&state).generation,
+                        generation,
                         queue.len(),
-                        lock(&state).submitted_samples
+                        submitted_samples
                     ));
                     if let Some((_, pending_reply)) = pending_drain.take() {
                         let _ = pending_reply.send(Err(PlatformError::AudioSessionInterrupted));
@@ -1311,6 +1317,29 @@ mod tests {
             "virtual_cable"
         );
         assert_eq!(endpoint_kind("opaque-id", "Speakers"), "other");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interrupt_logging_does_not_deadlock_the_audio_worker() {
+        use std::mem::ManuallyDrop;
+
+        let mut runtime = ManuallyDrop::new(AudioRuntime::new());
+        let result = runtime.request(Duration::from_secs(2), |reply| AudioMessage::Interrupt {
+            reply,
+        });
+
+        // Deliberately leak a deadlocked worker on failure so the test can report
+        // the timeout instead of hanging again while AudioRuntime::drop joins it.
+        if result == Err(PlatformError::AudioOperationTimedOut) {
+            panic!("interrupt logging deadlocked the audio worker");
+        }
+
+        unsafe { ManuallyDrop::drop(&mut runtime) };
+        assert_eq!(
+            result.expect("interrupt request should complete").phase,
+            AudioPhase::Unconfigured
+        );
     }
 
     #[cfg(windows)]
