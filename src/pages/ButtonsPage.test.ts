@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount, type VueWrapper } from "@vue/test-utils";
+import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import ButtonsPage from "./ButtonsPage.vue";
 
 type EdgeHandler = (edge: { button: string; isPressed: boolean }) => void;
@@ -64,7 +64,10 @@ vi.mock("../lib/bridge", async (importOriginal) => {
 
 import {
   exportButtonMappingConfiguration,
+  getButtonMappings,
   importButtonMappingConfiguration,
+  subscribeButtonEdges,
+  subscribeButtonGestures,
   saveButtonMappings,
 } from "../lib/bridge";
 import type { RuntimeSnapshot } from "../lib/bridge";
@@ -145,6 +148,9 @@ async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promis
 beforeEach(() => {
   edgeHandler = null;
   gestureHandler = null;
+  vi.mocked(getButtonMappings).mockClear();
+  vi.mocked(subscribeButtonEdges).mockClear();
+  vi.mocked(subscribeButtonGestures).mockClear();
   vi.mocked(saveButtonMappings).mockClear();
   vi.mocked(exportButtonMappingConfiguration).mockClear();
   vi.mocked(importButtonMappingConfiguration).mockClear();
@@ -158,6 +164,49 @@ describe("buttons mapping page", () => {
     const voiceCard = wrapper.find(".voice-card");
     expect(voiceCard.text()).toContain("语音键");
     expect(voiceCard.text()).toContain("按住说话");
+  });
+
+  it("does not register listeners or polling after unmounting during initial load", async () => {
+    let resolveMappings!: (value: Awaited<ReturnType<typeof getButtonMappings>>) => void;
+    const pendingMappings = new Promise<Awaited<ReturnType<typeof getButtonMappings>>>(
+      (resolve) => {
+        resolveMappings = resolve;
+      },
+    );
+    vi.mocked(getButtonMappings).mockImplementationOnce(() => pendingMappings);
+    const intervalSpy = vi.spyOn(window, "setInterval");
+
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    await flushPromises();
+    wrapper.unmount();
+    resolveMappings({ enabled: true, actions: {} });
+    await flushPromises();
+
+    expect(subscribeButtonEdges).not.toHaveBeenCalled();
+    expect(subscribeButtonGestures).not.toHaveBeenCalled();
+    expect(intervalSpy).not.toHaveBeenCalled();
+    intervalSpy.mockRestore();
+  });
+
+  it("immediately releases a listener that resolves after the page is unmounted", async () => {
+    let resolveUnlisten!: (unlisten: () => void) => void;
+    const pendingUnlisten = new Promise<() => void>((resolve) => {
+      resolveUnlisten = resolve;
+    });
+    vi.mocked(subscribeButtonEdges).mockImplementationOnce(() => pendingUnlisten);
+    const stopEdges = vi.fn();
+
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    await vi.waitFor(() => expect(subscribeButtonEdges).toHaveBeenCalledOnce());
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    wrapper.unmount();
+    resolveUnlisten(stopEdges);
+    await flushPromises();
+
+    expect(stopEdges).toHaveBeenCalledOnce();
+    expect(subscribeButtonGestures).not.toHaveBeenCalled();
+    expect(intervalSpy).not.toHaveBeenCalled();
+    intervalSpy.mockRestore();
   });
 
   it("saves, exports and imports a versioned mapping configuration from the footer", async () => {

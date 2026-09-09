@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import {
   actionSummary,
   buttonLabel,
@@ -202,6 +203,23 @@ let unlistenGestures: (() => void) | null = null;
 let snapshotTimer: number | null = null;
 let flashTimer: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let unmounted = false;
+let resourcesReady = false;
+
+function releasePageResources(): void {
+  window.removeEventListener("keydown", handleCaptureKeydown, true);
+  window.removeEventListener("keyup", handleCaptureKeyup, true);
+  unlistenEdges?.();
+  unlistenEdges = null;
+  unlistenGestures?.();
+  unlistenGestures = null;
+  if (snapshotTimer !== null) window.clearInterval(snapshotTimer);
+  snapshotTimer = null;
+  if (flashTimer !== null) window.clearTimeout(flashTimer);
+  flashTimer = null;
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+}
 
 const dirty = computed(
   () => JSON.stringify(mappings.value) !== JSON.stringify(savedSnapshot.value),
@@ -587,6 +605,7 @@ const rawInput = computed(() => props.runtime?.platform.rawInput);
 const connectionInfo = computed(() => props.runtime?.platform.connection);
 
 onMounted(async () => {
+  const setupStarted = performance.now();
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
   const [loaded, snapshot, apps] = await Promise.all([
@@ -594,6 +613,9 @@ onMounted(async () => {
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
   ]);
+  if (unmounted) {
+    return;
+  }
   presetApps.value = apps.filter((app) => app.installed);
   registerPresetAppNames(presetApps.value);
   mappings.value = loaded;
@@ -603,7 +625,7 @@ onMounted(async () => {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
 
-  unlistenEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
+  const stopEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
     const next = new Set(activeButtons.value);
     if (edge.isPressed) {
       next.add(edge.button);
@@ -615,7 +637,13 @@ onMounted(async () => {
       selectedButton.value = edge.button;
     }
   });
-  unlistenGestures = await subscribeButtonGestures((gesture: FiredGesture) => {
+  if (unmounted) {
+    stopEdges();
+    return;
+  }
+  unlistenEdges = stopEdges;
+
+  const stopGestures = await subscribeButtonGestures((gesture: FiredGesture) => {
     lastFired.value = gesture;
     firedFlash.value = { button: gesture.button, trigger: gesture.trigger };
     if (flashTimer !== null) window.clearTimeout(flashTimer);
@@ -623,6 +651,11 @@ onMounted(async () => {
       firedFlash.value = null;
     }, 600);
   });
+  if (unmounted) {
+    stopGestures();
+    return;
+  }
+  unlistenGestures = stopGestures;
 
   snapshotTimer = window.setInterval(async () => {
     mappingSnapshot.value = await getButtonMappingSnapshot();
@@ -643,16 +676,25 @@ onMounted(async () => {
     });
     resizeObserver.observe(canvasEl.value);
   }
+  resourcesReady = true;
+  reportFrontendEvent({
+    event: "buttons_page_resource_setup",
+    phase: "completed",
+    result: "passed",
+    reason: "listeners_and_polling_ready",
+    elapsedMs: Math.max(0, Math.round(performance.now() - setupStarted)),
+  });
 });
 
 onUnmounted(() => {
-  window.removeEventListener("keydown", handleCaptureKeydown, true);
-  window.removeEventListener("keyup", handleCaptureKeyup, true);
-  unlistenEdges?.();
-  unlistenGestures?.();
-  if (snapshotTimer !== null) window.clearInterval(snapshotTimer);
-  if (flashTimer !== null) window.clearTimeout(flashTimer);
-  resizeObserver?.disconnect();
+  unmounted = true;
+  releasePageResources();
+  reportFrontendEvent({
+    event: "buttons_page_resource_cleanup",
+    phase: "completed",
+    result: "passed",
+    reason: resourcesReady ? "unmounted_after_cleanup" : "unmounted_before_setup_completed",
+  });
 });
 </script>
 
