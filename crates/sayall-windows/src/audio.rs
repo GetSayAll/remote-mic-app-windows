@@ -370,13 +370,16 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     pending_drain = Some((generation, reply));
                 }
                 AudioMessage::Interrupt { reply } => {
-                    let generation = lock(&state).generation;
+                    let (generation, submitted_samples) = {
+                        let snapshot = lock(&state);
+                        (snapshot.generation, snapshot.submitted_samples)
+                    };
                     let started = Instant::now();
                     crate::ble::gatt_note(format!(
                         "audio_session generation={} action=interrupt phase=requested queued_samples={} submitted_samples={}",
-                        lock(&state).generation,
+                        generation,
                         queue.len(),
-                        lock(&state).submitted_samples
+                        submitted_samples
                     ));
                     if let Some((_, pending_reply)) = pending_drain.take() {
                         let _ = pending_reply.send(Err(PlatformError::AudioSessionInterrupted));
@@ -1246,6 +1249,26 @@ mod tests {
             generation,
             ..AudioSnapshot::default()
         }))
+    }
+
+    #[test]
+    fn interrupt_worker_replies_and_keeps_snapshot_readable() {
+        let (sender, receiver) = mpsc::sync_channel(MESSAGE_QUEUE_CAPACITY);
+        let state = Arc::new(Mutex::new(AudioSnapshot::default()));
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || worker_loop(receiver, worker_state));
+        for _ in 0..2 {
+            let (reply, response) = mpsc::channel();
+            sender.send(AudioMessage::Interrupt { reply }).unwrap();
+            let snapshot = response
+                .recv_timeout(Duration::from_secs(2))
+                .expect("audio interrupt deadlocked before replying")
+                .unwrap();
+            assert_eq!(snapshot.phase, AudioPhase::Unconfigured);
+            assert!(state.try_lock().is_ok(), "audio snapshot remained locked");
+        }
+        sender.send(AudioMessage::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]

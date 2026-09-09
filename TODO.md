@@ -6,6 +6,7 @@
 
 ## Windows RC001 / RC003
 
+- [x] Fix v0.2.3 startup deadlock in audio interrupt diagnostics: single-lock snapshot extraction; original worker regression failed, repaired worker and affected Windows host startup passed on 2026-09-09. See Bugs/2026-09-09-audio-interrupt-deadlock.md.
 - [x] 建立独立 Rust + Tauri 2 + Vue 3 工程结构。
 - [x] 建立 Mac 原版风格设置界面骨架。
 - [x] 建立 ATVV、ADPCM 和语音会话纯 Rust 核心。
