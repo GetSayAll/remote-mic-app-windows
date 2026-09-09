@@ -1,7 +1,7 @@
 # WeType history can interrupt a continuously held voice key
 
 - Discovered: 2026-09-09.
-- Status: fixed in source; RC003 and WeType end-to-end acceptance pending.
+- Status: fixed; RC003 and WeType continuous-hold acceptance passed on the affected Windows host.
 - Scope: Windows v0.2.2 and v0.2.3, RC003 with WeType.
 - Symptom: dictation starts, stops after roughly one second, then restarts and stops repeatedly while the remote voice key remains held.
 - Trigger: multiple historical WeType executable entries in Windows microphone ConsentStore.
@@ -11,4 +11,5 @@
 - Fix: aggregate all matching entries, recognize active microphone use via LastUsedTimeStop, capture the baseline before injection, and suppress recovery for unknown observations. Recheck after the recovery delay and before releasing a chord. Validate session identity before consuming the held chord, preserving cleanup ownership if release fails.
 - Timing: existing 700 ms checks, retry delays, chord spacing, and ATVV extension intervals are unchanged.
 - Validation: five regression cases cover version history/order, an already active baseline, newly completed recording, genuinely unchanged inactive history, and unavailable/regressed observations. A separate ignored Windows test reads only aggregate observation availability and counts.
+- Hardware acceptance: the user confirmed uninterrupted dictation ending only on physical release. Two captured holds lasted about 13 seconds each, with WeType response detected on attempt 0, periodic MIC_EXTEND commands, and one successful chord release followed by successful audio drain. The later hold started after almost four minutes idle. RC001 hardware and installer upgrade acceptance remain deferred for this patch.
 - Privacy: registry reads use the public Windows microphone access history. No WeType private configuration is read or written; diagnostics contain no paths, raw timestamps, voice data, or input text.
