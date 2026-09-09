@@ -37,7 +37,7 @@ const PROGRESS_EVENT: &str = "app-update-progress";
 /// "已经是最新版本"，不让用户看到失败感文案；真实原因只写诊断日志。
 /// 已知代价：正式 Release 若漏挂 latest.json 资产，用户也会看到"已经是
 /// 最新版本"——由发布流程（windows-release.yml：缺 latest.json/.sig 即
-/// fail-fast 拒绝建 Release）与诊断日志（check.fail error=...）兜底。
+/// fail-fast 拒绝建 Release）与诊断日志（稳定 error_domain/error_code）兜底。
 fn release_not_found_counts_as_up_to_date(error: &UpdaterError) -> bool {
     matches!(error, UpdaterError::ReleaseNotFound)
 }
@@ -188,11 +188,9 @@ async fn resolve_update_endpoint(include_prereleases: bool) -> Result<UpdateEndp
             .trim()
             .trim_matches('"')
             .to_owned();
-        note(format!("check.endpoint_override url={endpoint}"));
-        let url = endpoint.parse().map_err(|error| {
-            note(format!(
-                "check.fail stage=endpoint_override_parse error={error:?}"
-            ));
+        note("check.endpoint_override configured=true".to_owned());
+        let url = endpoint.parse().map_err(|_error| {
+            note("check.fail stage=endpoint_override_parse error_domain=url error_code=parse_failed reason=invalid_override retryable=false".to_owned());
             "更新配置异常，请联系开发者".to_owned()
         })?;
         return Ok(UpdateEndpoint::Runtime(url));
@@ -216,10 +214,8 @@ async fn resolve_update_endpoint(include_prereleases: bool) -> Result<UpdateEndp
         .timeout(CHECK_TIMEOUT)
         .user_agent("SayAll-Windows-Updater")
         .build()
-        .map_err(|error| {
-            note(format!(
-                "check.fail channel=preview stage=client_build error={error:?}"
-            ));
+        .map_err(|_error| {
+            note("check.fail channel=preview stage=client_build error_domain=http error_code=client_build_failed reason=tls_or_client_configuration retryable=true".to_owned());
             "预览版更新暂时不可用，请稍后重试".to_owned()
         })?;
     let response = client
@@ -228,31 +224,29 @@ async fn resolve_update_endpoint(include_prereleases: bool) -> Result<UpdateEndp
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| {
+        .map_err(|_error| {
             note(format!(
-                "check.fail channel=preview stage=releases_request error={error:?} took_ms={}",
+                "check.fail channel=preview stage=releases_request error_domain=http error_code=request_failed reason=network_or_status retryable=true took_ms={}",
                 elapsed_ms(started)
             ));
             "网络连接失败，请稍后重试".to_owned()
         })?;
-    let feed_xml = response.text().await.map_err(|error| {
+    let feed_xml = response.text().await.map_err(|_error| {
         note(format!(
-            "check.fail channel=preview stage=releases_read error={error:?} took_ms={}",
+            "check.fail channel=preview stage=releases_read error_domain=http error_code=body_read_failed reason=response_body_unavailable retryable=true took_ms={}",
             elapsed_ms(started)
         ));
         "预览版更新暂时不可用，请稍后重试".to_owned()
     })?;
-    let feed = quick_xml::de::from_str::<ReleasesFeed>(&feed_xml).map_err(|error| {
+    let feed = quick_xml::de::from_str::<ReleasesFeed>(&feed_xml).map_err(|_error| {
         note(format!(
-            "check.fail channel=preview stage=releases_parse error={error:?} took_ms={}",
+            "check.fail channel=preview stage=releases_parse error_domain=xml error_code=parse_failed reason=feed_invalid retryable=true took_ms={}",
             elapsed_ms(started)
         ));
         "预览版更新暂时不可用，请稍后重试".to_owned()
     })?;
-    let preview = preview_manifest_endpoint(&feed).map_err(|error| {
-        note(format!(
-            "check.fail channel=preview stage=manifest_url error={error:?}"
-        ));
+    let preview = preview_manifest_endpoint(&feed).map_err(|_error| {
+        note("check.fail channel=preview stage=manifest_url error_domain=url error_code=parse_failed reason=manifest_url_invalid retryable=true".to_owned());
         "预览版更新暂时不可用，请稍后重试".to_owned()
     })?;
     match preview {
@@ -295,15 +289,13 @@ fn build_updater(
         ));
     });
     if let Some(endpoint) = runtime_endpoint {
-        builder = builder.endpoints(vec![endpoint]).map_err(|error| {
-            note(format!(
-                "check.fail stage=runtime_endpoint_reject error={error:?}"
-            ));
+        builder = builder.endpoints(vec![endpoint]).map_err(|_error| {
+            note("check.fail stage=runtime_endpoint_reject error_domain=updater error_code=endpoint_rejected reason=runtime_endpoint_invalid retryable=false".to_owned());
             "更新配置异常，请联系开发者".to_owned()
         })?;
     }
-    builder.build().map_err(|error| {
-        note(format!("check.fail stage=build error={error:?}"));
+    builder.build().map_err(|_error| {
+        note("check.fail stage=build error_domain=updater error_code=build_failed reason=updater_configuration_invalid retryable=true".to_owned());
         "更新功能暂时不可用，请稍后重试".to_owned()
     })
 }
@@ -317,8 +309,8 @@ pub async fn check_app_update(
     let include_prereleases = state
         .settings
         .load()
-        .map_err(|error| {
-            note(format!("check.fail stage=preference_load error={error:?}"));
+        .map_err(|_error| {
+            note("check.fail stage=preference_load error_domain=settings error_code=load_failed reason=update_preference_unavailable retryable=true".to_owned());
             "读取更新设置失败，请稍后重试".to_owned()
         })?
         .check_prerelease_updates;
@@ -385,9 +377,8 @@ pub async fn check_app_update(
             })
         }
         Err(error) => {
-            // 日志保留插件原始错误（诊断用）；用户可见文案去技术化。
             note(format!(
-                "check.fail error={error:?} took_ms={}",
+                "check.fail error_domain=updater error_code=check_failed reason=manifest_or_network_failure retryable=true took_ms={}",
                 elapsed_ms(started)
             ));
             // 取不到清单（404 类）→ 呈现为"已经是最新版本"（2026-09-06 终裁）。
@@ -416,8 +407,8 @@ pub fn get_app_update_preferences(
     let include_prereleases = state
         .settings
         .load()
-        .map_err(|error| {
-            note(format!("preference.load result=failed error={error:?}"));
+        .map_err(|_error| {
+            note("preference.load result=failed error_domain=settings error_code=load_failed reason=preference_unavailable retryable=true".to_owned());
             "读取预览版更新设置失败，请稍后重试".to_owned()
         })?
         .check_prerelease_updates;
@@ -439,15 +430,15 @@ pub async fn set_app_update_preferences(
         settings.save_check_prerelease_updates(include_prereleases)
     })
     .await
-    .map_err(|error| {
+    .map_err(|_error| {
         note(format!(
-            "preference.save result=task_failed include_prereleases={include_prereleases} error={error:?}"
+            "preference.save result=task_failed include_prereleases={include_prereleases} error_domain=runtime error_code=task_failed reason=worker_unavailable retryable=true"
         ));
         "保存预览版更新设置失败，请稍后重试".to_owned()
     })?;
-    save_result.map_err(|error| {
+    save_result.map_err(|_error| {
         note(format!(
-            "preference.save result=write_failed include_prereleases={include_prereleases} error={error:?}"
+            "preference.save result=write_failed include_prereleases={include_prereleases} error_domain=settings error_code=write_failed reason=persistence_unavailable retryable=true"
         ));
         "保存预览版更新设置失败，请稍后重试".to_owned()
     })?;
@@ -465,8 +456,8 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
     let mut update = state
         .pending_update
         .lock()
-        .map_err(|error| {
-            note(format!("install.fail stage=state_lock error={error:?}"));
+        .map_err(|_error| {
+            note("install.fail stage=state_lock error_domain=state error_code=lock_failed reason=pending_update_unavailable retryable=true".to_owned());
             "更新状态异常，请重启应用后重试".to_owned()
         })?
         .take()
@@ -535,9 +526,8 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
                 .lock()
                 .map(|progress| progress.downloaded)
                 .unwrap_or(0);
-            // 日志保留插件原始错误（诊断用）；用户可见文案去技术化。
             note(format!(
-                "install.fail downloaded={downloaded} error={error:?} took_ms={}",
+                "install.fail downloaded={downloaded} error_domain=updater error_code=install_failed reason=download_or_install_failure retryable=true took_ms={}",
                 elapsed_ms(started)
             ));
             Err(install_error_message(&error))
@@ -704,12 +694,15 @@ mod tests {
         // 本测试二进制内无其他代码先初始化 gatt_sink（OnceLock 首次调用生效）。
         // SAFETY: 测试进程内单线程操作该环境变量，其余测试不读取它。
         unsafe { std::env::set_var("SAYALL_GATT_LOG", &path) };
-        note("check.fail stage=endpoint_override_parse error=probe".to_owned());
+        note("check.fail stage=endpoint_override_parse error_domain=url error_code=parse_failed reason=invalid_override retryable=false".to_owned());
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         unsafe { std::env::remove_var("SAYALL_GATT_LOG") };
         let _ = std::fs::remove_file(&path);
         assert!(
-            contents.contains("note=updater.check.fail stage=endpoint_override_parse"),
+            contents.contains("updater.check.fail stage=endpoint_override_parse")
+                && contents.contains("error_code=parse_failed")
+                && contents.starts_with("20")
+                && !contents.contains("note="),
             "updater 功能点日志未落盘：{contents}"
         );
     }

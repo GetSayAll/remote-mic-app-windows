@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import { getRuntimeSnapshot, type RuntimeSnapshot } from "./lib/bridge";
+import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import type { PageId } from "./navigation";
 import AboutPage from "./pages/AboutPage.vue";
@@ -15,6 +16,7 @@ const loadError = ref("");
 const { bannerVisible, info: updateInfo, dismissBanner, runStartupSilentCheck } = useAppUpdate();
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
+let initialRuntimeReported = false;
 
 const activeComponent = computed(() => ({
   buttons: ButtonsPage,
@@ -37,8 +39,26 @@ onMounted(async () => {
     try {
       runtime.value = await getRuntimeSnapshot();
       loadError.value = "";
+      if (!initialRuntimeReported) {
+        reportFrontendEvent({
+          event: "runtime_snapshot",
+          phase: "completed",
+          result: "passed",
+          reason: "initial_ipc_ready",
+        });
+        initialRuntimeReported = true;
+      }
     } catch (error) {
       loadError.value = error instanceof Error ? error.message : String(error);
+      if (!initialRuntimeReported) {
+        reportFrontendEvent({
+          event: "runtime_snapshot",
+          phase: "completed",
+          result: "failed",
+          reason: "initial_ipc_failed",
+        });
+        initialRuntimeReported = true;
+      }
     }
   };
   await refreshRuntime();

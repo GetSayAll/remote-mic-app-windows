@@ -35,6 +35,12 @@ windows_build=<build 或 unknown>
 
 构建时写入 `source_revision`，运行时不得读取 Git 工作区。无法可靠取得的值写 `unknown`，不能省略字段。
 
+正式应用默认写入 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`，不再要求用户
+预先设置环境变量。受控测试仍可用 `SAYALL_GATT_LOG` 覆盖写入位置；日志正文不得
+打印实际文件路径。应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
+在用户看到主页面前后分别留痕，确保安装后白屏可以区分为宿主、WebView、脚本、
+Vue 渲染或 IPC 阶段故障。
+
 ## 必需事件链
 
 每项功能按实际存在的边界记录：
@@ -53,6 +59,10 @@ windows_build=<build 或 unknown>
 ## 隐私红线
 
 不得记录语音或转写正文、用户输入、剪贴板、用户名/邮箱/手机号、完整路径、窗口标题、蓝牙 MAC/UUID/序列号、HID 路径、IP、Token/API Key/密码/私钥/证书、第三方 App 私有状态或原始音频字节。不要用敏感值的稳定哈希替代脱敏。允许记录稳定产品分类、布尔结果、错误 domain/code、采样率、帧数、耗时和脱敏计数。
+
+生产日志不得记录原始音频包；GATT 音频只在会话终态聚合帧数、样本数、丢弃数
+和耗时。音频端点只记录 `virtual_cable|bluetooth|other` 分类及计数，不记录名称、
+端点 ID 或蓝牙身份。
 
 ## 评审清单
 

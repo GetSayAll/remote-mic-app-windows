@@ -17,7 +17,7 @@ mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
 #[cfg(windows)]
-pub use ble::gatt_note;
+pub use ble::{gatt_note, initialize_diagnostic_log, DiagnosticLogMetadata};
 #[cfg(windows)]
 mod ime;
 pub mod key_gate;

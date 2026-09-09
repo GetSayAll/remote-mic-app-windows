@@ -87,14 +87,17 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
     };
     // 功能点日志（AGENTS.md）：决策结果 + 耗时 + 前台进程，报障时一次
     // 日志拉取即可定位是热/冷路径、查询、激活还是等待环节。
+    let outcome = match &result {
+        Ok(WeTypeActivation::AlreadyActive) => "already_active",
+        Ok(WeTypeActivation::Switched) => "switched",
+        Err(_) => "failed",
+    };
     crate::ble::gatt_note(format!(
-        "ime_activation outcome={:?} elapsed_ms={} foreground={} err={}",
-        result
-            .as_ref()
-            .map(|outcome| format!("{outcome:?}"))
-            .unwrap_or_else(|error| error.clone()),
+        "ime_activation outcome={outcome} elapsed_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
         started.elapsed().as_millis(),
-        foreground_process_name().unwrap_or_else(|| "unknown".to_owned()),
+        foreground_process_name().is_some(),
+        if result.is_ok() { "none" } else { "tsf" },
+        if result.is_ok() { "none" } else { "activation_failed" },
         result.is_err(),
     ));
     result
@@ -269,11 +272,11 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
                 Ok(()) => profile.clsid == WETYPE_CLSID && profile.guidProfile == WETYPE_PROFILE,
                 Err(_) => false,
             };
-            // 功能点日志：查询结果（活动输入法 CLSID 前缀）——冷/热判定依据。
+            // 功能点日志：只记录冷/热判定，不落盘输入法 GUID 或前台应用身份。
             crate::ble::gatt_note(format!(
-                "ime_query ok={} active_is_wetype={active_is_wetype} active_clsid={:08X}",
+                "ime_query ok={} active_is_wetype={active_is_wetype} active_profile_present={}",
                 query.is_ok(),
-                profile.clsid.data1,
+                profile.clsid != GUID::from_u128(0),
             ));
             if active_is_wetype {
                 return Ok(WeTypeActivation::AlreadyActive);

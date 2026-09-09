@@ -1,6 +1,7 @@
 use crate::{AudioEndpoint, AudioPhase, AudioSnapshot, PlatformError};
 use std::collections::VecDeque;
 use std::sync::{
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
     Arc, Mutex, MutexGuard,
 };
@@ -19,6 +20,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 const SESSION_MUTE_WATCH_INTERVAL: Duration = Duration::from_millis(100);
+static AUDIO_ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct AudioRuntime {
     sender: SyncSender<AudioMessage>,
@@ -184,10 +186,17 @@ enum AudioMessage {
 }
 
 fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>>) {
+    crate::ble::gatt_note(
+        "audio_worker phase=started backend=wasapi direction=render sample_rate=16000 channels=1 sample_format=s16".to_owned(),
+    );
     if let Err(error) = wasapi::initialize_mta().ok() {
         *lock(&state) = failed_snapshot(format!("WASAPI COM 初始化失败：{error}"));
+        crate::ble::gatt_note(
+            "audio_worker phase=completed terminal_result=failed error_domain=com error_code=initialize_mta_failed reason=wasapi_apartment_unavailable retryable=false".to_owned(),
+        );
         return;
     }
+    crate::ble::gatt_note("audio_worker phase=ready result=passed com_apartment=mta".to_owned());
     let _apartment = WasapiApartment;
     let mut sink: Option<AudioSink> = None;
     let mut queue = VecDeque::<i16>::new();
@@ -211,29 +220,76 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
         if let Some(message) = message {
             match message {
                 AudioMessage::ListEndpoints { reply } => {
-                    let _ = reply.send(list_endpoints());
+                    let started = Instant::now();
+                    crate::ble::gatt_note("audio_endpoint action=list phase=requested".to_owned());
+                    let result = list_endpoints();
+                    match &result {
+                        Ok(endpoints) => {
+                            let cable_count = endpoints
+                                .iter()
+                                .filter(|endpoint| endpoint.is_virtual_cable_candidate)
+                                .count();
+                            let bluetooth_count = endpoints
+                                .iter()
+                                .filter(|endpoint| endpoint_kind(&endpoint.id, &endpoint.name) == "bluetooth")
+                                .count();
+                            let inactive_counts = render_endpoint_inactive_counts().ok();
+                            let (disabled_count, unplugged_count, not_present_count) =
+                                inactive_counts.unwrap_or((0, 0, 0));
+                            crate::ble::gatt_note(format!(
+                                "audio_endpoint action=list phase=completed terminal_result=passed active_count={} active_virtual_cable_count={cable_count} active_bluetooth_count={bluetooth_count} active_other_count={} inactive_state_observed={} disabled_count={disabled_count} unplugged_count={unplugged_count} not_present_count={not_present_count} elapsed_ms={}",
+                                endpoints.len(),
+                                endpoints.len().saturating_sub(cable_count + bluetooth_count),
+                                inactive_counts.is_some(),
+                                started.elapsed().as_millis()
+                            ));
+                        }
+                        Err(_) => crate::ble::gatt_note(format!(
+                            "audio_endpoint action=list phase=completed terminal_result=failed error_domain=wasapi error_code=enumeration_failed reason=render_endpoint_enumeration_failed retryable=true elapsed_ms={}",
+                            started.elapsed().as_millis()
+                        )),
+                    }
+                    let _ = reply.send(result);
                 }
                 AudioMessage::SelectEndpoint { endpoint_id, reply } => {
+                    let started = Instant::now();
+                    let attempt_id = AUDIO_ATTEMPT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                    crate::ble::gatt_note(format!(
+                        "audio_endpoint attempt_id={attempt_id} action=select phase=requested source=user"
+                    ));
                     if pending_drain.is_some()
                         || matches!(
                             lock(&state).phase,
                             AudioPhase::Streaming | AudioPhase::Draining
                         )
                     {
+                        crate::ble::gatt_note(format!(
+                            "audio_endpoint attempt_id={attempt_id} action=select phase=completed terminal_result=failed error_domain=state error_code=audio_busy reason=active_voice_session retryable=true elapsed_ms={}",
+                            started.elapsed().as_millis()
+                        ));
                         let _ = reply.send(Err(PlatformError::AudioBusy));
                         continue;
                     }
                     sink = None;
                     queue.clear();
-                    match AudioSink::open(&endpoint_id) {
+                    match AudioSink::open(&endpoint_id, attempt_id) {
                         Ok(opened) => {
+                            let kind = endpoint_kind(&endpoint_id, &opened.name);
                             let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
                             sink = Some(opened);
                             *lock(&state) = snapshot.clone();
+                            crate::ble::gatt_note(format!(
+                                "audio_endpoint attempt_id={attempt_id} action=select phase=completed terminal_result=passed endpoint_kind={kind} format_autoconvert=true sample_rate=16000 channels=1 elapsed_ms={}",
+                                started.elapsed().as_millis()
+                            ));
                             let _ = reply.send(Ok(snapshot));
                         }
                         Err(error) => {
                             *lock(&state) = failed_snapshot(error.to_string());
+                            crate::ble::gatt_note(format!(
+                                "audio_endpoint attempt_id={attempt_id} action=select phase=completed terminal_result=failed error_domain=wasapi error_code=open_failed reason=endpoint_format_or_state_unavailable retryable=true elapsed_ms={}",
+                                started.elapsed().as_millis()
+                            ));
                             let _ = reply.send(Err(error));
                         }
                     }
@@ -258,6 +314,10 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     let _ = reply.send(Ok(snapshot));
                 }
                 AudioMessage::BeginSession { generation, reply } => {
+                    let started = Instant::now();
+                    crate::ble::gatt_note(format!(
+                        "audio_session generation={generation} action=begin phase=requested"
+                    ));
                     let result = begin_session(&mut sink, &mut queue, &state, generation);
                     if let Err(error @ PlatformError::Audio(_)) = &result {
                         fail_audio(
@@ -268,6 +328,18 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                             &mut pending_drain,
                         );
                     }
+                    crate::ble::gatt_note(match &result {
+                        Ok(snapshot) => format!(
+                            "audio_session generation={generation} action=begin phase=completed terminal_result=passed queued_samples={} elapsed_ms={}",
+                            snapshot.queued_samples,
+                            started.elapsed().as_millis()
+                        ),
+                        Err(error) => format!(
+                            "audio_session generation={generation} action=begin phase=completed terminal_result=failed error_domain=audio error_code={} reason=begin_rejected retryable=true elapsed_ms={}",
+                            audio_error_code(error),
+                            started.elapsed().as_millis()
+                        ),
+                    });
                     let _ = reply.send(result);
                 }
                 AudioMessage::Samples {
@@ -280,16 +352,32 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     }
                 },
                 AudioMessage::FinishSession { generation, reply } => {
+                    crate::ble::gatt_note(format!(
+                        "audio_session generation={generation} action=finish phase=requested queued_samples={} submitted_samples={}",
+                        queue.len(),
+                        lock(&state).submitted_samples
+                    ));
                     let snapshot = lock(&state).clone();
                     if snapshot.phase != AudioPhase::Streaming || snapshot.generation != generation
                     {
                         let _ = reply.send(Err(PlatformError::AudioSessionMismatch));
+                        crate::ble::gatt_note(format!(
+                            "audio_session generation={generation} action=finish phase=completed terminal_result=failed error_domain=state error_code=session_mismatch reason=stale_or_duplicate_finish retryable=false"
+                        ));
                         continue;
                     }
                     lock(&state).phase = AudioPhase::Draining;
                     pending_drain = Some((generation, reply));
                 }
                 AudioMessage::Interrupt { reply } => {
+                    let generation = lock(&state).generation;
+                    let started = Instant::now();
+                    crate::ble::gatt_note(format!(
+                        "audio_session generation={} action=interrupt phase=requested queued_samples={} submitted_samples={}",
+                        lock(&state).generation,
+                        queue.len(),
+                        lock(&state).submitted_samples
+                    ));
                     if let Some((_, pending_reply)) = pending_drain.take() {
                         let _ = pending_reply.send(Err(PlatformError::AudioSessionInterrupted));
                     }
@@ -303,9 +391,24 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                             &mut pending_drain,
                         );
                     }
+                    crate::ble::gatt_note(match &result {
+                        Ok(snapshot) => format!(
+                            "audio_session generation={generation} action=interrupt phase=completed terminal_result=passed next_phase={} elapsed_ms={}",
+                            audio_phase_name(snapshot.phase),
+                            started.elapsed().as_millis()
+                        ),
+                        Err(error) => format!(
+                            "audio_session generation={generation} action=interrupt phase=completed terminal_result=failed error_domain=audio error_code={} reason=reset_failed retryable=true elapsed_ms={}",
+                            audio_error_code(error),
+                            started.elapsed().as_millis()
+                        ),
+                    });
                     let _ = reply.send(result);
                 }
                 AudioMessage::Shutdown => {
+                    crate::ble::gatt_note(
+                        "audio_worker phase=stopping reason=app_shutdown".to_owned(),
+                    );
                     if let Some((_, pending_reply)) = pending_drain.take() {
                         let _ = pending_reply.send(Err(PlatformError::AudioWorkerUnavailable));
                     }
@@ -348,6 +451,16 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                             &mut pending_drain,
                         );
                     }
+                    crate::ble::gatt_note(match &result {
+                        Ok(snapshot) => format!(
+                            "audio_session generation={generation} action=finish phase=completed terminal_result=passed submitted_samples={} queued_samples={}",
+                            snapshot.submitted_samples, snapshot.queued_samples
+                        ),
+                        Err(error) => format!(
+                            "audio_session generation={generation} action=finish phase=completed terminal_result=failed error_domain=audio error_code={} reason=drain_or_reset_failed retryable=true",
+                            audio_error_code(error)
+                        ),
+                    });
                     let _ = reply.send(result);
                 }
                 Ok(false) => pending_drain = Some((generation, reply)),
@@ -364,6 +477,49 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                 }
             }
         }
+    }
+    crate::ble::gatt_note("audio_worker phase=completed terminal_result=passed".to_owned());
+}
+
+fn endpoint_kind(endpoint_id: &str, name: &str) -> &'static str {
+    if crate::is_virtual_cable_output_name(name) {
+        return "virtual_cable";
+    }
+    let normalized_name = name.to_ascii_lowercase();
+    let normalized_id = endpoint_id.to_ascii_lowercase();
+    if normalized_id.contains("bthenum")
+        || normalized_id.contains("bluetooth")
+        || normalized_name.contains("bluetooth")
+        || normalized_name.contains("蓝牙")
+    {
+        "bluetooth"
+    } else {
+        "other"
+    }
+}
+
+fn audio_error_code(error: &PlatformError) -> &'static str {
+    match error {
+        PlatformError::AudioEndpointNotSelected => "endpoint_not_selected",
+        PlatformError::AudioBusy => "audio_busy",
+        PlatformError::AudioQueueOverflow => "queue_overflow",
+        PlatformError::AudioWorkerUnavailable => "worker_unavailable",
+        PlatformError::AudioOperationTimedOut => "operation_timed_out",
+        PlatformError::AudioSessionMismatch => "session_mismatch",
+        PlatformError::AudioSessionInterrupted => "session_interrupted",
+        PlatformError::Audio(_) => "wasapi_failure",
+        _ => "platform_failure",
+    }
+}
+
+fn audio_phase_name(phase: AudioPhase) -> &'static str {
+    match phase {
+        AudioPhase::Unconfigured => "unconfigured",
+        AudioPhase::Ready => "ready",
+        AudioPhase::Streaming => "streaming",
+        AudioPhase::Draining => "draining",
+        AudioPhase::Failed => "failed",
+        AudioPhase::Unsupported => "unsupported",
     }
 }
 
@@ -397,12 +553,37 @@ fn list_endpoints() -> Result<Vec<AudioEndpoint>, PlatformError> {
     Ok(endpoints)
 }
 
+fn render_endpoint_inactive_counts() -> windows::core::Result<(u32, u32, u32)> {
+    use windows::Win32::Media::Audio::{
+        eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_DISABLED,
+        DEVICE_STATE_NOTPRESENT, DEVICE_STATE_UNPLUGGED,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+    let count = |state| -> windows::core::Result<u32> {
+        let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, state) }?;
+        unsafe { collection.GetCount() }
+    };
+    Ok((
+        count(DEVICE_STATE_DISABLED)?,
+        count(DEVICE_STATE_UNPLUGGED)?,
+        count(DEVICE_STATE_NOTPRESENT)?,
+    ))
+}
+
 fn restore_endpoint(
     sink: &mut Option<AudioSink>,
     state: &Arc<Mutex<AudioSnapshot>>,
     endpoint_id: String,
     expected_name: String,
 ) -> AudioSnapshot {
+    let started = Instant::now();
+    let attempt_id = AUDIO_ATTEMPT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    crate::ble::gatt_note(format!(
+        "audio_endpoint attempt_id={attempt_id} action=restore phase=requested source=persisted_settings"
+    ));
     let endpoints = match list_endpoints() {
         Ok(endpoints) => endpoints,
         Err(error) => {
@@ -412,20 +593,33 @@ fn restore_endpoint(
                 format!("无法验证上次选择的输出端点：{error}"),
             );
             *lock(state) = snapshot.clone();
+            crate::ble::gatt_note(format!(
+                "audio_endpoint attempt_id={attempt_id} action=restore phase=completed terminal_result=failed error_domain=wasapi error_code=enumeration_failed reason=cannot_validate_persisted_endpoint retryable=true elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
             return snapshot;
         }
     };
     if let Err(error) = validate_restored_endpoint(&endpoints, &endpoint_id, &expected_name) {
         let snapshot = configured_failure_snapshot(endpoint_id, expected_name, error);
         *lock(state) = snapshot.clone();
+        crate::ble::gatt_note(format!(
+            "audio_endpoint attempt_id={attempt_id} action=restore phase=completed terminal_result=failed error_domain=settings error_code=endpoint_identity_mismatch reason=persisted_endpoint_missing_or_changed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ));
         return snapshot;
     }
 
-    match AudioSink::open(&endpoint_id) {
+    match AudioSink::open(&endpoint_id, attempt_id) {
         Ok(opened) => {
+            let kind = endpoint_kind(&endpoint_id, &opened.name);
             let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
             *sink = Some(opened);
             *lock(state) = snapshot.clone();
+            crate::ble::gatt_note(format!(
+                "audio_endpoint attempt_id={attempt_id} action=restore phase=completed terminal_result=passed endpoint_kind={kind} elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
             snapshot
         }
         Err(error) => {
@@ -435,6 +629,10 @@ fn restore_endpoint(
                 format!("恢复上次选择的输出端点失败：{error}"),
             );
             *lock(state) = snapshot.clone();
+            crate::ble::gatt_note(format!(
+                "audio_endpoint attempt_id={attempt_id} action=restore phase=completed terminal_result=failed error_domain=wasapi error_code=open_failed reason=persisted_endpoint_unavailable retryable=true elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
             snapshot
         }
     }
@@ -587,6 +785,24 @@ fn fail_audio(
     error: PlatformError,
     pending_drain: &mut Option<(u64, Sender<Result<AudioSnapshot, PlatformError>>)>,
 ) {
+    let snapshot_before = lock(state).clone();
+    if matches!(
+        snapshot_before.phase,
+        AudioPhase::Streaming | AudioPhase::Draining
+    ) {
+        crate::ble::gatt_note(format!(
+            "audio_session generation={} action=stream phase=completed terminal_result=failed error_domain=audio error_code={} reason=wasapi_pipeline_failed retryable=true queued_samples={} submitted_samples={}",
+            snapshot_before.generation,
+            audio_error_code(&error),
+            queue.len(),
+            snapshot_before.submitted_samples
+        ));
+    } else {
+        crate::ble::gatt_note(format!(
+            "audio_pipeline event=failure phase=observed error_domain=audio error_code={} reason=pre_stream_failure retryable=true",
+            audio_error_code(&error)
+        ));
+    }
     if let Some((_, reply)) = pending_drain.take() {
         let _ = reply.send(Err(error.clone()));
     }
@@ -610,7 +826,7 @@ struct AudioSink {
 }
 
 impl AudioSink {
-    fn open(endpoint_id: &str) -> Result<Self, PlatformError> {
+    fn open(endpoint_id: &str, attempt_id: u64) -> Result<Self, PlatformError> {
         let enumerator =
             DeviceEnumerator::new().map_err(|error| audio_error("创建端点枚举器", error))?;
         let device = enumerator
@@ -620,6 +836,10 @@ impl AudioSink {
             .get_friendlyname()
             .map_err(|error| audio_error("读取所选端点名称", error))?;
         let is_virtual_cable = crate::is_virtual_cable_output_name(&name);
+        crate::ble::gatt_note(format!(
+            "audio_endpoint attempt_id={attempt_id} action=open phase=properties_read result=passed endpoint_kind={} virtual_cable={is_virtual_cable}",
+            endpoint_kind(endpoint_id, &name)
+        ));
         ensure_cable_endpoint_unmuted(endpoint_id, is_virtual_cable, "open")?;
         let mut client = device
             .get_iaudioclient()
@@ -645,6 +865,9 @@ impl AudioSink {
                 },
             )
             .map_err(|error| audio_error("初始化 16 kHz WASAPI 输出", error))?;
+        crate::ble::gatt_note(format!(
+            "audio_endpoint attempt_id={attempt_id} action=open phase=client_initialized result=passed share_mode=shared autoconvert=true requested_sample_rate=16000 requested_channels=1 buffer_period_hns={default_period}"
+        ));
         if is_virtual_cable {
             client
                 .get_audiosessioncontrol()
@@ -772,6 +995,10 @@ impl AudioSink {
                 .start_stream()
                 .map_err(|error| audio_error("启动 WASAPI 音频流", error))?;
             self.started = true;
+            crate::ble::gatt_note(format!(
+                "audio_stream phase=started result=passed endpoint_kind={} prebuffer_samples={PREBUFFER_SAMPLES} first_write_frames={frames}",
+                endpoint_kind(&self.endpoint_id, &self.name)
+            ));
             self.ensure_session_unmuted("after_start", true)?;
         }
         Ok(frames)
@@ -879,7 +1106,7 @@ fn ensure_cable_endpoint_unmuted(
         }
         Err(error) => {
             crate::ble::gatt_note(format!(
-                "endpoint_unmute checkpoint={checkpoint} result=failed elapsed_ms={} err={error}",
+                "endpoint_unmute checkpoint={checkpoint} result=failed error_domain=wasapi error_code=endpoint_volume_failed reason=mute_state_unavailable retryable=true elapsed_ms={}",
                 started.elapsed().as_millis()
             ));
             Err(audio_error("检查并恢复 CABLE Input 静音状态", error))
@@ -1069,6 +1296,21 @@ mod tests {
                 .unwrap_err()
                 .contains("名称已变")
         );
+    }
+
+    #[test]
+    fn endpoint_logging_classifies_bluetooth_without_returning_identity() {
+        assert_eq!(
+            endpoint_kind("{0.0.0.00000000}.bthenum-device", "Headphones"),
+            "bluetooth"
+        );
+        assert_eq!(endpoint_kind("opaque-id", "Bluetooth Headset"), "bluetooth");
+        assert_eq!(endpoint_kind("opaque-id", "蓝牙耳机"), "bluetooth");
+        assert_eq!(
+            endpoint_kind("opaque-id", "CABLE Input (VB-Audio Virtual Cable)"),
+            "virtual_cable"
+        );
+        assert_eq!(endpoint_kind("opaque-id", "Speakers"), "other");
     }
 
     #[cfg(windows)]
