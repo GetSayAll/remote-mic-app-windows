@@ -1,30 +1,80 @@
-//! ConsentStore 微信输入法（WeType）开麦判据读取。
-//!
-//! 用途（2026-09-05 WeType 热键休眠调查）：WeType 内部状态不可观测，
-//! ConsentStore 的 LastUsedTimeStart 时间戳是"微信输入法真的响应并打开了
-//! 麦克风"的唯一公开判据——与整晚持锁实验的 ground truth 相同。
-//! 供 ble.rs 的 wetype_check（热键休眠检测与自动恢复）使用。
-//!
-//! 历史注记：曾实现"对 WeType 进程解除后台节流"作为唤醒手段，真机实证
-//! 跨进程 SetProcessInformation(ProcessPowerThrottling) 返回 E_INVALIDARG
-//! （不支持作用于其他进程），方案已由 ime.rs 的 TSF 配置切换唤醒取代。
+//! Observe WeType microphone use through the public Windows ConsentStore.
+//! Updates leave historical executable entries behind; enumeration order is
+//! unrelated to the version that is currently recording.
 
+use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
-    REG_VALUE_TYPE,
+    REG_QWORD, REG_VALUE_TYPE,
 };
 
-/// ConsentStore microphone\NonPackaged 根键。
 const CONSENT_NONPACKAGED: &str =
     "Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MicObservation {
+    latest_start: u64,
+    active: bool,
+    entries: usize,
+}
+
+impl MicObservation {
+    fn record(&mut self, start: u64, stop: u64) {
+        self.latest_start = self.latest_start.max(start);
+        self.active |= start > 0 && stop == 0;
+        self.entries += 1;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MicResponse {
+    Observed,
+    NotObserved,
+    Unknown,
+}
+
+pub(crate) fn response_since(
+    baseline: Option<MicObservation>,
+    current: Option<MicObservation>,
+) -> MicResponse {
+    match (baseline, current) {
+        (_, Some(current)) if current.active => MicResponse::Observed,
+        (Some(base), Some(current)) if current.latest_start > base.latest_start => {
+            MicResponse::Observed
+        }
+        (Some(base), Some(current))
+            if current.entries >= base.entries && current.latest_start == base.latest_start =>
+        {
+            MicResponse::NotObserved
+        }
+        _ => MicResponse::Unknown,
+    }
+}
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
 
-/// 读取 WeType 的最近开麦时间戳（原始 FILETIME，100ns 单位）。
-/// 未找到 WeType 条目或读取失败返回 None（调用方按"无法判定"处理）。
-pub fn wetype_mic_start() -> Option<u64> {
+fn read_qword(key: HKEY, name: &str) -> Option<u64> {
+    let value = wide(name);
+    let mut data = 0_u64;
+    let mut size = std::mem::size_of::<u64>() as u32;
+    let mut kind = REG_VALUE_TYPE::default();
+    let result = unsafe {
+        RegQueryValueExW(
+            key,
+            windows::core::PCWSTR(value.as_ptr()),
+            None,
+            Some(&mut kind),
+            Some((&mut data as *mut u64).cast()),
+            Some(&mut size),
+        )
+    };
+    (result.0 == 0 && kind == REG_QWORD && size == 8).then_some(data)
+}
+
+/// Missing or partially unreadable observations must not trigger recovery.
+pub(crate) fn wetype_mic_observation() -> Option<MicObservation> {
     let subkey = wide(CONSENT_NONPACKAGED);
     let mut root = HKEY::default();
     if unsafe {
@@ -40,11 +90,13 @@ pub fn wetype_mic_start() -> Option<u64> {
     {
         return None;
     }
-    let mut index: u32 = 0;
+    let mut index = 0;
+    let mut observation = MicObservation::default();
+    let mut complete = true;
     loop {
         let mut name = [0u16; 260];
         let mut len = name.len() as u32;
-        if unsafe {
+        let result = unsafe {
             RegEnumKeyExW(
                 root,
                 index,
@@ -55,14 +107,17 @@ pub fn wetype_mic_start() -> Option<u64> {
                 None,
                 None,
             )
+        };
+        if result == ERROR_NO_MORE_ITEMS {
+            break;
         }
-        .0 != 0
-        {
+        if result.0 != 0 {
+            complete = false;
             break;
         }
         index += 1;
-        let entry = String::from_utf16_lossy(&name[..len as usize]).to_lowercase();
-        if !entry.contains("wetype") {
+        let entry = String::from_utf16_lossy(&name[..len as usize]);
+        if !entry.to_ascii_lowercase().contains("wetype") {
             continue;
         }
         let mut key = HKEY::default();
@@ -78,34 +133,110 @@ pub fn wetype_mic_start() -> Option<u64> {
         }
         .0 != 0
         {
+            complete = false;
             continue;
         }
-        let value = wide("LastUsedTimeStart");
-        let mut data: u64 = 0;
-        let mut size = std::mem::size_of::<u64>() as u32;
-        let mut kind = REG_VALUE_TYPE::default();
-        let queried = unsafe {
-            RegQueryValueExW(
-                key,
-                windows::core::PCWSTR(value.as_ptr()),
-                None,
-                Some(&mut kind),
-                Some((&mut data as *mut u64).cast()),
-                Some(&mut size),
-            )
-        };
+        let start = read_qword(key, "LastUsedTimeStart");
+        let stop = read_qword(key, "LastUsedTimeStop");
         unsafe {
             let _ = RegCloseKey(key);
         }
-        if queried.0 == 0 {
-            unsafe {
-                let _ = RegCloseKey(root);
-            }
-            return Some(data);
+        match (start, stop) {
+            (Some(start), Some(stop)) => observation.record(start, stop),
+            _ => complete = false,
         }
     }
     unsafe {
         let _ = RegCloseKey(root);
     }
-    None
+    (complete && observation.entries > 0).then_some(observation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires installed WeType microphone history; read-only"]
+    fn live_consentstore_observation_is_readable() {
+        let observation = wetype_mic_observation().expect("WeType observation unavailable");
+        assert!(observation.entries > 0);
+        println!(
+            "wetype_observation entries={} active={}",
+            observation.entries, observation.active
+        );
+    }
+
+    fn stopped(start: u64) -> MicObservation {
+        let mut result = MicObservation::default();
+        result.record(start, start + 1);
+        result
+    }
+
+    #[test]
+    fn historical_versions_do_not_hide_current_recording() {
+        let mut baseline = MicObservation::default();
+        for start in [10, 20, 30, 40, 50, 60, 70] {
+            baseline.record(start, start + 1);
+        }
+        let mut current = MicObservation::default();
+        for start in [10, 20, 30, 40, 50, 60] {
+            current.record(start, start + 1);
+        }
+        current.record(80, 0);
+        assert_eq!(
+            response_since(Some(baseline), Some(current)),
+            MicResponse::Observed
+        );
+        let mut reversed = MicObservation::default();
+        reversed.record(80, 0);
+        for start in [60, 50, 40, 30, 20, 10] {
+            reversed.record(start, start + 1);
+        }
+        assert_eq!(current, reversed);
+    }
+
+    #[test]
+    fn active_recording_is_not_retried_even_if_baseline_already_contains_start() {
+        let mut active = stopped(10);
+        active.active = true;
+        assert_eq!(
+            response_since(Some(active), Some(active)),
+            MicResponse::Observed
+        );
+        assert_eq!(response_since(None, Some(active)), MicResponse::Observed);
+    }
+
+    #[test]
+    fn new_completed_recording_is_a_response() {
+        assert_eq!(
+            response_since(Some(stopped(10)), Some(stopped(20))),
+            MicResponse::Observed
+        );
+    }
+
+    #[test]
+    fn unchanged_inactive_recording_allows_recovery() {
+        assert_eq!(
+            response_since(Some(stopped(10)), Some(stopped(10))),
+            MicResponse::NotObserved
+        );
+    }
+
+    #[test]
+    fn missing_or_regressed_observations_do_not_authorize_recovery() {
+        assert_eq!(response_since(None, None), MicResponse::Unknown);
+        assert_eq!(
+            response_since(Some(stopped(10)), None),
+            MicResponse::Unknown
+        );
+        assert_eq!(
+            response_since(None, Some(stopped(10))),
+            MicResponse::Unknown
+        );
+        assert_eq!(
+            response_since(Some(stopped(20)), Some(stopped(10))),
+            MicResponse::Unknown
+        );
+    }
 }
