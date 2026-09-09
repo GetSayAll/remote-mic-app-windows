@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "sayall-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "sayall-windows"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "futures",
  "sayall-core",
@@ -3126,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "sayall-windows-app"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "quick-xml",
  "reqwest",
