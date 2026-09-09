@@ -3,6 +3,8 @@ use raw_input::{RawInputPhase, RawInputSnapshot};
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
@@ -54,6 +56,9 @@ pub struct PlatformSnapshot {
     pub raw_input: RawInputSnapshot,
     pub button_mapping: ButtonMappingSnapshot,
 }
+
+#[cfg(windows)]
+static INITIAL_RUNTIME_SNAPSHOT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,9 +342,30 @@ impl WindowsPlatform {
     pub fn snapshot(&self) -> PlatformSnapshot {
         #[cfg(windows)]
         {
+            let trace_initial = !INITIAL_RUNTIME_SNAPSHOT_LOGGED.swap(true, Ordering::Relaxed);
+            if trace_initial {
+                gatt_note("runtime_snapshot phase=requested checkpoint=connection".to_owned());
+            }
             let connection = self.connection_snapshot();
+            if trace_initial {
+                gatt_note("runtime_snapshot phase=progress checkpoint=audio".to_owned());
+            }
             let audio = self.audio_snapshot();
+            if trace_initial {
+                gatt_note("runtime_snapshot phase=progress checkpoint=raw_input".to_owned());
+            }
             let raw_input = self.raw_input_snapshot();
+            if trace_initial {
+                gatt_note("runtime_snapshot phase=progress checkpoint=send_input".to_owned());
+            }
+            let send_input_ready = self.send_input_snapshot().available;
+            if trace_initial {
+                gatt_note("runtime_snapshot phase=progress checkpoint=button_mapping".to_owned());
+            }
+            let button_mapping = self.button_mapping_snapshot();
+            if trace_initial {
+                gatt_note("runtime_snapshot phase=completed terminal_result=passed".to_owned());
+            }
             PlatformSnapshot {
                 platform: "windows".to_owned(),
                 windows_api_available: true,
@@ -353,14 +379,14 @@ impl WindowsPlatform {
                     AudioPhase::Ready | AudioPhase::Streaming | AudioPhase::Draining
                 ),
                 raw_input_ready: raw_input.phase == RawInputPhase::Ready,
-                send_input_ready: self.send_input_snapshot().available,
+                send_input_ready,
                 verification_status:
                     "BLE/ATVV/WASAPI/Raw Input、退避重连与睡眠恢复代码已实现，等待 Windows 主机与 RC001/RC003 真机验证"
                         .to_owned(),
                 connection,
                 audio,
                 raw_input,
-                button_mapping: self.button_mapping_snapshot(),
+                button_mapping,
             }
         }
 
