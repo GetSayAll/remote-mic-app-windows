@@ -299,7 +299,7 @@ describe("buttons mapping page", () => {
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
-  it("records Win+L from native paired suppression without letting the browser execute it", async () => {
+  it("records Win+L safely by selecting Win in UI and pressing only the main key", async () => {
     const wrapper = await mountPage();
     const powerCard = wrapper
       .findAll(".mapping-card")
@@ -311,7 +311,10 @@ describe("buttons mapping page", () => {
     await captureButton.trigger("click");
     await vi.waitFor(() => expect(startShortcutCapture).toHaveBeenCalledOnce());
 
-    shortcutCaptureHandler!({ key: "left_windows", isPressed: true });
+    const leftWin = wrapper
+      .findAll(".capture-modifiers .chip")
+      .find((button) => button.text() === "左 Win")!;
+    await leftWin.trigger("click");
     shortcutCaptureHandler!({ key: "l", isPressed: true });
     await vi.waitFor(() => {
       const calls = vi.mocked(saveButtonMappings).mock.calls;
@@ -324,12 +327,7 @@ describe("buttons mapping page", () => {
     await vi.waitFor(() =>
       expect(wrapper.text()).toContain("已录入 左 Win + L，松开全部按键后完成"),
     );
-    expect(stopShortcutCapture).not.toHaveBeenCalled();
-
     shortcutCaptureHandler!({ key: "l", isPressed: false });
-    await flushPromises();
-    expect(stopShortcutCapture).not.toHaveBeenCalled();
-    shortcutCaptureHandler!({ key: "left_windows", isPressed: false });
     await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(wrapper.text()).toContain("快捷键已录入：左 Win + L"));
   });
