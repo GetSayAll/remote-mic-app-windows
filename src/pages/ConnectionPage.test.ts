@@ -108,6 +108,19 @@ describe("VB-CABLE first-launch guidance", () => {
     vi.clearAllMocks();
   });
 
+  it("groups each status dot with its heading for vertical alignment", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const headings = wrapper.findAll(".status-heading");
+    expect(headings).toHaveLength(2);
+    for (const heading of headings) {
+      expect(heading.find(".status-dot").exists()).toBe(true);
+      expect(heading.find("strong").exists()).toBe(true);
+    }
+    wrapper.unmount();
+  });
+
   it("automatically selects the only VB-CABLE endpoint when no endpoint was configured", async () => {
     mocks.endpoints = [cableEndpoint];
     const wrapper = mount(ConnectionPage, { props: { runtime } });

@@ -68,6 +68,11 @@ export interface ButtonEdge {
   isPressed: boolean;
 }
 
+export interface ShortcutCaptureEdge {
+  key: KeyCode;
+  isPressed: boolean;
+}
+
 export interface RawInputSnapshot {
   phase: RawInputPhase;
   matchedDeviceCount: number;
@@ -577,6 +582,30 @@ export async function subscribeButtonGestures(
   }
   const { listen } = await import("@tauri-apps/api/event");
   const unlisten = await listen<FiredGesture>("button-gesture", (event) => handler(event.payload));
+  return () => {
+    void unlisten();
+  };
+}
+
+export async function startShortcutCapture(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("start_shortcut_capture");
+}
+
+export async function stopShortcutCapture(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("stop_shortcut_capture");
+}
+
+/** 原生低级钩子录入边沿；Win+L 等系统组合在到达 Shell 前已成对吞下。 */
+export async function subscribeShortcutCaptureEdges(
+  handler: (edge: ShortcutCaptureEdge) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<ShortcutCaptureEdge>("shortcut-capture-edge", (event) =>
+    handler(event.payload),
+  );
   return () => {
     void unlisten();
   };

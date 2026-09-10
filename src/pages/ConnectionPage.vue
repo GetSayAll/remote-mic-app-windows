@@ -351,9 +351,11 @@ onUnmounted(() => {
         </div>
 
         <div class="status-panel" aria-live="polite">
-          <span class="status-dot" :class="phaseTone"></span>
-          <div>
-            <strong>{{ connection.remoteName ?? connectionPhaseLabel(connection.phase) }}</strong>
+          <div class="status-copy">
+            <div class="status-heading">
+              <span class="status-dot" :class="phaseTone"></span>
+              <strong>{{ connection.remoteName ?? connectionPhaseLabel(connection.phase) }}</strong>
+            </div>
             <small>{{ phaseDetail }}</small>
           </div>
           <button
@@ -443,9 +445,11 @@ onUnmounted(() => {
         </div>
 
         <div class="status-panel" aria-live="polite">
-          <span class="status-dot" :class="audioTone"></span>
-          <div>
-            <strong>{{ audio.selectedEndpointName ?? audioPhaseLabel(audio.phase) }}</strong>
+          <div class="status-copy">
+            <div class="status-heading">
+              <span class="status-dot" :class="audioTone"></span>
+              <strong>{{ audio.selectedEndpointName ?? audioPhaseLabel(audio.phase) }}</strong>
+            </div>
             <small>{{ audioDetail }}</small>
           </div>
         </div>

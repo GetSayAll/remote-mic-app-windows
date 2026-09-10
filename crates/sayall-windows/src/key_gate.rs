@@ -33,11 +33,135 @@
 //! 与 `key_suppressor`（语音键 F5 会话抑制器）相互独立、并存运行：后者只管
 //! ATVV 语音会话期间的 F5，本模块只管已映射按键。
 
+use crate::send_input::KeyCode;
+use serde::Serialize;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutCaptureEdge {
+    pub key: KeyCode,
+    pub is_pressed: bool,
+}
+
+pub type ShortcutCaptureCallback = Arc<dyn Fn(ShortcutCaptureEdge) + Send + Sync>;
+
+/// 低级键盘钩子的 VK/scan code → 持久化 KeyCode。保持为纯函数以便在
+/// 非 Windows CI 上验证录入协议；左右修饰键优先使用专用 VK，通用 VK
+/// 再以 extended/scan code 区分。
+pub fn capture_key_code(vk_code: u32, make_code: u16, extended: bool) -> Option<KeyCode> {
+    Some(match vk_code {
+        0x08 => KeyCode::Backspace,
+        0x09 => KeyCode::Tab,
+        0x0D => KeyCode::Enter,
+        0x10 => match make_code {
+            0x36 => KeyCode::RightShift,
+            _ => KeyCode::LeftShift,
+        },
+        0x11 => {
+            if extended {
+                KeyCode::RightControl
+            } else {
+                KeyCode::LeftControl
+            }
+        }
+        0x12 => {
+            if extended {
+                KeyCode::RightAlt
+            } else {
+                KeyCode::LeftAlt
+            }
+        }
+        0x1B => KeyCode::Escape,
+        0x20 => KeyCode::Space,
+        0x21 => KeyCode::PageUp,
+        0x22 => KeyCode::PageDown,
+        0x23 => KeyCode::End,
+        0x24 => KeyCode::Home,
+        0x25 => KeyCode::Left,
+        0x26 => KeyCode::Up,
+        0x27 => KeyCode::Right,
+        0x28 => KeyCode::Down,
+        0x2D => KeyCode::Insert,
+        0x2E => KeyCode::Delete,
+        0x30..=0x39 => [
+            KeyCode::Digit0,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ][(vk_code - 0x30) as usize],
+        0x41..=0x5A => [
+            KeyCode::A,
+            KeyCode::B,
+            KeyCode::C,
+            KeyCode::D,
+            KeyCode::E,
+            KeyCode::F,
+            KeyCode::G,
+            KeyCode::H,
+            KeyCode::I,
+            KeyCode::J,
+            KeyCode::K,
+            KeyCode::L,
+            KeyCode::M,
+            KeyCode::N,
+            KeyCode::O,
+            KeyCode::P,
+            KeyCode::Q,
+            KeyCode::R,
+            KeyCode::S,
+            KeyCode::T,
+            KeyCode::U,
+            KeyCode::V,
+            KeyCode::W,
+            KeyCode::X,
+            KeyCode::Y,
+            KeyCode::Z,
+        ][(vk_code - 0x41) as usize],
+        0x5B => KeyCode::LeftWindows,
+        0x5C => KeyCode::RightWindows,
+        0x5D => KeyCode::Apps,
+        0x70..=0x7B => [
+            KeyCode::F1,
+            KeyCode::F2,
+            KeyCode::F3,
+            KeyCode::F4,
+            KeyCode::F5,
+            KeyCode::F6,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F9,
+            KeyCode::F10,
+            KeyCode::F11,
+            KeyCode::F12,
+        ][(vk_code - 0x70) as usize],
+        0xA0 => KeyCode::LeftShift,
+        0xA1 => KeyCode::RightShift,
+        0xA2 => KeyCode::LeftControl,
+        0xA3 => KeyCode::RightControl,
+        0xA4 => KeyCode::LeftAlt,
+        0xA5 => KeyCode::RightAlt,
+        0xAD => KeyCode::VolumeMute,
+        0xAE => KeyCode::VolumeDown,
+        0xAF => KeyCode::VolumeUp,
+        0xB0 => KeyCode::MediaNext,
+        0xB1 => KeyCode::MediaPrev,
+        0xB3 => KeyCode::MediaPlayPause,
+        _ => return None,
+    })
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use crate::raw_input::{button_for_keyboard, ButtonEdge, RemoteButton, ALL_BUTTONS};
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, OnceLock};
     use std::thread::JoinHandle;
@@ -47,8 +171,8 @@ mod windows_impl {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-        PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
+        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+        LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -75,6 +199,12 @@ mod windows_impl {
     const BUMP_TIMER_MS: u32 = 10_000;
 
     static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static SHORTCUT_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static SHORTCUT_CAPTURE_PREHELD: [AtomicBool; 256] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const FALSE: AtomicBool = AtomicBool::new(false);
+        [FALSE; 256]
+    };
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static MAPPED_MASK: AtomicU64 = AtomicU64::new(0);
     /// 常驻抑制掩码（"遥控器优先"）：遥 online 期间无需武装直接吞。
@@ -95,12 +225,16 @@ mod windows_impl {
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
     /// 被吞键盘边沿的投递端（映射引擎注册；闭包形式避免模块间类型耦合）。
     static EDGE_SINK: OnceLock<Arc<dyn Fn(ButtonEdge) + Send + Sync>> = OnceLock::new();
+    static SHORTCUT_CAPTURE_SINK: OnceLock<super::ShortcutCaptureCallback> = OnceLock::new();
 
     thread_local! {
         /// (vk, make) → 按住配对状态（true=本次按住的 DOWN 全部被吞）。
         /// 仅钩子线程读写。
         static HOLD_PAIRING: RefCell<HashMap<(u16, u16), bool>> =
             RefCell::new(HashMap::new());
+        /// 录入模式吞下的 DOWN 集合。即使界面在录到非修饰键后立即关闭模式，
+        /// 对应 UP 与按住自动重复 DOWN 仍继续吞到物理释放，避免不对称边沿。
+        static CAPTURE_PAIRING: RefCell<HashSet<(u16, u16)>> = RefCell::new(HashSet::new());
     }
 
     pub const HOLD_NONE: u32 = 0;
@@ -214,12 +348,78 @@ mod windows_impl {
             let message = wparam.0 as u32;
             if matches!(message, 0x0100 | 0x0104 | 0x0101 | 0x0105) {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                if handle_shortcut_capture(kb.vkCode as u32, kb.scanCode as u16, message, kb.flags)
+                {
+                    return LRESULT(1);
+                }
                 if handle_keyboard(kb.vkCode as u32, kb.scanCode as u16, message, kb.flags) {
                     return LRESULT(1);
                 }
             }
         }
         CallNextHookEx(None, code, wparam, lparam)
+    }
+
+    fn handle_shortcut_capture(
+        vk_code: u32,
+        make_code: u16,
+        message: u32,
+        flags: windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT_FLAGS,
+    ) -> bool {
+        if flags.contains(LLKHF_INJECTED) {
+            return false;
+        }
+        let vk_index = vk_code as usize;
+        if vk_index < SHORTCUT_CAPTURE_PREHELD.len()
+            && SHORTCUT_CAPTURE_PREHELD[vk_index].load(Ordering::Relaxed)
+        {
+            if matches!(message, 0x0101 | 0x0105) {
+                SHORTCUT_CAPTURE_PREHELD[vk_index].store(false, Ordering::Relaxed);
+            }
+            // 录入开始前已经按下的键，其 DOWN 已进入 OS；后续重复 DOWN 与 UP
+            // 必须继续放行，不能制造“DOWN 放行、UP 吞下”的粘键。
+            return false;
+        }
+        let key_id = (vk_code as u16, make_code);
+        let is_pressed = matches!(message, 0x0100 | 0x0104);
+        let swallow = CAPTURE_PAIRING.with(|pairing| {
+            update_capture_pairing(
+                &mut pairing.borrow_mut(),
+                key_id,
+                is_pressed,
+                SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed),
+            )
+        });
+        if !swallow {
+            return false;
+        }
+        if SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed) {
+            if let (Some(key), Some(sink)) = (
+                super::capture_key_code(vk_code, make_code, flags.contains(LLKHF_EXTENDED)),
+                SHORTCUT_CAPTURE_SINK.get(),
+            ) {
+                sink(super::ShortcutCaptureEdge { key, is_pressed });
+            }
+        }
+        true
+    }
+
+    pub(super) fn update_capture_pairing(
+        pairing: &mut HashSet<(u16, u16)>,
+        key: (u16, u16),
+        is_pressed: bool,
+        capture_active: bool,
+    ) -> bool {
+        if is_pressed {
+            if capture_active || pairing.contains(&key) {
+                pairing.insert(key);
+                true
+            } else {
+                false
+            }
+        } else {
+            pairing.remove(&key)
+        }
     }
 
     /// 处理一条键盘事件；返回是否吞键。只在钩子线程执行。
@@ -367,6 +567,7 @@ mod windows_impl {
 
     impl KeyGate {
         pub fn start() -> KeyGate {
+            SHORTCUT_CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
             ENABLED.store(false, Ordering::Relaxed);
             MAPPED_MASK.store(0, Ordering::Relaxed);
             PERSISTENT_MASK.store(0, Ordering::Relaxed);
@@ -399,6 +600,7 @@ mod windows_impl {
 
     impl Drop for KeyGate {
         fn drop(&mut self) {
+            SHORTCUT_CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
             GATE_ACTIVE.store(false, Ordering::Relaxed);
             if self.thread_id != 0 {
                 unsafe {
@@ -459,6 +661,25 @@ mod windows_impl {
         let _ = EDGE_SINK.set(sink);
     }
 
+    pub fn set_shortcut_capture_sink(sink: super::ShortcutCaptureCallback) {
+        let _ = SHORTCUT_CAPTURE_SINK.set(sink);
+    }
+
+    pub fn set_shortcut_capture_active(active: bool) -> bool {
+        if active && !GATE_ACTIVE.load(Ordering::Relaxed) {
+            return false;
+        }
+        if active {
+            use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+            for (vk, slot) in SHORTCUT_CAPTURE_PREHELD.iter().enumerate() {
+                let down = unsafe { GetAsyncKeyState(vk as i32) } < 0;
+                slot.store(down, Ordering::Relaxed);
+            }
+        }
+        SHORTCUT_CAPTURE_ACTIVE.store(active, Ordering::Relaxed);
+        true
+    }
+
     pub fn swallowed_edge_count() -> u64 {
         SWALLOWED_EDGES.load(Ordering::Relaxed)
     }
@@ -481,7 +702,8 @@ mod windows_impl {
 pub use windows_impl::{
     arm_button, configure, decide, is_gate_thread_alive, leaked_down_count, listener_active,
     set_edge_sink, set_listener_active, set_persistent_mask, set_remote_connected,
-    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    set_shortcut_capture_active, set_shortcut_capture_sink, swallowed_edge_count, KeyGate,
+    HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -507,6 +729,10 @@ mod fallback {
     pub fn set_listener_active(_active: bool) {}
     pub fn arm_button(_button: RemoteButton, _grace_ms: u64) {}
     pub fn set_edge_sink(_sink: std::sync::Arc<dyn Fn(ButtonEdge) + Send + Sync>) {}
+    pub fn set_shortcut_capture_sink(_sink: super::ShortcutCaptureCallback) {}
+    pub fn set_shortcut_capture_active(_active: bool) -> bool {
+        false
+    }
     pub fn swallowed_edge_count() -> u64 {
         0
     }
@@ -528,6 +754,24 @@ pub use fallback::*;
 mod tests {
     #[cfg(windows)]
     use super::*;
+
+    #[test]
+    fn capture_protocol_preserves_sided_modifiers_and_letters() {
+        assert_eq!(
+            capture_key_code(0x5B, 0x5B, true),
+            Some(KeyCode::LeftWindows)
+        );
+        assert_eq!(capture_key_code(0x4C, 0x26, false), Some(KeyCode::L));
+        assert_eq!(
+            capture_key_code(0x11, 0x1D, true),
+            Some(KeyCode::RightControl)
+        );
+        assert_eq!(
+            capture_key_code(0x10, 0x36, false),
+            Some(KeyCode::RightShift)
+        );
+        assert_eq!(capture_key_code(0xFF, 0x5E, false), None);
+    }
 
     #[cfg(windows)]
     #[test]
@@ -654,6 +898,43 @@ mod tests {
         // 配对未知（钩子中途启动）→ UP 放行。
         assert!(!decide(
             0x0D, 0x1C, true, false, false, true, HOLD_NONE, true
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_pairs_edges_across_deactivation_and_restart_boundaries() {
+        let win = (0x5B, 0x5B);
+        let mut pairing = std::collections::HashSet::new();
+        // 录入中吞 DOWN；界面完成录入并关闭后，自动重复 DOWN 与最终 UP
+        // 仍按同一次按住全部吞掉。
+        assert!(windows_impl::update_capture_pairing(
+            &mut pairing,
+            win,
+            true,
+            true
+        ));
+        assert!(windows_impl::update_capture_pairing(
+            &mut pairing,
+            win,
+            true,
+            false
+        ));
+        assert!(windows_impl::update_capture_pairing(
+            &mut pairing,
+            win,
+            false,
+            false
+        ));
+        assert!(pairing.is_empty());
+
+        // 钩子/进程在按住中重启时没有历史 DOWN 所有权，孤立 UP 必须放行。
+        let mut after_restart = std::collections::HashSet::new();
+        assert!(!windows_impl::update_capture_pairing(
+            &mut after_restart,
+            win,
+            false,
+            false
         ));
     }
 

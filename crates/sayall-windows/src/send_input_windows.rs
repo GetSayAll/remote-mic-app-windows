@@ -1,10 +1,12 @@
 use crate::send_input::{
     plan_key_down, plan_key_up, send_key_edges_spaced_with, send_key_tap_with, KeyChord,
-    PlannedKeyEvent, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
+    PlannedKeyEvent, SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
 };
 use crate::PlatformError;
 use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
+use windows::Win32::System::Shutdown::LockWorkStation;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VIRTUAL_KEY,
@@ -30,6 +32,27 @@ impl SendInputRuntime {
     }
 
     pub fn tap(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
+        if chord.is_lock_workstation() {
+            let started = Instant::now();
+            crate::ble::gatt_note(
+                "shortcut_execute action=lock_workstation phase=requested method=win32_api"
+                    .to_owned(),
+            );
+            let result = unsafe { LockWorkStation() }
+                .map(|_| 0_usize)
+                .map_err(|error| SendInputError::Backend(error.to_string()));
+            crate::ble::gatt_note(match &result {
+                Ok(_) => format!(
+                    "shortcut_execute action=lock_workstation phase=completed terminal_result=passed api_request_started=true elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ),
+                Err(_) => format!(
+                    "shortcut_execute action=lock_workstation phase=completed terminal_result=failed error_domain=win32 error_code=lock_workstation_failed reason=api_rejected retryable=true elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ),
+            });
+            return self.record(result, "LockWorkStation");
+        }
         let result = send_key_tap_with(&chord, real_send_input_batch);
         self.record(result, "SendInput")
     }

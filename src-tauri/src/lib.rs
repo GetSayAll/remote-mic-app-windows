@@ -441,6 +441,35 @@ fn get_button_mapping_snapshot(
 }
 
 #[tauri::command]
+fn start_shortcut_capture() -> Result<(), String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(
+        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only".to_owned(),
+    );
+    if !sayall_windows::key_gate::set_shortcut_capture_active(true) {
+        sayall_windows::gatt_note(format!(
+            "shortcut_capture action=start phase=completed terminal_result=failed error_domain=keyboard_hook error_code=gate_unavailable reason=hook_not_active retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ));
+        return Err("键盘保护钩子尚未就绪，请稍后重试".to_owned());
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only elapsed_ms={}",
+        started.elapsed().as_millis()
+    ));
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_shortcut_capture() {
+    let _ = sayall_windows::key_gate::set_shortcut_capture_active(false);
+    sayall_windows::gatt_note(
+        "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired"
+            .to_owned(),
+    );
+}
+
+#[tauri::command]
 fn get_send_input_snapshot(state: tauri::State<'_, AppState>) -> SendInputSnapshot {
     state.platform.send_input_snapshot()
 }
@@ -760,6 +789,28 @@ fn register_button_events(platform: &Arc<dyn PlatformRuntime>, app: tauri::AppHa
     }));
 }
 
+/// 低级键盘钩子只做非阻塞 try_send；独立线程负责向 WebView 发事件，避免
+/// 在系统输入回调中执行 Tauri/IPC 工作。
+fn register_shortcut_capture_events(app: tauri::AppHandle) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(32);
+    sayall_windows::key_gate::set_shortcut_capture_sink(Arc::new(move |edge| {
+        let _ = sender.try_send(edge);
+    }));
+    std::thread::Builder::new()
+        .name("sayall-shortcut-capture-events".to_owned())
+        .spawn(move || {
+            while let Ok(edge) = receiver.recv() {
+                sayall_windows::gatt_note(format!(
+                    "shortcut_capture action=edge phase=observed key={:?} edge={} delivery=webview",
+                    edge.key,
+                    if edge.is_pressed { "down" } else { "up" }
+                ));
+                let _ = app.emit("shortcut-capture-edge", &edge);
+            }
+        })
+        .ok();
+}
+
 /// Raw Input 监听自愈监督线程：启动尝试一次（遥控器休眠时可能失败）；
 /// 此后每 10 秒巡检，phase=Failed（启动失败或监听线程意外退出）时自动重启。
 /// Stopped（用户在按键页显式停止）不重启；成功后保持低频巡检自愈。
@@ -1027,6 +1078,7 @@ pub fn run() {
 
             // 语义按键边沿与手势事件 → 前端（画布高亮与单击/双击/长按反馈）。
             register_button_events(&platform, app.handle().clone());
+            register_shortcut_capture_events(app.handle().clone());
 
             // Raw Input 监听自愈：启动即尝试，失败（遥控器休眠/未连接）进入
             // 10 秒重试循环；用户在按键页显式停止（Stopped）时不重试。
@@ -1078,6 +1130,8 @@ pub fn run() {
         list_preset_apps,
         pick_custom_app,
         get_button_mapping_snapshot,
+        start_shortcut_capture,
+        stop_shortcut_capture,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
@@ -1115,6 +1169,8 @@ pub fn run() {
         list_preset_apps,
         pick_custom_app,
         get_button_mapping_snapshot,
+        start_shortcut_capture,
+        stop_shortcut_capture,
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,

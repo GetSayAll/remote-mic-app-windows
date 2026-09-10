@@ -19,9 +19,12 @@ import {
   saveButtonMappings,
   shortcutCapability,
   startRawInput,
+  startShortcutCapture,
   stopRawInput,
+  stopShortcutCapture,
   subscribeButtonEdges,
   subscribeButtonGestures,
+  subscribeShortcutCaptureEdges,
   type ButtonAction,
   type ButtonActions,
   type ButtonEdge,
@@ -35,6 +38,7 @@ import {
   type RemoteButton,
   type RemoteModel,
   type RuntimeSnapshot,
+  type ShortcutCaptureEdge,
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -197,9 +201,16 @@ const mappingSnapshot = ref<ButtonMappingSnapshot | null>(null);
 const busy = ref(false);
 const statusMessage = ref<string | null>(null);
 const capturingShortcut = ref(false);
+const captureStarting = ref(false);
 const captureDisplay = ref<string[]>([]);
+const safeCaptureMode = ref(false);
+const capturePressedKeys = new Set<KeyCode>();
+let capturedChord: KeyCode[] | null = null;
 let unlistenEdges: (() => void) | null = null;
 let unlistenGestures: (() => void) | null = null;
+let unlistenShortcutCapture: (() => void) | null = null;
+let captureTimeout: number | null = null;
+let captureRequestId = 0;
 let snapshotTimer: number | null = null;
 let flashTimer: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -209,10 +220,16 @@ let resourcesReady = false;
 function releasePageResources(): void {
   window.removeEventListener("keydown", handleCaptureKeydown, true);
   window.removeEventListener("keyup", handleCaptureKeyup, true);
+  window.removeEventListener("blur", handleCaptureBlur);
   unlistenEdges?.();
   unlistenEdges = null;
   unlistenGestures?.();
   unlistenGestures = null;
+  unlistenShortcutCapture?.();
+  unlistenShortcutCapture = null;
+  if (captureTimeout !== null) window.clearTimeout(captureTimeout);
+  captureTimeout = null;
+  void stopShortcutCapture();
   if (snapshotTimer !== null) window.clearInterval(snapshotTimer);
   snapshotTimer = null;
   if (flashTimer !== null) window.clearTimeout(flashTimer);
@@ -291,7 +308,7 @@ function selectButton(button: RemoteButton): void {
 function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
-  capturingShortcut.value = false;
+  if (capturingShortcut.value) void finishShortcutCapture();
 }
 
 function applyAction(action: ButtonAction): void {
@@ -503,7 +520,131 @@ function codeToKeyCode(code: string): KeyCode | null {
   return null;
 }
 
-const heldModifiers = reactive(new Set<KeyCode>());
+const selectedCaptureModifiers = reactive(new Set<KeyCode>());
+const pressedCaptureModifiers = new Set<KeyCode>();
+const MODIFIER_KEYS = new Set<KeyCode>([
+  "left_control",
+  "right_control",
+  "left_shift",
+  "right_shift",
+  "left_alt",
+  "right_alt",
+  "left_windows",
+  "right_windows",
+]);
+const CAPTURE_MODIFIER_OPTIONS: Array<{ key: KeyCode; label: string }> = [
+  { key: "left_control", label: "左 Ctrl" },
+  { key: "left_shift", label: "左 Shift" },
+  { key: "left_alt", label: "左 Alt" },
+  { key: "left_windows", label: "左 Win" },
+  { key: "right_control", label: "右 Ctrl" },
+  { key: "right_shift", label: "右 Shift" },
+  { key: "right_alt", label: "右 Alt" },
+  { key: "right_windows", label: "右 Win" },
+];
+
+function toggleCaptureModifier(key: KeyCode): void {
+  if (!capturingShortcut.value || capturedChord) return;
+  if (selectedCaptureModifiers.has(key)) selectedCaptureModifiers.delete(key);
+  else selectedCaptureModifiers.add(key);
+  captureDisplay.value = [...selectedCaptureModifiers];
+}
+
+async function beginShortcutCapture(): Promise<void> {
+  if (capturingShortcut.value || captureStarting.value) return;
+  const requestId = ++captureRequestId;
+  captureStarting.value = true;
+  statusMessage.value = null;
+  try {
+    await startShortcutCapture();
+    if (unmounted || requestId !== captureRequestId) {
+      await stopShortcutCapture().catch(() => undefined);
+      return;
+    }
+    capturePressedKeys.clear();
+    capturedChord = null;
+    selectedCaptureModifiers.clear();
+    pressedCaptureModifiers.clear();
+    captureDisplay.value = [];
+    capturingShortcut.value = true;
+    if (captureTimeout !== null) window.clearTimeout(captureTimeout);
+    captureTimeout = window.setTimeout(() => {
+      void finishShortcutCapture("录入已超时，请重新录入");
+    }, 15_000);
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (requestId === captureRequestId) captureStarting.value = false;
+  }
+}
+
+async function finishShortcutCapture(message?: string): Promise<void> {
+  captureRequestId += 1;
+  captureStarting.value = false;
+  capturingShortcut.value = false;
+  if (captureTimeout !== null) window.clearTimeout(captureTimeout);
+  captureTimeout = null;
+  await stopShortcutCapture().catch(() => undefined);
+  capturePressedKeys.clear();
+  capturedChord = null;
+  pressedCaptureModifiers.clear();
+  if (message) statusMessage.value = message;
+}
+
+function handleCaptureBlur(): void {
+  if (capturingShortcut.value || captureStarting.value) {
+    void finishShortcutCapture("窗口失去焦点，已取消录入");
+  }
+}
+
+function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): void {
+  if (!capturingShortcut.value) return;
+  if (!isPressed) {
+    capturePressedKeys.delete(code);
+    if (MODIFIER_KEYS.has(code)) pressedCaptureModifiers.delete(code);
+    if (capturedChord) {
+      captureDisplay.value = capturedChord;
+      if (capturePressedKeys.size === 0) {
+        const label = chordLabel({ keys: capturedChord });
+        void finishShortcutCapture(`快捷键已录入：${label}`);
+      }
+    } else {
+      captureDisplay.value = safeCaptureMode.value
+        ? [...selectedCaptureModifiers]
+        : [...pressedCaptureModifiers];
+    }
+    return;
+  }
+  if (!repeat) capturePressedKeys.add(code);
+  // 已经拿到终止键后继续保持原生拦截，直到本次组合的所有 DOWN 都收到配对 UP。
+  // 这避免 Win+L 在录入完成但物理键尚未松开时被 Windows 补执行。
+  if (capturedChord) return;
+  if (MODIFIER_KEYS.has(code)) {
+    if (!repeat) pressedCaptureModifiers.add(code);
+    if (safeCaptureMode.value) {
+      statusMessage.value = "安全录入中：请松开键盘修饰键，并在界面中点击选择";
+    } else {
+      captureDisplay.value = [...pressedCaptureModifiers];
+    }
+    return;
+  }
+  if (safeCaptureMode.value && pressedCaptureModifiers.size > 0) {
+    statusMessage.value = "未录入：请不要按住键盘修饰键；先在界面选择修饰键，再单独按主键";
+    return;
+  }
+  const modifiers = safeCaptureMode.value
+    ? [...selectedCaptureModifiers]
+    : [...pressedCaptureModifiers];
+  if (code === "escape" && modifiers.length === 0) {
+    void finishShortcutCapture("已取消录入");
+    return;
+  }
+  const keys = [...modifiers, code];
+  capturedChord = keys;
+  captureDisplay.value = keys;
+  applyAction({ type: "shortcut", chord: { keys } });
+  statusMessage.value = `已录入 ${chordLabel({ keys })}，松开全部按键后完成`;
+}
 
 function handleCaptureKeydown(event: KeyboardEvent): void {
   if (!capturingShortcut.value) return;
@@ -511,49 +652,19 @@ function handleCaptureKeydown(event: KeyboardEvent): void {
   event.stopPropagation();
   const code = codeToKeyCode(event.code);
   if (code === null) return;
-  const isModifier = [
-    "left_control",
-    "right_control",
-    "left_shift",
-    "right_shift",
-    "left_alt",
-    "right_alt",
-    "left_windows",
-    "right_windows",
-  ].includes(code);
-  if (isModifier) {
-    if (event.repeat) return;
-    heldModifiers.add(code);
-    captureDisplay.value = [...heldModifiers];
-    return;
-  }
-  if (code === "escape" && heldModifiers.size === 0) {
-    capturingShortcut.value = false;
-    heldModifiers.clear();
-    captureDisplay.value = [];
-    statusMessage.value = "已取消录入";
-    return;
-  }
-  const keys = [...heldModifiers, code];
-  applyAction({ type: "shortcut", chord: { keys } });
-  capturingShortcut.value = false;
-  heldModifiers.clear();
-  captureDisplay.value = [];
-  statusMessage.value = `快捷键已录入：${chordLabel({ keys })}`;
+  acceptCapturedKey(code, true, event.repeat);
 }
 
 function handleCaptureKeyup(event: KeyboardEvent): void {
   if (!capturingShortcut.value) return;
   const code = codeToKeyCode(event.code);
-  if (code && heldModifiers.has(code)) {
-    heldModifiers.delete(code);
-    captureDisplay.value = [...heldModifiers];
-  }
+  if (code) acceptCapturedKey(code, false);
 }
 
 watch(capturingShortcut, (active) => {
   if (!active) {
-    heldModifiers.clear();
+    selectedCaptureModifiers.clear();
+    pressedCaptureModifiers.clear();
     captureDisplay.value = [];
   }
 });
@@ -608,6 +719,7 @@ onMounted(async () => {
   const setupStarted = performance.now();
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
+  window.addEventListener("blur", handleCaptureBlur);
   const [loaded, snapshot, apps] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
@@ -656,6 +768,15 @@ onMounted(async () => {
     return;
   }
   unlistenGestures = stopGestures;
+
+  const stopShortcutCaptureEvents = await subscribeShortcutCaptureEdges(
+    (edge: ShortcutCaptureEdge) => acceptCapturedKey(edge.key, edge.isPressed),
+  );
+  if (unmounted) {
+    stopShortcutCaptureEvents();
+    return;
+  }
+  unlistenShortcutCapture = stopShortcutCaptureEvents;
 
   snapshotTimer = window.setInterval(async () => {
     mappingSnapshot.value = await getButtonMappingSnapshot();
@@ -929,14 +1050,48 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: capturingShortcut }"
               type="button"
-              @click="capturingShortcut = !capturingShortcut"
+              :disabled="captureStarting"
+              @click="capturingShortcut ? finishShortcutCapture('已取消录入') : beginShortcutCapture()"
             >
               {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
             </button>
             <span v-if="capturingShortcut" class="capture-display">
-              {{ captureDisplay.length ? captureDisplay.join(" + ") : "请按下快捷键组合" }}
+              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? "先选择修饰键" : "请按下快捷键组合") }}
             </span>
           </div>
+          <label
+            class="toggle-row safe-capture-toggle"
+            title="开启后，通过界面选择修饰键，键盘只需按主键。"
+          >
+            <span>安全录入模式</span>
+            <input
+              v-model="safeCaptureMode"
+              type="checkbox"
+              class="toggle-input"
+              :disabled="capturingShortcut || captureStarting"
+            />
+            <small class="muted safe-capture-hint">
+              直接录入无法完成或会触发系统动作时再开启。
+            </small>
+          </label>
+          <template v-if="capturingShortcut && safeCaptureMode">
+            <p class="muted editor-note capture-guide">
+              请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
+            </p>
+            <div class="preset-grid capture-modifiers">
+              <button
+                v-for="modifier in CAPTURE_MODIFIER_OPTIONS"
+                :key="modifier.key"
+                class="chip"
+                :class="{ selected: selectedCaptureModifiers.has(modifier.key) }"
+                type="button"
+                @click="toggleCaptureModifier(modifier.key)"
+              >
+                {{ modifier.label }}
+              </button>
+            </div>
+            <p class="capture-display">然后单独按主键（例如选择“左 Win”后，只按 L）</p>
+          </template>
         </section>
       </div>
       <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
