@@ -1,5 +1,20 @@
 # 无线麦 SayAll for Windows
 
+<table>
+  <tr>
+    <td align="center">
+      <img src="Screenshots/wechat-group-qrcode.jpg" alt="无线麦 SayAll Windows 版微信群二维码" width="220"><br>
+      <strong>Windows 用户交流群</strong><br>
+      微信扫码加入交流群
+    </td>
+    <td align="center">
+      <a href="Screenshots/xhs-sayall.jpg"><img src="Screenshots/xhs-sayall.jpg" alt="无线麦小红书二维码" width="220"></a><br>
+      <strong>小红书</strong><br>
+      扫码关注无线麦
+    </td>
+  </tr>
+</table>
+
 无线麦 SayAll Windows 版已完成对小米蓝牙遥控器 2（RC001）和 2 Pro（RC003）的 Windows 真机适配，覆盖设备识别、连接、按键映射和语音桥接等已验证场景。项目采用 Rust、Tauri 2 和 Vue 3，Windows 与 macOS 分别维护和发布。
 
 参考源码仓库：[HD838A/remote-mic-app](https://github.com/HD838A/remote-mic-app)（macOS 版）。Windows 版保持独立的平台实现，仅参考其公开的产品行为、协议经验和测试边界，不回填 macOS 代码。
