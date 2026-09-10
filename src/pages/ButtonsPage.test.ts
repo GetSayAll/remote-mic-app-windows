@@ -335,7 +335,7 @@ describe("buttons mapping page", () => {
     const toggleRow = wrapper.find(".safe-capture-toggle");
     expect(shortcutRow.element.nextElementSibling).toBe(toggleRow.element);
     expect(safeToggle.classes()).toContain("toggle-input");
-    expect(toggleRow.element.nextElementSibling?.textContent).toContain(
+    expect(safeToggle.element.nextElementSibling?.textContent).toContain(
       "直接录入无法完成或会触发系统动作时再开启",
     );
     expect((safeToggle.element as HTMLInputElement).checked).toBe(false);

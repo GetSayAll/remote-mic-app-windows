@@ -1070,10 +1070,10 @@ onUnmounted(() => {
               class="toggle-input"
               :disabled="capturingShortcut || captureStarting"
             />
+            <small class="muted safe-capture-hint">
+              直接录入无法完成或会触发系统动作时再开启。
+            </small>
           </label>
-          <p class="muted editor-note safe-capture-hint">
-            直接录入无法完成或会触发系统动作时再开启。
-          </p>
           <template v-if="capturingShortcut && safeCaptureMode">
             <p class="muted editor-note capture-guide">
               请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
