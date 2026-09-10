@@ -299,12 +299,40 @@ describe("buttons mapping page", () => {
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
-  it("records Win+L safely by selecting Win in UI and pressing only the main key", async () => {
+  it("records a physical Win+L chord directly by default", async () => {
     const wrapper = await mountPage();
     const powerCard = wrapper
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const captureButton = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((button) => button.text().includes("录入自定义快捷键"))!;
+    await captureButton.trigger("click");
+
+    shortcutCaptureHandler!({ key: "left_windows", isPressed: true });
+    shortcutCaptureHandler!({ key: "l", isPressed: true });
+    shortcutCaptureHandler!({ key: "l", isPressed: false });
+    await flushPromises();
+    expect(stopShortcutCapture).not.toHaveBeenCalled();
+    shortcutCaptureHandler!({ key: "left_windows", isPressed: false });
+    await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as ButtonMappings;
+    expect(saved.actions.power?.single).toEqual({
+      type: "shortcut",
+      chord: { keys: ["left_windows", "l"] },
+    });
+  });
+
+  it("records Win+L safely after the user enables fallback mode", async () => {
+    const wrapper = await mountPage();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const safeToggle = wrapper.find(".safe-capture-toggle input");
+    expect((safeToggle.element as HTMLInputElement).checked).toBe(false);
+    await safeToggle.setValue(true);
     const captureButton = wrapper
       .findAll(".mapping-editor .chip")
       .find((button) => button.text().includes("录入自定义快捷键"))!;

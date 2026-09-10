@@ -203,6 +203,7 @@ const statusMessage = ref<string | null>(null);
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
 const captureDisplay = ref<string[]>([]);
+const safeCaptureMode = ref(false);
 const capturePressedKeys = new Set<KeyCode>();
 let capturedChord: KeyCode[] | null = null;
 let unlistenEdges: (() => void) | null = null;
@@ -608,7 +609,9 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
         void finishShortcutCapture(`快捷键已录入：${label}`);
       }
     } else {
-      captureDisplay.value = [...selectedCaptureModifiers];
+      captureDisplay.value = safeCaptureMode.value
+        ? [...selectedCaptureModifiers]
+        : [...pressedCaptureModifiers];
     }
     return;
   }
@@ -618,18 +621,25 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
   if (capturedChord) return;
   if (MODIFIER_KEYS.has(code)) {
     if (!repeat) pressedCaptureModifiers.add(code);
-    statusMessage.value = "为避免执行系统快捷键，请松开键盘修饰键，并在界面中点击选择";
+    if (safeCaptureMode.value) {
+      statusMessage.value = "安全录入中：请松开键盘修饰键，并在界面中点击选择";
+    } else {
+      captureDisplay.value = [...pressedCaptureModifiers];
+    }
     return;
   }
-  if (pressedCaptureModifiers.size > 0) {
+  if (safeCaptureMode.value && pressedCaptureModifiers.size > 0) {
     statusMessage.value = "未录入：请不要按住键盘修饰键；先在界面选择修饰键，再单独按主键";
     return;
   }
-  if (code === "escape" && selectedCaptureModifiers.size === 0) {
+  const modifiers = safeCaptureMode.value
+    ? [...selectedCaptureModifiers]
+    : [...pressedCaptureModifiers];
+  if (code === "escape" && modifiers.length === 0) {
     void finishShortcutCapture("已取消录入");
     return;
   }
-  const keys = [...selectedCaptureModifiers, code];
+  const keys = [...modifiers, code];
   capturedChord = keys;
   captureDisplay.value = keys;
   applyAction({ type: "shortcut", chord: { keys } });
@@ -1035,6 +1045,17 @@ onUnmounted(() => {
 
         <section class="action-section">
           <h4 class="action-section-title">自定义</h4>
+          <label class="toggle-row safe-capture-toggle">
+            <span>
+              <strong>安全录入模式</strong>
+              <small>直接录入无法完成或会触发系统动作时再开启</small>
+            </span>
+            <input
+              v-model="safeCaptureMode"
+              type="checkbox"
+              :disabled="capturingShortcut || captureStarting"
+            />
+          </label>
           <div class="custom-shortcut-row">
             <button
               class="chip"
@@ -1046,10 +1067,10 @@ onUnmounted(() => {
               {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
             </button>
             <span v-if="capturingShortcut" class="capture-display">
-              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : "先选择修饰键" }}
+              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? "先选择修饰键" : "请按下快捷键组合") }}
             </span>
           </div>
-          <template v-if="capturingShortcut">
+          <template v-if="capturingShortcut && safeCaptureMode">
             <p class="muted editor-note capture-guide">
               请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
             </p>
