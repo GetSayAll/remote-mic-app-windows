@@ -435,6 +435,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .chip.group-label { cursor: default; font-weight: 600; color: var(--muted); background: transparent; border-style: dashed; }
 .custom-shortcut-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .capture-display { font-size: 13px; font-weight: 600; color: var(--accent-muted-text); }
+.safe-capture-toggle { margin-top: 10px; }
+.safe-capture-hint { margin-top: 4px; }
 .editor-note { margin-top: 10px; font-size: 12.5px; }
 .mapping-footer { margin-top: 10px; display: flex; align-items: center; gap: 12px; padding: 11px 16px; flex-wrap: wrap; }
 .mapping-footer-status { display: flex; align-items: center; gap: 7px; font-size: 13px; flex-wrap: wrap; }

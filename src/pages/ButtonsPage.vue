@@ -1045,17 +1045,6 @@ onUnmounted(() => {
 
         <section class="action-section">
           <h4 class="action-section-title">自定义</h4>
-          <label class="toggle-row safe-capture-toggle">
-            <span>
-              <strong>安全录入模式</strong>
-              <small>直接录入无法完成或会触发系统动作时再开启</small>
-            </span>
-            <input
-              v-model="safeCaptureMode"
-              type="checkbox"
-              :disabled="capturingShortcut || captureStarting"
-            />
-          </label>
           <div class="custom-shortcut-row">
             <button
               class="chip"
@@ -1070,6 +1059,21 @@ onUnmounted(() => {
               {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? "先选择修饰键" : "请按下快捷键组合") }}
             </span>
           </div>
+          <label
+            class="toggle-row safe-capture-toggle"
+            title="开启后，通过界面选择修饰键，键盘只需按主键。"
+          >
+            <span>安全录入模式</span>
+            <input
+              v-model="safeCaptureMode"
+              type="checkbox"
+              class="toggle-input"
+              :disabled="capturingShortcut || captureStarting"
+            />
+          </label>
+          <p class="muted editor-note safe-capture-hint">
+            直接录入无法完成或会触发系统动作时再开启。
+          </p>
           <template v-if="capturingShortcut && safeCaptureMode">
             <p class="muted editor-note capture-guide">
               请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
