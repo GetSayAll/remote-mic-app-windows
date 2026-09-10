@@ -4,9 +4,11 @@ import ButtonsPage from "./ButtonsPage.vue";
 
 type EdgeHandler = (edge: { button: string; isPressed: boolean }) => void;
 type GestureHandler = (gesture: { button: string; trigger: string }) => void;
+type ShortcutCaptureHandler = (edge: { key: string; isPressed: boolean }) => void;
 
 let edgeHandler: EdgeHandler | null = null;
 let gestureHandler: GestureHandler | null = null;
+let shortcutCaptureHandler: ShortcutCaptureHandler | null = null;
 
 vi.mock("../lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/bridge")>();
@@ -59,6 +61,12 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       gestureHandler = handler;
       return () => {};
     }),
+    startShortcutCapture: vi.fn(async () => undefined),
+    stopShortcutCapture: vi.fn(async () => undefined),
+    subscribeShortcutCaptureEdges: vi.fn(async (handler: ShortcutCaptureHandler) => {
+      shortcutCaptureHandler = handler;
+      return () => {};
+    }),
   };
 });
 
@@ -69,8 +77,10 @@ import {
   subscribeButtonEdges,
   subscribeButtonGestures,
   saveButtonMappings,
+  startShortcutCapture,
+  stopShortcutCapture,
 } from "../lib/bridge";
-import type { RuntimeSnapshot } from "../lib/bridge";
+import type { ButtonMappings, RuntimeSnapshot } from "../lib/bridge";
 
 const runtime: RuntimeSnapshot = {
   appVersion: "0.1.0",
@@ -148,12 +158,15 @@ async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promis
 beforeEach(() => {
   edgeHandler = null;
   gestureHandler = null;
+  shortcutCaptureHandler = null;
   vi.mocked(getButtonMappings).mockClear();
   vi.mocked(subscribeButtonEdges).mockClear();
   vi.mocked(subscribeButtonGestures).mockClear();
   vi.mocked(saveButtonMappings).mockClear();
   vi.mocked(exportButtonMappingConfiguration).mockClear();
   vi.mocked(importButtonMappingConfiguration).mockClear();
+  vi.mocked(startShortcutCapture).mockClear();
+  vi.mocked(stopShortcutCapture).mockClear();
 });
 
 describe("buttons mapping page", () => {
@@ -284,6 +297,34 @@ describe("buttons mapping page", () => {
       actions: Record<string, { long: { type: string } }>;
     };
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
+  });
+
+  it("records Win+L from native paired suppression without letting the browser execute it", async () => {
+    const wrapper = await mountPage();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const captureButton = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((button) => button.text().includes("录入自定义快捷键"))!;
+    await captureButton.trigger("click");
+    await vi.waitFor(() => expect(startShortcutCapture).toHaveBeenCalledOnce());
+
+    shortcutCaptureHandler!({ key: "left_windows", isPressed: true });
+    shortcutCaptureHandler!({ key: "l", isPressed: true });
+    await vi.waitFor(() => {
+      const calls = vi.mocked(saveButtonMappings).mock.calls;
+      const saved = calls.at(-1)?.[0] as ButtonMappings | undefined;
+      const action = saved?.actions.power?.single;
+      if (action?.type !== "shortcut" || action.chord.keys.join("+") !== "left_windows+l") {
+        throw new Error("Win+L 未保存");
+      }
+    });
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("快捷键已录入：左 Win + L"),
+    );
+    expect(stopShortcutCapture).toHaveBeenCalled();
   });
 
   it("highlights the card for a pressed physical button and clears it on release", async () => {

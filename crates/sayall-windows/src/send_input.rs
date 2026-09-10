@@ -463,6 +463,14 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
 }
 
 impl KeyChord {
+    /// Windows 的锁屏是系统动作，不依赖当前前台窗口或键盘注入链路。
+    pub fn is_lock_workstation(&self) -> bool {
+        self.keys.len() == 2
+            && self.keys.contains(&KeyCode::L)
+            && (self.keys.contains(&KeyCode::LeftWindows)
+                || self.keys.contains(&KeyCode::RightWindows))
+    }
+
     pub fn validated(self) -> Result<Self, SendInputError> {
         if self.keys.is_empty() {
             return Err(SendInputError::EmptyChord);
@@ -637,6 +645,14 @@ mod tests {
         KeyChord {
             keys: keys.to_vec(),
         }
+    }
+
+    #[test]
+    fn recognizes_only_the_windows_l_system_action() {
+        assert!(chord(&[KeyCode::LeftWindows, KeyCode::L]).is_lock_workstation());
+        assert!(chord(&[KeyCode::L, KeyCode::RightWindows]).is_lock_workstation());
+        assert!(!chord(&[KeyCode::LeftWindows, KeyCode::D]).is_lock_workstation());
+        assert!(!chord(&[KeyCode::LeftWindows, KeyCode::Shift, KeyCode::L]).is_lock_workstation());
     }
 
     #[test]
