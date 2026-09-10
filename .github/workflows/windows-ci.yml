@@ -8,6 +8,7 @@ on:
       - 'docs/**'
       - 'Testing/**'
       - 'artifacts/**'
+      - 'Screenshots/**'
       - '.gitignore'
       - 'LICENSE'
   pull_request:
@@ -16,6 +17,7 @@ on:
       - 'docs/**'
       - 'Testing/**'
       - 'artifacts/**'
+      - 'Screenshots/**'
       - '.gitignore'
       - 'LICENSE'
 
