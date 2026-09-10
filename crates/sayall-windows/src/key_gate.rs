@@ -170,9 +170,10 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-        LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+        LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT,
+        WM_TIMER,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -223,6 +224,8 @@ mod windows_impl {
     };
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
+    /// 每次成功重挂钩子后递增；录入命令以此确认链首刷新已真正完成。
+    static HOOK_GENERATION: AtomicU64 = AtomicU64::new(0);
     /// 被吞键盘边沿的投递端（映射引擎注册；闭包形式避免模块间类型耦合）。
     static EDGE_SINK: OnceLock<Arc<dyn Fn(ButtonEdge) + Send + Sync>> = OnceLock::new();
     static SHORTCUT_CAPTURE_SINK: OnceLock<super::ShortcutCaptureCallback> = OnceLock::new();
@@ -499,7 +502,7 @@ mod windows_impl {
     }
 
     /// 钩子链头 bump（先挂新钩再卸旧钩，无吞键空窗）。
-    fn bump_to_chain_head(current: &mut Option<HHOOK>) {
+    fn bump_to_chain_head(current: &mut Option<HHOOK>) -> bool {
         if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
         {
             let old = current.replace(new_hook);
@@ -508,7 +511,31 @@ mod windows_impl {
                     let _ = UnhookWindowsHookEx(old);
                 }
             }
+            HOOK_GENERATION.fetch_add(1, Ordering::Release);
+            return true;
         }
+        false
+    }
+
+    /// 录入开始前同步把本钩子移到全局链首。仅设置 active 并不足够：若其它
+    /// 快捷键工具在本应用启动后安装了钩子，它可能先看到 Win+L 并锁屏。
+    fn refresh_hook_before_capture() -> bool {
+        let thread_id = HOOK_THREAD_ID.load(Ordering::Acquire) as u32;
+        if thread_id == 0 {
+            return false;
+        }
+        let generation = HOOK_GENERATION.load(Ordering::Acquire);
+        if unsafe { PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0)) }.is_err() {
+            return false;
+        }
+        let deadline = Instant::now() + std::time::Duration::from_millis(250);
+        while Instant::now() < deadline {
+            if HOOK_GENERATION.load(Ordering::Acquire) > generation {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
     }
 
     fn hook_thread(thread_id_tx: mpsc::Sender<u64>) {
@@ -527,7 +554,7 @@ mod windows_impl {
             let _ = CLOCK_BASE.get_or_init(Instant::now);
 
             let mut current: Option<HHOOK> = None;
-            bump_to_chain_head(&mut current);
+            let _ = bump_to_chain_head(&mut current);
             if current.is_none() {
                 return;
             }
@@ -539,9 +566,11 @@ mod windows_impl {
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
                 match message.message {
                     WM_QUIT => break,
-                    WM_HOOK_BUMP => bump_to_chain_head(&mut current),
+                    WM_HOOK_BUMP => {
+                        let _ = bump_to_chain_head(&mut current);
+                    }
                     WM_TIMER if message.wParam.0 as usize == BUMP_TIMER_ID => {
-                        bump_to_chain_head(&mut current)
+                        let _ = bump_to_chain_head(&mut current);
                     }
                     _ => {}
                 }
@@ -670,6 +699,9 @@ mod windows_impl {
             return false;
         }
         if active {
+            if !refresh_hook_before_capture() {
+                return false;
+            }
             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
             for (vk, slot) in SHORTCUT_CAPTURE_PREHELD.iter().enumerate() {
                 let down = unsafe { GetAsyncKeyState(vk as i32) } < 0;
