@@ -300,7 +300,7 @@ fn engine_worker(
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
                     for (button, trigger) in recognizer.advance(now) {
-                        fire_gesture(
+                        if fire_gesture(
                             button,
                             trigger,
                             &mappings,
@@ -308,7 +308,17 @@ fn engine_worker(
                             &gesture_callbacks,
                             &injector,
                             &mut native_pending,
-                        );
+                        ) {
+                            reset_after_terminal_action(
+                                "lock_workstation",
+                                &mut merger,
+                                &mut recognizer,
+                                &snapshot,
+                                &edge_callbacks,
+                                &mut native_pending,
+                            );
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -490,7 +500,7 @@ fn handle_edges(
             recognizer.release(edge.button, now)
         };
         for trigger in fired {
-            fire_gesture(
+            if fire_gesture(
                 edge.button,
                 trigger,
                 mappings,
@@ -498,7 +508,56 @@ fn handle_edges(
                 gesture_callbacks,
                 injector,
                 native_pending,
-            );
+            ) {
+                reset_after_terminal_action(
+                    "lock_workstation",
+                    merger,
+                    recognizer,
+                    snapshot,
+                    edge_callbacks,
+                    native_pending,
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// 会切换 Windows 会话的动作可能让遥控器释放沿延迟到解锁之后。动作已被系统
+/// 接受时立即结束本轮按住状态；迟到的 UP 随后只会成为幂等输入，下一次真实 DOWN
+/// 可立刻开始新一轮手势。
+fn reset_after_terminal_action(
+    reason: &str,
+    merger: &mut ButtonStateMerger,
+    recognizer: &mut GestureRecognizer,
+    snapshot: &Arc<Mutex<RawInputSnapshot>>,
+    edge_callbacks: &Arc<RwLock<Vec<ButtonEdgeCallback>>>,
+    native_pending: &mut BTreeSet<RemoteButton>,
+) {
+    recognizer.release_all();
+    let releases = merger.release_all();
+    native_pending.clear();
+    crate::ble::gatt_note(format!(
+        "map_reset source=terminal_action reason={reason} synthetic_releases={}",
+        releases.len()
+    ));
+    if releases.is_empty() {
+        return;
+    }
+    {
+        let mut snapshot = lock_snapshot(snapshot);
+        snapshot.semantic_edge_count = snapshot
+            .semantic_edge_count
+            .saturating_add(releases.len() as u64);
+        snapshot.active_buttons.clear();
+        if let Some(last) = releases.last() {
+            snapshot.last_button = Some(last.button);
+            snapshot.last_is_pressed = Some(false);
+        }
+    }
+    for callback in read_callbacks(edge_callbacks).iter() {
+        for edge in &releases {
+            callback(*edge);
         }
     }
 }
@@ -512,7 +571,7 @@ fn fire_gesture(
     gesture_callbacks: &Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: &Arc<dyn MappingInjector>,
     native_pending: &mut BTreeSet<RemoteButton>,
-) {
+) -> bool {
     let fired = FiredGesture { button, trigger };
     {
         let mut state = lock_state(state);
@@ -535,7 +594,7 @@ fn fire_gesture(
             state.last_error =
                 Some("按键映射门控未运行，已保持观察模式（不注入，避免双输入）".to_owned());
         }
-        return;
+        return false;
     }
     let action = mappings.action_for(button, trigger);
     if action == ButtonAction::Disabled {
@@ -543,7 +602,7 @@ fn fire_gesture(
             "map_skip_inject reason=action_disabled button={:?} trigger={:?}",
             button, trigger
         ));
-        return;
+        return false;
     }
     // 泄漏对冲：该按住的原始键已泄漏进 OS（原生动作已交付）。Single 且映射
     // 动作与原生动作相同（右→右 等）时跳过注入（原生已交付，注入即双响应）；
@@ -559,13 +618,14 @@ fn fire_gesture(
                     "map_skip_inject reason=native_covers_action button={:?} trigger=single",
                     button
                 ));
-                return;
+                return false;
             }
         }
     }
     match action {
         ButtonAction::Disabled => {}
         ButtonAction::Shortcut { chord } => {
+            let terminal_action = chord.is_lock_workstation();
             crate::ble::gatt_note(format!(
                 "map_fire button={:?} trigger={:?} action=shortcut chord={}",
                 button,
@@ -578,7 +638,10 @@ fn fire_gesture(
                     .join("+")
             ));
             match injector.tap(&chord) {
-                Ok(()) => crate::ble::gatt_note("map_inject result=ok".to_owned()),
+                Ok(()) => {
+                    crate::ble::gatt_note("map_inject result=ok".to_owned());
+                    return terminal_action;
+                }
                 Err(error) => {
                     crate::ble::gatt_note("map_inject result=err error_domain=send_input error_code=injection_failed reason=backend_rejected retryable=true".to_owned());
                     lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
@@ -610,6 +673,7 @@ fn fire_gesture(
             }
         }
     }
+    false
 }
 
 fn read_lock<T>(mutex: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -772,6 +836,19 @@ mod tests {
                 long: ButtonAction::Disabled,
             },
         );
+        // 电源→Win+L：锁屏会让真实 UP 延迟到解锁后，引擎须在成功请求锁屏后
+        // 立即清理按住态，保证下一次 DOWN 不依赖旧 UP。
+        mappings.actions.insert(
+            RemoteButton::Power,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::LeftWindows, KeyCode::L],
+                    },
+                },
+                ..ButtonActions::default()
+            },
+        );
         runtime.set_mappings(mappings);
 
         let sender = runtime.sender();
@@ -873,6 +950,28 @@ mod tests {
             .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYUP)))
             .unwrap();
         std::thread::sleep(Duration::from_millis(50));
+
+        // 场景 6：第一次 Win+L 成功后不发送 UP，第二次 DOWN 仍应立刻形成
+        // 新手势并再次调用动作；迟到的旧 UP 不再是下一次触发的前置条件。
+        ensure_gate(&mut gate);
+        let before_lock = taps().len();
+        for _ in 0..2 {
+            sender
+                .send(EngineMessage::GateEdge(ButtonEdge {
+                    button: RemoteButton::Power,
+                    is_pressed: true,
+                }))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let after_lock = taps();
+        assert_eq!(
+            after_lock.len(),
+            before_lock + 2,
+            "Win+L 终端动作成功后须立即释放引擎状态：{after_lock:?}"
+        );
+        assert!(after_lock[before_lock].is_lock_workstation());
+        assert!(after_lock[before_lock + 1].is_lock_workstation());
 
         drop(runtime);
         drop(gate);

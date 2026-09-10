@@ -322,9 +322,16 @@ describe("buttons mapping page", () => {
       }
     });
     await vi.waitFor(() =>
-      expect(wrapper.text()).toContain("快捷键已录入：左 Win + L"),
+      expect(wrapper.text()).toContain("已录入 左 Win + L，松开全部按键后完成"),
     );
-    expect(stopShortcutCapture).toHaveBeenCalled();
+    expect(stopShortcutCapture).not.toHaveBeenCalled();
+
+    shortcutCaptureHandler!({ key: "l", isPressed: false });
+    await flushPromises();
+    expect(stopShortcutCapture).not.toHaveBeenCalled();
+    shortcutCaptureHandler!({ key: "left_windows", isPressed: false });
+    await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(wrapper.text()).toContain("快捷键已录入：左 Win + L"));
   });
 
   it("highlights the card for a pressed physical button and clears it on release", async () => {

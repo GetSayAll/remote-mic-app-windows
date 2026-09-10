@@ -203,6 +203,8 @@ const statusMessage = ref<string | null>(null);
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
 const captureDisplay = ref<string[]>([]);
+const capturePressedKeys = new Set<KeyCode>();
+let capturedChord: KeyCode[] | null = null;
 let unlistenEdges: (() => void) | null = null;
 let unlistenGestures: (() => void) | null = null;
 let unlistenShortcutCapture: (() => void) | null = null;
@@ -540,6 +542,10 @@ async function beginShortcutCapture(): Promise<void> {
       await stopShortcutCapture().catch(() => undefined);
       return;
     }
+    capturePressedKeys.clear();
+    capturedChord = null;
+    heldModifiers.clear();
+    captureDisplay.value = [];
     capturingShortcut.value = true;
     if (captureTimeout !== null) window.clearTimeout(captureTimeout);
     captureTimeout = window.setTimeout(() => {
@@ -559,6 +565,8 @@ async function finishShortcutCapture(message?: string): Promise<void> {
   if (captureTimeout !== null) window.clearTimeout(captureTimeout);
   captureTimeout = null;
   await stopShortcutCapture().catch(() => undefined);
+  capturePressedKeys.clear();
+  capturedChord = null;
   if (message) statusMessage.value = message;
 }
 
@@ -571,10 +579,23 @@ function handleCaptureBlur(): void {
 function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): void {
   if (!capturingShortcut.value) return;
   if (!isPressed) {
+    capturePressedKeys.delete(code);
     heldModifiers.delete(code);
-    captureDisplay.value = [...heldModifiers];
+    if (capturedChord) {
+      captureDisplay.value = capturedChord;
+      if (capturePressedKeys.size === 0) {
+        const label = chordLabel({ keys: capturedChord });
+        void finishShortcutCapture(`快捷键已录入：${label}`);
+      }
+    } else {
+      captureDisplay.value = [...heldModifiers];
+    }
     return;
   }
+  if (!repeat) capturePressedKeys.add(code);
+  // 已经拿到终止键后继续保持原生拦截，直到本次组合的所有 DOWN 都收到配对 UP。
+  // 这避免 Win+L 在录入完成但物理键尚未松开时被 Windows 补执行。
+  if (capturedChord) return;
   if (MODIFIER_KEYS.has(code)) {
     if (!repeat) heldModifiers.add(code);
     captureDisplay.value = [...heldModifiers];
@@ -585,8 +606,10 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
     return;
   }
   const keys = [...heldModifiers, code];
+  capturedChord = keys;
+  captureDisplay.value = keys;
   applyAction({ type: "shortcut", chord: { keys } });
-  void finishShortcutCapture(`快捷键已录入：${chordLabel({ keys })}`);
+  statusMessage.value = `已录入 ${chordLabel({ keys })}，松开全部按键后完成`;
 }
 
 function handleCaptureKeydown(event: KeyboardEvent): void {
