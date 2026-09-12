@@ -1151,12 +1151,25 @@ fn handle_control(
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
                 let mic_baseline = wetype_mic_observation();
-                // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
-                // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
-                // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
-                // 行为注入（不比现状更差）。
-                if let Err(error) = crate::ime::activate_wetype_session() {
-                    lock(state).last_error = Some(error);
+                // 会话级激活与休眠检测仅适用于微信输入法默认和弦（左 Ctrl+
+                // 左 Win）：自定义热键（Win+H/其他输入法/听写软件）的目标
+                // 软件各不相同，由用户保证目标软件活跃；对它们做 WeType
+                // 专属切换/唤醒没有意义（wetype_check 的自动唤醒是 WeType
+                // 专属配置切换）。
+                let wetype_default = chord_is_wetype_default(&chord);
+                if wetype_default {
+                    // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
+                    // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
+                    // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
+                    // 行为注入（不比现状更差）。
+                    if let Err(error) = crate::ime::activate_wetype_session() {
+                        lock(state).last_error = Some(error);
+                    }
+                } else {
+                    gatt_note(
+                        "ime_activation outcome=skipped_custom_hotkey elapsed_ms=0 foreground_observed=true error_domain=none error_code=custom_hotkey retryable=false"
+                            .to_owned(),
+                    );
                 }
                 if let Err(error) = send_input.press(&chord) {
                     gatt_note(format!(
@@ -1182,16 +1195,19 @@ fn handle_control(
                 ));
                 *held_hotkey = Some(chord);
                 // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
-                // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
-                // 传入，防旧阶梯跨会话误伤新会话的和弦。
-                spawn_wetype_check(
-                    state,
-                    sender.clone(),
-                    0,
-                    epoch,
-                    voice_session_epoch,
-                    mic_baseline,
-                );
+                // 仅微信输入法默认和弦启用；自定义热键目标软件各异，专属
+                // 唤醒对其无意义。纪元在 StreamStarted 顶部已递增并捕获
+                // （见上），连同引用传入，防旧阶梯跨会话误伤新会话的和弦。
+                if wetype_default {
+                    spawn_wetype_check(
+                        state,
+                        sender.clone(),
+                        0,
+                        epoch,
+                        voice_session_epoch,
+                        mic_baseline,
+                    );
+                }
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(
@@ -1356,6 +1372,19 @@ fn abort_voice_session(
     apply_input_connection_phase(snapshot.phase);
     snapshot.voice_state = VoiceSessionState::Idle;
     snapshot.last_error = Some(error);
+}
+
+/// 是否为微信输入法默认按住说话和弦（左 Ctrl+左 Win，与设置默认值
+/// `SettingsStore::default_voice_hold_hotkey` 对应）。仅该和弦启用
+/// WeType 会话级激活与休眠检测；自定义热键目标软件各异，不做专属切换。
+fn chord_is_wetype_default(chord: &KeyChord) -> bool {
+    chord.keys.len() == 2
+        && chord
+            .keys
+            .contains(&crate::send_input::KeyCode::LeftControl)
+        && chord
+            .keys
+            .contains(&crate::send_input::KeyCode::LeftWindows)
 }
 
 /// 统一释放按住说话快捷键：只在当前持有和弦时发送一次反向 UP 边沿，
