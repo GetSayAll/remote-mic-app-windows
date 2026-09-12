@@ -75,6 +75,11 @@ const mocks = vi.hoisted(() => ({
   listAudioEndpoints: vi.fn(),
   selectAudioEndpoint: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
+  getVoiceHoldHotkey: vi.fn(),
+  setVoiceHoldHotkey: vi.fn(),
+  startShortcutCapture: vi.fn(),
+  stopShortcutCapture: vi.fn(),
+  shortcutCaptureHandlers: [] as Array<(edge: { key: string; isPressed: boolean }) => void>,
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -86,6 +91,20 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     listAudioEndpoints: mocks.listAudioEndpoints,
     selectAudioEndpoint: mocks.selectAudioEndpoint,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
+    getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
+    setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
+    startShortcutCapture: mocks.startShortcutCapture,
+    stopShortcutCapture: mocks.stopShortcutCapture,
+    subscribeShortcutCaptureEdges: vi.fn(
+      (handler: (edge: { key: string; isPressed: boolean }) => void) => {
+        mocks.shortcutCaptureHandlers.push(handler);
+        return Promise.resolve(() => {
+          mocks.shortcutCaptureHandlers = mocks.shortcutCaptureHandlers.filter(
+            (registered) => registered !== handler,
+          );
+        });
+      },
+    ),
   };
 });
 
@@ -102,6 +121,13 @@ describe("VB-CABLE first-launch guidance", () => {
       selectedEndpointName: cableEndpoint.name,
     }));
     mocks.openVbCableDownloadPage.mockResolvedValue(undefined);
+    mocks.getVoiceHoldHotkey.mockResolvedValue(null);
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey: { keys: string[] } | null) =>
+      hotkey,
+    );
+    mocks.startShortcutCapture.mockResolvedValue(undefined);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.shortcutCaptureHandlers = [];
   });
 
   afterEach(() => {
@@ -173,6 +199,114 @@ describe("VB-CABLE first-launch guidance", () => {
     await wrapper.get(".vb-cable-callout .primary-button").trigger("click");
     await flushPromises();
     expect(mocks.openVbCableDownloadPage).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+});
+
+describe("hold-to-talk hotkey presets and custom capture", () => {
+  function pressKey(code: string): void {
+    window.dispatchEvent(new KeyboardEvent("keydown", { code, cancelable: true }));
+  }
+
+  function releaseKey(code: string): void {
+    window.dispatchEvent(new KeyboardEvent("keyup", { code, cancelable: true }));
+  }
+
+  beforeEach(() => {
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getVoiceHoldHotkey.mockResolvedValue(null);
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey: { keys: string[] } | null) =>
+      hotkey,
+    );
+    mocks.startShortcutCapture.mockResolvedValue(undefined);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.shortcutCaptureHandlers = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("saves the Windows voice-typing preset in one click", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const preset = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text().includes("Windows 听写"));
+    expect(preset).toBeTruthy();
+    await preset!.trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["left_windows", "h"] });
+    expect(wrapper.text()).toContain("按住说话快捷键已设为");
+    wrapper.unmount();
+  });
+
+  it("captures and saves a custom hotkey after all keys are released", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper.get(".custom-shortcut-row .chip").trigger("click");
+    await flushPromises();
+    expect(mocks.startShortcutCapture).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain("请按下快捷键组合");
+
+    pressKey("MetaLeft");
+    pressKey("KeyH");
+    releaseKey("KeyH");
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+    releaseKey("MetaLeft");
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["left_windows", "h"] });
+    expect(mocks.stopShortcutCapture).toHaveBeenCalled();
+    expect(wrapper.text()).toContain("按住说话快捷键已设为");
+    wrapper.unmount();
+  });
+
+  it("cancels the capture with Escape without touching the saved hotkey", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper.get(".custom-shortcut-row .chip").trigger("click");
+    await flushPromises();
+
+    pressKey("Escape");
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+    expect(mocks.stopShortcutCapture).toHaveBeenCalled();
+    expect(wrapper.text()).toContain("已取消录入，快捷键未修改");
+    wrapper.unmount();
+  });
+
+  it("supports safe capture mode with on-screen modifiers and native edges", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper.get(".safe-capture-toggle input").setValue(true);
+    await wrapper.get(".custom-shortcut-row .chip").trigger("click");
+    await flushPromises();
+
+    const leftWin = wrapper
+      .findAll(".preset-grid .chip")
+      .find((button) => button.text() === "左 Win");
+    expect(leftWin).toBeTruthy();
+    await leftWin!.trigger("click");
+    expect(wrapper.text()).toContain("左 Win");
+
+    // 原生钩子边沿（shortcut-capture-edge 事件源）也应驱动同一状态机。
+    const edges = mocks.shortcutCaptureHandlers[0];
+    expect(edges).toBeTruthy();
+    edges!({ key: "h", isPressed: true });
+    edges!({ key: "h", isPressed: false });
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["left_windows", "h"] });
+    expect(mocks.stopShortcutCapture).toHaveBeenCalled();
     wrapper.unmount();
   });
 });
