@@ -494,6 +494,10 @@ fn handle_edges(
     }
 
     for edge in edges {
+        #[cfg(windows)]
+        if edge.button == RemoteButton::Tv && edge.is_pressed {
+            crate::lock_open_with_guard::note_tv_press();
+        }
         if edge.is_pressed && recognizer.defers_single_until_release(edge.button) {
             crate::ble::gatt_note(format!(
                 "map_terminal_wait button={:?} action=lock_workstation phase=armed release_required=true",

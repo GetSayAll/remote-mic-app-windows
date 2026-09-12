@@ -24,7 +24,16 @@
    实体键的 UP 尚未被门控成对消费。该迟到边沿跨到锁屏/解锁阶段后，Windows
    偶发执行原生浏览器动作并弹出“需要使用新应用打开 microsoft-edge 链接”。
    同时段日志只有 `Power → Win+L → LockWorkStation passed`，没有 `open_app`，
-   当前映射也没有打开应用动作，排除 SayAll 错误启动 Edge。
+   当前映射也没有打开应用动作；先等待实体 UP 的初版修复仍会复现，因此该归因
+   已被后续实测证伪。
+8. 2026-09-12 最终取证：问题的必要前序是 TV 键，TV DOWN/UP 已被门控成对吞下，
+   泄漏计数不增长；随后即使等待 15 秒再锁屏仍会弹窗。进程探针确认
+   `LockWorkStation` 成功约 4 秒后由系统服务创建 `OpenWith.exe`，解锁后显示
+   `microsoft-edge:` 协议选择器。100ms 轮询和 `EVENT_OBJECT_SHOW` 隐藏均偶发
+   闪现；`EVENT_OBJECT_CREATE` 阶段终止精确的 `OpenWith.exe` 连续四轮没有
+   可见窗口。结论：Windows 保留了 TV 的独立 Shell 协议动作，桌面切换使其落到
+   缺失的 Edge 协议处理器；不是 Power/Win+L 边沿泄漏，也不是 SayAll 的
+   `open_app`（现场 TV 映射目标为已运行的记事本）。
 
 ## 修复
 
@@ -36,6 +45,11 @@
 - 精确 Win+L 单击在 DOWN 沿只进入等待；合并后的真实 UP 到达、门控完成原始
   DOWN/UP 配对后才调用 `LockWorkStation`。普通快捷键仍在 DOWN 沿即时执行，
   双击/长按时序不变；动作成功后的状态清理保留为异常兜底。
+- 观察到 TV 语义按压后，仅为下一次 SayAll 锁屏预装 15 秒
+  `EVENT_OBJECT_CREATE` 钩子；钩子就绪后才调用 `LockWorkStation`。窗口创建
+  回调只接受 Windows `System32` 下映像名精确为 `OpenWith.exe` 的进程并立即
+  终止，阻止协议选择器进入 SHOW 阶段。无 TV 前序时不启用；其它窗口/进程不处理；全部分支写
+  `open_with_guard` 结构化日志。
 - 默认保留直接按完整组合的录入体验；另提供默认关闭的“安全录入模式”开关，并
   提示仅在直接录入失败或触发系统动作时使用。开启后用鼠标选择左/右修饰键，再
   只按一个主键（例如点击“左 Win”后单独按 L）；物理输入流从未形成 Win+L。
@@ -52,3 +66,6 @@
 - 链首刷新方案现场 failed（锁屏且不保存），已回退；安全组合录入的自动化测试
   passed，安装后的现场复验 deferred。
 - Windows 编译和真实 API 链路：待本地测试包与现场按键复验记录。
+- `OpenWith` 兜底原型现场：SHOW 阶段拦截四轮仍有一轮闪白，failed；CREATE
+  阶段连续四轮均无弹窗/闪白，passed。产品化代码自动化 passed，安装包复验
+  deferred。

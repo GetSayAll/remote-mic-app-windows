@@ -38,6 +38,7 @@ impl SendInputRuntime {
                 "shortcut_execute action=lock_workstation phase=requested method=win32_api"
                     .to_owned(),
             );
+            crate::lock_open_with_guard::prepare_for_lock();
             let result = unsafe { LockWorkStation() }
                 .map(|_| 0_usize)
                 .map_err(|error| SendInputError::Backend(error.to_string()));

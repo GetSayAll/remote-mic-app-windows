@@ -80,6 +80,18 @@
   完全丢失，实证 failed 并回退。产品路径不再依赖钩子链顺序屏蔽系统保留组合。
   官方依据：`learn.microsoft.com/windows/win32/winmsg/about-hooks`、
   `learn.microsoft.com/windows/win32/winmsg/lowlevelkeyboardproc`。
+- **TV→锁屏的协议选择器兜底（2026-09-12）**：微软 Raw Input 文档明确
+  `RIDEV_NOLEGACY` 只适用于鼠标/键盘，不能据此阻止消费控制 HID 的独立 Shell
+  动作；`SetWinEventHook` 提供跨进程、out-of-context 的对象事件观察，
+  `EVENT_OBJECT_CREATE` 早于 SHOW。现场证明 Windows 会在 SayAll 锁屏约 4 秒后
+  由系统服务创建 `OpenWith.exe`；SHOW 阶段隐藏仍偶发闪帧，CREATE 阶段终止精确
+  helper 连续四轮无可见弹窗。产品路径只在“已观察 TV→下一次 SayAll 锁屏”的
+  15 秒窗口启用，并只处理 Windows `System32` 下映像名精确为 `OpenWith.exe`
+  的进程。官方依据：
+  `learn.microsoft.com/windows/win32/api/winuser/ns-winuser-rawinputdevice`、
+  `learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwineventhook`、
+  `learn.microsoft.com/windows/win32/winauto/event-constants`、
+  `learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess`。
 
 ## WeType 热键休眠自动恢复调研来源（2026-09-05，热键休眠专项 v2）
 
