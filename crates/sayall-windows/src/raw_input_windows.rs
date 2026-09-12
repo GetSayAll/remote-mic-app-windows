@@ -68,6 +68,7 @@ impl RawInputRuntime {
     }
 
     pub fn start(&self) -> Result<RawInputSnapshot, PlatformError> {
+        crate::ble::gatt_note("raw_input_listener action=start phase=requested".to_owned());
         let mut control_slot = self.control.lock().unwrap();
         if let Some(control) = control_slot.as_mut() {
             if !control.join.as_ref().is_some_and(JoinHandle::is_finished) {
@@ -117,11 +118,20 @@ impl RawInputRuntime {
                 *control_slot = Some(control);
                 // 监听器就绪后 key_gate 才具备归因来源（HID 报文武装）。
                 key_gate::set_listener_active(true);
-                Ok(self.snapshot())
+                let snapshot = self.snapshot();
+                crate::ble::gatt_note(format!(
+                    "raw_input_listener action=start phase=completed terminal_result=passed matched_device_count={}",
+                    snapshot.matched_device_count
+                ));
+                Ok(snapshot)
             }
             Ok(Err(error)) => {
                 wait_for_thread(&mut control, STOP_TIMEOUT);
                 record_failure(&self.snapshot, error.clone());
+                crate::ble::gatt_note(
+                    "raw_input_listener action=start phase=completed terminal_result=failed error_domain=raw_input error_code=listener_start_failed retryable=true"
+                        .to_owned(),
+                );
                 Err(PlatformError::RawInput(error))
             }
             Err(_) => {
@@ -129,12 +139,20 @@ impl RawInputRuntime {
                 if wait_for_thread(&mut control, STOP_TIMEOUT) {
                     let error = "Raw Input listener did not become ready within 5 seconds";
                     record_failure(&self.snapshot, error.to_owned());
+                    crate::ble::gatt_note(
+                        "raw_input_listener action=start phase=completed terminal_result=failed error_domain=raw_input error_code=start_timeout retryable=true thread_alive=false"
+                            .to_owned(),
+                    );
                     Err(PlatformError::RawInput(error.to_owned()))
                 } else {
                     let error =
                         "Raw Input listener startup timed out and its thread is still alive";
                     record_failure(&self.snapshot, error.to_owned());
                     *control_slot = Some(control);
+                    crate::ble::gatt_note(
+                        "raw_input_listener action=start phase=completed terminal_result=failed error_domain=raw_input error_code=start_timeout retryable=true thread_alive=true"
+                            .to_owned(),
+                    );
                     Err(PlatformError::RawInput(error.to_owned()))
                 }
             }
@@ -502,6 +520,12 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 virtual_key: keyboard.VKey,
                 message: keyboard.Message,
             };
+            // Raw Input 在同一进程内每种设备类只能注册一个接收窗口；由本
+            // 主监听器统一把已归因的小米遥控器语音 F5 转发给抑制器与
+            // BLE 立即重连逻辑，避免第二个注册窗口相互覆盖。
+            if event.virtual_key == 0x74 {
+                crate::key_suppressor::observe_remote_voice_f5();
+            }
             // 透传的键盘事件交给引擎合并；同时武装 key_gate
             // （覆盖键盘-only 按键的重复沿与首沿泄漏后的续期）。
             if let Some(button) = event.button() {
