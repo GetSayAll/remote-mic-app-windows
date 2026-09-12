@@ -27,6 +27,8 @@ pub mod key_gate;
 #[cfg(windows)]
 mod key_suppressor;
 #[cfg(windows)]
+mod lock_open_with_guard;
+#[cfg(windows)]
 mod power;
 pub mod raw_input;
 #[cfg(windows)]

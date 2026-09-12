@@ -18,7 +18,7 @@
 - [x] 实现显式 WASAPI 输出端点枚举、选择、16 kHz PCM 写入、有界队列和真实 padding 排空代码路径。
 - [x] 实现用户显式配置的语音键按住说话快捷键（连接页预设：关闭、右 Alt、F5、Win+H、左 Ctrl+左 Win）：按下语音键先注入 DOWN 再开始音频会话，释放统一注入 UP，断连/睡眠/中止/退出强制释放；注入时序参考 ZSTDJan 按住说话快捷键与 Voice_VibeCoding 的 Hold 语义，仅使用 SendInput 公共 API（见 ATTRIBUTION.md）。2026-09-04 修复一：和弦改为逐事件提交、事件间 80ms 间隔（WeType 拒绝单批零间隔，evidence/p）。修复二：F5 抑制器会话武装信号误接未启动的旧模块 voice_key_suppressor（ble.rs），遥控器 F5 泄漏进和弦致 WeType "额外按键"拒绝——改接 key_suppressor 并删除旧模块（Bugs\2026-09-04-wetype-zero-gap-injection.md）。加固：钩子链头 bump（会话开始 + 10s 定时）+ Raw Input 归因独立线程。**RC001 真机端到端 passed（2026-09-04，用户确认文字上屏；前提=输出端点 CABLE Input + 系统默认录音 CABLE Output）**；RC003 真机待验。
 - [ ] 使用真实 RC001/RC003 和第三方语音程序（微信输入法、Win+H 等）验证按住说话快捷键：DOWN/UP 严格成对、无粘键、无重复音频，且断连和睡眠恢复后不残留按住的快捷键。RC001 基本链路与加固版回归均已 passed（2026-09-04，型号经应用 2A24 显示双证）；RC003 基本链路 passed（连接/触发/MIC_EXTEND 续期正常），音频送达率经**重配对后复测 passed**（55%→98.7%，与 RC001 基准持平，文字"一二三四五六七八九十"全对——初次配对的连接参数带宽不足，重配对即修复，已列为标准处置；Bugs\2026-09-04-rc003-voice-quality.md）。剩余待验：快速连按成对性、断连/睡眠恢复残留复验。
-- [x] 实现 RC001/RC003 选择持久化、意外断连指数退避重连和 Windows 睡眠/恢复通知代码路径；真机恢复仍待验收。
+- [x] 实现 RC001/RC003 选择持久化、意外断连指数退避重连和 Windows 睡眠/恢复通知代码路径；2026-09-12 修复 BLE MTA 线程误用 UI-thread-only `FromIdAsync` 导致 Windows 资源错误/工作线程卡死，改由配对 ID 的对端地址调用 `FromBluetoothAddressAsync`，并补齐连接阶段、退避与无线电恢复结构化日志；自动化 passed，新包真机恢复仍待验收。
 - [x] 在 Windows 主机编译 Tauri NSIS Preview 安装包；Windows CI 已生成并复验绑定精确来源 Commit、SHA-256 和未签名状态的 artifact，安装、升级、卸载与正式签名仍待完成。
 - [x] 提供去标识化运行诊断摘要和页面内复制入口；自动化已证明不导出设备身份、路径、端点名称或错误原文，Windows WebView 剪贴板仍待运行验收。
 - [x] 持久化并展示仅保存在本机的每日按键次数、完整语音会话次数和语音采样时长；Windows/RC001/RC003 真实事件计数与升级保留仍待真机验收。
@@ -35,7 +35,7 @@
 - [ ] 如未来需要捆绑或自动执行 VB-CABLE 驱动包，先取得与 Pack45 内附许可一致的作者书面授权，并实现来源校验、显式 UAC、结果检测和重启流程。
 - [x] 持久化用户选择的输出端点，并在端点消失或更名时失败关闭；Windows 运行时恢复仍待真机验收。
 - [x] 实现设备路径 fail-closed、隐藏消息窗口、Keyboard/HID 双来源合并和停止释放的 Raw Input 代码路径；Windows 与 RC001/RC003 真机按键验收仍待完成。
-- [ ] 实现按键映射保存、热加载和 SendInput：独立映射文件、显式热加载、批量 SendInput、部分提交回滚和界面测试已完成；2026-09-10 修复 Win+L：锁定动作改走公开 `LockWorkStation` API并在成功后立即清理因锁屏而延迟的遥控器释放态（RC003 电源单击现场 passed）。当前主机实证物理 Win+L 无法由普通用户态钩子可靠阻止，链首刷新方案又造成事件丢失，已回退；录入默认保留直接模式，并增加默认关闭的安全模式开关（界面选修饰键、键盘只按主键），两种模式自动化 passed、安全模式安装现场复验 deferred。真实 Raw Input 边沿自动执行仍须分别等待 Windows/RC001/RC003 确认 Keyboard/HID 事件形态，避免重复输入。
+- [ ] 实现按键映射保存、热加载和 SendInput：独立映射文件、显式热加载、批量 SendInput、部分提交回滚和界面测试已完成；2026-09-10 修复 Win+L：锁定动作改走公开 `LockWorkStation` API（RC003 电源单击现场 passed）。精确 Win+L 先等待实体 UP、门控完成边沿配对后再锁屏；2026-09-12 进一步实证 `microsoft-edge:` 弹窗并非迟到边沿，而是 TV 原生 Shell 协议动作在后续锁屏时由系统服务创建 `OpenWith.exe`，新增仅在 TV→SayAll 锁屏周期启用的 CREATE 阶段精准拦截（原型四轮现场 passed，产品化安装包待验）。当前主机实证物理 Win+L 无法由普通用户态钩子可靠阻止，链首刷新方案又造成事件丢失，已回退；录入默认保留直接模式，并增加默认关闭的安全模式开关（界面选修饰键、键盘只按主键），两种模式自动化 passed、安全模式安装现场复验 deferred。真实 Raw Input 边沿自动执行仍须分别等待 Windows/RC001/RC003 确认 Keyboard/HID 事件形态，避免重复输入。
 - [x] 按键映射页增加“保存配置 / 导入配置 / 导出配置”：沿用保存即热加载，导出版本化且稳定排序的 JSON；导入先做 1 MiB 上限、格式版本、动作与快捷键完整校验，落盘成功后才一次性替换运行态，取消选择不报错。Rust/Vue 自动化与 Windows COM 对话框代码路径 passed；可见文件选择器、跨机器迁移及 RC001/RC003 导入后实体按键回归 deferred。
 - [ ] 完成 Windows 10 1809 / Windows 11 安装、升级和卸载验证。
 - [x] 在 Windows CI 构建较低版本 NSIS 候选，验证当前用户安装、升级后单一安装身份、设置/映射/统计逐字节保留、降级不替换当前版本和最终卸载保留用户数据；该矩阵不代表真实历史二进制、可见安装界面或 Windows 10 1809 / Windows 11 真机验收。Tauri 2.11.1 静默页不会可靠设置内置降级检查所依赖的版本比较结果，已在既有 preinstall hook 中增加独立 SemVer 门禁；Run 33637195089 通过并确认 predecessor `/S` 返回 1638、当前 0.1.0 与用户数据保持不变。

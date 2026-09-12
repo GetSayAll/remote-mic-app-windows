@@ -494,6 +494,16 @@ fn handle_edges(
     }
 
     for edge in edges {
+        #[cfg(windows)]
+        if edge.button == RemoteButton::Tv && edge.is_pressed {
+            crate::lock_open_with_guard::note_tv_press();
+        }
+        if edge.is_pressed && recognizer.defers_single_until_release(edge.button) {
+            crate::ble::gatt_note(format!(
+                "map_terminal_wait button={:?} action=lock_workstation phase=armed release_required=true",
+                edge.button
+            ));
+        }
         let fired = if edge.is_pressed {
             recognizer.press(edge.button, now)
         } else {
@@ -951,11 +961,12 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(50));
 
-        // 场景 6：第一次 Win+L 成功后不发送 UP，第二次 DOWN 仍应立刻形成
-        // 新手势并再次调用动作；迟到的旧 UP 不再是下一次触发的前置条件。
+        // 场景 6：Win+L 会切换交互桌面，必须在实体 UP 到达后才调用锁屏，
+        // 确保门控先成对消费 DOWN/UP；下一次完整按压仍可再次触发。
         ensure_gate(&mut gate);
         let before_lock = taps().len();
         for _ in 0..2 {
+            let before_press = taps().len();
             sender
                 .send(EngineMessage::GateEdge(ButtonEdge {
                     button: RemoteButton::Power,
@@ -963,6 +974,23 @@ mod tests {
                 }))
                 .unwrap();
             std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                taps().len(),
+                before_press,
+                "Win+L 不得在实体按键仍按住时切换桌面"
+            );
+            sender
+                .send(EngineMessage::GateEdge(ButtonEdge {
+                    button: RemoteButton::Power,
+                    is_pressed: false,
+                }))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                taps().len(),
+                before_press + 1,
+                "Win+L 应在本轮实体按键释放后执行一次"
+            );
         }
         let after_lock = taps();
         assert_eq!(

@@ -57,7 +57,8 @@
 
 场景：应用被强杀（未走正常关闭）后 Windows 侧残留僵死 GATT/HID 链路或服务缓存，普通重试永不恢复（本机真机取证：CCCD 订阅写入 E_ABORT、HID 接口从系统消失；examples\radio_probe 与 examples\gatt_snoop 探针复现）。已实现 `bluetooth_radio.rs` 自动恢复（重连循环连续失败达 5 次时关开蓝牙无线电一次，每周期最多 2 次），真机验证：无线电开关周期后重连循环立即成功（Testing\investigation\sayall-gatt-20260905-live.log T/C 能力交换取证）。关键参考：
 
-- **微软官方 GATT 客户端文档**（Dispose 后系统"小超时"自动断开、重建设备对象按需重连；BluetoothLEDevice.Close 仅当本应用是唯一持有者才关连接）：`learn.microsoft.com/windows/apps/develop/devices-sensors/gatt-client`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.close`
+- **微软官方 GATT 客户端文档**（Dispose 后系统"小超时"自动断开、重建设备对象按需重连；BluetoothLEDevice.Close 仅当本应用是唯一持有者才关连接；GATT 连接/发现可能因系统队列等待数分钟且当前不能取消）：`learn.microsoft.com/windows/apps/develop/devices-sensors/gatt-client`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.close`
+- **微软 BluetoothLEDevice 构造入口文档**：`FromIdAsync` 明确要求从 UI 线程调用（可能触发访问授权）；`FromBluetoothAddressAsync` 无此线程要求，并支持从已进入系统缓存的配对设备地址重建设备对象。2026-09-12 现场的 MTA `FromIdAsync` 先返回 Windows 资源错误，后续日志时序显示下一次请求占住 BLE 工作线程（阶段日志缺失，属结合代码的推断），故改用配对 AssociationEndpoint ID 内的对端地址调用后者；不记录真实地址。官方依据：`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.fromidasync`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.frombluetoothaddressasync`。
 - **MS Q&A 99038**（只 Dispose 设备不 Dispose 服务则无法重连）、**MS Q&A 2280559**（RPA 解析滞后导致进程重启后首次 GetGattServicesAsync 必 Unreachable，官方建议 3 次重试 ×1s + Uncached）、**MS Q&A 1685221**（FromBluetoothAddressAsync 返回 null 僵死 bug，Win11 2024.01D 已修；MaintainConnection 遇 bond 丢失会重连循环）
 - **Qt 论坛 156281**（实测：OS 侧服务缓存僵死，重启应用无效，**关开蓝牙是唯一有效修复**——与本机取证一致，是本仓库选择无线电恢复的直接依据）：`forum.qt.io/topic/156281`
 - **Bleak winrt client 源码**（Unreachable 重试 10×1s；断开全量清理序列 CCCD=None→退订→逐服务 Close 带 0.1s 防挂起延迟）、**btleplug winrtble**（Uncached 触发连接、特征发现 5s 超时回退 Cached——#325：部分驱动 Uncached 请求无限挂起，本仓库 connect 尚无该超时，列为后续加固项）、**微软官方 BluetoothLE 示例 Scenario2_Client**（FromIdAsync→RequestAccessAsync→Uncached 发现→清理序列）
@@ -67,7 +68,7 @@
 
 ## Windows 系统快捷键录入与锁屏动作（2026-09-10）
 
-- **执行端**：微软 `SendInput` 文档说明它把事件串行插入输入流、受 UIPI 与当前键态影响；`LockWorkStation` 是交互桌面进程可调用的公开锁屏 API，成功返回表示异步锁屏请求已发起。按键映射中的精确 `Win+L` 因而使用 `LockWorkStation`，其他快捷键仍走既有 `SendInput`。官方依据：`learn.microsoft.com/windows/win32/api/winuser/nf-winuser-sendinput`、`learn.microsoft.com/windows/win32/api/winuser/nf-winuser-lockworkstation`。
+- **执行端**：微软 `SendInput` 文档说明它把事件串行插入输入流、受 UIPI 与当前键态影响；`LockWorkStation` 是交互桌面进程可调用的公开锁屏 API，成功返回只表示异步锁屏请求已发起。Hooks 文档说明全局钩子事件局限于调用线程所在桌面。按键映射中的精确 `Win+L` 因而先等待实体键释放、由门控成对处理 DOWN/UP，再调用 `LockWorkStation`；其他快捷键仍走既有 `SendInput` 并保持按下即响应。官方依据：`learn.microsoft.com/windows/win32/api/winuser/nf-winuser-sendinput`、`learn.microsoft.com/windows/win32/api/winuser/nf-winuser-lockworkstation`、`learn.microsoft.com/windows/win32/winmsg/hooks`。
 - **录入端**：微软 `LowLevelKeyboardProc` 文档明确低级键盘钩子在按键消息进入目标线程队列前运行，处理后返回非零可阻止继续传递，并要求回调快速把工作移交后台线程。本仓库复用常驻 `WH_KEYBOARD_LL` 门控：录入期间先吞物理 DOWN，所有对应重复 DOWN/UP 即使录入已经结束仍按同一次按住吞完；录入开始前已经按住的键则全程放行，避免不对称边沿。钩子只 `try_send`，Tauri 事件由独立线程发出。官方依据：`learn.microsoft.com/windows/win32/winmsg/lowlevelkeyboardproc`。
 - **边界**：`Ctrl+Alt+Del` 等安全注意序列不属于普通快捷键录入能力；Win+L 在当前
   Windows 主机上即使低级钩子返回吞下仍会锁屏。因此自定义录入默认保留直接模式，
@@ -79,6 +80,18 @@
   完全丢失，实证 failed 并回退。产品路径不再依赖钩子链顺序屏蔽系统保留组合。
   官方依据：`learn.microsoft.com/windows/win32/winmsg/about-hooks`、
   `learn.microsoft.com/windows/win32/winmsg/lowlevelkeyboardproc`。
+- **TV→锁屏的协议选择器兜底（2026-09-12）**：微软 Raw Input 文档明确
+  `RIDEV_NOLEGACY` 只适用于鼠标/键盘，不能据此阻止消费控制 HID 的独立 Shell
+  动作；`SetWinEventHook` 提供跨进程、out-of-context 的对象事件观察，
+  `EVENT_OBJECT_CREATE` 早于 SHOW。现场证明 Windows 会在 SayAll 锁屏约 4 秒后
+  由系统服务创建 `OpenWith.exe`；SHOW 阶段隐藏仍偶发闪帧，CREATE 阶段终止精确
+  helper 连续四轮无可见弹窗。产品路径只在“已观察 TV→下一次 SayAll 锁屏”的
+  15 秒窗口启用，并只处理 Windows `System32` 下映像名精确为 `OpenWith.exe`
+  的进程。官方依据：
+  `learn.microsoft.com/windows/win32/api/winuser/ns-winuser-rawinputdevice`、
+  `learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwineventhook`、
+  `learn.microsoft.com/windows/win32/winauto/event-constants`、
+  `learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess`。
 
 ## WeType 热键休眠自动恢复调研来源（2026-09-05，热键休眠专项 v2）
 
