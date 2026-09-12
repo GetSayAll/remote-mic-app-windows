@@ -18,6 +18,41 @@
 - 自动化：地址解析选取对端、错误分类、既有重连/清理测试 passed；新包连接
   与锁屏真机复验 deferred。
 
+### 2026-09-12 21:37 统一包复验补充
+
+- 提交 `69b1893` 的安装版把设备创建换成 `FromBluetoothAddressAsync` 后，
+  仍在 0-27ms 内返回 `windows_resource_exhausted`。因此“仅因 MTA 调用了
+  UI-only `FromIdAsync`”的归因被真机证伪；直接故障是 Windows 蓝牙栈资源
+  耗尽，地址入口只能避免潜在 UI 授权问题，不能清除已耗尽的系统状态。
+- 两次 `ble_radio_recovery` 都在 0-5ms 内报告失败。代码复核发现旧实现忽略
+  `SetStateAsync` 返回的 `RadioAccessStatus`，并在请求返回后立即读取 `State`；
+  微软文档明确说明状态异步转换，应该先 `RequestAccessAsync`、检查 Allowed，
+  再等待并复读最终状态。修复改为缓存 Allowed 权限、Off/On 各等待最多 5 秒，
+  并记录权限、拒绝、API 失败和状态超时的结构化阶段日志。
+- 修复后的独立真机探针先后尝试 `GetRadiosAsync` 与官方设备查询兜底
+  （`GetDeviceSelector` → `DeviceInformation::FindAllAsync` → `FromIdAsync`），
+  两条路径均返回 `0x80070008`。这证明当前故障是系统 WinRT 无线电枚举整体
+  资源耗尽；在所有公开 API 都无法取得 Radio 对象后，才允许提示用户手动
+  关开蓝牙，并明确说明其作用是清空系统蓝牙栈状态。
+- 一次语音按住产生多个 F5 typematic DOWN，曾在约 1 秒内连续重置并触发四次
+  attempt=0。Raw Input 现按物理 DOWN/UP 配对，每次按住只唤醒一次重连；所有
+  重复沿仍刷新 F5 抑制宽限，不改变防粘键规则。
+
+### 2026-09-12 22:12 恢复闭环
+
+- 基于最新 `origin/main` 的安装版（source revision `17f0ced8`）仍稳定复现
+  `device_from_address` 在 0-18ms 返回 `windows_resource_exhausted`；两轮应用内
+  恢复均成功取得 `RadioAccessStatus::Allowed`，但主枚举与官方设备查询兜底都
+  返回 `0x80070008`，因此无法取得 Radio 对象，符合人工介入边界。
+- 用户手动关开蓝牙后，下一次设备创建在 1.786s 内成功；首次服务发现瞬时失败，
+  再一轮 30s 退避后完整完成服务、特征、CCCD 与能力协商，连接阶段耗时 2.315s。
+  这验证“约 4 分钟”并非单次挂起，而是资源耗尽期间的多轮指数退避。
+- 系统栈恢复后显式运行 `live_radio_cycle_restores_the_radio_to_on`：自动
+  Off→等待确认→保持 2s→On→等待确认在 3.48s 内 passed；运行中的安装版随后
+  检测断连并约 6s 自动完成 GATT 重连。Radio 状态等待修复真机 passed。
+- 本次只验证当前已选遥控器链路与主机无线电恢复；RC001、RC003 各自的僵死态
+  自动恢复复现仍为 deferred，不扩大为双型号通过。
+
 ## 现象（2026-09-07 用户报障）
 
 - 上午起两只遥控器（RC001 + RC003）均连不上；应用 UI 显示

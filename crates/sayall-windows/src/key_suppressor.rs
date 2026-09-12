@@ -6,17 +6,16 @@
 //! 参考实现（ZSTDJan / Voice_VibeCoding）均以低级键盘钩子吞掉遥控器原始 F5
 //! 解决此问题（VVC 的"F5 状态机"）。
 //!
-//! 结构（2026-09-04 加固后，双线程 + 钩子链头 bump）：
+//! 结构（2026-09-10 加固后，单一 Raw Input 注册 + 钩子链头 bump）：
 //! - **钩子线程**：常驻 WH_KEYBOARD_LL 钩子（专职消息泵）。吞键判定只针对
 //!   F5，其余按键一律透传；武装条件（其一）：ATVV 语音会话进行中
-//!   （`set_session_active`，BLE 工作线程调用），或 Raw Input 在武装宽限
-//!   （250ms）内观察到来自遥控器（vid_2717/pid_32b8 设备族）的 F5；首个
+//!   （`set_session_active`，BLE 工作线程调用）、BLE 正处于连接建立/重连
+//!   窗口，或主 Raw Input 监听器在武装宽限（250ms）内观察到来自遥控器的 F5；首个
 //!   F5 在回调内有界等待 60ms 等任一武装信号（物理 F5 最坏 +60ms 延迟，
 //!   ZSTDJan 同款取舍）。
-//! - **Raw Input 线程**：独立消息窗口 + RIDEV_INPUTSINK，只做设备归因并刷
-//!   新武装时戳。独立线程是必须的：LL 钩子回调在钩子线程内执行，回调内的
-//!   有界等待期间同线程消息泵无法分发 WM_INPUT（单线程设计会自阻塞，2026-09-04
-//!   实测归因永不生效——见 Bugs\2026-09-04-wetype-zero-gap-injection.md）。
+//! - **Raw Input 归因**：由 `raw_input_windows.rs` 的进程唯一注册窗口转发。
+//!   Windows 明确规定同一进程每种 Raw Input 设备类只有最后注册的窗口能接收；
+//!   旧版在这里另建窗口会被主监听器覆盖，造成重连期间 F5 全部泄漏。
 //! - **钩子链头 bump**（VVC 技巧：先挂新钩再卸旧钩，无吞键空窗）：LL 钩子
 //!   按"最新安装在最前"的顺序调用；若微信输入法等目标在本应用之后（重）
 //!   安装了自己的 LL 钩子，其和弦判定会先于本抑制器看到遥控器 F5，导致
@@ -34,30 +33,22 @@
 //!   一个孤立 UP（无害）也不留粘键。
 //! - 会话结束保留 250ms 宽限，覆盖 BLE 通知晚到的物理 F5 释放沿。
 //!
-//! 护栏：回调内只读原子状态 + 短睡眠轮询，无 IO/锁；线程退出时卸钩销窗。
+//! 护栏：回调内只读原子状态 + 短睡眠轮询，无 IO/锁；线程退出时卸钩。
 
 #[cfg(windows)]
 mod windows_impl {
-    use crate::raw_input::device_path_matches_xiaomi_remote;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::sync::OnceLock;
     use std::thread::JoinHandle;
     use std::time::Instant;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Input::{
-        GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices, RAWINPUTDEVICE,
-        RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEKEYBOARD,
-    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetMessageW, PostThreadMessageW, RegisterClassW, SetTimer, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, UnregisterClassW, HHOOK, HWND_MESSAGE,
-        KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT,
-        WM_QUIT, WM_TIMER, WNDCLASSW,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetTimer,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
+        WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
     };
 
     const ARM_GRACE_MS: u64 = 250;
@@ -69,6 +60,9 @@ mod windows_impl {
     const BUMP_TIMER_MS: u32 = 10_000;
 
     static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// 连接建立/重连阶段临时接管 F5。此时遥控器的原生 F5 可能先于 ATVV
+    /// 控制通知到达；若放行会触发记事本“插入时间/日期”等前台副作用。
+    static LINK_GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ARMED_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
     static SWALLOW_MASTER: AtomicBool = AtomicBool::new(false);
     /// 抑制器决策计数（AGENTS.md 功能点日志规范；仅钩子线程原子递增，
@@ -77,6 +71,7 @@ mod windows_impl {
     static F5_DOWN_SWALLOWED: AtomicU64 = AtomicU64::new(0);
     static F5_DOWN_LEAKED: AtomicU64 = AtomicU64::new(0);
     static F5_DOWN_WAITED_ARMED_LATE: AtomicU64 = AtomicU64::new(0);
+    static REMOTE_F5_RAW_OBSERVED: AtomicU64 = AtomicU64::new(0);
     /// 遥控器 HID 活动通知（lib.rs 接线到 BleRuntime::wake_reconnect）：
     /// 归因线程观察到遥控器键盘事件时回调。用于断连状态下遥控器醒来
     /// 按键时立即触发重连（HID 先于 GATT 可达，2026-09-05 实证）。
@@ -105,7 +100,14 @@ mod windows_impl {
     }
 
     fn swallow_ready() -> bool {
-        session_active() || armed()
+        decide(
+            VK_F5,
+            false,
+            session_active(),
+            LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
+            armed(),
+            HOLD_NONE,
+        )
     }
 
     /// 纯决策函数：给定状态与按键，是否吞键（单元测试覆盖）。
@@ -116,6 +118,7 @@ mod windows_impl {
         vk_code: u32,
         is_key_up: bool,
         session: bool,
+        link_guard: bool,
         armed_now: bool,
         hold_pairing: u32,
     ) -> bool {
@@ -125,7 +128,7 @@ mod windows_impl {
         if is_key_up {
             return hold_pairing == HOLD_SWALLOWED_ALL;
         }
-        session || armed_now
+        session || link_guard || armed_now
     }
 
     /// 纯状态转移：DOWN 沿裁决后更新配对状态。任一 DOWN 沿泄漏（含 typematic
@@ -151,7 +154,14 @@ mod windows_impl {
                     let is_key_up = matches!(message, 0x0101 | 0x0105);
                     if is_key_up {
                         let hold = HOLD_PAIRING.swap(HOLD_NONE, Ordering::Relaxed);
-                        if decide(VK_F5, true, session_active(), armed(), hold) {
+                        if decide(
+                            VK_F5,
+                            true,
+                            session_active(),
+                            LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
+                            armed(),
+                            hold,
+                        ) {
                             return LRESULT(1);
                         }
                         // DOWN 沿曾泄漏进 OS（或配对未知）：放行 UP，防止粘键。
@@ -211,165 +221,9 @@ mod windows_impl {
         }
     }
 
-    unsafe fn device_name_of(device: HANDLE) -> Option<String> {
-        let mut size = 0u32;
-        if GetRawInputDeviceInfoW(Some(device), RIDI_DEVICENAME, None, &mut size) == 0 || size == 0
-        {
-            return None;
-        }
-        let mut buffer = vec![0u16; size as usize];
-        let written = GetRawInputDeviceInfoW(
-            Some(device),
-            RIDI_DEVICENAME,
-            Some(buffer.as_mut_ptr().cast()),
-            &mut size,
-        );
-        if written == 0 {
-            return None;
-        }
-        let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
-        Some(String::from_utf16_lossy(&buffer[..end]))
-    }
-
-    /// x64 下 RAWINPUTHEADER 为 24 字节：dwType@0、dwSize@4、hDevice@8、wParam@16；
-    /// RAWKEYBOARD 紧随其后：MakeCode@24、Flags@26、(Reserved@28)、VKey@30。
-    fn arm_from_raw_input(bytes: &[u8]) {
-        if bytes.len() < 32 {
-            return;
-        }
-        let dw_type = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if dw_type != RIM_TYPEKEYBOARD.0 as u32 {
-            return;
-        }
-        let vkey = u16::from_le_bytes([bytes[30], bytes[31]]);
-        if vkey as u32 != VK_F5 {
-            return;
-        }
-        let device = HANDLE(u64::from_le_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ]) as *mut core::ffi::c_void);
-        let Some(path) = (unsafe { device_name_of(device) }) else {
-            return;
-        };
-        if device_path_matches_xiaomi_remote(&path) {
-            ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
-            // 遥控器 HID 活动：通知 BLE 运行时立即重连（断连场景下遥控器
-            // 醒来的第一个按键就应触发重试，而不是等退避周期）。
-            if let Some(notify) = REMOTE_HID_ACTIVITY_NOTIFY.get() {
-                notify();
-            }
-        }
-    }
-
     /// 注册遥控器 HID 活动回调（lib.rs 启动时接线；重复注册保持首个）。
     pub fn set_remote_hid_activity_notify(callback: Box<dyn Fn() + Send + Sync>) {
         let _ = REMOTE_HID_ACTIVITY_NOTIFY.set(callback);
-    }
-
-    // ---- Raw Input 归因线程（独立消息窗口 + 消息泵） ----
-
-    unsafe extern "system" fn raw_wnd_proc(
-        hwnd: HWND,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if message == WM_INPUT {
-            let handle = windows::Win32::UI::Input::HRAWINPUT(lparam.0 as *mut _);
-            let mut size = 0u32;
-            if GetRawInputData(handle, RID_INPUT, None, &mut size, 24) != u32::MAX
-                && size > 0
-                && size <= 4096
-            {
-                let mut bytes = vec![0u8; size as usize];
-                if GetRawInputData(
-                    handle,
-                    RID_INPUT,
-                    Some(bytes.as_mut_ptr().cast()),
-                    &mut size,
-                    24,
-                ) != u32::MAX
-                {
-                    arm_from_raw_input(&bytes);
-                }
-            }
-        }
-        DefWindowProcW(hwnd, message, wparam, lparam)
-    }
-
-    fn raw_input_thread(thread_id_tx: mpsc::Sender<u32>) {
-        unsafe {
-            let instance: HINSTANCE = match GetModuleHandleW(None) {
-                Ok(module) => module.into(),
-                Err(_) => return,
-            };
-            let _ = thread_id_tx.send(GetCurrentThreadId());
-
-            let class_name: Vec<u16> = "SayAllVoiceKeySuppressorRaw\0".encode_utf16().collect();
-            let class_name_ptr = PCWSTR(class_name.as_ptr());
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(raw_wnd_proc),
-                lpszClassName: class_name_ptr,
-                hInstance: instance,
-                ..Default::default()
-            };
-            if RegisterClassW(&wc) == 0 {
-                return;
-            }
-            let hwnd = match CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                class_name_ptr,
-                class_name_ptr,
-                WINDOW_STYLE::default(),
-                0,
-                0,
-                0,
-                0,
-                Some(HWND_MESSAGE),
-                None,
-                Some(instance),
-                None,
-            ) {
-                Ok(hwnd) => hwnd,
-                Err(_) => {
-                    let _ = UnregisterClassW(class_name_ptr, Some(instance));
-                    return;
-                }
-            };
-            let keyboard_usage = RAWINPUTDEVICE {
-                usUsagePage: 1,
-                usUsage: 6,
-                dwFlags: RIDEV_INPUTSINK,
-                hwndTarget: hwnd,
-            };
-            if RegisterRawInputDevices(
-                &[keyboard_usage],
-                std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-            )
-            .is_err()
-            {
-                let _ = DestroyWindow(hwnd);
-                let _ = UnregisterClassW(class_name_ptr, Some(instance));
-                return;
-            }
-
-            let mut message = MSG::default();
-            while GetMessageW(&mut message, None, 0, 0).as_bool() {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-
-            let removals = [RAWINPUTDEVICE {
-                usUsagePage: 1,
-                usUsage: 6,
-                dwFlags: RIDEV_REMOVE,
-                hwndTarget: HWND::default(),
-            }];
-            let _ =
-                RegisterRawInputDevices(&removals, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
-            let _ = DestroyWindow(hwnd);
-            let _ = UnregisterClassW(class_name_ptr, Some(instance));
-        }
     }
 
     // ---- 钩子线程（LL 钩子 + 消息泵 + bump 消息/定时器） ----
@@ -420,15 +274,14 @@ mod windows_impl {
     #[derive(Debug)]
     pub struct VoiceKeySuppressor {
         worker: Option<JoinHandle<()>>,
-        raw_worker: Option<JoinHandle<()>>,
         thread_id: u32,
-        raw_thread_id: u32,
     }
 
     impl VoiceKeySuppressor {
-        /// 启动抑制线程（钩子 + Raw Input 归因 + 消息泵）。
+        /// 启动抑制线程（钩子 + 消息泵；Raw Input 归因由主监听器转发）。
         pub fn start() -> VoiceKeySuppressor {
             SESSION_ACTIVE.store(false, Ordering::Relaxed);
+            LINK_GUARD_ACTIVE.store(false, Ordering::Relaxed);
             ARMED_UNTIL_MS.store(0, Ordering::Relaxed);
             HOLD_PAIRING.store(HOLD_NONE, Ordering::Relaxed);
             let (thread_id_tx, thread_id_rx) = mpsc::channel();
@@ -437,20 +290,7 @@ mod windows_impl {
                 .spawn(move || hook_thread(thread_id_tx))
                 .ok();
             let thread_id = thread_id_rx.recv().unwrap_or(0);
-            // Raw Input 归因线程为尽力而为：失败仅失去"首个 F5 早于会话激活"的
-            // 提前吞键窗口，会话信号路径不受影响。
-            let (raw_tx, raw_rx) = mpsc::channel();
-            let raw_worker = std::thread::Builder::new()
-                .name("sayall-voice-key-raw".to_owned())
-                .spawn(move || raw_input_thread(raw_tx))
-                .ok();
-            let raw_thread_id = raw_rx.recv().unwrap_or(0);
-            VoiceKeySuppressor {
-                worker,
-                raw_worker,
-                thread_id,
-                raw_thread_id,
-            }
+            VoiceKeySuppressor { worker, thread_id }
         }
 
         /// ATVV 语音会话起止（等价模块级 [`set_session_active`]）。
@@ -472,6 +312,36 @@ mod windows_impl {
         ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
     }
 
+    /// 进程唯一 Raw Input 监听器确认语音 F5 来自小米遥控器后调用：刷新
+    /// 抑制宽限，并唤醒 BLE 退避重连。只转发语音 F5，避免方向键长按的
+    /// typematic 重复沿灌满重连消息队列。
+    pub fn observe_remote_voice_f5(wake_reconnect: bool) {
+        REMOTE_F5_RAW_OBSERVED.fetch_add(1, Ordering::Relaxed);
+        arm_grace();
+        if wake_reconnect {
+            crate::ble::gatt_note(
+                "voice_f5_raw edge=down wake_reconnect=true grace_refreshed=true".to_owned(),
+            );
+            if let Some(notify) = REMOTE_HID_ACTIVITY_NOTIFY.get() {
+                notify();
+            }
+        }
+    }
+
+    /// BLE 连接建立/重连窗口临时保护遥控器原生 F5。就绪、失败、挂起或
+    /// 用户主动断开时关闭，避免长期占用实体键盘 F5。
+    pub fn set_link_guard_active(active: bool) {
+        let previous = LINK_GUARD_ACTIVE.swap(active, Ordering::Relaxed);
+        if previous && !active {
+            ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
+        }
+        if previous != active {
+            crate::ble::gatt_note(format!(
+                "voice_f5_guard active={active} reason=ble_link_transition"
+            ));
+        }
+    }
+
     /// ATVV 语音会话起止（模块级，供 BleRuntime 工作线程调用）：
     /// 会话期间吞 F5；结束时保留 250ms 宽限覆盖晚到的释放沿。
     /// 会话开始同时请求钩子链头 bump——微信输入法等目标若在本应用之后
@@ -482,11 +352,13 @@ mod windows_impl {
             // 功能点日志：抑制器决策计数快照（自应用启动累计），首按
             // 失败类报障一次日志拉取即可归因（泄漏/等待超时/即时吞下）。
             crate::ble::gatt_note(format!(
-                "suppressor_stats seen={} swallowed={} leaked={} waited_late={}",
+                "suppressor_stats seen={} swallowed={} leaked={} waited_late={} raw_remote_f5={} link_guard={}",
                 F5_DOWN_SEEN.load(Ordering::Relaxed),
                 F5_DOWN_SWALLOWED.load(Ordering::Relaxed),
                 F5_DOWN_LEAKED.load(Ordering::Relaxed),
                 F5_DOWN_WAITED_ARMED_LATE.load(Ordering::Relaxed),
+                REMOTE_F5_RAW_OBSERVED.load(Ordering::Relaxed),
+                LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
             ));
             let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
             if thread_id != 0 {
@@ -511,15 +383,7 @@ mod windows_impl {
                     let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
                 }
             }
-            if self.raw_thread_id != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(self.raw_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-                }
-            }
             if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
-            if let Some(worker) = self.raw_worker.take() {
                 let _ = worker.join();
             }
         }
@@ -528,7 +392,8 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_grace, set_remote_hid_activity_notify, set_session_active, VoiceKeySuppressor,
+    arm_grace, observe_remote_voice_f5, set_link_guard_active, set_remote_hid_activity_notify,
+    set_session_active, VoiceKeySuppressor,
 };
 
 #[cfg(all(windows, test))]
@@ -537,19 +402,56 @@ pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWE
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_remote_or_session_f5_down_is_swallowed() {
-        // DOWN 沿：非 F5 一律透传；F5 仅在会话或武装时吞（配对状态不参与）。
-        assert!(!super::decide(0x41, false, false, false, super::HOLD_NONE));
+    fn only_armed_session_or_link_guard_f5_down_is_swallowed() {
+        // DOWN 沿：非 F5 一律透传；F5 仅在会话、建链保护或设备归因武装时吞。
+        assert!(!super::decide(
+            0x41,
+            false,
+            false,
+            false,
+            false,
+            super::HOLD_NONE
+        ));
         assert!(!super::decide(
             0x41,
             true,
             true,
             true,
+            true,
             super::HOLD_SWALLOWED_ALL
         ));
-        assert!(!super::decide(0x74, false, false, false, super::HOLD_NONE));
-        assert!(super::decide(0x74, false, true, false, super::HOLD_NONE));
-        assert!(super::decide(0x74, false, false, true, super::HOLD_NONE));
+        assert!(!super::decide(
+            0x74,
+            false,
+            false,
+            false,
+            false,
+            super::HOLD_NONE
+        ));
+        assert!(super::decide(
+            0x74,
+            false,
+            true,
+            false,
+            false,
+            super::HOLD_NONE
+        ));
+        assert!(super::decide(
+            0x74,
+            false,
+            false,
+            true,
+            false,
+            super::HOLD_NONE
+        ));
+        assert!(super::decide(
+            0x74,
+            false,
+            false,
+            false,
+            true,
+            super::HOLD_NONE
+        ));
     }
 
     #[test]
@@ -562,12 +464,28 @@ mod tests {
             true,
             false,
             false,
+            false,
             super::HOLD_SWALLOWED_ALL
         ));
-        assert!(!super::decide(0x74, true, true, true, super::HOLD_LEAKED));
-        assert!(!super::decide(0x74, true, true, true, super::HOLD_NONE));
+        assert!(!super::decide(
+            0x74,
+            true,
+            true,
+            true,
+            true,
+            super::HOLD_LEAKED
+        ));
+        assert!(!super::decide(
+            0x74,
+            true,
+            true,
+            true,
+            true,
+            super::HOLD_NONE
+        ));
         assert!(!super::decide(
             0x41,
+            true,
             true,
             true,
             true,

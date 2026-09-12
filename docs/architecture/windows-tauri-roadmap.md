@@ -66,7 +66,7 @@ Application State
 ### 3.2 `sayall-windows`
 
 只包含 Windows 公共 API。所有 Windows 句柄、COM、WinRT、HID 和音频资源必须有明确生命周期。BLE 回调和音频回调不得执行阻塞文件或进程操作。
-RC001/RC003 断连由 BLE 工作线程统一清理后进入 2–30 秒指数退避；用户主动断开只停止本次运行的重连。连接时优先从已批准设备名识别型号，名称不足以判定时可选读取标准 Device Information / Model Number（2A24）；型号未知不阻断共用 ATVV 路径。Windows 电源回调只投递事件，睡眠前的 GATT/音频释放与恢复后的重新发现仍在同一工作线程串行完成，旧 connection generation 回调继续丢弃。
+RC001/RC003 断连由 BLE 工作线程统一清理后进入 2–30 秒指数退避；用户主动断开只停止本次运行的重连。连接时优先从已批准设备名识别型号，名称不足以判定时可选读取标准 Device Information / Model Number（2A24）；型号未知不阻断共用 ATVV 路径。Windows 电源回调只投递事件，睡眠前的 GATT/音频释放与恢复后的重新发现仍在同一工作线程串行完成，旧 connection generation 回调继续丢弃。2026-09-10 修复升级重启后的重连窗口 F5 泄漏：Raw Input 每设备类在进程内只保留一个注册窗口，由主监听器统一转发设备归因；Connecting/Discovering/AwaitingCapabilities/Reconnecting 期间临时保护语音 F5，进入稳定/失败/挂起状态即释放实体键盘 F5；每次连接的设备激活、属性、服务/特征发现、CCCD 订阅与能力请求均记录脱敏结构化耗时，详见 `Bugs/2026-09-10-voice-f5-timestamp-during-reconnect.md`。
 
 ### 3.3 Tauri Host
 

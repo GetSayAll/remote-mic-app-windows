@@ -61,8 +61,38 @@
 - **微软 BluetoothLEDevice 构造入口文档**：`FromIdAsync` 明确要求从 UI 线程调用（可能触发访问授权）；`FromBluetoothAddressAsync` 无此线程要求，并支持从已进入系统缓存的配对设备地址重建设备对象。2026-09-12 现场的 MTA `FromIdAsync` 先返回 Windows 资源错误，后续日志时序显示下一次请求占住 BLE 工作线程（阶段日志缺失，属结合代码的推断），故改用配对 AssociationEndpoint ID 内的对端地址调用后者；不记录真实地址。官方依据：`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.fromidasync`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.frombluetoothaddressasync`。
 - **MS Q&A 99038**（只 Dispose 设备不 Dispose 服务则无法重连）、**MS Q&A 2280559**（RPA 解析滞后导致进程重启后首次 GetGattServicesAsync 必 Unreachable，官方建议 3 次重试 ×1s + Uncached）、**MS Q&A 1685221**（FromBluetoothAddressAsync 返回 null 僵死 bug，Win11 2024.01D 已修；MaintainConnection 遇 bond 丢失会重连循环）
 - **Qt 论坛 156281**（实测：OS 侧服务缓存僵死，重启应用无效，**关开蓝牙是唯一有效修复**——与本机取证一致，是本仓库选择无线电恢复的直接依据）：`forum.qt.io/topic/156281`
+
+### 2026-09-10 重连窗口 F5 泄漏补充
+
+- **微软 `RegisterRawInputDevices` 文档**：同一进程、同一 Raw Input 设备类只能
+  有一个接收窗口，最后一次注册覆盖前者；文档因此明确警告库内注册会干扰宿主
+  自己的 Raw Input 处理。该约束解释了旧版 `key_suppressor.rs` 的键盘注册被
+  `raw_input_windows.rs` 覆盖、断线期 F5 设备归因失效：
+  `learn.microsoft.com/windows/win32/api/winuser/nf-winuser-registerrawinputdevices`。
+- **参考实现复核**：本机 `reference-repos/vibe-flow` 提交
+  `b47f7cdce8b753fade0c64c97332bebe80f17d2d` 的 `VoxDeckInputBridge.cs` 对语音
+  F5 使用 LL 钩子兜底，并在重连扫描码变化时仍以持久语音映射为准；它接受实体
+  键盘 F5 冲突。本仓库采用边界更窄的做法：主 Raw Input 窗口统一归因，只有
+  Connecting/Discovering/AwaitingCapabilities/Reconnecting 建链窗口临时兜底，
+  稳定状态继续保留实体键盘 F5。
+- **记事本行为旁证**：Microsoft Q&A 的 Windows/Notepad 条目确认 F5 会插入当前
+  日期时间。2026-09-10 本机现象格式与系统区域格式一致，结合诊断日志
+  `seen=74 swallowed=0 leaked=74`，可排除 ASR 把语音识别成日期的解释。
 - **Bleak winrt client 源码**（Unreachable 重试 10×1s；断开全量清理序列 CCCD=None→退订→逐服务 Close 带 0.1s 防挂起延迟）、**btleplug winrtble**（Uncached 触发连接、特征发现 5s 超时回退 Cached——#325：部分驱动 Uncached 请求无限挂起，本仓库 connect 尚无该超时，列为后续加固项）、**微软官方 BluetoothLE 示例 Scenario2_Client**（FromIdAsync→RequestAccessAsync→Uncached 发现→清理序列）
-- **Windows.Devices.Radios.Radio**（RequestAccessAsync 文档要求 + 可能弹同意框；本机实测未打包桌面进程 SetStateAsync 直接 RadioAccessStatus=Allowed 无需提权；本仓库为避免无人值守弹框，不调 RequestAccessAsync，被拒时按错误上报走人工提示）
+- **Windows.Devices.Radios.Radio**（微软 `RequestAccessAsync` / `SetStateAsync`
+  文档）：改变无线电前先请求权限并检查 `RadioAccessStatus::Allowed`；
+  `SetStateAsync` 返回只表示请求是否获准，实际状态异步转换，应观察
+  `StateChanged` 或复读 `State` 确认。2026-09-12 统一包实测旧实现 0-5ms
+  即误判两轮恢复失败，据此改为进程内缓存 Allowed、Off/On 有界复读确认。
+  官方依据：`learn.microsoft.com/uwp/api/windows.devices.radios.radio.requestaccessasync`、
+  `learn.microsoft.com/uwp/api/windows.devices.radios.radio.setstateasync`。
+- **Radio 设备查询兜底**（微软 `Radio.GetDeviceSelector` / `Radio.FromIdAsync`
+  文档）：官方允许以 AQS + `DeviceInformation.FindAllAsync` 枚举后通过 ID
+  重建 Radio，并说明硬件异常/移除场景下它比 `GetRadiosAsync` 更可靠。
+  2026-09-12 现场两条路径均返回 `0x80070008`，据此把“公开 API 已穷尽”的
+  人工提示边界固定下来。官方依据：
+  `learn.microsoft.com/uwp/api/windows.devices.radios.radio.getdeviceselector`、
+  `learn.microsoft.com/uwp/api/windows.devices.radios.radio.fromidasync`。
 
 外部实现只作为带来源的参考。第三方应用进程注入、私有配置读取和来源不明二进制不进入稳定主路径。
 
