@@ -1,7 +1,7 @@
 # 语音会话触发 WebView 整页重载，应用回退默认「按键」页
 
 - 发现日期：2026-09-12
-- 状态：等待真机验证（前端兜底 + Rust 根因修复均已实施，自动化通过；真机验收待做）
+- 状态：已修复（真机验收通过 2026-09-12）
 - 影响范围：预览版 v0.2.2–v0.2.6；Windows 10/11 x64；RC001/RC003 语音链路共用；与微信输入法是否安装/激活无关（见根因）
 - 功能点：按住说话快捷键的 IME 会话级激活（`crates/sayall-windows/src/ime.rs`，由 `ble.rs` StreamStarted 调用）；前端导航（`src/App.vue`）
 - 现象：按住说话快捷键预设开启时，焦点在 SayAll 窗口内按住遥控器语音键，WebView 白屏一瞬后整页重载，应用回到默认「按键」页，当前页面与滚动位置全部丢失。
@@ -27,5 +27,6 @@
 - 验证：
   - 自动化：`pnpm test` 65 项 passed（含 navigation 新增 8 项：持久化往返、非法值忽略、心跳新鲜度、刷新键识别）；`pnpm build`（vue-tsc + vite）passed；Rust 侧 `cargo check -p sayall-windows`、`cargo test -p sayall-core`（30 项）、`cargo fmt --check` passed（2026-09-12 本地 GNU 工具链）。
   - 同引擎浏览器重载验证：修复版经 `pnpm dev` 在 Edge（Chromium，与 WebView2 同引擎族）加载，停在「连接与语音」页注入 F5 触发真实整页刷新 → 页面恢复到「连接与语音」而非默认「按键」页，`passed`。
-  - 真机：`deferred`——需 Windows 主机 + RC001/RC003 复现原四条件场景，确认①激活被跳过（日志出现 `ime_activation outcome=skipped_self_foreground`）且重载不再发生，或②即使发生应用停留在原页面 + 日志出现 `webview_reload_recovery`；语音链热路径（其他应用焦点）回归确认。
+  - WebView2 真机（CI 产物安装，2026-09-12）：fork CI（run 34660987204）MSVC 构建 unsigned NSIS 成功，SHA256 校验一致后静默安装；聚焦 SayAll 注入 F5 → **页面不再重载**（无新 `document_load`/`vue_mount`，页面层拦截在真实 WebView2 生效），停留在「连接与语音」页，`passed`。待遥控器语音键原四条件场景复核 `skipped_self_foreground`。
+  - 真机（RC003，2026-09-12 08:41–08:43 用户实按）：焦点在 SayAll 按语音键 3 次 → 全部记 `ime_activation outcome=skipped_self_foreground`（守卫生效）且**零 `document_load`**，页面自始至终停留在「连接与语音」页，`passed`；焦点在其他应用的回归 3 次 → `already_active` 热路径、`wetype_check reacted=true`、每次会话推流 5–9 万样本（约 4–6 秒语音）正常，`passed`。两项合计 `passed`。
 - 隐私检查：本文档与修复代码不包含个人路径、设备身份、语音内容或凭据；心跳与上报仅含时间戳和固定事件名。
