@@ -79,7 +79,20 @@
   日期时间。2026-09-10 本机现象格式与系统区域格式一致，结合诊断日志
   `seen=74 swallowed=0 leaked=74`，可排除 ASR 把语音识别成日期的解释。
 - **Bleak winrt client 源码**（Unreachable 重试 10×1s；断开全量清理序列 CCCD=None→退订→逐服务 Close 带 0.1s 防挂起延迟）、**btleplug winrtble**（Uncached 触发连接、特征发现 5s 超时回退 Cached——#325：部分驱动 Uncached 请求无限挂起，本仓库 connect 尚无该超时，列为后续加固项）、**微软官方 BluetoothLE 示例 Scenario2_Client**（FromIdAsync→RequestAccessAsync→Uncached 发现→清理序列）
-- **Windows.Devices.Radios.Radio**（RequestAccessAsync 文档要求 + 可能弹同意框；本机实测未打包桌面进程 SetStateAsync 直接 RadioAccessStatus=Allowed 无需提权；本仓库为避免无人值守弹框，不调 RequestAccessAsync，被拒时按错误上报走人工提示）
+- **Windows.Devices.Radios.Radio**（微软 `RequestAccessAsync` / `SetStateAsync`
+  文档）：改变无线电前先请求权限并检查 `RadioAccessStatus::Allowed`；
+  `SetStateAsync` 返回只表示请求是否获准，实际状态异步转换，应观察
+  `StateChanged` 或复读 `State` 确认。2026-09-12 统一包实测旧实现 0-5ms
+  即误判两轮恢复失败，据此改为进程内缓存 Allowed、Off/On 有界复读确认。
+  官方依据：`learn.microsoft.com/uwp/api/windows.devices.radios.radio.requestaccessasync`、
+  `learn.microsoft.com/uwp/api/windows.devices.radios.radio.setstateasync`。
+- **Radio 设备查询兜底**（微软 `Radio.GetDeviceSelector` / `Radio.FromIdAsync`
+  文档）：官方允许以 AQS + `DeviceInformation.FindAllAsync` 枚举后通过 ID
+  重建 Radio，并说明硬件异常/移除场景下它比 `GetRadiosAsync` 更可靠。
+  2026-09-12 现场两条路径均返回 `0x80070008`，据此把“公开 API 已穷尽”的
+  人工提示边界固定下来。官方依据：
+  `learn.microsoft.com/uwp/api/windows.devices.radios.radio.getdeviceselector`、
+  `learn.microsoft.com/uwp/api/windows.devices.radios.radio.fromidasync`。
 
 外部实现只作为带来源的参考。第三方应用进程注入、私有配置读取和来源不明二进制不进入稳定主路径。
 

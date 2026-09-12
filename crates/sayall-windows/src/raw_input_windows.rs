@@ -236,6 +236,11 @@ struct ListenerContext {
     selected_path: String,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
     engine: Sender<EngineMessage>,
+    remote_voice_f5_pressed: bool,
+}
+
+fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
+    is_pressed && !was_pressed
 }
 
 fn listener_thread(
@@ -299,6 +304,7 @@ fn run_listener(
             selected_path: normalize_device_path(&selected_path),
             snapshot: Arc::clone(&snapshot),
             engine,
+            remote_voice_f5_pressed: false,
         });
     });
 
@@ -524,7 +530,10 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             // 主监听器统一把已归因的小米遥控器语音 F5 转发给抑制器与
             // BLE 立即重连逻辑，避免第二个注册窗口相互覆盖。
             if event.virtual_key == 0x74 {
-                crate::key_suppressor::observe_remote_voice_f5();
+                let pressed = event.is_pressed();
+                let wake_reconnect = voice_f5_wake_edge(context.remote_voice_f5_pressed, pressed);
+                context.remote_voice_f5_pressed = pressed;
+                crate::key_suppressor::observe_remote_voice_f5(wake_reconnect);
             }
             // 透传的键盘事件交给引擎合并；同时武装 key_gate
             // （覆盖键盘-only 按键的重复沿与首沿泄漏后的续期）。
@@ -610,4 +619,17 @@ fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {
     let mut state = snapshot.lock().unwrap();
     state.phase = RawInputPhase::Failed;
     state.last_error = Some(error);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::voice_f5_wake_edge;
+
+    #[test]
+    fn voice_f5_wakes_reconnect_once_per_physical_hold() {
+        assert!(voice_f5_wake_edge(false, true));
+        assert!(!voice_f5_wake_edge(true, true));
+        assert!(!voice_f5_wake_edge(true, false));
+        assert!(voice_f5_wake_edge(false, true));
+    }
 }

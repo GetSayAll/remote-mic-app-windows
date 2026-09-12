@@ -315,11 +315,16 @@ mod windows_impl {
     /// 进程唯一 Raw Input 监听器确认语音 F5 来自小米遥控器后调用：刷新
     /// 抑制宽限，并唤醒 BLE 退避重连。只转发语音 F5，避免方向键长按的
     /// typematic 重复沿灌满重连消息队列。
-    pub fn observe_remote_voice_f5() {
+    pub fn observe_remote_voice_f5(wake_reconnect: bool) {
         REMOTE_F5_RAW_OBSERVED.fetch_add(1, Ordering::Relaxed);
         arm_grace();
-        if let Some(notify) = REMOTE_HID_ACTIVITY_NOTIFY.get() {
-            notify();
+        if wake_reconnect {
+            crate::ble::gatt_note(
+                "voice_f5_raw edge=down wake_reconnect=true grace_refreshed=true".to_owned(),
+            );
+            if let Some(notify) = REMOTE_HID_ACTIVITY_NOTIFY.get() {
+                notify();
+            }
         }
     }
 

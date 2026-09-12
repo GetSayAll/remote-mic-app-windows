@@ -29,7 +29,8 @@
 ## 修复
 
 - 删除语音抑制器的第二套 Raw Input 注册，由进程唯一的主监听器把已归因的
-  遥控器语音 F5 转发给抑制器和 BLE 立即重连入口。
+  遥控器语音 F5 转发给抑制器和 BLE 立即重连入口；Raw Input 按物理
+  DOWN/UP 配对，每次按住只唤醒一次，typematic 重复 DOWN 仅刷新抑制宽限。
 - 在 `Connecting / Discovering / AwaitingCapabilities / Reconnecting` 建链窗口
   临时保护 F5；进入 Ready、失败、挂起或用户主动断开后关闭，稳定在线时仍由
   ATVV `0x04` 前置信号精确武装。DOWN/UP 继续遵守“DOWN 泄漏则 UP 放行”的
