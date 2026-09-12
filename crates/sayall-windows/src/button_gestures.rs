@@ -42,6 +42,9 @@ pub struct GestureConfig {
     /// 原始单击路径（单击+连发在按下沿立即触发）：
     /// 仅当只配置了单击且该键支持连发时成立。
     pub repeat: Option<Duration>,
+    /// 会切换交互桌面的单击动作必须等本次实体按键完整释放后执行，确保
+    /// 原始 DOWN/UP 先由门控成对处理，不把迟到边沿带到锁屏/解锁阶段。
+    pub defer_single_until_release: bool,
 }
 
 impl GestureConfig {
@@ -54,23 +57,33 @@ impl GestureConfig {
         let single_configured = actions.single != ButtonAction::Disabled;
         let double_enabled = actions.double != ButtonAction::Disabled;
         let long_enabled = actions.long != ButtonAction::Disabled;
-        let repeat = if single_configured && !double_enabled && !long_enabled {
-            button.repeat_interval()
-        } else {
-            None
-        };
+        let defer_single_until_release = !double_enabled
+            && !long_enabled
+            && matches!(&actions.single, ButtonAction::Shortcut { chord }
+                if chord.is_lock_workstation());
+        let repeat =
+            if single_configured && !double_enabled && !long_enabled && !defer_single_until_release
+            {
+                button.repeat_interval()
+            } else {
+                None
+            };
         Some(Self {
             single_configured,
             double_enabled,
             long_enabled,
             repeat,
+            defer_single_until_release,
         })
     }
 
     /// 原始单击路径：未配置双击/长按时单击在按下沿立即触发（零延迟，
     /// Mac 同款），按住时按 repeat 间隔连发（无连发能力的按键不重复）。
     fn raw_path(&self) -> bool {
-        self.single_configured && !self.double_enabled && !self.long_enabled
+        self.single_configured
+            && !self.double_enabled
+            && !self.long_enabled
+            && !self.defer_single_until_release
     }
 }
 
@@ -106,6 +119,12 @@ impl GestureRecognizer {
                     .insert(button, (config, ButtonGestureState::default()));
             }
         }
+    }
+
+    pub fn defers_single_until_release(&self, button: RemoteButton) -> bool {
+        self.buttons
+            .get(&button)
+            .is_some_and(|(config, _)| config.defer_single_until_release)
     }
 
     /// 按下沿：返回立即触发的手势（原始单击路径）。
@@ -294,6 +313,53 @@ mod tests {
             vec![]
         );
         assert_eq!(recognizer.advance(t1 + Duration::from_millis(400)), vec![]);
+    }
+
+    #[test]
+    fn lock_workstation_single_waits_for_release() {
+        let t0 = Instant::now();
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Power,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::LeftWindows, KeyCode::L],
+                    },
+                },
+                double: ButtonAction::Disabled,
+                long: ButtonAction::Disabled,
+            },
+        );
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+
+        assert!(recognizer.defers_single_until_release(RemoteButton::Power));
+        assert!(recognizer.press(RemoteButton::Power, t0).is_empty());
+        assert!(recognizer.next_deadline().is_none());
+        assert_eq!(
+            recognizer.release(RemoteButton::Power, t0 + Duration::from_millis(80)),
+            vec![ButtonTrigger::Single]
+        );
+    }
+
+    #[test]
+    fn ordinary_non_repeating_single_still_fires_on_press() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with(
+            RemoteButton::Power,
+            Some(KeyCode::Enter),
+            None,
+            None,
+        ));
+
+        assert!(!recognizer.defers_single_until_release(RemoteButton::Power));
+        assert_eq!(
+            recognizer.press(RemoteButton::Power, t0),
+            vec![ButtonTrigger::Single]
+        );
+        assert!(recognizer.release(RemoteButton::Power, t0).is_empty());
     }
 
     #[test]
