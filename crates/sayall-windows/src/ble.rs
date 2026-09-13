@@ -234,9 +234,9 @@ fn worker_loop(
     // 17:35 实测：用户失败后 0.7s 即再按）。阶梯线程在关键点核对
     // armed 时的纪元，不符即退出，让新会话自带的新一轮检测接管。
     let voice_session_epoch: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    // 僵死链路自动恢复计数：连续失败达标后关开一次蓝牙无线电（每个僵死
-    // 周期最多 bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES 次）。
-    let mut radio_recovery_cycles: u32 = 0;
+    // 僵死链路自动恢复预算：每个窗口最多两次，冷却后自动开启下一窗口；
+    // 成功连接、主动断开或系统恢复时重置，不能永久退化成普通重连。
+    let mut radio_recovery = crate::bluetooth_radio::RadioRecoveryBudget::default();
 
     loop {
         let deadline = nearest_deadline(
@@ -320,33 +320,41 @@ fn worker_loop(
                                         // 重试永不恢复，公开 API 中只有关开蓝牙
                                         // 无线电能触达修复；调研与验证见
                                         // ATTRIBUTION.md 与 Testing\investigation）。
-                                        // 连续失败达标且未超次数上限时执行一次，
-                                        // 影响本机所有蓝牙设备约 2-4 秒。
-                                        if crate::bluetooth_radio::should_cycle(
-                                            backoff.attempt(),
-                                            radio_recovery_cycles,
-                                        ) {
-                                            radio_recovery_cycles += 1;
+                                        // 连续失败达标时执行；每窗口限制次数，耗尽后
+                                        // 冷却再开新窗口，避免永久退化成无限普通重连。
+                                        if let Some(recovery_cycle) = radio_recovery
+                                            .begin_cycle(backoff.attempt(), Instant::now())
+                                        {
+                                            if recovery_cycle.reopened {
+                                                gatt_note(format!(
+                                                    "ble_radio_recovery phase=window_reopened window={} cooldown_ms={}",
+                                                    recovery_cycle.window,
+                                                    crate::bluetooth_radio::RADIO_RECOVERY_RETRY_COOLDOWN.as_millis()
+                                                ));
+                                            }
                                             gatt_note(format!(
-                                                "ble_radio_recovery phase=requested consecutive_failures={} cycle={} max_cycles={}",
+                                                "ble_radio_recovery phase=requested consecutive_failures={} window={} cycle={} max_cycles={}",
                                                 backoff.attempt(),
-                                                radio_recovery_cycles,
+                                                recovery_cycle.window,
+                                                recovery_cycle.cycle,
                                                 crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES
                                             ));
                                             {
                                                 let mut snapshot = lock(&state);
                                                 snapshot.last_error = Some(format!(
-                                                    "连续 {} 次重连失败，正在自动重启蓝牙无线电以清除僵死链路（第 {}/{} 次）…",
+                                                    "连续 {} 次重连失败，正在自动重启蓝牙无线电以清除僵死链路（恢复窗口 {}，第 {}/{} 次）…",
                                                     backoff.attempt(),
-                                                    radio_recovery_cycles,
+                                                    recovery_cycle.window,
+                                                    recovery_cycle.cycle,
                                                     crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
                                                 ));
                                             }
                                             match crate::bluetooth_radio::cycle_bluetooth_radio() {
                                                 Ok(()) => {
                                                     gatt_note(format!(
-                                                        "ble_radio_recovery phase=completed terminal_result=passed cycle={} retry_delay_ms=2000",
-                                                        radio_recovery_cycles
+                                                        "ble_radio_recovery phase=completed terminal_result=passed window={} cycle={} retry_delay_ms=2000",
+                                                        recovery_cycle.window,
+                                                        recovery_cycle.cycle
                                                     ));
                                                     lock(&state).last_error = Some(
                                                         "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
@@ -355,11 +363,12 @@ fn worker_loop(
                                                 }
                                                 Err(radio_error) => {
                                                     gatt_note(format!(
-                                                        "ble_radio_recovery phase=completed terminal_result=failed cycle={} error_domain=bluetooth_radio error_code=cycle_failed retryable=true",
-                                                        radio_recovery_cycles
+                                                        "ble_radio_recovery phase=completed terminal_result=failed window={} cycle={} error_domain=bluetooth_radio error_code=cycle_failed retryable=true",
+                                                        recovery_cycle.window,
+                                                        recovery_cycle.cycle
                                                     ));
                                                     lock(&state).last_error = Some(format!(
-                                                        "蓝牙自动恢复失败：{radio_error}。请检查遥控器电量，或手动开关一次蓝牙后重试。"
+                                                        "蓝牙自动恢复本轮未成功：{radio_error}。应用会继续自动重连并在冷却后再次恢复，无需手动开关蓝牙。"
                                                     ));
                                                 }
                                             }
@@ -424,7 +433,7 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 let result = attempt_connection(
                     &device_id,
                     false,
@@ -466,7 +475,7 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 let result = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -497,7 +506,7 @@ fn worker_loop(
             WorkerMessage::Restore { device_id, reply } => {
                 preferred_device_id = Some(device_id);
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 reconnect_deadline = None;
                 let snapshot = if system_suspended {
                     ConnectionSnapshot {
@@ -624,7 +633,7 @@ fn worker_loop(
                     }
                     if phase == ConnectionPhase::Ready {
                         backoff.reset();
-                        radio_recovery_cycles = 0;
+                        radio_recovery.reset();
                         lock(&state).reconnect_attempt = 0;
                     }
                     if phase == ConnectionPhase::Failed {
@@ -786,7 +795,7 @@ fn worker_loop(
                 }
                 system_suspended = false;
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 if preferred_device_id.is_some() {
                     reconnect_deadline = Some(Instant::now());
                     let previous = lock(&state).clone();
@@ -923,6 +932,7 @@ fn attempt_connection(
             return Err(error);
         }
     };
+    crate::bluetooth_radio::refresh_bluetooth_radio_cache();
     let snapshot = ConnectionSnapshot {
         phase: ConnectionPhase::AwaitingCapabilities,
         remote_name: Some(connected.name.clone()),

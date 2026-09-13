@@ -1,5 +1,29 @@
 # 双遥控器 BLE Unreachable（GATT 状态 1）：多手段自愈矩阵实测
 
+## 2026-09-13：恢复预算永久耗尽与 Radio 事后枚举失败
+
+- 最新 `main` 安装版 `1086c19` 启动后，`device_from_address` 持续在 0–1ms
+  返回 `windows_resource_exhausted`。两轮恢复均取得 `RadioAccessStatus::Allowed`，
+  但 `GetRadiosAsync` 与设备查询兜底都返回 `0x80070008`，因此没有执行到
+  Off/On；两轮之后只剩普通指数退避，恢复预算在本进程生命周期内永久耗尽。
+- 新增一次性探针使用系统当前 PnP Radio ID 直接调用 `Radio::FromIdAsync`，仍
+  返回 `0x80070008`。这排除了“只需绕过枚举”的假设：对象必须在系统栈健康时
+  预先取得并保留，不能等资源耗尽后再创建。
+- 修复一：Tauri setup 的可交互 UI 上下文在 BLE 线程启动前调用官方 Radio API，
+  预先缓存 Bluetooth Radio 对象并请求控制权限；恢复路径优先复用缓存，不再依赖
+  已经失败的枚举。若启动预热失败但 BLE 后续恢复连接，会立即补建缓存。
+- 修复二：恢复策略改为“每窗口最多 2 次 + 60 秒冷却后自动重开窗口”；连接成功、
+  主动断开和系统恢复会重置窗口。任何一次恢复失败都只影响当前窗口，不再要求用户
+  手动开关蓝牙，也不会永久退化成“正在等待遥控器重连”。
+- 日志新增 `radio_recovery_prepare`、恢复 `window`、`window_reopened` 和
+  `cooldown_ms`，不记录 Radio ID、蓝牙地址或设备名称。
+- 验证：恢复预算阈值/上限/冷却重开/连接后重置单元测试 passed；Windows 全工作区
+  `cargo check --workspace --all-targets --all-features` passed。安装包 `34537f9` 在启动前
+  已资源耗尽的现场完成窗口 1 两次尝试，并在第二次完成 62.06 秒后自动记录
+  `window_reopened window=2 cooldown_ms=60000`，证明恢复预算不会永久耗尽（passed）。
+  该现场因预热前已经 `0x80070008`，缓存为 unavailable；系统健康启动时缓存成功、
+  随后再复现僵死并自动 Off/On/重连仍 deferred。
+
 ## 2026-09-12：`Windows API failed: 内存资源不足`
 
 - 安装锁屏修复测试包后，用户连接 RC001/RC003 时收到上述错误，无法继续

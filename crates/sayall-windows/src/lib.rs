@@ -15,6 +15,8 @@ mod audio;
 mod ble;
 #[cfg(windows)]
 mod bluetooth_radio;
+#[cfg(windows)]
+pub use bluetooth_radio::prepare_bluetooth_radio_recovery;
 mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
