@@ -1,4 +1,4 @@
-// Standalone, observation-only Windows RC003 diagnostic. No key injection or hooks.
+// Standalone, observation-only Windows RC003 diagnostic. No key injection or suppression; short-lived observation hook only.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -264,6 +264,39 @@ internal sealed class RawCapture : NativeWindow, IDisposable {
     }
 }
 
+internal sealed class KeyboardCapture : IDisposable {
+    [StructLayout(LayoutKind.Sequential)] internal struct Edge { public uint Vk, Scan, Flags, Time; public UIntPtr Extra; }
+    delegate IntPtr Hook(int code,IntPtr message,IntPtr data);
+    [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SetWindowsHookExW(int kind,Hook callback,IntPtr module,uint thread);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook,int code,IntPtr message,IntPtr data);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandleW(string name);
+    readonly Log log;
+    readonly Hook callback;
+    IntPtr handle;
+    public int Events;
+    public KeyboardCapture(Log log) {
+        this.log=log; callback=Observe;
+        handle=SetWindowsHookExW(13,callback,GetModuleHandleW(null),0);
+        log.Write("ll_register",new {success=handle!=IntPtr.Zero,error=handle==IntPtr.Zero?Marshal.GetLastWin32Error():0,scope="candidate_keys_only_unattributed",suppression=false});
+        if(handle==IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+    }
+    internal static bool Candidate(uint vk) { return vk==0xFF || vk==0xAE || vk==0xAF || vk==0xAD || vk==0xA6 || vk==0x26 || vk==0x08 || vk==0x1B; }
+    IntPtr Observe(int code,IntPtr message,IntPtr data) {
+        try {
+            if(code==0) {
+                Edge edge=(Edge)Marshal.PtrToStructure(data,typeof(Edge));
+                if(Candidate(edge.Vk)) {
+                    Events++;
+                    log.Write("ll_keyboard",new {vk=edge.Vk,scan=edge.Scan,flags=edge.Flags,message=message.ToInt64(),injected=(edge.Flags&0x10)!=0,device="unattributed"});
+                }
+            }
+        } catch(Exception e) { try {log.Error("ll_callback",e);} catch {} }
+        return CallNextHookEx(handle,code,message,data);
+    }
+    public void Dispose() { if(handle!=IntPtr.Zero) { bool ok=UnhookWindowsHookEx(handle); log.Write("ll_stop",new {success=ok,error=ok?0:Marshal.GetLastWin32Error()}); if(ok) handle=IntPtr.Zero; } }
+}
+
 internal sealed class GattCapture {
     readonly Log log;
     readonly List<GattDeviceService> services=new List<GattDeviceService>();
@@ -382,18 +415,18 @@ internal sealed class GattCapture {
 internal sealed class Diagnostic : Form {
     readonly ComboBox devices=new ComboBox {Left=20,Top=45,Width=650,DropDownStyle=ComboBoxStyle.DropDownList};
     readonly Button scan=new Button {Left=20,Top=85,Width=160,Text="刷新蓝牙设备"};
-    readonly Button start=new Button {Left=200,Top=85,Width=210,Text="开始 64 秒逐键采集"};
+    readonly Button start=new Button {Left=200,Top=85,Width=210,Text="开始 30 秒逐键采集"};
     readonly Button stop=new Button {Left=440,Top=85,Width=160,Text="停止并清理",Enabled=false};
-    readonly Label status=new Label {Left=20,Top=135,Width=650,Height=130,Text="请选择 RC003。开始前正常退出 SayAll，并只保留一台小米遥控器连接。"};
+    readonly Label status=new Label {Left=20,Top=135,Width=650,Height=130,Text="请选择这台 RC001。开始前正常退出 SayAll，并只保留一台小米遥控器连接。"};
     readonly List<Native.Target> paired=new List<Native.Target>();
-    Log log; RawCapture raw; GattCapture gatt; bool busy; bool finished;
+    Log log; RawCapture raw; GattCapture gatt; KeyboardCapture keyboard; bool busy; bool finished;
     string output;
     CancellationTokenSource cancellation;
-    static readonly string[] Steps={"control_up","back_tap","volume_up_tap","volume_down_tap","back_hold","volume_up_hold","volume_down_hold","control_up_repeat"};
-    static readonly string[] Prompts={"按上方向键 3 次（验证采集有效）","按返回键 3 次","按音量＋ 3 次","按音量－ 3 次","按住返回键 2 秒后松开","按住音量＋ 2 秒后松开","按住音量－ 2 秒后松开","再次按上方向键 3 次（验证连接仍有效）"};
+    static readonly string[] Steps={"control_up","back_tap","volume_up_tap","volume_down_tap","control_up_repeat"};
+    static readonly string[] Prompts={"按上方向键 3 次（验证两个输入通道）","按返回键 3 次","按音量＋ 3 次","按音量－ 3 次","再次按上方向键 3 次（验证监听仍有效）"};
     public Diagnostic(bool rendering=false) {
-        Text="RC003 按键诊断 · 不修改映射"; Width=710; Height=350; FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false;
-        Controls.Add(new Label {Left=20,Top=15,Width=650,Text="采集 HID / GATT 原始按键事件；日志仅保存到本工具旁的 captures 文件夹。"});
+        Text="RC001 / RC003 按键诊断 v2 · 不修改映射"; Width=710; Height=350; FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false;
+        Controls.Add(new Label {Left=20,Top=15,Width=650,Text="采集 LL / Raw Input / GATT；测试时不要操作普通键盘，日志保存在 captures。"});
         Controls.AddRange(new Control[]{devices,scan,start,stop,status});
         scan.Click+=async (s,e)=>await Scan(); start.Click+=async (s,e)=>await Run();
         stop.Click+=(s,e)=> { if(cancellation!=null) cancellation.Cancel(); stop.Enabled=false; status.Text="正在停止采集并恢复通知配置，请稍候。"; };
@@ -407,7 +440,7 @@ internal sealed class Diagnostic : Form {
             paired.Clear(); devices.Items.Clear();
             foreach(var d in found) { paired.Add(d); devices.Items.Add(String.IsNullOrWhiteSpace(d.Label)?"未命名蓝牙设备":d.Label); }
             if(paired.Count>0) devices.SelectedIndex=0;
-            status.Text=paired.Count==0?"未发现与小米 HID 接口关联的蓝牙遥控器。请先在 Windows 中连接 RC003，再刷新。":"请选择 RC003；工具只在本机显示设备名称，日志不保存名称、地址或设备路径。";
+            status.Text=paired.Count==0?"未发现与小米 HID 接口关联的蓝牙遥控器。请先在 Windows 中连接小米遥控器，再刷新。":"请选择这台 RC001；工具只在本机显示设备名称，日志不保存名称、地址或设备路径。";
         } catch(Exception e) { status.Text="设备枚举失败："+e.GetType().Name+" ("+e.HResult+")"; }
         finally { scan.Enabled=true; start.Enabled=paired.Count>0; }
     }
@@ -419,29 +452,31 @@ internal sealed class Diagnostic : Form {
         string directory=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"captures");
         try {
             Directory.CreateDirectory(directory); output=Path.Combine(directory,"rc003-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N").Substring(0,6)+".jsonl");
-            log=new Log(output); log.Write("session",new {version=1,os=Environment.OSVersion.Version.ToString(),pointerBytes=IntPtr.Size,scope="xiaomi_vid2717_pid32b8_only",audio="known_ATVV_audio_excluded",keyInjection=false});
+            log=new Log(output); log.Write("session",new {version=2,os=Environment.OSVersion.Version.ToString(),pointerBytes=IntPtr.Size,scope="raw_xiaomi_only_ll_candidate_keys_unattributed",audio="known_ATVV_audio_excluded",keyInjection=false});
             raw=new RawCapture(log,true); gatt=new GattCapture(log);
             status.Text="正在枚举 HID 并订阅 GATT；单次 API 最多等待约 11 秒。请暂时不要按键。";
             try { await gatt.Start(paired[devices.SelectedIndex],cancellation.Token); }
             catch(OperationCanceledException) { throw; }
             catch(Exception e) { log.Error("gatt_setup_raw_capture_continues",e); }
             cancellation.Token.ThrowIfCancellationRequested(); cancellation.CancelAfter(Timeout.Infinite);
+            // Install after GATT setup, keeping the global observation window short.
+            keyboard=new KeyboardCapture(log);
             log.Write("capture_ready",new {hidInterfaces=raw.Interfaces,gattSubscriptions=gatt.Subscribed});
             for(int i=0;i<Steps.Length;i++) {
-                log.Step=Steps[i]; int r=raw.Events,g=gatt.Events;
-                log.Write("step_start",new {seconds=8});
-                for(int remaining=8;remaining>0;remaining--) { status.Text=Prompts[i]+"\n\n剩余 "+remaining+" 秒；HID/键盘事件 "+raw.Events+"，GATT 通知 "+gatt.Events; await Task.Delay(1000,cancellation.Token); }
-                log.Write("step_end",new {rawEvents=raw.Events-r,gattEvents=gatt.Events-g,note="time correlation only; not proof of key identity or successful mapping"});
+                log.Step=Steps[i]; int r=raw.Events,g=gatt.Events,k=keyboard.Events;
+                log.Write("step_start",new {seconds=6});
+                for(int remaining=6;remaining>0;remaining--) { status.Text=Prompts[i]+"\n\n剩余 "+remaining+" 秒；Raw "+raw.Events+"，LL "+keyboard.Events+"，GATT "+gatt.Events; await Task.Delay(1000,cancellation.Token); }
+                log.Write("step_end",new {rawEvents=raw.Events-r,llEvents=keyboard.Events-k,gattEvents=gatt.Events-g,note="LL has no device identity; correlation only, not proof of successful mapping"});
             }
             log.Step="cleanup"; finished=true;
         } catch(Exception e) { if(log!=null) log.Error("session",e); status.Text="采集异常："+e.GetType().Name+"。正在清理，详细状态见日志。"; }
-        try { if(gatt!=null) await gatt.Stop(); }
+        try { if(keyboard!=null) keyboard.Dispose(); if(gatt!=null) await gatt.Stop(); }
         catch(Exception e) { if(log!=null) log.Error("cleanup",e); }
         finally {
             bool cleanupFailed=gatt!=null && gatt.CleanupFailed;
             if(raw!=null) { try { raw.Dispose(); } catch(Exception e) { if(log!=null) log.Error("raw_cleanup",e); } }
-            if(log!=null) { log.Write("summary",new {completed=finished,rawEvents=raw==null?0:raw.Events,gattEvents=gatt==null?0:gatt.Events,mappingVerified=false}); log.Dispose(); }
-            raw=null; gatt=null; log=null; busy=false; stop.Enabled=false;
+            if(log!=null) { log.Write("summary",new {completed=finished,rawEvents=raw==null?0:raw.Events,llEvents=keyboard==null?0:keyboard.Events,gattEvents=gatt==null?0:gatt.Events,mappingVerified=false}); log.Dispose(); }
+            raw=null; gatt=null; keyboard=null; log=null; busy=false; stop.Enabled=false;
             cancellation.Dispose(); cancellation=null;
             start.Enabled=true; scan.Enabled=true; devices.Enabled=true;
             status.Text=(finished?"采集完成。":"采集未完成。")+"日志：\n"+output+"\n"+(cleanupFailed?"部分通知恢复失败，已关闭连接；日志保留了失败状态。":"已完成清理，可重新启动 SayAll。")+" 零事件仍需结合对照键判断。";
@@ -457,7 +492,7 @@ internal sealed class Diagnostic : Form {
                 }
             }
             if(args.Length==2 && args[0]=="--capture-smoke") {
-                using(var l=new Log(args[1])) using(var r=new RawCapture(l,true)) {
+                using(var l=new Log(args[1])) using(var r=new RawCapture(l,true)) using(var k=new KeyboardCapture(l)) {
                     var host=new Form {ShowInTaskbar=false,Opacity=0}; var timer=new System.Windows.Forms.Timer {Interval=2000};
                     timer.Tick+=(s,e)=>host.Close(); host.Shown+=(s,e)=>timer.Start();
                     Application.Run(host); timer.Dispose(); host.Dispose(); l.Write("capture_smoke",new {events=r.Events}); return 0;
@@ -477,6 +512,7 @@ internal sealed class Diagnostic : Form {
     static void Check(bool value) { if(!value) throw new InvalidOperationException("self test failed"); }
     static void SelfTest() {
         Check(Marshal.SizeOf(typeof(Native.Header))==24); Check(Marshal.SizeOf(typeof(Native.Caps))==64);
+        Check(Marshal.SizeOf(typeof(KeyboardCapture.Edge))==24); Check(KeyboardCapture.Candidate(0xFF)); Check(!KeyboardCapture.Candidate(0x41));
         Check(Native.Matches("HID#Dev_VID&012717_PID&32B8_x")); Check(!Native.Matches("HID#VID_1234_PID_32B8"));
         Check(GattCapture.Mode(GattCharacteristicProperties.Indicate)==GattClientCharacteristicConfigurationDescriptorValue.Indicate);
         Check(GattCapture.Mode(GattCharacteristicProperties.Read)==GattClientCharacteristicConfigurationDescriptorValue.None);
