@@ -40,6 +40,7 @@ pub mod send_input;
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
 #[cfg(windows)]
 pub mod send_input_windows;
+mod three_button_driver;
 #[cfg(windows)]
 mod wetype_revive;
 

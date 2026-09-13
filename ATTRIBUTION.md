@@ -156,3 +156,13 @@
 - **发布资产命名**：NSIS 产物名含中文与空格（`无线麦 SayAll_*.exe`），GitHub 资产直链需 percent-encoding；为消除编码风险，Release 资产在 CI 中复制为纯 ASCII 名（`SayAll-Windows-<version>-x64-setup.exe`）后上传，本地构建产物名不变（CI 全部脚本按 `*-setup.exe` 过滤定位，实测不受新增 `.sig` 影响）。
 - **NSIS 与既有安装器门禁的相互作用**：updater 以 `/P`（passive）+ `/UPDATE` 运行，既有 installer-hooks.nsh 的 PREINSTALL SemVer 降级门禁照常生效（升级路径不受影响）；POSTINSTALL 的 VB-CABLE 提示在 passive（非 Silent）模式下仍会弹出——仅影响未装 VB-CABLE 的用户，与首装行为一致，保留。
 - **预览版通道（2026-09-08 增补）**：Tauri 官方 Runtime Configuration 文档明确支持通过 `UpdaterBuilder::endpoints` 在运行时选择 stable/beta 等独立通道；本仓库据此保持默认稳定端点不变，仅在用户显式开启“检查预览版更新”后覆盖端点。GitHub Releases 页面公开提供标准 Atom feed（`releases.atom`），包含已发布的正式版与 Pre-release、排除 Draft；实现从本仓库 feed 的 `alternate` 链接读取 SemVer tag，选择最高版本并自行构造本仓库 `https://github.com/GetSayAll/remote-mic-app-windows/releases/download/<tag>/latest.json`，避开匿名 REST API 每 IP 60 次/小时限流。最终安装包仍由 Tauri minisign 强制验签。
+
+## 2026-09-13：可选三键下层过滤驱动
+
+- 来源：https://github.com/QL-4/RemoteMapper
+- 参考提交：be8b57330c26a70d8b8ec9ff1e60c23251a2fc31（MIT）。
+- 实质改编：driver/SayAllThreeButtonFilter 的 KMDF 读取完成过滤、INF/vcxproj 和单键报文转换；保留独立 LICENSE.RemoteMapper。
+- 与参考的差异：只转换 80/81/F1 为 F13/F14/F15；不转换语音 F5、Home、Menu、TV、Power；独立服务名及 ExtensionId；不分发上游 SYS、CAT 或证书。
+- 应用在选定设备的 Raw Input 分支解码运输键，经独立 DriverEdge 进入已有合并/手势引擎，避免音量同键映射被原生对冲跳过。不全局占用实体键盘 F13–F15。
+- 已执行：报文边界 7,995,392 组 passed；驱动编译、InfVerif、Inf2Cat passed；应用映射/前端测试见本地验证报告。
+- deferred：RC001/RC003 分别安装后的物理短按、闲置首按、语音与断连验收。参考结果不能代替 RC001 真机。

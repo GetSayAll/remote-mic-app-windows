@@ -96,18 +96,8 @@ const remoteModel = computed<RemoteModel>(
   () => props.runtime?.platform.connection.remoteModel ?? "unknown",
 );
 
-/**
- * 不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
- * 返回/音量±——RC003 上不进 Windows 输入栈（配置无法生效，2026-09-05
- * 调查归档 docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md）；
- * RC001 上虽以 VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而
- * 不开放配置。存量配置由后端（settings 持久化层 + 映射引擎）双重剥离。
- */
-const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
-  "back",
-  "volume_up",
-  "volume_down",
-]);
+/** These keys can be configured before installing the optional filter. */
+const DRIVER_BUTTONS: ReadonlySet<RemoteButton> = new Set(["back", "volume_up", "volume_down"]);
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
@@ -398,6 +388,9 @@ function isActivePreset(keys: KeyCode[]): boolean {
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  if (DRIVER_BUTTONS.has(button)) {
+    return "返回、音量±需要可选的 SayAll 三键驱动。可先保存单击、双击或长按动作，安装驱动后验证。驱动启用期间，SayAll 退出或关闭映射后这三个键不会执行自定义动作；卸载驱动恢复原始输入。";
+  }
   if (button === "home" || button === "tv") {
     return "提示：保存后本按键启用“遥控器优先”——遥控器连接期间原生按键（Home / `）被接管，任意按压（含闲置后首次）严格单响应；此期间物理键盘上的对应按键将触发映射动作，断开遥控器或删除本键映射即恢复原生。";
   }
@@ -827,7 +820,7 @@ onUnmounted(() => {
       <div>
         <div class="mapping-title-row">
           <h1>按键映射</h1>
-          <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
+          <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时不执行自定义动作；已安装的三键驱动需单独卸载才能恢复原始输入。">
             <span>启用自定义按键功能</span>
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
           </label>
@@ -840,6 +833,8 @@ onUnmounted(() => {
         </div>
       </div>
     </header>
+
+    <p class="muted">返回、音量±可预先配置，需要安装可选三键驱动后验证生效。</p>
 
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
@@ -929,10 +924,9 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
             :title="
-              UNMAPPABLE_BUTTONS.has(placement.button)
-                ? '此按键暂不支持自定义，按键功能保持原样'
+              DRIVER_BUTTONS.has(placement.button)
+                ? '可预先配置；需要安装 SayAll 三键驱动后实测生效'
                 : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
             "
             @click.stop="openEditor(placement.button, trigger)"

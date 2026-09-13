@@ -49,6 +49,8 @@ pub enum EngineMessage {
     HidUsages(BTreeSet<u16>),
     /// 门控吞下的键盘边沿（已归因到遥控器）。
     GateEdge(ButtonEdge),
+    /// Device-attributed F13–F15 from the optional three-button filter.
+    DriverEdge(ButtonEdge),
     /// Raw Input 监听器已停止：释放全部按住状态。
     ListenerStopped,
     /// 匹配的遥控器 HID 设备被移除（断连/睡眠）：释放全部按住状态。
@@ -213,9 +215,7 @@ impl ButtonMappingRuntime {
 
     /// 更新按键映射：热加载到引擎 + 同步门控吞键配置。
     pub fn set_mappings(&self, mappings: ButtonMappings) {
-        // 策略性不支持的按键（返回/音量±）统一
-        // 剥离：normalized() 已在持久化层剥离，此处兜底直连调用路径。
-        let mappings = mappings.without_unsupported_buttons();
+        // Keep optional-driver mappings even while the remote is disconnected.
         *self
             .mappings
             .write()
@@ -373,7 +373,7 @@ fn engine_worker(
                     &mut native_pending,
                 );
             }
-            EngineMessage::GateEdge(edge) => {
+            EngineMessage::GateEdge(edge) | EngineMessage::DriverEdge(edge) => {
                 let now = Instant::now();
                 let edges = merger.apply_keyboard_button_edge(edge.button, edge.is_pressed);
                 // 门控吞下的按压：原生动作未进 OS，清除待对冲标记。
@@ -1001,6 +1001,32 @@ mod tests {
         assert!(after_lock[before_lock].is_lock_workstation());
         assert!(after_lock[before_lock + 1].is_lock_workstation());
 
+        // Driver transport must inject native volume mappings on the FIRST
+        // short press: F13/F14 have not delivered a native volume action.
+        ensure_gate(&mut gate);
+        for (button, key) in [
+            (RemoteButton::VolumeUp, KeyCode::VolumeUp),
+            (RemoteButton::VolumeDown, KeyCode::VolumeDown),
+            (RemoteButton::Back, KeyCode::Escape),
+        ] {
+            runtime.set_mappings(mappings_with_single(button, key));
+            let before = taps().len();
+            for pressed in [true, true, false] {
+                sender
+                    .send(EngineMessage::DriverEdge(ButtonEdge {
+                        button,
+                        is_pressed: pressed,
+                    }))
+                    .unwrap();
+            }
+            // Wait for the worker, not for any long-press threshold.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while taps().len() == before && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(taps()[before..], [KeyChord { keys: vec![key] }]);
+        }
+
         drop(runtime);
         drop(gate);
     }
@@ -1256,8 +1282,8 @@ mod tests {
     }
 
     #[test]
-    fn set_mappings_strips_unsupported_buttons_and_sets_persistent_mask() {
-        // 返回/音量±仍被策略剥离；左键映射必须保留并进入普通逐键武装机制。
+    fn set_mappings_preserves_optional_driver_buttons() {
+        // 配置不能因输入路径暂不可见而丢失。
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
@@ -1303,16 +1329,7 @@ mod tests {
             effective.actions.contains_key(&RemoteButton::Left),
             "左键自定义必须保留"
         );
-        for button in [
-            RemoteButton::Back,
-            RemoteButton::VolumeUp,
-            RemoteButton::VolumeDown,
-        ] {
-            assert!(
-                !effective.actions.contains_key(&button),
-                "{button:?} 自定义必须被策略剥离"
-            );
-        }
+        assert!(effective.actions.contains_key(&RemoteButton::Back));
         assert_eq!(
             effective
                 .actions
@@ -1332,10 +1349,14 @@ mod tests {
                 },
             },
         );
-        // 引擎侧被剥离按键的动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
+        // 引擎实际保留三键动作。
         assert_eq!(
             effective.action_for(RemoteButton::Back, ButtonTrigger::Single),
-            ButtonAction::Disabled,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Escape]
+                }
+            },
         );
     }
 }

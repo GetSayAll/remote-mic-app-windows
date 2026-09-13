@@ -492,7 +492,7 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 
-  it("返回/音量±全型号禁用（2026-09-07 用户决策：RC001 同样不开放）", async () => {
+  it("返回/音量±可预先配置，并说明需要三键驱动", async () => {
     for (const model of ["rc003", "rc001", "unknown"] as const) {
       const wrapper = await mountPage(model);
       const backCell = wrapper
@@ -501,18 +501,20 @@ describe("buttons mapping page", () => {
         .findAll(".mapping-cell")[0]!;
       expect(
         (backCell.element as HTMLButtonElement).disabled,
-        `${model} 返回格子应禁用`,
-      ).toBe(true);
+        `${model} 返回格子应开放`,
+      ).toBe(false);
       const volumeCell = wrapper
         .findAll(".mapping-card")
         .find((c) => c.text().includes("音量"))!
         .findAll(".mapping-cell")[0]!;
       expect(
         (volumeCell.element as HTMLButtonElement).disabled,
-        `${model} 音量格子应禁用`,
-      ).toBe(true);
+        `${model} 音量格子应开放`,
+      ).toBe(false);
       await backCell.trigger("click");
-      expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+      expect(wrapper.find(".mapping-editor").exists()).toBe(true);
+      expect(wrapper.find(".mapping-editor").text()).toContain("三键驱动");
+      expect(chipState(wrapper, "Esc")).toBe(false);
     }
   });
 });

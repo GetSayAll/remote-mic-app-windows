@@ -1,0 +1,58 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=Extension
+ClassGuid={e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+Provider=%ProviderName%
+ExtensionId={c04760a2-95ac-49dc-9a34-98815bdb0c9e}
+DriverVer=09/13/2026,0.1.0.0
+CatalogFile=SayAllThreeButtonFilter.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[SourceDisksNames]
+1=%DiskName%,,,""
+
+[SourceDisksFiles]
+SayAllThreeButtonFilter.sys=1
+
+[Manufacturer]
+%ProviderName%=Models,NTamd64.10.0...18362
+
+[Models.NTamd64.10.0...18362]
+%DeviceDesc%=SayAllThreeButtonFilter_Install, HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+
+[SayAllThreeButtonFilter_Install]
+CopyFiles=SayAllThreeButtonFilter_CopyFiles
+
+[SayAllThreeButtonFilter_Install.Filters]
+AddFilter=SayAllThreeButtonFilter,,SayAllThreeButtonLowerFilter
+
+[SayAllThreeButtonLowerFilter]
+FilterPosition=Lower
+
+[SayAllThreeButtonFilter_Install.Services]
+AddService=SayAllThreeButtonFilter,,SayAllThreeButtonFilter_Service
+
+[SayAllThreeButtonFilter_Service]
+DisplayName=%ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\SayAllThreeButtonFilter.sys
+
+[SayAllThreeButtonFilter_Install.Wdf]
+KmdfService=SayAllThreeButtonFilter,SayAllThreeButtonFilter_Wdf
+
+[SayAllThreeButtonFilter_Wdf]
+KmdfLibraryVersion=1.15
+
+[SayAllThreeButtonFilter_CopyFiles]
+SayAllThreeButtonFilter.sys
+
+[Strings]
+ProviderName="SayAll"
+DeviceDesc="SayAll Remote Three Button Filter"
+ServiceDesc="Xiaomi Remote HID Lower Filter"
+DiskName="SayAll Driver Package"

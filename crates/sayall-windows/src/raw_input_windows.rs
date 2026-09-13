@@ -535,6 +535,16 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 context.remote_voice_f5_pressed = pressed;
                 crate::key_suppressor::observe_remote_voice_f5(wake_reconnect);
             }
+            // This branch is AFTER exact selected-device matching. F13–F15
+            // are transport keys, so no native volume action has been delivered.
+            if let Some(edge) = crate::three_button_driver::decode(event) {
+                crate::ble::gatt_note(format!(
+                    "three_button_driver source=selected_raw_keyboard button={:?} pressed={} phase=decoded",
+                    edge.button, edge.is_pressed
+                ));
+                let _ = context.engine.send(EngineMessage::DriverEdge(edge));
+                return Ok(());
+            }
             // 透传的键盘事件交给引擎合并；同时武装 key_gate
             // （覆盖键盘-only 按键的重复沿与首沿泄漏后的续期）。
             if let Some(button) = event.button() {

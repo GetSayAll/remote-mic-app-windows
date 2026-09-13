@@ -1,0 +1,7 @@
+/build/
+/x64/
+/*.user
+/*.pfx
+/*.cer
+/*.cat
+/*.sys
