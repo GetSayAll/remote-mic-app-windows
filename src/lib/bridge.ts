@@ -157,6 +157,7 @@ export interface AtvvCapabilities {
 
 export interface ConnectionSnapshot {
   phase: ConnectionPhase;
+  batteryLevel?: number | null;
   remoteName: string | null;
   remoteModel: RemoteModel;
   capabilities: AtvvCapabilities | null;

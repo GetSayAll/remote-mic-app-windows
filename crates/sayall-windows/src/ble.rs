@@ -139,6 +139,9 @@ impl BleRuntime {
 
     fn decorate_snapshot(&self, mut snapshot: ConnectionSnapshot) -> ConnectionSnapshot {
         snapshot.power_notifications_available = lock(&self.power_notifications).is_some();
+        if !crate::battery::phase_accepts_battery(snapshot.phase) {
+            snapshot.battery_level = None;
+        }
         snapshot
     }
 }
@@ -171,6 +174,10 @@ pub(crate) enum WorkerMessage {
     /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
     /// GATT 重连耗 3 秒，期间按键全部无响应）。
     WakeReconnect,
+    BatteryRead {
+        connection_generation: u64,
+        reading: crate::battery::BatteryReading,
+    },
     /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
     /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
     /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
@@ -756,6 +763,22 @@ fn worker_loop(
                         *lock(&state) = failed_snapshot(error);
                         apply_input_connection_phase(ConnectionPhase::Failed);
                     }
+                }
+            }
+            WorkerMessage::BatteryRead {
+                connection_generation: message_generation,
+                reading,
+            } => {
+                if !crate::battery::apply_reading(
+                    &mut lock(&state),
+                    connection_generation,
+                    message_generation,
+                    reading,
+                ) {
+                    gatt_note(
+                        "remote_battery phase=apply result=ignored reason=stale_connection"
+                            .to_owned(),
+                    );
                 }
             }
             WorkerMessage::SystemSuspended => {
@@ -1405,6 +1428,7 @@ fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> 
 }
 
 struct BleSession {
+    battery_monitor: Option<crate::battery::BatteryMonitor>,
     name: String,
     model: RemoteModel,
     device: BluetoothLEDevice,
@@ -1480,6 +1504,7 @@ impl PendingBleConnection {
 
     fn finish(mut self, name: String, model: RemoteModel) -> BleSession {
         BleSession {
+            battery_monitor: None,
             name,
             model,
             device: self.device.take().expect("pending BLE device is owned"),
@@ -1717,6 +1742,7 @@ impl BleSession {
                 )
             },
         )?);
+        let battery_sender = sender.clone();
         let connection_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
                 move |device, _| {
@@ -1743,7 +1769,7 @@ impl BleSession {
             },
         )?);
 
-        let connected = pending.finish(name, model);
+        let mut connected = pending.finish(name, model);
         connect_stage(
             reconnecting,
             reconnect_attempt,
@@ -1756,6 +1782,8 @@ impl BleSession {
                 )
             },
         )?;
+        connected.battery_monitor =
+            crate::battery::BatteryMonitor::start(address, battery_sender, connection_generation);
         Ok(connected)
     }
 
@@ -1818,6 +1846,7 @@ impl BleSession {
             };
         }
         self.closed = true;
+        self.battery_monitor.take();
         let mut errors = Vec::new();
         if let Err(error) = self.audio.RemoveValueChanged(self.audio_token) {
             errors.push(format!("移除音频通知处理器：{error}"));
