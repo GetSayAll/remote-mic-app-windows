@@ -1,5 +1,12 @@
 # 来源与归属
 
+## RC003 三键独立诊断（2026-09-13）
+
+- 复查本仓库 `Testing/probe-rc003-vendor-gatt.ps1`、`Testing/capture-rawkeys.ps1`、`crates/sayall-windows/examples/gatt_snoop.rs` 与 2026-09-05 三键调查。新工具复用公开 API 思路，改为独立 C# 实现；不复用旧探针的固定 x64 报文偏移、普通键盘全量日志、IBuffer.Data 或 Indicate-only 特征强制 Notify 行为。
+- 参考 `HD838A/remote-mic-app` 的 `RemoteButtons.swift` 与 `HIDRemoteMonitor.swift` 确認 Mac 侧语义用法和原始 HID 报告回调；未复制 Mac 实现，未将其结果视为 Windows 真机证据。
+- 微软 [HID architecture](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-architecture)：系统键盘集合为独占，零读写权限可查询 HID 元数据；据此使用 SetupAPI + HidD/HidP 查询能力，用 Raw Input 观察可交付报告，不宣称 ReadFile 可绕过系统独占。
+- 现阶段仅诊断；Windows 实测发现 Page FF00 的 Report ID 6/7/8 只是后续线索，不能解释为返回或音量键。完整验证和边界见 `Testing/rc003-diagnostic/README.md`。
+
 本仓库是面向 Windows 的 Rust/Tauri 工程。
 
 ## 治理规范迁移
