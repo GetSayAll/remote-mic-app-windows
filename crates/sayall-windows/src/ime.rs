@@ -56,11 +56,32 @@ const ACTIVATION_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 const SESSION_REBIND_SETTLE: Duration = Duration::from_millis(50);
 
 /// 激活结果：AlreadyActive = 会话已是 WeType（调用方可零延迟注入）；
-/// Switched = 本次执行了会话切换（含重绑等待）。
+/// Switched = 本次执行了会话切换（含重绑等待）；
+/// SkippedSelfForeground = 前台是 SayAll 自身窗口，已跳过激活。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeTypeActivation {
     AlreadyActive,
     Switched,
+    SkippedSelfForeground,
+}
+
+/// 前台窗口是否属于 SayAll 自身进程。
+///
+/// 会话级 TSF 激活作用于焦点窗口——焦点落在自己的 WebView 时，把微信
+/// 输入法切进自己的设置窗口毫无收益（听写需要目标应用的文本框），且
+/// 实证会使 WebView2 整页重载（Bugs/2026-09-12：0x04 后 ime_activation
+/// 失败/成功均伴随 document_load，热路径会话零重载）。调用方据此跳过。
+fn foreground_is_self() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return false;
+        }
+        let mut process_id: u32 = 0;
+        GetWindowThreadProcessId(foreground, Some(&mut process_id));
+        process_id != 0 && process_id == std::process::id()
+    }
 }
 
 /// 确保微信输入法是当前会话的活动输入法（幂等）。
@@ -71,6 +92,16 @@ pub enum WeTypeActivation {
 /// 注入——激活失败不阻断语音。
 pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
     let started = std::time::Instant::now();
+    // 前台是自身 WebView 时跳过激活：TSF 会话切换实证会触发 WebView2
+    // 整页重载（Bugs/2026-09-12），且此时注入的和弦也落在自己窗口上，
+    // 激活没有任何收益。返回 Ok——这不是错误，不应置 UI last_error。
+    if foreground_is_self() {
+        crate::ble::gatt_note(
+            "ime_activation outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true error_domain=none error_code=foreground_is_self retryable=false"
+                .to_owned(),
+        );
+        return Ok(WeTypeActivation::SkippedSelfForeground);
+    }
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("sayall-ime-activate".to_owned())
@@ -90,6 +121,7 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
     let outcome = match &result {
         Ok(WeTypeActivation::AlreadyActive) => "already_active",
         Ok(WeTypeActivation::Switched) => "switched",
+        Ok(WeTypeActivation::SkippedSelfForeground) => "skipped_self_foreground",
         Err(_) => "failed",
     };
     crate::ble::gatt_note(format!(
