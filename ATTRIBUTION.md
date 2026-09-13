@@ -2,6 +2,8 @@
 
 ## RC003 三键独立诊断（2026-09-13）
 
+- v2 实测出现首段 Raw 对照通过但 LL 为零、末段两个通道才均通过；不能判为 LL 三键不可见。v3 增加逐段配对阳性对照和前台检查。微软 [LowLevelKeyboardProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc) 说明钩子依赖安装线程消息循环且可能超时静默移除；仅注册成功不是持续观测能力的证据。此处不将超时或权限差异认定为本次异常根因。
+
 - 复查本仓库 `Testing/probe-rc003-vendor-gatt.ps1`、`Testing/capture-rawkeys.ps1`、`crates/sayall-windows/examples/gatt_snoop.rs` 与 2026-09-05 三键调查。新工具复用公开 API 思路，改为独立 C# 实现；不复用旧探针的固定 x64 报文偏移、普通键盘全量日志、IBuffer.Data 或 Indicate-only 特征强制 Notify 行为。
 - 参考 `HD838A/remote-mic-app` 的 `RemoteButtons.swift` 与 `HIDRemoteMonitor.swift` 确認 Mac 侧语义用法和原始 HID 报告回调；未复制 Mac 实现，未将其结果视为 Windows 真机证据。
 - 微软 [HID architecture](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-architecture)：系统键盘集合为独占，零读写权限可查询 HID 元数据；据此使用 SetupAPI + HidD/HidP 查询能力，用 Raw Input 观察可交付报告，不宣称 ReadFile 可绕过系统独占。
