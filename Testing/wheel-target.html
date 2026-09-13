@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>SayAll Wheel Verification</title>
+<style>
+body { margin: 24px; font: 16px sans-serif; background: #fff; color: #222; }
+input { width: 600px; padding: 16px; font: inherit; }
+#viewport { height: 450px; overflow-y: auto; border: 2px solid #555; margin-top: 16px; }
+.row { height: 60px; padding: 12px; box-sizing: border-box; border-bottom: 1px solid #ddd; }
+#status { white-space: pre-wrap; }
+</style>
+<h1>SayAll Wheel Verification</h1>
+<input id="editor" aria-label="Focus check" value="Keep this input focused during the wheel test">
+<div id="viewport" aria-label="Wheel test region"></div>
+<pre id="status"></pre>
+<script>
+const viewport = document.getElementById("viewport");
+const status = document.getElementById("status");
+const events = [];
+let pointer = null;
+for (let i = 1; i <= 100; i++) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.textContent = `Row ${i}`;
+  viewport.append(row);
+}
+function render() {
+  status.textContent = JSON.stringify({ scrollTop: viewport.scrollTop, focus: document.activeElement.id, pointer, events }, null, 2);
+}
+document.addEventListener("mousemove", e => { pointer = [e.clientX, e.clientY]; render(); });
+document.addEventListener("focusin", render);
+viewport.addEventListener("scroll", render);
+viewport.addEventListener("wheel", e => { events.push({ deltaY: e.deltaY, trusted: e.isTrusted, focus: document.activeElement.id, pointer: [e.clientX, e.clientY] }); render(); }, { passive: true });
+viewport.scrollTop = 1200;
+render();
+</script>
+</html>

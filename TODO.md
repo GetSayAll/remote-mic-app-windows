@@ -6,6 +6,8 @@
 
 ## Windows RC001 / RC003
 
+- [ ] 鼠标动作映射：支持左/右/中键单击、左键双击、每次 1–100 格滚轮及每次 1–2000 物理像素指针移动；不修改默认绑定。RC001/RC003 实体按键及闲置首按回归仍需分别验收，见 `Testing/WindowsMouseActions.md`。
+
 - [x] 建立独立 Rust + Tauri 2 + Vue 3 工程结构。
 - [x] 建立 Mac 原版风格设置界面骨架。
 - [x] 建立 ATVV、ADPCM 和语音会话纯 Rust 核心。

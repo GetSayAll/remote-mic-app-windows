@@ -37,7 +37,10 @@ use crate::key_gate;
 use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
-use crate::send_input::{native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord};
+use crate::send_input::{
+    native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, MouseClickKind,
+    MoveDirection, ScrollDirection,
+};
 use crate::UsageCounters;
 
 /// 引擎消息（监听器/门控/宿主 → 引擎线程）。
@@ -61,6 +64,9 @@ pub enum EngineMessage {
 /// 动作注入器抽象（生产实现包装 `SendInputRuntime`，测试实现记录调用）。
 pub trait MappingInjector: Send + Sync {
     fn tap(&self, chord: &KeyChord) -> Result<(), String>;
+    fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String>;
+    fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String>;
+    fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String>;
     /// 打开/激活预设应用（生产实现调用 app_launcher）。
     fn launch_app(&self, target: &str) -> Result<(), String>;
 }
@@ -78,6 +84,27 @@ impl SendInputInjector {
 }
 
 impl MappingInjector for SendInputInjector {
+    fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String> {
+        self.runtime
+            .scroll(direction, steps)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String> {
+        self.runtime
+            .mouse_click(kind)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String> {
+        self.runtime
+            .mouse_move(direction, distance)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn tap(&self, chord: &KeyChord) -> Result<(), String> {
         self.runtime
             .tap(chord.clone())
@@ -634,6 +661,33 @@ fn fire_gesture(
     }
     match action {
         ButtonAction::Disabled => {}
+        ButtonAction::Scroll { direction, steps } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=scroll direction={direction:?} steps={steps}"
+            ));
+            if let Err(error) = injector.scroll(direction, steps) {
+                lock_state(state).last_error = Some(format!("滚轮事件发送失败：{error}"));
+            }
+        }
+        ButtonAction::MouseClick { kind } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=mouse_click kind={kind:?}"
+            ));
+            if let Err(error) = injector.mouse_click(kind) {
+                lock_state(state).last_error = Some(format!("鼠标点击失败：{error}"));
+            }
+        }
+        ButtonAction::MouseMove {
+            direction,
+            distance,
+        } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=mouse_move direction={direction:?} distance={distance}"
+            ));
+            if let Err(error) = injector.mouse_move(direction, distance) {
+                lock_state(state).last_error = Some(format!("鼠标移动失败：{error}"));
+            }
+        }
         ButtonAction::Shortcut { chord } => {
             let terminal_action = chord.is_lock_workstation();
             crate::ble::gatt_note(format!(
@@ -723,10 +777,37 @@ mod tests {
     struct RecordingInjector {
         taps: StdMutex<Vec<KeyChord>>,
         launches: StdMutex<Vec<String>>,
+        scrolls: StdMutex<Vec<(ScrollDirection, u16)>>,
+        clicks: StdMutex<Vec<MouseClickKind>>,
+        moves: StdMutex<Vec<(MoveDirection, u16)>>,
         fail: bool,
     }
 
     impl MappingInjector for RecordingInjector {
+        fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String> {
+            if self.fail {
+                return Err("wheel injection failed (test)".to_owned());
+            }
+            self.scrolls.lock().unwrap().push((direction, steps));
+            Ok(())
+        }
+
+        fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String> {
+            if self.fail {
+                return Err("mouse click failed (test)".to_owned());
+            }
+            self.clicks.lock().unwrap().push(kind);
+            Ok(())
+        }
+
+        fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String> {
+            if self.fail {
+                return Err("mouse move failed (test)".to_owned());
+            }
+            self.moves.lock().unwrap().push((direction, distance));
+            Ok(())
+        }
+
         fn tap(&self, chord: &KeyChord) -> Result<(), String> {
             if self.fail {
                 return Err("注入失败（测试）".to_owned());

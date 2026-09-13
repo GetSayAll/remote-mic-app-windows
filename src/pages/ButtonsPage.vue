@@ -13,6 +13,8 @@ import {
   identityShortcutByButton,
   importButtonMappingConfiguration,
   listPresetApps,
+  mouseClickLabels,
+  mouseMoveLabels,
   pickCustomApp,
   registerPresetAppNames,
   resetButtonMappings,
@@ -33,6 +35,7 @@ import {
   type ButtonTrigger,
   type FiredGesture,
   type KeyCode,
+  type MoveDirection,
   type PresetAppInfo,
   type RawInputPhase,
   type RemoteButton,
@@ -381,6 +384,32 @@ const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: 
   },
 ];
 
+const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
+const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? 1 : 1);
+const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : 30);
+const moveSymbols: Record<MoveDirection, string> = { up: "↑", down: "↓", left: "←", right: "→" };
+
+function updateMouseAmount(event: Event, kind: "scroll" | "mouse_move"): void {
+  const input = event.target as HTMLInputElement;
+  const value = input.valueAsNumber;
+  const maximum = kind === "scroll" ? 100 : 2000;
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    statusMessage.value = `请输入 1 到 ${maximum} 之间的整数`;
+    input.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
+    return;
+  }
+  const action = selectedAction.value;
+  if (action?.type === "scroll" && kind === "scroll") void applyAction({ ...action, steps: value });
+  if (action?.type === "mouse_move" && kind === "mouse_move") void applyAction({ ...action, distance: value });
+}
+
+function isActiveScroll(direction: "up" | "down"): boolean {
+  const target = editingTarget.value;
+  if (!target) return false;
+  const action = actionOf(target.button, target.trigger);
+  return action.type === "scroll" && action.direction === direction;
+}
+
 function isActivePreset(keys: KeyCode[]): boolean {
   const target = editingTarget.value;
   if (!target) return false;
@@ -409,21 +438,28 @@ const capabilityNote = computed<string | null>(() => {
   return null;
 });
 
+let saveQueue: Promise<void> = Promise.resolve();
+let saveRequest = 0;
 async function persist(message?: string): Promise<void> {
+  const request = ++saveRequest;
+  const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
-  try {
-    const saved = await saveButtonMappings(mappings.value);
-    mappings.value = saved;
-    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    if (message) {
-      statusMessage.value = message;
+  const task = saveQueue.then(async () => {
+    try {
+      const saved = await saveButtonMappings(payload);
+      savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+      if (request === saveRequest) {
+        mappings.value = saved;
+        if (message) statusMessage.value = message;
+      }
+    } catch (error) {
+      if (request === saveRequest) statusMessage.value = error instanceof Error ? error.message : String(error);
     }
-  } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    busy.value = false;
-  }
+  });
+  saveQueue = task;
+  await task;
+  if (request === saveRequest) busy.value = false;
 }
 
 async function restoreDefaults(): Promise<void> {
@@ -1008,6 +1044,43 @@ onUnmounted(() => {
         </section>
 
         <section class="action-section">
+          <h4 class="action-section-title">鼠标滚轮</h4>
+          <div class="preset-grid">
+            <button v-for="direction in (['up', 'down'] as const)" :key="direction" class="chip"
+              :class="{ selected: isActiveScroll(direction) }" type="button" title="在鼠标当前位置滚动"
+              @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? "滚轮向上" : "滚轮向下" }}</button>
+          </div>
+          <label v-if="selectedAction?.type === 'scroll'" class="mouse-amount">
+            <span>每次滚动</span>
+            <input aria-label="每次滚动格数" type="number" min="1" max="100" step="1" :value="scrollSteps" @change="updateMouseAmount($event, 'scroll')" />
+            <span>格</span>
+          </label>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标点击</h4>
+          <div class="preset-grid">
+            <button v-for="(label, kind) in mouseClickLabels" :key="kind" class="chip" type="button"
+              :class="{ selected: selectedAction?.type === 'mouse_click' && selectedAction.kind === kind }"
+              title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
+          </div>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标移动</h4>
+          <div class="preset-grid">
+            <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip mouse-direction" type="button"
+              :aria-label="label" :title="label" :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
+              @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ moveSymbols[direction] }}</button>
+          </div>
+          <label v-if="selectedAction?.type === 'mouse_move'" class="mouse-amount">
+            <span>每次移动</span>
+            <input aria-label="每次移动像素" type="number" min="1" max="2000" step="1" :value="moveDistance" @change="updateMouseAmount($event, 'mouse_move')" />
+            <span>像素</span>
+          </label>
+        </section>
+
+        <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <div class="preset-grid">
             <button
@@ -1142,3 +1215,9 @@ onUnmounted(() => {
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ mappingSnapshot.lastError }}</p>
   </section>
 </template>
+
+<style scoped>
+.mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
+.mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
+.mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
+</style>
