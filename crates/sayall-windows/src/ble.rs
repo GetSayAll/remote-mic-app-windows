@@ -234,9 +234,9 @@ fn worker_loop(
     // 17:35 实测：用户失败后 0.7s 即再按）。阶梯线程在关键点核对
     // armed 时的纪元，不符即退出，让新会话自带的新一轮检测接管。
     let voice_session_epoch: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    // 僵死链路自动恢复计数：连续失败达标后关开一次蓝牙无线电（每个僵死
-    // 周期最多 bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES 次）。
-    let mut radio_recovery_cycles: u32 = 0;
+    // 僵死链路自动恢复预算：每个窗口最多两次，冷却后自动开启下一窗口；
+    // 成功连接、主动断开或系统恢复时重置，不能永久退化成普通重连。
+    let mut radio_recovery = crate::bluetooth_radio::RadioRecoveryBudget::default();
 
     loop {
         let deadline = nearest_deadline(
@@ -320,33 +320,41 @@ fn worker_loop(
                                         // 重试永不恢复，公开 API 中只有关开蓝牙
                                         // 无线电能触达修复；调研与验证见
                                         // ATTRIBUTION.md 与 Testing\investigation）。
-                                        // 连续失败达标且未超次数上限时执行一次，
-                                        // 影响本机所有蓝牙设备约 2-4 秒。
-                                        if crate::bluetooth_radio::should_cycle(
-                                            backoff.attempt(),
-                                            radio_recovery_cycles,
-                                        ) {
-                                            radio_recovery_cycles += 1;
+                                        // 连续失败达标时执行；每窗口限制次数，耗尽后
+                                        // 冷却再开新窗口，避免永久退化成无限普通重连。
+                                        if let Some(recovery_cycle) = radio_recovery
+                                            .begin_cycle(backoff.attempt(), Instant::now())
+                                        {
+                                            if recovery_cycle.reopened {
+                                                gatt_note(format!(
+                                                    "ble_radio_recovery phase=window_reopened window={} cooldown_ms={}",
+                                                    recovery_cycle.window,
+                                                    crate::bluetooth_radio::RADIO_RECOVERY_RETRY_COOLDOWN.as_millis()
+                                                ));
+                                            }
                                             gatt_note(format!(
-                                                "ble_radio_recovery phase=requested consecutive_failures={} cycle={} max_cycles={}",
+                                                "ble_radio_recovery phase=requested consecutive_failures={} window={} cycle={} max_cycles={}",
                                                 backoff.attempt(),
-                                                radio_recovery_cycles,
+                                                recovery_cycle.window,
+                                                recovery_cycle.cycle,
                                                 crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES
                                             ));
                                             {
                                                 let mut snapshot = lock(&state);
                                                 snapshot.last_error = Some(format!(
-                                                    "连续 {} 次重连失败，正在自动重启蓝牙无线电以清除僵死链路（第 {}/{} 次）…",
+                                                    "连续 {} 次重连失败，正在自动重启蓝牙无线电以清除僵死链路（恢复窗口 {}，第 {}/{} 次）…",
                                                     backoff.attempt(),
-                                                    radio_recovery_cycles,
+                                                    recovery_cycle.window,
+                                                    recovery_cycle.cycle,
                                                     crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
                                                 ));
                                             }
                                             match crate::bluetooth_radio::cycle_bluetooth_radio() {
                                                 Ok(()) => {
                                                     gatt_note(format!(
-                                                        "ble_radio_recovery phase=completed terminal_result=passed cycle={} retry_delay_ms=2000",
-                                                        radio_recovery_cycles
+                                                        "ble_radio_recovery phase=completed terminal_result=passed window={} cycle={} retry_delay_ms=2000",
+                                                        recovery_cycle.window,
+                                                        recovery_cycle.cycle
                                                     ));
                                                     lock(&state).last_error = Some(
                                                         "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
@@ -355,11 +363,12 @@ fn worker_loop(
                                                 }
                                                 Err(radio_error) => {
                                                     gatt_note(format!(
-                                                        "ble_radio_recovery phase=completed terminal_result=failed cycle={} error_domain=bluetooth_radio error_code=cycle_failed retryable=true",
-                                                        radio_recovery_cycles
+                                                        "ble_radio_recovery phase=completed terminal_result=failed window={} cycle={} error_domain=bluetooth_radio error_code=cycle_failed retryable=true",
+                                                        recovery_cycle.window,
+                                                        recovery_cycle.cycle
                                                     ));
                                                     lock(&state).last_error = Some(format!(
-                                                        "蓝牙自动恢复失败：{radio_error}。请检查遥控器电量，或手动开关一次蓝牙后重试。"
+                                                        "蓝牙自动恢复本轮未成功：{radio_error}。应用会继续自动重连并在冷却后再次恢复，无需手动开关蓝牙。"
                                                     ));
                                                 }
                                             }
@@ -424,7 +433,7 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 let result = attempt_connection(
                     &device_id,
                     false,
@@ -466,7 +475,7 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 let result = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -497,7 +506,7 @@ fn worker_loop(
             WorkerMessage::Restore { device_id, reply } => {
                 preferred_device_id = Some(device_id);
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 reconnect_deadline = None;
                 let snapshot = if system_suspended {
                     ConnectionSnapshot {
@@ -624,7 +633,7 @@ fn worker_loop(
                     }
                     if phase == ConnectionPhase::Ready {
                         backoff.reset();
-                        radio_recovery_cycles = 0;
+                        radio_recovery.reset();
                         lock(&state).reconnect_attempt = 0;
                     }
                     if phase == ConnectionPhase::Failed {
@@ -786,7 +795,7 @@ fn worker_loop(
                 }
                 system_suspended = false;
                 backoff.reset();
-                radio_recovery_cycles = 0;
+                radio_recovery.reset();
                 if preferred_device_id.is_some() {
                     reconnect_deadline = Some(Instant::now());
                     let previous = lock(&state).clone();
@@ -923,6 +932,7 @@ fn attempt_connection(
             return Err(error);
         }
     };
+    crate::bluetooth_radio::refresh_bluetooth_radio_cache();
     let snapshot = ConnectionSnapshot {
         phase: ConnectionPhase::AwaitingCapabilities,
         remote_name: Some(connected.name.clone()),
@@ -1413,6 +1423,169 @@ struct BleSession {
     cleanup_failure: Option<String>,
 }
 
+/// Owns every WinRT object acquired while a BLE connection is still being
+/// assembled. Any early `?` drops this guard and explicitly closes the partial
+/// graph instead of relying on COM reference release to tear down the radio
+/// session. Repeated discovery failures otherwise leave Windows BLE resources
+/// behind and can eventually make every new WinRT request fail with
+/// ERROR_NOT_ENOUGH_MEMORY (0x80070008).
+struct PendingBleConnection {
+    device: Option<BluetoothLEDevice>,
+    service: Option<GattDeviceService>,
+    transmit: Option<GattCharacteristic>,
+    audio: Option<GattCharacteristic>,
+    control: Option<GattCharacteristic>,
+    audio_token: Option<i64>,
+    control_token: Option<i64>,
+    connection_token: Option<i64>,
+    params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
+}
+
+impl PendingBleConnection {
+    fn new(device: BluetoothLEDevice) -> Self {
+        Self {
+            device: Some(device),
+            service: None,
+            transmit: None,
+            audio: None,
+            control: None,
+            audio_token: None,
+            control_token: None,
+            connection_token: None,
+            params_request: None,
+        }
+    }
+
+    fn device(&self) -> &BluetoothLEDevice {
+        self.device.as_ref().expect("pending BLE device is owned")
+    }
+
+    fn service(&self) -> &GattDeviceService {
+        self.service
+            .as_ref()
+            .expect("pending GATT service is owned")
+    }
+
+    fn audio(&self) -> &GattCharacteristic {
+        self.audio
+            .as_ref()
+            .expect("pending audio characteristic is owned")
+    }
+
+    fn control(&self) -> &GattCharacteristic {
+        self.control
+            .as_ref()
+            .expect("pending control characteristic is owned")
+    }
+
+    fn finish(mut self, name: String, model: RemoteModel) -> BleSession {
+        BleSession {
+            name,
+            model,
+            device: self.device.take().expect("pending BLE device is owned"),
+            service: self.service.take().expect("pending GATT service is owned"),
+            transmit: self
+                .transmit
+                .take()
+                .expect("pending transmit characteristic is owned"),
+            audio: self
+                .audio
+                .take()
+                .expect("pending audio characteristic is owned"),
+            control: self
+                .control
+                .take()
+                .expect("pending control characteristic is owned"),
+            audio_token: self
+                .audio_token
+                .take()
+                .expect("pending audio subscription is owned"),
+            control_token: self
+                .control_token
+                .take()
+                .expect("pending control subscription is owned"),
+            connection_token: self
+                .connection_token
+                .take()
+                .expect("pending connection subscription is owned"),
+            params_request: self.params_request.take(),
+            microphone_opened: false,
+            closed: false,
+            cleanup_failure: None,
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if self.device.is_none() {
+            return;
+        }
+
+        let mut attempted = 0u32;
+        let mut failures = 0u32;
+        if let (Some(audio), Some(token)) = (self.audio.as_ref(), self.audio_token.take()) {
+            attempted += 1;
+            if audio.RemoveValueChanged(token).is_err() {
+                failures += 1;
+            }
+        }
+        if let (Some(control), Some(token)) = (self.control.as_ref(), self.control_token.take()) {
+            attempted += 1;
+            if control.RemoveValueChanged(token).is_err() {
+                failures += 1;
+            }
+        }
+        if let (Some(device), Some(token)) = (self.device.as_ref(), self.connection_token.take()) {
+            attempted += 1;
+            if device.RemoveConnectionStatusChanged(token).is_err() {
+                failures += 1;
+            }
+        }
+        if let Some(audio) = self.audio.as_ref() {
+            attempted += 1;
+            if disable_notifications(audio).is_err() {
+                failures += 1;
+            }
+        }
+        if let Some(control) = self.control.as_ref() {
+            attempted += 1;
+            if disable_notifications(control).is_err() {
+                failures += 1;
+            }
+        }
+        if let Some(request) = self.params_request.take() {
+            attempted += 1;
+            if request.Close().is_err() {
+                failures += 1;
+            }
+        }
+        if let Some(service) = self.service.take() {
+            attempted += 1;
+            if service.Close().is_err() {
+                failures += 1;
+            }
+        }
+        if let Some(device) = self.device.take() {
+            attempted += 1;
+            if device.Close().is_err() {
+                failures += 1;
+            }
+        }
+
+        gatt_note(format!(
+            "ble_partial_cleanup result={} attempted={} failures={} reason=connect_stage_failed retryable=true",
+            if failures == 0 { "ok" } else { "partial" },
+            attempted,
+            failures,
+        ));
+    }
+}
+
+impl Drop for PendingBleConnection {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 impl BleSession {
     fn connect(
         device_id: &str,
@@ -1441,6 +1614,7 @@ impl BleSession {
                 )
             },
         )?;
+        let mut pending = PendingBleConnection::new(device);
         // 连接参数吞吐优化（2026-09-07）：RC001 送达率实测仅 ~52%（18 会话
         // 全部 39%-68%，同 09-04 RC003 初次配对的 55% 症状；09-04 RC001
         // 基准为 100%）。ThroughputOptimized 收紧连接间隔，提升 15ms/120B
@@ -1448,7 +1622,10 @@ impl BleSession {
         // Windows 11（22000+）起可用：旧宿主调用失败降级默认参数，不阻断
         // 连接，结果落 gatt_note（"功能点必须自带日志"）。
         let params_request = match BluetoothLEPreferredConnectionParameters::ThroughputOptimized() {
-            Ok(parameters) => match device.RequestPreferredConnectionParameters(&parameters) {
+            Ok(parameters) => match pending
+                .device()
+                .RequestPreferredConnectionParameters(&parameters)
+            {
                 Ok(request) => {
                     gatt_note("conn_params result=ok mode=throughput_optimized".to_owned());
                     Some(request)
@@ -1467,15 +1644,17 @@ impl BleSession {
                 None
             }
         };
+        pending.params_request = params_request;
         let name = connect_stage(reconnecting, reconnect_attempt, "device_properties", || {
-            device
+            pending
+                .device()
                 .Name()
                 .map_err(windows_error)
                 .map(|name| name.to_string())
         })?;
         let inferred_model = remote_model_from_name(&name);
         let model = if inferred_model == RemoteModel::Unknown {
-            read_remote_model(&device).unwrap_or(RemoteModel::Unknown)
+            read_remote_model(pending.device()).unwrap_or(RemoteModel::Unknown)
         } else {
             inferred_model
         };
@@ -1487,62 +1666,57 @@ impl BleSession {
             snapshot.remote_model = model;
             snapshot.last_error = None;
         }
-        let service = connect_stage(reconnecting, reconnect_attempt, "service_discovery", || {
-            find_service(&device, SERVICE_UUID)
-        })?;
-        let transmit = connect_stage(
+        pending.service = Some(connect_stage(
+            reconnecting,
+            reconnect_attempt,
+            "service_discovery",
+            || find_service(pending.device(), SERVICE_UUID),
+        )?);
+        pending.transmit = Some(connect_stage(
             reconnecting,
             reconnect_attempt,
             "characteristic_transmit",
-            || find_characteristic(&service, TRANSMIT_UUID, "transmit"),
-        )?;
-        let audio = connect_stage(
+            || find_characteristic(pending.service(), TRANSMIT_UUID, "transmit"),
+        )?);
+        pending.audio = Some(connect_stage(
             reconnecting,
             reconnect_attempt,
             "characteristic_audio",
-            || find_characteristic(&service, AUDIO_UUID, "audio"),
-        )?;
-        let control = connect_stage(
+            || find_characteristic(pending.service(), AUDIO_UUID, "audio"),
+        )?);
+        pending.control = Some(connect_stage(
             reconnecting,
             reconnect_attempt,
             "characteristic_control",
-            || find_characteristic(&service, CONTROL_UUID, "control"),
-        )?;
+            || find_characteristic(pending.service(), CONTROL_UUID, "control"),
+        )?);
 
-        let audio_token =
-            match connect_stage(reconnecting, reconnect_attempt, "subscribe_audio", || {
+        pending.audio_token = Some(connect_stage(
+            reconnecting,
+            reconnect_attempt,
+            "subscribe_audio",
+            || {
                 subscribe(
-                    &audio,
+                    pending.audio(),
                     sender.clone(),
                     WorkerChannel::Audio,
                     connection_generation,
                 )
-            }) {
-                Ok(token) => token,
-                Err(error) => {
-                    let _ = service.Close();
-                    let _ = device.Close();
-                    return Err(error);
-                }
-            };
-        let control_token =
-            match connect_stage(reconnecting, reconnect_attempt, "subscribe_control", || {
+            },
+        )?);
+        pending.control_token = Some(connect_stage(
+            reconnecting,
+            reconnect_attempt,
+            "subscribe_control",
+            || {
                 subscribe(
-                    &control,
+                    pending.control(),
                     sender.clone(),
                     WorkerChannel::Control,
                     connection_generation,
                 )
-            }) {
-                Ok(token) => token,
-                Err(error) => {
-                    let _ = audio.RemoveValueChanged(audio_token);
-                    let _ = disable_notifications(&audio);
-                    let _ = service.Close();
-                    let _ = device.Close();
-                    return Err(error);
-                }
-            };
+            },
+        )?);
         let connection_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
                 move |device, _| {
@@ -1557,44 +1731,19 @@ impl BleSession {
                     Ok(())
                 },
             );
-        let connection_token = match connect_stage(
+        pending.connection_token = Some(connect_stage(
             reconnecting,
             reconnect_attempt,
             "connection_status_handler",
             || {
-                device
+                pending
+                    .device()
                     .ConnectionStatusChanged(&connection_handler)
                     .map_err(windows_error)
             },
-        ) {
-            Ok(token) => token,
-            Err(error) => {
-                let _ = audio.RemoveValueChanged(audio_token);
-                let _ = control.RemoveValueChanged(control_token);
-                let _ = disable_notifications(&audio);
-                let _ = disable_notifications(&control);
-                let _ = service.Close();
-                let _ = device.Close();
-                return Err(error);
-            }
-        };
+        )?);
 
-        let connected = Self {
-            name,
-            model,
-            device,
-            service,
-            transmit,
-            audio,
-            control,
-            audio_token,
-            control_token,
-            connection_token,
-            params_request,
-            microphone_opened: false,
-            closed: false,
-            cleanup_failure: None,
-        };
+        let connected = pending.finish(name, model);
         connect_stage(
             reconnecting,
             reconnect_attempt,
@@ -2081,26 +2230,36 @@ fn subscribe(
     let token = characteristic
         .ValueChanged(&handler)
         .map_err(windows_error)?;
-    let properties = characteristic
-        .CharacteristicProperties()
-        .map_err(windows_error)?;
-    let descriptor = if has_property(properties, GattCharacteristicProperties::Notify) {
-        GattClientCharacteristicConfigurationDescriptorValue::Notify
-    } else if has_property(properties, GattCharacteristicProperties::Indicate) {
-        GattClientCharacteristicConfigurationDescriptorValue::Indicate
-    } else {
+    let enable_result = (|| -> Result<(), PlatformError> {
+        let properties = characteristic
+            .CharacteristicProperties()
+            .map_err(windows_error)?;
+        let descriptor = if has_property(properties, GattCharacteristicProperties::Notify) {
+            GattClientCharacteristicConfigurationDescriptorValue::Notify
+        } else if has_property(properties, GattCharacteristicProperties::Indicate) {
+            GattClientCharacteristicConfigurationDescriptorValue::Indicate
+        } else {
+            return Err(PlatformError::Gatt(
+                "特征不支持 Notify 或 Indicate".to_owned(),
+            ));
+        };
+        let status = block_on(
+            characteristic
+                .WriteClientCharacteristicConfigurationDescriptorAsync(descriptor)
+                .map_err(windows_error)?,
+        )?;
+        require_success(status, "订阅 GATT 通知")
+    })();
+    if let Err(error) = enable_result {
+        // ValueChanged is registered before CCCD setup. Every later failure must
+        // roll that edge back here because the outer partial-session guard only
+        // receives a token after this function succeeds.
         let _ = characteristic.RemoveValueChanged(token);
-        return Err(PlatformError::Gatt(
-            "特征不支持 Notify 或 Indicate".to_owned(),
-        ));
-    };
-    let status = block_on(
-        characteristic
-            .WriteClientCharacteristicConfigurationDescriptorAsync(descriptor)
-            .map_err(windows_error)?,
-    )?;
-    if let Err(error) = require_success(status, "订阅 GATT 通知") {
-        let _ = characteristic.RemoveValueChanged(token);
+        let _ = disable_notifications(characteristic);
+        gatt_note(
+            "ble_subscription_rollback result=completed reason=subscription_setup_failed retryable=true"
+                .to_owned(),
+        );
         return Err(error);
     }
     Ok(token)

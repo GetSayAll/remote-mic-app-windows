@@ -1,5 +1,48 @@
 # 双遥控器 BLE Unreachable（GATT 状态 1）：多手段自愈矩阵实测
 
+## 2026-09-13：重连失败路径泄漏 WinRT BLE 资源
+
+- 代码复核发现 `BluetoothLEDevice` 创建成功后，设备属性、服务发现或任一特征发现
+  使用 `?` 提前返回时，只释放 Rust/COM 引用，没有显式调用
+  `GattDeviceService.Close()` / `BluetoothLEDevice.Close()`；订阅函数在注册
+  `ValueChanged` 后若读取属性或写 CCCD 的异步调用失败，也存在处理器未退订路径。
+  高频指数退避会重复走这些分支，可能逐步占满 Windows BLE 栈资源，最终让设备和
+  Radio 的所有 WinRT 创建入口统一返回 `0x80070008`。这是基于代码所有权与现场
+  错误演进得到的根因判断；健康栈压力复现仍需真机验收。
+- 修复新增 `PendingBleConnection` 连接期所有权守卫：设备创建后任何阶段失败，均按
+  已取得资源自动执行事件退订、通知关闭、连接参数请求关闭、GATT service 关闭和
+  设备关闭；完整建链后才把所有权一次性交给 `BleSession`。`subscribe` 内部也对
+  注册成功但 CCCD 配置失败做局部回滚，外层守卫无需猜测不可见的 token。
+- 新增 `ble_partial_cleanup` 与 `ble_subscription_rollback` 结构化日志，只记录尝试数、
+  失败数和原因，不含设备地址、ID 或名称。该修复阻止重连循环制造新的资源泄漏；
+  Radio 预热缓存和周期性恢复窗口继续处理应用启动前已存在的系统栈僵死。
+- 自动化与安装包验证见本次提交交付记录；RC001/RC003 分别制造中途失败并确认随后
+  自动恢复仍 deferred。
+
+## 2026-09-13：恢复预算永久耗尽与 Radio 事后枚举失败
+
+- 最新 `main` 安装版 `1086c19` 启动后，`device_from_address` 持续在 0–1ms
+  返回 `windows_resource_exhausted`。两轮恢复均取得 `RadioAccessStatus::Allowed`，
+  但 `GetRadiosAsync` 与设备查询兜底都返回 `0x80070008`，因此没有执行到
+  Off/On；两轮之后只剩普通指数退避，恢复预算在本进程生命周期内永久耗尽。
+- 新增一次性探针使用系统当前 PnP Radio ID 直接调用 `Radio::FromIdAsync`，仍
+  返回 `0x80070008`。这排除了“只需绕过枚举”的假设：对象必须在系统栈健康时
+  预先取得并保留，不能等资源耗尽后再创建。
+- 修复一：Tauri setup 的可交互 UI 上下文在 BLE 线程启动前调用官方 Radio API，
+  预先缓存 Bluetooth Radio 对象并请求控制权限；恢复路径优先复用缓存，不再依赖
+  已经失败的枚举。若启动预热失败但 BLE 后续恢复连接，会立即补建缓存。
+- 修复二：恢复策略改为“每窗口最多 2 次 + 60 秒冷却后自动重开窗口”；连接成功、
+  主动断开和系统恢复会重置窗口。任何一次恢复失败都只影响当前窗口，不再要求用户
+  手动开关蓝牙，也不会永久退化成“正在等待遥控器重连”。
+- 日志新增 `radio_recovery_prepare`、恢复 `window`、`window_reopened` 和
+  `cooldown_ms`，不记录 Radio ID、蓝牙地址或设备名称。
+- 验证：恢复预算阈值/上限/冷却重开/连接后重置单元测试 passed；Windows 全工作区
+  `cargo check --workspace --all-targets --all-features` passed。安装包 `34537f9` 在启动前
+  已资源耗尽的现场完成窗口 1 两次尝试，并在第二次完成 62.06 秒后自动记录
+  `window_reopened window=2 cooldown_ms=60000`，证明恢复预算不会永久耗尽（passed）。
+  该现场因预热前已经 `0x80070008`，缓存为 unavailable；系统健康启动时缓存成功、
+  随后再复现僵死并自动 Off/On/重连仍 deferred。
+
 ## 2026-09-12：`Windows API failed: 内存资源不足`
 
 - 安装锁屏修复测试包后，用户连接 RC001/RC003 时收到上述错误，无法继续

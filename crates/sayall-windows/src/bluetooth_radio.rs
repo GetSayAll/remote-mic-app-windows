@@ -13,15 +13,16 @@
 //!   =Allowed，开关周期后应用重连循环立即成功，GATT 日志取证）。
 //!
 //! 使用约束：
-//! - 只在自动重连循环里、连续失败达到阈值且未超过次数上限时调用，避免
-//!   无线电抖动（影响本机所有蓝牙设备，耳机等会短暂掉线重连）。
+//! - 只在自动重连循环里、连续失败达到阈值时调用；每窗口限制次数并设置
+//!   冷却，避免无线电抖动，同时保证恢复能力不会永久耗尽。
 //! - 调用 RequestAccessAsync 并检查 Allowed 后才改变状态；微软文档明确要求
 //!   此顺序。仅在自动恢复真正触发时请求，Allowed 后由进程内缓存避免重复请求。
-//! - 开关之间保持短暂间隔；On 未确认生效时重试一次，仍失败则如实报错
-//!   （提示手动打开蓝牙），绝不静默把无线电留在关闭状态。
+//! - 开关之间保持短暂间隔；On 未确认生效时重试一次，仍失败则进入下一
+//!   自动恢复窗口，绝不静默停止自愈。
 
 use std::future::IntoFuture;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::Devices::Enumeration::DeviceInformation;
@@ -31,9 +32,10 @@ use windows::Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState};
 /// 失败约在 60 秒后——足够覆盖常规的 RPA 解析滞后与瞬时掉线，又不至于让
 /// 用户等太久）。
 pub const RADIO_RECOVERY_AFTER_FAILURES: u32 = 5;
-/// 每个僵死周期最多恢复次数：超过后停止抖动，由 UI 提示人工介入（遥控器
-/// 电量/手动开关蓝牙/重新配对）。
+/// 每个恢复窗口最多执行次数，达到上限后进入冷却，避免无线电连续抖动。
 pub const RADIO_RECOVERY_MAX_CYCLES: u32 = 2;
+/// 窗口耗尽后的冷却时间；冷却结束会重新获得恢复预算，不能永久退化成普通重连。
+pub const RADIO_RECOVERY_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 /// 关→开的间隔：给协议栈和外设留出链路拆除时间。
 const RADIO_RECOVERY_OFF_HOLD: Duration = Duration::from_secs(2);
 /// SetStateAsync 只表示请求已受理，实际 State 异步变化。2026-09-12 现场日志
@@ -42,6 +44,84 @@ const RADIO_RECOVERY_OFF_HOLD: Duration = Duration::from_secs(2);
 const RADIO_STATE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const RADIO_STATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 static RADIO_ACCESS_ALLOWED: AtomicBool = AtomicBool::new(false);
+static CACHED_BLUETOOTH_RADIO: OnceLock<Mutex<Option<Radio>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadioRecoveryCycle {
+    pub cycle: u32,
+    pub window: u32,
+    pub reopened: bool,
+}
+
+/// 每个窗口最多执行两次无线电恢复；窗口耗尽后冷却，再自动开启下一窗口。
+#[derive(Debug)]
+pub struct RadioRecoveryBudget {
+    cycles_done: u32,
+    window: u32,
+    resume_at: Option<Instant>,
+}
+
+impl Default for RadioRecoveryBudget {
+    fn default() -> Self {
+        Self {
+            cycles_done: 0,
+            window: 1,
+            resume_at: None,
+        }
+    }
+}
+
+impl RadioRecoveryBudget {
+    pub fn begin_cycle(
+        &mut self,
+        consecutive_failures: u32,
+        now: Instant,
+    ) -> Option<RadioRecoveryCycle> {
+        let mut reopened = false;
+        if self.cycles_done >= RADIO_RECOVERY_MAX_CYCLES {
+            if !self.resume_at.is_some_and(|resume_at| now >= resume_at) {
+                return None;
+            }
+            self.cycles_done = 0;
+            self.resume_at = None;
+            self.window = self.window.saturating_add(1);
+            reopened = true;
+        }
+        if !should_cycle(consecutive_failures, self.cycles_done) {
+            return None;
+        }
+        self.cycles_done += 1;
+        if self.cycles_done >= RADIO_RECOVERY_MAX_CYCLES {
+            self.resume_at = Some(now + RADIO_RECOVERY_RETRY_COOLDOWN);
+        }
+        Some(RadioRecoveryCycle {
+            cycle: self.cycles_done,
+            window: self.window,
+            reopened,
+        })
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn radio_cache() -> &'static Mutex<Option<Radio>> {
+    CACHED_BLUETOOTH_RADIO.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_bluetooth_radio() -> Option<Radio> {
+    radio_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn cache_bluetooth_radio(radio: &Radio) {
+    *radio_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(radio.clone());
+}
 
 /// 纯决策：是否应触发无线电恢复（单元测试覆盖）。
 pub fn should_cycle(consecutive_failures: u32, cycles_done: u32) -> bool {
@@ -77,7 +157,7 @@ fn find_bluetooth_radio_from_device_query() -> windows::core::Result<Option<Radi
     Ok(None)
 }
 
-fn find_bluetooth_radio() -> windows::core::Result<Option<Radio>> {
+fn find_bluetooth_radio_uncached() -> windows::core::Result<Option<Radio>> {
     match find_bluetooth_radio_from_snapshot() {
         Ok(Some(radio)) => Ok(Some(radio)),
         Ok(None) => {
@@ -97,6 +177,21 @@ fn find_bluetooth_radio() -> windows::core::Result<Option<Radio>> {
     }
 }
 
+fn find_bluetooth_radio() -> windows::core::Result<Option<Radio>> {
+    if let Some(radio) = cached_bluetooth_radio() {
+        crate::ble::gatt_note(
+            "radio_cycle stage=enumerate phase=completed terminal_result=passed source=prewarmed_cache"
+                .to_owned(),
+        );
+        return Ok(Some(radio));
+    }
+    let radio = find_bluetooth_radio_uncached()?;
+    if let Some(radio) = radio.as_ref() {
+        cache_bluetooth_radio(radio);
+    }
+    Ok(radio)
+}
+
 fn request_access() -> windows::core::Result<RadioAccessStatus> {
     if RADIO_ACCESS_ALLOWED.load(Ordering::Acquire) {
         return Ok(RadioAccessStatus::Allowed);
@@ -107,6 +202,69 @@ fn request_access() -> windows::core::Result<RadioAccessStatus> {
         RADIO_ACCESS_ALLOWED.store(true, Ordering::Release);
     }
     Ok(access)
+}
+
+/// 在 Tauri setup 的 UI 线程预先取得无线电对象和控制权限。
+/// Windows 蓝牙栈稍后资源耗尽时，恢复路径可以直接复用对象，不再依赖已经失败的枚举。
+pub fn prepare_bluetooth_radio_recovery() {
+    let started = Instant::now();
+    crate::ble::gatt_note("radio_recovery_prepare phase=requested".to_owned());
+    let radio = match find_bluetooth_radio_uncached() {
+        Ok(Some(radio)) => radio,
+        Ok(None) => {
+            crate::ble::gatt_note(format!(
+                "radio_recovery_prepare phase=completed terminal_result=failed error_code=bluetooth_radio_missing cache=unavailable retryable=true elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            return;
+        }
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "radio_recovery_prepare phase=completed terminal_result=failed error_code={} cache=unavailable retryable=true elapsed_ms={}",
+                if error.code().0 as u32 == 0x8007_0008 {
+                    "windows_resource_exhausted"
+                } else {
+                    "prepare_failed"
+                },
+                started.elapsed().as_millis()
+            ));
+            return;
+        }
+    };
+    cache_bluetooth_radio(&radio);
+    match request_access() {
+        Ok(RadioAccessStatus::Allowed) => crate::ble::gatt_note(format!(
+            "radio_recovery_prepare phase=completed terminal_result=passed cache=ready access=allowed elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+        Ok(_) => crate::ble::gatt_note(format!(
+            "radio_recovery_prepare phase=completed terminal_result=failed error_code=access_denied cache=ready retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+        Err(error) => crate::ble::gatt_note(format!(
+            "radio_recovery_prepare phase=completed terminal_result=failed error_code={} cache=ready retryable=true elapsed_ms={}",
+            if error.code().0 as u32 == 0x8007_0008 {
+                "windows_resource_exhausted"
+            } else {
+                "prepare_failed"
+            },
+            started.elapsed().as_millis()
+        )),
+    }
+}
+
+/// 启动预热失败但后续 BLE 已恢复时，再补建无线电缓存，为下一次僵死保留恢复句柄。
+pub fn refresh_bluetooth_radio_cache() {
+    if cached_bluetooth_radio().is_some() {
+        return;
+    }
+    if let Ok(Some(radio)) = find_bluetooth_radio_uncached() {
+        cache_bluetooth_radio(&radio);
+        crate::ble::gatt_note(
+            "radio_recovery_prepare phase=completed terminal_result=passed cache=refreshed_after_connection"
+                .to_owned(),
+        );
+    }
 }
 
 fn set_state(radio: &Radio, state: RadioState) -> windows::core::Result<RadioAccessStatus> {
@@ -128,7 +286,7 @@ fn wait_for_state(radio: &Radio, target: RadioState) -> windows::core::Result<bo
 }
 
 /// 关开一次蓝牙无线电（阻塞约 2-4 秒，在 BLE 工作线程的重连间歇调用）。
-/// 返回 Err 时已尽力把无线电恢复打开；调用方把错误写入快照提示人工介入。
+/// 返回 Err 时已尽力把无线电恢复打开；调用方在冷却后开启下一恢复窗口。
 pub fn cycle_bluetooth_radio() -> Result<(), String> {
     let started = Instant::now();
     crate::ble::gatt_note("radio_cycle stage=request_access phase=requested".to_owned());
@@ -218,7 +376,7 @@ pub fn cycle_bluetooth_radio() -> Result<(), String> {
         ));
         return Ok(());
     }
-    // On 未确认生效：重试一次，仍失败则如实报错（可能需要手动打开）。
+    // On 未确认生效：重试一次，仍失败则由调用方在冷却后继续自动恢复。
     std::thread::sleep(Duration::from_secs(1));
     match set_state(&radio, RadioState::On) {
         Ok(status)
@@ -232,9 +390,11 @@ pub fn cycle_bluetooth_radio() -> Result<(), String> {
             Ok(())
         }
         Ok(status) => Err(format!(
-            "蓝牙无线电恢复打开未确认（访问状态 {status:?}），请手动打开蓝牙"
+            "蓝牙无线电恢复打开未确认（访问状态 {status:?}），将在后续自动恢复窗口重试"
         )),
-        Err(error) => Err(format!("蓝牙无线电恢复打开失败：{error}，请手动打开蓝牙")),
+        Err(error) => Err(format!(
+            "蓝牙无线电恢复打开失败：{error}，将在后续自动恢复窗口重试"
+        )),
     }
     .inspect_err(|_| {
         // 首次 On 的异常结果只用于诊断，不吞掉重试后的最终结论。
@@ -253,11 +413,64 @@ mod tests {
         assert!(!should_cycle(0, 0));
         assert!(!should_cycle(1, 0));
         assert!(!should_cycle(4, 0));
-        // 达到阈值触发；每个僵死周期最多 2 次。
+        // 达到阈值触发；单个恢复窗口最多 2 次。
         assert!(should_cycle(5, 0));
         assert!(should_cycle(9, 1));
         assert!(!should_cycle(5, 2));
         assert!(!should_cycle(30, 2));
+    }
+
+    #[test]
+    fn exhausted_recovery_budget_reopens_after_cooldown() {
+        let started = Instant::now();
+        let mut budget = RadioRecoveryBudget::default();
+
+        assert_eq!(budget.begin_cycle(4, started), None);
+        assert_eq!(
+            budget.begin_cycle(5, started),
+            Some(RadioRecoveryCycle {
+                cycle: 1,
+                window: 1,
+                reopened: false,
+            })
+        );
+        assert_eq!(
+            budget.begin_cycle(5, started),
+            Some(RadioRecoveryCycle {
+                cycle: 2,
+                window: 1,
+                reopened: false,
+            })
+        );
+        assert_eq!(
+            budget.begin_cycle(30, started + RADIO_RECOVERY_RETRY_COOLDOWN / 2),
+            None
+        );
+        assert_eq!(
+            budget.begin_cycle(30, started + RADIO_RECOVERY_RETRY_COOLDOWN),
+            Some(RadioRecoveryCycle {
+                cycle: 1,
+                window: 2,
+                reopened: true,
+            })
+        );
+    }
+
+    #[test]
+    fn successful_connection_resets_recovery_budget() {
+        let started = Instant::now();
+        let mut budget = RadioRecoveryBudget::default();
+        let _ = budget.begin_cycle(5, started);
+        budget.reset();
+
+        assert_eq!(
+            budget.begin_cycle(5, started),
+            Some(RadioRecoveryCycle {
+                cycle: 1,
+                window: 1,
+                reopened: false,
+            })
+        );
     }
 
     #[test]
