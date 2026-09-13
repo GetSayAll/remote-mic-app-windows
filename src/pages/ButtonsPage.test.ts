@@ -229,6 +229,7 @@ describe("buttons mapping page", () => {
 
     await button("保存配置").trigger("click");
     await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    await flushPromises();
     expect(wrapper.text()).toContain("配置已保存并生效");
 
     await button("导出配置…").trigger("click");
@@ -281,6 +282,7 @@ describe("buttons mapping page", () => {
     };
     expect(saved.actions.power!.long.type).toBe("shortcut");
     expect(saved.actions.power!.long.chord!.keys).toEqual(["escape"]);
+    await flushPromises();
 
     // 禁用按键按钮：禁用当前格并自动保存。
     const disableButton = wrapper
@@ -297,6 +299,44 @@ describe("buttons mapping page", () => {
       actions: Record<string, { long: { type: string } }>;
     };
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
+  });
+
+  it("configures mouse actions with independent validated amounts", async () => {
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const choose = async (label: string) => {
+      await wrapper
+        .findAll(".mapping-editor button")
+        .find((button) => button.text() === label)!
+        .trigger("click");
+      await flushPromises();
+    };
+
+    await choose("滚轮向下");
+    await wrapper.get('input[aria-label="每次滚动格数"]').setValue("5");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+      type: "scroll",
+      direction: "down",
+      steps: 5,
+    });
+
+    const saveCount = vi.mocked(saveButtonMappings).mock.calls.length;
+    await wrapper.get('input[aria-label="每次滚动格数"]').setValue("101");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.calls).toHaveLength(saveCount);
+    expect(wrapper.text()).toContain("请输入 1 到 100 之间的整数");
+
+    await choose("左键双击");
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+      type: "mouse_click",
+      kind: "double_left",
+    });
+    wrapper.unmount();
   });
 
   it("records a physical Win+L chord directly by default", async () => {

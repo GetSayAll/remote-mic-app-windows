@@ -336,6 +336,44 @@ impl WindowsPlatform {
         Arc::clone(&self.usage)
     }
 
+    pub fn test_scroll(
+        &self,
+        direction: send_input::ScrollDirection,
+        steps: u16,
+    ) -> Result<send_input::SendInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.send_input.scroll(direction, steps)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (direction, steps);
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn test_mouse_action(
+        &self,
+        action: send_input::ButtonAction,
+    ) -> Result<send_input::SendInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            match action {
+                send_input::ButtonAction::MouseClick { kind } => self.send_input.mouse_click(kind),
+                send_input::ButtonAction::MouseMove {
+                    direction,
+                    distance,
+                } => self.send_input.mouse_move(direction, distance),
+                _ => Err(PlatformError::SendInput("unsupported mouse action".into())),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = action;
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
     pub fn voice_hold_hotkey(&self) -> Option<send_input::KeyChord> {
         lock(&self.voice_hold_hotkey).clone()
     }

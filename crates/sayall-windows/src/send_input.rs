@@ -258,6 +258,128 @@ pub enum ButtonAction {
     OpenApp {
         target: String,
     },
+    Scroll {
+        direction: ScrollDirection,
+        #[serde(default = "default_scroll_steps")]
+        steps: u16,
+    },
+    MouseClick {
+        kind: MouseClickKind,
+    },
+    MouseMove {
+        direction: MoveDirection,
+        distance: u16,
+    },
+}
+
+pub fn default_scroll_steps() -> u16 {
+    1
+}
+
+pub fn validate_mouse_amount(value: u16, maximum: u16) -> Result<(), SendInputError> {
+    if value == 0 || value > maximum {
+        return Err(SendInputError::Backend(format!(
+            "mouse amount must be within 1..={maximum}"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseClickKind {
+    Left,
+    Right,
+    DoubleLeft,
+    Middle,
+}
+
+impl MouseClickKind {
+    pub fn event_count(self) -> usize {
+        if self == Self::DoubleLeft {
+            4
+        } else {
+            2
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl MoveDirection {
+    pub fn offset(self, distance: u16) -> Result<(i32, i32), SendInputError> {
+        validate_mouse_amount(distance, 2000)?;
+        let distance = i32::from(distance);
+        Ok(match self {
+            Self::Up => (0, -distance),
+            Self::Down => (0, distance),
+            Self::Left => (-distance, 0),
+            Self::Right => (distance, 0),
+        })
+    }
+}
+
+pub fn send_click_with(
+    kind: MouseClickKind,
+    mut sender: impl FnMut(&[bool]) -> Result<usize, String>,
+) -> Result<usize, SendInputError> {
+    let edges = [false, true, false, true];
+    let events = &edges[..kind.event_count()];
+    let sent = sender(events).map_err(SendInputError::Backend)?;
+    if sent == events.len() {
+        return Ok(sent);
+    }
+    let cleanup = if sent < events.len() && sent % 2 == 1 {
+        match sender(&[true]) {
+            Ok(1) => "released",
+            _ => "release_failed",
+        }
+    } else {
+        "not_needed"
+    };
+    Err(SendInputError::Backend(format!(
+        "mouse click submitted {sent}/{} events cleanup={cleanup}",
+        events.len()
+    )))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollDirection {
+    Up,
+    Down,
+}
+
+impl ScrollDirection {
+    pub fn wheel_delta(self) -> i32 {
+        match self {
+            Self::Up => 120,
+            Self::Down => -120,
+        }
+    }
+}
+
+pub fn send_wheel_with(
+    direction: ScrollDirection,
+    steps: u16,
+    mut sender: impl FnMut(i32) -> Result<usize, String>,
+) -> Result<usize, SendInputError> {
+    validate_mouse_amount(steps, 100)?;
+    let sent =
+        sender(direction.wheel_delta() * i32::from(steps)).map_err(SendInputError::Backend)?;
+    if sent != 1 {
+        return Err(SendInputError::Backend(format!(
+            "mouse wheel submission returned {sent}/1 events"
+        )));
+    }
+    Ok(sent)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -406,6 +528,13 @@ impl ButtonMappings {
             for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
                 if let ButtonAction::Shortcut { chord } = action {
                     *chord = chord.clone().validated()?;
+                }
+                match action {
+                    ButtonAction::Scroll { steps, .. } => validate_mouse_amount(*steps, 100)?,
+                    ButtonAction::MouseMove { distance, .. } => {
+                        validate_mouse_amount(*distance, 2000)?
+                    }
+                    _ => {}
                 }
             }
         }
@@ -640,6 +769,106 @@ pub struct SendInputSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_amounts_validate_and_actions_round_trip() {
+        for amount in [1, 5, 100] {
+            assert_eq!(
+                send_wheel_with(ScrollDirection::Down, amount, |delta| {
+                    assert_eq!(delta, -120 * i32::from(amount));
+                    Ok(1)
+                }),
+                Ok(1)
+            );
+        }
+        for amount in [0, 101, u16::MAX] {
+            assert!(send_wheel_with(ScrollDirection::Up, amount, |_| {
+                panic!("invalid amount must not inject")
+            })
+            .is_err());
+        }
+        for action in [
+            ButtonAction::MouseClick {
+                kind: MouseClickKind::DoubleLeft,
+            },
+            ButtonAction::MouseMove {
+                direction: MoveDirection::Left,
+                distance: 75,
+            },
+            ButtonAction::Scroll {
+                direction: ScrollDirection::Down,
+                steps: 5,
+            },
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<ButtonAction>(&json).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn mapping_normalization_rejects_invalid_mouse_amounts() {
+        for action in [
+            ButtonAction::MouseMove {
+                direction: MoveDirection::Up,
+                distance: 0,
+            },
+            ButtonAction::MouseMove {
+                direction: MoveDirection::Left,
+                distance: 2001,
+            },
+            ButtonAction::Scroll {
+                direction: ScrollDirection::Down,
+                steps: 101,
+            },
+        ] {
+            let mut mappings = ButtonMappings::default();
+            mappings.actions.insert(
+                RemoteButton::Power,
+                ButtonActions {
+                    single: action,
+                    ..Default::default()
+                },
+            );
+            assert!(mappings.normalized().is_err());
+        }
+    }
+
+    #[test]
+    fn move_directions_are_signed_physical_pixel_offsets() {
+        for (direction, expected) in [
+            (MoveDirection::Up, (0, -30)),
+            (MoveDirection::Down, (0, 30)),
+            (MoveDirection::Left, (-30, 0)),
+            (MoveDirection::Right, (30, 0)),
+        ] {
+            assert_eq!(direction.offset(30), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn mouse_clicks_pair_edges_and_release_partial_down() {
+        for kind in [
+            MouseClickKind::Left,
+            MouseClickKind::Right,
+            MouseClickKind::Middle,
+            MouseClickKind::DoubleLeft,
+        ] {
+            assert_eq!(
+                send_click_with(kind, |edges| {
+                    assert_eq!(edges, &[false, true, false, true][..kind.event_count()]);
+                    Ok(edges.len())
+                }),
+                Ok(kind.event_count())
+            );
+        }
+        let mut calls = Vec::new();
+        let result = send_click_with(MouseClickKind::DoubleLeft, |edges| {
+            calls.push(edges.to_vec());
+            Ok(if calls.len() == 1 { 1 } else { 1 })
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, [vec![false, true, false, true], vec![true]]);
+    }
 
     fn chord(keys: &[KeyCode]) -> KeyChord {
         KeyChord {
