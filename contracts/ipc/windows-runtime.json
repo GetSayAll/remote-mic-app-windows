@@ -9,6 +9,7 @@
     "sendInputReady": true,
     "verificationStatus": "fixture-only",
     "connection": {
+      "batteryLevel": 99,
       "phase": "ready",
       "remoteName": "Xiaomi Bluetooth Remote 2",
       "remoteModel": "rc001",
@@ -44,6 +45,8 @@
       "lastButton": "home",
       "lastIsPressed": true,
       "activeButtons": ["home"],
+      "confirmedFilterButtons": ["volume_up"],
+      "confirmedUserHidButtons": [],
       "lastError": null
     },
     "buttonMapping": {

@@ -1,0 +1,2 @@
+# Official PyPI Windows x64 wheel; Python >= 3.11 has no extra dependencies.
+frida==17.15.3 --hash=sha256:12349027d6a4485292db973922a81a9c5cad2b64c5a16453307a22661d79de5d

@@ -81,6 +81,8 @@ export interface RawInputSnapshot {
   lastButton: RemoteButton | null;
   lastIsPressed: boolean | null;
   activeButtons: RemoteButton[];
+  confirmedFilterButtons?: RemoteButton[];
+  confirmedUserHidButtons?: RemoteButton[];
   lastError: string | null;
 }
 
@@ -90,9 +92,17 @@ export interface KeyChord {
   keys: KeyCode[];
 }
 
+export type MouseClickKind = "left" | "right" | "double_left" | "middle";
+export type MoveDirection = "up" | "down" | "left" | "right";
+export const mouseClickLabels: Record<MouseClickKind, string> = { left: "左键单击", right: "右键单击", double_left: "左键双击", middle: "中键单击" };
+export const mouseMoveLabels: Record<MoveDirection, string> = { up: "鼠标向上", down: "鼠标向下", left: "鼠标向左", right: "鼠标向右" };
+
 export type ButtonAction =
   | { type: "disabled" }
   | { type: "shortcut"; chord: KeyChord }
+  | { type: "scroll"; direction: "up" | "down"; steps?: number }
+  | { type: "mouse_click"; kind: MouseClickKind }
+  | { type: "mouse_move"; direction: MoveDirection; distance: number }
   | { type: "open_app"; target: string };
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
@@ -112,6 +122,7 @@ export interface ButtonActions {
 export interface ButtonMappings {
   enabled: boolean;
   actions: Partial<Record<RemoteButton, ButtonActions>>;
+  applications?: CustomAppPick[];
 }
 
 export interface FiredGesture {
@@ -148,6 +159,7 @@ export interface AtvvCapabilities {
 
 export interface ConnectionSnapshot {
   phase: ConnectionPhase;
+  batteryLevel?: number | null;
   remoteName: string | null;
   remoteModel: RemoteModel;
   capabilities: AtvvCapabilities | null;
@@ -305,6 +317,7 @@ const browserSnapshot: RuntimeSnapshot = {
       lastButton: null,
       lastIsPressed: null,
       activeButtons: [],
+      confirmedFilterButtons: [],
       lastError: null,
     },
     buttonMapping: {
@@ -463,6 +476,29 @@ export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
     return browserSnapshot.platform.rawInput;
   }
   return invoke<RawInputSnapshot>("get_raw_input_snapshot");
+}
+
+export interface UserHidSnapshot {
+  available: boolean;
+  phase: "stopped" | "starting" | "ready" | "stopping" | "failed";
+  reason: string | null;
+  scope: "rc003" | "proxy_unverified" | null;
+  cleanupConfirmed: boolean;
+}
+
+export async function getUserHidSnapshot(): Promise<UserHidSnapshot> {
+  if (!isTauriRuntime()) return { available: false, phase: "stopped", reason: null, scope: null, cleanupConfirmed: false };
+  return invoke<UserHidSnapshot>("get_user_hid_snapshot");
+}
+
+export async function startUserHid(): Promise<UserHidSnapshot> {
+  if (!isTauriRuntime()) throw new Error("浏览器预览不能启动实验采集");
+  return invoke<UserHidSnapshot>("start_user_hid", { acknowledgeRisk: true });
+}
+
+export async function stopUserHid(): Promise<UserHidSnapshot> {
+  if (!isTauriRuntime()) return getUserHidSnapshot();
+  return invoke<UserHidSnapshot>("stop_user_hid");
 }
 
 export async function startRawInput(): Promise<RawInputSnapshot> {
@@ -833,6 +869,25 @@ export const identityShortcutByButton: Partial<Record<RemoteButton, KeyCode>> = 
 
 export type ShortcutCapability = "all" | "identity" | "none";
 
+export function userHidButtonReady(button: RemoteButton, model: RemoteModel, rawInput: RawInputSnapshot | undefined): boolean {
+  return filterButtons.includes(button) && model === "rc003" && rawInput?.phase === "ready"
+    && rawInput.matchedDeviceCount === 1 && (rawInput.confirmedUserHidButtons?.includes(button) ?? false);
+}
+
+export const filterButtons: readonly RemoteButton[] = ["volume_up", "volume_down", "back"];
+
+export function filterButtonReady(
+  button: RemoteButton,
+  model: RemoteModel,
+  rawInput: RawInputSnapshot | undefined,
+): boolean {
+  return filterButtons.includes(button)
+    && model === "rc003"
+    && rawInput?.phase === "ready"
+    && rawInput.matchedDeviceCount === 1
+    && (rawInput.confirmedFilterButtons?.includes(button) ?? false);
+}
+
 /**
  * 按键 × 触发 × 型号 的"单响应能力"判定（2026-09-06 定稿；注入链路已由
  * examples/preset_inject_probe.rs 真机验证 36/36 全部正确——所有可见按键
@@ -843,9 +898,9 @@ export type ShortcutCapability = "all" | "identity" | "none";
  * - **identity**（武装族常见物理 VK：确定/方向）：孤立冷首按原始键
  *   必泄漏（结构性武装死锁，公开 API 内不可根除）→ 同键映射由泄漏对冲
  *   保证单响应，其他映射"配置动作正常执行 + 冷首按附带一次原生动作"；
- * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与返回/音量±（RC003
- *   输入栈不可见；RC001 虽可达但 2026-09-07 起全型号禁用——格子禁用，
- *   见 ButtonsPage 的 UNMAPPABLE_BUTTONS）。
+ * - 返回/音量±：只有选中 RC003 的驱动信号已按键逐一确认时开放。
+ *   F13/F14/F15 仅作传输键，不承诺屏蔽其他程序的同名全局热键。
+ * - **none**：TV 无同键映射可表达，或驱动信号未确认。
  *
  * 2026-09-07 增补（方案 C"遥控器优先"落地，key_gate 常驻抑制族）：
  * Home/TV 已配置映射且遥控器连接期间原生按键被接管——任意按压（含孤立
@@ -856,8 +911,10 @@ export type ShortcutCapability = "all" | "identity" | "none";
 export function shortcutCapability(
   button: RemoteButton,
   trigger: ButtonTrigger,
-  _model: RemoteModel,
+  model: RemoteModel,
+  rawInput?: RawInputSnapshot,
 ): ShortcutCapability {
+  if (filterButtonReady(button, model, rawInput) || userHidButtonReady(button, model, rawInput)) return "all";
   if (button === "power" || button === "menu") {
     return "all";
   }
@@ -867,7 +924,7 @@ export function shortcutCapability(
     button === "volume_down" ||
     button === "tv"
   ) {
-    // 返回/音量±全型号禁用（2026-09-07 用户决策）；TV 无同键映射可表达。
+    // Missing/old snapshots fail closed; a driver file alone is not evidence.
     return "none";
   }
   // 武装族（确定/方向）：单击可配同键映射（对冲单响应）。
@@ -930,6 +987,12 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
 
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
+  if (action.type === "scroll") {
+    const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
+    return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;
+  }
+  if (action.type === "mouse_click") return mouseClickLabels[action.kind];
+  if (action.type === "mouse_move") return `${mouseMoveLabels[action.direction]} ${action.distance} px`;
   if (action.type === "open_app") {
     const known = presetAppNames.get(action.target);
     if (known) return `打开${known}`;
@@ -945,6 +1008,11 @@ export function actionSummary(action: ButtonAction | undefined): string {
 export interface CustomAppPick {
   name: string;
   path: string;
+}
+
+export async function scanRegisteredApps(): Promise<CustomAppPick[]> {
+  if (!isTauriRuntime()) throw new Error("应用扫描需要在 Windows 客户端中使用");
+  return invoke<CustomAppPick[]>("scan_registered_apps");
 }
 
 /**

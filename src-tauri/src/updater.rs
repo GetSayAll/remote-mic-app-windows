@@ -278,6 +278,7 @@ fn build_updater(
     // 未关闭的 GATT 会话把链路留成僵死状态。
     builder = builder.on_before_exit(move || {
         let started = Instant::now();
+        platform.stop_user_hid();
         let outcome = if platform.disconnect_remote().is_ok() {
             "ok"
         } else {

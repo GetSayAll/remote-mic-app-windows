@@ -139,6 +139,9 @@ impl BleRuntime {
 
     fn decorate_snapshot(&self, mut snapshot: ConnectionSnapshot) -> ConnectionSnapshot {
         snapshot.power_notifications_available = lock(&self.power_notifications).is_some();
+        if !crate::battery::phase_accepts_battery(snapshot.phase) {
+            snapshot.battery_level = None;
+        }
         snapshot
     }
 }
@@ -171,6 +174,10 @@ pub(crate) enum WorkerMessage {
     /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
     /// GATT 重连耗 3 秒，期间按键全部无响应）。
     WakeReconnect,
+    BatteryRead {
+        connection_generation: u64,
+        reading: crate::battery::BatteryReading,
+    },
     /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
     /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
     /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
@@ -677,6 +684,22 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerMessage::BatteryRead {
+                connection_generation: message_generation,
+                reading,
+            } => {
+                if !crate::battery::apply_reading(
+                    &mut lock(&state),
+                    connection_generation,
+                    message_generation,
+                    reading,
+                ) {
+                    gatt_note(
+                        "remote_battery phase=apply result=ignored reason=stale_connection"
+                            .to_owned(),
+                    );
+                }
+            }
             WorkerMessage::ConnectionChanged {
                 connection_generation: message_generation,
                 status,
@@ -834,6 +857,8 @@ fn gate_remote_connected(phase: ConnectionPhase) -> bool {
 /// 遥控器原生 F5、但 ATVV 会话尚未就绪的短暂建链窗口；稳定在线后继续由
 /// GATT 0x04 前置信号精确武装，失败/挂起/主动断开时不占用实体键盘 F5。
 fn apply_input_connection_phase(phase: ConnectionPhase) {
+    crate::rc003_user_hid::note_phase(phase);
+    crate::rc003_filter::notify_connection_phase(phase);
     crate::key_gate::set_remote_connected(gate_remote_connected(phase));
     crate::key_suppressor::set_link_guard_active(voice_link_guard_active(phase));
 }
@@ -992,6 +1017,7 @@ fn invalidate_connection(
     held_hotkey: &mut Option<KeyChord>,
     connection_generation: &mut u64,
 ) -> Result<(), PlatformError> {
+    crate::rc003_user_hid::invalidate_link();
     *connection_generation = connection_generation.wrapping_add(1);
     release_voice_hold_hotkey(send_input, held_hotkey);
     let mut cleanup_errors = Vec::new();
@@ -1395,6 +1421,7 @@ fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> 
 }
 
 struct BleSession {
+    battery_monitor: Option<crate::battery::BatteryMonitor>,
     name: String,
     model: RemoteModel,
     device: BluetoothLEDevice,
@@ -1543,6 +1570,7 @@ impl BleSession {
                     return Err(error);
                 }
             };
+        let battery_sender = sender.clone();
         let connection_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
                 move |device, _| {
@@ -1579,7 +1607,8 @@ impl BleSession {
             }
         };
 
-        let connected = Self {
+        let mut connected = Self {
+            battery_monitor: None,
             name,
             model,
             device,
@@ -1607,6 +1636,9 @@ impl BleSession {
                 )
             },
         )?;
+        connected.battery_monitor =
+            crate::battery::BatteryMonitor::start(address, battery_sender, connection_generation);
+        crate::rc003_user_hid::note_peer(address, connected.model == RemoteModel::Rc003);
         Ok(connected)
     }
 
@@ -1669,6 +1701,7 @@ impl BleSession {
             };
         }
         self.closed = true;
+        self.battery_monitor.take();
         let mut errors = Vec::new();
         if let Err(error) = self.audio.RemoveValueChanged(self.audio_token) {
             errors.push(format!("移除音频通知处理器：{error}"));

@@ -1,13 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
+import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
+import BatteryIndicator from "../components/BatteryIndicator.vue";
 import {
   actionSummary,
+  mouseClickLabels,
+  mouseMoveLabels,
   buttonLabel,
   buttonLabels,
   buttonTriggerLabel,
   chordLabel,
   exportButtonMappingConfiguration,
+  filterButtonReady,
+  filterButtons,
+  userHidButtonReady,
+  getUserHidSnapshot,
+  startUserHid,
+  stopUserHid,
+  type UserHidSnapshot,
   getButtonMappingSnapshot,
   getButtonMappings,
   identityShortcutByButton,
@@ -26,6 +37,7 @@ import {
   subscribeButtonGestures,
   subscribeShortcutCaptureEdges,
   type ButtonAction,
+  type CustomAppPick,
   type ButtonActions,
   type ButtonEdge,
   type ButtonMappingSnapshot,
@@ -33,6 +45,7 @@ import {
   type ButtonTrigger,
   type FiredGesture,
   type KeyCode,
+  type MoveDirection,
   type PresetAppInfo,
   type RawInputPhase,
   type RemoteButton,
@@ -96,18 +109,24 @@ const remoteModel = computed<RemoteModel>(
   () => props.runtime?.platform.connection.remoteModel ?? "unknown",
 );
 
-/**
- * 不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
- * 返回/音量±——RC003 上不进 Windows 输入栈（配置无法生效，2026-09-05
- * 调查归档 docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md）；
- * RC001 上虽以 VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而
- * 不开放配置。存量配置由后端（settings 持久化层 + 映射引擎）双重剥离。
- */
-const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
-  "back",
-  "volume_up",
-  "volume_down",
-]);
+function isMappable(button: RemoteButton): boolean {
+  return !filterButtons.includes(button)
+    || filterButtonReady(button, remoteModel.value, rawInput.value)
+    || userHidButtonReady(button, remoteModel.value, rawInput.value);
+}
+
+function filterStatusTitle(button: RemoteButton): string {
+  if (userHidButtonReady(button, remoteModel.value, rawInput.value)) return "实验采集已确认按下与松开；宿主代理来源，非设备专属驱动";
+  if (isMappable(button)) return "本次连接已收到此键的驱动按下与松开信号";
+  if (remoteModel.value === "rc001") return "此扩展仅支持 RC003，RC001 保持禁用";
+  return "首次完整按下和松开仅用于确认，已有绑定保留";
+}
+
+function extendedKeyStatus(button: RemoteButton): string {
+  if (userHidButtonReady(button, remoteModel.value, rawInput.value)) return "实验信号已确认";
+  if (filterButtonReady(button, remoteModel.value, rawInput.value)) return "驱动信号已确认";
+  return userHid.value.phase === "ready" ? "待按下 / 松开确认" : "增强信号待确认";
+}
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
@@ -199,6 +218,50 @@ const lastFired = ref<FiredGesture | null>(null);
 const firedFlash = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const mappingSnapshot = ref<ButtonMappingSnapshot | null>(null);
 const busy = ref(false);
+const userHid = ref<UserHidSnapshot>({ available: false, phase: "stopped", reason: null, scope: null, cleanupConfirmed: false });
+const helperBusy = ref(false);
+const showHelperConsent = ref(false);
+const helperConsentPanel = ref<HTMLElement | null>(null);
+let helperPreviousFocus: HTMLElement | null = null;
+watch(showHelperConsent, async (visible) => {
+  if (visible) helperPreviousFocus = document.activeElement as HTMLElement | null;
+  await nextTick();
+  if (visible) helperConsentPanel.value?.querySelector<HTMLButtonElement>("button")?.focus();
+  else helperPreviousFocus?.focus();
+});
+
+function handleHelperDialogKey(event: KeyboardEvent): void {
+  if (event.key === "Escape") { event.preventDefault(); showHelperConsent.value = false; return; }
+  if (event.key !== "Tab") return;
+  const buttons = [...(helperConsentPanel.value?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+  if (!buttons.length) return;
+  event.preventDefault();
+  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  buttons[(index + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length]?.focus();
+}
+const helperOn = computed(() => ["starting", "ready", "stopping"].includes(userHid.value.phase));
+const helperStatus = computed(() => {
+  if (!userHid.value.available) return "此安装包未包含采集组件";
+  const labels = { stopped: "已关闭", starting: "正在启动", ready: "已连接 · 宿主代理来源", stopping: "正在停止", failed: "启动或通信失败" };
+  return labels[userHid.value.phase];
+});
+
+async function toggleUserHid(event: Event): Promise<void> {
+  (event.target as HTMLInputElement).checked = helperOn.value;
+  if (!helperOn.value) { showHelperConsent.value = true; return; }
+  helperBusy.value = true;
+  try { userHid.value = await stopUserHid(); }
+  catch (error) { statusMessage.value = String(error); }
+  finally { helperBusy.value = false; }
+}
+
+async function enableUserHid(): Promise<void> {
+  showHelperConsent.value = false;
+  helperBusy.value = true;
+  try { userHid.value = await startUserHid(); }
+  catch (error) { statusMessage.value = String(error); }
+  finally { helperBusy.value = false; }
+}
 const statusMessage = ref<string | null>(null);
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
@@ -280,6 +343,7 @@ const presetAppIds = computed(() => new Set(presetApps.value.map((app) => app.id
 /** 已在映射中使用过的自定义应用（路径目标，去重；跨格可复选）。 */
 const customApps = computed<Array<{ path: string; name: string }>>(() => {
   const seen = new Map<string, string>();
+  for (const app of mappings.value.applications ?? []) seen.set(app.path, app.name);
   for (const actions of Object.values(mappings.value.actions)) {
     for (const action of Object.values(actions)) {
       if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
@@ -294,6 +358,29 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
   return [...seen.entries()].map(([path, name]) => ({ path, name }));
 });
 
+const appPickerOpen = ref(false);
+const appPickerError = ref<string | null>(null);
+const appFilter = ref("");
+const filteredCustomApps = computed(() => customApps.value.filter(app => app.name.toLocaleLowerCase().includes(appFilter.value.trim().toLocaleLowerCase())));
+watch([presetApps, () => mappings.value.applications], () => {
+  registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
+}, { deep: true });
+
+async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
+  if (busy.value) return;
+  busy.value = true; appPickerError.value = null;
+  try {
+    const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
+    for (const app of apps) unique.set(app.path.toLowerCase(), app);
+    const saved = await saveButtonMappings({ ...mappings.value, applications: [...unique.values()] });
+    mappings.value = saved;
+    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+    appPickerOpen.value = false;
+    statusMessage.value = "已添加 " + apps.length + " 个应用，按键绑定未改变";
+  } catch (cause) { appPickerError.value = cause instanceof Error ? cause.message : String(cause); }
+  finally { busy.value = false; }
+}
+
 /** 打开原生文件选择器添加自定义应用，并应用到当前编辑格。 */
 async function addCustomApp(): Promise<void> {
   const pick = await pickCustomApp();
@@ -306,6 +393,7 @@ function selectButton(button: RemoteButton): void {
 }
 
 function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
+  if (!isMappable(button)) return;
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
@@ -313,7 +401,7 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
 
 function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
-  if (!target) return;
+  if (!target || !isMappable(target.button)) return;
   const next: ButtonMappings = {
     ...mappings.value,
     actions: { ...mappings.value.actions },
@@ -381,6 +469,32 @@ const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: 
   },
 ];
 
+const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
+const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? 1 : 1);
+const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : 30);
+const moveSymbols: Record<MoveDirection, string> = { up: "↑", down: "↓", left: "←", right: "→" };
+
+function updateMouseAmount(event: Event, kind: "scroll" | "mouse_move"): void {
+  const input = event.target as HTMLInputElement;
+  const value = input.valueAsNumber;
+  const maximum = kind === "scroll" ? 100 : 2000;
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    statusMessage.value = `请输入 1 到 ${maximum} 之间的整数`;
+    input.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
+    return;
+  }
+  const action = selectedAction.value;
+  if (action?.type === "scroll" && kind === "scroll") void applyAction({ ...action, steps: value });
+  if (action?.type === "mouse_move" && kind === "mouse_move") void applyAction({ ...action, distance: value });
+}
+
+function isActiveScroll(direction: "up" | "down"): boolean {
+  const target = editingTarget.value;
+  if (!target) return false;
+  const action = actionOf(target.button, target.trigger);
+  return action.type === "scroll" && action.direction === direction;
+}
+
 function isActivePreset(keys: KeyCode[]): boolean {
   const target = editingTarget.value;
   if (!target) return false;
@@ -398,10 +512,14 @@ function isActivePreset(keys: KeyCode[]): boolean {
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  if (filterButtons.includes(button)) {
+    if (userHidButtonReady(button, remoteModel.value, rawInput.value)) return "实验采集：宿主代理来源，尚未验证所有键盘与蓝牙设备组合。";
+    return "实验性驱动通道：F13 / F14 / F15 不作全局吞键，其他程序的同名热键仍可能响应。";
+  }
   if (button === "home" || button === "tv") {
     return "提示：保存后本按键启用“遥控器优先”——遥控器连接期间原生按键（Home / `）被接管，任意按压（含闲置后首次）严格单响应；此期间物理键盘上的对应按键将触发映射动作，断开遥控器或删除本键映射即恢复原生。";
   }
-  if (shortcutCapability(button, "single", remoteModel.value) === "identity") {
+  if (shortcutCapability(button, "single", remoteModel.value, rawInput.value) === "identity") {
     const identity = identityShortcutByButton[button];
     const label = identity ? chordLabel({ keys: [identity] }) : "";
     return `提示：此按键闲置约 4 秒后的首次按压会附带一次原生按键动作（结构性泄漏，调查已归档）；4 秒内连按严格单响应，单击配置为同键映射（${label}）时由引擎对冲为单响应。`;
@@ -409,21 +527,29 @@ const capabilityNote = computed<string | null>(() => {
   return null;
 });
 
+let saveQueue: Promise<void> = Promise.resolve();
+let saveRequest = 0;
 async function persist(message?: string): Promise<void> {
+  const request = ++saveRequest;
+  const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
-  try {
-    const saved = await saveButtonMappings(mappings.value);
-    mappings.value = saved;
-    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    if (message) {
-      statusMessage.value = message;
+  // Serialize rapid amount/action edits; an older response must not replace a newer edit.
+  const task = saveQueue.then(async () => {
+    try {
+      const saved = await saveButtonMappings(payload);
+      savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+      if (request === saveRequest) {
+        mappings.value = saved;
+        if (message) statusMessage.value = message;
+      }
+    } catch (error) {
+      if (request === saveRequest) statusMessage.value = error instanceof Error ? error.message : String(error);
     }
-  } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    busy.value = false;
-  }
+  });
+  saveQueue = task;
+  await task;
+  if (request === saveRequest) busy.value = false;
 }
 
 async function restoreDefaults(): Promise<void> {
@@ -715,15 +841,23 @@ async function toggleListener(): Promise<void> {
 const rawInput = computed(() => props.runtime?.platform.rawInput);
 const connectionInfo = computed(() => props.runtime?.platform.connection);
 
+watch([rawInput, remoteModel], () => {
+  if (editingTarget.value && !isMappable(editingTarget.value.button)) {
+    editingTarget.value = null;
+    if (capturingShortcut.value) void finishShortcutCapture();
+  }
+}, { deep: true });
+
 onMounted(async () => {
   const setupStarted = performance.now();
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
   window.addEventListener("blur", handleCaptureBlur);
-  const [loaded, snapshot, apps] = await Promise.all([
+  const [loaded, snapshot, apps, helper] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    getUserHidSnapshot().catch(() => userHid.value),
   ]);
   if (unmounted) {
     return;
@@ -733,6 +867,7 @@ onMounted(async () => {
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
+  userHid.value = helper;
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
@@ -779,7 +914,10 @@ onMounted(async () => {
   unlistenShortcutCapture = stopShortcutCaptureEvents;
 
   snapshotTimer = window.setInterval(async () => {
-    mappingSnapshot.value = await getButtonMappingSnapshot();
+    const [mapping, helper] = await Promise.all([getButtonMappingSnapshot(), getUserHidSnapshot().catch(() => userHid.value)]);
+    if (unmounted) return;
+    mappingSnapshot.value = mapping;
+    userHid.value = helper;
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
     if (rawInput.value?.activeButtons) {
       activeButtons.value = new Set(rawInput.value.activeButtons);
@@ -827,7 +965,7 @@ onUnmounted(() => {
       <div>
         <div class="mapping-title-row">
           <h1>按键映射</h1>
-          <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
+          <label class="toggle-row" title="开启后执行已配置的按键动作；关闭仅停用 SayAll 映射，独立驱动的按键转换不受此开关控制。">
             <span>启用自定义按键功能</span>
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
           </label>
@@ -837,9 +975,33 @@ onUnmounted(() => {
         <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
           <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
           <span>{{ connectionInfo?.remoteName ?? "未连接遥控器" }}</span>
+          <BatteryIndicator :connection="connectionInfo" />
         </div>
       </div>
     </header>
+
+    <div class="user-hid-bar">
+      <label class="toggle-row">
+        <span>RC003 增强采集 <small>实验</small></span>
+        <input type="checkbox" class="toggle-input" aria-label="RC003 增强采集" :checked="helperOn"
+          :disabled="helperBusy || userHid.phase === 'stopping' || (!helperOn && (!userHid.available || remoteModel !== 'rc003' || rawInput?.phase !== 'ready'))"
+          @change="toggleUserHid" />
+      </label>
+      <span class="user-hid-status" role="status">{{ helperStatus }}</span>
+      <span v-if="userHid.reason && userHid.phase === 'failed'" class="user-hid-error">{{ userHid.reason }}</span>
+    </div>
+
+    <div v-if="showHelperConsent" class="user-hid-backdrop" @click.self="showHelperConsent = false" @keydown.esc="showHelperConsent = false">
+      <section ref="helperConsentPanel" class="user-hid-dialog" role="dialog" aria-modal="true" aria-labelledby="user-hid-consent-title" @keydown="handleHelperDialogKey">
+        <h2 id="user-hid-consent-title">开启实验采集？</h2>
+        <p>需要管理员授权，会向 Windows 蓝牙宿主加载本地组件，可能与反作弊软件冲突。关闭采集后，组件可能仍驻留，直到宿主进程退出。</p>
+        <p>不安装内核驱动，不改变安全启动；本次启动不会设为开机自动启用。</p>
+        <div class="user-hid-dialog-actions">
+          <button class="secondary-button" @click="showHelperConsent = false">取消</button>
+          <button class="primary-button" @click="enableUserHid">同意并开启</button>
+        </div>
+      </section>
+    </div>
 
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
@@ -916,6 +1078,11 @@ onUnmounted(() => {
             />
           </svg>
           <strong>{{ buttonLabels[placement.button] }}</strong>
+          <span
+            v-if="filterButtons.includes(placement.button)"
+            class="filter-key-status"
+            :title="filterStatusTitle(placement.button)"
+          >{{ extendedKeyStatus(placement.button) }}</span>
         </div>
         <div class="mapping-cells">
           <button
@@ -929,10 +1096,10 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
+            :disabled="!isMappable(placement.button)"
             :title="
-              UNMAPPABLE_BUTTONS.has(placement.button)
-                ? '此按键暂不支持自定义，按键功能保持原样'
+              !isMappable(placement.button)
+                ? filterStatusTitle(placement.button)
                 : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
             "
             @click.stop="openEditor(placement.button, trigger)"
@@ -1008,6 +1175,52 @@ onUnmounted(() => {
         </section>
 
         <section class="action-section">
+          <h4 class="action-section-title">鼠标滚轮</h4>
+          <div class="preset-grid">
+            <button
+              v-for="direction in (['up', 'down'] as const)"
+              :key="direction"
+              class="chip"
+              :class="{ selected: isActiveScroll(direction) }"
+              type="button"
+              title="在鼠标当前位置滚动"
+              @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })"
+            >
+              {{ direction === "up" ? "滚轮向上" : "滚轮向下" }}
+            </button>
+          </div>
+          <label v-if="selectedAction?.type === 'scroll'" class="mouse-amount">
+            <span>每次滚动</span>
+            <input aria-label="每次滚动格数" type="number" min="1" max="100" step="1" :value="scrollSteps" @change="updateMouseAmount($event, 'scroll')" />
+            <span>格</span>
+          </label>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标点击</h4>
+          <div class="preset-grid">
+            <button v-for="(label, kind) in mouseClickLabels" :key="kind" class="chip" type="button"
+              :class="{ selected: selectedAction?.type === 'mouse_click' && selectedAction.kind === kind }"
+              title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
+          </div>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标移动</h4>
+          <div class="preset-grid">
+            <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip mouse-direction" type="button"
+              :aria-label="label" :title="label"
+              :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
+              @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ moveSymbols[direction] }}</button>
+          </div>
+          <label v-if="selectedAction?.type === 'mouse_move'" class="mouse-amount">
+            <span>每次移动</span>
+            <input aria-label="每次移动像素" type="number" min="1" max="2000" step="1" :value="moveDistance" @change="updateMouseAmount($event, 'mouse_move')" />
+            <span>像素</span>
+          </label>
+        </section>
+
+        <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <div class="preset-grid">
             <button
@@ -1021,17 +1234,7 @@ onUnmounted(() => {
             >
               {{ app.name }}
             </button>
-            <button
-              v-for="app in customApps"
-              :key="app.path"
-              class="chip"
-              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
-              type="button"
-              title="自定义应用（按路径启动）"
-              @click="applyAction({ type: 'open_app', target: app.path })"
-            >
-              {{ app.name }}
-            </button>
+            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
               class="chip add-app"
               type="button"
@@ -1040,6 +1243,12 @@ onUnmounted(() => {
             >
               ＋ 添加应用
             </button>
+          </div>
+          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
+          <div v-if="customApps.length" class="preset-grid saved-app-grid">
+            <button v-for="app in filteredCustomApps" :key="app.path" class="chip" type="button"
+              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
+              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
           </div>
         </section>
 
@@ -1140,5 +1349,24 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ mappingSnapshot.lastError }}</p>
+    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
   </section>
 </template>
+
+<style scoped>
+.user-hid-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.user-hid-status { color: var(--muted); }
+.user-hid-error { color: var(--danger, #b42318); overflow-wrap: anywhere; }
+.user-hid-backdrop { position: fixed; inset: 0; background: #0006; z-index: 100; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 24px; }
+.user-hid-dialog { box-sizing: border-box; width: 440px; max-width: 100%; min-width: 0; max-height: 100%; overflow-y: auto; background: var(--surface-canvas); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 24px; box-shadow: 0 12px 36px #0003; }
+.user-hid-dialog h2 { font-size: 18px; margin: 0 0 16px; }
+.user-hid-dialog p { font-size: 13px; line-height: 1.7; margin: 12px 0; }
+.user-hid-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+.filter-key-status { margin-left: auto; color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
+.mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
+.mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
+.saved-app-grid { max-height: 180px; overflow-y: auto; margin-top: 8px; align-content: start; }
+.saved-app-grid .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
+</style>

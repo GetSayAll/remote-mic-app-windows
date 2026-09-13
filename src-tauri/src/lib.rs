@@ -1,5 +1,6 @@
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
+use sayall_windows::rc003_user_hid::UserHidSnapshot;
 use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
 };
@@ -11,6 +12,44 @@ use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
+
+fn user_hid_helper(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .resource_dir()
+        .map(|root| root.join("rc003-helper").join("sayall-rc003-helper.exe"))
+        .map_err(|_| "无法定位实验采集组件".to_owned())
+}
+
+#[tauri::command]
+fn get_user_hid_snapshot(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> UserHidSnapshot {
+    let mut snapshot = state.platform.user_hid_snapshot();
+    snapshot.available = user_hid_helper(&app).is_ok_and(|path| path.is_file());
+    snapshot
+}
+
+#[tauri::command]
+async fn start_user_hid(
+    app: tauri::AppHandle,
+    acknowledge_risk: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<UserHidSnapshot, String> {
+    if !acknowledge_risk {
+        return Err("尚未确认实验采集风险".to_owned());
+    }
+    let helper = user_hid_helper(&app)?;
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.start_user_hid(helper))
+        .await
+        .map_err(|_| "启动增强采集任务失败".to_owned())?
+}
+
+#[tauri::command]
+fn stop_user_hid(state: tauri::State<'_, AppState>) -> UserHidSnapshot {
+    state.platform.stop_user_hid()
+}
 
 mod diagnostics;
 mod platform;
@@ -376,18 +415,24 @@ async fn import_button_mapping_configuration(
 fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut shortcut_count = 0_usize;
     let mut open_app_count = 0_usize;
+    let mut scroll_count = 0_usize;
+    let mut mouse_count = 0_usize;
     let mut disabled_count = 0_usize;
     for actions in mappings.actions.values() {
         for action in [&actions.single, &actions.double, &actions.long] {
             match action {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
+                ButtonAction::Scroll { .. } => scroll_count += 1,
+                ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
+                    mouse_count += 1
+                }
                 ButtonAction::Disabled => disabled_count += 1,
             }
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -402,6 +447,18 @@ async fn test_button_mapping(
     let action = state.platform.button_mappings().action_for(button, trigger);
     let platform = Arc::clone(&state.platform);
     match action {
+        ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
+            tauri::async_runtime::spawn_blocking(move || platform.test_mouse_action(action))
+                .await
+                .map_err(|e| format!("测试鼠标任务失败：{e}"))?
+                .map_err(|e| e.to_string())
+        }
+        ButtonAction::Scroll { direction, steps } => {
+            tauri::async_runtime::spawn_blocking(move || platform.test_scroll(direction, steps))
+                .await
+                .map_err(|error| format!("测试滚轮任务失败：{error}"))?
+                .map_err(|error| error.to_string())
+        }
         ButtonAction::Shortcut { chord } => {
             tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
                 .await
@@ -431,6 +488,14 @@ fn list_preset_apps(
 #[tauri::command]
 fn pick_custom_app() -> Option<sayall_windows::app_launcher::CustomAppPick> {
     sayall_windows::app_launcher::pick_custom_app()
+}
+
+#[tauri::command]
+async fn scan_registered_apps() -> Result<Vec<sayall_windows::app_launcher::CustomAppPick>, String>
+{
+    tauri::async_runtime::spawn_blocking(sayall_windows::registered_apps::scan_registered_apps)
+        .await
+        .map_err(|error| format!("应用扫描任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -1109,6 +1174,9 @@ pub fn run() {
 
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
+        get_user_hid_snapshot,
+        start_user_hid,
+        stop_user_hid,
         get_runtime_snapshot,
         get_diagnostic_report,
         scan_paired_remotes,
@@ -1129,6 +1197,7 @@ pub fn run() {
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
+        scan_registered_apps,
         get_button_mapping_snapshot,
         start_shortcut_capture,
         stop_shortcut_capture,
@@ -1148,6 +1217,9 @@ pub fn run() {
     ]);
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
+        get_user_hid_snapshot,
+        start_user_hid,
+        stop_user_hid,
         get_runtime_snapshot,
         get_diagnostic_report,
         scan_paired_remotes,
@@ -1168,6 +1240,7 @@ pub fn run() {
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
+        scan_registered_apps,
         get_button_mapping_snapshot,
         start_shortcut_capture,
         stop_shortcut_capture,
@@ -1184,12 +1257,22 @@ pub fn run() {
         report_frontend_event
     ]);
 
-    if let Err(_) = builder.run(tauri::generate_context!()) {
+    let app = builder.build(tauri::generate_context!()).unwrap_or_else(|_| {
         sayall_windows::gatt_note(
             "app_lifecycle event=event_loop phase=completed terminal_result=failed error_domain=tauri error_code=run_failed reason=event_loop_failed retryable=false".to_owned(),
         );
         panic!("failed to run SayAll Windows app");
-    }
+    });
+    app.run(|handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.platform.stop_user_hid();
+            }
+        }
+    });
     sayall_windows::gatt_note(
         "app_lifecycle event=process_exit phase=completed terminal_result=passed".to_owned(),
     );

@@ -121,6 +121,9 @@ fn is_custom_path_target(target: &str) -> bool {
 /// 解析失败退回原路径 ShellExecuteW。
 #[cfg(windows)]
 pub fn activate_or_launch(id: &str) -> Result<(), String> {
+    if crate::registered_apps::is_registered_target(id) {
+        return crate::registered_apps::launch_registered_app(id);
+    }
     if let Some(app) = preset_app(id) {
         if app.id == "sayall" {
             // 自身：恒已运行；激活失败（窗口隐藏等）时用自身 exe 路径重启拉起。

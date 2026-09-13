@@ -6,6 +6,16 @@
 
 ## Windows RC001 / RC003
 
+- [ ] 应用图标资源已更新，原创作者同意公开提交供项目使用；Shell 缓存、任务栏固定项仍待验收。功能验收范围见 `Testing/WindowsInputExtensions.md`。
+
+- [ ] RC003 用户态 HID 实验：默认关闭的显式提权 Helper、会话校验、逐键确认及映射接入已实现；来源仍标记为实验。握手合包问题尚未修复，动作、键盘隔离、重连、闲置首按及语音回归需完成验收。实现见 `docs/architecture/rc003-enhanced-capture.md`，测试方法见 `Testing/WindowsInputExtensions.md`。
+
+- [ ] 遥控器电量显示：按所选 BLE 对端读取 Windows 缓存电量，断连、睡眠或缺失时显示未知，不额外进行 GATT 操作。持续更新、断连、睡眠及 RC001 实机验收见 `Testing/WindowsInputExtensions.md`。
+
+- [ ] RC003 设备专属过滤信号接入：校验 F13/F14/F15 的设备来源，逐键确认并在断连、停止或睡眠时清理。该通道不包含驱动安装器，原始未归因输入仍不开放；驱动联调和实体三键回归待验收，见 `Testing/WindowsInputExtensions.md`。
+
+- [ ] 鼠标与应用库扩展：点击、1–100 格滚轮、1–2000 物理像素移动和注册应用扫描/多选/全选已实现；不修改默认绑定。RC001/RC003 实体按键回归仍需分别验收，见 `Testing/WindowsInputExtensions.md`。
+
 - [x] 建立独立 Rust + Tauri 2 + Vue 3 工程结构。
 - [x] 建立 Mac 原版风格设置界面骨架。
 - [x] 建立 ATVV、ADPCM 和语音会话纯 Rust 核心。

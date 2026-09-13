@@ -96,6 +96,12 @@ pub struct RawInputSnapshot {
     pub last_is_pressed: Option<bool>,
     /// 当前处于按下状态的语义按键（由映射引擎维护，用于 UI 高亮对账）。
     pub active_buttons: Vec<RemoteButton>,
+    /// Filter transport pairs observed in this listener/link session, not persisted.
+    #[serde(default)]
+    pub confirmed_filter_buttons: Vec<RemoteButton>,
+    /// Experimental host-proxy pairs, distinct from device-attributed driver input.
+    #[serde(default)]
+    pub confirmed_user_hid_buttons: Vec<RemoteButton>,
     pub last_error: Option<String>,
 }
 

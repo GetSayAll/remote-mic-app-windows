@@ -1,0 +1,7 @@
+.venv/
+.build-venv/
+.build/
+.runs/
+.assets/
+__pycache__/
+*.pyc

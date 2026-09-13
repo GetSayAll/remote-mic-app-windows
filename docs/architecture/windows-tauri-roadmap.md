@@ -2,6 +2,10 @@
 
 ## 1. 决策
 
+遥控器电量作为可选只读平台能力：Configuration Manager 读取当前 BLE 对端的 Windows 设备缓存，不写设备配置、不新增 GATT 会话。后台 60 秒查询与语音线程隔离，结果带连接纪元，旧纪元/非连接阶段拒绝；停止时不等待系统调用。快照 `batteryLevel` 为可空百分比，UI 明示缓存、无法读取则未知。标准 BatteryLife 缺失时允许经过类型/范围验证的 Windows Bluetooth 缓存键兼容读取，不承诺所有固件和 Windows 版本支持。依据见 ATTRIBUTION.md，验收见 Testing/WindowsInputExtensions.md。
+
+输入扩展保持现有 Vue/Tauri/Windows 分层：鼠标动作和数值进入类型化 ButtonAction，滚轮每次 1–100 格，指针移动每次 1–2000 物理像素；移动时切换并恢复线程 DPI 上下文。Windows AppsFolder 扫描在独立 STA 线程执行并有超时/并发门限；应用库是 ButtonMappings 的可选字段，随保存、导入、导出一起保留。扫描、添加应用库都不改变按键绑定；不改变语音或遥控器原有时序。验证边界见 Testing/WindowsInputExtensions.md。
+
 无线麦 Windows 版在公开仓库 `GetSayAll/remote-mic-app-windows` 中独立开发，采用 Rust、Tauri 2 和 Vue 3。macOS 继续使用 SwiftUI/AppKit；两端独立构建、签名、打包、测试和发布。
 
 `mwlt/Voice_VibeCoding`、PR #249、ZSTDJan Windows 版本和 Vibe Flow 只作为带来源的架构、实现和故障经验参考。
@@ -164,9 +168,20 @@ Windows 深色模式已于 2026-09-08 实现：“关于”页面提供“系统
 
 单独研究返回和音量键，不阻塞 Preview。模拟、驱动存在或 HID Tap ready 都不能代替真实按下/释放验收。
 
+三键扩展接入设备专属过滤信号的 F13/F14/F15，参见 `Testing/WindowsInputExtensions.md`。
+此实现仅消费所选 RC003 REV 00A4 的 Raw Input 键盘事件，不提供驱动安装功能，
+不依赖管理员权限运行主程序。确认状态只存当前会话，配置独立持久化；未确认时
+不执行历史绑定、不解除 UI 禁用。原来的 HID/vendor VK 返回和音量输入仍被拒绝，
+全局门控不接管三键或 F13/F14/F15，其他程序的同名全局热键冲突仍属边界。
+暂停和断连取消手势、不补发动作；基础语音轨保持不变。驱动和真实设备联调 deferred。
+
 按住说话快捷键与按键映射的真机结果（Bugs/2026-09-04）确认了 IME 对模拟按键的过滤边界。按 ADR 0002（docs/decisions/0002-dual-track-injection-optional-helper.md）设立双轨架构：默认轨保持主程序 SendInput；增强轨为独立、显式安装的提权 Helper，负责按设备吞掉遥控器原始按键并以虚拟键盘驱动执行"与物理按键等价"的注入。驱动来源按序评估 WinUHid 审计、微软公开样例自研、暂缓；未经审计的 WinUHid 二进制不得进入仓库。前置条件：真机物理按键对照 + RC001/RC003 Keyboard/HID 事件形态确认。
 
 ## 7. 验证边界
+
+### 可配置的垂直滚轮动作
+
+沿用 ButtonAction 和既有手势映射引擎，提供 scroll(up/down)；Windows 层通过 SendInput 发送单个 MOUSEEVENTF_WHEEL，不引入宏工具、驱动或进程注入。动作并不固定绑定上下键，不修改用户现有配置。鼠标位置、应用滚轮处理和 Windows 滚动设置决定实际目标与距离；方向键冷首按原生泄漏不在本功能改动范围。验收方法见 `Testing/WindowsInputExtensions.md`。
 
 Mac 开发机可以证明：
 

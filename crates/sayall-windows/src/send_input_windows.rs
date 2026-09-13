@@ -1,16 +1,25 @@
 use crate::send_input::{
-    plan_key_down, plan_key_up, send_key_edges_spaced_with, send_key_tap_with, KeyChord,
-    PlannedKeyEvent, SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
+    plan_key_down, plan_key_up, send_click_with, send_key_edges_spaced_with, send_key_tap_with,
+    send_wheel_with, KeyChord, MouseClickKind, MoveDirection, PlannedKeyEvent, ScrollDirection,
+    SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
 };
 use crate::PlatformError;
 use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
+use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Shutdown::LockWorkStation;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VIRTUAL_KEY,
+use windows::Win32::UI::HiDpi::{
+    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY,
+    VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+};
+use windows::Win32::UI::WindowsAndMessaging::{GetPhysicalCursorPos, SetPhysicalCursorPos};
 
 #[derive(Debug)]
 pub struct SendInputRuntime {
@@ -29,6 +38,120 @@ impl SendInputRuntime {
 
     pub fn snapshot(&self) -> SendInputSnapshot {
         lock(&self.snapshot).clone()
+    }
+
+    pub fn scroll(
+        &self,
+        direction: ScrollDirection,
+        steps: u16,
+    ) -> Result<SendInputSnapshot, PlatformError> {
+        let started = Instant::now();
+        crate::ble::gatt_note(format!(
+            "mouse_wheel phase=requested direction={direction:?} steps={steps} delta={}",
+            direction.wheel_delta() * i32::from(steps)
+        ));
+        let result = send_wheel_with(direction, steps, |delta| {
+            let input = build_wheel_input(delta);
+            Ok(unsafe { SendInput(&[input], size_of::<INPUT>() as i32) } as usize)
+        });
+        crate::ble::gatt_note(match &result {
+            Ok(sent) => format!(
+                "mouse_wheel phase=completed terminal_result=submitted direction={direction:?} events={sent} target_result=unknown elapsed_ms={}",
+                started.elapsed().as_millis()
+            ),
+            Err(_) => format!(
+                "mouse_wheel phase=completed terminal_result=failed direction={direction:?} error_domain=send_input error_code=wheel_rejected retryable=true elapsed_ms={}",
+                started.elapsed().as_millis()
+            ),
+        });
+        self.record(result, "SendInput mouse wheel")
+    }
+
+    pub fn mouse_click(&self, kind: MouseClickKind) -> Result<SendInputSnapshot, PlatformError> {
+        let started = Instant::now();
+        crate::ble::gatt_note(format!("mouse_click phase=requested kind={kind:?}"));
+        let key = match kind {
+            MouseClickKind::Right => VK_RBUTTON,
+            MouseClickKind::Middle => VK_MBUTTON,
+            _ => VK_LBUTTON,
+        };
+        let result = if unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0 {
+            Err(SendInputError::Backend(
+                "mouse button already held; click skipped".to_owned(),
+            ))
+        } else {
+            send_click_with(kind, |edges| {
+                let inputs: Vec<_> = edges
+                    .iter()
+                    .map(|&up| build_mouse_button_input(kind, up))
+                    .collect();
+                let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize;
+                crate::ble::gatt_note(format!(
+                    "mouse_click phase=submit requested={} submitted={sent} release_only={}",
+                    inputs.len(),
+                    edges == [true]
+                ));
+                Ok(sent)
+            })
+        };
+        crate::ble::gatt_note(format!("mouse_click phase=completed kind={kind:?} terminal_result={} target_result=unknown elapsed_ms={}", if result.is_ok() { "submitted" } else { "failed" }, started.elapsed().as_millis()));
+        self.record(result, "SendInput mouse click")
+    }
+
+    pub fn mouse_move(
+        &self,
+        direction: MoveDirection,
+        distance: u16,
+    ) -> Result<SendInputSnapshot, PlatformError> {
+        let started = Instant::now();
+        crate::ble::gatt_note(format!(
+            "mouse_move phase=requested direction={direction:?} distance={distance}"
+        ));
+        let result = (|| {
+            let (dx, dy) = direction.offset(distance)?;
+            // Even physical-cursor APIs are virtualized for unaware callers on this host.
+            // Scope DPI awareness to this call and restore the worker thread afterwards.
+            let previous =
+                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+            if previous.0.is_null() {
+                return Err(SendInputError::Backend(
+                    "cannot establish physical cursor coordinate context".into(),
+                ));
+            }
+            struct DpiGuard(DPI_AWARENESS_CONTEXT);
+            impl Drop for DpiGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        SetThreadDpiAwarenessContext(self.0);
+                    }
+                }
+            }
+            let _dpi = DpiGuard(previous);
+            let mut point = POINT::default();
+            unsafe { GetPhysicalCursorPos(&mut point) }
+                .map_err(|e| SendInputError::Backend(e.to_string()))?;
+            unsafe { SetPhysicalCursorPos(point.x.saturating_add(dx), point.y.saturating_add(dy)) }
+                .map_err(|e| SendInputError::Backend(e.to_string()))?;
+            let mut after = POINT::default();
+            if unsafe { GetPhysicalCursorPos(&mut after) }.is_ok() {
+                crate::ble::gatt_note(format!(
+                    "mouse_move phase=observed moved_x={} moved_y={}",
+                    i64::from(after.x) - i64::from(point.x),
+                    i64::from(after.y) - i64::from(point.y)
+                ));
+            }
+            Ok(1)
+        })();
+        crate::ble::gatt_note(format!(
+            "mouse_move phase=completed direction={direction:?} terminal_result={} elapsed_ms={}",
+            if result.is_ok() {
+                "submitted"
+            } else {
+                "failed"
+            },
+            started.elapsed().as_millis()
+        ));
+        self.record(result, "SetPhysicalCursorPos")
     }
 
     pub fn tap(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
@@ -139,6 +262,39 @@ fn real_send_input_batch(events: &[PlannedKeyEvent]) -> Result<usize, String> {
     Ok(sent)
 }
 
+fn build_mouse_button_input(kind: MouseClickKind, up: bool) -> INPUT {
+    let flags = match (kind, up) {
+        (MouseClickKind::Right, false) => MOUSEEVENTF_RIGHTDOWN,
+        (MouseClickKind::Right, true) => MOUSEEVENTF_RIGHTUP,
+        (MouseClickKind::Middle, false) => MOUSEEVENTF_MIDDLEDOWN,
+        (MouseClickKind::Middle, true) => MOUSEEVENTF_MIDDLEUP,
+        (_, false) => MOUSEEVENTF_LEFTDOWN,
+        (_, true) => MOUSEEVENTF_LEFTUP,
+    };
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    }
+}
+
+fn build_wheel_input(delta: i32) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                mouseData: delta as u32,
+                dwFlags: MOUSEEVENTF_WHEEL,
+                ..Default::default()
+            },
+        },
+    }
+}
+
 fn build_input(event: PlannedKeyEvent) -> INPUT {
     let mut flags = KEYBD_EVENT_FLAGS::default();
     let (virtual_key, scan_code) =
@@ -181,6 +337,64 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::send_input::KeyCode;
+
+    #[test]
+    fn click_flags_do_not_move_the_pointer_or_send_wheel_events() {
+        for (kind, down, up) in [
+            (
+                MouseClickKind::Left,
+                MOUSEEVENTF_LEFTDOWN,
+                MOUSEEVENTF_LEFTUP,
+            ),
+            (
+                MouseClickKind::DoubleLeft,
+                MOUSEEVENTF_LEFTDOWN,
+                MOUSEEVENTF_LEFTUP,
+            ),
+            (
+                MouseClickKind::Right,
+                MOUSEEVENTF_RIGHTDOWN,
+                MOUSEEVENTF_RIGHTUP,
+            ),
+            (
+                MouseClickKind::Middle,
+                MOUSEEVENTF_MIDDLEDOWN,
+                MOUSEEVENTF_MIDDLEUP,
+            ),
+        ] {
+            for (released, expected) in [(false, down), (true, up)] {
+                let input = build_mouse_button_input(kind, released);
+                assert_eq!(input.r#type, INPUT_MOUSE);
+                let mouse = unsafe { input.Anonymous.mi };
+                assert_eq!(mouse.dwFlags, expected);
+                assert_eq!(
+                    (
+                        mouse.dx,
+                        mouse.dy,
+                        mouse.mouseData,
+                        mouse.time,
+                        mouse.dwExtraInfo
+                    ),
+                    (0, 0, 0, 0, 0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_input_is_one_signed_notch_without_moving_or_clicking() {
+        for direction in [ScrollDirection::Up, ScrollDirection::Down] {
+            let input = build_wheel_input(direction.wheel_delta());
+            assert_eq!(input.r#type, INPUT_MOUSE);
+            let mouse = unsafe { input.Anonymous.mi };
+            assert_eq!(mouse.mouseData as i32, direction.wheel_delta());
+            assert_eq!(mouse.dwFlags, MOUSEEVENTF_WHEEL);
+            assert_eq!(
+                (mouse.dx, mouse.dy, mouse.time, mouse.dwExtraInfo),
+                (0, 0, 0, 0)
+            );
+        }
+    }
 
     #[test]
     fn right_control_uses_extended_physical_scan_code() {

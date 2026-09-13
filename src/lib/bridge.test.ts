@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  actionSummary,
   audioPhaseLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
+  filterButtonReady,
+  userHidButtonReady,
   identityShortcutByButton,
   openVbCableDownloadPage,
   remoteModelLabel,
@@ -11,9 +14,60 @@ import {
   type AudioPhase,
   type ConnectionPhase,
   type DiagnosticReport,
+  type RawInputSnapshot,
 } from "./bridge";
 
+describe("experimental user-mode capture capability", () => {
+  it("keeps helper confirmation separate from driver confirmation and fails closed", () => {
+    const raw: RawInputSnapshot = {
+      phase: "ready", matchedDeviceCount: 1, rawEventCount: 0, semanticEdgeCount: 0,
+      lastButton: null, lastIsPressed: null, activeButtons: [], lastError: null,
+      confirmedUserHidButtons: ["back"],
+    };
+    expect(userHidButtonReady("back", "rc003", raw)).toBe(true);
+    expect(filterButtonReady("back", "rc003", raw)).toBe(false);
+    expect(shortcutCapability("back", "double", "rc003", raw)).toBe("all");
+    expect(userHidButtonReady("volume_up", "rc003", raw)).toBe(false);
+    expect(userHidButtonReady("back", "rc001", raw)).toBe(false);
+    expect(userHidButtonReady("back", "unknown", raw)).toBe(false);
+    expect(userHidButtonReady("back", "rc003", undefined)).toBe(false);
+    expect(userHidButtonReady("back", "rc003", { ...raw, confirmedUserHidButtons: undefined })).toBe(false);
+    expect(userHidButtonReady("back", "rc003", { ...raw, matchedDeviceCount: 2 })).toBe(false);
+    expect(userHidButtonReady("back", "rc003", { ...raw, phase: "stopped" })).toBe(false);
+  });
+});
+
+describe("mouse wheel actions", () => {
+  it("shows mouse action types and per-binding amounts", () => {
+    expect(actionSummary({ type: "scroll", direction: "down", steps: 5 })).toBe("滚轮向下 5 格");
+    expect(actionSummary({ type: "mouse_move", direction: "left", distance: 75 })).toBe("鼠标向左 75 px");
+    expect(actionSummary({ type: "mouse_click", kind: "double_left" })).toBe("左键双击");
+    expect(actionSummary({ type: "mouse_click", kind: "right" })).toBe("右键单击");
+  });
+  it("labels both wheel directions independently from keyboard arrows", () => {
+    expect(actionSummary({ type: "scroll", direction: "up" })).toBe("滚轮向上");
+    expect(actionSummary({ type: "scroll", direction: "down" })).toBe("滚轮向下");
+  });
+});
+
 describe("mapping capability matrix（单响应判定，用于信息提示）", () => {
+  it("requires a current per-key RC003 confirmation, including old-host fallback", () => {
+    const raw: RawInputSnapshot = {
+      phase: "ready", matchedDeviceCount: 1, rawEventCount: 2, semanticEdgeCount: 0,
+      lastButton: null, lastIsPressed: null, activeButtons: [], lastError: null,
+      confirmedFilterButtons: ["volume_up"],
+    };
+    expect(shortcutCapability("volume_up", "long", "rc003", raw)).toBe("all");
+    expect(filterButtonReady("volume_down", "rc003", raw)).toBe(false);
+    expect(filterButtonReady("volume_up", "rc001", raw)).toBe(false);
+    expect(filterButtonReady("volume_up", "unknown", raw)).toBe(false);
+    expect(filterButtonReady("volume_up", "rc003", undefined)).toBe(false);
+    expect(filterButtonReady("volume_up", "rc003", { ...raw, confirmedFilterButtons: undefined })).toBe(false);
+    expect(filterButtonReady("volume_up", "rc003", { ...raw, matchedDeviceCount: 2 })).toBe(false);
+    for (const phase of ["failed", "stopped", "starting", "unsupported"] as const) {
+      expect(filterButtonReady("volume_up", "rc003", { ...raw, phase })).toBe(false);
+    }
+  });
   it("直接归因族（电源/菜单）全部触发单响应", () => {
     expect(shortcutCapability("power", "long", "rc003")).toBe("all");
     expect(shortcutCapability("power", "single", "rc003")).toBe("all");
@@ -32,7 +86,7 @@ describe("mapping capability matrix（单响应判定，用于信息提示）", 
     expect(shortcutCapability("home", "single", "rc003")).toBe("identity");
   });
 
-  it("TV 与返回/音量±全型号判定为不可配（2026-09-07 用户决策：两型号行为一致）", () => {
+  it("keeps TV and unconfirmed filter buttons unavailable", () => {
     expect(shortcutCapability("tv", "single", "rc003")).toBe("none");
     expect(shortcutCapability("tv", "long", "rc001")).toBe("none");
     expect(shortcutCapability("back", "single", "rc003")).toBe("none");

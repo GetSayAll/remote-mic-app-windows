@@ -62,6 +62,7 @@ const buttonTriggers = ["single", "double", "long"] as const satisfies readonly 
 describe("Rust and TypeScript IPC contract", () => {
   it("loads the shared platform snapshot through the frontend types", () => {
     const fixture = contract.platformSnapshot;
+    expect(fixture.connection.batteryLevel).toBe(99);
     const platformSnapshot: PlatformSnapshot = {
       ...fixture,
       connection: {
@@ -82,6 +83,9 @@ describe("Rust and TypeScript IPC contract", () => {
             ? null
             : memberOf(fixture.rawInput.lastButton, remoteButtons),
         activeButtons: fixture.rawInput.activeButtons.map((button) =>
+          memberOf(button, remoteButtons),
+        ),
+        confirmedFilterButtons: fixture.rawInput.confirmedFilterButtons.map((button) =>
           memberOf(button, remoteButtons),
         ),
       },
@@ -117,6 +121,7 @@ describe("Rust and TypeScript IPC contract", () => {
     ]);
     expectExactKeys(platformSnapshot.connection, [
       "phase",
+      "batteryLevel",
       "remoteName",
       "remoteModel",
       "capabilities",
@@ -152,6 +157,8 @@ describe("Rust and TypeScript IPC contract", () => {
       "lastButton",
       "lastIsPressed",
       "activeButtons",
+      "confirmedFilterButtons",
+      "confirmedUserHidButtons",
       "lastError",
     ]);
     expectExactKeys(platformSnapshot.buttonMapping, [

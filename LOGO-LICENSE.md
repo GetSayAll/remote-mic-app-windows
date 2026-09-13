@@ -1,5 +1,19 @@
 # 无线麦 App Logo 许可
 
+## 当前青色麦克风图标
+
+`public/app-logo.png`、`public/favicon.png` 和 `src-tauri/icons/`
+中的青色麦克风图标由贡献者 MiyakoCheng 原创绘制并提供。
+这些当前文件不是下述原官方 Logo，也不将其来源归属为 HD838A。
+作者同意随本次贡献公开提交，供无线麦 SayAll Windows 项目使用。
+本说明不将该图标归入下述原官方品牌许可，也不另行声明通用再许可。
+来源见 [ATTRIBUTION.md](ATTRIBUTION.md)，资源验收方法见 [Testing/WindowsInputExtensions.md](Testing/WindowsInputExtensions.md)。
+
+以下原许可文字保留，适用于 Git 历史中的原官方品牌资产及其衍生资产，
+不应按相同文件路径误套到此次替换的新图标上。
+
+## 原官方品牌资产许可
+
 Copyright (C) 2026 HD838A. All rights reserved.
 
 ## 适用范围

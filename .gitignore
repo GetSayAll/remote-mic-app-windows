@@ -3,6 +3,7 @@ dist/
 target/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/binaries/rc003-helper/
 .env
 .env.*
 credentials.json

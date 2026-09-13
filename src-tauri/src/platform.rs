@@ -1,5 +1,5 @@
 use sayall_windows::raw_input::RawInputSnapshot;
-use sayall_windows::send_input::{KeyChord, SendInputSnapshot};
+use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
     PlatformSnapshot, UsageCounters, WindowsPlatform,
@@ -8,6 +8,18 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 pub trait PlatformRuntime: Debug + Send + Sync {
+    fn user_hid_snapshot(&self) -> sayall_windows::rc003_user_hid::UserHidSnapshot {
+        Default::default()
+    }
+    fn start_user_hid(
+        &self,
+        _helper: std::path::PathBuf,
+    ) -> Result<sayall_windows::rc003_user_hid::UserHidSnapshot, String> {
+        Err("此运行环境不支持实验采集".to_owned())
+    }
+    fn stop_user_hid(&self) -> sayall_windows::rc003_user_hid::UserHidSnapshot {
+        self.user_hid_snapshot()
+    }
     fn usage_counters(&self) -> Arc<UsageCounters>;
     fn snapshot(&self) -> PlatformSnapshot;
     fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError>;
@@ -30,6 +42,12 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn send_input_snapshot(&self) -> SendInputSnapshot;
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
+    fn test_scroll(
+        &self,
+        direction: ScrollDirection,
+        steps: u16,
+    ) -> Result<SendInputSnapshot, PlatformError>;
+    fn test_mouse_action(&self, action: ButtonAction) -> Result<SendInputSnapshot, PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
     /// 打开/激活预设应用（测试按钮与引擎共用路径）。
@@ -52,6 +70,18 @@ pub trait PlatformRuntime: Debug + Send + Sync {
 }
 
 impl PlatformRuntime for WindowsPlatform {
+    fn user_hid_snapshot(&self) -> sayall_windows::rc003_user_hid::UserHidSnapshot {
+        self.user_hid_snapshot()
+    }
+    fn start_user_hid(
+        &self,
+        helper: std::path::PathBuf,
+    ) -> Result<sayall_windows::rc003_user_hid::UserHidSnapshot, String> {
+        self.start_user_hid(helper)
+    }
+    fn stop_user_hid(&self) -> sayall_windows::rc003_user_hid::UserHidSnapshot {
+        self.stop_user_hid()
+    }
     fn usage_counters(&self) -> Arc<UsageCounters> {
         self.usage_counters()
     }
@@ -120,6 +150,18 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
         self.test_shortcut(chord)
+    }
+
+    fn test_scroll(
+        &self,
+        direction: ScrollDirection,
+        steps: u16,
+    ) -> Result<SendInputSnapshot, PlatformError> {
+        self.test_scroll(direction, steps)
+    }
+
+    fn test_mouse_action(&self, action: ButtonAction) -> Result<SendInputSnapshot, PlatformError> {
+        self.test_mouse_action(action)
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
@@ -374,6 +416,8 @@ mod simulation {
                 last_button: Some(RemoteButton::Ok),
                 last_is_pressed: Some(false),
                 active_buttons: Vec::new(),
+                confirmed_filter_buttons: Vec::new(),
+                confirmed_user_hid_buttons: Vec::new(),
                 last_error: None,
             };
             Ok(state.raw_input.clone())
@@ -399,6 +443,47 @@ mod simulation {
                 .send_input
                 .submitted_events
                 .saturating_add(planned.len() as u64);
+            state.send_input.last_error = None;
+            Ok(state.send_input.clone())
+        }
+
+        fn test_scroll(
+            &self,
+            _direction: ScrollDirection,
+            steps: u16,
+        ) -> Result<SendInputSnapshot, PlatformError> {
+            sayall_windows::send_input::validate_mouse_amount(steps, 100)
+                .map_err(|e| PlatformError::SendInput(e.to_string()))?;
+            let mut state = lock(&self.state);
+            state.send_input.submitted_batches =
+                state.send_input.submitted_batches.saturating_add(1);
+            state.send_input.submitted_events = state.send_input.submitted_events.saturating_add(1);
+            state.send_input.last_error = None;
+            Ok(state.send_input.clone())
+        }
+
+        fn test_mouse_action(
+            &self,
+            action: ButtonAction,
+        ) -> Result<SendInputSnapshot, PlatformError> {
+            let events = match action {
+                ButtonAction::MouseClick { kind } => kind.event_count() as u64,
+                ButtonAction::MouseMove {
+                    direction,
+                    distance,
+                } => {
+                    direction
+                        .offset(distance)
+                        .map_err(|e| PlatformError::SendInput(e.to_string()))?;
+                    1
+                }
+                _ => return Err(PlatformError::SendInput("unsupported mouse action".into())),
+            };
+            let mut state = lock(&self.state);
+            state.send_input.submitted_batches =
+                state.send_input.submitted_batches.saturating_add(1);
+            state.send_input.submitted_events =
+                state.send_input.submitted_events.saturating_add(events);
             state.send_input.last_error = None;
             Ok(state.send_input.clone())
         }
@@ -538,6 +623,18 @@ mod simulation {
     mod tests {
         use super::*;
         use sayall_windows::send_input::{KeyChord, KeyCode};
+
+        #[test]
+        fn simulation_counts_one_event_per_wheel_action() {
+            let platform = SimulatedPlatform::default();
+            let first = platform.test_scroll(ScrollDirection::Up, 1).unwrap();
+            assert_eq!(first.submitted_batches, 1);
+            assert_eq!(first.submitted_events, 1);
+            let second = platform.test_scroll(ScrollDirection::Down, 5).unwrap();
+            assert_eq!(second.submitted_batches, 2);
+            assert_eq!(second.submitted_events, 2);
+            assert!(second.last_error.is_none());
+        }
 
         #[test]
         fn simulation_runs_connection_audio_raw_input_and_send_input_journey() {
