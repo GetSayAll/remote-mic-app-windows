@@ -1,5 +1,24 @@
 # 双遥控器 BLE Unreachable（GATT 状态 1）：多手段自愈矩阵实测
 
+## 2026-09-13：重连失败路径泄漏 WinRT BLE 资源
+
+- 代码复核发现 `BluetoothLEDevice` 创建成功后，设备属性、服务发现或任一特征发现
+  使用 `?` 提前返回时，只释放 Rust/COM 引用，没有显式调用
+  `GattDeviceService.Close()` / `BluetoothLEDevice.Close()`；订阅函数在注册
+  `ValueChanged` 后若读取属性或写 CCCD 的异步调用失败，也存在处理器未退订路径。
+  高频指数退避会重复走这些分支，可能逐步占满 Windows BLE 栈资源，最终让设备和
+  Radio 的所有 WinRT 创建入口统一返回 `0x80070008`。这是基于代码所有权与现场
+  错误演进得到的根因判断；健康栈压力复现仍需真机验收。
+- 修复新增 `PendingBleConnection` 连接期所有权守卫：设备创建后任何阶段失败，均按
+  已取得资源自动执行事件退订、通知关闭、连接参数请求关闭、GATT service 关闭和
+  设备关闭；完整建链后才把所有权一次性交给 `BleSession`。`subscribe` 内部也对
+  注册成功但 CCCD 配置失败做局部回滚，外层守卫无需猜测不可见的 token。
+- 新增 `ble_partial_cleanup` 与 `ble_subscription_rollback` 结构化日志，只记录尝试数、
+  失败数和原因，不含设备地址、ID 或名称。该修复阻止重连循环制造新的资源泄漏；
+  Radio 预热缓存和周期性恢复窗口继续处理应用启动前已存在的系统栈僵死。
+- 自动化与安装包验证见本次提交交付记录；RC001/RC003 分别制造中途失败并确认随后
+  自动恢复仍 deferred。
+
 ## 2026-09-13：恢复预算永久耗尽与 Radio 事后枚举失败
 
 - 最新 `main` 安装版 `1086c19` 启动后，`device_from_address` 持续在 0–1ms
