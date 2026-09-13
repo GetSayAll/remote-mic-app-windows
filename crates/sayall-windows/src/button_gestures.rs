@@ -127,6 +127,12 @@ impl GestureRecognizer {
             .is_some_and(|(config, _)| config.defer_single_until_release)
     }
 
+    pub fn cancel(&mut self, button: RemoteButton) {
+        if let Some((_, state)) = self.buttons.get_mut(&button) {
+            *state = ButtonGestureState::default();
+        }
+    }
+
     /// 按下沿：返回立即触发的手势（原始单击路径）。
     pub fn press(&mut self, button: RemoteButton, now: Instant) -> Vec<ButtonTrigger> {
         let Some((config, state)) = self.buttons.get_mut(&button) else {
@@ -157,6 +163,9 @@ impl GestureRecognizer {
         let Some((config, state)) = self.buttons.get_mut(&button) else {
             return Vec::new();
         };
+        if !state.pressed {
+            return Vec::new();
+        }
         state.pressed = false;
         state.long_deadline = None;
         state.repeat_deadline = None;
@@ -254,6 +263,26 @@ mod tests {
     use super::*;
     use crate::send_input::{ButtonAction, ButtonActions, KeyChord, KeyCode};
 
+    #[test]
+    fn cancelled_or_orphan_releases_do_not_fire_or_start_timers() {
+        let mut recognizer = GestureRecognizer::new();
+        let mappings = mappings_with(
+            RemoteButton::Back,
+            Some(KeyCode::Escape),
+            Some(KeyCode::Space),
+            Some(KeyCode::Backspace),
+        );
+        recognizer.configure(&mappings);
+        let now = Instant::now();
+        assert!(recognizer.release(RemoteButton::Back, now).is_empty());
+        assert!(recognizer.next_deadline().is_none());
+        recognizer.press(RemoteButton::Back, now);
+        recognizer.cancel(RemoteButton::Back);
+        assert!(recognizer.release(RemoteButton::Back, now).is_empty());
+        assert!(recognizer.advance(now + Duration::from_secs(2)).is_empty());
+        assert!(recognizer.next_deadline().is_none());
+    }
+
     fn mappings_with(
         button: RemoteButton,
         single: Option<KeyCode>,
@@ -276,6 +305,45 @@ mod tests {
             },
         );
         mappings
+    }
+
+    #[test]
+    fn wheel_mapping_repeats_only_while_pressed_and_stops_on_release() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: ButtonAction::Scroll {
+                    direction: crate::send_input::ScrollDirection::Up,
+                    steps: 1,
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+        let now = Instant::now();
+        assert_eq!(
+            recognizer.press(RemoteButton::Up, now),
+            [ButtonTrigger::Single]
+        );
+        assert_eq!(
+            recognizer.advance(now + REPEAT_START_DELAY),
+            [(RemoteButton::Up, ButtonTrigger::Single)]
+        );
+        assert!(recognizer
+            .release(
+                RemoteButton::Up,
+                now + REPEAT_START_DELAY + Duration::from_millis(10)
+            )
+            .is_empty());
+        assert!(recognizer.advance(now + Duration::from_secs(10)).is_empty());
+        assert_eq!(
+            recognizer.press(RemoteButton::Up, now + Duration::from_secs(11)),
+            [ButtonTrigger::Single]
+        );
+        recognizer.release_all();
+        assert!(recognizer.advance(now + Duration::from_secs(20)).is_empty());
     }
 
     #[test]

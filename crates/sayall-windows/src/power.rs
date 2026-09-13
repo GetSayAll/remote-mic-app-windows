@@ -109,6 +109,10 @@ unsafe extern "system" fn power_callback(
     let Some(context) = (context as *const CallbackContext).as_ref() else {
         return 0;
     };
+    if event_type == PBT_APMSUSPEND {
+        // Cancel filter gestures before suspension, even if the BLE worker is busy.
+        crate::rc003_filter::notify_connection_phase(crate::ConnectionPhase::Suspended);
+    }
     let message = match event_type {
         PBT_APMSUSPEND => Some(WorkerMessage::SystemSuspended),
         PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMECRITICAL | PBT_APMRESUMESUSPEND => {

@@ -387,6 +387,12 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let store = SettingsStore::new(settings_path);
         let mut mappings = ButtonMappings::default();
+        mappings
+            .applications
+            .push(sayall_windows::app_launcher::CustomAppPick {
+                name: "Example".into(),
+                path: "shell:AppsFolder\\Example!App".into(),
+            });
         mappings.actions.insert(
             RemoteButton::Power,
             ButtonActions {
@@ -400,6 +406,27 @@ mod tests {
             },
         );
 
+        store
+            .export_button_mappings(&export_path, mappings.clone())
+            .unwrap();
+        for button in sayall_windows::rc003_filter::FILTER_BUTTONS {
+            mappings.actions.insert(
+                button,
+                ButtonActions {
+                    single: ButtonAction::Shortcut {
+                        chord: KeyChord {
+                            keys: vec![KeyCode::Escape],
+                        },
+                    },
+                    ..ButtonActions::default()
+                },
+            );
+        }
+        assert_eq!(
+            store.save_button_mappings(mappings.clone()).unwrap(),
+            mappings
+        );
+        assert_eq!(store.load_button_mappings().unwrap(), mappings);
         store
             .export_button_mappings(&export_path, mappings.clone())
             .unwrap();

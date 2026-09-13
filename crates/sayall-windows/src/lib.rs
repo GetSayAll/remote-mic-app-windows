@@ -12,6 +12,8 @@ pub mod app_launcher;
 #[cfg(windows)]
 mod audio;
 #[cfg(windows)]
+pub mod battery;
+#[cfg(windows)]
 mod ble;
 #[cfg(windows)]
 mod bluetooth_radio;
@@ -19,6 +21,7 @@ mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
 pub mod file_dialog;
+pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{gatt_note, initialize_diagnostic_log, DiagnosticLogMetadata};
 #[cfg(windows)]
@@ -33,6 +36,10 @@ mod power;
 pub mod raw_input;
 #[cfg(windows)]
 mod raw_input_windows;
+pub mod rc003_filter;
+pub mod rc003_user_hid;
+#[cfg(windows)]
+mod rc003_user_hid_windows;
 #[cfg(any(windows, test))]
 mod reconnect;
 pub mod send_input;
@@ -148,6 +155,8 @@ pub enum ConnectionPhase {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
     pub phase: ConnectionPhase,
+    #[serde(default)]
+    pub battery_level: Option<u8>,
     pub remote_name: Option<String>,
     pub remote_model: RemoteModel,
     pub capabilities: Option<AtvvCapabilities>,
@@ -195,6 +204,7 @@ impl Default for ConnectionSnapshot {
     fn default() -> Self {
         Self {
             phase: ConnectionPhase::Idle,
+            battery_level: None,
             remote_name: None,
             remote_model: RemoteModel::Unknown,
             capabilities: None,
@@ -228,6 +238,8 @@ pub struct WindowsPlatform {
     audio: Arc<audio::AudioRuntime>,
     #[cfg(windows)]
     raw_input: Arc<raw_input_windows::RawInputRuntime>,
+    #[cfg(windows)]
+    user_hid: Arc<rc003_user_hid_windows::UserHidRuntime>,
     #[cfg(windows)]
     send_input: Arc<send_input_windows::SendInputRuntime>,
 }
@@ -290,6 +302,10 @@ impl Default for WindowsPlatform {
                 Arc::clone(&raw_input_snapshot),
                 button_mapping.sender(),
             ));
+            let user_hid = Arc::new(rc003_user_hid_windows::UserHidRuntime::new(
+                button_mapping.sender(),
+                Arc::clone(&raw_input_snapshot),
+            ));
             // 遥控器 HID 活动通知接线（断连时遥控器醒来按键 → 立即重连）。
             let wake_runtime = Arc::clone(&runtime);
             key_suppressor::set_remote_hid_activity_notify(Box::new(move || {
@@ -305,6 +321,7 @@ impl Default for WindowsPlatform {
                 runtime,
                 audio,
                 raw_input,
+                user_hid,
                 send_input,
             }
         }
@@ -330,6 +347,42 @@ impl Default for WindowsPlatform {
 }
 
 impl WindowsPlatform {
+    pub fn user_hid_snapshot(&self) -> rc003_user_hid::UserHidSnapshot {
+        #[cfg(windows)]
+        {
+            self.user_hid.snapshot()
+        }
+        #[cfg(not(windows))]
+        {
+            rc003_user_hid::UserHidSnapshot::default()
+        }
+    }
+
+    pub fn start_user_hid(
+        &self,
+        helper: std::path::PathBuf,
+    ) -> Result<rc003_user_hid::UserHidSnapshot, String> {
+        #[cfg(windows)]
+        {
+            self.user_hid.start(helper)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = helper;
+            Err("仅支持 Windows".to_owned())
+        }
+    }
+
+    pub fn stop_user_hid(&self) -> rc003_user_hid::UserHidSnapshot {
+        #[cfg(windows)]
+        {
+            self.user_hid.stop()
+        }
+        #[cfg(not(windows))]
+        {
+            rc003_user_hid::UserHidSnapshot::default()
+        }
+    }
     pub fn usage_counters(&self) -> Arc<UsageCounters> {
         Arc::clone(&self.usage)
     }
@@ -584,6 +637,7 @@ impl WindowsPlatform {
     }
 
     pub fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
+        self.stop_user_hid();
         #[cfg(windows)]
         {
             self.raw_input.stop()
@@ -604,6 +658,44 @@ impl WindowsPlatform {
         #[cfg(not(windows))]
         {
             send_input::SendInputSnapshot::default()
+        }
+    }
+
+    pub fn test_scroll(
+        &self,
+        direction: send_input::ScrollDirection,
+        steps: u16,
+    ) -> Result<send_input::SendInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.send_input.scroll(direction, steps)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (direction, steps);
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn test_mouse_action(
+        &self,
+        action: send_input::ButtonAction,
+    ) -> Result<send_input::SendInputSnapshot, PlatformError> {
+        #[cfg(windows)]
+        {
+            match action {
+                send_input::ButtonAction::MouseClick { kind } => self.send_input.mouse_click(kind),
+                send_input::ButtonAction::MouseMove {
+                    direction,
+                    distance,
+                } => self.send_input.mouse_move(direction, distance),
+                _ => Err(PlatformError::SendInput("unsupported mouse action".into())),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = action;
+            Err(PlatformError::UnsupportedPlatform)
         }
     }
 

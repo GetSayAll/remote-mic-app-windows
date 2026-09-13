@@ -1,0 +1,7 @@
+{
+  "version": "0.2.8",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "resources": { "binaries/rc003-helper/": "rc003-helper/" }
+  }
+}

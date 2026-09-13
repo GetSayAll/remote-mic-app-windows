@@ -37,7 +37,15 @@ use crate::key_gate;
 use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
-use crate::send_input::{native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord};
+use crate::rc003_filter::{
+    legacy_gate_mask, requires_filter, FilterDecision, FilterSession, FilteredKeyEdge,
+    FILTER_BUTTONS,
+};
+use crate::rc003_user_hid::{UserHidPermit, UserHidReport, UserHidSession};
+use crate::send_input::{
+    native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, MouseClickKind,
+    MoveDirection, ScrollDirection,
+};
 use crate::UsageCounters;
 
 /// 引擎消息（监听器/门控/宿主 → 引擎线程）。
@@ -45,6 +53,13 @@ use crate::UsageCounters;
 pub enum EngineMessage {
     /// 监听器观察到的遥控器键盘事件（未被吞的；被吞的走 [`Self::GateEdge`]）。
     Keyboard(RawKeyboardEvent),
+    /// Device-attributed F13/F14/F15. Never supplied by the global keyboard hook.
+    FilterKeyboard(FilteredKeyEdge),
+    /// Link/suspend boundary: retain mappings but re-confirm the filter transport.
+    FilterSessionReset,
+    UserHidBegin(UserHidPermit),
+    UserHidState(UserHidReport),
+    UserHidReset(u64),
     /// 监听器观察到的一份 HID 报文 usage 集合（绝对状态）。
     HidUsages(BTreeSet<u16>),
     /// 门控吞下的键盘边沿（已归因到遥控器）。
@@ -61,6 +76,9 @@ pub enum EngineMessage {
 /// 动作注入器抽象（生产实现包装 `SendInputRuntime`，测试实现记录调用）。
 pub trait MappingInjector: Send + Sync {
     fn tap(&self, chord: &KeyChord) -> Result<(), String>;
+    fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String>;
+    fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String>;
+    fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String>;
     /// 打开/激活预设应用（生产实现调用 app_launcher）。
     fn launch_app(&self, target: &str) -> Result<(), String>;
 }
@@ -78,6 +96,25 @@ impl SendInputInjector {
 }
 
 impl MappingInjector for SendInputInjector {
+    fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String> {
+        self.runtime
+            .mouse_click(kind)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String> {
+        self.runtime
+            .mouse_move(direction, distance)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String> {
+        self.runtime
+            .scroll(direction, steps)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn tap(&self, chord: &KeyChord) -> Result<(), String> {
         self.runtime
             .tap(chord.clone())
@@ -120,6 +157,7 @@ struct EngineState {
     fired_gestures: u64,
     last_fired: Option<FiredGesture>,
     last_error: Option<String>,
+    user_hid_permit: Option<UserHidPermit>,
 }
 
 /// 常驻抑制（"遥控器优先"）掩码：已映射按键中需要接管原生输入的键位。
@@ -213,14 +251,12 @@ impl ButtonMappingRuntime {
 
     /// 更新按键映射：热加载到引擎 + 同步门控吞键配置。
     pub fn set_mappings(&self, mappings: ButtonMappings) {
-        // 策略性不支持的按键（返回/音量±）统一
-        // 剥离：normalized() 已在持久化层剥离，此处兜底直连调用路径。
-        let mappings = mappings.without_unsupported_buttons();
         *self
             .mappings
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = mappings.clone();
-        let mapped_mask = mappings.mapped_mask();
+        // Filter-only mappings cannot arm the legacy hook's volume/vendor keys.
+        let mapped_mask = legacy_gate_mask(mappings.mapped_mask());
         key_gate::configure(mappings.enabled, mapped_mask);
         key_gate::set_persistent_mask(persistent_suppress_mask(mapped_mask));
         let _ = self.sender.send(EngineMessage::MappingsChanged);
@@ -282,6 +318,8 @@ fn engine_worker(
     usage: Arc<UsageCounters>,
 ) {
     let mut merger = ButtonStateMerger::default();
+    let mut filter_session = FilterSession::default();
+    let mut user_hid_session: Option<UserHidSession> = None;
     let mut recognizer = GestureRecognizer::new();
     recognizer.configure(&read_lock(&mappings).clone());
     // 泄漏对冲标记：本次按住的原始键已泄漏进 OS（原生动作已交付）的按键。
@@ -332,6 +370,9 @@ fn engine_worker(
 
         match message {
             EngineMessage::Keyboard(event) => {
+                if event.button().is_some_and(requires_filter) {
+                    continue;
+                }
                 let now = Instant::now();
                 let edges = merger.update_keyboard(event);
                 // 泄漏路径的按压边沿：原生动作已进 OS，标记待对冲。
@@ -355,7 +396,10 @@ fn engine_worker(
                     &mut native_pending,
                 );
             }
-            EngineMessage::HidUsages(usages) => {
+            EngineMessage::HidUsages(mut usages) => {
+                usages.retain(|usage| {
+                    !crate::raw_input::button_for_usage(*usage).is_some_and(requires_filter)
+                });
                 let now = Instant::now();
                 let edges = merger.update_hid_usages(usages);
                 handle_edges(
@@ -374,6 +418,9 @@ fn engine_worker(
                 );
             }
             EngineMessage::GateEdge(edge) => {
+                if requires_filter(edge.button) {
+                    continue;
+                }
                 let now = Instant::now();
                 let edges = merger.apply_keyboard_button_edge(edge.button, edge.is_pressed);
                 // 门控吞下的按压：原生动作未进 OS，清除待对冲标记。
@@ -395,7 +442,174 @@ fn engine_worker(
                     &mut native_pending,
                 );
             }
+            EngineMessage::FilterKeyboard(input) => {
+                if user_hid_session.is_some() {
+                    continue;
+                }
+                if lock_snapshot(&snapshot).phase != crate::raw_input::RawInputPhase::Ready {
+                    continue;
+                }
+                match filter_session.observe(input) {
+                    FilterDecision::Ignore => {}
+                    FilterDecision::Calibrating(button) => {
+                        crate::ble::gatt_note(format!(
+                            "rc003_filter phase=confirming button={button:?} reason=awaiting_release"
+                        ));
+                    }
+                    FilterDecision::Confirmed(button) => {
+                        lock_snapshot(&snapshot).confirmed_filter_buttons =
+                            filter_session.confirmed_buttons();
+                        crate::ble::gatt_note(format!(
+                            "rc003_filter phase=confirmed button={button:?} reason=attributed_pair_observed"
+                        ));
+                    }
+                    FilterDecision::Dispatch(edge) => {
+                        let edges = merger.apply_keyboard_button_edge(edge.button, edge.is_pressed);
+                        // Native delivery was F13/F14/F15, not VolumeUp/Down. Do not
+                        // incorrectly skip an identity volume mapping's first tap.
+                        native_pending.remove(&edge.button);
+                        handle_edges(
+                            edges,
+                            Instant::now(),
+                            &mut merger,
+                            &mut recognizer,
+                            &mappings,
+                            &state,
+                            &snapshot,
+                            &edge_callbacks,
+                            &gesture_callbacks,
+                            &injector,
+                            &usage,
+                            &mut native_pending,
+                        );
+                    }
+                }
+            }
+            EngineMessage::UserHidBegin(permit) => {
+                if !permit.valid()
+                    || user_hid_session.is_some()
+                    || lock_snapshot(&snapshot).phase != crate::raw_input::RawInputPhase::Ready
+                {
+                    permit.cancel();
+                    continue;
+                }
+                filter_session.reset();
+                lock_snapshot(&snapshot).confirmed_filter_buttons.clear();
+                lock_snapshot(&snapshot).confirmed_user_hid_buttons.clear();
+                lock_state(&state).user_hid_permit = Some(permit.clone());
+                user_hid_session = Some(UserHidSession::new(permit));
+                crate::ble::gatt_note(
+                    "rc003_user_hid phase=confirming reason=explicit_session_started".to_owned(),
+                );
+            }
+            EngineMessage::UserHidState(report) => {
+                let Some(session) = user_hid_session.as_mut() else {
+                    continue;
+                };
+                if report.id != session.permit.id {
+                    continue;
+                }
+                if lock_snapshot(&snapshot).phase != crate::raw_input::RawInputPhase::Ready {
+                    session.permit.cancel();
+                    continue;
+                }
+                let before = session.confirmed();
+                let edges = match session.observe(report) {
+                    Ok(edges) => edges
+                        .into_iter()
+                        .flat_map(|edge| {
+                            native_pending.remove(&edge.button);
+                            merger.apply_keyboard_button_edge(edge.button, edge.is_pressed)
+                        })
+                        .collect(),
+                    Err(reason) => {
+                        session.permit.cancel();
+                        lock_snapshot(&snapshot).confirmed_user_hid_buttons.clear();
+                        let mut releases = Vec::new();
+                        for button in FILTER_BUTTONS {
+                            recognizer.cancel(button);
+                            native_pending.remove(&button);
+                            releases.extend(merger.apply_keyboard_button_edge(button, false));
+                        }
+                        crate::ble::gatt_note(format!(
+                            "rc003_user_hid phase=rejected reason={reason}"
+                        ));
+                        releases
+                    }
+                };
+                if session.permit.valid() {
+                    let confirmed = session.confirmed();
+                    if before != confirmed {
+                        crate::ble::gatt_note(format!("rc003_user_hid phase=confirmed key_count={} source=experimental_capture", confirmed.len()));
+                    }
+                    lock_snapshot(&snapshot).confirmed_user_hid_buttons = confirmed;
+                }
+                handle_edges(
+                    edges,
+                    Instant::now(),
+                    &mut merger,
+                    &mut recognizer,
+                    &mappings,
+                    &state,
+                    &snapshot,
+                    &edge_callbacks,
+                    &gesture_callbacks,
+                    &injector,
+                    &usage,
+                    &mut native_pending,
+                );
+            }
+            EngineMessage::FilterSessionReset | EngineMessage::UserHidReset(_) => {
+                if let EngineMessage::UserHidReset(id) = message {
+                    if user_hid_session
+                        .as_ref()
+                        .is_none_or(|session| session.permit.id != id)
+                    {
+                        continue;
+                    }
+                }
+                if let Some(session) = user_hid_session.take() {
+                    session.permit.cancel();
+                }
+                lock_snapshot(&snapshot).confirmed_user_hid_buttons.clear();
+                lock_state(&state).user_hid_permit = None;
+                let had_capability = !filter_session.confirmed_buttons().is_empty();
+                filter_session.reset();
+                lock_snapshot(&snapshot).confirmed_filter_buttons.clear();
+                let mut releases = Vec::new();
+                for button in FILTER_BUTTONS {
+                    recognizer.cancel(button);
+                    native_pending.remove(&button);
+                    releases.extend(merger.apply_keyboard_button_edge(button, false));
+                }
+                if had_capability || !releases.is_empty() {
+                    crate::ble::gatt_note(
+                        "rc003_filter phase=reset reason=connection_boundary".to_owned(),
+                    );
+                }
+                handle_edges(
+                    releases,
+                    Instant::now(),
+                    &mut merger,
+                    &mut recognizer,
+                    &mappings,
+                    &state,
+                    &snapshot,
+                    &edge_callbacks,
+                    &gesture_callbacks,
+                    &injector,
+                    &usage,
+                    &mut native_pending,
+                );
+            }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
+                if let Some(session) = user_hid_session.take() {
+                    session.permit.cancel();
+                }
+                lock_state(&state).user_hid_permit = None;
+                lock_snapshot(&snapshot).confirmed_user_hid_buttons.clear();
+                filter_session.reset();
+                lock_snapshot(&snapshot).confirmed_filter_buttons.clear();
                 crate::ble::gatt_note(format!(
                     "map_reset source={}",
                     match message {
@@ -582,6 +796,19 @@ fn fire_gesture(
     injector: &Arc<dyn MappingInjector>,
     native_pending: &mut BTreeSet<RemoteButton>,
 ) -> bool {
+    // A disconnected/stopped helper must invalidate even a queued long/double
+    // deadline before the engine receives its reset message.
+    if requires_filter(button)
+        && lock_state(state)
+            .user_hid_permit
+            .as_ref()
+            .is_some_and(|permit| !permit.valid())
+    {
+        crate::ble::gatt_note(
+            "rc003_user_hid phase=action_rejected reason=invalidated_session".to_owned(),
+        );
+        return false;
+    }
     let fired = FiredGesture { button, trigger };
     {
         let mut state = lock_state(state);
@@ -634,6 +861,31 @@ fn fire_gesture(
     }
     match action {
         ButtonAction::Disabled => {}
+        ButtonAction::MouseClick { kind } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=mouse_click kind={kind:?}"
+            ));
+            if let Err(error) = injector.mouse_click(kind) {
+                lock_state(state).last_error = Some(format!("鼠标点击失败：{error}"));
+            }
+        }
+        ButtonAction::MouseMove {
+            direction,
+            distance,
+        } => {
+            crate::ble::gatt_note(format!("map_fire button={button:?} trigger={trigger:?} action=mouse_move direction={direction:?} distance={distance}"));
+            if let Err(error) = injector.mouse_move(direction, distance) {
+                lock_state(state).last_error = Some(format!("鼠标移动失败：{error}"));
+            }
+        }
+        ButtonAction::Scroll { direction, steps } => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=scroll direction={direction:?}"
+            ));
+            if let Err(error) = injector.scroll(direction, steps) {
+                lock_state(state).last_error = Some(format!("滚轮事件发送失败：{error}"));
+            }
+        }
         ButtonAction::Shortcut { chord } => {
             let terminal_action = chord.is_lock_workstation();
             crate::ble::gatt_note(format!(
@@ -718,15 +970,49 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
+    // Mapping runtimes share the process-wide key gate and callback sink.
+    static ENGINE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn lock_engine_test() -> std::sync::MutexGuard<'static, ()> {
+        ENGINE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
     /// 测试注入器：记录 tap 的和弦与打开应用的目标。
     #[derive(Debug, Default)]
     struct RecordingInjector {
         taps: StdMutex<Vec<KeyChord>>,
         launches: StdMutex<Vec<String>>,
+        scrolls: StdMutex<Vec<(ScrollDirection, u16)>>,
+        clicks: StdMutex<Vec<MouseClickKind>>,
+        moves: StdMutex<Vec<(MoveDirection, u16)>>,
         fail: bool,
     }
 
     impl MappingInjector for RecordingInjector {
+        fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String> {
+            if self.fail {
+                return Err("mouse click failed (test)".into());
+            }
+            self.clicks.lock().unwrap().push(kind);
+            Ok(())
+        }
+        fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String> {
+            if self.fail {
+                return Err("mouse move failed (test)".into());
+            }
+            self.moves.lock().unwrap().push((direction, distance));
+            Ok(())
+        }
+        fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String> {
+            if self.fail {
+                return Err("wheel injection failed (test)".to_owned());
+            }
+            self.scrolls.lock().unwrap().push((direction, steps));
+            Ok(())
+        }
+
         fn tap(&self, chord: &KeyChord) -> Result<(), String> {
             if self.fail {
                 return Err("注入失败（测试）".to_owned());
@@ -742,6 +1028,184 @@ mod tests {
             self.launches.lock().unwrap().push(target.to_owned());
             Ok(())
         }
+    }
+
+    #[test]
+    fn wheel_gestures_route_without_keyboard_taps_and_report_failures() {
+        let _test_guard = lock_engine_test();
+        let _gate = crate::key_gate::KeyGate::start();
+        let started = Instant::now();
+        while !key_gate::is_gate_thread_alive() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(key_gate::is_gate_thread_alive());
+        let mut configured = ButtonMappings::default();
+        configured.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: ButtonAction::Scroll {
+                    direction: ScrollDirection::Up,
+                    steps: 1,
+                },
+                double: ButtonAction::Scroll {
+                    direction: ScrollDirection::Down,
+                    steps: 1,
+                },
+                long: ButtonAction::Disabled,
+            },
+        );
+        let mappings = Arc::new(RwLock::new(configured));
+        let state = Arc::new(Mutex::new(EngineState::default()));
+        let callbacks = Arc::new(RwLock::new(Vec::new()));
+        let recorder = Arc::new(RecordingInjector::default());
+        let injector = Arc::clone(&recorder) as Arc<dyn MappingInjector>;
+        let mut native_pending = BTreeSet::from([RemoteButton::Up]);
+        for trigger in [ButtonTrigger::Single, ButtonTrigger::Double] {
+            assert!(!fire_gesture(
+                RemoteButton::Up,
+                trigger,
+                &mappings,
+                &state,
+                &callbacks,
+                &injector,
+                &mut native_pending
+            ));
+        }
+        assert_eq!(
+            *recorder.scrolls.lock().unwrap(),
+            [(ScrollDirection::Up, 1), (ScrollDirection::Down, 1)]
+        );
+        assert!(recorder.taps.lock().unwrap().is_empty());
+        assert!(recorder.launches.lock().unwrap().is_empty());
+        assert!(native_pending.is_empty());
+        let failing = Arc::new(RecordingInjector {
+            fail: true,
+            ..Default::default()
+        }) as Arc<dyn MappingInjector>;
+        fire_gesture(
+            RemoteButton::Up,
+            ButtonTrigger::Single,
+            &mappings,
+            &state,
+            &callbacks,
+            &failing,
+            &mut native_pending,
+        );
+        assert!(lock_state(&state).last_error.is_some());
+        mappings.write().unwrap().enabled = false;
+        fire_gesture(
+            RemoteButton::Up,
+            ButtonTrigger::Single,
+            &mappings,
+            &state,
+            &callbacks,
+            &injector,
+            &mut native_pending,
+        );
+        assert_eq!(recorder.scrolls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mouse_mapping_routes_actions_and_respects_disabled_state() {
+        let _test_guard = lock_engine_test();
+        let _gate = crate::key_gate::KeyGate::start();
+        let started = Instant::now();
+        while !key_gate::is_gate_thread_alive() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(key_gate::is_gate_thread_alive());
+        let mappings = Arc::new(RwLock::new(ButtonMappings::default()));
+        let state = Arc::new(Mutex::new(EngineState::default()));
+        let callbacks = Arc::new(RwLock::new(Vec::new()));
+        let recorder = Arc::new(RecordingInjector::default());
+        let injector = Arc::clone(&recorder) as Arc<dyn MappingInjector>;
+        let mut pending = BTreeSet::new();
+        for action in [
+            ButtonAction::MouseClick {
+                kind: MouseClickKind::DoubleLeft,
+            },
+            ButtonAction::MouseMove {
+                direction: MoveDirection::Right,
+                distance: 80,
+            },
+            ButtonAction::Scroll {
+                direction: ScrollDirection::Down,
+                steps: 7,
+            },
+        ] {
+            mappings.write().unwrap().actions.insert(
+                RemoteButton::Power,
+                ButtonActions {
+                    single: action,
+                    ..Default::default()
+                },
+            );
+            fire_gesture(
+                RemoteButton::Power,
+                ButtonTrigger::Single,
+                &mappings,
+                &state,
+                &callbacks,
+                &injector,
+                &mut pending,
+            );
+        }
+        assert_eq!(
+            *recorder.clicks.lock().unwrap(),
+            [MouseClickKind::DoubleLeft]
+        );
+        assert_eq!(
+            *recorder.moves.lock().unwrap(),
+            [(MoveDirection::Right, 80)]
+        );
+        assert_eq!(
+            *recorder.scrolls.lock().unwrap(),
+            [(ScrollDirection::Down, 7)]
+        );
+        assert!(recorder.taps.lock().unwrap().is_empty());
+        let failing = Arc::new(RecordingInjector {
+            fail: true,
+            ..Default::default()
+        }) as Arc<dyn MappingInjector>;
+        for action in [
+            ButtonAction::MouseClick {
+                kind: MouseClickKind::Right,
+            },
+            ButtonAction::MouseMove {
+                direction: MoveDirection::Up,
+                distance: 40,
+            },
+        ] {
+            mappings.write().unwrap().actions.insert(
+                RemoteButton::Power,
+                ButtonActions {
+                    single: action,
+                    ..Default::default()
+                },
+            );
+            lock_state(&state).last_error = None;
+            fire_gesture(
+                RemoteButton::Power,
+                ButtonTrigger::Single,
+                &mappings,
+                &state,
+                &callbacks,
+                &failing,
+                &mut pending,
+            );
+            assert!(lock_state(&state).last_error.is_some());
+        }
+        mappings.write().unwrap().enabled = false;
+        fire_gesture(
+            RemoteButton::Power,
+            ButtonTrigger::Single,
+            &mappings,
+            &state,
+            &callbacks,
+            &injector,
+            &mut pending,
+        );
+        assert_eq!(recorder.moves.lock().unwrap().len(), 1);
     }
 
     fn mappings_with_single(button: RemoteButton, key: KeyCode) -> ButtonMappings {
@@ -791,6 +1255,7 @@ mod tests {
     /// 退出旧门控再启动新门控，避免 Drop 的 GATE_ACTIVE=false 覆盖新值）。
     #[test]
     fn leak_suppression_suite() {
+        let _test_guard = lock_engine_test();
         // 起跑让位：等其它启停门控的用例完成，避免共享 GATE_ACTIVE 抖动。
         std::thread::sleep(Duration::from_millis(500));
         let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
@@ -1007,6 +1472,7 @@ mod tests {
 
     #[test]
     fn hid_press_release_drives_single_action_tap() {
+        let _test_guard = lock_engine_test();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -1058,6 +1524,7 @@ mod tests {
     /// 打开应用动作：门控运行时，手势触发应调用 launch_app 而非 tap。
     #[test]
     fn open_app_action_launches_instead_of_tap() {
+        let _test_guard = lock_engine_test();
         let gate = crate::key_gate::KeyGate::start();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
@@ -1101,6 +1568,7 @@ mod tests {
 
     #[test]
     fn gate_edge_and_hid_report_merge_into_one_press() {
+        let _test_guard = lock_engine_test();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -1160,6 +1628,7 @@ mod tests {
 
     #[test]
     fn listener_stop_releases_held_buttons_without_firing() {
+        let _test_guard = lock_engine_test();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -1213,6 +1682,7 @@ mod tests {
 
     #[test]
     fn usage_counters_record_deduped_presses() {
+        let _test_guard = lock_engine_test();
         let usage = Arc::new(UsageCounters::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -1256,8 +1726,8 @@ mod tests {
     }
 
     #[test]
-    fn set_mappings_strips_unsupported_buttons_and_sets_persistent_mask() {
-        // 返回/音量±仍被策略剥离；左键映射必须保留并进入普通逐键武装机制。
+    fn set_mappings_preserves_filter_bindings_without_arming_legacy_keys() {
+        let _test_guard = lock_engine_test();
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
@@ -1303,16 +1773,11 @@ mod tests {
             effective.actions.contains_key(&RemoteButton::Left),
             "左键自定义必须保留"
         );
-        for button in [
-            RemoteButton::Back,
-            RemoteButton::VolumeUp,
-            RemoteButton::VolumeDown,
-        ] {
-            assert!(
-                !effective.actions.contains_key(&button),
-                "{button:?} 自定义必须被策略剥离"
-            );
-        }
+        assert!(effective.actions.contains_key(&RemoteButton::Back));
+        assert_eq!(
+            legacy_gate_mask(effective.mapped_mask()) & (1 << RemoteButton::Back.ordinal()),
+            0
+        );
         assert_eq!(
             effective
                 .actions
@@ -1332,10 +1797,321 @@ mod tests {
                 },
             },
         );
-        // 引擎侧被剥离按键的动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
         assert_eq!(
             effective.action_for(RemoteButton::Back, ButtonTrigger::Single),
-            ButtonAction::Disabled,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Escape]
+                }
+            },
         );
+    }
+
+    fn filtered_input(vk: u16, pressed: bool) -> EngineMessage {
+        let path = r"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32B8_REV&00A4#fixture";
+        EngineMessage::FilterKeyboard(
+            FilteredKeyEdge::from_device(
+                path,
+                path,
+                RawKeyboardEvent {
+                    virtual_key: vk,
+                    make_code: 0,
+                    flags: u16::from(!pressed),
+                    message: if pressed { 0x0100 } else { 0x0101 },
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    fn wait_until(mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "engine did not reach expected state"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn filter_transport_confirms_each_key_then_injects_identity_volume_once() {
+        let _test_guard = lock_engine_test();
+        let gate = crate::key_gate::KeyGate::start();
+        assert!(gate.is_active());
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot {
+            phase: crate::raw_input::RawInputPhase::Ready,
+            ..RawInputSnapshot::default()
+        }));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::clone(&snapshot),
+        );
+        let mut mappings = ButtonMappings::default();
+        for (button, key) in FILTER_BUTTONS.into_iter().zip([
+            KeyCode::VolumeUp,
+            KeyCode::VolumeDown,
+            KeyCode::Escape,
+        ]) {
+            mappings.actions.insert(
+                button,
+                ButtonActions {
+                    single: ButtonAction::Shortcut {
+                        chord: KeyChord { keys: vec![key] },
+                    },
+                    ..ButtonActions::default()
+                },
+            );
+        }
+        runtime.set_mappings(mappings.clone());
+        let sender = runtime.sender();
+        for (index, vk) in (0x7C..=0x7E).enumerate() {
+            sender.send(filtered_input(vk, false)).unwrap();
+            sender.send(filtered_input(vk, true)).unwrap();
+            sender.send(filtered_input(vk, true)).unwrap();
+            sender.send(filtered_input(vk, false)).unwrap();
+            wait_until(|| snapshot.lock().unwrap().confirmed_filter_buttons.len() == index + 1);
+        }
+        assert!(
+            injector.taps.lock().unwrap().is_empty(),
+            "confirmation must not run saved actions"
+        );
+
+        // Legacy HID, vendor VK, and unattributed hook edges cannot bypass confirmation.
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::from([0x80, 0x81, 0xF1])))
+            .unwrap();
+        sender
+            .send(EngineMessage::Keyboard(RawKeyboardEvent {
+                virtual_key: 0xAF,
+                make_code: 0,
+                flags: 0,
+                message: 0x0100,
+            }))
+            .unwrap();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: true,
+            }))
+            .unwrap();
+        for vk in 0x7C..=0x7E {
+            sender.send(filtered_input(vk, true)).unwrap();
+            sender.send(filtered_input(vk, true)).unwrap();
+            sender.send(filtered_input(vk, false)).unwrap();
+        }
+        wait_until(|| snapshot.lock().unwrap().semantic_edge_count == 6);
+        assert_eq!(
+            injector.taps.lock().unwrap().as_slice(),
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::VolumeUp]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::VolumeDown]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Escape]
+                },
+            ]
+        );
+
+        // A link reset retains settings but cancels repeat and requires a new pair.
+        sender.send(filtered_input(0x7C, true)).unwrap();
+        wait_until(|| injector.taps.lock().unwrap().len() == 4);
+        sender.send(EngineMessage::FilterSessionReset).unwrap();
+        wait_until(|| snapshot.lock().unwrap().confirmed_filter_buttons.is_empty());
+        sender.send(filtered_input(0x7C, false)).unwrap();
+        std::thread::sleep(Duration::from_millis(450));
+        assert_eq!(injector.taps.lock().unwrap().len(), 4);
+        assert!(snapshot.lock().unwrap().active_buttons.is_empty());
+        assert_eq!(runtime.mappings(), mappings);
+
+        sender.send(filtered_input(0x7C, true)).unwrap();
+        sender.send(filtered_input(0x7C, false)).unwrap();
+        wait_until(|| snapshot.lock().unwrap().confirmed_filter_buttons.len() == 1);
+        mappings.enabled = false;
+        runtime.set_mappings(mappings);
+        sender.send(filtered_input(0x7C, true)).unwrap();
+        sender.send(filtered_input(0x7C, false)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(injector.taps.lock().unwrap().len(), 4);
+        sender.send(EngineMessage::ListenerStopped).unwrap();
+        wait_until(|| snapshot.lock().unwrap().confirmed_filter_buttons.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_hid_calibrates_then_maps_all_three_and_cancels_held_repeat() {
+        let _test_guard = lock_engine_test();
+        let gate = crate::key_gate::KeyGate::start();
+        assert!(gate.is_active());
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot {
+            phase: crate::raw_input::RawInputPhase::Ready,
+            matched_device_count: 1,
+            ..RawInputSnapshot::default()
+        }));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::clone(&snapshot),
+        );
+        let mut mappings = ButtonMappings::default();
+        for (button, key) in FILTER_BUTTONS.into_iter().zip([
+            KeyCode::VolumeUp,
+            KeyCode::VolumeDown,
+            KeyCode::Escape,
+        ]) {
+            mappings.actions.insert(
+                button,
+                ButtonActions {
+                    single: ButtonAction::Shortcut {
+                        chord: KeyChord { keys: vec![key] },
+                    },
+                    ..ButtonActions::default()
+                },
+            );
+        }
+        runtime.set_mappings(mappings.clone());
+        let sender = runtime.sender();
+        let permit = UserHidPermit::fixture(42);
+        sender
+            .send(EngineMessage::UserHidBegin(permit.clone()))
+            .unwrap();
+        let mut sequence = 0;
+        let mut send_state = |active: Vec<RemoteButton>| {
+            sequence += 1;
+            sender
+                .send(EngineMessage::UserHidState(UserHidReport {
+                    id: 42,
+                    seq: sequence,
+                    stream: 1,
+                    scope: crate::rc003_user_hid::SourceScope::ProxyUnverified,
+                    active,
+                    received_at: Instant::now(),
+                }))
+                .unwrap();
+        };
+        for button in FILTER_BUTTONS {
+            send_state(vec![button]);
+            send_state(vec![]);
+        }
+        wait_until(|| snapshot.lock().unwrap().confirmed_user_hid_buttons.len() == 3);
+        assert!(snapshot.lock().unwrap().confirmed_filter_buttons.is_empty());
+        assert!(injector.taps.lock().unwrap().is_empty());
+        sender.send(EngineMessage::UserHidReset(999)).unwrap();
+        for button in FILTER_BUTTONS {
+            send_state(vec![button]);
+            send_state(vec![button]);
+            send_state(vec![]);
+        }
+        wait_until(|| injector.taps.lock().unwrap().len() == 3);
+        assert_eq!(
+            injector.taps.lock().unwrap().as_slice(),
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::VolumeUp]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::VolumeDown]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Escape]
+                },
+            ]
+        );
+        send_state(vec![RemoteButton::VolumeUp]);
+        wait_until(|| injector.taps.lock().unwrap().len() == 4);
+        permit.cancel();
+        sender.send(EngineMessage::UserHidReset(42)).unwrap();
+        send_state(vec![]);
+        wait_until(|| {
+            snapshot
+                .lock()
+                .unwrap()
+                .confirmed_user_hid_buttons
+                .is_empty()
+        });
+        std::thread::sleep(Duration::from_millis(550));
+        assert_eq!(injector.taps.lock().unwrap().len(), 4);
+        assert!(snapshot.lock().unwrap().active_buttons.is_empty());
+        assert_eq!(runtime.mappings(), mappings);
+        drop(gate);
+    }
+
+    #[test]
+    fn filter_reset_cancels_pending_long_and_double_without_touching_other_keys() {
+        let _test_guard = lock_engine_test();
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot {
+            phase: crate::raw_input::RawInputPhase::Ready,
+            ..RawInputSnapshot::default()
+        }));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::new(RecordingInjector::default()),
+            Arc::new(UsageCounters::default()),
+            Arc::clone(&snapshot),
+        );
+        let mut mappings = mappings_with_single(RemoteButton::Ok, KeyCode::Enter);
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Escape],
+                    },
+                },
+                double: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Backspace],
+                    },
+                },
+                long: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Space],
+                    },
+                },
+            },
+        );
+        runtime.set_mappings(mappings);
+        let fired = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&fired);
+        runtime
+            .subscribe_button_gestures(Arc::new(move |gesture| sink.lock().unwrap().push(gesture)));
+        let sender = runtime.sender();
+        for reset in [
+            EngineMessage::FilterSessionReset,
+            EngineMessage::DeviceRemoved,
+            EngineMessage::ListenerStopped,
+        ] {
+            sender.send(filtered_input(0x7E, true)).unwrap();
+            sender.send(filtered_input(0x7E, false)).unwrap();
+            wait_until(|| !snapshot.lock().unwrap().confirmed_filter_buttons.is_empty());
+            sender.send(filtered_input(0x7E, true)).unwrap();
+            sender.send(reset).unwrap();
+            sender.send(filtered_input(0x7E, false)).unwrap();
+            wait_until(|| snapshot.lock().unwrap().confirmed_filter_buttons.is_empty());
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(fired.lock().unwrap().is_empty());
+            assert!(snapshot.lock().unwrap().active_buttons.is_empty());
+        }
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: true,
+            }))
+            .unwrap();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: false,
+            }))
+            .unwrap();
+        wait_until(|| fired.lock().unwrap().len() == 1);
+        assert_eq!(fired.lock().unwrap()[0].button, RemoteButton::Ok);
     }
 }

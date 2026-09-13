@@ -22,6 +22,7 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
             verification_status: "fixture-only".into(),
             connection: ConnectionSnapshot {
                 phase: ConnectionPhase::Ready,
+                battery_level: Some(99),
                 remote_name: Some("Xiaomi Bluetooth Remote 2".into()),
                 remote_model: RemoteModel::Rc001,
                 capabilities: Some(AtvvCapabilities {
@@ -56,6 +57,8 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 last_button: Some(RemoteButton::Home),
                 last_is_pressed: Some(true),
                 active_buttons: vec![RemoteButton::Home],
+                confirmed_filter_buttons: vec![RemoteButton::VolumeUp],
+                confirmed_user_hid_buttons: Vec::new(),
                 last_error: None,
             },
             button_mapping: ButtonMappingSnapshot {

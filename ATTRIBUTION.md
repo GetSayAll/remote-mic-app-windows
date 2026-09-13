@@ -2,6 +2,79 @@
 
 本仓库是面向 Windows 的 Rust/Tauri 工程。
 
+## RC003 用户态 HID 独立诊断与可选桥接
+
+- Frida 管理员 HID 宿主采集固定参考 `leowzz/axonkey`
+  提交 `a0451ec59cbcb48063f8dc1d7104f817d3cbaff6` 的
+  `tools/keycode-demo/rc003_hid/`，GPL-3.0-only 来源和完整许可保留在
+  `Testing/rc003-user-hid/`；这不是 SayAll 的稳定语音路径。默认关闭的实验桥接
+  只用于返回、音量加、音量减三个键。
+- 只借鉴 RC003 硬件身份、完成态 IOCTL `0x80018483` 的 9 字节报告以及
+  每次查询 I/O 句柄对象的隔离方法。可选 Gadget 后端参考其
+  `frida_hid_tap_injector.py` 的 LoadLibrary 方法并增加远端模块 RVA 解析。
+  不引入 Interception 或其他内核驱动，不自动重连；DLL 使用官方固定哈希。
+- 实验桥接增加唯一活动设备、微软签名系统宿主、管理员显式启动、单实例、
+  宿主内截止时间、完成态长度校验和三键限定脱敏。UMDF 代理信号始终为
+  `proxy_unverified`，不能以捕获 usage 代替设备归因或真机验收。
+- Gadget 通信仅在诊断期间监听本机回环，校验每次运行随机 256 位口令和
+  宿主 PID；宿主仅发起一次出站连接，断开即撤钩。ProgramData 运行目录
+  仅管理员/SYSTEM 可写、LocalService 可读，以宿主 PID/启动时间隔离。
+  采用 Frida 官方 `on_change=reload` 供显式提权重测复用已加载 DLL；空闲
+  仍驻留 DLL/文件监视，不宣称暂停会完整卸载，不自动重启宿主或蓝牙。
+- 基础语音路径、语音快捷键时序、系统安全配置和已有用户映射保持不变。
+  普通权限 Rust 主程序通过独立显式提权 Helper 获取有限三键状态，增加
+  会话口令、选中对端校验、BLE 纪元许可、序号/队列界限及双层租约清理；
+  第一组完整按下/松开只确认当前会话中的单个键，随后才开放其映射。
+  宿主代理来源仍标为实验，不伪造驱动确认、F13-F15 或完整设备归因。
+- Helper 使用官方 PyInstaller 6.16.0 onedir 打包，构建依赖固定版本和
+  PyPI SHA-256，仅使用独立构建环境；未修改的 Gadget、对应 GPL 源码、
+  构建脚本及 Python/PyInstaller/Frida 许可随资源包保留。参考
+  `https://pyinstaller.org/en/v6.16.0/usage.html`、`https://frida.re/docs/gadget/`。
+  不安装 Axonkey 整套软件或 Interception，不修改正式发布配置。
+- 实现及验证边界见 `Testing/rc003-user-hid/README.md` 与 `Testing/WindowsInputExtensions.md`。
+  离线映射夹具、真实 Helper 续期/停止测试不代替安装态三键动作和语音验收。
+
+## RC003 三键过滤信号通道
+
+- 实现前核对 QL-4/RemoteMapper 的 README 与独立驱动交接契约，固定参考提交
+  `be8b57330c26a70d8b8ec9ff1e60c23251a2fc31`：
+  `https://github.com/QL-4/RemoteMapper/tree/be8b57330c26a70d8b8ec9ff1e60c23251a2fc31`。
+  只参考驱动在 kbdhid 前将 Keyboard usage 0x80/0x81/0xF1 转成
+  0x68/0x69/0x6A、进而得到 Windows F13/F14/F15 的传输约定；未复制应用代码。
+- 应用使用现有 Windows Raw Input 注册。新增 `rc003_filter.rs` 在选中设备的
+  完整路径一致且硬件组件精确匹配 RC003 REV 00A4 后解码三个 VK；设备句柄为空的
+  输入仍由原监听器排除。Windows VK 与 HID usage 不混用，不猜测 MakeCode。
+- 与参考应用的全局低级钩子映射不同，本实现不将 F13/F14/F15 加入全局吞键表，
+  不武装实体键盘的音量键。来源校验位于带 hDevice 的 Raw Input 通道；
+  其他应用对 F13/F14/F15 的热键可能同时响应，不能宣称系统级独占。
+- 保留 SayAll 原有单击、双击、长按和连发时序，不改变 F5/ATVV/音频路径。
+  首个完整按下/松开只确认当前会话中的单个按键；断连、睡眠和监听停止后重新确认。
+  驱动源码、二进制、安装器和签名材料不进入本仓库，不自动更改 Windows 安全设置。
+- 官方 API 边界参考：
+  `https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-rawinputheader`、
+  `https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-rawkeyboard`、
+  `https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-kbdllhookstruct`。
+  验证及未完成的真机边界见 `Testing/WindowsInputExtensions.md`。
+
+## 鼠标与注册应用扩展
+
+- 鼠标单击/双击参考 AutoHotkey v2 Click 的成对按下/释放行为，不复制其代码或引入依赖；通过 Windows SendInput 单批发送 2/4 个边沿，部分提交时补发释放，不新设双击等待常量。参考： https://www.autohotkey.com/docs/v2/lib/Click.htm 。
+- 鼠标移动使用 Microsoft GetPhysicalCursorPos / SetPhysicalCursorPos；本机 150% 缩放实测发现 DPI-unaware 调用的 37 单位会变成约 56 物理像素，因此为该调用显式设置线程级 PER_MONITOR_AWARE_V2，并用 RAII 恢复原线程上下文。修正后右/左 37、下/上 53 物理像素均通过。参考： https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddpiawarenesscontext 。
+- 应用发现使用 Microsoft AppsFolder / IShellItem / BHID_EnumItems，启动使用 ShellExecuteExW + SEE_MASK_NOASYNC；只读取系统公开注册的可启动项，不扫描第三方私有文件或修改 Windows 注册。按本机缓存的 Microsoft windows-rs 0.62.2 API 签名核对实现；没有复制外部算法。参考： https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid 、https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow 。
+- 应用库仅保存在用户确认后的按键配置中；扫描不是启动，多选添加不是绑定。日志只记录数量、阶段和耗时，不记录应用身份或个人路径。验收方法见 `Testing/WindowsInputExtensions.md`。
+
+## 滚轮动作参考
+
+- 参考 AutoHotkey v2 的 WheelUp/WheelDown 动作粒度，仅参考行为，不复制实现或依赖 AutoHotkey。来源：`https://github.com/AutoHotkey/AutoHotkeyDocs/blob/v2/docs/lib/Send.htm`。
+- 使用 Microsoft 公开 SendInput / MOUSEINPUT API：INPUT_MOUSE + MOUSEEVENTF_WHEEL，mouseData 是带符号的滚轮位移；一个刻度为 WHEEL_DELTA（120）。来源：`https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput`。不设置移动或点击标志，不移动光标，不获取第三方应用私有状态。
+- 动作是用户可选的配置项，不绑定固定遥控器按键、不修改默认配置；支持在原有单击/双击/长按格子中选择、更换或禁用。测试和首按边界见 `Testing/WindowsInputExtensions.md`。
+
+## 遥控器缓存电量显示
+
+- Microsoft 公开 Configuration Manager API `CM_Get_Device_ID_List_SizeW` / `CM_Get_Device_ID_ListW` / `CM_Locate_DevNodeW` / `CM_Get_DevNode_PropertyW`：只枚举当前存在的 BTHLE 设备，按连接所选对端的完整地址组件匹配唯一节点，读取 OS 设备属性。官方文档：`https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw`。标准 `System.Devices.BatteryLife` / PKEY_Devices_BatteryLife 的 GUID/PID/type 由本机 Windows SDK 10.0.22621.0 `propkey.h` 核对。
+- `Gronsten/razer-tray`，提交 `8e7e395417023bf2446779a4c5237716183da69f`，`src/DeviceMonitor.cpp`：参考其使用公开 Configuration Manager API 读取 Windows Bluetooth 电量缓存属性 `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2` 的路径和未知值语义；未复制代码、无运行时依赖。该键不是微软承诺跨版本稳定的标准 BatteryLife 属性，故仅作可失败的兼容读取，严格检查 BYTE、长度为 1、0..100；缺失/异常保持未知。
+- 不访问注册表，不读取第三方 App 数据，不使用设备管理写入 API，不另开 BLE/GATT 会话。独立后台线程每 60 秒查询一次系统缓存，不代表遥控器每 60 秒上报新电量；界面提示缓存来源。连接纪元隔离迟到结果，断连/睡眠后停止监视并隐藏旧值；可选电量功能不影响语音错误状态。详见 `Testing/WindowsInputExtensions.md`。
+
 ## 治理规范迁移
 
 - `HD838A/remote-mic-app`，提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`：迁移其平台无关的分支/提交纪律、日志脱敏与完整链路记录、Bug 复现取证顺序、测试手册要求、发布来源可追溯和资产不可变原则；本仓库将其改写为 Windows/RC001/RC003、Tauri/NSIS、updater minisign 与 Authenticode 边界。
@@ -10,7 +83,8 @@
 
 ## App Logo 版权
 
-- App Logo 与 App Icon 沿用 `HD838A/remote-mic-app` 的版权边界：属于 HD838A 保留版权的专有品牌资产，不纳入 GPL-3.0-only；Windows 版适用范围和授权条件见 [LOGO-LICENSE.md](LOGO-LICENSE.md)。
+- 原 App Logo 与 App Icon 来自 `HD838A/remote-mic-app`，其原品牌许可保留在 [LOGO-LICENSE.md](LOGO-LICENSE.md)，适用于历史原图，不将该归属套用到新替换的图片。
+- 青色麦克风图标由贡献者 MiyakoCheng 原创绘制并提供，保留背景、配色和图案，仅转换 RGBA 与生成尺寸/ICO。许可范围见 `LOGO-LICENSE.md`，资源验收方法见 `Testing/WindowsInputExtensions.md`。
 
 ## 产品与 UI 基准
 

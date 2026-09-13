@@ -14,6 +14,10 @@ vi.mock("../lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/bridge")>();
   return {
     ...actual,
+    getUserHidSnapshot: vi.fn(async () => ({ available: true, phase: "stopped", reason: null, scope: null, cleanupConfirmed: false })),
+    startUserHid: vi.fn(async () => ({ available: true, phase: "starting", reason: null, scope: null, cleanupConfirmed: false })),
+    stopUserHid: vi.fn(async () => ({ available: true, phase: "stopped", reason: null, scope: null, cleanupConfirmed: true })),
+    scanRegisteredApps: vi.fn(async () => [{ name: "Registered Example", path: "shell:AppsFolder\\Example!App" }]),
     getButtonMappings: vi.fn(async () => ({
       enabled: true,
       actions: {
@@ -71,6 +75,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
 });
 
 import {
+  startUserHid,
+  stopUserHid,
   exportButtonMappingConfiguration,
   getButtonMappings,
   importButtonMappingConfiguration,
@@ -170,6 +176,132 @@ beforeEach(() => {
 });
 
 describe("buttons mapping page", () => {
+  it("serializes rapid amount edits without letting a stale save reset the latest direction", async () => {
+    const wrapper = await mountPage();
+    const card = wrapper.findAll(".mapping-card").find(item => item.find(".mapping-card-title strong").text() === "电源")!;
+    await card.findAll(".mapping-cell")[0]!.trigger("click");
+    let release!: (value: ButtonMappings) => void;
+    let first!: ButtonMappings;
+    vi.mocked(saveButtonMappings).mockImplementationOnce(value => { first = value; return new Promise(resolve => { release = resolve; }); });
+    const choose = (label: string) => wrapper.findAll(".mapping-editor button").find(item => item.text() === label)!.trigger("click");
+    await choose("滚轮向上"); await flushPromises();
+    await wrapper.get('input[aria-label="每次滚动格数"]').setValue("7");
+    await choose("滚轮向下");
+    release(first); await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.single).toEqual({ type: "scroll", direction: "down", steps: 7 });
+    expect(card.text()).toContain("滚轮向下 7 格");
+    wrapper.unmount();
+  });
+  it("adds scanned apps to the configuration library without assigning or changing buttons", async () => {
+    const wrapper = await mountPage();
+    const card = wrapper.findAll(".mapping-card").find(item => item.find(".mapping-card-title strong").text() === "电源")!;
+    await card.findAll(".mapping-cell")[0]!.trigger("click");
+    await wrapper.findAll("button").find(button => button.text() === "扫描本机应用")!.trigger("click");
+    await flushPromises();
+    await wrapper.get('input[aria-label="全选当前结果"]').setValue(true);
+    await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
+    await flushPromises();
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(saved.applications).toEqual([{ name: "Registered Example", path: "shell:AppsFolder\\Example!App" }]);
+    expect(saved.actions.power).toBeUndefined();
+    expect(saved.actions.ok?.single).toEqual({ type: "shortcut", chord: { keys: ["enter"] } });
+    expect(wrapper.find(".registered-apps-dialog").exists()).toBe(false);
+    const option = wrapper.findAll(".saved-app-grid button").find(button => button.text() === "Registered Example")!;
+    await option.trigger("click"); await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.single).toEqual({ type: "open_app", target: "shell:AppsFolder\\Example!App" });
+    wrapper.unmount();
+  });
+  it("keeps wheel amounts independent per cell and rejects invalid input", async () => {
+    const wrapper = await mountPage();
+    const card = wrapper.findAll(".mapping-card").find(item => item.find(".mapping-card-title strong").text() === "电源")!;
+    const choose = async (label: string) => { await wrapper.findAll(".mapping-editor button").find(item => item.text() === label)!.trigger("click"); await flushPromises(); };
+    await card.findAll(".mapping-cell")[0]!.trigger("click");
+    await choose("滚轮向下");
+    await wrapper.get('input[aria-label="每次滚动格数"]').setValue("5");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.single).toEqual({ type: "scroll", direction: "down", steps: 5 });
+    const saves = vi.mocked(saveButtonMappings).mock.calls.length;
+    for (const invalid of ["0", "101", "1.5", ""]) {
+      await wrapper.get('input[aria-label="每次滚动格数"]').setValue(invalid); await flushPromises();
+    }
+    expect(vi.mocked(saveButtonMappings).mock.calls.length).toBe(saves);
+    await card.findAll(".mapping-cell")[1]!.trigger("click");
+    await choose("滚轮向上");
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.double).toEqual({ type: "scroll", direction: "up", steps: 1 });
+    await card.findAll(".mapping-cell")[0]!.trigger("click");
+    expect((wrapper.get('input[aria-label="每次滚动格数"]').element as HTMLInputElement).value).toBe("5");
+    wrapper.unmount();
+  });
+
+  it("configures all pointer directions, distance, click types, and disabling", async () => {
+    const wrapper = await mountPage();
+    const card = wrapper.findAll(".mapping-card").find(item => item.find(".mapping-card-title strong").text() === "电源")!;
+    await card.findAll(".mapping-cell")[2]!.trigger("click");
+    for (const [direction, label] of [["up", "鼠标向上"], ["down", "鼠标向下"], ["left", "鼠标向左"], ["right", "鼠标向右"]]) {
+      await wrapper.get(`button[aria-label="${label}"]`).trigger("click"); await flushPromises();
+      await wrapper.get('input[aria-label="每次移动像素"]').setValue("75"); await flushPromises();
+      expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.long).toEqual({ type: "mouse_move", direction, distance: 75 });
+    }
+    const saves = vi.mocked(saveButtonMappings).mock.calls.length;
+    for (const invalid of ["0", "2001", "1.5", ""]) {
+      await wrapper.get('input[aria-label="每次移动像素"]').setValue(invalid); await flushPromises();
+    }
+    expect(vi.mocked(saveButtonMappings).mock.calls.length).toBe(saves);
+    for (const [kind, label] of [["left", "左键单击"], ["right", "右键单击"], ["double_left", "左键双击"], ["middle", "中键单击"]]) {
+      await wrapper.findAll(".mapping-editor button").find(item => item.text() === label)!.trigger("click"); await flushPromises();
+      expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.long).toEqual({ type: "mouse_click", kind });
+    }
+    await wrapper.findAll(".mapping-editor button").find(item => item.text() === "禁用按键")!.trigger("click"); await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.long).toEqual({ type: "disabled" });
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.up).toBeUndefined();
+    wrapper.unmount();
+  });
+  it("offers wheel actions on a non-direction key and lets the user replace or disable them", async () => {
+    const wrapper = await mountPage();
+    const card = wrapper.findAll(".mapping-card").find((item) =>
+      item.find(".mapping-card-title strong").text() === "电源"
+    )!;
+    await card.findAll(".mapping-cell")[1]!.trigger("click");
+    const preset = (label: string) => wrapper.findAll(".mapping-editor button").find((item) => item.text() === label)!;
+    await preset("滚轮向下").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.double).toEqual({ type: "scroll", direction: "down", steps: 1 });
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.up).toBeUndefined();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.down).toBeUndefined();
+    await preset("Enter").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.double).toEqual({ type: "shortcut", chord: { keys: ["enter"] } });
+    await preset("滚轮向上").trigger("click");
+    await flushPromises();
+    await preset("禁用按键").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power?.double).toEqual({ type: "disabled" });
+    wrapper.unmount();
+  });
+
+  it.each(["up", "down"] as const)("saves %s as a wheel action without changing other mappings", async (direction) => {
+    const wrapper = await mountPage();
+    const label = direction === "up" ? "上" : "下";
+    const card = wrapper.findAll(".mapping-card").find((item) =>
+      item.find(".mapping-card-title strong").text() === label
+    )!;
+    await card.findAll(".mapping-cell")[0]!.trigger("click");
+    const wheelLabel = direction === "up" ? "滚轮向上" : "滚轮向下";
+    const preset = wrapper.findAll(".mapping-editor button").find((item) => item.text() === wheelLabel)!;
+    await preset.trigger("click");
+    await flushPromises();
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(saved.actions[direction]).toEqual({
+      single: { type: "scroll", direction, steps: 1 },
+      double: { type: "disabled" },
+      long: { type: "disabled" },
+    });
+    expect(saved.actions.ok?.single).toEqual({ type: "shortcut", chord: { keys: ["enter"] } });
+    expect(preset.classes()).toContain("selected");
+    expect(card.text()).toContain(wheelLabel);
+    wrapper.unmount();
+  });
+
   it("renders the remote canvas with 12 button cards, the voice card and 36 trigger cells", async () => {
     const wrapper = await mountPage();
     expect(wrapper.findAll(".mapping-card")).toHaveLength(13);
@@ -229,6 +361,7 @@ describe("buttons mapping page", () => {
 
     await button("保存配置").trigger("click");
     await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    await flushPromises();
     expect(wrapper.text()).toContain("配置已保存并生效");
 
     await button("导出配置…").trigger("click");
@@ -283,6 +416,7 @@ describe("buttons mapping page", () => {
     expect(saved.actions.power!.long.chord!.keys).toEqual(["escape"]);
 
     // 禁用按键按钮：禁用当前格并自动保存。
+    await flushPromises();
     const disableButton = wrapper
       .findAll("button")
       .find((button) => button.text() === "禁用按键");
@@ -492,7 +626,7 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 
-  it("返回/音量±全型号禁用（2026-09-07 用户决策：RC001 同样不开放）", async () => {
+  it("keeps filter buttons disabled without observed driver pairs on every model", async () => {
     for (const model of ["rc003", "rc001", "unknown"] as const) {
       const wrapper = await mountPage(model);
       const backCell = wrapper
@@ -513,6 +647,84 @@ describe("buttons mapping page", () => {
       ).toBe(true);
       await backCell.trigger("click");
       expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+      expect(backCell.attributes("title")).toContain(model === "rc001" ? "仅支持 RC003" : "首次完整按下和松开");
+      wrapper.unmount();
     }
+  });
+
+  it("requires explicit helper consent and does not stop the helper on page navigation", async () => {
+    const wrapper = await mountPage();
+    const toggle = wrapper.get('input[aria-label="RC003 增强采集"]');
+    await toggle.setValue(true);
+    expect(wrapper.get('[role="dialog"]').text()).toContain("反作弊");
+    expect(startUserHid).not.toHaveBeenCalled();
+    await wrapper.findAll('[role="dialog"] button').find(button => button.text() === "取消")!.trigger("click");
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+    expect((toggle.element as HTMLInputElement).checked).toBe(false);
+    await toggle.setValue(true);
+    await wrapper.findAll('[role="dialog"] button').find(button => button.text() === "同意并开启")!.trigger("click");
+    await flushPromises();
+    expect(startUserHid).toHaveBeenCalledTimes(1);
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+    wrapper.unmount();
+    expect(stopUserHid).not.toHaveBeenCalled();
+  });
+
+  it("opens helper-confirmed keys without claiming driver attribution and closes on reset", async () => {
+    const wrapper = await mountPage();
+    await wrapper.setProps({ runtime: { ...runtime, platform: { ...runtime.platform,
+      rawInput: { ...runtime.platform.rawInput, confirmedUserHidButtons: ["back"] },
+    } } });
+    const back = wrapper.findAll(".mapping-card").find(card => card.find("strong").text() === "返回")!;
+    expect(back.text()).toContain("实验信号已确认");
+    expect(back.text()).not.toContain("驱动信号已确认");
+    await openCell(wrapper, "返回", 0);
+    expect(wrapper.get(".mapping-editor").text()).toContain("宿主代理来源");
+    await wrapper.setProps({ runtime });
+    expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+    expect((back.get(".mapping-cell").element as HTMLButtonElement).disabled).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("opens only confirmed keys and preserves a saved binding after capability loss", async () => {
+    const wrapper = await mountPage();
+    const card = (label: string) => wrapper.findAll(".mapping-card").find(
+      item => item.find(".mapping-card-title strong").text() === label,
+    )!;
+    const confirmed: RuntimeSnapshot = {
+      ...runtime,
+      platform: {
+        ...runtime.platform,
+        rawInput: { ...runtime.platform.rawInput, confirmedFilterButtons: ["volume_up"] },
+      },
+    };
+    await wrapper.setProps({ runtime: confirmed });
+    expect(card("音量+").text()).toContain("驱动信号已确认");
+    expect((card("音量+").get(".mapping-cell").element as HTMLButtonElement).disabled).toBe(false);
+    expect((card("音量−").get(".mapping-cell").element as HTMLButtonElement).disabled).toBe(true);
+    expect((card("返回").get(".mapping-cell").element as HTMLButtonElement).disabled).toBe(true);
+    await openCell(wrapper, "音量+", 0);
+    expect(wrapper.get(".mapping-editor").text()).toContain("不作全局吞键");
+    await wrapper.findAll(".mapping-editor button").find(button => button.text() === "滚轮向上")!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.volume_up?.single).toEqual({ type: "scroll", direction: "up", steps: 1 });
+
+    const saves = vi.mocked(saveButtonMappings).mock.calls.length;
+    await wrapper.setProps({ runtime });
+    expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+    expect((card("音量+").get(".mapping-cell").element as HTMLButtonElement).disabled).toBe(true);
+    expect(card("音量+").text()).toContain("滚轮向上");
+    expect(vi.mocked(saveButtonMappings).mock.calls.length).toBe(saves);
+    await wrapper.setProps({ runtime: confirmed });
+    await openCell(wrapper, "音量+", 0);
+    expect(card("音量+").text()).toContain("滚轮向上");
+
+    await wrapper.setProps({ runtime: {
+      ...confirmed,
+      platform: { ...confirmed.platform, connection: { ...confirmed.platform.connection, remoteModel: "rc001" } },
+    } });
+    expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+    expect((card("音量+").get(".mapping-cell").element as HTMLButtonElement).disabled).toBe(true);
+    wrapper.unmount();
   });
 });

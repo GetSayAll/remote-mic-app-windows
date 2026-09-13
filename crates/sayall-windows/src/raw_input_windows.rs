@@ -4,6 +4,7 @@ use crate::raw_input::{
     button_for_usage, decode_report_usages, normalize_device_path, parse_raw_hid_body,
     select_single_device_path, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
 };
+use crate::rc003_filter::{device_path_matches_filter_target, requires_filter, FilteredKeyEdge};
 use crate::PlatformError;
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -48,17 +49,18 @@ thread_local! {
 #[derive(Debug)]
 pub struct RawInputRuntime {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    engine: Mutex<Option<Sender<EngineMessage>>>,
+    engine: Sender<EngineMessage>,
     control: Mutex<Option<ListenerControl>>,
 }
 
 impl RawInputRuntime {
     pub fn new(snapshot: Arc<Mutex<RawInputSnapshot>>, engine: Sender<EngineMessage>) -> Self {
+        crate::rc003_filter::set_reset_sink(engine.clone());
         // 监听器把语义事件交给映射引擎，被 key_gate 吞掉的键盘边沿由钩子线程
         // 直接投递（见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）。
         Self {
             snapshot,
-            engine: Mutex::new(Some(engine)),
+            engine,
             control: Mutex::new(None),
         }
     }
@@ -87,7 +89,10 @@ impl RawInputRuntime {
             snapshot.phase = RawInputPhase::Starting;
             snapshot.matched_device_count = 0;
             snapshot.last_error = None;
+            snapshot.confirmed_filter_buttons.clear();
         }
+        crate::ble::gatt_note("rc003_filter phase=unconfirmed reason=listener_start".to_owned());
+        let _ = self.engine.send(EngineMessage::FilterSessionReset);
 
         let stop_requested = Arc::new(AtomicBool::new(false));
         let hwnd = Arc::new(AtomicIsize::new(0));
@@ -95,12 +100,8 @@ impl RawInputRuntime {
         let snapshot = Arc::clone(&self.snapshot);
         let thread_stop = Arc::clone(&stop_requested);
         let thread_hwnd = Arc::clone(&hwnd);
-        let engine = self
-            .engine
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| mpsc::channel().0);
+        // Each listener restart must retain the real mapping-engine channel.
+        let engine = self.engine.clone();
         let join = thread::Builder::new()
             .name("sayall-raw-input".to_owned())
             .spawn(move || {
@@ -160,12 +161,14 @@ impl RawInputRuntime {
     }
 
     pub fn stop(&self) -> Result<RawInputSnapshot, PlatformError> {
+        let _ = self.engine.send(EngineMessage::FilterSessionReset);
         let mut control_slot = self.control.lock().unwrap();
         let Some(mut control) = control_slot.take() else {
             let mut snapshot = self.snapshot.lock().unwrap();
             if snapshot.phase != RawInputPhase::Unsupported {
                 snapshot.phase = RawInputPhase::Stopped;
             }
+            snapshot.confirmed_filter_buttons.clear();
             key_gate::set_listener_active(false);
             return Ok(snapshot.clone());
         };
@@ -234,6 +237,8 @@ fn wait_for_thread(control: &mut ListenerControl, timeout: Duration) -> bool {
 
 struct ListenerContext {
     selected_path: String,
+    selected_handle: Option<isize>,
+    filter_rejection_logged: bool,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
     engine: Sender<EngineMessage>,
     remote_voice_f5_pressed: bool,
@@ -283,6 +288,7 @@ fn listener_thread(
         }
     }
     state.active_buttons.clear();
+    state.confirmed_filter_buttons.clear();
     key_gate::set_listener_active(false);
 }
 
@@ -299,9 +305,15 @@ fn run_listener(
         snapshot.matched_device_count = paths.len() as u32;
     }
     let selected_path = select_single_device_path(&paths).map_err(|error| error.to_string())?;
+    crate::ble::gatt_note(format!(
+        "rc003_filter phase=identity_checked eligible={} action=await_transport",
+        device_path_matches_filter_target(&selected_path)
+    ));
     THREAD_CONTEXT.with(|slot| {
         *slot.borrow_mut() = Some(ListenerContext {
             selected_path: normalize_device_path(&selected_path),
+            selected_handle: None,
+            filter_rejection_logged: false,
             snapshot: Arc::clone(&snapshot),
             engine,
             remote_voice_f5_pressed: false,
@@ -446,7 +458,7 @@ unsafe extern "system" fn window_proc(
             // 设备热插拔通知（RIDEV_DEVNOTIFY）：遥控器断连/睡眠会让 HID 设备
             // 接口消失，按住中的按键不会再有释放报文——通知引擎强制释放。
             if wparam.0 as u32 == GIDC_REMOVAL || wparam.0 as u32 == GIDC_ARRIVAL {
-                handle_device_change(HRAWINPUT(lparam.0 as *mut c_void));
+                handle_device_change(HRAWINPUT(lparam.0 as *mut c_void), wparam.0 as u32);
             }
             LRESULT(0)
         }
@@ -462,14 +474,29 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-fn handle_device_change(handle: HRAWINPUT) {
-    let device_path = match get_device_name(windows::Win32::Foundation::HANDLE(handle.0)) {
-        Ok(path) => normalize_device_path(&path),
-        Err(_) => return,
-    };
+fn handle_device_change(handle: HRAWINPUT, change: u32) {
+    // Removed handles may no longer answer RIDI_DEVICENAME. Cache only the
+    // already-attributed handle; never guess based on another keyboard's event.
+    let device_path = get_device_name(windows::Win32::Foundation::HANDLE(handle.0))
+        .ok()
+        .map(|path| normalize_device_path(&path));
     THREAD_CONTEXT.with(|slot| {
-        if let Some(context) = slot.borrow().as_ref() {
-            if device_path == context.selected_path {
+        if let Some(context) = slot.borrow_mut().as_mut() {
+            if context.selected_handle == Some(handle.0 as isize)
+                || device_path.as_deref() == Some(context.selected_path.as_str())
+            {
+                context.selected_handle = if change == GIDC_ARRIVAL {
+                    Some(handle.0 as isize)
+                } else {
+                    None
+                };
+                context.remote_voice_f5_pressed = false;
+                context
+                    .snapshot
+                    .lock()
+                    .unwrap()
+                    .confirmed_filter_buttons
+                    .clear();
                 let _ = context.engine.send(EngineMessage::DeviceRemoved);
             }
         }
@@ -513,6 +540,14 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         if normalize_device_path(&device_path) != context.selected_path {
             return Ok(());
         }
+        let current_handle = header.hDevice.0 as isize;
+        if context
+            .selected_handle
+            .is_some_and(|previous| previous != current_handle)
+        {
+            let _ = context.engine.send(EngineMessage::DeviceRemoved);
+        }
+        context.selected_handle = Some(current_handle);
         context.snapshot.lock().unwrap().raw_event_count += 1;
 
         if header.dwType == RIM_TYPEKEYBOARD.0 {
@@ -526,6 +561,17 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 virtual_key: keyboard.VKey,
                 message: keyboard.Message,
             };
+            if (0x7C..=0x7E).contains(&event.virtual_key) {
+                if let Some(edge) =
+                    FilteredKeyEdge::from_device(&context.selected_path, &device_path, event)
+                {
+                    let _ = context.engine.send(EngineMessage::FilterKeyboard(edge));
+                } else if !context.filter_rejection_logged {
+                    context.filter_rejection_logged = true;
+                    crate::ble::gatt_note("rc003_filter phase=rejected reason=device_or_edge_mismatch retryable=false".to_owned());
+                }
+                return Ok(());
+            }
             // Raw Input 在同一进程内每种设备类只能注册一个接收窗口；由本
             // 主监听器统一把已归因的小米遥控器语音 F5 转发给抑制器与
             // BLE 立即重连逻辑，避免第二个注册窗口相互覆盖。
@@ -538,7 +584,9 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             // 透传的键盘事件交给引擎合并；同时武装 key_gate
             // （覆盖键盘-only 按键的重复沿与首沿泄漏后的续期）。
             if let Some(button) = event.button() {
-                key_gate::arm_button(button, GATE_ARM_GRACE_MS);
+                if !requires_filter(button) {
+                    key_gate::arm_button(button, GATE_ARM_GRACE_MS);
+                }
             }
             let _ = context.engine.send(EngineMessage::Keyboard(event));
         } else if header.dwType == RIM_TYPEHID.0 {
@@ -548,7 +596,9 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 // 对应按键：其键盘孪生事件在钩子里据此归因吞键。
                 for usage in &usages {
                     if let Some(button) = button_for_usage(*usage) {
-                        key_gate::arm_button(button, GATE_ARM_GRACE_MS);
+                        if !requires_filter(button) {
+                            key_gate::arm_button(button, GATE_ARM_GRACE_MS);
+                        }
                     }
                 }
                 let _ = context.engine.send(EngineMessage::HidUsages(usages));
@@ -619,6 +669,7 @@ fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {
     let mut state = snapshot.lock().unwrap();
     state.phase = RawInputPhase::Failed;
     state.last_error = Some(error);
+    state.confirmed_filter_buttons.clear();
 }
 
 #[cfg(test)]
@@ -631,5 +682,27 @@ mod tests {
         assert!(!voice_f5_wake_edge(true, true));
         assert!(!voice_f5_wake_edge(true, false));
         assert!(voice_f5_wake_edge(false, true));
+    }
+
+    #[test]
+    fn listener_restarts_keep_the_original_engine_sender() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runtime = super::RawInputRuntime::new(
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::raw_input::RawInputSnapshot::default(),
+            )),
+            sender,
+        );
+        for _ in 0..3 {
+            let listener_sender = runtime.engine.clone();
+            listener_sender
+                .send(crate::button_mapping::EngineMessage::ListenerStopped)
+                .unwrap();
+            drop(listener_sender);
+            assert!(matches!(
+                receiver.try_recv().unwrap(),
+                crate::button_mapping::EngineMessage::ListenerStopped
+            ));
+        }
     }
 }
