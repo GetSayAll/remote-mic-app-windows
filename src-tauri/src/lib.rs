@@ -452,6 +452,14 @@ fn pick_custom_app() -> Option<sayall_windows::app_launcher::CustomAppPick> {
 }
 
 #[tauri::command]
+async fn scan_registered_apps() -> Result<Vec<sayall_windows::app_launcher::CustomAppPick>, String>
+{
+    tauri::async_runtime::spawn_blocking(sayall_windows::registered_apps::scan_registered_apps)
+        .await
+        .map_err(|error| format!("应用扫描任务失败：{error}"))?
+}
+
+#[tauri::command]
 fn get_button_mapping_snapshot(
     state: tauri::State<'_, AppState>,
 ) -> sayall_windows::button_mapping::ButtonMappingSnapshot {
@@ -1152,6 +1160,7 @@ pub fn run() {
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
+        scan_registered_apps,
         get_button_mapping_snapshot,
         start_shortcut_capture,
         stop_shortcut_capture,
@@ -1191,6 +1200,7 @@ pub fn run() {
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
+        scan_registered_apps,
         get_button_mapping_snapshot,
         start_shortcut_capture,
         stop_shortcut_capture,

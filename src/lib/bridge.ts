@@ -120,6 +120,7 @@ export interface ButtonActions {
 export interface ButtonMappings {
   enabled: boolean;
   actions: Partial<Record<RemoteButton, ButtonActions>>;
+  applications?: CustomAppPick[];
 }
 
 export interface FiredGesture {
@@ -959,6 +960,11 @@ export function actionSummary(action: ButtonAction | undefined): string {
 export interface CustomAppPick {
   name: string;
   path: string;
+}
+
+export async function scanRegisteredApps(): Promise<CustomAppPick[]> {
+  if (!isTauriRuntime()) throw new Error("应用扫描需要在 Windows 客户端中使用");
+  return invoke<CustomAppPick[]>("scan_registered_apps");
 }
 
 /**

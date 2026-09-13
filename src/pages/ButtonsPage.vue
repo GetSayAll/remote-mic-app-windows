@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import {
   actionSummary,
@@ -33,6 +34,7 @@ import {
   type ButtonMappingSnapshot,
   type ButtonMappings,
   type ButtonTrigger,
+  type CustomAppPick,
   type FiredGesture,
   type KeyCode,
   type MoveDirection,
@@ -283,6 +285,9 @@ const presetAppIds = computed(() => new Set(presetApps.value.map((app) => app.id
 /** 已在映射中使用过的自定义应用（路径目标，去重；跨格可复选）。 */
 const customApps = computed<Array<{ path: string; name: string }>>(() => {
   const seen = new Map<string, string>();
+  for (const app of mappings.value.applications ?? []) {
+    seen.set(app.path, app.name);
+  }
   for (const actions of Object.values(mappings.value.actions)) {
     for (const action of Object.values(actions)) {
       if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
@@ -296,6 +301,33 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
   }
   return [...seen.entries()].map(([path, name]) => ({ path, name }));
 });
+
+const appPickerOpen = ref(false);
+const appPickerError = ref<string | null>(null);
+const appFilter = ref("");
+const filteredCustomApps = computed(() => customApps.value.filter(app => app.name.toLocaleLowerCase().includes(appFilter.value.trim().toLocaleLowerCase())));
+watch([presetApps, () => mappings.value.applications], () => {
+  registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
+}, { deep: true });
+
+async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  appPickerError.value = null;
+  try {
+    const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
+    for (const app of apps) unique.set(app.path.toLowerCase(), app);
+    const saved = await saveButtonMappings({ ...mappings.value, applications: [...unique.values()] });
+    mappings.value = saved;
+    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+    appPickerOpen.value = false;
+    statusMessage.value = `已添加 ${apps.length} 个应用，按键绑定未改变`;
+  } catch (cause) {
+    appPickerError.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    busy.value = false;
+  }
+}
 
 /** 打开原生文件选择器添加自定义应用，并应用到当前编辑格。 */
 async function addCustomApp(): Promise<void> {
@@ -1094,17 +1126,7 @@ onUnmounted(() => {
             >
               {{ app.name }}
             </button>
-            <button
-              v-for="app in customApps"
-              :key="app.path"
-              class="chip"
-              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
-              type="button"
-              title="自定义应用（按路径启动）"
-              @click="applyAction({ type: 'open_app', target: app.path })"
-            >
-              {{ app.name }}
-            </button>
+            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
               class="chip add-app"
               type="button"
@@ -1113,6 +1135,12 @@ onUnmounted(() => {
             >
               ＋ 添加应用
             </button>
+          </div>
+          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
+          <div v-if="customApps.length" class="preset-grid saved-app-grid">
+            <button v-for="app in filteredCustomApps" :key="app.path" class="chip" type="button"
+              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
+              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
           </div>
         </section>
 
@@ -1213,6 +1241,7 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ mappingSnapshot.lastError }}</p>
+    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
   </section>
 </template>
 
@@ -1220,4 +1249,7 @@ onUnmounted(() => {
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
+.saved-app-grid { max-height: 180px; overflow-y: auto; margin-top: 8px; align-content: start; }
+.saved-app-grid .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
 </style>

@@ -464,6 +464,8 @@ pub struct ButtonMappings {
     /// 自定义按键功能总开关（UI 的"启用自定义按键功能"）。
     pub enabled: bool,
     pub actions: BTreeMap<RemoteButton, ButtonActions>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub applications: Vec<crate::app_launcher::CustomAppPick>,
 }
 
 fn default_enabled() -> bool {
@@ -475,6 +477,7 @@ impl Default for ButtonMappings {
         Self {
             enabled: true,
             actions: BTreeMap::new(),
+            applications: Vec::new(),
         }
     }
 }
@@ -489,6 +492,8 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             #[serde(default = "default_enabled")]
             enabled: bool,
             actions: Option<BTreeMap<RemoteButton, ButtonActionsWire>>,
+            #[serde(default)]
+            applications: Vec<crate::app_launcher::CustomAppPick>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let actions = wire
@@ -500,6 +505,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
         Ok(Self {
             enabled: wire.enabled,
             actions,
+            applications: wire.applications,
         })
     }
 }
@@ -524,6 +530,8 @@ impl ButtonMappings {
 
     pub fn normalized(self) -> Result<Self, SendInputError> {
         let mut this = self.without_unsupported_buttons();
+        this.applications = crate::registered_apps::normalize_library(this.applications)
+            .map_err(SendInputError::Backend)?;
         for actions in this.actions.values_mut() {
             for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
                 if let ButtonAction::Shortcut { chord } = action {
@@ -870,6 +878,29 @@ mod tests {
         assert_eq!(calls, [vec![false, true, false, true], vec![true]]);
     }
 
+    #[test]
+    fn application_library_round_trips_without_adding_button_bindings() {
+        let mut mappings = ButtonMappings::default();
+        let app = crate::app_launcher::CustomAppPick {
+            name: "Example".into(),
+            path: "shell:AppsFolder\\Example!App".into(),
+        };
+        mappings.applications = vec![app.clone(), app];
+        let normalized = mappings.normalized().unwrap();
+        assert_eq!(normalized.applications.len(), 1);
+        assert!(normalized.actions.is_empty());
+        let bytes = serde_json::to_vec(&normalized).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ButtonMappings>(&bytes).unwrap(),
+            normalized
+        );
+        let old: ButtonMappings = serde_json::from_str(r#"{"enabled":true,"actions":{}}"#).unwrap();
+        assert!(old.applications.is_empty());
+        assert!(!serde_json::to_string(&old)
+            .unwrap()
+            .contains("applications"));
+    }
+
     fn chord(keys: &[KeyCode]) -> KeyChord {
         KeyChord {
             keys: keys.to_vec(),
@@ -1172,6 +1203,7 @@ mod tests {
         let disabled = ButtonMappings {
             enabled: false,
             actions: mappings.actions.clone(),
+            applications: Vec::new(),
         };
         assert_eq!(disabled.mapped_mask(), 0, "总开关关闭时不吞任何键");
     }
