@@ -538,10 +538,6 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             // This branch is AFTER exact selected-device matching. F13–F15
             // are transport keys, so no native volume action has been delivered.
             if let Some(edge) = crate::three_button_driver::decode(event) {
-                crate::ble::gatt_note(format!(
-                    "three_button_driver source=selected_raw_keyboard button={:?} pressed={} phase=decoded",
-                    edge.button, edge.is_pressed
-                ));
                 let _ = context.engine.send(EngineMessage::DriverEdge(edge));
                 return Ok(());
             }

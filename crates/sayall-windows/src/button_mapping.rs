@@ -376,6 +376,13 @@ fn engine_worker(
             EngineMessage::GateEdge(edge) | EngineMessage::DriverEdge(edge) => {
                 let now = Instant::now();
                 let edges = merger.apply_keyboard_button_edge(edge.button, edge.is_pressed);
+                // Only semantic transitions are logged, not keyboard auto-repeat.
+                if !edges.is_empty() && matches!(message, EngineMessage::DriverEdge(_)) {
+                    crate::ble::gatt_note(format!(
+                        "three_button_driver source=selected_raw_keyboard button={:?} pressed={} phase=decoded",
+                        edge.button, edge.is_pressed
+                    ));
+                }
                 // 门控吞下的按压：原生动作未进 OS，清除待对冲标记。
                 if edge.is_pressed {
                     native_pending.remove(&edge.button);
