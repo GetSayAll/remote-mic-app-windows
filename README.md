@@ -1,5 +1,11 @@
 # 无线麦 SayAll for Windows
 
+<p align="center">
+  <img src="Screenshots/sayall-key-mapping.png" alt="无线麦 SayAll Windows 版按键映射界面" width="960">
+</p>
+
+<p align="center">小米蓝牙遥控器的可视化按键映射</p>
+
 <table>
   <tr>
     <td align="center">
@@ -40,6 +46,12 @@ RC001 与 RC003 均已完成 Windows 真机适配；两型号的按键映射真�
 ## 用户安装与配置
 
 首次安装、遥控器配对、VB-CABLE、语音输入软件、按键映射、更新和排障步骤见 [安装与配置指南](docs/installation-and-configuration.md)。文档同时给出了 AI Agent 的安全执行边界与可验证的完成标准。
+
+<p align="center">
+  <img src="Screenshots/sayall-connection-audio-setup.png" alt="无线麦 SayAll Windows 版连接与语音设备配置界面" width="960">
+</p>
+
+<p align="center">连接遥控器并选择语音写入设备</p>
 
 ## 技术结构
 
