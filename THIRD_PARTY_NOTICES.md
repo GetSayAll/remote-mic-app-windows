@@ -21,3 +21,7 @@ VB-CABLE is developed by VB-Audio and is separately licensed Donationware. The c
 ## Reference implementations
 
 Source references and fixed revisions are listed in `ATTRIBUTION.md`. Copying compatible code into this GPL-3.0-only project does not change the license or attribution requirements of the original work.
+
+## RemoteMapper lower HID filter
+
+The optional three-button filter adapts `driver/MiRemoteHidFilter` from [QL-4/RemoteMapper](https://github.com/QL-4/RemoteMapper), revision `be8b57330c26a70d8b8ec9ff1e60c23251a2fc31`, under the MIT License. Its notice is preserved in [LICENSE.RemoteMapper](driver/SayAllThreeButtonFilter/LICENSE.RemoteMapper). This repository includes adapted source only, not the upstream driver's SYS/CAT files, certificates or private keys. See ATTRIBUTION.md for the reduced three-key scope.

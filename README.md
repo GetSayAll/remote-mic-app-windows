@@ -35,12 +35,21 @@
 - Windows CI 可生成带 SHA-256 和来源元数据的未签名 NSIS Preview artifact；
 - Windows CI、来源归属和真机测试手册。
 
-RC001 与 RC003 均已完成 Windows 真机适配；两型号的按键映射真机验收均已通过，语音、安装器、VB-CABLE 和第三方输入法按测试手册分项记录，尚未覆盖的专项继续标记为 `deferred`。当前公开的 v0.2.2 是预览版，包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
+RC001 与 RC003 均已完成 Windows 真机适配；既有按键映射路径的验收按历史测试记录保留；本分支新增的三键驱动不包含在该结论内，语音、安装器、VB-CABLE 和第三方输入法按测试手册分项记录，尚未覆盖的专项继续标记为 `deferred`。当前公开的 v0.2.2 是预览版，包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
 
 ## 用户安装与配置
 
 首次安装、遥控器配对、VB-CABLE、语音输入软件、按键映射、更新和排障步骤见 [安装与配置指南](docs/installation-and-configuration.md)。文档同时给出了 AI Agent 的安全执行边界与可验证的完成标准。
 
+## 返回 / 音量加减：可选实验驱动
+
+本分支增加三键专用 HID 下层过滤驱动和应用接入。当前已完成 RC001 测试机器的驱动安装与运行检查；三键最终动作、闲置首按、语音回归和卸载回滚仍需实机验收，RC003 尚未独立验收。
+
+- [完整操作指南：构建、签名、安装、配置、测试、排错和回滚](docs/three-button-driver-guide.md)
+- [驱动源码与工具](driver/SayAllThreeButtonFilter/README.md)
+- [验证记录与已知问题](Testing/ThreeButtonDriver.md)
+
+基础语音不依赖这个驱动。它需要开发测试签名环境，不是生产签名驱动；旧 Release 未必含三键支持。独立应用使用 `scripts/build-local-app.ps1` 构建，显式内嵌前端，避免访问不存在的 localhost 开发服务器。
 ## 技术结构
 
 ```text

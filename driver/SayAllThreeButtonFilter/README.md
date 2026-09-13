@@ -1,61 +1,44 @@
-# SayAll 三键驱动（本地实验版）
+# SayAll 三键可选驱动
 
-这是可选的 x64 KMDF 1.15 下层 HID 过滤驱动，只绑定 INF 中列出的
-VID 2717 / PID 32B8 / REV 00A4 蓝牙 HID 硬件 ID，不是全局键盘过滤器。
-RC001 与 RC003 必须分别实机验收；编译成功不代表硬件通过。
+本目录包含完整 C 源码、构建、测试、签名打包、安装、状态检查及卸载工具。
+完整教程见 [返回/音量加减操作指南](../../docs/three-button-driver-guide.md)，验证范围见 [测试记录](../../Testing/ThreeButtonDriver.md)。
 
-| 遥控器键 | 原始键盘 Usage | 驱动输出 | SayAll 动作源 |
-|---|---|---|---|
-| 音量加 | 80 | F13 / 68 | volume_up |
-| 音量减 | 81 | F14 / 69 | volume_down |
-| 返回 | F1 | F15 / 6A | back |
+这是实验功能：RC001 主机已观察到安装成功、服务 Running、设备 OK；最终动作、闲置首按、语音回归和回滚仍待实机验证。RC003 未独立验收。
 
-只改 ID=01 报文的第 4 字节。零释放、F5 语音、方向键、其他报文和尾部填充均原样传递。
-没有新增按住阈值。应用在精确匹配选定 Raw Input 设备后解码 F13–F15，
-不在全局键盘钩子中截获普通键盘 F13–F15。驱动事件不走原生音量动作去重。
-单击、双击、长按沿用现有手势引擎；配置双击或长按时，单击等待沿用原有规则。
+## 文件索引
 
-## 使用边界
+| 文件 | 用途 |
+|---|---|
+| driver.c / driver.h | KMDF 1.15 读取完成过滤 |
+| remap.c / remap.h | 只改三键的纯 C 报文转换 |
+| remap_test.c | 全报文 ID/Usage/长度边界、释放、语音不变检查 |
+| SayAllThreeButtonFilter.inf | 精确设备 ID、独立服务及 ExtensionId |
+| SayAllThreeButtonFilter.vcxproj | VS/WDK x64 工程 |
+| Build-Portable.ps1 | 使用配置好的 MSVC 与 SDK/WDK NuGet 编译并检查 |
+| Package-TestDriver.ps1 | 使用开发者自己的签名证书制作测试包，不导出私钥 |
+| Common.ps1 | 运行内核测试签名、包校验、设备及单实例检查 |
+| Install.ps1 | 管理员安装；-CheckOnly 仅预检 |
+| Status.ps1 | 管理员读取脱敏运行状态，不作硬件通过判定 |
+| Uninstall.ps1 | 只卸载唯一匹配的本驱动，不自动清除信任/启动设置 |
+| Test-ManagementScripts.ps1 | PowerShell 7 无系统变更的脚本测试 |
+| LICENSE.RemoteMapper | 改编来源 MIT 许可 |
 
-- 可提前保存三个键的映射；未安装驱动时不承诺有事件。
-- 驱动会持续把三键变成 F13–F15。SayAll 未运行、映射关闭或该键未配置时，
-  不会自动恢复音量/返回动作。卸载驱动后恢复原始报文。
-- 输出的 F13–F15 没有被全局吞掉；第三方已注册的 F13–F15 快捷键可能同时响应。
-  避免给它们设置其他全局快捷键。此设计保持普通键盘 F13–F15 可用。
-- 原 RemoteMapper MiRemoteHidFilter 不可与本驱动叠装；安装脚本遇到它会停止。
-- 不修改语音链路、普通方向键时序、蓝牙配对或系统音量设置。
+## 快速参考
 
-## 本地验证与安装
+驱动最低 Windows 10 1903 x64（应用基础最低版本不同）。只转换 ID=01 的第 4 字节：
 
-测试签名不是微软生产签名。安装需要管理员权限、允许测试签名及重启。
-安装/卸载脚本不会自行修改启动安全设置或自动重启。
-只在用户明确同意测试驱动安装后进行以下操作：
+| 实体键 | 输入 Usage | 输出 |
+|---|---|---|
+| 音量加 | 80 | 68 / F13 |
+| 音量减 | 81 | 69 / F14 |
+| 返回 | F1 | 6A / F15 |
 
-1. 正常退出 SayAll，保存工作。确认 Secure Boot 状态；若开启，先评估后续测试条件。
-2. 将包内 SayAllThreeButtonFilter.cer 导入本地计算机“受信任的根证书颁发机构”
-   和“受信任的发布者”，只信任本包证书。
-3. 管理员终端执行 `bcdedit /set testsigning on`，重启。
-4. 管理员 PowerShell 运行包内 `Install.ps1`，按提示再次重启。
-5. 运行同包 SayAll 应用。分别将返回设为 Esc、音量±设为音量±，保存并启用。
-6. 检查冷启动/闲置后短按、连续短按、按住连发及释放；每次短按应只触发一次。
-   验证普通键盘 F13–F15、上方向短按、语音按下开始/释放结束、断连重连。
-7. 日志应出现 `three_button_driver ... phase=decoded`，随后有对应 `map_edges`
-   和 `map_fire`。只有观察到目标应用动作，才能记录硬件通过。
+释放、F5 语音、方向键和其他报文原样传递。应用必须运行并启用相应映射；退出应用不会恢复驱动转换前的三键行为。其他软件的 F13–F15 全局快捷键可能同时响应。普通键盘 F13–F15 不被 SayAll 全局截获。
 
-## 回滚
+不要与 MiRemoteHidFilter 叠装，不要将 INF 扩大到全部键盘。测试签名不等于微软生产签名。
+签名顺序为 SYS → 生成 CAT → 签 CAT → 校验清单；改动 SYS/INF 后必须重新制作目录。
+包内 SYS/CAT/CER/清单由构建者生成，Git 仓库不携带测试机证书、私钥、采集或第三方二进制。
 
-管理员运行 `Uninstall.ps1`，只卸载精确命中的本驱动包；重启后验证遥控器恢复。
-确认恢复后，如果测试签名是为本次测试开启的，再执行
-`bcdedit /set testsigning off` 并重启。仅删除本次导入的证书，勿删除其他证书。
-若正常模式无法启动，可在 Windows 恢复环境移除本次新增的确切 OEM INF；
-不要删除系统 HID/蓝牙驱动。
-
-## 构建
-
-常规环境：VS 2022 C++ + WDK 10.0.26100，用 vcxproj 构建 x64。
-便携环境：配置 MSVC 的 PATH/INCLUDE/LIB 后，运行 `Build-Portable.ps1`，
-传入 Microsoft.Windows.WDK.x64 与 Microsoft.Windows.SDK.cpp NuGet 的 `c` 目录。
-脚本先执行报文测试，再编译驱动、验证 INF、生成 CAT。签名是独立步骤。
-不把私钥或上游二进制加入仓库。
-
-来源：QL-4/RemoteMapper，MIT；精确版本与改编范围见仓库 ATTRIBUTION.md。
+安装前按完整教程明确选择测试信任及启动设置，保存工作后执行 Windows“重启”。
+Status 的 testSigningActive 检查运行内核，不仅查看 BCD。安装脚本不会更改启动设置或自动重启。
+从源码直接构建应用时必须使用 scripts/build-local-app.ps1 或 --features custom-protocol，避免 localhost 连接失败。

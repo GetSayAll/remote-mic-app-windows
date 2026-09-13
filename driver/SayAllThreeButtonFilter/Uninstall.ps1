@@ -1,5 +1,7 @@
 #Requires -RunAsAdministrator
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Common.ps1')
+Assert-SayAllStopped
 $drivers = @(Get-WindowsDriver -Online | Where-Object {
     [IO.Path]::GetFileName($_.OriginalFileName) -ieq 'SayAllThreeButtonFilter.inf'
 })
