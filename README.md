@@ -41,7 +41,7 @@
 - Windows CI 可生成带 SHA-256 和来源元数据的未签名 NSIS Preview artifact；
 - Windows CI、来源归属和真机测试手册。
 
-RC001 与 RC003 均已完成 Windows 真机适配；两型号的按键映射真机验收均已通过，语音、安装器、VB-CABLE 和第三方输入法按测试手册分项记录，尚未覆盖的专项继续标记为 `deferred`。当前公开的 v0.2.2 是预览版，包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
+RC001 与 RC003 均已完成 Windows 真机适配；两型号的按键映射真机验收均已通过，语音、安装器、VB-CABLE 和第三方输入法按测试手册分项记录，尚未覆盖的专项继续标记为 `deferred`。公开发布目前仍处于预览阶段，更新包包含 updater minisign 签名，但尚无 Authenticode 代码签名，首次运行可能触发 SmartScreen 提示。
 
 ## 用户安装与配置
 
