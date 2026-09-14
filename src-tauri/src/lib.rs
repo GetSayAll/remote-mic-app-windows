@@ -377,18 +377,24 @@ async fn import_button_mapping_configuration(
 fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut shortcut_count = 0_usize;
     let mut open_app_count = 0_usize;
+    let mut scroll_count = 0_usize;
+    let mut mouse_count = 0_usize;
     let mut disabled_count = 0_usize;
     for actions in mappings.actions.values() {
         for action in [&actions.single, &actions.double, &actions.long] {
             match action {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
+                ButtonAction::Scroll { .. } => scroll_count += 1,
+                ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
+                    mouse_count += 1
+                }
                 ButtonAction::Disabled => disabled_count += 1,
             }
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -403,6 +409,18 @@ async fn test_button_mapping(
     let action = state.platform.button_mappings().action_for(button, trigger);
     let platform = Arc::clone(&state.platform);
     match action {
+        ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
+            tauri::async_runtime::spawn_blocking(move || platform.test_mouse_action(action))
+                .await
+                .map_err(|error| format!("测试鼠标任务失败：{error}"))?
+                .map_err(|error| error.to_string())
+        }
+        ButtonAction::Scroll { direction, steps } => {
+            tauri::async_runtime::spawn_blocking(move || platform.test_scroll(direction, steps))
+                .await
+                .map_err(|error| format!("测试滚轮任务失败：{error}"))?
+                .map_err(|error| error.to_string())
+        }
         ButtonAction::Shortcut { chord } => {
             tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
                 .await
@@ -432,6 +450,14 @@ fn list_preset_apps(
 #[tauri::command]
 fn pick_custom_app() -> Option<sayall_windows::app_launcher::CustomAppPick> {
     sayall_windows::app_launcher::pick_custom_app()
+}
+
+#[tauri::command]
+async fn scan_registered_apps() -> Result<Vec<sayall_windows::app_launcher::CustomAppPick>, String>
+{
+    tauri::async_runtime::spawn_blocking(sayall_windows::registered_apps::scan_registered_apps)
+        .await
+        .map_err(|error| format!("应用扫描任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -1199,6 +1225,7 @@ pub fn run() {
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
+        scan_registered_apps,
         get_button_mapping_snapshot,
         start_shortcut_capture,
         stop_shortcut_capture,
@@ -1240,6 +1267,7 @@ pub fn run() {
         test_button_mapping,
         list_preset_apps,
         pick_custom_app,
+        scan_registered_apps,
         get_button_mapping_snapshot,
         start_shortcut_capture,
         stop_shortcut_capture,

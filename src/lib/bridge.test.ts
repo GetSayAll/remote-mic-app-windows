@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  actionSummary,
   audioPhaseLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
@@ -12,6 +13,14 @@ import {
   type ConnectionPhase,
   type DiagnosticReport,
 } from "./bridge";
+
+describe("mouse actions", () => {
+  it("summarizes clicks, movement, and wheel amounts", () => {
+    expect(actionSummary({ type: "scroll", direction: "down", steps: 5 })).toBe("滚轮向下 5 格");
+    expect(actionSummary({ type: "mouse_move", direction: "left", distance: 75 })).toBe("鼠标向左 75 px");
+    expect(actionSummary({ type: "mouse_click", kind: "double_left" })).toBe("左键双击");
+  });
+});
 
 describe("mapping capability matrix（单响应判定，用于信息提示）", () => {
   it("直接归因族（电源/菜单）全部触发单响应", () => {

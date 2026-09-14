@@ -1,5 +1,5 @@
 use sayall_windows::raw_input::RawInputSnapshot;
-use sayall_windows::send_input::{KeyChord, SendInputSnapshot};
+use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
     PlatformSnapshot, UsageCounters, WindowsPlatform,
@@ -30,6 +30,12 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn send_input_snapshot(&self) -> SendInputSnapshot;
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
+    fn test_scroll(
+        &self,
+        direction: ScrollDirection,
+        steps: u16,
+    ) -> Result<SendInputSnapshot, PlatformError>;
+    fn test_mouse_action(&self, action: ButtonAction) -> Result<SendInputSnapshot, PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
     /// 打开/激活预设应用（测试按钮与引擎共用路径）。
@@ -120,6 +126,18 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
         self.test_shortcut(chord)
+    }
+
+    fn test_scroll(
+        &self,
+        direction: ScrollDirection,
+        steps: u16,
+    ) -> Result<SendInputSnapshot, PlatformError> {
+        self.test_scroll(direction, steps)
+    }
+
+    fn test_mouse_action(&self, action: ButtonAction) -> Result<SendInputSnapshot, PlatformError> {
+        self.test_mouse_action(action)
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
@@ -399,6 +417,47 @@ mod simulation {
                 .send_input
                 .submitted_events
                 .saturating_add(planned.len() as u64);
+            state.send_input.last_error = None;
+            Ok(state.send_input.clone())
+        }
+
+        fn test_scroll(
+            &self,
+            _direction: ScrollDirection,
+            steps: u16,
+        ) -> Result<SendInputSnapshot, PlatformError> {
+            sayall_windows::send_input::validate_mouse_amount(steps, 100)
+                .map_err(|error| PlatformError::SendInput(error.to_string()))?;
+            let mut state = lock(&self.state);
+            state.send_input.submitted_batches =
+                state.send_input.submitted_batches.saturating_add(1);
+            state.send_input.submitted_events = state.send_input.submitted_events.saturating_add(1);
+            state.send_input.last_error = None;
+            Ok(state.send_input.clone())
+        }
+
+        fn test_mouse_action(
+            &self,
+            action: ButtonAction,
+        ) -> Result<SendInputSnapshot, PlatformError> {
+            let events = match action {
+                ButtonAction::MouseClick { kind } => kind.event_count() as u64,
+                ButtonAction::MouseMove {
+                    direction,
+                    distance,
+                } => {
+                    direction
+                        .offset(distance)
+                        .map_err(|error| PlatformError::SendInput(error.to_string()))?;
+                    1
+                }
+                _ => return Err(PlatformError::SendInput("unsupported mouse action".into())),
+            };
+            let mut state = lock(&self.state);
+            state.send_input.submitted_batches =
+                state.send_input.submitted_batches.saturating_add(1);
+            state.send_input.submitted_events =
+                state.send_input.submitted_events.saturating_add(events);
             state.send_input.last_error = None;
             Ok(state.send_input.clone())
         }

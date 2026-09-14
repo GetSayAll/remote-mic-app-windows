@@ -47,6 +47,9 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       },
     })),
     resetButtonMappings: vi.fn(async () => ({ enabled: true, actions: {} })),
+    scanRegisteredApps: vi.fn(async () => [
+      { name: "Registered Example", path: "shell:AppsFolder\\Example!App" },
+    ]),
     testButtonMapping: vi.fn(async () => ({
       available: true,
       submittedBatches: 1,
@@ -170,6 +173,34 @@ beforeEach(() => {
 });
 
 describe("buttons mapping page", () => {
+  it("adds scanned apps to the library without changing button bindings", async () => {
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "扫描本机应用")!
+      .trigger("click");
+    await flushPromises();
+    await wrapper.get('input[aria-label="全选当前结果"]').setValue(true);
+    await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(saved.applications).toEqual([
+      { name: "Registered Example", path: "shell:AppsFolder\\Example!App" },
+    ]);
+    expect(saved.actions.power).toBeUndefined();
+    expect(saved.actions.ok?.single).toEqual({
+      type: "shortcut",
+      chord: { keys: ["enter"] },
+    });
+    wrapper.unmount();
+  });
+
   it("renders the remote canvas with 12 button cards, the voice card and 36 trigger cells", async () => {
     const wrapper = await mountPage();
     expect(wrapper.findAll(".mapping-card")).toHaveLength(13);
@@ -229,6 +260,7 @@ describe("buttons mapping page", () => {
 
     await button("保存配置").trigger("click");
     await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    await flushPromises();
     expect(wrapper.text()).toContain("配置已保存并生效");
 
     await button("导出配置…").trigger("click");
@@ -281,6 +313,7 @@ describe("buttons mapping page", () => {
     };
     expect(saved.actions.power!.long.type).toBe("shortcut");
     expect(saved.actions.power!.long.chord!.keys).toEqual(["escape"]);
+    await flushPromises();
 
     // 禁用按键按钮：禁用当前格并自动保存。
     const disableButton = wrapper
@@ -297,6 +330,44 @@ describe("buttons mapping page", () => {
       actions: Record<string, { long: { type: string } }>;
     };
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
+  });
+
+  it("configures mouse actions with independent validated amounts", async () => {
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const choose = async (label: string) => {
+      await wrapper
+        .findAll(".mapping-editor button")
+        .find((button) => button.text() === label)!
+        .trigger("click");
+      await flushPromises();
+    };
+
+    await choose("滚轮向下");
+    await wrapper.get('input[aria-label="每次滚动格数"]').setValue("5");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+      type: "scroll",
+      direction: "down",
+      steps: 5,
+    });
+
+    const saveCount = vi.mocked(saveButtonMappings).mock.calls.length;
+    await wrapper.get('input[aria-label="每次滚动格数"]').setValue("101");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.calls).toHaveLength(saveCount);
+    expect(wrapper.text()).toContain("请输入 1 到 100 之间的整数");
+
+    await choose("左键双击");
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+      type: "mouse_click",
+      kind: "double_left",
+    });
+    wrapper.unmount();
   });
 
   it("records a physical Win+L chord directly by default", async () => {

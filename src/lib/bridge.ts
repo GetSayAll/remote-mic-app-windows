@@ -90,9 +90,17 @@ export interface KeyChord {
   keys: KeyCode[];
 }
 
+export type MouseClickKind = "left" | "right" | "double_left" | "middle";
+export type MoveDirection = "up" | "down" | "left" | "right";
+export const mouseClickLabels: Record<MouseClickKind, string> = { left: "左键单击", right: "右键单击", double_left: "左键双击", middle: "中键单击" };
+export const mouseMoveLabels: Record<MoveDirection, string> = { up: "鼠标向上", down: "鼠标向下", left: "鼠标向左", right: "鼠标向右" };
+
 export type ButtonAction =
   | { type: "disabled" }
   | { type: "shortcut"; chord: KeyChord }
+  | { type: "scroll"; direction: "up" | "down"; steps?: number }
+  | { type: "mouse_click"; kind: MouseClickKind }
+  | { type: "mouse_move"; direction: MoveDirection; distance: number }
   | { type: "open_app"; target: string };
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
@@ -112,6 +120,7 @@ export interface ButtonActions {
 export interface ButtonMappings {
   enabled: boolean;
   actions: Partial<Record<RemoteButton, ButtonActions>>;
+  applications?: CustomAppPick[];
 }
 
 export interface FiredGesture {
@@ -148,6 +157,7 @@ export interface AtvvCapabilities {
 
 export interface ConnectionSnapshot {
   phase: ConnectionPhase;
+  batteryLevel?: number | null;
   remoteName: string | null;
   remoteModel: RemoteModel;
   capabilities: AtvvCapabilities | null;
@@ -940,6 +950,12 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
 
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
+  if (action.type === "scroll") {
+    const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
+    return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;
+  }
+  if (action.type === "mouse_click") return mouseClickLabels[action.kind];
+  if (action.type === "mouse_move") return `${mouseMoveLabels[action.direction]} ${action.distance} px`;
   if (action.type === "open_app") {
     const known = presetAppNames.get(action.target);
     if (known) return `打开${known}`;
@@ -955,6 +971,11 @@ export function actionSummary(action: ButtonAction | undefined): string {
 export interface CustomAppPick {
   name: string;
   path: string;
+}
+
+export async function scanRegisteredApps(): Promise<CustomAppPick[]> {
+  if (!isTauriRuntime()) throw new Error("应用扫描需要在 Windows 客户端中使用");
+  return invoke<CustomAppPick[]>("scan_registered_apps");
 }
 
 /**

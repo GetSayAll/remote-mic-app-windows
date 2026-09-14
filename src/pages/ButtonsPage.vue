@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
+import BatteryIndicator from "../components/BatteryIndicator.vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import {
   actionSummary,
@@ -13,6 +15,8 @@ import {
   identityShortcutByButton,
   importButtonMappingConfiguration,
   listPresetApps,
+  mouseClickLabels,
+  mouseMoveLabels,
   pickCustomApp,
   registerPresetAppNames,
   resetButtonMappings,
@@ -31,8 +35,10 @@ import {
   type ButtonMappingSnapshot,
   type ButtonMappings,
   type ButtonTrigger,
+  type CustomAppPick,
   type FiredGesture,
   type KeyCode,
+  type MoveDirection,
   type PresetAppInfo,
   type RawInputPhase,
   type RemoteButton,
@@ -280,6 +286,9 @@ const presetAppIds = computed(() => new Set(presetApps.value.map((app) => app.id
 /** 已在映射中使用过的自定义应用（路径目标，去重；跨格可复选）。 */
 const customApps = computed<Array<{ path: string; name: string }>>(() => {
   const seen = new Map<string, string>();
+  for (const app of mappings.value.applications ?? []) {
+    seen.set(app.path, app.name);
+  }
   for (const actions of Object.values(mappings.value.actions)) {
     for (const action of Object.values(actions)) {
       if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
@@ -293,6 +302,33 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
   }
   return [...seen.entries()].map(([path, name]) => ({ path, name }));
 });
+
+const appPickerOpen = ref(false);
+const appPickerError = ref<string | null>(null);
+const appFilter = ref("");
+const filteredCustomApps = computed(() => customApps.value.filter(app => app.name.toLocaleLowerCase().includes(appFilter.value.trim().toLocaleLowerCase())));
+watch([presetApps, () => mappings.value.applications], () => {
+  registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
+}, { deep: true });
+
+async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  appPickerError.value = null;
+  try {
+    const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
+    for (const app of apps) unique.set(app.path.toLowerCase(), app);
+    const saved = await saveButtonMappings({ ...mappings.value, applications: [...unique.values()] });
+    mappings.value = saved;
+    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+    appPickerOpen.value = false;
+    statusMessage.value = `已添加 ${apps.length} 个应用，按键绑定未改变`;
+  } catch (cause) {
+    appPickerError.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    busy.value = false;
+  }
+}
 
 /** 打开原生文件选择器添加自定义应用，并应用到当前编辑格。 */
 async function addCustomApp(): Promise<void> {
@@ -381,6 +417,32 @@ const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: 
   },
 ];
 
+const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
+const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? 1 : 1);
+const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : 30);
+const moveSymbols: Record<MoveDirection, string> = { up: "↑", down: "↓", left: "←", right: "→" };
+
+function updateMouseAmount(event: Event, kind: "scroll" | "mouse_move"): void {
+  const input = event.target as HTMLInputElement;
+  const value = input.valueAsNumber;
+  const maximum = kind === "scroll" ? 100 : 2000;
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    statusMessage.value = `请输入 1 到 ${maximum} 之间的整数`;
+    input.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
+    return;
+  }
+  const action = selectedAction.value;
+  if (action?.type === "scroll" && kind === "scroll") void applyAction({ ...action, steps: value });
+  if (action?.type === "mouse_move" && kind === "mouse_move") void applyAction({ ...action, distance: value });
+}
+
+function isActiveScroll(direction: "up" | "down"): boolean {
+  const target = editingTarget.value;
+  if (!target) return false;
+  const action = actionOf(target.button, target.trigger);
+  return action.type === "scroll" && action.direction === direction;
+}
+
 function isActivePreset(keys: KeyCode[]): boolean {
   const target = editingTarget.value;
   if (!target) return false;
@@ -409,21 +471,28 @@ const capabilityNote = computed<string | null>(() => {
   return null;
 });
 
+let saveQueue: Promise<void> = Promise.resolve();
+let saveRequest = 0;
 async function persist(message?: string): Promise<void> {
+  const request = ++saveRequest;
+  const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
-  try {
-    const saved = await saveButtonMappings(mappings.value);
-    mappings.value = saved;
-    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    if (message) {
-      statusMessage.value = message;
+  const task = saveQueue.then(async () => {
+    try {
+      const saved = await saveButtonMappings(payload);
+      savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+      if (request === saveRequest) {
+        mappings.value = saved;
+        if (message) statusMessage.value = message;
+      }
+    } catch (error) {
+      if (request === saveRequest) statusMessage.value = error instanceof Error ? error.message : String(error);
     }
-  } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    busy.value = false;
-  }
+  });
+  saveQueue = task;
+  await task;
+  if (request === saveRequest) busy.value = false;
 }
 
 async function restoreDefaults(): Promise<void> {
@@ -837,6 +906,7 @@ onUnmounted(() => {
         <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
           <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
           <span>{{ connectionInfo?.remoteName ?? "未连接遥控器" }}</span>
+          <BatteryIndicator :connection="connectionInfo" />
         </div>
       </div>
     </header>
@@ -1008,6 +1078,43 @@ onUnmounted(() => {
         </section>
 
         <section class="action-section">
+          <h4 class="action-section-title">鼠标滚轮</h4>
+          <div class="preset-grid">
+            <button v-for="direction in (['up', 'down'] as const)" :key="direction" class="chip"
+              :class="{ selected: isActiveScroll(direction) }" type="button" title="在鼠标当前位置滚动"
+              @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? "滚轮向上" : "滚轮向下" }}</button>
+          </div>
+          <label v-if="selectedAction?.type === 'scroll'" class="mouse-amount">
+            <span>每次滚动</span>
+            <input aria-label="每次滚动格数" type="number" min="1" max="100" step="1" :value="scrollSteps" @change="updateMouseAmount($event, 'scroll')" />
+            <span>格</span>
+          </label>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标点击</h4>
+          <div class="preset-grid">
+            <button v-for="(label, kind) in mouseClickLabels" :key="kind" class="chip" type="button"
+              :class="{ selected: selectedAction?.type === 'mouse_click' && selectedAction.kind === kind }"
+              title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
+          </div>
+        </section>
+
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标移动</h4>
+          <div class="preset-grid">
+            <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip mouse-direction" type="button"
+              :aria-label="label" :title="label" :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
+              @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ moveSymbols[direction] }}</button>
+          </div>
+          <label v-if="selectedAction?.type === 'mouse_move'" class="mouse-amount">
+            <span>每次移动</span>
+            <input aria-label="每次移动像素" type="number" min="1" max="2000" step="1" :value="moveDistance" @change="updateMouseAmount($event, 'mouse_move')" />
+            <span>像素</span>
+          </label>
+        </section>
+
+        <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <div class="preset-grid">
             <button
@@ -1021,17 +1128,7 @@ onUnmounted(() => {
             >
               {{ app.name }}
             </button>
-            <button
-              v-for="app in customApps"
-              :key="app.path"
-              class="chip"
-              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
-              type="button"
-              title="自定义应用（按路径启动）"
-              @click="applyAction({ type: 'open_app', target: app.path })"
-            >
-              {{ app.name }}
-            </button>
+            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
               class="chip add-app"
               type="button"
@@ -1040,6 +1137,12 @@ onUnmounted(() => {
             >
               ＋ 添加应用
             </button>
+          </div>
+          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
+          <div v-if="customApps.length" class="preset-grid saved-app-grid">
+            <button v-for="app in filteredCustomApps" :key="app.path" class="chip" type="button"
+              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
+              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
           </div>
         </section>
 
@@ -1140,5 +1243,15 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ mappingSnapshot.lastError }}</p>
+    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
   </section>
 </template>
+
+<style scoped>
+.mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
+.mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
+.mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
+.saved-app-grid { max-height: 180px; overflow-y: auto; margin-top: 8px; align-content: start; }
+.saved-app-grid .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
+</style>

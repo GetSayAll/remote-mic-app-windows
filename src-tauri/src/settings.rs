@@ -411,6 +411,12 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let store = SettingsStore::new(settings_path);
         let mut mappings = ButtonMappings::default();
+        mappings
+            .applications
+            .push(sayall_windows::app_launcher::CustomAppPick {
+                name: "Example".into(),
+                path: "shell:AppsFolder\\Example!App".into(),
+            });
         mappings.actions.insert(
             RemoteButton::Power,
             ButtonActions {

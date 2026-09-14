@@ -2,6 +2,24 @@
 
 本仓库是面向 Windows 的 Rust/Tauri 工程。
 
+## 鼠标动作扩展
+
+- 鼠标单击/双击参考 AutoHotkey v2 Click 的成对按下/释放行为，不复制其代码或引入依赖；通过 Windows SendInput 单批发送 2/4 个边沿，部分提交时补发释放，不新设双击等待常量。参考： https://www.autohotkey.com/docs/v2/lib/Click.htm 。
+- 鼠标移动使用 Microsoft GetPhysicalCursorPos / SetPhysicalCursorPos；本机 150% 缩放实测发现 DPI-unaware 调用的 37 单位会变成约 56 物理像素，因此为该调用显式设置线程级 PER_MONITOR_AWARE_V2，并用 RAII 恢复原线程上下文。修正后右/左 37、下/上 53 物理像素均通过。参考： https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddpiawarenesscontext 。
+- 滚轮动作参考 AutoHotkey v2 的 WheelUp/WheelDown 动作粒度，仅参考行为，不复制实现或依赖 AutoHotkey。来源：`https://github.com/AutoHotkey/AutoHotkeyDocs/blob/v2/docs/lib/Send.htm`。
+- 滚轮使用 Microsoft 公开 SendInput / MOUSEINPUT API：INPUT_MOUSE + MOUSEEVENTF_WHEEL，mouseData 是带符号的滚轮位移；一个刻度为 WHEEL_DELTA（120）。来源：`https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput`。动作是用户可选配置，不绑定固定遥控器按键、不修改默认配置。测试和首按边界见 `Testing/WindowsMouseActions.md`。
+
+## Windows 注册应用扩展
+
+- 应用发现使用 Microsoft AppsFolder / IShellItem / BHID_EnumItems，启动使用 ShellExecuteExW + SEE_MASK_NOASYNC；只读取系统公开注册的可启动项，不扫描第三方私有文件或修改 Windows 注册。按本机缓存的 Microsoft windows-rs 0.62.2 API 签名核对实现；没有复制外部算法。参考： https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid 、https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow 。
+- 应用库仅保存在用户确认后的按键配置中；扫描不是启动，多选添加不是绑定。日志只记录数量、阶段和耗时，不记录应用身份或个人路径。验收方法见 `Testing/WindowsRegisteredApps.md`。
+
+## 遥控器缓存电量显示
+
+- Microsoft 公开 Configuration Manager API `CM_Get_Device_ID_List_SizeW` / `CM_Get_Device_ID_ListW` / `CM_Locate_DevNodeW` / `CM_Get_DevNode_PropertyW`：只枚举当前存在的 BTHLE 设备，按连接所选对端的完整地址组件匹配唯一节点，读取 OS 设备属性。官方文档：`https://learn.microsoft.com/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw`。标准 `System.Devices.BatteryLife` / PKEY_Devices_BatteryLife 的 GUID/PID/type 由本机 Windows SDK 10.0.22621.0 `propkey.h` 核对。
+- `Gronsten/razer-tray`，提交 `8e7e395417023bf2446779a4c5237716183da69f`，`src/DeviceMonitor.cpp`：参考其使用公开 Configuration Manager API 读取 Windows Bluetooth 电量缓存属性 `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2` 的路径和未知值语义；未复制代码、无运行时依赖。该键不是微软承诺跨版本稳定的标准 BatteryLife 属性，故仅作可失败的兼容读取，严格检查 BYTE、长度为 1、0..100；缺失/异常保持未知。
+- 不访问注册表，不读取第三方 App 数据，不使用设备管理写入 API，不另开 BLE/GATT 会话。独立后台线程每 60 秒查询一次系统缓存，不代表遥控器每 60 秒上报新电量；界面提示缓存来源。连接纪元隔离迟到结果，断连/睡眠后停止监视并隐藏旧值；可选电量功能不影响语音错误状态。详见 `Testing/WindowsBattery.md`。
+
 ## 治理规范迁移
 
 - `HD838A/remote-mic-app`，提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`：迁移其平台无关的分支/提交纪律、日志脱敏与完整链路记录、Bug 复现取证顺序、测试手册要求、发布来源可追溯和资产不可变原则；本仓库将其改写为 Windows/RC001/RC003、Tauri/NSIS、updater minisign 与 Authenticode 边界。
@@ -67,6 +85,8 @@
 - **微软 BluetoothLEDevice 构造入口文档**：`FromIdAsync` 明确要求从 UI 线程调用（可能触发访问授权）；`FromBluetoothAddressAsync` 无此线程要求，并支持从已进入系统缓存的配对设备地址重建设备对象。2026-09-12 现场的 MTA `FromIdAsync` 先返回 Windows 资源错误，后续日志时序显示下一次请求占住 BLE 工作线程（阶段日志缺失，属结合代码的推断），故改用配对 AssociationEndpoint ID 内的对端地址调用后者；不记录真实地址。官方依据：`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.fromidasync`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.frombluetoothaddressasync`。
 - **MS Q&A 99038**（只 Dispose 设备不 Dispose 服务则无法重连）、**MS Q&A 2280559**（RPA 解析滞后导致进程重启后首次 GetGattServicesAsync 必 Unreachable，官方建议 3 次重试 ×1s + Uncached）、**MS Q&A 1685221**（FromBluetoothAddressAsync 返回 null 僵死 bug，Win11 2024.01D 已修；MaintainConnection 遇 bond 丢失会重连循环）
 - **Qt 论坛 156281**（实测：OS 侧服务缓存僵死，重启应用无效，**关开蓝牙是唯一有效修复**——与本机取证一致，是本仓库选择无线电恢复的直接依据）：`forum.qt.io/topic/156281`
+- **ZSTDJan/windows-remote-mic-app**，提交 `af54fd8e85a70f5b8f19cd4fa5bf11fe7fe530d6`，`apps/windows/rc003/src/ovb_rc003/ble_transport_winrt.py`（2026-09-14 复核）：参考实现从已配对 BLE selector 取得设备 ID 后调用 `FromIdAsync`，以 Uncached 发现服务；关闭时先取消写入/停止工作线程，再关闭 CCCD、退订事件并依次 Close service/device，且保留关闭失败的所有者供后续再次释放。本仓库据此修正 `BleSession::close` 首次 Close 失败后只回放旧错误、没有真正重试的缺陷。没有照搬其连接入口：同一僵死现场实测该配对 ID 路径返回 `0x80004004`，直接 GATT selector 返回 `0x80070008`，证明换构造入口不能恢复已经失效的系统栈。
+- **Windows PnP 自动恢复公开接口**（2026-09-14）：微软 PnPUtil 文档提供 `/restart-device <instance ID>`，设备节点变更需要管理员权限；`ShellExecuteExW` 的 `runas` verb 用于显示系统 UAC 并启动提权操作；SetupAPI `SetupDiGetClassDevsW`/设备属性用于只选择当前存在、服务为 `BTHUSB` 的唯一蓝牙适配器。实现不记录实例 ID、不接受外部命令或路径，并在工具退出后独立用 WinRT Radio 枚举验证，而不信任单独的进程退出码。官方依据：`learn.microsoft.com/windows-hardware/drivers/devtest/pnputil-command-syntax`、`learn.microsoft.com/windows/win32/api/shellapi/nf-shellapi-shellexecuteexw`、`learn.microsoft.com/windows/win32/api/setupapi/nf-setupapi-setupdigetclassdevsw`。
 
 ### 2026-09-10 重连窗口 F5 泄漏补充
 

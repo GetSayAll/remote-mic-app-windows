@@ -139,6 +139,9 @@ impl BleRuntime {
 
     fn decorate_snapshot(&self, mut snapshot: ConnectionSnapshot) -> ConnectionSnapshot {
         snapshot.power_notifications_available = lock(&self.power_notifications).is_some();
+        if !crate::battery::phase_accepts_battery(snapshot.phase) {
+            snapshot.battery_level = None;
+        }
         snapshot
     }
 }
@@ -171,6 +174,10 @@ pub(crate) enum WorkerMessage {
     /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
     /// GATT 重连耗 3 秒，期间按键全部无响应）。
     WakeReconnect,
+    BatteryRead {
+        connection_generation: u64,
+        reading: crate::battery::BatteryReading,
+    },
     /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
     /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
     /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
@@ -756,6 +763,22 @@ fn worker_loop(
                         *lock(&state) = failed_snapshot(error);
                         apply_input_connection_phase(ConnectionPhase::Failed);
                     }
+                }
+            }
+            WorkerMessage::BatteryRead {
+                connection_generation: message_generation,
+                reading,
+            } => {
+                if !crate::battery::apply_reading(
+                    &mut lock(&state),
+                    connection_generation,
+                    message_generation,
+                    reading,
+                ) {
+                    gatt_note(
+                        "remote_battery phase=apply result=ignored reason=stale_connection"
+                            .to_owned(),
+                    );
                 }
             }
             WorkerMessage::SystemSuspended => {
@@ -1405,6 +1428,7 @@ fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> 
 }
 
 struct BleSession {
+    battery_monitor: Option<crate::battery::BatteryMonitor>,
     name: String,
     model: RemoteModel,
     device: BluetoothLEDevice,
@@ -1419,8 +1443,10 @@ struct BleSession {
     /// 生效；Windows 11 前的宿主上请求失败时为 None（降级默认参数）。
     params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
     microphone_opened: bool,
+    cleanup_started: bool,
+    service_closed: bool,
+    device_closed: bool,
     closed: bool,
-    cleanup_failure: Option<String>,
 }
 
 /// Owns every WinRT object acquired while a BLE connection is still being
@@ -1480,6 +1506,7 @@ impl PendingBleConnection {
 
     fn finish(mut self, name: String, model: RemoteModel) -> BleSession {
         BleSession {
+            battery_monitor: None,
             name,
             model,
             device: self.device.take().expect("pending BLE device is owned"),
@@ -1510,8 +1537,10 @@ impl PendingBleConnection {
                 .expect("pending connection subscription is owned"),
             params_request: self.params_request.take(),
             microphone_opened: false,
+            cleanup_started: false,
+            service_closed: false,
+            device_closed: false,
             closed: false,
-            cleanup_failure: None,
         }
     }
 
@@ -1717,6 +1746,7 @@ impl BleSession {
                 )
             },
         )?);
+        let battery_sender = sender.clone();
         let connection_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
                 move |device, _| {
@@ -1743,7 +1773,7 @@ impl BleSession {
             },
         )?);
 
-        let connected = pending.finish(name, model);
+        let mut connected = pending.finish(name, model);
         connect_stage(
             reconnecting,
             reconnect_attempt,
@@ -1756,6 +1786,8 @@ impl BleSession {
                 )
             },
         )?;
+        connected.battery_monitor =
+            crate::battery::BatteryMonitor::start(address, battery_sender, connection_generation);
         Ok(connected)
     }
 
@@ -1812,45 +1844,79 @@ impl BleSession {
 
     fn close(&mut self) -> Result<(), PlatformError> {
         if self.closed {
-            return match &self.cleanup_failure {
-                Some(error) => Err(PlatformError::BleCleanup(error.clone())),
-                None => Ok(()),
-            };
+            return Ok(());
         }
-        self.closed = true;
+        let retrying = self.cleanup_started;
+        gatt_note(format!(
+            "ble_session_cleanup phase=requested retrying={retrying} service_closed={} device_closed={}",
+            self.service_closed, self.device_closed
+        ));
+        if !self.cleanup_started {
+            self.cleanup_started = true;
+            self.battery_monitor.take();
+            let mut best_effort_failures = 0u32;
+            if self.audio.RemoveValueChanged(self.audio_token).is_err() {
+                best_effort_failures += 1;
+            }
+            if self.control.RemoveValueChanged(self.control_token).is_err() {
+                best_effort_failures += 1;
+            }
+            if self
+                .device
+                .RemoveConnectionStatusChanged(self.connection_token)
+                .is_err()
+            {
+                best_effort_failures += 1;
+            }
+            // The remote CCCD can no longer be written after a physical
+            // disconnect. Handler removal and object Close are the ownership
+            // boundary; notification disable is best-effort in that state.
+            if disable_notifications(&self.audio).is_err() {
+                best_effort_failures += 1;
+            }
+            if disable_notifications(&self.control).is_err() {
+                best_effort_failures += 1;
+            }
+            if let Some(request) = self.params_request.take() {
+                if request.Close().is_err() {
+                    best_effort_failures += 1;
+                }
+            }
+            gatt_note(format!(
+                "ble_session_cleanup phase=local_release terminal_result={} failures={best_effort_failures}",
+                if best_effort_failures == 0 {
+                    "passed"
+                } else {
+                    "partial"
+                }
+            ));
+        }
+
         let mut errors = Vec::new();
-        if let Err(error) = self.audio.RemoveValueChanged(self.audio_token) {
-            errors.push(format!("移除音频通知处理器：{error}"));
+        if !self.service_closed {
+            match self.service.Close() {
+                Ok(()) => self.service_closed = true,
+                Err(error) => errors.push(format!("关闭 GATT service：{error}")),
+            }
         }
-        if let Err(error) = self.control.RemoveValueChanged(self.control_token) {
-            errors.push(format!("移除控制通知处理器：{error}"));
+        if !self.device_closed {
+            match self.device.Close() {
+                Ok(()) => self.device_closed = true,
+                Err(error) => errors.push(format!("关闭蓝牙设备：{error}")),
+            }
         }
-        if let Err(error) = self
-            .device
-            .RemoveConnectionStatusChanged(self.connection_token)
-        {
-            errors.push(format!("移除连接状态处理器：{error}"));
-        }
-        // The remote CCCD can no longer be written after a physical disconnect.
-        // Local handler removal and object Close are the ownership boundary;
-        // notification disable remains best-effort in that expected state.
-        let _ = disable_notifications(&self.audio);
-        let _ = disable_notifications(&self.control);
-        // 连接参数请求先于设备释放（request 活跃期与 device 绑定）。
-        if let Some(request) = self.params_request.take() {
-            let _ = request.Close();
-        }
-        if let Err(error) = self.service.Close() {
-            errors.push(format!("关闭 GATT service：{error}"));
-        }
-        if let Err(error) = self.device.Close() {
-            errors.push(format!("关闭蓝牙设备：{error}"));
-        }
+        self.closed = self.service_closed && self.device_closed;
         if errors.is_empty() {
+            gatt_note(format!(
+                "ble_session_cleanup phase=completed terminal_result=passed retrying={retrying}"
+            ));
             Ok(())
         } else {
             let error = errors.join("；");
-            self.cleanup_failure = Some(error.clone());
+            gatt_note(format!(
+                "ble_session_cleanup phase=completed terminal_result=failed retrying={retrying} service_closed={} device_closed={} retryable=true",
+                self.service_closed, self.device_closed
+            ));
             Err(PlatformError::BleCleanup(error))
         }
     }
