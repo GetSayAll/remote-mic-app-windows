@@ -39,6 +39,12 @@
 
 ## Windows 行为与测试参考
 
+- **登录时自动启动（2026-09-14）**：产品行为参考 macOS 仓库
+  `LoginItemService.swift` 的“读取系统状态 → 注册/取消 → 失败反馈”模式；Windows
+  不移植 `SMAppService`，改用微软公开的当前用户登录启动项
+  `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，只写本应用值且不需管理员权限。
+  设置默认关闭，应用启动时以持久化偏好同步系统状态，失败只记录结构化日志、不阻断启动。
+
 - **LL 吞键对 Raw Input 交付影响的本机实证（2026-09-05，`docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md`）**：双线程探针（钩子线程 + Raw Input INPUTSINK 线程分离，key_suppressor 同构）两轮一致证实 **WH_KEYBOARD_LL 返回 1 吞掉的键盘事件不会再投递 WM_INPUT**——按键映射门控（`key_gate.rs`）据此采用"被吞键盘边沿由钩子线程直接喂引擎 + 监听器喂 HID 报文与透传键盘事件"双源合并架构；HID 报文归因武装 + 60ms 有界等待沿用 key_suppressor 实证参数。
 
 - `HD838A/remote-mic-app#249`，提交 `090a3cfc24f0e3e733b2347ee2daf87c60e10097`：Windows 独立实现、ATVV 测试夹具、语音边沿、安装升级、公开边界和 Mac 风格 UI 原型；Raw Input 参考了 `hid_identity.py` 与 `raw_input_windows.py`，SendInput 的批量提交、物理修饰键和失败回滚参考了 `win32_input.py` 与 `win32_keys.py`，均以 Rust/windows-rs 重新实现。

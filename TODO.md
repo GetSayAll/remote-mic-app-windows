@@ -15,6 +15,8 @@
 
 ## Windows RC001 / RC003
 
+- [x] 参考 macOS `SMAppService.mainApp` 实现 Windows 当前用户登录自启动：关于页可开关，使用 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，启动时同步并记录结构化日志；不需要管理员权限。
+
 - [ ] 鼠标动作映射：支持左/右/中键单击、左键双击、每次 1–100 格滚轮及每次 1–2000 物理像素指针移动；不修改默认绑定。RC001/RC003 实体按键及闲置首按回归仍需分别验收，见 `Testing/WindowsMouseActions.md`。
 - [ ] Windows 注册应用扫描与应用库：支持搜索、多选/全选、配置保存及导入导出；扫描或添加应用不会自动启动或绑定。RC001/RC003 实体按键回归仍需分别验收，见 `Testing/WindowsRegisteredApps.md`。
 - [ ] 遥控器电量显示：按所选 BLE 对端读取 Windows 缓存电量，断连、睡眠或缺失时显示未知，不额外进行 GATT 操作。持续更新、断连、睡眠及 RC001/RC003 实机验收见 `Testing/WindowsBattery.md`。

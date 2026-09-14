@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import type { RuntimeSnapshot, ThemePreference } from "../lib/bridge";
+import { getLaunchAtLogin, setLaunchAtLogin } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
 
@@ -39,6 +40,9 @@ const updateAvailable = computed(() => phase.value === "available" && info.value
 const upToDate = computed(() => phase.value === "up-to-date");
 const failed = computed(() => phase.value === "failed");
 const notes = computed(() => info.value?.notes?.trim() || null);
+const launchAtLogin = ref(false);
+const launchAtLoginBusy = ref(false);
+const launchAtLoginError = ref("");
 
 async function onCheck(): Promise<void> {
   await check(true);
@@ -56,8 +60,24 @@ async function onThemeChange(event: Event): Promise<void> {
   await setThemePreference((event.target as HTMLInputElement).value as ThemePreference);
 }
 
+async function onLaunchAtLoginChange(event: Event): Promise<void> {
+  const enabled = (event.target as HTMLInputElement).checked;
+  launchAtLoginBusy.value = true;
+  launchAtLoginError.value = "";
+  try {
+    launchAtLogin.value = await setLaunchAtLogin(enabled);
+  } catch (error) {
+    launchAtLoginError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    launchAtLoginBusy.value = false;
+  }
+}
+
 onMounted(() => {
   void loadUpdatePreferences();
+  void getLaunchAtLogin()
+    .then((enabled) => { launchAtLogin.value = enabled; })
+    .catch((error) => { launchAtLoginError.value = error instanceof Error ? error.message : String(error); });
 });
 </script>
 
@@ -102,6 +122,23 @@ onMounted(() => {
         {{ themePreference === "system" ? "跟随 Windows 的应用颜色模式。" : "该选择会在重启后保持。" }}
       </p>
       <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
+    </article>
+
+    <article class="card">
+      <h2>启动行为</h2>
+      <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
+      <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
+        <input
+          type="checkbox"
+          class="toggle-input"
+          name="launch-at-login"
+          :checked="launchAtLogin"
+          :disabled="launchAtLoginBusy"
+          @change="onLaunchAtLoginChange"
+        />
+        登录时自动启动
+      </label>
+      <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
     </article>
 
     <article class="card">

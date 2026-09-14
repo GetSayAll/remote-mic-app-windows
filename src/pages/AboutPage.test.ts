@@ -153,7 +153,7 @@ describe("about page update panel", () => {
     const wrapper = mount(AboutPage, { props: { runtime } });
     await flushPromises();
     expect(loadUpdatePreferences).toHaveBeenCalledTimes(1);
-    const toggle = wrapper.find<HTMLInputElement>('input[type="checkbox"]');
+    const toggle = wrapper.find<HTMLInputElement>('label[title*="预览版本"] input');
     expect(toggle.element.checked).toBe(false);
 
     await toggle.setValue(true);

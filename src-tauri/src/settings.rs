@@ -66,6 +66,12 @@ impl SettingsStore {
         })
     }
 
+    pub fn save_launch_at_login(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存开机自启动设置", move |settings| {
+            settings.launch_at_login = enabled;
+        })
+    }
+
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
@@ -331,6 +337,24 @@ mod tests {
         assert!(!store.load().unwrap().check_prerelease_updates);
         store.save_check_prerelease_updates(true).unwrap();
         assert!(store.load().unwrap().check_prerelease_updates);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn launch_at_login_defaults_off_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-launch-at-login-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(!store.load().unwrap().launch_at_login);
+        store.save_launch_at_login(true).unwrap();
+        assert!(store.load().unwrap().launch_at_login);
+        store.save_launch_at_login(false).unwrap();
+        assert!(!store.load().unwrap().launch_at_login);
 
         let _ = std::fs::remove_file(path);
     }

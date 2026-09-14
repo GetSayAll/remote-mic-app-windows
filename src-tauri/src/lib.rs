@@ -15,6 +15,7 @@ use tauri::{Emitter, Manager};
 mod diagnostics;
 mod platform;
 mod settings;
+mod startup;
 mod updater;
 
 use diagnostics::DiagnosticReport;
@@ -652,6 +653,56 @@ async fn set_theme_preference(
     result
 }
 
+#[tauri::command]
+fn get_launch_at_login(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let started = std::time::Instant::now();
+    let result = startup::is_enabled();
+    sayall_windows::gatt_note(match &result {
+        Ok(enabled) => format!(
+            "startup feature=launch_at_login action=load terminal_result=passed enabled={} elapsed_ms={}",
+            enabled,
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "startup feature=launch_at_login action=load terminal_result=failed error_domain=windows_registry error_code=query_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    // Keep the parameter in the signature so the command follows the same state
+    // ownership convention as other settings commands.
+    let _ = state;
+    result
+}
+
+#[tauri::command]
+fn set_launch_at_login(enabled: bool, state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(format!(
+        "startup feature=launch_at_login action=save phase=requested enabled={enabled}"
+    ));
+    let previous = startup::is_enabled().unwrap_or(false);
+    let result = (|| {
+        startup::set_enabled(enabled)?;
+        if let Err(error) = state.settings.save_launch_at_login(enabled) {
+            let _ = startup::set_enabled(previous);
+            return Err(error);
+        }
+        Ok(enabled)
+    })();
+    sayall_windows::gatt_note(match &result {
+        Ok(enabled) => format!(
+            "startup feature=launch_at_login action=save phase=completed terminal_result=passed enabled={} elapsed_ms={}",
+            enabled,
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "startup feature=launch_at_login action=save phase=completed terminal_result=failed error_domain=startup error_code=update_failed reason=registry_or_settings_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ThemeAction {
@@ -1041,6 +1092,20 @@ pub fn run() {
                     Default::default()
                 }
             };
+            // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
+            // 不阻断主程序启动，用户可在“关于”页重试。
+            #[cfg(windows)]
+            if let Err(error) = startup::set_enabled(saved_settings.launch_at_login) {
+                sayall_windows::gatt_note(
+                    "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
+                );
+                eprintln!("同步开机自启动设置失败：{error}");
+            } else {
+                sayall_windows::gatt_note(format!(
+                    "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={}",
+                    saved_settings.launch_at_login
+                ));
+            }
             // Radio::RequestAccessAsync 可能显示系统授权，微软要求从可交互的 UI
             // 上下文调用。setup 线程在创建 BLE 后台线程前预热并缓存 Radio，
             // 使蓝牙栈资源耗尽时仍能自动关开无线电，而不是再依赖失败的枚举。
@@ -1169,6 +1234,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_theme_preference,
         set_theme_preference,
+        get_launch_at_login,
+        set_launch_at_login,
         report_theme_result,
         get_app_update_preferences,
         set_app_update_preferences,
@@ -1209,6 +1276,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_theme_preference,
         set_theme_preference,
+        get_launch_at_login,
+        set_launch_at_login,
         report_theme_result,
         get_app_update_preferences,
         set_app_update_preferences,
