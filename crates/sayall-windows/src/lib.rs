@@ -12,6 +12,8 @@ pub mod app_launcher;
 #[cfg(windows)]
 mod audio;
 #[cfg(windows)]
+pub mod battery;
+#[cfg(windows)]
 mod ble;
 #[cfg(windows)]
 mod bluetooth_radio;
@@ -151,6 +153,8 @@ pub enum ConnectionPhase {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
     pub phase: ConnectionPhase,
+    #[serde(default)]
+    pub battery_level: Option<u8>,
     pub remote_name: Option<String>,
     pub remote_model: RemoteModel,
     pub capabilities: Option<AtvvCapabilities>,
@@ -198,6 +202,7 @@ impl Default for ConnectionSnapshot {
     fn default() -> Self {
         Self {
             phase: ConnectionPhase::Idle,
+            battery_level: None,
             remote_name: None,
             remote_model: RemoteModel::Unknown,
             capabilities: None,

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import BatteryIndicator from "../components/BatteryIndicator.vue";
 import type {
   AudioEndpoint,
   AudioSnapshot,
@@ -389,6 +390,10 @@ onUnmounted(() => {
           <div class="setting-row">
             <strong>设备型号</strong>
             <span>{{ remoteModelLabel(connection.remoteModel) }}</span>
+          </div>
+          <div class="setting-row">
+            <strong>电池电量</strong>
+            <BatteryIndicator :connection="connection" />
           </div>
           <div class="setting-row">
             <strong>语音按键</strong>
