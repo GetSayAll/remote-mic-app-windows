@@ -21,12 +21,31 @@
 //!   自动恢复窗口，绝不静默停止自愈。
 
 use std::future::IntoFuture;
+use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use windows::core::{w, PCWSTR};
 use windows::Devices::Enumeration::DeviceInformation;
 use windows::Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState};
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInstanceIdW, SetupDiGetDevicePropertyW, DIGCF_PRESENT, GUID_DEVCLASS_BLUETOOTH,
+    HDEVINFO, SP_DEVINFO_DATA,
+};
+use windows::Win32::Devices::Properties::{DEVPKEY_Device_Service, DEVPROPTYPE};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_CANCELLED, ERROR_NO_MORE_ITEMS, WAIT_OBJECT_0,
+};
+use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+use windows::Win32::UI::Shell::{
+    ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
+    SHELLEXECUTEINFOW,
+};
+use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 /// 连续失败多少次后触发一次无线电恢复（按默认退避 2/4/8/16/30s，第 5 次
 /// 失败约在 60 秒后——足够覆盖常规的 RPA 解析滞后与瞬时掉线，又不至于让
@@ -44,7 +63,31 @@ const RADIO_RECOVERY_OFF_HOLD: Duration = Duration::from_secs(2);
 const RADIO_STATE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const RADIO_STATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 static RADIO_ACCESS_ALLOWED: AtomicBool = AtomicBool::new(false);
+static PNP_RECOVERY_PROMPTED: AtomicBool = AtomicBool::new(false);
 static CACHED_BLUETOOTH_RADIO: OnceLock<Mutex<Option<Radio>>> = OnceLock::new();
+
+const PNP_RECOVERY_PROCESS_TIMEOUT: Duration = Duration::from_secs(45);
+const PNP_RECOVERY_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PnpRecoveryError {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl PnpRecoveryError {
+    const fn new(code: &'static str, message: &'static str) -> Self {
+        Self { code, message }
+    }
+}
+
+struct DeviceInfoSet(HDEVINFO);
+
+impl Drop for DeviceInfoSet {
+    fn drop(&mut self) {
+        let _ = unsafe { SetupDiDestroyDeviceInfoList(self.0) };
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RadioRecoveryCycle {
@@ -204,6 +247,264 @@ fn request_access() -> windows::core::Result<RadioAccessStatus> {
     Ok(access)
 }
 
+fn hresult_matches(error: &windows::core::Error, win32_code: u32) -> bool {
+    error.code().0 as u32 & 0xFFFF == win32_code
+}
+
+fn is_bluetooth_stack_resource_failure(error: &windows::core::Error) -> bool {
+    matches!(error.code().0 as u32, 0x8007_0008 | 0x8000_4004)
+}
+
+fn utf16_property(buffer: &[u8]) -> String {
+    let words = buffer
+        .chunks_exact(size_of::<u16>())
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .take_while(|word| *word != 0)
+        .collect::<Vec<_>>();
+    String::from_utf16_lossy(&words)
+}
+
+fn device_service(info_set: HDEVINFO, device: &SP_DEVINFO_DATA) -> windows::core::Result<String> {
+    let mut property_type = DEVPROPTYPE::default();
+    let mut required = 0u32;
+    let _ = unsafe {
+        SetupDiGetDevicePropertyW(
+            info_set,
+            device,
+            &DEVPKEY_Device_Service,
+            &mut property_type,
+            None,
+            Some(&mut required),
+            0,
+        )
+    };
+    if required == 0 {
+        return Ok(String::new());
+    }
+    let mut buffer = vec![0u8; required as usize];
+    unsafe {
+        SetupDiGetDevicePropertyW(
+            info_set,
+            device,
+            &DEVPKEY_Device_Service,
+            &mut property_type,
+            Some(&mut buffer),
+            None,
+            0,
+        )?;
+    }
+    Ok(utf16_property(&buffer))
+}
+
+fn device_instance_id(
+    info_set: HDEVINFO,
+    device: &SP_DEVINFO_DATA,
+) -> windows::core::Result<String> {
+    let mut required = 0u32;
+    let _ = unsafe { SetupDiGetDeviceInstanceIdW(info_set, device, None, Some(&mut required)) };
+    if required == 0 {
+        return Err(windows::core::Error::from_thread());
+    }
+    let mut buffer = vec![0u16; required as usize];
+    unsafe { SetupDiGetDeviceInstanceIdW(info_set, device, Some(&mut buffer), None)? };
+    Ok(String::from_utf16_lossy(
+        &buffer[..buffer
+            .iter()
+            .position(|word| *word == 0)
+            .unwrap_or(buffer.len())],
+    ))
+}
+
+fn find_bthusb_adapter_instance_id() -> Result<String, PnpRecoveryError> {
+    let raw_set = unsafe {
+        SetupDiGetClassDevsW(
+            Some(&GUID_DEVCLASS_BLUETOOTH),
+            PCWSTR::null(),
+            None,
+            DIGCF_PRESENT,
+        )
+    }
+    .map_err(|_| {
+        PnpRecoveryError::new("adapter_enumeration_failed", "无法枚举蓝牙适配器设备节点")
+    })?;
+    let info_set = DeviceInfoSet(raw_set);
+    let mut matches = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut device = SP_DEVINFO_DATA {
+            cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        match unsafe { SetupDiEnumDeviceInfo(info_set.0, index, &mut device) } {
+            Ok(()) => index += 1,
+            Err(error) if hresult_matches(&error, ERROR_NO_MORE_ITEMS.0) => break,
+            Err(_) => {
+                return Err(PnpRecoveryError::new(
+                    "adapter_enumeration_failed",
+                    "枚举蓝牙适配器设备节点失败",
+                ));
+            }
+        }
+        let service = device_service(info_set.0, &device).map_err(|_| {
+            PnpRecoveryError::new("adapter_property_failed", "读取蓝牙适配器属性失败")
+        })?;
+        if service.eq_ignore_ascii_case("BTHUSB") {
+            matches.push(device_instance_id(info_set.0, &device).map_err(|_| {
+                PnpRecoveryError::new("adapter_identity_failed", "读取蓝牙适配器设备标识失败")
+            })?);
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.pop().expect("one BTHUSB adapter was counted")),
+        0 => Err(PnpRecoveryError::new(
+            "adapter_missing",
+            "未找到可恢复的 USB 蓝牙适配器",
+        )),
+        _ => Err(PnpRecoveryError::new(
+            "adapter_ambiguous",
+            "检测到多个 USB 蓝牙适配器，无法安全选择恢复目标",
+        )),
+    }
+}
+
+fn pnputil_path() -> Result<PathBuf, PnpRecoveryError> {
+    let system_root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| PnpRecoveryError::new("system_path_missing", "无法定位 Windows 系统目录"))?;
+    let path = PathBuf::from(system_root)
+        .join("System32")
+        .join("pnputil.exe");
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(PnpRecoveryError::new(
+            "pnputil_missing",
+            "Windows PnP 设备恢复工具不可用",
+        ))
+    }
+}
+
+fn is_safe_pnp_instance_id(instance_id: &str) -> bool {
+    !instance_id.is_empty()
+        && instance_id.len() <= 512
+        && !instance_id
+            .chars()
+            .any(|character| matches!(character, '\0' | '"' | '\r' | '\n'))
+}
+
+fn launch_elevated_pnp_restart(instance_id: &str) -> Result<(), PnpRecoveryError> {
+    if !is_safe_pnp_instance_id(instance_id) {
+        return Err(PnpRecoveryError::new(
+            "adapter_identity_invalid",
+            "蓝牙适配器设备标识无效",
+        ));
+    }
+    let executable = pnputil_path()?;
+    let executable_wide = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let parameters = format!("/restart-device \"{instance_id}\"");
+    let parameters_wide = parameters.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut execute = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(executable_wide.as_ptr()),
+        lpParameters: PCWSTR(parameters_wide.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut execute) }.map_err(|error| {
+        if hresult_matches(&error, ERROR_CANCELLED.0) {
+            PnpRecoveryError::new("elevation_cancelled", "蓝牙适配器自动恢复未获得系统授权")
+        } else {
+            PnpRecoveryError::new("helper_launch_failed", "无法启动蓝牙适配器自动恢复")
+        }
+    })?;
+    if execute.hProcess.is_invalid() {
+        return Err(PnpRecoveryError::new(
+            "helper_process_missing",
+            "蓝牙适配器自动恢复进程未启动",
+        ));
+    }
+    let wait = unsafe {
+        WaitForSingleObject(
+            execute.hProcess,
+            PNP_RECOVERY_PROCESS_TIMEOUT.as_millis() as u32,
+        )
+    };
+    if wait != WAIT_OBJECT_0 {
+        let _ = unsafe { CloseHandle(execute.hProcess) };
+        return Err(PnpRecoveryError::new(
+            "helper_timeout",
+            "蓝牙适配器自动恢复超时",
+        ));
+    }
+    let mut exit_code = u32::MAX;
+    let exit_result = unsafe { GetExitCodeProcess(execute.hProcess, &mut exit_code) };
+    let _ = unsafe { CloseHandle(execute.hProcess) };
+    exit_result.map_err(|_| {
+        PnpRecoveryError::new("helper_result_failed", "无法读取蓝牙适配器自动恢复结果")
+    })?;
+    if exit_code != 0 {
+        return Err(PnpRecoveryError::new(
+            "helper_failed",
+            "Windows 未能重启蓝牙适配器",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_pnp_recovery() -> Result<(), PnpRecoveryError> {
+    let deadline = Instant::now() + PNP_RECOVERY_VERIFY_TIMEOUT;
+    loop {
+        if let Ok(Some(radio)) = find_bluetooth_radio_from_snapshot() {
+            cache_bluetooth_radio(&radio);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(PnpRecoveryError::new(
+                "stack_verification_failed",
+                "蓝牙适配器已请求重启，但系统 BLE 栈仍不可用",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn recover_bluetooth_stack_with_pnp() -> Result<(), String> {
+    if PNP_RECOVERY_PROMPTED.swap(true, Ordering::AcqRel) {
+        return Err("本次运行已请求过系统级蓝牙恢复；应用将继续自动重连".to_owned());
+    }
+    let started = Instant::now();
+    crate::ble::gatt_note(
+        "pnp_radio_recovery phase=requested reason=winrt_stack_unavailable elevation=required"
+            .to_owned(),
+    );
+    let result = find_bthusb_adapter_instance_id()
+        .and_then(|instance_id| launch_elevated_pnp_restart(&instance_id))
+        .and_then(|()| verify_pnp_recovery());
+    match result {
+        Ok(()) => {
+            crate::ble::gatt_note(format!(
+                "pnp_radio_recovery phase=completed terminal_result=passed elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "pnp_radio_recovery phase=completed terminal_result=failed error_code={} retryable={} elapsed_ms={}",
+                error.code,
+                error.code != "elevation_cancelled",
+                started.elapsed().as_millis()
+            ));
+            Err(error.message.to_owned())
+        }
+    }
+}
+
 /// 在 Tauri setup 的 UI 线程预先取得无线电对象和控制权限。
 /// Windows 蓝牙栈稍后资源耗尽时，恢复路径可以直接复用对象，不再依赖已经失败的枚举。
 pub fn prepare_bluetooth_radio_recovery() {
@@ -255,6 +556,10 @@ pub fn prepare_bluetooth_radio_recovery() {
 
 /// 启动预热失败但后续 BLE 已恢复时，再补建无线电缓存，为下一次僵死保留恢复句柄。
 pub fn refresh_bluetooth_radio_cache() {
+    // A completed BLE connection proves that any prior system-level recovery
+    // attempt finished. Permit one future UAC recovery if this process later
+    // encounters a new, independently exhausted stack.
+    PNP_RECOVERY_PROMPTED.store(false, Ordering::Release);
     if cached_bluetooth_radio().is_some() {
         return;
     }
@@ -293,6 +598,13 @@ pub fn cycle_bluetooth_radio() -> Result<(), String> {
     let access = match request_access() {
         Ok(access) => access,
         Err(error) => {
+            if is_bluetooth_stack_resource_failure(&error) {
+                crate::ble::gatt_note(
+                    "radio_cycle stage=request_access phase=fallback method=pnp_restart reason=winrt_stack_unavailable"
+                        .to_owned(),
+                );
+                return recover_bluetooth_stack_with_pnp();
+            }
             crate::ble::gatt_note(
                 "radio_cycle stage=request_access phase=completed terminal_result=failed error_code=request_failed retryable=true"
                     .to_owned(),
@@ -322,6 +634,13 @@ pub fn cycle_bluetooth_radio() -> Result<(), String> {
             return Err("未找到蓝牙无线电".to_owned());
         }
         Err(error) => {
+            if is_bluetooth_stack_resource_failure(&error) {
+                crate::ble::gatt_note(
+                    "radio_cycle stage=enumerate phase=fallback method=pnp_restart reason=winrt_stack_unavailable"
+                        .to_owned(),
+                );
+                return recover_bluetooth_stack_with_pnp();
+            }
             crate::ble::gatt_note(format!(
                 "radio_cycle stage=enumerate phase=completed terminal_result=failed error_code={} retryable=true",
                 if error.code().0 as u32 == 0x8007_0008 {
@@ -405,6 +724,7 @@ pub fn cycle_bluetooth_radio() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::core::HRESULT;
     use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 
     #[test]
@@ -471,6 +791,36 @@ mod tests {
                 reopened: false,
             })
         );
+    }
+
+    #[test]
+    fn pnp_recovery_only_accepts_one_literal_device_instance_id() {
+        assert!(is_safe_pnp_instance_id("USB\\VID_1234&PID_5678\\INSTANCE"));
+        assert!(!is_safe_pnp_instance_id(""));
+        assert!(!is_safe_pnp_instance_id("USB\\DEVICE\" /restart-device"));
+        assert!(!is_safe_pnp_instance_id("USB\\DEVICE\nNEXT"));
+        assert!(!is_safe_pnp_instance_id(&"x".repeat(513)));
+    }
+
+    #[test]
+    fn pnp_fallback_is_limited_to_exhausted_or_aborted_bluetooth_stack() {
+        assert!(is_bluetooth_stack_resource_failure(
+            &windows::core::Error::from_hresult(HRESULT(0x8007_0008_u32 as i32))
+        ));
+        assert!(is_bluetooth_stack_resource_failure(
+            &windows::core::Error::from_hresult(HRESULT(0x8000_4004_u32 as i32))
+        ));
+        assert!(!is_bluetooth_stack_resource_failure(
+            &windows::core::Error::from_hresult(HRESULT(0x8007_0005_u32 as i32))
+        ));
+    }
+
+    #[test]
+    #[ignore = "shows UAC and restarts the host Bluetooth adapter; run explicitly for recovery validation"]
+    fn live_pnp_recovery_restores_winrt_radio_enumeration() {
+        PNP_RECOVERY_PROMPTED.store(false, Ordering::Release);
+        let result = recover_bluetooth_stack_with_pnp();
+        assert!(result.is_ok(), "PnP recovery failed: {result:?}");
     }
 
     #[test]

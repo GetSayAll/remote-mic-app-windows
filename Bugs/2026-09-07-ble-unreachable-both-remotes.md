@@ -1,5 +1,30 @@
 # 双遥控器 BLE Unreachable（GATT 状态 1）：多手段自愈矩阵实测
 
+## 2026-09-14：`0x80070008` 的内核栈兜底恢复
+
+- 在已稳定复现 `0x80070008` 的主机上，参考仓库的“配对 selector →
+  `BluetoothLEDevice.FromIdAsync`”路径返回 `0x80004004 (E_ABORT)`；直接 GATT
+  service selector 仍返回 `0x80070008`；SetupAPI 能看到一个 BLE 接口，但 Win32
+  GATT `CreateFile` 返回 `0x80070079`（信号量超时）。三条互相独立的用户态入口
+  同时失败，定位到 Windows 蓝牙设备节点/内核栈，而不是 SayAll 选错 WinRT 构造入口。
+- 普通用户执行 `pnputil /restart-device` 得到“拒绝访问”；`/disable-device` 因关键
+  系统设备被拒绝，而且该工具在这类逻辑失败时仍可能返回退出码 0。因此新恢复路径
+  不以工具退出码单独判成功，而是操作后重新枚举 WinRT Bluetooth Radio。
+- 修复仅在 WinRT 返回 `0x80070008` 或 `0x80004004`、常规 Radio 恢复也无法取得
+  对象时启用。SetupAPI 只接受当前存在且服务名为 `BTHUSB` 的唯一蓝牙类设备；随后
+  通过 Windows 自带 `pnputil.exe /restart-device` 显示 UAC 请求，用户无需进入设置
+  手工关开蓝牙。真实设备实例 ID 只在内存中传递，不写日志；多适配器时拒绝猜测。
+- 现场显式运行恢复测试：UAC 同意后 1.95 秒内完成设备节点重启并通过 WinRT Radio
+  重新枚举，测试 passed；随后运行 SayAll，连接日志从即时
+  `windows_resource_exhausted` 前进到 `conn_params`，证明
+  `BluetoothLEDevice` 创建能力已经恢复。当前选中遥控器完整能力协商与 RC001、
+  RC003 分别制造僵死后的无人值守恢复仍 deferred。
+- 连接资源释放另修一处确定缺陷：旧 `BleSession::close` 在第一次 Close 前就永久标记
+  `closed=true`；service/device 任一 Close 失败后，后续调用只重复返回已保存错误，
+  与“保留所有者并重试”的设计注释相反。现在分别记录两个所有者的关闭状态，后续
+  Close 只重试未成功项；本地事件、CCCD 和连接参数释放仍只执行一次，并新增不含
+  身份信息的 `ble_session_cleanup` 阶段日志。
+
 ## 2026-09-13：重连失败路径泄漏 WinRT BLE 资源
 
 - 代码复核发现 `BluetoothLEDevice` 创建成功后，设备属性、服务发现或任一特征发现
