@@ -342,6 +342,24 @@ mod tests {
     }
 
     #[test]
+    fn launch_at_login_defaults_off_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-launch-at-login-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(!store.load().unwrap().launch_at_login);
+        store.save_launch_at_login(true).unwrap();
+        assert!(store.load().unwrap().launch_at_login);
+        store.save_launch_at_login(false).unwrap();
+        assert!(!store.load().unwrap().launch_at_login);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn button_mapping_json_round_trip_preserves_typed_shortcut() {
         use sayall_windows::raw_input::RemoteButton;
         use sayall_windows::send_input::{
