@@ -259,6 +259,16 @@ export interface AppUpdatePreferences {
 
 export type ThemePreference = "system" | "light" | "dark";
 
+export async function getLaunchAtLogin(): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  return invoke<boolean>("get_launch_at_login");
+}
+
+export async function setLaunchAtLogin(enabled: boolean): Promise<boolean> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法设置开机自启动");
+  return invoke<boolean>("set_launch_at_login", { enabled });
+}
+
 export interface AppUpdateProgress {
   downloaded: number;
   contentLength: number | null;

@@ -66,6 +66,12 @@ impl SettingsStore {
         })
     }
 
+    pub fn save_launch_at_login(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存开机自启动设置", move |settings| {
+            settings.launch_at_login = enabled;
+        })
+    }
+
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
