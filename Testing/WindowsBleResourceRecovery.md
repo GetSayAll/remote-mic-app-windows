@@ -18,6 +18,8 @@
 | 普通用户 PnP 重启 | failed | Windows 拒绝访问；退出码不能单独代表成功 |
 | UAC 明示授权的唯一 BTHUSB 节点重启 | passed | ignored live test 1.95s 完成；WinRT Radio 读回成功 |
 | 恢复后的 `BluetoothLEDevice` 创建 | passed | SayAll 日志前进到 `conn_params`，不再即时资源耗尽 |
+| 提交 `341721f` 本地 NSIS 安装与启动 | passed | 静默安装退出码 0；日志 source revision 与提交一致 |
+| 当前所选遥控器完整 BLE 建链 | passed | 2.806s 内完成设备、服务、三项特征、两路订阅和能力响应 |
 | RC001 完整连接与首次语音 | deferred | 本轮未取得完整能力协商和语音证据 |
 | RC003 完整连接与首次语音 | deferred | 本轮未取得完整能力协商和语音证据 |
 
@@ -38,5 +40,9 @@
 - `cargo test --workspace`：176 passed，0 failed，5 ignored（硬件/联网显式测试）。
 - `pnpm test -- --run`：83 passed，0 failed。
 - `pnpm build`：passed。
-- 本地 NSIS 安装/启动结果在完成后补录；真实硬件结果只按上表标记，不由编译通过
-  推导。
+- 本地 NSIS：passed；`SayAll-Windows-0.2.6-ble-pnp-recovery-341721f-local-x64-setup.exe`
+  的 SHA-256 为
+  `701e7870c813de89bfb46eb852486b3717a449a9278d148e0e84995e5d1ac6a5`。
+- 安装版进程启动后，诊断日志记录 `source_revision=341721f...`、
+  `radio_recovery_prepare ... cache=ready access=allowed`，随后当前所选遥控器完成
+  capability response；真实双型号和首次语音结果只按上表标记，不由单型号连接推导。
