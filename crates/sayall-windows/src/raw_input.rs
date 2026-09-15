@@ -81,6 +81,10 @@ pub enum RawInputPhase {
     Stopped,
     Starting,
     Ready,
+    /// 监听器已运行，但当前系统里没有匹配遥控器的 HID 接口（多为 OS 侧 HOGP
+    /// 接口缺失/链路僵死）。监听器已注册设备热插拔通知，待接口恢复
+    /// （GIDC_ARRIVAL）会立即重新绑定，无需外层 10s 轮询重启。
+    Awaiting,
     Failed,
     Unsupported,
 }

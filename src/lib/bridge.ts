@@ -44,7 +44,7 @@ export interface AudioSnapshot {
   lastError: string | null;
 }
 
-export type RawInputPhase = "stopped" | "starting" | "ready" | "failed" | "unsupported";
+export type RawInputPhase = "stopped" | "starting" | "awaiting" | "ready" | "failed" | "unsupported";
 
 export type RemoteButton =
   | "back"

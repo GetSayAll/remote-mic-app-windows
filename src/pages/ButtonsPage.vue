@@ -755,6 +755,8 @@ function phaseLabel(phase: RawInputPhase | undefined): string {
       return "监听启动失败（自动重试中）";
     case "stopped":
       return "监听已停止";
+    case "awaiting":
+      return "等待遥控器连接（系统 HID 接口未就绪）";
     case "unsupported":
       return "当前环境暂不支持";
     default:

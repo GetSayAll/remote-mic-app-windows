@@ -38,6 +38,7 @@ const audioPhases = [
 const rawInputPhases = [
   "stopped",
   "starting",
+  "awaiting",
   "ready",
   "failed",
   "unsupported",
