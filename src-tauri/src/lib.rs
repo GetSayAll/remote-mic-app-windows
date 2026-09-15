@@ -891,6 +891,8 @@ fn register_shortcut_capture_events(app: tauri::AppHandle) {
 /// Raw Input 监听自愈监督线程：启动尝试一次（遥控器休眠时可能失败）；
 /// 此后每 10 秒巡检，phase=Failed（启动失败或监听线程意外退出）时自动重启。
 /// Stopped（用户在按键页显式停止）不重启；成功后保持低频巡检自愈。
+/// 注意：设备暂时缺失时监听器进入 Awaiting（窗口与设备热插拔通知已就位），
+/// 由 WM_INPUT_DEVICE_CHANGE 在接口恢复时立即重绑，不在此处重启，避免无谓抖动。
 fn spawn_raw_input_supervisor(platform: Arc<dyn PlatformRuntime>) {
     std::thread::Builder::new()
         .name("sayall-raw-input-supervisor".to_owned())

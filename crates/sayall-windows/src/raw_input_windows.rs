@@ -2,7 +2,7 @@ use crate::button_mapping::EngineMessage;
 use crate::key_gate;
 use crate::raw_input::{
     button_for_usage, decode_report_usages, normalize_device_path, parse_raw_hid_body,
-    select_single_device_path, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
+    select_single_device_path, DevicePathError, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
 };
 use crate::PlatformError;
 use std::cell::RefCell;
@@ -119,9 +119,10 @@ impl RawInputRuntime {
                 // 监听器就绪后 key_gate 才具备归因来源（HID 报文武装）。
                 key_gate::set_listener_active(true);
                 let snapshot = self.snapshot();
+                let awaiting = snapshot.phase == RawInputPhase::Awaiting;
                 crate::ble::gatt_note(format!(
-                    "raw_input_listener action=start phase=completed terminal_result=passed matched_device_count={}",
-                    snapshot.matched_device_count
+                    "raw_input_listener action=start phase=completed terminal_result=passed matched_device_count={} awaiting_remote_hid_interface={}",
+                    snapshot.matched_device_count, awaiting
                 ));
                 Ok(snapshot)
             }
@@ -293,20 +294,14 @@ fn run_listener(
     hwnd_slot: Arc<AtomicIsize>,
     ready: &mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), String> {
+    // 先枚举当前在位设备，但**不**以“找不到”作为失败退出：设备缺失时仍要建窗 +
+    // 注册 RIDEV_DEVNOTIFY，从而能收到 WM_INPUT_DEVICE_CHANGE（GIDC_ARRIVAL），
+    // 待系统 HOGP 接口恢复时立即重绑，而非靠上层 10s 轮询重启。
     let paths = enumerate_matching_device_paths()?;
     {
         let mut snapshot = snapshot.lock().unwrap();
         snapshot.matched_device_count = paths.len() as u32;
     }
-    let selected_path = select_single_device_path(&paths).map_err(|error| error.to_string())?;
-    THREAD_CONTEXT.with(|slot| {
-        *slot.borrow_mut() = Some(ListenerContext {
-            selected_path: normalize_device_path(&selected_path),
-            snapshot: Arc::clone(&snapshot),
-            engine,
-            remote_voice_f5_pressed: false,
-        });
-    });
 
     let module = unsafe { GetModuleHandleW(None) }.map_err(|error| error.to_string())?;
     let instance = HINSTANCE(module.0);
@@ -375,10 +370,39 @@ fn run_listener(
         return Err(format!("RegisterRawInputDevices failed: {error}"));
     }
 
+    // 设备选择：缺失（系统 HOGP 接口缺失/遥控器未连接）不视为失败，进入 Awaiting；
+    // 多设备歧义仍按失败处理，由上层重启。
+    let selected_path = match select_single_device_path(&paths) {
+        Ok(path) => normalize_device_path(&path),
+        Err(DevicePathError::Missing) => String::new(),
+        Err(error) => {
+            let _ = unsafe { DestroyWindow(window) };
+            let _ = unsafe { UnregisterClassW(class_name_ptr, Some(instance)) };
+            return Err(error.to_string());
+        }
+    };
+    THREAD_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(ListenerContext {
+            selected_path: selected_path.clone(),
+            snapshot: Arc::clone(&snapshot),
+            engine,
+            remote_voice_f5_pressed: false,
+        });
+    });
+
     {
         let mut state = snapshot.lock().unwrap();
-        state.phase = RawInputPhase::Ready;
-        state.last_error = None;
+        if selected_path.is_empty() {
+            state.phase = RawInputPhase::Awaiting;
+            state.last_error = Some(
+                "未找到小米遥控器 HID 接口：系统 HOGP 接口缺失（OS 侧 GATT/HID 链路僵死常见成因）。\
+                 监听已就位，待遥控器 HID 接口恢复（蓝牙重新配对或无线电恢复）会自动重绑定，无需重启应用。"
+                    .to_owned(),
+            );
+        } else {
+            state.phase = RawInputPhase::Ready;
+            state.last_error = None;
+        }
     }
     let _ = ready.send(Ok(()));
 
@@ -444,9 +468,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_INPUT_DEVICE_CHANGE => {
             // 设备热插拔通知（RIDEV_DEVNOTIFY）：遥控器断连/睡眠会让 HID 设备
-            // 接口消失，按住中的按键不会再有释放报文——通知引擎强制释放。
+            // 接口消失，按住中的按键不会再有释放报文——通知引擎强制释放；
+            // 接口恢复（GIDC_ARRIVAL）则由监听器立即重新绑定，无需重启。
             if wparam.0 as u32 == GIDC_REMOVAL || wparam.0 as u32 == GIDC_ARRIVAL {
-                handle_device_change(HRAWINPUT(lparam.0 as *mut c_void));
+                handle_device_change(HRAWINPUT(lparam.0 as *mut c_void), wparam.0 as u32);
             }
             LRESULT(0)
         }
@@ -462,15 +487,59 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-fn handle_device_change(handle: HRAWINPUT) {
+fn handle_device_change(handle: HRAWINPUT, event: u32) {
     let device_path = match get_device_name(windows::Win32::Foundation::HANDLE(handle.0)) {
         Ok(path) => normalize_device_path(&path),
         Err(_) => return,
     };
+    let is_remote = crate::raw_input::device_path_matches_xiaomi_remote(&device_path);
     THREAD_CONTEXT.with(|slot| {
-        if let Some(context) = slot.borrow().as_ref() {
+        let mut borrowed = slot.borrow_mut();
+        let context = match borrowed.as_mut() {
+            Some(context) => context,
+            None => return,
+        };
+        if event == GIDC_ARRIVAL {
+            // 遥控器 HID 接口恢复（或首次出现）：重新枚举并绑定，无需重启监听器。
+            if is_remote || context.selected_path.is_empty() {
+                let was_unbound = context.selected_path.is_empty();
+                let paths = match enumerate_matching_device_paths() {
+                    Ok(paths) => paths,
+                    Err(_) => return,
+                };
+                if let Ok(found) = select_single_device_path(&paths) {
+                    context.selected_path = normalize_device_path(&found);
+                    let mut state = context.snapshot.lock().unwrap();
+                    state.phase = RawInputPhase::Ready;
+                    state.matched_device_count = paths.len() as u32;
+                    state.last_error = None;
+                    if was_unbound {
+                        state.raw_event_count = 0;
+                    }
+                    crate::ble::gatt_note(format!(
+                        "raw_input device_change action=device_arrived phase=ready matched_device_count={}",
+                        paths.len()
+                    ));
+                } else if was_unbound && is_remote {
+                    // 此前未绑定、遥控器接口已出现但暂未选出唯一路径：保持等待。
+                    let mut state = context.snapshot.lock().unwrap();
+                    state.phase = RawInputPhase::Awaiting;
+                }
+                // 已绑定且本次选择变歧义：保留既有绑定，不回退。
+            }
+        } else if event == GIDC_REMOVAL {
             if device_path == context.selected_path {
+                context.selected_path.clear();
+                let mut state = context.snapshot.lock().unwrap();
+                state.phase = RawInputPhase::Awaiting;
+                state.last_error = Some(
+                    "小米遥控器 HID 接口已移除（断连/睡眠），等待重新连接后自动恢复".to_owned(),
+                );
+                drop(state);
                 let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                crate::ble::gatt_note(
+                    "raw_input device_change action=device_removed phase=awaiting".to_owned(),
+                );
             }
         }
     });
