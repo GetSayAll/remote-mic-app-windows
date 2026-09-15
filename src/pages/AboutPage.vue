@@ -41,6 +41,14 @@ const upToDate = computed(() => phase.value === "up-to-date");
 const failed = computed(() => phase.value === "failed");
 const notes = computed(() => info.value?.notes?.trim() || null);
 const launchAtLogin = ref(false);
+/**
+ * 登录自启动的初始值来自异步 IPC。就绪前用同尺寸占位符顶位，就绪后才创建开关
+ * 本体——元素"创建即带正确 checked"，从不存在属性变更，因此不会有关→开的滑动
+ * 过渡（对照：检查预览版开关是模块级单例、创建时即为终值，故无此动画）。
+ * 只禁用过渡（no-anim / nextTick / rAF）都不行：Vue 的 DOM 更新与 nextTick 都在
+ * 同一批微任务内、早于浏览器绘制，浏览器看不到中间帧，过渡照常触发。
+ */
+const launchAtLoginReady = ref(false);
 const launchAtLoginBusy = ref(false);
 const launchAtLoginError = ref("");
 
@@ -77,7 +85,10 @@ onMounted(() => {
   void loadUpdatePreferences();
   void getLaunchAtLogin()
     .then((enabled) => { launchAtLogin.value = enabled; })
-    .catch((error) => { launchAtLoginError.value = error instanceof Error ? error.message : String(error); });
+    .catch((error) => { launchAtLoginError.value = error instanceof Error ? error.message : String(error); })
+    // 就绪标志与初值在同一渲染批次生效：开关此时才被创建，创建即带正确
+    // checked，不产生属性变更，故无过渡可触发（无需禁用过渡或等待绘制）。
+    .finally(() => { launchAtLoginReady.value = true; });
 });
 </script>
 
@@ -129,6 +140,7 @@ onMounted(() => {
       <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
       <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
         <input
+          v-if="launchAtLoginReady"
           type="checkbox"
           class="toggle-input"
           name="launch-at-login"
@@ -136,6 +148,7 @@ onMounted(() => {
           :disabled="launchAtLoginBusy"
           @change="onLaunchAtLoginChange"
         />
+        <span v-else class="toggle-placeholder" aria-hidden="true"></span>
         登录时自动启动
       </label>
       <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
@@ -201,3 +214,9 @@ onMounted(() => {
     </article>
   </section>
 </template>
+
+<style scoped>
+/* 初值就绪前用同尺寸占位符顶位，避免开关出现时布局跳动；开关本体仅在
+   终值就绪后创建，创建即带正确 checked，不产生关→开滑动过渡。 */
+.toggle-placeholder { width: 34px; height: 20px; flex: none; }
+</style>
