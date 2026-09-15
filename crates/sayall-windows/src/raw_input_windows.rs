@@ -116,9 +116,11 @@ impl RawInputRuntime {
         match ready_receiver.recv_timeout(START_TIMEOUT) {
             Ok(Ok(())) => {
                 *control_slot = Some(control);
-                // 监听器就绪后 key_gate 才具备归因来源（HID 报文武装）。
-                key_gate::set_listener_active(true);
                 let snapshot = self.snapshot();
+                // 门控只有在真正绑定到唯一遥控器 HID 设备时才具备归因来源（HID 报文
+                // 武装）。Awaiting 期间设备不在位，必须保持关闭——否则钩子会在没有
+                // 归因来源时仍按“监听器运行中”判定；接口恢复重绑时再打开。
+                key_gate::set_listener_active(snapshot.phase == RawInputPhase::Ready);
                 let awaiting = snapshot.phase == RawInputPhase::Awaiting;
                 crate::ble::gatt_note(format!(
                     "raw_input_listener action=start phase=completed terminal_result=passed matched_device_count={} awaiting_remote_hid_interface={}",
@@ -395,8 +397,9 @@ fn run_listener(
         if selected_path.is_empty() {
             state.phase = RawInputPhase::Awaiting;
             state.last_error = Some(
-                "未找到小米遥控器 HID 接口：系统 HOGP 接口缺失（OS 侧 GATT/HID 链路僵死常见成因）。\
-                 监听已就位，待遥控器 HID 接口恢复（蓝牙重新配对或无线电恢复）会自动重绑定，无需重启应用。"
+                "未找到小米遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
+                 睡眠唤醒或蓝牙栈僵死）。监听已就位，系统恢复该接口后会自动重新绑定，\
+                 无需手动重连或重启应用。"
                     .to_owned(),
             );
         } else {
@@ -520,6 +523,8 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                         "raw_input device_change action=device_arrived phase=ready matched_device_count={}",
                         paths.len()
                     ));
+                    // 重新绑定到唯一设备后，门控重新具备归因来源。
+                    key_gate::set_listener_active(true);
                 } else if was_unbound && is_remote {
                     // 此前未绑定、遥控器接口已出现但暂未选出唯一路径：保持等待。
                     let mut state = context.snapshot.lock().unwrap();
@@ -537,6 +542,9 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                 );
                 drop(state);
                 let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                // 解绑即失去归因来源：关闭门控并清空武装宽限，避免按住中的键在
+                // 接口恢复重绑后仍带着旧武装状态被吞。
+                key_gate::set_listener_active(false);
                 crate::ble::gatt_note(
                     "raw_input device_change action=device_removed phase=awaiting".to_owned(),
                 );
