@@ -41,6 +41,21 @@ if (isTauriRuntime()) {
   document.addEventListener("contextmenu", (event) => event.preventDefault());
 }
 
+// 焦点环模态跟踪（见 styles.css body.kb-nav 注释）：仅真实 Tab 导航显示
+// 焦点环；遥控器注入的快捷键属于键盘模态但不该点亮焦点环，故只认 Tab。
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (event.key === "Tab") document.body.classList.add("kb-nav");
+  },
+  true,
+);
+window.addEventListener(
+  "mousedown",
+  () => document.body.classList.remove("kb-nav"),
+  true,
+);
+
 if (import.meta.env.VITE_SAYALL_RUNTIME_SIMULATION === "1") {
   void import("./runtime-simulation").then(({ runRuntimeSimulationSmoke }) =>
     runRuntimeSimulationSmoke(),

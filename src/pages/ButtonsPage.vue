@@ -1253,7 +1253,10 @@ onUnmounted(() => {
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
-.saved-app-grid { max-height: 180px; overflow-y: auto; margin-top: 8px; align-content: start; }
+/* 滚动容器顶部会裁掉向上溢出（transform 不产生可滚动区域）：
+   chip:hover 上浮 1px + 阴影会在容器顶边被切，故用内边距留出
+   上浮空间，负外边距补偿保持原网格位置不变。 */
+.saved-app-grid { max-height: 180px; overflow-y: auto; margin: 5px -3px -3px; padding: 3px; align-content: start; }
 .saved-app-grid .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
 </style>
