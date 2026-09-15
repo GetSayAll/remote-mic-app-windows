@@ -200,6 +200,23 @@ fn find_bluetooth_radio_from_device_query() -> windows::core::Result<Option<Radi
     Ok(None)
 }
 
+/// 设备查询兜底并把失败 HRESULT 落盘（2026-09-16）：此前两条枚举入口的
+/// 失败原因都被压成 `snapshot_failed`，看不出是 `0x80070008`
+/// （资源耗尽）还是 `0x80004004`（E_ABORT）或别的码——而不同码指向的
+/// 故障层不同，是本轮根因分析的首要盲区。
+fn device_query_with_log() -> windows::core::Result<Option<Radio>> {
+    match find_bluetooth_radio_from_device_query() {
+        Ok(radio) => Ok(radio),
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "radio_cycle stage=enumerate phase=fallback reason=device_query_failed hresult=0x{:08X}",
+                error.code().0 as u32
+            ));
+            Err(error)
+        }
+    }
+}
+
 fn find_bluetooth_radio_uncached() -> windows::core::Result<Option<Radio>> {
     match find_bluetooth_radio_from_snapshot() {
         Ok(Some(radio)) => Ok(Some(radio)),
@@ -208,14 +225,14 @@ fn find_bluetooth_radio_uncached() -> windows::core::Result<Option<Radio>> {
                 "radio_cycle stage=enumerate phase=fallback reason=snapshot_empty method=device_query"
                     .to_owned(),
             );
-            find_bluetooth_radio_from_device_query()
+            device_query_with_log()
         }
-        Err(_) => {
-            crate::ble::gatt_note(
-                "radio_cycle stage=enumerate phase=fallback reason=snapshot_failed method=device_query"
-                    .to_owned(),
-            );
-            find_bluetooth_radio_from_device_query()
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "radio_cycle stage=enumerate phase=fallback reason=snapshot_failed method=device_query hresult=0x{:08X}",
+                error.code().0 as u32
+            ));
+            device_query_with_log()
         }
     }
 }
@@ -510,6 +527,12 @@ fn recover_bluetooth_stack_with_pnp() -> Result<(), String> {
 pub fn prepare_bluetooth_radio_recovery() {
     let started = Instant::now();
     crate::ble::gatt_note("radio_recovery_prepare phase=requested".to_owned());
+    // 启动预热是"系统栈此刻健不健康"的第一个可观察点：同时采一次进程/系统
+    // 资源，把后续 `cache=unavailable` 与具体资源占用对齐（2026-09-16）。
+    crate::ble::gatt_note(crate::resource_probe::resource_probe_note(
+        "startup_prewarm",
+        "phase=before_enumerate",
+    ));
     let radio = match find_bluetooth_radio_uncached() {
         Ok(Some(radio)) => radio,
         Ok(None) => {
@@ -521,12 +544,13 @@ pub fn prepare_bluetooth_radio_recovery() {
         }
         Err(error) => {
             crate::ble::gatt_note(format!(
-                "radio_recovery_prepare phase=completed terminal_result=failed error_code={} cache=unavailable retryable=true elapsed_ms={}",
+                "radio_recovery_prepare phase=completed terminal_result=failed error_code={} hresult=0x{:08X} cache=unavailable retryable=true elapsed_ms={}",
                 if error.code().0 as u32 == 0x8007_0008 {
                     "windows_resource_exhausted"
                 } else {
                     "prepare_failed"
                 },
+                error.code().0 as u32,
                 started.elapsed().as_millis()
             ));
             return;
@@ -543,12 +567,13 @@ pub fn prepare_bluetooth_radio_recovery() {
             started.elapsed().as_millis()
         )),
         Err(error) => crate::ble::gatt_note(format!(
-            "radio_recovery_prepare phase=completed terminal_result=failed error_code={} cache=ready retryable=true elapsed_ms={}",
+            "radio_recovery_prepare phase=completed terminal_result=failed error_code={} hresult=0x{:08X} cache=ready retryable=true elapsed_ms={}",
             if error.code().0 as u32 == 0x8007_0008 {
                 "windows_resource_exhausted"
             } else {
                 "prepare_failed"
             },
+            error.code().0 as u32,
             started.elapsed().as_millis()
         )),
     }

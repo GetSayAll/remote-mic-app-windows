@@ -40,6 +40,8 @@ pub mod raw_input;
 mod raw_input_windows;
 #[cfg(any(windows, test))]
 mod reconnect;
+#[cfg(windows)]
+mod resource_probe;
 pub mod send_input;
 /// 真实注入运行时（2026-09-06 起 pub：预设注入链路真机验证探针
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
