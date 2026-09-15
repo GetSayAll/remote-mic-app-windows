@@ -15,7 +15,7 @@
 
 ## Windows RC001 / RC003
 
-- [x] 参考 macOS `SMAppService.mainApp` 实现 Windows 当前用户登录自启动：关于页可开关，使用 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，启动时同步并记录结构化日志；不需要管理员权限。
+- [x] 参考 macOS `SMAppService.mainApp` 实现 Windows 当前用户登录自启动：关于页可开关，使用 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，启动时同步并记录结构化日志；不需要管理员权限。**2026-09-15 本机 Windows 真机 passed**：release 安装版 0.2.6 注销重登后自动启动，进程父进程为 `explorer`（由登录 shell 拉起，非手动启动），启动链 `document_load finished → vue_mount(80ms) → initial_ipc_ready(337ms)` 完整，日志 `startup feature=launch_at_login action=sync terminal_result=passed enabled=true`。验证要点：`Win+L` 锁屏再解锁**不会**触发 `Run` 项（用户会话未结束），必须注销（`shutdown /l`）或重启才能验证。
 
 - [ ] 鼠标动作映射：支持左/右/中键单击、左键双击、每次 1–100 格滚轮及每次 1–2000 物理像素指针移动；不修改默认绑定。RC001/RC003 实体按键及闲置首按回归仍需分别验收，见 `Testing/WindowsMouseActions.md`。
 - [ ] Windows 注册应用扫描与应用库：支持搜索、多选/全选、配置保存及导入导出；扫描或添加应用不会自动启动或绑定。RC001/RC003 实体按键回归仍需分别验收，见 `Testing/WindowsRegisteredApps.md`。
