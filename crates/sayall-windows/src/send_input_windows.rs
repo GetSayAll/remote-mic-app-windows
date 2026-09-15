@@ -10,7 +10,8 @@ use std::time::Instant;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Shutdown::LockWorkStation;
 use windows::Win32::UI::HiDpi::{
-    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -111,9 +112,19 @@ impl SendInputRuntime {
             let (dx, dy) = direction.offset(distance)?;
             // Even physical-cursor APIs are virtualized for unaware callers on this host.
             // Scope DPI awareness to this call and restore the worker thread afterwards.
-            let previous =
-                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+            //
+            // 先前上下文必须用 GetThreadDpiAwarenessContext 读取：它与“是否未设置过”
+            // 无关，永远返回有效句柄；而 SetThreadDpiAwarenessContext 的返回值只在
+            // 失败时为 NULL，把它当“先前值”会在该线程从未显式设置过上下文时误判失败。
+            let previous = unsafe { GetThreadDpiAwarenessContext() };
             if previous.0.is_null() {
+                return Err(SendInputError::Backend(
+                    "cannot read thread DPI awareness context".into(),
+                ));
+            }
+            let switched =
+                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+            if switched.0.is_null() {
                 return Err(SendInputError::Backend(
                     "cannot establish physical cursor coordinate context".into(),
                 ));
