@@ -132,18 +132,19 @@ html[data-theme="dark"] {
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; min-width: 940px; min-height: 100%; margin: 0; }
 button, input { font: inherit; }
-/* 焦点环只在真实 Tab 键盘导航时显示（body.kb-nav 由 main.ts 维护）：
+/* 焦点环：默认保留浏览器原生 :focus-visible 行为（纯键盘、辅助技术或从未
+   使用指针的环境都能看到焦点指示），仅在最近一次交互是指针时抑制——
+   body.pointer-nav 由 src/lib/focus-modality.ts 维护。
    Chromium 会在"最近输入模态=键盘"时让 :focus-visible 重新命中鼠标
    点过的按钮——遥控器注入的快捷键（↑↓←→/Home 等）会把本窗口的
    最近模态切为键盘，导致上次点过的侧栏项/按键格凭空出现焦点环
    （配置为打开应用的按键不触发：启动目标应用使本窗口失焦）。
-   默认必须显式 outline:none 压住浏览器 UA 默认焦点环；仅 Tab 导航
-   （body.kb-nav）时显示强调环，否则门控规则会把 UA 默认轮廓重新露出。
-   鼠标按下即移除 kb-nav，Tab 键按下才重新打开。 */
+   幽灵环的成因必然伴随一次指针交互，故按指针模态判定：既消除幽灵环，
+   也不剥夺非 Tab 导航用户的焦点指示。鼠标按下打开指针模态，Tab 关闭。 */
 button:focus-visible,
-input:focus-visible { outline: none; }
-body.kb-nav button:focus-visible,
-body.kb-nav input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.pointer-nav button:focus-visible,
+body.pointer-nav input:focus-visible { outline: none; }
 
 body {
   min-height: 100vh;
@@ -316,7 +317,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .theme-option { position: relative; min-height: 32px; display: grid; place-items: center; padding: 5px 14px; border-radius: 7px; color: var(--text-secondary); cursor: pointer; font-size: 13.5px; font-weight: 600; transition: color 0.15s, background-color 0.15s, box-shadow 0.15s; }
 .theme-option:hover { color: var(--text-primary); background: var(--nav-hover); }
 .theme-option.selected { color: var(--text-on-accent); background: var(--accent); box-shadow: 0 2px 8px var(--shadow-control); }
-body.kb-nav .theme-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .theme-option:has(input:disabled) { cursor: wait; opacity: 0.6; }
 .theme-option input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .appearance-card .appearance-note { margin: 8px 0 0; font-size: 12.5px; }
