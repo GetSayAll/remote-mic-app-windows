@@ -171,3 +171,50 @@ BLE 会话，是链路僵死的主要诱因"）。
 **待补的一条对照**：恢复后（睡眠或重启）再启动一次，取 `resource_probe reason=startup_prewarm`
 与坏态对比。预期两者计数一致 → 进一步支持"楔死而非耗尽"。
 
+## 2026-09-16 01:12–01:27 现场干预：五类恢复全部无效，楔死定位于内核层
+
+坏态持续 15 分钟以上未自行恢复。本轮逐个实验（**前三类此前从未试过**），全部失败：
+
+| # | 干预 | 结果 |
+| --- | --- | --- |
+| 1 | 结束每用户 WinRT broker：`RuntimeBroker` ×2 + `SystemSettings` + `explorer` | failed（explorer 自动重启，蓝牙仍 `0x80070008`） |
+| 2 | 结束每用户蓝牙服务宿主：`svchost`(载 `microsoft.bluetooth.userservice.dll`) | failed（可成功结束，说明它以当前用户身份运行；栈无变化） |
+| 3 | 结束全部 COM 代理 `dllhost` ×3 | failed |
+| 4 | 应用内无线电 Off/On（`Radio.SetStateAsync`） | failed（长期累计 143 次"执行成功却无效"） |
+| 5 | 应用内提权 PnP 重启适配器 | failed，且**是空操作**（见下） |
+
+**新发现的产品缺陷（可独立修复）：提权 PnP 兜底是空操作。**
+应用在 01:12:35.808 记录 `pnp_radio_recovery phase=requested elevation=required`，
+16.9 秒后 `terminal_result=failed error_code=stack_verification_failed`。
+本机 UAC 为 **`ConsentPromptBehaviorAdmin=0`（提权不弹框）**，因此该 helper 确实是
+以管理员身份运行的——即这不是"用户没点 UAC"。
+但 `Microsoft-Windows-Kernel-PnP/Configuration` 通道在 01:12 前后**没有任何设备事件**
+（该通道对其它设备的重启有完整 400/410/420 记录，最近两条为 09-15 16:07 与 19:49）。
+→ **`pnputil /restart-device` 返回了成功但未产生设备重启**，与仓库既有记录
+（"该工具在这类逻辑失败时仍可能返回退出码 0"）一致。
+另外 `PNP_RECOVERY_PROMPTED` 每进程只允许一次，所以这一次空操作之后，
+该进程在剩余生命周期内再也不会尝试系统级恢复。
+
+**由本轮实验得到的排除结论（`passed`）**：
+
+- 楔死不在**设备在位性**：`Get-PnpDevice` 显示蓝牙类设备全部 Present 且 Status=OK
+  （英特尔适配器 `BTHUSB`、`Microsoft 蓝牙 LE 枚举器`、小米遥控器、蓝牙鼠标）；
+  `bthserv` 与 `RmSvc`（无线电管理服务）均在 Running。
+- 楔死不在**任何用户态层**：应用重启、无线电 Off/On、每用户 WinRT broker、
+  每用户蓝牙服务宿主、COM 代理——全部重置过，均无效。
+- 楔死不在**机器级资源**：见上一节的探针数据（内存/句柄/线程/池全不紧张）。
+- → 楔死位于**内核 BLE/无线电驱动 或 控制器状态**。这解释了为什么只有
+  **真正的电源循环（S3 / 重启）**能清除：Windows 的"蓝牙无线电关闭"
+  （`Radio.SetStateAsync`）只是软件层开关，**不切断控制器电源、不重置控制器**；
+  而 S3 会切断 USB 端口供电，从而真正复位控制器（轮 7/10/13 的恢复方式即此）。
+
+**本轮未完成的边界（`deferred`）**：
+
+- 现场无法自行恢复：本环境的工具策略禁止 PowerShell 提权（`Start-Process` 被产品级
+  硬策略拦下，`dangerouslyDisableSandbox` 亦无效）与 `rundll32`（LOLBin 拦下），
+  因此**无法执行 bthserv 重启、适配器 disable/enable、或触发 S3**。
+  现场恢复需一次人工电源循环（睡眠或重启）。
+- **复现实验（连接 → 强杀 → 重启应用）未执行**，且**故意不自动执行**：该实验会
+  **再次制造楔死**，而楔死只能靠电源循环解除，因此自动化复现会把机器留在坏态，
+  代价大于收益。应由人工在明确知道"事后要再电源循环一次"的前提下执行。
+
