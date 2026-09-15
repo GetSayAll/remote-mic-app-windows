@@ -10,7 +10,7 @@ mod windows_impl {
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
         RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE,
-        REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS,
+        REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ,
     };
 
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
