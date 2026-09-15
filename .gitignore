@@ -21,4 +21,5 @@ credentials.json
 coverage/
 .idea/
 .vscode/
+.workbuddy/memory/
 pnpm-debug.log*
