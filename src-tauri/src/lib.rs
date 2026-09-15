@@ -920,6 +920,77 @@ fn runtime_simulation_requested() -> bool {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 退出前收尾的宽限期（2026-09-16）。必须有界——超时是常态路径之一，
+/// 不是错误路径（AGENTS.md「偶发迟到要按必然事件设计」）。
+///
+/// 必须明显小于安装器侧的总宽限：`installer-hooks.nsh` 先固定静默 1.5s，若进程
+/// 仍在再补 6.5s（`SAYALL_GRACEFUL_EXIT_SETTLE_MS` + `SAYALL_GRACEFUL_EXIT_TAIL_MS`），
+/// 合计 8 秒；留足余量才能保证应用在被强杀之前完成清理。
+const GRACEFUL_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 退出前收尾：关闭 BLE 会话并**等待其完成**（`ble_session_cleanup` 落盘）。
+///
+/// 所有退出入口（托盘"退出"、更新器安装完成后的退出、外部请求）都会经过
+/// `RunEvent::ExitRequested`，因此在这里统一收尾即可覆盖全部路径。
+///
+/// 为什么必须显式做：Tauri v2 的 `App::run()` 收尾是 `std::process::exit`
+/// （`tauri/src/app.rs` 文档原文），而它**不执行 Rust 析构**——`BleRuntime::drop`
+/// 里的清理从不出现在进程结束路径上（现场证据：全日志 21 条
+/// `ble_session_cleanup` 无一条位于进程结束处）。
+fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
+    let platform = app.state::<AppState>().platform.clone();
+    match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
+        Ok(()) => sayall_windows::gatt_note(
+            "app_exit platform_shutdown phase=completed terminal_result=passed".to_owned(),
+        ),
+        Err(error) => sayall_windows::gatt_note(format!(
+            "app_exit platform_shutdown phase=completed terminal_result=failed error_domain=platform error_code=shutdown_failed retryable=false detail={error}"
+        )),
+    }
+}
+
+/// 监听安装器发出的"请优雅退出"信号（2026-09-16）。
+///
+/// 为什么需要：Tauri 的 NSIS 安装器在检测到应用正在运行时**直接
+/// `TerminateProcess`**（`tauri-bundler/.../nsis/utils.nsh` 的
+/// `CheckIfAppIsRunning`：没有优雅退出请求、`Sleep 500` 后即继续；静默安装
+/// 连提示都没有）。于是"升级"这个动作会留下未正常关闭的 GATT 会话——正是
+/// AGENTS.md 记录的链路僵死诱因。安装器侧现在会先置位一个命名事件并等待应用
+/// 自行退出（见 `windows/installer-hooks.nsh`），本线程即那个等待端。
+fn spawn_installer_graceful_exit_watcher(app: tauri::AppHandle) {
+    let spawned = std::thread::Builder::new()
+        .name("sayall-graceful-exit".to_owned())
+        .spawn(move || {
+            let signal = match sayall_windows::graceful_exit::GracefulExitSignal::create() {
+                Ok(signal) => signal,
+                Err(error) => {
+                    sayall_windows::gatt_note(format!(
+                        "app_exit graceful_exit_signal phase=completed terminal_result=failed error_domain=windows error_code=create_event_failed retryable=false detail={error}"
+                    ));
+                    return;
+                }
+            };
+            sayall_windows::gatt_note(
+                "app_exit graceful_exit_signal phase=completed terminal_result=passed reason=listening"
+                    .to_owned(),
+            );
+            if !signal.wait() {
+                return;
+            }
+            sayall_windows::gatt_note(
+                "app_exit graceful_exit_signal phase=completed terminal_result=passed reason=installer_requested_exit"
+                    .to_owned(),
+            );
+            shutdown_platform_for_exit(&app);
+            app.exit(0);
+        });
+    if let Err(error) = spawned {
+        sayall_windows::gatt_note(format!(
+            "app_exit graceful_exit_signal phase=completed terminal_result=failed error_domain=thread error_code=spawn_failed retryable=false detail={error}"
+        ));
+    }
+}
+
 pub fn run() {
     let log_path = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -1187,6 +1258,9 @@ pub fn run() {
                 settings,
                 pending_update: std::sync::Mutex::new(None),
             });
+            // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
+            // 再考虑强杀（详见函数注释）。
+            spawn_installer_graceful_exit_watcher(app.handle().clone());
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
@@ -1194,12 +1268,18 @@ pub fn run() {
         });
 
     let builder = builder
-        // 关闭主窗口 → 隐藏到托盘驻留（托盘菜单"退出"才真正退出；
-        // 退出走 Tauri 正常事件循环结束，平台组件 Drop 清理照常执行）。
+        // 关闭主窗口 → 隐藏到托盘驻留（托盘菜单"退出"才真正退出）。
+        // 注意：**不能**依赖 Drop 做退出清理——Tauri 的 `run()` 收尾是
+        // `std::process::exit`，不执行析构；退出收尾统一在
+        // `RunEvent::ExitRequested` 里显式做（见 `shutdown_platform_for_exit`）。
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    let _ = window.hide();
+                    let hide_result = window.hide();
+                    sayall_windows::gatt_note(format!(
+                        "window_close action=hide_to_tray label=main hide_result={:?} prevent_close=true",
+                        hide_result
+                    ));
                     api.prevent_close();
                 }
             }
@@ -1288,7 +1368,17 @@ pub fn run() {
         report_frontend_event
     ]);
 
-    if let Err(_) = builder.run(tauri::generate_context!()) {
+    // 退出收尾（2026-09-16）：`RunEvent::ExitRequested` 覆盖全部退出入口
+    // （托盘"退出"、更新器安装完成后的退出、外部请求）。必须在此显式关闭 BLE
+    // 会话——`run()` 收尾用的是 `std::process::exit`，析构不会执行。
+    let built = builder.build(tauri::generate_context!());
+    if let Err(_) = built.map(|app| {
+        app.run(|handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                shutdown_platform_for_exit(handle);
+            }
+        })
+    }) {
         sayall_windows::gatt_note(
             "app_lifecycle event=event_loop phase=completed terminal_result=failed error_domain=tauri error_code=run_failed reason=event_loop_failed retryable=false".to_owned(),
         );

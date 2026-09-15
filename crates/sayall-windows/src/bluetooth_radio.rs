@@ -55,6 +55,20 @@ pub const RADIO_RECOVERY_AFTER_FAILURES: u32 = 5;
 pub const RADIO_RECOVERY_MAX_CYCLES: u32 = 2;
 /// 窗口耗尽后的冷却时间；冷却结束会重新获得恢复预算，不能永久退化成普通重连。
 pub const RADIO_RECOVERY_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// 恢复"已被反复证明无效"的窗口数阈值（2026-09-16）。
+///
+/// 现场证据：单个进程的生命周期内恢复窗口曾开到 `window=70`，全日志累计
+/// 489 次恢复请求，其中 143 次无线电 Off/On **明确"执行成功"却依然无效**
+/// （见 Bugs/2026-09-16-ble-stack-resource-exhaustion-recovery-ineffective.md）。
+/// 超过本阈值后说明该僵死态不是软件层无线电开关能清除的，应停止空转并转为
+/// 明确的人工介入提示（AGENTS.md 允许"公开 API 全部失效"时提示用户，但要求
+/// 说明原因与预期效果）。
+pub const RADIO_RECOVERY_FUTILE_WINDOW: u32 = 3;
+
+/// 超过阈值后保留的低频恢复步长：每 N 个窗口才真正执行一次 Off/On。
+/// 目的：保留"系统自行恢复后仍能自救"的能力，同时把空转量降到 1/N。
+pub const RADIO_RECOVERY_FUTILE_STRIDE: u32 = 5;
 /// 关→开的间隔：给协议栈和外设留出链路拆除时间。
 const RADIO_RECOVERY_OFF_HOLD: Duration = Duration::from_secs(2);
 /// SetStateAsync 只表示请求已受理，实际 State 异步变化。2026-09-12 现场日志
@@ -146,6 +160,13 @@ impl RadioRecoveryBudget {
 
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// 当前恢复窗口序号（1 起，单调递增直到 `reset`）。用于判断"恢复是否已被
+    /// 反复证明无效"——窗口号持续增长本身就说明期间从未成功连接过
+    /// （成功连接、主动断开、系统恢复都会 `reset`）。
+    pub fn window_count(&self) -> u32 {
+        self.window
     }
 }
 
