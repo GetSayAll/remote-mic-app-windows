@@ -21,7 +21,8 @@
 ## 日志与报告
 
 正式版无需额外开关，诊断日志位于
-`%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。复现问题后退出应用，再复制该
+`%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`（应用内“关于 → 打开日志目录”
+可直接打开该文件夹）。复现问题后退出应用，再复制该
 文件；不要编辑后覆盖原件。白屏问题先看最后一次启动是否依次出现
 `process_start`、`tauri_setup`、`script_evaluation`、`vue_mount` 和
 `runtime_snapshot`，缺失的下一阶段就是优先排查边界。

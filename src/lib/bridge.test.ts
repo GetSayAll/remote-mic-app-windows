@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
   audioPhaseLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
   identityShortcutByButton,
+  openLogDirectory,
   openVbCableDownloadPage,
   remoteModelLabel,
   shortcutCapability,
@@ -13,6 +15,8 @@ import {
   type ConnectionPhase,
   type DiagnosticReport,
 } from "./bridge";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 describe("mouse actions", () => {
   it("summarizes clicks, movement, and wheel amounts", () => {
@@ -199,5 +203,28 @@ describe("VB-CABLE download guidance", () => {
 
     expect(open).toHaveBeenCalledWith(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
     open.mockRestore();
+  });
+});
+
+describe("诊断日志目录入口", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("在 Tauri 运行时按精确命令名交给 Rust，并原样回传目录", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    const directory = "C:\\Users\\probe\\AppData\\Local\\SayAll\\Logs";
+    vi.mocked(invoke).mockResolvedValue(directory);
+
+    await expect(openLogDirectory()).resolves.toBe(directory);
+    // 命令名写错或 Rust 侧漏注册时这里会红——这是该入口唯一的前端契约。
+    // 前端不拼接、不传路径参数：目录由 Rust 从日志初始化结果推导。
+    expect(invoke).toHaveBeenCalledWith("open_log_directory");
+  });
+
+  it("浏览器预览下明确不可用而不是静默失败", async () => {
+    await expect(openLogDirectory()).rejects.toThrow("当前是浏览器预览，无法打开日志目录");
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
