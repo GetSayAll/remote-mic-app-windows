@@ -120,6 +120,50 @@ impl BleRuntime {
         let _ = self.sender.send(WorkerMessage::WakeReconnect);
     }
 
+    /// 退出前的优雅关闭（2026-09-16）：请求工作线程关闭会话，并在**有界时间**内
+    /// 等待其完成（`ble_session_cleanup` 落盘）后才返回。
+    ///
+    /// 为什么不能只靠 `Drop`：Tauri v2 的 `App::run()` 结束时会直接
+    /// `std::process::exit`（`tauri/src/app.rs` 文档原文："the process is exited
+    /// directly using `std::process::exit`"），而它**不执行 Rust 析构**——所以
+    /// `Drop` 里的 `Shutdown` 从不出现在进程结束路径上（现场证据：全日志 21 条
+    /// `ble_session_cleanup` 无一条位于进程结束处）。退出路径必须显式调用本方法。
+    ///
+    /// 有界等待（AGENTS.md「归因线程、钩子线程等后台机制的偶发迟到要按必然事件
+    /// 设计」）：超时是常态路径之一而非错误路径——超时只落日志并让调用方继续
+    /// 退出，绝不无限等待。
+    pub fn shutdown_blocking(&self, timeout: Duration) -> Result<(), PlatformError> {
+        let started = Instant::now();
+        gatt_note(format!(
+            "app_exit ble_session_shutdown phase=requested timeout_ms={}",
+            timeout.as_millis()
+        ));
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        let sent = self.sender.send(WorkerMessage::Shutdown {
+            ack: Some(ack_sender),
+        });
+        let outcome = if sent.is_err() {
+            Err(PlatformError::WorkerUnavailable)
+        } else {
+            match ack_receiver.recv_timeout(timeout) {
+                Ok(()) => Ok(()),
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(PlatformError::OperationTimedOut),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(PlatformError::WorkerUnavailable),
+            }
+        };
+        gatt_note(format!(
+            "app_exit ble_session_shutdown phase=completed terminal_result={} error_code={} elapsed_ms={}",
+            if outcome.is_ok() { "passed" } else { "failed" },
+            match &outcome {
+                Ok(()) => "none",
+                Err(PlatformError::OperationTimedOut) => "shutdown_timeout",
+                Err(_) => "worker_unavailable",
+            },
+            started.elapsed().as_millis()
+        ));
+        outcome
+    }
+
     fn request(
         &self,
         make_message: impl FnOnce(Sender<Result<ConnectionSnapshot, PlatformError>>) -> WorkerMessage,
@@ -149,7 +193,8 @@ impl BleRuntime {
 impl Drop for BleRuntime {
     fn drop(&mut self) {
         lock(&self.power_notifications).take();
-        let _ = self.sender.send(WorkerMessage::Shutdown);
+        // ack: None —— 析构路径不阻塞等待（可能根本不会被执行：见 shutdown_blocking）。
+        let _ = self.sender.send(WorkerMessage::Shutdown { ack: None });
         if let Some(worker) = lock(&self.worker).take() {
             let _ = worker.join();
         }
@@ -206,7 +251,12 @@ pub(crate) enum WorkerMessage {
     },
     SystemSuspended,
     SystemResumed,
-    Shutdown,
+    /// 关闭工作线程。`ack` 用于让退出路径**有界等待**会话清理真正完成
+    /// （2026-09-16）：`Drop` 里的收尾走 `ack: None`（不阻塞析构），
+    /// 应用退出路径走 `Some(..)` 以便落日志并确认 `ble_session_cleanup` 已执行。
+    Shutdown {
+        ack: Option<Sender<()>>,
+    },
 }
 
 fn worker_loop(
@@ -868,11 +918,15 @@ fn worker_loop(
                     apply_input_connection_phase(ConnectionPhase::Idle);
                 }
             }
-            WorkerMessage::Shutdown => {
+            WorkerMessage::Shutdown { ack } => {
                 release_voice_hold_hotkey(&send_input, &mut held_hotkey);
                 let _ = audio.interrupt_session();
                 let _ = close_session(&mut session);
                 pipeline.interrupt();
+                // 回执放在清理之后：退出路径据此确认 `ble_session_cleanup` 已落盘。
+                if let Some(ack) = ack {
+                    let _ = ack.send(());
+                }
                 break;
             }
         }

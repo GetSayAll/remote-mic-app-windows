@@ -106,6 +106,11 @@ jobs:
         timeout-minutes: 10
         run: ./scripts/test-windows-silent-install.ps1
 
+      - name: Test installer graceful exit while the app is running
+        shell: pwsh
+        timeout-minutes: 12
+        run: ./scripts/test-windows-installer-graceful-exit.ps1
+
       - name: Upload unsigned preview installer
         uses: actions/upload-artifact@v4
         with:
