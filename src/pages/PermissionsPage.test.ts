@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mount } from "@vue/test-utils";
+import { describe, expect, it } from "vitest";
 import type { RuntimeSnapshot } from "../lib/bridge";
 import PermissionsPage from "./PermissionsPage.vue";
 
@@ -60,38 +60,16 @@ const runtime: RuntimeSnapshot = {
   },
 };
 
-describe("permissions diagnostics", () => {
-  const writeText = vi.fn<(text: string) => Promise<void>>();
-
-  beforeEach(() => {
-    writeText.mockReset();
-    writeText.mockResolvedValue();
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-  });
-
-  it("shows truthful unsupported states and copies the generated privacy-safe report", async () => {
+describe("permissions page", () => {
+  it("shows truthful unsupported states", () => {
     const wrapper = mount(PermissionsPage, { props: { runtime } });
     expect(wrapper.text()).not.toContain("尚未实现");
     expect(wrapper.text()).toContain("当前电脑不支持");
+  });
 
-    const buttons = wrapper.findAll(".diagnostics-card button");
-    await buttons[0].trigger("click");
-    await flushPromises();
-
-    const report = wrapper.get(".diagnostic-output").text();
-    expect(report).toContain('"schemaVersion": 1');
-    expect(report).not.toContain("remoteName");
-    expect(report).not.toContain("selectedEndpointName");
-    expect(report).not.toContain("lastError");
-
-    await buttons[1].trigger("click");
-    await flushPromises();
-
-    expect(writeText).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledWith(report);
-    expect(wrapper.text()).toContain("诊断摘要已复制到剪贴板");
+  it("诊断摘要已迁往关于页，权限页不再提供生成或复制入口", () => {
+    const wrapper = mount(PermissionsPage, { props: { runtime } });
+    expect(wrapper.text()).not.toContain("诊断摘要");
+    expect(wrapper.find(".diagnostic-output").exists()).toBe(false);
   });
 });

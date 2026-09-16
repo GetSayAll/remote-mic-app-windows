@@ -614,6 +614,27 @@ fn launch_explicit(
         .unwrap_or_else(|_| Err("启动线程异常退出".to_owned()))
 }
 
+/// 在系统文件资源管理器里打开目录（"打开日志目录"入口）。
+///
+/// 复用 `launch_explicit` 的 ShellExecuteW 链路而不是另起 `explorer.exe` 子进程：
+/// 目录的 "open" 动词本来就由 shell 处理，两者等价，但复用能继承已验证的
+/// COM 套间初始化与 80ms 保活（2026-09-06 实证：线程过早退出会中止挂起的启动）。
+///
+/// 目录不存在时不在这里创建——资源管理器会弹出系统"找不到"对话框，那是误导性的
+/// 用户可见错误。调用方应先确保目录存在（见 src-tauri 的 `open_log_directory`）。
+#[cfg(windows)]
+pub fn open_directory(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err("目录不存在".to_owned());
+    }
+    launch_explicit(&path.to_string_lossy(), None, None)
+}
+
+#[cfg(not(windows))]
+pub fn open_directory(_path: &std::path::Path) -> Result<(), String> {
+    Err("打开目录仅在 Windows 上可用".to_owned())
+}
+
 /// 原生文件选择器：选择自定义应用（.exe/.lnk）。
 /// 在短命 STA COM 线程内运行 IFileOpenDialog，避免占用调用方套间。
 #[cfg(windows)]
@@ -893,5 +914,27 @@ mod tests {
             notepad.is_some_and(|app| app.installed),
             "记事本应视为已安装"
         );
+    }
+
+    /// 不存在的目录必须直接拒绝：否则资源管理器会弹出系统"找不到"对话框，
+    /// 把"日志目录没建好"伪装成用户在系统里的操作失误。
+    #[test]
+    fn open_directory_rejects_missing_directory() {
+        let missing = std::env::temp_dir().join("sayall-open-directory-missing-probe");
+        let _ = std::fs::remove_dir(&missing);
+        assert!(open_directory(&missing).is_err());
+    }
+
+    /// 真机取证（默认 `#[ignore]`，CI 不跑）：实际调用 ShellExecuteW "open"
+    /// 打开一个临时目录，确认 shell 链路返回成功。会弹出资源管理器窗口。
+    ///
+    /// 运行：`cargo test -p sayall-windows --lib -- --ignored open_directory_opens_explorer`
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "会真实打开资源管理器窗口，仅在需要取证时手动运行"]
+    fn open_directory_opens_explorer() {
+        let directory = std::env::temp_dir().join("sayall-open-directory-probe");
+        std::fs::create_dir_all(&directory).expect("创建取证目录失败");
+        open_directory(&directory).expect("ShellExecuteW 打开目录应返回成功");
     }
 }

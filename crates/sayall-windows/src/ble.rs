@@ -1993,6 +1993,20 @@ pub fn initialize_diagnostic_log(
     parent_ready && gatt_sink().is_some()
 }
 
+/// 诊断日志实际落盘目录（供"打开日志目录"入口定位）。
+///
+/// 与 `gatt_sink()` 取同一路径来源，因此 `SAYALL_GATT_LOG` 覆盖时也返回真实目录，
+/// 不会指错地方。注意隐私边界：该路径只允许回给本机 UI，**不得写入日志内容**
+/// （日志条目里出现用户路径违反 AGENTS.md 的隐私规则）。
+pub fn diagnostic_log_directory() -> Option<std::path::PathBuf> {
+    DIAGNOSTIC_LOG_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+}
+
 /// ATVV 诊断日志（宿主默认写入 LocalAppData；SAYALL_GATT_LOG 可覆盖路径）。
 /// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
 /// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。

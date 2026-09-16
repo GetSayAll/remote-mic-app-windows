@@ -93,6 +93,40 @@ fn get_diagnostic_report(
     )
 }
 
+/// 在系统文件资源管理器里打开诊断日志目录（关于页"打开日志目录"入口）。
+///
+/// 路径来自日志初始化的**实际**落盘路径，不接受前端传入：否则等于把"用
+/// ShellExecuteW 打开任意路径"的能力交给 WebView，与本仓库 capabilities 的
+/// 最小权限设计（opener 仅放行 VB-CABLE 官网一个 URL）直接冲突。
+///
+/// 目录不存在时先创建：日志初始化理论上已建好父目录（`create_dir_all`），
+/// 但 `SAYALL_GATT_LOG` 覆盖或初始化失败的场景下可能缺失，而资源管理器对
+/// 不存在的目录只会弹一个误导性的"找不到"对话框。
+///
+/// 日志只记结果，**绝不记路径**（隐私规则：日志内容不得含用户路径）。
+#[tauri::command]
+fn open_log_directory() -> Result<String, String> {
+    let directory = sayall_windows::diagnostic_log_directory()
+        .ok_or_else(|| "诊断日志目录尚未就绪".to_owned())?;
+    std::fs::create_dir_all(&directory).map_err(|error| format!("创建日志目录失败：{error}"))?;
+    match sayall_windows::app_launcher::open_directory(&directory) {
+        Ok(()) => {
+            sayall_windows::gatt_note(
+                "about feature=open_log_directory action=open phase=completed terminal_result=passed reason=explorer_launch_requested"
+                    .to_owned(),
+            );
+            Ok(directory.display().to_string())
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(
+                "about feature=open_log_directory action=open phase=completed terminal_result=failed error_domain=shell error_code=open_failed retryable=true reason=explorer_launch_failed"
+                    .to_owned(),
+            );
+            Err(format!("无法打开日志目录：{error}"))
+        }
+    }
+}
+
 #[tauri::command]
 async fn scan_paired_remotes(
     state: tauri::State<'_, AppState>,
@@ -1231,6 +1265,7 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
         get_diagnostic_report,
+        open_log_directory,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -1273,6 +1308,7 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
         get_diagnostic_report,
+        open_log_directory,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,

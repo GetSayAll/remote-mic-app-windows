@@ -421,6 +421,17 @@ export function formatDiagnosticReport(
   return JSON.stringify({ generatedAt, ...report }, null, 2);
 }
 
+/**
+ * 打开诊断日志目录（关于页入口）。返回实际打开的目录供界面显示。
+ *
+ * 目录由 Rust 侧从日志初始化的落盘路径推导，前端不拼接、也不传路径——
+ * 保留 capabilities 的最小权限边界（opener 只放行 VB-CABLE 官网一个 URL）。
+ */
+export async function openLogDirectory(): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法打开日志目录");
+  return invoke<string>("open_log_directory");
+}
+
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法读取已配对设备");
