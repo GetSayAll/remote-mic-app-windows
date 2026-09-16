@@ -116,6 +116,13 @@ mod tests {
         assert!(!signal.wait_timeout(Duration::from_millis(50)));
     }
 
+    /// 安装器靠"打不开事件"判断没有实例在运行（`OpenEventW` 失败即跳过，零开销）。
+    /// 这条测试把这个前提钉住：事件不存在时置位必须返回错误，而不是静默成功。
+    #[test]
+    fn signalling_an_absent_event_fails_so_the_installer_can_skip() {
+        assert!(signal_named(r"Local\SayAll-GracefulExit-absent").is_err());
+    }
+
     #[test]
     fn signal_is_observed_by_a_waiter() {
         const NAME: &str = r"Local\SayAll-GracefulExit-test-signal";

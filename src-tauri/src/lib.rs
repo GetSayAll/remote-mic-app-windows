@@ -9,6 +9,7 @@ use sayall_windows::{
 };
 use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
@@ -928,23 +929,53 @@ fn runtime_simulation_requested() -> bool {
 /// 合计 8 秒；留足余量才能保证应用在被强杀之前完成清理。
 const GRACEFUL_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// 退出收尾的一次性守卫（见 `claim_exit_shutdown` 的说明）。
+static EXIT_SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
+
+/// 退出收尾的一次性守卫：调用一次即置位；返回 `true` 表示本次调用"认领"了收尾。
+///
+/// 为什么需要：退出收尾有**两条**入口会走到同一段代码——安装器请求退出的后台
+/// 线程（它必须自己先收尾，因为不能依赖主线程事件循环及时响应，见
+/// `spawn_installer_graceful_exit_watcher`），以及 `RunEvent::ExitRequested`
+/// （`AppHandle::exit` 会触发它，`tauri/src/app.rs` 文档："Exits the app by
+/// triggering `RunEvent::ExitRequested` and `RunEvent::Exit`"）。工作线程在第一
+/// 次收尾后已经关闭，第二次只会拿到 `worker_unavailable` 并落一条**误导性的
+/// failed 日志**——查日志的人会以为退出收尾失败了。收尾一次即够，故显式只做一次。
+///
+/// 抽成不落日志的纯函数，是为了让单测只验"只执行一次"这条不变量而不去写全局
+/// 诊断日志（`gatt_sink()` 是 `OnceLock`，首次调用即固定，测试里抢先用它会把
+/// 同进程其它日志测试钉死，见 `sayall_windows::gatt_note` 的注释）。
+fn claim_exit_shutdown(done: &AtomicBool) -> bool {
+    !done.swap(true, Ordering::SeqCst)
+}
+
 /// 退出前收尾：关闭 BLE 会话并**等待其完成**（`ble_session_cleanup` 落盘）。
 ///
-/// 所有退出入口（托盘"退出"、更新器安装完成后的退出、外部请求）都会经过
-/// `RunEvent::ExitRequested`，因此在这里统一收尾即可覆盖全部路径。
+/// 所有退出入口（托盘"退出"、更新器安装完成后的退出、安装器请求的退出）都会经过
+/// 这里，因此统一收尾即可覆盖全部路径。
 ///
 /// 为什么必须显式做：Tauri v2 的 `App::run()` 收尾是 `std::process::exit`
 /// （`tauri/src/app.rs` 文档原文），而它**不执行 Rust 析构**——`BleRuntime::drop`
 /// 里的清理从不出现在进程结束路径上（现场证据：全日志 21 条
 /// `ble_session_cleanup` 无一条位于进程结束处）。
 fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
+    if !claim_exit_shutdown(&EXIT_SHUTDOWN_DONE) {
+        sayall_windows::gatt_note(
+            "app_exit platform_shutdown phase=completed terminal_result=passed reason=already_shutdown elapsed_ms=0"
+                .to_owned(),
+        );
+        return;
+    }
+    let started = std::time::Instant::now();
     let platform = app.state::<AppState>().platform.clone();
     match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
-        Ok(()) => sayall_windows::gatt_note(
-            "app_exit platform_shutdown phase=completed terminal_result=passed".to_owned(),
-        ),
+        Ok(()) => sayall_windows::gatt_note(format!(
+            "app_exit platform_shutdown phase=completed terminal_result=passed reason=session_cleanup_acked elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
         Err(error) => sayall_windows::gatt_note(format!(
-            "app_exit platform_shutdown phase=completed terminal_result=failed error_domain=platform error_code=shutdown_failed retryable=false detail={error}"
+            "app_exit platform_shutdown phase=completed terminal_result=failed error_domain=platform error_code=shutdown_failed retryable=false reason=session_cleanup_unconfirmed elapsed_ms={} detail={error}",
+            started.elapsed().as_millis()
         )),
     }
 }
@@ -1387,4 +1418,129 @@ pub fn run() {
     sayall_windows::gatt_note(
         "app_lifecycle event=process_exit phase=completed terminal_result=passed".to_owned(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 安装器钩子源码。契约测试要在**构建期**读它：这些断言存在的理由就是
+    /// "有人改了一侧、忘了另一侧"（2026-09-16 的僵死 Bug 正是文档写了规则、
+    /// 安装器从未实现）。
+    const INSTALLER_HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
+
+    /// 去掉 NSIS 注释（`;` 到行尾）：注释里会引用被禁用的 API 名做说明，
+    /// 负向断言必须在正文上做。
+    fn strip_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| line.split(';').next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn define_number(hooks: &str, name: &str) -> u64 {
+        let prefix = format!("!define {name} ");
+        let start = hooks
+            .find(&prefix)
+            .unwrap_or_else(|| panic!("安装器钩子缺少 `{prefix}`"))
+            + prefix.len();
+        hooks[start..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("`{name}` 必须是十进制数字字面量"))
+    }
+
+    fn macro_body(hooks: &str, name: &str) -> String {
+        let opener = format!("!macro {name}");
+        let start = hooks
+            .find(&opener)
+            .unwrap_or_else(|| panic!("安装器钩子缺少 `{opener}`"));
+        let rest = &hooks[start..];
+        let end = rest
+            .find("!macroend")
+            .unwrap_or_else(|| panic!("`{opener}` 未以 !macroend 结束"));
+        rest[..end].to_owned()
+    }
+
+    #[test]
+    fn exit_shutdown_claim_is_one_shot() {
+        let done = AtomicBool::new(false);
+        assert!(claim_exit_shutdown(&done), "首次调用应认领退出收尾");
+        assert!(
+            !claim_exit_shutdown(&done),
+            "重复调用不得再次收尾：工作线程已关闭，再发一次只会落一条误导性的 failed 日志"
+        );
+        // 收尾**失败**后同样不重试：安装器给的宽限是有限的，二次等待会把退出拖过
+        // 强杀线，反而丢掉"自己退出"这个前提。
+        assert!(!claim_exit_shutdown(&done), "收尾失败后不得重试");
+    }
+
+    /// 安装器必须用**应用注册的那个事件名**请应用退出。
+    /// 改名会让整套机制静默失效（安装器打不开事件 → 直接跳过 → 回落到强杀）。
+    #[test]
+    fn installer_hook_requests_graceful_exit_with_the_app_event_name() {
+        let expected = format!(
+            "!define SAYALL_GRACEFUL_EXIT_EVENT \"{}\"",
+            sayall_windows::graceful_exit::GRACEFUL_EXIT_EVENT_NAME
+        );
+        assert!(
+            INSTALLER_HOOKS.contains(&expected),
+            "安装器事件名必须与应用常量逐字一致，缺少 `{expected}`"
+        );
+
+        let request = macro_body(INSTALLER_HOOKS, "SayAllRequestGracefulExit");
+        for token in ["OpenEventW", "SetEvent", "CloseHandle"] {
+            assert!(request.contains(token), "优雅退出宏缺少 `{token}`");
+        }
+
+        // 安装与卸载两条路径都会强杀正在运行的应用，都必须先请求退出。
+        for hook in ["NSIS_HOOK_PREINSTALL", "NSIS_HOOK_PREUNINSTALL"] {
+            assert!(
+                macro_body(INSTALLER_HOOKS, hook)
+                    .contains("!insertmacro SayAllRequestGracefulExit"),
+                "`{hook}` 没有请求应用优雅退出"
+            );
+        }
+    }
+
+    /// 安装器宽限必须**明显大于**应用自己的收尾预算，否则应用会在清理完成前被强杀，
+    /// 又回到"留下孤立 GATT 会话"的老路。
+    #[test]
+    fn installer_grace_window_exceeds_the_app_shutdown_budget() {
+        let settle = define_number(INSTALLER_HOOKS, "SAYALL_GRACEFUL_EXIT_SETTLE_MS");
+        let tail = define_number(INSTALLER_HOOKS, "SAYALL_GRACEFUL_EXIT_TAIL_MS");
+        let app_budget = GRACEFUL_EXIT_TIMEOUT.as_millis() as u64;
+        assert!(
+            settle >= 1_000,
+            "安装器在请求退出后必须先给应用一段固定的清理时间，当前 {settle}ms"
+        );
+        assert!(
+            settle + tail >= app_budget + 2_000,
+            "安装器宽限 {}ms 必须比应用收尾预算 {}ms 多留至少 2s 余量",
+            settle + tail,
+            app_budget
+        );
+    }
+
+    /// 安装器钩子**不得**自己引入强杀。Tauri 模板在钩子之后跑
+    /// `CheckIfAppIsRunning`；只要应用已退出，那一步自然落空。
+    #[test]
+    fn installer_hook_never_force_kills_the_app() {
+        let code = strip_comments(INSTALLER_HOOKS).to_ascii_lowercase();
+        for token in [
+            "killprocess",
+            "terminateprocess",
+            "taskkill",
+            "stop-process",
+        ] {
+            assert!(
+                !code.contains(token),
+                "安装器钩子出现强杀 `{token}`：强杀会留下未关闭的 GATT 会话并楔死系统蓝牙栈"
+            );
+        }
+    }
 }

@@ -106,6 +106,9 @@ impl Drop for DeviceInfoSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RadioRecoveryCycle {
     pub cycle: u32,
+    /// 当前恢复窗口序号（1 起，单调递增直到 `reset`）。用于判断"恢复是否已被反复
+    /// 证明无效"——窗口号持续增长即说明期间从未成功连接过（成功连接、主动断开、
+    /// 系统恢复都会 `reset`），见 `RADIO_RECOVERY_FUTILE_WINDOW`。
     pub window: u32,
     pub reopened: bool,
 }
@@ -160,13 +163,6 @@ impl RadioRecoveryBudget {
 
     pub fn reset(&mut self) {
         *self = Self::default();
-    }
-
-    /// 当前恢复窗口序号（1 起，单调递增直到 `reset`）。用于判断"恢复是否已被
-    /// 反复证明无效"——窗口号持续增长本身就说明期间从未成功连接过
-    /// （成功连接、主动断开、系统恢复都会 `reset`）。
-    pub fn window_count(&self) -> u32 {
-        self.window
     }
 }
 
