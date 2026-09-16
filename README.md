@@ -21,6 +21,14 @@
   </tr>
 </table>
 
+## 视频介绍
+
+《可能是我最近用过最不像工具的工具》展示了无线麦如何把蓝牙语音遥控器变成随手表达、控制电脑和与 AI 协作的新入口。视频中的产品界面以当时展示版本为准。
+
+[在 Bilibili 观看原视频](https://www.bilibili.com/video/BV13Pep6BEXe)
+
+视频作者：[可乐不甜的跑焦日记](https://space.bilibili.com/327214328)
+
 无线麦 SayAll Windows 版已完成对小米蓝牙遥控器 2（RC001）和 2 Pro（RC003）的 Windows 真机适配，覆盖设备识别、连接、按键映射和语音桥接等已验证场景。项目采用 Rust、Tauri 2 和 Vue 3，Windows 与 macOS 分别维护和发布。
 
 参考源码仓库：[HD838A/remote-mic-app](https://github.com/HD838A/remote-mic-app)（macOS 版）。Windows 版保持独立的平台实现，仅参考其公开的产品行为、协议经验和测试边界，不回填 macOS 代码。
