@@ -51,6 +51,16 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         callback: sayall_windows::button_mapping::ButtonGestureCallback,
     );
 
+    /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
+    /// （`ble_session_cleanup` 落盘）后才返回。
+    ///
+    /// 必须在进程结束**之前**显式调用：Tauri v2 的 `App::run()` 收尾是
+    /// `std::process::exit`，**不执行 Rust 析构**，所以 `Drop` 里的清理不会发生。
+    /// 默认实现为空——只有 Windows 平台持有需要清理的资源。
+    fn shutdown_for_exit(&self, _timeout: std::time::Duration) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     #[cfg(feature = "runtime-simulation")]
     fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
         Err(PlatformError::UnsupportedPlatform)
@@ -178,6 +188,10 @@ impl PlatformRuntime for WindowsPlatform {
         callback: sayall_windows::button_mapping::ButtonGestureCallback,
     ) {
         WindowsPlatform::subscribe_button_gestures(self, callback)
+    }
+
+    fn shutdown_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {
+        self.shutdown_ble_for_exit(timeout)
     }
 }
 

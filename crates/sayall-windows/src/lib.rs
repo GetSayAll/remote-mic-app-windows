@@ -23,6 +23,8 @@ mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
 pub mod file_dialog;
+#[cfg(windows)]
+pub mod graceful_exit;
 pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{
@@ -342,6 +344,25 @@ impl Default for WindowsPlatform {
 impl WindowsPlatform {
     pub fn usage_counters(&self) -> Arc<UsageCounters> {
         Arc::clone(&self.usage)
+    }
+
+    /// 退出前的优雅关闭（2026-09-16）：关闭 BLE 会话并**在有界时间内等待其完成**
+    /// （`ble_session_cleanup` 落盘）后才返回。
+    ///
+    /// 必须在 `app.exit()` / 进程结束**之前**调用：Tauri v2 的 `run()` 收尾是
+    /// `std::process::exit`，不执行析构，因此 `BleRuntime::drop` 的清理不会发生
+    /// （见 `graceful_exit` 模块头部的证据）。
+    #[cfg(windows)]
+    pub fn shutdown_ble_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {
+        self.runtime.shutdown_blocking(timeout)
+    }
+
+    #[cfg(not(windows))]
+    pub fn shutdown_ble_for_exit(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<(), PlatformError> {
+        Ok(())
     }
 
     pub fn test_scroll(
