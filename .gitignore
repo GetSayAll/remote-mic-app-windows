@@ -23,3 +23,5 @@ coverage/
 .vscode/
 .workbuddy/memory/
 pnpm-debug.log*
+__pycache__/
+*.pyc

@@ -329,7 +329,40 @@ fn worker_loop(
                                         // ATTRIBUTION.md 与 Testing\investigation）。
                                         // 连续失败达标时执行；每窗口限制次数，耗尽后
                                         // 冷却再开新窗口，避免永久退化成无限普通重连。
-                                        if let Some(recovery_cycle) = radio_recovery
+                                        //
+                                        // 按错误码分流（2026-09-16，A/B 对照结论）：
+                                        // 僵死态（`windows_resource_exhausted` /
+                                        // `winrt_operation_aborted`）下无线电 Off/On 与
+                                        // 提权 PnP 重启**都已实测无效**——143 次 Off/On
+                                        // 「执行成功」后连接仅恢复 3 次（2.10%），与不开关
+                                        // 的对照组（0.62%）统计上无差异（[-0.01pp]，
+                                        // 双比例 z=-0.022 / p=0.982）。原因是启动预热
+                                        // 缓存的 Radio 对象让 Off/On 命中缓存而未触达
+                                        // 真实蓝牙栈。继续开关只会空转，还会在 PnP 分支
+                                        // 弹 UAC。此态只保留普通重连。
+                                        // 其余故障（遥控器不可达、GATT 状态失败、超时等）
+                                        // 仍走 Off/On——那是无线电恢复唯一还可能有效的
+                                        // 场景，兜底必须保留。
+                                        //
+                                        // 证据与复算：ATTRIBUTION.md「2026-09-16 A/B
+                                        // 对照」；脚本 scripts/analyze-radio-recovery-ab.py；
+                                        // 判读标准 Testing/WindowsBleResourceRecovery.md。
+                                        let error_code = ble_error_code(&error);
+                                        if crate::bluetooth_radio::is_stack_exhausted(error_code) {
+                                            gatt_note(format!(
+                                                "ble_recovery_decision action=skip_recovery reason=stack_exhausted_proven_ineffective error_code={error_code} consecutive_failures={} radio_cycle=skipped pnp_restart=skipped",
+                                                backoff.attempt()
+                                            ));
+                                            // 不提示「重启电脑」：那不是用户该承担的动作
+                                            // （2026-09-16 用户明确否决）。只陈述当前状态，
+                                            // 并说明应用仍在自动重试。
+                                            lock(&state).last_error = Some(
+                                                "蓝牙链路暂时不可用，正在持续重试…".to_owned(),
+                                            );
+                                            // 刻意**不**调用 `begin_cycle`：僵死态下连
+                                            // 「低频试探」也没有收益证据，留着只会继续弹
+                                            // UAC。普通重连仍按既有退避继续。
+                                        } else if let Some(recovery_cycle) = radio_recovery
                                             .begin_cycle(backoff.attempt(), Instant::now())
                                         {
                                             if recovery_cycle.reopened {
@@ -983,6 +1016,16 @@ fn ble_error_code(error: &PlatformError) -> &'static str {
                     .contains("not enough memory resources") =>
         {
             "windows_resource_exhausted"
+        }
+        // E_ABORT（0x80004004）：与资源耗尽是同一僵死态的另一种出口
+        // （2026-09-16 现场：两者交替出现，恢复手段同样无效——见
+        // ATTRIBUTION.md「2026-09-16 A/B 对照」与
+        // Testing/WindowsBleResourceRecovery.md）。
+        PlatformError::WindowsApi(message)
+            if message.contains("已中止操作")
+                || message.to_ascii_lowercase().contains("aborted") =>
+        {
+            "winrt_operation_aborted"
         }
         PlatformError::WindowsApi(_) => "windows_api_failed",
         PlatformError::VoiceServiceMissing => "service_missing",
@@ -2539,6 +2582,35 @@ mod tests {
             ble_error_code(&PlatformError::WindowsApi("Access denied".to_owned())),
             "windows_api_failed"
         );
+    }
+
+    /// 僵死态有两个出口：`0x80070008`（资源耗尽）和 `0x80004004`（已中止操作）。
+    /// 两者必须都落到同一条分流支路上，否则只有一半的僵死事件会被识别，
+    /// Off/On 会在另一半上继续空转。
+    #[test]
+    fn aborted_operation_is_classified_as_the_same_wedged_state() {
+        let aborted_cases = [
+            "已中止操作。 (0x80004004)",
+            "The operation was aborted. (0x80004004)",
+            "Operation Aborted",
+        ];
+        for message in aborted_cases {
+            let code = ble_error_code(&PlatformError::WindowsApi(message.to_owned()));
+            assert_eq!(code, "winrt_operation_aborted", "输入：{message}");
+            assert!(
+                crate::bluetooth_radio::is_stack_exhausted(code),
+                "僵死码 {code} 必须命中分流"
+            );
+        }
+
+        // 非僵死码不能被误伤——否则普通故障会失去兜底恢复。
+        for message in ["Access denied", "句柄无效。", "设备未就绪"] {
+            let code = ble_error_code(&PlatformError::WindowsApi(message.to_owned()));
+            assert!(
+                !crate::bluetooth_radio::is_stack_exhausted(code),
+                "{message} 不应判定为僵死态"
+            );
+        }
     }
 
     #[test]

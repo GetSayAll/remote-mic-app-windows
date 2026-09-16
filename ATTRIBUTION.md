@@ -88,6 +88,35 @@
 - **ZSTDJan/windows-remote-mic-app**，提交 `af54fd8e85a70f5b8f19cd4fa5bf11fe7fe530d6`，`apps/windows/rc003/src/ovb_rc003/ble_transport_winrt.py`（2026-09-14 复核）：参考实现从已配对 BLE selector 取得设备 ID 后调用 `FromIdAsync`，以 Uncached 发现服务；关闭时先取消写入/停止工作线程，再关闭 CCCD、退订事件并依次 Close service/device，且保留关闭失败的所有者供后续再次释放。本仓库据此修正 `BleSession::close` 首次 Close 失败后只回放旧错误、没有真正重试的缺陷。没有照搬其连接入口：同一僵死现场实测该配对 ID 路径返回 `0x80004004`，直接 GATT selector 返回 `0x80070008`，证明换构造入口不能恢复已经失效的系统栈。
 - **Windows PnP 自动恢复公开接口**（2026-09-14）：微软 PnPUtil 文档提供 `/restart-device <instance ID>`，设备节点变更需要管理员权限；`ShellExecuteExW` 的 `runas` verb 用于显示系统 UAC 并启动提权操作；SetupAPI `SetupDiGetClassDevsW`/设备属性用于只选择当前存在、服务为 `BTHUSB` 的唯一蓝牙适配器。实现不记录实例 ID、不接受外部命令或路径，并在工具退出后独立用 WinRT Radio 枚举验证，而不信任单独的进程退出码。官方依据：`learn.microsoft.com/windows-hardware/drivers/devtest/pnputil-command-syntax`、`learn.microsoft.com/windows/win32/api/shellapi/nf-shellapi-shellexecuteexw`、`learn.microsoft.com/windows/win32/api/setupapi/nf-setupapi-setupdigetclassdevsw`。
 
+### 2026-09-16 A/B 对照：无线电 Off/On 在僵死态无可观测收益
+
+上节 Qt 156281「关开蓝牙是唯一有效修复」的适用边界已用现场日志划定（证据
+`artifacts/ev_stream_raw.txt`，0.2.6，僵死现场，2983 条 `ble_connect` 记录）：
+
+| 组 | 样本 | 恢复 | 恢复率 |
+| --- | --- | --- | --- |
+| 实验组：Off/On 之后首次重连 | 488 | 3 | **0.61%** |
+| 对照组：同事件内普通重试（`attempt>=1`） | 2406 | 15 | **0.62%** |
+| （参考）进程冷启动 `attempt=0` | 89 | 26 | 29.21% |
+| （参考）Off/On 自身报 `failed` | 345 | 0 | 0.00% |
+| （参考）Off/On 自身报 `passed` | 143 | 3 | 2.10% |
+
+两组相差 **-0.01 个百分点**（判定阈值 ±10），双比例 z 检验 z=-0.022 / p=0.982，
+95% Wilson 置信区间实验组 0.21%–1.79%、对照组 0.38%–1.03%（大幅重叠）。
+即：开关与不开关在统计上不可区分。旁证：Off/On 自身报告成功 143 次，其后也只恢复
+3 次——**"WinRT 说开关成功"不等于"碰到蓝牙栈"**，原因是启动预热缓存的 Radio 对象
+让 Off/On 命中缓存而非真实栈。这解释了 Qt 156281 的结论只在**系统栈健康**时成立，
+僵死态不成立。
+
+引用措辞边界：只能说"无可观测收益，不值得保留一条会打断链路的路径"，
+**不能**说成"零效果"（实验组 CI 上限 1.79%）。
+
+据此改为**按错误码分流**（`bluetooth_radio::is_stack_exhausted`）：命中
+`windows_resource_exhausted` / `winrt_operation_aborted` 时跳过 Off/On 与 PnP 重启，只留普通
+重连，日志落 `ble_recovery_decision action=skip_recovery reason=stack_exhausted_proven_ineffective`；
+非僵死码仍走原 Off/On 路径保留兜底。复算脚本 `scripts/analyze-radio-recovery-ab.py`，
+操作与判读标准见 `Testing/WindowsBleResourceRecovery.md`。
+
 ### 2026-09-10 重连窗口 F5 泄漏补充
 
 - **微软 `RegisterRawInputDevices` 文档**：同一进程、同一 Raw Input 设备类只能

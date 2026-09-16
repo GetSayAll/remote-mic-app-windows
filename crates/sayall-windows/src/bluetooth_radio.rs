@@ -171,6 +171,28 @@ pub fn should_cycle(consecutive_failures: u32, cycles_done: u32) -> bool {
     consecutive_failures >= RADIO_RECOVERY_AFTER_FAILURES && cycles_done < RADIO_RECOVERY_MAX_CYCLES
 }
 
+/// **系统蓝牙栈僵死**的错误码（`ble::ble_error_code` 的输出）。
+///
+/// 这些码表示 OS 侧 BLE 栈已耗尽/链路僵死，而不是"遥控器暂时不可达"。
+/// 2026-09-16 实测：此态下无线电 Off/On 与提权 PnP 重启**均无效**——
+/// Off/On 报"执行成功"143 次，其后连接只恢复 3 次（2.10%），与同事件内
+/// 不开关的对照组（0.62%）统计上不可区分。命中即跳过一切恢复动作，
+/// 只保留普通重连——继续开关只会空转。
+///
+/// 证据与复算：`ATTRIBUTION.md`「2026-09-16 A/B 对照」、
+/// `Testing/WindowsBleResourceRecovery.md`、`scripts/analyze-radio-recovery-ab.py`。
+pub const STACK_EXHAUSTED_ERROR_CODES: [&str; 2] =
+    ["windows_resource_exhausted", "winrt_operation_aborted"];
+
+/// 该错误码是否属于"恢复手段已证明无效"的僵死态（单元测试覆盖）。
+///
+/// 只认常量里的码。**不要**在这里另写一份 `matches!` 字面量——两处定义会各自
+/// 漂移：往 `STACK_EXHAUSTED_ERROR_CODES` 加码却忘了同步函数，测试照样通过，
+/// 而分流会静默漏掉新码（2026-09-16 复查发现过这个隐患）。
+pub fn is_stack_exhausted(error_code: &str) -> bool {
+    STACK_EXHAUSTED_ERROR_CODES.contains(&error_code)
+}
+
 fn find_bluetooth_radio_from_snapshot() -> windows::core::Result<Option<Radio>> {
     let operation = Radio::GetRadiosAsync()?;
     let radios = futures::executor::block_on(operation.into_future())?;
@@ -791,6 +813,74 @@ mod tests {
                 reopened: false,
             })
         );
+    }
+
+    /// `window` 只在**上一个窗口的预算耗尽且冷却到期**时递增，同一窗口内的
+    /// 第 2 次 cycle 不会让它动。
+    ///
+    /// 调用方的降频判定按窗口号比较，依赖的正是这个时机：若 `window` 改成一有
+    /// 周期就加，降频会提前生效并过度压制恢复；若改成永不递增，降频就永不生效。
+    /// 两种改法都不会报错，所以钉在这里。
+    #[test]
+    fn window_advances_only_when_a_cooldown_reopens_the_budget() {
+        let started = Instant::now();
+        let mut budget = RadioRecoveryBudget::default();
+
+        // 同一窗口内连续两次 cycle：cycle 递增，window 恒为 1。
+        assert_eq!(
+            budget.begin_cycle(5, started),
+            Some(RadioRecoveryCycle {
+                cycle: 1,
+                window: 1,
+                reopened: false,
+            })
+        );
+        assert_eq!(
+            budget.begin_cycle(5, started),
+            Some(RadioRecoveryCycle {
+                cycle: 2,
+                window: 1,
+                reopened: false,
+            })
+        );
+
+        // 窗口耗尽（cycles_done 已达到上限）→ 冷却未到期不发 cycle。
+        assert_eq!(budget.begin_cycle(5, started), None);
+
+        // 冷却到期后的下一次调用：window 才 +1 并标记 reopened。
+        // 循环往复，所以 `window` 单调递增、恢复不会永久退化。
+        let after_cooldown = started + RADIO_RECOVERY_RETRY_COOLDOWN;
+        assert_eq!(
+            budget.begin_cycle(5, after_cooldown),
+            Some(RadioRecoveryCycle {
+                cycle: 1,
+                window: 2,
+                reopened: true,
+            })
+        );
+    }
+
+    /// 分流的唯一判据。这里**故意**只断言常量里的两个码 + 边界样本，不再抄
+    /// 一份字面量：`is_stack_exhausted` 与 `STACK_EXHAUSTED_ERROR_CODES` 必须
+    /// 同源，否则往常量加码会静默漏掉分流。
+    #[test]
+    fn exhausted_stack_is_recognised_and_everything_else_is_not() {
+        for code in STACK_EXHAUSTED_ERROR_CODES {
+            assert!(is_stack_exhausted(code), "{code} 应被判为僵死态");
+        }
+
+        // 近似但不相同的码不能误命中——它们是可恢复的正常失败。
+        for code in [
+            "windows_resource_exhausted_",
+            "WINRT_OPERATION_ABORTED",
+            "operation_aborted",
+            "",
+            "timeout",
+        ] {
+            assert!(!is_stack_exhausted(code), "{code} 不该被判为僵死态");
+        }
+
+        assert_eq!(STACK_EXHAUSTED_ERROR_CODES.len(), 2);
     }
 
     #[test]
