@@ -11,6 +11,7 @@ $startMenuFolderName = $config.bundle.windows.nsis.startMenuFolder
 $appConfigDirectory = Join-Path $env:APPDATA $config.identifier
 $preservationMarker = Join-Path $appConfigDirectory "ci-uninstall-preservation-marker.txt"
 $appProcess = $null
+$gracefulExit = $null
 $normalUninstallCompleted = $false
 
 function Get-PropertyValue($object, [string] $name) {
@@ -92,6 +93,40 @@ function Invoke-SilentUninstall($entry) {
     }
 }
 
+# Smoke-test instances must be asked to exit, never terminated: a forced stop while a
+# BLE GATT session is open leaves the session behind and can wedge the system
+# Bluetooth stack (Bugs/2026-09-16-ble-stack-resource-exhaustion-recovery-ineffective.md).
+# The named event is the same channel the installer uses (installer-hooks.nsh).
+function Test-GracefulExitRequested {
+    $handle = $null
+    try {
+        $handle = [System.Threading.EventWaitHandle]::OpenExisting("Local\SayAll-GracefulExit")
+    } catch {
+        return $false
+    }
+    try {
+        $null = $handle.Set()
+        return $true
+    } finally {
+        $handle.Dispose()
+    }
+}
+
+function Stop-SmokeTestApp($process, [int] $timeoutSeconds = 30) {
+    if ($null -eq $process -or $process.HasExited) { return $true }
+    $requested = Test-GracefulExitRequested
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+    }
+    if ($process.HasExited) { return $true }
+    Write-Warning "Graceful exit request did not stop the smoke-test instance (request_sent=$requested); falling back to a forced stop. A real BLE session may now be left open - restart Windows if Bluetooth stops working."
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    $process.WaitForExit()
+    $false
+}
+
 $installers = @(Get-ChildItem -LiteralPath $bundleDirectory -Filter "*-setup.exe" -File)
 if ($installers.Count -ne 1) {
     throw "Expected exactly one NSIS installer, found $($installers.Count)"
@@ -164,8 +199,7 @@ try {
     if ($appProcess.HasExited) {
         throw "Installed SayAll exited during the 8-second launch smoke test with code $($appProcess.ExitCode)"
     }
-    Stop-Process -Id $appProcess.Id -Force
-    $appProcess.WaitForExit()
+    $gracefulExit = Stop-SmokeTestApp $appProcess
     $appProcess = $null
 
     Invoke-SilentUninstall $entry
@@ -187,9 +221,17 @@ try {
         throw "Silent uninstall unexpectedly removed the SayAll app-config marker"
     }
 
+    $gracefulExitLabel = if ($null -eq $gracefulExit) {
+        "not run"
+    } elseif ($gracefulExit) {
+        "passed"
+    } else {
+        "forced stop fallback"
+    }
     Write-Host "Verified silent current-user install and uninstall: $($installers[0].Name)"
     Write-Host "Install location: $installLocation"
     Write-Host "Launch smoke test: process remained alive for 8 seconds"
+    Write-Host "Smoke-test instance exit: $($gracefulExitLabel)"
     Write-Host "App config retained: $appConfigDirectory"
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         @"
@@ -198,6 +240,7 @@ try {
 - `/S` current-user install: passed
 - HKCU uninstall entry and one Start Menu shortcut: passed
 - installed process alive for 8 seconds: passed
+- smoke-test instance stopped without a forced kill: $gracefulExitLabel
 - `/S` uninstall removed app files, shortcut and uninstall entry: passed
 - `%APPDATA%\\$($config.identifier)` marker retained: passed
 
@@ -206,7 +249,7 @@ This does not validate visible UI rendering, SmartScreen, Windows 10 1809, real 
     }
 } finally {
     if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-        Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+        $null = Stop-SmokeTestApp $appProcess
     }
     if (-not $normalUninstallCompleted) {
         foreach ($remainingEntry in @(Get-SayAllUninstallEntries)) {

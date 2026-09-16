@@ -15,6 +15,7 @@ $settingsPath = Join-Path $appConfigDirectory "settings.json"
 $mappingsPath = Join-Path $appConfigDirectory "button-mappings.json"
 $preservationMarker = Join-Path $appConfigDirectory "ci-upgrade-preservation-marker.txt"
 $appProcess = $null
+$gracefulExit = $null
 $normalUninstallCompleted = $false
 
 function Get-PropertyValue($object, [string] $name) {
@@ -113,6 +114,40 @@ function Invoke-SilentUninstall($entry) {
     if ($process.ExitCode -ne 0) {
         throw "Silent uninstall failed with exit code $($process.ExitCode)"
     }
+}
+
+# Smoke-test instances must be asked to exit, never terminated: a forced stop while a
+# BLE GATT session is open leaves the session behind and can wedge the system
+# Bluetooth stack (Bugs/2026-09-16-ble-stack-resource-exhaustion-recovery-ineffective.md).
+# The named event is the same channel the installer uses (installer-hooks.nsh).
+function Test-GracefulExitRequested {
+    $handle = $null
+    try {
+        $handle = [System.Threading.EventWaitHandle]::OpenExisting("Local\SayAll-GracefulExit")
+    } catch {
+        return $false
+    }
+    try {
+        $null = $handle.Set()
+        return $true
+    } finally {
+        $handle.Dispose()
+    }
+}
+
+function Stop-SmokeTestApp($process, [int] $timeoutSeconds = 30) {
+    if ($null -eq $process -or $process.HasExited) { return $true }
+    $requested = Test-GracefulExitRequested
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+    }
+    if ($process.HasExited) { return $true }
+    Write-Warning "Graceful exit request did not stop the smoke-test instance (request_sent=$requested); falling back to a forced stop. A real BLE session may now be left open - restart Windows if Bluetooth stops working."
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    $process.WaitForExit()
+    $false
 }
 
 function Wait-ProcessesExit([string[]] $paths, [int] $timeoutSeconds = 120) {
@@ -286,8 +321,7 @@ try {
     if ($appProcess.HasExited) {
         throw "Upgraded application exited during the 8-second smoke test with code $($appProcess.ExitCode)"
     }
-    Stop-Process -Id $appProcess.Id -Force
-    $appProcess.WaitForExit()
+    $gracefulExit = Stop-SmokeTestApp $appProcess
     $appProcess = $null
 
     $expectedDowngradeExitCode = 1638
@@ -318,9 +352,17 @@ try {
         }
     }
 
+    $gracefulExitLabel = if ($null -eq $gracefulExit) {
+        "not run"
+    } elseif ($gracefulExit) {
+        "passed"
+    } else {
+        "forced stop fallback"
+    }
     Write-Host "Verified NSIS lifecycle matrix: $predecessorVersion -> $currentVersion (/UPDATE) -> downgrade rejected -> uninstall"
     Write-Host "Current-version convergence installer passes: $upgradePasses"
     Write-Host "Downgrade installer exit code: $downgradeExitCode; installed version remained $currentVersion"
+    Write-Host "Smoke-test instance exit: $gracefulExitLabel"
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         @"
 ### Windows NSIS lifecycle matrix
@@ -330,6 +372,7 @@ try {
 - current-version convergence installer passes: `$upgradePasses`
 - exact settings, mapping and usage-statistics fixture preservation: passed
 - upgraded process alive for 8 seconds: passed
+- smoke-test instance stopped without a forced kill: $gracefulExitLabel
 - predecessor `/S` re-run was rejected with exit code `$downgradeExitCode` and did not replace `$currentVersion`: passed
 - final uninstall removed program identity and retained user data: passed
 
@@ -338,7 +381,7 @@ This does not validate visible installer UI, real historical binaries, SmartScre
     }
 } finally {
     if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-        Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+        $null = Stop-SmokeTestApp $appProcess
     }
     if (-not $normalUninstallCompleted) {
         foreach ($entry in @(Get-SayAllUninstallEntries)) {
