@@ -1187,6 +1187,20 @@ pub fn run() {
                 settings,
                 pending_update: std::sync::Mutex::new(None),
             });
+            // "打开无线麦"（自身窗口）后的 tao 可见性缓存同步：`app_launcher` 用
+            // Win32 `ShowWindow` 显示已隐藏的自身主窗口（同步生效，其后抢前台才有
+            // 意义），但那会绕过 tao 的 `WindowFlags::VISIBLE` 缓存，使随后点 X 的
+            // `window.hide()` 被判为"无差异"而跳过——窗口关不进托盘（2026-09-16
+            // 真机实测）。这里用 tao 的 `show()` 把缓存置回"可见"；窗口已可见时为
+            // 幂等无副作用。显示与隐藏同走一条事件队列，FIFO 保证同步在前。
+            {
+                let handle = app.handle().clone();
+                sayall_windows::app_launcher::set_self_show_sync(move || {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                    }
+                });
+            }
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
@@ -1199,7 +1213,15 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    let _ = window.hide();
+                    // `hide()` 的返回值只说明"消息已投递"，不代表窗口真的隐藏了，
+                    // 因此同时记录 hide 前后 tao 报告的实际可见性：`visible_after=true`
+                    // 表示窗口仍在屏幕上（hide 未生效），可直接否证"已隐藏到托盘"。
+                    let visible_before = window.is_visible().unwrap_or(true);
+                    let hide_result = window.hide();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "window_close action=hide_to_tray label=main hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after} prevent_close=true"
+                    ));
                     api.prevent_close();
                 }
             }

@@ -113,6 +113,28 @@ fn is_custom_path_target(target: &str) -> bool {
         && (lower.ends_with(".exe") || lower.ends_with(".lnk"))
 }
 
+/// 宿主注册的"同步自身窗口可见性缓存"回调（Tauri 层在启动时注入一次）。
+///
+/// 为什么必须有它：为修"托盘里的窗口唤不回"，`show_and_force_foreground` 会用
+/// Win32 `ShowWindow(SW_SHOW)` 显示**本进程**的主窗口（同步生效，紧随其后的
+/// `SetForegroundWindow` 才有意义）。但 Win32 直接改可见性绕过了 tao 的
+/// `WindowFlags::VISIBLE` 缓存——tao 的 `set_window_flags` 只应用新旧 flag 的
+/// **差异**。于是缓存停在 `false`，之后 `window.hide()`（点 X 关到托盘）的
+/// `set_visible(false)` 被判为"无变化"而整个跳过，**窗口再也关不进托盘**
+/// （2026-09-16 真机实测：连续 13 次 `window_close hide_result=Ok(())` 仍不隐藏）。
+///
+/// 宿主的这个回调只需 `window.show()`：tao 会把缓存置回 `true`（窗口已可见时
+/// 判为无差异、无副作用），缓存与真实状态重新一致，`hide()` 恢复正常。
+/// 隐藏与显示走同一事件队列，FIFO 顺序天然保证"同步在前、hide 在后"。
+/// 外部应用的窗口不归本进程的 tao 管，无需同步。
+static SELF_SHOW_SYNC: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// 注册自身窗口可见性缓存同步回调（宿主在启动时调用一次）。
+pub fn set_self_show_sync(sync: impl Fn() + Send + Sync + 'static) {
+    let _ = SELF_SHOW_SYNC.set(Box::new(sync));
+}
+
 /// 激活已运行的应用窗口；未运行则启动。支持预设 id 与自定义路径。
 /// 自定义 .exe：按文件名探测已运行实例后直接启动；
 /// 自定义 .lnk：先解析快捷方式（目标 exe/参数/工作目录），按解析结果
@@ -128,6 +150,18 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
         if app.id == "sayall" {
             // 自身：恒已运行；激活失败（窗口隐藏等）时用自身 exe 路径重启拉起。
             if activate_running(app.exe_names) {
+                // `activate_running` 对隐藏的自身窗口用 Win32 `ShowWindow` 显示它
+                // （同步生效，其后抢前台才有意义），这会让 tao 的
+                // `WindowFlags::VISIBLE` 缓存停在 false。必须立刻请宿主同步一次
+                // （tao `window.show()`，幂等），否则随后点 X 的 `window.hide()`
+                // 会因"无差异"被整个跳过 —— 窗口关不进托盘（2026-09-16 实测）。
+                if let Some(sync) = SELF_SHOW_SYNC.get() {
+                    sync();
+                    crate::ble::gatt_note(
+                        "app_launcher self_show_sync via=host_callback terminal_result=passed"
+                            .to_owned(),
+                    );
+                }
                 return Ok(());
             }
             let exe =
@@ -326,16 +360,26 @@ fn activate_running(exe_names: &[&str]) -> bool {
         return false;
     }
 
-    // 枚举顶层可见窗口：第一个属于目标进程的窗口 → 恢复 + 前置。
+    // 枚举顶层窗口：找到目标进程的主窗口（无所有者、非工具窗口）→ 恢复/显示
+    // 并强制置前。先优先可见窗口；若只在托盘隐藏，则退而激活隐藏主窗口。
     let mut context = EnumContext {
         pids: &pids,
         activated: false,
+        hidden_candidate: None,
     };
     unsafe {
         let _ = EnumWindows(
             Some(enum_windows_proc),
             LPARAM(&mut context as *mut EnumContext as isize),
         );
+    }
+    if !context.activated {
+        if let Some(hwnd) = context.hidden_candidate {
+            unsafe {
+                show_and_force_foreground(hwnd);
+            }
+            context.activated = true;
+        }
     }
     context.activated
 }
@@ -345,35 +389,102 @@ fn activate_running(exe_names: &[&str]) -> bool {
 mod win_impl {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::System::Threading::{
+        AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow,
-        SW_RESTORE,
+        GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_RESTORE,
+        SW_SHOW, WS_EX_TOOLWINDOW,
     };
 
     pub(super) struct EnumContext<'a> {
         pub pids: &'a std::collections::HashSet<u32>,
         pub activated: bool,
+        /// 目标进程的隐藏（如收进托盘）主窗口候选；仅在无可见窗口时回退激活。
+        pub hidden_candidate: Option<HWND>,
     }
 
     pub(super) unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let context = &mut *(lparam.0 as *mut EnumContext);
-        if context.activated || !IsWindowVisible(hwnd).as_bool() {
+        if context.activated {
             return BOOL::from(true);
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if context.pids.contains(&pid) {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+        if !context.pids.contains(&pid) {
+            return BOOL::from(true);
+        }
+        // 只认主窗口：无所有者且非工具窗口（排除托盘/弹层/辅助隐藏窗口）。
+        if GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default()).0 != std::ptr::null_mut() {
+            return BOOL::from(true);
+        }
+        if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & (WS_EX_TOOLWINDOW.0 as u32) != 0 {
+            return BOOL::from(true);
+        }
+        if IsWindowVisible(hwnd).as_bool() {
+            // 可见但被其它窗口遮挡：直接恢复并强制置前。
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            show_and_force_foreground(hwnd);
             context.activated = true;
-            let _ = SetForegroundWindow(hwnd);
             return BOOL::from(false);
         }
+        // 隐藏（如收进托盘）的主窗口：记录为候选，循环结束后再激活。
+        if context.hidden_candidate.is_none() {
+            context.hidden_candidate = Some(hwnd);
+        }
         BOOL::from(true)
+    }
+
+    /// 显示（若隐藏）/还原（若最小化）目标窗口并强制置前。
+    /// 绕过 Windows 前台锁定（foreground lock）：菜单键的"打开应用"事件来自后台
+    /// 进程的引擎线程，直接 `SetForegroundWindow` 会静默失败（仅任务栏闪烁、不置前）。
+    /// 用 `AttachThreadInput` 把本线程输入挂到当前前台线程，使置前调用被视为前台线程
+    /// 发起而获准。不使用 TOPMOST 置顶：短暂的 topmost 状态会污染窗口常驻 Z 序，
+    /// 且与 `window.hide()`（关到托盘）交互时会造成窗口无法正常隐藏；仅依赖
+    /// attach + SetForegroundWindow（与仓库 wetype_dormancy_probe 已验证的前台切换同款）。
+    pub(super) unsafe fn show_and_force_foreground(hwnd: HWND) {
+        let mut target_pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
+        let self_window = target_pid == GetCurrentProcessId();
+        let visible_before = IsWindowVisible(hwnd).as_bool();
+        // 恢复可见性走 Win32（同步生效，确保紧随其后的抢前台有效）。
+        // 对**本进程**窗口，这会让 tao 的 `WindowFlags::VISIBLE` 缓存与真实状态
+        // 脱节，因此调用方（`activate_or_launch` 的 sayall 分支）必须随后调用
+        // `SELF_SHOW_SYNC` 把缓存同步回来，否则 `window.hide()`（点 X 关到托盘）
+        // 会被判为"无差异"而跳过（2026-09-16 真机实测）。
+        let took_show_path = !visible_before;
+        if took_show_path {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        } else if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let current_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0 && foreground_thread != current_thread;
+        crate::ble::gatt_note(format!(
+            "app_launcher action=show_and_force_foreground self_window={self_window} visible_before={visible_before} took_show_path={took_show_path} foreground_thread={foreground_thread} current_thread={current_thread} attached={attached}"
+        ));
+        if attached {
+            let _ = AttachThreadInput(foreground_thread, current_thread, true);
+        }
+        let ok = SetForegroundWindow(hwnd).as_bool();
+        if attached {
+            let _ = AttachThreadInput(foreground_thread, current_thread, false);
+        }
+        crate::ble::gatt_note(format!(
+            "app_launcher action=show_and_force_foreground terminal_result={} set_foreground_ok={}",
+            if ok { "passed" } else { "failed" },
+            ok
+        ));
     }
 }
 
 #[cfg(windows)]
-use win_impl::{enum_windows_proc, EnumContext};
+use win_impl::{enum_windows_proc, show_and_force_foreground, EnumContext};
 
 /// 启动新实例（短命线程内 COM 初始化后 ShellExecuteW，避免引擎线程套间约束）。
 #[cfg(windows)]
