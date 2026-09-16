@@ -49,12 +49,29 @@
 - 需要移除文件时移动到系统废纸篓，不永久删除。
 - 详细日志、发布和 Bug 记录规范分别见
   [LOGGING.md](LOGGING.md)、[RELEASING.md](RELEASING.md) 和
-  [Bugs/README.md](Bugs/README.md)。
+  [Bugs/README.md](Bugs/README.md)；Bug **排查方法**见
+  [DEBUGGING.md](DEBUGGING.md)。
+
+## Bug 排查（2026-09-16 新增）
+
+- **任何 Bug 调查开始前先读 [DEBUGGING.md](DEBUGGING.md)**：同源症状判定、错误码字面含义
+  不可当根因、全量聚合优先、恢复手段实验矩阵、本机环境陷阱、工具反模式清单、以及本次
+  被推翻的早期结论（避免重复走弯路）。`Bugs/README.md` 规定"做什么"，DEBUGGING.md 说明
+  "怎么查、别怎么查"，两者一起用。
+- **规则必须落到代码 + 一条能自动跑的测试**：只在文档里写规则等于没写——2026-09-16 的僵死
+  Bug 正是「部署不得强杀正在连接的应用」写在 AGENTS.md 里、安装器侧从未实现造成的。
+- **加日志的目的是否证自己**：新增探针/日志前先写明"它长什么样才能推翻我当前假设"；
+  只用来印证既有结论的日志不值得加（2026-09-16 的资源探针第一次启动就否掉了当时的主假设）。
 
 ## 运维与自愈（2026-09-05 会话复盘新增）
 
 - **用户侧零介入原则**：连接类故障（强杀残留、链路僵死、睡眠唤醒、固件抽风）必须由应用代码自愈（自动重试 + 自动无线电恢复等公开 API 手段），不得把"重连、重新配对、重启蓝牙、重启电脑"作为常规解法推给用户；只有公开 API 全部失效的场景才允许 UI 提示人工介入（且提示必须说明原因与预期效果）。
-- **部署不得强杀正在连接的应用**：强杀会留下未正常关闭的 BLE 会话，是链路僵死的主要诱因（2026-09-05 实证：安装包强杀后重连循环永不恢复，需无线电开关清除）。部署/升级流程应先请求应用正常退出；若必须强杀，预期可能触发一次自动恢复周期（约 60 秒内自愈）。
+- **部署不得强杀正在连接的应用（2026-09-16 已落地并加测试，不再是软建议）**：强杀会留下未正常关闭的 BLE 会话，使系统蓝牙栈进入**僵死态**。2026-09-16 逐项实测否证了此前两条乐观结论：① 无线电 Off/On **不能**清除（489 次请求、143 次明确"执行成功"却无效）；② 强杀后**不会自愈**（应用重启、杀 WinRT broker、杀蓝牙用户服务、杀 COM 代理、提权 PnP 重启适配器、伪 S3 睡眠全部无效，**只有完整重启电脑可解除**，3 次实证）。因此这是硬约束。
+  - 实现：应用启动时创建会话内命名事件 `Local\SayAll-GracefulExit`（`crates/sayall-windows/src/graceful_exit.rs`）；安装器在 `NSIS_HOOK_PREINSTALL` / `NSIS_HOOK_PREUNINSTALL` 中先请求退出并宽限 8 秒（`src-tauri/windows/installer-hooks.nsh`）。该钩子**先于** Tauri 的 `CheckIfAppIsRunning` 执行，应用自行退出了就不会被强杀。
+  - 应用侧必须**显式**收尾：Tauri v2 的 `App::run()` 收尾是 `std::process::exit`，**不执行 Rust 析构**，"退出时 Drop 会清理"是错的。退出路径要么经过 `RunEvent::ExitRequested`，要么显式调用 `BleRuntime::shutdown_blocking`（有界等待 `ble_session_cleanup` 落盘）。
+  - 测试：`scripts/test-windows-installer-graceful-exit.ps1`（应用运行中执行安装/卸载，断言优雅退出日志 + 进程自行退出）与 `src-tauri/src/lib.rs` 的安装器契约测试。**任何部署/退出/会话生命周期相关改动都必须先过这两条。**
+  - 详见 [Bugs/2026-09-16-ble-stack-resource-exhaustion-recovery-ineffective.md](Bugs/2026-09-16-ble-stack-resource-exhaustion-recovery-ineffective.md)。
+- **测试与运维脚本同样不得强杀应用**：同样的楔死风险（2026-09-16 前两个安装脚本用 `Stop-Process -Force` 收尾，本身就是诱因）。收尾一律"先请求优雅退出（`Local\SayAll-GracefulExit`）→ 有界等待 → 仍不退才强杀并打印告警"。
 - **吞键类抑制器必须做边沿配对**：任何"按下沿可能有条件放行（泄漏进 OS）、释放沿无条件吞下"的非对称吞键都会造成粘键，粘住的键会让下游热键（如输入法语音和弦）整体失效且难以归因。规则：DOWN 漏进 OS 则 UP 必放行（Voice_VibeCoding 同款，2026-09-05 已补入 key_suppressor.rs）。修改 LL 钩子/注入逻辑时，必须为"按住中应用退出/重启/边沿跨进程存活"写单元测试。
 - **破坏性批量操作必须先验证目标再执行**：对 GitHub Release/资产等外部资源的删除类 API，选择器必须锁定单个目标并打印将删除的清单核对后再执行（2026-09-05 教训：选择器意外匹配 4 个草稿，误删 9 个附件，靠 CI artifact 才恢复）。
 - **交付路径按用户原话执行**：用户要本地包就给本地路径，不自行扩展到上传/发布等额外渠道；额外动作即使"顺手"也先确认。
