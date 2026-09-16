@@ -8,8 +8,18 @@
 ; ── 部署前先请应用优雅退出（2026-09-16）───────────────────────────────
 ;
 ; 背景：Tauri 默认模板的 `CheckIfAppIsRunning`（utils.nsh）在检测到应用正在
-; 运行时**直接 `TerminateProcess`**（`nsis_tauri_utils::KillProcessCurrentUser`），
-; 没有优雅退出请求、静默安装（`IfSilent`）连提示都没有，杀完只 `Sleep 500`。
+; 运行时不会给应用任何退出机会，而是直接强杀。**本仓库构建产物的实际分支**
+; （原文见 `target/release/nsis/x64/utils.nsh`，构建时生成）：
+;
+;   nsis_tauri_utils::FindProcessCurrentUser → $R0 = 0 表示有实例在跑
+;     IfSilent kill_...              ; 静默安装（/S）：不提示，直接杀
+;     ${IfThen} $PassiveMode != 1 ${|} MessageBox MB_OKCANCEL ... ${|}
+;         kill_...:  KillProcessCurrentUser + Sleep 500   ; 交互点"确定" → 强杀
+;         cancel_...: Abort $R1                            ; 交互点"取消" → 安装中止
+;
+; 弹窗文案取自 SimpChinese.nsh：`{{product_name}} 正在运行！$\n点击确定以终止运行。`
+; 也就是说：**交互安装时用户手里本来就有一次"安全选择"（取消 = 什么都不装、
+; 不碰应用），只有点"确定"才会强杀**；静默/被动模式则没有这个选择。
 ;
 ; 而应用在持有活动 BLE GATT 会话时被强杀，会留下未正常关闭的会话，使系统
 ; 蓝牙栈进入僵死态：此后所有 WinRT 入口（`GetRadiosAsync`、设备查询、
@@ -18,14 +28,21 @@
 ; （2026-09-16 现场逐项实测，见 Bugs/2026-09-16-ble-stack-resource-exhaustion-recovery-ineffective.md）。
 ; AGENTS.md 已把这条列为「部署不得强杀正在连接的应用」（2026-09-05 实证）。
 ;
+; 注意（升级 CLI 时必须复核）：tauri `dev` 分支已把该宏改成走 Restart Manager
+; （`RSTRTMGR::RmShutdown` + `RmForceShutdown`，交互取消同样是 `Abort`）。两种实现
+; 都**不会**请求应用自行退出，因此本钩子对两者都成立；但升级 `@tauri-apps/cli` 后
+; 必须重新查看生成的 `utils.nsh` 并重跑契约测试与端到端测试。
+;
 ; 本宏在 `NSIS_HOOK_PREINSTALL` / `NSIS_HOOK_PREUNINSTALL` 中执行，而 Tauri 的
 ; `CheckIfAppIsRunning` 在 `Section Install` 里**紧随其后**才跑。因此应用只要能
-; 在这段宽限期内自行退出，后续检测自然落空、不会强杀；超时才落回原有行为。
+; 在这段宽限期内自行退出，后续检测自然落空、连弹窗都不会出现；超时才落回原有行为。
 ;
 ; 信号用**会话内**命名事件：非提权进程没有 `SeCreateGlobalPrivilege`，无法创建
 ; `Global\` 命名对象；而安装器与应用同处一个登录会话，`Local\` 命名空间对两者
 ; 都可见。事件由应用在启动时创建（只有运行中的实例才持有句柄），所以
-; `OpenEventW` 失败即表示"没有实例在运行"，直接跳过、零开销。
+; `OpenEventW` 失败即表示"没有实例在运行"**或"在跑的是没有监听的旧版本"**——
+; 两种情况都直接跳过、零开销（从没有监听的旧版本升级时仍会看到 Tauri 的弹窗，
+; 这是预期行为，只能靠用户点"取消"后手动退出应用再装）。
 ; 事件名必须与 crates/sayall-windows/src/graceful_exit.rs 的常量一致。
 !define SAYALL_GRACEFUL_EXIT_EVENT "Local\SayAll-GracefulExit"
 !define SAYALL_GRACEFUL_EXIT_SETTLE_MS 1500

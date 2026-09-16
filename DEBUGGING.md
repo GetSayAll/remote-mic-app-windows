@@ -111,6 +111,12 @@ grep -a "windows_resource_exhausted" "$LOG" | grep -ao "pid=[0-9]*" | sort | uni
   「部署不得强杀正在连接的应用」，而 `installer-hooks.nsh` 里 45 行，一个字都没实现。
   → **规则必须落到代码 + 一条能自动跑的测试上**（契约测试：`src-tauri/src/lib.rs` 的
   `installer_hook_*`）。
+- **判断第三方模板/工具的行为，要看"自己这次构建生成的产物"，不要看上游仓库。**
+  上游默认分支会变：`CheckIfAppIsRunning` 在 tauri `dev` 分支已从
+  `nsis_tauri_utils::KillProcessCurrentUser` 换成 Restart Manager
+  （`RSTRTMGR::RmShutdown` + `RmForceShutdown`）。而本仓库实际生成的是
+  `target/release/nsis/x64/utils.nsh`（外加 `SimpChinese.nsh` 里的真实弹窗文案）——
+  以它为准，升级 CLI 后重新核对。本机 npm 包与 cargo 缓存里的版本才是真正生效的版本。
 
 ## 8. 结论要带词汇，被推翻就当场改
 
