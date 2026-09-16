@@ -259,6 +259,20 @@ pub(crate) enum WorkerMessage {
     },
 }
 
+/// 以"一次重连尝试"为粒度驱动资源探针（2026-09-16）：进入资源耗尽轮次、
+/// 持续中抽样、恢复收尾各落一条 `resource_probe` 行，用于判定
+/// `0x80070008` 的成因是本进程泄漏还是系统/内核资源被占满。
+fn attempt_probe(
+    probe: &mut crate::resource_probe::ResourceProbe,
+    attempt: u32,
+    result: &Result<ConnectionSnapshot, PlatformError>,
+) -> Option<String> {
+    match result {
+        Ok(_) => probe.on_success(attempt),
+        Err(error) => probe.on_failure(ble_error_code(error), attempt),
+    }
+}
+
 fn worker_loop(
     receiver: Receiver<WorkerMessage>,
     sender: Sender<WorkerMessage>,
@@ -268,6 +282,12 @@ fn worker_loop(
     send_input: Arc<SendInputRuntime>,
     voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
 ) {
+    // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
+    // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
+    gatt_note(crate::resource_probe::resource_probe_note(
+        "worker_start",
+        "checkpoint=ble_worker",
+    ));
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         *lock(&state) = failed_snapshot(format!("WinRT 初始化失败：{error}"));
         return;
@@ -294,6 +314,9 @@ fn worker_loop(
     // 僵死链路自动恢复预算：每个窗口最多两次，冷却后自动开启下一窗口；
     // 成功连接、主动断开或系统恢复时重置，不能永久退化成普通重连。
     let mut radio_recovery = crate::bluetooth_radio::RadioRecoveryBudget::default();
+    // 资源探针（2026-09-16）：判定 0x80070008 成因的必要证据，见
+    // resource_probe 模块头部的判读方法。
+    let mut resource_probe = crate::resource_probe::ResourceProbe::default();
 
     loop {
         let deadline = nearest_deadline(
@@ -355,6 +378,11 @@ fn worker_loop(
                                     &mut connection_generation,
                                     &mut capabilities_deadline,
                                 );
+                                if let Some(note) =
+                                    attempt_probe(&mut resource_probe, attempt, &result)
+                                {
+                                    gatt_note(note);
+                                }
                                 if let Err(error) = result {
                                     connection_generation = connection_generation.wrapping_add(1);
                                     if matches!(error, PlatformError::BleCleanup(_)) {
@@ -538,6 +566,9 @@ fn worker_loop(
                     &mut connection_generation,
                     &mut capabilities_deadline,
                 );
+                if let Some(note) = attempt_probe(&mut resource_probe, 0, &result) {
+                    gatt_note(note);
+                }
                 if let Err(error) = &result {
                     connection_generation = connection_generation.wrapping_add(1);
                     if matches!(error, PlatformError::BleCleanup(_)) {
@@ -865,6 +896,14 @@ fn worker_loop(
                 }
             }
             WorkerMessage::SystemSuspended => {
+                // 睡眠/唤醒此前在诊断日志里完全不可见，而 2026-09-15 实测
+                // 到"S3 恢复后 1 秒内出现 windows_resource_exhausted"的高相关
+                // 现象（8 次 S3 中有 2 次紧邻爆发起点）。这里落一条带资源
+                // 采样的记录，使"复发点 vs 系统唤醒"可从应用日志直接对齐。
+                gatt_note(crate::resource_probe::resource_probe_note(
+                    "system_suspend",
+                    "action=entering_sleep",
+                ));
                 system_suspended = true;
                 capabilities_deadline = None;
                 reconnect_deadline = None;
@@ -896,6 +935,13 @@ fn worker_loop(
                 apply_input_connection_phase(ConnectionPhase::Suspended);
             }
             WorkerMessage::SystemResumed => {
+                // 无条件记录本次唤醒（含"未配对到 suspend"的情形，如应用在
+                // 睡眠期间被拉起）：唤醒时刻的进程/系统资源快照是判断
+                // "0x80070008 是否由睡眠周期引入"的关键对照。
+                gatt_note(crate::resource_probe::resource_probe_note(
+                    "system_resume",
+                    &format!("tracked_suspend={system_suspended}"),
+                ));
                 if !system_suspended {
                     continue;
                 }
@@ -1111,7 +1157,25 @@ fn connect_stage<T>(
         result.is_err(),
         started.elapsed().as_millis()
     ));
+    if let Err(error) = result.as_ref() {
+        // 保真落盘原始错误（含 WinRT HRESULT）。此前只落分类后的
+        // `error_code`，把 0x80070008 / 0x80004004 / 其他码压成同一串，
+        // 无法区分故障层——这是 2026-09-16 根因分析的首要盲区。
+        gatt_note(format!(
+            "ble_connect_stage phase=failure_detail stage={stage} attempt={attempt} raw_error={}",
+            raw_error_text(error)
+        ));
+    }
     result
+}
+
+/// 失败的原始文本。平台错误文本只含 WinRT/Win32 错误描述与 HRESULT，
+/// 不含设备身份、路径或用户内容（与 LOGGING.md 隐私红线一致）。
+fn raw_error_text(error: &PlatformError) -> String {
+    match error {
+        PlatformError::WindowsApi(message) => message.clone(),
+        other => other.to_string(),
+    }
 }
 
 fn invalidate_connection(

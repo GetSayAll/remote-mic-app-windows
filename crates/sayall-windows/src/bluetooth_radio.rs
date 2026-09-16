@@ -232,11 +232,18 @@ fn find_bluetooth_radio_uncached() -> windows::core::Result<Option<Radio>> {
             );
             find_bluetooth_radio_from_device_query()
         }
-        Err(_) => {
-            crate::ble::gatt_note(
-                "radio_cycle stage=enumerate phase=fallback reason=snapshot_failed method=device_query"
-                    .to_owned(),
-            );
+        Err(error) => {
+            // 保真落盘 HRESULT（2026-09-16）：此前两条枚举入口的失败原因都被
+            // 压成 `snapshot_failed`，看不出是 0x80070008（资源耗尽）还是
+            // 0x80004004（E_ABORT）或别的码——而不同码指向的故障层不同，
+            // 这是根因分析的首要盲区。错误文本只含 WinRT 描述与 HRESULT。
+            crate::ble::gatt_note(crate::resource_probe::resource_probe_note(
+                "radio_enumerate_failed",
+                &format!(
+                    "reason=snapshot_failed method=device_query hresult=0x{:08X} raw_error={error}",
+                    error.code().0 as u32
+                ),
+            ));
             find_bluetooth_radio_from_device_query()
         }
     }
