@@ -11,7 +11,7 @@
 |---|---|---|
 | 0 | 注入可达性（无人工） | **passed** —— 注入确实进入系统输入流 |
 | 1 | 免按未启用基线（自动部分） | **passed** —— 注入唤不起、TAKEN=0 |
-| 1 | 免按未启用基线（物理对照） | **deferred** —— 待真人按右 Alt |
+| 1 | 免按未启用基线（物理对照） | **deferred** —— 待真人按右 Alt；**软件无替代通路（已逐条排查）** |
 | 2 | 切到「免按模式」 | **deferred** —— 只能由 Echo 在豆包设置里操作 |
 | 3 | 免按模式已启用测量 | **deferred** —— 依赖阶段 2 |
 | 4 | 还原为长按模式 | **deferred** —— 依赖阶段 2 |
@@ -86,7 +86,7 @@ NativeRuntime 各 DLL 与设置 exe 中三种编码全 0 命中，仅 `ImeServic
 三个结果分支：
 
 - **A** 物理能唤起、注入不能 → 原判定成立，豆包记为第三方兼容性边界（预期结果）
-- **B** **两者都能唤起** → 免提模式下注入可用，**新合规路线成立**（我们想要的）
+- **B** **两者都能唤起** → 免按模式下注入可用，**新合规路线成立**（我们想要的）
 - **C** 两者都不能唤起 → 豆包自身没配好（快捷键冲突/麦克风未选 CABLE Output），
   本轮实验无效，先修豆包配置再复测
 
@@ -142,6 +142,10 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
 # 实测：连点两次同样全程 visible=False（阴性对照干净）
 ```
 
+> ⚠️ **候选键表已去重**：`Alt+Space` 曾同时以「免按模式正解」与「无 Win 位」两条出现，
+> 同一 `(modifiers, vk)` 第二次 `RegisterHotKey` 必然失败并报 `1409`
+> → **假 TAKEN**。现已删去重复项（保留 6 条互不相同的组合）。
+
 **阶段 1 实测数据（2026-09-17，当前为长按模式）**：
 
 | 判据 | 注入右 Alt | 说明 |
@@ -154,6 +158,20 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
 
 **仍需人工的部分**：本阶段还需真人按住**物理**右 Alt 一次（`--watch 30`）
 作为同条件对照，以排除"豆包本身没就绪"。**该项待 Echo 执行。**
+
+#### ⚠️ 为什么这一格软件无法替代（2026-09-17 逐条排查）
+
+「物理对照」要求按键**不带 `LLKHF_INJECTED` 标志**。本机可行的替代途径已全部排查：
+
+| 候选途径 | 排查结果 |
+|---|---|
+| `osk.exe`（屏幕键盘） | 未运行；且其内部实现走 `SendInput` → 仍带 injected 标志 |
+| `keybd_event`（旧 API） | 存在，但与 `SendInput` 同一条注入路径 → 标志同样置位 |
+| Interception 驱动 | **本机不存在**（`System32` 与 `System32\drivers` 下无 `interception.dll`/`.sys`） |
+| WinUHid / 虚拟 HID | **本机不存在**（无 `WinUHid.dll`/`.sys`）；且属 ADR 0002 增强轨，须先审计 |
+
+→ **本机不存在任何非注入的按键通路**，故真正的物理对照只能由真人完成。
+如果注入对照组去造假"物理键"，那只是又一次注入，对照会自我污染（见「实验设计」）。
 
 ### 阶段 2：切到「免按模式」
 
@@ -212,9 +230,25 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
 
 | 文件 | 作用 | 自测状态 |
 |---|---|---|
-| `1-probe-hotkey-ownership.py` | `RegisterHotKey` 抢占探测，判断豆包是否注册系统热键 | **passed**（基线全 FREE） |
+| `1-probe-hotkey-ownership.py` | `RegisterHotKey` 抢占探测，判断豆包是否注册系统热键 | **passed**（基线 6/6 FREE） |
 | `2-probe-injection-vs-physical.py` | 注入右 Alt + 观察三重判据；`--watch` 供真人按物理键；`--toggle N` 切换式语义 | **passed**（`--list` 能稳定读到 `OimeVoiceWaveWindow`；注入 DOWN 成功；`--toggle 2` 正常） |
 | `3-probe-injection-reachability.py` | 自装 LL 钩子验证"注入是否进入系统输入流"，把"注入没送达"与"目标不响应"分开 | **passed**（`--inject` 实测捕获到 `injected=True`） |
+| `4-probe-uia-reader.py` | 用公开 UI Automation 直读第三方设置窗口控件树，拿到**逐字界面文案** | **passed**（读到 72 个元素，确认「免按模式」「右 Alt + 空格」） |
+
+### `4-probe-uia-reader.py` 用法
+
+```bash
+python -u Testing/investigation/doubao-global-hotkey/4-probe-uia-reader.py
+# 默认找 class 含 DoubaoIme 的可见窗口；也可 --class-substr / --title-substr 指定
+```
+
+**为什么需要它**：跨应用调研中「配置键名 ≠ 界面文案，DLL 字符串 ≠ 界面文案」。
+本仓库曾因截图 OCR 把「免按」读成「免提」而写错代码与文档。
+**凡是要把 UI 文案写进代码/文档，都应以本脚本的读取结果或截图原图人工核对为准。**
+
+⚠️ 本机**没有 `comtypes`**，脚本用 `ctypes` 直接调原始 COM 虚表。虚表索引见脚本头注释
+（注意 `IUIAutomation::CreateTrueCondition` = **21**，算错会报 `0x80070057`）。
+⚠️ 目标窗口**必须处于可见状态**，否则 `EnumWindows` 找不到它。
 
 ## 工具陷阱（已踩，勿重犯）
 

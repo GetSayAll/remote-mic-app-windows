@@ -1,17 +1,20 @@
-"""豆包"免提模式"实验：一、系统热键注册探测
+"""豆包"免按模式"实验：一、系统热键注册探测
 
 目的：在不读取/不修改豆包私有配置的前提下，判断豆包当前是否已向系统
       注册了语音热键。做法是"抢占式探测"——尝试自己 RegisterHotKey
       候选组合键；注册失败且 LastError=1409
       （ERROR_HOTKEY_ALREADY_REGISTERED）说明该组合已被别人注册。
 
-何时用：用户切换豆包"语音输入模式"（长按模式 ↔ 免提模式）的前后各跑一次做对比。
-        未勾选免提模式时应全部 FREE；勾选后若变 TAKEN，即证明豆包改用了
+何时用：用户切换豆包"语音输入模式"（长按模式 ↔ 免按模式）的前后各跑一次做对比。
+        未切到免按模式时应全部 FREE；切换后若变 TAKEN，即证明豆包改用了
         RegisterHotKey 路径 → 意味着 SendInput 注入应当能触发。
 
 背景（2026-09-17 定案）：配置项 voice.enableGlobalVoiceShortcut 在界面上
-        对应「免提模式」（豆包设置 → 语音输入 → 语音输入模式），
-        不是独立的"全局语音快捷键"开关。详见 Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md。
+        对应「免按模式」（豆包设置 → 语音输入 → 语音输入模式），
+        不是独立的"全局语音快捷键"开关。⚠️ 早期从 DLL 字符串/截图 OCR
+        推断为「免提模式」，UIA 直读活窗口后确认为「免按模式」。
+        **两档快捷键不同**：长按模式 = 纯右 Alt；免按模式 = 右 Alt + 空格。
+        详见 Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md。
 
 本脚本只做 Register/Unregister，不注入按键、不改任何配置、不读豆包文件。
 用 ctypes 而非 PowerShell Add-Type（本机 Add-Type 被安全策略硬拦）。
@@ -33,8 +36,10 @@ ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
 CANDIDATES = [
     ("RightAlt (豆包长按语义)", MOD_ALT, VK_RMENU),
-    ("RightAlt+Win+Space (免提)", MOD_ALT | MOD_WIN, VK_SPACE),
-    ("Alt+Space (无 Win 位)", MOD_ALT, VK_SPACE),
+    # ⚠️ 同一 (modifiers, vk) 只能注册一次：重复项会在第二次注册时假报 1409
+    #    → 假 TAKEN。所以「免按模式正解」(Alt+Space) 只保留这一条。
+    ("RightAlt+Space (免按模式正解)", MOD_ALT, VK_SPACE),
+    ("RightAlt+Win+Space (对照)", MOD_ALT | MOD_WIN, VK_SPACE),
     ("LeftAlt (对照)", MOD_ALT, VK_LMENU),
     ("RightShift (对照)", 0, VK_RSHIFT),
     ("Ctrl+Alt+R (对照)", MOD_CONTROL | MOD_ALT, 0x52),

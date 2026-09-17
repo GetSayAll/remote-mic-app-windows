@@ -48,7 +48,7 @@ pub enum VoiceTarget {
 /// | 模式 | 界面文案 | 语义 |
 /// |---|---|---|
 /// | `Hold`（默认） | 长按模式 | 按住说话，松手结束 |
-/// | `HandsFree` | 免提模式 | 按一次即可开始说话，再按任意键可结束 |
+/// | `HandsFree` | 免按模式 | 按一次即可开始说话，再按任意键可结束 |
 ///
 /// **为什么本应用需要知道这个**：它决定注入形态。
 /// - `Hold` 对应「按下 → 保持 → 松开」，与现有 `HOLD` 配方一致。
@@ -70,7 +70,7 @@ pub enum DoubaoVoiceMode {
     /// 长按模式（豆包出厂默认）：按住说话，松手结束。
     #[default]
     Hold,
-    /// 免提模式：按一次开始说话，再按任意键结束。
+    /// 免按模式：按一次开始说话，再按任意键结束。
     HandsFree,
 }
 
@@ -144,7 +144,7 @@ pub enum InjectionShape {
     /// 用于「按住说话」类目标（WeType、豆包长按模式）。
     HoldWhileKeyDown,
     /// 语音键按下 = 送一次「按下+松开」的完整点击（切换开/关）。
-    /// 用于「按一次开始、再按一次结束」类目标（豆包免提模式）。
+    /// 用于「按一次开始、再按一次结束」类目标（豆包免按模式）。
     TogglePerKeyDown,
 }
 
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn non_doubao_targets_always_use_hold_shape() {
         // 微信路径必须逐字等价：即便配置里残留 doubaoMode=handsfree
-        // （用户先选豆包免提、后切回微信），也不得影响微信的注入形态。
+        // （用户先选豆包免按、后切回微信），也不得影响微信的注入形态。
         let config = VoiceTargetConfig {
             target: VoiceTarget::WeType,
             hotkey: None,
@@ -546,7 +546,7 @@ mod tests {
         //    字符串推断的「免提模式」——两者指同一档。
         assert_eq!(DoubaoVoiceMode::Hold.display_name(), "长按模式");
         assert_eq!(DoubaoVoiceMode::HandsFree.display_name(), "免按模式");
-        // 免提模式的引导文案必须明确指向豆包设置，否则用户找不到入口
+        // 免按模式的引导文案必须明确指向豆包设置，否则用户找不到入口
         // （2026-09-17 实际发生过：界面无"全局"字样，按字面找会扑空）。
         assert!(DoubaoVoiceMode::HandsFree.user_hint().contains("豆包设置"));
     }

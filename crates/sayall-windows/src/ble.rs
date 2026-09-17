@@ -1363,8 +1363,8 @@ fn handle_control(
                 // 注入形态由目标的语音模式决定（见 `voice_target::InjectionShape`）：
                 // - `HoldWhileKeyDown`（微信、豆包长按模式）：送按下沿并保持，
                 //   松手时由 `release_voice_hold_hotkey` 送抬起沿。
-                // - `TogglePerKeyDown`（豆包免提模式）：送一次完整点击即可开始
-                //   说话，**不记入 held_hotkey**——免提语义下没有"松手"这一半，
+                // - `TogglePerKeyDown`（豆包免按模式）：送一次完整点击即可开始
+                //   说话，**不记入 held_hotkey**——免按语义下没有"松手"这一半，
                 //   若仍记录，松手时的反向抬起沿会被豆包当成"再按任意键结束"，
                 //   语音只持续一瞬。
                 let shape = target_config.injection_shape();
@@ -1597,7 +1597,7 @@ fn abort_voice_session(
 /// 释放失败会记录在 SendInput 快照的 last_error 中，由诊断摘要呈现。
 /// 同时解除语音键 F5 抑制器的会话武装（覆盖停止/中止/断连/退出全部路径）。
 ///
-/// 切换式形态（豆包免提模式）**不会**留下持有中的和弦——它在按下时就送完了
+/// 切换式形态（豆包免按模式）**不会**留下持有中的和弦——它在按下时就送完了
 /// 整个点击周期，因此这里无事可做。这不是异常，故不产出 `chord_release` 行，
 /// 避免日志里出现"按下有成对、释放无成对"的假信号；形态可由同会话的
 /// `chord_press ... shape=toggle_per_key_down` 行判定。

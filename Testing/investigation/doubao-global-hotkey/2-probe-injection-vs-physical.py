@@ -217,11 +217,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="只列当前状态")
     ap.add_argument("--inject-rightalt", action="store_true",
-                    help="注入一次「按下+松开」完整点击（免提模式用；长按模式用 --hold-ms）")
+                    help="注入一次「按下+松开」完整点击（免按模式用；长按模式用 --hold-ms）")
     ap.add_argument("--hold-ms", type=int, default=0,
                     help="改为「按住 N 毫秒再松开」（长按模式语义）；0=只点一下")
     ap.add_argument("--toggle", type=int, default=0, metavar="N",
-                    help="连续注入 N 次完整点击（免提模式必须成对：1 次开始、2 次结束）")
+                    help="连续注入 N 次完整点击（免按模式必须成对：1 次开始、2 次结束）")
     ap.add_argument("--watch", type=int, default=0,
                     help="观察 N 秒（供用户手动按物理键）")
     ap.add_argument("--poll-ms", type=int, default=100,
@@ -235,14 +235,14 @@ def main() -> int:
         return 0
 
     if args.toggle > 0:
-        # 免提模式是切换式：必须在「开麦期间」采样，否则会漏掉判据。
-        print(f"\n>>> 免提模式：连续注入 {args.toggle} 次完整点击")
+        # 免按模式是切换式：必须在「开麦期间」采样，否则会漏掉判据。
+        print(f"\n>>> 免按模式：连续注入 {args.toggle} 次完整点击")
         for index in range(1, args.toggle + 1):
             print(f"\n>>> 第 {index} 次点击（按下+松开）…")
             if not right_alt_down():
                 print("!! 注入 DOWN 失败")
                 return 2
-            # 免提模式下"按下"即切换；稍等让豆包响应，再抬起。
+            # 免按模式下"按下"即切换；稍等让豆包响应，再抬起。
             time.sleep(0.12)
             if not right_alt_up():
                 print("!! 注入 UP 失败")

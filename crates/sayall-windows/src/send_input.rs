@@ -958,7 +958,7 @@ mod tests {
         );
     }
 
-    /// 切换式注入（豆包免提模式）走 `send_key_edges_spaced_with`，因此每个
+    /// 切换式注入（豆包免按模式）走 `send_key_edges_spaced_with`，因此每个
     /// 事件单独一次调用、且失败时回滚已投递的边沿——这正是切换式最需要的
     /// 保证：它没有后续的 `release` 步骤来清理残留按下的键。
     #[test]

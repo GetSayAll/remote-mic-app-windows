@@ -122,7 +122,8 @@ voice.voiceShortcut             = {"keyCode": 32, "modifierFlags": 2049}
 1. **2026-09-04 判定维持**：豆包输入法在**免驱动、免管理员、免进程注入**的前提下，其本地语音热键无法由 SendInput 唤起。三个独立来源同向印证（vibe-flow 实测 + ZSTDJan 机理 + ZSTDJan README 自述边界）。
 2. **确认无新增合法路线**：能达到豆包的三条已知路线分别是 Frida 进程注入（ZSTDJan）、Interception 内核驱动（ZSTDJan 探针 / axonkey）、以及物理化后的驱动注入（RemoteMapper 的 KMDF lower filter），**均被 AGENTS.md 明确排除在基础路径之外**。四个参考仓库中，凡覆盖豆包的实现**全部**依赖驱动级或进程级手段。
 3. **唯一值得新增测试的开放项**：豆包 **`enableGlobalVoiceShortcut`** 开启后，豆包是否改用 `RegisterHotKey` 注册系统级热键。若是，则注入可触发且完全合规（纯 SendInput）。
-   - ⚠️ **命名更正（2026-09-17）**：该配置项在 v0.9.0.0 界面上的显示名是「**免提模式**」，**不是**「全局语音快捷键」——按 vibe-flow 文档的字面名称在界面上**找不到该开关**。逐字证据与操作路径见 `Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md`。
+   - ⚠️ **命名更正（2026-09-17）**：该配置项在 v0.9.0.0 界面上的显示名是「**免按模式**」，**不是**「全局语音快捷键」——按 vibe-flow 文档的字面名称在界面上**找不到该开关**。逐字证据与操作路径见 `Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md`。（早期版本此处写作「免提模式」，系从 `HandsFreeShortcutBox` / DLL 字符串 / 截图 OCR 推断；同日改用 UIA 直读活窗口控件树后逐字确认为「免按」。）
+   - 🔑 **两档快捷键不同（同日 UIA + 配置双向实测）**：长按模式 = 纯 右 Alt（`voiceLongPressShortcut = {keyCode: 0, modifierFlags: 2049}`）；免按模式 = **右 Alt + 空格**（`voiceShortcut = {keyCode: 32, modifierFlags: 2049}`，`keyCode 32` 即空格）。注入形态与**注入内容**必须同时随模式变化。
    - 触发条件：需用户**在豆包设置里自行切换**该模式（本仓库不代改）。
    - 现状：长按模式（`enableGlobalVoiceShortcut = false`），故该分支从未被真正测过。
 4. **v0.9.0.0 未复测**：原判定基于 0.8.2.7，本机已升级。静态字符串复核显示 `VoiceKeyHookProc` 仍在（2 处），但 `LLKHF_INJECTED` 字面量在本版 0 次命中——**可能被内联/改名，也可能过滤被移除，两种可能无法只靠静态字符串区分**。
@@ -142,20 +143,21 @@ voice.voiceShortcut             = {"keyCode": 32, "modifierFlags": 2049}
 
   **这钉死了归因方向**：注入的右 Alt 确实进入了系统输入流，`LLKHF_INJECTED` 标志正确置位、扫描码 `0x38`、`extended=True`、按 `SYSDOWN`（系统键）投递。→ 豆包若唤不起，原因在**豆包如何对待带 `INJECTED` 标志的事件**，而不是"我们的键没送出去"。这是对结论 1 的**正向支撑证据**（原先只有"注入无效"的观察，没有"注入确实送达"的独立确认）。
   - ⚠️ **该探针不能替代物理对照**：LL 钩子是链式的，每个钩子收到**私有副本**，本探针只能证明"投递成立"，无法推断豆包看见了什么。A/B/C 判定仍须物理键对照。
-- **免提模式未勾选基线（阶段 1 自动部分，2026-09-17 实测，`passed`）**：
+- **免按模式未勾选基线（阶段 1 自动部分，2026-09-17 实测，`passed`）**：
   - `1-probe-hotkey-ownership.py`：6 个候选组合全部 FREE，`TAKEN` 总数 = **0** → 当前模式下豆包未注册任何系统热键。
-  - `2-probe-injection-vs-physical.py --inject-rightalt` 与 `--toggle 2`：注入 DOWN 成功，`OimeVoiceWaveWindow` **全程 `visible=False`**（按住期间密集采样 + 连点两次），录音设备 **0 / 2** 被占用 → 阴性对照干净，与 2026-09-04 判定一致。
-- **免提模式未勾选基线的物理对照：`deferred`** —— 须真人按住物理右 Alt（注入对照组会自我污染，不能代替）。
-- 豆包 v0.9.0.0 免提模式开启后注入能否唤起：**`deferred`** —— 依赖用户在豆包设置里切到「免提模式」。
-- 本仓库代码路径（目标选择 + TSF 激活 + 配置分流 + 免提模式切换式注入）：自动化 `passed`（143 + 36 + 95 用例全绿，见提交 `58dfb9c`）；RC001/RC003 真机 `deferred`。
+  - `2-probe-injection-vs-physical.py --inject-rightalt`、`--toggle 2`、以及长按语义正解形态 `--inject-rightalt --hold-ms 1500`：注入 DOWN 成功，`OimeVoiceWaveWindow` **全程 `visible=False`**（按住期间密集采样 + 连点两次 + 按住 1.5 秒），录音设备 **0 / 2** 被占用 → 阴性对照干净，与 2026-09-04 判定一致。
+  - **物理对照软件无法替代（已逐条排查）**：`osk.exe` 内部走 SendInput、`keybd_event` 同样带 injected 标记、本机**无** Interception / WinUHid 驱动（`System32` 与 `System32\drivers` 下 `.dll`/`.sys` 均不存在）→ **本机不存在非注入的按键通路**。
+- **免按模式未勾选基线的物理对照：`deferred`** —— 须真人按住物理右 Alt（注入对照组会自我污染，不能代替；软件亦无替代通路，见上）。
+- 豆包 v0.9.0.0 免按模式开启后注入能否唤起：**`deferred`** —— 依赖用户在豆包设置里切到「免按模式」。
+- 本仓库代码路径（目标选择 + TSF 激活 + 配置分流 + 免按模式切换式注入，含 `be6478d` 的组合键修正）：自动化 `passed`（145 + 36 + 95 用例全绿）；RC001/RC003 真机 `deferred`。
 
 ## 后续动作
 
 1. 真机实验（需用户配合）——协议与命令见 `Testing/investigation/doubao-global-hotkey/README.md`：
-   - **①** 长按模式下的物理对照：运行 `2-probe-injection-vs-physical.py --watch 30` 时**由用户本人按住物理右 Alt**；
-   - **②** 在豆包设置 → 语音输入 → 语音输入模式 → **选中「免提模式」**；
-   - **③** 免提模式下的三项测量（`1-probe-hotkey-ownership.py` 是否变 TAKEN ⭐、`--toggle 2` 注入、`--watch 30` 物理）；
+   - **①** 长按模式下的物理对照：运行 `2-probe-injection-vs-physical.py --watch 30` 时**由用户本人按住物理右 Alt**（此格软件无法代替，原因见「验证」节）；
+   - **②** 在豆包设置 → 语音输入 → 语音输入模式 → **选中「免按模式」**（其快捷键是 **右 Alt + 空格**，与长按档不同）；
+   - **③** 免按模式下的三项测量（`1-probe-hotkey-ownership.py` 是否变 TAKEN ⭐、`--toggle 2` 注入、`--watch 30` 物理）；
    - **④** 测完把模式**切回「长按模式」**还原。
-   - 若免提模式下注入可唤起 → 新增合规路径，本仓库目标选择增加"豆包（免提模式）"档，并在 UI 引导用户切换该模式。
+   - 若免按模式下注入可唤起 → 新增合规路径，本仓库目标选择增加"豆包（免按模式）"档，并在 UI 引导用户切换该模式。
 2. 若两模式注入均失败 → 豆包在本仓库**永久**记为第三方兼容性边界（非本仓库缺陷），UI 如实说明"豆包需要安装可选 Helper（虚拟键盘驱动）才能由本应用触发"，把决策交给用户。
 3. 新增 `ATTRIBUTION.md` 条目：vibe-flow 的 V1.x 豆包引导线索 + 其 V2.0 移除决定；ZSTDJan 的 Frida 机理（记为"机理解释，不作实现参考"）。
