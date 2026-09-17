@@ -1,7 +1,7 @@
 use crate::send_input::{
-    plan_key_down, plan_key_up, send_click_with, send_key_edges_spaced_with, send_key_tap_with,
-    send_wheel_with, KeyChord, MouseClickKind, MoveDirection, PlannedKeyEvent, ScrollDirection,
-    SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
+    plan_key_down, plan_key_tap, plan_key_up, send_click_with, send_key_edges_spaced_with,
+    send_key_tap_with, send_wheel_with, KeyChord, MouseClickKind, MoveDirection, PlannedKeyEvent,
+    ScrollDirection, SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
 };
 use crate::PlatformError;
 use std::mem::size_of;
@@ -211,6 +211,21 @@ impl SendInputRuntime {
         let result =
             send_key_edges_spaced_with(&events, HOLD_CHORD_EVENT_GAP, real_send_input_batch);
         self.record(result, "SendInput key-up")
+    }
+
+    /// Submit a complete press-release cycle for a chord as **one** edge-spaced
+    /// sequence (voice-key toggle, e.g. Doubao hands-free mode).
+    ///
+    /// `send_key_edges_spaced_with` already rolls back delivered edges on
+    /// failure, so a partial toggle can never leave a key stuck down — which
+    /// matters here because a toggle target has no separate release step to
+    /// clean up afterwards.
+    pub fn tap_spaced(&self, chord: &KeyChord) -> Result<SendInputSnapshot, PlatformError> {
+        let events =
+            plan_key_tap(chord).map_err(|error| PlatformError::SendInput(error.to_string()))?;
+        let result =
+            send_key_edges_spaced_with(&events, HOLD_CHORD_EVENT_GAP, real_send_input_batch);
+        self.record(result, "SendInput toggle")
     }
 
     /// 注入单个 F5 释放沿，清理可能粘在 OS 键态的 F5（2026-09-05 21:08

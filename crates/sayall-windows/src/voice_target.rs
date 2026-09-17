@@ -10,6 +10,9 @@
 //! - **注入形态**：目前两家共用「逐事件 + 间隔」配方（见
 //!   `send_input::HOLD_CHORD_EVENT_GAP`）；保留为每目标字段以便后续按目标
 //!   分化，不预先引入无实证的差异。
+//! - **豆包语音模式**（`DoubaoVoiceMode`）：豆包有两档互斥的语音输入模式，
+//!   按下语义不同（长按 = 按住说话；免提 = 按一次开始、再按任意键结束）。
+//!   详见该类型文档。
 //!
 //! 边界（AGENTS.md）：
 //! - 不读取或修改第三方 App 的私有配置、内部数据库或内存（因此**不**读豆包
@@ -36,6 +39,97 @@ pub enum VoiceTarget {
     Doubao,
     /// 用户自选快捷键，不做输入法会话激活。
     Custom,
+}
+
+/// 豆包输入法的语音输入模式。
+///
+/// 豆包在「设置 → 语音输入 → 语音输入模式」提供两档互斥选项，**按下语义不同**：
+///
+/// | 模式 | 界面文案 | 语义 |
+/// |---|---|---|
+/// | `Hold`（默认） | 长按模式 | 按住说话，松手结束 |
+/// | `HandsFree` | 免提模式 | 按一次即可开始说话，再按任意键可结束 |
+///
+/// **为什么本应用需要知道这个**：它决定注入形态。
+/// - `Hold` 对应「按下 → 保持 → 松开」，与现有 `HOLD` 配方一致。
+/// - `HandsFree` 是**切换式**：送一次按下即开始，需再送一次才结束；
+///   若仍按 `Hold` 的"按住再松开"注入，会被豆包理解成"开始后立刻被任意键结束"，
+///   语音只持续一瞬。因此必须改用 `TOGGLE` 形态（按下并立即松开，再按需二次触发）。
+///
+/// **与 `enableGlobalVoiceShortcut` 的对应**（2026-09-17 三路取证定案）：
+/// 豆包配置里的 `voice.enableGlobalVoiceShortcut` 在设置界面**没有独立开关**
+/// （该键在设置 UI/ViewModel/NativeRuntime 各 DLL 与设置 exe 中，UTF-8 /
+/// UTF-16LE / UTF-16BE 三种编码全部 0 命中，仅 `ImeService.exe` 命中），
+/// 它就是本枚举 `HandsFree` 那一档的配置层内部名，UI 侧控件为
+/// `HandsFreeShortcutBox`。见 `Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md`。
+///
+/// 只有 `VoiceTarget::Doubao` 使用本枚举；其他目标的取值被忽略。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoubaoVoiceMode {
+    /// 长按模式（豆包出厂默认）：按住说话，松手结束。
+    #[default]
+    Hold,
+    /// 免提模式：按一次开始说话，再按任意键结束。
+    HandsFree,
+}
+
+impl DoubaoVoiceMode {
+    /// 该模式对应的注入形态。
+    pub fn injection_shape(self) -> InjectionShape {
+        match self {
+            Self::Hold => InjectionShape::HoldWhileKeyDown,
+            Self::HandsFree => InjectionShape::TogglePerKeyDown,
+        }
+    }
+
+    /// 稳定的机器可读标识（用于日志）。
+    pub fn as_log_str(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::HandsFree => "handsfree",
+        }
+    }
+
+    /// UI 展示名（与豆包设置界面的文案一致，便于用户对照）。
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Hold => "长按模式",
+            Self::HandsFree => "免提模式",
+        }
+    }
+
+    /// 面向用户的模式说明（用于 UI 引导）。
+    pub fn user_hint(self) -> &'static str {
+        match self {
+            Self::Hold => "按住说话，松手结束。豆包出厂默认即此模式。",
+            Self::HandsFree => "按一次开始说话，再按任意键结束。需要在豆包设置里先切换成此模式。",
+        }
+    }
+}
+
+/// 注入形态：描述「遥控器语音键的按下/松开」如何映射为注入事件。
+///
+/// 引入本枚举是因为「按什么键」与「怎么按」是两件事：豆包两档模式用同一个
+/// 快捷键，但注入时序完全不同（见 `DoubaoVoiceMode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionShape {
+    /// 语音键按下 = 和弦按下（保持）；语音键松开 = 和弦松开。
+    /// 用于「按住说话」类目标（WeType、豆包长按模式）。
+    HoldWhileKeyDown,
+    /// 语音键按下 = 送一次「按下+松开」的完整点击（切换开/关）。
+    /// 用于「按一次开始、再按一次结束」类目标（豆包免提模式）。
+    TogglePerKeyDown,
+}
+
+impl InjectionShape {
+    /// 稳定的机器可读标识（用于日志）。
+    pub fn as_log_str(self) -> &'static str {
+        match self {
+            Self::HoldWhileKeyDown => "hold_while_key_down",
+            Self::TogglePerKeyDown => "toggle_per_key_down",
+        }
+    }
 }
 
 impl VoiceTarget {
@@ -97,6 +191,12 @@ pub struct VoiceTargetConfig {
     pub hotkey: Option<KeyChord>,
     /// 语音快捷键整体开关（false = 语音键只出音频，不注入任何和弦）。
     pub enabled: bool,
+    /// 豆包语音输入模式；仅 `target == Doubao` 时生效。
+    ///
+    /// 用 `#[serde(default)]` 保证旧的 `voice-target.json`（无此字段）能正常
+    /// 反序列化到 `Hold`——即豆包出厂默认档，语义与升级前一致，不产生行为回归。
+    #[serde(default)]
+    pub doubao_mode: DoubaoVoiceMode,
 }
 
 impl Default for VoiceTargetConfig {
@@ -105,6 +205,7 @@ impl Default for VoiceTargetConfig {
             target: VoiceTarget::WeType,
             hotkey: None,
             enabled: true,
+            doubao_mode: DoubaoVoiceMode::default(),
         }
     }
 }
@@ -118,6 +219,17 @@ impl VoiceTargetConfig {
         match &self.hotkey {
             Some(chord) => Some(chord.clone()),
             None => self.target.default_hotkey(),
+        }
+    }
+
+    /// 本次注入应采用何种形态。
+    ///
+    /// 只有豆包（且选了免提模式）走切换式；其余目标与微信保持原有
+    /// 「按住说话」语义，**逐字等价**。
+    pub fn injection_shape(&self) -> InjectionShape {
+        match self.target {
+            VoiceTarget::Doubao => self.doubao_mode.injection_shape(),
+            _ => InjectionShape::HoldWhileKeyDown,
         }
     }
 
@@ -173,6 +285,7 @@ mod tests {
                 keys: vec![KeyCode::RightControl, KeyCode::Space],
             }),
             enabled: true,
+            ..Default::default()
         };
         // 用户录入的值优先于出厂默认（豆包设置页可改快捷键）。
         assert_eq!(
@@ -191,6 +304,7 @@ mod tests {
             target: VoiceTarget::Doubao,
             hotkey: VoiceTarget::Doubao.default_hotkey(),
             enabled: true,
+            ..Default::default()
         };
         assert!(config.hotkey.is_some());
         assert_eq!(
@@ -207,6 +321,7 @@ mod tests {
                 keys: vec![KeyCode::RightAlt],
             }),
             enabled: false,
+            ..Default::default()
         };
         assert_eq!(config.resolved_hotkey(), None);
         // 关闭不清空录入值：重新开启即恢复。
@@ -239,13 +354,118 @@ mod tests {
             target: VoiceTarget::Doubao,
             hotkey: None,
             enabled: true,
+            doubao_mode: DoubaoVoiceMode::Hold,
         };
         let encoded = serde_json::to_string(&config).unwrap();
         assert!(encoded.contains("\"target\":\"doubao\""));
         assert!(encoded.contains("\"hotkey\":null"));
+        assert!(encoded.contains("\"doubaoMode\":\"hold\""));
         assert_eq!(
             serde_json::from_str::<VoiceTargetConfig>(&encoded).unwrap(),
             config
+        );
+    }
+
+    // ---- 豆包语音模式（2026-09-17 新增）----
+
+    #[test]
+    fn legacy_config_without_doubao_mode_loads_as_hold() {
+        // 关键向后兼容：升级前的 voice-target.json 没有 doubaoMode 字段，
+        // 必须能反序列化且落到 Hold（豆包出厂默认），不得报错或静默改语义。
+        let legacy = r#"{"target":"doubao","hotkey":null,"enabled":true}"#;
+        let config: VoiceTargetConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(config.doubao_mode, DoubaoVoiceMode::Hold);
+        assert_eq!(config.injection_shape(), InjectionShape::HoldWhileKeyDown);
+    }
+
+    #[test]
+    fn doubao_hold_mode_uses_hold_shape() {
+        let config = VoiceTargetConfig {
+            target: VoiceTarget::Doubao,
+            hotkey: None,
+            enabled: true,
+            doubao_mode: DoubaoVoiceMode::Hold,
+        };
+        assert_eq!(config.injection_shape(), InjectionShape::HoldWhileKeyDown);
+    }
+
+    #[test]
+    fn doubao_handsfree_mode_uses_toggle_shape() {
+        // 免提模式是"按一次开始、再按任意键结束"，若仍按 Hold 的
+        // "按住再松开"注入，语音只会持续一瞬 → 必须是切换式。
+        let config = VoiceTargetConfig {
+            target: VoiceTarget::Doubao,
+            hotkey: None,
+            enabled: true,
+            doubao_mode: DoubaoVoiceMode::HandsFree,
+        };
+        assert_eq!(config.injection_shape(), InjectionShape::TogglePerKeyDown);
+    }
+
+    #[test]
+    fn doubao_mode_does_not_affect_hotkey() {
+        // 两档模式用同一个快捷键：切换模式不得改变注入的和弦。
+        let hold = VoiceTargetConfig {
+            target: VoiceTarget::Doubao,
+            hotkey: None,
+            enabled: true,
+            doubao_mode: DoubaoVoiceMode::Hold,
+        };
+        let handsfree = VoiceTargetConfig {
+            doubao_mode: DoubaoVoiceMode::HandsFree,
+            ..hold.clone()
+        };
+        assert_eq!(hold.resolved_hotkey(), handsfree.resolved_hotkey());
+        assert_eq!(
+            handsfree.resolved_hotkey(),
+            Some(KeyChord {
+                keys: vec![KeyCode::RightAlt],
+            })
+        );
+    }
+
+    #[test]
+    fn non_doubao_targets_always_use_hold_shape() {
+        // 微信路径必须逐字等价：即便配置里残留 doubaoMode=handsfree
+        // （用户先选豆包免提、后切回微信），也不得影响微信的注入形态。
+        let config = VoiceTargetConfig {
+            target: VoiceTarget::WeType,
+            hotkey: None,
+            enabled: true,
+            doubao_mode: DoubaoVoiceMode::HandsFree,
+        };
+        assert_eq!(config.injection_shape(), InjectionShape::HoldWhileKeyDown);
+
+        let custom = VoiceTargetConfig {
+            target: VoiceTarget::Custom,
+            ..config
+        };
+        assert_eq!(custom.injection_shape(), InjectionShape::HoldWhileKeyDown);
+    }
+
+    #[test]
+    fn doubao_mode_display_names_match_client_ui() {
+        // 展示名必须与豆包设置界面的文案一致，用户才能对照着去找。
+        // 界面为「设置 → 语音输入 → 语音输入模式」下的二选一。
+        assert_eq!(DoubaoVoiceMode::Hold.display_name(), "长按模式");
+        assert_eq!(DoubaoVoiceMode::HandsFree.display_name(), "免提模式");
+        // 免提模式的引导文案必须明确指向豆包设置，否则用户找不到入口
+        // （2026-09-17 实际发生过：界面无"全局"字样，按字面找会扑空）。
+        assert!(DoubaoVoiceMode::HandsFree.user_hint().contains("豆包设置"));
+    }
+
+    #[test]
+    fn doubao_mode_log_str_is_stable() {
+        // 日志标识用于结构化诊断，不得随展示名变化。
+        assert_eq!(DoubaoVoiceMode::Hold.as_log_str(), "hold");
+        assert_eq!(DoubaoVoiceMode::HandsFree.as_log_str(), "handsfree");
+        assert_eq!(
+            InjectionShape::HoldWhileKeyDown.as_log_str(),
+            "hold_while_key_down"
+        );
+        assert_eq!(
+            InjectionShape::TogglePerKeyDown.as_log_str(),
+            "toggle_per_key_down"
         );
     }
 }

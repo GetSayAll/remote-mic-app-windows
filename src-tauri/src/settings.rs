@@ -628,6 +628,7 @@ mod tests {
                 target: VoiceTarget::Doubao,
                 hotkey: None,
                 enabled: true,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(saved.target, VoiceTarget::Doubao);
@@ -651,6 +652,7 @@ mod tests {
                 target: VoiceTarget::WeType,
                 hotkey: None,
                 enabled: true,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(
@@ -677,6 +679,7 @@ mod tests {
                 target: VoiceTarget::Doubao,
                 hotkey: Some(recorded.clone()),
                 enabled: true,
+                ..Default::default()
             })
             .unwrap();
 
@@ -766,6 +769,7 @@ mod tests {
                 target: VoiceTarget::Custom,
                 hotkey: None,
                 enabled: true,
+                ..Default::default()
             })
             .unwrap();
         // 自定义目标未录入 = 无和弦可注入（语音键只出音频），不是错误。
@@ -788,6 +792,7 @@ mod tests {
                     keys: vec![sayall_windows::send_input::KeyCode::RightAlt],
                 }),
                 enabled: true,
+                ..Default::default()
             })
             .unwrap();
 
@@ -796,6 +801,7 @@ mod tests {
                 target: VoiceTarget::Doubao,
                 hotkey: Some(KeyChord { keys: vec![] }),
                 enabled: true,
+                ..Default::default()
             })
             .is_err());
         // 失败不得改变现状。

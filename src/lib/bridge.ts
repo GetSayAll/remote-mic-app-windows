@@ -666,15 +666,28 @@ export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyCh
 /** 语音输入目标：与本应用内选择的目标输入法一一对应。 */
 export type VoiceTarget = "we_type" | "doubao" | "custom";
 
+/**
+ * 豆包输入法的语音输入模式，对应豆包「设置 → 语音输入 → 语音输入模式」两档。
+ *
+ * 该取值决定注入形态，因此必须与用户在豆包客户端里的选择保持一致：
+ * - `hold`（长按模式）：按住说话，松手结束。
+ * - `handsfree`（免提模式）：按一次开始说话，再按任意键结束。
+ */
+export type DoubaoVoiceMode = "hold" | "handsfree";
+
 export interface VoiceTargetSnapshot {
   target: VoiceTarget;
   /** 用户显式录入的快捷键；null = 使用 defaultHotkey。 */
   hotkey: KeyChord | null;
   enabled: boolean;
+  /** 用户所选的豆包语音模式；仅 target === "doubao" 时有意义。 */
+  doubaoMode: DoubaoVoiceMode;
   /** 实际注入的和弦；null = 语音键只出音频、不注入。 */
   resolvedHotkey: KeyChord | null;
   defaultHotkey: KeyChord | null;
   supportsSessionActivation: boolean;
+  /** 实际采用的注入形态；用于在界面上解释"为什么松手不再结束语音"。 */
+  injectionShape: "hold_while_key_down" | "toggle_per_key_down";
 }
 
 /** 浏览器预览下的占位（默认微信输入法 + 其默认快捷键）。 */
@@ -682,9 +695,11 @@ const browserVoiceTargetSnapshot: VoiceTargetSnapshot = {
   target: "we_type",
   hotkey: null,
   enabled: true,
+  doubaoMode: "hold",
   resolvedHotkey: { keys: ["left_control", "left_windows"] },
   defaultHotkey: { keys: ["left_control", "left_windows"] },
   supportsSessionActivation: true,
+  injectionShape: "hold_while_key_down",
 };
 
 export async function getVoiceTargetConfig(): Promise<VoiceTargetSnapshot> {
@@ -698,6 +713,7 @@ export async function setVoiceTargetConfig(
   target: VoiceTarget,
   hotkey: KeyChord | null,
   enabled: boolean,
+  doubaoMode?: DoubaoVoiceMode,
 ): Promise<VoiceTargetSnapshot> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法保存输入法设置");
@@ -706,6 +722,7 @@ export async function setVoiceTargetConfig(
     target,
     hotkey,
     enabled,
+    doubaoMode,
   });
 }
 
@@ -838,6 +855,22 @@ export function voiceTargetLabel(target: VoiceTarget): string {
     doubao: "豆包输入法",
     custom: "自定义快捷键",
   }[target];
+}
+
+/** 豆包语音模式展示名（与豆包客户端设置页文案保持一致，便于用户对照）。 */
+export function doubaoVoiceModeLabel(mode: DoubaoVoiceMode): string {
+  return {
+    hold: "长按模式",
+    handsfree: "免提模式",
+  }[mode];
+}
+
+/** 豆包语音模式的用户说明。 */
+export function doubaoVoiceModeHint(mode: DoubaoVoiceMode): string {
+  return {
+    hold: "按住说话，松手结束。豆包出厂默认即此模式。",
+    handsfree: "按一次开始说话，再按任意键结束。需要先在豆包设置里切换成此模式。",
+  }[mode];
 }
 
 export function connectionPhaseLabel(phase: ConnectionPhase): string {

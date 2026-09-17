@@ -14,6 +14,8 @@ import {
   connectRemote,
   connectionPhaseLabel,
   disconnectRemote,
+  doubaoVoiceModeHint,
+  doubaoVoiceModeLabel,
   getAudioSnapshot,
   getConnectionSnapshot,
   getVoiceTargetConfig,
@@ -23,6 +25,7 @@ import {
   scanPairedRemotes,
   selectAudioEndpoint,
   setVoiceTargetConfig,
+  type DoubaoVoiceMode,
   type VoiceTarget,
   type VoiceTargetSnapshot,
   voiceHoldHotkeyLabel,
@@ -96,6 +99,34 @@ const voiceTargets: Array<{ value: VoiceTarget; label: string; hint: string }> =
   },
 ];
 
+/**
+ * 豆包语音输入模式选项。**必须与用户在豆包客户端「设置 → 语音输入 →
+ * 语音输入模式」里选中的那一档一致**——它决定注入形态（见后端
+ * `InjectionShape`），选错会导致语音只持续一瞬。
+ */
+const doubaoModes: Array<{ value: DoubaoVoiceMode; label: string; hint: string }> = [
+  { value: "hold", label: "长按模式", hint: doubaoVoiceModeHint("hold") },
+  { value: "handsfree", label: "免提模式", hint: doubaoVoiceModeHint("handsfree") },
+];
+
+/** 当前展示的豆包模式（非豆包目标时为 null，界面不显示该区块）。 */
+const doubaoModeSelection = computed(() =>
+  voiceTarget.value?.target === "doubao" ? voiceTarget.value.doubaoMode : null,
+);
+
+function doubaoModeIsActive(mode: DoubaoVoiceMode): boolean {
+  return doubaoModeSelection.value === mode;
+}
+
+/** 切换豆包语音模式：其余字段保持不动。 */
+async function applyDoubaoMode(mode: DoubaoVoiceMode) {
+  const current = voiceTarget.value;
+  if (!current || current.target !== "doubao") return;
+  if (savingVoiceTarget.value || doubaoModeIsActive(mode)) return;
+  await saveVoiceTarget(current.target, current.hotkey, current.enabled, mode);
+  voiceHotkeyMessage.value = `豆包语音模式已设为${doubaoVoiceModeLabel(mode)}`;
+}
+
 /** 展示用：实际会注入什么（关闭 / 自定义未录入时为「关闭」）。 */
 const voiceHotkeyLabel = computed(() =>
   voiceHoldHotkeyLabel(voiceTarget.value?.resolvedHotkey ?? null),
@@ -121,10 +152,21 @@ const voiceTargetHint = computed(() => {
   return base;
 });
 
+/** 免提模式下松手不再结束语音，界面必须讲清楚，否则用户会以为坏了。 */
+const doubaoModeEffectHint = computed(() => {
+  if (doubaoModeSelection.value !== "handsfree") return "";
+  return "免提模式下，按一下遥控器语音键开始说话，再按一下结束；松手不会结束语音。";
+});
+
 /** 清除显式录入值，回到该目标的默认快捷键。 */
 async function useTargetDefaultHotkey() {
   if (!voiceTarget.value) return;
-  await saveVoiceTarget(voiceTarget.value.target, null, true);
+  await saveVoiceTarget(
+    voiceTarget.value.target,
+    null,
+    true,
+    voiceTarget.value.doubaoMode,
+  );
   voiceHotkeyMessage.value = `已恢复 ${voiceTargetLabel(
     voiceTarget.value.target,
   )} 的默认快捷键：${voiceHoldHotkeyLabel(voiceTarget.value.resolvedHotkey)}`;
@@ -137,7 +179,9 @@ function targetIsActive(target: VoiceTarget): boolean {
 /** 切换输入法：保留已录入的快捷键，但目标默认值随目标改变。 */
 async function applyVoiceTarget(target: VoiceTarget) {
   if (savingVoiceTarget.value || targetIsActive(target)) return;
-  await saveVoiceTarget(target, null, true);
+  // 带上当前的豆包模式：后端 `doubao_mode` 缺省会落回 `hold`，
+  // 不透传就会在每次切换输入法时静默重置用户已选好的免提模式。
+  await saveVoiceTarget(target, null, true, voiceTarget.value?.doubaoMode);
   voiceHotkeyMessage.value = `${voiceTargetLabel(target)}已选中，按住说话快捷键为 ${voiceHoldHotkeyLabel(
     voiceTarget.value?.resolvedHotkey ?? null,
   )}`;
@@ -146,23 +190,34 @@ async function applyVoiceTarget(target: VoiceTarget) {
 /** 用户在本应用内录入与目标输入法一致的快捷键（不读第三方私有配置）。 */
 async function applyRecordedHotkey(keys: string[]) {
   if (!voiceTarget.value) return;
-  await saveVoiceTarget(voiceTarget.value.target, keys.length ? { keys } : null, true);
+  await saveVoiceTarget(
+    voiceTarget.value.target,
+    keys.length ? { keys } : null,
+    true,
+    voiceTarget.value.doubaoMode,
+  );
 }
 
 async function setVoiceInjectionEnabled(enabled: boolean) {
   if (!voiceTarget.value) return;
-  await saveVoiceTarget(voiceTarget.value.target, voiceTarget.value.hotkey, enabled);
+  await saveVoiceTarget(
+    voiceTarget.value.target,
+    voiceTarget.value.hotkey,
+    enabled,
+    voiceTarget.value.doubaoMode,
+  );
 }
 
 async function saveVoiceTarget(
   target: VoiceTarget,
   hotkey: KeyChord | null,
   enabled: boolean,
+  doubaoMode?: DoubaoVoiceMode,
 ) {
   savingVoiceTarget.value = true;
   voiceHotkeyMessage.value = "";
   try {
-    voiceTarget.value = await setVoiceTargetConfig(target, hotkey, enabled);
+    voiceTarget.value = await setVoiceTargetConfig(target, hotkey, enabled, doubaoMode);
   } catch (error) {
     voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
     await refreshVoiceTarget();
@@ -511,6 +566,28 @@ onUnmounted(() => {
           </button>
         </div>
         <p class="muted scan-summary">{{ voiceTargetHint }}</p>
+        <div v-if="doubaoModeSelection" class="doubao-mode-block">
+          <p class="muted voice-hotkey-row">
+            豆包输入法的「语音输入模式」有两档。请选择你在
+            <strong>豆包设置 → 语音输入 → 语音输入模式</strong>里实际选中的那一档——两档的按键方式不同，选错会让语音只说一下就停。
+          </p>
+          <div class="button-row voice-hotkey-presets">
+            <button
+              v-for="option in doubaoModes"
+              :key="option.value"
+              :class="doubaoModeIsActive(option.value) ? 'primary-button' : 'secondary-button'"
+              type="button"
+              :disabled="savingVoiceTarget || !runtime?.platform.windowsApiAvailable || doubaoModeIsActive(option.value)"
+              @click="applyDoubaoMode(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <p class="muted scan-summary">
+            {{ doubaoModes.find((item) => item.value === doubaoModeSelection)?.hint }}
+          </p>
+          <p v-if="doubaoModeEffectHint" class="muted scan-summary">{{ doubaoModeEffectHint }}</p>
+        </div>
         <div class="setting-list compact two-col">
           <div class="setting-row">
             <strong>快捷键</strong>

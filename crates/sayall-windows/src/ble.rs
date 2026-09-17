@@ -1360,10 +1360,27 @@ fn handle_control(
                         lock(state).last_error = Some(error);
                     }
                 }
-                if let Err(error) = send_input.press(&chord) {
+                // 注入形态由目标的语音模式决定（见 `voice_target::InjectionShape`）：
+                // - `HoldWhileKeyDown`（微信、豆包长按模式）：送按下沿并保持，
+                //   松手时由 `release_voice_hold_hotkey` 送抬起沿。
+                // - `TogglePerKeyDown`（豆包免提模式）：送一次完整点击即可开始
+                //   说话，**不记入 held_hotkey**——免提语义下没有"松手"这一半，
+                //   若仍记录，松手时的反向抬起沿会被豆包当成"再按任意键结束"，
+                //   语音只持续一瞬。
+                let shape = target_config.injection_shape();
+                let injection = match shape {
+                    crate::voice_target::InjectionShape::HoldWhileKeyDown => {
+                        send_input.press(&chord)
+                    }
+                    crate::voice_target::InjectionShape::TogglePerKeyDown => {
+                        send_input.tap_spaced(&chord)
+                    }
+                };
+                if let Err(error) = injection {
                     gatt_note(format!(
-                        "chord_press result=err session={session_id} target={} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true",
+                        "chord_press result=err session={session_id} target={} shape={} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true",
                         target_config.target.as_log_str(),
+                        shape.as_log_str(),
                     ));
                     abort_voice_session(
                         session,
@@ -1378,13 +1395,18 @@ fn handle_control(
                     );
                     return;
                 }
-                // 功能点日志：成功按下（含会话号与目标，与 C 04 行对齐即可归因）。
+                // 功能点日志：成功按下（含会话号、目标与注入形态，与 C 04 行对齐
+                // 即可归因）。
                 gatt_note(format!(
-                    "chord_press result=ok session={session_id} target={} gap_ms={}",
+                    "chord_press result=ok session={session_id} target={} shape={} gap_ms={}",
                     target_config.target.as_log_str(),
+                    shape.as_log_str(),
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
-                *held_hotkey = Some(chord);
+                // 仅「按住」形态持有和弦供松手释放；切换形态本就不需要释放。
+                if shape == crate::voice_target::InjectionShape::HoldWhileKeyDown {
+                    *held_hotkey = Some(chord);
+                }
                 // 微信输入法热键休眠检测与自动恢复（见 spawn_wetype_check）。
                 // 该阶梯的判据是 WeType 的 ConsentStore 开麦记录与
                 // `cycle_wetype_profile`（切到其他输入法再切回 WeType），
@@ -1574,6 +1596,11 @@ fn abort_voice_session(
 /// 并立即清除持有状态，保证断连、睡眠、中止和退出路径不会留下粘住的按键。
 /// 释放失败会记录在 SendInput 快照的 last_error 中，由诊断摘要呈现。
 /// 同时解除语音键 F5 抑制器的会话武装（覆盖停止/中止/断连/退出全部路径）。
+///
+/// 切换式形态（豆包免提模式）**不会**留下持有中的和弦——它在按下时就送完了
+/// 整个点击周期，因此这里无事可做。这不是异常，故不产出 `chord_release` 行，
+/// 避免日志里出现"按下有成对、释放无成对"的假信号；形态可由同会话的
+/// `chord_press ... shape=toggle_per_key_down` 行判定。
 fn release_voice_hold_hotkey(send_input: &SendInputRuntime, held_hotkey: &mut Option<KeyChord>) {
     crate::key_suppressor::set_session_active(false);
     if let Some(chord) = held_hotkey.take() {

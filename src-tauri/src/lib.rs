@@ -3,7 +3,7 @@ use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
 use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
 };
-use sayall_windows::voice_target::{VoiceTarget, VoiceTargetConfig};
+use sayall_windows::voice_target::{DoubaoVoiceMode, VoiceTarget, VoiceTargetConfig};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
@@ -58,6 +58,11 @@ struct VoiceTargetSnapshot {
     default_hotkey: Option<KeyChord>,
     /// 该目标是否走 TSF 会话级输入法激活。
     supports_session_activation: bool,
+    /// 豆包语音输入模式（仅 `target == doubao` 有意义）。
+    doubao_mode: DoubaoVoiceMode,
+    /// 实际采用的注入形态（`hold_while_key_down` / `toggle_per_key_down`）。
+    /// 前端据此把「按住说话」的说明文案改成「按一次开始/再按一次结束」。
+    injection_shape: String,
 }
 
 impl std::fmt::Debug for AppState {
@@ -606,20 +611,28 @@ async fn set_voice_hold_hotkey(
 fn get_voice_target_config(state: tauri::State<'_, AppState>) -> VoiceTargetSnapshot {
     let config = state.platform.voice_target_config();
     let resolved = config.resolved_hotkey();
+    // 先取出所有派生值：下面构造 snapshot 时会移走 `config.hotkey`，
+    // 之后再借用 `config` 会编译失败。
+    let target = config.target;
+    let enabled = config.enabled;
+    let explicit_hotkey = config.hotkey.is_some();
+    let doubao_mode = config.doubao_mode;
+    let injection_shape = config.injection_shape().as_log_str().to_string();
     sayall_windows::gatt_note(format!(
-        "shortcut_settings feature=voice_target action=load phase=completed terminal_result=passed target={} enabled={} explicit_hotkey={} resolved_key_count={}",
-        config.target.as_log_str(),
-        config.enabled,
-        config.hotkey.is_some(),
+        "shortcut_settings feature=voice_target action=load phase=completed terminal_result=passed target={} enabled={enabled} explicit_hotkey={explicit_hotkey} doubao_mode={} injection_shape={injection_shape} resolved_key_count={}",
+        target.as_log_str(),
+        doubao_mode.as_log_str(),
         resolved.as_ref().map(|chord| chord.keys.len()).unwrap_or(0),
     ));
     VoiceTargetSnapshot {
-        target: config.target,
+        target,
         hotkey: config.hotkey,
-        enabled: config.enabled,
+        enabled,
         resolved_hotkey: resolved,
-        default_hotkey: config.target.default_hotkey(),
-        supports_session_activation: config.target.supports_session_activation(),
+        default_hotkey: target.default_hotkey(),
+        supports_session_activation: target.supports_session_activation(),
+        doubao_mode,
+        injection_shape,
     }
 }
 
@@ -629,18 +642,25 @@ fn get_voice_target_config(state: tauri::State<'_, AppState>) -> VoiceTargetSnap
 /// - 字段缺省 / `null` → 清除显式值，改用 `target` 的默认快捷键；
 /// - `Some(chord)` → 记录用户录入的快捷键；
 /// - 关闭注入请用 `enabled: false`（不清除已录入值）。
+///
+/// `doubao_mode` 语义：仅当 `target == Doubao` 时有意义，决定注入形态
+/// （`hold` = 按住说话；`handsfree` = 按一次开始/再按一次结束）。
+/// 缺省时落到 `hold`，即豆包出厂默认档。
 #[tauri::command]
 async fn set_voice_target_config(
     target: VoiceTarget,
     hotkey: Option<KeyChord>,
     enabled: bool,
+    doubao_mode: Option<DoubaoVoiceMode>,
     state: tauri::State<'_, AppState>,
 ) -> Result<VoiceTargetSnapshot, String> {
+    let doubao_mode = doubao_mode.unwrap_or_default();
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(format!(
-        "shortcut_settings feature=voice_target action=save phase=requested target={} enabled={enabled} explicit_hotkey={}",
+        "shortcut_settings feature=voice_target action=save phase=requested target={} enabled={enabled} explicit_hotkey={} doubao_mode={}",
         target.as_log_str(),
         hotkey.is_some(),
+        doubao_mode.as_log_str(),
     ));
     let platform = Arc::clone(&state.platform);
     let settings = state.settings.clone();
@@ -649,12 +669,15 @@ async fn set_voice_target_config(
             target,
             hotkey,
             enabled,
+            doubao_mode,
         })?;
         platform.set_voice_target_config(saved.clone());
         Ok(VoiceTargetSnapshot {
             target: saved.target,
             hotkey: saved.hotkey.clone(),
             enabled: saved.enabled,
+            doubao_mode: saved.doubao_mode,
+            injection_shape: saved.injection_shape().as_log_str().to_string(),
             resolved_hotkey: saved.resolved_hotkey(),
             default_hotkey: saved.target.default_hotkey(),
             supports_session_activation: saved.target.supports_session_activation(),
