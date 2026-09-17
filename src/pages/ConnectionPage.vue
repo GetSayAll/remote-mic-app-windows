@@ -16,14 +16,17 @@ import {
   disconnectRemote,
   getAudioSnapshot,
   getConnectionSnapshot,
-  getVoiceHoldHotkey,
+  getVoiceTargetConfig,
   listAudioEndpoints,
   openVbCableDownloadPage,
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
-  setVoiceHoldHotkey,
+  setVoiceTargetConfig,
+  type VoiceTarget,
+  type VoiceTargetSnapshot,
   voiceHoldHotkeyLabel,
+  voiceTargetLabel,
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -66,48 +69,130 @@ const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
 const audioMessage = ref("尚未读取语音设备");
-const voiceHotkey = ref<KeyChord | null>(null);
-const savingVoiceHotkey = ref(false);
-const voiceHotkeyMessage = ref("尚未读取快捷键设置");
+const voiceTarget = ref<VoiceTargetSnapshot | null>(null);
+const savingVoiceTarget = ref(false);
+const voiceHotkeyMessage = ref("尚未读取输入法设置");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
-const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
-  { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
-  { label: "关闭", keys: [] },
+/**
+ * 可选目标输入法。快捷键不在前端硬编码：一律用后端下发的
+ * `defaultHotkey` 展示，避免两处默认值漂移。
+ */
+const voiceTargets: Array<{ value: VoiceTarget; label: string; hint: string }> = [
+  {
+    value: "we_type",
+    label: "微信输入法",
+    hint: "微信输入法语音默认热键为左 Ctrl + 左 Win。",
+  },
+  {
+    value: "doubao",
+    label: "豆包输入法",
+    hint: "豆包输入法出厂默认为长按右 Alt；若你在豆包设置里改过快捷键，请在此录入同一个组合。",
+  },
+  {
+    value: "custom",
+    label: "自定义快捷键",
+    hint: "仅注入快捷键、不切换输入法，适用于会议软件等其他工具。",
+  },
 ];
 
-const activeVoiceHotkeyKeys = computed(() =>
-  voiceHotkey.value ? [...voiceHotkey.value.keys].sort().join("+") : "",
+/** 展示用：实际会注入什么（关闭 / 自定义未录入时为「关闭」）。 */
+const voiceHotkeyLabel = computed(() =>
+  voiceHoldHotkeyLabel(voiceTarget.value?.resolvedHotkey ?? null),
 );
 
-function presetIsActive(keys: string[]): boolean {
-  return [...keys].sort().join("+") === activeVoiceHotkeyKeys.value;
+/** 当前目标是否"启用了注入、但没有任何可用快捷键"。 */
+const voiceTargetNeedsHotkey = computed(
+  () =>
+    Boolean(voiceTarget.value) &&
+    voiceTarget.value!.enabled &&
+    !voiceTarget.value!.resolvedHotkey,
+);
+
+/** 当前目标的说明文案（含"如何与输入法设置对齐"的提示）。 */
+const voiceTargetHint = computed(() => {
+  const current = voiceTarget.value;
+  if (!current) return "正在读取输入法设置";
+  const option = voiceTargets.find((item) => item.value === current.target);
+  const base = option?.hint ?? "";
+  if (current.target === "doubao") {
+    return `${base}当前会注入：${voiceHoldHotkeyLabel(current.resolvedHotkey)}。`;
+  }
+  return base;
+});
+
+/** 清除显式录入值，回到该目标的默认快捷键。 */
+async function useTargetDefaultHotkey() {
+  if (!voiceTarget.value) return;
+  await saveVoiceTarget(voiceTarget.value.target, null, true);
+  voiceHotkeyMessage.value = `已恢复 ${voiceTargetLabel(
+    voiceTarget.value.target,
+  )} 的默认快捷键：${voiceHoldHotkeyLabel(voiceTarget.value.resolvedHotkey)}`;
 }
 
-async function applyVoiceHotkey(keys: string[]) {
-  savingVoiceHotkey.value = true;
+function targetIsActive(target: VoiceTarget): boolean {
+  return voiceTarget.value?.target === target;
+}
+
+/** 切换输入法：保留已录入的快捷键，但目标默认值随目标改变。 */
+async function applyVoiceTarget(target: VoiceTarget) {
+  if (savingVoiceTarget.value || targetIsActive(target)) return;
+  await saveVoiceTarget(target, null, true);
+  voiceHotkeyMessage.value = `${voiceTargetLabel(target)}已选中，按住说话快捷键为 ${voiceHoldHotkeyLabel(
+    voiceTarget.value?.resolvedHotkey ?? null,
+  )}`;
+}
+
+/** 用户在本应用内录入与目标输入法一致的快捷键（不读第三方私有配置）。 */
+async function applyRecordedHotkey(keys: string[]) {
+  if (!voiceTarget.value) return;
+  await saveVoiceTarget(voiceTarget.value.target, keys.length ? { keys } : null, true);
+}
+
+async function setVoiceInjectionEnabled(enabled: boolean) {
+  if (!voiceTarget.value) return;
+  await saveVoiceTarget(voiceTarget.value.target, voiceTarget.value.hotkey, enabled);
+}
+
+async function saveVoiceTarget(
+  target: VoiceTarget,
+  hotkey: KeyChord | null,
+  enabled: boolean,
+) {
+  savingVoiceTarget.value = true;
   voiceHotkeyMessage.value = "";
   try {
-    voiceHotkey.value = await setVoiceHoldHotkey(
-      keys.length ? { keys: [...keys] } : null,
-    );
-    voiceHotkeyMessage.value = voiceHotkey.value
-      ? `按住说话快捷键已设为 ${voiceHoldHotkeyLabel(voiceHotkey.value)}`
-      : "按住说话快捷键已关闭，语音键仅输出语音";
+    voiceTarget.value = await setVoiceTargetConfig(target, hotkey, enabled);
   } catch (error) {
     voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
-    await refreshVoiceHotkey();
+    await refreshVoiceTarget();
   } finally {
-    savingVoiceHotkey.value = false;
+    savingVoiceTarget.value = false;
   }
 }
 
-async function refreshVoiceHotkey() {
+async function refreshVoiceTarget() {
   try {
-    voiceHotkey.value = await getVoiceHoldHotkey();
+    voiceTarget.value = await getVoiceTargetConfig();
   } catch (error) {
     voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
   }
+}
+
+/** 从快捷键捕获控件（若可用）录入键位；无捕获能力时提供文本降级。 */
+async function captureRecordedHotkey(event: KeyboardEvent) {
+  const keys: string[] = [];
+  const map: Record<string, string> = {
+    Alt: "right_alt",
+    Control: "left_control",
+    Shift: "left_shift",
+    Meta: "left_windows",
+  };
+  const mapped = map[event.key];
+  if (mapped) keys.push(mapped);
+  if (!keys.length) return;
+  event.preventDefault();
+  await applyRecordedHotkey(keys);
 }
 
 watch(
@@ -313,7 +398,7 @@ async function initializeAudio() {
 onMounted(() => {
   void refreshConnection();
   void initializeAudio();
-  void refreshVoiceHotkey();
+  void refreshVoiceTarget();
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -404,31 +489,76 @@ onUnmounted(() => {
             <span>{{ connection.powerNotificationsAvailable ? "已启用" : "暂不可用" }}</span>
           </div>
           <div class="setting-row">
+            <strong>目标输入法</strong>
+            <span>{{ voiceTarget ? voiceTargetLabel(voiceTarget.target) : "正在读取" }}</span>
+          </div>
+          <div class="setting-row">
             <strong>按住说话快捷键</strong>
-            <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
+            <span>{{ voiceHotkeyLabel }}</span>
           </div>
         </div>
-        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：左 Ctrl + 左 Win。</p>
+        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由所选输入法转成文字。</p>
         <div class="button-row voice-hotkey-presets">
           <button
-            v-for="preset in voiceHotkeyPresets"
-            :key="preset.label"
-            :class="presetIsActive(preset.keys) ? 'primary-button' : 'secondary-button'"
+            v-for="option in voiceTargets"
+            :key="option.value"
+            :class="targetIsActive(option.value) ? 'primary-button' : 'secondary-button'"
             type="button"
-            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys)"
-            @click="applyVoiceHotkey(preset.keys)"
+            :disabled="savingVoiceTarget || !runtime?.platform.windowsApiAvailable || targetIsActive(option.value)"
+            @click="applyVoiceTarget(option.value)"
           >
-            {{ preset.label }}
+            {{ option.label }}
           </button>
         </div>
+        <p class="muted scan-summary">{{ voiceTargetHint }}</p>
+        <div class="setting-list compact two-col">
+          <div class="setting-row">
+            <strong>快捷键</strong>
+            <span>
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="savingVoiceTarget || !runtime?.platform.windowsApiAvailable"
+                @click="useTargetDefaultHotkey()"
+              >
+                使用该输入法默认值（{{ voiceHoldHotkeyLabel(voiceTarget?.defaultHotkey ?? null) }}）
+              </button>
+            </span>
+          </div>
+          <div class="setting-row">
+            <strong>语音注入</strong>
+            <span>
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="savingVoiceTarget || !runtime?.platform.windowsApiAvailable"
+                @click="setVoiceInjectionEnabled(!(voiceTarget?.enabled ?? true))"
+              >
+                {{ voiceTarget?.enabled ? "已开启（点击关闭）" : "已关闭（点击开启）" }}
+              </button>
+            </span>
+          </div>
+        </div>
+        <label class="muted voice-hotkey-capture">
+          录入与输入法一致的快捷键（按下组合键即可）：
+          <input
+            type="text"
+            readonly
+            placeholder="点击此处后按下快捷键"
+            @keydown="captureRecordedHotkey"
+          />
+        </label>
+        <p v-if="voiceTargetNeedsHotkey" class="muted scan-summary">
+          当前输入法尚未设置快捷键，语音键只会输出语音、不会触发输入法。请录入该输入法的语音快捷键。
+        </p>
         <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
         <details class="usage-hint-details">
-          <summary>微信输入法使用步骤（点开查看）</summary>
+          <summary>目标输入法使用步骤（点开查看）</summary>
           <ol>
             <li>语音设备选择 CABLE Input；</li>
-            <li>在微信输入法的语音设置里，把麦克风设为 CABLE Output；若没有这个选项，把系统默认录音设备设为 CABLE Output；</li>
-            <li>在目标应用的文本框内切换到微信输入法（看任务栏输入指示器确认）；</li>
-            <li>按住遥控器语音键约半秒以上再说话，松开后等待文字出现（需要联网）。快速点按不出文字是微信输入法自己的最短按住要求，不是故障。遥控器语音键自带的 F5 按键会被应用自动屏蔽，物理键盘的 F5 不受影响。</li>
+            <li>在目标输入法的语音设置里，把麦克风设为 CABLE Output；若没有这个选项，把系统默认录音设备设为 CABLE Output；</li>
+            <li>在目标应用的文本框内切换到该输入法（看任务栏输入指示器确认）；</li>
+            <li>按住遥控器语音键约半秒以上再说话，松开后等待文字出现（需要联网）。快速点按不出文字通常是输入法自己的最短按住要求，不是故障。遥控器语音键自带的 F5 按键会被应用自动屏蔽，物理键盘的 F5 不受影响。</li>
           </ol>
         </details>
       </article>

@@ -3,6 +3,7 @@ use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
 use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
 };
+use sayall_windows::voice_target::{VoiceTarget, VoiceTargetConfig};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
@@ -40,6 +41,23 @@ struct AppState {
     /// check_app_update 暂存的待安装更新（install_app_update 取走）。
     /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
     pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
+}
+
+/// 语音输入目标的前端视图：含目标自身默认值与「实际会注入什么」的解析结果，
+/// 前端无需重复实现解析规则（避免两处逻辑漂移）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTargetSnapshot {
+    target: VoiceTarget,
+    /// 用户显式录入的快捷键；`null` = 使用 `default_hotkey`。
+    hotkey: Option<KeyChord>,
+    enabled: bool,
+    /// 实际注入的和弦；`null` = 语音键只出音频、不注入。
+    resolved_hotkey: Option<KeyChord>,
+    /// 该目标的出厂/默认快捷键（供前端展示与"恢复默认"用）。
+    default_hotkey: Option<KeyChord>,
+    /// 该目标是否走 TSF 会话级输入法激活。
+    supports_session_activation: bool,
 }
 
 impl std::fmt::Debug for AppState {
@@ -578,6 +596,91 @@ async fn set_voice_hold_hotkey(
         Err(_) => format!(
             "shortcut_settings feature=voice_hold action=save phase=completed terminal_result=failed enabled={enabled} key_count={key_count} error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+/// 读取语音输入目标配置（微信 / 豆包 / 自定义）及其解析出的实际和弦。
+#[tauri::command]
+fn get_voice_target_config(state: tauri::State<'_, AppState>) -> VoiceTargetSnapshot {
+    let config = state.platform.voice_target_config();
+    let resolved = config.resolved_hotkey();
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_target action=load phase=completed terminal_result=passed target={} enabled={} explicit_hotkey={} resolved_key_count={}",
+        config.target.as_log_str(),
+        config.enabled,
+        config.hotkey.is_some(),
+        resolved.as_ref().map(|chord| chord.keys.len()).unwrap_or(0),
+    ));
+    VoiceTargetSnapshot {
+        target: config.target,
+        hotkey: config.hotkey,
+        enabled: config.enabled,
+        resolved_hotkey: resolved,
+        default_hotkey: config.target.default_hotkey(),
+        supports_session_activation: config.target.supports_session_activation(),
+    }
+}
+
+/// 保存语音输入目标配置。
+///
+/// `hotkey` 语义（与前端契约一致）：
+/// - 字段缺省 / `null` → 清除显式值，改用 `target` 的默认快捷键；
+/// - `Some(chord)` → 记录用户录入的快捷键；
+/// - 关闭注入请用 `enabled: false`（不清除已录入值）。
+#[tauri::command]
+async fn set_voice_target_config(
+    target: VoiceTarget,
+    hotkey: Option<KeyChord>,
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<VoiceTargetSnapshot, String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_target action=save phase=requested target={} enabled={enabled} explicit_hotkey={}",
+        target.as_log_str(),
+        hotkey.is_some(),
+    ));
+    let platform = Arc::clone(&state.platform);
+    let settings = state.settings.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        let saved = settings.save_voice_target_config(VoiceTargetConfig {
+            target,
+            hotkey,
+            enabled,
+        })?;
+        platform.set_voice_target_config(saved.clone());
+        Ok(VoiceTargetSnapshot {
+            target: saved.target,
+            hotkey: saved.hotkey.clone(),
+            enabled: saved.enabled,
+            resolved_hotkey: saved.resolved_hotkey(),
+            default_hotkey: saved.target.default_hotkey(),
+            supports_session_activation: saved.target.supports_session_activation(),
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存语音输入目标设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(snapshot) => format!(
+            "shortcut_settings feature=voice_target action=save phase=completed terminal_result=passed target={} enabled={} resolved_key_count={} elapsed_ms={}",
+            snapshot.target.as_log_str(),
+            snapshot.enabled,
+            snapshot
+                .resolved_hotkey
+                .as_ref()
+                .map(|chord| chord.keys.len())
+                .unwrap_or(0),
+            started.elapsed().as_millis(),
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=voice_target action=save phase=completed terminal_result=failed target={} enabled={enabled} error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
+            target.as_log_str(),
+            started.elapsed().as_millis(),
         ),
     });
     result
@@ -1289,6 +1392,30 @@ pub fn run() {
                 }
             }
 
+            // 语音输入目标（微信 / 豆包 / 自定义）优先：它承载目标与快捷键的
+            // 单一事实源，v1 裸和弦文件在其基础上自动迁移。
+            match settings.load_voice_target_config() {
+                Ok(config) => {
+                    let resolved = config.resolved_hotkey();
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=voice_target action=load phase=completed terminal_result=passed target={} enabled={} explicit_hotkey={} resolved_key_count={}",
+                        config.target.as_log_str(),
+                        config.enabled,
+                        config.hotkey.is_some(),
+                        resolved.as_ref().map(|chord| chord.keys.len()).unwrap_or(0),
+                    ));
+                    platform.set_voice_target_config(config);
+                }
+                Err(error) => {
+                    // 读取失败时回落到 v1 路径（微信 + 其默认/已存和弦），
+                    // 保证不比修复前更差。
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=voice_target action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=legacy_fallback retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                }
+            }
+
             match settings.load_voice_hold_hotkey() {
                 Ok(hotkey) => {
                     sayall_windows::gatt_note(format!(
@@ -1296,7 +1423,13 @@ pub fn run() {
                         hotkey.is_some(),
                         hotkey.as_ref().map(|chord| chord.keys.len()).unwrap_or(0)
                     ));
-                    platform.set_voice_hold_hotkey(hotkey)
+                    // v1 恢复仅在 v2 缺失时生效（避免覆盖刚载入的目标配置）。
+                    if platform.voice_target_config().hotkey.is_none()
+                        && platform.voice_target_config().enabled
+                        && hotkey.is_some()
+                    {
+                        platform.set_voice_hold_hotkey(hotkey)
+                    }
                 }
                 Err(error) => {
                     sayall_windows::gatt_note(
@@ -1398,6 +1531,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_voice_target_config,
+        set_voice_target_config,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -1441,6 +1576,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_voice_target_config,
+        set_voice_target_config,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

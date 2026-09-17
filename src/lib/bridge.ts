@@ -663,6 +663,52 @@ export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyCh
   return invoke<KeyChord | null>("set_voice_hold_hotkey", { hotkey });
 }
 
+/** 语音输入目标：与本应用内选择的目标输入法一一对应。 */
+export type VoiceTarget = "we_type" | "doubao" | "custom";
+
+export interface VoiceTargetSnapshot {
+  target: VoiceTarget;
+  /** 用户显式录入的快捷键；null = 使用 defaultHotkey。 */
+  hotkey: KeyChord | null;
+  enabled: boolean;
+  /** 实际注入的和弦；null = 语音键只出音频、不注入。 */
+  resolvedHotkey: KeyChord | null;
+  defaultHotkey: KeyChord | null;
+  supportsSessionActivation: boolean;
+}
+
+/** 浏览器预览下的占位（默认微信输入法 + 其默认快捷键）。 */
+const browserVoiceTargetSnapshot: VoiceTargetSnapshot = {
+  target: "we_type",
+  hotkey: null,
+  enabled: true,
+  resolvedHotkey: { keys: ["left_control", "left_windows"] },
+  defaultHotkey: { keys: ["left_control", "left_windows"] },
+  supportsSessionActivation: true,
+};
+
+export async function getVoiceTargetConfig(): Promise<VoiceTargetSnapshot> {
+  if (!isTauriRuntime()) {
+    return browserVoiceTargetSnapshot;
+  }
+  return invoke<VoiceTargetSnapshot>("get_voice_target_config");
+}
+
+export async function setVoiceTargetConfig(
+  target: VoiceTarget,
+  hotkey: KeyChord | null,
+  enabled: boolean,
+): Promise<VoiceTargetSnapshot> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法保存输入法设置");
+  }
+  return invoke<VoiceTargetSnapshot>("set_voice_target_config", {
+    target,
+    hotkey,
+    enabled,
+  });
+}
+
 /** 检查应用更新；浏览器预览下返回"无更新"占位（不发起网络请求）。 */
 export async function checkAppUpdate(): Promise<AppUpdateInfo> {
   if (!isTauriRuntime()) {
@@ -783,6 +829,15 @@ function voiceHotkeyKeyLabel(code: string): string {
 export function voiceHoldHotkeyLabel(hotkey: KeyChord | null): string {
   if (!hotkey || hotkey.keys.length === 0) return "关闭";
   return hotkey.keys.map(voiceHotkeyKeyLabel).join(" + ");
+}
+
+/** 目标输入法展示名（与 Rust `VoiceTarget::display_name` 保持一致）。 */
+export function voiceTargetLabel(target: VoiceTarget): string {
+  return {
+    we_type: "微信输入法",
+    doubao: "豆包输入法",
+    custom: "自定义快捷键",
+  }[target];
 }
 
 export function connectionPhaseLabel(phase: ConnectionPhase): string {

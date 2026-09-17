@@ -1,5 +1,6 @@
 use sayall_windows::raw_input::RawInputSnapshot;
 use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
+use sayall_windows::voice_target::VoiceTargetConfig;
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
     PlatformSnapshot, UsageCounters, WindowsPlatform,
@@ -42,6 +43,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn launch_app(&self, target: &str) -> Result<(), PlatformError>;
     fn voice_hold_hotkey(&self) -> Option<KeyChord>;
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
+    /// 语音输入目标配置（微信 / 豆包 / 自定义）：承载目标、快捷键与启用开关。
+    fn voice_target_config(&self) -> VoiceTargetConfig;
+    fn set_voice_target_config(&self, config: VoiceTargetConfig);
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
@@ -167,6 +171,14 @@ impl PlatformRuntime for WindowsPlatform {
         WindowsPlatform::set_voice_hold_hotkey(self, hotkey)
     }
 
+    fn voice_target_config(&self) -> VoiceTargetConfig {
+        WindowsPlatform::voice_target_config(self)
+    }
+
+    fn set_voice_target_config(&self, config: VoiceTargetConfig) {
+        WindowsPlatform::set_voice_target_config(self, config)
+    }
+
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
         WindowsPlatform::button_mappings(self)
     }
@@ -235,7 +247,7 @@ mod simulation {
     pub struct SimulatedPlatform {
         usage: Arc<UsageCounters>,
         state: Mutex<SimulationState>,
-        voice_hold_hotkey: Mutex<Option<KeyChord>>,
+        voice_target: Mutex<VoiceTargetConfig>,
         button_mappings: Mutex<sayall_windows::send_input::ButtonMappings>,
     }
 
@@ -493,12 +505,22 @@ mod simulation {
             Ok(())
         }
 
+        fn voice_target_config(&self) -> VoiceTargetConfig {
+            lock(&self.voice_target).clone()
+        }
+
+        fn set_voice_target_config(&self, config: VoiceTargetConfig) {
+            *lock(&self.voice_target) = config;
+        }
+
         fn voice_hold_hotkey(&self) -> Option<KeyChord> {
-            lock(&self.voice_hold_hotkey).clone()
+            lock(&self.voice_target).resolved_hotkey()
         }
 
         fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>) {
-            *lock(&self.voice_hold_hotkey) = hotkey;
+            let mut config = lock(&self.voice_target);
+            config.hotkey = hotkey;
+            config.enabled = config.hotkey.is_some();
         }
 
         fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
