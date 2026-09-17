@@ -16,7 +16,11 @@
   - **实验设计更正（2026-09-17）**：唯一未测过的合规路线"豆包的全局语音快捷键"**在 v0.9.0.0 界面上的真实名称是「免提模式」**（豆包设置 → 语音输入 → 语音输入模式，与「长按模式」二选一）。
     - 三路取证定案：`voice.enableGlobalVoiceShortcut` 在 `Settings.UI.dll` / `ViewModels.dll` / `NativeRuntime.dll` / `Settings.exe` 中**三种编码全部 0 命中**，仅 `ImeService.exe` 命中 1 次 → **无独立 UI 控件**，就是免提模式那一档的配置层内部键；UI 侧对应控件为 `HandsFreeShortcutBox`，界面文案「按一次即可开始说话，再按任意键可结束」；本机基线 `enableGlobalVoiceShortcut = false`（即当前为「长按模式」）。详见 `Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md`。
     - **该区分对可行性判断有意义**：长按模式与按键生命周期强绑定；免提模式是"按一次开始、再按任意键结束"的**切换式**语义，意味着豆包须持续监听全局按键，**更可能走 `RegisterHotKey` 全局路径**。
-    - 实验协议与探针已就绪：`Testing/investigation/doubao-global-hotkey/`（README 含四阶段步骤与 A/B/C 分支决策；`1-probe-hotkey-ownership.py` 抢占探测、`2-probe-injection-vs-physical.py` 注入 vs 物理键对照）。**状态：deferred**，需真机上勾选「免提模式」并由人工按物理键完成对照。
+  - **代码已落地（2026-09-17，提交 `58dfb9c`，分支 `feature-doubao-ime`）**：免提模式支持——新增 `DoubaoVoiceMode`（`hold` / `handsfree`）与 `InjectionShape`（`HoldWhileKeyDown` / `TogglePerKeyDown`），`ble.rs` 按下侧按形态分流（长按→`press` 并持有和弦；免提→`tap_spaced` 送一次完整点击且不记入持有态），日志新增 `shape=` 字段，前端连接页新增「语音输入模式」二选一，`voice-target.json` 新增 `doubao_mode`（`#[serde(default)]` 向后兼容）。**顺带修复一处静默缺陷**：切换输入法/开关注入时未透传 `doubaoMode` 会把已选的免提模式静默重置为长按（已用"去掉透传即回归测试变红"验证）。全量验证 passed：`sayall-windows` 143 + `src-tauri` 36 + vitest 95 用例全绿、`vue-tsc` 与 `rustfmt` 通过。
+  - **实验进度（2026-09-17）**：协议与探针见 `Testing/investigation/doubao-global-hotkey/README.md`。
+    - 阶段 0「注入可达性」**passed**：新增 `3-probe-injection-reachability.py`，自装 LL 钩子实测捕获到注入的右 Alt（`injected=True` / `scan=0x38` / `extended=True` / `SYSDOWN`）→ **注入确实进入系统输入流**，若豆包不响应，原因在豆包如何对待带 `INJECTED` 标志的事件，而非"键没送出"。
+    - 阶段 1「免提模式未勾选基线」自动部分 **passed**：`RegisterHotKey` 6 候选全 FREE（`TAKEN=0`）、注入右 Alt 与 `--toggle 2` 全程 `OimeVoiceWaveWindow visible=False`、录音设备 0/2 被占用。
+    - **deferred（需 Echo 配合，共三步）**：① 长按模式下由**真人按住物理右 Alt** 做同条件对照（`--watch 30`；注入对照组会自我污染，不能代替）；② 在豆包设置 → 语音输入 → 语音输入模式 → **选中「免提模式」**；③ 免提模式下三项测量，测完**切回「长按模式」**还原。
 - [ ] 完善聚焦输入框处理：参考 Mac App 对目标输入框的识别、焦点保持、恢复和无可编辑目标时的用户提示；Windows 仅使用公开的焦点与辅助功能 API，避免静默把语音结果送入错误窗口，并覆盖焦点切换、窗口关闭、应用切换、Onboarding/设置窗口前后台切换及语音会话中焦点变化。
 
 ## Windows RC001 / RC003

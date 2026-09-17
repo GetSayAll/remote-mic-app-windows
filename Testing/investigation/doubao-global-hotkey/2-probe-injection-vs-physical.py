@@ -132,37 +132,54 @@ def find_voice_windows() -> list:
 
 
 # ---- 判据 2：麦克风是否被占用 ----
-def mic_in_use() -> list:
-    """用 Windows 公开 API 查询"麦克风正在被使用"的进程。
+WAVE_FORMAT_QUERY = 0x0001
 
-    走 CapabilityAccessManager 注册表的只读枚举属于"读系统状态"，
-    但为守 AGENTS.md 边界，这里只用微软公开的
-    `Windows.Media.Devices` 无法从纯 Python 直接调，因此改用
-    `SetupAPI`/`MMDevice` 之外的稳妥办法：调用 waveIn 打开探测。
-    简化实现：只报告系统是否有进程持有音频会话，不做归属。
+
+def _wave_format() -> ctypes.Array:
+    """构造一个 WAVEFORMATEX 缓冲区（18 字节，纯 PCM 16k/mono/16bit）。
+
+    注意：`create_string_buffer(18)` 会实际分配 19 字节（尾部补 NUL），
+    但长度字段传 18 即可——这里显式用 `ctypes.create_string_buffer(18)` 并
+    按偏移写入，Windows 只读前 18 字节。
     """
-    # 用 winmm 的 waveInGetNumDevs + 尝试独占打开，判断是否被占用
+    fmt = ctypes.create_string_buffer(18)
+    fmt[0:2] = (1).to_bytes(2, "little")          # wFormatTag = WAVE_FORMAT_PCM
+    fmt[2:4] = (1).to_bytes(2, "little")          # nChannels
+    fmt[4:8] = (16000).to_bytes(4, "little")      # nSamplesPerSec
+    fmt[8:12] = (32000).to_bytes(4, "little")     # nAvgBytesPerSec
+    fmt[12:14] = (2).to_bytes(2, "little")        # nBlockAlign
+    fmt[14:16] = (16).to_bytes(2, "little")       # wBitsPerSample
+    fmt[16:18] = (0).to_bytes(2, "little")        # cbSize
+    return fmt
+
+
+def mic_in_use() -> list:
+    """用公开的 winmm API 查询每个录音设备现在能否被打开。
+
+    ⚠️ 必须用 WAVE_FORMAT_QUERY（0x0001）——它只做"这个格式支持吗"的**查询**，
+    不真正占用设备，因此不会干扰被测应用开麦。传 0 则是真打开，
+    本探针自己就会把设备占住，自证污染。
+
+    返回 [(设备号, mmr 返回码)]；mmr == MMSYSERR_NOERROR(0) 表示该设备
+    **当前可用**（未被独占），非 0 常见为 MMSYSERR_ALLOCATED(4)=已被占用。
+    为了不误报，这里只报告每个设备的返回码，由调用方判断。
+    """
     winmm = ctypes.WinDLL("winmm", use_last_error=True)
+    winmm.waveInGetNumDevs.restype = wintypes.UINT
+    winmm.waveInOpen.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.UINT,
+                                 ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_void_p, wintypes.DWORD]
+    winmm.waveInOpen.restype = wintypes.UINT
+
     num = winmm.waveInGetNumDevs()
-    busy = []
+    results = []
     for dev in range(num):
-        caps = ctypes.create_string_buffer(80)
-        if winmm.waveInGetDevCapsA(dev, caps, 80) != 0:
-            continue
         handle = wintypes.HANDLE()
-        # WAVE_FORMAT_QUERY = 1（只查询，不真开）
-        fmt = ctypes.create_string_buffer(18)
-        fmt[0:2] = (1).to_bytes(2, "little")          # WAVE_FORMAT_PCM
-        fmt[2:4] = (1).to_bytes(2, "little")          # channels
-        fmt[4:8] = (16000).to_bytes(4, "little")      # samples/sec
-        fmt[8:12] = (32000).to_bytes(4, "little")     # avg bytes/sec
-        fmt[12:14] = (2).to_bytes(2, "little")        # block align
-        fmt[14:16] = (16).to_bytes(2, "little")       # bits
-        rc = winmm.waveInOpen(ctypes.byref(handle), dev, fmt, 0, 0, 0x0001)
-        busy.append((dev, rc, rc == 0))
-        if rc == 0:
-            winmm.waveInClose(handle)
-    return busy
+        fmt = _wave_format()
+        rc = winmm.waveInOpen(ctypes.byref(handle), dev, ctypes.byref(fmt),
+                              None, None, WAVE_FORMAT_QUERY)
+        results.append((dev, rc))
+    return results
 
 
 def snapshot(label: str) -> None:
@@ -170,23 +187,46 @@ def snapshot(label: str) -> None:
     wins = find_voice_windows()
     if wins:
         for w in wins:
-            print(f"  [voice-window] hwnd={w[0]} class={w[1]} visible={w[2]}")
+            # (hwnd, class 或 "class | title", visible[, pid])
+            cls = w[1]
+            pid = w[3] if len(w) > 3 else None
+            suffix = f" pid={pid}" if pid is not None else ""
+            print(f"  [voice-window] hwnd={w[0]} class={cls} visible={w[2]}{suffix}")
     else:
         print("  [voice-window] 未发现豆包语音窗口")
     busy = mic_in_use()
-    n_busy = sum(1 for _, rc, ok in busy if not ok)
-    print(f"  [mic] 设备数={len(busy)} 被占用={n_busy}"
-          + (f" 详情={busy}" if n_busy else ""))
+    unavailable = [(d, rc) for d, rc in busy if rc != 0]
+    print(f"  [mic] 录音设备数={len(busy)} 当前不可用={len(unavailable)}"
+          + (f" 详情={unavailable}" if unavailable else ""))
+
+
+def doubao_voice_window_visible() -> bool:
+    """判据 1 的直接取值：只关心 `OimeVoiceWaveWindow` 这一条（判据强度最高）。
+
+    与 `find_voice_windows` 的兜底分支不同，这里**只认类名精确匹配**，
+    避免把微信输入法窗口（`wetype.flutter.setting`，标题含"语音输入"）
+    误算成豆包语音窗口——那会让实验假阳性。
+    """
+    for w in find_voice_windows():
+        if w[1].lower() == DOUBAO_VOICE_WINDOW_CLASS.lower():
+            return bool(w[2])
+    return False
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="只列当前状态")
     ap.add_argument("--inject-rightalt", action="store_true",
-                    help="注入按住右 Alt 1.5 秒")
+                    help="注入一次「按下+松开」完整点击（免提模式用；长按模式用 --hold-ms）")
+    ap.add_argument("--hold-ms", type=int, default=0,
+                    help="改为「按住 N 毫秒再松开」（长按模式语义）；0=只点一下")
+    ap.add_argument("--toggle", type=int, default=0, metavar="N",
+                    help="连续注入 N 次完整点击（免提模式必须成对：1 次开始、2 次结束）")
     ap.add_argument("--watch", type=int, default=0,
                     help="观察 N 秒（供用户手动按物理键）")
-    ap.add_argument("--hold-ms", type=int, default=1500)
+    ap.add_argument("--poll-ms", type=int, default=100,
+                    help="watch 期间的判据轮询间隔（默认 100ms，"
+                         "单次按键的语音窗口可能只闪几百毫秒，1s 会漏掉）")
     args = ap.parse_args()
 
     snapshot("状态：实验开始前")
@@ -194,30 +234,56 @@ def main() -> int:
     if args.list:
         return 0
 
+    if args.toggle > 0:
+        # 免提模式是切换式：必须在「开麦期间」采样，否则会漏掉判据。
+        print(f"\n>>> 免提模式：连续注入 {args.toggle} 次完整点击")
+        for index in range(1, args.toggle + 1):
+            print(f"\n>>> 第 {index} 次点击（按下+松开）…")
+            if not right_alt_down():
+                print("!! 注入 DOWN 失败")
+                return 2
+            # 免提模式下"按下"即切换；稍等让豆包响应，再抬起。
+            time.sleep(0.12)
+            if not right_alt_up():
+                print("!! 注入 UP 失败")
+                return 2
+            # 抬起后立刻采样：若第 1 次已开麦，此处应看到 visible=True。
+            time.sleep(0.35)
+            snapshot(f"状态：第 {index} 次点击后")
+
     if args.inject_rightalt:
-        print(f"\n>>> 注入 按住右 Alt（{args.hold_ms} ms）…")
+        hold_ms = args.hold_ms or 1500
+        print(f"\n>>> 注入 按住右 Alt（{hold_ms} ms）…")
         if not right_alt_down():
             print("!! 注入 DOWN 失败")
             return 2
-        time.sleep(args.hold_ms / 1000.0)
+        # 按住期间密集采样：语音窗口可能只闪一小段。
+        deadline = time.time() + hold_ms / 1000.0
+        seen = False
+        while time.time() < deadline:
+            if doubao_voice_window_visible():
+                seen = True
+            time.sleep(min(0.05, max(0.0, deadline - time.time())))
         snapshot("状态：注入按住期间")
         right_alt_up()
         time.sleep(1.2)
         snapshot("状态：注入释放后")
+        print(f"  按住期间豆包语音窗口是否可见: {seen}")
 
     if args.watch > 0:
         print(f"\n>>> 请现在手动按住【物理键盘右 Alt】并说话，观察窗口 {args.watch}s…")
         deadline = time.time() + args.watch
-        tick = 0
         seen_any = False
+        polls = 0
         while time.time() < deadline:
-            wins = [w for w in find_voice_windows() if w[2]]
-            if wins:
+            polls += 1
+            if doubao_voice_window_visible():
+                if not seen_any:
+                    print(f"  t≈{args.watch - (deadline - time.time()):.1f}s "
+                          f"首次出现可见的可豆包语音窗口")
                 seen_any = True
-                print(f"  t={tick}s 发现可见语音窗口: {[w[1] for w in wins]}")
-            time.sleep(1.0)
-            tick += 1
-        print(f"  watch 期间是否曾出现可见语音窗口: {seen_any}")
+            time.sleep(args.poll_ms / 1000.0)
+        print(f"  watch 期间轮询 {polls} 次；是否曾出现可见语音窗口: {seen_any}")
         snapshot("状态：watch 结束")
 
     return 0

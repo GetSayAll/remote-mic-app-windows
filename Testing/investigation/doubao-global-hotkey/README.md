@@ -3,7 +3,18 @@
 - 建立：2026-09-17
 - 目的：判定豆包输入法能否被本应用（纯 SendInput，免驱动/免提权/免注入）唤起
 - 前置结论：`Bugs/2026-09-17-doubao-injection-cross-repo-verification.md`
-- 状态：**未完成（需 Echo 配合）**。脚本已就绪并各自自测通过。
+- 状态：**阶段 0 / 1 已完成（自动部分）**；阶段 1 物理对照与阶段 3 需 Echo 配合。
+
+## 进度（2026-09-17）
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 0 | 注入可达性（无人工） | **passed** —— 注入确实进入系统输入流 |
+| 1 | 免提未勾选基线（自动部分） | **passed** —— 注入唤不起、TAKEN=0 |
+| 1 | 免提未勾选基线（物理对照） | **deferred** —— 待真人按右 Alt |
+| 2 | 勾选「免提模式」 | **deferred** —— 只能由 Echo 在豆包设置里操作 |
+| 3 | 免提已勾选测量 | **deferred** —— 依赖阶段 2 |
+| 4 | 还原为长按模式 | **deferred** —— 依赖阶段 2 |
 
 ## ⚠️ 2026-09-17 重要更正：开关的真实名字是「免提模式」
 
@@ -75,21 +86,60 @@
 1. **确认豆包麦克风是 `CABLE Output`**（截图确认本机已是此项，✅ 无需调整）。
 2. 打开记事本，点进文本框，确保**输入法切到豆包**（看任务栏输入指示器）。
 
-### 阶段 1：免提模式未勾选（对照基线）
+### 阶段 0：注入可达性（不需要人工按键）✅ 已完成
+
+**这一步把"注入有没有到达系统输入流"单独钉死**，避免后面把"豆包不响应"
+误判成"注入没送达"。
+
+```bash
+python -u Testing/investigation/doubao-global-hotkey/3-probe-injection-reachability.py --inject
+```
+
+⚠️ **必须加 `-u`**：不加时 Python 的行缓冲会让输出在脚本被中断时整段丢失，
+表现为"跑完什么都不打印"，极易误判成脚本被沙箱拦截。
+
+**2026-09-17 实测结果（passed）**：
+
+```
+LL 键盘钩子已装载
+>>> 注入右 Alt 点击…
+    注入调用返回 ok=True
+--- 注入按键捕获 ---
+  vk=0xA5 scan=0x38 SYSDOWN  injected=True lower_il=False extended=True
+  vk=0xA5 scan=0x38 UP       injected=True lower_il=False extended=True
+```
+
+**结论**：注入的右 Alt **确实进入了系统输入流**，且 `LLKHF_INJECTED` 标志
+正确置位、`scan=0x38`、`extended=True`、Alt 按系统键（`SYSDOWN`）投递。
+→ 因此若豆包唤不起，原因在**豆包如何对待带 `INJECTED` 标志的事件**，
+而不是"我们的键没送出去"。这为原判定提供了正向支撑证据。
+
+### 阶段 1：免提模式未勾选（对照基线）✅ 已完成
 
 ```bash
 cd C:/wt-doubao
 python Testing/investigation/doubao-global-hotkey/1-probe-hotkey-ownership.py
-# 预期：全部 FREE，TAKEN 总数 = 0（2026-09-17 已实测确认）
+# 实测：6 个候选全部 FREE，TAKEN 总数 = 0
 
-python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt
-# 预期：注入 DOWN 成功，但 OimeVoiceWaveWindow 仍 visible=False
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt
+# 实测：注入 DOWN 成功，OimeVoiceWaveWindow 全程 visible=False，麦克风未被占用
 
-python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --watch 30
-# 提示后：【你手动按住物理键盘右 Alt 并说话】30 秒
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --toggle 2
+# 实测：连点两次同样全程 visible=False（阴性对照干净）
 ```
 
-**记录 A 组数据**：`注入能否唤起` / `物理能否唤起`。
+**阶段 1 实测数据（2026-09-17，长按模式）**：
+
+| 判据 | 注入右 Alt | 说明 |
+|---|---|---|
+| `OimeVoiceWaveWindow` visible | **false**（按住期间密集采样 + 连点 2 次均为 false） | 注入唤不起 |
+| 录音设备被占用 | 0 / 2 | 未开麦 |
+| `RegisterHotKey` 抢占 | 6/6 FREE，TAKEN=0 | 豆包未注册系统热键 |
+
+→ **与 2026-09-04 的判定一致**：长按模式下注入确实唤不起豆包。
+
+**仍需人工的部分**：本阶段还需真人按住**物理**右 Alt 一次（`--watch 30`）
+作为同条件对照，以排除"豆包本身没就绪"。**该项待 Echo 执行。**
 
 ### 阶段 2：勾选「免提模式」
 
@@ -102,18 +152,25 @@ python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.
 ### 阶段 3：免提模式已勾选（关键测量）
 
 ```bash
+# 探针 1：是否出现 TAKEN —— 若变 TAKEN，说明豆包确实注册了系统热键 ⭐
 python Testing/investigation/doubao-global-hotkey/1-probe-hotkey-ownership.py
-# 重点看：是否出现 TAKEN —— 若变 TAKEN，说明豆包确实注册了系统热键 ⭐
 
-python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt
-python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --watch 30
-# 同样：先注入测一次，再手动物理按一次
+# 探针 2：注入侧（长按语义 vs 切换语义）
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --toggle 2
+
+# 探针 2：物理侧（**必须真人按**）
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --watch 30
 ```
 
-**记录 B 组数据。**
+⚠️ **免提模式下优先用 `--toggle`**：它是"按一次开始、再按任意键结束"的
+**切换式**语义，注入一次后需要**再注入一次来结束**，否则会一直开麦。
+`--toggle 2` 正是"开始 + 结束"一对。
 
-⚠️ 注意：免提模式是"按一次开始、再按任意键结束"的**切换式**语义，
-与长按模式不同。测量时注入一次后需要**再注入一次来结束**，否则会一直开麦。
+⚠️ **`:--watch` 的轮询间隔**：单次按键的语音窗口可能只闪几百毫秒，
+探针默认 `--poll-ms 100`；不要改回 1 秒，否则会漏检（漏检=假阴性）。
+
+**记录 B 组数据。**
 
 ### 阶段 4：还原
 
@@ -139,7 +196,8 @@ python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.
 | 文件 | 作用 | 自测状态 |
 |---|---|---|
 | `1-probe-hotkey-ownership.py` | `RegisterHotKey` 抢占探测，判断豆包是否注册系统热键 | **passed**（基线全 FREE） |
-| `2-probe-injection-vs-physical.py` | 注入右 Alt + 观察三重判据；`--watch` 供真人按物理键 | **passed**（`--list` 能稳定读到 `OimeVoiceWaveWindow`；注入 DOWN 成功） |
+| `2-probe-injection-vs-physical.py` | 注入右 Alt + 观察三重判据；`--watch` 供真人按物理键；`--toggle N` 切换式语义 | **passed**（`--list` 能稳定读到 `OimeVoiceWaveWindow`；注入 DOWN 成功；`--toggle 2` 正常） |
+| `3-probe-injection-reachability.py` | 自装 LL 钩子验证"注入是否进入系统输入流"，把"注入没送达"与"目标不响应"分开 | **passed**（`--inject` 实测捕获到 `injected=True`） |
 
 ## 工具陷阱（已踩，勿重犯）
 
