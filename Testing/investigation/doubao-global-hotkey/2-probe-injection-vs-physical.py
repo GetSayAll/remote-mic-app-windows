@@ -95,6 +95,7 @@ def send_one(scan: int, flags: int) -> bool:
 
 
 RIGHT_ALT_SCAN = 0x38
+SPACE_SCAN = 0x39
 EXT = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_SCANCODE
 
 
@@ -104,6 +105,36 @@ def right_alt_down() -> bool:
 
 def right_alt_up() -> bool:
     return send_one(RIGHT_ALT_SCAN, EXT | KEYEVENTF_KEYUP)
+
+
+def space_down() -> bool:
+    # ⚠️ 空格是**非扩展**键：不能带 KEYEVENTF_EXTENDEDKEY。
+    return send_one(SPACE_SCAN, KEYEVENTF_SCANCODE)
+
+
+def space_up() -> bool:
+    return send_one(SPACE_SCAN, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+
+
+def chord_right_alt_space_click(gap: float = 0.05) -> bool:
+    """注入一次「右 Alt + 空格」完整点击（**免按模式的正解和弦**）。
+
+    🔑 2026-09-18 修正：免按模式的出厂快捷键是 `右 Alt + 空格`，而
+    `--toggle` 此前只送纯右 Alt —— **漏了空格**，那次注入对照因此无效
+    （阴性结果不可归因）。务必用本函数测免按模式。
+    """
+    if not right_alt_down():
+        return False
+    time.sleep(gap)
+    if not space_down():
+        right_alt_up()
+        return False
+    time.sleep(gap)
+    if not space_up():
+        right_alt_up()
+        return False
+    time.sleep(gap)
+    return right_alt_up()
 
 
 # ---- 判据 1：豆包语音窗口 ----
@@ -222,6 +253,9 @@ def main() -> int:
                     help="改为「按住 N 毫秒再松开」（长按模式语义）；0=只点一下")
     ap.add_argument("--toggle", type=int, default=0, metavar="N",
                     help="连续注入 N 次完整点击（免按模式必须成对：1 次开始、2 次结束）")
+    ap.add_argument("--hands-free", action="store_true",
+                    help="⚠️ 与 --toggle 联用：注入「右 Alt + 空格」而不是纯右 Alt。"
+                         "免按模式的出厂快捷键是右 Alt + 空格，不用这个开关等于测错和弦！")
     ap.add_argument("--watch", type=int, default=0,
                     help="观察 N 秒（供用户手动按物理键）")
     ap.add_argument("--poll-ms", type=int, default=100,
@@ -236,17 +270,27 @@ def main() -> int:
 
     if args.toggle > 0:
         # 免按模式是切换式：必须在「开麦期间」采样，否则会漏掉判据。
-        print(f"\n>>> 免按模式：连续注入 {args.toggle} 次完整点击")
+        chord = "右 Alt + 空格" if args.hands_free else "纯右 Alt"
+        if not args.hands_free:
+            print("⚠️ 未加 --hands-free：本次注入的是【纯右 Alt】。")
+            print("   若目标是「免按模式」，其出厂快捷键是【右 Alt + 空格】，")
+            print("   这样测等于和弦错误 → 阴性结果不可归因。请加 --hands-free 重跑。")
+        print(f"\n>>> 免按模式：连续注入 {args.toggle} 次完整点击（和弦={chord}）")
         for index in range(1, args.toggle + 1):
-            print(f"\n>>> 第 {index} 次点击（按下+松开）…")
-            if not right_alt_down():
-                print("!! 注入 DOWN 失败")
-                return 2
-            # 免按模式下"按下"即切换；稍等让豆包响应，再抬起。
-            time.sleep(0.12)
-            if not right_alt_up():
-                print("!! 注入 UP 失败")
-                return 2
+            print(f"\n>>> 第 {index} 次点击（{chord} 按下+松开）…")
+            if args.hands_free:
+                if not chord_right_alt_space_click():
+                    print("!! 注入「右 Alt + 空格」失败")
+                    return 2
+            else:
+                if not right_alt_down():
+                    print("!! 注入 DOWN 失败")
+                    return 2
+                # 免按模式下"按下"即切换；稍等让豆包响应，再抬起。
+                time.sleep(0.12)
+                if not right_alt_up():
+                    print("!! 注入 UP 失败")
+                    return 2
             # 抬起后立刻采样：若第 1 次已开麦，此处应看到 visible=True。
             time.sleep(0.35)
             snapshot(f"状态：第 {index} 次点击后")

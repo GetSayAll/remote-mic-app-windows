@@ -10,11 +10,37 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0 | 注入可达性（无人工） | **passed** —— 注入确实进入系统输入流 |
-| 1 | 免按未启用基线（自动部分） | **passed** —— 注入唤不起、TAKEN=0 |
-| 1 | 免按未启用基线（物理对照） | **deferred** —— 待真人按右 Alt；**软件无替代通路（已逐条排查）** |
-| 2 | 切到「免按模式」 | **deferred** —— 只能由 Echo 在豆包设置里操作 |
-| 3 | 免按模式已启用测量 | **deferred** —— 依赖阶段 2 |
-| 4 | 还原为长按模式 | **deferred** —— 依赖阶段 2 |
+| 1 | 长按模式：物理 vs 注入对照 | **passed** —— 物理 `True`(0.7s) / 注入 `False` → **分支 A** |
+| 2 | 切到「免按模式」 | **passed** —— Echo 已操作 |
+| 3 | 免按模式测量 | **passed** —— 物理 `True`(23.8s) / 注入 `False` / TAKEN=0 → **分支 A** |
+| 4 | 还原为长按模式 | **passed** —— `enableGlobalVoiceShortcut=false` 已确认还原 |
+
+> ## 🏁 最终结论（2026-09-18，两档模式均实测）
+>
+> **豆包输入法 v0.9.0.0 在「免驱动 / 免提权 / 免进程注入」前提下，无法被 SendInput 唤起。**
+>
+> | 模式 | 和弦 | 物理组 | 注入组 | `RegisterHotKey` |
+> |---|---|---|---|---|
+> | 长按模式 | 纯 右 Alt | ✅ `True`（t≈0.7s） | ❌ `False` | 未注册（TAKEN=0） |
+> | 免按模式 | 右 Alt + 空格 | ✅ `True`（t≈23.8s） | ❌ `False` | 未注册（TAKEN=0） |
+>
+> **分支 A 在两种模式下都成立。** 免按模式虽然是「切换式」语义、理论上更可能走
+> 系统级热键，但实测**没有**注册 `RegisterHotKey`，仍走自家 LL 钩子并过滤注入。
+>
+> **这个结论是可归因的**：物理组在两种模式下都 `True`，排除了「豆包本身没就绪」
+> 这一解释；因此注入组的 `False` 才具备归因力。**不再是 `deferred`。**
+>
+> → 后续：豆包在本仓库**永久记为第三方兼容性边界**（非本仓库缺陷）。
+> UI 应如实说明「豆包需要安装可选 Helper（虚拟键盘驱动）才能由本应用触发」，把决策交给用户。
+
+> 🔑 **方法论：阴性结果必须先证明前置条件成立。** 本轮实验中共出现**两次
+> 「条件不对却看起来有结果」**，两次都被识破，未污染结论：
+> 1. 首次 `--watch 30` 得 `False` —— 焦点在 `WorkBuddy.exe`（不接 TSF 文本输入），
+>    不是可编辑文本框。**豆包长按右 Alt 只在它是活动输入法时生效**，焦点不对时按键本就该无反应。
+> 2. `--toggle 2` 得 `False` —— 注入的是**纯右 Alt**，漏了免按模式需要的**空格**。
+>    修正为 `--toggle 2 --hands-free` 后才是有效对照。
+>
+> **判据：物理组 `True` 是"前置条件成立"的证明。** 没有它，任何 `False` 都不可归因。
 
 ## ⚠️ 2026-09-17 两处重要更正
 
@@ -154,10 +180,30 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
 | 录音设备被占用 | 0 / 2 | 未开麦 |
 | `RegisterHotKey` 抢占 | 6/6 FREE，TAKEN=0 | 豆包未注册系统热键 |
 
-→ **与 2026-09-04 的判定一致**：长按模式下注入确实唤不起豆包。
+> ⚠️ **上表早期的 false 全部不可归因**（见下条）。真正的对照在 2026-09-18 完成。
 
-**仍需人工的部分**：本阶段还需真人按住**物理**右 Alt 一次（`--watch 30`）
-作为同条件对照，以排除"豆包本身没就绪"。**该项待 Echo 执行。**
+#### ✅ 2026-09-18：条件受控的对照完成 → **长按模式 = 分支 A**
+
+**关键教训：焦点条件必须先验证。** 早期多次 `--watch` 得到 `false`，原因是**前台窗口不是可编辑文本框**
+（实测为 `WorkBuddy.exe`，类 `Chrome_WidgetWin_1`，内部不接 TSF 文本输入）。
+豆包长按右 Alt 只在「豆包是活动输入法」时生效，焦点不在文本框上时按键本就该无反应
+→ **那些 `false` 是无效对照，不能作为证据**。
+
+**正确姿势**：用户在记事本里点进文本区 + 切到豆包输入法，**且监听期间不要切窗口**
+（本工具一执行命令就会抢焦点，所以必须用后台方式跑、用户在命令启动后自己切回记事本）。
+
+**同条件对照结果（记事本 + 豆包为活动输入法）**：
+
+| 组 | 条件 | `OimeVoiceWaveWindow` 是否可见 |
+|---|---|---|
+| **物理组** | 真人按住物理右 Alt | ✅ **`True`** —— **t≈0.7s** 首次出现（轮询 585 次） |
+| **注入组** | `--inject-rightalt --hold-ms 1500` | ❌ **`False`** —— 全程不可见 |
+
+→ **分支 A 成立**：物理能唤起、注入不能。**且 2026-09-04 的判定在 v0.9.0.0 上依然成立**
+（本轮是**重测验过**的，不是继承旧结论）。物理组的 `True` 排除了「豆包本身没就绪」这一解释，
+注入组的 `False` 才具备归因力。
+
+**仍需人工的部分**：长按模式下本阶段已完成，无需再补。
 
 #### ⚠️ 为什么这一格软件无法替代（2026-09-17 逐条排查）
 
@@ -182,56 +228,60 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
    若用户改过，需在本应用的语音目标设置里同步录入同一组合。
 3. 关掉豆包设置窗口。
 
-### 阶段 3：免按模式已启用（关键测量）
+### 阶段 3：免按模式已启用（关键测量）✅ 已完成 → 分支 A
 
 ```bash
 # 探针 1：是否出现 TAKEN —— 若变 TAKEN，说明豆包确实注册了系统热键 ⭐
 python Testing/investigation/doubao-global-hotkey/1-probe-hotkey-ownership.py
+# 实测：6/6 FREE，TAKEN=0 → 免按模式下豆包【依然没有】注册系统热键
 
-# 探针 2：注入侧（免按模式要的是「右 Alt + 空格」的切换式）
-python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --toggle 2
+# 探针 2：注入侧 —— ⚠️ 必须加 --hands-free，否则送的是纯右 Alt（和弦错误！）
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --toggle 2 --hands-free
+# 实测：注入「右 Alt + 空格」2 次，OimeVoiceWaveWindow 全程 visible=False
 
-# 探针 2：物理侧（**必须真人按**）
-python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --watch 30
+# 探针 2：物理侧（真人按住「右 Alt + 空格」）
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --watch 60
+# 实测：True（t≈23.8s），且结束时窗口仍 visible=True —— 切换式语义特征
 ```
 
-⚠️ **免按模式下的两个要点**：
+⚠️ **免按模式下的三个要点**：
 
-1. **用 `--toggle`**：它是"按一次开始、再按任意键结束"的**切换式**语义，
-   注入一次后需要**再注入一次来结束**，否则会一直开麦。`--toggle 2` 正是"开始 + 结束"一对。
-2. **和弦要带空格**：免按档快捷键是 `右 Alt + 空格`，不是纯 `右 Alt`。
-   本应用侧已按模式自动选对和弦（见 `doubao_mode_changes_the_injected_hotkey` 单测）。
+1. **注入必须加 `--hands-free`**：免按档快捷键是 `右 Alt + 空格`，不加该开关送的是纯右 Alt
+   → **和弦错误，阴性结果不可归因**（2026-09-18 实际踩过）。
+2. **用 `--toggle` 而非 `--hold-ms`**：它是切换式，注入一次开始、再一次结束。
+3. **物理侧按的是 `右 Alt + 空格`**，不是纯右 Alt。
 
-⚠️ **`:--watch` 的轮询间隔**：单次按键的语音窗口可能只闪几百毫秒，
-探针默认 `--poll-ms 100`；不要改回 1 秒，否则会漏检（漏检=假阴性）。
+**阶段 3 结果**：物理 `True` / 注入 `False` / TAKEN=0 → **分支 A**（同长按模式）。
 
-**记录 B 组数据。**
+### 阶段 4：还原 ✅ 已完成
 
-### 阶段 4：还原
+已把「语音输入模式」切回「长按模式」（用户操作）。**只读交叉验证**：
 
-把「语音输入模式」**切回「长按模式」**（恢复实验前状态）。
+```
+%APPDATA%\DoubaoIme\conf\config.json
+  voice.enableGlobalVoiceShortcut = False   ← 长按模式（与实验前基线一致 ✅）
+```
 
 ## 结果记录表
 
 | 阶段 | 热键 TAKEN 数 | 注入唤起 | 物理唤起 | 判定 |
 |---|---|---|---|---|
-| 1 · 免按模式未启用 | **0**（已实测） | 否（已实测） | 待测 | |
-| 3 · 免按模式已启用 | 待测 | 待测 | 待测 | |
+| 1 · 长按模式 | **0** | ❌ 否 | ✅ **是**（0.7s） | **A 成立** |
+| 3 · 免按模式 | **0** | ❌ 否 | ✅ **是**（23.8s） | **A 成立** |
 
-### 分支决策
+### 分支决策（已定案）
 
-- 阶段 3 出现 TAKEN 且注入唤起 → **B 成立**：本仓库新增"豆包（免按模式）"档，
-  UI 引导用户切到该模式。**这是唯一能免驱动支持豆包的合规路径。**
 - 阶段 3 无 TAKEN 且注入不唤起 → **A 成立**：豆包在免驱动前提下永久记为边界，
-  UI 如实说明需要可选 Helper（ADR 0002 增强轨）。
-- 物理键在任一阶段都唤不起 → **先修豆包配置**（麦克风/快捷键冲突），本轮作废。
+  UI 如实说明需要可选 Helper（ADR 0002 增强轨）。**已采用此结论。**
+- ~~阶段 3 出现 TAKEN 且注入唤起 → B 成立~~：实测未出现。
+- 物理键确认能唤起（两模式均 ✅）→ 排除「豆包没配好」，本轮实验**有效**。
 
 ## 脚本清单
 
 | 文件 | 作用 | 自测状态 |
 |---|---|---|
-| `1-probe-hotkey-ownership.py` | `RegisterHotKey` 抢占探测，判断豆包是否注册系统热键 | **passed**（基线 6/6 FREE） |
-| `2-probe-injection-vs-physical.py` | 注入右 Alt + 观察三重判据；`--watch` 供真人按物理键；`--toggle N` 切换式语义 | **passed**（`--list` 能稳定读到 `OimeVoiceWaveWindow`；注入 DOWN 成功；`--toggle 2` 正常） |
+| `1-probe-hotkey-ownership.py` | `RegisterHotKey` 抢占探测，判断豆包是否注册系统热键 | **passed**（两模式均 6/6 FREE） |
+| `2-probe-injection-vs-physical.py` | 注入 + 观察三重判据；`--watch` 供真人按物理键；`--toggle N`；**`--hands-free` 让注入带空格** | **passed**（两模式对照完成） |
 | `3-probe-injection-reachability.py` | 自装 LL 钩子验证"注入是否进入系统输入流"，把"注入没送达"与"目标不响应"分开 | **passed**（`--inject` 实测捕获到 `injected=True`） |
 | `4-probe-uia-reader.py` | 用公开 UI Automation 直读第三方设置窗口控件树，拿到**逐字界面文案** | **passed**（读到 72 个元素，确认「免按模式」「右 Alt + 空格」） |
 

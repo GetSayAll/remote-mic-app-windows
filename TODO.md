@@ -12,7 +12,17 @@
 - [ ] 支持 Typeless：参考 Mac App 的选择、配置、触发、状态反馈和恢复流程，调研 Windows 公开能力后实现按住说话生命周期、音频路由与失败关闭；分别完成 RC001/RC003、冷态首用、快速连按、断连和睡眠恢复真机验收。
 - [ ] 支持豆包输入法：参考 Mac App 的产品行为与配置引导，在不读取或修改豆包私有配置、内部数据库、内存或私有协议的前提下设计 Windows 支持路径；基础能力不得依赖进程注入，若必须使用提权 Helper 或虚拟 HID，须保持独立、显式启用且不影响现有语音主路径，并分别完成 RC001/RC003 真机验收。
   - **部分落地（2026-09-17，分支 `feature-doubao-ime`）**：已交付"语音输入目标选择"（微信 / 豆包 / 自定义）与快捷键分流——新增 `crates/sayall-windows/src/voice_target.rs`（`VoiceTarget` / `VoiceTargetConfig`，默认快捷键单一事实源），豆包走 TSF 会话级激活（CLSID `{9D2B2E2B-3C93-4D2F-9D35-6EEB85F0D2B0}` / Profile GUID `{2B4D4B3A-4D4F-4C0A-8E66-7F771A2B9C10}`，与微信同机制、仅身份不同），配置落 `voice-target.json` 且保留 v1→v2 迁移。**未读取豆包私有配置**（`%APPDATA%\DoubaoIme\conf\config.json` 仅作对照观察，不进产品路径）；用户自定义快捷键由本应用 UI 录入。
-  - **仍未完成 / deferred**：① 豆包能否被 SendInput 唤起**未在 v0.9.0.0 上复测**——2026-09-04 结论（`Bugs/2026-09-04-doubao-voice-hold-hotkey.md`，四层闭环判死：`VoiceKeyHookProc` 首查 `LLKHF_INJECTED` 即纯透传）基于 0.8.2.7，本机已升级至 v0.9.0.0，机制需重新确证；字符串复核显示 `VoiceKeyHookProc` 仍在（2 处），但 `LLKHF_INJECTED` 字面量在本版为 0 次命中——**这既可能是常量被内联/改名，也可能是过滤逻辑被移除，两种可能都无法只靠静态字符串区分**，必须真机实测。② RC001/RC003 真机验收未做。③ 若注入仍无效，唯一路径仍是 ADR 0002 的 WinUHid 增强轨。
+  - **🏁 关键疑问已闭合（2026-09-18 真机实测）**：豆包能否被 SendInput 唤起——**两档模式均已实测，答案是不能**。
+    - 2026-09-04 结论（`Bugs/2026-09-04-doubao-voice-hold-hotkey.md`，四层闭环判死）基于 0.8.2.7；本机已升级至 v0.9.0.0，**本轮完成重测，原判定依然成立**。
+    - **条件受控对照**（用户在记事本中切到豆包输入法，监听期间不切窗口）：
+      | 模式 | 和弦 | 物理组 | 注入组 | `RegisterHotKey` |
+      |---|---|---|---|---|
+      | 长按模式 | 纯 右 Alt | ✅ `True`（t≈0.7s） | ❌ `False` | 未注册 |
+      | 免按模式 | 右 Alt + 空格 | ✅ `True`（t≈23.8s） | ❌ `False` | 未注册 |
+    - **免按模式没能改变结论**：尽管它是切换式语义、理论上更可能走系统级热键，实测**没有**注册 `RegisterHotKey`，仍走自家 LL 钩子过滤注入。
+    - **结论可归因**：物理组两模式都 `True`，排除「豆包没就绪」；注入组 `False` 因此具备归因力。
+    - 🔑 **方法论**：本轮两次出现「条件不对却看起来有结果」（焦点在 `WorkBuddy.exe` 不接 TSF；`--toggle` 漏了空格），均被识破。**阴性结果必须先由物理组 `True` 证明前置条件成立。**
+  - **仍未完成 / deferred**：① RC001/RC003 真机验收未做。② 豆包在免驱动前提下**永久记为第三方兼容性边界**（非本仓库缺陷），唯一路径仍是 ADR 0002 的 WinUHid 增强轨。
   - **实验设计更正（2026-09-17）**：唯一未测过的合规路线"豆包的全局语音快捷键"**在 v0.9.0.0 界面上的真实名称是「免按模式」**（豆包设置 → 语音输入 → 语音输入模式，与「长按模式」二选一）。
     - ⚠️ **文案更正**：早期从 `HandsFreeShortcutBox` / DLL 字符串 / 截图 OCR 推断为「免提模式」，**2026-09-17 用 UIA 直读活窗口控件树，逐字确认是「免按模式」**（描述文案「按一次即可开始说话，再按任意键可结束」）。三者（免提 / 免按 / `HandsFree`）指同一档位，内部配置键 `voice.enableGlobalVoiceShortcut`。读取方法见 `Testing/investigation/doubao-global-hotkey/4-probe-uia-reader.py`（公开 UIA，无 `comtypes` 依赖）。
     - 🔑 **两档快捷键不同（同日 UIA + 配置双向实测）**：长按模式 `voice.voiceLongPressShortcut = {keyCode: 0, modifierFlags: 2049}` → **纯 右 Alt**；免按模式 `voice.voiceShortcut = {keyCode: 32, modifierFlags: 2049}` → **右 Alt + 空格**（`keyCode 32` = 空格）。`2049 = 0x801 = MOD_ALT | 右侧修饰位`，两档一致，**差异只在 `keyCode`**。此前"两档共用同一快捷键"的假设已被推翻。
