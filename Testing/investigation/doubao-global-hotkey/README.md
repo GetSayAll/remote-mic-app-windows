@@ -1,4 +1,4 @@
-# 豆包"免提模式"实验协议（原题：全局语音快捷键）
+# 豆包「免按模式」实验协议（原题：全局语音快捷键）
 
 - 建立：2026-09-17
 - 目的：判定豆包输入法能否被本应用（纯 SendInput，免驱动/免提权/免注入）唤起
@@ -10,39 +10,50 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0 | 注入可达性（无人工） | **passed** —— 注入确实进入系统输入流 |
-| 1 | 免提未勾选基线（自动部分） | **passed** —— 注入唤不起、TAKEN=0 |
-| 1 | 免提未勾选基线（物理对照） | **deferred** —— 待真人按右 Alt |
-| 2 | 勾选「免提模式」 | **deferred** —— 只能由 Echo 在豆包设置里操作 |
-| 3 | 免提已勾选测量 | **deferred** —— 依赖阶段 2 |
+| 1 | 免按未启用基线（自动部分） | **passed** —— 注入唤不起、TAKEN=0 |
+| 1 | 免按未启用基线（物理对照） | **deferred** —— 待真人按右 Alt |
+| 2 | 切到「免按模式」 | **deferred** —— 只能由 Echo 在豆包设置里操作 |
+| 3 | 免按模式已启用测量 | **deferred** —— 依赖阶段 2 |
 | 4 | 还原为长按模式 | **deferred** —— 依赖阶段 2 |
 
-## ⚠️ 2026-09-17 重要更正：开关的真实名字是「免提模式」
+## ⚠️ 2026-09-17 两处重要更正
 
-原先按 vibe-flow 文档的说法寻找「全局语音快捷键」开关，**在 v0.9.0.0 界面上找不到**。
-经三路取证，确认如下：
+### 更正 1：档位名是「免按模式」，且快捷键与长按档**不同**
 
-**实际界面（截图 + DLL 静态分析双重确认）** —— 豆包设置 → 语音输入：
+原先按 vibe-flow 文档的说法寻找「全局语音快捷键」，**在 v0.9.0.0 界面上找不到**。
+经三路取证确认它就是「语音输入模式」里的第二档。**但档位名与快捷键此前都记错了**
+（初版由截图 OCR + DLL 字符串推断：「免提模式」/ 右 Alt）。
+
+**UIA 直接读取活着的设置窗口**（公开 UI Automation，不读不改豆包私有配置），
+逐字结果：
 
 ```
 语音输入模式
-  ├─ 长按模式     按下说话，松手结束                    [右 Alt]
-  └─ 免提模式     按一次即可开始说话，再按任意键可结束      [右 Alt]
-麦克风选择        CABLE Output (VB-Audio Virtual Cable)
-标点展示         空格代替标点 / 句末不加标点
+  长按模式     按住说话，松手结束                    右 Alt
+  免按模式     按一次即可开始说话，再按任意键可结束      右 Alt + 空格
+麦克风选择    CABLE Output (VB-Audio Virtual Cable)
 ```
 
-**证据链**：
+配置侧同向印证（只读观察）：
 
-| 证据 | 结论 |
-|---|---|
-| `DoubaoIme.Settings.UI.dll` 有 `HandsFreeShortcutBox` / `UpdateHandsFreeShortcut` | UI 上确实有"免提快捷键"输入框 |
-| 同 DLL 有「长按模式」「免提模式」「按一次即可开始说话，再按任意键可结束」文案 | 「免提模式」是可见的单选项 |
-| `enableGlobalVoiceShortcut` 在 UI.dll / ViewModels.dll / NativeRuntime.dll / Settings.exe **三种编码下全部 0 命中**，仅 `ImeService.exe` 命中 1 次 | 该配置项**没有独立的 UI 开关**，属配置层内部键 |
-| `ImeService.exe` 的 config schema 键序列：`enableVoiceShortcut` → `enableGlobalVoiceShortcut` → `voiceShortcut` → `voiceLongPressShortcut` | 它与"语音快捷键"同组，是**免提模式那一档的开关** |
-| `handsFreeTipDid` / `ConsumeHandsFreeTipText` 位于状态栏/托盘代码段 | 「免提」是豆包自己的命名，与「全局」是同一件事 |
+| 键 | 值 | 解出的快捷键 |
+|---|---|---|
+| `voice.voiceLongPressShortcut` | `{keyCode: 0, modifierFlags: 2049}` | `keyCode 0` = 无主键 → **纯 右 Alt** |
+| `voice.voiceShortcut` | `{keyCode: 32, modifierFlags: 2049}` | `keyCode 32` = 空格 → **右 Alt + 空格** |
+| `voice.enableGlobalVoiceShortcut` | `false` | 当前生效 = **长按模式** |
+| `voice.hasShortcutConflict` | `false` | 无冲突（排除按键被别的程序占用） |
 
-**推论**：`enableGlobalVoiceShortcut` = 「免提模式」开关的内部名。
-勾选「免提模式」即开启该配置项。**这是本实验要操作的目标。**
+🔑 **两档快捷键不同**——注入时必须**同时**改「发什么和弦」与「怎么按」。
+详见 `Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md`（含代码修正记录）。
+
+### 更正 2：`enableGlobalVoiceShortcut` 是免按档的配置层内部名
+
+`DoubaoIme.Settings.UI.dll` 有 `HandsFreeShortcutBox` / `UpdateHandsFreeShortcut`
+（内部命名用 HandsFree），界面文案却写「免按」；该键在设置 UI/ViewModel/
+NativeRuntime 各 DLL 与设置 exe 中三种编码全 0 命中，仅 `ImeService.exe` 命中 1 次
+→ **无独立 UI 开关**，它就是免按模式那一档。
+
+**「免提」「免按」「HandsFree」指同一档位。**
 
 ## 为什么做这个实验
 
@@ -53,9 +64,9 @@
 > （`docs/V1_5_USER_GUIDE_ZH.md` L110、`V1_2_1_TUTORIAL_ZH.md` L84）。
 
 - 豆包的**长按右 Alt**只在"豆包是当前活动输入法"时生效 → 已证注入无效。
-- 豆包的**免提模式**（`enableGlobalVoiceShortcut`）语义上是**跨应用生效**的
+- 豆包的**免按模式**（`enableGlobalVoiceShortcut`）语义上是**跨应用生效**的
   （"按一次即可开始说话，再按任意键可结束"——不需要按住），更接近系统级全局热键。
-  **若勾选后豆包改用 `RegisterHotKey` 注册热键，则 SendInput 注入应当能触发，且完全合规。**
+  **若启用后豆包改用 `RegisterHotKey` 注册热键，则 SendInput 注入应当能触发，且完全合规。**
 
 本机基线（2026-09-17 只读观察）：`enableGlobalVoiceShortcut = false` → 该分支从未激活。
 
@@ -114,7 +125,7 @@ LL 键盘钩子已装载
 → 因此若豆包唤不起，原因在**豆包如何对待带 `INJECTED` 标志的事件**，
 而不是"我们的键没送出去"。这为原判定提供了正向支撑证据。
 
-### 阶段 1：免提模式未勾选（对照基线）✅ 已完成
+### 阶段 1：免按模式未启用（对照基线）✅ 已完成
 
 ```bash
 cd C:/wt-doubao
@@ -124,15 +135,18 @@ python Testing/investigation/doubao-global-hotkey/1-probe-hotkey-ownership.py
 python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt
 # 实测：注入 DOWN 成功，OimeVoiceWaveWindow 全程 visible=False，麦克风未被占用
 
+python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt --hold-ms 1500
+# 实测：长按语义 1.5 秒同样 visible=False（长按模式的正解形态也不行）
+
 python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --toggle 2
 # 实测：连点两次同样全程 visible=False（阴性对照干净）
 ```
 
-**阶段 1 实测数据（2026-09-17，长按模式）**：
+**阶段 1 实测数据（2026-09-17，当前为长按模式）**：
 
 | 判据 | 注入右 Alt | 说明 |
 |---|---|---|
-| `OimeVoiceWaveWindow` visible | **false**（按住期间密集采样 + 连点 2 次均为 false） | 注入唤不起 |
+| `OimeVoiceWaveWindow` visible | **false**（单击 / 长按 1.5s / 连点 2 次 全部 false） | 注入唤不起 |
 | 录音设备被占用 | 0 / 2 | 未开麦 |
 | `RegisterHotKey` 抢占 | 6/6 FREE，TAKEN=0 | 豆包未注册系统热键 |
 
@@ -141,31 +155,34 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
 **仍需人工的部分**：本阶段还需真人按住**物理**右 Alt 一次（`--watch 30`）
 作为同条件对照，以排除"豆包本身没就绪"。**该项待 Echo 执行。**
 
-### 阶段 2：勾选「免提模式」
+### 阶段 2：切到「免按模式」
 
-1. 豆包设置 → **语音输入** → **语音输入模式** → 选中 **「免提模式」**
+1. 豆包设置 → **语音输入** → **语音输入模式** → 选中 **「免按模式」**
    （对应配置项 `voice.enableGlobalVoiceShortcut`）。
-2. 确认它右侧显示的快捷键是什么——**记下来**，实验要注入同一个组合。
-   本机基线是 `右 Alt`（`modifierFlags=2049` = `0x801` = ALT | 右侧位）。
+2. **确认它右侧显示的快捷键**：实测为 **`右 Alt + 空格`**
+   （`keyCode 32` = 空格、`modifierFlags 2049` = ALT|右侧位），**与长按档的纯右 Alt 不同**。
+   若用户改过，需在本应用的语音目标设置里同步录入同一组合。
 3. 关掉豆包设置窗口。
 
-### 阶段 3：免提模式已勾选（关键测量）
+### 阶段 3：免按模式已启用（关键测量）
 
 ```bash
 # 探针 1：是否出现 TAKEN —— 若变 TAKEN，说明豆包确实注册了系统热键 ⭐
 python Testing/investigation/doubao-global-hotkey/1-probe-hotkey-ownership.py
 
-# 探针 2：注入侧（长按语义 vs 切换语义）
-python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --inject-rightalt
+# 探针 2：注入侧（免按模式要的是「右 Alt + 空格」的切换式）
 python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --toggle 2
 
 # 探针 2：物理侧（**必须真人按**）
 python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.py --watch 30
 ```
 
-⚠️ **免提模式下优先用 `--toggle`**：它是"按一次开始、再按任意键结束"的
-**切换式**语义，注入一次后需要**再注入一次来结束**，否则会一直开麦。
-`--toggle 2` 正是"开始 + 结束"一对。
+⚠️ **免按模式下的两个要点**：
+
+1. **用 `--toggle`**：它是"按一次开始、再按任意键结束"的**切换式**语义，
+   注入一次后需要**再注入一次来结束**，否则会一直开麦。`--toggle 2` 正是"开始 + 结束"一对。
+2. **和弦要带空格**：免按档快捷键是 `右 Alt + 空格`，不是纯 `右 Alt`。
+   本应用侧已按模式自动选对和弦（见 `doubao_mode_changes_the_injected_hotkey` 单测）。
 
 ⚠️ **`:--watch` 的轮询间隔**：单次按键的语音窗口可能只闪几百毫秒，
 探针默认 `--poll-ms 100`；不要改回 1 秒，否则会漏检（漏检=假阴性）。
@@ -180,13 +197,13 @@ python -u Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physic
 
 | 阶段 | 热键 TAKEN 数 | 注入唤起 | 物理唤起 | 判定 |
 |---|---|---|---|---|
-| 1 · 免提模式未勾选 | **0**（已实测） | 待测 | 待测 | |
-| 3 · 免提模式已勾选 | 待测 | 待测 | 待测 | |
+| 1 · 免按模式未启用 | **0**（已实测） | 否（已实测） | 待测 | |
+| 3 · 免按模式已启用 | 待测 | 待测 | 待测 | |
 
 ### 分支决策
 
-- 阶段 3 出现 TAKEN 且注入唤起 → **B 成立**：本仓库新增"豆包（免提模式）"档，
-  UI 引导用户勾选该模式。**这是唯一能免驱动支持豆包的合规路径。**
+- 阶段 3 出现 TAKEN 且注入唤起 → **B 成立**：本仓库新增"豆包（免按模式）"档，
+  UI 引导用户切到该模式。**这是唯一能免驱动支持豆包的合规路径。**
 - 阶段 3 无 TAKEN 且注入不唤起 → **A 成立**：豆包在免驱动前提下永久记为边界，
   UI 如实说明需要可选 Helper（ADR 0002 增强轨）。
 - 物理键在任一阶段都唤不起 → **先修豆包配置**（麦克风/快捷键冲突），本轮作废。

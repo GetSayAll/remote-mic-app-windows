@@ -257,11 +257,11 @@ describe("豆包语音模式选择", () => {
 
     const block = wrapper.get(".doubao-mode-block");
     expect(block.text()).toContain("长按模式");
-    expect(block.text()).toContain("免提模式");
+    expect(block.text()).toContain("免按模式");
     wrapper.unmount();
   });
 
-  it("切到免提模式时把 doubaoMode 传给后端并提示松手不会结束", async () => {
+  it("切到免按模式时把 doubaoMode 传给后端并提示松手不会结束", async () => {
     mocks.getVoiceTargetConfig.mockResolvedValue({ ...doubaoSnapshot });
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
@@ -269,7 +269,7 @@ describe("豆包语音模式选择", () => {
     const handsFree = wrapper
       .get(".doubao-mode-block")
       .findAll("button")
-      .find((button) => button.text() === "免提模式");
+      .find((button) => button.text() === "免按模式");
     await handsFree!.trigger("click");
     await flushPromises();
 
@@ -279,7 +279,7 @@ describe("豆包语音模式选择", () => {
   });
 
   // 回归防护：后端 `doubao_mode` 缺省会落回 `hold`。若 `applyVoiceTarget` /
-  // `setVoiceInjectionEnabled` 不透传当前模式，用户选好的免提模式会在每次
+  // `setVoiceInjectionEnabled` 不透传当前模式，用户选好的免按模式会在每次
   // 切换输入法或开关注入时被静默重置。
   it("切换输入法与开关注入时保留已选的豆包模式", async () => {
     mocks.getVoiceTargetConfig.mockResolvedValue({

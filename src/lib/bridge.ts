@@ -669,9 +669,10 @@ export type VoiceTarget = "we_type" | "doubao" | "custom";
 /**
  * 豆包输入法的语音输入模式，对应豆包「设置 → 语音输入 → 语音输入模式」两档。
  *
- * 该取值决定注入形态，因此必须与用户在豆包客户端里的选择保持一致：
- * - `hold`（长按模式）：按住说话，松手结束。
- * - `handsfree`（免提模式）：按一次开始说话，再按任意键结束。
+ * 该取值决定**注入的快捷键与注入形态两者**，必须与用户在豆包客户端里的
+ * 选择保持一致（2026-09-17 实测：两档快捷键不同）：
+ * - `hold`（长按模式）：按住说话，松手结束。快捷键 = 右 Alt。
+ * - `handsfree`（免按模式）：按一次开始说话，再按任意键结束。快捷键 = 右 Alt + 空格。
  */
 export type DoubaoVoiceMode = "hold" | "handsfree";
 
@@ -857,11 +858,16 @@ export function voiceTargetLabel(target: VoiceTarget): string {
   }[target];
 }
 
-/** 豆包语音模式展示名（与豆包客户端设置页文案保持一致，便于用户对照）。 */
+/**
+ * 豆包语音模式展示名（与豆包客户端设置页文案保持一致，便于用户对照）。
+ *
+ * ⚠️ 界面实测文案是「**免按模式**」（2026-09-17 UIA 读取），不是早期从
+ * DLL 字符串推断的「免提模式」——两者指同一档位。
+ */
 export function doubaoVoiceModeLabel(mode: DoubaoVoiceMode): string {
   return {
     hold: "长按模式",
-    handsfree: "免提模式",
+    handsfree: "免按模式",
   }[mode];
 }
 

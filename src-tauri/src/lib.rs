@@ -618,6 +618,10 @@ fn get_voice_target_config(state: tauri::State<'_, AppState>) -> VoiceTargetSnap
     let explicit_hotkey = config.hotkey.is_some();
     let doubao_mode = config.doubao_mode;
     let injection_shape = config.injection_shape().as_log_str().to_string();
+    // ⚠️ 必须用 `default_hotkey_for_target()`：豆包两档模式的出厂快捷键不同
+    //    （长按 = 右 Alt；免按 = 右 Alt + 空格），用 `target.default_hotkey()`
+    //    会把免按模式的实际快捷键显示错。
+    let default_hotkey = config.default_hotkey_for_target();
     sayall_windows::gatt_note(format!(
         "shortcut_settings feature=voice_target action=load phase=completed terminal_result=passed target={} enabled={enabled} explicit_hotkey={explicit_hotkey} doubao_mode={} injection_shape={injection_shape} resolved_key_count={}",
         target.as_log_str(),
@@ -629,7 +633,7 @@ fn get_voice_target_config(state: tauri::State<'_, AppState>) -> VoiceTargetSnap
         hotkey: config.hotkey,
         enabled,
         resolved_hotkey: resolved,
-        default_hotkey: target.default_hotkey(),
+        default_hotkey,
         supports_session_activation: target.supports_session_activation(),
         doubao_mode,
         injection_shape,
@@ -672,6 +676,8 @@ async fn set_voice_target_config(
             doubao_mode,
         })?;
         platform.set_voice_target_config(saved.clone());
+        // 同 `get_voice_target_config`：默认快捷键须随豆包模式变化。
+        let default_hotkey = saved.default_hotkey_for_target();
         Ok(VoiceTargetSnapshot {
             target: saved.target,
             hotkey: saved.hotkey.clone(),
@@ -679,7 +685,7 @@ async fn set_voice_target_config(
             doubao_mode: saved.doubao_mode,
             injection_shape: saved.injection_shape().as_log_str().to_string(),
             resolved_hotkey: saved.resolved_hotkey(),
-            default_hotkey: saved.target.default_hotkey(),
+            default_hotkey,
             supports_session_activation: saved.target.supports_session_activation(),
         })
     })

@@ -4,15 +4,15 @@
 //! 不同输入法的快捷键与激活方式不同，本模块把差异收敛为一处：
 //!
 //! - **快捷键默认值**：微信输入法（WeType）默认 左 Ctrl + 左 Win；豆包输入法
-//!   出厂默认 右 Alt（其设置页「长按快捷键」默认"未设置"即出厂右 Alt）。
+//!   出厂默认随模式而变——长按模式 `右 Alt`，免按模式 `右 Alt + 空格`
+//!   （2026-09-17 实测，见 `DoubaoVoiceMode::default_hotkey`）。
 //! - **会话级激活**：两家的语音热键都只在自身为该会话活动输入法时生效，
 //!   需要不同的 TSF CLSID / Profile GUID（见 `ime.rs`）。
-//! - **注入形态**：目前两家共用「逐事件 + 间隔」配方（见
-//!   `send_input::HOLD_CHORD_EVENT_GAP`）；保留为每目标字段以便后续按目标
-//!   分化，不预先引入无实证的差异。
+//! - **注入形态**：两家共用「逐事件 + 间隔」配方（见
+//!   `send_input::HOLD_CHORD_EVENT_GAP`）；豆包免按模式额外需要切换式时序。
 //! - **豆包语音模式**（`DoubaoVoiceMode`）：豆包有两档互斥的语音输入模式，
-//!   按下语义不同（长按 = 按住说话；免提 = 按一次开始、再按任意键结束）。
-//!   详见该类型文档。
+//!   **快捷键与按下语义都不同**（长按 = 按住说话 / 纯右 Alt；免按 = 按一次
+//!   开始、再按任意键结束 / 右 Alt + 空格）。详见该类型文档。
 //!
 //! 边界（AGENTS.md）：
 //! - 不读取或修改第三方 App 的私有配置、内部数据库或内存（因此**不**读豆包
@@ -75,6 +75,28 @@ pub enum DoubaoVoiceMode {
 }
 
 impl DoubaoVoiceMode {
+    /// 该模式在豆包设置界面显示的出厂快捷键。
+    ///
+    /// 🔑 **两档是不同的组合键**（2026-09-17 UIA + 配置双向实测：
+    /// `voiceLongPressShortcut = {keyCode: 0, modifierFlags: 2049}` →
+    /// 长按模式 = 纯 右 Alt；`voiceShortcut = {keyCode: 32, modifierFlags: 2049}`
+    /// → 免按模式 = 右 Alt + 空格，`keyCode 32` 即空格）。此前"两档共用同一
+    /// 快捷键"的假设已被推翻；注入形态与注入内容必须**同时**随模式变化，
+    /// 否则免按模式会发送错误的组合键。
+    ///
+    /// 用户若在豆包设置里改过快捷键，需在本应用 UI 内同步录入（本模块不读
+    /// 豆包私有配置）。
+    pub fn default_hotkey(self) -> Option<KeyChord> {
+        match self {
+            Self::Hold => Some(KeyChord {
+                keys: vec![KeyCode::RightAlt],
+            }),
+            Self::HandsFree => Some(KeyChord {
+                keys: vec![KeyCode::RightAlt, KeyCode::Space],
+            }),
+        }
+    }
+
     /// 该模式对应的注入形态。
     pub fn injection_shape(self) -> InjectionShape {
         match self {
@@ -92,10 +114,13 @@ impl DoubaoVoiceMode {
     }
 
     /// UI 展示名（与豆包设置界面的文案一致，便于用户对照）。
+    ///
+    /// ⚠️ 界面实测文案是「**免按模式**」（2026-09-17 UIA 读取），
+    /// 不是早期从 DLL 字符串推断的「免提模式」。两者指同一档位。
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Hold => "长按模式",
-            Self::HandsFree => "免提模式",
+            Self::HandsFree => "免按模式",
         }
     }
 
@@ -110,8 +135,9 @@ impl DoubaoVoiceMode {
 
 /// 注入形态：描述「遥控器语音键的按下/松开」如何映射为注入事件。
 ///
-/// 引入本枚举是因为「按什么键」与「怎么按」是两件事：豆包两档模式用同一个
-/// 快捷键，但注入时序完全不同（见 `DoubaoVoiceMode`）。
+/// 引入本枚举是因为「按什么键」与「怎么按」是两件事。⚠️ 豆包两档模式**两者
+/// 都不同**：长按模式 = 纯右 Alt + 按住保持；免按模式 = 右 Alt + 空格 + 切换式
+/// （组合键差异见 `DoubaoVoiceMode::default_hotkey`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionShape {
     /// 语音键按下 = 和弦按下（保持）；语音键松开 = 和弦松开。
@@ -137,15 +163,16 @@ impl VoiceTarget {
     ///
     /// 微信：左 Ctrl + 左 Win（既有 v1 默认，`settings.rs` 的
     /// `default_voice_hold_hotkey` 语义搬迁至此）。
-    /// 豆包：右 Alt（出厂默认；其设置页可改，用户改了就在本应用内同步录入）。
+    /// 豆包：**随语音模式而变**——长按模式为 右 Alt，免按模式为 右 Alt + 空格
+    /// （见 [`DoubaoVoiceMode::default_hotkey`]）。本方法取豆包**长按模式**
+    /// （出厂默认档）的值，仅为兼容不携带模式的调用方；需要精确值请用
+    /// [`VoiceTargetConfig::default_hotkey_for_target`]。
     pub fn default_hotkey(self) -> Option<KeyChord> {
         match self {
             Self::WeType => Some(KeyChord {
                 keys: vec![KeyCode::LeftControl, KeyCode::LeftWindows],
             }),
-            Self::Doubao => Some(KeyChord {
-                keys: vec![KeyCode::RightAlt],
-            }),
+            Self::Doubao => DoubaoVoiceMode::Hold.default_hotkey(),
             Self::Custom => None,
         }
     }
@@ -211,20 +238,35 @@ impl Default for VoiceTargetConfig {
 }
 
 impl VoiceTargetConfig {
+    /// 本配置对应的出厂默认快捷键（携带豆包模式差异）。
+    ///
+    /// 与 [`VoiceTarget::default_hotkey`] 的区别：豆包两档模式的出厂快捷键
+    /// **不同**，本方法按 `doubao_mode` 取精确值；`VoiceTarget::default_hotkey`
+    /// 只取豆包长按档，供不关心模式的调用方使用。
+    pub fn default_hotkey_for_target(&self) -> Option<KeyChord> {
+        match self.target {
+            VoiceTarget::Doubao => self.doubao_mode.default_hotkey(),
+            other => other.default_hotkey(),
+        }
+    }
+
     /// 解析出实际应注入的和弦。`None` = 本次不注入（关闭，或自定义目标未录入）。
+    ///
+    /// ⚠️ 未显式录入时取**随模式变化**的默认值（豆包免按模式为 右 Alt + 空格），
+    /// 不是 `VoiceTarget::default_hotkey` 那个只认长按档的简化值。
     pub fn resolved_hotkey(&self) -> Option<KeyChord> {
         if !self.enabled {
             return None;
         }
         match &self.hotkey {
             Some(chord) => Some(chord.clone()),
-            None => self.target.default_hotkey(),
+            None => self.default_hotkey_for_target(),
         }
     }
 
     /// 本次注入应采用何种形态。
     ///
-    /// 只有豆包（且选了免提模式）走切换式；其余目标与微信保持原有
+    /// 只有豆包（且选了免按模式）走切换式；其余目标与微信保持原有
     /// 「按住说话」语义，**逐字等价**。
     pub fn injection_shape(&self) -> InjectionShape {
         match self.target {
@@ -391,7 +433,7 @@ mod tests {
 
     #[test]
     fn doubao_handsfree_mode_uses_toggle_shape() {
-        // 免提模式是"按一次开始、再按任意键结束"，若仍按 Hold 的
+        // 免按模式是"按一次开始、再按任意键结束"，若仍按 Hold 的
         // "按住再松开"注入，语音只会持续一瞬 → 必须是切换式。
         let config = VoiceTargetConfig {
             target: VoiceTarget::Doubao,
@@ -403,8 +445,11 @@ mod tests {
     }
 
     #[test]
-    fn doubao_mode_does_not_affect_hotkey() {
-        // 两档模式用同一个快捷键：切换模式不得改变注入的和弦。
+    fn doubao_mode_changes_the_injected_hotkey() {
+        // 🔑 2026-09-17 实测推翻旧假设：两档模式**不是**同一个快捷键。
+        //   长按模式 voiceLongPressShortcut = {keyCode: 0,  modifierFlags: 2049}  → 纯右 Alt
+        //   免按模式 voiceShortcut          = {keyCode: 32, modifierFlags: 2049}  → 右 Alt + 空格
+        // 若沿用"切模式不改和弦"，免按模式会发送错误组合键。
         let hold = VoiceTargetConfig {
             target: VoiceTarget::Doubao,
             hotkey: None,
@@ -415,11 +460,61 @@ mod tests {
             doubao_mode: DoubaoVoiceMode::HandsFree,
             ..hold.clone()
         };
-        assert_eq!(hold.resolved_hotkey(), handsfree.resolved_hotkey());
+
+        assert_eq!(
+            hold.resolved_hotkey(),
+            Some(KeyChord {
+                keys: vec![KeyCode::RightAlt],
+            }),
+            "长按模式 = 纯右 Alt"
+        );
         assert_eq!(
             handsfree.resolved_hotkey(),
             Some(KeyChord {
+                keys: vec![KeyCode::RightAlt, KeyCode::Space],
+            }),
+            "免按模式 = 右 Alt + 空格"
+        );
+        assert_ne!(
+            hold.resolved_hotkey(),
+            handsfree.resolved_hotkey(),
+            "两档必须解析出不同和弦"
+        );
+    }
+
+    #[test]
+    fn explicit_user_hotkey_still_overrides_mode_default() {
+        // 用户显式录入的快捷键优先于任何模式的默认值。
+        let config = VoiceTargetConfig {
+            target: VoiceTarget::Doubao,
+            hotkey: Some(KeyChord {
+                keys: vec![KeyCode::F5],
+            }),
+            enabled: true,
+            doubao_mode: DoubaoVoiceMode::HandsFree,
+        };
+        assert_eq!(
+            config.resolved_hotkey(),
+            Some(KeyChord {
+                keys: vec![KeyCode::F5],
+            })
+        );
+    }
+
+    #[test]
+    fn target_only_default_still_reports_hold_chord() {
+        // `VoiceTarget::default_hotkey` 不带模式信息，固定取长按档；
+        // 需要精确值必须走 `VoiceTargetConfig::default_hotkey_for_target`。
+        assert_eq!(
+            VoiceTarget::Doubao.default_hotkey(),
+            Some(KeyChord {
                 keys: vec![KeyCode::RightAlt],
+            })
+        );
+        assert_eq!(
+            DoubaoVoiceMode::HandsFree.default_hotkey(),
+            Some(KeyChord {
+                keys: vec![KeyCode::RightAlt, KeyCode::Space],
             })
         );
     }
@@ -447,8 +542,10 @@ mod tests {
     fn doubao_mode_display_names_match_client_ui() {
         // 展示名必须与豆包设置界面的文案一致，用户才能对照着去找。
         // 界面为「设置 → 语音输入 → 语音输入模式」下的二选一。
+        // ⚠️ 2026-09-17 UIA 实测界面文案是「免按模式」，不是早期从 DLL
+        //    字符串推断的「免提模式」——两者指同一档。
         assert_eq!(DoubaoVoiceMode::Hold.display_name(), "长按模式");
-        assert_eq!(DoubaoVoiceMode::HandsFree.display_name(), "免提模式");
+        assert_eq!(DoubaoVoiceMode::HandsFree.display_name(), "免按模式");
         // 免提模式的引导文案必须明确指向豆包设置，否则用户找不到入口
         // （2026-09-17 实际发生过：界面无"全局"字样，按字面找会扑空）。
         assert!(DoubaoVoiceMode::HandsFree.user_hint().contains("豆包设置"));

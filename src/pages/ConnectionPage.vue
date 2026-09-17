@@ -105,8 +105,12 @@ const voiceTargets: Array<{ value: VoiceTarget; label: string; hint: string }> =
  * `InjectionShape`），选错会导致语音只持续一瞬。
  */
 const doubaoModes: Array<{ value: DoubaoVoiceMode; label: string; hint: string }> = [
-  { value: "hold", label: "长按模式", hint: doubaoVoiceModeHint("hold") },
-  { value: "handsfree", label: "免提模式", hint: doubaoVoiceModeHint("handsfree") },
+  { value: "hold", label: doubaoVoiceModeLabel("hold"), hint: doubaoVoiceModeHint("hold") },
+  {
+    value: "handsfree",
+    label: doubaoVoiceModeLabel("handsfree"),
+    hint: doubaoVoiceModeHint("handsfree"),
+  },
 ];
 
 /** 当前展示的豆包模式（非豆包目标时为 null，界面不显示该区块）。 */
@@ -152,10 +156,10 @@ const voiceTargetHint = computed(() => {
   return base;
 });
 
-/** 免提模式下松手不再结束语音，界面必须讲清楚，否则用户会以为坏了。 */
+/** 免按模式下松手不再结束语音，界面必须讲清楚，否则用户会以为坏了。 */
 const doubaoModeEffectHint = computed(() => {
   if (doubaoModeSelection.value !== "handsfree") return "";
-  return "免提模式下，按一下遥控器语音键开始说话，再按一下结束；松手不会结束语音。";
+  return "免按模式下，按一下遥控器语音键开始说话，再按一下结束；松手不会结束语音。";
 });
 
 /** 清除显式录入值，回到该目标的默认快捷键。 */
@@ -180,7 +184,7 @@ function targetIsActive(target: VoiceTarget): boolean {
 async function applyVoiceTarget(target: VoiceTarget) {
   if (savingVoiceTarget.value || targetIsActive(target)) return;
   // 带上当前的豆包模式：后端 `doubao_mode` 缺省会落回 `hold`，
-  // 不透传就会在每次切换输入法时静默重置用户已选好的免提模式。
+  // 不透传就会在每次切换输入法时静默重置用户已选好的免按模式。
   await saveVoiceTarget(target, null, true, voiceTarget.value?.doubaoMode);
   voiceHotkeyMessage.value = `${voiceTargetLabel(target)}已选中，按住说话快捷键为 ${voiceHoldHotkeyLabel(
     voiceTarget.value?.resolvedHotkey ?? null,
