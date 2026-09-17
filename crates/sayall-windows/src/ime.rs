@@ -185,7 +185,9 @@ pub fn activate_target_session(target: VoiceTarget) -> Result<VoiceTargetActivat
 
 /// 确保微信输入法是当前会话的活动输入法（幂等）。
 ///
-/// 保留原名作为薄封装：既有调用点与测试无需改动，且微信路径行为不变。
+/// 保留原名作为薄封装：微信路径不再是唯一目标后，应用侧统一走
+/// [`activate_target_session`]，本函数仅供测试与将来的语义化调用点保留。
+#[allow(dead_code)]
 pub fn activate_wetype_session() -> Result<VoiceTargetActivation, String> {
     activate_target_session(VoiceTarget::WeType)
 }
@@ -202,7 +204,9 @@ pub fn activate_wetype_session() -> Result<VoiceTargetActivation, String> {
 /// 返回结果描述（用于日志）：切换用的临时输入法 CLSID 与两步激活结果。
 pub fn cycle_wetype_profile() -> Result<String, String> {
     let (sender, receiver) = mpsc::channel();
-    let spawned = std::thread::Builder::new()
+    // 句柄不参与后续同步：本函数以 channel 超时收敛，不 join 线程（线程
+    // 自行结束）。保留 `_spawned` 以免句柄立即析构的语义被误读为"取消"。
+    let _spawned = std::thread::Builder::new()
         .name("sayall-ime-cycle".to_owned())
         .spawn(move || {
             let outcome = sta_cycle_wetype_profile();
