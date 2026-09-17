@@ -51,11 +51,11 @@ pub mod send_input;
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
 #[cfg(windows)]
 pub mod send_input_windows;
-#[cfg(windows)]
-mod wetype_revive;
 /// 语音输入目标抽象（微信/豆包/自定义）：默认快捷键、TSF 身份、注入形态差异
 /// 收敛于一处。非 Windows 下也需要（纯数据 + 测试），故不加 cfg。
 pub mod voice_target;
+#[cfg(windows)]
+mod wetype_revive;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
