@@ -1,23 +1,50 @@
-# 豆包"全局语音快捷键"真机实验协议
+# 豆包"免提模式"实验协议（原题：全局语音快捷键）
 
 - 建立：2026-09-17
 - 目的：判定豆包输入法能否被本应用（纯 SendInput，免驱动/免提权/免注入）唤起
 - 前置结论：`Bugs/2026-09-17-doubao-injection-cross-repo-verification.md`
 - 状态：**未完成（需 Echo 配合）**。脚本已就绪并各自自测通过。
 
+## ⚠️ 2026-09-17 重要更正：开关的真实名字是「免提模式」
+
+原先按 vibe-flow 文档的说法寻找「全局语音快捷键」开关，**在 v0.9.0.0 界面上找不到**。
+经三路取证，确认如下：
+
+**实际界面（截图 + DLL 静态分析双重确认）** —— 豆包设置 → 语音输入：
+
+```
+语音输入模式
+  ├─ 长按模式     按下说话，松手结束                    [右 Alt]
+  └─ 免提模式     按一次即可开始说话，再按任意键可结束      [右 Alt]
+麦克风选择        CABLE Output (VB-Audio Virtual Cable)
+标点展示         空格代替标点 / 句末不加标点
+```
+
+**证据链**：
+
+| 证据 | 结论 |
+|---|---|
+| `DoubaoIme.Settings.UI.dll` 有 `HandsFreeShortcutBox` / `UpdateHandsFreeShortcut` | UI 上确实有"免提快捷键"输入框 |
+| 同 DLL 有「长按模式」「免提模式」「按一次即可开始说话，再按任意键可结束」文案 | 「免提模式」是可见的单选项 |
+| `enableGlobalVoiceShortcut` 在 UI.dll / ViewModels.dll / NativeRuntime.dll / Settings.exe **三种编码下全部 0 命中**，仅 `ImeService.exe` 命中 1 次 | 该配置项**没有独立的 UI 开关**，属配置层内部键 |
+| `ImeService.exe` 的 config schema 键序列：`enableVoiceShortcut` → `enableGlobalVoiceShortcut` → `voiceShortcut` → `voiceLongPressShortcut` | 它与"语音快捷键"同组，是**免提模式那一档的开关** |
+| `handsFreeTipDid` / `ConsumeHandsFreeTipText` 位于状态栏/托盘代码段 | 「免提」是豆包自己的命名，与「全局」是同一件事 |
+
+**推论**：`enableGlobalVoiceShortcut` = 「免提模式」开关的内部名。
+勾选「免提模式」即开启该配置项。**这是本实验要操作的目标。**
+
 ## 为什么做这个实验
 
 2026-09-04 判定"豆包注入判死"（基于豆包 0.8.2.7）。四个参考仓库独立印证该判定。
 但复核发现**一格从未被测过**：
 
-> vibe-flow 在 V1.x 支持豆包的做法是**引导用户先在豆包客户端启用"全局语音快捷键"**，
-> 再让程序发送同一组合键（`docs/V1_5_USER_GUIDE_ZH.md` L110、
-> `V1_2_1_TUTORIAL_ZH.md` L84"先在豆包中启用全局快捷键"）。
+> vibe-flow 在 V1.x 支持豆包的做法是**引导用户先在豆包客户端启用"全局语音快捷键"**
+> （`docs/V1_5_USER_GUIDE_ZH.md` L110、`V1_2_1_TUTORIAL_ZH.md` L84）。
 
 - 豆包的**长按右 Alt**只在"豆包是当前活动输入法"时生效 → 已证注入无效。
-- 豆包的**全局语音快捷键**（`enableGlobalVoiceShortcut`）语义上是**跨应用生效**的，
-  更接近系统级全局热键。**若开关打开后豆包改用 `RegisterHotKey` 注册热键，
-  则 SendInput 注入应当能触发，且完全合规。**
+- 豆包的**免提模式**（`enableGlobalVoiceShortcut`）语义上是**跨应用生效**的
+  （"按一次即可开始说话，再按任意键可结束"——不需要按住），更接近系统级全局热键。
+  **若勾选后豆包改用 `RegisterHotKey` 注册热键，则 SendInput 注入应当能触发，且完全合规。**
 
 本机基线（2026-09-17 只读观察）：`enableGlobalVoiceShortcut = false` → 该分支从未激活。
 
@@ -37,7 +64,7 @@
 三个结果分支：
 
 - **A** 物理能唤起、注入不能 → 原判定成立，豆包记为第三方兼容性边界（预期结果）
-- **B** **两者都能唤起** → 开关打开后注入可用，**新合规路线成立**（我们想要的）
+- **B** **两者都能唤起** → 免提模式下注入可用，**新合规路线成立**（我们想要的）
 - **C** 两者都不能唤起 → 豆包自身没配好（快捷键冲突/麦克风未选 CABLE Output），
   本轮实验无效，先修豆包配置再复测
 
@@ -45,11 +72,10 @@
 
 ### 准备工作（一次性）
 
-1. **确认豆包麦克风是 `CABLE Output`**（否则实验永远失败）：
-   豆包设置 → 语音 → 麦克风设备 → 选 `CABLE Output (VB-Audio Virtual Cable)`。
+1. **确认豆包麦克风是 `CABLE Output`**（截图确认本机已是此项，✅ 无需调整）。
 2. 打开记事本，点进文本框，确保**输入法切到豆包**（看任务栏输入指示器）。
 
-### 阶段 1：开关关闭态（对照基线）
+### 阶段 1：免提模式未勾选（对照基线）
 
 ```bash
 cd C:/wt-doubao
@@ -65,14 +91,15 @@ python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.
 
 **记录 A 组数据**：`注入能否唤起` / `物理能否唤起`。
 
-### 阶段 2：打开开关
+### 阶段 2：勾选「免提模式」
 
-1. 豆包设置 → 语音 → 打开**"全局语音快捷键"**（名称以实际 UI 为准；
-   对应配置项 `voice.enableGlobalVoiceShortcut`）。
-2. 建议同时确认它显示的快捷键是什么——**记下来**，实验要注入同一个组合。
+1. 豆包设置 → **语音输入** → **语音输入模式** → 选中 **「免提模式」**
+   （对应配置项 `voice.enableGlobalVoiceShortcut`）。
+2. 确认它右侧显示的快捷键是什么——**记下来**，实验要注入同一个组合。
+   本机基线是 `右 Alt`（`modifierFlags=2049` = `0x801` = ALT | 右侧位）。
 3. 关掉豆包设置窗口。
 
-### 阶段 3：开关开启态（关键测量）
+### 阶段 3：免提模式已勾选（关键测量）
 
 ```bash
 python Testing/investigation/doubao-global-hotkey/1-probe-hotkey-ownership.py
@@ -85,21 +112,24 @@ python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.
 
 **记录 B 组数据。**
 
+⚠️ 注意：免提模式是"按一次开始、再按任意键结束"的**切换式**语义，
+与长按模式不同。测量时注入一次后需要**再注入一次来结束**，否则会一直开麦。
+
 ### 阶段 4：还原
 
-把"全局语音快捷键"开关**关回去**（恢复实验前状态）。
+把「语音输入模式」**切回「长按模式」**（恢复实验前状态）。
 
 ## 结果记录表
 
 | 阶段 | 热键 TAKEN 数 | 注入唤起 | 物理唤起 | 判定 |
 |---|---|---|---|---|
-| 1 · 开关关闭 | **0**（已实测） | 待测 | 待测 | |
-| 3 · 开关开启 | 待测 | 待测 | 待测 | |
+| 1 · 免提模式未勾选 | **0**（已实测） | 待测 | 待测 | |
+| 3 · 免提模式已勾选 | 待测 | 待测 | 待测 | |
 
 ### 分支决策
 
-- 阶段 3 出现 TAKEN 且注入唤起 → **B 成立**：本仓库新增"豆包（全局快捷键）"档，
-  UI 引导用户开启该开关。**这是唯一能免驱动支持豆包的合规路径。**
+- 阶段 3 出现 TAKEN 且注入唤起 → **B 成立**：本仓库新增"豆包（免提模式）"档，
+  UI 引导用户勾选该模式。**这是唯一能免驱动支持豆包的合规路径。**
 - 阶段 3 无 TAKEN 且注入不唤起 → **A 成立**：豆包在免驱动前提下永久记为边界，
   UI 如实说明需要可选 Helper（ADR 0002 增强轨）。
 - 物理键在任一阶段都唤不起 → **先修豆包配置**（麦克风/快捷键冲突），本轮作废。
@@ -115,11 +145,16 @@ python Testing/investigation/doubao-global-hotkey/2-probe-injection-vs-physical.
 
 1. **`Add-Type` 被本机安全策略硬拦**（`Command blocked for security: Add-Type compiles
    and loads .NET code at runtime`），**沙箱内外都拦**。→ 改用 `python3 + ctypes`。
-2. **SendInput 在沙箱内静默失败**（返回 0，不报错）。→ 注入类探针必须用
+2. **`os.path.islink` 在本机不可靠**（一律返回 False）→ 判定联接要用
+   `GetFileAttributesW & FILE_ATTRIBUTE_REPARSE_POINT`。
+3. **SendInput 在沙箱内静默失败**（返回 0，不报错）。→ 注入类探针必须用
    `dangerouslyDisableSandbox` 或让用户手动跑。
-3. **`INPUT` 结构体必须是 40 字节**。第一版 union 只填 24 字节 → `sizeof(INPUT)=32`
+4. **`INPUT` 结构体必须是 40 字节**。第一版 union 只填 24 字节 → `sizeof(INPUT)=32`
    → 注入静默无效（**这正是 2026-09-04 那个著名 bug 的重现**）。
    脚本已加启动断言 `assert sizeof(INPUT) == 40`，别再手写这个结构。
-4. **bash heredoc 写文件会触发安全启发式**（被误判为"从 bash 调 PowerShell"）。
+5. **bash heredoc 写文件会触发安全启发式**（被误判为"从 bash 调 PowerShell"）。
    → 用 Write 工具写文件，不要 `cat > file <<EOF`。
-5. PowerShell 工具 stdout 不返回 → 本方案已全部改用 Python，规避该问题。
+6. **PowerShell 工具 stdout 不返回** → 本方案已全部改用 Python，规避该问题。
+7. **截图用 `PrintWindow` 在本机取不全数据**（返回字节数少于 w*h*4）→
+   改用 `BitBlt` 从屏幕 DC 直接拷贝 + `CreateDIBSection` 拿像素指针。
+   另注意窗口若部分在屏幕外（负坐标），会截到黑边 → 先校正位置。

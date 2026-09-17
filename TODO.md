@@ -13,6 +13,10 @@
 - [ ] 支持豆包输入法：参考 Mac App 的产品行为与配置引导，在不读取或修改豆包私有配置、内部数据库、内存或私有协议的前提下设计 Windows 支持路径；基础能力不得依赖进程注入，若必须使用提权 Helper 或虚拟 HID，须保持独立、显式启用且不影响现有语音主路径，并分别完成 RC001/RC003 真机验收。
   - **部分落地（2026-09-17，分支 `feature-doubao-ime`）**：已交付"语音输入目标选择"（微信 / 豆包 / 自定义）与快捷键分流——新增 `crates/sayall-windows/src/voice_target.rs`（`VoiceTarget` / `VoiceTargetConfig`，默认快捷键单一事实源），豆包走 TSF 会话级激活（CLSID `{9D2B2E2B-3C93-4D2F-9D35-6EEB85F0D2B0}` / Profile GUID `{2B4D4B3A-4D4F-4C0A-8E66-7F771A2B9C10}`，与微信同机制、仅身份不同），配置落 `voice-target.json` 且保留 v1→v2 迁移。**未读取豆包私有配置**（`%APPDATA%\DoubaoIme\conf\config.json` 仅作对照观察，不进产品路径）；用户自定义快捷键由本应用 UI 录入。
   - **仍未完成 / deferred**：① 豆包能否被 SendInput 唤起**未在 v0.9.0.0 上复测**——2026-09-04 结论（`Bugs/2026-09-04-doubao-voice-hold-hotkey.md`，四层闭环判死：`VoiceKeyHookProc` 首查 `LLKHF_INJECTED` 即纯透传）基于 0.8.2.7，本机已升级至 v0.9.0.0，机制需重新确证；字符串复核显示 `VoiceKeyHookProc` 仍在（2 处），但 `LLKHF_INJECTED` 字面量在本版为 0 次命中——**这既可能是常量被内联/改名，也可能是过滤逻辑被移除，两种可能都无法只靠静态字符串区分**，必须真机实测。② RC001/RC003 真机验收未做。③ 若注入仍无效，唯一路径仍是 ADR 0002 的 WinUHid 增强轨。
+  - **实验设计更正（2026-09-17）**：唯一未测过的合规路线"豆包的全局语音快捷键"**在 v0.9.0.0 界面上的真实名称是「免提模式」**（豆包设置 → 语音输入 → 语音输入模式，与「长按模式」二选一）。
+    - 三路取证定案：`voice.enableGlobalVoiceShortcut` 在 `Settings.UI.dll` / `ViewModels.dll` / `NativeRuntime.dll` / `Settings.exe` 中**三种编码全部 0 命中**，仅 `ImeService.exe` 命中 1 次 → **无独立 UI 控件**，就是免提模式那一档的配置层内部键；UI 侧对应控件为 `HandsFreeShortcutBox`，界面文案「按一次即可开始说话，再按任意键可结束」；本机基线 `enableGlobalVoiceShortcut = false`（即当前为「长按模式」）。详见 `Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md`。
+    - **该区分对可行性判断有意义**：长按模式与按键生命周期强绑定；免提模式是"按一次开始、再按任意键结束"的**切换式**语义，意味着豆包须持续监听全局按键，**更可能走 `RegisterHotKey` 全局路径**。
+    - 实验协议与探针已就绪：`Testing/investigation/doubao-global-hotkey/`（README 含四阶段步骤与 A/B/C 分支决策；`1-probe-hotkey-ownership.py` 抢占探测、`2-probe-injection-vs-physical.py` 注入 vs 物理键对照）。**状态：deferred**，需真机上勾选「免提模式」并由人工按物理键完成对照。
 - [ ] 完善聚焦输入框处理：参考 Mac App 对目标输入框的识别、焦点保持、恢复和无可编辑目标时的用户提示；Windows 仅使用公开的焦点与辅助功能 API，避免静默把语音结果送入错误窗口，并覆盖焦点切换、窗口关闭、应用切换、Onboarding/设置窗口前后台切换及语音会话中焦点变化。
 
 ## Windows RC001 / RC003

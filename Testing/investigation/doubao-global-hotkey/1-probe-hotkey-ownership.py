@@ -1,13 +1,17 @@
-"""豆包"全局语音快捷键"实验：一、系统热键注册探测
+"""豆包"免提模式"实验：一、系统热键注册探测
 
 目的：在不读取/不修改豆包私有配置的前提下，判断豆包当前是否已向系统
       注册了语音热键。做法是"抢占式探测"——尝试自己 RegisterHotKey
       候选组合键；注册失败且 LastError=1409
       （ERROR_HOTKEY_ALREADY_REGISTERED）说明该组合已被别人注册。
 
-何时用：用户切换豆包"全局语音快捷键"开关的前后各跑一次做对比。
-        开关关闭时应全部 FREE；开启后若变 TAKEN，即证明豆包改用了
+何时用：用户切换豆包"语音输入模式"（长按模式 ↔ 免提模式）的前后各跑一次做对比。
+        未勾选免提模式时应全部 FREE；勾选后若变 TAKEN，即证明豆包改用了
         RegisterHotKey 路径 → 意味着 SendInput 注入应当能触发。
+
+背景（2026-09-17 定案）：配置项 voice.enableGlobalVoiceShortcut 在界面上
+        对应「免提模式」（豆包设置 → 语音输入 → 语音输入模式），
+        不是独立的"全局语音快捷键"开关。详见 Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md。
 
 本脚本只做 Register/Unregister，不注入按键、不改任何配置、不读豆包文件。
 用 ctypes 而非 PowerShell Add-Type（本机 Add-Type 被安全策略硬拦）。
