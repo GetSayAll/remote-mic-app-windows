@@ -32,6 +32,14 @@
 当时踩到的样子：先下结论"内核非分页池被泄漏占满"（错），修正为"用户态进程泄漏了 BLE
 资源"（又错），两次都是被新加的探针打掉的。见 §4。
 
+**⚠️ 连字段名也会骗人（2026-09-18 补）**：
+`resource_probe reason=radio_enumerate_failed reason=snapshot_failed method=device_query hresult=0x80070008`
+里 `method=device_query` 指的是**接下来要走的兜底方法**，**不是**失败的那一步。对照 0.2.12 的
+`bluetooth_radio.rs`，`reason=snapshot_failed` 是 `find_bluetooth_radio_from_snapshot()` 即
+**`Radio::GetRadiosAsync()` 返回 Err** 的分支。→ 读日志字段前**先去源码确认它是在哪个分支打的**。
+失盲态的准确描述是：**`Radio::GetRadiosAsync()` 与 `DeviceInformation.FindAllAsyncAqsFilter(Radio::GetDeviceSelector())`
+两条入口同时以 `0x80070008` 失败**，而失败进程只有 ~390 个句柄、启动仅 100 ms。
+
 ## 3. 只看日志尾部会得出相反结论
 
 只看 `tail` 时，每次现场都像"刚恢复、偶发"。全量聚合才看清是**慢性病**：16 轮爆发、
@@ -75,10 +83,26 @@ grep -a "windows_resource_exhausted" "$LOG" | grep -ao "pid=[0-9]*" | sort | uni
 | 杀 COM 代理 `dllhost` | 无效 |
 | 提权 PnP 重启适配器 | 无效，**且是空操作**（见 §6） |
 | 伪 S3 睡眠 | 无效 |
-| **完整重启** | **有效（3 次实证）** |
+| 命令行重启 `bthserv` / `BTAGService` / `DevQueryBroker` | **未验证**（沙箱内提权不可用，留作下次复现） |
+| **完整冷启动** | **有效（5 次实证）**，判据见 §6.3 |
 
 规则：把候选手段列成表，**逐项做、逐项留证据**，不要"再试一个看看"。否决也是资产——
 它能排除整层范围（本次直接排除了"所有用户态手段"）。
+
+### 5.1 剥离变量的一刀：先在**同一进程内**复现（2026-09-18 实测）
+
+`ConnectionPage` 的**「断开连接」**按钮与"退出应用"走的是**同一套** `close_session`，
+但前者**不结束进程**。所以它是对 `close()` 的**直接检验**，且把"进程退出"这个变量彻底排除。
+
+结果：**同一进程内 断开→重连 10/10 全部 `passed`**（耗时 1.9–3.6s，无单调上升）
+→ **`close_session` / GATT 对象不按循环泄漏**，`Prewarm → device_from_address → service_discovery`
+全链路健康。**别再去追"我们的 close 泄漏"这条线。**
+
+配套的**反面检验**（同一份日志、33 次进程迁移）：用"退出时是否持有活动会话"去预测
+"下次启动是否失盲"，**持有组 2/4 坏、未持有组 11/29 坏 → 零区分度**。日志逐字相同的两次退出
+（`cleanup passed` + `shutdown passed 553/586ms`）一次带来健康启动、一次带来失盲。
+→ **"上次退出方式"不足以解释失盲**，不要把它写成因果链。取证脚本：
+`.workbuddy/memory/tools/ble-log-forensics.py sessions|episodes|probe`。
 
 ## 6. 本机环境会骗人：三个必须验的前提
 
@@ -89,6 +113,9 @@ grep -a "windows_resource_exhausted" "$LOG" | grep -ao "pid=[0-9]*" | sort | uni
    `SuspendStart/SuspendEnd` 只差 1 个 tick、`FullResume: 259 ms` → 伪 S3。真实 S3 恢复
    是秒级。→ **判"是否真断电"看固件计时与恢复耗时。**
 3. **关机 ≠ 重启。** 本机启用了快速启动，混合关机不会完整复位设备，必须用"重启"。
+   🔑 **判据（2026-09-18 建立）**：`Microsoft-Windows-Kernel-Boot` **Event 27** 的
+   `<Data Name='BootType'>0</Data>` = 真冷启动（1=混合启动/快速启动，2=休眠恢复，3=睡眠恢复）。
+   ⚠️ 别拿 `wevtutil /f:text` 的 `Date:` 判断——它带 `Z` 但**其实是本地时间**；要真 UTC 用 `/f:xml`。
 
 ## 7. 工具反模式清单（都在本仓库真实出现过）
 

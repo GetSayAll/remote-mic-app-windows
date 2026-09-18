@@ -42,9 +42,13 @@
 
 | 恢复手段 | 用量（全日志） | 结果 |
 | --- | --- | --- |
-| 无线电 Off/On | `ble_radio_recovery phase=requested` 489 次；其中 `terminal_result=passed` **143 次**、failed 346 次 | **143 次 Off/On 明确执行成功，但紧随其后的 `device_from_address` 仍在 0–5 ms 内 `windows_resource_exhausted`** |
+| 无线电 Off/On | `ble_radio_recovery phase=completed` 489 次；其中 `terminal_result=passed` **143 次**、failed 346 次 | **143 次 Off/On 明确执行成功，但紧随其后的 `device_from_address` 仍在 0–5 ms 内 `windows_resource_exhausted`** |
 | 提权 PnP 重启适配器 | `pnp_radio_recovery phase=requested` **7 次** | **7 次全部 `error_code=stack_verification_failed`**（helper 退出码 0，但重建后仍枚举不到 Radio） |
 | 普通重连 + 指数退避 | 4581 次 | 无效 |
+
+> 计数口径更正（2026-09-16）：现场日志里 **没有** `ble_radio_recovery phase=requested`
+> 这一行（旧实现只在 Off/On 结束处落 `phase=completed`），489 次请按
+> `phase=completed` 计数。`requested` 只出现在 `pnp_radio_recovery` 上。
 
 - **恢复预算空转**：最长一轮里 `ble_radio_recovery phase=window_reopened` 的 `window` 已涨到
   **70**（每窗口 2 次 + 60 秒冷却）。应用在无法自愈的状态下持续空转数百次恢复，既不成功
@@ -326,6 +330,35 @@ BLE 会话，是链路僵死的主要诱因"）。
 - 建议（未实施）：① 检测"恢复连续无效"后转为明确 UI 提示，说明原因与预期效果
   （需一次重启），停止空转；② 修复提权 PnP 空操作（或改走真正会断电的路径）；
   ③ 升级/安装流程不得强杀正在连接的应用——本次事件的触发线索正指向该规则未被遵守。
+
+## 2026-09-16 A/B 对照：把"Off/On 无效"从单组印象升级为对照结论
+
+上面的表是**单组**观察（"执行成功却无效"）。单组数据无法排除"没开关会更差"，
+所以补了对照：把每次 Off/On 与其后**同一 pid** 的第一次重连配对，再与"同一次僵死
+事件内、没有紧接 Off/On 的重连尝试"比恢复率。复算脚本
+`scripts/analyze-radio-recovery-ab.py`，操作与判读见
+`Testing/WindowsBleResourceRecovery.md`。
+
+证据：`artifacts/ev_stream_raw.txt`（0.2.6 僵死现场，2983 条 `ble_connect`）。
+
+| 组 | 样本 | 恢复 | 恢复率 |
+| --- | --- | --- | --- |
+| 实验组：Off/On 后首次重连 | 488 | 3 | **0.61%** |
+| 对照组：同事件内普通重试（`attempt>=1`） | 2406 | 15 | **0.62%** |
+| （参考）进程冷启动 `attempt=0` | 89 | 26 | 29.21% |
+| （参考）Off/On 自身报 `passed` | 143 | 3 | 2.10% |
+| （参考）Off/On 自身报 `failed` | 345 | 0 | 0.00% |
+
+**两组相差 -0.01 个百分点**（判定阈值 ±10）——开关与不开关完全重合。
+**"WinRT 说开关成功"不等于"碰到蓝牙栈"**：Off/On 报成功 143 次，其后只恢复 3 次，
+因为命中的是启动预热缓存的 Radio 对象；报失败 345 次，其后恢复 0 次。
+这正面支持本文档的根因模型（楔死在驱动/控制器层，软件层无线电开关触不到）。
+
+**据此已实施**：`ble.rs` 按错误码分流——命中
+`windows_resource_exhausted` / `winrt_operation_aborted` 时跳过 Off/On 与 PnP
+（日志 `ble_recovery_decision action=skip_recovery reason=stack_exhausted_proven_ineffective`），
+只保留普通重连；非僵死码仍走 Off/On 兜底。用户可见文案不再要求"重启电脑"。
+根因/触发机制与本节无冲突：本节只否证了**恢复手段**，触发机制仍归因安装器强杀。
 
 ## 2026-09-16 01:40 根因落点确认：安装器强杀正在连接的应用（触发机制已定位）
 

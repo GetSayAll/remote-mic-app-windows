@@ -407,7 +407,23 @@ fn worker_loop(
                                         // ATTRIBUTION.md 与 Testing\investigation）。
                                         // 连续失败达标时执行；每窗口限制次数，耗尽后
                                         // 冷却再开新窗口，避免永久退化成无限普通重连。
-                                        if let Some(recovery_cycle) = radio_recovery
+                                        // 按错误码分流（2026-09-16）：
+                                        // 僵死态（0x80070008 / 0x80004004）下无线电 Off/On
+                                        // 与提权 PnP 重启**都已实测无效**（143 次 Off/On 执行
+                                        // 成功后连接一次都没恢复），继续开关只会空转——包括
+                                        // 弹 UAC 的 PnP。此态只保留普通重连。
+                                        // 其余故障（遥控器不可达、GATT 状态失败、超时等）
+                                        // 仍走 Off/On，那是无线电恢复唯一还可能有效的场景。
+                                        let error_code = ble_error_code(&error);
+                                        if crate::bluetooth_radio::is_stack_exhausted(error_code) {
+                                            gatt_note(format!(
+                                                "ble_recovery_decision action=skip_recovery reason=stack_exhausted_proven_ineffective error_code={error_code} consecutive_failures={} radio_cycle=skipped pnp_restart=skipped",
+                                                backoff.attempt()
+                                            ));
+                                            lock(&state).last_error = Some(
+                                                "蓝牙链路暂时不可用，正在持续重试…".to_owned(),
+                                            );
+                                        } else if let Some(recovery_cycle) = radio_recovery
                                             .begin_cycle(backoff.attempt(), Instant::now())
                                         {
                                             if recovery_cycle.reopened {
@@ -422,9 +438,14 @@ fn worker_loop(
                                             // 恢复请求，其中 143 次 Off/On「执行成功」却无效。
                                             // `begin_cycle` 已在上方调用（窗口号照常推进，保证
                                             // stride 生效），这里只是不执行 Off/On：保留低频恢复
-                                            // 与普通重连，并给出明确的人工介入提示——AGENTS.md
-                                            // 允许"公开 API 全部失效"时提示用户，但要求说明原因
-                                            // 与预期效果。
+                                            // 与普通重连。
+                                            //
+                                            // 与"落到底部"的差别：这里**必须**自己重设
+                                            // `reconnect_deadline`（下方第 519 行那次会被 `continue`
+                                            // 跳过）。若漏掉，循环顶部会走 `receiver.recv()` 无超时
+                                            // 阻塞，且 `WorkerMessage::WakeReconnect` 的
+                                            // `reconnect_deadline.is_some()` 门控会把按键唤醒重连
+                                            // 一并封死——重连永久停摆。改动此处务必保留赋值。
                                             if recovery_cycle.window
                                                 > crate::bluetooth_radio::RADIO_RECOVERY_FUTILE_WINDOW
                                                 && recovery_cycle.window
@@ -432,13 +453,14 @@ fn worker_loop(
                                                     != 0
                                             {
                                                 gatt_note(format!(
-                                                    "ble_radio_recovery phase=skipped reason=recovery_proven_ineffective window={} stride={}",
+                                                    "ble_recovery_decision action=skip_recovery reason=recovery_proven_ineffective error_code={error_code} window={} stride={}",
                                                     recovery_cycle.window,
                                                     crate::bluetooth_radio::RADIO_RECOVERY_FUTILE_STRIDE
                                                 ));
+                                                // 不提示"重启电脑"：那不是用户该承担的动作
+                                                // （2026-09-16 用户明确否决）。只说明当前状态。
                                                 lock(&state).last_error = Some(
-                                                    "蓝牙栈已进入自动恢复无法清除的状态：应用已多次重启蓝牙无线电但均未恢复连接。请重启电脑以恢复蓝牙。"
-                                                        .to_owned(),
+                                                    "蓝牙链路暂时不可用，正在持续重试…".to_owned(),
                                                 );
                                                 backoff.reset();
                                                 lock(&state).reconnect_attempt = 0;
@@ -446,6 +468,12 @@ fn worker_loop(
                                                     Some(Instant::now() + Duration::from_secs(2));
                                                 continue;
                                             }
+                                            gatt_note(format!(
+                                                "ble_recovery_decision action=radio_cycle error_code={error_code} consecutive_failures={} window={} cycle={}",
+                                                backoff.attempt(),
+                                                recovery_cycle.window,
+                                                recovery_cycle.cycle
+                                            ));
                                             gatt_note(format!(
                                                 "ble_radio_recovery phase=requested consecutive_failures={} window={} cycle={} max_cycles={}",
                                                 backoff.attempt(),
@@ -1112,6 +1140,14 @@ fn ble_error_code(error: &PlatformError) -> &'static str {
                     .contains("not enough memory resources") =>
         {
             "windows_resource_exhausted"
+        }
+        // E_ABORT（0x80004004）：与资源耗尽是同一僵死态的另一种出口
+        // （2026-09-16 现场：两者交替出现，且恢复手段同样无效）。
+        PlatformError::WindowsApi(message)
+            if message.contains("已中止操作")
+                || message.to_ascii_lowercase().contains("aborted") =>
+        {
+            "winrt_operation_aborted"
         }
         PlatformError::WindowsApi(_) => "windows_api_failed",
         PlatformError::VoiceServiceMissing => "service_missing",
@@ -2140,6 +2176,20 @@ pub fn initialize_diagnostic_log(
     parent_ready && gatt_sink().is_some()
 }
 
+/// 诊断日志实际落盘目录（供"打开日志目录"入口定位）。
+///
+/// 与 `gatt_sink()` 取同一路径来源，因此 `SAYALL_GATT_LOG` 覆盖时也返回真实目录，
+/// 不会指错地方。注意隐私边界：该路径只允许回给本机 UI，**不得写入日志内容**
+/// （日志条目里出现用户路径违反 AGENTS.md 的隐私规则）。
+pub fn diagnostic_log_directory() -> Option<std::path::PathBuf> {
+    DIAGNOSTIC_LOG_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+}
+
 /// ATVV 诊断日志（宿主默认写入 LocalAppData；SAYALL_GATT_LOG 可覆盖路径）。
 /// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
 /// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。
@@ -2672,6 +2722,35 @@ mod tests {
             ble_error_code(&PlatformError::WindowsApi("Access denied".to_owned())),
             "windows_api_failed"
         );
+    }
+
+    /// 僵死态有两个出口：`0x80070008`（资源耗尽）和 `0x80004004`（已中止操作）。
+    /// 两者必须都落到同一条分流支路上，否则只有一半的僵死事件会被识别，
+    /// Off/On 会在另一半上继续空转。
+    #[test]
+    fn aborted_operation_is_classified_as_the_same_wedged_state() {
+        let aborted_cases = [
+            "已中止操作。 (0x80004004)",
+            "The operation was aborted. (0x80004004)",
+            "Operation Aborted",
+        ];
+        for message in aborted_cases {
+            let code = ble_error_code(&PlatformError::WindowsApi(message.to_owned()));
+            assert_eq!(code, "winrt_operation_aborted", "输入：{message}");
+            assert!(
+                crate::bluetooth_radio::is_stack_exhausted(code),
+                "僵死码 {code} 必须命中分流"
+            );
+        }
+
+        // 非僵死码不能被误伤——否则普通故障会失去兜底恢复。
+        for message in ["Access denied", "句柄无效。", "设备未就绪"] {
+            let code = ble_error_code(&PlatformError::WindowsApi(message.to_owned()));
+            assert!(
+                !crate::bluetooth_radio::is_stack_exhausted(code),
+                "{message} 不应判定为僵死态"
+            );
+        }
     }
 
     #[test]

@@ -17,11 +17,34 @@
 //!   （池已被系统级占满）"两个现场现象的**共同**解释。
 //! - 上述全部不动 → 资源被系统 BLE 栈自身状态占着（设备节点僵死），
 //!   与用户态进程无关。
+//!
+//! **2026-09-18 修正：真正的主判据是 `commit_kb / commit_limit_kb`。**
+//! 全量回测 23 个有探针的会话（失盲 7）：
+//! - 提交水位 `>= 0.7` → 失盲 5/5；`< 0.7` → 失盲 2/18（其中 0.7 以上**零正常**）。
+//! - 提交水位 `< 0.5` → 失盲 **0/13**。
+//! - 同期被排除的候选：`nonpaged_kb`、`paged_kb` 各有"正常但更高"的反例
+//!   （2026-09-16 pid=7808 正常，却是全样本池占用最高者：非分页 665MB / 分页 932MB）；
+//!   `physical_available_kb` 两组范围大幅重叠，**确认无区分度**（复核旧结论）。
+//! 因此判读顺序应为：先看提交水位，再看池。提交水位高 = 全系统（含蓝牙服务
+//! 进程）一起缺内存，这解释了"为什么应用自己的蓝牙界面与 Windows 设置里的
+//! 蓝牙页**同时**失盲"——单看本应用的资源泄漏解释不了这一条。
+//!
+//! 新增磁盘字段的原因：提交水位受**页面文件能否增长**约束，而页面文件增长
+//! 受磁盘余量约束。本机页面文件配置是坏的（注册表 `PagingFiles` 里
+//! `C:\pagefile.sys` 被登记两次：一条 2/2MB、一条 12151/20252MB，实测只分配
+//! 7244MB），实测 `commit_limit_kb` 在 10.83↔14.99GB 之间漂移。要判定
+//! "磁盘满 → 页面文件长不起来 → 提交限制被钉住"这条链，必须同时有磁盘余量，
+//! 这也是 `disk_free_kb` 存在的原因。
+//! `disk_free_kb` 与 `disk_free_total_kb` 的差值非零 → 空间被预留/配额占着
+//! （现场出现过"可用 6.5GB 却报磁盘已满"，即 NTFS TxF 预留把空闲空间钉死）。
 
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::ProcessStatus::{
     GetPerformanceInfo, GetProcessMemoryInfo, PERFORMANCE_INFORMATION, PROCESS_MEMORY_COUNTERS,
 };
+use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetGuiResources, GetProcessHandleCount, GR_GDIOBJECTS, GR_USEROBJECTS,
 };
@@ -45,8 +68,47 @@ struct SystemWide {
     commit_kb: Option<u64>,
     commit_limit_kb: Option<u64>,
     physical_available_kb: Option<u64>,
+    physical_total_kb: Option<u64>,
     process_count: Option<u32>,
     thread_count: Option<u32>,
+}
+
+/// 系统盘余量。两个值分开报的理由：
+/// - `free_to_caller` 是调用方可用的字节数（含配额/预留限制）；
+/// - `free_total` 是卷上的总空闲字节数。
+/// 现场出现过"还有 6.5GB 空闲却报磁盘已满"（NTFS TxF 中止预留把空闲空间
+/// 钉死，见 Ntfs 事件 141），两者差值就是这类空间的量级线索。
+fn disk_usage() -> (Option<u64>, Option<u64>) {
+    let mut free_to_caller = None;
+    let mut free_total = None;
+    unsafe {
+        let mut buffer = [0u16; 260];
+        let len = GetWindowsDirectoryW(Some(&mut buffer));
+        // 形如 "C:\Windows"：截前三个字符得到卷根 "C:\"。
+        if len > 0 && (len as usize) < buffer.len() {
+            let root: Vec<u16> = buffer[..len as usize]
+                .iter()
+                .copied()
+                .take(3)
+                .chain(std::iter::once(0))
+                .collect();
+            let mut available = 0u64;
+            let mut total = 0u64;
+            let mut total_free = 0u64;
+            if GetDiskFreeSpaceExW(
+                PCWSTR(root.as_ptr()),
+                Some(&mut available),
+                Some(&mut total),
+                Some(&mut total_free),
+            )
+            .is_ok()
+            {
+                free_to_caller = Some(available / 1024);
+                free_total = Some(total_free / 1024);
+            }
+        }
+    }
+    (free_to_caller, free_total)
 }
 
 fn own_process() -> OwnProcess {
@@ -95,6 +157,7 @@ fn system_wide() -> SystemWide {
     let mut commit_kb = None;
     let mut commit_limit_kb = None;
     let mut physical_available_kb = None;
+    let mut physical_total_kb = None;
     let mut process_count = None;
     let mut thread_count = None;
     unsafe {
@@ -112,6 +175,9 @@ fn system_wide() -> SystemWide {
             commit_kb = Some(to_kb(info.CommitTotal));
             commit_limit_kb = Some(to_kb(info.CommitLimit));
             physical_available_kb = Some(to_kb(info.PhysicalAvailable));
+            // 记物理总量才能由 commit_limit - physical_total 反推页面文件总量，
+            // 进而判断"提交限制被钉在低位"是否是页面文件长不起来造成的。
+            physical_total_kb = Some(to_kb(info.PhysicalTotal));
             process_count = Some(info.ProcessCount);
             thread_count = Some(info.ThreadCount);
         }
@@ -123,6 +189,7 @@ fn system_wide() -> SystemWide {
         commit_kb,
         commit_limit_kb,
         physical_available_kb,
+        physical_total_kb,
         process_count,
         thread_count,
     }
@@ -137,6 +204,7 @@ fn show<T: std::fmt::Display>(value: Option<T>) -> String {
 pub fn resource_probe_note(reason: &str, detail: &str) -> String {
     let own = own_process();
     let system = system_wide();
+    let (disk_free_kb, disk_free_total_kb) = disk_usage();
     let mut note = format!("resource_probe reason={reason}");
     if !detail.is_empty() {
         note.push(' ');
@@ -156,6 +224,9 @@ pub fn resource_probe_note(reason: &str, detail: &str) -> String {
         ("commit_kb", show(system.commit_kb)),
         ("commit_limit_kb", show(system.commit_limit_kb)),
         ("physical_available_kb", show(system.physical_available_kb)),
+        ("physical_total_kb", show(system.physical_total_kb)),
+        ("disk_free_kb", show(disk_free_kb)),
+        ("disk_free_total_kb", show(disk_free_total_kb)),
         ("process_count", show(system.process_count)),
         ("thread_count", show(system.thread_count)),
     ];
@@ -219,7 +290,7 @@ mod tests {
     use super::*;
 
     /// 字段清单：新增/改名时必须同步，否则解析侧会静默丢字段。
-    const PROBE_FIELDS: [&str; 13] = [
+    const PROBE_FIELDS: [&str; 16] = [
         "process_handles",
         "gdi",
         "user",
@@ -231,6 +302,9 @@ mod tests {
         "commit_kb",
         "commit_limit_kb",
         "physical_available_kb",
+        "physical_total_kb",
+        "disk_free_kb",
+        "disk_free_total_kb",
         "process_count",
         "thread_count",
     ];
