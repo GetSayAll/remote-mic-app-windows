@@ -39,34 +39,84 @@
 ;
 ; 信号用**会话内**命名事件：非提权进程没有 `SeCreateGlobalPrivilege`，无法创建
 ; `Global\` 命名对象；而安装器与应用同处一个登录会话，`Local\` 命名空间对两者
-; 都可见。事件由应用在启动时创建（只有运行中的实例才持有句柄），所以
-; `OpenEventW` 失败即表示"没有实例在运行"**或"在跑的是没有监听的旧版本"**——
-; 两种情况都直接跳过、零开销（从没有监听的旧版本升级时仍会看到 Tauri 的弹窗，
-; 这是预期行为，只能靠用户点"取消"后手动退出应用再装）。
+; 都可见。事件由应用在启动时创建（只有运行中的实例才持有句柄），因此
+; `OpenEventW` 打不开 + 进程确实在跑 = 运行的是没有监听线程的旧版。
 ; 事件名必须与 crates/sayall-windows/src/graceful_exit.rs 的常量一致。
+;
+; 三种结局：
+;   1. 没有实例在跑 → 零等待直接返回（最常见，也是应用内更新路径的常态）；
+;   2. 有实例且能打开事件 → 置位 + 轮询等到它退出，`CheckIfAppIsRunning` 落空，
+;      连弹窗都不会出现；
+;   3. 有实例但打不开事件（旧版）→ 不杀也不装，中止并引导走应用内更新
+;      （见宏内说明）。
 !define SAYALL_GRACEFUL_EXIT_EVENT "Local\SayAll-GracefulExit"
 !define SAYALL_GRACEFUL_EXIT_SETTLE_MS 1500
-!define SAYALL_GRACEFUL_EXIT_TAIL_MS 6500
+!define SAYALL_GRACEFUL_EXIT_POLL_INTERVAL_MS 500
+; 轮询总预算必须 ≥ 应用侧 GRACEFUL_EXIT_TIMEOUT（5s）+ 退出开销，否则进程还没
+; 退干净就轮到 Tauri 的 CheckIfAppIsRunning，弹窗必然出现（2026-09-16 实测）。
+!define SAYALL_GRACEFUL_EXIT_MAX_WAIT_MS 20000
 !define SAYALL_EVENT_MODIFY_STATE 0x0002
+; 旧版（无监听线程）正在运行时的退出码：不装、不杀，交给应用内更新。
+!define SAYALL_LEGACY_RUNNING_ERROR_LEVEL 1639
 
-!macro SayAllRequestGracefulExit
+!macro SayAllRequestGracefulExit _uid
   Push $R8
   Push $R9
-  ; 句柄返回值必须用 p（指针宽度）；用 i 在 x64 上会截断。
-  System::Call 'kernel32::OpenEventW(i ${SAYALL_EVENT_MODIFY_STATE}, i 0, w "${SAYALL_GRACEFUL_EXIT_EVENT}") p .r8'
-  ${If} $R8 != 0
-    System::Call 'kernel32::SetEvent(p r8) i .r9'
-    System::Call 'kernel32::CloseHandle(p r8)'
-    ; 先固定静默一段时间，让应用关闭 GATT 会话并等 `ble_session_cleanup` 落盘。
-    Sleep ${SAYALL_GRACEFUL_EXIT_SETTLE_MS}
-    ; 若此时仍未退出，再补足剩余宽限（总计 SETTLE + TAIL）。
-    ; 这里**刻意不用 Goto/标签轮询**：`${__LINE__}` 在安装器与卸载器两次汇编中
-    ; 会展开成 `752.2.16` 这类复合 token，导致卸载段标签解析失败
-    ; （2026-09-16 构建实测：could not resolve label "…_752.2.16" in uninstall section）。
-    nsis_tauri_utils::FindProcessCurrentUser "$INSTDIR\${MAINBINARYNAME}.exe"
-    Pop $R8
+  ; 先确认是否真有实例在跑。`FindProcessCurrentUser` 的返回值语义由实测确定
+  ; （0 = 在跑，1 = 不在跑；用 makensis 编译的最小探针跑出来的 ground truth，
+  ; 见 artifacts/nsis-probe/）。**旧实现把这里写成 `!= 0`，语义正好反了**：
+  ; 进程已退出时白等 6.5s，而进程还在跑（BLE 关闭最多要 5s）时反而不等，
+  ; 直接落到 Tauri 的强杀弹窗——2026-09-16 用户现场看到的弹窗就是这个原因，
+  ; 与"运行的是不是旧版本"无关。
+  ; **必须传裸进程名，不能传全路径**：实测传 `"$INSTDIR\xxx.exe"` 时插件永远
+  ; 返回 1（当作"没有在跑"），整个等待逻辑会被静默跳过（2026-09-16 探针实测，
+  ; 见 artifacts/nsis-probe/sayall-findproc-probe2-result.txt）。Tauri 自己的
+  ; `CheckIfAppIsRunning` 也是传裸名（installer.nsi 第 638 行）。
+  nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+  Pop $R9
+  ${If} $R9 = 0
+    ; **寄存器大小写决定写进哪个变量**：`.R8` 写 `$R8`，`.r8` 写 `$8`（2026-09-16
+    ; 探针实测，见 artifacts/nsis-probe/sayall-probe3-result.txt）。旧实现用 `.r8`
+    ; 却判断 `$R8`，后者永远是空值，而空值 `!= 0` 在 NSIS 里为真——于是"事件存在"
+    ; 这个分支恒真，旧版检测从来没生效过。事件不存在时输出的是字面 `0`。
+    ; 句柄返回值必须用 p（指针宽度）；用 i 在 x64 上会截断。
+    System::Call 'kernel32::OpenEventW(i ${SAYALL_EVENT_MODIFY_STATE}, i 0, w "${SAYALL_GRACEFUL_EXIT_EVENT}") p .R8'
     ${If} $R8 != 0
-      Sleep ${SAYALL_GRACEFUL_EXIT_TAIL_MS}
+      System::Call 'kernel32::SetEvent(p R8) i .R9'
+      System::Call 'kernel32::CloseHandle(p R8)'
+      ; 先固定静默一段时间，让应用关闭 GATT 会话并等 `ble_session_cleanup` 落盘。
+      Sleep ${SAYALL_GRACEFUL_EXIT_SETTLE_MS}
+      ; 之后轮询到进程真正消失为止（预算耗尽才放弃），不再用"睡固定时长"。
+      ; 标签后缀由调用方传入：`${__LINE__}` 在安装器与卸载器两次汇编中会展开成
+      ; `752.2.16` 这类复合 token，导致卸载段标签解析失败（2026-09-16 构建实测）。
+      StrCpy $R9 ${SAYALL_GRACEFUL_EXIT_MAX_WAIT_MS}
+      sayall_wait_${_uid}:
+        nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+        Pop $R8
+        ${If} $R8 != 0
+          Goto sayall_done_${_uid}
+        ${EndIf}
+        Sleep ${SAYALL_GRACEFUL_EXIT_POLL_INTERVAL_MS}
+        IntOp $R9 $R9 - ${SAYALL_GRACEFUL_EXIT_POLL_INTERVAL_MS}
+        ${If} $R9 > 0
+          Goto sayall_wait_${_uid}
+        ${EndIf}
+      sayall_done_${_uid}:
+    ${Else}
+      ; 进程在跑但事件打不开 = 运行的是没有监听线程的旧版（0.2.10 及更早）。
+      ; 两条路都不能走：
+      ;   强杀 → 残留未关闭的 GATT 会话，蓝牙栈僵死，只有重启 Windows 能恢复
+      ;           （2026-09-16 逐项实测，见 Bugs/2026-09-16-ble-stack-*.md）；
+      ;   装下去 → 旧进程仍占着蓝牙链路，新版本连不上。
+      ; 因此主动中止并引导走应用内更新：旧版的 `on_before_exit` 会先断开 BLE
+      ; 再拉起安装器（tauri-plugin-updater 的 install_inner：on_before_exit 在
+      ; ShellExecuteW 之前执行），既不重启也不需要用户手动退出应用。
+      ${If} ${Silent}
+        SetErrorLevel ${SAYALL_LEGACY_RUNNING_ERROR_LEVEL}
+      ${Else}
+        MessageBox MB_ICONINFORMATION|MB_OK "正在运行的无线麦是较早的版本，直接覆盖安装会中断蓝牙链路。$\r$\n请打开无线麦，在「设置」里点「检查更新」完成升级（应用会自己断开蓝牙并重启）。$\r$\n$\r$\nSayAll is running an older build. Please upgrade from Settings → Check for updates inside the app."
+      ${EndIf}
+      Abort
     ${EndIf}
   ${EndIf}
   Pop $R9
@@ -98,12 +148,12 @@
   Pop $R8
 
   ; 版本校验通过后才请正在运行的实例优雅退出：升级路径的关键一步。
-  !insertmacro SayAllRequestGracefulExit
+  !insertmacro SayAllRequestGracefulExit install
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; 卸载同样不得强杀正在连接的应用（AGENTS.md 同一条规则）。
-  !insertmacro SayAllRequestGracefulExit
+  !insertmacro SayAllRequestGracefulExit uninstall
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

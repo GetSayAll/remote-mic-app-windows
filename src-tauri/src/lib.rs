@@ -94,6 +94,40 @@ fn get_diagnostic_report(
     )
 }
 
+/// 在系统文件资源管理器里打开诊断日志目录（关于页"打开日志目录"入口）。
+///
+/// 路径来自日志初始化的**实际**落盘路径，不接受前端传入：否则等于把"用
+/// ShellExecuteW 打开任意路径"的能力交给 WebView，与本仓库 capabilities 的
+/// 最小权限设计（opener 仅放行 VB-CABLE 官网一个 URL）直接冲突。
+///
+/// 目录不存在时先创建：日志初始化理论上已建好父目录（`create_dir_all`），
+/// 但 `SAYALL_GATT_LOG` 覆盖或初始化失败的场景下可能缺失，而资源管理器对
+/// 不存在的目录只会弹一个误导性的"找不到"对话框。
+///
+/// 日志只记结果，**绝不记路径**（隐私规则：日志内容不得含用户路径）。
+#[tauri::command]
+fn open_log_directory() -> Result<String, String> {
+    let directory = sayall_windows::diagnostic_log_directory()
+        .ok_or_else(|| "诊断日志目录尚未就绪".to_owned())?;
+    std::fs::create_dir_all(&directory).map_err(|error| format!("创建日志目录失败：{error}"))?;
+    match sayall_windows::app_launcher::open_directory(&directory) {
+        Ok(()) => {
+            sayall_windows::gatt_note(
+                "about feature=open_log_directory action=open phase=completed terminal_result=passed reason=explorer_launch_requested"
+                    .to_owned(),
+            );
+            Ok(directory.display().to_string())
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(
+                "about feature=open_log_directory action=open phase=completed terminal_result=failed error_domain=shell error_code=open_failed retryable=true reason=explorer_launch_failed"
+                    .to_owned(),
+            );
+            Err(format!("无法打开日志目录：{error}"))
+        }
+    }
+}
+
 #[tauri::command]
 async fn scan_paired_remotes(
     state: tauri::State<'_, AppState>,
@@ -1292,6 +1326,20 @@ pub fn run() {
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
             spawn_installer_graceful_exit_watcher(app.handle().clone());
+            // "打开无线麦"（自身窗口）后的 tao 可见性缓存同步：`app_launcher` 用
+            // Win32 `ShowWindow` 显示已隐藏的自身主窗口（同步生效，其后抢前台才有
+            // 意义），但那会绕过 tao 的 `WindowFlags::VISIBLE` 缓存，使随后点 X 的
+            // `window.hide()` 被判为"无差异"而跳过——窗口关不进托盘（2026-09-16
+            // 真机实测）。这里用 tao 的 `show()` 把缓存置回"可见"；窗口已可见时为
+            // 幂等无副作用。显示与隐藏同走一条事件队列，FIFO 保证同步在前。
+            {
+                let handle = app.handle().clone();
+                sayall_windows::app_launcher::set_self_show_sync(move || {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                    }
+                });
+            }
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
@@ -1306,10 +1354,14 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    // `hide()` 的返回值只说明"消息已投递"，不代表窗口真的隐藏了，
+                    // 因此同时记录 hide 前后 tao 报告的实际可见性：`visible_after=true`
+                    // 表示窗口仍在屏幕上（hide 未生效），可直接否证"已隐藏到托盘"。
+                    let visible_before = window.is_visible().unwrap_or(true);
                     let hide_result = window.hide();
+                    let visible_after = window.is_visible().unwrap_or(true);
                     sayall_windows::gatt_note(format!(
-                        "window_close action=hide_to_tray label=main hide_result={:?} prevent_close=true",
-                        hide_result
+                        "window_close action=hide_to_tray label=main hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after} prevent_close=true"
                     ));
                     api.prevent_close();
                 }
@@ -1320,6 +1372,7 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
         get_diagnostic_report,
+        open_log_directory,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -1362,6 +1415,7 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
         get_diagnostic_report,
+        open_log_directory,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -1512,18 +1566,77 @@ mod tests {
     #[test]
     fn installer_grace_window_exceeds_the_app_shutdown_budget() {
         let settle = define_number(INSTALLER_HOOKS, "SAYALL_GRACEFUL_EXIT_SETTLE_MS");
-        let tail = define_number(INSTALLER_HOOKS, "SAYALL_GRACEFUL_EXIT_TAIL_MS");
+        let max_wait = define_number(INSTALLER_HOOKS, "SAYALL_GRACEFUL_EXIT_MAX_WAIT_MS");
         let app_budget = GRACEFUL_EXIT_TIMEOUT.as_millis() as u64;
         assert!(
             settle >= 1_000,
             "安装器在请求退出后必须先给应用一段固定的清理时间，当前 {settle}ms"
         );
         assert!(
-            settle + tail >= app_budget + 2_000,
+            settle + max_wait >= app_budget + 2_000,
             "安装器宽限 {}ms 必须比应用收尾预算 {}ms 多留至少 2s 余量",
-            settle + tail,
+            settle + max_wait,
             app_budget
         );
+    }
+
+    /// `FindProcessCurrentUser` 只按**进程名**匹配：传全路径时它永远返回 1
+    /// （"没有在跑"），整段等待逻辑会被静默跳过，直接落到 Tauri 的强杀弹窗。
+    /// 2026-09-16 探针实测（artifacts/nsis-probe/sayall-findproc-probe2-result.txt）：
+    /// 裸名 `sayall.exe` → 0（在跑），全路径 `C:\...\sayall.exe` → 1（不在跑）。
+    #[test]
+    fn installer_hook_looks_up_processes_by_bare_name() {
+        let request = macro_body(INSTALLER_HOOKS, "SayAllRequestGracefulExit");
+        assert!(
+            request.contains("FindProcessCurrentUser \"${MAINBINARYNAME}.exe\""),
+            "必须传裸进程名，与 Tauri 自己的 CheckIfAppIsRunning 一致"
+        );
+        assert!(
+            !request.contains("FindProcessCurrentUser \"$INSTDIR"),
+            "不得给 FindProcessCurrentUser 传全路径：实测它不按路径匹配，会导致等待逻辑被跳过"
+        );
+    }
+
+    /// `System::Call` 的输出寄存器**大小写敏感**：`.R8` 写 `$R8`，`.r8` 写 `$8`。
+    /// 旧实现用 `.r8` 却判断 `$R8`（永远是空值，而空值 `!= 0` 在 NSIS 里为真），
+    /// 于是"事件存在"分支恒真，旧版检测从来没生效过。
+    /// 2026-09-16 探针实测（artifacts/nsis-probe/sayall-probe3-result.txt）：
+    /// `.R8` 成功 → `916`，事件不存在 → `0`；`.r8` 写进的是 `$8`。
+    #[test]
+    fn installer_hook_reads_the_register_it_writes() {
+        let request = macro_body(INSTALLER_HOOKS, "SayAllRequestGracefulExit");
+        assert!(
+            request.contains("p .R8"),
+            "OpenEventW 的输出必须写 `$R8`（`.R8`）；写成 `.r8` 会落到 `$8`"
+        );
+        assert!(
+            !request.contains("p .r8"),
+            "`.r8` 写的是 `$8`，与后续判断的 `$R8` 不是同一个变量"
+        );
+        assert!(
+            request.contains("SetEvent(p R8)"),
+            "SetEvent 必须读回同一个寄存器"
+        );
+    }
+
+    /// 等待必须**轮询到进程真的消失**，而不是睡一个固定时长：应用侧 BLE 收尾预算
+    /// 是 5s，睡固定时长必然提前落到 Tauri 的强杀弹窗。
+    #[test]
+    fn installer_hook_polls_until_the_process_is_gone() {
+        let request = macro_body(INSTALLER_HOOKS, "SayAllRequestGracefulExit");
+        let lookups = request.matches("FindProcessCurrentUser").count();
+        assert!(
+            lookups >= 2,
+            "必须先查一次再轮询到退出，当前只有 {lookups} 次进程查询"
+        );
+        assert!(request.contains("sayall_wait_"), "必须有轮询等待循环");
+        // 标签后缀由调用方传入：`${__LINE__}` 在卸载段会展开成复合 token。
+        for call in ["SayAllRequestGracefulExit install", "SayAllRequestGracefulExit uninstall"] {
+            assert!(
+                INSTALLER_HOOKS.contains(call),
+                "调用必须带唯一标签后缀，缺少 `{call}`"
+            );
+        }
     }
 
     /// 安装器钩子**不得**自己引入强杀。Tauri 模板在钩子之后跑

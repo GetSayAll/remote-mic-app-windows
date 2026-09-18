@@ -407,6 +407,7 @@ mod simulation {
                 last_is_pressed: Some(false),
                 active_buttons: Vec::new(),
                 last_error: None,
+                stale_remote_event_count: 0,
             };
             Ok(state.raw_input.clone())
         }

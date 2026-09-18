@@ -27,7 +27,9 @@ pub mod file_dialog;
 pub mod graceful_exit;
 pub mod registered_apps;
 #[cfg(windows)]
-pub use ble::{gatt_note, initialize_diagnostic_log, DiagnosticLogMetadata};
+pub use ble::{
+    diagnostic_log_directory, gatt_note, initialize_diagnostic_log, DiagnosticLogMetadata,
+};
 #[cfg(windows)]
 mod ime;
 pub mod key_gate;

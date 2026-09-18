@@ -148,6 +148,13 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");
 
   await openPage("权限");
+  assert(
+    !document.querySelector(".diagnostic-output"),
+    "权限页仍有诊断摘要输出（诊断入口应已迁往关于页）",
+  );
+  steps.push("权限页只呈现蓝牙/按键/音频三项权限状态");
+
+  await openPage("关于");
   await clickButton("生成摘要");
   await waitFor(
     () =>
@@ -161,9 +168,26 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(diagnostic.capabilities.bleVoiceReady, "诊断摘要没有反映 ATVV 就绪");
   assert(diagnostic.capabilities.wasapiReady, "诊断摘要没有反映 WASAPI 就绪");
   assert(diagnostic.capabilities.rawInputReady, "诊断摘要没有反映 Raw Input 就绪");
-  steps.push("权限页面生成去标识化运行诊断摘要");
+  steps.push("关于页生成去标识化运行诊断摘要");
 
-  await openPage("关于");
+  // "打开日志目录"刻意**不作成败断言**：它经 ShellExecuteW 交给资源管理器，
+  // CI runner 是否有可用的 shell 桌面不在本仓库控制范围内，拿它当门禁只会
+  // 制造与本产品无关的红灯。这里只证明 WebView → IPC → Rust → shell 的往返
+  // 真的走通（按钮回到可用、消息落在终态），并把结果如实记入步骤文本。
+  await clickButton("打开日志目录");
+  const logDirectoryMessage = await waitFor(
+    () => {
+      const text = document.querySelector(".log-directory-message")?.textContent?.trim();
+      return text && text !== "正在打开日志目录…" ? text : null;
+    },
+    "日志目录入口返回终态",
+  );
+  steps.push(
+    logDirectoryMessage.startsWith("已打开日志目录")
+      ? "关于页“打开日志目录”经真实 IPC 交由资源管理器打开"
+      : `关于页“打开日志目录”返回不可用（deferred）：${logDirectoryMessage}`,
+  );
+
   const darkTheme = await waitFor(
     () =>
       document.querySelector<HTMLInputElement>('input[name="theme-preference"][value="dark"]:not(:disabled)'),

@@ -41,19 +41,36 @@ nsis_tauri_utils::FindProcessCurrentUser "${executableName}"   ; $R0 = 0 表示�
    只有点"确定"才会强杀。静默（`/S`）与被动模式没有这个选择，直接强杀。
 3. 本钩子若成功让应用自行退出，后续检测落空，**连弹窗都不会出现**。
 
-因此从 0.2.10 起（该版本开始创建监听），"0.2.10 → 更新版本"的升级不会再有弹窗。
-弹窗只会在两种情况下出现，都属于预期：
+### 2026-09-16 更正：上面"0.2.10 起不会再有弹窗"的结论是错的
 
-- **从没有监听的旧版本升级**（例如 0.2.9 → 0.2.10）：旧实例不会响应请求，钩子跳过，
-  落回 Tauri 原有行为。此时应提示用户点"取消"，手动退出应用后再装。
-- 应用异常（挂死/监听线程未起来）：钩子等满宽限后落回原有行为。
+用户反馈"装新包时还是弹窗问我是否关闭无线麦"，回查发现**钩子从来没生效过**，
+里面有三个叠加的 bug，每一个都足以让它静默失效。均已实测定位并修复：
 
-现场记录（2026-09-16 09:05 左右，0.2.9 → 0.2.10）：弹窗出现（被替换的实例是 0.2.9，
-无监听）；日志确认该次安装**没有**出现 `reason=installer_requested_exit`，
-而新进程（ver=0.2.10）在启动 2 秒后落 `reason=listening`，随后
-`ble_connect terminal_result=passed elapsed_ms=2840`，此后 3 小时无一次
-`windows_resource_exhausted`。即本次强杀没有造成僵死——**这是运气，不是保证**：
-僵死是累积/偶发触发的（见 Bug 记录），不能据此认为强杀可接受。
+| # | bug | 证据 | 后果 |
+|---|-----|------|------|
+| 1 | `FindProcessCurrentUser` 传的是**全路径** `"$INSTDIR\xxx.exe"` | 探针：裸名 → `0`（在跑），全路径 → `1`（不在跑）。见 `artifacts/nsis-probe/sayall-findproc-probe2-result.txt` | 永远判定"没有在跑"，整段等待逻辑被跳过 |
+| 2 | 返回值判断**写反**：`${If} $R8 != 0` 才补等 | 探针：返回 `0` = 进程在跑，`1` = 不在跑。见 `sayall-findproc-probe-result.txt` | 进程已退出时白等 6.5s，进程还在（BLE 收尾要 5s）时反而不等 |
+| 3 | `System::Call` 输出用了 `.r8` 却判断 `$R8` | 探针：`.R8` → `$R8`（成功 `916`，不存在 `0`）；`.r8` → `$8`。见 `sayall-probe3-result.txt` | `$R8` 恒为空，而空值 `!= 0` 在 NSIS 里为**真** → "事件存在"分支恒真，旧版检测从未触发 |
+
+三者叠加的净效果：**无论运行的是新版本还是旧版本，钩子都会白等 6.5 秒，然后
+必然落到 Tauri 的强杀弹窗。**这正是用户看到的现象，与"是不是旧版本"无关。
+
+### 修复后的三条路径（均已在 2026-09-16 实测）
+
+| 路径 | 行为 | 实测结果 |
+|------|------|----------|
+| 没有实例在跑（含应用内更新路径） | 零等待直接继续 | `passed`，耗时 1s（旧实现在这里也要白等 6.5s） |
+| 有实例且能打开事件 | 置位 → **轮询**到进程消失（预算 20s，覆盖应用侧 5s BLE 收尾）→ 继续安装 | `passed`：替身进程打印 `signalled, exiting` 后自行退出，安装器未中止、未强杀，耗时 2s |
+| 有实例但打不开事件（无监听的旧版） | **不杀也不装**：立即 `Abort` + 引导走应用内更新 | `passed`：退出码 1639，耗时 1s，进程**存活**（未被杀） |
+
+第三条的取舍：旧版无法被请求退出，强杀会残留未关闭的 GATT 会话把系统蓝牙栈楔死
+（只能重启 Windows），装下去又会被旧进程占住链路。因此选择中止并引导用户
+在应用内点"检查更新"——旧版的 `on_before_exit` 会**先断开 BLE 再拉起安装器**
+（`tauri-plugin-updater` 的 `install_inner`：`on_before_exit` 在 `ShellExecuteW`
+之前执行，见插件源码 `updater.rs:843→862→876`），既不重启电脑，也不需要用户
+手动退出应用。
+
+### 现场记录（2026-09-16 09:05 左右，0.2.9 → 0.2.10）
 
 **升级 `@tauri-apps/cli` 时必须复核**：tauri `dev` 分支已把该宏改为走 Restart Manager
 （`RSTRTMGR::RmShutdown` + `RmForceShutdown`，交互取消同样是 `Abort`）。两种实现都不
@@ -93,20 +110,29 @@ grep -aE "app_exit " "$LOG" | tail -5
 | --- | --- | --- |
 | 安装器钩子语法（`makensis` 汇编） | passed | 0.2.10 构建产出安装包，含本钩子 |
 | NSIS `System::Call` 宽字符串 + 指针句柄在**运行时**有效 | passed | 独立探针（`Local\SayAll-Probe-GracefulExit`，对生产零影响）：PowerShell 侧事件被置位、`CloseHandle` 分支进入 |
-| 安装器契约测试（事件名一致、两道钩子都请求退出、宽限 > 应用预算、钩子无强杀） | passed | `cargo test -p sayall-windows-app --lib`，5 项断言 |
+| `FindProcessCurrentUser` 返回值语义（0=在跑 / 1=不在跑） | passed | 探针 `sayall-findproc-probe-result.txt` |
+| 该函数**只按进程名匹配**，传全路径恒返回 1 | passed | 探针 `sayall-findproc-probe2-result.txt` |
+| `System::Call` 输出寄存器大小写语义（`.R8`→`$R8`，`.r8`→`$8`） | passed | 探针 `sayall-probe3-result.txt` |
+| 安装器钩子在**安装段与卸载段**都能汇编（标签解析） | passed | `artifacts/nsis-probe/sayall-hook-compile-test.nsi` 用 `makensis` 编译 |
+| 三条路径的运行时行为（无进程 / 有监听 / 无监听） | passed | 见上表；替身 `crates/sayall-windows/examples/installer_exit_mock.rs` |
+| 安装器契约测试（事件名一致、两道钩子都请求退出、宽限 > 应用预算、钩子无强杀、裸进程名、寄存器一致、轮询等待） | passed | `cargo test -p sayall-windows-app --lib`，6 项 |
 | 退出收尾只执行一次（不产生误导性 failed 日志） | passed | `claim_exit_shutdown` 单测 |
 | 应用侧命名事件（创建/等待/置位/无事件时报错） | passed | `cargo test -p sayall-windows --lib graceful_exit`，4 项 |
 | 应用运行中执行安装 | deferred | 需真机（会改动机器安装状态），CI 步骤 `Test installer graceful exit while the app is running` 覆盖 |
 | 应用运行中执行卸载 | deferred | 同上 |
 | 真机"升级期间正在使用的遥控器语音链路" | deferred | 需 RC001/RC003 实机；本脚本的 CI 版本无蓝牙硬件，会话清理是空操作 |
-| 从 0.2.9（无监听）升级到 0.2.10 的现场 | passed，属**预期行为** | 弹窗出现（旧实例不会响应）；该次日志无 `installer_requested_exit`；新实例 2 秒后落 `listening`、2.84s 连上遥控器，此后 3 小时零 `windows_resource_exhausted` |
-| "0.2.10 → 更新版本"的升级不再出现弹窗 | deferred | 需要下一个包才能实测 |
+| 从 0.2.9（无监听）升级到 0.2.10 的现场 | passed | 弹窗出现（旧实例不会响应）；该次日志无 `installer_requested_exit`；新实例 2 秒后落 `listening`、2.84s 连上遥控器，此后 3 小时零 `windows_resource_exhausted`——**这是运气，不是保证**，不能据此认为强杀可接受 |
+| "有监听的新版本 → 更新版本"不再出现弹窗 | passed | 2026-09-16 用 `installer_exit_mock` 替身实测：应用自行退出，安装器未中止、未强杀 |
 
 ## 边界
 
 - CI 机器无蓝牙硬件，因此 CI 只断言**退出机制**，不断言"真实 GATT 会话在升级中被正确关闭"。
 - 未覆盖可见安装界面、SmartScreen、Windows 10 1809 与代码签名。
-- 应用侧宽限（`GRACEFUL_EXIT_TIMEOUT` = 5s）必须始终小于安装器宽限
-  （`SETTLE 1500ms + TAIL 6500ms` = 8s）；契约测试守着这个不等式，改动任一侧都要重跑它。
+- 应用侧宽限（`GRACEFUL_EXIT_TIMEOUT` = 5s）必须始终小于安装器轮询预算
+  （`SETTLE 1500ms + 轮询上限 20000ms`）；契约测试守着这个不等式，改动任一侧都要重跑它。
+- **改 NSIS 钩子后必须真跑一次 `makensis`**：`System::Call` 的类型串、输出寄存器名、
+  标签解析都是**运行时/汇编期**才检查的，编译通过不等于行为正确——本页记录的三个
+  bug 全都是"看起来对、跑起来静默失效"。最小复现脚手架见
+  `artifacts/nsis-probe/sayall-hook-compile-test.nsi`。
 - 事件名改动即破坏兼容：`crates/sayall-windows/src/graceful_exit.rs` 与
   `src-tauri/windows/installer-hooks.nsh` 必须逐字一致（已由契约测试守住）。

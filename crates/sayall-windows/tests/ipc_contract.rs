@@ -58,6 +58,7 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 last_is_pressed: Some(true),
                 active_buttons: vec![RemoteButton::Home],
                 last_error: None,
+                stale_remote_event_count: 0,
             },
             button_mapping: ButtonMappingSnapshot {
                 enabled: true,
