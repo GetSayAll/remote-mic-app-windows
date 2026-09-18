@@ -2,7 +2,8 @@ use crate::wetype_revive::{response_since, wetype_mic_observation, MicObservatio
 use crate::{
     audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff,
     remote_model_from_model_number, remote_model_from_name, send_input::KeyChord,
-    send_input_windows::SendInputRuntime, ConnectionPhase, ConnectionSnapshot, PlatformError,
+    send_input_windows::SendInputRuntime, voice_target::VoiceTarget,
+    voice_target::VoiceTargetConfig, ConnectionPhase, ConnectionSnapshot, PlatformError,
     RemoteModel, UsageCounters,
 };
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
@@ -56,7 +57,7 @@ impl BleRuntime {
         audio: Arc<AudioRuntime>,
         usage: Arc<UsageCounters>,
         send_input: Arc<SendInputRuntime>,
-        voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
+        voice_target: Arc<Mutex<VoiceTargetConfig>>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
@@ -72,7 +73,7 @@ impl BleRuntime {
                     audio,
                     usage,
                     send_input,
-                    voice_hold_hotkey,
+                    voice_target,
                 )
             });
 
@@ -280,7 +281,7 @@ fn worker_loop(
     audio: Arc<AudioRuntime>,
     usage: Arc<UsageCounters>,
     send_input: Arc<SendInputRuntime>,
-    voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
+    voice_target: Arc<Mutex<VoiceTargetConfig>>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -694,7 +695,7 @@ fn worker_loop(
                     ));
                     continue;
                 }
-                let chord_configured = lock(&voice_hold_hotkey).clone();
+                let chord_configured = lock(&voice_target).resolved_hotkey();
                 if let (Some(chord), Some(old)) = (chord_configured, held_hotkey.as_ref()) {
                     if send_input.release(old).is_err() {
                         gatt_note(format!(
@@ -739,7 +740,7 @@ fn worker_loop(
                         &state,
                         &audio,
                         &send_input,
-                        &voice_hold_hotkey,
+                        &voice_target,
                         &mut held_hotkey,
                         &usage,
                         &mut active_voice_samples,
@@ -1263,7 +1264,7 @@ fn handle_control(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
     send_input: &SendInputRuntime,
-    voice_hold_hotkey: &Mutex<Option<KeyChord>>,
+    voice_target: &Mutex<VoiceTargetConfig>,
     held_hotkey: &mut Option<KeyChord>,
     usage: &UsageCounters,
     active_voice_samples: &mut u64,
@@ -1343,18 +1344,43 @@ fn handle_control(
             std::thread::sleep(Duration::from_millis(20));
             // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
-            if let Some(chord) = lock(voice_hold_hotkey).clone() {
+            //
+            // 快捷键与激活方式都取自用户所选的语音输入目标
+            // （[`VoiceTargetConfig`]）：微信 = 左 Ctrl + 左 Win；豆包 = 其
+            // 默认右 Alt 或用户在本应用内录入的值；自定义 = 仅注入、不激活。
+            let target_config = lock(voice_target).clone();
+            if let Some(chord) = target_config.resolved_hotkey() {
                 let mic_baseline = wetype_mic_observation();
-                // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
+                // 会话级激活目标输入法：其语音热键只在自身为当前会话活动
                 // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
                 // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
-                // 行为注入（不比现状更差）。
-                if let Err(error) = crate::ime::activate_wetype_session() {
-                    lock(state).last_error = Some(error);
+                // 行为注入（不比现状更差）。自定义目标不做激活。
+                if target_config.target.supports_session_activation() {
+                    if let Err(error) = crate::ime::activate_target_session(target_config.target) {
+                        lock(state).last_error = Some(error);
+                    }
                 }
-                if let Err(error) = send_input.press(&chord) {
+                // 注入形态由目标的语音模式决定（见 `voice_target::InjectionShape`）：
+                // - `HoldWhileKeyDown`（微信、豆包长按模式）：送按下沿并保持，
+                //   松手时由 `release_voice_hold_hotkey` 送抬起沿。
+                // - `TogglePerKeyDown`（豆包免按模式）：送一次完整点击即可开始
+                //   说话，**不记入 held_hotkey**——免按语义下没有"松手"这一半，
+                //   若仍记录，松手时的反向抬起沿会被豆包当成"再按任意键结束"，
+                //   语音只持续一瞬。
+                let shape = target_config.injection_shape();
+                let injection = match shape {
+                    crate::voice_target::InjectionShape::HoldWhileKeyDown => {
+                        send_input.press(&chord)
+                    }
+                    crate::voice_target::InjectionShape::TogglePerKeyDown => {
+                        send_input.tap_spaced(&chord)
+                    }
+                };
+                if let Err(error) = injection {
                     gatt_note(format!(
-                        "chord_press result=err session={session_id} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true"
+                        "chord_press result=err session={session_id} target={} shape={} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true",
+                        target_config.target.as_log_str(),
+                        shape.as_log_str(),
                     ));
                     abort_voice_session(
                         session,
@@ -1369,27 +1395,41 @@ fn handle_control(
                     );
                     return;
                 }
-                // 功能点日志：成功按下（含会话号，与 C 04 行对齐即可归因）。
+                // 功能点日志：成功按下（含会话号、目标与注入形态，与 C 04 行对齐
+                // 即可归因）。
                 gatt_note(format!(
-                    "chord_press result=ok session={session_id} gap_ms={}",
+                    "chord_press result=ok session={session_id} target={} shape={} gap_ms={}",
+                    target_config.target.as_log_str(),
+                    shape.as_log_str(),
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
-                *held_hotkey = Some(chord);
-                // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
-                // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
-                // 传入，防旧阶梯跨会话误伤新会话的和弦。
-                spawn_wetype_check(
-                    state,
-                    sender.clone(),
-                    0,
-                    epoch,
-                    voice_session_epoch,
-                    mic_baseline,
-                );
+                // 仅「按住」形态持有和弦供松手释放；切换形态本就不需要释放。
+                if shape == crate::voice_target::InjectionShape::HoldWhileKeyDown {
+                    *held_hotkey = Some(chord);
+                }
+                // 微信输入法热键休眠检测与自动恢复（见 spawn_wetype_check）。
+                // 该阶梯的判据是 WeType 的 ConsentStore 开麦记录与
+                // `cycle_wetype_profile`（切到其他输入法再切回 WeType），
+                // **仅对微信目标成立**——豆包/自定义目标没有等价证据源，
+                // 强行沿用会在无信号时误触发输入法切换。因此仅微信目标启用。
+                if target_config.target == VoiceTarget::WeType {
+                    // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
+                    // 传入，防旧阶梯跨会话误伤新会话的和弦。
+                    spawn_wetype_check(
+                        state,
+                        sender.clone(),
+                        0,
+                        epoch,
+                        voice_session_epoch,
+                        mic_baseline,
+                    );
+                }
             } else {
-                // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
+                // 功能点日志：会话开始但本次无可注入和弦（关闭 / 自定义未录入）。
                 gatt_note(format!(
-                    "chord_press result=skipped session={session_id} reason=no_hotkey"
+                    "chord_press result=skipped session={session_id} target={} reason=no_hotkey enabled={}",
+                    target_config.target.as_log_str(),
+                    target_config.enabled,
                 ));
             }
             if let Err(error) = audio.begin_session(generation) {
@@ -1556,6 +1596,11 @@ fn abort_voice_session(
 /// 并立即清除持有状态，保证断连、睡眠、中止和退出路径不会留下粘住的按键。
 /// 释放失败会记录在 SendInput 快照的 last_error 中，由诊断摘要呈现。
 /// 同时解除语音键 F5 抑制器的会话武装（覆盖停止/中止/断连/退出全部路径）。
+///
+/// 切换式形态（豆包免按模式）**不会**留下持有中的和弦——它在按下时就送完了
+/// 整个点击周期，因此这里无事可做。这不是异常，故不产出 `chord_release` 行，
+/// 避免日志里出现"按下有成对、释放无成对"的假信号；形态可由同会话的
+/// `chord_press ... shape=toggle_per_key_down` 行判定。
 fn release_voice_hold_hotkey(send_input: &SendInputRuntime, held_hotkey: &mut Option<KeyChord>) {
     crate::key_suppressor::set_session_active(false);
     if let Some(chord) = held_hotkey.take() {

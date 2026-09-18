@@ -51,6 +51,9 @@ pub mod send_input;
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
 #[cfg(windows)]
 pub mod send_input_windows;
+/// 语音输入目标抽象（微信/豆包/自定义）：默认快捷键、TSF 身份、注入形态差异
+/// 收敛于一处。非 Windows 下也需要（纯数据 + 测试），故不加 cfg。
+pub mod voice_target;
 #[cfg(windows)]
 mod wetype_revive;
 
@@ -225,7 +228,7 @@ impl Default for ConnectionSnapshot {
 #[derive(Clone)]
 pub struct WindowsPlatform {
     usage: Arc<UsageCounters>,
-    voice_hold_hotkey: Arc<Mutex<Option<send_input::KeyChord>>>,
+    voice_target: Arc<Mutex<voice_target::VoiceTargetConfig>>,
     button_mapping: Arc<ButtonMappingRuntime>,
     raw_input_snapshot: Arc<Mutex<RawInputSnapshot>>,
     // 抑制器与门控句柄"持有即运行"：字段本身不被读取，随平台生命周期保活
@@ -271,7 +274,7 @@ impl MappingInjector for UnsupportedInjector {
 impl Default for WindowsPlatform {
     fn default() -> Self {
         let usage = Arc::new(UsageCounters::default());
-        let voice_hold_hotkey = Arc::new(Mutex::new(None));
+        let voice_target = Arc::new(Mutex::new(voice_target::VoiceTargetConfig::default()));
         let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
         #[cfg(windows)]
         {
@@ -298,7 +301,7 @@ impl Default for WindowsPlatform {
                 Arc::clone(&audio),
                 Arc::clone(&usage),
                 Arc::clone(&send_input),
-                Arc::clone(&voice_hold_hotkey),
+                Arc::clone(&voice_target),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
@@ -311,7 +314,7 @@ impl Default for WindowsPlatform {
             }));
             Self {
                 usage,
-                voice_hold_hotkey,
+                voice_target,
                 button_mapping,
                 raw_input_snapshot,
                 voice_key_suppressor,
@@ -335,7 +338,7 @@ impl Default for WindowsPlatform {
             ));
             Self {
                 usage,
-                voice_hold_hotkey,
+                voice_target,
                 button_mapping,
                 raw_input_snapshot,
             }
@@ -405,12 +408,27 @@ impl WindowsPlatform {
         }
     }
 
-    pub fn voice_hold_hotkey(&self) -> Option<send_input::KeyChord> {
-        lock(&self.voice_hold_hotkey).clone()
+    /// 当前语音输入目标配置。
+    pub fn voice_target_config(&self) -> voice_target::VoiceTargetConfig {
+        lock(&self.voice_target).clone()
     }
 
+    /// 原子替换语音输入目标配置（切换输入法/快捷键的唯一入口）。
+    pub fn set_voice_target_config(&self, config: voice_target::VoiceTargetConfig) {
+        *lock(&self.voice_target) = config;
+    }
+
+    /// 当前实际应注入的和弦（派生自目标配置：关闭或自定义未录入时为 `None`）。
+    pub fn voice_hold_hotkey(&self) -> Option<send_input::KeyChord> {
+        lock(&self.voice_target).resolved_hotkey()
+    }
+
+    /// 兼容 v1 语义：设置裸和弦 = 保持当前目标，记录该和弦并启用注入；
+    /// `None` = 关闭注入（保留目标与已录入值，便于重新开启）。
     pub fn set_voice_hold_hotkey(&self, hotkey: Option<send_input::KeyChord>) {
-        *lock(&self.voice_hold_hotkey) = hotkey;
+        let mut config = lock(&self.voice_target);
+        config.hotkey = hotkey;
+        config.enabled = config.hotkey.is_some();
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {
