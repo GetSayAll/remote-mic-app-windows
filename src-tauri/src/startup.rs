@@ -129,7 +129,11 @@ mod windows_impl {
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
-        Some(String::from_utf16_lossy(&units).trim_end_matches('\0').to_owned())
+        Some(
+            String::from_utf16_lossy(&units)
+                .trim_end_matches('\0')
+                .to_owned(),
+        )
     }
 
     pub fn is_enabled() -> Result<bool, String> {
@@ -138,7 +142,9 @@ mod windows_impl {
             Err(_) => return Ok(false),
         };
         let recorded = read_value(key);
-        unsafe { let _ = RegCloseKey(key); };
+        unsafe {
+            let _ = RegCloseKey(key);
+        };
         let Some(recorded) = recorded else {
             return Ok(false);
         };
@@ -169,7 +175,9 @@ mod windows_impl {
                     )),
                 )
             };
-            unsafe { let _ = RegCloseKey(key); };
+            unsafe {
+                let _ = RegCloseKey(key);
+            };
             if status.is_err() {
                 return Err(format!("写入 Windows 登录启动项失败：{status:?}"));
             }
@@ -180,7 +188,9 @@ mod windows_impl {
             };
             let name = wide(VALUE_NAME);
             let status = unsafe { RegDeleteValueW(key, PCWSTR(name.as_ptr())) };
-            unsafe { let _ = RegCloseKey(key); };
+            unsafe {
+                let _ = RegCloseKey(key);
+            };
             if status.is_err() && status.0 != 2 {
                 return Err(format!("删除 Windows 登录启动项失败：{status:?}"));
             }
@@ -207,7 +217,10 @@ mod windows_impl {
                 command_target("C:\\SayAll\\SayAll.exe"),
                 "C:\\SayAll\\SayAll.exe"
             );
-            assert_eq!(command_target("  \"C:\\SayAll\\SayAll.exe\"  "), "C:\\SayAll\\SayAll.exe");
+            assert_eq!(
+                command_target("  \"C:\\SayAll\\SayAll.exe\"  "),
+                "C:\\SayAll\\SayAll.exe"
+            );
             assert_eq!(command_target(""), "");
         }
 
