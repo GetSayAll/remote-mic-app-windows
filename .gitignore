@@ -25,3 +25,38 @@ coverage/
 pnpm-debug.log*
 __pycache__/
 *.pyc
+
+# ---- 本地产物与诊断证据目录 ----
+# CI workflow 的 paths-ignore 已把 artifacts/ 视为非源码；该目录同时是以下脚本的
+# 产物落地点，不应入库：
+#   scripts/verify-windows-bundle.ps1      -> artifacts/windows-preview/
+#   scripts/generate-updater-manifest.ps1  -> artifacts/windows-release/
+#   Testing/battery-ui-check.cjs           -> artifacts/remote-battery/
+artifacts/
+
+# 文档流水线工作目录（一次性生成物）
+output/
+
+# TypeScript / Vite 增量构建缓存（vue-tsc）
+*.tsbuildinfo
+
+# Python 本地环境（scripts/、Testing/ 下有一批辅助 .py）
+.venv/
+venv/
+.pytest_cache/
+
+# Windows 系统与崩溃产物
+Thumbs.db
+ehthumbs.db
+desktop.ini
+*.lnk
+*.dmp
+*.stackdump
+
+# 补丁 / 合并 / 编辑器残留（本仓库常手工 git apply）
+*.orig
+*.rej
+*.bak
+*~
+*.swp
+*.tmp
