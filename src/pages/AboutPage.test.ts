@@ -94,6 +94,7 @@ const runtime: RuntimeSnapshot = {
       lastIsPressed: false,
       activeButtons: [],
       lastError: null,
+      staleRemoteEventCount: 0,
     },
     buttonMapping: {
       enabled: true,

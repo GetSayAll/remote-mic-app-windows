@@ -45,7 +45,8 @@
       "lastButton": "home",
       "lastIsPressed": true,
       "activeButtons": ["home"],
-      "lastError": null
+      "lastError": null,
+      "staleRemoteEventCount": 0
     },
     "buttonMapping": {
       "enabled": true,

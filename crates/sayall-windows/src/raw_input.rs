@@ -101,6 +101,17 @@ pub struct RawInputSnapshot {
     /// 当前处于按下状态的语义按键（由映射引擎维护，用于 UI 高亮对账）。
     pub active_buttons: Vec<RemoteButton>,
     pub last_error: Option<String>,
+    /// 报文来自**遥控器设备**、但路径与当前绑定不符而被丢弃的次数（2026-09-18 新增）。
+    ///
+    /// 与 `raw_event_count` 的关键区别：后者只在路径匹配后才自增，所以
+    /// "报文一直在来、但绑定已失效"这种状态在旧实现里**零痕迹**——现场只能看到
+    /// 「什么都没发生」，看不到「为什么」。2026-09-18 就是因为这个盲区，
+    /// 无法区分"遥控器没发报文"与"报文被路径过滤丢弃"，最后只能靠外部枚举
+    /// PnP 设备才定位到是绑定失效。此计数就是为消除该盲区而加：
+    ///
+    /// - 持续增长 → 设备在发报文，是**绑定失效**（可自动重绑解决）；
+    /// - 恒为 0 而按键无效 → 报文根本没到，问题在**设备/HID 通道**（应用无法自愈）。
+    pub stale_remote_event_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +161,22 @@ pub fn normalize_device_path(path: &str) -> String {
 }
 
 pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathError> {
+    select_single_device_path_preferring(paths, "")
+}
+
+/// 在多个候选中选出唯一绑定，且**优先保持既有绑定**（2026-09-18）。
+///
+/// 与不传偏好的版本差别只在"多候选"这一支：先看旧路径是否仍在候选里，在就继续
+/// 用它。这样做的实际收益是——蓝牙 HID 重新枚举、或键盘接口与 HID 接口同时出现
+/// 时，不会在等价候选之间来回换绑；每次换绑都会让按住中的按键永远等不到释放
+/// 边沿，产生粘键（下游热键随之整体失效，且极难归因）。
+///
+/// 只在旧路径**已不在候选里**（真的换了设备/实例）时才退回 `Ambiguous`，
+/// 由调用方决定是重绑还是维持现状。
+pub fn select_single_device_path_preferring(
+    paths: &[String],
+    preferred: &str,
+) -> Result<String, DevicePathError> {
     let matches: Vec<_> = paths
         .iter()
         .filter(|path| device_path_matches_xiaomi_remote(path))
@@ -157,7 +184,18 @@ pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathE
     match matches.as_slice() {
         [] => Err(DevicePathError::Missing),
         [path] => Ok((*path).clone()),
-        _ => Err(DevicePathError::Ambiguous(matches.len())),
+        many => {
+            let preferred = normalize_device_path(preferred);
+            if !preferred.is_empty() {
+                if let Some(kept) = many
+                    .iter()
+                    .find(|path| normalize_device_path(path) == preferred)
+                {
+                    return Ok((*kept).clone());
+                }
+            }
+            Err(DevicePathError::Ambiguous(many.len()))
+        }
     }
 }
 
@@ -399,6 +437,59 @@ mod tests {
         assert_eq!(
             select_single_device_path(&paths),
             Err(DevicePathError::Ambiguous(2))
+        );
+    }
+
+    /// 多候选时优先保持既有绑定（2026-09-18）。
+    ///
+    /// 保护的是"换绑即丢释放边沿"这条代价：键盘接口与 HID 接口同时出现、
+    /// 或蓝牙 HID 重新枚举时，若每次审计都在等价候选之间改绑，按住中的按键就
+    /// 永远等不到 UP 边沿，形成粘键——下游热键（如输入法语音和弦）随之整体失效，
+    /// 且极难归因。因此旧绑定仍在候选里时必须继续用它。
+    #[test]
+    fn preferred_binding_is_kept_when_it_is_still_a_candidate() {
+        let one = r"\\?\HID#VID_2717&PID_32B8#one".to_owned();
+        let two = r"\\?\HID#VID_2717&PID_32B8#two".to_owned();
+        let paths = vec![one.clone(), two.clone()];
+
+        assert_eq!(
+            select_single_device_path_preferring(&paths, &one),
+            Ok(one.clone())
+        );
+        assert_eq!(
+            select_single_device_path_preferring(&paths, &two),
+            Ok(two.clone())
+        );
+        // 大小写归一后仍要命中：设备名由系统给出，大小写不作保证。
+        assert_eq!(
+            select_single_device_path_preferring(&paths, &one.to_uppercase()),
+            Ok(one.clone())
+        );
+
+        // 旧绑定已不在候选里 → 不猜，仍然 fail closed。
+        let gone = r"\\?\HID#VID_2717&PID_32B8#gone".to_owned();
+        assert_eq!(
+            select_single_device_path_preferring(&paths, &gone),
+            Err(DevicePathError::Ambiguous(2))
+        );
+        // 无偏好时与旧函数行为一致（向后兼容）。
+        assert_eq!(
+            select_single_device_path_preferring(&paths, ""),
+            Err(DevicePathError::Ambiguous(2))
+        );
+    }
+
+    /// 偏好不改变单候选与空候选的结果。
+    #[test]
+    fn preferred_binding_does_not_change_single_or_empty_candidates() {
+        let only = r"\\?\HID#VID_2717&PID_32B8#only".to_owned();
+        assert_eq!(
+            select_single_device_path_preferring(std::slice::from_ref(&only), "whatever"),
+            Ok(only.clone())
+        );
+        assert_eq!(
+            select_single_device_path_preferring(&[], "whatever"),
+            Err(DevicePathError::Missing)
         );
     }
 
