@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="docx-page-size" content="A4">
+  <title>关于 Windows 版豆包输入法语音快捷键接入的请求</title>
+  <style>
+  /* --- CSS @page 页面模型：正文页脚居中页码 --- */
+  @page {
+    @bottom-center { content: "— " counter(page) " —"; }
+  }
+
+  :root {
+    --fs-h1: var(--typography-fontSize-h1, 16pt);
+    --fs-h2: var(--typography-fontSize-h2, 14pt);
+    --fs-body: var(--typography-fontSize-body, 14pt);
+    --fs-small: var(--typography-fontSize-caption, 12pt);
+    --ff-heading: var(--typography-fontFamily-subheading, "黑体", SimHei, sans-serif);
+    --ff-body: var(--typography-fontFamily-body, "仿宋", FangSong, serif);
+    --lh-body: var(--typography-lineHeight-body, 1.5);
+    --fw-bold: var(--typography-fontWeight-heading, 700);
+    --color-primary: var(--color-primary, #003087);
+    --color-accent: var(--color-secondary, #c8102e);
+    --color-text: var(--color-text, #000000);
+    --color-heading: var(--color-heading, #000000);
+    --color-border: var(--color-border, #cc0000);
+    --color-bg: var(--color-background, #ffffff);
+    --spacing-paragraph: var(--spacing-paragraph, 0em);
+    --spacing-indent: var(--spacing-indent, 2em);
+    --spacing-sectionGap: var(--spacing-sectionGap, 1em);
+    --spacing-listItemGap: var(--spacing-listItemGap, 0.25em);
+    --spacing-list-indent: 2em;
+    --spacing-quote-pad: 6px 8px;
+    --spacing-cell-pad: 5px 6px;
+    --spacing-tight: 0em;
+    --margin-top: var(--layout-marginTop, 3.7cm);
+    --margin-bottom: var(--layout-marginBottom, 3.5cm);
+    --margin-left: var(--layout-marginLeft, 2.8cm);
+    --margin-right: var(--layout-marginRight, 2.6cm);
+    --page-content-width: 15.6cm;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--ff-body);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+    color: var(--color-text);
+    background: var(--color-bg);
+    max-width: var(--page-content-width);
+    margin-left: auto;
+    margin-right: auto;
+    padding-top: var(--margin-top);
+    padding-bottom: var(--margin-bottom);
+  }
+
+  .doc-title {
+    text-align: center;
+    font-size: var(--fs-h1);
+    font-family: var(--ff-heading);
+    font-weight: var(--fw-bold);
+    color: var(--color-heading);
+    line-height: var(--typography-lineHeight-title, 1.5);
+    margin-bottom: var(--spacing-sectionGap);
+  }
+
+  .doc-subtitle {
+    text-align: center;
+    font-size: var(--fs-small);
+    font-family: var(--ff-body);
+    color: var(--color-text);
+    margin-bottom: var(--spacing-sectionGap);
+  }
+
+  .lead {
+    text-indent: var(--spacing-indent);
+    margin-bottom: var(--spacing-paragraph);
+  }
+
+  p {
+    text-indent: var(--spacing-indent);
+    margin-bottom: var(--spacing-paragraph);
+  }
+
+  h2 {
+    font-size: var(--fs-h2);
+    font-family: var(--ff-heading);
+    font-weight: var(--fw-bold);
+    color: var(--color-heading);
+    text-indent: 0;
+    line-height: var(--typography-lineHeight-body, 1.5);
+    margin-top: var(--spacing-sectionGap);
+    margin-bottom: var(--spacing-paragraph);
+  }
+
+  ol, ul {
+    margin-top: var(--spacing-paragraph);
+    margin-bottom: var(--spacing-paragraph);
+    padding-left: var(--spacing-list-indent);
+  }
+  li {
+    text-indent: 0;
+    margin-bottom: var(--spacing-listItemGap);
+  }
+
+  .emphasis {
+    text-indent: var(--spacing-indent);
+    border-left: 3px solid var(--color-primary);
+    padding: var(--spacing-quote-pad);
+    margin-bottom: var(--spacing-paragraph);
+    font-family: var(--ff-body);
+  }
+
+  table.plan-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: var(--spacing-paragraph);
+    margin-bottom: var(--spacing-paragraph);
+    font-size: var(--fs-small);
+    font-family: var(--ff-body);
+  }
+  table.plan-table th {
+    background: var(--color-primary);
+    color: var(--color-bg);
+    font-family: var(--ff-heading);
+    font-weight: var(--fw-bold);
+    border: 1px solid var(--color-primary);
+    padding: var(--spacing-cell-pad);
+    text-align: left;
+    text-indent: 0;
+  }
+  table.plan-table td {
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    padding: var(--spacing-cell-pad);
+    text-indent: 0;
+    vertical-align: top;
+  }
+
+  .facts {
+    text-indent: var(--spacing-indent);
+    margin-bottom: var(--spacing-paragraph);
+  }
+
+  .signature {
+    text-align: right;
+    text-indent: 0;
+    font-family: var(--ff-heading);
+    font-weight: var(--fw-bold);
+    color: var(--color-heading);
+    margin-top: var(--spacing-sectionGap);
+  }
+  </style>
+</head>
+<body>
+
+  <h1 class="doc-title">关于 Windows 版豆包输入法<br>语音快捷键接入的请求</h1>
+  <p class="doc-subtitle">一名普通用户</p>
+
+  <p class="lead">你们好，Mac 版豆包的语音输入可以被其他程序唤起，Windows 版却不行。真人在键盘上按语音快捷键能正常触发，但由程序发出的同一个按键会被忽略——Windows 不像 macOS 那样有「已授权合成输入」的概念，程序发出的按键都带注入标记，因此都会被过滤。这一点我们理解，也不想绕过。</p>
+
+  <p>希望能为 Windows 版豆包开放一个可被其他程序合法调用的语音输入入口。具体用哪种形式都可以接受：</p>
+
+  <ol>
+    <li>把语音快捷键注册为<strong>系统级全局热键</strong>。这样遥控器、手柄、耳机等外设按下语音键即可直接唤起听写，不涉及模拟按键，你们现有的安全策略一行都不用改。这是我们最希望的方式。</li>
+    <li>提供一个<strong>命令行或本地接口</strong>（如命名管道、本地套接字），程序通过它启动语音输入，调用方由你们校验。</li>
+    <li>在设置里增加一个<strong>默认关闭的「允许模拟输入触发语音」开关</strong>，是否开启交给用户自己决定。</li>
+  </ol>
+
+  <p>上述任意一种落地后，Windows 用户就能像 Mac 用户一样，用外设一键唤起豆包的语音输入。谢谢。</p>
+
+</body>
+</html>

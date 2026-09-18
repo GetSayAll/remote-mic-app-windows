@@ -1,0 +1,19 @@
+critic_mode_hint: "once"
+force_mode: null
+rubrics_files:
+  - "experts/general-writer/references/quality-framework.md"
+  - "experts/general-writer/references/doc-type-matrix.md"
+pass_score: 75
+max_loops: 2
+section_params:
+  scope: "section"
+  min_issues: 1
+  min_instructions: 2
+full_params:
+  scope: "full"
+  min_issues: 2
+  min_instructions: 3
+revision_params:
+  scope: "revision"
+  min_issues: 1
+  min_instructions: 1

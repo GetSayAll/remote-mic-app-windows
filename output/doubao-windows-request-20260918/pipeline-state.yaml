@@ -1,0 +1,90 @@
+request_id: doubao-windows-request-20260918
+entry_type: full_pipeline
+current_stage: 3
+created_at: "2026-09-18T16:04:00+08:00"
+
+intent:
+  summary: "从零创作一份面向豆包输入法官方的技术说明与功能开放请求文档（.docx）"
+  intent_length: 96
+  genre: "对外技术沟通函 / 合作请求文档"
+  language: zh-CN
+  source_materials:
+    - "docs/external/2026-09-18-doubao-windows-integration-request.md（本会话已生成的 Markdown 源稿）"
+    - "Bugs/2026-09-17-doubao-injection-cross-repo-verification.md"
+    - "Bugs/2026-09-04-doubao-voice-hold-hotkey.md"
+    - "Bugs/2026-09-17-doubao-global-shortcut-is-handsfree-mode.md"
+    - "Testing/investigation/doubao-global-hotkey/README.md"
+    - "docs/decisions/0002-dual-track-injection-optional-helper.md"
+
+output_docx_path: "C:\\Users\\Administrator\\WorkBuddy\\2026-09-15-09-02-23\\remote-mic-app-windows\\output\\doubao-windows-request-20260918\\stage3\\豆包输入法Windows版接入说明与请求.docx"
+output_docx_user_specified: false
+
+stage1:
+  skill: doc-writer
+  status: completed
+  output: "output/doubao-windows-request-20260918/stage1/final_draft.md"
+  critic:
+    mode: "once"
+    scope: "full"
+    loop_index: 0
+    total_score: 92.20
+    pass_score: 75
+    decision: "PASS"
+    report: "output/doubao-windows-request-20260918/stage1/critic_r0.md"
+    p2_absorbed: 5
+    note: "判定覆盖 general genre 默认 skip，理由：本文档对外部方做可验证的事实声明，准确性有真实后果。全部 5 条指令均为 P2（可选优化），已在进入 Stage 2 前就地消化，未触发 REVISE。"
+  stats:
+    chars_no_ws: 5813
+    h1: 1
+    h2: 8
+    h3: 7
+    table_rows: 26
+
+stage2:
+  skill: doc-formatter
+  entry_type: stage2_flow
+  content_source: "用户在对话中给定的「发给豆包输入法开发者」短函正文（非 stage1/final_draft.md；经用户明确指令切换来源）"
+  intermediate_dir: "C:\\Users\\Administrator\\WorkBuddy\\2026-09-15-09-02-23\\remote-mic-app-windows\\output\\doubao-windows-request-20260918\\stage2\\intermediate\\"
+  status: completed
+  route: html
+  html_sub: template
+  genre: government-doc
+  template_used: government-doc.html
+  theme_name: formal-government
+  skills_invoked: ["design-token", "doc-typeset", "html-review"]
+  html_review_attempts: 1
+  review_result:
+    score_before: 75
+    score_after: 90
+    passed: false
+    remaining: "[GF-01/02/03] 文体契合度=50（缺发文字号/红头/落款三件套）"
+    disposition: "deferred — 本文档是发给输入法研发团队的技术沟通函，非党政机关公文；套用红头、发文字号会显得荒谬。按 html-review「一次定向修正后直接输出、不复检」协议出稿，剩余项为接受态。"
+  fallback: false
+  fallback_reason: null
+  output_path: "output/doubao-windows-request-20260918/stage2/formatted-doubao-dev-message.html"
+  output_format: html
+
+stage3:
+  skill: doc-converter
+  executor: doc-converter
+  status: completed
+  input_format: html
+  skill_used: ["html-to-docx"]
+  output_path: "C:\\Users\\Administrator\\WorkBuddy\\2026-09-15-09-02-23\\remote-mic-app-windows\\output\\doubao-windows-request-20260918\\stage3\\豆包输入法Windows版接入说明与请求.docx"
+  present_files_opened: true
+  fallback: false
+  fallback_reason: null
+  verify:
+    file_size: 40503
+    paragraphs: 20
+    tables: 1
+    warnings: []
+
+trace:
+  - "Stage 0: entry_type=full_pipeline（无文档 + 创作动词「出/给一份文档」）；链路 S1→S2→S3"
+  - "Stage 1: doc-writer 完成。Expert=L1 general-writer；Phase 2 Research 跳过（素材全为自证内容）；critic once/full → PASS(92.20)，5 条 P2 就地消化。格式门禁通过。"
+  - "Stage 1 取证核验：五份引用附件均存在，SHA-1 与 PR #96 提交（feature-doubao-ime）逐份一致，无转录漂移。"
+  - "Stage 2: 用户改短文案为「发给豆包输入法开发者的一段话」→ 内容源切换为用户对话内正文；doc-formatter html-template 路线，genre=government-doc；html-review 首轮 75 → 一次定向修正后 90（仅剩 GF-01/02/03 文体项，已 deferred 接受）。"
+  - "Stage 2 环境坑：setup-html-to-docx.sh 依赖 uv + 外网安装 uv（astral.sh 不可达）→ 改用托管 Python 3.13.12 直接 pip 装 requirements.txt（含 html-for-docx，提供 html4docx 模块名）。"
+  - "Stage 3: html-to-docx 转换成功，warnings 空，fields 空。"
+  - "Stage 3 终稿修订（用户第二轮指令）：全文压缩为一段约 80 字、以普通用户口吻、不提「无线麦」；标点为直角引号/句号，无 Markdown 语法。已重新转换并替换同名 docx。"

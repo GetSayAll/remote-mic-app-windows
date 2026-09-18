@@ -1,0 +1,13 @@
+detected_doc_type: "对外技术沟通函（正式商务函件）"
+target_length: 3200
+target_tone: "第三人称（我方/贵方），正式度★★★★☆"
+audience: "豆包输入法 Windows 客户端研发团队（外部厂商）"
+purpose: "说明我方接入需求 → 给出技术定位与实测证据 → 请求开放合规接入接口"
+core_points:
+  - "macOS 版豆包输入法可被外部程序唤起语音；Windows 版不行，存在平台能力落差"
+  - "实测证明：物理按键可唤起、SendInput 注入不可（两档模式均如此），且注入确实送达系统"
+  - "机制定位：ImeService.exe 的低级键盘钩子过滤 LLKHF_INJECTED 标志"
+  - "四个已实现豆包接入的开源项目全部依赖驱动级/进程注入，均被我方产品原则排除"
+  - "请求三种可选公开入口（全局热键 / IPC 接口 / 用户显式开关），并承诺零侵入"
+research_needed: false
+research_skip_reason: "全部素材来自我方第一手实测记录与仓库内既有文档，属自证内容；无需外部检索。"
