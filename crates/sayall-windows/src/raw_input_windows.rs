@@ -22,10 +22,10 @@ use windows::Win32::UI::Input::{
     RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassW, TranslateMessage, UnregisterClassW, HWND_MESSAGE, MSG,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE,
-    WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, UnregisterClassW,
+    HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT,
+    WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,6 +39,21 @@ const GATE_ARM_GRACE_MS: u64 = 4_000;
 /// GIDC_ARRIVAL=1（设备接入）、GIDC_REMOVAL=2（设备移除）。
 const GIDC_ARRIVAL: u32 = 1;
 const GIDC_REMOVAL: u32 = 2;
+/// 绑定审计定时器的 ID 与周期（2026-09-18）。
+///
+/// 为什么需要主动审计：`WM_INPUT_DEVICE_CHANGE` 只在设备**确实**被插拔时到达。
+/// 2026-09-18 现场出现过遥控器 HID 接口消失、但应用**没收到 GIDC_REMOVAL** 的情况
+/// ——监听器就一直停在 `Ready` 并绑定着一个已不存在的路径，按键永久失效，
+/// 而日志里连一条相关记录都没有（`raw_event_count` 不涨是因为报文根本没到）。
+/// 定时审计以"当前枚举结果是否仍包含绑定路径"为判据，弥补通知的漏失。
+const BINDING_AUDIT_TIMER_ID: usize = 0x5A11;
+const BINDING_AUDIT_INTERVAL_MS: u32 = 10_000;
+/// 遥控器 HID 接口缺失时给用户看的说明（启动路径与审计路径共用同一份文案，
+/// 避免两处各写一份而逐渐不一致）。
+const AWAITING_DEVICE_MESSAGE: &str =
+    "未找到小米遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
+     睡眠唤醒或蓝牙栈僵死）。监听已就位，系统恢复该接口后会自动重新绑定，\
+     无需手动重连或重启应用。";
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
@@ -240,6 +255,11 @@ struct ListenerContext {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
     engine: Sender<EngineMessage>,
     remote_voice_f5_pressed: bool,
+    /// 上次审计时绑定设备是否仍枚举得到（2026-09-18）。
+    ///
+    /// 只用于把日志压成**边沿**（设备一直在位就静默），避免 10 秒一次的审计把
+    /// 诊断日志刷满（LOGGING.md「状态未变化不重复刷」）。
+    binding_present: bool,
 }
 
 fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
@@ -389,6 +409,8 @@ fn run_listener(
             snapshot: Arc::clone(&snapshot),
             engine,
             remote_voice_f5_pressed: false,
+            // 启动时就绑定成功 = 设备此刻在位；空路径是 Awaiting，等接口出现。
+            binding_present: !selected_path.is_empty(),
         });
     });
 
@@ -396,18 +418,53 @@ fn run_listener(
         let mut state = snapshot.lock().unwrap();
         if selected_path.is_empty() {
             state.phase = RawInputPhase::Awaiting;
-            state.last_error = Some(
-                "未找到小米遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
-                 睡眠唤醒或蓝牙栈僵死）。监听已就位，系统恢复该接口后会自动重新绑定，\
-                 无需手动重连或重启应用。"
-                    .to_owned(),
-            );
+            state.last_error = Some(AWAITING_DEVICE_MESSAGE.to_owned());
         } else {
             state.phase = RawInputPhase::Ready;
             state.last_error = None;
         }
     }
+    // 启动时的绑定结论要留痕：后续所有 binding_audit 记录都以此为基准，
+    // 没有这一条就无法判断"是从未绑上"还是"绑上后掉了"（2026-09-18）。
+    crate::ble::gatt_note(format!(
+        "raw_input binding_initial selected_path={selected_path} matched_device_count={} \
+         phase={}",
+        paths.len(),
+        if selected_path.is_empty() {
+            "awaiting"
+        } else {
+            "ready"
+        }
+    ));
     let _ = ready.send(Ok(()));
+
+    // 绑定审计定时器：见 BINDING_AUDIT_TIMER_ID 的说明。
+    // 用 WM_TIMER 而不是把 `GetMessageW` 改写成带超时的等待循环——消息循环保持
+    // 原样，改动面最小，定时器消息会照常被 DispatchMessage 派发到 window_proc。
+    match unsafe {
+        SetTimer(
+            Some(window),
+            BINDING_AUDIT_TIMER_ID,
+            BINDING_AUDIT_INTERVAL_MS,
+            None,
+        )
+    } {
+        0 => {
+            // 定时器没建起来 = 绑定审计永不运行，退化成"只能靠 WM_INPUT_DEVICE_CHANGE"
+            // 的老行为。这是能力缺失，必须留痕，否则现场会以为审计在工作（2026-09-18）。
+            crate::ble::gatt_note(format!(
+                "raw_input binding_audit action=timer_arm_failed error={}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        _ => {
+            crate::ble::gatt_note(format!(
+                "raw_input binding_audit action=timer_armed interval_ms={BINDING_AUDIT_INTERVAL_MS} \
+                 selected_path={selected_path} binding_present={}",
+                !selected_path.is_empty()
+            ));
+        }
+    }
 
     if stop_requested.load(Ordering::Acquire) {
         let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
@@ -478,11 +535,38 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_TIMER => {
+            // 只认自己的定时器 ID：窗口是 message-only，本不该有别的定时器，
+            // 但显式比对可避免将来新增定时器时互相误触。
+            if wparam.0 == BINDING_AUDIT_TIMER_ID {
+                // THREAD_CONTEXT 已被清空 = 监听器正在收尾。此时审计会因为拿不到
+                // context 而静默返回，从日志上看与"设备一直在位"无法区分——
+                // 记一条，避免把这个空转当成正常静默（2026-09-18）。
+                if !THREAD_CONTEXT.with(|slot| slot.borrow().is_some()) {
+                    crate::ble::gatt_note(
+                        "raw_input binding_audit action=skipped reason=context_gone".to_owned(),
+                    );
+                    return LRESULT(0);
+                }
+                audit_binding();
+            }
+            LRESULT(0)
+        }
         WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
+            // 先杀定时器再退出：顺序反了会在收尾期间继续收到 WM_TIMER，
+            // 那些 tick 会因为 context 已被清空而空转。
+            match unsafe { KillTimer(Some(hwnd), BINDING_AUDIT_TIMER_ID) } {
+                Ok(()) => crate::ble::gatt_note(
+                    "raw_input binding_audit action=timer_disarmed".to_owned(),
+                ),
+                Err(error) => crate::ble::gatt_note(format!(
+                    "raw_input binding_audit action=timer_disarm_failed error={error}"
+                )),
+            }
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -553,6 +637,129 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
     });
 }
 
+/// 定期核对"绑定的设备是否仍在位"（2026-09-18）。
+///
+/// 存在的理由：`WM_INPUT_DEVICE_CHANGE` 通知可能漏失。2026-09-18 现场就是
+/// 遥控器 HID 接口已从系统消失（PnP 查得 `IsPresent=False`），应用却仍停在
+/// `Ready` 并绑着一个不存在的路径——按键永久失效，而且**日志里连一条相关记录
+/// 都没有**（`raw_event_count` 不涨是因为报文根本没到，不是被过滤）。
+/// 本函数以"当前枚举结果是否仍包含绑定路径"为准定期复核，按需重绑或转入等待。
+///
+/// 只在状态**变化**时写日志：设备一直在位就静默返回，避免 10 秒一次的审计刷屏
+/// （LOGGING.md「状态未变化不重复刷」）。
+fn audit_binding() {
+    THREAD_CONTEXT.with(|slot| {
+        let mut borrowed = slot.borrow_mut();
+        let context = match borrowed.as_mut() {
+            Some(context) => context,
+            None => return,
+        };
+        let paths = match enumerate_matching_device_paths() {
+            Ok(paths) => paths,
+            Err(error) => {
+                // 枚举本身失败（系统级错误）：保留现有绑定，只在边沿记录一次，
+                // 不用一次探测失败去推翻一个可能仍然有效的绑定。
+                if context.binding_present {
+                    context.binding_present = false;
+                    crate::ble::gatt_note(format!(
+                        "raw_input binding_audit action=probe_failed error={error}"
+                    ));
+                }
+                return;
+            }
+        };
+        let still_bound = !context.selected_path.is_empty()
+            && paths
+                .iter()
+                .any(|path| normalize_device_path(path) == context.selected_path);
+        if still_bound {
+            if !context.binding_present {
+                context.binding_present = true;
+                context.snapshot.lock().unwrap().last_error = None;
+                crate::ble::gatt_note(format!(
+                    "raw_input binding_audit action=present matched_device_count={}",
+                    paths.len()
+                ));
+            }
+            return;
+        }
+        // 绑定已失效（或从未建立）：按当前枚举结果决定重绑还是转入等待。
+        //
+        // 传 `preferred` 是必须的（2026-09-18 接线）：审计的触发条件正是"旧绑定
+        // 不在枚举结果里"，但"数量 >1"这一支如果不带偏好，就会在多个等价候选之间
+        // 盲选——选中哪个由枚举顺序决定，每次审计可能不同。换绑会让按住中的按键
+        // 永远等不到释放边沿（粘键），代价远高于沿用旧绑定。旧路径确实还在候选里时
+        // 沿用它是无代价的；真换了设备/实例（旧路径不在候选里）才退回 Ambiguous。
+        let candidate_count = paths.len();
+        match crate::raw_input::select_single_device_path_preferring(&paths, &context.selected_path)
+        {
+            Ok(path) => {
+                let rebound_path = normalize_device_path(&path);
+                // 换了还是没换？前者说明设备/实例真的变了，后者说明多候选里沿用了
+                // 旧绑定。两者的诊断含义完全不同，所以分开记（2026-09-18）。
+                let kept_previous = rebound_path == context.selected_path;
+                let previous_path = context.selected_path.clone();
+                context.selected_path = rebound_path;
+                context.binding_present = true;
+                let stale_remote_event_count = {
+                    let mut state = context.snapshot.lock().unwrap();
+                    state.phase = RawInputPhase::Ready;
+                    state.matched_device_count = candidate_count as u32;
+                    state.last_error = None;
+                    state.stale_remote_event_count
+                };
+                // 重新绑定后门控才重新具备归因来源。
+                key_gate::set_listener_active(true);
+                crate::ble::gatt_note(format!(
+                    "raw_input binding_audit action=rebound kept_previous={kept_previous} \
+                     matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count} \
+                     previous_path={previous_path} rebound_path={}",
+                    context.selected_path
+                ));
+            }
+            Err(crate::raw_input::DevicePathError::Missing) => {
+                if !context.binding_present {
+                    // 已经处于等待态，不重复处理、不重复写日志。
+                    return;
+                }
+                context.binding_present = false;
+                let previous_path = context.selected_path.clone();
+                context.selected_path.clear();
+                let stale_remote_event_count = {
+                    let mut state = context.snapshot.lock().unwrap();
+                    state.phase = RawInputPhase::Awaiting;
+                    state.matched_device_count = 0;
+                    state.last_error = Some(AWAITING_DEVICE_MESSAGE.to_owned());
+                    state.stale_remote_event_count
+                };
+                // 接口消失：让引擎释放按住状态，避免留下永远等不到配对的按下边沿。
+                let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                key_gate::set_listener_active(false);
+                // 带上丢失的路径与陈旧报文计数：这是判断"按键失效是接口消失还是
+                // 报文被路径过滤丢弃"的关键一组数字（2026-09-18）。
+                crate::ble::gatt_note(format!(
+                    "raw_input binding_audit action=unbound reason=device_missing \
+                     stale_remote_event_count={stale_remote_event_count} lost_path={previous_path}"
+                ));
+            }
+            Err(crate::raw_input::DevicePathError::Ambiguous(count)) => {
+                // 多候选且旧绑定已不在其中：不猜，保持现状并报告。
+                // 换绑会让按住中的按键丢失释放边沿（粘键），代价高于等下一次审计。
+                if context.binding_present {
+                    context.binding_present = false;
+                    let stale_remote_event_count =
+                        context.snapshot.lock().unwrap().stale_remote_event_count;
+                    crate::ble::gatt_note(format!(
+                        "raw_input binding_audit action=ambiguous candidate_count={count} \
+                         stale_remote_event_count={stale_remote_event_count} kept_path={}",
+                        context.selected_path
+                    ));
+                }
+            }
+        }
+    });
+}
+
 fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
     let mut size = 0u32;
     let header_size = size_of::<RAWINPUTHEADER>() as u32;
@@ -587,7 +794,37 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         let context = borrowed
             .as_mut()
             .ok_or_else(|| "Raw Input listener context is unavailable".to_owned())?;
-        if normalize_device_path(&device_path) != context.selected_path {
+        let normalized = normalize_device_path(&device_path);
+        if normalized != context.selected_path {
+            // 绑定失配：报文可能来自别的设备（物理键盘等），也可能是遥控器的 HID
+            // 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
+            // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
+            // 区分开的唯一线索（2026-09-18 现场正是无法区分这两者才迟迟定不了位）。
+            if crate::raw_input::device_path_matches_xiaomi_remote(&normalized) {
+                let (count, first) = {
+                    let mut state = context.snapshot.lock().unwrap();
+                    state.stale_remote_event_count += 1;
+                    (
+                        state.stale_remote_event_count,
+                        state.stale_remote_event_count == 1,
+                    )
+                };
+                // 只在第一次失配时写日志（计数的**开始时刻**才是定位线索；
+                // 后续每条都写会把诊断日志刷满，而这批报文的真实来源靠计数即可）。
+                if first {
+                    let bound_path = context.selected_path.clone();
+                    let binding_present = context.binding_present;
+                    let phase = context.snapshot.lock().unwrap().phase;
+                    crate::ble::gatt_note(format!(
+                        "raw_input stale_remote_event first_seen bound_path={bound_path} \
+                         binding_present={binding_present} phase={phase:?} \
+                         event_path={normalized} \
+                         hint=遥控器仍在发报文但路径与绑定不符（多候选时期最可能），\
+                         或绑定被审计清空后报文仍到达"
+                    ));
+                }
+                let _ = count;
+            }
             return Ok(());
         }
         context.snapshot.lock().unwrap().raw_event_count += 1;

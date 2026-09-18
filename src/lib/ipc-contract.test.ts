@@ -156,6 +156,7 @@ describe("Rust and TypeScript IPC contract", () => {
       "lastIsPressed",
       "activeButtons",
       "lastError",
+      "staleRemoteEventCount",
     ]);
     expectExactKeys(platformSnapshot.buttonMapping, [
       "enabled",

@@ -82,6 +82,8 @@ export interface RawInputSnapshot {
   lastIsPressed: boolean | null;
   activeButtons: RemoteButton[];
   lastError: string | null;
+  /** 报文来自遥控器但路径与绑定不符而被丢弃的次数（绑定失效的直接证据）。 */
+  staleRemoteEventCount: number;
 }
 
 export type KeyCode = string;
@@ -326,6 +328,7 @@ const browserSnapshot: RuntimeSnapshot = {
       lastIsPressed: null,
       activeButtons: [],
       lastError: null,
+      staleRemoteEventCount: 0,
     },
     buttonMapping: {
       enabled: true,
