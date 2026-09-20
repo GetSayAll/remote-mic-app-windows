@@ -125,23 +125,26 @@ const RC003_VOICE_PLACEMENT: Placement = {
  * Assistant 黑键中心 (0.578, 0.378)，方向环中心 (0.510, 0.234)）。
  */
 const CHROMECAST_PLACEMENTS: Placement[] = [
-  // 左列（物理左侧 6 键）：电源、方向环上/左、返回、主页、YouTube。
-  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.06 },
-  { button: "up", side: "left", anchor: [0.51, 0.15], targetY: 0.236 },
-  { button: "left", side: "left", anchor: [0.426, 0.234], targetY: 0.412 },
-  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.588 },
-  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.764 },
-  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.94 },
-  // 右列（物理右侧 8 键）：方向环右/确定/下、静音、Netflix、输入源、音量±。
-  // 音量± 是遥控器右侧实体键，产品正面照看不到：锚点落在机身右边缘。
-  { button: "right", side: "right", anchor: [0.594, 0.234], targetY: 0.16 },
-  { button: "ok", side: "right", anchor: [0.51, 0.234], targetY: 0.274 },
-  { button: "down", side: "right", anchor: [0.51, 0.318], targetY: 0.389 },
-  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.503 },
-  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.617 },
-  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.731 },
-  { button: "volume_up", side: "right", anchor: [0.649, 0.45], targetY: 0.846 },
-  { button: "volume_down", side: "right", anchor: [0.649, 0.53], targetY: 0.96 },
+  // 左列（物理左侧 6 键），按锚点高度从上到下排列，避免连线交叉：
+  // 上、左、返回、主页、YouTube、电源。
+  { button: "up", side: "left", anchor: [0.509, 0.145], targetY: 0.06 },
+  { button: "left", side: "left", anchor: [0.423, 0.231], targetY: 0.236 },
+  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.412 },
+  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.588 },
+  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.764 },
+  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.94 },
+  // 右列（物理右侧 8 键），同样按锚点高度排列：
+  // 右、确定、音量+、下、音量−、静音、Netflix、输入源。
+  // 音量± 是右侧边缘实体键、位置略高于语音键，且正面产品照看不到：
+  // 锚点取机身右边缘 y≈0.29/0.35。
+  { button: "right", side: "right", anchor: [0.595, 0.231], targetY: 0.16 },
+  { button: "ok", side: "right", anchor: [0.509, 0.231], targetY: 0.275 },
+  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.39 },
+  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.505 },
+  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.62 },
+  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.735 },
+  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.85 },
+  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.965 },
 ];
 const CHROMECAST_VOICE_PLACEMENT: Placement = {
   button: "ok",
