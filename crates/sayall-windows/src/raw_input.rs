@@ -221,8 +221,15 @@ pub struct RemoteHidSelection {
     pub paths: Vec<String>,
 }
 
+/// 选择要绑定的遥控器 HID 接口。
+///
+/// - `active = Some(profile)`：只保留该型号的接口（多遥控器同时在线时用于
+///   锁定当前语音遥控器；未出现则返回 `Missing`，由调用方进入等待）。
+/// - `active = None`：型号未知；仅当单一厂商在线时绑定，多厂商并存返回
+///   `Ambiguous`（调用方按等待处理，而非失败）。
 pub fn select_remote_hid_selection(
     paths: &[String],
+    active: Option<RemoteHidProfile>,
 ) -> Result<RemoteHidSelection, DevicePathError> {
     let mut xiaomi: Vec<String> = Vec::new();
     let mut google: Vec<String> = Vec::new();
@@ -233,17 +240,39 @@ pub fn select_remote_hid_selection(
             None => {}
         }
     }
-    match (xiaomi.is_empty(), google.is_empty()) {
-        (true, true) => Err(DevicePathError::Missing),
-        (false, false) => Err(DevicePathError::Ambiguous(xiaomi.len() + google.len())),
-        (false, true) => Ok(RemoteHidSelection {
-            profile: RemoteHidProfile::Xiaomi,
-            paths: xiaomi,
-        }),
-        (true, false) => Ok(RemoteHidSelection {
-            profile: RemoteHidProfile::Google,
-            paths: google,
-        }),
+    match active {
+        Some(RemoteHidProfile::Xiaomi) => {
+            if xiaomi.is_empty() {
+                Err(DevicePathError::Missing)
+            } else {
+                Ok(RemoteHidSelection {
+                    profile: RemoteHidProfile::Xiaomi,
+                    paths: xiaomi,
+                })
+            }
+        }
+        Some(RemoteHidProfile::Google) => {
+            if google.is_empty() {
+                Err(DevicePathError::Missing)
+            } else {
+                Ok(RemoteHidSelection {
+                    profile: RemoteHidProfile::Google,
+                    paths: google,
+                })
+            }
+        }
+        None => match (xiaomi.is_empty(), google.is_empty()) {
+            (true, true) => Err(DevicePathError::Missing),
+            (false, false) => Err(DevicePathError::Ambiguous(xiaomi.len() + google.len())),
+            (false, true) => Ok(RemoteHidSelection {
+                profile: RemoteHidProfile::Xiaomi,
+                paths: xiaomi,
+            }),
+            (true, false) => Ok(RemoteHidSelection {
+                profile: RemoteHidProfile::Google,
+                paths: google,
+            }),
+        },
     }
 }
 
@@ -752,20 +781,41 @@ mod tests {
             r"\\?\HID#{1812}_Dev_VID&0118D1_PID&9450_REV&0110_x&Col01".to_owned(),
             r"\\?\HID#{1812}_Dev_VID&0118D1_PID&9450_REV&0110_x&Col02".to_owned(),
         ];
-        let selection = select_remote_hid_selection(&paths).unwrap();
+        let selection = select_remote_hid_selection(&paths, None).unwrap();
         assert_eq!(selection.profile, RemoteHidProfile::Google);
         assert_eq!(selection.paths.len(), 2);
-        // 小米 + Google 同时在线：失败关闭。
+        // 小米 + Google 同时在线且型号未知：歧义（由调用方按等待处理）。
         let mixed = vec![
             r"\\?\HID#VID_2717&PID_32B8#a".to_owned(),
             r"\\?\HID#VID_18D1&PID_9450#b".to_owned(),
         ];
         assert_eq!(
-            select_remote_hid_selection(&mixed),
+            select_remote_hid_selection(&mixed, None),
             Err(DevicePathError::Ambiguous(2))
         );
         assert_eq!(
-            select_remote_hid_selection(&[]),
+            select_remote_hid_selection(&[], None),
+            Err(DevicePathError::Missing)
+        );
+    }
+
+    #[test]
+    fn active_profile_selects_only_that_vendor_when_both_are_online() {
+        let mixed = vec![
+            r"\\?\HID#VID_2717&PID_32B8#a".to_owned(),
+            r"\\?\HID#VID_18D1&PID_9450#b".to_owned(),
+            r"\\?\HID#VID_18D1&PID_9450#c&Col02".to_owned(),
+        ];
+        let google = select_remote_hid_selection(&mixed, Some(RemoteHidProfile::Google)).unwrap();
+        assert_eq!(google.profile, RemoteHidProfile::Google);
+        assert_eq!(google.paths.len(), 2);
+        let xiaomi = select_remote_hid_selection(&mixed, Some(RemoteHidProfile::Xiaomi)).unwrap();
+        assert_eq!(xiaomi.profile, RemoteHidProfile::Xiaomi);
+        assert_eq!(xiaomi.paths.len(), 1);
+        // 指定型号未出现：Missing（调用方等待其出现）。
+        let only_google = vec![r"\\?\HID#VID_18D1&PID_9450#b".to_owned()];
+        assert_eq!(
+            select_remote_hid_selection(&only_google, Some(RemoteHidProfile::Xiaomi)),
             Err(DevicePathError::Missing)
         );
     }

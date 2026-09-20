@@ -1856,6 +1856,9 @@ impl BleSession {
             snapshot.remote_model = model;
             snapshot.last_error = None;
         }
+        // 型号落定：让 Raw Input 只绑定这台遥控器的 HID 接口（多遥控器同时
+        // 在线时避免混合厂商被判歧义而无法启动监听）。
+        crate::raw_input_windows::set_active_profile(crate::hid_profile_for_model(model));
         pending.service = Some(connect_stage(
             reconnecting,
             reconnect_attempt,

@@ -738,6 +738,16 @@ pub fn remote_model_from_model_number(model_number: &str) -> Option<RemoteModel>
     }
 }
 
+/// 型号 → Raw Input HID 报文配置。多遥控器同时在线时用于锁定当前语音遥控器
+/// 应绑定的接口，避免把不同厂商的报文混在一起解析。
+pub fn hid_profile_for_model(model: RemoteModel) -> Option<raw_input::RemoteHidProfile> {
+    match model {
+        RemoteModel::Rc001 | RemoteModel::Rc003 => Some(raw_input::RemoteHidProfile::Xiaomi),
+        RemoteModel::Chromecast => Some(raw_input::RemoteHidProfile::Google),
+        RemoteModel::Unknown => None,
+    }
+}
+
 pub fn is_virtual_cable_output_name(raw_name: &str) -> bool {
     let normalized = raw_name.trim().to_lowercase();
     normalized.contains("cable input") || normalized.contains("vb-audio virtual cable")
