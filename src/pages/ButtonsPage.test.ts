@@ -233,9 +233,9 @@ describe("buttons mapping page", () => {
     // 12 张按键卡 + 语音卡。
     // 14 张按键卡（含右侧音量±）+ 语音卡。
     expect(wrapper.findAll(".mapping-card")).toHaveLength(15);
-    // 严格按物理位置：左列 6 张，右列 8 张 + 语音卡 1 张。
-    expect(wrapper.findAll(".mapping-card.left")).toHaveLength(6);
-    expect(wrapper.findAll(".mapping-card.right")).toHaveLength(9);
+    // 左列 7 张（含搬到左侧的「确定」），右列 7 张 + 语音卡 1 张。
+    expect(wrapper.findAll(".mapping-card.left")).toHaveLength(7);
+    expect(wrapper.findAll(".mapping-card.right")).toHaveLength(8);
   });
 
   it("does not register listeners or polling after unmounting during initial load", async () => {

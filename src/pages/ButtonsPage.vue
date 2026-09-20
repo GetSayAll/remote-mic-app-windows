@@ -123,33 +123,31 @@ const RC003_VOICE_PLACEMENT: Placement = {
 };
 
 /**
- * Chromecast Remote 布局（1600×1600 正方形产品图内的相对坐标）：方向/确定在上，
+ * Chromecast Remote 布局（1600×1600 正方形产品图内的相对坐标）：方向环在上，
  * 返回与语音键（Google Assistant）同行，Home/静音、YouTube/Netflix、
- * 电源/输入源依次向下；该遥控器没有 TV/菜单/音量±。
+ * 电源/输入源依次向下；右侧边缘有音量±实体键；该遥控器没有 TV/菜单键。
  * 锚点由产品图像素实测标定（遥控器 bbox x 0.370–0.649 / y 0.059–0.955，
- * Assistant 黑键中心 (0.578, 0.378)，方向环中心 (0.510, 0.234)）。
+ * Assistant 黑键中心 (0.578, 0.378)，方向环中心 (0.509, 0.231)）。
  */
 const CHROMECAST_PLACEMENTS: Placement[] = [
-  // 左列（物理左侧 6 键），按锚点高度从上到下排列，避免连线交叉：
-  // 上、左、返回、主页、YouTube、电源。
+  // 左列 7 键（含搬到左侧的「确定」）：上、左、确定、返回、主页、YouTube、电源。
   { button: "up", side: "left", anchor: [0.509, 0.145], targetY: 0.06 },
-  { button: "left", side: "left", anchor: [0.423, 0.231], targetY: 0.236 },
-  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.412 },
-  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.588 },
-  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.764 },
+  { button: "left", side: "left", anchor: [0.423, 0.231], targetY: 0.206 },
+  { button: "ok", side: "left", anchor: [0.509, 0.231], targetY: 0.352 },
+  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.498 },
+  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.644 },
+  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.79 },
   { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.94 },
-  // 右列（物理右侧 8 键），同样按锚点高度排列：
-  // 右、确定、音量+、下、音量−、静音、Netflix、输入源。
+  // 右列 7 键：右、下、音量+、音量−、静音、Netflix、输入源。
   // 音量± 是右侧边缘实体键、位置略高于语音键，且正面产品照看不到：
   // 锚点取机身右边缘 y≈0.29/0.35。
   { button: "right", side: "right", anchor: [0.595, 0.231], targetY: 0.16 },
-  { button: "ok", side: "right", anchor: [0.509, 0.231], targetY: 0.275 },
-  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.39 },
-  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.505 },
-  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.62 },
-  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.735 },
-  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.85 },
-  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.965 },
+  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.28 },
+  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.4 },
+  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.52 },
+  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.64 },
+  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.76 },
+  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.88 },
 ];
 const CHROMECAST_VOICE_PLACEMENT: Placement = {
   button: "ok",
