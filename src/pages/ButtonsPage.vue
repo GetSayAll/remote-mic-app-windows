@@ -55,8 +55,8 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
  * --map-scale 连续缩放兜底（小于最小窗口的恢复态窗口）。 */
 const CANVAS_MIN_WIDTH = 800;
 const CANVAS_HEIGHT = 570;
-/** Chromecast 按键更多；画布加高，让语音卡独占顶部、左右两列对齐。 */
-const CHROMECAST_CANVAS_HEIGHT = 720;
+/** Chromecast 按键更多（物理左右 6/8 + 语音卡），画布加高避免卡片重叠。 */
+const CHROMECAST_CANVAS_HEIGHT = 660;
 const CARD_HEIGHT = 72;
 /** 卡片内边缘与遥控器之间的固定水平间距（不随窗口宽度变化）。 */
 const CARD_GAP = 40;
@@ -130,31 +130,30 @@ const RC003_VOICE_PLACEMENT: Placement = {
  * Assistant 黑键中心 (0.578, 0.378)，方向环中心 (0.509, 0.231)）。
  */
 const CHROMECAST_PLACEMENTS: Placement[] = [
-  // 左右两列各 7 张、使用完全相同的纵向位置（对称）；语音卡独占顶部。
-  // 左列（含搬到左侧的「确定」）：上、左、确定、返回、主页、YouTube、电源。
-  { button: "up", side: "left", anchor: [0.509, 0.145], targetY: 0.17 },
-  { button: "left", side: "left", anchor: [0.423, 0.231], targetY: 0.30 },
-  { button: "ok", side: "left", anchor: [0.509, 0.231], targetY: 0.43 },
-  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.56 },
-  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.69 },
-  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.82 },
-  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.95 },
-  // 右列：右、下、音量+、音量−、静音、Netflix、输入源。
+  // 左列 7 键（含搬到左侧的「确定」）：上、左、确定、返回、主页、YouTube、电源。
+  { button: "up", side: "left", anchor: [0.509, 0.145], targetY: 0.06 },
+  { button: "left", side: "left", anchor: [0.423, 0.231], targetY: 0.206 },
+  { button: "ok", side: "left", anchor: [0.509, 0.231], targetY: 0.352 },
+  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.498 },
+  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.644 },
+  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.79 },
+  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.94 },
+  // 右列 7 键：右、下、音量+、音量−、静音、Netflix、输入源。
   // 音量± 是右侧边缘实体键、位置略高于语音键，且正面产品照看不到：
   // 锚点取机身右边缘 y≈0.29/0.35。
-  { button: "right", side: "right", anchor: [0.595, 0.231], targetY: 0.17 },
-  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.30 },
-  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.43 },
-  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.56 },
-  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.69 },
-  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.82 },
-  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.95 },
+  { button: "right", side: "right", anchor: [0.595, 0.231], targetY: 0.16 },
+  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.28 },
+  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.4 },
+  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.52 },
+  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.64 },
+  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.76 },
+  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.88 },
 ];
 const CHROMECAST_VOICE_PLACEMENT: Placement = {
   button: "ok",
   side: "right",
   anchor: [0.578, 0.378],
-  targetY: 0.05,
+  targetY: 0.04,
 };
 
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
