@@ -138,22 +138,22 @@ const CHROMECAST_PLACEMENTS: Placement[] = [
   { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.644 },
   { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.79 },
   { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.94 },
-  // 右列 7 键：右、下、音量+、音量−、静音、Netflix、输入源。
+  // 右列含语音卡共 8 项，纵向跨度与左列一致（0.06→0.94），使左右两列上下对齐。
   // 音量± 是右侧边缘实体键、位置略高于语音键，且正面产品照看不到：
   // 锚点取机身右边缘 y≈0.29/0.35。
-  { button: "right", side: "right", anchor: [0.595, 0.231], targetY: 0.16 },
-  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.28 },
-  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.4 },
-  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.52 },
-  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.64 },
-  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.76 },
-  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.88 },
+  { button: "right", side: "right", anchor: [0.595, 0.231], targetY: 0.1857 },
+  { button: "down", side: "right", anchor: [0.509, 0.317], targetY: 0.3114 },
+  { button: "volume_up", side: "right", anchor: [0.649, 0.29], targetY: 0.4371 },
+  { button: "volume_down", side: "right", anchor: [0.649, 0.35], targetY: 0.5629 },
+  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.6886 },
+  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.8143 },
+  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.94 },
 ];
 const CHROMECAST_VOICE_PLACEMENT: Placement = {
   button: "ok",
   side: "right",
   anchor: [0.578, 0.378],
-  targetY: 0.04,
+  targetY: 0.06,
 };
 
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
