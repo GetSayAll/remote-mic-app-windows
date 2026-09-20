@@ -85,7 +85,7 @@ const RC003_VISUAL: RemoteVisual = {
   image: "/RC003-remote-photo@2x.png",
   alt: "小米蓝牙遥控器 2 Pro（RC003）示意图",
 };
-/** Chromecast Remote 产品图为正方形，容器同步为正方形（cover 即完整显示）。 */
+/** Chromecast Remote 产品图为 1600×1600 正方形，容器同步为正方形（cover 即完整显示）。 */
 const CHROMECAST_VISUAL: RemoteVisual = {
   width: 300,
   height: 300,
@@ -108,7 +108,7 @@ const RC003_PLACEMENTS: Placement[] = [
   { button: "volume_down", side: "right", anchor: [0.604, 0.48], targetY: 0.795 },
   { button: "tv", side: "right", anchor: [0.604, 0.569], targetY: 0.94 },
 ];
-const RC003_voicePlacement: Placement = {
+const RC003_VOICE_PLACEMENT: Placement = {
   button: "ok", // 语音卡不对应 RemoteButton；占位仅用于定位。
   side: "right",
   anchor: [0.63, 0.099],
@@ -116,29 +116,31 @@ const RC003_voicePlacement: Placement = {
 };
 
 /**
- * Chromecast Remote 布局（正方形产品图内的相对坐标）：方向/确定在上，
- * 返回与语音键同行，Home/静音、YouTube/Netflix、电源/输入源依次向下；
- * 该遥控器没有 TV/菜单/音量±。锚点为首版视觉初值，需真机截图复核微调。
+ * Chromecast Remote 布局（1600×1600 正方形产品图内的相对坐标）：方向/确定在上，
+ * 返回与语音键（Google Assistant）同行，Home/静音、YouTube/Netflix、
+ * 电源/输入源依次向下；该遥控器没有 TV/菜单/音量±。
+ * 锚点由产品图像素实测标定（遥控器 bbox x 0.370–0.649 / y 0.059–0.955，
+ * Assistant 黑键中心 (0.578, 0.378)，方向环中心 (0.510, 0.234)）。
  */
 const CHROMECAST_PLACEMENTS: Placement[] = [
-  { button: "power", side: "left", anchor: [0.435, 0.705], targetY: 0.08 },
-  { button: "up", side: "left", anchor: [0.5, 0.155], targetY: 0.22 },
-  { button: "left", side: "left", anchor: [0.405, 0.228], targetY: 0.36 },
-  { button: "back", side: "left", anchor: [0.42, 0.375], targetY: 0.5 },
-  { button: "home", side: "left", anchor: [0.42, 0.48], targetY: 0.64 },
-  { button: "youtube", side: "left", anchor: [0.42, 0.585], targetY: 0.78 },
-  { button: "right", side: "right", anchor: [0.595, 0.228], targetY: 0.22 },
-  { button: "ok", side: "right", anchor: [0.5, 0.228], targetY: 0.36 },
-  { button: "down", side: "right", anchor: [0.5, 0.3], targetY: 0.5 },
-  { button: "volume_mute", side: "right", anchor: [0.58, 0.48], targetY: 0.64 },
-  { button: "netflix", side: "right", anchor: [0.58, 0.585], targetY: 0.78 },
-  { button: "input", side: "right", anchor: [0.565, 0.705], targetY: 0.92 },
+  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.08 },
+  { button: "up", side: "left", anchor: [0.51, 0.15], targetY: 0.23 },
+  { button: "left", side: "left", anchor: [0.426, 0.234], targetY: 0.38 },
+  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.53 },
+  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.68 },
+  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.83 },
+  { button: "right", side: "right", anchor: [0.594, 0.234], targetY: 0.2 },
+  { button: "ok", side: "right", anchor: [0.51, 0.234], targetY: 0.335 },
+  { button: "down", side: "right", anchor: [0.51, 0.318], targetY: 0.47 },
+  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.605 },
+  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.74 },
+  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.88 },
 ];
-const CHROMECAST_voicePlacement: Placement = {
+const CHROMECAST_VOICE_PLACEMENT: Placement = {
   button: "ok",
   side: "right",
-  anchor: [0.58, 0.375],
-  targetY: 0.08,
+  anchor: [0.578, 0.378],
+  targetY: 0.07,
 };
 
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
@@ -156,7 +158,7 @@ const placements = computed<Placement[]>(() =>
   isChromecast.value ? CHROMECAST_PLACEMENTS : RC003_PLACEMENTS,
 );
 const voicePlacement = computed<Placement>(() =>
-  isChromecast.value ? CHROMECAST_voicePlacement : RC003_voicePlacement,
+  isChromecast.value ? CHROMECAST_VOICE_PLACEMENT : RC003_VOICE_PLACEMENT,
 );
 const remoteWidth = computed(() => remoteVisual.value.width);
 const remoteHeight = computed(() => remoteVisual.value.height);
