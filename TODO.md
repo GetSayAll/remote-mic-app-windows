@@ -19,12 +19,12 @@
   广播名 `Chromecast Remote` 型号识别、Google VID `0x18D1`/PID `0x9450` 的 HID
   匹配与 Col01/Col02 多集合绑定、`Report ID 0x01` 三字节报文解码与按键码表、
   新增 `YouTube`/`Netflix`/`输入源` 三个语义键，以及按键页按型号切换产品图与布局，
-  均已实现并通过 Rust/前端自动化；**Windows 真机验收待完成**（语音生命周期、
+  均已实现并通过 Rust/前端自动化；**Windows 真机验收 deferred**（语音生命周期、
   全部按键、快速连按、断连/睡眠恢复、与小米遥控器共存），清单见
   [Testing/WindowsChromecastRemote.md](Testing/WindowsChromecastRemote.md)。
   协议与输入形态真机探测结论见
   [docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md](docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md)。
-- [ ] 按键页 Chromecast 产品图资源（`public/chromecast-remote-photo@2x.png`）待加入仓库，
+- [ ] 按键页 Chromecast 产品图资源（`public/chromecast-remote-photo@2x.png`）已加入仓库，
   锚点为视觉初值，需真机截图复核微调。
 
 ## Windows RC001 / RC003
