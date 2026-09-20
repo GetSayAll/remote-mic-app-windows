@@ -374,10 +374,12 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   position: relative;
   width: 100%;
   min-width: 800px;
-  height: 570px;
-  margin-bottom: calc(-570px * (1 - var(--map-scale)));
+  /* 高度按型号由组件内联 --canvas-height 提供（小米 570 / Chromecast 660）。 */
+  height: var(--canvas-height, 570px);
+  margin-bottom: calc(var(--canvas-height, 570px) * (var(--map-scale) - 1));
   flex: 0 0 auto;
-  --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 640px);
+  /* 分母取最高画布 + 余量（660 + 70）：高窗口不缩放，矮窗口连续缩放兜底。 */
+  --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 730px);
   transform: scale(var(--map-scale));
   transform-origin: top left;
 }

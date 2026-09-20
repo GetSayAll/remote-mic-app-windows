@@ -267,80 +267,6 @@ fn get_button_mappings(
 }
 
 #[tauri::command]
-fn get_active_button_profile(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
-    state.settings.active_button_profile()
-}
-
-/// 记录当前生效 profile 并把该 profile 的映射热加载到引擎（不切换连接）。
-///
-/// 用于连接型号变化后让按键配置跟随当前遥控器；语音跟随 tab 的主动切换走
-/// [`select_remote_profile`]。
-#[tauri::command]
-async fn sync_active_button_profile(
-    profile: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<ButtonMappings, String> {
-    let settings = state.settings.clone();
-    let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-        settings.set_active_button_profile(&profile)?;
-        let mappings = settings.load_button_mappings_for(&profile)?;
-        platform.set_active_remote_model(sayall_windows::remote_model_from_profile(&profile));
-        platform.set_button_mappings(mappings.clone());
-        Ok(mappings)
-    })
-    .await
-    .map_err(|error| format!("同步按键配置任务失败：{error}"))?
-}
-
-/// 按键页顶部 tab 切换遥控器：切换当前 profile、连接该型号遥控器（语音跟随
-/// tab）并热加载该 profile 的按键映射。
-#[tauri::command]
-async fn select_remote_profile(
-    profile: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<ConnectionSnapshot, String> {
-    let started = std::time::Instant::now();
-    let settings = state.settings.clone();
-    let platform = Arc::clone(&state.platform);
-    let profile_for_log = profile.clone();
-    let result =
-        tauri::async_runtime::spawn_blocking(move || -> Result<ConnectionSnapshot, String> {
-            settings.set_active_button_profile(&profile)?;
-            let model = sayall_windows::remote_model_from_profile(&profile);
-            // 先切换 Raw Input 绑定与映射，再发起连接。
-            platform.set_active_remote_model(model);
-            let mappings = settings.load_button_mappings_for(&profile)?;
-            platform.set_button_mappings(mappings);
-            let target = platform
-                .scan_paired_remotes()
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .find(|remote| remote.model == model);
-            let Some(target) = target else {
-                return Err("未找到该型号的已配对遥控器".to_owned());
-            };
-            settings.save_selected_remote_id(target.id.clone())?;
-            platform
-                .connect_remote(target.id)
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .map_err(|error| format!("切换遥控器任务失败：{error}"))?;
-    sayall_windows::gatt_note(match &result {
-        Ok(_) => format!(
-            "shortcut_settings feature=remote_profile action=select phase=completed terminal_result=passed profile={profile_for_log} elapsed_ms={}",
-            started.elapsed().as_millis()
-        ),
-        Err(_) => format!(
-            "shortcut_settings feature=remote_profile action=select phase=completed terminal_result=failed profile={profile_for_log} error_domain=platform error_code=select_failed retryable=true elapsed_ms={}",
-            started.elapsed().as_millis()
-        ),
-    });
-    result
-}
-
-#[tauri::command]
 async fn save_button_mappings(
     profile: String,
     mappings: ButtonMappings,
@@ -1341,9 +1267,9 @@ pub fn run() {
             #[cfg(all(windows, not(feature = "runtime-simulation")))]
             sayall_windows::prepare_bluetooth_radio_recovery();
             let platform = create_platform();
-            // 启动只加载"当前生效 profile"的映射；型号 profile 在连接确定后由
-            // sync_active_button_profile 跟随。active profile 缺失时用空配置，
-            // 由前端在连接型号就绪后同步（避免把小米配置误套到 Chromecast）。
+            // 启动只加载"当前生效 profile"的映射；设备在连接页连接/切换后，由
+            // connect_remote 按型号重新加载对应 profile 的映射。active profile
+            // 缺失时用空配置，避免把小米配置误套到 Chromecast。
             let active_profile = settings.active_button_profile().unwrap_or(None);
             let button_mappings = match active_profile.as_deref() {
                 Some(profile) => match settings.load_button_mappings_for(profile) {
@@ -1485,9 +1411,6 @@ pub fn run() {
         start_raw_input,
         stop_raw_input,
         get_button_mappings,
-        get_active_button_profile,
-        sync_active_button_profile,
-        select_remote_profile,
         save_button_mappings,
         reset_button_mappings,
         export_button_mapping_configuration,
@@ -1531,9 +1454,6 @@ pub fn run() {
         start_raw_input,
         stop_raw_input,
         get_button_mappings,
-        get_active_button_profile,
-        sync_active_button_profile,
-        select_remote_profile,
         save_button_mappings,
         reset_button_mappings,
         export_button_mapping_configuration,

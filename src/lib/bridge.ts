@@ -541,30 +541,6 @@ export async function resetButtonMappings(profile: string): Promise<ButtonMappin
   return invoke<ButtonMappings>("reset_button_mappings", { profile });
 }
 
-/** 返回持久化的当前生效 profile（型号字符串），未设置时为 null。 */
-export async function getActiveButtonProfile(): Promise<string | null> {
-  if (!isTauriRuntime()) {
-    return null;
-  }
-  return invoke<string | null>("get_active_button_profile");
-}
-
-/** 连接型号变化后让按键配置跟随：记录并热加载该 profile（不切换连接）。 */
-export async function syncActiveButtonProfile(profile: string): Promise<ButtonMappings> {
-  if (!isTauriRuntime()) {
-    return { enabled: true, actions: {} };
-  }
-  return invoke<ButtonMappings>("sync_active_button_profile", { profile });
-}
-
-/** 按键页 tab 切换遥控器：切换 profile、连接该型号遥控器（语音跟随 tab）。 */
-export async function selectRemoteProfile(profile: string): Promise<ConnectionSnapshot> {
-  if (!isTauriRuntime()) {
-    throw new Error("当前是浏览器预览，无法切换遥控器");
-  }
-  return invoke<ConnectionSnapshot>("select_remote_profile", { profile });
-}
-
 /** 返回 false 表示用户在系统文件选择器中取消。 */
 export async function exportButtonMappingConfiguration(profile: string): Promise<boolean> {
   if (!isTauriRuntime()) {

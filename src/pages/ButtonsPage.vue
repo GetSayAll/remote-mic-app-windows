@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
@@ -9,17 +9,12 @@ import {
   buttonLabels,
   buttonTriggerLabel,
   chordLabel,
-  connectRemote,
   exportButtonMappingConfiguration,
-  getActiveButtonProfile,
   getButtonMappingSnapshot,
   getButtonMappings,
   identityShortcutByButton,
   importButtonMappingConfiguration,
   listPresetApps,
-  remoteModelLabel,
-  scanPairedRemotes,
-  syncActiveButtonProfile,
   mouseClickLabels,
   mouseMoveLabels,
   pickCustomApp,
@@ -44,7 +39,6 @@ import {
   type FiredGesture,
   type KeyCode,
   type MoveDirection,
-  type PairedRemote,
   type PresetAppInfo,
   type RawInputPhase,
   type RemoteButton,
@@ -61,6 +55,8 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
  * --map-scale 连续缩放兜底（小于最小窗口的恢复态窗口）。 */
 const CANVAS_MIN_WIDTH = 800;
 const CANVAS_HEIGHT = 570;
+/** Chromecast 按键更多（物理左右 6/8 + 语音卡），画布加高避免卡片重叠。 */
+const CHROMECAST_CANVAS_HEIGHT = 660;
 const CARD_HEIGHT = 72;
 
 const canvasEl = ref<HTMLElement | null>(null);
@@ -129,48 +125,48 @@ const RC003_VOICE_PLACEMENT: Placement = {
  * Assistant 黑键中心 (0.578, 0.378)，方向环中心 (0.510, 0.234)）。
  */
 const CHROMECAST_PLACEMENTS: Placement[] = [
-  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.08 },
-  { button: "up", side: "left", anchor: [0.51, 0.15], targetY: 0.24 },
-  { button: "left", side: "left", anchor: [0.426, 0.234], targetY: 0.4 },
-  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.56 },
-  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.72 },
-  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.88 },
-  { button: "right", side: "right", anchor: [0.594, 0.234], targetY: 0.16 },
-  { button: "ok", side: "right", anchor: [0.51, 0.234], targetY: 0.28 },
-  { button: "down", side: "right", anchor: [0.51, 0.318], targetY: 0.4 },
+  // 左列（物理左侧 6 键）：电源、方向环上/左、返回、主页、YouTube。
+  { button: "power", side: "left", anchor: [0.435, 0.716], targetY: 0.06 },
+  { button: "up", side: "left", anchor: [0.51, 0.15], targetY: 0.236 },
+  { button: "left", side: "left", anchor: [0.426, 0.234], targetY: 0.412 },
+  { button: "back", side: "left", anchor: [0.44, 0.378], targetY: 0.588 },
+  { button: "home", side: "left", anchor: [0.44, 0.516], targetY: 0.764 },
+  { button: "youtube", side: "left", anchor: [0.44, 0.629], targetY: 0.94 },
+  // 右列（物理右侧 8 键）：方向环右/确定/下、静音、Netflix、输入源、音量±。
   // 音量± 是遥控器右侧实体键，产品正面照看不到：锚点落在机身右边缘。
-  { button: "volume_up", side: "right", anchor: [0.649, 0.45], targetY: 0.52 },
-  { button: "volume_down", side: "right", anchor: [0.649, 0.53], targetY: 0.64 },
-  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.76 },
-  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.87 },
-  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.96 },
+  { button: "right", side: "right", anchor: [0.594, 0.234], targetY: 0.16 },
+  { button: "ok", side: "right", anchor: [0.51, 0.234], targetY: 0.274 },
+  { button: "down", side: "right", anchor: [0.51, 0.318], targetY: 0.389 },
+  { button: "volume_mute", side: "right", anchor: [0.578, 0.516], targetY: 0.503 },
+  { button: "netflix", side: "right", anchor: [0.578, 0.629], targetY: 0.617 },
+  { button: "input", side: "right", anchor: [0.565, 0.716], targetY: 0.731 },
+  { button: "volume_up", side: "right", anchor: [0.649, 0.45], targetY: 0.846 },
+  { button: "volume_down", side: "right", anchor: [0.649, 0.53], targetY: 0.96 },
 ];
 const CHROMECAST_VOICE_PLACEMENT: Placement = {
   button: "ok",
   side: "right",
   anchor: [0.578, 0.378],
-  targetY: 0.05,
+  targetY: 0.04,
 };
 
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 
-interface ProfileTab {
-  deviceId: string;
-  name: string;
-  model: RemoteModel;
-  label: string;
-}
-
-/** 按键页顶部 tab：当前选中的遥控器。语音与按键都跟随它。 */
-const activeTab = ref<RemoteModel>("unknown");
-const activeDeviceId = ref<string | null>(null);
-const profileTabs = ref<ProfileTab[]>([]);
-/** tab 切换进行中：抑制"连接型号变化"的自动跟随，避免与显式切换相争。 */
-let switchingProfile = false;
-
-const remoteModel = computed<RemoteModel>(() => activeTab.value);
+/**
+ * 当前连接的遥控器型号。设备连接/切换只在「连接与语音」页完成，本页直接
+ * 显示该型号的按键配置；未连接时按 RC003 保守布局。
+ */
+const remoteModel = computed<RemoteModel>(
+  () => props.runtime?.platform.connection.remoteModel ?? "unknown",
+);
 
 const isChromecast = computed(() => remoteModel.value === "chromecast");
+/** 按键配置 profile：与型号同名的 snake_case 字符串。 */
+const activeProfile = computed<string>(() => remoteModel.value);
+/** 画布高度按型号：Chromecast 按键更多，需要更高的画布避免卡片重叠。 */
+const canvasHeight = computed(() =>
+  isChromecast.value ? CHROMECAST_CANVAS_HEIGHT : CANVAS_HEIGHT,
+);
 const remoteVisual = computed<RemoteVisual>(() =>
   isChromecast.value ? CHROMECAST_VISUAL : RC003_VISUAL,
 );
@@ -182,7 +178,7 @@ const voicePlacement = computed<Placement>(() =>
 );
 const remoteWidth = computed(() => remoteVisual.value.width);
 const remoteHeight = computed(() => remoteVisual.value.height);
-const remoteTop = computed(() => (CANVAS_HEIGHT - remoteHeight.value) / 2);
+const remoteTop = computed(() => (canvasHeight.value - remoteHeight.value) / 2);
 const remoteLeft = computed(() => (canvasWidth.value - remoteWidth.value) / 2);
 
 /**
@@ -214,14 +210,14 @@ function photoAnchorPoint(placement: Placement): { x: number; y: number } {
 }
 
 function cardTop(placement: Placement): number {
-  return placement.targetY * CANVAS_HEIGHT - CARD_HEIGHT / 2;
+  return placement.targetY * canvasHeight.value - CARD_HEIGHT / 2;
 }
 
 /** 卡片朝向遥控器一侧的边缘中点（箭头/连线的落点基准）。 */
 function cardEdgePoint(placement: Placement): { x: number; y: number } {
   return {
     x: placement.side === "left" ? cardWidth.value : canvasWidth.value - cardWidth.value,
-    y: placement.targetY * CANVAS_HEIGHT,
+    y: placement.targetY * canvasHeight.value,
   };
 }
 
@@ -407,7 +403,7 @@ async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
   try {
     const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
     for (const app of apps) unique.set(app.path.toLowerCase(), app);
-    const saved = await saveButtonMappings(activeTab.value, {
+    const saved = await saveButtonMappings(activeProfile.value, {
       ...mappings.value,
       applications: [...unique.values()],
     });
@@ -572,7 +568,7 @@ async function persist(message?: string): Promise<void> {
   statusMessage.value = null;
   const task = saveQueue.then(async () => {
     try {
-      const saved = await saveButtonMappings(activeTab.value, payload);
+      const saved = await saveButtonMappings(activeProfile.value, payload);
       savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
       if (request === saveRequest) {
         mappings.value = saved;
@@ -591,7 +587,7 @@ async function restoreDefaults(): Promise<void> {
   busy.value = true;
   statusMessage.value = null;
   try {
-    const saved = await resetButtonMappings(activeTab.value);
+    const saved = await resetButtonMappings(activeProfile.value);
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     statusMessage.value = "已恢复默认（全部按键保持原始行为）";
@@ -610,7 +606,7 @@ async function exportConfiguration(): Promise<void> {
   busy.value = true;
   statusMessage.value = null;
   try {
-    const exported = await exportButtonMappingConfiguration(activeTab.value);
+    const exported = await exportButtonMappingConfiguration(activeProfile.value);
     if (exported) statusMessage.value = "按键映射配置已导出";
   } catch (error) {
     statusMessage.value = error instanceof Error ? error.message : String(error);
@@ -623,7 +619,7 @@ async function importConfiguration(): Promise<void> {
   busy.value = true;
   statusMessage.value = null;
   try {
-    const imported = await importButtonMappingConfiguration(activeTab.value);
+    const imported = await importButtonMappingConfiguration(activeProfile.value);
     if (!imported) return;
     mappings.value = imported;
     savedSnapshot.value = JSON.parse(JSON.stringify(imported)) as ButtonMappings;
@@ -878,30 +874,8 @@ async function toggleListener(): Promise<void> {
 const rawInput = computed(() => props.runtime?.platform.rawInput);
 const connectionInfo = computed(() => props.runtime?.platform.connection);
 
-async function refreshTabs(): Promise<void> {
-  let remotes: PairedRemote[] = [];
-  try {
-    remotes = await scanPairedRemotes();
-  } catch {
-    remotes = [];
-  }
-  // 按设备建 tab：小米广播名不区分 RC001/RC003（连接读 2A24 后才确定型号），
-  // 因此型号未知时先用设备名占位，连接后型号与配置自动跟随。
-  profileTabs.value = remotes
-    .filter((remote) => remote.isSupportedCandidate)
-    .map((remote) => ({
-      deviceId: remote.id,
-      name: remote.name,
-      model: remote.model,
-      label:
-        remote.model === "unknown"
-          ? remote.name
-          : remoteModelLabel(remote.model),
-    }));
-}
-
-/** 加载指定 profile 的映射与快照到编辑区。 */
-async function applyProfileMappings(model: RemoteModel): Promise<void> {
+/** 加载指定型号 profile 的映射与快照到编辑区。 */
+async function loadProfileMappings(model: RemoteModel): Promise<void> {
   const [loaded, snapshot] = await Promise.all([
     getButtonMappings(model),
     getButtonMappingSnapshot(),
@@ -914,54 +888,16 @@ async function applyProfileMappings(model: RemoteModel): Promise<void> {
   editingTarget.value = null;
 }
 
-/** 点击顶部 tab：连接该遥控器（语音跟随 tab），配置与画布布局一起跟随。 */
-async function selectTab(tab: ProfileTab): Promise<void> {
-  if (tab.deviceId === activeDeviceId.value || busy.value) return;
-  busy.value = true;
-  statusMessage.value = null;
-  switchingProfile = true;
-  try {
-    // 连接该设备；后端在型号确定后会同步对应 profile 的按键映射。
-    const snapshot = await connectRemote(tab.deviceId);
-    activeDeviceId.value = tab.deviceId;
-    const model = (snapshot.remoteModel ?? "unknown") as RemoteModel;
-    activeTab.value = model;
-    await refreshTabs();
-    await applyProfileMappings(model);
-    statusMessage.value = `已切换到 ${tab.label}`;
-  } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    switchingProfile = false;
-    busy.value = false;
-  }
-}
-
-/** 当前连接设备对应的 tab（按设备名匹配）。 */
-function syncActiveDeviceFromConnection(): void {
-  const name = props.runtime?.platform.connection.remoteName ?? null;
-  const match = name ? profileTabs.value.find((tab) => tab.name === name) : undefined;
-  if (match) activeDeviceId.value = match.deviceId;
-}
-
-// 连接型号变化（重连、系统侧切换）时，tab 与配置自动跟随。
+// 设备连接/切换只在「连接与语音」页发生；型号变化时加载该型号的独立配置。
 watch(
   () => props.runtime?.platform.connection.remoteModel,
   async (model) => {
-    if (!model || model === "unknown" || switchingProfile || unmounted) return;
-    if (model === activeTab.value) {
-      syncActiveDeviceFromConnection();
-      return;
-    }
+    if (!model || model === "unknown" || unmounted) return;
+    if (model === activeProfile.value) return;
     try {
-      await refreshTabs();
-      if (unmounted || switchingProfile) return;
-      await syncActiveButtonProfile(model);
-      activeTab.value = model;
-      syncActiveDeviceFromConnection();
-      await applyProfileMappings(model);
+      await loadProfileMappings(model);
     } catch {
-      // 跟随失败不改 UI。
+      // 加载失败保留当前界面。
     }
   },
 );
@@ -971,15 +907,8 @@ onMounted(async () => {
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
   window.addEventListener("blur", handleCaptureBlur);
-  await refreshTabs();
-  // 当前 profile 以持久化的为准（后端启动时已按它加载映射）；否则跟随已连接型号。
-  const storedProfile = (await getActiveButtonProfile().catch(() => null)) as RemoteModel | null;
-  const connectedModel = (props.runtime?.platform.connection.remoteModel ??
-    "unknown") as RemoteModel;
-  activeTab.value = storedProfile ?? connectedModel;
-  syncActiveDeviceFromConnection();
   const [loaded, snapshot, apps] = await Promise.all([
-    getButtonMappings(activeTab.value),
+    getButtonMappings(activeProfile.value),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
   ]);
@@ -1100,25 +1029,18 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <nav v-if="profileTabs.length > 1" class="remote-tabs" aria-label="切换遥控器">
-      <button
-        v-for="tab in profileTabs"
-        :key="tab.deviceId"
-        type="button"
-        class="remote-tab"
-        :class="{ active: tab.deviceId === activeDeviceId }"
-        :disabled="busy"
-        @click="selectTab(tab)"
-      >
-        {{ tab.label }}
-      </button>
-    </nav>
-
-    <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
+    <div
+      ref="canvasEl"
+      class="mapping-canvas"
+      :style="{
+        height: `${canvasHeight}px`,
+        '--canvas-height': `${canvasHeight}px`,
+      }"
+    >
       <svg
         class="mapping-connections"
         :width="canvasWidth"
-        :height="CANVAS_HEIGHT"
+        :height="canvasHeight"
         aria-hidden="true"
       >
         <template v-for="placement in placements" :key="placement.button">
@@ -1468,20 +1390,4 @@ onUnmounted(() => {
 .saved-app-grid { max-height: 180px; overflow-y: auto; margin: 5px -3px -3px; padding: 3px; align-content: start; }
 .saved-app-grid .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
-
-/* 遥控器 tab：切换当前遥控器（按键配置、画布布局与语音一起跟随）。 */
-.remote-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
-.remote-tab {
-  padding: 6px 14px;
-  font: inherit;
-  font-size: 13px;
-  color: inherit;
-  background: transparent;
-  border: 1px solid #888;
-  border-radius: 999px;
-  cursor: pointer;
-}
-.remote-tab:hover { border-color: currentColor; }
-.remote-tab.active { color: #fff; background: #2f6feb; border-color: #2f6feb; }
-.remote-tab:disabled { opacity: 0.55; cursor: default; }
 </style>
