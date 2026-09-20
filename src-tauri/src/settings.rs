@@ -13,12 +13,40 @@ pub struct SettingsStore {
 
 const BUTTON_MAPPING_EXPORT_VERSION: u32 = 1;
 const MAX_BUTTON_MAPPING_IMPORT_BYTES: u64 = 1024 * 1024;
+/// 本地按键映射存储版本：v2 = 按型号 profile 隔离。
+const BUTTON_MAPPING_PROFILES_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ButtonMappingConfiguration {
     format_version: u32,
     button_mappings: ButtonMappings,
+}
+
+/// 本地按键映射存储：按型号（profile）隔离的多份配置 + 当前生效 profile。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ButtonMappingProfiles {
+    #[serde(default = "default_button_mapping_profiles_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    active_profile: Option<String>,
+    #[serde(default)]
+    profiles: std::collections::BTreeMap<String, ButtonMappings>,
+}
+
+fn default_button_mapping_profiles_schema_version() -> u32 {
+    BUTTON_MAPPING_PROFILES_SCHEMA_VERSION
+}
+
+impl Default for ButtonMappingProfiles {
+    fn default() -> Self {
+        Self {
+            schema_version: BUTTON_MAPPING_PROFILES_SCHEMA_VERSION,
+            active_profile: None,
+            profiles: std::collections::BTreeMap::new(),
+        }
+    }
 }
 
 impl SettingsStore {
@@ -104,44 +132,104 @@ impl SettingsStore {
         })
     }
 
-    pub fn load_button_mappings(&self) -> Result<ButtonMappings, String> {
+    /// 当前生效的按键配置 profile（型号字符串）；未设置时为 None。
+    pub fn active_button_profile(&self) -> Result<Option<String>, String> {
         let _guard = lock(&self.access);
+        Ok(self.load_button_mapping_profiles()?.active_profile)
+    }
+
+    /// 记录当前生效的 profile（用户在按键页切换遥控器时写入）。
+    pub fn set_active_button_profile(&self, profile: &str) -> Result<(), String> {
+        let _guard = lock(&self.access);
+        let mut file = self.load_button_mapping_profiles()?;
+        file.active_profile = Some(profile.to_owned());
+        self.save_button_mapping_profiles(&file)
+    }
+
+    /// 读取指定型号 profile 的按键映射（不存在时返回该型号的空配置）。
+    pub fn load_button_mappings_for(&self, profile: &str) -> Result<ButtonMappings, String> {
+        let _guard = lock(&self.access);
+        let file = self.load_button_mapping_profiles()?;
+        let model = sayall_windows::remote_model_from_profile(profile);
+        file.profiles
+            .get(profile)
+            .cloned()
+            .unwrap_or_default()
+            .normalized_for(model)
+            .map_err(|error| format!("按键映射无效：{error}"))
+    }
+
+    /// 保存指定型号 profile 的按键映射，并把它记为当前生效 profile。
+    pub fn save_button_mappings_for(
+        &self,
+        profile: &str,
+        mappings: ButtonMappings,
+    ) -> Result<ButtonMappings, String> {
+        let _guard = lock(&self.access);
+        let model = sayall_windows::remote_model_from_profile(profile);
+        let normalized = mappings
+            .normalized_for(model)
+            .map_err(|error| format!("按键映射无效：{error}"))?;
+        let mut file = self.load_button_mapping_profiles()?;
+        file.profiles.insert(profile.to_owned(), normalized.clone());
+        file.active_profile = Some(profile.to_owned());
+        self.save_button_mapping_profiles(&file)?;
+        Ok(normalized)
+    }
+
+    fn load_button_mapping_profiles(&self) -> Result<ButtonMappingProfiles, String> {
         let path = self.button_mappings_path();
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                return Ok(ButtonMappings::default())
+                return Ok(ButtonMappingProfiles::default())
             }
             Err(error) => return Err(format!("读取按键映射失败：{error}")),
         };
-        serde_json::from_str::<ButtonMappings>(&contents)
-            .map_err(|error| format!("解析按键映射失败：{error}"))?
-            .normalized()
-            .map_err(|error| format!("按键映射无效：{error}"))
+        let value: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|error| format!("解析按键映射失败：{error}"))?;
+        if value.get("profiles").is_some() || value.get("schemaVersion").is_some() {
+            let file: ButtonMappingProfiles = serde_json::from_value(value)
+                .map_err(|error| format!("解析按键映射失败：{error}"))?;
+            if file.schema_version != BUTTON_MAPPING_PROFILES_SCHEMA_VERSION {
+                return Err(format!("不支持的按键映射存储版本：{}", file.schema_version));
+            }
+            Ok(file)
+        } else {
+            // 旧版单份配置（小米时代）：迁移到 rc001/rc003 两个型号 profile，
+            // Chromecast 作为新型号从空配置开始，避免继承小米动作。
+            let legacy: ButtonMappings = serde_json::from_value(value)
+                .map_err(|error| format!("解析按键映射失败：{error}"))?;
+            let mut profiles = std::collections::BTreeMap::new();
+            profiles.insert("rc001".to_owned(), legacy.clone());
+            profiles.insert("rc003".to_owned(), legacy);
+            Ok(ButtonMappingProfiles {
+                schema_version: BUTTON_MAPPING_PROFILES_SCHEMA_VERSION,
+                active_profile: None,
+                profiles,
+            })
+        }
     }
 
-    pub fn save_button_mappings(&self, mappings: ButtonMappings) -> Result<ButtonMappings, String> {
-        let _guard = lock(&self.access);
-        let mappings = mappings
-            .normalized()
-            .map_err(|error| format!("按键映射无效：{error}"))?;
+    fn save_button_mapping_profiles(&self, file: &ButtonMappingProfiles) -> Result<(), String> {
         let path = self.button_mappings_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
         }
-        let contents = serde_json::to_vec_pretty(&mappings)
+        let contents = serde_json::to_vec_pretty(file)
             .map_err(|error| format!("序列化按键映射失败：{error}"))?;
-        fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))?;
-        Ok(mappings)
+        fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))
     }
 
-    pub fn export_button_mappings(
+    pub fn export_button_mappings_for(
         &self,
+        profile: &str,
         path: &Path,
         mappings: ButtonMappings,
     ) -> Result<(), String> {
+        let model = sayall_windows::remote_model_from_profile(profile);
         let mappings = mappings
-            .normalized()
+            .normalized_for(model)
             .map_err(|error| format!("按键映射无效：{error}"))?;
         let configuration = ButtonMappingConfiguration {
             format_version: BUTTON_MAPPING_EXPORT_VERSION,
@@ -155,7 +243,11 @@ impl SettingsStore {
         fs::write(path, contents).map_err(|error| format!("写入按键映射配置失败：{error}"))
     }
 
-    pub fn import_button_mappings(&self, path: &Path) -> Result<ButtonMappings, String> {
+    pub fn import_button_mappings_for(
+        &self,
+        profile: &str,
+        path: &Path,
+    ) -> Result<ButtonMappings, String> {
         let metadata =
             fs::metadata(path).map_err(|error| format!("读取按键映射配置失败：{error}"))?;
         if metadata.len() > MAX_BUTTON_MAPPING_IMPORT_BYTES {
@@ -171,7 +263,7 @@ impl SettingsStore {
             ));
         }
         // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
-        self.save_button_mappings(configuration.button_mappings)
+        self.save_button_mappings_for(profile, configuration.button_mappings)
     }
 
     pub fn load_voice_hold_hotkey(&self) -> Result<Option<KeyChord>, String> {
@@ -431,7 +523,7 @@ mod tests {
         );
 
         store
-            .export_button_mappings(&export_path, mappings.clone())
+            .export_button_mappings_for("rc003", &export_path, mappings.clone())
             .unwrap();
         let exported: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&export_path).unwrap()).unwrap();
@@ -439,11 +531,13 @@ mod tests {
         assert!(exported.get("buttonMappings").is_some());
         let first_export = std::fs::read(&export_path).unwrap();
         store
-            .export_button_mappings(&export_path, mappings.clone())
+            .export_button_mappings_for("rc003", &export_path, mappings.clone())
             .unwrap();
         assert_eq!(std::fs::read(&export_path).unwrap(), first_export);
         assert_eq!(
-            store.import_button_mappings(&export_path).unwrap(),
+            store
+                .import_button_mappings_for("rc003", &export_path)
+                .unwrap(),
             mappings
         );
 
@@ -452,8 +546,79 @@ mod tests {
             br#"{"formatVersion":99,"buttonMappings":{"enabled":false,"actions":{}}}"#,
         )
         .unwrap();
-        assert!(store.import_button_mappings(&export_path).is_err());
-        assert_eq!(store.load_button_mappings().unwrap(), mappings);
+        assert!(store
+            .import_button_mappings_for("rc003", &export_path)
+            .is_err());
+        assert_eq!(store.load_button_mappings_for("rc003").unwrap(), mappings);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn button_mapping_profiles_are_isolated_and_model_aware() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::{ButtonAction, ButtonActions, KeyCode};
+
+        let base = std::env::temp_dir().join(format!(
+            "sayall-test-button-profiles-{}",
+            std::process::id()
+        ));
+        let settings_path = base.join("settings.json");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = SettingsStore::new(settings_path);
+
+        let mut xiaomi = ButtonMappings::default();
+        xiaomi.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Escape],
+                    },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        // 小米 profile：返回键被策略剥离。
+        let saved_xiaomi = store.save_button_mappings_for("rc003", xiaomi).unwrap();
+        assert!(!saved_xiaomi.actions.contains_key(&RemoteButton::Back));
+
+        // Chromecast profile：返回键保留，且与小米配置互不影响。
+        let mut chromecast = ButtonMappings::default();
+        chromecast.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Escape],
+                    },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let saved_chromecast = store
+            .save_button_mappings_for("chromecast", chromecast)
+            .unwrap();
+        assert!(saved_chromecast.actions.contains_key(&RemoteButton::Back));
+
+        assert_eq!(
+            store.load_button_mappings_for("chromecast").unwrap(),
+            saved_chromecast
+        );
+        assert_eq!(
+            store.load_button_mappings_for("rc003").unwrap(),
+            saved_xiaomi
+        );
+        // 保存会记录当前生效 profile。
+        assert_eq!(
+            store.active_button_profile().unwrap().as_deref(),
+            Some("chromecast")
+        );
+        assert!(store
+            .load_button_mappings_for("rc001")
+            .unwrap()
+            .actions
+            .is_empty());
         let _ = std::fs::remove_dir_all(base);
     }
 

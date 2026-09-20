@@ -656,6 +656,18 @@ impl WindowsPlatform {
         }
     }
 
+    /// 切换"当前遥控器"型号：Raw Input 重新绑定为这台遥控器的 HID 接口。
+    ///
+    /// 用于按键页 tab 切换（语音与按键都跟随当前遥控器）；BLE 连接确定型号时
+    /// 也会调用同一底层函数。
+    pub fn set_active_remote_model(&self, model: RemoteModel) {
+        #[cfg(windows)]
+        raw_input_windows::set_active_profile(hid_profile_for_model(model));
+
+        #[cfg(not(windows))]
+        let _ = model;
+    }
+
     pub fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
         #[cfg(windows)]
         {
@@ -735,6 +747,26 @@ pub fn remote_model_from_model_number(model_number: &str) -> Option<RemoteModel>
         "RC003" => Some(RemoteModel::Rc003),
         value if value.contains("ARN9") => Some(RemoteModel::Rc003),
         _ => None,
+    }
+}
+
+/// 按键配置 profile 字符串 → 型号（profile 即型号的 snake_case 名）。
+pub fn remote_model_from_profile(profile: &str) -> RemoteModel {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "rc001" => RemoteModel::Rc001,
+        "rc003" => RemoteModel::Rc003,
+        "chromecast" => RemoteModel::Chromecast,
+        _ => RemoteModel::Unknown,
+    }
+}
+
+/// 型号 → 按键配置 profile 字符串。
+pub fn profile_for_model(model: RemoteModel) -> &'static str {
+    match model {
+        RemoteModel::Rc001 => "rc001",
+        RemoteModel::Rc003 => "rc003",
+        RemoteModel::Chromecast => "chromecast",
+        RemoteModel::Unknown => "unknown",
     }
 }
 

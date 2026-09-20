@@ -516,41 +516,71 @@ export async function stopRawInput(): Promise<RawInputSnapshot> {
   return invoke<RawInputSnapshot>("stop_raw_input");
 }
 
-export async function getButtonMappings(): Promise<ButtonMappings> {
+/** 读取指定型号 profile 的按键映射（profile 即型号字符串）。 */
+export async function getButtonMappings(profile: string): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
     return { enabled: true, actions: {} };
   }
-  return invoke<ButtonMappings>("get_button_mappings");
+  return invoke<ButtonMappings>("get_button_mappings", { profile });
 }
 
-export async function saveButtonMappings(mappings: ButtonMappings): Promise<ButtonMappings> {
+export async function saveButtonMappings(
+  profile: string,
+  mappings: ButtonMappings,
+): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法保存按键映射");
   }
-  return invoke<ButtonMappings>("save_button_mappings", { mappings });
+  return invoke<ButtonMappings>("save_button_mappings", { profile, mappings });
 }
 
-export async function resetButtonMappings(): Promise<ButtonMappings> {
+export async function resetButtonMappings(profile: string): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
     return { enabled: true, actions: {} };
   }
-  return invoke<ButtonMappings>("reset_button_mappings");
+  return invoke<ButtonMappings>("reset_button_mappings", { profile });
+}
+
+/** 返回持久化的当前生效 profile（型号字符串），未设置时为 null。 */
+export async function getActiveButtonProfile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("get_active_button_profile");
+}
+
+/** 连接型号变化后让按键配置跟随：记录并热加载该 profile（不切换连接）。 */
+export async function syncActiveButtonProfile(profile: string): Promise<ButtonMappings> {
+  if (!isTauriRuntime()) {
+    return { enabled: true, actions: {} };
+  }
+  return invoke<ButtonMappings>("sync_active_button_profile", { profile });
+}
+
+/** 按键页 tab 切换遥控器：切换 profile、连接该型号遥控器（语音跟随 tab）。 */
+export async function selectRemoteProfile(profile: string): Promise<ConnectionSnapshot> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法切换遥控器");
+  }
+  return invoke<ConnectionSnapshot>("select_remote_profile", { profile });
 }
 
 /** 返回 false 表示用户在系统文件选择器中取消。 */
-export async function exportButtonMappingConfiguration(): Promise<boolean> {
+export async function exportButtonMappingConfiguration(profile: string): Promise<boolean> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法导出按键映射配置");
   }
-  return invoke<boolean>("export_button_mapping_configuration");
+  return invoke<boolean>("export_button_mapping_configuration", { profile });
 }
 
 /** 返回 null 表示用户在系统文件选择器中取消。 */
-export async function importButtonMappingConfiguration(): Promise<ButtonMappings | null> {
+export async function importButtonMappingConfiguration(
+  profile: string,
+): Promise<ButtonMappings | null> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法导入按键映射配置");
   }
-  return invoke<ButtonMappings | null>("import_button_mapping_configuration");
+  return invoke<ButtonMappings | null>("import_button_mapping_configuration", { profile });
 }
 
 export async function testButtonMapping(
@@ -897,8 +927,14 @@ export type ShortcutCapability = "all" | "identity" | "none";
 export function shortcutCapability(
   button: RemoteButton,
   trigger: ButtonTrigger,
-  _model: RemoteModel,
+  model: RemoteModel,
 ): ShortcutCapability {
+  if (model === "chromecast") {
+    // Chromecast 的实体键都经 BLE HID 绝对状态上报，没有键盘孪生事件，
+    // 不涉及"原生键泄漏 + 注入"的双响应问题：全部按键均可自由配置
+    //（含返回与右侧音量±；该遥控器没有 TV/菜单/音量±之外的键）。
+    return "all";
+  }
   if (button === "power" || button === "menu") {
     return "all";
   }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import ButtonsPage from "./ButtonsPage.vue";
 
@@ -34,7 +34,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       lastFired: null,
       lastError: null,
     })),
-    saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    saveButtonMappings: vi.fn(async (_profile: string, mappings: unknown) => mappings),
     exportButtonMappingConfiguration: vi.fn(async () => true),
     importButtonMappingConfiguration: vi.fn(async () => ({
       enabled: false,
@@ -192,7 +192,7 @@ describe("buttons mapping page", () => {
     await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
     await flushPromises();
 
-    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![1];
     expect(saved.applications).toEqual([
       { name: "Registered Example", path: "shell:AppsFolder\\Example!App" },
     ]);
@@ -221,13 +221,18 @@ describe("buttons mapping page", () => {
     expect(labels).toContain("YouTube");
     expect(labels).toContain("Netflix");
     expect(labels).toContain("输入源");
+    expect(labels).toContain("返回");
+    // Chromecast 右侧实体音量键走 BLE HID，可映射。
+    expect(labels).toContain("音量+");
+    expect(labels).toContain("音量−");
     expect(labels).not.toContain("TV");
-    expect(labels).not.toContain("音量+");
+    expect(labels).not.toContain("菜单");
     expect(wrapper.find(".remote-photo img").attributes("src")).toBe(
       "/chromecast-remote-photo@2x.png",
     );
     // 12 张按键卡 + 语音卡。
-    expect(wrapper.findAll(".mapping-card")).toHaveLength(13);
+    // 14 张按键卡（含右侧音量±）+ 语音卡。
+    expect(wrapper.findAll(".mapping-card")).toHaveLength(15);
   });
 
   it("does not register listeners or polling after unmounting during initial load", async () => {
@@ -328,7 +333,7 @@ describe("buttons mapping page", () => {
         throw new Error("自动保存未触发");
       }
     });
-    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![1] as {
       actions: Record<string, { long: { type: string; chord?: { keys: string[] } } }>;
     };
     expect(saved.actions.power!.long.type).toBe("shortcut");
@@ -346,7 +351,7 @@ describe("buttons mapping page", () => {
         throw new Error("禁用后未自动保存");
       }
     });
-    const disabledSaved = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+    const disabledSaved = vi.mocked(saveButtonMappings).mock.calls[1]![1] as {
       actions: Record<string, { long: { type: string } }>;
     };
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
@@ -370,7 +375,7 @@ describe("buttons mapping page", () => {
     await choose("滚轮向下");
     await wrapper.get('input[aria-label="每次滚动格数"]').setValue("5");
     await flushPromises();
-    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![1].actions.power!.single).toEqual({
       type: "scroll",
       direction: "down",
       steps: 5,
@@ -383,7 +388,7 @@ describe("buttons mapping page", () => {
     expect(wrapper.text()).toContain("请输入 1 到 100 之间的整数");
 
     await choose("左键双击");
-    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![1].actions.power!.single).toEqual({
       type: "mouse_click",
       kind: "double_left",
     });
@@ -408,7 +413,7 @@ describe("buttons mapping page", () => {
     expect(stopShortcutCapture).not.toHaveBeenCalled();
     shortcutCaptureHandler!({ key: "left_windows", isPressed: false });
     await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
-    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as ButtonMappings;
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[1] as ButtonMappings;
     expect(saved.actions.power?.single).toEqual({
       type: "shortcut",
       chord: { keys: ["left_windows", "l"] },
@@ -444,7 +449,7 @@ describe("buttons mapping page", () => {
     shortcutCaptureHandler!({ key: "l", isPressed: true });
     await vi.waitFor(() => {
       const calls = vi.mocked(saveButtonMappings).mock.calls;
-      const saved = calls.at(-1)?.[0] as ButtonMappings | undefined;
+      const saved = calls.at(-1)?.[1] as ButtonMappings | undefined;
       const action = saved?.actions.power?.single;
       if (action?.type !== "shortcut" || action.chord.keys.join("+") !== "left_windows+l") {
         throw new Error("Win+L 未保存");

@@ -136,7 +136,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("按键映射画布渲染 12 张按键卡与三列触发单元格");
 
-  await saveButtonMappings({
+  await saveButtonMappings("rc003", {
     enabled: true,
     actions: {
       ok: {

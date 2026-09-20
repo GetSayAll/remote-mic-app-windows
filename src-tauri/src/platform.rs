@@ -28,6 +28,8 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn raw_input_snapshot(&self) -> RawInputSnapshot;
     fn start_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
+    /// 切换"当前遥控器"型号（Raw Input 只绑定这台遥控器的接口）。
+    fn set_active_remote_model(&self, model: sayall_windows::RemoteModel);
     fn send_input_snapshot(&self) -> SendInputSnapshot;
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
     fn test_scroll(
@@ -128,6 +130,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
         self.stop_raw_input()
+    }
+
+    fn set_active_remote_model(&self, model: sayall_windows::RemoteModel) {
+        WindowsPlatform::set_active_remote_model(self, model)
     }
 
     fn send_input_snapshot(&self) -> SendInputSnapshot {
@@ -423,6 +429,8 @@ mod simulation {
             state.raw_input = RawInputSnapshot::default();
             Ok(state.raw_input.clone())
         }
+
+        fn set_active_remote_model(&self, _model: sayall_windows::RemoteModel) {}
 
         fn send_input_snapshot(&self) -> SendInputSnapshot {
             lock(&self.state).send_input.clone()
