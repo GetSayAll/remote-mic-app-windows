@@ -98,12 +98,17 @@ fn describe_control(bytes: &[u8]) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("用法: atvv_probe <MAC或名称> <秒数>");
+    if args.len() < 3 || args.len() > 4 {
+        eprintln!("用法: atvv_probe <MAC或名称> <秒数> [原始音频输出文件]");
         std::process::exit(2);
     }
     let target = args[1].clone();
     let seconds: u64 = args[2].parse().expect("秒数解析失败");
+    let raw_sink = args.get(3).map(|path| {
+        Arc::new(std::sync::Mutex::new(
+            std::fs::File::create(path).expect("创建原始音频输出失败"),
+        ))
+    });
     let wants_mac = parse_mac(&target);
 
     unsafe {
@@ -165,6 +170,7 @@ fn main() {
     {
         let audio_frames = Arc::clone(&audio_frames);
         let running = Arc::clone(&running);
+        let raw_sink = raw_sink.clone();
         let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
             move |_, args| {
                 if !running.load(Ordering::Relaxed) {
@@ -173,6 +179,21 @@ fn main() {
                 if let Some(args) = args.as_ref() {
                     if let Ok(bytes) = args.CharacteristicValue().and_then(|b| buffer_to_vec(&b)) {
                         let count = audio_frames.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(sink) = raw_sink.as_ref() {
+                            use std::io::Write;
+                            if let Ok(mut file) = sink.lock() {
+                                let line = format!(
+                                    "A {} {}\n",
+                                    count,
+                                    bytes
+                                        .iter()
+                                        .map(|byte| format!("{byte:02X}"))
+                                        .collect::<Vec<_>>()
+                                        .join("")
+                                );
+                                let _ = file.write_all(line.as_bytes());
+                            }
+                        }
                         if count <= 3 || count % 50 == 0 {
                             println!(
                                 "[A +{:>8.1}ms] #{count} len={} b=[{}]",
