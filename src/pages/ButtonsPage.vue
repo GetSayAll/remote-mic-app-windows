@@ -277,7 +277,7 @@ const buttonIcons: Record<RemoteButton, string[]> = {
   home: ["M3.5 11.2L12 3.5l8.5 7.7", "M6 9.5V20.5h12V9.5", "M10 20.5v-5.5h4v5.5"],
   menu: ["M4 6h16", "M4 12h16", "M4 18h16"],
   tv: ["M3 7.5h18a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8.5a1 1 0 0 1 1-1z", "M17 3l-5 4-5-4"],
-  volume_up: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
+  volume_up: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 12h5.5", "M18.25 9.25v5.5"],
   volume_down: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15 12h5.5"],
   volume_mute: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
   youtube: [
