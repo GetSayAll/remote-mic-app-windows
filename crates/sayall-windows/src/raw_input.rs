@@ -447,6 +447,8 @@ pub fn button_for_google_remote_code(code: u8) -> Option<RemoteButton> {
         0x08 => RemoteButton::VolumeMute,
         0x0A => RemoteButton::Home,
         0x0B => RemoteButton::Back,
+        0x0C => RemoteButton::VolumeUp,
+        0x0D => RemoteButton::VolumeDown,
         0x0E => RemoteButton::Youtube,
         0x0F => RemoteButton::Netflix,
         0x11 => RemoteButton::Input,
@@ -829,6 +831,14 @@ mod tests {
         assert_eq!(
             decode_google_remote_report(&[0x01, 0x0E, 0x00]),
             Some(Some(RemoteButton::Youtube))
+        );
+        assert_eq!(
+            decode_google_remote_report(&[0x01, 0x0C, 0x00]),
+            Some(Some(RemoteButton::VolumeUp))
+        );
+        assert_eq!(
+            decode_google_remote_report(&[0x01, 0x0D, 0x00]),
+            Some(Some(RemoteButton::VolumeDown))
         );
         assert_eq!(decode_google_remote_report(&[0x01, 0x00, 0x00]), Some(None));
         // 非本遥控器形态：忽略（不改状态）。
