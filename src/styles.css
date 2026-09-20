@@ -378,8 +378,8 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   height: var(--canvas-height, 570px);
   margin-bottom: calc(var(--canvas-height, 570px) * (var(--map-scale) - 1));
   flex: 0 0 auto;
-  /* 分母取最高画布 + 余量（660 + 70）：高窗口不缩放，矮窗口连续缩放兜底。 */
-  --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 730px);
+  /* 分母取最高画布 + 余量（720 + 70）：高窗口不缩放，矮窗口连续缩放兜底。 */
+  --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 790px);
   transform: scale(var(--map-scale));
   transform-origin: top left;
 }
