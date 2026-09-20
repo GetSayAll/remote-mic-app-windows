@@ -595,7 +595,12 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
         RemoteButton::VolumeMute => KeyCode::VolumeMute,
         RemoteButton::VolumeUp => KeyCode::VolumeUp,
         RemoteButton::VolumeDown => KeyCode::VolumeDown,
-        RemoteButton::Back | RemoteButton::Tv | RemoteButton::Power => return None,
+        RemoteButton::Back
+        | RemoteButton::Tv
+        | RemoteButton::Power
+        | RemoteButton::Youtube
+        | RemoteButton::Netflix
+        | RemoteButton::Input => return None,
     })
 }
 

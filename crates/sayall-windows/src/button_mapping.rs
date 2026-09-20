@@ -50,6 +50,8 @@ pub enum EngineMessage {
     Keyboard(RawKeyboardEvent),
     /// 监听器观察到的一份 HID 报文 usage 集合（绝对状态）。
     HidUsages(BTreeSet<u16>),
+    /// 监听器已解码好的 HID 按键集合（绝对状态，Chromecast Remote）。
+    HidButtons(BTreeSet<RemoteButton>),
     /// 门控吞下的键盘边沿（已归因到遥控器）。
     GateEdge(ButtonEdge),
     /// Raw Input 监听器已停止：释放全部按住状态。
@@ -385,6 +387,24 @@ fn engine_worker(
             EngineMessage::HidUsages(usages) => {
                 let now = Instant::now();
                 let edges = merger.update_hid_usages(usages);
+                handle_edges(
+                    edges,
+                    now,
+                    &mut merger,
+                    &mut recognizer,
+                    &mappings,
+                    &state,
+                    &snapshot,
+                    &edge_callbacks,
+                    &gesture_callbacks,
+                    &injector,
+                    &usage,
+                    &mut native_pending,
+                );
+            }
+            EngineMessage::HidButtons(buttons) => {
+                let now = Instant::now();
+                let edges = merger.update_hid_buttons(buttons);
                 handle_edges(
                     edges,
                     now,

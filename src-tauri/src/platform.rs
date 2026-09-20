@@ -206,6 +206,7 @@ mod simulation {
 
     const RC001_ID: &str = "ci-simulation-rc001";
     const RC003_ID: &str = "ci-simulation-rc003";
+    const CHROMECAST_ID: &str = "ci-simulation-chromecast";
     const CABLE_ENDPOINT_ID: &str = "ci-simulation-cable-input";
     const CABLE_ENDPOINT_NAME: &str = "CABLE Input (CI Simulation)";
 
@@ -252,6 +253,12 @@ mod simulation {
                     id: RC003_ID.to_owned(),
                     name: "Xiaomi Bluetooth Remote 2 Pro".to_owned(),
                     model: RemoteModel::Rc003,
+                    is_supported_candidate: true,
+                },
+                PairedRemote {
+                    id: CHROMECAST_ID.to_owned(),
+                    name: "Chromecast Remote".to_owned(),
+                    model: RemoteModel::Chromecast,
                     is_supported_candidate: true,
                 },
             ]
@@ -615,13 +622,20 @@ mod simulation {
         #[test]
         fn simulation_runs_connection_audio_raw_input_and_send_input_journey() {
             let platform = SimulatedPlatform::default();
-            assert_eq!(platform.scan_paired_remotes().unwrap().len(), 2);
+            assert_eq!(platform.scan_paired_remotes().unwrap().len(), 3);
             assert_eq!(
                 platform
                     .connect_remote(RC001_ID.to_owned())
                     .unwrap()
                     .remote_model,
                 RemoteModel::Rc001
+            );
+            assert_eq!(
+                platform
+                    .connect_remote(CHROMECAST_ID.to_owned())
+                    .unwrap()
+                    .remote_model,
+                RemoteModel::Chromecast
             );
             assert_eq!(
                 platform

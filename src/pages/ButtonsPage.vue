@@ -55,17 +55,13 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
  * --map-scale 连续缩放兜底（小于最小窗口的恢复态窗口）。 */
 const CANVAS_MIN_WIDTH = 800;
 const CANVAS_HEIGHT = 570;
-const REMOTE_WIDTH = 202;
-const REMOTE_HEIGHT = 410;
 const CARD_HEIGHT = 72;
-const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
 
 const canvasEl = ref<HTMLElement | null>(null);
 const canvasWidth = ref(CANVAS_MIN_WIDTH);
 const cardWidth = computed(() =>
   Math.min(300, Math.max(270, (canvasWidth.value - 260) / 2)),
 );
-const remoteLeft = computed(() => (canvasWidth.value - REMOTE_WIDTH) / 2);
 
 interface Placement {
   button: RemoteButton;
@@ -74,8 +70,31 @@ interface Placement {
   targetY: number;
 }
 
-/** 按键卡片布局表：对齐 Mac RemoteMappingLayout.buttonPlacements。 */
-const PLACEMENTS: Placement[] = [
+/** 遥控器示意图视觉参数：不同型号的产品图尺寸与长宽比不同。 */
+interface RemoteVisual {
+  width: number;
+  height: number;
+  image: string;
+  alt: string;
+}
+
+/** RC001/RC003 共用 RC003 产品图。 */
+const RC003_VISUAL: RemoteVisual = {
+  width: 202,
+  height: 410,
+  image: "/RC003-remote-photo@2x.png",
+  alt: "小米蓝牙遥控器 2 Pro（RC003）示意图",
+};
+/** Chromecast Remote 产品图为正方形，容器同步为正方形（cover 即完整显示）。 */
+const CHROMECAST_VISUAL: RemoteVisual = {
+  width: 300,
+  height: 300,
+  image: "/chromecast-remote-photo@2x.png",
+  alt: "Chromecast Remote 示意图",
+};
+
+/** RC001/RC003 按键卡片布局表：对齐 Mac RemoteMappingLayout.buttonPlacements。 */
+const RC003_PLACEMENTS: Placement[] = [
   { button: "power", side: "left", anchor: [0.386, 0.099], targetY: 0.08 },
   { button: "up", side: "left", anchor: [0.502, 0.179], targetY: 0.23 },
   { button: "left", side: "left", anchor: [0.362, 0.246], targetY: 0.38 },
@@ -89,12 +108,39 @@ const PLACEMENTS: Placement[] = [
   { button: "volume_down", side: "right", anchor: [0.604, 0.48], targetY: 0.795 },
   { button: "tv", side: "right", anchor: [0.604, 0.569], targetY: 0.94 },
 ];
-const VOICE_PLACEMENT: Placement = {
+const RC003_voicePlacement: Placement = {
   button: "ok", // 语音卡不对应 RemoteButton；占位仅用于定位。
   side: "right",
   anchor: [0.63, 0.099],
   targetY: 0.07,
 };
+
+/**
+ * Chromecast Remote 布局（正方形产品图内的相对坐标）：方向/确定在上，
+ * 返回与语音键同行，Home/静音、YouTube/Netflix、电源/输入源依次向下；
+ * 该遥控器没有 TV/菜单/音量±。锚点为首版视觉初值，需真机截图复核微调。
+ */
+const CHROMECAST_PLACEMENTS: Placement[] = [
+  { button: "power", side: "left", anchor: [0.435, 0.705], targetY: 0.08 },
+  { button: "up", side: "left", anchor: [0.5, 0.155], targetY: 0.22 },
+  { button: "left", side: "left", anchor: [0.405, 0.228], targetY: 0.36 },
+  { button: "back", side: "left", anchor: [0.42, 0.375], targetY: 0.5 },
+  { button: "home", side: "left", anchor: [0.42, 0.48], targetY: 0.64 },
+  { button: "youtube", side: "left", anchor: [0.42, 0.585], targetY: 0.78 },
+  { button: "right", side: "right", anchor: [0.595, 0.228], targetY: 0.22 },
+  { button: "ok", side: "right", anchor: [0.5, 0.228], targetY: 0.36 },
+  { button: "down", side: "right", anchor: [0.5, 0.3], targetY: 0.5 },
+  { button: "volume_mute", side: "right", anchor: [0.58, 0.48], targetY: 0.64 },
+  { button: "netflix", side: "right", anchor: [0.58, 0.585], targetY: 0.78 },
+  { button: "input", side: "right", anchor: [0.565, 0.705], targetY: 0.92 },
+];
+const CHROMECAST_voicePlacement: Placement = {
+  button: "ok",
+  side: "right",
+  anchor: [0.58, 0.375],
+  targetY: 0.08,
+};
+
 const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 
 /** 当前连接的遥控器型号（未连接时 unknown，按 RC003 保守处理）。 */
@@ -102,12 +148,28 @@ const remoteModel = computed<RemoteModel>(
   () => props.runtime?.platform.connection.remoteModel ?? "unknown",
 );
 
+const isChromecast = computed(() => remoteModel.value === "chromecast");
+const remoteVisual = computed<RemoteVisual>(() =>
+  isChromecast.value ? CHROMECAST_VISUAL : RC003_VISUAL,
+);
+const placements = computed<Placement[]>(() =>
+  isChromecast.value ? CHROMECAST_PLACEMENTS : RC003_PLACEMENTS,
+);
+const voicePlacement = computed<Placement>(() =>
+  isChromecast.value ? CHROMECAST_voicePlacement : RC003_voicePlacement,
+);
+const remoteWidth = computed(() => remoteVisual.value.width);
+const remoteHeight = computed(() => remoteVisual.value.height);
+const remoteTop = computed(() => (CANVAS_HEIGHT - remoteHeight.value) / 2);
+const remoteLeft = computed(() => (canvasWidth.value - remoteWidth.value) / 2);
+
 /**
  * 不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
  * 返回/音量±——RC003 上不进 Windows 输入栈（配置无法生效，2026-09-05
  * 调查归档 docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md）；
  * RC001 上虽以 VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而
- * 不开放配置。存量配置由后端（settings 持久化层 + 映射引擎）双重剥离。
+ * 不开放配置；Chromecast 的返回键虽可达，首版同样暂不开放，保持三型号一致。
+ * 存量配置由后端（settings 持久化层 + 映射引擎）双重剥离。
  */
 const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
   "back",
@@ -117,16 +179,16 @@ const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
-    x: remoteLeft.value + REMOTE_WIDTH * placement.anchor[0],
-    y: REMOTE_TOP + REMOTE_HEIGHT * placement.anchor[1],
+    x: remoteLeft.value + remoteWidth.value * placement.anchor[0],
+    y: remoteTop.value + remoteHeight.value * placement.anchor[1],
   };
 }
 
 /** 照片容器内相对坐标（锚点橙点渲染在 .remote-photo 内部，坐标系是照片自身）。 */
 function photoAnchorPoint(placement: Placement): { x: number; y: number } {
   return {
-    x: REMOTE_WIDTH * placement.anchor[0],
-    y: REMOTE_HEIGHT * placement.anchor[1],
+    x: remoteWidth.value * placement.anchor[0],
+    y: remoteHeight.value * placement.anchor[1],
   };
 }
 
@@ -187,6 +249,12 @@ const buttonIcons: Record<RemoteButton, string[]> = {
   volume_up: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
   volume_down: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15 12h5.5"],
   volume_mute: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
+  youtube: [
+    "M3.5 8.5a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3h-11a3 3 0 0 1-3-3z",
+    "M10.5 9.3l5 2.7-5 2.7z",
+  ],
+  netflix: ["M8 3h2.6l3.4 9.4V3H17v18h-2.6L11 11.6V21H8z"],
+  input: ["M4 6h11v12H4z", "M15 12h5.5", "M18 9.2l3 2.8-3 2.8"],
 };
 /** 语音键图标（Mac mic.fill：实心话筒）。 */
 const VOICE_ICON_FILLED = "M12 2.8a3.4 3.4 0 0 1 3.4 3.4v5.6a3.4 3.4 0 0 1-6.8 0V6.2A3.4 3.4 0 0 1 12 2.8z";
@@ -920,7 +988,7 @@ onUnmounted(() => {
         :height="CANVAS_HEIGHT"
         aria-hidden="true"
       >
-        <template v-for="placement in PLACEMENTS" :key="placement.button">
+        <template v-for="placement in placements" :key="placement.button">
           <path
             :d="connectionPath(placement)"
             :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
@@ -932,17 +1000,25 @@ onUnmounted(() => {
           />
         </template>
         <path
-          :d="connectionPath(VOICE_PLACEMENT)"
+          :d="connectionPath(voicePlacement)"
           :class="{ active: voiceActive }"
           fill="none"
         />
-        <polygon :points="arrowPolygon(VOICE_PLACEMENT)" :class="{ active: voiceActive }" />
+        <polygon :points="arrowPolygon(voicePlacement)" :class="{ active: voiceActive }" />
       </svg>
 
-      <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
-        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
+      <figure
+        class="remote-photo"
+        :style="{
+          left: `${remoteLeft}px`,
+          top: `${remoteTop}px`,
+          width: `${remoteWidth}px`,
+          height: `${remoteHeight}px`,
+        }"
+      >
+        <img :src="remoteVisual.image" :alt="remoteVisual.alt" draggable="false" />
         <span
-          v-for="placement in PLACEMENTS"
+          v-for="placement in placements"
           :key="placement.button"
           class="anchor-dot"
           :class="{ visible: activeButtons.has(placement.button) }"
@@ -955,14 +1031,14 @@ onUnmounted(() => {
           class="anchor-dot voice"
           :class="{ visible: voiceActive }"
           :style="{
-            left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 4}px`,
-            top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 4}px`,
+            left: `${photoAnchorPoint(voicePlacement).x - 4}px`,
+            top: `${photoAnchorPoint(voicePlacement).y - 4}px`,
           }"
         ></span>
       </figure>
 
       <article
-        v-for="placement in PLACEMENTS"
+        v-for="placement in placements"
         :key="placement.button"
         class="mapping-card"
         :class="{
@@ -1018,7 +1094,7 @@ onUnmounted(() => {
       <article
         class="mapping-card voice-card right"
         :class="{ active: voiceActive }"
-        :style="{ top: `${cardTop(VOICE_PLACEMENT)}px`, width: `${cardWidth}px` }"
+        :style="{ top: `${cardTop(voicePlacement)}px`, width: `${cardWidth}px` }"
       >
         <div class="mapping-card-title">
           <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">

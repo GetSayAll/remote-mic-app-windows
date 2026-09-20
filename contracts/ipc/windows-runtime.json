@@ -76,6 +76,12 @@
       "isSupportedCandidate": true
     },
     {
+      "id": "fixture-chromecast",
+      "name": "Chromecast Remote",
+      "model": "chromecast",
+      "isSupportedCandidate": true
+    },
+    {
       "id": "fixture-unknown",
       "name": "Approved Fixture Remote",
       "model": "unknown",

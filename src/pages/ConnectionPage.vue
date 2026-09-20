@@ -204,12 +204,12 @@ async function refreshAudio() {
 async function scan() {
   scanning.value = true;
   operationMessage.value = "";
-  scanMessage.value = "正在寻找小米遥控器…";
+  scanMessage.value = "正在寻找遥控器…";
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
-      ? `找到 ${devices.value.length} 个已配对的小米遥控器`
-      : "没有找到已配对的小米遥控器";
+      ? `找到 ${devices.value.length} 个已配对设备`
+      : "没有找到已配对设备";
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
@@ -339,7 +339,7 @@ onUnmounted(() => {
         <div class="card-title-row">
           <div>
             <h2>遥控器连接</h2>
-            <p class="muted">连接已配对的小米遥控器。</p>
+            <p class="muted">连接已配对的遥控器。</p>
           </div>
           <button
             class="primary-button"

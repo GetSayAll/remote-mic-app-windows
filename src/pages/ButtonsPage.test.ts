@@ -141,7 +141,9 @@ const runtime: RuntimeSnapshot = {
   },
 };
 
-async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promise<VueWrapper> {
+async function mountPage(
+  model: "rc001" | "rc003" | "chromecast" | "unknown" = "rc003",
+): Promise<VueWrapper> {
   const snapshot =
     model === "rc003"
       ? runtime
@@ -209,6 +211,23 @@ describe("buttons mapping page", () => {
     const voiceCard = wrapper.find(".voice-card");
     expect(voiceCard.text()).toContain("语音键");
     expect(voiceCard.text()).toContain("按住说话");
+  });
+
+  it("renders the Chromecast layout with its own photo and app/source keys", async () => {
+    const wrapper = await mountPage("chromecast");
+    const labels = wrapper
+      .findAll(".mapping-card-title strong")
+      .map((item) => item.text());
+    expect(labels).toContain("YouTube");
+    expect(labels).toContain("Netflix");
+    expect(labels).toContain("输入源");
+    expect(labels).not.toContain("TV");
+    expect(labels).not.toContain("音量+");
+    expect(wrapper.find(".remote-photo img").attributes("src")).toBe(
+      "/chromecast-remote-photo@2x.png",
+    );
+    // 12 张按键卡 + 语音卡。
+    expect(wrapper.findAll(".mapping-card")).toHaveLength(13);
   });
 
   it("does not register listeners or polling after unmounting during initial load", async () => {

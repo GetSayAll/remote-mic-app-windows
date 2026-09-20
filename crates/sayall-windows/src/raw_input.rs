@@ -5,6 +5,8 @@ use thiserror::Error;
 
 pub const XIAOMI_REMOTE_VENDOR_ID: u16 = 0x2717;
 pub const XIAOMI_REMOTE_PRODUCT_ID: u16 = 0x32B8;
+pub const GOOGLE_REMOTE_VENDOR_ID: u16 = 0x18D1;
+pub const GOOGLE_REMOTE_PRODUCT_ID: u16 = 0x9450;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,10 +24,18 @@ pub enum RemoteButton {
     VolumeMute,
     VolumeUp,
     VolumeDown,
+    /// Chromecast Remote 独有：YouTube 应用键。
+    Youtube,
+    /// Chromecast Remote 独有：Netflix 应用键。
+    Netflix,
+    /// Chromecast Remote 独有：输入源/信号源键。
+    Input,
 }
 
 /// 语义按键的稳定顺序：key_gate 的映射位掩码、UI 画布布局都依赖该表。
-pub const ALL_BUTTONS: [RemoteButton; 13] = [
+/// 新增型号独有按键必须**追加**在末尾，保持既有 ordinal 不漂移（否则会破坏
+/// 已持久化的映射位掩码与统计）。
+pub const ALL_BUTTONS: [RemoteButton; 16] = [
     RemoteButton::Back,
     RemoteButton::Ok,
     RemoteButton::Tv,
@@ -39,6 +49,9 @@ pub const ALL_BUTTONS: [RemoteButton; 13] = [
     RemoteButton::VolumeMute,
     RemoteButton::VolumeUp,
     RemoteButton::VolumeDown,
+    RemoteButton::Youtube,
+    RemoteButton::Netflix,
+    RemoteButton::Input,
 ];
 
 impl RemoteButton {
@@ -62,7 +75,15 @@ impl RemoteButton {
             | Self::Right
             | Self::VolumeUp
             | Self::VolumeDown => Some(Duration::from_millis(100)),
-            Self::Ok | Self::Tv | Self::Home | Self::Menu | Self::Power | Self::VolumeMute => None,
+            Self::Ok
+            | Self::Tv
+            | Self::Home
+            | Self::Menu
+            | Self::Power
+            | Self::VolumeMute
+            | Self::Youtube
+            | Self::Netflix
+            | Self::Input => None,
         }
     }
 }
@@ -156,8 +177,91 @@ pub fn device_path_matches_xiaomi_remote(path: &str) -> bool {
     classic || ble
 }
 
+pub fn device_path_matches_google_remote(path: &str) -> bool {
+    let normalized = normalize_device_path(path);
+    let classic = normalized.contains("vid_18d1") && normalized.contains("pid_9450");
+    let ble = (normalized.contains("dev_vid&0018d1") || normalized.contains("dev_vid&0118d1"))
+        && normalized.contains("pid&9450");
+    classic || ble
+}
+
+pub fn device_path_matches_supported_remote(path: &str) -> bool {
+    device_path_matches_xiaomi_remote(path) || device_path_matches_google_remote(path)
+}
+
+/// Raw Input 报文解析配置：不同型号的 HID 报文形态与按键码表不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteHidProfile {
+    /// 小米 RC001/RC003：usage 集合（`decode_report_usages`）。
+    Xiaomi,
+    /// Chromecast Remote：`Report ID 0x01` 的 3 字节厂商码报文。
+    Google,
+}
+
+impl RemoteHidProfile {
+    pub fn for_path(path: &str) -> Option<Self> {
+        if device_path_matches_google_remote(path) {
+            Some(Self::Google)
+        } else if device_path_matches_xiaomi_remote(path) {
+            Some(Self::Xiaomi)
+        } else {
+            None
+        }
+    }
+}
+
+/// 一次绑定选出的遥控器 HID 配置：型号 + 全部匹配路径。
+///
+/// Chromecast Remote 有 Col01/Col02 两个 HID 集合，按键只出现在 Col01，
+/// 但必须同时接受两者（不因集合数>1 判歧义）；同一型号可能同时出现
+/// 多个接口。不同厂商（小米 + Google）同时在线时失败关闭。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteHidSelection {
+    pub profile: RemoteHidProfile,
+    pub paths: Vec<String>,
+}
+
+pub fn select_remote_hid_selection(
+    paths: &[String],
+) -> Result<RemoteHidSelection, DevicePathError> {
+    let mut xiaomi: Vec<String> = Vec::new();
+    let mut google: Vec<String> = Vec::new();
+    for path in paths {
+        match RemoteHidProfile::for_path(path) {
+            Some(RemoteHidProfile::Xiaomi) => xiaomi.push(normalize_device_path(path)),
+            Some(RemoteHidProfile::Google) => google.push(normalize_device_path(path)),
+            None => {}
+        }
+    }
+    match (xiaomi.is_empty(), google.is_empty()) {
+        (true, true) => Err(DevicePathError::Missing),
+        (false, false) => Err(DevicePathError::Ambiguous(xiaomi.len() + google.len())),
+        (false, true) => Ok(RemoteHidSelection {
+            profile: RemoteHidProfile::Xiaomi,
+            paths: xiaomi,
+        }),
+        (true, false) => Ok(RemoteHidSelection {
+            profile: RemoteHidProfile::Google,
+            paths: google,
+        }),
+    }
+}
+
 pub fn normalize_device_path(path: &str) -> String {
     path.trim().to_ascii_lowercase()
+}
+
+/// 绑定的全部路径是否仍在当前枚举结果里（绑定审计的"仍在位"判据）。
+///
+/// Chromecast 绑的是 Col01/Col02 两个 HID 集合，**全部**集合都在枚举结果里才算
+/// 在位——只认其中之一，会在半个集合消失后把绑定判成健康，随后属于它的报文被
+/// 路径过滤静默丢弃（2026-09-18 与 `audit_binding` 的主线逻辑合并）。单集合型号
+/// 退化为单路径判断；空绑定一律视为不在位。
+pub fn bound_paths_still_present(bound: &[String], enumerated: &[String]) -> bool {
+    !bound.is_empty()
+        && bound
+            .iter()
+            .all(|path| enumerated.iter().any(|candidate| candidate == path))
 }
 
 pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathError> {
@@ -300,6 +404,39 @@ pub fn button_for_keyboard(virtual_key: u16, make_code: u16) -> Option<RemoteBut
     })
 }
 
+/// Chromecast Remote 按键码（2026-09-18 真机实测，见
+/// docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md）：
+/// Col01、`Report ID 0x01`、3 字节 `01 <code> 00`，`code == 0` 表示松开。
+pub fn button_for_google_remote_code(code: u8) -> Option<RemoteButton> {
+    Some(match code {
+        0x01 => RemoteButton::Power,
+        0x03 => RemoteButton::Up,
+        0x04 => RemoteButton::Down,
+        0x05 => RemoteButton::Left,
+        0x06 => RemoteButton::Right,
+        0x07 => RemoteButton::Ok,
+        0x08 => RemoteButton::VolumeMute,
+        0x0A => RemoteButton::Home,
+        0x0B => RemoteButton::Back,
+        0x0E => RemoteButton::Youtube,
+        0x0F => RemoteButton::Netflix,
+        0x11 => RemoteButton::Input,
+        _ => return None,
+    })
+}
+
+/// 解析一份 Chromecast Remote HID 报文。
+///
+/// - `Some(Some(button))`：该键当前按下（绝对状态）；
+/// - `Some(None)`：全部松开（`code == 0`）；
+/// - `None`：不是本遥控器的报文形态，调用方应忽略、不改变状态。
+pub fn decode_google_remote_report(report: &[u8]) -> Option<Option<RemoteButton>> {
+    if report.len() != 3 || report[0] != 0x01 {
+        return None;
+    }
+    Some(button_for_google_remote_code(report[1]))
+}
+
 #[derive(Debug, Default)]
 pub struct ButtonStateMerger {
     keyboard: BTreeSet<RemoteButton>,
@@ -353,6 +490,13 @@ impl ButtonStateMerger {
     pub fn update_hid_usages(&mut self, usages: BTreeSet<u16>) -> Vec<ButtonEdge> {
         let before = self.active_buttons();
         self.hid = usages.into_iter().filter_map(button_for_usage).collect();
+        edges_between(&before, &self.active_buttons())
+    }
+
+    /// 应用一份已经解码好的 HID 按键集合（绝对状态，Chromecast Remote）。
+    pub fn update_hid_buttons(&mut self, buttons: BTreeSet<RemoteButton>) -> Vec<ButtonEdge> {
+        let before = self.active_buttons();
+        self.hid = buttons;
         edges_between(&before, &self.active_buttons())
     }
 
@@ -422,6 +566,20 @@ mod tests {
         assert!(!device_path_matches_xiaomi_remote(
             r"\\?\HID#VID_2717&PID_0001#instance"
         ));
+    }
+
+    #[test]
+    fn binding_presence_requires_every_bound_path() {
+        let bound = vec!["a".to_owned(), "b".to_owned()];
+        // 全部在位 → 仍在位（顺序无关）。
+        assert!(bound_paths_still_present(
+            &bound,
+            &["x".to_owned(), "a".to_owned(), "b".to_owned()]
+        ));
+        // 少一个集合（Chromecast 的 Col01/Col02 只回来一个）→ 不在位。
+        assert!(!bound_paths_still_present(&bound, &["a".to_owned()]));
+        // 从未绑定 → 不在位，由调用方决定重绑还是等待。
+        assert!(!bound_paths_still_present(&[], &["a".to_owned()]));
     }
 
     #[test]
@@ -565,5 +723,101 @@ mod tests {
         assert_eq!(releases.len(), 2);
         assert!(releases.iter().all(|edge| !edge.is_pressed));
         assert!(merger.release_all().is_empty());
+    }
+
+    #[test]
+    fn matches_both_windows_google_remote_device_path_shapes() {
+        assert!(device_path_matches_google_remote(
+            r"\\?\HID#VID_18D1&PID_9450&REV_0110#instance"
+        ));
+        assert!(device_path_matches_google_remote(
+            r"\\?\HID#{1812}_Dev_VID&0118D1_PID&9450_REV&0110_instance_col01"
+        ));
+        assert!(!device_path_matches_google_remote(
+            r"\\?\HID#VID_18D1&PID_0001#instance"
+        ));
+        assert!(device_path_matches_supported_remote(
+            r"\\?\HID#VID_2717&PID_32B8#instance"
+        ));
+    }
+
+    #[test]
+    fn google_remote_profile_and_multi_collection_selection() {
+        assert_eq!(
+            RemoteHidProfile::for_path(r"HID#DEv_VID&0118D1_PID&9450_x_Col01"),
+            Some(RemoteHidProfile::Google)
+        );
+        // 两个集合属于同一台遥控器：不判歧义，两条路径都保留。
+        let paths = vec![
+            r"\\?\HID#{1812}_Dev_VID&0118D1_PID&9450_REV&0110_x&Col01".to_owned(),
+            r"\\?\HID#{1812}_Dev_VID&0118D1_PID&9450_REV&0110_x&Col02".to_owned(),
+        ];
+        let selection = select_remote_hid_selection(&paths).unwrap();
+        assert_eq!(selection.profile, RemoteHidProfile::Google);
+        assert_eq!(selection.paths.len(), 2);
+        // 小米 + Google 同时在线：失败关闭。
+        let mixed = vec![
+            r"\\?\HID#VID_2717&PID_32B8#a".to_owned(),
+            r"\\?\HID#VID_18D1&PID_9450#b".to_owned(),
+        ];
+        assert_eq!(
+            select_remote_hid_selection(&mixed),
+            Err(DevicePathError::Ambiguous(2))
+        );
+        assert_eq!(
+            select_remote_hid_selection(&[]),
+            Err(DevicePathError::Missing)
+        );
+    }
+
+    #[test]
+    fn decodes_google_remote_reports() {
+        assert_eq!(
+            decode_google_remote_report(&[0x01, 0x07, 0x00]),
+            Some(Some(RemoteButton::Ok))
+        );
+        assert_eq!(
+            decode_google_remote_report(&[0x01, 0x0E, 0x00]),
+            Some(Some(RemoteButton::Youtube))
+        );
+        assert_eq!(decode_google_remote_report(&[0x01, 0x00, 0x00]), Some(None));
+        // 非本遥控器形态：忽略（不改状态）。
+        assert_eq!(decode_google_remote_report(&[0x02, 0x07, 0x00]), None);
+        assert_eq!(decode_google_remote_report(&[0x01, 0x07]), None);
+        // 未知码：识别为按下但无对应语义键 → 空状态。
+        assert_eq!(decode_google_remote_report(&[0x01, 0x7F, 0x00]), Some(None));
+    }
+
+    #[test]
+    fn google_hid_buttons_follow_press_and_release_edges() {
+        let mut merger = ButtonStateMerger::default();
+        let press = merger.update_hid_buttons(BTreeSet::from([RemoteButton::Netflix]));
+        assert_eq!(
+            press,
+            vec![ButtonEdge {
+                button: RemoteButton::Netflix,
+                is_pressed: true,
+            }]
+        );
+        assert!(merger
+            .update_hid_buttons(BTreeSet::from([RemoteButton::Netflix]))
+            .is_empty());
+        assert_eq!(
+            merger.update_hid_buttons(BTreeSet::new()),
+            vec![ButtonEdge {
+                button: RemoteButton::Netflix,
+                is_pressed: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn new_buttons_are_appended_and_keep_existing_ordinals() {
+        assert_eq!(RemoteButton::Back.ordinal(), 0);
+        assert_eq!(RemoteButton::VolumeDown.ordinal(), 12);
+        assert_eq!(RemoteButton::Youtube.ordinal(), 13);
+        assert_eq!(RemoteButton::Netflix.ordinal(), 14);
+        assert_eq!(RemoteButton::Input.ordinal(), 15);
+        assert_eq!(ALL_BUTTONS.len(), 16);
     }
 }

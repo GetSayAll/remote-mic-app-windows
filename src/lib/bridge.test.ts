@@ -100,9 +100,10 @@ describe("connection phase presentation", () => {
     ]);
   });
 
-  it("展示 RC001、RC003 和未知型号", () => {
+  it("展示 RC001、RC003、Chromecast 和未知型号", () => {
     expect(remoteModelLabel("rc001")).toBe("小米蓝牙遥控器 2");
     expect(remoteModelLabel("rc003")).toBe("小米蓝牙遥控器 2 Pro");
+    expect(remoteModelLabel("chromecast")).toBe("Chromecast Remote（谷歌）");
     expect(remoteModelLabel("unknown")).toBe("连接后显示");
   });
 

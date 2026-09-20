@@ -88,6 +88,8 @@ pub struct PairedRemote {
 pub enum RemoteModel {
     Rc001,
     Rc003,
+    /// Chromecast Remote（Google 参考设计，ATVV v1.0 + 16 kHz + BLE HID 按键）。
+    Chromecast,
     #[default]
     Unknown,
 }
@@ -711,6 +713,7 @@ pub fn is_supported_remote_name(raw_name: &str) -> bool {
             | "小米蓝牙遥控器2"
             | "小米蓝牙遥控器2 pro"
             | "arn9"
+            | "chromecast remote"
     )
 }
 
@@ -720,6 +723,7 @@ pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
         "xiaomi bluetooth remote 2 pro" | "小米蓝牙遥控器2 pro" | "arn9" => {
             RemoteModel::Rc003
         }
+        "chromecast remote" => RemoteModel::Chromecast,
         _ => RemoteModel::Unknown,
     }
 }
@@ -844,6 +848,7 @@ mod tests {
             "小米蓝牙语音遥控器",
             "小米蓝牙遥控器2",
             "ARN9",
+            "Chromecast Remote",
         ] {
             assert!(is_supported_remote_name(name), "expected match: {name}");
         }
@@ -864,6 +869,16 @@ mod tests {
             RemoteModel::Rc003
         );
         assert_eq!(remote_model_from_name("MI RC"), RemoteModel::Unknown);
+        assert_eq!(
+            remote_model_from_name("Chromecast Remote"),
+            RemoteModel::Chromecast
+        );
+        assert_eq!(
+            remote_model_from_name("  chromecast remote  "),
+            RemoteModel::Chromecast
+        );
+        // 2A24 的 `A3` 过泛，不作型号判据（避免误判其他设备）。
+        assert_eq!(remote_model_from_model_number("A3"), None);
 
         assert_eq!(
             remote_model_from_model_number(" RC001\r\n"),
