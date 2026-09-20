@@ -397,8 +397,6 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; transition: opacity 0.06s; }
 .anchor-dot.visible { opacity: 1; }
 .mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease; }
-.mapping-card.left { left: 0; }
-.mapping-card.right { right: 0; }
 .mapping-card:hover { background: var(--surface-hover); border-color: var(--accent-border); box-shadow: 0 3px 12px var(--shadow-control); }
 .mapping-card.selected { background: var(--accent-surface); border-color: var(--accent-border); }
 .mapping-card.active { background: var(--pressed-surface); border-color: var(--pressed-border); }

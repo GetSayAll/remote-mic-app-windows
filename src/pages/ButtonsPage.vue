@@ -58,12 +58,17 @@ const CANVAS_HEIGHT = 570;
 /** Chromecast 按键更多（物理左右 6/8 + 语音卡），画布加高避免卡片重叠。 */
 const CHROMECAST_CANVAS_HEIGHT = 660;
 const CARD_HEIGHT = 72;
+/** 卡片内边缘与遥控器之间的固定水平间距（不随窗口宽度变化）。 */
+const CARD_GAP = 40;
 
 const canvasEl = ref<HTMLElement | null>(null);
 const canvasWidth = ref(CANVAS_MIN_WIDTH);
-const cardWidth = computed(() =>
-  Math.min(300, Math.max(270, (canvasWidth.value - 260) / 2)),
-);
+const cardWidth = computed(() => {
+  const fluid = Math.min(300, Math.max(270, (canvasWidth.value - 260) / 2));
+  // 窄窗口下收缩卡片宽度，保证"与遥控器固定间距"仍放得下（宽窗口不生效）。
+  const fit = (canvasWidth.value - remoteWidth.value - 2 * CARD_GAP) / 2;
+  return Math.max(180, Math.min(fluid, fit));
+});
 
 interface Placement {
   button: RemoteButton;
@@ -216,12 +221,20 @@ function cardTop(placement: Placement): number {
   return placement.targetY * canvasHeight.value - CARD_HEIGHT / 2;
 }
 
-/** 卡片朝向遥控器一侧的边缘中点（箭头/连线的落点基准）。 */
+/** 卡片朝向遥控器一侧的边缘中点（箭头/连线的落点基准）。
+ *  钉在遥控器两侧、间距固定，不随窗口宽度变化。 */
 function cardEdgePoint(placement: Placement): { x: number; y: number } {
-  return {
-    x: placement.side === "left" ? cardWidth.value : canvasWidth.value - cardWidth.value,
-    y: placement.targetY * canvasHeight.value,
-  };
+  const x =
+    placement.side === "left"
+      ? remoteLeft.value - CARD_GAP
+      : remoteLeft.value + remoteWidth.value + CARD_GAP;
+  return { x, y: placement.targetY * canvasHeight.value };
+}
+
+/** 卡片左边缘（绝对定位 left）：左列贴在遥控器左侧，右列贴在右侧。 */
+function cardLeft(placement: Placement): number {
+  const edge = cardEdgePoint(placement);
+  return placement.side === "left" ? edge.x - cardWidth.value : edge.x;
 }
 
 /** 连线与箭头一体化：线画到箭头底部（距卡边 13px），箭头补足到距卡边 7px，
@@ -1106,7 +1119,7 @@ onUnmounted(() => {
           active: activeButtons.has(placement.button),
           flashed: firedFlash?.button === placement.button,
         }"
-        :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
+        :style="{ top: `${cardTop(placement)}px`, left: `${cardLeft(placement)}px`, width: `${cardWidth}px` }"
         @click="selectButton(placement.button)"
       >
         <div class="mapping-card-title">
@@ -1152,7 +1165,7 @@ onUnmounted(() => {
       <article
         class="mapping-card voice-card right"
         :class="{ active: voiceActive }"
-        :style="{ top: `${cardTop(voicePlacement)}px`, width: `${cardWidth}px` }"
+        :style="{ top: `${cardTop(voicePlacement)}px`, left: `${cardLeft(voicePlacement)}px`, width: `${cardWidth}px` }"
       >
         <div class="mapping-card-title">
           <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
