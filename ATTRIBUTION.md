@@ -66,6 +66,24 @@
 - **CABLE Input 端点静音自愈（2026-09-07）**：依据 Microsoft Core Audio `IAudioEndpointVolume` / Endpoint Volume Controls 公共 API（`learn.microsoft.com/windows/win32/api/endpointvolume/nn-endpointvolume-iaudioendpointvolume`、`learn.microsoft.com/windows/win32/coreaudio/endpoint-volume-controls`），共享模式端点的主静音属于端点级状态，不是应用 WASAPI 写入成功即可证明可听。本仓库仅对名称确认的 VB-CABLE 渲染端点在打开时及每次语音会话开始前调用 `GetMute` → 必要时 `SetMute(FALSE)` → `GetMute` 读回确认；不修改物理输出设备，也不覆盖用户音量标量。调用结果、检查点和耗时写入结构化 GATT 诊断日志。
 - **SayAll 会话静音自愈（2026-09-07）**：用户现场观察到音量合成器左侧 CABLE Input 端点未静音，但右侧“无线麦 SayAll”应用会话在开始推流后很快重新静音。依据 Microsoft `IAudioClient::Initialize` 文档，渲染会话默认会跨应用重启持久化音量与静音状态；依据 `ISimpleAudioVolume::GetMute/SetMute`，应用会话静音独立于端点主静音。实现使用 `IAudioSessionManager2::GetSessionEnumerator` + `IAudioSessionControl2::GetProcessId`，只锁定当前 SayAll 进程在用户已选 CABLE 端点上的会话；初始化、语音会话开始、`IAudioClient::Start` 后读回，并在推流期间每 100ms 低频检查，发现静音才解除，不修改会话音量、不碰系统声音或其他进程。初始化时另以 `IAudioSessionControl2::SetDuckingPreference(TRUE)` 让 SayAll 会话退出 Windows 默认通信自动压低机制；该预防措施不作为外部静音来源已经归因的证据。官方依据：`learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize`、`learn.microsoft.com/windows/win32/api/audioclient/nf-audioclient-isimpleaudiovolume-setmute`、`learn.microsoft.com/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessionmanager2-getsessionenumerator`、`learn.microsoft.com/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessioncontrol2-getprocessid`、`learn.microsoft.com/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessioncontrol2-setduckingpreference`。
 
+## Chromecast Remote / Google ATVV 参考（2026-09-18）
+
+- 目标设备：Chromecast Remote（Google，`VID 0x18D1` / `PID 0x9450`，`2A24` 型号 `A3`）。
+  真机协议与输入形态实测见
+  `docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md`。
+- **Google Voice over BLE (ATVV) 规范 v1.0**：ATVV 服务 `AB5E0001`、发送
+  `AB5E0002`、音频 `AB5E0003`、控制 `AB5E0004` 的角色定义，以及版本 1.0 的
+  `GET_CAPS`/`MIC_OPEN`/`AUDIO_START`/`AUDIO_STOP` 语义。本仓库现有 ATVV 实现
+  与之一致，Chromecast 探测结论为 16 kHz（codec `0x02`）可直接复用，不改核心解码。
+- `b0o/ATVVoice`：`docs/research/report.md` 与 `AGENTS.md` 的 ATVV 逆向资料
+  （命令表、控制信号、以及 v0.4 与 v1.0 在帧格式与交互模型上的差异）。仅作协议
+  参考（对照确认 Chromecast 属 v1.0、主机无需先发 `MIC_OPEN`、松开送 `AUDIO_STOP`），
+  未复制其代码或引入依赖。
+- `nordicsemi/Kotlin-BLE-Library`：`Service.kt` 将 `AB5E0001` 标注为 Android TV
+  Remote Service，用于确认该服务是 Google/Android TV 参考设计遥控器的通用语音服务。
+- 按键侧为本仓库独立实测：遥控器事件走 HID `Col01`、`Report ID 0x01`、3 字节
+  `01 <code> 00`；语音键不产生 HID 报文。未采用任何外部按键解析实现。
+
 ## 延迟调研来源（2026-09-05，语音键按下→电平图出现优化专项）
 
 按仓库规则（实现前先调研），本专项调研结论与边界记录如下；对应实测见 `docs/investigations/evidence/p/FINDINGS.md`（端点预热对照实验）：

@@ -88,6 +88,8 @@ pub struct PairedRemote {
 pub enum RemoteModel {
     Rc001,
     Rc003,
+    /// Chromecast Remote（Google 参考设计，ATVV v1.0 + 16 kHz + BLE HID 按键）。
+    Chromecast,
     #[default]
     Unknown,
 }
@@ -654,6 +656,18 @@ impl WindowsPlatform {
         }
     }
 
+    /// 切换"当前遥控器"型号：Raw Input 重新绑定为这台遥控器的 HID 接口。
+    ///
+    /// 用于按键页 tab 切换（语音与按键都跟随当前遥控器）；BLE 连接确定型号时
+    /// 也会调用同一底层函数。
+    pub fn set_active_remote_model(&self, model: RemoteModel) {
+        #[cfg(windows)]
+        raw_input_windows::set_active_profile(hid_profile_for_model(model));
+
+        #[cfg(not(windows))]
+        let _ = model;
+    }
+
     pub fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
         #[cfg(windows)]
         {
@@ -711,6 +725,7 @@ pub fn is_supported_remote_name(raw_name: &str) -> bool {
             | "小米蓝牙遥控器2"
             | "小米蓝牙遥控器2 pro"
             | "arn9"
+            | "chromecast remote"
     )
 }
 
@@ -720,6 +735,7 @@ pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
         "xiaomi bluetooth remote 2 pro" | "小米蓝牙遥控器2 pro" | "arn9" => {
             RemoteModel::Rc003
         }
+        "chromecast remote" => RemoteModel::Chromecast,
         _ => RemoteModel::Unknown,
     }
 }
@@ -731,6 +747,36 @@ pub fn remote_model_from_model_number(model_number: &str) -> Option<RemoteModel>
         "RC003" => Some(RemoteModel::Rc003),
         value if value.contains("ARN9") => Some(RemoteModel::Rc003),
         _ => None,
+    }
+}
+
+/// 按键配置 profile 字符串 → 型号（profile 即型号的 snake_case 名）。
+pub fn remote_model_from_profile(profile: &str) -> RemoteModel {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "rc001" => RemoteModel::Rc001,
+        "rc003" => RemoteModel::Rc003,
+        "chromecast" => RemoteModel::Chromecast,
+        _ => RemoteModel::Unknown,
+    }
+}
+
+/// 型号 → 按键配置 profile 字符串。
+pub fn profile_for_model(model: RemoteModel) -> &'static str {
+    match model {
+        RemoteModel::Rc001 => "rc001",
+        RemoteModel::Rc003 => "rc003",
+        RemoteModel::Chromecast => "chromecast",
+        RemoteModel::Unknown => "unknown",
+    }
+}
+
+/// 型号 → Raw Input HID 报文配置。多遥控器同时在线时用于锁定当前语音遥控器
+/// 应绑定的接口，避免把不同厂商的报文混在一起解析。
+pub fn hid_profile_for_model(model: RemoteModel) -> Option<raw_input::RemoteHidProfile> {
+    match model {
+        RemoteModel::Rc001 | RemoteModel::Rc003 => Some(raw_input::RemoteHidProfile::Xiaomi),
+        RemoteModel::Chromecast => Some(raw_input::RemoteHidProfile::Google),
+        RemoteModel::Unknown => None,
     }
 }
 
@@ -844,6 +890,7 @@ mod tests {
             "小米蓝牙语音遥控器",
             "小米蓝牙遥控器2",
             "ARN9",
+            "Chromecast Remote",
         ] {
             assert!(is_supported_remote_name(name), "expected match: {name}");
         }
@@ -864,6 +911,16 @@ mod tests {
             RemoteModel::Rc003
         );
         assert_eq!(remote_model_from_name("MI RC"), RemoteModel::Unknown);
+        assert_eq!(
+            remote_model_from_name("Chromecast Remote"),
+            RemoteModel::Chromecast
+        );
+        assert_eq!(
+            remote_model_from_name("  chromecast remote  "),
+            RemoteModel::Chromecast
+        );
+        // 2A24 的 `A3` 过泛，不作型号判据（避免误判其他设备）。
+        assert_eq!(remote_model_from_model_number("A3"), None);
 
         assert_eq!(
             remote_model_from_model_number(" RC001\r\n"),

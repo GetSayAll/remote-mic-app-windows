@@ -28,6 +28,8 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn raw_input_snapshot(&self) -> RawInputSnapshot;
     fn start_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
+    /// 切换"当前遥控器"型号（Raw Input 只绑定这台遥控器的接口）。
+    fn set_active_remote_model(&self, model: sayall_windows::RemoteModel);
     fn send_input_snapshot(&self) -> SendInputSnapshot;
     fn test_shortcut(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError>;
     fn test_scroll(
@@ -130,6 +132,10 @@ impl PlatformRuntime for WindowsPlatform {
         self.stop_raw_input()
     }
 
+    fn set_active_remote_model(&self, model: sayall_windows::RemoteModel) {
+        WindowsPlatform::set_active_remote_model(self, model)
+    }
+
     fn send_input_snapshot(&self) -> SendInputSnapshot {
         self.send_input_snapshot()
     }
@@ -206,6 +212,7 @@ mod simulation {
 
     const RC001_ID: &str = "ci-simulation-rc001";
     const RC003_ID: &str = "ci-simulation-rc003";
+    const CHROMECAST_ID: &str = "ci-simulation-chromecast";
     const CABLE_ENDPOINT_ID: &str = "ci-simulation-cable-input";
     const CABLE_ENDPOINT_NAME: &str = "CABLE Input (CI Simulation)";
 
@@ -252,6 +259,12 @@ mod simulation {
                     id: RC003_ID.to_owned(),
                     name: "Xiaomi Bluetooth Remote 2 Pro".to_owned(),
                     model: RemoteModel::Rc003,
+                    is_supported_candidate: true,
+                },
+                PairedRemote {
+                    id: CHROMECAST_ID.to_owned(),
+                    name: "Chromecast Remote".to_owned(),
+                    model: RemoteModel::Chromecast,
                     is_supported_candidate: true,
                 },
             ]
@@ -419,6 +432,8 @@ mod simulation {
             state.raw_input = RawInputSnapshot::default();
             Ok(state.raw_input.clone())
         }
+
+        fn set_active_remote_model(&self, _model: sayall_windows::RemoteModel) {}
 
         fn send_input_snapshot(&self) -> SendInputSnapshot {
             lock(&self.state).send_input.clone()
@@ -618,13 +633,20 @@ mod simulation {
         #[test]
         fn simulation_runs_connection_audio_raw_input_and_send_input_journey() {
             let platform = SimulatedPlatform::default();
-            assert_eq!(platform.scan_paired_remotes().unwrap().len(), 2);
+            assert_eq!(platform.scan_paired_remotes().unwrap().len(), 3);
             assert_eq!(
                 platform
                     .connect_remote(RC001_ID.to_owned())
                     .unwrap()
                     .remote_model,
                 RemoteModel::Rc001
+            );
+            assert_eq!(
+                platform
+                    .connect_remote(CHROMECAST_ID.to_owned())
+                    .unwrap()
+                    .remote_model,
+                RemoteModel::Chromecast
             );
             assert_eq!(
                 platform

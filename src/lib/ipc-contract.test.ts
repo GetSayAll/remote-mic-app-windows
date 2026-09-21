@@ -26,7 +26,7 @@ const connectionPhases = [
   "failed",
 ] as const satisfies readonly ConnectionPhase[];
 const voiceStates = ["idle", "streaming", "draining"] as const satisfies readonly VoiceSessionState[];
-const remoteModels = ["rc001", "rc003", "unknown"] as const satisfies readonly RemoteModel[];
+const remoteModels = ["rc001", "rc003", "chromecast", "unknown"] as const satisfies readonly RemoteModel[];
 const audioPhases = [
   "unconfigured",
   "ready",
@@ -172,13 +172,18 @@ describe("Rust and TypeScript IPC contract", () => {
     expect(platformSnapshot).not.toHaveProperty("connection.remote_model");
   });
 
-  it("keeps RC001, RC003 and unknown paired-remote models stable", () => {
+  it("keeps RC001, RC003, Chromecast and unknown paired-remote models stable", () => {
     const pairedRemotes: PairedRemote[] = contract.pairedRemotes.map((remote) => ({
       ...remote,
       model: memberOf(remote.model, remoteModels),
     }));
 
-    expect(pairedRemotes.map((remote) => remote.model)).toEqual(["rc001", "rc003", "unknown"]);
+    expect(pairedRemotes.map((remote) => remote.model)).toEqual([
+      "rc001",
+      "rc003",
+      "chromecast",
+      "unknown",
+    ]);
     for (const remote of pairedRemotes) {
       expectExactKeys(remote, ["id", "name", "model", "isSupportedCandidate"]);
       expect(remote).not.toHaveProperty("is_supported_candidate");

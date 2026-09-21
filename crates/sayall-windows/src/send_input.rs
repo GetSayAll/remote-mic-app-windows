@@ -511,25 +511,37 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
-    /// 策略性不支持自定义的按键（全型号一致）：
-    /// - 返回/音量±：RC003 输入栈不可见（配置无法生效）；RC001 虽以
-    ///   VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而不开放。
-    ///
-    /// 持久化层（[`Self::normalized`]）与引擎层（button_mapping 的
-    /// `set_mappings`）双重剥离，存量配置在加载/保存时自动清除。
-    pub(crate) fn without_unsupported_buttons(mut self) -> Self {
-        for button in [
-            RemoteButton::Back,
-            RemoteButton::VolumeUp,
-            RemoteButton::VolumeDown,
-        ] {
-            self.actions.remove(&button);
+    /// 按型号剥离策略性不支持的按键：
+    /// - 小米（RC001/RC003）：返回/音量±——RC003 输入栈不可见（配置无法生效）；
+    ///   RC001 虽以 VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而不开放。
+    /// - Chromecast Remote：返回/静音/音量± 均可捕获（见
+    ///   docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md），
+    ///   不剥离；该遥控器没有 TV/菜单键。
+    /// - Unknown：保守按小米处理。
+    pub(crate) fn without_unsupported_buttons_for(mut self, model: crate::RemoteModel) -> Self {
+        let unsupported: &[RemoteButton] = match model {
+            crate::RemoteModel::Chromecast => &[],
+            crate::RemoteModel::Rc001 | crate::RemoteModel::Rc003 | crate::RemoteModel::Unknown => {
+                &[
+                    RemoteButton::Back,
+                    RemoteButton::VolumeUp,
+                    RemoteButton::VolumeDown,
+                ]
+            }
+        };
+        for button in unsupported {
+            self.actions.remove(button);
         }
         self
     }
 
+    /// 全型号兼容入口：按 Unknown（保守剥离）处理。
     pub fn normalized(self) -> Result<Self, SendInputError> {
-        let mut this = self.without_unsupported_buttons();
+        self.normalized_for(crate::RemoteModel::Unknown)
+    }
+
+    pub fn normalized_for(self, model: crate::RemoteModel) -> Result<Self, SendInputError> {
+        let mut this = self.without_unsupported_buttons_for(model);
         this.applications = crate::registered_apps::normalize_library(this.applications)
             .map_err(SendInputError::Backend)?;
         for actions in this.actions.values_mut() {
@@ -595,7 +607,12 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
         RemoteButton::VolumeMute => KeyCode::VolumeMute,
         RemoteButton::VolumeUp => KeyCode::VolumeUp,
         RemoteButton::VolumeDown => KeyCode::VolumeDown,
-        RemoteButton::Back | RemoteButton::Tv | RemoteButton::Power => return None,
+        RemoteButton::Back
+        | RemoteButton::Tv
+        | RemoteButton::Power
+        | RemoteButton::Youtube
+        | RemoteButton::Netflix
+        | RemoteButton::Input => return None,
     })
 }
 

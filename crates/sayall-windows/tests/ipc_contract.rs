@@ -88,6 +88,12 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 is_supported_candidate: true,
             },
             PairedRemote {
+                id: "fixture-chromecast".into(),
+                name: "Chromecast Remote".into(),
+                model: RemoteModel::Chromecast,
+                is_supported_candidate: true,
+            },
+            PairedRemote {
                 id: "fixture-unknown".into(),
                 name: "Approved Fixture Remote".into(),
                 model: RemoteModel::Unknown,

@@ -13,6 +13,20 @@
 - [ ] 支持豆包输入法：参考 Mac App 的产品行为与配置引导，在不读取或修改豆包私有配置、内部数据库、内存或私有协议的前提下设计 Windows 支持路径；基础能力不得依赖进程注入，若必须使用提权 Helper 或虚拟 HID，须保持独立、显式启用且不影响现有语音主路径，并分别完成 RC001/RC003 真机验收。
 - [ ] 完善聚焦输入框处理：参考 Mac App 对目标输入框的识别、焦点保持、恢复和无可编辑目标时的用户提示；Windows 仅使用公开的焦点与辅助功能 API，避免静默把语音结果送入错误窗口，并覆盖焦点切换、窗口关闭、应用切换、Onboarding/设置窗口前后台切换及语音会话中焦点变化。
 
+## Chromecast Remote（2026-09-18 新增）
+
+- [ ] Chromecast Remote 支持（Google 参考设计，ATVV v1.0 16 kHz + BLE HID）：
+  广播名 `Chromecast Remote` 型号识别、Google VID `0x18D1`/PID `0x9450` 的 HID
+  匹配与 Col01/Col02 多集合绑定、`Report ID 0x01` 三字节报文解码与按键码表、
+  新增 `YouTube`/`Netflix`/`输入源` 三个语义键，以及按键页按型号切换产品图与布局，
+  均已实现并通过 Rust/前端自动化；**Windows 真机验收 deferred**（语音生命周期、
+  全部按键、快速连按、断连/睡眠恢复、与小米遥控器共存），清单见
+  [Testing/WindowsChromecastRemote.md](Testing/WindowsChromecastRemote.md)。
+  协议与输入形态真机探测结论见
+  [docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md](docs/investigations/evidence/2026-09-18-chromecast-remote-atvv-hid-probe.md)。
+- [ ] 按键页 Chromecast 产品图资源（`public/chromecast-remote-photo@2x.png`）已加入仓库，
+  锚点为视觉初值，需真机截图复核微调。
+
 ## Windows RC001 / RC003
 
 - [x] 参考 macOS `SMAppService.mainApp` 实现 Windows 当前用户登录自启动：关于页可开关，使用 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，启动时同步并记录结构化日志；不需要管理员权限。**2026-09-15 本机 Windows 真机 passed**：release 安装版 0.2.6 注销重登后自动启动，进程父进程为 `explorer`（由登录 shell 拉起，非手动启动），启动链 `document_load finished → vue_mount(80ms) → initial_ipc_ready(337ms)` 完整，日志 `startup feature=launch_at_login action=sync terminal_result=passed enabled=true`。验证要点：`Win+L` 锁屏再解锁**不会**触发 `Run` 项（用户会话未结束），必须注销（`shutdown /l`）或重启才能验证。

@@ -76,14 +76,18 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
 
   await clickButton("扫描已配对设备");
   await waitFor(
-    () => (document.body.textContent?.includes("找到 2 个已配对的小米遥控器") ? true : null),
-    "RC001/RC003 扫描结果",
+    () => (document.body.textContent?.includes("找到 3 个已配对设备") ? true : null),
+    "RC001/RC003/Chromecast 扫描结果",
   );
   const remotes = await scanPairedRemotes();
-  assert(remotes.length === 2, "仿真扫描没有同时返回 RC001 和 RC003");
+  assert(remotes.length === 3, "仿真扫描没有同时返回 RC001、RC003 和 Chromecast");
   assert(remotes.some((remote) => remote.model === "rc001"), "仿真扫描缺少 RC001");
   assert(remotes.some((remote) => remote.model === "rc003"), "仿真扫描缺少 RC003");
-  steps.push("连接页面渲染 RC001/RC003 扫描结果");
+  assert(
+    remotes.some((remote) => remote.model === "chromecast"),
+    "仿真扫描缺少 Chromecast Remote",
+  );
+  steps.push("连接页面渲染 RC001/RC003/Chromecast 扫描结果");
 
   const rc001 = remotes.find((remote) => remote.model === "rc001");
   assert(rc001, "找不到 RC001 仿真设备");
@@ -132,7 +136,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("按键映射画布渲染 12 张按键卡与三列触发单元格");
 
-  await saveButtonMappings({
+  await saveButtonMappings("rc003", {
     enabled: true,
     actions: {
       ok: {
