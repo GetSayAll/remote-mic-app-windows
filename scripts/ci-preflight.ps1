@@ -1,13 +1,18 @@
 ﻿# CI 前置自检：在本地跑通 CI verify 的快速检查步骤，通过后再 push。
 #
 # 背景（2026-09-05）：CI verify 曾因 rustfmt 格式漂移连续 10 次失败（run
-# #64-#73），而 CI 全量流水线约 19 分钟，反馈太慢。本脚本镜像 CI 的前
-# 6 个快速步骤（约 1-2 分钟），失败时按 CI 步骤名报告——本地过 = CI
-# 的这些步骤必过（同一命令、同一仓库根）。
+# #64-#73），而 CI 全量流水线约 19 分钟，反馈太慢。本脚本镜像 CI 的快速
+# 步骤（默认 7 步，失败时按 CI 步骤名报告）——本地过 = CI 的这些步骤必过
+# （同一命令、同一仓库根）。
+#
+# 2026-09-21 补充：默认加入 runtime-simulation 的**编译检查**（CI 第 7 步的轻量版）。
+# 此前默认只跑前 6 步，而 `cargo check --workspace` 不带 feature，覆盖不到
+# feature-gated 的 simulation 模块；#98 的 E0063 恰好只在这条路径上暴露，
+# 于是"本地 6/6 通过 + CI 红灯"并存了三个提交。
 #
 # 用法（仓库根目录）：
-#   powershell -File scripts\ci-preflight.ps1           # 快速检查（推荐每次 push 前）
-#   powershell -File scripts\ci-preflight.ps1 -Full     # 追加 runtime-simulation Tauri 构建（慢，发布前用）
+#   powershell -File scripts\ci-preflight.ps1           # 7 步，含 runtime-simulation 编译检查
+#   powershell -File scripts\ci-preflight.ps1 -Full     # 8 步，追加 runtime-simulation Tauri 完整构建（慢，发布前用）
 #
 # 说明：CI 后续的重型步骤（NSIS 安装包、安装矩阵测试）本地不镜像——
 # 它们依赖 CI 环境且极少因常规改动失败；快速步骤通过后 CI 失败的概率
@@ -47,7 +52,7 @@ $step = 0
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Action)
     $script:step++
-    Write-Host ("[$script:step/$(if ($Full) { 7 } else { 6 })] $Name ...")
+    Write-Host ("[$script:step/$(if ($Full) { 8 } else { 7 })] $Name ...")
     & $Action
     if ($LASTEXITCODE -ne 0) {
         Write-Host ("  FAIL（exit=$LASTEXITCODE）——CI 步骤 [$Name] 将失败") -ForegroundColor Red
@@ -86,6 +91,12 @@ Invoke-Step "Test Rust workspace" {
 
 Invoke-Step "Check Windows Tauri host" {
     cargo check --workspace
+}
+
+# runtime-simulation 是 feature-gated 路径，上面的 `cargo check --workspace` 不带
+# feature、覆盖不到它。用轻量 check 补上（依赖已编译时约十几秒，首次会久一些）。
+Invoke-Step "Check Windows runtime simulation (compile only)" {
+    cargo check -p sayall-windows-app --features runtime-simulation
 }
 
 if ($Full) {

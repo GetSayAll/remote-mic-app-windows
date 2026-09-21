@@ -12,14 +12,10 @@ on:
       - '.gitignore'
       - 'LICENSE'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'Testing/**'
-      - 'artifacts/**'
-      - 'Screenshots/**'
-      - '.gitignore'
-      - 'LICENSE'
+    # 刻意不在 pull_request 上设 paths-ignore：被 paths-ignore 跳过的 workflow
+    # 不会创建任何 check，而分支保护的必需检查指向 `gate`，纯文档 PR 会一直卡在
+    # "Expected — Waiting for status to be reported"。
+    # 改由 job 级判断（changes）跳过重量级校验，`gate` 始终运行并给出结论。
 
 permissions:
   contents: read
@@ -30,7 +26,46 @@ env:
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
 jobs:
+  # 路径感知：判断本次变更是否包含"非文档"内容，决定要不要跑重量级校验。
+  # 忽略清单与原来的 paths-ignore 保持一致（见文件头的 push 配置）。
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        name: Detect relevant changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "非 PR 事件（push）：视为需要完整校验"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.base_ref }}"
+          git fetch --no-tags origin "$base" || true
+          files="$(git diff --name-only "origin/$base"...HEAD || true)"
+          echo "changed files:"
+          printf '%s\n' "$files"
+          ignore='(^|/)[^/]*\.md$|^(docs|Testing|Screenshots|artifacts)/|^\.gitignore$|^LICENSE$'
+          code="$(printf '%s\n' "$files" | grep -vE "$ignore" | grep -v '^$' || true)"
+          if [ -n "$code" ]; then
+            echo "包含非文档改动，需要完整校验"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "仅文档改动，跳过重量级校验"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,3 +153,28 @@ jobs:
           path: artifacts/windows-preview/
           if-no-files-found: error
           retention-days: 14
+
+  # 分支保护的必需检查指向这里。它总是运行并给出明确结论，所以：
+  # - 代码改动：verify 必须成功，否则 gate 失败（= 合不进去）；
+  # - 仅文档改动：verify 被 skip，gate 直接成功（不再需要本仓跑 19 分钟）。
+  # 用一个始终存在的 check 作为闸门，避免 paths 过滤导致的"必需检查永不出现"死锁。
+  gate:
+    name: gate
+    needs: [changes, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate upstream results
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "changes=${{ needs.changes.result }} verify=${{ needs.verify.result }}"
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "::error::changes job did not succeed"
+            exit 1
+          fi
+          case "${{ needs.verify.result }}" in
+            success) echo "verify passed";;
+            skipped) echo "verify skipped（仅文档改动）";;
+            *) echo "::error::verify did not pass: ${{ needs.verify.result }}"; exit 1;;
+          esac
