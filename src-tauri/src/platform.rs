@@ -420,6 +420,9 @@ mod simulation {
                 last_is_pressed: Some(false),
                 active_buttons: Vec::new(),
                 last_error: None,
+                // 模拟一次全新绑定：尚未出现"报文到了、但路径与当前绑定不符"而被
+                // 丢弃的事件，因此陈旧报文计数从 0 起（2026-09-18 新增字段）。
+                stale_remote_event_count: 0,
             };
             Ok(state.raw_input.clone())
         }
