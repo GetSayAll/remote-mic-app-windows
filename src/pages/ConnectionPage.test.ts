@@ -1,6 +1,13 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
+import type {
+  AudioEndpoint,
+  AudioSnapshot,
+  ConnectionSnapshot,
+  RuntimeSnapshot,
+  VoiceTarget,
+  VoiceTargetSnapshot,
+} from "../lib/bridge";
 import ConnectionPage from "./ConnectionPage.vue";
 
 const emptyConnection: ConnectionSnapshot = {
@@ -69,6 +76,18 @@ const cableEndpoint: AudioEndpoint = {
   isVirtualCableCandidate: true,
 };
 
+/** 微信输入法基线（多数用例的语音目标起点）。 */
+const weTypeVoiceTarget: VoiceTargetSnapshot = {
+  target: "we_type",
+  hotkey: null,
+  enabled: true,
+  doubaoMode: "hold",
+  resolvedHotkey: { keys: ["left_control", "left_windows"] },
+  defaultHotkey: { keys: ["left_control", "left_windows"] },
+  supportsSessionActivation: true,
+  injectionShape: "hold_while_key_down",
+};
+
 const mocks = vi.hoisted(() => ({
   endpoints: [] as AudioEndpoint[],
   getConnectionSnapshot: vi.fn(),
@@ -76,6 +95,8 @@ const mocks = vi.hoisted(() => ({
   listAudioEndpoints: vi.fn(),
   selectAudioEndpoint: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
+  getVoiceTargetConfig: vi.fn(),
+  setVoiceTargetConfig: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -87,6 +108,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     listAudioEndpoints: mocks.listAudioEndpoints,
     selectAudioEndpoint: mocks.selectAudioEndpoint,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
+    getVoiceTargetConfig: mocks.getVoiceTargetConfig,
+    setVoiceTargetConfig: mocks.setVoiceTargetConfig,
   };
 });
 
@@ -103,6 +126,16 @@ describe("VB-CABLE first-launch guidance", () => {
       selectedEndpointName: cableEndpoint.name,
     }));
     mocks.openVbCableDownloadPage.mockResolvedValue(undefined);
+    mocks.getVoiceTargetConfig.mockResolvedValue({ ...weTypeVoiceTarget });
+    mocks.setVoiceTargetConfig.mockImplementation(
+      async (target: VoiceTarget, hotkey: unknown, enabled: boolean, doubaoMode?: string) => ({
+        ...weTypeVoiceTarget,
+        target,
+        hotkey,
+        enabled,
+        doubaoMode: doubaoMode ?? weTypeVoiceTarget.doubaoMode,
+      }),
+    );
   });
 
   afterEach(() => {
@@ -174,6 +207,96 @@ describe("VB-CABLE first-launch guidance", () => {
     await wrapper.get(".vb-cable-callout .primary-button").trigger("click");
     await flushPromises();
     expect(mocks.openVbCableDownloadPage).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+});
+
+describe("豆包语音模式选择", () => {
+  const doubaoSnapshot: VoiceTargetSnapshot = {
+    target: "doubao",
+    hotkey: null,
+    enabled: true,
+    doubaoMode: "hold",
+    resolvedHotkey: { keys: ["right_alt"] },
+    defaultHotkey: { keys: ["right_alt"] },
+    supportsSessionActivation: true,
+    injectionShape: "hold_while_key_down",
+  };
+
+  beforeEach(() => {
+    mocks.endpoints = [];
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockImplementation(async () => []);
+    mocks.openVbCableDownloadPage.mockResolvedValue(undefined);
+    mocks.getVoiceTargetConfig.mockResolvedValue({ ...weTypeVoiceTarget });
+    mocks.setVoiceTargetConfig.mockImplementation(
+      async (target: VoiceTarget, hotkey: unknown, enabled: boolean, doubaoMode?: string) => ({
+        ...doubaoSnapshot,
+        target,
+        hotkey,
+        enabled,
+        doubaoMode: doubaoMode ?? doubaoSnapshot.doubaoMode,
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("仅在选中豆包输入法时显示模式选择", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.find(".doubao-mode-block").exists()).toBe(false);
+
+    const doubaoButton = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "豆包输入法");
+    await doubaoButton!.trigger("click");
+    await flushPromises();
+
+    const block = wrapper.get(".doubao-mode-block");
+    expect(block.text()).toContain("长按模式");
+    expect(block.text()).toContain("免按模式");
+    wrapper.unmount();
+  });
+
+  it("切到免按模式时把 doubaoMode 传给后端并提示松手不会结束", async () => {
+    mocks.getVoiceTargetConfig.mockResolvedValue({ ...doubaoSnapshot });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const handsFree = wrapper
+      .get(".doubao-mode-block")
+      .findAll("button")
+      .find((button) => button.text() === "免按模式");
+    await handsFree!.trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceTargetConfig).toHaveBeenCalledWith("doubao", null, true, "handsfree");
+    expect(wrapper.get(".doubao-mode-block").text()).toContain("再按一下结束");
+    wrapper.unmount();
+  });
+
+  // 回归防护：后端 `doubao_mode` 缺省会落回 `hold`。若 `applyVoiceTarget` /
+  // `setVoiceInjectionEnabled` 不透传当前模式，用户选好的免按模式会在每次
+  // 切换输入法或开关注入时被静默重置。
+  it("切换输入法与开关注入时保留已选的豆包模式", async () => {
+    mocks.getVoiceTargetConfig.mockResolvedValue({
+      ...doubaoSnapshot,
+      doubaoMode: "handsfree",
+    });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const weTypeButton = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "微信输入法");
+    await weTypeButton!.trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceTargetConfig).toHaveBeenCalledWith("we_type", null, true, "handsfree");
     wrapper.unmount();
   });
 });

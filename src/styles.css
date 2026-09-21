@@ -466,6 +466,13 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .voice-hotkey-row { margin-top: 10px; }
 .voice-hotkey-row p { margin: 0; font-size: 13px; }
 .voice-hotkey-presets { justify-content: flex-start; margin-top: 8px; }
+/* 豆包语音模式选择：仅当目标为豆包输入法时出现。左侧竖线把它与上方的
+   目标输入法按钮组区分开，避免用户把两组按钮当成一组。 */
+.doubao-mode-block {
+  margin-top: 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-subtle, rgba(128, 128, 128, 0.3));
+}
 .endpoint-list li small { font-size: 12.5px; }
 .endpoint-select-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .endpoint-count { font-size: 12.5px; }

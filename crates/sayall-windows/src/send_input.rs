@@ -958,6 +958,48 @@ mod tests {
         );
     }
 
+    /// 切换式注入（豆包免按模式）走 `send_key_edges_spaced_with`，因此每个
+    /// 事件单独一次调用、且失败时回滚已投递的边沿——这正是切换式最需要的
+    /// 保证：它没有后续的 `release` 步骤来清理残留按下的键。
+    #[test]
+    fn toggle_shape_sends_one_event_per_call_and_rolls_back_partial_delivery() {
+        let chord = chord(&[KeyCode::RightAlt]);
+        let planned = plan_key_tap(&chord).unwrap();
+        assert_eq!(
+            planned.len(),
+            2,
+            "single-key toggle is exactly one down + one up"
+        );
+
+        let mut calls: Vec<Vec<PlannedKeyEvent>> = Vec::new();
+        send_key_edges_spaced_with(&planned, Duration::ZERO, |events| {
+            calls.push(events.to_vec());
+            Ok(events.len())
+        })
+        .unwrap();
+        assert_eq!(calls.len(), 2, "one edge per SendInput call");
+        assert_eq!(calls[0][0].is_key_up, false);
+        assert_eq!(calls[1][0].is_key_up, true);
+
+        // 第二次调用失败 → 第一次已投递的 DOWN 必须被回滚（补一次 UP），
+        // 否则右 Alt 会永久粘在按下态。
+        let mut attempts: Vec<PlannedKeyEvent> = Vec::new();
+        let result = send_key_edges_spaced_with(&planned, Duration::ZERO, |events| {
+            attempts.push(events[0]);
+            if attempts.len() == 2 {
+                return Ok(0);
+            }
+            Ok(events.len())
+        });
+        assert!(matches!(
+            result,
+            Err(SendInputError::PartialDelivery { .. })
+        ));
+        assert_eq!(attempts.len(), 3, "down, failed up, rollback up");
+        assert_eq!(attempts[2].key, KeyCode::RightAlt);
+        assert!(attempts[2].is_key_up, "rollback must be a release edge");
+    }
+
     #[test]
     fn rejects_empty_long_and_duplicate_chords() {
         assert_eq!(chord(&[]).validated(), Err(SendInputError::EmptyChord));
