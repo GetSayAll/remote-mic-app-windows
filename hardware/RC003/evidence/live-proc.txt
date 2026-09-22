@@ -1,0 +1,67 @@
+﻿=== cargo/rustc/link processes ===
+
+   Id ProcessName StartTime             Path                                   
+   -- ----------- ---------             ----                                   
+ 5680 cargo       2026/9/22/周二 17:26:02 <USER-HOME>\.cargo\bin\ca...
+12768 cargo       2026/9/22/周二 17:26:02 <USER-HOME>\.rustup\toolc...
+ 7336 node        2026/9/22/周二 17:29:59 <USER-HOME>\.workbuddy\bi...
+ 8108 node        2026/9/22/周二 17:30:02 <USER-HOME>\.workbuddy\bi...
+10088 node        2026/9/22/周二 16:42:43 <USER-HOME>\.workbuddy\bi...
+14584 node        2026/9/22/周二 16:39:22 <USER-HOME>\.workbuddy\bi...
+15852 node        2026/9/22/周二 16:39:18 <USER-HOME>\.workbuddy\bi...
+16340 node        2026/9/22/周二 16:42:37 <USER-HOME>\.workbuddy\bi...
+
+
+=== a4e2a95c target newest files ===
+
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.by
+                krvbnqt8nn14j984m0i28rg.1dgcpks.rcgu.o
+Length        : 2296
+LastWriteTime : 2026/9/22/周二 17:19:23
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.88
+                kzzi724rmkdtvd0v05o3522.1dgcpks.rcgu.o
+Length        : 177963
+LastWriteTime : 2026/9/22/周二 17:19:22
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.ao
+                7ac210b3gx2lvfjv7orf593.1dgcpks.rcgu.o
+Length        : 2090030
+LastWriteTime : 2026/9/22/周二 17:19:22
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.8h
+                4u140aufxw18uz0g7kbphll.1dgcpks.rcgu.o
+Length        : 1455711
+LastWriteTime : 2026/9/22/周二 17:19:21
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.2s
+                9axfdkw2wbdaj19cd1x7ych.1dgcpks.rcgu.o
+Length        : 2004349
+LastWriteTime : 2026/9/22/周二 17:19:21
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.8q
+                xszwcd4mer5da7yyaytm518.1dgcpks.rcgu.o
+Length        : 63417
+LastWriteTime : 2026/9/22/周二 17:19:20
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.eb
+                8yhu6tq4y7gj0ccmmfn6t5u.1dgcpks.rcgu.o
+Length        : 2774832
+LastWriteTime : 2026/9/22/周二 17:19:19
+
+FullName      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windo
+                ws\origin-main-a4e2a95c\target\debug\deps\sayall_windows_app.96
+                jeofoka07jutmezk9n737pf.1dgcpks.rcgu.o
+Length        : 1666008
+LastWriteTime : 2026/9/22/周二 17:19:19
+
+
+

@@ -1,0 +1,40 @@
+E2-1 前置核查  (2026-09-22T18:29:00)
+==============================================================
+
+1. 当前会话是否管理员        : False
+
+2. Secure Boot (UEFISecureBootEnabled): '0'
+   -> 1 = 开着（prepare-test-mode 会拒绝）；0/空 = 关着或无该键
+
+3. bcdedit testsigning       : ''
+
+4. 目标设备（RC003 父节点）present:
+     （未找到 —— 遥控器可能未连接/休眠）
+   stderr: EXC:Command '['powershell', '-NoProfile', '-Command', '$t=\'HID\\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4\';Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Fo
+
+4b. 所有 2717/32b8 相关 present 设备:
+     OK|Bluetooth|蓝牙 LE 通用属性服务
+     OK|Bluetooth|蓝牙 LE 通用属性服务
+     OK|Bluetooth|通用访问配置文件
+     OK|HIDClass|符合蓝牙低能耗 GATT 的 HID 设备
+     OK|Bluetooth|通用属性配置文件
+     OK|Bluetooth|蓝牙 LE 通用属性服务
+     OK|Bluetooth|蓝牙 LE 通用属性服务
+     OK|Bluetooth|蓝牙 LE 通用属性服务
+     OK|Keyboard|HID Keyboard Device
+     OK|Bluetooth|设备信息服务
+
+5. driver store 里的 MiRemoteHidFilter : ''
+
+6. 信任库中的 RemoteMapper 测试证书:
+     （无）
+
+7. WDK dir (Program Files (x86)\Windows Kits\10\Include): 'True'
+7. MSBuild                                       : ''
+7. VS BuildTools                                 : 'True'
+
+8. 现成 package 文件:
+        11032 B  MiRemoteHidFilter.sys
+         1330 B  MiRemoteHidFilter.inf
+         2596 B  miremotehidfilter.cat
+          784 B  MiRemoteHidFilter.cer

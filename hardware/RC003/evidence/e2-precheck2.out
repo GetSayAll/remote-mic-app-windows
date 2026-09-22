@@ -1,0 +1,21 @@
+E2-1 前置核查（补正版）
+==============================================================
+
+目标 HardwareID: HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+
+（A/B/C 无输出）
+stderr: EXC:Command '['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '<PROBE-DIR>\\_tmp_ps.ps1']' timed out after 90 seconds
+
+=== D. TESTSIGNING 真值 ===
+-- bcdedit /enum {current} 全文 --
+指定的项类型无效。
+运行 "bcdedit /?" 获得命令行帮助。
+参数错误。
+
+-- exitcode=1 --
+
+-- 注册表 SystemStartOptions --
+SystemStartOptions =  NOEXECUTE=OPTIN  NOVGA
+
+-- 当前 boot 是否测试模式：Win32_OperatingSystem --
+BuildNumber=19041  Caption=Microsoft Windows 10 专业版

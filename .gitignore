@@ -60,3 +60,9 @@ desktop.ini
 *~
 *.swp
 *.tmp
+
+# ---- 硬件取证证据（例外） ----
+# hardware/<型号>/evidence/ 下存放的是**有意归档的一次性真机采集输出**，
+# 不是易变的运行日志，因此对上面的 `*.log` 规则做例外。
+# 说明见 hardware/RC003/README.md。
+!hardware/RC003/evidence/*.log

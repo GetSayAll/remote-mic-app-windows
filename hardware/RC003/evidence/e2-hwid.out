@@ -1,0 +1,120 @@
+硬编码目标串: HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+======================================================================
+
+### 树 BTHLEDEVICE
+  实例 8&14b2359b&b&0800   Service=UmPass
+      HardwareID     BTHLEDevice\{000001bf-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{000001bf-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{000001bf-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{000001bf-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&001d   Service=UmPass
+      HardwareID     BTHLEDevice\{00001800-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{00001800-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{00001800-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{00001800-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&0001   Service=UmPass
+      HardwareID     BTHLEDevice\{00001801-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{00001801-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{00001801-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{00001801-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&003a   Service=UmPass
+      HardwareID     BTHLEDevice\{0000180a-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{0000180a-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{0000180a-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{0000180a-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&002e   Service=UmPass
+      HardwareID     BTHLEDevice\{0000180f-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{0000180f-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{0000180f-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{0000180f-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&0055   Service=mshidumdf
+      HardwareID     BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&0804   Service=UmPass
+      HardwareID     BTHLEDevice\{0000fe59-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{0000fe59-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{0000fe59-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{0000fe59-0000-1000-8000-00805f9b34fb}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&0500   Service=UmPass
+      HardwareID     BTHLEDevice\{8a7a0001-2c42-c2a2-0f36-41928c259b78}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{8a7a0001-2c42-c2a2-0f36-41928c259b78}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{8a7a0001-2c42-c2a2-0f36-41928c259b78}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{8a7a0001-2c42-c2a2-0f36-41928c259b78}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+  实例 8&14b2359b&b&0300   Service=UmPass
+      HardwareID     BTHLEDevice\{ab5e0001-5a21-4f05-bc7d-af01f617b664}_Dev_VID&012717_PID&32b8_REV&00a4
+      HardwareID     BTHLEDevice\{ab5e0001-5a21-4f05-bc7d-af01f617b664}_Dev_VID&012717_PID&32b8
+      HardwareID     BTHLEDevice\{ab5e0001-5a21-4f05-bc7d-af01f617b664}_LOCALMFG&0002
+      CompatibleIDs  BTHLEDevice\{ab5e0001-5a21-4f05-bc7d-af01f617b664}
+      CompatibleIDs  BTHLEDevice\GenericATTService
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+      [前缀] BTHLEDevice\ ...  (与 INF 匹配串不同前缀)
+
+### 树 HID
+  实例 9&1748ac9e&0&0000   Service=kbdhid
+      HardwareID     HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4  <<<< 命中目标串
+      HardwareID     HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      HardwareID     HID\{00001812-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+      HardwareID     HID\VID_2717&UP:0001_U:0006
+      HardwareID     HID_DEVICE_SYSTEM_KEYBOARD
+      HardwareID     HID_DEVICE_UP:0001_U:0006
+      HardwareID     HID_DEVICE
+      CompatibleIDs  
+      [前缀] HID\ ...  (与 INF 匹配串同前缀)
+      [前缀] HID\ ...  (与 INF 匹配串同前缀)
+      [前缀] HID\ ...  (与 INF 匹配串同前缀)
+      [前缀] HID\ ...  (与 INF 匹配串同前缀)
+
+======================================================================
+### 结论
+
+RemoteMapper 的 INF 第 24 行与 install-driver.ps1 第 6 行使用的匹配串：
+    HID\{00001812-...}_Dev_VID&012717_PID&32b8_REV&00a4
+而本机该设备父节点实际 HardwareID 首项：
+    BTHLEDevice\{00001812-...}_Dev_VID&012717_PID&32b8_REV&00a4
+
+两串前缀不同（HID\ vs BTHLEDevice\）。若本机所有节点的
+HardwareID/CompatibleIDs 都不含带 HID\ 前缀的那一串，
+则 install-driver.ps1 会抛 not present —— 该 blocker 必须在下发前解决。

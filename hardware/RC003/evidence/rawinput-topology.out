@@ -1,0 +1,21 @@
+=== 1. HKLM\SYSTEM\CurrentControlSet\Enum\HID 下与 VID_2717 / PID_32B8 匹配的实例 ===
+HID 类下顶层子键数: 21
+匹配 VID+PID 的顶层键: ['{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>']
+
+顶层键 {00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR> -> 1 个实例
+  实例: 9&1748ac9e&0&0000
+    Service     = kbdhid
+    ClassGUID   = {4d36e96b-e325-11ce-bfc1-08002be10318}
+    Driver      = {4d36e96b-e325-11ce-bfc1-08002be10318}\0004
+    Mfg         = @keyboard.inf,%std-keyboards%;(Standard keyboards)
+    DeviceDesc  = @keyboard.inf,%hid.keyboarddevice%;HID Keyboard Device
+
+=== 2. 全 HID 类下 Service=kbdhid 的实例（键盘类驱动，不分 VID）===
+  VID_045E&PID_07FD&MI_00\7&67e8f95&0&0000
+  {00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col05\8&d669d5&1&0004
+  {00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&1748ac9e&0&0000
+
+=== 3. 该设备在 Enum\USB / Enum\BTHENUM 下是否另有实例 ===
+  SYSTEM\CurrentControlSet\Enum\USB              子键 24, 匹配 []
+  SYSTEM\CurrentControlSet\Enum\BTHENUM          子键 4, 匹配 []
+  SYSTEM\CurrentControlSet\Enum\BTHLE            子键 2, 匹配 []

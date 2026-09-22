@@ -1,0 +1,49 @@
+日志: <PROBE-DIR>\e1-capture3.log
+大小: 30879 bytes, 行数: 121
+
+=== 1. 会话边界 ===
+  2026-09-22T09:51:53.426Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=process_start phase=sta
+  2026-09-22T09:51:53.427Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=single_instance phase=c
+  2026-09-22T09:51:58.127Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input_listener action=start phase=reque
+  2026-09-22T09:51:58.172Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input_listener action=start phase=compl
+
+=== 2. HID 相关行逐模式计数 ===
+  hid_report_seen              0
+  hid_usage_seen               0
+  hid_usage_unmapped           0
+  hid_report_shape_unmapped    0
+  任何 hid_ 前缀的 note             0
+  decode/decode_report 相关      0
+  RIM_TYPEHID / 类型 2 字样        0
+
+=== 3. 键盘通道证据（map_edges / map_fire / raw_input）===
+  map_edges 行数: 18
+  map_fire  行数: 1
+
+  --- 去重后的按键（从 map_edges 抽 button=）---
+
+  --- map_fire 明细 ---
+    2026-09-22T09:53:04.174Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown map_fire button=Tv trigger=Single action=op
+
+=== 4. 监听器就绪 / 绑定证据 ===
+  [raw_input_listener] 2 条
+      2026-09-22T09:51:58.127Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input_listener action=start phase=requested
+      2026-09-22T09:51:58.172Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input_listener action=start phase=completed termi
+  [binding_initial] 1 条
+      2026-09-22T09:51:58.171Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input binding_initial selected_path=\\?\hid#{0000
+  [matched_device_count] 3 条
+      2026-09-22T09:51:58.171Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input binding_initial selected_path=\\?\hid#{0000
+      2026-09-22T09:51:58.172Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input device_change action=device_arrived phase=r
+      2026-09-22T09:51:58.172Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown raw_input_listener action=start phase=completed termi
+
+=== 5. 构建指纹（确认跑的是哪个二进制）===
+  2026-09-22T09:51:53.426Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=process_start phase=started result=passed d
+  2026-09-22T09:51:53.426Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=process_start phase=started result=passed d
+  2026-09-22T09:51:53.426Z pid=3124 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=process_start phase=started result=passed d
+
+
+=== 6. 终审结论 ===
+  HID 四类采集行合计: 0
+  键盘通道按键种类: 0
+  按键边沿总条数: 18
+  => 终审 passed：HID 通道零报文，键盘通道有事件。结论与 §7.4 一致。
