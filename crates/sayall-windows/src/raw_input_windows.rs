@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
@@ -574,6 +574,29 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+/// 遥控器 HID 接口重新出现的通知回调（lib.rs 接线到
+/// `BleRuntime::notify_remote_device_arrived`）。
+///
+/// 存在的理由：`GIDC_ARRIVAL` 是本机能拿到的最早、最可靠的"遥控器已回到
+/// 无线电上"信号。2026-09-22 实测 6 个唤醒后故障 episode 的恢复时刻**全部**
+/// 紧跟 `device_arrived`（05:14:26/27/28/43 arrived → 05:15:05 连接成功；
+/// 01:19:38 arrived → 01:19:39 成功），而此前 ble 侧只能等退避到期才重试，
+/// 最长空转一个退避周期（30s）。
+///
+/// 这是纯增益信号：它只把重连**提前**，从不延后或门控任何已排定的重连。
+static DEVICE_ARRIVED_NOTIFY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// 注册遥控器 HID 接口出现回调（lib.rs 启动时接线；重复注册保持首个）。
+pub(crate) fn set_device_arrived_notify(callback: Box<dyn Fn() + Send + Sync>) {
+    let _ = DEVICE_ARRIVED_NOTIFY.set(callback);
+}
+
+fn notify_device_arrived() {
+    if let Some(callback) = DEVICE_ARRIVED_NOTIFY.get() {
+        callback();
+    }
+}
+
 fn handle_device_change(handle: HRAWINPUT, event: u32) {
     let device_path = match get_device_name(windows::Win32::Foundation::HANDLE(handle.0)) {
         Ok(path) => normalize_device_path(&path),
@@ -609,6 +632,11 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                     ));
                     // 重新绑定到唯一设备后，门控重新具备归因来源。
                     key_gate::set_listener_active(true);
+                    // 遥控器 HID 接口已回到无线电上：通知 ble 立即重试，
+                    // 不必等退避到期（只提前，不延后/不门控）。
+                    // 只在确实绑定到遥控器时发出——`paths` 已由
+                    // `enumerate_matching_device_paths` 过滤为匹配设备。
+                    notify_device_arrived();
                 } else if was_unbound && is_remote {
                     // 此前未绑定、遥控器接口已出现但暂未选出唯一路径：保持等待。
                     let mut state = context.snapshot.lock().unwrap();
