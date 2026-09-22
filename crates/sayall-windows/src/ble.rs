@@ -1446,6 +1446,41 @@ fn advance_reconnect(
     true
 }
 
+/// `ThroughputOptimized` 连接参数请求的两层失败（P1-1，2026-09-22）。
+///
+/// 此前两层共用**同一行**日志，分不出是哪一层：
+/// - `BluetoothLEPreferredConnectionParameters::ThroughputOptimized()` 构造
+///   失败 —— 宿主低于 Windows 11 22000，属**常态**，重试无意义；
+/// - `RequestPreferredConnectionParameters` 调用失败 —— API 可用但被拒，
+///   这才是需要换路径（连接后延迟申请 / UI 线程申请）的信号。
+///
+/// 本机实测（2026-09-22）：Windows 10 Pro build 19041，`>= 22000` 为假，
+/// 所以日志里每次都出现的 `conn_params result=unavailable` **是版本门禁所致**，
+/// 不是 MTA 线程也不是设备限制。连带结论：09-07 那次"送达率 52%→98%"
+/// 不可能来自这条优化——它从未生效过，需重新归因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnParamsFailure {
+    /// 构造失败：宿主不满足 Windows 11 22000+。
+    Unsupported { build: u32 },
+    /// 构造成功但请求被拒：API 可用，需另行排查。
+    RequestFailed { hresult: u32 },
+}
+
+/// 两层失败各自的日志行。区分要点：
+/// - `os_build` / `requires_build`：让日志**自证**版本，下次不必再向用户追问；
+/// - `hresult`：请求被拒时保留原始错误码（09-17 起的 HRESULT 保真手法）；
+/// - `retryable`：版本不足重试无意义（false），API 被拒可重试（true）。
+fn conn_params_failure_note(failure: ConnParamsFailure) -> String {
+    match failure {
+        ConnParamsFailure::Unsupported { build } => format!(
+            "conn_params result=unavailable error_domain=bluetooth error_code=unsupported_os reason=throughput_optimized_unsupported os_build={build} requires_build=22000 retryable=false mode=throughput_optimized"
+        ),
+        ConnParamsFailure::RequestFailed { hresult } => format!(
+            "conn_params result=unavailable error_domain=bluetooth error_code=request_failed reason=request_failed hresult=0x{hresult:08X} retryable=true mode=throughput_optimized"
+        ),
+    }
+}
+
 fn handle_control(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
@@ -2011,17 +2046,22 @@ impl BleSession {
                     gatt_note("conn_params result=ok mode=throughput_optimized".to_owned());
                     Some(request)
                 }
-                Err(_) => {
-                    gatt_note(
-                        "conn_params result=unavailable error_domain=bluetooth error_code=request_failed reason=connection_parameter_api_failed retryable=true mode=throughput_optimized".to_owned(),
-                    );
+                Err(error) => {
+                    // 第二层：构造成功、请求被拒。落 HRESULT 以便定位是谁拒绝
+                    // （此前 `Err(_)` 直接丢弃，只剩一句无法归因的话）。
+                    gatt_note(conn_params_failure_note(ConnParamsFailure::RequestFailed {
+                        hresult: error.code().0 as u32,
+                    }));
                     None
                 }
             },
             Err(_) => {
-                gatt_note(
-                    "conn_params result=unavailable error_domain=bluetooth error_code=request_failed reason=connection_parameter_api_failed retryable=true mode=throughput_optimized".to_owned(),
-                );
+                // 第一层：版本门禁。落 os_build 让日志自证——本次排查就因为
+                // 日志里没有版本信息，不得不专门去查了一次系统版本。
+                let build = windows_version::OsVersion::current().build;
+                gatt_note(conn_params_failure_note(ConnParamsFailure::Unsupported {
+                    build,
+                }));
                 None
             }
         };
@@ -3365,5 +3405,38 @@ mod tests {
         );
         assert!(advanced);
         assert!(deadline_past.unwrap() <= Instant::now());
+    }
+
+    #[test]
+    fn conn_params_failures_are_distinguishable_in_logs() {
+        // P1-1：两层失败此前共用同一行日志，拿到日志也分不出是版本门禁
+        // 还是 API 被拒——而这两种情况的处置完全不同（前者无解、后者可换路径）。
+        let unsupported = conn_params_failure_note(ConnParamsFailure::Unsupported { build: 19041 });
+        let request_failed = conn_params_failure_note(ConnParamsFailure::RequestFailed {
+            hresult: 0x8007_0008,
+        });
+
+        assert_ne!(unsupported, request_failed, "两层失败必须落到不同的日志行");
+
+        // 版本门禁：日志自证版本，且重试无意义。
+        assert!(unsupported.contains("os_build=19041"));
+        assert!(unsupported.contains("requires_build=22000"));
+        assert!(unsupported.contains("reason=throughput_optimized_unsupported"));
+        assert!(
+            unsupported.contains("retryable=false"),
+            "版本不足时重试没有意义：{unsupported}"
+        );
+        // API 被拒：带 HRESULT 以便定位，且可重试。
+        assert!(request_failed.contains("hresult=0x80070008"));
+        assert!(request_failed.contains("reason=request_failed"));
+        assert!(request_failed.contains("retryable=true"));
+
+        // 旧的那句无法归因的原因串不应再出现在任何一层。
+        for note in [&unsupported, &request_failed] {
+            assert!(
+                !note.contains("connection_parameter_api_failed"),
+                "旧的无区分原因串不应再出现：{note}"
+            );
+        }
     }
 }
