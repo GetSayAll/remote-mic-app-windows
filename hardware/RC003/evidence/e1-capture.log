@@ -1,0 +1,2 @@
+2026-09-22T09:49:36.982Z pid=15272 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=process_start phase=started result=passed diagnostic_schema=1 process_architecture=x86_64 windows_version=unknown windows_build=unknown
+2026-09-22T09:49:36.983Z pid=15272 ver=0.2.6 build=unknown source_revision=2d949f417b7f54cd79248097a0ab687299fbdb7d build_channel=unknown release_tag=unknown app_lifecycle event=single_instance phase=completed terminal_result=passed

@@ -1,0 +1,7 @@
+exe      : <USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windows\origin-main-01fa85f8\target\debug\sayall-windows-app.exe
+size     : 25403392
+built    : 2026-09-22 17:48:54.368400
+log path : <PROBE-DIR>\e1-capture.log
+free GB  : 6.625
+launched pid = 15272
+已启动。请按压遥控器实体键（TV / 主页 / 菜单 / 返回 / 音量± / 语音 / 确定 / 方向）。

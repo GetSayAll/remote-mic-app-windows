@@ -1,0 +1,13 @@
+﻿=== sayall process ===
+=== RC003 HID devices present? ===
+=== any VID_2717 ===
+=== bluetooth connected ===
+
+FriendlyName                   Status
+------------                   ------
+设备标识服务                         OK    
+蓝牙 HID 设备                      OK    
+Bluetooth Mouse M336/M337/M535 OK    
+服务发现服务                         OK    
+
+

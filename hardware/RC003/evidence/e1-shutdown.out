@@ -1,0 +1,14 @@
+Get-Process 原始输出: '{"Id":3124,"WorkingSet64":53510144,"StartTime":"\\/Date(1790070713084)\\/"}'
+存活实例数: 1
+  pid=3124 ws=51MB start=/Date(1790070713084)/
+
+属于采集实例的顶层窗口: 5
+  hwnd=0x0BD80386 pid=3124 visible=True class='Tauri Window' title='无线麦 SayAll'
+  hwnd=0x003704EA pid=3124 visible=False class='tray_icon_app' title=''
+  hwnd=0x1E070698 pid=3124 visible=True class='Tao Thread Event Target' title=''
+  hwnd=0x01DE05E4 pid=3124 visible=False class='MSCTFIME UI' title='MSCTFIME UI'
+  hwnd=0x01B60604 pid=3124 visible=False class='IME' title='Default IME'
+
+PostMessage WM_CLOSE -> hwnd=0x0BD80386 title='无线麦 SayAll' ret=1
+
+3 秒后存活实例数: 1

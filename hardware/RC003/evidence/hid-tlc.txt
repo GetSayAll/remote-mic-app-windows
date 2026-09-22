@@ -1,0 +1,21 @@
+﻿=== subkeys of HID enum key ===
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&1748ac9e&0&0000
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&1748ac9e&0&0000\Device Parameters
+
+=== Device Parameters ===
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&1748ac9e&0&0000\Device Parameters
+
+=== all values under each subkey ===
+--- HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&1748ac9e&0&0000
+    Capabilities = 160
+    Address = 1
+    ContainerID = {51e99db4-cb97-5cef-99f0-5778db02368d}
+    HardwareID = HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4 HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8 HID\{00001812-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002 HID\VID_2717&UP:0001_U:0006 HID_DEVICE_SYSTEM_KEYBOARD HID_DEVICE_UP:0001_U:0006 HID_DEVICE
+    CompatibleIDs = 
+    ClassGUID = {4d36e96b-e325-11ce-bfc1-08002be10318}
+    Service = kbdhid
+    DeviceDesc = @keyboard.inf,%hid.keyboarddevice%;HID Keyboard Device
+    Driver = {4d36e96b-e325-11ce-bfc1-08002be10318}\0004
+    Mfg = @keyboard.inf,%std-keyboards%;(Standard keyboards)
+    ConfigFlags = 0
+--- HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&1748ac9e&0&0000\Device Parameters

@@ -1,0 +1,75 @@
+cargo = <USER-HOME>\.cargo\bin\cargo.exe
+exists = True
+=== cargo fmt --check : exit=0 ===
+
+
+=== cargo check -p sayall-windows : exit=0 ===
+
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+    Checking windows-link v0.2.1
+    Checking windows-result v0.4.1
+    Checking windows-strings v0.5.1
+   Compiling autocfg v1.5.1
+    Checking futures-core v0.3.34
+    Checking futures-sink v0.3.34
+   Compiling num-traits v0.2.19
+   Compiling serde_core v1.0.229
+   Compiling thiserror v2.0.20
+    Checking futures-channel v0.3.34
+    Checking windows-threading v0.2.1
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+    Checking memchr v2.8.3
+    Checking slab v0.4.12
+    Checking pin-project-lite v0.2.17
+    Checking futures-io v0.3.34
+    Checking futures-task v0.3.34
+   Compiling serde v1.0.229
+    Checking num-integer v0.1.47
+    Checking log v0.4.34
+    Checking windows-version v0.1.7
+   Compiling windows-interface v0.59.3
+   Compiling windows-implement v0.60.2
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+   Compiling serde_derive v1.0.229
+    Checking windows-core v0.62.2
+    Checking futures-util v0.3.34
+    Checking windows-numerics v0.3.1
+    Checking windows-future v0.3.2
+    Checking windows-collections v0.3.2
+    Checking windows v0.62.2
+    Checking futures-executor v0.3.34
+    Checking futures v0.3.34
+    Checking sayall-core v0.2.6 (<USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windows\origin-main-01fa85f8\crates\sayall-core)
+    Checking wasapi v0.24.0
+    Checking sayall-windows v0.2.6 (<USER-HOME>\WorkBuddy\Worktrees\remote-mic-app-windows\origin-main-01fa85f8\crates\sayall-windows)
+warning: unused variable: `spawned`
+   --> crates\sayall-windows\src\ime.rs:150:9
+    |
+150 |     let spawned = std::thread::Builder::new()
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_spawned`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `set_session_active` is never used
+   --> crates\sayall-windows\src\key_suppressor.rs:297:16
+    |
+280 |     impl VoiceKeySuppressor {
+    |     ----------------------- method in this implementation
+...
+297 |         pub fn set_session_active(&self, active: bool) {
+    |                ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `set_device_arrived_notify` is never used
+   --> crates\sayall-windows\src\raw_input_windows.rs:620:15
+    |
+620 | pub(crate) fn set_device_arrived_notify(callback: Box<dyn Fn() + Send + Sync>) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `sayall-windows` (lib) generated 3 warnings (run `cargo fix --lib -p sayall-windows` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 43s

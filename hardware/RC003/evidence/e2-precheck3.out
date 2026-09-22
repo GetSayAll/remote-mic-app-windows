@@ -1,0 +1,37 @@
+E2-1 前置核查（注册表直读版）
+==================================================================
+
+目标 HardwareID: HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+
+=== A. RC003 父节点（HIDClass / mshidumdf）===
+  instance   : 8&14b2359b&b&0055
+  ClassGUID  : {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+  Service    : mshidumdf
+  LowerFilters: WUDFRd
+  HardwareID :
+      BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4
+      BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8
+      BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_LOCALMFG&0002
+  => 含目标 HardwareID: 否（会抛 not present）
+
+=== B. RC003 子节点（Keyboard / kbdhid）===
+  instance : 9&1748ac9e&0&0000
+  Service  : kbdhid
+  ClassGUID: {4d36e96b-e325-11ce-bfc1-08002be10318}
+
+=== C. 当前系统状态汇总 ===
+  driver store 有 MiRemoteHidFilter : 否（见 e2-precheck.out 第 5 项）
+  信任库有 RemoteMapper 证书       : 否（见 e2-precheck.out 第 6 项）
+  SystemStartOptions               : NOEXECUTE=OPTIN  NOVGA  -> 无 TESTSIGNING
+  本机                              : Windows 10 专业版 19041
+  当前会话管理员                    : 否
+
+=== D. E2-1 可行性与缺口 ===
+  [1] Secure Boot = 0（已关）        -> prepare-test-mode 的前置满足
+  [2] TESTSIGNING 未开               -> 需要 prepare-test-mode 开启
+  [3] 目标设备父节点存在            -> install-driver 的前置满足（见 A）
+  [4] 未装过驱动 / 未信任证书        -> 无残留，起点干净
+  [5] **当前会话不是管理员**          -> 无法执行 prepare/install/restore，需提权
+  [6] 现成 package 齐全（.sys/.inf/.cat/.cer）-> 无需 WDK 构建（但 WDK 已存在，可自建）
+
+  => E2-1 的全部前置条件已满足，唯一阻塞 = 需要管理员权限 + 一次重启 + 关 Secure Boot 的确认

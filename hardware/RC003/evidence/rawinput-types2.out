@@ -1,0 +1,36 @@
+sizeof(RAWINPUTDEVICELIST) = 16
+GetRawInputDeviceList(size query) -> 0  count=13
+GetRawInputDeviceList(fill) -> 13 (期望 == 13)
+
+总设备数: 13
+
+=== 全部 Raw Input 设备 ===
+idx  type      infoType ok     name
+0    HID       HID      32     \\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&0118d1_PID&9450_REV&0110_<BT-ADDR-OTHER>#9&13885af6&0&0000#{4d1e55b2
+1    KEYBOARD  KEYBOARD 32     \\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col05#8&d669d5&1&0004#{884b96c3-56ef-11d1-bc8c-00a0
+2    MOUSE     MOUSE    32     \\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col01#8&d669d5&1&0000#{378de44c-56ef-11d1-bc8c-00a0
+3    HID       HID      32     \\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col06#8&d669d5&1&0005#{4d1e55b2-f16f-11cf-88cb-0011
+4    HID       HID      32     \\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col04#8&d669d5&1&0003#{4d1e55b2-f16f-11cf-88cb-0011
+5    HID       HID      32     \\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col03#8&d669d5&1&0002#{4d1e55b2-f16f-11cf-88cb-0011
+6    HID       HID      32     \\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b016&Col02#8&d669d5&1&0001#{4d1e55b2-f16f-11cf-88cb-0011
+7    KEYBOARD  KEYBOARD 32     \\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>#9&1748ac9e&0&0000#{884b96c3
+8    ?3        MOUSE    32     \\?\HID#ELAN2301&Col04#5&16bb76b4&0&0003#{4d1e55b2-f16f-11cf-88cb-001111000030}
+9    HID       HID      32     \\?\HID#ELAN2301&Col03#5&16bb76b4&0&0002#{4d1e55b2-f16f-11cf-88cb-001111000030}
+10   HID       HID      32     \\?\HID#ELAN2301&Col02#5&16bb76b4&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}
+11   KEYBOARD  KEYBOARD 32     \\?\ACPI#TIMI1601#4&3896fa66&0#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}
+12   MOUSE     MOUSE    32     \\?\HID#ELAN2301&Col01#5&16bb76b4&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}
+
+=== 目标设备（名字含 2717）===
+  list_dtype  : 1 (KEYBOARD)
+  info.dwType : 1 (KEYBOARD)
+  ilen         : 32
+  name         : \\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>#9&1748ac9e&0&0000#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}
+  [HID 视图] usage_page=0x000C usage=0x0000 vid=0x0051 pid=0x0000
+  [KB 视图]  subType=0 keysTotal=1023 funcKeys=12
+  [原始字节] 20 00 00 00 01 00 00 00 51 00 00 00 00 00 00 00 01 00 00 00 0C 00 00 00 03 00 00 00 FF 03 00 00
+
+=== 类型分布（按列表 dwType）===
+  ?3         1
+  HID        7
+  KEYBOARD   3
+  MOUSE      2
