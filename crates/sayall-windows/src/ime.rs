@@ -147,7 +147,7 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
 /// 返回结果描述（用于日志）：切换用的临时输入法 CLSID 与两步激活结果。
 pub fn cycle_wetype_profile() -> Result<String, String> {
     let (sender, receiver) = mpsc::channel();
-    let spawned = std::thread::Builder::new()
+    let _spawned = std::thread::Builder::new()
         .name("sayall-ime-cycle".to_owned())
         .spawn(move || {
             let outcome = sta_cycle_wetype_profile();

@@ -804,6 +804,22 @@ pub enum PlatformError {
     VoiceCharacteristicMissing(&'static str),
     #[error("Xiaomi voice remote GATT operation failed: {0}")]
     Gatt(String),
+    /// GATT 状态类失败的细分变体（2026-09-22，P0-1）。
+    ///
+    /// `GattCommunicationStatus` 的 Unreachable/ProtocolError/AccessDenied
+    /// 是三个不同的故障层：遥控器不在线（可自愈）、链路在但协议出错、
+    /// 以及系统拒绝了访问（需要用户动作）。此前全部压成 `Gatt(String)`，
+    /// 结构化日志里无法区分，用户报障只能靠肉眼读原文。
+    ///
+    /// 这三个变体只在 crate 内部流转；跨 crate 边界前统一由
+    /// `as_public_gatt_error` 归并回 `Gatt(String)`，因此
+    /// `sayall-core` 与前端看到的形状与升级前完全一致。
+    #[error("Xiaomi voice remote GATT operation failed: {0}")]
+    GattUnreachable(String),
+    #[error("Xiaomi voice remote GATT operation failed: {0}")]
+    GattProtocolError(String),
+    #[error("Xiaomi voice remote GATT operation failed: {0}")]
+    GattAccessDenied(String),
     #[error("ATVV protocol failed: {0}")]
     Protocol(String),
     #[error("WASAPI audio worker is unavailable")]
@@ -828,6 +844,22 @@ pub enum PlatformError {
     RawInput(String),
     #[error("SendInput failed: {0}")]
     SendInput(String),
+}
+
+impl PlatformError {
+    /// 归并回公开的 `Gatt(String)` 形状（2026-09-22，P0-1）。
+    ///
+    /// 跨 crate 边界的调用方（`src-tauri` 转发给前端）只认 `Gatt(String)`；
+    /// `GattUnreachable` / `GattProtocolError` / `GattAccessDenied` 这些
+    /// 细分变体是 crate 内部的诊断手段，出界前必须收敛，否则前端契约会漂移。
+    pub fn into_public(self) -> Self {
+        match self {
+            Self::GattUnreachable(message)
+            | Self::GattProtocolError(message)
+            | Self::GattAccessDenied(message) => Self::Gatt(message),
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
