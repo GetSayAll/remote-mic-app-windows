@@ -309,6 +309,13 @@ impl Default for WindowsPlatform {
             key_suppressor::set_remote_hid_activity_notify(Box::new(move || {
                 wake_runtime.wake_reconnect();
             }));
+            // 遥控器 HID 接口重新出现接线（PnP `GIDC_ARRIVAL` → 立即重连）。
+            // 与上面按键触发同源同理，但更早：设备一上线就重试，不必等
+            // 用户先按一下，也不必等退避到期。
+            let arrived_runtime = Arc::clone(&runtime);
+            raw_input_windows::set_device_arrived_notify(Box::new(move || {
+                arrived_runtime.notify_remote_device_arrived();
+            }));
             Self {
                 usage,
                 voice_hold_hotkey,

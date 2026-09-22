@@ -120,6 +120,20 @@ impl BleRuntime {
         let _ = self.sender.send(WorkerMessage::WakeReconnect);
     }
 
+    /// 遥控器 HID 接口在 PnP 中重新出现触发的立即重连（`WM_INPUT_DEVICE_CHANGE`
+    /// / `GIDC_ARRIVAL`，由 raw_input 消息线程调用；尽力而为，队列满即丢弃）。
+    ///
+    /// 与 `wake_reconnect` 同源同理——HID 侧先于 GATT 可达（2026-09-22 实测：
+    /// 6 个唤醒后故障 episode 的恢复时刻都紧跟 `device_arrived`，
+    /// 05:14:26/27/28/43 arrived → 05:15:05 连接成功；01:19:38 arrived →
+    /// 01:19:39 成功）。此前只能等退避到期才重试，最长空转一个退避周期（30s）。
+    ///
+    /// 只"提前"、不"门控"：本信号缺失时重连行为与改造前完全一致，仍照常
+    /// 退避重连（用户侧零介入）。
+    pub fn notify_remote_device_arrived(&self) {
+        let _ = self.sender.send(WorkerMessage::RemoteDeviceArrived);
+    }
+
     /// 退出前的优雅关闭（2026-09-16）：请求工作线程关闭会话，并在**有界时间**内
     /// 等待其完成（`ble_session_cleanup` 落盘）后才返回。
     ///
@@ -219,6 +233,13 @@ pub(crate) enum WorkerMessage {
     /// （30s）压到立即（2026-09-05 实证：遥控器沉睡 52 分钟后首按，
     /// GATT 重连耗 3 秒，期间按键全部无响应）。
     WakeReconnect,
+    /// 遥控器 HID 接口重新出现（raw_input 消息线程的 `GIDC_ARRIVAL`）：
+    /// 与 `WakeReconnect` 共用同一套提前重连判定——设备一回到无线电上
+    /// 就立即重试，把"遥控器上线 → 应用重连"的空窗从最长一个退避周期
+    /// （30s）压到立即。
+    ///
+    /// 只提前、不门控：本信号缺失时重连行为与改造前完全一致。
+    RemoteDeviceArrived,
     BatteryRead {
         connection_generation: u64,
         reading: crate::battery::BatteryReading,
@@ -652,23 +673,28 @@ fn worker_loop(
             WorkerMessage::WakeReconnect => {
                 // 遥控器 HID 活动（正在按键）：仅当无活动会话、有首选设备、
                 // 未挂起时立即重试连接；清零退避让下一次尝试马上发生。
-                if session.is_none()
-                    && preferred_device_id.is_some()
-                    && !system_suspended
-                    && reconnect_deadline.is_some()
-                {
-                    gatt_note("wake_reconnect triggered=hidi backoff_reset=true".to_owned());
-                    backoff.reset();
-                    reconnect_deadline = Some(Instant::now());
-                    let mut snapshot = lock(&state);
-                    if snapshot.phase == ConnectionPhase::Reconnecting {
-                        snapshot.reconnect_attempt = 0;
-                    }
-                    // 注：不在此处做 WeType 预热点火（曾基于"钩子休眠"假设
-                    // 加入，2026-09-05 晚证伪：首按失败实为 20ms 和弦间隔
-                    // 回归（cef24d3），已回退 80ms；且唤醒瞬间 cycle 存在和弦
-                    // 撞上配置切换重绑窗口的自伤风险，已移除）。
-                }
+                advance_reconnect(
+                    &session,
+                    &preferred_device_id,
+                    system_suspended,
+                    &mut backoff,
+                    &mut reconnect_deadline,
+                    &state,
+                    "hidi",
+                );
+            }
+            WorkerMessage::RemoteDeviceArrived => {
+                // 遥控器 HID 接口重新出现：判定与 `WakeReconnect` 完全一致——
+                // 两者都是"HID 侧先于 GATT 可达"的上线前兆，区别只在日志来源。
+                advance_reconnect(
+                    &session,
+                    &preferred_device_id,
+                    system_suspended,
+                    &mut backoff,
+                    &mut reconnect_deadline,
+                    &state,
+                    "device_arrived",
+                );
             }
             WorkerMessage::RetryVoiceChord {
                 attempt,
@@ -1361,6 +1387,63 @@ fn schedule_reconnect(
         "{reason}；将在 {} 秒后进行第 {attempt} 次重连",
         delay.as_secs()
     ));
+}
+
+/// 是否应当把下一次重连**立即提前**（纯判定）。
+///
+/// 抽成纯函数是因为 worker 循环本身无法在单测里驱动，而这条判定是
+/// `WakeReconnect`（用户按键）与 `RemoteDeviceArrived`（HID 接口出现）
+/// 共用的唯一分岔点——两种触发源的语义完全一致，若各自内联，改一处
+/// 漏一处就会让"设备上线立即重连"在某个路径上静默失效。
+fn should_advance_reconnect(
+    session: &Option<BleSession>,
+    preferred_device_id: &Option<String>,
+    system_suspended: bool,
+    reconnect_deadline: Option<Instant>,
+) -> bool {
+    // 有活动会话（已连接）→ 无需重连；无首选设备 → 无处可连；
+    // 挂起中 → 恢复时另有 `SystemResumed` 处理；无 deadline → 不在重连等待中。
+    session.is_none()
+        && preferred_device_id.is_some()
+        && !system_suspended
+        && reconnect_deadline.is_some()
+}
+
+/// 执行"提前重连"：清零退避并把 deadline 拉到当下。返回是否真的提前了。
+///
+/// 只提前、不新增等待：本函数从不延后任何已排定的重连，因此不可能降低
+/// 成功率（AGENTS.md 2026-09-05 晚要求"延迟优化不得降低成功率"）。
+fn advance_reconnect(
+    session: &Option<BleSession>,
+    preferred_device_id: &Option<String>,
+    system_suspended: bool,
+    backoff: &mut ReconnectBackoff,
+    reconnect_deadline: &mut Option<Instant>,
+    state: &Arc<Mutex<ConnectionSnapshot>>,
+    reason: &str,
+) -> bool {
+    if !should_advance_reconnect(
+        session,
+        preferred_device_id,
+        system_suspended,
+        *reconnect_deadline,
+    ) {
+        return false;
+    }
+    gatt_note(format!(
+        "wake_reconnect triggered={reason} backoff_reset=true"
+    ));
+    backoff.reset();
+    *reconnect_deadline = Some(Instant::now());
+    let mut snapshot = lock(state);
+    if snapshot.phase == ConnectionPhase::Reconnecting {
+        snapshot.reconnect_attempt = 0;
+    }
+    // 注：不在此处做 WeType 预热点火（曾基于"钩子休眠"假设加入，
+    // 2026-09-05 晚证伪：首按失败实为 20ms 和弦间隔回归（cef24d3），
+    // 已回退 80ms；且唤醒瞬间 cycle 存在和弦撞上配置切换重绑窗口的
+    // 自伤风险，已移除）。
+    true
 }
 
 fn handle_control(
@@ -3208,5 +3291,79 @@ mod tests {
         );
         assert_eq!(deadline2, None);
         assert_eq!(lock(&state).phase, ConnectionPhase::Failed);
+    }
+
+    #[test]
+    fn device_arrival_advances_only_an_already_pending_reconnect() {
+        // P0-3：遥控器上线信号只能把**已排定**的重连提前，绝不能凭空发起
+        // 一次连接——没有首选设备时无处可连，挂起中另有 `SystemResumed`。
+        let no_session: Option<BleSession> = None;
+        let preferred = Some("device-id".to_owned());
+        let deadline = Some(Instant::now() + Duration::from_secs(30));
+
+        assert!(should_advance_reconnect(
+            &no_session,
+            &preferred,
+            false,
+            deadline
+        ));
+        assert!(
+            !should_advance_reconnect(&no_session, &None, false, deadline),
+            "无首选设备时不得凭空发起连接"
+        );
+        assert!(
+            !should_advance_reconnect(&no_session, &preferred, true, deadline),
+            "挂起中由 SystemResumed 处理，不在此处重连"
+        );
+        assert!(
+            !should_advance_reconnect(&no_session, &preferred, false, None),
+            "没有排定重连时不得制造一次重连"
+        );
+    }
+
+    #[test]
+    fn advance_reconnect_pulls_the_deadline_forward_and_never_pushes_it_back() {
+        // 核心收益：把"遥控器上线 → 应用重连"的空窗从最长一个退避周期
+        // （30s）压到立即。同时必须保证**只前移、不后移**——
+        // 后者会凭空引入延迟，违反"延迟优化不得降低成功率"。
+        let state = Arc::new(Mutex::new(ConnectionSnapshot {
+            phase: ConnectionPhase::Reconnecting,
+            reconnect_attempt: 7,
+            ..ConnectionSnapshot::default()
+        }));
+        let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
+        let mut deadline = Some(Instant::now() + Duration::from_secs(30));
+
+        let advanced = advance_reconnect(
+            &None,
+            &Some("device-id".to_owned()),
+            false,
+            &mut backoff,
+            &mut deadline,
+            &state,
+            "device_arrived",
+        );
+        assert!(advanced);
+        assert!(
+            deadline.unwrap() <= Instant::now(),
+            "deadline 必须被拉到当下，而不是还差 30 秒"
+        );
+        // 退避清零：下一次若仍失败，不会接着按 30s 累积。
+        assert_eq!(lock(&state).reconnect_attempt, 0);
+
+        // 已到期的 deadline 不会被推后。
+        let past = Instant::now() - Duration::from_secs(1);
+        let mut deadline_past = Some(past);
+        let advanced = advance_reconnect(
+            &None,
+            &Some("device-id".to_owned()),
+            false,
+            &mut backoff,
+            &mut deadline_past,
+            &state,
+            "device_arrived",
+        );
+        assert!(advanced);
+        assert!(deadline_past.unwrap() <= Instant::now());
     }
 }
