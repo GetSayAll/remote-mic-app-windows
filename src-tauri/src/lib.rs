@@ -160,6 +160,9 @@ async fn connect_remote(
         settings.save_selected_remote_id(device_id.clone())?;
         platform
             .connect_remote(device_id)
+            // 跨到前端的错误统一归并回公开的 `Gatt(String)` 形状（2026-09-22）：
+            // 内部细分变体只服务结构化日志与文案分流，前端契约保持不变。
+            .map_err(sayall_windows::PlatformError::into_public)
             .map_err(|error| error.to_string())
     })
     .await
@@ -1285,7 +1288,10 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(device_id) = saved_settings.selected_remote_id {
                 if let Err(error) = platform.restore_remote(device_id) {
-                    eprintln!("恢复已保存的小米语音遥控器失败：{error}");
+                    eprintln!(
+                        "恢复已保存的小米语音遥控器失败：{}",
+                        error.into_public()
+                    );
                 }
             }
 

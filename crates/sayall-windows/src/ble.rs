@@ -398,7 +398,7 @@ fn worker_loop(
                                             &state,
                                             &mut backoff,
                                             &mut reconnect_deadline,
-                                            &error.to_string(),
+                                            &user_facing_connection_error(&error, true),
                                         );
                                         // 僵死链路自动恢复（2026-09-05 真机取证：
                                         // 应用强杀后 OS 侧链路/缓存可能僵死，普通
@@ -584,7 +584,7 @@ fn worker_loop(
                             &state,
                             &mut backoff,
                             &mut reconnect_deadline,
-                            &error.to_string(),
+                            &user_facing_connection_error(error, false),
                         );
                     }
                 }
@@ -872,7 +872,14 @@ fn worker_loop(
                         continue;
                     }
                     if preferred_device_id.is_some() && !system_suspended {
-                        schedule_reconnect(&state, &mut backoff, &mut reconnect_deadline, &error);
+                        // `error` 是回调链里的字符串（GATT 通知读取失败），
+                        // 属于链路异常而非用户可操作事项，统一附"正在自动重试"。
+                        schedule_reconnect(
+                            &state,
+                            &mut backoff,
+                            &mut reconnect_deadline,
+                            &format!("{error}；正在自动重试…"),
+                        );
                     } else {
                         *lock(&state) = failed_snapshot(error);
                         apply_input_connection_phase(ConnectionPhase::Failed);
@@ -1130,6 +1137,12 @@ fn ble_error_code(error: &PlatformError) -> &'static str {
         PlatformError::WindowsApi(_) => "windows_api_failed",
         PlatformError::VoiceServiceMissing => "service_missing",
         PlatformError::VoiceCharacteristicMissing(_) => "characteristic_missing",
+        // 2026-09-22：GATT 状态按语义细分，不再一律压成 gatt_status_failed。
+        // 状态 1（Unreachable，遥控器不在线）与状态 3（AccessDenied，权限层）
+        // 是完全不同的故障层，必须能在日志里区分（P0-1）。
+        PlatformError::GattUnreachable(_) => "gatt_unreachable",
+        PlatformError::GattProtocolError(_) => "gatt_protocol_error",
+        PlatformError::GattAccessDenied(_) => "gatt_access_denied",
         PlatformError::Gatt(_) => "gatt_status_failed",
         PlatformError::Protocol(_) => "protocol_failed",
         PlatformError::BleCleanup(_) => "cleanup_failed",
@@ -1149,8 +1162,16 @@ fn connect_stage<T>(
         "ble_connect_stage phase=requested reconnecting={reconnecting} attempt={attempt} stage={stage}"
     ));
     let result = operation();
+    // `gatt_status=N` 在 GATT 状态类失败时随行落盘（2026-09-22，P0-1）：
+    // 用户报"状态 3"时，直接 grep 数值即可定位，不必再读 raw_error 原文。
+    let gatt_status_suffix = result
+        .as_ref()
+        .err()
+        .and_then(gatt_status_code)
+        .map(|code| format!(" gatt_status={code}"))
+        .unwrap_or_default();
     gatt_note(format!(
-        "ble_connect_stage phase=completed terminal_result={} reconnecting={reconnecting} attempt={attempt} stage={stage} error_domain={} error_code={} retryable={} elapsed_ms={}",
+        "ble_connect_stage phase=completed terminal_result={} reconnecting={reconnecting} attempt={attempt} stage={stage} error_domain={} error_code={} retryable={} elapsed_ms={}{gatt_status_suffix}",
         if result.is_ok() { "passed" } else { "failed" },
         if result.is_ok() { "none" } else { "bluetooth" },
         result.as_ref().err().map(ble_error_code).unwrap_or("none"),
@@ -1171,9 +1192,17 @@ fn connect_stage<T>(
 
 /// 失败的原始文本。平台错误文本只含 WinRT/Win32 错误描述与 HRESULT，
 /// 不含设备身份、路径或用户内容（与 LOGGING.md 隐私红线一致）。
+///
+/// GATT 状态类错误在这里还原成稳定的技术描述：状态分类已由
+/// `error_code` 与 `gatt_status=` 两个结构化字段承载，`raw_error` 只需
+/// 保持历史格式 `{操作}返回状态 {N}`，跨版本对比历史日志的文本匹配才不失效。
 fn raw_error_text(error: &PlatformError) -> String {
     match error {
         PlatformError::WindowsApi(message) => message.clone(),
+        PlatformError::Gatt(message)
+        | PlatformError::GattUnreachable(message)
+        | PlatformError::GattProtocolError(message)
+        | PlatformError::GattAccessDenied(message) => message.clone(),
         other => other.to_string(),
     }
 }
@@ -1223,12 +1252,89 @@ fn keep_reconnecting_after_cleanup_failure(
             state,
             backoff,
             reconnect_deadline,
-            &format!("{error}；旧会话清理失败，将继续重试并再次清理"),
+            // 清理失败必须保留"旧连接没清干净、下次会再清一次"这条诊断——
+            // 它是排查链路残留唯一的一手信息（2026-09-05 修正的初衷）。
+            // 这里显式拼接而不是交给 `user_facing_connection_error` 的通用后缀，
+            // 避免 P0-2 的分流文案把这条信息吞掉。
+            &format!(
+                "{}；旧会话清理失败，将继续重试并再次清理",
+                user_facing_connection_error(error, true)
+            ),
         );
     } else {
         *reconnect_deadline = None;
-        *lock(state) = failed_snapshot(error.to_string());
+        *lock(state) = failed_snapshot(user_facing_connection_error(error, false));
         apply_input_connection_phase(ConnectionPhase::Failed);
+    }
+}
+
+/// 连接失败 → **用户可见文案**（2026-09-22，P0-2）。
+///
+/// 此前 `schedule_reconnect` 直接把 `error.to_string()` 拼进界面：
+///
+/// > `Xiaomi voice remote GATT operation failed: 发现 ATVV 服务返回状态 1；将在 4 秒后进行第 2 次重连`
+///
+/// 这句话对用户不可操作：它把"遥控器睡着了、链路还没起来"说成了
+/// "GATT 操作失败"，用户既不知道要不要动手，也不知道该动什么手；
+/// 状态 3（权限层故障）更是和链路故障共用同一句话。
+///
+/// 分流原则（AGENTS.md 运维与自愈节）：
+/// - **能自愈的必须自愈**，文案只陈述状态并说明应用仍在自动重试，
+///   不得把"重连、重开蓝牙、重启电脑"作为解法推给用户；
+/// - 只有确实需要用户动作的场景（如设备被禁用）才给**可操作指引**，
+///   且必须说明原因与预期效果。
+///
+/// 返回半句话（不含重试计划），由 `schedule_reconnect` 追加
+/// "；将在 N 秒后进行第 N 次重连"。
+fn user_facing_connection_error(error: &PlatformError, reconnecting: bool) -> String {
+    // 按 GATT 状态语义分流。未带分类标记的 `PlatformError::Gatt`
+    // （如"特征不支持 Notify 或 Indicate"）走默认分支，保留技术描述。
+    if let Some(kind) = gatt_status_kind(error) {
+        return match kind {
+            GattStatusKind::Unreachable => {
+                // 实测（2026-09-22）：这类失败集中在系统唤醒后，遥控器尚未回到
+                // 无线电上，链路一通同路径 173ms 即通过。属于可自愈场景，
+                // 文案重点是让用户知道"不用管"。
+                if reconnecting {
+                    "暂时没找到小米语音遥控器（它可能还在休眠），正在自动等待它恢复…".to_owned()
+                } else {
+                    "暂时没有找到小米语音遥控器，正在重试。如果它就在附近，按一下遥控器任意键可以加快唤醒。"
+                        .to_owned()
+                }
+            }
+            GattStatusKind::AccessDenied => {
+                // 权限层故障：与链路无关，自动恢复手段通常无效，需要用户动作。
+                // 本机先例：普通用户 pnputil /restart-device 得「拒绝访问」；
+                // FromIdAsync 在非 UI 线程返回 E_ABORT（Bugs/2026-09-07）。
+                "无法访问小米语音遥控器的蓝牙服务（系统拒绝了访问）。请确认它在 Windows 蓝牙设置中处于已连接且未被禁用，然后应用会自动重试。"
+                    .to_owned()
+            }
+            GattStatusKind::ProtocolError => {
+                "与小米语音遥控器的蓝牙通信出现协议错误，正在自动重试…".to_owned()
+            }
+            GattStatusKind::Unknown | GattStatusKind::Success => {
+                default_connection_error_text(error, reconnecting)
+            }
+        };
+    }
+    default_connection_error_text(error, reconnecting)
+}
+
+/// 非 GATT 状态类失败的兜底文案：保留可读的技术描述，并统一附上
+/// "正在自动重试"的安定信息（用户侧零介入）。
+fn default_connection_error_text(error: &PlatformError, reconnecting: bool) -> String {
+    match error {
+        PlatformError::VoiceServiceMissing | PlatformError::VoiceCharacteristicMissing(_) => {
+            "小米语音遥控器的语音服务不完整。请在应用中断开重连一次遥控器；若仍失败，可能需要在 Windows 设置中移除配对后重新配对。"
+                .to_owned()
+        }
+        PlatformError::OperationTimedOut => {
+            "连接小米语音遥控器的操作超时，正在自动重试…".to_owned()
+        }
+        _ if reconnecting => {
+            format!("{error}；正在自动重试…")
+        }
+        _ => error.to_string(),
     }
 }
 
@@ -1309,7 +1415,9 @@ fn handle_control(
                 if let Err(error) = session
                     .request_microphone_open(capabilities.version, capabilities.selected_codec)
                 {
-                    lock(state).last_error = Some(error.to_string());
+                    // MIC_OPEN 写入走 GATT，可能返回 Unreachable/AccessDenied 等
+                    // 状态码；用户文案同样按语义分流（P0-2）。
+                    lock(state).last_error = Some(user_facing_connection_error(&error, true));
                 }
             }
         }
@@ -2630,6 +2738,46 @@ fn has_property(
     properties.0 & expected.0 != 0
 }
 
+/// `GattCommunicationStatus` 的语义分类（2026-09-22）。
+///
+/// 此前 `require_success` 只把状态码拼进中文错误串，`ble_error_code` 又把所有
+/// `PlatformError::Gatt` 一律归成 `gatt_status_failed`——结果是
+/// **Unreachable(1) / ProtocolError(2) / AccessDenied(3) 在结构化日志里完全
+/// 无法区分**，用户报"状态 3"时只能靠肉眼读 raw_error 才认得出来。
+/// 这违反 AGENTS.md「一次报障 + 一次日志拉取 = 定位到具体环节」的判据。
+///
+/// 现在分类在构造点确定，不靠事后解析字符串：状态码既要落进日志
+/// （`gatt_status=N`），也要能驱动 UI 文案与后续恢复分流。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GattStatusKind {
+    /// 0：成功，不会进入错误路径。
+    Success,
+    /// 1：设备不可达——链路没建立，通常是遥控器不在无线电上/深度睡眠。
+    /// 与"GATT 表损坏"无关，开关无线电对"对端不在广播"通常无益。
+    Unreachable,
+    /// 2：协议错误——链路在但 GATT 交互出错。
+    ProtocolError,
+    /// 3：访问被拒绝——权限层故障（节点/句柄被拒、设备被禁用、策略限制），
+    /// 与链路问题完全不同的故障层。
+    AccessDenied,
+    /// 未识别的状态码：保留原始数值，不猜测语义。
+    Unknown,
+}
+
+impl GattStatusKind {
+    fn from_status(status: GattCommunicationStatus) -> Self {
+        // 数值来自 windows-0.62.2 绑定：
+        // Success=0 / Unreachable=1 / ProtocolError=2 / AccessDenied=3。
+        match status.0 {
+            0 => Self::Success,
+            1 => Self::Unreachable,
+            2 => Self::ProtocolError,
+            3 => Self::AccessDenied,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 fn require_success(
     status: GattCommunicationStatus,
     operation: &'static str,
@@ -2637,10 +2785,56 @@ fn require_success(
     if status == GattCommunicationStatus::Success {
         Ok(())
     } else {
-        Err(PlatformError::Gatt(format!(
-            "{operation}返回状态 {}",
-            status.0
-        )))
+        Err(gatt_status_error(status, operation))
+    }
+}
+
+/// 构造带语义分类的 GATT 状态错误（2026-09-22）。
+///
+/// 每个 `GattCommunicationStatus` 用一个**具名错误变体**承载，不再把状态码
+/// 格式化成文本再解析回来。这样做的原因有两层：
+///
+/// 1. **正确性**：曾用「`{操作}返回状态 {N}` + 末尾数字」反解状态码，但
+///    `{操作}` 本身可能以数字结尾（如"写入 ATVV 控制命令C4"），反解会静默
+///    取到错误数值。结构化字段不能靠解析自由文本得到。
+/// 2. **契约**：`PlatformError` 对 `sayall-core` 与 Tauri 层是稳定契约，
+///    新增变体而不是改形状，才能保持跨 crate 兼容。
+///
+/// 错误自带的 `Display` 文本刻意保持历史格式 `{操作}返回状态 {N}`，
+/// 因此日志里的 `raw_error` 与升级前逐字一致，跨版本对比不受影响。
+fn gatt_status_error(status: GattCommunicationStatus, operation: &'static str) -> PlatformError {
+    let message = format!("{operation}返回状态 {}", status.0);
+    match GattStatusKind::from_status(status) {
+        GattStatusKind::Success => PlatformError::Gatt(message),
+        GattStatusKind::Unreachable => PlatformError::GattUnreachable(message),
+        GattStatusKind::ProtocolError => PlatformError::GattProtocolError(message),
+        GattStatusKind::AccessDenied => PlatformError::GattAccessDenied(message),
+        GattStatusKind::Unknown => PlatformError::Gatt(message),
+    }
+}
+
+/// 状态分类（2026-09-22）。
+///
+/// 分类直接来自 `PlatformError` 的**具名变体**，不再从错误文本里反解状态码。
+fn gatt_status_kind(error: &PlatformError) -> Option<GattStatusKind> {
+    match error {
+        PlatformError::GattUnreachable(_) => Some(GattStatusKind::Unreachable),
+        PlatformError::GattProtocolError(_) => Some(GattStatusKind::ProtocolError),
+        PlatformError::GattAccessDenied(_) => Some(GattStatusKind::AccessDenied),
+        _ => None,
+    }
+}
+
+/// 提取 `GattCommunicationStatus` 的原始数值，供 `gatt_status=N` 落盘。
+///
+/// 分类与数值是一一对应的（见 `GattStatusKind::from_status`），因此由分类
+/// 反查数值即可，不需要解析文本——这正是不再回读文本的原因。
+fn gatt_status_code(error: &PlatformError) -> Option<i32> {
+    match error {
+        PlatformError::GattUnreachable(_) => Some(1),
+        PlatformError::GattProtocolError(_) => Some(2),
+        PlatformError::GattAccessDenied(_) => Some(3),
+        _ => None,
     }
 }
 
@@ -2729,6 +2923,181 @@ mod tests {
                 "{message} 不应判定为僵死态"
             );
         }
+    }
+
+    #[test]
+    fn gatt_status_codes_map_to_distinct_error_codes() {
+        // P0-1（2026-09-22）：状态 1/2/3 此前全部压成 `gatt_status_failed`，
+        // 导致用户报"状态 3"时无法从结构化日志区分故障层。这里锁定分类边界。
+        //
+        // 校验走完整的 `gatt_status_error` → `ble_error_code` 链路，而不是
+        // 单独测分类枚举：错误码必须真的从构造点流到日志判据上。
+        for (status, kind, code) in [
+            (1_i32, GattStatusKind::Unreachable, "gatt_unreachable"),
+            (2, GattStatusKind::ProtocolError, "gatt_protocol_error"),
+            (3, GattStatusKind::AccessDenied, "gatt_access_denied"),
+        ] {
+            let raw = GattCommunicationStatus(status);
+            assert_eq!(
+                GattStatusKind::from_status(raw),
+                kind,
+                "状态码 {status} 分类错误"
+            );
+            let error = gatt_status_error(raw, "发现 ATVV 服务");
+            assert_eq!(ble_error_code(&error), code, "状态码 {status} 的错误码错误");
+        }
+        // 未识别的状态码必须安全退化，不能被归成某个具体故障层。
+        for unknown in [7_i32, 99] {
+            let raw = GattCommunicationStatus(unknown);
+            assert_eq!(GattStatusKind::from_status(raw), GattStatusKind::Unknown);
+            let error = gatt_status_error(raw, "发现 ATVV 服务");
+            assert_eq!(
+                ble_error_code(&error),
+                "gatt_status_failed",
+                "状态码 {unknown}"
+            );
+            assert_eq!(gatt_status_kind(&error), None, "状态码 {unknown}");
+        }
+    }
+
+    #[test]
+    fn gatt_status_survives_the_error_round_trip() {
+        // 状态码与分类必须能从错误值里读回来——日志的 `gatt_status=N` 字段
+        // 与 `error_code` 都依赖这条往返，不能只靠人工读 raw_error。
+        for (raw, kind, code) in [
+            (1_i32, GattStatusKind::Unreachable, "gatt_unreachable"),
+            (2, GattStatusKind::ProtocolError, "gatt_protocol_error"),
+            (3, GattStatusKind::AccessDenied, "gatt_access_denied"),
+        ] {
+            let error = gatt_status_error(GattCommunicationStatus(raw), "发现 ATVV 服务");
+            assert_eq!(gatt_status_kind(&error), Some(kind), "状态 {raw}");
+            assert_eq!(gatt_status_code(&error), Some(raw), "状态 {raw}");
+            assert_eq!(ble_error_code(&error), code, "状态 {raw}");
+        }
+    }
+
+    #[test]
+    fn raw_error_text_keeps_the_historic_shape() {
+        // raw_error 的历史格式必须保持 `{操作}返回状态 {N}`：跨版本对比日志
+        // 靠它，内部分类信息不能泄漏进去（分类由 error_code/gatt_status 承载）。
+        let error = gatt_status_error(GattCommunicationStatus(1), "发现 ATVV 服务");
+        let text = raw_error_text(&error);
+        assert_eq!(text, "发现 ATVV 服务返回状态 1");
+        assert!(
+            !text.contains("gatt_"),
+            "raw_error 不应含内部错误码：{text}"
+        );
+    }
+
+    #[test]
+    fn status_code_never_parses_the_operation_label() {
+        // 回归防护（2026-09-22）：曾用「末尾数字」反解状态码，而 {操作} 可以
+        // 以数字结尾（如 "写入 ATVV 控制命令C4"）。那种实现会把操作名的数字
+        // 误当成状态码。这里用带数字尾缀的操作名锁死这一点。
+        let error = gatt_status_error(GattCommunicationStatus(1), "写入 ATVV 控制命令C4");
+        assert_eq!(gatt_status_code(&error), Some(1));
+        assert_eq!(gatt_status_kind(&error), Some(GattStatusKind::Unreachable));
+        assert_eq!(ble_error_code(&error), "gatt_unreachable");
+    }
+
+    #[test]
+    fn non_status_gatt_errors_fall_back_to_the_generic_code() {
+        // `PlatformError::Gatt` 也可能承载非状态类信息（如特征属性缺失）。
+        // 这类没有状态码，必须安全退化，不能被误分类成某个具体状态。
+        let error = PlatformError::Gatt("特征不支持 Notify 或 Indicate".to_owned());
+        assert_eq!(gatt_status_kind(&error), None);
+        assert_eq!(gatt_status_code(&error), None);
+        assert_eq!(ble_error_code(&error), "gatt_status_failed");
+        assert_eq!(raw_error_text(&error), "特征不支持 Notify 或 Indicate");
+    }
+
+    #[test]
+    fn user_text_never_leaks_internal_markers_or_blames_the_user() {
+        // P0-2（2026-09-22）：用户文案不得暴露内部标记，也不得把
+        // "重连/重开蓝牙/重启电脑"这类动作推给用户（AGENTS.md 用户侧零介入）。
+        for raw in [1_i32, 2, 3] {
+            let error = gatt_status_error(GattCommunicationStatus(raw), "发现 ATVV 服务");
+            for reconnecting in [true, false] {
+                let text = user_facing_connection_error(&error, reconnecting);
+                assert!(!text.contains("gatt_"), "用户文案泄漏内部错误码：{text}");
+                assert!(
+                    !text.contains("返回状态"),
+                    "用户文案不应出现裸状态描述：{text}"
+                );
+                for banned in ["重启电脑", "重开蓝牙", "重新配对蓝牙"] {
+                    assert!(
+                        !text.contains(banned),
+                        "用户文案不得推给用户「{banned}」：{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn access_denied_text_points_at_the_real_cause() {
+        // 状态 3 是权限层故障，与链路无关——文案应给出可操作指引，
+        // 而且不能声称这是"没找到遥控器"（那是状态 1 的语义）。
+        let error = gatt_status_error(GattCommunicationStatus(3), "发现 ATVV 服务");
+        let text = user_facing_connection_error(&error, true);
+        assert!(text.contains("访问"), "应点明访问被拒：{text}");
+        assert!(text.contains("蓝牙设置"), "应给出可操作的检查位置：{text}");
+        assert!(
+            !text.contains("没找到") && !text.contains("休眠"),
+            "状态 3 不应套用「遥控器不在线」的文案：{text}"
+        );
+    }
+
+    #[test]
+    fn unreachable_text_reassures_without_asking_for_action() {
+        // 状态 1 是可自愈场景（实测集中在唤醒后，链路一通同路径 173ms 通过）。
+        // 文案必须让用户知道"不用管"，而不是要求他动手。
+        let error = gatt_status_error(GattCommunicationStatus(1), "发现 ATVV 服务");
+        let text = user_facing_connection_error(&error, true);
+        assert!(text.contains("自动"), "应说明会自动恢复：{text}");
+        for banned in ["请检查", "请确认", "请重启", "请重新"] {
+            assert!(!text.contains(banned), "不应要求用户动作：{text}");
+        }
+    }
+
+    #[test]
+    fn status_kind_is_only_claimed_for_status_errors() {
+        // 只有状态类变体带分类。其他 `Gatt` 错误（如特征属性缺失）必须为 None，
+        // 否则会把"特征不支持 Notify"误报成某个 GATT 状态码。
+        assert_eq!(
+            gatt_status_kind(&PlatformError::Gatt(
+                "特征不支持 Notify 或 Indicate".to_owned()
+            )),
+            None
+        );
+        assert_eq!(
+            gatt_status_code(&PlatformError::Gatt(
+                "特征不支持 Notify 或 Indicate".to_owned()
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn public_boundary_coalesces_status_variants_back_to_gatt() {
+        // 跨 crate 边界（Tauri → 前端）只认 `Gatt(String)`。
+        // 细分变体必须收敛，否则前端契约会漂移。
+        for error in [
+            gatt_status_error(GattCommunicationStatus(1), "发现 ATVV 服务"),
+            gatt_status_error(GattCommunicationStatus(2), "发现 ATVV 服务"),
+            gatt_status_error(GattCommunicationStatus(3), "发现 ATVV 服务"),
+        ] {
+            let public = error.clone().into_public();
+            assert!(
+                matches!(public, PlatformError::Gatt(_)),
+                "未收敛回 Gatt(String)：{public:?}"
+            );
+            // 收敛只能改形状，不能改文本——日志与既有文案依赖原文。
+            assert_eq!(public.to_string(), error.to_string());
+        }
+        // 非 GATT 错误必须原样透传，不能被吞掉。
+        let other = PlatformError::OperationTimedOut;
+        assert_eq!(other.clone().into_public(), other);
     }
 
     #[test]
