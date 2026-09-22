@@ -620,6 +620,15 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                 if let Ok(found) = select_single_device_path(&paths) {
                     context.selected_path = normalize_device_path(&found);
                     let mut state = context.snapshot.lock().unwrap();
+                    // 真正的"上线边沿"：相位此前不是 Ready，本次才变为 Ready。
+                    //
+                    // 实测（2026-09-22 晚）：`GIDC_ARRIVAL` 在**已绑定**状态下仍会
+                    // 每 0.5–2 秒重复上报一次（同期 `device_removed` 为 0——设备从未
+                    // 离开过）。它是**状态通知**，不是边沿事件。若每次到达都通知 ble
+                    // 提前重连，退避会被永久清零，形成 2 秒一次的紧密重试风暴
+                    // （该晚 115 次 `device_arrived` 触发，每次 service_discovery
+                    // 卡 7.7 秒）。因此只在相位真正跃迁时通知。
+                    let became_ready = state.phase != RawInputPhase::Ready;
                     state.phase = RawInputPhase::Ready;
                     state.matched_device_count = paths.len() as u32;
                     state.last_error = None;
@@ -627,16 +636,18 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                         state.raw_event_count = 0;
                     }
                     crate::ble::gatt_note(format!(
-                        "raw_input device_change action=device_arrived phase=ready matched_device_count={}",
-                        paths.len()
+                        "raw_input device_change action=device_arrived phase=ready matched_device_count={} edge={}",
+                        paths.len(),
+                        u8::from(became_ready)
                     ));
                     // 重新绑定到唯一设备后，门控重新具备归因来源。
                     key_gate::set_listener_active(true);
-                    // 遥控器 HID 接口已回到无线电上：通知 ble 立即重试，
-                    // 不必等退避到期（只提前，不延后/不门控）。
-                    // 只在确实绑定到遥控器时发出——`paths` 已由
-                    // `enumerate_matching_device_paths` 过滤为匹配设备。
-                    notify_device_arrived();
+                    // 只在真正的上线边沿通知 ble。`paths` 已由
+                    // `enumerate_matching_device_paths` 过滤为匹配设备，
+                    // 因此绑定成功即遥控器在位。
+                    if became_ready {
+                        notify_device_arrived();
+                    }
                 } else if was_unbound && is_remote {
                     // 此前未绑定、遥控器接口已出现但暂未选出唯一路径：保持等待。
                     let mut state = context.snapshot.lock().unwrap();

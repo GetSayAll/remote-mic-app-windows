@@ -671,8 +671,8 @@ fn worker_loop(
                 let _ = reply.send(Ok(snapshot));
             }
             WorkerMessage::WakeReconnect => {
-                // 遥控器 HID 活动（正在按键）：仅当无活动会话、有首选设备、
-                // 未挂起时立即重试连接；清零退避让下一次尝试马上发生。
+                // 遥控器 HID 活动（正在按键）：用户明确要求现在就连，
+                // 值得把退避计数一并清零。
                 advance_reconnect(
                     &session,
                     &preferred_device_id,
@@ -681,11 +681,14 @@ fn worker_loop(
                     &mut reconnect_deadline,
                     &state,
                     "hidi",
+                    true,
                 );
             }
             WorkerMessage::RemoteDeviceArrived => {
                 // 遥控器 HID 接口重新出现：判定与 `WakeReconnect` 完全一致——
                 // 两者都是"HID 侧先于 GATT 可达"的上线前兆，区别只在日志来源。
+                // **不清零退避**：该信号会重复上报（2026-09-22 实测 0.5–2s 一次），
+                // 若清零会把退避永久压在 2 秒，形成紧密重试风暴。
                 advance_reconnect(
                     &session,
                     &preferred_device_id,
@@ -694,6 +697,7 @@ fn worker_loop(
                     &mut reconnect_deadline,
                     &state,
                     "device_arrived",
+                    false,
                 );
             }
             WorkerMessage::RetryVoiceChord {
@@ -1409,10 +1413,17 @@ fn should_advance_reconnect(
         && reconnect_deadline.is_some()
 }
 
-/// 执行"提前重连"：清零退避并把 deadline 拉到当下。返回是否真的提前了。
+/// 执行"提前重连"：把 deadline 拉到当下。返回是否真的提前了。
 ///
-/// 只提前、不新增等待：本函数从不延后任何已排定的重连，因此不可能降低
-/// 成功率（AGENTS.md 2026-09-05 晚要求"延迟优化不得降低成功率"）。
+/// `reset_backoff` 决定是否同时清零退避计数：
+/// - `true`（用户按键 `WakeReconnect`）：用户**明确**要求现在就连，值得从头开始；
+/// - `false`（`RemoteDeviceArrived`）：该信号可能是重复上报（2026-09-22 实测
+///   0.5–2 秒一次，同期设备从未移除过），只提前本次、**不动退避计数**，
+///   这样下一次失败仍会按 2→4→8→…→30s 增长。若这里也清零，退避会被
+///   永久压在 2 秒，变成紧密重试风暴（该晚 115 次触发、每次卡 7.7 秒）。
+///
+/// 两种情况都只提前、不新增等待：本函数从不延后任何已排定的重连，因此
+/// 不可能降低成功率（AGENTS.md 2026-09-05 晚要求"延迟优化不得降低成功率"）。
 fn advance_reconnect(
     session: &Option<BleSession>,
     preferred_device_id: &Option<String>,
@@ -1421,6 +1432,7 @@ fn advance_reconnect(
     reconnect_deadline: &mut Option<Instant>,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     reason: &str,
+    reset_backoff: bool,
 ) -> bool {
     if !should_advance_reconnect(
         session,
@@ -1431,12 +1443,14 @@ fn advance_reconnect(
         return false;
     }
     gatt_note(format!(
-        "wake_reconnect triggered={reason} backoff_reset=true"
+        "wake_reconnect triggered={reason} backoff_reset={reset_backoff}"
     ));
-    backoff.reset();
+    if reset_backoff {
+        backoff.reset();
+    }
     *reconnect_deadline = Some(Instant::now());
     let mut snapshot = lock(state);
-    if snapshot.phase == ConnectionPhase::Reconnecting {
+    if snapshot.phase == ConnectionPhase::Reconnecting && reset_backoff {
         snapshot.reconnect_attempt = 0;
     }
     // 注：不在此处做 WeType 预热点火（曾基于"钩子休眠"假设加入，
@@ -3382,14 +3396,21 @@ mod tests {
             &mut deadline,
             &state,
             "device_arrived",
+            false,
         );
         assert!(advanced);
         assert!(
             deadline.unwrap() <= Instant::now(),
             "deadline 必须被拉到当下，而不是还差 30 秒"
         );
-        // 退避清零：下一次若仍失败，不会接着按 30s 累积。
-        assert_eq!(lock(&state).reconnect_attempt, 0);
+        // **关键回归防线**：device_arrived 不清零退避计数（attempt 仍为 7）。
+        // 此前这里会清零，而该信号会重复上报（0.5–2s 一次），退避被永久
+        // 压在 2 秒 → 紧密重试风暴（2026-09-22 晚实测 115 次触发）。
+        assert_eq!(
+            lock(&state).reconnect_attempt,
+            7,
+            "device_arrived 不得清零退避，否则重复的到达通知会把退避永久压在最短间隔"
+        );
 
         // 已到期的 deadline 不会被推后。
         let past = Instant::now() - Duration::from_secs(1);
@@ -3402,9 +3423,36 @@ mod tests {
             &mut deadline_past,
             &state,
             "device_arrived",
+            false,
         );
         assert!(advanced);
         assert!(deadline_past.unwrap() <= Instant::now());
+    }
+
+    #[test]
+    fn hidi_advance_still_resets_the_backoff_because_the_user_asked_for_it() {
+        // 用户按键是**明确**的"现在就给我连"，值得把退避计数清零；
+        // 这与 device_arrived（可能重复上报）必须区别对待。
+        let state = Arc::new(Mutex::new(ConnectionSnapshot {
+            phase: ConnectionPhase::Reconnecting,
+            reconnect_attempt: 7,
+            ..ConnectionSnapshot::default()
+        }));
+        let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
+        let mut deadline = Some(Instant::now() + Duration::from_secs(30));
+
+        let advanced = advance_reconnect(
+            &None,
+            &Some("device-id".to_owned()),
+            false,
+            &mut backoff,
+            &mut deadline,
+            &state,
+            "hidi",
+            true,
+        );
+        assert!(advanced);
+        assert_eq!(lock(&state).reconnect_attempt, 0, "用户按键应清零退避");
     }
 
     #[test]
