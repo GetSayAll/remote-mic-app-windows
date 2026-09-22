@@ -260,6 +260,32 @@ struct ListenerContext {
     /// 只用于把日志压成**边沿**（设备一直在位就静默），避免 10 秒一次的审计把
     /// 诊断日志刷满（LOGGING.md「状态未变化不重复刷」）。
     binding_present: bool,
+    /// E1-a' 按键 usage 采集（2026-09-22）：已记录过的**未归因 usage** 与
+    /// **未识别报告形状**，用于把日志压成"每种情况只记一次"的边沿。
+    ///
+    /// 目的：真机按压 TV / 返回 / 音量± 时，从诊断日志直接读到该设备实际发出的
+    /// usage 值与报告长度，判定选型文档第 6 节 E1 的两项待确认事项
+    /// （TV 的真实 usage、是否存在第二/第三种报告形状）。
+    ///
+    /// 仅诊断用：不参与任何决策，不影响按键行为；日志开关关闭时整段空转。
+    observed_unmapped_usages: std::collections::BTreeSet<u16>,
+    observed_report_shapes: std::collections::BTreeSet<usize>,
+    /// E1 全量逐键采集（2026-09-22）：**每一个**首次出现的 usage 都记一次，
+    /// 不论它是否已在 `button_for_usage` 表内。
+    ///
+    /// 为什么必须补这个（原 E1-a' 的缺口）：E1 的通过判据是「记录该设备**全部**
+    /// report ID 与原始字节」「得到 TV 按压对应的**完整 report 清单**；确认是否
+    /// 只有 `0x01`」。而原采集只在"usage 未归因"或"报告形状未识别"时输出——
+    /// 若该设备 report 恒为 9 字节且所按键都在映射表内（当前已知的最可能情形），
+    /// 日志会一行都没有，既拿不到 TV 的 report 清单，也无法判断"是否只有 0x01"。
+    ///
+    /// 边沿口径：每个 usage 值只记**首次**出现的那一次（含当次完整报告字节），
+    /// 因此同一次按压的 DOWN/UP 两个报告只留 DOWN 那条；日志量 = usage 种类数。
+    observed_usages: std::collections::BTreeSet<u16>,
+    /// 已记录过的报告形状（长度 + 首字节前缀 `report id`），同样每种只记一次。
+    /// 与 `observed_report_shapes` 的区别：后者只收**不在形状表内**的长度（异常），
+    /// 本集合收**全部**长度，用于回答 E1 的"report ID 是否只有 `0x01`"。
+    observed_report_ids: std::collections::BTreeSet<(usize, u8)>,
 }
 
 fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
@@ -411,6 +437,10 @@ fn run_listener(
             remote_voice_f5_pressed: false,
             // 启动时就绑定成功 = 设备此刻在位；空路径是 Awaiting，等接口出现。
             binding_present: !selected_path.is_empty(),
+            observed_unmapped_usages: std::collections::BTreeSet::new(),
+            observed_report_shapes: std::collections::BTreeSet::new(),
+            observed_usages: std::collections::BTreeSet::new(),
+            observed_report_ids: std::collections::BTreeSet::new(),
         });
     });
 
@@ -885,12 +915,74 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             let _ = context.engine.send(EngineMessage::Keyboard(event));
         } else if header.dwType == RIM_TYPEHID.0 {
             for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
+                // E1 全量采集（2026-09-22）：**每个**首次出现的 (报告长度, report id)
+                // 组合记一次，不论长度是否在形状表内。回答 E1 的"是否只有 0x01"。
+                let report_id = report.first().copied().unwrap_or(0);
+                if context
+                    .observed_report_ids
+                    .insert((report.len(), report_id))
+                {
+                    crate::ble::gatt_note(format!(
+                        "hid_report_seen len={} report_id=0x{report_id:02X} raw={} \
+                         known_shape={} hint=E1 全量采集：该设备出现过的报告长度与 report \
+                         id 组合，用于确认是否只有 0x01",
+                        report.len(),
+                        hex_bytes(report),
+                        is_known_report_shape(report)
+                    ));
+                }
+                // E1-a' 采集（2026-09-22）：记录**未识别报告形状**（边沿，每种一次）。
+                // 目的见 ListenerContext::observed_report_shapes 的注释。
+                if !is_known_report_shape(report) {
+                    let first_seen = context.observed_report_shapes.insert(report.len());
+                    if first_seen {
+                        crate::ble::gatt_note(format!(
+                            "hid_report_shape_unmapped len={} raw={} phase={:?} \
+                             hint=该报告长度未在 decode_report_usages 的形状表内，\
+                             选型文档 E1 待确认的\"第二种报告形状\"可能在此",
+                            report.len(),
+                            hex_bytes(report),
+                            context.snapshot.lock().unwrap().phase
+                        ));
+                    }
+                }
                 let usages = decode_report_usages(report).map_err(|error| error.to_string())?;
                 // HID 报文（独立管线，不受键盘 LL 钩子影响）到达即武装
                 // 对应按键：其键盘孪生事件在钩子里据此归因吞键。
                 for usage in &usages {
+                    // E1 全量逐键采集（2026-09-22）：**每个**首次出现的 usage 都记一次，
+                    // 不论是否已在 button_for_usage 表内。这是回答 E1「TV 按压对应的
+                    // 完整 report 清单」唯一可靠的方式——只记 unmapped 会在
+                    // "按键全在表内"时完全静默。
+                    if context.observed_usages.insert(*usage) {
+                        crate::ble::gatt_note(format!(
+                            "hid_usage_seen usage=0x{usage:04X} button={:?} report_len={} \
+                             report_id=0x{report_id:02X} raw={} hint=E1 全量采集：该设备实际发出\
+                             过的 usage（含已映射项），button=None 且非语音键即为未归因 usage",
+                            button_for_usage(*usage),
+                            report.len(),
+                            hex_bytes(report)
+                        ));
+                    }
                     if let Some(button) = button_for_usage(*usage) {
                         key_gate::arm_button(button, GATE_ARM_GRACE_MS);
+                    } else {
+                        // E1-a' 采集（2026-09-22）：记录**未归因 usage**（边沿，每个值一次）。
+                        // 真机按压 TV / 返回 / 音量± 后，本行直接给出该键的实际 usage，
+                        // 用于核对 raw_input.rs 的 button_for_usage 映射表是否准确。
+                        // 注意 0x003E（语音键 F5）是**有意**映射为 None，属已知项；
+                        // 用 exclude 标注以免与真正的未知 usage 混淆。
+                        let first_seen = context.observed_unmapped_usages.insert(*usage);
+                        if first_seen {
+                            let known_voice = *usage == 0x003E;
+                            crate::ble::gatt_note(format!(
+                                "hid_usage_unmapped usage=0x{usage:04X} known_voice_key={known_voice} \
+                                 report_len={} raw={} hint=未在 button_for_usage 表中的 usage，\
+                                 若是本次按压的实体键即为该键的真实 usage",
+                                report.len(),
+                                hex_bytes(report)
+                            ));
+                        }
                     }
                 }
                 let _ = context.engine.send(EngineMessage::HidUsages(usages));
@@ -898,6 +990,27 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// E1-a' 采集辅助（2026-09-22）：报告长度是否已在 `decode_report_usages`
+/// 的形状表内。表见 `crates/sayall-windows/src/raw_input.rs` 的 9/7/6 三种。
+///
+/// 纯诊断判据，不参与解码决策——解码仍由 `decode_report_usages` 全权负责。
+fn is_known_report_shape(report: &[u8]) -> bool {
+    matches!(report.len(), 9 | 7 | 6)
+}
+
+/// E1-a' 采集辅助（2026-09-22）：把报告字节格式化为诊断日志用的十六进制串。
+///
+/// 只输出报告本身的字节。报告里不含设备身份、语音内容或个人路径，
+/// 符合 LOGGING.md / AGENTS.md 的隐私约束。
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02X}");
+    }
+    out
 }
 
 fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
@@ -965,7 +1078,7 @@ fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::voice_f5_wake_edge;
+    use super::{hex_bytes, is_known_report_shape, voice_f5_wake_edge};
 
     #[test]
     fn voice_f5_wakes_reconnect_once_per_physical_hold() {
@@ -973,5 +1086,61 @@ mod tests {
         assert!(!voice_f5_wake_edge(true, true));
         assert!(!voice_f5_wake_edge(true, false));
         assert!(voice_f5_wake_edge(false, true));
+    }
+
+    /// E1-a' 采集判据：形状表必须与 `decode_report_usages` 支持的 9/7/6 一致。
+    /// 若将来 `raw_input.rs` 改形状表而此处未同步，本测试即失败（防止采集口径漂移）。
+    #[test]
+    fn known_report_shape_matches_decoder_supported_lengths() {
+        assert!(is_known_report_shape(&[0u8; 9]));
+        assert!(is_known_report_shape(&[0u8; 7]));
+        assert!(is_known_report_shape(&[0u8; 6]));
+        // 这些长度目前不在形状表内 → 应被标记为未识别
+        for length in [0usize, 1, 5, 8, 10, 11, 16] {
+            assert!(
+                !is_known_report_shape(&vec![0u8; length]),
+                "length {length} should be flagged as an unrecognized report shape"
+            );
+        }
+    }
+
+    #[test]
+    fn hex_bytes_formats_uppercase_without_separator() {
+        assert_eq!(hex_bytes(&[]), "");
+        assert_eq!(hex_bytes(&[0x01]), "01");
+        assert_eq!(
+            hex_bytes(&[0x01, 0x00, 0x00, 0x35, 0x00, 0x00]),
+            "010000350000"
+        );
+        assert_eq!(hex_bytes(&[0xAB, 0xCD, 0xEF, 0x00, 0xFF]), "ABCDEF00FF");
+    }
+
+    /// E1 全量采集（2026-09-22）：未归因判据必须与 `button_for_usage` 一致。
+    ///
+    /// 这条测试锁定"哪些 usage 会被记为未归因"：语音键 `0x003E` 是**有意**
+    /// 返回 `None` 的已知项，必须能与真正未知的 usage 区分开。
+    #[test]
+    fn usage_attribution_matches_button_table() {
+        use crate::raw_input::button_for_usage;
+        // 已知按键：应能归因，不产生 unmapped 行
+        for usage in [
+            0x00F1u16, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066,
+            0x007F, 0x0080, 0x0081,
+        ] {
+            assert!(
+                button_for_usage(usage).is_some(),
+                "usage 0x{usage:04X} should be attributable"
+            );
+        }
+        // 语音键：有意不归因（走 ATVV，不经按键映射）
+        assert_eq!(button_for_usage(0x003E), None);
+        // 真正未知的 usage：应被记为 unmapped
+        for usage in [0x0001u16, 0x0004, 0x0099, 0xFFFF, 0x0036, 0x0049] {
+            assert_eq!(
+                button_for_usage(usage),
+                None,
+                "usage 0x{usage:04X} should stay unattributed"
+            );
+        }
     }
 }
