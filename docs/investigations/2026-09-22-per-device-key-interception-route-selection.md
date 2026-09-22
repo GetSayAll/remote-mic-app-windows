@@ -1,5 +1,10 @@
 # 按键拦截路线选型研究：追求"按设备源头替换、零残留副作用"（2026-09-22）
 
+> ⚠️⚠️ **2026-09-22 18:3x 重大更正：本文的推荐路线 A 已被真机采集判定 `failed`，推荐路线改为路线 B（RemoteMapper 式设备专属下层 filter）。**
+> 后续研究见 `docs/investigations/2026-09-22-per-device-key-interception-route-selection-round2.md`。
+> 失效原因：路线 A 的前提是"设备走 HID 通道、报告层能拿到报告"；真机证明 **RC003 在 Raw Input 的 HID 通道上零报文**——它只有一个键盘页 TLC，该 TLC 被系统独占，报告永不进入 HID 通道。详见 `evidence/2026-09-22-tv-shell-action-channel-analysis.md` §7。
+> 本文中 **§0 摘要、§2.1、§4、§6** 的推荐结论已失效；**§2.2（RemoteMapper）升为推荐**；**§9 的两级能力方案（含 9.4 决策）仍然有效**。保留原文以便对照推理为何出错。
+
 > 状态：**研究文档，供审核与外部复审**。除本文档本身外，未改动任何代码、配置、TODO 或归属文件，也未创建发布资产。
 > 方法：只读取证。逐行阅读五个参考仓库的拦截实现与文档，另加本仓库既有调查档案对照。未安装任何驱动、未运行任何安装/构建脚本、未做真机测试。
 > **可核验性**：所有引用的外部仓库均已固定到 commit SHA（见[附录 D](#附录-d版本固定核对时的-commit-sha)）；逐条证据索引见[附录 B](#附录-b证据索引逐条可核验)；供外部 AI 复审的核对清单与已知缺口见[附录 C](#附录-c供外部复审的核对清单)。
@@ -59,6 +64,8 @@
 
 ### 2.1 ZSTDJan/windows-remote-mic-app —— HID 宿主内"复制并清空"报告（推荐路线）
 
+> ⚠️ **本节推荐已失效（`failed`，2026-09-22 18:3x 真机采集）。** 本路线的前提是"设备走 HID 通道、报告层（`RIM_TYPEHID`）能拿到报告"。真机证明 **RC003 的 HID 通道零报文**：它只有一个键盘页 TLC（`UP:0001_U:0006`）且被系统独占，报告永不进入 HID 通道，`NtDeviceIoControlFile` 这个挂载点对 RC003 **不可达**。详见 round2 文档与 `evidence/2026-09-22-tv-shell-action-channel-analysis.md` §7。保留原文以便对照。
+
 - 许可 / 形态：GPL-3.0-only，Python + 官方 Frida Gadget，`1.0.44` 正式发布源码。
 - **拦截层**：管理员 HID 助手把 Gadget 注入**已核验的 RC003 `WUDFHost.exe`**，脚本 hook `NtDeviceIoControlFile`，只处理 IOCTL `0x80018483`、9 字节、前缀 `010000` 的报告（`apps/windows/rc003/src/ovb_rc003/frida_hid_tap_runtime.py:485-499,511-527`）。
 - **是否真吞**：**是，且在 Windows 翻译之前**。逐字：
@@ -73,6 +80,8 @@
 - **未验证（关键）**：在其文档中**未找到** `microsoft-edge:` / `OpenWith` / 协议选择器相关记录。因此"TV 的独立 Shell 协议动作是否随清空一起消失"**无证据**，列为第 6 节 E1/E2 的判别实验；我的判断（推断）：若该动作由同一 report ID `0x01` 的 usage 引发，清空即可移除；若来自其它 report（RemoteMapper 记录该设备另有 vendor report `0x06/0x07/0x08`），则当前 `010000` 过滤会漏掉，需要把清空扩展到对应 report。
 
 ### 2.2 QL-4/RemoteMapper —— 设备专属下层 HID 过滤驱动，重映射为设备专属 F 键（次选）
+
+> ✅ **2026-09-22 18:3x：本节由"次选"升为推荐路线。** 原因：路线 A 失效（见 §2.1 标注），而本节方案**不依赖 HID 通道**——它挂在设备栈本身（`kbdhid` 之下），绕开了"键盘 TLC 独占导致 HID 通道不可见"的障碍。源码已逐字复核，另补齐了返回/音量± 的覆盖（原实现已含）。详见 round2 文档。
 
 - 许可 / 形态：MIT，C# 应用 + KMDF 过滤驱动（`driver.c` 142 行、`remap.c` 71 行）。
 - **拦截层**：extension INF，`Class=Extension` / `FilterPosition=Lower`，精确绑定 `HID\{00001812-...}_Dev_VID&012717_PID&32b8_REV&00a4`；栈为 `kbdclass -> kbdhid -> MiRemoteHidFilter -> mshidumdf`（`driver/MiRemoteHidFilter/README.md`）。转发 `IRP_MJ_READ`，在下层完成后**原地等长改写 `report[3]`**，不动描述符、report ID 与长度；只碰键盘 report `0x01`，vendor report `0x06/0x07/0x08` 不改。
@@ -309,13 +318,13 @@ RC003 --BLE HID--> WUDFHost(已核验为 RC003 独占)
 
 ## 附录 A：取证方法与本地副本
 
-- 五个参考仓库的完整文件树与关键文件已下载到本机（文件名中的 `/` 以 `__` 代替）：
-  - `C:\Users\Administrator\ref-repos\RemoteMapper\`（QL-4/RemoteMapper）
-  - `C:\Users\Administrator\ref-repos\vibe-flow\`（richlearntodo-debug/vibe-flow）
-  - `C:\Users\Administrator\ref-repos\axonkey\`（leowzz/axonkey）
-  - `C:\Users\Administrator\ref-repos\zstdjan\`、`...\zstdjan-code\`、`...\zstdjan-pinned\`（ZSTDJan/windows-remote-mic-app）
-  - `C:\Users\Administrator\ref-repos\suk-ldev\`（Suk-ldev/remote-mic-app-windows）
-  - 各仓库文件名清单：`C:\Users\Administrator\ref-repos\*.tree.txt`
+- 五个参考仓库的完整文件树与关键文件已下载到本机（文件名中的 `/` 以 `__` 代替；路径统一按相对形式记录，不写主机绝对路径）：
+  - `ref-repos/RemoteMapper/`（QL-4/RemoteMapper）
+  - `ref-repos/vibe-flow/`（richlearntodo-debug/vibe-flow）
+  - `ref-repos/axonkey/`（leowzz/axonkey）
+  - `ref-repos/zstdjan/`、`ref-repos/zstdjan-code/`、`ref-repos/zstdjan-pinned/`（ZSTDJan/windows-remote-mic-app）
+  - `ref-repos/suk-ldev/`（Suk-ldev/remote-mic-app-windows）
+  - 各仓库文件名清单：`ref-repos/*.tree.txt`
 - 抓取命令（`gh` 需要 git 在 PATH，本机 Git 位于 `…\PortableGit\versions\1.2.0\mingw64\bin`）：
   ```
   gh api repos/<owner>/<repo>/contents/<path>?ref=<SHA> --jq .content   # base64，去换行后解出原文
