@@ -1601,13 +1601,19 @@ fn handle_control(
                 } else {
                     None
                 };
-                // 会话级激活微信输入法：仅对内置微信输入法默认和弦
-                // 生效。Chatterfly 等其他工具使用自定义快捷键时不能
-                // 被切换到 WeType，也不能触发 WeType 休眠恢复。
-                if wetype_target {
-                    if let Err(error) = crate::ime::activate_wetype_session() {
-                        lock(state).last_error = Some(error);
+                // 会话级激活当前语音目标。两者都是公开 TSF profile：
+                // WeType 需要专属休眠恢复检测，Chatterfly 只需要切换到
+                // 自己的会话 profile，不走 WeType 专属恢复路径。
+                let activation_result = match crate::send_input::voice_hold_target() {
+                    crate::send_input::VoiceHoldTarget::WeType => {
+                        crate::ime::activate_wetype_session()
                     }
+                    crate::send_input::VoiceHoldTarget::Chatterfly => {
+                        crate::ime::activate_chatterfly_session()
+                    }
+                };
+                if let Err(error) = activation_result {
+                    lock(state).last_error = Some(error);
                 }
                 if let Err(error) = send_input.press(&chord) {
                     gatt_note(format!(
@@ -1629,7 +1635,11 @@ fn handle_control(
                 // 功能点日志：成功按下（含会话号，与 C 04 行对齐即可归因）。
                 gatt_note(format!(
                     "chord_press result=ok session={session_id} target={} gap_ms={}",
-                    if wetype_target { "wetype" } else { "generic" },
+                    if wetype_target {
+                        "wetype"
+                    } else {
+                        "chatterfly"
+                    },
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
                 *held_hotkey = Some(chord);

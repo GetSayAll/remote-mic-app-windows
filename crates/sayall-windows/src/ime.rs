@@ -48,6 +48,9 @@ const CLSID_TF_INPUT_PROCESSOR_PROFILES: GUID =
 /// 来自本机输入法列表 `0804:{86598FB9-…}{607FDF85-…}`，2.1.3.18 实测）。
 const WETYPE_CLSID: GUID = GUID::from_u128(0x86598fb9_66a2_463e_b9c2_aeb906d477ad);
 const WETYPE_PROFILE: GUID = GUID::from_u128(0x607fdf85_fcc8_4dbd_a365_41296f980c9c);
+/// Chatterfly TSF profile installed by the public Windows client.
+const CHATTERFLY_CLSID: GUID = GUID::from_u128(0x604a99e3_6d90_4571_824d_2639bd572f6c);
+const CHATTERFLY_PROFILE: GUID = GUID::from_u128(0xc16c250b_cf1c_4c58_b068_12aedbed610f);
 const LANGID_ZH_CN: u16 = 0x0804;
 /// STA 激活线程的有界等待：正常 <10ms，500ms 只是防卡上限。
 const ACTIVATION_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -131,6 +134,50 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
         if result.is_ok() { "none" } else { "tsf" },
         if result.is_ok() { "none" } else { "activation_failed" },
         result.is_err(),
+    ));
+    result
+}
+
+/// Ensure Chatterfly is the active input method for the focused application.
+/// Chatterfly registers a public TSF profile, so the same session-scoped
+/// activation used for WeType can switch to it without touching private app
+/// state or changing the user's global input method preference.
+pub fn activate_chatterfly_session() -> Result<WeTypeActivation, String> {
+    activate_profile_session(CHATTERFLY_CLSID, CHATTERFLY_PROFILE, "Chatterfly")
+}
+
+fn activate_profile_session(
+    target_clsid: GUID,
+    target_profile: GUID,
+    target_name: &'static str,
+) -> Result<WeTypeActivation, String> {
+    let started = std::time::Instant::now();
+    if foreground_is_self() {
+        crate::ble::gatt_note(format!(
+            "ime_activation target={target_name} outcome=skipped_self_foreground elapsed_ms=0"
+        ));
+        return Ok(WeTypeActivation::SkippedSelfForeground);
+    }
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("sayall-{target_name}-activate"))
+        .spawn(move || {
+            let outcome = sta_ensure_profile(target_clsid, target_profile, target_name);
+            let _ = sender.send(outcome);
+        })
+        .map_err(|error| format!("创建 {target_name} 激活线程失败：{error}"))?;
+    let result = match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err(format!("激活 {target_name} 超时（500ms）")),
+    };
+    crate::ble::gatt_note(format!(
+        "ime_activation target={target_name} outcome={} elapsed_ms={}",
+        if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        },
+        started.elapsed().as_millis()
     ));
     result
 }
@@ -281,6 +328,14 @@ fn foreground_process_name() -> Option<String> {
 /// （需要时）ActivateProfile + 重绑等待 → CoUninitialize。
 /// 全部调用在本线程内完成（无跨套间封送，无需消息泵）。
 fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
+    sta_ensure_profile(WETYPE_CLSID, WETYPE_PROFILE, "WeType")
+}
+
+fn sta_ensure_profile(
+    target_clsid: GUID,
+    target_profile: GUID,
+    target_name: &'static str,
+) -> Result<WeTypeActivation, String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
@@ -301,12 +356,12 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
             let mut profile = TF_INPUTPROCESSORPROFILE::default();
             let query = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile);
             let active_is_wetype = match &query {
-                Ok(()) => profile.clsid == WETYPE_CLSID && profile.guidProfile == WETYPE_PROFILE,
+                Ok(()) => profile.clsid == target_clsid && profile.guidProfile == target_profile,
                 Err(_) => false,
             };
             // 功能点日志：只记录冷/热判定，不落盘输入法 GUID 或前台应用身份。
             crate::ble::gatt_note(format!(
-                "ime_query ok={} active_is_wetype={active_is_wetype} active_profile_present={}",
+                "ime_query target={target_name} ok={} active_is_target={active_is_wetype} active_profile_present={}",
                 query.is_ok(),
                 profile.clsid != GUID::from_u128(0),
             ));
@@ -317,12 +372,12 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
                 .ActivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,
                     LANGID_ZH_CN,
-                    &WETYPE_CLSID,
-                    &WETYPE_PROFILE,
+                    &target_clsid,
+                    &target_profile,
                     HKL::default(),
                     TF_IPPMF_FORSESSION,
                 )
-                .map_err(|error| format!("激活微信输入法会话失败：{error}"))?;
+                .map_err(|error| format!("激活 {target_name} 会话失败：{error}"))?;
             // 冷切换：等目标应用完成输入法会话重绑再放行注入。
             std::thread::sleep(SESSION_REBIND_SETTLE);
             Ok(WeTypeActivation::Switched)
