@@ -2554,6 +2554,18 @@ const WETYPE_RETRY_SETTLE_MS: [u64; 3] = [2000, 3000, 5000];
 /// 最大重注入轮次（检测共 attempt 0..=3 四轮）。
 const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
 
+/// 是否在 wetype_check 判定"未响应"时执行自动恢复（cycle 输入法配置 + 重放和弦）。
+///
+/// 2026-09-23 实测（Windows 11 25H2，用户机器）：微信输入法 2.1.4.6 起录音
+/// 不再写入 HKCU CapabilityAccessManager ConsentStore（历史版本可见
+/// `C:#Program Files#Tencent#WeType#*#wetype_*.exe` 条目；2.1.4.6 下整个
+/// 按住期间 ConsentStore 毫无变化），wetype_check 的 reacted 探测对它恒为
+/// false——而此时 WeType 的听写其实已经启动。此后的 reviving / chord_retry
+/// 会重放 LCtrl+LWin 边沿，把进行中的会话拆掉：用户表现为长按约 2.9s 即断。
+/// 在探测适配 2.1.4.6 之前默认关闭自动恢复：检测失败时保持按住状态不动，
+/// 仅记录日志（revive_disabled keeping_session）。
+const WETYPE_AUTO_REVIVE_ENABLED: bool = false;
+
 fn spawn_wetype_check(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     sender: Sender<WorkerMessage>,
@@ -2602,7 +2614,19 @@ fn spawn_wetype_check(
                     ));
                     return;
                 }
-                MicResponse::NotObserved => {}
+                MicResponse::NotObserved => {
+                    if !WETYPE_AUTO_REVIVE_ENABLED {
+                        // 检测未观察到 WeType 响应，但探测本身可能已失效
+                        // （2.1.4.6 起录音不进 ConsentStore）。此时保持按住
+                        // 状态不动：若 WeType 真的在听写，任何和弦重放都会
+                        // 中断它；若真的休眠，松手后用户会看到无文字，再按
+                        // 一次即可。
+                        gatt_note(format!(
+                            "wetype_check reacted=false attempt={attempt} epoch={epoch} revive_disabled keeping_session"
+                        ));
+                        return;
+                    }
+                }
             }
             if attempt >= WETYPE_RETRY_MAX_ATTEMPT {
                 // 最后一轮仍未响应：放弃自动恢复，提示人工（唯一兜底）。
