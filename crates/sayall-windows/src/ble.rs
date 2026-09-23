@@ -726,7 +726,9 @@ fn worker_loop(
                 }
                 let chord_configured = lock(&voice_hold_hotkey).clone();
                 if let (Some(chord), Some(old)) = (chord_configured, held_hotkey.as_ref()) {
-                    let wetype_target = chord.is_wetype_default();
+                    let wetype_target = chord.is_wetype_default()
+                        && crate::send_input::voice_hold_target()
+                            == crate::send_input::VoiceHoldTarget::WeType;
                     if send_input.release(old).is_err() {
                         gatt_note(format!(
                             "chord_retry result=err reason=release_failed epoch={epoch}"
@@ -1591,7 +1593,9 @@ fn handle_control(
             // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
-                let wetype_target = chord.is_wetype_default();
+                let wetype_target = chord.is_wetype_default()
+                    && crate::send_input::voice_hold_target()
+                        == crate::send_input::VoiceHoldTarget::WeType;
                 let mic_baseline = if wetype_target {
                     wetype_mic_observation()
                 } else {

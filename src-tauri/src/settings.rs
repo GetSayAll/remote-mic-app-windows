@@ -1,5 +1,5 @@
 use sayall_core::{AppSettings, ThemePreference, UsageStatistics};
-use sayall_windows::send_input::{ButtonMappings, KeyChord};
+use sayall_windows::send_input::{ButtonMappings, KeyChord, VoiceHoldTarget};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -223,12 +223,42 @@ impl SettingsStore {
         Ok(hotkey)
     }
 
+    pub fn load_voice_hold_target(&self) -> Result<VoiceHoldTarget, String> {
+        let _guard = lock(&self.access);
+        let path = self.voice_hold_target_path();
+        match fs::read_to_string(path) {
+            Ok(contents) => serde_json::from_str(&contents)
+                .map_err(|error| format!("解析语音输入目标失败：{error}")),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(VoiceHoldTarget::default()),
+            Err(error) => Err(format!("读取语音输入目标失败：{error}")),
+        }
+    }
+
+    pub fn save_voice_hold_target(
+        &self,
+        target: VoiceHoldTarget,
+    ) -> Result<VoiceHoldTarget, String> {
+        let _guard = lock(&self.access);
+        let path = self.voice_hold_target_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
+        }
+        let contents = serde_json::to_vec_pretty(&target)
+            .map_err(|error| format!("序列化语音输入目标失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("保存语音输入目标失败：{error}"))?;
+        Ok(target)
+    }
+
     fn button_mappings_path(&self) -> PathBuf {
         self.path.with_file_name("button-mappings.json")
     }
 
     fn voice_hold_hotkey_path(&self) -> PathBuf {
         self.path.with_file_name("voice-hold-hotkey.json")
+    }
+
+    fn voice_hold_target_path(&self) -> PathBuf {
+        self.path.with_file_name("voice-hold-target.json")
     }
 
     fn update(&self, operation: &str, update: impl FnOnce(&mut AppSettings)) -> Result<(), String> {

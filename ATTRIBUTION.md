@@ -160,7 +160,7 @@
 ## Chatterfly 语音输入适配（2026-09-23）
 
 - **腾讯 Chatterfly 官方站点**（`https://chatterfly.tencent.com/`，2026-09-23 访问）：确认 Windows 客户端定位为跨应用语音输入/表达助手，语音结果需要写入当前输入场景；未公开稳定的 Windows 注入协议或私有 IPC，因此本仓库只使用公开的麦克风选择、用户可见快捷键设置和 `SendInput`。
-- **公开内测体验资料**（IT之家 2026-09-18，`https://www.ithome.com/1/004/273.htm`；产品经理 2026-09-18，`https://www.woshipm.com/ai/6466022.html`）：资料称 Chatterfly Windows 语音输入默认以 Fn 唤起，并支持按住/松开语音输入且可在设置中改键。Fn 是键盘硬件层按键，不能通过 Windows 公共 `SendInput` 可靠生成；因此产品提供“Chatterfly（右 Alt）”预设，要求用户在 Chatterfly 内把语音输入改为右 Alt。该资料不是腾讯 API 文档，快捷键细节需以用户安装的内测版本为准。
+- **公开内测体验资料**（IT之家 2026-09-18，`https://www.ithome.com/1/004/273.htm`；产品经理 2026-09-18，`https://www.woshipm.com/ai/6466022.html`）：资料称 Chatterfly Windows 语音输入支持按住/松开语音输入且可在设置中改键。当前安装版本经用户确认使用左 Ctrl + 左 Win；该资料不是腾讯 API 文档，快捷键细节需以用户安装版本为准。
 - **适配边界**：Chatterfly 使用自定义快捷键时跳过 WeType 专属 TSF 激活和休眠恢复检测，避免切换第三方输入法或触发微信输入法诊断路径；仍沿用现有按下/释放成对注入、CABLE 音频路由和失败关闭语义。未读取 Chatterfly 私有配置、进程内存或内部协议。
 
 ## Windows 系统快捷键录入与锁屏动作（2026-09-10）

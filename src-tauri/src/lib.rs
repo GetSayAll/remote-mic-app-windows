@@ -1,7 +1,7 @@
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
 use sayall_windows::send_input::{
-    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
+    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot, VoiceHoldTarget,
 };
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
@@ -584,6 +584,30 @@ async fn set_voice_hold_hotkey(
         ),
     });
     result
+}
+
+#[tauri::command]
+fn get_voice_hold_target(state: tauri::State<'_, AppState>) -> VoiceHoldTarget {
+    let target = sayall_windows::send_input::voice_hold_target();
+    let _ = state.settings.load_voice_hold_target();
+    target
+}
+
+#[tauri::command]
+async fn set_voice_hold_target(
+    target: VoiceHoldTarget,
+    state: tauri::State<'_, AppState>,
+) -> Result<VoiceHoldTarget, String> {
+    let settings = state.settings.clone();
+    let saved =
+        tauri::async_runtime::spawn_blocking(move || settings.save_voice_hold_target(target))
+            .await
+            .map_err(|error| format!("保存语音输入目标任务失败：{error}"))??;
+    sayall_windows::send_input::set_voice_hold_target(saved);
+    sayall_windows::gatt_note(format!(
+        "voice_target action=save terminal_result=passed target={saved:?}"
+    ));
+    Ok(saved)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1313,6 +1337,11 @@ pub fn run() {
                 }
             }
 
+            match settings.load_voice_hold_target() {
+                Ok(target) => sayall_windows::send_input::set_voice_hold_target(target),
+                Err(error) => eprintln!("{error}"),
+            }
+
             #[cfg(not(windows))]
             let _ = saved_settings;
 
@@ -1404,6 +1433,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_voice_hold_target,
+        set_voice_hold_target,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -1447,6 +1478,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_voice_hold_target,
+        set_voice_hold_target,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

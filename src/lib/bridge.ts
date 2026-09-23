@@ -659,6 +659,18 @@ export async function getVoiceHoldHotkey(): Promise<KeyChord | null> {
   return invoke<KeyChord | null>("get_voice_hold_hotkey");
 }
 
+export type VoiceHoldTarget = "wetype" | "chatterfly";
+
+export async function getVoiceHoldTarget(): Promise<VoiceHoldTarget> {
+  if (!isTauriRuntime()) return "wetype";
+  return invoke<VoiceHoldTarget>("get_voice_hold_target");
+}
+
+export async function setVoiceHoldTarget(target: VoiceHoldTarget): Promise<VoiceHoldTarget> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法保存语音输入目标");
+  return invoke<VoiceHoldTarget>("set_voice_hold_target", { target });
+}
+
 export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyChord | null> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法保存按住说话快捷键");

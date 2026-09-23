@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -7,6 +8,35 @@ use thiserror::Error;
 use crate::raw_input::RemoteButton;
 
 const MAX_CHORD_KEYS: usize = 4;
+static VOICE_HOLD_TARGET: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceHoldTarget {
+    WeType,
+    Chatterfly,
+}
+
+impl Default for VoiceHoldTarget {
+    fn default() -> Self {
+        Self::WeType
+    }
+}
+
+pub fn voice_hold_target() -> VoiceHoldTarget {
+    if VOICE_HOLD_TARGET.load(Ordering::SeqCst) == 1 {
+        VoiceHoldTarget::Chatterfly
+    } else {
+        VoiceHoldTarget::WeType
+    }
+}
+
+pub fn set_voice_hold_target(target: VoiceHoldTarget) {
+    VOICE_HOLD_TARGET.store(
+        matches!(target, VoiceHoldTarget::Chatterfly) as u8,
+        Ordering::SeqCst,
+    );
+}
 
 /// Gap between consecutive edges of a held-chord submission (voice hold hotkey).
 ///

@@ -8,6 +8,7 @@ import type {
   KeyChord,
   PairedRemote,
   RuntimeSnapshot,
+  VoiceHoldTarget,
 } from "../lib/bridge";
 import {
   audioPhaseLabel,
@@ -17,12 +18,14 @@ import {
   getAudioSnapshot,
   getConnectionSnapshot,
   getVoiceHoldHotkey,
+  getVoiceHoldTarget,
   listAudioEndpoints,
   openVbCableDownloadPage,
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
   setVoiceHoldHotkey,
+  setVoiceHoldTarget,
   voiceHoldHotkeyLabel,
 } from "../lib/bridge";
 
@@ -67,31 +70,33 @@ const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
 const audioMessage = ref("尚未读取语音设备");
 const voiceHotkey = ref<KeyChord | null>(null);
+const voiceTarget = ref<VoiceHoldTarget>("wetype");
 const savingVoiceHotkey = ref(false);
 const voiceHotkeyMessage = ref("尚未读取快捷键设置");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
-const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
-  { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
-  { label: "Chatterfly（右 Alt）", keys: ["right_alt"] },
-  { label: "关闭", keys: [] },
+const voiceHotkeyPresets: Array<{ label: string; keys: string[]; target: VoiceHoldTarget }> = [
+  { label: "微信输入法（默认）", keys: ["left_control", "left_windows"], target: "wetype" },
+  { label: "Chatterfly（左 Ctrl + 左 Win）", keys: ["left_control", "left_windows"], target: "chatterfly" },
+  { label: "关闭", keys: [], target: "wetype" },
 ];
 
 const activeVoiceHotkeyKeys = computed(() =>
   voiceHotkey.value ? [...voiceHotkey.value.keys].sort().join("+") : "",
 );
 
-function presetIsActive(keys: string[]): boolean {
-  return [...keys].sort().join("+") === activeVoiceHotkeyKeys.value;
+function presetIsActive(keys: string[], target: VoiceHoldTarget): boolean {
+  return target === voiceTarget.value && [...keys].sort().join("+") === activeVoiceHotkeyKeys.value;
 }
 
-async function applyVoiceHotkey(keys: string[]) {
+async function applyVoiceHotkey(keys: string[], target: VoiceHoldTarget) {
   savingVoiceHotkey.value = true;
   voiceHotkeyMessage.value = "";
   try {
     voiceHotkey.value = await setVoiceHoldHotkey(
       keys.length ? { keys: [...keys] } : null,
     );
+    voiceTarget.value = await setVoiceHoldTarget(target);
     voiceHotkeyMessage.value = voiceHotkey.value
       ? `按住说话快捷键已设为 ${voiceHoldHotkeyLabel(voiceHotkey.value)}`
       : "按住说话快捷键已关闭，语音键仅输出语音";
@@ -106,6 +111,7 @@ async function applyVoiceHotkey(keys: string[]) {
 async function refreshVoiceHotkey() {
   try {
     voiceHotkey.value = await getVoiceHoldHotkey();
+    voiceTarget.value = await getVoiceHoldTarget();
   } catch (error) {
     voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
   }
@@ -414,10 +420,10 @@ onUnmounted(() => {
           <button
             v-for="preset in voiceHotkeyPresets"
             :key="preset.label"
-            :class="presetIsActive(preset.keys) ? 'primary-button' : 'secondary-button'"
+            :class="presetIsActive(preset.keys, preset.target) ? 'primary-button' : 'secondary-button'"
             type="button"
-            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys)"
-            @click="applyVoiceHotkey(preset.keys)"
+            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys, preset.target)"
+            @click="applyVoiceHotkey(preset.keys, preset.target)"
           >
             {{ preset.label }}
           </button>
@@ -435,10 +441,10 @@ onUnmounted(() => {
         <details class="usage-hint-details">
           <summary>Chatterfly 使用步骤（点开查看）</summary>
           <ol>
-            <li>在 Chatterfly 设置中，把“语音输入”触发键改为“右 Alt”，并选择按住说话、松开结束（不要使用默认 Fn 或双击 Alt）；</li>
-            <li>在 SayAll 这里选择“Chatterfly（右 Alt）”，语音设备选择 CABLE Input；</li>
+            <li>在 Chatterfly 设置中，把“语音输入”触发键设为“左 Ctrl + 左 Win”，并选择按住说话、松开结束；</li>
+            <li>在 SayAll 这里选择“Chatterfly（左 Ctrl + 左 Win）”，语音设备选择 CABLE Input；</li>
             <li>在 Chatterfly 的麦克风设置中选择 CABLE Output；若没有单独的选择项，把 Windows 默认录音设备设为 CABLE Output；</li>
-            <li>把光标放到目标文本框，按住遥控器语音键说话，松开后等待 Chatterfly 转写并上屏。Fn 是键盘硬件键，无法由 Windows 公共按键注入接口可靠模拟。</li>
+            <li>把光标放到目标文本框，按住遥控器语音键说话，松开后等待 Chatterfly 转写并上屏。</li>
           </ol>
         </details>
       </article>

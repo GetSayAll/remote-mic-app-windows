@@ -122,13 +122,12 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("offers the Chatterfly right-Alt preset and documents the hardware-Fn boundary", async () => {
+  it("offers the Chatterfly Ctrl-Win preset", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Chatterfly（右 Alt）");
-    expect(wrapper.text()).toContain("不要使用默认 Fn 或双击 Alt");
-    expect(wrapper.text()).toContain("Fn 是键盘硬件键");
+    expect(wrapper.text()).toContain("Chatterfly（左 Ctrl + 左 Win）");
+    expect(wrapper.text()).toContain("左 Ctrl + 左 Win");
     wrapper.unmount();
   });
 
