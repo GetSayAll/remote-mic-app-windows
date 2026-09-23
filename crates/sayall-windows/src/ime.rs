@@ -51,6 +51,18 @@ const WETYPE_PROFILE: GUID = GUID::from_u128(0x607fdf85_fcc8_4dbd_a365_41296f980
 /// Chatterfly TSF profile installed by the public Windows client.
 const CHATTERFLY_CLSID: GUID = GUID::from_u128(0x604a99e3_6d90_4571_824d_2639bd572f6c);
 const CHATTERFLY_PROFILE: GUID = GUID::from_u128(0xc16c250b_cf1c_4c58_b068_12aedbed610f);
+
+fn profile_label(profile: &TF_INPUTPROCESSORPROFILE) -> &'static str {
+    if profile.clsid == WETYPE_CLSID && profile.guidProfile == WETYPE_PROFILE {
+        "wetype"
+    } else if profile.clsid == CHATTERFLY_CLSID && profile.guidProfile == CHATTERFLY_PROFILE {
+        "chatterfly"
+    } else if profile.clsid == GUID::from_u128(0) {
+        "none"
+    } else {
+        "other"
+    }
+}
 const LANGID_ZH_CN: u16 = 0x0804;
 /// STA 激活线程的有界等待：正常 <10ms，500ms 只是防卡上限。
 const ACTIVATION_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -143,7 +155,7 @@ pub fn activate_wetype_session() -> Result<WeTypeActivation, String> {
 /// activation used for WeType can switch to it without touching private app
 /// state or changing the user's global input method preference.
 pub fn activate_chatterfly_session() -> Result<WeTypeActivation, String> {
-    activate_profile_session(CHATTERFLY_CLSID, CHATTERFLY_PROFILE, "Chatterfly")
+    activate_profile_session(CHATTERFLY_CLSID, CHATTERFLY_PROFILE, "chatterfly")
 }
 
 fn activate_profile_session(
@@ -328,7 +340,7 @@ fn foreground_process_name() -> Option<String> {
 /// （需要时）ActivateProfile + 重绑等待 → CoUninitialize。
 /// 全部调用在本线程内完成（无跨套间封送，无需消息泵）。
 fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
-    sta_ensure_profile(WETYPE_CLSID, WETYPE_PROFILE, "WeType")
+    sta_ensure_profile(WETYPE_CLSID, WETYPE_PROFILE, "wetype")
 }
 
 fn sta_ensure_profile(
@@ -355,17 +367,21 @@ fn sta_ensure_profile(
             .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
             let mut profile = TF_INPUTPROCESSORPROFILE::default();
             let query = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile);
-            let active_is_wetype = match &query {
+            let active_is_target = match &query {
                 Ok(()) => profile.clsid == target_clsid && profile.guidProfile == target_profile,
                 Err(_) => false,
             };
             // 功能点日志：只记录冷/热判定，不落盘输入法 GUID 或前台应用身份。
             crate::ble::gatt_note(format!(
-                "ime_query target={target_name} ok={} active_is_target={active_is_wetype} active_profile_present={}",
+                "ime_query target={target_name} ok={} active_is_target={active_is_target} active_profile={}",
                 query.is_ok(),
-                profile.clsid != GUID::from_u128(0),
+                if query.is_ok() { profile_label(&profile) } else { "unknown" },
             ));
-            if active_is_wetype {
+            if active_is_target {
+                crate::ble::gatt_note(format!(
+                    "ime_readback target={target_name} phase=already_active query_ok=true active_profile={} matched=true",
+                    profile_label(&profile),
+                ));
                 return Ok(WeTypeActivation::AlreadyActive);
             }
             manager
@@ -380,9 +396,38 @@ fn sta_ensure_profile(
                 .map_err(|error| format!("激活 {target_name} 会话失败：{error}"))?;
             // 冷切换：等目标应用完成输入法会话重绑再放行注入。
             std::thread::sleep(SESSION_REBIND_SETTLE);
+            let mut observed = TF_INPUTPROCESSORPROFILE::default();
+            let readback = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut observed);
+            let matched = readback.is_ok()
+                && observed.clsid == target_clsid
+                && observed.guidProfile == target_profile;
+            crate::ble::gatt_note(format!(
+                "ime_readback target={target_name} phase=after_activation query_ok={} active_profile={} matched={matched}",
+                readback.is_ok(),
+                if readback.is_ok() { profile_label(&observed) } else { "unknown" },
+            ));
             Ok(WeTypeActivation::Switched)
         })();
         CoUninitialize();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_labels_only_identify_known_voice_targets() {
+        let mut profile = TF_INPUTPROCESSORPROFILE::default();
+        assert_eq!(profile_label(&profile), "none");
+        profile.clsid = WETYPE_CLSID;
+        profile.guidProfile = WETYPE_PROFILE;
+        assert_eq!(profile_label(&profile), "wetype");
+        profile.clsid = CHATTERFLY_CLSID;
+        profile.guidProfile = CHATTERFLY_PROFILE;
+        assert_eq!(profile_label(&profile), "chatterfly");
+        profile.guidProfile = WETYPE_PROFILE;
+        assert_eq!(profile_label(&profile), "other");
     }
 }
