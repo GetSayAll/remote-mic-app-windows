@@ -162,6 +162,7 @@
 - **腾讯 Chatterfly 官方站点**（`https://chatterfly.tencent.com/`，2026-09-23 访问）：确认 Windows 客户端定位为跨应用语音输入/表达助手，语音结果需要写入当前输入场景；未公开稳定的 Windows 注入协议或私有 IPC，因此本仓库只使用公开的麦克风选择、用户可见快捷键设置和 `SendInput`。
 - **公开内测体验资料**（IT之家 2026-09-18，`https://www.ithome.com/1/004/273.htm`；产品经理 2026-09-18，`https://www.woshipm.com/ai/6466022.html`）：资料称 Chatterfly Windows 语音输入支持按住/松开语音输入且可在设置中改键。当前安装版本经用户确认使用左 Ctrl + 左 Win；该资料不是腾讯 API 文档，快捷键细节需以用户安装版本为准。
 - **适配边界**：Chatterfly 通过 Windows 公开注册的 TSF profile 进行会话级激活（本机注册表描述为 Chatterfly），跳过 WeType 专属休眠恢复检测；仍沿用现有按下/释放成对注入、CABLE 音频路由和失败关闭语义。诊断日志只记录公开 TSF 的目标与读回分类，不记录第三方私有配置、进程内存或内部协议；TSF 读回不等同于 Chatterfly 已开麦或文字已上屏。
+- **模拟按键边界**：微软 `SendInput` 文档（`https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput`）只保证成功事件插入 Windows 输入流，不保证第三方快捷键消费；`KBDLLHOOKSTRUCT` 文档（`https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-kbdllhookstruct`）说明低级键盘钩子可区分注入事件。2026-09-23 本机实测 Chatterfly 对实体键可开麦，对多种 `SendInput` 左 Ctrl + 左 Win 组合不响应；过滤注入或 Raw Input 是可能解释，不是经第三方源码证实的事实。不得通过隐藏注入标志、私有协议或驱动绕过。
 
 ## Windows 系统快捷键录入与锁屏动作（2026-09-10）
 
