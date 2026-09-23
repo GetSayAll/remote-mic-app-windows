@@ -13,6 +13,7 @@ static VOICE_HOLD_TARGET: AtomicU8 = AtomicU8::new(0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceHoldTarget {
+    #[serde(rename = "wetype")]
     WeType,
     Chatterfly,
 }
@@ -954,6 +955,22 @@ mod tests {
         assert!(chord(&[KeyCode::LeftWindows, KeyCode::LeftControl]).is_wetype_default());
         assert!(!chord(&[KeyCode::RightAlt]).is_wetype_default());
         assert!(!chord(&[KeyCode::LeftControl, KeyCode::RightWindows]).is_wetype_default());
+    }
+
+    #[test]
+    fn voice_hold_target_uses_frontend_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&VoiceHoldTarget::WeType).unwrap(),
+            "\"wetype\""
+        );
+        assert_eq!(
+            serde_json::from_str::<VoiceHoldTarget>("\"wetype\"").unwrap(),
+            VoiceHoldTarget::WeType
+        );
+        assert_eq!(
+            serde_json::to_string(&VoiceHoldTarget::Chatterfly).unwrap(),
+            "\"chatterfly\""
+        );
     }
 
     #[test]
