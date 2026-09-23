@@ -80,6 +80,15 @@ SayAll 会记住用户选择的遥控器和语音设备，之后启动、临时�
 
 完成标准：按下遥控器语音键后输入法开始收音，松开后停止，并在当前文本框出现刚才说出的文字。
 
+### Chatterfly
+
+1. 在 Chatterfly 设置中把“语音输入”触发键改为“右 Alt”，并选择按住说话、松开结束。Chatterfly 默认的 Fn 属于键盘硬件键，Windows 公共 `SendInput` 接口无法可靠模拟，因此不能直接作为 SayAll 的注入目标。
+2. 在 SayAll 连接页选择“Chatterfly（右 Alt）”按住说话快捷键，并选择 `CABLE Input` 作为语音设备。
+3. 在 Chatterfly 的麦克风设置中选择 `CABLE Output`；若没有单独的麦克风选项，把 Windows 默认录音设备设为 `CABLE Output`。
+4. 把光标放到目标文本框，按住遥控器语音键说话，松开后等待 Chatterfly 转写并上屏。
+
+完成标准：按住遥控器语音键时 Chatterfly 开始收音，松开后停止，并在当前文本框出现转写结果。
+
 ### 其他软件
 
 - 软件的麦克风/输入设备选择 `CABLE Output`；

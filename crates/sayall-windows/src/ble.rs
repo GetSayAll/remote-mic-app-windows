@@ -726,6 +726,7 @@ fn worker_loop(
                 }
                 let chord_configured = lock(&voice_hold_hotkey).clone();
                 if let (Some(chord), Some(old)) = (chord_configured, held_hotkey.as_ref()) {
+                    let wetype_target = chord.is_wetype_default();
                     if send_input.release(old).is_err() {
                         gatt_note(format!(
                             "chord_retry result=err reason=release_failed epoch={epoch}"
@@ -739,14 +740,20 @@ fn worker_loop(
                                 "chord_retry result=ok attempt={attempt} epoch={epoch}"
                             ));
                             held_hotkey = Some(chord);
-                            spawn_wetype_check(
-                                &state,
-                                sender.clone(),
-                                attempt,
-                                epoch,
-                                &voice_session_epoch,
-                                retry_baseline,
-                            );
+                            if wetype_target {
+                                spawn_wetype_check(
+                                    &state,
+                                    sender.clone(),
+                                    attempt,
+                                    epoch,
+                                    &voice_session_epoch,
+                                    retry_baseline,
+                                );
+                            } else {
+                                gatt_note(format!(
+                                    "wetype_check skipped reason=non_wetype_hotkey attempt={attempt} epoch={epoch}"
+                                ));
+                            }
                         }
                         Err(_) => {
                             gatt_note(format!(
@@ -1584,13 +1591,19 @@ fn handle_control(
             // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
-                let mic_baseline = wetype_mic_observation();
-                // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
-                // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
-                // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
-                // 行为注入（不比现状更差）。
-                if let Err(error) = crate::ime::activate_wetype_session() {
-                    lock(state).last_error = Some(error);
+                let wetype_target = chord.is_wetype_default();
+                let mic_baseline = if wetype_target {
+                    wetype_mic_observation()
+                } else {
+                    None
+                };
+                // 会话级激活微信输入法：仅对内置微信输入法默认和弦
+                // 生效。Chatterfly 等其他工具使用自定义快捷键时不能
+                // 被切换到 WeType，也不能触发 WeType 休眠恢复。
+                if wetype_target {
+                    if let Err(error) = crate::ime::activate_wetype_session() {
+                        lock(state).last_error = Some(error);
+                    }
                 }
                 if let Err(error) = send_input.press(&chord) {
                     gatt_note(format!(
@@ -1611,21 +1624,28 @@ fn handle_control(
                 }
                 // 功能点日志：成功按下（含会话号，与 C 04 行对齐即可归因）。
                 gatt_note(format!(
-                    "chord_press result=ok session={session_id} gap_ms={}",
+                    "chord_press result=ok session={session_id} target={} gap_ms={}",
+                    if wetype_target { "wetype" } else { "generic" },
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
                 *held_hotkey = Some(chord);
-                // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
-                // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
-                // 传入，防旧阶梯跨会话误伤新会话的和弦。
-                spawn_wetype_check(
-                    state,
-                    sender.clone(),
-                    0,
-                    epoch,
-                    voice_session_epoch,
-                    mic_baseline,
-                );
+                if wetype_target {
+                    // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
+                    // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
+                    // 传入，防旧阶梯跨会话误伤新会话的和弦。
+                    spawn_wetype_check(
+                        state,
+                        sender.clone(),
+                        0,
+                        epoch,
+                        voice_session_epoch,
+                        mic_baseline,
+                    );
+                } else {
+                    gatt_note(format!(
+                        "wetype_check skipped reason=non_wetype_hotkey session={session_id}"
+                    ));
+                }
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(

@@ -246,6 +246,17 @@ pub struct KeyChord {
     pub keys: Vec<KeyCode>,
 }
 
+impl KeyChord {
+    /// Whether this chord is the legacy WeType default used by the built-in
+    /// 微信输入法 preset. Other voice tools (for example Chatterfly) must
+    /// not receive WeType-specific TSF activation or recovery attempts.
+    pub fn is_wetype_default(&self) -> bool {
+        self.keys.len() == 2
+            && self.keys.contains(&KeyCode::LeftControl)
+            && self.keys.contains(&KeyCode::LeftWindows)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ButtonAction {
@@ -905,6 +916,14 @@ mod tests {
         KeyChord {
             keys: keys.to_vec(),
         }
+    }
+
+    #[test]
+    fn recognizes_only_the_wechat_voice_chord_for_wetype_specific_recovery() {
+        assert!(chord(&[KeyCode::LeftControl, KeyCode::LeftWindows]).is_wetype_default());
+        assert!(chord(&[KeyCode::LeftWindows, KeyCode::LeftControl]).is_wetype_default());
+        assert!(!chord(&[KeyCode::RightAlt]).is_wetype_default());
+        assert!(!chord(&[KeyCode::LeftControl, KeyCode::RightWindows]).is_wetype_default());
     }
 
     #[test]

@@ -122,6 +122,16 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
+  it("offers the Chatterfly right-Alt preset and documents the hardware-Fn boundary", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Chatterfly（右 Alt）");
+    expect(wrapper.text()).toContain("不要使用默认 Fn 或双击 Alt");
+    expect(wrapper.text()).toContain("Fn 是键盘硬件键");
+    wrapper.unmount();
+  });
+
   it("automatically selects the only VB-CABLE endpoint when no endpoint was configured", async () => {
     mocks.endpoints = [cableEndpoint];
     const wrapper = mount(ConnectionPage, { props: { runtime } });

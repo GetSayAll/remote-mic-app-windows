@@ -73,6 +73,7 @@ let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
   { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
+  { label: "Chatterfly（右 Alt）", keys: ["right_alt"] },
   { label: "关闭", keys: [] },
 ];
 
@@ -408,7 +409,7 @@ onUnmounted(() => {
             <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
           </div>
         </div>
-        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：左 Ctrl + 左 Win。</p>
+        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法、Chatterfly 等工具转成文字。默认快捷键：左 Ctrl + 左 Win。</p>
         <div class="button-row voice-hotkey-presets">
           <button
             v-for="preset in voiceHotkeyPresets"
@@ -431,13 +432,22 @@ onUnmounted(() => {
             <li>按住遥控器语音键约半秒以上再说话，松开后等待文字出现（需要联网）。快速点按不出文字是微信输入法自己的最短按住要求，不是故障。遥控器语音键自带的 F5 按键会被应用自动屏蔽，物理键盘的 F5 不受影响。</li>
           </ol>
         </details>
+        <details class="usage-hint-details">
+          <summary>Chatterfly 使用步骤（点开查看）</summary>
+          <ol>
+            <li>在 Chatterfly 设置中，把“语音输入”触发键改为“右 Alt”，并选择按住说话、松开结束（不要使用默认 Fn 或双击 Alt）；</li>
+            <li>在 SayAll 这里选择“Chatterfly（右 Alt）”，语音设备选择 CABLE Input；</li>
+            <li>在 Chatterfly 的麦克风设置中选择 CABLE Output；若没有单独的选择项，把 Windows 默认录音设备设为 CABLE Output；</li>
+            <li>把光标放到目标文本框，按住遥控器语音键说话，松开后等待 Chatterfly 转写并上屏。Fn 是键盘硬件键，无法由 Windows 公共按键注入接口可靠模拟。</li>
+          </ol>
+        </details>
       </article>
 
       <article class="card">
         <div class="card-title-row">
           <div>
             <h2>语音设备</h2>
-            <p class="muted">选择语音写入的设备。使用微信输入法请选 CABLE Input。</p>
+            <p class="muted">选择语音写入的设备。使用微信输入法或 Chatterfly 请选 CABLE Input。</p>
           </div>
           <button
             class="secondary-button"
@@ -476,7 +486,7 @@ onUnmounted(() => {
           <li v-for="endpoint in audioEndpoints" :key="endpoint.id">
             <div>
               <strong>{{ endpoint.name }}</strong>
-              <small>{{ endpoint.isVirtualCableCandidate ? "推荐（微信输入法等语音工具使用）" : "其他音频设备" }}</small>
+            <small>{{ endpoint.isVirtualCableCandidate ? "推荐（微信输入法、Chatterfly 等语音工具使用）" : "其他音频设备" }}</small>
             </div>
             <button
               type="button"
@@ -520,7 +530,7 @@ onUnmounted(() => {
             wasapiReady
               ? "语音设备已就绪。"
               : virtualCableInstalled
-                ? "已检测到 VB-CABLE。这里选择 CABLE Input；在微信输入法的语音设置里选择 CABLE Output。"
+                ? "已检测到 VB-CABLE。这里选择 CABLE Input；在微信输入法或 Chatterfly 的麦克风设置里选择 CABLE Output。"
                 : "正在检测 VB-CABLE…"
           }}
         </div>
