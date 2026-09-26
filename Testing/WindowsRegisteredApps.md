@@ -9,6 +9,14 @@
 cargo test -p sayall-windows registered_apps
 ```
 
+使用本机已安装注册应用做前台副作用探针（会切换桌面前台）：
+
+```powershell
+$env:SAYALL_TEST_REGISTERED_APP_TARGET = 'shell:AppsFolder\<AUMID>'
+cargo test -p sayall-windows configured_registered_app_reaches_observed_foreground -- --ignored
+Remove-Item Env:SAYALL_TEST_REGISTERED_APP_TARGET
+```
+
 ## 功能验收
 
 - 验证应用库扫描、搜索、多选、全选、扫描失败重试，以及保存、导入和导出。
@@ -18,6 +26,8 @@ cargo test -p sayall-windows registered_apps
   最小化时再次按映射键，窗口也应恢复并成为前台，不能只在任务栏闪烁。诊断日志
   应以 `target_result=foreground_observed` 作为成功终态；`SetForegroundWindow`
   单独返回成功不算通过。
+- 对 MSIX/Electron 等多进程应用，验收按精确 AUMID 关联整组进程，不能只把激活
+  契约返回的单个 PID 当作主窗口进程。
 - 物理 Alt 正在按住时触发映射，应用不得注入 Alt UP 破坏用户键态；日志应记录
   `physical_alt_held=true`，若 Windows 因此前台拒绝则明确失败，不得误报成功。
 - 分别用 RC001、RC003 验证实体按键与已有设置保持不变。

@@ -158,23 +158,39 @@ pub fn scan_registered_apps() -> Result<Vec<CustomAppPick>, String> {
     Err("仅 Windows 支持应用扫描".into())
 }
 
+fn classify_registered_launch(submitted: bool, foreground_observed: bool) -> Result<(), String> {
+    match (submitted, foreground_observed) {
+        (true, true) => Ok(()),
+        (true, false) => Err("应用已启动，但 Windows 未将其窗口切换到前台".into()),
+        (false, _) => Err("Windows 未接受应用启动请求".into()),
+    }
+}
+
 #[cfg(windows)]
 pub fn launch_registered_app(target: &str) -> Result<(), String> {
     if !is_registered_target(target) {
         return Err("无效的 Windows 应用目标".into());
     }
-    let target = target.to_owned();
+    let app_user_model_id = target
+        .strip_prefix(REGISTERED_PREFIX)
+        .expect("registered target was validated")
+        .to_owned();
+    let shell_target = target.to_owned();
     crate::gatt_note("registered_app_launch phase=requested".to_owned());
     let started = std::time::Instant::now();
     let result = std::thread::Builder::new()
         .name("sayall-registered-launch".into())
         .spawn(move || {
             use windows::core::{w, PCWSTR};
+            use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::Com::{
-                CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_APARTMENTTHREADED,
             };
             use windows::Win32::UI::Shell::{
-                ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW,
+                ApplicationActivationManager, IApplicationActivationManager, ShellExecuteExW,
+                AO_NONE, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOASYNC,
+                SHELLEXECUTEINFOW,
             };
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
             unsafe {
@@ -182,37 +198,144 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                     .ok()
                     .map_err(|e| e.to_string())?;
             }
-            let wide: Vec<_> = target.encode_utf16().chain(Some(0)).collect();
-            let mut info = SHELLEXECUTEINFOW {
-                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-                fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
-                lpVerb: w!("open"),
-                lpFile: PCWSTR(wide.as_ptr()),
-                nShow: SW_SHOWNORMAL.0,
-                ..Default::default()
+
+            let id_wide: Vec<_> = app_user_model_id.encode_utf16().chain(Some(0)).collect();
+            let activation = (|| -> windows::core::Result<u32> {
+                let manager: IApplicationActivationManager = unsafe {
+                    CoCreateInstance(
+                        &ApplicationActivationManager,
+                        None,
+                        CLSCTX_INPROC_SERVER,
+                    )?
+                };
+                let (result, unlock) = crate::app_launcher::with_alt_foreground_unlock(|| unsafe {
+                    manager.ActivateApplication(PCWSTR(id_wide.as_ptr()), PCWSTR::null(), AO_NONE)
+                });
+                crate::gatt_note(format!(
+                    "registered_app_launch phase=activation_contract method=application_activation_manager terminal_result={} alt_unlock_submitted={} physical_alt_held={}",
+                    if result.is_ok() { "submitted" } else { "failed" },
+                    unlock.pair_submitted,
+                    unlock.physical_alt_held
+                ));
+                result
+            })();
+
+            let (method, submitted, pid) = match activation {
+                Ok(pid) => ("application_activation_manager", true, Some(pid)),
+                Err(_) => {
+                    // AppsFolder 也可能含传统桌面注册项；激活契约不支持时保留
+                    // ShellExecuteEx 回退，并尽量从进程句柄取得 PID 做同样的读回。
+                    let wide: Vec<_> = shell_target.encode_utf16().chain(Some(0)).collect();
+                    let mut info = SHELLEXECUTEINFOW {
+                        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                        fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS,
+                        lpVerb: w!("open"),
+                        lpFile: PCWSTR(wide.as_ptr()),
+                        nShow: SW_SHOWNORMAL.0,
+                        ..Default::default()
+                    };
+                    let (shell_result, unlock) =
+                        crate::app_launcher::with_alt_foreground_unlock(|| unsafe {
+                            ShellExecuteExW(&mut info).map_err(|e| e.to_string())
+                        });
+                    let pid = if !info.hProcess.is_invalid() {
+                        let pid = unsafe {
+                            windows::Win32::System::Threading::GetProcessId(info.hProcess)
+                        };
+                        unsafe {
+                            let _ = CloseHandle(info.hProcess);
+                        }
+                        (pid != 0).then_some(pid)
+                    } else {
+                        None
+                    };
+                    crate::gatt_note(format!(
+                        "registered_app_launch phase=activation_contract method=shell_fallback terminal_result={} pid_available={} alt_unlock_submitted={} physical_alt_held={}",
+                        if shell_result.is_ok() { "submitted" } else { "failed" },
+                        pid.is_some(),
+                        unlock.pair_submitted,
+                        unlock.physical_alt_held
+                    ));
+                    ("shell_fallback", shell_result.is_ok(), pid)
+                }
             };
-            let (result, unlock) = crate::app_launcher::with_alt_foreground_unlock(|| {
-                unsafe { ShellExecuteExW(&mut info) }.map_err(|e| e.to_string())
+
+            let foreground_observed = pid.is_some_and(|pid| {
+                observe_registered_foreground(
+                    pid,
+                    &app_user_model_id,
+                    method == "shell_fallback",
+                )
             });
             crate::gatt_note(format!(
-                "registered_app_launch phase=foreground_handoff alt_unlock_submitted={} physical_alt_held={}",
-                unlock.pair_submitted, unlock.physical_alt_held
+                "registered_app_launch phase=foreground_readback method={method} pid_available={} target_result={}",
+                pid.is_some(),
+                if foreground_observed { "foreground_observed" } else { "foreground_denied" }
             ));
             unsafe {
                 CoUninitialize();
             }
-            result
+            classify_registered_launch(submitted, foreground_observed)
         })
         .map_err(|e| e.to_string())?
         .join()
         .unwrap_or_else(|_| Err("启动线程异常退出".into()));
-    crate::gatt_note(format!("registered_app_launch phase=completed terminal_result={} target_result=unknown elapsed_ms={}", if result.is_ok() { "submitted" } else { "failed" }, started.elapsed().as_millis()));
+    crate::gatt_note(format!(
+        "registered_app_launch phase=completed terminal_result={} target_result={} elapsed_ms={}",
+        if result.is_ok() { "passed" } else { "failed" },
+        if result.is_ok() {
+            "foreground_observed"
+        } else {
+            "foreground_denied"
+        },
+        started.elapsed().as_millis()
+    ));
     result
+}
+
+#[cfg(windows)]
+fn observe_registered_foreground(
+    pid: u32,
+    app_user_model_id: &str,
+    allow_pid_fallback: bool,
+) -> bool {
+    // 冷启动时窗口创建晚于激活契约返回。等待窗口出现并以有限次数尝试恢复/前置；
+    // 每次都由 GetForegroundWindow + PID 读回确认，而不是相信 API 返回值。
+    for delay_ms in [0, 50, 100, 250, 500, 1000] {
+        if delay_ms != 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+        if crate::app_launcher::activate_application_window(app_user_model_id)
+            || (allow_pid_fallback
+                && (crate::app_launcher::process_is_foreground(pid)
+                    || crate::app_launcher::activate_process_window(pid)))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_launch_requires_observed_foreground() {
+        assert!(classify_registered_launch(true, false).is_err());
+        assert!(classify_registered_launch(false, false).is_err());
+        assert!(classify_registered_launch(true, true).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an installed registered app and changes the desktop foreground"]
+    fn configured_registered_app_reaches_observed_foreground() {
+        let target = std::env::var("SAYALL_TEST_REGISTERED_APP_TARGET")
+            .expect("set SAYALL_TEST_REGISTERED_APP_TARGET to an AppsFolder target");
+        launch_registered_app(&target).expect("registered app should reach observed foreground");
+    }
+
     #[test]
     fn library_deduplicates_targets_and_rejects_commands() {
         let app = CustomAppPick {

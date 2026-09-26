@@ -167,6 +167,21 @@
 
 外部实现只作为带来源的参考。第三方应用进程注入、私有配置读取和来源不明二进制不进入稳定主路径。
 
+## Windows 注册应用激活与前台验收（2026-09-26）
+
+- **`IApplicationActivationManager::ActivateApplication`**：微软文档定义它按 AUMID
+  激活当前会话中的通用启动契约，并返回承接契约的进程 ID。本仓库用它替代 AppsFolder
+  路径中仅投递 `ShellExecuteExW` 的主路径；传统桌面注册项仍保留 Shell 回退。官方依据：
+  `learn.microsoft.com/windows/win32/api/shobjidl_core/nf-shobjidl_core-iapplicationactivationmanager-activateapplication`。
+- **AUMID 与多进程应用**：微软说明 AUMID 用于把应用的窗口、进程和资源关联起来，
+  不依赖应用内部是单进程还是多进程；`GetApplicationUserModelId` 可从公开进程句柄读取
+  该身份。因此不能假定激活契约 PID 就是主窗口 PID，本仓库按精确 AUMID 枚举进程后
+  再以 `GetForegroundWindow` 读回验收。官方依据：
+  `learn.microsoft.com/windows/apps/desktop/modernize/package-identity-overview`、
+  `learn.microsoft.com/windows/win32/appxpkg/functions`。
+- **边界**：只读取 Windows 公开的应用身份，不读取 ChatGPT 或其他第三方应用的私有
+  配置、数据库或进程内存；日志不记录 AUMID、窗口标题、路径或应用名称。
+
 ## Windows 系统快捷键录入与锁屏动作（2026-09-10）
 
 - **执行端**：微软 `SendInput` 文档说明它把事件串行插入输入流、受 UIPI 与当前键态影响；`LockWorkStation` 是交互桌面进程可调用的公开锁屏 API，成功返回只表示异步锁屏请求已发起。Hooks 文档说明全局钩子事件局限于调用线程所在桌面。按键映射中的精确 `Win+L` 因而先等待实体键释放、由门控成对处理 DOWN/UP，再调用 `LockWorkStation`；其他快捷键仍走既有 `SendInput` 并保持按下即响应。官方依据：`learn.microsoft.com/windows/win32/api/winuser/nf-winuser-sendinput`、`learn.microsoft.com/windows/win32/api/winuser/nf-winuser-lockworkstation`、`learn.microsoft.com/windows/win32/winmsg/hooks`。

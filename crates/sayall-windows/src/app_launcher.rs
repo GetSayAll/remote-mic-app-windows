@@ -386,9 +386,6 @@ fn drive_foreground_activation(
 fn activate_running(exe_names: &[&str]) -> RunningActivation {
     use std::collections::HashSet;
 
-    use windows::Win32::Foundation::LPARAM;
-    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
-
     let wanted: HashSet<String> = exe_names
         .iter()
         .map(|name| name.to_ascii_lowercase())
@@ -427,10 +424,104 @@ fn activate_running(exe_names: &[&str]) -> RunningActivation {
         return RunningActivation::NotFound;
     }
 
+    activate_process_windows(&pids)
+}
+
+/// 按 Windows 激活契约返回的 PID 查找主窗口，并以与普通 EXE 相同的读回判据
+/// 恢复/前置。注册应用的启动提交成功不代表窗口已经到了前台。
+#[cfg(windows)]
+pub(crate) fn activate_process_window(pid: u32) -> bool {
+    let pids = std::collections::HashSet::from([pid]);
+    matches!(
+        activate_process_windows(&pids),
+        RunningActivation::Activated(_)
+    )
+}
+
+/// AUMID 是 Windows 用来把一个应用的多个进程和窗口关联起来的公开身份。
+/// Electron/MSIX 应用的激活契约 PID 可能不是拥有主窗口的 PID，因此按精确
+/// AUMID 收集同一应用的进程后再激活，不能只盯契约返回的单个进程。
+#[cfg(windows)]
+pub(crate) fn activate_application_window(app_user_model_id: &str) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
+    let mut pids = std::collections::HashSet::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        if process_app_user_model_id(entry.th32ProcessID)
+            .is_some_and(|value| value.eq_ignore_ascii_case(app_user_model_id))
+        {
+            pids.insert(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    !pids.is_empty()
+        && matches!(
+            activate_process_windows(&pids),
+            RunningActivation::Activated(_)
+        )
+}
+
+#[cfg(windows)]
+fn process_app_user_model_id(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let result = (|| {
+        let mut length = 0u32;
+        if unsafe { GetApplicationUserModelId(process, &mut length, None) }
+            != ERROR_INSUFFICIENT_BUFFER
+            || !(2..=4096).contains(&length)
+        {
+            return None;
+        }
+        let mut buffer = vec![0u16; length as usize];
+        if unsafe {
+            GetApplicationUserModelId(process, &mut length, Some(PWSTR(buffer.as_mut_ptr())))
+        } != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let used = buffer.iter().position(|value| *value == 0)?;
+        String::from_utf16(&buffer[..used]).ok()
+    })();
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    result
+}
+
+#[cfg(windows)]
+pub(crate) fn process_is_foreground(pid: u32) -> bool {
+    unsafe { win_impl::foreground_belongs_to(pid) }
+}
+
+#[cfg(windows)]
+fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningActivation {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
     // 枚举顶层窗口：找到目标进程的主窗口（无所有者、非工具窗口）→ 恢复/显示
     // 并强制置前。先优先可见窗口；若只在托盘隐藏，则退而激活隐藏主窗口。
     let mut context = EnumContext {
-        pids: &pids,
+        pids,
         activation: None,
         hidden_candidate: None,
     };
@@ -626,7 +717,7 @@ mod win_impl {
         }
     }
 
-    unsafe fn foreground_belongs_to(target_pid: u32) -> bool {
+    pub(crate) unsafe fn foreground_belongs_to(target_pid: u32) -> bool {
         let foreground = GetForegroundWindow();
         if foreground.0.is_null() {
             return false;
