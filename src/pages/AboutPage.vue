@@ -193,7 +193,7 @@ onMounted(() => {
       <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
     </article>
 
-    <article class="card">
+    <article class="card startup-card">
       <h2>启动行为</h2>
       <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
       <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
@@ -320,6 +320,10 @@ onMounted(() => {
 /* 初值就绪前用同尺寸占位符顶位，避免开关出现时布局跳动；开关本体仅在
    终值就绪后创建，创建即带正确 checked，不产生关→开滑动过渡。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
+/* 启动行为与软件更新是两组独立设置（一个是登录自启动、一个是更新通道与手动
+   检查），贴在一起会读成同一张卡的两段。数值与上方 about-card /
+   appearance-card 的堆叠间距一致，保持整页节奏统一。 */
+.startup-card { margin-bottom: 12px; }
 /* 日志目录入口与上面的摘要动作分组：摘要随时可生成，日志目录是"已经出问题、
    要取证"时才走的路，靠分隔线和一行说明避免被当成同一组按钮。 */
 .log-directory-block {

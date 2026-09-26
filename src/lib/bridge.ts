@@ -435,6 +435,19 @@ export async function openLogDirectory(): Promise<string> {
   return invoke<string>("open_log_directory");
 }
 
+/**
+ * Ctrl+W：关闭主窗口——隐藏到托盘驻留，语义与点标题栏“X”完全一致。
+ *
+ * 有意**不**调用 `@tauri-apps/api` 的 `getCurrentWindow().close()`：那条路径在
+ * Windows 上究竟是触发 `CloseRequested`（→ Rust 侧 `prevent_close` + hide，
+ * 即隐藏到托盘）还是直接销毁窗口，取决于 tao 的平台实现细节，跨版本可能静默
+ * 改变语义；这里显式调 Rust 命令，动作与“X”的收尾是同一行代码。
+ */
+export async function hideMainWindow(): Promise<void> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法关闭窗口");
+  await invoke("hide_main_window");
+}
+
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法读取已配对设备");
