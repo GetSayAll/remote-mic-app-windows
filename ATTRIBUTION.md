@@ -13,6 +13,16 @@
 
 - 应用发现使用 Microsoft AppsFolder / IShellItem / BHID_EnumItems，启动使用 ShellExecuteExW + SEE_MASK_NOASYNC；只读取系统公开注册的可启动项，不扫描第三方私有文件或修改 Windows 注册。按本机缓存的 Microsoft windows-rs 0.62.2 API 签名核对实现；没有复制外部算法。参考： https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid 、https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow 。
 - 应用库仅保存在用户确认后的按键配置中；扫描不是启动，多选添加不是绑定。日志只记录数量、阶段和耗时，不记录应用身份或个人路径。验收方法见 `Testing/WindowsRegisteredApps.md`。
+- 前台切换依据 Microsoft `SetForegroundWindow` / `GetForegroundWindow` /
+  `LockSetForegroundWindow` / `AttachThreadInput` 公共 API 文档：Windows 即使满足常规
+  条件仍可拒绝后台进程抢前台，并改为闪烁任务栏；`AttachThreadInput` 只共享输入状态，
+  不承诺绕过 foreground lock；用户按 Alt 会解除该锁。本仓库因此以
+  `GetForegroundWindow` 所属进程读回作为唯一成功判据，常规尝试读回失败后才用成对
+  Alt DOWN/UP 包住一次重试，物理 Alt 已按住时跳过，避免破坏用户键态。官方依据：
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow 、
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getforegroundwindow 、
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-locksetforegroundwindow 、
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-attachthreadinput 。
 
 ## 遥控器缓存电量显示
 

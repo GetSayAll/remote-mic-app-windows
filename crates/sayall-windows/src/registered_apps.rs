@@ -191,7 +191,13 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 nShow: SW_SHOWNORMAL.0,
                 ..Default::default()
             };
-            let result = unsafe { ShellExecuteExW(&mut info) }.map_err(|e| e.to_string());
+            let (result, unlock) = crate::app_launcher::with_alt_foreground_unlock(|| {
+                unsafe { ShellExecuteExW(&mut info) }.map_err(|e| e.to_string())
+            });
+            crate::gatt_note(format!(
+                "registered_app_launch phase=foreground_handoff alt_unlock_submitted={} physical_alt_held={}",
+                unlock.pair_submitted, unlock.physical_alt_held
+            ));
             unsafe {
                 CoUninitialize();
             }

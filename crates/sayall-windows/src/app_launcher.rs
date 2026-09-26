@@ -149,12 +149,13 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
     if let Some(app) = preset_app(id) {
         if app.id == "sayall" {
             // 自身：恒已运行；激活失败（窗口隐藏等）时用自身 exe 路径重启拉起。
-            if activate_running(app.exe_names) {
-                // `activate_running` 对隐藏的自身窗口用 Win32 `ShowWindow` 显示它
-                // （同步生效，其后抢前台才有意义），这会让 tao 的
-                // `WindowFlags::VISIBLE` 缓存停在 false。必须立刻请宿主同步一次
-                // （tao `window.show()`，幂等），否则随后点 X 的 `window.hide()`
-                // 会因"无差异"被整个跳过 —— 窗口关不进托盘（2026-09-16 实测）。
+            let activation = activate_running(app.exe_names);
+            // `activate_running` 对隐藏的自身窗口用 Win32 `ShowWindow` 显示它
+            // （同步生效，其后抢前台才有意义），这会让 tao 的
+            // `WindowFlags::VISIBLE` 缓存停在 false。只要找到窗口就必须同步，
+            // 即使 Windows 最终拒绝前台切换；否则窗口已显示但随后点 X 时
+            // `window.hide()` 仍会因"无差异"被跳过（2026-09-16 实测）。
+            if !matches!(activation, RunningActivation::NotFound) {
                 if let Some(sync) = SELF_SHOW_SYNC.get() {
                     sync();
                     crate::ble::gatt_note(
@@ -162,14 +163,24 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                             .to_owned(),
                     );
                 }
-                return Ok(());
+            }
+            match activation {
+                RunningActivation::Activated(_) => return Ok(()),
+                RunningActivation::ForegroundDenied => {
+                    return Err("Windows 拒绝将无线麦窗口切换到前台".to_owned());
+                }
+                RunningActivation::NotFound => {}
             }
             let exe =
                 std::env::current_exe().map_err(|error| format!("获取自身路径失败：{error}"))?;
             return launch_explicit(&exe.to_string_lossy(), None, None);
         }
-        if activate_running(app.exe_names) {
-            return Ok(());
+        match activate_running(app.exe_names) {
+            RunningActivation::Activated(_) => return Ok(()),
+            RunningActivation::ForegroundDenied => {
+                return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+            }
+            RunningActivation::NotFound => {}
         }
         return launch_new(app.exe_names);
     }
@@ -183,8 +194,12 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if activate_running(&[&exe_name]) {
-                return Ok(());
+            match activate_running(&[&exe_name]) {
+                RunningActivation::Activated(_) => return Ok(()),
+                RunningActivation::ForegroundDenied => {
+                    return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+                }
+                RunningActivation::NotFound => {}
             }
             return launch_explicit(id, None, None);
         }
@@ -194,8 +209,12 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default();
-                if activate_running(&[&exe_name]) {
-                    return Ok(());
+                match activate_running(&[&exe_name]) {
+                    RunningActivation::Activated(_) => return Ok(()),
+                    RunningActivation::ForegroundDenied => {
+                        return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+                    }
+                    RunningActivation::NotFound => {}
                 }
                 let arguments =
                     (!resolved.arguments.is_empty()).then_some(resolved.arguments.clone());
@@ -314,9 +333,57 @@ fn app_paths_key_exists(exe: &str) -> bool {
     false
 }
 
-/// 已运行 → 恢复窗口并前置。返回是否找到并激活了窗口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunningActivation {
+    NotFound,
+    Activated(ForegroundActivationOutcome),
+    ForegroundDenied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForegroundAttempt {
+    set_foreground_ok: bool,
+    target_is_foreground: bool,
+    alt_unlock_submitted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForegroundActivationOutcome {
+    activated: bool,
+    attempt_count: u8,
+    alt_unlock_submitted: bool,
+    last_set_foreground_ok: bool,
+}
+
+/// 第一次按常规公开 API 激活；若 Windows 只闪任务栏、前台读回仍不是目标进程，
+/// 再用一次成对 Alt 边沿解除 foreground lock 后重试。API 布尔值只作诊断，
+/// 最终成功判据必须是 `GetForegroundWindow` 读回属于目标进程。
+fn drive_foreground_activation(
+    mut attempt: impl FnMut(bool) -> ForegroundAttempt,
+) -> ForegroundActivationOutcome {
+    let first = attempt(false);
+    if first.target_is_foreground {
+        return ForegroundActivationOutcome {
+            activated: true,
+            attempt_count: 1,
+            alt_unlock_submitted: false,
+            last_set_foreground_ok: first.set_foreground_ok,
+        };
+    }
+
+    let retry = attempt(true);
+    ForegroundActivationOutcome {
+        activated: retry.target_is_foreground,
+        attempt_count: 2,
+        alt_unlock_submitted: retry.alt_unlock_submitted,
+        last_set_foreground_ok: retry.set_foreground_ok,
+    }
+}
+
+/// 已运行 → 恢复窗口并前置。区分“未找到”与“找到但 Windows 拒绝前置”，
+/// 防止后者被误报为成功或错误地再启动一个实例。
 #[cfg(windows)]
-fn activate_running(exe_names: &[&str]) -> bool {
+fn activate_running(exe_names: &[&str]) -> RunningActivation {
     use std::collections::HashSet;
 
     use windows::Win32::Foundation::LPARAM;
@@ -335,7 +402,7 @@ fn activate_running(exe_names: &[&str]) -> bool {
             TH32CS_SNAPPROCESS,
         };
         let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
-            return false;
+            return RunningActivation::NotFound;
         };
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -357,14 +424,14 @@ fn activate_running(exe_names: &[&str]) -> bool {
         let _ = windows::Win32::Foundation::CloseHandle(snapshot);
     }
     if pids.is_empty() {
-        return false;
+        return RunningActivation::NotFound;
     }
 
     // 枚举顶层窗口：找到目标进程的主窗口（无所有者、非工具窗口）→ 恢复/显示
     // 并强制置前。先优先可见窗口；若只在托盘隐藏，则退而激活隐藏主窗口。
     let mut context = EnumContext {
         pids: &pids,
-        activated: false,
+        activation: None,
         hidden_candidate: None,
     };
     unsafe {
@@ -373,15 +440,16 @@ fn activate_running(exe_names: &[&str]) -> bool {
             LPARAM(&mut context as *mut EnumContext as isize),
         );
     }
-    if !context.activated {
+    if context.activation.is_none() {
         if let Some(hwnd) = context.hidden_candidate {
-            unsafe {
-                show_and_force_foreground(hwnd);
-            }
-            context.activated = true;
+            context.activation = Some(unsafe { show_and_force_foreground(hwnd) });
         }
     }
-    context.activated
+    match context.activation {
+        Some(outcome) if outcome.activated => RunningActivation::Activated(outcome),
+        Some(_) => RunningActivation::ForegroundDenied,
+        None => RunningActivation::NotFound,
+    }
 }
 
 /// EnumWindows 回调（extern "system" ABI，无捕获）。
@@ -392,6 +460,10 @@ mod win_impl {
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MENU,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsIconic,
         IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_RESTORE,
@@ -400,14 +472,20 @@ mod win_impl {
 
     pub(super) struct EnumContext<'a> {
         pub pids: &'a std::collections::HashSet<u32>,
-        pub activated: bool,
+        pub activation: Option<super::ForegroundActivationOutcome>,
         /// 目标进程的隐藏（如收进托盘）主窗口候选；仅在无可见窗口时回退激活。
         pub hidden_candidate: Option<HWND>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct AltUnlockResult {
+        pub pair_submitted: bool,
+        pub physical_alt_held: bool,
+    }
+
     pub(super) unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let context = &mut *(lparam.0 as *mut EnumContext);
-        if context.activated {
+        if context.activation.is_some() {
             return BOOL::from(true);
         }
         let mut pid = 0u32;
@@ -427,8 +505,7 @@ mod win_impl {
             if IsIconic(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
             }
-            show_and_force_foreground(hwnd);
-            context.activated = true;
+            context.activation = Some(show_and_force_foreground(hwnd));
             return BOOL::from(false);
         }
         // 隐藏（如收进托盘）的主窗口：记录为候选，循环结束后再激活。
@@ -445,7 +522,9 @@ mod win_impl {
     /// 发起而获准。不使用 TOPMOST 置顶：短暂的 topmost 状态会污染窗口常驻 Z 序，
     /// 且与 `window.hide()`（关到托盘）交互时会造成窗口无法正常隐藏；仅依赖
     /// attach + SetForegroundWindow（与仓库 wetype_dormancy_probe 已验证的前台切换同款）。
-    pub(super) unsafe fn show_and_force_foreground(hwnd: HWND) {
+    pub(super) unsafe fn show_and_force_foreground(
+        hwnd: HWND,
+    ) -> super::ForegroundActivationOutcome {
         let mut target_pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
         let self_window = target_pid == GetCurrentProcessId();
@@ -461,30 +540,128 @@ mod win_impl {
         } else if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
+        let outcome = super::drive_foreground_activation(|use_alt_unlock| {
+            foreground_attempt(hwnd, target_pid, use_alt_unlock)
+        });
+        crate::ble::gatt_note(format!(
+            "app_launcher action=show_and_force_foreground terminal_result={} target_result={} self_window={self_window} visible_before={visible_before} took_show_path={took_show_path} attempt_count={} alt_unlock_submitted={} set_foreground_ok={}",
+            if outcome.activated { "passed" } else { "failed" },
+            if outcome.activated { "foreground_observed" } else { "foreground_denied" },
+            outcome.attempt_count,
+            outcome.alt_unlock_submitted,
+            outcome.last_set_foreground_ok,
+        ));
+        outcome
+    }
+
+    unsafe fn foreground_attempt(
+        hwnd: HWND,
+        target_pid: u32,
+        use_alt_unlock: bool,
+    ) -> super::ForegroundAttempt {
         let foreground = GetForegroundWindow();
         let foreground_thread = GetWindowThreadProcessId(foreground, None);
         let current_thread = GetCurrentThreadId();
         let attached = foreground_thread != 0 && foreground_thread != current_thread;
-        crate::ble::gatt_note(format!(
-            "app_launcher action=show_and_force_foreground self_window={self_window} visible_before={visible_before} took_show_path={took_show_path} foreground_thread={foreground_thread} current_thread={current_thread} attached={attached}"
-        ));
-        if attached {
-            let _ = AttachThreadInput(foreground_thread, current_thread, true);
-        }
-        let ok = SetForegroundWindow(hwnd).as_bool();
-        if attached {
+        let attach_ok =
+            !attached || AttachThreadInput(foreground_thread, current_thread, true).as_bool();
+
+        let (set_foreground_ok, alt_unlock) = if use_alt_unlock {
+            with_alt_foreground_unlock(|| SetForegroundWindow(hwnd).as_bool())
+        } else {
+            (
+                SetForegroundWindow(hwnd).as_bool(),
+                AltUnlockResult {
+                    pair_submitted: false,
+                    physical_alt_held: false,
+                },
+            )
+        };
+
+        if attached && attach_ok {
             let _ = AttachThreadInput(foreground_thread, current_thread, false);
         }
+
+        // SetForegroundWindow 的 BOOL 不是产品成功判据；读回前台窗口所属进程。
+        let target_is_foreground = foreground_belongs_to(target_pid);
         crate::ble::gatt_note(format!(
-            "app_launcher action=show_and_force_foreground terminal_result={} set_foreground_ok={}",
-            if ok { "passed" } else { "failed" },
-            ok
+            "app_launcher action=foreground_attempt use_alt_unlock={use_alt_unlock} physical_alt_held={} attach_requested={attached} attach_ok={attach_ok} alt_unlock_submitted={} set_foreground_ok={set_foreground_ok} target_is_foreground={target_is_foreground}",
+            alt_unlock.physical_alt_held,
+            alt_unlock.pair_submitted,
         ));
+        super::ForegroundAttempt {
+            set_foreground_ok,
+            target_is_foreground,
+            alt_unlock_submitted: alt_unlock.pair_submitted,
+        }
+    }
+
+    /// Windows 在用户按 Alt 后会解除 foreground lock。这里仅在普通前置失败后
+    /// 或即将经 Shell 启动/激活目标时，成对提交 Alt DOWN/UP 包住操作；物理 Alt
+    /// 已按住时严格跳过，避免把用户自己的按住态提前释放。
+    pub(crate) fn with_alt_foreground_unlock<T>(
+        operation: impl FnOnce() -> T,
+    ) -> (T, AltUnlockResult) {
+        unsafe {
+            let physical_alt_held = GetAsyncKeyState(VK_MENU.0 as i32) < 0;
+            let alt_down_submitted = !physical_alt_held && submit_alt_edge(false);
+            let value = operation();
+            let alt_up_submitted = if alt_down_submitted {
+                let submitted = submit_alt_edge(true);
+                if !submitted {
+                    // SendInput 部分失败时再补一次释放，不能把 Alt 留在按下态。
+                    let _ = submit_alt_edge(true);
+                }
+                submitted
+            } else {
+                false
+            };
+            (
+                value,
+                AltUnlockResult {
+                    pair_submitted: alt_down_submitted && alt_up_submitted,
+                    physical_alt_held,
+                },
+            )
+        }
+    }
+
+    unsafe fn foreground_belongs_to(target_pid: u32) -> bool {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return false;
+        }
+        let mut foreground_pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
+        foreground_pid == target_pid
+    }
+
+    unsafe fn submit_alt_edge(key_up: bool) -> bool {
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(VK_MENU.0),
+                    wScan: 0,
+                    dwFlags: if key_up {
+                        KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0)
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1
     }
 }
 
 #[cfg(windows)]
 use win_impl::{enum_windows_proc, show_and_force_foreground, EnumContext};
+
+#[cfg(windows)]
+pub(crate) use win_impl::with_alt_foreground_unlock;
 
 /// 启动新实例（短命线程内 COM 初始化后 ShellExecuteW，避免引擎线程套间约束）。
 #[cfg(windows)]
@@ -508,7 +685,7 @@ fn launch_new(exe_names: &[&str]) -> Result<(), String> {
             for exe in &exes {
                 let wide: Vec<u16> = exe.encode_utf16().chain(Some(0)).collect();
                 let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
-                let result = unsafe {
+                let (result, unlock) = with_alt_foreground_unlock(|| unsafe {
                     ShellExecuteW(
                         None,
                         PCWSTR(verb.as_ptr()),
@@ -517,7 +694,11 @@ fn launch_new(exe_names: &[&str]) -> Result<(), String> {
                         None,
                         SW_SHOWNORMAL,
                     )
-                };
+                });
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=launch_new phase=foreground_handoff alt_unlock_submitted={} physical_alt_held={}",
+                    unlock.pair_submitted, unlock.physical_alt_held
+                ));
                 // 返回值 > 32 表示成功（ShellExecuteW 旧式约定）。
                 if result.0 as usize > 32 {
                     unsafe {
@@ -587,7 +768,7 @@ fn launch_explicit(
                 .as_ref()
                 .map(|v| PCWSTR(v.as_ptr()))
                 .unwrap_or(PCWSTR::null());
-            let result = unsafe {
+            let (result, unlock) = with_alt_foreground_unlock(|| unsafe {
                 ShellExecuteW(
                     None,
                     PCWSTR(verb.as_ptr()),
@@ -596,7 +777,11 @@ fn launch_explicit(
                     dir_ptr,
                     SW_SHOWNORMAL,
                 )
-            };
+            });
+            crate::ble::gatt_note(format!(
+                "app_launcher action=launch_explicit phase=foreground_handoff alt_unlock_submitted={} physical_alt_held={}",
+                unlock.pair_submitted, unlock.physical_alt_held
+            ));
             // 保活：给 shell 的异步派生留出完成窗口。
             std::thread::sleep(std::time::Duration::from_millis(80));
             unsafe {
@@ -712,6 +897,200 @@ pub fn pick_custom_app() -> Option<CustomAppPick> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_activation_retries_when_api_only_flashes_taskbar() {
+        let mut unlock_flags = Vec::new();
+        let mut attempts = vec![
+            ForegroundAttempt {
+                set_foreground_ok: true,
+                target_is_foreground: false,
+                alt_unlock_submitted: false,
+            },
+            ForegroundAttempt {
+                set_foreground_ok: true,
+                target_is_foreground: true,
+                alt_unlock_submitted: true,
+            },
+        ]
+        .into_iter();
+
+        let outcome = drive_foreground_activation(|use_alt_unlock| {
+            unlock_flags.push(use_alt_unlock);
+            attempts
+                .next()
+                .expect("unexpected extra activation attempt")
+        });
+
+        assert_eq!(unlock_flags, [false, true]);
+        assert!(outcome.activated);
+        assert_eq!(outcome.attempt_count, 2);
+        assert!(outcome.alt_unlock_submitted);
+    }
+
+    #[test]
+    fn foreground_activation_does_not_trust_api_return_without_readback() {
+        let outcome = drive_foreground_activation(|use_alt_unlock| ForegroundAttempt {
+            set_foreground_ok: true,
+            target_is_foreground: false,
+            alt_unlock_submitted: use_alt_unlock,
+        });
+
+        assert!(!outcome.activated);
+        assert_eq!(outcome.attempt_count, 2);
+        assert!(outcome.alt_unlock_submitted);
+    }
+
+    /// Windows 桌面实测（默认忽略）：先手动让记事本保持运行、再把其他应用切到
+    /// 前台，随后运行本测试。成功必须来自 `GetForegroundWindow` 的目标进程读回，
+    /// 不能只看 SetForegroundWindow/ShellExecute 返回值。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "会真实把已运行的记事本切到前台"]
+    fn running_notepad_reaches_observed_foreground() {
+        assert!(
+            matches!(
+                activate_running(&["notepad.exe"]),
+                RunningActivation::Activated(_)
+            ),
+            "请先启动记事本并让另一个应用处于前台"
+        );
+    }
+
+    /// 子进程锁持有器。普通测试运行时立即返回；仅由下面的忽略探针通过环境变量
+    /// 启动。独立进程是必要条件——同进程既持有前台又调用 SetForegroundWindow
+    /// 会天然获准，无法覆盖用户报告的后台进程场景。
+    #[test]
+    #[cfg(windows)]
+    fn foreground_lock_holder_process() {
+        if std::env::var("SAYALL_FOREGROUND_LOCK_HOLDER").as_deref() != Ok("1") {
+            return;
+        }
+        use std::io::{Read, Write};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, GetForegroundWindow, LockSetForegroundWindow, MessageBoxW, PostMessageW,
+            SetForegroundWindow, LSFW_LOCK, MB_OK, WM_CLOSE,
+        };
+
+        let title = format!("SayAll foreground lock probe {}", std::process::id());
+        let thread_title = title.clone();
+        let dialog = std::thread::spawn(move || {
+            let title: Vec<u16> = thread_title.encode_utf16().chain(Some(0)).collect();
+            let message: Vec<u16> = "SayAll foreground activation probe"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            unsafe {
+                let _ = MessageBoxW(
+                    None,
+                    PCWSTR(message.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_OK,
+                );
+            }
+        });
+        let wide_title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let mut found = None;
+        for _ in 0..100 {
+            if let Ok(hwnd) = unsafe { FindWindowW(None, PCWSTR(wide_title.as_ptr())) } {
+                if !hwnd.0.is_null() {
+                    found = Some(hwnd);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let hwnd = found.expect("测试消息框未创建");
+
+        let _ = with_alt_foreground_unlock(|| unsafe { SetForegroundWindow(hwnd).as_bool() });
+        assert_eq!(unsafe { GetForegroundWindow() }, hwnd);
+        assert!(unsafe { LockSetForegroundWindow(LSFW_LOCK) }.is_ok());
+
+        let port: u16 = std::env::var("SAYALL_FOREGROUND_LOCK_PORT")
+            .expect("缺少锁探针端口")
+            .parse()
+            .expect("锁探针端口无效");
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("无法连接锁探针父进程");
+        stream.write_all(&[1]).expect("无法发送锁就绪信号");
+        let mut stop = [0u8; 1];
+        stream.read_exact(&mut stop).expect("无法读取锁停止信号");
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        let _ = dialog.join();
+    }
+
+    /// 强制 foreground lock 的 Windows 探针：独立子进程持有前台锁，父测试进程
+    /// 从后台调用产品路径。必须观察到第一次被拒绝、成对 Alt 解锁、第二次读回成功。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "会显示短暂测试消息框并把已运行的记事本切到前台"]
+    fn foreground_lock_retry_reaches_observed_notepad() {
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("无法创建锁探针监听器");
+        let port = listener.local_addr().expect("无法读取锁探针端口").port();
+        let mut child = Command::new(std::env::current_exe().expect("无法读取测试程序路径"))
+            .args([
+                "--exact",
+                "app_launcher::tests::foreground_lock_holder_process",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SAYALL_FOREGROUND_LOCK_HOLDER", "1")
+            .env("SAYALL_FOREGROUND_LOCK_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("无法启动锁探针子进程");
+
+        listener
+            .set_nonblocking(true)
+            .expect("无法设置锁探针非阻塞监听");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut connected = None;
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok(connection) => {
+                    connected = Some(connection);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Some(status) = child.try_wait().expect("无法读取锁探针子进程状态")
+                    {
+                        panic!("锁探针子进程在连接前退出：{status}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("锁探针监听失败：{error}"),
+            }
+        }
+        let Some((mut stream, _)) = connected else {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("锁探针子进程未在 3 秒内连接");
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .expect("无法设置锁探针读取超时");
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+            .expect("无法设置锁探针写入超时");
+        let mut ready = [0u8; 1];
+        stream.read_exact(&mut ready).expect("无法读取锁就绪信号");
+        let activation = activate_running(&["notepad.exe"]);
+        stream.write_all(&[1]).expect("无法发送锁停止信号");
+        let child_status = child.wait().expect("无法等待锁探针子进程");
+
+        assert!(child_status.success(), "锁探针子进程失败");
+        let RunningActivation::Activated(outcome) = activation else {
+            panic!("foreground lock 后的 Alt 解锁重试未激活记事本：{activation:?}");
+        };
+        assert_eq!(outcome.attempt_count, 2, "必须实际走到第二次尝试");
+        assert!(outcome.alt_unlock_submitted, "第二次尝试必须成对提交 Alt");
+    }
 
     #[test]
     fn preset_ids_are_unique_and_nonempty() {
