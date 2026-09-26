@@ -1,10 +1,58 @@
 # 按键拦截路线选型研究：追求"按设备源头替换、零残留副作用"（2026-09-22）
 
-> 状态：**研究文档，供审核与外部复审**。除本文档本身外，未改动任何代码、配置、TODO 或归属文件，也未创建发布资产。
+> 状态：**研究结论已获产品策略变更授权，正在分阶段实现**。2026-09-23 已先取消返回/音量±在配置、持久化和映射引擎中的策略性剥离，并恢复 Vue 配置入口；这只解决“策略/配置层禁用”，不等于 RC003 已能产生三键事件。按设备源头捕获、完成态协议、Helper 握手与 RC001/RC003 真机 E1–E6 仍未完成，不能宣称端到端支持。
 > 方法：只读取证。逐行阅读五个参考仓库的拦截实现与文档，另加本仓库既有调查档案对照。未安装任何驱动、未运行任何安装/构建脚本、未做真机测试。
 > **可核验性**：所有引用的外部仓库均已固定到 commit SHA（见[附录 D](#附录-d版本固定核对时的-commit-sha)）；逐条证据索引见[附录 B](#附录-b证据索引逐条可核验)；供外部 AI 复审的核对清单与已知缺口见[附录 C](#附录-c供外部复审的核对清单)。
-> **本文件内的决策记录**：无权限档的 TV / 主页取"维持现状"（2026-09-22 用户确认，见 9.4）。其余事项仍为待审核状态。
+> **本文件内的决策记录**：无权限档的 TV / 主页取"维持现状"（2026-09-22 用户确认，见 9.4）；返回/音量±的产品禁用策略已于 2026-09-23 撤销，但两型号的源头捕获实现和验收仍按本文门槛推进。
 > **核验状态词汇**：`passed` = 实际执行并观察通过；`failed` = 实际执行不满足预期；`deferred` = 依赖当前不可得条件。本文所有结论**均为静态代码/文档取证**，不构成真机验证；真机项一律标注 `deferred`。
+
+> ⚠️ **勘误（2026-09-23 复核，取代此前的 `failed` 判定）：本节原称路线 A 已被真机 E1 判定为 `failed`，该判定不成立。**
+> - **原因：层错位。** E1 采集的数据源是本仓库 `raw_input_listener` 的 HID 采集行（见 [`e1-final-audit.out`](../../hardware/RC003/evidence/e1-final-audit.out) 第 2 节的 `hid_*` 计数），测的是 **Raw Input 的 HID 通道**；而路线 A 不读 Raw Input——它在承载该设备的 `WUDFHost.exe` 内部、于 `NtDeviceIoControlFile` 的 UMDF 输出复制入口读取并清空报告，**位于 RIM 之前**。"Raw Input HID 通道零报文"是**预期现象**（RC003 只有一个键盘页 TLC，Raw Input 自然只投递 `RIM_TYPEKEYBOARD`），不能推出"报告层拿不到该设备的报告"。
+> - **本机只读实测（`structural`）已确认路线 A 的物理前提成立**：RC003 的 HID 设备由 `mshidumdf` + `WUDFRd`（`WUDF\DriverList = HidOverGatt`）承载在 `WUDFHost.exe`，宿主 PID 可从 `Device Parameters\WUDFDiagnosticInfo\HostPid` 读取，且在本机为**独占 RC003** 宿主。证据：[`hardware/RC003/evidence/wudf-host-probe.log`](../../hardware/RC003/evidence/wudf-host-probe.log)。
+> - **代价更正**：路线 A **不需要内核驱动、`TESTSIGNING`、关闭 Secure Boot、重启或 WHQL 签名**；代价是提权助手（参考实现用固定计划任务）+ 注入一个第三方注入框架（Frida Gadget，SHA256 固定）。
+> - 完整机制复核、与本仓库 R1–R6 / ADR 0002 的逐条对照、以及未验证项见 [`2026-09-23-zstdjan-hid-host-tap-implementation-review.md`](2026-09-23-zstdjan-hid-host-tap-implementation-review.md)。~~**我们自己的注入与拦截尚未执行**（`deferred`，需一次提权，不需重启）~~ → **2026-09-23 已执行只读版并 `passed`**（见下方第三次更新）；**写入路径亦已实测并通过**
+（7 项断言全 PASS、`interception_effective`，见下方第四次更新）。
+> - TV 键通道归属专项、路线重选（第二轮）两份文档**尚未合入 `main`**，位于分支 `feat-rc003-e1-capture-and-route-research`：前者证明 TV 的 Shell 动作来自该设备**唯一**的键盘页 report（其"与『清空即可消除』互斥"的推论**同样依赖上述层混淆，需一并复核**——tap 的清空位于 Windows 键码翻译与 Shell 动作生成之前，会同时消除该 Shell 动作；参考实现正是对全部 `010000` 前缀报告统一清空后再由应用侧按 usage 重新映射）；后者曾改推 **RC003 设备专属 KMDF lower filter（挂 `kbdhid` 之下）**并称其为唯一形态——**该"唯一"结论同样不成立**（见下一条补充更正）。
+> - 本文 **§9（两级能力）与 §9.4 决策仍然有效**，第二轮未作修改。
+> - 本文 §6 的 E1–E6 已被上述第二轮 §7 的 E2-1 ~ E2-4 取代；其中 E2-1 唯一阻塞 = 需管理员权限 + 一次重启。
+
+> ⚠️ **2026-09-23 补充（真机实测，本仓库已归档）**：**不提权**的普通用户态路径已被穷尽并判定 `failed` ——
+> 厂商 GATT 通知静默、GATT HID 特征 AccessDenied、用户态直读 HID 顶层集合被 RIM 独占拒绝、Raw Input 含厂商页注册仍零事件；
+> 同时用零权限 `HidP_GetButtonCaps` 证明**设备确实把 `0x80`/`0x81`/`0xF1` 声明在键盘页 `report_id=0x01` 里**，
+> 是 `kbdhid` 的 HID→VK 映射表缺这三个 usage 才导致不可见。
+> 完整证据、阳性对照与残余不确定项见 [`2026-09-23-rc003-driverless-capture-investigation.md`](2026-09-23-rc003-driverless-capture-investigation.md)。
+>
+> ⚠️ **同日第二次更正（取代上段原结论）**：上段原写"因此第二轮推荐的『按设备源头捕获（`kbdhid` 之下）』
+> 重新成为**唯一**可行形态"——**该"唯一"不成立，且"免驱动路线已穷尽"的范围被误述**。
+> 上述四条只证明"**不提权**的普通用户态程序拿不到三键"；**提权注入 HID 宿主**这条路径从未被测，
+> 而它同样**不装内核驱动**。本轮对参考实现的复核 + 本机只读实测已确认该路径的物理前提成立
+> （`mshidumdf`/`HidOverGatt` 承载于 `WUDFHost.exe`、宿主 PID 可定位、本机为独占 RC003 宿主）。
+> 因此当前方案空间内**并列**两条可行路线：**路线 A（HID 宿主内报告层捕获，提权助手 + 注入框架，
+> 无内核驱动、无需重启）** 与 **路线 B（`kbdhid` 之下 KMDF lower filter，需 `TESTSIGNING` + 关 Secure Boot + 重启）**。
+> 详见 [`2026-09-23-zstdjan-hid-host-tap-implementation-review.md`](2026-09-23-zstdjan-hid-host-tap-implementation-review.md)。
+>
+> ✅ **同日第三次更新（只读实验已完成，`passed`）**：在据上文定位到的**独占 RC003** 宿主
+> （`HostPid=32684`，`WUDFHost.exe`）内挂 `ntdll!NtDeviceIoControlFile`，命中
+> `IOCTL 0x80018483`（in 8 / out 9 / operation-selector `02 01`）时**只读**转储缓冲区
+> （**不清空、不注入按键、不改任何系统设置**，一次交互式 UAC 提权，未重启）。
+> 结果：本机 RC003 的报告里**确实存在** `0x00F1`（返回）×3、`0x0080`（音量+）×3、
+> `0x0081`（音量−）×3；阳性对照 `0x0028`（确定）×4 / `0x004A`（主页）×2 如期到达；
+> 30 次命中中 `onLeave` 输出缓冲区变化 **0/30**，独立证实"报告在 `onEnter` 已就位"。
+> **判定 `three_keys_present_in_report`（`passed`）。**
+> 因此"三键在 Windows 侧不可见"的因果链闭合为：**设备上报 → 报告到达宿主层 → 键码映射
+> （`kbdhid`）丢弃**；不再是推断，而是实测。
+> 报告与复现步骤：[`2026-09-23-rc003-hid-host-readonly-tap-result.md`](2026-09-23-rc003-hid-host-readonly-tap-result.md)。
+> **写入路径已实测验证（2026-09-23）**：擦除与改写**均被 Windows 键码翻译采纳**、停止写入后恢复
+> ——**7 项断言全部 PASS，判定 `interception_effective`**（首轮 5 项 + 补采 `B2` 2 项）。
+> 旁证：扫描码也是由改写后的 usage 重新推导（`0x0068` → `vk=0x7C make=0x64`），
+> ⇒ 写入在翻译链**最上游**被消费。**仍未执行**：边沿配对 / 接管就绪门 / 租约 / fail-safe 的失效验收。
+> ✅ **同日第四次更新（阻塞项已解除，写入版实验已就位）**：产品决策已下——
+> ADR 0002 §3 的「不使用 Frida」已废止（改为"允许注入框架，但须固定版本 + 校验哈希 + 登记许可"），
+> 本文件 §1 的 R5 口径同时收窄（显式安装、可逆卸载的提权 Helper 与固定计划任务不再被禁）。
+> 写入版最小实验装置：`hardware/RC003/probes/wudf_ioctl_write.py`（+ `wudf_ioctl_write.js`、
+> `raw_input_sink.py`、全程 / 补采提权启动器），**实测 7 项断言全部 PASS**，结果见
+> [`2026-09-23-rc003-hid-host-write-tap-result.md`](2026-09-23-rc003-hid-host-write-tap-result.md)。
+> 剩余阻塞项只剩 R6 类失效验收（边沿配对 / 租约 / fail-safe）与 RC001 适配。
 
 ---
 
@@ -48,7 +96,7 @@
 | R2 | **零原生残留**：自定义后按键不产生任何原生动作（字符、方向、媒体/音量、Shell 协议动作） | 逐键观察：无原生字符、无光标移动、无音量变化、锁屏场景无 `microsoft-edge:` 协议选择器 |
 | R3 | **纯替换语义**：遥控器键只执行我配置的动作，没有第二份行为 | 单次响应、无"原生+映射"双执行 |
 | R4 | **物理键盘与原系统行为零影响**：` 、Home、方向、Enter、音量、F5 全部照常 | 遥控器在线期间用物理键盘做高频输入回归 |
-| R5 | **不引入新的系统级改动**：不装内核驱动、不改 Secure Boot / 测试签名 / 驱动签名策略、不写注册表过滤项、不需要重启、可逆卸载 | 安装/卸载全流程审计；失败或拒绝时不留残余 |
+| R5 | **不引入不可逆或全局性的系统级改动**：不装内核驱动、不改 Secure Boot / 测试签名 / 驱动签名策略、不写注册表过滤项、不需要重启。**显式安装、可逆卸载、经用户一次性授权的提权 Helper（含固定计划任务）不属于被禁范围**（2026-09-23 按产品决策收窄口径，见 [ADR 0002 修订记录](../decisions/0002-dual-track-injection-optional-helper.md)） | 安装/卸载全流程审计；失败或拒绝时不留残余 |
 | R6 | **不降低可靠性**：不新增"输入整体失效、必须重启"这类风险；不可用时回到原始行为 | 断连 / 睡眠 / 组件被杀 / 权限被拒 的场景回归 |
 
 **现状对照**（本仓库既有证据）：现行 `WH_KEYBOARD_LL` 钩子 + 常驻抑制在 R2 与 R4 上结构性不达标——Home/TV 只能整键盘吞（`crates/sayall-windows/src/key_gate.rs:17-20`），物理键盘 ` 与 Home 被接管；TV 的 Shell 协议动作在键盘边沿全部吞下后仍出现（`Bugs/2026-09-10-win-l-mapping-and-capture.md` §8）。返回/音量± 则在 Windows 侧零事件（`docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md`）。
@@ -218,6 +266,16 @@ RC003 --BLE HID--> WUDFHost(已核验为 RC003 独占)
 
 **判定口径**：`passed` = 实际执行并观察通过；`failed` = 实际执行不满足预期；`deferred` = 依赖当前不可得的条件。**编译通过、单元测试通过、模拟宿主机通过，都不算这三项。**
 
+**E1–E6 的当前状态（2026-09-23 实时）**：逐项状态表在 [`Testing/WindowsRC003EnhancedCapture.md`](../../Testing/WindowsRC003EnhancedCapture.md)。
+要点：三键边沿送达与「反复运行 / 接管」已 `passed`；E1（TV 的 report 归属）、E2 的锁屏场景、E4d、E5、E6 为 `deferred` 并已写明依赖；E2 主判据、E3、E4a/b/c 为「未执行，可直接做」。
+
+> ⚠️ **E2 在 RC003 上必须用哨兵键才可判。** 三键在 Windows 侧本来就零事件（`kbdhid` 丢弃
+> `0xF1`/`0x80`/`0x81`），所以「清掉」与「不清」外部完全看不出差别——判据「没有原生动作」
+> **恒为真、没有分辨力**，`observe` 与 `run` 在现象上无法分辨。助手因此新增
+> `--canary-usage <U16>` 与入口 `run-helper-canary.cmd`（默认额外清主页 `0x4A`，Windows
+> 本来能处理的键），使「清空生效」与「fail-open」变成肉眼可见的三步对照。
+> 详见 [`../../hardware/RC003/README.md`](../../hardware/RC003/README.md) §5.7。
+
 ---
 
 ## 7. 审核通过后需要改动的文件（**现在不动**）
@@ -226,8 +284,50 @@ RC003 --BLE HID--> WUDFHost(已核验为 RC003 独占)
 - `docs/decisions/`：新增 ADR（替代/修订 ADR 0002 中"虚拟键盘驱动 + 按设备吞键"的 Helper 轨定义）。
 - `ATTRIBUTION.md`：记录 ZSTDJan `windows-remote-mic-app`（协议与"复制并清空"做法）、内容边界；若参考 RemoteMapper 的 remap 表或 TAP 语义，一并记录（MIT）。
 - `docs/architecture/rc003-enhanced-capture.md`：把既有的只读实验方案与本次路线合并或明确分工。
-- `Testing/`：新增验收手册（E1–E6 的命令、判据、日志字段）。
+- `Testing/`：新增验收手册（E1–E6 的命令、判据、日志字段）。**✅ 2026-09-23 已落盘**：[`Testing/WindowsRC003EnhancedCapture.md`](../../Testing/WindowsRC003EnhancedCapture.md)（含退出码表、日志字段速查、常见失败处置与逐项状态表）。
 - 两级能力（第 9 节）落地时另需：`src/lib/bridge.ts` 的 `ShortcutCapability` 输入增加"能力档位"、`src/pages/ButtonsPage.vue` 的 `capabilityNote` 逐格说明按档位变化、`src-tauri/src/platform.rs` 暴露档位状态；以及两档切换的回归用例。
+
+**📌 2026-09-23 状态回填**（本节写于 2026-09-22 的"现在不动"，逐项对照）：
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| `TODO.md` 条目 | ✅ 已做 | 见 TODO 的"为返回键、音量加、音量减完成按设备源头捕获"条目及其四次更新 |
+| `docs/decisions/` ADR | ✅ 已做 | ADR 0002 §3 已修订（「不使用 Frida」废止 → 改为"固定版本 + 校验 SHA256 + 登记来源与许可"），R5 口径同步收窄 |
+| `ATTRIBUTION.md` | ✅ 已做 | 已记录 ZSTDJan / `remote-bridge-hub`，并新增"产品注入载体登记：Frida Gadget 17.18.0"一节 |
+| `docs/architecture/rc003-enhanced-capture.md` | ❌ **未做** | 只读/写入实验已分别成文于 `docs/investigations/2026-09-23-rc003-hid-host-*.md`；架构文档尚未合并 |
+| `Testing/` 验收手册（E1–E6） | ❌ **未做** | 阻塞于真机验收；spike 的 `--help` 已给出运行入口，但 E1–E6 的命令/判据/日志字段手册未写 |
+| 两级能力前端/后端改动 | ❌ **未做** | `bridge.ts` / `ButtonsPage.vue` / `platform.rs` 的档位化未动 |
+
+新增（本节未预见）：`hardware/RC003/helper/` 产品化 spike —— 把机制造成可运行组件（提权助手 + Gadget agent + 自检台），**未并入产品工作区**，提交 `76e3855`。
+
+**📌 2026-09-23 二次状态回填（真机首跑后的修正）**：
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 宿主定位链真机成立 | ✅ 已验（**免提权**） | `helper_dryrun.out`：`diag_keys=6` / `pid=32684 WUDFHost.exe` / `exclusive_rc003_host` / Gadget 校验通过；与只读探针**两个独立实现给出同一 PID** |
+| 真机注入（`observe` / 正式） | 🟡 **`observe` 已验；`run` 未做** | `observe`：30 条 `[EDGE]`，三键 usage 与预测一致，`clears_ok=0`。**但 `observe` 一个字节都不清 ⇒ 证明不了"拦截生效"，也证明不了"确定/主页/方向键无回归"**。`run` 模式仍需 Andy 提权运行 |
+| `Testing/` 验收手册（E1–E6） | ❌ **未做** | **不阻塞于真机**——命令、判据、日志字段可以也应该在跑之前先写定，否则现场没有可对照的验收标准 |
+
+> **首跑教训**（详见 [`2026-09-23-rc003-helper-hostpid-read-bug.md`](2026-09-23-rc003-helper-hostpid-read-bug.md)）：
+> 助手把 `HostPid`（本机为 `REG_QWORD` / 8 字节）按 4 字节读，全部返回 `ERROR_MORE_DATA`
+> 又被静默丢弃，于是**误报"设备未连接"**。两点可迁移的结论：
+> ① **探针能跑通 ≠ 我的原语正确**——Python 的 `winreg` 按真实类型自动转换，从不暴露"宽度"这个契约；
+> ② **错误信息不得断言未被检验的原因**——"设备未连接"是个结论，而当时只观测到"计数为 0"。
+
+**📌 2026-09-23 三次状态回填（首次真机 `observe` 之后）**：
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 三键边沿送达我们的代码 | ✅ **已验（真机、提权）** | 30 条 `[EDGE]`（返回 `0x00F1` / 音量+ `0x0080` / 音量− `0x0081` 各 5 次 + 释放），`target_hits=15` 与按下数 1:1、`edges_sent=30`；`evidence/2026-09-23-observe-run.log` |
+| `--duration` 上限 | ✅ 已修 + 自检回归 | 原先**有 agent 连接时永不到期**（`BufReader::lines()` 阻塞，收尾检查点到不了；实测 300 s → 518 s 仍在跑）。改为读超时轮询 + 把绝对到期时刻传进会话循环 |
+| Ctrl+C / 关窗发 `disarm` | ✅ 已修 + 自检回归 | 原先**从未安装 `SetConsoleCtrlHandler`**，硬终止，收尾代码永远到不了 |
+| `run` 模式的拦截生效 / 无回归 / fail-open | ❌ **未做** | 需 Andy 本人提权运行 `run-helper.cmd` |
+
+> **二次真机教训**（详见 [`2026-09-23-rc003-observe-first-real-run.md`](2026-09-23-rc003-observe-first-real-run.md)）：
+> **功能路径通过 ≠ 收尾路径通过**。`--duration` 与 Ctrl+C 两条"不把钩子留在系统上"的保障，
+> 自检与静态检查都抓不到，只有真机跑够久才显形；而唯一真正兜住的是 agent 侧租约——
+> 它**设计上只是最后一道防线，不该成为唯一一道**。
+> 顺带：`--dry-run` 原先也要求提权，**正是那道无谓的 UAC 门**让这个 bug 没能被提前发现，已去掉。
 
 ---
 
@@ -272,6 +372,19 @@ RC003 --BLE HID--> WUDFHost(已核验为 RC003 独占)
 2. **按键级降级、不静默改语义**：同一份配置在两档下只能是"该键不可用（格子禁用）"或"可用且行为已在界面注明"，**绝不能出现"用户以为映射了 A、实际执行了原生 B"**。UI 复用现有 `capabilityNote` 机制逐格说明。
 3. **配置不因档位变化丢失**：与现行"能力消失只禁用、不删除"一致（PR #66 文档 §7.3 同款纪律）。
 4. **拦截 `fail-open` + 动作 `fail-closed` + 自动恢复**：Helper 消失必须立即回到 legacy 行为，且不得继续执行已排队动作。参考实现给的量级可直接借用：Python 侧拦截租约 `HID_INTERCEPT_LEASE_SECONDS = 2.0`、续期 0.5s（`frida_compat.py:94-97`）；Gadget 侧上限 `MAX_INTERCEPT_LEASE_MS = 5000`、心跳 5s（`frida_hid_tap_runtime.py:59-61`）→ 即**"报告被清了但没人转发"的最坏窗口约 2 秒**，超过即自动撤钩；这个窗口仍须在 E4 真机测量，不得仅由常量推断。
+
+   **📌 2026-09-23 实现状态**：spike 已按 `LEASE_MS = 2000` / 续期 `RENEW_MS = 500` 落地（与上述量级一致），见 `hardware/RC003/helper/agent/rc003_agent.js`。
+
+   **一个重要更正——判据不能是"连接状态"**：实测 Frida 17 的 Socket API **没有可用的存活原语**：对端关闭后写入**不抛错**（3/3）、pending 的 `read` **不以 EOF 收尾**、连不上要**约 2.2s** 才以 ECONNREFUSED reject（太慢，不适合当存活判据）。因此 `fail-open` 的判据**只能是**租约式 `Date.now() - lastRenewAt <= LEASE_MS`。若照"连接断了就恢复"的直觉写，得到的是一个**永不触发**的 fail-open——这正是本项落地时最容易犯的错。
+
+   **📌 2026-09-23 真机补充：租约之外的两道"收尾"保证曾经都是空的。** 首次真机 `observe` 跑完发现：① `--duration`（本项之外、但同属"不把钩子留在系统上"的保障）在有 agent 连接时**永不到期**——会话读取阻塞在 `BufReader::lines()`，主循环的收尾检查点被同步调用挡死（实测 300 s 的跑到 518 s 仍在运行）；② Ctrl+C / 关窗**不发 `disarm`**——从未安装 `SetConsoleCtrlHandler`，系统硬终止进程，`main()` 末尾的收尾代码永远到不了。
+   两处都已修复并纳入自检回归（当时 23 项；现行 **34 项**，含阳性对照证明该回归项在修复前必然 FAIL）。**可迁移的教训**：功能路径通过 ≠ 收尾路径通过；这两类代码在自检与静态检查里都看不出来，只有"真机跑够久"才会显形。详见 [`2026-09-23-rc003-observe-first-real-run.md`](2026-09-23-rc003-observe-first-real-run.md)。
+
+   **📌 2026-09-23 第三次真机教训：功能路径与收尾路径都通之后，还有"第二次运行"这条路。** 注入成功会让宿主**长期映射**运行时目录那份 Gadget DLL，而助手的运行时准备是无条件覆盖复制 → 第二次运行必然 `os error 32`。修法与一次性迁移见 [`2026-09-23-rc003-helper-rerun-blocked-by-locked-gadget.md`](2026-09-23-rc003-helper-rerun-blocked-by-locked-gadget.md)。**教训**：长期驻留的注入物会改变**文件系统的可用性**，这类耦合不会出现在第一轮跑通里。
+
+   **📌 2026-09-23 第四次真机教训：功能全通之后，剩下的问题全在证据层。** 清掉旧世代 tap 后重跑，注入轮与**接管轮**双双通过（`how=injected` / `how=attached_existing_tap`，两轮三键各一组 `[EDGE]`），但同一轮的日志里埋着 **6 处会让人读错结论**的东西：多余的运行分隔线（把 6 轮数成 11 轮）、agent 的 `connect` 叠加导致 3 条连接里 2 条被 RST、读失败断线**在统计里完全不可见**、`discarded` 一物二用、接管轮误报 `sha256_verified=false`、`sent=false arm=true` 自相矛盾。**教训**：当功能验收通过之后，剩下的缺陷往往不再表现为失败，而表现为**证据说谎**——而排查时我们唯一依赖的就是证据。判据是「这个字段能不能被读成别的意思」，而不是「这条日志有没有出现」。验收判决与修法见 [`2026-09-23-rc003-rerun-acceptance-verdict.md`](2026-09-23-rc003-rerun-acceptance-verdict.md)。
+
+   **仍未做**：E4 真机测量（含"杀掉助手后三键自动恢复原生行为"的实测）。
 
 ### 9.4 已决策：无权限档的 TV / 主页**维持现状**
 

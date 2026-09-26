@@ -1,0 +1,115 @@
+# RC003 三键端到端验收日志（2026-09-23 19:11 与 19:18 两轮）
+#
+# 归档理由：捕获链三段在真机全部成立的证据。
+#   19:11:05 轮：三键各按 3 次 -> 助手侧 18 条 [EDGE] -> 主程序侧 edges=18
+#   19:18:32 轮：在按键页给返回键配置键盘 b -> 按返回键 -> 记事本打出 b
+#      （16 条 [EDGE] 全为 back：8 次按下 + 8 次释放；主程序侧 edges=16）
+#
+# 已滤掉每 2 秒一条的 [HB] 心跳与 [RENEW] tick= 例行行，只留结构性事件。
+# 原始完整日志见被 .gitignore 排除的 helper-run.log。
+
+---------- 新一轮运行 2026-09-23 19:11:05.285 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 19:11:05.286 ===
+[ENV] elevated=true pid=7792 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=C:\Windows\System32\WUDFHost.exe
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[TOKEN] source=file path=C:\ProgramData\SayAll\rc003-helper\session.token value=0f5aa153684025a756d359c7b5b5583c
+[TAP] scan=ok modules=46 resident=1 modules_detail=frida-gadget.dll base=0x7FF959FE0000 size=23617536
+    [TAP] path=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll
+[APP-BRIDGE] event=enabled descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[LISTEN] addr=127.0.0.1:47831
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=skip_copy_attaching_existing_tap
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper config=C:\ProgramData\SayAll\rc003-helper\frida-gadget.config agent=C:\ProgramData\SayAll\rc003-helper\rc003_agent.js port=47831 mode=clear restore=true lease_ms=2000
+[ATTACH] action=skip_injection reason=宿主里已有我们那一代 tap（令牌一致） path=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll note=agent 会在 RECONNECT_MS 内自己连回来；连上后会补发 arm/mode/restore
+[DLL] dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=attach_existing_tap touched_files=false note=这一轮不复制、不注入；DLL 是上一轮落地的那份，无需重新校验
+
+已武装。现在可以按遥控器：返回 / 音量+ / 音量- 都会以 [EDGE] 上报；
+确定 / 主页 / 方向应保持 Windows 原生行为（本 spike 不碰它们）。
+
+[APP-BRIDGE] event=connected descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[ACCEPT] from=127.0.0.1:63011
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=true restore_sent=true targets_sent=true flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[WARN] 读取连接失败: 远程主机强迫关闭了一个现有的连接。 (os error 10054)
+[DISCONNECT] alive_s=0 agent=rc003_agent/1 agent_pid=31284 lines=1 edges=0
+[ACCEPT] from=127.0.0.1:63009
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=false restore_sent=false targets_sent=false flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[WARN] 读取连接失败: 你的主机中的软件中止了一个已建立的连接。 (os error 10053)
+[DISCONNECT] alive_s=0 agent=rc003_agent/1 agent_pid=31284 lines=1 edges=0
+[ACCEPT] from=127.0.0.1:63008
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=true restore_sent=true targets_sent=true flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[AGENT] msg=mode:clear
+[AGENT] msg=renew:first
+[EDGE] buttons=back raw=t=1790161867969 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161868130 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790161870291 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161870426 usages= buttons= n=0
+[EDGE] buttons=volume_up raw=t=1790161871415 usages=0x0080 buttons=volume_up n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161871596 usages= buttons= n=0
+[EDGE] buttons=volume_up raw=t=1790161872016 usages=0x0080 buttons=volume_up n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161872196 usages= buttons= n=0
+[EDGE] buttons=volume_down raw=t=1790161872795 usages=0x0081 buttons=volume_down n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161872991 usages= buttons= n=0
+[EDGE] buttons=volume_down raw=t=1790161873426 usages=0x0081 buttons=volume_down n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161873591 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790161875150 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161875286 usages= buttons= n=0
+[EDGE] buttons=volume_up raw=t=1790161875841 usages=0x0080 buttons=volume_up n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161875976 usages= buttons= n=0
+[EDGE] buttons=volume_down raw=t=1790161876636 usages=0x0081 buttons=volume_down n=1
+[EDGE] buttons=(释放) reason= raw=t=1790161876801 usages= buttons= n=0
+
+---------- 新一轮运行 2026-09-23 19:18:32.651 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 19:18:32.651 ===
+[ENV] elevated=true pid=18112 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=C:\Windows\System32\WUDFHost.exe
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[TOKEN] source=file path=C:\ProgramData\SayAll\rc003-helper\session.token value=0f5aa153684025a756d359c7b5b5583c
+[TAP] scan=ok modules=46 resident=1 modules_detail=frida-gadget.dll base=0x7FF959FE0000 size=23617536
+    [TAP] path=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll
+[APP-BRIDGE] event=enabled descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[LISTEN] addr=127.0.0.1:47831
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=skip_copy_attaching_existing_tap
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper config=C:\ProgramData\SayAll\rc003-helper\frida-gadget.config agent=C:\ProgramData\SayAll\rc003-helper\rc003_agent.js port=47831 mode=clear restore=true lease_ms=2000
+[ATTACH] action=skip_injection reason=宿主里已有我们那一代 tap（令牌一致） path=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll note=agent 会在 RECONNECT_MS 内自己连回来；连上后会补发 arm/mode/restore
+[DLL] dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=attach_existing_tap touched_files=false note=这一轮不复制、不注入；DLL 是上一轮落地的那份，无需重新校验
+
+已武装。现在可以按遥控器：返回 / 音量+ / 音量- 都会以 [EDGE] 上报；
+确定 / 主页 / 方向应保持 Windows 原生行为（本 spike 不碰它们）。
+
+[APP-BRIDGE] event=connected descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[ACCEPT] from=127.0.0.1:61766
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=true restore_sent=true targets_sent=true flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[WARN] 读取连接失败: 远程主机强迫关闭了一个现有的连接。 (os error 10054)
+[DISCONNECT] alive_s=0 agent=rc003_agent/1 agent_pid=31284 lines=1 edges=0
+[ACCEPT] from=127.0.0.1:61765
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=true restore_sent=true targets_sent=true flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[AGENT] msg=mode:clear
+[EDGE] buttons=back raw=t=1790162344478 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162344658 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162350688 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162350824 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162351303 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162351393 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162351528 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162351663 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162351783 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162351918 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162436984 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162437119 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162437224 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162437345 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790162437464 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790162437570 usages= buttons= n=0

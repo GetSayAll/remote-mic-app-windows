@@ -1,0 +1,15 @@
+=== RC003 agent 自检台（无需提权 / 无需设备）===
+frida 17.18.0 | agent rc003_agent_noguard.js (673 行)
+
+[PASS] A 无助手在监听：init 必须超时兜底
+       init settled:{"stage": "early", "hook": true, "gate": "connect_failed:Error: could not connect to 127.0.0.1: \u7531\u4e8e\u76ee\u6807\u8ba1\u7b97\u673a\u79ef\u6781\u62d2\u7edd\uff0c\u65e0\u6cd5\u8fde\u63a5\u3002", "pid": 27640} 耗时 2.21s（期望 2.0-8.0s：必须由 CONNECT_TIMEOUT_MS 兜底，而不是立刻返回）
+[PASS] B 正常协议：hello/hb/续约与租约过期
+       init settled:{"stage": "early", "hook": true, "gate": "connected", "pid": 36428} 耗时 0.15s；续约前 hb: lease_ok=False handshake=False；续约后 hb: lease_ok=True handshake=True；停续约后 hb: lease_ok=False since_renew_ms=-1；计数: target_hits=0 clears_ok=0
+[PASS] C 显式解除：disarm
+       disarm 后 hb: disarmed=True lease_ok=False
+[FAIL] D 助手消失后重新上线：只允许连一次（连接不得堆积）
+       init settled:{"stage": "early", "hook": true, 耗时 0.14s；下线 7s 后重新上线：被连 4 次 / 收到 hello 4 条；累计 accept=5 hello=5；agent 计数: 断线可见=1(rx_timeouts=1 read_errors=0) connect_raced=0 send_dropped=8
+[FAIL] E targets 护栏：只许追加哨兵键，被拒的命令不得改动清空范围
+       默认 clear_usages=0x00f1,0x0080,0x0081；追加哨兵后 clear_usages=0x00f1,0x0080,0x0081,0x004a；缺少拒绝日志 targets:rejected_report_not_targets
+
+结论: 存在失败用例

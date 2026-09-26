@@ -1,0 +1,22 @@
+[package]
+name = "rc003-helper"
+version = "0.1.0-spike"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "RC003 增强捕获轨（路线 A）提权助手 —— 产品化 spike，尚未并入产品工作区"
+
+# 故意不并入顶层 workspace：本 crate 处于 spike 阶段，E1–E6 真机验收尚未全部完成。
+# 一旦验收通过并决定产品化，把它移入 crates/ 并加进 workspace members 即可
+# （届时要让 `cargo fmt/test/check --workspace` 一并覆盖它）。
+[workspace]
+
+# bin 名即 UAC 弹窗里显示的程序名（无版本资源时）——用 SayAll 而不是
+# rc003-helper，用户在授权弹窗里看到的名字才有归属感。
+[[bin]]
+name = "sayall-helper"
+path = "src/main.rs"
+
+[dependencies]
+# 刻意零第三方依赖：全部走 kernel32 / advapi32 / shell32 的原生 FFI，
+# 既避免为 spike 拉入整套 windows crate，也让构建可离线复现。

@@ -149,11 +149,89 @@
 
   ; 版本校验通过后才请正在运行的实例优雅退出：升级路径的关键一步。
   !insertmacro SayAllRequestGracefulExit install
+  ; 升级覆盖写 sayall-helper.exe 前，必须让旧助手退出——否则
+  ; 「无法打开要写入的文件」（2026-09-24 真机复现：跑了一天的旧助手
+  ; 锁住 exe，主程序的优雅退出对它无效）。
+  !insertmacro SayAllStopHelper install
+  ; ── 授权不跨安装保留（2026-09-24 产品决策）────────────────────────
+  ; 覆盖升级执行的是**旧版卸载器**（没有删任务的钩子），任务会跨升级
+  ; 幸存——所以安装钩子自己也要删一次。这样无论全新安装还是覆盖升级，
+  ; 装完都是「未授权」状态：应用启动对账把开关回落为关闭，
+  ; 用户重新打开时必然重新走一次 UAC。
+  nsExec::Exec 'schtasks /delete /f /tn "SayAll RC003 Helper"'
+!macroend
+
+; ── 停止增强捕获助手并等它真正退出（2026-09-24）──────────────────────
+;
+; 为什么不能直接杀：助手是提权进程，普通权限安装器的 taskkill 必被拒；
+; 唯一通道是让它自愿退出——schtasks /end（调度器有权终止任务实例）+
+; 停用信号文件（路径必须与 rc003_task.rs 的 stop_signal_path 逐字符一致，
+; 新助手每 50ms 轮询一次）。**跑了一整天以上的旧助手两种都不认识**
+; （真机：up=27.8h 的实例锁住 exe，升级写文件必然失败），等待超时后
+; 只能中止安装并请用户以管理员运行 helper 目录里的 stop-helper.cmd。
+!define SAYALL_HELPER_EXIT_MAX_WAIT_MS 8000
+!define SAYALL_HELPER_EXIT_POLL_MS 250
+
+!macro SayAllStopHelper _uid
+  Push $R8
+  Push $R9
+  Push $0
+  nsExec::Exec 'schtasks /end /f /tn "SayAll RC003 Helper"'
+  CreateDirectory "$LOCALAPPDATA\SayAll"
+  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-capture-stop" w
+  ${If} $0 != 0
+    FileWrite $0 "stop"
+    FileClose $0
+  ${EndIf}
+  StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
+  sayall_helper_wait_${_uid}:
+    nsis_tauri_utils::FindProcessCurrentUser "sayall-helper.exe"
+    Pop $R8
+    ${If} $R8 != 0
+      Goto sayall_helper_done_${_uid}
+    ${EndIf}
+    Sleep ${SAYALL_HELPER_EXIT_POLL_MS}
+    IntOp $R9 $R9 - ${SAYALL_HELPER_EXIT_POLL_MS}
+    ${If} $R9 > 0
+      Goto sayall_helper_wait_${_uid}
+    ${EndIf}
+  sayall_helper_done_${_uid}:
+  ; 超时仍在跑（旧版助手不认识停用信号）：中止并给出可操作的出路。
+  nsis_tauri_utils::FindProcessCurrentUser "sayall-helper.exe"
+  Pop $R8
+  ${If} $R8 = 0
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONSTOP|MB_OK "增强捕获助手仍在运行且无法自动停止（可能是较早版本）。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper is still running and cannot be stopped automatically. Run stop-helper.cmd as administrator, then retry."
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ; 写「需重新授权」标记：提权任务普通权限删不掉（真机实测），这是
+  ; 「授权已应撤销」的唯一可靠凭证；应用启动据此回落开关，下次开启
+  ; 强制重装任务（必弹 UAC）。路径与 rc003_task.rs reauth_marker_path
+  ; 逐字符一致（有测试钉住）。
+  CreateDirectory "$LOCALAPPDATA\SayAll"
+  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
+  ${If} $0 != 0
+    FileWrite $0 "reauth"
+    FileClose $0
+  ${EndIf}
+  Pop $0
+  Pop $R9
+  Pop $R8
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; 卸载同样不得强杀正在连接的应用（AGENTS.md 同一条规则）。
   !insertmacro SayAllRequestGracefulExit uninstall
+  ; 卸载也要先停助手，再删它的文件与授权。
+  !insertmacro SayAllStopHelper uninstall
+
+  ; ── 授权不跨卸载保留（2026-09-24 产品决策）────────────────────────
+  ; 卸载即撤销增强捕获的授权：删除计划任务，重装/升级后打开开关需要
+  ; 重新走一次 UAC。任务由同用户的提权进程创建（owner=该用户），
+  ; 非提权删除自己的任务通常被允许；即便个别环境拒绝，应用启动侧
+  ; 还有"设置说开着但任务不存在 → 回落关闭"的对账兜底。
+  nsExec::Exec 'schtasks /delete /f /tn "SayAll RC003 Helper"'
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

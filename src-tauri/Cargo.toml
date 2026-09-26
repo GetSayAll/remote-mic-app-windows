@@ -11,6 +11,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 runtime-simulation = []
+# 验证用 debug 包也隐藏控制台窗口（打包时启用；dev 流程不受影响）。
+hide-console = []
 
 [build-dependencies]
 tauri-build = { version = "2.4", features = [] }
@@ -32,4 +34,5 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
 ] }

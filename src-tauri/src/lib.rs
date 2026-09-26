@@ -1,5 +1,6 @@
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
+use sayall_windows::rc003_bridge::BridgeSnapshot;
 use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
 };
@@ -15,6 +16,7 @@ use tauri::{Emitter, Manager};
 
 mod diagnostics;
 mod platform;
+mod rc003_task;
 mod settings;
 mod startup;
 mod updater;
@@ -231,6 +233,119 @@ async fn get_raw_input_snapshot(
     tauri::async_runtime::spawn_blocking(move || platform.raw_input_snapshot())
         .await
         .map_err(|error| format!("读取 Raw Input 状态失败：{error}"))
+}
+
+/// RC003 三键传输桥接状态（捕获链第 ② 段）。
+///
+/// 单独开一条命令而不是塞进 `RawInputSnapshot`：后者是既有的 IPC 契约，
+/// 有序列化夹具与回归测试，为了一个全新机制去动它不划算。
+#[tauri::command]
+async fn get_rc003_bridge_snapshot(
+    state: tauri::State<'_, AppState>,
+) -> Result<BridgeSnapshot, String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
+        .await
+        .map_err(|error| format!("读取 RC003 桥接状态失败：{error}"))
+}
+
+/// RC003 三键助手的计划任务状态（授权 = 任务在系统里）。
+fn rc003_capture_enabled(state: &AppState) -> bool {
+    state
+        .settings
+        .load()
+        .map(|settings| settings.rc003_capture_enabled)
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn get_rc003_task_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<rc003_task::TaskStatus, String> {
+    let enabled = rc003_capture_enabled(&state);
+    tauri::async_runtime::spawn_blocking(move || rc003_task::status(enabled))
+        .await
+        .map_err(|error| format!("读取 RC003 任务状态失败：{error}"))
+}
+
+/// 助手经计划任务拉起时会在用户会话里短暂创建控制台窗口（随即自隐藏），
+/// 这个创建动作仍会把前台焦点从主程序抢走——窗口随即消失，焦点落在「无」上，
+/// 用户感觉"程序没反应了"。助手进程启动到自隐藏只有几十毫秒，之后把焦点
+/// 还给主窗口即可；延迟留足助手启动 + 自隐藏的时间。
+fn refocus_main_window_soon(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_focus();
+        }
+    });
+}
+
+/// 开关打开：确保已授权（必要时弹**一次** UAC 注册），然后触发助手。
+#[tauri::command]
+async fn enable_rc003_capture(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<rc003_task::TaskStatus, String> {
+    // 尝试与结局都落诊断日志：「UAC 选了否，开关却变成开」这类争议
+    // 只能靠这里的记录裁决（2026-09-24 真机争议：日志证明当时 UAC 是
+    // 被允许的——任务重建于同一秒，没有日志就只能各说各话）。
+    sayall_windows::gatt_note(
+        "rc003 feature=enhanced-capture action=enable phase=started".to_owned(),
+    );
+    // spawn_blocking 带回的是**双层 Result**：外层 JoinError、内层闭包的
+    // Result<(), String>。只对外层用 `?` 会把内层错误**静默丢掉**——
+    // 真机代价：UAC 取消被正确识别了，命令却照旧报 passed、开关翻成开启
+    // （编译器一直有 `unused Result` 告警，被忽略了整整一天）。
+    let outcome = tauri::async_runtime::spawn_blocking(rc003_task::enable_capture)
+        .await
+        .map_err(|error| {
+            sayall_windows::gatt_note(
+                "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed"
+                    .to_owned(),
+            );
+            format!("启用 RC003 三键捕获失败：{error}")
+        })?;
+    outcome.map_err(|error| {
+        sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed"
+                .to_owned(),
+        );
+        format!("启用 RC003 三键捕获失败：{error}")
+    })?;
+    // 意图**成功后**才落盘。此前是先落盘再执行——UAC 被取消时设置里残留
+    // enabled=true，下次打开页面开关假显示"已开启"却没有助手（意图与系统
+    // 状态脱节）。失败时不动设置：开关是什么样就保持什么样。
+    state
+        .settings
+        .save_rc003_capture_enabled(true)
+        .map_err(|error| format!("保存三键捕获开关失败：{error}"))?;
+    sayall_windows::gatt_note(
+        "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=passed"
+            .to_owned(),
+    );
+    refocus_main_window_soon(app);
+    Ok(rc003_task::status(true))
+}
+
+/// 开关关闭：结束助手；**任务保留**（授权保留，符合"只弹一次 UAC"）。
+#[tauri::command]
+async fn disable_rc003_capture(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<rc003_task::TaskStatus, String> {
+    state
+        .settings
+        .save_rc003_capture_enabled(false)
+        .map_err(|error| format!("保存三键捕获开关失败：{error}"))?;
+    let outcome = tauri::async_runtime::spawn_blocking(rc003_task::disable_capture)
+        .await
+        .map_err(|error| format!("停用 RC003 三键捕获失败：{error}"))?;
+    // 同上：内层 Result 必须自己判，否则停用失败也会静默成功。
+    outcome.map_err(|error| format!("停用 RC003 三键捕获失败：{error}"))?;
+    // 结束助手同样可能抢走前台（taskkill / 控制台进程退出），一并还焦点。
+    refocus_main_window_soon(app);
+    Ok(rc003_task::status(false))
 }
 
 #[tauri::command]
@@ -1233,6 +1348,32 @@ pub fn run() {
                     Default::default()
                 }
             };
+            // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
+            // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
+            // 「任务装没装」当状态。失败静默：按键页的状态行会如实反映，
+            // 启动不该被附属能力打断。
+            //
+            // 对账兜底：授权**不跨安装/卸载保留**（产品决策）。安装器删不掉
+            // 提权任务（普通权限被拒），但会写「需重新授权」标记；任务意外
+            // 缺失同样视为授权撤销——两种情况都把开关回落为关闭。用户重新
+            // 打开时 enable 会强制重装任务（必弹 UAC）并清除标记。
+            #[cfg(windows)]
+            if saved_settings.rc003_capture_enabled {
+                let revoked =
+                    rc003_task::reauth_required() || !rc003_task::task_installed();
+                if revoked {
+                    eprintln!(
+                        "rc003: 授权已随安装/升级撤销（reauth={} task_installed={}），增强捕获回落为关闭",
+                        rc003_task::reauth_required(),
+                        rc003_task::task_installed()
+                    );
+                    let _ = settings.save_rc003_capture_enabled(false);
+                } else {
+                    std::thread::spawn(|| {
+                        let _ = rc003_task::task_trigger();
+                    });
+                }
+            }
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
             // 不阻断主程序启动，用户可在“关于”页重试。
             #[cfg(windows)]
@@ -1387,6 +1528,10 @@ pub fn run() {
         get_audio_snapshot,
         select_audio_endpoint,
         get_raw_input_snapshot,
+        get_rc003_bridge_snapshot,
+        get_rc003_task_status,
+        enable_rc003_capture,
+        disable_rc003_capture,
         start_raw_input,
         stop_raw_input,
         get_button_mappings,
@@ -1430,6 +1575,10 @@ pub fn run() {
         get_audio_snapshot,
         select_audio_endpoint,
         get_raw_input_snapshot,
+        get_rc003_bridge_snapshot,
+        get_rc003_task_status,
+        enable_rc003_capture,
+        disable_rc003_capture,
         start_raw_input,
         stop_raw_input,
         get_button_mappings,

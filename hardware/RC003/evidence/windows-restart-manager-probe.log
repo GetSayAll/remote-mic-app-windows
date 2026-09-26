@@ -1,0 +1,16 @@
+================================================================
+ 证据：谁占着运行时目录里的 frida-gadget.dll
+ 探针：windows-restart-manager-probe.py（只读，Restart Manager API）
+ 归档：2026-09-23 15:51:51 +0800
+================================================================
+
+--- positive control (本进程必然映射) pid=2376 ---
+  file: C:\Users\hd838\.workbuddy\binaries\python\versions\3.13.12\python.exe
+  user pid=2376   type=Critical   started=1790149912 app='Python'
+  control_detects_mapping = True
+
+--- target ---
+  file: C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll
+  user pid=32684  type=Critical   started=1790097806 app='WUDFHost.exe'
+
+exit=0

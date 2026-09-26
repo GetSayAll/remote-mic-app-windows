@@ -1,0 +1,11 @@
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 15:50:21.477 ===
+[ENV] elevated=false pid=24916 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=d7f22eed9504b549ce3ce4f4b0830ab575f5da00e38d18e7d7bf3b5458773b6b
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=32684 exe=WUDFHost.exe image=?
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&0&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[DRY-RUN] 宿主定位、独占性核对与 Gadget 校验均通过；未准备运行时目录、未注入、未监听。elevated=false（本模式不需要提权；observe / 正式运行才需要）。注意：宿主内是否已有 tap 需要枚举目标进程模块，本模式不提权、**不查**。
+[PREP-SIM] runtime_dir=C:\ProgramData\SayAll\rc003-helper dll_exists=true sha256_matches=true would_do=reuse_existing note=只报告、不写入；宿主内是否已有 tap 需要枚举目标进程模块（要提权），本模式不查
+[PREP-SIM] generations=- token_file=false

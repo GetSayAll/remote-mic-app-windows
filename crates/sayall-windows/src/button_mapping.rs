@@ -240,9 +240,6 @@ impl ButtonMappingRuntime {
 
     /// 更新按键映射：热加载到引擎 + 同步门控吞键配置。
     pub fn set_mappings(&self, mappings: ButtonMappings) {
-        // 策略性不支持的按键（返回/音量±）统一
-        // 剥离：normalized() 已在持久化层剥离，此处兜底直连调用路径。
-        let mappings = mappings.without_unsupported_buttons();
         *self
             .mappings
             .write()
@@ -1337,8 +1334,8 @@ mod tests {
     }
 
     #[test]
-    fn set_mappings_strips_unsupported_buttons_and_sets_persistent_mask() {
-        // 返回/音量±仍被策略剥离；左键映射必须保留并进入普通逐键武装机制。
+    fn set_mappings_preserves_back_and_volume_buttons_and_sets_persistent_mask() {
+        // 返回/音量±现在属于可配置按键；左键映射也必须保留并进入普通逐键武装机制。
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
@@ -1356,17 +1353,21 @@ mod tests {
                 ..ButtonActions::default()
             },
         );
-        mappings.actions.insert(
-            RemoteButton::Back,
-            ButtonActions {
-                single: ButtonAction::Shortcut {
-                    chord: KeyChord {
-                        keys: vec![KeyCode::Escape],
-                    },
+        let escape_action = ButtonActions {
+            single: ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Escape],
                 },
-                ..ButtonActions::default()
             },
-        );
+            ..ButtonActions::default()
+        };
+        for button in [
+            RemoteButton::Back,
+            RemoteButton::VolumeUp,
+            RemoteButton::VolumeDown,
+        ] {
+            mappings.actions.insert(button, escape_action.clone());
+        }
         mappings.actions.insert(
             RemoteButton::Tv,
             ButtonActions {
@@ -1390,8 +1391,8 @@ mod tests {
             RemoteButton::VolumeDown,
         ] {
             assert!(
-                !effective.actions.contains_key(&button),
-                "{button:?} 自定义必须被策略剥离"
+                effective.actions.contains_key(&button),
+                "{button:?} 自定义必须保留"
             );
         }
         assert_eq!(
@@ -1413,10 +1414,13 @@ mod tests {
                 },
             },
         );
-        // 引擎侧被剥离按键的动作查询为 Disabled（双保险：配置剥离 + 查询兜底）。
         assert_eq!(
             effective.action_for(RemoteButton::Back, ButtonTrigger::Single),
-            ButtonAction::Disabled,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Escape],
+                },
+            },
         );
     }
 }

@@ -86,6 +86,32 @@ export interface RawInputSnapshot {
   staleRemoteEventCount: number;
 }
 
+/**
+ * RC003 三键传输桥接（捕获链第 ② 段）的状态。
+ *
+ * 背景：RC003 的返回 / 音量± 在 Windows 侧零事件（`kbdhid` 丢弃了这三个 usage），
+ * 必须由提权助手在报告层拦下、再经这条桥接送回主程序。所以"三键按不动"有
+ * 多种原因，这一份快照用来区分它们：`listening` = 主程序已就绪、在等助手；
+ * `connected` 且 `edgesApplied` 增长 = 边沿真的过了桥。
+ */
+export interface Rc003BridgeSnapshot {
+  phase: Rc003BridgePhase;
+  port: number;
+  helperPid: number;
+  acceptedTotal: number;
+  deniedTotal: number;
+  replacedTotal: number;
+  edgesApplied: number;
+  usagesDropped: number;
+  malformedTotal: number;
+  watchdogReleaseTotal: number;
+  pressedUsages: number[];
+  lastRxAgeMs: number | null;
+}
+
+/** `stopped` = 该平台没有这个机制（非 Windows），或桥接未启用。 */
+export type Rc003BridgePhase = "stopped" | "listening" | "connected" | "failed";
+
 export type KeyCode = string;
 
 export interface KeyChord {
@@ -499,6 +525,70 @@ export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
   return invoke<RawInputSnapshot>("get_raw_input_snapshot");
 }
 
+/** 浏览器 / 仿真环境没有这个机制：恒为 "不存在"，前端据此不显示这一条目。 */
+const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
+  phase: "stopped",
+  port: 0,
+  helperPid: 0,
+  acceptedTotal: 0,
+  deniedTotal: 0,
+  replacedTotal: 0,
+  edgesApplied: 0,
+  usagesDropped: 0,
+  malformedTotal: 0,
+  watchdogReleaseTotal: 0,
+  pressedUsages: [],
+  lastRxAgeMs: null,
+};
+
+export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {
+  // `typeof window` 这一层不能省：组件卸载后轮询仍可能再触发一次，
+  // 而测试环境在 teardown 之后 window 已不可用 —— 直接调 `isTauriRuntime()`
+  // 会抛 ReferenceError，表现为一个与被测功能无关的 unhandled rejection。
+  if (typeof window === "undefined" || !isTauriRuntime()) {
+    return BROWSER_RC003_BRIDGE;
+  }
+  return invoke<Rc003BridgeSnapshot>("get_rc003_bridge_snapshot");
+}
+
+/**
+ * 三键捕获的计划任务状态。`installed` = 用户已授权（任务在系统里），
+ * 这是开关的真相源——主程序每次启动时会自动拉起已授权的助手，
+ * 所以**不需要**额外的持久化字段。
+ */
+export interface Rc003TaskStatus {
+  installed: boolean;
+  /** 用户意图（持久化，默认关闭）。开关显示读它，而不是读 installed。 */
+  enabled: boolean;
+  helperPath: string | null;
+  lastError: string | null;
+}
+
+/**
+ * 开关打开：确保已授权（必要时弹一次 UAC，主程序会等它完成），然后触发助手。
+ * 开关关闭：结束助手，**授权保留**（这正是"只弹一次 UAC"的一部分）。
+ */
+export async function getRc003TaskStatus(): Promise<Rc003TaskStatus> {
+  if (typeof window === "undefined" || !isTauriRuntime()) {
+    return { installed: false, enabled: false, helperPath: null, lastError: null };
+  }
+  return invoke<Rc003TaskStatus>("get_rc003_task_status");
+}
+
+export async function enableRc003Capture(): Promise<Rc003TaskStatus> {
+  if (typeof window === "undefined" || !isTauriRuntime()) {
+    return { installed: false, enabled: false, helperPath: null, lastError: null };
+  }
+  return invoke<Rc003TaskStatus>("enable_rc003_capture");
+}
+
+export async function disableRc003Capture(): Promise<Rc003TaskStatus> {
+  if (typeof window === "undefined" || !isTauriRuntime()) {
+    return { installed: false, enabled: false, helperPath: null, lastError: null };
+  }
+  return invoke<Rc003TaskStatus>("disable_rc003_capture");
+}
+
 export async function startRawInput(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法启动按键监听");
@@ -877,9 +967,8 @@ export type ShortcutCapability = "all" | "identity" | "none";
  * - **identity**（武装族常见物理 VK：确定/方向）：孤立冷首按原始键
  *   必泄漏（结构性武装死锁，公开 API 内不可根除）→ 同键映射由泄漏对冲
  *   保证单响应，其他映射"配置动作正常执行 + 冷首按附带一次原生动作"；
- * - **none**：TV（OEM_3 `~/~，同键映射不可表达）与返回/音量±（RC003
- *   输入栈不可见；RC001 虽可达但 2026-09-07 起全型号禁用——格子禁用，
- *   见 ButtonsPage 的 UNMAPPABLE_BUTTONS）。
+ * - **none**：TV（OEM_3 `~/~，同键映射不可表达）。返回/音量±现在保留为
+ *   可配置按键；实际是否能收到边沿由底层设备捕获能力决定。
  *
  * 2026-09-07 增补（方案 C"遥控器优先"落地，key_gate 常驻抑制族）：
  * Home/TV 已配置映射且遥控器连接期间原生按键被接管——任意按压（含孤立
@@ -895,14 +984,12 @@ export function shortcutCapability(
   if (button === "power" || button === "menu") {
     return "all";
   }
-  if (
-    button === "back" ||
-    button === "volume_up" ||
-    button === "volume_down" ||
-    button === "tv"
-  ) {
-    // 返回/音量±全型号禁用（2026-09-07 用户决策）；TV 无同键映射可表达。
+  if (button === "tv") {
+    // TV 无同键映射可表达。
     return "none";
+  }
+  if (button === "back" || button === "volume_up" || button === "volume_down") {
+    return "all";
   }
   // 武装族（确定/方向）：单击可配同键映射（对冲单响应）。
   return trigger === "single" ? "identity" : "none";

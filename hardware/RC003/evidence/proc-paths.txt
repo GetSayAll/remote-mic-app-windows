@@ -1,0 +1,2 @@
+sayall-windows-app pid=21660 path=C:\Users\hd838\AppData\Local\无线麦 SayAll\sayall-windows-app.exe
+sayall-helper pid=2776 path=

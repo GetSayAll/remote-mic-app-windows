@@ -1,0 +1,14 @@
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 16:56:07.501 ===
+[ENV] elevated=false pid=25028 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[CANARY] enabled=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081,0x004a canary=0x004a
+[CANARY] 验收专用配置：除三键外还会清掉上面的哨兵键，它的原生行为会暂时消失。判据：清空生效 ⇒ 哨兵键无反应；助手退出 / 租约到期 / Ctrl+C ⇒ 哨兵键恢复（fail-open）。
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=?
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[DRY-RUN] 宿主定位、独占性核对与 Gadget 校验均通过；未准备运行时目录、未注入、未监听。elevated=false（本模式不需要提权；observe / 正式运行才需要）。注意：宿主内是否已有 tap 需要枚举目标进程模块，本模式不提权、**不查**。
+[PREP-SIM] runtime_dir=C:\ProgramData\SayAll\rc003-helper dll_exists=true sha256_matches=true would_do=reuse_existing note=只报告、不写入；宿主内是否已有 tap 需要枚举目标进程模块（要提权），本模式不查
+[PREP-SIM] generations=- token_file=true
+[DRY-RUN-CANARY] canary=0x004a clear_usages=0x00f1,0x0080,0x0081,0x004a note=若开始运行，这些 usage 的原生行为会暂时消失（受租约与 --duration 兜底）

@@ -1,0 +1,45 @@
+{
+  "schema": "sayall.vendored-binary.lock/1",
+  "purpose": "RC003 增强捕获轨（路线 A）的注入载体。助手把该 DLL 加载进承载 RC003 的 WUDFHost.exe，在其进程内挂 ntdll!NtDeviceIoControlFile 并按 usage 选择性拦截键盘报告。",
+  "note": "本文件是版本与完整性的唯一事实来源。任何升级都必须同时更新 version / url / sha256 三项，并在 ATTRIBUTION.md 记录变更。",
+  "entries": [
+    {
+      "name": "frida-gadget",
+      "component": "frida-gadget-17.18.0-windows-x86_64.dll",
+      "target": "frida-gadget.dll",
+      "version": "17.18.0",
+      "arch": "x86_64",
+      "releasePublishedAt": "2026-09-09T19:25:03Z",
+      "source": {
+        "kind": "github-release",
+        "repo": "frida/frida",
+        "tag": "17.18.0",
+        "asset": "frida-gadget-17.18.0-windows-x86_64.dll.xz",
+        "url": "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-windows-x86_64.dll.xz"
+      },
+      "compressed": {
+        "name": "frida-gadget-17.18.0-windows-x86_64.dll.xz",
+        "size": 7030612,
+        "sha256": "2e549d3b77bc939b83b9a368655e90b7e566bd56b635a10fc3fab68d8dbe173d"
+      },
+      "extracted": {
+        "name": "frida-gadget.dll",
+        "size": 23254016,
+        "sha256": "350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687"
+      },
+      "integrity": {
+        "compressedSha256Origin": "GitHub Releases API 的 asset.digest 字段（非本地计算，可独立复核）",
+        "verifiedOn": "2026-09-23",
+        "verifiedBy": "本机下载后本地重算，与 API 摘要逐字符一致；解压产物 PE 头为 MZ / machine=0x8664"
+      },
+      "license": {
+        "name": "wxWindows Library Licence, Version 3.1",
+        "file": "COPYING（frida/frida 仓库根）",
+        "redistributionBasis": "该许可的 exception notice 第 2 条：\"The exception is that you may use, copy, link, modify and distribute under your own terms, binary object code versions of works based on the Library.\"",
+        "implication": "以二进制形式随本产品分发被明确允许；无需开源本产品代码。第 3 条同时说明：若在库中并入 GPL/LGPL 代码，该例外不适用于并入部分。",
+        "residualRisk": "本次仅核对了仓库根 COPYING。正式发布前应做一次逐组件许可复核（尤其是 Gadget 内嵌的第三方组件），并把许可全文随安装包一并分发。"
+      },
+      "usageBoundary": "仅作为开发期与增强轨的注入载体登记。基础语音主路径不得依赖本组件（AGENTS.md 架构边界）。"
+    }
+  ]
+}

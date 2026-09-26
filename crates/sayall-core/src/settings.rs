@@ -29,6 +29,11 @@ pub struct AppSettings {
     pub launch_at_login: bool,
     pub open_window_at_launch: bool,
     pub check_prerelease_updates: bool,
+    /// RC003 三键增强捕获的用户意图（按键页开关）。默认 **关闭**——
+    /// 只有用户主动打开过才为 true。注意它与「计划任务是否还在系统里」
+    /// 是两回事：关闭开关只结束助手、任务保留（授权保留，避免重复 UAC），
+    /// 所以不能拿任务的存在与否当这个开关的状态。
+    pub rc003_capture_enabled: bool,
     pub theme_preference: ThemePreference,
     pub usage_statistics: UsageStatistics,
 }
@@ -45,6 +50,7 @@ impl Default for AppSettings {
             launch_at_login: false,
             open_window_at_launch: true,
             check_prerelease_updates: false,
+            rc003_capture_enabled: false,
             theme_preference: ThemePreference::System,
             usage_statistics: UsageStatistics::default(),
         }
