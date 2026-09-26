@@ -28,6 +28,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 LOCK_PATH = HERE / "frida-gadget.lock.json"
 
+# Windows 上 Python 的 stdout/stderr 默认跟随控制台代码页，CI runner 实测是 **cp1252**；
+# 本脚本会打印中文进度（如「下载 …」），于是整个取件过程被 UnicodeEncodeError 打断
+# （2026-09-27 PR #127 CI 实测）。显式把输出流设成 UTF-8，别让编码问题伪装成"下载失败"。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 EXIT_OK = 0
 EXIT_LOCK = 2
 EXIT_MISMATCH = 3
