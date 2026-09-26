@@ -11,19 +11,26 @@ import type {
 } from "../lib/bridge";
 import {
   audioPhaseLabel,
+  chordLabel,
   connectRemote,
   connectionPhaseLabel,
   disconnectRemote,
   getAudioSnapshot,
   getConnectionSnapshot,
   getVoiceHoldHotkey,
+  isRecommendedVoiceEndpoint,
   listAudioEndpoints,
   openVbCableDownloadPage,
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
   setVoiceHoldHotkey,
+  startShortcutCapture,
+  stopShortcutCapture,
+  subscribeShortcutCaptureEdges,
   voiceHoldHotkeyLabel,
+  type KeyCode,
+  type ShortcutCaptureEdge,
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -69,12 +76,30 @@ const audioMessage = ref("尚未读取语音设备");
 const voiceHotkey = ref<KeyChord | null>(null);
 const savingVoiceHotkey = ref(false);
 const voiceHotkeyMessage = ref("尚未读取快捷键设置");
+const capturingVoiceHotkey = ref(false);
+const captureStartingVoiceHotkey = ref(false);
+const voiceCaptureDisplay = ref<KeyCode[]>([]);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
+let unlistenVoiceCapture: (() => void) | null = null;
+let voiceCaptureTimeout: number | null = null;
+let voiceCaptureRequestId = 0;
+let unmounted = false;
+const voiceCapturePressed = new Set<KeyCode>();
+let voiceCapturedKeys: KeyCode[] | null = null;
 
-const voiceHotkeyPresets: Array<{ label: string; keys: string[] }> = [
-  { label: "微信输入法（默认）", keys: ["left_control", "left_windows"] },
-  { label: "关闭", keys: [] },
-];
+/** 按住说话快捷键默认值（v1 固定，适配微信输入法的默认语音热键）。 */
+const DEFAULT_VOICE_HOTKEY_KEYS: KeyCode[] = ["left_control", "left_windows"];
+
+const CAPTURE_MODIFIER_KEYS: ReadonlySet<KeyCode> = new Set<KeyCode>([
+  "left_control",
+  "right_control",
+  "left_shift",
+  "right_shift",
+  "left_alt",
+  "right_alt",
+  "left_windows",
+  "right_windows",
+]);
 
 const activeVoiceHotkeyKeys = computed(() =>
   voiceHotkey.value ? [...voiceHotkey.value.keys].sort().join("+") : "",
@@ -99,6 +124,101 @@ async function applyVoiceHotkey(keys: string[]) {
     await refreshVoiceHotkey();
   } finally {
     savingVoiceHotkey.value = false;
+  }
+}
+
+/**
+ * 按住说话快捷键录入：录入门走 OS 级低级钩子（与按键映射页的自定义录入
+ * 同一条链路），Win+L 之类的系统组合在到达 Shell 前就被成对吞下，不会
+ * 真的锁屏。保存点放在"全部按键松开"之后，避免录入完成但物理键尚未松开
+ * 时被系统补执行。Esc（未按修饰键）取消；15 秒未完成自动结束，此时已录到
+ * 的组合不再丢弃。
+ */
+async function beginVoiceHotkeyCapture(): Promise<void> {
+  if (capturingVoiceHotkey.value || captureStartingVoiceHotkey.value) return;
+  const requestId = ++voiceCaptureRequestId;
+  captureStartingVoiceHotkey.value = true;
+  voiceHotkeyMessage.value = "";
+  try {
+    await startShortcutCapture();
+    if (unmounted || requestId !== voiceCaptureRequestId) {
+      await stopShortcutCapture().catch(() => undefined);
+      return;
+    }
+    voiceCapturePressed.clear();
+    voiceCapturedKeys = null;
+    voiceCaptureDisplay.value = [];
+    capturingVoiceHotkey.value = true;
+    if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
+    voiceCaptureTimeout = window.setTimeout(() => {
+      void finishVoiceHotkeyCapture("录入已超时，请重新录入");
+    }, 15_000);
+  } catch (error) {
+    voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (requestId === voiceCaptureRequestId) captureStartingVoiceHotkey.value = false;
+  }
+}
+
+/** 结束录入：已录到组合则落盘生效，否则只显示传入的取消原因。 */
+async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
+  voiceCaptureRequestId += 1;
+  captureStartingVoiceHotkey.value = false;
+  capturingVoiceHotkey.value = false;
+  if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
+  voiceCaptureTimeout = null;
+  voiceCapturePressed.clear();
+  const keys = voiceCapturedKeys;
+  voiceCapturedKeys = null;
+  voiceCaptureDisplay.value = [];
+  await stopShortcutCapture().catch(() => undefined);
+  if (keys) {
+    await applyVoiceHotkey([...keys]);
+    return;
+  }
+  if (cancelMessage) voiceHotkeyMessage.value = cancelMessage;
+}
+
+async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> {
+  if (!capturingVoiceHotkey.value) return;
+  const { key, isPressed } = edge;
+  if (!isPressed) {
+    const wasPressed = voiceCapturePressed.delete(key);
+    if (voiceCapturedKeys) {
+      voiceCaptureDisplay.value = voiceCapturedKeys;
+      if (voiceCapturePressed.size === 0) await finishVoiceHotkeyCapture();
+      return;
+    }
+    // 单独按下并松开一个修饰键本身就是一个合法快捷键（豆包输入法即"长按右
+    // Alt"），在没有任何主键参与时按它落盘；录入结果同时显示在页面上，
+    // 误触可再次录入或选回默认。
+    if (wasPressed && CAPTURE_MODIFIER_KEYS.has(key) && voiceCapturePressed.size === 0) {
+      voiceCapturedKeys = [key];
+      voiceCaptureDisplay.value = voiceCapturedKeys;
+      await finishVoiceHotkeyCapture();
+      return;
+    }
+    voiceCaptureDisplay.value = [...voiceCapturePressed];
+    return;
+  }
+  // 已经拿到终止键后继续保持原生拦截，直到本次组合的所有 DOWN 都收到配对 UP。
+  if (voiceCapturedKeys) return;
+  if (key === "escape" && voiceCapturePressed.size === 0) {
+    await finishVoiceHotkeyCapture("已取消录入");
+    return;
+  }
+  voiceCapturePressed.add(key);
+  if (CAPTURE_MODIFIER_KEYS.has(key)) {
+    voiceCaptureDisplay.value = [...voiceCapturePressed];
+    return;
+  }
+  voiceCapturedKeys = [...voiceCapturePressed];
+  voiceCaptureDisplay.value = voiceCapturedKeys;
+}
+
+function handleVoiceCaptureBlur(): void {
+  if (capturingVoiceHotkey.value || captureStartingVoiceHotkey.value) {
+    void finishVoiceHotkeyCapture("窗口失去焦点，已取消录入");
   }
 }
 
@@ -310,7 +430,8 @@ async function initializeAudio() {
   await detectAudioEndpoints(restoredAudio);
 }
 
-onMounted(() => {
+onMounted(async () => {
+  window.addEventListener("blur", handleVoiceCaptureBlur);
   void refreshConnection();
   void initializeAudio();
   void refreshVoiceHotkey();
@@ -318,10 +439,25 @@ onMounted(() => {
     void refreshConnection();
     void refreshAudio();
   }, 1_000);
+  const stopCaptureEdges = await subscribeShortcutCaptureEdges((edge) => {
+    void acceptVoiceCaptureEdge(edge);
+  });
+  if (unmounted) {
+    stopCaptureEdges();
+    return;
+  }
+  unlistenVoiceCapture = stopCaptureEdges;
 });
 
 onUnmounted(() => {
+  unmounted = true;
+  window.removeEventListener("blur", handleVoiceCaptureBlur);
   if (pollTimer) clearInterval(pollTimer);
+  if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
+  voiceCaptureTimeout = null;
+  unlistenVoiceCapture?.();
+  unlistenVoiceCapture = null;
+  void stopShortcutCapture().catch(() => undefined);
 });
 </script>
 
@@ -329,7 +465,7 @@ onUnmounted(() => {
   <section>
     <header class="page-header">
       <div>
-        <h1>连接与语音</h1>
+        <h1>连接</h1>
       </div>
       <span class="badge" :class="phaseTone">{{ connectionPhaseLabel(connection.phase) }}</span>
     </header>
@@ -408,19 +544,60 @@ onUnmounted(() => {
             <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
           </div>
         </div>
-        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：左 Ctrl + 左 Win。</p>
+        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：{{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}。</p>
         <div class="button-row voice-hotkey-presets">
           <button
-            v-for="preset in voiceHotkeyPresets"
-            :key="preset.label"
-            :class="presetIsActive(preset.keys) ? 'primary-button' : 'secondary-button'"
+            class="secondary-button"
             type="button"
-            :disabled="savingVoiceHotkey || !runtime?.platform.windowsApiAvailable || presetIsActive(preset.keys)"
-            @click="applyVoiceHotkey(preset.keys)"
+            :disabled="
+              savingVoiceHotkey ||
+              captureStartingVoiceHotkey ||
+              !runtime?.platform.windowsApiAvailable
+            "
+            @click="
+              capturingVoiceHotkey
+                ? finishVoiceHotkeyCapture('已取消录入')
+                : beginVoiceHotkeyCapture()
+            "
           >
-            {{ preset.label }}
+            {{ capturingVoiceHotkey ? "录入中…（按 Esc 取消）" : "修改快捷键" }}
+          </button>
+          <button
+            :class="
+              presetIsActive(DEFAULT_VOICE_HOTKEY_KEYS) ? 'primary-button' : 'secondary-button'
+            "
+            type="button"
+            :disabled="
+              savingVoiceHotkey ||
+              capturingVoiceHotkey ||
+              !runtime?.platform.windowsApiAvailable ||
+              presetIsActive(DEFAULT_VOICE_HOTKEY_KEYS)
+            "
+            @click="applyVoiceHotkey(DEFAULT_VOICE_HOTKEY_KEYS)"
+          >
+            {{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}（默认）
+          </button>
+          <button
+            :class="activeVoiceHotkeyKeys ? 'secondary-button' : 'primary-button'"
+            type="button"
+            :disabled="
+              savingVoiceHotkey ||
+              capturingVoiceHotkey ||
+              !runtime?.platform.windowsApiAvailable ||
+              !activeVoiceHotkeyKeys
+            "
+            @click="applyVoiceHotkey([])"
+          >
+            关闭
           </button>
         </div>
+        <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
+          {{
+            voiceCaptureDisplay.length
+              ? chordLabel({ keys: voiceCaptureDisplay })
+              : "请按下要使用的快捷键组合（也可单独按一个 Ctrl/Alt/Win 等修饰键）；按 Esc 取消"
+          }}
+        </p>
         <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
         <details class="usage-hint-details">
           <summary>微信输入法使用步骤（点开查看）</summary>
@@ -476,7 +653,13 @@ onUnmounted(() => {
           <li v-for="endpoint in audioEndpoints" :key="endpoint.id">
             <div>
               <strong>{{ endpoint.name }}</strong>
-              <small>{{ endpoint.isVirtualCableCandidate ? "推荐（微信输入法等语音工具使用）" : "其他音频设备" }}</small>
+              <strong
+                v-if="isRecommendedVoiceEndpoint(endpoint)"
+                class="endpoint-recommend"
+              >
+                推荐
+              </strong>
+              <small v-else>其他音频设备</small>
             </div>
             <button
               type="button"

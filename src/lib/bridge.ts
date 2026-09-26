@@ -34,6 +34,20 @@ export interface AudioEndpoint {
   isVirtualCableCandidate: boolean;
 }
 
+/**
+ * 界面上的“推荐”判据：只有 VB-CABLE 标准包提供的 CABLE Input
+ * （渲染端点友好名 `CABLE Input (VB-Audio Virtual Cable)`）值得推荐给
+ * 微信输入法等语音工具作麦克风来源。
+ *
+ * 后端的 `isVirtualCableCandidate` 是更宽的候选判定（含 VB-CABLE A/B 的
+ * CABLE-A/B Input 与 CI 仿真端点），只用于自动选择与安装检测，不足以
+ * 决定推荐标记；两者刻意分开，避免给非标准端点打上推荐。
+ */
+export function isRecommendedVoiceEndpoint(endpoint: AudioEndpoint): boolean {
+  const name = endpoint.name.trim().toLowerCase();
+  return name.includes("cable input") && name.includes("vb-audio");
+}
+
 export interface AudioSnapshot {
   phase: AudioPhase;
   selectedEndpointId: string | null;
@@ -923,7 +937,9 @@ export function shortcutCapability(
 
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
-  backspace: "退格",
+  // 用厂商印在键帽上的英文名，避免“退格/删除”在中文里被混为一谈。
+  backspace: "Backspace",
+  home: "Home",
   page_up: "Page Up",
   page_down: "Page Down",
   end: "End",

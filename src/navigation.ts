@@ -11,7 +11,7 @@ export interface NavigationItem {
 
 export const navigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
-  { id: "connection", label: "连接与语音", icon: "link" },
+  { id: "connection", label: "连接", icon: "link" },
   { id: "permissions", label: "权限", icon: "shield" },
   { id: "about", label: "关于", icon: "info" },
 ];
