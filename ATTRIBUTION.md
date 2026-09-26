@@ -13,6 +13,16 @@
 
 - 应用发现使用 Microsoft AppsFolder / IShellItem / BHID_EnumItems，启动使用 ShellExecuteExW + SEE_MASK_NOASYNC；只读取系统公开注册的可启动项，不扫描第三方私有文件或修改 Windows 注册。按本机缓存的 Microsoft windows-rs 0.62.2 API 签名核对实现；没有复制外部算法。参考： https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid 、https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow 。
 - 应用库仅保存在用户确认后的按键配置中；扫描不是启动，多选添加不是绑定。日志只记录数量、阶段和耗时，不记录应用身份或个人路径。验收方法见 `Testing/WindowsRegisteredApps.md`。
+- 前台切换依据 Microsoft `SetForegroundWindow` / `GetForegroundWindow` /
+  `LockSetForegroundWindow` / `AttachThreadInput` 公共 API 文档：Windows 即使满足常规
+  条件仍可拒绝后台进程抢前台，并改为闪烁任务栏；`AttachThreadInput` 只共享输入状态，
+  不承诺绕过 foreground lock；用户按 Alt 会解除该锁。本仓库因此以
+  `GetForegroundWindow` 所属进程读回作为唯一成功判据，常规尝试读回失败后才用成对
+  Alt DOWN/UP 包住一次重试，物理 Alt 已按住时跳过，避免破坏用户键态。官方依据：
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow 、
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getforegroundwindow 、
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-locksetforegroundwindow 、
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-attachthreadinput 。
 
 ## 遥控器缓存电量显示
 
@@ -156,6 +166,29 @@
   `learn.microsoft.com/uwp/api/windows.devices.radios.radio.fromidasync`。
 
 外部实现只作为带来源的参考。第三方应用进程注入、私有配置读取和来源不明二进制不进入稳定主路径。
+
+## Windows 注册应用激活与前台验收（2026-09-26）
+
+- **`IApplicationActivationManager::ActivateApplication`**：微软文档定义它按 AUMID
+  激活当前会话中的通用启动契约，并返回承接契约的进程 ID。本仓库用它替代 AppsFolder
+  路径中仅投递 `ShellExecuteExW` 的主路径；传统桌面注册项仍保留 Shell 回退。官方依据：
+  `learn.microsoft.com/windows/win32/api/shobjidl_core/nf-shobjidl_core-iapplicationactivationmanager-activateapplication`。
+- **AUMID 与多进程应用**：微软说明 AUMID 用于把应用的窗口、进程和资源关联起来，
+  不依赖应用内部是单进程还是多进程；`GetApplicationUserModelId` 可从公开进程句柄读取
+  该身份；窗口级 `System.AppUserModel.ID` 可覆盖进程级身份，用于共享宿主或同进程多应用。
+  因此不能假定激活契约 PID 就是主窗口 PID，本仓库先按窗口级、再按进程级精确 AUMID
+  枚举，最后以 `GetForegroundWindow` 读回验收。官方依据：
+  `learn.microsoft.com/windows/apps/desktop/modernize/package-identity-overview`、
+  `learn.microsoft.com/windows/win32/appxpkg/functions`、
+  `learn.microsoft.com/windows/win32/properties/props-system-appusermodel-id`。
+- **传统 AppsFolder 条目**：微软将 `System.Link.TargetParsingPath` 定义为链接项真实目标
+  的 Shell 命名空间路径，文件目标时等同于显示路径；`IShellItem2::GetString` 是读取该
+  PROPERTYKEY 的公开接口。本仓库用它取得完整 exe 路径，匹配所有同路径运行进程，
+  避免误把 Shell 返回的启动器 PID 当主窗口，也避免仅按文件名造成跨目录碰撞。官方依据：
+  `learn.microsoft.com/windows/win32/properties/props-system-link-targetparsingpath`、
+  `learn.microsoft.com/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishellitem2-getstring`。
+- **边界**：只读取 Windows 公开的应用身份，不读取 ChatGPT 或其他第三方应用的私有
+  配置、数据库或进程内存；日志不记录 AUMID、窗口标题、路径或应用名称。
 
 ## Windows 系统快捷键录入与锁屏动作（2026-09-10）
 
