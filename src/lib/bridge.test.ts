@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
   audioPhaseLabel,
+  chordLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
   identityShortcutByButton,
+  isRecommendedVoiceEndpoint,
   openLogDirectory,
   openVbCableDownloadPage,
   remoteModelLabel,
@@ -66,6 +68,31 @@ describe("mapping capability matrix（单响应判定，用于信息提示）", 
     expect(identityShortcutByButton.home).toBe("home");
     expect(identityShortcutByButton.tv).toBeUndefined();
     expect(identityShortcutByButton.power).toBeUndefined();
+  });
+});
+
+describe("voice endpoint recommendation", () => {
+  const candidate = (name: string, isVirtualCableCandidate = true) => ({
+    id: name,
+    name,
+    isVirtualCableCandidate,
+  });
+
+  it("recommends only the standard VB-Audio CABLE Input", () => {
+    expect(isRecommendedVoiceEndpoint(candidate("CABLE Input (VB-Audio Virtual Cable)"))).toBe(
+      true,
+    );
+    // 后端的候选判定更宽（自动选择与安装检测用）：非标准端点不得进推荐位。
+    expect(isRecommendedVoiceEndpoint(candidate("CABLE-A Input (VB-Audio Cable A)"))).toBe(false);
+    expect(isRecommendedVoiceEndpoint(candidate("CABLE Input (CI Simulation)"))).toBe(false);
+    expect(isRecommendedVoiceEndpoint(candidate("扬声器 (Realtek Audio)", false))).toBe(false);
+  });
+
+  it("uses the vendor key names for keys that were confusable in Chinese", () => {
+    expect(chordLabel({ keys: ["backspace"] })).toBe("Backspace");
+    expect(chordLabel({ keys: ["delete"] })).toBe("Delete");
+    expect(chordLabel({ keys: ["control", "c"] })).toBe("Ctrl + C");
+    expect(chordLabel({ keys: ["left_windows", "shift", "s"] })).toBe("左 Win + Shift + S");
   });
 });
 

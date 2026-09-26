@@ -46,17 +46,17 @@ SayAll 只能扫描已经由 Windows 配对的遥控器。Windows 的“已配�
 
 SayAll 把遥控器声音写入播放端 `CABLE Input`，输入法或会议软件再从录音端 `CABLE Output` 读取。两个名称看似相反，这是 VB-CABLE 的正常信号方向。
 
-1. 在 SayAll 中打开“连接与语音”。如果页面提示缺少 VB-CABLE，选择“打开官方下载页”；也可以直接打开 [VB-CABLE 官方页面](https://vb-audio.com/Cable/)。
+1. 在 SayAll 中打开“连接”。如果页面提示缺少 VB-CABLE，选择“打开官方下载页”；也可以直接打开 [VB-CABLE 官方页面](https://vb-audio.com/Cable/)。
 2. 下载 VB-CABLE 压缩包，并把全部文件解压到本地文件夹。不要直接在压缩包内运行安装程序。
 3. 64 位 Windows 用户右键 `VBCABLE_Setup_x64.exe`，选择“以管理员身份运行”，然后选择“Install Driver”。
 4. 安装完成后重启 Windows。VB-Audio 的[官方参考手册](https://vb-audio.com/Cable/VBCABLE_ReferenceManual.pdf)也要求安装后重启。
-5. 重新打开 SayAll 的“连接与语音”，选择“刷新设备列表”。如果系统中只有一个 VB-CABLE，SayAll 首次启动时会自动选择它；否则手动选择 `CABLE Input`。
+5. 重新打开 SayAll 的“连接”，选择“刷新设备列表”。如果系统中只有一个 VB-CABLE，SayAll 首次启动时会自动选择它；否则手动选择带加粗“推荐”标记的 `CABLE Input (VB-Audio Virtual Cable)`。
 
 完成标准：语音设备卡片显示 `CABLE Input`，状态为“已就绪”。
 
 ## 5. 在 SayAll 中连接遥控器
 
-1. 打开“连接与语音”，选择“扫描已配对设备”。
+1. 打开“连接”，选择“扫描已配对设备”。
 2. 在目标遥控器旁选择“连接”。
 3. 等待状态变为“已就绪”，并确认页面显示 RC001 或 RC003。
 
@@ -73,7 +73,7 @@ SayAll 会记住用户选择的遥控器和语音设备，之后启动、临时�
 
 ### 微信输入法（默认配置）
 
-1. 保持 SayAll 的“按住说话快捷键”为“微信输入法（默认）”，即左 Ctrl + 左 Win。
+1. 保持 SayAll 的“按住说话快捷键”为默认的左 Ctrl + 左 Win（默认预设）；需要与其他软件一致时，选择“修改快捷键”，按下目标组合（例如右 Alt），松开后自动生效。
 2. 在微信输入法的语音设置中把麦克风选为 `CABLE Output`。若软件不提供单独的麦克风选择，把 Windows 默认录音设备设为 `CABLE Output`。
 3. 在目标应用中点入文本框，并切换到微信输入法。
 4. 按住遥控器语音键约半秒后说话，松开后等待文字出现。微信输入法语音识别需要网络。

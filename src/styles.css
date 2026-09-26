@@ -466,7 +466,11 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .voice-hotkey-row { margin-top: 10px; }
 .voice-hotkey-row p { margin: 0; font-size: 13px; }
 .voice-hotkey-presets { justify-content: flex-start; margin-top: 8px; }
+/* 按住说话快捷键录入中的实时显示（未按任何键时显示提示文案）。 */
+.voice-hotkey-capture { margin: 8px 0 0; }
 .endpoint-list li small { font-size: 12.5px; }
+/* 语音端点的“推荐”标记：只出现在标准 VB-CABLE 的 CABLE Input 下。 */
+.endpoint-recommend { margin-top: 2px; font-size: 13px; color: var(--accent-muted-text); }
 .endpoint-select-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .endpoint-count { font-size: 12.5px; }
 

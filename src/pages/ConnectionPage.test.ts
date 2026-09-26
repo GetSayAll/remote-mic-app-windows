@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
 import ConnectionPage from "./ConnectionPage.vue";
 
+type ShortcutCaptureHandler = (edge: { key: string; isPressed: boolean }) => void;
+
 const emptyConnection: ConnectionSnapshot = {
   phase: "idle",
   remoteName: null,
@@ -71,11 +73,17 @@ const cableEndpoint: AudioEndpoint = {
 
 const mocks = vi.hoisted(() => ({
   endpoints: [] as AudioEndpoint[],
+  captureEdgeHandler: null as ShortcutCaptureHandler | null,
   getConnectionSnapshot: vi.fn(),
   getAudioSnapshot: vi.fn(),
   listAudioEndpoints: vi.fn(),
   selectAudioEndpoint: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
+  getVoiceHoldHotkey: vi.fn(),
+  setVoiceHoldHotkey: vi.fn(),
+  startShortcutCapture: vi.fn(),
+  stopShortcutCapture: vi.fn(),
+  subscribeShortcutCaptureEdges: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -87,12 +95,18 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     listAudioEndpoints: mocks.listAudioEndpoints,
     selectAudioEndpoint: mocks.selectAudioEndpoint,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
+    getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
+    setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
+    startShortcutCapture: mocks.startShortcutCapture,
+    stopShortcutCapture: mocks.stopShortcutCapture,
+    subscribeShortcutCaptureEdges: mocks.subscribeShortcutCaptureEdges,
   };
 });
 
 describe("VB-CABLE first-launch guidance", () => {
   beforeEach(() => {
     mocks.endpoints = [];
+    mocks.captureEdgeHandler = null;
     mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
     mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
     mocks.listAudioEndpoints.mockImplementation(async () => mocks.endpoints);
@@ -103,6 +117,18 @@ describe("VB-CABLE first-launch guidance", () => {
       selectedEndpointName: cableEndpoint.name,
     }));
     mocks.openVbCableDownloadPage.mockResolvedValue(undefined);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({
+      keys: ["left_control", "left_windows"],
+    });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.startShortcutCapture.mockResolvedValue(undefined);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.subscribeShortcutCaptureEdges.mockImplementation(
+      async (handler: ShortcutCaptureHandler) => {
+        mocks.captureEdgeHandler = handler;
+        return () => {};
+      },
+    );
   });
 
   afterEach(() => {
@@ -174,6 +200,136 @@ describe("VB-CABLE first-launch guidance", () => {
     await wrapper.get(".vb-cable-callout .primary-button").trigger("click");
     await flushPromises();
     expect(mocks.openVbCableDownloadPage).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+
+  it("recommends only the standard VB-Audio CABLE Input, never the other endpoints", async () => {
+    const cableA: AudioEndpoint = {
+      id: "cable-a",
+      name: "CABLE-A Input (VB-Audio Cable A)",
+      isVirtualCableCandidate: true,
+    };
+    const speaker: AudioEndpoint = {
+      id: "speaker",
+      name: "扬声器 (Realtek Audio)",
+      isVirtualCableCandidate: false,
+    };
+    mocks.endpoints = [cableA, cableEndpoint, speaker];
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    // 多个候选端点时不自动选择，需要用户显式展开列表。
+    expect(mocks.selectAudioEndpoint).not.toHaveBeenCalled();
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "选择设备")!
+      .trigger("click");
+    await flushPromises();
+
+    const marks = wrapper.findAll(".endpoint-list .endpoint-recommend");
+    expect(marks).toHaveLength(1);
+    expect(marks[0].text()).toBe("推荐");
+
+    const items = wrapper.findAll(".endpoint-list li");
+    expect(items).toHaveLength(3);
+    expect(items[0].text()).toContain("CABLE-A Input");
+    expect(items[1].text()).toContain("CABLE Input (VB-Audio Virtual Cable)");
+    expect(items[2].text()).toContain("扬声器");
+    expect(items[0].text()).not.toContain("推荐");
+    expect(items[2].text()).not.toContain("推荐");
+    expect(items[0].text()).toContain("其他音频设备");
+    expect(items[2].text()).toContain("其他音频设备");
+    wrapper.unmount();
+  });
+
+  it("accepts a lone modifier as the hold-to-talk hotkey (长按右 Alt 一类)", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+
+    mocks.captureEdgeHandler!({ key: "right_alt", isPressed: false });
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
+    // 默认项与关闭项仍在列，误录可一键回退。
+    const presetTexts = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .map((button) => button.text());
+    expect(presetTexts).toContain("左 Ctrl + 左 Win（默认）");
+    expect(presetTexts).toContain("关闭");
+    wrapper.unmount();
+  });
+
+  it("cancels capture with Esc and keeps the current hotkey", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    mocks.captureEdgeHandler!({ key: "escape", isPressed: true });
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+    expect(mocks.stopShortcutCapture).toHaveBeenCalledOnce();
+    expect(wrapper.find(".voice-hotkey-capture").exists()).toBe(false);
+    expect(wrapper.text()).toContain("已取消录入");
+    wrapper.unmount();
+  });
+
+  it("keeps 左 Ctrl + 左 Win as the default hold-to-talk hotkey", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const defaultButton = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text().includes("默认"))!;
+    expect(defaultButton.text()).toBe("左 Ctrl + 左 Win（默认）");
+    expect(defaultButton.classes()).toContain("primary-button");
+    expect(defaultButton.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("默认快捷键：左 Ctrl + 左 Win");
+  });
+
+  it("records a custom hold-to-talk chord and only saves it after every key is released", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+    expect(mocks.startShortcutCapture).toHaveBeenCalledOnce();
+    expect(mocks.captureEdgeHandler).not.toBeNull();
+    expect(wrapper.find(".voice-hotkey-capture").text()).toContain("请按下要使用的快捷键组合");
+
+    mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "d", isPressed: true });
+    await flushPromises();
+    expect(wrapper.find(".voice-hotkey-capture").text()).toContain("右 Alt + D");
+    // 物理键未松开前不落盘：Win+L 一类组合不会在录入中提前生效。
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+
+    mocks.captureEdgeHandler!({ key: "d", isPressed: false });
+    expect(mocks.stopShortcutCapture).not.toHaveBeenCalled();
+    mocks.captureEdgeHandler!({ key: "right_alt", isPressed: false });
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt", "d"] });
+    expect(mocks.stopShortcutCapture).toHaveBeenCalledOnce();
+    expect(wrapper.find(".voice-hotkey-capture").exists()).toBe(false);
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt + D");
     wrapper.unmount();
   });
 });
