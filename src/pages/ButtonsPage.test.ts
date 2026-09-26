@@ -801,6 +801,16 @@ describe("全按键支持开启前确认弹窗", () => {
     return checkbox;
   }
 
+  function captureCheckboxChecked(page: VueWrapper): boolean {
+    // 每次重新取元素：Vue 重渲染可能替换 DOM 节点，早先拿到的引用会变成
+    // 已卸载节点，读到过期状态（实测约 1/3 概率让本用例假失败）。
+    const row = page
+      .findAll(".toggle-row")
+      .filter((r) => r.text().includes("全按键支持"))[0]!;
+    return (row.find('input[type="checkbox"]').element as HTMLInputElement)
+      .checked;
+  }
+
   function confirmDialog(page: VueWrapper) {
     return page
       .findAll("dialog")
@@ -834,7 +844,7 @@ describe("全按键支持开启前确认弹窗", () => {
     await flushPromises();
     expect(confirmDialog(page)).toBeUndefined();
     expect(vi.mocked(enableRc003Capture)).not.toHaveBeenCalled();
-    expect((checkbox.element as HTMLInputElement).checked).toBe(false);
+    expect(captureCheckboxChecked(page)).toBe(false);
     expect(localStorage.getItem(CONFIRM_KEY)).toBeNull();
 
     // 再次点开：仍先弹（还没确认过）。
@@ -850,7 +860,7 @@ describe("全按键支持开启前确认弹窗", () => {
     expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem(CONFIRM_KEY)).toBe("1");
     await vi.waitFor(() => {
-      expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+      expect(captureCheckboxChecked(page)).toBe(true);
     });
 
     // 关 → 再开：不再弹，直接开启。
@@ -875,7 +885,7 @@ describe("全按键支持开启前确认弹窗", () => {
     expect(confirmDialog(page)).toBeUndefined();
     expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => {
-      expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+      expect(captureCheckboxChecked(page)).toBe(true);
     });
   });
 });
