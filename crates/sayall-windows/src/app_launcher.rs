@@ -173,7 +173,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
             }
             let exe =
                 std::env::current_exe().map_err(|error| format!("获取自身路径失败：{error}"))?;
-            return launch_explicit(&exe.to_string_lossy(), None, None);
+            return launch_explicit(&exe.to_string_lossy(), None, None, true);
         }
         match activate_running(app.exe_names) {
             RunningActivation::Activated(_) => return Ok(()),
@@ -201,7 +201,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 }
                 RunningActivation::NotFound => {}
             }
-            return launch_explicit(id, None, None);
+            return launch_explicit(id, None, None, true);
         }
         if let Some(resolved) = resolve_lnk(id) {
             if !resolved.exe_path.is_empty() {
@@ -220,7 +220,12 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                     (!resolved.arguments.is_empty()).then_some(resolved.arguments.clone());
                 let dir =
                     (!resolved.working_dir.is_empty()).then_some(resolved.working_dir.clone());
-                return launch_explicit(&resolved.exe_path, arguments.as_deref(), dir.as_deref());
+                return launch_explicit(
+                    &resolved.exe_path,
+                    arguments.as_deref(),
+                    dir.as_deref(),
+                    true,
+                );
             }
         }
         return launch_path(id);
@@ -999,7 +1004,7 @@ fn launch_path(_path: &str) -> Result<(), String> {
 /// 按完整路径启动（短命 COM 线程内 ShellExecuteW，支持 .exe/.lnk）。
 #[cfg(windows)]
 fn launch_path(path: &str) -> Result<(), String> {
-    launch_explicit(path, None, None)
+    launch_explicit(path, None, None, true)
 }
 
 /// 按完整路径启动（可带参数与工作目录；短命 COM 线程内 ShellExecuteW）。
@@ -1010,6 +1015,7 @@ fn launch_explicit(
     target: &str,
     arguments: Option<&str>,
     working_dir: Option<&str>,
+    foreground_unlock: bool,
 ) -> Result<(), String> {
     let target = target.to_owned();
     let arguments = arguments.map(str::to_owned);
@@ -1040,19 +1046,42 @@ fn launch_explicit(
                 .as_ref()
                 .map(|v| PCWSTR(v.as_ptr()))
                 .unwrap_or(PCWSTR::null());
-            let (result, unlock) = with_alt_foreground_unlock(|| unsafe {
-                ShellExecuteW(
+            // 只有"激活/启动应用"路径需要解除 foreground lock。打开目录等无前台
+            // 诉求的路径必须跳过 Alt 注入：Alt 按住期间调用 shell 会干扰 explorer，
+            // ShellExecuteW 可能长时间不返回（2026-09-26 CI 实测卡死）。
+            let (result, unlock) = if foreground_unlock {
+                let (value, unlock) = with_alt_foreground_unlock(|| unsafe {
+                    ShellExecuteW(
+                        None,
+                        PCWSTR(verb.as_ptr()),
+                        PCWSTR(wide.as_ptr()),
+                        args_ptr,
+                        dir_ptr,
+                        SW_SHOWNORMAL,
+                    )
+                });
+                (value, Some(unlock))
+            } else {
+                (
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            PCWSTR(verb.as_ptr()),
+                            PCWSTR(wide.as_ptr()),
+                            args_ptr,
+                            dir_ptr,
+                            SW_SHOWNORMAL,
+                        )
+                    },
                     None,
-                    PCWSTR(verb.as_ptr()),
-                    PCWSTR(wide.as_ptr()),
-                    args_ptr,
-                    dir_ptr,
-                    SW_SHOWNORMAL,
                 )
-            });
+            };
+            let (alt_unlock_submitted, physical_alt_held) = match unlock {
+                Some(unlock) => (unlock.pair_submitted, unlock.physical_alt_held),
+                None => (false, false),
+            };
             crate::ble::gatt_note(format!(
-                "app_launcher action=launch_explicit phase=foreground_handoff alt_unlock_submitted={} physical_alt_held={}",
-                unlock.pair_submitted, unlock.physical_alt_held
+                "app_launcher action=launch_explicit phase=foreground_handoff foreground_unlock={foreground_unlock} alt_unlock_submitted={alt_unlock_submitted} physical_alt_held={physical_alt_held}"
             ));
             // 保活：给 shell 的异步派生留出完成窗口。
             std::thread::sleep(std::time::Duration::from_millis(80));
@@ -1084,7 +1113,7 @@ pub fn open_directory(path: &std::path::Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("目录不存在".to_owned());
     }
-    launch_explicit(&path.to_string_lossy(), None, None)
+    launch_explicit(&path.to_string_lossy(), None, None, false)
 }
 
 #[cfg(not(windows))]
