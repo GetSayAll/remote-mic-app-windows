@@ -70,12 +70,48 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       shortcutCaptureHandler = handler;
       return () => {};
     }),
+    // 三键捕获：默认未授权；个别用例用 mockResolvedValue 覆盖授权状态。
+    getRc003TaskStatus: vi.fn(async () => ({
+      installed: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    })),
+    enableRc003Capture: vi.fn(async () => ({
+      installed: true,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    })),
+    disableRc003Capture: vi.fn(async () => ({
+      installed: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    })),
+    getRc003BridgeSnapshot: vi.fn(async () => ({
+      phase: "stopped",
+      port: 0,
+      helperPid: 0,
+      acceptedTotal: 0,
+      deniedTotal: 0,
+      replacedTotal: 0,
+      edgesApplied: 0,
+      usagesDropped: 0,
+      malformedTotal: 0,
+      watchdogReleaseTotal: 0,
+      pressedUsages: [],
+      lastRxAgeMs: null,
+    })),
   };
 });
 
 import {
   exportButtonMappingConfiguration,
   getButtonMappings,
+  enableRc003Capture,
+  disableRc003Capture,
+  getRc003TaskStatus,
   importButtonMappingConfiguration,
   subscribeButtonEdges,
   subscribeButtonGestures,
@@ -171,6 +207,27 @@ beforeEach(() => {
   vi.mocked(importButtonMappingConfiguration).mockClear();
   vi.mocked(startShortcutCapture).mockClear();
   vi.mocked(stopShortcutCapture).mockClear();
+  // mockClear 只清调用记录，**不清实现**：前面用例留下的 mockRejectedValue /
+  // mockResolvedValue 会渗进后面的用例，必须显式重置。
+  localStorage.clear();
+  vi.mocked(getRc003TaskStatus).mockResolvedValue({
+    installed: false,
+    enabled: false,
+    helperPath: null,
+    lastError: null,
+  });
+  vi.mocked(enableRc003Capture).mockResolvedValue({
+    installed: true,
+    enabled: true,
+    helperPath: null,
+    lastError: null,
+  });
+  vi.mocked(disableRc003Capture).mockResolvedValue({
+    installed: false,
+    enabled: false,
+    helperPath: null,
+    lastError: null,
+  });
 });
 
 describe("buttons mapping page", () => {
@@ -564,27 +621,242 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 
-  it("返回/音量±全型号禁用（2026-09-07 用户决策：RC001 同样不开放）", async () => {
+  it("返回/音量±全型号开放自定义", async () => {
     for (const model of ["rc003", "rc001", "unknown"] as const) {
       const wrapper = await mountPage(model);
       const backCell = wrapper
         .findAll(".mapping-card")
         .find((c) => c.text().includes("返回"))!
         .findAll(".mapping-cell")[0]!;
-      expect(
-        (backCell.element as HTMLButtonElement).disabled,
-        `${model} 返回格子应禁用`,
-      ).toBe(true);
+      expect((backCell.element as HTMLButtonElement).disabled, `${model} 返回格子应启用`).toBe(false);
       const volumeCell = wrapper
         .findAll(".mapping-card")
         .find((c) => c.text().includes("音量"))!
         .findAll(".mapping-cell")[0]!;
-      expect(
-        (volumeCell.element as HTMLButtonElement).disabled,
-        `${model} 音量格子应禁用`,
-      ).toBe(true);
+      expect((volumeCell.element as HTMLButtonElement).disabled, `${model} 音量格子应启用`).toBe(false);
       await backCell.trigger("click");
-      expect(wrapper.find(".mapping-editor").exists()).toBe(false);
+      expect(wrapper.find(".mapping-editor").exists()).toBe(true);
     }
+  });
+
+  it("返回/音量±按型号如实标注源头捕获能力（不静默降级）", async () => {
+    // 未授权：如实指向开关，而不是沿用任何旧占位文案。
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    const rc003 = await mountPage("rc003");
+    const rc003Back = rc003
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    await rc003Back.trigger("click");
+    await vi.waitFor(
+      () => {
+        expect(rc003.find(".capability-note").text()).toContain(
+          "需先开启「全按键支持」开关",
+        );
+      },
+      { timeout: 4000 },
+    );
+
+    // 已授权：如实说"现在生效"，且绝不回到旧占位文案。
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    const rc003On = await mountPage("rc003");
+    const rc003OnBack = rc003On
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    await rc003OnBack.trigger("click");
+    await vi.waitFor(
+      () => {
+        expect(rc003On.find(".capability-note").text()).toContain("映射现在生效");
+      },
+      { timeout: 4000 },
+    );
+    expect(rc003On.find(".capability-note").text()).not.toContain(
+      "不进 Windows 输入栈",
+    );
+
+    // 型号不再区分（2026-09-24 产品决策）：RC001 上同一个开关状态驱动的
+    // 说明，RC001 专属文案（VK 0xFF）不回流。
+    const rc001 = await mountPage("rc001");
+    const rc001Volume = rc001
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("音量"))!
+      .findAll(".mapping-cell")[0]!;
+    await rc001Volume.trigger("click");
+    expect(rc001.find(".capability-note").text()).not.toContain("VK 0xFF");
+  });
+
+  it("UAC 被取消（enable 拒绝）时开关保持关闭、显示错误（2026-09-24 用户报告）", async () => {
+    // 复现链：marker 存在 → 开关回落关闭 → 用户打开 → UAC → 选「否」
+    // → enable 拒绝。此时开关绝不能翻成开启。
+    // （2026-09-26 起首次开启会先弹确认弹窗；本用例只关心 enable 被拒，
+    // 故预置"已确认"标记跳过弹窗。）
+    localStorage.setItem(CONFIRM_KEY, "1");
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(enableRc003Capture).mockRejectedValue(
+      new Error("启用 RC003 三键捕获失败：授权未完成（UAC 被取消或安装失败）"),
+    );
+    const page = await mountPage("rc003");
+    const back = page
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    await back.trigger("click");
+    // 页面有多个 toggle-row（总开关/全按键支持/锁定选择），必须按文本定位。
+    await vi.waitFor(() => {
+      expect(
+        page
+          .findAll(".toggle-row")
+          .filter((row) => row.text().includes("全按键支持")).length,
+      ).toBe(1);
+    });
+    const checkbox = page
+      .findAll(".toggle-row")
+      .filter((row) => row.text().includes("全按键支持"))[0]
+      .find('input[type="checkbox"]');
+    // 等初始化完成（rc003CaptureEnabled !== null 之前 checkbox 是 disabled，
+    // disabled 元素的 change 事件不会触发——这正是要测的行为的前提）。
+    await vi.waitFor(() => {
+      expect((checkbox.element as HTMLInputElement).disabled).toBe(false);
+    });
+    expect((checkbox.element as HTMLInputElement).checked).toBe(false);
+    // 忠实模拟浏览器：点击真实复选框时，**DOM 先被浏览器翻成勾选**，然后
+    // 才派发 change 事件。原来只 trigger("change") 永远复现不出
+    // 「状态是关、界面是开」——Vue 判定 :checked 前后都 false 而不打补丁。
+    (checkbox.element as HTMLInputElement).checked = true;
+    await checkbox.trigger("change");
+    await vi.waitFor(() => {
+      // 错误走到页面既有的提示条……
+      expect(page.text()).toContain("UAC 被取消");
+    });
+    // ……且开关仍是关闭：实际系统状态没变，开关翻过去就是"证据说谎"。
+    const captureRow = page
+      .findAll(".toggle-row")
+      .filter((row) => row.text().includes("全按键支持"))[0];
+    expect(
+      (captureRow.find('input[type="checkbox"]').element as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+});
+
+const CONFIRM_KEY = "sayall.enhancedCapture.confirmShown";
+
+describe("全按键支持开启前确认弹窗", () => {
+
+  async function openCaptureToggle(page: VueWrapper) {
+    const back = page
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    await back.trigger("click");
+    await vi.waitFor(() => {
+      expect(
+        page
+          .findAll(".toggle-row")
+          .filter((row) => row.text().includes("全按键支持")).length,
+      ).toBe(1);
+    });
+    const checkbox = page
+      .findAll(".toggle-row")
+      .filter((row) => row.text().includes("全按键支持"))[0]
+      .find('input[type="checkbox"]');
+    await vi.waitFor(() => {
+      expect((checkbox.element as HTMLInputElement).disabled).toBe(false);
+    });
+    return checkbox;
+  }
+
+  function confirmDialog(page: VueWrapper) {
+    return page
+      .findAll("dialog")
+      .find((d) => d.classes().includes("capture-confirm-dialog"));
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(enableRc003Capture).mockClear();
+    vi.mocked(disableRc003Capture).mockClear();
+  });
+
+  it("首次开启：先弹确认；取消则不开启；确认后开启并记住，之后不再弹", async () => {
+    const page = await mountPage("rc003");
+    const checkbox = await openCaptureToggle(page);
+
+    // 浏览器先把 DOM 翻成勾选，再派发 change（与既有用例同一保真写法）。
+    (checkbox.element as HTMLInputElement).checked = true;
+    await checkbox.trigger("change");
+    await flushPromises();
+
+    // 弹窗出现，且此刻绝不能已经调过 enable。
+    const dialog = confirmDialog(page);
+    expect(dialog).toBeDefined();
+    expect(dialog!.text()).toContain("升级或重装无线麦后");
+    expect(dialog!.text()).toContain("防作弊");
+    expect(vi.mocked(enableRc003Capture)).not.toHaveBeenCalled();
+
+    // 取消：不开启、开关保持关闭、"已确认"标记不写入。
+    await dialog!.findAll("button").find((b) => b.text() === "取消")!.trigger("click");
+    await flushPromises();
+    expect(confirmDialog(page)).toBeUndefined();
+    expect(vi.mocked(enableRc003Capture)).not.toHaveBeenCalled();
+    expect((checkbox.element as HTMLInputElement).checked).toBe(false);
+    expect(localStorage.getItem(CONFIRM_KEY)).toBeNull();
+
+    // 再次点开：仍先弹（还没确认过）。
+    (checkbox.element as HTMLInputElement).checked = true;
+    await checkbox.trigger("change");
+    await flushPromises();
+    const second = confirmDialog(page);
+    expect(second).toBeDefined();
+
+    // 确认：真正开启，并写入标记。
+    await second!.findAll("button").find((b) => b.text() === "开启")!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(CONFIRM_KEY)).toBe("1");
+    await vi.waitFor(() => {
+      expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+    });
+
+    // 关 → 再开：不再弹，直接开启。
+    vi.mocked(enableRc003Capture).mockClear();
+    (checkbox.element as HTMLInputElement).checked = false;
+    await checkbox.trigger("change");
+    await flushPromises();
+    (checkbox.element as HTMLInputElement).checked = true;
+    await checkbox.trigger("change");
+    await flushPromises();
+    expect(confirmDialog(page)).toBeUndefined();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+  });
+
+  it("已确认过（本地有标记）：点开关直接开启，不弹窗", async () => {
+    localStorage.setItem(CONFIRM_KEY, "1");
+    const page = await mountPage("rc003");
+    const checkbox = await openCaptureToggle(page);
+    (checkbox.element as HTMLInputElement).checked = true;
+    await checkbox.trigger("change");
+    await flushPromises();
+    expect(confirmDialog(page)).toBeUndefined();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+    });
   });
 });

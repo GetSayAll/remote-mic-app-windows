@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
+import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import {
@@ -12,6 +13,10 @@ import {
   exportButtonMappingConfiguration,
   getButtonMappingSnapshot,
   getButtonMappings,
+  disableRc003Capture,
+  enableRc003Capture,
+  getRc003BridgeSnapshot,
+  getRc003TaskStatus,
   identityShortcutByButton,
   importButtonMappingConfiguration,
   listPresetApps,
@@ -41,6 +46,8 @@ import {
   type MoveDirection,
   type PresetAppInfo,
   type RawInputPhase,
+  type Rc003BridgeSnapshot,
+  type Rc003TaskStatus,
   type RemoteButton,
   type RemoteModel,
   type RuntimeSnapshot,
@@ -101,19 +108,6 @@ const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 const remoteModel = computed<RemoteModel>(
   () => props.runtime?.platform.connection.remoteModel ?? "unknown",
 );
-
-/**
- * 不支持自定义的按键（2026-09-07 用户决策，全型号一致）：
- * 返回/音量±——RC003 上不进 Windows 输入栈（配置无法生效，2026-09-05
- * 调查归档 docs/investigations/2026-09-05-rc003-back-volume-buttons-invisible.md）；
- * RC001 上虽以 VK 0xFF 厂商键可达且可直接归因，为保持两型号行为一致而
- * 不开放配置。存量配置由后端（settings 持久化层 + 映射引擎）双重剥离。
- */
-const UNMAPPABLE_BUTTONS: ReadonlySet<RemoteButton> = new Set<RemoteButton>([
-  "back",
-  "volume_up",
-  "volume_down",
-]);
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
@@ -456,10 +450,26 @@ function isActivePreset(keys: KeyCode[]): boolean {
  * 已配置映射且遥控器连接期间原生按键被接管，任意按压（含闲置后首次）严格
  * 单响应；确定/方向的同键映射仍由泄漏对冲保证单响应，其余配置冷首按附带
  * 一次原生动作（结构性泄漏）。
+ *
+ * 2026-09-23 增补（返回/音量± 产品策略改为"启用"）：三键已恢复可配置，
+ * 但能否真正收到边沿取决于型号——界面按型号如实说明，不做静默降级。
  */
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  if (button === "back" || button === "volume_up" || button === "volume_down") {
+    // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
+    // 文案只随开关状态走。RC001 的三键不经助手也能到达（key_gate 直接归因），
+    // 开着增强捕获对它无害；RC003 则必须开启才会生效。
+    const state = rc003CaptureEnabled.value;
+    if (state === true) {
+      return "全按键支持已启用，此按键的映射现在生效。";
+    }
+      if (state === false) {
+        return "提示：返回 / 音量± 需先开启「全按键支持」开关才会生效。开启时系统会弹窗询问一次；关闭即停。升级或重装无线麦后需重新开启。个别带防作弊的游戏可能与该功能冲突，玩游戏前建议先关闭。";
+      }
+    return "提示：正在确认三键捕获状态…";
+  }
   if (button === "home" || button === "tv") {
     return "提示：保存后本按键启用“遥控器优先”——遥控器连接期间原生按键（Home / `）被接管，任意按压（含闲置后首次）严格单响应；此期间物理键盘上的对应按键将触发映射动作，断开遥控器或删除本键映射即恢复原生。";
   }
@@ -786,6 +796,176 @@ async function toggleListener(): Promise<void> {
 const rawInput = computed(() => props.runtime?.platform.rawInput);
 const connectionInfo = computed(() => props.runtime?.platform.connection);
 
+/**
+ * RC003 三键的传输桥接状态（捕获链第 ② 段）。
+ *
+ * 三个键按不动时，这一行直接说出卡在哪一段：主程序已就绪 = 在等提权助手；
+ * 助手已连接 = 传输段通了（再没反应就该查第 ① 段的捕获）。
+ *
+ * 两个型号统一展示（产品决策 2026-09-24：三键映射逻辑不分型号，
+ * 界面不做区分；RC001 开着增强捕获只是多一个不参与其按键路径的助手）。
+ */
+const rc003Bridge = ref<Rc003BridgeSnapshot | null>(null);
+/** 三键捕获的授权状态（= 系统里的计划任务）。 */
+const rc003Task = ref<Rc003TaskStatus | null>(null);
+const rc003CaptureBusy = ref(false);
+/**
+ * 开关的显示状态：**事件驱动**，`null` = 尚未初始化。
+ *
+ * 为什么不用「任务是否存在」当真相源：关闭开关只结束助手、**任务保留**
+ * （授权保留，这是"只弹一次 UAC"的一部分）——任务还在，若读任务，
+ * 开关会立刻弹回开启，「已停用」的提示与三键恢复原生行为全都对不上
+ * （2026-09-23 首次 UI 验收正是这个形状）。因此轮询只在首次对账一次，
+ * 之后以用户的开关操作为准。
+ */
+const rc003CaptureEnabled = ref<boolean | null>(null);
+const rc003BridgeText = computed(() => {
+  const bridge = rc003Bridge.value;
+  if (!bridge || bridge.phase === "stopped") return null;
+  switch (bridge.phase) {
+    case "listening":
+      return "全按键支持已开启，正在启动";
+    case "connected":
+      return "全按键支持已开启";
+    case "failed":
+      return "全按键支持开启失败";
+    default:
+      return null;
+  }
+});
+const rc003BridgeTone = computed(() =>
+  rc003Bridge.value?.phase === "connected" ? "success" : "pending",
+);
+
+/**
+ * 切换三键捕获。打开可能在**首次**弹一次 UAC（IPC 会等授权流程结束）；
+ * 关闭只结束助手、保留授权——所以之后不会再弹。
+ * 完成后用返回的状态刷新，而不是假设成功；lastError 走页面既有的提示条。
+ */
+const captureSwitchEl = ref<HTMLInputElement | null>(null);
+/**
+ * 把开关的**DOM 状态**写回成绑定值。
+ *
+ * 为什么必须手动写：原生复选框在被点击的瞬间由浏览器先翻了 `checked`，
+ * 而 `:checked` 的绑定值若前后都是 false（操作失败 = 状态没变），Vue 判定
+ * props 无变化、**不会**生成 DOM 补丁——于是出现「状态是关、界面是开」
+ * （2026-09-25 真机：后端日志判 failed，开关却仍显示勾选）。
+ */
+function syncCaptureSwitchDom(): void {
+  const el = captureSwitchEl.value;
+  if (el) {
+    el.checked = rc003CaptureEnabled.value === true;
+  }
+}
+
+async function toggleRc003Capture() {
+  if (rc003CaptureBusy.value) return;
+  // 首次开启：先弹一次性确认（2026-09-26 用户要求：重装/升级要重新授权、
+  // 防作弊游戏可能冲突，这两件事必须让用户在开启前知道）。
+  // 关闭方向永远直接执行，不弹。
+  if (rc003CaptureEnabled.value !== true && !captureConfirmShown.value) {
+    showCaptureConfirm.value = true;
+    // 开关 DOM 在点击瞬间已被浏览器翻转，先写回关闭，等确认后再真正执行。
+    syncCaptureSwitchDom();
+    return;
+  }
+  await applyCaptureToggle();
+}
+
+/**
+ * 首次开启前的一次性确认标记。
+ *
+ * 为什么放 localStorage 而不是设置模型：这是纯展示层的「读没读过说明」标记，
+ * 不影响任何功能语义（授权、助手、映射都不读它）；读不到（隐私模式等）
+ * 宁可下次再弹一次，也不能把开关卡成「必须先过弹窗」。
+ */
+const CAPTURE_CONFIRM_KEY = "sayall.enhancedCapture.confirmShown";
+const captureConfirmShown = ref(readCaptureConfirmFlag());
+const showCaptureConfirm = ref(false);
+
+function readCaptureConfirmFlag(): boolean {
+  try {
+    return localStorage.getItem(CAPTURE_CONFIRM_KEY) === "1";
+  } catch {
+    return true;
+  }
+}
+
+function confirmCaptureDialog(): void {
+  captureConfirmShown.value = true;
+  try {
+    localStorage.setItem(CAPTURE_CONFIRM_KEY, "1");
+  } catch {
+    // 写不进去只意味着下次会再弹一次，可接受。
+  }
+  showCaptureConfirm.value = false;
+  void applyCaptureToggle();
+}
+
+function closeCaptureDialog(): void {
+  showCaptureConfirm.value = false;
+  // 不开启：开关 DOM 已被浏览器翻转，必须显式写回（见 syncCaptureSwitchDom）。
+  syncCaptureSwitchDom();
+}
+
+async function applyCaptureToggle() {
+  if (rc003CaptureBusy.value) return;
+  rc003CaptureBusy.value = true;
+  const wasEnabled = rc003CaptureEnabled.value;
+  try {
+    const next = wasEnabled ? await disableRc003Capture() : await enableRc003Capture();
+    rc003Task.value = next;
+    if (next.lastError) {
+      // 操作失败（UAC 取消 / 停止被拒）：**保持开关原状态**。
+      // 实际系统状态没变，开关却翻过去，就是又一次"证据说谎"。
+      statusMessage.value = next.lastError;
+      return;
+    }
+    // 成功后的反馈由面板里的常驻能力说明承担（随状态实时切换），
+    // 提示条不再重复一条一次性的话；失败仍走提示条（见上）。
+    rc003CaptureEnabled.value = next.enabled;
+    reportFrontendEvent({
+      event: "rc003_capture_toggle",
+      phase: "completed",
+      result: "passed",
+      reason: `enabled=${String(next.enabled)}`,
+    });
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : String(error);
+    // **同步回退到点击前的状态**——不依赖"我没动过它"，也不等下一次异步
+    // 对账：原生复选框在 click 时 DOM 已经先翻了，只有显式写回才确定。
+    rc003CaptureEnabled.value = wasEnabled === true;
+    reportFrontendEvent({
+      event: "rc003_capture_toggle",
+      phase: "completed",
+      result: "failed",
+      reason: `was_enabled=${String(wasEnabled === true)} switch_reverted`,
+    });
+    // 再用权威状态（设置里的意图）校正一次，防止本地值与系统状态漂移。
+    void getRc003TaskStatus()
+      .then((status) => {
+        rc003CaptureEnabled.value = status.enabled;
+        reportFrontendEvent({
+          event: "rc003_capture_toggle",
+          phase: "reconciled",
+          result: "unknown",
+          reason: `authoritative_enabled=${String(status.enabled)}`,
+        });
+      })
+      .catch(() => {});
+  } finally {
+    rc003CaptureBusy.value = false;
+    // 无论成败都把 DOM 校正成绑定值：失败时尤其关键（见 syncCaptureSwitchDom）。
+    syncCaptureSwitchDom();
+  }
+}
+
+/** 增强捕获开关只对三键有意义——其他按键走 Raw Input，本来就能看见。 */
+const selectedIsTriKey = computed(() => {
+  const button = editingTarget.value?.button;
+  return button === "back" || button === "volume_up" || button === "volume_down";
+});
+
 onMounted(async () => {
   const setupStarted = performance.now();
   window.addEventListener("keydown", handleCaptureKeydown, true);
@@ -851,6 +1031,16 @@ onMounted(async () => {
 
   snapshotTimer = window.setInterval(async () => {
     mappingSnapshot.value = await getButtonMappingSnapshot();
+    // 桥接状态只在连接的是 RC003 时才有意义（见 rc003BridgeText），
+    // 但这里照常拉取：开销只是一次内存快照，免得再维护一个定时器。
+    rc003Bridge.value = await getRc003BridgeSnapshot();
+    // 授权状态每秒对账；但开关的显示状态只在首次对账一次——
+    // 之后以用户的开关操作为准（理由见 rc003CaptureEnabled 的注释）。
+    const task = await getRc003TaskStatus();
+    rc003Task.value = task;
+    if (rc003CaptureEnabled.value === null) {
+      rc003CaptureEnabled.value = task.enabled;
+    }
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
     if (rawInput.value?.activeButtons) {
       activeButtons.value = new Set(rawInput.value.activeButtons);
@@ -912,6 +1102,17 @@ onUnmounted(() => {
         </div>
       </div>
     </header>
+
+    <!-- 三键已启用时的桥接状态行。开关本体在编辑面板里
+         （"禁用按键"左侧，仅对返回/音量± 显示）。 -->
+    <div
+      v-if="rc003CaptureEnabled === true && rc003BridgeText"
+      class="device-chip"
+      style="align-self: flex-start; margin: 0 0 10px"
+    >
+      <span class="status-dot" :class="rc003BridgeTone"></span>
+      <span>{{ rc003BridgeText }}</span>
+    </div>
 
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
@@ -1001,12 +1202,7 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="UNMAPPABLE_BUTTONS.has(placement.button)"
-            :title="
-              UNMAPPABLE_BUTTONS.has(placement.button)
-                ? '此按键暂不支持自定义，按键功能保持原样'
-                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
-            "
+            :title="`${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`"
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
@@ -1047,6 +1243,20 @@ onUnmounted(() => {
           <p class="muted">当前：{{ actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }}</p>
         </div>
         <div class="button-row">
+          <label
+            v-if="selectedIsTriKey"
+            class="toggle-row"
+            title="返回 / 音量± 这三个键 Windows 平时看不见，需要开启此功能才能使用。开启时系统会弹窗询问一次；关闭即停，不用重复询问。升级或重装无线麦后需重新开启。个别带防作弊的游戏可能与此功能冲突，玩游戏前建议先关闭。"
+          >
+            <span>全按键支持</span>
+            <input
+              ref="captureSwitchEl"
+              type="checkbox"
+              :checked="rc003CaptureEnabled === true"
+              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
+              @change="toggleRc003Capture"
+            />
+          </label>
           <button
             class="secondary-button editor-disable-btn"
             :class="{ 'is-active': actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"
@@ -1246,6 +1456,7 @@ onUnmounted(() => {
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ mappingSnapshot.lastError }}</p>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
+    <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
 </template>
 
