@@ -99,6 +99,11 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      # tauri.conf 的 bundle.resources 声明了 helper 与 gadget，而这两个文件不入库
+      # ⇒ tauri-build 在编译期就会校验路径存在，先暂存再编译（2026-09-27 PR #127 实测）。
+      - name: Stage bundle resources (helper + frida gadget)
+        run: node scripts/stage-bundle-inputs.cjs
+
       - name: Test Rust workspace
         run: cargo test --workspace
 
