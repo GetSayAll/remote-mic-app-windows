@@ -449,6 +449,17 @@ pub(crate) fn activate_application_window(app_user_model_id: &str) -> bool {
         TH32CS_SNAPPROCESS,
     };
 
+    if matches!(
+        activate_windows_by_app_user_model_id(app_user_model_id),
+        RunningActivation::Activated(_)
+    ) {
+        crate::gatt_note(
+            "app_launcher action=identity_match source=window_aumid terminal_result=passed"
+                .to_owned(),
+        );
+        return true;
+    }
+
     let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
         return false;
     };
@@ -469,11 +480,119 @@ pub(crate) fn activate_application_window(app_user_model_id: &str) -> bool {
     unsafe {
         let _ = CloseHandle(snapshot);
     }
+    let activated = !pids.is_empty()
+        && matches!(
+            activate_process_windows(&pids),
+            RunningActivation::Activated(_)
+        );
+    if activated {
+        crate::gatt_note(
+            "app_launcher action=identity_match source=process_aumid terminal_result=passed"
+                .to_owned(),
+        );
+    }
+    activated
+}
+
+#[cfg(windows)]
+fn activate_windows_by_app_user_model_id(app_user_model_id: &str) -> RunningActivation {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    let mut context = AppIdentityEnumContext {
+        app_user_model_id,
+        activation: None,
+        hidden_candidate: None,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_app_identity_windows_proc),
+            LPARAM(&mut context as *mut AppIdentityEnumContext as isize),
+        );
+    }
+    if context.activation.is_none() {
+        if let Some(hwnd) = context.hidden_candidate {
+            context.activation = Some(unsafe { show_and_force_foreground(hwnd) });
+        }
+    }
+    match context.activation {
+        Some(outcome) if outcome.activated => RunningActivation::Activated(outcome),
+        Some(_) => RunningActivation::ForegroundDenied,
+        None => RunningActivation::NotFound,
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn activate_executable_path(executable_path: &str) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
+    let mut pids = std::collections::HashSet::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        if process_image_path(entry.th32ProcessID)
+            .is_some_and(|image| process_image_matches_target(&image, executable_path))
+        {
+            pids.insert(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
     !pids.is_empty()
         && matches!(
             activate_process_windows(&pids),
             RunningActivation::Activated(_)
         )
+}
+
+fn process_image_matches_target(image: &str, target: &str) -> bool {
+    fn normalized(value: &str) -> String {
+        value
+            .strip_prefix(r"\\?\")
+            .unwrap_or(value)
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    }
+    normalized(image) == normalized(target)
+}
+
+#[cfg(windows)]
+fn process_image_path(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0u16; 32768];
+    let mut length = buffer.len() as u32;
+    let queried = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    }
+    .is_ok();
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    queried.then(|| String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
 #[cfg(windows)]
@@ -568,6 +687,12 @@ mod win_impl {
         pub hidden_candidate: Option<HWND>,
     }
 
+    pub(super) struct AppIdentityEnumContext<'a> {
+        pub app_user_model_id: &'a str,
+        pub activation: Option<super::ForegroundActivationOutcome>,
+        pub hidden_candidate: Option<HWND>,
+    }
+
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct AltUnlockResult {
         pub pair_submitted: bool,
@@ -604,6 +729,59 @@ mod win_impl {
             context.hidden_candidate = Some(hwnd);
         }
         BOOL::from(true)
+    }
+
+    pub(super) unsafe extern "system" fn enum_app_identity_windows_proc(
+        hwnd: HWND,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let context = &mut *(lparam.0 as *mut AppIdentityEnumContext);
+        if context.activation.is_some() {
+            return BOOL::from(true);
+        }
+        if GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default()).0 != std::ptr::null_mut()
+            || (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & (WS_EX_TOOLWINDOW.0 as u32) != 0
+            || !window_app_user_model_id(hwnd)
+                .is_some_and(|value| value.eq_ignore_ascii_case(context.app_user_model_id))
+        {
+            return BOOL::from(true);
+        }
+        if IsWindowVisible(hwnd).as_bool() {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            context.activation = Some(show_and_force_foreground(hwnd));
+            return BOOL::from(false);
+        }
+        if context.hidden_candidate.is_none() {
+            context.hidden_candidate = Some(hwnd);
+        }
+        BOOL::from(true)
+    }
+
+    unsafe fn window_app_user_model_id(hwnd: HWND) -> Option<String> {
+        use windows::Win32::Foundation::PROPERTYKEY;
+        use windows::Win32::System::Com::StructuredStorage::{
+            PropVariantClear, PropVariantToString,
+        };
+        use windows::Win32::UI::Shell::PropertiesSystem::{
+            IPropertyStore, SHGetPropertyStoreForWindow,
+        };
+
+        const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+            fmtid: windows::core::GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+            pid: 5,
+        };
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(hwnd).ok()?;
+        let mut value = store.GetValue(&PKEY_APP_USER_MODEL_ID).ok()?;
+        let mut buffer = [0u16; 4096];
+        let converted = PropVariantToString(&value, &mut buffer).is_ok();
+        let _ = PropVariantClear(&mut value);
+        if !converted {
+            return None;
+        }
+        let used = buffer.iter().position(|item| *item == 0)?;
+        String::from_utf16(&buffer[..used]).ok()
     }
 
     /// 显示（若隐藏）/还原（若最小化）目标窗口并强制置前。
@@ -749,7 +927,10 @@ mod win_impl {
 }
 
 #[cfg(windows)]
-use win_impl::{enum_windows_proc, show_and_force_foreground, EnumContext};
+use win_impl::{
+    enum_app_identity_windows_proc, enum_windows_proc, show_and_force_foreground,
+    AppIdentityEnumContext, EnumContext,
+};
 
 #[cfg(windows)]
 pub(crate) use win_impl::with_alt_foreground_unlock;
@@ -986,8 +1167,20 @@ pub fn pick_custom_app() -> Option<CustomAppPick> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn executable_identity_normalizes_windows_path_forms() {
+        assert!(process_image_matches_target(
+            r"\\?\C:\Program Files\Example\Example.exe",
+            r"c:/program files/example/example.exe"
+        ));
+        assert!(!process_image_matches_target(
+            r"C:\Program Files\Example\Example.exe",
+            r"C:\Other\Example.exe"
+        ));
+    }
 
     #[test]
     fn foreground_activation_retries_when_api_only_flashes_taskbar() {
@@ -1095,7 +1288,13 @@ mod tests {
         }
         let hwnd = found.expect("测试消息框未创建");
 
-        let _ = with_alt_foreground_unlock(|| unsafe { SetForegroundWindow(hwnd).as_bool() });
+        for _ in 0..10 {
+            let _ = with_alt_foreground_unlock(|| unsafe { SetForegroundWindow(hwnd).as_bool() });
+            if unsafe { GetForegroundWindow() } == hwnd {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(unsafe { GetForegroundWindow() }, hwnd);
         assert!(unsafe { LockSetForegroundWindow(LSFW_LOCK) }.is_ok());
 
@@ -1112,12 +1311,8 @@ mod tests {
         let _ = dialog.join();
     }
 
-    /// 强制 foreground lock 的 Windows 探针：独立子进程持有前台锁，父测试进程
-    /// 从后台调用产品路径。必须观察到第一次被拒绝、成对 Alt 解锁、第二次读回成功。
-    #[test]
     #[cfg(windows)]
-    #[ignore = "会显示短暂测试消息框并把已运行的记事本切到前台"]
-    fn foreground_lock_retry_reaches_observed_notepad() {
+    pub(crate) fn with_foreground_lock<T>(operation: impl FnOnce() -> T) -> T {
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
 
@@ -1171,11 +1366,21 @@ mod tests {
             .expect("无法设置锁探针写入超时");
         let mut ready = [0u8; 1];
         stream.read_exact(&mut ready).expect("无法读取锁就绪信号");
-        let activation = activate_running(&["notepad.exe"]);
+        let result = operation();
         stream.write_all(&[1]).expect("无法发送锁停止信号");
         let child_status = child.wait().expect("无法等待锁探针子进程");
 
         assert!(child_status.success(), "锁探针子进程失败");
+        result
+    }
+
+    /// 强制 foreground lock 的 Windows 探针：独立子进程持有前台锁，父测试进程
+    /// 从后台调用产品路径。必须观察到第一次被拒绝、成对 Alt 解锁、第二次读回成功。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "会显示短暂测试消息框并把已运行的记事本切到前台"]
+    fn foreground_lock_retry_reaches_observed_notepad() {
+        let activation = with_foreground_lock(|| activate_running(&["notepad.exe"]));
         let RunningActivation::Activated(outcome) = activation else {
             panic!("foreground lock 后的 Alt 解锁重试未激活记事本：{activation:?}");
         };

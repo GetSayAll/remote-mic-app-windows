@@ -28,6 +28,12 @@ Remove-Item Env:SAYALL_TEST_REGISTERED_APP_TARGET
   单独返回成功不算通过。
 - 对 MSIX/Electron 等多进程应用，验收按精确 AUMID 关联整组进程，不能只把激活
   契约返回的单个 PID 当作主窗口进程。
+- 对 AppsFolder 中的传统桌面条目，验收应从 `System.Link.TargetParsingPath` 读取公开
+  的真实目标路径，并按完整进程映像路径关联窗口；不能把 `ShellExecuteExW` 返回的
+  启动器/中转 PID 当作最终应用身份，也不能只按容易碰撞的 exe 文件名匹配。
+- 至少各选一个打包应用和传统桌面应用执行前台锁探针：让独立进程先持有
+  foreground lock，再从后台触发映射。两类目标都必须以
+  `target_result=foreground_observed` 结束。
 - 物理 Alt 正在按住时触发映射，应用不得注入 Alt UP 破坏用户键态；日志应记录
   `physical_alt_held=true`，若 Windows 因此前台拒绝则明确失败，不得误报成功。
 - 分别用 RC001、RC003 验证实体按键与已有设置保持不变。

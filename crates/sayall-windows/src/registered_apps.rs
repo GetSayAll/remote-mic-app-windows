@@ -2,6 +2,12 @@
 use crate::app_launcher::CustomAppPick;
 pub const REGISTERED_PREFIX: &str = "shell:AppsFolder\\";
 
+#[derive(Debug, Clone)]
+struct RegisteredIdentity {
+    app_user_model_id: String,
+    executable_path: Option<String>,
+}
+
 pub fn is_registered_target(target: &str) -> bool {
     target.strip_prefix(REGISTERED_PREFIX).is_some_and(|id| {
         !id.is_empty()
@@ -167,14 +173,64 @@ fn classify_registered_launch(submitted: bool, foreground_observed: bool) -> Res
 }
 
 #[cfg(windows)]
+fn resolve_registered_identity(target: &str) -> Result<RegisteredIdentity, String> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IShellItem2, SHCreateItemFromParsingName};
+
+    if !is_registered_target(target) {
+        return Err("无效的 Windows 应用目标".into());
+    }
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|error| error.to_string())?;
+    }
+    let result = (|| -> windows::core::Result<Option<String>> {
+        let wide: Vec<_> = target.encode_utf16().chain(Some(0)).collect();
+        let item: IShellItem2 =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }?;
+        const PKEY_LINK_TARGET_PARSING_PATH: PROPERTYKEY = PROPERTYKEY {
+            fmtid: windows::core::GUID::from_u128(0xb9b4b3fc_2b51_4a42_b5d8_324146afcf25),
+            pid: 2,
+        };
+        let value: PWSTR = match unsafe { item.GetString(&PKEY_LINK_TARGET_PARSING_PATH) } {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let text = unsafe { value.to_string() }.unwrap_or_default();
+        unsafe {
+            CoTaskMemFree(Some(value.0.cast()));
+        }
+        let path = std::path::Path::new(&text);
+        Ok((text.len() <= 8192
+            && !text.chars().any(char::is_control)
+            && path.is_absolute()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")))
+        .then_some(text))
+    })();
+    unsafe {
+        CoUninitialize();
+    }
+    Ok(RegisteredIdentity {
+        app_user_model_id: target
+            .strip_prefix(REGISTERED_PREFIX)
+            .expect("registered target was validated")
+            .to_owned(),
+        executable_path: result.map_err(|error| error.to_string())?,
+    })
+}
+
+#[cfg(windows)]
 pub fn launch_registered_app(target: &str) -> Result<(), String> {
     if !is_registered_target(target) {
         return Err("无效的 Windows 应用目标".into());
     }
-    let app_user_model_id = target
-        .strip_prefix(REGISTERED_PREFIX)
-        .expect("registered target was validated")
-        .to_owned();
     let shell_target = target.to_owned();
     crate::gatt_note("registered_app_launch phase=requested".to_owned());
     let started = std::time::Instant::now();
@@ -198,6 +254,22 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                     .ok()
                     .map_err(|e| e.to_string())?;
             }
+            struct Com;
+            impl Drop for Com {
+                fn drop(&mut self) {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
+            }
+            let _com = Com;
+            let identity = resolve_registered_identity(&shell_target)?;
+            crate::gatt_note(format!(
+                "registered_app_launch phase=identity_resolved aumid_available=true executable_path_available={}",
+                identity.executable_path.is_some()
+            ));
+            let app_user_model_id = identity.app_user_model_id;
+            let executable_path = identity.executable_path;
 
             let id_wide: Vec<_> = app_user_model_id.encode_utf16().chain(Some(0)).collect();
             let activation = (|| -> windows::core::Result<u32> {
@@ -264,6 +336,7 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 observe_registered_foreground(
                     pid,
                     &app_user_model_id,
+                    executable_path.as_deref(),
                     method == "shell_fallback",
                 )
             });
@@ -272,9 +345,6 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 pid.is_some(),
                 if foreground_observed { "foreground_observed" } else { "foreground_denied" }
             ));
-            unsafe {
-                CoUninitialize();
-            }
             classify_registered_launch(submitted, foreground_observed)
         })
         .map_err(|e| e.to_string())?
@@ -297,6 +367,7 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
 fn observe_registered_foreground(
     pid: u32,
     app_user_model_id: &str,
+    executable_path: Option<&str>,
     allow_pid_fallback: bool,
 ) -> bool {
     // 冷启动时窗口创建晚于激活契约返回。等待窗口出现并以有限次数尝试恢复/前置；
@@ -306,6 +377,7 @@ fn observe_registered_foreground(
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
         if crate::app_launcher::activate_application_window(app_user_model_id)
+            || executable_path.is_some_and(crate::app_launcher::activate_executable_path)
             || (allow_pid_fallback
                 && (crate::app_launcher::process_is_foreground(pid)
                     || crate::app_launcher::activate_process_window(pid)))
@@ -329,11 +401,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[ignore = "requires the configured AppsFolder desktop application"]
+    fn configured_desktop_registered_app_resolves_executable_identity() {
+        let target = std::env::var("SAYALL_TEST_REGISTERED_APP_TARGET")
+            .expect("set SAYALL_TEST_REGISTERED_APP_TARGET to an AppsFolder target");
+        let identity = resolve_registered_identity(&target).expect("resolve AppsFolder identity");
+        assert!(identity.executable_path.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
     #[ignore = "requires an installed registered app and changes the desktop foreground"]
     fn configured_registered_app_reaches_observed_foreground() {
         let target = std::env::var("SAYALL_TEST_REGISTERED_APP_TARGET")
             .expect("set SAYALL_TEST_REGISTERED_APP_TARGET to an AppsFolder target");
         launch_registered_app(&target).expect("registered app should reach observed foreground");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "shows a foreground-lock probe and activates the configured registered app"]
+    fn configured_registered_app_survives_foreground_lock() {
+        let target = std::env::var("SAYALL_TEST_REGISTERED_APP_TARGET")
+            .expect("set SAYALL_TEST_REGISTERED_APP_TARGET to an AppsFolder target");
+        let activation =
+            crate::app_launcher::tests::with_foreground_lock(|| launch_registered_app(&target));
+        activation.expect("registered app should reach foreground after lock retry");
     }
 
     #[test]

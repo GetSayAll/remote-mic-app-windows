@@ -175,10 +175,18 @@
   `learn.microsoft.com/windows/win32/api/shobjidl_core/nf-shobjidl_core-iapplicationactivationmanager-activateapplication`。
 - **AUMID 与多进程应用**：微软说明 AUMID 用于把应用的窗口、进程和资源关联起来，
   不依赖应用内部是单进程还是多进程；`GetApplicationUserModelId` 可从公开进程句柄读取
-  该身份。因此不能假定激活契约 PID 就是主窗口 PID，本仓库按精确 AUMID 枚举进程后
-  再以 `GetForegroundWindow` 读回验收。官方依据：
+  该身份；窗口级 `System.AppUserModel.ID` 可覆盖进程级身份，用于共享宿主或同进程多应用。
+  因此不能假定激活契约 PID 就是主窗口 PID，本仓库先按窗口级、再按进程级精确 AUMID
+  枚举，最后以 `GetForegroundWindow` 读回验收。官方依据：
   `learn.microsoft.com/windows/apps/desktop/modernize/package-identity-overview`、
-  `learn.microsoft.com/windows/win32/appxpkg/functions`。
+  `learn.microsoft.com/windows/win32/appxpkg/functions`、
+  `learn.microsoft.com/windows/win32/properties/props-system-appusermodel-id`。
+- **传统 AppsFolder 条目**：微软将 `System.Link.TargetParsingPath` 定义为链接项真实目标
+  的 Shell 命名空间路径，文件目标时等同于显示路径；`IShellItem2::GetString` 是读取该
+  PROPERTYKEY 的公开接口。本仓库用它取得完整 exe 路径，匹配所有同路径运行进程，
+  避免误把 Shell 返回的启动器 PID 当主窗口，也避免仅按文件名造成跨目录碰撞。官方依据：
+  `learn.microsoft.com/windows/win32/properties/props-system-link-targetparsingpath`、
+  `learn.microsoft.com/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishellitem2-getstring`。
 - **边界**：只读取 Windows 公开的应用身份，不读取 ChatGPT 或其他第三方应用的私有
   配置、数据库或进程内存；日志不记录 AUMID、窗口标题、路径或应用名称。
 
