@@ -21,6 +21,7 @@
 - [ ] Windows 注册应用扫描与应用库：支持搜索、多选/全选、配置保存及导入导出；扫描或添加应用不会自动启动或绑定。RC001/RC003 实体按键回归仍需分别验收，见 `Testing/WindowsRegisteredApps.md`。
 - [ ] 遥控器电量显示：按所选 BLE 对端读取 Windows 缓存电量，断连、睡眠或缺失时显示未知，不额外进行 GATT 操作。持续更新、断连、睡眠及 RC001/RC003 实机验收见 `Testing/WindowsBattery.md`。
 - [ ] 关于页"启动行为"与"软件更新"之间补 12px 分组间距：与上方应用标识/外观卡的堆叠节奏一致，两组独立设置不再读成同一张卡的两段。前端类型检查与 AboutPage 仿真测试 passed；纯 CSS 间距无需真机专项。
+- [ ] 主窗口 Ctrl+W 关闭快捷键：Ctrl+W 隐藏主窗口并由托盘驻留，语义与点标题栏"X"完全一致（不动 BLE/语音链路、不退出进程，真正退出仍走托盘菜单"退出"）；带 Alt/Shift/Meta 的组合与按住连发均不触发，Rust 侧落 `window_close source=ctrl_w` 结构化日志。不复用前端 `getCurrentWindow().close()`——它在 Windows 上是否触发 `CloseRequested`（→ 隐藏到托盘）取决于 tao 的平台实现，跨版本可能静默改变语义，故显式走 IPC 调 `window.hide()`。自动化验证 passed（前端 vitest 95 例含 Ctrl+W 边沿、`pnpm build`、`cargo check` 含 runtime-simulation、`cargo fmt --check`、`cargo test` 单线程全量）；**Windows 真机 Ctrl+W 按键与托盘恢复 deferred**（worktree git 元数据异常，本次未能出本地包）。
 
 - [x] 建立独立 Rust + Tauri 2 + Vue 3 工程结构。
 - [x] 建立 Mac 原版风格设置界面骨架。

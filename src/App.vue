@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
-import { getRuntimeSnapshot, type RuntimeSnapshot } from "./lib/bridge";
+import { getRuntimeSnapshot, hideMainWindow, type RuntimeSnapshot } from "./lib/bridge";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
+  isWindowCloseAccelerator,
   loadPersistedPage,
   persistActivePage,
   touchLiveness,
@@ -27,6 +28,19 @@ let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
 let initialRuntimeReported = false;
 
 function handleWindowKeydown(event: KeyboardEvent): void {
+  if (isWindowCloseAccelerator(event)) {
+    if (event.repeat) return;
+    // Ctrl+W 在 WebView2 里是否默认被当浏览器加速键取决于宿主配置，这里一律
+    // 拦下：窗口已在 IPC 返回前隐藏，扩散出去只是把组合键喂给页面里的输入框。
+    // 系统按键重复率下的连发也一并吞掉（见上面的 `repeat` 提前返回）——
+    // 否则窗口重新显示时会收到一串本轮按住产生的关闭请求。
+    event.preventDefault();
+    event.stopPropagation();
+    // 隐藏失败只可能是窗口已销毁/不存在，用户侧表现为"没反应"，不值得弹错误；
+    // Rust 侧已落 window_close 日志可直接定位。
+    void hideMainWindow().catch(() => undefined);
+    return;
+  }
   if (isBrowserReloadAccelerator(event)) {
     event.preventDefault();
     event.stopPropagation();
