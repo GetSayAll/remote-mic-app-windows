@@ -241,3 +241,87 @@
 - **发布资产命名**：NSIS 产物名含中文与空格（`无线麦 SayAll_*.exe`），GitHub 资产直链需 percent-encoding；为消除编码风险，Release 资产在 CI 中复制为纯 ASCII 名（`SayAll-Windows-<version>-x64-setup.exe`）后上传，本地构建产物名不变（CI 全部脚本按 `*-setup.exe` 过滤定位，实测不受新增 `.sig` 影响）。
 - **NSIS 与既有安装器门禁的相互作用**：updater 以 `/P`（passive）+ `/UPDATE` 运行，既有 installer-hooks.nsh 的 PREINSTALL SemVer 降级门禁照常生效（升级路径不受影响）；POSTINSTALL 的 VB-CABLE 提示在 passive（非 Silent）模式下仍会弹出——仅影响未装 VB-CABLE 的用户，与首装行为一致，保留。
 - **预览版通道（2026-09-08 增补）**：Tauri 官方 Runtime Configuration 文档明确支持通过 `UpdaterBuilder::endpoints` 在运行时选择 stable/beta 等独立通道；本仓库据此保持默认稳定端点不变，仅在用户显式开启“检查预览版更新”后覆盖端点。GitHub Releases 页面公开提供标准 Atom feed（`releases.atom`），包含已发布的正式版与 Pre-release、排除 Draft；实现从本仓库 feed 的 `alternate` 链接读取 SemVer tag，选择最高版本并自行构造本仓库 `https://github.com/GetSayAll/remote-mic-app-windows/releases/download/<tag>/latest.json`，避开匿名 REST API 每 IP 60 次/小时限流。最终安装包仍由 Tauri minisign 强制验签。
+
+## HID 访问模式与免驱动捕获调研来源（2026-09-23，RC003 三键免驱动专项）
+
+- **微软 HID 架构文档 · HID 客户端访问模式表**（`learn.microsoft.com/windows-hardware/drivers/hid/hid-architecture`）：给出各 TLC 的访问模式——**键盘/键台（`0x01`/`0x0006–0x0007`）与鼠标（`0x01`/`0x0001–0x0002`）为 Exclusive**；游戏控制器、`0x01`/`0x0080` 系统控制、`0x0C`/`0x0001` 消费类、厂商自定义页均为 Shared。文档原文：为阻止其他 HID 客户端截获全局输入状态，**"Raw Input Manager (RIM) opens all such devices exclusively"**；RIM 独占打开后，应用仍可**不请求读写权限**地打开 HID 设备接口，并只能用 `HidD_GetXxx` 取设备信息。本条直接解释了本仓库实测到的 `CreateFile(GENERIC_READ)` → `ERROR_ACCESS_DENIED`、以及零权限打开成功但 `DeviceIoControl(IOCTL_HID_GET_REPORT_DESCRIPTOR)` → `ERROR_INVALID_FUNCTION`。
+- **适用边界**：该表用于判定"某个 TLC 在当前 Windows 上能否被**普通用户态**进程读取"。本仓库据此得出 RC003 **不提权直读**不可行的结论；不涉及任何第三方实现代码，无代码来源需要标注。**注意**：该结论仅覆盖"不提权、不注入"的范围——报告的生产端位于 `WUDFHost` 内、在 RIM 之前，提权注入该宿主可读，见本文下方的「HID 宿主内报告层捕获」条。
+- **实测交叉验证**（本机 2026-09-23）：17 个 HID 设备接口中 8 个打开成功（全部为 Shared 模式：消费类 / 厂商页 / 笔），9 个被拒（全部为键盘类）；RC003 的唯一 TLC 为 `Generic Desktop / Keyboard`，因此落在 Exclusive 一侧。原始输出见 `hardware/RC003/evidence/hid-direct-control.log`。
+- **`HidP_GetButtonCaps` / `HidP_GetCaps` / `HidP_GetLinkCollectionNodes`**（`hid.dll` 公开 API）：用于在**不读取报告**的前提下枚举设备**声明**的 usage 与报告结构；这是本轮判定"三键（`0x80`/`0x81`/`0xF1`）确实被设备声明在 `report_id=0x01` 的键盘页范围内"的依据（证据同上）。
+- **`RegisterRawInputDevices` 的匹配语义**：注册项按 TLC 的 usage page / usage 匹配。RC003 的 TLC 是 `0x01`/`0x0006`，因此厂商页 `0xFF00/0x0001` 注册项在原理上无法匹配该设备；本仓库仍实测之（`hardware/RC003/probes/raw-input-dump.py`）以把预期变成可核验的事实——结果为零事件，与原理一致。
+
+## HID 宿主内报告层捕获（2026-09-23，RC003 三键实现复核专项）
+
+按用户要求复核 `ZSTDJan/windows-remote-mic-app` 的按键捕获实现，记录其机理、上游与依赖。
+**只读复核，未复制任何代码**；本仓库与参考实现同为 GPL-3.0-only，若后续移植代码须按本文件规则登记模块与提交。
+
+- **参考实现**：`ZSTDJan/windows-remote-mic-app`，提交
+  `1e6b1d285f9cd50f30c5bc92ac7787a693fc993d`（`main`，v1.0.44，2026-09-14）。
+  - **技术上游**：该方案源自 `xxb26553663-star/remote-bridge-hub`，提交
+    `8a93f321ac71a602300c6cd77f7256fa4b63068e`（GPL-3.0-only）。ZSTDJan 自己的
+    `frida_compat.py` 开篇即写明：*"Windows' normal keyboard stack does not expose the RC003
+    usages for Back and the two volume buttons. The original `remote-bridge-hub` Windows client
+    solves that by observing the completed HID read inside the RC003 WUDF host via a verified
+    Frida Gadget."* 引用时应同时点出上游，避免把二手适配当原始出处。
+  - **关键模块**（供移植时按模块登记）：`apps/windows/rc003/src/ovb_rc003/`
+    下的 `frida_hid_tap_runtime.py`（宿主定位、独占性判据、内嵌 Gadget 脚本）、
+    `frida_hid_tap_injector.py`（提权与注入）、`frida_compat.py`（客户端、usage→按钮表、租约与降级）、
+    `hid_host_reload_windows.py`（旧世代 Gadget 迁移）；架构说明以其
+    `WINDOWS-ARCHITECTURE-LEDGER.md` §6–§8、§12 为准。
+- **机理**：RC003 的 HID 设备由 `mshidumdf` + `WUDFRd`（`WUDF\DriverList = HidOverGatt`）承载在
+  **用户态** `WUDFHost.exe` 中。在该进程内挂 `ntdll!NtDeviceIoControlFile`，命中
+  `IoControlCode = 0x80018483`、`inputLength = 8`（`input[4] = 2` operation、`input[5] = 1` selector）、
+  `outputLength = 9` 时，把 9 字节键盘报告（`report_id 0x01` + modifiers + reserved +
+  3 × uint16 usage）中偏移 3 起的 6 字节 usage 槽**在 `onEnter` 清空**，再把原文交回应用侧做
+  手势与映射。清空必须在 `onEnter`——内核在调用返回前已复制源缓冲区，`onLeave` 清空太晚。
+  **不使用 Raw Input**，因此与"Raw Input HID 通道零报文"并不矛盾。
+- **依赖与代价**：无需内核驱动、无需 `TESTSIGNING`、不改 Secure Boot 与驱动签名策略、无需重启；
+  代价为**提权组件**（参考实现为固定计划任务承载的 `RemoteMicRC003HidHelper.exe`，
+  不接受调用方传入的 PID/路径/配置）+ **Frida Gadget 17.15.3**
+  （`frida-gadget-17.15.3-windows-x86_64.dll.xz`，SHA256
+  `b566d70189b6d551ad8f4e0bea24de08a3d4c0f559bb35b2bdb67d45182240c2`，独立许可，非 GPL）。
+  注入使用 `SeDebugPrivilege` + `VirtualAllocEx`/`WriteProcessMemory`/`CreateRemoteThread(LoadLibraryW)`。
+- **本仓库自用探针的依赖登记（2026-09-23）**：本仓库的只读 / 写入实验探针
+  （`hardware/RC003/probes/wudf_ioctl_tap.{js,py}`、`wudf_ioctl_write.{js,py}`、
+  `raw_input_sink.py`）使用 **Frida 官方 Python 绑定 17.18.0**（独立许可，非 GPL）在**开发期**
+  完成宿主定位与脚本注入，**不随产品发布**；探针的 hook 脚本为本仓库自持实现（未复制参考实现代码，
+  仅按公开 IOCTL 行为独立编写）。产品若采用路线 A，注入框架（含 Frida Gadget）须按
+  ADR 0002 修订记录**固定版本 + 校验 SHA256 + 在本文件登记来源与许可**后再引入
+  —— 该登记见下一条。
+- **产品注入载体登记：Frida Gadget 17.18.0（2026-09-23，路线 A 助手产品化 spike）**。
+  按 ADR 0002 §3 修订记录的要求完成"固定版本 + 校验 SHA256 + 登记来源与许可"三件事。
+  - **来源**：`frida/frida` 发行 tag `17.18.0`（2026-09-09），资产
+    `frida-gadget-17.18.0-windows-x86_64.dll.xz`，
+    下载地址 `https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-windows-x86_64.dll.xz`。
+  - **完整性**：压缩包 SHA-256 `2e549d3b77bc939b83b9a368655e90b7e566bd56b635a10fc3fab68d8dbe173d`
+    （与 GitHub Releases API 的 `asset.digest` 逐字符一致，非本地自证）；解压产物
+    `frida-gadget.dll` 23 254 016 字节，SHA-256
+    `350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687`，PE machine `0x8664`（x86_64）。
+  - **固定方式**：机器可读清单 `hardware/RC003/helper/vendor/frida-gadget.lock.json` 是版本与
+    完整性的**唯一事实来源**；`hardware/RC003/helper/vendor/fetch_frida_gadget.py` 按锁定值
+    下载并逐级校验（压缩包哈希 → 解压 → 产物哈希 → PE 头与架构），任何一步不符即非零退出，
+    **不留下未校验的 DLL 供助手加载**。二进制本身不入库（见 `.gitignore`），入库的是
+    "可复现的获取方式 + 锁定的完整性凭据"。
+  - **许可**：**wxWindows Library Licence, Version 3.1**（`frida/frida` 仓库根 `COPYING`）。
+    该许可的 exception notice 第 2 条明确：*"you may use, copy, link, modify and distribute
+    under your own terms, binary object code versions of works based on the Library."*
+    ⇒ **以二进制形式随本产品分发被允许，无需开源本产品代码**；第 3 条同时说明该例外
+    不适用于"并入库中的 GPL/LGPL 代码"。与参考实现所用的 17.15.3 属同一许可族（均非 GPL）。
+  - **残留风险（发布前须收口）**：本次仅核对了仓库根 `COPYING`，**未做逐组件许可复核**
+    （Gadget 内嵌的第三方组件未逐一确认）。正式发布前应完成逐组件复核，并把许可全文随安装包
+    一并分发。在此之前该组件**仅用于开发期与增强轨验证**。
+  - **使用边界**：基础语音主路径不得依赖本组件（`AGENTS.md` 架构边界条款）。助手只承载
+    "按设备源头捕获"这一可选增强轨，未就绪时按键回到 Windows 原生行为。
+- **本仓库只读实测（`structural`，2026-09-23）**：本机 RC003 的宿主节点
+  `Enum\BTHLEDevice\{00001812-…}_Dev_VID&012717_PID&32b8_REV&00a4_…\9&3aacf7b9&0&0055` 声明
+  `Service = mshidumdf`、`LowerFilters = WUDFRd`、`WUDF\DriverList = HidOverGatt`、
+  `DeviceDesc = Bluetooth Low Energy GATT compliant HID device`；
+  `Device Parameters\WUDFDiagnosticInfo\HostPid` 可读且指向 `WUDFHost.exe`；该宿主在整棵
+  `Enum` 树中**只承载 RC003 一个成员**（参考实现的"独占宿主"简单绑定路径适用）；
+  普通权限 `OpenProcess` 返回 `err=5`（宿主位于 session 0，说明注入必须提权）。
+  证据：`hardware/RC003/evidence/wudf-host-probe.log`，探针 `hardware/RC003/probes/wudf-host-probe.py`。
+- **参考实现自陈的风险边界**（引用时应一并保留）：*"该方案沿用既有管理员助手与 Frida，不安装新过滤驱动，
+  不修改 Windows 蓝牙配置或宿主池化设置；它依赖已经验证的 Windows 内部复制语义，
+  **不是微软承诺稳定的公开接口**"*；其 README 亦列出游戏反作弊识别风险。
+- **不要效仿的部分**：其按键映射支持单击/双击/长按配置，与本仓库"语音键只支持按下开始、释放结束"
+  的产品规则冲突——语音键不借鉴其手势策略，只借鉴报告层捕获机理。

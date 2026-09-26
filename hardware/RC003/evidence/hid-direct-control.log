@@ -1,0 +1,84 @@
+=== hid-direct-read mode=list 开始 2026-09-23T10:10:21 ===
+
+[1] 按 GUID_DEVINTERFACE_HID 枚举设备接口:
+    共 17 个 HID 设备接口
+
+[2] 按 GUID_DEVINTERFACE_KEYBOARD 枚举:
+    共 4 个键盘设备接口
+
+[3] 匹配 RC003 的接口:
+    \\?\hid#{00001812-0000-1000-8000-<BT-ADDR>}_dev_vid&012717_pid&32b8_rev&00a4_<BT-ADDR>#a&435f0b9&0&0000#{4d1e55b2-f16f-11cf-88cb-<BT-ADDR>}\kbd
+    \\?\hid#{00001812-0000-1000-8000-<BT-ADDR>}_dev_vid&012717_pid&32b8_rev&00a4_<BT-ADDR>#a&435f0b9&0&0000#{884b96c3-56ef-11d1-bc8c-<BT-ADDR>}
+
+[4] 阳性对照：逐个尝试以只读方式打开全部 HID 接口
+    目的：证明 CreateFile 失败是「键盘类 TLC 被系统独占」，而不是探针写错了。
+    只做 CreateFile + HidD_GetAttributes + HidP_GetCaps，不做任何写入。
+    [打开] VID=0000 PID=0000 UP=0x000C U=0x0001 InLen=3 <-- 消费类
+    [打开] VID=5E2A PID=71B4 UP=0x000C U=0x0001 InLen=2 <-- 消费类
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}
+    [拒绝] err=32 {4d1e55b2-f16f-11cf-88cb-001111000030}
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}\k
+    [拒绝] err=32 {4d1e55b2-f16f-11cf-88cb-001111000030}
+    [打开] VID=27C6 PID=01E0 UP=0x000D U=0x000E InLen=0
+    [打开] VID=27C6 PID=01E0 UP=0xFF00 U=0x0001 InLen=65
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}
+    [打开] VID=046D PID=B016 UP=0x000C U=0x0001 InLen=2 <-- 消费类
+    [打开] VID=046D PID=B016 UP=0xFF00 U=0x0001 InLen=7
+    [打开] VID=046D PID=B016 UP=0xFF00 U=0x0002 InLen=20
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}\k
+    [打开] VID=046D PID=B016 UP=0x000C U=0x0001 InLen=2 <-- 消费类
+    [拒绝] err=5 {4d1e55b2-f16f-11cf-88cb-001111000030}\k
+
+    汇总: 打开成功 8 个 / 拒绝 9 个
+
+[5] 零权限打开测试（CreateFile dwDesiredAccess=0）
+    微软文档：RIM 以独占方式打开键盘/鼠标 TLC 后，用户态仍可以「不请求读写权限」的方式打开接口，
+    并可用 HidD_GetXxx 读取设备信息；但不能收发报告。验证 RC003 是否走这条路：
+    [零权限成功] VID=0x2717 PID=0x32B8 ver=0x00A4 product=""
+      HidP_GetCaps: UP=0x0001 U=0x0006 InLen=121 InputButtonCaps=4 InputValueCaps=0 LinkCollectionNodes=3
+      声明为「按钮数组」的 caps 数: 4
+        [caps 0] page=0x0007 report_id=0x01 link=1 range=0x0000-0x00FE
+            包含 usage=0x0035 `~ / Live(TV)
+            包含 usage=0x003E F5 / Voice
+            包含 usage=0x0049 Insert
+            包含 usage=0x004A Home
+            包含 usage=0x0065 Application(Menu)
+            包含 usage=0x0066 Power
+            包含 usage=0x0075 Help
+            包含 usage=0x0080 Volume Up  <<< 本调查关注
+            包含 usage=0x0081 Volume Down <<< 本调查关注
+            包含 usage=0x00F1 Back  <<< 本调查关注
+        [caps 1] page=0xFF00 report_id=0x06 link=2 range=0x0000-0x00FF
+        [caps 2] page=0xFF00 report_id=0x07 link=2 range=0x0000-0x00FF
+        [caps 3] page=0xFF00 report_id=0x08 link=2 range=0x0000-0x00FF
+      LinkCollection 节点数: 3
+        [link 0] page=0x0001 usage=0x0006 parent=0 children=2 
+        [link 1] page=0x0000 usage=0x0001 parent=1 children=0 
+        [link 2] page=0x0000 usage=0x0000 parent=0 children=0 
+      报告描述符不可达（IOCTL_HID_GET_REPORT_DESCRIPTOR err=1）—— 与「零权限仅 HidD_GetXxx」一致
+    [零权限成功] VID=0x2717 PID=0x32B8 ver=0x00A4 product=""
+      HidP_GetCaps: UP=0x0001 U=0x0006 InLen=121 InputButtonCaps=4 InputValueCaps=0 LinkCollectionNodes=3
+      声明为「按钮数组」的 caps 数: 4
+        [caps 0] page=0x0007 report_id=0x01 link=1 range=0x0000-0x00FE
+            包含 usage=0x0035 `~ / Live(TV)
+            包含 usage=0x003E F5 / Voice
+            包含 usage=0x0049 Insert
+            包含 usage=0x004A Home
+            包含 usage=0x0065 Application(Menu)
+            包含 usage=0x0066 Power
+            包含 usage=0x0075 Help
+            包含 usage=0x0080 Volume Up  <<< 本调查关注
+            包含 usage=0x0081 Volume Down <<< 本调查关注
+            包含 usage=0x00F1 Back  <<< 本调查关注
+        [caps 1] page=0xFF00 report_id=0x06 link=2 range=0x0000-0x00FF
+        [caps 2] page=0xFF00 report_id=0x07 link=2 range=0x0000-0x00FF
+        [caps 3] page=0xFF00 report_id=0x08 link=2 range=0x0000-0x00FF
+      LinkCollection 节点数: 3
+        [link 0] page=0x0001 usage=0x0006 parent=0 children=2 
+        [link 1] page=0x0000 usage=0x0001 parent=1 children=0 
+        [link 2] page=0x0000 usage=0x0000 parent=0 children=0 
+      报告描述符不可达（IOCTL_HID_GET_REPORT_DESCRIPTOR err=1）—— 与「零权限仅 HidD_GetXxx」一致
+
+=== list 模式结束 ===

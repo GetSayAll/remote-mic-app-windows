@@ -44,6 +44,10 @@ jobs:
           }
           Write-Host "正式更新签名密钥已就绪"
 
+      # 同 windows-ci.yml：bundle.resources 的两件文件不入库，编译期就需要它们存在。
+      - name: Stage bundle resources (helper + frida gadget)
+        run: node scripts/stage-bundle-inputs.cjs
+
       - name: Build signed NSIS installer
         run: pnpm tauri build --bundles nsis
         env:

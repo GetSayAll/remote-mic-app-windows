@@ -1,4 +1,5 @@
 use sayall_windows::raw_input::RawInputSnapshot;
+use sayall_windows::rc003_bridge::BridgeSnapshot;
 use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
@@ -26,6 +27,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     ) -> Result<AudioSnapshot, PlatformError>;
     fn audio_snapshot(&self) -> AudioSnapshot;
     fn raw_input_snapshot(&self) -> RawInputSnapshot;
+    /// RC003 三键传输桥接状态（捕获链第 ② 段）。
+    /// 仿真平台与没有该机制的平台返回 `Default`，即 `phase=stopped`。
+    fn rc003_bridge_snapshot(&self) -> BridgeSnapshot;
     fn start_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn stop_raw_input(&self) -> Result<RawInputSnapshot, PlatformError>;
     fn send_input_snapshot(&self) -> SendInputSnapshot;
@@ -120,6 +124,11 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn raw_input_snapshot(&self) -> RawInputSnapshot {
         self.raw_input_snapshot()
+    }
+
+    fn rc003_bridge_snapshot(&self) -> BridgeSnapshot {
+        // 显式走 inherent 方法，避免被解析成本 trait 方法（那会无限递归）。
+        WindowsPlatform::rc003_bridge_snapshot(self)
     }
 
     fn start_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {
@@ -394,6 +403,11 @@ mod simulation {
 
         fn raw_input_snapshot(&self) -> RawInputSnapshot {
             lock(&self.state).raw_input.clone()
+        }
+
+        fn rc003_bridge_snapshot(&self) -> BridgeSnapshot {
+            // 仿真平台不承载这条桥：返回"不存在"，前端据此不渲染这一行。
+            BridgeSnapshot::default()
         }
 
         fn start_raw_input(&self) -> Result<RawInputSnapshot, PlatformError> {

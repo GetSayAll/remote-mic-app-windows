@@ -72,6 +72,13 @@ impl SettingsStore {
         })
     }
 
+    /// RC003 三键增强捕获的用户意图（按键页开关，默认关闭）。
+    pub fn save_rc003_capture_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存三键增强捕获开关", move |settings| {
+            settings.rc003_capture_enabled = enabled;
+        })
+    }
+
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;

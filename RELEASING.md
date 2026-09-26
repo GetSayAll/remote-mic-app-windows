@@ -4,6 +4,12 @@
 
 ## 发布不变量
 
+- **出包/编译前置**：`src-tauri/tauri.conf.json` 的 `bundle.resources` 声明了
+  `sayall-helper.exe` 与 `frida-gadget.dll`，而这两个文件**不入库**（见 `.gitignore`）。
+  tauri-build 在**编译期**就校验资源路径存在，所以任何会编译 `src-tauri` 的环境
+  （本机出包、CI verify、发布流程）都必须先执行 `node scripts/stage-bundle-inputs.cjs`
+  ——它构建助手、按锁文件获取并校验 Gadget、再复用 `stage-bundle-resources.cjs` 落地。
+  漏掉这一步的报错是 `resource path 'sayall-helper.exe' doesn't exist`（2026-09-27 实测）。
 - 默认交付物是本地测试包。先在本机生成测试安装器，报告其路径和校验值，并完成与改动风险相称的本地安装、升级、启动和功能验证。
 - 本地验证通过后必须停在“可发布”状态；不得自行创建发布 Tag、GitHub Release、发布草稿或上传发布资产。只有用户在收到验证结果后明确要求“发布预览版”，才获得本次发布授权。“继续”“做完”“合入 main”等指令本身不构成发布授权。
 - 发布源必须是已合入远端 `main` 的精确 SHA；开始前 `git fetch origin main`，发布 worktree 必须干净且与该 SHA 一致。

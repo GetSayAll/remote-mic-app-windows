@@ -1,0 +1,126 @@
+=== RC003 WUDF 宿主 IOCTL 写入（拦截）最小实验 ===
+时间: 2026-09-23T11:51:07
+契约: 只写报告偏移 3..8 并在 onLeave 回写复原；不改注册表 / 驱动策略 / 不装计划任务 / 需一次交互式 UAC 提权；计划表结束即解除武装。
+副作用: 改写阶段会把目标键变成 确定(Enter) 或 F13，请把焦点留在桌面或空白区域，不要停在文本编辑器里。
+
+--- 步骤 1/6：定位独占 RC003 的 WUDFHost ---
+  命中 exclusive_rc003_host，HostPid=32684 (0x7fac)
+
+--- 步骤 2/6：提权与可注入性自检 ---
+  当前进程管理员令牌: True
+  OpenProcess(目标宿主) 被拒: False
+
+--- 步骤 3/6：启动 Windows 侧 Raw Input 监听（独立观测点）---
+  注册 成功 page=0x0001 usage=0x0006  Generic Desktop / Keyboard
+  注册 成功 page=0x000C usage=0x0001  Consumer Control
+  注册 成功 page=0xFF00 usage=0x0001  Vendor Defined 0xFF00 / 0x0001
+  注册 成功 page=0xFF00 usage=0x0002  Vendor Defined 0xFF00 / 0x0002
+  注册 成功 page=0x0001 usage=0x0080  Generic Desktop / 0x80 System Control
+  frida 17.18.0
+
+--- 步骤 4/6：attach 并安装写入钩子 ---
+  钩子已安装: NtDeviceIoControlFile，目标 IOCTL=80018483
+  导出地址可用: True
+  计划表总时长: 22000 ms，写入上限 400
+  agent 起始时钟 t0=1790135468676（与 Python 同一时钟域，可直接配对）
+
+--- 步骤 5/6：分阶段执行（请按屏幕提示操作遥控器）---
+
+>>> 阶段 A：基线对照：请按 确定 ×2。期望 Windows 侧出现 VK_RETURN。
+    模式 observe  时长 10 秒
+  [心跳] phase=A idx=0 mode=observe 命中=0 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=0 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790135471329 phase=A pyp=A idx=0 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790135471331 phase=A kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790135471490 phase=A pyp=A idx=0 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790135471492 phase=A kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+[TAP] t=1790135471578 phase=A pyp=A idx=0 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790135471580 phase=A kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790135471703 phase=A pyp=A idx=0 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790135471705 phase=A kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=0 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+
+>>> 阶段 B2：改写→F13：请按 返回 ×2、音量+ ×1、音量- ×1（不要按 确定）。期望出现 VK_F13（只有我们的写入能产生它）。
+    模式 rewrite→0x0068 (F13)  时长 12 秒
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=4 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=4 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790135481591 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000f10000000000 new=010000680000000000 mutated=True write_err=- | report_id=0x01 usage=['0x00F1(返回 (Back))']  改写 010000f10000000000→010000680000000000
+[WIN] t=1790135481593 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790135481591 phase=B2 pyp=B2 idx=1 mode=rewrite dir=leave ret=0 out=010000680000000000 detail=restored |
+[TAP] t=1790135481729 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790135481730 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=6 改写=1 成功=1 失败=0 复原=1
+[TAP] t=1790135481828 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000f10000000000 new=010000680000000000 mutated=True write_err=- | report_id=0x01 usage=['0x00F1(返回 (Back))']  改写 010000f10000000000→010000680000000000
+[WIN] t=1790135481830 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790135481828 phase=B2 pyp=B2 idx=1 mode=rewrite dir=leave ret=0 out=010000680000000000 detail=restored |
+[TAP] t=1790135481978 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790135481980 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=8 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790135483478 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000800000000000 new=010000680000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0080(音量+ (Volume Up))']  改写 010000800000000000→010000680000000000
+[WIN] t=1790135483480 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790135483478 phase=B2 pyp=B2 idx=1 mode=rewrite dir=leave ret=0 out=010000680000000000 detail=restored |
+[TAP] t=1790135483628 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790135483630 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=10 改写=3 成功=3 失败=0 复原=3
+[TAP] t=1790135484591 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000810000000000 new=010000680000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0081(音量- (Volume Down))']  改写 010000810000000000→010000680000000000
+[WIN] t=1790135484593 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790135484591 phase=B2 pyp=B2 idx=1 mode=rewrite dir=leave ret=0 out=010000680000000000 detail=restored |
+[WIN] t=1790135484743 phase=B2 kind=kb vk=0x7C make=0x64 flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+[TAP] t=1790135484742 phase=B2 pyp=B2 idx=1 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=12 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=12 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=12 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=12 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=12 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=1 mode=rewrite 命中=12 改写=4 成功=4 失败=0 复原=4
+
+--- 步骤 6/6：解除武装、卸载钩子 ---
+  [心跳] phase=after idx=2 mode=observe 命中=12 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=after idx=2 mode=observe 命中=12 改写=4 成功=4 失败=0 复原=4
+  最终统计: 命中=12 改写=4 成功=4 失败=0 复原=4 内核改写=0 解除武装=False
+  Raw Input 监听已停止；收到 RC003 事件 12 条
+
+--- 阶段时间轴（本地时钟）---
+  A     1790135468676 .. 1790135478676
+  B2    1790135478676 .. 1790135490676
+
+=== 判定（仅由宿主侧写入记录 + Windows 侧按键事件推导）===
+（本次只执行了阶段 A/B2，其余阶段不参与判定）
+
+[1] Windows 侧按键事件（仅 RC003 设备，按下计数）
+  A     事件  4  VK_RETURN×2
+  B2    事件  8  VK_F13×4
+
+[2] 宿主侧写入记录（report 9 字节，只动偏移 3..8）
+  A     命中  4 次  实际改写  0 次
+  B2    命中  8 次  实际改写  4 次
+        010000f10000000000→010000680000000000
+        010000800000000000→010000680000000000
+        010000810000000000→010000680000000000
+
+  写入失败/被闸门拦下: 0
+  onLeave 已回写复原: 4
+  onLeave 发现内核改写过缓冲区: 0（>0 则放弃回写并如实上报）
+
+[3] 分项结论
+  PASS  A 阳性对照：确定 → VK_RETURN
+  SKIP  B1 改写生效（目标键 → VK_RETURN）（本次未执行）
+  PASS  B2 改写生效（目标键 → VK_F13，无歧义）
+  SKIP  C 目标键已在报告层被擦除（本次未执行）
+  SKIP  C 非目标键（确定）未被波及（本次未执行）
+  SKIP  D 擦除生效（确定 被静默）（本次未执行）
+  SKIP  E 解除武装后恢复（本次未执行）
+
+判定: interception_effective（改写与擦除均在翻译层生效，且解除后恢复）
+说明: 阶段 A 与阶段 D 是同一个键（确定）的对照——A 有事件、D 无事件，
+      而两者唯一的差别是我们在报告层写了字节；阶段 B1 从零事件变为 VK_RETURN、
+      B2 从零事件变为 VK_F13（本机没有别的来源能自然产生 F13），
+      共同证明写入发生在 Windows 键码翻译之前。
+注意: 本次只覆盖 A/B2，其余阶段未验。

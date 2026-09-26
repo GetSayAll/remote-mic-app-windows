@@ -1,0 +1,19 @@
+=== raw-input-dump 开始 2026-09-23T10:18:17 ===
+
+[1] 逐项注册 Raw Input（RIDEV_INPUTSINK）：
+    注册成功 page=0x0001 usage=0x0006  Generic Desktop / Keyboard（生产已注册）
+    注册成功 page=0x000C usage=0x0001  Consumer Control（生产已注册）
+    注册成功 page=0xFF00 usage=0x0001  Vendor Defined 0xFF00 / 0x0001（从未注册）
+    注册成功 page=0xFF00 usage=0x0002  Vendor Defined 0xFF00 / 0x0002（从未注册）
+    注册成功 page=0x0001 usage=0x0080  Generic Desktop / 0x80 System Control（从未注册）
+
+[2] 开始采集 10 秒。
+    请按：返回 ×1 →（停 3 秒）音量+ ×2 →（停 3 秒）音量- ×3
+         →（停 3 秒）确定 ×2 →（停 3 秒）主页 ×1（已知可用的对照组）
+    注意：本探针不做任何 VK 过滤，遥控器的**每一条**事件都会被打印。
+[RAW-KEYBOARD] vk=0x41 make=0x00 flags=0x0000 msg=0x0100
+[RAW-KEYBOARD] vk=0x41 make=0x00 flags=0x0001 msg=0x0101
+[RAW-KEYBOARD] vk=0x41 make=0x00 flags=0x0000 msg=0x0100
+[RAW-KEYBOARD] vk=0x41 make=0x00 flags=0x0001 msg=0x0101
+
+=== 采集结束，用时 10.0s ===

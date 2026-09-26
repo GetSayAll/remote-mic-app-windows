@@ -1,0 +1,38 @@
+================================================================
+ 证据：rc003-helper 第二次运行被上一代 Gadget 占用挡住
+ 来源：helper-run.log 第 695-726 行（用户 2026-09-23 15:32/15:33/15:35 三次实跑）
+ 归档：2026-09-23 15:51:45 +0800
+================================================================
+
+---------- 新一轮运行 2026-09-23 15:32:48.533 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 15:32:48.533 ===
+[ENV] elevated=true pid=25520 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=d48bf52797862e111a74b4d918bacdd1ed3dcf9945ccc714c96f48ec7b139f44
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=32684 exe=WUDFHost.exe image=C:\Windows\System32\WUDFHost.exe
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&0&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[STOP] 复制 Gadget 失败 D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll -> C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll: 另一个程序正在使用此文件，进程无法访问。 (os error 32)
+
+---------- 新一轮运行 2026-09-23 15:33:33.158 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 15:33:33.159 ===
+[ENV] elevated=true pid=30812 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=d48bf52797862e111a74b4d918bacdd1ed3dcf9945ccc714c96f48ec7b139f44
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=32684 exe=WUDFHost.exe image=C:\Windows\System32\WUDFHost.exe
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&0&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[STOP] 复制 Gadget 失败 D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll -> C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll: 另一个程序正在使用此文件，进程无法访问。 (os error 32)
+
+---------- 新一轮运行 2026-09-23 15:35:25.242 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 15:35:25.242 ===
+[ENV] elevated=true pid=35420 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=d48bf52797862e111a74b4d918bacdd1ed3dcf9945ccc714c96f48ec7b139f44
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=32684 exe=WUDFHost.exe image=C:\Windows\System32\WUDFHost.exe
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&0&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[STOP] 复制 Gadget 失败 D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll -> C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll: 另一个程序正在使用此文件，进程无法访问。 (os error 32)

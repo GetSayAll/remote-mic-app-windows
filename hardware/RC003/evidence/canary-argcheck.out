@@ -1,0 +1,28 @@
+================================================================================
+ 证据：--canary-usage 参数校验（免提权、只读 dry-run）
+ 归档：2026-09-23 16:56:08 +0800
+================================================================================
+
+--- --canary-usage 0x4A
+    [CANARY] enabled=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081,0x004a canary=0x004a
+    [CANARY] 验收专用配置：除三键外还会清掉上面的哨兵键，它的原生行为会暂时消失。判据：清空生效 ⇒ 哨兵键无反应；助手退出 / 租约到期 / Ctrl+C ⇒ 哨兵键恢复（fail-open）。
+    [DRY-RUN-CANARY] canary=0x004a clear_usages=0x00f1,0x0080,0x0081,0x004a note=若开始运行，这些 usage 的原生行为会暂时消失（受租约与 --duration 兜底）
+    EXIT=0
+
+--- --canary-usage 0x00F1
+    [STOP] 哨兵键 0x00F1 与目标三键重叠；哨兵必须是别的键（RC003 上建议用主页 0x4A）
+    EXIT=2
+
+--- --canary-usage 0
+    参数错误: --canary-usage 取值 "0" 无效：usage 0 在报告里表示空槽，不能当哨兵键
+    EXIT=2
+
+--- --canary-usage zz
+    参数错误: --canary-usage 取值 "zz" 无效："zz" 不是十六进制 usage
+    EXIT=2
+
+--- --canary-usage 0x4a,0x4B
+    [CANARY] enabled=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081,0x004a,0x004b canary=0x004a,0x004b
+    [CANARY] 验收专用配置：除三键外还会清掉上面的哨兵键，它的原生行为会暂时消失。判据：清空生效 ⇒ 哨兵键无反应；助手退出 / 租约到期 / Ctrl+C ⇒ 哨兵键恢复（fail-open）。
+    [DRY-RUN-CANARY] canary=0x004a,0x004b clear_usages=0x00f1,0x0080,0x0081,0x004a,0x004b note=若开始运行，这些 usage 的原生行为会暂时消失（受租约与 --duration 兜底）
+    EXIT=0

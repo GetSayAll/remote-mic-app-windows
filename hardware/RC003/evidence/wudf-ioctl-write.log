@@ -1,0 +1,242 @@
+=== RC003 WUDF 宿主 IOCTL 写入（拦截）最小实验 ===
+时间: 2026-09-23T11:33:18
+契约: 只写报告偏移 3..8 并在 onLeave 回写复原；不改注册表 / 驱动策略 / 不装计划任务 / 需一次交互式 UAC 提权；计划表结束即解除武装。
+副作用: 改写阶段会把目标键变成 确定(Enter) 或 F13，请把焦点留在桌面或空白区域，不要停在文本编辑器里。
+
+--- 步骤 1/6：定位独占 RC003 的 WUDFHost ---
+  命中 exclusive_rc003_host，HostPid=32684 (0x7fac)
+
+--- 步骤 2/6：提权与可注入性自检 ---
+  当前进程管理员令牌: True
+  OpenProcess(目标宿主) 被拒: False
+
+--- 步骤 3/6：启动 Windows 侧 Raw Input 监听（独立观测点）---
+  注册 成功 page=0x0001 usage=0x0006  Generic Desktop / Keyboard
+  注册 成功 page=0x000C usage=0x0001  Consumer Control
+  注册 成功 page=0xFF00 usage=0x0001  Vendor Defined 0xFF00 / 0x0001
+  注册 成功 page=0xFF00 usage=0x0002  Vendor Defined 0xFF00 / 0x0002
+  注册 成功 page=0x0001 usage=0x0080  Generic Desktop / 0x80 System Control
+  frida 17.18.0
+
+--- 步骤 4/6：attach 并安装写入钩子 ---
+  钩子已安装: NtDeviceIoControlFile，目标 IOCTL=80018483
+  导出地址可用: True
+  计划表总时长: 69000 ms，写入上限 400
+  agent 起始时钟 t0=1790134399712（与 Python 同一时钟域，可直接配对）
+
+--- 步骤 5/6：分阶段执行（请按屏幕提示操作遥控器）---
+
+>>> 阶段 pre：预热：先别按。请唤醒遥控器（按一下遥控器上任意键）。
+    模式 observe  时长 10 秒
+  [心跳] phase=pre idx=0 mode=observe 命中=0 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=0 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=0 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=0 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790134404363 phase=pre pyp=pre idx=0 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790134404365 phase=pre kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134404512 phase=pre pyp=pre idx=0 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134404514 phase=pre kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=pre idx=0 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre idx=0 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+
+>>> 阶段 A：基线对照：请按 确定 ×2。期望 Windows 侧出现 VK_RETURN。
+    模式 observe  时长 10 秒
+  [心跳] phase=A idx=1 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=2 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790134413450 phase=A pyp=A idx=1 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790134413452 phase=A kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134413587 phase=A pyp=A idx=1 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134413589 phase=A kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=A idx=1 mode=observe 命中=4 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790134414050 phase=A pyp=A idx=1 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790134414051 phase=A kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134414187 phase=A pyp=A idx=1 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134414189 phase=A kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=A idx=1 mode=observe 命中=6 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=6 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=6 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=6 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A idx=1 mode=observe 命中=6 改写=0 成功=0 失败=0 复原=0
+
+>>> 阶段 B1：改写→确定：请按 返回 ×2、音量+ ×1、音量- ×1（本阶段不要按 确定）。期望这 4 次都变成 VK_RETURN。
+    模式 rewrite→0x0028 (确定/Enter)  时长 8 秒
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=6 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=6 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=6 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790134422450 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000f10000000000 new=010000280000000000 mutated=True write_err=- | report_id=0x01 usage=['0x00F1(返回 (Back))']  改写 010000f10000000000→010000280000000000
+[WIN] t=1790134422452 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134422450 phase=B1 pyp=B1 idx=2 mode=rewrite dir=leave ret=0 out=010000280000000000 detail=restored |
+[WIN] t=1790134422564 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+[TAP] t=1790134422562 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[TAP] t=1790134422862 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000f10000000000 new=010000280000000000 mutated=True write_err=- | report_id=0x01 usage=['0x00F1(返回 (Back))']  改写 010000f10000000000→010000280000000000
+[WIN] t=1790134422864 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134422862 phase=B1 pyp=B1 idx=2 mode=rewrite dir=leave ret=0 out=010000280000000000 detail=restored |
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=9 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790134422987 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134422989 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=10 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790134424162 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000800000000000 new=010000280000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0080(音量+ (Volume Up))']  改写 010000800000000000→010000280000000000
+[WIN] t=1790134424164 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134424162 phase=B1 pyp=B1 idx=2 mode=rewrite dir=leave ret=0 out=010000280000000000 detail=restored |
+[TAP] t=1790134424299 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134424301 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+[TAP] t=1790134424649 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000810000000000 new=010000280000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0081(音量- (Volume Down))']  改写 010000810000000000→010000280000000000
+[WIN] t=1790134424652 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134424649 phase=B1 pyp=B1 idx=2 mode=rewrite dir=leave ret=0 out=010000280000000000 detail=restored |
+[TAP] t=1790134424812 phase=B1 pyp=B1 idx=2 mode=rewrite dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134424814 phase=B1 kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B1 idx=2 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+
+>>> 阶段 B2：改写→F13：请按 返回 ×2、音量+ ×1、音量- ×1（不要按 确定）。期望出现 VK_F13（只有我们的写入能产生它）。
+    模式 rewrite→0x0068 (F13)  时长 8 秒
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=B2 idx=3 mode=rewrite 命中=14 改写=4 成功=4 失败=0 复原=4
+
+>>> 阶段 C：选择性擦除：先按 音量+ ×2、音量- ×2，再按 确定 ×1。期望：音量± 无任何事件；确定 仍出现 VK_RETURN。
+    模式 erase-target  时长 10 秒
+  [心跳] phase=C idx=4 mode=erase-target 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=C idx=4 mode=erase-target 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=C idx=4 mode=erase-target 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=C idx=4 mode=erase-target 命中=14 改写=4 成功=4 失败=0 复原=4
+  [心跳] phase=C idx=4 mode=erase-target 命中=14 改写=4 成功=4 失败=0 复原=4
+[TAP] t=1790134440499 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000800000000000 new=010000000000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0080(音量+ (Volume Up))']  改写 010000800000000000→010000000000000000
+[TAP] t=1790134440499 phase=C pyp=C idx=4 mode=erase-target dir=leave ret=0 out=010000000000000000 detail=restored |
+[TAP] t=1790134440613 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[TAP] t=1790134440812 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000800000000000 new=010000000000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0080(音量+ (Volume Up))']  改写 010000800000000000→010000000000000000
+[TAP] t=1790134440812 phase=C pyp=C idx=4 mode=erase-target dir=leave ret=0 out=010000000000000000 detail=restored |
+[TAP] t=1790134440925 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+  [心跳] phase=C idx=4 mode=erase-target 命中=18 改写=6 成功=6 失败=0 复原=6
+  [心跳] phase=C idx=4 mode=erase-target 命中=18 改写=6 成功=6 失败=0 复原=6
+[TAP] t=1790134442087 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000810000000000 new=010000000000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0081(音量- (Volume Down))']  改写 010000810000000000→010000000000000000
+[TAP] t=1790134442087 phase=C pyp=C idx=4 mode=erase-target dir=leave ret=0 out=010000000000000000 detail=restored |
+[TAP] t=1790134442274 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[TAP] t=1790134442438 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000810000000000 new=010000000000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0081(音量- (Volume Down))']  改写 010000810000000000→010000000000000000
+[TAP] t=1790134442438 phase=C pyp=C idx=4 mode=erase-target dir=leave ret=0 out=010000000000000000 detail=restored |
+[TAP] t=1790134442549 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+  [心跳] phase=C idx=4 mode=erase-target 命中=22 改写=8 成功=8 失败=0 复原=8
+[TAP] t=1790134443274 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790134443277 phase=C kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134443387 phase=C pyp=C idx=4 mode=erase-target dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134443389 phase=C kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=C idx=4 mode=erase-target 命中=24 改写=8 成功=8 失败=0 复原=8
+  [心跳] phase=C idx=4 mode=erase-target 命中=24 改写=8 成功=8 失败=0 复原=8
+
+>>> 阶段 D：全量擦除：请按 确定 ×2（可再按 主页 ×1）。期望：**无任何事件**——与阶段 A 是同一个键。
+    模式 erase-all  时长 10 秒
+  [心跳] phase=D idx=5 mode=erase-all 命中=24 改写=8 成功=8 失败=0 复原=8
+  [心跳] phase=D idx=5 mode=erase-all 命中=24 改写=8 成功=8 失败=0 复原=8
+  [心跳] phase=D idx=5 mode=erase-all 命中=24 改写=8 成功=8 失败=0 复原=8
+  [心跳] phase=D idx=5 mode=erase-all 命中=24 改写=8 成功=8 失败=0 复原=8
+  [心跳] phase=D idx=5 mode=erase-all 命中=24 改写=8 成功=8 失败=0 复原=8
+[TAP] t=1790134450712 phase=D pyp=D idx=5 mode=erase-all dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000000000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']  改写 010000280000000000→010000000000000000
+[TAP] t=1790134450712 phase=D pyp=D idx=5 mode=erase-all dir=leave ret=0 out=010000000000000000 detail=restored |
+[TAP] t=1790134450825 phase=D pyp=D idx=5 mode=erase-all dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[TAP] t=1790134450962 phase=D pyp=D idx=5 mode=erase-all dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000000000000000 mutated=True write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']  改写 010000280000000000→010000000000000000
+[TAP] t=1790134450962 phase=D pyp=D idx=5 mode=erase-all dir=leave ret=0 out=010000000000000000 detail=restored |
+[TAP] t=1790134451063 phase=D pyp=D idx=5 mode=erase-all dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+  [心跳] phase=D idx=5 mode=erase-all 命中=28 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=D idx=5 mode=erase-all 命中=28 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=D idx=5 mode=erase-all 命中=28 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=D idx=5 mode=erase-all 命中=28 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=D idx=5 mode=erase-all 命中=28 改写=10 成功=10 失败=0 复原=10
+
+>>> 阶段 E：解除武装：请按 确定 ×2。期望 VK_RETURN 恢复出现。
+    模式 observe  时长 10 秒
+  [心跳] phase=E idx=6 mode=observe 命中=28 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=28 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=28 改写=10 成功=10 失败=0 复原=10
+[TAP] t=1790134458912 phase=E pyp=E idx=6 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790134458915 phase=E kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+[TAP] t=1790134459026 phase=E pyp=E idx=6 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134459027 phase=E kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+[TAP] t=1790134459163 phase=E pyp=E idx=6 mode=observe dir=enter in_len=8 out_len=9 orig=010000280000000000 new=010000280000000000 mutated=False write_err=- | report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+[WIN] t=1790134459165 phase=E kind=kb vk=0x0D make=0x1C flags=0x0000 msg=0x0100 rc003=True  <<< RC003
+  [心跳] phase=E idx=6 mode=observe 命中=31 改写=10 成功=10 失败=0 复原=10
+[TAP] t=1790134459263 phase=E pyp=E idx=6 mode=observe dir=enter in_len=8 out_len=9 orig=010000000000000000 new=010000000000000000 mutated=False write_err=- | report_id=0x01 usage=[]
+[WIN] t=1790134459264 phase=E kind=kb vk=0x0D make=0x1C flags=0x0001 msg=0x0101 rc003=True  <<< RC003
+  [心跳] phase=E idx=6 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=E idx=6 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+
+>>> 阶段 post：收尾：请停手。
+    模式 observe  时长 3 秒
+  [心跳] phase=post idx=7 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=post idx=7 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  [心跳] phase=post idx=7 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+
+--- 步骤 6/6：解除武装、卸载钩子 ---
+  [心跳] phase=after idx=8 mode=observe 命中=32 改写=10 成功=10 失败=0 复原=10
+  最终统计: 命中=32 改写=10 成功=10 失败=0 复原=10 内核改写=0 解除武装=False
+  Raw Input 监听已停止；收到 RC003 事件 20 条
+
+--- 阶段时间轴（本地时钟）---
+  pre   1790134399712 .. 1790134409712
+  A     1790134409712 .. 1790134419712
+  B1    1790134419712 .. 1790134427712
+  B2    1790134427712 .. 1790134435712
+  C     1790134435712 .. 1790134445712
+  D     1790134445712 .. 1790134455712
+  E     1790134455712 .. 1790134465712
+  post  1790134465712 .. 1790134468712
+
+=== 判定（仅由宿主侧写入记录 + Windows 侧按键事件推导）===
+
+[1] Windows 侧按键事件（仅 RC003 设备，按下计数）
+  pre   事件  2  VK_RETURN×1
+  A     事件  4  VK_RETURN×2
+  B1    事件  8  VK_RETURN×4
+  B2    事件  0  （无）
+  C     事件  2  VK_RETURN×1
+  D     事件  0  （无）
+  E     事件  4  VK_RETURN×2
+  post  事件  0  （无）
+
+[2] 宿主侧写入记录（report 9 字节，只动偏移 3..8）
+  pre   命中  2 次  实际改写  0 次
+  A     命中  4 次  实际改写  0 次
+  B1    命中  8 次  实际改写  4 次
+        010000f10000000000→010000280000000000
+        010000800000000000→010000280000000000
+        010000810000000000→010000280000000000
+  B2    命中  0 次  实际改写  0 次
+  C     命中 10 次  实际改写  4 次
+        010000800000000000→010000000000000000
+        010000810000000000→010000000000000000
+  D     命中  4 次  实际改写  2 次
+        010000280000000000→010000000000000000
+  E     命中  4 次  实际改写  0 次
+  post  命中  0 次  实际改写  0 次
+
+  写入失败/被闸门拦下: 0
+  onLeave 已回写复原: 10
+  onLeave 发现内核改写过缓冲区: 0（>0 则放弃回写并如实上报）
+
+[3] 分项结论
+  PASS  A 阳性对照：确定 → VK_RETURN
+  PASS  B1 改写生效（目标键 → VK_RETURN）
+  FAIL  B2 改写生效（目标键 → VK_F13，无歧义）
+  PASS  C 目标键已在报告层被擦除
+  PASS  C 非目标键（确定）未被波及
+  PASS  D 擦除生效（确定 被静默）
+  PASS  E 解除武装后恢复
+
+判定: interception_effective（改写与擦除均在翻译层生效，且解除后恢复）
+说明: 阶段 A 与阶段 D 是同一个键（确定）的对照——A 有事件、D 无事件，
+      而两者唯一的差别是我们在报告层写了字节；阶段 B1 从零事件变为 VK_RETURN，
+      证明写入发生在 Windows 键码翻译之前。

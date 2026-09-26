@@ -1,0 +1,120 @@
+=== sayall-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-25 01:02:46.168 ===
+[ENV] elevated=false pid=4304 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+=== sayall-helper 自检（无需提权 / 无需设备 / 不注入）===
+
+[PASS] SHA-256 向量 "<empty>"
+       e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855（期望 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855）
+[PASS] SHA-256 向量 "abc"
+       ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad（期望 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad）
+[PASS] SHA-256 向量 "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+       248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1（期望 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1）
+[PASS] mask_token 只打掉蓝牙地址
+       {00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>
+[PASS] 取字符串 type
+       Some("hb")
+[PASS] 取数字 t（大数）
+       Some(1758600000000)
+[PASS] 取布尔 lease_ok
+       true
+[PASS] 取嵌套对象 stat
+       Some("{\"clears_ok\":7,\"write_fail\":0}")
+[PASS] 取字符串数组 buttons
+       ["back", "volume_up"]
+[PASS] 取数字数组 usages
+       [241, 128]
+[PASS] 空数组不被误判为有值
+       usages=[] reason=Some("lease_expired")
+[PASS] 内嵌 agent 含目标 IOCTL 与三键 usage
+       sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997 lines=685
+[PASS] Gadget 配置：script 交互 + 端口/令牌落进 parameters
+       {   "interaction": {     "type": "script",     "path": "rc003_agent.js",     "parameters": {       "port": 47831,       "token": "deadbeef",       "mode": "clear",       "restore": true,       "leaseMs": 2000     }   } } 
+[PASS] Gadget 锁定文件与 GADGET_SHA256 / GADGET_VERSION 一致
+       常量 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 version=17.18.0；锁定文件 2633 字节
+[PASS] decode_host_pid: QWORD 8 字节（本机实际形态）
+       got=Some(32684) 期望=Some(32684)
+[PASS] decode_host_pid: DWORD 4 字节
+       got=Some(1048) 期望=Some(1048)
+[PASS] decode_host_pid: BINARY 8 字节按同宽度解
+       got=Some(32684) 期望=Some(32684)
+[PASS] decode_host_pid: BINARY 2 字节应拒绝
+       got=None 期望=None
+[PASS] decode_host_pid: REG_SZ(1) 应拒绝（不得把字符串当数字）
+       got=None 期望=None
+[PASS] 实机 Enum 扫描：HostPid 全部可读
+       diag_keys=9 HostPid读出=9 no_host=0 读失败=0 命中RC003=1
+[PASS] 本机时间戳：形态与取值范围
+       2026-09-25 01:02:46.174（y=2026 m=9 d=25 h=1 min=2 s=46）
+[PASS] 会话循环遵守 --duration（静默客户端占住连接）
+       deadline=1500 ms，实际 1557 ms 返回
+[PASS] 控制台处理器可注册（Ctrl+C 走收尾而非硬终止）
+       SetConsoleCtrlHandler -> true；端到端 Ctrl+C 行为未在自检中覆盖
+[PASS] 模块枚举：阳性对照（本进程自身）与阴性对照（无 Gadget）
+       modules=29 saw_self_exe(sayall-helper.exe)=true resident_taps=0
+[PASS] Gadget 模块名判据（含分代文件名与阴性例）
+       frida-gadget.dll->true(期望true), FRIDA-GADGET.DLL->true(期望true), frida-gadget.3a7f19c2.dll->true(期望true), frida-agent.dll->false(期望false), kernel32.dll->false(期望false)
+[PASS] 放置策略：无 tap → 规范化注入
+       Canonical
+[PASS] 放置策略：有 tap + 令牌可接管 → 接管（不碰文件）
+       Attach
+[PASS] 放置策略：有 tap + 令牌接不上 + 允许新世代 → 分代复制
+       Generation
+[PASS] 放置策略：有 tap + 令牌接不上 + 禁止分代 → STALE-TAP
+       Err(STALE-TAP)
+[PASS] 放置策略：无 tap + --attach-only → 报错（不能装作已接管）
+       Err(--attach-only 要求宿主里已有 tap，但模块枚举没有发现。)
+[PASS] DLL 放置：摘要一致即复用（不写文件）
+       exists=true match=true -> Reuse(期望Reuse), exists=true match=false -> Copy(期望Copy), exists=false match=false -> Copy(期望Copy)
+[PASS] 分代目录名安全（仅小写 [0-9a-f]）
+       generation_dir_name -> gen-9f3a1c7e
+[TOKEN] source=generated path=C:\Users\hd838\AppData\Local\Temp\rc003-helper-selftest-4304\session.token value=0f5ae3f948b3b79e6c748450130f77cc
+[TOKEN] source=file path=C:\Users\hd838\AppData\Local\Temp\rc003-helper-selftest-4304\session.token value=0f5ae3f948b3b79e6c748450130f77cc
+[TOKEN] source=regenerated path=C:\Users\hd838\AppData\Local\Temp\rc003-helper-selftest-4304\session.token value=0f5ae3f948bdb1989491e920013ec4a8
+[PASS] 令牌：首次生成 → 二次读到同一个 → --new-token 才换
+       1st(from_file=false)=0f5ae3f948b3b79e6c748450130f77cc 2nd(from_file=true)=0f5ae3f948b3b79e6c748450130f77cc new=0f5ae3f948bdb1989491e920013ec4a8 文件已更新=true
+[REAP] removed=1 kept_in_use=1
+[PASS] 分代目录回收：保留在用那份，删掉其余
+       keep_exists=true stale_removed=true
+第一轮的一行
+续约线程的一行
+第二轮的一行
+[PASS] 日志分隔线：同轮内再建 Logger 不写，开新一轮才写
+       同一轮内计数=0（应为 0）开新轮后=1（应为 1）
+[PASS] 端口占用（10048）：第二次绑定必须失败且提示已有另一次运行在跑
+       绑定 127.0.0.1:59417 失败：通常每个套接字地址(协议/网络地址/端口)只允许使用一次。 (os error 10048)。这通常意味着**已经有另一次 sayall-helper 在跑**（端口 59417 即单实例锁）：先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉），或用 --port 换端口。谁在占：netstat -ano | findstr :59417
+[PASS] 接管轮的 [DLL] 汇报：如实写 attach，不得报 sha256_verified
+       action_ok=true has_sha256_verified=false
+[PASS] [DLL] 汇报阳性对照：复用路径必须报告 sha256_verified=true
+       [("dll", "C:\\x\\frida-gadget.dll"), ("action", "reuse"), ("sha256_verified", "true"), ("copied", "false")]
+[PASS] 哨兵键解析：接受 0x4A / 4a / 逗号分隔并去重；拒绝 usage 0 与非十六进制
+       0x4A=Ok([74]) 4a,80=Ok([74, 128]) 0x4a,0x4A=Ok([74]) 0=Err("usage 0 在报告里表示空槽，不能当哨兵键") zz=Err("\"zz\" 不是十六进制 usage")
+[PASS] 清空集合：默认=三键；追加哨兵键后三键仍在前；与三键重叠必须报错
+       default=Ok([241, 128, 129]) canary=Ok([241, 128, 129, 74]) overlap=Err("哨兵键 0x00F1 与目标三键重叠；哨兵必须是别的键（RC003 上建议用主页 0x4A）")
+[PASS] usage 渲染：hex 四位补零小写，JSON 用十进制
+       hex=0x00f1,0x004a json=241,74
+[PASS] 内嵌 agent：三键常量与 helper 一致，且含 targets 命令与两个集合
+       agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[PASS] 桥接描述文件：正常解析
+       port=53124 token=deadbeefcafe
+[PASS] 桥接描述文件：版本不符必须整份拒绝
+       version=2 与缺 version 均应返回 None
+[PASS] 桥接描述文件：缺令牌或缺端口必须拒绝
+       缺 token / 缺 port / 空 token 三种都应拒绝
+[PASS] 桥接边沿编码：空集合为 -，非空为小写十六进制列表
+       空=- 单=f1 三键=f1,80,81
+[PASS] 桥接描述文件路径：与主程序侧约定一致（SayAll\rc003-bridge.ini）
+       C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[PASS] 桥接描述文件只读探测：absent / ok / invalid 三态可分辨
+       absent(主程序未运行？) | ok port=53124 token_len=8 | invalid(版本不符或字段缺失)
+[PASS] 桥接连接错误码：路径未知 与 文件不存在（带路径）可分辨
+       none->descriptor_path_unknown | missing->descriptor_missing(C:\Users\hd838\AppData\Local\Temp\rc003-helper-selftest-4304\bridge-probe\definitely-missing.ini)
+[CONN-STALE] 续约写入失败 → 本条连接已不可用，立即收尾以便接受 agent 的新连接。
+[PASS] 续约写失败（conn_stale）能立刻打断当前连接
+       置位后 504 ms 内返回（读轮询 250 ms，阈值 1500 ms）
+[PASS] 计划任务创建参数：手动触发 + 最高权限 + 跟随主程序 + 路径带引号
+       /create /tn SayAll RC003 Helper /tr "C:\fake\rc003-helper.exe" --follow-app /sc once /st 00:00 /rl highest /f
+[PASS] 计划任务查询/删除参数：任务名一致、删除必须带 /f
+       query=/query /tn SayAll RC003 Helper /fo LIST | delete=/delete /tn SayAll RC003 Helper /f
+[PASS] 停用信号：存在即取走并删除、二次读取为否
+       first=true second=false
+
+结论: 全部通过

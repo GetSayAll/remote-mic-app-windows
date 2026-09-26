@@ -1,0 +1,107 @@
+# RC003 计划任务按需提权验收日志（2026-09-23 21:47 - 23:00）
+#
+# 证据链：假设被证伪 -> 修复 -> 复验通过。
+#   21:47 / 21:53 / 21:54  三轮全部失败：提权令牌（elevated=true）打不开
+#                          session 0 的宿主进程（TAP 枚举与 OpenProcess 均 error 5），
+#                          而同日手动提权运行对同一宿主一直成功；
+#                          助手失败退出 => 桥接 80ms 后 read_error（曾长期无法解释）。
+#   根因：源码只有注释声称 SeDebugPrivilege 由提权隐含获得，无任何启用调用；
+#         UAC 提权只是把它放进特权列表，默认禁用，必须 AdjustTokenPrivileges。
+#   23:00:07  修复后（enable_se_debug）：scan=ok modules=46 resident=1，
+#             agent 认证通过，按键映射生效（用户在记事本打出所配字符）。
+#
+# 已滤掉 [HB] 心跳与 [RENEW] tick= 例行行。
+
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 21:47:26.445 ===
+[ENV] elevated=true pid=38632 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=?
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[TOKEN] source=file path=C:\ProgramData\SayAll\rc003-helper\session.token value=0f5aa153684025a756d359c7b5b5583c
+[TAP] scan=failed error=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 31284) 失败，GetLastError=5 note=无法枚举宿主模块；若有上一代 tap，本次注入会是无操作（LoadLibrary 返回已加载基址）
+[APP-BRIDGE] event=enabled descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[LISTEN] addr=127.0.0.1:47831
+[APP-BRIDGE] event=connected descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[PREP] dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=reuse reason=sha256_matches sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 note=一个字节都没写——被宿主映射着的那份不会被覆盖
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper config=C:\ProgramData\SayAll\rc003-helper\frida-gadget.config agent=C:\ProgramData\SayAll\rc003-helper\rc003_agent.js port=47831 mode=clear restore=true lease_ms=2000
+[STOP] OpenProcess(PROCESS_ALL_ACCESS, 31284) 失败，GetLastError=5。宿主位于 session 0，通常因为未提权。
+
+---------- 新一轮运行 2026-09-23 21:53:23.191 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 21:53:23.191 ===
+[ENV] elevated=true pid=23908 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=?
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[TOKEN] source=file path=C:\ProgramData\SayAll\rc003-helper\session.token value=0f5aa153684025a756d359c7b5b5583c
+[TAP] scan=failed error=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 31284) 失败，GetLastError=5 note=无法枚举宿主模块；若有上一代 tap，本次注入会是无操作（LoadLibrary 返回已加载基址）
+[APP-BRIDGE] event=enabled descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[LISTEN] addr=127.0.0.1:47831
+[APP-BRIDGE] event=connected descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[PREP] dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=reuse reason=sha256_matches sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 note=一个字节都没写——被宿主映射着的那份不会被覆盖
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper config=C:\ProgramData\SayAll\rc003-helper\frida-gadget.config agent=C:\ProgramData\SayAll\rc003-helper\rc003_agent.js port=47831 mode=clear restore=true lease_ms=2000
+[STOP] OpenProcess(PROCESS_ALL_ACCESS, 31284) 失败，GetLastError=5。宿主位于 session 0，通常因为未提权。
+
+---------- 新一轮运行 2026-09-23 21:54:13.025 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 21:54:13.025 ===
+[ENV] elevated=true pid=30016 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=?
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[TOKEN] source=file path=C:\ProgramData\SayAll\rc003-helper\session.token value=0f5aa153684025a756d359c7b5b5583c
+[TAP] scan=failed error=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 31284) 失败，GetLastError=5 note=无法枚举宿主模块；若有上一代 tap，本次注入会是无操作（LoadLibrary 返回已加载基址）
+[APP-BRIDGE] event=enabled descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[LISTEN] addr=127.0.0.1:47831
+[APP-BRIDGE] event=connected descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[PREP] dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=reuse reason=sha256_matches sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 note=一个字节都没写——被宿主映射着的那份不会被覆盖
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper config=C:\ProgramData\SayAll\rc003-helper\frida-gadget.config agent=C:\ProgramData\SayAll\rc003-helper\rc003_agent.js port=47831 mode=clear restore=true lease_ms=2000
+[STOP] OpenProcess(PROCESS_ALL_ACCESS, 31284) 失败，GetLastError=5。宿主位于 session 0，通常因为未提权。
+
+---------- 新一轮运行 2026-09-23 23:00:07.705 ----------
+=== rc003-helper（RC003 增强捕获轨 / 产品化 spike）  2026-09-23 23:00:07.705 ===
+[ENV] elevated=true pid=17800 port=47831 runtime_dir=C:\ProgramData\SayAll\rc003-helper target_pid=- gadget_sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 agent_sha256=27381d727986ec27087f16fb16d640cd7087e5eef1e2beafb320d252bdd6e997
+[REG] diag_keys=6 instances_with_hostpid=6 no_host=0 read_failures=0 rc003_instances=1
+[HOST] pid=31284 exe=WUDFHost.exe image=C:\Windows\System32\WUDFHost.exe
+[EXCLUSIVE] members=1 rc003_members=1 verdict=exclusive_rc003_host
+    [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>\9&3aacf7b9&1&0055
+[GADGET] src=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll
+[VERIFY] file=D:\SayAll\src\GetSayAll\remote-mic-app-windows\hardware\RC003\helper\vendor\frida-gadget.dll size=23254016 sha256=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687 expected=350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687
+[TOKEN] source=file path=C:\ProgramData\SayAll\rc003-helper\session.token value=0f5aa153684025a756d359c7b5b5583c
+[TAP] scan=ok modules=46 resident=1 modules_detail=frida-gadget.dll base=0x7FF959FE0000 size=23617536
+    [TAP] path=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll
+[APP-BRIDGE] event=enabled descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[LISTEN] addr=127.0.0.1:47831
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=skip_copy_attaching_existing_tap
+[PREP] dir=C:\ProgramData\SayAll\rc003-helper config=C:\ProgramData\SayAll\rc003-helper\frida-gadget.config agent=C:\ProgramData\SayAll\rc003-helper\rc003_agent.js port=47831 mode=clear restore=true lease_ms=2000
+[ATTACH] action=skip_injection reason=宿主里已有我们那一代 tap（令牌一致） path=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll note=agent 会在 RECONNECT_MS 内自己连回来；连上后会补发 arm/mode/restore
+[DLL] dll=C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll action=attach_existing_tap touched_files=false note=这一轮不复制、不注入；DLL 是上一轮落地的那份，无需重新校验
+
+已武装。现在可以按遥控器：返回 / 音量+ / 音量- 都会以 [EDGE] 上报；
+确定 / 主页 / 方向应保持 Windows 原生行为（本 spike 不碰它们）。
+
+[APP-BRIDGE] event=connected descriptor=C:\Users\hd838\AppData\Local\SayAll\rc003-bridge.ini
+[ACCEPT] from=127.0.0.1:55436
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=true restore_sent=true targets_sent=true flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[WARN] 读取连接失败: 远程主机强迫关闭了一个现有的连接。 (os error 10054)
+[DISCONNECT] alive_s=0 agent=rc003_agent/1 agent_pid=31284 lines=1 edges=0
+[ACCEPT] from=127.0.0.1:55437
+[HELLO] auth=true pid=31284 agent=rc003_agent/1 mode=clear restore=true lease_ms=2000
+[CONFIG] arm_sent=true mode_sent=true restore_sent=true targets_sent=true flush=true mode=clear restore=true report_usages=0x00f1,0x0080,0x0081 clear_usages=0x00f1,0x0080,0x0081 canary=none ack=n/a（本协议无 ack）
+[AGENT] msg=mode:clear
+[AGENT] msg=mode:clear
+[EDGE] buttons=volume_down raw=t=1790175619477 usages=0x0081 buttons=volume_down n=1
+[EDGE] buttons=(释放) reason= raw=t=1790175619654 usages= buttons= n=0
+[EDGE] buttons=volume_up raw=t=1790175621648 usages=0x0080 buttons=volume_up n=1
+[EDGE] buttons=(释放) reason= raw=t=1790175621813 usages= buttons= n=0
+[EDGE] buttons=back raw=t=1790175624933 usages=0x00F1 buttons=back n=1
+[EDGE] buttons=(释放) reason= raw=t=1790175625068 usages= buttons= n=0
+

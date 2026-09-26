@@ -66,3 +66,27 @@ desktop.ini
 # 不是易变的运行日志，因此对上面的 `*.log` 规则做例外。
 # 说明见 hardware/RC003/README.md。
 !hardware/RC003/evidence/*.log
+
+# ---- RC003 助手（路线 A）的 vendored 注入载体 ----
+# 版本与 SHA-256 由 hardware/RC003/helper/vendor/frida-gadget.lock.json 固定；
+# 二进制本身（约 23 MB）不入库，由 vendor/fetch_frida_gadget.py 按锁定值下载并校验。
+# 入库的是「可复现的获取方式 + 锁定的完整性凭据」，而不是大文件本身。
+hardware/RC003/helper/vendor/*.dll
+hardware/RC003/helper/vendor/*.dll.xz
+hardware/RC003/helper/vendor/*.part
+
+# ---- 上面那条 `!evidence/*.log` 的**例外中的例外** ----
+# helper-run.log 是助手启动器每次运行都追加的**可变**运行时日志（内容每次都变），
+# 当归档物入库只会造成噪声。真机验收后请复制成带日期的文件名再入库，
+# 例如 rc003-observe-2026-09-23.log —— 那才是"有意归档的一次性采集输出"。
+hardware/RC003/evidence/helper-run.log
+
+# 本机开发启动器：硬编码本机 node 位置，不入库（见文件头说明）
+/dev-app.cmd
+
+# 打包资源暂存（构建产物，由出包脚本复制）
+/src-tauri/resources/
+
+# 出包暂存产物（beforeBundleCommand 复制）
+/src-tauri/sayall-helper.exe
+/src-tauri/frida-gadget.dll

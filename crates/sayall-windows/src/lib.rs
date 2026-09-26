@@ -42,6 +42,9 @@ mod power;
 pub mod raw_input;
 #[cfg(windows)]
 mod raw_input_windows;
+/// RC003 三键传输桥接。跨平台可编译（便于单测），但只在 Windows 平台上启动。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod rc003_bridge;
 #[cfg(any(windows, test))]
 mod reconnect;
 #[cfg(windows)]
@@ -242,6 +245,12 @@ pub struct WindowsPlatform {
     audio: Arc<audio::AudioRuntime>,
     #[cfg(windows)]
     raw_input: Arc<raw_input_windows::RawInputRuntime>,
+    /// RC003 三键传输桥接：把提权助手手里的按键边沿送进 `button_mapping` 引擎。
+    ///
+    /// 与 `key_gate` 同样是"持有即运行"：`Rc003Bridge::drop` 会停止监听并删除描述文件，
+    /// 因此它必须随平台生命周期保活。诊断见 [`Self::rc003_bridge_snapshot`]。
+    #[cfg(windows)]
+    rc003_bridge: Arc<rc003_bridge::Rc003Bridge>,
     #[cfg(windows)]
     send_input: Arc<send_input_windows::SendInputRuntime>,
 }
@@ -304,6 +313,10 @@ impl Default for WindowsPlatform {
                 Arc::clone(&raw_input_snapshot),
                 button_mapping.sender(),
             ));
+            // RC003 三键传输桥接（捕获链第 ② 段）：主程序监听随机端口并写出描述文件，
+            // 提权助手读取后回连。没有这一段，RC003 的三键只会被"清空"（Windows 侧
+            // 零事件），边沿永远送不进映射引擎 —— 表现为"能配置但按下去没反应"。
+            let rc003_bridge = rc003_bridge::Rc003Bridge::start(button_mapping.sender());
             // 遥控器 HID 活动通知接线（断连时遥控器醒来按键 → 立即重连）。
             let wake_runtime = Arc::clone(&runtime);
             key_suppressor::set_remote_hid_activity_notify(Box::new(move || {
@@ -326,6 +339,7 @@ impl Default for WindowsPlatform {
                 runtime,
                 audio,
                 raw_input,
+                rc003_bridge,
                 send_input,
             }
         }
@@ -353,6 +367,26 @@ impl Default for WindowsPlatform {
 impl WindowsPlatform {
     pub fn usage_counters(&self) -> Arc<UsageCounters> {
         Arc::clone(&self.usage)
+    }
+
+    /// RC003 三键传输桥接的诊断快照：阶段、端口、助手进程号与投递计数。
+    ///
+    /// 是用来回答"三键还是按不动，到底卡在哪一段"的入口：`phase=listening`
+    /// 说明主程序已就绪、在等助手；`phase=connected` 且 `edges_applied` 增长
+    /// 才说明第 ② 段真的通了。
+    ///
+    /// **刻意做成跨平台**：非 Windows 恒返回 `Default`（即 `phase=stopped`），
+    /// 这样上层（Tauri 命令）不必自己写 cfg 分支，也不会因为平台差异
+    /// 出现"某个平台上这个命令不存在"的裂缝。
+    pub fn rc003_bridge_snapshot(&self) -> rc003_bridge::BridgeSnapshot {
+        #[cfg(windows)]
+        {
+            self.rc003_bridge.snapshot()
+        }
+        #[cfg(not(windows))]
+        {
+            rc003_bridge::BridgeSnapshot::default()
+        }
     }
 
     /// 退出前的优雅关闭（2026-09-16）：关闭 BLE 会话并**在有界时间内等待其完成**

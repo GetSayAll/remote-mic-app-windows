@@ -1,0 +1,103 @@
+=== RC003 WUDF 宿主 IOCTL 只读 tap 实验 ===
+时间: 2026-09-23T11:05:47
+契约: 只读转储，不清空缓冲区、不注入按键、不改系统设置。
+
+--- 步骤 1/4：定位独占 RC003 的 WUDFHost ---
+  命中 exclusive_rc003_host，HostPid=32684 (0x7fac)
+
+--- 步骤 2/4：提权与可注入性自检 ---
+  当前进程管理员令牌: True
+  OpenProcess(目标宿主) 被拒: False
+  提权自检通过。
+  frida 17.18.0
+
+--- 步骤 3/4：attach 并安装只读钩子 ---
+  钩子已安装: NtDeviceIoControlFile，目标 IOCTL=80018483
+  导出地址可用: True
+
+--- 步骤 4/4：分阶段采集（请按屏幕提示操作遥控器）---
+
+>>> 阶段 pre：预热。请不要按遥控器——请拿好遥控器并唤醒它（按一下任意可用键）。  时长 15 秒
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=0 目标 IOCTL 调用=0
+  [pre/enter] in_len=8 out_len=9 in=402f000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+  [pre/leave] in_len=8 out_len=9 in=402f000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=a040000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=a040000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=2 目标 IOCTL 调用=2
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=2 目标 IOCTL 调用=2
+
+>>> 阶段 A：阳性对照。请只按：主页 2-3 次，再按 确定 2-3 次。  时长 12 秒
+  [pre/enter] in_len=8 out_len=9 in=802f000002010000 out=0100004a0000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x004A(主页/Home)']
+  [pre/leave] in_len=8 out_len=9 in=802f000002010000 out=0100004a0000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x004A(主页/Home)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=d429000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=d429000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=4 目标 IOCTL 调用=4
+  [pre/enter] in_len=8 out_len=9 in=3c3d000002010000 out=0100004a0000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x004A(主页/Home)']
+  [pre/leave] in_len=8 out_len=9 in=3c3d000002010000 out=0100004a0000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x004A(主页/Home)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=1036000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=1036000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=bc24000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+  [pre/leave] in_len=8 out_len=9 in=bc24000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=402f000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=402f000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=443e000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+  [pre/leave] in_len=8 out_len=9 in=443e000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=a02b000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=a02b000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=10 目标 IOCTL 调用=10
+  [pre/enter] in_len=8 out_len=9 in=681c000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))']
+  [pre/leave] in_len=8 out_len=9 in=681c000002010000 out=010000280000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0028(确定/OK (Enter))'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=bc24000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=bc24000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+
+>>> 阶段 B：目标三键。请依次按：返回 2-3 次，音量+ 2-3 次，音量- 2-3 次。  时长 16 秒
+  [pre/enter] in_len=8 out_len=9 in=dc22000002010000 out=010000f10000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x00F1(返回 (Back)          ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=dc22000002010000 out=010000f10000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x00F1(返回 (Back)          ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=443e000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=443e000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=b031000002010000 out=010000f10000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x00F1(返回 (Back)          ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=b031000002010000 out=010000f10000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x00F1(返回 (Back)          ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=1440000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=1440000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=16 目标 IOCTL 调用=16
+  [pre/enter] in_len=8 out_len=9 in=6036000002010000 out=010000f10000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x00F1(返回 (Back)          ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=6036000002010000 out=010000f10000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x00F1(返回 (Back)          ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=702c000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=702c000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=9c3b000002010000 out=010000800000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0080(音量+ (Volume Up)  ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=9c3b000002010000 out=010000800000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0080(音量+ (Volume Up)  ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=c81f000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=c81f000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=9824000002010000 out=010000800000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0080(音量+ (Volume Up)  ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=9824000002010000 out=010000800000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0080(音量+ (Volume Up)  ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=8027000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=8027000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=603e000002010000 out=010000800000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0080(音量+ (Volume Up)  ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=603e000002010000 out=010000800000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0080(音量+ (Volume Up)  ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=9c3b000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=9c3b000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=c81f000002010000 out=010000810000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0081(音量- (Volume Down) ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=c81f000002010000 out=010000810000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0081(音量- (Volume Down) ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=ac23000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=ac23000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=f80e000002010000 out=010000810000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0081(音量- (Volume Down) ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=f80e000002010000 out=010000810000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0081(音量- (Volume Down) ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=8027000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=8027000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=5c34000002010000 out=010000810000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0081(音量- (Volume Down) ← 目标)']
+  [pre/leave] in_len=8 out_len=9 in=5c34000002010000 out=010000810000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=['0x0081(音量- (Volume Down) ← 目标)'] out_changed=False
+  [pre/enter] in_len=8 out_len=9 in=bc1b000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[]
+  [pre/leave] in_len=8 out_len=9 in=bc1b000002010000 out=010000000000000000 caller=KERNELBASE.dll+0x3f723 report_id=0x01 usage=[] out_changed=False
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=30 目标 IOCTL 调用=30
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=30 目标 IOCTL 调用=30
+
+>>> 阶段 post：收尾。请停止按键。  时长 4 秒
+  [心跳] phase=pre NtDeviceIoControlFile 总调用=30 目标 IOCTL 调用=30
+
+=== 判定 ===
+命中 IOCTL 0x80018483 的调用次数: 0
+  输入长度分布: {}   输出长度分布: {}   （参考实现判据: in=8 / out=9）
+判定: tap_not_verified
+说明: 钩子生效但该 IOCTL 在本机未出现——可能 Windows/驱动链版本不同，
+      需要在 onEnter 打印 8 字节输入的前 6 字节来反查 operation/selector。
+      （本轮已按参考判据全量转储，可直接在日志里按 in 长度检索。）

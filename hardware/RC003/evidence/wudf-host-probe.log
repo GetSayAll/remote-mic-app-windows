@@ -1,0 +1,22 @@
+=== RC003 WUDF 宿主探测（只读）===
+时间: 2026-09-23T10:34:10
+
+带 WUDFDiagnosticInfo 的实例总数: 6
+其中命中 RC003 硬件 token 的实例: 1
+
+--- RC003 宿主 ---
+  instance=9&3aacf7b9&0&0055  HostPid=32684 (0x7fac)  exe=WUDFHost.exe  open_denied=True
+宿主 PID 集合: [32684]
+说明: WUDFHost 由驱动管理器启动、通常位于 session 0；普通权限对其OpenProcess 返回 err=5 属预期，也正说明注入必须由提权助手执行。
+
+--- 宿主成员核对 ---
+  HostPid=32684: 总成员 1，其中 RC003 成员 1
+      [RC003] BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>
+
+=== 判定 ===
+  HostPid=32684: exclusive_rc003_host
+
+结论解读:
+  - exclusive_rc003_host → 参考实现的简单绑定路径在本机适用；
+  - shared_host → 本机该宿主还承载其它设备，参考实现需要额外的来源核验路径。
+  - 本探针不做注入，不代表 tap 已可用；实际拦截仍需提权注入 + 真机复验。
