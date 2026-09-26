@@ -30,7 +30,7 @@
 
 ## 用例一：首次连接
 
-1. 只配对 RC001，启动无线麦并打开“连接与语音”。
+1. 只配对 RC001，启动无线麦并打开“连接”。
 2. 点击扫描，选择 RC001 并连接。
 3. 确认界面显示“小米蓝牙遥控器 2（RC001）”。
 4. 断开并移除 RC001 配对，改为只配对 RC003，重复扫描和连接。
@@ -180,7 +180,7 @@
 1. 以 `runtime-simulation` Cargo feature 和 `VITE_SAYALL_RUNTIME_SIMULATION=1` 构建专用测试程序；普通构建不得包含仿真前端入口或仿真专用 Tauri command。
 2. 在 `windows-latest` 启动该程序，并设置唯一的运行报告路径；不得向真实桌面发送 SendInput，也不得尝试扫描真实 BLE、音频或 HID 设备。
 3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、首次检测并自动选择唯一仿真 CABLE Input、渲染 RC001/RC003 扫描结果、连接 RC001、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
-4. 依次打开按键、统计、权限、关于和连接与语音页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`。
+4. 依次打开按键、统计、权限、关于和连接页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`。
 5. 通过测试专用 command 驱动纯 Rust ATVV 管线完成首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN`，确认得到 240 个采样、generation 为 1、连接和音频均回到 ready。
 6. 停止 Raw Input 并断开，确认最终快照为 `rawInput.phase = stopped` 和 `connection.phase = disconnected`；程序写入报告并自行以成功退出码结束。
 

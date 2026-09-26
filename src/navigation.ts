@@ -11,7 +11,7 @@ export interface NavigationItem {
 
 export const navigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
-  { id: "connection", label: "连接与语音", icon: "link" },
+  { id: "connection", label: "连接", icon: "link" },
   { id: "permissions", label: "权限", icon: "shield" },
   { id: "about", label: "关于", icon: "info" },
 ];
@@ -62,6 +62,25 @@ export function detectReloadRecovery(now = Date.now()): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Ctrl+W：关闭主窗口快捷键（2026-09-26）。命中即隐藏到托盘，与点标题栏“X”同义。
+ *
+ * 带 Alt/Shift/Meta 一律不算：Ctrl+Alt+W、Ctrl+Shift+W（浏览器里是“关闭所有
+ * 标签页/窗口”）与 Cmd+W 都不该让本窗口消失。只收 Ctrl 是为了避免与 Windows
+ * 其它组合键抢语义。key 用小写归一，覆盖 Ctrl 与字母键大小写/输入法切层差异。
+ */
+export function isWindowCloseAccelerator(event: {
+  key: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}): boolean {
+  if (event.altKey || event.shiftKey || event.metaKey) return false;
+  if (!event.ctrlKey) return false;
+  return event.key.toLowerCase() === "w";
 }
 
 /** WebView2 默认把 F5/Ctrl+R 当浏览器刷新键（渲染进程重载在用户侧表现为

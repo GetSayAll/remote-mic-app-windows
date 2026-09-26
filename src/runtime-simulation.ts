@@ -64,11 +64,11 @@ async function openPage(label: string, heading = label): Promise<void> {
 }
 
 async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
-  // 应用默认打开"按键"页（对齐 Mac 页序），先导航到连接与语音完成连接旅程。
-  await openPage("连接与语音");
+  // 应用默认打开"按键"页（对齐 Mac 页序），先导航到连接页完成连接旅程。
+  await openPage("连接");
   await waitFor(
-    () => (document.querySelector("h1")?.textContent?.trim() === "连接与语音" ? true : null),
-    "连接与语音首页",
+    () => (document.querySelector("h1")?.textContent?.trim() === "连接" ? true : null),
+    "连接首页",
   );
   const runtime = await getRuntimeSnapshot();
   assert(runtime.platform.platform === "windows-ci-simulation", "应用未使用 Windows CI 仿真后端");
@@ -211,7 +211,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(!document.querySelector('[role="alert"]'), "恢复系统外观后显示错误");
   steps.push("关于页深色/系统外观经 Windows WebView、Tauri capability 与设置持久化闭环");
 
-  await openPage("连接与语音");
+  await openPage("连接");
   steps.push("五个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
   const voice = await invoke<PlatformSnapshot>("run_runtime_simulation_voice_session");

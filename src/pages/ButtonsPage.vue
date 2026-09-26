@@ -1275,16 +1275,18 @@ onUnmounted(() => {
         <section v-for="group in PRESET_GROUPS" :key="group.label" class="action-section">
           <h4 class="action-section-title">{{ group.label }}</h4>
           <div class="preset-grid">
+            <!-- 芯片显示实际按键组合（组合在不同 App 里语义不同，功能描述
+                 只作悬停提示，避免把 Ctrl+C 一类写成"复制"造成误判）。 -->
             <button
               v-for="preset in group.items"
               :key="preset.label"
               class="chip"
               :class="{ selected: isActivePreset(preset.keys) }"
               type="button"
-              :title="chordLabel({ keys: preset.keys })"
+              :title="preset.label"
               @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
             >
-              {{ preset.label }}
+              {{ chordLabel({ keys: preset.keys }) }}
             </button>
           </div>
         </section>

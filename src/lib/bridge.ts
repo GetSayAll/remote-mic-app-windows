@@ -34,6 +34,20 @@ export interface AudioEndpoint {
   isVirtualCableCandidate: boolean;
 }
 
+/**
+ * 界面上的“推荐”判据：只有 VB-CABLE 标准包提供的 CABLE Input
+ * （渲染端点友好名 `CABLE Input (VB-Audio Virtual Cable)`）值得推荐给
+ * 微信输入法等语音工具作麦克风来源。
+ *
+ * 后端的 `isVirtualCableCandidate` 是更宽的候选判定（含 VB-CABLE A/B 的
+ * CABLE-A/B Input 与 CI 仿真端点），只用于自动选择与安装检测，不足以
+ * 决定推荐标记；两者刻意分开，避免给非标准端点打上推荐。
+ */
+export function isRecommendedVoiceEndpoint(endpoint: AudioEndpoint): boolean {
+  const name = endpoint.name.trim().toLowerCase();
+  return name.includes("cable input") && name.includes("vb-audio");
+}
+
 export interface AudioSnapshot {
   phase: AudioPhase;
   selectedEndpointId: string | null;
@@ -459,6 +473,19 @@ export function formatDiagnosticReport(
 export async function openLogDirectory(): Promise<string> {
   if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法打开日志目录");
   return invoke<string>("open_log_directory");
+}
+
+/**
+ * Ctrl+W：关闭主窗口——隐藏到托盘驻留，语义与点标题栏“X”完全一致。
+ *
+ * 有意**不**调用 `@tauri-apps/api` 的 `getCurrentWindow().close()`：那条路径在
+ * Windows 上究竟是触发 `CloseRequested`（→ Rust 侧 `prevent_close` + hide，
+ * 即隐藏到托盘）还是直接销毁窗口，取决于 tao 的平台实现细节，跨版本可能静默
+ * 改变语义；这里显式调 Rust 命令，动作与“X”的收尾是同一行代码。
+ */
+export async function hideMainWindow(): Promise<void> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法关闭窗口");
+  await invoke("hide_main_window");
 }
 
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {
@@ -997,7 +1024,9 @@ export function shortcutCapability(
 
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
-  backspace: "退格",
+  // 用厂商印在键帽上的英文名，避免“退格/删除”在中文里被混为一谈。
+  backspace: "Backspace",
+  home: "Home",
   page_up: "Page Up",
   page_down: "Page Down",
   end: "End",

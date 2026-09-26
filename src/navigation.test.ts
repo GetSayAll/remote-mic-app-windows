@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
+  isWindowCloseAccelerator,
   loadPersistedPage,
   navigationItems,
   persistActivePage,
@@ -82,5 +83,36 @@ describe("browser reload accelerator blocking", () => {
     expect(isBrowserReloadAccelerator({ key: "a", ctrlKey: true, metaKey: false })).toBe(false);
     expect(isBrowserReloadAccelerator({ key: "F6", ctrlKey: false, metaKey: false })).toBe(false);
     expect(isBrowserReloadAccelerator({ key: "F5", ctrlKey: true, metaKey: false })).toBe(true);
+  });
+});
+
+describe("window close accelerator (Ctrl+W)", () => {
+  function press(overrides: Partial<Parameters<typeof isWindowCloseAccelerator>[0]> = {}) {
+    return isWindowCloseAccelerator({
+      key: "w",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      ...overrides,
+    });
+  }
+
+  it("matches Ctrl+W regardless of the letter case", () => {
+    expect(press({ ctrlKey: true })).toBe(true);
+    expect(press({ ctrlKey: true, key: "W" })).toBe(true);
+  });
+
+  it("requires Ctrl: Cmd+W alone stays a plain keystroke here", () => {
+    expect(press()).toBe(false);
+    expect(press({ metaKey: true })).toBe(false);
+  });
+
+  it("never claims combinations that mean something else on Windows", () => {
+    expect(press({ ctrlKey: true, altKey: true })).toBe(false);
+    // Ctrl+Shift+W 在浏览器语义里是"关闭所有窗口"——误判会让用户丢掉全部上下文。
+    expect(press({ ctrlKey: true, shiftKey: true })).toBe(false);
+    expect(press({ ctrlKey: true, key: "q" })).toBe(false);
+    expect(press({ ctrlKey: true, key: "F4" })).toBe(false);
   });
 });

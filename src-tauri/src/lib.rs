@@ -130,6 +130,39 @@ fn open_log_directory() -> Result<String, String> {
     }
 }
 
+/// Ctrl+W：关闭主窗口——与点标题栏"X"走同一动作，`window.hide()` 后由托盘驻留。
+///
+/// 为什么前端不直接调 `@tauri-apps/api` 的 `getCurrentWindow().close()`：那条路径
+/// 在 Windows 上究竟会触发 `CloseRequested`（走到本文件 `on_window_event` 的
+/// `prevent_close` + hide，即隐藏到托盘）还是直接销毁窗口，取决于 tao 的平台实现
+/// 细节，跨版本可能静默改变语义；而本应用的窗口语义要求"关闭"恒等于托盘驻留、
+/// 不动 BLE/语音链路。这里显式调 `window.hide()`，动作与"X"的收尾是同一行代码。
+///
+/// 日志只落结果、可见性与耗时，不含窗口标题或任何用户信息。
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let Some(window) = app.get_webview_window("main") else {
+        sayall_windows::gatt_note(
+            "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result=failed error_domain=window error_code=not_found retryable=true reason=main_window_missing"
+                .to_owned(),
+        );
+        return Err("主窗口不存在".to_owned());
+    };
+    // `hide()` 的返回值只说明"消息已投递"，不代表窗口真的隐藏了（见
+    // `on_window_event` 的同款注释）：同时记录前后 tao 报告的可见性，
+    // `visible_after=true` 即为"按了却没藏起来"的直接否证证据。
+    let visible_before = window.is_visible().unwrap_or(true);
+    let result = window.hide().map_err(|error| error.to_string());
+    let visible_after = window.is_visible().unwrap_or(true);
+    sayall_windows::gatt_note(format!(
+        "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result={} visible_before={visible_before} visible_after={visible_after} elapsed_ms={}",
+        if result.is_ok() { "passed" } else { "failed" },
+        started.elapsed().as_millis()
+    ));
+    result
+}
+
 #[tauri::command]
 async fn scan_paired_remotes(
     state: tauri::State<'_, AppState>,
@@ -1520,6 +1553,7 @@ pub fn run() {
         get_runtime_snapshot,
         get_diagnostic_report,
         open_log_directory,
+        hide_main_window,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -1567,6 +1601,7 @@ pub fn run() {
         get_runtime_snapshot,
         get_diagnostic_report,
         open_log_directory,
+        hide_main_window,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,

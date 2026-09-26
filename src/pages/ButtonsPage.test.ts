@@ -571,11 +571,30 @@ describe("buttons mapping page", () => {
     expect(chipState(wrapper, "Enter")).toBe(false);
     expect(chipState(wrapper, "Home")).toBe(false);
     expect(chipState(wrapper, "空格")).toBe(false);
-    expect(chipState(wrapper, "粘贴")).toBe(false);
+    expect(chipState(wrapper, "Ctrl + V")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
     // 武装族按键显示冷首按原生副作用提示（信息性，不门控）。
     expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
+  });
+
+  it("预设芯片显示实际按键组合，功能描述退为悬停提示", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "电源", 0);
+    const chips = wrapper.findAll(".mapping-editor .chip");
+    const texts = chips.map((chip) => chip.text());
+
+    expect(texts).toContain("Ctrl + C");
+    expect(texts).toContain("Alt + Tab");
+    expect(texts).toContain("Backspace");
+    expect(texts).toContain("左 Win + Shift + S");
+    expect(texts).not.toContain("复制");
+    expect(texts).not.toContain("退格");
+    expect(texts).not.toContain("截图");
+    expect(chips.find((chip) => chip.text() === "Ctrl + C")!.attributes("title")).toBe("复制");
+    expect(chips.find((chip) => chip.text() === "Alt + Tab")!.attributes("title")).toBe(
+      "切换窗口",
+    );
   });
 
   it("全开放：确定·双击与 TV 所有操作可配 + 各自的单响应提示", async () => {
@@ -598,7 +617,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "左", 0);
     expect(chipState(wrapper, "←")).toBe(false);
-    expect(chipState(wrapper, "退格")).toBe(false);
+    expect(chipState(wrapper, "Backspace")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
 
@@ -615,7 +634,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "电源", 2);
     expect(chipState(wrapper, "Esc")).toBe(false);
-    expect(chipState(wrapper, "截图")).toBe(false);
+    expect(chipState(wrapper, "左 Win + Shift + S")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");

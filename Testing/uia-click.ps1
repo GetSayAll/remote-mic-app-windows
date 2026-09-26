@@ -1,6 +1,6 @@
 ﻿# UIA 点击 WebView 内按钮 + 截图（自测用）。
 # 用法:
-#   .\uia-click.ps1 -Text "连接与语音"          # 点击包含该文本的按钮
+#   .\uia-click.ps1 -Text "连接"          # 点击包含该文本的按钮
 #   .\uia-click.ps1 -Text "单击" -Index 2       # 点击第 N 个匹配（跳过前 Index-1 个）
 param(
     [Parameter(Mandatory = $true)][string]$Text,
