@@ -30,10 +30,28 @@
      "请先松开所有按键"提示，收到第一条边沿即视为已武装、清除提示。
   2. 录入会话期间 bump 定时器切到 200ms（停止恢复 10s），持续保持本钩子在
      LL 链头，把外部钩子重建的竞态窗口压到单个按键间隔以下。
+- **二次定位（同日晚，本机探针实证）——定时 bump 从未执行过**：
+  - 真机日志（preheld 修复版）：5 次会话 `preheld_count=0` 但 3 次零边沿、1 次只剩左 Ctrl；
+    新增诊断字段显示 `keys_seen` 不涨（边沿根本没到钩子）且 **`timer_bumps=0`**
+    （进程运行约 28 分钟、两个定时器从未触发）。
+  - 隔离实证（`cargo run --example hook_bump_probe`）：最小消息循环 + `SetTimer(None, 0x6A71, 200ms, None)`，
+    `set_timer_ok=true` 但 12 秒内 WM_TIMER 计数为 0；**按 SetTimer 返回值（系统分配的
+    id）匹配后同一场景 ticks=63**。根因：Win32 文档明确 `hWnd=NULL` 的线程定时器
+    **忽略传入的 nIDEvent**，WM_TIMER 的 wParam 是系统分配的 id——原按传入 id 匹配
+    的分支永不命中，定时消息全部落入 `_ => {}` 丢弃。
+  - 后果：链头 bump 只在录入开始的那一瞬间执行过一次；点击"修改快捷键"引起的焦点
+    变化让微信输入法重建钩子抢回链头后，整段会话都压在录入钩子之前——它的和弦键
+    （用户配置的组合）被它吞掉（"只剩第一个键"），其他键正常透传（"偶发完整成功"）。
+    key_suppressor 的定期 bump 是同款缺陷（同样从未执行）。
+  - 修复：按 SetTimer 返回值匹配 WM_TIMER；录入期间改周期时先 KillTimer 旧 id 再
+    SetTimer（线程定时器每次调用会分配新 id，不能靠传入 id 覆盖）；key_suppressor
+    同款修正。另加"每投递一条录入边沿即异步重抢链头"（PostThreadMessage，不阻塞
+    钩子线程）——组合第一个键到达后数十毫秒内必然回到链头，完成键不再被抢吞。
 - 验证：`cargo test --workspace` passed（新增 `preheld_scan_*` 两例纯函数测试，
   非 Windows CI 亦可运行）；前端 vitest 112 passed（新增 preheld 提示与武装后
   完整落盘回归）；`vue-tsc --noEmit`、双 `cargo check` passed；本地 NSIS 包构建 +
-  双次静默安装 + 三二进制哈希核对通过。**真机复测 deferred**：见下。
+  双次静默安装 + 三二进制哈希核对通过；**定时器缺陷由本机探针 `hook_bump_probe`
+  直接实证（修前 ticks=0 / 修后 200ms 定时器 12s 内 63 次）**。真机复测 deferred。
 - 真机复测要点：启动应用 → 连接页"修改快捷键" → **先松开所有按键**（若提示
   "检测到仍有按住的按键"则先松手）→ 按左 Ctrl + 左 Win → 松开 → 应保存
   `["left_control","left_windows"]`。日志 `shortcut_capture action=start` 行含

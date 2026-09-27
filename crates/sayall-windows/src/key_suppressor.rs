@@ -243,7 +243,10 @@ mod windows_impl {
                 return;
             }
             HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::Relaxed);
-            SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
+            // hWnd=NULL 的线程定时器忽略传入 nIDEvent（Win32 文档），WM_TIMER 的
+            // wParam 是系统分配的 id：必须按 SetTimer 返回值匹配，否则定期链头
+            // bump 永不执行（2026-09-27 key_gate 侧探针实证同款缺陷）。
+            let bump_timer = SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
             SWALLOW_MASTER.store(true, Ordering::Relaxed);
 
             let mut message = MSG::default();
@@ -251,7 +254,7 @@ mod windows_impl {
                 match message.message {
                     WM_QUIT => break,
                     WM_HOOK_BUMP => bump_to_chain_head(&mut current),
-                    WM_TIMER if message.wParam.0 as usize == BUMP_TIMER_ID => {
+                    WM_TIMER if message.wParam.0 as usize == bump_timer => {
                         bump_to_chain_head(&mut current)
                     }
                     _ => {}

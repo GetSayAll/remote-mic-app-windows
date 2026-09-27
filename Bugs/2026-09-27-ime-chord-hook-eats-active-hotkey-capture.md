@@ -15,7 +15,7 @@
 - 根因：微信输入法等目标会安装自己的 `WH_KEYBOARD_LL` 钩子并在输入焦点变化时重建；LL 钩子按"最新安装在最前"调用，其语音和弦判定先于本应用 key_gate 录入钩子看到物理边沿。当录入组合恰好等于输入法语音和弦时，完成键（左 Win）的 DOWN/UP 整对被输入法吞掉，key_gate 完全观察不到，前端只能按先松开的单个修饰键落盘。key_gate 自身录入分支（成对吞 + 投递 webview）无缺陷——事件根本没到达。
 - 修复：录入开始时把 key_gate 钩子提升到 LL 链头（`request_hook_bump`：先挂新钩再卸旧钩，无吞键空窗，Voice_VibeCoding 同款技巧，key_suppressor 已有先例）。录入期间本钩子先于所有外部钩子看到物理边沿，成对吞下并投递录入通道；输入法在录入期间看不到任何按键，也不会误触发语音。`set_shortcut_capture_active(true)` 内自动发起；lib.rs 启动日志追加 `hook_bump=requested` 与 `hook_bump_count` 便于归因。仅改 `key_gate.rs` 与 `src-tauri/src/lib.rs` 日志行；录入协议（`capture_key_code`、配对规则）与前端零改动。
 - 验证：`cargo test --workspace` passed（新增 `capture_start_requests_hook_bump_and_gate_off_refused`：bump 请求可观测、门控未就绪时录入失败且不发起 bump）；`cargo fmt --all` 无漂移；`cargo check --workspace` 与 `cargo check -p sayall-windows-app --features runtime-simulation` passed。**真机复测 deferred**：需安装包含本修复的构建后，在快捷键=左 Alt+左 Win 状态下重录该组合确认四边沿全部 `phase=observed` 且保存完整。
-- 残留风险（接受并记录）：若外部钩子在录入开始之后、按键之前重新安装到链头（本机实测未发生：输入焦点变化发生在点击"修改快捷键"时，早于录入开始的 bump），边沿仍可能被抢。若真机复现，后续在录入会话期间启用短周期 bump。
+- 残留风险（接受并记录）：若外部钩子在录入开始之后、按键之前重新安装到链头（本机实测未发生：输入焦点变化发生在点击"修改快捷键"时，早于录入开始的 bump），边沿仍可能被抢。**2026-09-27 晚更新**：该竞态实为"定期链头 bump 从未执行"所致——`hWnd=NULL` 的线程定时器忽略传入 nIDEvent，原按传入 id 匹配 WM_TIMER 的分支永不命中（见 Bugs\2026-09-27-capture-preheld-keys-block-recording.md 二次定位）；已修正为按 SetTimer 返回值匹配，并新增"每投递一条边沿即重抢链头"。
 - 隐私检查：日志仅含虚拟键码、边沿方向与计数，无设备身份、个人路径、语音内容或凭据。
 - 边界（属既有语义，本次不改）：
   - "分次输入"（先按 Alt 松开、再按 Win）会在 Alt 松开时即落盘为 Alt（见同日 Bugs\2026-09-27-voice-hotkey-capture-drops-modifier.md）。

@@ -1068,6 +1068,10 @@ fn register_shortcut_capture_events(app: tauri::AppHandle) {
         .name("sayall-shortcut-capture-events".to_owned())
         .spawn(move || {
             while let Ok(edge) = receiver.recv() {
+                // 每投递一条边沿就异步重抢 LL 链头（PostThreadMessage，不阻塞本线程）：
+                // 组合的第一个键进来后数十毫秒内本钩子必然回到链头，完成键不会再
+                // 被外部钩子（微信输入法等）抢吞（2026-09-27 真机"只剩第一个键"根因）。
+                sayall_windows::key_gate::request_hook_bump();
                 sayall_windows::gatt_note(format!(
                     "shortcut_capture action=edge phase=observed key={:?} edge={} delivery=webview",
                     edge.key,

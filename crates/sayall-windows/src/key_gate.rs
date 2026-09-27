@@ -208,8 +208,8 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+        CallNextHookEx, DispatchMessageW, GetMessageW, KillTimer, PeekMessageW, PostThreadMessageW,
+        SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
         LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT,
         WM_TIMER,
     };
@@ -633,7 +633,12 @@ mod windows_impl {
                 return;
             }
             HOOK_THREAD_ID.store(GetCurrentThreadId() as u64, Ordering::Relaxed);
-            SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
+            // hWnd=NULL 的线程定时器**忽略传入的 nIDEvent**（Win32 文档："If this
+            // parameter is NULL ... the nIDEvent parameter is ignored"），WM_TIMER
+            // 的 wParam 是系统分配的 id。必须按 SetTimer 的返回值匹配——按传入
+            // id 匹配会让定时 bump 永不执行（2026-09-27 hw 探针实证：传入 0x6A71
+            // 时 12s 内 ticks=0；按返回值匹配后同一场景 ticks=63）。
+            let mut bump_timer = SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
             GATE_ACTIVE.store(true, Ordering::Relaxed);
 
             let mut message = MSG::default();
@@ -643,12 +648,15 @@ mod windows_impl {
                     WM_HOOK_BUMP => bump_to_chain_head(&mut current),
                     WM_CAPTURE_BUMP => {
                         // 录入期间短周期保持链头 / 停止时恢复常驻周期
-                        //（wParam 携带周期毫秒数，见 WM_CAPTURE_BUMP 文档）。
-                        unsafe {
-                            SetTimer(None, BUMP_TIMER_ID, message.wParam.0.max(1) as u32, None);
+                        //（wParam 携带周期毫秒数）。旧定时器按实际 id 杀掉，
+                        // 避免系统分配新 id 后残留多个定时器叠加。
+                        if bump_timer != 0 {
+                            KillTimer(None, bump_timer);
                         }
+                        bump_timer =
+                            SetTimer(None, BUMP_TIMER_ID, message.wParam.0.max(1) as u32, None);
                     }
-                    WM_TIMER if message.wParam.0 as usize == BUMP_TIMER_ID => {
+                    WM_TIMER if message.wParam.0 as usize == bump_timer => {
                         TIMER_BUMPS.fetch_add(1, Ordering::Relaxed);
                         bump_to_chain_head(&mut current)
                     }
