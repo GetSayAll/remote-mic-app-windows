@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
+mod accent;
 mod diagnostics;
 mod platform;
 mod rc003_task;
@@ -64,6 +65,36 @@ impl std::fmt::Debug for AppState {
                 },
             )
             .finish()
+    }
+}
+
+/// 读取 Windows 系统强调色（设置 > 个性化 > 颜色）。前端用返回的 RGB 派生
+/// `--accent*` 变量族，让选中态等 UI 跟随系统主题色而非硬编码品牌色。
+/// 读取在一次性 STA 线程上进行（UISettings 要求 COM apartment）；失败返回
+/// None，前端保留 styles.css 内置默认色，不阻塞启动。
+#[tauri::command]
+async fn get_system_accent_color() -> Option<accent::AccentColor> {
+    let result = tauri::async_runtime::spawn_blocking(accent::read_system_accent_color).await;
+    match result {
+        Ok(color) => {
+            sayall_windows::gatt_note(format!(
+                "accent_color action=frontend_read phase=completed terminal_result={} reason={}",
+                if color.is_some() { "passed" } else { "failed" },
+                if color.is_some() {
+                    "accent_read"
+                } else {
+                    "accent_unavailable"
+                },
+            ));
+            color
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(format!(
+                "accent_color action=frontend_read phase=completed terminal_result=failed error_domain=task error_code=join_failed retryable=true reason=blocking_task_panicked"
+            ));
+            let _ = error;
+            None
+        }
     }
 }
 
@@ -1495,6 +1526,27 @@ pub fn run() {
             register_button_events(&platform, app.handle().clone());
             register_shortcut_capture_events(app.handle().clone());
 
+            // 系统强调色实时跟随（2026-09-27）：Rust 侧 message-only 窗口监听
+            // WM_SETTINGCHANGE("ImmersiveColorSet")，去抖后经事件推送前端重新
+            // 派生 --accent* 变量；用户在系统设置里换强调色无需重启应用。注册
+            // 失败只记日志：实时跟随不可用但首次读取仍有效，不影响语音链路。
+            {
+                let accent_handle = app.handle().clone();
+                let watcher_registered =
+                    accent::spawn_change_watcher(Arc::new(move |color| {
+                        let _ = accent_handle.emit("system-accent-changed", color);
+                    }));
+                sayall_windows::gatt_note(format!(
+                    "accent_color action=watcher_register phase=completed terminal_result={} reason={}",
+                    if watcher_registered { "passed" } else { "failed" },
+                    if watcher_registered {
+                        "watcher_started"
+                    } else {
+                        "watcher_unavailable"
+                    },
+                ));
+            }
+
             // Raw Input 监听自愈：启动即尝试，失败（遥控器休眠/未连接）进入
             // 10 秒重试循环；用户在按键页显式停止（Stopped）时不重试。
             spawn_raw_input_supervisor(Arc::clone(&platform));
@@ -1552,6 +1604,7 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
         hide_main_window,
@@ -1600,6 +1653,7 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
         hide_main_window,

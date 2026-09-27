@@ -1,6 +1,7 @@
 import { createApp } from "vue";
 import App from "./App.vue";
 import { isTauriRuntime } from "./lib/bridge";
+import { initializeAccentColor } from "./lib/accent";
 import { initializeTheme } from "./lib/theme";
 import { installFrontendDiagnostics, reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { installFocusModalityTracking } from "./lib/focus-modality";
@@ -9,6 +10,11 @@ import "./styles.css";
 installFrontendDiagnostics();
 // 初始化调用在 Vue 挂载前同步应用首帧主题；异步读取设置不阻塞主界面。
 void initializeTheme();
+// 系统强调色：拉取一次并注入 --accent* 变量；后续系统侧变化由
+// "system-accent-changed" 事件实时推送（Rust WM_SETTINGCHANGE 监听），
+// 用户在系统设置里换强调色无需重启应用。读取失败时保留 styles.css
+// 内置默认色，不影响启动。
+void initializeAccentColor();
 try {
   const app = createApp(App);
   app.config.errorHandler = () => {
