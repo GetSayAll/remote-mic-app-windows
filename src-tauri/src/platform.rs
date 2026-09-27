@@ -56,10 +56,6 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         callback: sayall_windows::button_mapping::ButtonGestureCallback,
     );
 
-    /// 全按键支持开关变化时同步平台侧门控状态（key_gate 的 enabled 位）。
-    /// 必须走与映射更新相同的 `set_mappings` 路径，确保吞键配置同步生效。
-    fn set_enhanced_capture_enabled(&self, enabled: bool);
-
     /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
     /// （`ble_session_cleanup` 落盘）后才返回。
     ///
@@ -187,10 +183,6 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
         WindowsPlatform::set_button_mappings(self, mappings)
-    }
-
-    fn set_enhanced_capture_enabled(&self, enabled: bool) {
-        WindowsPlatform::set_enhanced_capture_enabled(self, enabled)
     }
 
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot {
@@ -568,12 +560,6 @@ mod simulation {
             _callback: sayall_windows::button_mapping::ButtonGestureCallback,
         ) {
             // CI 仿真不产生真实手势。
-        }
-
-        fn set_enhanced_capture_enabled(&self, enabled: bool) {
-            let mut mappings = self.button_mappings();
-            mappings.enabled = enabled;
-            self.set_button_mappings(mappings);
         }
 
         fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {

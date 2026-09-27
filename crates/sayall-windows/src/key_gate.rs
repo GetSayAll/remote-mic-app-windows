@@ -924,11 +924,10 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     arm_button, capture_diagnostics_summary, configure, decide, enhanced_owned_mask,
-    hook_bump_request_count, is_gate_thread_alive, leaked_down_count, listener_active,
-    request_hook_bump, set_edge_sink, set_enhanced_owned_mask, set_listener_active,
-    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
-    set_shortcut_capture_sink, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
-    HOLD_SWALLOWED_ALL,
+    is_gate_thread_alive, leaked_down_count, listener_active, set_edge_sink,
+    set_enhanced_owned_mask, set_listener_active, set_persistent_mask, set_remote_connected,
+    set_shortcut_capture_active, set_shortcut_capture_sink, swallowed_edge_count, KeyGate,
+    HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]

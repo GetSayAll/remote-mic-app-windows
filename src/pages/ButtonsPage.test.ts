@@ -260,6 +260,9 @@ function bridgeSnapshot(phase: Rc003BridgeSnapshot["phase"]): Rc003BridgeSnapsho
     watchdogReleaseTotal: 0,
     pressedUsages: [],
     lastRxAgeMs: null,
+    targetGeneration: 0,
+    targetUsages: [],
+    ownedUsages: [],
   };
 }
 
