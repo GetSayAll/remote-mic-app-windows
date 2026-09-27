@@ -371,16 +371,14 @@ fn observe_registered_foreground(
     allow_pid_fallback: bool,
 ) -> bool {
     // 冷启动时窗口创建晚于激活契约返回。等待窗口出现并以有限次数尝试恢复/前置；
-    // 每次都由 GetForegroundWindow + PID 读回确认，而不是相信 API 返回值。
+    // 每次都由 GetForegroundWindow 读回所选主窗口，而不是相信 API 返回值或 PID。
     for delay_ms in [0, 50, 100, 250, 500, 1000] {
         if delay_ms != 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
         if crate::app_launcher::activate_application_window(app_user_model_id)
             || executable_path.is_some_and(crate::app_launcher::activate_executable_path)
-            || (allow_pid_fallback
-                && (crate::app_launcher::process_is_foreground(pid)
-                    || crate::app_launcher::activate_process_window(pid)))
+            || (allow_pid_fallback && crate::app_launcher::activate_process_window(pid))
         {
             return true;
         }
