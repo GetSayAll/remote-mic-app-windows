@@ -37,14 +37,89 @@ use crate::send_input::KeyCode;
 use serde::Serialize;
 use std::sync::Arc;
 
+/// 录入边沿的来源。
+///
+/// `Real` = 物理按键事件本身；`Injected` = 外部钩子（微信输入法等）在
+/// “吞掉物理边沿 + 重放整个组合”后注入的副本。2026-09-27 真机实测：按住
+/// 说话快捷键 = 左 Ctrl + 左 Win 时，输入法吞掉完成键（左 Win）的物理边沿，
+/// 随后把整个组合以注入副本重放——录入通道能从注入副本里拿到左 Win，
+/// 因此注入副本必须被接受（见 `injected_edge_is_passthrough`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EdgeSource {
+    Real,
+    Injected,
+}
+
+impl EdgeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EdgeSource::Real => "real",
+            EdgeSource::Injected => "injected",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutCaptureEdge {
     pub key: KeyCode,
     pub is_pressed: bool,
+    pub source: EdgeSource,
 }
 
 pub type ShortcutCaptureCallback = Arc<dyn Fn(ShortcutCaptureEdge) + Send + Sync>;
+
+/// 录入事件准入裁决：该事件是否应当直接透传（不参与录入处理）。
+///
+/// - 非录入期的注入事件照旧透传——本应用自己的注入（遥控器按键映射、
+///   按住说话和弦）绝不能被自己吞掉。
+/// - **录入期内的注入事件必须参与录入**：它们是外部钩子“吞下 + 重放”的
+///   副本，是被吞掉的那半个组合的唯一可观测形式（2026-09-27 真机：左
+///   Ctrl + 左 Win 只录到左 Ctrl，而每会话恰好 4 条注入副本 = 输入法重放
+///   的整个两键组合）。此前按“防自吞”一律跳过注入副本，等于把完成键
+///   的边沿全部丢弃。
+pub fn injected_edge_is_passthrough(capture_active: bool, injected: bool) -> bool {
+    injected && !capture_active
+}
+
+/// 低级键盘钩子实际会报告的 VK 才参与录入 preheld 扫描：通用 VK
+/// （0x10/0x11/0x12）不会作为 vkCode 出现在钩子事件里（左右修饰键用专用
+/// VK 0xA0-0xA5/0x5B/0x5C），纳入扫描会让其"按下"标志永远等不到释放沿
+/// 清除，preheld 计数无法归零、录入永远无法武装。0x00-0x07 为鼠标/保留
+/// VK，不产生键盘事件，同理排除。
+pub fn is_hook_reported_vk(vk: u32) -> bool {
+    (0x08..=0xFF).contains(&vk) && !matches!(vk, 0x10 | 0x11 | 0x12)
+}
+
+/// 收集录入开始时已被按住的键（preheld）。`is_down` 注入按下状态探测，
+/// 纯函数供非 Windows CI 验证。返回（去重后的键列表，仍按住的键数量）；
+/// 后者驱动"preheld 全部松开后录入才开始投递边沿"的武装判定——preheld
+/// 键的边沿对录入不可见（防粘键：其 DOWN 已进 OS，UP 必须放行），若不
+/// 等它们松开，"按住中打开录入 + 按新组合"会被静默截断成半截组合落盘
+/// （2026-09-27 真机实测："只剩左 Ctrl"、大量零边沿会话）。
+pub fn collect_preheld_keys(mut is_down: impl FnMut(u32) -> bool) -> (Vec<KeyCode>, usize) {
+    let mut keys = Vec::new();
+    let mut pending = 0usize;
+    for vk in 0x08u32..=0xFF {
+        if !is_hook_reported_vk(vk) || !is_down(vk) {
+            continue;
+        }
+        if let Some(key) = capture_key_code(vk, 0, false) {
+            pending += 1;
+            keys.push(key);
+        }
+    }
+    (keys, pending)
+}
+
+/// 录入开始时的 preheld 键列表（`set_shortcut_capture_active(true)` 写入，
+/// 命令层取走后交给前端做"请先松开按键"提示）。
+static PREHELD_CAPTURE_DRAIN: std::sync::Mutex<Vec<KeyCode>> = std::sync::Mutex::new(Vec::new());
+
+pub fn take_preheld_capture_keys() -> Vec<KeyCode> {
+    std::mem::take(&mut *PREHELD_CAPTURE_DRAIN.lock().unwrap())
+}
 
 /// 低级键盘钩子的 VK/scan code → 持久化 KeyCode。保持为纯函数以便在
 /// 非 Windows CI 上验证录入协议；左右修饰键优先使用专用 VK，通用 VK
@@ -162,7 +237,7 @@ mod windows_impl {
     use crate::raw_input::{button_for_keyboard, ButtonEdge, RemoteButton, ALL_BUTTONS};
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, OnceLock};
     use std::thread::JoinHandle;
     use std::time::Instant;
@@ -170,10 +245,9 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
-        LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT,
-        WM_TIMER,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetWindowsHookExW,
+        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+        LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -194,11 +268,6 @@ mod windows_impl {
     /// 常见物理键 VK 不能直接归因，>4s 间隔的孤立首按泄漏仍是结构性残留
     /// （Helper 轨解决；同键映射的泄漏由映射引擎对冲，见 button_mapping.rs）。
     const ARM_GRACE_MS: u64 = 4_000;
-    /// 链头 bump 的线程消息（WM_APP 私有区，与 key_suppressor 错开）。
-    const WM_HOOK_BUMP: u32 = WM_APP + 0x61;
-    const BUMP_TIMER_ID: usize = 0x6A71;
-    const BUMP_TIMER_MS: u32 = 10_000;
-
     static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SHORTCUT_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SHORTCUT_CAPTURE_PREHELD: [AtomicBool; 256] = {
@@ -206,6 +275,11 @@ mod windows_impl {
         const FALSE: AtomicBool = AtomicBool::new(false);
         [FALSE; 256]
     };
+    /// 录入开始时仍被按住的 preheld 键数量（仅统计钩子会报告的键盘 VK）。
+    /// >0 期间录入"未武装"：物理按键照常成对吞下但不投递录入通道——
+    /// preheld 键的边沿对录入不可见，此时按下的新组合会被静默截断成
+    /// 半截组合（2026-09-27 真机实测根因之一）。
+    static PREHELD_PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static MAPPED_MASK: AtomicU64 = AtomicU64::new(0);
     /// 常驻抑制掩码（"遥控器优先"）：遥 online 期间无需武装直接吞。
@@ -224,8 +298,30 @@ mod windows_impl {
     };
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
-    /// 链头 bump 请求计数（功能点日志/测试观测：录入开始必须发起一次 bump）。
-    static HOOK_BUMP_REQUESTS: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间进入捕获处理器的键盘事件数（钩子健康度探针：会话内用户
+    /// 按键但该计数不涨 ⇒ 边沿根本没到本钩子，问题在钩子链位置/安装失败，
+    /// 而非投递门控）。
+    static CAPTURE_KEYS_SEEN: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间被接受的注入副本数（外部钩子"吞下 + 重放"的产物：微信
+    /// 输入法吞掉完成键的物理边沿后重放整个组合，注入副本是被吞键的唯一
+    /// 可观测形式——2026-09-27 真机每会话恰好 4 条 = 两键组合的重放）。
+    static CAPTURE_INJECTED_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间到达但**未能映射**成协议键的事件数，与其最后一次原始
+    /// vk/注入标记（`last_unmapped_injected`）——区分"边沿没到"与"边沿到了
+    /// 但被映射丢弃"（后者此前表现为静默零边沿，无法归因）。
+    static CAPTURE_UNMAPPED_SEEN: AtomicU64 = AtomicU64::new(0);
+    static LAST_UNMAPPED_VK: AtomicU64 = AtomicU64::new(0);
+    static LAST_UNMAPPED_INJECTED: AtomicU64 = AtomicU64::new(0);
+    /// 钩子收到的全部键盘回调数（含未激活录入时的每一键；健康度基线）与其中
+    /// 的注入事件数。用于区分"钩子没被系统调用"与"钩子被调用但事件被上层
+    /// 过滤/吞掉"（2026-09-27 真机：录入期 keys_seen 恒为 0，需外部注入对照）。
+    static HOOK_CALLS_TOTAL: AtomicU64 = AtomicU64::new(0);
+    static HOOK_CALLS_INJECTED: AtomicU64 = AtomicU64::new(0);
+    /// 链头 bump 成败与最后一次失败错误码（2026-09-27：SetWindowsHookExW
+    /// 失败此前静默保留旧钩，链位置问题不可见）。
+    static HOOK_BUMPS_OK: AtomicU64 = AtomicU64::new(0);
+    static HOOK_BUMPS_FAILED: AtomicU64 = AtomicU64::new(0);
+    static LAST_HOOK_ERROR: AtomicU64 = AtomicU64::new(0);
     /// 被吞键盘边沿的投递端（映射引擎注册；闭包形式避免模块间类型耦合）。
     static EDGE_SINK: OnceLock<Arc<dyn Fn(ButtonEdge) + Send + Sync>> = OnceLock::new();
     static SHORTCUT_CAPTURE_SINK: OnceLock<super::ShortcutCaptureCallback> = OnceLock::new();
@@ -346,6 +442,15 @@ mod windows_impl {
     }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 {
+            // 健康度基线：钩子被系统调用的每一次键盘回调（在 GATE_ACTIVE 判定之前），
+            // 与其中的注入事件数。用于外部注入对照实验区分"没被调用"与"被过滤"。
+            HOOK_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            let kb_probe = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            if kb_probe.flags.contains(LLKHF_INJECTED) {
+                HOOK_CALLS_INJECTED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         if code >= 0 && GATE_ACTIVE.load(Ordering::Relaxed) {
             // WM_KEYDOWN=0x0100 / WM_SYSKEYDOWN=0x0104 / WM_KEYUP=0x0101 / WM_SYSKEYUP=0x0105
             let message = wparam.0 as u32;
@@ -369,15 +474,33 @@ mod windows_impl {
         message: u32,
         flags: windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT_FLAGS,
     ) -> bool {
-        if flags.contains(LLKHF_INJECTED) {
+        let capture_active = SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed);
+        let injected = flags.contains(LLKHF_INJECTED);
+        if super::injected_edge_is_passthrough(capture_active, injected) {
+            // 非录入期：注入事件一律透传（防自吞）。
             return false;
+        }
+        if capture_active {
+            CAPTURE_KEYS_SEEN.fetch_add(1, Ordering::Relaxed);
+            if injected {
+                // 录入期内接受的注入副本（外部钩子"吞下 + 重放"的产物）。
+                CAPTURE_INJECTED_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+            }
         }
         let vk_index = vk_code as usize;
         if vk_index < SHORTCUT_CAPTURE_PREHELD.len()
             && SHORTCUT_CAPTURE_PREHELD[vk_index].load(Ordering::Relaxed)
         {
             if matches!(message, 0x0101 | 0x0105) {
-                SHORTCUT_CAPTURE_PREHELD[vk_index].store(false, Ordering::Relaxed);
+                if SHORTCUT_CAPTURE_PREHELD[vk_index].swap(false, Ordering::Relaxed) {
+                    // 饱和递减：扫描窗口内命令线程可能正在重写计数，
+                    // 归零下溢不影响正确性（扫描结束会写入精确值）。
+                    let _ = PREHELD_PENDING_COUNT.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |n| Some(n.saturating_sub(1)),
+                    );
+                }
             }
             // 录入开始前已经按下的键，其 DOWN 已进入 OS；后续重复 DOWN 与 UP
             // 必须继续放行，不能制造“DOWN 放行、UP 吞下”的粘键。
@@ -397,11 +520,34 @@ mod windows_impl {
             return false;
         }
         if SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed) {
-            if let (Some(key), Some(sink)) = (
-                super::capture_key_code(vk_code, make_code, flags.contains(LLKHF_EXTENDED)),
-                SHORTCUT_CAPTURE_SINK.get(),
-            ) {
-                sink(super::ShortcutCaptureEdge { key, is_pressed });
+            // 录入未武装（仍有 preheld 键按住）：物理按键照常成对吞下，
+            // 但不投递录入通道——preheld 键的边沿本就不可见，此时投递的
+            // 新组合会被前端按"全部松开"截断成半截组合落盘。
+            if PREHELD_PENDING_COUNT.load(Ordering::Relaxed) == 0 {
+                match (
+                    super::capture_key_code(vk_code, make_code, flags.contains(LLKHF_EXTENDED)),
+                    SHORTCUT_CAPTURE_SINK.get(),
+                ) {
+                    (Some(key), Some(sink)) => {
+                        sink(super::ShortcutCaptureEdge {
+                            key,
+                            is_pressed,
+                            source: if injected {
+                                super::EdgeSource::Injected
+                            } else {
+                                super::EdgeSource::Real
+                            },
+                        });
+                    }
+                    // 未能映射成协议键：记录最后一次原始 vk/注入标记，
+                    // 使"边沿到了但没投递"可归因（否则表现为静默零边沿）。
+                    (None, _) => {
+                        CAPTURE_UNMAPPED_SEEN.fetch_add(1, Ordering::Relaxed);
+                        LAST_UNMAPPED_VK.store(vk_code as u64, Ordering::Relaxed);
+                        LAST_UNMAPPED_INJECTED.store(injected as u64, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
             }
         }
         true
@@ -501,15 +647,26 @@ mod windows_impl {
         false
     }
 
-    /// 钩子链头 bump（先挂新钩再卸旧钩，无吞键空窗）。
+    /// 钩子链头 bump（先挂新钩再卸旧钩，无吞键空窗）。失败时保留旧钩并
+    /// 记录错误码——2026-09-27 实证链位置问题会静默表现为"按键完全到不了
+    /// 捕获通道"，必须可从诊断快照归因。
     fn bump_to_chain_head(current: &mut Option<HHOOK>) {
-        if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
-        {
-            let old = current.replace(new_hook);
-            if let Some(old) = old {
-                unsafe {
-                    let _ = UnhookWindowsHookEx(old);
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
+            Ok(new_hook) => {
+                HOOK_BUMPS_OK.fetch_add(1, Ordering::Relaxed);
+                let old = current.replace(new_hook);
+                if let Some(old) = old {
+                    unsafe {
+                        let _ = UnhookWindowsHookEx(old);
+                    }
                 }
+            }
+            Err(_) => {
+                HOOK_BUMPS_FAILED.fetch_add(1, Ordering::Relaxed);
+                LAST_HOOK_ERROR.store(
+                    unsafe { windows::Win32::Foundation::GetLastError() }.0 as u64,
+                    Ordering::Relaxed,
+                );
             }
         }
     }
@@ -535,17 +692,17 @@ mod windows_impl {
                 return;
             }
             HOOK_THREAD_ID.store(GetCurrentThreadId() as u64, Ordering::Relaxed);
-            SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
             GATE_ACTIVE.store(true, Ordering::Relaxed);
 
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                // 消息泵是 LL 钩子投递的必要条件（钩子回调经本线程消息队列投递）。
+                // 2026-09-27 起不再有任何"重装钩子抢链头"的定时/消息驱动：LL 钩子链
+                // 为 FIFO（最早安装最先调用，见
+                // docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md），
+                // 重装只会把本钩子推向链尾；钩子只在启动时安装一次。
                 match message.message {
                     WM_QUIT => break,
-                    WM_HOOK_BUMP => bump_to_chain_head(&mut current),
-                    WM_TIMER if message.wParam.0 as usize == BUMP_TIMER_ID => {
-                        bump_to_chain_head(&mut current)
-                    }
                     _ => {}
                 }
                 let _ = TranslateMessage(&message);
@@ -668,28 +825,27 @@ mod windows_impl {
         let _ = SHORTCUT_CAPTURE_SINK.set(sink);
     }
 
-    /// 请求把本钩子重新安装到 LL 链头（先挂新钩再卸旧钩，无吞键空窗）。
-    ///
-    /// 为什么录入开始必须 bump：微信输入法等目标会在本应用之后（重）安装自己的
-    /// WH_KEYBOARD_LL 钩子（IME 在输入焦点变化时重建钩子），其语音和弦判定
-    /// 先于本钩子看到物理边沿。当录入的组合恰好等于 IME 的语音和弦（实测
-    /// 2026-09-27：按住说话快捷键=左Alt+左Win 时重录该组合），IME 会把完成键
-    /// 的 DOWN/UP 整对吞掉——本钩子完全看不到 LeftWindows 边沿，前端只按
-    /// 先松开的单个修饰键落盘（"只剩左 Alt"）。录入开始时 bump 到链头，
-    /// 本钩子先于所有外部钩子成对吞下并投递录入通道；IME 在录入期间看不到
-    /// 任何按键，也不会误触发语音。
-    pub fn request_hook_bump() {
-        HOOK_BUMP_REQUESTS.fetch_add(1, Ordering::Relaxed);
-        let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
-        if thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(thread_id as u32, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-
-    pub fn hook_bump_request_count() -> u64 {
-        HOOK_BUMP_REQUESTS.load(Ordering::Relaxed)
+    /// 录入诊断快照（lib.rs 在开始/停止日志中记录；只读原子，任意线程可调用）。
+    /// 判据：`keys_seen` 不涨 ⇒ 物理边沿没到本钩子（被更早安装的外部钩子吞掉，
+    /// 链序 FIFO，见 docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md）；
+    /// `injected_skipped` 涨 ⇒ 外部钩子"吞下 + 重注入"；`calls_total` 是钩子被
+    /// 系统调用的健康度基线（含未录入期间的每一键）。
+    pub fn capture_diagnostics_summary() -> String {
+        format!(
+            "keys_seen={} injected_accepted={} unmapped_seen={} last_unmapped_vk=0x{:02X} last_unmapped_injected={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={}",
+            CAPTURE_KEYS_SEEN.load(Ordering::Relaxed),
+            CAPTURE_INJECTED_ACCEPTED.load(Ordering::Relaxed),
+            CAPTURE_UNMAPPED_SEEN.load(Ordering::Relaxed),
+            LAST_UNMAPPED_VK.load(Ordering::Relaxed) & 0xFF,
+            LAST_UNMAPPED_INJECTED.load(Ordering::Relaxed),
+            HOOK_CALLS_TOTAL.load(Ordering::Relaxed),
+            HOOK_CALLS_INJECTED.load(Ordering::Relaxed),
+            GATE_ACTIVE.load(Ordering::Relaxed) as u8,
+            SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed) as u8,
+            HOOK_BUMPS_OK.load(Ordering::Relaxed),
+            HOOK_BUMPS_FAILED.load(Ordering::Relaxed),
+            LAST_HOOK_ERROR.load(Ordering::Relaxed),
+        )
     }
 
     pub fn set_shortcut_capture_active(active: bool) -> bool {
@@ -697,14 +853,31 @@ mod windows_impl {
             return false;
         }
         if active {
-            // 先把钩子提到链头再开录入：物理边沿必须先经过本钩子（见
-            // request_hook_bump 文档），否则与 IME 语音和弦相同的组合录不全。
-            request_hook_bump();
+            // preheld 扫描：只扫钩子会报告的键盘 VK（is_hook_reported_vk），
+            // 否则通用/鼠标 VK 的"按下"标志永远等不到释放沿清除。
+            //
+            // 注意：录音期**不做**任何钩子重装。输入法（微信输入法）的语音和弦
+            // 与其钩子先于本应用安装，必须由应用层先让位（录入命令在主线程调用
+            // sayall_windows::suspend_input_method_for_capture 把输入区域切到非
+            // IME 布局），否则物理边沿到不了本钩子。
             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-            for (vk, slot) in SHORTCUT_CAPTURE_PREHELD.iter().enumerate() {
+            let mut preheld = Vec::new();
+            let mut pending = 0usize;
+            for vk in 0x08u32..=0xFF {
+                if !super::is_hook_reported_vk(vk) {
+                    continue;
+                }
                 let down = unsafe { GetAsyncKeyState(vk as i32) } < 0;
-                slot.store(down, Ordering::Relaxed);
+                SHORTCUT_CAPTURE_PREHELD[vk as usize].store(down, Ordering::Relaxed);
+                if down {
+                    if let Some(key) = super::capture_key_code(vk, 0, false) {
+                        pending += 1;
+                        preheld.push(key);
+                    }
+                }
             }
+            PREHELD_PENDING_COUNT.store(pending, Ordering::Relaxed);
+            *super::PREHELD_CAPTURE_DRAIN.lock().unwrap() = preheld;
         }
         SHORTCUT_CAPTURE_ACTIVE.store(active, Ordering::Relaxed);
         true
@@ -730,11 +903,10 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, configure, decide, hook_bump_request_count, is_gate_thread_alive,
-    leaked_down_count, listener_active, request_hook_bump, set_edge_sink, set_listener_active,
-    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
-    set_shortcut_capture_sink, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
-    HOLD_SWALLOWED_ALL,
+    arm_button, capture_diagnostics_summary, configure, decide, is_gate_thread_alive,
+    leaked_down_count, listener_active, set_edge_sink, set_listener_active, set_persistent_mask,
+    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
+    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -766,6 +938,10 @@ mod fallback {
     }
     pub fn swallowed_edge_count() -> u64 {
         0
+    }
+    pub fn capture_diagnostics_summary() -> String {
+        "keys_seen=0 injected_accepted=0 unmapped_seen=0 last_unmapped_vk=0x00 last_unmapped_injected=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0"
+            .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
         0
@@ -971,15 +1147,52 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn capture_start_requests_hook_bump() {
-        // request_hook_bump 不依赖钩子线程存在（thread_id=0 时只计数不投递）：
-        // 录入开始的链头提升请求必须始终可观测（2026-09-27 IME 和弦吞边沿修复）。
-        // 注意：本套件另有测试并发启动真实门控（GATE_ACTIVE 为进程级全局），
-        // 故此处不断言 set_shortcut_capture_active 的门控拒绝路径，避免
-        // 跨测试全局状态串扰；拒绝路径本身未被本次修改。
-        let before = hook_bump_request_count();
-        request_hook_bump();
-        assert_eq!(hook_bump_request_count(), before + 1);
+    fn capture_diagnostics_summary_exposes_all_probe_fields() {
+        // 诊断字段名是日志契约（真机归因直接依赖）：拼写漂移会让"零边沿"
+        // 类报障失去可观测性，此处锁定字段集合。
+        let summary = capture_diagnostics_summary();
+        for field in [
+            "keys_seen=",
+            "injected_accepted=",
+            "unmapped_seen=",
+            "last_unmapped_vk=",
+            "last_unmapped_injected=",
+            "calls_total=",
+            "calls_injected=",
+            "gate_active=",
+            "capture_active=",
+            "bumps_ok=",
+            "bumps_failed=",
+            "last_bump_error=",
+        ] {
+            assert!(summary.contains(field), "missing {field} in {summary}");
+        }
+    }
+
+    /// 录入期准入裁决：注入副本必须在录入期被接受（否则被外部钩子吞掉的
+    /// 完成键永远录不到），非录入期必须透传（防自吞）。
+    /// 非 Windows 亦可运行——这是本修复的核心判据。
+    #[test]
+    fn injected_edges_are_accepted_only_during_capture() {
+        assert!(super::injected_edge_is_passthrough(false, true));
+        assert!(!super::injected_edge_is_passthrough(false, false));
+        assert!(!super::injected_edge_is_passthrough(true, true));
+        assert!(!super::injected_edge_is_passthrough(true, false));
+    }
+
+    /// 边沿来源随注入标记变化，且序列化为日志可直接读出的字符串。
+    #[test]
+    fn edge_source_distinguishes_injected_copies() {
+        assert_eq!(super::EdgeSource::Real.as_str(), "real");
+        assert_eq!(super::EdgeSource::Injected.as_str(), "injected");
+        let edge = super::ShortcutCaptureEdge {
+            key: super::KeyCode::LeftWindows,
+            is_pressed: true,
+            source: super::EdgeSource::Injected,
+        };
+        let json = serde_json::to_string(&edge).expect("edge 应可序列化");
+        assert!(json.contains("\"source\":\"injected\""), "{json}");
+        assert!(json.contains("\"isPressed\":true"), "{json}");
     }
 
     #[cfg(not(windows))]
@@ -989,5 +1202,29 @@ mod tests {
         assert!(!gate.is_active());
         super::configure(true, u64::MAX);
         assert_eq!(super::swallowed_edge_count(), 0);
+    }
+
+    #[test]
+    fn preheld_scan_reports_only_hook_reported_keyboard_keys() {
+        // 鼠标/保留 VK（0x00-0x07）与通用修饰 VK（0x10/0x11/0x12）不参与
+        // preheld 扫描：前者不产生键盘事件，后者不会作为 vkCode 出现在钩子
+        // 事件里，其"按下"标志永远等不到释放沿清除（会永久阻塞武装）。
+        // 专用 VK 正常上报；未映射 VK（0xFF）不计数、不入列表。
+        let (keys, pending) = super::collect_preheld_keys(|vk| {
+            matches!(vk, 0x01 | 0x10 | 0x11 | 0x12 | 0x5B | 0xA2 | 0xFF)
+        });
+        assert_eq!(
+            keys,
+            vec![super::KeyCode::LeftWindows, super::KeyCode::LeftControl]
+        );
+        // 只统计可捕获的键盘键：鼠标 0x01、未映射 0xFF 不计。
+        assert_eq!(pending, 2);
+    }
+
+    #[test]
+    fn preheld_scan_skips_released_keys() {
+        let (keys, pending) = super::collect_preheld_keys(|vk| vk == 0xA4);
+        assert_eq!(keys, vec![super::KeyCode::LeftAlt]);
+        assert_eq!(pending, 1);
     }
 }

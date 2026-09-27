@@ -85,6 +85,8 @@ export interface ButtonEdge {
 export interface ShortcutCaptureEdge {
   key: KeyCode;
   isPressed: boolean;
+  /** 边沿来源：real = 物理事件；injected = 外部钩子（输入法）吞下后重放的副本。 */
+  source?: "real" | "injected";
 }
 
 export interface RawInputSnapshot {
@@ -771,14 +773,28 @@ export async function subscribeButtonGestures(
   };
 }
 
-export async function startShortcutCapture(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("start_shortcut_capture");
+/** 开始 OS 级快捷键录入；返回录入开始时仍被按住的键（preheld）。
+ *  preheld 键的边沿对录入不可见（防粘键：其 DOWN 已进 OS，UP 必须放行），
+ *  后端会等它们全部松开后才开始投递边沿——前端据此提示用户先松手，
+ *  避免"按住中打开录入"被静默截断成半截组合。 */
+export async function startShortcutCapture(): Promise<KeyCode[]> {
+  if (!isTauriRuntime()) return [];
+  const preheld = await invoke<KeyCode[]>("start_shortcut_capture");
+  return preheld ?? [];
 }
 
-export async function stopShortcutCapture(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("stop_shortcut_capture");
+/** 微信输入法语音是否在录入会话期间被触发（观测其麦克风 ConsentStore）。 */
+export type WetypeVoiceVerdict = "observed" | "not_observed" | "unknown";
+
+export interface ShortcutCaptureStopResult {
+  /** "unknown" 表示观测不可用，调用方不得据此推断用户按了什么。 */
+  wetypeVoice: WetypeVoiceVerdict;
+}
+
+export async function stopShortcutCapture(): Promise<ShortcutCaptureStopResult | null> {
+  if (!isTauriRuntime()) return null;
+  const result = await invoke<ShortcutCaptureStopResult | null>("stop_shortcut_capture");
+  return result ?? null;
 }
 
 /** 原生低级钩子录入边沿；Win+L 等系统组合在到达 Shell 前已成对吞下。 */

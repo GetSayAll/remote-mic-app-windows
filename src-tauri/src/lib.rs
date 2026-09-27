@@ -684,34 +684,106 @@ fn get_button_mapping_snapshot(
     state.platform.button_mapping_snapshot()
 }
 
+/// 在应用主线程（= 录入窗口所在线程）上执行输入区域让位/恢复并取回日志片段。
+/// 输入区域按线程生效，必须在窗口线程调用；有界等待防卡命令线程。
+fn run_ime_yield_on_window_thread(app: &tauri::AppHandle, task: fn() -> String) -> Option<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(task());
+    })
+    .ok()?;
+    receiver
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .ok()
+}
+
+/// 录入会话开始前微信输入法麦克风的观测基线：start 时取样，stop 时对比，判定
+/// "微信输入法语音是否在录入期间被触发"。其语音热键组成键的物理边沿在 RIT 层
+/// 即被吞（对低级钩子、Raw Input、GetAsyncKeyState 均不可见，见 2026-09-27 诊断），
+/// 语音被触发是零/半截边沿会话中推断用户按了其热键的唯一旁证。
+static CAPTURE_MIC_BASELINE: std::sync::OnceLock<std::sync::Mutex<Option<u64>>> =
+    std::sync::OnceLock::new();
+
+fn capture_mic_baseline_slot() -> &'static std::sync::Mutex<Option<u64>> {
+    CAPTURE_MIC_BASELINE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 #[tauri::command]
-fn start_shortcut_capture() -> Result<(), String> {
+fn start_shortcut_capture(
+    app: tauri::AppHandle,
+) -> Result<Vec<sayall_windows::send_input::KeyCode>, String> {
     let started = std::time::Instant::now();
-    sayall_windows::gatt_note(
-        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only hook_bump=requested reason=ime_chord_may_preempt".to_owned(),
-    );
+    let mic_baseline = sayall_windows::capture_mic_baseline();
+    match capture_mic_baseline_slot().lock() {
+        Ok(mut guard) => *guard = mic_baseline,
+        Err(poisoned) => *poisoned.into_inner() = mic_baseline,
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only ime_yield=pending mic_baseline={mic_baseline:?}",
+    ));
+    // 录入期让位（路线①）：LL 钩子链为 FIFO，输入法钩子先于本应用安装，其语音和弦
+    // 的物理边沿到不了本钩子（见 docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md）。
+    // 先把录入窗口线程的输入区域切到非 IME 布局，让输入法的和弦判定失效，物理边沿
+    // 得以直达本钩子；录入结束（stop）恢复。
+    match run_ime_yield_on_window_thread(&app, sayall_windows::suspend_input_method_for_capture) {
+        Some(note) => sayall_windows::gatt_note(note),
+        None => sayall_windows::gatt_note(
+            "capture_ime_yield outcome=unavailable reason=window_thread_timeout".to_owned(),
+        ),
+    }
     if !sayall_windows::key_gate::set_shortcut_capture_active(true) {
+        // 让位已发生但门控不可用：立即恢复布局，避免留下非 IME 输入区域。
+        if let Some(note) =
+            run_ime_yield_on_window_thread(&app, sayall_windows::restore_input_method_after_capture)
+        {
+            sayall_windows::gatt_note(note);
+        }
         sayall_windows::gatt_note(format!(
             "shortcut_capture action=start phase=completed terminal_result=failed error_domain=keyboard_hook error_code=gate_unavailable reason=hook_not_active retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ));
         return Err("键盘保护钩子尚未就绪，请稍后重试".to_owned());
     }
+    let preheld = sayall_windows::key_gate::take_preheld_capture_keys();
     sayall_windows::gatt_note(format!(
-        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} elapsed_ms={}",
-        sayall_windows::key_gate::hook_bump_request_count(),
-        started.elapsed().as_millis()
+        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only preheld_count={} preheld_keys={:?} elapsed_ms={} {}",
+        preheld.len(),
+        preheld,
+        started.elapsed().as_millis(),
+        sayall_windows::key_gate::capture_diagnostics_summary()
     ));
-    Ok(())
+    Ok(preheld)
+}
+
+/// stop_shortcut_capture 的返回值：前端据此在零/半截边沿会话中推断用户按的是
+/// 微信输入法语音热键并引导落盘（"observed" = 触发；"not_observed" = 确认未触发；
+/// "unknown" = 观测不可用，不得推断）。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutCaptureStopResult {
+    wetype_voice: &'static str,
 }
 
 #[tauri::command]
-fn stop_shortcut_capture() {
+fn stop_shortcut_capture(app: tauri::AppHandle) -> ShortcutCaptureStopResult {
+    let mic_baseline = match capture_mic_baseline_slot().lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    let wetype_voice = sayall_windows::capture_mic_verdict(mic_baseline);
     let _ = sayall_windows::key_gate::set_shortcut_capture_active(false);
-    sayall_windows::gatt_note(
-        "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired"
-            .to_owned(),
-    );
+    // 恢复录入前的输入区域布局（让位撤销，输入法回到该窗口会话）。
+    match run_ime_yield_on_window_thread(&app, sayall_windows::restore_input_method_after_capture) {
+        Some(note) => sayall_windows::gatt_note(note),
+        None => sayall_windows::gatt_note(
+            "capture_ime_restore outcome=unavailable reason=window_thread_timeout".to_owned(),
+        ),
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired wetype_voice={wetype_voice} {}",
+        sayall_windows::key_gate::capture_diagnostics_summary()
+    ));
+    ShortcutCaptureStopResult { wetype_voice }
 }
 
 #[tauri::command]
@@ -1096,12 +1168,26 @@ fn register_shortcut_capture_events(app: tauri::AppHandle) {
         .spawn(move || {
             while let Ok(edge) = receiver.recv() {
                 sayall_windows::gatt_note(format!(
-                    "shortcut_capture action=edge phase=observed key={:?} edge={} delivery=webview",
+                    "shortcut_capture action=edge phase=observed key={:?} edge={} source={} delivery=webview",
                     edge.key,
-                    if edge.is_pressed { "down" } else { "up" }
+                    if edge.is_pressed { "down" } else { "up" },
+                    edge.source.as_str()
                 ));
                 let _ = app.emit("shortcut-capture-edge", &edge);
             }
+        })
+        .ok();
+    // 10s 诊断心跳（临时排查设施，PR 前移除）：把钩子健康度基线（calls_total /
+    // capture_active 等）周期落盘，便于在无需界面交互的情况下用外部注入对照，
+    // 区分"钩子没被系统调用"与"钩子被调用但事件被上层吞掉/过滤"。只读原子。
+    std::thread::Builder::new()
+        .name("sayall-shortcut-capture-diag".to_owned())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            sayall_windows::gatt_note(format!(
+                "shortcut_capture action=diag phase=heartbeat {}",
+                sayall_windows::key_gate::capture_diagnostics_summary()
+            ));
         })
         .ok();
 }

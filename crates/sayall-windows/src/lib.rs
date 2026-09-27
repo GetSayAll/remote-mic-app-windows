@@ -32,6 +32,32 @@ pub use ble::{
 };
 #[cfg(windows)]
 mod ime;
+
+/// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
+/// 语音和弦判定失效（其热键只在自身为当前会话活动输入法时生效），物理边沿
+/// 得以到达本应用 LL 钩子（链序 FIFO，见 docs/investigations/2026-09-27-*）。
+/// **必须在录入窗口所在线程（应用主线程）上调用。** 返回诊断日志片段。
+#[cfg(windows)]
+pub fn suspend_input_method_for_capture() -> String {
+    ime::suspend_input_method_for_capture()
+}
+
+/// 录入结束恢复输入区域布局（同上，须在录入窗口线程调用）。
+#[cfg(windows)]
+pub fn restore_input_method_after_capture() -> String {
+    ime::restore_input_method_after_capture()
+}
+
+#[cfg(not(windows))]
+pub fn suspend_input_method_for_capture() -> String {
+    "capture_ime_yield outcome=unsupported".to_owned()
+}
+
+#[cfg(not(windows))]
+pub fn restore_input_method_after_capture() -> String {
+    "capture_ime_restore outcome=unsupported".to_owned()
+}
+
 pub mod key_gate;
 #[cfg(windows)]
 mod key_suppressor;
@@ -56,6 +82,9 @@ pub mod send_input;
 pub mod send_input_windows;
 #[cfg(windows)]
 mod wetype_revive;
+// 录入会话的微信输入法麦克风观测（模块本体私有，仅导出这两个读数入口）。
+#[cfg(windows)]
+pub use wetype_revive::{capture_mic_baseline, capture_mic_verdict};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -78,10 +78,19 @@ const savingVoiceHotkey = ref(false);
 const voiceHotkeyMessage = ref("尚未读取快捷键设置");
 const capturingVoiceHotkey = ref(false);
 const captureStartingVoiceHotkey = ref(false);
+/** 录入开始时仍有 preheld 键按住：后端吞键但不投递边沿，直到全部松开。 */
+const waitingPreheldRelease = ref(false);
 const voiceCaptureDisplay = ref<KeyCode[]>([]);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
 let voiceCaptureTimeout: number | null = null;
+/**
+ * 落盘稳定窗口：外部钩子（微信输入法等）会吞掉完成键的物理边沿、随后把整个
+ * 组合以注入副本重放（见 Bugs/2026-09-27-ime-chord-hook-eats-active-hotkey-capture.md）。
+ * 副本可能晚于用户物理松开到达，因此"全部松开"后不立即落盘，先等一个短窗口；
+ * 窗口内又出现按下沿则取消并重新等待。
+ */
+let voiceCaptureSettleTimeout: number | null = null;
 let voiceCaptureRequestId = 0;
 let unmounted = false;
 const voiceCapturePressed = new Set<KeyCode>();
@@ -141,8 +150,9 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
   const requestId = ++voiceCaptureRequestId;
   captureStartingVoiceHotkey.value = true;
   voiceHotkeyMessage.value = "";
+  cancelVoiceCaptureSettle();
   try {
-    await startShortcutCapture();
+    const preheld = await startShortcutCapture();
     if (unmounted || requestId !== voiceCaptureRequestId) {
       await stopShortcutCapture().catch(() => undefined);
       return;
@@ -152,6 +162,14 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
     voiceCapturedKeys = null;
     voiceCaptureDisplay.value = [];
     capturingVoiceHotkey.value = true;
+    // preheld 键的边沿对录入不可见（其 DOWN 已进 OS，UP 必须放行），
+    // 后端等它们全部松开后才开始投递边沿；提示用户先松手，避免把
+    // "按住中打开录入"截断成半截组合。
+    waitingPreheldRelease.value = preheld.length > 0;
+    if (preheld.length > 0) {
+      voiceHotkeyMessage.value =
+        "检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始";
+    }
     if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
     voiceCaptureTimeout = window.setTimeout(() => {
       void finishVoiceHotkeyCapture("录入已超时，请重新录入");
@@ -163,49 +181,127 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
   }
 }
 
-/** 结束录入：已录到组合则落盘生效，否则只显示传入的取消原因。 */
+/**
+ * 结束录入：已录到组合则落盘生效；零/半截边沿时结合微信输入法语音观测推断
+ * （见 applyVoiceHotkey 上方的推断说明）；否则只显示传入的取消原因。
+ */
 async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   voiceCaptureRequestId += 1;
   captureStartingVoiceHotkey.value = false;
   capturingVoiceHotkey.value = false;
+  waitingPreheldRelease.value = false;
+  cancelVoiceCaptureSettle();
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   voiceCapturePressed.clear();
+  // 推断判定在清空前取样：会话内见到的边沿数（0 = 全吞，1 = 半截）。
+  const seenKeyCount = voiceCaptureEverPressed.length;
   voiceCaptureEverPressed.length = 0;
   const keys = voiceCapturedKeys;
   voiceCapturedKeys = null;
   voiceCaptureDisplay.value = [];
-  await stopShortcutCapture().catch(() => undefined);
-  if (keys) {
-    await applyVoiceHotkey([...keys]);
+  const stop = await stopShortcutCapture().catch(() => null);
+  const wetypeVoice = stop?.wetypeVoice ?? "unknown";
+  // 半截会话（scheduleVoiceCaptureFinish 在稳定窗口到期时已把唯一修饰键写进
+  // keys）与零边沿会话同样走推断：微信输入法吞键发生在 RIT 层，唯一旁证是其
+  // 语音被触发。单主键（如 D）不推断——按主键不会触发微信输入法语音。
+  const shouldInferWetypeChord =
+    wetypeVoice === "observed" &&
+    (keys === null
+      ? seenKeyCount <= 1
+      : keys.length === 1 && CAPTURE_MODIFIER_KEYS.has(keys[0]));
+  if (shouldInferWetypeChord) {
+    await applyVoiceHotkey([...DEFAULT_VOICE_HOTKEY_KEYS]);
+    // applyVoiceHotkey 成功会覆写消息，推断说明必须在其后写入；失败时保留错误信息。
+    if (voiceHotkey.value) {
+      voiceHotkeyMessage.value =
+        "你按下的组合触发了微信输入法的语音（按键被其拦截，内容无法读取），已按微信输入法语音键默认值 左 Ctrl + 左 Win 生效。此快捷键需与微信输入法语音键一致；若你修改过微信输入法的语音键，请在微信输入法设置中查看后重新录入对应组合";
+    }
     return;
   }
-  if (cancelMessage) voiceHotkeyMessage.value = cancelMessage;
+  if (keys && keys.length > 0) {
+    await applyVoiceHotkey([...keys]);
+    appendWetypeChordNotice([...keys]);
+    return;
+  }
+  if (cancelMessage) {
+    voiceHotkeyMessage.value = cancelMessage;
+    return;
+  }
+  voiceHotkeyMessage.value =
+    "本次未捕获到任何按键。微信输入法会拦截它自己的语音键（默认 左 Ctrl + 左 Win），本次也未观测到语音被触发；请重试，或点击“默认”直接使用 左 Ctrl + 左 Win";
+}
+
+/**
+ * 落盘组合不是微信输入法语音键（默认 左 Ctrl + 左 Win）时提醒：按住说话会把
+ * 该组合注入系统来唤起微信输入法语音，组合不一致则按住说话无法生效——这正是
+ * "能录上 Win+右 Ctrl 反而没用"的原因。默认组合与推断落盘不需要这句提醒。
+ */
+function appendWetypeChordNotice(keys: KeyCode[]): void {
+  if (!voiceHotkeyMessage.value.startsWith("按住说话快捷键已设为")) return;
+  const normalized = [...keys].sort().join("+");
+  if ([...DEFAULT_VOICE_HOTKEY_KEYS].sort().join("+") === normalized) return;
+  voiceHotkeyMessage.value +=
+    "。注意：按住说话会把该组合注入系统来唤起微信输入法语音，若与微信输入法语音键不一致将无法生效";
+}
+
+/** 落盘稳定窗口时长：外部钩子重放的注入副本通常在物理边沿的同一输入批次内到达。 */
+const VOICE_CAPTURE_SETTLE_MS = 200;
+
+/** 取消待执行的落盘稳定窗口（新按下沿到来时需要重新计时）。 */
+function cancelVoiceCaptureSettle(): void {
+  if (voiceCaptureSettleTimeout !== null) window.clearTimeout(voiceCaptureSettleTimeout);
+  voiceCaptureSettleTimeout = null;
+}
+
+/**
+ * 全部按键松开后延迟定稿：外部钩子吞掉完成键的物理边沿后会以注入副本重放
+ * 整个组合，副本可能晚于物理松开到达；立即落盘会把组合截断成"只剩第一个键"
+ * （Bugs/2026-09-27）。窗口内若再出现按下沿，cancelVoiceCaptureSettle 会取消
+ * 本次计时并重新等待。
+ */
+function scheduleVoiceCaptureFinish(): void {
+  cancelVoiceCaptureSettle();
+  voiceCaptureSettleTimeout = window.setTimeout(() => {
+    voiceCaptureSettleTimeout = null;
+    if (!capturingVoiceHotkey.value || voiceCapturePressed.size > 0) return;
+    if (!voiceCapturedKeys && voiceCaptureEverPressed.length > 0) {
+      voiceCapturedKeys = [...voiceCaptureEverPressed];
+    }
+    void finishVoiceHotkeyCapture();
+  }, VOICE_CAPTURE_SETTLE_MS);
 }
 
 async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> {
   if (!capturingVoiceHotkey.value) return;
+  // 后端只在 preheld 键全部松开后才开始投递边沿：第一条边沿即已武装。
+  if (waitingPreheldRelease.value) {
+    waitingPreheldRelease.value = false;
+    voiceHotkeyMessage.value = "";
+  }
   const { key, isPressed } = edge;
   if (!isPressed) {
     voiceCapturePressed.delete(key);
     if (voiceCapturedKeys) {
       voiceCaptureDisplay.value = voiceCapturedKeys;
-      if (voiceCapturePressed.size === 0) await finishVoiceHotkeyCapture();
+      if (voiceCapturePressed.size === 0) scheduleVoiceCaptureFinish();
       return;
     }
     // 组合里没有主键时（默认的 左 Ctrl + 左 Win、豆包的"长按右 Alt"都是这种），
     // 在最后一个按键松开时按本次会话按过的全部修饰键落盘。不能只看最后松开
     // 的那个键：Ctrl+Win 先松 Win 会把组合截断成只剩 Ctrl（Bugs/2026-09-27）。
     // 能走到这里说明会话里没有主键（主键按下时即成组），故全部是修饰键。
+    // 定稿延后到稳定窗口（见 scheduleVoiceCaptureFinish）：被吞掉的完成键只
+    // 会以输入法重放的注入副本形式稍后到达，立即落盘会把它丢掉。
     if (voiceCapturePressed.size === 0 && voiceCaptureEverPressed.length > 0) {
-      voiceCapturedKeys = [...voiceCaptureEverPressed];
-      voiceCaptureDisplay.value = voiceCapturedKeys;
-      await finishVoiceHotkeyCapture();
+      voiceCaptureDisplay.value = [...voiceCaptureEverPressed];
+      scheduleVoiceCaptureFinish();
     }
     return;
   }
   // 已经拿到终止键后继续保持原生拦截，直到本次组合的所有 DOWN 都收到配对 UP。
   if (voiceCapturedKeys) return;
+  cancelVoiceCaptureSettle();
   if (key === "escape" && voiceCapturePressed.size === 0) {
     await finishVoiceHotkeyCapture("已取消录入");
     return;
@@ -457,6 +553,7 @@ onUnmounted(() => {
   unmounted = true;
   window.removeEventListener("blur", handleVoiceCaptureBlur);
   if (pollTimer) clearInterval(pollTimer);
+  cancelVoiceCaptureSettle();
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   unlistenVoiceCapture?.();
@@ -548,7 +645,7 @@ onUnmounted(() => {
             <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
           </div>
         </div>
-        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：{{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}。</p>
+        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。说话时按的是遥控器语音键，此快捷键是应用替它向系统注入的组合，用于唤起微信输入法语音——因此必须与微信输入法设置的语音键一致，否则按住说话无法生效。默认快捷键：{{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}。</p>
         <div class="button-row voice-hotkey-presets">
           <button
             class="secondary-button"
@@ -599,8 +696,13 @@ onUnmounted(() => {
           {{
             voiceCaptureDisplay.length
               ? chordLabel({ keys: voiceCaptureDisplay })
-              : "请按下要使用的快捷键组合（也可单独按一个 Ctrl/Alt/Win 等修饰键）；按 Esc 取消"
+              : waitingPreheldRelease
+                ? "检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始"
+                : "请按下微信输入法当前设置的语音键（默认 左 Ctrl + 左 Win，也可单独按一个修饰键）；按 Esc 取消"
           }}
+        </p>
+        <p v-if="capturingVoiceHotkey && waitingPreheldRelease" class="muted scan-summary">
+          按"修改快捷键"时仍按着键的组合不会完整录入，先松手即可。
         </p>
         <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
         <details class="usage-hint-details">
