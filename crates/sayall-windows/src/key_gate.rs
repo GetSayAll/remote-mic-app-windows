@@ -284,6 +284,11 @@ mod windows_impl {
     /// 微信输入法等目标若"吞下 + 重注入"，其注入副本会命中 LLKHF_INJECTED
     /// 分支被跳过——表现为零边沿）。
     static CAPTURE_INJECTED_SKIPPED: AtomicU64 = AtomicU64::new(0);
+    /// 钩子收到的全部键盘回调数（含未激活录入时的每一键；健康度基线）与其中
+    /// 的注入事件数。用于区分"钩子没被系统调用"与"钩子被调用但事件被上层
+    /// 过滤/吞掉"（2026-09-27 真机：录入期 keys_seen 恒为 0，需外部注入对照）。
+    static HOOK_CALLS_TOTAL: AtomicU64 = AtomicU64::new(0);
+    static HOOK_CALLS_INJECTED: AtomicU64 = AtomicU64::new(0);
     /// 链头 bump 成败与最后一次失败错误码（2026-09-27：SetWindowsHookExW
     /// 失败此前静默保留旧钩，链位置问题不可见）。
     static HOOK_BUMPS_OK: AtomicU64 = AtomicU64::new(0);
@@ -412,6 +417,15 @@ mod windows_impl {
     }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 {
+            // 健康度基线：钩子被系统调用的每一次键盘回调（在 GATE_ACTIVE 判定之前），
+            // 与其中的注入事件数。用于外部注入对照实验区分"没被调用"与"被过滤"。
+            HOOK_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            let kb_probe = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            if kb_probe.flags.contains(LLKHF_INJECTED) {
+                HOOK_CALLS_INJECTED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         if code >= 0 && GATE_ACTIVE.load(Ordering::Relaxed) {
             // WM_KEYDOWN=0x0100 / WM_SYSKEYDOWN=0x0104 / WM_KEYUP=0x0101 / WM_SYSKEYUP=0x0105
             let message = wparam.0 as u32;
@@ -813,9 +827,13 @@ mod windows_impl {
     /// 录入期间定时 bump 未生效。
     pub fn capture_diagnostics_summary() -> String {
         format!(
-            "keys_seen={} injected_skipped={} bumps_ok={} bumps_failed={} last_bump_error={} timer_bumps={}",
+            "keys_seen={} injected_skipped={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={} timer_bumps={}",
             CAPTURE_KEYS_SEEN.load(Ordering::Relaxed),
             CAPTURE_INJECTED_SKIPPED.load(Ordering::Relaxed),
+            HOOK_CALLS_TOTAL.load(Ordering::Relaxed),
+            HOOK_CALLS_INJECTED.load(Ordering::Relaxed),
+            GATE_ACTIVE.load(Ordering::Relaxed) as u8,
+            SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed) as u8,
             HOOK_BUMPS_OK.load(Ordering::Relaxed),
             HOOK_BUMPS_FAILED.load(Ordering::Relaxed),
             LAST_HOOK_ERROR.load(Ordering::Relaxed),
@@ -939,7 +957,7 @@ mod fallback {
         0
     }
     pub fn capture_diagnostics_summary() -> String {
-        "keys_seen=0 injected_skipped=0 bumps_ok=0 bumps_failed=0 last_bump_error=0 timer_bumps=0"
+        "keys_seen=0 injected_skipped=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0 timer_bumps=0"
             .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
@@ -1166,6 +1184,10 @@ mod tests {
         for field in [
             "keys_seen=",
             "injected_skipped=",
+            "calls_total=",
+            "calls_injected=",
+            "gate_active=",
+            "capture_active=",
             "bumps_ok=",
             "bumps_failed=",
             "last_bump_error=",
