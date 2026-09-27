@@ -6,6 +6,7 @@ import {
   saveThemePreference,
   type ThemePreference,
 } from "./bridge";
+import { applyAccentPalette } from "./accent";
 
 export type EffectiveTheme = "light" | "dark";
 
@@ -82,6 +83,8 @@ function applyDocumentTheme(theme: EffectiveTheme): void {
   const previous = effectiveTheme.value;
   effectiveTheme.value = theme;
   document.documentElement.dataset.theme = theme;
+  // 强调色派生随主题重算（系统强调色未读取成功时内部 no-op，保留内置默认色）。
+  applyAccentPalette(theme);
   if (previous !== theme) {
     console.info(
       `feature=theme event=changed previous=${previous} resolved=${theme} preference=${preference.value}`,

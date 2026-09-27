@@ -1,3 +1,6 @@
+/* --accent 族：默认值是历史紫色品牌色，仅作为"系统强调色读取失败"的回退。
+   正常路径由 src/lib/accent.ts 读取 Windows 系统主题色并按深浅色主题
+   动态注入同名变量（内联样式优先级更高），选中态自动跟随系统强调色。 */
 :root {
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   color: var(--text-primary);
