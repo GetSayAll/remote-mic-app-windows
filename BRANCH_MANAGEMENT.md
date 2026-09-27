@@ -41,6 +41,11 @@
   改由 `changes` job 判定、`verify` 按需运行、`gate` 始终给出结论。原因是
   被 `paths-ignore` 跳过的 workflow **不会创建任何 check**，而分支保护要求
   `gate`，纯文档 PR 会永久卡在等待状态；现在这类 PR 由 `gate` 秒过。
+- **PR 与安装器生命周期校验分层（2026-09-27）**：代码 PR 的 `verify` 只运行
+  前端、Rust、Tauri runtime simulation 等快速正确性检查；NSIS 构建以及安装、
+  升级、降级、卸载矩阵移到 main push 或人工 `workflow_dispatch` 的 `installer`
+  job。`verify`、`installer` 分别设置 30、45 分钟硬超时，同一 PR 的旧提交会被新
+  提交取消。必需检查仍为 `gate`，因此不改变分支保护配置。
 - **CI 出结果前不得合并（2026-09-21 教训）**：#98 在自己的 CI 判定失败前
   5 分 35 秒被合入 main，导致 main 连红三个提交、后续所有代码 PR 都会在同一
   步骤失败。`gate` 必需检查已在机制上堵住这条路径——不依赖自律。

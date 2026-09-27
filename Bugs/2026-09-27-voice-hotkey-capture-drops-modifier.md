@@ -1,0 +1,21 @@
+# 按住说话快捷键录入：多修饰键组合被截断成最后松开的那个修饰键
+
+- 发现日期：2026-09-27
+- 状态：已修复（真机复测 deferred）
+- 影响范围：main `8a39407` 起（0.2.6 构建含该功能）的 Windows 版；连接页「修改快捷键」录入；不影响 RC001/RC003 链路与注入时序
+- 功能点：连接页按住说话快捷键自由录入（`src/pages/ConnectionPage.vue` 的 `acceptVoiceCaptureEdge`）
+- 现象：录入 左 Ctrl + 左 Win，保存结果只剩 左 Ctrl
+- 复现条件：进入录入后同时按住 左 Ctrl + 左 Win，先松 Win、后松 Ctrl（用户实测为自然松手顺序）
+- 正常预期：保存 `[left_control, left_windows]`，与按键盘面一致
+- 证据：
+  - `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log` 的 `shortcut_capture action=edge`：
+    - `2026-09-27T04:12:34Z`：`LeftControl↓ LeftWindows↓ LeftControl↑ LeftWindows↑` → 存成 左 Win
+    - `2026-09-27T04:12:40Z`：`LeftControl↓ LeftWindows↓ LeftWindows↑ LeftControl↑` → 存成 左 Ctrl（本次报障）
+  - 回归单测：`ConnectionPage.test.ts` "keeps every modifier of a modifier-only chord..." 与 "...first-pressed modifier is released last"
+- 根因：录入会话在"组合里没有主键"时依赖"最后一个按键松开"落盘，判断只看"当前是否全部松开"，未看"本次会话是否按过其他键"；纯修饰键组合（默认快捷键 左 Ctrl + 左 Win 即属此类）没有主键终止沿，只能走这条路径，于是按最后松开的单个修饰键落盘。
+- 修复：会话内记录按过的全部按键（按首次按下顺序、去重）；最后一个按键松开且会话内无主键时，按会话内全部修饰键落盘，删除只看单键的分支。仅改 `src/pages/ConnectionPage.vue`，录入链路（`start_shortcut_capture` / key_gate）与保存链路（`set_voice_hold_hotkey`）零改动。
+- 验证：vitest 12 文件 109 passed（新增 2 例回归，覆盖两种松开顺序；既有单修饰键、主键组合、Esc 取消用例全部保持通过）；`vue-tsc --noEmit` passed；`vite build` passed。**真机复测 deferred**：需安装包含本修复的 main 构建后重按 左 Ctrl + 左 Win 录入确认。
+- 隐私检查：日志仅含虚拟键码与边沿方向，无设备身份、个人路径、语音内容或凭据。
+- 边界（属既有语义，本次不改）：
+  - "分次输入"（先按 Ctrl 松开、再按 Win）会在 Ctrl 松开时即落盘为 Ctrl；录入提示要求组合同时按下后松开。
+  - 录入开始前已被按住的键（pre-held）的 DOWN 对录入不可见（key_gate 为防粘键刻意放行），此类会话只能录到其后新按的键。
