@@ -466,7 +466,7 @@ const capabilityNote = computed<string | null>(() => {
       return "全按键支持已启用，此按键的映射现在生效。";
     }
       if (state === false) {
-        return "提示：返回 / 音量± 需先开启「全按键支持」开关才会生效。开启时系统会弹窗询问一次；关闭即停。升级或重装无线麦后需重新开启。个别带防作弊的游戏可能与该功能冲突，玩游戏前建议先关闭。";
+        return "提示：返回 / 音量± 需先开启「全按键支持」开关才会生效；每次开启都会先弹一次确认。升级或重装无线麦后需重新开启。个别带防作弊的游戏可能与该功能冲突，玩游戏前建议先关闭。";
       }
     return "提示：正在确认三键捕获状态…";
   }
@@ -860,10 +860,17 @@ function syncCaptureSwitchDom(): void {
 
 async function toggleRc003Capture() {
   if (rc003CaptureBusy.value) return;
-  // 首次开启：先弹一次性确认（2026-09-26 用户要求：重装/升级要重新授权、
-  // 防作弊游戏可能冲突，这两件事必须让用户在开启前知道）。
+  // 开启方向：**只在这次开启会触发系统授权（UAC）时**先弹确认——判据与
+  // Rust enable_capture 同源（任务未注册，或安装/升级写下了重授权标记），
+  // 由每秒轮询的 rc003Task.authorizationRequired 带给前端。
+  //
+  // 为什么不记「已读过」（2026-09-27 用户报告 + 拍板）：一次性 localStorage
+  // 标记在重装/升级后仍然存活，正是「重装后弹窗消失」的根因；「每次都弹」
+  // 又会在授权仍在的普通开启上反复打扰。按「是否需要授权」弹，与弹窗文案
+  // 「首次开启时系统会弹窗询问 / 升级或重装后会再弹一次询问」逐句对齐。
+  // 状态未知（authorizationRequired 缺失）宁可多弹一次，也不静默跳过。
   // 关闭方向永远直接执行，不弹。
-  if (rc003CaptureEnabled.value !== true && !captureConfirmShown.value) {
+  if (rc003CaptureEnabled.value !== true && rc003Task.value?.authorizationRequired !== false) {
     showCaptureConfirm.value = true;
     // 开关 DOM 在点击瞬间已被浏览器翻转，先写回关闭，等确认后再真正执行。
     syncCaptureSwitchDom();
@@ -872,32 +879,9 @@ async function toggleRc003Capture() {
   await applyCaptureToggle();
 }
 
-/**
- * 首次开启前的一次性确认标记。
- *
- * 为什么放 localStorage 而不是设置模型：这是纯展示层的「读没读过说明」标记，
- * 不影响任何功能语义（授权、助手、映射都不读它）；读不到（隐私模式等）
- * 宁可下次再弹一次，也不能把开关卡成「必须先过弹窗」。
- */
-const CAPTURE_CONFIRM_KEY = "sayall.enhancedCapture.confirmShown";
-const captureConfirmShown = ref(readCaptureConfirmFlag());
 const showCaptureConfirm = ref(false);
 
-function readCaptureConfirmFlag(): boolean {
-  try {
-    return localStorage.getItem(CAPTURE_CONFIRM_KEY) === "1";
-  } catch {
-    return true;
-  }
-}
-
 function confirmCaptureDialog(): void {
-  captureConfirmShown.value = true;
-  try {
-    localStorage.setItem(CAPTURE_CONFIRM_KEY, "1");
-  } catch {
-    // 写不进去只意味着下次会再弹一次，可接受。
-  }
   showCaptureConfirm.value = false;
   void applyCaptureToggle();
 }
@@ -1246,7 +1230,7 @@ onUnmounted(() => {
           <label
             v-if="selectedIsTriKey"
             class="toggle-row"
-            title="返回 / 音量± 这三个键 Windows 平时看不见，需要开启此功能才能使用。开启时系统会弹窗询问一次；关闭即停，不用重复询问。升级或重装无线麦后需重新开启。个别带防作弊的游戏可能与此功能冲突，玩游戏前建议先关闭。"
+            title="返回/音量+/音量-三个键需要开启此功能才能使用。"
           >
             <span>全按键支持</span>
             <input
