@@ -14,7 +14,7 @@ describe("remote battery", () => {
     const wrapper = mount(BatteryIndicator, { props: { connection: connection(level) } });
     expect(wrapper.text()).toBe(`${level}%`);
     expect(wrapper.classes("low")).toBe(level <= 20);
-    expect(wrapper.attributes("title")).toContain("Windows 缓存");
+    expect(wrapper.attributes("title")).toContain("随遥控器上报更新");
   });
 
   it.each([undefined, null, -1, 101, 0.5, NaN, Infinity])("keeps missing/invalid %s unknown", (level) => {

@@ -34,6 +34,11 @@ const AUDIO_UUID: GUID = GUID::from_u128(0xab5e00035a214f05bc7daf01f617b664);
 const CONTROL_UUID: GUID = GUID::from_u128(0xab5e00045a214f05bc7daf01f617b664);
 const DEVICE_INFORMATION_SERVICE_UUID: GUID = GUID::from_u128(0x0000180a00001000800000805f9b34fb);
 const MODEL_NUMBER_UUID: GUID = GUID::from_u128(0x00002a2400001000800000805f9b34fb);
+/// 标准 Battery Service（0x180F）与 Battery Level（0x2A19）。真机证据：RC003
+/// 0x2A19 props=read|notify，订阅后 0.5s 内即推送当前电量
+/// （hardware/RC003/evidence/gatt-probe-listen1.log）。
+const BATTERY_SERVICE_UUID: GUID = GUID::from_u128(0x0000180f00001000800000805f9b34fb);
+const BATTERY_LEVEL_UUID: GUID = GUID::from_u128(0x00002a1900001000800000805f9b34fb);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
@@ -1826,6 +1831,12 @@ struct BleSession {
     audio_token: i64,
     control_token: i64,
     connection_token: i64,
+    /// GATT 电量订阅（0x180F/0x2A19，可选增强）：订阅成功时持有三件套并在
+    /// cleanup 成对释放；失败或设备无 BAS 时为 None，由 60s 缓存轮询兜底。
+    battery_service: Option<GattDeviceService>,
+    battery_characteristic: Option<GattCharacteristic>,
+    battery_token: Option<i64>,
+    battery_service_closed: bool,
     /// ThroughputOptimized 连接参数请求（2026-09-07 新增）：持有以维持偏好
     /// 生效；Windows 11 前的宿主上请求失败时为 None（降级默认参数）。
     params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
@@ -1898,6 +1909,10 @@ impl PendingBleConnection {
             model,
             device: self.device.take().expect("pending BLE device is owned"),
             service: self.service.take().expect("pending GATT service is owned"),
+            battery_service: None,
+            battery_characteristic: None,
+            battery_token: None,
+            battery_service_closed: false,
             transmit: self
                 .transmit
                 .take()
@@ -2178,8 +2193,18 @@ impl BleSession {
                 )
             },
         )?;
-        connected.battery_monitor =
-            crate::battery::BatteryMonitor::start(address, battery_sender, connection_generation);
+        // 电量数据路径：GATT 0x2A19 notify 实时订阅优先（best-effort，内部
+        // 已含完整回滚与日志）；订阅失败或设备无 BAS 时回退 60 秒 Windows
+        // 属性缓存轮询兜底（use_cache_monitor 决策，battery.rs 单测覆盖）。
+        let battery_notify_ready =
+            connected.setup_battery_notify(battery_sender.clone(), connection_generation);
+        if crate::battery::use_cache_monitor(battery_notify_ready) {
+            connected.battery_monitor = crate::battery::BatteryMonitor::start(
+                address,
+                battery_sender,
+                connection_generation,
+            );
+        }
         Ok(connected)
     }
 
@@ -2204,6 +2229,71 @@ impl BleSession {
         }
         .map_err(windows_error)?;
         require_success(block_on(operation)?, "写入 ATVV 控制命令")
+    }
+
+    /// 订阅 GATT Battery Service（0x180F/0x2A19）电量通知。可选增强、
+    /// best-effort：任何一步失败都清理本函数已获取的对象并返回 false，
+    /// 由调用方回退到 60 秒 Windows 缓存轮询；绝不向上传播错误——电量
+    /// 是锦上添花，不能影响语音主路径（AGENTS.md 架构边界）。
+    fn setup_battery_notify(
+        &mut self,
+        sender: Sender<WorkerMessage>,
+        connection_generation: u64,
+    ) -> bool {
+        gatt_note("remote_battery phase=gatt_subscribe_start".to_owned());
+        let Some(service) = find_battery_service(&self.device) else {
+            gatt_note(
+                "remote_battery phase=gatt_subscribe result=fallback reason=battery_service_missing"
+                    .to_owned(),
+            );
+            return false;
+        };
+        let characteristic = match find_characteristic(
+            &service,
+            BATTERY_LEVEL_UUID,
+            "battery_level",
+        ) {
+            Ok(characteristic) => characteristic,
+            Err(error) => {
+                let _ = service.Close();
+                gatt_note(format!(
+                        "remote_battery phase=gatt_subscribe result=fallback reason=characteristic_missing error={error}"
+                    ));
+                return false;
+            }
+        };
+        let token = match subscribe(
+            &characteristic,
+            sender.clone(),
+            WorkerChannel::Battery,
+            connection_generation,
+        ) {
+            Ok(token) => token,
+            Err(error) => {
+                let _ = service.Close();
+                gatt_note(format!(
+                    "remote_battery phase=gatt_subscribe result=fallback reason=subscribe_failed error={error}"
+                ));
+                return false;
+            }
+        };
+        self.battery_service = Some(service);
+        self.battery_characteristic = Some(characteristic);
+        self.battery_token = Some(token);
+        // 订阅成功后立即读一次初始值：多数设备订阅时也会推一次，重复到达
+        // 无害（同一电量幂等覆盖）；个别设备只在变化时推送，这一读保证 UI
+        // 不必等到第一次变化才显示电量。
+        read_battery_level_initial(
+            self.battery_characteristic
+                .as_ref()
+                .expect("battery characteristic is owned"),
+            &sender,
+            connection_generation,
+        );
+        gatt_note(
+            "remote_battery phase=gatt_subscribe result=passed source=gatt_notify".to_owned(),
+        );
+        true
     }
 
     fn request_microphone_open(&mut self, version: u16, codec: u8) -> Result<(), PlatformError> {
@@ -2247,6 +2337,24 @@ impl BleSession {
             self.cleanup_started = true;
             self.battery_monitor.take();
             let mut best_effort_failures = 0u32;
+            if let Some(token) = self.battery_token.take() {
+                if let Some(characteristic) = &self.battery_characteristic {
+                    if characteristic.RemoveValueChanged(token).is_err() {
+                        best_effort_failures += 1;
+                    }
+                }
+            }
+            if let Some(characteristic) = &self.battery_characteristic {
+                if disable_notifications(characteristic).is_err() {
+                    best_effort_failures += 1;
+                }
+            }
+            if let Some(service) = self.battery_service.take() {
+                match service.Close() {
+                    Ok(()) => self.battery_service_closed = true,
+                    Err(_) => best_effort_failures += 1,
+                }
+            }
             if self.audio.RemoveValueChanged(self.audio_token).is_err() {
                 best_effort_failures += 1;
             }
@@ -2300,14 +2408,15 @@ impl BleSession {
         self.closed = self.service_closed && self.device_closed;
         if errors.is_empty() {
             gatt_note(format!(
-                "ble_session_cleanup phase=completed terminal_result=passed retrying={retrying}"
+                "ble_session_cleanup phase=completed terminal_result=passed retrying={retrying} battery_service_closed={}",
+                self.battery_service_closed
             ));
             Ok(())
         } else {
             let error = errors.join("；");
             gatt_note(format!(
-                "ble_session_cleanup phase=completed terminal_result=failed retrying={retrying} service_closed={} device_closed={} retryable=true",
-                self.service_closed, self.device_closed
+                "ble_session_cleanup phase=completed terminal_result=failed retrying={retrying} service_closed={} device_closed={} battery_service_closed={} retryable=true",
+                self.service_closed, self.device_closed, self.battery_service_closed
             ));
             Err(PlatformError::BleCleanup(error))
         }
@@ -2353,6 +2462,9 @@ impl Drop for BleSession {
 enum WorkerChannel {
     Audio,
     Control,
+    /// GATT Battery Service 0x2A19 电量通知：回调内解析为百分比后复用
+    /// BatteryRead 消息（纪元 + phase 校验与缓存轮询路径完全一致）。
+    Battery,
 }
 
 #[derive(Debug, Clone)]
@@ -2652,21 +2764,25 @@ fn subscribe(
     connection_generation: u64,
 ) -> Result<i64, PlatformError> {
     let callback_sender = sender.clone();
-    let handler =
-        TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(move |_, args| {
+    let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
+        move |_, args| {
             let result = args
                 .ok()
                 .and_then(|args| args.CharacteristicValue())
                 .and_then(|buffer| buffer_to_vec(&buffer));
             match result {
                 Ok(bytes) => {
-                    gatt_log(
-                        match channel {
-                            WorkerChannel::Audio => "A",
-                            WorkerChannel::Control => "C",
-                        },
-                        &bytes,
-                    );
+                    // 电量通知低频且单字节，走结构化 note，不落原始包。
+                    if !matches!(channel, WorkerChannel::Battery) {
+                        gatt_log(
+                            match channel {
+                                WorkerChannel::Audio => "A",
+                                WorkerChannel::Control => "C",
+                                WorkerChannel::Battery => unreachable!(),
+                            },
+                            &bytes,
+                        );
+                    }
                     // 控制通知（遥控器按键活动，含语音会话 0x04）：在此刻
                     // ——GATT 回调线程，刚被事件唤醒、不经工作线程队列——
                     // 直接武装 F5 抑制宽限。遥控器闲置后首按时应用自身被
@@ -2687,6 +2803,22 @@ fn subscribe(
                             connection_generation,
                             bytes,
                         },
+                        WorkerChannel::Battery => {
+                            let reading = crate::battery::gatt_level_reading(&bytes, "gatt_notify");
+                            gatt_note(format!(
+                                "remote_battery phase=notify source={} reason={} level={} connection_generation={}",
+                                reading.source,
+                                reading.reason,
+                                reading
+                                    .level
+                                    .map_or_else(|| "unknown".to_owned(), |level| level.to_string()),
+                                connection_generation,
+                            ));
+                            WorkerMessage::BatteryRead {
+                                connection_generation,
+                                reading,
+                            }
+                        }
                     };
                     let _ = callback_sender.send(message);
                 }
@@ -2698,7 +2830,8 @@ fn subscribe(
                 }
             }
             Ok(())
-        });
+        },
+    );
     let token = characteristic
         .ValueChanged(&handler)
         .map_err(windows_error)?;
@@ -2763,6 +2896,68 @@ fn find_service(
         return Err(PlatformError::VoiceServiceMissing);
     }
     services.GetAt(0).map_err(windows_error)
+}
+
+/// best-effort 定位标准 Battery Service（0x180F）。设备固件没有 BAS、
+/// 服务数量异常或查询失败都返回 None，由调用方回退缓存轮询。
+fn find_battery_service(device: &BluetoothLEDevice) -> Option<GattDeviceService> {
+    let result = block_on(
+        device
+            .GetGattServicesForUuidWithCacheModeAsync(
+                BATTERY_SERVICE_UUID,
+                BluetoothCacheMode::Uncached,
+            )
+            .ok()?,
+    )
+    .ok()?;
+    if result.Status().ok()? != GattCommunicationStatus::Success {
+        return None;
+    }
+    let services = result.Services().ok()?;
+    if services.Size().ok()? != 1 {
+        return None;
+    }
+    services.GetAt(0).ok()
+}
+
+/// 订阅成功后读一次当前电量作为初始值（best-effort，失败仅记录）。
+fn read_battery_level_initial(
+    characteristic: &GattCharacteristic,
+    sender: &Sender<WorkerMessage>,
+    connection_generation: u64,
+) {
+    let started = Instant::now();
+    let outcome = (|| -> Option<crate::battery::BatteryReading> {
+        let result = block_on(characteristic.ReadValueAsync().ok()?).ok()?;
+        if result.Status().ok()? != GattCommunicationStatus::Success {
+            return None;
+        }
+        let bytes = buffer_to_vec(&result.Value().ok()?).ok()?;
+        Some(crate::battery::gatt_level_reading(&bytes, "gatt_read"))
+    })();
+    match outcome {
+        Some(reading) => {
+            gatt_note(format!(
+                "remote_battery phase=initial_read source={} reason={} level={} elapsed_ms={} connection_generation={}",
+                reading.source,
+                reading.reason,
+                reading
+                    .level
+                    .map_or_else(|| "unknown".to_owned(), |level| level.to_string()),
+                started.elapsed().as_millis(),
+                connection_generation,
+            ));
+            let _ = sender.send(WorkerMessage::BatteryRead {
+                connection_generation,
+                reading,
+            });
+        }
+        None => gatt_note(format!(
+            "remote_battery phase=initial_read result=failed elapsed_ms={} connection_generation={}",
+            started.elapsed().as_millis(),
+            connection_generation,
+        )),
+    }
 }
 
 fn find_characteristic(
