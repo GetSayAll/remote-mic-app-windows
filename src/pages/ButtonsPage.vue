@@ -972,6 +972,17 @@ async function applyCaptureToggle() {
 /** 页面统一展示全按键支持；开关关闭时，非三键仍沿用原有输入路径。 */
 onMounted(async () => {
   const setupStarted = performance.now();
+  // 画布宽度必须在首个 await 之前同步测量。canvasWidth 初值是
+  // CANVAS_MIN_WIDTH(800)，而容器实际宽 926（1100 窗口）；若等挂载首批
+  // IPC（下方 Promise.all）返回后再测，首帧会以 800 布局、随后跳到 926，
+  // 画布内所有元素（遥控器图/左右卡片/连线箭头）整体水平重排——真机 IPC
+  // 跨进程有延迟必然跨帧，用户看到"点按键页整页左右抖一下"（2026-09-28
+  // 实测：注入 300ms 延迟后遥控器图 +63px、右列卡片 −30px、连线箭头
+  // +96px；浏览器预览因 Promise 同帧 resolve 不复现）。同步测量后首帧
+  // 即真实宽度，后续窗口变化仍由 ResizeObserver 接管。
+  if (canvasEl.value) {
+    canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, canvasEl.value.clientWidth);
+  }
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
   window.addEventListener("blur", handleCaptureBlur);
@@ -1064,9 +1075,9 @@ onMounted(async () => {
   }, 1_000);
 
   // 流式画布：观测容器宽（不足最小画布 800px 时保持 800 由 CSS 缩放兜底）。
+  // 首次宽度已在 onMounted 同步段测过（见函数开头），此处只订阅后续变化。
   // jsdom 测试环境无 ResizeObserver，跳过观测。
   if (canvasEl.value && typeof ResizeObserver !== "undefined") {
-    canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, canvasEl.value.clientWidth);
     resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, Math.round(entry.contentRect.width));
