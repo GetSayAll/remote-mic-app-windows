@@ -85,6 +85,8 @@ let voiceCaptureTimeout: number | null = null;
 let voiceCaptureRequestId = 0;
 let unmounted = false;
 const voiceCapturePressed = new Set<KeyCode>();
+/** 本次录入会话按过的全部按键（按首次按下顺序，去重）。 */
+const voiceCaptureEverPressed: KeyCode[] = [];
 let voiceCapturedKeys: KeyCode[] | null = null;
 
 /** 按住说话快捷键默认值（v1 固定，适配微信输入法的默认语音热键）。 */
@@ -146,6 +148,7 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
       return;
     }
     voiceCapturePressed.clear();
+    voiceCaptureEverPressed.length = 0;
     voiceCapturedKeys = null;
     voiceCaptureDisplay.value = [];
     capturingVoiceHotkey.value = true;
@@ -168,6 +171,7 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   voiceCapturePressed.clear();
+  voiceCaptureEverPressed.length = 0;
   const keys = voiceCapturedKeys;
   voiceCapturedKeys = null;
   voiceCaptureDisplay.value = [];
@@ -183,22 +187,21 @@ async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> 
   if (!capturingVoiceHotkey.value) return;
   const { key, isPressed } = edge;
   if (!isPressed) {
-    const wasPressed = voiceCapturePressed.delete(key);
+    voiceCapturePressed.delete(key);
     if (voiceCapturedKeys) {
       voiceCaptureDisplay.value = voiceCapturedKeys;
       if (voiceCapturePressed.size === 0) await finishVoiceHotkeyCapture();
       return;
     }
-    // 单独按下并松开一个修饰键本身就是一个合法快捷键（豆包输入法即"长按右
-    // Alt"），在没有任何主键参与时按它落盘；录入结果同时显示在页面上，
-    // 误触可再次录入或选回默认。
-    if (wasPressed && CAPTURE_MODIFIER_KEYS.has(key) && voiceCapturePressed.size === 0) {
-      voiceCapturedKeys = [key];
+    // 组合里没有主键时（默认的 左 Ctrl + 左 Win、豆包的"长按右 Alt"都是这种），
+    // 在最后一个按键松开时按本次会话按过的全部修饰键落盘。不能只看最后松开
+    // 的那个键：Ctrl+Win 先松 Win 会把组合截断成只剩 Ctrl（Bugs/2026-09-27）。
+    // 能走到这里说明会话里没有主键（主键按下时即成组），故全部是修饰键。
+    if (voiceCapturePressed.size === 0 && voiceCaptureEverPressed.length > 0) {
+      voiceCapturedKeys = [...voiceCaptureEverPressed];
       voiceCaptureDisplay.value = voiceCapturedKeys;
       await finishVoiceHotkeyCapture();
-      return;
     }
-    voiceCaptureDisplay.value = [...voiceCapturePressed];
     return;
   }
   // 已经拿到终止键后继续保持原生拦截，直到本次组合的所有 DOWN 都收到配对 UP。
@@ -208,6 +211,7 @@ async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> 
     return;
   }
   voiceCapturePressed.add(key);
+  if (!voiceCaptureEverPressed.includes(key)) voiceCaptureEverPressed.push(key);
   if (CAPTURE_MODIFIER_KEYS.has(key)) {
     voiceCaptureDisplay.value = [...voiceCapturePressed];
     return;
