@@ -208,10 +208,9 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, KillTimer, PeekMessageW, PostThreadMessageW,
-        SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
-        LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT,
-        WM_TIMER,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+        LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -232,18 +231,6 @@ mod windows_impl {
     /// 常见物理键 VK 不能直接归因，>4s 间隔的孤立首按泄漏仍是结构性残留
     /// （Helper 轨解决；同键映射的泄漏由映射引擎对冲，见 button_mapping.rs）。
     const ARM_GRACE_MS: u64 = 4_000;
-    /// 链头 bump 的线程消息（WM_APP 私有区，与 key_suppressor 错开）。
-    const WM_HOOK_BUMP: u32 = WM_APP + 0x61;
-    const BUMP_TIMER_ID: usize = 0x6A71;
-    const BUMP_TIMER_MS: u32 = 10_000;
-    /// 录入会话期间把 bump 定时器切到短周期（wParam 携带周期毫秒数），
-    /// 停止时恢复 [`BUMP_TIMER_MS`]。微信输入法等目标会在输入焦点变化时
-    /// 重建自己的 LL 钩子抢占链头（实测 2026-09-27：录入开始单次 bump
-    /// 之后仍可能被抢回，"大多时候录不全"）；录入期间以 200ms 周期保持
-    /// 链头，把竞态窗口压到单个按键间隔以下。
-    const WM_CAPTURE_BUMP: u32 = WM_APP + 0x62;
-    const CAPTURE_BUMP_TIMER_MS: u32 = 200;
-
     static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SHORTCUT_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SHORTCUT_CAPTURE_PREHELD: [AtomicBool; 256] = {
@@ -274,8 +261,6 @@ mod windows_impl {
     };
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
-    /// 链头 bump 请求计数（功能点日志/测试观测：录入开始必须发起一次 bump）。
-    static HOOK_BUMP_REQUESTS: AtomicU64 = AtomicU64::new(0);
     /// 录入会话期间进入捕获处理器的真实键盘事件数（钩子健康度探针：
     /// 会话内用户按键但该计数不涨 ⇒ 物理边沿根本没到本钩子，问题在钩子
     /// 链位置/安装失败，而非投递门控）。
@@ -294,9 +279,6 @@ mod windows_impl {
     static HOOK_BUMPS_OK: AtomicU64 = AtomicU64::new(0);
     static HOOK_BUMPS_FAILED: AtomicU64 = AtomicU64::new(0);
     static LAST_HOOK_ERROR: AtomicU64 = AtomicU64::new(0);
-    /// bump 定时器实际触发次数（录入期间应为 5 次/秒；不涨 ⇒ 定时器
-    /// 未生效或钩子线程被阻塞）。
-    static TIMER_BUMPS: AtomicU64 = AtomicU64::new(0);
     /// 被吞键盘边沿的投递端（映射引擎注册；闭包形式避免模块间类型耦合）。
     static EDGE_SINK: OnceLock<Arc<dyn Fn(ButtonEdge) + Send + Sync>> = OnceLock::new();
     static SHORTCUT_CAPTURE_SINK: OnceLock<super::ShortcutCaptureCallback> = OnceLock::new();
@@ -647,33 +629,17 @@ mod windows_impl {
                 return;
             }
             HOOK_THREAD_ID.store(GetCurrentThreadId() as u64, Ordering::Relaxed);
-            // hWnd=NULL 的线程定时器**忽略传入的 nIDEvent**（Win32 文档："If this
-            // parameter is NULL ... the nIDEvent parameter is ignored"），WM_TIMER
-            // 的 wParam 是系统分配的 id。必须按 SetTimer 的返回值匹配——按传入
-            // id 匹配会让定时 bump 永不执行（2026-09-27 hw 探针实证：传入 0x6A71
-            // 时 12s 内 ticks=0；按返回值匹配后同一场景 ticks=63）。
-            let mut bump_timer = SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
             GATE_ACTIVE.store(true, Ordering::Relaxed);
 
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                // 消息泵是 LL 钩子投递的必要条件（钩子回调经本线程消息队列投递）。
+                // 2026-09-27 起不再有任何"重装钩子抢链头"的定时/消息驱动：LL 钩子链
+                // 为 FIFO（最早安装最先调用，见
+                // docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md），
+                // 重装只会把本钩子推向链尾；钩子只在启动时安装一次。
                 match message.message {
                     WM_QUIT => break,
-                    WM_HOOK_BUMP => bump_to_chain_head(&mut current),
-                    WM_CAPTURE_BUMP => {
-                        // 录入期间短周期保持链头 / 停止时恢复常驻周期
-                        //（wParam 携带周期毫秒数）。旧定时器按实际 id 杀掉，
-                        // 避免系统分配新 id 后残留多个定时器叠加。
-                        if bump_timer != 0 {
-                            KillTimer(None, bump_timer);
-                        }
-                        bump_timer =
-                            SetTimer(None, BUMP_TIMER_ID, message.wParam.0.max(1) as u32, None);
-                    }
-                    WM_TIMER if message.wParam.0 as usize == bump_timer => {
-                        TIMER_BUMPS.fetch_add(1, Ordering::Relaxed);
-                        bump_to_chain_head(&mut current)
-                    }
                     _ => {}
                 }
                 let _ = TranslateMessage(&message);
@@ -796,38 +762,14 @@ mod windows_impl {
         let _ = SHORTCUT_CAPTURE_SINK.set(sink);
     }
 
-    /// 请求把本钩子重新安装到 LL 链头（先挂新钩再卸旧钩，无吞键空窗）。
-    ///
-    /// 为什么录入开始必须 bump：微信输入法等目标会在本应用之后（重）安装自己的
-    /// WH_KEYBOARD_LL 钩子（IME 在输入焦点变化时重建钩子），其语音和弦判定
-    /// 先于本钩子看到物理边沿。当录入的组合恰好等于 IME 的语音和弦（实测
-    /// 2026-09-27：按住说话快捷键=左Alt+左Win 时重录该组合），IME 会把完成键
-    /// 的 DOWN/UP 整对吞掉——本钩子完全看不到 LeftWindows 边沿，前端只按
-    /// 先松开的单个修饰键落盘（"只剩左 Alt"）。录入开始时 bump 到链头，
-    /// 本钩子先于所有外部钩子成对吞下并投递录入通道；IME 在录入期间看不到
-    /// 任何按键，也不会误触发语音。
-    pub fn request_hook_bump() {
-        HOOK_BUMP_REQUESTS.fetch_add(1, Ordering::Relaxed);
-        let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
-        if thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(thread_id as u32, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-
-    pub fn hook_bump_request_count() -> u64 {
-        HOOK_BUMP_REQUESTS.load(Ordering::Relaxed)
-    }
-
     /// 录入诊断快照（lib.rs 在开始/停止日志中记录；只读原子，任意线程可调用）。
-    /// 判据：`keys_seen` 不涨 ⇒ 物理边沿没到本钩子（链位置/钩子被移除）；
-    /// `injected_skipped` 涨 ⇒ 外部钩子"吞下 + 重注入"；`bumps_failed` 涨 ⇒
-    /// 链头提升失败（`last_bump_error` 为 Win32 错误码）；`timer_bumps` 不涨 ⇒
-    /// 录入期间定时 bump 未生效。
+    /// 判据：`keys_seen` 不涨 ⇒ 物理边沿没到本钩子（被更早安装的外部钩子吞掉，
+    /// 链序 FIFO，见 docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md）；
+    /// `injected_skipped` 涨 ⇒ 外部钩子"吞下 + 重注入"；`calls_total` 是钩子被
+    /// 系统调用的健康度基线（含未录入期间的每一键）。
     pub fn capture_diagnostics_summary() -> String {
         format!(
-            "keys_seen={} injected_skipped={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={} timer_bumps={}",
+            "keys_seen={} injected_skipped={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={}",
             CAPTURE_KEYS_SEEN.load(Ordering::Relaxed),
             CAPTURE_INJECTED_SKIPPED.load(Ordering::Relaxed),
             HOOK_CALLS_TOTAL.load(Ordering::Relaxed),
@@ -837,7 +779,6 @@ mod windows_impl {
             HOOK_BUMPS_OK.load(Ordering::Relaxed),
             HOOK_BUMPS_FAILED.load(Ordering::Relaxed),
             LAST_HOOK_ERROR.load(Ordering::Relaxed),
-            TIMER_BUMPS.load(Ordering::Relaxed),
         )
     }
 
@@ -845,23 +786,14 @@ mod windows_impl {
         if active && !GATE_ACTIVE.load(Ordering::Relaxed) {
             return false;
         }
-        let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
         if active {
-            // 先把钩子提到链头再开录入（见 request_hook_bump 文档），并在
-            // 录入期间以短周期定时保持链头，压制外部钩子重建的竞态。
-            request_hook_bump();
-            if thread_id != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(
-                        thread_id as u32,
-                        WM_CAPTURE_BUMP,
-                        WPARAM(CAPTURE_BUMP_TIMER_MS as usize),
-                        LPARAM(0),
-                    );
-                }
-            }
             // preheld 扫描：只扫钩子会报告的键盘 VK（is_hook_reported_vk），
             // 否则通用/鼠标 VK 的"按下"标志永远等不到释放沿清除。
+            //
+            // 注意：录音期**不做**任何钩子重装。输入法（微信输入法）的语音和弦
+            // 与其钩子先于本应用安装，必须由应用层先让位（录入命令在主线程调用
+            // sayall_windows::suspend_input_method_for_capture 把输入区域切到非
+            // IME 布局），否则物理边沿到不了本钩子。
             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
             let mut preheld = Vec::new();
             let mut pending = 0usize;
@@ -880,17 +812,6 @@ mod windows_impl {
             }
             PREHELD_PENDING_COUNT.store(pending, Ordering::Relaxed);
             *super::PREHELD_CAPTURE_DRAIN.lock().unwrap() = preheld;
-        } else if thread_id != 0 {
-            // 录入结束恢复常驻 bump 周期；preheld 标志留待释放沿清除
-            //（或下次开始时重新扫描覆盖）。
-            unsafe {
-                let _ = PostThreadMessageW(
-                    thread_id as u32,
-                    WM_CAPTURE_BUMP,
-                    WPARAM(BUMP_TIMER_MS as usize),
-                    LPARAM(0),
-                );
-            }
         }
         SHORTCUT_CAPTURE_ACTIVE.store(active, Ordering::Relaxed);
         true
@@ -916,11 +837,10 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, capture_diagnostics_summary, configure, decide, hook_bump_request_count,
-    is_gate_thread_alive, leaked_down_count, listener_active, request_hook_bump, set_edge_sink,
-    set_listener_active, set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
-    set_shortcut_capture_sink, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
-    HOLD_SWALLOWED_ALL,
+    arm_button, capture_diagnostics_summary, configure, decide, is_gate_thread_alive,
+    leaked_down_count, listener_active, set_edge_sink, set_listener_active, set_persistent_mask,
+    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
+    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -953,11 +873,8 @@ mod fallback {
     pub fn swallowed_edge_count() -> u64 {
         0
     }
-    pub fn hook_bump_request_count() -> u64 {
-        0
-    }
     pub fn capture_diagnostics_summary() -> String {
-        "keys_seen=0 injected_skipped=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0 timer_bumps=0"
+        "keys_seen=0 injected_skipped=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0"
             .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
@@ -1164,19 +1081,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn capture_start_requests_hook_bump() {
-        // request_hook_bump 不依赖钩子线程存在（thread_id=0 时只计数不投递）：
-        // 录入开始的链头提升请求必须始终可观测（2026-09-27 IME 和弦吞边沿修复）。
-        // 注意：本套件另有测试并发启动真实门控（GATE_ACTIVE 为进程级全局），
-        // 故此处不断言 set_shortcut_capture_active 的门控拒绝路径，避免
-        // 跨测试全局状态串扰；拒绝路径本身未被本次修改。
-        let before = hook_bump_request_count();
-        request_hook_bump();
-        assert_eq!(hook_bump_request_count(), before + 1);
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn capture_diagnostics_summary_exposes_all_probe_fields() {
         // 诊断字段名是日志契约（真机归因直接依赖）：拼写漂移会让"零边沿"
         // 类报障失去可观测性，此处锁定字段集合。
@@ -1191,7 +1095,6 @@ mod tests {
             "bumps_ok=",
             "bumps_failed=",
             "last_bump_error=",
-            "timer_bumps=",
         ] {
             assert!(summary.contains(field), "missing {field} in {summary}");
         }

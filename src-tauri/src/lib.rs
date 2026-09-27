@@ -653,13 +653,44 @@ fn get_button_mapping_snapshot(
     state.platform.button_mapping_snapshot()
 }
 
+/// 在应用主线程（= 录入窗口所在线程）上执行输入区域让位/恢复并取回日志片段。
+/// 输入区域按线程生效，必须在窗口线程调用；有界等待防卡命令线程。
+fn run_ime_yield_on_window_thread(app: &tauri::AppHandle, task: fn() -> String) -> Option<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(task());
+    })
+    .ok()?;
+    receiver
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .ok()
+}
+
 #[tauri::command]
-fn start_shortcut_capture() -> Result<Vec<sayall_windows::send_input::KeyCode>, String> {
+fn start_shortcut_capture(
+    app: tauri::AppHandle,
+) -> Result<Vec<sayall_windows::send_input::KeyCode>, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
-        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only hook_bump=requested reason=ime_chord_may_preempt".to_owned(),
+        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only ime_yield=pending".to_owned(),
     );
+    // 录入期让位（路线①）：LL 钩子链为 FIFO，输入法钩子先于本应用安装，其语音和弦
+    // 的物理边沿到不了本钩子（见 docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md）。
+    // 先把录入窗口线程的输入区域切到非 IME 布局，让输入法的和弦判定失效，物理边沿
+    // 得以直达本钩子；录入结束（stop）恢复。
+    match run_ime_yield_on_window_thread(&app, sayall_windows::suspend_input_method_for_capture) {
+        Some(note) => sayall_windows::gatt_note(note),
+        None => sayall_windows::gatt_note(
+            "capture_ime_yield outcome=unavailable reason=window_thread_timeout".to_owned(),
+        ),
+    }
     if !sayall_windows::key_gate::set_shortcut_capture_active(true) {
+        // 让位已发生但门控不可用：立即恢复布局，避免留下非 IME 输入区域。
+        if let Some(note) =
+            run_ime_yield_on_window_thread(&app, sayall_windows::restore_input_method_after_capture)
+        {
+            sayall_windows::gatt_note(note);
+        }
         sayall_windows::gatt_note(format!(
             "shortcut_capture action=start phase=completed terminal_result=failed error_domain=keyboard_hook error_code=gate_unavailable reason=hook_not_active retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
@@ -668,8 +699,7 @@ fn start_shortcut_capture() -> Result<Vec<sayall_windows::send_input::KeyCode>, 
     }
     let preheld = sayall_windows::key_gate::take_preheld_capture_keys();
     sayall_windows::gatt_note(format!(
-        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} preheld_count={} preheld_keys={:?} elapsed_ms={} {}",
-        sayall_windows::key_gate::hook_bump_request_count(),
+        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only preheld_count={} preheld_keys={:?} elapsed_ms={} {}",
         preheld.len(),
         preheld,
         started.elapsed().as_millis(),
@@ -679,8 +709,15 @@ fn start_shortcut_capture() -> Result<Vec<sayall_windows::send_input::KeyCode>, 
 }
 
 #[tauri::command]
-fn stop_shortcut_capture() {
+fn stop_shortcut_capture(app: tauri::AppHandle) {
     let _ = sayall_windows::key_gate::set_shortcut_capture_active(false);
+    // 恢复录入前的输入区域布局（让位撤销，输入法回到该窗口会话）。
+    match run_ime_yield_on_window_thread(&app, sayall_windows::restore_input_method_after_capture) {
+        Some(note) => sayall_windows::gatt_note(note),
+        None => sayall_windows::gatt_note(
+            "capture_ime_restore outcome=unavailable reason=window_thread_timeout".to_owned(),
+        ),
+    }
     sayall_windows::gatt_note(format!(
         "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired {}",
         sayall_windows::key_gate::capture_diagnostics_summary()
@@ -1068,10 +1105,6 @@ fn register_shortcut_capture_events(app: tauri::AppHandle) {
         .name("sayall-shortcut-capture-events".to_owned())
         .spawn(move || {
             while let Ok(edge) = receiver.recv() {
-                // 每投递一条边沿就异步重抢 LL 链头（PostThreadMessage，不阻塞本线程）：
-                // 组合的第一个键进来后数十毫秒内本钩子必然回到链头，完成键不会再
-                // 被外部钩子（微信输入法等）抢吞（2026-09-27 真机"只剩第一个键"根因）。
-                sayall_windows::key_gate::request_hook_bump();
                 sayall_windows::gatt_note(format!(
                     "shortcut_capture action=edge phase=observed key={:?} edge={} delivery=webview",
                     edge.key,

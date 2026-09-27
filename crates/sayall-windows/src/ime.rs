@@ -331,3 +331,180 @@ fn sta_ensure_wetype() -> Result<WeTypeActivation, String> {
         result
     }
 }
+// ─── 录入期"输入法让位"（路线①，2026-09-27）───────────────────────────────
+//
+// 背景：LL 键盘钩子链为 FIFO（最早安装最先调用，见
+// docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md）。微信输入法随
+// 登录先于本应用安装钩子，其语音和弦（= 用户在「按住说话快捷键」中配置的组合）
+// 的物理边沿在到达本应用录入钩子之前就被它吞掉，表现为"已配置的组合录不进去"。
+//
+// 本模块头（2026-09-05 实验）已实锤：输入法的语音热键**只有当它是当前会话的
+// 活动输入法时才生效**。因此录入期间把录入窗口所在线程的输入区域临时切到
+// 非 IME 布局，其和弦判定即失效，物理边沿直达本应用钩子；录入结束恢复。
+// 布局按线程生效且只作用于本应用窗口，不影响其他应用的输入法状态。
+//
+// 已知风险（需真机确认）：TSF/输入区域变更在本仓库曾出现"前台是自身 WebView
+// 时整页重载"（Bugs/2026-09-12）；本实现用 ActivateKeyboardLayout（非 TSF 配置
+// 切换），是否触发重载待实测。
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use windows::Win32::UI::Input::Ime::ImmIsIME;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ActivateKeyboardLayout, GetKeyboardLayoutList, LoadKeyboardLayoutW,
+    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, KLF_ACTIVATE,
+};
+
+/// 让位计划（纯逻辑，供单测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YieldPlan {
+    /// 当前布局不是 IME（或未知）——无需让位。
+    NotNeeded,
+    /// 切到该非 IME 布局。
+    SwitchTo(usize),
+    /// 系统里没有非 IME 布局，且加载 en-US 也失败。
+    NoCandidate,
+}
+
+/// 选择录入期让位方案：当前布局是 IME 时，从候选里挑第一个非 IME 布局。
+pub fn plan_input_method_yield(
+    current: usize,
+    candidates: &[usize],
+    is_ime: impl Fn(usize) -> bool,
+) -> YieldPlan {
+    if current == 0 || !is_ime(current) {
+        return YieldPlan::NotNeeded;
+    }
+    match candidates
+        .iter()
+        .copied()
+        .find(|hkl| *hkl != current && !is_ime(*hkl))
+    {
+        Some(hkl) => YieldPlan::SwitchTo(hkl),
+        None => YieldPlan::NoCandidate,
+    }
+}
+
+/// 录入前的原始布局（0 = 无让位进行中）。
+static CAPTURE_ORIGINAL_LAYOUT: AtomicUsize = AtomicUsize::new(0);
+
+fn hkl_to_usize(hkl: HKL) -> usize {
+    hkl.0 as usize
+}
+
+/// 录入开始时调用。
+///
+/// **必须在录入窗口所在线程上执行**（输入区域按线程生效；应用里即主线程）。
+/// 返回结构化日志片段（调用方写入诊断日志）。让位失败不阻断录入——只是该
+/// 组合可能仍被输入法吞掉，日志里可归因。
+pub fn suspend_input_method_for_capture() -> String {
+    unsafe {
+        let current = current_thread_layout();
+        let mut list = [HKL::default(); 32];
+        let count = GetKeyboardLayoutList(Some(&mut list));
+        let candidates: Vec<usize> = list[..(count.max(0) as usize)]
+            .iter()
+            .map(|hkl| hkl_to_usize(*hkl))
+            .collect();
+        let plan = plan_input_method_yield(current, &candidates, |hkl| {
+            ImmIsIME(HKL(hkl as *mut core::ffi::c_void)).as_bool()
+        });
+        match plan {
+            YieldPlan::NotNeeded => {
+                return format!(
+                    "capture_ime_yield outcome=not_needed current_hkl=0x{:04X}",
+                    current & 0xFFFF
+                );
+            }
+            YieldPlan::NoCandidate => {
+                // 兜底：加载 en-US（标准布局，系统随时可加载）。
+                match LoadKeyboardLayoutW(windows::core::w!("00000409"), KLF_ACTIVATE) {
+                    Ok(hkl) => apply_yield(hkl_to_usize(hkl), current),
+                    Err(_) => "capture_ime_yield outcome=no_candidate".to_owned(),
+                }
+            }
+            YieldPlan::SwitchTo(target) => apply_yield(target, current),
+        }
+    }
+}
+
+fn apply_yield(target: usize, original: usize) -> String {
+    unsafe {
+        let activated = ActivateKeyboardLayout(
+            HKL(target as *mut core::ffi::c_void),
+            ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0),
+        );
+        let observed = current_thread_layout();
+        CAPTURE_ORIGINAL_LAYOUT.store(original, Ordering::Relaxed);
+        format!(
+            "capture_ime_yield outcome={} activated={} original_hkl=0x{:04X} target_hkl=0x{:04X} observed_hkl=0x{:04X} switched={}",
+            if observed == target { "switched" } else { "not_switched" },
+            activated.is_ok(),
+            original & 0xFFFF,
+            target & 0xFFFF,
+            observed & 0xFFFF,
+            observed == target
+        )
+    }
+}
+
+/// 录入结束时调用（同样必须在录入窗口所在线程上执行）：恢复原布局。
+pub fn restore_input_method_after_capture() -> String {
+    let original = CAPTURE_ORIGINAL_LAYOUT.swap(0, Ordering::Relaxed);
+    if original == 0 {
+        return "capture_ime_restore outcome=not_needed".to_owned();
+    }
+    unsafe {
+        let restored = ActivateKeyboardLayout(
+            HKL(original as *mut core::ffi::c_void),
+            ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0),
+        );
+        let observed = current_thread_layout();
+        format!(
+            "capture_ime_restore outcome={} restored={} target_hkl=0x{:04X} observed_hkl=0x{:04X}",
+            if observed == original {
+                "restored"
+            } else {
+                "not_restored"
+            },
+            restored.is_ok(),
+            original & 0xFFFF,
+            observed & 0xFFFF
+        )
+    }
+}
+
+/// 调用线程当前的输入区域布局（0 = 线程尚无输入上下文）。
+fn current_thread_layout() -> usize {
+    unsafe { hkl_to_usize(windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0)) }
+}
+
+#[cfg(test)]
+mod yield_plan_tests {
+    use super::{plan_input_method_yield, YieldPlan};
+
+    #[test]
+    fn yields_only_when_current_layout_is_an_ime() {
+        let is_ime = |hkl: usize| hkl == 0x0804;
+        // 当前是 IME（0x0804），候选里有非 IME（0x0409）→ 切换。
+        assert_eq!(
+            plan_input_method_yield(0x0804, &[0x0804, 0x0409], is_ime),
+            YieldPlan::SwitchTo(0x0409)
+        );
+        // 当前不是 IME → 不动（不影响普通键盘布局）。
+        assert_eq!(
+            plan_input_method_yield(0x0409, &[0x0804, 0x0409], is_ime),
+            YieldPlan::NotNeeded
+        );
+        // 无线索（0）→ 不动。
+        assert_eq!(
+            plan_input_method_yield(0, &[0x0804], is_ime),
+            YieldPlan::NotNeeded
+        );
+        // 全是 IME → 交由调用方兜底加载 en-US。
+        let both_are_ime = |hkl: usize| hkl == 0x0804 || hkl == 0x0411;
+        assert_eq!(
+            plan_input_method_yield(0x0804, &[0x0804, 0x0411], both_are_ime),
+            YieldPlan::NoCandidate
+        );
+    }
+}
