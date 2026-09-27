@@ -1015,18 +1015,30 @@ onMounted(async () => {
   }
   unlistenShortcutCapture = stopShortcutCaptureEvents;
 
+  // 授权状态对账（挂载后立即一次 + 每秒一次）。不能只靠 interval：首跳在
+  // 挂载 1 秒后才跑，期间开关一直 disabled——真机上用户进页面头 1 秒点不动、
+  // 无解释；CI 慢机上 waitFor 默认 1000ms 被压线超时（PR #132 实测）。
+  const reconcileRc003Task = async () => {
+    try {
+      const task = await getRc003TaskStatus();
+      rc003Task.value = task;
+      // 开关的显示状态只在首次对账一次——之后以用户的开关操作为准
+      //（理由见 rc003CaptureEnabled 的注释）。
+      if (rc003CaptureEnabled.value === null) {
+        rc003CaptureEnabled.value = task.enabled;
+      }
+    } catch {
+      // 对账失败：开关保持禁用，等下一秒轮询重试（与既有 interval 行为一致）。
+    }
+  };
+  await reconcileRc003Task();
+
   snapshotTimer = window.setInterval(async () => {
     mappingSnapshot.value = await getButtonMappingSnapshot();
     // 桥接状态只在连接的是 RC003 时才有意义（见 rc003BridgeText），
     // 但这里照常拉取：开销只是一次内存快照，免得再维护一个定时器。
     rc003Bridge.value = await getRc003BridgeSnapshot();
-    // 授权状态每秒对账；但开关的显示状态只在首次对账一次——
-    // 之后以用户的开关操作为准（理由见 rc003CaptureEnabled 的注释）。
-    const task = await getRc003TaskStatus();
-    rc003Task.value = task;
-    if (rc003CaptureEnabled.value === null) {
-      rc003CaptureEnabled.value = task.enabled;
-    }
+    await reconcileRc003Task();
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
     if (rawInput.value?.activeButtons) {
       activeButtons.value = new Set(rawInput.value.activeButtons);

@@ -821,9 +821,14 @@ describe("全按键支持开启前确认弹窗", () => {
       ).toBe(1);
     });
     const checkbox = captureRow(page)!.find('input[type="checkbox"]');
-    await vi.waitFor(() => {
-      expect((checkbox.element as HTMLInputElement).disabled).toBe(false);
-    });
+    // CI 双核慢机余量：授权状态已改为挂载后立即对账（微任务），正常瞬时可过；
+    // 4000ms 只防无关步骤偶发慢（与下方 capability-note 用例同一口径）。
+    await vi.waitFor(
+      () => {
+        expect((checkbox.element as HTMLInputElement).disabled).toBe(false);
+      },
+      { timeout: 4000 },
+    );
     return checkbox;
   }
 
@@ -948,5 +953,27 @@ describe("全按键支持开启前确认弹窗", () => {
     await vi.waitFor(() => {
       expect(captureCheckboxChecked(page)).toBe(true);
     });
+  });
+
+  it("挂载后立即对账授权状态：不等 1 秒轮询首跳，开关即可用", async () => {
+    // PR #132 CI 实测：授权状态只在挂载 1 秒后的首次 interval 轮询里落地，
+    // CI 慢机上 openCaptureToggle 的 waitFor（默认 1000ms）被压线超时；
+    // 真机上则是「进页面头 1 秒开关点不动、无解释」。挂载后必须立即拉一次。
+    const page = await mountPage("rc003");
+    // 只清微任务队列、不推进真实时间：1 秒后的首次 interval 轮询不会跑。
+    // 若授权状态仍依赖轮询首跳，下面的断言必失败。
+    await flushPromises();
+    const back = page
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!
+      .findAll(".mapping-cell")[0]!;
+    await back.trigger("click");
+    await flushPromises();
+    const row = page
+      .findAll(".toggle-row")
+      .filter((r) => r.text().includes("全按键支持"))[0]!;
+    expect(
+      (row.find('input[type="checkbox"]').element as HTMLInputElement).disabled,
+    ).toBe(false);
   });
 });
