@@ -50,6 +50,25 @@ pub(crate) fn phase_accepts_battery(phase: ConnectionPhase) -> bool {
     )
 }
 
+/// GATT Battery Level（0x2A19）通知/读取值的解析：标准 BAS 电量为单字节
+/// 百分比（0-100）。其他长度或数值一律视为协议违规，回退未知、不猜测。
+pub(crate) fn gatt_level_reading(bytes: &[u8], source: &'static str) -> BatteryReading {
+    match bytes {
+        [level] if *level <= 100 => BatteryReading {
+            level: Some(*level),
+            source,
+            reason: "available",
+        },
+        _ => BatteryReading::unknown("gatt_value_invalid"),
+    }
+}
+
+/// 电量数据路径决策：GATT 0x2A19 notify 订阅成功时设备主动推送实时电量，
+/// 不再轮询 Windows 属性缓存；订阅失败或特征不可用时保留 60 秒缓存轮询兜底。
+pub(crate) fn use_cache_monitor(gatt_notify_subscribed: bool) -> bool {
+    !gatt_notify_subscribed
+}
+
 pub(crate) fn apply_reading(
     snapshot: &mut ConnectionSnapshot,
     current_generation: u64,
@@ -279,6 +298,28 @@ mod tests {
             assert!(!apply_reading(&mut snapshot, 3, 3, reading));
             assert_eq!(snapshot.battery_level, None);
         }
+    }
+
+    #[test]
+    fn gatt_level_reading_accepts_one_byte_percentage_and_rejects_the_rest() {
+        for level in [0u8, 1, 20, 55, 99, 100] {
+            let reading = gatt_level_reading(&[level], "gatt_notify");
+            assert_eq!(reading.level, Some(level));
+            assert_eq!(reading.source, "gatt_notify");
+            assert_eq!(reading.reason, "available");
+        }
+        for bytes in [&[][..], &[101], &[255], &[50, 0], &[0, 0, 0, 0]] {
+            let reading = gatt_level_reading(bytes, "gatt_notify");
+            assert_eq!(reading.level, None);
+            assert_eq!(reading.source, "none");
+            assert_eq!(reading.reason, "gatt_value_invalid");
+        }
+    }
+
+    #[test]
+    fn cache_monitor_runs_only_without_gatt_notify() {
+        assert!(use_cache_monitor(false));
+        assert!(!use_cache_monitor(true));
     }
 
     #[test]
