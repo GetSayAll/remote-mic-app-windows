@@ -332,4 +332,54 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt + D");
     wrapper.unmount();
   });
+
+  it("keeps every modifier of a modifier-only chord when keys are released out of order", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    // 回归（Bugs/2026-09-27）：左 Ctrl + 左 Win 先松 Win、后松 Ctrl，
+    // 不能把组合截断成只剩 Ctrl。
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: false });
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: false });
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
+      keys: ["left_control", "left_windows"],
+    });
+    expect(mocks.stopShortcutCapture).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 左 Ctrl + 左 Win");
+    wrapper.unmount();
+  });
+
+  it("keeps the whole modifier-only chord when the first-pressed modifier is released last", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: false });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: false });
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
+      keys: ["left_windows", "left_control"],
+    });
+    wrapper.unmount();
+  });
 });
