@@ -41,6 +41,26 @@ pub const ALL_BUTTONS: [RemoteButton; 13] = [
     RemoteButton::VolumeDown,
 ];
 
+/// Report ID 1 中可由增强捕获链路接管的全部语义按键。
+///
+/// 语音键（usage 0x003E）不属于按键映射系统，必须继续由 ATVV 会话处理，
+/// 因此不在此表中。该表是应用、Helper 与 agent 的协议白名单来源。
+pub const ENHANCED_CAPTURE_BUTTON_USAGES: [(RemoteButton, u16); 13] = [
+    (RemoteButton::Back, 0x00F1),
+    (RemoteButton::Ok, 0x0028),
+    (RemoteButton::Tv, 0x0035),
+    (RemoteButton::Home, 0x004A),
+    (RemoteButton::Right, 0x004F),
+    (RemoteButton::Left, 0x0050),
+    (RemoteButton::Down, 0x0051),
+    (RemoteButton::Up, 0x0052),
+    (RemoteButton::Menu, 0x0065),
+    (RemoteButton::Power, 0x0066),
+    (RemoteButton::VolumeMute, 0x007F),
+    (RemoteButton::VolumeUp, 0x0080),
+    (RemoteButton::VolumeDown, 0x0081),
+];
+
 impl RemoteButton {
     /// 在 [`ALL_BUTTONS`] 中的序号（0..12），用于门控位掩码。
     pub fn ordinal(self) -> usize {
@@ -252,23 +272,16 @@ pub fn parse_raw_hid_body(body: &[u8]) -> Result<Vec<&[u8]>, RawInputDecodeError
 }
 
 pub fn button_for_usage(usage: u16) -> Option<RemoteButton> {
-    Some(match usage {
-        0x00F1 => RemoteButton::Back,
-        0x0028 => RemoteButton::Ok,
-        0x0035 => RemoteButton::Tv,
-        0x004A => RemoteButton::Home,
-        0x004F => RemoteButton::Right,
-        0x0050 => RemoteButton::Left,
-        0x0051 => RemoteButton::Down,
-        0x0052 => RemoteButton::Up,
-        0x0065 => RemoteButton::Menu,
-        0x0066 => RemoteButton::Power,
-        0x007F => RemoteButton::VolumeMute,
-        0x0080 => RemoteButton::VolumeUp,
-        0x0081 => RemoteButton::VolumeDown,
-        0x003E => return None,
-        _ => return None,
-    })
+    ENHANCED_CAPTURE_BUTTON_USAGES
+        .iter()
+        .find_map(|(button, candidate)| (*candidate == usage).then_some(*button))
+}
+
+pub fn usage_for_button(button: RemoteButton) -> u16 {
+    ENHANCED_CAPTURE_BUTTON_USAGES
+        .iter()
+        .find_map(|(candidate, usage)| (*candidate == button).then_some(*usage))
+        .expect("enhanced capture table covers every RemoteButton variant")
 }
 
 pub fn button_for_keyboard(virtual_key: u16, make_code: u16) -> Option<RemoteButton> {
@@ -501,6 +514,21 @@ mod tests {
         assert_eq!(decode_report_usages(&full).unwrap(), expected);
         assert_eq!(decode_report_usages(&compact).unwrap(), expected);
         assert_eq!(decode_report_usages(&full[3..]).unwrap(), expected);
+    }
+
+    #[test]
+    fn enhanced_capture_usage_table_is_a_complete_bijection() {
+        assert_eq!(ENHANCED_CAPTURE_BUTTON_USAGES.len(), ALL_BUTTONS.len());
+        let usages: BTreeSet<_> = ENHANCED_CAPTURE_BUTTON_USAGES
+            .iter()
+            .map(|(_, usage)| *usage)
+            .collect();
+        assert_eq!(usages.len(), ALL_BUTTONS.len());
+        for button in ALL_BUTTONS {
+            let usage = usage_for_button(button);
+            assert_eq!(button_for_usage(usage), Some(button));
+        }
+        assert_eq!(button_for_usage(0x003E), None, "voice stays on ATVV");
     }
 
     #[test]

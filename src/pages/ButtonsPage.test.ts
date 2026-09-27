@@ -108,6 +108,9 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       watchdogReleaseTotal: 0,
       pressedUsages: [],
       lastRxAgeMs: null,
+      targetGeneration: 0,
+      targetUsages: [],
+      ownedUsages: [],
     })),
   };
 });

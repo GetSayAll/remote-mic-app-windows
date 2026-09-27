@@ -48,6 +48,7 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
+    fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
     fn subscribe_button_edges(&self, callback: sayall_windows::button_mapping::ButtonEdgeCallback);
     fn subscribe_button_gestures(
@@ -186,6 +187,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
         WindowsPlatform::set_button_mappings(self, mappings)
+    }
+
+    fn set_enhanced_capture_enabled(&self, enabled: bool) {
+        WindowsPlatform::set_enhanced_capture_enabled(self, enabled)
     }
 
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot {

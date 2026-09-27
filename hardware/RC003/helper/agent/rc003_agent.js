@@ -6,13 +6,13 @@
  * ----
  * 由 Frida Gadget 以 `interaction.type = "script"` 的方式加载进承载 RC003 的
  * WUDFHost.exe。职责单一：在 `ntdll!NtDeviceIoControlFile` 的 UMDF 输出复制入口
- * **只拦截目标三键的 usage**（返回 `0x00F1`、音量+ `0x0080`、音量- `0x0081`），
- * 把边沿通过 loopback TCP 上报给助手，其余字节一字节不动。
+ * **只拦截主程序动态下发的目标 usage**，把边沿通过 loopback TCP 上报给助手，
+ * 未配置按键的报告一字节不动。语音键不在白名单内，继续由 ATVV 会话处理。
  *
  * 与既有实验探针（wudf_ioctl_write.js）的差别
  * -------------------------------------------
- * 1. **选择性**：探针会 `erase-all`（连确定/主页一起清）；本 agent 只清目标三键，
- *    确定/主页/方向仍走 Windows 原生路径，零回归。
+ * 1. **选择性**：探针会 `erase-all`；本 agent 只清主程序动态下发的已映射按键，
+ *    未配置按键仍走 Windows 原生路径。
  * 2. **传输**：探针用 `send()`（需要 host 侧 frida 客户端）；本 agent 用
  *    loopback TCP，助手是纯 Rust 进程，**不需要 frida 客户端库**。
  * 3. **租约**：探针靠内建计划表；本 agent 靠助手每 500ms 的续约，
@@ -48,7 +48,7 @@
  *   5. 租约有效（助手续约未过期）
  *   6. mode == 'clear'（观察模式一个字节都不写）
  *   7. 累计清键次数 < MAX_CLEARS
- *   8. usage ∈ clearUsages（默认=三键；验收时可能多一个哨兵键，见 --canary-usage）
+ *   8. usage ∈ clearUsages（产品目标来自主程序；验收时可能多一个哨兵键）
  * 只写偏移 3..8，绝不触碰 report_id / modifiers / reserved。
  *
  * ⚠️ 一个必须说明的可观测性缺口（2026-09-23）
@@ -69,8 +69,8 @@
  *                     {"type":"mode","clear":true|false}
  *                     {"type":"restore","on":true|false}
  *                     {"type":"targets","report":[...],"clear":[...]}
- *                       下发清空范围。report 必须恰好等于三键、clear 必须是它的超集
- *                       （只允许"追加哨兵键"这一种改变），两条护栏见 handleCommand。
+ *                       下发动态范围。report 必须是语义按键白名单的子集，clear
+ *                       必须覆盖 report；空集合表示完全恢复原路径。
  */
 
 /* ------------------------------------------------------------------ 常量 */
@@ -79,15 +79,23 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-09-26.canary-gate';
+var AGENT_BUILD = '2026-09-27.dynamic-all-key';
 
 var TARGET_IOCTL = 0x80018483;
-var TARGET_USAGES = [0x00F1, 0x0080, 0x0081];
-var TARGET_NAMES = { 0x00F1: 'back', 0x0080: 'volume_up', 0x0081: 'volume_down' };
+var TARGET_USAGES = [
+  0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051,
+  0x0052, 0x0065, 0x0066, 0x007F, 0x0080, 0x0081
+];
+var TARGET_NAMES = {
+  0x00F1: 'back', 0x0028: 'ok', 0x0035: 'tv', 0x004A: 'home',
+  0x004F: 'right', 0x0050: 'left', 0x0051: 'down', 0x0052: 'up',
+  0x0065: 'menu', 0x0066: 'power', 0x007F: 'volume_mute',
+  0x0080: 'volume_up', 0x0081: 'volume_down'
+};
 var REPORT_ID = 0x01;
 
 var LEASE_MS = 2000;          /* 超过此时间未收到续约就停止清键 */
-var HB_MS = 1000;             /* 心跳周期 */
+var HB_MS = 500;              /* 所有权心跳周期；须显著短于 2s 租约 */
 var CONNECT_TIMEOUT_MS = 3000;/* init() 最多阻塞宿主这么久 */
 var RECONNECT_MS = 1000;
 /*
@@ -131,7 +139,7 @@ var tReady = Date.now();
 var stat = {
   ioctl_calls: 0,
   target_hits: 0,
-  /* 只含哨兵键（clearUsages 里不属于三键的那些）的报告数。单独计数，见 onEnter。 */
+  /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。 */
   canary_hits: 0,
   clears_ok: 0,
   clears_fail: 0,
@@ -159,12 +167,13 @@ var stat = {
 var pressed = {};             /* 当前按下的目标 usage（绝对状态） */
 
 /* 两个集合必须分开，否则"哨兵键"会污染按键证据：
-   - reportUsages：**上报**集合。恒等于三键，永远不接受下行修改（见 targets 命令的护栏）。
-   - clearUsages ：**清空**集合。默认等于三键；验收时可由 `targets` 命令追加哨兵键。
+   - reportUsages：**上报**集合。由主程序动态下发，且只能取语义按键白名单的子集。
+   - clearUsages ：**清空**集合。产品路径覆盖 reportUsages；验收时可追加哨兵键。
    哨兵键存在的理由：RC003 的三键在 Windows 侧本来就零事件，所以"清掉"与"不清"
    在外部看不出差别 —— 清一个本来可用的键（如主页 0x4A）才能让清空是否生效变得可见。 */
-var reportUsages = TARGET_USAGES.slice();
-var clearUsages = TARGET_USAGES.slice();
+var reportUsages = [];
+var clearUsages = [];
+var targetGeneration = 0;
 
 /* ------------------------------------------------------- 编解码与传输 */
 
@@ -211,10 +220,10 @@ function leaseOk() {
 
 /* ------------------------------------------------------------ 命令处理 */
 
-/* 校验下行给的 usage 数组：非空、元素是 1..0xFFFF 的整数、无重复。非法返回 null。
+/* 校验下行给的 usage 数组：元素是 1..0xFFFF 的整数、无重复；允许空集。非法返回 null。
    usage 0 被拒绝：它在报告里表示"该槽为空"，不是一个可以按下的键。 */
 function usageArrayOf(v) {
-  if (!Array.isArray(v) || v.length === 0) return null;
+  if (!Array.isArray(v)) return null;
   var out = [];
   for (var i = 0; i < v.length; i++) {
     var n = v[i];
@@ -269,30 +278,41 @@ function handleCommand(line) {
     logLine('mode:' + mode);
     return;
   }
-  /* 下发清空范围。两条护栏，都是为了不让"畸形配置"变成最难查的现场：
-       1. report 必须**恰好**等于三键 —— 否则等于允许远端关掉上报，那样
-          "看不到按键"就会被误读成"按键没到"（而实际上是被配置屏蔽了）；
-       2. clear 必须是 report 的**超集** —— 否则会出现"报了但不清"的隐形配置：
-          日志显示已武装，实际每个键都放行。
-     只有"追加哨兵键"这一种改变被允许，这正是验收需要的形状。 */
+  /* 下发动态捕获范围。两条护栏：report 只能来自语义按键白名单；clear 必须覆盖
+     report，避免出现“已经上报但没有清掉原生边沿”的双触发。空集合是关闭增强捕获
+     时的 fail-open 配置。clear 仍可额外带哨兵键供人工验收。 */
   if (cmd.type === 'targets') {
     var rep = usageArrayOf(cmd.report);
     var clr = usageArrayOf(cmd.clear);
     if (rep === null || clr === null) {
       stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_bad_array'); return;
     }
-    if (!sameUsageSet(rep, TARGET_USAGES)) {
-      stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_report_not_targets'); return;
+    for (var wi = 0; wi < rep.length; wi++) {
+      if (TARGET_USAGES.indexOf(rep[wi]) < 0) {
+        stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_outside_whitelist'); return;
+      }
     }
     var covers = true;
     for (var ti = 0; ti < rep.length; ti++) if (clr.indexOf(rep[ti]) < 0) covers = false;
     if (!covers) {
       stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_clear_lacks_report'); return;
     }
+    var nextGeneration = Number(cmd.generation);
+    if (!isFinite(nextGeneration) || nextGeneration < 0) {
+      stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_bad_generation'); return;
+    }
+    /* 先释放被移出目标集的按键，避免切换映射时留下旧 DOWN。 */
+    var retained = [];
+    var before = currentUsages();
+    for (var ri = 0; ri < before.length; ri++) if (rep.indexOf(before[ri]) >= 0) retained.push(before[ri]);
+    reportUsages = rep.slice();
     clearUsages = clr.slice();
+    targetGeneration = Math.floor(nextGeneration);
+    emitEdgesIfChanged(retained);
     stat.targets_applied++;
-    logLine('targets:applied clear=' + usagesHex(clearUsages)
-      + ' canary=' + (clearUsages.length - reportUsages.length));
+    sendLine({ type: 'targets_ack', t: Date.now(), generation: targetGeneration, usages: reportUsages });
+    logLine('targets:applied generation=' + targetGeneration + ' report=' + usagesHex(reportUsages)
+      + ' clear=' + usagesHex(clearUsages));
     return;
   }
   if (cmd.type === 'restore') { restoreOnLeave = (cmd.on !== false); return; }
@@ -388,7 +408,8 @@ function connectOnce() {
         mode: mode,
         restore: restoreOnLeave,
         lease_ms: LEASE_MS,
-        targets: TARGET_USAGES
+        targets: reportUsages,
+        target_generation: targetGeneration
       });
       pump();
       return true;
@@ -434,8 +455,7 @@ function targetSetIn(bytes) {
     var o = slots[i];
     var u = bytes[o] | (bytes[o + 1] << 8);
     if (u === 0) continue;
-    /* 用 reportUsages 而不是 clearUsages：哨兵键只清、不上报。
-       否则日志里会出现"某个 usage 有边沿"却无法分辨是三键还是哨兵。 */
+    /* 用 reportUsages 而不是 clearUsages：额外哨兵键只清、不上报。 */
     if (reportUsages.indexOf(u) >= 0 && found.indexOf(u) < 0) found.push(u);
   }
   return found;
@@ -549,8 +569,8 @@ function installHook() {
         this.restored = false;
 
         var bytes = new Uint8Array(outPtr.readByteArray(9));
-        var found = targetSetIn(bytes);      /* 上报集合：三键 */
-        var toClear = clearSetIn(bytes);     /* 清空集合：三键 + 哨兵键（如有） */
+        var found = targetSetIn(bytes);      /* 主程序动态上报集合 */
+        var toClear = clearSetIn(bytes);     /* 上报集合 + 哨兵键（如有） */
         this.orig = bytes;
 
         /* 边沿上报必须早于/独立于清键：即使租约过期不上报也要如实反映状态 */
@@ -578,7 +598,7 @@ function installHook() {
           var o = 3 + i * 2;
           var u = bytes[o] | (bytes[o + 1] << 8);
           if (u === 0) continue;
-          /* 用 clearUsages：默认 = 三键；验收时可能多一个哨兵键（见 --canary-usage）。 */
+          /* 用 clearUsages：产品路径覆盖动态目标；验收时可能多一个哨兵键。 */
           if (clearUsages.indexOf(u) < 0) continue;
           patched[o] = 0;
           patched[o + 1] = 0;
@@ -659,6 +679,7 @@ function heartbeat() {
        此前这只能靠助手侧推断，agent 实际用的是什么都没人知道。 */
     report_usages: usagesHex(reportUsages),
     clear_usages: usagesHex(clearUsages),
+    target_generation: targetGeneration,
     restore: restoreOnLeave,
     disarmed: disarmed,
     lease_ok: leaseOk(),

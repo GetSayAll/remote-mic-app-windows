@@ -282,6 +282,9 @@ mod windows_impl {
     static PREHELD_PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static MAPPED_MASK: AtomicU64 = AtomicU64::new(0);
+    /// 已由报告层增强链路确认接管的按键。命中的按键不得再走全局键盘钩子，
+    /// 否则会把同名物理键盘按键也吞掉；增强所有权丢失时清零即恢复旧兜底。
+    static ENHANCED_OWNED_MASK: AtomicU64 = AtomicU64::new(0);
     /// 常驻抑制掩码（"遥控器优先"）：遥 online 期间无需武装直接吞。
     /// 由映射引擎在映射变化时写入（当前仅 Home/TV，见 button_mapping.rs）。
     static PERSISTENT_MASK: AtomicU64 = AtomicU64::new(0);
@@ -387,6 +390,12 @@ mod windows_impl {
             && ENABLED.load(Ordering::Relaxed)
             && LISTENER_ACTIVE.load(Ordering::Relaxed)
             && mapped(button)
+            && !enhanced_owned(button)
+    }
+
+    fn enhanced_owned(button: RemoteButton) -> bool {
+        let mask = ENHANCED_OWNED_MASK.load(Ordering::Relaxed);
+        (mask >> button.ordinal()) & 1 == 1
     }
 
     /// 纯决策函数（单元测试覆盖）：给定钩子事件与归因状态，是否吞键。
@@ -730,6 +739,7 @@ mod windows_impl {
             SHORTCUT_CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
             ENABLED.store(false, Ordering::Relaxed);
             MAPPED_MASK.store(0, Ordering::Relaxed);
+            ENHANCED_OWNED_MASK.store(0, Ordering::Relaxed);
             PERSISTENT_MASK.store(0, Ordering::Relaxed);
             REMOTE_CONNECTED.store(false, Ordering::Relaxed);
             LISTENER_ACTIVE.store(false, Ordering::Relaxed);
@@ -790,6 +800,16 @@ mod windows_impl {
     /// 该键按下沿无需武装直接吞（跳过 60ms 有界等待，零额外延迟）。
     pub fn set_persistent_mask(mask: u64) {
         PERSISTENT_MASK.store(mask, Ordering::Relaxed);
+    }
+
+    /// 仅在 Helper 已确认相同代次、相同目标集合后设置。清零是 fail-open：
+    /// 报告层失联时立刻恢复既有 Raw Input + 全局钩子路径。
+    pub fn set_enhanced_owned_mask(mask: u64) {
+        ENHANCED_OWNED_MASK.store(mask, Ordering::Relaxed);
+    }
+
+    pub fn enhanced_owned_mask() -> u64 {
+        ENHANCED_OWNED_MASK.load(Ordering::Relaxed)
     }
 
     /// 同步遥控器在线状态（ble.rs 在连接相位提交点调用）：
@@ -903,10 +923,12 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, capture_diagnostics_summary, configure, decide, is_gate_thread_alive,
-    leaked_down_count, listener_active, set_edge_sink, set_listener_active, set_persistent_mask,
-    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
-    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    arm_button, capture_diagnostics_summary, configure, decide, enhanced_owned_mask,
+    hook_bump_request_count, is_gate_thread_alive, leaked_down_count, listener_active,
+    request_hook_bump, set_edge_sink, set_enhanced_owned_mask, set_listener_active,
+    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
+    set_shortcut_capture_sink, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
+    HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -928,6 +950,10 @@ mod fallback {
 
     pub fn configure(_enabled: bool, _mapped_mask: u64) {}
     pub fn set_persistent_mask(_mask: u64) {}
+    pub fn set_enhanced_owned_mask(_mask: u64) {}
+    pub fn enhanced_owned_mask() -> u64 {
+        0
+    }
     pub fn set_remote_connected(_connected: bool) {}
     pub fn set_listener_active(_active: bool) {}
     pub fn arm_button(_button: RemoteButton, _grace_ms: u64) {}
