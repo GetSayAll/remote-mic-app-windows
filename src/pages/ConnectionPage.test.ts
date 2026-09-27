@@ -3,7 +3,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
 import ConnectionPage from "./ConnectionPage.vue";
 
-type ShortcutCaptureHandler = (edge: { key: string; isPressed: boolean }) => void;
+type ShortcutCaptureHandler = (edge: {
+  key: string;
+  isPressed: boolean;
+  source?: "real" | "injected";
+}) => void;
+
+/**
+ * 落盘稳定窗口（200ms）之后才定稿：外部钩子吞掉完成键的物理边沿后会以注入
+ * 副本重放整个组合，副本可能晚于物理松开到达（见 ConnectionPage 的
+ * scheduleVoiceCaptureFinish），因此断言落盘前必须等过该窗口。
+ */
+async function settleVoiceCapture(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 260));
+  await flushPromises();
+}
 
 const emptyConnection: ConnectionSnapshot = {
   phase: "idle",
@@ -257,7 +271,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
 
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: false });
-    await flushPromises();
+    await settleVoiceCapture();
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
     expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
     // 默认项与关闭项仍在列，误录可一键回退。
@@ -324,7 +338,7 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.captureEdgeHandler!({ key: "d", isPressed: false });
     expect(mocks.stopShortcutCapture).not.toHaveBeenCalled();
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: false });
-    await flushPromises();
+    await settleVoiceCapture();
 
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt", "d"] });
     expect(mocks.stopShortcutCapture).toHaveBeenCalledOnce();
@@ -361,7 +375,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
 
     mocks.captureEdgeHandler!({ key: "left_windows", isPressed: false });
-    await flushPromises();
+    await settleVoiceCapture();
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
       keys: ["left_control", "left_windows"],
     });
@@ -387,11 +401,47 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
 
     mocks.captureEdgeHandler!({ key: "left_control", isPressed: false });
-    await flushPromises();
+    await settleVoiceCapture();
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
       keys: ["left_control", "left_windows"],
     });
     expect(mocks.stopShortcutCapture).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 左 Ctrl + 左 Win");
+    wrapper.unmount();
+  });
+
+  it("saves the full chord when the swallowed key only arrives as a replayed injected copy", async () => {
+    // 2026-09-27 真机回归（Bugs/2026-09-27-ime-chord-hook-eats-active-hotkey-capture.md）：
+    // 微信输入法的语音和弦就是默认的 左 Ctrl + 左 Win。按下该组合时它吞掉
+    // 左 Win 的物理边沿、随后把整个组合以注入副本重放——真实到达后端的只有
+    // 左 Ctrl 的真实边沿 + 左 Win 的注入副本，且副本可能晚于物理松开。
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    // 物理按下：只有左 Ctrl 的真实边沿（左 Win 被输入法吞掉）。
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: true, source: "real" });
+    // 物理松开：左 Ctrl 的真实抬起先到——此时组合看似"只剩左 Ctrl"。
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: false, source: "real" });
+    await flushPromises();
+    // 稳定窗口内不得提前落盘（否则就是"只剩左 Ctrl"）。
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+
+    // 输入法重放的注入副本晚到：完整的两键组合。
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: true, source: "injected" });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: true, source: "injected" });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: false, source: "injected" });
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: false, source: "injected" });
+    await settleVoiceCapture();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
+      keys: ["left_control", "left_windows"],
+    });
     expect(wrapper.text()).toContain("按住说话快捷键已设为 左 Ctrl + 左 Win");
     wrapper.unmount();
   });
@@ -410,7 +460,7 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.captureEdgeHandler!({ key: "left_control", isPressed: true });
     mocks.captureEdgeHandler!({ key: "left_control", isPressed: false });
     mocks.captureEdgeHandler!({ key: "left_windows", isPressed: false });
-    await flushPromises();
+    await settleVoiceCapture();
 
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
       keys: ["left_windows", "left_control"],

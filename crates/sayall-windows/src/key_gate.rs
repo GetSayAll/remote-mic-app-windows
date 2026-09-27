@@ -37,14 +37,51 @@ use crate::send_input::KeyCode;
 use serde::Serialize;
 use std::sync::Arc;
 
+/// 录入边沿的来源。
+///
+/// `Real` = 物理按键事件本身；`Injected` = 外部钩子（微信输入法等）在
+/// “吞掉物理边沿 + 重放整个组合”后注入的副本。2026-09-27 真机实测：按住
+/// 说话快捷键 = 左 Ctrl + 左 Win 时，输入法吞掉完成键（左 Win）的物理边沿，
+/// 随后把整个组合以注入副本重放——录入通道能从注入副本里拿到左 Win，
+/// 因此注入副本必须被接受（见 `injected_edge_is_passthrough`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EdgeSource {
+    Real,
+    Injected,
+}
+
+impl EdgeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EdgeSource::Real => "real",
+            EdgeSource::Injected => "injected",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutCaptureEdge {
     pub key: KeyCode,
     pub is_pressed: bool,
+    pub source: EdgeSource,
 }
 
 pub type ShortcutCaptureCallback = Arc<dyn Fn(ShortcutCaptureEdge) + Send + Sync>;
+
+/// 录入事件准入裁决：该事件是否应当直接透传（不参与录入处理）。
+///
+/// - 非录入期的注入事件照旧透传——本应用自己的注入（遥控器按键映射、
+///   按住说话和弦）绝不能被自己吞掉。
+/// - **录入期内的注入事件必须参与录入**：它们是外部钩子“吞下 + 重放”的
+///   副本，是被吞掉的那半个组合的唯一可观测形式（2026-09-27 真机：左
+///   Ctrl + 左 Win 只录到左 Ctrl，而每会话恰好 4 条注入副本 = 输入法重放
+///   的整个两键组合）。此前按“防自吞”一律跳过注入副本，等于把完成键
+///   的边沿全部丢弃。
+pub fn injected_edge_is_passthrough(capture_active: bool, injected: bool) -> bool {
+    injected && !capture_active
+}
 
 /// 低级键盘钩子实际会报告的 VK 才参与录入 preheld 扫描：通用 VK
 /// （0x10/0x11/0x12）不会作为 vkCode 出现在钩子事件里（左右修饰键用专用
@@ -208,9 +245,9 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
-        LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetWindowsHookExW,
+        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+        LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -261,14 +298,20 @@ mod windows_impl {
     };
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
-    /// 录入会话期间进入捕获处理器的真实键盘事件数（钩子健康度探针：
-    /// 会话内用户按键但该计数不涨 ⇒ 物理边沿根本没到本钩子，问题在钩子
-    /// 链位置/安装失败，而非投递门控）。
+    /// 录入会话期间进入捕获处理器的键盘事件数（钩子健康度探针：会话内用户
+    /// 按键但该计数不涨 ⇒ 边沿根本没到本钩子，问题在钩子链位置/安装失败，
+    /// 而非投递门控）。
     static CAPTURE_KEYS_SEEN: AtomicU64 = AtomicU64::new(0);
-    /// 录入会话期间被跳过的注入事件数（外部钩子吞下后重新注入的探针：
-    /// 微信输入法等目标若"吞下 + 重注入"，其注入副本会命中 LLKHF_INJECTED
-    /// 分支被跳过——表现为零边沿）。
-    static CAPTURE_INJECTED_SKIPPED: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间被接受的注入副本数（外部钩子"吞下 + 重放"的产物：微信
+    /// 输入法吞掉完成键的物理边沿后重放整个组合，注入副本是被吞键的唯一
+    /// 可观测形式——2026-09-27 真机每会话恰好 4 条 = 两键组合的重放）。
+    static CAPTURE_INJECTED_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间到达但**未能映射**成协议键的事件数，与其最后一次原始
+    /// vk/注入标记（`last_unmapped_injected`）——区分"边沿没到"与"边沿到了
+    /// 但被映射丢弃"（后者此前表现为静默零边沿，无法归因）。
+    static CAPTURE_UNMAPPED_SEEN: AtomicU64 = AtomicU64::new(0);
+    static LAST_UNMAPPED_VK: AtomicU64 = AtomicU64::new(0);
+    static LAST_UNMAPPED_INJECTED: AtomicU64 = AtomicU64::new(0);
     /// 钩子收到的全部键盘回调数（含未激活录入时的每一键；健康度基线）与其中
     /// 的注入事件数。用于区分"钩子没被系统调用"与"钩子被调用但事件被上层
     /// 过滤/吞掉"（2026-09-27 真机：录入期 keys_seen 恒为 0，需外部注入对照）。
@@ -432,15 +475,17 @@ mod windows_impl {
         flags: windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT_FLAGS,
     ) -> bool {
         let capture_active = SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed);
+        let injected = flags.contains(LLKHF_INJECTED);
+        if super::injected_edge_is_passthrough(capture_active, injected) {
+            // 非录入期：注入事件一律透传（防自吞）。
+            return false;
+        }
         if capture_active {
             CAPTURE_KEYS_SEEN.fetch_add(1, Ordering::Relaxed);
-        }
-        if flags.contains(LLKHF_INJECTED) {
-            // 录入期间被跳过的注入副本（外部钩子"吞下 + 重注入"探针）。
-            if capture_active {
-                CAPTURE_INJECTED_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            if injected {
+                // 录入期内接受的注入副本（外部钩子"吞下 + 重放"的产物）。
+                CAPTURE_INJECTED_ACCEPTED.fetch_add(1, Ordering::Relaxed);
             }
-            return false;
         }
         let vk_index = vk_code as usize;
         if vk_index < SHORTCUT_CAPTURE_PREHELD.len()
@@ -479,11 +524,29 @@ mod windows_impl {
             // 但不投递录入通道——preheld 键的边沿本就不可见，此时投递的
             // 新组合会被前端按"全部松开"截断成半截组合落盘。
             if PREHELD_PENDING_COUNT.load(Ordering::Relaxed) == 0 {
-                if let (Some(key), Some(sink)) = (
+                match (
                     super::capture_key_code(vk_code, make_code, flags.contains(LLKHF_EXTENDED)),
                     SHORTCUT_CAPTURE_SINK.get(),
                 ) {
-                    sink(super::ShortcutCaptureEdge { key, is_pressed });
+                    (Some(key), Some(sink)) => {
+                        sink(super::ShortcutCaptureEdge {
+                            key,
+                            is_pressed,
+                            source: if injected {
+                                super::EdgeSource::Injected
+                            } else {
+                                super::EdgeSource::Real
+                            },
+                        });
+                    }
+                    // 未能映射成协议键：记录最后一次原始 vk/注入标记，
+                    // 使"边沿到了但没投递"可归因（否则表现为静默零边沿）。
+                    (None, _) => {
+                        CAPTURE_UNMAPPED_SEEN.fetch_add(1, Ordering::Relaxed);
+                        LAST_UNMAPPED_VK.store(vk_code as u64, Ordering::Relaxed);
+                        LAST_UNMAPPED_INJECTED.store(injected as u64, Ordering::Relaxed);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -769,9 +832,12 @@ mod windows_impl {
     /// 系统调用的健康度基线（含未录入期间的每一键）。
     pub fn capture_diagnostics_summary() -> String {
         format!(
-            "keys_seen={} injected_skipped={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={}",
+            "keys_seen={} injected_accepted={} unmapped_seen={} last_unmapped_vk=0x{:02X} last_unmapped_injected={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={}",
             CAPTURE_KEYS_SEEN.load(Ordering::Relaxed),
-            CAPTURE_INJECTED_SKIPPED.load(Ordering::Relaxed),
+            CAPTURE_INJECTED_ACCEPTED.load(Ordering::Relaxed),
+            CAPTURE_UNMAPPED_SEEN.load(Ordering::Relaxed),
+            LAST_UNMAPPED_VK.load(Ordering::Relaxed) & 0xFF,
+            LAST_UNMAPPED_INJECTED.load(Ordering::Relaxed),
             HOOK_CALLS_TOTAL.load(Ordering::Relaxed),
             HOOK_CALLS_INJECTED.load(Ordering::Relaxed),
             GATE_ACTIVE.load(Ordering::Relaxed) as u8,
@@ -874,7 +940,7 @@ mod fallback {
         0
     }
     pub fn capture_diagnostics_summary() -> String {
-        "keys_seen=0 injected_skipped=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0"
+        "keys_seen=0 injected_accepted=0 unmapped_seen=0 last_unmapped_vk=0x00 last_unmapped_injected=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0"
             .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
@@ -1087,7 +1153,10 @@ mod tests {
         let summary = capture_diagnostics_summary();
         for field in [
             "keys_seen=",
-            "injected_skipped=",
+            "injected_accepted=",
+            "unmapped_seen=",
+            "last_unmapped_vk=",
+            "last_unmapped_injected=",
             "calls_total=",
             "calls_injected=",
             "gate_active=",
@@ -1098,6 +1167,32 @@ mod tests {
         ] {
             assert!(summary.contains(field), "missing {field} in {summary}");
         }
+    }
+
+    /// 录入期准入裁决：注入副本必须在录入期被接受（否则被外部钩子吞掉的
+    /// 完成键永远录不到），非录入期必须透传（防自吞）。
+    /// 非 Windows 亦可运行——这是本修复的核心判据。
+    #[test]
+    fn injected_edges_are_accepted_only_during_capture() {
+        assert!(super::injected_edge_is_passthrough(false, true));
+        assert!(!super::injected_edge_is_passthrough(false, false));
+        assert!(!super::injected_edge_is_passthrough(true, true));
+        assert!(!super::injected_edge_is_passthrough(true, false));
+    }
+
+    /// 边沿来源随注入标记变化，且序列化为日志可直接读出的字符串。
+    #[test]
+    fn edge_source_distinguishes_injected_copies() {
+        assert_eq!(super::EdgeSource::Real.as_str(), "real");
+        assert_eq!(super::EdgeSource::Injected.as_str(), "injected");
+        let edge = super::ShortcutCaptureEdge {
+            key: super::KeyCode::LeftWindows,
+            is_pressed: true,
+            source: super::EdgeSource::Injected,
+        };
+        let json = serde_json::to_string(&edge).expect("edge 应可序列化");
+        assert!(json.contains("\"source\":\"injected\""), "{json}");
+        assert!(json.contains("\"isPressed\":true"), "{json}");
     }
 
     #[cfg(not(windows))]

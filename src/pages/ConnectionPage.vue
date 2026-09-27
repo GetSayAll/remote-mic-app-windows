@@ -84,6 +84,13 @@ const voiceCaptureDisplay = ref<KeyCode[]>([]);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
 let voiceCaptureTimeout: number | null = null;
+/**
+ * 落盘稳定窗口：外部钩子（微信输入法等）会吞掉完成键的物理边沿、随后把整个
+ * 组合以注入副本重放（见 Bugs/2026-09-27-ime-chord-hook-eats-active-hotkey-capture.md）。
+ * 副本可能晚于用户物理松开到达，因此"全部松开"后不立即落盘，先等一个短窗口；
+ * 窗口内又出现按下沿则取消并重新等待。
+ */
+let voiceCaptureSettleTimeout: number | null = null;
 let voiceCaptureRequestId = 0;
 let unmounted = false;
 const voiceCapturePressed = new Set<KeyCode>();
@@ -143,6 +150,7 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
   const requestId = ++voiceCaptureRequestId;
   captureStartingVoiceHotkey.value = true;
   voiceHotkeyMessage.value = "";
+  cancelVoiceCaptureSettle();
   try {
     const preheld = await startShortcutCapture();
     if (unmounted || requestId !== voiceCaptureRequestId) {
@@ -179,6 +187,7 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   captureStartingVoiceHotkey.value = false;
   capturingVoiceHotkey.value = false;
   waitingPreheldRelease.value = false;
+  cancelVoiceCaptureSettle();
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   voiceCapturePressed.clear();
@@ -194,6 +203,33 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   if (cancelMessage) voiceHotkeyMessage.value = cancelMessage;
 }
 
+/** 落盘稳定窗口时长：外部钩子重放的注入副本通常在物理边沿的同一输入批次内到达。 */
+const VOICE_CAPTURE_SETTLE_MS = 200;
+
+/** 取消待执行的落盘稳定窗口（新按下沿到来时需要重新计时）。 */
+function cancelVoiceCaptureSettle(): void {
+  if (voiceCaptureSettleTimeout !== null) window.clearTimeout(voiceCaptureSettleTimeout);
+  voiceCaptureSettleTimeout = null;
+}
+
+/**
+ * 全部按键松开后延迟定稿：外部钩子吞掉完成键的物理边沿后会以注入副本重放
+ * 整个组合，副本可能晚于物理松开到达；立即落盘会把组合截断成"只剩第一个键"
+ * （Bugs/2026-09-27）。窗口内若再出现按下沿，cancelVoiceCaptureSettle 会取消
+ * 本次计时并重新等待。
+ */
+function scheduleVoiceCaptureFinish(): void {
+  cancelVoiceCaptureSettle();
+  voiceCaptureSettleTimeout = window.setTimeout(() => {
+    voiceCaptureSettleTimeout = null;
+    if (!capturingVoiceHotkey.value || voiceCapturePressed.size > 0) return;
+    if (!voiceCapturedKeys && voiceCaptureEverPressed.length > 0) {
+      voiceCapturedKeys = [...voiceCaptureEverPressed];
+    }
+    void finishVoiceHotkeyCapture();
+  }, VOICE_CAPTURE_SETTLE_MS);
+}
+
 async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> {
   if (!capturingVoiceHotkey.value) return;
   // 后端只在 preheld 键全部松开后才开始投递边沿：第一条边沿即已武装。
@@ -206,22 +242,24 @@ async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> 
     voiceCapturePressed.delete(key);
     if (voiceCapturedKeys) {
       voiceCaptureDisplay.value = voiceCapturedKeys;
-      if (voiceCapturePressed.size === 0) await finishVoiceHotkeyCapture();
+      if (voiceCapturePressed.size === 0) scheduleVoiceCaptureFinish();
       return;
     }
     // 组合里没有主键时（默认的 左 Ctrl + 左 Win、豆包的"长按右 Alt"都是这种），
     // 在最后一个按键松开时按本次会话按过的全部修饰键落盘。不能只看最后松开
     // 的那个键：Ctrl+Win 先松 Win 会把组合截断成只剩 Ctrl（Bugs/2026-09-27）。
     // 能走到这里说明会话里没有主键（主键按下时即成组），故全部是修饰键。
+    // 定稿延后到稳定窗口（见 scheduleVoiceCaptureFinish）：被吞掉的完成键只
+    // 会以输入法重放的注入副本形式稍后到达，立即落盘会把它丢掉。
     if (voiceCapturePressed.size === 0 && voiceCaptureEverPressed.length > 0) {
-      voiceCapturedKeys = [...voiceCaptureEverPressed];
-      voiceCaptureDisplay.value = voiceCapturedKeys;
-      await finishVoiceHotkeyCapture();
+      voiceCaptureDisplay.value = [...voiceCaptureEverPressed];
+      scheduleVoiceCaptureFinish();
     }
     return;
   }
   // 已经拿到终止键后继续保持原生拦截，直到本次组合的所有 DOWN 都收到配对 UP。
   if (voiceCapturedKeys) return;
+  cancelVoiceCaptureSettle();
   if (key === "escape" && voiceCapturePressed.size === 0) {
     await finishVoiceHotkeyCapture("已取消录入");
     return;
@@ -473,6 +511,7 @@ onUnmounted(() => {
   unmounted = true;
   window.removeEventListener("blur", handleVoiceCaptureBlur);
   if (pollTimer) clearInterval(pollTimer);
+  cancelVoiceCaptureSettle();
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   unlistenVoiceCapture?.();

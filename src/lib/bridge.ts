@@ -85,6 +85,8 @@ export interface ButtonEdge {
 export interface ShortcutCaptureEdge {
   key: KeyCode;
   isPressed: boolean;
+  /** 边沿来源：real = 物理事件；injected = 外部钩子（输入法）吞下后重放的副本。 */
+  source?: "real" | "injected";
 }
 
 export interface RawInputSnapshot {

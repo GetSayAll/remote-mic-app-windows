@@ -1106,9 +1106,10 @@ fn register_shortcut_capture_events(app: tauri::AppHandle) {
         .spawn(move || {
             while let Ok(edge) = receiver.recv() {
                 sayall_windows::gatt_note(format!(
-                    "shortcut_capture action=edge phase=observed key={:?} edge={} delivery=webview",
+                    "shortcut_capture action=edge phase=observed key={:?} edge={} source={} delivery=webview",
                     edge.key,
-                    if edge.is_pressed { "down" } else { "up" }
+                    if edge.is_pressed { "down" } else { "up" },
+                    edge.source.as_str()
                 ));
                 let _ = app.emit("shortcut-capture-edge", &edge);
             }
