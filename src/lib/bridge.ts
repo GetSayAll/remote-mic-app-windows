@@ -756,9 +756,18 @@ export async function startShortcutCapture(): Promise<KeyCode[]> {
   return preheld ?? [];
 }
 
-export async function stopShortcutCapture(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("stop_shortcut_capture");
+/** 微信输入法语音是否在录入会话期间被触发（观测其麦克风 ConsentStore）。 */
+export type WetypeVoiceVerdict = "observed" | "not_observed" | "unknown";
+
+export interface ShortcutCaptureStopResult {
+  /** "unknown" 表示观测不可用，调用方不得据此推断用户按了什么。 */
+  wetypeVoice: WetypeVoiceVerdict;
+}
+
+export async function stopShortcutCapture(): Promise<ShortcutCaptureStopResult | null> {
+  if (!isTauriRuntime()) return null;
+  const result = await invoke<ShortcutCaptureStopResult | null>("stop_shortcut_capture");
+  return result ?? null;
 }
 
 /** 原生低级钩子录入边沿；Win+L 等系统组合在到达 Shell 前已成对吞下。 */

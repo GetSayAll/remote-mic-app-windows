@@ -465,6 +465,83 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
       keys: ["left_windows", "left_control"],
     });
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 左 Win + 左 Ctrl");
+    // 默认组合不需要"与微信输入法语音键不一致"的提醒（顺序无关比较）。
+    expect(wrapper.text()).not.toContain("不一致将无法生效");
+    wrapper.unmount();
+  });
+
+  it("infers the WeType chord when only one edge survived but WeType voice was triggered", async () => {
+    // 2026-09-27 探针结论：微信输入法吞掉其语音热键组成键的物理边沿发生在
+    // RIT 层，对本进程零/半截边沿（低级钩子、Raw Input、GetAsyncKeyState 都
+    // 看不到）；其麦克风在录入期间被触发（observed）是唯一旁证 → 推断用户按
+    // 的就是微信输入法语音热键，落盘产品默认组合并说明原因。
+    mocks.stopShortcutCapture.mockResolvedValue({ wetypeVoice: "observed" });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    // 只有左 Ctrl 的真实边沿到达（左 Win 被吞，半截会话）。
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: true, source: "real" });
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: false, source: "real" });
+    await settleVoiceCapture();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
+      keys: ["left_control", "left_windows"],
+    });
+    expect(wrapper.text()).toContain("已为你设置微信输入法语音键 左 Ctrl + 左 Win");
+    wrapper.unmount();
+  });
+
+  it("keeps a lone modifier when WeType voice was not triggered", async () => {
+    // 单修饰键（豆包"长按右 Alt"一类）合法：微信输入法语音未被触发时不得推断。
+    mocks.stopShortcutCapture.mockResolvedValue({ wetypeVoice: "not_observed" });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "right_alt", isPressed: false });
+    await settleVoiceCapture();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
+    expect(wrapper.text()).not.toContain("已为你设置微信输入法语音键");
+    wrapper.unmount();
+  });
+
+  it("warns that a non-WeType chord will not trigger hold-to-talk voice", async () => {
+    // Win + 右 Ctrl 不是微信输入法热键：边沿透传能录上，但按住说话靠注入该
+    // 组合唤起微信输入法语音，不一致就无法生效——必须把这一后果告诉用户。
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    mocks.captureEdgeHandler!({ key: "right_windows", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "right_control", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "right_control", isPressed: false });
+    mocks.captureEdgeHandler!({ key: "right_windows", isPressed: false });
+    await settleVoiceCapture();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
+      keys: ["right_windows", "right_control"],
+    });
+    expect(wrapper.text()).toContain("已设为 右 Win + 右 Ctrl");
+    expect(wrapper.text()).toContain("若与微信输入法语音键不一致将无法生效");
     wrapper.unmount();
   });
 });

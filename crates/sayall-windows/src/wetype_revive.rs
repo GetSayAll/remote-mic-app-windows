@@ -51,6 +51,34 @@ pub(crate) fn response_since(
     }
 }
 
+/// 录入会话开始前的微信输入法麦克风观测基线（latest_start；None = 观测不可用）。
+///
+/// 微信输入法的 LL 钩子吞掉其语音热键组成键的物理边沿发生在 RIT 层，对本进程
+/// 的一切用户态通道（低级钩子、Raw Input、GetAsyncKeyState）都不可见（探针实测，
+/// 见 2026-09-27 诊断）。录入会话零/半截边沿时，"微信输入法语音是否在会话期间
+/// 被触发"是判断用户按了其语音热键的唯一可观测旁证。
+pub fn capture_mic_baseline() -> Option<u64> {
+    wetype_mic_observation().map(|observation| observation.latest_start)
+}
+
+/// 录入会话结束后判定微信输入法语音是否在会话期间被触发。
+///
+/// 基线只携带 latest_start（active 语义由 current.active 分支兜底）。返回
+/// "observed"（触发了新录音或仍在录音）、"not_observed"（确认未触发）或
+/// "unknown"（观测不可用，调用方不得据此做任何推断）。
+pub fn capture_mic_verdict(baseline: Option<u64>) -> &'static str {
+    let baseline = baseline.map(|latest_start| MicObservation {
+        latest_start,
+        active: false,
+        entries: 0,
+    });
+    match response_since(baseline, wetype_mic_observation()) {
+        MicResponse::Observed => "observed",
+        MicResponse::NotObserved => "not_observed",
+        MicResponse::Unknown => "unknown",
+    }
+}
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
@@ -205,6 +233,26 @@ mod tests {
             MicResponse::Observed
         );
         assert_eq!(response_since(None, Some(active)), MicResponse::Observed);
+    }
+
+    #[test]
+    fn capture_baseline_reconstruction_only_carries_latest_start() {
+        // capture_mic_verdict 用 latest_start 重构基线（active=false、entries=0）。
+        // 持平 → NotObserved；前进 → Observed；基线缺失 → Unknown（不得推断）。
+        let base = MicObservation {
+            latest_start: 10,
+            active: false,
+            entries: 0,
+        };
+        assert_eq!(
+            response_since(Some(base), Some(stopped(10))),
+            MicResponse::NotObserved
+        );
+        assert_eq!(
+            response_since(Some(base), Some(stopped(20))),
+            MicResponse::Observed
+        );
+        assert_eq!(response_since(None, Some(stopped(20))), MicResponse::Unknown);
     }
 
     #[test]

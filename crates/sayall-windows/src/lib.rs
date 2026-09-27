@@ -82,6 +82,9 @@ pub mod send_input;
 pub mod send_input_windows;
 #[cfg(windows)]
 mod wetype_revive;
+// 录入会话的微信输入法麦克风观测（模块本体私有，仅导出这两个读数入口）。
+#[cfg(windows)]
+pub use wetype_revive::{capture_mic_baseline, capture_mic_verdict};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

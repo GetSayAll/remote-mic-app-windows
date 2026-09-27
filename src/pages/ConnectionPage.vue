@@ -181,7 +181,10 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
   }
 }
 
-/** 结束录入：已录到组合则落盘生效，否则只显示传入的取消原因。 */
+/**
+ * 结束录入：已录到组合则落盘生效；零/半截边沿时结合微信输入法语音观测推断
+ * （见 applyVoiceHotkey 上方的推断说明）；否则只显示传入的取消原因。
+ */
 async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   voiceCaptureRequestId += 1;
   captureStartingVoiceHotkey.value = false;
@@ -191,16 +194,55 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   voiceCapturePressed.clear();
+  // 推断判定在清空前取样：会话内见到的边沿数（0 = 全吞，1 = 半截）。
+  const seenKeyCount = voiceCaptureEverPressed.length;
   voiceCaptureEverPressed.length = 0;
   const keys = voiceCapturedKeys;
   voiceCapturedKeys = null;
   voiceCaptureDisplay.value = [];
-  await stopShortcutCapture().catch(() => undefined);
-  if (keys) {
-    await applyVoiceHotkey([...keys]);
+  const stop = await stopShortcutCapture().catch(() => null);
+  const wetypeVoice = stop?.wetypeVoice ?? "unknown";
+  // 半截会话（scheduleVoiceCaptureFinish 在稳定窗口到期时已把唯一修饰键写进
+  // keys）与零边沿会话同样走推断：微信输入法吞键发生在 RIT 层，唯一旁证是其
+  // 语音被触发。单主键（如 D）不推断——按主键不会触发微信输入法语音。
+  const shouldInferWetypeChord =
+    wetypeVoice === "observed" &&
+    (keys === null
+      ? seenKeyCount <= 1
+      : keys.length === 1 && CAPTURE_MODIFIER_KEYS.has(keys[0]));
+  if (shouldInferWetypeChord) {
+    await applyVoiceHotkey([...DEFAULT_VOICE_HOTKEY_KEYS]);
+    // applyVoiceHotkey 成功会覆写消息，推断说明必须在其后写入；失败时保留错误信息。
+    if (voiceHotkey.value) {
+      voiceHotkeyMessage.value =
+        "你按下的组合触发了微信输入法的语音键，按键被其拦截而无法直接录入；已为你设置微信输入法语音键 左 Ctrl + 左 Win。若你在微信输入法中改过语音键，请改设为一致的组合";
+    }
     return;
   }
-  if (cancelMessage) voiceHotkeyMessage.value = cancelMessage;
+  if (keys && keys.length > 0) {
+    await applyVoiceHotkey([...keys]);
+    appendWetypeChordNotice([...keys]);
+    return;
+  }
+  if (cancelMessage) {
+    voiceHotkeyMessage.value = cancelMessage;
+    return;
+  }
+  voiceHotkeyMessage.value =
+    "本次未捕获到任何按键。若按下的是微信输入法的语音键（默认 左 Ctrl + 左 Win），其按键会被微信输入法拦截；请重试或改用其他组合，也可点击“默认”直接使用 左 Ctrl + 左 Win";
+}
+
+/**
+ * 落盘组合不是微信输入法语音键（默认 左 Ctrl + 左 Win）时提醒：按住说话会把
+ * 该组合注入系统来唤起微信输入法语音，组合不一致则按住说话无法生效——这正是
+ * "能录上 Win+右 Ctrl 反而没用"的原因。默认组合与推断落盘不需要这句提醒。
+ */
+function appendWetypeChordNotice(keys: KeyCode[]): void {
+  if (!voiceHotkeyMessage.value.startsWith("按住说话快捷键已设为")) return;
+  const normalized = [...keys].sort().join("+");
+  if ([...DEFAULT_VOICE_HOTKEY_KEYS].sort().join("+") === normalized) return;
+  voiceHotkeyMessage.value +=
+    "。注意：按住说话会把该组合注入系统来唤起微信输入法语音，若与微信输入法语音键不一致将无法生效";
 }
 
 /** 落盘稳定窗口时长：外部钩子重放的注入副本通常在物理边沿的同一输入批次内到达。 */
