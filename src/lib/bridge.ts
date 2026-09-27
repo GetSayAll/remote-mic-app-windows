@@ -311,6 +311,33 @@ export interface AppUpdatePreferences {
 
 export type ThemePreference = "system" | "light" | "dark";
 
+/** Windows 系统强调色（设置 > 个性化 > 颜色），Rust accent 命令契约。 */
+export interface AccentRgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export async function getSystemAccentColor(): Promise<AccentRgb | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<AccentRgb | null>("get_system_accent_color");
+}
+
+export async function subscribeAccentChanges(
+  handler: (color: AccentRgb) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<AccentRgb>("system-accent-changed", (event) =>
+    handler(event.payload),
+  );
+  return () => {
+    void unlisten();
+  };
+}
+
 export async function getLaunchAtLogin(): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   return invoke<boolean>("get_launch_at_login");
