@@ -10,6 +10,15 @@
 - 自动化判据：`agent_logic_test.mjs` 对 13 个 usage 逐键验证报告槽被清零，并验证空目标恢复原报告；`rc003_bridge` 真 TCP 用例验证 `OK/T/O`、动态主页边沿和关闭时撤销所有权。
 - 真机判据（RC001、RC003 分别执行）：为确定、主页、TV、四方向、菜单、电源、静音和三键逐个配置可观察动作；开启时每键只触发映射动作且物理键盘同名键完全原生，关闭后除返回/音量±外全部沿用旧逻辑。覆盖按下中关闭、Helper 强杀、1.5s 所有权超时、冷态首按与连续按压。
 - 当前结果：自动化 `passed`；RC001/RC003 全 13 键真机与共享宿主上其它蓝牙键盘兼容性 `deferred`。
+
+### 本地安装包验证（2026-09-27）
+
+- 来源提交：`6a4aaf88ef740534a29152ea0ef021cffee82256`；安装器：`artifacts/windows-preview/无线麦 SayAll_0.2.6_x64-setup.exe`，11,742,143 bytes，SHA-256 `e74b2572d9828784c840005a4d2395d04ddee860aa494d9fd44a38f43efc65a0`，Authenticode `NotSigned`，仅供本地测试。
+- production bundle 不含 runtime-simulation；安装目录中的 Helper/Gadget 与构建输入 SHA-256 一致。安装版 Helper `--selftest` `passed`，并确认内嵌 agent build 为 `2026-09-27.dynamic-all-key`。
+- 对正在运行的旧安装版执行 `/S /UPDATE`：旧进程 2,225 ms 内自行退出；日志具备 `installer_requested_exit`、BLE 与平台清理完成标记；安装器退出码 0。升级后仍只有一个 HKCU 安装身份和一个开始菜单快捷方式，四份设置/映射文件在安装及新版本启动后逐字节不变。
+- 新安装版启动后持续存活，诊断日志 source revision 与上述提交一致；RC003 bridge 描述文件为协议 v2。功能关闭状态下做无边沿 loopback 握手，返回 `OK 2 <generation> -`，证明未开启时增强目标为空。
+- 安装/升级会按产品规则撤销 Helper 授权，本轮启动后“全按键支持”为关闭状态。因此本记录不宣称实体 13 键已通过；重新授权后的 RC001/RC003 逐键、物理键盘同名键和共享宿主兼容性仍为 `deferred`。
+
 它给出每项的命令、判据与日志字段。
 
 **步骤是验收方法，不代表各项均已通过。** 每项的当前状态见文末状态表——那里写的 `passed`
