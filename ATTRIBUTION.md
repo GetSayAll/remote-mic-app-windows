@@ -30,6 +30,12 @@
   识别 Windows 隐藏于合成器的窗口。参考：
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect 、
   https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute 。
+- 2026-09-27 关窗后白屏复现补充：`GetWindowTextLengthW` 只用于判断 Chromium
+  顶层窗口是否已有标题，不读取或记录标题内容。无标题 `Chrome_WidgetWin_1`
+  的现场样本是 960×720 空白窗口，而正常主窗口标题长度非零；该筛选是已观测
+  框架窗口的兼容判据，不宣称 Windows 为所有应用提供统一“主窗口”标识。
+  官方 API 语义：
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowtextlengthw 。
 
 ## 遥控器缓存电量显示
 

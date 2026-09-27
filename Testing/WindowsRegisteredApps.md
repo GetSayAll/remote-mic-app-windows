@@ -30,6 +30,9 @@ Remove-Item Env:SAYALL_TEST_REGISTERED_APP_TARGET
   窗口不会被主动显示；诊断日志应有 `window_candidate` 的接受或拒绝原因。
 - 对 ChatGPT 检查不再出现空白窄条；对 WorkBuddy 检查冷启动、主窗口已隐藏
   和闲置后首按不再出现白屏。若白屏仍在实际主窗口发生，单独记录渲染时序。
+- 对 ChatGPT 再执行“点 X 关闭窗口到任务栏 → 菜单键打开”回归：不能把
+  无标题、正常尺寸的 `Chrome_WidgetWin_1` 预创建窗口显示成白屏；应等待
+  有标题的实际主窗口并确认其成为前台。
 - 对 MSIX/Electron 等多进程应用，验收按精确 AUMID 关联整组进程，不能只把激活
   契约返回的单个 PID 当作主窗口进程。
 - 对 AppsFolder 中的传统桌面条目，验收应从 `System.Link.TargetParsingPath` 读取公开

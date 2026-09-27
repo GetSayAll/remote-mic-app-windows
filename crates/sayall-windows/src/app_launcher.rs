@@ -677,8 +677,9 @@ mod win_impl {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow,
-        GWL_EXSTYLE, GW_OWNER, SW_RESTORE, SW_SHOW, WS_EX_TOOLWINDOW,
+        GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_RESTORE, SW_SHOW,
+        WS_EX_TOOLWINDOW,
     };
 
     pub(super) struct EnumContext<'a> {
@@ -703,13 +704,15 @@ mod win_impl {
     // 进程/AUMID 只能确定应用身份，不能确定 HWND 的用途。Electron 等应用会
     // 在同一身份下创建崩溃监视、消息、托盘与渲染辅助窗口；它们也可能无 owner、
     // 非 WS_EX_TOOLWINDOW。窗口类只排除已知的框架辅助用途，尺寸兜底排除
-    // 尚未布局的消息窗口；不以窗口标题或应用名称作判断。
+    // 尚未布局的消息窗口；仅对 Chromium 主窗口类检查标题是否存在，
+    // 不读取标题内容，也不以应用名称作判断。
     pub(super) fn window_rejection_reason(
         class_name: &str,
         width: i32,
         height: i32,
         owned: bool,
         cloaked: bool,
+        has_title: bool,
     ) -> Option<&'static str> {
         if owned {
             return Some("owned");
@@ -725,6 +728,12 @@ mod win_impl {
             || class_name == "Chrome_StatusTrayWindow"
         {
             return Some("auxiliary_class");
+        }
+        // Chromium/Electron 的无标题 Chrome_WidgetWin_1 也可能是预创建的
+        // 空白 BrowserWindow。即使它有正常尺寸和 WS_EX_APPWINDOW，也不能
+        // 在应用自己的激活契约完成前把它强制显示出来。
+        if class_name == "Chrome_WidgetWin_1" && !has_title {
+            return Some("untitled_chromium_window");
         }
         if width < 120 || height < 80 {
             return Some("small_or_unlaid_out");
@@ -767,6 +776,7 @@ mod win_impl {
                 rect.bottom - rect.top,
                 owned,
                 cloaked != 0,
+                GetWindowTextLengthW(hwnd) > 0,
             )
         };
         crate::ble::gatt_note(format!(
@@ -1266,35 +1276,39 @@ pub(crate) mod tests {
         use super::win_impl::window_rejection_reason;
 
         assert_eq!(
-            window_rejection_reason("crashpad_SessionEndWatcher", 136, 39, false, false),
+            window_rejection_reason("crashpad_SessionEndWatcher", 136, 39, false, false, false),
             Some("auxiliary_class")
         );
         assert_eq!(
-            window_rejection_reason("Base_PowerMessageWindow", 0, 0, false, false),
+            window_rejection_reason("Base_PowerMessageWindow", 0, 0, false, false, false),
             Some("auxiliary_class")
         );
         assert_eq!(
-            window_rejection_reason("Chrome_WidgetWin_0", 1920, 1019, false, false),
+            window_rejection_reason("Chrome_WidgetWin_0", 1920, 1019, false, false, false),
             Some("auxiliary_class")
         );
         assert_eq!(
-            window_rejection_reason("Electron_NotifyIconHostWindow", 0, 0, false, false),
+            window_rejection_reason("Electron_NotifyIconHostWindow", 0, 0, false, false, false),
             Some("auxiliary_class")
         );
         assert_eq!(
-            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, false),
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, false, true),
             None
         );
         assert_eq!(
-            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, true, false),
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, false, false),
+            Some("untitled_chromium_window")
+        );
+        assert_eq!(
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, true, false, true),
             Some("owned")
         );
         assert_eq!(
-            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, true),
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, true, true),
             Some("cloaked")
         );
         assert_eq!(
-            window_rejection_reason("UnknownWindow", 136, 39, false, false),
+            window_rejection_reason("UnknownWindow", 136, 39, false, false, false),
             Some("small_or_unlaid_out")
         );
     }
