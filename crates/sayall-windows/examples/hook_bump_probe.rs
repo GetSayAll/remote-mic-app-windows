@@ -1,12 +1,13 @@
-//! 一次性诊断探针：LL 键盘钩子在"链头 bump"（重装钩子）与 SetTimer 定时器
-//! 下的事件接收行为。只注入无害的 VK_F13，不触碰应用状态、不读写设置。
+//! 一次性诊断探针：LL 键盘钩子在"高频重装链头"（录入期 200ms bump）下的事件
+//! 接收行为。只注入无害的 VK_F13，不触碰应用状态、不读写设置。
 //!
-//! 背景（2026-09-27 真机日志）：#133 引入"录入开始把钩子重装到链头"后，录入
-//! 会话大量出现 keys_seen=0（钩子完全收不到按键）且 timer_bumps=0（10s/200ms
-//! 定时器从未触发）。本探针把两个疑点在同一环境下隔离验证：
-//!   1. SetTimer(None, id, 200ms, None) 是否真的产生 WM_TIMER；
-//!   2. 按 key_gate 的 bump 写法（先挂新钩、再卸旧钩）重装后，钩子是否还收事件；
-//!      对照变体：只挂不卸、先卸再挂、完全不重装。
+//! 背景（2026-09-27 真机日志）：定时器缺陷修复后，录入期间链头 bump 实测以
+//! ~5 次/秒执行（bumps_ok 每会话 +60~75），但 `keys_seen` 仍为 0——物理按键
+//! 一个都到不了钩子。本探针隔离验证"高频重装是否会让钩子失去事件投递"：
+//!   阶段 A：单次安装，持续注入（基线）
+//!   阶段 B：每 200ms 重装一次（先挂新钩再卸旧钩，录入期写法），持续注入
+//!   阶段 C：停止重装，持续注入（恢复）
+//! 判定：若 B 阶段接收数骤降/归零而 C 阶段恢复 ⇒ 高频重装本身破坏投递。
 
 #[cfg(not(windows))]
 fn main() {
@@ -28,17 +29,19 @@ mod windows_probe {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_F13,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP,
-        WM_QUIT, WM_TIMER,
+        CallNextHookEx, DispatchMessageW, GetMessageW, KillTimer, PeekMessageW, SetTimer,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, PM_NOREMOVE,
+        WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
     };
 
-    const WM_DO_BUMP: u32 = WM_APP + 0x71;
+    const WM_SET_BUMP_PERIOD: u32 = WM_APP + 0x71;
+    const WM_QUIT_PROBE: u32 = WM_APP + 0x72;
     const TIMER_ID: usize = 0x9A01;
-    const TIMER_MS: u32 = 200;
 
     static HOOK_CALLS: AtomicU64 = AtomicU64::new(0);
     static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+    static HOOK_BUMPS: AtomicU64 = AtomicU64::new(0);
+    static PROBE_THREAD_ID: AtomicU64 = AtomicU64::new(0);
 
     unsafe extern "system" fn probe_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 {
@@ -48,101 +51,95 @@ mod windows_probe {
     }
 
     fn inject_key() {
-        let down = INPUT {
+        let make = |flags| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: VK_F13,
                     wScan: 0,
-                    dwFlags: Default::default(),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_F13,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
+                    dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },
             },
         };
         unsafe {
-            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+            SendInput(
+                &[make(Default::default()), make(KEYEVENTF_KEYUP)],
+                std::mem::size_of::<INPUT>() as i32,
+            );
         }
     }
 
-    /// 一段观察窗口：每秒注入两次按键，返回（钩子回调数, 定时器触发数）。
-    fn observe(seconds: u64) -> (u64, u64) {
-        let calls_before = HOOK_CALLS.load(Ordering::Relaxed);
-        let ticks_before = TIMER_TICKS.load(Ordering::Relaxed);
-        for _ in 0..seconds {
-            std::thread::sleep(Duration::from_millis(500));
+    /// 每 300ms 注入一次按键，观察 seconds 秒；返回（钩子回调数, 定时器触发数, 重装次数）。
+    fn observe(seconds: u64) -> (u64, u64, u64) {
+        let calls = HOOK_CALLS.load(Ordering::Relaxed);
+        let ticks = TIMER_TICKS.load(Ordering::Relaxed);
+        let bumps = HOOK_BUMPS.load(Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+        while std::time::Instant::now() < deadline {
             inject_key();
-            std::thread::sleep(Duration::from_millis(500));
-            inject_key();
+            std::thread::sleep(Duration::from_millis(300));
         }
         (
-            HOOK_CALLS.load(Ordering::Relaxed) - calls_before,
-            TIMER_TICKS.load(Ordering::Relaxed) - ticks_before,
+            HOOK_CALLS.load(Ordering::Relaxed) - calls,
+            TIMER_TICKS.load(Ordering::Relaxed) - ticks,
+            HOOK_BUMPS.load(Ordering::Relaxed) - bumps,
         )
     }
 
+    fn post(msg: u32, arg: usize) {
+        let tid = PROBE_THREAD_ID.load(Ordering::Relaxed) as u32;
+        if tid != 0 {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                    tid,
+                    msg,
+                    WPARAM(arg),
+                    LPARAM(0),
+                );
+            }
+        }
+    }
+
     pub fn run() {
-        let (tx, rx) = mpsc::channel::<(bool, bool, u32)>();
+        let (tx, rx) = mpsc::channel::<(bool, usize, u32)>();
         let worker = std::thread::spawn(move || unsafe {
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
             let mut current: Option<HHOOK> =
                 SetWindowsHookExW(WH_KEYBOARD_LL, Some(probe_hook), None, 0).ok();
-            // 注意：本 crate 版本的 SetTimer 返回 usize（0 = 失败），非 Result。
-            let timer = SetTimer(None, TIMER_ID, TIMER_MS, None);
-            let timer_ok = timer != 0;
-            println!("[probe] requested_timer_id={TIMER_ID} actual_timer_id={timer}");
+            let mut timer = SetTimer(None, TIMER_ID, 10_000, None);
             let _ = tx.send((
                 current.is_some(),
-                timer_ok,
+                timer,
                 windows::Win32::System::Threading::GetCurrentThreadId(),
             ));
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 match msg.message {
-                    WM_QUIT => break,
-                    WM_DO_BUMP => {
-                        let mode = msg.wParam.0;
-                        if mode == 2 {
-                            if let Some(old) = current.take() {
+                    WM_QUIT | WM_QUIT_PROBE => break,
+                    WM_SET_BUMP_PERIOD => {
+                        // 模拟录入期：短周期重装；wParam=0 表示停止重装。
+                        let period = msg.wParam.0;
+                        if timer != 0 {
+                            KillTimer(None, timer);
+                        }
+                        timer = if period == 0 {
+                            0
+                        } else {
+                            SetTimer(None, TIMER_ID, period.max(1) as u32, None)
+                        };
+                    }
+                    WM_TIMER if timer != 0 && msg.wParam.0 as usize == timer => {
+                        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+                        // 重装链头（先挂新钩再卸旧钩）——录入期 bump 的写法。
+                        if let Ok(new_hook) =
+                            SetWindowsHookExW(WH_KEYBOARD_LL, Some(probe_hook), None, 0)
+                        {
+                            if let Some(old) = current.replace(new_hook) {
                                 let _ = UnhookWindowsHookEx(old);
                             }
-                        }
-                        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(probe_hook), None, 0) {
-                            Ok(new_hook) => {
-                                let old = current.replace(new_hook);
-                                if mode == 1 {
-                                    if let Some(old) = old {
-                                        let _ = UnhookWindowsHookEx(old);
-                                    }
-                                }
-                            }
-                            Err(_) => println!(
-                                "[probe] bump mode={mode} failed err={}",
-                                windows::Win32::Foundation::GetLastError().0
-                            ),
-                        }
-                    }
-                    WM_TIMER => {
-                        // hWnd=NULL 的线程定时器忽略传入 nIDEvent，wParam 为系统分配的 id。
-                        if msg.wParam.0 as usize == timer {
-                            TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            println!(
-                                "[probe] timer id mismatch: got {} expect {}",
-                                msg.wParam.0, timer
-                            );
+                            HOOK_BUMPS.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     _ => {}
@@ -154,61 +151,29 @@ mod windows_probe {
                 let _ = UnhookWindowsHookEx(hook);
             }
         });
-        let (hook_ok, timer_ok, thread_id) = rx.recv().expect("probe 线程未启动");
+        let (hook_ok, timer_id, thread_id) = rx.recv().expect("probe 线程未启动");
         PROBE_THREAD_ID.store(thread_id as u64, Ordering::Relaxed);
-        println!(
-            "[probe] initial_hook_ok={hook_ok} set_timer_ok={timer_ok} timer_ms={TIMER_MS} 注入 VK_F13"
-        );
+        println!("[probe] hook_ok={hook_ok} timer_id={timer_id} (系统分配) 注入 VK_F13 每 300ms");
 
-        // 线程 id：用于投递 WM_DO_BUMP（探针线程自己的 id 由消息循环持有）。
-        // 这里直接借助线程启动时记录的 id：改用全局原子从 worker 内写。
-        let (baseline_calls, baseline_ticks) = observe(3);
-        println!("[probe] phase=baseline calls={baseline_calls} ticks={baseline_ticks}");
+        let (a_calls, _, _) = observe(3);
+        println!("[probe] phase=A 单次安装 3s calls={a_calls}");
 
-        for (mode, label) in [
-            (1usize, "bump_install_then_unhook(应用现写法)"),
-            (0, "bump_install_only(不卸旧钩)"),
-            (2, "bump_unhook_then_install(先卸再挂)"),
-        ] {
-            post_bump(mode);
-            std::thread::sleep(Duration::from_millis(300));
-            let (calls, ticks) = observe(3);
-            println!("[probe] phase={label} calls={calls} ticks={ticks}");
-        }
+        post(WM_SET_BUMP_PERIOD, 200);
+        std::thread::sleep(Duration::from_millis(300));
+        let (b_calls, b_ticks, b_bumps) = observe(10);
+        println!("[probe] phase=B 200ms重装 10s calls={b_calls} ticks={b_ticks} bumps={b_bumps}");
+
+        post(WM_SET_BUMP_PERIOD, 0);
+        std::thread::sleep(Duration::from_millis(300));
+        let (c_calls, _, _) = observe(3);
+        println!("[probe] phase=C 停止重装 3s calls={c_calls}");
 
         println!(
-            "[probe] totals calls={} ticks={}",
+            "[probe] totals calls={} bumps={}",
             HOOK_CALLS.load(Ordering::Relaxed),
-            TIMER_TICKS.load(Ordering::Relaxed)
+            HOOK_BUMPS.load(Ordering::Relaxed)
         );
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                probe_thread_id(),
-                WM_QUIT,
-                WPARAM(0),
-                LPARAM(0),
-            );
-        }
+        post(WM_QUIT_PROBE, 0);
         let _ = worker.join();
-    }
-
-    static PROBE_THREAD_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn probe_thread_id() -> u32 {
-        PROBE_THREAD_ID.load(Ordering::Relaxed) as u32
-    }
-
-    fn post_bump(mode: usize) {
-        let tid = probe_thread_id();
-        if tid != 0 {
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                    tid,
-                    WM_DO_BUMP,
-                    WPARAM(mode),
-                    LPARAM(0),
-                );
-            }
-        }
     }
 }

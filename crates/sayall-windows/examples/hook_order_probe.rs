@@ -44,7 +44,8 @@ mod windows_probe {
     /// A：吞掉 VK_F13（模拟外部输入法/竞争钩子）。
     unsafe extern "system" fn swallow_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 && SWALLOW_ARMED.load(Ordering::Relaxed) {
-            let kb = &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT);
+            let kb =
+                &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT);
             if kb.vkCode == VK_F13_CODE {
                 SWALLOWED.fetch_add(1, Ordering::Relaxed);
                 return LRESULT(1);
@@ -56,7 +57,8 @@ mod windows_probe {
     /// B：只计数（模拟本应用钩子）。
     unsafe extern "system" fn observe_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 {
-            let kb = &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT);
+            let kb =
+                &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT);
             if kb.vkCode == VK_F13_CODE {
                 OBSERVED.fetch_add(1, Ordering::Relaxed);
             }
@@ -86,7 +88,9 @@ mod windows_probe {
     }
 
     pub fn run() {
-        let mode = std::env::args().nth(1).unwrap_or_else(|| "count_first".to_owned());
+        let mode = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "count_first".to_owned());
         let swallow_first = mode == "swallow_first";
         let (tx, rx) = mpsc::channel::<(bool, bool)>();
         let worker = std::thread::spawn(move || unsafe {
