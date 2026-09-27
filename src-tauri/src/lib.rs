@@ -668,11 +668,12 @@ fn start_shortcut_capture() -> Result<Vec<sayall_windows::send_input::KeyCode>, 
     }
     let preheld = sayall_windows::key_gate::take_preheld_capture_keys();
     sayall_windows::gatt_note(format!(
-        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} preheld_count={} preheld_keys={:?} elapsed_ms={}",
+        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} preheld_count={} preheld_keys={:?} elapsed_ms={} {}",
         sayall_windows::key_gate::hook_bump_request_count(),
         preheld.len(),
         preheld,
-        started.elapsed().as_millis()
+        started.elapsed().as_millis(),
+        sayall_windows::key_gate::capture_diagnostics_summary()
     ));
     Ok(preheld)
 }
@@ -680,10 +681,10 @@ fn start_shortcut_capture() -> Result<Vec<sayall_windows::send_input::KeyCode>, 
 #[tauri::command]
 fn stop_shortcut_capture() {
     let _ = sayall_windows::key_gate::set_shortcut_capture_active(false);
-    sayall_windows::gatt_note(
-        "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired"
-            .to_owned(),
-    );
+    sayall_windows::gatt_note(format!(
+        "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired {}",
+        sayall_windows::key_gate::capture_diagnostics_summary()
+    ));
 }
 
 #[tauri::command]

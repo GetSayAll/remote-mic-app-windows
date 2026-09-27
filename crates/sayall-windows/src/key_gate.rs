@@ -276,6 +276,22 @@ mod windows_impl {
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
     /// 链头 bump 请求计数（功能点日志/测试观测：录入开始必须发起一次 bump）。
     static HOOK_BUMP_REQUESTS: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间进入捕获处理器的真实键盘事件数（钩子健康度探针：
+    /// 会话内用户按键但该计数不涨 ⇒ 物理边沿根本没到本钩子，问题在钩子
+    /// 链位置/安装失败，而非投递门控）。
+    static CAPTURE_KEYS_SEEN: AtomicU64 = AtomicU64::new(0);
+    /// 录入会话期间被跳过的注入事件数（外部钩子吞下后重新注入的探针：
+    /// 微信输入法等目标若"吞下 + 重注入"，其注入副本会命中 LLKHF_INJECTED
+    /// 分支被跳过——表现为零边沿）。
+    static CAPTURE_INJECTED_SKIPPED: AtomicU64 = AtomicU64::new(0);
+    /// 链头 bump 成败与最后一次失败错误码（2026-09-27：SetWindowsHookExW
+    /// 失败此前静默保留旧钩，链位置问题不可见）。
+    static HOOK_BUMPS_OK: AtomicU64 = AtomicU64::new(0);
+    static HOOK_BUMPS_FAILED: AtomicU64 = AtomicU64::new(0);
+    static LAST_HOOK_ERROR: AtomicU64 = AtomicU64::new(0);
+    /// bump 定时器实际触发次数（录入期间应为 5 次/秒；不涨 ⇒ 定时器
+    /// 未生效或钩子线程被阻塞）。
+    static TIMER_BUMPS: AtomicU64 = AtomicU64::new(0);
     /// 被吞键盘边沿的投递端（映射引擎注册；闭包形式避免模块间类型耦合）。
     static EDGE_SINK: OnceLock<Arc<dyn Fn(ButtonEdge) + Send + Sync>> = OnceLock::new();
     static SHORTCUT_CAPTURE_SINK: OnceLock<super::ShortcutCaptureCallback> = OnceLock::new();
@@ -419,7 +435,15 @@ mod windows_impl {
         message: u32,
         flags: windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT_FLAGS,
     ) -> bool {
+        let capture_active = SHORTCUT_CAPTURE_ACTIVE.load(Ordering::Relaxed);
+        if capture_active {
+            CAPTURE_KEYS_SEEN.fetch_add(1, Ordering::Relaxed);
+        }
         if flags.contains(LLKHF_INJECTED) {
+            // 录入期间被跳过的注入副本（外部钩子"吞下 + 重注入"探针）。
+            if capture_active {
+                CAPTURE_INJECTED_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            }
             return false;
         }
         let vk_index = vk_code as usize;
@@ -564,15 +588,26 @@ mod windows_impl {
         false
     }
 
-    /// 钩子链头 bump（先挂新钩再卸旧钩，无吞键空窗）。
+    /// 钩子链头 bump（先挂新钩再卸旧钩，无吞键空窗）。失败时保留旧钩并
+    /// 记录错误码——2026-09-27 实证链位置问题会静默表现为"按键完全到不了
+    /// 捕获通道"，必须可从诊断快照归因。
     fn bump_to_chain_head(current: &mut Option<HHOOK>) {
-        if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
-        {
-            let old = current.replace(new_hook);
-            if let Some(old) = old {
-                unsafe {
-                    let _ = UnhookWindowsHookEx(old);
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
+            Ok(new_hook) => {
+                HOOK_BUMPS_OK.fetch_add(1, Ordering::Relaxed);
+                let old = current.replace(new_hook);
+                if let Some(old) = old {
+                    unsafe {
+                        let _ = UnhookWindowsHookEx(old);
+                    }
                 }
+            }
+            Err(_) => {
+                HOOK_BUMPS_FAILED.fetch_add(1, Ordering::Relaxed);
+                LAST_HOOK_ERROR.store(
+                    unsafe { windows::Win32::Foundation::GetLastError() }.0 as u64,
+                    Ordering::Relaxed,
+                );
             }
         }
     }
@@ -614,6 +649,7 @@ mod windows_impl {
                         }
                     }
                     WM_TIMER if message.wParam.0 as usize == BUMP_TIMER_ID => {
+                        TIMER_BUMPS.fetch_add(1, Ordering::Relaxed);
                         bump_to_chain_head(&mut current)
                     }
                     _ => {}
@@ -762,6 +798,23 @@ mod windows_impl {
         HOOK_BUMP_REQUESTS.load(Ordering::Relaxed)
     }
 
+    /// 录入诊断快照（lib.rs 在开始/停止日志中记录；只读原子，任意线程可调用）。
+    /// 判据：`keys_seen` 不涨 ⇒ 物理边沿没到本钩子（链位置/钩子被移除）；
+    /// `injected_skipped` 涨 ⇒ 外部钩子"吞下 + 重注入"；`bumps_failed` 涨 ⇒
+    /// 链头提升失败（`last_bump_error` 为 Win32 错误码）；`timer_bumps` 不涨 ⇒
+    /// 录入期间定时 bump 未生效。
+    pub fn capture_diagnostics_summary() -> String {
+        format!(
+            "keys_seen={} injected_skipped={} bumps_ok={} bumps_failed={} last_bump_error={} timer_bumps={}",
+            CAPTURE_KEYS_SEEN.load(Ordering::Relaxed),
+            CAPTURE_INJECTED_SKIPPED.load(Ordering::Relaxed),
+            HOOK_BUMPS_OK.load(Ordering::Relaxed),
+            HOOK_BUMPS_FAILED.load(Ordering::Relaxed),
+            LAST_HOOK_ERROR.load(Ordering::Relaxed),
+            TIMER_BUMPS.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn set_shortcut_capture_active(active: bool) -> bool {
         if active && !GATE_ACTIVE.load(Ordering::Relaxed) {
             return false;
@@ -837,9 +890,9 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, configure, decide, hook_bump_request_count, is_gate_thread_alive,
-    leaked_down_count, listener_active, request_hook_bump, set_edge_sink, set_listener_active,
-    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
+    arm_button, capture_diagnostics_summary, configure, decide, hook_bump_request_count,
+    is_gate_thread_alive, leaked_down_count, listener_active, request_hook_bump, set_edge_sink,
+    set_listener_active, set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
     set_shortcut_capture_sink, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
     HOLD_SWALLOWED_ALL,
 };
@@ -873,6 +926,13 @@ mod fallback {
     }
     pub fn swallowed_edge_count() -> u64 {
         0
+    }
+    pub fn hook_bump_request_count() -> u64 {
+        0
+    }
+    pub fn capture_diagnostics_summary() -> String {
+        "keys_seen=0 injected_skipped=0 bumps_ok=0 bumps_failed=0 last_bump_error=0 timer_bumps=0"
+            .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
         0
@@ -1087,6 +1147,24 @@ mod tests {
         let before = hook_bump_request_count();
         request_hook_bump();
         assert_eq!(hook_bump_request_count(), before + 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_diagnostics_summary_exposes_all_probe_fields() {
+        // 诊断字段名是日志契约（真机归因直接依赖）：拼写漂移会让"零边沿"
+        // 类报障失去可观测性，此处锁定字段集合。
+        let summary = capture_diagnostics_summary();
+        for field in [
+            "keys_seen=",
+            "injected_skipped=",
+            "bumps_ok=",
+            "bumps_failed=",
+            "last_bump_error=",
+            "timer_bumps=",
+        ] {
+            assert!(summary.contains(field), "missing {field} in {summary}");
+        }
     }
 
     #[cfg(not(windows))]
