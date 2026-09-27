@@ -16,6 +16,7 @@ on:
     # 不会创建任何 check，而分支保护的必需检查指向 `gate`，纯文档 PR 会一直卡在
     # "Expected — Waiting for status to be reported"。
     # 改由 job 级判断（changes）跳过重量级校验，`gate` 始终运行并给出结论。
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,12 +26,17 @@ permissions:
 env:
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+concurrency:
+  group: windows-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # 路径感知：判断本次变更是否包含"非文档"内容，决定要不要跑重量级校验。
   # 忽略清单与原来的 paths-ignore 保持一致（见文件头的 push 配置）。
   changes:
     name: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
@@ -67,6 +73,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -121,6 +128,42 @@ jobs:
         timeout-minutes: 3
         run: ./scripts/test-windows-runtime-simulation.ps1
 
+  # 安装器构建与生命周期矩阵只在合入 main 后或人工点跑时执行。
+  # PR 仍由 verify 覆盖前端、Rust 和 runtime simulation，避免每次提交都重复
+  # 构建 NSIS 并执行耗时的安装、升级、降级和卸载测试。
+  installer:
+    name: Verify Windows installer lifecycle
+    needs: [changes, verify]
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      needs.verify.result == 'success' &&
+      github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Ensure updater signing key (CI fallback for missing secret)
+        shell: pwsh
+        run: ./scripts/ensure-updater-signing-key.ps1
+
+      - name: Stage bundle resources (helper + frida gadget)
+        run: node scripts/stage-bundle-inputs.cjs
+
       - name: Build predecessor NSIS upgrade fixture
         shell: pwsh
         run: ./scripts/build-windows-upgrade-fixture.ps1
@@ -165,15 +208,16 @@ jobs:
   # 用一个始终存在的 check 作为闸门，避免 paths 过滤导致的"必需检查永不出现"死锁。
   gate:
     name: gate
-    needs: [changes, verify]
+    needs: [changes, verify, installer]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Evaluate upstream results
         shell: bash
         run: |
           set -euo pipefail
-          echo "changes=${{ needs.changes.result }} verify=${{ needs.verify.result }}"
+          echo "changes=${{ needs.changes.result }} verify=${{ needs.verify.result }} installer=${{ needs.installer.result }}"
           if [ "${{ needs.changes.result }}" != "success" ]; then
             echo "::error::changes job did not succeed"
             exit 1
@@ -183,3 +227,9 @@ jobs:
             skipped) echo "verify skipped（仅文档改动）";;
             *) echo "::error::verify did not pass: ${{ needs.verify.result }}"; exit 1;;
           esac
+          if [ "${{ github.event_name }}" != "pull_request" ] && \
+             [ "${{ needs.changes.outputs.code }}" = "true" ] && \
+             [ "${{ needs.installer.result }}" != "success" ]; then
+            echo "::error::installer did not pass: ${{ needs.installer.result }}"
+            exit 1
+          fi
