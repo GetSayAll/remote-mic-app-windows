@@ -215,7 +215,7 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
     // applyVoiceHotkey 成功会覆写消息，推断说明必须在其后写入；失败时保留错误信息。
     if (voiceHotkey.value) {
       voiceHotkeyMessage.value =
-        "你按下的组合触发了微信输入法的语音键，按键被其拦截而无法直接录入；已为你设置微信输入法语音键 左 Ctrl + 左 Win。若你在微信输入法中改过语音键，请改设为一致的组合";
+        "你按下的组合触发了微信输入法的语音（按键被其拦截，内容无法读取），已按微信输入法语音键默认值 左 Ctrl + 左 Win 生效。此快捷键需与微信输入法语音键一致；若你修改过微信输入法的语音键，请在微信输入法设置中查看后重新录入对应组合";
     }
     return;
   }
@@ -229,7 +229,7 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
     return;
   }
   voiceHotkeyMessage.value =
-    "本次未捕获到任何按键。若按下的是微信输入法的语音键（默认 左 Ctrl + 左 Win），其按键会被微信输入法拦截；请重试或改用其他组合，也可点击“默认”直接使用 左 Ctrl + 左 Win";
+    "本次未捕获到任何按键。微信输入法会拦截它自己的语音键（默认 左 Ctrl + 左 Win），本次也未观测到语音被触发；请重试，或点击“默认”直接使用 左 Ctrl + 左 Win";
 }
 
 /**
@@ -645,7 +645,7 @@ onUnmounted(() => {
             <span>{{ voiceHoldHotkeyLabel(voiceHotkey) }}</span>
           </div>
         </div>
-        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。默认快捷键：{{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}。</p>
+        <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。说话时按的是遥控器语音键，此快捷键是应用替它向系统注入的组合，用于唤起微信输入法语音——因此必须与微信输入法设置的语音键一致，否则按住说话无法生效。默认快捷键：{{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}。</p>
         <div class="button-row voice-hotkey-presets">
           <button
             class="secondary-button"
@@ -698,7 +698,7 @@ onUnmounted(() => {
               ? chordLabel({ keys: voiceCaptureDisplay })
               : waitingPreheldRelease
                 ? "检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始"
-                : "请按下要使用的快捷键组合（也可单独按一个 Ctrl/Alt/Win 等修饰键）；按 Esc 取消"
+                : "请按下微信输入法当前设置的语音键（默认 左 Ctrl + 左 Win，也可单独按一个修饰键）；按 Esc 取消"
           }}
         </p>
         <p v-if="capturingVoiceHotkey && waitingPreheldRelease" class="muted scan-summary">

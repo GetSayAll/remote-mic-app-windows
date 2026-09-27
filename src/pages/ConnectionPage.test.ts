@@ -326,7 +326,9 @@ describe("VB-CABLE first-launch guidance", () => {
     await flushPromises();
     expect(mocks.startShortcutCapture).toHaveBeenCalledOnce();
     expect(mocks.captureEdgeHandler).not.toBeNull();
-    expect(wrapper.find(".voice-hotkey-capture").text()).toContain("请按下要使用的快捷键组合");
+    expect(wrapper.find(".voice-hotkey-capture").text()).toContain(
+      "请按下微信输入法当前设置的语音键",
+    );
 
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
     mocks.captureEdgeHandler!({ key: "d", isPressed: true });
@@ -494,7 +496,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
       keys: ["left_control", "left_windows"],
     });
-    expect(wrapper.text()).toContain("已为你设置微信输入法语音键 左 Ctrl + 左 Win");
+    expect(wrapper.text()).toContain("已按微信输入法语音键默认值 左 Ctrl + 左 Win");
     wrapper.unmount();
   });
 
@@ -515,7 +517,7 @@ describe("VB-CABLE first-launch guidance", () => {
     await settleVoiceCapture();
 
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
-    expect(wrapper.text()).not.toContain("已为你设置微信输入法语音键");
+    expect(wrapper.text()).not.toContain("已按微信输入法语音键默认值");
     wrapper.unmount();
   });
 
