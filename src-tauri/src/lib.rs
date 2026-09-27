@@ -657,7 +657,7 @@ fn get_button_mapping_snapshot(
 fn start_shortcut_capture() -> Result<(), String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
-        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only".to_owned(),
+        "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only hook_bump=requested reason=ime_chord_may_preempt".to_owned(),
     );
     if !sayall_windows::key_gate::set_shortcut_capture_active(true) {
         sayall_windows::gatt_note(format!(
@@ -667,7 +667,8 @@ fn start_shortcut_capture() -> Result<(), String> {
         return Err("键盘保护钩子尚未就绪，请稍后重试".to_owned());
     }
     sayall_windows::gatt_note(format!(
-        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only elapsed_ms={}",
+        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} elapsed_ms={}",
+        sayall_windows::key_gate::hook_bump_request_count(),
         started.elapsed().as_millis()
     ));
     Ok(())
