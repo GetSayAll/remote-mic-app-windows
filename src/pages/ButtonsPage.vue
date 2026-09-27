@@ -835,9 +835,32 @@ const rc003BridgeText = computed(() => {
       return null;
   }
 });
-const rc003BridgeTone = computed(() =>
-  rc003Bridge.value?.phase === "connected" ? "success" : "pending",
-);
+const rc003BridgeTone = computed(() => {
+  switch (rc003Bridge.value?.phase) {
+    case "connected":
+      return "success";
+    case "failed":
+      return "error";
+    default:
+      // listening 及未知相位：等待中（黄点）。文案仍可从开关圆点的 title 读到。
+      return "pending";
+  }
+});
+
+// 开启成功但桥接段异步失败（助手起不来等）：开关已是开启态、不会再走
+// applyCaptureToggle 的失败分支，必须在这里把失败送进底部提示条，
+// 否则用户只看到一个黄点永远不变绿（2026-09-28 状态行移除后的唯一显性告警）。
+watch(rc003Bridge, (bridge, previous) => {
+  if (bridge?.phase === "failed" && previous?.phase !== "failed") {
+    statusMessage.value = "全按键支持开启失败：请关闭全按键支持后重新开启；若反复失败请联系开发者。";
+    reportFrontendEvent({
+      event: "rc003_capture_bridge_failed",
+      phase: "completed",
+      result: "failed",
+      reason: `bridge_phase=${String(bridge.phase)}`,
+    });
+  }
+});
 
 /**
  * 切换三键捕获。打开可能在**首次**弹一次 UAC（IPC 会等授权流程结束）；
@@ -1086,7 +1109,11 @@ onUnmounted(() => {
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
           </label>
           <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
-               选中某个按键的编辑面板，任何时刻都能开启/关闭。 -->
+               选中某个按键的编辑面板，任何时刻都能开启/关闭。
+               样式与「启用自定义按键功能」一致（toggle-input Switch，2026-09-28）；
+               桥接状态是开关右侧的行内圆点——不能再用独立状态行：v-if 插行会把
+               下方画布整体顶下去（页面抖动），胶囊底色+状态光晕也把标题区染了色
+               （2026-09-28 Andy 报告）。 -->
           <label
             class="toggle-row"
             title="开启后，已配置按键从遥控器报告层捕获，避免接管物理键盘同名按键"
@@ -1095,10 +1122,17 @@ onUnmounted(() => {
             <input
               ref="captureSwitchEl"
               type="checkbox"
+              class="toggle-input"
               :checked="rc003CaptureEnabled === true"
               :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
               @change="toggleRc003Capture"
             />
+            <span
+              v-if="rc003BridgeText"
+              class="status-dot"
+              :class="rc003BridgeTone"
+              :title="rc003BridgeText"
+            ></span>
           </label>
         </div>
       </div>
@@ -1111,16 +1145,9 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- 三键已启用时的桥接状态行。开关本体在编辑面板里
-         （"禁用按键"左侧，仅对返回/音量± 显示）。 -->
-    <div
-      v-if="rc003CaptureEnabled === true && rc003BridgeText"
-      class="device-chip"
-      style="align-self: flex-start; margin: 0 0 10px"
-    >
-      <span class="status-dot" :class="rc003BridgeTone"></span>
-      <span>{{ rc003BridgeText }}</span>
-    </div>
+    <!-- 桥接状态不再有独立行（2026-09-28）：状态收进头部开关右侧的行内圆点
+         （title 悬停看文案），开启失败走底部提示条——独立行的 v-if 插入 /
+         移除会引起整页回流（抖动），胶囊底色与状态光晕还会染到标题区。 -->
 
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg

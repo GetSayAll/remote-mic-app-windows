@@ -108,9 +108,6 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       watchdogReleaseTotal: 0,
       pressedUsages: [],
       lastRxAgeMs: null,
-      targetGeneration: 0,
-      targetUsages: [],
-      ownedUsages: [],
     })),
   };
 });
@@ -120,6 +117,7 @@ import {
   getButtonMappings,
   enableRc003Capture,
   disableRc003Capture,
+  getRc003BridgeSnapshot,
   getRc003TaskStatus,
   importButtonMappingConfiguration,
   subscribeButtonEdges,
@@ -128,7 +126,7 @@ import {
   startShortcutCapture,
   stopShortcutCapture,
 } from "../lib/bridge";
-import type { ButtonMappings, RuntimeSnapshot } from "../lib/bridge";
+import type { ButtonMappings, Rc003BridgeSnapshot, RuntimeSnapshot } from "../lib/bridge";
 
 const runtime: RuntimeSnapshot = {
   appVersion: "0.1.0",
@@ -240,7 +238,27 @@ beforeEach(() => {
     helperPath: null,
     lastError: null,
   });
+  // 桥接快照同样要重置实现（mockClear 不清实现，见上）。
+  vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("stopped"));
 });
+
+/** 构造一份指定相位的桥接快照（其余计数字段对 UI 无关，取零值）。 */
+function bridgeSnapshot(phase: Rc003BridgeSnapshot["phase"]): Rc003BridgeSnapshot {
+  return {
+    phase,
+    port: 0,
+    helperPid: 0,
+    acceptedTotal: 0,
+    deniedTotal: 0,
+    replacedTotal: 0,
+    edgesApplied: 0,
+    usagesDropped: 0,
+    malformedTotal: 0,
+    watchdogReleaseTotal: 0,
+    pressedUsages: [],
+    lastRxAgeMs: null,
+  };
+}
 
 /** 「全按键支持」所在的开关行（页面有多个 toggle-row，必须按文本定位）。 */
 function captureRow(page: VueWrapper) {
@@ -765,6 +783,69 @@ describe("buttons mapping page", () => {
     });
     await vi.waitFor(() => {
       expect(page.find(".capability-note").text()).toContain("不接管物理键盘");
+    });
+  });
+
+  it("全按键支持开关使用与「启用自定义按键功能」一致的 Switch 样式（2026-09-28）", async () => {
+    const page = await mountPage("rc003");
+    const checkbox = captureRow(page)!.find('input[type="checkbox"]');
+    expect(checkbox.classes()).toContain("toggle-input");
+  });
+
+  it("桥接状态收进开关旁的行内圆点，不再插入独立状态行（2026-09-28 抖动修复）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    const page = await mountPage("rc003");
+
+    // listening：黄点 + 悬停文案；页面上不存在独立的胶囊状态行。
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("listening"));
+    await vi.waitFor(
+      () => {
+        const dot = captureRow(page)!.find(".status-dot");
+        expect(dot.exists()).toBe(true);
+        expect(dot.classes()).toContain("pending");
+        expect(dot.attributes("title")).toContain("正在启动");
+      },
+      { timeout: 3000 },
+    );
+    expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
+
+    // connected：绿点。同样不允许出现独立状态行。
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
+    await vi.waitFor(
+      () => {
+        expect(captureRow(page)!.find(".status-dot").classes()).toContain("success");
+      },
+      { timeout: 3000 },
+    );
+    expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
+  });
+
+  it("桥接段异步失败：红点 + 底部提示条给出失败文案（开关已开、无法走 toggle 失败分支）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    const page = await mountPage("rc003");
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("failed"));
+    await vi.waitFor(
+      () => {
+        const dot = captureRow(page)!.find(".status-dot");
+        expect(dot.exists()).toBe(true);
+        expect(dot.classes()).toContain("error");
+      },
+      { timeout: 3000 },
+    );
+    await vi.waitFor(() => {
+      expect(page.text()).toContain("全按键支持开启失败");
     });
   });
 
