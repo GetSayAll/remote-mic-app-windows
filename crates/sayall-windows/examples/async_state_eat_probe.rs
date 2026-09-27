@@ -29,8 +29,8 @@ mod windows_probe {
     use std::time::Duration;
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_F24,
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_F24,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetWindowsHookExW,
@@ -50,7 +50,8 @@ mod windows_probe {
         if code >= 0 {
             let message = wparam.0 as u32;
             if matches!(message, 0x0100u32 | 0x0104u32 | 0x0101u32 | 0x0105u32) {
-                let kb = &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT);
+                let kb =
+                    &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT);
                 // 只吞 F24（实验组），F25 照常放行（对照组）。
                 if kb.vkCode == u32::from(VK_F24.0) {
                     EAT_HOOK_SAW.fetch_add(1, Ordering::Relaxed);
@@ -77,10 +78,12 @@ mod windows_probe {
                 },
             },
         };
-        let flags: KEYBD_EVENT_FLAGS = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
-        unsafe {
-            SendInput(&[make(flags)], std::mem::size_of::<INPUT>() as i32) as usize
-        }
+        let flags: KEYBD_EVENT_FLAGS = if up {
+            KEYEVENTF_KEYUP
+        } else {
+            KEYBD_EVENT_FLAGS(0)
+        };
+        unsafe { SendInput(&[make(flags)], std::mem::size_of::<INPUT>() as i32) as usize }
     }
 
     fn is_down(vk: VIRTUAL_KEY) -> bool {
@@ -107,7 +110,8 @@ mod windows_probe {
             let mut msg = MSG::default();
             // 先创建消息队列再装钩子/通知（WM_QUIT 必达，见 hook_bump_probe 注释）。
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-            let hook: Option<HHOOK> = SetWindowsHookExW(WH_KEYBOARD_LL, Some(eat_hook), None, 0).ok();
+            let hook: Option<HHOOK> =
+                SetWindowsHookExW(WH_KEYBOARD_LL, Some(eat_hook), None, 0).ok();
             let _ = tx.send(windows::Win32::System::Threading::GetCurrentThreadId());
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message == WM_QUIT || msg.message == WM_QUIT_PROBE {
@@ -146,7 +150,10 @@ mod windows_probe {
 
         println!(
             "[probe] sent_down={} {} sent_up={} {} eat_hook_saw={} pass_hook_saw={}",
-            n1, n2, n3, n4,
+            n1,
+            n2,
+            n3,
+            n4,
             EAT_HOOK_SAW.load(Ordering::Relaxed),
             PASS_HOOK_SAW.load(Ordering::Relaxed),
         );

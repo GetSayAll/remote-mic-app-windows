@@ -80,7 +80,11 @@ mod windows_probe {
                 },
             },
         };
-        let flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+        let flags = if up {
+            KEYEVENTF_KEYUP
+        } else {
+            KEYBD_EVENT_FLAGS(0)
+        };
         unsafe {
             SendInput(&[make(flags)], size_of::<INPUT>() as i32);
         }
@@ -166,7 +170,7 @@ mod windows_probe {
 
         let lwin = VIRTUAL_KEY(VK_LWIN.0);
         let lctrl = VIRTUAL_KEY(VK_CONTROL.0); // 左 Ctrl（无扩展标志即左）
-        // VIRTUAL_KEY 直接用数值构造左右区分键。
+                                               // VIRTUAL_KEY 直接用数值构造左右区分键。
         let rctrl = VIRTUAL_KEY(VK_RCONTROL as u16);
         let ralt = VIRTUAL_KEY(VK_RMENU as u16);
         let lalt = VIRTUAL_KEY(VK_LMENU as u16);

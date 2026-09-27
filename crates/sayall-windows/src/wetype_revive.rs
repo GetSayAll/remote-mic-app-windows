@@ -252,7 +252,10 @@ mod tests {
             response_since(Some(base), Some(stopped(20))),
             MicResponse::Observed
         );
-        assert_eq!(response_since(None, Some(stopped(20))), MicResponse::Unknown);
+        assert_eq!(
+            response_since(None, Some(stopped(20))),
+            MicResponse::Unknown
+        );
     }
 
     #[test]

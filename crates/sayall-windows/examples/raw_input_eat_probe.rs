@@ -39,8 +39,8 @@ mod windows_probe {
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
         PeekMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-        HHOOK, HWND_MESSAGE, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WNDCLASSW, WM_APP, WM_INPUT,
-        WM_QUIT,
+        HHOOK, HWND_MESSAGE, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_INPUT, WM_QUIT,
+        WNDCLASSW,
     };
 
     const WM_QUIT_PROBE: u32 = WM_APP + 0x91;
@@ -117,7 +117,11 @@ mod windows_probe {
                 },
             },
         };
-        let flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+        let flags = if up {
+            KEYEVENTF_KEYUP
+        } else {
+            KEYBD_EVENT_FLAGS(0)
+        };
         unsafe {
             SendInput(&[make(flags)], size_of::<INPUT>() as i32);
         }
@@ -167,8 +171,8 @@ mod windows_probe {
                 dwFlags: RIDEV_INPUTSINK,
                 hwndTarget: hwnd,
             };
-            let registered = RegisterRawInputDevices(&[rid], size_of::<RAWINPUTDEVICE>() as u32)
-                .is_ok();
+            let registered =
+                RegisterRawInputDevices(&[rid], size_of::<RAWINPUTDEVICE>() as u32).is_ok();
             let thread_id = windows::Win32::System::Threading::GetCurrentThreadId();
             let _ = tx.send((registered, thread_id));
             if !registered {
@@ -211,9 +215,7 @@ mod windows_probe {
         let f25 = WM_INPUT_F25.load(Ordering::Relaxed);
         let total = WM_INPUT_TOTAL.load(Ordering::Relaxed);
         let ate = EAT_HOOK_SAW_F24.load(Ordering::Relaxed);
-        println!(
-            "[probe] eat_hook_saw_f24={ate} wm_input: total={total} f24={f24} f25={f25}"
-        );
+        println!("[probe] eat_hook_saw_f24={ate} wm_input: total={total} f24={f24} f25={f25}");
         let verdict = if ate == 0 {
             "INCONCLUSIVE(钩子没看到注入事件)"
         } else if f24 > 0 && f25 > 0 {
