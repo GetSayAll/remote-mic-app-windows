@@ -19,4 +19,7 @@
   - `pnpm test` 111/111、`pnpm build`（vue-tsc + vite）passed；
   - 真机 WebView2 确认抖动消失：deferred（浏览器预览与 WebView2 同为 Chromium；用户症状本身即经典滚动条占位的证据）。
 - 后续（2026-09-27 晚，用户要求）：窗口默认/最小尺寸 1029×732 → **1100×720**（`src-tauri/tauri.conf.json`）；视口相应变为 1100×688。复测：四页 `clientWidth` 恒 1100、滚动条宽度 0（无可见滚动条）、按键页（714px）与关于页（890px）仍可滚轮滚动，切换零回流（passed）。关于页 `.diagnostic-output` 为嵌入式诊断输出框的内部滚动（max-height 180px），不属于页面级滚动条，保留。
+- 后续（2026-09-28，第二个抖动源）：滚动条修复合入后用户仍反馈按键页抖动。逐帧实测定位到**桥接状态芯片延迟插入**：`ButtonsPage` 的 RC003 桥接状态芯片原为画布上方独立一行，而 `rc003Bridge` 只在 1 秒轮询里拉取，于是进页约 0.6 秒后该行被插入，画布整体下移 41px（实测 `canvasTop` 60→101、`scrollHeight` 714→755、`device-chip` 数 1→2）。仅 RC003 + 三键增强捕获开启时复现，浏览器预览默认关闭该能力故此前不复现。
+  - 修复：芯片移入 `.mapping-header-controls`（与设备芯片同一行，出现/消失不改变行高），并把 `getRc003BridgeSnapshot()` 并入挂载首批 `Promise.all`，状态随首屏一起出现（`src/pages/ButtonsPage.vue`）。
+  - 验证：修复后逐帧 3 秒采样仅 1 个关键帧——`canvasTop` 恒 60、`.mapping-header` 高恒 34、芯片首帧即在、`scrollHeight` 恒 714（1100 宽下两芯片不换行，passed）；`pnpm test` 129/129、`pnpm build` passed；真机 RC003 复验 deferred。
 - 隐私检查：本文档与修复不含个人路径、设备身份、语音内容或凭据。

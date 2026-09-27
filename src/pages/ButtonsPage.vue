@@ -957,10 +957,13 @@ onMounted(async () => {
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
   window.addEventListener("blur", handleCaptureBlur);
-  const [loaded, snapshot, apps] = await Promise.all([
+  // 桥接快照随首批一起取（开销只是一次内存快照）：原先只在 1 秒轮询里取，
+  // 状态芯片要到进页 1 秒后才出现（见头部桥接芯片的注释）。
+  const [loaded, snapshot, apps, bridge] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    getRc003BridgeSnapshot().catch(() => null),
   ]);
   if (unmounted) {
     return;
@@ -970,6 +973,9 @@ onMounted(async () => {
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
+  if (bridge) {
+    rc003Bridge.value = bridge;
+  }
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
@@ -1093,6 +1099,18 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="mapping-header-controls">
+        <!-- 三键已启用时的桥接状态。开关本体在编辑面板里（"禁用按键"左侧，
+             仅对返回/音量± 显示）。
+             放在头部状态行而不是画布上方独立一行：桥接快照是异步到达的，
+             独立行会在进页约 0.6 秒后被插入、把画布整体下推 41px（2026-09-28
+             实测），用户看到"抖一下"；头部行已有设备芯片，同高度不再回流。 -->
+        <div
+          v-if="rc003CaptureEnabled === true && rc003BridgeText"
+          class="device-chip"
+        >
+          <span class="status-dot" :class="rc003BridgeTone"></span>
+          <span>{{ rc003BridgeText }}</span>
+        </div>
         <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
           <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
           <span>{{ connectionInfo?.remoteName ?? "未连接遥控器" }}</span>
@@ -1100,17 +1118,6 @@ onUnmounted(() => {
         </div>
       </div>
     </header>
-
-    <!-- 三键已启用时的桥接状态行。开关本体在编辑面板里
-         （"禁用按键"左侧，仅对返回/音量± 显示）。 -->
-    <div
-      v-if="rc003CaptureEnabled === true && rc003BridgeText"
-      class="device-chip"
-      style="align-self: flex-start; margin: 0 0 10px"
-    >
-      <span class="status-dot" :class="rc003BridgeTone"></span>
-      <span>{{ rc003BridgeText }}</span>
-    </div>
 
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
