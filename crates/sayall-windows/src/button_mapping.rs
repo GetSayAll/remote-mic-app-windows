@@ -898,13 +898,12 @@ mod tests {
     /// 按压边沿把该键标记为"原生已交付"——同键映射（上→上）的 Single
     /// 跳过注入（原生动作已进 OS），连发/不同键映射/门控路径照常注入。
     ///
-    /// 并行测试下其它用例（open_app）会启停自己的 KeyGate 并拉低共享的
-    /// GATE_ACTIVE：先让出起跑窗口，且每个场景前确保门控存活（先完整
-    /// 退出旧门控再启动新门控，避免 Drop 的 GATE_ACTIVE=false 覆盖新值）。
+    /// GATE_ACTIVE 是进程级全局：本套件持 `key_gate::lock_gate_tests()` 串行锁
+    /// 启停门控，不再依赖 sleep 让位（2026-09-28），且每个场景前确保门控存活
+    /// （先完整退出旧门控再启动新门控，避免 Drop 的 GATE_ACTIVE=false 覆盖新值）。
     #[test]
     fn leak_suppression_suite() {
-        // 起跑让位：等其它启停门控的用例完成，避免共享 GATE_ACTIVE 抖动。
-        std::thread::sleep(Duration::from_millis(500));
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
         let ensure_gate = |gate: &mut Option<crate::key_gate::KeyGate>| {
             if !crate::key_gate::is_gate_thread_alive() {
@@ -1278,6 +1277,13 @@ mod tests {
 
     #[test]
     fn hid_press_release_drives_single_action_tap() {
+        // 门控是进程级单例：持串行锁，保证本用例期间没有别的用例启停真实门控
+        // （否则会观察到别人的存活门控而注入，断言随机失败，2026-09-28）。
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        assert!(
+            !crate::key_gate::is_gate_thread_alive(),
+            "持锁后不应有存活门控：本用例的前提是门控未运行"
+        );
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -1329,6 +1335,8 @@ mod tests {
     /// 打开应用动作：门控运行时，手势触发应调用 launch_app 而非 tap。
     #[test]
     fn open_app_action_launches_instead_of_tap() {
+        // 启停真实门控：持串行锁，避免与别的用例共享 GATE_ACTIVE 互相拉扯。
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let gate = crate::key_gate::KeyGate::start();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));

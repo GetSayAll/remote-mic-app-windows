@@ -1,0 +1,23 @@
+# Rust 门控测试并行偶发失败（GATE_ACTIVE 进程级全局串扰）
+
+- 发现日期：2026-09-27（2026-09-28 修复）
+- 状态：已修复
+- 影响范围：Windows 开发机上的 `cargo test`（sayall-windows 单元测试二进制）；不影响生产运行时、不影响 RC001/RC003 真机行为
+- 功能点：`crates/sayall-windows` 单元测试；按键映射门控（key_gate）与映射引擎（button_mapping）
+- 现象：`button_mapping::tests::hid_press_release_drives_single_action_tap` 在 `cargo test -p sayall-windows --lib`（默认多线程）下偶发失败，panic 信息「门控未运行（测试环境）时不得注入」；单线程（`-- --test-threads=1`）或单独运行该用例均通过
+- 复现条件：Windows 上执行 `cargo test -p sayall-windows --lib`（多线程）。同一二进制内另有用例启停真实门控
+- 正常预期：单元测试互相隔离，门控相关断言不受其它用例启停门控的影响，结果稳定可重复
+- 证据：
+  - 并行全量：`test result: FAILED. 155 passed; 1 failed; 10 ignored`，失败用例固定为 `hid_press_release_drives_single_action_tap`，panic 位于 `crates/sayall-windows/src/button_mapping.rs:1124`
+  - 单线程全量：`156 passed; 0 failed`；单独运行该用例 `ok`
+  - main 最近多次 CI 均 success（GitHub Actions 侧未复现），属本地并行调度下的顺序敏感失败
+- 根因（已确认）：真实门控是**进程级单例**——`key_gate::GATE_ACTIVE` 由钩子线程在 `hook_thread` 内写入（`true` 于安装完成、`false` 于退出前），`KeyGate::start()` 与 `Drop` 也从外部改写它。同一测试二进制中 `leak_suppression_suite`、`open_app_action_launches_instead_of_tap` 会启停真实门控；并行时 `hid_press_release_drives_single_action_tap` 观察到别人仍存活的门控（`is_gate_thread_alive()==true`），引擎按设计注入按键，于是「门控未运行时不得注入」断言失败。原 `leak_suppression_suite` 用 `sleep(500ms)`「起跑让位」规避，只是降低概率，不构成不变量
+- 修复（最小改动，仅测试代码，生产路径零改动）：
+  - `crates/sayall-windows/src/key_gate.rs`：`#[cfg(test)]` 新增 `GATE_TEST_LOCK: Mutex<()>` 与 `lock_gate_tests()`，注释写明「启停真实门控或依赖门控未运行的用例必须先持锁」
+  - `crates/sayall-windows/src/button_mapping.rs`：三个相关用例持锁；`hid_press_release_drives_single_action_tap` 增加前置断言「持锁后不应有存活门控」（隔离再次被破坏时失败信息可直接定位）；`leak_suppression_suite` 删除 500ms「起跑让位」sleep
+- 验证：
+  - `cargo test -p sayall-windows --lib` 连续 5 次：`164 passed; 0 failed`（修复前同环境 1 failed）—— passed
+  - `cargo test --workspace`：全部 `test result: ok` —— passed
+  - `cargo fmt --all -- --check` 无差异 —— passed
+  - 未验证边界：非 Windows（fallback 门控）路径仅静态编译覆盖，未在本机运行 —— deferred
+- 隐私检查：未包含个人路径、设备身份、语音内容或凭据

@@ -982,6 +982,28 @@ mod fallback {
 #[cfg(not(windows))]
 pub use fallback::*;
 
+/// 门控测试串行锁（2026-09-28）。
+///
+/// 真实门控是**进程级单例**：`GATE_ACTIVE` 由钩子线程写入，`KeyGate::start()`
+/// 与 `Drop` 都会改写它。同一测试二进制里并行跑的用例会互相污染——已复现的
+/// 症状：`button_mapping::tests::hid_press_release_drives_single_action_tap`
+/// 断言"门控未运行时不得注入"，却观察到别的用例还活着的门控而注入，随机失败
+/// （单线程 156/156 全绿、多线程偶发红）。
+///
+/// 约定：**任何启停真实门控、或依赖"门控未运行"的用例都必须先持此锁**，
+/// 使"同一时刻只有一个用例操作全局门控"成为显式不变量，而不是靠 sleep 让位。
+#[cfg(test)]
+pub(crate) static GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取门控测试串行锁。中毒时不传播恐慌（上一个持锁用例失败不应连带挂掉后续
+/// 用例，锁保护的只是全局门控的互斥，不涉及被保护数据的一致性）。
+#[cfg(test)]
+pub(crate) fn lock_gate_tests() -> std::sync::MutexGuard<'static, ()> {
+    GATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
