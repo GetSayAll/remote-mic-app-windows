@@ -37,11 +37,12 @@
   官方 API 语义：
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowtextlengthw 。
 
-## 遥控器缓存电量显示
+## 遥控器电量显示
 
-- Microsoft 公开 Configuration Manager API `CM_Get_Device_ID_List_SizeW` / `CM_Get_Device_ID_ListW` / `CM_Locate_DevNodeW` / `CM_Get_DevNode_PropertyW`：只枚举当前存在的 BTHLE 设备，按连接所选对端的完整地址组件匹配唯一节点，读取 OS 设备属性。官方文档：`https://learn.microsoft.com/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw`。标准 `System.Devices.BatteryLife` / PKEY_Devices_BatteryLife 的 GUID/PID/type 由本机 Windows SDK 10.0.22621.0 `propkey.h` 核对。
+- **GATT Battery Service 订阅（2026-09-27 起主路径）**：Bluetooth SIG 标准 Battery Service `0x180F` / Battery Level `0x2A19`（单字节百分比，`read|notify`），在既有 ATVV GATT 会话内通过公开 WinRT API `GetGattServicesForUuidWithCacheModeAsync` / `GetCharacteristicsForUuidWithCacheModeAsync` / `WriteClientCharacteristicConfigurationDescriptorAsync` / `ReadValueAsync` 订阅与读取，不新开 BLE 会话。规范来源：Bluetooth SIG GSS 规范（Battery Service 1.1 / Battery Level）。设备端支持 notify 的真机证据：`hardware/RC003/evidence/gatt-probe-listen1.log`（订阅后 0.5s 内推送 0x1E=30%）。
+- Microsoft 公开 Configuration Manager API `CM_Get_Device_ID_List_SizeW` / `CM_Get_Device_ID_ListW` / `CM_Locate_DevNodeW` / `CM_Get_DevNode_PropertyW`：兜底路径，只枚举当前存在的 BTHLE 设备，按连接所选对端的完整地址组件匹配唯一节点，读取 OS 设备属性。官方文档：`https://learn.microsoft.com/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw`。标准 `System.Devices.BatteryLife` / PKEY_Devices_BatteryLife 的 GUID/PID/type 由本机 Windows SDK 10.0.22621.0 `propkey.h` 核对。
 - `Gronsten/razer-tray`，提交 `8e7e395417023bf2446779a4c5237716183da69f`，`src/DeviceMonitor.cpp`：参考其使用公开 Configuration Manager API 读取 Windows Bluetooth 电量缓存属性 `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2` 的路径和未知值语义；未复制代码、无运行时依赖。该键不是微软承诺跨版本稳定的标准 BatteryLife 属性，故仅作可失败的兼容读取，严格检查 BYTE、长度为 1、0..100；缺失/异常保持未知。
-- 不访问注册表，不读取第三方 App 数据，不使用设备管理写入 API，不另开 BLE/GATT 会话。独立后台线程每 60 秒查询一次系统缓存，不代表遥控器每 60 秒上报新电量；界面提示缓存来源。连接纪元隔离迟到结果，断连/睡眠后停止监视并隐藏旧值；可选电量功能不影响语音错误状态。详见 `Testing/WindowsBattery.md`。
+- GATT notify 订阅成功时不轮询缓存；订阅失败或设备无 BAS 时由独立后台线程每 60 秒查询一次系统缓存兜底（缓存值不代表遥控器实时上报）。不访问注册表，不读取第三方 App 数据，不使用设备管理写入 API。连接纪元隔离迟到结果，断连/睡眠后停止订阅与监视并隐藏旧值；可选电量功能不影响语音错误状态（订阅为 best-effort，失败仅回退、不阻塞连接）。详见 `Testing/WindowsBattery.md`。
 
 ## 治理规范迁移
 

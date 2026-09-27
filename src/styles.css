@@ -1,3 +1,6 @@
+/* --accent 族：默认值是历史紫色品牌色，仅作为"系统强调色读取失败"的回退。
+   正常路径由 src/lib/accent.ts 读取 Windows 系统主题色并按深浅色主题
+   动态注入同名变量（内联样式优先级更高），选中态自动跟随系统强调色。 */
 :root {
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   color: var(--text-primary);
@@ -131,6 +134,17 @@ html[data-theme="dark"] {
 
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; min-width: 940px; min-height: 100%; margin: 0; }
+/* 滚动发生在根元素（.content 随内容增高，自身不滚）。默认窗口下按键页
+   （570px 画布 + 头部/底部）刚好略超一屏，连接/权限页不超——切换页面时
+   正文滚动条出现/消失会让视口宽度瞬间变化（1029→1014），整窗水平回流，
+   用户看到"点按键页面整个页面抖一下"（2026-09-27 实测：clientWidth
+   1029→1014，右对齐内容整体左移 15px；scrollbar-gutter: stable 对根
+   滚动器在 Chromium 不生效，已实测否证）。隐藏根滚动条（宽度归零、
+   仍可滚轮/键盘滚动）后四页视口宽度恒定，切换不再回流；与 plan
+   2026-09-05 T2 的"页面不显示滚动条、仍可滚动"决策一致。两条规则
+   分别覆盖标准属性（Chromium 121+）与 legacy webkit 伪元素。 */
+html { scrollbar-width: none; }
+html::-webkit-scrollbar { display: none; }
 button, input { font: inherit; }
 /* 焦点环：默认保留浏览器原生 :focus-visible 行为（纯键盘、辅助技术或从未
    使用指针的环境都能看到焦点指示），仅在最近一次交互是指针时抑制——

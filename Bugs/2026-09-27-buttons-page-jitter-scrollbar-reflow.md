@@ -1,0 +1,22 @@
+# 切换页面时整窗水平抖动（按键页滚动条出现/消失引发回流）
+
+- 发现日期：2026-09-27
+- 状态：已修复（浏览器预览实测通过；真机验证 deferred）
+- 影响范围：Windows 版全部页面切换，默认窗口（1029×732）最明显；WebView2（Chromium 内核，经典滚动条占布局空间）
+- 功能点：前端布局（`src/styles.css`，根元素滚动与滚动条）
+- 现象：每次从「连接」「权限」等页点进「按键」页，整个页面水平抖动一下；切走时再抖回来。
+- 复现条件：视口高度 700px（窗口 1029×732 去标题栏）。按键页自然高度 713px 略超一屏，连接/权限页 700px 不超。
+- 正常预期：切换页面时布局零位移。
+- 证据：Playwright + 本机 Chrome（视口 1029×700）逐帧测量（rAF 记录 `clientWidth` 与关键元素 `getBoundingClientRect`）：
+  - 修复前四页调查：连接/权限 `clientWidth=1029`，按键/关于 `clientWidth=1014`（垂直滚动条占 15px）；
+  - 修复前点击「按键」后 t=38ms：`clientWidth 1029→1014`，`.page-header` 宽 859.6→844.3，整窗水平回流；
+  - 按键页 713px 仅超视口 13px，属窗口尺寸调整（1080×720 → 1120×800 → 1029×732，见 Bugs/2026-09-03）后的边缘态。
+- 根因：滚动发生在根元素（`.content` 随内容增高、自身不滚），正文滚动条随页面高度出现/消失。Chromium 经典滚动条占 15px 布局宽度，出现瞬间视口变窄，全部右对齐内容左移、离开时复原。已实测否证备选方案：`scrollbar-gutter: stable` 对根滚动器在 Chromium 不生效（html 上 overflow visible/auto 均不预留槽位，computed 值正确但 `clientWidth` 不变）。
+- 修复：`src/styles.css` 对 `html` 隐藏根滚动条（`scrollbar-width: none` + `::-webkit-scrollbar{display:none}`，宽度归零、滚轮/键盘滚动保留）。四页 `clientWidth` 恒定 1029，切换零回流。与 plan 2026-09-05 T2「页面不显示滚动条、仍可滚动」的产品决策一致；`.content` 上同款规则是既有先例。
+- 验证：
+  - 修复后逐帧测量：点击「按键」前后 `clientWidth` 恒 1029、`.page-header`/`.mapping-canvas`/`.mapping-footer` 位置与宽度零变化（passed）；
+  - 滚轮滚动仍生效（scrollTop 0→12.7，passed）；弹窗为原生 `<dialog>` + `showModal()`（top layer），不受影响（passed）；
+  - `pnpm test` 111/111、`pnpm build`（vue-tsc + vite）passed；
+  - 真机 WebView2 确认抖动消失：deferred（浏览器预览与 WebView2 同为 Chromium；用户症状本身即经典滚动条占位的证据）。
+- 后续（2026-09-27 晚，用户要求）：窗口默认/最小尺寸 1029×732 → **1100×720**（`src-tauri/tauri.conf.json`）；视口相应变为 1100×688。复测：四页 `clientWidth` 恒 1100、滚动条宽度 0（无可见滚动条）、按键页（714px）与关于页（890px）仍可滚轮滚动，切换零回流（passed）。关于页 `.diagnostic-output` 为嵌入式诊断输出框的内部滚动（max-height 180px），不属于页面级滚动条，保留。
+- 隐私检查：本文档与修复不含个人路径、设备身份、语音内容或凭据。
