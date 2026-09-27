@@ -78,6 +78,8 @@ const savingVoiceHotkey = ref(false);
 const voiceHotkeyMessage = ref("尚未读取快捷键设置");
 const capturingVoiceHotkey = ref(false);
 const captureStartingVoiceHotkey = ref(false);
+/** 录入开始时仍有 preheld 键按住：后端吞键但不投递边沿，直到全部松开。 */
+const waitingPreheldRelease = ref(false);
 const voiceCaptureDisplay = ref<KeyCode[]>([]);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
@@ -142,7 +144,7 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
   captureStartingVoiceHotkey.value = true;
   voiceHotkeyMessage.value = "";
   try {
-    await startShortcutCapture();
+    const preheld = await startShortcutCapture();
     if (unmounted || requestId !== voiceCaptureRequestId) {
       await stopShortcutCapture().catch(() => undefined);
       return;
@@ -152,6 +154,14 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
     voiceCapturedKeys = null;
     voiceCaptureDisplay.value = [];
     capturingVoiceHotkey.value = true;
+    // preheld 键的边沿对录入不可见（其 DOWN 已进 OS，UP 必须放行），
+    // 后端等它们全部松开后才开始投递边沿；提示用户先松手，避免把
+    // "按住中打开录入"截断成半截组合。
+    waitingPreheldRelease.value = preheld.length > 0;
+    if (preheld.length > 0) {
+      voiceHotkeyMessage.value =
+        "检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始";
+    }
     if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
     voiceCaptureTimeout = window.setTimeout(() => {
       void finishVoiceHotkeyCapture("录入已超时，请重新录入");
@@ -168,6 +178,7 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
   voiceCaptureRequestId += 1;
   captureStartingVoiceHotkey.value = false;
   capturingVoiceHotkey.value = false;
+  waitingPreheldRelease.value = false;
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
   voiceCapturePressed.clear();
@@ -185,6 +196,11 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
 
 async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> {
   if (!capturingVoiceHotkey.value) return;
+  // 后端只在 preheld 键全部松开后才开始投递边沿：第一条边沿即已武装。
+  if (waitingPreheldRelease.value) {
+    waitingPreheldRelease.value = false;
+    voiceHotkeyMessage.value = "";
+  }
   const { key, isPressed } = edge;
   if (!isPressed) {
     voiceCapturePressed.delete(key);
@@ -599,8 +615,13 @@ onUnmounted(() => {
           {{
             voiceCaptureDisplay.length
               ? chordLabel({ keys: voiceCaptureDisplay })
-              : "请按下要使用的快捷键组合（也可单独按一个 Ctrl/Alt/Win 等修饰键）；按 Esc 取消"
+              : waitingPreheldRelease
+                ? "检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始"
+                : "请按下要使用的快捷键组合（也可单独按一个 Ctrl/Alt/Win 等修饰键）；按 Esc 取消"
           }}
+        </p>
+        <p v-if="capturingVoiceHotkey && waitingPreheldRelease" class="muted scan-summary">
+          按"修改快捷键"时仍按着键的组合不会完整录入，先松手即可。
         </p>
         <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
         <details class="usage-hint-details">

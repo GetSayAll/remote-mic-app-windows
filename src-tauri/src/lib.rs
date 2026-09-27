@@ -654,7 +654,7 @@ fn get_button_mapping_snapshot(
 }
 
 #[tauri::command]
-fn start_shortcut_capture() -> Result<(), String> {
+fn start_shortcut_capture() -> Result<Vec<sayall_windows::send_input::KeyCode>, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
         "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only hook_bump=requested reason=ime_chord_may_preempt".to_owned(),
@@ -666,12 +666,15 @@ fn start_shortcut_capture() -> Result<(), String> {
         ));
         return Err("键盘保护钩子尚未就绪，请稍后重试".to_owned());
     }
+    let preheld = sayall_windows::key_gate::take_preheld_capture_keys();
     sayall_windows::gatt_note(format!(
-        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} elapsed_ms={}",
+        "shortcut_capture action=start phase=completed terminal_result=passed capture_mode=main_key_only hook_bump_count={} preheld_count={} preheld_keys={:?} elapsed_ms={}",
         sayall_windows::key_gate::hook_bump_request_count(),
+        preheld.len(),
+        preheld,
         started.elapsed().as_millis()
     ));
-    Ok(())
+    Ok(preheld)
 }
 
 #[tauri::command]

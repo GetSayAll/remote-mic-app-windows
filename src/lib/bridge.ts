@@ -744,9 +744,14 @@ export async function subscribeButtonGestures(
   };
 }
 
-export async function startShortcutCapture(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("start_shortcut_capture");
+/** 开始 OS 级快捷键录入；返回录入开始时仍被按住的键（preheld）。
+ *  preheld 键的边沿对录入不可见（防粘键：其 DOWN 已进 OS，UP 必须放行），
+ *  后端会等它们全部松开后才开始投递边沿——前端据此提示用户先松手，
+ *  避免"按住中打开录入"被静默截断成半截组合。 */
+export async function startShortcutCapture(): Promise<KeyCode[]> {
+  if (!isTauriRuntime()) return [];
+  const preheld = await invoke<KeyCode[]>("start_shortcut_capture");
+  return preheld ?? [];
 }
 
 export async function stopShortcutCapture(): Promise<void> {
