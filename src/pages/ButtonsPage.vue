@@ -457,15 +457,15 @@ function isActivePreset(keys: KeyCode[]): boolean {
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  if (rc003CaptureEnabled.value === true) {
+    return "全按键支持已启用，此按键的映射现在生效；已配置按键由遥控器报告层捕获，不接管物理键盘上的同名按键。";
+  }
   if (button === "back" || button === "volume_up" || button === "volume_down") {
     // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
     // 文案只随开关状态走。RC001 的三键不经助手也能到达（key_gate 直接归因），
     // 开着增强捕获对它无害；RC003 则必须开启才会生效。
     const state = rc003CaptureEnabled.value;
-    if (state === true) {
-      return "全按键支持已启用，此按键的映射现在生效。";
-    }
-      if (state === false) {
+    if (state === false) {
         // 2026-09-27 Andy 定稿：一句话即可，与开关悬停提示同句；
         // 授权弹窗 / 防作弊冲突等细节由开启前的确认弹窗承载，不再重复。
         return "提示：返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
@@ -946,12 +946,7 @@ async function applyCaptureToggle() {
   }
 }
 
-/** 增强捕获开关只对三键有意义——其他按键走 Raw Input，本来就能看见。 */
-const selectedIsTriKey = computed(() => {
-  const button = editingTarget.value?.button;
-  return button === "back" || button === "volume_up" || button === "volume_down";
-});
-
+/** 页面统一展示全按键支持；开关关闭时，非三键仍沿用原有输入路径。 */
 onMounted(async () => {
   const setupStarted = performance.now();
   window.addEventListener("keydown", handleCaptureKeydown, true);
@@ -1089,6 +1084,21 @@ onUnmounted(() => {
           <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
             <span>启用自定义按键功能</span>
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
+          </label>
+          <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
+               选中某个按键的编辑面板，任何时刻都能开启/关闭。 -->
+          <label
+            class="toggle-row"
+            title="开启后，已配置按键从遥控器报告层捕获，避免接管物理键盘同名按键"
+          >
+            <span>全按键支持</span>
+            <input
+              ref="captureSwitchEl"
+              type="checkbox"
+              :checked="rc003CaptureEnabled === true"
+              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
+              @change="toggleRc003Capture"
+            />
           </label>
         </div>
       </div>
@@ -1241,20 +1251,8 @@ onUnmounted(() => {
           <p class="muted">当前：{{ actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }}</p>
         </div>
         <div class="button-row">
-          <label
-            v-if="selectedIsTriKey"
-            class="toggle-row"
-            title="返回 / 音量+ / 音量−三个键需要开启此功能才能使用"
-          >
-            <span>全按键支持</span>
-            <input
-              ref="captureSwitchEl"
-              type="checkbox"
-              :checked="rc003CaptureEnabled === true"
-              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
-              @change="toggleRc003Capture"
-            />
-          </label>
+          <!-- 全按键支持开关已移至页面头部（与「启用自定义按键功能」并排，
+               2026-09-27），编辑面板只保留按键级操作。 -->
           <button
             class="secondary-button editor-disable-btn"
             :class="{ 'is-active': actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"

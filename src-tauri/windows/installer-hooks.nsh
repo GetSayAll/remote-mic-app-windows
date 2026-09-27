@@ -152,13 +152,19 @@
   ; 升级覆盖写 sayall-helper.exe 前，必须让旧助手退出——否则
   ; 「无法打开要写入的文件」（2026-09-24 真机复现：跑了一天的旧助手
   ; 锁住 exe，主程序的优雅退出对它无效）。
-  !insertmacro SayAllStopHelper install
-  ; ── 授权不跨安装保留（2026-09-24 产品决策）────────────────────────
-  ; 覆盖升级执行的是**旧版卸载器**（没有删任务的钩子），任务会跨升级
-  ; 幸存——所以安装钩子自己也要删一次。这样无论全新安装还是覆盖升级，
-  ; 装完都是「未授权」状态：应用启动对账把开关回落为关闭，
-  ; 用户重新打开时必然重新走一次 UAC。
-  nsExec::Exec 'schtasks /delete /f /tn "SayAll RC003 Helper"'
+  !insertmacro SayAllStopHelper install 0
+  ; 旧版卸载器（升级时序里先于本钩子运行）写过重授权标记——升级必须
+  ; 清掉它，否则应用启动对账见到标记仍会把开关回落为关闭。无脑删除
+  ; 安全：全新安装本无标记；卸载后重装的残留标记清除后，幸存的任务
+  ; 承载授权（任务实际未被普通权限删除），开关状态保持。
+  Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required"
+  ; ── 授权跨升级保留（2026-09-27 Andy 拍板，取代 2026-09-24「不跨安装保留」）──
+  ; 计划任务由提权进程创建，普通权限安装器删不掉它（删除命令静默失败，
+  ; 任务本来就跨升级幸存）；停助手钩子也不再写重授权标记——升级装完
+  ; 后应用启动对账（设置开启 && 无标记 && 任务在）直接通过，开关保持原状态，
+  ; helper 由启动对账自动拉起，无需重新走 UAC。helper 与主程序同路径覆盖
+  ; 更新，幸存的任务指向的路径依然有效。卸载路径仍撤销授权（PREUNINSTALL
+  ; 尝试删任务 + 重授权标记兜底）。
 !macroend
 
 ; ── 停止增强捕获助手并等它真正退出（2026-09-24）──────────────────────
@@ -172,7 +178,7 @@
 !define SAYALL_HELPER_EXIT_MAX_WAIT_MS 8000
 !define SAYALL_HELPER_EXIT_POLL_MS 250
 
-!macro SayAllStopHelper _uid
+!macro SayAllStopHelper _uid _revoke_auth
   Push $R8
   Push $R9
   Push $0
@@ -205,16 +211,20 @@
     ${EndIf}
     Abort
   ${EndIf}
-  ; 写「需重新授权」标记：提权任务普通权限删不掉（真机实测），这是
-  ; 「授权已应撤销」的唯一可靠凭证；应用启动据此回落开关，下次开启
-  ; 强制重装任务（必弹 UAC）。路径与 rc003_task.rs reauth_marker_path
-  ; 逐字符一致（有测试钉住）。
-  CreateDirectory "$LOCALAPPDATA\SayAll"
-  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
-  ${If} $0 != 0
-    FileWrite $0 "reauth"
-    FileClose $0
-  ${EndIf}
+  ; 写「需重新授权」标记（**仅卸载路径**，_revoke_auth=1）：提权任务普通
+  ; 权限删不掉（真机实测），卸载时这是「授权已应撤销」的唯一可靠凭证；
+  ; 应用启动据此回落开关，下次开启强制重装任务（必弹 UAC）。升级路径
+  ; （_revoke_auth=0）**不得**写标记——授权跨升级保留（2026-09-27 Andy
+  ; 拍板），写了标记应用启动就会把用户已开启的开关打回关闭。路径与
+  ; rc003_task.rs reauth_marker_path 逐字符一致（有测试钉住）。
+  !if ${_revoke_auth} == 1
+    CreateDirectory "$LOCALAPPDATA\SayAll"
+    FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
+    ${If} $0 != 0
+      FileWrite $0 "reauth"
+      FileClose $0
+    ${EndIf}
+  !endif
   Pop $0
   Pop $R9
   Pop $R8
@@ -224,7 +234,7 @@
   ; 卸载同样不得强杀正在连接的应用（AGENTS.md 同一条规则）。
   !insertmacro SayAllRequestGracefulExit uninstall
   ; 卸载也要先停助手，再删它的文件与授权。
-  !insertmacro SayAllStopHelper uninstall
+  !insertmacro SayAllStopHelper uninstall 1
 
   ; ── 授权不跨卸载保留（2026-09-24 产品决策）────────────────────────
   ; 卸载即撤销增强捕获的授权：删除计划任务，重装/升级后打开开关需要

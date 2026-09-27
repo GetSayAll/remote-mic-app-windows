@@ -632,10 +632,44 @@ fn fire_gesture(
     }
     let action = mappings.action_for(button, trigger);
     if action == ButtonAction::Disabled {
-        crate::ble::gatt_note(format!(
-            "map_skip_inject reason=action_disabled button={:?} trigger={:?}",
-            button, trigger
-        ));
+        // 吞键缝隙（2026-09-27 真机，见 Bugs/2026-09-27-fullkey-swallowed-keys.md）：
+        // 整键因任一触发列有动作而进 mapped_mask，门控/报告层按整键吞原始键；
+        // 当前触发列却是 Disabled 时，不回注则按键凭空消失（真机：Tv 配置长按
+        // 动作后，单击 ~ 打不出字符，退出无线麦才恢复输入）。判据沿用泄漏对冲
+        // 的标记：native_pending 不含该键 = 原始键未进 OS（门控吞下或报告层
+        // 接管），回注一次原生完整按压（tap = DOWN+UP 成对；key_gate 对
+        // LLKHF_INJECTED 放行，不会被二次拦截）。泄漏路径（native_pending 含
+        // 该键）原生已交付，保持跳过防双输入。厂商键（Back/Power）无原生
+        // 对应，维持既有「无动作即无输出」语义。已知边界：Double 触发被吞时
+        // 只回注一次按压；gate 线程死亡且报告层仍接管的异常窗口不在此补。
+        if !native_pending.contains(&button) {
+            match native_key(button) {
+                Some(native) => {
+                    let chord = KeyChord {
+                        keys: vec![native],
+                    };
+                    match injector.tap(&chord) {
+                        Ok(()) => crate::ble::gatt_note(format!(
+                            "map_native_replay result=ok button={button:?} trigger={trigger:?} key={native:?}"
+                        )),
+                        Err(error) => {
+                            crate::ble::gatt_note(format!(
+                                "map_native_replay result=err button={button:?} error_domain=send_input reason=backend_rejected error={error}"
+                            ));
+                            lock_state(state).last_error =
+                                Some(format!("回注原生键失败：{error}"));
+                        }
+                    }
+                }
+                None => crate::ble::gatt_note(format!(
+                    "map_skip_inject reason=action_disabled button={button:?} trigger={trigger:?} note=vendor_key_no_native"
+                )),
+            }
+        } else {
+            crate::ble::gatt_note(format!(
+                "map_skip_inject reason=action_disabled button={button:?} trigger={trigger:?} note=native_already_delivered"
+            ));
+        }
         return false;
     }
     // 泄漏对冲：该按住的原始键已泄漏进 OS（原生动作已交付）。Single 且映射
@@ -1078,6 +1112,165 @@ mod tests {
         );
         assert!(after_lock[before_lock].is_lock_workstation());
         assert!(after_lock[before_lock + 1].is_lock_workstation());
+
+        drop(runtime);
+        drop(gate);
+    }
+
+    /// 吞键缝隙回归（2026-09-27 真机，见 Bugs/2026-09-27-fullkey-swallowed-keys.md）：
+    /// 整键因任一触发列有动作而进 mapped_mask（门控/报告层按整键吞原始键），
+    /// 当前触发列却是 Disabled 时，被吞的边沿必须回注原生键——否则按键凭空
+    /// 消失。真机表现：Tv 配置长按动作后，单击 ~ 打不出字符，退出无线麦才
+    /// 恢复输入。泄漏路径（原生已进 OS）的 Disabled 触发必须保持跳过。
+    #[test]
+    fn gate_edge_disabled_trigger_replays_native_key_leak_path_skips() {
+        std::thread::sleep(Duration::from_millis(500));
+        let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
+        let ensure_gate = |gate: &mut Option<crate::key_gate::KeyGate>| {
+            if !crate::key_gate::is_gate_thread_alive() {
+                *gate = None;
+                std::thread::sleep(Duration::from_millis(50));
+                *gate = Some(crate::key_gate::KeyGate::start());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+        );
+        let long_scroll = || ButtonAction::Scroll {
+            direction: ScrollDirection::Up,
+            steps: 1,
+        };
+        let mut mappings = ButtonMappings::default();
+        // Tv / Up / Back 均为 2026-09-27 故障形态：只有 long 列有动作
+        // （整键进 mapped_mask → 会被吞键），single/double 保持 Disabled。
+        for button in [RemoteButton::Tv, RemoteButton::Up, RemoteButton::Back] {
+            mappings.actions.insert(
+                button,
+                ButtonActions {
+                    long: long_scroll(),
+                    ..ButtonActions::default()
+                },
+            );
+        }
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        let taps = || injector.taps.lock().unwrap().clone();
+
+        // 场景 1：门控吞下的 Tv 单击 → 回注原生 ~ 键（Oem3）。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Tv,
+                is_pressed: true,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Tv,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            taps().as_slice(),
+            &[KeyChord {
+                keys: vec![KeyCode::Oem3]
+            }],
+            "门控吞下的 Disabled 单击必须回注原生 ~ 键，实际 {:?}",
+            taps()
+        );
+
+        // 场景 2：门控吞下的 Up 单击 → 按 native_key 回注原生 Up。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Up,
+                is_pressed: true,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Up,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            taps().as_slice(),
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::Oem3]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Up]
+                },
+            ],
+            "被吞的 Disabled 单击按 native_key 取键回注，实际 {:?}",
+            taps()
+        );
+
+        // 场景 3（对照）：泄漏路径（Keyboard，原生 Up 已进 OS）的 Disabled
+        // 单击不得回注——注入即双输入。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYDOWN)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        sender
+            .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYUP)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            taps().as_slice(),
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::Oem3]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Up]
+                },
+            ],
+            "泄漏路径的 Disabled 单击不得回注（原生已交付），实际 {:?}",
+            taps()
+        );
+
+        // 场景 4：Back（厂商键，无原生对应）被吞的 Disabled 单击——不产生 tap。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: true,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            taps().as_slice(),
+            &[
+                KeyChord {
+                    keys: vec![KeyCode::Oem3]
+                },
+                KeyChord {
+                    keys: vec![KeyCode::Up]
+                },
+            ],
+            "厂商键无原生键可回注，维持不注入，实际 {:?}",
+            taps()
+        );
 
         drop(runtime);
         drop(gate);

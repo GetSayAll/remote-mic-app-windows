@@ -109,6 +109,9 @@ pub enum KeyCode {
     F10,
     F11,
     F12,
+    /// `~ 键（VK_OEM_3）。遥控器 TV 键的原生等价键：TV usage 0x0035 在
+    /// Windows 键盘映射里就是 OEM_3，被吞后必须能按原样回注。
+    Oem3,
 }
 
 impl KeyCode {
@@ -195,6 +198,7 @@ impl KeyCode {
             Self::MediaPrev => 0xB1,
             Self::MediaNext => 0xB0,
             Self::MediaPlayPause => 0xB3,
+            Self::Oem3 => 0xC0,
         }
     }
 
@@ -208,6 +212,7 @@ impl KeyCode {
             Self::RightAlt => (0x38, true),
             Self::LeftWindows => (0x5B, true),
             Self::RightWindows => (0x5C, true),
+            Self::Oem3 => (0x29, false),
             _ => return None,
         })
     }
@@ -564,8 +569,10 @@ impl ButtonMappings {
 /// （见 button_mapping.rs 与 2026-09-06 调查档案修复记录）。映射动作与
 /// 原生动作相同（如 右→右、确定→Enter）且该次按压走了泄漏路径（原始键
 /// 已进 OS）时，注入会被跳过——原生动作已交付，注入即双响应。
-/// 厂商键（返回/电源 VK 0xFF 族，Windows 无默认动作）、TV（OEM_3 `~/~）
-/// 无对应 KeyCode → None：这些键的映射动作无法由原生覆盖。
+/// 厂商键（返回/电源 VK 0xFF 族，Windows 无默认动作）无对应 KeyCode →
+/// None：这些键的映射动作无法由原生覆盖。TV（OEM_3 `~/~）自 2026-09-27
+/// 起有对应：usage 0x0035 在 Windows 键盘映射里就是 OEM_3，被吞的
+/// Disabled 触发需要按原样回注（见 button_mapping 吞键缝隙修复）。
 pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
     Some(match button {
         RemoteButton::Ok => KeyCode::Enter,
@@ -578,7 +585,8 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
         RemoteButton::VolumeMute => KeyCode::VolumeMute,
         RemoteButton::VolumeUp => KeyCode::VolumeUp,
         RemoteButton::VolumeDown => KeyCode::VolumeDown,
-        RemoteButton::Back | RemoteButton::Tv | RemoteButton::Power => return None,
+        RemoteButton::Tv => KeyCode::Oem3,
+        RemoteButton::Back | RemoteButton::Power => return None,
     })
 }
 
@@ -899,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn native_key_covers_common_keys_and_none_for_vendor_and_tv() {
+    fn native_key_covers_common_keys_and_none_for_vendor() {
         // 泄漏对冲依据：常见键的原生动作可由同键映射覆盖（泄漏路径免注入）。
         assert_eq!(native_key(RemoteButton::Ok), Some(KeyCode::Enter));
         assert_eq!(native_key(RemoteButton::Home), Some(KeyCode::Home));
@@ -908,11 +916,12 @@ mod tests {
         assert_eq!(native_key(RemoteButton::Left), Some(KeyCode::Left));
         assert_eq!(native_key(RemoteButton::Right), Some(KeyCode::Right));
         assert_eq!(native_key(RemoteButton::Menu), Some(KeyCode::Apps));
-        // 厂商键（Windows 无默认动作）与 TV（OEM_3 `~/~ 无对应 KeyCode）：
-        // 原生无法覆盖，泄漏路径只能注入（结构性双响应残留，Helper 轨解决）。
+        // TV usage 0x0035 的原生等价键是 OEM_3（`~）：2026-09-27 吞键缝隙
+        // 修复起有对应，被吞的 Disabled 触发按原样回注。
+        assert_eq!(native_key(RemoteButton::Tv), Some(KeyCode::Oem3));
+        // 厂商键（Windows 无默认动作）：原生无法覆盖。
         assert_eq!(native_key(RemoteButton::Back), None);
         assert_eq!(native_key(RemoteButton::Power), None);
-        assert_eq!(native_key(RemoteButton::Tv), None);
     }
 
     #[test]

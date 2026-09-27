@@ -1,6 +1,6 @@
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
-use sayall_windows::rc003_bridge::BridgeSnapshot;
+use sayall_windows::rc003_bridge::{BridgePhase, BridgeSnapshot};
 use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
 };
@@ -282,7 +282,7 @@ async fn get_rc003_bridge_snapshot(
         .map_err(|error| format!("读取 RC003 桥接状态失败：{error}"))
 }
 
-/// RC003 三键助手的计划任务状态（授权 = 任务在系统里）。
+/// 全按键支持 Helper 的计划任务状态（授权 = 任务在系统里）。
 fn rc003_capture_enabled(state: &AppState) -> bool {
     state
         .settings
@@ -337,14 +337,14 @@ async fn enable_rc003_capture(
                 "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed"
                     .to_owned(),
             );
-            format!("启用 RC003 三键捕获失败：{error}")
+            format!("启用全按键支持失败：{error}")
         })?;
     outcome.map_err(|error| {
         sayall_windows::gatt_note(
             "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed"
                 .to_owned(),
         );
-        format!("启用 RC003 三键捕获失败：{error}")
+        format!("启用全按键支持失败：{error}")
     })?;
     // 意图**成功后**才落盘。此前是先落盘再执行——UAC 被取消时设置里残留
     // enabled=true，下次打开页面开关假显示"已开启"却没有助手（意图与系统
@@ -352,7 +352,8 @@ async fn enable_rc003_capture(
     state
         .settings
         .save_rc003_capture_enabled(true)
-        .map_err(|error| format!("保存三键捕获开关失败：{error}"))?;
+        .map_err(|error| format!("保存全按键支持开关失败：{error}"))?;
+    state.platform.set_enhanced_capture_enabled(true);
     sayall_windows::gatt_note(
         "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=passed"
             .to_owned(),
@@ -367,18 +368,154 @@ async fn disable_rc003_capture(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<rc003_task::TaskStatus, String> {
+    // 先恢复旧输入路径，再结束 Helper。即使 Helper 停止失败，其 agent 租约也会
+    // fail-open；其它按键不会因为关闭增强能力而跟三键一样变成完全不可用。
+    state.platform.set_enhanced_capture_enabled(false);
     state
         .settings
         .save_rc003_capture_enabled(false)
-        .map_err(|error| format!("保存三键捕获开关失败：{error}"))?;
+        .map_err(|error| format!("保存全按键支持开关失败：{error}"))?;
     let outcome = tauri::async_runtime::spawn_blocking(rc003_task::disable_capture)
         .await
-        .map_err(|error| format!("停用 RC003 三键捕获失败：{error}"))?;
+        .map_err(|error| format!("停用全按键支持失败：{error}"))?;
     // 同上：内层 Result 必须自己判，否则停用失败也会静默成功。
-    outcome.map_err(|error| format!("停用 RC003 三键捕获失败：{error}"))?;
+    outcome.map_err(|error| format!("停用全按键支持失败：{error}"))?;
     // 结束助手同样可能抢走前台（taskkill / 控制台进程退出），一并还焦点。
     refocus_main_window_soon(app);
     Ok(rc003_task::status(false))
+}
+
+/// 启动自动拉起助手的单轮判定（纯函数，便于测试）。
+///
+/// 判据是**桥接快照**（独立外部观察），不是 `schtasks /run` 的退出码：
+/// 触发命令成功 ≠ 助手真的连上了桥（2026-09-27 真机：`/run` 被单实例
+/// 策略静默拒绝、或助手读了过期描述文件，桥永远停在 listening）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoTriggerCheck {
+    /// 助手已连接：收工。
+    Connected,
+    /// 桥在监听、助手未连上：继续触发。
+    Retry,
+    /// 桥不在监听（failed/stopped）：触发无意义，放弃。
+    Abort,
+}
+
+fn classify_auto_trigger(snapshot: &BridgeSnapshot) -> AutoTriggerCheck {
+    match snapshot.phase {
+        BridgePhase::Connected => AutoTriggerCheck::Connected,
+        BridgePhase::Listening => AutoTriggerCheck::Retry,
+        BridgePhase::Failed | BridgePhase::Stopped => AutoTriggerCheck::Abort,
+    }
+}
+
+/// 启动时自动拉起助手，带**有界重试 + 全程日志 + 卡实例兜底**。
+///
+/// 背景（2026-09-27 真机复盘）：此前的实现是 `let _ = task_trigger()`
+/// ——触发被拒（上一次任务实例还挂着，`MultipleInstancesPolicy=IgnoreNew`
+/// 让 `/run` 每次都失败）、或助手读了过期描述文件时，既无日志也无重试，
+/// 开关开着、桥停在 listening，界面就永远显示「正在启动」。
+///
+/// 行为：
+/// * 每轮先看桥接快照——助手已连上立即收工；桥 failed/stopped 放弃；
+/// * 重试前**重读设置**：用户中途关掉开关就立即收手（否则重试会顶掉
+///   用户的「关闭」意图）；
+/// * 最多 `MAX_AUTO_TRIGGER_ATTEMPTS` 轮触发，每轮间隔
+///   `AUTO_TRIGGER_RETRY_MS`；
+/// * 全部落空后兜底一次 `/end`（结束可能卡住的任务实例）+ `/run`，
+///   并把最终对账结果落日志——此后不再重试，状态由按键页如实呈现。
+fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: SettingsStore) {
+    const MAX_AUTO_TRIGGER_ATTEMPTS: u32 = 4;
+    const AUTO_TRIGGER_RETRY_MS: u64 = 5_000;
+    sayall_windows::gatt_note(
+        "rc003 feature=enhanced-capture action=auto_trigger phase=started reason=app_startup"
+            .to_owned(),
+    );
+    for attempt in 1..=MAX_AUTO_TRIGGER_ATTEMPTS {
+        match classify_auto_trigger(&platform.rc003_bridge_snapshot()) {
+            AutoTriggerCheck::Connected => {
+                sayall_windows::gatt_note(
+                    "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=helper_connected".to_owned(),
+                );
+                return;
+            }
+            AutoTriggerCheck::Abort => {
+                sayall_windows::gatt_note(
+                    "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=failed reason=bridge_not_listening retryable=false".to_owned(),
+                );
+                return;
+            }
+            AutoTriggerCheck::Retry => {}
+        }
+        let enabled_now = settings
+            .load()
+            .map(|settings| settings.rc003_capture_enabled)
+            .unwrap_or(false);
+        if !enabled_now {
+            sayall_windows::gatt_note(
+                "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=disabled_by_user_during_retry".to_owned(),
+            );
+            return;
+        }
+        sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=auto_trigger phase=trigger attempt={attempt}"
+        ));
+        match rc003_task::task_trigger() {
+            Ok(()) => sayall_windows::gatt_note(format!(
+                "rc003 feature=enhanced-capture action=auto_trigger phase=triggered terminal_result=passed attempt={attempt}"
+            )),
+            Err(error) => sayall_windows::gatt_note(format!(
+                "rc003 feature=enhanced-capture action=auto_trigger phase=triggered terminal_result=failed attempt={attempt} detail={error}"
+            )),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_RETRY_MS));
+    }
+    // 有界重试全部落空。`IgnoreNew` 下最常见的原因是上一次任务实例还挂着
+    // （每次 `/run` 都被拒）。此刻桥上没有已连接的助手（最后一轮 classify
+    // 是 Retry 才会走到这里），`/end` 结束当前实例是安全的，结束后再触发
+    // 一次；仍连不上就交还给按键页的状态行，不再无限重试。
+    sayall_windows::gatt_note(
+        "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=started reason=helper_not_connected_after_retries".to_owned(),
+    );
+    match classify_auto_trigger(&platform.rc003_bridge_snapshot()) {
+        AutoTriggerCheck::Connected => {
+            sayall_windows::gatt_note(
+                "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=passed reason=helper_connected".to_owned(),
+            );
+            return;
+        }
+        AutoTriggerCheck::Abort => {
+            sayall_windows::gatt_note(
+                "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=failed reason=bridge_not_listening retryable=false".to_owned(),
+            );
+            return;
+        }
+        AutoTriggerCheck::Retry => {}
+    }
+    match rc003_task::task_stop() {
+        Ok(()) => sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=passed".to_owned(),
+        ),
+        Err(error) => sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=failed detail={error}"
+        )),
+    }
+    match rc003_task::task_trigger() {
+        Ok(()) => sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=retriggered terminal_result=passed".to_owned(),
+        ),
+        Err(error) => sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=retriggered terminal_result=failed detail={error}"
+        )),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_RETRY_MS));
+    match classify_auto_trigger(&platform.rc003_bridge_snapshot()) {
+        AutoTriggerCheck::Connected => sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=passed reason=helper_connected".to_owned(),
+        ),
+        _ => sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=failed reason=helper_still_not_connected retryable=false".to_owned(),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -1384,30 +1521,37 @@ pub fn run() {
             };
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
-            // 「任务装没装」当状态。失败静默：按键页的状态行会如实反映，
-            // 启动不该被附属能力打断。
+            // 「任务装没装」当状态。
             //
-            // 对账兜底：授权**不跨安装/卸载保留**（产品决策）。安装器删不掉
-            // 提权任务（普通权限被拒），但会写「需重新授权」标记；任务意外
-            // 缺失同样视为授权撤销——两种情况都把开关回落为关闭。用户重新
-            // 打开时 enable 会强制重装任务（必弹 UAC）并清除标记。
+            // 对账兜底：授权**跨升级保留**、随卸载撤销（2026-09-27 Andy 拍板，
+            // 取代 2026-09-24「不跨安装保留」）。升级不写「需重新授权」标记，
+            // 幸存的计划任务承载授权——启动对账通过，开关保持原状态，助手由
+            // 本对账自动拉起。仍要回落为关闭的两种情况：卸载/重装留下的标记
+            // （卸载器写入），以及任务意外缺失。用户重新打开时 enable 会强制
+            // 重装任务（必弹 UAC）并清除标记。
+            //
+            // 实际触发放在 platform 创建之后（见下方 rc003_auto_trigger_allowed）：
+            // bridge 的描述文件（端口 + 令牌）由 platform 创建时写出，**先触发
+            // 助手再写描述文件**会让助手读到上一轮主程序的过期端口，从此永远
+            // 连不上（2026-09-27 真机复盘，「正在启动」永不结束的成因之一）。
             #[cfg(windows)]
-            if saved_settings.rc003_capture_enabled {
+            let rc003_auto_trigger_allowed = if saved_settings.rc003_capture_enabled {
                 let revoked =
                     rc003_task::reauth_required() || !rc003_task::task_installed();
                 if revoked {
                     eprintln!(
-                        "rc003: 授权已随安装/升级撤销（reauth={} task_installed={}），增强捕获回落为关闭",
+                        "rc003: 授权已随卸载/重置撤销（reauth={} task_installed={}），增强捕获回落为关闭",
                         rc003_task::reauth_required(),
                         rc003_task::task_installed()
                     );
                     let _ = settings.save_rc003_capture_enabled(false);
+                    false
                 } else {
-                    std::thread::spawn(|| {
-                        let _ = rc003_task::task_trigger();
-                    });
+                    true
                 }
-            }
+            } else {
+                false
+            };
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
             // 不阻断主程序启动，用户可在“关于”页重试。
             #[cfg(windows)]
@@ -1446,6 +1590,27 @@ pub fn run() {
             };
             // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
             platform.set_button_mappings(button_mappings);
+            // 授权对账可能已把持久化意图回落为 false，因此这里重新读取最终值，
+            // 不使用 setup 开头那份可能已经过期的 saved_settings。
+            platform.set_enhanced_capture_enabled(
+                settings
+                    .load()
+                    .map(|settings| settings.rc003_capture_enabled)
+                    .unwrap_or(false),
+            );
+
+            // 自动拉起助手。此刻 bridge 已在监听、描述文件已写出（platform 创建
+            // 时完成），助手读到的端口/令牌一定是本轮的。失败**不再静默**：
+            // 有界重试 + 全程落日志 + IgnoreNew 卡实例的 /end 兜底，见
+            // rc003_auto_trigger_reconcile（2026-09-27 真机复盘）。
+            #[cfg(windows)]
+            if rc003_auto_trigger_allowed {
+                let platform_for_trigger = Arc::clone(&platform);
+                let settings_for_trigger = settings.clone();
+                std::thread::spawn(move || {
+                    rc003_auto_trigger_reconcile(platform_for_trigger, settings_for_trigger);
+                });
+            }
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (
@@ -1674,6 +1839,48 @@ mod tests {
     /// 安装器从未实现）。
     const INSTALLER_HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
 
+    fn snapshot_with_phase(phase: BridgePhase) -> BridgeSnapshot {
+        BridgeSnapshot {
+            phase,
+            ..Default::default()
+        }
+    }
+
+    /// 自动拉起的单轮判定（2026-09-27 真机回归）：判据必须是**桥接快照**
+    /// 而非触发命令的退出码——`/run` 成功但助手读了过期描述文件时，桥
+    /// 停在 listening，只有快照能区分「还在等」与「已连上」。
+    #[test]
+    fn auto_trigger_check_routes_by_bridge_phase() {
+        assert_eq!(
+            classify_auto_trigger(&snapshot_with_phase(BridgePhase::Connected)),
+            AutoTriggerCheck::Connected
+        );
+        assert_eq!(
+            classify_auto_trigger(&snapshot_with_phase(BridgePhase::Listening)),
+            AutoTriggerCheck::Retry
+        );
+        // failed（端口占用）与 stopped（非 Windows/仿真）下重试无意义，
+        // 尤其不能在 runtime-simulation 的 CI 里去碰真实的计划任务。
+        assert_eq!(
+            classify_auto_trigger(&snapshot_with_phase(BridgePhase::Failed)),
+            AutoTriggerCheck::Abort
+        );
+        assert_eq!(
+            classify_auto_trigger(&snapshot_with_phase(BridgePhase::Stopped)),
+            AutoTriggerCheck::Abort
+        );
+    }
+
+    /// 仿真平台的桥快照恒为 `stopped`：自动拉起必须在触发前就判定放弃，
+    /// 保证 CI 的 runtime-simulation 不会执行真实的 `schtasks /run`。
+    #[test]
+    fn auto_trigger_check_aborts_on_simulation_default_snapshot() {
+        assert_eq!(
+            classify_auto_trigger(&BridgeSnapshot::default()),
+            AutoTriggerCheck::Abort
+        );
+    }
+
     /// 去掉 NSIS 注释（`;` 到行尾）：注释里会引用被禁用的 API 名做说明，
     /// 负向断言必须在正文上做。
     fn strip_comments(source: &str) -> String {
@@ -1768,6 +1975,55 @@ mod tests {
             "安装器宽限 {}ms 必须比应用收尾预算 {}ms 多留至少 2s 余量",
             settle + max_wait,
             app_budget
+        );
+    }
+
+    /// 授权跨升级保留（2026-09-27 Andy 拍板，取代 2026-09-24「授权不跨安装保留」）：
+    /// 安装（升级/覆盖）路径不得写「需重新授权」标记——那个标记是应用启动
+    /// 回落开关的唯一凭证，写了就把用户已开启的开关打回关闭。卸载路径仍必须
+    /// 写（卸载即撤销，防止提权任务随卸载残留）。安装路径也不得删任务：普通
+    /// 权限删不掉提权任务（真机实测静默失败），升级恰恰要靠幸存的任务承载
+    /// 授权，helper 与主程序同路径覆盖更新后无需重建。
+    #[test]
+    fn installer_preserves_capture_authorization_on_upgrade() {
+        let install = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
+        assert!(
+            install.contains("!insertmacro SayAllStopHelper install 0"),
+            "安装路径停助手必须以保留授权的方式（revoke=0），写标记会把开关打回关闭"
+        );
+        assert!(
+            !install.contains("schtasks /delete"),
+            "安装路径不得删授权任务：普通权限删不掉，升级必须保留任务"
+        );
+        // 升级时序：新安装器先跑**旧版卸载器**（当前已装版本的），它仍会写
+        // 重授权标记——PREINSTALL 必须把它删掉，否则本次升级开关照样回落。
+        // 卸载后重装的残留标记同被清除：任务实际幸存（普通权限删不掉），
+        // 保留开关状态符合直觉，且不引入新风险。
+        assert!(
+            install.contains(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#),
+            "PREINSTALL 必须删除旧卸载器写下的重授权标记，否则升级开关回落"
+        );
+        let uninstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREUNINSTALL");
+        assert!(
+            uninstall.contains("!insertmacro SayAllStopHelper uninstall 1"),
+            "卸载路径必须撤销授权（revoke=1）"
+        );
+        // 重授权标记的写入必须被锁在 revoke=1 的编译期分支里：宏被两条路径
+        // 共享，无条件写入会让升级路径也把开关回落为关闭。
+        let stop = macro_body(INSTALLER_HOOKS, "SayAllStopHelper");
+        let branch = stop
+            .find("!if ${_revoke_auth} == 1")
+            .expect("StopHelper 的重授权标记写入必须用 !if ${{_revoke_auth}} == 1 编译期分支");
+        let endif = stop[branch..]
+            .find("!endif")
+            .map(|offset| branch + offset)
+            .expect("revoke 分支必须有 !endif");
+        let marker = stop
+            .find("rc003-reauth-required")
+            .expect("StopHelper 应包含重授权标记路径（与应用侧逐字符一致）");
+        assert!(
+            marker > branch && marker < endif,
+            "重授权标记写入必须位于 revoke=1 分支内"
         );
     }
 
