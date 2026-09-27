@@ -91,3 +91,6 @@ hardware/RC003/evidence/helper-run.log
 # 出包暂存产物（beforeBundleCommand 复制）
 /src-tauri/sayall-helper.exe
 /src-tauri/frida-gadget.dll
+
+# 本地出包的临时前端产物（safe-delete 守卫绕法），不入库
+dist-build/

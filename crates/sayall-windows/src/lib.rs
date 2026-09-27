@@ -281,6 +281,8 @@ pub struct WindowsPlatform {
     #[cfg(windows)]
     rc003_bridge: Arc<rc003_bridge::Rc003Bridge>,
     #[cfg(windows)]
+    enhanced_capture_enabled: Arc<AtomicBool>,
+    #[cfg(windows)]
     send_input: Arc<send_input_windows::SendInputRuntime>,
 }
 
@@ -369,6 +371,7 @@ impl Default for WindowsPlatform {
                 audio,
                 raw_input,
                 rc003_bridge,
+                enhanced_capture_enabled: Arc::new(AtomicBool::new(false)),
                 send_input,
             }
         }
@@ -558,7 +561,28 @@ impl WindowsPlatform {
 
     /// 更新按键映射：持久化由 Tauri 层负责，这里热加载到引擎并同步门控配置。
     pub fn set_button_mappings(&self, mappings: send_input::ButtonMappings) {
+        #[cfg(windows)]
+        let mapped_mask = mappings.mapped_mask();
         self.button_mapping.set_mappings(mappings);
+        #[cfg(windows)]
+        self.rc003_bridge.set_capture_targets(
+            self.enhanced_capture_enabled.load(Ordering::Relaxed),
+            mapped_mask,
+        );
+    }
+
+    /// 同步用户的“全按键支持”意图。关闭时先撤销报告层所有权，随后旧的
+    /// Raw Input + 键盘门控逻辑自动接回其它按键；三键保持其既有不可用语义。
+    pub fn set_enhanced_capture_enabled(&self, enabled: bool) {
+        #[cfg(windows)]
+        {
+            self.enhanced_capture_enabled
+                .store(enabled, Ordering::Relaxed);
+            self.rc003_bridge
+                .set_capture_targets(enabled, self.button_mapping.mappings().mapped_mask());
+        }
+        #[cfg(not(windows))]
+        let _ = enabled;
     }
 
     pub fn button_mappings(&self) -> send_input::ButtonMappings {

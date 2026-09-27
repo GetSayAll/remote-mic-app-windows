@@ -156,6 +156,11 @@ function press(...usages) {
 
 /* ------------------------------------------- 2. 三键：清空 + 计数 + 边沿 */
 
+ctx.handleCommand(JSON.stringify({
+  type: 'targets', generation: 1,
+  report: [0x00f1, 0x0080, 0x0081], clear: [0x00f1, 0x0080, 0x0081],
+}));
+
 {
   const before = ctx.stat.target_hits;
   const { ptr, self } = press(0x00f1);
@@ -169,10 +174,11 @@ function press(...usages) {
 /* ------------------------- 3. 下发哨兵键（助手 --canary-usage 0x4A 走这条） */
 
 ctx.handleCommand(JSON.stringify({
-  type: 'targets', report: [0x00f1, 0x0080, 0x0081], clear: [0x00f1, 0x0080, 0x0081, 0x004a],
+  type: 'targets', generation: 2,
+  report: [0x00f1, 0x0080, 0x0081], clear: [0x00f1, 0x0080, 0x0081, 0x004a],
 }));
-check('targets 被接受（targets_applied=1）',
-  ctx.stat.targets_applied === 1, `applied=${ctx.stat.targets_applied} rejected=${ctx.stat.targets_rejected}`);
+check('targets 热更新被接受（targets_applied=2）',
+  ctx.stat.targets_applied === 2, `applied=${ctx.stat.targets_applied} rejected=${ctx.stat.targets_rejected}`);
 
 /* ------- 4. 本次缺陷的正主：只含哨兵键的报告必须真被清掉（不只是"门禁放行"） */
 
@@ -213,14 +219,29 @@ check('targets 被接受（targets_applied=1）',
 /* --------------------------- 7. 护栏仍然生效 */
 
 {
+  const all = [0x00f1, 0x0028, 0x0035, 0x004a, 0x004f, 0x0050, 0x0051,
+    0x0052, 0x0065, 0x0066, 0x007f, 0x0080, 0x0081];
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 3, report: all, clear: all }));
+  for (const usage of all) {
+    const { ptr } = press(usage);
+    check(`动态全键：0x${usage.toString(16)} 被清零`, ptr.buf[3] === 0 && ptr.buf[4] === 0);
+  }
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 4, report: [], clear: [] }));
+  const { ptr } = press(0x004a);
+  check('动态目标清空后恢复原始报告', ptr.buf[3] === 0x4a);
+}
+
+/* --------------------------- 8. 护栏仍然生效 */
+
+{
   const rejected = ctx.stat.targets_rejected;
-  ctx.handleCommand(JSON.stringify({ type: 'targets', report: [0x004a], clear: [0x004a] }));
-  check('篡改上报集合仍被拒', ctx.stat.targets_rejected === rejected + 1);
-  ctx.handleCommand(JSON.stringify({ type: 'targets', report: [0x00f1, 0x0080, 0x0081], clear: [0x004a] }));
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 5, report: [0x1234], clear: [0x1234] }));
+  check('白名单外 usage 仍被拒', ctx.stat.targets_rejected === rejected + 1);
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 5, report: [0x00f1, 0x0080, 0x0081], clear: [0x004a] }));
   check('清空集合不含三键仍被拒', ctx.stat.targets_rejected === rejected + 2);
 }
 
-/* --------------------------- 8. 静态：门禁必须挂在清空集合上 */
+/* --------------------------- 9. 静态：门禁必须挂在清空集合上 */
 
 check('源码含 clearSetIn（清空集合视角）', src.includes('function clearSetIn('));
 check('onEnter 门禁调用 shouldTouchReport',

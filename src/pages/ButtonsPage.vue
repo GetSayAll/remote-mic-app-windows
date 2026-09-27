@@ -457,15 +457,15 @@ function isActivePreset(keys: KeyCode[]): boolean {
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  if (rc003CaptureEnabled.value === true) {
+    return "全按键支持已启用，此按键的映射现在生效；已配置按键由遥控器报告层捕获，不接管物理键盘上的同名按键。";
+  }
   if (button === "back" || button === "volume_up" || button === "volume_down") {
     // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
     // 文案只随开关状态走。RC001 的三键不经助手也能到达（key_gate 直接归因），
     // 开着增强捕获对它无害；RC003 则必须开启才会生效。
     const state = rc003CaptureEnabled.value;
-    if (state === true) {
-      return "全按键支持已启用，此按键的映射现在生效。";
-    }
-      if (state === false) {
+    if (state === false) {
         // 2026-09-27 Andy 定稿：一句话即可，与开关悬停提示同句；
         // 授权弹窗 / 防作弊冲突等细节由开启前的确认弹窗承载，不再重复。
         return "提示：返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
@@ -835,9 +835,32 @@ const rc003BridgeText = computed(() => {
       return null;
   }
 });
-const rc003BridgeTone = computed(() =>
-  rc003Bridge.value?.phase === "connected" ? "success" : "pending",
-);
+const rc003BridgeTone = computed(() => {
+  switch (rc003Bridge.value?.phase) {
+    case "connected":
+      return "success";
+    case "failed":
+      return "error";
+    default:
+      // listening 及未知相位：等待中（黄点）。文案仍可从开关圆点的 title 读到。
+      return "pending";
+  }
+});
+
+// 开启成功但桥接段异步失败（助手起不来等）：开关已是开启态、不会再走
+// applyCaptureToggle 的失败分支，必须在这里把失败送进底部提示条，
+// 否则用户只看到一个黄点永远不变绿（2026-09-28 状态行移除后的唯一显性告警）。
+watch(rc003Bridge, (bridge, previous) => {
+  if (bridge?.phase === "failed" && previous?.phase !== "failed") {
+    statusMessage.value = "全按键支持开启失败：请关闭全按键支持后重新开启；若反复失败请联系开发者。";
+    reportFrontendEvent({
+      event: "rc003_capture_bridge_failed",
+      phase: "completed",
+      result: "failed",
+      reason: `bridge_phase=${String(bridge.phase)}`,
+    });
+  }
+});
 
 /**
  * 切换三键捕获。打开可能在**首次**弹一次 UAC（IPC 会等授权流程结束）；
@@ -946,12 +969,7 @@ async function applyCaptureToggle() {
   }
 }
 
-/** 增强捕获开关只对三键有意义——其他按键走 Raw Input，本来就能看见。 */
-const selectedIsTriKey = computed(() => {
-  const button = editingTarget.value?.button;
-  return button === "back" || button === "volume_up" || button === "volume_down";
-});
-
+/** 页面统一展示全按键支持；开关关闭时，非三键仍沿用原有输入路径。 */
 onMounted(async () => {
   const setupStarted = performance.now();
   window.addEventListener("keydown", handleCaptureKeydown, true);
@@ -1090,6 +1108,32 @@ onUnmounted(() => {
             <span>启用自定义按键功能</span>
             <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
           </label>
+          <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
+               选中某个按键的编辑面板，任何时刻都能开启/关闭。
+               样式与「启用自定义按键功能」一致（toggle-input Switch，2026-09-28）；
+               桥接状态是开关右侧的行内圆点——不能再用独立状态行：v-if 插行会把
+               下方画布整体顶下去（页面抖动），胶囊底色+状态光晕也把标题区染了色
+               （2026-09-28 Andy 报告）。 -->
+          <label
+            class="toggle-row"
+            title="开启后，已配置按键从遥控器报告层捕获，避免接管物理键盘同名按键"
+          >
+            <span>全按键支持</span>
+            <input
+              ref="captureSwitchEl"
+              type="checkbox"
+              class="toggle-input"
+              :checked="rc003CaptureEnabled === true"
+              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
+              @change="toggleRc003Capture"
+            />
+            <span
+              v-if="rc003BridgeText"
+              class="status-dot"
+              :class="rc003BridgeTone"
+              :title="rc003BridgeText"
+            ></span>
+          </label>
         </div>
       </div>
       <div class="mapping-header-controls">
@@ -1101,16 +1145,9 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- 三键已启用时的桥接状态行。开关本体在编辑面板里
-         （"禁用按键"左侧，仅对返回/音量± 显示）。 -->
-    <div
-      v-if="rc003CaptureEnabled === true && rc003BridgeText"
-      class="device-chip"
-      style="align-self: flex-start; margin: 0 0 10px"
-    >
-      <span class="status-dot" :class="rc003BridgeTone"></span>
-      <span>{{ rc003BridgeText }}</span>
-    </div>
+    <!-- 桥接状态不再有独立行（2026-09-28）：状态收进头部开关右侧的行内圆点
+         （title 悬停看文案），开启失败走底部提示条——独立行的 v-if 插入 /
+         移除会引起整页回流（抖动），胶囊底色与状态光晕还会染到标题区。 -->
 
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
@@ -1241,20 +1278,8 @@ onUnmounted(() => {
           <p class="muted">当前：{{ actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }}</p>
         </div>
         <div class="button-row">
-          <label
-            v-if="selectedIsTriKey"
-            class="toggle-row"
-            title="返回 / 音量+ / 音量−三个键需要开启此功能才能使用"
-          >
-            <span>全按键支持</span>
-            <input
-              ref="captureSwitchEl"
-              type="checkbox"
-              :checked="rc003CaptureEnabled === true"
-              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
-              @change="toggleRc003Capture"
-            />
-          </label>
+          <!-- 全按键支持开关已移至页面头部（与「启用自定义按键功能」并排，
+               2026-09-27），编辑面板只保留按键级操作。 -->
           <button
             class="secondary-button editor-disable-btn"
             :class="{ 'is-active': actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"

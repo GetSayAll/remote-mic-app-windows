@@ -48,6 +48,7 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
+    fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
     fn subscribe_button_edges(&self, callback: sayall_windows::button_mapping::ButtonEdgeCallback);
     fn subscribe_button_gestures(
@@ -197,6 +198,14 @@ impl PlatformRuntime for WindowsPlatform {
         callback: sayall_windows::button_mapping::ButtonGestureCallback,
     ) {
         WindowsPlatform::subscribe_button_gestures(self, callback)
+    }
+
+    fn set_enhanced_capture_enabled(&self, enabled: bool) {
+        // 只翻转 enabled 位，复用 set_button_mappings 的门控同步路径
+        //（key_gate::configure 由 mappings.enabled 驱动，与 UI 保存映射同路）。
+        let mut mappings = WindowsPlatform::button_mappings(self);
+        mappings.enabled = enabled;
+        WindowsPlatform::set_button_mappings(self, mappings);
     }
 
     fn shutdown_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {

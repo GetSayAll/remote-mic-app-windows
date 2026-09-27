@@ -1,13 +1,14 @@
-//! RC003 三键「助手 → 主程序」桥接：捕获链的**第 ② 段（传输）**。
+//! RC003 全按键「助手 ↔ 主程序」桥接：捕获链的**第 ② 段（传输与所有权）**。
 //!
 //! ## 三段链条与本模块的位置
 //!
 //! RC003 的返回 / 音量± 三键被 Windows 的 HID→VK 映射表丢弃（`kbdhid` 在映射阶段
 //! 丢掉这三个 usage），主程序侧**所有常规输入通道**（Raw Input、键盘钩子）都收不到
-//! 它们。于是整条链路被切成三段：
+//! 它们。启用“全按键支持”后，其余已映射按键也复用同一条报告层链路，避免依赖
+//! 全局物理键盘钩子。于是整条链路被切成三段：
 //!
 //! 1. **捕获**（`hardware/RC003/helper` + Gadget 侧 agent）：在承载该设备的
-//!    用户态 `WUDFHost.exe` 内、于报告层把三键 usage 拦下（选择性清空），
+//!    用户态 `WUDFHost.exe` 内、于报告层把动态目标 usage 拦下（选择性清空），
 //!    并把按键边沿经 loopback 上报给提权助手。**已真机验证**。
 //! 2. **传输**（本模块）：把助手手里的边沿送进主程序。← **这里**
 //! 3. **重映射**（`button_mapping` 引擎）：边沿驱动手势识别与动作注入。
@@ -42,16 +43,17 @@
 //! 有别的进程占住端口往主程序喂伪造边沿"，那已由**方向选择**天然消解：
 //! 主程序是监听方，且**只接受出示正确令牌的连接**。
 //!
-//! 纵深防御在**白名单**：即使令牌泄漏，桥接也只接受
-//! [`BRIDGE_ALLOWED_USAGES`]（三键）三个 usage，其余一律丢弃并计数。
-//! 攻击者最多伪造这三个键，无法借桥接触发任意按键映射。
+//! 纵深防御在**白名单 + 动态目标集**：桥接只接受 13 个已知语义按键，且只有
+//! 当前启用并已配置映射的动态目标可以进入映射引擎；语音键始终排除。
 //!
 //! ## 协议（ASCII 行，`\n` 结尾；助手 → 主程序）
 //!
 //! | 行 | 方向 | 含义 |
 //! | --- | --- | --- |
 //! | `HELLO <ver> <token> <helper_pid>` | 助手 → app | 鉴权；必须首行 |
-//! | `OK <ver>` / `DENY <reason>` | app → 助手 | 鉴权结果；DENY 累计上限后断开 |
+//! | `OK <ver> <gen> <usages>` / `DENY <reason>` | app → 助手 | 鉴权结果与初始目标 |
+//! | `T <gen> <usages>` | app → 助手 | 热更新报告层捕获目标 |
+//! | `O <gen> <usages>` | 助手 → app | agent 已应用目标；随后随心跳续租所有权 |
 //! | `E <t_ms> <u1,u2,...>` | 助手 → app | 边沿：当前按下的 usage 集合（十六进制） |
 //! | `E <t_ms> -` | 助手 → app | 边沿：集合为空 = 全部释放 |
 //! | `P <t_ms>` | 助手 → app | 心跳（每 1s） |
@@ -74,19 +76,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::button_mapping::EngineMessage;
-use crate::raw_input::{button_for_usage, ButtonEdge};
+use crate::raw_input::{button_for_usage, ButtonEdge, ENHANCED_CAPTURE_BUTTON_USAGES};
 
 /// 桥接描述文件名。约定路径见 [`default_bridge_dir`]。
 pub const BRIDGE_FILE_NAME: &str = "rc003-bridge.ini";
 
 /// 协议版本。助手与主程序不一致时**拒绝连接**（宁可不可用，也不要半懂不懂地跑）。
-pub const BRIDGE_PROTOCOL_VERSION: u32 = 1;
+pub const BRIDGE_PROTOCOL_VERSION: u32 = 2;
 
-/// 允许通过桥接的 usage 白名单（纵深防御：令牌泄漏时也只能伪造这三个键）。
+/// 允许通过桥接的 usage 白名单。实际还必须命中当前动态目标集。
 ///
-/// 与 agent 侧 `TARGET_USAGES = [0x00F1, 0x0080, 0x0081]` 必须一致；
-/// 助手侧自检会核对内嵌 agent 与助手的常量一致性，本模块由单测核对。
-pub const BRIDGE_ALLOWED_USAGES: [u16; 3] = [0x00F1, 0x0080, 0x0081];
+/// 与 agent 侧的全量语义按键白名单必须一致；助手侧自检会核对内嵌 agent 与助手
+/// 的常量一致性，本模块由单测核对。运行时实际集合仍由主程序动态下发。
+pub const BRIDGE_ALLOWED_USAGES: [u16; 13] = [
+    0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F, 0x0080,
+    0x0081,
+];
 
 /// 等待 `HELLO` 的上限。超时即断开——避免连接被空占。
 const HELLO_TIMEOUT: Duration = Duration::from_millis(5_000);
@@ -97,7 +102,10 @@ const HELLO_TIMEOUT: Duration = Duration::from_millis(5_000);
 const SILENCE_TIMEOUT: Duration = Duration::from_millis(3_000);
 
 /// 单次读等待。决定看门狗与停止标志的响应粒度。
-const READ_POLL: Duration = Duration::from_millis(500);
+const READ_POLL: Duration = Duration::from_millis(250);
+
+/// agent 租约为 2s；所有权心跳必须在租约到期前失效，先恢复旧键盘路径。
+const OWNERSHIP_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 /// 未通过鉴权的连接允许的错误次数，超过即断开（与助手侧 REJECT 折叠计数同旨）。
 const MAX_DENY: u32 = 3;
@@ -116,7 +124,7 @@ pub enum BridgePhase {
     Listening,
     /// 助手已连接且通过鉴权。
     Connected,
-    /// 监听失败（端口等）：桥接不可用，三键退回"可配置但不生效"。
+    /// 监听失败（端口等）：普通键继续走旧路径，三键保持原有降级语义。
     Failed,
 }
 
@@ -149,6 +157,11 @@ pub struct BridgeSnapshot {
     pub pressed_usages: Vec<u16>,
     /// 距最近一次收到助手数据的毫秒数（None = 从未收到）。
     pub last_rx_age_ms: Option<u64>,
+    /// 当前下发给 Helper 的动态捕获代次与目标集合。
+    pub target_generation: u64,
+    pub target_usages: Vec<u16>,
+    /// 已由 agent ACK 且仍在所有权租约内的集合。
+    pub owned_usages: Vec<u16>,
 }
 
 /// 默认桥接描述文件目录：`%LOCALAPPDATA%\SayAll`。
@@ -175,9 +188,38 @@ pub enum BridgeLine {
         usages: Vec<u16>,
     },
     Ping,
+    /// agent 已应用该代目标集合；后续心跳重复上报同一所有权。
+    Ownership {
+        generation: u64,
+        usages: Vec<u16>,
+    },
     Bye {
         reason: String,
     },
+}
+
+fn parse_usage_payload(payload: &str) -> Result<Vec<u16>, String> {
+    if payload == "-" {
+        return Ok(Vec::new());
+    }
+    let mut usages = Vec::new();
+    for raw in payload.split(',') {
+        let raw = raw.trim();
+        let token = if raw.len() > 2 && (raw.starts_with("0x") || raw.starts_with("0X")) {
+            &raw[2..]
+        } else {
+            raw
+        };
+        if token.is_empty() {
+            continue;
+        }
+        let usage =
+            u16::from_str_radix(token, 16).map_err(|_| format!("{token:?} 不是十六进制 usage"))?;
+        if !usages.contains(&usage) {
+            usages.push(usage);
+        }
+    }
+    Ok(usages)
 }
 
 /// 解析一行（已去掉行尾换行）。空行返回 `None`。
@@ -222,32 +264,19 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
                 .ok_or_else(|| "E 缺少时间戳".to_string())?
                 .parse::<u64>()
                 .map_err(|_| "E 时间戳不是整数".to_string())?;
-            let payload = parts.next().unwrap_or("-");
-            if payload == "-" {
-                return Ok(Some(BridgeLine::Edges { usages: Vec::new() }));
-            }
-            let mut usages = Vec::new();
-            for raw in payload.split(',') {
-                let raw = raw.trim();
-                // 前缀大小写都要接受：助手写的是小写 `f1`，而人工联调脚本里
-                // 复制粘贴 `0x00F1` 是常态；只认一种会在现场浪费一轮排查。
-                let token = if raw.len() > 2 && (raw.starts_with("0x") || raw.starts_with("0X")) {
-                    &raw[2..]
-                } else {
-                    raw
-                };
-                if token.is_empty() {
-                    continue;
-                }
-                let usage = u16::from_str_radix(token, 16)
-                    .map_err(|_| format!("{token:?} 不是十六进制 usage"))?;
-                if !usages.contains(&usage) {
-                    usages.push(usage);
-                }
-            }
+            let usages = parse_usage_payload(parts.next().unwrap_or("-"))?;
             Ok(Some(BridgeLine::Edges { usages }))
         }
         "P" => Ok(Some(BridgeLine::Ping)),
+        "O" => {
+            let generation = parts
+                .next()
+                .ok_or_else(|| "O 缺少目标代次".to_string())?
+                .parse::<u64>()
+                .map_err(|_| "O 目标代次不是整数".to_string())?;
+            let usages = parse_usage_payload(parts.next().unwrap_or("-"))?;
+            Ok(Some(BridgeLine::Ownership { generation, usages }))
+        }
         "BYE" => Ok(Some(BridgeLine::Bye {
             reason: parts.collect::<Vec<_>>().join(" "),
         })),
@@ -309,6 +338,8 @@ struct BridgeShared {
     watchdog_release_total: u64,
     pressed: BTreeSet<u16>,
     last_rx: Option<Instant>,
+    owned: BTreeSet<u16>,
+    ownership_last_rx: Option<Instant>,
 }
 
 impl Default for BridgeShared {
@@ -325,7 +356,58 @@ impl Default for BridgeShared {
             watchdog_release_total: 0,
             pressed: BTreeSet::new(),
             last_rx: None,
+            owned: BTreeSet::new(),
+            ownership_last_rx: None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CaptureTargets {
+    generation: u64,
+    usages: BTreeSet<u16>,
+}
+
+impl Default for CaptureTargets {
+    fn default() -> Self {
+        Self {
+            generation: 1,
+            usages: BTreeSet::new(),
+        }
+    }
+}
+
+fn format_usage_payload(usages: &BTreeSet<u16>) -> String {
+    if usages.is_empty() {
+        "-".to_owned()
+    } else {
+        usages
+            .iter()
+            .map(|usage| format!("{usage:x}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn usage_mask(usages: &BTreeSet<u16>) -> u64 {
+    usages.iter().fold(0u64, |mask, usage| {
+        button_for_usage(*usage)
+            .map(|button| mask | (1u64 << button.ordinal()))
+            .unwrap_or(mask)
+    })
+}
+
+fn clear_ownership(shared: &Arc<Mutex<BridgeShared>>) {
+    let had_ownership = {
+        let mut state = lock(shared);
+        let had = !state.owned.is_empty();
+        state.owned.clear();
+        state.ownership_last_rx = None;
+        had
+    };
+    crate::key_gate::set_enhanced_owned_mask(0);
+    if had_ownership {
+        note("enhanced_capture event=ownership_released fallback=legacy".to_owned());
     }
 }
 
@@ -356,11 +438,13 @@ struct CurrentConn {
     stream: TcpStream,
 }
 
-/// RC003 三键传输桥接。随平台生命周期存活（`Drop` 即停止监听并清理描述文件）。
+/// RC003 报告层按键传输桥接。随平台生命周期存活（`Drop` 即停止监听并清理描述文件）。
 pub struct Rc003Bridge {
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<BridgeShared>>,
     current: Arc<Mutex<Option<CurrentConn>>>,
+    targets: Arc<Mutex<CaptureTargets>>,
+    sender: Sender<EngineMessage>,
     worker: Mutex<Option<JoinHandle<()>>>,
     file: Option<PathBuf>,
     port: u16,
@@ -375,12 +459,13 @@ impl Rc003Bridge {
     /// 在指定目录启动：监听 loopback 随机端口 → 写出描述文件 → 等待助手回连。
     ///
     /// 端口与令牌由主程序决定，助手只读不改；监听失败**不是**致命错误
-    /// （桥接不可用 = 三键退回"可配置但不生效"，与接线前完全一致），
+    /// （桥接不可用时普通键继续走旧路径，三键保持接线前的降级语义），
     /// 但会在诊断日志里留下 `phase=failed` 的记录。
     pub fn start_in(dir: PathBuf, sender: Sender<EngineMessage>) -> Arc<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Mutex::new(BridgeShared::default()));
         let current: Arc<Mutex<Option<CurrentConn>>> = Arc::new(Mutex::new(None));
+        let targets = Arc::new(Mutex::new(CaptureTargets::default()));
         let next_id = Arc::new(AtomicU64::new(1));
 
         let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
@@ -394,6 +479,8 @@ impl Rc003Bridge {
                     stop,
                     shared,
                     current,
+                    targets,
+                    sender,
                     worker: Mutex::new(None),
                     file: None,
                     port: 0,
@@ -427,10 +514,12 @@ impl Rc003Bridge {
                 .unwrap_or_else(|| "none".to_string())
         ));
 
+        let bridge_sender = sender.clone();
         let worker = {
             let stop = Arc::clone(&stop);
             let shared = Arc::clone(&shared);
             let current = Arc::clone(&current);
+            let targets = Arc::clone(&targets);
             let next_id = Arc::clone(&next_id);
             std::thread::Builder::new()
                 .name("sayall-rc003-bridge".to_owned())
@@ -440,9 +529,10 @@ impl Rc003Bridge {
                         stop,
                         shared,
                         current,
+                        targets,
                         next_id,
                         &token_for_worker,
-                        sender,
+                        bridge_sender,
                     )
                 })
                 .ok()
@@ -452,6 +542,8 @@ impl Rc003Bridge {
             stop,
             shared,
             current,
+            targets,
+            sender,
             worker: Mutex::new(worker),
             file,
             port,
@@ -465,6 +557,7 @@ impl Rc003Bridge {
 
     pub fn snapshot(&self) -> BridgeSnapshot {
         let state = lock(&self.shared);
+        let targets = lock(&self.targets);
         BridgeSnapshot {
             phase: state.phase,
             port: self.port,
@@ -478,7 +571,51 @@ impl Rc003Bridge {
             watchdog_release_total: state.watchdog_release_total,
             pressed_usages: state.pressed.iter().copied().collect(),
             last_rx_age_ms: state.last_rx.map(|t| t.elapsed().as_millis() as u64),
+            target_generation: targets.generation,
+            target_usages: targets.usages.iter().copied().collect(),
+            owned_usages: state.owned.iter().copied().collect(),
         }
+    }
+
+    /// 更新增强捕获目标。只有功能开启且已配置映射的按键才被报告层接管；
+    /// 关闭功能或删除映射会立即撤销所有权并恢复既有 Raw Input/键盘门控路径。
+    pub fn set_capture_targets(&self, enabled: bool, mapped_mask: u64) {
+        let usages: BTreeSet<u16> = if enabled {
+            ENHANCED_CAPTURE_BUTTON_USAGES
+                .iter()
+                .filter_map(|(button, usage)| {
+                    (((mapped_mask >> button.ordinal()) & 1) == 1).then_some(*usage)
+                })
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let generation = {
+            let mut targets = lock(&self.targets);
+            if targets.usages == usages {
+                return;
+            }
+            targets.generation = targets.generation.wrapping_add(1).max(1);
+            targets.usages = usages.clone();
+            targets.generation
+        };
+
+        // 先撤销旧所有权，再让 Helper 切换目标；这段窗口宁可走旧逻辑，也不能
+        // 因为仍把键盘钩子关着而让按键完全不可用。
+        clear_ownership(&self.shared);
+        let retained: BTreeSet<u16> = lock(&self.shared)
+            .pressed
+            .intersection(&usages)
+            .copied()
+            .collect();
+        let releases = apply_usages(&self.shared, &self.targets, &retained);
+        for edge in releases {
+            let _ = self.sender.send(EngineMessage::GateEdge(edge));
+        }
+        note(format!(
+            "enhanced_capture event=targets_changed generation={generation} enabled={enabled} usages={}",
+            format_usage_payload(&usages)
+        ));
     }
 }
 
@@ -488,6 +625,7 @@ impl Drop for Rc003Bridge {
         if let Some(conn) = lock(&self.current).take() {
             let _ = conn.stream.shutdown(Shutdown::Both);
         }
+        clear_ownership(&self.shared);
         if let Some(worker) = lock(&self.worker).take() {
             let _ = worker.join();
         }
@@ -528,6 +666,7 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<BridgeShared>>,
     current: Arc<Mutex<Option<CurrentConn>>>,
+    targets: Arc<Mutex<CaptureTargets>>,
     next_id: Arc<AtomicU64>,
     token: &str,
     sender: Sender<EngineMessage>,
@@ -568,6 +707,7 @@ fn accept_loop(
                     }
                 }
                 if replaced {
+                    clear_ownership(&shared);
                     note(format!(
                         "rc003_bridge event=replaced_by_new_connection from={addr}"
                     ));
@@ -575,6 +715,7 @@ fn accept_loop(
                 let thread_stop = Arc::clone(&stop);
                 let thread_shared = Arc::clone(&shared);
                 let thread_current = Arc::clone(&current);
+                let thread_targets = Arc::clone(&targets);
                 let thread_sender = sender.clone();
                 let thread_token = token.to_string();
                 let spawned = std::thread::Builder::new()
@@ -586,6 +727,7 @@ fn accept_loop(
                             &thread_stop,
                             &thread_shared,
                             &thread_current,
+                            &thread_targets,
                             &thread_token,
                             &thread_sender,
                         )
@@ -625,6 +767,7 @@ fn handle_connection(
     stop: &Arc<AtomicBool>,
     shared: &Arc<Mutex<BridgeShared>>,
     current: &Arc<Mutex<Option<CurrentConn>>>,
+    targets: &Arc<Mutex<CaptureTargets>>,
     token: &str,
     sender: &Sender<EngineMessage>,
 ) {
@@ -639,10 +782,11 @@ fn handle_connection(
     let mut writer = stream;
     let mut pending: Vec<u8> = Vec::new();
     let mut authenticated = false;
+    let mut last_sent_generation = 0u64;
     let mut deny_count = 0u32;
     let started = Instant::now();
     let mut last_rx = Instant::now();
-    /// 本轮连接内实际投递给映射引擎的边沿数（用于"边沿到底有没有到"这个问题）。
+    // 本轮连接内实际投递给映射引擎的边沿数（用于"边沿到底有没有到"这个问题）。
     let mut session_edges = 0u64;
     // 不用初值：所有出口都在 break 前赋值，给它一个"默认值"只会掩盖漏赋值的分支。
     let drop_reason: &str;
@@ -710,7 +854,16 @@ fn handle_connection(
                         note(format!(
                             "rc003_bridge event=helper_authenticated helper_pid={helper_pid} version={version}"
                         ));
-                        let _ = write_line(&mut writer, &format!("OK {BRIDGE_PROTOCOL_VERSION}"));
+                        let target = lock(targets).clone();
+                        last_sent_generation = target.generation;
+                        let _ = write_line(
+                            &mut writer,
+                            &format!(
+                                "OK {BRIDGE_PROTOCOL_VERSION} {} {}",
+                                target.generation,
+                                format_usage_payload(&target.usages)
+                            ),
+                        );
                     }
                     _ => {
                         // 未鉴权前只接受 HELLO。这不是防攻击（同用户进程挡不住），
@@ -724,7 +877,7 @@ fn handle_connection(
             match message {
                 BridgeLine::Edges { usages } => {
                     let wanted: BTreeSet<u16> = usages.into_iter().collect();
-                    let edges = apply_usages(shared, &wanted);
+                    let edges = apply_usages(shared, targets, &wanted);
                     for edge in edges {
                         if sender.send(EngineMessage::GateEdge(edge)).is_err() {
                             drop_reason = "engine_gone";
@@ -752,6 +905,25 @@ fn handle_connection(
                     }
                 }
                 BridgeLine::Ping => {}
+                BridgeLine::Ownership { generation, usages } => {
+                    let reported: BTreeSet<u16> = usages.into_iter().collect();
+                    let target = lock(targets).clone();
+                    if generation == target.generation && reported == target.usages {
+                        {
+                            let mut state = lock(shared);
+                            state.owned = reported.clone();
+                            state.ownership_last_rx = Some(Instant::now());
+                        }
+                        crate::key_gate::set_enhanced_owned_mask(usage_mask(&reported));
+                    } else {
+                        note(format!(
+                            "enhanced_capture event=ownership_rejected reported_generation={generation} expected_generation={} reported={} expected={}",
+                            target.generation,
+                            format_usage_payload(&reported),
+                            format_usage_payload(&target.usages)
+                        ));
+                    }
+                }
                 BridgeLine::Bye { reason } => {
                     note(format!("rc003_bridge event=helper_bye reason={reason}"));
                     drop_reason = "helper_bye";
@@ -772,6 +944,36 @@ fn handle_connection(
         if authenticated && last_rx.elapsed() > SILENCE_TIMEOUT {
             drop_reason = "silence_timeout";
             break;
+        }
+        if authenticated {
+            let target = lock(targets).clone();
+            if target.generation != last_sent_generation {
+                if write_line(
+                    &mut writer,
+                    &format!(
+                        "T {} {}",
+                        target.generation,
+                        format_usage_payload(&target.usages)
+                    ),
+                )
+                .is_err()
+                {
+                    drop_reason = "target_write_error";
+                    break;
+                }
+                last_sent_generation = target.generation;
+            }
+            let ownership_expired = lock(shared)
+                .ownership_last_rx
+                .map(|at| at.elapsed() > OWNERSHIP_TIMEOUT)
+                .unwrap_or(false);
+            if ownership_expired {
+                clear_ownership(shared);
+                note(format!(
+                    "enhanced_capture event=ownership_timeout timeout_ms={} fallback=legacy",
+                    OWNERSHIP_TIMEOUT.as_millis()
+                ));
+            }
         }
         match reader.read_until(b'\n', &mut pending) {
             Ok(0) => {
@@ -798,7 +1000,8 @@ fn handle_connection(
     // 它自己的静默看门狗也会兜底。同理，共享状态也不该由旧连接改写。
     let mut released_count = 0u64;
     if drop_reason != "replaced" {
-        let released = apply_usages(shared, &BTreeSet::new());
+        clear_ownership(shared);
+        let released = apply_usages(shared, targets, &BTreeSet::new());
         released_count = released.len() as u64;
         for edge in released {
             let _ = sender.send(EngineMessage::GateEdge(edge));
@@ -840,12 +1043,17 @@ fn write_line(stream: &mut TcpStream, line: &str) -> std::io::Result<()> {
 /// 应用一份绝对状态集合：过滤白名单 → 差分 → 逐按钮边沿。**调用方负责投递**。
 ///
 /// 差分是必要的：助手侧发的是"当前按下的集合"，而引擎要的是按键边沿。
-fn apply_usages(shared: &Arc<Mutex<BridgeShared>>, wanted: &BTreeSet<u16>) -> Vec<ButtonEdge> {
+fn apply_usages(
+    shared: &Arc<Mutex<BridgeShared>>,
+    targets: &Arc<Mutex<CaptureTargets>>,
+    wanted: &BTreeSet<u16>,
+) -> Vec<ButtonEdge> {
     let mut state = lock(shared);
+    let allowed = lock(targets).usages.clone();
     let before = state.pressed.clone();
     let mut accepted = BTreeSet::new();
     for usage in wanted {
-        if BRIDGE_ALLOWED_USAGES.contains(usage) {
+        if BRIDGE_ALLOWED_USAGES.contains(usage) && allowed.contains(usage) {
             accepted.insert(*usage);
         } else {
             state.usages_dropped += 1;
@@ -909,7 +1117,21 @@ pub fn parse_descriptor(text: &str) -> Option<(u16, String, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raw_input::RemoteButton;
     use std::sync::mpsc::channel;
+
+    fn targets(usages: &[u16]) -> Arc<Mutex<CaptureTargets>> {
+        Arc::new(Mutex::new(CaptureTargets {
+            generation: 1,
+            usages: usages.iter().copied().collect(),
+        }))
+    }
+
+    fn mask(buttons: &[RemoteButton]) -> u64 {
+        buttons
+            .iter()
+            .fold(0, |mask, button| mask | (1u64 << button.ordinal()))
+    }
 
     #[test]
     fn parses_hello_and_rejects_malformed() {
@@ -958,6 +1180,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_dynamic_capture_ownership() {
+        assert_eq!(
+            parse_bridge_line("O 7 28,4a,f1").unwrap(),
+            Some(BridgeLine::Ownership {
+                generation: 7,
+                usages: vec![0x0028, 0x004A, 0x00F1],
+            })
+        );
+        assert_eq!(
+            parse_bridge_line("O 8 -").unwrap(),
+            Some(BridgeLine::Ownership {
+                generation: 8,
+                usages: Vec::new(),
+            })
+        );
+        assert!(parse_bridge_line("O nope f1").is_err());
+    }
+
+    #[test]
+    fn bridge_whitelist_matches_the_semantic_button_table() {
+        let bridge: BTreeSet<_> = BRIDGE_ALLOWED_USAGES.into_iter().collect();
+        let semantic: BTreeSet<_> = ENHANCED_CAPTURE_BUTTON_USAGES
+            .iter()
+            .map(|(_, usage)| *usage)
+            .collect();
+        assert_eq!(bridge, semantic);
+        assert!(!bridge.contains(&0x003E), "voice must stay on ATVV");
+    }
+
+    #[test]
     fn token_comparison_is_exact() {
         assert!(token_matches("abcd", "abcd"));
         assert!(!token_matches("abcd", "abce"));
@@ -968,24 +1220,25 @@ mod tests {
 
     #[test]
     fn descriptor_round_trip() {
-        let text = "version=1\nport=53124\ntoken=deadbeefcafe\npid=999\n";
+        let text = "version=2\nport=53124\ntoken=deadbeefcafe\npid=999\n";
         assert_eq!(
             parse_descriptor(text),
-            Some((53124, "deadbeefcafe".to_string(), 1))
+            Some((53124, "deadbeefcafe".to_string(), 2))
         );
         // 版本不符必须整份拒绝：宁可不可用，也不要跑一个半懂的协议。
-        assert_eq!(parse_descriptor("version=2\nport=1\ntoken=x\n"), None);
+        assert_eq!(parse_descriptor("version=1\nport=1\ntoken=x\n"), None);
         assert_eq!(parse_descriptor("port=1\ntoken=x\n"), None);
-        assert_eq!(parse_descriptor("version=1\nport=1\n"), None);
-        assert_eq!(parse_descriptor("version=1\nport=1\ntoken=\n"), None);
+        assert_eq!(parse_descriptor("version=2\nport=1\n"), None);
+        assert_eq!(parse_descriptor("version=2\nport=1\ntoken=\n"), None);
     }
 
     #[test]
     fn whitelist_blocks_non_target_usages() {
         let shared = Arc::new(Mutex::new(BridgeShared::default()));
-        // 故意混入一个可用但**不属于三键**的 usage（主页 0x4A）与一个未知 usage。
+        let targets = targets(&[0x00F1]);
+        // 主页属于增强白名单，但不在本代动态目标中；未知 usage 也必须丢弃。
         let wanted: BTreeSet<u16> = [0x00F1, 0x004A, 0x1234].into_iter().collect();
-        let edges = apply_usages(&shared, &wanted);
+        let edges = apply_usages(&shared, &targets, &wanted);
         assert_eq!(
             edges,
             vec![ButtonEdge {
@@ -1002,7 +1255,8 @@ mod tests {
     #[test]
     fn diff_emits_press_then_release() {
         let shared = Arc::new(Mutex::new(BridgeShared::default()));
-        let press = apply_usages(&shared, &[0x0080].into_iter().collect());
+        let targets = targets(&[0x0080]);
+        let press = apply_usages(&shared, &targets, &[0x0080].into_iter().collect());
         assert_eq!(
             press,
             vec![ButtonEdge {
@@ -1011,8 +1265,8 @@ mod tests {
             }]
         );
         // 同一集合重复上报不得产生重复边沿（助手侧"变化才发"，但去重不能只靠对端）。
-        assert!(apply_usages(&shared, &[0x0080].into_iter().collect()).is_empty());
-        let release = apply_usages(&shared, &BTreeSet::new());
+        assert!(apply_usages(&shared, &targets, &[0x0080].into_iter().collect()).is_empty());
+        let release = apply_usages(&shared, &targets, &BTreeSet::new());
         assert_eq!(
             release,
             vec![ButtonEdge {
@@ -1023,6 +1277,30 @@ mod tests {
         assert!(lock(&shared).pressed.is_empty());
     }
 
+    #[test]
+    fn dynamic_targets_accept_other_buttons_only_while_selected() {
+        let shared = Arc::new(Mutex::new(BridgeShared::default()));
+        let targets = targets(&[0x004A]);
+        assert_eq!(
+            apply_usages(&shared, &targets, &[0x004A].into_iter().collect()),
+            vec![ButtonEdge {
+                button: RemoteButton::Home,
+                is_pressed: true,
+            }]
+        );
+
+        lock(&targets).usages.clear();
+        assert_eq!(
+            apply_usages(&shared, &targets, &BTreeSet::new()),
+            vec![ButtonEdge {
+                button: RemoteButton::Home,
+                is_pressed: false,
+            }]
+        );
+        assert!(apply_usages(&shared, &targets, &[0x004A].into_iter().collect()).is_empty());
+        assert_eq!(lock(&shared).usages_dropped, 1);
+    }
+
     /// 端到端（离线、免提权、免设备）：真 TcpStream 走完整协议。
     #[test]
     fn end_to_end_loopback_delivers_edges() {
@@ -1030,6 +1308,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (sender, receiver) = channel();
         let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back, RemoteButton::VolumeUp]));
 
         let descriptor_path = dir.join(BRIDGE_FILE_NAME);
         let text = std::fs::read_to_string(&descriptor_path).expect("描述文件必须已写出");
@@ -1060,8 +1339,26 @@ mod tests {
         let mut ok = String::new();
         reader.read_line(&mut ok).expect("必须收到 OK");
         assert!(ok.starts_with("OK "), "实际收到 {ok:?}");
+        let ok_parts: Vec<_> = ok.trim().split(' ').collect();
+        let generation = ok_parts[2].parse::<u64>().expect("OK 携带目标代次");
+        assert_eq!(ok_parts[3], "80,f1", "OK 携带当前动态目标");
+        stream
+            .write_all(format!("O {generation} f1,80\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        for _ in 0..20 {
+            if bridge.snapshot().owned_usages == vec![0x0080, 0x00F1] {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(
+            bridge.snapshot().owned_usages,
+            vec![0x0080, 0x00F1],
+            "只有 agent ACK 后才建立增强所有权"
+        );
 
-        // 三键按下。
+        // 两个当前目标键按下。
         stream.write_all(b"E 1 f1,80\n").unwrap();
         stream.flush().unwrap();
         let mut first = Vec::new();
@@ -1103,6 +1400,54 @@ mod tests {
         }
         assert_eq!(released, 2, "两个键都必须收到释放边沿");
 
+        // 助手若仍连着但不再续报目标所有权，主程序必须在 helper 的 2 秒租约前
+        // 先撤销报告层所有权，让普通键自动恢复旧的键盘路径。P 只维持桥接连接，
+        // 不应续期所有权。
+        for _ in 0..7 {
+            stream.write_all(b"P\n").unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        for _ in 0..20 {
+            if bridge.snapshot().owned_usages.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            bridge.snapshot().owned_usages.is_empty(),
+            "所有权超时后必须恢复旧路径，不能继续劫持物理键盘边沿"
+        );
+
+        // 热更新为主页键：主程序先撤销旧所有权，再下发新一代目标；主页边沿
+        // 此后应走同一条 GateEdge 通道，而不是全局物理键盘钩子。
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Home]));
+        let mut target_line = String::new();
+        reader
+            .read_line(&mut target_line)
+            .expect("必须收到 T 热更新");
+        assert!(target_line.starts_with("T "), "实际收到 {target_line:?}");
+        assert!(target_line.trim().ends_with("4a"));
+        stream.write_all(b"E 3 4a\n").unwrap();
+        stream.flush().unwrap();
+        let home = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("主页边沿应被动态桥接");
+        assert!(matches!(
+            home,
+            EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Home,
+                is_pressed: true
+            })
+        ));
+
+        bridge.set_capture_targets(false, mask(&[RemoteButton::Home]));
+        assert!(bridge.snapshot().owned_usages.is_empty());
+        assert!(
+            bridge.snapshot().target_usages.is_empty(),
+            "关闭全按键支持必须清空增强目标；非三键随后完全沿用旧路径"
+        );
+
         drop(bridge);
         assert!(
             !descriptor_path.exists(),
@@ -1127,6 +1472,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (sender, receiver) = channel();
         let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back, RemoteButton::VolumeUp]));
 
         let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
         let (port, token, _version) = parse_descriptor(&text).expect("可解析");
@@ -1204,6 +1550,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (sender, receiver) = channel();
         let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back]));
 
         let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
         let (port, token, _version) = parse_descriptor(&text).expect("可解析");
