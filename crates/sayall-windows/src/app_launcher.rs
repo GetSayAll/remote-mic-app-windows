@@ -633,11 +633,6 @@ fn process_app_user_model_id(pid: u32) -> Option<String> {
 }
 
 #[cfg(windows)]
-pub(crate) fn process_is_foreground(pid: u32) -> bool {
-    unsafe { win_impl::foreground_belongs_to(pid) }
-}
-
-#[cfg(windows)]
 fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningActivation {
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
@@ -671,7 +666,8 @@ fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningAct
 #[cfg(windows)]
 mod win_impl {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
     };
@@ -680,9 +676,9 @@ mod win_impl {
         KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MENU,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsIconic,
-        IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_RESTORE,
-        SW_SHOW, WS_EX_TOOLWINDOW,
+        GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow,
+        GWL_EXSTYLE, GW_OWNER, SW_RESTORE, SW_SHOW, WS_EX_TOOLWINDOW,
     };
 
     pub(super) struct EnumContext<'a> {
@@ -704,6 +700,85 @@ mod win_impl {
         pub physical_alt_held: bool,
     }
 
+    // 进程/AUMID 只能确定应用身份，不能确定 HWND 的用途。Electron 等应用会
+    // 在同一身份下创建崩溃监视、消息、托盘与渲染辅助窗口；它们也可能无 owner、
+    // 非 WS_EX_TOOLWINDOW。窗口类只排除已知的框架辅助用途，尺寸兜底排除
+    // 尚未布局的消息窗口；不以窗口标题或应用名称作判断。
+    pub(super) fn window_rejection_reason(
+        class_name: &str,
+        width: i32,
+        height: i32,
+        owned: bool,
+        cloaked: bool,
+    ) -> Option<&'static str> {
+        if owned {
+            return Some("owned");
+        }
+        if cloaked {
+            return Some("cloaked");
+        }
+        if class_name.starts_with("crashpad_")
+            || class_name == "Base_PowerMessageWindow"
+            || class_name == "Chrome_WidgetWin_0"
+            || class_name.contains("NotifyIconHostWindow")
+            || class_name.contains("SystemPreferencesHostWindow")
+            || class_name == "Chrome_StatusTrayWindow"
+        {
+            return Some("auxiliary_class");
+        }
+        if width < 120 || height < 80 {
+            return Some("small_or_unlaid_out");
+        }
+        None
+    }
+
+    unsafe fn eligible_window(hwnd: HWND) -> bool {
+        let owned = GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default()).0 != std::ptr::null_mut();
+        let tool = (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & (WS_EX_TOOLWINDOW.0 as u32) != 0;
+        if tool {
+            crate::ble::gatt_note(
+                "app_launcher action=window_candidate terminal_result=rejected reason=tool_window"
+                    .to_owned(),
+            );
+            return false;
+        }
+        let mut class_buffer = [0u16; 256];
+        let class_len = GetClassNameW(hwnd, &mut class_buffer).max(0) as usize;
+        let class_name = String::from_utf16_lossy(&class_buffer[..class_len]);
+        let mut rect = RECT::default();
+        let has_rect = GetWindowRect(hwnd, &mut rect).is_ok();
+        let mut cloaked = 0i32;
+        let cloak_result = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+        let reason = if class_len == 0 {
+            Some("class_unavailable")
+        } else if !has_rect {
+            Some("rect_unavailable")
+        } else if cloak_result.is_err() {
+            Some("cloak_unavailable")
+        } else {
+            window_rejection_reason(
+                &class_name,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                owned,
+                cloaked != 0,
+            )
+        };
+        crate::ble::gatt_note(format!(
+            "app_launcher action=window_candidate terminal_result={} reason={} visible={} size_class={}",
+            if reason.is_none() { "accepted" } else { "rejected" },
+            reason.unwrap_or("main_candidate"),
+            IsWindowVisible(hwnd).as_bool(),
+            if !has_rect { "unknown" } else if rect.right - rect.left < 120 || rect.bottom - rect.top < 80 { "small" } else { "normal" },
+        ));
+        reason.is_none()
+    }
+
     pub(super) unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let context = &mut *(lparam.0 as *mut EnumContext);
         if context.activation.is_some() {
@@ -714,11 +789,7 @@ mod win_impl {
         if !context.pids.contains(&pid) {
             return BOOL::from(true);
         }
-        // 只认主窗口：无所有者且非工具窗口（排除托盘/弹层/辅助隐藏窗口）。
-        if GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default()).0 != std::ptr::null_mut() {
-            return BOOL::from(true);
-        }
-        if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & (WS_EX_TOOLWINDOW.0 as u32) != 0 {
+        if !eligible_window(hwnd) {
             return BOOL::from(true);
         }
         if IsWindowVisible(hwnd).as_bool() {
@@ -744,10 +815,9 @@ mod win_impl {
         if context.activation.is_some() {
             return BOOL::from(true);
         }
-        if GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default()).0 != std::ptr::null_mut()
-            || (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & (WS_EX_TOOLWINDOW.0 as u32) != 0
-            || !window_app_user_model_id(hwnd)
-                .is_some_and(|value| value.eq_ignore_ascii_case(context.app_user_model_id))
+        if !window_app_user_model_id(hwnd)
+            .is_some_and(|value| value.eq_ignore_ascii_case(context.app_user_model_id))
+            || !eligible_window(hwnd)
         {
             return BOOL::from(true);
         }
@@ -815,7 +885,7 @@ mod win_impl {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         let outcome = super::drive_foreground_activation(|use_alt_unlock| {
-            foreground_attempt(hwnd, target_pid, use_alt_unlock)
+            foreground_attempt(hwnd, use_alt_unlock)
         });
         crate::ble::gatt_note(format!(
             "app_launcher action=show_and_force_foreground terminal_result={} target_result={} self_window={self_window} visible_before={visible_before} took_show_path={took_show_path} attempt_count={} alt_unlock_submitted={} set_foreground_ok={}",
@@ -828,11 +898,7 @@ mod win_impl {
         outcome
     }
 
-    unsafe fn foreground_attempt(
-        hwnd: HWND,
-        target_pid: u32,
-        use_alt_unlock: bool,
-    ) -> super::ForegroundAttempt {
+    unsafe fn foreground_attempt(hwnd: HWND, use_alt_unlock: bool) -> super::ForegroundAttempt {
         let foreground = GetForegroundWindow();
         let foreground_thread = GetWindowThreadProcessId(foreground, None);
         let current_thread = GetCurrentThreadId();
@@ -856,8 +922,9 @@ mod win_impl {
             let _ = AttachThreadInput(foreground_thread, current_thread, false);
         }
 
-        // SetForegroundWindow 的 BOOL 不是产品成功判据；读回前台窗口所属进程。
-        let target_is_foreground = foreground_belongs_to(target_pid);
+        // SetForegroundWindow 的 BOOL 不是产品成功判据；读回选定的前台 HWND。
+        let target_is_foreground =
+            foreground_matches_window(GetForegroundWindow().0 as isize, hwnd.0 as isize);
         crate::ble::gatt_note(format!(
             "app_launcher action=foreground_attempt use_alt_unlock={use_alt_unlock} physical_alt_held={} attach_requested={attached} attach_ok={attach_ok} alt_unlock_submitted={} set_foreground_ok={set_foreground_ok} target_is_foreground={target_is_foreground}",
             alt_unlock.physical_alt_held,
@@ -900,14 +967,8 @@ mod win_impl {
         }
     }
 
-    pub(crate) unsafe fn foreground_belongs_to(target_pid: u32) -> bool {
-        let foreground = GetForegroundWindow();
-        if foreground.0.is_null() {
-            return false;
-        }
-        let mut foreground_pid = 0u32;
-        GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
-        foreground_pid == target_pid
+    pub(super) fn foreground_matches_window(foreground: isize, target: isize) -> bool {
+        foreground != 0 && foreground == target
     }
 
     unsafe fn submit_alt_edge(key_up: bool) -> bool {
@@ -1198,6 +1259,52 @@ pub fn pick_custom_app() -> Option<CustomAppPick> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn window_candidate_rejects_auxiliary_windows_from_real_apps() {
+        use super::win_impl::window_rejection_reason;
+
+        assert_eq!(
+            window_rejection_reason("crashpad_SessionEndWatcher", 136, 39, false, false),
+            Some("auxiliary_class")
+        );
+        assert_eq!(
+            window_rejection_reason("Base_PowerMessageWindow", 0, 0, false, false),
+            Some("auxiliary_class")
+        );
+        assert_eq!(
+            window_rejection_reason("Chrome_WidgetWin_0", 1920, 1019, false, false),
+            Some("auxiliary_class")
+        );
+        assert_eq!(
+            window_rejection_reason("Electron_NotifyIconHostWindow", 0, 0, false, false),
+            Some("auxiliary_class")
+        );
+        assert_eq!(
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, false),
+            None
+        );
+        assert_eq!(
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, true, false),
+            Some("owned")
+        );
+        assert_eq!(
+            window_rejection_reason("Chrome_WidgetWin_1", 960, 720, false, true),
+            Some("cloaked")
+        );
+        assert_eq!(
+            window_rejection_reason("UnknownWindow", 136, 39, false, false),
+            Some("small_or_unlaid_out")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn foreground_must_be_the_selected_window() {
+        assert!(super::win_impl::foreground_matches_window(42, 42));
+        assert!(!super::win_impl::foreground_matches_window(42, 43));
+    }
 
     #[test]
     fn executable_identity_normalizes_windows_path_forms() {

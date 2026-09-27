@@ -24,8 +24,12 @@ Remove-Item Env:SAYALL_TEST_REGISTERED_APP_TARGET
 - 从应用库选择一个目标绑定到按键后，验证启动路径。
 - 目标未运行时，按一次映射键后窗口应成为前台；目标已运行且被其他窗口遮挡或
   最小化时再次按映射键，窗口也应恢复并成为前台，不能只在任务栏闪烁。诊断日志
-  应以 `target_result=foreground_observed` 作为成功终态；`SetForegroundWindow`
-  单独返回成功不算通过。
+  应以 `target_result=foreground_observed` 作为成功终态，且现场确认前台窗口是
+  实际主窗口；`SetForegroundWindow` 成功或目标 PID 相同均不足以证明通过。
+- 对同一应用拥有崩溃监视、消息、托盘、隐藏渲染窗口的场景，确认这些辅助
+  窗口不会被主动显示；诊断日志应有 `window_candidate` 的接受或拒绝原因。
+- 对 ChatGPT 检查不再出现空白窄条；对 WorkBuddy 检查冷启动、主窗口已隐藏
+  和闲置后首按不再出现白屏。若白屏仍在实际主窗口发生，单独记录渲染时序。
 - 对 MSIX/Electron 等多进程应用，验收按精确 AUMID 关联整组进程，不能只把激活
   契约返回的单个 PID 当作主窗口进程。
 - 对 AppsFolder 中的传统桌面条目，验收应从 `System.Link.TargetParsingPath` 读取公开

@@ -17,12 +17,19 @@
   `LockSetForegroundWindow` / `AttachThreadInput` 公共 API 文档：Windows 即使满足常规
   条件仍可拒绝后台进程抢前台，并改为闪烁任务栏；`AttachThreadInput` 只共享输入状态，
   不承诺绕过 foreground lock；用户按 Alt 会解除该锁。本仓库因此以
-  `GetForegroundWindow` 所属进程读回作为唯一成功判据，常规尝试读回失败后才用成对
+  `GetForegroundWindow` 的目标窗口读回作为成功判据，常规尝试读回失败后才用成对
   Alt DOWN/UP 包住一次重试，物理 Alt 已按住时跳过，避免破坏用户键态。官方依据：
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow 、
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getforegroundwindow 、
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-locksetforegroundwindow 、
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-attachthreadinput 。
+- 2026-09-27 窗口候选筛选使用 Microsoft 公开 `GetClassNameW`、`GetWindowRect`
+  和 `DwmGetWindowAttribute(DWMWA_CLOAKED)`，在进程/AUMID 身份匹配后排除
+  辅助、未布局或被 DWM 遮蔽的窗口。`GetWindowRect` 的尺寸受 DPI 虚拟化影响，
+  因此只做宽松的小窗口门槛，不用精确尺寸识别特定应用；`DWMWA_CLOAKED` 用于
+  识别 Windows 隐藏于合成器的窗口。参考：
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect 、
+  https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute 。
 
 ## 遥控器缓存电量显示
 
