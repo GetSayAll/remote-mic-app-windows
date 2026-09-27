@@ -108,6 +108,9 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       watchdogReleaseTotal: 0,
       pressedUsages: [],
       lastRxAgeMs: null,
+      targetGeneration: 0,
+      targetUsages: [],
+      ownedUsages: [],
     })),
   };
 });
@@ -744,6 +747,27 @@ describe("buttons mapping page", () => {
     expect(rc001.find(".capability-note").text()).not.toContain("VK 0xFF");
   });
 
+  it("其它按键的编辑器也能控制全按键支持", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    const page = await mountPage("rc003");
+    const home = page
+      .findAll(".mapping-card")
+      .find((card) => card.find(".mapping-card-title strong").text() === "主页")!;
+    await home.findAll(".mapping-cell")[0]!.trigger("click");
+    await vi.waitFor(() => {
+      expect(captureRow(page)).toBeDefined();
+    });
+    await vi.waitFor(() => {
+      expect(page.find(".capability-note").text()).toContain("不接管物理键盘");
+    });
+  });
+
   it("UAC 被取消（enable 拒绝）时开关保持关闭、显示错误（2026-09-24 用户报告）", async () => {
     // 复现链（升级/重装后）：任务删不掉但重授权标记在 → 开关回落关闭 →
     // 用户打开 → 确认弹窗点「开启」→ UAC → 选「否」→ enable 拒绝。
@@ -848,8 +872,7 @@ describe("全按键支持开启前确认弹窗", () => {
     const page = await mountPage("rc003");
     await openCaptureToggle(page);
 
-    // 悬停提示（2026-09-27 用户定稿）：只说哪三个键、需要开启。
-    expect(captureRow(page)!.attributes("title")).toBe(TRI_KEY_HINT);
+    expect(captureRow(page)!.attributes("title")).toContain("遥控器报告层捕获");
 
     const checkbox = captureRow(page)!.find('input[type="checkbox"]');
     (checkbox.element as HTMLInputElement).checked = true;

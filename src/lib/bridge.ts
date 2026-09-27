@@ -101,10 +101,10 @@ export interface RawInputSnapshot {
 }
 
 /**
- * RC003 三键传输桥接（捕获链第 ② 段）的状态。
+ * 全按键增强捕获传输桥接（捕获链第 ② 段）的状态。
  *
  * 背景：RC003 的返回 / 音量± 在 Windows 侧零事件（`kbdhid` 丢弃了这三个 usage），
- * 必须由提权助手在报告层拦下、再经这条桥接送回主程序。所以"三键按不动"有
+ * 增强模式由提权助手在报告层拦下已映射按键、再经这条桥接送回主程序。所以按键无响应有
  * 多种原因，这一份快照用来区分它们：`listening` = 主程序已就绪、在等助手；
  * `connected` 且 `edgesApplied` 增长 = 边沿真的过了桥。
  */
@@ -121,6 +121,9 @@ export interface Rc003BridgeSnapshot {
   watchdogReleaseTotal: number;
   pressedUsages: number[];
   lastRxAgeMs: number | null;
+  targetGeneration: number;
+  targetUsages: number[];
+  ownedUsages: number[];
 }
 
 /** `stopped` = 该平台没有这个机制（非 Windows），或桥接未启用。 */
@@ -566,6 +569,9 @@ const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   watchdogReleaseTotal: 0,
   pressedUsages: [],
   lastRxAgeMs: null,
+  targetGeneration: 0,
+  targetUsages: [],
+  ownedUsages: [],
 };
 
 export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {

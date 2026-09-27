@@ -282,7 +282,7 @@ async fn get_rc003_bridge_snapshot(
         .map_err(|error| format!("读取 RC003 桥接状态失败：{error}"))
 }
 
-/// RC003 三键助手的计划任务状态（授权 = 任务在系统里）。
+/// 全按键支持 Helper 的计划任务状态（授权 = 任务在系统里）。
 fn rc003_capture_enabled(state: &AppState) -> bool {
     state
         .settings
@@ -337,14 +337,14 @@ async fn enable_rc003_capture(
                 "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed"
                     .to_owned(),
             );
-            format!("启用 RC003 三键捕获失败：{error}")
+            format!("启用全按键支持失败：{error}")
         })?;
     outcome.map_err(|error| {
         sayall_windows::gatt_note(
             "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed"
                 .to_owned(),
         );
-        format!("启用 RC003 三键捕获失败：{error}")
+        format!("启用全按键支持失败：{error}")
     })?;
     // 意图**成功后**才落盘。此前是先落盘再执行——UAC 被取消时设置里残留
     // enabled=true，下次打开页面开关假显示"已开启"却没有助手（意图与系统
@@ -352,7 +352,8 @@ async fn enable_rc003_capture(
     state
         .settings
         .save_rc003_capture_enabled(true)
-        .map_err(|error| format!("保存三键捕获开关失败：{error}"))?;
+        .map_err(|error| format!("保存全按键支持开关失败：{error}"))?;
+    state.platform.set_enhanced_capture_enabled(true);
     sayall_windows::gatt_note(
         "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=passed"
             .to_owned(),
@@ -367,15 +368,18 @@ async fn disable_rc003_capture(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<rc003_task::TaskStatus, String> {
+    // 先恢复旧输入路径，再结束 Helper。即使 Helper 停止失败，其 agent 租约也会
+    // fail-open；其它按键不会因为关闭增强能力而跟三键一样变成完全不可用。
+    state.platform.set_enhanced_capture_enabled(false);
     state
         .settings
         .save_rc003_capture_enabled(false)
-        .map_err(|error| format!("保存三键捕获开关失败：{error}"))?;
+        .map_err(|error| format!("保存全按键支持开关失败：{error}"))?;
     let outcome = tauri::async_runtime::spawn_blocking(rc003_task::disable_capture)
         .await
-        .map_err(|error| format!("停用 RC003 三键捕获失败：{error}"))?;
+        .map_err(|error| format!("停用全按键支持失败：{error}"))?;
     // 同上：内层 Result 必须自己判，否则停用失败也会静默成功。
-    outcome.map_err(|error| format!("停用 RC003 三键捕获失败：{error}"))?;
+    outcome.map_err(|error| format!("停用全按键支持失败：{error}"))?;
     // 结束助手同样可能抢走前台（taskkill / 控制台进程退出），一并还焦点。
     refocus_main_window_soon(app);
     Ok(rc003_task::status(false))
@@ -1446,6 +1450,14 @@ pub fn run() {
             };
             // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
             platform.set_button_mappings(button_mappings);
+            // 授权对账可能已把持久化意图回落为 false，因此这里重新读取最终值，
+            // 不使用 setup 开头那份可能已经过期的 saved_settings。
+            platform.set_enhanced_capture_enabled(
+                settings
+                    .load()
+                    .map(|settings| settings.rc003_capture_enabled)
+                    .unwrap_or(false),
+            );
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (

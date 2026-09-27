@@ -107,8 +107,13 @@ mod imp {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
         fn CloseHandle(h: Handle) -> i32;
         fn GetLastError() -> u32;
-        fn VirtualAllocEx(h: Handle, addr: *mut c_void, size: usize, alloc: u32, protect: u32)
-            -> *mut c_void;
+        fn VirtualAllocEx(
+            h: Handle,
+            addr: *mut c_void,
+            size: usize,
+            alloc: u32,
+            protect: u32,
+        ) -> *mut c_void;
         fn VirtualFreeEx(h: Handle, addr: *mut c_void, size: usize, free_type: u32) -> i32;
         fn WriteProcessMemory(
             h: Handle,
@@ -130,12 +135,7 @@ mod imp {
         fn GetExitCodeThread(h: Handle, code: *mut u32) -> i32;
         fn GetModuleHandleW(name: *const u16) -> Handle;
         fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
-        fn QueryFullProcessImageNameW(
-            h: Handle,
-            flags: u32,
-            buf: *mut u16,
-            size: *mut u32,
-        ) -> i32;
+        fn QueryFullProcessImageNameW(h: Handle, flags: u32, buf: *mut u16, size: *mut u32) -> i32;
         fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
         fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
         fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
@@ -149,10 +149,7 @@ mod imp {
         fn GetLocalTime(out: *mut LocalTime);
         /// 注册控制台事件处理器。第二参数非零 = 追加到链尾。
         /// 返回非零表示注册成功。
-        fn SetConsoleCtrlHandler(
-            handler: Option<extern "system" fn(u32) -> i32>,
-            add: i32,
-        ) -> i32;
+        fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -218,10 +215,13 @@ mod imp {
     const MAX_PATH_W: usize = 260;
     const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
-    /// 目标三键（HID 键盘页 usage）：返回 / 音量+ / 音量−。
-    /// helper 侧也留一份：用于校验哨兵键不与之重叠，并在下发命令里如实汇报"上报集合"。
-    /// 必须与 `agent/rc003_agent.js` 的 `TARGET_USAGES` 一致（自检会核对内嵌脚本内容）。
-    const TARGET_USAGES: [u16; 3] = [0x00F1, 0x0080, 0x0081];
+    /// agent 允许接管的全部语义按键白名单（语音键 0x003E 明确排除）。
+    const TARGET_USAGES: [u16; 13] = [
+        0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F,
+        0x0080, 0x0081,
+    ];
+    /// 无主程序桥接的手工诊断模式维持历史三键范围，避免意外扩大清键面。
+    const DEFAULT_TARGET_USAGES: [u16; 3] = [0x00F1, 0x0080, 0x0081];
 
     #[repr(C)]
     struct ProcessEntry32W {
@@ -368,7 +368,10 @@ mod imp {
             let name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
             let mut luid = Luid::default();
             if LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) == 0 {
-                return Err(format!("LookupPrivilegeValueW 失败 error={}", GetLastError()));
+                return Err(format!(
+                    "LookupPrivilegeValueW 失败 error={}",
+                    GetLastError()
+                ));
             }
             let new_state = TokenPrivileges {
                 privilege_count: 1,
@@ -386,7 +389,10 @@ mod imp {
                 std::ptr::null_mut(),
             ) == 0
             {
-                return Err(format!("AdjustTokenPrivileges 失败 error={}", GetLastError()));
+                return Err(format!(
+                    "AdjustTokenPrivileges 失败 error={}",
+                    GetLastError()
+                ));
             }
             // 成功 ≠ 生效：令牌缺这个特权时它照样返回"成功"，
             // 真实结果要看 GetLastError == ERROR_NOT_ALL_ASSIGNED。
@@ -717,10 +723,8 @@ mod imp {
                                 PidRead::Error(rc) => format!("注册表返回码 {rc}"),
                                 _ => format!("{other:?}"),
                             };
-                            scan.failures.push(format!(
-                                "{enumerator} / {} :: {why}",
-                                mask_token(&device)
-                            ));
+                            scan.failures
+                                .push(format!("{enumerator} / {} :: {why}", mask_token(&device)));
                             continue;
                         }
                     };
@@ -826,11 +830,7 @@ mod imp {
                 let existed = fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false);
                 if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
                     if existed {
-                        let _ = writeln!(
-                            f,
-                            "\n---------- 新一轮运行 {} ----------",
-                            local_stamp()
-                        );
+                        let _ = writeln!(f, "\n---------- 新一轮运行 {} ----------", local_stamp());
                     }
                 }
             }
@@ -1024,9 +1024,12 @@ mod imp {
             if t.is_empty() {
                 continue;
             }
-            let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
-            let v = u16::from_str_radix(hex, 16)
-                .map_err(|_| format!("{t:?} 不是十六进制 usage"))?;
+            let hex = t
+                .strip_prefix("0x")
+                .or_else(|| t.strip_prefix("0X"))
+                .unwrap_or(t);
+            let v =
+                u16::from_str_radix(hex, 16).map_err(|_| format!("{t:?} 不是十六进制 usage"))?;
             if v == 0 {
                 return Err("usage 0 在报告里表示空槽，不能当哨兵键".to_string());
             }
@@ -1044,13 +1047,13 @@ mod imp {
     ///   2. 哨兵不得与三键重叠 —— 重叠会让日志无法分辨一条命中是三键还是哨兵。
     fn clear_usages(canary: &[u16]) -> Result<Vec<u16>, String> {
         for c in canary {
-            if TARGET_USAGES.contains(c) {
+            if DEFAULT_TARGET_USAGES.contains(c) {
                 return Err(format!(
                     "哨兵键 0x{c:04X} 与目标三键重叠；哨兵必须是别的键（RC003 上建议用主页 0x4A）"
                 ));
             }
         }
-        let mut out: Vec<u16> = TARGET_USAGES.to_vec();
+        let mut out: Vec<u16> = DEFAULT_TARGET_USAGES.to_vec();
         for c in canary {
             if !out.contains(c) {
                 out.push(*c);
@@ -1275,12 +1278,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
         }
         let token = random_token();
-        fs::create_dir_all(dir).map_err(|e| format!("创建运行时目录失败 {}: {e}", dir.display()))?;
-        fs::write(&path, &token).map_err(|e| format!("写入令牌文件失败 {}: {e}", path.display()))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("创建运行时目录失败 {}: {e}", dir.display()))?;
+        fs::write(&path, &token)
+            .map_err(|e| format!("写入令牌文件失败 {}: {e}", path.display()))?;
         logger.kv(
             "[TOKEN]",
             &[
-                ("source", if force_new { "regenerated".into() } else { "generated".into() }),
+                (
+                    "source",
+                    if force_new {
+                        "regenerated".into()
+                    } else {
+                        "generated".into()
+                    },
+                ),
                 ("path", normalize_display(&path)),
                 ("value", mask_token(&token)),
             ],
@@ -1325,7 +1337,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if removed > 0 || kept > 0 {
             logger.kv(
                 "[REAP]",
-                &[("removed", removed.to_string()), ("kept_in_use", kept.to_string())],
+                &[
+                    ("removed", removed.to_string()),
+                    ("kept_in_use", kept.to_string()),
+                ],
             );
         }
     }
@@ -1394,8 +1409,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         logger.kv(
             "[PREP-SIM]",
             &[
-                ("generations", if gens.is_empty() { "-".into() } else { gens.join(",") }),
-                ("token_file", args.runtime_dir.join(TOKEN_FILE).exists().to_string()),
+                (
+                    "generations",
+                    if gens.is_empty() {
+                        "-".into()
+                    } else {
+                        gens.join(",")
+                    },
+                ),
+                (
+                    "token_file",
+                    args.runtime_dir.join(TOKEN_FILE).exists().to_string(),
+                ),
             ],
         );
     }
@@ -1414,7 +1439,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// `reused_existing=false sha256_verified=false copied=false`，读起来像"没校验就用了"，
     /// 而事实是那一轮**一个文件字节都没碰**（不复制、不注入，只是连回常驻的那一代）。
     /// 汇报要描述"这一轮做了什么"，不能拿另一条路径的字段来填空。
-    fn dll_report_fields(plan: &DllPlan, prepared: &PreparedRuntime) -> Vec<(&'static str, String)> {
+    fn dll_report_fields(
+        plan: &DllPlan,
+        prepared: &PreparedRuntime,
+    ) -> Vec<(&'static str, String)> {
         let mut v: Vec<(&'static str, String)> = vec![("dll", normalize_display(&prepared.dll))];
         match plan {
             DllPlan::Attach => {
@@ -1452,7 +1480,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         plan: &DllPlan,
     ) -> Result<PreparedRuntime, String> {
         let dir = &args.runtime_dir;
-        fs::create_dir_all(dir).map_err(|e| format!("创建运行时目录失败 {}: {e}", dir.display()))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("创建运行时目录失败 {}: {e}", dir.display()))?;
 
         let gen_name = match plan {
             DllPlan::Generation(_) => generation_dir_name(&args.token),
@@ -1544,7 +1573,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     &[
                         ("dll", normalize_display(&dll)),
                         ("action", "copied".into()),
-                        ("bytes", fs::metadata(&dll).map(|m| m.len()).unwrap_or(0).to_string()),
+                        (
+                            "bytes",
+                            fs::metadata(&dll).map(|m| m.len()).unwrap_or(0).to_string(),
+                        ),
                     ],
                 );
             }
@@ -1576,13 +1608,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("config", normalize_display(&config)),
                 ("agent", normalize_display(&agent)),
                 ("port", args.port.to_string()),
-                ("mode", if args.observe { "observe".into() } else { "clear".into() }),
+                (
+                    "mode",
+                    if args.observe {
+                        "observe".into()
+                    } else {
+                        "clear".into()
+                    },
+                ),
                 ("restore", args.restore.to_string()),
                 ("lease_ms", LEASE_MS.to_string()),
             ],
         );
 
-        Ok(PreparedRuntime { dll, reused, verified })
+        Ok(PreparedRuntime {
+            dll,
+            reused,
+            verified,
+        })
     }
 
     /// Gadget 配置：`interaction.type = "script"` 会在加载时把脚本跑起来，
@@ -1750,12 +1793,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ("module_present", hit.is_some().to_string()),
                             (
                                 "base",
-                                hit.map(|m| format!("0x{:X}", m.base)).unwrap_or_else(|| "-".into()),
+                                hit.map(|m| format!("0x{:X}", m.base))
+                                    .unwrap_or_else(|| "-".into()),
                             ),
                             ("gadget_modules_in_host", taps.len().to_string()),
                             (
                                 "all",
-                                taps.iter().map(summarize_module).collect::<Vec<_>>().join("; "),
+                                taps.iter()
+                                    .map(summarize_module)
+                                    .collect::<Vec<_>>()
+                                    .join("; "),
                             ),
                         ],
                     );
@@ -1789,7 +1836,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     /// 桥接协议版本。与主程序 `rc003_bridge::BRIDGE_PROTOCOL_VERSION` 必须一致：
     /// 不一致时主程序会直接拒绝连接——宁可不可用，也不要跑一个"半懂"的协议。
-    const BRIDGE_PROTOCOL_VERSION: u32 = 1;
+    const BRIDGE_PROTOCOL_VERSION: u32 = 2;
     /// 回连重试间隔。
     const BRIDGE_RETRY_MS: u64 = 2000;
     /// 心跳间隔。主程序侧静默看门狗是 3000 ms，这里留两倍余量。
@@ -1819,7 +1866,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         last_error: Mutex<String>,
     }
 
-    /// 主程序桥接：把 agent 上报的三键边沿转发给主程序。
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    struct BridgeCaptureTargets {
+        generation: u64,
+        usages: Vec<u16>,
+    }
+
+    enum BridgeOutbound {
+        Edges(Vec<u16>),
+        Ownership(BridgeCaptureTargets),
+    }
+
+    /// 主程序桥接：把 agent 上报的动态目标按键边沿转发给主程序。
     ///
     /// **为什么必须有这一段**：RC003 的返回 / 音量± 在 Windows 侧**零事件**
     /// （`kbdhid` 在 HID→VK 映射阶段丢弃这三个 usage），主程序的 Raw Input 与
@@ -1835,7 +1893,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 转发。断线期间丢失的变化无需逐条补发——重连后拿最近的绝对状态再发一次即可对齐。
     /// 这是选绝对语义而不是"逐键按下/抬起事件"的主要理由。
     struct AppBridge {
-        tx: mpsc::Sender<Vec<u16>>,
+        tx: mpsc::Sender<BridgeOutbound>,
         handle: Option<JoinHandle<()>>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
@@ -1845,6 +1903,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// ⇒ 这个值不再更新 ⇒ 助手自行退出。比让主程序反过来去杀进程干净得多
         /// （主程序是普通权限，本来就杀不掉一个提权进程）。
         last_connected_ms: Arc<AtomicU64>,
+        targets: Arc<Mutex<BridgeCaptureTargets>>,
     }
 
     impl AppBridge {
@@ -1853,7 +1912,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
         /// 转发一份绝对状态（空 = 全部释放）。
         fn push_edges(&self, usages: Vec<u16>) {
-            let _ = self.tx.send(usages);
+            let _ = self.tx.send(BridgeOutbound::Edges(usages));
+        }
+
+        fn push_ownership(&self, targets: BridgeCaptureTargets) {
+            let _ = self.tx.send(BridgeOutbound::Ownership(targets));
+        }
+
+        fn capture_targets(&self) -> BridgeCaptureTargets {
+            self.targets
+                .lock()
+                .map(|targets| targets.clone())
+                .unwrap_or_default()
         }
 
         fn snapshot(&self) -> (u64, u64, u64, String) {
@@ -1903,7 +1973,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
             format!("{home}\\AppData\\Local")
         });
-        PathBuf::from(base).join("SayAll").join("rc003-capture-stop")
+        PathBuf::from(base)
+            .join("SayAll")
+            .join("rc003-capture-stop")
     }
 
     /// 信号存在则删除并返回 true（谁见到谁删，避免残留信号误杀下一轮）。
@@ -1948,7 +2020,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 &[
                     ("event", "descriptor_found_elsewhere".into()),
                     ("path", path.display().to_string()),
-                    ("note", "默认 %LOCALAPPDATA% 下没有找到；已按 C:\\Users\\* 枚举兜底".into()),
+                    (
+                        "note",
+                        "默认 %LOCALAPPDATA% 下没有找到；已按 C:\\Users\\* 枚举兜底".into(),
+                    ),
                 ],
             );
         }
@@ -1994,11 +2069,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     fn probe_bridge_descriptor(path: &Path) -> String {
         match fs::read_to_string(path) {
             Ok(text) => match parse_bridge_descriptor(&text) {
-                Some(target) => format!(
-                    "ok port={} token_len={}",
-                    target.port,
-                    target.token.len()
-                ),
+                Some(target) => format!("ok port={} token_len={}", target.port, target.token.len()),
                 None => "invalid(版本不符或字段缺失)".to_string(),
             },
             Err(_) => "absent(主程序未运行？)".to_string(),
@@ -2025,6 +2096,30 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
+    fn parse_bridge_target_line(line: &str, head: &str) -> Option<BridgeCaptureTargets> {
+        let mut parts = line.trim().split(' ');
+        if parts.next()? != head {
+            return None;
+        }
+        if head == "OK" {
+            let version = parts.next()?.parse::<u32>().ok()?;
+            if version != BRIDGE_PROTOCOL_VERSION {
+                return None;
+            }
+        }
+        let generation = parts.next()?.parse::<u64>().ok()?;
+        let payload = parts.next().unwrap_or("-");
+        let usages = if payload == "-" {
+            Vec::new()
+        } else {
+            parse_usage_list(payload).ok()?
+        };
+        if usages.iter().any(|usage| !TARGET_USAGES.contains(usage)) {
+            return None;
+        }
+        Some(BridgeCaptureTargets { generation, usages })
+    }
+
     /// 发一条边沿行。空集合编码为 `-`（主程序侧据此释放全部）。
     fn bridge_send_edges(stream: &mut TcpStream, usages: &[u16]) -> std::io::Result<()> {
         bridge_write_line(
@@ -2040,7 +2135,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     fn bridge_connect(
         path: Option<&Path>,
         logger: &Logger,
-    ) -> Result<(TcpStream, PathBuf), String> {
+    ) -> Result<(TcpStream, PathBuf, BridgeCaptureTargets), String> {
         let path = match path {
             Some(path) => path.to_path_buf(),
             None => return Err("descriptor_path_unknown".to_string()),
@@ -2083,21 +2178,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         reader
             .read_line(&mut ack)
             .map_err(|error| format!("ack_timeout({error})"))?;
-        if !ack.starts_with("OK") {
-            return Err(format!("rejected({})", ack.trim()));
-        }
+        let targets = parse_bridge_target_line(&ack, "OK")
+            .ok_or_else(|| format!("rejected_or_bad_config({})", ack.trim()))?;
+        stream.set_nonblocking(true).ok();
         let _ = logger;
-        Ok((stream, path))
+        Ok((stream, path, targets))
     }
 
     fn app_bridge_worker(
         path: PathBuf,
-        rx: mpsc::Receiver<Vec<u16>>,
+        rx: mpsc::Receiver<BridgeOutbound>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
         logger: Logger,
         last_connected_ms: Arc<AtomicU64>,
         follow_app: bool,
+        targets: Arc<Mutex<BridgeCaptureTargets>>,
     ) {
         let mut conn: Option<TcpStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
@@ -2106,6 +2202,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut resolved: Option<PathBuf> = Some(path);
         let mut last_fallback_search: Option<Instant> = None;
         let mut failures_logged = 0u64;
+        let mut read_buffer: Vec<u8> = Vec::new();
+        let mut had_connection = false;
 
         while !stop.load(Ordering::Relaxed) {
             // 0) 停用信号：主程序关开关时写此文件。检测到即整个进程退出——
@@ -2119,14 +2217,30 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
             // 1) 消化待发消息。用 try_recv 而不是 recv_timeout：断线期间积压的消息
             //    只需要"最后一份绝对状态"，逐条补发没有意义（见 AppBridge 的说明）。
-            while let Ok(usages) = rx.try_recv() {
-                last_known = usages;
-                if let Some(stream) = conn.as_mut() {
-                    match bridge_send_edges(stream, &last_known) {
-                        Ok(()) => {
-                            stats.edges_forwarded.fetch_add(1, Ordering::Relaxed);
+            while let Ok(message) = rx.try_recv() {
+                match message {
+                    BridgeOutbound::Edges(usages) => {
+                        last_known = usages;
+                        if let Some(stream) = conn.as_mut() {
+                            match bridge_send_edges(stream, &last_known) {
+                                Ok(()) => {
+                                    stats.edges_forwarded.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => conn = None,
+                            }
                         }
-                        Err(_) => conn = None,
+                    }
+                    BridgeOutbound::Ownership(owned) => {
+                        if let Some(stream) = conn.as_mut() {
+                            let _ = bridge_write_line(
+                                stream,
+                                &format!(
+                                    "O {} {}",
+                                    owned.generation,
+                                    format_edge_payload(&owned.usages)
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -2165,7 +2279,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         }
                     }
                     match bridge_connect(candidate.as_deref(), &logger) {
-                        Ok((stream, location)) => {
+                        Ok((stream, location, configured)) => {
                             stats.connects.fetch_add(1, Ordering::Relaxed);
                             last_connected_ms.store(now_ms_u64(), Ordering::Relaxed);
                             resolved = Some(location.clone());
@@ -2176,7 +2290,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                     ("descriptor", location.display().to_string()),
                                 ],
                             );
+                            if let Ok(mut current) = targets.lock() {
+                                *current = configured;
+                            }
+                            read_buffer.clear();
                             conn = Some(stream);
+                            had_connection = true;
                             // 重连后立刻对齐绝对状态：断线期间的变化无从逐条补发，
                             // 但一份绝对状态就能完全对齐（这是绝对语义的价值）。
                             if let Some(stream) = conn.as_mut() {
@@ -2200,7 +2319,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                         ("tries", failures_logged.to_string()),
                                         (
                                             "note",
-                                            "主程序未运行属正常现象；本通道只影响三键映射，不影响捕获与清键"
+                                            "主程序未运行属正常现象；此时动态目标为空，不接管普通按键"
                                                 .into(),
                                         ),
                                     ],
@@ -2208,6 +2327,28 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             }
                         }
                     }
+                }
+            }
+
+            // 2.5) 主程序热更新动态目标：`T <generation> <usages>`。
+            if let Some(stream) = conn.as_mut() {
+                let mut chunk = [0u8; 1024];
+                match stream.read(&mut chunk) {
+                    Ok(0) => conn = None,
+                    Ok(n) => {
+                        read_buffer.extend_from_slice(&chunk[..n]);
+                        while let Some(pos) = read_buffer.iter().position(|byte| *byte == b'\n') {
+                            let raw: Vec<u8> = read_buffer.drain(..=pos).collect();
+                            let line = String::from_utf8_lossy(&raw[..raw.len().saturating_sub(1)]);
+                            if let Some(configured) = parse_bridge_target_line(&line, "T") {
+                                if let Ok(mut current) = targets.lock() {
+                                    *current = configured;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => conn = None,
                 }
             }
 
@@ -2225,6 +2366,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 }
             }
 
+            if conn.is_none() && had_connection {
+                had_connection = false;
+                if let Ok(mut current) = targets.lock() {
+                    current.usages.clear();
+                }
+                logger.kv(
+                    "[APP-BRIDGE]",
+                    &[("event", "disconnected_targets_cleared".into())],
+                );
+            }
+
             std::thread::sleep(Duration::from_millis(50));
         }
 
@@ -2237,7 +2389,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
-    fn spawn_app_bridge(path: Option<PathBuf>, logger: &Logger, follow_app: bool) -> Option<AppBridge> {
+    fn spawn_app_bridge(
+        path: Option<PathBuf>,
+        logger: &Logger,
+        follow_app: bool,
+    ) -> Option<AppBridge> {
         let path = path?;
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -2245,12 +2401,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 初值 = 进程启动时刻（不是 0）：主程序还没开时也要等满宽限期才退出，
         // 否则一启动就满足"很久没连上"而立刻自杀。
         let last_connected_ms = Arc::new(AtomicU64::new(now_ms_u64()));
+        let targets = Arc::new(Mutex::new(BridgeCaptureTargets::default()));
         let worker_logger = Logger::new(logger.path.clone());
         let worker_stop = Arc::clone(&stop);
         let worker_stats = Arc::clone(&stats);
         // 初值 = 进程启动时刻，而不是 0：这样"主程序还没开"也要等满宽限期才退出，
         // 否则一启动就满足"很久没连上"而立刻自杀。
         let worker_last = Arc::clone(&last_connected_ms);
+        let worker_targets = Arc::clone(&targets);
         let handle = std::thread::Builder::new()
             .name("rc003-app-bridge".to_owned())
             .spawn(move || {
@@ -2262,6 +2420,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     worker_logger,
                     worker_last,
                     follow_app,
+                    worker_targets,
                 )
             })
             .ok()?;
@@ -2271,6 +2430,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             stop,
             stats,
             last_connected_ms,
+            targets,
         })
     }
 
@@ -2376,7 +2536,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     fn run_task_command(cmd_args: Vec<String>, label: &str, logger: &Logger) -> bool {
-        match std::process::Command::new("schtasks").args(&cmd_args).output() {
+        match std::process::Command::new("schtasks")
+            .args(&cmd_args)
+            .output()
+        {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2393,13 +2556,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             if ok {
                                 stdout.lines().next().unwrap_or("").trim().to_string()
                             } else {
-                                format!(
-                                    "{} {}",
-                                    stderr.trim(),
-                                    stdout.trim()
-                                )
-                                .trim()
-                                .to_string()
+                                format!("{} {}", stderr.trim(), stdout.trim())
+                                    .trim()
+                                    .to_string()
                             },
                         ),
                     ],
@@ -2429,6 +2588,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// （`leaseOk()` 里 `if (disarmed ...) return false`）。不发 `arm`，
         /// 接管后心跳一切正常、`edges` 却永远不会出现——最容易被误判成"注入没成功"。
         config_sent: bool,
+        target_ack: Option<BridgeCaptureTargets>,
     }
 
     fn now_ms() -> u128 {
@@ -2492,7 +2652,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ("build", extract_str(line, "build").unwrap_or_default()),
                         ("mode", extract_str(line, "mode").unwrap_or_default()),
                         ("restore", extract_bool(line, "restore").to_string()),
-                        ("lease_ms", extract_num(line, "lease_ms").unwrap_or(0).to_string()),
+                        (
+                            "lease_ms",
+                            extract_num(line, "lease_ms").unwrap_or(0).to_string(),
+                        ),
                     ],
                 );
 
@@ -2505,7 +2668,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         &[
                             ("running", build),
                             ("embedded", AGENT_BUILD.to_string()),
-                            ("host_pid", extract_num(line, "pid").unwrap_or(0).to_string()),
+                            (
+                                "host_pid",
+                                extract_num(line, "pid").unwrap_or(0).to_string(),
+                            ),
                             (
                                 "note",
                                 "宿主里跑的是上一代脚本（本轮接管的是旧实例）。\
@@ -2531,10 +2697,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ("lease_ok", extract_bool(line, "lease_ok").to_string()),
                         ("handshake", extract_bool(line, "handshake").to_string()),
                         ("disarmed", extract_bool(line, "disarmed").to_string()),
-                        ("renew_age_ms", extract_num(line, "since_renew_ms").unwrap_or(0).to_string()),
+                        (
+                            "renew_age_ms",
+                            extract_num(line, "since_renew_ms").unwrap_or(0).to_string(),
+                        ),
                         ("stat", stat),
                     ],
                 );
+                if extract_bool(line, "lease_ok") {
+                    if let (Some(bridge), Some(ack)) = (bridge, session.target_ack.clone()) {
+                        bridge.push_ownership(ack);
+                    }
+                }
+            }
+            "targets_ack" => {
+                if !session.authenticated {
+                    return false;
+                }
+                let generation = extract_num(line, "generation").unwrap_or(0);
+                let usages = extract_num_array(line, "usages")
+                    .into_iter()
+                    .filter_map(|usage| u16::try_from(usage).ok())
+                    .collect::<Vec<_>>();
+                let ack = BridgeCaptureTargets { generation, usages };
+                session.target_ack = Some(ack);
+                // ACK 只证明目标配置已经应用；必须等下一条 lease_ok=true 的 HB
+                // 才能向主程序声明报告层所有权，避免 agent 尚未续约时过早关闭旧路径。
             }
             "edge" => {
                 if !session.authenticated {
@@ -2543,7 +2731,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 let buttons = extract_str_array(line, "buttons");
                 let usages = extract_num_array(line, "usages");
                 let note = if usages.is_empty() {
-                    format!("(释放) reason={}", extract_str(line, "reason").unwrap_or_default())
+                    format!(
+                        "(释放) reason={}",
+                        extract_str(line, "reason").unwrap_or_default()
+                    )
                 } else {
                     buttons.join("+")
                 };
@@ -2663,7 +2854,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             return Vec::new();
         };
         let mut out = Vec::new();
-        for part in value.trim().trim_start_matches('[').trim_end_matches(']').split(',') {
+        for part in value
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+        {
             let part = part.trim().trim_matches('"');
             if !part.is_empty() {
                 out.push(part.to_string());
@@ -2727,7 +2923,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("pid", std::process::id().to_string()),
                 ("port", args.port.to_string()),
                 ("runtime_dir", args.runtime_dir.display().to_string()),
-                ("target_pid", args.target_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into())),
+                (
+                    "target_pid",
+                    args.target_pid
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                ),
                 ("gadget_sha256", GADGET_SHA256.to_string()),
                 ("agent_sha256", agent_sha256_hex()),
             ],
@@ -2819,7 +3020,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let image = process_image_path(target_pid).unwrap_or_else(|| "?".to_string());
         logger.kv(
             "[HOST]",
-            &[("pid", target_pid.to_string()), ("exe", name.clone()), ("image", image)],
+            &[
+                ("pid", target_pid.to_string()),
+                ("exe", name.clone()),
+                ("image", image),
+            ],
         );
         if !name.eq_ignore_ascii_case("WUDFHost.exe") {
             logger.line(&format!(
@@ -2867,9 +3072,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if args.require_exclusive_host || args.force {
                     // 旧行为（--require-exclusive-host；--force 保持同义）：
                     // 共享宿主直接停止，不做任何注入。
-                    logger.line(
-                        "[STOP] 该宿主并非「独占 RC003」，且已显式要求独占宿主。",
-                    );
+                    logger.line("[STOP] 该宿主并非「独占 RC003」，且已显式要求独占宿主。");
                     std::process::exit(5);
                 }
                 logger.kv(
@@ -2898,10 +3101,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 std::process::exit(4);
             }
         };
-        logger.kv(
-            "[GADGET]",
-            &[("src", normalize_display(&gadget_src))],
-        );
+        logger.kv("[GADGET]", &[("src", normalize_display(&gadget_src))]);
         if let Err(e) = verify_gadget(&gadget_src, &logger) {
             logger.line(&format!("[STOP] {e}"));
             std::process::exit(6);
@@ -2939,7 +3139,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ),
             }
             if !args.canary_usages.is_empty() {
-                let clear = clear_usages(&args.canary_usages).unwrap_or_else(|_| TARGET_USAGES.to_vec());
+                let clear = clear_usages(&args.canary_usages)
+                    .unwrap_or_else(|_| DEFAULT_TARGET_USAGES.to_vec());
                 logger.kv(
                     "[DRY-RUN-CANARY]",
                     &[
@@ -2968,7 +3169,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         } else {
             logger.kv(
                 "[TOKEN]",
-                &[("source", "explicit".into()), ("value", mask_token(&args.token))],
+                &[
+                    ("source", "explicit".into()),
+                    ("value", mask_token(&args.token)),
+                ],
             );
         }
 
@@ -2989,13 +3193,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             if found.is_empty() {
                                 "-".into()
                             } else {
-                                found.iter().map(summarize_module).collect::<Vec<_>>().join("; ")
+                                found
+                                    .iter()
+                                    .map(summarize_module)
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
                             },
                         ),
                     ],
                 );
                 for m in &found {
-                    logger.line(&format!("    [TAP] path={}", normalize_display(Path::new(&m.path))));
+                    logger.line(&format!(
+                        "    [TAP] path={}",
+                        normalize_display(Path::new(&m.path))
+                    ));
                 }
                 // 归属核对：只有"从我们的运行时目录加载起来的"那份才可能是我们注入的。
                 // 名字相同但路径在别处 → 别人（或别的工具）也注入了 frida-gadget，明确说出来，
@@ -3051,7 +3262,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                      \x20 python hardware/RC003/probes/windows-restart-manager-probe.py C:\\ProgramData\\SayAll\\rc003-helper\\frida-gadget.dll\n\
                      本次仍可尝试实验性的并行注入（不保证，依赖 Frida 允许同进程双实例）：加 --new-generation。",
                 );
-                logger.line(&format!("[STOP] 退出码 13。旧世代 tap: {}", taps.iter().map(summarize_module).collect::<Vec<_>>().join("; ")));
+                logger.line(&format!(
+                    "[STOP] 退出码 13。旧世代 tap: {}",
+                    taps.iter()
+                        .map(summarize_module)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
                 std::process::exit(13);
             }
             Err(e) => {
@@ -3088,8 +3305,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ("event", "disabled".into()),
                         (
                             "note",
-                            "未启用：三键仍会被清空，但边沿不会转发，主程序侧映射不会触发"
-                                .into(),
+                            "未启用：三键仍会被清空，但边沿不会转发，主程序侧映射不会触发".into(),
                         ),
                     ],
                 );
@@ -3131,7 +3347,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ("action", "skip_injection".into()),
                         ("reason", "宿主里已有我们那一代 tap（令牌一致）".into()),
                         ("path", normalize_display(&prepared.dll)),
-                        ("note", "agent 会在 RECONNECT_MS 内自己连回来；连上后会补发 arm/mode/restore".into()),
+                        (
+                            "note",
+                            "agent 会在 RECONNECT_MS 内自己连回来；连上后会补发 arm/mode/restore"
+                                .into(),
+                        ),
                     ],
                 );
                 None
@@ -3144,10 +3364,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 }
             },
         };
-        logger.kv(
-            "[DLL]",
-            &dll_report_fields(&plan, &prepared),
-        );
+        logger.kv("[DLL]", &dll_report_fields(&plan, &prepared));
 
         // ---- 续约线程：清键许可的唯一来源 ----
         // 先装控制台处理器，让 Ctrl+C / 关窗走"置位 → 主循环收尾 → 发 disarm"，
@@ -3198,8 +3415,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     } else {
                         renew_counter.fetch_add(1, Ordering::Relaxed);
                         if tick % 10 == 0 {
-                            renew_logger
-                                .kv("[RENEW]", &[("tick", tick.to_string()), ("state", "ok".into())]);
+                            renew_logger.kv(
+                                "[RENEW]",
+                                &[("tick", tick.to_string()), ("state", "ok".into())],
+                            );
                         }
                     }
                 }
@@ -3207,8 +3426,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         });
 
         logger.line("");
-        logger.line("已武装。现在可以按遥控器：返回 / 音量+ / 音量- 都会以 [EDGE] 上报；");
-        logger.line("确定 / 主页 / 方向应保持 Windows 原生行为（本 spike 不碰它们）。");
+        logger.line(
+            "已武装。主程序会动态下发已配置按键；[CONFIG] / [HB] 的 report_usages 是当前实际目标。",
+        );
+        logger.line("未列入 report_usages 的按键保持 Windows 原生行为；语音键不参与本链路。");
         logger.line(&format!(
             "每 2 秒会打印一次 [HB] 心跳；Ctrl+C 或直接关掉本窗口结束\
              （会先给 agent 发 disarm；即使来不及，agent 也会在 {LEASE_MS} ms 租约到期后自行停止清键）。\
@@ -3241,6 +3462,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             lines: 0,
             authenticated: false,
             config_sent: false,
+            target_ack: None,
         };
         let mut last_hb_warn = Instant::now();
         // 是否曾经接到过**已鉴权**的 agent。注意不能用 `session.authenticated`：
@@ -3296,7 +3518,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
             if let Some(d) = deadline {
                 if Instant::now() >= d {
-                    logger.line(&format!("[TIMEUP] 已达 --duration {}s，开始收尾。", args.duration));
+                    logger.line(&format!(
+                        "[TIMEUP] 已达 --duration {}s，开始收尾。",
+                        args.duration
+                    ));
                     break;
                 }
             }
@@ -3315,6 +3540,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         lines: 0,
                         authenticated: false,
                         config_sent: false,
+                        target_ack: None,
                     };
                     if let Ok(mut guard) = shared.lock() {
                         *guard = Some(stream.try_clone().expect("clone stream"));
@@ -3353,7 +3579,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             {
                 logger.kv(
                     "[WARN]",
-                    &[("note", "超过 5 秒没有 agent 心跳（设备是否已断开？）".into())],
+                    &[(
+                        "note",
+                        "超过 5 秒没有 agent 心跳（设备是否已断开？）".into(),
+                    )],
                 );
                 last_hb_warn = Instant::now();
             }
@@ -3383,7 +3612,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let counts: BTreeSet<&str> = session
             .edges
             .iter()
-            .map(|e| e.split("buttons=").nth(1).unwrap_or("?").split(' ').next().unwrap_or("?"))
+            .map(|e| {
+                e.split("buttons=")
+                    .nth(1)
+                    .unwrap_or("?")
+                    .split(' ')
+                    .next()
+                    .unwrap_or("?")
+            })
             .collect();
         logger.line("");
         logger.kv(
@@ -3391,9 +3627,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             &[
                 ("uptime_s", started.elapsed().as_secs().to_string()),
                 ("agent_lines", session.lines.to_string()),
-                ("renews_sent", renew_count.load(Ordering::Relaxed).to_string()),
+                (
+                    "renews_sent",
+                    renew_count.load(Ordering::Relaxed).to_string(),
+                ),
                 ("edges", session.edges.len().to_string()),
-                ("distinct_buttons", counts.into_iter().collect::<Vec<_>>().join("|")),
+                (
+                    "distinct_buttons",
+                    counts.into_iter().collect::<Vec<_>>().join("|"),
+                ),
                 ("authenticated_ever", saw_authenticated.to_string()),
                 (
                     "app_bridge",
@@ -3454,10 +3696,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 唯一真正兜住的是 agent 侧租约（租约到期自动停止清键），不是这里。
     extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
         match ctrl_type {
-            CTRL_C_EVENT
-            | CTRL_BREAK_EVENT
-            | CTRL_CLOSE_EVENT
-            | CTRL_LOGOFF_EVENT
+            CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT
             | CTRL_SHUTDOWN_EVENT => {
                 CTRL_STOP.store(true, Ordering::Relaxed);
                 1 // 已处理：不让系统立刻终止，给主线程留出收尾时间
@@ -3500,17 +3739,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         observe: bool,
         restore: bool,
         canary: &[u16],
+        targets: &BridgeCaptureTargets,
     ) {
         // 清空集合 = 上报集合 ∪ 哨兵键。哨兵键把"清空到底有没有生效"变成外部可观测的实验
-        // （详见 `--canary-usage` 的说明）。配置有误时**不下发 targets**，agent 侧维持默认
-        // （恒等于三键），避免一条畸形命令把清空范围改坏。
-        let clear: Vec<u16> = match clear_usages(canary) {
-            Ok(v) => v,
-            Err(e) => {
-                logger.line(&format!("[WARN] 哨兵键配置无效，本次不下发 targets，agent 侧维持默认三键：{e}"));
-                TARGET_USAGES.to_vec()
+        // （详见 `--canary-usage` 的说明）。产品路径下目标来自主程序；无主程序时由
+        // 调用方显式传入历史三键默认值，agent 自身默认保持空集合（fail-open）。
+        let mut clear = targets.usages.clone();
+        for usage in canary {
+            if !clear.contains(usage) {
+                clear.push(*usage);
             }
-        };
+        }
         let lines = [
             format!("{{\"type\":\"arm\",\"token\":\"{token}\"}}\n"),
             format!(
@@ -3519,8 +3758,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
             format!("{{\"type\":\"restore\",\"token\":\"{token}\",\"on\":{restore}}}\n"),
             format!(
-                "{{\"type\":\"targets\",\"token\":\"{token}\",\"report\":[{}],\"clear\":[{}]}}\n",
-                usages_json(&TARGET_USAGES),
+                "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+                targets.generation,
+                usages_json(&targets.usages),
                 usages_json(&clear)
             ),
         ];
@@ -3548,9 +3788,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("restore_sent", sent[2].to_string()),
                 ("targets_sent", sent[3].to_string()),
                 ("flush", flush_ok.to_string()),
-                ("mode", if observe { "observe".into() } else { "clear".into() }),
+                (
+                    "mode",
+                    if observe {
+                        "observe".into()
+                    } else {
+                        "clear".into()
+                    },
+                ),
                 ("restore", restore.to_string()),
-                ("report_usages", usages_hex(&TARGET_USAGES)),
+                ("target_generation", targets.generation.to_string()),
+                ("report_usages", usages_hex(&targets.usages)),
                 ("clear_usages", usages_hex(&clear)),
                 (
                     "canary",
@@ -3560,9 +3808,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         usages_hex(canary)
                     },
                 ),
-                ("ack", "n/a（本协议无 ack）".into()),
+                ("ack", "pending".into()),
             ],
         );
+    }
+
+    fn send_dynamic_targets(
+        stream: &mut TcpStream,
+        token: &str,
+        targets: &BridgeCaptureTargets,
+    ) -> bool {
+        let line = format!(
+            "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+            targets.generation,
+            usages_json(&targets.usages),
+            usages_json(&targets.usages)
+        );
+        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
     }
 
     /// 服务一条 agent 连接。
@@ -3598,6 +3860,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
+        let mut sent_targets: Option<BridgeCaptureTargets> = None;
         loop {
             if stop_requested(stop) {
                 return;
@@ -3614,6 +3877,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             if let Some(d) = deadline {
                 if Instant::now() >= d {
                     return; // 主循环会打 [TIMEUP] 并收尾
+                }
+            }
+
+            if session.authenticated && session.config_sent {
+                if let Some(bridge) = bridge {
+                    let current = bridge.capture_targets();
+                    if sent_targets.as_ref() != Some(&current) {
+                        if !send_dynamic_targets(&mut stream, token, &current) {
+                            return;
+                        }
+                        sent_targets = Some(current);
+                        session.target_ack = None;
+                    }
                 }
             }
 
@@ -3636,7 +3912,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         }
                         if session.authenticated && !session.config_sent {
                             session.config_sent = true;
-                            send_session_config(&mut stream, logger, token, observe, restore, canary);
+                            let targets = bridge
+                                .map(|bridge| bridge.capture_targets())
+                                .unwrap_or_else(|| BridgeCaptureTargets {
+                                    generation: 0,
+                                    usages: DEFAULT_TARGET_USAGES.to_vec(),
+                                });
+                            send_session_config(
+                                &mut stream,
+                                logger,
+                                token,
+                                observe,
+                                restore,
+                                canary,
+                                &targets,
+                            );
+                            sent_targets = Some(targets);
                         }
                     }
                 }
@@ -3655,9 +3946,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         logger.kv(
             "[DISCONNECT]",
             &[
-                ("alive_s", session.connected_at.elapsed().as_secs().to_string()),
-                ("agent", extract_str(session.hello.as_deref().unwrap_or(""), "agent").unwrap_or_default()),
-                ("agent_pid", extract_num(session.hello.as_deref().unwrap_or(""), "pid").unwrap_or(0).to_string()),
+                (
+                    "alive_s",
+                    session.connected_at.elapsed().as_secs().to_string(),
+                ),
+                (
+                    "agent",
+                    extract_str(session.hello.as_deref().unwrap_or(""), "agent")
+                        .unwrap_or_default(),
+                ),
+                (
+                    "agent_pid",
+                    extract_num(session.hello.as_deref().unwrap_or(""), "pid")
+                        .unwrap_or(0)
+                        .to_string(),
+                ),
                 ("lines", session.lines.to_string()),
                 ("edges", session.edges.len().to_string()),
             ],
@@ -3680,7 +3983,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("instances_with_hostpid", entries.len().to_string()),
                 ("no_host", scan.no_host.to_string()),
                 ("read_failures", scan.failures.len().to_string()),
-                ("rc003_instances", entries.iter().filter(|e| e.is_rc003).count().to_string()),
+                (
+                    "rc003_instances",
+                    entries.iter().filter(|e| e.is_rc003).count().to_string(),
+                ),
             ],
         );
         for f in &scan.failures {
@@ -3688,7 +3994,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
 
         if let Some(pid) = args.target_pid {
-            logger.kv("[REG]", &[("note", "--target-pid 指定，跳过 RC003 定位".into())]);
+            logger.kv(
+                "[REG]",
+                &[("note", "--target-pid 指定，跳过 RC003 定位".into())],
+            );
             return Ok((pid, entries));
         }
 
@@ -3719,7 +4028,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if pids.len() > 1 {
             logger.kv(
                 "[STOP]",
-                &[("note", format!("定位到多个候选宿主 {pids:?}，请用 --target-pid 指定"))],
+                &[(
+                    "note",
+                    format!("定位到多个候选宿主 {pids:?}，请用 --target-pid 指定"),
+                )],
             );
             return Err(12);
         }
@@ -3762,7 +4074,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         for (input, expected) in vectors {
             let got = sha256_hex(input.as_bytes());
             check(
-                &format!("SHA-256 向量 {:?}", if input.is_empty() { "<empty>" } else { input }),
+                &format!(
+                    "SHA-256 向量 {:?}",
+                    if input.is_empty() { "<empty>" } else { input }
+                ),
                 got == expected,
                 format!("{got}（期望 {expected}）"),
             );
@@ -3771,7 +4086,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 2) mask_token：只脱敏紧跟在 `_` 之后的 12 位十六进制
         //    注意：设备实例名里的厂商段是大写（`PID&32b8`），脱敏后必须原样保留，
         //    断言须按实际大小写写，否则会误报（此前的 FAIL 就是这个测试自身的 bug）。
-        let device = "{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_A1B2C3D4E5F6";
+        let device =
+            "{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_A1B2C3D4E5F6";
         let masked = mask_token(device);
         check(
             "mask_token 只打掉蓝牙地址",
@@ -3816,7 +4132,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
             (
                 "取字符串数组 buttons",
-                extract_str_array(edge, "buttons") == vec!["back".to_string(), "volume_up".to_string()],
+                extract_str_array(edge, "buttons")
+                    == vec!["back".to_string(), "volume_up".to_string()],
                 format!("{:?}", extract_str_array(edge, "buttons")),
             ),
             (
@@ -3915,13 +4232,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 decode_host_pid(REG_QWORD, &qword_raw),
                 Some(32684),
             ),
-            ("DWORD 4 字节", decode_host_pid(REG_DWORD, &dword_raw), Some(1048)),
+            (
+                "DWORD 4 字节",
+                decode_host_pid(REG_DWORD, &dword_raw),
+                Some(1048),
+            ),
             (
                 "BINARY 8 字节按同宽度解",
                 decode_host_pid(REG_BINARY, &qword_raw),
                 Some(32684),
             ),
-            ("BINARY 2 字节应拒绝", decode_host_pid(REG_BINARY, &[1, 0]), None),
+            (
+                "BINARY 2 字节应拒绝",
+                decode_host_pid(REG_BINARY, &[1, 0]),
+                None,
+            ),
             (
                 "REG_SZ(1) 应拒绝（不得把字符串当数字）",
                 decode_host_pid(1, b"32684"),
@@ -4045,6 +4370,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         lines: 0,
                         authenticated: false,
                         config_sent: false,
+                        target_ack: None,
                     };
                     let quiet = Logger::new(None);
                     let stop = Arc::new(AtomicBool::new(false));
@@ -4104,11 +4430,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Ok(modules) => {
                 let self_exe = std::env::current_exe()
                     .ok()
-                    .map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+                    .map(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    })
                     .unwrap_or_default();
-                let saw_self = modules
-                    .iter()
-                    .any(|m| m.path.to_ascii_lowercase().ends_with(&self_exe.to_ascii_lowercase()));
+                let saw_self = modules.iter().any(|m| {
+                    m.path
+                        .to_ascii_lowercase()
+                        .ends_with(&self_exe.to_ascii_lowercase())
+                });
                 let taps = resident_taps(&modules);
                 check(
                     "模块枚举：阳性对照（本进程自身）与阴性对照（无 Gadget）",
@@ -4137,7 +4469,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ("frida-agent.dll", false),
             ("kernel32.dll", false),
         ];
-        let name_ok = name_cases.iter().all(|(n, want)| is_gadget_module(n) == *want);
+        let name_ok = name_cases
+            .iter()
+            .all(|(n, want)| is_gadget_module(n) == *want);
         check(
             "Gadget 模块名判据（含分代文件名与阴性例）",
             name_ok,
@@ -4166,18 +4500,59 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Generation,
         }
         let plan_cases: [PlanCase; 5] = [
-            ("无 tap → 规范化注入", false, false, false, false, PlanExpect::Ok(PlanKind::Canonical)),
-            ("有 tap + 令牌可接管 → 接管（不碰文件）", true, true, false, false, PlanExpect::Ok(PlanKind::Attach)),
-            ("有 tap + 令牌接不上 + 允许新世代 → 分代复制", true, false, false, true, PlanExpect::Ok(PlanKind::Generation)),
-            ("有 tap + 令牌接不上 + 禁止分代 → STALE-TAP", true, false, false, false, PlanExpect::Err("STALE-TAP")),
-            ("无 tap + --attach-only → 报错（不能装作已接管）", false, false, true, false, PlanExpect::Err("attach_only_no_tap")),
+            (
+                "无 tap → 规范化注入",
+                false,
+                false,
+                false,
+                false,
+                PlanExpect::Ok(PlanKind::Canonical),
+            ),
+            (
+                "有 tap + 令牌可接管 → 接管（不碰文件）",
+                true,
+                true,
+                false,
+                false,
+                PlanExpect::Ok(PlanKind::Attach),
+            ),
+            (
+                "有 tap + 令牌接不上 + 允许新世代 → 分代复制",
+                true,
+                false,
+                false,
+                true,
+                PlanExpect::Ok(PlanKind::Generation),
+            ),
+            (
+                "有 tap + 令牌接不上 + 禁止分代 → STALE-TAP",
+                true,
+                false,
+                false,
+                false,
+                PlanExpect::Err("STALE-TAP"),
+            ),
+            (
+                "无 tap + --attach-only → 报错（不能装作已接管）",
+                false,
+                false,
+                true,
+                false,
+                PlanExpect::Err("attach_only_no_tap"),
+            ),
         ];
         for (label, tap, tok, att, gen, want) in plan_cases {
             let got = decide_plan(tap, tok, att, gen);
             let (ok, detail) = match (&got, &want) {
-                (Ok(DllPlan::Canonical), PlanExpect::Ok(PlanKind::Canonical)) => (true, "Canonical".to_string()),
-                (Ok(DllPlan::Attach), PlanExpect::Ok(PlanKind::Attach)) => (true, "Attach".to_string()),
-                (Ok(DllPlan::Generation(_)), PlanExpect::Ok(PlanKind::Generation)) => (true, "Generation".to_string()),
+                (Ok(DllPlan::Canonical), PlanExpect::Ok(PlanKind::Canonical)) => {
+                    (true, "Canonical".to_string())
+                }
+                (Ok(DllPlan::Attach), PlanExpect::Ok(PlanKind::Attach)) => {
+                    (true, "Attach".to_string())
+                }
+                (Ok(DllPlan::Generation(_)), PlanExpect::Ok(PlanKind::Generation)) => {
+                    (true, "Generation".to_string())
+                }
                 (Err(e), PlanExpect::Err(want_tag)) => {
                     let matched = match *want_tag {
                         "STALE-TAP" => e == "STALE-TAP",
@@ -4205,7 +4580,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             dll_ok,
             dll_cases
                 .iter()
-                .map(|(e, m, want)| format!("exists={e} match={m} -> {:?}(期望{want:?})", dll_action(*e, *m)))
+                .map(|(e, m, want)| {
+                    format!(
+                        "exists={e} match={m} -> {:?}(期望{want:?})",
+                        dll_action(*e, *m)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -4219,7 +4599,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
 
         // 17) 令牌跨运行稳定 + 分代目录回收
-        let tmp = std::env::temp_dir().join(format!("rc003-helper-selftest-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("rc003-helper-selftest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         let quiet = Logger::new(None);
         let token_detail = |t1: &str, from1: bool, t2: &str, from2: bool, t3: Option<&str>| {
@@ -4238,20 +4619,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Ok((t1, from1)) => match load_or_create_token(&tmp, false, &quiet) {
                 Ok((t2, from2)) => match load_or_create_token(&tmp, true, &quiet) {
                     Ok((t3, from3)) => {
-                        let ok = !from1
-                            && from2
-                            && t1 == t2
-                            && !from3
-                            && t3 != t1
-                            && t3.len() == 32;
+                        let ok =
+                            !from1 && from2 && t1 == t2 && !from3 && t3 != t1 && t3.len() == 32;
                         let detail = token_detail(&t1, from1, &t2, from2, Some(&t3));
-                        check("令牌：首次生成 → 二次读到同一个 → --new-token 才换", ok, detail);
+                        check(
+                            "令牌：首次生成 → 二次读到同一个 → --new-token 才换",
+                            ok,
+                            detail,
+                        );
                     }
-                    Err(e) => check("令牌：首次生成 → 二次读到同一个 → --new-token 才换", false, e),
+                    Err(e) => check(
+                        "令牌：首次生成 → 二次读到同一个 → --new-token 才换",
+                        false,
+                        e,
+                    ),
                 },
-                Err(e) => check("令牌：首次生成 → 二次读到同一个 → --new-token 才换", false, e),
+                Err(e) => check(
+                    "令牌：首次生成 → 二次读到同一个 → --new-token 才换",
+                    false,
+                    e,
+                ),
             },
-            Err(e) => check("令牌：首次生成 → 二次读到同一个 → --new-token 才换", false, e),
+            Err(e) => check(
+                "令牌：首次生成 → 二次读到同一个 → --new-token 才换",
+                false,
+                e,
+            ),
         }
 
         let keep_dir = tmp.join("gen-aaaaaaaa");
@@ -4371,7 +4764,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
         check(
             "清空集合：默认=三键；追加哨兵键后三键仍在前；与三键重叠必须报错",
-            matches!(&cu_default, Ok(v) if v.as_slice() == TARGET_USAGES.as_slice())
+            matches!(&cu_default, Ok(v) if v.as_slice() == DEFAULT_TARGET_USAGES.as_slice())
                 && matches!(&cu_canary, Ok(v)
                     if v.len() == 4 && v[0] == 0x00F1 && v[3] == 0x004A)
                 && cu_overlap.is_err(),
@@ -4392,11 +4785,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         //     但内联的还是旧的"只可能发生在**改错文件**时——真机表现是"命令发了没人认"，
         //     极难从日志看出来（一切握手正常，只是按键永久不可见）。这条就是防它。
         check(
-            "内嵌 agent：三键常量与 helper 一致，且含 targets 命令与两个集合",
-            AGENT_JS.contains("var TARGET_USAGES = [0x00F1, 0x0080, 0x0081]")
+            "内嵌 agent：全按键白名单与动态 targets 协议存在",
+            AGENT_JS.contains("0x00F1, 0x0028, 0x0035, 0x004A")
                 && AGENT_JS.contains("if (cmd.type === 'targets')")
-                && AGENT_JS.contains("var reportUsages = TARGET_USAGES.slice();")
-                && AGENT_JS.contains("var clearUsages = TARGET_USAGES.slice();")
+                && AGENT_JS.contains("var reportUsages = [];")
+                && AGENT_JS.contains("var clearUsages = [];")
+                && AGENT_JS.contains("type: 'targets_ack'")
                 && AGENT_JS.contains("reportUsages.indexOf(u) >= 0")
                 && AGENT_JS.contains("clearUsages.indexOf(u) < 0"),
             format!("agent_sha256={}", agent_sha256_hex()),
@@ -4415,9 +4809,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 && AGENT_JS.contains("function shouldTouchReport(")
                 && AGENT_JS.contains("if (!shouldTouchReport(bytes)) return;")
                 && AGENT_JS.contains("stat.canary_hits++;"),
-            format!("has_clearSetIn={} has_gate={}",
+            format!(
+                "has_clearSetIn={} has_gate={}",
                 AGENT_JS.contains("function clearSetIn("),
-                AGENT_JS.contains("if (!shouldTouchReport(bytes)) return;")),
+                AGENT_JS.contains("if (!shouldTouchReport(bytes)) return;")
+            ),
         );
 
         // 23c) agent 代次必须与内嵌脚本一致，否则 [AGENT-STALE] 形同虚设：
@@ -4432,7 +4828,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 24) 桥接描述文件解析（捕获链第 ② 段）。解析错一处，现象是
         //     "主程序在跑、助手也在跑，但三键就是不动"——日志上只有 APP-BRIDGE unavailable，
         //     而那是一条折叠日志，本身不会告诉你是哪一项不匹配。逐项钉住。
-        let good = "version=1\nport=53124\ntoken=deadbeefcafe\npid=999\n";
+        let good = "version=2\nport=53124\ntoken=deadbeefcafe\npid=999\n";
         let parsed = parse_bridge_descriptor(good);
         check(
             "桥接描述文件：正常解析",
@@ -4453,15 +4849,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 这是阳性对照：若解析器忽略 version，这条必然 FAIL。
         check(
             "桥接描述文件：版本不符必须整份拒绝",
-            parse_bridge_descriptor("version=2\nport=53124\ntoken=abc\n").is_none()
+            parse_bridge_descriptor("version=1\nport=53124\ntoken=abc\n").is_none()
                 && parse_bridge_descriptor("port=53124\ntoken=abc\n").is_none(),
-            "version=2 与缺 version 均应返回 None".to_string(),
+            "version=1 与缺 version 均应返回 None".to_string(),
         );
         check(
             "桥接描述文件：缺令牌或缺端口必须拒绝",
-            parse_bridge_descriptor("version=1\nport=53124\n").is_none()
-                && parse_bridge_descriptor("version=1\ntoken=abc\n").is_none()
-                && parse_bridge_descriptor("version=1\nport=53124\ntoken=\n").is_none(),
+            parse_bridge_descriptor("version=2\nport=53124\n").is_none()
+                && parse_bridge_descriptor("version=2\ntoken=abc\n").is_none()
+                && parse_bridge_descriptor("version=2\nport=53124\ntoken=\n").is_none(),
             "缺 token / 缺 port / 空 token 三种都应拒绝".to_string(),
         );
 
@@ -4508,7 +4904,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let _ = fs::create_dir_all(&probe_dir);
         let probe_absent = probe_bridge_descriptor(&probe_dir.join("nope.ini"));
         let probe_file = probe_dir.join("rc003-bridge.ini");
-        let _ = fs::write(&probe_file, "version=1\nport=53124\ntoken=deadbeef\npid=1\n");
+        let _ = fs::write(
+            &probe_file,
+            "version=2\nport=53124\ntoken=deadbeef\npid=1\n",
+        );
         let probe_ok = probe_bridge_descriptor(&probe_file);
         let _ = fs::write(&probe_file, "version=9\nport=53124\ntoken=deadbeef\n");
         let probe_invalid = probe_bridge_descriptor(&probe_file);
@@ -4528,7 +4927,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         //     两类原因必须能分开，且"文件不存在"必须把**路径**一起带出来。
         let quiet_logger = Logger::new(None);
         let missing_path = probe_dir.join("definitely-missing.ini");
-        let err_unknown = bridge_connect(None, &quiet_logger).err().unwrap_or_default();
+        let err_unknown = bridge_connect(None, &quiet_logger)
+            .err()
+            .unwrap_or_default();
         let err_missing = bridge_connect(Some(&missing_path), &quiet_logger)
             .err()
             .unwrap_or_default();
@@ -4568,6 +4969,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 lines: 0,
                                 authenticated: false,
                                 config_sent: false,
+                                target_ack: None,
                             };
                             let quiet = Logger::new(None);
                             let stop = Arc::new(AtomicBool::new(false));
@@ -4674,7 +5076,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         logger.line("");
         logger.line(&format!(
             "结论: {}",
-            if all_ok { "全部通过" } else { "存在失败项" }
+            if all_ok {
+                "全部通过"
+            } else {
+                "存在失败项"
+            }
         ));
         all_ok
     }
@@ -4697,7 +5103,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             dir.join("frida-gadget.dll"),
             dir.join("vendor").join("frida-gadget.dll"),
             // 开发布局：target/release/rc003-helper.exe → helper/vendor/frida-gadget.dll
-            dir.join("..").join("..").join("vendor").join("frida-gadget.dll"),
+            dir.join("..")
+                .join("..")
+                .join("vendor")
+                .join("frida-gadget.dll"),
         ];
         // 以当前工作目录为基准（从 helper/ 或仓库根直接调用 exe 时）
         if let Ok(cwd) = std::env::current_dir() {
@@ -4710,7 +5119,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 校验 Gadget 的 SHA-256。锁定值来自 `vendor/frida-gadget.lock.json`，
     /// 这里是编译期常量——改版本必须同时改锁定文件与本常量（见 ATTRIBUTION.md 登记）。
     fn verify_gadget(path: &Path, logger: &Logger) -> Result<(), String> {
-        let bytes = fs::read(path).map_err(|e| format!("读取 Gadget 失败 {}: {e}", path.display()))?;
+        let bytes =
+            fs::read(path).map_err(|e| format!("读取 Gadget 失败 {}: {e}", path.display()))?;
         let digest = sha256_hex(&bytes);
         logger.kv(
             "[VERIFY]",
@@ -4834,7 +5244,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-09-26.canary-gate";
+    const AGENT_BUILD: &str = "2026-09-27.dynamic-all-key";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
