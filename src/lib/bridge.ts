@@ -585,6 +585,12 @@ export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {
  */
 export interface Rc003TaskStatus {
   installed: boolean;
+  /**
+   * 这次打开开关会触发系统授权（UAC）：任务未注册，或安装/升级写下了
+   * 重授权标记（重装后任务删不掉，标记是授权应撤销的唯一凭证）。
+   * 与 Rust enable_capture 的判定同源；前端据此决定开启前要不要先弹确认。
+   */
+  authorizationRequired: boolean;
   /** 用户意图（持久化，默认关闭）。开关显示读它，而不是读 installed。 */
   enabled: boolean;
   helperPath: string | null;
@@ -597,21 +603,21 @@ export interface Rc003TaskStatus {
  */
 export async function getRc003TaskStatus(): Promise<Rc003TaskStatus> {
   if (typeof window === "undefined" || !isTauriRuntime()) {
-    return { installed: false, enabled: false, helperPath: null, lastError: null };
+    return { installed: false, authorizationRequired: true, enabled: false, helperPath: null, lastError: null };
   }
   return invoke<Rc003TaskStatus>("get_rc003_task_status");
 }
 
 export async function enableRc003Capture(): Promise<Rc003TaskStatus> {
   if (typeof window === "undefined" || !isTauriRuntime()) {
-    return { installed: false, enabled: false, helperPath: null, lastError: null };
+    return { installed: false, authorizationRequired: true, enabled: false, helperPath: null, lastError: null };
   }
   return invoke<Rc003TaskStatus>("enable_rc003_capture");
 }
 
 export async function disableRc003Capture(): Promise<Rc003TaskStatus> {
   if (typeof window === "undefined" || !isTauriRuntime()) {
-    return { installed: false, enabled: false, helperPath: null, lastError: null };
+    return { installed: false, authorizationRequired: true, enabled: false, helperPath: null, lastError: null };
   }
   return invoke<Rc003TaskStatus>("disable_rc003_capture");
 }

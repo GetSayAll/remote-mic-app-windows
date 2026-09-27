@@ -17,13 +17,27 @@ pub const SCHEDULED_TASK_NAME: &str = "SayAll RC003 Helper";
 /// `enabled` = 用户意图（持久化在设置里，默认关闭）。
 /// 两者是**不同的状态**：关闭开关只结束助手、任务保留（授权保留），
 /// 所以开关显示读 `enabled`，绝不能读 `installed`。
+///
+/// `authorization_required` = **这次打开开关会触发系统授权（UAC）**，
+/// 与 `enable_capture` 内部的判定同源（见 [`authorization_needed`]）：
+/// 任务未注册，或安装/升级写下了重授权标记（重装后任务删不掉，标记是
+/// 授权应撤销的唯一凭证）。前端用它决定「开启前要不要先弹确认弹窗」——
+/// 不能只看 `installed`：重装后任务其实还在，但那次开启照样要弹 UAC。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatus {
     pub installed: bool,
+    pub authorization_required: bool,
     pub enabled: bool,
     pub helper_path: Option<String>,
     pub last_error: Option<String>,
+}
+
+/// 「这次打开开关会触发系统授权（UAC）」的纯判据，
+/// 与 `enable_capture` 的 `force_install || !task_installed()` 同源：
+/// 任务未注册，或重授权标记在。两处必须走同一个函数，防止判定漂移。
+fn authorization_needed(installed: bool, reauth_marker: bool) -> bool {
+    reauth_marker || !installed
 }
 
 /// 定位助手 exe。三种布局按序尝试：
@@ -185,7 +199,7 @@ pub fn enable_capture() -> Result<(), String> {
     // 提权进程创建的任务普通权限删不掉（真机实测），标记是"授权已应撤销"
     // 的唯一可靠凭证；重装走 UAC，用户点了「是」才算重新授权。
     let force_install = reauth_required();
-    if force_install || !task_installed() {
+    if authorization_needed(task_installed(), force_install) {
         // 重授权成功的判据**不能是退出码**：PowerShell 5.1 对 UAC 取消的
         // 非终止性错误即使加了 -ErrorAction Stop 也可能退出 0（真机实测
         // 两次 passed 且任务 Date 未变）。硬判据是「任务的注册时间真的
@@ -299,8 +313,10 @@ fn extract_task_date(xml: &str) -> Option<String> {
 /// `enabled` 来自持久化的用户意图（AppSettings.rc003_capture_enabled），
 /// **不是**"任务是否存在"——两者是不同的状态（见 TaskStatus 注释）。
 pub fn status(enabled: bool) -> TaskStatus {
+    let installed = task_installed();
     TaskStatus {
-        installed: task_installed(),
+        installed,
+        authorization_required: authorization_needed(installed, reauth_required()),
         enabled,
         helper_path: locate_helper_exe().map(|p| p.display().to_string()),
         last_error: None,
@@ -381,5 +397,24 @@ mod tests {
             Some("2026-09-24T20:27:20".to_string())
         );
         assert_eq!(extract_task_date("<Task></Task>"), None);
+    }
+
+    #[test]
+    fn authorization_needed_covers_all_four_states() {
+        // 与 enable_capture 的授权判定同源（前端弹确认弹窗读同一判据）：
+        // 任务不在 → 要授权；重授权标记在（升级/重装后，任务可能还在）→ 也要授权。
+        assert!(authorization_needed(false, false), "任务未注册：要授权");
+        assert!(
+            authorization_needed(false, true),
+            "任务未注册且标记在：要授权"
+        );
+        assert!(
+            authorization_needed(true, true),
+            "升级/重装后任务删不掉但标记在：仍要授权（正是重装后必须再弹的那次）"
+        );
+        assert!(
+            !authorization_needed(true, false),
+            "任务在且无标记：授权保留，开启不触发 UAC"
+        );
     }
 }
