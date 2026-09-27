@@ -170,9 +170,10 @@ mod windows_impl {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetTimer, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-        LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
+        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetTimer,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+        LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT,
+        WM_TIMER,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -223,6 +224,8 @@ mod windows_impl {
     };
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
     static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
+    /// 链头 bump 请求计数（功能点日志/测试观测：录入开始必须发起一次 bump）。
+    static HOOK_BUMP_REQUESTS: AtomicU64 = AtomicU64::new(0);
     /// 被吞键盘边沿的投递端（映射引擎注册；闭包形式避免模块间类型耦合）。
     static EDGE_SINK: OnceLock<Arc<dyn Fn(ButtonEdge) + Send + Sync>> = OnceLock::new();
     static SHORTCUT_CAPTURE_SINK: OnceLock<super::ShortcutCaptureCallback> = OnceLock::new();
@@ -665,11 +668,38 @@ mod windows_impl {
         let _ = SHORTCUT_CAPTURE_SINK.set(sink);
     }
 
+    /// 请求把本钩子重新安装到 LL 链头（先挂新钩再卸旧钩，无吞键空窗）。
+    ///
+    /// 为什么录入开始必须 bump：微信输入法等目标会在本应用之后（重）安装自己的
+    /// WH_KEYBOARD_LL 钩子（IME 在输入焦点变化时重建钩子），其语音和弦判定
+    /// 先于本钩子看到物理边沿。当录入的组合恰好等于 IME 的语音和弦（实测
+    /// 2026-09-27：按住说话快捷键=左Alt+左Win 时重录该组合），IME 会把完成键
+    /// 的 DOWN/UP 整对吞掉——本钩子完全看不到 LeftWindows 边沿，前端只按
+    /// 先松开的单个修饰键落盘（"只剩左 Alt"）。录入开始时 bump 到链头，
+    /// 本钩子先于所有外部钩子成对吞下并投递录入通道；IME 在录入期间看不到
+    /// 任何按键，也不会误触发语音。
+    pub fn request_hook_bump() {
+        HOOK_BUMP_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
+        if thread_id != 0 {
+            unsafe {
+                let _ = PostThreadMessageW(thread_id as u32, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
+    pub fn hook_bump_request_count() -> u64 {
+        HOOK_BUMP_REQUESTS.load(Ordering::Relaxed)
+    }
+
     pub fn set_shortcut_capture_active(active: bool) -> bool {
         if active && !GATE_ACTIVE.load(Ordering::Relaxed) {
             return false;
         }
         if active {
+            // 先把钩子提到链头再开录入：物理边沿必须先经过本钩子（见
+            // request_hook_bump 文档），否则与 IME 语音和弦相同的组合录不全。
+            request_hook_bump();
             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
             for (vk, slot) in SHORTCUT_CAPTURE_PREHELD.iter().enumerate() {
                 let down = unsafe { GetAsyncKeyState(vk as i32) } < 0;
@@ -700,10 +730,11 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, configure, decide, is_gate_thread_alive, leaked_down_count, listener_active,
-    set_edge_sink, set_listener_active, set_persistent_mask, set_remote_connected,
-    set_shortcut_capture_active, set_shortcut_capture_sink, swallowed_edge_count, KeyGate,
-    HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    arm_button, configure, decide, hook_bump_request_count, is_gate_thread_alive,
+    leaked_down_count, listener_active, request_hook_bump, set_edge_sink, set_listener_active,
+    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
+    set_shortcut_capture_sink, swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE,
+    HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -936,6 +967,19 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_start_requests_hook_bump() {
+        // request_hook_bump 不依赖钩子线程存在（thread_id=0 时只计数不投递）：
+        // 录入开始的链头提升请求必须始终可观测（2026-09-27 IME 和弦吞边沿修复）。
+        // 注意：本套件另有测试并发启动真实门控（GATE_ACTIVE 为进程级全局），
+        // 故此处不断言 set_shortcut_capture_active 的门控拒绝路径，避免
+        // 跨测试全局状态串扰；拒绝路径本身未被本次修改。
+        let before = hook_bump_request_count();
+        request_hook_bump();
+        assert_eq!(hook_bump_request_count(), before + 1);
     }
 
     #[cfg(not(windows))]
