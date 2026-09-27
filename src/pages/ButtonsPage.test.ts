@@ -246,6 +246,9 @@ function captureRow(page: VueWrapper) {
     .filter((row) => row.text().includes("全按键支持"))[0];
 }
 
+/** 2026-09-27 用户定稿：三键的提示与悬停提示共用同一句话。 */
+const TRI_KEY_HINT = "返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
+
 /** 三键捕获开启前的确认弹窗（未弹出时为 undefined）。 */
 function confirmDialog(page: VueWrapper) {
   return page
@@ -698,8 +701,9 @@ describe("buttons mapping page", () => {
     await rc003Back.trigger("click");
     await vi.waitFor(
       () => {
-        expect(rc003.find(".capability-note").text()).toContain(
-          "需先开启「全按键支持」开关",
+        // 2026-09-27 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
+        expect(rc003.find(".capability-note").text()).toBe(
+          `提示：${TRI_KEY_HINT}`,
         );
       },
       { timeout: 4000 },
@@ -840,9 +844,7 @@ describe("全按键支持开启前确认弹窗", () => {
     await openCaptureToggle(page);
 
     // 悬停提示（2026-09-27 用户定稿）：只说哪三个键、需要开启。
-    expect(captureRow(page)!.attributes("title")).toBe(
-      "返回/音量+/音量-三个键需要开启此功能才能使用。",
-    );
+    expect(captureRow(page)!.attributes("title")).toBe(TRI_KEY_HINT);
 
     const checkbox = captureRow(page)!.find('input[type="checkbox"]');
     (checkbox.element as HTMLInputElement).checked = true;
