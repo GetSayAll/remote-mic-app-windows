@@ -1,7 +1,7 @@
 # 全按键支持开关显示已开启但所有按键边沿被主程序丢弃（动态目标集从未下发）
 
 - 发现日期：2026-09-28
-- 状态：已定位根因，待修复
+- 状态：已修复（0ff8561），等待真机验证
 - 影响范围：SayAll 0.3.0（source_revision=d5bd0ca，2026-09-28 安装版）；RC003 全按键支持（enhanced capture）整条桥接链路；0.2.6 及更早版本不受影响
 - 功能点：RC003 全按键支持（`rc003_bridge` 动态捕获目标下发）
 - 现象：安装 0.3.0 后，按键页「全按键支持」开关显示已开启，助手（helper）进程正常拉起并完成桥接鉴权，但遥控器按键在应用内完全无响应。
@@ -82,10 +82,15 @@ fn set_enhanced_capture_enabled(&self, enabled: bool) {
 
 ## 验证
 
-- 单元：待实施（见上）。
+- 单元：`enhanced_capture_enable_pushes_targets_and_disable_clears` passed（0ff8561，
+  离线驱动完整链路；enable 后目标集含 0x00F1、disable 清空、原子量与 enabled 位同步）。
+  `cargo test -p sayall-windows --lib` 与 `cargo test -p sayall-windows-app --lib`（38 项）passed；
+  `cargo fmt --check`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
+  （`silence_watchdog` / `leak_suppression_suite` 偶发计时 flake 在未改动的 main 基线同样复现，
+  与本修复无关。）
 - 真机：`deferred`——需 RC003 实机验收：开启后日志出现 `targets_changed enabled=true usages=…`
   与 `first_edge`，三键与已映射按键动作生效；关闭后 `targets_changed enabled=false` 且旧路径恢复。
-- 安装包：`deferred`——从干净 main 重出后安装，核对 `reason=invalid` 消失、关键二进制哈希
+- 安装包：`deferred`——从干净分支重出后安装，核对 `reason=invalid` 消失、关键二进制哈希
   （NSIS 静默安装遇占用文件会静默跳过）。
 
 ## 隐私检查
