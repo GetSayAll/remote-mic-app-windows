@@ -101,7 +101,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from wudf_host_probe import probe_open_denied, scan_hosts  # noqa: E402
+from wudf_host_probe import (  # noqa: E402
+    enable_se_debug_privilege,
+    probe_open_denied,
+    scan_hosts,
+)
 from ll_flag_logger import (  # noqa: E402
     LLKeyWatcher,
     count_pairs,
@@ -126,6 +130,12 @@ VK_F13 = 0x7C
 TRIGGER_USAGE = 0x004A   # 主页
 SYNTH_USAGE = 0x00E2     # Keyboard RightAlt
 HOLD_MS = 200            # S 阶段 SendInput 按住时长
+
+# 2026-09-28 run5 实测（evidence/synth-doubao-2026-09-28-run5.log）：
+# usage 槽位里的 0x00E2 经 kbdhid 翻译后**不带扩展前缀**，win32k 按普通
+# 0x38 扫描码映射成 VK_LMENU(0xA4)，而不是 VK_RMENU(0xA5)。判定与自检
+# 必须盯这个实际产出的 VK；S 对照 SendInput 注入的是真 0xA5，不受影响。
+SYNTH_VK_ON_STACK = 0xA4
 
 USAGE_NAMES = {
     0x00E0: "LeftCtrl", 0x00E1: "LeftShift", 0x00E2: "RightAlt",
@@ -157,7 +167,12 @@ _log_file: Path | None = None
 
 
 def log(message: str = "") -> None:
-    print(message, flush=True)
+    # 控制台只是给人看的；窗口被提前关闭/编码炸了都不能打死采集过程，
+    # 判据只认 --out 落盘文件。
+    try:
+        print(message, flush=True)
+    except OSError:
+        pass
     _log_lines.append(message)
     if _log_file is not None:
         _log_file.write_text("\n".join(_log_lines) + "\n", encoding="utf-8")
@@ -362,9 +377,9 @@ def verdict(taps: list[dict], lls: list[dict],
             key = f"0x{e['vk']:02X}{'↑' if e['up'] else '↓'}"
             summary[key] = summary.get(key, 0) + 1
         flag = ""
-        rmenu = [e for e in seg if e["vk"] == VK_RMENU]
-        if rmenu:
-            flag = f"   VK_RMENU injected={[int(e['injected']) for e in rmenu]}"
+        synth_keys = [e for e in seg if e["vk"] in (VK_RMENU, SYNTH_VK_ON_STACK)]
+        if synth_keys:
+            flag = f"   Alt 系 injected={[int(e['injected']) for e in synth_keys]}"
         log(f"  {name:<5} 事件 {len(seg):>3}  "
             + ("  ".join(f"{k}×{v}" for k, v in summary.items()) or "（无）") + flag)
 
@@ -407,15 +422,16 @@ def verdict(taps: list[dict], lls: list[dict],
     for name in ("S", "B"):
         if name not in active_set:
             continue
-        info = count_pairs(_phase_ll(lls, name, VK_RMENU), VK_RMENU)
+        vk = VK_RMENU if name == "S" else SYNTH_VK_ON_STACK
+        info = count_pairs(_phase_ll(lls, name, vk), vk)
         pair_info[name] = info
-        log(f"  {name:<5} VK_RMENU 按下={info['downs']} 释放={info['ups']} "
+        log(f"  {name:<5} 0x{vk:02X} 按下={info['downs']} 释放={info['ups']} "
             f"配对={info['pairs']} autorepeat={info['repeats']} "
             f"孤立释放={info['stray_up']} 结束时仍按住={info['stuck']}")
 
     a_home = _phase_ll(lls, "A", VK_HOME)
     s_rmenu = _phase_ll(lls, "S", VK_RMENU)
-    b_rmenu = _phase_ll(lls, "B", VK_RMENU)
+    b_synth = _phase_ll(lls, "B", SYNTH_VK_ON_STACK)
     b_home = _phase_ll(lls, "B", VK_HOME)
     c_home = _phase_ll(lls, "C", VK_HOME)
     b_info = pair_info.get("B", {"stuck": False, "pairs": 0, "stray_up": 0})
@@ -426,8 +442,8 @@ def verdict(taps: list[dict], lls: list[dict],
         "A_handle_bound": dominant_bound >= 1,
         "S_synth_key_seen": len(s_rmenu) >= 1,
         "S_injected_flag_seen": any(e["injected"] for e in s_rmenu),
-        "B_synth_key_seen": len(b_rmenu) >= 1,
-        "B_not_injected": any(not e["injected"] for e in b_rmenu),
+        "B_synth_key_seen": len(b_synth) >= 1,
+        "B_not_injected": any(not e["injected"] for e in b_synth),
         "B_home_suppressed": len(b_home) == 0,
         "B_edges_paired": bool(b_info["pairs"] >= 1 and not b_info["stuck"]
                                and b_info["stray_up"] == 0),
@@ -439,8 +455,9 @@ def verdict(taps: list[dict], lls: list[dict],
         "A_handle_bound": "A 对照：已按 FileHandle 绑定到单一来源（设备维度成立）",
         "S_synth_key_seen": "S 对照：SendInput 的右 Alt 被观测到",
         "S_injected_flag_seen": "S 对照：SendInput 的按键带 injected=1（观测器有分辨力）",
-        "B_synth_key_seen": "B 被测：报告层产出 VK_RMENU",
-        "B_not_injected": "B 被测：该 VK_RMENU 的 injected=0（**核心**）",
+        "B_synth_key_seen": f"B 被测：报告层产出 0x{SYNTH_VK_ON_STACK:02X}"
+                            f"（0x{SYNTH_USAGE:04X} 实测映射为 VK_LMENU）",
+        "B_not_injected": "B 被测：合成键 injected=0（**核心**）",
         "B_home_suppressed": "B 被测：原主页键已被替换（无 VK_HOME）",
         "B_edges_paired": "B 被测：按下/释放严格配对（无粘键）",
         "C_restored": "C 对照：解除武装后主页键恢复",
@@ -492,10 +509,11 @@ def verdict(taps: list[dict], lls: list[dict],
                 log(f"说明: 有 {len(b_entered)} 次 IOCTL 命中，但没有一份含 {TRIGGER_USAGE:#06x}。")
                 log("      通常是阶段 B 没按到主页键——采集缺失，重跑即可。")
                 return results, 12
-            log("\n判定: substitute_not_mapped（报告已改写，LL 侧没有 VK_RMENU）")
+            log("\n判定: substitute_not_mapped（报告已改写，LL 侧没有合成键）")
             log(f"说明: 阶段 B 命中 {_enters(taps, 'B')} 次、改写 {_mutations(taps, 'B')} 次，")
-            log(f"      但 Windows 侧没有 {USAGE_NAMES.get(SYNTH_USAGE)}。"
-                "即 usage 0x00E2 在本机 kbdhid 路径上未映射到 VK_RMENU。")
+            log(f"      但 Windows 侧既没有 0x{SYNTH_VK_ON_STACK:02X}（0x{SYNTH_USAGE:04X} 在本栈的实测映射）"
+                f"也没有 0x{VK_RMENU:02X}。")
+            log("      即该 usage 在本机 kbdhid 路径上未映射成任何键——")
             log("      这是**技术结论**而非故障：替换 usage 必须逐键实测。")
             return results, 9
         if not results["B_not_injected"]:
@@ -524,7 +542,7 @@ def verdict(taps: list[dict], lls: list[dict],
     log(f"说明: 同一次运行里，A（真实按键）读到 injected=0、S（SendInput）读到 injected=1，")
     log(f"      证明观测器具备双向分辨力；B（报告层把主页 {TRIGGER_USAGE:#06x} 改成 "
         f"{SYNTH_USAGE:#06x}）"
-        f"读到的 VK_RMENU 是 injected=0，")
+        f"读到的合成键 0x{SYNTH_VK_ON_STACK:02X} 是 injected=0，")
     log(f"      且按下/释放严格配对——即它在 Windows 输入流中与物理按键不可区分。")
     log(f"      这意味着豆包那条唯一门槛（LLKHF_INJECTED 检查）不成立。")
     if active_set != set(phases):
@@ -594,10 +612,10 @@ def _synth_log(*, with_home: bool = True, s_flagged: bool = True,
     tap(20000, "B", "rewrite", home_down, "010000e20000000000", True,
         handle=b_handle, write_err=b_err)
     if b_keys and not wrong_device:
-        ll(20000, "B", VK_RMENU, injected=b_injected)
-        ll(20450, "B", VK_RMENU, injected=b_injected)   # autorepeat
+        ll(20000, "B", SYNTH_VK_ON_STACK, injected=b_injected)
+        ll(20450, "B", SYNTH_VK_ON_STACK, injected=b_injected)   # autorepeat
         if not b_stuck:
-            ll(20500, "B", VK_RMENU, up=True, injected=b_injected)
+            ll(20500, "B", SYNTH_VK_ON_STACK, up=True, injected=b_injected)
     tap(26000, "C", "observe", home_down, handle="h0")
     if c_home:
         ll(26000, "C", VK_HOME)
@@ -688,13 +706,25 @@ def run(scale: float, out: Path | None, do_watch: bool,
 
     log("\n--- 步骤 2/5：提权与可注入性自检 ---")
     admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-    denied = probe_open_denied(host_pid)
+    # 2026-09-28 阶梯诊断实证：WUDFHost 的 DACL 连提权进程的
+    # PROCESS_QUERY_LIMITED_INFORMATION 都拒绝（err=5），必须先启用
+    # SeDebugPrivilege（管理员令牌默认携带但处于 disabled 态）；frida 能
+    # attach 正是因为它的 helper 自己开了这个特权。
+    se_ok, se_err = enable_se_debug_privilege()
     log(f"  当前进程管理员令牌: {admin}")
-    log(f"  OpenProcess(目标宿主) 被拒: {denied}")
-    if not (admin and not denied):
+    log(f"  SeDebugPrivilege 启用: {se_ok} (err={se_err})")
+    denied = probe_open_denied(host_pid)
+    log(f"  OpenProcess(QUERY_LIMITED) 目标宿主被拒: {denied}")
+    if not admin:
         log("判定: elevation_required")
-        log("说明: 宿主位于 session 0，普通权限 OpenProcess 返回 err=5。")
+        log("说明: 普通令牌对 session 0 的 WUDFHost 没有任何访问权。")
         log("      请用「以管理员身份运行」的终端重跑本脚本。")
+        return 3
+    if denied:
+        log("判定: elevation_required")
+        log(f"说明: 管理员令牌下宿主仍被拒。SeDebugPrivilege 启用={se_ok} "
+            f"(err={se_err}，1300=令牌无此特权)。")
+        log("      参见 2026-09-28 阶梯诊断：宿主 DACL 收紧后必须先开 SeDebug。")
         return 3
 
     watcher: LLKeyWatcher | None = None
@@ -900,6 +930,14 @@ def analyze(paths: list[Path]) -> int:
 
 
 def main() -> int:
+    # 提权后的控制台默认 GBK 代码页；强制 UTF-8 + replace，避免个别字符
+    # 在 print 处抛 UnicodeEncodeError 把整次运行打死（2026-09-28 run2 实证）。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     parser = argparse.ArgumentParser(
         description="报告层合成按键实验：产物是否等价于物理按键（需提权）")
     parser.add_argument("--out", type=Path, help="日志落盘路径")
@@ -946,6 +984,8 @@ def main() -> int:
             log(f"  同宿主其它设备: {', '.join(other_members)}")
         if host_pid is not None:
             log(f"  管理员令牌: {bool(ctypes.windll.shell32.IsUserAnAdmin())}")
+            se_ok, se_err = enable_se_debug_privilege()
+            log(f"  SeDebugPrivilege 启用: {se_ok} (err={se_err})")
             log(f"  OpenProcess 被拒: {probe_open_denied(host_pid)}")
         log("\n计划表:")
         for item in build_schedule(args.scale, only):
@@ -958,6 +998,12 @@ def main() -> int:
     except KeyboardInterrupt:
         log("\n用户中断。")
         return 130
+    except Exception:  # noqa: BLE001
+        # 异常必须落进日志文件——traceback 只打控制台的话，窗口一关证据就没了。
+        import traceback
+
+        log(f"\n未捕获异常:\n{traceback.format_exc()}")
+        return 15
 
 
 if __name__ == "__main__":
