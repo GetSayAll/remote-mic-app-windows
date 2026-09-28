@@ -27,3 +27,13 @@
   - `cargo fmt --all -- --check`、`cargo check --workspace` —— passed
   - **真机复验 deferred**：须以修复后构建出包 → 安装并授权 → 卸载 → 重装 → 核对开关回落关闭 → 重开触发 UAC。注意：修复只在本分支构建生效，用旧分支构建（如 `0a876485` 语义）重装不构成对本修复的检验。
 - 隐私检查：未包含个人路径、设备身份、语音内容或凭据
+
+## 2026-09-28 第三轮：现场复验失败诊断 + 回落取证盲区修复
+
+- **现场复验（14:11–14:22 本地）仍报失败**：卸载 → 重装 → 开关未落为关闭、未要求重新授权。
+- **受控实验（14:34–14:37，本机实测）证实链路通畅**：`uninstall.exe /S` 静默真卸载 → 进程 3.4s 全退、标记写入 `uninstalled=152468250` → 静默重装 → 标记**原样保留** ✓。修复本身无缺陷。
+- **现场失败归因**：用户三轮操作走的是**覆盖安装/升级语义**（直接双击安装包，旧卸载器被 `_?=$INSTDIR` 原位调用、`$EXEDIR == $INSTDIR` 不写标记）→ 授权与开关状态保留是**定稿正确行为**，不是回归。日志旁证：14:13:46 启动无 `auto_trigger started`（settings 已回落，回落机制实际生效过）；14:22 用户开启 86ms 无 UAC（当时标记已不在）。
+- **用户假设「卸载时应删除开关状态」不采纳**：开关意图存 AppSettings（`settings.json`），升级/覆盖安装保留语义依赖它；卸载时删数据会破坏「升级保留」。正确机制 = 真卸载标记（`uninstalled=`）+ 启动对账回落，已实测可用。
+- **取证盲区修复（本轮代码改动）**：启动对账回落分支原先只 `eprintln!`（stderr，现场不可见）→ 改为 `gatt_note` 落诊断日志：`rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason=reauth_marker_present|task_missing reauth_required=<bool> task_installed=<bool>`。reason 只陈述探针可支撑的结论。`cargo test -p sayall-windows-app --lib` 38 passed。
+- **复验要点（给 Andy）**：① 必须走**真卸载**——Windows「设置 → 应用」卸载，或运行安装目录里的 `uninstall.exe`；直接双击新安装包属升级语义，授权保留是设计使然；② 当前现场已是「真卸载后重装 + 标记在」状态，启动应用即可看到开关回落为关；③ 回落现在会落诊断日志（`action=reconcile … terminal_result=revoked`），可事后取证。
+- 隐私检查：未包含个人路径、设备身份、语音内容或凭据

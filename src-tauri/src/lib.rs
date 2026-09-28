@@ -1653,14 +1653,20 @@ pub fn run() {
             // 连不上（2026-09-27 真机复盘，「正在启动」永不结束的成因之一）。
             #[cfg(windows)]
             let rc003_auto_trigger_allowed = if saved_settings.rc003_capture_enabled {
-                let revoked =
-                    rc003_task::reauth_required() || !rc003_task::task_installed();
-                if revoked {
-                    eprintln!(
-                        "rc003: 授权已随卸载/重置撤销（reauth={} task_installed={}），增强捕获回落为关闭",
-                        rc003_task::reauth_required(),
-                        rc003_task::task_installed()
-                    );
+                let reauth_required = rc003_task::reauth_required();
+                let task_installed = rc003_task::task_installed();
+                if reauth_required || !task_installed {
+                    // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
+                    // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验
+                    // 复盘的取证盲区）。reason 只陈述两个探针能支撑的结论。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} reauth_required={reauth_required} task_installed={task_installed}",
+                        if reauth_required {
+                            "reauth_marker_present"
+                        } else {
+                            "task_missing"
+                        }
+                    ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     false
                 } else {
