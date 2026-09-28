@@ -1,0 +1,1753 @@
+=== 报告层合成按键实验：能不能产出不带 LLKHF_INJECTED 的真实按键 ===
+时间: 2026-09-28T23:41:53
+契约: 载体 usage=0x004a(主页) -> 合成 usage=0x00e6(RightAlt)，预期产出 VK 0xA5；只写报告偏移 3..8 并回写复原
+      不写注册表 / 驱动策略 / 计划任务，不需重启；需一次交互式 UAC 提权。
+副作用: 阶段 B 会把主页键变成 Alt 键——请把焦点留在桌面，不要停在文本编辑器里，期间不要触碰物理键盘。
+
+--- 步骤 1/5：定位独占 RC003 的 WUDFHost ---
+  命中 RC003 宿主 HostPid=42020 (0xa424)，该宿主共承载 3 个设备
+  ⚠ 宿主非独占，同宿主还有 2 个设备： BTHLEDevice/c0539bcb6979, BTHLEDevice/c053a1ae14f0
+    因此写入必须走 FileHandle 绑定（见 JS 的「设备维度绑定」），否则会误伤同宿主的其它 HID 设备。
+
+--- 步骤 2/5：提权与可注入性自检 ---
+  当前进程管理员令牌: True
+  SeDebugPrivilege 启用: True (err=0)
+  OpenProcess(QUERY_LIMITED) 目标宿主被拒: False
+
+--- 步骤 3/5：启动 LL 钩子观测（读回 LLKHF_INJECTED 位）---
+  已安装 WH_KEYBOARD_LL 钩子（免提权）
+  frida 17.18.0
+
+--- 步骤 4/5：attach 并安装报告层钩子 ---
+  钩子已安装: NtDeviceIoControlFile，目标 IOCTL=80018483
+  目标 usage: [{'usage': 74, 'name': '主页'}]
+  计划表总时长 61000 ms，写入上限 400
+  agent 起始时钟 t0=1790610115129
+
+--- 步骤 5/5：分阶段执行 ---
+
+>>> 阶段 pre（8s，observe）：预热：请先唤醒遥控器（按一下任意键），然后停手。
+[TAP] t=1790610115136 phase=pre mode=observe dir=enter orig=0100fabfff0000 new=0100fabfff0000 mutated=False |
+[TAP] t=1790610115143 phase=pre mode=observe dir=enter orig=0100f9cfff0000 new=0100f9cfff0000 mutated=False |
+[TAP] t=1790610115151 phase=pre mode=observe dir=enter orig=0100fabfff0000 new=0100fabfff0000 mutated=False |
+[TAP] t=1790610115158 phase=pre mode=observe dir=enter orig=0100f8afff0000 new=0100f8afff0000 mutated=False |
+[TAP] t=1790610115165 phase=pre mode=observe dir=enter orig=0100f9bfff0000 new=0100f9bfff0000 mutated=False |
+[TAP] t=1790610115173 phase=pre mode=observe dir=enter orig=0100f8bfff0000 new=0100f8bfff0000 mutated=False |
+[TAP] t=1790610115181 phase=pre mode=observe dir=enter orig=0100f9cfff0000 new=0100f9cfff0000 mutated=False |
+[TAP] t=1790610115188 phase=pre mode=observe dir=enter orig=0100f8cfff0000 new=0100f8cfff0000 mutated=False |
+[TAP] t=1790610115196 phase=pre mode=observe dir=enter orig=0100f9cfff0000 new=0100f9cfff0000 mutated=False |
+[TAP] t=1790610115203 phase=pre mode=observe dir=enter orig=0100f8efff0000 new=0100f8efff0000 mutated=False |
+[TAP] t=1790610115211 phase=pre mode=observe dir=enter orig=0100f9efff0000 new=0100f9efff0000 mutated=False |
+[TAP] t=1790610115218 phase=pre mode=observe dir=enter orig=0100faefff0000 new=0100faefff0000 mutated=False |
+[TAP] t=1790610115241 phase=pre mode=observe dir=enter orig=0100f8ffff0000 new=0100f8ffff0000 mutated=False |
+[TAP] t=1790610115242 phase=pre mode=observe dir=enter orig=0100faefff0000 new=0100faefff0000 mutated=False |
+[TAP] t=1790610115248 phase=pre mode=observe dir=enter orig=0100f9ffff0000 new=0100f9ffff0000 mutated=False |
+[TAP] t=1790610115256 phase=pre mode=observe dir=enter orig=0100faffff0000 new=0100faffff0000 mutated=False |
+[TAP] t=1790610115263 phase=pre mode=observe dir=enter orig=0100fcffff0000 new=0100fcffff0000 mutated=False |
+[TAP] t=1790610115270 phase=pre mode=observe dir=enter orig=0100fdffff0000 new=0100fdffff0000 mutated=False |
+[TAP] t=1790610115278 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610115286 phase=pre mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610115293 phase=pre mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610115301 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610115308 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610115317 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610115324 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610115331 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610115338 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610115354 phase=pre mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610115361 phase=pre mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610115369 phase=pre mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610115376 phase=pre mode=observe dir=enter orig=0100fe4f000000 new=0100fe4f000000 mutated=False |
+[TAP] t=1790610115383 phase=pre mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610115391 phase=pre mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610115398 phase=pre mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610115413 phase=pre mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610115421 phase=pre mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610115436 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610115443 phase=pre mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610115465 phase=pre mode=observe dir=enter orig=010000d0ff0000 new=010000d0ff0000 mutated=False |
+[TAP] t=1790610115788 phase=pre mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610115804 phase=pre mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610115833 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610115841 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610115856 phase=pre mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610115863 phase=pre mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610115871 phase=pre mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610115879 phase=pre mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610115894 phase=pre mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610115901 phase=pre mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610115923 phase=pre mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610115968 phase=pre mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610115998 phase=pre mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610116065 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610116081 phase=pre mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610116104 phase=pre mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610116119 phase=pre mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610116133 phase=pre mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+  [心跳] phase=pre mode=observe 命中=57 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610116141 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610116156 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610116163 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610116178 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610116186 phase=pre mode=observe dir=enter orig=010002e0ff0000 new=010002e0ff0000 mutated=False |
+[TAP] t=1790610116194 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610116201 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610116209 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610116216 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610116224 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610116231 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610116238 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610116246 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610116253 phase=pre mode=observe dir=enter orig=010003f0ff0000 new=010003f0ff0000 mutated=False |
+[TAP] t=1790610116261 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610116276 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610116283 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610116291 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610116298 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610116306 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610116313 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610116321 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610116328 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610116336 phase=pre mode=observe dir=enter orig=010003f0ff0000 new=010003f0ff0000 mutated=False |
+[TAP] t=1790610116343 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610116351 phase=pre mode=observe dir=enter orig=010004f0ff0000 new=010004f0ff0000 mutated=False |
+[TAP] t=1790610116359 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610116366 phase=pre mode=observe dir=enter orig=010003f0ff0000 new=010003f0ff0000 mutated=False |
+[TAP] t=1790610116374 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610116381 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610116396 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610116410 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610116426 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+  [心跳] phase=pre mode=observe 命中=90 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610117581 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610117582 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610117596 phase=pre mode=observe dir=enter orig=010003f0ff0000 new=010003f0ff0000 mutated=False |
+[TAP] t=1790610117603 phase=pre mode=observe dir=enter orig=010003e0ff0000 new=010003e0ff0000 mutated=False |
+[TAP] t=1790610117611 phase=pre mode=observe dir=enter orig=010005e0ff0000 new=010005e0ff0000 mutated=False |
+[TAP] t=1790610117618 phase=pre mode=observe dir=enter orig=010007e0ff0000 new=010007e0ff0000 mutated=False |
+[TAP] t=1790610117634 phase=pre mode=observe dir=enter orig=01000cd0ff0000 new=01000cd0ff0000 mutated=False |
+[TAP] t=1790610117641 phase=pre mode=observe dir=enter orig=01000dc0ff0000 new=01000dc0ff0000 mutated=False |
+[TAP] t=1790610117648 phase=pre mode=observe dir=enter orig=010011c0ff0000 new=010011c0ff0000 mutated=False |
+[TAP] t=1790610117656 phase=pre mode=observe dir=enter orig=010012b0ff0000 new=010012b0ff0000 mutated=False |
+[TAP] t=1790610117663 phase=pre mode=observe dir=enter orig=010012c0ff0000 new=010012c0ff0000 mutated=False |
+[TAP] t=1790610117671 phase=pre mode=observe dir=enter orig=010014c0ff0000 new=010014c0ff0000 mutated=False |
+[TAP] t=1790610117678 phase=pre mode=observe dir=enter orig=010014c0ff0000 new=010014c0ff0000 mutated=False |
+[TAP] t=1790610117685 phase=pre mode=observe dir=enter orig=010013d0ff0000 new=010013d0ff0000 mutated=False |
+[TAP] t=1790610117693 phase=pre mode=observe dir=enter orig=010013d0ff0000 new=010013d0ff0000 mutated=False |
+[TAP] t=1790610117700 phase=pre mode=observe dir=enter orig=010013d0ff0000 new=010013d0ff0000 mutated=False |
+[TAP] t=1790610117707 phase=pre mode=observe dir=enter orig=010013d0ff0000 new=010013d0ff0000 mutated=False |
+[TAP] t=1790610117716 phase=pre mode=observe dir=enter orig=010014d0ff0000 new=010014d0ff0000 mutated=False |
+[TAP] t=1790610117724 phase=pre mode=observe dir=enter orig=010014d0ff0000 new=010014d0ff0000 mutated=False |
+[TAP] t=1790610117731 phase=pre mode=observe dir=enter orig=010013d0ff0000 new=010013d0ff0000 mutated=False |
+[TAP] t=1790610117738 phase=pre mode=observe dir=enter orig=010012d0ff0000 new=010012d0ff0000 mutated=False |
+[TAP] t=1790610117753 phase=pre mode=observe dir=enter orig=010015d0ff0000 new=010015d0ff0000 mutated=False |
+[TAP] t=1790610117761 phase=pre mode=observe dir=enter orig=010013d0ff0000 new=010013d0ff0000 mutated=False |
+[TAP] t=1790610117768 phase=pre mode=observe dir=enter orig=010012d0ff0000 new=010012d0ff0000 mutated=False |
+[TAP] t=1790610117776 phase=pre mode=observe dir=enter orig=010011d0ff0000 new=010011d0ff0000 mutated=False |
+[TAP] t=1790610117783 phase=pre mode=observe dir=enter orig=01000ce0ff0000 new=01000ce0ff0000 mutated=False |
+[TAP] t=1790610117791 phase=pre mode=observe dir=enter orig=01000ce0ff0000 new=01000ce0ff0000 mutated=False |
+[TAP] t=1790610117797 phase=pre mode=observe dir=enter orig=01000be0ff0000 new=01000be0ff0000 mutated=False |
+[TAP] t=1790610117813 phase=pre mode=observe dir=enter orig=01000be0ff0000 new=01000be0ff0000 mutated=False |
+[TAP] t=1790610117820 phase=pre mode=observe dir=enter orig=010009e0ff0000 new=010009e0ff0000 mutated=False |
+[TAP] t=1790610117821 phase=pre mode=observe dir=enter orig=010008f0ff0000 new=010008f0ff0000 mutated=False |
+[TAP] t=1790610117828 phase=pre mode=observe dir=enter orig=010008e0ff0000 new=010008e0ff0000 mutated=False |
+[TAP] t=1790610117836 phase=pre mode=observe dir=enter orig=010006e0ff0000 new=010006e0ff0000 mutated=False |
+[TAP] t=1790610117843 phase=pre mode=observe dir=enter orig=010005f0ff0000 new=010005f0ff0000 mutated=False |
+[TAP] t=1790610117851 phase=pre mode=observe dir=enter orig=010004e0ff0000 new=010004e0ff0000 mutated=False |
+[TAP] t=1790610117858 phase=pre mode=observe dir=enter orig=010004f0ff0000 new=010004f0ff0000 mutated=False |
+[TAP] t=1790610117874 phase=pre mode=observe dir=enter orig=010003f0ff0000 new=010003f0ff0000 mutated=False |
+[TAP] t=1790610117889 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610117896 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610117911 phase=pre mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610117911 phase=pre mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610117918 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610117926 phase=pre mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610117933 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610117941 phase=pre mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610117948 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610117956 phase=pre mode=observe dir=enter orig=01000310000000 new=01000310000000 mutated=False |
+[TAP] t=1790610117963 phase=pre mode=observe dir=enter orig=01000410000000 new=01000410000000 mutated=False |
+[TAP] t=1790610117971 phase=pre mode=observe dir=enter orig=01000410000000 new=01000410000000 mutated=False |
+[TAP] t=1790610117978 phase=pre mode=observe dir=enter orig=01000510000000 new=01000510000000 mutated=False |
+[TAP] t=1790610117993 phase=pre mode=observe dir=enter orig=01000600000000 new=01000600000000 mutated=False |
+[TAP] t=1790610118001 phase=pre mode=observe dir=enter orig=01000600000000 new=01000600000000 mutated=False |
+[TAP] t=1790610118008 phase=pre mode=observe dir=enter orig=01000610000000 new=01000610000000 mutated=False |
+[TAP] t=1790610118016 phase=pre mode=observe dir=enter orig=01000700000000 new=01000700000000 mutated=False |
+[TAP] t=1790610118024 phase=pre mode=observe dir=enter orig=01000610000000 new=01000610000000 mutated=False |
+[TAP] t=1790610118031 phase=pre mode=observe dir=enter orig=01000610000000 new=01000610000000 mutated=False |
+[TAP] t=1790610118039 phase=pre mode=observe dir=enter orig=01000710000000 new=01000710000000 mutated=False |
+[TAP] t=1790610118046 phase=pre mode=observe dir=enter orig=01000810000000 new=01000810000000 mutated=False |
+[TAP] t=1790610118053 phase=pre mode=observe dir=enter orig=01000820000000 new=01000820000000 mutated=False |
+[TAP] t=1790610118061 phase=pre mode=observe dir=enter orig=01000a20000000 new=01000a20000000 mutated=False |
+[TAP] t=1790610118069 phase=pre mode=observe dir=enter orig=01000920000000 new=01000920000000 mutated=False |
+[TAP] t=1790610118075 phase=pre mode=observe dir=enter orig=01000a20000000 new=01000a20000000 mutated=False |
+[TAP] t=1790610118083 phase=pre mode=observe dir=enter orig=01000a20000000 new=01000a20000000 mutated=False |
+[TAP] t=1790610118090 phase=pre mode=observe dir=enter orig=01000a10000000 new=01000a10000000 mutated=False |
+[TAP] t=1790610118098 phase=pre mode=observe dir=enter orig=01000a20000000 new=01000a20000000 mutated=False |
+[TAP] t=1790610118114 phase=pre mode=observe dir=enter orig=01000b20000000 new=01000b20000000 mutated=False |
+[TAP] t=1790610118121 phase=pre mode=observe dir=enter orig=01000910000000 new=01000910000000 mutated=False |
+[TAP] t=1790610118129 phase=pre mode=observe dir=enter orig=01000920000000 new=01000920000000 mutated=False |
+[TAP] t=1790610118136 phase=pre mode=observe dir=enter orig=01000810000000 new=01000810000000 mutated=False |
+[TAP] t=1790610118143 phase=pre mode=observe dir=enter orig=01000510000000 new=01000510000000 mutated=False |
+[TAP] t=1790610118151 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610118158 phase=pre mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+  [心跳] phase=pre mode=observe 命中=162 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610118165 phase=pre mode=observe dir=enter orig=01000310000000 new=01000310000000 mutated=False |
+[TAP] t=1790610118174 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610118181 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610118189 phase=pre mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610118196 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610118211 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610118219 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610118233 phase=pre mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610118241 phase=pre mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610118248 phase=pre mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610118271 phase=pre mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610118308 phase=pre mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610118751 phase=pre mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610118751 phase=pre mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610118759 phase=pre mode=observe dir=enter orig=0100fc1f000000 new=0100fc1f000000 mutated=False |
+[TAP] t=1790610118766 phase=pre mode=observe dir=enter orig=0100fc1f000000 new=0100fc1f000000 mutated=False |
+[TAP] t=1790610118774 phase=pre mode=observe dir=enter orig=0100fa1f000000 new=0100fa1f000000 mutated=False |
+[TAP] t=1790610118781 phase=pre mode=observe dir=enter orig=0100fa1f000000 new=0100fa1f000000 mutated=False |
+[TAP] t=1790610118795 phase=pre mode=observe dir=enter orig=0100f81f000000 new=0100f81f000000 mutated=False |
+[TAP] t=1790610118803 phase=pre mode=observe dir=enter orig=0100f32f000000 new=0100f32f000000 mutated=False |
+[TAP] t=1790610118811 phase=pre mode=observe dir=enter orig=0100f22f000000 new=0100f22f000000 mutated=False |
+[TAP] t=1790610118818 phase=pre mode=observe dir=enter orig=0100ef2f000000 new=0100ef2f000000 mutated=False |
+[TAP] t=1790610118826 phase=pre mode=observe dir=enter orig=0100ee1f000000 new=0100ee1f000000 mutated=False |
+[TAP] t=1790610118834 phase=pre mode=observe dir=enter orig=0100f01f000000 new=0100f01f000000 mutated=False |
+[TAP] t=1790610118840 phase=pre mode=observe dir=enter orig=0100f01f000000 new=0100f01f000000 mutated=False |
+[TAP] t=1790610118848 phase=pre mode=observe dir=enter orig=0100f12f000000 new=0100f12f000000 mutated=False |
+[TAP] t=1790610118855 phase=pre mode=observe dir=enter orig=0100f21f000000 new=0100f21f000000 mutated=False |
+[TAP] t=1790610118863 phase=pre mode=observe dir=enter orig=0100f22f000000 new=0100f22f000000 mutated=False |
+[TAP] t=1790610118871 phase=pre mode=observe dir=enter orig=0100f12f000000 new=0100f12f000000 mutated=False |
+[TAP] t=1790610118879 phase=pre mode=observe dir=enter orig=0100ef2f000000 new=0100ef2f000000 mutated=False |
+[TAP] t=1790610118886 phase=pre mode=observe dir=enter orig=0100f01f000000 new=0100f01f000000 mutated=False |
+[TAP] t=1790610118893 phase=pre mode=observe dir=enter orig=0100f01f000000 new=0100f01f000000 mutated=False |
+[TAP] t=1790610118901 phase=pre mode=observe dir=enter orig=0100f11f000000 new=0100f11f000000 mutated=False |
+[TAP] t=1790610118909 phase=pre mode=observe dir=enter orig=0100f21f000000 new=0100f21f000000 mutated=False |
+[TAP] t=1790610118923 phase=pre mode=observe dir=enter orig=0100ef1f000000 new=0100ef1f000000 mutated=False |
+[TAP] t=1790610118931 phase=pre mode=observe dir=enter orig=0100f11f000000 new=0100f11f000000 mutated=False |
+[TAP] t=1790610118938 phase=pre mode=observe dir=enter orig=0100f11f000000 new=0100f11f000000 mutated=False |
+[TAP] t=1790610118946 phase=pre mode=observe dir=enter orig=0100f21f000000 new=0100f21f000000 mutated=False |
+[TAP] t=1790610118953 phase=pre mode=observe dir=enter orig=0100f51f000000 new=0100f51f000000 mutated=False |
+[TAP] t=1790610118961 phase=pre mode=observe dir=enter orig=0100f61f000000 new=0100f61f000000 mutated=False |
+[TAP] t=1790610118968 phase=pre mode=observe dir=enter orig=0100f61f000000 new=0100f61f000000 mutated=False |
+[TAP] t=1790610118976 phase=pre mode=observe dir=enter orig=0100f61f000000 new=0100f61f000000 mutated=False |
+[TAP] t=1790610118983 phase=pre mode=observe dir=enter orig=0100f52f000000 new=0100f52f000000 mutated=False |
+[TAP] t=1790610118991 phase=pre mode=observe dir=enter orig=0100f51f000000 new=0100f51f000000 mutated=False |
+[TAP] t=1790610118998 phase=pre mode=observe dir=enter orig=0100f61f000000 new=0100f61f000000 mutated=False |
+[TAP] t=1790610119006 phase=pre mode=observe dir=enter orig=0100f62f000000 new=0100f62f000000 mutated=False |
+[TAP] t=1790610119013 phase=pre mode=observe dir=enter orig=0100f51f000000 new=0100f51f000000 mutated=False |
+[TAP] t=1790610119021 phase=pre mode=observe dir=enter orig=0100f61f000000 new=0100f61f000000 mutated=False |
+[TAP] t=1790610119028 phase=pre mode=observe dir=enter orig=0100f71f000000 new=0100f71f000000 mutated=False |
+[TAP] t=1790610119043 phase=pre mode=observe dir=enter orig=0100f51f000000 new=0100f51f000000 mutated=False |
+[TAP] t=1790610119051 phase=pre mode=observe dir=enter orig=0100f51f000000 new=0100f51f000000 mutated=False |
+[TAP] t=1790610119059 phase=pre mode=observe dir=enter orig=0100f71f000000 new=0100f71f000000 mutated=False |
+[TAP] t=1790610119066 phase=pre mode=observe dir=enter orig=0100f81f000000 new=0100f81f000000 mutated=False |
+[TAP] t=1790610119081 phase=pre mode=observe dir=enter orig=0100fa0f000000 new=0100fa0f000000 mutated=False |
+[TAP] t=1790610119082 phase=pre mode=observe dir=enter orig=0100fa1f000000 new=0100fa1f000000 mutated=False |
+[TAP] t=1790610119088 phase=pre mode=observe dir=enter orig=0100fa0f000000 new=0100fa0f000000 mutated=False |
+[TAP] t=1790610119096 phase=pre mode=observe dir=enter orig=0100f91f000000 new=0100f91f000000 mutated=False |
+[TAP] t=1790610119103 phase=pre mode=observe dir=enter orig=0100fa2f000000 new=0100fa2f000000 mutated=False |
+[TAP] t=1790610119111 phase=pre mode=observe dir=enter orig=0100f91f000000 new=0100f91f000000 mutated=False |
+[TAP] t=1790610119119 phase=pre mode=observe dir=enter orig=0100fa2f000000 new=0100fa2f000000 mutated=False |
+[TAP] t=1790610119126 phase=pre mode=observe dir=enter orig=0100fa1f000000 new=0100fa1f000000 mutated=False |
+[TAP] t=1790610119134 phase=pre mode=observe dir=enter orig=0100fb2f000000 new=0100fb2f000000 mutated=False |
+[TAP] t=1790610119142 phase=pre mode=observe dir=enter orig=0100fc2f000000 new=0100fc2f000000 mutated=False |
+[TAP] t=1790610119149 phase=pre mode=observe dir=enter orig=0100fc1f000000 new=0100fc1f000000 mutated=False |
+[TAP] t=1790610119163 phase=pre mode=observe dir=enter orig=0100fb2f000000 new=0100fb2f000000 mutated=False |
+[TAP] t=1790610119171 phase=pre mode=observe dir=enter orig=0100fc1f000000 new=0100fc1f000000 mutated=False |
+  [心跳] phase=pre mode=observe 命中=228 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610119186 phase=pre mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610119186 phase=pre mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610119193 phase=pre mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610119209 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119216 phase=pre mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610119224 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119231 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119239 phase=pre mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610119246 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119253 phase=pre mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610119261 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119268 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119283 phase=pre mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610119290 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119321 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119351 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119404 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119636 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119658 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119681 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119696 phase=pre mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610119703 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119711 phase=pre mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610119718 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119726 phase=pre mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610119734 phase=pre mode=observe dir=enter orig=0100ffefff0000 new=0100ffefff0000 mutated=False |
+[TAP] t=1790610119741 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119749 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119756 phase=pre mode=observe dir=enter orig=0100fedfff0000 new=0100fedfff0000 mutated=False |
+[TAP] t=1790610119763 phase=pre mode=observe dir=enter orig=0100fedfff0000 new=0100fedfff0000 mutated=False |
+[TAP] t=1790610119771 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119778 phase=pre mode=observe dir=enter orig=0100fddfff0000 new=0100fddfff0000 mutated=False |
+[TAP] t=1790610119786 phase=pre mode=observe dir=enter orig=0100fddfff0000 new=0100fddfff0000 mutated=False |
+[TAP] t=1790610119794 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119801 phase=pre mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610119816 phase=pre mode=observe dir=enter orig=0100fdefff0000 new=0100fdefff0000 mutated=False |
+[TAP] t=1790610119823 phase=pre mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610119831 phase=pre mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610119838 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119846 phase=pre mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610119853 phase=pre mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610119861 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119868 phase=pre mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610119876 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610119891 phase=pre mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610120153 phase=pre mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+  [心跳] phase=pre mode=observe 命中=274 改写=0 成功=0 失败=0 复原=0
+[LL] t=1790610125571 phase=A vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+
+>>> 阶段 A（14s，observe）：对照 A + 设备绑定：请连按遥控器 主页 ×3（本阶段**只按遥控器**，不要碰其它键盘）。 期望 LL 侧读到 VK_HOME 且 injected=0，同时探针据此绑定该设备的 FileHandle。
+[LL] t=1790610125897 phase=A vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610120266 phase=pre mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+[TAP] t=1790610120680 phase=pre mode=observe dir=enter orig=010000280000000000 new=010000280000000000 mutated=False |
+[TAP] t=1790610120800 phase=pre mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+  [心跳] phase=pre mode=observe 命中=277 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=pre mode=observe 命中=277 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=277 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=277 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=277 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610125570 phase=A mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+[TAP] t=1790610125615 phase=A mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+[LL] t=1790610126021 phase=A vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610126019 phase=A mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+[LL] t=1790610126157 phase=A vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610126154 phase=A mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+  [心跳] phase=A mode=observe 命中=281 改写=0 成功=0 失败=0 复原=0
+[LL] t=1790610126592 phase=A vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610126590 phase=A mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+[LL] t=1790610126726 phase=A vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610126725 phase=A mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+  [心跳] phase=A mode=observe 命中=283 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610127886 phase=A mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610127894 phase=A mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610127939 phase=A mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610127962 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610127969 phase=A mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610127976 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610127983 phase=A mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610127991 phase=A mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610128028 phase=A mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610128156 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128157 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610128164 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610128186 phase=A mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610128238 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+  [心跳] phase=A mode=observe 命中=297 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610128269 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610128373 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128381 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610128381 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128388 phase=A mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610128396 phase=A mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610128412 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610128426 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610128456 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128501 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128539 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610128568 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610128576 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128583 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610128591 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128598 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610128606 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128614 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128621 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128628 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610128651 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=A mode=observe 命中=318 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610135805 phase=A mode=observe dir=enter orig=01000910000000 new=01000910000000 mutated=False |
+[TAP] t=1790610135806 phase=A mode=observe dir=enter orig=01001750000000 new=01001750000000 mutated=False |
+[TAP] t=1790610135806 phase=A mode=observe dir=enter orig=01001b70000000 new=01001b70000000 mutated=False |
+[TAP] t=1790610135807 phase=A mode=observe dir=enter orig=01001f70000000 new=01001f70000000 mutated=False |
+[TAP] t=1790610135807 phase=A mode=observe dir=enter orig=01001c80000000 new=01001c80000000 mutated=False |
+[TAP] t=1790610135808 phase=A mode=observe dir=enter orig=01001440000000 new=01001440000000 mutated=False |
+[TAP] t=1790610135808 phase=A mode=observe dir=enter orig=01001540000000 new=01001540000000 mutated=False |
+[TAP] t=1790610135808 phase=A mode=observe dir=enter orig=01001740000000 new=01001740000000 mutated=False |
+[TAP] t=1790610135809 phase=A mode=observe dir=enter orig=01001840000000 new=01001840000000 mutated=False |
+[TAP] t=1790610135809 phase=A mode=observe dir=enter orig=01001940000000 new=01001940000000 mutated=False |
+[TAP] t=1790610135810 phase=A mode=observe dir=enter orig=01001950000000 new=01001950000000 mutated=False |
+[TAP] t=1790610135813 phase=A mode=observe dir=enter orig=01001940000000 new=01001940000000 mutated=False |
+[TAP] t=1790610135821 phase=A mode=observe dir=enter orig=01001940000000 new=01001940000000 mutated=False |
+[TAP] t=1790610135821 phase=A mode=observe dir=enter orig=01001630000000 new=01001630000000 mutated=False |
+[TAP] t=1790610135829 phase=A mode=observe dir=enter orig=01001630000000 new=01001630000000 mutated=False |
+[TAP] t=1790610135836 phase=A mode=observe dir=enter orig=01001330000000 new=01001330000000 mutated=False |
+[TAP] t=1790610135851 phase=A mode=observe dir=enter orig=01001530000000 new=01001530000000 mutated=False |
+[TAP] t=1790610135859 phase=A mode=observe dir=enter orig=01001520000000 new=01001520000000 mutated=False |
+[TAP] t=1790610135866 phase=A mode=observe dir=enter orig=01001410000000 new=01001410000000 mutated=False |
+[TAP] t=1790610135874 phase=A mode=observe dir=enter orig=01001320000000 new=01001320000000 mutated=False |
+[TAP] t=1790610135881 phase=A mode=observe dir=enter orig=01000e00000000 new=01000e00000000 mutated=False |
+[TAP] t=1790610135888 phase=A mode=observe dir=enter orig=01000f10000000 new=01000f10000000 mutated=False |
+[TAP] t=1790610135897 phase=A mode=observe dir=enter orig=01000d00000000 new=01000d00000000 mutated=False |
+[TAP] t=1790610135904 phase=A mode=observe dir=enter orig=01000d10000000 new=01000d10000000 mutated=False |
+[TAP] t=1790610135912 phase=A mode=observe dir=enter orig=01000c00000000 new=01000c00000000 mutated=False |
+[TAP] t=1790610135919 phase=A mode=observe dir=enter orig=01000b00000000 new=01000b00000000 mutated=False |
+[TAP] t=1790610135926 phase=A mode=observe dir=enter orig=01000a00000000 new=01000a00000000 mutated=False |
+[TAP] t=1790610135933 phase=A mode=observe dir=enter orig=01000900000000 new=01000900000000 mutated=False |
+[TAP] t=1790610135941 phase=A mode=observe dir=enter orig=01000800000000 new=01000800000000 mutated=False |
+[TAP] t=1790610135949 phase=A mode=observe dir=enter orig=01000800000000 new=01000800000000 mutated=False |
+[TAP] t=1790610135957 phase=A mode=observe dir=enter orig=01000700000000 new=01000700000000 mutated=False |
+[TAP] t=1790610135971 phase=A mode=observe dir=enter orig=01000800000000 new=01000800000000 mutated=False |
+[TAP] t=1790610135979 phase=A mode=observe dir=enter orig=01000700000000 new=01000700000000 mutated=False |
+[TAP] t=1790610135986 phase=A mode=observe dir=enter orig=01000700000000 new=01000700000000 mutated=False |
+[TAP] t=1790610135994 phase=A mode=observe dir=enter orig=010006f0ff0000 new=010006f0ff0000 mutated=False |
+[TAP] t=1790610136001 phase=A mode=observe dir=enter orig=010005f0ff0000 new=010005f0ff0000 mutated=False |
+[TAP] t=1790610136008 phase=A mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610136016 phase=A mode=observe dir=enter orig=010005f0ff0000 new=010005f0ff0000 mutated=False |
+[TAP] t=1790610136023 phase=A mode=observe dir=enter orig=010005f0ff0000 new=010005f0ff0000 mutated=False |
+[TAP] t=1790610136031 phase=A mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610136039 phase=A mode=observe dir=enter orig=010006f0ff0000 new=010006f0ff0000 mutated=False |
+[TAP] t=1790610136047 phase=A mode=observe dir=enter orig=01000600000000 new=01000600000000 mutated=False |
+[TAP] t=1790610136054 phase=A mode=observe dir=enter orig=010007f0ff0000 new=010007f0ff0000 mutated=False |
+[TAP] t=1790610136062 phase=A mode=observe dir=enter orig=01000700000000 new=01000700000000 mutated=False |
+[TAP] t=1790610136070 phase=A mode=observe dir=enter orig=01000900000000 new=01000900000000 mutated=False |
+[TAP] t=1790610136077 phase=A mode=observe dir=enter orig=01000a00000000 new=01000a00000000 mutated=False |
+[TAP] t=1790610136091 phase=A mode=observe dir=enter orig=01000e00000000 new=01000e00000000 mutated=False |
+[TAP] t=1790610136099 phase=A mode=observe dir=enter orig=01000e00000000 new=01000e00000000 mutated=False |
+[TAP] t=1790610136106 phase=A mode=observe dir=enter orig=01001000000000 new=01001000000000 mutated=False |
+[TAP] t=1790610136113 phase=A mode=observe dir=enter orig=01000f10000000 new=01000f10000000 mutated=False |
+[TAP] t=1790610136121 phase=A mode=observe dir=enter orig=01000b00000000 new=01000b00000000 mutated=False |
+[TAP] t=1790610136128 phase=A mode=observe dir=enter orig=01000b00000000 new=01000b00000000 mutated=False |
+[TAP] t=1790610136136 phase=A mode=observe dir=enter orig=01000910000000 new=01000910000000 mutated=False |
+[TAP] t=1790610136143 phase=A mode=observe dir=enter orig=01000700000000 new=01000700000000 mutated=False |
+[TAP] t=1790610136151 phase=A mode=observe dir=enter orig=01000600000000 new=01000600000000 mutated=False |
+[TAP] t=1790610136158 phase=A mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610136166 phase=A mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610136189 phase=A mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610136204 phase=A mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610136219 phase=A mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610136227 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610136242 phase=A mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610136256 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610136264 phase=A mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610136278 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610136286 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610136302 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610136324 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+  [心跳] phase=A mode=observe 命中=386 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610136361 phase=A mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610136369 phase=A mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610136377 phase=A mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610136384 phase=A mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610136392 phase=A mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610136399 phase=A mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610136406 phase=A mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610136414 phase=A mode=observe dir=enter orig=0100fd3f000000 new=0100fd3f000000 mutated=False |
+[TAP] t=1790610136421 phase=A mode=observe dir=enter orig=0100fd3f000000 new=0100fd3f000000 mutated=False |
+[TAP] t=1790610136429 phase=A mode=observe dir=enter orig=0100fd5f000000 new=0100fd5f000000 mutated=False |
+[TAP] t=1790610136436 phase=A mode=observe dir=enter orig=0100fe6f000000 new=0100fe6f000000 mutated=False |
+[TAP] t=1790610136444 phase=A mode=observe dir=enter orig=0100fd7f000000 new=0100fd7f000000 mutated=False |
+[TAP] t=1790610136458 phase=A mode=observe dir=enter orig=0100ff8f000000 new=0100ff8f000000 mutated=False |
+[TAP] t=1790610136466 phase=A mode=observe dir=enter orig=0100ffbf000000 new=0100ffbf000000 mutated=False |
+[TAP] t=1790610136466 phase=A mode=observe dir=enter orig=0100ffcf000000 new=0100ffcf000000 mutated=False |
+[TAP] t=1790610136473 phase=A mode=observe dir=enter orig=010000f0000000 new=010000f0000000 mutated=False |
+[TAP] t=1790610136489 phase=A mode=observe dir=enter orig=01000360010000 new=01000360010000 mutated=False |
+[TAP] t=1790610136496 phase=A mode=observe dir=enter orig=01000460010000 new=01000460010000 mutated=False |
+[TAP] t=1790610136504 phase=A mode=observe dir=enter orig=01000570010000 new=01000570010000 mutated=False |
+[TAP] t=1790610136511 phase=A mode=observe dir=enter orig=01000870010000 new=01000870010000 mutated=False |
+[TAP] t=1790610136519 phase=A mode=observe dir=enter orig=01000720010000 new=01000720010000 mutated=False |
+[TAP] t=1790610136526 phase=A mode=observe dir=enter orig=01000920010000 new=01000920010000 mutated=False |
+[TAP] t=1790610136534 phase=A mode=observe dir=enter orig=01000910010000 new=01000910010000 mutated=False |
+[TAP] t=1790610136541 phase=A mode=observe dir=enter orig=01000b10010000 new=01000b10010000 mutated=False |
+[TAP] t=1790610136556 phase=A mode=observe dir=enter orig=01000c10010000 new=01000c10010000 mutated=False |
+[TAP] t=1790610136556 phase=A mode=observe dir=enter orig=01000c00010000 new=01000c00010000 mutated=False |
+[TAP] t=1790610136564 phase=A mode=observe dir=enter orig=01000df0000000 new=01000df0000000 mutated=False |
+[TAP] t=1790610136571 phase=A mode=observe dir=enter orig=01000d00010000 new=01000d00010000 mutated=False |
+[TAP] t=1790610136579 phase=A mode=observe dir=enter orig=01000de0000000 new=01000de0000000 mutated=False |
+[TAP] t=1790610136586 phase=A mode=observe dir=enter orig=01000ef0000000 new=01000ef0000000 mutated=False |
+[TAP] t=1790610136594 phase=A mode=observe dir=enter orig=01000dd0000000 new=01000dd0000000 mutated=False |
+[TAP] t=1790610136609 phase=A mode=observe dir=enter orig=01000f10010000 new=01000f10010000 mutated=False |
+[TAP] t=1790610136616 phase=A mode=observe dir=enter orig=01001000010000 new=01001000010000 mutated=False |
+[TAP] t=1790610136622 phase=A mode=observe dir=enter orig=01000ff0000000 new=01000ff0000000 mutated=False |
+[TAP] t=1790610136632 phase=A mode=observe dir=enter orig=01000fe0000000 new=01000fe0000000 mutated=False |
+[TAP] t=1790610136639 phase=A mode=observe dir=enter orig=01000bb0000000 new=01000bb0000000 mutated=False |
+[TAP] t=1790610136646 phase=A mode=observe dir=enter orig=01000a90000000 new=01000a90000000 mutated=False |
+[TAP] t=1790610136653 phase=A mode=observe dir=enter orig=01000980000000 new=01000980000000 mutated=False |
+[TAP] t=1790610136661 phase=A mode=observe dir=enter orig=01000970000000 new=01000970000000 mutated=False |
+[TAP] t=1790610136668 phase=A mode=observe dir=enter orig=01000860000000 new=01000860000000 mutated=False |
+[TAP] t=1790610136676 phase=A mode=observe dir=enter orig=01000750000000 new=01000750000000 mutated=False |
+[TAP] t=1790610136684 phase=A mode=observe dir=enter orig=01000550000000 new=01000550000000 mutated=False |
+[TAP] t=1790610136691 phase=A mode=observe dir=enter orig=01000540000000 new=01000540000000 mutated=False |
+[TAP] t=1790610136699 phase=A mode=observe dir=enter orig=01000530000000 new=01000530000000 mutated=False |
+[TAP] t=1790610136707 phase=A mode=observe dir=enter orig=01000330000000 new=01000330000000 mutated=False |
+[TAP] t=1790610136714 phase=A mode=observe dir=enter orig=01000320000000 new=01000320000000 mutated=False |
+[TAP] t=1790610136736 phase=A mode=observe dir=enter orig=01000420000000 new=01000420000000 mutated=False |
+[TAP] t=1790610136736 phase=A mode=observe dir=enter orig=01000220000000 new=01000220000000 mutated=False |
+[TAP] t=1790610136751 phase=A mode=observe dir=enter orig=01000320000000 new=01000320000000 mutated=False |
+[TAP] t=1790610136774 phase=A mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610136781 phase=A mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610136789 phase=A mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610136796 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610136804 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610136811 phase=A mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610136818 phase=A mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610136826 phase=A mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610136834 phase=A mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610136841 phase=A mode=observe dir=enter orig=01000140000000 new=01000140000000 mutated=False |
+[TAP] t=1790610136856 phase=A mode=observe dir=enter orig=01000160000000 new=01000160000000 mutated=False |
+[TAP] t=1790610136864 phase=A mode=observe dir=enter orig=01000050000000 new=01000050000000 mutated=False |
+[TAP] t=1790610136871 phase=A mode=observe dir=enter orig=01000050000000 new=01000050000000 mutated=False |
+[TAP] t=1790610136879 phase=A mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610136886 phase=A mode=observe dir=enter orig=0100ff3f000000 new=0100ff3f000000 mutated=False |
+[TAP] t=1790610136894 phase=A mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610136902 phase=A mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610136909 phase=A mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610136916 phase=A mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610136923 phase=A mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610136931 phase=A mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610136938 phase=A mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610136946 phase=A mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610136961 phase=A mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610136962 phase=A mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610136969 phase=A mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610136976 phase=A mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610136984 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610136991 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610136999 phase=A mode=observe dir=enter orig=0100fdefff0000 new=0100fdefff0000 mutated=False |
+[TAP] t=1790610137014 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137021 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137021 phase=A mode=observe dir=enter orig=0100fddfff0000 new=0100fddfff0000 mutated=False |
+[TAP] t=1790610137029 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137036 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137044 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610137051 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137059 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137066 phase=A mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137074 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137081 phase=A mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610137096 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610137104 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610137119 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610137126 phase=A mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610137155 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137157 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+
+>>> 阶段 S（8s，observe）：对照 S（注入标志）：请不要按键——脚本会自动用 SendInput 注入右 Alt。 期望读到 VK_RMENU 且 injected=1。
+[TAP] t=1790610137164 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137170 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137179 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137186 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137194 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137201 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137208 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137231 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137238 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137351 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137352 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+  [心跳] phase=S mode=observe 命中=493 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610137359 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610137373 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137381 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137389 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137396 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137403 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610137412 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137426 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137442 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610137449 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610137456 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610137464 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610137471 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610137478 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610137495 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610137501 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610137508 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610137517 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610137524 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610137531 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137539 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137547 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137562 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610137569 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610137726 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610137726 phase=S mode=observe dir=enter orig=01000310000000 new=01000310000000 mutated=False |
+[TAP] t=1790610137742 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137748 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137755 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137764 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137771 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610137779 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610137787 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610137794 phase=S mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610137802 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610137808 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137824 phase=S mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610137831 phase=S mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610137838 phase=S mode=observe dir=enter orig=01000600000000 new=01000600000000 mutated=False |
+[TAP] t=1790610137846 phase=S mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610137853 phase=S mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610137861 phase=S mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610137869 phase=S mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610137876 phase=S mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610137884 phase=S mode=observe dir=enter orig=01000500000000 new=01000500000000 mutated=False |
+[TAP] t=1790610137891 phase=S mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610137899 phase=S mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610137906 phase=S mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610137913 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137922 phase=S mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610137929 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610137944 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610137966 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610138116 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610138131 phase=S mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610138139 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610138146 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610138153 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610138162 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610138169 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610138176 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610138184 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610138191 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610138206 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+  [心跳] phase=S mode=observe 命中=557 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610138417 phase=S mode=observe dir=enter orig=01020000000000 new=01020000000000 mutated=False |
+[TAP] t=1790610138536 phase=S mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+[TAP] t=1790610139069 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139076 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139077 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610139084 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139091 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139099 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139114 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610139121 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610139129 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139137 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610139144 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139151 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610139166 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610139167 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139173 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610139181 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610139188 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139196 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139204 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139212 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139219 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139233 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139241 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139249 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139257 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139264 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139279 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139286 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610139294 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139301 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139308 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139316 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610139324 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+  [心跳] phase=S mode=observe 命中=592 改写=0 成功=0 失败=0 复原=0
+  [自动对照] SendInput 注入右 Alt（必然带 LLKHF_INJECTED）……
+[LL] t=1790610139531 phase=S vk=0xA5 up=0 flags=0x0030 injected=1 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[TAP] t=1790610139549 phase=S mode=observe dir=enter orig=01020000000000 new=01020000000000 mutated=False |
+[TAP] t=1790610139669 phase=S mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+[LL] t=1790610139734 phase=S vk=0xA5 up=1 flags=0x0090 injected=1 lower_il=0 altdown=0 | VK_RMENU(右Alt) 释放
+  [自动对照] SendInput 返回 True（0 表示被 UIPI 拦下，判据不可用）
+[TAP] t=1790610140127 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610140142 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610140149 phase=S mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610140157 phase=S mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610140164 phase=S mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610140171 phase=S mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610140179 phase=S mode=observe dir=enter orig=010002e0ff0000 new=010002e0ff0000 mutated=False |
+[TAP] t=1790610140186 phase=S mode=observe dir=enter orig=010002e0ff0000 new=010002e0ff0000 mutated=False |
+[TAP] t=1790610140194 phase=S mode=observe dir=enter orig=010003e0ff0000 new=010003e0ff0000 mutated=False |
+[TAP] t=1790610140201 phase=S mode=observe dir=enter orig=010003e0ff0000 new=010003e0ff0000 mutated=False |
+[TAP] t=1790610140209 phase=S mode=observe dir=enter orig=010004e0ff0000 new=010004e0ff0000 mutated=False |
+[TAP] t=1790610140223 phase=S mode=observe dir=enter orig=010007d0ff0000 new=010007d0ff0000 mutated=False |
+[TAP] t=1790610140231 phase=S mode=observe dir=enter orig=010007e0ff0000 new=010007e0ff0000 mutated=False |
+[TAP] t=1790610140239 phase=S mode=observe dir=enter orig=010007e0ff0000 new=010007e0ff0000 mutated=False |
+[TAP] t=1790610140246 phase=S mode=observe dir=enter orig=010007f0ff0000 new=010007f0ff0000 mutated=False |
+[TAP] t=1790610140254 phase=S mode=observe dir=enter orig=010005f0ff0000 new=010005f0ff0000 mutated=False |
+[TAP] t=1790610140262 phase=S mode=observe dir=enter orig=01000400000000 new=01000400000000 mutated=False |
+[TAP] t=1790610140269 phase=S mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610140276 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610140367 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610140367 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610140374 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610140388 phase=S mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+  [心跳] phase=S mode=observe 命中=617 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610140396 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610140403 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610140419 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610140427 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610140433 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610140449 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610140456 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610140464 phase=S mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610140472 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610140479 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610140487 phase=S mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610140494 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140502 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140509 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140524 phase=S mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610140539 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140546 phase=S mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610140561 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140569 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140576 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140584 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610140592 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140599 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140606 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610140614 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610140622 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140629 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610140637 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140644 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610140659 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140666 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140681 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610140696 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140711 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610140718 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140733 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140749 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610140832 phase=S mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+[TAP] t=1790610140914 phase=S mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+  [心跳] phase=S mode=observe 命中=656 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610141401 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610141402 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610141409 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610141416 phase=S mode=observe dir=enter orig=0100ffefff0000 new=0100ffefff0000 mutated=False |
+[TAP] t=1790610141424 phase=S mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610141431 phase=S mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610141438 phase=S mode=observe dir=enter orig=0100fd9fff0000 new=0100fd9fff0000 mutated=False |
+[TAP] t=1790610141446 phase=S mode=observe dir=enter orig=0100fd8fff0000 new=0100fd8fff0000 mutated=False |
+[TAP] t=1790610141454 phase=S mode=observe dir=enter orig=0100fb6fff0000 new=0100fb6fff0000 mutated=False |
+[TAP] t=1790610141461 phase=S mode=observe dir=enter orig=0100fb5fff0000 new=0100fb5fff0000 mutated=False |
+[TAP] t=1790610141468 phase=S mode=observe dir=enter orig=0100fb3fff0000 new=0100fb3fff0000 mutated=False |
+[TAP] t=1790610141476 phase=S mode=observe dir=enter orig=0100fa3fff0000 new=0100fa3fff0000 mutated=False |
+[TAP] t=1790610141484 phase=S mode=observe dir=enter orig=0100fb4fff0000 new=0100fb4fff0000 mutated=False |
+[TAP] t=1790610141499 phase=S mode=observe dir=enter orig=0100fb0fff0000 new=0100fb0fff0000 mutated=False |
+[TAP] t=1790610141507 phase=S mode=observe dir=enter orig=0100fc2fff0000 new=0100fc2fff0000 mutated=False |
+[TAP] t=1790610141514 phase=S mode=observe dir=enter orig=0100fc2fff0000 new=0100fc2fff0000 mutated=False |
+[TAP] t=1790610141521 phase=S mode=observe dir=enter orig=0100fd2fff0000 new=0100fd2fff0000 mutated=False |
+[TAP] t=1790610141529 phase=S mode=observe dir=enter orig=0100ff7fff0000 new=0100ff7fff0000 mutated=False |
+[TAP] t=1790610141536 phase=S mode=observe dir=enter orig=0100fe8fff0000 new=0100fe8fff0000 mutated=False |
+[TAP] t=1790610141544 phase=S mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610141551 phase=S mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610141559 phase=S mode=observe dir=enter orig=0100fdcfff0000 new=0100fdcfff0000 mutated=False |
+[TAP] t=1790610141566 phase=S mode=observe dir=enter orig=0100febfff0000 new=0100febfff0000 mutated=False |
+[TAP] t=1790610141574 phase=S mode=observe dir=enter orig=0100fe9fff0000 new=0100fe9fff0000 mutated=False |
+[TAP] t=1790610141582 phase=S mode=observe dir=enter orig=0100fdafff0000 new=0100fdafff0000 mutated=False |
+[TAP] t=1790610141589 phase=S mode=observe dir=enter orig=0100fe8fff0000 new=0100fe8fff0000 mutated=False |
+[TAP] t=1790610141596 phase=S mode=observe dir=enter orig=0100fe9fff0000 new=0100fe9fff0000 mutated=False |
+[TAP] t=1790610141604 phase=S mode=observe dir=enter orig=0100ff9fff0000 new=0100ff9fff0000 mutated=False |
+[TAP] t=1790610141619 phase=S mode=observe dir=enter orig=0100fe9fff0000 new=0100fe9fff0000 mutated=False |
+[TAP] t=1790610141626 phase=S mode=observe dir=enter orig=0100fe9fff0000 new=0100fe9fff0000 mutated=False |
+[TAP] t=1790610141633 phase=S mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610141641 phase=S mode=observe dir=enter orig=0100feafff0000 new=0100feafff0000 mutated=False |
+[TAP] t=1790610141648 phase=S mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610141656 phase=S mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610141664 phase=S mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610141671 phase=S mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610141679 phase=S mode=observe dir=enter orig=0100ffefff0000 new=0100ffefff0000 mutated=False |
+[TAP] t=1790610141686 phase=S mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610141694 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610142069 phase=S mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610142091 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610142106 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610142107 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142114 phase=S mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610142121 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142129 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142137 phase=S mode=observe dir=enter orig=0100ff3f000000 new=0100ff3f000000 mutated=False |
+[TAP] t=1790610142144 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142151 phase=S mode=observe dir=enter orig=0100ff4f000000 new=0100ff4f000000 mutated=False |
+[TAP] t=1790610142159 phase=S mode=observe dir=enter orig=0100ff4f000000 new=0100ff4f000000 mutated=False |
+[TAP] t=1790610142166 phase=S mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610142174 phase=S mode=observe dir=enter orig=0100ff4f000000 new=0100ff4f000000 mutated=False |
+[TAP] t=1790610142182 phase=S mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610142197 phase=S mode=observe dir=enter orig=0100ff6f000000 new=0100ff6f000000 mutated=False |
+[TAP] t=1790610142204 phase=S mode=observe dir=enter orig=0100ff5f000000 new=0100ff5f000000 mutated=False |
+[TAP] t=1790610142211 phase=S mode=observe dir=enter orig=01000040000000 new=01000040000000 mutated=False |
+[TAP] t=1790610142219 phase=S mode=observe dir=enter orig=0100ff5f000000 new=0100ff5f000000 mutated=False |
+[TAP] t=1790610142226 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142234 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142242 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142249 phase=S mode=observe dir=enter orig=0100ff3f000000 new=0100ff3f000000 mutated=False |
+[TAP] t=1790610142256 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142264 phase=S mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610142271 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142279 phase=S mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610142286 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142293 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142301 phase=S mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610142316 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142324 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142332 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610142339 phase=S mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610142346 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142353 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142361 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142369 phase=S mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610142376 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142384 phase=S mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610142391 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+  [心跳] phase=S mode=observe 命中=735 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610142421 phase=S mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610142518 phase=S mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+[TAP] t=1790610142586 phase=S mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+[TAP] t=1790610142669 phase=S mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610142699 phase=S mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610142706 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610142713 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610142721 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610142729 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610142737 phase=S mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610142744 phase=S mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610142752 phase=S mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610142759 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610142766 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610142789 phase=S mode=observe dir=enter orig=010001d0ff0000 new=010001d0ff0000 mutated=False |
+[TAP] t=1790610142804 phase=S mode=observe dir=enter orig=010002d0ff0000 new=010002d0ff0000 mutated=False |
+[TAP] t=1790610142811 phase=S mode=observe dir=enter orig=010002d0ff0000 new=010002d0ff0000 mutated=False |
+[TAP] t=1790610142827 phase=S mode=observe dir=enter orig=010001d0ff0000 new=010001d0ff0000 mutated=False |
+[TAP] t=1790610142842 phase=S mode=observe dir=enter orig=010001d0ff0000 new=010001d0ff0000 mutated=False |
+[TAP] t=1790610142857 phase=S mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610142992 phase=S mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610143006 phase=S mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610143014 phase=S mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610143021 phase=S mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610143029 phase=S mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610143043 phase=S mode=observe dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610143051 phase=S mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610143059 phase=S mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610143066 phase=S mode=observe dir=enter orig=0100fc2f000000 new=0100fc2f000000 mutated=False |
+[TAP] t=1790610143074 phase=S mode=observe dir=enter orig=0100fb1f000000 new=0100fb1f000000 mutated=False |
+[TAP] t=1790610143081 phase=S mode=observe dir=enter orig=0100fb1f000000 new=0100fb1f000000 mutated=False |
+[TAP] t=1790610143089 phase=S mode=observe dir=enter orig=0100f91f000000 new=0100f91f000000 mutated=False |
+[TAP] t=1790610143097 phase=S mode=observe dir=enter orig=0100f81f000000 new=0100f81f000000 mutated=False |
+[TAP] t=1790610143104 phase=S mode=observe dir=enter orig=0100f51f000000 new=0100f51f000000 mutated=False |
+[TAP] t=1790610143111 phase=S mode=observe dir=enter orig=0100f41f000000 new=0100f41f000000 mutated=False |
+[TAP] t=1790610143119 phase=S mode=observe dir=enter orig=0100f20f000000 new=0100f20f000000 mutated=False |
+[TAP] t=1790610143126 phase=S mode=observe dir=enter orig=0100f10f000000 new=0100f10f000000 mutated=False |
+[TAP] t=1790610143134 phase=S mode=observe dir=enter orig=0100ef0f000000 new=0100ef0f000000 mutated=False |
+[TAP] t=1790610143142 phase=S mode=observe dir=enter orig=0100efefff0000 new=0100efefff0000 mutated=False |
+[TAP] t=1790610143149 phase=S mode=observe dir=enter orig=0100eeefff0000 new=0100eeefff0000 mutated=False |
+[TAP] t=1790610143164 phase=S mode=observe dir=enter orig=0100e9dfff0000 new=0100e9dfff0000 mutated=False |
+[TAP] t=1790610143172 phase=S mode=observe dir=enter orig=0100e8cfff0000 new=0100e8cfff0000 mutated=False |
+[TAP] t=1790610143178 phase=S mode=observe dir=enter orig=0100e8bfff0000 new=0100e8bfff0000 mutated=False |
+[TAP] t=1790610143186 phase=S mode=observe dir=enter orig=0100e7bfff0000 new=0100e7bfff0000 mutated=False |
+[TAP] t=1790610143194 phase=S mode=observe dir=enter orig=0100eabfff0000 new=0100eabfff0000 mutated=False |
+[TAP] t=1790610143202 phase=S mode=observe dir=enter orig=0100eabfff0000 new=0100eabfff0000 mutated=False |
+[TAP] t=1790610143209 phase=S mode=observe dir=enter orig=0100e9bfff0000 new=0100e9bfff0000 mutated=False |
+[TAP] t=1790610143216 phase=S mode=observe dir=enter orig=0100ebbfff0000 new=0100ebbfff0000 mutated=False |
+[TAP] t=1790610143223 phase=S mode=observe dir=enter orig=0100eccfff0000 new=0100eccfff0000 mutated=False |
+[TAP] t=1790610143231 phase=S mode=observe dir=enter orig=0100edcfff0000 new=0100edcfff0000 mutated=False |
+[TAP] t=1790610143239 phase=S mode=observe dir=enter orig=0100eedfff0000 new=0100eedfff0000 mutated=False |
+[TAP] t=1790610143246 phase=S mode=observe dir=enter orig=0100f0dfff0000 new=0100f0dfff0000 mutated=False |
+[TAP] t=1790610143254 phase=S mode=observe dir=enter orig=0100efefff0000 new=0100efefff0000 mutated=False |
+[TAP] t=1790610143262 phase=S mode=observe dir=enter orig=0100f1dfff0000 new=0100f1dfff0000 mutated=False |
+[TAP] t=1790610143276 phase=S mode=observe dir=enter orig=0100f2dfff0000 new=0100f2dfff0000 mutated=False |
+[TAP] t=1790610143284 phase=S mode=observe dir=enter orig=0100f1efff0000 new=0100f1efff0000 mutated=False |
+[TAP] t=1790610143291 phase=S mode=observe dir=enter orig=0100f2dfff0000 new=0100f2dfff0000 mutated=False |
+[TAP] t=1790610143299 phase=S mode=observe dir=enter orig=0100f4efff0000 new=0100f4efff0000 mutated=False |
+[TAP] t=1790610143307 phase=S mode=observe dir=enter orig=0100f5efff0000 new=0100f5efff0000 mutated=False |
+[TAP] t=1790610143314 phase=S mode=observe dir=enter orig=0100f9ffff0000 new=0100f9ffff0000 mutated=False |
+[TAP] t=1790610143322 phase=S mode=observe dir=enter orig=0100faffff0000 new=0100faffff0000 mutated=False |
+[TAP] t=1790610143329 phase=S mode=observe dir=enter orig=0100faffff0000 new=0100faffff0000 mutated=False |
+[TAP] t=1790610143336 phase=S mode=observe dir=enter orig=0100fbffff0000 new=0100fbffff0000 mutated=False |
+[TAP] t=1790610143344 phase=S mode=observe dir=enter orig=0100fbffff0000 new=0100fbffff0000 mutated=False |
+[TAP] t=1790610143352 phase=S mode=observe dir=enter orig=0100fcffff0000 new=0100fcffff0000 mutated=False |
+[TAP] t=1790610143359 phase=S mode=observe dir=enter orig=0100fdffff0000 new=0100fdffff0000 mutated=False |
+[TAP] t=1790610143366 phase=S mode=observe dir=enter orig=0100fc0f000000 new=0100fc0f000000 mutated=False |
+[TAP] t=1790610143374 phase=S mode=observe dir=enter orig=0100fdffff0000 new=0100fdffff0000 mutated=False |
+[TAP] t=1790610143381 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610143389 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610143405 phase=S mode=observe dir=enter orig=0100fdffff0000 new=0100fdffff0000 mutated=False |
+  [心跳] phase=S mode=observe 命中=806 改写=0 成功=0 失败=0 复原=0
+[TAP] t=1790610143412 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610143419 phase=S mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610143434 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610143449 phase=S mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610143464 phase=S mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610143509 phase=S mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610143562 phase=S mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610143884 phase=S mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+[TAP] t=1790610143997 phase=S mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+  [心跳] phase=S mode=observe 命中=815 改写=0 成功=0 失败=0 复原=0
+
+>>> 阶段 B（16s，rewrite→RightAlt）：被测阶段 B：请按住 主页 ×2，每次按住约 0.5~1 秒再松开。 期望读到合成 Alt 键（见启动日志）且 injected=0，同时不再出现 VK_HOME。
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+  [心跳] phase=B mode=rewrite 命中=815 改写=0 成功=0 失败=0 复原=0
+[LL] t=1790610152871 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[TAP] t=1790610152869 phase=B mode=rewrite dir=enter orig=0100004a0000000000 new=010000e60000000000 mutated=True |  改写 0100004a0000000000→010000e60000000000
+[TAP] t=1790610152869 phase=B dir=leave ret=0 out=010000e60000000000 detail=restored |
+[LL] t=1790610153378 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153409 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153440 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153471 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153502 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+  [心跳] phase=B mode=rewrite 命中=816 改写=1 成功=1 失败=0 复原=1
+[LL] t=1790610153549 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153580 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153610 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153642 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153673 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153704 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153736 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153767 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153815 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153846 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153877 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153909 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153940 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610153972 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154003 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154034 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154065 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154096 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154144 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154175 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154207 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154237 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154268 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154299 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154331 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154362 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154393 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154440 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154471 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154502 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+  [心跳] phase=B mode=rewrite 命中=816 改写=1 成功=1 失败=0 复原=1
+[LL] t=1790610154533 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154564 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154594 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154626 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154672 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154703 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154734 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154765 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154797 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154829 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154859 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154891 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154921 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154967 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610154998 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610155030 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610155060 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610155091 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610155105 phase=B vk=0xA5 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_RMENU(右Alt) 释放
+[TAP] t=1790610155104 phase=B mode=rewrite dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+[LL] t=1790610155110 phase=B vk=0xFC up=0 flags=0x0010 injected=1 lower_il=0 altdown=0 | 0xFC 按下
+[LL] t=1790610155112 phase=B vk=0xFC up=1 flags=0x0090 injected=1 lower_il=0 altdown=0 | 0xFC 释放
+[LL] t=1790610155118 phase=B vk=0xA5 up=1 flags=0x0091 injected=1 lower_il=0 altdown=0 | VK_RMENU(右Alt) 释放
+  [心跳] phase=B mode=rewrite 命中=817 改写=1 成功=1 失败=0 复原=1
+  [心跳] phase=B mode=rewrite 命中=817 改写=1 成功=1 失败=0 复原=1
+[LL] t=1790610156832 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[TAP] t=1790610156830 phase=B mode=rewrite dir=enter orig=0100004a0000000000 new=010000e60000000000 mutated=True |  改写 0100004a0000000000→010000e60000000000
+[TAP] t=1790610156830 phase=B dir=leave ret=0 out=010000e60000000000 detail=restored |
+[LL] t=1790610157338 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157368 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157399 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157446 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157478 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157509 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+  [心跳] phase=B mode=rewrite 命中=818 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610157541 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157572 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157603 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157635 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157667 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157698 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157729 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157776 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157807 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157838 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157868 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157899 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157930 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157963 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610157994 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158039 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158071 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158102 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158133 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158164 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158195 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158227 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158259 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158290 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158336 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158368 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158397 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158428 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158460 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158491 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158521 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158553 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+  [心跳] phase=B mode=rewrite 命中=818 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610158599 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158630 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158662 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158692 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158724 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158754 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158785 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158831 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158863 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158893 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158926 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158956 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610158988 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159019 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159050 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159096 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159126 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159157 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159187 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159217 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159248 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159279 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159326 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159358 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159389 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159421 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159454 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159484 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159514 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+[LL] t=1790610159545 phase=B vk=0xA5 up=0 flags=0x0021 injected=0 lower_il=0 altdown=1 | VK_RMENU(右Alt) 按下
+  [心跳] phase=B mode=rewrite 命中=818 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610159561 phase=B vk=0xA5 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_RMENU(右Alt) 释放
+[TAP] t=1790610159559 phase=B mode=rewrite dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+[LL] t=1790610159565 phase=B vk=0xFC up=0 flags=0x0010 injected=1 lower_il=0 altdown=0 | 0xFC 按下
+[LL] t=1790610159567 phase=B vk=0xFC up=1 flags=0x0090 injected=1 lower_il=0 altdown=0 | 0xFC 释放
+[LL] t=1790610159568 phase=B vk=0xA5 up=1 flags=0x0091 injected=1 lower_il=0 altdown=0 | VK_RMENU(右Alt) 释放
+[TAP] t=1790610160257 phase=B mode=rewrite dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610160279 phase=B mode=rewrite dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610160295 phase=B mode=rewrite dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610160310 phase=B mode=rewrite dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610160317 phase=B mode=rewrite dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610160324 phase=B mode=rewrite dir=enter orig=0100ff2f000000 new=0100ff2f000000 mutated=False |
+[TAP] t=1790610160331 phase=B mode=rewrite dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610160354 phase=B mode=rewrite dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610160361 phase=B mode=rewrite dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610160370 phase=B mode=rewrite dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610160437 phase=B mode=rewrite dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610160489 phase=B mode=rewrite dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+  [心跳] phase=B mode=rewrite 命中=831 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610160782 phase=B mode=rewrite dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610160834 phase=B mode=rewrite dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610160872 phase=B mode=rewrite dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610160902 phase=B mode=rewrite dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610160924 phase=B mode=rewrite dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610160939 phase=B mode=rewrite dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610160947 phase=B mode=rewrite dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610160969 phase=B mode=rewrite dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610161006 phase=B mode=rewrite dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610161029 phase=B mode=rewrite dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+
+>>> 阶段 C（12s，observe）：恢复对照 C：请再按 主页 ×2。期望 VK_HOME 重新出现（无残留）。
+  [心跳] phase=C mode=observe 命中=841 改写=2 成功=2 失败=0 复原=2
+  [心跳] phase=C mode=observe 命中=841 改写=2 成功=2 失败=0 复原=2
+  [心跳] phase=C mode=observe 命中=841 改写=2 成功=2 失败=0 复原=2
+  [心跳] phase=C mode=observe 命中=841 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610164996 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165094 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610165109 phase=C mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610165117 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165124 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165147 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165154 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610165245 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165274 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165290 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610165297 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165304 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165312 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165320 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165342 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610165357 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165364 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610165372 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165379 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165387 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610165394 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165417 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610165432 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610165478 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+  [心跳] phase=C mode=observe 命中=865 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610165667 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610165666 phase=C mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+[LL] t=1790610166170 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166202 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166248 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166278 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166310 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166340 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166372 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166403 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166434 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166466 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166497 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166543 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166575 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166605 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+  [心跳] phase=C mode=observe 命中=866 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610166637 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166668 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166699 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166731 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166763 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166809 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166840 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166871 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166902 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166934 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166965 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610166996 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167027 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167060 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167106 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167137 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610167157 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[LL] t=1790610167168 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167199 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167230 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167261 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167292 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167323 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167368 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167399 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167429 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167460 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167492 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167522 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167554 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167600 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167631 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+  [心跳] phase=C mode=observe 命中=867 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610167662 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167693 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167725 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167756 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167787 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167818 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167850 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167896 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167927 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167958 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610167989 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168019 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168050 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168082 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168114 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168158 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168191 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168222 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168253 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168284 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168315 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168346 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168378 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168425 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168456 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168487 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168518 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168548 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168579 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168611 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168642 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+  [心跳] phase=C mode=observe 命中=867 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610168688 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168718 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168749 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610168761 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610168769 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[LL] t=1790610168781 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610168784 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[LL] t=1790610168812 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168843 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168874 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610168906 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610168942 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[LL] t=1790610168951 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610168957 phase=C mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610168965 phase=C mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610168972 phase=C mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610168979 phase=C mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[LL] t=1790610168982 phase=C vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610168981 phase=C mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+[TAP] t=1790610168987 phase=C mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610168994 phase=C mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610169002 phase=C mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610169017 phase=C mode=observe dir=enter orig=01000300000000 new=01000300000000 mutated=False |
+[TAP] t=1790610169024 phase=C mode=observe dir=enter orig=01000200000000 new=01000200000000 mutated=False |
+[TAP] t=1790610169031 phase=C mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610169039 phase=C mode=observe dir=enter orig=010002e0ff0000 new=010002e0ff0000 mutated=False |
+[TAP] t=1790610169047 phase=C mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610169062 phase=C mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610169077 phase=C mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610169369 phase=C mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610169414 phase=C mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610169429 phase=C mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610169602 phase=C mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610169632 phase=C mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610169639 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610169646 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+  [心跳] phase=C mode=observe 命中=893 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610169654 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610169662 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610169677 phase=C mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610169692 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610170141 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610170142 phase=C mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610170149 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610170165 phase=C mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610170172 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170180 phase=C mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610170187 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170194 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610170202 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610170209 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610170216 phase=C mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610170224 phase=C mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610170232 phase=C mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610170239 phase=C mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610170247 phase=C mode=observe dir=enter orig=0100fd0f000000 new=0100fd0f000000 mutated=False |
+[TAP] t=1790610170255 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610170262 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610170269 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170285 phase=C mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610170291 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170307 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170322 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170329 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170337 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170352 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170375 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170382 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170592 phase=C mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610170592 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610170599 phase=C mode=observe dir=enter orig=0100feefff0000 new=0100feefff0000 mutated=False |
+[TAP] t=1790610170607 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610170614 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610170622 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610170637 phase=C mode=observe dir=enter orig=0100feffff0000 new=0100feffff0000 mutated=False |
+[TAP] t=1790610170652 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610170652 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+  [心跳] phase=C mode=observe 命中=933 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610170674 phase=C mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610170825 phase=C mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+[TAP] t=1790610170914 phase=C mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+[LL] t=1790610171322 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610171321 phase=C mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+  [心跳] phase=C mode=observe 命中=937 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610171831 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610171862 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610171894 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610171925 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610171955 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172001 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172032 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172063 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172095 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172126 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172157 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172188 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172219 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172265 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172296 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172328 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172359 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172391 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172422 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172454 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172484 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172529 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172561 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172592 phase=C vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[LL] t=1790610172612 phase=C vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610172610 phase=C mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+  [心跳] phase=C mode=observe 命中=938 改写=2 成功=2 失败=0 复原=2
+
+>>> 阶段 post（3s，observe）：收尾：请停手。
+[TAP] t=1790610173337 phase=post mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610173389 phase=post mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610173397 phase=post mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610173405 phase=post mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610173412 phase=post mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610173427 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610173494 phase=post mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610173510 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610173517 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610173524 phase=post mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610173539 phase=post mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610173554 phase=post mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610173569 phase=post mode=observe dir=enter orig=01000030000000 new=01000030000000 mutated=False |
+[TAP] t=1790610173577 phase=post mode=observe dir=enter orig=01000130000000 new=01000130000000 mutated=False |
+[TAP] t=1790610173584 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610173599 phase=post mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610173607 phase=post mode=observe dir=enter orig=01000130000000 new=01000130000000 mutated=False |
+[TAP] t=1790610173622 phase=post mode=observe dir=enter orig=01000220000000 new=01000220000000 mutated=False |
+[TAP] t=1790610173629 phase=post mode=observe dir=enter orig=01000220000000 new=01000220000000 mutated=False |
+[TAP] t=1790610173637 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610173645 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610173652 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610173659 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610173674 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173682 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173689 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+  [心跳] phase=post mode=observe 命中=964 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610173704 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610173719 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173727 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610173734 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610173742 phase=post mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610173757 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173780 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173810 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610173824 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173840 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173869 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610173914 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610173937 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610173952 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610173974 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610174004 phase=post mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610174552 phase=post mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610174567 phase=post mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610174574 phase=post mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610174582 phase=post mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610174620 phase=post mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610174627 phase=post mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610174642 phase=post mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610174657 phase=post mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610174664 phase=post mode=observe dir=enter orig=01000210000000 new=01000210000000 mutated=False |
+[TAP] t=1790610174672 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610174679 phase=post mode=observe dir=enter orig=01000110000000 new=01000110000000 mutated=False |
+[TAP] t=1790610174702 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+  [心跳] phase=post mode=observe 命中=992 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610174709 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610174747 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610174755 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610174769 phase=post mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610174777 phase=post mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610174784 phase=post mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610174792 phase=post mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610174807 phase=post mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610174807 phase=post mode=observe dir=enter orig=0100fd5f000000 new=0100fd5f000000 mutated=False |
+[TAP] t=1790610174815 phase=post mode=observe dir=enter orig=0100fe5f000000 new=0100fe5f000000 mutated=False |
+[TAP] t=1790610174822 phase=post mode=observe dir=enter orig=0100fd5f000000 new=0100fd5f000000 mutated=False |
+[TAP] t=1790610174829 phase=post mode=observe dir=enter orig=0100fc6f000000 new=0100fc6f000000 mutated=False |
+[TAP] t=1790610174837 phase=post mode=observe dir=enter orig=0100fc6f000000 new=0100fc6f000000 mutated=False |
+[TAP] t=1790610174853 phase=post mode=observe dir=enter orig=0100fb8f000000 new=0100fb8f000000 mutated=False |
+[TAP] t=1790610174859 phase=post mode=observe dir=enter orig=0100fc8f000000 new=0100fc8f000000 mutated=False |
+[TAP] t=1790610174867 phase=post mode=observe dir=enter orig=0100fc6f000000 new=0100fc6f000000 mutated=False |
+[TAP] t=1790610174882 phase=post mode=observe dir=enter orig=0100fc5f000000 new=0100fc5f000000 mutated=False |
+[TAP] t=1790610174897 phase=post mode=observe dir=enter orig=0100fe3f000000 new=0100fe3f000000 mutated=False |
+[TAP] t=1790610174898 phase=post mode=observe dir=enter orig=0100ff3f000000 new=0100ff3f000000 mutated=False |
+[TAP] t=1790610174904 phase=post mode=observe dir=enter orig=0100ff3f000000 new=0100ff3f000000 mutated=False |
+[TAP] t=1790610174927 phase=post mode=observe dir=enter orig=0100ff3f000000 new=0100ff3f000000 mutated=False |
+[TAP] t=1790610174942 phase=post mode=observe dir=enter orig=01000020000000 new=01000020000000 mutated=False |
+[TAP] t=1790610174995 phase=post mode=observe dir=enter orig=01000010000000 new=01000010000000 mutated=False |
+[TAP] t=1790610175002 phase=post mode=observe dir=enter orig=0100ff0f000000 new=0100ff0f000000 mutated=False |
+[TAP] t=1790610175025 phase=post mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610175032 phase=post mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610175040 phase=post mode=observe dir=enter orig=0100fedfff0000 new=0100fedfff0000 mutated=False |
+[TAP] t=1790610175062 phase=post mode=observe dir=enter orig=0100febfff0000 new=0100febfff0000 mutated=False |
+[TAP] t=1790610175063 phase=post mode=observe dir=enter orig=0100ffbfff0000 new=0100ffbfff0000 mutated=False |
+[TAP] t=1790610175063 phase=post mode=observe dir=enter orig=0100ff9fff0000 new=0100ff9fff0000 mutated=False |
+[TAP] t=1790610175069 phase=post mode=observe dir=enter orig=01000070ff0000 new=01000070ff0000 mutated=False |
+[TAP] t=1790610175077 phase=post mode=observe dir=enter orig=0100ff5fff0000 new=0100ff5fff0000 mutated=False |
+[TAP] t=1790610175084 phase=post mode=observe dir=enter orig=01000060ff0000 new=01000060ff0000 mutated=False |
+[TAP] t=1790610175100 phase=post mode=observe dir=enter orig=01000080ff0000 new=01000080ff0000 mutated=False |
+[TAP] t=1790610175107 phase=post mode=observe dir=enter orig=01000160ff0000 new=01000160ff0000 mutated=False |
+[TAP] t=1790610175115 phase=post mode=observe dir=enter orig=01000310ff0000 new=01000310ff0000 mutated=False |
+[TAP] t=1790610175122 phase=post mode=observe dir=enter orig=010003a0fe0000 new=010003a0fe0000 mutated=False |
+[TAP] t=1790610175129 phase=post mode=observe dir=enter orig=01000420fe0000 new=01000420fe0000 mutated=False |
+[TAP] t=1790610175137 phase=post mode=observe dir=enter orig=01000300fe0000 new=01000300fe0000 mutated=False |
+[TAP] t=1790610175152 phase=post mode=observe dir=enter orig=010005b0fd0000 new=010005b0fd0000 mutated=False |
+[TAP] t=1790610175159 phase=post mode=observe dir=enter orig=01000400fe0000 new=01000400fe0000 mutated=False |
+[TAP] t=1790610175167 phase=post mode=observe dir=enter orig=01000640fe0000 new=01000640fe0000 mutated=False |
+[TAP] t=1790610175174 phase=post mode=observe dir=enter orig=010006a0fe0000 new=010006a0fe0000 mutated=False |
+[TAP] t=1790610175181 phase=post mode=observe dir=enter orig=01000550ff0000 new=01000550ff0000 mutated=False |
+[TAP] t=1790610175189 phase=post mode=observe dir=enter orig=01000670ff0000 new=01000670ff0000 mutated=False |
+[TAP] t=1790610175197 phase=post mode=observe dir=enter orig=01000590ff0000 new=01000590ff0000 mutated=False |
+[TAP] t=1790610175204 phase=post mode=observe dir=enter orig=010004b0ff0000 new=010004b0ff0000 mutated=False |
+[TAP] t=1790610175212 phase=post mode=observe dir=enter orig=010004b0ff0000 new=010004b0ff0000 mutated=False |
+[TAP] t=1790610175220 phase=post mode=observe dir=enter orig=010004c0ff0000 new=010004c0ff0000 mutated=False |
+[TAP] t=1790610175227 phase=post mode=observe dir=enter orig=010004d0ff0000 new=010004d0ff0000 mutated=False |
+[TAP] t=1790610175234 phase=post mode=observe dir=enter orig=010004d0ff0000 new=010004d0ff0000 mutated=False |
+[TAP] t=1790610175242 phase=post mode=observe dir=enter orig=010003d0ff0000 new=010003d0ff0000 mutated=False |
+[TAP] t=1790610175250 phase=post mode=observe dir=enter orig=010003e0ff0000 new=010003e0ff0000 mutated=False |
+[TAP] t=1790610175257 phase=post mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610175490 phase=post mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610175512 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610175519 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610175527 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610175542 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610175550 phase=post mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610175580 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610175647 phase=post mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610175662 phase=post mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610175669 phase=post mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610175684 phase=post mode=observe dir=enter orig=010002f0ff0000 new=010002f0ff0000 mutated=False |
+[TAP] t=1790610175692 phase=post mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610175699 phase=post mode=observe dir=enter orig=010003e0ff0000 new=010003e0ff0000 mutated=False |
+[TAP] t=1790610175707 phase=post mode=observe dir=enter orig=010002d0ff0000 new=010002d0ff0000 mutated=False |
+[TAP] t=1790610175714 phase=post mode=observe dir=enter orig=010003c0ff0000 new=010003c0ff0000 mutated=False |
+  [心跳] phase=post mode=observe 命中=1061 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610175722 phase=post mode=observe dir=enter orig=010002c0ff0000 new=010002c0ff0000 mutated=False |
+[TAP] t=1790610175730 phase=post mode=observe dir=enter orig=010003c0ff0000 new=010003c0ff0000 mutated=False |
+[TAP] t=1790610175737 phase=post mode=observe dir=enter orig=010002b0ff0000 new=010002b0ff0000 mutated=False |
+[TAP] t=1790610175744 phase=post mode=observe dir=enter orig=010003a0ff0000 new=010003a0ff0000 mutated=False |
+[TAP] t=1790610175752 phase=post mode=observe dir=enter orig=01000390ff0000 new=01000390ff0000 mutated=False |
+[TAP] t=1790610175759 phase=post mode=observe dir=enter orig=01000470ff0000 new=01000470ff0000 mutated=False |
+[TAP] t=1790610175767 phase=post mode=observe dir=enter orig=01000450ff0000 new=01000450ff0000 mutated=False |
+[TAP] t=1790610175774 phase=post mode=observe dir=enter orig=01000430ff0000 new=01000430ff0000 mutated=False |
+[TAP] t=1790610175782 phase=post mode=observe dir=enter orig=01000420ff0000 new=01000420ff0000 mutated=False |
+[TAP] t=1790610175789 phase=post mode=observe dir=enter orig=01000400ff0000 new=01000400ff0000 mutated=False |
+[TAP] t=1790610175804 phase=post mode=observe dir=enter orig=010005c0fe0000 new=010005c0fe0000 mutated=False |
+[TAP] t=1790610175812 phase=post mode=observe dir=enter orig=010005c0fe0000 new=010005c0fe0000 mutated=False |
+[TAP] t=1790610175820 phase=post mode=observe dir=enter orig=010004f0fe0000 new=010004f0fe0000 mutated=False |
+[TAP] t=1790610175827 phase=post mode=observe dir=enter orig=01000500ff0000 new=01000500ff0000 mutated=False |
+[TAP] t=1790610175834 phase=post mode=observe dir=enter orig=01000580ff0000 new=01000580ff0000 mutated=False |
+[TAP] t=1790610175842 phase=post mode=observe dir=enter orig=01000490ff0000 new=01000490ff0000 mutated=False |
+[TAP] t=1790610175849 phase=post mode=observe dir=enter orig=01000590ff0000 new=01000590ff0000 mutated=False |
+[TAP] t=1790610175857 phase=post mode=observe dir=enter orig=010004a0ff0000 new=010004a0ff0000 mutated=False |
+[TAP] t=1790610175865 phase=post mode=observe dir=enter orig=01000490ff0000 new=01000490ff0000 mutated=False |
+[TAP] t=1790610175872 phase=post mode=observe dir=enter orig=010005b0ff0000 new=010005b0ff0000 mutated=False |
+[TAP] t=1790610175879 phase=post mode=observe dir=enter orig=010004a0ff0000 new=010004a0ff0000 mutated=False |
+[TAP] t=1790610175887 phase=post mode=observe dir=enter orig=010005a0ff0000 new=010005a0ff0000 mutated=False |
+[TAP] t=1790610175894 phase=post mode=observe dir=enter orig=010005a0ff0000 new=010005a0ff0000 mutated=False |
+[TAP] t=1790610175902 phase=post mode=observe dir=enter orig=010006a0ff0000 new=010006a0ff0000 mutated=False |
+[TAP] t=1790610175910 phase=post mode=observe dir=enter orig=01000590ff0000 new=01000590ff0000 mutated=False |
+[TAP] t=1790610175924 phase=post mode=observe dir=enter orig=01000660ff0000 new=01000660ff0000 mutated=False |
+[TAP] t=1790610175932 phase=post mode=observe dir=enter orig=01000670ff0000 new=01000670ff0000 mutated=False |
+[TAP] t=1790610175939 phase=post mode=observe dir=enter orig=01000670ff0000 new=01000670ff0000 mutated=False |
+[TAP] t=1790610175947 phase=post mode=observe dir=enter orig=01000670ff0000 new=01000670ff0000 mutated=False |
+[TAP] t=1790610175954 phase=post mode=observe dir=enter orig=010004a0ff0000 new=010004a0ff0000 mutated=False |
+[TAP] t=1790610175962 phase=post mode=observe dir=enter orig=010004a0ff0000 new=010004a0ff0000 mutated=False |
+[TAP] t=1790610175977 phase=post mode=observe dir=enter orig=010003b0ff0000 new=010003b0ff0000 mutated=False |
+[TAP] t=1790610175977 phase=post mode=observe dir=enter orig=010002d0ff0000 new=010002d0ff0000 mutated=False |
+[TAP] t=1790610175984 phase=post mode=observe dir=enter orig=010002e0ff0000 new=010002e0ff0000 mutated=False |
+[TAP] t=1790610176104 phase=post mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+
+--- 等待自动解除武装 ---
+[TAP] t=1790610176195 phase=after mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610176202 phase=after mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610176202 phase=after mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610176210 phase=after mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610176224 phase=after mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610176232 phase=after mode=observe dir=enter orig=010000c0ff0000 new=010000c0ff0000 mutated=False |
+[TAP] t=1790610176240 phase=after mode=observe dir=enter orig=0100ff9fff0000 new=0100ff9fff0000 mutated=False |
+[TAP] t=1790610176247 phase=after mode=observe dir=enter orig=01000080ff0000 new=01000080ff0000 mutated=False |
+[TAP] t=1790610176255 phase=after mode=observe dir=enter orig=01000080ff0000 new=01000080ff0000 mutated=False |
+[TAP] t=1790610176262 phase=after mode=observe dir=enter orig=01000080ff0000 new=01000080ff0000 mutated=False |
+[TAP] t=1790610176269 phase=after mode=observe dir=enter orig=01000080ff0000 new=01000080ff0000 mutated=False |
+[TAP] t=1790610176277 phase=after mode=observe dir=enter orig=01000090ff0000 new=01000090ff0000 mutated=False |
+[TAP] t=1790610176284 phase=after mode=observe dir=enter orig=01000090ff0000 new=01000090ff0000 mutated=False |
+[TAP] t=1790610176292 phase=after mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610176299 phase=after mode=observe dir=enter orig=0100ffbfff0000 new=0100ffbfff0000 mutated=False |
+[TAP] t=1790610176307 phase=after mode=observe dir=enter orig=010000c0ff0000 new=010000c0ff0000 mutated=False |
+[TAP] t=1790610176314 phase=after mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610176322 phase=after mode=observe dir=enter orig=010000d0ff0000 new=010000d0ff0000 mutated=False |
+[TAP] t=1790610176329 phase=after mode=observe dir=enter orig=0100ffdfff0000 new=0100ffdfff0000 mutated=False |
+[TAP] t=1790610176344 phase=after mode=observe dir=enter orig=010000c0ff0000 new=010000c0ff0000 mutated=False |
+[TAP] t=1790610176352 phase=after mode=observe dir=enter orig=0100ffdfff0000 new=0100ffdfff0000 mutated=False |
+[TAP] t=1790610176360 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176367 phase=after mode=observe dir=enter orig=0100ffefff0000 new=0100ffefff0000 mutated=False |
+[TAP] t=1790610176374 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176381 phase=after mode=observe dir=enter orig=0100ffffff0000 new=0100ffffff0000 mutated=False |
+[TAP] t=1790610176390 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176397 phase=after mode=observe dir=enter orig=0100ffdfff0000 new=0100ffdfff0000 mutated=False |
+[TAP] t=1790610176404 phase=after mode=observe dir=enter orig=010000c0ff0000 new=010000c0ff0000 mutated=False |
+[TAP] t=1790610176412 phase=after mode=observe dir=enter orig=0100ffcfff0000 new=0100ffcfff0000 mutated=False |
+[TAP] t=1790610176419 phase=after mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610176427 phase=after mode=observe dir=enter orig=0100ffbfff0000 new=0100ffbfff0000 mutated=False |
+[TAP] t=1790610176434 phase=after mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610176442 phase=after mode=observe dir=enter orig=010000a0ff0000 new=010000a0ff0000 mutated=False |
+[TAP] t=1790610176449 phase=after mode=observe dir=enter orig=010000a0ff0000 new=010000a0ff0000 mutated=False |
+[TAP] t=1790610176464 phase=after mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610176472 phase=after mode=observe dir=enter orig=010000a0ff0000 new=010000a0ff0000 mutated=False |
+[TAP] t=1790610176479 phase=after mode=observe dir=enter orig=0100ffafff0000 new=0100ffafff0000 mutated=False |
+[TAP] t=1790610176487 phase=after mode=observe dir=enter orig=010000c0ff0000 new=010000c0ff0000 mutated=False |
+[TAP] t=1790610176495 phase=after mode=observe dir=enter orig=010000c0ff0000 new=010000c0ff0000 mutated=False |
+[TAP] t=1790610176502 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176509 phase=after mode=observe dir=enter orig=010000d0ff0000 new=010000d0ff0000 mutated=False |
+[TAP] t=1790610176517 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176524 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176532 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176547 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176554 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176562 phase=after mode=observe dir=enter orig=010001d0ff0000 new=010001d0ff0000 mutated=False |
+[TAP] t=1790610176569 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176584 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176592 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176599 phase=after mode=observe dir=enter orig=010000d0ff0000 new=010000d0ff0000 mutated=False |
+[TAP] t=1790610176607 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176614 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176622 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176629 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176637 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176644 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176652 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176659 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176667 phase=after mode=observe dir=enter orig=010000d0ff0000 new=010000d0ff0000 mutated=False |
+[TAP] t=1790610176675 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176682 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176689 phase=after mode=observe dir=enter orig=010000d0ff0000 new=010000d0ff0000 mutated=False |
+[TAP] t=1790610176712 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176713 phase=after mode=observe dir=enter orig=010001e0ff0000 new=010001e0ff0000 mutated=False |
+[TAP] t=1790610176719 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+  [心跳] phase=after mode=observe 命中=1162 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610176727 phase=after mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610176765 phase=after mode=observe dir=enter orig=010000e0ff0000 new=010000e0ff0000 mutated=False |
+[TAP] t=1790610176772 phase=after mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610176787 phase=after mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610176794 phase=after mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610176810 phase=after mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610176847 phase=after mode=observe dir=enter orig=010000f0ff0000 new=010000f0ff0000 mutated=False |
+[TAP] t=1790610176929 phase=after mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610176953 phase=after mode=observe dir=enter orig=010001f0ff0000 new=010001f0ff0000 mutated=False |
+[TAP] t=1790610176959 phase=after mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610176966 phase=after mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+[TAP] t=1790610176967 phase=after mode=observe dir=enter orig=010101f0ff0000 new=010101f0ff0000 mutated=False |
+[TAP] t=1790610176974 phase=after mode=observe dir=enter orig=01010200000000 new=01010200000000 mutated=False |
+[TAP] t=1790610176982 phase=after mode=observe dir=enter orig=01010200000000 new=01010200000000 mutated=False |
+[TAP] t=1790610176989 phase=after mode=observe dir=enter orig=01010300000000 new=01010300000000 mutated=False |
+[TAP] t=1790610176997 phase=after mode=observe dir=enter orig=01010200000000 new=01010200000000 mutated=False |
+[TAP] t=1790610177004 phase=after mode=observe dir=enter orig=010103f0ff0000 new=010103f0ff0000 mutated=False |
+[TAP] t=1790610177012 phase=after mode=observe dir=enter orig=01010300000000 new=01010300000000 mutated=False |
+[TAP] t=1790610177019 phase=after mode=observe dir=enter orig=01010300000000 new=01010300000000 mutated=False |
+[TAP] t=1790610177027 phase=after mode=observe dir=enter orig=01010300000000 new=01010300000000 mutated=False |
+[TAP] t=1790610177034 phase=after mode=observe dir=enter orig=01010400000000 new=01010400000000 mutated=False |
+[TAP] t=1790610177042 phase=after mode=observe dir=enter orig=01010400000000 new=01010400000000 mutated=False |
+[TAP] t=1790610177050 phase=after mode=observe dir=enter orig=01010500000000 new=01010500000000 mutated=False |
+[TAP] t=1790610177064 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177072 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177080 phase=after mode=observe dir=enter orig=01010800000000 new=01010800000000 mutated=False |
+[TAP] t=1790610177087 phase=after mode=observe dir=enter orig=01010800000000 new=01010800000000 mutated=False |
+[TAP] t=1790610177095 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177102 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177110 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177117 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177124 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177132 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177139 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177147 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177155 phase=after mode=observe dir=enter orig=010107f0ff0000 new=010107f0ff0000 mutated=False |
+[TAP] t=1790610177162 phase=after mode=observe dir=enter orig=01010800000000 new=01010800000000 mutated=False |
+[TAP] t=1790610177169 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177184 phase=after mode=observe dir=enter orig=01010800000000 new=01010800000000 mutated=False |
+[TAP] t=1790610177191 phase=after mode=observe dir=enter orig=01010800000000 new=01010800000000 mutated=False |
+[TAP] t=1790610177199 phase=after mode=observe dir=enter orig=01010800000000 new=01010800000000 mutated=False |
+[TAP] t=1790610177207 phase=after mode=observe dir=enter orig=010108f0ff0000 new=010108f0ff0000 mutated=False |
+[TAP] t=1790610177215 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177221 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177229 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177237 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177244 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177252 phase=after mode=observe dir=enter orig=01010700000000 new=01010700000000 mutated=False |
+[TAP] t=1790610177259 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177267 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177275 phase=after mode=observe dir=enter orig=010105f0ff0000 new=010105f0ff0000 mutated=False |
+[TAP] t=1790610177282 phase=after mode=observe dir=enter orig=01010600000000 new=01010600000000 mutated=False |
+[TAP] t=1790610177290 phase=after mode=observe dir=enter orig=01010400000000 new=01010400000000 mutated=False |
+[TAP] t=1790610177304 phase=after mode=observe dir=enter orig=010105f0ff0000 new=010105f0ff0000 mutated=False |
+[TAP] t=1790610177312 phase=after mode=observe dir=enter orig=01010300000000 new=01010300000000 mutated=False |
+[TAP] t=1790610177320 phase=after mode=observe dir=enter orig=01010300000000 new=01010300000000 mutated=False |
+[TAP] t=1790610177327 phase=after mode=observe dir=enter orig=01010200000000 new=01010200000000 mutated=False |
+[TAP] t=1790610177335 phase=after mode=observe dir=enter orig=01010100000000 new=01010100000000 mutated=False |
+[TAP] t=1790610177342 phase=after mode=observe dir=enter orig=01010100000000 new=01010100000000 mutated=False |
+[TAP] t=1790610177357 phase=after mode=observe dir=enter orig=01010100000000 new=01010100000000 mutated=False |
+[TAP] t=1790610177379 phase=after mode=observe dir=enter orig=01010100000000 new=01010100000000 mutated=False |
+[TAP] t=1790610177395 phase=after mode=observe dir=enter orig=01010100000000 new=01010100000000 mutated=False |
+[TAP] t=1790610177402 phase=after mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+[TAP] t=1790610177409 phase=after mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610177417 phase=after mode=observe dir=enter orig=01000100000000 new=01000100000000 mutated=False |
+[TAP] t=1790610177432 phase=after mode=observe dir=enter orig=01000120000000 new=01000120000000 mutated=False |
+[TAP] t=1790610177439 phase=after mode=observe dir=enter orig=01000130000000 new=01000130000000 mutated=False |
+[TAP] t=1790610177447 phase=after mode=observe dir=enter orig=01000160000000 new=01000160000000 mutated=False |
+[TAP] t=1790610177454 phase=after mode=observe dir=enter orig=01000180000000 new=01000180000000 mutated=False |
+[TAP] t=1790610177462 phase=after mode=observe dir=enter orig=01000090000000 new=01000090000000 mutated=False |
+[TAP] t=1790610177469 phase=after mode=observe dir=enter orig=010000b0000000 new=010000b0000000 mutated=False |
+[TAP] t=1790610177477 phase=after mode=observe dir=enter orig=010000c0000000 new=010000c0000000 mutated=False |
+[TAP] t=1790610177485 phase=after mode=observe dir=enter orig=0100fedf000000 new=0100fedf000000 mutated=False |
+[TAP] t=1790610177492 phase=after mode=observe dir=enter orig=0100fd1f010000 new=0100fd1f010000 mutated=False |
+[TAP] t=1790610177500 phase=after mode=observe dir=enter orig=0100fc3f010000 new=0100fc3f010000 mutated=False |
+[TAP] t=1790610177507 phase=after mode=observe dir=enter orig=0100fc5f010000 new=0100fc5f010000 mutated=False |
+[TAP] t=1790610177515 phase=after mode=observe dir=enter orig=0100fc7f010000 new=0100fc7f010000 mutated=False |
+[TAP] t=1790610177521 phase=after mode=observe dir=enter orig=0100fc9f010000 new=0100fc9f010000 mutated=False |
+[TAP] t=1790610177529 phase=after mode=observe dir=enter orig=0100fc9f010000 new=0100fc9f010000 mutated=False |
+[TAP] t=1790610177537 phase=after mode=observe dir=enter orig=0100fdaf010000 new=0100fdaf010000 mutated=False |
+[TAP] t=1790610177552 phase=after mode=observe dir=enter orig=0100fbff010000 new=0100fbff010000 mutated=False |
+[TAP] t=1790610177559 phase=after mode=observe dir=enter orig=0100fbdf010000 new=0100fbdf010000 mutated=False |
+[TAP] t=1790610177567 phase=after mode=observe dir=enter orig=0100fbcf010000 new=0100fbcf010000 mutated=False |
+[TAP] t=1790610177574 phase=after mode=observe dir=enter orig=0100fbcf010000 new=0100fbcf010000 mutated=False |
+[TAP] t=1790610177582 phase=after mode=observe dir=enter orig=0100fd4f010000 new=0100fd4f010000 mutated=False |
+[TAP] t=1790610177589 phase=after mode=observe dir=enter orig=0100fe4f010000 new=0100fe4f010000 mutated=False |
+[TAP] t=1790610177597 phase=after mode=observe dir=enter orig=0100fe2f010000 new=0100fe2f010000 mutated=False |
+[TAP] t=1790610177604 phase=after mode=observe dir=enter orig=0100ff1f010000 new=0100ff1f010000 mutated=False |
+[TAP] t=1790610177611 phase=after mode=observe dir=enter orig=01000000010000 new=01000000010000 mutated=False |
+[TAP] t=1790610177619 phase=after mode=observe dir=enter orig=010000f0000000 new=010000f0000000 mutated=False |
+[TAP] t=1790610177627 phase=after mode=observe dir=enter orig=0100ffef000000 new=0100ffef000000 mutated=False |
+[TAP] t=1790610177634 phase=after mode=observe dir=enter orig=010000d0000000 new=010000d0000000 mutated=False |
+[TAP] t=1790610177642 phase=after mode=observe dir=enter orig=0100ffcf000000 new=0100ffcf000000 mutated=False |
+[TAP] t=1790610177649 phase=after mode=observe dir=enter orig=0100ff9f000000 new=0100ff9f000000 mutated=False |
+[TAP] t=1790610177657 phase=after mode=observe dir=enter orig=01000090000000 new=01000090000000 mutated=False |
+[TAP] t=1790610177672 phase=after mode=observe dir=enter orig=0100ff9f000000 new=0100ff9f000000 mutated=False |
+[TAP] t=1790610177679 phase=after mode=observe dir=enter orig=01000080000000 new=01000080000000 mutated=False |
+[TAP] t=1790610177687 phase=after mode=observe dir=enter orig=0100ff7f000000 new=0100ff7f000000 mutated=False |
+[TAP] t=1790610177694 phase=after mode=observe dir=enter orig=0100ff7f000000 new=0100ff7f000000 mutated=False |
+[TAP] t=1790610177709 phase=after mode=observe dir=enter orig=0100ff4f000000 new=0100ff4f000000 mutated=False |
+[TAP] t=1790610177717 phase=after mode=observe dir=enter orig=0100ff4f000000 new=0100ff4f000000 mutated=False |
+[TAP] t=1790610177717 phase=after mode=observe dir=enter orig=01000050000000 new=01000050000000 mutated=False |
+[TAP] t=1790610177724 phase=after mode=observe dir=enter orig=0100ff5f000000 new=0100ff5f000000 mutated=False |
+[TAP] t=1790610177732 phase=after mode=observe dir=enter orig=0100ff5f000000 new=0100ff5f000000 mutated=False |
+  [心跳] phase=after mode=observe 命中=1266 改写=2 成功=2 失败=0 复原=2
+[TAP] t=1790610177740 phase=after mode=observe dir=enter orig=0100ff5f000000 new=0100ff5f000000 mutated=False |
+[TAP] t=1790610177747 phase=after mode=observe dir=enter orig=0100fe5f000000 new=0100fe5f000000 mutated=False |
+[TAP] t=1790610177754 phase=after mode=observe dir=enter orig=0100fe5f000000 new=0100fe5f000000 mutated=False |
+[TAP] t=1790610177762 phase=after mode=observe dir=enter orig=0100ff4f000000 new=0100ff4f000000 mutated=False |
+[TAP] t=1790610177770 phase=after mode=observe dir=enter orig=0100fe5f000000 new=0100fe5f000000 mutated=False |
+[TAP] t=1790610177777 phase=after mode=observe dir=enter orig=0100fe4f000000 new=0100fe4f000000 mutated=False |
+[TAP] t=1790610177792 phase=after mode=observe dir=enter orig=0100fd5f000000 new=0100fd5f000000 mutated=False |
+[TAP] t=1790610177800 phase=after mode=observe dir=enter orig=0100fd5f000000 new=0100fd5f000000 mutated=False |
+[TAP] t=1790610177807 phase=after mode=observe dir=enter orig=0100fd4f000000 new=0100fd4f000000 mutated=False |
+[TAP] t=1790610177837 phase=after mode=observe dir=enter orig=0100fd4f000000 new=0100fd4f000000 mutated=False |
+[TAP] t=1790610177837 phase=after mode=observe dir=enter orig=0100fd3f000000 new=0100fd3f000000 mutated=False |
+[TAP] t=1790610177838 phase=after mode=observe dir=enter orig=0100fc2f000000 new=0100fc2f000000 mutated=False |
+[TAP] t=1790610177845 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177852 phase=after mode=observe dir=enter orig=0100fb4f000000 new=0100fb4f000000 mutated=False |
+[TAP] t=1790610177853 phase=after mode=observe dir=enter orig=0100fb4f000000 new=0100fb4f000000 mutated=False |
+[TAP] t=1790610177861 phase=after mode=observe dir=enter orig=0100fb3f000000 new=0100fb3f000000 mutated=False |
+[TAP] t=1790610177867 phase=after mode=observe dir=enter orig=0100fb4f000000 new=0100fb4f000000 mutated=False |
+[TAP] t=1790610177889 phase=after mode=observe dir=enter orig=0100fb2f000000 new=0100fb2f000000 mutated=False |
+[TAP] t=1790610177898 phase=after mode=observe dir=enter orig=0100fb2f000000 new=0100fb2f000000 mutated=False |
+[TAP] t=1790610177898 phase=after mode=observe dir=enter orig=0100fb2f000000 new=0100fb2f000000 mutated=False |
+[TAP] t=1790610177899 phase=after mode=observe dir=enter orig=0100fc2f000000 new=0100fc2f000000 mutated=False |
+[TAP] t=1790610177904 phase=after mode=observe dir=enter orig=0100fc2f000000 new=0100fc2f000000 mutated=False |
+[TAP] t=1790610177912 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177919 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177942 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177943 phase=after mode=observe dir=enter orig=0100fb4f000000 new=0100fb4f000000 mutated=False |
+[TAP] t=1790610177950 phase=after mode=observe dir=enter orig=0100fc4f000000 new=0100fc4f000000 mutated=False |
+[TAP] t=1790610177964 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177972 phase=after mode=observe dir=enter orig=0100fc4f000000 new=0100fc4f000000 mutated=False |
+[TAP] t=1790610177972 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177973 phase=after mode=observe dir=enter orig=0100fc3f000000 new=0100fc3f000000 mutated=False |
+[TAP] t=1790610177986 phase=after mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610177987 phase=after mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610177994 phase=after mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610178002 phase=after mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610178009 phase=after mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610178017 phase=after mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610178055 phase=after mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610178062 phase=after mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610178063 phase=after mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610178064 phase=after mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610178070 phase=after mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610178077 phase=after mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610178078 phase=after mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610178084 phase=after mode=observe dir=enter orig=0100fe0f000000 new=0100fe0f000000 mutated=False |
+[TAP] t=1790610178107 phase=after mode=observe dir=enter orig=0100fd1f000000 new=0100fd1f000000 mutated=False |
+[TAP] t=1790610178115 phase=after mode=observe dir=enter orig=0100fe1f000000 new=0100fe1f000000 mutated=False |
+[TAP] t=1790610178122 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178123 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178123 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178130 phase=after mode=observe dir=enter orig=0100fd2f000000 new=0100fd2f000000 mutated=False |
+[TAP] t=1790610178137 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178159 phase=after mode=observe dir=enter orig=0100fc4f000000 new=0100fc4f000000 mutated=False |
+[TAP] t=1790610178167 phase=after mode=observe dir=enter orig=0100fd3f000000 new=0100fd3f000000 mutated=False |
+[TAP] t=1790610178168 phase=after mode=observe dir=enter orig=0100fd3f000000 new=0100fd3f000000 mutated=False |
+[TAP] t=1790610178175 phase=after mode=observe dir=enter orig=0100fd3f000000 new=0100fd3f000000 mutated=False |
+[TAP] t=1790610178182 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178189 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178204 phase=after mode=observe dir=enter orig=0100fe2f000000 new=0100fe2f000000 mutated=False |
+[TAP] t=1790610178212 phase=after mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610178220 phase=after mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610178227 phase=after mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610178234 phase=after mode=observe dir=enter orig=0100ff1f000000 new=0100ff1f000000 mutated=False |
+[TAP] t=1790610178385 phase=after mode=observe dir=enter orig=01010000000000 new=01010000000000 mutated=False |
+[TAP] t=1790610178467 phase=after mode=observe dir=enter orig=01000000000000 new=01000000000000 mutated=False |
+  [心跳] phase=after mode=observe 命中=1331 改写=2 成功=2 失败=0 复原=2
+[LL] t=1790610179002 phase=? vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610179001 phase=after mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+[LL] t=1790610179152 phase=? vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610179151 phase=after mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+[LL] t=1790610179272 phase=? vk=0x24 up=0 flags=0x0001 injected=0 lower_il=0 altdown=0 | VK_HOME 按下
+[TAP] t=1790610179271 phase=after mode=observe dir=enter orig=0100004a0000000000 new=0100004a0000000000 mutated=False |
+[LL] t=1790610179407 phase=? vk=0x24 up=1 flags=0x0081 injected=0 lower_il=0 altdown=0 | VK_HOME 释放
+[TAP] t=1790610179405 phase=after mode=observe dir=enter orig=010000000000000000 new=010000000000000000 mutated=False |
+  [心跳] phase=after mode=observe(disarmed) 命中=1335 改写=2 成功=2 失败=0 复原=2【已解除武装】
+  最终统计: 命中=1335 改写=2 成功=2 失败=0 复原=2 解除武装=True
+  LL 钩子已卸载；共捕获 256 条按键事件
+
+--- 阶段时间轴（本地时钟）---
+  pre   1790610115129 .. 1790610123129
+  A     1790610123129 .. 1790610137129
+  S     1790610137129 .. 1790610145129
+  B     1790610145129 .. 1790610161129
+  C     1790610161129 .. 1790610173129
+  post  1790610173129 .. 1790610176129
+
+=== 判定（仅由宿主侧写入记录 + LL 侧按键flags推导）===
+
+[1] LL 侧按键观测（全系统，按阶段归类）
+  pre   事件   0  （无）
+  A     事件   6  0x24↓×3  0x24↑×3
+  S     事件   2  0xA5↓×1  0xA5↑×1   Alt 系 injected=[1, 1]
+  B     事件 131  0xA5↓×123  0xA5↑×4  0xFC↓×2  0xFC↑×2   Alt 系 injected=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+  C     事件 113  0x24↓×111  0x24↑×2
+  post  事件   0  （无）
+
+[2] 宿主侧报告层改写记录
+  pre   IOCTL 命中 277 次  实际改写   0 次
+  A     IOCTL 命中 203 次  实际改写   0 次
+  S     IOCTL 命中 335 次  实际改写   0 次
+  B     IOCTL 命中  26 次  实际改写   2 次
+        0100004a0000000000→010000e60000000000
+  C     IOCTL 命中  97 次  实际改写   0 次
+  post  IOCTL 命中 158 次  实际改写   0 次
+
+  写入失败/被闸门拦下: 0
+  onLeave 已回写复原: 2
+
+[3] 设备维度绑定（同一宿主里有多个 HID 设备时的归因依据）
+  A 阶段来自 h1 的目标 usage 报告: 3 次
+
+[4] 边沿配对（粘键判据，按边沿去重后再数）
+  S     0xA5 按下=1 释放=1 配对=1 autorepeat=0 孤立释放=0 结束时仍按住=False
+  B     0xA5 按下=123 释放=4 配对=2 autorepeat=121 孤立释放=2 结束时仍按住=False
+
+[5] 分项结论
+  PASS  A 对照：真实主页键 -> VK_HOME 且 injected=0
+  PASS  A 对照：已按 FileHandle 绑定到单一来源（设备维度成立）
+  PASS  S 对照：SendInput 的右 Alt 被观测到
+  PASS  S 对照：SendInput 的按键带 injected=1（观测器有分辨力）
+  PASS  B 被测：报告层产出 0xA5（0x00E6 实测映射为 VK_LMENU）
+  PASS  B 被测：合成键 injected=0（**核心**）
+  PASS  B 被测：原主页键已被替换（无 VK_HOME）
+  FAIL  B 被测：按下/释放严格配对（无粘键）
+  PASS  C 对照：解除武装后主页键恢复
+
+判定: edges_not_paired（存在粘键或孤立释放）
+说明: 这是安全性判据——粘住的 Alt 会污染用户后续每一次键盘输入。

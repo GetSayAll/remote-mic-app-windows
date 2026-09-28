@@ -128,7 +128,7 @@ VK_RMENU = 0xA5          # 右 Alt
 VK_F13 = 0x7C
 
 TRIGGER_USAGE = 0x004A   # 主页
-SYNTH_USAGE = 0x00E2     # Keyboard RightAlt
+SYNTH_USAGE = 0x00E2     # HID Keyboard LeftAlt（HID 规范 0xE2=LeftAlt / 0xE6=RightAlt）
 HOLD_MS = 200            # S 阶段 SendInput 按住时长
 
 # 2026-09-28 run5 实测（evidence/synth-doubao-2026-09-28-run5.log）：
@@ -137,9 +137,19 @@ HOLD_MS = 200            # S 阶段 SendInput 按住时长
 # 必须盯这个实际产出的 VK；S 对照 SendInput 注入的是真 0xA5，不受影响。
 SYNTH_VK_ON_STACK = 0xA4
 
+# 合成 usage -> 预期栈上 VK 的映射。两者均已实测：
+#   0x00E2 -> 0xA4（2026-09-28 run5，evidence/synth-doubao-2026-09-28-run5.log）
+#   0x00E6 -> 0xA5（2026-09-28 豆包行为验证轮，evidence/synth-doubao-2026-09-28-doubao-behavior.log，
+#             kbdhid 按标准 E0-38 翻译成 VK_RMENU；autorepeat 每帧 injected=0）
+USAGE_TO_VK = {
+    0x00E2: 0xA4,   # LeftAlt  -> VK_LMENU（run5 实测）
+    0x00E6: 0xA5,   # RightAlt -> VK_RMENU（豆包行为验证轮实测）
+}
+
 USAGE_NAMES = {
-    0x00E0: "LeftCtrl", 0x00E1: "LeftShift", 0x00E2: "RightAlt",
-    0x00E3: "LeftGUI", 0x0028: "确定/Enter", 0x004A: "主页",
+    0x00E0: "LeftCtrl", 0x00E1: "LeftShift", 0x00E2: "LeftAlt",
+    0x00E6: "RightAlt", 0x00E3: "LeftGUI",
+    0x0028: "确定/Enter", 0x004A: "主页",
     0x0068: "F13", 0x00F1: "返回", 0x0080: "音量+", 0x0081: "音量-",
 }
 
@@ -155,7 +165,7 @@ PHASES: list[tuple[str, float, str, int, str]] = [
      " 期望读到 VK_RMENU 且 injected=1。"),
     ("B", 16, "rewrite", SYNTH_USAGE,
      "被测阶段 B：请按住 主页 ×2，每次按住约 0.5~1 秒再松开。"
-     " 期望读到 VK_RMENU 且 injected=0，同时不再出现 VK_HOME。"),
+     " 期望读到合成 Alt 键（见启动日志）且 injected=0，同时不再出现 VK_HOME。"),
     ("C", 12, "observe", 0,
      "恢复对照 C：请再按 主页 ×2。期望 VK_HOME 重新出现（无残留）。"),
     ("post", 3, "observe", 0,
@@ -456,7 +466,7 @@ def verdict(taps: list[dict], lls: list[dict],
         "S_synth_key_seen": "S 对照：SendInput 的右 Alt 被观测到",
         "S_injected_flag_seen": "S 对照：SendInput 的按键带 injected=1（观测器有分辨力）",
         "B_synth_key_seen": f"B 被测：报告层产出 0x{SYNTH_VK_ON_STACK:02X}"
-                            f"（0x{SYNTH_USAGE:04X} 实测映射为 VK_LMENU）",
+                            f"（0x{SYNTH_USAGE:04X} 实测映射，VK 值为准）",
         "B_not_injected": "B 被测：合成键 injected=0（**核心**）",
         "B_home_suppressed": "B 被测：原主页键已被替换（无 VK_HOME）",
         "B_edges_paired": "B 被测：按下/释放严格配对（无粘键）",
@@ -682,10 +692,11 @@ def run(scale: float, out: Path | None, do_watch: bool,
     log("=== 报告层合成按键实验：能不能产出不带 LLKHF_INJECTED 的真实按键 ===")
     log(f"时间: {datetime.now().isoformat(timespec='seconds')}")
     log(f"契约: 载体 usage={TRIGGER_USAGE:#06x}({USAGE_NAMES.get(TRIGGER_USAGE)})"
-        f" -> 合成 usage={SYNTH_USAGE:#06x}({USAGE_NAMES.get(SYNTH_USAGE)})；"
+        f" -> 合成 usage={SYNTH_USAGE:#06x}({USAGE_NAMES.get(SYNTH_USAGE)})"
+        f"，预期产出 VK 0x{SYNTH_VK_ON_STACK:02X}；"
         "只写报告偏移 3..8 并回写复原")
     log("      不写注册表 / 驱动策略 / 计划任务，不需重启；需一次交互式 UAC 提权。")
-    log("副作用: 阶段 B 会把主页键变成右 Alt——请把焦点留在桌面，"
+    log("副作用: 阶段 B 会把主页键变成 Alt 键——请把焦点留在桌面，"
         "不要停在文本编辑器里，期间不要触碰物理键盘。")
 
     log("\n--- 步骤 1/5：定位独占 RC003 的 WUDFHost ---")
@@ -930,6 +941,7 @@ def analyze(paths: list[Path]) -> int:
 
 
 def main() -> int:
+    global SYNTH_USAGE, SYNTH_VK_ON_STACK, _log_file
     # 提权后的控制台默认 GBK 代码页；强制 UTF-8 + replace，避免个别字符
     # 在 print 处抛 UnicodeEncodeError 把整次运行打死（2026-09-28 run2 实证）。
     for stream in (sys.stdout, sys.stderr):
@@ -949,7 +961,23 @@ def main() -> int:
                         help="分析层自检：合成日志走同一条 parse+verdict 路径")
     parser.add_argument("--analyze", type=Path, nargs="+", help="离线复核既有日志")
     parser.add_argument("--phases", help="只跑指定阶段（逗号分隔，如 A,S,B）")
+    parser.add_argument("--synth-usage", type=lambda s: int(s, 0),
+                        default=SYNTH_USAGE,
+                        help="B 阶段合成 usage（0x00E2=LeftAlt 默认 / 0x00E6=RightAlt）")
     args = parser.parse_args()
+
+    if args.synth_usage != SYNTH_USAGE:
+        if args.synth_usage not in USAGE_TO_VK:
+            print(f"未知合成 usage: {args.synth_usage:#06x}"
+                  f"（可选: {', '.join(f'{u:#06x}' for u in USAGE_TO_VK)}）",
+                  file=sys.stderr)
+            return 2
+        SYNTH_USAGE = args.synth_usage
+        SYNTH_VK_ON_STACK = USAGE_TO_VK[SYNTH_USAGE]
+        # PHASES 里的 substitute 是模块加载时固化的旧值，同步改写。
+        for i, (name, seconds, mode, _sub, hint) in enumerate(PHASES):
+            if name == "B":
+                PHASES[i] = (name, seconds, mode, SYNTH_USAGE, hint)
 
     only: list[str] | None = None
     if args.phases:
@@ -967,7 +995,6 @@ def main() -> int:
         return analyze(args.analyze)
 
     if args.dry_run:
-        global _log_file
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             _log_file = args.out
