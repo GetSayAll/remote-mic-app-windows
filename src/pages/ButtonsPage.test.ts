@@ -862,6 +862,90 @@ describe("buttons mapping page", () => {
     expect(row.find(".toggle-placeholder").exists()).toBe(true);
   });
 
+  it("缓存命中时进页首帧即渲染开关与圆点终值，不等 IPC（2026-09-28 Andy 要求：无延迟、无灰→绿跳变）", () => {
+    localStorage.setItem(
+      "sayall.rc003Capture.uiCache",
+      JSON.stringify({ enabled: true, phase: "connected" }),
+    );
+    // 状态与桥接快照的 IPC 永不返回：旧行为里开关要等首次对账（串在映射
+    // 加载 + 三次订阅之后）、圆点要等 1 秒轮询首跳——本用例证明两者都在
+    // 首帧就位，IPC 迟到不产生可见的空档或状态跳变。
+    vi.mocked(getRc003TaskStatus).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(getRc003BridgeSnapshot).mockImplementation(() => new Promise(() => {}));
+    const page = mount(ButtonsPage, { props: { runtime } });
+    const row = captureRow(page)!;
+    const checkbox = row.find('input[type="checkbox"]');
+    expect(checkbox.exists()).toBe(true);
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+    const dot = row.find(".status-dot");
+    expect(dot.exists()).toBe(true);
+    expect(dot.classes()).toContain("success");
+    page.unmount();
+  });
+
+  it("缓存与权威状态不一致时以对账结果为准并回写（卸载后重装回落关闭，2026-09-28）", async () => {
+    localStorage.setItem(
+      "sayall.rc003Capture.uiCache",
+      JSON.stringify({ enabled: true, phase: "connected" }),
+    );
+    // 卸载后重装：授权已撤销（authorizationRequired），持久化意图回落为关。
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: false,
+      authorizationRequired: true,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        const checkbox = captureRow(page)!.find('input[type="checkbox"]');
+        expect((checkbox.element as HTMLInputElement).checked).toBe(false);
+      },
+      { timeout: 3000 },
+    );
+    const cached = JSON.parse(localStorage.getItem("sayall.rc003Capture.uiCache") ?? "null") as {
+      enabled?: unknown;
+    };
+    expect(cached?.enabled).toBe(false);
+  });
+
+  it("状态与桥接快照就绪后写入缓存，供下次进页首帧渲染（2026-09-28）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        const cached = JSON.parse(
+          localStorage.getItem("sayall.rc003Capture.uiCache") ?? "null",
+        ) as { enabled?: unknown; phase?: unknown } | null;
+        expect(cached).toMatchObject({ enabled: true, phase: "connected" });
+      },
+      { timeout: 3000 },
+    );
+    page.unmount();
+  });
+
+  it("缓存内容非法（垃圾/越界值）时忽略，回落占位符与旧行为（2026-09-28）", () => {
+    localStorage.setItem(
+      "sayall.rc003Capture.uiCache",
+      JSON.stringify({ enabled: "yes", phase: "hacked" }),
+    );
+    vi.mocked(getRc003TaskStatus).mockImplementation(() => new Promise(() => {}));
+    const page = mount(ButtonsPage, { props: { runtime } });
+    const row = captureRow(page)!;
+    expect(row.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(row.find(".toggle-placeholder").exists()).toBe(true);
+    expect(row.find(".status-dot").exists()).toBe(false);
+    page.unmount();
+  });
+
   it("桥接段异步失败：红点 + 底部提示条给出失败文案（开关已开、无法走 toggle 失败分支）", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
       installed: true,
