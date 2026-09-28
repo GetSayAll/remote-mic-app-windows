@@ -153,18 +153,21 @@
   ; 「无法打开要写入的文件」（2026-09-24 真机复现：跑了一天的旧助手
   ; 锁住 exe，主程序的优雅退出对它无效）。
   !insertmacro SayAllStopHelper install 0
-  ; ── 授权语义（2026-09-28 Andy 拍板）：升级保留、卸载撤销、卸载后重装回落关闭 ──
+  ; ── 授权语义（2026-09-28 Andy 拍板；同日二次定稿补维护模式）──────────
   ; 开关的持久化意图在 AppSettings（app_config_dir），跨升级/重装幸存；
   ; 授权本体是提权创建的计划任务（普通权限删不掉，跨安装幸存）。撤销的
   ; 唯一凭证是真卸载时写下的重授权标记——因此本钩子对标记的删除必须
   ; **有条件**（见 SayAllClearFreshReauthMarker）：
   ;
-  ;   * 升级（固定安装器，2026-09-28 起）：旧卸载器以 `_?=$INSTDIR` 原位
-  ;     调用、**根本不写标记**（$EXEDIR == $INSTDIR 判定，见 SayAllStopHelper）
-  ;     ——本钩子通常见不到标记，无需清理。
-  ;   * 卸载后重装（任意时距）：标记是新格式 `uninstalled=<tick>`，一律
-  ;     **保留**——应用启动对账据此把开关回落为关闭，重开时强制重装任务
-  ;     （必弹 UAC）。
+  ;   * 真卸载（Windows「设置 → 应用」/ 双击 uninstall.exe / /S）：卸载器
+  ;     被拷进临时目录（$EXEDIR != $INSTDIR），直接写 `uninstalled=<tick>`。
+  ;     卸载后重装（任意时距）：标记一律**保留**——应用启动对账据此把
+  ;     开关回落为关闭，重开时强制重装任务（必弹 UAC）。
+  ;   * 维护模式卸载（双击安装包 → 已安装页选「卸载」）：旧卸载器被
+  ;     `_?=$INSTDIR` 原位调用，只写待决文件（pending-uninstall=旧版本）；
+  ;     向导随即继续重装（PageLeaveReinstall 成功路径不退出），走到本钩子
+  ;     由 SayAllResolveUninstallPending 裁决：待决版本 == 本版本 → 写撤销
+  ;     凭证；否则（升级）→ 删待决、授权保留。
   ;   * 过渡清理（只针对旧版卸载器）：877a3c5 时代及更早的卸载器没有
   ;     $EXEDIR 判断，升级路径也会写标记（裸 tick / 旧格式 reauth）——
   ;     fresh（≤120s）或 legacy 才删除，否则升级会把开关打回关闭。
@@ -172,6 +175,7 @@
   ;     重装，裸 tick 标记会被误判为升级产物而删除、授权被保留；旧格式
   ;     reauth 标记无论时距都会被清理（升级语义优先）。换装一次本修复后
   ;     的安装包，两类旧格式即从现场消失。
+  !insertmacro SayAllResolveUninstallPending install
   !insertmacro SayAllClearFreshReauthMarker install
   ; 计划任务由提权进程创建，普通权限安装器删不掉它（删除命令静默失败，
   ; 任务本来就跨升级幸存）——升级恰恰要靠幸存的任务承载授权，helper 与
@@ -257,6 +261,48 @@
   Pop $R9
 !macroend
 
+; ── 维护模式卸载的裁决（2026-09-28 二次定稿）────────────────────────
+; 原位调用的旧卸载器只会留下待决文件（见 SayAllStopHelper 的 Else 分支），
+; 本宏在 PREINSTALL 里裁决——能走到安装节 = 本轮安装必然继续，「卸载后
+; 向导被取消」的场景不会进入这里（待决文件留到下一次安装裁决）：
+;   * 待决文件不存在（真卸载的 revoked 标记、静默升级、全新安装、
+;     「不卸载」的升级/修复）→ 无操作；
+;   * 内容 == pending-uninstall=${VERSION}（同版本）→ 维护模式卸载后
+;     向导重装：写撤销凭证 `uninstalled=<tick>`（新格式，任何安装不得
+;     删除），应用启动据此回落开关，重开时必弹 UAC；
+;   * 内容是其他版本 → 升级路径的原位卸载：删待决文件，授权保留。
+; 待决文件无论哪条出路都会被删除——它只是「原位卸载刚发生」的瞬时信号，
+; 不承载跨安装语义（跨安装凭证只有 uninstalled= 标记）。本宏必须先于
+; SayAllClearFreshReauthMarker 执行：裁决写下的凭证是 revoked 新格式，
+; 过渡清理不会碰它，顺序即语义。
+!macro SayAllResolveUninstallPending _uid
+  Push $R8
+  Push $R9
+  Push $0
+  ClearErrors
+  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-uninstall-pending" r
+  ${If} ${Errors}
+    Goto sayall_pending_done_${_uid}
+  ${EndIf}
+  FileRead $0 $R9
+  FileClose $0
+  ${If} $R9 == "pending-uninstall=${VERSION}"
+    ; 同版本：维护模式卸载 → 撤销授权（与真卸载同一凭证格式）
+    CreateDirectory "$LOCALAPPDATA\SayAll"
+    System::Call "kernel32::GetTickCount() i .R8"
+    FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
+    ${If} $0 != 0
+      FileWrite $0 "uninstalled=$R8"
+      FileClose $0
+    ${EndIf}
+  ${EndIf}
+  Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending"
+  sayall_pending_done_${_uid}:
+  Pop $0
+  Pop $R9
+  Pop $R8
+!macroend
+
 !macro SayAllStopHelper _uid _revoke_auth
   Push $R8
   Push $R9
@@ -290,28 +336,44 @@
     ${EndIf}
     Abort
   ${EndIf}
-  ; 写「需重新授权」标记（**仅卸载路径的真卸载**，_revoke_auth=1 且
-  ; $EXEDIR != $INSTDIR）：提权任务普通权限删不掉（真机实测），真卸载时
-  ; 这是「授权已应撤销」的唯一可靠凭证；应用启动据此回落开关，下次开启
-  ; 强制重装任务（必弹 UAC）。升级路径（_revoke_auth=0）**不得**写标记；
-  ; 真卸载判定（2026-09-28 真机复测后修正）：升级时旧卸载器被新安装器以
-  ; `_?=$INSTDIR` 原位调用（生成的 installer.nsi 的 reinst_uninstall 段），
-  ; 此时 $EXEDIR == $INSTDIR——**不写标记**（授权由升级保留，若写了标记，
-  ; 卸载后快速重装与升级在 PREINSTALL 处就不可区分，标记会被误删、授权
-  ; 复活——12:29 卸载 → 12:51 重装仍复现，见
-  ; Bugs/2026-09-28-reinstall-did-not-revoke-capture-authorization.md）。
-  ; 真卸载时 NSIS 把卸载器拷进 %TEMP%\~nsu*.tmp 再跑，$EXEDIR 是临时目录，
-  ; 与 $INSTDIR 必不相同。路径与 rc003_task.rs reauth_marker_path 逐字符
-  ; 一致（有测试钉住）。内容 = `uninstalled=<卸载时刻 GetTickCount>`：
-  ; 新格式让 PREINSTALL 能与旧版卸载器的升级产物（裸 tick / reauth）区分，
-  ; 见 SayAllReauthMarkerAge 的 revoked 分支。
+  ; 写「需重新授权」标记 / 待决文件（**仅卸载路径**，_revoke_auth=1）：
+  ; 提权任务普通权限删不掉（真机实测），卸载时这是「授权已应撤销」的唯一
+  ; 可靠凭证；应用启动据此回落开关，下次开启强制重装任务（必弹 UAC）。
+  ; 升级路径（_revoke_auth=0）**不得**写标记。卸载器的两种调用形态
+  ; （2026-09-28 真机复测 + 同日维护模式二次修正）：
+  ;
+  ;   * 真卸载（$EXEDIR != $INSTDIR）：NSIS 把卸载器拷进 %TEMP%\~nsu*.tmp
+  ;     再跑——Windows「设置 → 应用」、双击 uninstall.exe、uninstall.exe /S
+  ;     都走这条。直接写新格式 `uninstalled=<tick>`（撤销凭证，任何安装
+  ;     不得删除），并清掉可能残留的待决文件（被撤销凭证取代）。
+  ;   * 原位调用（$EXEDIR == $INSTDIR）：安装器以 `_?=$INSTDIR` 调旧卸载器
+  ;     （生成的 installer.nsi 的 reinst_uninstall 段）。**两种意图共用此
+  ;     形态且此刻不可区分**：升级（旧版本 → 新安装器接续安装）与维护模式
+  ;     卸载（同版本 → PageLeaveReinstall 卸载成功后**不退出**，继续走目录
+  ;     页与安装节重装）。因此这里只写**待决文件**
+  ;     `pending-uninstall=${VERSION}`，把裁决推迟到 PREINSTALL（见
+  ;     SayAllResolveUninstallPending）：同版本 = 维护卸载 → 撤销；不同
+  ;     版本 = 升级 → 授权保留。若此处直接写标记，升级会把授权打回关闭；
+  ;     若什么都不写，维护卸载的撤销会丢失（Andy 2026-09-28 现场报告：
+  ;     「设置 → 应用」卸载已生效，维护模式卸载不行）。
   !if ${_revoke_auth} == 1
     ${If} $EXEDIR != $INSTDIR
+      ; 真卸载：撤销凭证 + 清掉残留的待决文件（被本凭证取代）
       CreateDirectory "$LOCALAPPDATA\SayAll"
       System::Call "kernel32::GetTickCount() i .R8"
       FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
       ${If} $0 != 0
         FileWrite $0 "uninstalled=$R8"
+        FileClose $0
+      ${EndIf}
+      Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending"
+    ${Else}
+      ; 原位调用（升级卸载 / 维护模式卸载共用形态）：写待决文件，
+      ; 由 PREINSTALL 的 SayAllResolveUninstallPending 按版本裁决
+      CreateDirectory "$LOCALAPPDATA\SayAll"
+      FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-uninstall-pending" w
+      ${If} $0 != 0
+        FileWrite $0 "pending-uninstall=${VERSION}"
         FileClose $0
       ${EndIf}
     ${EndIf}

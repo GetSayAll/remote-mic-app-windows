@@ -1,23 +1,17 @@
-# 卸载→重装后授权未撤销（开关未回落、重开未弹 UAC）
 
-- 发现日期：2026-09-28（Andy 现场报告）
-- 状态：已修复（本地自动化 passed；真机复验 deferred，**须用修复后构建重装复验**）
-- 影响范围：Windows 安装器钩子（`src-tauri/windows/installer-hooks.nsh`）授权撤销语义；不影响基础语音与按键路径
-- 功能点：卸载/重装后的「全按键支持」授权生命周期（重授权标记 + 计划任务）
-- 现象：卸载应用 → 重新安装 → 启动后「全按键支持」开关**没有回落为关闭**，重新开启也**没有触发 UAC**（授权复活，103ms 内无弹窗完成 enable）
-- 复现条件：卸载已授权的安装包后重新安装任意携带旧授权语义（或修复前语义）构建的包
-- 正常预期：卸载撤销授权 → 重装启动时开关回落为关闭 → 用户重新开启时走一次 UAC 重新授权（2026-09-28 ab83163 定稿语义）
-- 证据：
-  - 诊断日志：12:29:48 `app_exit reason=installer_requested_exit`（pid=23784，`source_revision=877a3c59` 被卸载器优雅退出）→ 12:51:13 起新进程 pid=7048 **`source_revision=0a876485`** → 12:51:21 `action=enable phase=started` → 103ms 后 `terminal_result=passed`（无 UAC）、`helper_authenticated version=2`
-  - 已安装 exe（`%LOCALAPPDATA%` 安装布局）内嵌 revision 为 `0a876485`，不含 `877a3c5`；`0a876485` 为另一 agent 分支 12:27 的构建，**不含 ab83163**
-  - main（d5bd0ca）版钩子实况：PREINSTALL 存在**无条件** `Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required"`；卸载器写裸字面 `reauth`
-  - 现场标记文件不存在（被 PREINSTALL 清掉）；`C:\Windows\System32\Tasks` 递归查无 SayAll 任务（目录权限受限；且已知普通权限卸载器删不掉提权任务）
-- 根因（两层）：
-  1. **直接原因**：本次重装安装的包来自另一分支构建 `0a876485`，其 PREINSTALL 沿用 main 的无条件删标记语义；计划任务在卸载中幸存（提权创建、普通权限卸载器删不掉），标记被清后 `authorization_required` 判 false → enable 直通。
-  2. **设计缺口**（即使安装 ab83163 构建也存在）：ab83163 依赖标记**新鲜度**（≤120s 判为升级产物）区分「升级」与「卸载后快速重装」——两条路径在系统状态上不可区分，120s 内重叠。本次为彻底修复：利用 NSIS 真卸载会把卸载器拷进 `%TEMP%\~nsu*.tmp` 执行的机制（`$EXEDIR != $INSTDIR`），**写入时机**即已区分两类路径，不再依赖时间窗口。
-- 修复（`installer-hooks.nsh`）：
-  - `SayAllReauthMarkerAge` 新增 `revoked` 分类：内容以 `uninstalled=` 为前缀（`StrCpy $R8 $R9 12` 判断，不依赖 `IntOp` 对非数字的隐式归零）；
-  - 卸载器只在**真卸载**（`$EXEDIR != $INSTDIR`）时写标记，内容 = `uninstalled=<卸载时刻 GetTickCount>`；升级路径的原位卸载（`_?=$INSTDIR`）**根本不写**；
+## 2026-09-28 第四轮：维护模式卸载不撤销授权（同日二次修正）
+
+- **现象（Andy 现场报告）**：Windows「设置 → 应用」卸载已生效（第三轮修复验证通过）；但双击安装包 →「已安装」页选「卸载 无线麦 SayAll」的**维护模式卸载**不撤销授权。
+- **根因（生成的 installer.nsi 实证）**：`PageLeaveReinstall` 的 `reinst_uninstall` 段对**所有**向导内卸载（升级「卸载后安装」、维护模式「卸载」）都用 `ExecWait '"$INSTDIR\uninstall.exe" _?=$INSTDIR'` **原位调用**旧卸载器（`$EXEDIR == $INSTDIR`）——与第三轮的 `$EXEDIR != $INSTDIR` 真卸载守卫正好互斥，标记不写。且卸载成功后向导**不退出**，继续走目录页与安装节**重装**——净效果等同覆盖安装，授权保留。
+- **难点**：原位调用此刻无法区分「升级」与「维护卸载」——进程、命令行、版本关系（卸载器 = 已安装版本）全部相同；版本关系（同版本 vs 新版本）只在安装器的重装页可知。
+- **修复（纯 NSIS 侧，Rust 不动）**：
+  - 卸载器原位调用（`$EXEDIR == $INSTDIR`）改写**待决文件** `$LOCALAPPDATA\SayAll\rc003-uninstall-pending`，内容 `pending-uninstall=${VERSION}`；真卸载分支照旧写 `uninstalled=<tick>` 并清掉残留待决；
+  - PREINSTALL 新增 `SayAllResolveUninstallPending`（先于过渡清理执行）：待决内容 == 本版本（维护卸载后向导重装）→ 写 `uninstalled=<tick>` 撤销凭证；其他版本（升级）→ 删待决、授权保留；待决文件两条出路都删（瞬时信号，不承载跨安装语义）。
+- **语义矩阵**：真卸载（设置→应用 / 双击 uninstall.exe / /S）→ 直接撤销 ✓；维护模式卸载 → 向导重装完成后启动应用，开关回落关闭 ✓；交互升级（卸载后安装 / 不卸载）→ 授权保留 ✓；静默升级 /S（无向导页，无原位调用）→ 保留 ✓；修复（添加/重新安装组件）→ 保留 ✓。
+- **已知边界（fail-safe 方向优先）**：① 维护卸载后在目录页取消向导 → 待决文件残留，由下一次安装裁决（同版本 → 撤销，视为「卸载已发生」；换新版本 → 删待决、保留）；② 卸载器中途取消 → 应用未卸载，待决文件残留，后续**同版本修复**会误判为维护卸载而撤销（多走一次 UAC，方向安全）；③ 旧版卸载器（无待决逻辑）的维护卸载 → 不撤销，过渡期一次，换装本修复后消失。
+- 契约测试：`installer_resolves_maintenance_uninstall_via_pending_file`（新增）+ `installer_preserves_capture_authorization_on_upgrade`（扩展待决断言）——38 → 39 passed。
+- 隐私检查：未包含个人路径、设备身份、语音内容或凭据
+��载**（`$EXEDIR != $INSTDIR`）时写标记，内容 = `uninstalled=<卸载时刻 GetTickCount>`；升级路径的原位卸载（`_?=$INSTDIR`）**根本不写**；
   - `SayAllClearFreshReauthMarker` 只清理旧版卸载器产物（`fresh`/`legacy`），`revoked` 与 `stale` 一律保留——带 `uninstalled=` 前缀的标记是「真卸载撤销过授权」的凭证，**任何安装都不得删除**；
   - 契约测试 `installer_preserves_capture_authorization_on_upgrade`（`src-tauri/src/lib.rs`）同步覆盖五态语义与守卫位置。
 - 修复后语义：升级 → 授权与开关状态保持不变；卸载 → 标记 `uninstalled=` 落盘 → 重装启动开关回落关闭 → 重开走一次 UAC。**不再有时限**。

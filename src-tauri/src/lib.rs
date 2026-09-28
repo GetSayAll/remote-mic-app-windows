@@ -2134,6 +2134,10 @@ mod tests {
     ///    唯一判据是新鲜度，所以删除必须走 SayAllClearFreshReauthMarker
     ///    （fresh/legacy 才删），**不得**在 PREINSTALL 里无条件 Delete。
     ///    开关意图由 AppSettings 承载、启动对账回落——安装器不碰设置。
+    /// 3. 维护模式卸载（双击安装包 → 已安装页选「卸载」，与升级共用原位
+    ///    调用形态）写待决文件，PREINSTALL 按版本裁决：同版本（维护卸载
+    ///    后重装）→ 写撤销凭证；不同版本（升级）→ 删待决、授权保留——
+    ///    见 installer_resolves_maintenance_uninstall_via_pending_file。
     #[test]
     fn installer_preserves_capture_authorization_on_upgrade() {
         let install = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
@@ -2230,6 +2234,77 @@ mod tests {
         assert!(
             tick > guard && tick < endif,
             "GetTickCount 必须写在 revoke 分支的 $EXEDIR 守卫内（安装路径不写标记）"
+        );
+        // 2026-09-28 二次定稿：原位调用（升级卸载 / 维护卸载共用形态）写
+        // 待决文件而非标记——直接写标记会让升级把授权打回关闭，什么都不写
+        // 会让维护卸载的撤销丢失。真卸载分支还要清掉残留待决（被撤销凭证
+        // 取代）。
+        let else_branch = stop[guard..endif]
+            .find("${Else}")
+            .map(|offset| guard + offset)
+            .expect("原位调用必须有 ${Else} 分支处理待决文件");
+        let pending_write = stop
+            .find(r#"FileWrite $0 "pending-uninstall=${VERSION}""#)
+            .expect("原位调用必须写待决文件 pending-uninstall=<版本>");
+        assert!(
+            pending_write > else_branch && pending_write < endif,
+            "待决文件写入必须位于 $EXEDIR == $INSTDIR（Else）分支内——真卸载分支写的是撤销凭证"
+        );
+        let pending_delete = stop
+            .find(r#"Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending""#)
+            .expect("真卸载分支必须清掉残留的待决文件");
+        assert!(
+            pending_delete > guard && pending_delete < else_branch,
+            "待决文件清理必须位于真卸载分支（撤销凭证取代一切待决）"
+        );
+    }
+
+    /// 维护模式卸载（双击安装包 → 已安装页选「卸载」）在生成的 installer.nsi
+    /// 里与升级共用同一原位调用形态（PageLeaveReinstall → reinst_uninstall，
+    /// `_?=$INSTDIR`），且卸载成功后向导**继续走安装节**（不退出）。撤销只能
+    /// 由 PREINSTALL 裁决：待决版本 == 本版本（维护卸载 → 重装）→ 写撤销
+    /// 凭证；不同版本（升级）→ 删待决、授权保留（2026-09-28 Andy 现场报告
+    /// 「设置 → 应用卸载可以了，维护模式不行」的修复）。
+    #[test]
+    fn installer_resolves_maintenance_uninstall_via_pending_file() {
+        let resolve = macro_body(INSTALLER_HOOKS, "SayAllResolveUninstallPending");
+        // 裁决判据必须是「待决内容 == 本版本」的字符串精确比较
+        let branch = resolve
+            .find(r#"${If} $R9 == "pending-uninstall=${VERSION}""#)
+            .expect("裁决宏必须以待决内容 == 本版本为撤销判据");
+        let branch_end = resolve[branch..]
+            .find("${EndIf}")
+            .map(|offset| branch + offset)
+            .expect("同版本分支必须有 ${EndIf}");
+        // 撤销凭证必须且只能由同版本分支写出（新格式，任何安装不得删除）
+        let marker = resolve
+            .find(r#"FileWrite $0 "uninstalled=$R8""#)
+            .expect("维护卸载裁决必须写 uninstalled= 撤销凭证");
+        assert!(
+            marker > branch && marker < branch_end,
+            "撤销凭证必须只由同版本分支写出（升级分支不得碰标记）"
+        );
+        // 待决文件必须无条件清理：它只是「原位卸载刚发生」的瞬时信号，
+        // 不承载跨安装语义（跨安装凭证只有 uninstalled= 标记）
+        let cleanup = resolve
+            .find(r#"Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending""#)
+            .expect("待决文件必须在裁决后删除");
+        assert!(
+            cleanup > branch_end,
+            "待决文件清理必须位于版本分支之外（同版本/异版本两条出路都删）"
+        );
+        // PREINSTALL 必须先裁决、后过渡清理：裁决写下的凭证是 revoked 新格式，
+        // 过渡清理（fresh/legacy 判据）不会碰它——顺序即语义。
+        let install = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
+        let resolve_ins = install
+            .find("!insertmacro SayAllResolveUninstallPending install")
+            .expect("PREINSTALL 必须执行维护卸载裁决");
+        let clear_ins = install
+            .find("!insertmacro SayAllClearFreshReauthMarker install")
+            .expect("PREINSTALL 必须执行过渡清理");
+        assert!(
+            resolve_ins < clear_ins,
+            "裁决必须先于过渡清理执行（顺序即语义，见裁决宏说明）"
         );
     }
 
