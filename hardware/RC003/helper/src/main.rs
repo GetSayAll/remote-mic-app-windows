@@ -2983,6 +2983,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             hide_console_window();
         }
 
+        // ---- panic 落盘：--hide-window / 计划任务路径下 stderr 无人可见 ----
+        // panic（unwind）是"干净退出"（退出码 101），**不触发 WER/事件日志**，
+        // 进程表现为"无声消失"——2026-09-28 真机 run4/run5 正是这个形状
+        // （日志停在 HB 中间、无 [TIMEUP]/[DISCONNECT]、事件日志无崩溃记录）。
+        // hook 保留 stderr 输出，并把同一份信息写进日志文件。
+        // 边界：TerminateProcess / abort 仍无任何痕迹——前者只能靠启动器观测退出码区分。
+        if let Some(path) = args
+            .log
+            .clone()
+            .or_else(|| Some(args.runtime_dir.join("helper-panic.log")))
+        {
+            std::panic::set_hook(Box::new(move |info| {
+                let thread = std::thread::current();
+                let msg = format!(
+                    "[PANIC] {} | thread={} backtrace_env={} stamp={}",
+                    info,
+                    thread.name().unwrap_or("<unnamed>"),
+                    std::env::var("RUST_BACKTRACE").unwrap_or_else(|_| "-".into()),
+                    local_stamp(),
+                );
+                eprintln!("{msg}");
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+                    let _ = writeln!(f, "{msg}");
+                }
+            }));
+        }
+
         let logger = Logger::open_round(args.log.clone());
         logger.line(&format!(
             "=== sayall-helper（RC003 增强捕获轨 / 产品化 spike）  {} ===",
