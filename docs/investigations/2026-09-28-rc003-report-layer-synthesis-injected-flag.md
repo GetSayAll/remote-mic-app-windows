@@ -86,3 +86,55 @@ LLKHF_INJECTED 位上），豆包的注入标志门槛对这条路径无效。**
   与现有三键清空逻辑共享同一 tap，无新增驱动；usage 与产品热键配置联动。
 - 边界：本结论来自单机单日；kbdhid 映射随系统版本可能变化，产品验收时
   需按验收手册在真机上重跑本探针确认 `USAGE_TO_VK` 仍成立。
+
+## 2026-09-29 凌晨：helper 死亡排查与产品集成真机诊断（run6/run7）
+
+### 基础设施补盲（已提交 5f666d9 / f12b573）
+
+- **panic 落盘 hook**：Rust panic（unwind）是干净退出（码 101），不触发
+  WER/事件日志；`--hide-window` 下 stderr 无人可见 → run4/run5 的
+  「日志停在 HB 中间、无收尾、无事件记录」正是这个形状。`set_hook`
+  保留 stderr 并把同一份信息写进 `--log`（无 --log 时落
+  `runtime_dir/helper-panic.log`）。边界：TerminateProcess/abort 仍无痕迹，
+  退出码只能靠启动器 `-PassThru -Wait` 观测。
+- **--synth-from/--synth-to 槽位覆盖 bug**（f12b573）：原
+  `take().unwrap_or((parsed, 0))` 把单 flag 调用变成清掉另一槽位
+  （run3 实测 `synth=0x003e->0x0000`）。
+- **事件日志排查记录**：Application 日志 4h 窗口内无 helper 崩溃记录；
+  唯一相关事件是 `CodexSandboxService` 21:23 的重启通知——与本轮
+  helper 死亡时刻（00:15~00:22）不吻合，codex 嫌疑排除。
+
+### run6（00:44，--duration 900）：helper 死亡未复现 + 新现象
+
+- 带 panic hook 跑满 900s，`EXITCODE=0`、`[TIMEUP]` 正常收尾、PANIC=0。
+  **run4/run5 的死亡未复现**——当时的差异是 app 还在跑（PID 5720，
+  本轮发现 app 已退出）；死亡是否与 app 桥接交互相关待复现验证。
+- **新 bug：agent 静默**。`gadget_modules_in_host=3`（三代并存），
+  新 agent HELLO/CONFIG 正常、回了 `mode:clear`，此后 900 秒
+  **零上行**（无 HB、无 renew:first、无 targets_ack、无 dropped:*
+  重连日志），TCP 单连接保持 ESTABLISHED（netstat 实证，排除重连
+  循环），helper 侧 `[TARGETS-RESEND]` 重发 95 次全空。
+
+### run7（01:07，宿主清零后单实例注入）
+
+- 提权结束 WUDFHost(42020) 让设备重枚举 → 0 Gadget → 单实例注入。
+- **agent 完全正常**：HB 每 500ms、lease_ok、renew_age_ms 新鲜
+  （agent 在收 renew），且当时 **targets 是空集**（app 不在）——
+  **排除「空 targets 杀死 agent」假设**；run6 的静默最大嫌疑收敛到
+  **3 Gadget 实例 hook 堆叠**（3 层 NtDeviceIoControlFile 回调链）。
+- **未解之谜（保留 instrumentation）**：CONFIG 批次里 agent 只回了
+  `mode:clear`，`targets`/`synth` 的 ack 四轮全缺（run4~run7 100% 复现），
+  而 renew（批次之后 500ms 周期下发）全部被处理——已给 agent
+  `handleCommand` 加命令级日志（非 renew 命令到达即记
+  `cmd:<type>`，JSON.parse 失败记 `cmd:parse_failed len= head=`），
+  下一轮真机直接区分「字节没到 / 到了但损坏 / 处理了但 ack 没回」。
+- 环境：run5（桥 connected + targets 非空）agent 活；run6（桥失败 +
+  空集 + 3 实例）agent 死；run7（空集 + 1 实例）agent 活——
+  **产品路径（桥连上 → 非空 targets）有 run5 正面实证**。
+
+### 下一步
+
+1. run8：带 cmd 级日志的 agent 重跑（先 app 后 helper 或反之按 UAC
+   时序），核对 `[TARGETS-ACK]` / `[SYNTH-ACK]` / HB `stat.synth_applied`。
+2. Andy 目视端到端：按住语音键 → 豆包语音条弹出、松开停止。
+3. TODO.md 条目仍不可勾：完成定义要求 RC001/RC003 双真机验收。

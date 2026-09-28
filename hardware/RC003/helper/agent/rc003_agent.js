@@ -274,8 +274,18 @@ function usagesHex(us) {
 function handleCommand(line) {
   tLastRx = Date.now();
   var cmd = null;
-  try { cmd = JSON.parse(line); } catch (e) { return; }
-  if (!cmd || typeof cmd.type !== 'string') return;
+  try { cmd = JSON.parse(line); } catch (e) {
+    /* 2026-09-29 run7 观察：targets/synth 的 ack 四轮全缺而 renew 正常——
+       必须区分「字节没到 / 到了但损坏 / 处理了但 ack 没回」。parse 失败不再静默。 */
+    logLine('cmd:parse_failed len=' + line.length + ' head=' + line.slice(0, 32));
+    return;
+  }
+  if (!cmd || typeof cmd.type !== 'string') {
+    logLine('cmd:bad_shape head=' + String(line).slice(0, 32));
+    return;
+  }
+  /* 每条非 renew 下行都留痕：renew 500ms 一条太多，其余命令频次极低。 */
+  if (cmd.type !== 'renew') logLine('cmd:' + cmd.type);
 
   /* 令牌校验：助手监听在 loopback，本地任意进程都能连上来冒充助手。
      带令牌时不匹配的命令一律忽略（尤其不能让伪造的 renew 把 agent 武装起来）。 */
