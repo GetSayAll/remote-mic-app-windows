@@ -294,6 +294,13 @@ mod windows_impl {
     static LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SWALLOWED_EDGES: AtomicU64 = AtomicU64::new(0);
     static LEAKED_DOWNS: AtomicU64 = AtomicU64::new(0);
+    /// 常驻抑制吞键累计（按下沿，每次按住的 DOWN 计一次）。只增不减。
+    /// 2026-09-28 TV 键偶发拦截调查：增强所有权丢失窗口（ownership_timeout /
+    /// ownership_released → ownership_resumed）内，方案 C 常驻抑制接管 TV，
+    /// 物理键盘同名键（反引号 VK 0xC0）随之被吞——该窗口此前只知起点不知
+    /// 终点与影响面。本计数由所有权沿日志（rc003_bridge）读快照，分析时
+    /// 做差即得窗口内被吞按压次数。钩子线程内只做 fetch_add（无锁无 IO）。
+    static PERSISTENT_SWALLOW_TOTAL: AtomicU64 = AtomicU64::new(0);
     static ARMED_UNTIL_MS: [AtomicU64; ALL_BUTTONS.len()] = {
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: AtomicU64 = AtomicU64::new(0);
@@ -617,8 +624,12 @@ mod windows_impl {
         // 按下沿：直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键 + VK_SLEEP）与
         // 常驻抑制键（Home/TV"遥控器优先"：已映射 + 遥控器在线）无需武装；
         // 其余等待武装（有界 60ms）。常驻抑制键跳过有界等待，响应零额外延迟。
-        let attributed = if direct_attributed(vk_code) || (persistent(button) && remote_connected())
-        {
+        // 路径分类供 PERSISTENT_SWALLOW_TOTAL 计数：direct 族（0xFF/0x5D/0x5F）
+        // 与 TV/Home 的 VK（0xC0/0x24）不相交，via_persistent && !via_direct
+        // 恒等于"常驻抑制吞键"。
+        let via_direct = direct_attributed(vk_code);
+        let via_persistent = persistent(button) && remote_connected();
+        let attributed = if via_direct || via_persistent {
             true
         } else if armed(button) {
             true
@@ -646,6 +657,9 @@ mod windows_impl {
         });
         if attributed {
             SWALLOWED_EDGES.fetch_add(1, Ordering::Relaxed);
+            if via_persistent && !via_direct {
+                PERSISTENT_SWALLOW_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
             // 自我续期武装：覆盖同一次按住的后续事件（多键盘事件/未知固件形态）。
             ARMED_UNTIL_MS[button.ordinal()].store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
             feed_edge(button, true);
@@ -911,6 +925,11 @@ mod windows_impl {
         LEAKED_DOWNS.load(Ordering::Relaxed)
     }
 
+    /// 常驻抑制吞键累计（见 PERSISTENT_SWALLOW_TOTAL 注释）。任意线程可调用。
+    pub fn persistent_swallow_total() -> u64 {
+        PERSISTENT_SWALLOW_TOTAL.load(Ordering::Relaxed)
+    }
+
     pub fn is_gate_thread_alive() -> bool {
         GATE_ACTIVE.load(Ordering::Relaxed)
     }
@@ -924,10 +943,10 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     arm_button, capture_diagnostics_summary, configure, decide, enhanced_owned_mask,
-    is_gate_thread_alive, leaked_down_count, listener_active, set_edge_sink,
-    set_enhanced_owned_mask, set_listener_active, set_persistent_mask, set_remote_connected,
-    set_shortcut_capture_active, set_shortcut_capture_sink, swallowed_edge_count, KeyGate,
-    HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    is_gate_thread_alive, leaked_down_count, listener_active, persistent_swallow_total,
+    set_edge_sink, set_enhanced_owned_mask, set_listener_active, set_persistent_mask,
+    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
+    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -969,6 +988,9 @@ mod fallback {
             .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
+        0
+    }
+    pub fn persistent_swallow_total() -> u64 {
         0
     }
     pub fn is_gate_thread_alive() -> bool {
