@@ -2163,6 +2163,21 @@ mod tests {
             fresh < delete && legacy < delete,
             "标记删除必须位于 fresh/legacy 判据之后"
         );
+        // 新格式（真卸载凭证）必须被识别为 revoked，且**不进入**可删除集合：
+        // 它是「卸载后重装必须回落关闭」的唯一凭证，删除它授权就会复活。
+        let age = macro_body(INSTALLER_HOOKS, "SayAllReauthMarkerAge");
+        assert!(
+            age.contains("StrCpy $R8 $R9 12") && age.contains(r#""uninstalled=""#),
+            "新鲜度宏必须按 uninstalled= 前缀识别真卸载标记（不依赖 IntOp 对非数字的隐式归零）"
+        );
+        assert!(
+            age.contains(r#""revoked""#),
+            "新鲜度宏必须输出 revoked（真卸载凭证，任何安装不得删除）"
+        );
+        assert!(
+            !clear.contains(r#""revoked""#),
+            "清除宏不得把 revoked（真卸载凭证）纳入删除集合"
+        );
         let uninstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREUNINSTALL");
         assert!(
             uninstall.contains("!insertmacro SayAllStopHelper uninstall 1"),
@@ -2185,13 +2200,30 @@ mod tests {
             marker > branch && marker < endif,
             "重授权标记写入必须位于 revoke=1 分支内"
         );
+        // 2026-09-28 真机复测修正：升级路径根本不得写标记——旧卸载器由安装器
+        // 以 `_?=$INSTDIR` 原位调用（$EXEDIR == $INSTDIR），真卸载时 NSIS 先把
+        // 卸载器拷进临时目录（$EXEDIR != $INSTDIR）。
+        let guard = stop[branch..endif]
+            .find("${If} $EXEDIR != $INSTDIR")
+            .map(|offset| branch + offset)
+            .expect("必须用 $EXEDIR != $INSTDIR 区分真卸载与升级原位调用");
+        assert!(
+            marker > guard,
+            "标记写入必须位于 $EXEDIR 守卫之内（升级原位调用不得写标记）"
+        );
+        // 标记内容必须是新格式 `uninstalled=<tick>`：PREINSTALL 见到它必须
+        // 保留，与升级产物（旧格式）不可混淆。
+        assert!(
+            stop[guard..endif].contains(r#"FileWrite $0 "uninstalled=$R8""#),
+            "真卸载标记内容必须是新格式 uninstalled=<tick>"
+        );
         // 标记内容必须携带卸载时刻的 GetTickCount（新鲜度判据的数据来源）。
         let tick = stop
             .find("kernel32::GetTickCount")
             .expect("卸载器写标记必须记录卸载时刻的 GetTickCount");
         assert!(
-            tick > branch && tick < endif,
-            "GetTickCount 必须写在 revoke=1 分支内（安装路径不写标记）"
+            tick > guard && tick < endif,
+            "GetTickCount 必须写在 revoke 分支的 $EXEDIR 守卫内（安装路径不写标记）"
         );
     }
 

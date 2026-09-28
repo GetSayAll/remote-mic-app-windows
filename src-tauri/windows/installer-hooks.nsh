@@ -156,26 +156,22 @@
   ; ── 授权语义（2026-09-28 Andy 拍板）：升级保留、卸载撤销、卸载后重装回落关闭 ──
   ; 开关的持久化意图在 AppSettings（app_config_dir），跨升级/重装幸存；
   ; 授权本体是提权创建的计划任务（普通权限删不掉，跨安装幸存）。撤销的
-  ; 唯一凭证是卸载器写下的重授权标记——因此本钩子对标记的删除必须**有条件**：
+  ; 唯一凭证是真卸载时写下的重授权标记——因此本钩子对标记的删除必须
+  ; **有条件**（见 SayAllClearFreshReauthMarker）：
   ;
-  ;   * 交互升级：旧版卸载器（先于本钩子运行）以 revoke=1 写下标记；
-  ;     该标记「刚刚」（秒级）写入，属于本次升级的中间产物——删除，
-  ;     幸存的任务继续承载授权，开关保持原状态（2026-09-27 决策延续）。
-  ;   * 卸载后重装：标记是用户手动卸载时写下的，年龄不可控——保留，
-  ;     应用启动对账据此把开关回落为关闭，重开时强制重装任务（必弹 UAC）。
-  ;
-  ; 安装器在结构上**无法区分**这两种来源（交互升级与卸载后重装到达本钩子时
-  ; 系统状态完全一致），唯一可用判据是标记的新鲜度。判据与实现：
-  ;   * 卸载器写标记时把 `GetTickCount`（本次开机的毫秒数）写进内容；
-  ;   * SayAllClearFreshReauthMarker 读回内容与当前 tick 相减：
-  ;     0 ≤ 年龄 ≤ SAYALL_REAUTH_MARKER_FRESH_MS 视为「本次升级刚写的」→ 删除；
-  ;   * 旧格式（字面 `reauth`，无 tick）只能来自旧版卸载器，而旧版卸载器只会
-  ;     作为本次升级的旧卸载段出现 → 删除（与旧行为一致）；
-  ;   * 跨重启（age 为负）/ 标记过期 → 保留（撤销生效）。
-  ; 残留风险（已知并接受，TODO.md 同步）：卸载后 120 秒内完成重装，标记会被
-  ; 误判为本次升级产物而删除、授权被保留——需用户手动关一次开关。该路径与
-  ; 「升级」在系统状态上不可区分，120s 是升级钩子最坏时距（约 40s）与人为
-  ; 快速重装之间的工程折中。
+  ;   * 升级（固定安装器，2026-09-28 起）：旧卸载器以 `_?=$INSTDIR` 原位
+  ;     调用、**根本不写标记**（$EXEDIR == $INSTDIR 判定，见 SayAllStopHelper）
+  ;     ——本钩子通常见不到标记，无需清理。
+  ;   * 卸载后重装（任意时距）：标记是新格式 `uninstalled=<tick>`，一律
+  ;     **保留**——应用启动对账据此把开关回落为关闭，重开时强制重装任务
+  ;     （必弹 UAC）。
+  ;   * 过渡清理（只针对旧版卸载器）：877a3c5 时代及更早的卸载器没有
+  ;     $EXEDIR 判断，升级路径也会写标记（裸 tick / 旧格式 reauth）——
+  ;     fresh（≤120s）或 legacy 才删除，否则升级会把开关打回关闭。
+  ;     残留风险（过渡期，TODO.md 同步）：旧版卸载器**真卸载**后 120 秒内
+  ;     重装，裸 tick 标记会被误判为升级产物而删除、授权被保留；旧格式
+  ;     reauth 标记无论时距都会被清理（升级语义优先）。换装一次本修复后
+  ;     的安装包，两类旧格式即从现场消失。
   !insertmacro SayAllClearFreshReauthMarker install
   ; 计划任务由提权进程创建，普通权限安装器删不掉它（删除命令静默失败，
   ; 任务本来就跨升级幸存）——升级恰恰要靠幸存的任务承载授权，helper 与
@@ -202,11 +198,14 @@
 
 ; 读取重授权标记的年龄。结果放在 $R9（**会覆盖 $R9**，调用方若需保留请自行
 ; Push/Pop），$R8 由本宏保存恢复。输出取值：
-;   "fresh"   —— 标记在且内容是 tick、年龄在 [0, FRESH_MS] 内（只能是本次
-;                升级的旧卸载器刚写的）；
+;   "revoked" —— 标记在且内容是新格式 `uninstalled=<tick>`（2026-09-28 起，
+;                真卸载的撤销凭证；升级路径根本不会写下它）——**任何安装都
+;                不得删除**，应用启动据此把开关回落为关闭；
+;   "fresh"   —— 标记在且内容是裸 tick、年龄在 [0, FRESH_MS] 内（只能是
+;                877a3c5 时代旧版卸载器刚在升级路径写下的过渡产物）；
 ;   "stale"   —— 标记在但已过期 / 跨重启（撤销生效，不得删除）；
-;   "legacy"  —— 标记在但内容是旧格式字面 `reauth`（旧版卸载器所写，只可能
-;                出现在本次升级的旧卸载段）；
+;   "legacy"  —— 标记在但内容是旧格式字面 `reauth`（main/codex 时代卸载器
+;                所写，只可能出现在本次升级的旧卸载段）；
 ;   "absent"  —— 标记不存在。
 !macro SayAllReauthMarkerAge _uid
   Push $R8
@@ -222,8 +221,17 @@
     StrCpy $R9 "legacy"
     Goto sayall_age_done_${_uid}
   ${EndIf}
-  ; 新格式：内容 = 卸载器写入时的 GetTickCount（毫秒）。IntOp 是带符号 32 位，
-  ; 跨重启 / tick 回绕都会算出负年龄 → stale（撤销生效），方向安全。
+  ; 新格式 `uninstalled=<tick>`（2026-09-28）：真卸载的撤销凭证——无论距离
+  ; 卸载多久，安装器一律不得删除。按固定长度前缀判断，不依赖 IntOp 对
+  ; 非数字内容的隐式归零（"uninstalled=…" 被当 0 会「碰巧」得到 stale，
+  ; 但那种巧合撑不起撤销语义）。
+  StrCpy $R8 $R9 12
+  ${If} $R8 == "uninstalled="
+    StrCpy $R9 "revoked"
+    Goto sayall_age_done_${_uid}
+  ${EndIf}
+  ; 裸 tick（877a3c5 时代格式）：IntOp 是带符号 32 位，跨重启 / tick 回绕
+  ; 都会算出负年龄 → stale（撤销生效），方向安全。
   System::Call "kernel32::GetTickCount() i .R8"
   IntOp $R8 $R8 - $R9
   ${If} $R8 >= 0
@@ -236,8 +244,9 @@
   Pop $R8
 !macroend
 
-; 升级路径专用：只删除「本次升级的旧卸载器刚写下」的重授权标记。
-; 旧格式视为 fresh（等价于旧行为的无条件删除）；stale/absent 不动。
+; 升级路径专用的**过渡清理**：只删除旧版卸载器在升级路径写下的标记——
+; 裸 tick 且新鲜（877a3c5 时代）或旧格式 reauth（main/codex 时代）。
+; 新格式 revoked（真卸载凭证）与 stale 一律不动。
 !macro SayAllClearFreshReauthMarker _uid
   Push $R9
   !insertmacro SayAllReauthMarkerAge ${_uid}clear
@@ -281,22 +290,30 @@
     ${EndIf}
     Abort
   ${EndIf}
-  ; 写「需重新授权」标记（**仅卸载路径**，_revoke_auth=1）：提权任务普通
-  ; 权限删不掉（真机实测），卸载时这是「授权已应撤销」的唯一可靠凭证；
-  ; 应用启动据此回落开关，下次开启强制重装任务（必弹 UAC）。升级路径
-  ; （_revoke_auth=0）**不得**写标记——授权跨升级保留（2026-09-27 Andy
-  ; 拍板），写了标记应用启动就会把用户已开启的开关打回关闭。路径与
-  ; rc003_task.rs reauth_marker_path 逐字符一致（有测试钉住）。
-  ; 内容写入**卸载时刻的 GetTickCount**：升级路径的 PREINSTALL 钩子据此
-  ; 区分「本次升级的旧卸载器刚写的标记」（删除，授权保留）与「手动卸载
-  ; 留下的标记」（保留，撤销生效）——见 PREINSTALL 的授权语义注释。
+  ; 写「需重新授权」标记（**仅卸载路径的真卸载**，_revoke_auth=1 且
+  ; $EXEDIR != $INSTDIR）：提权任务普通权限删不掉（真机实测），真卸载时
+  ; 这是「授权已应撤销」的唯一可靠凭证；应用启动据此回落开关，下次开启
+  ; 强制重装任务（必弹 UAC）。升级路径（_revoke_auth=0）**不得**写标记；
+  ; 真卸载判定（2026-09-28 真机复测后修正）：升级时旧卸载器被新安装器以
+  ; `_?=$INSTDIR` 原位调用（生成的 installer.nsi 的 reinst_uninstall 段），
+  ; 此时 $EXEDIR == $INSTDIR——**不写标记**（授权由升级保留，若写了标记，
+  ; 卸载后快速重装与升级在 PREINSTALL 处就不可区分，标记会被误删、授权
+  ; 复活——12:29 卸载 → 12:51 重装仍复现，见
+  ; Bugs/2026-09-28-reinstall-did-not-revoke-capture-authorization.md）。
+  ; 真卸载时 NSIS 把卸载器拷进 %TEMP%\~nsu*.tmp 再跑，$EXEDIR 是临时目录，
+  ; 与 $INSTDIR 必不相同。路径与 rc003_task.rs reauth_marker_path 逐字符
+  ; 一致（有测试钉住）。内容 = `uninstalled=<卸载时刻 GetTickCount>`：
+  ; 新格式让 PREINSTALL 能与旧版卸载器的升级产物（裸 tick / reauth）区分，
+  ; 见 SayAllReauthMarkerAge 的 revoked 分支。
   !if ${_revoke_auth} == 1
-    CreateDirectory "$LOCALAPPDATA\SayAll"
-    System::Call "kernel32::GetTickCount() i .R8"
-    FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
-    ${If} $0 != 0
-      FileWrite $0 "$R8"
-      FileClose $0
+    ${If} $EXEDIR != $INSTDIR
+      CreateDirectory "$LOCALAPPDATA\SayAll"
+      System::Call "kernel32::GetTickCount() i .R8"
+      FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
+      ${If} $0 != 0
+        FileWrite $0 "uninstalled=$R8"
+        FileClose $0
+      ${EndIf}
     ${EndIf}
   !endif
   Pop $0
