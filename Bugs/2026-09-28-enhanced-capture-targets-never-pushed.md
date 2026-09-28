@@ -1,7 +1,7 @@
 # 全按键支持开关显示已开启但所有按键边沿被主程序丢弃（动态目标集从未下发）
 
 - 发现日期：2026-09-28
-- 状态：已修复（0ff8561），等待真机验证
+- 状态：第一轮已修复（0ff8561）；第二轮回归已修复（3afdd01），等待真机验证
 - 影响范围：SayAll 0.3.0（source_revision=d5bd0ca，2026-09-28 安装版）；RC003 全按键支持（enhanced capture）整条桥接链路；0.2.6 及更早版本不受影响
 - 功能点：RC003 全按键支持（`rc003_bridge` 动态捕获目标下发）
 - 现象：安装 0.3.0 后，按键页「全按键支持」开关显示已开启，助手（helper）进程正常拉起并完成桥接鉴权，但遥控器按键在应用内完全无响应。
@@ -92,6 +92,45 @@ fn set_enhanced_capture_enabled(&self, enabled: bool) {
   与 `first_edge`，三键与已映射按键动作生效；关闭后 `targets_changed enabled=false` 且旧路径恢复。
 - 安装包：`deferred`——从干净分支重出后安装，核对 `reason=invalid` 消失、关键二进制哈希
   （NSIS 静默安装遇占用文件会静默跳过）。
+
+## 第二轮回归（2026-09-28 上午真机，pid 41708，0ff8561 之后）
+
+第一轮修复出包真机实测后，Andy 报告新行为：
+
+- 全按键支持**关闭**：TV 键（配置"打开无线麦"）不触发动作，原生键入漏成 `·`
+  （VK_OEM_3 经 IME）；物理反引号键输出正常。
+- 全按键支持**开启**：TV 键能打开无线麦，但物理反引号键无法输出；
+  期望 = 与返回键一致（动作单响应 + 不拦截物理按键），关闭 = 回到原有
+  「遥控器优先」逻辑。
+
+证据（`sayall-diagnostic.log` pid 41708 + `%ProgramData%\SayAll\rc003-helper\helper-task.log`）：
+
+- `targets_changed enabled=true usages=28,35,4a,…`（第一轮修复生效，目标集已下发）；
+- 开启态 `map_edges … gate(sw=24→53 lk=…)`：LL 钩子仍在逐键吞 VK_OEM_3（sw=被吞边沿计数），
+  同窗口 `bridge closed edges=0`——报告层**没有**接管，边沿全部来自钩子；
+- helper 日志 `[AGENT-STALE] ×21`：宿主内 agent 仍是 `2026-09-26.canary-gate` 旧构建，
+  新动态 targets 命令全部被拒（`targets:rejected_report_not_targets` / `rejected_bad_array`），
+  `clearUsages` 从未含 0x35 → 报告层未接管 TV，`ENHANCED_OWNED_MASK` 永不置位，
+  钩子常驻抑制继续吞 VK_OEM_3（物理反引号被杀）；
+- 关闭态（`targets_changed enabled=false` 后）`map_edges … gate(sw=35 lk=15)`：
+  sw 不再增长、lk +1，钩子完全不吞——TV 原生键入泄漏成 `·`。
+
+根因 A（关闭态泄漏，代码缺陷，3afdd01 修复）：`apply_enhanced_capture_state`
+翻转 `mappings.enabled`，而它是映射功能总开关——`mapped_mask()` 在
+`enabled=false` 时恒 0 → `key_gate::configure` 后 `PERSISTENT_MASK` 归零 →
+Home/TV「遥控器优先」常驻抑制被一并拆掉。开关语义应为「只切换捕获通道」
+（报告层增强 vs 原有 Raw Input + 键盘门控兜底），映射引擎与门控在两种状态下
+都必须保持激活。
+
+根因 B（开启态拦截物理键，部署问题，非代码缺陷）：见上 `[AGENT-STALE]`。
+宿主换新（让 WUDFHost 重新加载 `2026-09-27.dynamic-all-key` agent）后，
+报告层接管全部动态目标 + ownership 握手置位 `ENHANCED_OWNED_MASK`
+（rc003_bridge.rs:917）→ 钩子对已接管按键让位（key_gate.rs:393 `!enhanced_owned`）
+→ 物理按键透传，兑现"同返回键"语义。
+
+回归测试：`enhanced_capture_enable_pushes_targets_and_disable_clears` 增补
+阳性对照二——关闭后 `mappings.enabled` 必须保持 true；旧实现（翻转）下该测试
+精确红在此断言（已实测 FAILED → 修复后 passed）。
 
 ## 隐私检查
 
