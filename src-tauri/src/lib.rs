@@ -2118,12 +2118,16 @@ mod tests {
         );
     }
 
-    /// 授权跨升级保留（2026-09-27 Andy 拍板，取代 2026-09-24「授权不跨安装保留」）：
-    /// 安装（升级/覆盖）路径不得写「需重新授权」标记——那个标记是应用启动
-    /// 回落开关的唯一凭证，写了就把用户已开启的开关打回关闭。卸载路径仍必须
-    /// 写（卸载即撤销，防止提权任务随卸载残留）。安装路径也不得删任务：普通
-    /// 权限删不掉提权任务（真机实测静默失败），升级恰恰要靠幸存的任务承载
-    /// 授权，helper 与主程序同路径覆盖更新后无需重建。
+    /// 授权语义（2026-09-28 Andy 拍板）：升级/覆盖安装保留授权，卸载撤销，
+    /// 卸载后的重装回落为关闭。实现要点：
+    ///
+    /// 1. 安装路径停助手用 revoke=0，不写标记；卸载路径 revoke=1 写标记
+    ///    （内容 = 卸载时刻 GetTickCount），且不删任务（普通权限删不掉）。
+    /// 2. PREINSTALL 只删除「新鲜」标记——交互升级的旧卸载器先于本钩子运行、
+    ///    秒级前刚写下标记；卸载后重装到达本钩子时的系统状态与升级完全一致，
+    ///    唯一判据是新鲜度，所以删除必须走 SayAllClearFreshReauthMarker
+    ///    （fresh/legacy 才删），**不得**在 PREINSTALL 里无条件 Delete。
+    ///    开关意图由 AppSettings 承载、启动对账回落——安装器不碰设置。
     #[test]
     fn installer_preserves_capture_authorization_on_upgrade() {
         let install = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
@@ -2135,13 +2139,29 @@ mod tests {
             !install.contains("schtasks /delete"),
             "安装路径不得删授权任务：普通权限删不掉，升级必须保留任务"
         );
-        // 升级时序：新安装器先跑**旧版卸载器**（当前已装版本的），它仍会写
-        // 重授权标记——PREINSTALL 必须把它删掉，否则本次升级开关照样回落。
-        // 卸载后重装的残留标记同被清除：任务实际幸存（普通权限删不掉），
-        // 保留开关状态符合直觉，且不引入新风险。
+        // 标记删除必须走带新鲜度判据的宏：无条件 Delete 会把「卸载后重装」
+        // 的撤销凭证一并清掉（幸存任务把授权复活，违背 2026-09-28 语义）。
         assert!(
-            install.contains(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#),
-            "PREINSTALL 必须删除旧卸载器写下的重授权标记，否则升级开关回落"
+            install.contains("!insertmacro SayAllClearFreshReauthMarker install"),
+            "PREINSTALL 必须经 SayAllClearFreshReauthMarker 删除旧卸载器写下的标记"
+        );
+        assert!(
+            !install.contains(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#),
+            "PREINSTALL 不得无条件 Delete 重授权标记——必须走新鲜度判据宏"
+        );
+        let clear = macro_body(INSTALLER_HOOKS, "SayAllClearFreshReauthMarker");
+        let fresh = clear
+            .find(r#""fresh""#)
+            .expect("清除宏必须按 fresh 判据放行删除");
+        let legacy = clear
+            .find(r#""legacy""#)
+            .expect("清除宏必须兼容旧格式标记（旧版卸载器只出现在本次升级的旧卸载段）");
+        let delete = clear
+            .find(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#)
+            .expect("清除宏应包含标记删除");
+        assert!(
+            fresh < delete && legacy < delete,
+            "标记删除必须位于 fresh/legacy 判据之后"
         );
         let uninstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREUNINSTALL");
         assert!(
@@ -2164,6 +2184,14 @@ mod tests {
         assert!(
             marker > branch && marker < endif,
             "重授权标记写入必须位于 revoke=1 分支内"
+        );
+        // 标记内容必须携带卸载时刻的 GetTickCount（新鲜度判据的数据来源）。
+        let tick = stop
+            .find("kernel32::GetTickCount")
+            .expect("卸载器写标记必须记录卸载时刻的 GetTickCount");
+        assert!(
+            tick > branch && tick < endif,
+            "GetTickCount 必须写在 revoke=1 分支内（安装路径不写标记）"
         );
     }
 
