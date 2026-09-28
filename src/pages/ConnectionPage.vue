@@ -86,6 +86,7 @@ const voiceCapturePressedCount = ref(0);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
 let voiceCaptureTimeout: number | null = null;
+let voiceCaptureBlurTimer: number | null = null;
 let voiceCaptureRequestId = 0;
 let unmounted = false;
 const voiceCapturePressed = new Set<KeyCode>();
@@ -131,6 +132,8 @@ async function beginVoiceHotkeyCapture(): Promise<void> {
   const requestId = ++voiceCaptureRequestId;
   captureStartingVoiceHotkey.value = true;
   voiceHotkeyMessage.value = "";
+  if (voiceCaptureBlurTimer !== null) window.clearTimeout(voiceCaptureBlurTimer);
+  voiceCaptureBlurTimer = null;
   try {
     const preheld = await startShortcutCapture();
     if (unmounted || requestId !== voiceCaptureRequestId) {
@@ -193,6 +196,8 @@ async function stopVoiceHotkeyCaptureSession(): Promise<KeyCode[]> {
   waitingPreheldRelease.value = false;
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
+  if (voiceCaptureBlurTimer !== null) window.clearTimeout(voiceCaptureBlurTimer);
+  voiceCaptureBlurTimer = null;
   voiceCapturePressed.clear();
   voiceCapturePressedCount.value = 0;
   voiceCaptureDisplay.value = [];
@@ -327,9 +332,33 @@ async function acceptVoiceCaptureEdge(edge: ShortcutCaptureEdge): Promise<void> 
 }
 
 function handleVoiceCaptureBlur(): void {
-  if (capturingVoiceHotkey.value || captureStartingVoiceHotkey.value) {
-    void cancelVoiceHotkeyCapture("窗口失去焦点，已取消录入", "window_blurred");
-  }
+  if (!capturingVoiceHotkey.value && !captureStartingVoiceHotkey.value) return;
+  if (voiceCaptureBlurTimer !== null) window.clearTimeout(voiceCaptureBlurTimer);
+  // 输入法可能在组合键按下后抢走前台焦点，原生边沿再异步送进 WebView。
+  // 留出一个很短的投递窗口：已有草稿就继续全局捕获，空会话才取消，
+  // 避免用户真的离开应用后录入器仍在后台吞键。
+  voiceCaptureBlurTimer = window.setTimeout(() => {
+    voiceCaptureBlurTimer = null;
+    if (!capturingVoiceHotkey.value && !captureStartingVoiceHotkey.value) return;
+    if (voiceCaptureDisplay.value.length > 0) {
+      voiceHotkeyMessage.value =
+        "窗口失去焦点，已保留录入草稿；返回应用后可继续补按或保存";
+      reportFrontendEvent({
+        event: "voice_hotkey_capture",
+        phase: "updated",
+        result: "passed",
+        reason: "window_blurred_draft_preserved",
+      });
+      return;
+    }
+    void cancelVoiceHotkeyCapture("窗口失去焦点，已取消录入", "window_blurred_empty");
+  }, 300);
+}
+
+function handleVoiceCaptureFocus(): void {
+  if (voiceCaptureBlurTimer === null) return;
+  window.clearTimeout(voiceCaptureBlurTimer);
+  voiceCaptureBlurTimer = null;
 }
 
 async function refreshVoiceHotkey() {
@@ -542,6 +571,7 @@ async function initializeAudio() {
 
 onMounted(async () => {
   window.addEventListener("blur", handleVoiceCaptureBlur);
+  window.addEventListener("focus", handleVoiceCaptureFocus);
   void refreshConnection();
   void initializeAudio();
   void refreshVoiceHotkey();
@@ -562,9 +592,12 @@ onMounted(async () => {
 onUnmounted(() => {
   unmounted = true;
   window.removeEventListener("blur", handleVoiceCaptureBlur);
+  window.removeEventListener("focus", handleVoiceCaptureFocus);
   if (pollTimer) clearInterval(pollTimer);
   if (voiceCaptureTimeout !== null) window.clearTimeout(voiceCaptureTimeout);
   voiceCaptureTimeout = null;
+  if (voiceCaptureBlurTimer !== null) window.clearTimeout(voiceCaptureBlurTimer);
+  voiceCaptureBlurTimer = null;
   unlistenVoiceCapture?.();
   unlistenVoiceCapture = null;
   void stopShortcutCapture().catch(() => undefined);

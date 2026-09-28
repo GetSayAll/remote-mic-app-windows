@@ -294,6 +294,61 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
+  it("preserves an existing shortcut draft when the input method steals window focus", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: true });
+    mocks.captureEdgeHandler!({ key: "left_control", isPressed: false });
+    mocks.captureEdgeHandler!({ key: "left_windows", isPressed: false });
+    await flushPromises();
+
+    window.dispatchEvent(new Event("blur"));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await flushPromises();
+
+    expect(mocks.stopShortcutCapture).not.toHaveBeenCalled();
+    expect(wrapper.find(".voice-hotkey-capture").text()).toContain("左 Ctrl + 左 Win");
+    expect(wrapper.text()).toContain("已保留录入草稿");
+
+    await wrapper
+      .findAll(".voice-hotkey-capture-actions button")
+      .find((button) => button.text() === "保存")!
+      .trigger("click");
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({
+      keys: ["left_control", "left_windows"],
+    });
+    wrapper.unmount();
+  });
+
+  it("still cancels an empty capture after the window remains unfocused", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "修改快捷键")!
+      .trigger("click");
+    await flushPromises();
+
+    window.dispatchEvent(new Event("blur"));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await flushPromises();
+
+    expect(mocks.stopShortcutCapture).toHaveBeenCalledOnce();
+    expect(wrapper.find(".voice-hotkey-capture").exists()).toBe(false);
+    expect(wrapper.text()).toContain("窗口失去焦点，已取消录入");
+    wrapper.unmount();
+  });
+
   it("cancels capture with Esc and keeps the current hotkey", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
