@@ -1111,7 +1111,9 @@ describe("全按键支持开启前确认弹窗", () => {
     expect(dialog).toBeDefined();
     // 2026-09-27 用户要求去掉「Windows 平时看不见它们」。
     expect(dialog!.text()).not.toContain("Windows 平时看不见它们");
-    expect(dialog!.text()).toContain("升级或重装无线麦后");
+    // 2026-09-28 二次定稿：授权语义改成「升级保留、卸载后重装才撤销」。
+    expect(dialog!.text()).toContain("升级/覆盖安装后无需重新授权");
+    expect(dialog!.text()).toContain("卸载后重装才需要");
     expect(dialog!.text()).toContain("防作弊");
 
     // 点弹窗「开启」完成授权 → 真正开启后悬停提示切到「关闭后…将不可映射」。
