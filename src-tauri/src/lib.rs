@@ -1653,14 +1653,20 @@ pub fn run() {
             // 连不上（2026-09-27 真机复盘，「正在启动」永不结束的成因之一）。
             #[cfg(windows)]
             let rc003_auto_trigger_allowed = if saved_settings.rc003_capture_enabled {
-                let revoked =
-                    rc003_task::reauth_required() || !rc003_task::task_installed();
-                if revoked {
-                    eprintln!(
-                        "rc003: 授权已随卸载/重置撤销（reauth={} task_installed={}），增强捕获回落为关闭",
-                        rc003_task::reauth_required(),
-                        rc003_task::task_installed()
-                    );
+                let reauth_required = rc003_task::reauth_required();
+                let task_installed = rc003_task::task_installed();
+                if reauth_required || !task_installed {
+                    // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
+                    // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验
+                    // 复盘的取证盲区）。reason 只陈述两个探针能支撑的结论。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} reauth_required={reauth_required} task_installed={task_installed}",
+                        if reauth_required {
+                            "reauth_marker_present"
+                        } else {
+                            "task_missing"
+                        }
+                    ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     false
                 } else {
@@ -2118,12 +2124,20 @@ mod tests {
         );
     }
 
-    /// 授权跨升级保留（2026-09-27 Andy 拍板，取代 2026-09-24「授权不跨安装保留」）：
-    /// 安装（升级/覆盖）路径不得写「需重新授权」标记——那个标记是应用启动
-    /// 回落开关的唯一凭证，写了就把用户已开启的开关打回关闭。卸载路径仍必须
-    /// 写（卸载即撤销，防止提权任务随卸载残留）。安装路径也不得删任务：普通
-    /// 权限删不掉提权任务（真机实测静默失败），升级恰恰要靠幸存的任务承载
-    /// 授权，helper 与主程序同路径覆盖更新后无需重建。
+    /// 授权语义（2026-09-28 Andy 拍板）：升级/覆盖安装保留授权，卸载撤销，
+    /// 卸载后的重装回落为关闭。实现要点：
+    ///
+    /// 1. 安装路径停助手用 revoke=0，不写标记；卸载路径 revoke=1 写标记
+    ///    （内容 = 卸载时刻 GetTickCount），且不删任务（普通权限删不掉）。
+    /// 2. PREINSTALL 只删除「新鲜」标记——交互升级的旧卸载器先于本钩子运行、
+    ///    秒级前刚写下标记；卸载后重装到达本钩子时的系统状态与升级完全一致，
+    ///    唯一判据是新鲜度，所以删除必须走 SayAllClearFreshReauthMarker
+    ///    （fresh/legacy 才删），**不得**在 PREINSTALL 里无条件 Delete。
+    ///    开关意图由 AppSettings 承载、启动对账回落——安装器不碰设置。
+    /// 3. 维护模式卸载（双击安装包 → 已安装页选「卸载」，与升级共用原位
+    ///    调用形态）写待决文件，PREINSTALL 按版本裁决：同版本（维护卸载
+    ///    后重装）→ 写撤销凭证；不同版本（升级）→ 删待决、授权保留——
+    ///    见 installer_resolves_maintenance_uninstall_via_pending_file。
     #[test]
     fn installer_preserves_capture_authorization_on_upgrade() {
         let install = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
@@ -2135,13 +2149,44 @@ mod tests {
             !install.contains("schtasks /delete"),
             "安装路径不得删授权任务：普通权限删不掉，升级必须保留任务"
         );
-        // 升级时序：新安装器先跑**旧版卸载器**（当前已装版本的），它仍会写
-        // 重授权标记——PREINSTALL 必须把它删掉，否则本次升级开关照样回落。
-        // 卸载后重装的残留标记同被清除：任务实际幸存（普通权限删不掉），
-        // 保留开关状态符合直觉，且不引入新风险。
+        // 标记删除必须走带新鲜度判据的宏：无条件 Delete 会把「卸载后重装」
+        // 的撤销凭证一并清掉（幸存任务把授权复活，违背 2026-09-28 语义）。
         assert!(
-            install.contains(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#),
-            "PREINSTALL 必须删除旧卸载器写下的重授权标记，否则升级开关回落"
+            install.contains("!insertmacro SayAllClearFreshReauthMarker install"),
+            "PREINSTALL 必须经 SayAllClearFreshReauthMarker 删除旧卸载器写下的标记"
+        );
+        assert!(
+            !install.contains(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#),
+            "PREINSTALL 不得无条件 Delete 重授权标记——必须走新鲜度判据宏"
+        );
+        let clear = macro_body(INSTALLER_HOOKS, "SayAllClearFreshReauthMarker");
+        let fresh = clear
+            .find(r#""fresh""#)
+            .expect("清除宏必须按 fresh 判据放行删除");
+        let legacy = clear
+            .find(r#""legacy""#)
+            .expect("清除宏必须兼容旧格式标记（旧版卸载器只出现在本次升级的旧卸载段）");
+        let delete = clear
+            .find(r#"Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required""#)
+            .expect("清除宏应包含标记删除");
+        assert!(
+            fresh < delete && legacy < delete,
+            "标记删除必须位于 fresh/legacy 判据之后"
+        );
+        // 新格式（真卸载凭证）必须被识别为 revoked，且**不进入**可删除集合：
+        // 它是「卸载后重装必须回落关闭」的唯一凭证，删除它授权就会复活。
+        let age = macro_body(INSTALLER_HOOKS, "SayAllReauthMarkerAge");
+        assert!(
+            age.contains("StrCpy $R8 $R9 12") && age.contains(r#""uninstalled=""#),
+            "新鲜度宏必须按 uninstalled= 前缀识别真卸载标记（不依赖 IntOp 对非数字的隐式归零）"
+        );
+        assert!(
+            age.contains(r#""revoked""#),
+            "新鲜度宏必须输出 revoked（真卸载凭证，任何安装不得删除）"
+        );
+        assert!(
+            !clear.contains(r#""revoked""#),
+            "清除宏不得把 revoked（真卸载凭证）纳入删除集合"
         );
         let uninstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREUNINSTALL");
         assert!(
@@ -2164,6 +2209,102 @@ mod tests {
         assert!(
             marker > branch && marker < endif,
             "重授权标记写入必须位于 revoke=1 分支内"
+        );
+        // 2026-09-28 真机复测修正：升级路径根本不得写标记——旧卸载器由安装器
+        // 以 `_?=$INSTDIR` 原位调用（$EXEDIR == $INSTDIR），真卸载时 NSIS 先把
+        // 卸载器拷进临时目录（$EXEDIR != $INSTDIR）。
+        let guard = stop[branch..endif]
+            .find("${If} $EXEDIR != $INSTDIR")
+            .map(|offset| branch + offset)
+            .expect("必须用 $EXEDIR != $INSTDIR 区分真卸载与升级原位调用");
+        assert!(
+            marker > guard,
+            "标记写入必须位于 $EXEDIR 守卫之内（升级原位调用不得写标记）"
+        );
+        // 标记内容必须是新格式 `uninstalled=<tick>`：PREINSTALL 见到它必须
+        // 保留，与升级产物（旧格式）不可混淆。
+        assert!(
+            stop[guard..endif].contains(r#"FileWrite $0 "uninstalled=$R8""#),
+            "真卸载标记内容必须是新格式 uninstalled=<tick>"
+        );
+        // 标记内容必须携带卸载时刻的 GetTickCount（新鲜度判据的数据来源）。
+        let tick = stop
+            .find("kernel32::GetTickCount")
+            .expect("卸载器写标记必须记录卸载时刻的 GetTickCount");
+        assert!(
+            tick > guard && tick < endif,
+            "GetTickCount 必须写在 revoke 分支的 $EXEDIR 守卫内（安装路径不写标记）"
+        );
+        // 2026-09-28 二次定稿：原位调用（升级卸载 / 维护卸载共用形态）写
+        // 待决文件而非标记——直接写标记会让升级把授权打回关闭，什么都不写
+        // 会让维护卸载的撤销丢失。真卸载分支还要清掉残留待决（被撤销凭证
+        // 取代）。
+        let else_branch = stop[guard..endif]
+            .find("${Else}")
+            .map(|offset| guard + offset)
+            .expect("原位调用必须有 ${Else} 分支处理待决文件");
+        let pending_write = stop
+            .find(r#"FileWrite $0 "pending-uninstall=${VERSION}""#)
+            .expect("原位调用必须写待决文件 pending-uninstall=<版本>");
+        assert!(
+            pending_write > else_branch && pending_write < endif,
+            "待决文件写入必须位于 $EXEDIR == $INSTDIR（Else）分支内——真卸载分支写的是撤销凭证"
+        );
+        let pending_delete = stop
+            .find(r#"Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending""#)
+            .expect("真卸载分支必须清掉残留的待决文件");
+        assert!(
+            pending_delete > guard && pending_delete < else_branch,
+            "待决文件清理必须位于真卸载分支（撤销凭证取代一切待决）"
+        );
+    }
+
+    /// 维护模式卸载（双击安装包 → 已安装页选「卸载」）在生成的 installer.nsi
+    /// 里与升级共用同一原位调用形态（PageLeaveReinstall → reinst_uninstall，
+    /// `_?=$INSTDIR`），且卸载成功后向导**继续走安装节**（不退出）。撤销只能
+    /// 由 PREINSTALL 裁决：待决版本 == 本版本（维护卸载 → 重装）→ 写撤销
+    /// 凭证；不同版本（升级）→ 删待决、授权保留（2026-09-28 Andy 现场报告
+    /// 「设置 → 应用卸载可以了，维护模式不行」的修复）。
+    #[test]
+    fn installer_resolves_maintenance_uninstall_via_pending_file() {
+        let resolve = macro_body(INSTALLER_HOOKS, "SayAllResolveUninstallPending");
+        // 裁决判据必须是「待决内容 == 本版本」的字符串精确比较
+        let branch = resolve
+            .find(r#"${If} $R9 == "pending-uninstall=${VERSION}""#)
+            .expect("裁决宏必须以待决内容 == 本版本为撤销判据");
+        let branch_end = resolve[branch..]
+            .find("${EndIf}")
+            .map(|offset| branch + offset)
+            .expect("同版本分支必须有 ${EndIf}");
+        // 撤销凭证必须且只能由同版本分支写出（新格式，任何安装不得删除）
+        let marker = resolve
+            .find(r#"FileWrite $0 "uninstalled=$R8""#)
+            .expect("维护卸载裁决必须写 uninstalled= 撤销凭证");
+        assert!(
+            marker > branch && marker < branch_end,
+            "撤销凭证必须只由同版本分支写出（升级分支不得碰标记）"
+        );
+        // 待决文件必须无条件清理：它只是「原位卸载刚发生」的瞬时信号，
+        // 不承载跨安装语义（跨安装凭证只有 uninstalled= 标记）
+        let cleanup = resolve
+            .find(r#"Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending""#)
+            .expect("待决文件必须在裁决后删除");
+        assert!(
+            cleanup > branch_end,
+            "待决文件清理必须位于版本分支之外（同版本/异版本两条出路都删）"
+        );
+        // PREINSTALL 必须先裁决、后过渡清理：裁决写下的凭证是 revoked 新格式，
+        // 过渡清理（fresh/legacy 判据）不会碰它——顺序即语义。
+        let install = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
+        let resolve_ins = install
+            .find("!insertmacro SayAllResolveUninstallPending install")
+            .expect("PREINSTALL 必须执行维护卸载裁决");
+        let clear_ins = install
+            .find("!insertmacro SayAllClearFreshReauthMarker install")
+            .expect("PREINSTALL 必须执行过渡清理");
+        assert!(
+            resolve_ins < clear_ins,
+            "裁决必须先于过渡清理执行（顺序即语义，见裁决宏说明）"
         );
     }
 

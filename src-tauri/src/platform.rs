@@ -201,11 +201,13 @@ impl PlatformRuntime for WindowsPlatform {
     }
 
     fn set_enhanced_capture_enabled(&self, enabled: bool) {
-        // 只翻转 enabled 位，复用 set_button_mappings 的门控同步路径
-        //（key_gate::configure 由 mappings.enabled 驱动，与 UI 保存映射同路）。
-        let mut mappings = WindowsPlatform::button_mappings(self);
-        mappings.enabled = enabled;
-        WindowsPlatform::set_button_mappings(self, mappings);
+        // 必须是**纯委托**：开关的平台侧语义（key_gate enabled 位、原子量 store、
+        // 动态目标下发）全部收敛在 WindowsPlatform::set_enhanced_capture_enabled
+        // 的唯一实现里。2026-09-28 真机回归（Bugs/2026-09-28-enhanced-capture-
+        // targets-never-pushed.md）的根因就是这一层被改成"自己实现一半"——
+        // 翻转 mappings.enabled 却不 store 原子量，set_button_mappings 读到恒为
+        // false 的原子量，目标集永远为空，按键边沿全部被丢弃。
+        WindowsPlatform::set_enhanced_capture_enabled(self, enabled)
     }
 
     fn shutdown_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {

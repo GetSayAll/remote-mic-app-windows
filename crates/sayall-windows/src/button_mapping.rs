@@ -801,7 +801,7 @@ mod tests {
     use crate::raw_input::RemoteButton;
     use crate::send_input::{ButtonAction, ButtonActions, KeyCode};
     use std::sync::Mutex as StdMutex;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// 测试注入器：记录 tap 的和弦与打开应用的目标。
     #[derive(Debug, Default)]
@@ -893,6 +893,25 @@ mod tests {
     const KEYDOWN: u32 = 0x0100;
     const KEYUP: u32 = 0x0101;
 
+    /// 轮询等待谓词成立（真时钟测试的统一等待原语），预算内不成立返回 false。
+    ///
+    /// 为什么不用固定 sleep：引擎是单线程循环，消息处理与连发/双击定时器共用
+    /// 一条队列，CI 慢机或全量并行下排队延迟可达本地的数倍——固定 sleep 是
+    /// 「本地刚好够、CI 必然压线」的 flaky 来源（2026-09-28 `leak_suppression_suite`
+    /// 实证：700ms 窗口断言 4 拍连发，负载下第 4 拍在窗口后才到）。轮询把
+    /// 「断言时机」换成「条件成立」，判据不变、余量放大；超时后由调用处的
+    /// assert 以实际状态给出可诊断的失败。
+    fn wait_until(mut pred: impl FnMut() -> bool, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pred()
+    }
+
     /// 泄漏对冲套件（2026-09-06 调查档案修复记录）：泄漏路径
     /// （[`EngineMessage::Keyboard`]，监听器按设备路径过滤=遥控器专用）的
     /// 按压边沿把该键标记为"原生已交付"——同键映射（上→上）的 Single
@@ -901,6 +920,13 @@ mod tests {
     /// GATE_ACTIVE 是进程级全局：本套件持 `key_gate::lock_gate_tests()` 串行锁
     /// 启停门控，不再依赖 sleep 让位（2026-09-28），且每个场景前确保门控存活
     /// （先完整退出旧门控再启动新门控，避免 Drop 的 GATE_ACTIVE=false 覆盖新值）。
+    ///
+    /// 时间余量原则（2026-09-28，CI flaky 修复）：引擎是单线程循环，消息与
+    /// 定时器共用一条队列，CI 慢机上排队延迟可达本地的数倍。所有「注入已
+    /// 发生」类断言一律用 [`wait_until`] 轮询 + 发送前基线的**相对增量**，
+    /// 不再用固定 sleep 后断绝对数量——绝对断言既会被上游场景的极端漏拍
+    /// 污染，又把断言时机压在固定窗口的边沿上。「未发生」类断言则拉长
+    /// 观察窗（越久越强）。判据本身没有放宽，放宽的只有时间余量。
     #[test]
     fn leak_suppression_suite() {
         let _gate_lock = crate::key_gate::lock_gate_tests();
@@ -976,6 +1002,11 @@ mod tests {
         let taps = || injector.taps.lock().unwrap().clone();
 
         // 场景 1：泄漏路径的同键映射（上→上）首击不注入（原生已交付）。
+        // 注意观察窗**不能**像场景 4/6 那样拉长：它受连发起始（350ms）的
+        // 上界约束——观察越久，KEYUP 的处理余量越小，引擎延迟处理 KEYUP
+        // 越过 350ms 就会补出连发拍。120ms 是"足以证明首击未注入"与
+        // "给 KEYUP 留 ~230ms 处理余量"的折中；即便极端负载下漏出连发拍，
+        // 场景 2/3 的相对基线断言也已把污染隔离在基线之前。
         ensure_gate(&mut gate);
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYDOWN)))
@@ -992,17 +1023,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // 场景 2（对照）：门控路径的同键映射（右→右）照常注入。
+        // 以发送前的 taps 长度为基线断言增量：上游场景若在极端负载下漏出
+        // 一拍连发，污染的是基线之前的历史，不进本场景的断言范围。
         ensure_gate(&mut gate);
+        let base = taps().len();
         sender
             .send(EngineMessage::GateEdge(ButtonEdge {
                 button: RemoteButton::Right,
                 is_pressed: true,
             }))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(|| taps().len() > base, Duration::from_millis(600));
         assert_eq!(
-            taps().as_slice(),
-            &[KeyChord {
+            taps()[base..].to_vec(),
+            vec![KeyChord {
                 keys: vec![KeyCode::Right]
             }],
             "门控路径（已吞键）的同键映射必须注入"
@@ -1017,21 +1051,18 @@ mod tests {
 
         // 场景 3：泄漏路径的不同键映射（左→退格）照常注入。冷首按会
         // 同时包含原生左移，这是与上/下/右/确定相同的结构性边界。
+        // 断言同样取相对基线（理由同场景 2）。
         ensure_gate(&mut gate);
+        let base = taps().len();
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x25, KEYDOWN)))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(120));
+        wait_until(|| taps().len() > base, Duration::from_millis(600));
         assert_eq!(
-            taps().as_slice(),
-            &[
-                KeyChord {
-                    keys: vec![KeyCode::Right]
-                },
-                KeyChord {
-                    keys: vec![KeyCode::Backspace]
-                },
-            ],
+            taps()[base..].to_vec(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Backspace]
+            }],
             "泄漏路径的左键不同键映射必须注入"
         );
         sender
@@ -1040,7 +1071,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // 场景 4：泄漏路径的双击窗口补发单击（确定→Enter）由原生覆盖，不注入。
+        // 观察期从 450ms 放宽到 650ms：双击窗口超时补发本身由引擎定时器驱动，
+        // 负载下「超时到达」就晚，观察期必须宽于窗口时长再加处理余量。
         ensure_gate(&mut gate);
+        let base = taps().len();
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x0D, KEYDOWN)))
             .unwrap();
@@ -1048,23 +1082,30 @@ mod tests {
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x0D, KEYUP)))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(450));
-        let after_window = taps();
-        assert_eq!(
-            after_window.len(),
-            2,
+        std::thread::sleep(Duration::from_millis(650));
+        let after_window = &taps()[base..];
+        assert!(
+            after_window.is_empty(),
             "双击窗口超时补发的同键单击应由原生覆盖：{after_window:?}"
         );
 
         // 场景 5：泄漏按住的连发照常注入（遥控器不自动重复，连发由引擎交付）。
+        // 期望 350/450/550/650ms 四拍。**为什么预算给到 2000ms**：引擎的
+        // `GestureRecognizer::advance` 每次到期只补一拍、下一拍从"当前时刻"
+        // 重新起排（不追赶积压），而引擎循环与全部测试线程共享 CPU——CI 慢机
+        // 上每次定时器唤醒可能延迟 100~300ms，四拍的到达时间 = 350ms 起步
+        // 每拍再叠加一次唤醒延迟，1200ms 的窗口实测仍会压线（2026-09-28
+        // 全量并行复现）。2000ms 覆盖每拍 ~400ms 延迟的最坏链；等待期间
+        // 连发持续进行，等到第 4 拍即刻 KEYUP，不引入多余拍数。
         ensure_gate(&mut gate);
+        let base = taps().len();
         sender
             .send(EngineMessage::Keyboard(keyboard_event(0x26, KEYDOWN)))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(700));
-        let count = taps().len();
+        let got_four = wait_until(|| taps().len() >= base + 4, Duration::from_millis(2000));
+        let count = taps().len() - base;
         assert!(
-            count >= 4,
+            got_four,
             "泄漏按住的连发应注入（350/450/550/650ms），实际 {count} 次"
         );
         sender
@@ -1084,7 +1125,9 @@ mod tests {
                     is_pressed: true,
                 }))
                 .unwrap();
-            std::thread::sleep(Duration::from_millis(50));
+            // 「按住期间不锁屏」是否定性断言：观察窗从 50ms 拉长到 150ms，
+            // 给引擎更充分的时间证明"没有发生"（越久越强，且仍远小于测试预算）。
+            std::thread::sleep(Duration::from_millis(150));
             assert_eq!(
                 taps().len(),
                 before_press,
@@ -1096,7 +1139,7 @@ mod tests {
                     is_pressed: false,
                 }))
                 .unwrap();
-            std::thread::sleep(Duration::from_millis(50));
+            wait_until(|| taps().len() > before_press, Duration::from_millis(600));
             assert_eq!(
                 taps().len(),
                 before_press + 1,
@@ -1123,7 +1166,10 @@ mod tests {
     /// 恢复输入。泄漏路径（原生已进 OS）的 Disabled 触发必须保持跳过。
     #[test]
     fn gate_edge_disabled_trigger_replays_native_key_leak_path_skips() {
-        std::thread::sleep(Duration::from_millis(500));
+        // 门控是进程级单例：本用例全程启停真实门控，必须持串行锁，防止与
+        // leak_suppression_suite 的连发注入窗口互相掐断（2026-09-28 全量并行
+        // flaky 的并发根因）。此前用 sleep(500ms) 让位，纯属时序赌博。
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
         let ensure_gate = |gate: &mut Option<crate::key_gate::KeyGate>| {
             if !crate::key_gate::is_gate_thread_alive() {

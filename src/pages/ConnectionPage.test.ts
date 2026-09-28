@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
+import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import ConnectionPage from "./ConnectionPage.vue";
 
 type ShortcutCaptureHandler = (edge: {
@@ -256,7 +257,23 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("accepts a lone modifier as the hold-to-talk hotkey (长按右 Alt 一类)", async () => {
+  // 入口隐藏守卫（2026-09-28 Andy：修改快捷键功能有问题先下入口）。
+  // 预设按钮（默认/关闭）必须保留；自定义录入按钮随
+  // feature-flags.VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED 回归。
+  it("修改快捷键入口隐藏时，默认与关闭预设按钮仍然可用", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const presetTexts = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .map((button) => button.text());
+    expect(presetTexts).not.toContain("修改快捷键");
+    expect(presetTexts).toContain("左 Ctrl + 左 Win（默认）");
+    expect(presetTexts).toContain("关闭");
+    wrapper.unmount();
+  });
+
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("accepts a lone modifier as the hold-to-talk hotkey (长按右 Alt 一类)", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -283,7 +300,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("cancels capture with Esc and keeps the current hotkey", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("cancels capture with Esc and keeps the current hotkey", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -315,7 +332,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(wrapper.text()).toContain("默认快捷键：左 Ctrl + 左 Win");
   });
 
-  it("records a custom hold-to-talk chord and only saves it after every key is released", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("records a custom hold-to-talk chord and only saves it after every key is released", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -349,7 +366,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("asks to release pre-held keys first and saves the full chord after arming", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("asks to release pre-held keys first and saves the full chord after arming", async () => {
     // 2026-09-27 回归：录入开始时仍有按键按住（preheld），其边沿对录入
     // 不可见；后端等 preheld 全部松开后才投递边沿，前端先提示松手，
     // 杜绝把新组合截断成半截（"只剩左 Ctrl"）。
@@ -384,7 +401,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("keeps every modifier of a modifier-only chord when keys are released out of order", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("keeps every modifier of a modifier-only chord when keys are released out of order", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -412,7 +429,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("saves the full chord when the swallowed key only arrives as a replayed injected copy", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("saves the full chord when the swallowed key only arrives as a replayed injected copy", async () => {
     // 2026-09-27 真机回归（Bugs/2026-09-27-ime-chord-hook-eats-active-hotkey-capture.md）：
     // 微信输入法的语音和弦就是默认的 左 Ctrl + 左 Win。按下该组合时它吞掉
     // 左 Win 的物理边沿、随后把整个组合以注入副本重放——真实到达后端的只有
@@ -448,7 +465,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("keeps the whole modifier-only chord when the first-pressed modifier is released last", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("keeps the whole modifier-only chord when the first-pressed modifier is released last", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -473,7 +490,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("infers the WeType chord when only one edge survived but WeType voice was triggered", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("infers the WeType chord when only one edge survived but WeType voice was triggered", async () => {
     // 2026-09-27 探针结论：微信输入法吞掉其语音热键组成键的物理边沿发生在
     // RIT 层，对本进程零/半截边沿（低级钩子、Raw Input、GetAsyncKeyState 都
     // 看不到）；其麦克风在录入期间被触发（observed）是唯一旁证 → 推断用户按
@@ -500,7 +517,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("keeps a lone modifier when WeType voice was not triggered", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("keeps a lone modifier when WeType voice was not triggered", async () => {
     // 单修饰键（豆包"长按右 Alt"一类）合法：微信输入法语音未被触发时不得推断。
     mocks.stopShortcutCapture.mockResolvedValue({ wetypeVoice: "not_observed" });
     const wrapper = mount(ConnectionPage, { props: { runtime } });
@@ -521,7 +538,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("warns that a non-WeType chord will not trigger hold-to-talk voice", async () => {
+  it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("warns that a non-WeType chord will not trigger hold-to-talk voice", async () => {
     // Win + 右 Ctrl 不是微信输入法热键：边沿透传能录上，但按住说话靠注入该
     // 组合唤起微信输入法语音，不一致就无法生效——必须把这一后果告诉用户。
     const wrapper = mount(ConnectionPage, { props: { runtime } });

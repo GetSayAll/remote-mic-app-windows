@@ -46,7 +46,7 @@ import {
   type MoveDirection,
   type PresetAppInfo,
   type RawInputPhase,
-  type Rc003BridgeSnapshot,
+  type Rc003BridgePhase,
   type Rc003TaskStatus,
   type RemoteButton,
   type RemoteModel,
@@ -457,19 +457,22 @@ function isActivePreset(keys: KeyCode[]): boolean {
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  // 2026-09-28 Andy 定稿：开启态按「三键 / 其他按键」分两句；关闭态三键
+  // 一句话（与开关悬停提示同源），home/tv 与同键映射的关闭态说明保留原口径。
   if (rc003CaptureEnabled.value === true) {
-    return "全按键支持已启用，此按键的映射现在生效；已配置按键由遥控器报告层捕获，不接管物理键盘上的同名按键。";
+    const isThreeKey =
+      button === "back" || button === "volume_up" || button === "volume_down";
+    return isThreeKey
+      ? "全按键支持已启用，此按键的映射现在生效"
+      : "全按键支持已启用，此按键的映射已优化";
   }
   if (button === "back" || button === "volume_up" || button === "volume_down") {
     // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
     // 文案只随开关状态走。RC001 的三键不经助手也能到达（key_gate 直接归因），
     // 开着增强捕获对它无害；RC003 则必须开启才会生效。
-    const state = rc003CaptureEnabled.value;
-    if (state === false) {
-        // 2026-09-27 Andy 定稿：一句话即可，与开关悬停提示同句；
-        // 授权弹窗 / 防作弊冲突等细节由开启前的确认弹窗承载，不再重复。
-        return "提示：返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
-      }
+    if (rc003CaptureEnabled.value === false) {
+      return "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
+    }
     return "提示：正在确认三键捕获状态…";
   }
   if (button === "home" || button === "tv") {
@@ -482,6 +485,17 @@ const capabilityNote = computed<string | null>(() => {
   }
   return null;
 });
+
+/**
+ * 全按键支持开关的悬停提示（2026-09-28 Andy 定稿）：随开关状态切换两句。
+ * 状态未就绪（null）按关闭态口径显示——占位符阶段开关本体都不存在，
+ * 真正可悬停时对账大概率已落地。
+ */
+const captureSwitchTitle = computed(() =>
+  rc003CaptureEnabled.value === true
+    ? "关闭后返回 / 音量+ / 音量−将不可映射"
+    : "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化",
+);
 
 let saveQueue: Promise<void> = Promise.resolve();
 let saveRequest = 0;
@@ -807,8 +821,51 @@ const connectionInfo = computed(() => props.runtime?.platform.connection);
  * 两个型号统一展示（产品决策 2026-09-24：三键映射逻辑不分型号，
  * 界面不做区分；RC001 开着增强捕获只是多一个不参与其按键路径的助手）。
  */
-const rc003Bridge = ref<Rc003BridgeSnapshot | null>(null);
 /** 三键捕获的授权状态（= 系统里的计划任务）。 */
+/**
+ * 开关与圆点的「上次已知状态」缓存。只服务**首帧**（2026-09-28 Andy 要求：
+ * 进按键页不要「开关延迟出现 + 圆点灰→绿」）：setup 阶段同步读出终值渲染，
+ * 挂载后的对账以权威状态为准，不一致时采信对账并回写（卸载后重装回落关闭
+ * 会在约一次 IPC 内纠正首帧，属可接受的最终一致）。
+ */
+const RC003_UI_CACHE_KEY = "sayall.rc003Capture.uiCache";
+const RC003_BRIDGE_PHASES: readonly Rc003BridgePhase[] = [
+  "stopped",
+  "listening",
+  "connected",
+  "failed",
+];
+
+function readRc003UiCache(): { enabled: boolean | null; phase: Rc003BridgePhase | null } {
+  try {
+    const raw = localStorage.getItem(RC003_UI_CACHE_KEY);
+    if (!raw) return { enabled: null, phase: null };
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return { enabled: null, phase: null };
+    const record = parsed as Record<string, unknown>;
+    return {
+      enabled: typeof record.enabled === "boolean" ? record.enabled : null,
+      phase:
+        typeof record.phase === "string" &&
+        RC003_BRIDGE_PHASES.includes(record.phase as Rc003BridgePhase)
+          ? (record.phase as Rc003BridgePhase)
+          : null,
+    };
+  } catch {
+    // 解析失败（版本垃圾/手工改动）：忽略缓存，回落旧的对账行为。
+    return { enabled: null, phase: null };
+  }
+}
+
+function writeRc003UiCache(enabled: boolean | null, phase: Rc003BridgePhase | null): void {
+  try {
+    localStorage.setItem(RC003_UI_CACHE_KEY, JSON.stringify({ enabled, phase }));
+  } catch {
+    // localStorage 满/被禁：缓存只是首帧优化，静默降级。
+  }
+}
+
+const rc003UiCache = readRc003UiCache();
 const rc003Task = ref<Rc003TaskStatus | null>(null);
 const rc003CaptureBusy = ref(false);
 /**
@@ -820,11 +877,13 @@ const rc003CaptureBusy = ref(false);
  * （2026-09-23 首次 UI 验收正是这个形状）。因此轮询只在首次对账一次，
  * 之后以用户的开关操作为准。
  */
-const rc003CaptureEnabled = ref<boolean | null>(null);
+const rc003CaptureEnabled = ref<boolean | null>(rc003UiCache.enabled);
+/** 桥接相位（从快照中提取）：首帧可由缓存给出终值，后续随对账刷新。 */
+const rc003BridgePhase = ref<Rc003BridgePhase | null>(rc003UiCache.phase);
 const rc003BridgeText = computed(() => {
-  const bridge = rc003Bridge.value;
-  if (!bridge || bridge.phase === "stopped") return null;
-  switch (bridge.phase) {
+  const phase = rc003BridgePhase.value;
+  if (!phase || phase === "stopped") return null;
+  switch (phase) {
     case "listening":
       return "全按键支持已开启，正在启动";
     case "connected":
@@ -836,7 +895,7 @@ const rc003BridgeText = computed(() => {
   }
 });
 const rc003BridgeTone = computed(() => {
-  switch (rc003Bridge.value?.phase) {
+  switch (rc003BridgePhase.value) {
     case "connected":
       return "success";
     case "failed":
@@ -850,17 +909,55 @@ const rc003BridgeTone = computed(() => {
 // 开启成功但桥接段异步失败（助手起不来等）：开关已是开启态、不会再走
 // applyCaptureToggle 的失败分支，必须在这里把失败送进底部提示条，
 // 否则用户只看到一个黄点永远不变绿（2026-09-28 状态行移除后的唯一显性告警）。
-watch(rc003Bridge, (bridge, previous) => {
-  if (bridge?.phase === "failed" && previous?.phase !== "failed") {
+watch(rc003BridgePhase, (phase, previous) => {
+  if (phase === "failed" && previous !== "failed") {
     statusMessage.value = "全按键支持开启失败：请关闭全按键支持后重新开启；若反复失败请联系开发者。";
     reportFrontendEvent({
       event: "rc003_capture_bridge_failed",
       phase: "completed",
       result: "failed",
-      reason: `bridge_phase=${String(bridge.phase)}`,
+      reason: `bridge_phase=${String(phase)}`,
     });
   }
 });
+
+// 缓存回写：状态或圆点相位每次落定都记录，供下次进页首帧直接渲染终值。
+watch([rc003CaptureEnabled, rc003BridgePhase], ([enabled, phase]) => {
+  writeRc003UiCache(enabled, phase);
+});
+
+/**
+ * 授权与桥接状态对账（挂载开头启动一次 + 每秒一次）。不能只靠 interval：
+ * 首跳在挂载 1 秒后才跑，期间开关一直 disabled——真机上用户进页面头 1 秒
+ * 点不动、无解释；CI 慢机上 waitFor 默认 1000ms 被压线超时（PR #132 实测）。
+ *
+ * 首次对账以权威状态为准：缓存只是首帧优化（见 rc003UiCache），授权变化
+ * （卸载后重装回落关闭、启动对账回落）必须采信；之后以用户的开关操作为准
+ * （理由见 rc003CaptureEnabled 注释）。桥接快照在此一并拉取（内存读，开销
+ * 可忽略），圆点相位因此不再依赖 1 秒轮询首跳——消除「灰点→绿点」跳变。
+ */
+let rc003FirstReconcile = true;
+const reconcileRc003Task = async (): Promise<void> => {
+  try {
+    const [task, bridge] = await Promise.all([
+      getRc003TaskStatus(),
+      getRc003BridgeSnapshot().catch(() => null),
+    ]);
+    rc003Task.value = task;
+    if (rc003FirstReconcile) {
+      rc003FirstReconcile = false;
+      if (!rc003CaptureBusy.value) {
+        rc003CaptureEnabled.value = task.enabled;
+      }
+    }
+    if (bridge) {
+      rc003BridgePhase.value = bridge.phase;
+    }
+  } catch {
+    // 对账失败：状态保持当前值（缓存或 null），等下一秒轮询重试
+    //（与既有 interval 行为一致）。
+  }
+};
 
 /**
  * 切换三键捕获。打开可能在**首次**弹一次 UAC（IPC 会等授权流程结束）；
@@ -986,6 +1083,9 @@ onMounted(async () => {
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
   window.addEventListener("blur", handleCaptureBlur);
+  // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
+  // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
+  const rc003ReconcileStarted = reconcileRc003Task();
   const [loaded, snapshot, apps] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
@@ -1044,29 +1144,11 @@ onMounted(async () => {
   }
   unlistenShortcutCapture = stopShortcutCaptureEvents;
 
-  // 授权状态对账（挂载后立即一次 + 每秒一次）。不能只靠 interval：首跳在
-  // 挂载 1 秒后才跑，期间开关一直 disabled——真机上用户进页面头 1 秒点不动、
-  // 无解释；CI 慢机上 waitFor 默认 1000ms 被压线超时（PR #132 实测）。
-  const reconcileRc003Task = async () => {
-    try {
-      const task = await getRc003TaskStatus();
-      rc003Task.value = task;
-      // 开关的显示状态只在首次对账一次——之后以用户的开关操作为准
-      //（理由见 rc003CaptureEnabled 的注释）。
-      if (rc003CaptureEnabled.value === null) {
-        rc003CaptureEnabled.value = task.enabled;
-      }
-    } catch {
-      // 对账失败：开关保持禁用，等下一秒轮询重试（与既有 interval 行为一致）。
-    }
-  };
-  await reconcileRc003Task();
+  // 对账函数定义在 onMounted 之前（挂载开头就启动它，与映射加载并行）。
+  await rc003ReconcileStarted;
 
   snapshotTimer = window.setInterval(async () => {
     mappingSnapshot.value = await getButtonMappingSnapshot();
-    // 桥接状态只在连接的是 RC003 时才有意义（见 rc003BridgeText），
-    // 但这里照常拉取：开销只是一次内存快照，免得再维护一个定时器。
-    rc003Bridge.value = await getRc003BridgeSnapshot();
     await reconcileRc003Task();
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
     if (rawInput.value?.activeButtons) {
@@ -1125,24 +1207,38 @@ onUnmounted(() => {
                桥接状态是开关右侧的行内圆点——不能再用独立状态行：v-if 插行会把
                下方画布整体顶下去（页面抖动），胶囊底色+状态光晕也把标题区染了色
                （2026-09-28 Andy 报告）。 -->
+          <!-- 悬停提示随开关状态切换（2026-09-28 Andy 定稿）：关闭态指向
+               「开启后支持使用…」，开启态指向「关闭后…将不可映射」。 -->
           <label
             class="toggle-row"
-            title="开启后，已配置按键从遥控器报告层捕获，避免接管物理键盘同名按键"
+            :title="captureSwitchTitle"
           >
             <span>全按键支持</span>
+            <!-- 终值就绪前用同尺寸占位符顶位、就绪后才创建开关本体——与
+                 「启动行为」页登录自启动开关同法（2026-09-28 Andy 要求）：
+                 开关创建即带正确 checked，不产生"状态回来后关→开"的滑动动画。 -->
+            <span
+              v-if="rc003CaptureEnabled === null"
+              class="toggle-placeholder"
+              aria-hidden="true"
+            ></span>
             <input
+              v-else
               ref="captureSwitchEl"
               type="checkbox"
               class="toggle-input"
               :checked="rc003CaptureEnabled === true"
-              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
+              :disabled="rc003CaptureBusy"
               @change="toggleRc003Capture"
             />
+            <!-- 状态圆点只在开关**打开**时出现（2026-09-28 Andy 要求），颜色随
+                 桥接相位变化：绿=助手已连接、黄=启动中/未知、红=开启失败；
+                 关闭时不占位，避免"关着还亮个点"读成已启用。 -->
             <span
-              v-if="rc003BridgeText"
+              v-if="rc003CaptureEnabled === true"
               class="status-dot"
               :class="rc003BridgeTone"
-              :title="rc003BridgeText"
+              :title="rc003BridgeText ?? '全按键支持已开启'"
             ></span>
           </label>
         </div>
@@ -1497,6 +1593,9 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
+   避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
+.toggle-placeholder { width: 34px; height: 20px; flex: none; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
