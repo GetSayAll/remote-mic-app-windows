@@ -457,19 +457,22 @@ function isActivePreset(keys: KeyCode[]): boolean {
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
   const button = editingTarget.value.button;
+  // 2026-09-28 Andy 定稿：开启态按「三键 / 其他按键」分两句；关闭态三键
+  // 一句话（与开关悬停提示同源），home/tv 与同键映射的关闭态说明保留原口径。
   if (rc003CaptureEnabled.value === true) {
-    return "全按键支持已启用，此按键的映射现在生效；已配置按键由遥控器报告层捕获，不接管物理键盘上的同名按键。";
+    const isThreeKey =
+      button === "back" || button === "volume_up" || button === "volume_down";
+    return isThreeKey
+      ? "全按键支持已启用，此按键的映射现在生效"
+      : "全按键支持已启用，此按键的映射已优化";
   }
   if (button === "back" || button === "volume_up" || button === "volume_down") {
     // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
     // 文案只随开关状态走。RC001 的三键不经助手也能到达（key_gate 直接归因），
     // 开着增强捕获对它无害；RC003 则必须开启才会生效。
-    const state = rc003CaptureEnabled.value;
-    if (state === false) {
-        // 2026-09-27 Andy 定稿：一句话即可，与开关悬停提示同句；
-        // 授权弹窗 / 防作弊冲突等细节由开启前的确认弹窗承载，不再重复。
-        return "提示：返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
-      }
+    if (rc003CaptureEnabled.value === false) {
+      return "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
+    }
     return "提示：正在确认三键捕获状态…";
   }
   if (button === "home" || button === "tv") {
@@ -482,6 +485,17 @@ const capabilityNote = computed<string | null>(() => {
   }
   return null;
 });
+
+/**
+ * 全按键支持开关的悬停提示（2026-09-28 Andy 定稿）：随开关状态切换两句。
+ * 状态未就绪（null）按关闭态口径显示——占位符阶段开关本体都不存在，
+ * 真正可悬停时对账大概率已落地。
+ */
+const captureSwitchTitle = computed(() =>
+  rc003CaptureEnabled.value === true
+    ? "关闭后返回 / 音量+ / 音量−将不可映射"
+    : "开启后支持使用返回 / 音量+ / 音量−",
+);
 
 let saveQueue: Promise<void> = Promise.resolve();
 let saveRequest = 0;
@@ -1193,9 +1207,11 @@ onUnmounted(() => {
                桥接状态是开关右侧的行内圆点——不能再用独立状态行：v-if 插行会把
                下方画布整体顶下去（页面抖动），胶囊底色+状态光晕也把标题区染了色
                （2026-09-28 Andy 报告）。 -->
+          <!-- 悬停提示随开关状态切换（2026-09-28 Andy 定稿）：关闭态指向
+               「开启后支持使用…」，开启态指向「关闭后…将不可映射」。 -->
           <label
             class="toggle-row"
-            title="开启后，已配置按键从遥控器报告层捕获，避免接管物理键盘同名按键"
+            :title="captureSwitchTitle"
           >
             <span>全按键支持</span>
             <!-- 终值就绪前用同尺寸占位符顶位、就绪后才创建开关本体——与

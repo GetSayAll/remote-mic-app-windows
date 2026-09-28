@@ -273,8 +273,12 @@ function captureRow(page: VueWrapper) {
     .filter((row) => row.text().includes("全按键支持"))[0];
 }
 
-/** 2026-09-27 用户定稿：三键的提示与悬停提示共用同一句话。 */
-const TRI_KEY_HINT = "返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
+/** 2026-09-28 用户定稿：三键关闭态提示（不再带「提示：」前缀）。 */
+const TRI_KEY_HINT = "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
+
+/** 2026-09-28 用户定稿：开关悬停提示随开关状态切换。 */
+const CAPTURE_SWITCH_OFF_TITLE = "开启后支持使用返回 / 音量+ / 音量−";
+const CAPTURE_SWITCH_ON_TITLE = "关闭后返回 / 音量+ / 音量−将不可映射";
 
 /** 三键捕获开启前的确认弹窗（未弹出时为 undefined）。 */
 function confirmDialog(page: VueWrapper) {
@@ -728,10 +732,8 @@ describe("buttons mapping page", () => {
     await rc003Back.trigger("click");
     await vi.waitFor(
       () => {
-        // 2026-09-27 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
-        expect(rc003.find(".capability-note").text()).toBe(
-          `提示：${TRI_KEY_HINT}`,
-        );
+        // 2026-09-28 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
+        expect(rc003.find(".capability-note").text()).toBe(TRI_KEY_HINT);
       },
       { timeout: 4000 },
     );
@@ -758,6 +760,21 @@ describe("buttons mapping page", () => {
     );
     expect(rc003On.find(".capability-note").text()).not.toContain(
       "不进 Windows 输入栈",
+    );
+
+    // 2026-09-28 定稿：开启态下其他按键走「已优化」口径。
+    const rc003OnPower = rc003On
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("电源"))!
+      .findAll(".mapping-cell")[0]!;
+    await rc003OnPower.trigger("click");
+    await vi.waitFor(
+      () => {
+        expect(rc003On.find(".capability-note").text()).toBe(
+          "全按键支持已启用，此按键的映射已优化",
+        );
+      },
+      { timeout: 4000 },
     );
 
     // 型号不再区分（2026-09-24 产品决策）：RC001 上同一个开关状态驱动的
@@ -787,8 +804,12 @@ describe("buttons mapping page", () => {
     await vi.waitFor(() => {
       expect(captureRow(page)).toBeDefined();
     });
+    // 开启态「其他按键」（主页）走 2026-09-28 定稿的「已优化」口径；
+    // 本用例重点是 note 常驻头部、不依赖编辑面板展开路径。
     await vi.waitFor(() => {
-      expect(page.find(".capability-note").text()).toContain("不接管物理键盘");
+      expect(page.find(".capability-note").text()).toBe(
+        "全按键支持已启用，此按键的映射已优化",
+      );
     });
   });
 
@@ -1069,23 +1090,40 @@ describe("全按键支持开启前确认弹窗", () => {
     vi.mocked(disableRc003Capture).mockClear();
   });
 
-  it("开关悬停提示是一句短话；弹窗文案不再出现内部视角表述", async () => {
+  it("开关悬停提示随状态切换；弹窗文案不再出现内部视角表述", async () => {
     const page = await mountPage("rc003");
     await openCaptureToggle(page);
 
-    expect(captureRow(page)!.attributes("title")).toContain("遥控器报告层捕获");
+    // 2026-09-28 定稿：关闭态指向「开启后支持使用…」。
+    expect(captureRow(page)!.attributes("title")).toBe(
+      CAPTURE_SWITCH_OFF_TITLE,
+    );
 
     const checkbox = captureRow(page)!.find('input[type="checkbox"]');
     (checkbox.element as HTMLInputElement).checked = true;
     await checkbox.trigger("change");
     await flushPromises();
 
+    // 默认 mock 是「未授权」场景：change 先弹确认弹窗，开关此时尚未
+    // 真正开启——title 保持关闭态文案是正确行为。
     const dialog = confirmDialog(page);
     expect(dialog).toBeDefined();
     // 2026-09-27 用户要求去掉「Windows 平时看不见它们」。
     expect(dialog!.text()).not.toContain("Windows 平时看不见它们");
     expect(dialog!.text()).toContain("升级或重装无线麦后");
     expect(dialog!.text()).toContain("防作弊");
+
+    // 点弹窗「开启」完成授权 → 真正开启后悬停提示切到「关闭后…将不可映射」。
+    await dialog!
+      .findAll("button")
+      .find((b) => b.text() === "开启")!
+      .trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(captureRow(page)!.attributes("title")).toBe(
+        CAPTURE_SWITCH_ON_TITLE,
+      );
+    });
   });
 
   it("需要授权的开启才先弹确认；授权已在时直接开启，不再打扰", async () => {
