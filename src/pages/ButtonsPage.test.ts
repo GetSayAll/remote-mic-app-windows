@@ -277,7 +277,8 @@ function captureRow(page: VueWrapper) {
 const TRI_KEY_HINT = "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
 
 /** 2026-09-28 用户定稿：开关悬停提示随开关状态切换。 */
-const CAPTURE_SWITCH_OFF_TITLE = "开启后支持使用返回 / 音量+ / 音量−";
+const CAPTURE_SWITCH_OFF_TITLE =
+  "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化";
 const CAPTURE_SWITCH_ON_TITLE = "关闭后返回 / 音量+ / 音量−将不可映射";
 
 /** 三键捕获开启前的确认弹窗（未弹出时为 undefined）。 */

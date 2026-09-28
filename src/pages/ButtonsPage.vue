@@ -494,7 +494,7 @@ const capabilityNote = computed<string | null>(() => {
 const captureSwitchTitle = computed(() =>
   rc003CaptureEnabled.value === true
     ? "关闭后返回 / 音量+ / 音量−将不可映射"
-    : "开启后支持使用返回 / 音量+ / 音量−",
+    : "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化",
 );
 
 let saveQueue: Promise<void> = Promise.resolve();
