@@ -79,13 +79,22 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-09-27.dynamic-all-key';
+var AGENT_BUILD = '2026-09-28.voice-hotkey-synth';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
   0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051,
   0x0052, 0x0065, 0x0066, 0x007F, 0x0080, 0x0081
 ];
+
+/* 语音键热键合成（豆包支持，2026-09-28 白名单）。
+ * from 只允许语音键 0x003E：ATVV 会话走 BLE 协议层不经过它，且它在
+ * Windows 输入流本来就未映射——槽内替换零损失。
+ * to 只允许已实测映射的合成 usage（USAGE_TO_VK，见探针 wudf_ioctl_synth.py）：
+ * 0x00E6 实测产出 VK_RMENU(0xA5)、0x00E2 实测产出 VK_LMENU(0xA4)。
+ * 未实测的 usage 一律拒绝——替换 usage 必须逐键实测。 */
+var SYNTH_FROM_WHITELIST = [0x003E];
+var SYNTH_TO_WHITELIST = [0x00E6, 0x00E2];
 var TARGET_NAMES = {
   0x00F1: 'back', 0x0028: 'ok', 0x0035: 'tv', 0x004A: 'home',
   0x004F: 'right', 0x0050: 'left', 0x0051: 'down', 0x0052: 'up',
@@ -122,6 +131,12 @@ var mode = 'clear';           /* clear | observe */
 var restoreOnLeave = true;
 var disarmed = false;
 
+/* 语音键热键合成状态。槽内替换的电平语义：物理报告含 synthFrom → 槽位呈现
+ * synthTo；物理释放 → 槽位自然回零。HID 报告是状态语义，usage 从报告中消失
+ * 即 OS 收到该键的 UP——粘键在结构上不可能，无需补帧或状态跟踪。 */
+var synthFrom = 0;
+var synthTo = 0;
+
 var sock = null;
 var connected = false;
 var handshakeDone = false;
@@ -157,6 +172,9 @@ var stat = {
   connect_raced: 0,           /* 竞争落败而主动关闭的多余连接（见 connectOnce） */
   targets_applied: 0,         /* 成功应用的 targets 命令数（清空范围被下发过几次） */
   targets_rejected: 0,        /* 被护栏拒掉的 targets 命令数（形状非法 / 试图改上报集合） */
+  synth_applied: 0,           /* 成功应用的 synth 命令数（含 off） */
+  synth_rejected: 0,          /* 被白名单拒掉的 synth 命令数 */
+  synth_hits: 0,              /* 执行了语音键替换的帧数 */
   lease_expired: 0,
   rx_timeouts: 0,
   read_errors: 0,             /* 读失败导致的断线（此前这条路径不计数，见 pump） */
@@ -313,6 +331,29 @@ function handleCommand(line) {
     sendLine({ type: 'targets_ack', t: Date.now(), generation: targetGeneration, usages: reportUsages });
     logLine('targets:applied generation=' + targetGeneration + ' report=' + usagesHex(reportUsages)
       + ' clear=' + usagesHex(clearUsages));
+    return;
+  }
+  /* 语音键热键合成配置。护栏：from 必须是语音键、to 必须是已实测映射的
+     合成 usage（见 SYNTH_TO_WHITELIST 注释）。off 关闭并立即复位注入状态。 */
+  if (cmd.type === 'synth') {
+    if (cmd.off === true) {
+      synthFrom = 0; synthTo = 0;
+      stat.synth_applied++;
+      sendLine({ type: 'synth_ack', t: Date.now(), off: true });
+      logLine('synth:off');
+      return;
+    }
+    var sFrom = Number(cmd.from), sTo = Number(cmd.to);
+    if (SYNTH_FROM_WHITELIST.indexOf(sFrom) < 0 || SYNTH_TO_WHITELIST.indexOf(sTo) < 0
+        || sFrom === sTo) {
+      stat.synth_rejected++;
+      logLine('synth:rejected from=' + usagesHex([sFrom]) + ' to=' + usagesHex([sTo]));
+      return;
+    }
+    synthFrom = sFrom; synthTo = sTo;
+    stat.synth_applied++;
+    sendLine({ type: 'synth_ack', t: Date.now(), from: synthFrom, to: synthTo });
+    logLine('synth:applied from=' + usagesHex([synthFrom]) + ' to=' + usagesHex([synthTo]));
     return;
   }
   if (cmd.type === 'restore') { restoreOnLeave = (cmd.on !== false); return; }
@@ -479,10 +520,25 @@ function clearSetIn(bytes) {
   return found;
 }
 
+/* 合成视角：这份报告里有没有语音键（等待被替换）。门禁必须三类合一
+   （上报 ∪ 清空 ∪ 合成）——2026-09-26 canary 死代码事故的同款坑：
+   只含语音键的报告若在门禁处早退，替换逻辑永远执行不到。 */
+function synthSetIn(bytes) {
+  if (synthFrom === 0) return false;
+  var slots = [3, 5, 7];
+  for (var i = 0; i < slots.length; i++) {
+    var o = slots[i];
+    var u = bytes[o] | (bytes[o + 1] << 8);
+    if (u === synthFrom) return true;
+  }
+  return false;
+}
+
 /* 唯一门禁。抽成函数是为了能被 `agent_logic_test.mjs` 直接调用（见同目录），
    把这次缺陷钉成回归项——纯静态的"源码里有没有这行"拦不住下一个人改回去。 */
 function shouldTouchReport(bytes) {
-  return targetSetIn(bytes).length > 0 || clearSetIn(bytes).length > 0;
+  return targetSetIn(bytes).length > 0 || clearSetIn(bytes).length > 0
+    || synthSetIn(bytes);
 }
 
 function sameSet(a, b) {
@@ -591,13 +647,24 @@ function installHook() {
         if (mode !== 'clear') return;
         if (stat.clears_ok >= MAX_CLEARS) return;
 
-        /* 只清目标 usage 所在的两个字节，其余一字节不动 */
+        /* 只清目标 usage 所在的两个字节，其余一字节不动。
+           语音键合成（synthFrom !== 0 时）在同一循环里做槽内替换：
+           物理报告含语音键 → 该槽呈现合成 usage；物理释放 → 报告自然回零，
+           合成键随之消失（HID 状态语义 = UP），粘键在结构上不可能。 */
         var patched = bytes.slice();
         var changed = false;
+        var synthChanged = false;
         for (var i = 0; i < 3; i++) {
           var o = 3 + i * 2;
           var u = bytes[o] | (bytes[o + 1] << 8);
           if (u === 0) continue;
+          if (synthFrom !== 0 && u === synthFrom) {
+            patched[o] = synthTo & 0xff;
+            patched[o + 1] = (synthTo >> 8) & 0xff;
+            changed = true;
+            synthChanged = true;
+            continue;
+          }
           /* 用 clearUsages：产品路径覆盖动态目标；验收时可能多一个哨兵键。 */
           if (clearUsages.indexOf(u) < 0) continue;
           patched[o] = 0;
@@ -615,6 +682,7 @@ function installHook() {
             back[6] === patched[6] && back[7] === patched[7] &&
             back[8] === patched[8]) {
           stat.clears_ok++;
+          if (synthChanged) stat.synth_hits++;
           this.cleared = true;
         } else {
           stat.clears_fail++;
@@ -679,6 +747,8 @@ function heartbeat() {
        此前这只能靠助手侧推断，agent 实际用的是什么都没人知道。 */
     report_usages: usagesHex(reportUsages),
     clear_usages: usagesHex(clearUsages),
+    synth_from: synthFrom,
+    synth_to: synthTo,
     target_generation: targetGeneration,
     restore: restoreOnLeave,
     disarmed: disarmed,

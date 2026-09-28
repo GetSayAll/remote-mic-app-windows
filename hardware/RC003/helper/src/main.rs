@@ -932,6 +932,12 @@ mod imp {
         new_token: bool,
         attach_only: bool,
         new_generation: bool,
+        /// 语音键热键合成（豆包支持）：报告层把语音键 usage 槽内替换成合成 usage。
+        ///
+        /// 机制与护栏见 agent 侧 SYNTH_FROM/TO_WHITELIST 注释；CLI 只是验收通路
+        /// （与 --canary-usage 同哲学），产品路径由主程序下行配置联动。
+        /// `None` = 不启用（语音键保持 Windows 原生行为）。
+        synth: Option<(u16, u16)>,
     }
 
     fn parse_args() -> Result<Args, String> {
@@ -961,6 +967,7 @@ mod imp {
             new_token: false,
             attach_only: false,
             new_generation: false,
+            synth: None,
         };
 
         let mut it = std::env::args().skip(1);
@@ -1006,6 +1013,22 @@ mod imp {
                     let parsed = parse_usage_list(&raw)
                         .map_err(|e| format!("--canary-usage 取值 {raw:?} 无效：{e}"))?;
                     args.canary_usages.extend(parsed);
+                }
+                "--synth-from" => {
+                    let raw = value()?;
+                    let parsed = u16::from_str_radix(raw.trim_start_matches("0x").trim(), 16)
+                        .map_err(|_| {
+                            format!("--synth-from 取值 {raw:?} 无效：需要十六进制 usage")
+                        })?;
+                    let (from, to) = args.synth.take().unwrap_or((parsed, 0));
+                    args.synth = Some((from, to));
+                }
+                "--synth-to" => {
+                    let raw = value()?;
+                    let parsed = u16::from_str_radix(raw.trim_start_matches("0x").trim(), 16)
+                        .map_err(|_| format!("--synth-to 取值 {raw:?} 无效：需要十六进制 usage"))?;
+                    let (from, to) = args.synth.take().unwrap_or((0, parsed));
+                    args.synth = Some((from, to));
                 }
                 "--dry-run" => args.dry_run = true,
                 "--observe" => args.observe = true,
@@ -2756,6 +2779,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 // ACK 只证明目标配置已经应用；必须等下一条 lease_ok=true 的 HB
                 // 才能向主程序声明报告层所有权，避免 agent 尚未续约时过早关闭旧路径。
             }
+            "synth_ack" => {
+                if !session.authenticated {
+                    return false;
+                }
+                // 与 [TARGETS-ACK] 同哲学：agent 侧 synth 配置应用的确认日志，
+                // 与 [CONFIG] 的 synth_sent 成对出现，验收时一眼对上。
+                let from = extract_num(line, "from");
+                let to = extract_num(line, "to");
+                let state = if extract_bool(line, "off") {
+                    "off".to_string()
+                } else {
+                    format!("0x{:04x}->0x{:04x}", from.unwrap_or(0), to.unwrap_or(0))
+                };
+                logger.kv("[SYNTH-ACK]", &[("state", state)]);
+            }
             "edge" => {
                 if !session.authenticated {
                     return false;
@@ -3585,6 +3623,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         args.observe,
                         args.restore,
                         &args.canary_usages,
+                        args.synth,
                         &stop,
                         deadline,
                         app_bridge.as_ref(),
@@ -3772,6 +3811,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         restore: bool,
         canary: &[u16],
         targets: &BridgeCaptureTargets,
+        synth: Option<(u16, u16)>,
     ) {
         // 清空集合 = 上报集合 ∪ 哨兵键。哨兵键把"清空到底有没有生效"变成外部可观测的实验
         // （详见 `--canary-usage` 的说明）。产品路径下目标来自主程序；无主程序时由
@@ -3782,7 +3822,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 clear.push(*usage);
             }
         }
-        let lines = [
+        // 语音键热键合成（豆包支持）：agent 默认关闭，只在配置存在时下发。
+        let mut lines = vec![
             format!("{{\"type\":\"arm\",\"token\":\"{token}\"}}\n"),
             format!(
                 "{{\"type\":\"mode\",\"token\":\"{token}\",\"clear\":{}}}\n",
@@ -3796,13 +3837,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 usages_json(&clear)
             ),
         ];
+        let mut has_synth_line = false;
+        if let Some((from, to)) = synth {
+            lines.push(format!(
+                "{{\"type\":\"synth\",\"token\":\"{token}\",\"from\":{},\"to\":{}}}\n",
+                from, to
+            ));
+            has_synth_line = true;
+        }
         // 逐条记录**实际写出去没有**。协议里没有 ack，所以这些字段只能说"已写出"，
         // 不能说"已生效"——命名如实为 `*_sent`。
         //
         // 2026-09-23 真机实测暴露的问题：此前只要整体 ok，`arm` 一律打印 `true`，
         // 于是接管轮出现过 `sent=false arm=true` 这种自相矛盾的一行；实际情况是
         // 那条连接的 arm 根本没送到（socket 已被对端重置）。
-        let mut sent = [false; 4];
+        let mut sent = vec![false; lines.len()];
         let mut stopped = false;
         for (i, l) in lines.iter().enumerate() {
             if stopped || stream.write_all(l.as_bytes()).is_err() {
@@ -3812,37 +3861,41 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             sent[i] = true;
         }
         let flush_ok = stream.flush().is_ok();
-        logger.kv(
-            "[CONFIG]",
-            &[
-                ("arm_sent", sent[0].to_string()),
-                ("mode_sent", sent[1].to_string()),
-                ("restore_sent", sent[2].to_string()),
-                ("targets_sent", sent[3].to_string()),
-                ("flush", flush_ok.to_string()),
-                (
-                    "mode",
-                    if observe {
-                        "observe".into()
-                    } else {
-                        "clear".into()
-                    },
-                ),
-                ("restore", restore.to_string()),
-                ("target_generation", targets.generation.to_string()),
-                ("report_usages", usages_hex(&targets.usages)),
-                ("clear_usages", usages_hex(&clear)),
-                (
-                    "canary",
-                    if canary.is_empty() {
-                        "none".into()
-                    } else {
-                        usages_hex(canary)
-                    },
-                ),
-                ("ack", "pending".into()),
-            ],
-        );
+        let mut config_fields: Vec<(&str, String)> = vec![
+            ("arm_sent", sent[0].to_string()),
+            ("mode_sent", sent[1].to_string()),
+            ("restore_sent", sent[2].to_string()),
+            ("targets_sent", sent[3].to_string()),
+            ("flush", flush_ok.to_string()),
+            (
+                "mode",
+                if observe {
+                    "observe".into()
+                } else {
+                    "clear".into()
+                },
+            ),
+            ("restore", restore.to_string()),
+            ("target_generation", targets.generation.to_string()),
+            ("report_usages", usages_hex(&targets.usages)),
+            ("clear_usages", usages_hex(&clear)),
+            (
+                "canary",
+                if canary.is_empty() {
+                    "none".into()
+                } else {
+                    usages_hex(canary)
+                },
+            ),
+            ("ack", "pending".into()),
+        ];
+        if has_synth_line {
+            config_fields.insert(4, ("synth_sent", sent[4].to_string()));
+            if let Some((from, to)) = synth {
+                config_fields.insert(5, ("synth", format!("0x{from:04x}->0x{to:04x}")));
+            }
+        }
+        logger.kv("[CONFIG]", &config_fields);
     }
 
     fn send_dynamic_targets(
@@ -3908,6 +3961,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         observe: bool,
         restore: bool,
         canary: &[u16],
+        synth: Option<(u16, u16)>,
         stop: &Arc<AtomicBool>,
         deadline: Option<Instant>,
         bridge: Option<&AppBridge>,
@@ -4023,6 +4077,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 restore,
                                 canary,
                                 &targets,
+                                synth,
                             );
                             sent_targets = Some(targets);
                             sent_at = Some(Instant::now());
@@ -4296,6 +4351,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             new_token: false,
             attach_only: false,
             new_generation: false,
+            synth: None,
         };
         let cfg = serde_like_config(&args);
         check(
@@ -4482,6 +4538,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         false,
                         true,
                         &[],
+                        None,
                         &stop,
                         Some(t0 + Duration::from_millis(1500)),
                         // 自检不连主程序：桥接在自检里必须是 None，
@@ -4914,6 +4971,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
         );
 
+        // 23c) 语音键热键合成（豆包支持）的静态断言：白名单、槽内替换循环、
+        //      合成视角进门禁（防 canary 死代码同款坑——只含语音键的报告
+        //      必须能穿过门禁到达替换逻辑）。行为级覆盖在 agent_logic_test.mjs。
+        check(
+            "内嵌 agent：语音键热键合成白名单与门禁（豆包支持）",
+            AGENT_JS.contains("var SYNTH_FROM_WHITELIST = [0x003E];")
+                && AGENT_JS.contains("var SYNTH_TO_WHITELIST = [0x00E6, 0x00E2];")
+                && AGENT_JS.contains("function synthSetIn(")
+                && AGENT_JS.contains("if (cmd.type === 'synth')")
+                && AGENT_JS.contains("type: 'synth_ack'")
+                && AGENT_JS.contains("stat.synth_hits++;"),
+            format!(
+                "has_synthSetIn={} has_gate={}",
+                AGENT_JS.contains("function synthSetIn("),
+                AGENT_JS.contains("function synthSetIn("),
+            ),
+        );
+
         // 23c) agent 代次必须与内嵌脚本一致，否则 [AGENT-STALE] 形同虚设：
         //      hello 里报的代次永远对不上，或者反过来永远对得上（两边都忘了改）。
         check(
@@ -5080,6 +5155,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 false,
                                 true,
                                 &[],
+                                None,
                                 &stop,
                                 None,
                                 None,
@@ -5342,7 +5418,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-09-27.dynamic-all-key";
+    const AGENT_BUILD: &str = "2026-09-28.voice-hotkey-synth";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；

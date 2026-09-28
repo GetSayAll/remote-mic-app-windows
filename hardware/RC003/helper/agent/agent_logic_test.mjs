@@ -241,7 +241,79 @@ check('targets 热更新被接受（targets_applied=2）',
   check('清空集合不含三键仍被拒', ctx.stat.targets_rejected === rejected + 2);
 }
 
-/* --------------------------- 9. 静态：门禁必须挂在清空集合上 */
+/* ----------- 9. 语音键热键合成（豆包支持，2026-09-28 行为验证通过后集成） ----------- */
+/* 机制：语音键 0x003E 槽内替换成合成 usage（0x00E6=RightAlt）——电平跟随物理报告，
+   物理释放即合成释放，无粘键路径。语音键 ATVV 会话走 BLE 协议层，不受影响；
+   0x003E 在 Windows 输入流本来就未映射，替换零损失。 */
+
+{
+  const rejected = ctx.stat.synth_rejected || 0;
+  ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003E, to: 0x00E6 }));
+  check('synth：合法配置被接受', (ctx.stat.synth_applied || 0) === 1,
+    `applied=${ctx.stat.synth_applied} rejected=${ctx.stat.synth_rejected}`);
+
+  const { ptr, self } = press(0x003E);
+  check('synth：语音键槽被替换成 0x00E6',
+    ptr.buf[3] === 0xe6 && ptr.buf[4] === 0,
+    `buf3=0x${ptr.buf[3].toString(16)} buf4=0x${ptr.buf[4].toString(16)}`);
+  check('synth：report_id / modifiers 未被动', ptr.buf[0] === 0x01 && ptr.buf[1] === 0);
+  check('synth：不产生按键边沿（语音键不参与映射系统）', self.hit === true);
+}
+
+{
+  const { ptr } = press(0x003E, 0x0028);
+  check('synth：与其它键共存时只替换语音键槽',
+    ptr.buf[3] === 0xe6 && ptr.buf[5] === 0x28 && ptr.buf[6] === 0,
+    `buf=${Array.from(ptr.buf).map((b) => b.toString(16)).join(',')}`);
+}
+
+{
+  const { ptr } = press();
+  check('synth：物理释放帧全零——合成键随物理电平消失，无粘键路径',
+    ptr.buf[3] === 0 && ptr.buf[4] === 0 && ptr.buf[5] === 0,
+    `buf3=0x${ptr.buf[3].toString(16)}`);
+}
+
+{
+  const rejected = ctx.stat.synth_rejected;
+  ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x004A, to: 0x00E6 }));
+  check('synth：from 非语音键被拒', ctx.stat.synth_rejected === rejected + 1);
+  ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003E, to: 0x1234 }));
+  check('synth：to 不在合成白名单被拒', ctx.stat.synth_rejected === rejected + 2);
+}
+
+{
+  ctx.handleCommand(JSON.stringify({ type: 'mode', clear: false }));
+  const { ptr } = press(0x003E);
+  check('synth：observe 模式不替换', ptr.buf[3] === 0x3e,
+    `buf3=0x${ptr.buf[3].toString(16)}`);
+  ctx.handleCommand(JSON.stringify({ type: 'mode' }));
+}
+
+{
+  /* 租约过期（disarm/bye 同路径）：替换停止 → 报告回归语音键原样 → 0xE6 从
+     报告中消失。HID 报告是状态语义，usage 消失本身就是 UP——无需补帧。 */
+  ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+  press(0x003E);                                            // 替换激活（OS 收到 0xE6 DOWN）
+  ctx.lastRenewAt = 0;                                      // 模拟租约过期
+  const a = press(0x003E);
+  check('synth：租约过期后停止替换，报告回归原样（0xE6 消失即 OS 收到 UP）',
+    a.ptr.buf[3] === 0x3e,
+    `buf3=0x${a.ptr.buf[3].toString(16)}`);
+}
+
+{
+  ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+  ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+  const { ptr } = press(0x003E);
+  check('synth：off 后语音键恢复原样', ptr.buf[3] === 0x3e,
+    `buf3=0x${ptr.buf[3].toString(16)}`);
+}
+
+check('源码含 synthSetIn（合成视角进门禁，防 canary 死代码同款坑）',
+  src.includes('function synthSetIn('));
+
+/* --------------------------- 10. 静态：门禁必须挂在清空集合上 */
 
 check('源码含 clearSetIn（清空集合视角）', src.includes('function clearSetIn('));
 check('onEnter 门禁调用 shouldTouchReport',
