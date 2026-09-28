@@ -78,6 +78,33 @@ use serde::Serialize;
 use crate::button_mapping::EngineMessage;
 use crate::raw_input::{button_for_usage, ButtonEdge, ENHANCED_CAPTURE_BUTTON_USAGES};
 
+/// 语音键的 HID 键盘 usage：遥控器语音键同时以键盘 **F5（0x003E）** 上报
+/// （与 key_suppressor 的知识同源）。ATVV 语音会话走 BLE 协议层，不经这个
+/// usage；且它在 Windows 输入流本来就未映射——报告层替换它零损失。
+pub const VOICE_KEY_HID_USAGE: u16 = 0x003E;
+
+/// 报告层合成**已实测可用**的目标 usage 白名单（2026-09-29）。
+///
+/// 替换 usage 会在 WUDFHost 翻译链最上游重新推 VK/扫描码，未实测的 usage
+/// 可能产出意外键值或不产出事件——替换 usage 必须逐键实测（探针
+/// wudf_ioctl_synth.py）。当前实测：0x00E6 → VK_RMENU、0x00E2 → VK_LMENU。
+/// 扩表 = 先跑探针，再同步 agent 侧 `SYNTH_TO_WHITELIST`（两侧一致由
+/// 各自测试钉住；agent 是终审，这里只是「不下发注定被拒的配置」的预过滤）。
+pub const VOICE_SYNTHABLE_USAGES: &[u16] = &[0x00E2, 0x00E6];
+
+/// 「按住说话快捷键」能否驱动报告层合成：**恰好单键**且 usage 在白名单内。
+///
+/// 和弦（≥2 键）无法用单个报告槽表达（合成是槽内替换，一次只能呈现一个
+/// usage），返回 `None` 后 BLE 层继续走 SendInput 注入路径——两条路径
+/// 互斥，由判据显式二选一，不允许叠加（双写互扰，2026-09-29 run8 实证）。
+pub(crate) fn voice_synth_target(chord: &crate::send_input::KeyChord) -> Option<u16> {
+    if chord.keys.len() != 1 {
+        return None;
+    }
+    let usage = chord.keys[0].hid_usage()?;
+    VOICE_SYNTHABLE_USAGES.contains(&usage).then_some(usage)
+}
+
 /// 桥接描述文件名。约定路径见 [`default_bridge_dir`]。
 pub const BRIDGE_FILE_NAME: &str = "rc003-bridge.ini";
 
@@ -449,6 +476,8 @@ pub struct Rc003Bridge {
     shared: Arc<Mutex<BridgeShared>>,
     current: Arc<Mutex<Option<CurrentConn>>>,
     targets: Arc<Mutex<CaptureTargets>>,
+    /// 语音键报告层合成目标（`None` = 关闭）。来源 = app 的「按住说话快捷键」。
+    voice_synth_to: Arc<Mutex<Option<u16>>>,
     sender: Sender<EngineMessage>,
     worker: Mutex<Option<JoinHandle<()>>>,
     file: Option<PathBuf>,
@@ -471,6 +500,7 @@ impl Rc003Bridge {
         let shared = Arc::new(Mutex::new(BridgeShared::default()));
         let current: Arc<Mutex<Option<CurrentConn>>> = Arc::new(Mutex::new(None));
         let targets = Arc::new(Mutex::new(CaptureTargets::default()));
+        let voice_synth_to = Arc::new(Mutex::new(None::<u16>));
         let next_id = Arc::new(AtomicU64::new(1));
 
         let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
@@ -485,6 +515,7 @@ impl Rc003Bridge {
                     shared,
                     current,
                     targets,
+                    voice_synth_to,
                     sender,
                     worker: Mutex::new(None),
                     file: None,
@@ -525,6 +556,7 @@ impl Rc003Bridge {
             let shared = Arc::clone(&shared);
             let current = Arc::clone(&current);
             let targets = Arc::clone(&targets);
+            let voice_synth_to = Arc::clone(&voice_synth_to);
             let next_id = Arc::clone(&next_id);
             std::thread::Builder::new()
                 .name("sayall-rc003-bridge".to_owned())
@@ -535,6 +567,7 @@ impl Rc003Bridge {
                         shared,
                         current,
                         targets,
+                        voice_synth_to,
                         next_id,
                         &token_for_worker,
                         bridge_sender,
@@ -548,6 +581,7 @@ impl Rc003Bridge {
             shared,
             current,
             targets,
+            voice_synth_to,
             sender,
             worker: Mutex::new(worker),
             file,
@@ -622,11 +656,54 @@ impl Rc003Bridge {
             format_usage_payload(&usages)
         ));
     }
+    /// 更新语音键报告层合成目标（2026-09-29 产品化：配置来源 = app 的
+    /// 「按住说话快捷键」设置，helper 不再单独设置）。
+    ///
+    /// * `Some(usage)`：助手在报告层把语音键 usage 替换为该 usage（`injected=0`，
+    ///   第三方输入法如豆包的语音热键才收得到）。
+    /// * `None`：关闭合成。
+    ///
+    /// 合成生效期间 BLE 层的 SendInput 注入路径**必须停用**（否则同一会话
+    /// 双写：注入的和弦带 `injected=1` 且可能触发输入法切换，与报告层合成
+    /// 互扰——2026-09-29 run8 真机实证）。门禁判据是
+    /// [`Self::voice_synth_active`]：仅当助手已连接且本条 S 行写出成功才为真；
+    /// 断连即回落，BLE 层自动恢复注入路径。
+    ///
+    /// 这里只更新共享状态（绝对状态语义）：连接线程每轮比对变更并下发 S 行，
+    /// 与 targets 的 `T` 行同一模式；助手断线重连后鉴权完成也会收到当前状态。
+    pub fn set_voice_synth(&self, to_usage: Option<u16>) {
+        {
+            let mut synth = lock(&self.voice_synth_to);
+            if *synth == to_usage {
+                return;
+            }
+            *synth = to_usage;
+        }
+        note(format!(
+            "enhanced_capture event=voice_synth_configured to={}",
+            to_usage
+                .map(|u| format!("0x{u:04X}"))
+                .unwrap_or_else(|| "off".to_owned())
+        ));
+    }
+
+    /// 报告层合成门禁判据：助手已连接且 S 行写出成功。断连或配置关闭时为
+    /// `false`，BLE 层据此恢复 SendInput 注入路径。
+    ///
+    /// 实现走 key_gate 的模块级原子（与 `enhanced_owned_mask` 同模式）：
+    /// BleRuntime 构造先于本桥，共享 Arc 需要两端装配顺序配合；模块级静态
+    /// 是项目内已验证的跨组件状态载体，且 `Drop` 路径的回落有单处归属。
+    pub fn voice_synth_active() -> bool {
+        crate::key_gate::voice_synth_active()
+    }
 }
 
 impl Drop for Rc003Bridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // 桥没了 = 合成通道没了：门禁必须回落（正常路径连接收尾已清，
+        // 这里兜底连接线程卡在阻塞读而收尾尚未执行的情形）。
+        crate::key_gate::set_voice_synth_active(false);
         if let Some(conn) = lock(&self.current).take() {
             let _ = conn.stream.shutdown(Shutdown::Both);
         }
@@ -672,6 +749,7 @@ fn accept_loop(
     shared: Arc<Mutex<BridgeShared>>,
     current: Arc<Mutex<Option<CurrentConn>>>,
     targets: Arc<Mutex<CaptureTargets>>,
+    voice_synth_to: Arc<Mutex<Option<u16>>>,
     next_id: Arc<AtomicU64>,
     token: &str,
     sender: Sender<EngineMessage>,
@@ -721,6 +799,7 @@ fn accept_loop(
                 let thread_shared = Arc::clone(&shared);
                 let thread_current = Arc::clone(&current);
                 let thread_targets = Arc::clone(&targets);
+                let thread_synth = Arc::clone(&voice_synth_to);
                 let thread_sender = sender.clone();
                 let thread_token = token.to_string();
                 let spawned = std::thread::Builder::new()
@@ -733,6 +812,7 @@ fn accept_loop(
                             &thread_shared,
                             &thread_current,
                             &thread_targets,
+                            &thread_synth,
                             &thread_token,
                             &thread_sender,
                         )
@@ -773,6 +853,7 @@ fn handle_connection(
     shared: &Arc<Mutex<BridgeShared>>,
     current: &Arc<Mutex<Option<CurrentConn>>>,
     targets: &Arc<Mutex<CaptureTargets>>,
+    voice_synth_to: &Arc<Mutex<Option<u16>>>,
     token: &str,
     sender: &Sender<EngineMessage>,
 ) {
@@ -788,6 +869,10 @@ fn handle_connection(
     let mut pending: Vec<u8> = Vec::new();
     let mut authenticated = false;
     let mut last_sent_generation = 0u64;
+    // 最近下发的语音合成目标（含 None）：与本条连接的 S 行下发状态对齐。
+    // 初值 None 不会被读到——变更检测在 `authenticated` 分支内，而
+    // authenticated 只在鉴权分支赋值 last_sent_synth 之后才可能为 true。
+    let mut last_sent_synth: Option<u16> = None;
     let mut deny_count = 0u32;
     let started = Instant::now();
     let mut last_rx = Instant::now();
@@ -869,6 +954,25 @@ fn handle_connection(
                                 format_usage_payload(&target.usages)
                             ),
                         );
+                        // 鉴权后立即对齐语音合成状态（绝对语义，同 OK 行的 targets）。
+                        // 写失败不在这里断链：与 targets 的 T 行同哲学，下一轮
+                        // 变更检测/看门狗会暴露写入问题；但 active 门禁不提前置位。
+                        let synth_current = *lock(voice_synth_to);
+                        last_sent_synth = synth_current;
+                        if synth_current.is_some() {
+                            let line = voice_synth_line(synth_current);
+                            if write_line(&mut writer, &line).is_ok() {
+                                crate::key_gate::set_voice_synth_active(true);
+                                note(format!(
+                                    "rc003_bridge event=voice_synth_sent to={} scope=hello",
+                                    synth_current
+                                        .map(|u| format!("0x{u:04X}"))
+                                        .unwrap_or_else(|| "off".to_owned())
+                                ));
+                            }
+                        } else {
+                            crate::key_gate::set_voice_synth_active(false);
+                        }
                     }
                     _ => {
                         // 未鉴权前只接受 HELLO。这不是防攻击（同用户进程挡不住），
@@ -981,6 +1085,27 @@ fn handle_connection(
                 }
                 last_sent_generation = target.generation;
             }
+            // 语音合成状态变更检测（与 T 行同模式）：app 在运行中改了
+            // 「按住说话快捷键」时，把新的绝对状态推给助手。
+            {
+                let synth_current = *lock(voice_synth_to);
+                if synth_current != last_sent_synth {
+                    let line = voice_synth_line(synth_current);
+                    if write_line(&mut writer, &line).is_err() {
+                        drop_reason = "voice_synth_write_error";
+                        break;
+                    }
+                    last_sent_synth = synth_current;
+                    let active = synth_current.is_some();
+                    crate::key_gate::set_voice_synth_active(active);
+                    note(format!(
+                        "rc003_bridge event=voice_synth_sent to={} scope=update active={active}",
+                        synth_current
+                            .map(|u| format!("0x{u:04X}"))
+                            .unwrap_or_else(|| "off".to_owned())
+                    ));
+                }
+            }
             let ownership_expired = lock(shared)
                 .ownership_last_rx
                 .map(|at| at.elapsed() > OWNERSHIP_TIMEOUT)
@@ -1037,6 +1162,13 @@ fn handle_connection(
         }
         state.helper_pid = 0;
     }
+    // 语音合成门禁回落：连接不在了 ⇒ 报告层合成不再可靠，BLE 注入路径必须
+    // 自动接回（与 targets 断连清零同哲学：fail-open 回落旧路径）。
+    // 例外：`replaced`。接手的新连接会在鉴权后重新置位；旧连接若在这里清掉，
+    // 会造成"接管瞬间门禁闪断"——但配置状态仍指向合成生效。为简单与安全起见，
+    // 替换场景也清零：新连接鉴权后最多一个轮询周期内重新置位（亚秒级），
+    // 代价是那一瞬可能多走一次注入路径，换来的是"门禁只反映已验证的连接"。
+    crate::key_gate::set_voice_synth_active(false);
     let _ = writer.shutdown(Shutdown::Both);
     {
         // 只清理"当前连接还是我"的情况。无条件 take 会把**接手的新连接**一起清掉，
@@ -1052,6 +1184,15 @@ fn handle_connection(
          released={released_count} dropped={}",
         lock(shared).usages_dropped
     ));
+}
+
+/// 语音合成状态的 S 行编码（绝对状态语义）：`S <usage 十六进制>` 或 `S -`（关闭）。
+/// 助手侧解析见 `hardware/RC003/helper/src/main.rs` 的 `parse_bridge_synth_line`。
+fn voice_synth_line(to: Option<u16>) -> String {
+    match to {
+        Some(usage) => format!("S {usage:04X}"),
+        None => "S -".to_owned(),
+    }
 }
 
 fn write_line(stream: &mut TcpStream, line: &str) -> std::io::Result<()> {
@@ -1138,7 +1279,14 @@ pub fn parse_descriptor(text: &str) -> Option<(u16, String, u32)> {
 mod tests {
     use super::*;
     use crate::raw_input::RemoteButton;
+    use crate::send_input::{KeyChord, KeyCode};
     use std::sync::mpsc::channel;
+
+    fn chord(keys: &[KeyCode]) -> KeyChord {
+        KeyChord {
+            keys: keys.to_vec(),
+        }
+    }
 
     fn targets(usages: &[u16]) -> Arc<Mutex<CaptureTargets>> {
         Arc::new(Mutex::new(CaptureTargets {
@@ -1151,6 +1299,51 @@ mod tests {
         buttons
             .iter()
             .fold(0, |mask, button| mask | (1u64 << button.ordinal()))
+    }
+
+    #[test]
+    fn voice_synth_target_accepts_only_whitelisted_single_keys() {
+        // 已实测 usage 的单键：放行（RightAlt=0xE6 / LeftAlt=0xE2）。
+        assert_eq!(
+            voice_synth_target(&chord(&[KeyCode::RightAlt])),
+            Some(0x00E6)
+        );
+        assert_eq!(
+            voice_synth_target(&chord(&[KeyCode::LeftAlt])),
+            Some(0x00E2)
+        );
+        // 和弦（v1 默认 Ctrl+Win）：报告槽只有单个替换位，合成不可表达 → None，
+        // BLE 层继续走注入路径。这正是"两条路径互斥、判据显式二选一"的一半。
+        assert_eq!(
+            voice_synth_target(&chord(&[KeyCode::LeftControl, KeyCode::LeftWindows])),
+            None
+        );
+        // 白名单外单键（Ctrl 未实测）：不下发，同样回落注入路径。
+        assert_eq!(voice_synth_target(&chord(&[KeyCode::LeftControl])), None);
+        // 无 usage 的键（音量键走 Consumer 页）。
+        assert_eq!(voice_synth_target(&chord(&[KeyCode::VolumeUp])), None);
+    }
+
+    #[test]
+    fn voice_synth_line_encodes_on_and_off() {
+        // helper 侧 parse_bridge_synth_line 的对侧编码，两种形态逐字符对齐。
+        assert_eq!(voice_synth_line(Some(0x00E6)), "S 00E6");
+        assert_eq!(voice_synth_line(None), "S -");
+    }
+
+    #[test]
+    fn set_voice_synth_updates_shared_state_idempotently() {
+        let (sender, _receiver) = channel();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-synth-test-{}", std::process::id()));
+        let bridge = Rc003Bridge::start_in(dir, sender);
+        bridge.set_voice_synth(Some(0x00E6));
+        assert_eq!(*lock(&bridge.voice_synth_to), Some(0x00E6));
+        // 重复写同值幂等（日志不重复刷屏）。
+        bridge.set_voice_synth(Some(0x00E6));
+        assert_eq!(*lock(&bridge.voice_synth_to), Some(0x00E6));
+        bridge.set_voice_synth(None);
+        assert_eq!(*lock(&bridge.voice_synth_to), None);
     }
 
     #[test]

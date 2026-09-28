@@ -1572,9 +1572,19 @@ fn handle_control(
             // 仅在确有泄漏时放行到 OS——恰好只在需要时生效。
             send_input.release_stuck_f5();
             std::thread::sleep(Duration::from_millis(20));
-            // 按住说话快捷键（参考 ZSTDJan/Voice_VibeCoding）：先注入快捷键
-            // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
-            if let Some(chord) = lock(voice_hold_hotkey).clone() {
+            // 按住说话快捷键：两条互斥路径，由报告层合成门禁二选一（判据显式，
+            // 不允许叠加——双写互扰 2026-09-29 run8 真机实证）：
+            // * 报告层合成生效（rc003 桥已连接且 S 行下发成功）：OS 在报告层
+            //   直接收到合成的快捷键 usage（injected=0），这里**整体跳过**注入
+            //   分支——包括 activate_wetype_session（它会把输入法切到微信，
+            //   正是"豆包路径被切成微信输入法"的根因）与 chord_retry。
+            // * 合成不生效（和弦 / 白名单外 / 助手断线回落）：走既有 SendInput
+            //   注入路径，行为与 2026-09-28 之前一致。
+            if crate::key_gate::voice_synth_active() {
+                gatt_note(format!(
+                    "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
+                ));
+            } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
                 let mic_baseline = wetype_mic_observation();
                 // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
                 // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零

@@ -231,6 +231,10 @@ mod imp {
     const MAX_PATH_W: usize = 260;
     const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
+    /// 语音键的 HID usage（键盘 F5）。agent 侧 SYNTH_FROM_WHITELIST 与此一致；
+    /// 合成命令的 from 恒为它，桥（S 行）只下发目标 usage。
+    const VOICE_KEY_HID_USAGE: u16 = 0x003E;
+
     /// agent 允许接管的全部语义按键白名单（语音键 0x003E 明确排除）。
     const TARGET_USAGES: [u16; 13] = [
         0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F,
@@ -1945,6 +1949,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// （主程序是普通权限，本来就杀不掉一个提权进程）。
         last_connected_ms: Arc<AtomicU64>,
         targets: Arc<Mutex<BridgeCaptureTargets>>,
+        /// 语音键报告层合成的目标 usage（`None` = 关闭）。来源 = 主程序经桥
+        /// 下发的 `S` 行（绝对状态语义）；app 的「按住说话快捷键」是唯一事实源
+        /// （2026-09-29 产品化），CLI `--synth-from/--synth-to` 只在无桥时兜底。
+        voice_synth: Arc<Mutex<Option<u16>>>,
+        /// voice_synth 变化标志：主循环比对后给 agent 补发 synth 命令并清零。
+        voice_synth_dirty: Arc<AtomicBool>,
     }
 
     impl AppBridge {
@@ -1965,6 +1975,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 .lock()
                 .map(|targets| targets.clone())
                 .unwrap_or_default()
+        }
+
+        /// 当前语音合成目标；`dirty` = 自上次读取以来被主程序改过。
+        fn voice_synth_state(&self) -> (Option<u16>, bool) {
+            let synth = self
+                .voice_synth
+                .lock()
+                .map(|guard| *guard)
+                .unwrap_or(None);
+            (
+                synth,
+                self.voice_synth_dirty
+                    .swap(false, Ordering::Relaxed),
+            )
         }
 
         fn snapshot(&self) -> (u64, u64, u64, String) {
@@ -2161,6 +2185,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         Some(BridgeCaptureTargets { generation, usages })
     }
 
+    /// 解析主程序的语音合成状态行：`S <usage 十六进制>`（开启）或 `S -`（关闭）。
+    ///
+    /// 与 targets 的 `T` 行同哲学：**绝对状态语义**，直接覆盖本地值。这里不做
+    /// usage 白名单校验——白名单的终审在 agent（SYNTH_TO_WHITELIST），主程序
+    /// 下发什么就转发什么，被拒的配置会在 agent 日志里留下 `synth:rejected`
+    /// 证据链。注意目标 usage 不受 `TARGET_USAGES` 限制（0x00E6 等合成键
+    /// 本来就不在三键集合里），也不能照搬 target 行的集合校验。
+    fn parse_bridge_synth_line(line: &str) -> Option<Option<u16>> {
+        let mut parts = line.trim().split(' ');
+        if parts.next()? != "S" {
+            return None;
+        }
+        let payload = parts.next()?;
+        if payload == "-" {
+            return Some(None);
+        }
+        let usage = u16::from_str_radix(payload.trim_start_matches("0x").trim_start_matches("0X"), 16)
+            .ok()?;
+        (usage != 0).then_some(Some(usage))
+    }
+
     /// 发一条边沿行。空集合编码为 `-`（主程序侧据此释放全部）。
     fn bridge_send_edges(stream: &mut TcpStream, usages: &[u16]) -> std::io::Result<()> {
         bridge_write_line(
@@ -2235,6 +2280,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         last_connected_ms: Arc<AtomicU64>,
         follow_app: bool,
         targets: Arc<Mutex<BridgeCaptureTargets>>,
+        voice_synth: Arc<Mutex<Option<u16>>>,
+        voice_synth_dirty: Arc<AtomicBool>,
     ) {
         let mut conn: Option<TcpStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
@@ -2377,6 +2424,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
 
             // 2.5) 主程序热更新动态目标：`T <generation> <usages>`。
+            //      同一读循环里顺带处理 `S <usage>` / `S -`（语音键报告层合成，
+            //      来源 = 主程序的「按住说话快捷键」设置）。
             if let Some(stream) = conn.as_mut() {
                 let mut chunk = [0u8; 1024];
                 match stream.read(&mut chunk) {
@@ -2390,6 +2439,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 if let Ok(mut current) = targets.lock() {
                                     *current = configured;
                                 }
+                            } else if let Some(synth) = parse_bridge_synth_line(&line) {
+                                // 功能点日志：来源、目标、关闭态三态都要能从日志定位。
+                                logger.kv(
+                                    "[VOICE-SYNTH]",
+                                    &[
+                                        ("event", "configured".into()),
+                                        (
+                                            "to",
+                                            synth
+                                                .map(|usage| format!("0x{usage:04X}"))
+                                                .unwrap_or_else(|| "off".into()),
+                                        ),
+                                        ("source", "app_bridge".into()),
+                                    ],
+                                );
+                                if let Ok(mut current) = voice_synth.lock() {
+                                    *current = synth;
+                                }
+                                voice_synth_dirty.store(true, Ordering::Relaxed);
                             }
                         }
                     }
@@ -2417,6 +2485,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if let Ok(mut current) = targets.lock() {
                     current.usages.clear();
                 }
+                // 主程序没了 = 合成配置的事实源没了：回落关闭（fail-open）。
+                // CLI 参数在无桥阶段仍可重建配置（调试路径），这里只清桥下发的那份。
+                if let Ok(mut current) = voice_synth.lock() {
+                    *current = None;
+                }
+                voice_synth_dirty.store(true, Ordering::Relaxed);
                 logger.kv(
                     "[APP-BRIDGE]",
                     &[("event", "disconnected_targets_cleared".into())],
@@ -2448,6 +2522,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 否则一启动就满足"很久没连上"而立刻自杀。
         let last_connected_ms = Arc::new(AtomicU64::new(now_ms_u64()));
         let targets = Arc::new(Mutex::new(BridgeCaptureTargets::default()));
+        let voice_synth = Arc::new(Mutex::new(None::<u16>));
+        let voice_synth_dirty = Arc::new(AtomicBool::new(false));
         let worker_logger = Logger::new(logger.path.clone());
         let worker_stop = Arc::clone(&stop);
         let worker_stats = Arc::clone(&stats);
@@ -2455,6 +2531,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 否则一启动就满足"很久没连上"而立刻自杀。
         let worker_last = Arc::clone(&last_connected_ms);
         let worker_targets = Arc::clone(&targets);
+        let worker_synth = Arc::clone(&voice_synth);
+        let worker_synth_dirty = Arc::clone(&voice_synth_dirty);
         let handle = std::thread::Builder::new()
             .name("rc003-app-bridge".to_owned())
             .spawn(move || {
@@ -2467,6 +2545,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     worker_last,
                     follow_app,
                     worker_targets,
+                    worker_synth,
+                    worker_synth_dirty,
                 )
             })
             .ok()?;
@@ -2477,6 +2557,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             stats,
             last_connected_ms,
             targets,
+            voice_synth,
+            voice_synth_dirty,
         })
     }
 
@@ -3941,6 +4023,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
     }
 
+    /// 语音合成命令的行编码（纯函数，单测钉住格式）：
+    /// `to = Some` → from 恒为语音键 usage；`None` → from=0/to=0（agent synth:off 分支）。
+    fn voice_synth_command_line(token: &str, to: Option<u16>) -> String {
+        let (from, to) = match to {
+            Some(usage) => (VOICE_KEY_HID_USAGE, usage),
+            None => (0, 0),
+        };
+        format!("{{\"type\":\"synth\",\"token\":\"{token}\",\"from\":{from},\"to\":{to}}}\n")
+    }
+
+    /// 给 agent 补发一条语音合成命令（与 send_session_config 里的 synth 行同格式）。
+    fn send_voice_synth(stream: &mut TcpStream, token: &str, to: Option<u16>) -> bool {
+        let line = voice_synth_command_line(token, to);
+        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+    }
+
     /// targets 重发判据（纯函数，语义由单测钉住）。
     ///
     /// 语义要点：判据是「ack 确认的是**最近下发的那份**配置」，而不是「有没有 ack」
@@ -4011,6 +4109,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut sent_at: Option<Instant> = None;
         // 本条连接内已重发的次数（决定快/慢节奏，见 ACK_RESEND_* 常量注释）。
         let mut resend_attempts: u64 = 0;
+        // 最近一次下发给 agent 的语音合成目标：主程序改了「按住说话快捷键」时
+        // 在这里检测差异并补发（agent 的 synth 命令幂等，重复应用无害）。
+        let mut sent_synth: Option<Option<u16>> = None;
         loop {
             if stop_requested(stop) {
                 return;
@@ -4042,6 +4143,28 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         // 新配置 = 新一轮等待：重置计时与快节奏预算。
                         sent_at = Some(Instant::now());
                         resend_attempts = 0;
+                    }
+                    // 语音合成状态变更：主程序侧改了「按住说话快捷键」（含关闭）。
+                    // 单独一条 synth 命令，不重发整批 config（与 targets 的差异
+                    // 下发同哲学）；agent 侧幂等，重复应用无害。
+                    let (synth_current, synth_dirty) = bridge.voice_synth_state();
+                    if synth_dirty || sent_synth.as_ref() != Some(&synth_current) {
+                        if !send_voice_synth(&mut stream, token, synth_current) {
+                            return;
+                        }
+                        logger.kv(
+                            "[VOICE-SYNTH]",
+                            &[
+                                ("event", "agent_notified".into()),
+                                (
+                                    "to",
+                                    synth_current
+                                        .map(|usage| format!("0x{usage:04X}"))
+                                        .unwrap_or_else(|| "off".into()),
+                                ),
+                            ],
+                        );
+                        sent_synth = Some(synth_current);
                     }
                 }
             }
@@ -4098,6 +4221,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                     generation: 0,
                                     usages: DEFAULT_TARGET_USAGES.to_vec(),
                                 });
+                            // 合成配置：有桥时以桥为唯一事实源（含"桥明确关闭"，
+                            // 产品语义 = app 的「按住说话快捷键」是唯一设置入口）；
+                            // CLI 只在无桥（run-helper.cmd 手动调试）时兜底。
+                            let bridge_synth: Option<Option<u16>> =
+                                bridge.map(|bridge| bridge.voice_synth_state().0);
+                            let synth = match bridge_synth {
+                                Some(Some(usage)) => Some((VOICE_KEY_HID_USAGE, usage)),
+                                Some(None) => None,
+                                None => synth,
+                            };
                             send_session_config(
                                 &mut stream,
                                 logger,
@@ -4110,6 +4243,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             );
                             sent_targets = Some(targets);
                             sent_at = Some(Instant::now());
+                            sent_synth = Some(bridge_synth.unwrap_or(None));
                         }
                     }
                 }
@@ -5456,6 +5590,52 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    #[cfg(test)]
+    mod bridge_synth_line_tests {
+        use super::*;
+
+        #[test]
+        fn parses_on_and_off_states() {
+            // 主程序侧 voice_synth_line() 的两种编码，逐字符对齐。
+            assert_eq!(parse_bridge_synth_line("S 00E6"), Some(Some(0x00E6)));
+            assert_eq!(parse_bridge_synth_line("S E6"), Some(Some(0x00E6)));
+            assert_eq!(parse_bridge_synth_line("S -"), Some(None));
+        }
+
+        #[test]
+        fn rejects_malformed_lines() {
+            // 非法形状一律 None（与 T 行解析同哲学：坏行丢弃，不断链）。
+            assert_eq!(parse_bridge_synth_line("T 7 0x004A"), None);
+            assert_eq!(parse_bridge_synth_line("S"), None);
+            assert_eq!(parse_bridge_synth_line("S zz"), None);
+            // 0 usage 视为无效（app 侧不会下发；防呆）。
+            assert_eq!(parse_bridge_synth_line("S 0"), None);
+        }
+
+        #[test]
+        fn voice_key_usage_constant_matches_agent_whitelist() {
+            // agent 的 SYNTH_FROM_WHITELIST = [0x003E]（编译期内联常量，
+            // 这里钉住 Rust 侧常量；AGENT_JS 自检另有 contains 钉住 JS 侧）。
+            assert_eq!(VOICE_KEY_HID_USAGE, 0x003E);
+            assert!(!TARGET_USAGES.contains(&VOICE_KEY_HID_USAGE),
+                "语音键不能进接管白名单：ATVV 会话走 BLE 层，且合成命令的 from 就是它");
+        }
+
+        #[test]
+        fn voice_synth_command_line_encodes_on_and_off() {
+            // 开启态：from 恒为语音键 usage；关闭态：from=0/to=0（agent synth:off）。
+            // 格式必须与 agent 侧 `cmd.type === 'synth'` 解析逐字段对齐。
+            assert_eq!(
+                voice_synth_command_line("tok", Some(0x00E6)),
+                "{\"type\":\"synth\",\"token\":\"tok\",\"from\":62,\"to\":230}\n"
+            );
+            assert_eq!(
+                voice_synth_command_line("tok", None),
+                "{\"type\":\"synth\",\"token\":\"tok\",\"from\":0,\"to\":0}\n"
+            );
+        }
+    }
 
     #[cfg(test)]
     mod targets_ack_resend_tests {
