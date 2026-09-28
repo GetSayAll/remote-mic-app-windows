@@ -231,6 +231,21 @@
   `learn.microsoft.com/windows/win32/winauto/event-constants`、
   `learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess`。
 
+### 两处快捷键直接录入统一方案（2026-09-28）
+
+- **调研结论与边界**：见
+  `docs/investigations/2026-09-28-direct-hotkey-capture-options.md`。连接页现有自动定稿方案已由
+  用户判定不可用，且历史日志存在完整组合被截成单键保存的证据；不得直接复用到按键页。
+- **Microsoft `LowLevelKeyboardProc` / Raw Input / `RegisterHotKey` / `SendInput` / `BlockInput`**：
+  用于界定普通权限下录入、吞键、系统保留组合、注入与全局输入冻结的能力上限。均为公开
+  Windows API 文档，未复制代码。
+- **Microsoft PowerToys Keyboard Manager**（`microsoft/PowerToys`，调研时 `main`）：参考其
+  “Type shortcut”使用低级钩子向编辑 UI 投递按键的分层，以及明确拒绝 `Win+L`、
+  `Ctrl+Alt+Del` 的产品边界。只参考公开架构与限制，未复制代码。
+- **适用结论**：推荐共享“持续累计草稿 + 显式保存”录入器；允许实体键逐个加入组合，替代
+  用户可见的安全模式。外部输入法已消费的边沿不能靠换成 Raw Input 或 `RegisterHotKey`
+  恢复；若实验“修饰键 DOWN 后立即注入自有标记 UP”增强路线，必须先完成真机系统组合矩阵。
+
 ## WeType 热键休眠自动恢复调研来源（2026-09-05，热键休眠专项 v2）
 
 场景：WeType 2.1.3.18 后台约 40 分钟后"TSF 存活但全局键盘钩子休眠"——和弦注入 LWin 穿透、无 0xFC、ConsentStore 时间戳不动；打开 WeType 任意自身界面立即复活（kb-live 会话 23-26 真机取证）。跨进程 `SetProcessInformation(ProcessPowerThrottling)` 解除节流**真机证伪**（对其他进程 E_INVALIDARG 0x80070057，wetype_service 打开即 0x80070005，15:04 live12 取证），该路线已从 `wetype_revive.rs` 移除。v2 已实现（`ble.rs` + `ime.rs`）：检测（注入后 700ms ConsentStore 时间戳未动）→ TSF 配置切换唤醒（`cycle_wetype_profile`：激活微软拼音 80ms 后切回，公开 API）→ 300ms 后经 `WorkerMessage::RetryVoiceChord` 在工作线程释放旧和弦并重注入 → 二次检测未响应才提示人工。关键参考与实测：
