@@ -1130,19 +1130,31 @@ onUnmounted(() => {
             title="开启后，已配置按键从遥控器报告层捕获，避免接管物理键盘同名按键"
           >
             <span>全按键支持</span>
+            <!-- 终值就绪前用同尺寸占位符顶位、就绪后才创建开关本体——与
+                 「启动行为」页登录自启动开关同法（2026-09-28 Andy 要求）：
+                 开关创建即带正确 checked，不产生"状态回来后关→开"的滑动动画。 -->
+            <span
+              v-if="rc003CaptureEnabled === null"
+              class="toggle-placeholder"
+              aria-hidden="true"
+            ></span>
             <input
+              v-else
               ref="captureSwitchEl"
               type="checkbox"
               class="toggle-input"
               :checked="rc003CaptureEnabled === true"
-              :disabled="rc003CaptureBusy || rc003CaptureEnabled === null"
+              :disabled="rc003CaptureBusy"
               @change="toggleRc003Capture"
             />
+            <!-- 状态圆点只在开关**打开**时出现（2026-09-28 Andy 要求），颜色随
+                 桥接相位变化：绿=助手已连接、黄=启动中/未知、红=开启失败；
+                 关闭时不占位，避免"关着还亮个点"读成已启用。 -->
             <span
-              v-if="rc003BridgeText"
+              v-if="rc003CaptureEnabled === true"
               class="status-dot"
               :class="rc003BridgeTone"
-              :title="rc003BridgeText"
+              :title="rc003BridgeText ?? '全按键支持已开启'"
             ></span>
           </label>
         </div>
@@ -1497,6 +1509,9 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
+   避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
+.toggle-placeholder { width: 34px; height: 20px; flex: none; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }

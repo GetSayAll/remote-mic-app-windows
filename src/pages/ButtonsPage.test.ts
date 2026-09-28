@@ -832,6 +832,36 @@ describe("buttons mapping page", () => {
     expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
   });
 
+  it("状态圆点只在开关打开时出现（2026-09-28 Andy 要求）：关闭时即使桥接快照在也不显示", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    // 桥接快照故意给 connected：旧实现只要 rc003BridgeText 非空就画点，
+    // 开关关着也亮绿点——本用例就是那条行为的阳性对照。
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        expect(captureRow(page)!.find('input[type="checkbox"]').exists()).toBe(true);
+      },
+      { timeout: 3000 },
+    );
+    expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
+  });
+
+  it("状态未就绪时渲染同尺寸占位符、不渲染开关本体（与「启动行为」同法的无动画挂载，2026-09-28）", async () => {
+    // 对账失败 → rc003CaptureEnabled 保持 null → 只允许占位符顶位。
+    vi.mocked(getRc003TaskStatus).mockRejectedValue(new Error("ipc unavailable"));
+    const page = await mountPage("rc003");
+    const row = captureRow(page)!;
+    expect(row.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(row.find(".toggle-placeholder").exists()).toBe(true);
+  });
+
   it("桥接段异步失败：红点 + 底部提示条给出失败文案（开关已开、无法走 toggle 失败分支）", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
       installed: true,
