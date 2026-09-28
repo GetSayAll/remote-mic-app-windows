@@ -400,11 +400,16 @@ impl Default for WindowsPlatform {
 ///
 /// 1. `enhanced_capture_enabled` 原子量 store——`set_button_mappings` 推送目标集时
 ///    读它，任何后续映射保存都必须沿用当前开关意图；
-/// 2. 翻转 `mappings.enabled`（key_gate 吞键配置经 `set_mappings` 生效，与 UI
-///    保存映射同路）——必须在取 `mapped_mask()` **之前**做，`mapped_mask()`
-///    在 `enabled=false` 时恒为 0；
-/// 3. `set_capture_targets` 把「已启用映射的按键」下发给报告层。漏掉这一步就是
+/// 2. `set_capture_targets` 把「已启用映射的按键」下发给报告层。漏掉这一步就是
 ///    2026-09-28 真机回归（见 `WindowsPlatform::set_enhanced_capture_enabled` 文档）。
+///
+/// **刻意不翻 `mappings.enabled`**（2026-09-28 第二次真机回归的修复）：那是按键
+/// 映射功能自己的总开关（UI「总开关」，保存路径恒 true），驱动映射引擎注入、
+/// `mapped_mask()`、key_gate 吞键配置与 Home/TV「遥控器优先」常驻抑制。全按键
+/// 支持开关只选择捕获通道——报告层增强 vs 原有 Raw Input + 键盘门控兜底；翻转
+/// 它会把关闭态的原有逻辑一并拆掉：`mapped_mask()` 归零 → PERSISTENT_MASK 归零
+/// → 遥控器 TV 键原生 VK_OEM_3 不再被吞、直接漏成 `·` 字符，与「关闭 = 回到
+/// 原有逻辑」的语义相反。
 ///
 /// 独立成自由函数是为了离线单测：真实 `WindowsPlatform` 会写 `%LOCALAPPDATA%`
 /// 桥接描述文件并启动 WASAPI/钩子线程，不能进单测；本函数可在测试里用
@@ -417,9 +422,6 @@ pub(crate) fn apply_enhanced_capture_state(
     enabled: bool,
 ) {
     enhanced_capture_enabled.store(enabled, Ordering::Relaxed);
-    let mut mappings = button_mapping.mappings();
-    mappings.enabled = enabled;
-    button_mapping.set_mappings(mappings);
     rc003_bridge.set_capture_targets(enabled, button_mapping.mappings().mapped_mask());
 }
 
@@ -598,8 +600,10 @@ impl WindowsPlatform {
         );
     }
 
-    /// 同步用户的“全按键支持”意图。关闭时先撤销报告层所有权，随后旧的
-    /// Raw Input + 键盘门控逻辑自动接回其它按键；三键保持其既有不可用语义。
+    /// 同步用户的“全按键支持”意图：只切换捕获通道（报告层增强 vs 原有
+    /// Raw Input + 键盘门控兜底），**不动**按键映射功能自身的总开关
+    /// （`mappings.enabled`）——关闭后映射引擎、key_gate 与 Home/TV
+    /// 「遥控器优先」常驻抑制照常工作，三键保持其既有不可用语义。
     ///
     /// 开关的**全部**平台侧语义收敛在 [`apply_enhanced_capture_state`] 一个实现里，
     /// 本方法与 src-tauri 的 trait 实现都只做委托。2026-09-28 真机回归
@@ -1062,11 +1066,16 @@ mod tests {
         );
     }
 
-    /// 全按键支持开关的平台侧完整语义（离线复刻 2026-09-28 真机回归，
+    /// 全按键支持开关的平台侧完整语义（离线复刻 2026-09-28 两次真机回归，
     /// Bugs/2026-09-28-enhanced-capture-targets-never-pushed.md）。
     ///
-    /// 阳性对照：修复前 trait 路径翻转 enabled 位却不 store 原子量、目标集恒空，
-    /// 本测试"enable 后目标集必须含已映射按键"恰好红在真机上死掉的环节。
+    /// 阳性对照一（第一次回归）：修复前 trait 路径翻转 enabled 位却不 store
+    /// 原子量、目标集恒空，"enable 后目标集必须含已映射按键"红在真机死掉的环节。
+    /// 阳性对照二（第二次回归）：开关若翻转 `mappings.enabled`，关闭态会把
+    /// 映射引擎 / key_gate / Home/TV「遥控器优先」常驻抑制一并拆掉
+    /// （`mapped_mask()` 在 enabled=false 时恒 0 → PERSISTENT_MASK 归零），
+    /// 遥控器 TV 键原生 VK_OEM_3 泄漏成 `·` 字符——所以关闭后
+    /// `mappings.enabled` 必须保持 true（原有逻辑继续接手）。
     #[cfg(windows)]
     #[test]
     fn enhanced_capture_enable_pushes_targets_and_disable_clears() {
@@ -1116,6 +1125,8 @@ mod tests {
             Arc::new(Mutex::new(RawInputSnapshot::default())),
         );
         let mut mappings = engine.mappings();
+        // UI「总开关」保存路径恒为 true；按键映射功能与全按键支持开关解耦。
+        mappings.enabled = true;
         mappings.actions.insert(
             raw_input::RemoteButton::Back,
             send_input::ButtonActions {
@@ -1153,10 +1164,11 @@ mod tests {
         );
         assert!(
             engine.mappings().enabled,
-            "key_gate enabled 位必须随开关翻转（吞键配置同步语义）"
+            "开启不得触碰映射功能总开关（映射引擎与 key_gate 配置保持原状）"
         );
 
-        // 关闭：目标集清空、enabled 位回落。
+        // 关闭：目标集清空，但映射功能总开关必须保持 true——原有
+        // Raw Input + 键盘门控 + 遥控器优先常驻抑制逻辑继续接手。
         apply_enhanced_capture_state(&atomic, &engine, &bridge, false);
         let snapshot = bridge.snapshot();
         assert!(
@@ -1165,7 +1177,10 @@ mod tests {
             snapshot.target_usages
         );
         assert!(!atomic.load(Ordering::Relaxed));
-        assert!(!engine.mappings().enabled);
+        assert!(
+            engine.mappings().enabled,
+            "关闭全按键支持不得拆掉映射引擎/常驻抑制（真机 TV 键泄漏 `·` 的根因）"
+        );
 
         drop(bridge);
         let _ = std::fs::remove_dir_all(&dir);
