@@ -1020,15 +1020,17 @@ mod imp {
                         .map_err(|_| {
                             format!("--synth-from 取值 {raw:?} 无效：需要十六进制 usage")
                         })?;
-                    let (from, to) = args.synth.take().unwrap_or((parsed, 0));
-                    args.synth = Some((from, to));
+                    // 只覆盖 from 位；--synth-to 先出现时保留已设置的 to。
+                    let to = args.synth.take().map(|(_, t)| t).unwrap_or(0);
+                    args.synth = Some((parsed, to));
                 }
                 "--synth-to" => {
                     let raw = value()?;
                     let parsed = u16::from_str_radix(raw.trim_start_matches("0x").trim(), 16)
                         .map_err(|_| format!("--synth-to 取值 {raw:?} 无效：需要十六进制 usage"))?;
-                    let (from, to) = args.synth.take().unwrap_or((0, parsed));
-                    args.synth = Some((from, to));
+                    // 只覆盖 to 位；--synth-from 先出现时保留已设置的 from。
+                    let from = args.synth.take().map(|(f, _)| f).unwrap_or(0);
+                    args.synth = Some((from, parsed));
                 }
                 "--dry-run" => args.dry_run = true,
                 "--observe" => args.observe = true,
