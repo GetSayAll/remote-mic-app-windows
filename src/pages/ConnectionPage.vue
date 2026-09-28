@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
+import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import type {
   AudioEndpoint,
   AudioSnapshot,
@@ -647,7 +648,11 @@ onUnmounted(() => {
         </div>
         <p class="muted voice-hotkey-row">按住遥控器语音键说话，松开即停止；语音会送入右侧选中的设备，由微信输入法等工具转成文字。说话时按的是遥控器语音键，此快捷键是应用替它向系统注入的组合，用于唤起微信输入法语音——因此必须与微信输入法设置的语音键一致，否则按住说话无法生效。默认快捷键：{{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}。</p>
         <div class="button-row voice-hotkey-presets">
+          <!-- 自定义录入入口暂时隐藏（2026-09-28 Andy：功能有问题，先下入口，
+               后续研究新方案再放开；feature-flags.VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED）。
+               录入逻辑保留在脚本里不动，默认/关闭两个预设按钮照常可用。 -->
           <button
+            v-if="VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED"
             class="secondary-button"
             type="button"
             :disabled="

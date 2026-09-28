@@ -20,9 +20,12 @@ pub const SCHEDULED_TASK_NAME: &str = "SayAll RC003 Helper";
 ///
 /// `authorization_required` = **这次打开开关会触发系统授权（UAC）**，
 /// 与 `enable_capture` 内部的判定同源（见 [`authorization_needed`]）：
-/// 任务未注册，或安装/升级写下了重授权标记（重装后任务删不掉，标记是
-/// 授权应撤销的唯一凭证）。前端用它决定「开启前要不要先弹确认弹窗」——
-/// 不能只看 `installed`：重装后任务其实还在，但那次开启照样要弹 UAC。
+/// 任务未注册，或卸载器写下了重授权标记（卸载后任务删不掉，标记是
+/// 授权应撤销的唯一凭证；真卸载写下的 `uninstalled=` 新格式在任何
+/// 安装中都不删，升级路径也不再写标记——见 installer-hooks.nsh 的
+/// 授权语义注释——所以升级后授权保留）。
+/// 前端用它决定「开启前要不要先弹确认弹窗」——
+/// 不能只看 `installed`：卸载后重装任务其实还在，但那次开启照样要弹 UAC。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatus {
@@ -195,9 +198,11 @@ pub fn enable_capture() -> Result<(), String> {
     let helper = locate_helper_exe().ok_or_else(|| {
         "找不到 sayall-helper.exe（检查安装布局，或设置 SAYALL_RC003_HELPER 指向它）".to_string()
     })?;
-    // 重授权标记（安装/升级时由安装器写入）：**即使任务还在也要重装**——
-    // 提权进程创建的任务普通权限删不掉（真机实测），标记是"授权已应撤销"
-    // 的唯一可靠凭证；重装走 UAC，用户点了「是」才算重新授权。
+    // 重授权标记（卸载器仅在**真卸载**路径以 revoke=1 写入，内容 =
+    // `uninstalled=<卸载时刻 GetTickCount>`；升级路径的原位卸载不写）：
+    // **即使任务还在也要重装**——提权进程创建的任务普通权限删不掉
+    // （真机实测），标记是"授权已应撤销"的唯一可靠凭证；重装走 UAC，
+    // 用户点了「是」才算重新授权。
     let force_install = reauth_required();
     if authorization_needed(task_installed(), force_install) {
         // 重授权成功的判据**不能是退出码**：PowerShell 5.1 对 UAC 取消的
@@ -260,11 +265,18 @@ fn stop_signal_path() -> std::path::PathBuf {
 
 /// 重授权标记：`%LOCALAPPDATA%\SayAll\rc003-reauth-required`。
 ///
-/// **为什么需要**：授权（计划任务）由提权进程创建，普通权限的安装器
-/// **删不掉它**（真机实测：schtasks /delete 静默失败）——安装/升级时
+/// **为什么需要**：授权（计划任务）由提权进程创建，普通权限的卸载器
+/// **删不掉它**（真机实测：schtasks /delete 静默失败）——卸载时
 /// 只能写这个标记作为「授权已应撤销」的凭证。应用启动见到标记就把
 /// 开关回落为关闭；用户重新打开时 enable 强制重装任务（必弹 UAC），
-/// 成功后清除标记。与安装器侧写入的路径**必须逐字符一致**。
+/// 成功后清除标记。
+///
+/// 内容与写入时机（2026-09-28 修订）：**只有真卸载**（NSIS 把卸载器
+/// 拷进临时目录跑，`$EXEDIR != $INSTDIR`）才写，内容为
+/// `uninstalled=<卸载时刻 GetTickCount>`；升级安装原位调用旧卸载器
+/// 不写。带 `uninstalled=` 前缀的新格式**任何安装都不删**（重装凭证）；
+/// 旧格式（裸 tick / 字面 `reauth`）是历史版本卸载器产物，安装器侧
+/// 只做过渡清理。与安装器侧写入的路径**必须逐字符一致**。
 pub fn reauth_marker_path() -> std::path::PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
         let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
@@ -410,7 +422,7 @@ mod tests {
         );
         assert!(
             authorization_needed(true, true),
-            "升级/重装后任务删不掉但标记在：仍要授权（正是重装后必须再弹的那次）"
+            "卸载后任务删不掉但标记在：仍要授权（正是卸载后重装必须再弹的那次）"
         );
         assert!(
             !authorization_needed(true, false),

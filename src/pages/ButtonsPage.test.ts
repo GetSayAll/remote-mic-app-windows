@@ -273,8 +273,13 @@ function captureRow(page: VueWrapper) {
     .filter((row) => row.text().includes("全按键支持"))[0];
 }
 
-/** 2026-09-27 用户定稿：三键的提示与悬停提示共用同一句话。 */
-const TRI_KEY_HINT = "返回 / 音量+ / 音量−三个键需要开启此功能才能使用";
+/** 2026-09-28 用户定稿：三键关闭态提示（不再带「提示：」前缀）。 */
+const TRI_KEY_HINT = "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
+
+/** 2026-09-28 用户定稿：开关悬停提示随开关状态切换。 */
+const CAPTURE_SWITCH_OFF_TITLE =
+  "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化";
+const CAPTURE_SWITCH_ON_TITLE = "关闭后返回 / 音量+ / 音量−将不可映射";
 
 /** 三键捕获开启前的确认弹窗（未弹出时为 undefined）。 */
 function confirmDialog(page: VueWrapper) {
@@ -728,10 +733,8 @@ describe("buttons mapping page", () => {
     await rc003Back.trigger("click");
     await vi.waitFor(
       () => {
-        // 2026-09-27 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
-        expect(rc003.find(".capability-note").text()).toBe(
-          `提示：${TRI_KEY_HINT}`,
-        );
+        // 2026-09-28 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
+        expect(rc003.find(".capability-note").text()).toBe(TRI_KEY_HINT);
       },
       { timeout: 4000 },
     );
@@ -758,6 +761,21 @@ describe("buttons mapping page", () => {
     );
     expect(rc003On.find(".capability-note").text()).not.toContain(
       "不进 Windows 输入栈",
+    );
+
+    // 2026-09-28 定稿：开启态下其他按键走「已优化」口径。
+    const rc003OnPower = rc003On
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("电源"))!
+      .findAll(".mapping-cell")[0]!;
+    await rc003OnPower.trigger("click");
+    await vi.waitFor(
+      () => {
+        expect(rc003On.find(".capability-note").text()).toBe(
+          "全按键支持已启用，此按键的映射已优化",
+        );
+      },
+      { timeout: 4000 },
     );
 
     // 型号不再区分（2026-09-24 产品决策）：RC001 上同一个开关状态驱动的
@@ -787,8 +805,12 @@ describe("buttons mapping page", () => {
     await vi.waitFor(() => {
       expect(captureRow(page)).toBeDefined();
     });
+    // 开启态「其他按键」（主页）走 2026-09-28 定稿的「已优化」口径；
+    // 本用例重点是 note 常驻头部、不依赖编辑面板展开路径。
     await vi.waitFor(() => {
-      expect(page.find(".capability-note").text()).toContain("不接管物理键盘");
+      expect(page.find(".capability-note").text()).toBe(
+        "全按键支持已启用，此按键的映射已优化",
+      );
     });
   });
 
@@ -830,6 +852,120 @@ describe("buttons mapping page", () => {
       { timeout: 3000 },
     );
     expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
+  });
+
+  it("状态圆点只在开关打开时出现（2026-09-28 Andy 要求）：关闭时即使桥接快照在也不显示", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    // 桥接快照故意给 connected：旧实现只要 rc003BridgeText 非空就画点，
+    // 开关关着也亮绿点——本用例就是那条行为的阳性对照。
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        expect(captureRow(page)!.find('input[type="checkbox"]').exists()).toBe(true);
+      },
+      { timeout: 3000 },
+    );
+    expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
+  });
+
+  it("状态未就绪时渲染同尺寸占位符、不渲染开关本体（与「启动行为」同法的无动画挂载，2026-09-28）", async () => {
+    // 对账失败 → rc003CaptureEnabled 保持 null → 只允许占位符顶位。
+    vi.mocked(getRc003TaskStatus).mockRejectedValue(new Error("ipc unavailable"));
+    const page = await mountPage("rc003");
+    const row = captureRow(page)!;
+    expect(row.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(row.find(".toggle-placeholder").exists()).toBe(true);
+  });
+
+  it("缓存命中时进页首帧即渲染开关与圆点终值，不等 IPC（2026-09-28 Andy 要求：无延迟、无灰→绿跳变）", () => {
+    localStorage.setItem(
+      "sayall.rc003Capture.uiCache",
+      JSON.stringify({ enabled: true, phase: "connected" }),
+    );
+    // 状态与桥接快照的 IPC 永不返回：旧行为里开关要等首次对账（串在映射
+    // 加载 + 三次订阅之后）、圆点要等 1 秒轮询首跳——本用例证明两者都在
+    // 首帧就位，IPC 迟到不产生可见的空档或状态跳变。
+    vi.mocked(getRc003TaskStatus).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(getRc003BridgeSnapshot).mockImplementation(() => new Promise(() => {}));
+    const page = mount(ButtonsPage, { props: { runtime } });
+    const row = captureRow(page)!;
+    const checkbox = row.find('input[type="checkbox"]');
+    expect(checkbox.exists()).toBe(true);
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+    const dot = row.find(".status-dot");
+    expect(dot.exists()).toBe(true);
+    expect(dot.classes()).toContain("success");
+    page.unmount();
+  });
+
+  it("缓存与权威状态不一致时以对账结果为准并回写（卸载后重装回落关闭，2026-09-28）", async () => {
+    localStorage.setItem(
+      "sayall.rc003Capture.uiCache",
+      JSON.stringify({ enabled: true, phase: "connected" }),
+    );
+    // 卸载后重装：授权已撤销（authorizationRequired），持久化意图回落为关。
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: false,
+      authorizationRequired: true,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        const checkbox = captureRow(page)!.find('input[type="checkbox"]');
+        expect((checkbox.element as HTMLInputElement).checked).toBe(false);
+      },
+      { timeout: 3000 },
+    );
+    const cached = JSON.parse(localStorage.getItem("sayall.rc003Capture.uiCache") ?? "null") as {
+      enabled?: unknown;
+    };
+    expect(cached?.enabled).toBe(false);
+  });
+
+  it("状态与桥接快照就绪后写入缓存，供下次进页首帧渲染（2026-09-28）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        const cached = JSON.parse(
+          localStorage.getItem("sayall.rc003Capture.uiCache") ?? "null",
+        ) as { enabled?: unknown; phase?: unknown } | null;
+        expect(cached).toMatchObject({ enabled: true, phase: "connected" });
+      },
+      { timeout: 3000 },
+    );
+    page.unmount();
+  });
+
+  it("缓存内容非法（垃圾/越界值）时忽略，回落占位符与旧行为（2026-09-28）", () => {
+    localStorage.setItem(
+      "sayall.rc003Capture.uiCache",
+      JSON.stringify({ enabled: "yes", phase: "hacked" }),
+    );
+    vi.mocked(getRc003TaskStatus).mockImplementation(() => new Promise(() => {}));
+    const page = mount(ButtonsPage, { props: { runtime } });
+    const row = captureRow(page)!;
+    expect(row.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(row.find(".toggle-placeholder").exists()).toBe(true);
+    expect(row.find(".status-dot").exists()).toBe(false);
+    page.unmount();
   });
 
   it("桥接段异步失败：红点 + 底部提示条给出失败文案（开关已开、无法走 toggle 失败分支）", async () => {
@@ -955,23 +1091,42 @@ describe("全按键支持开启前确认弹窗", () => {
     vi.mocked(disableRc003Capture).mockClear();
   });
 
-  it("开关悬停提示是一句短话；弹窗文案不再出现内部视角表述", async () => {
+  it("开关悬停提示随状态切换；弹窗文案不再出现内部视角表述", async () => {
     const page = await mountPage("rc003");
     await openCaptureToggle(page);
 
-    expect(captureRow(page)!.attributes("title")).toContain("遥控器报告层捕获");
+    // 2026-09-28 定稿：关闭态指向「开启后支持使用…」。
+    expect(captureRow(page)!.attributes("title")).toBe(
+      CAPTURE_SWITCH_OFF_TITLE,
+    );
 
     const checkbox = captureRow(page)!.find('input[type="checkbox"]');
     (checkbox.element as HTMLInputElement).checked = true;
     await checkbox.trigger("change");
     await flushPromises();
 
+    // 默认 mock 是「未授权」场景：change 先弹确认弹窗，开关此时尚未
+    // 真正开启——title 保持关闭态文案是正确行为。
     const dialog = confirmDialog(page);
     expect(dialog).toBeDefined();
     // 2026-09-27 用户要求去掉「Windows 平时看不见它们」。
     expect(dialog!.text()).not.toContain("Windows 平时看不见它们");
-    expect(dialog!.text()).toContain("升级或重装无线麦后");
+    // 2026-09-28 二次定稿：授权语义改成「升级保留、卸载后重装才撤销」。
+    expect(dialog!.text()).toContain("升级/覆盖安装后无需重新授权");
+    expect(dialog!.text()).toContain("卸载后重装才需要");
     expect(dialog!.text()).toContain("防作弊");
+
+    // 点弹窗「开启」完成授权 → 真正开启后悬停提示切到「关闭后…将不可映射」。
+    await dialog!
+      .findAll("button")
+      .find((b) => b.text() === "开启")!
+      .trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(captureRow(page)!.attributes("title")).toBe(
+        CAPTURE_SWITCH_ON_TITLE,
+      );
+    });
   });
 
   it("需要授权的开启才先弹确认；授权已在时直接开启，不再打扰", async () => {

@@ -164,10 +164,14 @@ pub fn scan_registered_apps() -> Result<Vec<CustomAppPick>, String> {
     Err("仅 Windows 支持应用扫描".into())
 }
 
+/// 启动结果的分类（2026-09-28 Andy 定稿）：**应用已启动即算成功**——前台
+/// 读回失败（Windows 前台锁、冷启动窗口创建慢等）不再构成用户可见错误
+/// （此前会拼成「打开应用失败：应用已启动，但 Windows 未将其窗口切换到
+/// 前台」弹出提示条，用户明确不需要）；前台观察结果只进结构化日志。
+/// `(false, _)` = 启动请求本身未被接受，仍是失败。
 fn classify_registered_launch(submitted: bool, foreground_observed: bool) -> Result<(), String> {
     match (submitted, foreground_observed) {
-        (true, true) => Ok(()),
-        (true, false) => Err("应用已启动，但 Windows 未将其窗口切换到前台".into()),
+        (true, _) => Ok(()),
         (false, _) => Err("Windows 未接受应用启动请求".into()),
     }
 }
@@ -236,7 +240,10 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
     let started = std::time::Instant::now();
     let result = std::thread::Builder::new()
         .name("sayall-registered-launch".into())
-        .spawn(move || {
+        // 闭包返回 (结果, 前台是否观察到)：收尾日志必须如实区分「已启动但
+        // 未抢到前台」与「启动失败」——(true, false) 自 2026-09-28 起算成功，
+        // 日志若仍按 result.is_ok() 推导前台字段就会说谎。
+        .spawn(move || -> (Result<(), String>, bool) {
             use windows::core::{w, PCWSTR};
             use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::Com::{
@@ -249,10 +256,8 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 SHELLEXECUTEINFOW,
             };
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-            unsafe {
-                CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                    .ok()
-                    .map_err(|e| e.to_string())?;
+            if let Err(error) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() } {
+                return (Err(error.to_string()), false);
             }
             struct Com;
             impl Drop for Com {
@@ -263,7 +268,10 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 }
             }
             let _com = Com;
-            let identity = resolve_registered_identity(&shell_target)?;
+            let identity = match resolve_registered_identity(&shell_target) {
+                Ok(identity) => identity,
+                Err(error) => return (Err(error), false),
+            };
             crate::gatt_note(format!(
                 "registered_app_launch phase=identity_resolved aumid_available=true executable_path_available={}",
                 identity.executable_path.is_some()
@@ -345,18 +353,24 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 pid.is_some(),
                 if foreground_observed { "foreground_observed" } else { "foreground_denied" }
             ));
-            classify_registered_launch(submitted, foreground_observed)
+            (
+                classify_registered_launch(submitted, foreground_observed),
+                foreground_observed,
+            )
         })
         .map_err(|e| e.to_string())?
         .join()
-        .unwrap_or_else(|_| Err("启动线程异常退出".into()));
+        .unwrap_or_else(|_| (Err("启动线程异常退出".into()), false));
+    let (result, foreground_observed) = result;
     crate::gatt_note(format!(
         "registered_app_launch phase=completed terminal_result={} target_result={} elapsed_ms={}",
         if result.is_ok() { "passed" } else { "failed" },
-        if result.is_ok() {
-            "foreground_observed"
-        } else {
-            "foreground_denied"
+        // 2026-09-28 起 (已启动, 未抢到前台) 也是 passed：字段必须如实区分，
+        // 不能再由 result.is_ok() 反推前台状态。
+        match (result.is_ok(), foreground_observed) {
+            (true, true) => "foreground_observed",
+            (true, false) => "launched_without_foreground",
+            (false, _) => "launch_failed",
         },
         started.elapsed().as_millis()
     ));
@@ -391,10 +405,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registered_launch_requires_observed_foreground() {
-        assert!(classify_registered_launch(true, false).is_err());
-        assert!(classify_registered_launch(false, false).is_err());
+    fn registered_launch_treats_missing_foreground_as_success() {
+        // 2026-09-28 Andy 定稿：应用已启动即算成功——前台读回失败不再构成
+        // 用户可见错误（此前会拼成「打开应用失败：应用已启动，但 Windows
+        // 未将其窗口切换到前台」弹提示条，用户明确不需要）；前台结果只进日志。
+        assert!(classify_registered_launch(true, false).is_ok());
         assert!(classify_registered_launch(true, true).is_ok());
+        assert!(
+            classify_registered_launch(false, false).is_err(),
+            "启动请求未被接受仍是失败"
+        );
+        assert!(
+            classify_registered_launch(false, true).is_err(),
+            "未提交却观察到前台属逻辑矛盾，按失败处理"
+        );
     }
 
     #[cfg(windows)]

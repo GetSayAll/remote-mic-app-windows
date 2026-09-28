@@ -407,7 +407,12 @@ fn clear_ownership(shared: &Arc<Mutex<BridgeShared>>) {
     };
     crate::key_gate::set_enhanced_owned_mask(0);
     if had_ownership {
-        note("enhanced_capture event=ownership_released fallback=legacy".to_owned());
+        // persistent_swallow= 是常驻抑制吞键累计快照：与 ownership_resumed
+        // 的快照做差，即得本窗口内被吞的按压次数（含物理键盘同名键）。
+        note(format!(
+            "enhanced_capture event=ownership_released fallback=legacy persistent_swallow={}",
+            crate::key_gate::persistent_swallow_total()
+        ));
     }
 }
 
@@ -909,12 +914,25 @@ fn handle_connection(
                     let reported: BTreeSet<u16> = usages.into_iter().collect();
                     let target = lock(targets).clone();
                     if generation == target.generation && reported == target.usages {
+                        let new_mask = usage_mask(&reported);
+                        let resumed = crate::key_gate::enhanced_owned_mask() == 0 && new_mask != 0;
                         {
                             let mut state = lock(shared);
                             state.owned = reported.clone();
                             state.ownership_last_rx = Some(Instant::now());
                         }
-                        crate::key_gate::set_enhanced_owned_mask(usage_mask(&reported));
+                        crate::key_gate::set_enhanced_owned_mask(new_mask);
+                        if resumed {
+                            // 恢复沿（此前静默——2026-09-28 TV 键偶发拦截调查：
+                            // "fallback=legacy 窗口"只有起点没有终点，窗口时长
+                            // 与窗口内物理键被吞次数都不可观测）。
+                            note(format!(
+                                "enhanced_capture event=ownership_resumed usages={} \
+                                 persistent_swallow={}",
+                                format_usage_payload(&reported),
+                                crate::key_gate::persistent_swallow_total()
+                            ));
+                        }
                     } else {
                         note(format!(
                             "enhanced_capture event=ownership_rejected reported_generation={generation} expected_generation={} reported={} expected={}",
@@ -970,8 +988,10 @@ fn handle_connection(
             if ownership_expired {
                 clear_ownership(shared);
                 note(format!(
-                    "enhanced_capture event=ownership_timeout timeout_ms={} fallback=legacy",
-                    OWNERSHIP_TIMEOUT.as_millis()
+                    "enhanced_capture event=ownership_timeout timeout_ms={} fallback=legacy \
+                     persistent_swallow={}",
+                    OWNERSHIP_TIMEOUT.as_millis(),
+                    crate::key_gate::persistent_swallow_total()
                 ));
             }
         }
