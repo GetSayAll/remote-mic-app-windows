@@ -138,3 +138,50 @@ LLKHF_INJECTED 位上），豆包的注入标志门槛对这条路径无效。**
    时序），核对 `[TARGETS-ACK]` / `[SYNTH-ACK]` / HB `stat.synth_applied`。
 2. Andy 目视端到端：按住语音键 → 豆包语音条弹出、松开停止。
 3. TODO.md 条目仍不可勾：完成定义要求 RC001/RC003 双真机验收。
+
+## 2026-09-29 01:38：端到端验证通过（RC003 + 豆包，Andy 目视）
+
+### 首测失败 → 双写根因（01:32）
+
+首次按语音键：**输入法自动切到微信**，豆包失效。app 诊断日志实锤
+双写——语音键按下瞬间 app 从 BLE 层（`gatt packet [00 02]`）走了
+「按住说话快捷键」路径注入 **Ctrl+Win 和弦**（`chord_release`，
+v1 默认配置适配微信输入法默认语音热键，settings.rs:189），与 helper
+的报告层合成（右 Alt）叠加：app 注入的键带 INJECTED 位（豆包忽略，
+S 对照实证）且触发微信语音热键 → 输入法被切走。这与「同键双写」
+家族同型：**开关语义横跨两层（BLE/ATVV 层 vs 报告层）时只关一层
+另一层还在依赖**。
+
+### 修复与通过（01:38）
+
+Andy 在 app 设置清空「按住说话快捷键」→ helper（run8）报告层合成
+独占。Andy 目视确认：**豆包语音条弹出、松开停止、输入法保持豆包、
+文字出现**。证据：
+- `evidence/helper-run8-doubao-e2e.log`：按键窗口 ioctl_calls
+  306→1550（+1244 帧报告经过），clears_ok=4/kernel_changed=4
+  （4 帧语音键报告被槽内替换为 0x00E6）。
+- app 日志 01:38:53 起 `audio_stream phase=started
+  endpoint_kind=virtual_cable`（ATVV 音频正常），**无 chord_release**。
+- 生命周期判据天然成立：物理释放 → 报告全零 → 合成键消失 →
+  豆包停止聆听（HID 状态语义，无补帧无状态跟踪）。
+
+### 结论
+
+报告层合成（injected=0）在产品形态下端到端可用：helper 增强轨 +
+报告层 0x003E→0x00E6 替换 = 豆包「长按右 Alt」零配置直通，且
+ATVV 音频路径（virtual_cable）与热键合成并行不冲突。产品集成
+剩余工作：① helper 正式构建进安装包（当前安装版 helper 是旧构建）；
+② heartbeat 上报补 synth 字段（本次顺手已修）；③ RC001 侧验证；
+④ 双真机验收后 TODO.md 才可勾。
+
+### 本轮附带发现（记录待查）
+
+- **CONFIG 批次 ack 缺失**：arm/mode/restore/targets(/synth) 连发的
+  批次里，mode 之后的命令 ack 100% 缺失（run4~run7），而批次之后
+  500ms 周期的 renew 全部被处理、桥单独下发的 targets 有 ack
+  （run8 [TARGETS-ACK] gen=1）——疑似 Gadget socket 层批次化问题，
+  已加 `cmd:<type>` / `cmd:parse_failed` 命令级日志待下轮定位。
+  不阻断产品路径（桥下发的 targets 正常）。
+- **3 Gadget 实例 hook 堆叠**：run6（三代并存）agent 静默 900s
+  （TCP 假活、零上行、无 drop 日志）；清零后单实例（run7/run8）
+  agent 完全正常。多实例注入是实验性路径，产品化必须避免。

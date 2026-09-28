@@ -779,6 +779,11 @@ function heartbeat() {
       connect_raced: stat.connect_raced,
       targets_applied: stat.targets_applied,
       targets_rejected: stat.targets_rejected,
+      /* synth 三兄弟此前漏在 hb 上报里（stat 对象在计数、日志永远看不到）——
+         2026-09-29 run8 排查时踩到：clears_ok 在涨却无法确认是 synth 在干活。 */
+      synth_applied: stat.synth_applied,
+      synth_rejected: stat.synth_rejected,
+      synth_hits: stat.synth_hits,
       read_errors: stat.read_errors,
       lease_expired: stat.lease_expired,
       rx_timeouts: stat.rx_timeouts,
