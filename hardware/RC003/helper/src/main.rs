@@ -84,6 +84,22 @@ mod imp {
     /// 30 s 足够覆盖 agent 侧的 CONNECT_TIMEOUT(3 s) + 重连周期(1 s)。
     const DEFAULT_AWAIT_HELLO_S: u64 = 30;
 
+    /// targets 下发后等不到 `targets_ack` 时的重发节奏：前 `ACK_RESEND_FAST_N` 次
+    /// 每 `ACK_RESEND_FAST_MS` 一次，之后放慢到 `ACK_RESEND_SLOW_MS`。
+    ///
+    /// 为什么要重发：2026-09-28 真机实证，agent 的下行读取存在秒级批次化延迟，
+    /// 极端情况下对启动配置**整批静默**（实测 26 秒一条都没应用），期间 helper
+    /// 拿不到 ack → 每条 lease_ok 心跳都不推 Ownership → 应用侧方案 C 常驻抑制
+    /// 吞物理键。重发同一份 targets 给丢失的命令更多"落在有效读窗口"的机会；
+    /// agent 的 targets 处理幂等（applied++ + ack，重复应用无副作用）。
+    ///
+    /// 取值：1.5s × 8 覆盖实测 ~12s 的批次延迟；之后还不 ack 大概率是确定性拒绝
+    /// （如 usage 越白名单——agent 对同一输入永远拒绝），继续快节奏只刷日志不
+    /// 解决问题，故转 10s 慢节奏保底（agent 恢复读取后最迟一个慢周期内被拉起）。
+    const ACK_RESEND_FAST_MS: u64 = 1500;
+    const ACK_RESEND_FAST_N: u64 = 8;
+    const ACK_RESEND_SLOW_MS: u64 = 10_000;
+
     // Win32 控制台事件码（`SetConsoleCtrlHandler` 的 ctrl_type）
     const CTRL_C_EVENT: u32 = 0;
     const CTRL_BREAK_EVENT: u32 = 1;
@@ -2317,7 +2333,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 let note = if reason.contains("descriptor_invalid") {
                                     "描述文件解析失败：若主程序确实在运行，优先排查两侧 BRIDGE_PROTOCOL_VERSION 是否一致（新应用 + 旧助手或反之都会在此永久卡住）".to_string()
                                 } else {
-                                    "主程序未运行属正常现象；此时动态目标为空，不接管普通按键".to_string()
+                                    "主程序未运行属正常现象；此时动态目标为空，不接管普通按键"
+                                        .to_string()
                                 };
                                 logger.kv(
                                     "[APP-BRIDGE]",
@@ -2724,7 +2741,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     .filter_map(|usage| u16::try_from(usage).ok())
                     .collect::<Vec<_>>();
                 let ack = BridgeCaptureTargets { generation, usages };
+                let usage_count = ack.usages.len();
                 session.target_ack = Some(ack);
+                // 此前 ack 到达完全无日志，2026-09-28 排查"启动静默"时只能靠
+                // [AGENT] applied 计数间接推断；与 [TARGETS-RESEND] 成对出现，
+                // 重发→确认的自愈全程可观测。
+                logger.kv(
+                    "[TARGETS-ACK]",
+                    &[
+                        ("gen", generation.to_string()),
+                        ("usages", usage_count.to_string()),
+                    ],
+                );
                 // ACK 只证明目标配置已经应用；必须等下一条 lease_ok=true 的 HB
                 // 才能向主程序声明报告层所有权，避免 agent 尚未续约时过早关闭旧路径。
             }
@@ -3831,6 +3859,36 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
     }
 
+    /// targets 重发判据（纯函数，语义由单测钉住）。
+    ///
+    /// 语义要点：判据是「ack 确认的是**最近下发的那份**配置」，而不是「有没有 ack」
+    /// ——配置刚切换（gen N → N+1）时，迟到的旧 gen ack 不应终止新一代的重发；
+    /// 否则一旦新一代的 ack 也走丢，就复现本次要修的静默窗口。
+    ///
+    /// agent 回显的 `targets_ack.usages` 是命令 report 数组的逐字副本
+    /// （`usageArrayOf` 不排序、遇重复整条拒绝），因此内容比较在"已应用"时精确
+    /// 成立；"被拒绝"时永远不成立——这正是转慢节奏兜底的场景。
+    ///
+    /// 返回 `Some(wait)` 表示此刻该重发，`wait` 是本次采用的间隔（供日志）。
+    fn targets_needs_resend(
+        sent: Option<&BridgeCaptureTargets>,
+        ack: Option<&BridgeCaptureTargets>,
+        sent_at: Option<Instant>,
+        resend_attempts: u64,
+        now: Instant,
+    ) -> Option<Duration> {
+        let (sent, at) = (sent?, sent_at?);
+        if ack == Some(sent) {
+            return None; // 最近下发的这份已被 agent 确认
+        }
+        let wait = if resend_attempts < ACK_RESEND_FAST_N {
+            Duration::from_millis(ACK_RESEND_FAST_MS)
+        } else {
+            Duration::from_millis(ACK_RESEND_SLOW_MS)
+        };
+        (now.duration_since(at) >= wait).then_some(wait)
+    }
+
     /// 服务一条 agent 连接。
     ///
     /// `deadline` 是 `--duration` 的绝对到期时刻（`None` = 不限时）。到期即返回，
@@ -3865,6 +3923,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         let mut sent_targets: Option<BridgeCaptureTargets> = None;
+        // 最近一次 targets 下发（含重发）的时刻。与 `sent_targets` 同置：
+        // 只在写成功后一起更新，两者要么同时为 None、要么同时有值。
+        let mut sent_at: Option<Instant> = None;
+        // 本条连接内已重发的次数（决定快/慢节奏，见 ACK_RESEND_* 常量注释）。
+        let mut resend_attempts: u64 = 0;
         loop {
             if stop_requested(stop) {
                 return;
@@ -3893,8 +3956,38 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         }
                         sent_targets = Some(current);
                         session.target_ack = None;
+                        // 新配置 = 新一轮等待：重置计时与快节奏预算。
+                        sent_at = Some(Instant::now());
+                        resend_attempts = 0;
                     }
                 }
+            }
+
+            // ack 超时自愈：targets 已写出但 agent 迟迟不回 `targets_ack` 时，
+            // 重发同一份 targets（agent 侧幂等）。判据与节奏见 `targets_needs_resend`
+            // 及 ACK_RESEND_* 常量注释；这是对 2026-09-28 启动整批静默（26s 吞键窗口）
+            // 的修复——把恢复时机从"用户手动重发"提前到自动的秒级重发。
+            if let Some(wait) = targets_needs_resend(
+                sent_targets.as_ref(),
+                session.target_ack.as_ref(),
+                sent_at,
+                resend_attempts,
+                Instant::now(),
+            ) {
+                let sent = sent_targets
+                    .as_ref()
+                    .expect("sent_at 有值 ⇒ sent_targets 必有值（两处发送路径同置）");
+                resend_attempts += 1;
+                logger.line(&format!(
+                    "[TARGETS-RESEND] gen={} attempt={} wait_ms={} | ack 未按时到达，重发 targets（agent 侧幂等，重复应用无害）。",
+                    sent.generation,
+                    resend_attempts,
+                    wait.as_millis()
+                ));
+                if !send_dynamic_targets(&mut stream, token, sent) {
+                    return;
+                }
+                sent_at = Some(Instant::now());
             }
 
             match stream.read(&mut chunk) {
@@ -3932,6 +4025,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 &targets,
                             );
                             sent_targets = Some(targets);
+                            sent_at = Some(Instant::now());
                         }
                     }
                 }
@@ -5257,4 +5351,118 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    #[cfg(test)]
+    mod targets_ack_resend_tests {
+        use super::*;
+
+        fn mk(gen: u64, usages: &[u16]) -> BridgeCaptureTargets {
+            BridgeCaptureTargets {
+                generation: gen,
+                usages: usages.to_vec(),
+            }
+        }
+
+        fn ago(base: Instant, d: Duration) -> Instant {
+            base.checked_sub(d).expect("测试时钟回退溢出")
+        }
+
+        #[test]
+        fn nothing_sent_never_resends() {
+            let now = Instant::now();
+            assert_eq!(targets_needs_resend(None, None, None, 0, now), None);
+        }
+
+        #[test]
+        fn no_ack_becomes_due_after_fast_wait() {
+            let now = Instant::now();
+            let sent = mk(2, &[0x28, 0x4A]);
+            // 刚下发：还没到重发时机。
+            assert_eq!(
+                targets_needs_resend(
+                    Some(&sent),
+                    None,
+                    Some(ago(now, Duration::from_millis(100))),
+                    0,
+                    now
+                ),
+                None
+            );
+            // 超过快节奏间隔：该重发，返回值即本次采用的间隔（供日志）。
+            assert_eq!(
+                targets_needs_resend(
+                    Some(&sent),
+                    None,
+                    Some(ago(now, Duration::from_millis(1600))),
+                    0,
+                    now
+                ),
+                Some(Duration::from_millis(ACK_RESEND_FAST_MS))
+            );
+        }
+
+        #[test]
+        fn matching_ack_stops_resend_even_when_overdue() {
+            let now = Instant::now();
+            let sent = mk(2, &[0x28, 0x4A]);
+            let ack = mk(2, &[0x28, 0x4A]);
+            assert_eq!(
+                targets_needs_resend(
+                    Some(&sent),
+                    Some(&ack),
+                    Some(ago(now, Duration::from_secs(60))),
+                    0,
+                    now
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn stale_ack_does_not_stop_resend_of_newer_config() {
+            let now = Instant::now();
+            let sent = mk(3, &[0x28]);
+            let stale = mk(2, &[0x28, 0x4A]);
+            // 配置切到 gen 3 后，迟到的 gen 2 ack 不算确认——否则新一代 ack
+            // 再走丢就复现本次要修的静默窗口。
+            assert_eq!(
+                targets_needs_resend(
+                    Some(&sent),
+                    Some(&stale),
+                    Some(ago(now, Duration::from_secs(60))),
+                    0,
+                    now
+                ),
+                Some(Duration::from_millis(ACK_RESEND_FAST_MS))
+            );
+        }
+
+        #[test]
+        fn slow_track_kicks_in_after_fast_budget() {
+            let now = Instant::now();
+            let sent = mk(2, &[0x28, 0x4A]);
+            // 快节奏预算（ACK_RESEND_FAST_N 次）用完后：间隔不足慢节奏不重发，
+            // 超过则按慢节奏兜底（确定性拒绝场景下不再刷屏）。
+            assert_eq!(
+                targets_needs_resend(
+                    Some(&sent),
+                    None,
+                    Some(ago(now, Duration::from_secs(5))),
+                    ACK_RESEND_FAST_N,
+                    now
+                ),
+                None
+            );
+            assert_eq!(
+                targets_needs_resend(
+                    Some(&sent),
+                    None,
+                    Some(ago(now, Duration::from_secs(11))),
+                    ACK_RESEND_FAST_N,
+                    now
+                ),
+                Some(Duration::from_millis(ACK_RESEND_SLOW_MS))
+            );
+        }
+    }
 }
