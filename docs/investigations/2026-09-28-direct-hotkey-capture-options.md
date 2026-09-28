@@ -58,6 +58,70 @@
 6. `BlockInput` 会让真实键盘输入不再更新同步/异步键状态，因此既不适合作为录入源，也会
    造成高风险的全局输入冻结体验。
 
+## 四个参考项目的源码复核
+
+本轮固定到 2026-09-28 可见的各仓库提交，只研究录入器，不把项目的快捷键注入或遥控器
+映射能力误当成录入能力。四个项目都提供了可借鉴的局部设计，但没有一个能原样满足
+“微信输入法已占用 `左 Ctrl + 左 Win` 时仍一次录全，并支持单独 `右 Alt`”的要求。
+
+### `richlearntodo-debug/vibe-flow`
+
+- 复核提交：`97fa69cb6831781ebb1dc2ad5f79090a90c1f937`，核心为
+  `scripts/VibeMic.cs` 的 `KeyboardShortcutCaptureSession`。
+- 可借鉴：原生 `WH_KEYBOARD_LL`、录入时吞下所拥有的物理边沿、左右修饰键归一化、实时
+  预览、录完后仍要点“使用此快捷键”、对 `Ctrl+Alt+Delete` 给出明确错误。
+- 不可直接复用：它忽略所有 `LLKHF_INJECTED` 事件，并在最后一个键松开时停止会话；因此
+  第三方若吞掉物理完成键再重放注入副本，录入器仍可能只得到半截组合。用户也无法在第一次
+  松手后继续补键。
+
+### `ZSTDJan/windows-remote-mic-app`
+
+- 复核提交：`906e6b3a40c7f06dca47a1875872cf014f76f254`，核心为
+  `hotkey_capture_windows.py`、`VoicePage.qml` 和 `ButtonsPage.qml`。
+- 可借鉴：独立消息循环线程安装 `WH_KEYBOARD_LL`；启动时用 `GetAsyncKeyState` 把录入前已经
+  按住的键标成透传，避免收进半个按住周期；保留左右修饰键；停止采用有界等待；设置页可显式
+  选择是否接受注入事件。按键页另提供“按键录入 / 手动输入”双路径。
+- 不可直接复用：底层同样在全部键松开时 `_complete_capture()`；语音页失焦会立即以
+  `focus_lost` 停止。因此它会遇到与连接页旧实现相同的“第三方抢焦点或只漏出一个键便结束”
+  风险。接受第三方注入副本可以增加观测，但不能把副本当作可靠的物理键事实，更不能代替
+  持久草稿。
+
+### `QL-4/RemoteMapper`
+
+- 复核提交：`be8b57330c26a70d8b8ec9ff1e60c23251a2fc31`，录入逻辑位于
+  `ui/keymap.html`。
+- 实现只监听 WebView 的 `keydown` / `keyup`，收到主键便 `finishRecord()`；`ctrlKey`、
+  `altKey`、`shiftKey`、`metaKey` 分别固定写成左侧修饰键。
+- 结论：适合没有全局冲突的普通“修饰键 + 主键”，但无法区分右 Alt，修饰键本身又被排除为
+  主键，所以不能录入单独 `右 Alt`；事件到达 WebView 前也可能已经被系统或第三方钩子消费。
+
+### `leowzz/axonkey`
+
+- 复核提交：`db204531f549ea86d5527eac565a335f80223d74`，录入与编辑逻辑位于
+  `src/appConfig.tsx` 和 `src/components/BehaviorEditor.tsx`。
+- 它的自动录入同样只是 React `onKeyDown`：修饰键单独按下时返回空值，`Alt` / `Ctrl` /
+  `Win` 也不保留左右侧，因此不能作为 SayAll 的底层捕获方案。
+- 最值得借鉴的是同一对话框内始终可见的手动构造器：修饰键用按钮开关，主键或单独修饰键用
+  列表选择，并明确列出 `RAlt`、`RCtrl`、`RShift`、`RWin`。这比单独切换“安全模式”更容易
+  理解。SayAll 可以把它改造成录入结果键帽旁的“添加按键 / 删除按键”，作为同一草稿的直接
+  编辑能力，而不是再开一种模式。
+
+### 组合结论
+
+最适合 SayAll 的不是选择某一个项目，而是组合三层：
+
+1. 底层继续使用原生 `WH_KEYBOARD_LL`，吸收 ZSTDJan 的 preheld 透传、有界停止和左右修饰键
+   处理；第三方注入副本保留来源标记，只用于补充观测与日志。
+2. 状态机坚持本项目的持续草稿：松手不结束，非空草稿遭遇临时失焦时不丢失，只有显式
+   “保存 / 取消 / 清空”才改变持久配置。
+3. 交互吸收 AxonKey 的同屏直接编辑：每个键显示成可删除键帽，提供“添加按键”入口；这样
+   同按成功时仍是一键录入，同按被第三方抢走时可补上缺键，不需要理解“安全模式”。
+
+Vibe Flow 的显式确认和实时预览可以直接保留；它与 ZSTDJan 的“全部松开即完成”、
+RemoteMapper/AxonKey 的页面级键盘事件则不应照搬。若产品坚持被第三方占用的组合也必须
+一次同时按下完成，四个参考实现都没有提供可证明可靠的公开 API 解法，仍需单独做下文的
+修饰键中和实验并以真机成功率决定是否启用。
+
 ## 推荐产品方案：持续编辑型录入器
 
 ### 交互
@@ -66,7 +130,8 @@
 2. 弹出小型录入层，焦点锁定在录入器；提示“直接按组合键，也可以逐个按键”。
 3. 每个新键立即显示为可删除的键帽，例如 `左 Ctrl`、`左 Win`。
 4. 松开全部键后**不自动结束、不自动保存**；用户仍可补按遗漏键。
-5. 底部只有“取消 / 清空 / 保存”。页面失焦、超时、路由切换统一取消，绝不保存半截草稿。
+5. 底部只有“取消 / 清空 / 保存”。第三方输入法造成临时失焦时保留非空草稿；路由切换、
+   显式取消和录入器关闭统一丢弃未保存草稿，绝不自动保存半截组合。
 6. 两处复用同一组件和同一捕获会话；仅由调用方提供校验策略：
    - 按键页：校验该组合是否能由当前动作执行器可靠注入；`Win+L` 可保存，但执行时继续走
      既有 `LockWorkStation` 特例；`Ctrl+Alt+Del` 等不可执行组合直接说明原因并拒绝。
@@ -141,6 +206,22 @@
    的系统组合；RC001/RC003 只影响动作来源，不替代键盘录入本身的 Windows 验收。
 
 ## 参考
+
+- `richlearntodo-debug/vibe-flow` 快捷键录入器，提交
+  `97fa69cb6831781ebb1dc2ad5f79090a90c1f937`：
+  <https://github.com/richlearntodo-debug/vibe-flow/blob/97fa69cb6831781ebb1dc2ad5f79090a90c1f937/scripts/VibeMic.cs>
+- `ZSTDJan/windows-remote-mic-app` 原生录入器与两处设置 UI，提交
+  `906e6b3a40c7f06dca47a1875872cf014f76f254`：
+  <https://github.com/ZSTDJan/windows-remote-mic-app/blob/906e6b3a40c7f06dca47a1875872cf014f76f254/apps/windows/rc003/src/ovb_rc003/hotkey_capture_windows.py>
+  <https://github.com/ZSTDJan/windows-remote-mic-app/blob/906e6b3a40c7f06dca47a1875872cf014f76f254/apps/windows/rc003/src/ovb_rc003/qml/VoicePage.qml>
+  <https://github.com/ZSTDJan/windows-remote-mic-app/blob/906e6b3a40c7f06dca47a1875872cf014f76f254/apps/windows/rc003/src/ovb_rc003/qml/ButtonsPage.qml>
+- `QL-4/RemoteMapper` 页面级录入器，提交
+  `be8b57330c26a70d8b8ec9ff1e60c23251a2fc31`：
+  <https://github.com/QL-4/RemoteMapper/blob/be8b57330c26a70d8b8ec9ff1e60c23251a2fc31/ui/keymap.html>
+- `leowzz/axonkey` 页面级录入与手动构造器，提交
+  `db204531f549ea86d5527eac565a335f80223d74`：
+  <https://github.com/leowzz/axonkey/blob/db204531f549ea86d5527eac565a335f80223d74/src/appConfig.tsx>
+  <https://github.com/leowzz/axonkey/blob/db204531f549ea86d5527eac565a335f80223d74/src/components/BehaviorEditor.tsx>
 
 - Microsoft `LowLevelKeyboardProc`：钩子可返回非零阻止事件继续传到后续钩子/目标窗口，且
   回调发生在异步键状态更新之前：

@@ -2,6 +2,30 @@
 
 本仓库是面向 Windows 的 Rust/Tauri 工程。
 
+## 快捷键录入器参考（2026-09-28）
+
+以下复核只提取行为、状态机和交互思路，未复制参考仓库代码。详细比较与适用边界见
+`docs/investigations/2026-09-28-direct-hotkey-capture-options.md`。
+
+- `richlearntodo-debug/vibe-flow`，提交
+  `97fa69cb6831781ebb1dc2ad5f79090a90c1f937`，`scripts/VibeMic.cs`：参考其
+  `WH_KEYBOARD_LL` 录入、左右修饰键归一化、实时预览、录入后显式确认和保留组合校验；不采用
+  “全部松开即结束”及忽略全部注入事件的策略。
+- `ZSTDJan/windows-remote-mic-app`，提交
+  `906e6b3a40c7f06dca47a1875872cf014f76f254`，
+  `hotkey_capture_windows.py` / `VoicePage.qml` / `ButtonsPage.qml`：参考独立消息循环、
+  preheld 键透传、有界停止、左右修饰键和录入失败时的手动回退；不采用“全部松开即完成”与
+  语音录入框失焦即停止的策略。接受第三方注入副本只视为辅助观测，不视为物理输入事实。
+- `QL-4/RemoteMapper`，提交
+  `be8b57330c26a70d8b8ec9ff1e60c23251a2fc31`，`ui/keymap.html`：确认其 DOM
+  `keydown` / `keyup` 录入会把修饰键固定折叠为左侧且要求主键，不适用于单独右 Alt 或已经
+  被系统/第三方钩子消费的组合；不采用该捕获层。
+- `leowzz/axonkey`，提交
+  `db204531f549ea86d5527eac565a335f80223d74`，`src/appConfig.tsx` /
+  `src/components/BehaviorEditor.tsx`：参考同一编辑面板中的修饰键开关、主键/单独修饰键选择和
+  显式保存；其 React `onKeyDown` 捕获会忽略单独修饰键并折叠左右侧，不采用该捕获层。SayAll
+  后续只借鉴“录入结果可就地补键/删键”的交互，替代单独的安全模式开关。
+
 ## 鼠标动作扩展
 
 - 鼠标单击/双击参考 AutoHotkey v2 Click 的成对按下/释放行为，不复制其代码或引入依赖；通过 Windows SendInput 单批发送 2/4 个边沿，部分提交时补发释放，不新设双击等待常量。参考： https://www.autohotkey.com/docs/v2/lib/Click.htm 。
