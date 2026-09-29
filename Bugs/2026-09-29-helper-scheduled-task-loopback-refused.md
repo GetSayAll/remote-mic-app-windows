@@ -1,0 +1,22 @@
+# 计划任务 Helper 无法连接应用 loopback bridge
+
+- 发现日期：2026-09-29
+- 状态：调查中
+- 影响范围：Windows 11、0.3.0 本地测试包、RC003、增强捕获 Helper；基础 BLE 语音与基础按键路径不受影响
+- 功能点：RC003 增强捕获 Helper 与主程序 bridge
+- 现象：计划任务以最高权限启动安装版 Helper 后，Helper 能读取 bridge 描述文件，但连接 `127.0.0.1` 监听端口被拒绝，因而收不到动态目标和语音键合成配置。
+- 复现条件：主程序普通用户运行且 bridge 已监听；触发 `SayAll RC003 Helper` 计划任务（`--follow-app`、最高权限）。
+- 正常预期：Helper 连接 bridge、完成 `HELLO/OK`，随后收到动态 targets 与 `0x003E → 0x00E6` synth 配置。
+- 证据：
+  - 普通用户协议探针连接同一描述文件中的端口，立即收到 `OK 2 ...`。
+  - 计划任务 Helper 读取同一描述文件后约 2 秒返回 `ConnectionRefused / WSAECONNREFUSED (10061)`；bridge 最终记录 `helper_still_not_connected`。
+  - 同一安装版 Helper 手动提权启动后立即出现 `[APP-BRIDGE] event=connected`，并完成已鉴权 `HELLO`、`synth_sent=true`、`synth_applied=1`。
+  - 清理旧 Gadget、让 RC003 进入全新 WUDF 宿主并由应用自动恢复 BLE 后，计划任务路径仍可复现，排除了旧 tap 和 BLE 僵死作为原因。
+- 根因：已确认失败点位于“计划任务 Helper → 普通用户主程序 loopback”连接阶段；二进制、描述文件、端口监听和 bridge 协议本身均有手动路径阳性对照。计划任务登录/网络安全上下文差异是当前假设，尚未完成根因验证。
+- 修复：尚未修复连接行为。本轮仅把原先笼统的 `connect_failed` 扩展为结构化 `kind`、Win32 `os` 错误码和 `elapsed_ms`，并把提示从“主程序未运行”改为“描述文件存在但 loopback 连接失败”，防止任务退出码 0 掩盖真实失败。
+- 验证：
+  - `cargo test --manifest-path hardware/RC003/helper/Cargo.toml`：`passed`（10/10，含连接错误日志字段回归）。
+  - 计划任务自动路径：`failed`。
+  - 同二进制手动提权 bridge + RC003 → RightAlt → 豆包语音条：`passed`。
+  - 修复后的计划任务复测：`deferred`（尚无行为修复）。
+- 隐私检查：本文未包含个人路径、设备地址/实例路径、bridge token、语音内容或凭据；原始现场日志不提交。

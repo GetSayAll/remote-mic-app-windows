@@ -1979,16 +1979,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         /// 当前语音合成目标；`dirty` = 自上次读取以来被主程序改过。
         fn voice_synth_state(&self) -> (Option<u16>, bool) {
-            let synth = self
-                .voice_synth
-                .lock()
-                .map(|guard| *guard)
-                .unwrap_or(None);
-            (
-                synth,
-                self.voice_synth_dirty
-                    .swap(false, Ordering::Relaxed),
-            )
+            let synth = self.voice_synth.lock().map(|guard| *guard).unwrap_or(None);
+            (synth, self.voice_synth_dirty.swap(false, Ordering::Relaxed))
         }
 
         fn snapshot(&self) -> (u64, u64, u64, String) {
@@ -2201,8 +2193,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if payload == "-" {
             return Some(None);
         }
-        let usage = u16::from_str_radix(payload.trim_start_matches("0x").trim_start_matches("0X"), 16)
-            .ok()?;
+        let usage = u16::from_str_radix(
+            payload.trim_start_matches("0x").trim_start_matches("0X"),
+            16,
+        )
+        .ok()?;
         (usage != 0).then_some(Some(usage))
     }
 
@@ -2211,6 +2206,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         bridge_write_line(
             stream,
             &format!("E {} {}", now_ms(), format_edge_payload(usages)),
+        )
+    }
+
+    fn format_bridge_connect_error(error: &std::io::Error, elapsed: Duration) -> String {
+        format!(
+            "connect_failed(kind={:?},os={:?},elapsed_ms={},detail={error})",
+            error.kind(),
+            error.raw_os_error(),
+            elapsed.as_millis()
         )
     }
 
@@ -2233,11 +2237,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let target = parse_bridge_descriptor(&text)
             .ok_or_else(|| "descriptor_invalid_or_version_mismatch".to_string())?;
         let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, target.port);
+        let connect_started = Instant::now();
         let mut stream = TcpStream::connect_timeout(
             &std::net::SocketAddr::V4(addr),
             Duration::from_millis(BRIDGE_IO_TIMEOUT_MS),
         )
-        .map_err(|error| format!("connect_failed({error})"))?;
+        .map_err(|error| format_bridge_connect_error(&error, connect_started.elapsed()))?;
         stream.set_nodelay(true).ok();
         stream
             .set_read_timeout(Some(Duration::from_millis(BRIDGE_IO_TIMEOUT_MS)))
@@ -2404,6 +2409,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 // "新旧版本混装导致永久连不上"误导成"没开主程序"。
                                 let note = if reason.contains("descriptor_invalid") {
                                     "描述文件解析失败：若主程序确实在运行，优先排查两侧 BRIDGE_PROTOCOL_VERSION 是否一致（新应用 + 旧助手或反之都会在此永久卡住）".to_string()
+                                } else if reason.contains("connect_failed") {
+                                    "描述文件存在但 loopback 连接失败：主程序未监听、端口已过期或本机网络路径异常；不能按「主程序未运行」直接放过"
+                                        .to_string()
                                 } else {
                                     "主程序未运行属正常现象；此时动态目标为空，不接管普通按键"
                                         .to_string()
@@ -5618,8 +5626,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             // agent 的 SYNTH_FROM_WHITELIST = [0x003E]（编译期内联常量，
             // 这里钉住 Rust 侧常量；AGENT_JS 自检另有 contains 钉住 JS 侧）。
             assert_eq!(VOICE_KEY_HID_USAGE, 0x003E);
-            assert!(!TARGET_USAGES.contains(&VOICE_KEY_HID_USAGE),
-                "语音键不能进接管白名单：ATVV 会话走 BLE 层，且合成命令的 from 就是它");
+            assert!(
+                !TARGET_USAGES.contains(&VOICE_KEY_HID_USAGE),
+                "语音键不能进接管白名单：ATVV 会话走 BLE 层，且合成命令的 from 就是它"
+            );
         }
 
         #[test]
@@ -5634,6 +5644,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 voice_synth_command_line("tok", None),
                 "{\"type\":\"synth\",\"token\":\"tok\",\"from\":0,\"to\":0}\n"
             );
+        }
+
+        #[test]
+        fn bridge_connect_error_keeps_kind_os_code_and_elapsed_time() {
+            let error = std::io::Error::from_raw_os_error(10061);
+            let message = format_bridge_connect_error(&error, Duration::from_millis(37));
+
+            assert!(message.starts_with("connect_failed("));
+            assert!(message.contains("kind=ConnectionRefused"));
+            assert!(message.contains("os=Some(10061)"));
+            assert!(message.contains("elapsed_ms=37"));
         }
     }
 

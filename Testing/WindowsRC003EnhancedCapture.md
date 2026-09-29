@@ -19,6 +19,16 @@
 - 新安装版启动后持续存活，诊断日志 source revision 与上述提交一致；RC003 bridge 描述文件为协议 v2。功能关闭状态下做无边沿 loopback 握手，返回 `OK 2 <generation> -`，证明未开启时增强目标为空。
 - 授权语义（2026-09-28 Andy 拍板，取代 2026-09-24「安装/升级即撤销」）：**升级/覆盖安装保留授权，开关记住之前的选择；卸载撤销授权（写重授权标记），卸载后的重装启动时「全按键支持」回落为关闭，重开时再走一次 UAC**。上述 0.2.6 时点记录中「安装/升级会撤销 Helper 授权」一句按当时产品规则执行，不再代表现行语义；据此本记录不宣称实体 13 键已通过，重新授权后的 RC001/RC003 逐键、物理键盘同名键和共享宿主兼容性仍为 `deferred`。
 
+### RC003 语音键 → RightAlt → 豆包语音条（2026-09-29）
+
+- **真机结果：`passed`（手动提权 Helper 路径）**。RC003 语音键报告 `0x003E` 命中后被报告层替换为 HID `0x00E6`；Helper 心跳从 `synth_hits=0` 增至 `8`，同时 `clears_ok=8`、`kernel_changed=8`、`synth_rejected=0`、`write_fail=0`。
+- LL 钩子阳性取证：输出为 `VK_RMENU (0xA5)`，`extended/E0=true`、`injected=false`；按住期间有硬件自动重复，松开产生对应 UP。切换豆包为当前输入法并把焦点置于记事本后，操作人观察到豆包语音条出现，松开后结束。
+- 前置边界：豆包设置中的长按快捷键为「右 Alt」，麦克风为 `CABLE Output`；**豆包必须是当前输入法**。未激活豆包时同一按键只进入 Windows Alt 菜单，不应误判为 Helper 合成失败。
+- 安装包：`无线麦 SayAll_0.3.0_x64-setup.exe`，11,772,352 bytes，SHA-256 `6736d98ef68b880e6fd90078cba1357954dc38779f211d63a949ec994863fcb5`，Authenticode `NotSigned`，仅供本地测试。安装退出码 0，安装版启动并持续运行。
+- Helper 构建输入、Tauri staged resource 与安装目录文件均为 965,120 bytes、SHA-256 `25a0bd840fef13acd8b3b5be26f254f6e20ec80276dd4bedac88323d928c396b`；安装版 `--selftest` 全部通过，证明本轮新 Helper 已进入并由安装包落地。
+- **产品计划任务路径：`failed`**。相同安装版 Helper 由 `SayAll RC003 Helper` 计划任务以最高权限启动时，读取到 bridge 描述文件但 loopback 连接返回 `WSAECONNREFUSED (10061)`；同一二进制手动提权启动则立即连接并收到 `0x003E → 0x00E6` 配置。详见 [计划任务 Helper 无法连接应用 loopback bridge](../Bugs/2026-09-29-helper-scheduled-task-loopback-refused.md)。因此本轮不把手动路径结果扩大为正式产品自动路径通过。
+- RC001、冷/闲置后首用、断连恢复和睡眠恢复仍为 `deferred`；本轮未发布预览版。
+
 它给出每项的命令、判据与日志字段。
 
 **步骤是验收方法，不代表各项均已通过。** 每项的当前状态见文末状态表——那里写的 `passed`
