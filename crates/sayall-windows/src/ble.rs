@@ -1,9 +1,12 @@
 use crate::wetype_revive::{response_since, wetype_mic_observation, MicObservation, MicResponse};
 use crate::{
-    audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff,
-    remote_model_from_model_number, remote_model_from_name, send_input::KeyChord,
-    send_input_windows::SendInputRuntime, ConnectionPhase, ConnectionSnapshot, PlatformError,
-    RemoteModel, UsageCounters,
+    audio::AudioRuntime,
+    power::PowerNotifications,
+    reconnect::ReconnectBackoff,
+    remote_model_from_model_number, remote_model_from_name,
+    send_input::{KeyChord, KeyCode},
+    send_input_windows::SendInputRuntime,
+    ConnectionPhase, ConnectionSnapshot, PlatformError, RemoteModel, UsageCounters,
 };
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
@@ -48,6 +51,17 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 /// 恰为免费窗口；RC001 短按从不触窗）。宿主须周期发送 MIC_EXTEND(0x0E)
 /// 续期，2.5s 间隔留足余量。
 const MICROPHONE_EXTEND_INTERVAL: Duration = Duration::from_millis(2500);
+
+/// 微信输入法专属的会话激活/休眠恢复只能用于它自己的默认语音热键。
+///
+/// 其它输入工具（尤其豆包的 RightAlt）即使在报告层合成暂时不可用、回落到
+/// SendInput，也只能发送用户配置的快捷键，绝不能顺带切换当前输入法。顺序无关，
+/// 但键集合必须精确相等；多一个键也不进入微信专属路径。
+fn is_wetype_voice_hotkey(chord: &KeyChord) -> bool {
+    chord.keys.len() == 2
+        && chord.keys.contains(&KeyCode::LeftControl)
+        && chord.keys.contains(&KeyCode::LeftWindows)
+}
 
 pub struct BleRuntime {
     sender: Sender<WorkerMessage>,
@@ -727,6 +741,12 @@ fn worker_loop(
                 }
                 let chord_configured = lock(&voice_hold_hotkey).clone();
                 if let (Some(chord), Some(old)) = (chord_configured, held_hotkey.as_ref()) {
+                    if !is_wetype_voice_hotkey(&chord) {
+                        gatt_note(format!(
+                            "chord_retry skipped reason=hotkey_not_wetype epoch={epoch}"
+                        ));
+                        continue;
+                    }
                     if send_input.release(old).is_err() {
                         gatt_note(format!(
                             "chord_retry result=err reason=release_failed epoch={epoch}"
@@ -1585,13 +1605,22 @@ fn handle_control(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
                 ));
             } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
-                let mic_baseline = wetype_mic_observation();
-                // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
-                // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
-                // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
-                // 行为注入（不比现状更差）。
-                if let Err(error) = crate::ime::activate_wetype_session() {
-                    lock(state).last_error = Some(error);
+                let wetype_hotkey = is_wetype_voice_hotkey(&chord);
+                let mic_baseline = wetype_hotkey.then(wetype_mic_observation).flatten();
+                if wetype_hotkey {
+                    // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
+                    // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
+                    // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
+                    // 行为注入（不比现状更差）。
+                    if let Err(error) = crate::ime::activate_wetype_session() {
+                        lock(state).last_error = Some(error);
+                    }
+                } else {
+                    // 豆包/其它工具只接收配置的快捷键。即使 Helper 断线导致
+                    // 报告层合成回落，也绝不能先把当前输入法切成微信。
+                    gatt_note(format!(
+                        "ime_activation outcome=skipped reason=hotkey_not_wetype session={session_id}"
+                    ));
                 }
                 if let Err(error) = send_input.press(&chord) {
                     gatt_note(format!(
@@ -1616,17 +1645,19 @@ fn handle_control(
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
                 *held_hotkey = Some(chord);
-                // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
-                // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
-                // 传入，防旧阶梯跨会话误伤新会话的和弦。
-                spawn_wetype_check(
-                    state,
-                    sender.clone(),
-                    0,
-                    epoch,
-                    voice_session_epoch,
-                    mic_baseline,
-                );
+                if wetype_hotkey {
+                    // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
+                    // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
+                    // 传入，防旧阶梯跨会话误伤新会话的和弦。
+                    spawn_wetype_check(
+                        state,
+                        sender.clone(),
+                        0,
+                        epoch,
+                        voice_session_epoch,
+                        mic_baseline,
+                    );
+                }
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
                 gatt_note(format!(
@@ -3195,6 +3226,33 @@ impl Drop for WinRtApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wetype_activation_is_limited_to_the_wetype_default_hotkey() {
+        let chord = |keys| KeyChord { keys };
+
+        assert!(is_wetype_voice_hotkey(&chord(vec![
+            KeyCode::LeftControl,
+            KeyCode::LeftWindows,
+        ])));
+        assert!(is_wetype_voice_hotkey(&chord(vec![
+            KeyCode::LeftWindows,
+            KeyCode::LeftControl,
+        ])));
+        assert!(
+            !is_wetype_voice_hotkey(&chord(vec![KeyCode::RightAlt])),
+            "豆包右 Alt 路径不得激活或复活微信输入法"
+        );
+        assert!(!is_wetype_voice_hotkey(&chord(vec![
+            KeyCode::LeftControl,
+            KeyCode::RightWindows,
+        ])));
+        assert!(!is_wetype_voice_hotkey(&chord(vec![
+            KeyCode::LeftControl,
+            KeyCode::LeftWindows,
+            KeyCode::A,
+        ])));
+    }
 
     #[test]
     fn paired_device_id_uses_the_last_embedded_address_as_the_peer() {

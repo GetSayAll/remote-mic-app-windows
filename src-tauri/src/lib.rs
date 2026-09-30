@@ -1648,7 +1648,7 @@ pub fn run() {
             // 重装任务（必弹 UAC）并清除标记。
             //
             // 实际触发放在 platform 创建之后（见下方 rc003_auto_trigger_allowed）：
-            // bridge 的描述文件（端口 + 令牌）由 platform 创建时写出，**先触发
+            // bridge 的描述文件（命名管道 + 兼容端口 + 令牌）由 platform 创建时写出，**先触发
             // 助手再写描述文件**会让助手读到上一轮主程序的过期端口，从此永远
             // 连不上（2026-09-27 真机复盘，「正在启动」永不结束的成因之一）。
             #[cfg(windows)]
@@ -2256,6 +2256,31 @@ mod tests {
         assert!(
             pending_delete > guard && pending_delete < else_branch,
             "待决文件清理必须位于真卸载分支（撤销凭证取代一切待决）"
+        );
+    }
+
+    /// 提权 Helper 可能不被普通权限安装器的 `FindProcessCurrentUser` 枚举到。
+    /// 只看进程就继续覆盖会落进 NSIS 自带的“无法打开要写入的文件”弹窗；
+    /// StopHelper 必须再以安装目标本身的写锁作为最终外部判据。
+    #[test]
+    fn installer_waits_for_helper_image_lock_before_overwrite() {
+        let stop = macro_body(INSTALLER_HOOKS, "SayAllStopHelper");
+        let process_probe = stop
+            .rfind("FindProcessCurrentUser")
+            .expect("StopHelper 必须保留进程退出探测");
+        let existing_guard = stop
+            .find(r#"IfFileExists "$INSTDIR\sayall-helper.exe""#)
+            .expect("首次安装不得为探测写锁而创建空 helper，必须先检查文件存在");
+        let lock_probe = stop
+            .find(r#"FileOpen $0 "$INSTDIR\sayall-helper.exe" a"#)
+            .expect("StopHelper 必须直接探测目标 helper 的写锁");
+        assert!(
+            process_probe < existing_guard && existing_guard < lock_probe,
+            "文件锁探测必须在进程等待之后，并受文件存在判据保护"
+        );
+        assert!(
+            stop[lock_probe..].contains("Abort"),
+            "写锁在预算内仍未释放时必须中止，不得继续到覆盖写弹窗"
         );
     }
 

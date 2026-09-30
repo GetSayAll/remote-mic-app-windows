@@ -26,7 +26,9 @@
 - 前置边界：豆包设置中的长按快捷键为「右 Alt」，麦克风为 `CABLE Output`；**豆包必须是当前输入法**。未激活豆包时同一按键只进入 Windows Alt 菜单，不应误判为 Helper 合成失败。
 - 安装包：`无线麦 SayAll_0.3.0_x64-setup.exe`，11,772,352 bytes，SHA-256 `6736d98ef68b880e6fd90078cba1357954dc38779f211d63a949ec994863fcb5`，Authenticode `NotSigned`，仅供本地测试。安装退出码 0，安装版启动并持续运行。
 - Helper 构建输入、Tauri staged resource 与安装目录文件均为 965,120 bytes、SHA-256 `25a0bd840fef13acd8b3b5be26f254f6e20ec80276dd4bedac88323d928c396b`；安装版 `--selftest` 全部通过，证明本轮新 Helper 已进入并由安装包落地。
-- **产品计划任务路径：`failed`**。相同安装版 Helper 由 `SayAll RC003 Helper` 计划任务以最高权限启动时，读取到 bridge 描述文件但 loopback 连接返回 `WSAECONNREFUSED (10061)`；同一二进制手动提权启动则立即连接并收到 `0x003E → 0x00E6` 配置。详见 [计划任务 Helper 无法连接应用 loopback bridge](../Bugs/2026-09-29-helper-scheduled-task-loopback-refused.md)。因此本轮不把手动路径结果扩大为正式产品自动路径通过。
+- **产品计划任务路径修复后状态：`passed`（2026-09-30）**。旧包的 loopback 被本机 WFP/TUN 改写，计划任务 Helper 无法稳定命中 App；bridge 已改为固定本机命名管道主路径，随机 TCP 端口只作兼容。自动化真实命名管道 `HELLO/OK/T/O/E/S` 通过，安装器正常启动的 App 接受 Helper 的命名管道连接；操作人确认“最终安装版 + RightAlt + RC003”出现豆包语音条且没有切到微信输入法。详见 [计划任务 Helper 的 loopback bridge 被本机网络过滤器改写](../Bugs/2026-09-29-helper-scheduled-task-loopback-refused.md) 与 [豆包右 Alt 语音键错误切换到微信输入法](../Bugs/2026-09-29-doubao-right-alt-activates-wetype.md)。
+- 连接页现有“豆包输入法（右 Alt）”显式预设；右 Alt 不再进入微信输入法激活/复活分支。“支持更多输入工具（如豆包输入法）”与按键页“全按键支持”是同一持久化设置 `rc003_capture_enabled`，任一页面修改后另一页刷新应显示相同状态。
+- **豆包 → 微信回切：`passed`（2026-09-30）**。切回“微信输入法（左 Ctrl + 左 Win）”后，操作人确认按住 RC003 语音键出现微信语音条。Helper 依次记录 `to=0x00E6`、`to=off` 与 agent `cmd:synth`；心跳中 `synth_applied=3→5`、`synth_rejected=8→8`，证明关闭态被真正应用。修复同时要求每次 HELLO 都重放 `S -`，防止 Helper 重启后 resident agent 保留旧 RightAlt。详见 [从豆包切回微信后仍残留右 Alt 合成](../Bugs/2026-09-30-switching-doubao-to-wetype-keeps-right-alt-synth.md)。
 - RC001、冷/闲置后首用、断连恢复和睡眠恢复仍为 `deferred`；本轮未发布预览版。
 
 它给出每项的命令、判据与日志字段。

@@ -107,6 +107,8 @@ let voiceCapturedKeys: KeyCode[] | null = null;
 
 /** 按住说话快捷键默认值（v1 固定，适配微信输入法的默认语音热键）。 */
 const DEFAULT_VOICE_HOTKEY_KEYS: KeyCode[] = ["left_control", "left_windows"];
+/** 豆包输入法的长按语音快捷键；始终保留显式入口，避免自定义录入隐藏后无法切回。 */
+const DOUBAO_VOICE_HOTKEY_KEYS: KeyCode[] = ["right_alt"];
 
 const CAPTURE_MODIFIER_KEYS: ReadonlySet<KeyCode> = new Set<KeyCode>([
   "left_control",
@@ -806,6 +808,21 @@ onUnmounted(() => {
             @click="applyVoiceHotkey(DEFAULT_VOICE_HOTKEY_KEYS)"
           >
             {{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}（默认）
+          </button>
+          <button
+            :class="
+              presetIsActive(DOUBAO_VOICE_HOTKEY_KEYS) ? 'primary-button' : 'secondary-button'
+            "
+            type="button"
+            :disabled="
+              savingVoiceHotkey ||
+              capturingVoiceHotkey ||
+              !runtime?.platform.windowsApiAvailable ||
+              presetIsActive(DOUBAO_VOICE_HOTKEY_KEYS)
+            "
+            @click="applyVoiceHotkey(DOUBAO_VOICE_HOTKEY_KEYS)"
+          >
+            豆包输入法（{{ chordLabel({ keys: DOUBAO_VOICE_HOTKEY_KEYS }) }}）
           </button>
           <button
             :class="activeVoiceHotkeyKeys ? 'secondary-button' : 'primary-button'"

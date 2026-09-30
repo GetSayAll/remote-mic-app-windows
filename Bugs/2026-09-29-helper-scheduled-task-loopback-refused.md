@@ -1,7 +1,7 @@
-# 计划任务 Helper 无法连接应用 loopback bridge
+# 计划任务 Helper 的 loopback bridge 被本机网络过滤器改写
 
 - 发现日期：2026-09-29
-- 状态：调查中
+- 状态：等待真机验证
 - 影响范围：Windows 11、0.3.0 本地测试包、RC003、增强捕获 Helper；基础 BLE 语音与基础按键路径不受影响
 - 功能点：RC003 增强捕获 Helper 与主程序 bridge
 - 现象：计划任务以最高权限启动安装版 Helper 后，Helper 能读取 bridge 描述文件，但连接 `127.0.0.1` 监听端口被拒绝，因而收不到动态目标和语音键合成配置。
@@ -12,11 +12,18 @@
   - 计划任务 Helper 读取同一描述文件后约 2 秒返回 `ConnectionRefused / WSAECONNREFUSED (10061)`；bridge 最终记录 `helper_still_not_connected`。
   - 同一安装版 Helper 手动提权启动后立即出现 `[APP-BRIDGE] event=connected`，并完成已鉴权 `HELLO`、`synth_sent=true`、`synth_applied=1`。
   - 清理旧 Gadget、让 RC003 进入全新 WUDF 宿主并由应用自动恢复 BLE 后，计划任务路径仍可复现，排除了旧 tap 和 BLE 僵死作为原因。
-- 根因：已确认失败点位于“计划任务 Helper → 普通用户主程序 loopback”连接阶段；二进制、描述文件、端口监听和 bridge 协议本身均有手动路径阳性对照。计划任务登录/网络安全上下文差异是当前假设，尚未完成根因验证。
-- 修复：尚未修复连接行为。本轮仅把原先笼统的 `connect_failed` 扩展为结构化 `kind`、Win32 `os` 错误码和 `elapsed_ms`，并把提示从“主程序未运行”改为“描述文件存在但 loopback 连接失败”，防止任务退出码 0 掩盖真实失败。
+  - WFP/TUN 取证显示：Helper 发往描述文件端口的 SYN 被改送到另一个本机端口；因此目标监听、协议和计划任务交互会话均正常，但 Winsock 路径不再指向 App。
+  - 安装器正常启动的 App 已连续接受计划任务 Helper 的命名管道连接，证明跨完整性级别的本机管道 ACL 可用；在旧 token 的混装场景下，连接到达后被旧 token 拒绝，进一步把“传输可达”与“握手身份”分开取证。
+- 根因：本机 WFP/TUN 网络过滤器会改写计划任务 Helper 的 loopback 连接；问题不在计划任务是否交互式，也不在 App 是否监听。bridge token 随 App 重启变化，而计划任务上下文还可能读到陈旧描述字段，因此把 token 当命名管道的唯一握手判据也会造成可达后的永久拒绝。
+- 修复：
+  - Windows 产品主路径改为固定本机命名管道 `SayAll.Rc003Bridge`，不经过 Winsock/WFP/TUN；随机 loopback 端口只保留旧 Helper 与离线兼容。
+  - 管道启用 `PIPE_REJECT_REMOTE_CLIENTS` 并使用 Windows 本地命名对象 ACL；管道握手依赖 OS 身份与协议版本，不再被陈旧 token 卡死。TCP 兼容路径仍必须校验 token。
+  - 描述文件发布可选 `pipe=`；即使计划任务遗漏该字段，新 Helper 也会先尝试固定管道。日志明确记录 `descriptor_loaded pipe=published|derived_fixed_name` 与最终 transport。
+  - 原先的 `connect_failed` 继续保留结构化 `kind`、Win32 `os`、`elapsed_ms`、描述端口和管道回落原因，防止任务退出码 0 掩盖失败。
 - 验证：
   - `cargo test --manifest-path hardware/RC003/helper/Cargo.toml`：`passed`（10/10，含连接错误日志字段回归）。
-  - 计划任务自动路径：`failed`。
+  - `cargo test -p sayall-windows rc003_bridge`：`passed`（16/16，含真实命名管道、陈旧 token 仍可由 OS ACL 身份完成 `HELLO/OK`，以及 TCP 错 token 拒绝）。
+  - 计划任务自动路径：旧 TCP 包 `failed`；新版安装器正常启动 App 的命名管道传输 `passed`；最终 RightAlt + 真机用户可见结果 `deferred`。
   - 同二进制手动提权 bridge + RC003 → RightAlt → 豆包语音条：`passed`。
-  - 修复后的计划任务复测：`deferred`（尚无行为修复）。
+  - 修复后计划任务 Helper + RightAlt + RC003 → 豆包语音条：`deferred`（等待最终安装版由正常桌面入口启动后复测）。
 - 隐私检查：本文未包含个人路径、设备地址/实例路径、bridge token、语音内容或凭据；原始现场日志不提交。

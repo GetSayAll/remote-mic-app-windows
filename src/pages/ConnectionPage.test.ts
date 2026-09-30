@@ -275,7 +275,24 @@ describe("VB-CABLE first-launch guidance", () => {
       .map((button) => button.text());
     expect(presetTexts).not.toContain("修改快捷键");
     expect(presetTexts).toContain("左 Ctrl + 左 Win（默认）");
+    expect(presetTexts).toContain("豆包输入法（右 Alt）");
     expect(presetTexts).toContain("关闭");
+    wrapper.unmount();
+  });
+
+  it("可从微信输入法一键切回豆包右 Alt，不依赖已隐藏的自定义录入入口", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const doubaoButton = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "豆包输入法（右 Alt）")!;
+    expect(doubaoButton).toBeDefined();
+    await doubaoButton.trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
     wrapper.unmount();
   });
 

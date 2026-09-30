@@ -50,8 +50,9 @@ mod imp {
     use std::collections::BTreeSet;
     use std::ffi::c_void;
     use std::fs;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{Read, Write};
     use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
+    use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -902,7 +903,7 @@ mod imp {
         canary_usages: Vec<u16>,
         /// 向主程序转发三键边沿的桥接描述文件路径（`None` = 不转发）。
         ///
-        /// 默认 `%LOCALAPPDATA%\SayAll\rc003-bridge.ini`，由主程序写出（端口 + 令牌），
+        /// 默认 `%LOCALAPPDATA%\SayAll\rc003-bridge.ini`，由主程序写出（命名管道 + 兼容端口 + 令牌），
         /// 助手读取后回连。`--no-app-bridge` 关闭；`--app-bridge <PATH>` 指定。
         ///
         /// **为什么默认开启**：不转发时三键只是"被清掉"，映射永远不触发；
@@ -1899,7 +1900,61 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 主程序桥接描述文件里读出的连接参数。
     struct BridgeTarget {
         port: u16,
+        pipe: Option<String>,
         token: String,
+    }
+
+    enum AppBridgeStream {
+        Tcp(TcpStream),
+        Pipe(fs::File),
+    }
+
+    impl AppBridgeStream {
+        fn transport(&self) -> &'static str {
+            match self {
+                Self::Tcp(_) => "tcp_loopback",
+                Self::Pipe(_) => "named_pipe",
+            }
+        }
+
+        fn shutdown(&self) {
+            match self {
+                Self::Tcp(stream) => {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                Self::Pipe(_) => {}
+            }
+        }
+    }
+
+    impl Read for AppBridgeStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Tcp(stream) => stream.read(buffer),
+                Self::Pipe(file) => match file.read(buffer) {
+                    // PIPE_NOWAIT 的 0 字节表示「当前没有数据」，不是 TCP 式 EOF；
+                    // 真正断管会以 ERROR_BROKEN_PIPE 返回。
+                    Ok(0) => Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+                    result => result,
+                },
+            }
+        }
+    }
+
+    impl Write for AppBridgeStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Tcp(stream) => stream.write(buffer),
+                Self::Pipe(file) => file.write(buffer),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self {
+                Self::Tcp(stream) => stream.flush(),
+                Self::Pipe(file) => file.flush(),
+            }
+        }
     }
 
     /// 桥接累计统计（供 [SUMMARY] 汇报）。
@@ -1929,7 +1984,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 键盘钩子永远看不到它们。助手是唯一拿到边沿的地方——不转发，三键就只是
     /// "被清掉了"，映射永远不触发（表现为"能配置但按下去没反应"）。
     ///
-    /// **方向**：主程序监听随机端口并写出描述文件（端口 + 令牌），助手读取后**回连**。
+    /// **方向**：主程序创建命名管道并写出描述文件（管道 + 兼容端口 + 令牌），
+    /// 助手读取后**回连**；旧描述文件没有 pipe 字段时才回落 TCP loopback。
     /// 反向（助手监听、主程序连接）在权限上不成立：助手以管理员身份运行、运行时目录
     /// 在 `%ProgramData%\SayAll\rc003-helper`，普通权限的主程序既读不到那里的写入，
     /// 也不该去猜。而"主程序写在 `%LOCALAPPDATA%`、提权助手去读"没有权限障碍。
@@ -2090,6 +2146,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 解析描述文件（`key=value`）。规则与主程序侧 `rc003_bridge::parse_descriptor` 一致。
     fn parse_bridge_descriptor(text: &str) -> Option<BridgeTarget> {
         let mut port = None;
+        let mut pipe = None;
         let mut token = None;
         let mut version = 0u32;
         for line in text.lines() {
@@ -2103,6 +2160,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             match key.trim() {
                 "version" => version = value.trim().parse().unwrap_or(0),
                 "port" => port = value.trim().parse().ok(),
+                "pipe" => pipe = Some(value.trim().to_string()),
                 "token" => token = Some(value.trim().to_string()),
                 _ => {}
             }
@@ -2115,7 +2173,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if token.is_empty() {
             return None;
         }
-        Some(BridgeTarget { port, token })
+        if pipe.as_deref() == Some("") {
+            pipe = None;
+        }
+        Some(BridgeTarget { port, pipe, token })
     }
 
     /// 桥接描述文件的**只读**探测结论（不连接、不写盘）。
@@ -2133,7 +2194,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
-    fn bridge_write_line(stream: &mut TcpStream, line: &str) -> std::io::Result<()> {
+    fn bridge_write_line(stream: &mut impl Write, line: &str) -> std::io::Result<()> {
         stream.write_all(line.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()
@@ -2202,13 +2263,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 发一条边沿行。空集合编码为 `-`（主程序侧据此释放全部）。
-    fn bridge_send_edges(stream: &mut TcpStream, usages: &[u16]) -> std::io::Result<()> {
+    fn bridge_send_edges(stream: &mut impl Write, usages: &[u16]) -> std::io::Result<()> {
         bridge_write_line(
             stream,
             &format!("E {} {}", now_ms(), format_edge_payload(usages)),
         )
     }
 
+    #[cfg(test)]
     fn format_bridge_connect_error(error: &std::io::Error, elapsed: Duration) -> String {
         format!(
             "connect_failed(kind={:?},os={:?},elapsed_ms={},detail={error})",
@@ -2218,6 +2280,70 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         )
     }
 
+    fn derived_bridge_pipe_name() -> &'static str {
+        r"\\.\pipe\SayAll.Rc003Bridge"
+    }
+
+    fn open_named_pipe(pipe: &str) -> std::io::Result<fs::File> {
+        fs::OpenOptions::new().read(true).write(true).open(pipe)
+    }
+
+    fn set_named_pipe_nowait(file: &fs::File) -> std::io::Result<()> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetNamedPipeHandleState(
+                pipe: Handle,
+                mode: *const u32,
+                max_collection_count: *const u32,
+                collect_data_timeout: *const u32,
+            ) -> i32;
+        }
+        // PIPE_READMODE_BYTE (0) | PIPE_NOWAIT (1).
+        let mode = 1u32;
+        let ok = unsafe {
+            SetNamedPipeHandleState(
+                file.as_raw_handle() as Handle,
+                &mode,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn bridge_read_ack(stream: &mut AppBridgeStream) -> Result<String, String> {
+        let deadline = Instant::now() + Duration::from_millis(BRIDGE_IO_TIMEOUT_MS);
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => return Err("ack_peer_closed".to_string()),
+                Ok(count) => {
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+                        return Ok(String::from_utf8_lossy(&bytes[..=newline]).into_owned());
+                    }
+                    if bytes.len() > 4_096 {
+                        return Err("ack_line_too_long".to_string());
+                    }
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut
+                        || error.raw_os_error() == Some(232) => {}
+                Err(error) => return Err(format!("ack_read_failed({error})")),
+            }
+            if Instant::now() >= deadline {
+                return Err("ack_timeout".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// 读描述文件 → 连接 → 出示令牌 → 等 `OK`。
     ///
     /// 返回**错误原因字符串**（不是 `io::Error`）：这些原因是给人看的排查线索，
@@ -2225,7 +2351,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     fn bridge_connect(
         path: Option<&Path>,
         logger: &Logger,
-    ) -> Result<(TcpStream, PathBuf, BridgeCaptureTargets), String> {
+    ) -> Result<(AppBridgeStream, PathBuf, BridgeCaptureTargets), String> {
         let path = match path {
             Some(path) => path.to_path_buf(),
             None => return Err("descriptor_path_unknown".to_string()),
@@ -2236,20 +2362,73 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         })?;
         let target = parse_bridge_descriptor(&text)
             .ok_or_else(|| "descriptor_invalid_or_version_mismatch".to_string())?;
-        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, target.port);
         let connect_started = Instant::now();
-        let mut stream = TcpStream::connect_timeout(
-            &std::net::SocketAddr::V4(addr),
-            Duration::from_millis(BRIDGE_IO_TIMEOUT_MS),
-        )
-        .map_err(|error| format_bridge_connect_error(&error, connect_started.elapsed()))?;
-        stream.set_nodelay(true).ok();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(BRIDGE_IO_TIMEOUT_MS)))
-            .ok();
-        stream
-            .set_write_timeout(Some(Duration::from_millis(BRIDGE_IO_TIMEOUT_MS)))
-            .ok();
+        let derived_pipe;
+        let (pipe, pipe_published) = match target.pipe.as_deref() {
+            Some(pipe) => (pipe, true),
+            None => {
+                // 新 app 使用固定本机管道名。这样即使提权计划任务读取描述文件时
+                // 漏掉可选 pipe 行，也不会回落到会被 WFP/TUN 改写的 TCP。
+                // 旧 app 没有该管道时，NotFound 才兼容回落 TCP。
+                derived_pipe = derived_bridge_pipe_name().to_owned();
+                (derived_pipe.as_str(), false)
+            }
+        };
+        logger.kv(
+            "[APP-BRIDGE]",
+            &[
+                ("event", "descriptor_loaded".into()),
+                ("port", target.port.to_string()),
+                (
+                    "pipe",
+                    if pipe_published {
+                        "published".into()
+                    } else {
+                        "derived_fixed_name".into()
+                    },
+                ),
+            ],
+        );
+        let mut stream = match open_named_pipe(pipe) {
+            Ok(file) => {
+                set_named_pipe_nowait(&file)
+                    .map_err(|error| format!("pipe_nonblocking_failed({error})"))?;
+                AppBridgeStream::Pipe(file)
+            }
+            Err(error) => {
+                if pipe_published || error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!(
+                        "pipe_connect_failed(kind={:?},os={:?},elapsed_ms={},published={},detail={error})",
+                        error.kind(),
+                        error.raw_os_error(),
+                        connect_started.elapsed().as_millis(),
+                        pipe_published
+                    ));
+                }
+                let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, target.port);
+                let tcp = TcpStream::connect_timeout(
+                    &std::net::SocketAddr::V4(addr),
+                    Duration::from_millis(BRIDGE_IO_TIMEOUT_MS),
+                )
+                .map_err(|tcp_error| {
+                    format!(
+                        "connect_failed(kind={:?},os={:?},elapsed_ms={},detail={tcp_error},descriptor_port={},pipe_fallback_kind={:?},pipe_fallback_os={:?})",
+                        tcp_error.kind(),
+                        tcp_error.raw_os_error(),
+                        connect_started.elapsed().as_millis(),
+                        target.port,
+                        error.kind(),
+                        error.raw_os_error()
+                    )
+                })?;
+                tcp.set_nodelay(true).ok();
+                tcp.set_read_timeout(Some(Duration::from_millis(BRIDGE_IO_TIMEOUT_MS)))
+                    .ok();
+                tcp.set_write_timeout(Some(Duration::from_millis(BRIDGE_IO_TIMEOUT_MS)))
+                    .ok();
+                AppBridgeStream::Tcp(tcp)
+            }
+        };
         let hello = format!(
             "HELLO {} {} {}\n",
             BRIDGE_PROTOCOL_VERSION,
@@ -2260,19 +2439,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .write_all(hello.as_bytes())
             .map_err(|error| format!("hello_write_failed({error})"))?;
         stream.flush().ok();
-        let mut reader = BufReader::new(
-            stream
-                .try_clone()
-                .map_err(|error| format!("clone_failed({error})"))?,
-        );
-        let mut ack = String::new();
-        reader
-            .read_line(&mut ack)
-            .map_err(|error| format!("ack_timeout({error})"))?;
+        let ack = bridge_read_ack(&mut stream)?;
         let targets = parse_bridge_target_line(&ack, "OK")
             .ok_or_else(|| format!("rejected_or_bad_config({})", ack.trim()))?;
-        stream.set_nonblocking(true).ok();
-        let _ = logger;
+        if let AppBridgeStream::Tcp(tcp) = &stream {
+            tcp.set_nonblocking(true).ok();
+        }
         Ok((stream, path, targets))
     }
 
@@ -2288,7 +2460,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         voice_synth: Arc<Mutex<Option<u16>>>,
         voice_synth_dirty: Arc<AtomicBool>,
     ) {
-        let mut conn: Option<TcpStream> = None;
+        let mut conn: Option<AppBridgeStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
         let mut last_attempt: Option<Instant> = None;
         let mut last_ping = Instant::now();
@@ -2373,6 +2545,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     }
                     match bridge_connect(candidate.as_deref(), &logger) {
                         Ok((stream, location, configured)) => {
+                            let transport = stream.transport();
                             stats.connects.fetch_add(1, Ordering::Relaxed);
                             last_connected_ms.store(now_ms_u64(), Ordering::Relaxed);
                             resolved = Some(location.clone());
@@ -2380,6 +2553,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 "[APP-BRIDGE]",
                                 &[
                                     ("event", "connected".into()),
+                                    ("transport", transport.into()),
                                     ("descriptor", location.display().to_string()),
                                 ],
                             );
@@ -2410,7 +2584,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 let note = if reason.contains("descriptor_invalid") {
                                     "描述文件解析失败：若主程序确实在运行，优先排查两侧 BRIDGE_PROTOCOL_VERSION 是否一致（新应用 + 旧助手或反之都会在此永久卡住）".to_string()
                                 } else if reason.contains("connect_failed") {
-                                    "描述文件存在但 loopback 连接失败：主程序未监听、端口已过期或本机网络路径异常；不能按「主程序未运行」直接放过"
+                                    "描述文件存在但桥接传输连接失败：命名管道不可用，或旧版 TCP loopback 路径被本机网络过滤器改写；不能按「主程序未运行」直接放过"
                                         .to_string()
                                 } else {
                                     "主程序未运行属正常现象；此时动态目标为空，不接管普通按键"
@@ -2513,7 +2687,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if let Some(stream) = conn.as_mut() {
             let _ = bridge_send_edges(stream, &[]);
             let _ = bridge_write_line(stream, "BYE helper_shutdown");
-            let _ = stream.shutdown(Shutdown::Both);
+            stream.shutdown();
         }
     }
 
@@ -4032,13 +4206,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 语音合成命令的行编码（纯函数，单测钉住格式）：
-    /// `to = Some` → from 恒为语音键 usage；`None` → from=0/to=0（agent synth:off 分支）。
+    /// `to = Some` → from 恒为语音键 usage；`None` → agent 的显式 synth:off 分支。
     fn voice_synth_command_line(token: &str, to: Option<u16>) -> String {
-        let (from, to) = match to {
-            Some(usage) => (VOICE_KEY_HID_USAGE, usage),
-            None => (0, 0),
-        };
-        format!("{{\"type\":\"synth\",\"token\":\"{token}\",\"from\":{from},\"to\":{to}}}\n")
+        match to {
+            Some(usage) => format!(
+                "{{\"type\":\"synth\",\"token\":\"{token}\",\"from\":{VOICE_KEY_HID_USAGE},\"to\":{usage}}}\n"
+            ),
+            // (0, 0) 会先被 agent 的 usage 白名单拒绝，旧映射因而不会清除。
+            None => format!("{{\"type\":\"synth\",\"token\":\"{token}\",\"off\":true}}\n"),
+        }
     }
 
     /// 给 agent 补发一条语音合成命令（与 send_session_config 里的 synth 行同格式）。
@@ -5172,13 +5348,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 24) 桥接描述文件解析（捕获链第 ② 段）。解析错一处，现象是
         //     "主程序在跑、助手也在跑，但三键就是不动"——日志上只有 APP-BRIDGE unavailable，
         //     而那是一条折叠日志，本身不会告诉你是哪一项不匹配。逐项钉住。
-        let good = "version=2\nport=53124\ntoken=deadbeefcafe\npid=999\n";
+        let good = "version=2\nport=53124\npipe=\\\\.\\pipe\\SayAll.Rc003Bridge.999.deadbeef\ntoken=deadbeefcafe\npid=999\n";
         let parsed = parse_bridge_descriptor(good);
         check(
             "桥接描述文件：正常解析",
             parsed
                 .as_ref()
-                .map(|t| t.port == 53124 && t.token == "deadbeefcafe")
+                .map(|t| {
+                    t.port == 53124
+                        && t.token == "deadbeefcafe"
+                        && t.pipe.as_deref() == Some(r"\\.\pipe\SayAll.Rc003Bridge.999.deadbeef")
+                })
                 .unwrap_or(false),
             format!(
                 "port={} token={}",
@@ -5191,6 +5371,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
         // 版本不符**整份拒绝**（宁可不可用，也不要跑一个半懂的协议）。
         // 这是阳性对照：若解析器忽略 version，这条必然 FAIL。
+        check(
+            "桥接命名管道：固定本机名不依赖可被网络层改写的端口",
+            derived_bridge_pipe_name() == r"\\.\pipe\SayAll.Rc003Bridge",
+            derived_bridge_pipe_name().to_owned(),
+        );
         check(
             "桥接描述文件：版本不符必须整份拒绝",
             parse_bridge_descriptor("version=1\nport=53124\ntoken=abc\n").is_none()
@@ -5634,7 +5819,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         #[test]
         fn voice_synth_command_line_encodes_on_and_off() {
-            // 开启态：from 恒为语音键 usage；关闭态：from=0/to=0（agent synth:off）。
+            // 开启态：from 恒为语音键 usage；关闭态必须命中 agent 的显式 off 分支。
             // 格式必须与 agent 侧 `cmd.type === 'synth'` 解析逐字段对齐。
             assert_eq!(
                 voice_synth_command_line("tok", Some(0x00E6)),
@@ -5642,7 +5827,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             );
             assert_eq!(
                 voice_synth_command_line("tok", None),
-                "{\"type\":\"synth\",\"token\":\"tok\",\"from\":0,\"to\":0}\n"
+                "{\"type\":\"synth\",\"token\":\"tok\",\"off\":true}\n"
             );
         }
 

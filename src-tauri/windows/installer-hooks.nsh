@@ -336,6 +336,29 @@
     ${EndIf}
     Abort
   ${EndIf}
+  ; `FindProcessCurrentUser` 在普通权限安装器里可能看不到提升权限的 Helper。
+  ; 进程枚举只能作快速判据，覆盖前还要直接探测目标映像的写锁；这与 NSIS
+  ; 随后的 File 指令面对的是同一个外部事实。首次安装文件不存在时直接跳过，
+  ; 避免 FileOpen 的 append 模式为了探测而创建空文件。
+  IfFileExists "$INSTDIR\sayall-helper.exe" 0 sayall_helper_image_unlocked_${_uid}
+  StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
+  sayall_helper_image_wait_${_uid}:
+    ClearErrors
+    FileOpen $0 "$INSTDIR\sayall-helper.exe" a
+    ${IfNot} ${Errors}
+      FileClose $0
+      Goto sayall_helper_image_unlocked_${_uid}
+    ${EndIf}
+    Sleep ${SAYALL_HELPER_EXIT_POLL_MS}
+    IntOp $R9 $R9 - ${SAYALL_HELPER_EXIT_POLL_MS}
+    ${If} $R9 > 0
+      Goto sayall_helper_image_wait_${_uid}
+    ${EndIf}
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONSTOP|MB_OK "增强捕获助手的程序文件仍被占用，安装器无法安全覆盖。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper image is still locked. Run stop-helper.cmd as administrator, then retry."
+    ${EndIf}
+    Abort
+  sayall_helper_image_unlocked_${_uid}:
   ; 写「需重新授权」标记 / 待决文件（**仅卸载路径**，_revoke_auth=1）：
   ; 提权任务普通权限删不掉（真机实测），卸载时这是「授权已应撤销」的唯一
   ; 可靠凭证；应用启动据此回落开关，下次开启强制重装任务（必弹 UAC）。
