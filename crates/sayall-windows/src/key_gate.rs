@@ -291,6 +291,11 @@ mod windows_impl {
     /// 遥控器在线状态（BLE 连接相位推导，ble.rs 在相位提交点同步）。
     /// 常驻抑制键仅在线时接管；离线恢复物理键盘原生透传（不劫持）。
     static REMOTE_CONNECTED: AtomicBool = AtomicBool::new(false);
+    /// 语音键报告层合成生效门禁（2026-09-29）：rc003_bridge 在「助手已连接
+    /// 且 S 行（合成目标）写出成功」时置位，连接收尾/桥 Drop 时回落。
+    /// ble.rs 据此停用 SendInput 注入路径（防止同一语音会话双写互扰，
+    /// 2026-09-29 run8 真机实证）。模块级原子与 ENHANCED_OWNED_MASK 同模式。
+    static VOICE_SYNTH_ACTIVE: AtomicBool = AtomicBool::new(false);
     static LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SWALLOWED_EDGES: AtomicU64 = AtomicU64::new(0);
     static LEAKED_DOWNS: AtomicU64 = AtomicU64::new(0);
@@ -826,6 +831,16 @@ mod windows_impl {
         ENHANCED_OWNED_MASK.load(Ordering::Relaxed)
     }
 
+    /// 语音键报告层合成门禁（见 VOICE_SYNTH_ACTIVE 注释）。
+    /// 写入方：rc003_bridge（鉴权后置位 / 变更 / 收尾回落）；读取方：ble.rs。
+    pub fn set_voice_synth_active(active: bool) {
+        VOICE_SYNTH_ACTIVE.store(active, Ordering::Relaxed);
+    }
+
+    pub fn voice_synth_active() -> bool {
+        VOICE_SYNTH_ACTIVE.load(Ordering::Relaxed)
+    }
+
     /// 同步遥控器在线状态（ble.rs 在连接相位提交点调用）：
     /// 在线时常驻抑制键接管（吞 + 引擎执行映射动作）；离线时恢复
     /// 原生透传（物理键盘 Home/` 不被劫持）。
@@ -946,7 +961,8 @@ pub use windows_impl::{
     is_gate_thread_alive, leaked_down_count, listener_active, persistent_swallow_total,
     set_edge_sink, set_enhanced_owned_mask, set_listener_active, set_persistent_mask,
     set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
-    swallowed_edge_count, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    set_voice_synth_active, swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED,
+    HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -992,6 +1008,10 @@ mod fallback {
     }
     pub fn persistent_swallow_total() -> u64 {
         0
+    }
+    pub fn set_voice_synth_active(_active: bool) {}
+    pub fn voice_synth_active() -> bool {
+        false
     }
     pub fn is_gate_thread_alive() -> bool {
         false

@@ -32,8 +32,9 @@
 //!   主程序是普通权限，默认**读不到**该目录的写入（也不该去猜）。
 //! - 反过来则权限确定成立：主程序在 `%LOCALAPPDATA%\SayAll\` 下写桥接描述文件，
 //!   提权助手读取用户目录**没有障碍**。
-//! - 因此：**主程序监听随机端口并写出「端口 + 令牌」描述文件，助手读取后回连。**
-//!   随机端口同时避免了固定端口被抢注导致的连接失败。
+//! - 因此：**主程序创建命名管道并写出「管道 + 兼容端口 + 令牌」描述文件，助手
+//!   读取后回连。** 命名管道是 Windows 产品主路径，不经过会改写 loopback 的
+//!   Winsock/WFP/TUN；随机 TCP 端口保留给旧 Helper 与离线兼容测试。
 //!
 //! ## 威胁模型（必须如实理解，别把它当成安全边界）
 //!
@@ -64,7 +65,7 @@
 //! 而看门狗负责兜住"连行都不再来"的情况。
 
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -73,10 +74,53 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
+use std::fs::File;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+#[cfg(windows)]
+use windows::core::{HRESULT, PCWSTR};
+#[cfg(windows)]
+use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, HANDLE};
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+#[cfg(windows)]
+use windows::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_NOWAIT, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+};
+
 use serde::Serialize;
 
 use crate::button_mapping::EngineMessage;
 use crate::raw_input::{button_for_usage, ButtonEdge, ENHANCED_CAPTURE_BUTTON_USAGES};
+
+/// 语音键的 HID 键盘 usage：遥控器语音键同时以键盘 **F5（0x003E）** 上报
+/// （与 key_suppressor 的知识同源）。ATVV 语音会话走 BLE 协议层，不经这个
+/// usage；且它在 Windows 输入流本来就未映射——报告层替换它零损失。
+pub const VOICE_KEY_HID_USAGE: u16 = 0x003E;
+
+/// 报告层合成**已实测可用**的目标 usage 白名单（2026-09-29）。
+///
+/// 替换 usage 会在 WUDFHost 翻译链最上游重新推 VK/扫描码，未实测的 usage
+/// 可能产出意外键值或不产出事件——替换 usage 必须逐键实测（探针
+/// wudf_ioctl_synth.py）。当前实测：0x00E6 → VK_RMENU、0x00E2 → VK_LMENU。
+/// 扩表 = 先跑探针，再同步 agent 侧 `SYNTH_TO_WHITELIST`（两侧一致由
+/// 各自测试钉住；agent 是终审，这里只是「不下发注定被拒的配置」的预过滤）。
+pub const VOICE_SYNTHABLE_USAGES: &[u16] = &[0x00E2, 0x00E6];
+
+/// 「按住说话快捷键」能否驱动报告层合成：**恰好单键**且 usage 在白名单内。
+///
+/// 和弦（≥2 键）无法用单个报告槽表达（合成是槽内替换，一次只能呈现一个
+/// usage），返回 `None` 后 BLE 层继续走 SendInput 注入路径——两条路径
+/// 互斥，由判据显式二选一，不允许叠加（双写互扰，2026-09-29 run8 实证）。
+pub(crate) fn voice_synth_target(chord: &crate::send_input::KeyChord) -> Option<u16> {
+    if chord.keys.len() != 1 {
+        return None;
+    }
+    let usage = chord.keys[0].hid_usage()?;
+    VOICE_SYNTHABLE_USAGES.contains(&usage).then_some(usage)
+}
 
 /// 桥接描述文件名。约定路径见 [`default_bridge_dir`]。
 pub const BRIDGE_FILE_NAME: &str = "rc003-bridge.ini";
@@ -112,6 +156,11 @@ const MAX_DENY: u32 = 3;
 
 /// 单行最大字节数。超长一律断开：读缓冲不能由对端无限撑大。
 const MAX_LINE_BYTES: usize = 4_096;
+
+/// Windows 命名管道绕开 Winsock/WFP。现场已确认 Clash/Meta TUN 会把计划任务
+/// Helper 发往当前 loopback 端口的 SYN 改送到另一个端口，导致 TCP 永久超时；
+/// 命名管道不经过 IP 栈，同时保留 TCP 作为旧 Helper/离线测试兼容路径。
+const PIPE_BUFFER_BYTES: u32 = 4_096;
 
 /// 桥接阶段（诊断用）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -324,6 +373,11 @@ fn generate_token() -> String {
     out
 }
 
+#[cfg(windows)]
+fn named_pipe_name() -> &'static str {
+    r"\\.\pipe\SayAll.Rc003Bridge"
+}
+
 /// 跨线程共享的桥接状态。
 #[derive(Debug)]
 struct BridgeShared {
@@ -438,9 +492,87 @@ fn note(message: String) {
 /// 这个缺陷是在自测里被构造出来的（见
 /// `replacement_takes_over_and_survivor_keeps_working`），不是纸面推演。
 #[derive(Debug)]
+enum BridgeIo {
+    Tcp(TcpStream),
+    #[cfg(windows)]
+    Pipe(File),
+}
+
+impl BridgeIo {
+    fn transport(&self) -> &'static str {
+        match self {
+            Self::Tcp(_) => "tcp_loopback",
+            #[cfg(windows)]
+            Self::Pipe(_) => "named_pipe",
+        }
+    }
+
+    fn uses_os_identity(&self) -> bool {
+        match self {
+            Self::Tcp(_) => false,
+            #[cfg(windows)]
+            Self::Pipe(_) => true,
+        }
+    }
+
+    fn try_clone(&self) -> std::io::Result<Self> {
+        match self {
+            Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            #[cfg(windows)]
+            Self::Pipe(file) => file.try_clone().map(Self::Pipe),
+        }
+    }
+
+    fn disconnect(&self) {
+        match self {
+            Self::Tcp(stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            #[cfg(windows)]
+            Self::Pipe(file) => {
+                let _ = unsafe { DisconnectNamedPipe(HANDLE(file.as_raw_handle())) };
+            }
+        }
+    }
+}
+
+impl Read for BridgeIo {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buffer),
+            #[cfg(windows)]
+            Self::Pipe(file) => match file.read(buffer) {
+                // PIPE_NOWAIT 在连接仍然有效、只是暂时无数据时可能成功返回 0；
+                // 命名管道真正断开会返回 ERROR_BROKEN_PIPE。不能套用 TCP 的 EOF 语义。
+                Ok(0) => Err(std::io::Error::from(ErrorKind::WouldBlock)),
+                result => result,
+            },
+        }
+    }
+}
+
+impl Write for BridgeIo {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(buffer),
+            #[cfg(windows)]
+            Self::Pipe(file) => file.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            #[cfg(windows)]
+            Self::Pipe(file) => file.flush(),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct CurrentConn {
     id: u64,
-    stream: TcpStream,
+    stream: BridgeIo,
 }
 
 /// RC003 报告层按键传输桥接。随平台生命周期存活（`Drop` 即停止监听并清理描述文件）。
@@ -449,6 +581,8 @@ pub struct Rc003Bridge {
     shared: Arc<Mutex<BridgeShared>>,
     current: Arc<Mutex<Option<CurrentConn>>>,
     targets: Arc<Mutex<CaptureTargets>>,
+    /// 语音键报告层合成目标（`None` = 关闭）。来源 = app 的「按住说话快捷键」。
+    voice_synth_to: Arc<Mutex<Option<u16>>>,
     sender: Sender<EngineMessage>,
     worker: Mutex<Option<JoinHandle<()>>>,
     file: Option<PathBuf>,
@@ -461,7 +595,7 @@ impl Rc003Bridge {
         Self::start_in(default_bridge_dir(), sender)
     }
 
-    /// 在指定目录启动：监听 loopback 随机端口 → 写出描述文件 → 等待助手回连。
+    /// 在指定目录启动：创建命名管道与兼容 loopback 端口 → 写出描述文件 → 等待助手回连。
     ///
     /// 端口与令牌由主程序决定，助手只读不改；监听失败**不是**致命错误
     /// （桥接不可用时普通键继续走旧路径，三键保持接线前的降级语义），
@@ -471,6 +605,7 @@ impl Rc003Bridge {
         let shared = Arc::new(Mutex::new(BridgeShared::default()));
         let current: Arc<Mutex<Option<CurrentConn>>> = Arc::new(Mutex::new(None));
         let targets = Arc::new(Mutex::new(CaptureTargets::default()));
+        let voice_synth_to = Arc::new(Mutex::new(None::<u16>));
         let next_id = Arc::new(AtomicU64::new(1));
 
         let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
@@ -485,6 +620,7 @@ impl Rc003Bridge {
                     shared,
                     current,
                     targets,
+                    voice_synth_to,
                     sender,
                     worker: Mutex::new(None),
                     file: None,
@@ -496,7 +632,19 @@ impl Rc003Bridge {
         let token = generate_token();
         let token_for_worker = token.clone();
 
-        let file = match write_bridge_file(&dir, port, &token) {
+        #[cfg(windows)]
+        let pipe_name = Some(if dir == default_bridge_dir() {
+            // 产品单实例使用固定本机名：不依赖计划任务会读到旧值的描述字段。
+            named_pipe_name().to_owned()
+        } else {
+            // 测试会并行启动多个 bridge，也可能与正在运行的安装版共存；每个实例
+            // 必须独占名字，否则客户端会被 Windows 分配到另一个同名 pipe 实例。
+            format!("{}.Test.{}.{}", named_pipe_name(), std::process::id(), port)
+        });
+        #[cfg(not(windows))]
+        let pipe_name: Option<String> = None;
+
+        let file = match write_bridge_file(&dir, port, pipe_name.as_deref(), &token) {
             Ok(path) => Some(path),
             Err(error) => {
                 // 监听已成功但描述文件写不出：助手将无法发现我们 → 相当于不可用。
@@ -525,6 +673,7 @@ impl Rc003Bridge {
             let shared = Arc::clone(&shared);
             let current = Arc::clone(&current);
             let targets = Arc::clone(&targets);
+            let voice_synth_to = Arc::clone(&voice_synth_to);
             let next_id = Arc::clone(&next_id);
             std::thread::Builder::new()
                 .name("sayall-rc003-bridge".to_owned())
@@ -535,7 +684,9 @@ impl Rc003Bridge {
                         shared,
                         current,
                         targets,
+                        voice_synth_to,
                         next_id,
+                        pipe_name,
                         &token_for_worker,
                         bridge_sender,
                     )
@@ -548,6 +699,7 @@ impl Rc003Bridge {
             shared,
             current,
             targets,
+            voice_synth_to,
             sender,
             worker: Mutex::new(worker),
             file,
@@ -622,13 +774,56 @@ impl Rc003Bridge {
             format_usage_payload(&usages)
         ));
     }
+    /// 更新语音键报告层合成目标（2026-09-29 产品化：配置来源 = app 的
+    /// 「按住说话快捷键」设置，helper 不再单独设置）。
+    ///
+    /// * `Some(usage)`：助手在报告层把语音键 usage 替换为该 usage（`injected=0`，
+    ///   第三方输入法如豆包的语音热键才收得到）。
+    /// * `None`：关闭合成。
+    ///
+    /// 合成生效期间 BLE 层的 SendInput 注入路径**必须停用**（否则同一会话
+    /// 双写：注入的和弦带 `injected=1` 且可能触发输入法切换，与报告层合成
+    /// 互扰——2026-09-29 run8 真机实证）。门禁判据是
+    /// [`Self::voice_synth_active`]：仅当助手已连接且本条 S 行写出成功才为真；
+    /// 断连即回落，BLE 层自动恢复注入路径。
+    ///
+    /// 这里只更新共享状态（绝对状态语义）：连接线程每轮比对变更并下发 S 行，
+    /// 与 targets 的 `T` 行同一模式；助手断线重连后鉴权完成也会收到当前状态。
+    pub fn set_voice_synth(&self, to_usage: Option<u16>) {
+        {
+            let mut synth = lock(&self.voice_synth_to);
+            if *synth == to_usage {
+                return;
+            }
+            *synth = to_usage;
+        }
+        note(format!(
+            "enhanced_capture event=voice_synth_configured to={}",
+            to_usage
+                .map(|u| format!("0x{u:04X}"))
+                .unwrap_or_else(|| "off".to_owned())
+        ));
+    }
+
+    /// 报告层合成门禁判据：助手已连接且 S 行写出成功。断连或配置关闭时为
+    /// `false`，BLE 层据此恢复 SendInput 注入路径。
+    ///
+    /// 实现走 key_gate 的模块级原子（与 `enhanced_owned_mask` 同模式）：
+    /// BleRuntime 构造先于本桥，共享 Arc 需要两端装配顺序配合；模块级静态
+    /// 是项目内已验证的跨组件状态载体，且 `Drop` 路径的回落有单处归属。
+    pub fn voice_synth_active() -> bool {
+        crate::key_gate::voice_synth_active()
+    }
 }
 
 impl Drop for Rc003Bridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // 桥没了 = 合成通道没了：门禁必须回落（正常路径连接收尾已清，
+        // 这里兜底连接线程卡在阻塞读而收尾尚未执行的情形）。
+        crate::key_gate::set_voice_synth_active(false);
         if let Some(conn) = lock(&self.current).take() {
-            let _ = conn.stream.shutdown(Shutdown::Both);
+            conn.stream.disconnect();
         }
         clear_ownership(&self.shared);
         if let Some(worker) = lock(&self.worker).take() {
@@ -643,12 +838,20 @@ impl Drop for Rc003Bridge {
 }
 
 /// 原子写出描述文件（先写临时文件再改名，避免助手读到半截内容）。
-fn write_bridge_file(dir: &Path, port: u16, token: &str) -> Result<PathBuf, String> {
+fn write_bridge_file(
+    dir: &Path,
+    port: u16,
+    pipe_name: Option<&str>,
+    token: &str,
+) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let final_path = dir.join(BRIDGE_FILE_NAME);
     let temp_path = dir.join(format!("{BRIDGE_FILE_NAME}.tmp"));
+    let pipe_line = pipe_name
+        .map(|name| format!("pipe={name}\n"))
+        .unwrap_or_default();
     let body = format!(
-        "version={BRIDGE_PROTOCOL_VERSION}\nport={port}\ntoken={token}\npid={}\n",
+        "version={BRIDGE_PROTOCOL_VERSION}\nport={port}\n{pipe_line}token={token}\npid={}\n",
         std::process::id()
     );
     {
@@ -672,88 +875,193 @@ fn accept_loop(
     shared: Arc<Mutex<BridgeShared>>,
     current: Arc<Mutex<Option<CurrentConn>>>,
     targets: Arc<Mutex<CaptureTargets>>,
+    voice_synth_to: Arc<Mutex<Option<u16>>>,
     next_id: Arc<AtomicU64>,
+    pipe_name: Option<String>,
     token: &str,
     sender: Sender<EngineMessage>,
 ) {
     listener.set_nonblocking(true).ok();
+    #[cfg(windows)]
+    let mut pending_pipe =
+        pipe_name
+            .as_deref()
+            .and_then(|name| match create_named_pipe_server(name) {
+                Ok(pipe) => Some(pipe),
+                Err(error) => {
+                    note(format!(
+                    "rc003_bridge transport=pipe phase=failed reason=create_error detail={error}"
+                ));
+                    None
+                }
+            });
+    #[cfg(not(windows))]
+    let _ = pipe_name;
+
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(false).ok();
                 stream.set_nodelay(true).ok();
                 stream.set_read_timeout(Some(READ_POLL)).ok();
-                let my_id = next_id.fetch_add(1, Ordering::Relaxed);
-                let clone = match stream.try_clone() {
-                    Ok(clone) => clone,
-                    Err(error) => {
-                        note(format!("rc003_bridge event=clone_failed detail={error}"));
-                        continue;
-                    }
-                };
-                // 新连接顶掉旧连接：助手被重启（或新旧两代并存）时，
-                // "用户刚启动的那个"必须能接管，否则桥接会永久哑掉。
-                let previous = lock(&current).replace(CurrentConn {
-                    id: my_id,
-                    stream: clone,
-                });
-                let replaced = previous.is_some();
-                if let Some(previous) = previous {
-                    // 主动打断旧连接的阻塞读，让它尽快走完"让位"。
-                    let _ = previous.stream.shutdown(Shutdown::Both);
-                }
-                {
-                    let mut state = lock(&shared);
-                    state.accepted_total += 1;
-                    if replaced {
-                        state.replaced_total += 1;
-                        state.phase = BridgePhase::Listening;
-                        state.helper_pid = 0;
-                    }
-                }
-                if replaced {
-                    clear_ownership(&shared);
-                    note(format!(
-                        "rc003_bridge event=replaced_by_new_connection from={addr}"
-                    ));
-                }
-                let thread_stop = Arc::clone(&stop);
-                let thread_shared = Arc::clone(&shared);
-                let thread_current = Arc::clone(&current);
-                let thread_targets = Arc::clone(&targets);
-                let thread_sender = sender.clone();
-                let thread_token = token.to_string();
-                let spawned = std::thread::Builder::new()
-                    .name("sayall-rc003-bridge-conn".to_owned())
-                    .spawn(move || {
-                        handle_connection(
-                            stream,
-                            my_id,
-                            &thread_stop,
-                            &thread_shared,
-                            &thread_current,
-                            &thread_targets,
-                            &thread_token,
-                            &thread_sender,
-                        )
-                    });
-                if spawned.is_err() {
-                    note("rc003_bridge event=conn_thread_spawn_failed".to_string());
-                    // 连线程都起不来就清掉当前连接，别把它留成一个不处理任何数据的挂名连接。
-                    let mut guard = lock(&current);
-                    if guard.as_ref().map(|conn| conn.id == my_id).unwrap_or(false) {
-                        *guard = None;
-                    }
-                }
+                adopt_connection(
+                    BridgeIo::Tcp(stream),
+                    format!("tcp:{addr}"),
+                    &stop,
+                    &shared,
+                    &current,
+                    &targets,
+                    &voice_synth_to,
+                    &next_id,
+                    token,
+                    &sender,
+                );
             }
-            Err(ref error) if error.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            Err(ref error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => {
                 note(format!("rc003_bridge event=accept_error detail={error}"));
-                std::thread::sleep(Duration::from_millis(200));
             }
         }
+
+        #[cfg(windows)]
+        if let Some(pipe) = pending_pipe.as_ref() {
+            match named_pipe_connected(pipe) {
+                Ok(true) => {
+                    let connected = pending_pipe.take().expect("checked Some");
+                    adopt_connection(
+                        BridgeIo::Pipe(connected),
+                        "named_pipe".to_owned(),
+                        &stop,
+                        &shared,
+                        &current,
+                        &targets,
+                        &voice_synth_to,
+                        &next_id,
+                        token,
+                        &sender,
+                    );
+                    pending_pipe = pipe_name
+                        .as_deref()
+                        .and_then(|name| create_named_pipe_server(name).ok());
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    note(format!(
+                        "rc003_bridge transport=pipe event=accept_error detail={error}"
+                    ));
+                    pending_pipe = pipe_name
+                        .as_deref()
+                        .and_then(|name| create_named_pipe_server(name).ok());
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adopt_connection(
+    stream: BridgeIo,
+    source: String,
+    stop: &Arc<AtomicBool>,
+    shared: &Arc<Mutex<BridgeShared>>,
+    current: &Arc<Mutex<Option<CurrentConn>>>,
+    targets: &Arc<Mutex<CaptureTargets>>,
+    voice_synth_to: &Arc<Mutex<Option<u16>>>,
+    next_id: &Arc<AtomicU64>,
+    token: &str,
+    sender: &Sender<EngineMessage>,
+) {
+    let my_id = next_id.fetch_add(1, Ordering::Relaxed);
+    let clone = match stream.try_clone() {
+        Ok(clone) => clone,
+        Err(error) => {
+            note(format!("rc003_bridge event=clone_failed detail={error}"));
+            return;
+        }
+    };
+    let previous = lock(current).replace(CurrentConn {
+        id: my_id,
+        stream: clone,
+    });
+    let replaced = previous.is_some();
+    if let Some(previous) = previous {
+        previous.stream.disconnect();
+    }
+    {
+        let mut state = lock(shared);
+        state.accepted_total += 1;
+        if replaced {
+            state.replaced_total += 1;
+            state.phase = BridgePhase::Listening;
+            state.helper_pid = 0;
+        }
+    }
+    if replaced {
+        clear_ownership(shared);
+        note(format!(
+            "rc003_bridge event=replaced_by_new_connection from={source}"
+        ));
+    }
+    let thread_stop = Arc::clone(stop);
+    let thread_shared = Arc::clone(shared);
+    let thread_current = Arc::clone(current);
+    let thread_targets = Arc::clone(targets);
+    let thread_synth = Arc::clone(voice_synth_to);
+    let thread_sender = sender.clone();
+    let thread_token = token.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("sayall-rc003-bridge-conn".to_owned())
+        .spawn(move || {
+            handle_connection(
+                stream,
+                my_id,
+                &thread_stop,
+                &thread_shared,
+                &thread_current,
+                &thread_targets,
+                &thread_synth,
+                &thread_token,
+                &thread_sender,
+            )
+        });
+    if spawned.is_err() {
+        note("rc003_bridge event=conn_thread_spawn_failed".to_string());
+        let mut guard = lock(current);
+        if guard.as_ref().map(|conn| conn.id == my_id).unwrap_or(false) {
+            *guard = None;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn create_named_pipe_server(name: &str) -> std::io::Result<File> {
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            PCWSTR(wide.as_ptr()),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            PIPE_BUFFER_BYTES,
+            PIPE_BUFFER_BYTES,
+            0,
+            None,
+        )
+    };
+    if handle.is_invalid() {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_handle(handle.0) })
+}
+
+#[cfg(windows)]
+fn named_pipe_connected(pipe: &File) -> std::io::Result<bool> {
+    match unsafe { ConnectNamedPipe(HANDLE(pipe.as_raw_handle()), None) } {
+        Ok(()) => Ok(true),
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_PIPE_CONNECTED.0) => Ok(true),
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_PIPE_LISTENING.0) => Ok(false),
+        Err(error) => Err(std::io::Error::from_raw_os_error(error.code().0 & 0xFFFF)),
     }
 }
 
@@ -767,12 +1075,13 @@ fn is_current(current: &Mutex<Option<CurrentConn>>, id: u64) -> bool {
 
 /// 单个助手连接的生命周期：HELLO → 收边沿 → （静默/断开/BYE）释放全部。
 fn handle_connection(
-    stream: TcpStream,
+    stream: BridgeIo,
     my_id: u64,
     stop: &Arc<AtomicBool>,
     shared: &Arc<Mutex<BridgeShared>>,
     current: &Arc<Mutex<Option<CurrentConn>>>,
     targets: &Arc<Mutex<CaptureTargets>>,
+    voice_synth_to: &Arc<Mutex<Option<u16>>>,
     token: &str,
     sender: &Sender<EngineMessage>,
 ) {
@@ -788,6 +1097,10 @@ fn handle_connection(
     let mut pending: Vec<u8> = Vec::new();
     let mut authenticated = false;
     let mut last_sent_generation = 0u64;
+    // 最近下发的语音合成目标（含 None）：与本条连接的 S 行下发状态对齐。
+    // 初值 None 不会被读到——变更检测在 `authenticated` 分支内，而
+    // authenticated 只在鉴权分支赋值 last_sent_synth 之后才可能为 true。
+    let mut last_sent_synth: Option<u16> = None;
     let mut deny_count = 0u32;
     let started = Instant::now();
     let mut last_rx = Instant::now();
@@ -832,7 +1145,13 @@ fn handle_connection(
                         helper_pid,
                     } => {
                         let version_ok = version == BRIDGE_PROTOCOL_VERSION;
-                        if !version_ok || !token_matches(token, &got) {
+                        // TCP 令牌用于防误连；命名管道由 Windows 本机命名对象 ACL
+                        // 约束到可访问该用户对象的进程，且拒绝远程客户端。同用户进程
+                        // 本来就能注入主程序，令牌对该路径不增加安全边界。现场还证实
+                        // WFP/TUN 环境会让提权任务读到旧描述 token，因此管道路径必须
+                        // 以 OS 对象身份为准，否则会在传输已通时被陈旧 token 拒绝。
+                        let token_ok = writer.uses_os_identity() || token_matches(token, &got);
+                        if !version_ok || !token_ok {
                             deny_count += 1;
                             let reason = if version_ok {
                                 "token_mismatch"
@@ -857,7 +1176,9 @@ fn handle_connection(
                             state.helper_pid = helper_pid;
                         }
                         note(format!(
-                            "rc003_bridge event=helper_authenticated helper_pid={helper_pid} version={version}"
+                            "rc003_bridge event=helper_authenticated helper_pid={helper_pid} version={version} transport={} auth={}",
+                            writer.transport(),
+                            if writer.uses_os_identity() { "os_pipe_acl" } else { "token" }
                         ));
                         let target = lock(targets).clone();
                         last_sent_generation = target.generation;
@@ -869,6 +1190,26 @@ fn handle_connection(
                                 format_usage_payload(&target.usages)
                             ),
                         );
+                        // 鉴权后立即对齐语音合成状态（绝对语义，同 OK 行的 targets）。
+                        // 写失败不在这里断链：与 targets 的 T 行同哲学，下一轮
+                        // 变更检测/看门狗会暴露写入问题；但 active 门禁不提前置位。
+                        let synth_current = *lock(voice_synth_to);
+                        last_sent_synth = synth_current;
+                        // None 也必须显式发送：helper/agent 可以跨应用或 helper 重启
+                        // 常驻，省略 S - 会让上一轮 RightAlt 合成继续生效。
+                        let line = voice_synth_line(synth_current);
+                        if write_line(&mut writer, &line).is_ok() {
+                            let active = synth_current.is_some();
+                            crate::key_gate::set_voice_synth_active(active);
+                            note(format!(
+                                "rc003_bridge event=voice_synth_sent to={} scope=hello active={active}",
+                                synth_current
+                                    .map(|u| format!("0x{u:04X}"))
+                                    .unwrap_or_else(|| "off".to_owned())
+                            ));
+                        } else {
+                            crate::key_gate::set_voice_synth_active(false);
+                        }
                     }
                     _ => {
                         // 未鉴权前只接受 HELLO。这不是防攻击（同用户进程挡不住），
@@ -981,6 +1322,27 @@ fn handle_connection(
                 }
                 last_sent_generation = target.generation;
             }
+            // 语音合成状态变更检测（与 T 行同模式）：app 在运行中改了
+            // 「按住说话快捷键」时，把新的绝对状态推给助手。
+            {
+                let synth_current = *lock(voice_synth_to);
+                if synth_current != last_sent_synth {
+                    let line = voice_synth_line(synth_current);
+                    if write_line(&mut writer, &line).is_err() {
+                        drop_reason = "voice_synth_write_error";
+                        break;
+                    }
+                    last_sent_synth = synth_current;
+                    let active = synth_current.is_some();
+                    crate::key_gate::set_voice_synth_active(active);
+                    note(format!(
+                        "rc003_bridge event=voice_synth_sent to={} scope=update active={active}",
+                        synth_current
+                            .map(|u| format!("0x{u:04X}"))
+                            .unwrap_or_else(|| "off".to_owned())
+                    ));
+                }
+            }
             let ownership_expired = lock(shared)
                 .ownership_last_rx
                 .map(|at| at.elapsed() > OWNERSHIP_TIMEOUT)
@@ -1001,9 +1363,7 @@ fn handle_connection(
                 break;
             }
             Ok(_) => {}
-            Err(ref error)
-                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut => {
-            }
+            Err(ref error) if retryable_bridge_read(error) => {}
             Err(ref error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => {
                 drop_reason = "read_error";
@@ -1037,7 +1397,14 @@ fn handle_connection(
         }
         state.helper_pid = 0;
     }
-    let _ = writer.shutdown(Shutdown::Both);
+    // 语音合成门禁回落：连接不在了 ⇒ 报告层合成不再可靠，BLE 注入路径必须
+    // 自动接回（与 targets 断连清零同哲学：fail-open 回落旧路径）。
+    // 例外：`replaced`。接手的新连接会在鉴权后重新置位；旧连接若在这里清掉，
+    // 会造成"接管瞬间门禁闪断"——但配置状态仍指向合成生效。为简单与安全起见，
+    // 替换场景也清零：新连接鉴权后最多一个轮询周期内重新置位（亚秒级），
+    // 代价是那一瞬可能多走一次注入路径，换来的是"门禁只反映已验证的连接"。
+    crate::key_gate::set_voice_synth_active(false);
+    writer.disconnect();
     {
         // 只清理"当前连接还是我"的情况。无条件 take 会把**接手的新连接**一起清掉，
         // 于是新连接下一轮就认为自己被替换 —— 两个连接互相让位，桥接整体哑掉。
@@ -1054,7 +1421,22 @@ fn handle_connection(
     ));
 }
 
-fn write_line(stream: &mut TcpStream, line: &str) -> std::io::Result<()> {
+/// 语音合成状态的 S 行编码（绝对状态语义）：`S <usage 十六进制>` 或 `S -`（关闭）。
+/// 助手侧解析见 `hardware/RC003/helper/src/main.rs` 的 `parse_bridge_synth_line`。
+fn voice_synth_line(to: Option<u16>) -> String {
+    match to {
+        Some(usage) => format!("S {usage:04X}"),
+        None => "S -".to_owned(),
+    }
+}
+
+fn retryable_bridge_read(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::WouldBlock
+        || error.kind() == ErrorKind::TimedOut
+        || error.raw_os_error() == Some(232) // ERROR_NO_DATA（PIPE_NOWAIT）
+}
+
+fn write_line(stream: &mut impl Write, line: &str) -> std::io::Result<()> {
     stream.write_all(line.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()
@@ -1138,7 +1520,14 @@ pub fn parse_descriptor(text: &str) -> Option<(u16, String, u32)> {
 mod tests {
     use super::*;
     use crate::raw_input::RemoteButton;
+    use crate::send_input::{KeyChord, KeyCode};
     use std::sync::mpsc::channel;
+
+    fn chord(keys: &[KeyCode]) -> KeyChord {
+        KeyChord {
+            keys: keys.to_vec(),
+        }
+    }
 
     fn targets(usages: &[u16]) -> Arc<Mutex<CaptureTargets>> {
         Arc::new(Mutex::new(CaptureTargets {
@@ -1151,6 +1540,51 @@ mod tests {
         buttons
             .iter()
             .fold(0, |mask, button| mask | (1u64 << button.ordinal()))
+    }
+
+    #[test]
+    fn voice_synth_target_accepts_only_whitelisted_single_keys() {
+        // 已实测 usage 的单键：放行（RightAlt=0xE6 / LeftAlt=0xE2）。
+        assert_eq!(
+            voice_synth_target(&chord(&[KeyCode::RightAlt])),
+            Some(0x00E6)
+        );
+        assert_eq!(
+            voice_synth_target(&chord(&[KeyCode::LeftAlt])),
+            Some(0x00E2)
+        );
+        // 和弦（v1 默认 Ctrl+Win）：报告槽只有单个替换位，合成不可表达 → None，
+        // BLE 层继续走注入路径。这正是"两条路径互斥、判据显式二选一"的一半。
+        assert_eq!(
+            voice_synth_target(&chord(&[KeyCode::LeftControl, KeyCode::LeftWindows])),
+            None
+        );
+        // 白名单外单键（Ctrl 未实测）：不下发，同样回落注入路径。
+        assert_eq!(voice_synth_target(&chord(&[KeyCode::LeftControl])), None);
+        // 无 usage 的键（音量键走 Consumer 页）。
+        assert_eq!(voice_synth_target(&chord(&[KeyCode::VolumeUp])), None);
+    }
+
+    #[test]
+    fn voice_synth_line_encodes_on_and_off() {
+        // helper 侧 parse_bridge_synth_line 的对侧编码，两种形态逐字符对齐。
+        assert_eq!(voice_synth_line(Some(0x00E6)), "S 00E6");
+        assert_eq!(voice_synth_line(None), "S -");
+    }
+
+    #[test]
+    fn set_voice_synth_updates_shared_state_idempotently() {
+        let (sender, _receiver) = channel();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-synth-test-{}", std::process::id()));
+        let bridge = Rc003Bridge::start_in(dir, sender);
+        bridge.set_voice_synth(Some(0x00E6));
+        assert_eq!(*lock(&bridge.voice_synth_to), Some(0x00E6));
+        // 重复写同值幂等（日志不重复刷屏）。
+        bridge.set_voice_synth(Some(0x00E6));
+        assert_eq!(*lock(&bridge.voice_synth_to), Some(0x00E6));
+        bridge.set_voice_synth(None);
+        assert_eq!(*lock(&bridge.voice_synth_to), None);
     }
 
     #[test]
@@ -1250,6 +1684,88 @@ mod tests {
         assert_eq!(parse_descriptor("port=1\ntoken=x\n"), None);
         assert_eq!(parse_descriptor("version=2\nport=1\n"), None);
         assert_eq!(parse_descriptor("version=2\nport=1\ntoken=\n"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_bypasses_loopback_filters_and_delivers_edges() {
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-bridge-pipe-descriptor-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back]));
+        let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
+        let pipe = text
+            .lines()
+            .find_map(|line| line.strip_prefix("pipe="))
+            .filter(|line| line.starts_with(r"\\.\pipe\SayAll.Rc003Bridge"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "计划任务 Helper 的 TCP loopback 会被本机 WFP/TUN 重定向，描述文件必须发布命名管道：{text:?}"
+                )
+            });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(pipe)
+            {
+                Ok(stream) => break stream,
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("命名管道连接失败: {error}"),
+            }
+        };
+        stream
+            .write_all(
+                format!("HELLO {BRIDGE_PROTOCOL_VERSION} stale-token-from-previous-app 9001\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        stream.flush().unwrap();
+
+        let mut ack = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while ack.iter().filter(|byte| **byte == b'\n').count() < 2 && Instant::now() < deadline {
+            let mut chunk = [0u8; 256];
+            match stream.read(&mut chunk) {
+                Ok(0) => panic!("命名管道在应答前关闭"),
+                Ok(count) => ack.extend_from_slice(&chunk[..count]),
+                Err(error) if retryable_bridge_read(&error) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("读取命名管道应答失败: {error}"),
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&ack).starts_with("OK "),
+            "命名管道必须以本机 ACL 身份完成 HELLO/OK，不能被陈旧描述 token 卡死；实际收到 {ack:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&ack).lines().any(|line| line == "S -"),
+            "握手必须重放关闭态，避免 helper 重启后 resident agent 保留上一轮 RightAlt；实际收到 {ack:?}"
+        );
+
+        stream.write_all(b"E 1 f1\n").unwrap();
+        stream.flush().unwrap();
+        let edge = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("命名管道边沿必须送入映射引擎");
+        assert!(matches!(
+            edge,
+            EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: true
+            })
+        ));
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1362,6 +1878,11 @@ mod tests {
         let ok_parts: Vec<_> = ok.trim().split(' ').collect();
         let generation = ok_parts[2].parse::<u64>().expect("OK 携带目标代次");
         assert_eq!(ok_parts[3], "80,f1", "OK 携带当前动态目标");
+        let mut synth = String::new();
+        reader
+            .read_line(&mut synth)
+            .expect("HELLO 必须重放合成状态");
+        assert_eq!(synth, "S -\n", "初始关闭态也必须是绝对状态");
         stream
             .write_all(format!("O {generation} f1,80\n").as_bytes())
             .unwrap();

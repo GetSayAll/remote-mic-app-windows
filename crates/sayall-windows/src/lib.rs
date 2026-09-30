@@ -511,8 +511,26 @@ impl WindowsPlatform {
         lock(&self.voice_hold_hotkey).clone()
     }
 
+    /// 更新「按住说话快捷键」，并联动语音键报告层合成配置（2026-09-29 产品化：
+    /// **单一事实源 = 这个设置**，helper 不再有独立的快捷键配置）。
+    ///
+    /// 联动规则（判据都能失败、都能从日志定位）：
+    /// * 和弦恰为**单键**且该键的 HID usage 在已实测合成白名单
+    ///   （[`VOICE_SYNTHABLE_USAGES`]）内 → 桥下发 `S <usage>`，助手在报告层
+    ///   把语音键（F5 usage）替换为该键；BLE 层的 SendInput 注入路径随
+    ///   `voice_synth_active` 门禁自动停用。
+    /// * 和弦（≥2 键）、无 usage 的键、或白名单外的单键 → **不下发**合成，
+    ///   BLE 层继续走既有 SendInput 注入路径（和弦无法用单报告槽表达；
+    ///   白名单外的 usage 未逐键实测，替换可能产出意外 VK——见探针
+    ///   wudf_ioctl_synth.py 的方法论约束）。
+    /// * `None`（快捷键清空）→ 下发 `S -` 关闭合成。
     pub fn set_voice_hold_hotkey(&self, hotkey: Option<send_input::KeyChord>) {
-        *lock(&self.voice_hold_hotkey) = hotkey;
+        *lock(&self.voice_hold_hotkey) = hotkey.clone();
+        #[cfg(windows)]
+        {
+            let synth_to = hotkey.and_then(|chord| rc003_bridge::voice_synth_target(&chord));
+            self.rc003_bridge.set_voice_synth(synth_to);
+        }
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {

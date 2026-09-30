@@ -243,6 +243,101 @@ impl KeyCode {
                 | Self::RightWindows
         )
     }
+
+    /// 单键和弦的 HID 键盘 usage（`None` = 该键没有标准键盘 usage）。
+    ///
+    /// 用途：语音键报告层合成（helper 在 WUDFHost 报告层把语音键 usage 替换为
+    /// 该 usage，`injected=0`，第三方输入法热键才收得到）。报告层一次只能替换
+    /// **一个** usage 槽，因此这里只提供单键查询；和弦（多键）不适用报告层合成。
+    ///
+    /// ⚠️ 这张表只是客观映射（KeyCode → USB HID Keyboard/Keypad usage），
+    /// **不等于该 usage 可以被合成**——替换 usage 会在翻译链最上游重新推
+    /// VK/扫描码，必须逐键实测（见 agent 的 SYNTH_TO_WHITELIST 与探针
+    /// wudf_ioctl_synth.py）。能否合成由调用方白名单过滤，本表不回答。
+    pub fn hid_usage(&self) -> Option<u16> {
+        let usage = match self {
+            // 修饰键（0xE0-0xE7）。无侧别的别名按左侧语义（SendInput 同）。
+            KeyCode::Control | KeyCode::LeftControl => 0xE0,
+            KeyCode::Shift | KeyCode::LeftShift => 0xE1,
+            KeyCode::Alt | KeyCode::LeftAlt => 0xE2,
+            KeyCode::LeftWindows => 0xE3,
+            KeyCode::RightControl => 0xE4,
+            KeyCode::RightShift => 0xE5,
+            KeyCode::RightAlt => 0xE6,
+            KeyCode::RightWindows => 0xE7,
+            // 常用功能键。
+            KeyCode::Backspace => 0x2A,
+            KeyCode::Tab => 0x2B,
+            KeyCode::Enter => 0x28,
+            KeyCode::Escape => 0x29,
+            KeyCode::Space => 0x2C,
+            KeyCode::PageUp => 0x4B,
+            KeyCode::PageDown => 0x4E,
+            KeyCode::End => 0x4D,
+            KeyCode::Home => 0x4A,
+            KeyCode::Left => 0x50,
+            KeyCode::Up => 0x52,
+            KeyCode::Right => 0x4F,
+            KeyCode::Down => 0x51,
+            KeyCode::Insert => 0x49,
+            KeyCode::Delete => 0x4C,
+            // F1-F12（0x3A-0x45）。
+            KeyCode::F1 => 0x3A,
+            KeyCode::F2 => 0x3B,
+            KeyCode::F3 => 0x3C,
+            KeyCode::F4 => 0x3D,
+            KeyCode::F5 => 0x3E,
+            KeyCode::F6 => 0x3F,
+            KeyCode::F7 => 0x40,
+            KeyCode::F8 => 0x41,
+            KeyCode::F9 => 0x42,
+            KeyCode::F10 => 0x43,
+            KeyCode::F11 => 0x44,
+            KeyCode::F12 => 0x45,
+            // 字母 A-Z（0x04-0x1D）。
+            KeyCode::A => 0x04,
+            KeyCode::B => 0x05,
+            KeyCode::C => 0x06,
+            KeyCode::D => 0x07,
+            KeyCode::E => 0x08,
+            KeyCode::F => 0x09,
+            KeyCode::G => 0x0A,
+            KeyCode::H => 0x0B,
+            KeyCode::I => 0x0C,
+            KeyCode::J => 0x0D,
+            KeyCode::K => 0x0E,
+            KeyCode::L => 0x0F,
+            KeyCode::M => 0x10,
+            KeyCode::N => 0x11,
+            KeyCode::O => 0x12,
+            KeyCode::P => 0x13,
+            KeyCode::Q => 0x14,
+            KeyCode::R => 0x15,
+            KeyCode::S => 0x16,
+            KeyCode::T => 0x17,
+            KeyCode::U => 0x18,
+            KeyCode::V => 0x19,
+            KeyCode::W => 0x1A,
+            KeyCode::X => 0x1B,
+            KeyCode::Y => 0x1C,
+            KeyCode::Z => 0x1D,
+            // 数字 0-9（0x1E-0x27）。
+            KeyCode::Digit0 => 0x27,
+            KeyCode::Digit1 => 0x1E,
+            KeyCode::Digit2 => 0x1F,
+            KeyCode::Digit3 => 0x20,
+            KeyCode::Digit4 => 0x21,
+            KeyCode::Digit5 => 0x22,
+            KeyCode::Digit6 => 0x23,
+            KeyCode::Digit7 => 0x24,
+            KeyCode::Digit8 => 0x25,
+            KeyCode::Digit9 => 0x26,
+            // 音量/媒体键走 Consumer 页（0x0C），不在 Keyboard/Keypad 页：
+            // 报告槽是键盘页 usage，合成为 Consumer usage 语义不成立。
+            _ => return None,
+        };
+        Some(usage)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

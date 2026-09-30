@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
+import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
+import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import type {
   AudioEndpoint,
   AudioSnapshot,
   ConnectionSnapshot,
   KeyChord,
   PairedRemote,
+  Rc003TaskStatus,
   RuntimeSnapshot,
 } from "../lib/bridge";
 import {
@@ -15,9 +18,12 @@ import {
   chordLabel,
   connectRemote,
   connectionPhaseLabel,
+  disableRc003Capture,
   disconnectRemote,
+  enableRc003Capture,
   getAudioSnapshot,
   getConnectionSnapshot,
+  getRc003TaskStatus,
   getVoiceHoldHotkey,
   isRecommendedVoiceEndpoint,
   listAudioEndpoints,
@@ -101,6 +107,8 @@ let voiceCapturedKeys: KeyCode[] | null = null;
 
 /** 按住说话快捷键默认值（v1 固定，适配微信输入法的默认语音热键）。 */
 const DEFAULT_VOICE_HOTKEY_KEYS: KeyCode[] = ["left_control", "left_windows"];
+/** 豆包输入法的长按语音快捷键；始终保留显式入口，避免自定义录入隐藏后无法切回。 */
+const DOUBAO_VOICE_HOTKEY_KEYS: KeyCode[] = ["right_alt"];
 
 const CAPTURE_MODIFIER_KEYS: ReadonlySet<KeyCode> = new Set<KeyCode>([
   "left_control",
@@ -137,6 +145,123 @@ async function applyVoiceHotkey(keys: string[]) {
   } finally {
     savingVoiceHotkey.value = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 「支持更多输入工具」开关（2026-09-29 Andy 需求：连接页的第二入口）。
+//
+// **与按键页「全按键支持」是同一个设置项**（AppSettings.rc003_capture_enabled），
+// 不是新状态：两处开关操作同一对 IPC（enable/disable_rc003_capture），状态
+// 由每页挂载时的 getRc003TaskStatus 对账对齐——页面经 <component :is> 切换
+// 时组件重建，每次进页都对账一次，两个入口不会漂移。
+//
+// 判据与文案与 ButtonsPage.toggleRc003Capture 同源：只在「这次开启会触发
+// 系统授权（UAC）」时先弹确认（authorizationRequired !== false），关闭方向
+// 永远直接执行。开关文案用连接页语境（输入工具联动），授权弹窗沿用同一组件。
+// ---------------------------------------------------------------------------
+
+const rc003CaptureEnabled = ref<boolean | null>(null);
+/** 这次开启会不会触发系统授权（UAC）。`null` = 尚未对账（宁可多弹一次）。 */
+const rc003AuthorizationRequired = ref<boolean | null>(null);
+const rc003CaptureBusy = ref(false);
+const showCaptureConfirm = ref(false);
+const captureSwitchEl = ref<HTMLInputElement | null>(null);
+const rc003CaptureHint = ref("");
+
+/**
+ * 把开关的 DOM 状态写回绑定值。原生复选框被点击的瞬间浏览器先翻了 checked，
+ * 而操作失败（状态没变）时 Vue 判定 props 无变化、不会生成 DOM 补丁——
+ * 会出现「状态是关、界面是开」（ButtonsPage 2026-09-25 真机实证，同法防御）。
+ */
+function syncCaptureSwitchDom(): void {
+  const el = captureSwitchEl.value;
+  if (el) {
+    el.checked = rc003CaptureEnabled.value === true;
+  }
+}
+
+async function reconcileRc003Capture(): Promise<void> {
+  try {
+    const status = await getRc003TaskStatus();
+    // 首次对账（null → 权威值）直接采纳；此后以本页用户操作为准，
+    // 不被每秒变化无关的 installed 抖动带偏（与 ButtonsPage 同策略）。
+    if (rc003CaptureEnabled.value === null) {
+      rc003CaptureEnabled.value = status.enabled;
+    }
+    rc003AuthorizationRequired.value = status.authorizationRequired;
+  } catch {
+    // 对账失败保持 null：开关显示占位符（不可点），不猜状态。
+  }
+}
+
+async function toggleRc003Capture() {
+  if (rc003CaptureBusy.value) return;
+  // 与 ButtonsPage.toggleRc003Capture 同源判据：只在「这次开启会触发系统
+  // 授权（UAC）」时先弹确认（authorizationRequired 缺失宁可多弹）。
+  // 关闭方向永远直接执行。
+  if (rc003CaptureEnabled.value !== true && rc003AuthorizationRequired.value !== false) {
+    showCaptureConfirm.value = true;
+    // 开关 DOM 在点击瞬间已被浏览器翻转，先写回关闭，等确认后再真正执行。
+    syncCaptureSwitchDom();
+    return;
+  }
+  await applyCaptureToggle();
+}
+
+async function applyCaptureToggle() {
+  if (rc003CaptureBusy.value) return;
+  rc003CaptureBusy.value = true;
+  const wasEnabled = rc003CaptureEnabled.value;
+  try {
+    const next: Rc003TaskStatus =
+      wasEnabled === true ? await disableRc003Capture() : await enableRc003Capture();
+    if (next.lastError) {
+      rc003CaptureHint.value = next.lastError;
+      reportFrontendEvent({
+        event: "rc003_capture_toggle",
+        phase: "completed",
+        result: "failed",
+        reason: `page=connection was_enabled=${String(wasEnabled === true)} error=${next.lastError}`,
+      });
+      return;
+    }
+    rc003CaptureEnabled.value = next.enabled;
+    rc003CaptureHint.value = "";
+    reportFrontendEvent({
+      event: "rc003_capture_toggle",
+      phase: "completed",
+      result: "passed",
+      reason: `page=connection enabled=${String(next.enabled)}`,
+    });
+  } catch (error) {
+    rc003CaptureHint.value = error instanceof Error ? error.message : String(error);
+    reportFrontendEvent({
+      event: "rc003_capture_toggle",
+      phase: "completed",
+      result: "failed",
+      reason: `page=connection was_enabled=${String(wasEnabled === true)} switch_reverted`,
+    });
+    // 同步回退到点击前的状态，并用权威状态校正一次（与 ButtonsPage 同源）。
+    rc003CaptureEnabled.value = wasEnabled === true;
+    void getRc003TaskStatus()
+      .then((status) => {
+        rc003CaptureEnabled.value = status.enabled;
+      })
+      .catch(() => {});
+  } finally {
+    rc003CaptureBusy.value = false;
+    syncCaptureSwitchDom();
+  }
+}
+
+function confirmCaptureDialog(): void {
+  showCaptureConfirm.value = false;
+  void applyCaptureToggle();
+}
+
+function closeCaptureDialog(): void {
+  showCaptureConfirm.value = false;
+  syncCaptureSwitchDom();
 }
 
 /**
@@ -536,6 +661,7 @@ onMounted(async () => {
   void refreshConnection();
   void initializeAudio();
   void refreshVoiceHotkey();
+  void reconcileRc003Capture();
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -684,6 +810,21 @@ onUnmounted(() => {
             {{ chordLabel({ keys: DEFAULT_VOICE_HOTKEY_KEYS }) }}（默认）
           </button>
           <button
+            :class="
+              presetIsActive(DOUBAO_VOICE_HOTKEY_KEYS) ? 'primary-button' : 'secondary-button'
+            "
+            type="button"
+            :disabled="
+              savingVoiceHotkey ||
+              capturingVoiceHotkey ||
+              !runtime?.platform.windowsApiAvailable ||
+              presetIsActive(DOUBAO_VOICE_HOTKEY_KEYS)
+            "
+            @click="applyVoiceHotkey(DOUBAO_VOICE_HOTKEY_KEYS)"
+          >
+            豆包输入法（{{ chordLabel({ keys: DOUBAO_VOICE_HOTKEY_KEYS }) }}）
+          </button>
+          <button
             :class="activeVoiceHotkeyKeys ? 'secondary-button' : 'primary-button'"
             type="button"
             :disabled="
@@ -710,6 +851,34 @@ onUnmounted(() => {
           按"修改快捷键"时仍按着键的组合不会完整录入，先松手即可。
         </p>
         <p class="muted scan-summary">{{ voiceHotkeyMessage }}</p>
+        <!-- 「支持更多输入工具」开关（2026-09-29 Andy 需求）：与按键页
+             「全按键支持」是同一设置项的第二入口，状态一致、同时开关。
+             放在按住说话快捷键区块之后：用户语境是"语音键要唤起豆包等
+             第三方输入法"，这正是报告层合成（增强捕获）的用户价值。 -->
+        <div class="setting-row capture-tool-row">
+          <label class="toggle-row" for="connection-capture-switch">
+            <span>支持更多输入工具（如豆包输入法）</span>
+            <span
+              v-if="rc003CaptureEnabled === null"
+              class="toggle-placeholder"
+              aria-hidden="true"
+            ></span>
+            <input
+              v-else
+              id="connection-capture-switch"
+              ref="captureSwitchEl"
+              type="checkbox"
+              class="toggle-input"
+              :checked="rc003CaptureEnabled === true"
+              :disabled="rc003CaptureBusy"
+              @change="toggleRc003Capture"
+            />
+          </label>
+        </div>
+        <p class="muted scan-summary">
+          开启后由系统底层直接把遥控器语音键转成按住说话快捷键，豆包输入法等第三方工具的语音热键才能被唤起。它就是按键页的「全按键支持」，两处开关随时同步；首次开启会弹一次系统授权。
+        </p>
+        <p v-if="rc003CaptureHint" class="muted scan-summary">{{ rc003CaptureHint }}</p>
         <details class="usage-hint-details">
           <summary>微信输入法使用步骤（点开查看）</summary>
           <ol>
@@ -821,4 +990,11 @@ onUnmounted(() => {
       </article>
     </div>
   </section>
+  <!-- 授权确认弹窗：与 ButtonsPage 共用同一组件（同一设置项、同一授权流程）；
+       只在「这次开启会触发 UAC」时出现（toggleRc003Capture 决定）。 -->
+  <EnhancedCaptureConfirmDialog
+    v-if="showCaptureConfirm"
+    @confirm="confirmCaptureDialog"
+    @close="closeCaptureDialog"
+  />
 </template>

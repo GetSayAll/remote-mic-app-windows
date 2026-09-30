@@ -1,0 +1,39 @@
+=== 提权 OpenProcess 阶梯诊断 ===
+时间: 2026-09-28T18:13:07
+python: C:\Users\hd838\.workbuddy\binaries\python\envs\default\Scripts\python.exe
+IsUserAnAdmin: True
+
+--- 自我（阳性对照） (pid=34956) ---
+  QUERY_LIMITED_INFORMATION    0x001000 -> 成功
+  QUERY_INFORMATION            0x000400 -> 成功
+  VM_OP|VM_READ|VM_WRITE       0x000038 -> 成功
+  CREATE_THREAD                0x000002 -> 成功
+  frida-needs                  0x00043A -> 成功
+  ALL_ACCESS                   0x1FFFFF -> 成功
+
+注册表 WUDFDiagnosticInfo 宿主 PID 集合: [1268, 1828, 2516, 3764, 9144, 9372, 42020]
+RC003 宿主 PID: 42020
+
+--- RC003 宿主 WUDFHost (pid=42020) ---
+  QUERY_LIMITED_INFORMATION    0x001000 -> 失败 err=5
+  QUERY_INFORMATION            0x000400 -> 失败 err=5
+  VM_OP|VM_READ|VM_WRITE       0x000038 -> 失败 err=5
+  CREATE_THREAD                0x000002 -> 失败 err=5
+  frida-needs                  0x00043A -> 失败 err=5
+  ALL_ACCESS                   0x1FFFFF -> 失败 err=5
+
+--- 启用 SeDebugPrivilege 后重跑阶梯（假设：frida 能进靠的是它）---
+  enable_se_debug_privilege -> True (err=0)
+
+--- RC003 宿主 WUDFHost（SeDebug 后） (pid=42020) ---
+  QUERY_LIMITED_INFORMATION    0x001000 -> 成功
+  QUERY_INFORMATION            0x000400 -> 成功
+  VM_OP|VM_READ|VM_WRITE       0x000038 -> 成功
+  CREATE_THREAD                0x000002 -> 成功
+  frida-needs                  0x00043A -> 成功
+  ALL_ACCESS                   0x1FFFFF -> 成功
+
+--- frida attach 测试（不加载脚本，attach 后立即 detach）---
+frida 17.18.0
+frida.attach 成功
+detach 完成，无残留

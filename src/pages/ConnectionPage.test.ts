@@ -99,6 +99,9 @@ const mocks = vi.hoisted(() => ({
   startShortcutCapture: vi.fn(),
   stopShortcutCapture: vi.fn(),
   subscribeShortcutCaptureEdges: vi.fn(),
+  getRc003TaskStatus: vi.fn(),
+  enableRc003Capture: vi.fn(),
+  disableRc003Capture: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -115,6 +118,9 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     startShortcutCapture: mocks.startShortcutCapture,
     stopShortcutCapture: mocks.stopShortcutCapture,
     subscribeShortcutCaptureEdges: mocks.subscribeShortcutCaptureEdges,
+    getRc003TaskStatus: mocks.getRc003TaskStatus,
+    enableRc003Capture: mocks.enableRc003Capture,
+    disableRc003Capture: mocks.disableRc003Capture,
   };
 });
 
@@ -269,7 +275,24 @@ describe("VB-CABLE first-launch guidance", () => {
       .map((button) => button.text());
     expect(presetTexts).not.toContain("修改快捷键");
     expect(presetTexts).toContain("左 Ctrl + 左 Win（默认）");
+    expect(presetTexts).toContain("豆包输入法（右 Alt）");
     expect(presetTexts).toContain("关闭");
+    wrapper.unmount();
+  });
+
+  it("可从微信输入法一键切回豆包右 Alt，不依赖已隐藏的自定义录入入口", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const doubaoButton = wrapper
+      .findAll(".voice-hotkey-presets button")
+      .find((button) => button.text() === "豆包输入法（右 Alt）")!;
+    expect(doubaoButton).toBeDefined();
+    await doubaoButton.trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
+    expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
     wrapper.unmount();
   });
 
@@ -561,6 +584,129 @@ describe("VB-CABLE first-launch guidance", () => {
     });
     expect(wrapper.text()).toContain("已设为 右 Win + 右 Ctrl");
     expect(wrapper.text()).toContain("若与微信输入法语音键不一致将无法生效");
+    wrapper.unmount();
+  });
+});
+
+/**
+ * 「支持更多输入工具」开关（2026-09-29）：与按键页「全按键支持」同一设置项
+ * 的连接页入口。判据（授权确认、失败回退、权威对账）与 ButtonsPage 同源。
+ */
+describe("connection page rc003 capture switch", () => {
+  const taskStatus = (
+    overrides: Partial<import("../lib/bridge").Rc003TaskStatus> = {},
+  ) => ({
+    installed: true,
+    authorizationRequired: false,
+    enabled: false,
+    helperPath: null,
+    lastError: null,
+    ...overrides,
+  });
+
+  afterEach(() => {
+    // 本 describe 不继承上面 VB-CABLE describe 的 afterEach（作用域只在
+    // 各自 describe 内）；没有它，spy 调用计数跨用例累计，"未被调用"
+    // 断言会吃到上一个用例的调用记录（本次失败实证）。
+    vi.clearAllMocks();
+  });
+
+  beforeEach(() => {
+    // vi.clearAllMocks 只清调用记录不清实现（ButtonsPage 2026-09-28 教训）：
+    // 每个 beforeEach 显式重置实现。
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.startShortcutCapture.mockResolvedValue([]);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.subscribeShortcutCaptureEdges.mockImplementation(
+      async (handler: ShortcutCaptureHandler) => {
+        mocks.captureEdgeHandler = handler;
+        return () => {};
+      },
+    );
+    mocks.getRc003TaskStatus.mockResolvedValue(taskStatus());
+    mocks.enableRc003Capture.mockResolvedValue(taskStatus({ enabled: true }));
+    mocks.disableRc003Capture.mockResolvedValue(taskStatus({ enabled: false }));
+  });
+
+  it("挂载对账后开关显示权威状态，对账失败显示占位符", async () => {
+    mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: true }));
+    let wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.find("#connection-capture-switch").exists()).toBe(true);
+    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+      true,
+    );
+    wrapper.unmount();
+
+    // 对账失败（IPC 抛错）：开关不猜状态，渲染占位符且不出可点的 input。
+    mocks.getRc003TaskStatus.mockRejectedValue(new Error("ipc down"));
+    wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.find("#connection-capture-switch").exists()).toBe(false);
+    expect(wrapper.find(".toggle-placeholder").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("已授权（authorizationRequired=false）时开启直接执行，不开确认弹窗", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    await wrapper.find("#connection-capture-switch").setValue(true);
+    await flushPromises();
+
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    expect(mocks.disableRc003Capture).not.toHaveBeenCalled();
+    expect(wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" }).exists()).toBe(false);
+    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+      true,
+    );
+    wrapper.unmount();
+  });
+
+  it("需要授权时先弹确认弹窗，确认后才调用 enable", async () => {
+    mocks.getRc003TaskStatus.mockResolvedValue(
+      taskStatus({ installed: false, authorizationRequired: true }),
+    );
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper.find("#connection-capture-switch").setValue(true);
+    await flushPromises();
+    // 未确认：不调 enable，开关 DOM 写回关闭。
+    expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
+    const dialog = wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" });
+    expect(dialog.exists()).toBe(true);
+    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+      false,
+    );
+
+    // 确认后走 enable，开关随结果开启。
+    await dialog.vm.$emit("confirm");
+    await flushPromises();
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+      true,
+    );
+    wrapper.unmount();
+  });
+
+  it("操作失败（lastError）：开关回退原状态并显示提示，不静默保持翻转", async () => {
+    mocks.enableRc003Capture.mockResolvedValue(
+      taskStatus({ enabled: false, lastError: "授权未完成（UAC 被取消）" }),
+    );
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper.find("#connection-capture-switch").setValue(true);
+    await flushPromises();
+
+    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect(wrapper.text()).toContain("授权未完成（UAC 被取消）");
     wrapper.unmount();
   });
 });

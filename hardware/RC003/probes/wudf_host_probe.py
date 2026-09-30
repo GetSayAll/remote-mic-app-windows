@@ -123,6 +123,77 @@ def probe_open_denied(pid: int) -> bool:
     return True
 
 
+def enable_se_debug_privilege() -> tuple[bool, int]:
+    """在当前进程令牌上启用 SeDebugPrivilege，返回 (是否生效, 最后错误码)。
+
+    **为什么需要它**（2026-09-28 阶梯诊断实证）：管理员令牌默认**携带**该特权
+    但处于 disabled 态，不显式 AdjustTokenPrivileges 就不生效。持有者打开其它
+    进程时内核会越过 DACL 授予访问。实测 WUDFHost 的 DACL 连提权进程的
+    PROCESS_QUERY_LIMITED_INFORMATION 都拒绝（err=5），但 frida.attach 成功
+    ——frida 的 helper 自己启用了 SeDebugPrivilege。裸 OpenProcess 探针若不
+    开它，提权守卫会永远失败（09-23 时宿主 DACL 尚放行，之后收紧）。
+
+    返回的 err=1300 (ERROR_NOT_ALL_ASSIGNED) 表示令牌根本没有该特权
+    （非管理员），1300 且 AdjustTokenPrivileges 返回 TRUE 属预期失败语义。
+    """
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32_local = ctypes.WinDLL("kernel32", use_last_error=True)
+    SE_DEBUG_PRIVILEGE_NAME = "SeDebugPrivilege"
+    SE_PRIVILEGE_ENABLED = 0x00000002
+    TOKEN_ADJUST_PRIVILEGES = 0x0020
+    TOKEN_QUERY = 0x0008
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [
+            ("PrivilegeCount", wintypes.DWORD),
+            ("Privileges", LUID_AND_ATTRIBUTES * 1),
+        ]
+
+    advapi32.OpenProcessToken.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.LookupPrivilegeValueW.argtypes = (
+        wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID))
+    advapi32.LookupPrivilegeValueW.restype = wintypes.BOOL
+    advapi32.AdjustTokenPrivileges.argtypes = (
+        wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TOKEN_PRIVILEGES),
+        wintypes.DWORD, ctypes.POINTER(TOKEN_PRIVILEGES),
+        ctypes.POINTER(wintypes.DWORD))
+    advapi32.AdjustTokenPrivileges.restype = wintypes.BOOL
+    kernel32_local.GetCurrentProcess.argtypes = []
+    kernel32_local.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32_local.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+            kernel32_local.GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(token)):
+        return False, ctypes.get_last_error()
+    try:
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(
+                None, SE_DEBUG_PRIVILEGE_NAME, ctypes.byref(luid)):
+            return False, ctypes.get_last_error()
+        tp = TOKEN_PRIVILEGES()
+        tp.PrivilegeCount = 1
+        tp.Privileges[0].Luid = luid
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+        if not advapi32.AdjustTokenPrivileges(
+                token, False, ctypes.byref(tp), 0, None, None):
+            return False, ctypes.get_last_error()
+        # AdjustTokenPrivileges 返回 TRUE 只代表调用成功；特权是否真的
+        # 授予要看 get_last_error：0 = 已授予，1300 = 令牌没有该特权。
+        return ctypes.get_last_error() == 0, ctypes.get_last_error()
+    finally:
+        kernel32_local.CloseHandle(token)
+
+
 def scan_hosts() -> list[dict]:
     """枚举全部 WUDFDiagnosticInfo，返回 {pid, rd3, is_rc003, instance} 列表。"""
     entries: list[dict] = []
