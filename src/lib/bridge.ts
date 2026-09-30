@@ -838,6 +838,30 @@ export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyCh
   return invoke<KeyChord | null>("set_voice_hold_hotkey", { hotkey });
 }
 
+/**
+ * 连接页选择的输入工具（2026-09-30 设计稿 v3）。
+ *
+ * 它只决定连接页展示哪套引导（快捷键建议、准备清单、是否显示"支持更多
+ * 输入工具"开关）；真正生效的语音路径永远是"按住说话快捷键"本身。
+ * `null` = 用户从未选择过（老配置）：界面按当前快捷键推断一次后落存。
+ */
+export type VoiceInputTool = "wechat" | "doubao" | "other";
+
+export async function getVoiceInputTool(): Promise<VoiceInputTool | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<VoiceInputTool | null>("get_voice_input_tool");
+}
+
+export async function setVoiceInputTool(tool: VoiceInputTool): Promise<VoiceInputTool> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法保存输入工具设置");
+  }
+  const saved = await invoke<VoiceInputTool | null>("set_voice_input_tool", { tool });
+  return saved ?? tool;
+}
+
 /** 检查应用更新；浏览器预览下返回"无更新"占位（不发起网络请求）。 */
 export async function checkAppUpdate(): Promise<AppUpdateInfo> {
   if (!isTauriRuntime()) {

@@ -1,4 +1,4 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
@@ -17,6 +17,25 @@ type ShortcutCaptureHandler = (edge: {
  */
 async function settleVoiceCapture(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 260));
+  await flushPromises();
+}
+
+/** 当前选中（高亮）的输入工具卡片。 */
+function selectedToolCard(wrapper: VueWrapper): string {
+  return wrapper.find(".tool-card.selected").find("strong").text();
+}
+
+/** 切到"其他工具"并进入自定义组合键录入（录入入口在 feature flag 之后）。 */
+async function startCustomCapture(wrapper: VueWrapper): Promise<void> {
+  await wrapper
+    .findAll(".tool-card")
+    .find((card) => card.text().includes("其他工具"))!
+    .trigger("click");
+  await flushPromises();
+  await wrapper
+    .findAll(".chip-select .chip")
+    .find((chip) => chip.text() === "自定义组合键")!
+    .trigger("click");
   await flushPromises();
 }
 
@@ -96,6 +115,8 @@ const mocks = vi.hoisted(() => ({
   openVbCableDownloadPage: vi.fn(),
   getVoiceHoldHotkey: vi.fn(),
   setVoiceHoldHotkey: vi.fn(),
+  getVoiceInputTool: vi.fn(),
+  setVoiceInputTool: vi.fn(),
   startShortcutCapture: vi.fn(),
   stopShortcutCapture: vi.fn(),
   subscribeShortcutCaptureEdges: vi.fn(),
@@ -115,6 +136,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
     getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
     setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
+    getVoiceInputTool: mocks.getVoiceInputTool,
+    setVoiceInputTool: mocks.setVoiceInputTool,
     startShortcutCapture: mocks.startShortcutCapture,
     stopShortcutCapture: mocks.stopShortcutCapture,
     subscribeShortcutCaptureEdges: mocks.subscribeShortcutCaptureEdges,
@@ -142,6 +165,15 @@ describe("VB-CABLE first-launch guidance", () => {
       keys: ["left_control", "left_windows"],
     });
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getRc003TaskStatus.mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
     mocks.startShortcutCapture.mockResolvedValue([]);
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
@@ -263,36 +295,136 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  // 入口隐藏守卫（2026-09-28 Andy：修改快捷键功能有问题先下入口）。
-  // 预设按钮（默认/关闭）必须保留；自定义录入按钮随
-  // feature-flags.VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED 回归。
-  it("修改快捷键入口隐藏时，默认与关闭预设按钮仍然可用", async () => {
+  // 输入工具卡片（2026-09-30 设计稿 v3）：选工具即自动落该工具的快捷键。
+  // 顺序固定为 豆包 > 微信 > 其他（Andy 要求豆包排第一）；选中态跟随持久化的
+  // 工具选择，而不是卡片顺序。
+  it("工具卡片顺序为豆包/微信/其他，选中态跟随已保存的工具选择", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    const presetTexts = wrapper
-      .findAll(".voice-hotkey-presets button")
-      .map((button) => button.text());
-    expect(presetTexts).not.toContain("修改快捷键");
-    expect(presetTexts).toContain("左 Ctrl + 左 Win（默认）");
-    expect(presetTexts).toContain("豆包输入法（右 Alt）");
-    expect(presetTexts).toContain("关闭");
+    const order = wrapper.findAll(".tool-card strong").map((node) => node.text());
+    expect(order).toEqual(["豆包输入法", "微信输入法", "其他工具"]);
+    expect(selectedToolCard(wrapper)).toBe("微信输入法");
+    // 微信不需要"支持更多输入工具"开关，面板不渲染它。
+    expect(wrapper.find(".capture-switch").exists()).toBe(false);
+    expect(wrapper.text()).toContain("微信输入法不需要「支持更多输入工具」开关");
     wrapper.unmount();
   });
 
-  it("可从微信输入法一键切回豆包右 Alt，不依赖已隐藏的自定义录入入口", async () => {
+  it("老配置没有工具选择时按当前快捷键推断并落存一次", async () => {
+    mocks.getVoiceInputTool.mockResolvedValue(null);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    const doubaoButton = wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "豆包输入法（右 Alt）")!;
-    expect(doubaoButton).toBeDefined();
-    await doubaoButton.trigger("click");
+    expect(selectedToolCard(wrapper)).toBe("豆包输入法");
+    expect(mocks.setVoiceInputTool).toHaveBeenCalledWith("doubao");
+    wrapper.unmount();
+  });
+
+  it("点豆包卡片：自动把快捷键设为右 Alt、落存工具选择并显示该工具的清单", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("豆包输入法"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceInputTool).toHaveBeenCalledWith("doubao");
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
+    expect(selectedToolCard(wrapper)).toBe("豆包输入法");
     expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
+    expect(wrapper.findAll(".checklist li").map((item) => item.text())).toEqual([
+      "1豆包麦克风选 CABLE Output",
+      "2豆包长按语音键选 右 Alt",
+      "3切到豆包后，按住遥控器语音键说话",
+    ]);
+    expect(wrapper.find(".capture-switch").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("点其他工具卡片：不改变当前快捷键，改为提供按键芯片与自定义占位", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("其他工具"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceInputTool).toHaveBeenCalledWith("other");
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+    const chips = wrapper.findAll(".chip-select .chip").map((chip) => chip.text());
+    expect(chips.slice(0, 3)).toEqual(["右 Alt", "左 Alt", "不按键"]);
+    // 自定义组合键入口：feature flag 关闭时是禁用占位，打开时是可点入口。
+    expect(chips[3]).toBe(
+      VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED ? "自定义组合键" : "自定义组合键（暂未开放）",
+    );
+    expect(wrapper.find(".chip-select .chip:disabled").exists()).toBe(
+      !VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED,
+    );
+    wrapper.unmount();
+  });
+
+  it("其他工具：选左 Alt 落盘左 Alt，选不按键落盘关闭", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("其他工具"))!
+      .trigger("click");
+    await flushPromises();
+
+    await wrapper
+      .findAll(".chip-select .chip")
+      .find((chip) => chip.text() === "左 Alt")!
+      .trigger("click");
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenLastCalledWith({ keys: ["left_alt"] });
+    expect(
+      wrapper.find(".chip-select .chip[aria-pressed='true']").text(),
+    ).toBe("左 Alt");
+
+    await wrapper
+      .findAll(".chip-select .chip")
+      .find((chip) => chip.text() === "不按键")!
+      .trigger("click");
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenLastCalledWith(null);
+    expect(
+      wrapper.find(".chip-select .chip[aria-pressed='true']").text(),
+    ).toBe("不按键");
+    wrapper.unmount();
+  });
+
+  it("默认工具为微信时，面板显示 左 Ctrl + 左 Win 且标记已自动设置", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const panel = wrapper.find(".setup-col:nth-child(2)");
+    expect(panel.text()).toContain("左 Ctrl");
+    expect(panel.text()).toContain("左 Win");
+    expect(panel.text()).toContain("已自动设置");
+    wrapper.unmount();
+  });
+
+  it("工具选择保存失败时回退到原工具并显示错误", async () => {
+    mocks.setVoiceInputTool.mockRejectedValueOnce(new Error("磁盘写入失败"));
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("豆包输入法"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(selectedToolCard(wrapper)).toBe("微信输入法");
+    expect(wrapper.text()).toContain("磁盘写入失败");
+    expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -300,11 +432,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
     await flushPromises();
@@ -314,12 +442,8 @@ describe("VB-CABLE first-launch guidance", () => {
     await settleVoiceCapture();
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
     expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
-    // 默认项与关闭项仍在列，误录可一键回退。
-    const presetTexts = wrapper
-      .findAll(".voice-hotkey-presets button")
-      .map((button) => button.text());
-    expect(presetTexts).toContain("左 Ctrl + 左 Win（默认）");
-    expect(presetTexts).toContain("关闭");
+    // 其他工具的按键芯片应与落盘结果一致（误录可一键换回）。
+    expect(wrapper.find(".chip-select .chip[aria-pressed='true']").text()).toBe("右 Alt");
     wrapper.unmount();
   });
 
@@ -327,11 +451,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     mocks.captureEdgeHandler!({ key: "escape", isPressed: true });
     await flushPromises();
@@ -342,32 +462,15 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("keeps 左 Ctrl + 左 Win as the default hold-to-talk hotkey", async () => {
-    const wrapper = mount(ConnectionPage, { props: { runtime } });
-    await flushPromises();
-
-    const defaultButton = wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text().includes("默认"))!;
-    expect(defaultButton.text()).toBe("左 Ctrl + 左 Win（默认）");
-    expect(defaultButton.classes()).toContain("primary-button");
-    expect(defaultButton.attributes("disabled")).toBeDefined();
-    expect(wrapper.text()).toContain("默认快捷键：左 Ctrl + 左 Win");
-  });
-
   it.skipIf(!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED)("records a custom hold-to-talk chord and only saves it after every key is released", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
     expect(mocks.startShortcutCapture).toHaveBeenCalledOnce();
     expect(mocks.captureEdgeHandler).not.toBeNull();
     expect(wrapper.find(".voice-hotkey-capture").text()).toContain(
-      "请按下微信输入法当前设置的语音键",
+      "请按下你输入工具当前设置的语音键",
     );
 
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
@@ -397,11 +500,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
     expect(wrapper.find(".voice-hotkey-capture").text()).toContain("请先松开所有按键");
     expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
 
@@ -428,11 +527,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     // 回归（Bugs/2026-09-27）：左 Ctrl + 左 Win 先松 Win、后松 Ctrl，
     // 不能把组合截断成只剩 Ctrl。
@@ -460,11 +555,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     // 物理按下：只有左 Ctrl 的真实边沿（左 Win 被输入法吞掉）。
     mocks.captureEdgeHandler!({ key: "left_control", isPressed: true, source: "real" });
@@ -492,11 +583,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     mocks.captureEdgeHandler!({ key: "left_windows", isPressed: true });
     mocks.captureEdgeHandler!({ key: "left_control", isPressed: true });
@@ -522,11 +609,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     // 只有左 Ctrl 的真实边沿到达（左 Win 被吞，半截会话）。
     mocks.captureEdgeHandler!({ key: "left_control", isPressed: true, source: "real" });
@@ -546,11 +629,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: true });
     mocks.captureEdgeHandler!({ key: "right_alt", isPressed: false });
@@ -567,11 +646,7 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper
-      .findAll(".voice-hotkey-presets button")
-      .find((button) => button.text() === "修改快捷键")!
-      .trigger("click");
-    await flushPromises();
+    await startCustomCapture(wrapper);
 
     mocks.captureEdgeHandler!({ key: "right_windows", isPressed: true });
     mocks.captureEdgeHandler!({ key: "right_control", isPressed: true });
@@ -619,6 +694,9 @@ describe("connection page rc003 capture switch", () => {
     mocks.listAudioEndpoints.mockResolvedValue([]);
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    // 开关只在需要它的工具面板里渲染：这里固定为豆包（要求开启）。
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.startShortcutCapture.mockResolvedValue([]);
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
@@ -636,8 +714,8 @@ describe("connection page rc003 capture switch", () => {
     mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: true }));
     let wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.find("#connection-capture-switch").exists()).toBe(true);
-    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+    expect(wrapper.find(".capture-switch").exists()).toBe(true);
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       true,
     );
     wrapper.unmount();
@@ -646,21 +724,34 @@ describe("connection page rc003 capture switch", () => {
     mocks.getRc003TaskStatus.mockRejectedValue(new Error("ipc down"));
     wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.find("#connection-capture-switch").exists()).toBe(false);
+    expect(wrapper.find(".capture-switch").exists()).toBe(false);
     expect(wrapper.find(".toggle-placeholder").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("豆包面板在开关未开启时提示「还差一步」，开启后提示已就绪", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("需要开启");
+    expect(wrapper.text()).toContain("还差一步");
+
+    await wrapper.find(".capture-switch").setValue(true);
+    await flushPromises();
+    expect(wrapper.text()).toContain("已开启");
+    expect(wrapper.text()).not.toContain("还差一步");
     wrapper.unmount();
   });
 
   it("已授权（authorizationRequired=false）时开启直接执行，不开确认弹窗", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    await wrapper.find("#connection-capture-switch").setValue(true);
+    await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
 
     expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
     expect(mocks.disableRc003Capture).not.toHaveBeenCalled();
     expect(wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" }).exists()).toBe(false);
-    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       true,
     );
     wrapper.unmount();
@@ -673,13 +764,13 @@ describe("connection page rc003 capture switch", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper.find("#connection-capture-switch").setValue(true);
+    await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
     // 未确认：不调 enable，开关 DOM 写回关闭。
     expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
     const dialog = wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" });
     expect(dialog.exists()).toBe(true);
-    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       false,
     );
 
@@ -687,7 +778,7 @@ describe("connection page rc003 capture switch", () => {
     await dialog.vm.$emit("confirm");
     await flushPromises();
     expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
-    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       true,
     );
     wrapper.unmount();
@@ -700,10 +791,10 @@ describe("connection page rc003 capture switch", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    await wrapper.find("#connection-capture-switch").setValue(true);
+    await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
 
-    expect((wrapper.find("#connection-capture-switch").element as HTMLInputElement).checked).toBe(
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       false,
     );
     expect(wrapper.text()).toContain("授权未完成（UAC 被取消）");

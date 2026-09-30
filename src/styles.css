@@ -488,9 +488,155 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .endpoint-select-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .endpoint-count { font-size: 12.5px; }
 
+/* ---- 连接页改版（2026-09-30 设计稿 v3）：设备行 + 语音输入设置三步 ----
+   设备卡等高并排；设置区通栏三列，切换输入工具时三列联动（组件侧 v-if）。 */
+.device-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr);
+  gap: 14px;
+  align-items: stretch;
+}
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.setup-card { margin-top: 14px; }
+.setup-card > .card-title-row p { margin: 3px 0 0; font-size: 13px; }
+.setup-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 12px;
+}
+.setup-col { min-width: 0; }
+.setup-col + .setup-col { padding-left: 16px; border-left: 1px solid var(--border); }
+.col-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.step-index {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-surface-strong);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.col-head strong { font-size: 13.5px; }
+.tool-list { display: grid; gap: 7px; }
+.tool-card {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 8px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-control);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+.tool-card:hover { border-color: var(--accent-border); background: var(--accent-hover); }
+.tool-card.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  box-shadow: inset 0 0 0 1px var(--accent-surface-strong);
+}
+.tool-card:disabled { cursor: wait; opacity: 0.7; }
+.tool-card .radio {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface-raised);
+}
+.tool-card.selected .radio {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--surface-raised), inset 0 0 0 8px var(--accent);
+}
+.tool-card strong { display: block; font-size: 13.5px; }
+.tool-card small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.chord-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13.5px; }
+.key {
+  display: inline-block;
+  min-width: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: 0 1px 0 var(--shadow-control);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: center;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.pill.ok { color: var(--success-text); background: var(--success-surface); }
+.pill.warn { color: var(--warning-text); background: var(--warning-surface); }
+.tiny { margin: 7px 0 0; font-size: 12.5px; line-height: 1.45; }
+.switch-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.switch-state { font-size: 12.5px; font-weight: 600; }
+.switch-state.ok { color: var(--success-text); }
+.switch-state.warn { color: var(--warning-text); }
+.chip-select { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.chip-select .chip { min-height: 28px; font-size: 12.5px; }
+.chip-select .chip[aria-pressed="true"] {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.chip-select .chip:disabled { cursor: not-allowed; opacity: 0.55; }
+.callout-small { margin-top: 9px; font-size: 12.5px; }
+.checklist { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.checklist li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.checklist .mark { color: var(--muted); font-size: 12.5px; font-weight: 600; text-align: right; }
+.faq { margin-top: 12px; }
+.faq ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.55;
+  font-size: 13px;
+  color: var(--text-subtle-strong);
+}
+/* 开关对账中的占位（与按键页 / 关于页同尺寸；本页样式集中在全局表）。 */
+.toggle-placeholder { width: 34px; height: 20px; flex: none; }
+
 @media (max-width: 1020px) {
   .content { padding: 20px 22px 26px; }
   .two-column { grid-template-columns: 1fr; }
+  .device-row { grid-template-columns: 1fr; }
+  .setup-columns { grid-template-columns: 1fr; }
+  .setup-col + .setup-col {
+    padding-left: 0;
+    padding-top: 12px;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
   .usage-day-row { grid-template-columns: 82px minmax(120px, 1fr); }
   .usage-day-value { grid-column: 2; text-align: left; }
 }
