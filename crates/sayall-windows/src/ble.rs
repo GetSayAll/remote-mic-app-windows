@@ -1,4 +1,6 @@
-use crate::wetype_revive::{response_since, wetype_mic_observation, MicObservation, MicResponse};
+use crate::wetype_revive::{
+    reaction_verdict, response_since, wetype_mic_observation, MicObservation, WetypeReaction,
+};
 use crate::{
     audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff,
     remote_model_from_model_number, remote_model_from_name, send_input::KeyChord,
@@ -254,10 +256,15 @@ pub(crate) enum WorkerMessage {
     /// 串行执行，与会话结束路径无竞态。`attempt` 为本次重注入对应的
     /// 检测轮次（1 起）；`epoch` 为 armed 时的语音会话纪元（防跨会话
     /// 误伤，见 worker_loop 中 voice_session_epoch 注释）。
+    ///
+    /// `marker_baseline` 是**本会话**按下前的存活标记计数（不是本轮新取），
+    /// 使"微信输入法曾响应过本次按住"的正面证据在整个按住期间持续生效；
+    /// 本轮新的开麦基线在重注入前重新取样。
     RetryVoiceChord {
         attempt: u32,
         epoch: u64,
         baseline: Option<MicObservation>,
+        marker_baseline: u64,
     },
     Control {
         connection_generation: u64,
@@ -705,6 +712,7 @@ fn worker_loop(
                 attempt,
                 epoch,
                 baseline,
+                marker_baseline,
             } => {
                 // 微信输入法热键休眠的自动重试（同一次按住内完成）：
                 // 释放旧和弦边沿 → 重注入。在工作线程内串行执行，与
@@ -718,13 +726,19 @@ fn worker_loop(
                     gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
                     continue;
                 }
-                let retry_baseline = wetype_mic_observation();
-                if response_since(baseline, retry_baseline) != MicResponse::NotObserved {
+                let (verdict, evidence) = wetype_reaction(baseline, marker_baseline);
+                if verdict != WetypeReaction::NotReacted {
                     gatt_note(format!(
-                        "chord_retry skipped reason=mic_active_or_unknown epoch={epoch}"
+                        "chord_retry skipped reason={} evidence={evidence} attempt={attempt} epoch={epoch}",
+                        if verdict == WetypeReaction::Reacted {
+                            "wetype_alive"
+                        } else {
+                            "observation_unavailable"
+                        }
                     ));
                     continue;
                 }
+                let retry_mic_baseline = wetype_mic_observation();
                 let chord_configured = lock(&voice_hold_hotkey).clone();
                 if let (Some(chord), Some(old)) = (chord_configured, held_hotkey.as_ref()) {
                     if send_input.release(old).is_err() {
@@ -746,7 +760,8 @@ fn worker_loop(
                                 attempt,
                                 epoch,
                                 &voice_session_epoch,
-                                retry_baseline,
+                                retry_mic_baseline,
+                                marker_baseline,
                             );
                         }
                         Err(_) => {
@@ -1576,6 +1591,9 @@ fn handle_control(
             // DOWN，再开始音频会话；注入失败直接中止本次会话并统一释放。
             if let Some(chord) = lock(voice_hold_hotkey).clone() {
                 let mic_baseline = wetype_mic_observation();
+                // 存活标记基线：必须与开麦基线同在注入之前取样，否则本次和弦
+                // 自己的标记会被算成"基线内"而漏掉否决。
+                let marker_baseline = crate::key_suppressor::wetype_marker_count();
                 // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
                 // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
                 // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
@@ -1616,6 +1634,7 @@ fn handle_control(
                     epoch,
                     voice_session_epoch,
                     mic_baseline,
+                    marker_baseline,
                 );
             } else {
                 // 功能点日志：会话开始但未配置按住说话快捷键（无注入环节）。
@@ -2652,6 +2671,31 @@ const WETYPE_RETRY_SETTLE_MS: [u64; 3] = [2000, 3000, 5000];
 /// 最大重注入轮次（检测共 attempt 0..=3 四轮）。
 const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
 
+/// 合并微信输入法"本次按住是否已被触发"的两个独立判据，返回（裁决，证据来源）。
+///
+/// 证据来源只用于日志归因：`marker` = 钩子层看到微信输入法自注入的存活标记
+/// （0xFC break key，与版本解耦）；`mic` = ConsentStore 开麦观测；`unavailable`
+/// = 观测不可用；`none` = 两个判据都确认未触发（可执行恢复阶梯）。
+///
+/// 背景（2026-09-23 issue #118）：微信输入法 2.1.4.6 起录音不再写 ConsentStore，
+/// 单靠开麦观测会把"其实已在录音"判成未响应，随后重放和弦拆掉进行中的会话。
+/// 存活标记是正面证据，出现即否决恢复；判据缺失时退化为原行为，不比现状更差。
+fn wetype_reaction(
+    baseline: Option<MicObservation>,
+    marker_baseline: u64,
+) -> (WetypeReaction, &'static str) {
+    let mic = response_since(baseline, wetype_mic_observation());
+    let marker_now = crate::key_suppressor::wetype_marker_count();
+    let verdict = reaction_verdict(mic, marker_baseline, marker_now);
+    let evidence = match verdict {
+        WetypeReaction::Reacted if marker_now > marker_baseline => "marker",
+        WetypeReaction::Reacted => "mic",
+        WetypeReaction::Unknown => "unavailable",
+        WetypeReaction::NotReacted => "none",
+    };
+    (verdict, evidence)
+}
+
 fn spawn_wetype_check(
     state: &Arc<Mutex<ConnectionSnapshot>>,
     sender: Sender<WorkerMessage>,
@@ -2659,11 +2703,12 @@ fn spawn_wetype_check(
     epoch: u64,
     epoch_ref: &Arc<AtomicU64>,
     baseline: Option<MicObservation>,
+    marker_baseline: u64,
 ) {
     let state = Arc::clone(state);
     let epoch_ref = Arc::clone(epoch_ref);
     gatt_note(format!(
-        "wetype_check armed attempt={attempt} epoch={epoch} baseline_available={}",
+        "wetype_check armed attempt={attempt} epoch={epoch} baseline_available={} marker_baseline={marker_baseline}",
         baseline.is_some()
     ));
     std::thread::Builder::new()
@@ -2687,20 +2732,23 @@ fn spawn_wetype_check(
                 });
                 return;
             }
-            match response_since(baseline, wetype_mic_observation()) {
-                MicResponse::Observed => {
+            match wetype_reaction(baseline, marker_baseline) {
+                (WetypeReaction::Reacted, evidence) => {
+                    // marker_extra 是目标程序自定义的魔数（WeType = "WTYP"），
+                    // 只用于真机归因，不含用户数据。
                     gatt_note(format!(
-                        "wetype_check reacted=true attempt={attempt} epoch={epoch}"
+                        "wetype_check reacted=true attempt={attempt} epoch={epoch} evidence={evidence} marker_extra={:#X}",
+                        crate::key_suppressor::wetype_marker_last_extra()
                     ));
                     return;
                 }
-                MicResponse::Unknown => {
+                (WetypeReaction::Unknown, _) => {
                     gatt_note(format!(
                         "wetype_check skipped reason=observation_unavailable attempt={attempt} epoch={epoch}"
                     ));
                     return;
                 }
-                MicResponse::NotObserved => {}
+                (WetypeReaction::NotReacted, _) => {}
             }
             if attempt >= WETYPE_RETRY_MAX_ATTEMPT {
                 // 最后一轮仍未响应：放弃自动恢复，提示人工（唯一兜底）。
@@ -2741,9 +2789,15 @@ fn spawn_wetype_check(
                 });
                 return;
             }
-            if response_since(baseline, wetype_mic_observation()) != MicResponse::NotObserved {
+            let (verdict, evidence) = wetype_reaction(baseline, marker_baseline);
+            if verdict != WetypeReaction::NotReacted {
                 gatt_note(format!(
-                    "wetype_check skipped_retry reason=mic_active_or_unknown attempt={attempt} epoch={epoch}"
+                    "wetype_check skipped_retry reason={} evidence={evidence} attempt={attempt} epoch={epoch}",
+                    if verdict == WetypeReaction::Reacted {
+                        "wetype_alive"
+                    } else {
+                        "observation_unavailable"
+                    }
                 ));
                 return;
             }
@@ -2752,6 +2806,7 @@ fn spawn_wetype_check(
                 attempt: next_attempt,
                 epoch,
                 baseline,
+                marker_baseline,
             });
         })
         .ok();

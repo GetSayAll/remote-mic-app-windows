@@ -79,6 +79,47 @@ pub fn capture_mic_verdict(baseline: Option<u64>) -> &'static str {
     }
 }
 
+/// 微信输入法"本次按住是否真的被触发"的合并裁决。
+///
+/// 两个**相互独立**的证据源：
+/// - ConsentStore 开麦观测（历史判据，见本模块顶部说明）；
+/// - 钩子层观测到的微信输入法自注入标记（`0xFC` break key，extra="WTYP"）：
+///   其钩子存活时吞掉和弦的 LWin 边沿并注入自己的标记边沿对，休眠时无标记
+///   （2026-09-05 kb-live 实测，与开麦时间戳 100% 交叉一致，见 ATTRIBUTION.md）。
+///
+/// 2026-09-23 社区报告（issue #118 / PR #119）：微信输入法 2.1.4.6 起录音不再
+/// 写 ConsentStore，单靠开麦观测会把"其实已在录音"判成未响应，随后重放和弦
+/// 拆掉进行中的会话（长按约 2.9s 即断）。标记是**正面存活证据**，一旦在本次
+/// 按住期间出现即否决一切破坏性恢复动作；判据缺失时退化为原行为（只减不增，
+/// 绝不比现状更差）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WetypeReaction {
+    /// 已有正面证据证明本次按住触发了微信输入法。
+    Reacted,
+    /// 两个证据源都确认未触发：此时恢复阶梯（配置切换 + 重放和弦）仍可执行。
+    NotReacted,
+    /// 观测不可用，调用方不得据此做任何推断。
+    Unknown,
+}
+
+/// 合并裁决：标记证据优先于开麦观测（正面证据否决误判）。
+pub(crate) fn reaction_verdict(
+    mic: MicResponse,
+    marker_baseline: u64,
+    marker_now: u64,
+) -> WetypeReaction {
+    if marker_now > marker_baseline {
+        // 微信输入法自注入标记只可能来自它自己（0xFC break key + extra="WTYP"）：
+        // 出现即证明其钩子活着并已消费本次和弦，任何重放都是破坏性的。
+        return WetypeReaction::Reacted;
+    }
+    match mic {
+        MicResponse::Observed => WetypeReaction::Reacted,
+        MicResponse::NotObserved => WetypeReaction::NotReacted,
+        MicResponse::Unknown => WetypeReaction::Unknown,
+    }
+}
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
@@ -199,6 +240,52 @@ mod tests {
         let mut result = MicObservation::default();
         result.record(start, start + 1);
         result
+    }
+
+    #[test]
+    fn marker_evidence_vetoes_recovery_when_mic_probe_is_blind() {
+        // issue #118：WeType 2.1.4.6 起录音不再写 ConsentStore → 开麦观测判
+        // NotObserved，但钩子层仍看到它的自注入标记（说明它正在工作）。
+        // 必须判 Reacted：绝不重放和弦拆掉进行中的会话。
+        assert_eq!(
+            reaction_verdict(MicResponse::NotObserved, 7, 9),
+            WetypeReaction::Reacted
+        );
+    }
+
+    #[test]
+    fn dormant_hook_without_marker_and_without_mic_opening_stays_recoverable() {
+        // 2026-09-05 真休眠：无标记、无开麦 → NotReacted，恢复阶梯照旧可用。
+        assert_eq!(
+            reaction_verdict(MicResponse::NotObserved, 7, 7),
+            WetypeReaction::NotReacted
+        );
+    }
+
+    #[test]
+    fn marker_evidence_beats_unavailable_mic_observation() {
+        // 观测不可用但标记前进：已有正面存活证据，不得报"不可用"。
+        assert_eq!(
+            reaction_verdict(MicResponse::Unknown, 7, 8),
+            WetypeReaction::Reacted
+        );
+    }
+
+    #[test]
+    fn unavailable_mic_observation_without_marker_is_never_dormancy() {
+        // 失败安全保持：观测不可用且无标记 → Unknown（调用方不得据此恢复）。
+        assert_eq!(
+            reaction_verdict(MicResponse::Unknown, 7, 7),
+            WetypeReaction::Unknown
+        );
+    }
+
+    #[test]
+    fn mic_opening_without_marker_is_still_reacted() {
+        assert_eq!(
+            reaction_verdict(MicResponse::Observed, 7, 7),
+            WetypeReaction::Reacted
+        );
     }
 
     #[test]
