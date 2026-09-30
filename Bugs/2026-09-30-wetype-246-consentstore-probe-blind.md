@@ -56,7 +56,10 @@
 
 **只减不增**：标记通道缺失（例如未来版本不再注入标记）时裁决退化为原行为，不会比修复前更差；真休眠场景（无标记 + 无开麦，2026-09-05 七次发作的原型）仍可执行恢复阶梯，人工兜底提示也仍可达。
 
-日志：健康会话 `wetype_check reacted=true ... evidence=mic|marker marker_extra=0x57545950`；被门禁拦下 `chord_retry skipped reason=wetype_alive evidence=marker`；观测不可用 `reason=observation_unavailable`。标记计数与 extra 魔数不含路径、语音或设备身份。
+日志：健康会话 `wetype_check reacted=true ... evidence=mic|marker mic=observed|not_observed marker_extra=0x57545950`；
+被门禁拦下 `chord_retry skipped reason=wetype_alive evidence=marker mic=not_observed`；观测不可用 `reason=observation_unavailable`。
+`mic=` 与 `evidence=` 分开记录，使"盲判"（开麦没看到但标记命中）与"双通道同时命中"可区分。
+标记计数与 extra 魔数不含路径、语音或设备身份。
 
 ## 验证
 
@@ -100,8 +103,12 @@ SHA-256 `5e8ac7c8…`）在装有微信输入法 **2.1.4.6**（`wetype_renderer/
 - `deferred`：**盲判场景未复现**，因此"门禁真的挡住了破坏性重放"这一步尚未被真机证明。
   本次会话窗口里开麦通道也正常（ConsentStore `wetype_update.exe` 条目
   19:44:33→19:44:38 与第 98 次会话时间一一对应），两条判据同时可用。
-- 待改进（下一次取证前）：`evidence=` 只报先命中的那条，无法区分"标记与开麦同时命中"
-  与"只有标记命中"。应补记开麦判据本身的结果，才能在复现窗口判定门禁是否承重。
+- 待改进（已实现，2026-09-30 第二版）：`evidence=` 只报先命中的那条，无法区分"标记与开麦同时命中"
+  与"只有标记命中"。现已在全部四处判定日志中补记开麦判据自身结果 `mic=observed|not_observed|unknown`：
+  `evidence=marker mic=not_observed` 即盲判形态（门禁承重），`evidence=marker mic=observed` 即双通道同时命中。
+  下一次 `reacted=false` 出现时，凭这两行即可定论：随后跟
+  `chord_retry skipped reason=wetype_alive` 且长按继续 ⇒ 修复成立；
+  随后跟 `reviving` + `chord_retry result=ok` ⇒ 两个判据都缺席，本改动不覆盖。
 
 ### 长按自行停止的定性（用户提问）
 

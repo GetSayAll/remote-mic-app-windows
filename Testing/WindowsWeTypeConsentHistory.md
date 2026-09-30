@@ -73,12 +73,13 @@
 
 ## 日志判据
 
-默认诊断日志位于 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。健康会话通常包含（`evidence=mic` = ConsentStore 开麦观测；`evidence=marker` = 微信输入法自注入的 0xFC 存活标记，见 Bugs\2026-09-30-wetype-246-consentstore-probe-blind.md）：
+默认诊断日志位于 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。健康会话通常包含（`evidence=mic` = ConsentStore 开麦观测；`evidence=marker` = 微信输入法自注入的 0xFC 存活标记，见 Bugs\2026-09-30-wetype-246-consentstore-probe-blind.md；`mic=` 单独记录开麦判据自身结果，用于识别"盲判"）：
 
 ```text
 wetype_check armed attempt=0 ... marker_baseline=<n>
-wetype_check reacted=true attempt=0 ... evidence=mic marker_extra=0x0
-wetype_check reacted=true attempt=0 ... evidence=marker marker_extra=0x57545950
+wetype_check reacted=true attempt=0 ... evidence=mic mic=observed marker_extra=0x0
+wetype_check reacted=true attempt=0 ... evidence=marker mic=observed marker_extra=0x57545950
+wetype_check reacted=true attempt=0 ... evidence=marker mic=not_observed marker_extra=0x57545950   ← 盲判被门禁拦住（正常）
 ```
 
 持续按住且 WeType 已开始录音时，不应出现同一会话的：

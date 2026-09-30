@@ -33,6 +33,18 @@ pub(crate) enum MicResponse {
     Unknown,
 }
 
+impl MicResponse {
+    /// 诊断日志用的开麦判据结果标记。与标记判据分别记录，才能在复现窗口区分
+    /// "两条通道同时命中"与"只有标记命中"（后者正是 issue #118 的盲判形态）。
+    pub(crate) fn as_log_str(self) -> &'static str {
+        match self {
+            MicResponse::Observed => "observed",
+            MicResponse::NotObserved => "not_observed",
+            MicResponse::Unknown => "unknown",
+        }
+    }
+}
+
 pub(crate) fn response_since(
     baseline: Option<MicObservation>,
     current: Option<MicObservation>,
@@ -240,6 +252,19 @@ mod tests {
         let mut result = MicObservation::default();
         result.record(start, start + 1);
         result
+    }
+
+    #[test]
+    fn mic_response_log_tokens_are_distinct_and_stable() {
+        // 三个标记必须互不相同，否则日志无法区分"盲判"（开麦 not_observed 而
+        // 标记命中）与"两条通道同时命中"。
+        assert_eq!(MicResponse::Observed.as_log_str(), "observed");
+        assert_eq!(MicResponse::NotObserved.as_log_str(), "not_observed");
+        assert_eq!(MicResponse::Unknown.as_log_str(), "unknown");
+        assert_ne!(
+            MicResponse::Observed.as_log_str(),
+            MicResponse::NotObserved.as_log_str()
+        );
     }
 
     #[test]

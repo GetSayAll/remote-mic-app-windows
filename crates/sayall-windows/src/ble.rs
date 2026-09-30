@@ -1,5 +1,6 @@
 use crate::wetype_revive::{
-    reaction_verdict, response_since, wetype_mic_observation, MicObservation, WetypeReaction,
+    reaction_verdict, response_since, wetype_mic_observation, MicObservation, MicResponse,
+    WetypeReaction,
 };
 use crate::{
     audio::AudioRuntime, power::PowerNotifications, reconnect::ReconnectBackoff,
@@ -726,15 +727,16 @@ fn worker_loop(
                     gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
                     continue;
                 }
-                let (verdict, evidence) = wetype_reaction(baseline, marker_baseline);
+                let (verdict, evidence, mic) = wetype_reaction(baseline, marker_baseline);
                 if verdict != WetypeReaction::NotReacted {
                     gatt_note(format!(
-                        "chord_retry skipped reason={} evidence={evidence} attempt={attempt} epoch={epoch}",
+                        "chord_retry skipped reason={} evidence={evidence} mic={} attempt={attempt} epoch={epoch}",
                         if verdict == WetypeReaction::Reacted {
                             "wetype_alive"
                         } else {
                             "observation_unavailable"
-                        }
+                        },
+                        mic.as_log_str()
                     ));
                     continue;
                 }
@@ -2671,11 +2673,17 @@ const WETYPE_RETRY_SETTLE_MS: [u64; 3] = [2000, 3000, 5000];
 /// 最大重注入轮次（检测共 attempt 0..=3 四轮）。
 const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
 
-/// 合并微信输入法"本次按住是否已被触发"的两个独立判据，返回（裁决，证据来源）。
+/// 合并微信输入法"本次按住是否已被触发"的两个独立判据，返回
+/// （裁决，证据来源，开麦判据结果）。
 ///
 /// 证据来源只用于日志归因：`marker` = 钩子层看到微信输入法自注入的存活标记
 /// （0xFC break key，与版本解耦）；`mic` = ConsentStore 开麦观测；`unavailable`
 /// = 观测不可用；`none` = 两个判据都确认未触发（可执行恢复阶梯）。
+///
+/// 第三个返回值**始终**记录开麦判据自身的结果：`evidence=marker mic=not_observed`
+/// 就是 issue #118 的盲判形态（微信输入法在录音但 ConsentStore 没写），
+/// 而 `evidence=marker mic=observed` 说明两条通道同时命中——修复是否承重，
+/// 靠这一个字段即可在复现窗口判定。
 ///
 /// 背景（2026-09-23 issue #118）：微信输入法 2.1.4.6 起录音不再写 ConsentStore，
 /// 单靠开麦观测会把"其实已在录音"判成未响应，随后重放和弦拆掉进行中的会话。
@@ -2683,7 +2691,7 @@ const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
 fn wetype_reaction(
     baseline: Option<MicObservation>,
     marker_baseline: u64,
-) -> (WetypeReaction, &'static str) {
+) -> (WetypeReaction, &'static str, MicResponse) {
     let mic = response_since(baseline, wetype_mic_observation());
     let marker_now = crate::key_suppressor::wetype_marker_count();
     let verdict = reaction_verdict(mic, marker_baseline, marker_now);
@@ -2693,7 +2701,7 @@ fn wetype_reaction(
         WetypeReaction::Unknown => "unavailable",
         WetypeReaction::NotReacted => "none",
     };
-    (verdict, evidence)
+    (verdict, evidence, mic)
 }
 
 fn spawn_wetype_check(
@@ -2733,22 +2741,25 @@ fn spawn_wetype_check(
                 return;
             }
             match wetype_reaction(baseline, marker_baseline) {
-                (WetypeReaction::Reacted, evidence) => {
+                (WetypeReaction::Reacted, evidence, mic) => {
                     // marker_extra 是目标程序自定义的魔数（WeType = "WTYP"），
-                    // 只用于真机归因，不含用户数据。
+                    // 只用于真机归因，不含用户数据。mic= 记录开麦判据自身结果，
+                    // 用于区分"盲判"与"两条通道同时命中"。
                     gatt_note(format!(
-                        "wetype_check reacted=true attempt={attempt} epoch={epoch} evidence={evidence} marker_extra={:#X}",
+                        "wetype_check reacted=true attempt={attempt} epoch={epoch} evidence={evidence} mic={} marker_extra={:#X}",
+                        mic.as_log_str(),
                         crate::key_suppressor::wetype_marker_last_extra()
                     ));
                     return;
                 }
-                (WetypeReaction::Unknown, _) => {
+                (WetypeReaction::Unknown, _, mic) => {
                     gatt_note(format!(
-                        "wetype_check skipped reason=observation_unavailable attempt={attempt} epoch={epoch}"
+                        "wetype_check skipped reason=observation_unavailable attempt={attempt} epoch={epoch} mic={}",
+                        mic.as_log_str()
                     ));
                     return;
                 }
-                (WetypeReaction::NotReacted, _) => {}
+                (WetypeReaction::NotReacted, _, _) => {}
             }
             if attempt >= WETYPE_RETRY_MAX_ATTEMPT {
                 // 最后一轮仍未响应：放弃自动恢复，提示人工（唯一兜底）。
@@ -2789,15 +2800,16 @@ fn spawn_wetype_check(
                 });
                 return;
             }
-            let (verdict, evidence) = wetype_reaction(baseline, marker_baseline);
+            let (verdict, evidence, mic) = wetype_reaction(baseline, marker_baseline);
             if verdict != WetypeReaction::NotReacted {
                 gatt_note(format!(
-                    "wetype_check skipped_retry reason={} evidence={evidence} attempt={attempt} epoch={epoch}",
+                    "wetype_check skipped_retry reason={} evidence={evidence} mic={} attempt={attempt} epoch={epoch}",
                     if verdict == WetypeReaction::Reacted {
                         "wetype_alive"
                     } else {
                         "observation_unavailable"
-                    }
+                    },
+                    mic.as_log_str()
                 ));
                 return;
             }
