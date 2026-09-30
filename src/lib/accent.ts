@@ -3,6 +3,7 @@ import {
   subscribeAccentChanges,
   type AccentRgb,
 } from "./bridge";
+import { reportFrontendEvent } from "./frontend-diagnostics";
 
 export type { AccentRgb } from "./bridge";
 
@@ -196,12 +197,24 @@ export async function initializeAccentColor(): Promise<void> {
     console.warn(
       "feature=accent event=initialized result=fallback reason=system_accent_unavailable",
     );
+    reportFrontendEvent({
+      event: "system_accent",
+      phase: "completed",
+      result: "failed",
+      reason: "system_accent_unavailable",
+    });
     return;
   }
   applyAccentPalette(currentDocumentTheme());
   console.info(
     `feature=accent event=initialized result=passed r=${rawAccent.r} g=${rawAccent.g} b=${rawAccent.b}`,
   );
+  reportFrontendEvent({
+    event: "system_accent",
+    phase: "completed",
+    result: "passed",
+    reason: "accent_applied",
+  });
 
   try {
     removeChangeListener = await subscribeAccentChanges((color) => {
@@ -210,9 +223,23 @@ export async function initializeAccentColor(): Promise<void> {
       console.info(
         `feature=accent event=changed result=passed r=${color.r} g=${color.g} b=${color.b}`,
       );
+      // 诊断日志只在 Rust 侧记到"广播到达"（accent_color action=watcher_message）；
+      // 这一条记录事件确实穿透到前端并重注入成功，两条合起来覆盖完整链路。
+      reportFrontendEvent({
+        event: "system_accent_change",
+        phase: "completed",
+        result: "passed",
+        reason: "accent_applied",
+      });
     });
   } catch {
     console.warn("feature=accent event=fallback reason=change_listener_failed");
+    reportFrontendEvent({
+      event: "system_accent_change",
+      phase: "completed",
+      result: "failed",
+      reason: "change_listener_failed",
+    });
   }
 }
 

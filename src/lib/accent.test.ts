@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSystemAccentColor, subscribeAccentChanges } from "./bridge";
+import { reportFrontendEvent } from "./frontend-diagnostics";
 import {
   applyAccentPalette,
   contrastRatio,
@@ -17,8 +18,13 @@ vi.mock("./bridge", () => ({
   isTauriRuntime: () => false,
 }));
 
+vi.mock("./frontend-diagnostics", () => ({
+  reportFrontendEvent: vi.fn(),
+}));
+
 const getAccentMock = vi.mocked(getSystemAccentColor);
 const subscribeMock = vi.mocked(subscribeAccentChanges);
+const reportMock = vi.mocked(reportFrontendEvent);
 
 const WINDOWS_BLUE: AccentRgb = { r: 0, g: 120, b: 212 };
 const WINDOWS_GOLD: AccentRgb = { r: 255, g: 200, b: 61 };
@@ -158,6 +164,7 @@ describe("initializeAccentColor", () => {
   beforeEach(() => {
     getAccentMock.mockReset();
     subscribeMock.mockReset().mockResolvedValue(() => undefined);
+    reportMock.mockReset();
     vi.spyOn(console, "info").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     document.documentElement.style.removeProperty("--accent");
@@ -192,6 +199,24 @@ describe("initializeAccentColor", () => {
     expect(console.warn).toHaveBeenCalledWith(
       expect.stringContaining("feature=accent"),
     );
+    expect(reportMock).toHaveBeenCalledWith({
+      event: "system_accent",
+      phase: "completed",
+      result: "failed",
+      reason: "system_accent_unavailable",
+    });
+  });
+
+  it("读取成功：诊断日志记录 accent_applied（可一次日志定位）", async () => {
+    getAccentMock.mockResolvedValue(WINDOWS_BLUE);
+    await initializeAccentColor();
+
+    expect(reportMock).toHaveBeenCalledWith({
+      event: "system_accent",
+      phase: "completed",
+      result: "passed",
+      reason: "accent_applied",
+    });
   });
 
   it("主题切换：applyAccentPalette 按新主题重算变量", async () => {
@@ -224,5 +249,11 @@ describe("initializeAccentColor", () => {
     expect(after).not.toBe(before);
     expect(after).not.toBe("rgb(255, 200, 61)"); // 浅色主题下被 clamp 到白字可读
     expect(contrastAgainstWhite(parseRgb(after))).toBeGreaterThanOrEqual(4.5);
+    expect(reportMock).toHaveBeenCalledWith({
+      event: "system_accent_change",
+      phase: "completed",
+      result: "passed",
+      reason: "accent_applied",
+    });
   });
 });
