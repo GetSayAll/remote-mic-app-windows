@@ -17,6 +17,19 @@
 - Preview 的 CI 未签名 NSIS artifact 只能用于受限验收，不能宣称为公开可信安装包；公开分发需同时满足 Authenticode（若流程已启用）、updater minisign 签名、SHA-256 和来源元数据要求。
 - Tag、Release Notes、资产和 `latest.json` 建立后视为不可变。内容变化回到普通 PR，使用新版本/Build；不得覆盖旧 Tag 或资产。
 
+## 版本号唯一来源（2026-09-30 收敛）
+
+- 应用版本号**只写在** `src-tauri/tauri.conf.json` 的 `version`。安装包文件名、exe 的
+  版本资源、关于页显示、更新器比较、诊断日志的 `app_version` 全部由它派生。
+- 改版本号 = 改这一行。`Cargo.lock` 里的 crate 版本是占位 `0.0.0`，不随应用版本变化，
+  因此发布只需一个文件的一行 diff。
+- 不要在两处维护版本号：`Cargo.toml` 的 `[workspace.package] version` 是内部 crate 的
+  占位值，`package.json` 不再带 `version`。把版本号写回这两处既不会改变产物，又会让
+  安装包/关于页与仓库里的数字重新漂移。
+- 守卫：`src-tauri` 的单元测试 `app_version_comes_from_tauri_config` 核对运行期
+  `package_info().version` 与 config 一致（删掉 config 的 `version` 会同时丢掉 exe 的
+  版本资源并让测试失败）；`generate-updater-manifest.ps1` 继续强制 Tag 与 config 版本一致。
+
 ## Preview
 
 1. 先完成本地测试包的构建和验证，并向用户报告结果；没有用户随后给出的明确预览发布指令时，到此停止。
