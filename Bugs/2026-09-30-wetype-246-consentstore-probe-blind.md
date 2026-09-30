@@ -4,7 +4,8 @@
   社区修复尝试：PR [#119](https://github.com/GetSayAll/remote-mic-app-windows/pull/119)（未合入）。
 - 发现：2026-09-23；本仓处理：2026-09-30。
 - 状态：**症状在本机可复现**（0.3.0 + WeType 2.1.4.6，2026-09-30）；改动单元验证 `passed`；
-  真机验收 `deferred`（需在复现时刻用新构建采集 `evidence=marker`，见"验证"节）。
+  **真机部分验证 `passed`**（标记通道在 2.1.4.6 上成立、长按 59.9s 不被打断），
+  **门禁承重部分 `deferred`**（本次未复现盲判），见"真机验收"节。
 - 影响版本：0.2.12 起（开麦观测判据自 0.2.3 引入），0.3.0 仍存在。
 
 ## 本机证据（2026-09-30，Windows + WeType 2.1.4.6 + 0.3.0）
@@ -60,10 +61,10 @@
 ## 验证
 
 - 单元 `passed`：`wetype_revive::tests::{marker_evidence_vetoes_recovery_when_mic_probe_is_blind, dormant_hook_without_marker_and_without_mic_opening_stays_recoverable, marker_evidence_beats_unavailable_mic_observation, unavailable_mic_observation_without_marker_is_never_dormancy, mic_opening_without_marker_is_still_reacted}`；`key_suppressor::tests::only_injected_wetype_marker_counts_as_liveness_evidence`；`cargo test --workspace` 全绿（含 `cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation`）。
-- 真机 `deferred`（**本机具备条件**，WeType 2.1.4.6 + 遥控器）：用本分支的新构建按住语音键若干次（含 ≥15s 长按），在能复现 `reacted=false` 的时段采集判据：
-  - 若出现 `chord_retry skipped reason=wetype_alive evidence=marker`：说明那些 `reacted=false` 是**盲判**（WeType 实际在工作），门禁按设计挡住了破坏性重放 → #118 修复在本机得到验证。
-  - 若始终只有 `reacted=true ... evidence=mic`：说明该时段判据正常，需等到复现窗口再采；标记通道是否可用另需一次 `evidence=marker` 观测佐证。
-  - 若长按期间出现 `wetype_check skipped_retry reason=observation_unavailable`：说明标记也缺席且开麦不可用，此时按设计不动手（保持按住）。
+- 真机 `passed`（2026-09-30，本机 WeType 2.1.4.6，构建 `c9a1878`）：9 次会话（2.6–59.9s，含 3 次 ≥49s 长按）全部
+  `reacted=true evidence=marker marker_extra=0x57545950`，零 `reacted=false`／零 `reviving`／零 `chord_retry`，
+  长按不断线；`observation_unavailable` 0 次。**边界**：本次开麦通道也正常，盲判未复现，
+  "门禁真的承重"仍为 `deferred`——需在复现窗口复测。
 - 判据与用例见 [Testing/WindowsWeTypeConsentHistory.md](../Testing/WindowsWeTypeConsentHistory.md)。
 - 回退边界：若真机显示 2.1.4.6 在某些时段既不写 ConsentStore **也不注入标记**，本改动对那种时段无效，需临时采用 PR #119 式开关（默认关闭自动恢复）——但需同时修掉其连带问题：默认关闭会让真休眠用户既失去自动恢复、也看不到"打开微信输入法界面"的人工提示。
 
@@ -78,6 +79,39 @@
   但排障时需注意该混淆项。
 - 标记观测依赖 key_suppressor 的常驻 LL 钩子；钩子未就绪（应用刚启动、线程退出中）时
   计数不前进，裁决退化为修复前行为。
+
+## 真机验收（2026-09-30，本机，WeType 2.1.4.6，构建 `c9a1878`）
+
+用本分支构建的本地包（`artifacts/windows-preview/无线麦 SayAll_0.3.0_x64-setup.exe`，
+SHA-256 `5e8ac7c8…`）在装有微信输入法 **2.1.4.6**（`wetype_renderer/server/update` 进程版本均为 2.1.4.6）
+的机器上做 9 次按住会话（2.6s ~ 59.9s，含 3 次 ≥49s 长按）：
+
+| 观测 | 结果 |
+|---|---|
+| `wetype_check reacted=true ... evidence=marker marker_extra=0x57545950` | 9/9 会话 |
+| `reacted=false` / `reviving` / `chord_retry` | 0 / 0 / 0 |
+| 门禁拦截（`reason=wetype_alive`） | 0（本次未出现盲判，无需拦截） |
+| 长按是否被打断 | 否：13.9s / 14.8s / 15.9s / 31.1s / 49.4s / 52.5s / **59.9s** 全部连续到松手 |
+
+**结论（分项）**：
+
+- `passed`：**0xFC 存活标记在 2.1.4.6 上确实存在**（extra 恰为 "WTYP" = `0x57545950`），
+  本改动依赖的观测通道在真机成立；长按期间无任何和弦重放，长按不断线。
+- `deferred`：**盲判场景未复现**，因此"门禁真的挡住了破坏性重放"这一步尚未被真机证明。
+  本次会话窗口里开麦通道也正常（ConsentStore `wetype_update.exe` 条目
+  19:44:33→19:44:38 与第 98 次会话时间一一对应），两条判据同时可用。
+- 待改进（下一次取证前）：`evidence=` 只报先命中的那条，无法区分"标记与开麦同时命中"
+  与"只有标记命中"。应补记开麦判据本身的结果，才能在复现窗口判定门禁是否承重。
+
+### 长按自行停止的定性（用户提问）
+
+第 97 次会话按住 **59.92s** 后停止，停止前 0.086s 收到**遥控器**发来的停止通知
+（`direction=C preview=[00 02]`），而本应用侧全程健康：`MIC_EXTEND`（`T [0E 61]`）每 ~2.5s
+一次无缺口，音频提交 956,458 样本 ≈ 59.8s @16kHz。代码中不存在会话时长上限，
+本次其余会话的结束点也各不相同（52.5s / 49.4s / 31.1s）。因此该次停止**来自遥控器/固件侧**，
+不是本应用或本轮改动所致；是否为固件约 60s 的语音会话上限，单次样本不足以定论，
+需再做一次"刻意不松手"的长按复验。相关固件怪癖另见
+[Bugs/2026-09-04-rc003-voice-quality.md](2026-09-04-rc003-voice-quality.md)（会话停止 60s 后的迟到停止通知）。
 
 ## 未采纳的社区方案要点（PR #119）
 
