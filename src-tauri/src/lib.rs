@@ -1469,10 +1469,15 @@ pub fn run() {
         .join("SayAll")
         .join("Logs")
         .join("sayall-diagnostic.log");
+    // 版本号唯一来源是 tauri.conf.json 的 `version`（安装包名、exe 版本资源、关于页
+    // 显示都取自它）。这里提前构建 context 并读同一个 package_info，日志里的
+    // app_version 才与用户安装的版本严格一致（此前用编译期 CARGO_PKG_VERSION，
+    // Cargo crate 版本是占位值 0.0.0，会写出与实际安装版本无关的版本号）。
+    let context = tauri::generate_context!();
     let log_ready = sayall_windows::initialize_diagnostic_log(
         log_path,
         sayall_windows::DiagnosticLogMetadata {
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_version: context.package_info().version.to_string(),
             app_build: option_env!("SAYALL_APP_BUILD")
                 .unwrap_or("unknown")
                 .to_owned(),
@@ -1958,7 +1963,7 @@ pub fn run() {
     // 退出收尾（2026-09-16）：`RunEvent::ExitRequested` 覆盖全部退出入口
     // （托盘"退出"、更新器安装完成后的退出、外部请求）。必须在此显式关闭 BLE
     // 会话——`run()` 收尾用的是 `std::process::exit`，析构不会执行。
-    let built = builder.build(tauri::generate_context!());
+    let built = builder.build(context);
     if let Err(_) = built.map(|app| {
         app.run(|handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
@@ -2025,6 +2030,23 @@ mod tests {
             classify_auto_trigger(&BridgeSnapshot::default()),
             AutoTriggerCheck::Abort
         );
+    }
+
+    /// 版本号唯一来源（2026-09-30 收敛）：安装包名、exe 版本资源、关于页显示、
+    /// 更新器比较和诊断日志全部取自 `src-tauri/tauri.conf.json` 的 `version`。
+    /// 运行期 `package_info().version` 必须与它一致——把版本号写回 Cargo.toml
+    /// 或把 config 的 `version` 删掉都会静默改变产物版本，这里在构建期钉住。
+    #[test]
+    fn app_version_comes_from_tauri_config() {
+        let config_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json");
+        let raw = std::fs::read_to_string(config_path).expect("read tauri.conf.json");
+        let config: serde_json::Value = serde_json::from_str(&raw).expect("parse tauri.conf.json");
+        let configured = config["version"]
+            .as_str()
+            .expect("tauri.conf.json 必须显式带 version 字段（版本号唯一来源）");
+        // 运行期类型在这里由注解固定（生产路径由 `builder.build(context)` 推断）。
+        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        assert_eq!(context.package_info().version.to_string(), configured);
     }
 
     /// 去掉 NSIS 注释（`;` 到行尾）：注释里会引用被禁用的 API 名做说明，
