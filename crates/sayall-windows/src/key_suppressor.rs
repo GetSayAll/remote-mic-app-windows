@@ -47,8 +47,8 @@ mod windows_impl {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetTimer,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
-        WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+        LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
     };
 
     const ARM_GRACE_MS: u64 = 250;
@@ -110,6 +110,41 @@ mod windows_impl {
         )
     }
 
+    /// 微信输入法自注入的存活标记（break key）：其钩子存活时，吞掉语音和弦的
+    /// LWin 边沿并注入自己的 0xFC 边沿对（extra="WTYP"，见 ATTRIBUTION.md
+    /// 2026-09-05 kb-live 全解码）；钩子休眠时边沿泄漏、无此标记。该标记与
+    /// ConsentStore 开麦时间戳 100% 交叉一致，因此成为**与版本解耦**的存活
+    /// 判据（2026-09-23 issue #118 起 ConsentStore 对 2.1.4.6 失明）。
+    const VK_WETYPE_MARKER: u32 = 0xFC;
+    static WETYPE_MARKER_COUNT: AtomicU64 = AtomicU64::new(0);
+    static WETYPE_MARKER_LAST_EXTRA: AtomicU64 = AtomicU64::new(0);
+
+    /// 纯判定：该键盘事件是否为微信输入法的存活标记（单元测试覆盖）。
+    /// 物理键盘不会产生 0xFC，因此只认注入形态。
+    pub fn is_wetype_marker(vk_code: u32, injected: bool) -> bool {
+        injected && vk_code == VK_WETYPE_MARKER
+    }
+
+    /// 钩子线程内记录（无 IO、无锁、仅原子递增）。extra 是目标程序自定义的
+    /// 魔数（非用户数据），只用于确认归因。
+    fn note_key_event(vk_code: u32, injected: bool, extra: u64) {
+        if is_wetype_marker(vk_code, injected) {
+            WETYPE_MARKER_COUNT.fetch_add(1, Ordering::Relaxed);
+            WETYPE_MARKER_LAST_EXTRA.store(extra, Ordering::Relaxed);
+        }
+    }
+
+    /// 存活标记累计值：会话开始前取基线，检测点取当前值，前进即证明微信输入法
+    /// 已响应本次和弦（判据由 `wetype_revive::reaction_verdict` 合并）。
+    pub fn wetype_marker_count() -> u64 {
+        WETYPE_MARKER_COUNT.load(Ordering::Relaxed)
+    }
+
+    /// 最后一次标记的 extra（诊断用；0 表示尚未观察到任何标记）。
+    pub fn wetype_marker_last_extra() -> u64 {
+        WETYPE_MARKER_LAST_EXTRA.load(Ordering::Relaxed)
+    }
+
     /// 纯决策函数：给定状态与按键，是否吞键（单元测试覆盖）。
     /// UP 沿只按配对状态裁决（会话/武装不参与）：本次按住的 DOWN 沿全部被
     /// 吞下（hold==HOLD_SWALLOWED_ALL）才吞 UP，防"DOWN 泄漏 + UP 吞下"粘键；
@@ -150,6 +185,12 @@ mod windows_impl {
             let message = wparam.0 as u32;
             if matches!(message, 0x0100 | 0x0104 | 0x0101 | 0x0105) {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                // 功能点观测：微信输入法存活标记（只增计数，不参与吞键判定）。
+                note_key_event(
+                    kb.vkCode,
+                    kb.flags.contains(LLKHF_INJECTED),
+                    kb.dwExtraInfo as u64,
+                );
                 if kb.vkCode == VK_F5 {
                     let is_key_up = matches!(message, 0x0101 | 0x0105);
                     if is_key_up {
@@ -399,8 +440,13 @@ pub use windows_impl::{
     set_session_active, VoiceKeySuppressor,
 };
 
+#[cfg(windows)]
+pub use windows_impl::{wetype_marker_count, wetype_marker_last_extra};
+
 #[cfg(all(windows, test))]
-pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL};
+pub use windows_impl::{
+    decide, is_wetype_marker, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+};
 
 #[cfg(test)]
 mod tests {
@@ -494,6 +540,18 @@ mod tests {
             true,
             super::HOLD_SWALLOWED_ALL
         ));
+    }
+
+    #[test]
+    fn only_injected_wetype_marker_counts_as_liveness_evidence() {
+        // 存活标记只认微信输入法自注入的 0xFC：物理 0xFC 不存在，非 0xFC 的
+        // 注入事件（含本应用自己的和弦注入）绝不能被当成存活证据——否则
+        // 门禁会把真休眠误判成存活、恢复阶梯永远不执行。
+        assert!(super::is_wetype_marker(0xFC, true));
+        assert!(!super::is_wetype_marker(0xFC, false));
+        assert!(!super::is_wetype_marker(0x5B, true));
+        assert!(!super::is_wetype_marker(0xA2, true));
+        assert!(!super::is_wetype_marker(0x74, true));
     }
 
     #[test]
