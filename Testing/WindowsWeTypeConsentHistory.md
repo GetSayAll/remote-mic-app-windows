@@ -73,11 +73,13 @@
 
 ## 日志判据
 
-默认诊断日志位于 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。健康会话通常包含：
+默认诊断日志位于 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。健康会话通常包含（`evidence=mic` = ConsentStore 开麦观测；`evidence=marker` = 微信输入法自注入的 0xFC 存活标记，见 Bugs\2026-09-30-wetype-246-consentstore-probe-blind.md；`mic=` 单独记录开麦判据自身结果，用于识别"盲判"）：
 
 ```text
-wetype_check armed attempt=0 ...
-wetype_check reacted=true attempt=0 ...
+wetype_check armed attempt=0 ... marker_baseline=<n>
+wetype_check reacted=true attempt=0 ... evidence=mic mic=observed marker_extra=0x0
+wetype_check reacted=true attempt=0 ... evidence=marker mic=observed marker_extra=0x57545950
+wetype_check reacted=true attempt=0 ... evidence=marker mic=not_observed marker_extra=0x57545950   ← 盲判被门禁拦住（正常）
 ```
 
 持续按住且 WeType 已开始录音时，不应出现同一会话的：
@@ -87,8 +89,9 @@ wetype_revive result=...
 chord_retry result=ok ...
 ```
 
-若观测不可用，允许出现 `reason=observation_unavailable` 或
-`reason=mic_active_or_unknown`，但不得因此释放并重注入当前和弦。
+若观测不可用，允许出现 `reason=observation_unavailable`；若已有正面存活证据，允许出现
+`wetype_check skipped_retry reason=wetype_alive evidence=marker`（或 `chord_retry skipped reason=wetype_alive`）
+——**两者都不得因此释放并重注入当前和弦**。
 
 提交日志前应删除任何意外出现的个人路径或用户内容；不要提交语音、转写正文、设备
 身份、蓝牙地址、HID 路径或音频端点身份。
