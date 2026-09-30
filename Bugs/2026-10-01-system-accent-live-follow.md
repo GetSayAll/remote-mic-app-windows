@@ -1,7 +1,7 @@
 # 换系统主题色后应用内部不跟随（强调色监听窗口收不到广播）
 
 - 发现日期：2026-10-01
-- 状态：已修复（自动化 passed；Windows 真机复验中）
+- 状态：已修复（自动化 passed；Windows 真机验证 passed：广播到达 → 重读 → 前端重注入 → 界面换色，全链路现场取证；仅"真实设置应用改色"这一入口未重复走一遍，见验证一节的边界）
 - 影响范围：Windows 版含该功能的全部构建（2026-09-27 `08e94ab` 起）；
   启动时首次读取正常，只有"运行中改系统主题色"受影响；不涉及 RC001/RC003、
   语音链路和第三方工具
@@ -62,9 +62,27 @@
 - `cargo fmt --all -- --check` passed、`cargo check --workspace` passed、
   `cargo test --workspace` passed（core 26 + replay 4 + windows 177 + app 41 等）；
 - 前端 `npm test`（vitest）131 passed | 10 skipped，含新增 3 条强调色上报断言；
-- Windows 真机复验（运行中改系统主题色，界面是否跟随 + 日志是否落
-  `accent_color action=watcher_message ... reason=accent_changed` 与
-  `frontend event=system_accent_change ... reason=accent_applied`）：**进行中**。
+- Windows 真机验证（本机 Windows，安装本地包 `0.5.0`，`source_revision=88593b71c0c8f0cfd2f60d44324ae8c51315eb88`）——**passed**：
+  1. 启动：`accent_color action=watcher_register ... terminal_result=passed`；
+     `frontend event=system_accent phase=completed result=passed reason=accent_applied`；
+  2. 合成广播（颜色未变）：`accent_color action=watcher_message ... reason=accent_debounced r=132 g=117 b=69`
+     ——旧版本 52 次会话 0 次该日志，修复后单次会话内连续 6 次广播全部到达；
+  3. 真改色（`DWM\AccentColor` 写入 + 广播，由 Windows 随后应用）：
+     `accent_color action=watcher_message ... reason=accent_changed r=212 g=120 b=0`
+     紧跟 `frontend event=system_accent_change phase=completed result=passed reason=accent_applied`；
+  4. 界面证据：同一次运行、未重启，按键映射页的强调元素（左侧选中项、两个开关、
+     映射键名）整体换色——截图逐像素对比 `rgb(142,128,84) -> rgb(212,120,0)` 等
+     共 20836 像素变化（截图与对比脚本为本次临时工件，未入库）。
+- 边界（deferred）：本次改色走的是"注册表写入 + 广播"，与设置应用的写入路径等价但
+  **不是设置应用本身**。实测该路径下 Windows shell 应用注册表写入有秒级延迟，且长驻
+  进程内 WinRT `UISettings` 缓存会滞后一拍（恢复原值后应用仍显示测试色，重启后正常，
+  同时独立进程读回 `UISettings.Accent = rgb(132,117,69)` 确认系统色已复原）。因此
+  "用户从设置 > 个性化 > 颜色 直接改色"这一入口仍建议再走一次首用确认。
+- 附带发现（仅供下次做同类验证参考）：`DWM\AccentColor` 的 DWORD 实为 `0xAARRGGBB`，
+  按 `0xAABBGGRR` 写入会被读成 R/B 互换的颜色（本次写入 `0xFFD47800`，应用读到
+  `rgb(212,120,0)`）。这不是产品缺陷，只是验证脚本的字节序坑。
+- 验证用的系统设置已复原：注册表（`AccentColor`/`AccentColorMenu`/`StartColorMenu`/
+  `AccentPalette`/`ColorPrevalence`）按备份恢复原值，独立进程读回系统强调色为原始值。
 
 ## 隐私检查
 
