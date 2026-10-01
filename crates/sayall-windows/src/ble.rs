@@ -2566,12 +2566,21 @@ pub fn initialize_diagnostic_log(
 /// 不会指错地方。注意隐私边界：该路径只允许回给本机 UI，**不得写入日志内容**
 /// （日志条目里出现用户路径违反 AGENTS.md 的隐私规则）。
 pub fn diagnostic_log_directory() -> Option<std::path::PathBuf> {
+    diagnostic_log_path()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+}
+
+/// 诊断日志的实际文件路径（含 `SAYALL_GATT_LOG` 覆盖）。
+///
+/// 用途仅限**同一用户范围内的进程间约定**：桥接描述文件把该路径交给提权助手，
+/// 让助手的日志与主程序写进同一个文件（2026-10-01 用户要求：报障一次只拉一份
+/// 日志）。与 `diagnostic_log_directory` 同理，**不得**把该路径写进日志正文。
+pub fn diagnostic_log_path() -> Option<std::path::PathBuf> {
     DIAGNOSTIC_LOG_PATH
         .get()
         .cloned()
-        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?
-        .parent()
-        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))
 }
 
 /// ATVV 诊断日志（宿主默认写入 LocalAppData；SAYALL_GATT_LOG 可覆盖路径）。

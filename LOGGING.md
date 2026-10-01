@@ -41,6 +41,19 @@ windows_build=<build 或 unknown>
 在用户看到主页面前后分别留痕，确保安装后白屏可以区分为宿主、WebView、脚本、
 Vue 渲染或 IPC 阶段故障。
 
+### 单一日志文件：主程序 + 提权助手（2026-10-01）
+
+RC003 提权助手的日志**与主程序写进同一个文件**，报障收集只要求用户提供一份日志。
+链路：主程序在桥接描述文件里发布 `log=<主程序诊断日志路径>` → 助手读到后把行写进
+同一文件（行首为 UTC ISO 8601 毫秒时间戳 + `pid=<助手进程号> component=rc003-helper`）。
+助手与该文件之间是"整行单次 `write_all` 追加"，主程序侧按行读取不受影响。
+
+- 描述文件缺 `log=`（旧版主程序）→ 助手按约定回退 `<描述文件目录>\Logs\sayall-diagnostic.log`；
+- 两者都不可写 → 回退助手自己的 `%ProgramData%\SayAll\rc003-helper\helper-task.log`，
+  并在该文件里记 `[LOG] event=helper_local_fallback`（回退绝不静默）；
+- 助手行**落盘前统一脱敏**：`%USERPROFILE%` / `%LOCALAPPDATA%`（含 `\AppData\Local` 形态）/
+  `%APPDATA%` / `%ProgramData%`，另抹掉 `C:\Users\<用户名>`。
+
 ## 必需事件链
 
 每项功能按实际存在的边界记录：

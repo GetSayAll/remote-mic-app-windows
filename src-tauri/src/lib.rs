@@ -544,10 +544,35 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
         AutoTriggerCheck::Connected => sayall_windows::gatt_note(
             "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=passed reason=helper_connected".to_owned(),
         ),
-        _ => sayall_windows::gatt_note(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=failed reason=helper_still_not_connected retryable=false".to_owned(),
-        ),
+        _ => sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=failed reason=helper_still_not_connected retryable=false {}",
+            bridge_health_summary(&platform.rc003_bridge_snapshot())
+        )),
     }
+}
+
+/// 兜底失败时的桥接对账摘要（纯函数，字段逐一可断言）。
+///
+/// 存在的理由（2026-10-01 用户现场）：兜底只落一句 `helper_still_not_connected`
+/// 时，日志读不出**差在哪一步**——助手根本没连上来、连接到了被拒、还是桥自己
+/// 出了问题，三者在那一行里完全相同。摘要把「有没有连接被接受 / 有没有被拒 /
+/// 有没有坏行」与相位、端口一起钉在失败行上，一次拉取即可分流。
+fn bridge_health_summary(snapshot: &BridgeSnapshot) -> String {
+    let phase = match snapshot.phase {
+        BridgePhase::Stopped => "stopped",
+        BridgePhase::Listening => "listening",
+        BridgePhase::Connected => "connected",
+        BridgePhase::Failed => "failed",
+    };
+    format!(
+        "bridge_phase={phase} bridge_port={} accepted_total={} denied_total={} replaced_total={} malformed_total={} helper_pid={}",
+        snapshot.port,
+        snapshot.accepted_total,
+        snapshot.denied_total,
+        snapshot.replaced_total,
+        snapshot.malformed_total,
+        snapshot.helper_pid
+    )
 }
 
 #[tauri::command]
@@ -2133,6 +2158,34 @@ mod tests {
             classify_auto_trigger(&snapshot_with_phase(BridgePhase::Stopped)),
             AutoTriggerCheck::Abort
         );
+    }
+
+    /// 兜底失败行必须自带"差在哪一步"的对账字段（2026-10-01 现场教训：
+    /// 只有 `helper_still_not_connected` 时，读日志分不出"助手没来"和
+    /// "来了被拒"）。字段名与取值在这里钉死，防止有人精简掉。
+    #[test]
+    fn bridge_health_summary_keeps_rejection_and_connection_counters() {
+        let snapshot = BridgeSnapshot {
+            phase: BridgePhase::Listening,
+            port: 6056,
+            helper_pid: 0,
+            accepted_total: 2,
+            denied_total: 3,
+            replaced_total: 1,
+            malformed_total: 0,
+            ..BridgeSnapshot::default()
+        };
+        let line = bridge_health_summary(&snapshot);
+        assert!(line.contains("bridge_phase=listening"), "{line}");
+        assert!(line.contains("bridge_port=6056"), "{line}");
+        assert!(line.contains("accepted_total=2"), "{line}");
+        assert!(line.contains("denied_total=3"), "{line}");
+        assert!(line.contains("replaced_total=1"), "{line}");
+        assert!(line.contains("malformed_total=0"), "{line}");
+        assert!(line.contains("helper_pid=0"), "{line}");
+        // 隐私边界：不含路径、不含 token。
+        assert!(!line.contains(":\\"), "{line}");
+        assert!(!line.contains("token"), "{line}");
     }
 
     /// 仿真平台的桥快照恒为 `stopped`：自动拉起必须在触发前就判定放弃，

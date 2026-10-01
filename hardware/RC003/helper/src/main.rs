@@ -819,8 +819,149 @@ mod imp {
         )
     }
 
+    /// UTC ISO 8601（毫秒）。与主程序诊断日志同一形状——两侧写进同一个文件后，
+    /// 只有同一时间基准才排得出先后（助手此前只写本地时间，合并后无法与主程序
+    /// 的行对齐）。
+    fn utc_stamp() -> String {
+        let now = now_ms();
+        let total_seconds = (now / 1000) as i64;
+        let millis = (now % 1000) as u32;
+        let days = total_seconds.div_euclid(86_400);
+        let seconds_of_day = total_seconds.rem_euclid(86_400);
+        // Howard Hinnant 的 civil_from_days：不引入任何依赖。
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+        format!(
+            "{year:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+            seconds_of_day / 3600,
+            (seconds_of_day % 3600) / 60,
+            seconds_of_day % 60
+        )
+    }
+
+    /// 大小写不敏感的字节查找（Windows 路径大小写不敏感；只用 ASCII 折叠，
+    /// 中文路径按原字节精确比对）。
+    fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+        if needle.is_empty() || needle.len() > haystack.len() {
+            return None;
+        }
+        let hay = haystack.as_bytes();
+        let pat = needle.as_bytes();
+        (0..=hay.len() - pat.len()).find(|&start| {
+            hay[start..start + pat.len()]
+                .iter()
+                .zip(pat)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+    }
+
+    fn replace_ci(haystack: &str, needle: &str, replacement: &str) -> String {
+        let mut out = String::with_capacity(haystack.len());
+        let mut rest = haystack;
+        while let Some(pos) = find_ci(rest, needle) {
+            out.push_str(&rest[..pos]);
+            out.push_str(replacement);
+            rest = &rest[pos + needle.len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// 个人路径脱敏：把已知的用户目录替换成环境变量形态。
+    ///
+    /// 为什么必须做：助手日志现在与主程序写进同一个文件，而这个文件是**用户要
+    /// 发出来的**（LOGGING.md / AGENTS.md 隐私红线：不得出现个人路径）。替换保留
+    /// 定位信息（是 `%LOCALAPPDATA%` 还是 `%ProgramData%`），不保留用户名。
+    fn redact_personal_paths(text: &str) -> String {
+        // 顺序有意义：`%LOCALAPPDATA%` 是 `%USERPROFILE%` 的子路径，先替换更长的。
+        let mut out = text.to_string();
+        for (var, value) in [
+            ("%LOCALAPPDATA%", std::env::var("LOCALAPPDATA").ok()),
+            ("%APPDATA%", std::env::var("APPDATA").ok()),
+            ("%ProgramData%", std::env::var("ProgramData").ok()),
+            ("%USERPROFILE%", std::env::var("USERPROFILE").ok()),
+        ] {
+            if let Some(value) = value {
+                if !value.is_empty() {
+                    out = replace_ci(&out, &value, var);
+                }
+            }
+        }
+        // 兜底：环境变量取不到（或路径属于别的账户）时，抹掉 `C:\Users\<用户名>`。
+        mask_user_profile_segment(&out)
+    }
+
+    fn mask_user_profile_segment(text: &str) -> String {
+        const PREFIX: &str = "C:\\Users\\";
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(pos) = find_ci(rest, PREFIX) {
+            out.push_str(&rest[..pos + PREFIX.len()]);
+            let tail = &rest[pos + PREFIX.len()..];
+            match tail.find('\\') {
+                Some(end) => {
+                    out.push_str("$USER");
+                    rest = &tail[end..];
+                }
+                None => {
+                    out.push_str("$USER");
+                    rest = "";
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// 解析助手的日志落点（**纯函数**，便于自检与单测）：
+    /// ① 描述文件里的 `log=`（主程序写的**真实**路径，含 `SAYALL_GATT_LOG` 覆盖）；
+    /// ② 约定回退 `<描述文件目录>\Logs\sayall-diagnostic.log`（旧版主程序）；
+    /// ③ 两者都拿不到 → `None`（调用方继续写助手自己的文件，绝不静默丢日志）。
+    fn resolve_shared_log(
+        descriptor: Option<&Path>,
+        descriptor_text: Option<&str>,
+    ) -> Option<PathBuf> {
+        let descriptor = descriptor?;
+        if let Some(text) = descriptor_text {
+            if let Some(target) = parse_bridge_descriptor(text) {
+                if let Some(log) = target.log {
+                    return Some(log);
+                }
+            }
+        }
+        shared_log_fallback(descriptor)
+    }
+
+    /// 单次 `write_all` 追加一整行。
+    ///
+    /// **必须整行一次写入**：主程序可能同时在往同一文件追加，逐字段 `write!` 会
+    /// 让两边的行互相穿插。写入失败返回 false，由调用方换下一个落点。
+    fn append_record(path: &Path, record: &str) -> bool {
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+            return false;
+        };
+        let mut line = String::with_capacity(record.len() + 1);
+        line.push_str(record);
+        line.push('\n');
+        file.write_all(line.as_bytes()).is_ok()
+    }
+
     struct Logger {
-        path: Option<PathBuf>,
+        /// 助手自己的文件：主程序日志不可用时的回退落点（`--log` / `--follow-app` 默认）。
+        fallback: Option<PathBuf>,
+        /// 主程序诊断日志。有它时**只写它**——用户报障只拉一份日志（2026-10-01 要求）。
+        shared: Option<PathBuf>,
     }
 
     impl Logger {
@@ -837,7 +978,45 @@ mod imp {
                     let _ = fs::create_dir_all(dir);
                 }
             }
-            Self { path }
+            Self {
+                fallback: path,
+                shared: None,
+            }
+        }
+
+        /// 带上"与主程序共用的日志文件"的构造（`shared` 为空时等价于 `new`）。
+        fn with_shared(fallback: Option<PathBuf>, shared: Option<PathBuf>) -> Self {
+            let mut logger = Self::new(fallback);
+            logger.shared = shared;
+            logger
+        }
+
+        /// 记录一行"落点决策"，让下一次报障一眼看出日志去了哪里。
+        fn log_sink_note(&self) {
+            if self.shared.is_some() {
+                self.kv(
+                    "[LOG]",
+                    &[
+                        ("event", "shared_with_app".into()),
+                        (
+                            "note",
+                            "助手日志与主程序诊断日志写入同一文件（一次拉取覆盖两段链路）".into(),
+                        ),
+                    ],
+                );
+            } else {
+                self.kv(
+                    "[LOG]",
+                    &[
+                        ("event", "helper_local_fallback".into()),
+                        (
+                            "note",
+                            "未解析到主程序日志路径（描述文件缺失或不可读），本次写助手自己的文件"
+                                .into(),
+                        ),
+                    ],
+                );
+            }
         }
 
         /// 开启"新一轮运行"：若日志已有内容，先插一条带本地时间戳的分隔线。
@@ -845,26 +1024,40 @@ mod imp {
         /// **只允许在一次运行的最外层调用一次**（`run()` 的入口）。日志是追加语义、
         /// 不截断：上一轮的原始记录是排错时最主要的对照物（2026-09-23 曾有一次
         /// dry-run 把前一轮真机失败的记录抹掉，此后改为追加 + 每轮分隔线）。
-        fn open_round(path: Option<PathBuf>) -> Self {
-            let logger = Self::new(path);
-            if let Some(p) = &logger.path {
+        fn open_round(path: Option<PathBuf>, shared: Option<PathBuf>) -> Self {
+            let logger = Self::with_shared(path, shared);
+            let target = logger.shared.clone().or_else(|| logger.fallback.clone());
+            if let Some(p) = &target {
                 let existed = fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false);
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
-                    if existed {
-                        let _ = writeln!(f, "\n---------- 新一轮运行 {} ----------", local_stamp());
-                    }
+                if existed {
+                    logger.line("\n---------- 新一轮运行 ----------");
                 }
             }
             logger
         }
 
         fn line(&self, msg: &str) {
-            println!("{msg}");
-            if let Some(p) = &self.path {
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
-                    let _ = writeln!(f, "{msg}");
+            // 目的地优先级：主程序诊断日志（用户只拉一份）→ 助手自己的文件。
+            // 脱敏对两个落点都做：两份文件都可能被用户发出来。
+            let text = redact_personal_paths(msg);
+            println!("{text}");
+            let record = format!(
+                "{} pid={} component=rc003-helper {}",
+                utc_stamp(),
+                std::process::id(),
+                text
+            );
+            if let Some(shared) = &self.shared {
+                if append_record(shared, &record) {
+                    return;
                 }
             }
+            if let Some(fallback) = &self.fallback {
+                if append_record(fallback, &record) {
+                    return;
+                }
+            }
+            // 两个落点都写不进去：至少 stdout 已经拿到全文（手动运行时可见）。
         }
 
         fn kv(&self, tag: &str, kv: &[(&str, String)]) {
@@ -1902,6 +2095,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         port: u16,
         pipe: Option<String>,
         token: String,
+        /// 主程序的诊断日志路径（`log=`）。**只用于决定助手往哪儿写日志**，
+        /// 不参与连接；不得写进日志正文（隐私规则：正文不落个人路径）。
+        log: Option<PathBuf>,
     }
 
     enum AppBridgeStream {
@@ -2144,10 +2340,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 解析描述文件（`key=value`）。规则与主程序侧 `rc003_bridge::parse_descriptor` 一致。
+    ///
+    /// `log=`（2026-10-01 新增）：主程序**真实**的诊断日志路径。带上它，助手的
+    /// 日志与主程序落进同一个文件——报障后一次拉取覆盖两段链路，而不是让用户
+    /// 再去 `%ProgramData%` 里翻第二份文件。字段缺失时按约定回退（见
+    /// [`shared_log_fallback`]），旧版主程序 + 新版助手因此仍然可用。
     fn parse_bridge_descriptor(text: &str) -> Option<BridgeTarget> {
         let mut port = None;
         let mut pipe = None;
         let mut token = None;
+        let mut log = None;
         let mut version = 0u32;
         for line in text.lines() {
             let line = line.trim();
@@ -2162,6 +2364,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 "port" => port = value.trim().parse().ok(),
                 "pipe" => pipe = Some(value.trim().to_string()),
                 "token" => token = Some(value.trim().to_string()),
+                "log" if !value.trim().is_empty() => log = Some(PathBuf::from(value.trim())),
                 _ => {}
             }
         }
@@ -2176,7 +2379,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if pipe.as_deref() == Some("") {
             pipe = None;
         }
-        Some(BridgeTarget { port, pipe, token })
+        Some(BridgeTarget {
+            port,
+            pipe,
+            token,
+            log,
+        })
+    }
+
+    /// 描述文件没带 `log=` 时的约定回退：`<描述文件目录>\Logs\sayall-diagnostic.log`。
+    ///
+    /// 主程序的默认日志位置与桥接描述文件同在 `%LOCALAPPDATA%\SayAll` 下
+    /// （见 LOGGING.md），所以这条推导在旧版主程序 + 新版助手、以及"助手提权
+    /// 到另一个账户"两种情况下都能落到正确的那一份日志上。
+    fn shared_log_fallback(descriptor: &Path) -> Option<PathBuf> {
+        descriptor
+            .parent()
+            .map(|dir| dir.join("Logs").join("sayall-diagnostic.log"))
     }
 
     /// 桥接描述文件的**只读**探测结论（不连接、不写盘）。
@@ -2706,7 +2925,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let targets = Arc::new(Mutex::new(BridgeCaptureTargets::default()));
         let voice_synth = Arc::new(Mutex::new(None::<u16>));
         let voice_synth_dirty = Arc::new(AtomicBool::new(false));
-        let worker_logger = Logger::new(logger.path.clone());
+        let worker_logger = Logger::with_shared(logger.fallback.clone(), logger.shared.clone());
         let worker_stop = Arc::clone(&stop);
         let worker_stats = Arc::clone(&stats);
         // 初值 = 进程启动时刻，而不是 0：这样"主程序还没开"也要等满宽限期才退出，
@@ -3247,15 +3466,28 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             hide_console_window();
         }
 
+        // ---- 日志落点：优先与主程序同一个文件（2026-10-01 Andy 要求）----
+        // 描述文件 `log=` 是主程序写的真实路径；旧版主程序没有该字段时按约定回退
+        // 到 `<描述文件目录>\Logs\sayall-diagnostic.log`；都拿不到才写自己的文件。
+        let shared_log = {
+            let descriptor = args.app_bridge.clone();
+            let text = descriptor
+                .as_ref()
+                .and_then(|path| fs::read_to_string(path).ok());
+            resolve_shared_log(descriptor.as_deref(), text.as_deref())
+        };
+
         // ---- panic 落盘：--hide-window / 计划任务路径下 stderr 无人可见 ----
         // panic（unwind）是"干净退出"（退出码 101），**不触发 WER/事件日志**，
         // 进程表现为"无声消失"——2026-09-28 真机 run4/run5 正是这个形状
         // （日志停在 HB 中间、无 [TIMEUP]/[DISCONNECT]、事件日志无崩溃记录）。
         // hook 保留 stderr 输出，并把同一份信息写进日志文件。
         // 边界：TerminateProcess / abort 仍无任何痕迹——前者只能靠启动器观测退出码区分。
-        if let Some(path) = args
-            .log
+        // panic 与其它日志落在同一个文件：`--hide-window` 下 panic 是"无声消失"，
+        // 它必须出现在用户要发出来的那一份日志里。
+        if let Some(path) = shared_log
             .clone()
+            .or_else(|| args.log.clone())
             .or_else(|| Some(args.runtime_dir.join("helper-panic.log")))
         {
             std::panic::set_hook(Box::new(move |info| {
@@ -3274,7 +3506,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }));
         }
 
-        let logger = Logger::open_round(args.log.clone());
+        let logger = Logger::open_round(args.log.clone(), shared_log.clone());
+        logger.log_sink_note();
         logger.line(&format!(
             "=== sayall-helper（RC003 增强捕获轨 / 产品化 spike）  {} ===",
             local_stamp()
@@ -3746,7 +3979,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let renew_token = args.token.clone();
         // 注意：这里是 `new` **不是** `open_round` —— 续约线程不是新一轮运行，
         // 它若写分隔线会让"每轮起点"的 grep 多算一次（2026-09-23 实测）。
-        let renew_logger = Logger::new(args.log.clone());
+        let renew_logger = Logger::with_shared(args.log.clone(), shared_log.clone());
         let renew_handle = std::thread::spawn(move || {
             let mut tick: u64 = 0;
             while !renew_stop.load(Ordering::Relaxed) {
@@ -5170,14 +5403,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         //     只有阴性断言的话，"一条都没写"也会静默通过。
         //     2026-09-23 真机：续约线程那个 Logger 每轮都多写一条分隔线，把 6 轮数成 11 轮。
         let logp = tmp.join("round.log");
-        let r_first = Logger::open_round(Some(logp.clone()));
+        let r_first = Logger::open_round(Some(logp.clone()), None);
         r_first.line("第一轮的一行");
         let r_inner = Logger::new(Some(logp.clone())); // 模拟续约线程（同一轮内的第二个 Logger）
         r_inner.line("续约线程的一行");
         let n_same_round = fs::read_to_string(&logp)
             .map(|s| s.matches("新一轮运行").count())
             .unwrap_or(usize::MAX);
-        let r_next = Logger::open_round(Some(logp.clone())); // 真正开启新一轮
+        let r_next = Logger::open_round(Some(logp.clone()), None); // 真正开启新一轮
         r_next.line("第二轮的一行");
         let n_new_round = fs::read_to_string(&logp)
             .map(|s| s.matches("新一轮运行").count())
@@ -5840,6 +6073,108 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(message.contains("kind=ConnectionRefused"));
             assert!(message.contains("os=Some(10061)"));
             assert!(message.contains("elapsed_ms=37"));
+        }
+    }
+
+    #[cfg(test)]
+    mod shared_log_tests {
+        use super::*;
+
+        const DESCRIPTOR: &str = r"C:\Users\x\AppData\Local\SayAll\rc003-bridge.ini";
+        const CONVENTION: &str = r"C:\Users\x\AppData\Local\SayAll\Logs\sayall-diagnostic.log";
+
+        #[test]
+        fn descriptor_log_field_wins_over_convention() {
+            // 主程序写明 `log=` 时以它为准（它能反映 SAYALL_GATT_LOG 覆盖）。
+            let text =
+                "version=2\nport=1\ntoken=t\nlog=C:\\Users\\x\\AppData\\Local\\SayAll\\Logs\\other.log\n";
+            assert_eq!(
+                resolve_shared_log(Some(Path::new(DESCRIPTOR)), Some(text)),
+                Some(PathBuf::from(
+                    r"C:\Users\x\AppData\Local\SayAll\Logs\other.log"
+                ))
+            );
+        }
+
+        #[test]
+        fn missing_or_unreadable_descriptor_falls_back_to_convention() {
+            // 旧版主程序没有 `log=`：按约定推导到同一个目录树。
+            let text = "version=2\nport=1\ntoken=t\n";
+            assert_eq!(
+                resolve_shared_log(Some(Path::new(DESCRIPTOR)), Some(text)),
+                Some(PathBuf::from(CONVENTION))
+            );
+            // `log=` 空值视为缺字段，不得把空路径当落点。
+            let empty = "version=2\nport=1\ntoken=t\nlog=\n";
+            assert_eq!(
+                resolve_shared_log(Some(Path::new(DESCRIPTOR)), Some(empty)),
+                Some(PathBuf::from(CONVENTION))
+            );
+            // 描述文件还没被主程序写出（读不到）：仍按约定推导。
+            assert_eq!(
+                resolve_shared_log(Some(Path::new(DESCRIPTOR)), None),
+                Some(PathBuf::from(CONVENTION))
+            );
+            // 完全没有描述文件路径（`--no-app-bridge` / 手动调试）：不猜，写自己的文件。
+            assert_eq!(resolve_shared_log(None, None), None);
+        }
+
+        #[test]
+        fn personal_paths_are_redacted() {
+            let text = r"descriptor=C:\Users\alice\AppData\Local\SayAll\rc003-bridge.ini other=C:\Users\alice\Documents";
+            let redacted = mask_user_profile_segment(text);
+            assert!(
+                redacted.contains(r"C:\Users\$USER\AppData\Local\SayAll\rc003-bridge.ini"),
+                "{redacted}"
+            );
+            assert!(!redacted.contains("alice"), "{redacted}");
+            // 已知环境变量的值优先替换成长名（保留"这是哪一类目录"的信息）。
+            let with_var = redact_personal_paths(
+                &std::env::var("ProgramData")
+                    .map(|base| format!(r"{base}\SayAll\rc003-helper\frida-gadget.dll"))
+                    .unwrap_or_default(),
+            );
+            assert!(
+                with_var.starts_with("%ProgramData%") || with_var.is_empty(),
+                "{with_var}"
+            );
+        }
+
+        #[test]
+        fn utc_stamp_has_iso_shape_with_milliseconds() {
+            let stamp = utc_stamp();
+            // 2026-10-01T12:34:56.789Z
+            assert_eq!(stamp.len(), 24, "{stamp}");
+            assert_eq!(stamp.as_bytes()[4], b'-', "{stamp}");
+            assert_eq!(stamp.as_bytes()[10], b'T', "{stamp}");
+            assert_eq!(stamp.as_bytes()[19], b'.', "{stamp}");
+            assert_eq!(stamp.as_bytes()[23], b'Z', "{stamp}");
+        }
+
+        #[test]
+        fn shared_sink_is_preferred_and_fallback_catches_unwritable_shared() {
+            let dir = std::env::temp_dir().join(format!("rc003-log-shared-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            let shared = dir.join("app.log");
+            let fallback = dir.join("helper.log");
+
+            // 1) 共用日志可用：只写它，不再产生第二份文件。
+            let logger = Logger::with_shared(Some(fallback.clone()), Some(shared.clone()));
+            logger.line("shared_sink_line");
+            let written = fs::read_to_string(&shared).expect("共用日志必须被写入");
+            assert!(written.contains("shared_sink_line"), "{written}");
+            assert!(written.contains("component=rc003-helper"), "{written}");
+            assert!(!fallback.exists(), "共用日志可用时不得再写第二份文件");
+
+            // 2) 共用日志不可用（父路径是个文件）→ 回退到助手自己的文件，绝不丢日志。
+            let blocked = dir.join("blocked");
+            fs::write(&blocked, b"x").expect("prepare blocked path");
+            let logger = Logger::with_shared(Some(fallback.clone()), Some(blocked.join("app.log")));
+            logger.line("fallback_sink_line");
+            let written = fs::read_to_string(&fallback).expect("回退文件必须被写入");
+            assert!(written.contains("fallback_sink_line"), "{written}");
+
+            let _ = fs::remove_dir_all(&dir);
         }
     }
 
