@@ -1036,12 +1036,33 @@ async fn set_voice_input_tool(
 ) -> Result<Option<VoiceInputTool>, String> {
     let started = std::time::Instant::now();
     let settings = state.settings.clone();
+    let platform = state.platform.clone();
     sayall_windows::gatt_note(format!(
         "shortcut_settings feature=voice_input_tool action=save phase=requested tool={}",
         voice_input_tool_name(tool)
     ));
     let result = match tauri::async_runtime::spawn_blocking(move || {
         settings.save_voice_input_tool(tool)?;
+        // 推给平台并武装"预切"：BLE 工作线程在语音会话开始前按它决定切哪个
+        // 输入法；武装用于"用户离开窗口、第一次切到目标应用时"预切输入法
+        //（报告层合成路径只有这样第一次按下才来得及）。
+        platform.select_voice_input_tool(tool);
+        // 选中即切一次（2026-10-01）：报告层合成的和弦在物理报告到达时就送达
+        // OS，早于本应用知情，所以"按下才切"对合成路径来不及——先切好，
+        // 第一次按下就能用。Vokie/其他工具不会切输入法（内核里判掉）。
+        if let Some(tool) = tool {
+            match platform.ensure_voice_input_ime(tool) {
+                Ok(outcome) => sayall_windows::gatt_note(format!(
+                    "ime_activation tool={} outcome={outcome} trigger=select",
+                    voice_input_tool_name(Some(tool))
+                )),
+                Err(error) => sayall_windows::gatt_note(format!(
+                    "ime_activation tool={} outcome=failed trigger=select error_domain=tsf error_code=activation_failed retryable=true note={}",
+                    voice_input_tool_name(Some(tool)),
+                    error.chars().take(80).collect::<String>(),
+                )),
+            }
+        }
         Ok(tool)
     })
     .await
@@ -1922,6 +1943,25 @@ pub fn run() {
                 }
             }
 
+            // 选的输入工具同样要推给平台（2026-10-01）：语音会话开始前决定把哪个
+            // 输入法切进当前会话。启动只推状态、不主动切——避免应用一启动就改用户
+            // 当前的输入法；真正切换发生在"选中工具"与"按下语音键"两个时机。
+            match settings.load() {
+                Ok(loaded) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=passed tool={}",
+                        voice_input_tool_name(loaded.voice_input_tool)
+                    ));
+                    platform.set_voice_input_tool(loaded.voice_input_tool);
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=cold_start_fallback retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                }
+            }
+
             #[cfg(not(windows))]
             let _ = saved_settings;
 
@@ -2000,6 +2040,29 @@ pub fn run() {
                         "window_close action=hide_to_tray label=main hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after} prevent_close=true"
                     ));
                     api.prevent_close();
+                }
+            }
+            // 预切输入法（2026-10-01）：选中豆包/微信后，用户在连接页点完就会切到
+            // 目标应用——那一刻才切输入法才有意义（TSF 会话切换作用于前台应用；
+            // 报告层合成的和弦又早于本应用知情）。只在"选中之后第一次离开窗口"
+            // 触发一次，之后不再干预用户的输入法选择。
+            if let tauri::WindowEvent::Focused(false) = event {
+                if window.label() == "main" {
+                    let state = window.app_handle().state::<AppState>();
+                    let platform = Arc::clone(&state.platform);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Some(result) = platform.ensure_armed_voice_input_ime() {
+                            match result {
+                                Ok(outcome) => sayall_windows::gatt_note(format!(
+                                    "ime_activation tool=armed outcome={outcome} trigger=window_blur"
+                                )),
+                                Err(error) => sayall_windows::gatt_note(format!(
+                                    "ime_activation tool=armed outcome=failed trigger=window_blur error_domain=tsf error_code=activation_failed retryable=true note={}",
+                                    error.chars().take(80).collect::<String>(),
+                                )),
+                            }
+                        }
+                    });
                 }
             }
         });
