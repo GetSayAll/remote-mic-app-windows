@@ -1,4 +1,4 @@
-use sayall_core::{AppSettings, ThemePreference, UsageStatistics};
+use sayall_core::{AppSettings, ThemePreference, UsageStatistics, VoiceInputTool};
 use sayall_windows::send_input::{ButtonMappings, KeyChord};
 use std::fs;
 use std::io::ErrorKind;
@@ -82,6 +82,13 @@ impl SettingsStore {
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
+        })
+    }
+
+    /// 连接页选择的输入工具（None = 从未选择，由界面按当前快捷键推断后落存）。
+    pub fn save_voice_input_tool(&self, tool: Option<VoiceInputTool>) -> Result<(), String> {
+        self.update("保存输入工具设置", move |settings| {
+            settings.voice_input_tool = tool;
         })
     }
 
@@ -344,6 +351,35 @@ mod tests {
         assert!(!store.load().unwrap().check_prerelease_updates);
         store.save_check_prerelease_updates(true).unwrap();
         assert!(store.load().unwrap().check_prerelease_updates);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn voice_input_tool_defaults_to_unset_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-voice-input-tool-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        // 老配置 / 新装：未选择过 → None（界面据此推断一次，不替用户猜）。
+        assert_eq!(store.load().unwrap().voice_input_tool, None);
+        store
+            .save_voice_input_tool(Some(VoiceInputTool::Doubao))
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().voice_input_tool,
+            Some(VoiceInputTool::Doubao)
+        );
+        store
+            .save_voice_input_tool(Some(VoiceInputTool::Other))
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().voice_input_tool,
+            Some(VoiceInputTool::Other)
+        );
 
         let _ = std::fs::remove_file(path);
     }

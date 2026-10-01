@@ -17,6 +17,18 @@ pub enum ThemePreference {
     Dark,
 }
 
+/// 用户在连接页选择的输入工具（决定"按住说话快捷键"的默认组合与引导步骤）。
+///
+/// `None` = 用户从未选择过（老配置）：前端按当前快捷键推断一次后落存，
+/// 不在这里猜——推断规则只属于界面，Rust 侧只做持久化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceInputTool {
+    Wechat,
+    Doubao,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -26,6 +38,8 @@ pub struct AppSettings {
     pub audio_endpoint_name: Option<String>,
     pub gain_db: f32,
     pub voice_trigger_mode: VoiceTriggerMode,
+    /// 连接页选择的输入工具（微信输入法 / 豆包输入法 / 其他工具）。
+    pub voice_input_tool: Option<VoiceInputTool>,
     pub launch_at_login: bool,
     pub open_window_at_launch: bool,
     pub check_prerelease_updates: bool,
@@ -47,6 +61,7 @@ impl Default for AppSettings {
             audio_endpoint_name: None,
             gain_db: 0.0,
             voice_trigger_mode: VoiceTriggerMode::Hold,
+            voice_input_tool: None,
             launch_at_login: false,
             open_window_at_launch: true,
             check_prerelease_updates: false,
@@ -115,6 +130,32 @@ mod tests {
             let encoded = serde_json::to_string(&settings).unwrap();
             let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded.normalized().theme_preference, preference);
+        }
+    }
+
+    #[test]
+    fn voice_input_tool_defaults_to_none_and_round_trips() {
+        // 老配置没有这个字段：必须落成 None（由界面按当前快捷键推断一次），
+        // 不能在 Rust 侧替用户猜成某个工具。
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.voice_input_tool, None);
+
+        for tool in [
+            VoiceInputTool::Wechat,
+            VoiceInputTool::Doubao,
+            VoiceInputTool::Other,
+        ] {
+            let settings = AppSettings {
+                voice_input_tool: Some(tool),
+                ..AppSettings::default()
+            };
+            let encoded = serde_json::to_string(&settings).unwrap();
+            assert!(encoded.contains("\"voice_input_tool\""));
+            let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.voice_input_tool, Some(tool));
         }
     }
 }

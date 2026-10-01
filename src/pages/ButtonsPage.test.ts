@@ -632,8 +632,8 @@ describe("buttons mapping page", () => {
     expect(chipState(wrapper, "Ctrl + V")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
-    // 武装族按键显示冷首按原生副作用提示（信息性，不门控）。
-    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
+    // 武装族按键显示冷首按副作用提示（信息性，不门控）。
+    expect(wrapper.find(".mapping-editor").text()).toContain("它原本的按键效果");
   });
 
   it("预设芯片显示实际按键组合，功能描述退为悬停提示", async () => {
@@ -661,14 +661,14 @@ describe("buttons mapping page", () => {
     expect(chipState(wrapper, "Enter")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
-    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
+    expect(wrapper.find(".mapping-editor").text()).toContain("它原本的按键效果");
 
     await openCell(wrapper, "TV", 0);
     expect(chipState(wrapper, "Enter")).toBe(false);
     expect(chipState(wrapper, "静音")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(chipState(wrapper, "＋ 添加应用")).toBe(false);
-    expect(wrapper.find(".mapping-editor").text()).toContain("遥控器优先");
+    expect(wrapper.find(".mapping-editor").text()).toContain("这个键只执行你配置的动作");
   });
 
   it("左键与其余方向键同样开放自定义并显示结构性泄漏提示", async () => {
@@ -677,7 +677,7 @@ describe("buttons mapping page", () => {
     expect(chipState(wrapper, "←")).toBe(false);
     expect(chipState(wrapper, "Backspace")).toBe(false);
     expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
-    expect(wrapper.find(".mapping-editor").text()).toContain("原生按键动作");
+    expect(wrapper.find(".mapping-editor").text()).toContain("它原本的按键效果");
 
     // 与型号无关：RC001 上左键同样开放。
     const rc001 = await mountPage("rc001");

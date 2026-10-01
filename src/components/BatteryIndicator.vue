@@ -12,8 +12,8 @@ const level = computed(() => {
 });
 const label = computed(() => level.value === null ? "电量未知" : `${level.value}%`);
 const title = computed(() => !connected.value ? "遥控器未连接"
-  : level.value === null ? "Windows 暂未提供遥控器电量"
-  : `遥控器电量 ${level.value}%（随遥控器上报更新）`);
+  : level.value === null ? "暂时读不到遥控器电量"
+  : `遥控器电量 ${level.value}%`);
 </script>
 
 <template>

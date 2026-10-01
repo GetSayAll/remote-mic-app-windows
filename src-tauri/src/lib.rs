@@ -24,7 +24,7 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
-use sayall_core::ThemePreference;
+use sayall_core::{ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
@@ -975,6 +975,78 @@ async fn set_voice_hold_hotkey(
     result
 }
 
+/// 连接页选择的输入工具（微信输入法 / 豆包输入法 / 其他工具）。
+///
+/// `None` = 用户从未选择过：界面按当前快捷键推断一次后落存（老配置升级路径）。
+/// 它不是语音路径的开关——真正生效的永远是"按住说话快捷键"本身，
+/// 这个值只决定连接页展示哪一套引导与开关。
+#[tauri::command]
+async fn get_voice_input_tool(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<VoiceInputTool>, String> {
+    let settings = state.settings.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.load().map(|settings| settings.voice_input_tool)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取输入工具设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(tool) => format!(
+            "shortcut_settings feature=voice_input_tool action=load phase=completed terminal_result=passed tool={}",
+            voice_input_tool_name(*tool)
+        ),
+        Err(_) => "shortcut_settings feature=voice_input_tool action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true".to_owned(),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_voice_input_tool(
+    tool: Option<VoiceInputTool>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<VoiceInputTool>, String> {
+    let started = std::time::Instant::now();
+    let settings = state.settings.clone();
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_input_tool action=save phase=requested tool={}",
+        voice_input_tool_name(tool)
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_voice_input_tool(tool)?;
+        Ok(tool)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存输入工具设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "shortcut_settings feature=voice_input_tool action=save phase=completed terminal_result=passed tool={} elapsed_ms={}",
+            voice_input_tool_name(*saved),
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "shortcut_settings feature=voice_input_tool action=save phase=completed terminal_result=failed tool={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            voice_input_tool_name(tool),
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
+    match tool {
+        Some(VoiceInputTool::Wechat) => "wechat",
+        Some(VoiceInputTool::Doubao) => "doubao",
+        Some(VoiceInputTool::Other) => "other",
+        None => "unset",
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrontendDiagnosticEvent {
@@ -1899,6 +1971,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_voice_input_tool,
+        set_voice_input_tool,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -1948,6 +2022,8 @@ pub fn run() {
         get_send_input_snapshot,
         get_voice_hold_hotkey,
         set_voice_hold_hotkey,
+        get_voice_input_tool,
+        set_voice_input_tool,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

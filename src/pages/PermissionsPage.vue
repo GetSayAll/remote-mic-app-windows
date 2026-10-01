@@ -41,7 +41,7 @@ const audioStatus = computed(() => {
       </div>
       <div class="permission-row">
         <div class="permission-icon">IN</div>
-        <div><strong>按键监听与模拟</strong><p>只监听小米遥控器的按键；按键模拟仅在自定义映射启用时使用。</p></div>
+        <div><strong>按键监听与映射</strong><p>只监听小米遥控器的按键；只有你为按键配置了动作时，才会向电脑发送按键。</p></div>
         <span class="badge" :class="inputStatus.tone">{{ inputStatus.label }}</span>
       </div>
       <div class="permission-row">
