@@ -119,7 +119,6 @@ const mocks = vi.hoisted(() => ({
   setVoiceInputTool: vi.fn(),
   getVokieInstallation: vi.fn(),
   openVokieHomepage: vi.fn(),
-  getConflictingVoiceApps: vi.fn(),
   getOtherVoiceHotkey: vi.fn(),
   setOtherVoiceHotkey: vi.fn(),
   startShortcutCapture: vi.fn(),
@@ -145,7 +144,6 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setVoiceInputTool: mocks.setVoiceInputTool,
     getVokieInstallation: mocks.getVokieInstallation,
     openVokieHomepage: mocks.openVokieHomepage,
-    getConflictingVoiceApps: mocks.getConflictingVoiceApps,
     getOtherVoiceHotkey: mocks.getOtherVoiceHotkey,
     setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
     startShortcutCapture: mocks.startShortcutCapture,
@@ -178,7 +176,6 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
@@ -414,25 +411,6 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("检测到 Chatterfly 正在运行：豆包面板提示右 Alt 会被它抢走", async () => {
-    mocks.getVoiceInputTool.mockResolvedValue("doubao");
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: true });
-    const wrapper = mount(ConnectionPage, { props: { runtime } });
-    await flushPromises();
-
-    expect(wrapper.text()).toContain("要用豆包，请先退出 Chatterfly");
-
-    // 关掉 Chatterfly（重查一次）：提示消失。
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
-    await wrapper
-      .findAll(".tool-card")
-      .find((card) => card.text().includes("豆包"))!
-      .trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).not.toContain("要用豆包，请先退出 Chatterfly");
-    wrapper.unmount();
-  });
-
   it("点 Vokie 卡片：自动设为右 Alt、落存工具选择并显示 Vokie 的准备清单", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
@@ -475,7 +453,6 @@ describe("VB-CABLE first-launch guidance", () => {
 
     // 启动后点“重新检测”：提示消失。
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     const panel = wrapper.find(".setup-col:nth-child(2)");
@@ -491,7 +468,6 @@ describe("VB-CABLE first-launch guidance", () => {
   it("选豆包且 Vokie 正在运行：豆包面板给出“右 Alt 会被 Vokie 抢先”的提示", async () => {
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     const wrapper = mount(ConnectionPage, { props: { runtime } });
@@ -525,7 +501,6 @@ describe("VB-CABLE first-launch guidance", () => {
 
     // 装好之后点“重新检测”：提示消失。
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     await panel
@@ -915,7 +890,6 @@ describe("connection page remote model", () => {
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
@@ -1012,7 +986,6 @@ describe("connection page rc003 capture switch", () => {
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
-    mocks.getConflictingVoiceApps.mockResolvedValue({ chatterflyRunning: false });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);

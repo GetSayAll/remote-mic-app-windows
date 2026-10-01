@@ -1043,26 +1043,9 @@ async fn set_voice_input_tool(
     ));
     let result = match tauri::async_runtime::spawn_blocking(move || {
         settings.save_voice_input_tool(tool)?;
-        // 推给平台并武装"预切"：BLE 工作线程在语音会话开始前按它决定切哪个
-        // 输入法；武装用于"用户离开窗口、第一次切到目标应用时"预切输入法
-        //（报告层合成路径只有这样第一次按下才来得及）。
-        platform.select_voice_input_tool(tool);
-        // 选中即切一次（2026-10-01）：报告层合成的和弦在物理报告到达时就送达
-        // OS，早于本应用知情，所以"按下才切"对合成路径来不及——先切好，
-        // 第一次按下就能用。Vokie/其他工具不会切输入法（内核里判掉）。
-        if let Some(tool) = tool {
-            match platform.ensure_voice_input_ime(tool) {
-                Ok(outcome) => sayall_windows::gatt_note(format!(
-                    "ime_activation tool={} outcome={outcome} trigger=select",
-                    voice_input_tool_name(Some(tool))
-                )),
-                Err(error) => sayall_windows::gatt_note(format!(
-                    "ime_activation tool={} outcome=failed trigger=select error_domain=tsf error_code=activation_failed retryable=true note={}",
-                    voice_input_tool_name(Some(tool)),
-                    error.chars().take(80).collect::<String>(),
-                )),
-            }
-        }
+        // 推给平台：BLE 工作线程在**按住语音键**的那一刻按它决定切哪个输入法
+        //（唯一切换时机；不做聚焦/离开窗口时的预切，2026-10-01 Andy 要求）。
+        platform.set_voice_input_tool(tool);
         Ok(tool)
     })
     .await
@@ -1187,43 +1170,6 @@ async fn set_other_voice_hotkey(
         Err(_) => "shortcut_settings feature=other_voice_hotkey action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true".to_owned(),
     });
     result
-}
-
-/// 与豆包/语音键争右 Alt 的桌面程序检测（2026-10-01 Andy 反馈：
-/// 选了豆包、豆包也确实是当前输入法，按住语音键出现的却是 Chatterfly 的语音输入）。
-///
-/// 只读进程名（不读它的配置、不记路径，隐私红线同 Vokie）。判据用"在跑"：
-/// 没运行就不会抢键。
-#[tauri::command]
-async fn get_conflicting_voice_apps() -> ConflictingVoiceAppsSnapshot {
-    let result = tauri::async_runtime::spawn_blocking(|| ConflictingVoiceAppsSnapshot {
-        chatterfly_running: sayall_windows::chatterfly::running(),
-    })
-    .await;
-    match result {
-        Ok(snapshot) => {
-            sayall_windows::gatt_note(format!(
-                "voice_input_tool feature=conflict_probe action=detect phase=completed terminal_result=passed chatterfly_running={}",
-                snapshot.chatterfly_running
-            ));
-            snapshot
-        }
-        Err(_) => {
-            sayall_windows::gatt_note(
-                "voice_input_tool feature=conflict_probe action=detect phase=completed terminal_result=failed chatterfly_running=false error_domain=task error_code=join_failed retryable=true"
-                    .to_owned(),
-            );
-            ConflictingVoiceAppsSnapshot {
-                chatterfly_running: false,
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConflictingVoiceAppsSnapshot {
-    chatterfly_running: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2131,44 +2077,6 @@ pub fn run() {
                     api.prevent_close();
                 }
             }
-            // 预切输入法（2026-10-01）：选中豆包/微信后，用户在连接页点完就会切到
-            // 目标应用——那一刻才切输入法才有意义（TSF 会话切换作用于前台应用；
-            // 报告层合成的和弦又早于本应用知情）。只在"选中之后第一次离开窗口"
-            // 触发，之后不再干预用户的输入法选择。
-            //
-            // 重试若干次：焦点交接/目标应用启动有竞态，第一次调用可能看到前台
-            // 仍是自己（skipped_self_foreground，此时不消费武装）或目标应用尚未
-            // 就绪；实测用遥控器按键打开记事本时正是这种情况（2026-10-01）。
-            if let tauri::WindowEvent::Focused(false) = event {
-                if window.label() == "main" {
-                    let state = window.app_handle().state::<AppState>();
-                    let platform = Arc::clone(&state.platform);
-                    tauri::async_runtime::spawn_blocking(move || {
-                        const RETRY_DELAYS_MS: [u64; 4] = [0, 400, 900, 1600];
-                        for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
-                            if *delay > 0 {
-                                std::thread::sleep(std::time::Duration::from_millis(*delay));
-                            }
-                            let Some(result) = platform.ensure_armed_voice_input_ime() else {
-                                break;
-                            };
-                            let stopped = !matches!(&result, Ok(label) if *label == "skipped_self_foreground");
-                            match result {
-                                Ok(outcome) => sayall_windows::gatt_note(format!(
-                                    "ime_activation tool=armed outcome={outcome} trigger=window_blur attempt={attempt}"
-                                )),
-                                Err(error) => sayall_windows::gatt_note(format!(
-                                    "ime_activation tool=armed outcome=failed trigger=window_blur attempt={attempt} error_domain=tsf error_code=activation_failed retryable=true note={}",
-                                    error.chars().take(80).collect::<String>(),
-                                )),
-                            }
-                            if stopped {
-                                break;
-                            }
-                        }
-                    });
-                }
-            }
         });
 
     #[cfg(feature = "runtime-simulation")]
@@ -2210,7 +2118,6 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
-        get_conflicting_voice_apps,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
         get_theme_preference,
@@ -2265,7 +2172,6 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
-        get_conflicting_voice_apps,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
         get_theme_preference,

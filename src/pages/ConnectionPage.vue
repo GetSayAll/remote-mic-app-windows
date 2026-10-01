@@ -23,7 +23,6 @@ import {
   disconnectRemote,
   enableRc003Capture,
   getAudioSnapshot,
-  getConflictingVoiceApps,
   getConnectionSnapshot,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
@@ -116,12 +115,6 @@ const vokieRunning = ref<boolean | null>(null);
 const checkingVokie = ref(false);
 const openingVokiePage = ref(false);
 const vokieCheckMessage = ref("");
-/**
- * Chatterfly 等"抢右 Alt"的常驻桌面程序是否在运行（2026-10-01 Andy 反馈：
- * 选了豆包、豆包也确实是当前输入法，按住语音键出现的却是 Chatterfly 的语音输入）。
- * `null` = 尚未检测/检测失败——不把"没检测到"当成"没在跑"。
- */
-const chatterflyRunning = ref<boolean | null>(null);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
 let voiceCaptureTimeout: number | null = null;
@@ -271,20 +264,6 @@ async function selectVoiceInputTool(tool: VoiceInputTool): Promise<void> {
   // Vokie：每次选中都重查一次安装状态（用户可能刚装好就回来选）。
   if (tool === "vokie") {
     void refreshVokieInstallation();
-  }
-  // 豆包：重查一次"抢右 Alt 的常驻程序"，决定要不要提示冲突。
-  if (tool === "doubao") {
-    void refreshChatterflyRunning();
-  }
-}
-
-/** 抢右 Alt 的常驻程序检测；失败保持 null，不把"检测失败"当成"没在跑"。 */
-async function refreshChatterflyRunning(): Promise<void> {
-  try {
-    const status = await getConflictingVoiceApps();
-    chatterflyRunning.value = status.chatterflyRunning;
-  } catch {
-    chatterflyRunning.value = null;
   }
 }
 
@@ -908,7 +887,6 @@ onMounted(async () => {
   void initializeShortcutSettings();
   void reconcileRc003Capture();
   void refreshVokieInstallation();
-  void refreshChatterflyRunning();
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -1188,14 +1166,6 @@ onUnmounted(() => {
             </div>
             <div v-if="rc003CaptureEnabled === false" class="info-callout warning callout-small">
               还差一步：开启后豆包才能收到遥控器语音键。首次开启会弹出一次系统授权，请点“是”。
-            </div>
-            <div
-              v-if="chatterflyRunning === true"
-              class="info-callout warning callout-small"
-            >
-              检测到 Chatterfly 正在运行：实测按住遥控器语音键时出现的是它的语音输入（它也响应右 Alt）。要用豆包，请先退出 Chatterfly。
-            </div>
-            <div v-else-if="rc003CaptureEnabled === true" class="info-callout callout-small">
               已开启：现在按住遥控器语音键，豆包的语音条就会出现。
             </div>
             <div v-if="vokieRunning === true" class="info-callout warning callout-small">
@@ -1379,8 +1349,7 @@ onUnmounted(() => {
         <li>“支持更多输入工具”和“按键”页的“全按键支持”是同一个开关，两处随时同步；首次开启会弹一次系统授权。</li>
         <li>“替你按下的键”目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
         <li>微信输入法要求按住约半秒以上（需要联网），快速点按不出字是它自己的要求，不是故障。</li>
-        <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单（记事本里会出现“文件(F)、编辑(E)”这类字母）。应用会在你选中工具、切到目标应用时自动把输入法切过去；刚打开一个应用后的第一次按住如果没反应，松开再按一次即可（那一下用于让输入法在该应用里接上）。</li>
-        <li>Chatterfly 等语音工具如果也响应右 Alt，会抢在豆包前面——按住语音键出现的是它的语音输入时，先退出它再试（豆包面板检测到 Chatterfly 正在运行时会提示）。</li>
+        <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单（记事本里会出现“文件(F)、编辑(E)”这类字母）。应用会在你**按住语音键时**把输入法切到所选工具；刚切换过输入工具后的第一次按住如果没反应，松开再按一次即可（第一次那下用于切换输入法）。</li>
         <li>Vokie、微信输入法或豆包如果没有单独的麦克风选项，把系统默认录音设备设为 CABLE Output。</li>
         <li>Vokie 和豆包用的是同一个快捷键（右 Alt），同一时间只会有一个在响应：Vokie 要在运行中，豆包要是当前输入法；两个同时开着时 Vokie 会抢先。</li>
       </ul>

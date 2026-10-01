@@ -121,9 +121,8 @@ fn vokie_process_running() -> bool {
 ///
 /// 抽成谓词形式是为了能做**阳性对照**测试——用"本测试进程自己的名字"验证遍历
 /// 真的能看到进程（2026-09-23 教训：没有阳性对照的阴性结论不可信）。
-/// 2026-10-01：`chatterfly` 模块复用本函数做同类冲突检测。
 #[cfg(windows)]
-pub(crate) fn any_process_name_matches(predicate: impl Fn(&str) -> bool) -> bool {
+fn any_process_name_matches(predicate: impl Fn(&str) -> bool) -> bool {
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,

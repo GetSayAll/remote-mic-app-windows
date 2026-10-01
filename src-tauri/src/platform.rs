@@ -50,21 +50,6 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// 「你在用的输入工具」：BLE 工作线程在语音会话开始前按它决定把哪个
     /// 输入法切进当前会话（`ime::ensure_session_ime`）。
     fn set_voice_input_tool(&self, _tool: Option<VoiceInputTool>) {}
-    /// 用户**显式选择**输入工具：除记录状态外，还要武装一次"离开应用窗口时
-    /// 预切输入法"（报告层合成路径第一次按下才来得及）。
-    fn select_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
-        self.set_voice_input_tool(tool);
-    }
-    /// 立即确保目标输入法是当前会话的活动输入法；不切输入法的工具返回
-    /// `"not_required"`。用于"选中工具即切一次"（报告层合成路径第一次按下就可用）。
-    fn ensure_voice_input_ime(&self, _tool: VoiceInputTool) -> Result<String, String> {
-        Ok("unsupported".to_owned())
-    }
-    /// 用户刚选过工具后第一次离开应用窗口时的"预切输入法"：`None` = 未武装
-    /// （无事可做），`Some(Ok(label))` / `Some(Err(_))` = 已执行一次。
-    fn ensure_armed_voice_input_ime(&self) -> Option<Result<String, String>> {
-        None
-    }
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
     fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
@@ -198,21 +183,6 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
         WindowsPlatform::set_voice_input_tool(self, tool)
-    }
-
-    fn select_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
-        WindowsPlatform::select_voice_input_tool(self, tool)
-    }
-
-    #[cfg(windows)]
-    fn ensure_voice_input_ime(&self, tool: VoiceInputTool) -> Result<String, String> {
-        WindowsPlatform::ensure_voice_input_ime(self, tool).map(|label| label.to_owned())
-    }
-
-    #[cfg(windows)]
-    fn ensure_armed_voice_input_ime(&self) -> Option<Result<String, String>> {
-        WindowsPlatform::ensure_armed_voice_input_ime(self)
-            .map(|result| result.map(|label| label.to_owned()))
     }
 
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
