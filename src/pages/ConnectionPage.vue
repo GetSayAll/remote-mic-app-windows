@@ -97,6 +97,11 @@ const voiceCaptureDisplay = ref<KeyCode[]>([]);
 const voiceInputTool = ref<VoiceInputTool | null>(null);
 const savingVoiceInputTool = ref(false);
 /**
+ * 正在为哪个工具落"按住说话快捷键"（含两段 IPC 全程）。见 toolChordPill：
+ * 这期间状态胶囊按乐观态显示，避免切换工具的瞬间闪一帧"未同步"黄标。
+ */
+const applyingTool = ref<VoiceInputTool | null>(null);
+/**
  * Vokie 检测状态（2026-10-01 Andy 需求 + 快捷键冲突处理）：
  * - `installed === false`：Vokie 面板显示官网入口；
  * - 已安装但没运行：提示“没有运行”——没运行就不会响应右 Alt；
@@ -185,6 +190,24 @@ function toolChordActive(tool: VoiceInputTool): boolean {
 }
 
 /**
+ * 状态胶囊（"已自动设置 / 未同步，点左侧卡片重设"）的判据。
+ *
+ * 切换工具是两段异步 IPC（落工具选择 → 写按住说话快捷键），期间 `voiceHotkey`
+ * 还是上一代的组合——纯按 `toolChordActive` 判定会闪一帧"未同步"黄标
+ * （2026-10-01 Andy 实测：快速在微信/豆包之间切换时黄标闪现）。正在为这个工具
+ * 落快捷键时按乐观态显示"已自动设置"；失败时 applyingTool 清空，回到真实判定
+ * （写失败的真实状态由 voiceHotkeyMessage + 重新读取的 voiceHotkey 呈现）。
+ */
+function toolChordPill(tool: VoiceInputTool): { ok: boolean; label: string } {
+  if (applyingTool.value === tool) {
+    return { ok: true, label: "已自动设置" };
+  }
+  return toolChordActive(tool)
+    ? { ok: true, label: "已自动设置" }
+    : { ok: false, label: "未同步，点左侧卡片重设" };
+}
+
+/**
  * 老配置（从未选过工具）按当前快捷键推断一次：左 Ctrl + 左 Win = 微信、
  * 右 Alt = 豆包（Vokie 与豆包用同一个组合，只能靠已保存的工具区分）、
  * 其余（左 Alt / 不按键 / 自定义组合）= 其他工具。
@@ -207,6 +230,8 @@ async function selectVoiceInputTool(tool: VoiceInputTool): Promise<void> {
   }
   const previous = voiceInputTool.value;
   savingVoiceInputTool.value = true;
+  // 乐观态窗口：工具已切、快捷键还在写盘路上，期间状态胶囊不许判成"未同步"。
+  applyingTool.value = tool;
   voiceHotkeyMessage.value = "";
   voiceInputTool.value = tool;
   try {
@@ -215,12 +240,17 @@ async function selectVoiceInputTool(tool: VoiceInputTool): Promise<void> {
     voiceInputTool.value = previous;
     voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
     savingVoiceInputTool.value = false;
+    applyingTool.value = null;
     return;
   }
   savingVoiceInputTool.value = false;
   const keys = VOICE_TOOL_CHORDS[tool];
-  if (keys) {
-    await applyVoiceHotkey([...keys]);
+  try {
+    if (keys) {
+      await applyVoiceHotkey([...keys]);
+    }
+  } finally {
+    applyingTool.value = null;
   }
   // Vokie：每次选中都重查一次安装状态（用户可能刚装好就回来选）。
   if (tool === "vokie") {
@@ -1071,8 +1101,8 @@ onUnmounted(() => {
             <div class="chord-line">
               按住遥控器语音键 <span class="muted">=</span>
               <span class="key">右 Alt</span>
-              <span class="pill" :class="toolChordActive('doubao') ? 'ok' : 'warn'">
-                {{ toolChordActive("doubao") ? "已自动设置" : "未同步，点左侧卡片重设" }}
+              <span class="pill" :class="toolChordPill('doubao').ok ? 'ok' : 'warn'">
+                {{ toolChordPill("doubao").label }}
               </span>
             </div>
             <div class="switch-line">
@@ -1125,8 +1155,8 @@ onUnmounted(() => {
               <span class="key">左 Ctrl</span>
               <span class="muted">+</span>
               <span class="key">左 Win</span>
-              <span class="pill" :class="toolChordActive('wechat') ? 'ok' : 'warn'">
-                {{ toolChordActive("wechat") ? "已自动设置" : "未同步，点左侧卡片重设" }}
+              <span class="pill" :class="toolChordPill('wechat').ok ? 'ok' : 'warn'">
+                {{ toolChordPill("wechat").label }}
               </span>
             </div>
             <p class="tiny muted">微信输入法不需要“支持更多输入工具”开关。</p>
@@ -1173,8 +1203,8 @@ onUnmounted(() => {
             <div class="chord-line">
               按住遥控器语音键 <span class="muted">=</span>
               <span class="key">右 Alt</span>
-              <span class="pill" :class="toolChordActive('vokie') ? 'ok' : 'warn'">
-                {{ toolChordActive("vokie") ? "已自动设置" : "未同步，点左侧卡片重设" }}
+              <span class="pill" :class="toolChordPill('vokie').ok ? 'ok' : 'warn'">
+                {{ toolChordPill("vokie").label }}
               </span>
             </div>
             <p v-if="vokieCheckMessage" class="tiny muted">{{ vokieCheckMessage }}</p>

@@ -446,6 +446,52 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
+  it("切换输入工具期间不闪「未同步」黄标（两段 IPC 之间按乐观态显示）", async () => {
+    // 按住说话快捷键写入挂在半路：复现"工具已切、快捷键还在写盘"的中间态。
+    const gate: { release: (() => void) | null } = { release: null };
+    mocks.setVoiceHoldHotkey.mockImplementation(
+      (hotkey: unknown) =>
+        new Promise((resolve) => {
+          gate.release = () => resolve(hotkey);
+        }),
+    );
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    // 起点：微信 + 左 Ctrl + 左 Win（beforeEach 默认），面板显示"已自动设置"。
+    const panelText = () =>
+      wrapper.find(".setup-col:nth-child(2)").text();
+    expect(panelText()).toContain("已自动设置");
+
+    // 点豆包：点击后 nextTick 已过、快捷键尚未写盘——旧实现这里会闪"未同步"。
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("豆包"))!
+      .trigger("click");
+    expect(panelText()).not.toContain("未同步");
+
+    gate.release?.();
+    await flushPromises();
+    expect(panelText()).toContain("已自动设置");
+    expect(panelText()).not.toContain("未同步");
+    wrapper.unmount();
+  });
+
+  it("切换输入工具但快捷键写盘失败：回到「未同步」而不是停在乐观态", async () => {
+    mocks.setVoiceHoldHotkey.mockRejectedValue(new Error("写入失败"));
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("豆包"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".setup-col:nth-child(2)").text()).toContain("未同步");
+    wrapper.unmount();
+  });
+
   it("点其他工具卡片：不改变当前快捷键，改为提供按键芯片与自定义占位", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
