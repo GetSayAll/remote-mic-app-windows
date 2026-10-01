@@ -2045,21 +2045,36 @@ pub fn run() {
             // 预切输入法（2026-10-01）：选中豆包/微信后，用户在连接页点完就会切到
             // 目标应用——那一刻才切输入法才有意义（TSF 会话切换作用于前台应用；
             // 报告层合成的和弦又早于本应用知情）。只在"选中之后第一次离开窗口"
-            // 触发一次，之后不再干预用户的输入法选择。
+            // 触发，之后不再干预用户的输入法选择。
+            //
+            // 重试若干次：焦点交接/目标应用启动有竞态，第一次调用可能看到前台
+            // 仍是自己（skipped_self_foreground，此时不消费武装）或目标应用尚未
+            // 就绪；实测用遥控器按键打开记事本时正是这种情况（2026-10-01）。
             if let tauri::WindowEvent::Focused(false) = event {
                 if window.label() == "main" {
                     let state = window.app_handle().state::<AppState>();
                     let platform = Arc::clone(&state.platform);
                     tauri::async_runtime::spawn_blocking(move || {
-                        if let Some(result) = platform.ensure_armed_voice_input_ime() {
+                        const RETRY_DELAYS_MS: [u64; 4] = [0, 400, 900, 1600];
+                        for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
+                            if *delay > 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(*delay));
+                            }
+                            let Some(result) = platform.ensure_armed_voice_input_ime() else {
+                                break;
+                            };
+                            let stopped = !matches!(&result, Ok(label) if *label == "skipped_self_foreground");
                             match result {
                                 Ok(outcome) => sayall_windows::gatt_note(format!(
-                                    "ime_activation tool=armed outcome={outcome} trigger=window_blur"
+                                    "ime_activation tool=armed outcome={outcome} trigger=window_blur attempt={attempt}"
                                 )),
                                 Err(error) => sayall_windows::gatt_note(format!(
-                                    "ime_activation tool=armed outcome=failed trigger=window_blur error_domain=tsf error_code=activation_failed retryable=true note={}",
+                                    "ime_activation tool=armed outcome=failed trigger=window_blur attempt={attempt} error_domain=tsf error_code=activation_failed retryable=true note={}",
                                     error.chars().take(80).collect::<String>(),
                                 )),
+                            }
+                            if stopped {
+                                break;
                             }
                         }
                     });

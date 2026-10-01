@@ -577,16 +577,25 @@ impl WindowsPlatform {
     pub fn ensure_voice_input_ime(&self, tool: VoiceInputTool) -> Result<&'static str, String> {
         ime::ensure_session_ime(tool).map(ime_activation_label)
     }
-    /// 「离开应用窗口时预切一次输入法」：仅在用户刚选过工具（armed）后触发一次，
-    /// 幂等且一次性——避免持续干预用户在别处手动切换输入法。
+    /// 「离开应用窗口时预切一次输入法」：仅在用户刚选过工具（armed）后触发，
+    /// 一次性且幂等——避免持续干预用户在别处手动切换输入法。
+    ///
+    /// **前台还是自己时不算数、不消费武装**（`skipped_self_foreground`）：
+    /// 焦点交接有竞态（2026-10-01 实测：用遥控器按键打开记事本时，blur 事件
+    /// 可能早于记事本真正拿到焦点），否则会出现"武装被一次无效调用吃掉，
+    /// 之后再也不预切"——表现为切完工具后第一次按下仍然漏键。
     /// `None` = 本次没有待办（未武装）；`Some(Ok(label))` / `Some(Err(_))` = 已执行。
     #[cfg(windows)]
     pub fn ensure_armed_voice_input_ime(&self) -> Option<Result<&'static str, String>> {
-        if !self.ime_ensure_armed.swap(false, Ordering::SeqCst) {
+        if !self.ime_ensure_armed.load(Ordering::SeqCst) {
             return None;
         }
         let tool = (*lock(&self.voice_input_tool))?;
-        Some(self.ensure_voice_input_ime(tool))
+        let result = self.ensure_voice_input_ime(tool);
+        if !matches!(result, Ok("skipped_self_foreground")) {
+            self.ime_ensure_armed.store(false, Ordering::SeqCst);
+        }
+        Some(result)
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {
