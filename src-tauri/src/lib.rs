@@ -1039,12 +1039,46 @@ async fn set_voice_input_tool(
     result
 }
 
+/// Vokie 安装检测的返回体（连接页只用 installed 决定是否显示官网入口）。
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VokieInstallationSnapshot {
+    installed: bool,
+}
+
 fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
     match tool {
         Some(VoiceInputTool::Wechat) => "wechat",
         Some(VoiceInputTool::Doubao) => "doubao",
+        Some(VoiceInputTool::Vokie) => "vokie",
         Some(VoiceInputTool::Other) => "other",
         None => "unset",
+    }
+}
+
+/// Vokie 安装检测（连接页“选择输入工具”→“Vokie”卡片的未安装提示）。
+///
+/// 只读：不启动 Vokie、不读它的配置。日志只记结果与命中的判据标签（source），
+/// **绝不记路径**（隐私红线）。
+#[tauri::command]
+async fn get_vokie_installation() -> VokieInstallationSnapshot {
+    let result = match tauri::async_runtime::spawn_blocking(sayall_windows::vokie::detect).await {
+        Ok(installation) => installation,
+        Err(_) => {
+            sayall_windows::gatt_note(
+                "voice_input_tool feature=vokie_install action=detect phase=completed terminal_result=failed installed=false source=task_failed error_domain=task error_code=join_failed retryable=true"
+                    .to_owned(),
+            );
+            return VokieInstallationSnapshot { installed: false };
+        }
+    };
+    sayall_windows::gatt_note(format!(
+        "voice_input_tool feature=vokie_install action=detect phase=completed terminal_result=passed installed={} source={}",
+        result.installed,
+        result.source_label()
+    ));
+    VokieInstallationSnapshot {
+        installed: result.installed,
     }
 }
 
@@ -1974,6 +2008,7 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_vokie_installation,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -2025,6 +2060,7 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_vokie_installation,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

@@ -11,7 +11,8 @@
       "allow": [
         { "url": "https://vb-audio.com/Cable/" },
         { "url": "https://sayall.app/" },
-        { "url": "https://github.com/GetSayAll/remote-mic-app-windows" }
+        { "url": "https://github.com/GetSayAll/remote-mic-app-windows" },
+        { "url": "https://vokie.com/" }
       ]
     }
   ]

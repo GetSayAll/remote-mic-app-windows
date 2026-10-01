@@ -117,6 +117,8 @@ const mocks = vi.hoisted(() => ({
   setVoiceHoldHotkey: vi.fn(),
   getVoiceInputTool: vi.fn(),
   setVoiceInputTool: vi.fn(),
+  getVokieInstallation: vi.fn(),
+  openVokieHomepage: vi.fn(),
   startShortcutCapture: vi.fn(),
   stopShortcutCapture: vi.fn(),
   subscribeShortcutCaptureEdges: vi.fn(),
@@ -138,6 +140,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
     getVoiceInputTool: mocks.getVoiceInputTool,
     setVoiceInputTool: mocks.setVoiceInputTool,
+    getVokieInstallation: mocks.getVokieInstallation,
+    openVokieHomepage: mocks.openVokieHomepage,
     startShortcutCapture: mocks.startShortcutCapture,
     stopShortcutCapture: mocks.stopShortcutCapture,
     subscribeShortcutCaptureEdges: mocks.subscribeShortcutCaptureEdges,
@@ -167,6 +171,8 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true });
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.getRc003TaskStatus.mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -303,7 +309,7 @@ describe("VB-CABLE first-launch guidance", () => {
     await flushPromises();
 
     const order = wrapper.findAll(".tool-card strong").map((node) => node.text());
-    expect(order).toEqual(["豆包输入法", "微信输入法", "其他工具"]);
+    expect(order).toEqual(["豆包输入法", "微信输入法", "Vokie", "其他工具"]);
     expect(selectedToolCard(wrapper)).toBe("微信输入法");
     // 微信不需要"支持更多输入工具"开关，面板不渲染它。
     expect(wrapper.find(".capture-switch").exists()).toBe(false);
@@ -342,6 +348,61 @@ describe("VB-CABLE first-launch guidance", () => {
       "3切到豆包后，按住遥控器语音键说话",
     ]);
     expect(wrapper.find(".capture-switch").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("点 Vokie 卡片：自动设为右 Alt、落存工具选择并显示 Vokie 的准备清单", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("Vokie"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(mocks.setVoiceInputTool).toHaveBeenCalledWith("vokie");
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
+    expect(selectedToolCard(wrapper)).toBe("Vokie");
+    expect(wrapper.findAll(".checklist li").map((item) => item.text())).toEqual([
+      "1Vokie 麦克风选 CABLE Output",
+      "2Vokie 快捷键保持默认的 右 Alt",
+      "3在要写字的地方按住遥控器语音键说话",
+    ]);
+    // 已安装（默认 mock）：不显示官网入口。
+    expect(wrapper.text()).not.toContain("没有检测到 Vokie");
+    wrapper.unmount();
+  });
+
+  it("未安装 Vokie：显示官网入口与重新检测，点官网按钮调用 openVokieHomepage", async () => {
+    mocks.getVokieInstallation.mockResolvedValue({ installed: false });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll(".tool-card")
+      .find((card) => card.text().includes("Vokie"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("没有检测到 Vokie");
+    const panel = wrapper.find(".setup-col:nth-child(2)");
+    const siteButton = panel
+      .findAll("button")
+      .find((button) => button.text().includes("打开官网"))!;
+    expect(siteButton).toBeDefined();
+    await siteButton.trigger("click");
+    await flushPromises();
+    expect(mocks.openVokieHomepage).toHaveBeenCalledOnce();
+
+    // 装好之后点“重新检测”：提示消失。
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true });
+    await panel
+      .findAll("button")
+      .find((button) => button.text().includes("重新检测"))!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("没有检测到 Vokie");
     wrapper.unmount();
   });
 
@@ -676,6 +737,8 @@ describe("connection page remote model", () => {
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true });
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.getRc003TaskStatus.mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -768,6 +831,8 @@ describe("connection page rc003 capture switch", () => {
     // 开关只在需要它的工具面板里渲染：这里固定为豆包（要求开启）。
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true });
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.startShortcutCapture.mockResolvedValue([]);
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
