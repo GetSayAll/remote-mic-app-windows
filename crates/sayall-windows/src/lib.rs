@@ -24,6 +24,8 @@ mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
 pub mod file_dialog;
+/// 聚焦输入框的纯逻辑（跨平台可编译、可单测）。
+pub mod focus;
 #[cfg(windows)]
 pub mod graceful_exit;
 pub mod registered_apps;
