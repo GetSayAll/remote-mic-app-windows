@@ -24,6 +24,7 @@
 | 同一设置在连接页的入口 | 支持更多输入工具 | `ConnectionPage.vue` |
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
 | 虚拟声卡端点 | CABLE Input / CABLE Output（VB-CABLE） | VB-Audio 官方名称 |
+| 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页

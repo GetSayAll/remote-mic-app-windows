@@ -26,6 +26,7 @@ pub enum ThemePreference {
 pub enum VoiceInputTool {
     Wechat,
     Doubao,
+    Vokie,
     Other,
 }
 
@@ -146,6 +147,7 @@ mod tests {
         for tool in [
             VoiceInputTool::Wechat,
             VoiceInputTool::Doubao,
+            VoiceInputTool::Vokie,
             VoiceInputTool::Other,
         ] {
             let settings = AppSettings {

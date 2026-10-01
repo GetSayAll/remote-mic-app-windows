@@ -14,6 +14,14 @@ export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 export const OFFICIAL_WEBSITE_URL = "https://sayall.app/";
 export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-app-windows";
 
+/**
+ * Vokie 官网（2026-10-01 Andy 提供）。
+ *
+ * 同样是 opener 白名单的键：新增 URL 必须同步
+ * `src-tauri/capabilities/default.json` 与 `bridge.test.ts` 的白名单断言。
+ */
+export const VOKIE_HOMEPAGE_URL = "https://vokie.com/";
+
 export type ConnectionPhase =
   | "idle"
   | "connecting"
@@ -601,14 +609,31 @@ async function openExternalUrl(url: string): Promise<void> {
   await openUrl(url);
 }
 
-/** 关于页顶部"官网"入口。 */
+/** 关于页顶部“官网”入口。 */
 export async function openOfficialWebsite(): Promise<void> {
   await openExternalUrl(OFFICIAL_WEBSITE_URL);
 }
 
-/** 关于页顶部"GitHub"入口。 */
+/** 关于页顶部“GitHub”入口。 */
 export async function openGitHubRepository(): Promise<void> {
   await openExternalUrl(GITHUB_REPOSITORY_URL);
+}
+
+/** 连接页“Vokie 未安装”提示里的官网入口（2026-10-01）。 */
+export async function openVokieHomepage(): Promise<void> {
+  await openExternalUrl(VOKIE_HOMEPAGE_URL);
+}
+
+/** Vokie 安装检测结果；未安装时连接页显示官网入口（不展示任何路径）。 */
+export interface VokieInstallation {
+  installed: boolean;
+}
+
+export async function getVokieInstallation(): Promise<VokieInstallation> {
+  if (!isTauriRuntime()) {
+    return { installed: false };
+  }
+  return invoke<VokieInstallation>("get_vokie_installation");
 }
 
 export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
@@ -879,7 +904,7 @@ export async function setVoiceHoldHotkey(hotkey: KeyChord | null): Promise<KeyCh
  * 输入工具"开关）；真正生效的语音路径永远是"按住说话快捷键"本身。
  * `null` = 用户从未选择过（老配置）：界面按当前快捷键推断一次后落存。
  */
-export type VoiceInputTool = "wechat" | "doubao" | "other";
+export type VoiceInputTool = "wechat" | "doubao" | "vokie" | "other";
 
 export async function getVoiceInputTool(): Promise<VoiceInputTool | null> {
   if (!isTauriRuntime()) {

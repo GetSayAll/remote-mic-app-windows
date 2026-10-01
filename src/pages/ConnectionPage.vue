@@ -27,9 +27,11 @@ import {
   getRc003TaskStatus,
   getVoiceHoldHotkey,
   getVoiceInputTool,
+  getVokieInstallation,
   isRecommendedVoiceEndpoint,
   listAudioEndpoints,
   openVbCableDownloadPage,
+  openVokieHomepage,
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
@@ -94,6 +96,14 @@ const voiceCaptureDisplay = ref<KeyCode[]>([]);
 /** 当前选择的输入工具；null = 尚未读取（或从未选择过，正在推断）。 */
 const voiceInputTool = ref<VoiceInputTool | null>(null);
 const savingVoiceInputTool = ref(false);
+/**
+ * Vokie 安装检测（2026-10-01 Andy 需求）：未安装时在 Vokie 面板给出官网入口。
+ * 检测在 Rust 侧只读完成（卸载表 / 开始菜单 / App Paths），只回布尔值、不回路径。
+ */
+const vokieInstalled = ref<boolean | null>(null);
+const checkingVokie = ref(false);
+const openingVokiePage = ref(false);
+const vokieCheckMessage = ref("");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
 let voiceCaptureTimeout: number | null = null;
@@ -122,13 +132,15 @@ const DEFAULT_VOICE_HOTKEY_KEYS: KeyCode[] = ["left_control", "left_windows"];
 const VOICE_TOOL_CHORDS: Record<VoiceInputTool, KeyCode[] | null> = {
   doubao: ["right_alt"],
   wechat: [...DEFAULT_VOICE_HOTKEY_KEYS],
+  vokie: ["right_alt"],
   other: null,
 };
 
-/** 工具卡片顺序：豆包排第一（2026-09-30 Andy 要求）。 */
+/** 工具卡片顺序：豆包第一（2026-09-30 Andy 要求），Vokie 在“其他工具”之前（2026-10-01 新增）。 */
 const TOOL_CARDS: Array<{ id: VoiceInputTool; name: string; note: string }> = [
   { id: "doubao", name: "豆包输入法", note: "要开启“支持更多输入工具”" },
   { id: "wechat", name: "微信输入法", note: "用默认语音键，最省事" },
+  { id: "vokie", name: "Vokie", note: "流式显示，智能整理，不占用输入法" },
   { id: "other", name: "其他工具", note: "自己指定按键" },
 ];
 
@@ -170,7 +182,8 @@ function toolChordActive(tool: VoiceInputTool): boolean {
 
 /**
  * 老配置（从未选过工具）按当前快捷键推断一次：左 Ctrl + 左 Win = 微信、
- * 右 Alt = 豆包、其余（左 Alt / 不按键 / 自定义组合）= 其他工具。
+ * 右 Alt = 豆包（Vokie 与豆包用同一个组合，只能靠已保存的工具区分）、
+ * 其余（左 Alt / 不按键 / 自定义组合）= 其他工具。
  */
 function deriveToolFromChord(chord: KeyChord | null): VoiceInputTool {
   const normalized = chord ? [...chord.keys].sort().join("+") : "";
@@ -204,6 +217,37 @@ async function selectVoiceInputTool(tool: VoiceInputTool): Promise<void> {
   const keys = VOICE_TOOL_CHORDS[tool];
   if (keys) {
     await applyVoiceHotkey([...keys]);
+  }
+  // Vokie：每次选中都重查一次安装状态（用户可能刚装好就回来选）。
+  if (tool === "vokie") {
+    void refreshVokieInstallation();
+  }
+}
+
+/** Vokie 安装检测；失败保持 null，不把"检测失败"当成"没装"。 */
+async function refreshVokieInstallation(): Promise<void> {
+  if (checkingVokie.value) return;
+  checkingVokie.value = true;
+  try {
+    vokieInstalled.value = (await getVokieInstallation()).installed;
+    vokieCheckMessage.value = "";
+  } catch (error) {
+    vokieInstalled.value = null;
+    vokieCheckMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    checkingVokie.value = false;
+  }
+}
+
+async function openVokiePage(): Promise<void> {
+  openingVokiePage.value = true;
+  try {
+    await openVokieHomepage();
+    vokieCheckMessage.value = "已打开 Vokie 官网；安装后点“重新检测”。";
+  } catch (error) {
+    vokieCheckMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    openingVokiePage.value = false;
   }
 }
 
@@ -778,6 +822,7 @@ onMounted(async () => {
   void initializeAudio();
   void initializeShortcutSettings();
   void reconcileRc003Capture();
+  void refreshVokieInstallation();
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -1077,6 +1122,66 @@ onUnmounted(() => {
             <p class="tiny muted">微信输入法不需要“支持更多输入工具”开关。</p>
           </div>
 
+          <div v-else-if="voiceInputTool === 'vokie'" class="tool-panel">
+            <div v-if="vokieInstalled === false" class="info-callout warning callout-small">
+              没有检测到 Vokie。先安装，再回来设置。
+              <div class="button-row">
+                <button
+                  class="primary-button"
+                  type="button"
+                  :disabled="openingVokiePage"
+                  @click="openVokiePage"
+                >
+                  {{ openingVokiePage ? "正在打开…" : "打开官网 vokie.com" }}
+                </button>
+                <button
+                  class="secondary-button"
+                  type="button"
+                  :disabled="checkingVokie"
+                  @click="refreshVokieInstallation"
+                >
+                  {{ checkingVokie ? "检测中…" : "重新检测" }}
+                </button>
+              </div>
+            </div>
+            <div class="chord-line">
+              按住遥控器语音键 <span class="muted">=</span>
+              <span class="key">右 Alt</span>
+              <span class="pill" :class="toolChordActive('vokie') ? 'ok' : 'warn'">
+                {{ toolChordActive("vokie") ? "已自动设置" : "未同步，点左侧卡片重设" }}
+              </span>
+            </div>
+            <div class="switch-line">
+              <label class="toggle-row" for="capture-switch-vokie">
+                <span>支持更多输入工具</span>
+                <span
+                  v-if="rc003CaptureEnabled === null"
+                  class="toggle-placeholder"
+                  aria-hidden="true"
+                ></span>
+                <input
+                  v-else
+                  id="capture-switch-vokie"
+                  ref="captureSwitchEl"
+                  type="checkbox"
+                  class="toggle-input capture-switch"
+                  :checked="rc003CaptureEnabled === true"
+                  :disabled="rc003CaptureBusy"
+                  @change="toggleRc003Capture"
+                />
+              </label>
+              <span
+                class="switch-state"
+                :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
+              >
+                {{ rc003CaptureEnabled === true ? "已开启" : "未开启" }}
+              </span>
+            </div>
+            <p class="tiny muted">建议开启：部分输入工具需要它才能收到遥控器按键。</p>
+            <p v-if="rc003CaptureHint" class="tiny muted">{{ rc003CaptureHint }}</p>
+            <p v-if="vokieCheckMessage" class="tiny muted">{{ vokieCheckMessage }}</p>
+          </div>
+
           <div v-else-if="voiceInputTool === 'other'" class="tool-panel">
             <p class="tiny muted" style="margin-top: 0">选与你输入工具里一致的语音键：</p>
             <div class="chip-select">
@@ -1170,6 +1275,11 @@ onUnmounted(() => {
             <li><span class="mark">1</span><span>微信输入法麦克风选 CABLE Output</span></li>
             <li><span class="mark">2</span><span>切到微信输入法后，按住遥控器语音键说话</span></li>
           </ol>
+          <ol v-else-if="voiceInputTool === 'vokie'" class="checklist">
+            <li><span class="mark">1</span><span>Vokie 麦克风选 CABLE Output</span></li>
+            <li><span class="mark">2</span><span>Vokie 快捷键保持默认的 右 Alt</span></li>
+            <li><span class="mark">3</span><span>在要写字的地方按住遥控器语音键说话</span></li>
+          </ol>
           <ol v-else-if="voiceInputTool === 'other'" class="checklist">
             <li><span class="mark">1</span><span>输入工具麦克风选 CABLE Output</span></li>
             <li><span class="mark">2</span><span>语音键与第 2 步选的键一致</span></li>
@@ -1187,6 +1297,7 @@ onUnmounted(() => {
         <li>“替你按下的键”目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
         <li>微信输入法要求按住约半秒以上（需要联网），快速点按不出字是它自己的要求，不是故障。</li>
         <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单。</li>
+        <li>Vokie、微信输入法或豆包如果没有单独的麦克风选项，把系统默认录音设备设为 CABLE Output。</li>
       </ul>
     </details>
   </section>
