@@ -138,6 +138,50 @@
 
 观察：WebView2 与 Chrome/Edge 行为一致（`Document` / `RootWebArea`），读数耗时 19–45 ms。
 
+## 6. 微信 4.0（已登录，聊天主窗口）
+
+```json
+{
+  "process_name": "Weixin", "process_id": 13748,
+  "minimized": false, "cloaked": false, "foreground": false,
+  "scan_attempts": [
+    { "attempt": 1, "count": 0, "elapsed_ms": 12, "error": null },
+    { "attempt": 2, "count": 0, "elapsed_ms": 1,  "error": null },
+    { "attempt": 3, "count": 0, "elapsed_ms": 1,  "error": null }
+  ],
+  "candidates": [],
+  "broad": { "total_found": 2, "control_types": { "ControlType.Pane": 2 },
+             "text_pattern_count": 0, "focusable_count": 0 },
+  "windows": [ "hwnd=0x7117E|pid=13748|visible=True|class=Qt51514QWindowIcon|title=微信",
+               "child=0x71148|visible=True|class=MMUIRenderSubWindowHW" ]
+}
+```
+
+补充：直接探子窗口 `MMUIRenderSubWindowHW` 得到 0 个元素；`powershell -Mta` 结果不变；`WM_NULL` 有响应。
+对照登录窗口（第一轮）：28 个元素、`mmui::XButton` / `XTextView`、点分 AutomationId、0 TextPattern。
+
+## 7. WorkBuddy（Electron 37.10.3，腾讯）与 DimAgent（Electron，正例）
+
+```json
+// WorkBuddy: 树为空
+{ "process_name": "WorkBuddy", "process_id": 27992, "minimized": false, "cloaked": false,
+  "scan_attempts": [ { "attempt": 1, "count": 0, "elapsed_ms": 15 }, { "attempt": 8, "count": 0, "elapsed_ms": 3 } ],
+  "candidates": [],
+  "broad": { "total_found": 2, "control_types": { "ControlType.Pane": 2 },
+             "text_pattern_count": 0, "focusable_count": 0 },
+  "wake": { "attempted": 4, "answered": 4 },
+  "windows": [ "hwnd=0x2CE0730|class=Chrome_WidgetWin_1|visible=True",
+               "child=0x99A0F6A|class=Chrome_RenderWidgetHostHWND|visible=True" ] }
+
+// DimAgent: 树可用（对照）
+{ "process_name": "DimAgent", "process_id": 10736,
+  "scan_attempts": [ { "attempt": 1, "count": 1, "elapsed_ms": 38 } ],
+  "candidates": [ { "control_type": "ControlType.Document", "automation_id": "RootWebArea" } ],
+  "broad": { "total_found": 685, "text_pattern_count": 120, "focusable_count": 288 } }
+```
+
+无效尝试记录（WorkBuddy）：探子窗口 `Chrome_RenderWidgetHostHWND`（0 元素）、`WM_GETOBJECT(UiaRootObjectId)` 唤醒（4/4 送达但树不建立）、置前台、`powershell -Mta`、`WM_NULL` 响应正常（未卡死）。
+
 ## 复现命令
 
 ```powershell
@@ -145,6 +189,13 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -ProcessName notepad
 # 宽口径扫描（控制类型直方图 + TextPattern / 可聚焦元素）
 powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -ProcessName Weixin -Broad
+# 指定窗口/枚举窗口/子窗口（MainWindowHandle 不是真实 UI 窗口时）
+powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -ProcessName WorkBuddy -ListWindows
+powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -WindowHandle 0x2CE0730 -ListChildren
+# 唤醒按需构建的无障碍树（WM_GETOBJECT(UiaRootObjectId)）后再扫描
+powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -WindowHandle 0x2CE0730 -Wake -Broad
+# 用 MTA 线程复核（产品路径是 MTA；PowerShell 默认 STA）
+powershell -Mta -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -WindowHandle 0x2CE0730 -Broad
 # 激活并验证 SetFocus 读回（会抢前台，慎用）
 powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-uia-focus.ps1 -ProcessName msedge -Activate -SetFocus
 ```

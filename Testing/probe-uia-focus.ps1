@@ -21,6 +21,18 @@ param(
     [string]$ProcessName,
     [int]$ProcessId = 0,
     [string]$WindowTitleContains,
+    # 直接指定顶层窗口句柄（十进制或 0x 十六进制）。用于 MainWindowHandle 不是
+    # 真实 UI 窗口的应用（实测：微信 4.0 与 WorkBuddy 只有一个 Proxy 窗口）。
+    # 注意变量名不能叫 $hwnd：PowerShell 大小写不敏感，会与内部句柄变量撞名并被
+    # [string] 类型约束把句柄转成字符串。
+    [string]$WindowHandle,
+    # 列出匹配进程的所有顶层窗口后退出（用于找出真实 UI 窗口）。
+    [switch]$ListWindows,
+    # 列出目标窗口的全部子窗口（找 Chromium 的 render widget host 用）。
+    [switch]$ListChildren,
+    # 对目标窗口与其所有子窗口发送 WM_GETOBJECT(UiaRootObjectId)，唤醒按需构建的
+    # 无障碍树（Chromium/Electron 的公开机制），随后再扫描。
+    [switch]$Wake,
     [switch]$Activate,
     [switch]$SetFocus,
     [switch]$Json,
@@ -62,6 +74,121 @@ try {
     }
 } catch {
     $dpiNote = 'error: ' + $_.Exception.Message
+}
+
+# --- 顶层窗口枚举（找真实 UI 窗口用；MainWindowHandle 对部分应用是 Proxy 窗口） ---
+Add-Type -Namespace SayAllProbe -Name Windows -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
+private delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint pid);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool IsWindowVisible(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+private static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int max);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+private static extern int GetClassName(System.IntPtr hWnd, System.Text.StringBuilder text, int max);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool GetWindowRect(System.IntPtr hWnd, out RECT rect);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool IsIconic(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+private static extern int DwmGetWindowAttribute(System.IntPtr hWnd, int attribute, out int value, int size);
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+private struct RECT { public int Left, Top, Right, Bottom; }
+
+public static bool IsMinimized(System.IntPtr hWnd) { return IsIconic(hWnd); }
+
+public static bool IsCloaked(System.IntPtr hWnd) {
+    const int DWMWA_CLOAKED = 14;
+    int value;
+    int hr = DwmGetWindowAttribute(hWnd, DWMWA_CLOAKED, out value, sizeof(int));
+    return hr == 0 && value != 0;
+}
+
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern bool EnumChildWindows(System.IntPtr parent, EnumWindowsProc callback, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+private static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint msg, System.IntPtr wParam,
+    System.IntPtr lParam, uint flags, uint timeout, out System.IntPtr result);
+
+// UiaRootObjectId = -25（UIA 客户端向窗口要 UIA provider 的 object id）。
+public static int WakeUia(System.IntPtr hWnd) {
+    const uint WM_GETOBJECT = 0x003D;
+    const uint SMTO_ABORTIFHUNG = 0x0002;
+    System.IntPtr result;
+    System.IntPtr ok = SendMessageTimeout(hWnd, WM_GETOBJECT, System.IntPtr.Zero,
+        new System.IntPtr(-25), SMTO_ABORTIFHUNG, 2000, out result);
+    return ok == System.IntPtr.Zero ? 0 : 1;
+}
+
+public static string[] DumpChildren(System.IntPtr parent) {
+    var list = new System.Collections.Generic.List<string>();
+    EnumChildWindows(parent, delegate(System.IntPtr hWnd, System.IntPtr lParam) {
+        var cls = new System.Text.StringBuilder(256);
+        GetClassName(hWnd, cls, 256);
+        RECT rect;
+        GetWindowRect(hWnd, out rect);
+        list.Add(string.Format("child=0x{0:X}|visible={1}|rect={2},{3} {4}x{5}|class={6}",
+            hWnd.ToInt64(), IsWindowVisible(hWnd), rect.Left, rect.Top,
+            rect.Right - rect.Left, rect.Bottom - rect.Top, cls));
+        return true;
+    }, System.IntPtr.Zero);
+    return list.ToArray();
+}
+
+
+public static uint PidOf(System.IntPtr hWnd) {
+    uint pid;
+    GetWindowThreadProcessId(hWnd, out pid);
+    return pid;
+}
+
+public static string[] Dump(uint filterPid) {
+    var list = new System.Collections.Generic.List<string>();
+    EnumWindows(delegate(System.IntPtr hWnd, System.IntPtr lParam) {
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        if (filterPid != 0 && pid != filterPid) return true;
+        var title = new System.Text.StringBuilder(256);
+        GetWindowText(hWnd, title, 256);
+        var cls = new System.Text.StringBuilder(256);
+        GetClassName(hWnd, cls, 256);
+        RECT rect;
+        GetWindowRect(hWnd, out rect);
+        list.Add(string.Format("hwnd=0x{0:X}|pid={1}|visible={2}|minimized={3}|cloaked={4}|rect={5},{6} {7}x{8}|class={9}|title={10}",
+            hWnd.ToInt64(), pid, IsWindowVisible(hWnd), IsMinimized(hWnd), IsCloaked(hWnd), rect.Left, rect.Top,
+            rect.Right - rect.Left, rect.Bottom - rect.Top, cls, title));
+        return true;
+    }, System.IntPtr.Zero);
+    return list.ToArray();
+}
+'@
+
+function Get-TargetProcesses {
+    if ($ProcessId -gt 0) {
+        return @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+    }
+    if (-not $ProcessName) { throw 'need -ProcessName or -ProcessId' }
+    return @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+}
+
+if ($ListWindows) {
+    $pids = @(Get-TargetProcesses | ForEach-Object { $_.Id })
+    $rows = @()
+    foreach ($row in [SayAllProbe.Windows]::Dump(0)) {
+        $parts = $row -split '\|'
+        $rowPid = [int](($parts[1] -split '=')[1])
+        if ($pids -contains $rowPid) { $rows += $row }
+    }
+    if ($Json) {
+        @{ ok = $true; pids = $pids; windows = $rows } | ConvertTo-Json -Depth 6
+    } else {
+        Write-Output ("pids=" + ($pids -join ','))
+        $rows | ForEach-Object { Write-Output $_ }
+    }
+    exit 0
 }
 
 Add-Type -AssemblyName UIAutomationClient
@@ -112,24 +239,36 @@ function Get-ElementSummary($element, $index) {
     }
 }
 
-# --- 定位目标进程与主窗口 ---
-if ($ProcessId -gt 0) {
-    $found = @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+# --- 定位目标进程与窗口 ---
+if ($WindowHandle) {
+    $raw = $WindowHandle.Trim()
+    if ($raw.StartsWith('0x') -or $raw.StartsWith('0X')) {
+        $handleValue = [Convert]::ToInt64($raw.Substring(2), 16)
+    } else {
+        $handleValue = [Convert]::ToInt64($raw)
+    }
+    $hwnd = [IntPtr]$handleValue
+    $targetPid = [SayAllProbe.Windows]::PidOf($hwnd)
+    $proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+    if (-not $proc) {
+        $msg = "no process for hwnd=$Hwnd"
+        if ($Json) { @{ ok = $false; error = $msg } | ConvertTo-Json -Depth 6 } else { Write-Output "ERROR: $msg" }
+        exit 2
+    }
 } else {
-    if (-not $ProcessName) { throw 'need -ProcessName or -ProcessId' }
-    $found = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+    $found = @(Get-TargetProcesses)
+    $found = @($found | Where-Object { $_.MainWindowHandle -ne 0 })
+    if ($WindowTitleContains) {
+        $found = @($found | Where-Object { $_.MainWindowTitle -and $_.MainWindowTitle.Contains($WindowTitleContains) })
+    }
+    if ($found.Count -eq 0) {
+        $msg = "no process with a main window matches (name=$ProcessName id=$ProcessId title~$WindowTitleContains)"
+        if ($Json) { @{ ok = $false; error = $msg } | ConvertTo-Json -Depth 6 } else { Write-Output "ERROR: $msg" }
+        exit 2
+    }
+    $proc = $found[0]
+    $hwnd = [IntPtr]$proc.MainWindowHandle
 }
-$found = @($found | Where-Object { $_.MainWindowHandle -ne 0 })
-if ($WindowTitleContains) {
-    $found = @($found | Where-Object { $_.MainWindowTitle -and $_.MainWindowTitle.Contains($WindowTitleContains) })
-}
-if ($found.Count -eq 0) {
-    $msg = "no process with a main window matches (name=$ProcessName id=$ProcessId title~$WindowTitleContains)"
-    if ($Json) { @{ ok = $false; error = $msg } | ConvertTo-Json -Depth 6 } else { Write-Output "ERROR: $msg" }
-    exit 2
-}
-$proc = $found[0]
-$hwnd = [IntPtr]$proc.MainWindowHandle
 
 $wasForeground = ([SayAllProbe.Native]::GetForegroundWindow() -eq $hwnd)
 if ($Activate) {
@@ -138,6 +277,28 @@ if ($Activate) {
     Start-Sleep -Milliseconds 250
 }
 $isForeground = ([SayAllProbe.Native]::GetForegroundWindow() -eq $hwnd)
+$minimized = [SayAllProbe.Windows]::IsMinimized($hwnd)
+$cloaked = [SayAllProbe.Windows]::IsCloaked($hwnd)
+
+$childWindows = @([SayAllProbe.Windows]::DumpChildren($hwnd))
+if ($ListChildren) {
+    Write-Output ("target hwnd=0x{0:X} class-children={1}" -f $hwnd.ToInt64(), $childWindows.Count)
+    $childWindows | ForEach-Object { Write-Output $_ }
+    exit 0
+}
+
+$wakeResult = $null
+if ($Wake) {
+    $answered = 0
+    $attempted = 0
+    foreach ($line in @("target") + $childWindows) {
+        $handle = if ($line -eq "target") { $hwnd } else { [IntPtr][Convert]::ToInt64((($line -split '\|')[0] -split '=')[1].Substring(2), 16) }
+        $attempted++
+        if ([SayAllProbe.Windows]::WakeUia($handle) -eq 1) { $answered++ }
+    }
+    $wakeResult = @{ attempted = $attempted; answered = $answered }
+    Start-Sleep -Milliseconds 400
+}
 
 # --- 当前焦点元素 ---
 $focusedInfo = $null
@@ -285,6 +446,10 @@ $report = [pscustomobject]@{
     dpi_awareness    = $dpiNote
     was_foreground   = $wasForeground
     foreground       = $isForeground
+    minimized        = $minimized
+    cloaked          = $cloaked
+    child_windows    = $childWindows
+    wake             = $wakeResult
     focused          = $focusedInfo
     scan_attempts    = $attemptsResult
     candidates       = $candidateSummaries
