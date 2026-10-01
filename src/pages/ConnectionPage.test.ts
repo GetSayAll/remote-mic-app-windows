@@ -664,6 +664,77 @@ describe("VB-CABLE first-launch guidance", () => {
 });
 
 /**
+ * 遥控器型号显示（2026-10-01 Andy 要求）：已识别型号时状态条标题直接显示型号，
+ * 未识别（GATT 2A24 未读回）或未连接时退回蓝牙广播名 / 阶段文案。
+ */
+describe("connection page remote model", () => {
+  beforeEach(() => {
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getRc003TaskStatus.mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    mocks.startShortcutCapture.mockResolvedValue([]);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.subscribeShortcutCaptureEdges.mockImplementation(
+      async (handler: ShortcutCaptureHandler) => {
+        mocks.captureEdgeHandler = handler;
+        return () => {};
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ["rc001", "小米蓝牙语音遥控器 2"],
+    ["rc003", "小米蓝牙语音遥控器 2 Pro"],
+  ] as const)("%s 连接后标题显示型号", async (model, expected) => {
+    mocks.getConnectionSnapshot.mockResolvedValue({
+      ...emptyConnection,
+      phase: "ready",
+      remoteName: "小米蓝牙语音遥控器",
+      remoteModel: model,
+    });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.find(".connection-title").text()).toBe(expected);
+    wrapper.unmount();
+  });
+
+  it("型号未识别时退回蓝牙广播名，未连接时显示阶段文案", async () => {
+    mocks.getConnectionSnapshot.mockResolvedValue({
+      ...emptyConnection,
+      phase: "ready",
+      remoteName: "小米蓝牙语音遥控器",
+      remoteModel: "unknown",
+    });
+    let wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.find(".connection-title").text()).toBe("小米蓝牙语音遥控器");
+    wrapper.unmount();
+
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.find(".connection-title").text()).toBe("尚未连接");
+    wrapper.unmount();
+  });
+});
+
+/**
  * 「支持更多输入工具」开关（2026-09-29）：与按键页「全按键支持」同一设置项
  * 的连接页入口。判据（授权确认、失败回退、权威对账）与 ButtonsPage 同源。
  */

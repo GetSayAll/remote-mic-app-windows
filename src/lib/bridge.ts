@@ -1002,8 +1002,8 @@ export function connectionPhaseLabel(phase: ConnectionPhase): string {
 
 export function remoteModelLabel(model: RemoteModel): string {
   return {
-    rc001: "小米蓝牙遥控器 2",
-    rc003: "小米蓝牙遥控器 2 Pro",
+    rc001: "小米蓝牙语音遥控器 2",
+    rc003: "小米蓝牙语音遥控器 2 Pro",
     unknown: "连接后显示",
   }[model];
 }
