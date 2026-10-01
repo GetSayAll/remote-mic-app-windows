@@ -180,7 +180,7 @@
   "broad": { "total_found": 685, "text_pattern_count": 120, "focusable_count": 288 } }
 ```
 
-无效尝试记录（WorkBuddy）：探子窗口 `Chrome_RenderWidgetHostHWND`（0 元素）、`WM_GETOBJECT(UiaRootObjectId)` 唤醒（4/4 送达但树不建立）、置前台、`powershell -Mta`、`WM_NULL` 响应正常（未卡死）。
+无效尝试记录（WorkBuddy）：探子窗口 `Chrome_RenderWidgetHostHWND`（0 元素）、`WM_GETOBJECT(UiaRootObjectId)` 唤醒（4/4 送达但树不建立）、置前台、`powershell -Mta`、`WM_NULL` 响应正常（未卡死）、**操作人确认窗口显示正常**、主/渲染进程命令行无无障碍相关开关。
 
 ## 复现命令
 

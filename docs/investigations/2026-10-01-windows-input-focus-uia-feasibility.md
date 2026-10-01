@@ -57,9 +57,10 @@ WorkBuddy 的补充尝试（全部无效）：
 - 向目标窗口与全部子窗口发送 `WM_GETOBJECT(UiaRootObjectId)`（4/4 消息被处理）→ 树不建立；
 - 置前台（`foreground=true`）→ 结果不变；
 - `powershell -Mta`（MTA 线程）→ 结果不变；
-- `WM_NULL` 有响应 → 窗口未卡死。
+- `WM_NULL` 有响应 → 窗口未卡死；**操作人确认窗口显示正常**（不是白屏/暂态）；
+- 主进程与渲染进程命令行均无无障碍相关开关（`--disable-features` 只含 `ScreenAIOCREnabled,SpareRendererForSitePerProcess,WinDelaySpellcheckServiceInit`）。
 
-⇒ **Electron 的 UIA 可用性是逐应用行为**，不能按「Electron 类」整体假设。产品必须按应用实测，并把「无树/无候选」当作正常失败路径处理（计划 §5.10 的 `no_candidate` / `not_accessible`），而不是异常。
+⇒ 判定为**应用级行为**（具体原因未定位，可能是应用自身关闭了无障碍支持）。产品不需要知道原因：**Electron 的 UIA 可用性逐应用不同**，不能按「Electron 类」整体假设；必须按应用实测，并把「无树/无候选」当作正常失败路径处理（计划 §5.10 的 `no_candidate` / `not_accessible`），而不是异常。
 
 ### 顺带确认
 
