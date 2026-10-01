@@ -15,6 +15,7 @@
 - 分支、提交、PR 和 CI：先读 [BRANCH_MANAGEMENT.md](BRANCH_MANAGEMENT.md)。
 - 发布、安装、升级和卸载：先读 [RELEASING.md](RELEASING.md)。
 - 产品待办或用户可见功能：先读 [TODO.md](TODO.md)。
+- 用户可见文案、命名与术语红线：先读 [docs/product-copy.md](docs/product-copy.md)。
 - Windows 架构和 API 边界：先读 [TECHNICAL.md](TECHNICAL.md)。
 - 真实硬件验收：先读对应的 `Testing/Windows*.md`。
 - 外部实现、竞品或实验来源：先读 [ATTRIBUTION.md](ATTRIBUTION.md)。
@@ -32,13 +33,15 @@
 ## 产品范围
 
 - 正式产品名称为“无线麦 SayAll Windows 版”，简称“无线麦”或“SayAll”。
-- 当前支持目标为小米蓝牙遥控器 2 / RC001 和小米蓝牙遥控器 2 Pro / RC003。两种型号均须分别完成 Windows 真机验收后才能宣称通过。
+- 当前支持目标为小米蓝牙语音遥控器 2（RC001）和小米蓝牙语音遥控器 2 Pro（RC003）。
+  两种型号均须分别完成 Windows 真机验收后才能宣称通过；用户可见名称与文案要求
+  见 [docs/product-copy.md](docs/product-copy.md)。
 - macOS 代码不进入本仓库；Windows 代码不回填 macOS 仓库。
 
 ## 产品命名与 TODO 同步
 
-- 面向用户的文案优先使用“无线麦 SayAll Windows 版”“无线麦”或“SayAll”；
-  `Remote Mic` 仅保留给历史兼容标识、代码标识符和既有发布资产。
+- 面向用户的名称、术语与文案要求以 [docs/product-copy.md](docs/product-copy.md) 为唯一
+  规范来源（名称表、术语红线、写法约定、提交前审查清单），本文件不重复其内容。
 - 开发或完成用户可见功能时，必须检查 [TODO.md](TODO.md) 是否有对应条目；
   只有实现并完成验证后才能在同一修改中标记完成。
 
