@@ -11,6 +11,7 @@ use crate::{
     send_input_windows::SendInputRuntime,
     ConnectionPhase, ConnectionSnapshot, PlatformError, RemoteModel, UsageCounters,
 };
+use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::future::IntoFuture;
 use std::sync::{
@@ -79,6 +80,7 @@ impl BleRuntime {
         usage: Arc<UsageCounters>,
         send_input: Arc<SendInputRuntime>,
         voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
+        voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
@@ -95,6 +97,7 @@ impl BleRuntime {
                     usage,
                     send_input,
                     voice_hold_hotkey,
+                    voice_input_tool,
                 )
             });
 
@@ -329,6 +332,7 @@ fn worker_loop(
     usage: Arc<UsageCounters>,
     send_input: Arc<SendInputRuntime>,
     voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
+    voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -808,6 +812,7 @@ fn worker_loop(
                         &audio,
                         &send_input,
                         &voice_hold_hotkey,
+                        &voice_input_tool,
                         &mut held_hotkey,
                         &usage,
                         &mut active_voice_samples,
@@ -1530,6 +1535,7 @@ fn handle_control(
     audio: &AudioRuntime,
     send_input: &SendInputRuntime,
     voice_hold_hotkey: &Mutex<Option<KeyChord>>,
+    voice_input_tool: &Mutex<Option<VoiceInputTool>>,
     held_hotkey: &mut Option<KeyChord>,
     usage: &UsageCounters,
     active_voice_samples: &mut u64,
@@ -1612,15 +1618,22 @@ fn handle_control(
             // 按住说话快捷键：两条互斥路径，由报告层合成门禁二选一（判据显式，
             // 不允许叠加——双写互扰 2026-09-29 run8 真机实证）：
             // * 报告层合成生效（rc003 桥已连接且 S 行下发成功）：OS 在报告层
-            //   直接收到合成的快捷键 usage（injected=0），这里**整体跳过**注入
-            //   分支——包括 activate_wetype_session（它会把输入法切到微信，
-            //   正是"豆包路径被切成微信输入法"的根因）与 chord_retry。
+            //   直接收到合成的快捷键 usage（injected=0），这里跳过注入分支与
+            //   chord_retry。但输入法仍要按用户选的工具兜底切一次：合成在报告层
+            //   到达时就已改写（早于本应用知情一个 BLE 往返），本次按下可能来不及，
+            //   这一次切换是为**下一次**按下生效（2026-10-01 Andy 反馈：选了豆包
+            //   但系统没切 → 语音键没反应）。
             // * 合成不生效（和弦 / 白名单外 / 助手断线回落）：走既有 SendInput
             //   注入路径，行为与 2026-09-28 之前一致。
             if crate::key_gate::voice_synth_active() {
                 gatt_note(format!(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
                 ));
+                if let Some(tool) = *lock(voice_input_tool) {
+                    if let Err(error) = crate::ime::ensure_session_ime(tool) {
+                        lock(state).last_error = Some(error);
+                    }
+                }
             } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
                 let wetype_hotkey = is_wetype_voice_hotkey(&chord);
                 let mic_baseline = wetype_hotkey.then(wetype_mic_observation).flatten();
@@ -1628,20 +1641,16 @@ fn handle_control(
                 // 自己的标记会被算成“基线内”而漏掉否决。非微信快捷键不会
                 // 启动恢复阶梯，但统一取样可保持该临界区没有额外分支时序。
                 let marker_baseline = crate::key_suppressor::wetype_marker_count();
-                if wetype_hotkey {
-                    // 会话级激活微信输入法：其语音热键只在自身为当前会话活动
-                    // 输入法时生效（2026-09-05 持锁实验，evidence/p）；激活后零
-                    // 延迟注入 3/3 触发，不增加按键延迟。失败仅记录提示，按原
-                    // 行为注入（不比现状更差）。
-                    if let Err(error) = crate::ime::activate_wetype_session() {
+                // 会话级激活目标输入法：语音热键只在自身为当前会话活动输入法
+                // 时生效（2026-09-05 持锁实验，evidence/p）；激活后零延迟注入
+                // 3/3 触发，不增加按键延迟。目标按**用户选的工具**决定
+                // （2026-10-01：不再按和弦猜——选豆包却把和弦配成 Ctrl+Win 时，
+                // 旧实现会把输入法切成微信）。失败仅记录提示，按原行为注入
+                // （不比现状更差）；Vokie / 其他工具返回 NotRequired，不切输入法。
+                if let Some(tool) = *lock(voice_input_tool) {
+                    if let Err(error) = crate::ime::ensure_session_ime(tool) {
                         lock(state).last_error = Some(error);
                     }
-                } else {
-                    // 豆包/其它工具只接收配置的快捷键。即使 Helper 断线导致
-                    // 报告层合成回落，也绝不能先把当前输入法切成微信。
-                    gatt_note(format!(
-                        "ime_activation outcome=skipped reason=hotkey_not_wetype session={session_id}"
-                    ));
                 }
                 if let Err(error) = send_input.press(&chord) {
                     gatt_note(format!(

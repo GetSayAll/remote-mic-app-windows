@@ -1,5 +1,6 @@
 use button_mapping::{ButtonMappingRuntime, ButtonMappingSnapshot, MappingInjector};
 use raw_input::{RawInputPhase, RawInputSnapshot};
+use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -260,6 +261,12 @@ impl Default for ConnectionSnapshot {
 pub struct WindowsPlatform {
     usage: Arc<UsageCounters>,
     voice_hold_hotkey: Arc<Mutex<Option<send_input::KeyChord>>>,
+    /// 用户在连接页选的语音输入工具：决定语音会话开始前把哪个输入法
+    /// 切进当前会话（`ime::ensure_session_ime`）；Vokie / 其他工具不切。
+    voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
+    /// 「离开窗口时预切输入法」的一次性开关：只在用户刚选过工具后为 true。
+    #[cfg(windows)]
+    ime_ensure_armed: Arc<AtomicBool>,
     button_mapping: Arc<ButtonMappingRuntime>,
     raw_input_snapshot: Arc<Mutex<RawInputSnapshot>>,
     // 抑制器与门控句柄"持有即运行"：字段本身不被读取，随平台生命周期保活
@@ -314,6 +321,9 @@ impl Default for WindowsPlatform {
     fn default() -> Self {
         let usage = Arc::new(UsageCounters::default());
         let voice_hold_hotkey = Arc::new(Mutex::new(None));
+        let voice_input_tool = Arc::new(Mutex::new(None));
+        #[cfg(windows)]
+        let ime_ensure_armed = Arc::new(AtomicBool::new(false));
         let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
         #[cfg(windows)]
         {
@@ -341,6 +351,7 @@ impl Default for WindowsPlatform {
                 Arc::clone(&usage),
                 Arc::clone(&send_input),
                 Arc::clone(&voice_hold_hotkey),
+                Arc::clone(&voice_input_tool),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
@@ -365,6 +376,8 @@ impl Default for WindowsPlatform {
             Self {
                 usage,
                 voice_hold_hotkey,
+                voice_input_tool,
+                ime_ensure_armed,
                 button_mapping,
                 raw_input_snapshot,
                 voice_key_suppressor,
@@ -391,6 +404,8 @@ impl Default for WindowsPlatform {
             Self {
                 usage,
                 voice_hold_hotkey,
+                voice_input_tool,
+                ime_ensure_armed,
                 button_mapping,
                 raw_input_snapshot,
             }
@@ -533,6 +548,45 @@ impl WindowsPlatform {
             let synth_to = hotkey.and_then(|chord| rc003_bridge::voice_synth_target(&chord));
             self.rc003_bridge.set_voice_synth(synth_to);
         }
+    }
+
+    /// 更新「你在用的输入工具」的状态（启动时从设置恢复用；**不武装**预切开关
+    /// ——应用一启动就改用户的输入法太打扰）。用户显式选择走 `select_voice_input_tool`。
+    pub fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+        *lock(&self.voice_input_tool) = tool;
+    }
+
+    /// 用户显式选择了输入工具（连接页第 ① 步）：记录状态，并**武装**一次
+    /// "离开应用窗口时预切输入法"（`ensure_armed_voice_input_ime`）——用户选完
+    /// 就会切到目标应用，那一刻切才作用到目标应用（TSF 会话切换作用于前台窗口），
+    /// 报告层合成的和弦也才来得及（合成发生在物理报告到达时，早于本应用知情
+    /// 一个 BLE 往返，2026-10-01）。
+    pub fn select_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+        self.set_voice_input_tool(tool);
+        // 不切输入法的工具不武装（Vokie / 其他工具）。
+        let arm = tool.and_then(ime::ime_target_for).is_some();
+        self.ime_ensure_armed.store(arm, Ordering::SeqCst);
+    }
+
+    pub fn voice_input_tool(&self) -> Option<VoiceInputTool> {
+        *lock(&self.voice_input_tool)
+    }
+    /// 选择输入工具时立即确保它是当前会话的活动输入法（2026-10-01）。
+    /// 返回结果标签用于日志；不切输入法的工具返回 "not_required"。
+    #[cfg(windows)]
+    pub fn ensure_voice_input_ime(&self, tool: VoiceInputTool) -> Result<&'static str, String> {
+        ime::ensure_session_ime(tool).map(ime_activation_label)
+    }
+    /// 「离开应用窗口时预切一次输入法」：仅在用户刚选过工具（armed）后触发一次，
+    /// 幂等且一次性——避免持续干预用户在别处手动切换输入法。
+    /// `None` = 本次没有待办（未武装）；`Some(Ok(label))` / `Some(Err(_))` = 已执行。
+    #[cfg(windows)]
+    pub fn ensure_armed_voice_input_ime(&self) -> Option<Result<&'static str, String>> {
+        if !self.ime_ensure_armed.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        let tool = (*lock(&self.voice_input_tool))?;
+        Some(self.ensure_voice_input_ime(tool))
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {
@@ -851,6 +905,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `ime::ImeActivation` → 结构化日志用的结果标签（唯一映射，避免各调用点各写一套）。
+#[cfg(windows)]
+pub(crate) fn ime_activation_label(outcome: ime::ImeActivation) -> &'static str {
+    match outcome {
+        ime::ImeActivation::AlreadyActive => "already_active",
+        ime::ImeActivation::Switched => "switched",
+        ime::ImeActivation::SkippedSelfForeground => "skipped_self_foreground",
+        ime::ImeActivation::NotRequired => "not_required",
+    }
 }
 
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
