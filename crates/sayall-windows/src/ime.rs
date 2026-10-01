@@ -184,9 +184,10 @@ pub fn ensure_session_ime(tool: VoiceInputTool) -> Result<ImeActivation, String>
         Err(_) => "failed",
     };
     crate::ble::gatt_note(format!(
-        "ime_activation tool={} outcome={outcome} elapsed_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
+        "ime_activation tool={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
         target.label,
         started.elapsed().as_millis(),
+        last_switch_age_ms().map(|age| age.to_string()).unwrap_or_else(|| "never".to_owned()),
         foreground_process_name().is_some(),
         if result.is_ok() { "none" } else { "tsf" },
         if result.is_ok() { "none" } else { "activation_failed" },
@@ -337,6 +338,25 @@ fn foreground_process_name() -> Option<String> {
     }
 }
 
+/// 最近一次真正执行了会话切换（Switched）的时刻：用于把"首次按下没反应"
+/// 与"刚刚切过输入法"关联起来（2026-10-01：Andy 实测记事本里第一次按下
+/// 右 Alt 漏进记事本变成菜单助记符，说明目标应用的输入法会话还没接上）。
+static LAST_SWITCH_AT: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+fn note_switch_happened() {
+    let slot = LAST_SWITCH_AT.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(std::time::Instant::now());
+}
+
+/// 距离最近一次会话切换过去了多少毫秒；从未切过返回 None。
+pub fn last_switch_age_ms() -> Option<u64> {
+    let slot = LAST_SWITCH_AT.get_or_init(|| std::sync::Mutex::new(None));
+    let guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.map(|instant| instant.elapsed().as_millis() as u64)
+}
+
 /// 临时 STA 线程体：CoInitializeEx(STA) → 查询活动输入法 →
 /// （需要时）ActivateProfile + 重绑等待 → CoUninitialize。
 /// 全部调用在本线程内完成（无跨套间封送，无需消息泵）。
@@ -388,6 +408,7 @@ fn sta_ensure_ime(target: ImeProfile) -> Result<ImeActivation, String> {
                 .map_err(|error| format!("激活 {} 会话失败：{error}", target.label))?;
             // 冷切换：等目标应用完成输入法会话重绑再放行注入。
             std::thread::sleep(SESSION_REBIND_SETTLE);
+            note_switch_happened();
             Ok(ImeActivation::Switched)
         })();
         CoUninitialize();

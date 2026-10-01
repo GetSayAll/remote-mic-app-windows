@@ -1043,26 +1043,9 @@ async fn set_voice_input_tool(
     ));
     let result = match tauri::async_runtime::spawn_blocking(move || {
         settings.save_voice_input_tool(tool)?;
-        // 推给平台并武装"预切"：BLE 工作线程在语音会话开始前按它决定切哪个
-        // 输入法；武装用于"用户离开窗口、第一次切到目标应用时"预切输入法
-        //（报告层合成路径只有这样第一次按下才来得及）。
-        platform.select_voice_input_tool(tool);
-        // 选中即切一次（2026-10-01）：报告层合成的和弦在物理报告到达时就送达
-        // OS，早于本应用知情，所以"按下才切"对合成路径来不及——先切好，
-        // 第一次按下就能用。Vokie/其他工具不会切输入法（内核里判掉）。
-        if let Some(tool) = tool {
-            match platform.ensure_voice_input_ime(tool) {
-                Ok(outcome) => sayall_windows::gatt_note(format!(
-                    "ime_activation tool={} outcome={outcome} trigger=select",
-                    voice_input_tool_name(Some(tool))
-                )),
-                Err(error) => sayall_windows::gatt_note(format!(
-                    "ime_activation tool={} outcome=failed trigger=select error_domain=tsf error_code=activation_failed retryable=true note={}",
-                    voice_input_tool_name(Some(tool)),
-                    error.chars().take(80).collect::<String>(),
-                )),
-            }
-        }
+        // 推给平台：BLE 工作线程在**按住语音键**的那一刻按它决定切哪个输入法
+        //（唯一切换时机；不做聚焦/离开窗口时的预切，2026-10-01 Andy 要求）。
+        platform.set_voice_input_tool(tool);
         Ok(tool)
     })
     .await
@@ -1135,6 +1118,58 @@ async fn get_vokie_installation() -> VokieInstallationSnapshot {
         installed: result.installed,
         running: result.running,
     }
+}
+
+/// 「其他工具」面板记住的按键（2026-10-01 Andy 反馈：选了「不按键 / 左 Alt」
+/// 后切去豆包再切回「其他工具」，会退回默认右 Alt）。
+///
+/// 返回 `null` = 从未选过（调用方保持现状）；`[]` = 明确选了「不按键」。
+#[tauri::command]
+async fn get_other_voice_hotkey(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<sayall_windows::send_input::KeyCode>>, String> {
+    let settings = state.settings.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.load_other_voice_hotkey()
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取「其他工具」按键记忆任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(keys) => format!(
+            "shortcut_settings feature=other_voice_hotkey action=load phase=completed terminal_result=passed chosen={} key_count={}",
+            keys.is_some(),
+            keys.as_ref().map(|keys| keys.len()).unwrap_or(0)
+        ),
+        Err(_) => "shortcut_settings feature=other_voice_hotkey action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true".to_owned(),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_other_voice_hotkey(
+    keys: Option<Vec<sayall_windows::send_input::KeyCode>>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<sayall_windows::send_input::KeyCode>>, String> {
+    let settings = state.settings.clone();
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || settings.save_other_voice_hotkey(keys))
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("保存「其他工具」按键记忆任务失败：{error}")),
+        };
+    sayall_windows::gatt_note(match &result {
+        Ok(keys) => format!(
+            "shortcut_settings feature=other_voice_hotkey action=save phase=completed terminal_result=passed chosen={} key_count={}",
+            keys.is_some(),
+            keys.as_ref().map(|keys| keys.len()).unwrap_or(0)
+        ),
+        Err(_) => "shortcut_settings feature=other_voice_hotkey action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true".to_owned(),
+    });
+    result
 }
 
 #[derive(Debug, Deserialize)]
@@ -2042,29 +2077,6 @@ pub fn run() {
                     api.prevent_close();
                 }
             }
-            // 预切输入法（2026-10-01）：选中豆包/微信后，用户在连接页点完就会切到
-            // 目标应用——那一刻才切输入法才有意义（TSF 会话切换作用于前台应用；
-            // 报告层合成的和弦又早于本应用知情）。只在"选中之后第一次离开窗口"
-            // 触发一次，之后不再干预用户的输入法选择。
-            if let tauri::WindowEvent::Focused(false) = event {
-                if window.label() == "main" {
-                    let state = window.app_handle().state::<AppState>();
-                    let platform = Arc::clone(&state.platform);
-                    tauri::async_runtime::spawn_blocking(move || {
-                        if let Some(result) = platform.ensure_armed_voice_input_ime() {
-                            match result {
-                                Ok(outcome) => sayall_windows::gatt_note(format!(
-                                    "ime_activation tool=armed outcome={outcome} trigger=window_blur"
-                                )),
-                                Err(error) => sayall_windows::gatt_note(format!(
-                                    "ime_activation tool=armed outcome=failed trigger=window_blur error_domain=tsf error_code=activation_failed retryable=true note={}",
-                                    error.chars().take(80).collect::<String>(),
-                                )),
-                            }
-                        }
-                    });
-                }
-            }
         });
 
     #[cfg(feature = "runtime-simulation")]
@@ -2106,6 +2118,8 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
+        get_other_voice_hotkey,
+        set_other_voice_hotkey,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -2158,6 +2172,8 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
+        get_other_voice_hotkey,
+        set_other_voice_hotkey,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
