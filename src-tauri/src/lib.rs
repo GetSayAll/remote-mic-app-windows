@@ -1137,6 +1137,95 @@ async fn get_vokie_installation() -> VokieInstallationSnapshot {
     }
 }
 
+/// 「其他工具」面板记住的按键（2026-10-01 Andy 反馈：选了「不按键 / 左 Alt」
+/// 后切去豆包再切回「其他工具」，会退回默认右 Alt）。
+///
+/// 返回 `null` = 从未选过（调用方保持现状）；`[]` = 明确选了「不按键」。
+#[tauri::command]
+async fn get_other_voice_hotkey(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<sayall_windows::send_input::KeyCode>>, String> {
+    let settings = state.settings.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.load_other_voice_hotkey()
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取「其他工具」按键记忆任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(keys) => format!(
+            "shortcut_settings feature=other_voice_hotkey action=load phase=completed terminal_result=passed chosen={} key_count={}",
+            keys.is_some(),
+            keys.as_ref().map(|keys| keys.len()).unwrap_or(0)
+        ),
+        Err(_) => "shortcut_settings feature=other_voice_hotkey action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true".to_owned(),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_other_voice_hotkey(
+    keys: Option<Vec<sayall_windows::send_input::KeyCode>>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<sayall_windows::send_input::KeyCode>>, String> {
+    let settings = state.settings.clone();
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || settings.save_other_voice_hotkey(keys))
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("保存「其他工具」按键记忆任务失败：{error}")),
+        };
+    sayall_windows::gatt_note(match &result {
+        Ok(keys) => format!(
+            "shortcut_settings feature=other_voice_hotkey action=save phase=completed terminal_result=passed chosen={} key_count={}",
+            keys.is_some(),
+            keys.as_ref().map(|keys| keys.len()).unwrap_or(0)
+        ),
+        Err(_) => "shortcut_settings feature=other_voice_hotkey action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true".to_owned(),
+    });
+    result
+}
+
+/// 与豆包/语音键争右 Alt 的桌面程序检测（2026-10-01 Andy 反馈：
+/// 选了豆包、豆包也确实是当前输入法，按住语音键出现的却是 Chatterfly 的语音输入）。
+///
+/// 只读进程名（不读它的配置、不记路径，隐私红线同 Vokie）。判据用"在跑"：
+/// 没运行就不会抢键。
+#[tauri::command]
+async fn get_conflicting_voice_apps() -> ConflictingVoiceAppsSnapshot {
+    let result = tauri::async_runtime::spawn_blocking(|| ConflictingVoiceAppsSnapshot {
+        chatterfly_running: sayall_windows::chatterfly::running(),
+    })
+    .await;
+    match result {
+        Ok(snapshot) => {
+            sayall_windows::gatt_note(format!(
+                "voice_input_tool feature=conflict_probe action=detect phase=completed terminal_result=passed chatterfly_running={}",
+                snapshot.chatterfly_running
+            ));
+            snapshot
+        }
+        Err(_) => {
+            sayall_windows::gatt_note(
+                "voice_input_tool feature=conflict_probe action=detect phase=completed terminal_result=failed chatterfly_running=false error_domain=task error_code=join_failed retryable=true"
+                    .to_owned(),
+            );
+            ConflictingVoiceAppsSnapshot {
+                chatterfly_running: false,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConflictingVoiceAppsSnapshot {
+    chatterfly_running: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrontendDiagnosticEvent {
@@ -2121,6 +2210,9 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
+        get_conflicting_voice_apps,
+        get_other_voice_hotkey,
+        set_other_voice_hotkey,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -2173,6 +2265,9 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
+        get_conflicting_voice_apps,
+        get_other_voice_hotkey,
+        set_other_voice_hotkey,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

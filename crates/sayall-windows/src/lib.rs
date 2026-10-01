@@ -59,6 +59,8 @@ pub fn restore_input_method_after_capture() -> String {
     "capture_ime_restore outcome=unsupported".to_owned()
 }
 
+/// Chatterfly 等抢右 Alt 的常驻程序检测（2026-10-01）：只读进程名。
+pub mod chatterfly;
 pub mod key_gate;
 #[cfg(windows)]
 mod key_suppressor;

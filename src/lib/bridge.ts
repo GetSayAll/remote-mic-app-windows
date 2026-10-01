@@ -637,6 +637,39 @@ export async function getVokieInstallation(): Promise<VokieInstallation> {
   return invoke<VokieInstallation>("get_vokie_installation");
 }
 
+/**
+ * 与豆包/语音键争右 Alt 的常驻桌面程序（2026-10-01）：Chatterfly 在跑时按住
+ * 遥控器语音键可能唤起它的语音输入而不是豆包的。只回布尔值、不回路径。
+ */
+export interface ConflictingVoiceApps {
+  chatterflyRunning: boolean;
+}
+
+export async function getConflictingVoiceApps(): Promise<ConflictingVoiceApps> {
+  if (!isTauriRuntime()) {
+    return { chatterflyRunning: false };
+  }
+  return invoke<ConflictingVoiceApps>("get_conflicting_voice_apps");
+}
+
+/**
+ * 「其他工具」面板记住的按键：`null` = 从未选过（保持现状），`[]` = 明确选了
+ * 「不按键」。选中「其他工具」时恢复它，用户改选时写回。
+ */
+export async function getOtherVoiceHotkey(): Promise<KeyCode[] | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<KeyCode[] | null>("get_other_voice_hotkey");
+}
+
+export async function setOtherVoiceHotkey(keys: KeyCode[]): Promise<KeyCode[] | null> {
+  if (!isTauriRuntime()) {
+    return keys;
+  }
+  return invoke<KeyCode[] | null>("set_other_voice_hotkey", { keys });
+}
+
 export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
     return browserSnapshot.platform.rawInput;
