@@ -127,7 +127,7 @@ const VOICE_TOOL_CHORDS: Record<VoiceInputTool, KeyCode[] | null> = {
 
 /** 工具卡片顺序：豆包排第一（2026-09-30 Andy 要求）。 */
 const TOOL_CARDS: Array<{ id: VoiceInputTool; name: string; note: string }> = [
-  { id: "doubao", name: "豆包输入法", note: "要开启「支持更多输入工具」" },
+  { id: "doubao", name: "豆包输入法", note: "要开启“支持更多输入工具”" },
   { id: "wechat", name: "微信输入法", note: "用默认语音键，最省事" },
   { id: "other", name: "其他工具", note: "自己指定按键" },
 ];
@@ -1074,7 +1074,7 @@ onUnmounted(() => {
                 {{ toolChordActive("wechat") ? "已自动设置" : "未同步，点左侧卡片重设" }}
               </span>
             </div>
-            <p class="tiny muted">微信输入法不需要「支持更多输入工具」开关。</p>
+            <p class="tiny muted">微信输入法不需要“支持更多输入工具”开关。</p>
           </div>
 
           <div v-else-if="voiceInputTool === 'other'" class="tool-panel">
@@ -1183,8 +1183,8 @@ onUnmounted(() => {
       <summary>常见问题（点开查看）</summary>
       <ul>
         <li>为什么语音键要“替你按一个键”？遥控器语音键不是键盘按键，输入法只认键盘按键，所以应用替你按住它。</li>
-        <li>「支持更多输入工具」和「按键」页的「全按键支持」是同一个开关，两处随时同步；首次开启会弹一次系统授权。</li>
-        <li>「替你按下的键」目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
+        <li>“支持更多输入工具”和“按键”页的“全按键支持”是同一个开关，两处随时同步；首次开启会弹一次系统授权。</li>
+        <li>“替你按下的键”目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
         <li>微信输入法要求按住约半秒以上（需要联网），快速点按不出字是它自己的要求，不是故障。</li>
         <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单。</li>
       </ul>

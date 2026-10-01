@@ -307,7 +307,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(selectedToolCard(wrapper)).toBe("微信输入法");
     // 微信不需要"支持更多输入工具"开关，面板不渲染它。
     expect(wrapper.find(".capture-switch").exists()).toBe(false);
-    expect(wrapper.text()).toContain("微信输入法不需要「支持更多输入工具」开关");
+    expect(wrapper.text()).toContain("微信输入法不需要“支持更多输入工具”开关");
     wrapper.unmount();
   });
 
