@@ -566,6 +566,12 @@ pub struct ButtonMappings {
     pub actions: BTreeMap<RemoteButton, ButtonActions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub applications: Vec<crate::app_launcher::CustomAppPick>,
+    /// 聚焦档案：键 = `OpenApp` 的 target（预设 id 或自定义应用路径）。
+    ///
+    /// 与 `applications` 解耦：预置应用（如微信）也要能记录输入框，而且仓库扫描/
+    /// 去重/删库都不应该影响已记录的档案。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub focus_profiles: BTreeMap<String, crate::focus::AppFocusProfile>,
 }
 
 fn default_enabled() -> bool {
@@ -578,6 +584,7 @@ impl Default for ButtonMappings {
             enabled: true,
             actions: BTreeMap::new(),
             applications: Vec::new(),
+            focus_profiles: BTreeMap::new(),
         }
     }
 }
@@ -588,12 +595,15 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
         D: serde::Deserializer<'de>,
     {
         #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Wire {
             #[serde(default = "default_enabled")]
             enabled: bool,
             actions: Option<BTreeMap<RemoteButton, ButtonActionsWire>>,
             #[serde(default)]
             applications: Vec<crate::app_launcher::CustomAppPick>,
+            #[serde(default)]
+            focus_profiles: BTreeMap<String, crate::focus::AppFocusProfile>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let actions = wire
@@ -606,6 +616,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             enabled: wire.enabled,
             actions,
             applications: wire.applications,
+            focus_profiles: wire.focus_profiles,
         })
     }
 }
@@ -615,6 +626,18 @@ impl ButtonMappings {
         let mut this = self;
         this.applications = crate::registered_apps::normalize_library(this.applications)
             .map_err(SendInputError::Backend)?;
+        // 非法聚焦档案整条丢弃（策略与字段不自洽、超出长度/条数上限）。
+        // 只按条数记日志：target 可能是用户本机路径，不进日志。
+        let dropped = crate::focus::normalize_focus_profiles(&mut this.focus_profiles);
+        #[cfg(windows)]
+        if !dropped.is_empty() {
+            crate::ble::gatt_note(format!(
+                "focus_profiles_dropped count={} reason=invalid_or_over_limit",
+                dropped.len()
+            ));
+        }
+        #[cfg(not(windows))]
+        let _ = dropped;
         for actions in this.actions.values_mut() {
             for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
                 if let ButtonAction::Shortcut { chord } = action {
@@ -1291,6 +1314,7 @@ mod tests {
             enabled: false,
             actions: mappings.actions.clone(),
             applications: Vec::new(),
+            focus_profiles: BTreeMap::new(),
         };
         assert_eq!(disabled.mapped_mask(), 0, "总开关关闭时不吞任何键");
     }
@@ -1367,6 +1391,70 @@ mod tests {
                 | (1u64 << RemoteButton::Back.ordinal())
                 | (1u64 << RemoteButton::VolumeUp.ordinal())
                 | (1u64 << RemoteButton::VolumeDown.ordinal())
+        );
+    }
+
+    #[test]
+    fn focus_profiles_round_trip_and_legacy_configs_default_to_empty() {
+        // 旧配置（无 focusProfiles 字段）→ 空映射，不报错
+        let legacy: ButtonMappings =
+            serde_json::from_str(r#"{"enabled":true,"actions":{},"applications":[]}"#).unwrap();
+        assert!(legacy.focus_profiles.is_empty());
+
+        // 新字段往返
+        let mut mappings = ButtonMappings::default();
+        mappings.focus_profiles.insert(
+            "notepad".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::AppShortcut,
+                shortcut: Some(KeyChord {
+                    keys: vec![KeyCode::RightAlt],
+                }),
+                recorded: None,
+            },
+        );
+        let json = serde_json::to_string(&mappings).unwrap();
+        assert!(json.contains("focusProfiles"), "新字段必须落盘：{json}");
+        let parsed: ButtonMappings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.focus_profiles, mappings.focus_profiles);
+
+        // 空映射不写出字段（与既有配置文件保持最小 diff）
+        let empty_json = serde_json::to_string(&ButtonMappings::default()).unwrap();
+        assert!(!empty_json.contains("focusProfiles"));
+    }
+
+    #[test]
+    fn normalized_drops_invalid_focus_profiles_and_keeps_valid_ones() {
+        let mut mappings = ButtonMappings::default();
+        mappings.focus_profiles.insert(
+            "wechat".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::RecordedElement,
+                shortcut: None,
+                recorded: Some(crate::focus::RecordedFocusTarget {
+                    control_type: "Edit".to_owned(),
+                    automation_id: "chat-input".to_owned(),
+                    ..Default::default()
+                }),
+            },
+        );
+        // 非法：app_shortcut 但没有快捷键 → 整条丢弃
+        mappings.focus_profiles.insert(
+            "bad-target".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::AppShortcut,
+                ..Default::default()
+            },
+        );
+
+        let normalized = mappings.normalized().unwrap();
+        assert!(
+            normalized.focus_profiles.contains_key("wechat"),
+            "合法档案必须保留"
+        );
+        assert!(
+            !normalized.focus_profiles.contains_key("bad-target"),
+            "非法档案必须被丢弃"
         );
     }
 }

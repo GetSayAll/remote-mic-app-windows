@@ -133,6 +133,11 @@ pub struct NormalizedRect {
     pub height: f64,
 }
 
+// 比例用 f64 表示；唯一构造入口 `from_bounds` 只接受有限值，因此这里可以满足
+// `Eq` 的自反性要求（手写 `Eq` 只是 Marker 承诺，不改变 `PartialEq` 语义）。
+// 没有它，`ButtonMappings`（derive Eq）就无法容纳聚焦档案。
+impl Eq for NormalizedRect {}
+
 impl NormalizedRect {
     /// 由元素矩形与窗口矩形（物理像素）换算；任一矩形非有限或尺寸非正时返回 `None`。
     ///
@@ -177,7 +182,7 @@ fn clamp_chars(value: &str, limit: usize) -> String {
 }
 
 /// 用户记录的输入框语义特征（不包含任何输入内容）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordedFocusTarget {
     pub control_type: String,
@@ -244,7 +249,7 @@ impl RecordedFocusTarget {
 }
 
 /// 单个目标（预设应用 id 或自定义应用路径）的聚焦档案。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppFocusProfile {
     #[serde(default)]
