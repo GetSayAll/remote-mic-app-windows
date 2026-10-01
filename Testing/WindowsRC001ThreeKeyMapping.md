@@ -98,7 +98,7 @@ RC003 表现**完全一致**——
 | 三键完全无反应 | 诊断日志里该键是否有事件（Raw Input / key_gate）；确认遥控器已连接且型号为 `rc001` |
 | 触发两次 / 粘键 | 边沿配对日志（按下/释放是否成对） |
 | 开关状态与预期不符 | 诊断日志 `feature=enhanced-capture` 与 `rc003_capture_toggle` 两处记录 |
-| 助手起不来 | `hardware/RC003/helper` 下 `run-helper-selftest.cmd`（免提权）+ `%ProgramData%\SayAll\rc003-helper\helper-task.log` |
+| 助手起不来 | `hardware/RC003/helper` 下 `run-helper-selftest.cmd`（免提权）；日志看**主程序诊断日志**（`%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`，助手行带 `component=rc003-helper`）。只有主程序日志不可写时，助手才回退写 `%ProgramData%\SayAll\rc003-helper\helper-task.log` |
 
 ## 未覆盖（deferred）
 

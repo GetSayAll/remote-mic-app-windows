@@ -644,7 +644,13 @@ impl Rc003Bridge {
         #[cfg(not(windows))]
         let pipe_name: Option<String> = None;
 
-        let file = match write_bridge_file(&dir, port, pipe_name.as_deref(), &token) {
+        let file = match write_bridge_file(
+            &dir,
+            port,
+            pipe_name.as_deref(),
+            &token,
+            crate::ble::diagnostic_log_path().as_deref(),
+        ) {
             Ok(path) => Some(path),
             Err(error) => {
                 // 监听已成功但描述文件写不出：助手将无法发现我们 → 相当于不可用。
@@ -837,23 +843,41 @@ impl Drop for Rc003Bridge {
     }
 }
 
+/// 描述文件正文。**纯函数**：字段增删要在这里一眼看清，测试直接对字符串断言。
+///
+/// `log` 字段（2026-10-01 新增）把主程序**真实**的诊断日志路径交给助手，让两侧
+/// 日志落进同一个文件——报障后一次拉取即可覆盖「主程序 + 提权助手」两段链路。
+/// 助手读不到该字段时按约定回退到 `<描述文件目录>\Logs\sayall-diagnostic.log`。
+fn descriptor_body(
+    port: u16,
+    pipe_name: Option<&str>,
+    token: &str,
+    log_path: Option<&Path>,
+) -> String {
+    let pipe_line = pipe_name
+        .map(|name| format!("pipe={name}\n"))
+        .unwrap_or_default();
+    let log_line = log_path
+        .map(|path| format!("log={}\n", path.display()))
+        .unwrap_or_default();
+    format!(
+        "version={BRIDGE_PROTOCOL_VERSION}\nport={port}\n{pipe_line}token={token}\npid={}\n{log_line}",
+        std::process::id()
+    )
+}
+
 /// 原子写出描述文件（先写临时文件再改名，避免助手读到半截内容）。
 fn write_bridge_file(
     dir: &Path,
     port: u16,
     pipe_name: Option<&str>,
     token: &str,
+    log_path: Option<&Path>,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let final_path = dir.join(BRIDGE_FILE_NAME);
     let temp_path = dir.join(format!("{BRIDGE_FILE_NAME}.tmp"));
-    let pipe_line = pipe_name
-        .map(|name| format!("pipe={name}\n"))
-        .unwrap_or_default();
-    let body = format!(
-        "version={BRIDGE_PROTOCOL_VERSION}\nport={port}\n{pipe_line}token={token}\npid={}\n",
-        std::process::id()
-    );
+    let body = descriptor_body(port, pipe_name, token, log_path);
     {
         let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
         file.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
@@ -861,6 +885,20 @@ fn write_bridge_file(
     }
     std::fs::rename(&temp_path, &final_path).map_err(|e| e.to_string())?;
     Ok(final_path)
+}
+
+/// 鉴权被拒的诊断行。**纯函数**，便于对字段逐一断言。
+///
+/// 为什么必须有：被拒是"连接通了、但身份/版本不对"的**独立事实**，与"助手根本
+/// 没连上来"是两条完全不同的故障路径。2026-10-01 用户现场只有"桥停在 listening、
+/// 没有任何 `helper_authenticated`"，而 DENY 分支当时不留任何日志——于是主程序
+/// 日志无法区分「助手没启动」与「助手来了被拒（新旧版本混装 / 陈旧 token）」。
+/// 该行只记原因、助手进程号与累计次数：不含 token 值、不含任何路径。
+fn deny_note(reason: &str, helper_pid: u32, denied_total: u64) -> String {
+    format!(
+        "rc003_bridge event=helper_denied reason={reason} helper_pid={helper_pid} \
+         denied_total={denied_total} retryable=true"
+    )
 }
 
 /// 监听主循环：非阻塞 accept + 短睡，保证停止标志能被及时观察到。
@@ -1158,10 +1196,12 @@ fn handle_connection(
                             } else {
                                 "version_mismatch"
                             };
-                            {
+                            let denied_total = {
                                 let mut state = lock(shared);
                                 state.denied_total += 1;
-                            }
+                                state.denied_total
+                            };
+                            note(deny_note(reason, helper_pid, denied_total));
                             let _ = write_line(&mut writer, &format!("DENY {reason}"));
                             if deny_count >= MAX_DENY {
                                 drop_reason = "deny_limit";
@@ -1684,6 +1724,44 @@ mod tests {
         assert_eq!(parse_descriptor("port=1\ntoken=x\n"), None);
         assert_eq!(parse_descriptor("version=2\nport=1\n"), None);
         assert_eq!(parse_descriptor("version=2\nport=1\ntoken=\n"), None);
+    }
+
+    #[test]
+    fn descriptor_body_publishes_optional_pipe_and_log_fields() {
+        let body = descriptor_body(53124, Some(r"\\.\pipe\SayAll.Rc003Bridge"), "tok", None);
+        assert!(body.starts_with("version=2\nport=53124\n"), "{body:?}");
+        assert!(
+            body.contains("pipe=\\\\.\\pipe\\SayAll.Rc003Bridge\n"),
+            "{body:?}"
+        );
+        assert!(body.contains("token=tok\n"), "{body:?}");
+        assert!(body.contains("pid="), "{body:?}");
+        assert!(
+            !body.contains("log="),
+            "日志未初始化时不得凭空写出路径：{body:?}"
+        );
+        // 日志已初始化时必须发布 `log=`：助手据此把日志与主程序写进同一文件。
+        let body = descriptor_body(1, None, "t", Some(Path::new(r"C:\x\sayall-diagnostic.log")));
+        assert!(
+            body.contains("log=C:\\x\\sayall-diagnostic.log\n"),
+            "{body:?}"
+        );
+        // 新字段对解析方透明：主程序自己的解析器（与助手逐字对齐）照常工作。
+        assert_eq!(parse_descriptor(&body), Some((1, "t".to_string(), 2)));
+    }
+
+    #[test]
+    fn deny_note_distinguishes_rejection_from_silence() {
+        // 被拒必须留下一条**独立**记录：否则"助手没来"与"助手来了被拒"在日志里
+        // 是同一形状（2026-10-01 现场正是如此）。
+        let line = deny_note("version_mismatch", 4242, 3);
+        assert!(line.contains("event=helper_denied"), "{line}");
+        assert!(line.contains("reason=version_mismatch"), "{line}");
+        assert!(line.contains("helper_pid=4242"), "{line}");
+        assert!(line.contains("denied_total=3"), "{line}");
+        // 隐私边界：不落 token 值、不落任何路径。
+        assert!(!line.contains("token="), "{line}");
+        assert!(!line.contains(":\\"), "{line}");
     }
 
     #[cfg(windows)]
