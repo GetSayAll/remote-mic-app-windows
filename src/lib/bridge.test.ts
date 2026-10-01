@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
@@ -6,9 +7,13 @@ import {
   chordLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
+  GITHUB_REPOSITORY_URL,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
+  OFFICIAL_WEBSITE_URL,
+  openGitHubRepository,
   openLogDirectory,
+  openOfficialWebsite,
   openVbCableDownloadPage,
   remoteModelLabel,
   shortcutCapability,
@@ -19,6 +24,7 @@ import {
 } from "./bridge";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 describe("mouse actions", () => {
   it("summarizes clicks, movement, and wheel amounts", () => {
@@ -228,6 +234,45 @@ describe("VB-CABLE download guidance", () => {
 
     expect(open).toHaveBeenCalledWith(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
     open.mockRestore();
+  });
+});
+
+describe("关于页外部入口（官网 / GitHub）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(openUrl).mockReset();
+  });
+
+  it("指向已确认的官网与 Windows 仓库地址", () => {
+    expect(OFFICIAL_WEBSITE_URL).toBe("https://sayall.app/");
+    expect(GITHUB_REPOSITORY_URL).toBe("https://github.com/GetSayAll/remote-mic-app-windows");
+  });
+
+  it("浏览器预览下用新标签打开，不调用 Tauri opener", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    await openOfficialWebsite();
+    await openGitHubRepository();
+
+    expect(open).toHaveBeenNthCalledWith(1, OFFICIAL_WEBSITE_URL, "_blank", "noopener,noreferrer");
+    expect(open).toHaveBeenNthCalledWith(2, GITHUB_REPOSITORY_URL, "_blank", "noopener,noreferrer");
+    expect(openUrl).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it("Tauri 运行时交给 opener 插件，地址必须与 capability 白名单逐字一致", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(openUrl).mockResolvedValue(undefined);
+
+    await openOfficialWebsite();
+    await openGitHubRepository();
+
+    // 传出的字符串与 src-tauri/capabilities/default.json 的 allow 列表是同一份
+    // 契约：多一个字符、少一个尾斜杠都会被插件判为 ForbiddenUrl。
+    expect(vi.mocked(openUrl).mock.calls.map(([url]) => url)).toEqual([
+      OFFICIAL_WEBSITE_URL,
+      GITHUB_REPOSITORY_URL,
+    ]);
   });
 });
 
