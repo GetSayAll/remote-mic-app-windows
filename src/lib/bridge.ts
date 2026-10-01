@@ -624,14 +624,15 @@ export async function openVokieHomepage(): Promise<void> {
   await openExternalUrl(VOKIE_HOMEPAGE_URL);
 }
 
-/** Vokie 安装检测结果；未安装时连接页显示官网入口（不展示任何路径）。 */
+/** Vokie 检测结果：未安装时连接页显示官网入口；已安装但没运行时提示先启动它。 */
 export interface VokieInstallation {
   installed: boolean;
+  running: boolean;
 }
 
 export async function getVokieInstallation(): Promise<VokieInstallation> {
   if (!isTauriRuntime()) {
-    return { installed: false };
+    return { installed: false, running: false };
   }
   return invoke<VokieInstallation>("get_vokie_installation");
 }

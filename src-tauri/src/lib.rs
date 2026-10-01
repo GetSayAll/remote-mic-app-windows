@@ -1064,11 +1064,12 @@ async fn set_voice_input_tool(
     result
 }
 
-/// Vokie 安装检测的返回体（连接页只用 installed 决定是否显示官网入口）。
+/// Vokie 安装检测的返回体（连接页用它决定显示官网入口还是“没有运行”提示）。
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VokieInstallationSnapshot {
     installed: bool,
+    running: bool,
 }
 
 fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
@@ -1081,7 +1082,10 @@ fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
     }
 }
 
-/// Vokie 安装检测（连接页“选择输入工具”→“Vokie”卡片的未安装提示）。
+/// Vokie 安装 / 运行检测（连接页“选择输入工具”→“Vokie”卡片）。
+///
+/// `installed` 决定显示官网入口，`running` 决定提示“没有运行”——右键 Alt 冲突的
+/// 判据是“在跑”（没运行就不会响应遥控器按键，2026-10-01 Andy 提出的冲突点）。
 ///
 /// 只读：不启动 Vokie、不读它的配置。日志只记结果与命中的判据标签（source），
 /// **绝不记路径**（隐私红线）。
@@ -1094,16 +1098,21 @@ async fn get_vokie_installation() -> VokieInstallationSnapshot {
                 "voice_input_tool feature=vokie_install action=detect phase=completed terminal_result=failed installed=false source=task_failed error_domain=task error_code=join_failed retryable=true"
                     .to_owned(),
             );
-            return VokieInstallationSnapshot { installed: false };
+            return VokieInstallationSnapshot {
+                installed: false,
+                running: false,
+            };
         }
     };
     sayall_windows::gatt_note(format!(
-        "voice_input_tool feature=vokie_install action=detect phase=completed terminal_result=passed installed={} source={}",
+        "voice_input_tool feature=vokie_install action=detect phase=completed terminal_result=passed installed={} running={} source={}",
         result.installed,
+        result.running,
         result.source_label()
     ));
     VokieInstallationSnapshot {
         installed: result.installed,
+        running: result.running,
     }
 }
 
