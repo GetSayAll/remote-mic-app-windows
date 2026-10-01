@@ -322,7 +322,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.about-card { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+.about-card { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.about-row { display: flex; align-items: center; gap: 16px; }
+.about-links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
 .app-logo { width: 56px; height: 56px; flex: 0 0 auto; border-radius: 14px; }
 .about-card p { margin: 3px 0 0; font-size: 13.5px; }
 .appearance-card { margin-bottom: 12px; }

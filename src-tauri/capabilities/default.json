@@ -8,7 +8,11 @@
     "core:app:allow-set-app-theme",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://vb-audio.com/Cable/" }]
+      "allow": [
+        { "url": "https://vb-audio.com/Cable/" },
+        { "url": "https://sayall.app/" },
+        { "url": "https://github.com/GetSayAll/remote-mic-app-windows" }
+      ]
     }
   ]
 }

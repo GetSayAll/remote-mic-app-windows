@@ -172,6 +172,44 @@ describe("about page update panel", () => {
     expect(button).toBeDefined();
   });
 
+  it("顶部模块提供官网与 GitHub 入口，检查更新紧随其后是第二个模块", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const wrapper = mount(AboutPage, { props: { runtime } });
+
+    const cards = wrapper.findAll(".card");
+    expect(cards[0].text()).toContain("无线麦 SayAll");
+    expect(cards[0].text()).toContain("0.1.0");
+    expect(cards[0].findAll("button").map((button) => button.text())).toEqual(["官网", "GitHub"]);
+    expect(cards[1].text()).toContain("软件更新");
+    expect(cards[1].text()).toContain("检查更新");
+
+    const entryButtons = cards[0].findAll("button");
+    await entryButtons[0].trigger("click");
+    await entryButtons[1].trigger("click");
+    await flushPromises();
+
+    expect(open.mock.calls.map(([url]) => url)).toEqual([
+      "https://sayall.app/",
+      "https://github.com/GetSayAll/remote-mic-app-windows",
+    ]);
+    open.mockRestore();
+  });
+
+  it("入口打开失败时就地显示原因而不是静默", async () => {
+    const open = vi
+      .spyOn(window, "open")
+      .mockImplementation(() => {
+        throw new Error("Not allowed to open url https://sayall.app/");
+      });
+    const wrapper = mount(AboutPage, { props: { runtime } });
+
+    await wrapper.findAll(".about-links button")[0].trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Not allowed to open url");
+    open.mockRestore();
+  });
+
   it("发现新版本时展示版本、说明与安装入口", async () => {
     phase.value = "available";
     info.value = {
@@ -244,52 +282,5 @@ describe("about page update panel", () => {
       .findAll("button")
       .find((b) => b.text().includes("下载并安装"));
     expect(installButton).toBeUndefined();
-  });
-
-  it("诊断摘要可在关于页生成并复制完整可见内容", async () => {
-    const writeText = vi.fn<(text: string) => Promise<void>>();
-    writeText.mockResolvedValue();
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
-    const wrapper = mount(AboutPage, { props: { runtime } });
-    const buttons = wrapper.findAll<HTMLButtonElement>(".diagnostics-card button");
-    expect(buttons.map((button) => button.text())).toEqual([
-      "生成摘要",
-      "复制摘要",
-      "打开日志目录",
-    ]);
-
-    await buttons[0].trigger("click");
-    await flushPromises();
-
-    const report = wrapper.get(".diagnostic-output").text();
-    expect(report).toContain('"schemaVersion": 1');
-    expect(report).not.toContain("remoteName");
-    expect(report).not.toContain("selectedEndpointName");
-    expect(report).not.toContain("lastError");
-    expect(wrapper.text()).toContain("诊断摘要已生成");
-
-    await buttons[1].trigger("click");
-    await flushPromises();
-
-    expect(writeText).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledWith(report);
-    expect(wrapper.text()).toContain("诊断摘要已复制到剪贴板");
-  });
-
-  it("浏览器预览下打开日志目录给出明确不可用提示而不是静默失败", async () => {
-    const wrapper = mount(AboutPage, { props: { runtime } });
-    const button = wrapper
-      .findAll("button")
-      .find((candidate) => candidate.text().includes("打开日志目录"));
-    expect(button).toBeDefined();
-
-    await button!.trigger("click");
-    await flushPromises();
-
-    expect(wrapper.text()).toContain("当前是浏览器预览，无法打开日志目录");
   });
 });

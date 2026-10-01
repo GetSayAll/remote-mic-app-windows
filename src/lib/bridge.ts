@@ -3,6 +3,17 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 
+/**
+ * 关于页顶部的外部入口（2026-10-01 用户指定）：官网首页与 Windows 版源码仓库。
+ *
+ * 这两个字符串同时是 `src-tauri/capabilities/default.json` 里 opener 白名单的
+ * 键——改这里必须同步改那里，否则真机上点击会被插件判为 ForbiddenUrl
+ * （`bridge.test.ts` 逐字锁定了这份契约，runtime simulation 另行断言不在真机
+ * 上被拒绝）。
+ */
+export const OFFICIAL_WEBSITE_URL = "https://sayall.app/";
+export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-app-windows";
+
 export type ConnectionPhase =
   | "idle"
   | "connecting"
@@ -500,7 +511,8 @@ export function formatDiagnosticReport(
  * 打开诊断日志目录（关于页入口）。返回实际打开的目录供界面显示。
  *
  * 目录由 Rust 侧从日志初始化的落盘路径推导，前端不拼接、也不传路径——
- * 保留 capabilities 的最小权限边界（opener 只放行 VB-CABLE 官网一个 URL）。
+ * 保留 capabilities 的最小权限边界（opener 只放行 VB-CABLE 官网、产品官网与
+ * 源码仓库三个固定 URL）。
  */
 export async function openLogDirectory(): Promise<string> {
   if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法打开日志目录");
@@ -575,6 +587,28 @@ export async function openVbCableDownloadPage(): Promise<void> {
     return;
   }
   await openUrl(VB_CABLE_DOWNLOAD_URL);
+}
+
+/**
+ * 外部链接的统一出口：浏览器预览开新标签，Tauri 运行时交给 opener 插件
+ * （插件只放行 capabilities 白名单内的 URL，前端不做过滤，也不拼接参数）。
+ */
+async function openExternalUrl(url: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await openUrl(url);
+}
+
+/** 关于页顶部"官网"入口。 */
+export async function openOfficialWebsite(): Promise<void> {
+  await openExternalUrl(OFFICIAL_WEBSITE_URL);
+}
+
+/** 关于页顶部"GitHub"入口。 */
+export async function openGitHubRepository(): Promise<void> {
+  await openExternalUrl(GITHUB_REPOSITORY_URL);
 }
 
 export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {

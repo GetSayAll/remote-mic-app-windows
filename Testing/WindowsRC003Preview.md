@@ -180,7 +180,7 @@
 1. 以 `runtime-simulation` Cargo feature 和 `VITE_SAYALL_RUNTIME_SIMULATION=1` 构建专用测试程序；普通构建不得包含仿真前端入口或仿真专用 Tauri command。
 2. 在 `windows-latest` 启动该程序，并设置唯一的运行报告路径；不得向真实桌面发送 SendInput，也不得尝试扫描真实 BLE、音频或 HID 设备。
 3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、首次检测并自动选择唯一仿真 CABLE Input、渲染 RC001/RC003 扫描结果、连接 RC001、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
-4. 依次打开按键、统计、权限、关于和连接页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`。
+4. 依次打开按键、统计、权限、关于和连接页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`；在关于页确认顶部为“官网/GitHub”入口、检查更新为第二个模块，并点击两个入口——被 opener capability 拒绝（`Not allowed to open url`）判失败，runner 上没有可用默认浏览器则如实记为 deferred。
 5. 通过测试专用 command 驱动纯 Rust ATVV 管线完成首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN`，确认得到 240 个采样、generation 为 1、连接和音频均回到 ready。
 6. 停止 Raw Input 并断开，确认最终快照为 `rawInput.phase = stopped` 和 `connection.phase = disconnected`；程序写入报告并自行以成功退出码结束。
 
@@ -200,6 +200,17 @@
 预期：同一产品身份只存在一个当前用户安装；覆盖升级不改变本应用用户数据；较低版本安装器在复制文件前由 preinstall SemVer 门禁以退出码 1638 拒绝，不能把当前版本降级；最终卸载边界与现有约定一致。
 
 失败判定：使用当前版本直接覆盖当前版本冒充升级；升级后出现两个安装条目或快捷方式；设置、映射或统计被重写；降级后版本或主程序发生变化；卸载残留程序身份或误删用户数据；把同源码 predecessor fixture 表述为真实历史版本兼容性验收。
+
+## 用例十四：关于页入口与模块顺序
+
+1. 打开“关于”页面，确认第一个模块是应用标识（图标、名称、版本）并带“官网”“GitHub”两个入口；第二个模块是“软件更新”（含“检查更新”），其后依次是“外观”和“启动行为”。
+2. 点击“官网”，确认系统默认浏览器打开 `https://sayall.app/`，返回应用后页面显示“已在系统默认浏览器打开官网”。
+3. 点击“GitHub”，确认系统默认浏览器打开 `https://github.com/GetSayAll/remote-mic-app-windows`，返回应用后页面显示“已在系统默认浏览器打开 GitHub”。
+4. 在受控条件下制造失败（无默认浏览器关联或打开被安全策略拦截），确认页面就地显示原始错误原因而不是静默无反应；错误若为 `Not allowed to open url`，说明 opener capability 白名单与 `bridge.ts` 的常量不一致，属配置回归而非环境限制。
+
+预期（2026-10-01 用户定稿）：顶部模块集中应用标识与官网/GitHub 入口，检查更新紧随其后为第二个模块；外部入口只打开 capabilities 白名单内的固定 URL，不在 WebView 内导航，也不读取或拼接用户输入；诊断摘要生成与复制入口在“权限”页而不在此页。
+
+失败判定：WebView 自身跳转，或入口可打开白名单外的任意 URL；点击失败但页面无任何提示；正常安装上出现 `Not allowed to open url`；检查更新不再是第二个模块；诊断摘要入口重回关于页；把浏览器预览或仿真结果表述为 Windows 真机通过。
 
 ## 日志收集
 

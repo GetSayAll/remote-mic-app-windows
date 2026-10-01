@@ -2,10 +2,9 @@
 import { computed, onMounted, ref } from "vue";
 import type { RuntimeSnapshot, ThemePreference } from "../lib/bridge";
 import {
-  formatDiagnosticReport,
-  getDiagnosticReport,
   getLaunchAtLogin,
-  openLogDirectory,
+  openGitHubRepository,
+  openOfficialWebsite,
   setLaunchAtLogin,
 } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
@@ -59,55 +58,34 @@ const launchAtLoginBusy = ref(false);
 const launchAtLoginError = ref("");
 
 /**
- * 诊断摘要与日志目录（2026-09-16 从权限页迁到关于页）。
- *
- * 为什么在关于页：诊断摘要是"给开发者看本机运行状态"的支持入口，跟着版本、
- * 启动行为、更新一起属于应用级信息；权限页只回答"蓝牙/按键/音频有没有权限"，
- * 两者混在一页会让用户以为生成摘要需要额外授权。
+ * 顶部模块的外部入口（2026-10-01 用户指定：关于页顶部显示官网与 GitHub 入口，
+ * 检查更新紧随其后为第二个模块）。打开动作一律走 bridge：浏览器预览开新标签，
+ * Tauri 运行时的 URL 白名单在 capabilities/default.json。
  */
-const diagnosticText = ref("");
-const diagnosticMessage = ref("尚未生成诊断摘要");
-const generatingDiagnostic = ref(false);
-const logDirectoryBusy = ref(false);
-const logDirectoryMessage = ref("");
+const linkBusy = ref(false);
+const linkMessage = ref("");
 
-async function generateDiagnostic(): Promise<void> {
-  generatingDiagnostic.value = true;
-  diagnosticMessage.value = "正在读取当前运行状态…";
+async function openEntry(open: () => Promise<void>, label: string): Promise<void> {
+  linkBusy.value = true;
+  linkMessage.value = `正在打开${label}…`;
   try {
-    diagnosticText.value = formatDiagnosticReport(await getDiagnosticReport());
-    diagnosticMessage.value = "诊断摘要已生成；复制前可在页面内检查全部内容";
+    await open();
+    linkMessage.value = `已在系统默认浏览器打开${label}`;
   } catch (error) {
-    diagnosticText.value = "";
-    diagnosticMessage.value = error instanceof Error ? error.message : String(error);
+    // 失败就地显示原始原因：capability 拒绝（Not allowed to open url）与系统
+    // 没有默认浏览器是两类不同问题，压缩成"打开失败"会让现场无法归因。
+    linkMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
-    generatingDiagnostic.value = false;
+    linkBusy.value = false;
   }
 }
 
-async function copyDiagnostic(): Promise<void> {
-  if (!diagnosticText.value) await generateDiagnostic();
-  if (!diagnosticText.value) return;
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
-    await navigator.clipboard.writeText(diagnosticText.value);
-    diagnosticMessage.value = "诊断摘要已复制到剪贴板";
-  } catch (error) {
-    diagnosticMessage.value = error instanceof Error ? error.message : String(error);
-  }
+async function onOpenOfficialWebsite(): Promise<void> {
+  await openEntry(openOfficialWebsite, "官网");
 }
 
-async function onOpenLogDirectory(): Promise<void> {
-  logDirectoryBusy.value = true;
-  logDirectoryMessage.value = "正在打开日志目录…";
-  try {
-    const directory = await openLogDirectory();
-    logDirectoryMessage.value = `已打开日志目录：${directory}`;
-  } catch (error) {
-    logDirectoryMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    logDirectoryBusy.value = false;
-  }
+async function onOpenGitHubRepository(): Promise<void> {
+  await openEntry(openGitHubRepository, "GitHub");
 }
 
 async function onCheck(): Promise<void> {
@@ -159,60 +137,37 @@ onMounted(() => {
     </header>
 
     <article class="card about-card">
-      <img class="app-logo" src="/app-logo.png" alt="无线麦 SayAll 应用图标" />
-      <div>
-        <h2>无线麦 SayAll</h2>
-        <p>版本 {{ runtime?.appVersion ?? "0.1.0" }}</p>
+      <div class="about-row">
+        <img class="app-logo" src="/app-logo.png" alt="无线麦 SayAll 应用图标" />
+        <div>
+          <h2>无线麦 SayAll</h2>
+          <p>版本 {{ runtime?.appVersion ?? "0.1.0" }}</p>
+        </div>
+        <div class="about-links">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="linkBusy"
+            @click="onOpenOfficialWebsite"
+          >
+            官网
+          </button>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="linkBusy"
+            @click="onOpenGitHubRepository"
+          >
+            GitHub
+          </button>
+        </div>
       </div>
-    </article>
-
-    <article class="card appearance-card">
-      <h2>外观</h2>
-      <p class="muted">选择应用的显示模式。</p>
-      <div class="theme-selector" role="radiogroup" aria-label="显示模式">
-        <label
-          v-for="option in themeOptions"
-          :key="option.value"
-          class="theme-option"
-          :class="{ selected: themePreference === option.value }"
-        >
-          <input
-            type="radio"
-            name="theme-preference"
-            :value="option.value"
-            :checked="themePreference === option.value"
-            :disabled="themeBusy"
-            @change="onThemeChange"
-          />
-          <span>{{ option.label }}</span>
-        </label>
-      </div>
-      <p class="muted appearance-note">
-        {{ themePreference === "system" ? "跟随 Windows 的应用颜色模式。" : "该选择会在重启后保持。" }}
+      <p v-if="linkMessage" class="operation-message link-message" aria-live="polite">
+        {{ linkMessage }}
       </p>
-      <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
     </article>
 
-    <article class="card startup-card">
-      <h2>启动行为</h2>
-      <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
-      <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
-        <input
-          v-if="launchAtLoginReady"
-          type="checkbox"
-          class="toggle-input"
-          name="launch-at-login"
-          :checked="launchAtLogin"
-          :disabled="launchAtLoginBusy"
-          @change="onLaunchAtLoginChange"
-        />
-        <span v-else class="toggle-placeholder" aria-hidden="true"></span>
-        登录时自动启动
-      </label>
-      <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
-    </article>
-
-    <article class="card">
+    <article class="card update-card">
       <h2>软件更新</h2>
       <p class="muted">更新包来自 GitHub Releases，下载后自动安装并重启应用。</p>
       <label class="toggle-row" title="开启后，检查更新时也会包含尚在测试中的预览版本。">
@@ -270,48 +225,51 @@ onMounted(() => {
         </div>
       </div>
     </article>
-    <article class="card diagnostics-card">
-      <div class="card-title-row">
-        <div>
-          <h2>诊断摘要</h2>
-          <p class="muted">摘要不含设备地址、语音内容等隐私信息，可放心复制发给开发者排查问题。</p>
-        </div>
-        <div class="button-row">
-          <button
-            class="secondary-button"
-            type="button"
-            :disabled="generatingDiagnostic"
-            @click="generateDiagnostic"
-          >
-            {{ generatingDiagnostic ? "生成中…" : "生成摘要" }}
-          </button>
-          <button
-            class="primary-button"
-            type="button"
-            :disabled="generatingDiagnostic"
-            @click="copyDiagnostic"
-          >
-            复制摘要
-          </button>
-        </div>
-      </div>
-      <p class="operation-message" aria-live="polite">{{ diagnosticMessage }}</p>
-      <pre v-if="diagnosticText" class="diagnostic-output">{{ diagnosticText }}</pre>
 
-      <div class="log-directory-block">
-        <button
-          class="secondary-button"
-          type="button"
-          :disabled="logDirectoryBusy"
-          @click="onOpenLogDirectory"
+    <article class="card appearance-card">
+      <h2>外观</h2>
+      <p class="muted">选择应用的显示模式。</p>
+      <div class="theme-selector" role="radiogroup" aria-label="显示模式">
+        <label
+          v-for="option in themeOptions"
+          :key="option.value"
+          class="theme-option"
+          :class="{ selected: themePreference === option.value }"
         >
-          {{ logDirectoryBusy ? "正在打开…" : "打开日志目录" }}
-        </button>
-        <p class="muted">日志记录本机运行细节，遇到问题时连同摘要一起发给开发者。</p>
+          <input
+            type="radio"
+            name="theme-preference"
+            :value="option.value"
+            :checked="themePreference === option.value"
+            :disabled="themeBusy"
+            @change="onThemeChange"
+          />
+          <span>{{ option.label }}</span>
+        </label>
       </div>
-      <p class="operation-message log-directory-message" aria-live="polite">
-        {{ logDirectoryMessage }}
+      <p class="muted appearance-note">
+        {{ themePreference === "system" ? "跟随 Windows 的应用颜色模式。" : "该选择会在重启后保持。" }}
       </p>
+      <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
+    </article>
+
+    <article class="card">
+      <h2>启动行为</h2>
+      <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
+      <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
+        <input
+          v-if="launchAtLoginReady"
+          type="checkbox"
+          class="toggle-input"
+          name="launch-at-login"
+          :checked="launchAtLogin"
+          :disabled="launchAtLoginBusy"
+          @change="onLaunchAtLoginChange"
+        />
+        <span v-else class="toggle-placeholder" aria-hidden="true"></span>
+        登录时自动启动
+      </label>
+      <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
     </article>
   </section>
 </template>
@@ -320,20 +278,10 @@ onMounted(() => {
 /* 初值就绪前用同尺寸占位符顶位，避免开关出现时布局跳动；开关本体仅在
    终值就绪后创建，创建即带正确 checked，不产生关→开滑动过渡。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
-/* 启动行为与软件更新是两组独立设置（一个是登录自启动、一个是更新通道与手动
-   检查），贴在一起会读成同一张卡的两段。数值与上方 about-card /
-   appearance-card 的堆叠间距一致，保持整页节奏统一。 */
-.startup-card { margin-bottom: 12px; }
-/* 日志目录入口与上面的摘要动作分组：摘要随时可生成，日志目录是"已经出问题、
-   要取证"时才走的路，靠分隔线和一行说明避免被当成同一组按钮。 */
-.log-directory-block {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.log-directory-block .muted { margin: 0; }
+/* 模块节奏（2026-10-01 用户指定：顶部标识 + 官网/GitHub 入口为第一模块，
+   检查更新为第二模块）：各卡之间统一 12px 堆叠间距，与 about-card /
+   appearance-card 的全局间距一致，避免相邻两卡读成同一张卡的分段。 */
+.update-card { margin-bottom: 12px; }
+/* 入口失败/成功提示跟在顶部行下面，用卡片自身的 10px 间距，不再叠加段前距。 */
+.link-message { margin: 0; }
 </style>

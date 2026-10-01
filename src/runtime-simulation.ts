@@ -63,6 +63,34 @@ async function openPage(label: string, heading = label): Promise<void> {
   );
 }
 
+/**
+ * 关于页外部入口（官网 / GitHub）的 CI 判据。
+ *
+ * 两层边界刻意分开：capability 白名单是产品配置，被 opener 拒绝
+ * （"Not allowed to open url"）必须报红；runner 上没有可用的默认浏览器只是
+ * 环境差异，如实记为 deferred——与"打开日志目录"同款处理，不制造与本产品
+ * 无关的红灯。
+ */
+async function recordExternalEntry(label: string, steps: string[]): Promise<void> {
+  await clickButton(label);
+  const message = await waitFor(
+    () => {
+      const text = document.querySelector(".link-message")?.textContent?.trim();
+      return text && !text.startsWith("正在打开") ? text : null;
+    },
+    `关于页“${label}”入口返回终态`,
+  );
+  assert(
+    !message.includes("Not allowed to open url"),
+    `关于页“${label}”入口被 opener capability 拒绝：${message}`,
+  );
+  steps.push(
+    message.startsWith("已在系统默认浏览器打开")
+      ? `关于页“${label}”入口经真实 IPC 交由系统浏览器打开`
+      : `关于页“${label}”入口返回不可用（deferred）：${message}`,
+  );
+}
+
 async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   // 应用默认打开"按键"页（对齐 Mac 页序），先导航到连接页完成连接旅程。
   await openPage("连接");
@@ -148,13 +176,8 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");
 
   await openPage("权限");
-  assert(
-    !document.querySelector(".diagnostic-output"),
-    "权限页仍有诊断摘要输出（诊断入口应已迁往关于页）",
-  );
-  steps.push("权限页只呈现蓝牙/按键/音频三项权限状态");
-
-  await openPage("关于");
+  // 诊断摘要 2026-10-01 从关于页迁回权限页（用户指定）：状态与取证入口同页，
+  // 用户看到某一项不对时不必跳页。
   await clickButton("生成摘要");
   await waitFor(
     () =>
@@ -168,7 +191,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(diagnostic.capabilities.bleVoiceReady, "诊断摘要没有反映 ATVV 就绪");
   assert(diagnostic.capabilities.wasapiReady, "诊断摘要没有反映 WASAPI 就绪");
   assert(diagnostic.capabilities.rawInputReady, "诊断摘要没有反映 Raw Input 就绪");
-  steps.push("关于页生成去标识化运行诊断摘要");
+  steps.push("权限页呈现蓝牙/按键/音频三项状态并生成去标识化运行诊断摘要");
 
   // "打开日志目录"刻意**不作成败断言**：它经 ShellExecuteW 交给资源管理器，
   // CI runner 是否有可用的 shell 桌面不在本仓库控制范围内，拿它当门禁只会
@@ -184,9 +207,24 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push(
     logDirectoryMessage.startsWith("已打开日志目录")
-      ? "关于页“打开日志目录”经真实 IPC 交由资源管理器打开"
-      : `关于页“打开日志目录”返回不可用（deferred）：${logDirectoryMessage}`,
+      ? "权限页“打开日志目录”经真实 IPC 交由资源管理器打开"
+      : `权限页“打开日志目录”返回不可用（deferred）：${logDirectoryMessage}`,
   );
+
+  await openPage("关于");
+  const aboutCards = Array.from(document.querySelectorAll<HTMLElement>("article.card"));
+  assert(aboutCards[0]?.classList.contains("about-card"), "关于页第一个模块不是顶部标识卡");
+  assert(aboutCards[1]?.classList.contains("update-card"), "关于页第二个模块不是检查更新");
+  const entryLabels = Array.from(
+    document.querySelectorAll<HTMLButtonElement>(".about-links button"),
+  ).map((button) => button.textContent?.trim());
+  assert(
+    entryLabels.length === 2 && entryLabels[0] === "官网" && entryLabels[1] === "GitHub",
+    `关于页顶部入口异常：${entryLabels.join(" / ")}`,
+  );
+  steps.push("关于页顶部为官网/GitHub 入口，检查更新为第二个模块");
+  await recordExternalEntry("官网", steps);
+  await recordExternalEntry("GitHub", steps);
 
   const darkTheme = await waitFor(
     () =>

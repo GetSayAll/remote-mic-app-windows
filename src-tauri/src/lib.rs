@@ -131,7 +131,8 @@ fn get_diagnostic_report(
 ///
 /// 路径来自日志初始化的**实际**落盘路径，不接受前端传入：否则等于把"用
 /// ShellExecuteW 打开任意路径"的能力交给 WebView，与本仓库 capabilities 的
-/// 最小权限设计（opener 仅放行 VB-CABLE 官网一个 URL）直接冲突。
+/// 最小权限设计（opener 只放行 VB-CABLE 官网、产品官网与源码仓库三个固定
+/// URL，见 capabilities/default.json）直接冲突。
 ///
 /// 目录不存在时先创建：日志初始化理论上已建好父目录（`create_dir_all`），
 /// 但 `SAYALL_GATT_LOG` 覆盖或初始化失败的场景下可能缺失，而资源管理器对

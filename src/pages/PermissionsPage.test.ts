@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { describe, expect, it, vi } from "vitest";
 import type { RuntimeSnapshot } from "../lib/bridge";
 import PermissionsPage from "./PermissionsPage.vue";
 
@@ -68,9 +68,51 @@ describe("permissions page", () => {
     expect(wrapper.text()).toContain("当前电脑不支持");
   });
 
-  it("诊断摘要已迁往关于页，权限页不再提供生成或复制入口", () => {
+  it("诊断摘要入口落在权限页（2026-10-01 从关于页迁回）", async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>();
+    writeText.mockResolvedValue();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
     const wrapper = mount(PermissionsPage, { props: { runtime } });
-    expect(wrapper.text()).not.toContain("诊断摘要");
-    expect(wrapper.find(".diagnostic-output").exists()).toBe(false);
+    expect(wrapper.find(".diagnostics-card").exists()).toBe(true);
+    const buttons = wrapper.findAll<HTMLButtonElement>(".diagnostics-card button");
+    expect(buttons.map((button) => button.text())).toEqual([
+      "生成摘要",
+      "复制摘要",
+      "打开日志目录",
+    ]);
+
+    await buttons[0].trigger("click");
+    await flushPromises();
+
+    const report = wrapper.get(".diagnostic-output").text();
+    expect(report).toContain('"schemaVersion": 1');
+    expect(report).not.toContain("remoteName");
+    expect(report).not.toContain("selectedEndpointName");
+    expect(report).not.toContain("lastError");
+    expect(wrapper.text()).toContain("诊断摘要已生成");
+
+    await buttons[1].trigger("click");
+    await flushPromises();
+
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(writeText).toHaveBeenCalledWith(report);
+    expect(wrapper.text()).toContain("诊断摘要已复制到剪贴板");
+  });
+
+  it("浏览器预览下打开日志目录给出明确不可用提示而不是静默失败", async () => {
+    const wrapper = mount(PermissionsPage, { props: { runtime } });
+    const button = wrapper
+      .findAll("button")
+      .find((candidate) => candidate.text().includes("打开日志目录"));
+    expect(button).toBeDefined();
+
+    await button!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("当前是浏览器预览，无法打开日志目录");
   });
 });
