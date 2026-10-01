@@ -473,15 +473,15 @@ const capabilityNote = computed<string | null>(() => {
     if (rc003CaptureEnabled.value === false) {
       return "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
     }
-    return "提示：正在确认三键捕获状态…";
+    return "提示：正在确认按键状态…";
   }
   if (button === "home" || button === "tv") {
-    return "提示：保存后本按键启用“遥控器优先”——遥控器连接期间原生按键（Home / `）被接管，任意按压（含闲置后首次）严格单响应；此期间物理键盘上的对应按键将触发映射动作，断开遥控器或删除本键映射即恢复原生。";
+    return "提示：保存后，遥控器连接期间这个键只执行你配置的动作；同时物理键盘上的对应按键（Home / `）也会执行同样的动作。断开遥控器或删除本键映射即恢复原样。";
   }
   if (shortcutCapability(button, "single", remoteModel.value) === "identity") {
     const identity = identityShortcutByButton[button];
     const label = identity ? chordLabel({ keys: [identity] }) : "";
-    return `提示：此按键闲置约 4 秒后的首次按压会附带一次原生按键动作（结构性泄漏，调查已归档）；4 秒内连按严格单响应，单击配置为同键映射（${label}）时由引擎对冲为单响应。`;
+    return `提示：闲置约 4 秒后第一次按这个键，可能同时出现一次它原本的按键效果；这段时间内连按不受影响。单击动作若就是该键本身（${label}），多出的那一次会被自动合并。`;
   }
   return null;
 });
@@ -782,7 +782,7 @@ function phaseLabel(phase: RawInputPhase | undefined): string {
     case "stopped":
       return "监听已停止";
     case "awaiting":
-      return "等待遥控器连接（系统 HID 接口未就绪）";
+      return "等待遥控器连接";
     case "unsupported":
       return "当前环境暂不支持";
     default:
@@ -1283,7 +1283,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
-        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro（RC003）示意图" draggable="false" />
+        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro 示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"

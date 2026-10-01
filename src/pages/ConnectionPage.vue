@@ -1012,7 +1012,6 @@ onUnmounted(() => {
                 {{ toolChordActive("doubao") ? "已自动设置" : "未同步，点左侧卡片重设" }}
               </span>
             </div>
-            <p class="tiny muted">豆包只认真实按键，对应用模拟按下的按键没反应。</p>
             <div class="switch-line">
               <label class="toggle-row" for="capture-switch-doubao">
                 <span>支持更多输入工具</span>
@@ -1123,7 +1122,7 @@ onUnmounted(() => {
                 {{ rc003CaptureEnabled === true ? "已开启" : "未开启" }}
               </span>
             </div>
-            <p class="tiny muted">建议开启：不少第三方工具只认真实按键。</p>
+            <p class="tiny muted">建议开启：部分输入工具需要它才能收到遥控器按键。</p>
             <p v-if="rc003CaptureHint" class="tiny muted">{{ rc003CaptureHint }}</p>
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{
@@ -1172,12 +1171,11 @@ onUnmounted(() => {
     <details class="usage-hint-details faq">
       <summary>常见问题（点开查看）</summary>
       <ul>
-        <li>为什么语音键要“替你按一个键”？遥控器语音键不是键盘按键，输入法只认键盘按键，所以应用替你在系统里按住它。</li>
+        <li>为什么语音键要“替你按一个键”？遥控器语音键不是键盘按键，输入法只认键盘按键，所以应用替你按住它。</li>
         <li>「支持更多输入工具」和「按键」页的「全按键支持」是同一个开关，两处随时同步；首次开启会弹一次系统授权。</li>
         <li>「替你按下的键」目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
         <li>微信输入法要求按住约半秒以上（需要联网），快速点按不出字是它自己的要求，不是故障。</li>
         <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单。</li>
-        <li>遥控器语音键自带的 F5 会被应用自动屏蔽，物理键盘的 F5 不受影响。</li>
       </ul>
     </details>
   </section>
