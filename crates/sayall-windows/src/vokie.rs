@@ -34,6 +34,9 @@ impl VokieInstallSource {
 pub struct VokieInstallation {
     pub installed: bool,
     pub source: Option<VokieInstallSource>,
+    /// 进程是否在运行。快捷键冲突的判据是“在跑”而不是“装了”——
+    /// 没运行就不会响应右 Alt（2026-10-01 Andy 提出的冲突点）。
+    pub running: bool,
 }
 
 impl VokieInstallation {
@@ -87,6 +90,7 @@ pub fn directory_tree_contains_vokie(root: &std::path::Path, max_depth: u8) -> b
 
 #[cfg(windows)]
 pub fn detect() -> VokieInstallation {
+    let running = vokie_process_running();
     for probe in [
         VokieInstallSource::UninstallRegistry,
         VokieInstallSource::StartMenu,
@@ -96,13 +100,56 @@ pub fn detect() -> VokieInstallation {
             return VokieInstallation {
                 installed: true,
                 source: Some(probe),
+                running,
             };
         }
     }
     VokieInstallation {
         installed: false,
         source: None,
+        running,
     }
+}
+
+/// Vokie 进程是否在运行（只匹配进程名，不读路径、不记路径）。
+#[cfg(windows)]
+fn vokie_process_running() -> bool {
+    any_process_name_matches(matches_vokie)
+}
+
+/// 进程名遍历（Toolhelp 快照）：任一进程名满足 `predicate` 即为真。
+///
+/// 抽成谓词形式是为了能做**阳性对照**测试——用"本测试进程自己的名字"验证遍历
+/// 真的能看到进程（2026-09-23 教训：没有阳性对照的阴性结论不可信）。
+#[cfg(windows)]
+fn any_process_name_matches(predicate: impl Fn(&str) -> bool) -> bool {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut matched = false;
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        if predicate(&String::from_utf16_lossy(&entry.szExeFile[..len])) {
+            matched = true;
+            break;
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    let _ = unsafe { windows::Win32::Foundation::CloseHandle(snapshot) };
+    matched
 }
 
 #[cfg(not(windows))]
@@ -110,6 +157,7 @@ pub fn detect() -> VokieInstallation {
     VokieInstallation {
         installed: false,
         source: None,
+        running: false,
     }
 }
 
@@ -322,24 +370,51 @@ mod tests {
         assert_eq!(
             VokieInstallation {
                 installed: false,
-                source: None
+                source: None,
+                running: false,
             }
             .source_label(),
             "none"
         );
     }
 
+    /// 阳性对照：进程遍历必须能看见**本测试进程自己**（用自身 exe 名做谓词）。
+    /// 没有这条，`running=false` 的阴性结论无法与"遍历根本没工作"区分。
+    #[cfg(windows)]
+    #[test]
+    fn process_scan_sees_its_own_process() {
+        let own = std::env::current_exe().expect("current exe");
+        let stem = own
+            .file_stem()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(!stem.is_empty(), "自身进程名不应为空");
+        let stem_lower = stem.to_ascii_lowercase();
+        assert!(
+            any_process_name_matches(|name| {
+                let lowered = name.to_ascii_lowercase();
+                let trimmed = lowered.strip_suffix(".exe").unwrap_or(lowered.as_str());
+                trimmed == stem_lower
+            }),
+            "进程遍历看不到自己（stem={stem}）"
+        );
+        assert!(!any_process_name_matches(|name| name.eq_ignore_ascii_case(
+            "sayall-probe-definitely-not-running.exe"
+        )));
+    }
+
     /// 真机取证（默认 `#[ignore]`，CI 不跑）：本机装有 Vokie 时必须命中，
-    /// 并打印命中的判据标签（不含任何路径）。
+    /// 并打印命中的判据标签与运行状态（不含任何路径）。
     #[cfg(windows)]
     #[test]
     #[ignore = "真机取证：依赖本机实际安装的 Vokie"]
     fn detect_reports_installed_on_this_machine() {
         let result = detect();
         println!(
-            "vokie installed={} source={}",
+            "vokie installed={} source={} running={}",
             result.installed,
-            result.source_label()
+            result.source_label(),
+            result.running
         );
         assert!(
             result.installed,
