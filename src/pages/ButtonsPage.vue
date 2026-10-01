@@ -24,6 +24,7 @@ import {
   mouseMoveLabels,
   pickCustomApp,
   registerPresetAppNames,
+  remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
   shortcutCapability,
@@ -108,6 +109,15 @@ const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 const remoteModel = computed<RemoteModel>(
   () => props.runtime?.platform.connection.remoteModel ?? "unknown",
 );
+
+/**
+ * 头部设备胶囊（2026-10-01）：优先显示已识别的型号（RC001 = 小米蓝牙语音遥控器 2、
+ * RC003 = 小米蓝牙语音遥控器 2 Pro）；型号未读回时退回蓝牙广播名，未连接时提示未连接。
+ */
+const deviceLabel = computed(() => {
+  if (remoteModel.value !== "unknown") return remoteModelLabel(remoteModel.value);
+  return connectionInfo.value?.remoteName ?? "未连接遥控器";
+});
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
@@ -1246,7 +1256,7 @@ onUnmounted(() => {
       <div class="mapping-header-controls">
         <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
           <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
-          <span>{{ connectionInfo?.remoteName ?? "未连接遥控器" }}</span>
+          <span>{{ deviceLabel }}</span>
           <BatteryIndicator :connection="connectionInfo" />
         </div>
       </div>
@@ -1283,7 +1293,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
-        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙遥控器 2 Pro 示意图" draggable="false" />
+        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙语音遥控器 2 Pro 示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"

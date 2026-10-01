@@ -1241,4 +1241,21 @@ describe("全按键支持开启前确认弹窗", () => {
       (row.find('input[type="checkbox"]').element as HTMLInputElement).disabled,
     ).toBe(false);
   });
+
+  // 2026-10-01 Andy 要求：头部设备胶囊显示遥控器型号（而不是蓝牙广播名）。
+  it.each([
+    ["rc001" as const, "小米蓝牙语音遥控器 2"],
+    ["rc003" as const, "小米蓝牙语音遥控器 2 Pro"],
+  ])("头部设备胶囊显示遥控器型号（%s）", async (model, expected) => {
+    const page = await mountPage(model);
+    expect(page.find(".device-chip").text()).toContain(expected);
+    page.unmount();
+  });
+
+  it("型号未读回时头部设备胶囊退回蓝牙广播名", async () => {
+    const page = await mountPage("unknown");
+    expect(page.find(".device-chip").text()).toContain("小米蓝牙语音遥控器");
+    expect(page.find(".device-chip").text()).not.toContain("连接后显示");
+    page.unmount();
+  });
 });

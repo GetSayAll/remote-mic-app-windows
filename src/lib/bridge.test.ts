@@ -126,8 +126,8 @@ describe("connection phase presentation", () => {
   });
 
   it("展示 RC001、RC003 和未知型号", () => {
-    expect(remoteModelLabel("rc001")).toBe("小米蓝牙遥控器 2");
-    expect(remoteModelLabel("rc003")).toBe("小米蓝牙遥控器 2 Pro");
+    expect(remoteModelLabel("rc001")).toBe("小米蓝牙语音遥控器 2");
+    expect(remoteModelLabel("rc003")).toBe("小米蓝牙语音遥控器 2 Pro");
     expect(remoteModelLabel("unknown")).toBe("连接后显示");
   });
 

@@ -620,6 +620,17 @@ const phaseDetail = computed(() => {
   return "连接后即可使用遥控器语音键";
 });
 
+/**
+ * 状态条标题：已识别型号时显示型号（2026-10-01 Andy 要求——RC001 = 小米蓝牙语音遥控器 2、
+ * RC003 = 小米蓝牙语音遥控器 2 Pro）。型号未识别（GATT 2A24 还没读回）或未连接时退回
+ * 蓝牙广播名 / 阶段文案，避免把"连接后显示"这类占位当标题。
+ */
+const connectionTitle = computed(() => {
+  const model = connection.value.remoteModel;
+  if (connectionActive.value && model !== "unknown") return remoteModelLabel(model);
+  return connection.value.remoteName ?? connectionPhaseLabel(connection.value.phase);
+});
+
 const audioTone = computed(() => {
   if (audio.value.phase === "failed") return "error";
   if (audio.value.phase === "streaming") return "active";
@@ -824,7 +835,7 @@ onUnmounted(() => {
           <div class="status-copy">
             <div class="status-heading">
               <span class="status-dot" :class="phaseTone"></span>
-              <strong>{{ connection.remoteName ?? connectionPhaseLabel(connection.phase) }}</strong>
+              <strong class="connection-title">{{ connectionTitle }}</strong>
             </div>
             <small>{{ phaseDetail }}</small>
           </div>
