@@ -110,6 +110,17 @@ const ALLOWED_TERMS: &[&str] = &[
     "控制台",
 ];
 
+/// 一次聚焦尝试的目标选择方式（跨平台纯数据；平台后端按它定位元素）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusChoice {
+    /// 通用路径：按 composer 评分选最佳输入框。
+    BestComposer,
+    /// 学习路径：按已记录目标匹配。
+    Recorded(RecordedFocusTarget),
+    /// 诊断路径：直接指定候选序号。
+    Index(usize),
+}
+
 /// 目标应用的聚焦方式。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +132,17 @@ pub enum FocusStrategy {
     AppShortcut,
     /// 打开后聚焦用户记录的输入框。
     RecordedElement,
+}
+
+impl FocusStrategy {
+    /// 结构化日志使用的稳定标识（与线的 snake_case 表示一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenOnly => "open_only",
+            Self::AppShortcut => "app_shortcut",
+            Self::RecordedElement => "recorded_element",
+        }
+    }
 }
 
 /// 相对目标顶层窗口的归一化矩形（物理像素换算成比例）。

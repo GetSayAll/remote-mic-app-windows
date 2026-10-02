@@ -10,11 +10,11 @@
 //! Chromium 的 contenteditable 会以 `Group` 暴露、WorkBuddy 这类应用完全没有树。
 
 #[cfg(windows)]
-use crate::focus::{best_composer_index, best_recorded_index, FocusCandidate, RecordedFocusTarget};
-#[cfg(windows)]
-use crate::focus_service::{
-    drive_attempts, AttemptResult, FocusFailure, FocusOutcome, FocusRetryPolicy,
+use crate::focus::{
+    best_composer_index, best_recorded_index, FocusCandidate, FocusChoice, RecordedFocusTarget,
 };
+#[cfg(windows)]
+use crate::focus_service::{AttemptResult, FocusFailure};
 
 #[cfg(windows)]
 mod imp {
@@ -379,17 +379,6 @@ mod imp {
         matches
     }
 
-    /// 一次聚焦的目标选择方式（`Index` 仅供诊断探针做 A/B 实验）。
-    #[derive(Debug, Clone)]
-    pub enum FocusChoice {
-        /// 通用路径：按 composer 评分选最佳输入框。
-        BestComposer,
-        /// 学习路径：按已记录目标匹配。
-        Recorded(RecordedFocusTarget),
-        /// 诊断路径：直接指定候选序号。
-        Index(usize),
-    }
-
     /// 扫描 + 选择 + 聚焦 + 读回，全部在同一次 UIA 调用里完成（避免索引漂移）。
     pub fn focus_target(pid: u32, choice: FocusChoice) -> FocusAttempt {
         if !process_alive(pid) {
@@ -516,38 +505,46 @@ mod imp {
         }
     }
 
-    /// 「聚焦当前前台应用输入框」的完整流程：捕获目标进程 → 每轮校验其仍是前台 →
-    /// 扫描选择聚焦读回。前台是本进程或拿不到前台窗口时立即失败（不重试）。
-    pub fn focus_frontmost(policy: FocusRetryPolicy) -> FocusOutcome {
-        let Some(target_pid) = foreground_process_id() else {
-            return FocusOutcome::Failed {
-                reason: FocusFailure::NotForeground,
-                attempts: 1,
-                elapsed_ms: 0,
-            };
-        };
-        if target_pid == current_process_id() {
-            return FocusOutcome::Failed {
-                reason: FocusFailure::SelfForeground,
-                attempts: 1,
-                elapsed_ms: 0,
-            };
+    /// 生产后端：实现 `FocusBackend`，由 `FocusRunner` 的串行队列调用。
+    #[derive(Debug, Default)]
+    pub struct WindowsFocusBackend;
+
+    impl WindowsFocusBackend {
+        pub fn new() -> Self {
+            Self
         }
-        let started = Instant::now();
-        drive_attempts(
-            policy,
-            |_attempt| {
-                if !process_alive(target_pid) {
-                    return AttemptResult::Fatal(FocusFailure::TargetExited);
-                }
-                if foreground_process_id() != Some(target_pid) {
-                    return AttemptResult::NotForeground;
-                }
-                focus_best(target_pid, None).into_attempt_result()
-            },
-            || started.elapsed(),
-            |duration: Duration| std::thread::sleep(duration),
-        )
+    }
+
+    /// 进程内单调时钟锚点（只用于预算判定与日志耗时）。
+    fn service_clock_ms() -> u64 {
+        static ANCHOR: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        ANCHOR.get_or_init(Instant::now).elapsed().as_millis() as u64
+    }
+
+    impl crate::focus_service::FocusBackend for WindowsFocusBackend {
+        fn now_ms(&self) -> u64 {
+            service_clock_ms()
+        }
+
+        fn sleep(&self, duration: std::time::Duration) {
+            std::thread::sleep(duration);
+        }
+
+        fn foreground_process_id(&self) -> Option<u32> {
+            foreground_process_id()
+        }
+
+        fn current_process_id(&self) -> u32 {
+            current_process_id()
+        }
+
+        fn process_alive(&self, pid: u32) -> bool {
+            process_alive(pid)
+        }
+
+        fn attempt(&self, pid: u32, choice: &crate::focus::FocusChoice) -> AttemptResult {
+            focus_target(pid, choice.clone()).into_attempt_result()
+        }
     }
 
     /// 学习输入框：把「目标进程当前焦点元素」当作文档记录（只读语义，不读内容）。
@@ -579,9 +576,9 @@ mod imp {
 
 #[cfg(windows)]
 pub use imp::{
-    capture_focused_target, capture_for_process, current_process_id, focus_best, focus_frontmost,
-    focus_target, foreground_process_id, foreground_title_len, process_alive, scan_candidates,
-    window_of_process, FocusAttempt, FocusChoice,
+    capture_focused_target, capture_for_process, current_process_id, focus_best, focus_target,
+    foreground_process_id, foreground_title_len, process_alive, scan_candidates, window_of_process,
+    FocusAttempt, WindowsFocusBackend,
 };
 
 /// 非 Windows 平台不提供 UIA 后端；保持模块可编译以便纯逻辑单测。

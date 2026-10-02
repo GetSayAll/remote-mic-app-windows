@@ -321,6 +321,18 @@ impl MappingInjector for UnsupportedInjector {
     fn tap(&self, _chord: &send_input::KeyChord) -> Result<(), String> {
         Err("SendInput 仅在 Windows 上可用".to_owned())
     }
+
+    fn focus_frontmost(&self) -> Result<(), String> {
+        Err("聚焦输入框仅在 Windows 上可用".to_owned())
+    }
+
+    fn launch_app_and_focus(
+        &self,
+        _target: &str,
+        _profile: Option<&crate::focus::AppFocusProfile>,
+    ) -> Result<(), String> {
+        Err("打开应用仅在 Windows 上可用".to_owned())
+    }
 }
 
 impl Default for WindowsPlatform {
@@ -678,6 +690,13 @@ impl WindowsPlatform {
 
     pub fn button_mapping_snapshot(&self) -> ButtonMappingSnapshot {
         self.button_mapping.snapshot()
+    }
+
+    /// UI「测试」按钮：聚焦当前前台应用输入框（异步受理，结果在快照的 `last_focus`）。
+    pub fn test_focus_input(&self) -> Result<(), PlatformError> {
+        self.button_mapping
+            .focus_frontmost_now()
+            .map_err(PlatformError::SendInput)
     }
 
     /// 订阅语义按键边沿（画布高亮数据源）。
@@ -1153,6 +1172,16 @@ mod tests {
                 Ok(())
             }
             fn launch_app(&self, _target: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn focus_frontmost(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn launch_app_and_focus(
+                &self,
+                _target: &str,
+                _profile: Option<&crate::focus::AppFocusProfile>,
+            ) -> Result<(), String> {
                 Ok(())
             }
         }

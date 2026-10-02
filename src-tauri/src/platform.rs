@@ -41,6 +41,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         steps: u16,
     ) -> Result<SendInputSnapshot, PlatformError>;
     fn test_mouse_action(&self, action: ButtonAction) -> Result<SendInputSnapshot, PlatformError>;
+    /// 聚焦当前前台应用的输入框（异步受理：真正的重试与结果由聚焦服务汇报，
+    /// 失败原因见 `button_mapping_snapshot().last_focus`）。
+    fn test_focus_input(&self) -> Result<(), PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
     /// 打开/激活预设应用（测试按钮与引擎共用路径）。
@@ -162,6 +165,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn test_mouse_action(&self, action: ButtonAction) -> Result<SendInputSnapshot, PlatformError> {
         self.test_mouse_action(action)
+    }
+
+    fn test_focus_input(&self) -> Result<(), PlatformError> {
+        WindowsPlatform::test_focus_input(self)
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
@@ -530,6 +537,16 @@ mod simulation {
             Ok(())
         }
 
+        fn test_focus_input(&self) -> Result<(), PlatformError> {
+            // 仿真环境没有真实前台/UIA：受理请求并记一次计数，供 runtime-simulation
+            // 断言「动作接入后确实走到了聚焦服务」。
+            let mut state = lock(&self.state);
+            state.send_input.submitted_batches =
+                state.send_input.submitted_batches.saturating_add(1);
+            state.send_input.last_error = None;
+            Ok(())
+        }
+
         fn voice_hold_hotkey(&self) -> Option<KeyChord> {
             lock(&self.voice_hold_hotkey).clone()
         }
@@ -560,6 +577,7 @@ mod simulation {
                 fired_gestures: 0,
                 last_fired: None,
                 last_error: None,
+                last_focus: None,
             }
         }
 

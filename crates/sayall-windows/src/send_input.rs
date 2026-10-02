@@ -358,6 +358,11 @@ pub enum ButtonAction {
     OpenApp {
         target: String,
     },
+    /// 聚焦当前前台应用的可编辑输入框（对标 mac `focusInput`）。
+    ///
+    /// 无参数：目标永远是「当前前台应用」；「打开应用后聚焦」由 `OpenApp` 的
+    /// 聚焦档案（`ButtonMappings.focus_profiles`）承载。
+    FocusInput,
     Scroll {
         direction: ScrollDirection,
         #[serde(default = "default_scroll_steps")]

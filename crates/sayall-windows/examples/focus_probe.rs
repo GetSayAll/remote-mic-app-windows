@@ -11,9 +11,10 @@
 //!
 //! 隐私：只打印长度/哈希/几何/类型，不打印名称、内容、路径或设备标识。
 
+use sayall_windows::focus::FocusChoice;
 use sayall_windows::focus::{NormalizedRect, RecordedFocusTarget};
 use sayall_windows::focus_windows as fw;
-use sayall_windows::focus_windows::{FocusAttempt, FocusChoice};
+use sayall_windows::focus_windows::FocusAttempt;
 
 /// FNV-1a 32 位：给「元素身份」生成短哈希，便于前后对比而不泄露内容。
 fn identity_hash(control_type: &str, automation_id: &str, class_name: &str, name: &str) -> String {
@@ -117,9 +118,20 @@ fn main() {
     }
 
     if std::env::args().any(|arg| arg == "--frontmost") {
-        // 生产语义：目标=当前前台应用，带重试与预算。
-        let outcome = fw::focus_frontmost(Default::default());
-        println!("outcome={outcome:?}");
+        // 生产组合：FocusRunner（串行队列 + 重试 + 读回）驱动真实 UIA 后端。
+        use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner, FocusTask};
+        use sayall_windows::focus_windows::WindowsFocusBackend;
+        let runner = FocusRunner::spawn(
+            std::sync::Arc::new(WindowsFocusBackend::new()),
+            FocusRetryPolicy::default(),
+        );
+        let request_id = runner.submit(FocusTask::Frontmost);
+        println!("submitted={request_id:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runner.last_report().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        println!("report={:?}", runner.last_report());
         if let Some(pid) = fw::foreground_process_id() {
             println!(
                 "focused_after={}",
