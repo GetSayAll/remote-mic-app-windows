@@ -2,13 +2,13 @@
 import type { NavIcon, PageId } from "../navigation";
 import { navigationItems } from "../navigation";
 
-defineProps<{ activePage: PageId }>();
+defineProps<{ activePage: PageId; version?: string | null }>();
 const emit = defineEmits<{ select: [page: PageId] }>();
 
 /**
  * 侧栏图标：SVG path 组（24x24 视窗，描边风格），形状对齐
  * macOS SettingsSection.systemImage（keyboard/link/shield.lefthalf.filled/
- * info.circle）。Windows 无 SF Symbols，用同形 SVG 还原。
+ * gearshape）。Windows 无 SF Symbols，用同形 SVG 还原。
  */
 const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   keyboard: {
@@ -31,9 +31,13 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     strokes: ["M12 2.8l7.2 2.9v5.4c0 4.7-3.1 7.8-7.2 9.4-4.1-1.6-7.2-4.7-7.2-9.4V5.7z"],
     fills: ["M12 2.8L4.8 5.7v5.4c0 4.7 3.1 7.8 7.2 9.4z"],
   },
-  info: {
-    // SF "info.circle"：圆 + i
-    strokes: ["M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18z", "M12 8.1h.01", "M12 11.4v5"],
+  gear: {
+    // SF "gearshape"：外圈齿形 + 中央圆孔（齿形沿用 Feather 齿轮比例，与其余
+    // 图标的 1.9 描边保持一致）
+    strokes: [
+      "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z",
+      "M15.2 12a3.2 3.2 0 1 1-6.4 0 3.2 3.2 0 0 1 6.4 0z",
+    ],
   },
 };
 </script>
@@ -72,9 +76,15 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
       </button>
     </nav>
 
+    <!-- 底部显示应用版本号（2026-10-02 用户指定：不再显示“预览版”）。版本来自
+         运行快照的 package_info，与安装包/更新器同源；尚未读到时不显示占位。 -->
     <div class="sidebar-footer">
-      <span class="status-dot pending"></span>
-      预览版
+      <span v-if="version" class="sidebar-version">{{ version }}</span>
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* 版本号用等宽数字，避免运行中的宽度抖动。 */
+.sidebar-version { font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
+</style>

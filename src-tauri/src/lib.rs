@@ -15,6 +15,7 @@ use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
 mod accent;
+mod app_icon;
 mod diagnostics;
 mod platform;
 mod rc003_task;
@@ -24,7 +25,7 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
-use sayall_core::{ThemePreference, VoiceInputTool};
+use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
@@ -193,6 +194,25 @@ fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
         started.elapsed().as_millis()
     ));
     result
+}
+
+/// 设置页「应用图标」的当前选择（默认内置应用图标）。
+#[tauri::command]
+fn get_app_icon(state: tauri::State<'_, AppState>) -> Result<AppIconIdentifier, String> {
+    state.settings.load().map(|settings| settings.app_icon)
+}
+
+/// 切换应用图标：先落盘，再应用到主窗口（任务栏 / Alt-Tab）与托盘图标；
+/// 认不出的 ID 与资产缺失都在应用层回落 `standard` 并落日志。
+#[tauri::command]
+fn set_app_icon(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    identifier: AppIconIdentifier,
+) -> Result<AppIconIdentifier, String> {
+    state.settings.save_app_icon(identifier)?;
+    let applied = app_icon::apply(&app, identifier);
+    Ok(applied)
 }
 
 #[tauri::command]
@@ -1793,7 +1813,7 @@ pub fn run() {
                 let icon = app.default_window_icon().cloned().ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "缺少应用图标，无法创建托盘")
                 })?;
-                TrayIconBuilder::with_id("sayall-tray")
+                TrayIconBuilder::with_id(app_icon::TRAY_ID)
                     .icon(icon)
                     .menu(&menu)
                     .show_menu_on_left_click(false)
@@ -1855,6 +1875,10 @@ pub fn run() {
                     Default::default()
                 }
             };
+            // 应用图标（2026-10-02）：托盘刚用内置图标建成，这里按持久化选择把
+            // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
+            #[cfg(windows)]
+            app_icon::apply(app.handle(), saved_settings.app_icon);
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
             // 「任务装没装」当状态。
@@ -2143,6 +2167,8 @@ pub fn run() {
         get_launch_at_login,
         set_launch_at_login,
         report_theme_result,
+        get_app_icon,
+        set_app_icon,
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,
@@ -2198,6 +2224,8 @@ pub fn run() {
         get_launch_at_login,
         set_launch_at_login,
         report_theme_result,
+        get_app_icon,
+        set_app_icon,
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,

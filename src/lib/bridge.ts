@@ -4,14 +4,16 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 
 /**
- * 关于页顶部的外部入口（2026-10-01 用户指定）：官网首页与 Windows 版源码仓库。
+ * 设置页“问题反馈”的外部入口（2026-10-01 用户指定，2026-10-02 官网地址改为
+ * 带 `?from=win` 的来源标记，便于官网区分 Windows 版来客）：官网首页与 Windows
+ * 版源码仓库。
  *
  * 这两个字符串同时是 `src-tauri/capabilities/default.json` 里 opener 白名单的
  * 键——改这里必须同步改那里，否则真机上点击会被插件判为 ForbiddenUrl
  * （`bridge.test.ts` 逐字锁定了这份契约，runtime simulation 另行断言不在真机
  * 上被拒绝）。
  */
-export const OFFICIAL_WEBSITE_URL = "https://sayall.app/";
+export const OFFICIAL_WEBSITE_URL = "https://sayall.app/?from=win";
 export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-app-windows";
 
 /**
@@ -379,7 +381,9 @@ export interface AppUpdateProgress {
 }
 
 const browserSnapshot: RuntimeSnapshot = {
-  appVersion: "0.1.0",
+  // 浏览器预览没有安装包可读，这里跟随当前应用版本：它是预览里"设置页版本号"
+  // 与侧栏底部的唯一来源，写死旧值会让预览显示一个不存在的版本。
+  appVersion: "0.5.0",
   platform: {
     platform: "browser-preview",
     windowsApiAvailable: false,
@@ -609,12 +613,12 @@ async function openExternalUrl(url: string): Promise<void> {
   await openUrl(url);
 }
 
-/** 关于页顶部“官网”入口。 */
+/** 设置页顶部“官网”入口。 */
 export async function openOfficialWebsite(): Promise<void> {
   await openExternalUrl(OFFICIAL_WEBSITE_URL);
 }
 
-/** 关于页顶部“GitHub”入口。 */
+/** 设置页“问题反馈”里的“GitHub”入口。 */
 export async function openGitHubRepository(): Promise<void> {
   await openExternalUrl(GITHUB_REPOSITORY_URL);
 }
@@ -1015,6 +1019,28 @@ export interface ThemeResultReport {
 export async function reportThemeResult(report: ThemeResultReport): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("report_theme_result", { report });
+}
+
+/**
+ * 应用图标（2026-10-02 用户指定；对齐 Mac main `AppIconController`/`AppIconCatalog`）：
+ *
+ * - `standard`：内置应用图标（默认，也是老配置的落点）；
+ * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」。
+ *
+ * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）与托盘图标**；
+ * 设置页顶部标识与选项预览用同一 ID 实时渲染。安装包与开始菜单快捷方式的图标
+ * 属于安装产物，运行期不变（Mac 的 bundle 图标同样不变）。
+ */
+export type AppIconIdentifier = "standard" | "faceted-duck";
+
+export async function getAppIcon(): Promise<AppIconIdentifier> {
+  if (!isTauriRuntime()) return "standard";
+  return invoke<AppIconIdentifier>("get_app_icon");
+}
+
+export async function setAppIcon(identifier: AppIconIdentifier): Promise<AppIconIdentifier> {
+  if (!isTauriRuntime()) return identifier;
+  return invoke<AppIconIdentifier>("set_app_icon", { identifier });
 }
 
 /** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */
