@@ -8,10 +8,12 @@ import {
   getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
+  learnFocusTarget,
   saveButtonMappings,
   scanPairedRemotes,
   setAppIcon,
   stopRawInput,
+  testAppFocus,
   testButtonMapping,
   type PlatformSnapshot,
 } from "./lib/bridge";
@@ -283,37 +285,21 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「聚焦输入框」动作经真实 IPC 写入并分发到平台聚焦受理（UI 芯片按用户要求隐藏）");
 
-  // 「打开应用 + 聚焦方式」：选预设应用 → 切到「聚焦已记录的输入框」→ 学习一次 →
-  // 读回档案 → 测试打开与聚焦。学习与测试都走真实 IPC（仿真返回固定样本）。
+  // 「打开应用 + 聚焦方式」：UI 面板自 2026-10-03 起按用户要求隐藏（后端能力与已存配置
+  // 保留）。旅程改为：选中目标后断言面板不再出现，并直接经真实 IPC 覆盖学习与测试两条
+  // 后端受理路径——面板恢复时把这里改回点击「聚焦已记录的输入框 / 开始学习输入框」即可。
   await clickButton("记事本");
   await waitFor(
-    () =>
-      document.body.textContent?.includes("打开后聚焦方式") &&
-      document.body.textContent?.includes("聚焦已记录的输入框")
-        ? true
-        : null,
-    "聚焦方式面板",
+    () => (document.body.textContent?.includes("打开后聚焦方式") ? null : true),
+    "聚焦方式面板保持隐藏",
   );
-  mark("focus_profile_panel");
-  await clickButton("聚焦已记录的输入框");
-  await clickButton("开始学习输入框");
-  await waitFor(
-    () => (document.body.textContent?.includes("只记录控件特征，不含输入内容") ? true : null),
-    "学习结果提示",
-  );
-  await waitFor(
-    () => (document.body.textContent?.includes("已记录输入框") ? true : null),
-    "聚焦档案呈现为已记录输入框",
-  );
-  const savedMappings = await getButtonMappings();
-  const profile = savedMappings.focusProfiles?.["notepad"];
-  assert(profile?.strategy === "recorded_element", "聚焦档案没有保存为已记录输入框");
+  const learned = await learnFocusTarget();
   assert(
-    profile?.recorded?.automationId === "ci-simulation-input",
-    "聚焦档案没有记录到仿真输入框",
+    learned.automationId === "ci-simulation-input",
+    "仿真学习样本不是预期的可编辑目标",
   );
-  await clickButton("测试打开与聚焦");
-  steps.push("打开应用的聚焦方式三选一、学习输入框与测试打开聚焦经真实 IPC 闭环");
+  await testAppFocus("notepad");
+  steps.push("「打开后聚焦方式」面板按用户要求隐藏；学习与测试打开聚焦仍经真实 IPC 覆盖");
 
   mark("permissions_page");
   await openPage("权限");
