@@ -117,6 +117,32 @@ fn main() {
         );
     }
 
+    if std::env::args().any(|arg| arg == "--learn") {
+        // 「学习输入框」生产组合：3 秒窗口内轮询采样，返回稳定命中的目标。
+        use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner};
+        use sayall_windows::focus_windows::WindowsFocusBackend;
+        let runner = FocusRunner::spawn(
+            std::sync::Arc::new(WindowsFocusBackend::new()),
+            FocusRetryPolicy::default(),
+        );
+        let started = std::time::Instant::now();
+        match runner.learn_target() {
+            Ok(target) => println!(
+                "learned control_type={} id_chars={} class_chars={} name_chars={} elapsed_ms={}",
+                target.control_type,
+                target.automation_id.chars().count(),
+                target.class_name.chars().count(),
+                target.name.chars().count(),
+                started.elapsed().as_millis()
+            ),
+            Err(reason) => println!(
+                "learn_failed={reason:?} elapsed_ms={}",
+                started.elapsed().as_millis()
+            ),
+        }
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--frontmost") {
         // 生产组合：FocusRunner（串行队列 + 重试 + 读回）驱动真实 UIA 后端。
         use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner, FocusTask};
