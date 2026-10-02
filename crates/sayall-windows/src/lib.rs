@@ -26,6 +26,11 @@ pub mod compatibility;
 pub mod file_dialog;
 /// 聚焦输入框的纯逻辑（跨平台可编译、可单测）。
 pub mod focus;
+/// 聚焦请求的执行编排（重试、预算与失败分类；不触碰平台 API）。
+pub mod focus_service;
+/// Windows UI Automation 后端（MTA 工作线程；非 Windows 平台不参与编译）。
+#[cfg(windows)]
+pub mod focus_windows;
 #[cfg(windows)]
 pub mod graceful_exit;
 pub mod registered_apps;
