@@ -38,6 +38,10 @@ mod imp {
         IUIAutomationValuePattern, TreeScope_Descendants, UIA_DocumentControlTypeId,
         UIA_EditControlTypeId, UIA_GroupControlTypeId, UIA_TextPatternId, UIA_ValuePatternId,
     };
+    use windows::Win32::UI::HiDpi::{
+        GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     };
@@ -67,9 +71,22 @@ mod imp {
             std::thread::Builder::new()
                 .name("sayall-uia".to_owned())
                 .spawn(move || {
+                    // UIA 的坐标随线程 DPI 感知变化：固定在 Per-Monitor V2 下取物理
+                    // 像素，元素矩形与窗口矩形才在同一坐标系（后续若要按坐标点击，
+                    // 也必须用物理像素）。退出前成对恢复。
+                    let previous_awareness = unsafe { GetThreadDpiAwarenessContext() };
+                    let awareness_switched = !previous_awareness.0.is_null()
+                        && !unsafe {
+                            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+                        }
+                        .0
+                        .is_null();
                     // 工作线程不拥有窗口；COM 以 MTA 初始化，符合 UIA 客户端要求。
                     let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
                     if initialized.is_err() {
+                        if awareness_switched {
+                            unsafe { SetThreadDpiAwarenessContext(previous_awareness) };
+                        }
                         return;
                     }
                     let automation: IUIAutomation = match unsafe {
@@ -78,6 +95,9 @@ mod imp {
                         Ok(automation) => automation,
                         Err(_) => {
                             unsafe { CoUninitialize() };
+                            if awareness_switched {
+                                unsafe { SetThreadDpiAwarenessContext(previous_awareness) };
+                            }
                             return;
                         }
                     };
@@ -86,6 +106,9 @@ mod imp {
                         job(&session);
                     }
                     unsafe { CoUninitialize() };
+                    if awareness_switched {
+                        unsafe { SetThreadDpiAwarenessContext(previous_awareness) };
+                    }
                 })
                 .expect("启动 UIA 工作线程失败");
             Mutex::new(Worker { sender })
