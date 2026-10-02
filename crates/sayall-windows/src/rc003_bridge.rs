@@ -148,6 +148,14 @@ const SILENCE_TIMEOUT: Duration = Duration::from_millis(3_000);
 /// 单次读等待。决定看门狗与停止标志的响应粒度。
 const READ_POLL: Duration = Duration::from_millis(250);
 
+/// 命名管道空闲读退避。`PIPE_NOWAIT` 连接在无数据时读会**立即**返回
+/// `ERROR_NO_DATA`，退避缺失会让连接线程变成忙等（2026-10-02 真机实测：
+/// Helper 一连上 `sayall-rc003-bridge-conn` 就吃满一个核，应用 UI 被饿死、
+/// 点不动也关不掉）。取 2ms：边沿投递的额外上界延迟 ≤2ms（在本链路噪声内），
+/// 空闲轮询 500Hz 的 CPU 成本可忽略；TCP 路径由 `READ_POLL` 读超时提供
+/// 同等的"非忙等"语义。
+const PIPE_IDLE_BACKOFF: Duration = Duration::from_millis(2);
+
 /// agent 租约为 2s；所有权心跳必须在租约到期前失效，先恢复旧键盘路径。
 const OWNERSHIP_TIMEOUT: Duration = Duration::from_millis(1_500);
 
@@ -1403,7 +1411,9 @@ fn handle_connection(
                 break;
             }
             Ok(_) => {}
-            Err(ref error) if retryable_bridge_read(error) => {}
+            // 空闲必须退避：`PIPE_NOWAIT` 无数据时立即返回，直接 continue
+            // 会把本线程变成 100% 占核的忙等（见 `PIPE_IDLE_BACKOFF`）。
+            Err(ref error) if retryable_bridge_read(error) => bridge_idle_backoff(),
             Err(ref error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => {
                 drop_reason = "read_error";
@@ -1475,6 +1485,17 @@ fn retryable_bridge_read(error: &std::io::Error) -> bool {
         || error.kind() == ErrorKind::TimedOut
         || error.raw_os_error() == Some(232) // ERROR_NO_DATA（PIPE_NOWAIT）
 }
+
+/// 空闲读退避（`PIPE_IDLE_BACKOFF` 的唯一落点，便于用计数器做回归判据）。
+fn bridge_idle_backoff() {
+    #[cfg(test)]
+    IDLE_BACKOFFS.fetch_add(1, Ordering::Relaxed);
+    std::thread::sleep(PIPE_IDLE_BACKOFF);
+}
+
+/// 测试用：空闲退避次数。判据见 `idle_named_pipe_connection_is_throttled`。
+#[cfg(test)]
+static IDLE_BACKOFFS: AtomicU64 = AtomicU64::new(0);
 
 fn write_line(stream: &mut impl Write, line: &str) -> std::io::Result<()> {
     stream.write_all(line.as_bytes())?;
@@ -1842,6 +1863,79 @@ mod tests {
                 is_pressed: true
             })
         ));
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空闲命名管道连接不得忙等（2026-10-02 真机实测：Helper 一连上，
+    /// `sayall-rc003-bridge-conn` 单线程吃满一个核，应用 UI 被饿死、
+    /// 点不动也关不掉）。判据 = 空闲窗口内退避次数必须被限速：去掉
+    /// `bridge_idle_backoff` 里的 sleep（阳性对照）时同一窗口会到数十万次；
+    /// 闸值 5000 留了两个数量级余量（并行测试各自 ≤200 次/400ms）。
+    #[cfg(windows)]
+    #[test]
+    fn idle_named_pipe_connection_is_throttled() {
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-bridge-idle-backoff-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
+        let pipe = text
+            .lines()
+            .find_map(|line| line.strip_prefix("pipe="))
+            .expect("描述文件必须发布命名管道")
+            .to_owned();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&pipe)
+            {
+                Ok(stream) => break stream,
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("命名管道连接失败: {error}"),
+            }
+        };
+        stream
+            .write_all(
+                format!("HELLO {BRIDGE_PROTOCOL_VERSION} stale-token-from-previous-app 9002\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        stream.flush().unwrap();
+        let mut ack = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ack.contains(&b'\n') && Instant::now() < deadline {
+            let mut chunk = [0u8; 256];
+            match stream.read(&mut chunk) {
+                Ok(0) => panic!("命名管道在应答前关闭"),
+                Ok(count) => ack.extend_from_slice(&chunk[..count]),
+                Err(error) if retryable_bridge_read(&error) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("读取命名管道应答失败: {error}"),
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&ack).starts_with("OK "),
+            "握手失败：{ack:?}"
+        );
+
+        // 握手完成后连接进入空闲（对端不再发数据）——这正是先前忙等的窗口。
+        let before = IDLE_BACKOFFS.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(400));
+        let backoffs = IDLE_BACKOFFS.load(Ordering::Relaxed) - before;
+        assert!(
+            backoffs < 5_000,
+            "空闲命名管道在 400ms 内退避 {backoffs} 次：退避缺失（忙等）或间隔被改小"
+        );
         drop(bridge);
         let _ = std::fs::remove_dir_all(&dir);
     }
