@@ -292,7 +292,7 @@ impl AppFocusProfile {
 /// 平台层采集到的候选输入框（只含语义与几何，不含输入内容）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FocusCandidate {
-    /// UIA 控制类型名（`Edit` / `Document` / 其它）。
+    /// UIA 控制类型名（`Edit` / `Document` / `Group` / 其它）。
     pub control_type: String,
     pub automation_id: String,
     pub class_name: String,
@@ -304,7 +304,25 @@ pub struct FocusCandidate {
     pub keyboard_focusable: bool,
     pub is_password: bool,
     pub read_only: Option<bool>,
+    /// UIA `IsTextPatternAvailable`：控件承载可读文本。
+    pub has_text_pattern: bool,
+    /// 该元素当前是否持有键盘焦点（用于「优先保留用户已在用的输入框」）。
+    pub focused: bool,
 }
+
+/// 现代网页编辑器的语义提示。实测（2026-10-02）：TipTap / ProseMirror 的
+/// `contenteditable` 在 Windows UIA 上是 `ControlType.Group` 而不是 Edit/Document
+/// （Chromium 会把 DOM class 原样暴露，例如 `tiptap ProseMirror … ProseMirror-focused`）。
+/// 只认 Edit/Document 会漏掉这类输入框，因此允许「可聚焦 + 编辑器语义」的控件入候选。
+const EDITOR_SEMANTIC_HINTS: &[&str] = &[
+    "prosemirror",
+    "tiptap",
+    "contenteditable",
+    "cm-editor",
+    "codemirror",
+    "ql-editor",
+    "slate-editor",
+];
 
 impl FocusCandidate {
     /// 控制类型是否是文本输入类（mac 的 `AXTextArea` / `AXTextField` 等价物）。
@@ -312,19 +330,25 @@ impl FocusCandidate {
         matches!(self.control_type.as_str(), "Edit" | "Document")
     }
 
-    /// 硬门槛：可用、可聚焦、非密码框、语义不含敏感词。
+    /// 是否带富文本编辑器语义（class / automation id / name 命中编辑器特征词）。
+    fn has_editor_semantics(&self) -> bool {
+        let semantic = self.semantic_text();
+        EDITOR_SEMANTIC_HINTS
+            .iter()
+            .any(|hint| semantic.contains(hint))
+    }
+
+    /// 硬门槛：可用、可聚焦、非密码框、语义不含敏感/排除词，且属于文本输入类、
+    /// 带文本模式或带编辑器语义（三者之一）。
     pub fn passes_hard_gate(&self) -> bool {
         if !self.enabled || !self.keyboard_focusable || self.is_password {
-            return false;
-        }
-        if !self.is_text_control() {
             return false;
         }
         let semantic = self.semantic_text();
         if contains_sensitive_term(&semantic) || contains_excluded_term(&semantic) {
             return false;
         }
-        true
+        self.is_text_control() || self.has_text_pattern || self.has_editor_semantics()
     }
 
     /// 语义字段（不含窗口标题）的合并文本。
@@ -358,7 +382,13 @@ pub fn composer_candidate_score(candidate: &FocusCandidate) -> Option<i32> {
         return None;
     }
     let semantic = candidate.semantic_text();
-    let mut score = 50; // Edit / Document 基础分
+    // Edit / Document 基础分更高；其它类型（实测：TipTap/ProseMirror 的 Group）
+    // 需要靠语义或几何补足阈值。
+    let mut score = if candidate.is_text_control() { 50 } else { 30 };
+    if candidate.focused {
+        // 用户当前已在用的输入框优先保留（DimAgent 实测：编辑器节点自带焦点）。
+        score += 40;
+    }
     if STRONG_TERMS.iter().any(|term| semantic.contains(term)) {
         score += 120;
     } else if SUPPORTING_TERMS.iter().any(|term| semantic.contains(term)) {
@@ -770,6 +800,62 @@ mod tests {
 
         // 非文本输入类控件（如微信的 XButton）不进入候选
         assert!(!candidate("Button", "ok").passes_hard_gate());
+        // 可聚焦但没有文本模式、也没有编辑器语义的 Group 同样不进候选
+        assert!(!candidate("Group", "").passes_hard_gate());
+    }
+
+    #[test]
+    fn contenteditable_editor_group_is_accepted_as_candidate() {
+        // 真实样本（2026-10-02 DimAgent 实测）：TipTap/ProseMirror contenteditable
+        // 在 UIA 上是 ControlType.Group，Chromium 把 DOM class 原样暴露。
+        let editor = FocusCandidate {
+            control_type: "Group".to_owned(),
+            class_name: "tiptap ProseMirror outline-none ProseMirror-focused".to_owned(),
+            normalized_rect: Some(NormalizedRect {
+                x: 0.30,
+                y: 0.75,
+                width: 0.55,
+                height: 0.10,
+            }),
+            focused: true,
+            ..candidate("Group", "")
+        };
+        assert!(editor.passes_hard_gate(), "编辑器 Group 必须可入候选");
+        assert!(
+            composer_candidate_score(&editor).is_some(),
+            "编辑器 Group 必须能过打分阈值"
+        );
+
+        // 有文本模式但无编辑器语义的可聚焦控件也允许（例如自定义富文本容器）
+        let text_container = FocusCandidate {
+            has_text_pattern: true,
+            ..candidate("Custom", "custom-text-host")
+        };
+        assert!(text_container.passes_hard_gate());
+    }
+
+    #[test]
+    fn focused_candidate_wins_over_identical_unfocused_one() {
+        let rect = NormalizedRect {
+            x: 0.05,
+            y: 0.62,
+            width: 0.80,
+            height: 0.25,
+        };
+        let unfocused = FocusCandidate {
+            normalized_rect: Some(rect),
+            ..candidate("Edit", "composer")
+        };
+        let focused = FocusCandidate {
+            focused: true,
+            ..unfocused.clone()
+        };
+        let candidates = vec![unfocused, focused];
+        assert_eq!(
+            best_composer_index(&candidates),
+            Some(1),
+            "同分时保留用户当前已在用的输入框"
+        );
     }
 
     #[test]
