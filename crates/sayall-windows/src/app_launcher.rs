@@ -50,8 +50,11 @@ pub const PRESET_APPS: &[PresetApp] = &[
         id: "wechat",
         name: "微信",
         exe_names: &["WeChat.exe", "Weixin.exe"],
-        install_paths: &[],
-        shortcut_names: &[],
+        install_paths: &[
+            "%ProgramFiles%\\Tencent\\WeChat\\WeChat.exe",
+            "%ProgramFiles(x86)%\\Tencent\\WeChat\\WeChat.exe",
+        ],
+        shortcut_names: &["微信", "WeChat"],
     },
     PresetApp {
         id: "edge",
@@ -1847,6 +1850,17 @@ pub(crate) mod tests {
                 "{id} 需要开始菜单快捷方式兜底探测"
             );
         }
+    }
+
+    /// 微信常装在自定义目录（本机 D:\Apps\Weixin）：必须带开始菜单兜底，
+    /// 否则已安装的微信不会出现在"打开应用"列表（2026-10-02 用户反馈）。
+    #[test]
+    fn wechat_preset_falls_back_to_start_menu_shortcut() {
+        let app = preset_app("wechat").expect("微信预设");
+        assert!(
+            app.shortcut_names.contains(&"微信"),
+            "微信需要开始菜单快捷方式兜底探测"
+        );
     }
 
     /// 安装候选路径模板展开：正常变量、整串变量与缺失变量。
