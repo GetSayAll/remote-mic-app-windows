@@ -80,13 +80,44 @@ WorkBuddy 的补充尝试（全部无效）：
 - Chrome 在 MTA 下同样可读（4 个候选），且出现**最小化窗口的地址栏矩形 `-31697,-31923`**、离屏 `Document`、`value_readonly=true` 的网页根——再次印证第一轮的三条矩形/只读口径修正。
 - 探针新增能力：`-ListWindows`（枚举进程全部顶层窗口）、`-ListChildren`（子窗口）、`-Wake`（发送 `WM_GETOBJECT(UiaRootObjectId)`）、minimized/cloaked 判定；可用 `powershell -Mta` 复核线程套间差异。
 
+## 2026-10-02 追加：产品路径 `SetFocus` + 读回真机实测（计划 Phase 2）
+
+探针换成产品代码自身：`crates/sayall-windows/examples/focus_probe.rs` 直接调用
+`focus_windows` 的扫描 / 聚焦 / 读回；目标窗口保持在前台。
+
+| 场景 | 目标 | 结果 |
+| --- | --- | --- |
+| 候选扫描与选择 | Chrome（独立 profile + 本地 fixture：顶部 `autofocus` 搜索框、底部 `chat-input` 文本域） | 候选 2 个：搜索框（`Edit`、`focused=true`）与 composer（`Edit`、`rect.y≈0.86`、宽 0.97）；`focus_frontmost` 选 composer 而不是搜索框 |
+| 焦点迁移（A/B 对照） | 同上 | `--index 0` 把焦点放到搜索框 → 独立读回确认；再 `focus_frontmost` → 读回的元素身份哈希变化，落在 composer。`attempts=1`、`elapsed_ms=87..116` |
+| 幂等 | 同上 | 焦点已在 composer 时重复执行仍为 `Focused`，不会误报迁移 |
+| TipTap / ProseMirror | DimAgent | 候选 1 个：`Group`（`text_pattern=true`、`focusable=true`、`focused=true`、宽 0.485）＝用户报障的输入框；只读网页根被过滤 |
+| 普通 Win32 | 记事本 | 候选 1 个：`Document`（`readonly=false`、`text_pattern=true`、宽 0.979） |
+| 自身/无输入应用 | 本应用前端窗口 | 候选 0 个（只读网页根被过滤）→ 走 `no_candidate` |
+
+**本轮新发现（已回写实现）**
+
+1. **Chromium 网页根节点是只读 `Document`**：`ControlType.Document` +
+   `CurrentIsReadOnly=true` + `text_pattern=true`，能通过原硬门槛并在缺少更强候选时被
+   选中（聚焦它不能输入、还会抢走真输入框）。硬门槛补 `read_only == Some(true)` 直接
+   拒绝，`None`（拿不到 ValuePattern）保持宽松。复测：Chrome fixture 候选 3 → 2，
+   DimAgent 侧只剩 TipTap 的 `Group`。
+2. **DPI 感知影响坐标**：UIA 工作线程固定 Per-Monitor V2（物理像素），元素矩形与窗口
+   矩形才在同一坐标系；沿用 `send_input_windows` 的 Get/Set + 成对恢复写法。复测归一化
+   矩形与改动前一致。
+3. **读回判据两段式**：先看 `CurrentHasKeyboardFocus`，再用 `GetFocusedElement` +
+   `CompareRuntimeIds` 交叉确认（SAFEARRAY 由调用方释放）。实测两者一致；只凭
+   `CurrentHasKeyboardFocus` 不足以排除「窗口未激活但元素自报焦点」的应用。
+4. **无树应用仍走失败路径**：WorkBuddy 本轮未在运行，沿用第一轮结论（0 元素）；无
+   provider 的应用在 `ElementFromHandle`/`FindAll` 失败时立即 `not_accessible`，不做长重试。
+
 ## 待补项（`deferred`，需要环境或人工参与）
 
 | 项 | 为什么没做 | 复现方式 |
 | --- | --- | --- |
 | 微信聊天输入框的 opt-in 兜底路线 | 已确认聊天主窗口不暴露文本输入（第二轮） | 决策点 D1/D2 待定；实现后按 `Testing/WindowsInputFocus.md` 真机验收 |
 | 真实 Electron 目标的冷启动建树时序（VS Code / ChatGPT / Claude） | 本机未安装这些应用；已用 DimAgent（正例）与 WorkBuddy（反例）替代验证 | 安装后运行 `probe-uia-focus.ps1 -ProcessName Code -Attempts 8 -AttemptGapMs 250` |
-| 产品路径的 `SetFocus` + 读回验证 | 探针会抢占前台，本次只做只读探测，避免打断用户 | 计划 Phase 2 真机冒烟（记事本冷启动 + 热路径）执行 |
+| 产品路径的 `SetFocus` + 读回验证 | ~~未做~~ **2026-10-02 已做**（Chrome fixture / DimAgent / 记事本，见上一节） | `cargo run -p sayall-windows --example focus_probe -- --frontmost` |
+| 属性缓存请求（`FindAllBuildCache`）降低跨进程调用 | 当前整条路径 87–116 ms 已达标；缓存对部分 provider 可能返回空值，需按应用实测 | 有性能需求时再改，改前先复核成功判据 |
 | 豆包/微信输入法场景 | 输入法运行期 UI 无 UIA provider（仓库既有实证），且本机未装豆包 | 沿用既有结论；实现完成后按计划 §8.2 真机矩阵验收 |
 | RC001 / RC003 实体按键链路 | 与本调查无关 | 计划 §8.2 真机验收 |
 
@@ -98,3 +129,4 @@ WorkBuddy 的补充尝试（全部无效）：
 - D3（失败提示）得到强化：目标应用可能根本不提供 UIA（WorkBuddy 为实例），「无法读取该应用的界面」提示必须有，且不能表现为重试卡死。
 - D4（预置应用内置扫描）：记事本、Chrome/Edge、WebView2、DimAgent 已实测可用，可作为内置默认；微信不适用。
 - Phase 2 的验证要覆盖两类目标：有树（记事本/浏览器/WebView2）与无树（WorkBuddy/微信聊天窗口），确保无树时快速失败并给出原因，而不是耗满 3 s 预算。
+- **Phase 2 状态（2026-10-02）**：纯逻辑层、重试编排与 UIA 后端已完成并真机验证（见上节）；属性缓存与「日志事件」并入 Phase 3 的接入工作，避免后端先行落日志造成重复。
