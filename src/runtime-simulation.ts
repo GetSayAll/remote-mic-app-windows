@@ -83,6 +83,20 @@ async function openPage(label: string, heading = label): Promise<void> {
   );
 }
 
+/** 仿真选项：本机运行时跳过「外部入口」两步，避免反复弹出系统浏览器。 */
+interface RuntimeSimulationOptions {
+  skipExternalEntries: boolean;
+}
+
+async function loadSimulationOptions(): Promise<RuntimeSimulationOptions> {
+  try {
+    return await invoke<RuntimeSimulationOptions>("get_runtime_simulation_options");
+  } catch {
+    // 拿不到选项时按 CI 口径（执行外部入口），不静默降级覆盖面。
+    return { skipExternalEntries: false };
+  }
+}
+
 /**
  * 设置页外部入口（官网 / GitHub）的 CI 判据。
  *
@@ -90,8 +104,20 @@ async function openPage(label: string, heading = label): Promise<void> {
  * "在窗口期内要么出现失败原因、要么保持静默"；capability 白名单是产品配置，
  * 被 opener 拒绝（"Not allowed to open url"）必须报红，runner 上没有可用的
  * 默认浏览器只是环境差异（失败文案会如实带出来），不制造与本产品无关的红灯。
+ *
+ * 本机运行（脚本未带 -IncludeExternalEntries 且非 CI）时这两步会弹出系统浏览器，
+ * 打断操作人：此时**如实记为 deferred 步骤**并跳过点击（不是静默丢覆盖面）。
  */
-async function recordExternalEntry(label: string, steps: string[]): Promise<void> {
+async function recordExternalEntry(
+  label: string,
+  steps: string[],
+  skip: boolean,
+): Promise<void> {
+  if (skip) {
+    // 本机运行：跳过点击（避免弹出系统浏览器），如实记为 deferred。
+    steps.push(`设置页“${label}”入口本机跳过（避免弹出浏览器）：capability 往返未验证`);
+    return;
+  }
   await clickButton(label);
   const deadline = Date.now() + 3_000;
   let message: string | null = null;
@@ -116,6 +142,7 @@ async function recordExternalEntry(label: string, steps: string[]): Promise<void
 
 async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   mark("journey_start");
+  const simulationOptions = await loadSimulationOptions();
   // 应用默认打开"按键"页（对齐 Mac 页序），先导航到连接页完成连接旅程。
   await openPage("连接");
   await waitFor(
@@ -319,8 +346,8 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     `设置页问题反馈入口异常：${entryLabels.join(" / ")}`,
   );
   steps.push("设置页顶部为应用标识/版本/检查更新，问题反馈分组提供官网与 GitHub 入口");
-  await recordExternalEntry("官网", steps);
-  await recordExternalEntry("GitHub", steps);
+  await recordExternalEntry("官网", steps, simulationOptions.skipExternalEntries);
+  await recordExternalEntry("GitHub", steps, simulationOptions.skipExternalEntries);
 
   const darkTheme = await waitFor(
     () =>

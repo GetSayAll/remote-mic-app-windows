@@ -1,4 +1,13 @@
-﻿$ErrorActionPreference = "Stop"
+﻿# Windows runtime simulation（真实 Tauri/WebView + 真实 IPC 旅程）。
+#
+# 外部入口（设置页「官网」/「GitHub」）会经 opener 打开系统默认浏览器——本机跑会
+# 打断操作人（每轮弹 2 次）。因此：**CI 或显式 -IncludeExternalEntries 时执行**，
+# 其余本地运行默认跳过并把该步骤如实记为 deferred（不静默丢覆盖面）。
+param(
+    [switch]$IncludeExternalEntries
+)
+
+$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -20,6 +29,9 @@ $stderrPath = Join-Path $reportDirectory "sayall-runtime-simulation-$simulationI
 $env:SAYALL_WINDOWS_RUNTIME_SIMULATION = "1"
 $env:SAYALL_RUNTIME_SIMULATION_REPORT = $reportPath
 $env:SAYALL_RUNTIME_SIMULATION_STATE_DIR = $stateDirectory
+$includeExternal = $IncludeExternalEntries -or ($env:CI -eq "true")
+$env:SAYALL_RUNTIME_SIMULATION_SKIP_EXTERNAL = if ($includeExternal) { "0" } else { "1" }
+Write-Host ("外部入口（官网/GitHub）: " + $(if ($includeExternal) { "执行（CI 或显式指定）" } else { "跳过（本机运行，避免弹出浏览器）" }))
 $appProcess = $null
 
 function Write-SimulationProcessLogs {

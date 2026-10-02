@@ -1518,6 +1518,15 @@ fn run_runtime_simulation_voice_session(
         .map_err(|error| error.to_string())
 }
 
+/// 仿真旅程选项：本机跑时不弹系统浏览器（CI 或显式指定时执行外部入口）。
+#[cfg(feature = "runtime-simulation")]
+#[tauri::command]
+fn get_runtime_simulation_options(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    serde_json::json!({
+        "skipExternalEntries": state.platform.simulation_skip_external_entries(),
+    })
+}
+
 #[cfg(feature = "runtime-simulation")]
 #[tauri::command]
 fn complete_runtime_simulation_smoke(
@@ -2213,6 +2222,7 @@ pub fn run() {
         install_app_update,
         report_frontend_event,
         run_runtime_simulation_voice_session,
+        get_runtime_simulation_options,
         complete_runtime_simulation_smoke
     ]);
     #[cfg(not(feature = "runtime-simulation"))]

@@ -52,6 +52,15 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
+    /// 仿真旅程是否跳过「外部入口（官网 / GitHub）」这两步。
+    ///
+    /// 它们经 opener 打开系统默认浏览器：CI 需要真实执行以守住 capability 白名单，
+    /// 本机重复跑会不断弹窗打断操作人。默认不跳过（CI 口径）；仿真平台读
+    /// `SAYALL_RUNTIME_SIMULATION_SKIP_EXTERNAL=1` 时跳过。
+    #[cfg(feature = "runtime-simulation")]
+    fn simulation_skip_external_entries(&self) -> bool {
+        false
+    }
     /// 打开/激活预设应用（测试按钮与引擎共用路径）。
     fn launch_app(&self, target: &str) -> Result<(), PlatformError>;
     fn voice_hold_hotkey(&self) -> Option<KeyChord>;
@@ -548,6 +557,14 @@ mod simulation {
                 .collect()
         }
 
+        fn simulation_skip_external_entries(&self) -> bool {
+            simulation_skip_external_from_env(
+                std::env::var("SAYALL_RUNTIME_SIMULATION_SKIP_EXTERNAL")
+                    .ok()
+                    .as_deref(),
+            )
+        }
+
         fn launch_app(&self, _target: &str) -> Result<(), PlatformError> {
             // 仿真环境不真实启动应用（CI 无桌面会话语义）。
             Ok(())
@@ -702,10 +719,25 @@ mod simulation {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 跳过外部入口的开关解析（纯函数，便于单测）。
+    /// 只有显式 `1` / `true` 才跳过：未设置或其它值 = 执行（CI 默认口径）。
+    pub fn simulation_skip_external_from_env(value: Option<&str>) -> bool {
+        matches!(value, Some("1") | Some("true"))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use sayall_windows::send_input::{KeyChord, KeyCode};
+
+        #[test]
+        fn simulation_skip_external_entry_flag_only_accepts_explicit_truthy_values() {
+            assert!(!simulation_skip_external_from_env(None));
+            assert!(!simulation_skip_external_from_env(Some("0")));
+            assert!(!simulation_skip_external_from_env(Some("false")));
+            assert!(simulation_skip_external_from_env(Some("1")));
+            assert!(simulation_skip_external_from_env(Some("true")));
+        }
 
         #[test]
         fn simulation_runs_connection_audio_raw_input_and_send_input_journey() {
