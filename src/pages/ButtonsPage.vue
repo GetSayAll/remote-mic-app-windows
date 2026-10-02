@@ -4,6 +4,7 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
+import { DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
 import {
   actionSummary,
   buttonLabel,
@@ -1642,7 +1643,9 @@ onUnmounted(() => {
           </label>
         </section>
 
-        <section class="action-section">
+        <!-- 「设备操作 / 聚焦输入框」入口先隐藏（2026-10-03 用户要求）：动作类型与平台
+             受理路径保留（已有映射照常生效），只是 UI 暂不暴露入口。 -->
+        <section v-if="DEVICE_ACTION_SECTION_ENABLED" class="action-section">
           <h4 class="action-section-title">设备操作</h4>
           <div class="preset-grid">
             <button
@@ -1659,7 +1662,10 @@ onUnmounted(() => {
 
         <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
-          <div class="preset-grid">
+          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
+          <!-- 预设应用与已添加应用共用一个换行网格（2026-10-03 用户要求）：
+               两组名字连续排布，不再在中间强制换行；长名字的换行规则见 .chip.custom-app。 -->
+          <div class="preset-grid app-library">
             <button
               v-for="app in presetApps"
               :key="app.id"
@@ -1671,6 +1677,13 @@ onUnmounted(() => {
             >
               {{ app.name }}
             </button>
+            <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
+              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
+              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
+          </div>
+          <!-- 两个动作入口排在**所有**应用名称（预设 + 自定义）之后（2026-10-03 用户要求）：
+               用户挑应用时先扫完名字，再看到「扫描 / 添加」——不再插在名字中间。 -->
+          <div class="preset-grid app-library-actions">
             <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
               class="chip add-app"
@@ -1680,12 +1693,6 @@ onUnmounted(() => {
             >
               ＋ 添加应用
             </button>
-          </div>
-          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
-          <div v-if="customApps.length" class="preset-grid saved-app-grid">
-            <button v-for="app in filteredCustomApps" :key="app.path" class="chip" type="button"
-              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
-              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
           </div>
           <div v-if="focusTarget" class="focus-profile">
             <p class="muted focus-profile-title">打开后聚焦方式</p>
@@ -1867,7 +1874,12 @@ onUnmounted(() => {
 /* 滚动容器顶部会裁掉向上溢出（transform 不产生可滚动区域）：
    chip:hover 上浮 1px + 阴影会在容器顶边被切，故用内边距留出
    上浮空间，负外边距补偿保持原网格位置不变。 */
-.saved-app-grid { max-height: 180px; overflow-y: auto; margin: 5px -3px -3px; padding: 3px; align-content: start; }
-.saved-app-grid .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* 打开应用：预设 + 已添加应用共用一个换行网格（2026-10-03 用户要求）。
+   芯片内换行只给自定义应用名（预设名保持单行，避免撑高整行）。 */
+.app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* 「扫描本机应用 / ＋添加应用」排在所有应用名称之后（2026-10-03 用户要求）：
+   与上面的应用列表（含可滚动列表）之间留出分组间距；选择器要压过
+   `.action-section .preset-grid` 的 6px。 */
+.action-section .preset-grid.app-library-actions { margin-top: 9px; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
 </style>

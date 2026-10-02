@@ -247,9 +247,10 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「全按键支持」关闭时返回/音量± 整卡置灰禁用并给出开启指引");
 
-  // 「聚焦输入框」动作：UI 芯片可选 → 自动保存 → 平台受理一次（真实 IPC）。
-  // 走「确定 · 单击」而不是「返回」：关闭态下三键不可点击（上一步已钉住），
-  // 本段验证的是动作通路与按键无关。
+  // 「设备操作 / 聚焦输入框」芯片自 2026-10-03 起按用户要求隐藏（见
+  // src/lib/feature-flags.ts DEVICE_ACTION_SECTION_ENABLED=false），动作与平台受理路径
+  // 保留：这里钉住芯片缺席，映射改为经真实 IPC 直接写入，再验证平台受理。
+  // 打开编辑器仍走「确定 · 单击」格子——关闭态下三键不可点击，上一步已钉住。
   const focusCell = await waitFor(() => {
     const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
       (candidate) => candidate.title.startsWith("确定 · 单击"),
@@ -257,18 +258,30 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     return cell ?? null;
   }, "确定键「单击」映射格");
   focusCell.click();
-  const focusChip = await waitFor(() => buttonWithText("聚焦输入框"), "「聚焦输入框」动作芯片");
-  focusChip.click();
-  await waitFor(
-    () => (focusCell.title.includes("聚焦输入框") ? true : null),
-    "映射格显示「聚焦输入框」",
+  await waitFor(() => (document.querySelector(".mapping-editor") ? true : null), "按键编辑器");
+  const editorButtons = Array.from(
+    document.querySelectorAll<HTMLButtonElement>(".mapping-editor button"),
   );
+  assert(
+    !editorButtons.some((button) => button.textContent?.trim() === "聚焦输入框"),
+    "「聚焦输入框」芯片应已隐藏",
+  );
+  const currentMappings = await getButtonMappings();
+  const currentOk = currentMappings.actions.ok;
+  assert(currentOk !== undefined, "确定键映射缺失（仿真前置步骤应已写入）");
+  await saveButtonMappings({
+    ...currentMappings,
+    actions: {
+      ...currentMappings.actions,
+      ok: { ...currentOk, single: { type: "focus_input" } },
+    },
+  });
   const focusSnapshot = await testButtonMapping("ok", "single");
   assert(
     focusSnapshot.submittedBatches === 2,
     "「聚焦输入框」动作没有分发到平台的聚焦受理路径",
   );
-  steps.push("「聚焦输入框」动作在按键页可选、经真实 IPC 分发到平台聚焦受理");
+  steps.push("「聚焦输入框」动作经真实 IPC 写入并分发到平台聚焦受理（UI 芯片按用户要求隐藏）");
 
   // 「打开应用 + 聚焦方式」：选预设应用 → 切到「聚焦已记录的输入框」→ 学习一次 →
   // 读回档案 → 测试打开与聚焦。学习与测试都走真实 IPC（仿真返回固定样本）。
