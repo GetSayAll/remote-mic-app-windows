@@ -250,6 +250,13 @@ pub enum BridgeLine {
         generation: u64,
         usages: Vec<u16>,
     },
+    /// agent 已把语音键报告层合成配置应用到位（助手转发的 agent 回执）。
+    ///
+    /// 绝对状态：`Some(usage)` = 生效中，`None` = 已关闭。门禁只认它，
+    /// 不再认"S 行写进 socket"（2026-10-03 加固：写出成功 ≠ 报告层已生效）。
+    SynthAck {
+        to: Option<u16>,
+    },
     Bye {
         reason: String,
     },
@@ -325,6 +332,19 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
             Ok(Some(BridgeLine::Edges { usages }))
         }
         "P" => Ok(Some(BridgeLine::Ping)),
+        "A" => {
+            // agent 回执（助手转发）：绝对状态，`-` = 关闭。
+            let payload = parts.next().unwrap_or("-");
+            let to = if payload == "-" {
+                None
+            } else {
+                let token = payload.trim_start_matches("0x").trim_start_matches("0X");
+                let usage = u16::from_str_radix(token, 16)
+                    .map_err(|_| format!("{token:?} 不是十六进制 usage"))?;
+                (usage != 0).then_some(usage)
+            };
+            Ok(Some(BridgeLine::SynthAck { to }))
+        }
         "O" => {
             let generation = parts
                 .next()
@@ -798,7 +818,8 @@ impl Rc003Bridge {
     /// 合成生效期间 BLE 层的 SendInput 注入路径**必须停用**（否则同一会话
     /// 双写：注入的和弦带 `injected=1` 且可能触发输入法切换，与报告层合成
     /// 互扰——2026-09-29 run8 真机实证）。门禁判据是
-    /// [`Self::voice_synth_active`]：仅当助手已连接且本条 S 行写出成功才为真；
+    /// [`Self::voice_synth_active`]：仅当收到与当前目标一致的 agent 回执
+    /// （`A` 行）才为真（2026-10-03 加固：写出成功 ≠ 报告层已生效）；
     /// 断连即回落，BLE 层自动恢复注入路径。
     ///
     /// 这里只更新共享状态（绝对状态语义）：连接线程每轮比对变更并下发 S 行，
@@ -819,8 +840,9 @@ impl Rc003Bridge {
         ));
     }
 
-    /// 报告层合成门禁判据：助手已连接且 S 行写出成功。断连或配置关闭时为
-    /// `false`，BLE 层据此恢复 SendInput 注入路径。
+    /// 报告层合成门禁判据：已收到与当前目标一致的 agent 回执（`A` 行，经
+    /// 助手转发；2026-10-03 加固）。断连、配置关闭或回执未到时为 `false`，
+    /// BLE 层据此恢复 SendInput 注入路径——失败保持可见，不再静默吞掉。
     ///
     /// 实现走 key_gate 的模块级原子（与 `enhanced_owned_mask` 同模式）：
     /// BleRuntime 构造先于本桥，共享 Arc 需要两端装配顺序配合；模块级静态
@@ -1147,6 +1169,12 @@ fn handle_connection(
     // 初值 None 不会被读到——变更检测在 `authenticated` 分支内，而
     // authenticated 只在鉴权分支赋值 last_sent_synth 之后才可能为 true。
     let mut last_sent_synth: Option<u16> = None;
+    // 语音合成加固（2026-10-03）：门禁只认 agent 回执（`A` 行），不认"写进
+    // socket"。`synth_confirmed` = 已收到与当前期望值一致的回执；未确认期间
+    // 按 `synth_resend_due` 的节奏重发 S 行（幂等；覆盖丢行/助手晚读）。
+    let mut synth_confirmed = false;
+    let mut synth_sent_at: Option<Instant> = None;
+    let mut synth_resend_attempts: u64 = 0;
     let mut deny_count = 0u32;
     let started = Instant::now();
     let mut last_rx = Instant::now();
@@ -1239,25 +1267,25 @@ fn handle_connection(
                             ),
                         );
                         // 鉴权后立即对齐语音合成状态（绝对语义，同 OK 行的 targets）。
-                        // 写失败不在这里断链：与 targets 的 T 行同哲学，下一轮
-                        // 变更检测/看门狗会暴露写入问题；但 active 门禁不提前置位。
+                        // 门禁（是否跳过 SendInput 注入）只认 agent 回执（`A` 行）：
+                        // "写进 socket" ≠ "报告层已生效"（2026-10-03 加固）。
                         let synth_current = *lock(voice_synth_to);
                         last_sent_synth = synth_current;
+                        synth_confirmed = false;
+                        synth_resend_attempts = 0;
                         // None 也必须显式发送：helper/agent 可以跨应用或 helper 重启
                         // 常驻，省略 S - 会让上一轮 RightAlt 合成继续生效。
                         let line = voice_synth_line(synth_current);
-                        if write_line(&mut writer, &line).is_ok() {
-                            let active = synth_current.is_some();
-                            crate::key_gate::set_voice_synth_active(active);
-                            note(format!(
-                                "rc003_bridge event=voice_synth_sent to={} scope=hello active={active}",
-                                synth_current
-                                    .map(|u| format!("0x{u:04X}"))
-                                    .unwrap_or_else(|| "off".to_owned())
-                            ));
-                        } else {
-                            crate::key_gate::set_voice_synth_active(false);
-                        }
+                        synth_sent_at =
+                            write_line(&mut writer, &line).ok().map(|()| Instant::now());
+                        crate::key_gate::set_voice_synth_active(false);
+                        note(format!(
+                            "rc003_bridge event=voice_synth_sent to={} scope=hello await=ack write_ok={}",
+                            synth_current
+                                .map(|u| format!("0x{u:04X}"))
+                                .unwrap_or_else(|| "off".to_owned()),
+                            synth_sent_at.is_some()
+                        ));
                     }
                     _ => {
                         // 未鉴权前只接受 HELLO。这不是防攻击（同用户进程挡不住），
@@ -1331,6 +1359,31 @@ fn handle_connection(
                         ));
                     }
                 }
+                BridgeLine::SynthAck { to } => {
+                    let desired = *lock(voice_synth_to);
+                    if to == desired {
+                        // 回执与当前期望值一致（绝对状态语义）⇒ 报告层确已生效。
+                        // `None` = 已关闭：确认收到，但门禁保持 false。
+                        synth_confirmed = true;
+                        crate::key_gate::set_voice_synth_active(to.is_some());
+                        note(format!(
+                            "rc003_bridge event=voice_synth_ack to={} active={} confirm=agent",
+                            to.map(|u| format!("0x{u:04X}"))
+                                .unwrap_or_else(|| "off".to_owned()),
+                            to.is_some()
+                        ));
+                    } else {
+                        // 迟到/旧值回执：不改门禁、不当确认（期望值刚变更时的正常竞态）。
+                        note(format!(
+                            "rc003_bridge event=voice_synth_ack to={} stale=true expected={}",
+                            to.map(|u| format!("0x{u:04X}"))
+                                .unwrap_or_else(|| "off".to_owned()),
+                            desired
+                                .map(|u| format!("0x{u:04X}"))
+                                .unwrap_or_else(|| "off".to_owned())
+                        ));
+                    }
+                }
                 BridgeLine::Bye { reason } => {
                     note(format!("rc003_bridge event=helper_bye reason={reason}"));
                     drop_reason = "helper_bye";
@@ -1371,7 +1424,8 @@ fn handle_connection(
                 last_sent_generation = target.generation;
             }
             // 语音合成状态变更检测（与 T 行同模式）：app 在运行中改了
-            // 「按住说话快捷键」时，把新的绝对状态推给助手。
+            // 「按住说话快捷键」时，把新的绝对状态推给助手；未收到 agent 回执
+            // 期间按节奏重发（幂等），确认后停止（2026-10-03 加固）。
             {
                 let synth_current = *lock(voice_synth_to);
                 if synth_current != last_sent_synth {
@@ -1381,14 +1435,37 @@ fn handle_connection(
                         break;
                     }
                     last_sent_synth = synth_current;
-                    let active = synth_current.is_some();
-                    crate::key_gate::set_voice_synth_active(active);
+                    synth_confirmed = false;
+                    synth_sent_at = Some(Instant::now());
+                    synth_resend_attempts = 0;
+                    crate::key_gate::set_voice_synth_active(false);
                     note(format!(
-                        "rc003_bridge event=voice_synth_sent to={} scope=update active={active}",
+                        "rc003_bridge event=voice_synth_sent to={} scope=update await=ack",
                         synth_current
                             .map(|u| format!("0x{u:04X}"))
                             .unwrap_or_else(|| "off".to_owned())
                     ));
+                } else if !synth_confirmed
+                    && synth_resend_due(synth_sent_at.map(|at| at.elapsed()), synth_resend_attempts)
+                {
+                    let line = voice_synth_line(synth_current);
+                    if write_line(&mut writer, &line).is_err() {
+                        drop_reason = "voice_synth_write_error";
+                        break;
+                    }
+                    synth_resend_attempts += 1;
+                    synth_sent_at = Some(Instant::now());
+                    // 仍未确认：门禁保持 false（失败可见、走注入兜底）。日志
+                    // 前 3 次逐条、之后每 60 次一条（与助手侧失败折叠同模式）。
+                    if synth_resend_attempts <= 3 || synth_resend_attempts % 60 == 0 {
+                        note(format!(
+                            "rc003_bridge event=voice_synth_resend to={} attempt={}",
+                            synth_current
+                                .map(|u| format!("0x{u:04X}"))
+                                .unwrap_or_else(|| "off".to_owned()),
+                            synth_resend_attempts
+                        ));
+                    }
                 }
             }
             let ownership_expired = lock(shared)
@@ -1478,6 +1555,25 @@ fn voice_synth_line(to: Option<u16>) -> String {
         Some(usage) => format!("S {usage:04X}"),
         None => "S -".to_owned(),
     }
+}
+
+/// 未收到 agent 回执时的 S 行重发节奏：0.5s / 1.5s / 3s，之后每 5s 一次。
+///
+/// 与 targets 的 ack 重发同哲学：快节奏覆盖偶发丢行/助手晚读，慢节奏兜底；
+/// S 行是绝对状态、agent 侧幂等，重复发送无害。`elapsed = None`（上次写失败）
+/// 表示应立即重试。仍未确认期间门禁保持 false —— 失败可见（走注入兜底），
+/// 而不是"以为合成生效"地静默吞掉（2026-10-03 加固）。
+fn synth_resend_due(elapsed: Option<Duration>, attempts: u64) -> bool {
+    let Some(elapsed) = elapsed else {
+        return true;
+    };
+    let wait = match attempts {
+        0 => Duration::from_millis(500),
+        1 => Duration::from_millis(1_500),
+        2 => Duration::from_millis(3_000),
+        _ => Duration::from_millis(5_000),
+    };
+    elapsed >= wait
 }
 
 fn retryable_bridge_read(error: &std::io::Error) -> bool {
@@ -1634,7 +1730,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_synth_ack_lines() {
+        // 助手转发 agent 回执的 `A` 行：绝对状态，`-` = 关闭。
+        assert_eq!(
+            parse_bridge_line("A 00E6").unwrap(),
+            Some(BridgeLine::SynthAck { to: Some(0x00E6) })
+        );
+        assert_eq!(
+            parse_bridge_line("A e6").unwrap(),
+            Some(BridgeLine::SynthAck { to: Some(0x00E6) })
+        );
+        assert_eq!(
+            parse_bridge_line("A -").unwrap(),
+            Some(BridgeLine::SynthAck { to: None })
+        );
+        assert!(parse_bridge_line("A zz").is_err());
+    }
+
+    #[test]
+    fn synth_resend_schedule_is_fast_then_steady() {
+        // 上次写失败（None）→ 立即重试。
+        assert!(synth_resend_due(None, 0));
+        // 快节奏：0.5s / 1.5s / 3s。
+        assert!(!synth_resend_due(Some(Duration::from_millis(499)), 0));
+        assert!(synth_resend_due(Some(Duration::from_millis(500)), 0));
+        assert!(!synth_resend_due(Some(Duration::from_millis(1_499)), 1));
+        assert!(synth_resend_due(Some(Duration::from_millis(1_500)), 1));
+        assert!(!synth_resend_due(Some(Duration::from_millis(2_999)), 2));
+        assert!(synth_resend_due(Some(Duration::from_millis(3_000)), 2));
+        // 慢节奏兜底：之后每 5s。
+        assert!(!synth_resend_due(Some(Duration::from_millis(4_999)), 9));
+        assert!(synth_resend_due(Some(Duration::from_millis(5_000)), 9));
+    }
+
+    #[test]
     fn set_voice_synth_updates_shared_state_idempotently() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
         let (sender, _receiver) = channel();
         let dir =
             std::env::temp_dir().join(format!("sayall-bridge-synth-test-{}", std::process::id()));
@@ -1788,6 +1920,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn named_pipe_bypasses_loopback_filters_and_delivers_edges() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
         let dir = std::env::temp_dir().join(format!(
             "sayall-bridge-pipe-descriptor-test-{}",
             std::process::id()
@@ -1867,6 +2001,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 测试用：读一段管道数据（可重试错误退避后重试，其余错误直接失败）。
+    fn read_pipe_chunk(stream: &mut std::fs::File, out: &mut Vec<u8>) {
+        let mut chunk = [0u8; 256];
+        match stream.read(&mut chunk) {
+            Ok(0) => {}
+            Ok(count) => out.extend_from_slice(&chunk[..count]),
+            Err(error) if retryable_bridge_read(&error) => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("读取命名管道失败: {error}"),
+        }
+    }
+
+    /// 2026-10-03 加固回归：语音合成门禁必须跟随 agent 回执（`A` 行），
+    /// 且未确认期间按节奏重发 S 行——旧实现"写出成功即置真"会让丢行变成
+    /// "应用以为合成生效、跳过注入，而报告层什么都没送"的静默黑洞。
+    #[cfg(windows)]
+    #[test]
+    fn voice_synth_gate_follows_agent_ack() {
+        // 启停真实门控（桥的连接/收尾会改写它）：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-bridge-synth-ack-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_voice_synth(Some(0x00E6));
+
+        let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
+        let pipe = text
+            .lines()
+            .find_map(|line| line.strip_prefix("pipe="))
+            .filter(|line| line.starts_with(r"\\.\pipe\SayAll.Rc003Bridge"))
+            .expect("描述文件必须发布命名管道");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(pipe)
+            {
+                Ok(stream) => break stream,
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("命名管道连接失败: {error}"),
+            }
+        };
+        stream
+            .write_all(format!("HELLO {BRIDGE_PROTOCOL_VERSION} stale-token 9001\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+
+        // 握手重放当前合成目标（`S 00E6` = 右 Alt）。
+        let mut received = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !String::from_utf8_lossy(&received).contains("S 00E6") && Instant::now() < deadline {
+            read_pipe_chunk(&mut stream, &mut received);
+        }
+        assert!(
+            String::from_utf8_lossy(&received).contains("S 00E6"),
+            "握手必须重放当前合成目标；实际收到 {received:?}"
+        );
+        // 关键判据 ①：仅"写出 S 行"不得置门禁为真。
+        assert!(
+            !Rc003Bridge::voice_synth_active(),
+            "未收到 agent 回执前门禁必须保持 false（失败要走注入兜底，不能静默吞掉）"
+        );
+
+        // 未确认 → 按节奏重发（首次 500ms；这里给 1.5s 窗口）。
+        let before = received.len();
+        let deadline = Instant::now() + Duration::from_millis(1_500);
+        while Instant::now() < deadline {
+            read_pipe_chunk(&mut stream, &mut received);
+            if String::from_utf8_lossy(&received[before..]).contains("S 00E6") {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&received[before..]).contains("S 00E6"),
+            "未收到回执时必须重发 S 行（幂等自愈）；实际收到 {received:?}"
+        );
+
+        // 关键判据 ②：与期望不一致的回执（迟到/旧值）不得置门禁。
+        stream.write_all(b"A 00E2\n").unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(!Rc003Bridge::voice_synth_active(), "旧值回执不得置门禁为真");
+
+        // 关键判据 ③：与期望一致的回执置门禁为真（报告层确已生效）。
+        stream.write_all(b"A 00E6\n").unwrap();
+        stream.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !Rc003Bridge::voice_synth_active() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            Rc003Bridge::voice_synth_active(),
+            "收到与期望一致的回执后门禁必须置真"
+        );
+
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 空闲命名管道连接不得忙等（2026-10-02 真机实测：Helper 一连上，
     /// `sayall-rc003-bridge-conn` 单线程吃满一个核，应用 UI 被饿死、
     /// 点不动也关不掉）。判据 = 空闲窗口内退避次数必须被限速：去掉
@@ -1875,6 +2117,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn idle_named_pipe_connection_is_throttled() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
         let dir = std::env::temp_dir().join(format!(
             "sayall-bridge-idle-backoff-test-{}",
             std::process::id()
@@ -2012,6 +2256,8 @@ mod tests {
     /// 端到端（离线、免提权、免设备）：真 TcpStream 走完整协议。
     #[test]
     fn end_to_end_loopback_delivers_edges() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
         let dir = std::env::temp_dir().join(format!("sayall-bridge-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (sender, receiver) = channel();
@@ -2055,6 +2301,10 @@ mod tests {
             .read_line(&mut synth)
             .expect("HELLO 必须重放合成状态");
         assert_eq!(synth, "S -\n", "初始关闭态也必须是绝对状态");
+        // 按 2026-10-03 加固协议回执关闭态：未确认期间主程序会按节奏重发 S 行，
+        // 确认后停止——后续断言才不会被重发行干扰（回执同时也是门禁闭环的输入）。
+        stream.write_all(b"A -\n").unwrap();
+        stream.flush().unwrap();
         stream
             .write_all(format!("O {generation} f1,80\n").as_bytes())
             .unwrap();
@@ -2180,6 +2430,8 @@ mod tests {
     /// 刚建立的按下状态（表现为"刚按下就被松开"）。
     #[test]
     fn replacement_takes_over_and_survivor_keeps_working() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
         let dir =
             std::env::temp_dir().join(format!("sayall-bridge-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2258,6 +2510,8 @@ mod tests {
     /// 这是 fail-open 合同里最容易漏掉、也最难在现场察觉的一条。
     #[test]
     fn silence_watchdog_releases_pressed_buttons() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
         let dir =
             std::env::temp_dir().join(format!("sayall-bridge-watchdog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
