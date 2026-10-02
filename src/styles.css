@@ -257,6 +257,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .setting-row span { color: var(--muted); text-align: right; font-size: 13.5px; }
 .info-callout { margin-top: 10px; padding: 9px 12px; border-left: 3px solid var(--accent); border-radius: 7px; color: var(--info-text); background: var(--info-surface); line-height: 1.45; font-size: 13px; }
 .info-callout.warning { border-left-color: var(--warning); background: var(--warning-surface-soft); }
+/* 提示语与其下的操作按钮之间留出间距（2026-10-02 Andy 反馈：Vokie 面板的
+   「打开 Vokie」/「重新检测」贴着文字，挤在一起）。 */
+.info-callout .button-row { margin-top: 10px; }
 /* 始终纵向堆叠：右卡宽度随窗口收缩，横排按钮行（nowrap）会在中窄窗口溢出裁切。 */
 .vb-cable-callout { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; }
 .vb-cable-callout strong { color: var(--warning-strong); }

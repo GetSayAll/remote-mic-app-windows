@@ -314,12 +314,42 @@ async function openVokiePage(): Promise<void> {
   }
 }
 
-/** 打开 Vokie（装了但没运行时）：启动后提示用户点「重新检测」确认在运行。 */
+/** 打开 Vokie 之后的自动复查：间隔 1.5s、最多 8 次（约 12 秒）。 */
+const VOKIE_LAUNCH_POLL_INTERVAL_MS = 1500;
+const VOKIE_LAUNCH_POLL_ATTEMPTS = 8;
+
+/**
+ * 点「打开 Vokie」后替用户等它起来并自动复查。
+ * 2026-10-02 Andy 反馈：点了按钮、Vokie 明明已经打开，但「Vokie 没有运行」的
+ * 提示还挂着，得手动再点一次「重新检测」——因为启动是异步的，点完立刻检测
+ * 多半还是 false。这里轮询到 running=true 就清掉提示（提示区变成「Vokie 已在
+ * 运行。」）；超时仍没起来就明确告诉他可以再点「重新检测」。
+ */
+async function waitForVokieRunning(): Promise<void> {
+  for (let attempt = 0; attempt < VOKIE_LAUNCH_POLL_ATTEMPTS; attempt += 1) {
+    await new Promise<void>((resolve) =>
+      window.setTimeout(resolve, VOKIE_LAUNCH_POLL_INTERVAL_MS),
+    );
+    if (unmounted) return;
+    await refreshVokieInstallation();
+    if (unmounted) return;
+    if (vokieRunning.value === true) {
+      vokieCheckMessage.value = "Vokie 已在运行。";
+      return;
+    }
+  }
+  if (!unmounted) {
+    vokieCheckMessage.value = "还没检测到 Vokie 在运行；如果它已经打开，点“重新检测”。";
+  }
+}
+
+/** 打开 Vokie（装了但没运行时）：启动后自动等待并复查，用户不用再点一次。 */
 async function launchVokieApp(): Promise<void> {
   launchingVokie.value = true;
   try {
     await launchVokie();
-    vokieCheckMessage.value = "已打开 Vokie；等它启动完成后点“重新检测”。";
+    vokieCheckMessage.value = "已打开 Vokie；正在等待它启动…";
+    void waitForVokieRunning();
   } catch (error) {
     vokieCheckMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
