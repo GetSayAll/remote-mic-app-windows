@@ -808,6 +808,14 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
       { id: "calc", name: "计算器", installed: true },
       { id: "explorer", name: "文件资源管理器", installed: true },
       { id: "netease_music", name: "网易云音乐", installed: true },
+      // 2026-10-02 扩充的预设（与 Rust PRESET_APPS 同步，仅浏览器预览用）。
+      { id: "vokie", name: "Vokie", installed: true },
+      { id: "vscode", name: "Visual Studio Code", installed: true },
+      { id: "cursor", name: "Cursor", installed: true },
+      { id: "dimagent", name: "DimAgent", installed: true },
+      { id: "qq", name: "QQ", installed: true },
+      { id: "feishu", name: "飞书", installed: true },
+      { id: "hermes", name: "Hermes", installed: true },
     ];
   }
   return invoke<PresetAppInfo[]>("list_preset_apps");

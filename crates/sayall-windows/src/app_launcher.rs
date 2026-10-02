@@ -25,69 +25,319 @@ pub struct PresetApp {
     pub name: &'static str,
     /// 进程/窗口匹配用可执行文件名（大小写不敏感；含不同版本命名）。
     pub exe_names: &'static [&'static str],
+    /// 额外安装位置候选（`%ENV%` 模板；探测与启动共用，按顺序取首个存在项）。
+    pub install_paths: &'static [&'static str],
+    /// 开始菜单快捷方式名（不含 .lnk）：覆盖自定义安装目录的兜底探测，
+    /// 命中且解析出的目标 exe 属于 `exe_names` 才算已安装。
+    pub shortcut_names: &'static [&'static str],
 }
 
 /// 预设应用表（对齐 Mac 预设 + Windows 常见项）。无线麦自身排首位
 /// （对齐 Mac `PresetApplication.remoteMic`，恒为已安装）。
+///
+/// 安装探测三级（任一命中即视为已安装）：System32 直存或 App Paths 注册表 →
+/// `install_paths` 候选路径 → 开始菜单快捷方式（解析目标 exe 与 `exe_names`
+/// 比对）。未安装的条目由 UI 过滤，不在"打开应用"列表展示。
 pub const PRESET_APPS: &[PresetApp] = &[
     PresetApp {
         id: "sayall",
         name: "无线麦",
         exe_names: &["sayall-windows-app.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "wechat",
         name: "微信",
         exe_names: &["WeChat.exe", "Weixin.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "edge",
         name: "Edge 浏览器",
         exe_names: &["msedge.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "chrome",
         name: "Chrome 浏览器",
         exe_names: &["chrome.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "notepad",
         name: "记事本",
         exe_names: &["notepad.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "calc",
         name: "计算器",
         exe_names: &["calc.exe", "CalculatorApp.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "explorer",
         name: "文件资源管理器",
         exe_names: &["explorer.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
     },
     PresetApp {
         id: "netease_music",
         name: "网易云音乐",
         exe_names: &["cloudmusic.exe"],
+        install_paths: &[],
+        shortcut_names: &[],
+    },
+    // 2026-10-02 扩充：这些应用常装在自定义目录（如 D:\Apps\vokie），
+    // App Paths 与 System32 探测覆盖不到，必须走候选路径/开始菜单兜底。
+    PresetApp {
+        id: "vokie",
+        name: "Vokie",
+        exe_names: &["Vokie.exe"],
+        install_paths: &["%LOCALAPPDATA%\\Programs\\Vokie\\Vokie.exe"],
+        shortcut_names: &["Vokie"],
+    },
+    PresetApp {
+        id: "vscode",
+        name: "Visual Studio Code",
+        exe_names: &["Code.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe",
+            "%ProgramFiles%\\Microsoft VS Code\\Code.exe",
+        ],
+        shortcut_names: &["Visual Studio Code", "VS Code"],
+    },
+    PresetApp {
+        id: "cursor",
+        name: "Cursor",
+        exe_names: &["Cursor.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Programs\\cursor\\Cursor.exe",
+            "%ProgramFiles%\\cursor\\Cursor.exe",
+        ],
+        shortcut_names: &["Cursor"],
+    },
+    PresetApp {
+        id: "dimagent",
+        name: "DimAgent",
+        exe_names: &["DimAgent.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Programs\\DimAgent\\DimAgent.exe",
+            "%ProgramFiles%\\DimAgent\\DimAgent.exe",
+        ],
+        shortcut_names: &["DimAgent"],
+    },
+    PresetApp {
+        id: "qq",
+        name: "QQ",
+        exe_names: &["QQ.exe"],
+        install_paths: &[
+            "%ProgramFiles%\\Tencent\\QQNT\\QQ.exe",
+            "%ProgramFiles(x86)%\\Tencent\\QQ\\Bin\\QQ.exe",
+        ],
+        shortcut_names: &["QQ"],
+    },
+    PresetApp {
+        id: "feishu",
+        name: "飞书",
+        exe_names: &["Feishu.exe", "Lark.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Feishu\\Feishu.exe",
+            "%ProgramFiles%\\Feishu\\Feishu.exe",
+            "%ProgramFiles%\\Lark\\Lark.exe",
+        ],
+        shortcut_names: &["飞书", "Lark"],
+    },
+    PresetApp {
+        id: "hermes",
+        name: "Hermes",
+        exe_names: &["Hermes.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Programs\\Hermes\\Hermes.exe",
+            "%LOCALAPPDATA%\\hermes\\hermes-agent\\apps\\desktop\\release\\win-unpacked\\Hermes.exe",
+        ],
+        shortcut_names: &["Hermes"],
     },
 ];
+
+/// 展开 `%VAR%` 形式的安装路径模板；任一变量缺失返回 None。
+fn expand_install_path(template: &str) -> Option<std::path::PathBuf> {
+    let mut expanded = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let end = after.find('%')?;
+        let name = &after[..end];
+        if name.is_empty() {
+            return None;
+        }
+        expanded.push_str(&std::env::var(name).ok()?);
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    (!expanded.is_empty()).then(|| std::path::PathBuf::from(expanded))
+}
 
 pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
     PRESET_APPS.iter().find(|app| app.id == id)
 }
 
-/// 探测预设应用安装状态（System32 直存或 App Paths 注册表命中）。
+/// 预设应用解析出的启动位置（候选路径或开始菜单快捷方式）。
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresetLaunchTarget {
+    exe_path: String,
+    arguments: Option<String>,
+    working_dir: Option<String>,
+    /// 诊断日志用来源：`install_path` | `start_menu_shortcut`。
+    source: &'static str,
+}
+
+/// 开始菜单快捷方式索引：文件名去 `.lnk` 后小写 → 完整路径。
+/// 覆盖自定义安装目录（App Paths/System32 探测不到的应用）。
+#[cfg(windows)]
+fn start_menu_shortcuts() -> Vec<(String, std::path::PathBuf)> {
+    let mut out = Vec::new();
+    for root in [
+        std::env::var_os("APPDATA").map(|value| {
+            std::path::PathBuf::from(value).join(r"Microsoft\Windows\Start Menu\Programs")
+        }),
+        std::env::var_os("ProgramData").map(|value| {
+            std::path::PathBuf::from(value).join(r"Microsoft\Windows\Start Menu\Programs")
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        collect_start_menu_shortcuts(&root, &mut out);
+    }
+    out
+}
+
+/// 递归收集目录下的 `.lnk`（索引构建的独立步骤，便于用临时目录测试）。
+#[cfg(windows)]
+fn collect_start_menu_shortcuts(
+    dir: &std::path::Path,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_start_menu_shortcuts(&path, out);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.len() <= 4 || !name.to_ascii_lowercase().ends_with(".lnk") {
+            continue;
+        }
+        out.push((name[..name.len() - 4].to_lowercase(), path));
+    }
+}
+
+/// 解析预设应用启动位置：先按 `install_paths` 候选路径（存在即用），
+/// 再按开始菜单快捷方式（名称匹配 + 解析出的 exe 名与 `exe_names` 比对）。
+#[cfg(windows)]
+fn preset_launch_target(
+    app: &PresetApp,
+    shortcuts: &[(String, std::path::PathBuf)],
+) -> Option<PresetLaunchTarget> {
+    for template in app.install_paths {
+        let Some(path) = expand_install_path(template) else {
+            continue;
+        };
+        if path.is_file() {
+            return Some(PresetLaunchTarget {
+                exe_path: path.to_string_lossy().into_owned(),
+                arguments: None,
+                working_dir: None,
+                source: "install_path",
+            });
+        }
+    }
+    if app.shortcut_names.is_empty() {
+        return None;
+    }
+    let wanted: Vec<String> = app
+        .shortcut_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+    let exe_names: Vec<String> = app
+        .exe_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+    for (stem, path) in shortcuts {
+        if !wanted.iter().any(|name| name == stem) {
+            continue;
+        }
+        let Some(resolved) = resolve_lnk(&path.to_string_lossy()) else {
+            continue;
+        };
+        if resolved.exe_path.is_empty() {
+            continue;
+        }
+        let exe_name = std::path::Path::new(&resolved.exe_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !exe_names.iter().any(|name| *name == exe_name) {
+            continue;
+        }
+        return Some(PresetLaunchTarget {
+            exe_path: resolved.exe_path,
+            arguments: (!resolved.arguments.is_empty()).then_some(resolved.arguments),
+            working_dir: (!resolved.working_dir.is_empty()).then_some(resolved.working_dir),
+            source: "start_menu_shortcut",
+        });
+    }
+    None
+}
+
+/// 启动前解析预设应用的启动位置（自带开始菜单索引）。
+#[cfg(windows)]
+fn resolve_preset_launch_target(app: &PresetApp) -> Option<PresetLaunchTarget> {
+    preset_launch_target(app, &start_menu_shortcuts())
+}
+
+/// 探测预设应用安装状态（System32 直存 / App Paths 注册表 / `install_paths`
+/// 候选路径 / 开始菜单快捷方式，任一命中）。
 /// 无线麦自身恒为已安装（映射运行时它必然在运行）。
 #[cfg(windows)]
 pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
-    PRESET_APPS
+    let started = std::time::Instant::now();
+    // 开始菜单索引只扫一次，供全部条目复用（每页加载调用一次，不能按条目重复遍历）。
+    let shortcuts = start_menu_shortcuts();
+    let apps: Vec<PresetAppInfo> = PRESET_APPS
         .iter()
         .map(|app| PresetAppInfo {
             id: app.id.to_owned(),
             name: app.name.to_owned(),
-            installed: app.id == "sayall" || app.exe_names.iter().any(|exe| exe_resolvable(exe)),
+            installed: app.id == "sayall"
+                || app.exe_names.iter().any(|exe| exe_resolvable(exe))
+                || preset_launch_target(app, &shortcuts).is_some(),
         })
-        .collect()
+        .collect();
+    crate::ble::gatt_note(format!(
+        "app_launcher action=probe_preset_apps phase=completed total={} installed={} elapsed_ms={}",
+        apps.len(),
+        apps.iter().filter(|app| app.installed).count(),
+        started.elapsed().as_millis()
+    ));
+    apps
 }
 
 #[cfg(not(windows))]
@@ -181,6 +431,24 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 return Err("Windows 拒绝将目标应用切换到前台".to_owned());
             }
             RunningActivation::NotFound => {}
+        }
+        if let Some(target) = resolve_preset_launch_target(app) {
+            // 候选路径/开始菜单解析出的完整路径：自定义安装目录的应用
+            // （Vokie、DimAgent、Hermes 等）ShellExecuteW 只拿文件名会找不到。
+            // 日志只记来源与副产品可用性，不落任何个人路径。
+            crate::ble::gatt_note(format!(
+                "app_launcher action=activate_or_launch preset={} phase=launch_target source={} arguments_present={} working_dir_present={}",
+                app.id,
+                target.source,
+                target.arguments.is_some(),
+                target.working_dir.is_some()
+            ));
+            return launch_explicit(
+                &target.exe_path,
+                target.arguments.as_deref(),
+                target.working_dir.as_deref(),
+                true,
+            );
         }
         return launch_new(app.exe_names);
     }
@@ -1556,6 +1824,212 @@ pub(crate) mod tests {
     fn preset_app_lookup_rejects_unknown() {
         assert!(preset_app("wechat").is_some());
         assert!(preset_app("nonexistent-app").is_none());
+    }
+
+    /// 2026-10-02 扩充的预设应用（Vokie / Visual Studio Code / Cursor / DimAgent /
+    /// QQ / 飞书 / Hermes）：必须带开始菜单快捷方式探测名——这些应用常装在
+    /// 自定义目录（如 D:\Apps），App Paths 与 System32 探测覆盖不到。
+    #[test]
+    fn preset_table_includes_requested_apps() {
+        for (id, name) in [
+            ("vokie", "Vokie"),
+            ("vscode", "Visual Studio Code"),
+            ("cursor", "Cursor"),
+            ("dimagent", "DimAgent"),
+            ("qq", "QQ"),
+            ("feishu", "飞书"),
+            ("hermes", "Hermes"),
+        ] {
+            let app = preset_app(id).unwrap_or_else(|| panic!("预设表缺少 {id}"));
+            assert_eq!(app.name, name, "{id} 的展示名");
+            assert!(
+                !app.shortcut_names.is_empty(),
+                "{id} 需要开始菜单快捷方式兜底探测"
+            );
+        }
+    }
+
+    /// 安装候选路径模板展开：正常变量、整串变量与缺失变量。
+    #[test]
+    #[cfg(windows)]
+    fn install_path_templates_expand_environment_variables() {
+        let expanded = expand_install_path("%SystemRoot%\\System32\\notepad.exe")
+            .expect("SystemRoot 应可展开");
+        assert!(expanded.is_file(), "展开结果应指向真实文件：{expanded:?}");
+        assert!(expand_install_path("%SystemRoot%").is_some());
+        assert!(
+            expand_install_path("%SAYALL_MISSING_VAR_PROBE%\\app.exe").is_none(),
+            "变量缺失必须返回 None，不能留下字面量路径"
+        );
+    }
+
+    /// 开始菜单索引：识别 .lnk（大小写不敏感）、递归子目录、忽略其他文件。
+    #[test]
+    #[cfg(windows)]
+    fn start_menu_index_collects_lnk_names() {
+        let root = std::env::temp_dir().join("sayall-start-menu-index-probe");
+        let _ = std::fs::remove_dir_all(&root);
+        let nested = root.join("Tools");
+        std::fs::create_dir_all(&nested).expect("创建探测目录");
+        std::fs::write(root.join("readme.txt"), b"x").expect("写入无关文件");
+        std::fs::write(root.join("Hermes.LNK"), b"x").expect("写入快捷方式");
+        std::fs::write(nested.join("Visual Studio Code.lnk"), b"x").expect("写入嵌套快捷方式");
+        let mut out = Vec::new();
+        collect_start_menu_shortcuts(&root, &mut out);
+        let stems: Vec<&str> = out.iter().map(|(stem, _)| stem.as_str()).collect();
+        assert!(stems.contains(&"hermes"), "扩展名大小写不敏感：{stems:?}");
+        assert!(
+            stems.contains(&"visual studio code"),
+            "应递归子目录：{stems:?}"
+        );
+        assert_eq!(out.len(), 2, "非 .lnk 文件不应入索引");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 候选路径存在时启动目标直接取完整路径（自定义安装目录的关键路径）。
+    #[test]
+    #[cfg(windows)]
+    fn preset_launch_target_prefers_existing_install_path() {
+        let probe = std::env::temp_dir().join("sayall-preset-install-path-probe.exe");
+        std::fs::write(&probe, b"x").expect("创建探测文件");
+        let app = PresetApp {
+            id: "probe",
+            name: "probe",
+            exe_names: &["probe.exe"],
+            install_paths: &["%TEMP%\\sayall-preset-install-path-probe.exe"],
+            shortcut_names: &[],
+        };
+        let target = preset_launch_target(&app, &[]).expect("候选路径应命中");
+        assert_eq!(target.source, "install_path");
+        assert!(target
+            .exe_path
+            .to_lowercase()
+            .ends_with("sayall-preset-install-path-probe.exe"));
+        let _ = std::fs::remove_file(&probe);
+    }
+
+    /// 开始菜单快捷方式：名称命中且目标 exe 名匹配才可用；同名快捷方式
+    /// 指向别的程序时必须拒绝，避免把未安装误报成已安装。
+    #[test]
+    #[cfg(windows)]
+    fn preset_launch_target_resolves_matching_shortcut_only() {
+        let dir = std::env::temp_dir().join("sayall-preset-shortcut-probe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建探测目录");
+        let target_exe = dir.join("Hermes.exe");
+        std::fs::write(&target_exe, b"x").expect("创建目标 exe 占位文件");
+        let lnk = dir.join("Hermes.lnk");
+        assert!(
+            create_test_shortcut(&lnk, &target_exe.to_string_lossy(), "", ""),
+            "创建探测快捷方式失败"
+        );
+
+        let app = PresetApp {
+            id: "shortcut-probe",
+            name: "shortcut-probe",
+            exe_names: &["Hermes.exe"],
+            install_paths: &[],
+            shortcut_names: &["Hermes"],
+        };
+        let index = vec![("hermes".to_owned(), lnk.clone())];
+        let target = preset_launch_target(&app, &index).expect("快捷方式应命中");
+        assert_eq!(target.source, "start_menu_shortcut");
+        assert!(target.exe_path.to_lowercase().ends_with("hermes.exe"));
+
+        // 同名快捷方式指向不匹配的 exe：拒绝。
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).expect("创建子目录");
+        let other_exe = sub.join("Other.exe");
+        std::fs::write(&other_exe, b"x").expect("创建无关 exe 占位文件");
+        let other_lnk = sub.join("Hermes.lnk");
+        assert!(create_test_shortcut(
+            &other_lnk,
+            &other_exe.to_string_lossy(),
+            "",
+            ""
+        ));
+        let index = vec![("hermes".to_owned(), other_lnk)];
+        assert!(
+            preset_launch_target(&app, &index).is_none(),
+            "目标 exe 与 exe_names 不匹配必须拒绝"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 探测结果一致性：probe 判定已安装的预设（自身除外）必须能给出
+    /// System32/App Paths 或候选路径/开始菜单启动位置——否则 UI 会展示
+    /// 一个点了打不开的芯片。
+    #[test]
+    #[cfg(windows)]
+    fn installed_preset_apps_expose_launch_targets() {
+        let shortcuts = start_menu_shortcuts();
+        for info in probe_preset_apps() {
+            if !info.installed || info.id == "sayall" {
+                continue;
+            }
+            let app = preset_app(&info.id).expect("probe 只返回预设表内的条目");
+            assert!(
+                app.exe_names.iter().any(|exe| exe_resolvable(exe))
+                    || preset_launch_target(app, &shortcuts).is_some(),
+                "{} 判定已安装却没有可用的启动位置",
+                info.id
+            );
+        }
+    }
+
+    /// 在测试里创建指向指定 exe 的 .lnk（真机 COM 链路，与
+    /// `lnk_resolution_round_trips` 同一套 IShellLinkW + IPersistFile）。
+    #[cfg(windows)]
+    fn create_test_shortcut(
+        lnk: &std::path::Path,
+        target: &str,
+        arguments: &str,
+        working_dir: &str,
+    ) -> bool {
+        let lnk = lnk.to_path_buf();
+        let target = target.to_owned();
+        let arguments = arguments.to_owned();
+        let working_dir = working_dir.to_owned();
+        std::thread::Builder::new()
+            .name("sayall-test-lnk-create".to_owned())
+            .spawn(move || {
+                use windows::core::{Interface, PCWSTR};
+                use windows::Win32::System::Com::IPersistFile;
+                use windows::Win32::System::Com::{
+                    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                    COINIT_APARTMENTTHREADED,
+                };
+                use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+                unsafe {
+                    if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+                        return false;
+                    }
+                }
+                let ok = (|| unsafe {
+                    let link: IShellLinkW =
+                        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+                    let wide =
+                        |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
+                    let target_wide = wide(&target);
+                    link.SetPath(PCWSTR(target_wide.as_ptr())).ok()?;
+                    let args_wide = wide(&arguments);
+                    link.SetArguments(PCWSTR(args_wide.as_ptr())).ok()?;
+                    let dir_wide = wide(&working_dir);
+                    link.SetWorkingDirectory(PCWSTR(dir_wide.as_ptr())).ok()?;
+                    let persist: IPersistFile = link.cast().ok()?;
+                    let lnk_wide = wide(&lnk.to_string_lossy());
+                    persist.Save(PCWSTR(lnk_wide.as_ptr()), true).ok()?;
+                    Some(())
+                })()
+                .is_some();
+                unsafe {
+                    CoUninitialize();
+                }
+                ok
+            })
+            .expect("spawn create thread failed")
+            .join()
+            .expect("create thread panicked")
     }
 
     #[test]
