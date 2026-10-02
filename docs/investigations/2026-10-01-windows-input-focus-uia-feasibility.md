@@ -44,6 +44,19 @@
 对照：**登录窗口**曾暴露 28 个元素（Button/Text/Group/Pane/ToolBar/Custom，带点分 AutomationId 如 `login_layout_...current_login_nick_name`）。
 ⇒ 微信 4.0 具备 UIA provider，但**聊天主窗口不暴露文本输入**：「扫描 Edit/Document 找输入框」在微信上不成立。这是决策点 D1/D2（opt-in 位置点击兜底或仅提示手动点击）的直接实测依据。
 
+### 内容可编辑输入框：TipTap / ProseMirror 暴露为 `Group`（DimAgent，2026-10-02 补充）
+
+用户报告「DimAgent 打开后无法聚焦到输入框」，实测定位到**算法口径问题**（可修）：
+
+| 观测 | 结果 |
+| --- | --- |
+| 当前焦点元素 | `ControlType.Group`，`class_name = "tiptap ProseMirror outline-none ProseMirror-focused"`（Chromium 把 DOM class 原样暴露），`focusable=true`、`has_focus=true`、矩形 1417×133（窗口底部） |
+| 我的既有候选扫描（只认 Edit/Document） | **只找到 1 个** `Document`/`RootWebArea`——真正的输入框被漏掉 |
+| 宽口径扫描 | 363 个元素：150 个带 TextPattern、133 个可聚焦；可聚焦元素里既有 `Group`（编辑器容器）也有大量 `Button`（侧栏/工具条） |
+| `SetFocus` 到 `RootWebArea` | 调用成功、读回一致（`has_focus=true`）——说明 UIA 设焦点可行，但聚焦网页根 ≠ 聚焦输入框 |
+
+⇒ **硬门槛不能只认 Edit/Document**。需要扩展为「可聚焦 + 具备可编辑/文本特征 + 语义或几何合格」，并把「当前焦点元素（若属于目标进程且通过硬门槛）」作为首选目标。已记入实现待办（`focus.rs` 的 `passes_hard_gate` / 打分口径）。
+
 ### Electron 目标
 
 | 目标 | Electron 版本 | 树规模 | 判定 |
