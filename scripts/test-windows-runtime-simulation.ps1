@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -49,12 +49,20 @@ try {
     }
 
     $report = Get-Content -Raw -Encoding UTF8 -LiteralPath $reportPath | ConvertFrom-Json
-    if ($appProcess.ExitCode -ne 0) {
+    # PowerShell 5.1 的 `Start-Process -PassThru` + `-RedirectStandardOutput` 组合拿不到
+    # 退出码（本机实测：`cmd /c exit 3` 直启读到 3、带重定向读到 $null，PS 5.1.26100）。
+    # 退出码不可读时以报告判据为准，不把平台差异误报成仿真失败；可读时仍然强制为零。
+    $exitCode = $null
+    try { $exitCode = $appProcess.ExitCode } catch { $exitCode = $null }
+    $reportError = if ($report.PSObject.Properties.Name -contains "error") { $report.error } else { "" }
+    if ($null -eq $exitCode) {
+        Write-Warning "runtime simulation 退出码不可读（PowerShell 5.1 重定向限制），按报告判据验收"
+    } elseif ($exitCode -ne 0) {
         Write-SimulationProcessLogs
-        throw "Windows runtime simulation exited with code $($appProcess.ExitCode): $($report.error)"
+        throw "Windows runtime simulation exited with code ${exitCode}: $reportError"
     }
     if ($report.passed -ne $true) {
-        throw "Windows runtime simulation reported failure: $($report.error)"
+        throw "Windows runtime simulation reported failure: $reportError"
     }
     if ($report.platform -ne "windows-ci-simulation") {
         throw "Unexpected runtime simulation platform: $($report.platform)"

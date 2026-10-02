@@ -838,9 +838,11 @@ async fn test_button_mapping(
         .map_err(|error| format!("测试打开应用任务失败：{error}"))?
         .map_err(|error| error.to_string()),
         ButtonAction::FocusInput => tauri::async_runtime::spawn_blocking(move || {
+            // 受理后返回平台的 SendInput 快照（与快捷键/滚轮测试同口径），
+            // 便于 UI 与仿真断言「动作确实走到了聚焦受理路径」。
             platform
                 .test_focus_input()
-                .map(|_| SendInputSnapshot::default())
+                .map(|_| platform.send_input_snapshot())
         })
         .await
         .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
