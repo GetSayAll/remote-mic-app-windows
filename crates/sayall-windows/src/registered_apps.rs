@@ -278,13 +278,78 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
             ));
             let app_user_model_id = identity.app_user_model_id;
             let executable_path = identity.executable_path;
+            // 收在托盘里的主窗口：契约/ShellExecute 之后先看应用是否自己把它显示出来，
+            // 没显示才走旧的显示路径（见下方 2026-10-03 说明）。
+            let mut deferred_hidden_window: Option<isize> = None;
 
             // 「已运行 → 切回已有窗口」必须先于激活契约：Word / PowerPoint / WPS
             // 这类应用只要走到 ActivateApplication 就会新开实例或文档/首页窗口，
             // 之后的前台读回只能把那个新窗口置前（2026-10-02 用户实测）。
             // 能力本就在 app_launcher 里（窗口 AUMID → 进程 AUMID → exe 路径），
             // 这里只是在启动前先试一次；都失败才认为确实没在运行。
+            //
+            // 例外（2026-10-03 真机）：目标应用**只有隐藏窗口**（收在托盘，如 WorkBuddy）
+            // 时不能直接显示它——应用内部仍认为窗口是隐藏的，客户端区点击不进入应用
+            // （"打开后点不动，双击标题栏才活"）。这种情形交给应用自己的激活契约。
             {
+                // AUMID 与 exe 路径两个口径都查：WorkBuddy 这类进程没有 AUMID，
+                // 只按 AUMID 查会得到 (0,0)，于是永远走不到"应用自己打开"的分支
+                // （2026-10-03 用户实测：关闭到托盘后打开不可点击）。
+                let by_identity = crate::app_launcher::window_visibility(
+                    crate::app_launcher::WindowSelector::AppUserModelId(&app_user_model_id),
+                );
+                let by_path = executable_path.as_deref().map_or(
+                    crate::app_launcher::WindowVisibility::EMPTY,
+                    |path| {
+                        crate::app_launcher::window_visibility(
+                            crate::app_launcher::WindowSelector::ExecutablePath(path),
+                        )
+                    },
+                );
+                let visibility = by_identity.merge(by_path);
+                let (visible, hidden) = (visibility.visible, visibility.hidden);
+                let main_hidden = hidden > 0 && visibility.hidden_max_area > visibility.visible_max_area;
+                if (visible == 0 || main_hidden) && hidden > 0 {
+                    // 先走应用自己的托盘图标（用户平时把应用叫回来的方式；窗口由应用自己
+                    // 恢复，可交互）。触发失败再落到激活契约。
+                    let mut names: Vec<String> = Vec::new();
+                    if let Some(stem) = executable_path
+                        .as_deref()
+                        .and_then(|path| path.rsplit(['\\', '/']).next())
+                        .map(|name| name.to_string())
+                    {
+                        names.push(stem.clone());
+                        if let Some(base) = stem
+                            .strip_suffix(".exe")
+                            .or(stem.strip_suffix(".EXE"))
+                            .map(str::to_string)
+                        {
+                            names.push(base);
+                        }
+                    }
+                    if let Some(segment) = app_user_model_id.rsplit('.').next() {
+                        names.push(segment.to_string());
+                    }
+                    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+                    let tray = crate::tray_icons::invoke_tray_icon(&borrowed);
+                    let known_hidden = visibility.largest_hidden;
+                    let tray_visible = tray.submitted
+                        && crate::app_launcher::readback_hidden_window_shown(known_hidden);
+                    crate::gatt_note(format!(
+                        "registered_app_launch phase=tray_icon matched={} submitted={} method={} terminal_result={}",
+                        tray.matched,
+                        tray.submitted,
+                        tray.method,
+                        if tray_visible { "passed" } else { "failed" },
+                    ));
+                    if tray_visible {
+                        return (Ok(()), true);
+                    }
+                    deferred_hidden_window = known_hidden;
+                    crate::gatt_note(format!(
+                        "registered_app_launch phase=prelaunch_activation result=deferred reason=windows_hidden_by_app visible=0 hidden={hidden}"
+                    ));
+                } else {
                 let by_identity =
                     crate::app_launcher::activate_application_window(&app_user_model_id);
                 let by_path = !by_identity
@@ -321,6 +386,7 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                     by_identity,
                     executable_path.is_some()
                 ));
+                }
             }
 
             let id_wide: Vec<_> = app_user_model_id.encode_utf16().chain(Some(0)).collect();
@@ -383,6 +449,20 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                     ("shell_fallback", shell_result.is_ok(), pid)
                 }
             };
+
+            // 收在托盘的应用：契约/ShellExecute 已经按应用自己的方式请求过一次（Electron
+            // 应用会由单实例处理把主窗口显示出来）。先有界复核应用是否自己把窗口显示出来，
+            // 是则不再走会被判"点不动"的直接显示路径。
+            if let Some(hwnd) = deferred_hidden_window {
+                let self_shown = crate::app_launcher::readback_hidden_window_shown(Some(hwnd));
+                crate::gatt_note(format!(
+                    "registered_app_launch phase=app_self_shown terminal_result={}",
+                    if self_shown { "passed" } else { "failed" },
+                ));
+                if self_shown {
+                    return (Ok(()), true);
+                }
+            }
 
             let foreground_observed = pid.is_some_and(|pid| {
                 observe_registered_foreground(

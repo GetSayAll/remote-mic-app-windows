@@ -528,7 +528,31 @@ describe("buttons mapping page", () => {
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
-  it("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
+  it("配置「打开应用」时聚焦方式面板暂时隐藏（2026-10-03 下线的回归守卫）", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    const notepadChip = editor.findAll(".chip").find((chip) => chip.text() === "记事本");
+    expect(notepadChip).toBeDefined();
+    await notepadChip!.trigger("click");
+    await flushPromises();
+
+    // 目标仍能正常选中并写入映射，但「打开后聚焦方式」面板不再暴露。
+    expect(editor.find(".focus-profile").exists()).toBe(false);
+    await vi.waitFor(() => {
+      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+        actions: Record<string, { single: { type: string; target?: string } }>;
+      };
+      if (saved?.actions.ok?.single?.target !== "notepad") {
+        throw new Error("选中目标后未写入映射");
+      }
+    });
+  });
+
+  // 2026-10-03：UI 暂时隐藏（ButtonsPage.vue 的 showAppFocusStrategy=false），
+  // 恢复面板时把这个 skip 去掉即可继续覆盖策略切换与学习流程。
+  it.skip("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");

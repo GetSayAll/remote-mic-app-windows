@@ -315,6 +315,10 @@ const focusStrategyOptions: Array<{ value: FocusStrategy; label: string }> = [
   { value: "recorded_element", label: "聚焦已记录的输入框" },
 ];
 
+// 2026-10-03 Andy：先隐藏「打开后聚焦方式」面板（后端能力与已存配置保留，UI 暂不暴露）。
+// 需要恢复时把这个开关改回 true 即可；相关测试按同一开关跳过。
+const showAppFocusStrategy = false;
+
 const focusFailureLabels: Record<string, string> = {
   self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
   no_candidate: "没有找到可用的输入框",
@@ -1694,7 +1698,7 @@ onUnmounted(() => {
               ＋ 添加应用
             </button>
           </div>
-          <div v-if="focusTarget" class="focus-profile">
+          <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile">
             <p class="muted focus-profile-title">打开后聚焦方式</p>
             <div class="preset-grid">
               <button
