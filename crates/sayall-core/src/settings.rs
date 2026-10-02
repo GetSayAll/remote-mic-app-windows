@@ -33,9 +33,10 @@ pub enum VoiceInputTool {
 /// 应用图标（设置页「应用图标」，2026-10-02 用户指定）。
 ///
 /// 对齐 Mac main `Sources/RemoteMic/AppIconController.swift` 的 `AppIconIdentifier`：
-/// 稳定语义 ID（`standard` 是内置应用图标，`faceted-duck` 来自 Mac
-/// `Resources/AppIcons/faceted-duck.png`），未知 ID 一律回落到 `standard`
-/// （Mac `AppIconCatalog.resolvedIdentifier(for:)` 同款语义）。
+/// 稳定语义 ID（`standard` 是内置应用图标，`faceted-duck` 的图案来自 Mac
+/// `Resources/AppIcons/faceted-duck.png`、Windows 侧用满画布导出的
+/// `src-tauri/icons/app-icons/faceted-duck-source.png` 派生），未知 ID 一律回落到
+/// `standard`（Mac `AppIconCatalog.resolvedIdentifier(for:)` 同款语义）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppIconIdentifier {
