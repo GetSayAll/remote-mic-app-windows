@@ -63,6 +63,15 @@ mod imp {
 
     /// RC003 的硬件 token（VID 0x2717 / PID 0x32B8 / REV 00a4），与仓库既有取证一致。
     const RC003_HARDWARE_TOKEN: &str = "vid&012717_pid&32b8_rev&00a4";
+
+    /// 检测到宿主里跑的是上一代 agent 时自动刷新的冷却时间：
+    /// 一台机器一小时内最多自动刷新一次，防"刷新→仍旧→再刷新"的循环。
+    const AGENT_REFRESH_COOLDOWN_SECS: u64 = 3600;
+    /// 冷却时间戳文件名（放运行时目录，跨助手进程重启仍生效）。
+    const AGENT_REFRESH_STAMP: &str = "agent-refresh.stamp";
+    /// 本轮准备好的 gadget DLL 路径：stale 分支自动刷新时用它重新注入。
+    static PREPARED_GADGET_DLL: std::sync::OnceLock<std::path::PathBuf> =
+        std::sync::OnceLock::new();
     /// BLE HID-over-GATT 服务的 UUID 前缀（设备实例名以它开头）。
     const HID_SERVICE_PREFIX: &str = "{00001812-0000-1000-8000-00805f9b34fb}";
     const ENUM_ROOT: &str = "SYSTEM\\CurrentControlSet\\Enum";
@@ -123,6 +132,7 @@ mod imp {
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
         fn CloseHandle(h: Handle) -> i32;
+        fn TerminateProcess(h: Handle, exit_code: u32) -> i32;
         fn GetLastError() -> u32;
         fn VirtualAllocEx(
             h: Handle,
@@ -702,6 +712,164 @@ mod imp {
 
     /// 走遍整棵 `Enum` 树，收集所有带 `WUDFDiagnosticInfo\HostPid` 的设备实例。
     /// 必须走全量（而不是只找 RC003）：独占性判据需要知道同一宿主还承载了谁。
+    /// 纯决策：这次 stale 握手要不要自动刷新（可自检）。
+    ///
+    /// 条件：提权（结束 session 0 宿主必需）＋ 宿主代次非空且与内嵌代次不同
+    /// ＋ 距上次自动刷新超过冷却时间。
+    fn should_auto_refresh_agent(
+        elevated: bool,
+        running_build: &str,
+        embedded_build: &str,
+        last_refresh_unix: Option<u64>,
+        now_unix: u64,
+    ) -> bool {
+        if !elevated || running_build.is_empty() || running_build == embedded_build {
+            return false;
+        }
+        match last_refresh_unix {
+            Some(last) => now_unix >= last && now_unix - last >= AGENT_REFRESH_COOLDOWN_SECS,
+            None => true,
+        }
+    }
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn read_refresh_stamp(dir: &std::path::Path) -> Option<u64> {
+        std::fs::read_to_string(dir.join(AGENT_REFRESH_STAMP))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    fn write_refresh_stamp(dir: &std::path::Path, now: u64) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join(AGENT_REFRESH_STAMP), now.to_string());
+    }
+
+    /// stale 分支入口：条件满足就后台自动刷新宿主里的 agent（不阻塞连接线程）。
+    fn spawn_agent_refresh_if_needed(running_build: &str, host_pid: u32, logger: &Logger) {
+        let Some(dll) = PREPARED_GADGET_DLL.get().cloned() else {
+            return; // 本轮没准备好 DLL（dry-run / 自检路径），不刷新
+        };
+        let dir = dll.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let last = read_refresh_stamp(&dir);
+        if !should_auto_refresh_agent(is_elevated(), running_build, AGENT_BUILD, last, now_unix()) {
+            return;
+        }
+        write_refresh_stamp(&dir, now_unix());
+        let logger = logger.fork();
+        let _ = std::thread::Builder::new()
+            .name("sayall-helper-agent-refresh".into())
+            .spawn(move || refresh_agent_in_host(host_pid, &dll, &logger));
+    }
+
+    /// 自动刷新：结束旧宿主 → 等新宿主跟上设备 → 重新注入 gadget。
+    /// 新宿主的 agent 从本轮的运行时目录加载，代次即当前内嵌代次。
+    /// 失败只记日志：不影响既有会话与后续重连。
+    fn refresh_agent_in_host(old_pid: u32, dll: &std::path::Path, logger: &Logger) {
+        logger.kv(
+            "[AGENT-REFRESH]",
+            &[
+                ("phase", "requested".into()),
+                ("host_pid", old_pid.to_string()),
+                ("target_build", AGENT_BUILD.to_string()),
+            ],
+        );
+        if let Err(error) = terminate_process(old_pid) {
+            logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "failed".into()),
+                    ("stage", "terminate".into()),
+                    ("detail", error),
+                ],
+            );
+            return;
+        }
+        // 宿主被结束后由系统重建；轮询直到出现"另一个 RC003 宿主 pid"。
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut new_pid = 0_u32;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            if let Ok(scan) = enum_hosts() {
+                if let Some(entry) = scan
+                    .entries
+                    .iter()
+                    .find(|e| e.is_rc003 && e.pid != 0 && e.pid != old_pid)
+                {
+                    new_pid = entry.pid;
+                    break;
+                }
+            }
+        }
+        if new_pid == 0 {
+            logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "failed".into()),
+                    ("stage", "wait_new_host".into()),
+                ],
+            );
+            return;
+        }
+        match inject_gadget(new_pid, dll, logger) {
+            // 不 cleanup：远端线程/缓冲区交给宿主进程自身的生命周期（与主流程
+            // 退出时才清理的取舍一致）；句柄泄漏两个，刷新最多每小时一次。
+            Ok(injection) => {
+                std::mem::forget(injection);
+                logger.kv(
+                    "[AGENT-REFRESH]",
+                    &[
+                        ("phase", "completed".into()),
+                        ("terminal_result", "passed".into()),
+                        ("host_pid", new_pid.to_string()),
+                    ],
+                );
+            }
+            Err(error) => logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "failed".into()),
+                    ("stage", "inject".into()),
+                    ("detail", error),
+                ],
+            ),
+        }
+    }
+
+    /// 结束目标进程（提权后对 session 0 的 WUDFHost 有效）。
+    fn terminate_process(pid: u32) -> Result<(), String> {
+        const PROCESS_TERMINATE: u32 = 0x0001;
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if handle.is_null() {
+            return Err(format!(
+                "OpenProcess(PROCESS_TERMINATE, {pid}) 失败，GetLastError={}",
+                unsafe { GetLastError() }
+            ));
+        }
+        let ok = unsafe { TerminateProcess(handle, 1) } != 0;
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "TerminateProcess({pid}) 失败，GetLastError={}",
+                unsafe { GetLastError() }
+            ))
+        }
+    }
+
     fn enum_hosts() -> Result<HostScan, String> {
         let root = reg_open(HKEY_LOCAL_MACHINE, ENUM_ROOT)
             .ok_or_else(|| format!("无法打开注册表 {ENUM_ROOT}"))?;
@@ -972,6 +1140,15 @@ mod imp {
         /// `---------- 新一轮运行 ... ----------`。后果是 `grep '新一轮运行'` 的**运行起点
         /// 计数是错的**：真实 6 轮被数成 11 条。而这条分隔线当初加进来的**唯一目的**
         /// 就是让每轮起点可辨——它自己把它破坏了。
+        /// 派生一个同落点的 Logger：后台线程用（Logger 不是 Send 结构体之外
+        /// 的共享对象，续约线程用的是同款做法）。
+        fn fork(&self) -> Logger {
+            Logger {
+                fallback: self.fallback.clone(),
+                shared: self.shared.clone(),
+            }
+        }
+
         fn new(path: Option<PathBuf>) -> Self {
             if let Some(p) = &path {
                 if let Some(dir) = p.parent() {
@@ -3192,6 +3369,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 // 不打这一条，现象是"日志一切正常，但行为还是旧的"——最难查的一类。
                 let build = extract_str(line, "build").unwrap_or_default();
                 if !build.is_empty() && build != AGENT_BUILD {
+                    // 旧代 agent 不会自愈（脚本在宿主里只加载一次）：满足冷却与提权
+                    // 条件时后台刷新一次——结束旧宿主、等新宿主、重新注入。
+                    spawn_agent_refresh_if_needed(
+                        &build,
+                        extract_num(line, "pid").unwrap_or(0) as u32,
+                        logger,
+                    );
                     logger.kv(
                         "[AGENT-STALE]",
                         &[
@@ -3204,9 +3388,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             (
                                 "note",
                                 "宿主里跑的是上一代脚本（本轮接管的是旧实例）。\
-                                 要让新脚本生效必须重新注入：重启机器最稳；\
-                                 或以管理员结束该 WUDFHost 进程后让设备重新枚举。\
-                                 注意 --new-generation 另起一代时，助手同一时刻只服务一条连接，\
+                                助手已尝试自动刷新（结束旧宿主 → 等新宿主 → 重新注入）；
+                                自动刷新受冷却限制，失败时会重试。若仍反复出现，
+                                可重启机器或以管理员结束该 WUDFHost 进程。\
                                  另一条会因租约过期停清键，不适合做验收判据。"
                                     .into(),
                             ),
@@ -3934,6 +4118,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if matches!(plan, DllPlan::Generation(_)) {
             reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
         }
+
+        // 记下本轮准备好的 DLL：stale 自动刷新要用它重新注入。
+        let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
 
         let mut injection: Option<Injection> = match plan {
             DllPlan::Attach => {
@@ -6016,6 +6203,37 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    #[cfg(test)]
+    mod agent_refresh_tests {
+        use super::{should_auto_refresh_agent, AGENT_REFRESH_COOLDOWN_SECS};
+
+        #[test]
+        fn refresh_only_when_stale_elevated_and_outside_cooldown() {
+            let now = 1_000_000_u64;
+            // 代次一致 / 提权不足 / 代次未知：都不刷新。
+            assert!(!should_auto_refresh_agent(true, "a", "a", None, now));
+            assert!(!should_auto_refresh_agent(false, "old", "new", None, now));
+            assert!(!should_auto_refresh_agent(true, "", "new", None, now));
+            // 首次 stale：刷新。
+            assert!(should_auto_refresh_agent(true, "old", "new", None, now));
+            // 冷却内：不刷新；冷却外：刷新。
+            assert!(!should_auto_refresh_agent(
+                true,
+                "old",
+                "new",
+                Some(now - (AGENT_REFRESH_COOLDOWN_SECS - 1)),
+                now
+            ));
+            assert!(should_auto_refresh_agent(
+                true,
+                "old",
+                "new",
+                Some(now - AGENT_REFRESH_COOLDOWN_SECS),
+                now
+            ));
+        }
+    }
 
     #[cfg(test)]
     mod bridge_synth_line_tests {
