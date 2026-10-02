@@ -192,6 +192,27 @@ describe("settings page", () => {
     expect(setIncludePrereleases).toHaveBeenCalledWith(true);
   });
 
+  it("设置页的 Switch 开关都在对应文字右侧（2026-10-03 用户要求）", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    // 顶部「检查预览版更新」：文字在前、开关在后（标签行内顺序即视觉顺序）。
+    const prerelease = wrapper.get("label.prerelease-toggle");
+    expect((prerelease.element.firstElementChild as HTMLElement).textContent).toContain(
+      "检查预览版更新",
+    );
+    expect(prerelease.element.lastElementChild).toBe(prerelease.find("input").element);
+
+    // 通用「登录时自动启动」：同样文字在前、开关在后。
+    const launch = wrapper.get('label[title*="Windows 登录启动项"]');
+    expect((launch.element.firstElementChild as HTMLElement).textContent).toContain(
+      "登录时自动启动",
+    );
+    expect(launch.element.lastElementChild).toBe(
+      launch.find('input[name="launch-at-login"]').element,
+    );
+  });
+
   it("初始状态显示手动检查入口", () => {
     const wrapper = mount(SettingsPage, { props: { runtime } });
     expect(wrapper.text()).toContain("手动检查是否有新版本");

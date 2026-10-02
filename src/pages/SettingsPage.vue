@@ -259,6 +259,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             class="toggle-row prerelease-toggle"
             title="开启后，检查更新时也会包含尚在测试中的预览版本。"
           >
+            <span>检查预览版更新</span>
             <input
               type="checkbox"
               class="toggle-input"
@@ -266,7 +267,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
               :disabled="preferenceBusy || checking || installing"
               @change="onPreviewToggle"
             />
-            检查预览版更新
           </label>
         </div>
 
@@ -401,6 +401,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
           </div>
           <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
+            <span>登录时自动启动</span>
             <input
               v-if="launchAtLoginReady"
               type="checkbox"
@@ -411,7 +412,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
               @change="onLaunchAtLoginChange"
             />
             <span v-else class="toggle-placeholder" aria-hidden="true"></span>
-            登录时自动启动
           </label>
         </div>
         <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
