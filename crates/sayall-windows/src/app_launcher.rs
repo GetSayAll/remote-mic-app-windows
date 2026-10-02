@@ -833,15 +833,105 @@ pub(crate) fn activate_executable_path(executable_path: &str) -> bool {
         )
 }
 
+fn normalized_windows_path(value: &str) -> String {
+    value
+        .strip_prefix(r"\\?\")
+        .unwrap_or(value)
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
 fn process_image_matches_target(image: &str, target: &str) -> bool {
-    fn normalized(value: &str) -> String {
-        value
-            .strip_prefix(r"\\?\")
-            .unwrap_or(value)
-            .replace('/', "\\")
-            .to_ascii_lowercase()
+    normalized_windows_path(image) == normalized_windows_path(target)
+}
+
+/// 启动器式注册目标的「同族进程」判定（纯函数，便于单测）。
+///
+/// 背景（2026-10-02 实测）：`shell:AppsFolder\Kingsoft.Office.WPS` 的
+/// `PKEY_Link_TargetParsingPath` 解析结果是启动器 `...\WPS Office\ksolaunch.exe`，
+/// 而真正承载文档窗口的进程是 `...\WPS Office\<版本>\office6\wps.exe`。此时
+/// 「按精确路径找运行中进程」必然落空，于是每次触发都新开一个窗口。
+///
+/// 判定规则：候选必须位于解析路径的同一安装目录之下（含子目录），且不是解析
+/// 路径本身。返回 `Some(1)` 表示优先候选——exe 基名出现在 AUMID 里（如
+/// `Kingsoft.Office.WPS` ↔ `wps.exe`）；`Some(0)` 表示同目录下的其它可执行文件
+/// （可用但不优先，避免把「WPS 表格」当成「WPS 文字」）；`None` 表示不相干。
+pub fn launcher_family_rank(
+    image_path: &str,
+    resolved_path: &str,
+    app_user_model_id: &str,
+) -> Option<u8> {
+    let image = normalized_windows_path(image_path);
+    let resolved = normalized_windows_path(resolved_path);
+    if image.is_empty() || resolved.is_empty() || image == resolved {
+        return None;
     }
-    normalized(image) == normalized(target)
+    let install_dir = resolved.rsplit_once('\\')?.0;
+    if install_dir.is_empty() || !image.starts_with(&format!("{install_dir}\\")) {
+        return None;
+    }
+    let file_name = image.rsplit('\\').next().unwrap_or_default();
+    let stem = file_name.strip_suffix(".exe").unwrap_or(file_name);
+    let aumid = app_user_model_id.to_ascii_lowercase();
+    if stem.chars().count() >= 2 && aumid.contains(stem) {
+        Some(1)
+    } else {
+        Some(0)
+    }
+}
+
+/// 启动器式目标的兜底激活：在同一安装目录下寻找同族进程并前置其窗口。
+#[cfg(windows)]
+pub(crate) fn activate_install_directory_family(
+    resolved_path: &str,
+    app_user_model_id: &str,
+) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
+    let mut preferred = std::collections::HashSet::new();
+    let mut fallback = std::collections::HashSet::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        if let Some(image) = process_image_path(entry.th32ProcessID) {
+            match launcher_family_rank(&image, resolved_path, app_user_model_id) {
+                Some(1) => {
+                    preferred.insert(entry.th32ProcessID);
+                }
+                Some(_) => {
+                    fallback.insert(entry.th32ProcessID);
+                }
+                None => {}
+            }
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    let activated = !preferred.is_empty()
+        && matches!(
+            activate_process_windows(&preferred),
+            RunningActivation::Activated(_)
+        );
+    if activated {
+        return true;
+    }
+    !fallback.is_empty()
+        && matches!(
+            activate_process_windows(&fallback),
+            RunningActivation::Activated(_)
+        )
 }
 
 #[cfg(windows)]
@@ -2249,5 +2339,68 @@ pub(crate) mod tests {
         let directory = std::env::temp_dir().join("sayall-open-directory-probe");
         std::fs::create_dir_all(&directory).expect("创建取证目录失败");
         open_directory(&directory).expect("ShellExecuteW 打开目录应返回成功");
+    }
+
+    #[test]
+    fn launcher_family_rank_prefers_exe_name_matching_aumid() {
+        let resolved = r"C:\Program Files (x86)\WPS Office\ksolaunch.exe";
+        let aumid = "Kingsoft.Office.WPS";
+
+        // 真正的文档进程：同安装目录的版本子目录里，基名 wps 出现在 AUMID 中 → 优先
+        assert_eq!(
+            launcher_family_rank(
+                r"C:\Program Files (x86)\WPS Office\12.1.0.25225\office6\wps.exe",
+                resolved,
+                aumid
+            ),
+            Some(1)
+        );
+        // 同族的表格进程：同目录之下，但基名与 AUMID 不符 → 可用但不优先
+        assert_eq!(
+            launcher_family_rank(
+                r"C:\Program Files (x86)\WPS Office\12.1.0.25225\office6\et.exe",
+                resolved,
+                aumid
+            ),
+            Some(0)
+        );
+        // 表格 AUMID 下，et.exe 反过来是优先候选
+        assert_eq!(
+            launcher_family_rank(
+                r"C:\Program Files (x86)\WPS Office\12.1.0.25225\office6\et.exe",
+                resolved,
+                "Kingsoft.Office.ET"
+            ),
+            Some(1)
+        );
+        // 不在同一安装目录 → 不相干
+        assert_eq!(
+            launcher_family_rank(r"C:\Other\app.exe", resolved, aumid),
+            None
+        );
+        // 解析路径本身由精确匹配负责，不在这里重复判定
+        assert_eq!(launcher_family_rank(resolved, resolved, aumid), None);
+    }
+
+    #[test]
+    fn launcher_family_rank_normalizes_case_separators_and_prefix() {
+        let resolved = r"C:\Program Files (x86)\WPS Office\ksolaunch.exe";
+        assert_eq!(
+            launcher_family_rank(
+                r"\\?\c:/program files (x86)/wps office/12.1.0.25225/office6/WPS.EXE",
+                resolved,
+                "Kingsoft.Office.WPS"
+            ),
+            Some(1)
+        );
+        // 只差一个字符的相邻目录不能算同族（避免误命中同级产品）
+        assert_eq!(
+            launcher_family_rank(
+                r"C:\Program Files (x86)\WPS Office Backup\wps.exe",
+                resolved,
+                "Kingsoft.Office.WPS"
+            ),
+            None
+        );
     }
 }
