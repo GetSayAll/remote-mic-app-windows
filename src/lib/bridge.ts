@@ -638,6 +638,17 @@ export async function getVokieInstallation(): Promise<VokieInstallation> {
 }
 
 /**
+ * 打开 Vokie（连接页第 ② 步「打开 Vokie」按钮）：装了但没运行时一键叫起来。
+ * 失败时抛错（调用方把原因显示给用户）。
+ */
+export async function launchVokie(): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  return invoke<void>("launch_vokie");
+}
+
+/**
  * 「其他工具」面板记住的按键：`null` = 从未选过（保持现状），`[]` = 明确选了
  * 「不按键」。选中「其他工具」时恢复它，用户改选时写回。
  */
