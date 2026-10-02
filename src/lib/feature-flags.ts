@@ -12,3 +12,11 @@
  * 预设按钮不受影响，用户仍可一键回到默认组合或关闭快捷键。
  */
 export const VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED = false;
+
+/**
+ * 按键编辑器「设备操作 / 聚焦输入框」入口。
+ *
+ * 2026-10-03 用户要求：先隐藏入口。动作类型与平台受理路径保留（已有映射照常生效，
+ * runtime simulation 改为经 IPC 直接写入并验证受理），只是 UI 暂不暴露入口。
+ */
+export const DEVICE_ACTION_SECTION_ENABLED = false;

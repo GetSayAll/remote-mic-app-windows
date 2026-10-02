@@ -566,6 +566,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .tool-card strong { display: block; font-size: 13.5px; }
 .tool-card small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
 .chord-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13.5px; }
+/* 「按住遥控器语音键 = …」行上方还有别的块（Vokie 提示 + 打开/重新检测按钮）时
+   留出组间距，不要贴着上面（2026-10-03 用户反馈图 1 间距过小）。 */
+.tool-panel > .chord-line:not(:first-child) { margin-top: 10px; }
 .key {
   display: inline-block;
   min-width: 26px;

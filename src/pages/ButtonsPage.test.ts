@@ -334,6 +334,69 @@ describe("buttons mapping page", () => {
     wrapper.unmount();
   });
 
+  it("扫描本机应用与添加应用排在其他应用名称之后（2026-10-03 用户要求）", async () => {
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    // 先加一个自定义应用（复用既有扫描流程），保证「其他应用名称」非空。
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "扫描本机应用")!
+      .trigger("click");
+    await flushPromises();
+    await wrapper.get('input[aria-label="全选当前结果"]').setValue(true);
+    await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
+    await flushPromises();
+
+    const section = wrapper
+      .findAll(".action-section")
+      .find((item) => item.find(".action-section-title").text() === "打开应用")!;
+    const chips = section.findAll("button.chip").map((button) => button.text());
+    const customIndex = chips.findIndex((text) => text.includes("Registered Example"));
+    const scanIndex = chips.findIndex((text) => text === "扫描本机应用");
+    const addIndex = chips.findIndex((text) => text.includes("添加应用"));
+    expect(customIndex, `自定义应用芯片缺失：${chips.join(" / ")}`).toBeGreaterThanOrEqual(0);
+    expect(scanIndex, "扫描本机应用按钮缺失").toBeGreaterThanOrEqual(0);
+    expect(addIndex, "添加应用按钮缺失").toBeGreaterThanOrEqual(0);
+    // 两个动作入口必须排在所有应用名称（预设 + 自定义）之后。
+    expect(scanIndex, `扫描本机应用排在应用名称之前：${chips.join(" / ")}`).toBeGreaterThan(
+      customIndex,
+    );
+    expect(addIndex).toBeGreaterThan(scanIndex);
+    // 预设与已添加应用在同一个换行网格里：名字连续排布，二者之间不强制换行。
+    const presetChip = section.findAll("button.chip").find((button) => button.text() === "无线麦")!;
+    const customChip = section
+      .findAll("button.chip")
+      .find((button) => button.text().includes("Registered Example"))!;
+    expect(customChip.element.parentElement, "预设与已添加应用应在同一容器内").toBe(
+      presetChip.element.parentElement,
+    );
+    wrapper.unmount();
+  });
+
+  it("「设备操作 / 聚焦输入框」入口先隐藏（2026-10-03 用户要求）", async () => {
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
+    expect(titles, `动作分组：${titles.join(" / ")}`).not.toContain("设备操作");
+    expect(
+      wrapper.findAll(".mapping-editor button").some((button) => button.text() === "聚焦输入框"),
+    ).toBe(false);
+    // 对照组：其他动作分组不受影响。
+    expect(titles).toContain("鼠标滚轮");
+    expect(titles).toContain("打开应用");
+    wrapper.unmount();
+  });
+
   it("renders the remote canvas with 12 button cards, the voice card and 36 trigger cells", async () => {
     const wrapper = await mountPage();
     expect(wrapper.findAll(".mapping-card")).toHaveLength(13);
