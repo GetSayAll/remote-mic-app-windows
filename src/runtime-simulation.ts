@@ -227,13 +227,35 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(sendInput.submittedEvents === 4, "Ctrl+C 仿真没有生成四个按下/释放事件");
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");
 
+  // 2026-10-03 关闭态语义：仿真设置目录每轮重建（「全按键支持」默认关闭），
+  // 返回 / 音量+ / 音量− 三张卡片整卡置灰、格子禁用、悬停给出开启指引——
+  // 这条在真实 WebView 里钉住（单元测试另有覆盖），也是下面改用「确定」键的原因。
+  // 用 waitFor 而不是即时断言：真实 WebView 的 localStorage 可能残留上一轮的
+  // 开关缓存（本机仿真就命中过：首帧按缓存渲染成开启、首次对账后才回落关闭），
+  // 权威状态落地前的过渡帧不是本步要验证的东西。
+  const gatedBackCard = await waitFor(() => {
+    const card = Array.from(document.querySelectorAll<HTMLElement>(".mapping-card")).find(
+      (candidate) => candidate.querySelector(".mapping-card-title strong")?.textContent === "返回",
+    );
+    return card?.classList.contains("is-locked") ? card : null;
+  }, "关闭态返回卡片整卡置灰");
+  const gatedBackCell = gatedBackCard.querySelector<HTMLButtonElement>(".mapping-cell");
+  assert(gatedBackCell?.disabled === true, "关闭态返回格子没有禁用");
+  assert(
+    (gatedBackCell?.title ?? "").includes("需要开启全按键支持才能使用，开启后恢复正常"),
+    `关闭态返回格子悬停提示异常：${gatedBackCell?.title ?? ""}`,
+  );
+  steps.push("「全按键支持」关闭时返回/音量± 整卡置灰禁用并给出开启指引");
+
   // 「聚焦输入框」动作：UI 芯片可选 → 自动保存 → 平台受理一次（真实 IPC）。
+  // 走「确定 · 单击」而不是「返回」：关闭态下三键不可点击（上一步已钉住），
+  // 本段验证的是动作通路与按键无关。
   const focusCell = await waitFor(() => {
     const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
-      (candidate) => candidate.title.startsWith("返回 · 单击"),
+      (candidate) => candidate.title.startsWith("确定 · 单击"),
     );
     return cell ?? null;
-  }, "返回键「单击」映射格");
+  }, "确定键「单击」映射格");
   focusCell.click();
   const focusChip = await waitFor(() => buttonWithText("聚焦输入框"), "「聚焦输入框」动作芯片");
   focusChip.click();
@@ -241,7 +263,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     () => (focusCell.title.includes("聚焦输入框") ? true : null),
     "映射格显示「聚焦输入框」",
   );
-  const focusSnapshot = await testButtonMapping("back", "single");
+  const focusSnapshot = await testButtonMapping("ok", "single");
   assert(
     focusSnapshot.submittedBatches === 2,
     "「聚焦输入框」动作没有分发到平台的聚焦受理路径",
