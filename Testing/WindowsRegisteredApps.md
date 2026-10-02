@@ -26,6 +26,14 @@ Remove-Item Env:SAYALL_TEST_REGISTERED_APP_TARGET
   最小化时再次按映射键，窗口也应恢复并成为前台，不能只在任务栏闪烁。诊断日志
   应以 `target_result=foreground_observed` 作为成功终态，且现场确认前台窗口是
   实际主窗口；`SetForegroundWindow` 成功或目标 PID 相同均不足以证明通过。
+- **已运行时再次触发不能新开实例**（2026-10-02 修复）：Word / PowerPoint / WPS
+  这类传统桌面条目，先手动打开一个文档，再按映射键——必须切回已有窗口，不能出现
+  新文档或新实例；对照判据是诊断日志出现
+  `phase=prelaunch_activation result=activated source=app_identity|executable_path|install_directory`
+  且耗时在百毫秒级（未修复时走激活契约约 2 s+ 且 pid 增加）。启动器式条目
+  （实测 WPS：注册项解析到 `ksolaunch.exe`，真正的文档进程在同安装目录的版本
+  子目录）应走 `source=install_directory` 兜底，且不得把同族的表格/演示进程
+  当成目标（`launcher_family_rank` 单测覆盖）。
 - 对同一应用拥有崩溃监视、消息、托盘、隐藏渲染窗口的场景，确认这些辅助
   窗口不会被主动显示；诊断日志应有 `window_candidate` 的接受或拒绝原因。
 - 对 ChatGPT 检查不再出现空白窄条；对 WorkBuddy 检查冷启动、主窗口已隐藏

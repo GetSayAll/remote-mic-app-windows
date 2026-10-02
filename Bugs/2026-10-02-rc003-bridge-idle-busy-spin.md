@@ -1,0 +1,21 @@
+# RC003 桥接命名管道空闲读忙等（Helper 连上后单核 100%、界面被饿死）
+
+- 发现日期：2026-10-02
+- 状态：已修复（本机真机验证 `passed`；分支 `fix/rc003-bridge-idle-spin`，未开 PR）
+- 影响范围：2026-09-30 起含命名管道桥接的 Windows 版本（0.5.0 实测）；RC003 增强捕获 Helper 已连接时；与 RC001 无关
+- 功能点：`crates/sayall-windows/src/rc003_bridge.rs`，连接处理线程 `handle_connection`
+- 现象：Helper 一连上，应用进程内 `sayall-rc003-bridge-conn` 单线程吃满一个 CPU 核；界面点不动、输入框无法聚焦、窗口关不掉（用户反馈原文：「打开的 app 无法聚焦输入框，点击无反应，也无法关闭」）
+- 复现条件：应用启动、RC003 Helper 经命名管道完成 `HELLO/OK` 握手后保持空闲即可，**不需要按任何键**
+- 正常预期：空闲连接不占 CPU；TCP 路径以 250ms 读超时达到同一语义（只在无数据时等待，数据到达立即处理）
+- 证据：
+  - 逐线程 CPU 采样（PowerShell + `ProcessThread.TotalProcessorTime` + `GetThreadDescription`）：热线程 `sayall-rc003-bridge-conn` 6 秒窗口消耗 6.02 秒 CPU；应用整进程 8 秒窗口 7.9 秒 CPU（累计 300+ 秒）
+  - 应用诊断日志：`helper_authenticated … transport=named_pipe` 之后无任何错误行——CPU 全烧在"空闲读重试"上，日志侧静默
+  - 回归测试的空闲窗口计数（阳性对照）：400ms 内 461,162 次重试（≈1.15M 次/秒）
+- 根因：命名管道以 `PIPE_NOWAIT` 创建，无数据时 `ReadFile` **立即**失败并返回 `ERROR_NO_DATA`；`handle_connection` 把该错误归入"可重试"分支后直接 `continue`，循环里没有任何退避 ⇒ 忙等。TCP 路径的 `set_read_timeout(250ms)` 天然限速，所以问题只在管道路径出现。
+- 修复：新增 `bridge_idle_backoff()`（`PIPE_IDLE_BACKOFF = 2ms`）落在可重试读分支——只限制"无数据时的等待"，数据到达仍立即处理，边沿投递额外上界延迟 ≤2ms。文件：`crates/sayall-windows/src/rc003_bridge.rs`。
+- 验证：
+  - 回归测试 `idle_named_pipe_connection_is_throttled`（真命名管道握手后空转 400ms，退避次数必须 <5000）：修复后 ~200 次 `passed`；阳性对照（去掉 sleep）实测 461,162 次即 `failed`。`cargo test -p sayall-windows --lib rc003_bridge` 19 passed。
+  - 本机真机：0.5.0 本地测试包（提交 `e6fdc7d`，静默安装）在 `helper_authenticated transport=named_pipe` 状态下，应用 CPU 8 秒窗口 **0.08 秒**（修复前同状态 7.9 秒）；UIA 读回界面树正常。
+  - `cargo test --workspace` 285 passed、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation`、`cargo fmt --all -- --check` 全绿。
+- 仍未知/边界：RC001 不涉及；冷态首用、断连与睡眠恢复未因本次修复专门复测（改动只影响空闲读节流，不触碰握手/看门狗/边沿处理路径）。
+- 隐私检查：本条不含个人路径、设备身份、语音内容或凭据。
