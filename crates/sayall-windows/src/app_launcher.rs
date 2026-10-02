@@ -428,12 +428,83 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 std::env::current_exe().map_err(|error| format!("获取自身路径失败：{error}"))?;
             return launch_explicit(&exe.to_string_lossy(), None, None, true);
         }
-        match activate_running(app.exe_names) {
-            RunningActivation::Activated(_) => return Ok(()),
-            RunningActivation::ForegroundDenied => {
-                return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+        let visibility = window_visibility(WindowSelector::ExecutableNames(app.exe_names));
+        match running_window_disposition(visibility.visible, visibility.hidden) {
+            RunningWindowDisposition::ActivateVisible => match activate_running(app.exe_names) {
+                RunningActivation::Activated(_) => return Ok(()),
+                RunningActivation::ForegroundDenied => {
+                    return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+                }
+                RunningActivation::NotFound => {}
+            },
+            RunningWindowDisposition::DelegateToApp => {
+                // 应用已运行，但窗口收在托盘里（如微信关闭到托盘）。不要直接把隐藏窗口
+                // 摆出来：应用内部仍认为自己是隐藏的，客户端区点击不进入应用
+                // （2026-10-03 真机"打开后点不动"）。改为按应用自己的入口重新拉起——
+                // 单实例应用会自己把已有窗口正确显示出来，与开始菜单/桌面快捷方式一致。
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=activate_or_launch preset={} phase=relaunch_entry reason=window_hidden_by_app visible=0 hidden={}",
+                    app.id,
+                    visibility.hidden
+                ));
+                let relaunched = if let Some(target) = resolve_preset_launch_target(app) {
+                    crate::ble::gatt_note(format!(
+                        "app_launcher action=activate_or_launch preset={} phase=launch_target source={} arguments_present={} working_dir_present={}",
+                        app.id,
+                        target.source,
+                        target.arguments.is_some(),
+                        target.working_dir.is_some()
+                    ));
+                    launch_explicit(
+                        &target.exe_path,
+                        target.arguments.as_deref(),
+                        target.working_dir.as_deref(),
+                        true,
+                    )
+                    .is_ok()
+                } else {
+                    launch_new(app.exe_names).is_ok()
+                };
+                // 有界等待：必须观察到**原先那个隐藏窗口**自己变可见才算成功。
+                // 只数"有没有可见窗口"会被应用一闪而过的登录/提示窗口骗过（实测假阳性）。
+                let known_hidden = visibility.first_hidden;
+                let became_visible = readback_with_recheck(
+                    || match known_hidden {
+                        Some(hwnd) => unsafe {
+                            windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(
+                                windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void),
+                            )
+                        }
+                        .as_bool(),
+                        None => {
+                            window_visibility(WindowSelector::ExecutableNames(app.exe_names))
+                                .visible
+                                > 0
+                        }
+                    },
+                    || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
+                    RELAUNCH_VISIBLE_CHECKS,
+                );
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=activate_or_launch preset={} phase=relaunch_entry terminal_result={} reason={} submitted={relaunched} known_hidden={}",
+                    app.id,
+                    if became_visible { "passed" } else { "failed" },
+                    if became_visible { "app_shown_known_window" } else { "app_window_not_observed" },
+                    known_hidden.is_some(),
+                ));
+                if became_visible {
+                    return Ok(());
+                }
+                // 兜底：应用没有自己显示窗口时，仍按旧路径显示隐藏窗口并置前。
+                match activate_running(app.exe_names) {
+                    RunningActivation::Activated(_) => return Ok(()),
+                    RunningActivation::ForegroundDenied => {
+                        return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+                    }
+                    RunningActivation::NotFound => {}
+                }
             }
-            RunningActivation::NotFound => {}
+            RunningWindowDisposition::StartFresh => {}
         }
         if let Some(target) = resolve_preset_launch_target(app) {
             // 候选路径/开始菜单解析出的完整路径：自定义安装目录的应用
@@ -631,6 +702,38 @@ struct ForegroundActivationOutcome {
     last_set_foreground_ok: bool,
 }
 
+/// 已运行应用的窗口处置（纯逻辑，便于单测）。
+///
+/// 2026-10-03 真机：把收在托盘里的窗口直接 `ShowWindow` 出来，操作系统层面窗口可见、
+/// 前台读回也通过，但**应用内部仍认为窗口是隐藏的**，客户端区点击不进入应用——
+/// 微信 / WorkBuddy「打开后点不动，双击标题栏才活」。因此只有"已经有可见窗口"时才
+/// 直接激活；只有隐藏窗口时交给应用自己的打开路径（预设置信入口重新拉起，注册应用
+/// 走激活契约），与开始菜单、桌面快捷方式、任务栏的打开方式一致。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunningWindowDisposition {
+    /// 已有可见窗口：显示/还原并强制置前。
+    ActivateVisible,
+    /// 只有隐藏窗口：交给应用自己打开，不直接 ShowWindow。
+    DelegateToApp,
+    /// 没有窗口：按未运行处理，走启动路径。
+    StartFresh,
+}
+
+#[cfg(windows)]
+fn running_window_disposition(
+    visible_windows: usize,
+    hidden_windows: usize,
+) -> RunningWindowDisposition {
+    if visible_windows > 0 {
+        RunningWindowDisposition::ActivateVisible
+    } else if hidden_windows > 0 {
+        RunningWindowDisposition::DelegateToApp
+    } else {
+        RunningWindowDisposition::StartFresh
+    }
+}
+
 /// 第一次按常规公开 API 激活；若 Windows 只闪任务栏、前台读回仍不是目标进程，
 /// 再用一次成对 Alt 边沿解除 foreground lock 后重试。API 布尔值只作诊断，
 /// 最终成功判据必须是 `GetForegroundWindow` 读回属于目标进程。
@@ -655,6 +758,11 @@ fn drive_foreground_activation(
         last_set_foreground_ok: retry.set_foreground_ok,
     }
 }
+
+/// 重新拉起后等待应用自己显示窗口的复核：6 × 200 ms。冷启动到窗口出现通常在 1 s 内，
+/// 没有出现就按失败处理、回落到旧的显示隐藏窗口路径。
+const RELAUNCH_VISIBLE_CHECKS: u8 = 6;
+const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// `SetForegroundWindow` 之后 Windows 可能异步完成前台切换，单次读回会把成功的
 /// 置前误判为失败。这里做有界复核：首次读回，失败后等待 `wait()` 再读回，最多
@@ -1012,6 +1120,132 @@ fn process_app_user_model_id(pid: u32) -> Option<String> {
     result
 }
 
+/// 窗口可见性查询口径：与 activate_* 系列一致，用于先问"有没有可见窗口"，
+/// 再决定是直接激活还是交给应用自己的打开路径。
+#[cfg(windows)]
+pub(crate) enum WindowSelector<'a> {
+    ExecutableNames(&'a [&'a str]),
+    AppUserModelId(&'a str),
+}
+
+/// 只读枚举结果。`first_hidden` 是枚举顺序里的第一个隐藏候选，用于"应用是否把
+/// **我们已知的那个窗口**自己显示出来"的复核——只看"有没有可见窗口"会被应用
+/// 一闪而过的登录/提示窗口骗过（2026-10-03 实测假阳性）。
+#[cfg(windows)]
+pub(crate) struct WindowVisibility {
+    pub visible: usize,
+    pub hidden: usize,
+    pub first_hidden: Option<isize>,
+}
+
+/// 目标进程/AUMID 当前可见窗口与隐藏窗口的数量（与激活路径同一份过滤规则）。
+/// 只读枚举：不显示、不置前、不写任何窗口状态。
+#[cfg(windows)]
+pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibility {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    let (pids, app_user_model_id) = match selector {
+        WindowSelector::ExecutableNames(names) => (pids_for_exe_names(names), None),
+        WindowSelector::AppUserModelId(aumid) => (pids_for_app_user_model_id(aumid), Some(aumid)),
+    };
+    let mut context = win_impl::VisibilityEnumContext {
+        pids: &pids,
+        app_user_model_id,
+        visible: 0,
+        hidden: 0,
+        first_hidden: None,
+    };
+    if pids.is_empty() && app_user_model_id.is_none() {
+        return WindowVisibility {
+            visible: 0,
+            hidden: 0,
+            first_hidden: None,
+        };
+    }
+    unsafe {
+        let _ = EnumWindows(
+            Some(win_impl::enum_visibility_proc),
+            LPARAM(&mut context as *mut win_impl::VisibilityEnumContext as isize),
+        );
+    }
+    WindowVisibility {
+        visible: context.visible,
+        hidden: context.hidden,
+        first_hidden: context.first_hidden,
+    }
+}
+
+/// 进程快照：可执行文件名 → pid 集合。
+#[cfg(windows)]
+fn pids_for_exe_names(exe_names: &[&str]) -> std::collections::HashSet<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let wanted: std::collections::HashSet<String> = exe_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let mut pids = std::collections::HashSet::new();
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return pids;
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+        if wanted.contains(&name) {
+            pids.insert(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+    }
+    pids
+}
+
+/// 契约 PID 可能不是拥有主窗口的 PID，因此按精确 AUMID 收集同一应用的进程。
+#[cfg(windows)]
+fn pids_for_app_user_model_id(app_user_model_id: &str) -> std::collections::HashSet<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut pids = std::collections::HashSet::new();
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return pids;
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        if process_app_user_model_id(entry.th32ProcessID)
+            .is_some_and(|value| value.eq_ignore_ascii_case(app_user_model_id))
+        {
+            pids.insert(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+    }
+    pids
+}
+
 #[cfg(windows)]
 fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningActivation {
     use windows::Win32::Foundation::LPARAM;
@@ -1077,6 +1311,37 @@ mod win_impl {
         /// 目标进程的隐藏（如收进托盘）窗口候选，按枚举顺序排列；仅在无可见窗口时
         /// 逐个回退激活。第一个候选不一定是主窗口（消息/托盘窗口可能排在前面）。
         pub hidden_candidates: Vec<HWND>,
+    }
+
+    /// 只读枚举：统计目标（pid 集合 / 窗口 AUMID）当前可见与隐藏的候选窗口数量。
+    pub(super) struct VisibilityEnumContext<'a> {
+        pub pids: &'a std::collections::HashSet<u32>,
+        pub app_user_model_id: Option<&'a str>,
+        pub visible: usize,
+        pub hidden: usize,
+        pub first_hidden: Option<isize>,
+    }
+
+    pub(super) unsafe extern "system" fn enum_visibility_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let context = &mut *(lparam.0 as *mut VisibilityEnumContext);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let by_pid = context.pids.contains(&pid);
+        let by_identity = context.app_user_model_id.is_some_and(|value| {
+            window_app_user_model_id(hwnd).is_some_and(|id| id.eq_ignore_ascii_case(value))
+        });
+        if !(by_pid || by_identity) || !eligible_window_without_logging(hwnd) {
+            return BOOL::from(true);
+        }
+        if IsWindowVisible(hwnd).as_bool() {
+            context.visible += 1;
+        } else {
+            context.hidden += 1;
+            if context.first_hidden.is_none() {
+                context.first_hidden = Some(hwnd.0 as isize);
+            }
+        }
+        BOOL::from(true)
     }
 
     pub(super) struct AppIdentityEnumContext<'a> {
@@ -1151,13 +1416,25 @@ mod win_impl {
     }
 
     unsafe fn eligible_window(hwnd: HWND) -> bool {
+        eligible_window_with_logging(hwnd, true)
+    }
+
+    /// 只读查询用的静默版本：不写候选诊断日志（`window_visibility` 每次按键都会问一次，
+    /// 否则会把候选日志翻倍）。
+    unsafe fn eligible_window_without_logging(hwnd: HWND) -> bool {
+        eligible_window_with_logging(hwnd, false)
+    }
+
+    unsafe fn eligible_window_with_logging(hwnd: HWND, log: bool) -> bool {
         let owned = GetWindow(hwnd, GW_OWNER).unwrap_or(HWND::default()).0 != std::ptr::null_mut();
         let tool = (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & (WS_EX_TOOLWINDOW.0 as u32) != 0;
         if tool {
-            crate::ble::gatt_note(
-                "app_launcher action=window_candidate terminal_result=rejected reason=tool_window"
-                    .to_owned(),
-            );
+            if log {
+                crate::ble::gatt_note(
+                    "app_launcher action=window_candidate terminal_result=rejected reason=tool_window"
+                        .to_owned(),
+                );
+            }
             return false;
         }
         let class_name = window_class_name(hwnd);
@@ -1187,14 +1464,16 @@ mod win_impl {
                 GetWindowTextLengthW(hwnd) > 0,
             )
         };
-        crate::ble::gatt_note(format!(
-            "app_launcher action=window_candidate terminal_result={} reason={} class={} visible={} size_class={}",
-            if reason.is_none() { "accepted" } else { "rejected" },
-            reason.unwrap_or("main_candidate"),
-            class_name,
-            IsWindowVisible(hwnd).as_bool(),
-            if !has_rect { "unknown" } else if rect.right - rect.left < 120 || rect.bottom - rect.top < 80 { "small" } else { "normal" },
-        ));
+        if log {
+            crate::ble::gatt_note(format!(
+                "app_launcher action=window_candidate terminal_result={} reason={} class={} visible={} size_class={}",
+                if reason.is_none() { "accepted" } else { "rejected" },
+                reason.unwrap_or("main_candidate"),
+                class_name,
+                IsWindowVisible(hwnd).as_bool(),
+                if !has_rect { "unknown" } else if rect.right - rect.left < 120 || rect.bottom - rect.top < 80 { "small" } else { "normal" },
+            ));
+        }
         reason.is_none()
     }
 
@@ -1802,6 +2081,32 @@ pub(crate) mod tests {
         assert_eq!(
             window_rejection_reason("Chrome_WidgetWin_1", 1513, 1180, false, false, true),
             None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn running_window_disposition_prefers_app_owned_opening_for_hidden_windows() {
+        use super::*;
+        // 已有可见窗口：直接激活（原有行为，Word/WPS 等）。
+        assert_eq!(
+            running_window_disposition(1, 0),
+            RunningWindowDisposition::ActivateVisible
+        );
+        assert_eq!(
+            running_window_disposition(2, 3),
+            RunningWindowDisposition::ActivateVisible
+        );
+        // 只有隐藏窗口（收在托盘）：交给应用自己打开——直接 ShowWindow 会让应用
+        // 内部状态与窗口状态脱节，客户端区点击不进入应用（2026-10-03 真机）。
+        assert_eq!(
+            running_window_disposition(0, 1),
+            RunningWindowDisposition::DelegateToApp
+        );
+        // 没有窗口：按未运行处理，走启动路径。
+        assert_eq!(
+            running_window_disposition(0, 0),
+            RunningWindowDisposition::StartFresh
         );
     }
 

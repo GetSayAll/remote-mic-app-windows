@@ -284,7 +284,22 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
             // 之后的前台读回只能把那个新窗口置前（2026-10-02 用户实测）。
             // 能力本就在 app_launcher 里（窗口 AUMID → 进程 AUMID → exe 路径），
             // 这里只是在启动前先试一次；都失败才认为确实没在运行。
+            //
+            // 例外（2026-10-03 真机）：目标应用**只有隐藏窗口**（收在托盘，如 WorkBuddy）
+            // 时不能直接显示它——应用内部仍认为窗口是隐藏的，客户端区点击不进入应用
+            // （"打开后点不动，双击标题栏才活"）。这种情形交给应用自己的激活契约。
             {
+                let (visible, hidden) = {
+                    let v = crate::app_launcher::window_visibility(
+                        crate::app_launcher::WindowSelector::AppUserModelId(&app_user_model_id),
+                    );
+                    (v.visible, v.hidden)
+                };
+                if visible == 0 && hidden > 0 {
+                    crate::gatt_note(format!(
+                        "registered_app_launch phase=prelaunch_activation result=deferred reason=windows_hidden_by_app visible=0 hidden={hidden}"
+                    ));
+                } else {
                 let by_identity =
                     crate::app_launcher::activate_application_window(&app_user_model_id);
                 let by_path = !by_identity
@@ -321,6 +336,7 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                     by_identity,
                     executable_path.is_some()
                 ));
+                }
             }
 
             let id_wide: Vec<_> = app_user_model_id.encode_utf16().chain(Some(0)).collect();
