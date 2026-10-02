@@ -478,6 +478,43 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
+  it("点「打开 Vokie」后自动复查：Vokie 起来后提示自动消失（不用再点「重新检测」）", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: false });
+      mocks.getOtherVoiceHotkey.mockResolvedValue(null);
+      mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
+      const wrapper = mount(ConnectionPage, { props: { runtime } });
+      await flushPromises();
+
+      await wrapper
+        .findAll(".tool-card")
+        .find((card) => card.text().includes("Vokie"))!
+        .trigger("click");
+      await flushPromises();
+      expect(wrapper.text()).toContain("Vokie 没有运行");
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text().includes("打开 Vokie"))!
+        .trigger("click");
+      await flushPromises();
+      expect(mocks.launchVokie).toHaveBeenCalledTimes(1);
+      expect(wrapper.text()).toContain("正在等待它启动");
+
+      // Vokie 冷启动完成后（下一次检测返回 running=true），推进一个轮询间隔：
+      // 提示应自动消失，不需要用户再点一次「重新检测」。
+      mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+      await vi.advanceTimersByTimeAsync(1500);
+      await flushPromises();
+      expect(wrapper.text()).not.toContain("Vokie 没有运行");
+      expect(wrapper.text()).toContain("Vokie 已在运行");
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("第 ② 步常显提示：避免其他 App 同键 + 当前输入法不对时再按一次", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
