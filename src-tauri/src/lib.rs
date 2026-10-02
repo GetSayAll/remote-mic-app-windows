@@ -856,6 +856,30 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
+/// 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+///
+/// 阻塞式（窗口期内），放在阻塞线程池执行；UI 负责把它写进对应目标的聚焦档案。
+#[tauri::command]
+async fn learn_focus_target(
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::focus::RecordedFocusTarget, String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_target())
+        .await
+        .map_err(|error| format!("学习输入框任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// 「测试打开与聚焦」：按目标与其聚焦档案走一次生产路径（异步受理）。
+#[tauri::command]
+async fn test_app_focus(target: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.test_app_focus(target))
+        .await
+        .map_err(|error| format!("测试打开与聚焦任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
 /// 原生文件选择器：选择自定义应用（.exe/.lnk）。用户取消返回 null。
 #[tauri::command]
 fn pick_custom_app() -> Option<sayall_windows::app_launcher::CustomAppPick> {
@@ -2157,6 +2181,8 @@ pub fn run() {
         export_button_mapping_configuration,
         import_button_mapping_configuration,
         test_button_mapping,
+        learn_focus_target,
+        test_app_focus,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,
@@ -2214,6 +2240,8 @@ pub fn run() {
         export_button_mapping_configuration,
         import_button_mapping_configuration,
         test_button_mapping,
+        learn_focus_target,
+        test_app_focus,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,

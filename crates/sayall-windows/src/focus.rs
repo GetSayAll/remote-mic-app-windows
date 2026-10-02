@@ -203,6 +203,46 @@ fn clamp_chars(value: &str, limit: usize) -> String {
     value.trim().chars().take(limit).collect()
 }
 
+/// 「学习输入框」的窗口与采样参数。
+///
+/// 用户点「开始学习输入框」后有 [`LEARN_WINDOW`] 的时间去点目标应用的输入框；
+/// 采样间隔 [`LEARN_POLL_INTERVAL`]，同一候选需连续 [`LEARN_STABLE_SAMPLES`] 次
+/// 采样一致才认账（避免把扫过或中途闪现的元素记下来）。
+pub const LEARN_WINDOW: std::time::Duration = std::time::Duration::from_millis(3000);
+pub const LEARN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+pub const LEARN_STABLE_SAMPLES: usize = 2;
+
+/// 学习采样的稳定判据（纯函数）：连续 `LEARN_STABLE_SAMPLES` 次采样命中同一个
+/// 候选（按 [`learning_key`] 比较）才算稳定；中途为 `None` 会打断连续段。
+pub fn learning_stable_target(
+    samples: &[Option<RecordedFocusTarget>],
+) -> Option<RecordedFocusTarget> {
+    if samples.len() < LEARN_STABLE_SAMPLES {
+        return None;
+    }
+    let tail = &samples[samples.len() - LEARN_STABLE_SAMPLES..];
+    let first = tail.first()?.as_ref()?;
+    let key = learning_key(first);
+    tail.iter()
+        .all(|sample| {
+            sample
+                .as_ref()
+                .is_some_and(|value| learning_key(value) == key)
+        })
+        .then(|| first.clone())
+}
+
+/// 两个候选是否算「同一个元素」的键（只含语义字段，不含几何与用户内容）。
+pub fn learning_key(target: &RecordedFocusTarget) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        target.control_type.trim().to_lowercase(),
+        target.automation_id.trim().to_lowercase(),
+        target.class_name.trim().to_lowercase(),
+        target.name.trim().to_lowercase()
+    )
+}
+
 /// 用户记录的输入框语义特征（不包含任何输入内容）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -463,7 +463,8 @@ mod imp {
         focus_target(pid, choice)
     }
 
-    /// 采集当前系统焦点元素（「学习输入框」用）；要求属于指定进程且可编辑。
+    /// 采集当前系统焦点元素（「学习输入框」用）；要求属于指定进程、通过候选硬门槛
+    /// 且能形成可比对的语义特征（否则返回 `None`，UI 报「没学到可用的输入框」）。
     pub fn capture_focused_target(pid: u32) -> Option<RecordedFocusTarget> {
         submit(move |session| {
             let focused = unsafe { session.automation.GetFocusedElement() }.ok()?;
@@ -471,11 +472,20 @@ mod imp {
             if element_pid != pid {
                 return None;
             }
+            // 学习必须命中「能输入」的元素：只读网页根、按钮、密码框一律不记。
+            let focused_candidate = {
+                let mut candidate = snapshot_candidate(&focused, None);
+                candidate.control_type = control_type_name(&session.automation, &focused);
+                candidate
+            };
+            if !focused_candidate.passes_hard_gate() {
+                return None;
+            }
             let target = RecordedFocusTarget {
-                control_type: control_type_name(&session.automation, &focused),
-                automation_id: bstr_string(unsafe { focused.CurrentAutomationId() }),
-                class_name: bstr_string(unsafe { focused.CurrentClassName() }),
-                name: bstr_string(unsafe { focused.CurrentName() }),
+                control_type: focused_candidate.control_type,
+                automation_id: focused_candidate.automation_id,
+                class_name: focused_candidate.class_name,
+                name: focused_candidate.name,
                 window_title: String::new(),
                 normalized_rect: None,
                 context_tokens: Vec::new(),
@@ -544,6 +554,15 @@ mod imp {
 
         fn attempt(&self, pid: u32, choice: &crate::focus::FocusChoice) -> AttemptResult {
             focus_target(pid, choice.clone()).into_attempt_result()
+        }
+
+        fn sample_learning_target(&self) -> Option<RecordedFocusTarget> {
+            let pid = foreground_process_id()?;
+            if pid == current_process_id() {
+                // 用户在学习窗口内点了本应用自己的界面：不记，等继续点目标应用。
+                return None;
+            }
+            capture_focused_target(pid)
         }
     }
 

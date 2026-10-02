@@ -19,6 +19,7 @@ import {
   getRc003TaskStatus,
   identityShortcutByButton,
   importButtonMappingConfiguration,
+  learnFocusTarget,
   listPresetApps,
   mouseClickLabels,
   mouseMoveLabels,
@@ -42,7 +43,9 @@ import {
   type ButtonMappings,
   type ButtonTrigger,
   type CustomAppPick,
+  type AppFocusProfile,
   type FiredGesture,
+  type FocusStrategy,
   type KeyCode,
   type MoveDirection,
   type PresetAppInfo,
@@ -53,6 +56,7 @@ import {
   type RemoteModel,
   type RuntimeSnapshot,
   type ShortcutCaptureEdge,
+  testAppFocus,
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -214,6 +218,12 @@ const capturingShortcut = ref(false);
 const captureStarting = ref(false);
 const captureDisplay = ref<string[]>([]);
 const safeCaptureMode = ref(false);
+/** 录入快捷键的用途：动作本身，还是「打开应用」的聚焦快捷键。 */
+const capturePurpose = ref<"action" | "focus_shortcut">("action");
+/** 「学习输入框」状态机。 */
+const focusLearnState = ref<"idle" | "learning" | "captured" | "error">("idle");
+const focusLearnMessage = ref<string | null>(null);
+const focusTestMessage = ref<string | null>(null);
 const capturePressedKeys = new Set<KeyCode>();
 let capturedChord: KeyCode[] | null = null;
 let unlistenEdges: (() => void) | null = null;
@@ -282,6 +292,129 @@ function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
 function openAppTargetOf(button: RemoteButton, trigger: ButtonTrigger): string | null {
   const action = actionOf(button, trigger);
   return action.type === "open_app" ? action.target : null;
+}
+
+/** 当前编辑格的「打开应用」目标（聚焦档案按它键控）。 */
+const focusTarget = computed(() =>
+  editingTarget.value
+    ? openAppTargetOf(editingTarget.value.button, editingTarget.value.trigger)
+    : null,
+);
+
+/** 该目标的聚焦档案（未配置时 null ＝ 只打开应用）。 */
+const focusProfile = computed<AppFocusProfile | null>(() => {
+  const target = focusTarget.value;
+  if (!target) return null;
+  return mappings.value.focusProfiles?.[target] ?? null;
+});
+
+const focusStrategyOptions: Array<{ value: FocusStrategy; label: string }> = [
+  { value: "open_only", label: "只打开应用" },
+  { value: "app_shortcut", label: "用应用快捷键聚焦" },
+  { value: "recorded_element", label: "聚焦已记录的输入框" },
+];
+
+const focusFailureLabels: Record<string, string> = {
+  self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
+  no_candidate: "没有找到可用的输入框",
+  not_foreground: "目标应用不在前台",
+  target_exited: "目标应用已退出",
+  not_accessible: "读不到该应用的界面（对方可能以管理员身份运行）",
+  timeout: "等待超时",
+  not_configured: "还没有配置聚焦方式",
+  cancelled: "已取消",
+};
+
+/** 最近一次聚焦结果（失败时给用户可解释的原因）。 */
+const lastFocusNotice = computed<string | null>(() => {
+  const report = mappingSnapshot.value?.lastFocus;
+  if (!report || report.focused) return null;
+  return `上次聚焦失败：${focusFailureLabels[report.reason ?? ""] ?? report.reason ?? "未知原因"}`;
+});
+
+/** 聚焦档案写回：策略与字段保持自洽（对齐 Rust `AppFocusProfile::normalized`）。 */
+function applyFocusStrategy(strategy: FocusStrategy): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const previous = mappings.value.focusProfiles?.[target];
+  const profile: AppFocusProfile = { strategy };
+  if (strategy === "app_shortcut" && previous?.shortcut) profile.shortcut = previous.shortcut;
+  if (strategy === "recorded_element" && previous?.recorded) profile.recorded = previous.recorded;
+  const next = { ...(mappings.value.focusProfiles ?? {}), [target]: profile };
+  mappings.value = { ...mappings.value, focusProfiles: next };
+  focusLearnMessage.value = null;
+  focusTestMessage.value = null;
+  void persist("聚焦方式已更新");
+}
+
+/** 录入聚焦快捷键的落点（由 `capturePurpose` 分流）。 */
+function applyFocusShortcut(keys: KeyCode[]): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const next = {
+    ...(mappings.value.focusProfiles ?? {}),
+    [target]: { strategy: "app_shortcut" as const, shortcut: { keys } },
+  };
+  mappings.value = { ...mappings.value, focusProfiles: next };
+  void persist("聚焦快捷键已录入");
+}
+
+function clearRecordedFocus(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const next = {
+    ...(mappings.value.focusProfiles ?? {}),
+    [target]: { strategy: "recorded_element" as const },
+  };
+  mappings.value = { ...mappings.value, focusProfiles: next };
+  focusLearnState.value = "idle";
+  focusLearnMessage.value = null;
+  void persist("已清除记录的输入框");
+}
+
+async function beginFocusShortcutCapture(): Promise<void> {
+  if (focusLearnState.value === "learning") return;
+  capturePurpose.value = "focus_shortcut";
+  await beginShortcutCapture();
+}
+
+/**
+ * 「学习输入框」：3 秒窗口内轮询系统焦点，用户需要在此期间点击目标应用的输入框。
+ * 采集只读控件语义（不含输入内容），写入该目标的聚焦档案。
+ */
+async function startFocusLearning(): Promise<void> {
+  if (focusLearnState.value === "learning") return;
+  const target = focusTarget.value;
+  if (!target) return;
+  focusLearnState.value = "learning";
+  focusLearnMessage.value = "请在 3 秒内点击目标应用的输入框（点到别处会记录成别的控件）";
+  try {
+    const recorded = await learnFocusTarget();
+    const next = {
+      ...(mappings.value.focusProfiles ?? {}),
+      [target]: { strategy: "recorded_element" as const, recorded },
+    };
+    mappings.value = { ...mappings.value, focusProfiles: next };
+    await persist();
+    focusLearnState.value = "captured";
+    focusLearnMessage.value = "已记录该输入框（只记录控件特征，不含输入内容）";
+  } catch (error) {
+    focusLearnState.value = "error";
+    focusLearnMessage.value =
+      error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** 「测试打开与聚焦」：走生产路径（异步受理，结果稍后体现在聚焦结果提示里）。 */
+async function testSelectedAppFocus(): Promise<void> {
+  const target = focusTarget.value;
+  if (!target) return;
+  focusTestMessage.value = "已受理：正在打开/切换到该应用并执行聚焦…";
+  try {
+    await testAppFocus(target);
+  } catch (error) {
+    focusTestMessage.value = error instanceof Error ? error.message : String(error);
+  }
 }
 
 /** 预设 id 集合（区分预设与自定义路径目标）。 */
@@ -747,7 +880,11 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
   const keys = [...modifiers, code];
   capturedChord = keys;
   captureDisplay.value = keys;
-  applyAction({ type: "shortcut", chord: { keys } });
+  if (capturePurpose.value === "focus_shortcut") {
+    applyFocusShortcut(keys);
+  } else {
+    applyAction({ type: "shortcut", chord: { keys } });
+  }
   statusMessage.value = `已录入 ${chordLabel({ keys })}，松开全部按键后完成`;
 }
 
@@ -1512,6 +1649,72 @@ onUnmounted(() => {
             <button v-for="app in filteredCustomApps" :key="app.path" class="chip" type="button"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
+          </div>
+          <div v-if="focusTarget" class="focus-profile">
+            <p class="muted focus-profile-title">打开后聚焦方式</p>
+            <div class="preset-grid">
+              <button
+                v-for="option in focusStrategyOptions"
+                :key="option.value"
+                class="chip"
+                :class="{ selected: (focusProfile?.strategy ?? 'open_only') === option.value }"
+                type="button"
+                @click="applyFocusStrategy(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <div v-if="focusProfile?.strategy === 'app_shortcut'" class="focus-shortcut-row">
+              <button
+                class="chip"
+                :class="{ selected: capturingShortcut && capturePurpose === 'focus_shortcut' }"
+                type="button"
+                :disabled="captureStarting"
+                @click="
+                  capturingShortcut && capturePurpose === 'focus_shortcut'
+                    ? finishShortcutCapture('已取消录入')
+                    : beginFocusShortcutCapture()
+                "
+              >
+                {{ capturingShortcut && capturePurpose === "focus_shortcut" ? "录入中…（按 Esc 取消）" : "录入聚焦快捷键" }}
+              </button>
+              <span class="muted">
+                {{
+                  focusProfile?.shortcut?.keys?.length
+                    ? `当前：${chordLabel(focusProfile.shortcut)}`
+                    : "尚未录入"
+                }}
+              </span>
+            </div>
+            <div v-if="focusProfile?.strategy === 'recorded_element'" class="focus-learn-row">
+              <button
+                class="chip"
+                type="button"
+                :disabled="focusLearnState === 'learning'"
+                @click="startFocusLearning"
+              >
+                {{ focusLearnState === "learning" ? "学习中…" : "开始学习输入框" }}
+              </button>
+              <button
+                v-if="focusProfile?.recorded"
+                class="chip"
+                type="button"
+                @click="clearRecordedFocus"
+              >
+                清除记录
+              </button>
+              <span class="muted">
+                {{ focusProfile?.recorded ? "已记录输入框" : "尚未记录" }}
+              </span>
+            </div>
+            <div class="focus-profile-actions">
+              <button class="chip" type="button" :disabled="!focusProfile?.strategy || focusProfile.strategy === 'open_only'" @click="testSelectedAppFocus">
+                测试打开与聚焦
+              </button>
+            </div>
+            <p v-if="focusLearnMessage" class="muted focus-learn-message">{{ focusLearnMessage }}</p>
+            <p v-if="focusTestMessage" class="muted focus-test-message">{{ focusTestMessage }}</p>
+            <p v-if="lastFocusNotice" class="muted focus-result-message">{{ lastFocusNotice }}</p>
           </div>
         </section>
 

@@ -44,6 +44,12 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// 聚焦当前前台应用的输入框（异步受理：真正的重试与结果由聚焦服务汇报，
     /// 失败原因见 `button_mapping_snapshot().last_focus`）。
     fn test_focus_input(&self) -> Result<(), PlatformError>;
+    /// 打开/激活目标应用并按聚焦档案聚焦（UI「测试打开与聚焦」）。
+    fn test_app_focus(&self, target: String) -> Result<(), PlatformError>;
+    /// 「学习输入框」：阻塞至多 3 秒，返回捕获到的可编辑目标特征。
+    fn learn_focus_target(
+        &self,
+    ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
     /// 打开/激活预设应用（测试按钮与引擎共用路径）。
@@ -169,6 +175,16 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn test_focus_input(&self) -> Result<(), PlatformError> {
         WindowsPlatform::test_focus_input(self)
+    }
+
+    fn test_app_focus(&self, target: String) -> Result<(), PlatformError> {
+        WindowsPlatform::test_app_focus(self, &target)
+    }
+
+    fn learn_focus_target(
+        &self,
+    ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError> {
+        WindowsPlatform::learn_focus_target(self)
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
@@ -545,6 +561,26 @@ mod simulation {
                 state.send_input.submitted_batches.saturating_add(1);
             state.send_input.last_error = None;
             Ok(())
+        }
+
+        fn test_app_focus(&self, _target: String) -> Result<(), PlatformError> {
+            // 仿真环境不真实启动应用；受理即视为通过（与 launch_app 同口径）。
+            Ok(())
+        }
+
+        fn learn_focus_target(
+            &self,
+        ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError> {
+            // 固定样本：CI 断言 UI 的学习状态机能落到「已记录输入框」。
+            Ok(sayall_windows::focus::RecordedFocusTarget {
+                control_type: "Edit".to_owned(),
+                automation_id: "ci-simulation-input".to_owned(),
+                class_name: "RichEdit".to_owned(),
+                name: "仿真输入框".to_owned(),
+                window_title: String::new(),
+                normalized_rect: None,
+                context_tokens: Vec::new(),
+            })
         }
 
         fn voice_hold_hotkey(&self) -> Option<KeyChord> {

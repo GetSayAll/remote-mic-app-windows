@@ -3,6 +3,7 @@ import {
   connectRemote,
   disconnectRemote,
   getAudioSnapshot,
+  getButtonMappings,
   getDiagnosticReport,
   getRawInputSnapshot,
   getRuntimeSnapshot,

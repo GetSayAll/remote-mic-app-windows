@@ -35,6 +35,12 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       lastError: null,
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    learnFocusTarget: vi.fn(async () => ({
+      controlType: "Edit",
+      automationId: "chat-input",
+      className: "RichEdit",
+    })),
+    testAppFocus: vi.fn(async () => undefined),
     exportButtonMappingConfiguration: vi.fn(async () => true),
     importButtonMappingConfiguration: vi.fn(async () => ({
       enabled: false,
@@ -123,6 +129,7 @@ import {
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   importButtonMappingConfiguration,
+  learnFocusTarget,
   subscribeButtonEdges,
   subscribeButtonGestures,
   saveButtonMappings,
@@ -213,6 +220,13 @@ beforeEach(() => {
   vi.mocked(subscribeButtonEdges).mockClear();
   vi.mocked(subscribeButtonGestures).mockClear();
   vi.mocked(saveButtonMappings).mockClear();
+  // mockClear 只清调用记录，**不清实现**：学习输入框的默认实现要在每个用例里重置。
+  vi.mocked(learnFocusTarget).mockClear();
+  vi.mocked(learnFocusTarget).mockResolvedValue({
+    controlType: "Edit",
+    automationId: "chat-input",
+    className: "RichEdit",
+  });
   vi.mocked(exportButtonMappingConfiguration).mockClear();
   vi.mocked(importButtonMappingConfiguration).mockClear();
   vi.mocked(startShortcutCapture).mockClear();
@@ -448,8 +462,75 @@ describe("buttons mapping page", () => {
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
-  it("configures mouse actions with independent validated amounts", async () => {
+  it("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
     const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    const notepadChip = editor.findAll(".chip").find((chip) => chip.text() === "记事本");
+    expect(notepadChip).toBeDefined();
+    await notepadChip!.trigger("click");
+    await flushPromises();
+
+    // 选中目标后出现聚焦方式面板，默认「只打开应用」。
+    const panel = editor.find(".focus-profile");
+    expect(panel.exists()).toBe(true);
+    const recordedChip = panel
+      .findAll(".chip")
+      .find((chip) => chip.text() === "聚焦已记录的输入框");
+    await recordedChip!.trigger("click");
+    await vi.waitFor(() => {
+      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+        focusProfiles?: Record<string, { strategy: string }>;
+      };
+      if (saved?.focusProfiles?.notepad?.strategy !== "recorded_element") {
+        throw new Error("策略未写进聚焦档案");
+      }
+    });
+
+    // 切换策略时必须丢掉异策略字段（Rust 侧 normalized 会整条丢弃不自洽的档案）。
+    const shortcutChip = panel
+      .findAll(".chip")
+      .find((chip) => chip.text() === "用应用快捷键聚焦");
+    await shortcutChip!.trigger("click");
+    await vi.waitFor(() => {
+      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+        focusProfiles?: Record<string, { strategy: string; recorded?: unknown }>;
+      };
+      const profile = saved?.focusProfiles?.notepad;
+      if (profile?.strategy !== "app_shortcut" || profile.recorded !== undefined) {
+        throw new Error("切换策略后仍带着旧策略字段");
+      }
+    });
+
+    // 学习输入框：写入 recorded 并置为 recorded_element。
+    await recordedChip!.trigger("click");
+    await flushPromises();
+    const learnChip = panel.findAll(".chip").find((chip) => chip.text() === "开始学习输入框");
+    expect(learnChip).toBeDefined();
+    await learnChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (!wrapper.text().includes("已记录该输入框（只记录控件特征，不含输入内容）")) {
+        throw new Error("学习结果提示未出现");
+      }
+    });
+    const learned = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      focusProfiles?: Record<string, { strategy: string; recorded?: { automationId: string } }>;
+    };
+    expect(learned.focusProfiles?.notepad?.strategy).toBe("recorded_element");
+    expect(learned.focusProfiles?.notepad?.recorded?.automationId).toBe("chat-input");
+
+    // 学习失败时给可解释文案，不静默。
+    vi.mocked(learnFocusTarget).mockRejectedValueOnce(new Error("no_candidate"));
+    await learnChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (!wrapper.text().includes("no_candidate")) {
+        throw new Error("学习失败文案未出现");
+      }
+    });
+  });
+
+  it("configures mouse actions with independent validated amounts", async () => {    const wrapper = await mountPage();
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")

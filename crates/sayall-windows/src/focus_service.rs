@@ -197,6 +197,9 @@ pub trait FocusBackend: Send + Sync {
     fn process_alive(&self, pid: u32) -> bool;
     /// 一次聚焦尝试：扫描 + 选择 + 聚焦 + 读回。
     fn attempt(&self, pid: u32, choice: &FocusChoice) -> AttemptResult;
+    /// 「学习输入框」单次采样：返回**当前系统焦点**对应的可编辑目标；焦点在
+    /// 本进程、拿不到元素或元素不合格（只读/敏感/不可聚焦）时返回 `None`。
+    fn sample_learning_target(&self) -> Option<crate::focus::RecordedFocusTarget>;
 }
 
 /// 聚焦任务。
@@ -273,10 +276,20 @@ impl FocusShared {
     }
 }
 
+/// 工作线程队列里的一项作业。
+enum FocusJob {
+    /// 聚焦任务（提交即忘，结果落 `FocusReport`）。
+    Task { request_id: u64, task: FocusTask },
+    /// 学习采样（同步等待结果：最多 `LEARN_WINDOW`，不受聚焦重试预算影响）。
+    Learn {
+        reply: Sender<Result<crate::focus::RecordedFocusTarget, FocusFailure>>,
+    },
+}
+
 /// 串行聚焦服务：单一工作线程按提交顺序执行任务，不阻塞按键/手势线程。
 pub struct FocusRunner {
     shared: Arc<FocusShared>,
-    sender: Option<Sender<(u64, FocusTask)>>,
+    sender: Option<Sender<FocusJob>>,
     exited: Option<Receiver<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
     join_timeout: Duration,
@@ -284,7 +297,7 @@ pub struct FocusRunner {
 
 impl FocusRunner {
     pub fn spawn(backend: Arc<dyn FocusBackend>, policy: FocusRetryPolicy) -> Self {
-        let (sender, receiver) = channel::<(u64, FocusTask)>();
+        let (sender, receiver) = channel::<FocusJob>();
         let (exit_sender, exited) = channel::<()>();
         let shared = Arc::new(FocusShared {
             backend,
@@ -297,13 +310,21 @@ impl FocusRunner {
         let thread = std::thread::Builder::new()
             .name("sayall-focus".to_owned())
             .spawn(move || {
-                while let Ok((request_id, task)) = receiver.recv() {
-                    // 排队期间被更新请求取代：直接跳过，不做任何 UIA 调用。
-                    if worker_shared.superseded(request_id) {
-                        continue;
+                while let Ok(job) = receiver.recv() {
+                    match job {
+                        FocusJob::Task { request_id, task } => {
+                            // 排队期间被更新请求取代：直接跳过，不做任何 UIA 调用。
+                            if worker_shared.superseded(request_id) {
+                                continue;
+                            }
+                            let report = run_task(&worker_shared, request_id, &task);
+                            worker_shared.record(report);
+                        }
+                        FocusJob::Learn { reply } => {
+                            let result = run_learn(&worker_shared);
+                            let _ = reply.send(result);
+                        }
                     }
-                    let report = run_task(&worker_shared, request_id, &task);
-                    worker_shared.record(report);
                 }
                 let _ = exit_sender.send(());
             })
@@ -324,8 +345,30 @@ impl FocusRunner {
         }
         let request_id = self.shared.gate.begin();
         let sender = self.sender.as_ref()?;
-        sender.send((request_id, task)).ok()?;
+        sender.send(FocusJob::Task { request_id, task }).ok()?;
         Some(request_id)
+    }
+
+    /// 「学习输入框」：在 [`crate::focus::LEARN_WINDOW`] 内轮询采样，返回稳定命中的
+    /// 目标；窗口内没有稳定命中返回 `Err(NoCandidate)`。
+    ///
+    /// 与聚焦任务共用同一工作线程（同一 UIA 会话串行使用）；学习作业不产生
+    /// 新的请求代次，因此不会作废排队中的聚焦请求。
+    pub fn learn_target(&self) -> Result<crate::focus::RecordedFocusTarget, FocusFailure> {
+        if self.shared.shutdown.load(Ordering::Relaxed) {
+            return Err(FocusFailure::Cancelled);
+        }
+        let (reply, receiver) = channel();
+        let Some(sender) = self.sender.as_ref() else {
+            return Err(FocusFailure::Cancelled);
+        };
+        sender
+            .send(FocusJob::Learn { reply })
+            .map_err(|_| FocusFailure::Cancelled)?;
+        let wait = crate::focus::LEARN_WINDOW + Duration::from_secs(1);
+        receiver
+            .recv_timeout(wait)
+            .unwrap_or(Err(FocusFailure::Timeout))
     }
 
     /// 最近一次执行结果（供 UI 反馈与诊断）。
@@ -389,6 +432,30 @@ fn run_task(shared: &FocusShared, request_id: u64, task: &FocusTask) -> FocusRep
         reason: outcome.failure().map(|reason| reason.as_str().to_owned()),
         attempts: outcome.attempts(),
         elapsed_ms: outcome.elapsed_ms(),
+    }
+}
+
+fn run_learn(shared: &FocusShared) -> Result<crate::focus::RecordedFocusTarget, FocusFailure> {
+    use crate::focus::{learning_stable_target, LEARN_POLL_INTERVAL, LEARN_WINDOW};
+    let backend = shared.backend.as_ref();
+    let started = backend.now_ms();
+    let mut samples = Vec::new();
+    loop {
+        if shared.shutdown.load(Ordering::Relaxed) {
+            return Err(FocusFailure::Cancelled);
+        }
+        samples.push(backend.sample_learning_target());
+        if let Some(target) = learning_stable_target(&samples) {
+            focus_note("focus_learn phase=completed terminal_result=passed".to_owned());
+            return Ok(target);
+        }
+        if backend.now_ms().saturating_sub(started) >= LEARN_WINDOW.as_millis() as u64 {
+            focus_note(
+                "focus_learn phase=completed terminal_result=failed reason=no_candidate".to_owned(),
+            );
+            return Err(FocusFailure::NoCandidate);
+        }
+        backend.sleep(LEARN_POLL_INTERVAL);
     }
 }
 
@@ -580,6 +647,8 @@ mod tests {
         current: u32,
         results: Mutex<std::collections::VecDeque<AttemptResult>>,
         attempts: Mutex<Vec<FocusChoice>>,
+        learning_samples:
+            Mutex<std::collections::VecDeque<Option<crate::focus::RecordedFocusTarget>>>,
         gate: Mutex<Option<Receiver<()>>>,
         started: Mutex<Option<Sender<()>>>,
         elapsed_ms: std::sync::atomic::AtomicU64,
@@ -592,10 +661,18 @@ mod tests {
                 current,
                 results: Mutex::new(results.into()),
                 attempts: Mutex::new(Vec::new()),
+                learning_samples: Mutex::new(std::collections::VecDeque::new()),
                 gate: Mutex::new(None),
                 started: Mutex::new(None),
                 elapsed_ms: std::sync::atomic::AtomicU64::new(0),
             })
+        }
+
+        fn with_learning_samples(
+            self: &Arc<Self>,
+            samples: Vec<Option<crate::focus::RecordedFocusTarget>>,
+        ) {
+            *self.learning_samples.lock().unwrap() = samples.into();
         }
 
         fn attempts(&self) -> Vec<FocusChoice> {
@@ -641,6 +718,10 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(AttemptResult::Focused)
+        }
+
+        fn sample_learning_target(&self) -> Option<crate::focus::RecordedFocusTarget> {
+            self.learning_samples.lock().unwrap().pop_front().flatten()
         }
     }
 
@@ -729,6 +810,65 @@ mod tests {
         assert_eq!(report.reason.as_deref(), Some("self_foreground"));
         assert_eq!(report.attempts, 1);
         assert!(backend.attempts().is_empty(), "自身前台不得发起扫描");
+    }
+
+    fn learning_target(automation_id: &str) -> crate::focus::RecordedFocusTarget {
+        crate::focus::RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            automation_id: automation_id.to_owned(),
+            class_name: "RichEdit".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn learning_requires_a_stable_candidate_across_samples() {
+        use crate::focus::learning_stable_target;
+        // 只有一闪而过的候选（中途为 None 或换了别的元素）不算学到。
+        assert_eq!(learning_stable_target(&[]), None);
+        assert_eq!(
+            learning_stable_target(&[Some(learning_target("a"))]),
+            None,
+            "单次采样不足以认定"
+        );
+        let a = Some(learning_target("a"));
+        let b = Some(learning_target("b"));
+        assert_eq!(
+            learning_stable_target(&[a.clone(), None, a.clone()]),
+            None,
+            "中间采到空必须打断连续段"
+        );
+        assert_eq!(
+            learning_stable_target(&[a.clone(), b.clone()]),
+            None,
+            "两次不同元素不算稳定"
+        );
+        assert_eq!(
+            learning_stable_target(&[b, a.clone(), a.clone()]),
+            Some(learning_target("a")),
+            "连续两次相同才算稳定"
+        );
+    }
+
+    #[test]
+    fn runner_learning_succeeds_on_stable_samples_and_times_out_otherwise() {
+        let target = learning_target("chat-input");
+        let backend = FakeBackend::new(7, 42, vec![]);
+        backend.with_learning_samples(vec![None, Some(target.clone()), Some(target.clone())]);
+        let runner = FocusRunner::spawn(
+            Arc::clone(&backend) as Arc<dyn FocusBackend>,
+            FocusRetryPolicy::default(),
+        );
+        assert_eq!(runner.learn_target(), Ok(target));
+
+        // 采样全是空（用户在窗口期内没点目标输入框）→ 3 秒窗口后 no_candidate。
+        let empty = FakeBackend::new(7, 42, vec![]);
+        empty.with_learning_samples(vec![None; 40]);
+        let runner = FocusRunner::spawn(
+            Arc::clone(&empty) as Arc<dyn FocusBackend>,
+            FocusRetryPolicy::default(),
+        );
+        assert_eq!(runner.learn_target(), Err(FocusFailure::NoCandidate));
     }
 
     #[test]

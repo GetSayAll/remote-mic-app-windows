@@ -84,6 +84,10 @@ pub trait MappingInjector: Send + Sync {
     fn focus_report(&self) -> Option<crate::focus_service::FocusReport> {
         None
     }
+    /// 「学习输入框」：在 3 秒窗口内轮询系统焦点，返回稳定命中的可编辑目标。
+    ///
+    /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
+    fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
 }
 
 /// 生产注入器：批量 SendInput tap（DOWN+UP），部分交付时由 send_input 层回滚。
@@ -214,6 +218,12 @@ impl MappingInjector for SendInputInjector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         slot.as_ref().and_then(|runner| runner.last_report())
+    }
+
+    fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+        self.with_focus_runner(|runner| runner.learn_target())
+            .unwrap_or(Err(crate::focus_service::FocusFailure::Cancelled))
+            .map_err(|reason| reason.as_str().to_owned())
     }
 }
 
@@ -378,6 +388,17 @@ impl ButtonMappingRuntime {
     /// UI「测试」按钮：走与手势分发相同的注入器路径（异步受理，结果见快照）。
     pub fn focus_frontmost_now(&self) -> Result<(), String> {
         self.injector.focus_frontmost()
+    }
+
+    /// UI「测试打开与聚焦」：先打开/激活目标应用，再按其聚焦档案聚焦。
+    pub fn launch_app_and_focus_now(&self, target: &str) -> Result<(), String> {
+        let profile = self.mappings().focus_profiles.get(target).cloned();
+        self.injector.launch_app_and_focus(target, profile.as_ref())
+    }
+
+    /// UI「开始学习输入框」：阻塞至多 3 秒，返回捕获到的输入框特征。
+    pub fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+        self.injector.learn_focus_target()
     }
 
     /// 订阅语义按键边沿（Tauri 层转发为前端事件；画布高亮数据源）。
@@ -949,6 +970,7 @@ mod tests {
         clicks: StdMutex<Vec<MouseClickKind>>,
         moves: StdMutex<Vec<(MoveDirection, u16)>>,
         focus_requests: StdMutex<Vec<FocusCall>>,
+        learn_results: StdMutex<Vec<Result<crate::focus::RecordedFocusTarget, String>>>,
         fail: bool,
     }
 
@@ -1034,6 +1056,18 @@ mod tests {
                     strategy,
                 });
             Ok(())
+        }
+        fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+            if self.fail {
+                return Err("学习输入框失败（测试）".to_owned());
+            }
+            self.learn_results.lock().unwrap().pop().unwrap_or_else(|| {
+                Ok(crate::focus::RecordedFocusTarget {
+                    control_type: "Edit".to_owned(),
+                    automation_id: "chat-input".to_owned(),
+                    ..Default::default()
+                })
+            })
         }
     }
 
