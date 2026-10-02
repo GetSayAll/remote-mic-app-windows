@@ -7,9 +7,9 @@ import {
   getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
-  reportTrayIconState,
   saveButtonMappings,
   scanPairedRemotes,
+  setAppIcon,
   stopRawInput,
   testButtonMapping,
   type PlatformSnapshot,
@@ -85,27 +85,30 @@ async function openPage(label: string, heading = label): Promise<void> {
 /**
  * 设置页外部入口（官网 / GitHub）的 CI 判据。
  *
- * 两层边界刻意分开：capability 白名单是产品配置，被 opener 拒绝
- * （"Not allowed to open url"）必须报红；runner 上没有可用的默认浏览器只是
- * 环境差异，如实记为 deferred——与"打开日志目录"同款处理，不制造与本产品
- * 无关的红灯。
+ * 2026-10-02 用户指定：成功不再显示任何提示，只有失败就地给原因。因此判据是
+ * "在窗口期内要么出现失败原因、要么保持静默"；capability 白名单是产品配置，
+ * 被 opener 拒绝（"Not allowed to open url"）必须报红，runner 上没有可用的
+ * 默认浏览器只是环境差异（失败文案会如实带出来），不制造与本产品无关的红灯。
  */
 async function recordExternalEntry(label: string, steps: string[]): Promise<void> {
   await clickButton(label);
-  const message = await waitFor(
-    () => {
-      const text = document.querySelector(".link-message")?.textContent?.trim();
-      return text && !text.startsWith("正在打开") ? text : null;
-    },
-    `设置页“${label}”入口返回终态`,
-  );
+  const deadline = Date.now() + 3_000;
+  let message: string | null = null;
+  while (Date.now() < deadline) {
+    const text = document.querySelector(".link-message")?.textContent?.trim();
+    if (text) {
+      message = text;
+      break;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
   assert(
-    !message.includes("Not allowed to open url"),
+    message === null || !message.includes("Not allowed to open url"),
     `设置页“${label}”入口被 opener capability 拒绝：${message}`,
   );
   steps.push(
-    message.startsWith("已在系统默认浏览器打开")
-      ? `设置页“${label}”入口经真实 IPC 交由系统浏览器打开`
+    message === null
+      ? `设置页“${label}”入口经真实 IPC 交由系统浏览器打开（成功不显示提示）`
       : `设置页“${label}”入口返回不可用（deferred）：${message}`,
   );
 }
@@ -288,20 +291,23 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(!document.querySelector('[role="alert"]'), "恢复系统外观后显示错误");
   steps.push("设置页深色/系统外观经 Windows WebView、Tauri capability 与设置持久化闭环");
 
-  // 托盘图标样式（2026-10-02）：仿真后端没有真实托盘，这里只证明控件与 IPC
-  // 往返可用、非法状态不残留（真实托盘换图属真机验收，见 Testing/WindowsRC003Preview.md）。
-  const trayStyle = document.querySelector<HTMLInputElement>(
-    'input[name="tray-icon-style"][value="status_icon"]:not(:disabled)',
+  // 应用图标（2026-10-02）：仿真后端不建托盘，这里证明选项、IPC 与持久化往返
+  // 可用，并且窗口图标接口不报错（真实托盘/任务栏换图属真机验收，见
+  // Testing/WindowsRC003Preview.md 用例十四）。
+  const appIconOption = document.querySelector<HTMLInputElement>(
+    'input[name="app-icon"][value="faceted-duck"]:not(:disabled)',
   );
-  assert(trayStyle !== null, "设置页缺少托盘图标样式选项");
-  trayStyle.click();
-  await waitFor(() => (trayStyle.checked ? true : null), "托盘图标样式切换");
-  assert(!document.querySelector('[role="alert"]'), "切换托盘图标样式后显示错误");
-  // 直达断言：托盘状态上报命令的参数契约（前端 `{ state }` ↔ Rust 命令参数名）。
-  // 名字不匹配时 Tauri 判成缺参，前端只会看到 "IPC 不可用"，托盘图标永不更新
-  // （2026-10-02 本机仿真现场）；这条断言让 CI 直接红在契约上。
-  await reportTrayIconState({ connected: false, streaming: false });
-  steps.push("设置页托盘图标样式切换经真实 IPC 与设置持久化往返");
+  assert(appIconOption !== null, "设置页缺少应用图标选项");
+  appIconOption.click();
+  await waitFor(() => (appIconOption.checked ? true : null), "应用图标切换");
+  assert(!document.querySelector('[role="alert"]'), "切换应用图标后显示错误");
+  // 直达断言：命令参数契约（前端 `{ identifier }` ↔ Rust 命令参数名）。名字不匹配
+  // 时 Tauri 判成缺参，前端只会看到 "IPC 不可用"（2026-10-02 本机仿真现场教训）。
+  const appliedIcon = await setAppIcon("faceted-duck");
+  assert(appliedIcon === "faceted-duck", `仿真切换应用图标没有生效：${appliedIcon}`);
+  const restoredIcon = await setAppIcon("standard");
+  assert(restoredIcon === "standard", `仿真还原应用图标没有生效：${restoredIcon}`);
+  steps.push("设置页应用图标选项经真实 IPC 与设置持久化往返");
 
   await openPage("连接");
   steps.push("四个侧栏页面均在 Windows WebView 中完成导航和渲染");

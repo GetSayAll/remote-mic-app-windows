@@ -4,7 +4,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Ref } from "vue";
 import { ref } from "vue";
-import type { RuntimeSnapshot, TrayIconStyle } from "../lib/bridge";
+import type { RuntimeSnapshot } from "../lib/bridge";
 import { useAppUpdate, type AppUpdatePhase } from "../lib/app-update";
 import SettingsPage from "./SettingsPage.vue";
 
@@ -27,8 +27,8 @@ const setThemePreference = vi.fn<(value: "system" | "light" | "dark") => Promise
 const bridge = vi.hoisted(() => ({
   getLaunchAtLogin: vi.fn<() => Promise<boolean>>(),
   setLaunchAtLogin: vi.fn<(enabled: boolean) => Promise<boolean>>(),
-  getTrayIconStyle: vi.fn<() => Promise<"app_icon" | "status_icon">>(),
-  setTrayIconStyle: vi.fn<(style: "app_icon" | "status_icon") => Promise<"app_icon" | "status_icon">>(),
+  getAppIcon: vi.fn<() => Promise<"standard" | "faceted-duck">>(),
+  setAppIcon: vi.fn<(identifier: "standard" | "faceted-duck") => Promise<"standard" | "faceted-duck">>(),
 }));
 
 vi.mock("../lib/app-update", async (importOriginal) => {
@@ -140,8 +140,8 @@ describe("settings page", () => {
     setThemePreference.mockReset();
     bridge.getLaunchAtLogin.mockReset().mockResolvedValue(false);
     bridge.setLaunchAtLogin.mockReset();
-    bridge.getTrayIconStyle.mockReset().mockResolvedValue("app_icon");
-    bridge.setTrayIconStyle.mockReset();
+    bridge.getAppIcon.mockReset().mockResolvedValue("standard");
+    bridge.setAppIcon.mockReset();
   });
 
   it("页面标题为「设置」，顶部显示应用标识、标语与当前版本", async () => {
@@ -153,8 +153,11 @@ describe("settings page", () => {
     expect(wrapper.text()).toContain("让语音触手可及");
     expect(wrapper.text()).toContain("当前版本");
     expect(wrapper.text()).toContain("0.5.0");
-    // 版本号来自运行快照（安装包同源），运行时还没读到时不编造版本。
     expect(wrapper.text()).toContain("检查预览版更新");
+    // 2026-10-02 用户指定：这些说明文字都去掉。
+    expect(wrapper.text()).not.toContain("预览版包含新功能");
+    expect(wrapper.text()).not.toContain("该选择会在重启后保持");
+    expect(wrapper.text()).not.toContain("跟随 Windows 的应用颜色模式");
   });
 
   it("外观选择器提供系统、浅色、深色三档并立即保存", async () => {
@@ -167,7 +170,6 @@ describe("settings page", () => {
       "dark",
     ]);
     expect(radios[0].element.checked).toBe(true);
-    expect(wrapper.text()).toContain("跟随 Windows 的应用颜色模式");
 
     await radios[2].setValue(true);
     expect(setThemePreference).toHaveBeenCalledWith("dark");
@@ -188,7 +190,6 @@ describe("settings page", () => {
 
     await toggle.setValue(true);
     expect(setIncludePrereleases).toHaveBeenCalledWith(true);
-    expect(wrapper.text()).toContain("预览版包含新功能");
   });
 
   it("初始状态显示手动检查入口", () => {
@@ -218,6 +219,8 @@ describe("settings page", () => {
       "https://sayall.app/?from=win",
       "https://github.com/GetSayAll/remote-mic-app-windows",
     ]);
+    // 2026-10-02 用户指定：成功不再显示“已在系统默认浏览器打开…”这类提示。
+    expect(wrapper.find(".link-message").exists()).toBe(false);
     open.mockRestore();
   });
 
@@ -238,36 +241,43 @@ describe("settings page", () => {
     open.mockRestore();
   });
 
-  it("托盘图标样式默认彩色应用图标，切换后保存并立即生效", async () => {
-    bridge.setTrayIconStyle.mockImplementation(async (style) => style);
+  it("应用图标默认内置图标，切换后保存并立即生效，顶部标识同步换图", async () => {
+    bridge.setAppIcon.mockImplementation(async (identifier) => identifier);
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
 
-    expect(bridge.getTrayIconStyle).toHaveBeenCalledTimes(1);
-    const radios = wrapper.findAll<HTMLInputElement>('input[name="tray-icon-style"]');
+    expect(bridge.getAppIcon).toHaveBeenCalledTimes(1);
+    const radios = wrapper.findAll<HTMLInputElement>('input[name="app-icon"]');
     expect(radios.map((radio) => radio.attributes("value"))).toEqual([
-      "app_icon",
-      "status_icon",
+      "standard",
+      "faceted-duck",
     ]);
     expect(radios[0].element.checked).toBe(true);
-    expect(wrapper.text()).toContain("未连接遥控器时变暗");
+    expect(wrapper.text()).toContain("应用图标");
+    expect(wrapper.text()).toContain("默认");
+    expect(wrapper.text()).toContain("几何鸭");
+    expect(wrapper.get("img.app-logo").attributes("src")).toBe("/app-logo.png");
 
     await radios[1].setValue(true);
-    expect(bridge.setTrayIconStyle).toHaveBeenCalledWith("status_icon");
+    expect(bridge.setAppIcon).toHaveBeenCalledWith("faceted-duck");
     expect(radios[1].element.checked).toBe(true);
+    // 顶部标识与窗口/托盘用同一个选择：切换后立即换成几何鸭。
+    expect(wrapper.get("img.app-logo").attributes("src")).toBe(
+      "/app-icon-faceted-duck.png",
+    );
   });
 
-  it("托盘图标样式保存失败时就地报错并回到实际生效的样式", async () => {
-    bridge.setTrayIconStyle.mockRejectedValue(new Error("保存托盘图标设置失败"));
-    bridge.getTrayIconStyle.mockResolvedValue("app_icon");
+  it("应用图标保存失败时就地报错并回到实际生效的图标", async () => {
+    bridge.setAppIcon.mockRejectedValue(new Error("保存应用图标设置失败"));
+    bridge.getAppIcon.mockResolvedValue("standard");
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
 
-    const radios = wrapper.findAll<HTMLInputElement>('input[name="tray-icon-style"]');
+    const radios = wrapper.findAll<HTMLInputElement>('input[name="app-icon"]');
     await radios[1].setValue(true);
     await flushPromises();
 
-    expect(wrapper.get('[role="alert"]').text()).toContain("保存托盘图标设置失败");
+    expect(wrapper.get('[role="alert"]').text()).toContain("保存应用图标设置失败");
     expect(radios[0].element.checked).toBe(true);
   });
 

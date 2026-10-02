@@ -12,6 +12,8 @@ pub use atvv::{AtvvCapabilities, AtvvCommand, AtvvControlEvent, AtvvError, AtvvU
 pub use frame::FrameAccumulator;
 pub use pcm::process_pcm;
 pub use pipeline::{AtvvVoicePipeline, PipelineError, PipelineOutput};
-pub use settings::{AppSettings, ThemePreference, TrayIconStyle, VoiceInputTool, VoiceTriggerMode};
+pub use settings::{
+    AppIconIdentifier, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
+};
 pub use statistics::{DailyUsage, UsageStatistics};
 pub use voice::{VoiceSession, VoiceSessionError, VoiceSessionEvent, VoiceSessionState};

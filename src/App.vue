@@ -17,14 +17,12 @@ import SettingsPage from "./pages/SettingsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
-import { createTrayIconReporter } from "./lib/tray-icon";
 
 const activePage = ref<PageId>(loadPersistedPage() ?? "buttons");
 watch(activePage, (page) => persistActivePage(page));
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
 const { bannerVisible, info: updateInfo, dismissBanner, runStartupSilentCheck } = useAppUpdate();
-const trayIconReporter = createTrayIconReporter();
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
 let initialRuntimeReported = false;
@@ -71,9 +69,6 @@ onMounted(async () => {
       runtime.value = await getRuntimeSnapshot();
       loadError.value = "";
       touchLiveness();
-      // 托盘图标只在"连接/语音状态变化"时投递（内部去重）：单色状态图标据此
-      // 决定是否变暗，与本段轮询同源，不新增轮询或线程。
-      void trayIconReporter.report(runtime.value);
       if (!initialRuntimeReported) {
         reportFrontendEvent({
           event: "runtime_snapshot",

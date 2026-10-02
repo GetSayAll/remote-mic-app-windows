@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import type { RuntimeSnapshot, ThemePreference, TrayIconStyle } from "../lib/bridge";
+import type { AppIconIdentifier, RuntimeSnapshot, ThemePreference } from "../lib/bridge";
 import {
+  getAppIcon,
   getLaunchAtLogin,
-  getTrayIconStyle,
   openGitHubRepository,
   openOfficialWebsite,
+  setAppIcon,
   setLaunchAtLogin,
-  setTrayIconStyle,
 } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
@@ -40,9 +40,9 @@ const themeOptions: Array<{ value: ThemePreference; label: string }> = [
   { value: "dark", label: "深色" },
 ];
 
-const trayStyleOptions: Array<{ value: TrayIconStyle; label: string; detail: string }> = [
-  { value: "app_icon", label: "彩色应用图标", detail: "与应用图标一致" },
-  { value: "status_icon", label: "单色状态图标", detail: "未连接遥控器时变暗" },
+const appIconOptions: Array<{ value: AppIconIdentifier; label: string; preview: string }> = [
+  { value: "standard", label: "默认", preview: "/app-logo.png" },
+  { value: "faceted-duck", label: "几何鸭", preview: "/app-icon-faceted-duck.png" },
 ];
 
 /** 版本号与安装包/更新器同源（package_info）；尚未读到时不编造版本。 */
@@ -92,29 +92,40 @@ const launchAtLoginReady = ref(false);
 const launchAtLoginBusy = ref(false);
 const launchAtLoginError = ref("");
 
-/** 托盘图标样式（2026-10-02）：默认彩色应用图标，切换后立即生效并持久化。 */
-const trayStyle = ref<TrayIconStyle>("app_icon");
-const trayStyleReady = ref(false);
-const trayStyleBusy = ref(false);
-const trayStyleError = ref("");
+/** 应用图标（2026-10-02）：默认内置图标；切换后窗口/任务栏、托盘与设置页顶部一起换。 */
+const appIcon = ref<AppIconIdentifier>("standard");
+const appIconReady = ref(false);
+const appIconBusy = ref(false);
+const appIconError = ref("");
+
+/** 顶部标识跟随选择实时换图，与窗口/托盘用同一个 ID。 */
+const appIconPreview = computed(
+  () => appIconOptions.find((option) => option.value === appIcon.value)?.preview ?? "/app-logo.png",
+);
 
 /**
  * “问题反馈”的外部入口（2026-10-01 用户指定：官网与 GitHub 入口；2026-10-02
  * 官网地址带 `?from=win` 来源标记）。打开动作一律走 bridge：浏览器预览开新标签，
  * Tauri 运行时的 URL 白名单在 capabilities/default.json。
  */
+/**
+ * 外部入口（2026-10-01 用户指定：官网与 GitHub 入口；2026-10-02 官网地址带
+ * `?from=win` 来源标记）。打开动作一律走 bridge：浏览器预览开新标签，Tauri
+ * 运行时的 URL 白名单在 capabilities/default.json。
+ *
+ * 2026-10-02 用户指定：成功不再显示任何提示（“已在系统默认浏览器打开…”已去掉），
+ * 只有失败就地给原因——失败文案不能省：capability 拒绝（Not allowed to open url）
+ * 与系统没有默认浏览器是两类不同问题，压成"打开失败"会让现场无法归因。
+ */
 const linkBusy = ref(false);
 const linkMessage = ref("");
 
-async function openEntry(open: () => Promise<void>, label: string): Promise<void> {
+async function openEntry(open: () => Promise<void>): Promise<void> {
   linkBusy.value = true;
-  linkMessage.value = `正在打开${label}…`;
+  linkMessage.value = "";
   try {
     await open();
-    linkMessage.value = `已在系统默认浏览器打开${label}`;
   } catch (error) {
-    // 失败就地显示原始原因：capability 拒绝（Not allowed to open url）与系统
-    // 没有默认浏览器是两类不同问题，压缩成"打开失败"会让现场无法归因。
     linkMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
     linkBusy.value = false;
@@ -122,11 +133,11 @@ async function openEntry(open: () => Promise<void>, label: string): Promise<void
 }
 
 async function onOpenOfficialWebsite(): Promise<void> {
-  await openEntry(openOfficialWebsite, "官网");
+  await openEntry(openOfficialWebsite);
 }
 
 async function onOpenGitHubRepository(): Promise<void> {
-  await openEntry(openGitHubRepository, "GitHub");
+  await openEntry(openGitHubRepository);
 }
 
 async function onCheck(): Promise<void> {
@@ -158,26 +169,26 @@ async function onLaunchAtLoginChange(event: Event): Promise<void> {
   }
 }
 
-async function onTrayStyleChange(event: Event): Promise<void> {
-  const desired = (event.target as HTMLInputElement).value as TrayIconStyle;
-  const previous = trayStyle.value;
+async function onAppIconChange(event: Event): Promise<void> {
+  const desired = (event.target as HTMLInputElement).value as AppIconIdentifier;
+  const previous = appIcon.value;
   // 乐观显示：先让界面与用户点击一致（与连接页选输入工具同款），失败再回到
-  // 实际生效的样式——否则失败时单选按钮会停在"点击过但没保存"的位置。
-  trayStyle.value = desired;
-  trayStyleBusy.value = true;
-  trayStyleError.value = "";
+  // 实际生效的图标——否则失败时单选按钮会停在"点击过但没保存"的位置。
+  appIcon.value = desired;
+  appIconBusy.value = true;
+  appIconError.value = "";
   try {
-    trayStyle.value = await setTrayIconStyle(desired);
+    appIcon.value = await setAppIcon(desired);
   } catch (error) {
-    trayStyleError.value = error instanceof Error ? error.message : String(error);
+    appIconError.value = error instanceof Error ? error.message : String(error);
     try {
-      trayStyle.value = await getTrayIconStyle();
+      appIcon.value = await getAppIcon();
     } catch {
       // 读回也失败时退回最后一次已知生效值，错误信息已经给出原因。
-      trayStyle.value = previous;
+      appIcon.value = previous;
     }
   } finally {
-    trayStyleBusy.value = false;
+    appIconBusy.value = false;
   }
 }
 
@@ -189,10 +200,10 @@ onMounted(() => {
     // 就绪标志与初值在同一渲染批次生效：开关此时才被创建，创建即带正确
     // checked，不产生属性变更，故无过渡可触发（无需禁用过渡或等待绘制）。
     .finally(() => { launchAtLoginReady.value = true; });
-  void getTrayIconStyle()
-    .then((style) => { trayStyle.value = style; })
-    .catch((error) => { trayStyleError.value = error instanceof Error ? error.message : String(error); })
-    .finally(() => { trayStyleReady.value = true; });
+  void getAppIcon()
+    .then((identifier) => { appIcon.value = identifier; })
+    .catch((error) => { appIconError.value = error instanceof Error ? error.message : String(error); })
+    .finally(() => { appIconReady.value = true; });
 });
 
 /** 行内图标：形状对齐 Mac 设置页各行的 SF Symbols（Windows 无 SF Symbols）。 */
@@ -206,7 +217,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
     // SF "power"：电源圆环 + 竖线
     strokes: ["M12 3.6v7.4", "M7.3 6.4a7 7 0 1 0 9.4 0"],
   },
-  tray: {
+  app_icon: {
     // SF "app.badge" 近似：应用方块 + 右下角标
     strokes: [
       "M4.6 3.4h10.4a1.6 1.6 0 0 1 1.6 1.6v10.4a1.6 1.6 0 0 1-1.6 1.6H4.6A1.6 1.6 0 0 1 3 15.4V5a1.6 1.6 0 0 1 1.6-1.6z",
@@ -234,7 +245,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
     <!-- 顶部模块（对齐 Mac 设置页：左边应用标识，右边版本与检查更新）。 -->
     <article class="card settings-overview">
       <div class="overview-identity">
-        <img class="app-logo" src="/app-logo.png" alt="无线麦 SayAll 应用图标" />
+        <img class="app-logo" :src="appIconPreview" alt="无线麦 SayAll 应用图标" />
         <h2>无线麦 SayAll</h2>
         <p class="muted">让语音触手可及</p>
       </div>
@@ -284,8 +295,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
             {{ failed ? "重试检查" : "检查更新…" }}
           </button>
-          <!-- 预览通道说明保留在按钮旁：默认关闭，开启后才会发现预览版。 -->
-          <p class="muted prerelease-note">默认关闭。预览版包含新功能，但稳定性可能低于正式版。</p>
         </div>
         <p v-if="preferenceError" class="update-error">{{ preferenceError }}</p>
 
@@ -371,9 +380,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </label>
           </div>
         </div>
-        <p class="row-note muted">
-          {{ themePreference === "system" ? "跟随 Windows 的应用颜色模式。" : "该选择会在重启后保持。" }}
-        </p>
         <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
 
         <div class="settings-row">
@@ -414,13 +420,13 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           <span class="settings-row-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none">
               <path
-                v-for="(path, index) in ROW_ICONS.tray.fills"
+                v-for="(path, index) in ROW_ICONS.app_icon.fills"
                 :key="`tf${index}`"
                 :d="path"
                 fill="currentColor"
               />
               <path
-                v-for="(path, index) in ROW_ICONS.tray.strokes"
+                v-for="(path, index) in ROW_ICONS.app_icon.strokes"
                 :key="`ts${index}`"
                 :d="path"
                 stroke="currentColor"
@@ -431,51 +437,29 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
           </span>
           <div class="settings-row-text">
-            <strong>托盘图标</strong>
-            <p class="muted">选择通知区域里显示的图标。</p>
+            <strong>应用图标</strong>
           </div>
-          <div class="tray-style-selector" role="radiogroup" aria-label="托盘图标">
+          <div class="app-icon-selector" role="radiogroup" aria-label="应用图标">
             <label
-              v-for="option in trayStyleOptions"
+              v-for="option in appIconOptions"
               :key="option.value"
-              class="tray-style-option"
-              :class="{ selected: trayStyle === option.value }"
-              :title="option.detail"
+              class="app-icon-option"
+              :class="{ selected: appIcon === option.value }"
             >
               <input
                 type="radio"
-                name="tray-icon-style"
+                name="app-icon"
                 :value="option.value"
-                :checked="trayStyle === option.value"
-                :disabled="!trayStyleReady || trayStyleBusy"
-                @change="onTrayStyleChange"
+                :checked="appIcon === option.value"
+                :disabled="!appIconReady || appIconBusy"
+                @change="onAppIconChange"
               />
-              <img
-                v-if="option.value === 'app_icon'"
-                src="/app-logo.png"
-                alt=""
-                aria-hidden="true"
-              />
-              <template v-else>
-                <img
-                  class="tray-preview-light"
-                  src="/status-icon-black.png"
-                  alt=""
-                  aria-hidden="true"
-                />
-                <img
-                  class="tray-preview-dark"
-                  src="/status-icon-white.png"
-                  alt=""
-                  aria-hidden="true"
-                />
-              </template>
+              <img :src="option.preview" alt="" aria-hidden="true" />
               <span>{{ option.label }}</span>
-              <small class="tray-style-detail muted">{{ option.detail }}</small>
             </label>
           </div>
         </div>
-        <p v-if="trayStyleError" class="error-text" role="alert">{{ trayStyleError }}</p>
+        <p v-if="appIconError" class="error-text" role="alert">{{ appIconError }}</p>
       </div>
     </section>
 
@@ -553,7 +537,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 .check-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .check-button { display: inline-flex; align-items: center; gap: 7px; }
 .check-button svg { width: 15px; height: 15px; }
-.prerelease-note { margin: 0; font-size: 12.5px; }
 .settings-divider { width: 100%; height: 1px; margin: 2px 0; border: 0; background: var(--border); }
 .update-status { margin: 0; font-size: 13.5px; line-height: 1.5; }
 .update-status.success { color: var(--success-text); font-weight: 600; }
@@ -587,15 +570,14 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 .settings-row-text { min-width: 0; }
 .settings-row-text strong { font-size: 14px; }
 .settings-row-text p { margin: 3px 0 0; font-size: 13px; }
-.row-note { margin: 0 0 0 50px; font-size: 12.5px; }
 /* 行内错误与行内说明共用左缩进，读起来仍属于上一行。 */
 .settings-group > .error-text { margin: 0 0 8px 50px; }
 
-/* 托盘图标样式：两个带预览图的选项（选中态用强调色描边）。 */
-.tray-style-selector { display: flex; gap: 8px; }
-.tray-style-option {
+/* 应用图标：两个带预览图的选项（选中态用强调色描边，对齐 Mac appIconPreferenceRow）。 */
+.app-icon-selector { display: flex; gap: 8px; }
+.app-icon-option {
   position: relative;
-  width: 108px;
+  width: 96px;
   display: grid;
   justify-items: center;
   gap: 5px;
@@ -610,14 +592,9 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
   text-align: center;
   transition: border-color 0.15s, background-color 0.15s, color 0.15s;
 }
-.tray-style-option:hover { border-color: var(--accent-border); }
-.tray-style-option.selected { color: var(--accent-text); border-color: var(--accent); background: var(--accent-surface); }
-.tray-style-option:has(input:disabled) { cursor: wait; opacity: 0.6; }
-.tray-style-option input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.tray-style-option img { width: 24px; height: 24px; border-radius: 6px; }
-.tray-style-detail { font-size: 11.5px; font-weight: 500; line-height: 1.3; }
-/* 单色图标按应用主题取反色版本：深色主题看不到黑图标（反之同理）。 */
-.tray-preview-dark { display: none; }
-:global(html[data-theme="dark"]) .tray-preview-light { display: none; }
-:global(html[data-theme="dark"]) .tray-preview-dark { display: block; }
+.app-icon-option:hover { border-color: var(--accent-border); }
+.app-icon-option.selected { color: var(--accent-text); border-color: var(--accent); background: var(--accent-surface); }
+.app-icon-option:has(input:disabled) { cursor: wait; opacity: 0.6; }
+.app-icon-option input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.app-icon-option img { width: 28px; height: 28px; border-radius: 7px; }
 </style>

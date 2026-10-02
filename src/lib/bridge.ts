@@ -1022,38 +1022,25 @@ export async function reportThemeResult(report: ThemeResultReport): Promise<void
 }
 
 /**
- * 托盘图标样式（2026-10-02 用户指定；对齐 Mac main 的菜单栏图标逻辑）：
+ * 应用图标（2026-10-02 用户指定；对齐 Mac main `AppIconController`/`AppIconCatalog`）：
  *
- * - `app_icon`（默认）：沿用应用图标，行为与旧版托盘一致；
- * - `status_icon`：Mac main `Resources/StatusIconTemplate` 同款单色遥控器图标，
- *   由 Windows 侧按任务栏明暗选色、按 DPI 选尺寸，未连接遥控器时整体变暗
- *   （对应 Mac `appearsDisabled`），连接后恢复。
+ * - `standard`：内置应用图标（默认，也是老配置的落点）；
+ * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」。
  *
- * 前端只负责"用户选了哪个样式"和"当前连接/语音状态"，图标取色、尺寸与变暗
- * 都在 Rust 侧完成——那里才有托盘句柄与系统主题。
+ * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）与托盘图标**；
+ * 设置页顶部标识与选项预览用同一 ID 实时渲染。安装包与开始菜单快捷方式的图标
+ * 属于安装产物，运行期不变（Mac 的 bundle 图标同样不变）。
  */
-export type TrayIconStyle = "app_icon" | "status_icon";
+export type AppIconIdentifier = "standard" | "faceted-duck";
 
-export interface TrayIconState {
-  /** 遥控器是否处于已连接（含语音中）状态。 */
-  connected: boolean;
-  /** 是否正在按住说话（语音流进行中）。 */
-  streaming: boolean;
+export async function getAppIcon(): Promise<AppIconIdentifier> {
+  if (!isTauriRuntime()) return "standard";
+  return invoke<AppIconIdentifier>("get_app_icon");
 }
 
-export async function getTrayIconStyle(): Promise<TrayIconStyle> {
-  if (!isTauriRuntime()) return "app_icon";
-  return invoke<TrayIconStyle>("get_tray_icon_style");
-}
-
-export async function setTrayIconStyle(style: TrayIconStyle): Promise<TrayIconStyle> {
-  if (!isTauriRuntime()) return style;
-  return invoke<TrayIconStyle>("set_tray_icon_style", { style });
-}
-
-export async function reportTrayIconState(state: TrayIconState): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("report_tray_icon_state", { state });
+export async function setAppIcon(identifier: AppIconIdentifier): Promise<AppIconIdentifier> {
+  if (!isTauriRuntime()) return identifier;
+  return invoke<AppIconIdentifier>("set_app_icon", { identifier });
 }
 
 /** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */

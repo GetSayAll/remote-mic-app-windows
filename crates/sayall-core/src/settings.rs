@@ -30,17 +30,28 @@ pub enum VoiceInputTool {
     Other,
 }
 
-/// 通知区域（托盘）图标样式（设置页「托盘图标」，2026-10-02 用户指定）。
+/// 应用图标（设置页「应用图标」，2026-10-02 用户指定）。
 ///
-/// `AppIcon` = 沿用彩色应用图标（历史行为，也是老配置的默认）；
-/// `StatusIcon` = Mac main `Resources/StatusIconTemplate` 同款单色图标，
-/// 未连接遥控器时按 Mac `appearsDisabled` 的语义整体变暗。
+/// 对齐 Mac main `Sources/RemoteMic/AppIconController.swift` 的 `AppIconIdentifier`：
+/// 稳定语义 ID（`standard` 是内置应用图标，`faceted-duck` 来自 Mac
+/// `Resources/AppIcons/faceted-duck.png`），未知 ID 一律回落到 `standard`
+/// （Mac `AppIconCatalog.resolvedIdentifier(for:)` 同款语义）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TrayIconStyle {
+#[serde(rename_all = "kebab-case")]
+pub enum AppIconIdentifier {
     #[default]
-    AppIcon,
-    StatusIcon,
+    Standard,
+    FacetedDuck,
+}
+
+impl AppIconIdentifier {
+    /// 用户可见名称（对齐 Mac `about.preferences.app_icon_*` 文案）。
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Standard => "默认",
+            Self::FacetedDuck => "几何鸭",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,9 +74,19 @@ pub struct AppSettings {
     /// 所以不能拿任务的存在与否当这个开关的状态。
     pub rc003_capture_enabled: bool,
     pub theme_preference: ThemePreference,
-    /// 通知区域（托盘）图标样式；老配置没有这个字段时落回彩色应用图标。
-    pub tray_icon_style: TrayIconStyle,
+    /// 应用图标；老配置没有这个字段时落回内置默认图标。
+    #[serde(default, deserialize_with = "deserialize_app_icon")]
+    pub app_icon: AppIconIdentifier,
     pub usage_statistics: UsageStatistics,
+}
+
+/// 认不出的应用图标 ID（更早/更新版本写下的值）回落 `standard`，不让一个
+/// 图标名把整份设置打成默认值（Mac `AppIconCatalog.resolvedIdentifier` 同款语义）。
+fn deserialize_app_icon<'de, D>(deserializer: D) -> Result<AppIconIdentifier, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(AppIconIdentifier::deserialize(deserializer).unwrap_or_default())
 }
 
 impl Default for AppSettings {
@@ -83,7 +104,7 @@ impl Default for AppSettings {
             check_prerelease_updates: false,
             rc003_capture_enabled: false,
             theme_preference: ThemePreference::System,
-            tray_icon_style: TrayIconStyle::AppIcon,
+            app_icon: AppIconIdentifier::Standard,
             usage_statistics: UsageStatistics::default(),
         }
     }
@@ -178,24 +199,39 @@ mod tests {
     }
 
     #[test]
-    fn tray_icon_style_defaults_to_app_icon_and_round_trips() {
-        // 老配置 / 新装：没有这个字段时落回彩色应用图标（历史行为），
-        // 不能让升级用户的托盘图标突然变成单色状态图标。
+    fn app_icon_defaults_to_standard_and_round_trips() {
+        // 老配置 / 新装：没有这个字段时落回内置默认图标（Mac 的 standard）。
         let settings: AppSettings = serde_json::from_str(
             r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
         )
         .unwrap();
-        assert_eq!(settings.tray_icon_style, TrayIconStyle::AppIcon);
+        assert_eq!(settings.app_icon, AppIconIdentifier::Standard);
 
-        for style in [TrayIconStyle::AppIcon, TrayIconStyle::StatusIcon] {
+        for icon in [AppIconIdentifier::Standard, AppIconIdentifier::FacetedDuck] {
             let settings = AppSettings {
-                tray_icon_style: style,
+                app_icon: icon,
                 ..AppSettings::default()
             };
             let encoded = serde_json::to_string(&settings).unwrap();
-            assert!(encoded.contains("\"tray_icon_style\""));
+            assert!(encoded.contains("\"app_icon\""));
             let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
-            assert_eq!(decoded.normalized().tray_icon_style, style);
+            assert_eq!(decoded.normalized().app_icon, icon);
         }
+
+        // 磁盘上的原始值是 Mac 同源的稳定语义 ID。
+        let encoded = serde_json::to_string(&AppSettings::default()).unwrap();
+        assert!(encoded.contains("\"app_icon\":\"standard\""));
+        assert_eq!(AppIconIdentifier::FacetedDuck.display_name(), "几何鸭");
+    }
+
+    #[test]
+    fn unknown_app_icon_identifier_falls_back_to_standard() {
+        // 更早/更新版本写下的图标 ID：只回落图标选择，不把整份设置打成默认值。
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"schema_version":3,"gain_db":12.0,"voice_trigger_mode":"hold","app_icon":"neon-duck"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.app_icon, AppIconIdentifier::Standard);
+        assert_eq!(settings.gain_db, 12.0);
     }
 }

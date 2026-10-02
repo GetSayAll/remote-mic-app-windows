@@ -26,7 +26,7 @@
 | 虚拟声卡端点 | CABLE Input / CABLE Output（VB-CABLE） | VB-Audio 官方名称 |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
-| 通知区域图标 | 托盘图标；两种样式写“彩色应用图标”“单色状态图标” | `SettingsPage.vue`、`AppSettings.tray_icon_style` |
+| 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`） | `SettingsPage.vue`、`AppSettings.app_icon` |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页
@@ -93,5 +93,7 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   见 [TODO.md](../TODO.md) 与 PR #151、#153。
 - 2026-10-02：「关于」改名「设置」并按 Mac 新设置页重排（顶部标识 + 版本 + 检查更新，
   「通用」「问题反馈」两个分组）；官网入口地址改为 `https://sayall.app/?from=win`；
-  侧栏底部改显示版本号；新增「托盘图标」两种样式（彩色应用图标 / 单色状态图标）。
+  侧栏底部改显示版本号；新增「应用图标」切换（默认 / 几何鸭，窗口 + 托盘 + 设置页
+  顶部一起换）。同日按用户指正删掉三处说明文字（预览通道说明、外观的“该选择会在
+  重启后保持”、外部入口的成功提示）与 Mac 菜单栏状态图标（Windows 没有该图标）。
   用户可见名称与写法见上表，验收见 `Testing/WindowsRC003Preview.md` 用例十四。

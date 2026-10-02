@@ -180,7 +180,7 @@
 1. 以 `runtime-simulation` Cargo feature 和 `VITE_SAYALL_RUNTIME_SIMULATION=1` 构建专用测试程序；普通构建不得包含仿真前端入口或仿真专用 Tauri command。
 2. 在 `windows-latest` 启动该程序，并设置唯一的运行报告路径；不得向真实桌面发送 SendInput，也不得尝试扫描真实 BLE、音频或 HID 设备。
 3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、首次检测并自动选择唯一仿真 CABLE Input、渲染 RC001/RC003 扫描结果、连接 RC001、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
-4. 依次打开按键、权限、设置和连接页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`；在设置页确认顶部（应用标识 / 当前版本 / 检查更新）与“通用”“问题反馈”分组标题，并点击“官网”“GitHub”两个入口——被 opener capability 拒绝（`Not allowed to open url`）判失败，runner 上没有可用默认浏览器则如实记为 deferred。
+4. 依次打开按键、权限、设置和连接页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`；在设置页确认顶部（应用标识 / 当前版本 / 检查更新）与“通用”“问题反馈”分组标题，切换“应用图标”并确认 IPC 与持久化往返，再点击“官网”“GitHub”两个入口——成功不显示提示、静默即通过，被 opener capability 拒绝（`Not allowed to open url`）判失败，runner 上没有可用默认浏览器则如实记为 deferred。
 5. 通过测试专用 command 驱动纯 Rust ATVV 管线完成首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN`，确认得到 240 个采样、generation 为 1、连接和音频均回到 ready。
 6. 停止 Raw Input 并断开，确认最终快照为 `rawInput.phase = stopped` 和 `connection.phase = disconnected`；程序写入报告并自行以成功退出码结束。
 
@@ -201,19 +201,20 @@
 
 失败判定：使用当前版本直接覆盖当前版本冒充升级；升级后出现两个安装条目或快捷方式；设置、映射或统计被重写；降级后版本或主程序发生变化；卸载残留程序身份或误删用户数据；把同源码 predecessor fixture 表述为真实历史版本兼容性验收。
 
-## 用例十四：设置页结构、外部入口与托盘图标
+## 用例十四：设置页结构、外部入口与应用图标
 
 1. 打开侧栏最后一项，确认名称是“设置”、图标是齿轮，页面标题为“设置”；顶部一行为应用图标 + “无线麦 SayAll” + “让语音触手可及”，其右为“当前版本”与版本号（应与安装包版本一致，如 0.5.0）、“检查更新…”按钮、“检查预览版更新”开关，再往下是分隔线与更新状态。
-2. 确认随后是“通用”（外观 / 启动行为 / 托盘图标）与“问题反馈”（官网 / GitHub）两个分组，且诊断摘要与日志目录仍只在“权限”页。
-3. 点击“官网”，确认系统默认浏览器打开 `https://sayall.app/?from=win`（地址必须带 `?from=win`），返回应用后页面显示“已在系统默认浏览器打开官网”。
-4. 点击“GitHub”，确认系统默认浏览器打开 `https://github.com/GetSayAll/remote-mic-app-windows`，返回应用后页面显示“已在系统默认浏览器打开 GitHub”。
-5. 在受控条件下制造失败（无默认浏览器关联或打开被安全策略拦截），确认页面就地显示原始错误原因而不是静默无反应；错误若为 `Not allowed to open url`，说明 opener capability 白名单与 `bridge.ts` 的常量不一致，属配置回归而非环境限制。
-6. 在“托盘图标”里选“单色状态图标”，确认通知区域图标立刻变成单色遥控器形状；断开遥控器（或尚未连接时）确认它变暗而非消失，连接后恢复清晰；切回“彩色应用图标”确认恢复应用图标。日志应出现 `tray_icon feature=tray action=apply phase=completed terminal_result=passed style=... state=... tone=... size=...`。
-7. 重启应用，确认托盘图标样式与外观、启动行为一样被保持。
+2. 确认页面里没有说明性小字：按钮旁不再有“默认关闭。预览版包含新功能……”、“外观”下不再有“该选择会在重启后保持。”或“跟随 Windows 的应用颜色模式。”。
+3. 确认随后是“通用”（外观 / 启动行为 / 应用图标）与“问题反馈”（官网 / GitHub）两个分组，且诊断摘要与日志目录仍只在“权限”页。
+4. 点击“官网”，确认系统默认浏览器打开 `https://sayall.app/?from=win`（地址必须带 `?from=win`）；返回应用后页面**不显示**任何成功提示。
+5. 点击“GitHub”，确认系统默认浏览器打开 `https://github.com/GetSayAll/remote-mic-app-windows`，同样不显示成功提示。
+6. 在受控条件下制造失败（无默认浏览器关联或打开被安全策略拦截），确认页面就地显示原因而不是静默无反应；错误若为 `Not allowed to open url`，说明 opener capability 白名单与 `bridge.ts` 的常量不一致，属配置回归而非环境限制。
+7. 在“应用图标”里选“几何鸭”，确认三处同时换成几何鸭：本页顶部标识、窗口与任务栏（含 Alt-Tab）图标、通知区域（托盘）图标；切回“默认”确认三处一起还原。日志应出现 `app_icon action=apply ... applied=faceted-duck` 与 `target=window` / `target=tray` 两条结果。
+8. 重启应用，确认应用图标与外观、启动行为一样被保持。
 
-预期（2026-10-02 用户定稿）：顶部模块集中应用标识、版本与检查更新；“通用”“问题反馈”分组卡片与 Mac 新设置页同构，Windows 没有的模块不出现；外部入口只打开 capabilities 白名单内的固定 URL，不在 WebView 内导航，也不读取或拼接用户输入；托盘图标样式立即生效并持久化，单色图标未连接遥控器时变暗（Mac `appearsDisabled` 同款语义），托盘的取色/尺寸属于本机表现，不写入任何用户信息。
+预期（2026-10-02 用户定稿）：顶部模块集中应用标识、版本与检查更新；“通用”“问题反馈”分组卡片与 Mac 新设置页同构，Windows 没有的模块不出现；外部入口只打开 capabilities 白名单内的固定 URL，成功不打扰、失败给原因；应用图标切换对齐 Mac `AppIconController`（稳定语义 ID、未知 ID 回落默认、切换落结构化日志），窗口/任务栏与托盘一起换，安装包与快捷方式图标不随切换变化。
 
-失败判定：WebView 自身跳转，或入口可打开白名单外的任意 URL；点击失败但页面无任何提示；正常安装上出现 `Not allowed to open url`；官网地址缺少 `?from=win`；诊断摘要入口重回设置页；侧栏底部仍显示“预览版”或版本号错误；切换托盘图标样式没有立即生效、失败时单选按钮停在未保存的位置、或单色图标在未连接时完全不显示；把浏览器预览或仿真结果表述为 Windows 真机通过。
+失败判定：WebView 自身跳转，或入口可打开白名单外的任意 URL；点击失败但页面无任何提示；正常安装上出现 `Not allowed to open url`；官网地址缺少 `?from=win`；成功后又出现“已在系统默认浏览器打开…”这类提示；诊断摘要入口重回设置页；侧栏底部仍显示“预览版”或版本号错误；切换应用图标后窗口/任务栏或托盘有一处没换、失败时单选按钮停在未保存的位置、或出现 Mac 菜单栏的单色状态图标（Windows 没有该图标）；把浏览器预览或仿真结果表述为 Windows 真机通过。
 
 ## 日志收集
 
