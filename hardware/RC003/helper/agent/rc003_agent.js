@@ -79,7 +79,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-09-28.voice-hotkey-synth';
+var AGENT_BUILD = '2026-10-02.synth-frame-trace';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
@@ -225,6 +225,19 @@ function sendLine(obj) {
 
 function logLine(msg) {
   sendLine({ type: 'log', t: Date.now(), msg: String(msg).slice(0, 400) });
+}
+
+/* 语音键帧轨迹（2026-10-02 排障新增）。真机出现"按了没反应"时，
+   现有计数只能看到"最终有没有替换成功"，看不到卡在哪一步；这里在每帧
+   语音键经过时打点，秒级限流防刷屏。 */
+var SYNTH_TRACE = { window: 0, count: 0, maxPerSec: 8, dropped: 0 };
+function synthTrace(msg) {
+  var now = Date.now();
+  if (now - SYNTH_TRACE.window >= 1000) { SYNTH_TRACE.window = now; SYNTH_TRACE.count = 0; }
+  if (SYNTH_TRACE.count >= SYNTH_TRACE.maxPerSec) { SYNTH_TRACE.dropped++; return; }
+  SYNTH_TRACE.count++;
+  logLine('synth:frame ' + msg + (SYNTH_TRACE.dropped ? ' dropped=' + SYNTH_TRACE.dropped : ''));
+  SYNTH_TRACE.dropped = 0;
 }
 
 /* ------------------------------------------------------------ 租约状态 */
@@ -653,9 +666,16 @@ function installHook() {
           if (reportUsages.indexOf(toClear[ci]) < 0) { stat.canary_hits++; break; }
         }
 
-        if (!leaseOk()) { stat.lease_expired++; return; }
-        if (mode !== 'clear') return;
-        if (stat.clears_ok >= MAX_CLEARS) return;
+        var synthSeen = synthSetIn(bytes);
+        if (synthSeen) {
+          synthTrace('seen mode=' + mode + ' lease=' + (leaseOk() ? 1 : 0)
+            + ' disarmed=' + (disarmed ? 1 : 0) + ' connected=' + (connected ? 1 : 0)
+            + ' clears_ok=' + stat.clears_ok);
+        }
+
+        if (!leaseOk()) { stat.lease_expired++; if (synthSeen) synthTrace('skip reason=lease'); return; }
+        if (mode !== 'clear') { if (synthSeen) synthTrace('skip reason=mode_' + mode); return; }
+        if (stat.clears_ok >= MAX_CLEARS) { if (synthSeen) synthTrace('skip reason=clear_cap'); return; }
 
         /* 只清目标 usage 所在的两个字节，其余一字节不动。
            语音键合成（synthFrom !== 0 时）在同一循环里做槽内替换：
@@ -681,10 +701,10 @@ function installHook() {
           patched[o + 1] = 0;
           changed = true;
         }
-        if (!changed) return;
+        if (!changed) { if (synthSeen) synthTrace('skip reason=nochange'); return; }
 
         var res = writeReport(outPtr, patched);
-        if (!res.ok) { stat.clears_fail++; return; }
+        if (!res.ok) { stat.clears_fail++; if (synthSeen) synthTrace('skip reason=write_fail'); return; }
 
         var back = new Uint8Array(outPtr.readByteArray(9));
         if (back[0] === patched[0] && back[3] === patched[3] &&
@@ -693,9 +713,11 @@ function installHook() {
             back[8] === patched[8]) {
           stat.clears_ok++;
           if (synthChanged) stat.synth_hits++;
+          if (synthChanged) synthTrace('replace ok to=0x' + synthTo.toString(16));
           this.cleared = true;
         } else {
           stat.clears_fail++;
+          if (synthSeen) synthTrace('skip reason=verify_mismatch');
         }
       } catch (e) {
         stat.errors++;
@@ -803,6 +825,7 @@ rpc.exports = {
     if (params.mode) mode = params.mode;
     if (params.restore === false) restoreOnLeave = params.restore;
 
+  logLine('agent:load build=' + AGENT_BUILD);
     var hookOk = installHook();
 
     var connectAttempt = connectOnce().then(function () { return 'connected'; })
