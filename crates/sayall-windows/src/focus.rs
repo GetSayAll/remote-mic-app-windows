@@ -338,10 +338,17 @@ impl FocusCandidate {
             .any(|hint| semantic.contains(hint))
     }
 
-    /// 硬门槛：可用、可聚焦、非密码框、语义不含敏感/排除词，且属于文本输入类、
+    /// 硬门槛：可用、可聚焦、非密码框、非只读、语义不含敏感/排除词，且属于文本输入类、
     /// 带文本模式或带编辑器语义（三者之一）。
+    ///
+    /// `read_only == Some(true)` 直接拒绝：Chromium 会把网页根节点暴露成
+    /// `Document` 且标 `IsReadOnly=true`（实测），聚焦它既不能输入也会抢走真正的
+    /// 输入框；`None`（拿不到值模式）不在此列，保持宽松。
     pub fn passes_hard_gate(&self) -> bool {
         if !self.enabled || !self.keyboard_focusable || self.is_password {
+            return false;
+        }
+        if self.read_only == Some(true) {
             return false;
         }
         let semantic = self.semantic_text();
@@ -802,6 +809,16 @@ mod tests {
         assert!(!candidate("Button", "ok").passes_hard_gate());
         // 可聚焦但没有文本模式、也没有编辑器语义的 Group 同样不进候选
         assert!(!candidate("Group", "").passes_hard_gate());
+
+        // 只读控件（实测：Chromium 把网页根节点暴露为 Document + IsReadOnly=true）
+        // 不能输入，直接拒绝；拿不到只读值时保持宽松。
+        let mut read_only = candidate("Document", "RootWebArea");
+        read_only.read_only = Some(true);
+        assert!(!read_only.passes_hard_gate());
+
+        let mut writable = candidate("Document", "RootWebArea");
+        writable.read_only = Some(false);
+        assert!(writable.passes_hard_gate());
     }
 
     #[test]
