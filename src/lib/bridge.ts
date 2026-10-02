@@ -169,13 +169,48 @@ export type ButtonAction =
   | { type: "scroll"; direction: "up" | "down"; steps?: number }
   | { type: "mouse_click"; kind: MouseClickKind }
   | { type: "mouse_move"; direction: MoveDirection; distance: number }
-  | { type: "open_app"; target: string };
+  | { type: "open_app"; target: string }
+  | { type: "focus_input" };
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
 export interface PresetAppInfo {
   id: string;
   name: string;
   installed: boolean;
+}
+
+/** 打开应用后的聚焦方式（对齐 Rust `FocusStrategy`）。 */
+export type FocusStrategy = "open_only" | "app_shortcut" | "recorded_element";
+
+/** 相对目标顶层窗口的归一化矩形（物理像素换算成比例）。 */
+export interface NormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 用户记录的输入框语义特征（不含任何输入内容）。
+ *
+ * `name` / `windowTitle` 属本地配置数据（可能含文档名等个人化信息），只存本地
+ * 配置文件，不进日志、不随诊断上传。
+ */
+export interface RecordedFocusTarget {
+  controlType: string;
+  automationId: string;
+  className?: string;
+  name?: string;
+  windowTitle?: string;
+  normalizedRect?: NormalizedRect;
+  contextTokens?: string[];
+}
+
+/** 「打开应用」目标的聚焦档案（键 = open_app 的 target）。 */
+export interface AppFocusProfile {
+  strategy: FocusStrategy;
+  shortcut?: KeyChord;
+  recorded?: RecordedFocusTarget;
 }
 
 /** 每键三列（单击/双击/长按），对齐 Mac 原版 ButtonTrigger。 */
@@ -189,11 +224,23 @@ export interface ButtonMappings {
   enabled: boolean;
   actions: Partial<Record<RemoteButton, ButtonActions>>;
   applications?: CustomAppPick[];
+  /** 聚焦档案：键 = `open_app` 的 target（预设 id 或自定义应用路径）。 */
+  focusProfiles?: Record<string, AppFocusProfile>;
 }
 
 export interface FiredGesture {
   button: RemoteButton;
   trigger: ButtonTrigger;
+}
+
+/** 「聚焦输入框」最近一次结果（focus_service::FocusReport；reason 见 FocusFailure 标识）。 */
+export interface FocusReport {
+  requestId: number;
+  kind: string;
+  focused: boolean;
+  reason?: string;
+  attempts: number;
+  elapsedMs: number;
 }
 
 export interface ButtonMappingSnapshot {
@@ -205,6 +252,7 @@ export interface ButtonMappingSnapshot {
   firedGestures: number;
   lastFired: FiredGesture | null;
   lastError: string | null;
+  lastFocus?: FocusReport;
 }
 
 export interface SendInputSnapshot {
@@ -836,6 +884,26 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
   return invoke<PresetAppInfo[]>("list_preset_apps");
 }
 
+/**
+ * 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+ *
+ * 调用方需先让目标应用成为前台（本命令不会切换窗口）。
+ */
+export async function learnFocusTarget(): Promise<RecordedFocusTarget> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法学习输入框");
+  }
+  return invoke<RecordedFocusTarget>("learn_focus_target");
+}
+
+/** 「测试打开与聚焦」：按目标与聚焦档案走一次生产路径（异步受理）。 */
+export async function testAppFocus(target: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法测试打开与聚焦");
+  }
+  return invoke<void>("test_app_focus", { target });
+}
+
 export async function getButtonMappingSnapshot(): Promise<ButtonMappingSnapshot> {
   if (!isTauriRuntime()) {
     return {
@@ -1282,6 +1350,7 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
 
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
+  if (action.type === "focus_input") return "聚焦输入框";
   if (action.type === "scroll") {
     const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
     return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;

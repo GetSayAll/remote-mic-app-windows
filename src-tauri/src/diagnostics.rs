@@ -206,6 +206,7 @@ mod tests {
                 fired_gestures: 2,
                 last_fired: None,
                 last_error: Some("内部注入细节".to_owned()),
+                last_focus: None,
             },
         };
         let send_input = SendInputSnapshot {

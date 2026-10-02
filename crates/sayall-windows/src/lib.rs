@@ -1,4 +1,5 @@
 use button_mapping::{ButtonMappingRuntime, ButtonMappingSnapshot, MappingInjector};
+use focus::RecordedFocusTarget;
 use raw_input::{RawInputPhase, RawInputSnapshot};
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
@@ -24,6 +25,13 @@ mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
 pub mod file_dialog;
+/// 聚焦输入框的纯逻辑（跨平台可编译、可单测）。
+pub mod focus;
+/// 聚焦请求的执行编排（重试、预算与失败分类；不触碰平台 API）。
+pub mod focus_service;
+/// Windows UI Automation 后端（MTA 工作线程；非 Windows 平台不参与编译）。
+#[cfg(windows)]
+pub mod focus_windows;
 #[cfg(windows)]
 pub mod graceful_exit;
 pub mod registered_apps;
@@ -313,6 +321,22 @@ struct UnsupportedInjector;
 impl MappingInjector for UnsupportedInjector {
     fn tap(&self, _chord: &send_input::KeyChord) -> Result<(), String> {
         Err("SendInput 仅在 Windows 上可用".to_owned())
+    }
+
+    fn focus_frontmost(&self) -> Result<(), String> {
+        Err("聚焦输入框仅在 Windows 上可用".to_owned())
+    }
+
+    fn launch_app_and_focus(
+        &self,
+        _target: &str,
+        _profile: Option<&crate::focus::AppFocusProfile>,
+    ) -> Result<(), String> {
+        Err("打开应用仅在 Windows 上可用".to_owned())
+    }
+
+    fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+        Err("学习输入框仅在 Windows 上可用".to_owned())
     }
 }
 
@@ -671,6 +695,27 @@ impl WindowsPlatform {
 
     pub fn button_mapping_snapshot(&self) -> ButtonMappingSnapshot {
         self.button_mapping.snapshot()
+    }
+
+    /// UI「测试」按钮：聚焦当前前台应用输入框（异步受理，结果在快照的 `last_focus`）。
+    pub fn test_focus_input(&self) -> Result<(), PlatformError> {
+        self.button_mapping
+            .focus_frontmost_now()
+            .map_err(PlatformError::SendInput)
+    }
+
+    /// UI「测试打开与聚焦」：打开/激活目标并按档案聚焦。
+    pub fn test_app_focus(&self, target: &str) -> Result<(), PlatformError> {
+        self.button_mapping
+            .launch_app_and_focus_now(target)
+            .map_err(PlatformError::SendInput)
+    }
+
+    /// UI「开始学习输入框」：阻塞至多 3 秒捕获当前系统焦点对应的可编辑目标。
+    pub fn learn_focus_target(&self) -> Result<focus::RecordedFocusTarget, PlatformError> {
+        self.button_mapping
+            .learn_focus_target()
+            .map_err(PlatformError::SendInput)
     }
 
     /// 订阅语义按键边沿（画布高亮数据源）。
@@ -1147,6 +1192,23 @@ mod tests {
             }
             fn launch_app(&self, _target: &str) -> Result<(), String> {
                 Ok(())
+            }
+            fn focus_frontmost(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn launch_app_and_focus(
+                &self,
+                _target: &str,
+                _profile: Option<&crate::focus::AppFocusProfile>,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+                Ok(crate::focus::RecordedFocusTarget {
+                    control_type: "Edit".to_owned(),
+                    automation_id: "chat-input".to_owned(),
+                    ..Default::default()
+                })
             }
         }
 

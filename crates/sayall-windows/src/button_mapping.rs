@@ -69,17 +69,73 @@ pub trait MappingInjector: Send + Sync {
     fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String>;
     /// 打开/激活预设应用（生产实现调用 app_launcher）。
     fn launch_app(&self, target: &str) -> Result<(), String>;
+    /// 聚焦当前前台应用的可编辑输入框。
+    ///
+    /// **异步受理**：返回 `Ok` 只表示请求已交给聚焦服务（它会按时间表重试并
+    /// 独立汇报结果），不代表已经聚焦成功——聚焦结果见 [`Self::focus_report`]。
+    fn focus_frontmost(&self) -> Result<(), String>;
+    /// 打开/激活应用后按聚焦档案聚焦（`None` 或 `open_only` 等同只打开）。
+    fn launch_app_and_focus(
+        &self,
+        target: &str,
+        profile: Option<&crate::focus::AppFocusProfile>,
+    ) -> Result<(), String>;
+    /// 最近一次聚焦结果（供 UI 状态与诊断）；无该能力的实现返回 `None`。
+    fn focus_report(&self) -> Option<crate::focus_service::FocusReport> {
+        None
+    }
+    /// 「学习输入框」：在 3 秒窗口内轮询系统焦点，返回稳定命中的可编辑目标。
+    ///
+    /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
+    fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
 }
 
 /// 生产注入器：批量 SendInput tap（DOWN+UP），部分交付时由 send_input 层回滚。
 pub struct SendInputInjector {
     runtime: Arc<crate::send_input_windows::SendInputRuntime>,
+    /// 聚焦服务：单线程串行执行 UIA 聚焦（不阻塞按键/手势线程）。
+    focus: Mutex<Option<crate::focus_service::FocusRunner>>,
+    focus_policy: crate::focus_service::FocusRetryPolicy,
 }
 
 impl SendInputInjector {
     #[cfg(windows)]
     pub fn new(runtime: Arc<crate::send_input_windows::SendInputRuntime>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            focus: Mutex::new(None),
+            focus_policy: crate::focus_service::FocusRetryPolicy::default(),
+        }
+    }
+
+    /// 惰性启动聚焦服务（首次用到时才创建线程）。
+    #[cfg(windows)]
+    fn with_focus_runner<T>(
+        &self,
+        task: impl FnOnce(&crate::focus_service::FocusRunner) -> T,
+    ) -> Option<T> {
+        let mut slot = self
+            .focus
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_none() {
+            let backend: Arc<dyn crate::focus_service::FocusBackend> =
+                Arc::new(crate::focus_windows::WindowsFocusBackend::new());
+            *slot = Some(crate::focus_service::FocusRunner::spawn(
+                backend,
+                self.focus_policy,
+            ));
+        }
+        slot.as_ref().map(task)
+    }
+
+    /// 非 Windows 平台没有 UIA 后端：聚焦服务不可用。
+    #[cfg(not(windows))]
+    fn with_focus_runner<T>(
+        &self,
+        _task: impl FnOnce(&crate::focus_service::FocusRunner) -> T,
+    ) -> Option<T> {
+        None
     }
 }
 
@@ -115,6 +171,60 @@ impl MappingInjector for SendInputInjector {
     fn launch_app(&self, target: &str) -> Result<(), String> {
         crate::app_launcher::activate_or_launch(target)
     }
+
+    fn focus_frontmost(&self) -> Result<(), String> {
+        self.with_focus_runner(|runner| runner.submit(crate::focus_service::FocusTask::Frontmost))
+            .flatten()
+            .map(|_| ())
+            .ok_or_else(|| "聚焦服务不可用".to_owned())
+    }
+
+    fn launch_app_and_focus(
+        &self,
+        target: &str,
+        profile: Option<&crate::focus::AppFocusProfile>,
+    ) -> Result<(), String> {
+        self.launch_app(target)?;
+        let strategy = profile
+            .map(|profile| profile.strategy)
+            .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
+        match strategy {
+            crate::focus::FocusStrategy::OpenOnly => Ok(()),
+            crate::focus::FocusStrategy::AppShortcut => {
+                let chord = profile
+                    .and_then(|profile| profile.shortcut.clone())
+                    .ok_or_else(|| "该应用未录入聚焦快捷键".to_owned())?;
+                self.tap(&chord)
+            }
+            crate::focus::FocusStrategy::RecordedElement => {
+                let recorded = profile
+                    .and_then(|profile| profile.recorded.clone())
+                    .ok_or_else(|| "该应用还没有学习过输入框".to_owned())?;
+                self.with_focus_runner(|runner| {
+                    runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
+                        crate::focus::FocusChoice::Recorded(recorded),
+                    ))
+                })
+                .flatten()
+                .map(|_| ())
+                .ok_or_else(|| "聚焦服务不可用".to_owned())
+            }
+        }
+    }
+
+    fn focus_report(&self) -> Option<crate::focus_service::FocusReport> {
+        let slot = self
+            .focus
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.as_ref().and_then(|runner| runner.last_report())
+    }
+
+    fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+        self.with_focus_runner(|runner| runner.learn_target())
+            .unwrap_or(Err(crate::focus_service::FocusFailure::Cancelled))
+            .map_err(|reason| reason.as_str().to_owned())
+    }
 }
 
 pub type ButtonEdgeCallback = Arc<dyn Fn(ButtonEdge) + Send + Sync>;
@@ -140,6 +250,9 @@ pub struct ButtonMappingSnapshot {
     pub fired_gestures: u64,
     pub last_fired: Option<FiredGesture>,
     pub last_error: Option<String>,
+    /// 最近一次「聚焦输入框」的结果（未使用过该功能时为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_focus: Option<crate::focus_service::FocusReport>,
 }
 
 #[derive(Debug, Default)]
@@ -168,6 +281,8 @@ pub struct ButtonMappingRuntime {
     state: Arc<Mutex<EngineState>>,
     edge_callbacks: Arc<RwLock<Vec<ButtonEdgeCallback>>>,
     gesture_callbacks: Arc<RwLock<Vec<ButtonGestureCallback>>>,
+    /// 与引擎工作线程共享的注入器句柄（用于读取最近一次聚焦结果、触发测试聚焦）。
+    injector: Arc<dyn MappingInjector>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -197,6 +312,7 @@ impl ButtonMappingRuntime {
             state: Arc::clone(&state),
             edge_callbacks: Arc::clone(&edge_callbacks),
             gesture_callbacks: Arc::clone(&gesture_callbacks),
+            injector: Arc::clone(&injector),
             worker: None,
         };
 
@@ -265,7 +381,24 @@ impl ButtonMappingRuntime {
             fired_gestures: state.fired_gestures,
             last_fired: state.last_fired,
             last_error: state.last_error.clone(),
+            last_focus: self.injector.focus_report(),
         }
+    }
+
+    /// UI「测试」按钮：走与手势分发相同的注入器路径（异步受理，结果见快照）。
+    pub fn focus_frontmost_now(&self) -> Result<(), String> {
+        self.injector.focus_frontmost()
+    }
+
+    /// UI「测试打开与聚焦」：先打开/激活目标应用，再按其聚焦档案聚焦。
+    pub fn launch_app_and_focus_now(&self, target: &str) -> Result<(), String> {
+        let profile = self.mappings().focus_profiles.get(target).cloned();
+        self.injector.launch_app_and_focus(target, profile.as_ref())
+    }
+
+    /// UI「开始学习输入框」：阻塞至多 3 秒，返回捕获到的输入框特征。
+    pub fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+        self.injector.learn_focus_target()
     }
 
     /// 订阅语义按键边沿（Tauri 层转发为前端事件；画布高亮数据源）。
@@ -749,21 +882,46 @@ fn fire_gesture(
             } else {
                 "preset"
             };
+            let profile = mappings.focus_profiles.get(&target).cloned();
+            let strategy = profile
+                .as_ref()
+                .map(|profile| profile.strategy.as_str())
+                .unwrap_or("none");
             crate::ble::gatt_note(format!(
-                "map_fire button={:?} trigger={:?} action=open_app target_kind={target_kind}",
+                "map_fire button={:?} trigger={:?} action=open_app target_kind={target_kind} focus_strategy={strategy}",
                 button, trigger,
             ));
-            match injector.launch_app(&target) {
+            match injector.launch_app_and_focus(&target, profile.as_ref()) {
                 Ok(()) => crate::ble::gatt_note(format!(
-                    "map_launch result=ok target_kind={}",
-                    target_kind
+                    "map_launch result=ok target_kind={} focus_strategy={}",
+                    target_kind, strategy
                 )),
                 Err(error) => {
                     crate::ble::gatt_note(format!(
-                        "map_launch result=err target_kind={} error_domain=shell error_code=launch_failed reason=target_unavailable retryable=true",
-                        target_kind
+                        "map_launch result=err target_kind={} focus_strategy={} error_domain=shell error_code=launch_failed reason=target_unavailable retryable=true",
+                        target_kind, strategy
                     ));
                     lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
+                }
+            }
+        }
+        ButtonAction::FocusInput => {
+            crate::ble::gatt_note(format!(
+                "map_fire button={:?} trigger={:?} action=focus_input",
+                button, trigger
+            ));
+            // 异步受理：聚焦要重试并读回，结果由聚焦服务经 focus_report 汇报，
+            // 这里只记录「已受理/无法受理」。
+            match injector.focus_frontmost() {
+                Ok(()) => crate::ble::gatt_note(
+                    "map_focus_input phase=accepted terminal_result=deferred".to_owned(),
+                ),
+                Err(error) => {
+                    crate::ble::gatt_note(
+                        "map_focus_input phase=requested terminal_result=failed reason=service_unavailable"
+                            .to_owned(),
+                    );
+                    lock_state(state).last_error = Some(format!("聚焦输入框失败：{error}"));
                 }
             }
         }
@@ -811,7 +969,19 @@ mod tests {
         scrolls: StdMutex<Vec<(ScrollDirection, u16)>>,
         clicks: StdMutex<Vec<MouseClickKind>>,
         moves: StdMutex<Vec<(MoveDirection, u16)>>,
+        focus_requests: StdMutex<Vec<FocusCall>>,
+        learn_results: StdMutex<Vec<Result<crate::focus::RecordedFocusTarget, String>>>,
         fail: bool,
+    }
+
+    /// 测试注入器收到的聚焦类调用（区分「只聚焦」与「打开+聚焦」）。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FocusCall {
+        Frontmost,
+        LaunchThenFocus {
+            target: String,
+            strategy: &'static str,
+        },
     }
 
     impl MappingInjector for RecordingInjector {
@@ -853,6 +1023,51 @@ mod tests {
             }
             self.launches.lock().unwrap().push(target.to_owned());
             Ok(())
+        }
+
+        fn focus_frontmost(&self) -> Result<(), String> {
+            if self.fail {
+                return Err("聚焦服务不可用（测试）".to_owned());
+            }
+            self.focus_requests
+                .lock()
+                .unwrap()
+                .push(FocusCall::Frontmost);
+            Ok(())
+        }
+
+        fn launch_app_and_focus(
+            &self,
+            target: &str,
+            profile: Option<&crate::focus::AppFocusProfile>,
+        ) -> Result<(), String> {
+            if self.fail {
+                return Err("打开应用失败（测试）".to_owned());
+            }
+            let strategy = profile
+                .map(|profile| profile.strategy.as_str())
+                .unwrap_or("none");
+            self.launches.lock().unwrap().push(target.to_owned());
+            self.focus_requests
+                .lock()
+                .unwrap()
+                .push(FocusCall::LaunchThenFocus {
+                    target: target.to_owned(),
+                    strategy,
+                });
+            Ok(())
+        }
+        fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
+            if self.fail {
+                return Err("学习输入框失败（测试）".to_owned());
+            }
+            self.learn_results.lock().unwrap().pop().unwrap_or_else(|| {
+                Ok(crate::focus::RecordedFocusTarget {
+                    control_type: "Edit".to_owned(),
+                    automation_id: "chat-input".to_owned(),
+                    ..Default::default()
+                })
+            })
         }
     }
 
@@ -1420,6 +1635,106 @@ mod tests {
         assert!(
             injector.taps.lock().unwrap().is_empty(),
             "打开应用动作不得注入按键"
+        );
+        drop(gate);
+    }
+
+    #[test]
+    fn focus_input_action_requests_frontmost_focus_without_tapping() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::FocusInput,
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.focus_requests.lock().unwrap().as_slice(),
+            &[FocusCall::Frontmost],
+            "聚焦输入框动作应请求聚焦当前前台应用"
+        );
+        assert!(injector.taps.lock().unwrap().is_empty());
+        assert!(injector.launches.lock().unwrap().is_empty());
+        drop(gate);
+    }
+
+    /// 打开应用带聚焦档案：分发侧必须把档案一起交给注入器（策略在档案里）。
+    #[test]
+    fn open_app_with_focus_profile_forwards_strategy() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::OpenApp {
+                    target: "notepad".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings.focus_profiles.insert(
+            "notepad".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::RecordedElement,
+                shortcut: None,
+                recorded: Some(crate::focus::RecordedFocusTarget {
+                    control_type: "Edit".to_owned(),
+                    automation_id: "chat-input".to_owned(),
+                    ..Default::default()
+                }),
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.focus_requests.lock().unwrap().as_slice(),
+            &[FocusCall::LaunchThenFocus {
+                target: "notepad".to_owned(),
+                strategy: "recorded_element",
+            }],
+            "带档案的打开应用必须把策略交给注入器"
+        );
+        assert_eq!(
+            injector.launches.lock().unwrap().as_slice(),
+            &["notepad".to_owned()]
         );
         drop(gate);
     }

@@ -32,6 +32,11 @@ describe("mouse actions", () => {
     expect(actionSummary({ type: "mouse_move", direction: "left", distance: 75 })).toBe("鼠标向左 75 px");
     expect(actionSummary({ type: "mouse_click", kind: "double_left" })).toBe("左键双击");
   });
+
+  it("summarizes the focus-input action", () => {
+    // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
+    expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
+  });
 });
 
 describe("mapping capability matrix（单响应判定，用于信息提示）", () => {

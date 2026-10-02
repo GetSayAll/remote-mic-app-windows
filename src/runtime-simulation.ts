@@ -3,6 +3,7 @@ import {
   connectRemote,
   disconnectRemote,
   getAudioSnapshot,
+  getButtonMappings,
   getDiagnosticReport,
   getRawInputSnapshot,
   getRuntimeSnapshot,
@@ -82,6 +83,20 @@ async function openPage(label: string, heading = label): Promise<void> {
   );
 }
 
+/** 仿真选项：本机运行时跳过「外部入口」两步，避免反复弹出系统浏览器。 */
+interface RuntimeSimulationOptions {
+  skipExternalEntries: boolean;
+}
+
+async function loadSimulationOptions(): Promise<RuntimeSimulationOptions> {
+  try {
+    return await invoke<RuntimeSimulationOptions>("get_runtime_simulation_options");
+  } catch {
+    // 拿不到选项时按 CI 口径（执行外部入口），不静默降级覆盖面。
+    return { skipExternalEntries: false };
+  }
+}
+
 /**
  * 设置页外部入口（官网 / GitHub）的 CI 判据。
  *
@@ -89,8 +104,20 @@ async function openPage(label: string, heading = label): Promise<void> {
  * "在窗口期内要么出现失败原因、要么保持静默"；capability 白名单是产品配置，
  * 被 opener 拒绝（"Not allowed to open url"）必须报红，runner 上没有可用的
  * 默认浏览器只是环境差异（失败文案会如实带出来），不制造与本产品无关的红灯。
+ *
+ * 本机运行（脚本未带 -IncludeExternalEntries 且非 CI）时这两步会弹出系统浏览器，
+ * 打断操作人：此时**如实记为 deferred 步骤**并跳过点击（不是静默丢覆盖面）。
  */
-async function recordExternalEntry(label: string, steps: string[]): Promise<void> {
+async function recordExternalEntry(
+  label: string,
+  steps: string[],
+  skip: boolean,
+): Promise<void> {
+  if (skip) {
+    // 本机运行：跳过点击（避免弹出系统浏览器），如实记为 deferred。
+    steps.push(`设置页“${label}”入口本机跳过（避免弹出浏览器）：capability 往返未验证`);
+    return;
+  }
   await clickButton(label);
   const deadline = Date.now() + 3_000;
   let message: string | null = null;
@@ -115,6 +142,7 @@ async function recordExternalEntry(label: string, steps: string[]): Promise<void
 
 async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   mark("journey_start");
+  const simulationOptions = await loadSimulationOptions();
   // 应用默认打开"按键"页（对齐 Mac 页序），先导航到连接页完成连接旅程。
   await openPage("连接");
   await waitFor(
@@ -199,6 +227,59 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(sendInput.submittedEvents === 4, "Ctrl+C 仿真没有生成四个按下/释放事件");
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");
 
+  // 「聚焦输入框」动作：UI 芯片可选 → 自动保存 → 平台受理一次（真实 IPC）。
+  const focusCell = await waitFor(() => {
+    const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
+      (candidate) => candidate.title.startsWith("返回 · 单击"),
+    );
+    return cell ?? null;
+  }, "返回键「单击」映射格");
+  focusCell.click();
+  const focusChip = await waitFor(() => buttonWithText("聚焦输入框"), "「聚焦输入框」动作芯片");
+  focusChip.click();
+  await waitFor(
+    () => (focusCell.title.includes("聚焦输入框") ? true : null),
+    "映射格显示「聚焦输入框」",
+  );
+  const focusSnapshot = await testButtonMapping("back", "single");
+  assert(
+    focusSnapshot.submittedBatches === 2,
+    "「聚焦输入框」动作没有分发到平台的聚焦受理路径",
+  );
+  steps.push("「聚焦输入框」动作在按键页可选、经真实 IPC 分发到平台聚焦受理");
+
+  // 「打开应用 + 聚焦方式」：选预设应用 → 切到「聚焦已记录的输入框」→ 学习一次 →
+  // 读回档案 → 测试打开与聚焦。学习与测试都走真实 IPC（仿真返回固定样本）。
+  await clickButton("记事本");
+  await waitFor(
+    () =>
+      document.body.textContent?.includes("打开后聚焦方式") &&
+      document.body.textContent?.includes("聚焦已记录的输入框")
+        ? true
+        : null,
+    "聚焦方式面板",
+  );
+  mark("focus_profile_panel");
+  await clickButton("聚焦已记录的输入框");
+  await clickButton("开始学习输入框");
+  await waitFor(
+    () => (document.body.textContent?.includes("只记录控件特征，不含输入内容") ? true : null),
+    "学习结果提示",
+  );
+  await waitFor(
+    () => (document.body.textContent?.includes("已记录输入框") ? true : null),
+    "聚焦档案呈现为已记录输入框",
+  );
+  const savedMappings = await getButtonMappings();
+  const profile = savedMappings.focusProfiles?.["notepad"];
+  assert(profile?.strategy === "recorded_element", "聚焦档案没有保存为已记录输入框");
+  assert(
+    profile?.recorded?.automationId === "ci-simulation-input",
+    "聚焦档案没有记录到仿真输入框",
+  );
+  await clickButton("测试打开与聚焦");
+  steps.push("打开应用的聚焦方式三选一、学习输入框与测试打开聚焦经真实 IPC 闭环");
+
   mark("permissions_page");
   await openPage("权限");
   // 诊断摘要 2026-10-01 从关于页迁回权限页（用户指定）：状态与取证入口同页，
@@ -265,8 +346,8 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     `设置页问题反馈入口异常：${entryLabels.join(" / ")}`,
   );
   steps.push("设置页顶部为应用标识/版本/检查更新，问题反馈分组提供官网与 GitHub 入口");
-  await recordExternalEntry("官网", steps);
-  await recordExternalEntry("GitHub", steps);
+  await recordExternalEntry("官网", steps, simulationOptions.skipExternalEntries);
+  await recordExternalEntry("GitHub", steps, simulationOptions.skipExternalEntries);
 
   const darkTheme = await waitFor(
     () =>

@@ -777,6 +777,7 @@ async fn import_button_mapping_configuration(
 fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut shortcut_count = 0_usize;
     let mut open_app_count = 0_usize;
+    let mut focus_input_count = 0_usize;
     let mut scroll_count = 0_usize;
     let mut mouse_count = 0_usize;
     let mut disabled_count = 0_usize;
@@ -785,6 +786,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
             match action {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
+                ButtonAction::FocusInput => focus_input_count += 1,
                 ButtonAction::Scroll { .. } => scroll_count += 1,
                 ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
                     mouse_count += 1
@@ -794,7 +796,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -835,6 +837,16 @@ async fn test_button_mapping(
         .await
         .map_err(|error| format!("测试打开应用任务失败：{error}"))?
         .map_err(|error| error.to_string()),
+        ButtonAction::FocusInput => tauri::async_runtime::spawn_blocking(move || {
+            // 受理后返回平台的 SendInput 快照（与快捷键/滚轮测试同口径），
+            // 便于 UI 与仿真断言「动作确实走到了聚焦受理路径」。
+            platform
+                .test_focus_input()
+                .map(|_| platform.send_input_snapshot())
+        })
+        .await
+        .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
+        .map_err(|error| error.to_string()),
         ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
     }
 }
@@ -844,6 +856,30 @@ fn list_preset_apps(
     state: tauri::State<'_, AppState>,
 ) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
     state.platform.preset_apps()
+}
+
+/// 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+///
+/// 阻塞式（窗口期内），放在阻塞线程池执行；UI 负责把它写进对应目标的聚焦档案。
+#[tauri::command]
+async fn learn_focus_target(
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::focus::RecordedFocusTarget, String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_target())
+        .await
+        .map_err(|error| format!("学习输入框任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// 「测试打开与聚焦」：按目标与其聚焦档案走一次生产路径（异步受理）。
+#[tauri::command]
+async fn test_app_focus(target: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.test_app_focus(target))
+        .await
+        .map_err(|error| format!("测试打开与聚焦任务失败：{error}"))?
+        .map_err(|error| error.to_string())
 }
 
 /// 原生文件选择器：选择自定义应用（.exe/.lnk）。用户取消返回 null。
@@ -1480,6 +1516,15 @@ fn run_runtime_simulation_voice_session(
         .platform
         .run_simulated_voice_session()
         .map_err(|error| error.to_string())
+}
+
+/// 仿真旅程选项：本机跑时不弹系统浏览器（CI 或显式指定时执行外部入口）。
+#[cfg(feature = "runtime-simulation")]
+#[tauri::command]
+fn get_runtime_simulation_options(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    serde_json::json!({
+        "skipExternalEntries": state.platform.simulation_skip_external_entries(),
+    })
 }
 
 #[cfg(feature = "runtime-simulation")]
@@ -2147,6 +2192,8 @@ pub fn run() {
         export_button_mapping_configuration,
         import_button_mapping_configuration,
         test_button_mapping,
+        learn_focus_target,
+        test_app_focus,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,
@@ -2175,6 +2222,7 @@ pub fn run() {
         install_app_update,
         report_frontend_event,
         run_runtime_simulation_voice_session,
+        get_runtime_simulation_options,
         complete_runtime_simulation_smoke
     ]);
     #[cfg(not(feature = "runtime-simulation"))]
@@ -2204,6 +2252,8 @@ pub fn run() {
         export_button_mapping_configuration,
         import_button_mapping_configuration,
         test_button_mapping,
+        learn_focus_target,
+        test_app_focus,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,

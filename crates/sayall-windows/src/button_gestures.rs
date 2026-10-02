@@ -64,7 +64,13 @@ impl GestureConfig {
         let repeat =
             if single_configured && !double_enabled && !long_enabled && !defer_single_until_release
             {
-                button.repeat_interval()
+                // 「聚焦输入框」是一次性动作（对标 mac `allowsRepeat=false`）：
+                // 按住不放只执行一次，不按连发间隔重复聚焦。
+                if matches!(&actions.single, ButtonAction::FocusInput) {
+                    None
+                } else {
+                    button.repeat_interval()
+                }
             } else {
                 None
             };
@@ -340,6 +346,74 @@ mod tests {
         assert_eq!(
             recognizer.release(RemoteButton::Power, t0 + Duration::from_millis(80)),
             vec![ButtonTrigger::Single]
+        );
+    }
+
+    #[test]
+    fn focus_input_single_fires_once_per_press_and_never_repeats() {
+        let t0 = Instant::now();
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: ButtonAction::FocusInput,
+                double: ButtonAction::Disabled,
+                long: ButtonAction::Disabled,
+            },
+        );
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+
+        // 未配置双击/长按：按下沿立即触发一次。
+        assert_eq!(
+            recognizer.press(RemoteButton::Up, t0),
+            vec![ButtonTrigger::Single]
+        );
+        // 按住不放不得连发（对标 mac allowsRepeat=false）。
+        assert_eq!(recognizer.advance(t0 + Duration::from_secs(2)), vec![]);
+        assert_eq!(
+            recognizer.release(RemoteButton::Up, t0 + Duration::from_secs(2)),
+            vec![]
+        );
+        // 下一次按压才是下一次聚焦。
+        assert_eq!(
+            recognizer.press(RemoteButton::Up, t0 + Duration::from_secs(3)),
+            vec![ButtonTrigger::Single]
+        );
+    }
+
+    #[test]
+    fn focus_input_single_defers_into_the_double_click_window() {
+        let t0 = Instant::now();
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: ButtonAction::FocusInput,
+                double: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Tab],
+                    },
+                },
+                long: ButtonAction::Disabled,
+            },
+        );
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+
+        // 单击要等双击窗口结束才执行，避免「双击的第一击」被当成一次聚焦。
+        assert!(recognizer.press(RemoteButton::Up, t0).is_empty());
+        let released = t0 + Duration::from_millis(60);
+        assert!(recognizer.release(RemoteButton::Up, released).is_empty());
+        // 双击窗口从释放沿开始计时。
+        assert_eq!(
+            recognizer.advance(released + DOUBLE_CLICK_WINDOW),
+            vec![(RemoteButton::Up, ButtonTrigger::Single)]
+        );
+        // 双击窗口已消费：不再重复触发。
+        assert_eq!(
+            recognizer.advance(released + DOUBLE_CLICK_WINDOW * 2),
+            vec![]
         );
     }
 
