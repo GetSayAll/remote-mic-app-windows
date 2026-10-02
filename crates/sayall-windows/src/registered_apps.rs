@@ -296,6 +296,44 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                     (v.visible, v.hidden)
                 };
                 if visible == 0 && hidden > 0 {
+                    // 先走应用自己的托盘图标（用户平时把应用叫回来的方式；窗口由应用自己
+                    // 恢复，可交互）。触发失败再落到激活契约。
+                    let mut names: Vec<String> = Vec::new();
+                    if let Some(stem) = executable_path
+                        .as_deref()
+                        .and_then(|path| path.rsplit(['\\', '/']).next())
+                        .map(|name| name.to_string())
+                    {
+                        names.push(stem.clone());
+                        if let Some(base) = stem
+                            .strip_suffix(".exe")
+                            .or(stem.strip_suffix(".EXE"))
+                            .map(str::to_string)
+                        {
+                            names.push(base);
+                        }
+                    }
+                    if let Some(segment) = app_user_model_id.rsplit('.').next() {
+                        names.push(segment.to_string());
+                    }
+                    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+                    let tray = crate::tray_icons::invoke_tray_icon(&borrowed);
+                    let tray_visible = tray.submitted
+                        && crate::app_launcher::window_visibility(
+                            crate::app_launcher::WindowSelector::AppUserModelId(&app_user_model_id),
+                        )
+                        .largest_hidden
+                        .is_none();
+                    crate::gatt_note(format!(
+                        "registered_app_launch phase=tray_icon matched={} submitted={} method={} terminal_result={}",
+                        tray.matched,
+                        tray.submitted,
+                        tray.method,
+                        if tray_visible { "passed" } else { "failed" },
+                    ));
+                    if tray_visible {
+                        return (Ok(()), true);
+                    }
                     crate::gatt_note(format!(
                         "registered_app_launch phase=prelaunch_activation result=deferred reason=windows_hidden_by_app visible=0 hidden={hidden}"
                     ));

@@ -438,6 +438,46 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 RunningActivation::NotFound => {}
             },
             RunningWindowDisposition::DelegateToApp => {
+                // 应用已运行，但窗口收在托盘里（如微信关闭到托盘）。**先走应用自己的托盘图标**
+                // ——这是用户平时"把应用叫回来"的方式，窗口由应用自己恢复，状态一致、可交互
+                // （2026-10-03 真机：直接 ShowWindow 出来的窗口点不动）。
+                // 托盘触发失败时，再按应用入口重新拉起。
+                let mut names: Vec<&str> = app.shortcut_names.to_vec();
+                names.extend(app.exe_names.iter().map(|name| {
+                    name.strip_suffix(".exe")
+                        .or(name.strip_suffix(".EXE"))
+                        .unwrap_or(name)
+                }));
+                let tray = crate::tray_icons::invoke_tray_icon(&names);
+                let tray_visible = tray.submitted
+                    && match visibility.largest_hidden {
+                        Some(hwnd) => readback_with_recheck(
+                            || {
+                                unsafe {
+                                    windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(
+                                        windows::Win32::Foundation::HWND(
+                                            hwnd as *mut core::ffi::c_void,
+                                        ),
+                                    )
+                                }
+                                .as_bool()
+                            },
+                            || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
+                            RELAUNCH_VISIBLE_CHECKS,
+                        ),
+                        None => false,
+                    };
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=activate_or_launch preset={} phase=tray_icon matched={} submitted={} method={} terminal_result={}",
+                    app.id,
+                    tray.matched,
+                    tray.submitted,
+                    tray.method,
+                    if tray_visible { "passed" } else { "failed" },
+                ));
+                if tray_visible {
+                    return Ok(());
+                }
                 // 应用已运行，但窗口收在托盘里（如微信关闭到托盘）。不要直接把隐藏窗口
                 // 摆出来：应用内部仍认为自己是隐藏的，客户端区点击不进入应用
                 // （2026-10-03 真机"打开后点不动"）。改为按应用自己的入口重新拉起——
