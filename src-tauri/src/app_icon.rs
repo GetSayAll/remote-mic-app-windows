@@ -409,6 +409,53 @@ mod tests {
         assert_eq!((window_icon.width(), window_icon.height()), (256, 256));
     }
 
+    /// 回归测试（2026-10-03 现场："图标在任务栏和托盘都比别人的小一圈"）：
+    ///
+    /// 源图若是 macOS 图标网格的导出（图案只占画布 ~87%，四周留白/阴影），缩到
+    /// Windows 尺寸后贴不满画布，任务栏与托盘就会显得比邻居小。这里把"内容必须
+    /// 铺满画布"钉成断言：阈值取 alpha ≥ 128（抗锯齿边缘也算可见），要求外接框
+    /// ≥ 98%。旧资产实测 0.90–0.94，会失败；新资产实测 1.000。
+    #[test]
+    fn faceted_duck_artwork_fills_the_canvas() {
+        fn visible_fill_ratio(image: &Image<'_>) -> f64 {
+            let (width, height) = (image.width() as i64, image.height() as i64);
+            let rgba = image.rgba();
+            let (mut min_x, mut min_y, mut max_x, mut max_y) = (width, height, -1_i64, -1_i64);
+            for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+                if pixel[3] < 128 {
+                    continue;
+                }
+                let x = (index as i64) % width;
+                let y = (index as i64) / width;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            if max_x < min_x || max_y < min_y {
+                return 0.0;
+            }
+            let extent = (max_x - min_x + 1).max(max_y - min_y + 1) as f64;
+            extent / width.max(height) as f64
+        }
+
+        let mut checked = Vec::new();
+        for size in TRAY_ICON_SIZES {
+            let image = faceted_duck_tray_image(size).expect("托盘图标必须可解码");
+            checked.push((format!("{size}px"), visible_fill_ratio(&image)));
+        }
+        let window_icon = faceted_duck_window_image().expect("窗口图标必须可解码");
+        checked.push(("256px".to_owned(), visible_fill_ratio(&window_icon)));
+
+        for (label, ratio) in checked {
+            assert!(
+                ratio >= 0.98,
+                "几何鸭 {label} 图标内容只占画布 {ratio:.3}：源图带了 macOS 式留白，\
+                 在任务栏/托盘会比别的应用小一圈（见 scripts/generate-app-icons.py 的 FILL_RATIO_MINIMUM）"
+            );
+        }
+    }
+
     #[test]
     fn resolution_keeps_known_identifiers() {
         assert_eq!(
