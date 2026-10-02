@@ -2348,6 +2348,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     enum BridgeOutbound {
         Edges(Vec<u16>),
         Ownership(BridgeCaptureTargets),
+        /// agent 已应用语音键合成配置的确认（绝对状态；`None` = 关闭）。
+        ///
+        /// 只用于转发给主程序置门禁——门禁不再认"S 行写进 socket"
+        /// （2026-10-03 加固：写出成功 ≠ 报告层已生效）。
+        SynthAck(Option<u16>),
     }
 
     /// 主程序桥接：把 agent 上报的动态目标按键边沿转发给主程序。
@@ -2397,6 +2402,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         fn push_ownership(&self, targets: BridgeCaptureTargets) {
             let _ = self.tx.send(BridgeOutbound::Ownership(targets));
+        }
+
+        /// 转发 agent 的合成回执（绝对状态）给主程序（门禁闭环的输入）。
+        fn push_synth_ack(&self, state: Option<u16>) {
+            let _ = self.tx.send(BridgeOutbound::SynthAck(state));
         }
 
         fn capture_targets(&self) -> BridgeCaptureTargets {
@@ -2658,6 +2668,74 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         (usage != 0).then_some(Some(usage))
     }
 
+    /// agent `synth_ack` 行 → 已应用的绝对状态。
+    ///
+    /// `Some(Some(usage))` = 合成生效中；`Some(None)` = 已关闭；`None` = 不是
+    /// synth_ack 或形状非法。这份状态经 `BridgeOutbound::SynthAck` 转发给主程序，
+    /// 是它置门禁（是否跳过 SendInput 注入）的唯一依据（2026-10-03 加固）。
+    fn parse_agent_synth_ack(line: &str) -> Option<Option<u16>> {
+        if extract_str(line, "type").unwrap_or_default() != "synth_ack" {
+            return None;
+        }
+        if extract_bool(line, "off") {
+            return Some(None);
+        }
+        let to = u16::try_from(extract_num(line, "to")?).ok()?;
+        Some(Some(to))
+    }
+
+    /// 转发给主程序的 agent 回执编码：`A <usage 四位十六进制>` 或 `A -`（关闭）。
+    /// 与主程序侧 `voice_synth_line`（S 行）同形状，两侧逐字符对齐。
+    fn synth_ack_line(state: Option<u16>) -> String {
+        match state {
+            Some(usage) => format!("A {usage:04X}"),
+            None => "A -".to_string(),
+        }
+    }
+
+    /// 解析读缓冲里的完整行：`T <generation> <usages>`（动态目标）与
+    /// `S <usage>` / `S -`（语音键报告层合成）。
+    ///
+    /// 与"本次读是否拿到新数据"解耦：握手余量（鉴权后紧跟的 `S` 行）在连接建立
+    /// 那一刻就已在缓冲里；只在 `Ok(n)` 分支里解析会把配置延迟到下一次读
+    /// （2026-10-03 修复的正是"余量被丢弃/久不生效"）。
+    fn drain_bridge_lines(
+        read_buffer: &mut Vec<u8>,
+        targets: &Mutex<BridgeCaptureTargets>,
+        voice_synth: &Mutex<Option<u16>>,
+        voice_synth_dirty: &AtomicBool,
+        logger: &Logger,
+    ) {
+        while let Some(pos) = read_buffer.iter().position(|byte| *byte == b'\n') {
+            let raw: Vec<u8> = read_buffer.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&raw[..raw.len().saturating_sub(1)]);
+            if let Some(configured) = parse_bridge_target_line(&line, "T") {
+                if let Ok(mut current) = targets.lock() {
+                    *current = configured;
+                }
+            } else if let Some(synth) = parse_bridge_synth_line(&line) {
+                // 功能点日志：来源、目标、关闭态三态都要能从日志定位。
+                logger.kv(
+                    "[VOICE-SYNTH]",
+                    &[
+                        ("event", "configured".into()),
+                        (
+                            "to",
+                            synth
+                                .map(|usage| format!("0x{usage:04X}"))
+                                .unwrap_or_else(|| "off".into()),
+                        ),
+                        ("source", "app_bridge".into()),
+                    ],
+                );
+                if let Ok(mut current) = voice_synth.lock() {
+                    *current = synth;
+                }
+                voice_synth_dirty.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// 发一条边沿行。空集合编码为 `-`（主程序侧据此释放全部）。
     fn bridge_send_edges(stream: &mut impl Write, usages: &[u16]) -> std::io::Result<()> {
         bridge_write_line(
@@ -2711,7 +2789,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
-    fn bridge_read_ack(stream: &mut AppBridgeStream) -> Result<String, String> {
+    /// 从已读字节里取出第一行（含换行）与**其余全部字节**（余量）。
+    ///
+    /// 余量必须保留：主程序鉴权后把 `OK` 行与语音键合成配置 `S <usage>` 行
+    /// **背靠背**写出，一次 `read` 常把两行一起带回来。旧实现只返回第一行、
+    /// 丢弃余量，于是合成配置永远不生效，而应用侧门禁已置真、跳过注入——
+    /// 表现为"重启/升级后按语音键没有任何事件送出，豆包语音条出不来"
+    /// （2026-10-03 现场，见 Bugs/2026-10-03-rc003-bridge-handshake-drops-synth-hello-replay.md）。
+    fn split_first_line(bytes: &[u8]) -> Option<(String, Vec<u8>)> {
+        let newline = bytes.iter().position(|byte| *byte == b'\n')?;
+        Some((
+            String::from_utf8_lossy(&bytes[..=newline]).into_owned(),
+            bytes[newline + 1..].to_vec(),
+        ))
+    }
+
+    /// 读 `OK` 行；返回（行内容, 同一次读里的余量字节）。
+    fn bridge_read_ack(stream: &mut AppBridgeStream) -> Result<(String, Vec<u8>), String> {
         let deadline = Instant::now() + Duration::from_millis(BRIDGE_IO_TIMEOUT_MS);
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 256];
@@ -2720,8 +2814,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 Ok(0) => return Err("ack_peer_closed".to_string()),
                 Ok(count) => {
                     bytes.extend_from_slice(&chunk[..count]);
-                    if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-                        return Ok(String::from_utf8_lossy(&bytes[..=newline]).into_owned());
+                    if let Some(line_and_surplus) = split_first_line(&bytes) {
+                        return Ok(line_and_surplus);
                     }
                     if bytes.len() > 4_096 {
                         return Err("ack_line_too_long".to_string());
@@ -2747,7 +2841,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     fn bridge_connect(
         path: Option<&Path>,
         logger: &Logger,
-    ) -> Result<(AppBridgeStream, PathBuf, BridgeCaptureTargets), String> {
+    ) -> Result<(AppBridgeStream, PathBuf, BridgeCaptureTargets, Vec<u8>), String> {
         let path = match path {
             Some(path) => path.to_path_buf(),
             None => return Err("descriptor_path_unknown".to_string()),
@@ -2835,13 +2929,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .write_all(hello.as_bytes())
             .map_err(|error| format!("hello_write_failed({error})"))?;
         stream.flush().ok();
-        let ack = bridge_read_ack(&mut stream)?;
+        let (ack, surplus) = bridge_read_ack(&mut stream)?;
         let targets = parse_bridge_target_line(&ack, "OK")
             .ok_or_else(|| format!("rejected_or_bad_config({})", ack.trim()))?;
         if let AppBridgeStream::Tcp(tcp) = &stream {
             tcp.set_nonblocking(true).ok();
         }
-        Ok((stream, path, targets))
+        // `surplus`：与 `OK` 同一次读到达的后续字节（真实主程序紧跟一行
+        // `S <usage>`）。调用方必须交回读循环——丢掉等于吞掉合成配置。
+        Ok((stream, path, targets, surplus))
     }
 
     fn app_bridge_worker(
@@ -2903,6 +2999,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             );
                         }
                     }
+                    BridgeOutbound::SynthAck(state) => {
+                        // agent 回执原样转发（绝对状态）——主程序据此置/清门禁。
+                        if let Some(stream) = conn.as_mut() {
+                            let _ = bridge_write_line(stream, &synth_ack_line(state));
+                        }
+                    }
                 }
             }
 
@@ -2940,7 +3042,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         }
                     }
                     match bridge_connect(candidate.as_deref(), &logger) {
-                        Ok((stream, location, configured)) => {
+                        Ok((stream, location, configured, surplus)) => {
                             let transport = stream.transport();
                             stats.connects.fetch_add(1, Ordering::Relaxed);
                             last_connected_ms.store(now_ms_u64(), Ordering::Relaxed);
@@ -2956,7 +3058,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             if let Ok(mut current) = targets.lock() {
                                 *current = configured;
                             }
-                            read_buffer.clear();
+                            // 握手余量（真实主程序在 `OK` 后紧跟的 `S` 行）成为新连接的
+                            // 起始缓冲；由下方 2.5 每轮无条件解析（不等下一次读）。
+                            read_buffer = surplus;
+                            if !read_buffer.is_empty() {
+                                logger.kv(
+                                    "[APP-BRIDGE]",
+                                    &[
+                                        ("event", "handshake_surplus".into()),
+                                        ("bytes", read_buffer.len().to_string()),
+                                    ],
+                                );
+                            }
                             conn = Some(stream);
                             had_connection = true;
                             // 重连后立刻对齐绝对状态：断线期间的变化无从逐条补发，
@@ -3004,44 +3117,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             // 2.5) 主程序热更新动态目标：`T <generation> <usages>`。
             //      同一读循环里顺带处理 `S <usage>` / `S -`（语音键报告层合成，
             //      来源 = 主程序的「按住说话快捷键」设置）。
+            //      解析与"本次读是否拿到新数据"解耦：握手余量（鉴权后紧跟的 `S` 行）
+            //      在连接建立那一刻就已在缓冲里，等到下一次读会白白延迟（甚至久不触发）。
             if let Some(stream) = conn.as_mut() {
                 let mut chunk = [0u8; 1024];
                 match stream.read(&mut chunk) {
                     Ok(0) => conn = None,
-                    Ok(n) => {
-                        read_buffer.extend_from_slice(&chunk[..n]);
-                        while let Some(pos) = read_buffer.iter().position(|byte| *byte == b'\n') {
-                            let raw: Vec<u8> = read_buffer.drain(..=pos).collect();
-                            let line = String::from_utf8_lossy(&raw[..raw.len().saturating_sub(1)]);
-                            if let Some(configured) = parse_bridge_target_line(&line, "T") {
-                                if let Ok(mut current) = targets.lock() {
-                                    *current = configured;
-                                }
-                            } else if let Some(synth) = parse_bridge_synth_line(&line) {
-                                // 功能点日志：来源、目标、关闭态三态都要能从日志定位。
-                                logger.kv(
-                                    "[VOICE-SYNTH]",
-                                    &[
-                                        ("event", "configured".into()),
-                                        (
-                                            "to",
-                                            synth
-                                                .map(|usage| format!("0x{usage:04X}"))
-                                                .unwrap_or_else(|| "off".into()),
-                                        ),
-                                        ("source", "app_bridge".into()),
-                                    ],
-                                );
-                                if let Ok(mut current) = voice_synth.lock() {
-                                    *current = synth;
-                                }
-                                voice_synth_dirty.store(true, Ordering::Relaxed);
-                            }
-                        }
-                    }
+                    Ok(n) => read_buffer.extend_from_slice(&chunk[..n]),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(_) => conn = None,
                 }
+            }
+            if conn.is_some() {
+                drain_bridge_lines(
+                    &mut read_buffer,
+                    &targets,
+                    &voice_synth,
+                    &voice_synth_dirty,
+                    &logger,
+                );
             }
 
             // 3) 心跳：主程序侧以 3 s 静默为断线判据，这里 1 s 一次。
@@ -3461,7 +3555,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 } else {
                     format!("0x{:04x}->0x{:04x}", from.unwrap_or(0), to.unwrap_or(0))
                 };
-                logger.kv("[SYNTH-ACK]", &[("state", state)]);
+                // 转发给主程序（2026-10-03 加固）：门禁只认 agent 回执，不再认
+                // "S 行写进 socket"；回执丢失时主程序按节奏重发 S 行（幂等自愈）。
+                let to_app = match (parse_agent_synth_ack(line), bridge) {
+                    (Some(applied), Some(bridge)) => {
+                        bridge.push_synth_ack(applied);
+                        "queued"
+                    }
+                    _ => "unavailable",
+                };
+                logger.kv(
+                    "[SYNTH-ACK]",
+                    &[("state", state), ("to_app", to_app.to_string())],
+                );
             }
             "edge" => {
                 if !session.authenticated {
@@ -6291,6 +6397,89 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(message.contains("kind=ConnectionRefused"));
             assert!(message.contains("os=Some(10061)"));
             assert!(message.contains("elapsed_ms=37"));
+        }
+    }
+
+    #[cfg(test)]
+    mod bridge_synth_ack_tests {
+        use super::*;
+
+        /// agent 回执解析：开/关两态都要能读出来；非本命令的行（或缺字段）返回 None。
+        #[test]
+        fn parses_agent_synth_ack_states() {
+            assert_eq!(
+                parse_agent_synth_ack(r#"{"type":"synth_ack","from":62,"to":230}"#),
+                Some(Some(230))
+            );
+            assert_eq!(
+                parse_agent_synth_ack(r#"{"type":"synth_ack","off":true}"#),
+                Some(None)
+            );
+            assert_eq!(parse_agent_synth_ack(r#"{"type":"hb"}"#), None);
+            assert_eq!(parse_agent_synth_ack(r#"{"type":"synth_ack"}"#), None);
+        }
+
+        /// 转发给主程序的 `A` 行与主程序侧 `voice_synth_line`（S 行）同形状——
+        /// 两侧逐字符对齐，避免"回执永远匹配不上期望值"的静默失谐。
+        #[test]
+        fn ack_line_encodes_on_and_off() {
+            assert_eq!(synth_ack_line(Some(0x00E6)), "A 00E6");
+            assert_eq!(synth_ack_line(None), "A -");
+        }
+    }
+
+    #[cfg(test)]
+    mod bridge_handshake_surplus_tests {
+        use super::*;
+
+        /// 2026-10-03 现场回归：主程序鉴权后把 `OK` 行与合成配置 `S` 行**背靠背**
+        /// 写出，一次 `read` 常把两行一起带回来。旧实现只返回第一行、丢弃余量，
+        /// 助手永远不知道合成配置；应用侧门禁却已置真并跳过注入——语音键按下
+        /// 没有任何事件送出（豆包语音条出不来，四连按复现）。
+        #[test]
+        fn ack_read_keeps_lines_that_arrive_in_the_same_read() {
+            let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+                .expect("绑定本机回环端口");
+            let address = listener.local_addr().expect("本地地址");
+            let client = TcpStream::connect(address).expect("连接回环");
+            let (mut server, _) = listener.accept().expect("接受连接");
+            // 与真实主程序一致：两行一次写出（不是两次 write）。
+            server.write_all(b"OK 2 12 -\nS 00E6\n").expect("写回两行");
+            server.flush().ok();
+
+            let mut stream = AppBridgeStream::Tcp(client);
+            let (line, surplus) = bridge_read_ack(&mut stream).expect("读到 ack");
+            assert_eq!(line, "OK 2 12 -\n");
+            assert_eq!(
+                surplus, b"S 00E6\n",
+                "同一次读里的后续行必须以余量交回，而不是丢弃"
+            );
+        }
+
+        /// 余量不是"留着好看"：读循环必须把它解析成合成配置（而不是只留字节）。
+        #[test]
+        fn drain_applies_synth_line_left_in_the_read_buffer() {
+            let mut read_buffer: Vec<u8> = b"S 00E6\n".to_vec();
+            let targets = Mutex::new(BridgeCaptureTargets::default());
+            let voice_synth = Mutex::new(None);
+            let dirty = AtomicBool::new(false);
+            let logger = Logger::new(None);
+
+            drain_bridge_lines(&mut read_buffer, &targets, &voice_synth, &dirty, &logger);
+
+            assert!(read_buffer.is_empty());
+            let observed = *voice_synth.lock().unwrap();
+            assert_eq!(observed, Some(0x00E6));
+            assert!(dirty.load(Ordering::Relaxed));
+        }
+
+        /// 未成行的尾巴不能吐掉：没有换行就留在缓冲里等下一次读补齐。
+        #[test]
+        fn split_first_line_waits_for_the_newline() {
+            assert!(split_first_line(b"OK 2 1").is_none());
+            let (line, surplus) = split_first_line(b"OK 2 12 -\nS 00E6\nP 1\n").expect("第一行");
+            assert_eq!(line, "OK 2 12 -\n");
+            assert_eq!(surplus, b"S 00E6\nP 1\n");
         }
     }
 
