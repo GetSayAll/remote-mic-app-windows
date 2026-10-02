@@ -322,13 +322,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.about-card { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
-.about-row { display: flex; align-items: center; gap: 16px; }
-.about-links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+/* 设置页顶部标识卡与通用分组：布局细节在 SettingsPage.vue 的 scoped 样式里，
+   这里只保留跨页复用的应用图标尺寸。 */
 .app-logo { width: 56px; height: 56px; flex: 0 0 auto; border-radius: 14px; }
-.about-card p { margin: 3px 0 0; font-size: 13.5px; }
-.appearance-card { margin-bottom: 12px; }
-.appearance-card > .muted { margin: 3px 0 10px; font-size: 13.5px; }
 .theme-selector { width: fit-content; display: inline-grid; grid-template-columns: repeat(3, minmax(76px, 1fr)); gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
 .theme-option { position: relative; min-height: 32px; display: grid; place-items: center; padding: 5px 14px; border-radius: 7px; color: var(--text-secondary); cursor: pointer; font-size: 13.5px; font-weight: 600; transition: color 0.15s, background-color 0.15s, box-shadow 0.15s; }
 .theme-option:hover { color: var(--text-primary); background: var(--nav-hover); }
@@ -337,10 +333,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .theme-option:has(input:disabled) { cursor: wait; opacity: 0.6; }
 .theme-option input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.appearance-card .appearance-note { margin: 8px 0 0; font-size: 12.5px; }
 .error-banner { margin-bottom: 20px; padding: 12px 14px; border-radius: 8px; color: var(--error-text); background: var(--error-surface); }
 
-/* ---- 应用内更新（关于页面板 + 顶部横幅） ---- */
+/* ---- 应用内更新（设置页面板 + 顶部横幅） ---- */
 .update-panel { display: flex; flex-direction: column; gap: 10px; }
 .update-panel p { margin: 0; }
 .update-notes { font-size: 13px; white-space: pre-line; }

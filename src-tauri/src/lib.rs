@@ -20,11 +20,12 @@ mod platform;
 mod rc003_task;
 mod settings;
 mod startup;
+mod tray;
 mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
-use sayall_core::{ThemePreference, VoiceInputTool};
+use sayall_core::{ThemePreference, TrayIconStyle, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
@@ -193,6 +194,56 @@ fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
         started.elapsed().as_millis()
     ));
     result
+}
+
+/// 设置页「托盘图标」的当前样式（默认彩色应用图标）。
+#[tauri::command]
+fn get_tray_icon_style(state: tauri::State<'_, AppState>) -> Result<TrayIconStyle, String> {
+    state
+        .settings
+        .load()
+        .map(|settings| settings.tray_icon_style)
+}
+
+/// 切换托盘图标样式：先落盘再换图，换图用的连接状态来自当前运行快照
+/// （不依赖前端此刻是否已经上报过），因此切换后立即与真实状态一致。
+#[tauri::command]
+fn set_tray_icon_style(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    style: TrayIconStyle,
+) -> Result<TrayIconStyle, String> {
+    state.settings.save_tray_icon_style(style)?;
+    let current = tray::TrayIconState::from_platform(&state.platform.snapshot());
+    tray::apply(&app, style, current);
+    sayall_windows::gatt_note(format!(
+        "tray_icon feature=tray action=set_style phase=completed terminal_result=passed style={} state={}",
+        tray::style_label(style),
+        current.label()
+    ));
+    Ok(style)
+}
+
+/// 前端按运行快照上报的连接/语音状态。只在状态变化时投递；这里不落盘、不改
+/// 任何主路径状态，托盘不可用时只记日志（仿真构建与托盘创建失败都走这条路）。
+///
+/// 参数名必须与前端 `invoke("report_tray_icon_state", { state })` 的键一致：
+/// 名字不匹配时 Tauri 直接把调用判成缺参，前端只会看到"IPC 不可用"而托盘
+/// 永不更新（2026-10-02 本机仿真日志实证：每秒 `tray_icon_state result=failed
+/// reason=ipc_unavailable`）。`runtime-simulation` 的旅程里对这条命令有直达断言。
+#[tauri::command]
+fn report_tray_icon_state(
+    app: tauri::AppHandle,
+    app_state: tauri::State<'_, AppState>,
+    state: tray::TrayIconState,
+) -> Result<(), String> {
+    let style = app_state
+        .settings
+        .load()
+        .map(|settings| settings.tray_icon_style)
+        .unwrap_or_default();
+    tray::apply(&app, style, state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1793,7 +1844,7 @@ pub fn run() {
                 let icon = app.default_window_icon().cloned().ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "缺少应用图标，无法创建托盘")
                 })?;
-                TrayIconBuilder::with_id("sayall-tray")
+                TrayIconBuilder::with_id(tray::TRAY_ID)
                     .icon(icon)
                     .menu(&menu)
                     .show_menu_on_left_click(false)
@@ -1855,6 +1906,15 @@ pub fn run() {
                     Default::default()
                 }
             };
+            // 托盘图标样式（2026-10-02）：托盘刚用应用图标建成，这里按持久化样式
+            // 应用一次。初值按"未连接"（与 Mac 启动时的 disconnected 一致），前端
+            // 首次运行快照上报（约 1 秒内）会把它纠正成真实连接状态。
+            #[cfg(windows)]
+            tray::apply(
+                app.handle(),
+                saved_settings.tray_icon_style,
+                tray::TrayIconState::DISCONNECTED,
+            );
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
             // 「任务装没装」当状态。
@@ -2143,6 +2203,9 @@ pub fn run() {
         get_launch_at_login,
         set_launch_at_login,
         report_theme_result,
+        get_tray_icon_style,
+        set_tray_icon_style,
+        report_tray_icon_state,
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,
@@ -2198,6 +2261,9 @@ pub fn run() {
         get_launch_at_login,
         set_launch_at_login,
         report_theme_result,
+        get_tray_icon_style,
+        set_tray_icon_style,
+        report_tray_icon_state,
         get_app_update_preferences,
         set_app_update_preferences,
         check_app_update,

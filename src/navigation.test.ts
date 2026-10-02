@@ -15,8 +15,11 @@ describe("Windows navigation", () => {
       "buttons",
       "connection",
       "permissions",
-      "about",
+      "settings",
     ]);
+    // 2026-10-02 用户指定：末位页从「关于」改名「设置」，图标换成 Mac 同款齿轮。
+    expect(navigationItems[3].label).toBe("设置");
+    expect(navigationItems[3].icon).toBe("gear");
     expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
   });
 });
@@ -30,12 +33,15 @@ describe("active page persistence (webview reload recovery)", () => {
     expect(loadPersistedPage()).toBeNull();
     persistActivePage("connection");
     expect(loadPersistedPage()).toBe("connection");
-    persistActivePage("about");
-    expect(loadPersistedPage()).toBe("about");
+    persistActivePage("settings");
+    expect(loadPersistedPage()).toBe("settings");
   });
 
   it("ignores stored values that are no longer valid page ids", () => {
     localStorage.setItem("sayall.activePage", "statistics");
+    expect(loadPersistedPage()).toBeNull();
+    // 旧版本持久化的 "about" 在改名后不再是合法页 id：回落默认页，不做迁移映射。
+    localStorage.setItem("sayall.activePage", "about");
     expect(loadPersistedPage()).toBeNull();
     localStorage.setItem("sayall.activePage", "");
     expect(loadPersistedPage()).toBeNull();

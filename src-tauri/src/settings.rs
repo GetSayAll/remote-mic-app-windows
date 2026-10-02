@@ -1,4 +1,4 @@
-use sayall_core::{AppSettings, ThemePreference, UsageStatistics, VoiceInputTool};
+use sayall_core::{AppSettings, ThemePreference, TrayIconStyle, UsageStatistics, VoiceInputTool};
 use sayall_windows::send_input::{ButtonMappings, KeyChord, KeyCode};
 use std::fs;
 use std::io::ErrorKind;
@@ -82,6 +82,13 @@ impl SettingsStore {
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
+        })
+    }
+
+    /// 通知区域（托盘）图标样式（设置页「托盘图标」，2026-10-02）。
+    pub fn save_tray_icon_style(&self, style: TrayIconStyle) -> Result<(), String> {
+        self.update("保存托盘图标设置", move |settings| {
+            settings.tray_icon_style = style;
         })
     }
 

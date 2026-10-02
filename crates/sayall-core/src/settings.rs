@@ -30,6 +30,19 @@ pub enum VoiceInputTool {
     Other,
 }
 
+/// 通知区域（托盘）图标样式（设置页「托盘图标」，2026-10-02 用户指定）。
+///
+/// `AppIcon` = 沿用彩色应用图标（历史行为，也是老配置的默认）；
+/// `StatusIcon` = Mac main `Resources/StatusIconTemplate` 同款单色图标，
+/// 未连接遥控器时按 Mac `appearsDisabled` 的语义整体变暗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayIconStyle {
+    #[default]
+    AppIcon,
+    StatusIcon,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -50,6 +63,8 @@ pub struct AppSettings {
     /// 所以不能拿任务的存在与否当这个开关的状态。
     pub rc003_capture_enabled: bool,
     pub theme_preference: ThemePreference,
+    /// 通知区域（托盘）图标样式；老配置没有这个字段时落回彩色应用图标。
+    pub tray_icon_style: TrayIconStyle,
     pub usage_statistics: UsageStatistics,
 }
 
@@ -68,6 +83,7 @@ impl Default for AppSettings {
             check_prerelease_updates: false,
             rc003_capture_enabled: false,
             theme_preference: ThemePreference::System,
+            tray_icon_style: TrayIconStyle::AppIcon,
             usage_statistics: UsageStatistics::default(),
         }
     }
@@ -158,6 +174,28 @@ mod tests {
             assert!(encoded.contains("\"voice_input_tool\""));
             let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded.voice_input_tool, Some(tool));
+        }
+    }
+
+    #[test]
+    fn tray_icon_style_defaults_to_app_icon_and_round_trips() {
+        // 老配置 / 新装：没有这个字段时落回彩色应用图标（历史行为），
+        // 不能让升级用户的托盘图标突然变成单色状态图标。
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.tray_icon_style, TrayIconStyle::AppIcon);
+
+        for style in [TrayIconStyle::AppIcon, TrayIconStyle::StatusIcon] {
+            let settings = AppSettings {
+                tray_icon_style: style,
+                ..AppSettings::default()
+            };
+            let encoded = serde_json::to_string(&settings).unwrap();
+            assert!(encoded.contains("\"tray_icon_style\""));
+            let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.normalized().tray_icon_style, style);
         }
     }
 }

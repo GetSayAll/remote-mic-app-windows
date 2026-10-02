@@ -237,14 +237,15 @@ describe("VB-CABLE download guidance", () => {
   });
 });
 
-describe("关于页外部入口（官网 / GitHub）", () => {
+describe("设置页外部入口（官网 / GitHub）", () => {
   afterEach(() => {
     delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     vi.mocked(openUrl).mockReset();
   });
 
   it("指向已确认的官网与 Windows 仓库地址", () => {
-    expect(OFFICIAL_WEBSITE_URL).toBe("https://sayall.app/");
+    // 2026-10-02 用户指定：官网入口带 `?from=win` 来源标记，便于官网区分来客。
+    expect(OFFICIAL_WEBSITE_URL).toBe("https://sayall.app/?from=win");
     expect(GITHUB_REPOSITORY_URL).toBe("https://github.com/GetSayAll/remote-mic-app-windows");
   });
 
