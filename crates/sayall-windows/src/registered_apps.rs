@@ -279,6 +279,50 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
             let app_user_model_id = identity.app_user_model_id;
             let executable_path = identity.executable_path;
 
+            // 「已运行 → 切回已有窗口」必须先于激活契约：Word / PowerPoint / WPS
+            // 这类应用只要走到 ActivateApplication 就会新开实例或文档/首页窗口，
+            // 之后的前台读回只能把那个新窗口置前（2026-10-02 用户实测）。
+            // 能力本就在 app_launcher 里（窗口 AUMID → 进程 AUMID → exe 路径），
+            // 这里只是在启动前先试一次；都失败才认为确实没在运行。
+            {
+                let by_identity =
+                    crate::app_launcher::activate_application_window(&app_user_model_id);
+                let by_path = !by_identity
+                    && executable_path
+                        .as_deref()
+                        .is_some_and(crate::app_launcher::activate_executable_path);
+                // 启动器式目标（实测：WPS 注册项解析到 ksolaunch.exe，真正的文档
+                // 进程在同目录的版本子目录里）→ 同安装目录同族进程兜底。
+                let by_family = !by_identity
+                    && !by_path
+                    && executable_path.as_deref().is_some_and(|path| {
+                        crate::app_launcher::activate_install_directory_family(
+                            path,
+                            &app_user_model_id,
+                        )
+                    });
+                if by_identity || by_path || by_family {
+                    let source = if by_identity {
+                        "app_identity"
+                    } else if by_path {
+                        "executable_path"
+                    } else {
+                        "install_directory"
+                    };
+                    crate::gatt_note(format!(
+                        "registered_app_launch phase=prelaunch_activation result=activated source={source}"
+                    ));
+                    return (Ok(()), true);
+                }
+                // 只记判定结果，不记路径（隐私规则）：用于区分「没匹配到运行中的
+                // 进程」与「匹配到但抢前台被拒」——后者修法完全不同。
+                crate::gatt_note(format!(
+                    "registered_app_launch phase=prelaunch_activation result=not_running aumid_hit={} executable_path_available={}",
+                    by_identity,
+                    executable_path.is_some()
+                ));
+            }
+
             let id_wide: Vec<_> = app_user_model_id.encode_utf16().chain(Some(0)).collect();
             let activation = (|| -> windows::core::Result<u32> {
                 let manager: IApplicationActivationManager = unsafe {
