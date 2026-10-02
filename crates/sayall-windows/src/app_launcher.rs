@@ -467,7 +467,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 };
                 // 有界等待：必须观察到**原先那个隐藏窗口**自己变可见才算成功。
                 // 只数"有没有可见窗口"会被应用一闪而过的登录/提示窗口骗过（实测假阳性）。
-                let known_hidden = visibility.first_hidden;
+                let known_hidden = visibility.largest_hidden;
                 let became_visible = readback_with_recheck(
                     || match known_hidden {
                         Some(hwnd) => unsafe {
@@ -495,7 +495,22 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 if became_visible {
                     return Ok(());
                 }
-                // 兜底：应用没有自己显示窗口时，仍按旧路径显示隐藏窗口并置前。
+                // 回落：**定点**显示我们已知的那个隐藏主窗口（面积最大的隐藏候选）。
+                // 不能重新枚举再挑"第一个可见窗口"——应用被重新拉起后往往先弹一个
+                // 登录/入口小窗口（2026-10-03 实测：微信 295×387 的"进入微信"窗口
+                // 正好会抢走回落目标，用户看到的就是那个小窗口）。
+                if let Some(hwnd) = known_hidden {
+                    let activated = unsafe { win_impl::activate_known_window(hwnd) };
+                    crate::ble::gatt_note(format!(
+                        "app_launcher action=activate_or_launch preset={} phase=relaunch_fallback target=largest_hidden_window terminal_result={}",
+                        app.id,
+                        if activated { "passed" } else { "failed" },
+                    ));
+                    if activated {
+                        return Ok(());
+                    }
+                }
+                // 最后兜底：仍按旧的"枚举 + 显示隐藏候选"路径（最坏等于修复前行为）。
                 match activate_running(app.exe_names) {
                     RunningActivation::Activated(_) => return Ok(()),
                     RunningActivation::ForegroundDenied => {
@@ -1128,14 +1143,14 @@ pub(crate) enum WindowSelector<'a> {
     AppUserModelId(&'a str),
 }
 
-/// 只读枚举结果。`first_hidden` 是枚举顺序里的第一个隐藏候选，用于"应用是否把
-/// **我们已知的那个窗口**自己显示出来"的复核——只看"有没有可见窗口"会被应用
-/// 一闪而过的登录/提示窗口骗过（2026-10-03 实测假阳性）。
+/// 只读枚举结果。`largest_hidden` 是**面积最大**的隐藏候选（通常是应用主窗口），
+/// 用于复核"应用是否把我们已知的主窗口自己显示出来"，以及回落时定点显示它——
+/// 只看"有没有可见窗口"会被应用一闪而过的登录/入口小窗口骗过（2026-10-03 实测假阳性）。
 #[cfg(windows)]
 pub(crate) struct WindowVisibility {
     pub visible: usize,
     pub hidden: usize,
-    pub first_hidden: Option<isize>,
+    pub largest_hidden: Option<isize>,
 }
 
 /// 目标进程/AUMID 当前可见窗口与隐藏窗口的数量（与激活路径同一份过滤规则）。
@@ -1154,13 +1169,14 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
         app_user_model_id,
         visible: 0,
         hidden: 0,
-        first_hidden: None,
+        largest_hidden: None,
+        largest_hidden_area: 0,
     };
     if pids.is_empty() && app_user_model_id.is_none() {
         return WindowVisibility {
             visible: 0,
             hidden: 0,
-            first_hidden: None,
+            largest_hidden: None,
         };
     }
     unsafe {
@@ -1172,7 +1188,7 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
     WindowVisibility {
         visible: context.visible,
         hidden: context.hidden,
-        first_hidden: context.first_hidden,
+        largest_hidden: context.largest_hidden,
     }
 }
 
@@ -1313,13 +1329,15 @@ mod win_impl {
         pub hidden_candidates: Vec<HWND>,
     }
 
-    /// 只读枚举：统计目标（pid 集合 / 窗口 AUMID）当前可见与隐藏的候选窗口数量。
+    /// 只读枚举：统计目标（pid 集合 / 窗口 AUMID）当前可见与隐藏的候选窗口数量，
+    /// 并记下**面积最大**的隐藏候选（通常是主窗口，用于复核与定点回落）。
     pub(super) struct VisibilityEnumContext<'a> {
         pub pids: &'a std::collections::HashSet<u32>,
         pub app_user_model_id: Option<&'a str>,
         pub visible: usize,
         pub hidden: usize,
-        pub first_hidden: Option<isize>,
+        pub largest_hidden: Option<isize>,
+        pub largest_hidden_area: i64,
     }
 
     pub(super) unsafe extern "system" fn enum_visibility_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -1337,11 +1355,24 @@ mod win_impl {
             context.visible += 1;
         } else {
             context.hidden += 1;
-            if context.first_hidden.is_none() {
-                context.first_hidden = Some(hwnd.0 as isize);
+            let mut rect = RECT::default();
+            let area = if GetWindowRect(hwnd, &mut rect).is_ok() {
+                i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
+            } else {
+                0
+            };
+            if area > context.largest_hidden_area {
+                context.largest_hidden_area = area;
+                context.largest_hidden = Some(hwnd.0 as isize);
             }
         }
         BOOL::from(true)
+    }
+
+    /// 定点显示并置前一个已知窗口（回落用）。返回是否读回到前台。
+    pub(super) unsafe fn activate_known_window(hwnd: isize) -> bool {
+        let window = HWND(hwnd as *mut core::ffi::c_void);
+        show_and_force_foreground(window).activated
     }
 
     pub(super) struct AppIdentityEnumContext<'a> {
