@@ -436,9 +436,17 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-cell.set span { color: var(--accent-text); }
 .mapping-cell.editing { background: var(--accent-surface-strong); }
 .mapping-cell.flashed { background: var(--pressed-surface); }
-/* 暂不支持自定义的按键：禁用态（保留卡片与已配置显示，仅不可编辑）。 */
+/* 不可编辑的格子：禁用态（保留卡片与已配置显示，仅不可编辑）。
+   现状只在「全按键支持」关闭时的返回/音量± 上出现（2026-10-03）。 */
 .mapping-cell:disabled { cursor: not-allowed; opacity: 0.5; }
 .mapping-cell:disabled:hover { background: var(--mapping-neutral); }
+/* 「全按键支持」关闭时的三键卡片：整卡置灰、不可点、悬停给出开启指引
+   （2026-10-03 Andy 定稿）。格子不再二次降透明，避免卡片 × 格子叠加过暗；
+   格子同时不吃指针事件——悬停改由卡片/容器的 title 承担（原生 tooltip 对
+   disabled 控件的支持因引擎而异，不能赌），点击仍由动作函数守卫拦下。 */
+.mapping-card.is-locked { opacity: 0.55; cursor: not-allowed; }
+.mapping-card.is-locked:hover { background: var(--mapping-neutral); border-color: var(--border-strong); box-shadow: none; }
+.mapping-card.is-locked .mapping-cell { opacity: 1; pointer-events: none; }
 .voice-card { cursor: default; }
 .voice-card .mapping-card-title { margin-bottom: 3px; }
 .voice-badge { margin-left: auto; font-size: 12px; font-weight: 600; min-height: 20px; padding: 2px 6px; }

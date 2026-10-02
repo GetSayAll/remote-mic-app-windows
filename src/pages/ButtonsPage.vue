@@ -475,10 +475,13 @@ async function addCustomApp(): Promise<void> {
 }
 
 function selectButton(button: RemoteButton): void {
+  // 三键在「全按键支持」关闭时置灰禁用：合成事件绕过原生 disabled，这里再守一道。
+  if (captureGated(button)) return;
   selectedButton.value = button;
 }
 
 function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
+  if (captureGated(button)) return;
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
@@ -589,6 +592,14 @@ function isActivePreset(keys: KeyCode[]): boolean {
 }
 
 /**
+ * 三键（返回/音量±）关闭态的统一说明（2026-09-28 Andy 定稿）：
+ * 编辑器能力说明与卡片置灰禁用悬停提示共用，悬停提示在句尾补「开启后恢复正常」
+ * （2026-10-03 Andy 定稿）。
+ */
+const TRI_KEY_CAPTURE_HINT = "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
+const TRI_KEY_GATED_TITLE = `${TRI_KEY_CAPTURE_HINT}，开启后恢复正常`;
+
+/**
  * 编辑器提示（信息性）：Home/TV 已落地"遥控器优先"（2026-09-07 方案 C）——
  * 已配置映射且遥控器连接期间原生按键被接管，任意按压（含闲置后首次）严格
  * 单响应；确定/方向的同键映射仍由泄漏对冲保证单响应，其余配置冷首按附带
@@ -596,6 +607,9 @@ function isActivePreset(keys: KeyCode[]): boolean {
  *
  * 2026-09-23 增补（返回/音量± 产品策略改为"启用"）：三键已恢复可配置，
  * 但能否真正收到边沿取决于型号——界面按型号如实说明，不做静默降级。
+ *
+ * 2026-10-03 增补：关闭态下三键卡片置灰禁用（captureGated），进不了编辑器；
+ * 关闭态整句因此只在"开启后现场关闭开关"这一路径出现（防"界面说明说谎"）。
  */
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
@@ -611,10 +625,10 @@ const capabilityNote = computed<string | null>(() => {
   }
   if (button === "back" || button === "volume_up" || button === "volume_down") {
     // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
-    // 文案只随开关状态走。RC001 的三键不经助手也能到达（key_gate 直接归因），
-    // 开着增强捕获对它无害；RC003 则必须开启才会生效。
+    // 文案只随开关状态走。RC001 的三键同样依赖增强捕获（2026-09-25 真机：
+    // 开=可映射、关=不映射），不再按"RC001 免助手"设计。
     if (rc003CaptureEnabled.value === false) {
-      return "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
+      return TRI_KEY_CAPTURE_HINT;
     }
     return "提示：正在确认按键状态…";
   }
@@ -1053,6 +1067,21 @@ const rc003BridgeTone = computed(() => {
   }
 });
 
+/**
+ * 返回/音量± 在「全按键支持」关闭时不可用：卡片置灰禁用并给悬停提示
+ * （2026-10-03 Andy 定稿：置灰禁用 +「…需要开启全按键支持才能使用，开启后恢复正常」）。
+ * 状态未就绪（null）按关闭态处理——与开关悬停提示、能力说明同一口径；开启后
+ * 卡片与命中路径立即恢复（响应式，无需重进页面）。
+ * 注意：不能只靠模板的 disabled 属性——合成事件会绕过原生 disabled，动作函数
+ * （selectButton/openEditor）必须同样自守。
+ */
+function captureGated(button: RemoteButton): boolean {
+  return (
+    rc003CaptureEnabled.value !== true &&
+    (button === "back" || button === "volume_up" || button === "volume_down")
+  );
+}
+
 // 开启成功但桥接段异步失败（助手起不来等）：开关已是开启态、不会再走
 // applyCaptureToggle 的失败分支，必须在这里把失败送进底部提示条，
 // 否则用户只看到一个黄点永远不变绿（2026-09-28 状态行移除后的唯一显性告警）。
@@ -1461,8 +1490,11 @@ onUnmounted(() => {
           selected: selectedButton === placement.button,
           active: activeButtons.has(placement.button),
           flashed: firedFlash?.button === placement.button,
+          'is-locked': captureGated(placement.button),
         }"
         :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
+        :title="captureGated(placement.button) ? TRI_KEY_GATED_TITLE : undefined"
+        :aria-disabled="captureGated(placement.button) || undefined"
         @click="selectButton(placement.button)"
       >
         <div class="mapping-card-title">
@@ -1491,7 +1523,12 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :title="`${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`"
+            :disabled="captureGated(placement.button)"
+            :title="
+              captureGated(placement.button)
+                ? TRI_KEY_GATED_TITLE
+                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
+            "
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>

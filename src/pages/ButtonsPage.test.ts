@@ -290,6 +290,9 @@ function captureRow(page: VueWrapper) {
 /** 2026-09-28 用户定稿：三键关闭态提示（不再带「提示：」前缀）。 */
 const TRI_KEY_HINT = "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
 
+/** 2026-10-03 用户定稿：关闭态三键卡片置灰禁用后的悬停提示。 */
+const TRI_KEY_GATED_TITLE = `${TRI_KEY_HINT}，开启后恢复正常`;
+
 /** 2026-09-28 用户定稿：开关悬停提示随开关状态切换。 */
 const CAPTURE_SWITCH_OFF_TITLE =
   "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化";
@@ -779,46 +782,101 @@ describe("buttons mapping page", () => {
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 
-  it("返回/音量±全型号开放自定义", async () => {
+  it("全按键支持关闭时：返回/音量±置灰禁用并悬停指向开关（全型号一致）", async () => {
     for (const model of ["rc003", "rc001", "unknown"] as const) {
       const wrapper = await mountPage(model);
-      const backCell = wrapper
+      const backCard = wrapper
         .findAll(".mapping-card")
-        .find((c) => c.text().includes("返回"))!
-        .findAll(".mapping-cell")[0]!;
-      expect((backCell.element as HTMLButtonElement).disabled, `${model} 返回格子应启用`).toBe(false);
-      const volumeCell = wrapper
-        .findAll(".mapping-card")
-        .find((c) => c.text().includes("音量"))!
-        .findAll(".mapping-cell")[0]!;
-      expect((volumeCell.element as HTMLButtonElement).disabled, `${model} 音量格子应启用`).toBe(false);
+        .find((c) => c.find(".mapping-card-title strong").text() === "返回")!;
+      expect(backCard.classes(), `${model} 返回卡片应置灰`).toContain("is-locked");
+      expect(backCard.attributes("title"), `${model} 返回卡片悬停提示`).toBe(TRI_KEY_GATED_TITLE);
+      const backCell = backCard.findAll(".mapping-cell")[0]!;
+      expect((backCell.element as HTMLButtonElement).disabled, `${model} 返回格子应禁用`).toBe(true);
+      expect(backCell.attributes("title"), `${model} 返回格子悬停提示`).toBe(TRI_KEY_GATED_TITLE);
+      // 合成事件绕过原生 disabled：动作函数必须自守，不能打开编辑器。
       await backCell.trigger("click");
-      expect(wrapper.find(".mapping-editor").exists()).toBe(true);
+      expect(wrapper.find(".mapping-editor").exists(), `${model} 禁用格子不应打开编辑器`).toBe(false);
+
+      const volumeCard = wrapper
+        .findAll(".mapping-card")
+        .find((c) => c.find(".mapping-card-title strong").text().includes("音量"))!;
+      expect(volumeCard.classes(), `${model} 音量卡片应置灰`).toContain("is-locked");
+      expect(
+        (volumeCard.findAll(".mapping-cell")[0]!.element as HTMLButtonElement).disabled,
+        `${model} 音量格子应禁用`,
+      ).toBe(true);
+
+      // 其余按键不受影响：电源卡片照常可进编辑器。
+      const powerCard = wrapper
+        .findAll(".mapping-card")
+        .find((c) => c.find(".mapping-card-title strong").text() === "电源")!;
+      expect(powerCard.classes(), `${model} 电源卡片不应置灰`).not.toContain("is-locked");
+      await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+      expect(wrapper.find(".mapping-editor").exists(), `${model} 电源格子应可打开编辑器`).toBe(true);
+      wrapper.unmount();
     }
   });
 
-  it("返回/音量±按型号如实标注源头捕获能力（不静默降级）", async () => {
-    // 未授权：如实指向开关，而不是沿用任何旧占位文案。
+  it("开启全按键支持后：返回/音量±立即恢复正常（可点击、提示恢复按键信息）", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
-      installed: false,
-      authorizationRequired: true,
-      enabled: false,
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
       helperPath: null,
       lastError: null,
     });
-    const rc003 = await mountPage("rc003");
-    const rc003Back = rc003
+    const wrapper = await mountPage("rc003");
+    const backCard = wrapper
       .findAll(".mapping-card")
-      .find((c) => c.text().includes("返回"))!
-      .findAll(".mapping-cell")[0]!;
-    await rc003Back.trigger("click");
+      .find((c) => c.find(".mapping-card-title strong").text() === "返回")!;
+    expect(backCard.classes()).not.toContain("is-locked");
+    expect(backCard.attributes("title")).toBeUndefined();
+    const backCell = backCard.findAll(".mapping-cell")[0]!;
+    expect((backCell.element as HTMLButtonElement).disabled).toBe(false);
+    expect(backCell.attributes("title")).toContain("返回 · 单击");
+    await backCell.trigger("click");
+    expect(wrapper.find(".mapping-editor").exists()).toBe(true);
+  });
+
+  it("返回/音量±按型号如实标注源头捕获能力（不静默降级）", async () => {
+    // 关闭方向现场：开启态进入编辑器 → 现场关闭开关 → 三键说明切回关闭态整句。
+    // （关闭态下卡片已置灰禁用，这条路径是编辑器内关闭态说明的唯一入口。）
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    const rc003Closing = await mountPage("rc003");
+    const closingBackCard = rc003Closing
+      .findAll(".mapping-card")
+      .find((c) => c.text().includes("返回"))!;
+    await closingBackCard.findAll(".mapping-cell")[0]!.trigger("click");
     await vi.waitFor(
       () => {
-        // 2026-09-28 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
-        expect(rc003.find(".capability-note").text()).toBe(TRI_KEY_HINT);
+        expect(rc003Closing.find(".capability-note").text()).toContain("映射现在生效");
       },
       { timeout: 4000 },
     );
+    const closingSwitch = captureRow(rc003Closing)!.find('input[type="checkbox"]');
+    (closingSwitch.element as HTMLInputElement).checked = false;
+    await closingSwitch.trigger("change");
+    await flushPromises();
+    await vi.waitFor(
+      () => {
+        // 2026-09-28 定稿：未开启时整句就是一句话（细节由确认弹窗承载）。
+        expect(rc003Closing.find(".capability-note").text()).toBe(TRI_KEY_HINT);
+      },
+      { timeout: 4000 },
+    );
+    // 关闭后卡片同步置灰禁用（开启后恢复正常）。
+    expect(
+      rc003Closing
+        .findAll(".mapping-card")
+        .find((c) => c.text().includes("返回"))!
+        .classes(),
+    ).toContain("is-locked");
 
     // 已授权：如实说"现在生效"，且绝不回到旧占位文案。
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
@@ -829,6 +887,20 @@ describe("buttons mapping page", () => {
       lastError: null,
     });
     const rc003On = await mountPage("rc003");
+    // 上一段把关闭态写进了首帧缓存，第二次挂载的首帧仍是关闭态；等首次对账把
+    // 开关切回开启态（三键卡片解锁）再操作——否则点击会被守卫拦下（同真实界面：
+    // 缓存只是首帧优化，权威状态落地前不可交互）。
+    await vi.waitFor(
+      () => {
+        expect(
+          rc003On
+            .findAll(".mapping-card")
+            .find((c) => c.find(".mapping-card-title strong").text() === "返回")!
+            .classes(),
+        ).not.toContain("is-locked");
+      },
+      { timeout: 4000 },
+    );
     const rc003OnBack = rc003On
       .findAll(".mapping-card")
       .find((c) => c.text().includes("返回"))!
