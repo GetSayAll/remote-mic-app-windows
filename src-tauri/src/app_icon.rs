@@ -62,6 +62,179 @@ pub fn style_label(identifier: AppIconIdentifier) -> &'static str {
     }
 }
 
+/// 任务栏 / Alt-Tab 用的是 `ICON_BIG`，标题栏用的是 `ICON_SMALL`。
+///
+/// Tauri 的 `WebviewWindow::set_icon` 在 Windows 上只写 `ICON_SMALL`
+/// （`tao::platform_impl::windows::window::set_window_icon` → `WM_SETICON(ICON_SMALL)`，
+/// 2026-10-02 源码核对），`ICON_BIG` 只有 `set_taskbar_icon` 会写、而它不在 Tauri 的
+/// 公开路径上——这正是用户现场"任务栏没有跟随切换图标"的根因（按钮图标不动、
+/// 标题栏/通知区域却变了）。这里自己补 `ICON_BIG`，并顺带按 DPI 重设 `ICON_SMALL`。
+#[cfg(windows)]
+mod window_icons {
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HGDIOBJ,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconIndirect, DestroyIcon, SendMessageW, HICON, ICONINFO, WM_SETICON,
+    };
+
+    /// 自己持有一份图标位图（RGBA，行主序）。
+    pub struct IconBitmap {
+        pub rgba: Vec<u8>,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    /// `WM_SETICON` 不会接管句柄所有权：Windows 只保存指针，因此句柄必须由我们
+    /// 保持有效，直到窗口换成下一张（提前 `DestroyIcon` 会让任务栏读到已释放的位图）。
+    pub struct OwnedIconHandle(HICON);
+
+    impl OwnedIconHandle {
+        fn from_raw(handle: HICON) -> Self {
+            Self(handle)
+        }
+
+        pub fn as_raw(&self) -> isize {
+            self.0 .0 as isize
+        }
+    }
+
+    impl Drop for OwnedIconHandle {
+        fn drop(&mut self) {
+            // SAFETY: 句柄由 CreateIconIndirect 创建且只在这里释放一次。
+            unsafe {
+                let _ = DestroyIcon(self.0);
+            }
+        }
+    }
+
+    // SAFETY: HICON 是进程级的 user32 句柄，任意线程都可以持有/使用；我们只用它
+    // 保活（WM_SETICON 不接管所有权）并在替换时销毁一次，没有跨线程别名。
+    unsafe impl Send for OwnedIconHandle {}
+
+    /// 进程内最近一次交给主窗口的两个句柄；换新图后才释放上一代。
+    static APPLIED_WINDOW_ICONS: Mutex<Option<(OwnedIconHandle, OwnedIconHandle)>> =
+        Mutex::new(None);
+
+    fn lock_applied() -> std::sync::MutexGuard<'static, Option<(OwnedIconHandle, OwnedIconHandle)>>
+    {
+        APPLIED_WINDOW_ICONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// RGBA → HICON（`CreateIconIndirect`，与 tao 的 `RgbaIcon::into_windows_icon` 同路）。
+    pub fn create_icon(bitmap: &IconBitmap) -> Result<OwnedIconHandle, String> {
+        let (width, height) = (bitmap.width, bitmap.height);
+        if width == 0 || height == 0 || bitmap.rgba.len() < (width * height * 4) as usize {
+            return Err("图标位图尺寸与数据长度不一致".to_owned());
+        }
+        unsafe {
+            let mut info = BITMAPINFO::default();
+            info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            info.bmiHeader.biWidth = width as i32;
+            // 负高度 = 自上而下，与 RGBA 缓冲一致。
+            info.bmiHeader.biHeight = -(height as i32);
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB.0;
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let color = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0)
+                .map_err(|error| format!("创建图标位图失败：{error}"))?;
+            {
+                let pixels =
+                    std::slice::from_raw_parts_mut(bits as *mut u8, (width * height * 4) as usize);
+                // DIB 是 BGRA，输入是 RGBA。
+                for (dst, src) in pixels.chunks_exact_mut(4).zip(bitmap.rgba.chunks_exact(4)) {
+                    dst[0] = src[2];
+                    dst[1] = src[1];
+                    dst[2] = src[0];
+                    dst[3] = src[3];
+                }
+            }
+            // 全 0 掩码：alpha 通道已经给出透明度（32bpp 图标的标准做法）。
+            let mask = CreateBitmap(width as i32, height as i32, 1, 1, None);
+            let icon_info = ICONINFO {
+                fIcon: TRUE,
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: mask,
+                hbmColor: color,
+            };
+            let created = CreateIconIndirect(&icon_info);
+            // 句柄创建后位图即可释放：HICON 自带副本。
+            let _ = DeleteObject(HGDIOBJ(color.0));
+            let _ = DeleteObject(HGDIOBJ(mask.0));
+            created
+                .map(OwnedIconHandle::from_raw)
+                .map_err(|error| format!("创建图标句柄失败：{error}"))
+        }
+    }
+
+    /// 把一张图标写到窗口的指定槽位（`ICON_BIG` / `ICON_SMALL`）。
+    pub fn send_icon(hwnd: HWND, icon_type: u32, icon: &OwnedIconHandle) {
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(icon_type as usize)),
+                Some(LPARAM(icon.as_raw())),
+            );
+        }
+    }
+
+    /// 读回窗口当前挂的图标句柄（0 = 未设置）。测试与诊断用。
+    // 产品路径只写不读，非测试构建下没有调用点。
+    #[allow(dead_code)]
+    pub fn read_icon(hwnd: HWND, icon_type: u32) -> isize {
+        use windows::Win32::UI::WindowsAndMessaging::WM_GETICON;
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_GETICON,
+                Some(WPARAM(icon_type as usize)),
+                Some(LPARAM(0)),
+            )
+            .0
+        }
+    }
+
+    /// 给窗口换任务栏（`ICON_BIG`）与标题栏（`ICON_SMALL`）图标。
+    ///
+    /// 调用方传裸句柄值：Tauri 自带的是 windows 0.61 的 `HWND`（tao 依赖），
+    /// 本 crate 用的是 0.62；跨版本不能直接传类型，只能传指针值。
+    pub fn apply(hwnd_raw: isize, big: &IconBitmap, small: &IconBitmap) -> Result<(), String> {
+        let big_handle = create_icon(big)?;
+        let small_handle = create_icon(small)?;
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+        send_icon(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::ICON_BIG,
+            &big_handle,
+        );
+        send_icon(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::ICON_SMALL,
+            &small_handle,
+        );
+        // 换图成功后再让上一代句柄失效：窗口此刻已不再引用它们。
+        *lock_applied() = Some((big_handle, small_handle));
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn icon_bitmap_from_image(image: &Image<'_>) -> window_icons::IconBitmap {
+    window_icons::IconBitmap {
+        rgba: image.rgba().to_vec(),
+        width: image.width(),
+        height: image.height(),
+    }
+}
+
 /// 主窗口所在显示器缩放因子 → DPI（拿不到时按 96 处理）。
 ///
 /// 通知区域由系统按任务栏所在显示器绘制，这里用主窗口 DPI 近似；预生成的四档
@@ -90,14 +263,59 @@ pub fn apply(app: &AppHandle, requested: AppIconIdentifier) -> AppIconIdentifier
             .map(|icon| icon.to_owned()),
         AppIconIdentifier::FacetedDuck => faceted_duck_window_image().ok(),
     };
+    let dpi = window_dpi(app);
+    let tray_icon = match applied {
+        AppIconIdentifier::Standard => app
+            .default_window_icon()
+            .cloned()
+            .map(|icon| icon.to_owned()),
+        AppIconIdentifier::FacetedDuck => faceted_duck_tray_image(nearest_icon_size(dpi)).ok(),
+    };
+
     match (&window_icon, app.get_webview_window("main")) {
         (Some(icon), Some(window)) => {
+            // 跨平台路径（Windows 上只覆盖标题栏的 ICON_SMALL）。
             if let Err(error) = window.set_icon(icon.clone()) {
                 sayall_windows::gatt_note(
                     "app_icon action=apply target=window phase=completed terminal_result=failed error_domain=window error_code=set_icon_failed retryable=true"
                         .to_owned(),
                 );
                 eprintln!("更新窗口图标失败：{error}");
+            }
+            // 任务栏 / Alt-Tab 走 ICON_BIG，必须自己补（见 window_icons 注释）。
+            // 标题栏小图标同时按 DPI 重设，与通知区域用同一张。
+            #[cfg(windows)]
+            {
+                let small_source = tray_icon.as_ref().unwrap_or(icon);
+                let big = icon_bitmap_from_image(icon);
+                let small = icon_bitmap_from_image(small_source);
+                match window.hwnd() {
+                    Ok(hwnd) => {
+                        if let Err(error) = window_icons::apply(hwnd.0 as isize, &big, &small) {
+                            sayall_windows::gatt_note(format!(
+                                "app_icon action=apply target=taskbar phase=completed terminal_result=failed applied={} error_domain=windows error_code=set_icon_failed retryable=true",
+                                style_label(applied)
+                            ));
+                            eprintln!("更新任务栏图标失败：{error}");
+                        } else {
+                            sayall_windows::gatt_note(format!(
+                                "app_icon action=apply target=taskbar phase=completed terminal_result=passed applied={} big={}x{} small={}x{}",
+                                style_label(applied),
+                                big.width,
+                                big.height,
+                                small.width,
+                                small.height
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        sayall_windows::gatt_note(
+                            "app_icon action=apply target=taskbar phase=completed terminal_result=failed error_domain=window error_code=hwnd_unavailable retryable=true"
+                                .to_owned(),
+                        );
+                        eprintln!("读取主窗口句柄失败：{error}");
+                    }
+                }
             }
         }
         (None, _) => sayall_windows::gatt_note(
@@ -108,14 +326,6 @@ pub fn apply(app: &AppHandle, requested: AppIconIdentifier) -> AppIconIdentifier
         (Some(_), None) => {}
     }
 
-    let dpi = window_dpi(app);
-    let tray_icon = match applied {
-        AppIconIdentifier::Standard => app
-            .default_window_icon()
-            .cloned()
-            .map(|icon| icon.to_owned()),
-        AppIconIdentifier::FacetedDuck => faceted_duck_tray_image(nearest_icon_size(dpi)).ok(),
-    };
     match app.tray_by_id(TRAY_ID) {
         Some(tray) => match tray_icon {
             Some(icon) => match tray.set_icon(Some(icon)) {
@@ -209,5 +419,142 @@ mod tests {
             resolve(AppIconIdentifier::Standard),
             AppIconIdentifier::Standard
         );
+    }
+
+    /// 回归测试（2026-10-02 用户现场："任务栏没有跟随切换图标"）：
+    ///
+    /// - 只写 `ICON_SMALL`（= Tauri/tao 的 `set_window_icon` 路径）时，任务栏用的
+    ///   `ICON_BIG` 保持不变——这是根因，不是浏览器缓存或 Explorer 刷新问题；
+    /// - 我们的修复同时写 `ICON_BIG` + `ICON_SMALL`，读回 `ICON_BIG` 必须等于刚设的
+    ///   句柄，且再次切换会换成新句柄（旧句柄在替换后才释放）。
+    #[cfg(windows)]
+    #[test]
+    fn taskbar_icon_follows_only_when_icon_big_is_written() {
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, ICON_BIG, ICON_SMALL};
+
+        let hwnd = hidden_test_window();
+        let solid = |size: u32, rgb: [u8; 3]| {
+            let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+            for _ in 0..(size * size) {
+                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+            window_icons::IconBitmap {
+                rgba,
+                width: size,
+                height: size,
+            }
+        };
+        let raw = hwnd.0 as isize;
+
+        // 1) 复现根因：只写 ICON_SMALL。
+        let small_only =
+            window_icons::create_icon(&solid(16, [0, 0, 255])).expect("小图标创建失败");
+        window_icons::send_icon(hwnd, ICON_SMALL, &small_only);
+        assert_ne!(
+            window_icons::read_icon(hwnd, ICON_SMALL),
+            0,
+            "ICON_SMALL 应当已写入"
+        );
+        assert_eq!(
+            window_icons::read_icon(hwnd, ICON_BIG),
+            0,
+            "只设 ICON_SMALL 时任务栏图标（ICON_BIG）不该变化——正是用户看到的症状"
+        );
+
+        // 2) 修复路径：ICON_BIG + ICON_SMALL 一起写。
+        let big = solid(32, [255, 0, 0]);
+        let small = solid(16, [0, 255, 0]);
+        window_icons::apply(raw, &big, &small).expect("应用窗口图标失败");
+        let applied_big = window_icons::read_icon(hwnd, ICON_BIG);
+        assert_ne!(applied_big, 0, "ICON_BIG 必须写入，任务栏才会跟随");
+        assert_ne!(
+            applied_big,
+            small_only.as_raw(),
+            "任务栏图标不能还是小图标句柄"
+        );
+        assert_ne!(
+            window_icons::read_icon(hwnd, ICON_SMALL),
+            0,
+            "ICON_SMALL 应保持已设置"
+        );
+
+        // 3) 再次切换：任务栏图标换成新句柄（证明每次切换都会更新）。
+        let big_again = solid(32, [255, 255, 0]);
+        window_icons::apply(raw, &big_again, &small).expect("二次应用窗口图标失败");
+        let reapplied_big = window_icons::read_icon(hwnd, ICON_BIG);
+        assert_ne!(reapplied_big, 0);
+        assert_ne!(
+            reapplied_big, applied_big,
+            "再次切换后任务栏图标必须换新句柄"
+        );
+
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn icon_bitmap_validation_rejects_size_mismatch() {
+        // 长度不足的缓冲必须在触碰任何系统 API 之前被拒。
+        let bitmap = window_icons::IconBitmap {
+            rgba: vec![0; 3],
+            width: 4,
+            height: 4,
+        };
+        assert!(window_icons::create_icon(&bitmap).is_err());
+
+        let empty = window_icons::IconBitmap {
+            rgba: Vec::new(),
+            width: 0,
+            height: 0,
+        };
+        assert!(window_icons::create_icon(&empty).is_err());
+    }
+
+    /// 隐藏的顶层窗口：只用于读回 `WM_GETICON`，从不 ShowWindow。
+    #[cfg(windows)]
+    fn hidden_test_window() -> windows::Win32::Foundation::HWND {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, RegisterClassExW, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+            WS_POPUP,
+        };
+
+        unsafe extern "system" fn test_wnd_proc(
+            hwnd: windows::Win32::Foundation::HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+
+        unsafe {
+            let class = WNDCLASSEXW {
+                cbSize: u32::try_from(std::mem::size_of::<WNDCLASSEXW>()).unwrap_or_default(),
+                lpfnWndProc: Some(test_wnd_proc),
+                lpszClassName: w!("SayAllAppIconTestWindow"),
+                ..Default::default()
+            };
+            // 已注册时重复注册会失败，可忽略。
+            let _ = RegisterClassExW(&class);
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("SayAllAppIconTestWindow"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("测试窗口创建失败")
+        }
     }
 }
