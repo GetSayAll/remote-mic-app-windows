@@ -1074,7 +1074,7 @@ fn launch_path(_path: &str) -> Result<(), String> {
 
 /// 按完整路径启动（短命 COM 线程内 ShellExecuteW，支持 .exe/.lnk）。
 #[cfg(windows)]
-fn launch_path(path: &str) -> Result<(), String> {
+pub(crate) fn launch_path(path: &str) -> Result<(), String> {
     launch_explicit(path, None, None, true)
 }
 

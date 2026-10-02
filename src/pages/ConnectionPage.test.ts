@@ -119,6 +119,7 @@ const mocks = vi.hoisted(() => ({
   setVoiceInputTool: vi.fn(),
   getVokieInstallation: vi.fn(),
   openVokieHomepage: vi.fn(),
+  launchVokie: vi.fn(),
   getOtherVoiceHotkey: vi.fn(),
   setOtherVoiceHotkey: vi.fn(),
   startShortcutCapture: vi.fn(),
@@ -144,6 +145,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setVoiceInputTool: mocks.setVoiceInputTool,
     getVokieInstallation: mocks.getVokieInstallation,
     openVokieHomepage: mocks.openVokieHomepage,
+    launchVokie: mocks.launchVokie,
     getOtherVoiceHotkey: mocks.getOtherVoiceHotkey,
     setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
     startShortcutCapture: mocks.startShortcutCapture,
@@ -179,6 +181,7 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
+    mocks.launchVokie.mockResolvedValue(undefined);
     mocks.getRc003TaskStatus.mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -451,6 +454,16 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(wrapper.text()).toContain("Vokie 没有运行");
     expect(wrapper.text()).not.toContain("没有检测到 Vokie");
 
+    // 没运行 → 第 ② 步给出「打开 Vokie」按钮：点它调用 launchVokie 并提示重新检测。
+    const launchButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("打开 Vokie"))!;
+    expect(launchButton).toBeDefined();
+    await launchButton.trigger("click");
+    await flushPromises();
+    expect(mocks.launchVokie).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("已打开 Vokie");
+
     // 启动后点“重新检测”：提示消失。
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
@@ -462,6 +475,14 @@ describe("VB-CABLE first-launch guidance", () => {
       .trigger("click");
     await flushPromises();
     expect(wrapper.text()).not.toContain("Vokie 没有运行");
+    wrapper.unmount();
+  });
+
+  it("第 ② 步常显提示：避免其他 App 同键 + 当前输入法不对时再按一次", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("避免其他 App 使用同一个快捷键");
+    expect(wrapper.text()).toContain("可能需要再按住一次才能正常使用");
     wrapper.unmount();
   });
 
