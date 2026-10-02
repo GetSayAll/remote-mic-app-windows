@@ -15,6 +15,10 @@ Frida 17 的 Socket 语义与直觉相反（字符串写入被静默丢弃、con
   A 无助手在监听      → init 必须在 CONNECT_TIMEOUT_MS 内 settle（绝不能挂住宿主）
   B 正常协议          → hello / hb / renew 后 lease_ok=true / 停续约后 lease_ok=false
   C 显式解除          → 收到 disarm 后 hb.disarmed=true
+  D 重连只连一次      → 助手消失再上线后只接受 1 条连接（并发守卫生效）
+  E targets 护栏      → 只许追加哨兵键，被拒的命令不得改动清空范围
+  F 一次回调连写多行  → targets/synth/mode 的**每一行**上行都必须到达
+                        （Frida 17 `output.write()` 单飞互斥回归项，2026-10-02）
 
 退出码：0 全部通过 / 1 有用例失败 / 2 环境不可用（缺 frida）
 """
@@ -470,6 +474,12 @@ def case_e_targets_guard() -> tuple[bool, str]:
     targets 把范围改坏，真机表现是最难查的一类 —— 命令日志显示"已处理"、握手全绿，
     但按键永久不可见（上报被关）或永久漏清（clear 缺了目标键）。所以这里既验护栏，
     也验拒绝之后状态没变。
+
+    2026-10-02 同步现状（此前两条断言已过期，会在最新 agent 上恒 FAIL）：
+      - 清空范围不再有"默认三键"：自 6a4aaf8 起完全由助手动态下发（agent 内默认空集），
+        所以基线断言改成"未下发时为空"，再下发合法 targets 建立基线；
+      - 白名单护栏的拒绝文案是 `targets:rejected_outside_whitelist`
+        （旧文案 `..._report_not_targets` 已不存在）。
     """
     helper = Helper()
     helper.start()
@@ -489,12 +499,15 @@ def case_e_targets_guard() -> tuple[bool, str]:
             return None if hb is None else hb.get("clear_usages")
 
         base = clear_now()
-        notes.append(f"默认 clear_usages={base}")
-        if base != "0x00f1,0x0080,0x0081":
-            return False, "；".join(notes + ["默认清空集合不是三键"])
+        notes.append(f"未下发 targets 时 clear_usages={base!r}")
+        if base != "":
+            return False, "；".join(notes + ["未下发 targets 时清空集合应为空（动态下发设计）"])
 
-        # 1) 合法：在三键之外追加哨兵键 0x4A（主页）——这正是验收要用的形状
-        helper.send({"type": "targets", "report": three, "clear": three + [0x004A]})
+        # 1) 合法：三键 + 哨兵键 0x4A（主页）——这正是验收要用的形状
+        #    （generation 是必填：缺了会被 targets:rejected_bad_generation 拒掉，
+        #     这正是此前的用例 E 恒 FAIL 的第二个原因）
+        helper.send({"type": "targets", "report": three,
+                     "clear": three + [0x004A], "generation": 3})
         applied = helper.wait_for(
             "log", 3.0, lambda l: "targets:applied" in str(l.get("msg", ""))
         )
@@ -509,18 +522,19 @@ def case_e_targets_guard() -> tuple[bool, str]:
         if applied is None or after != "0x00f1,0x0080,0x0081,0x004a":
             return False, "；".join(notes + ["合法 targets 未生效"])
 
-        # 2) 非法三连：改上报集合 / clear 缺 report / 数组含 0
+        # 2) 非法三连：上报集合含白名单外 usage / clear 缺 report / 数组含 0
         bad = [
             (
-                {"type": "targets", "report": [0x004A], "clear": [0x004A]},
-                "targets:rejected_report_not_targets",
+                {"type": "targets", "report": [0x1234], "clear": [0x1234], "generation": 4},
+                "targets:rejected_outside_whitelist",
             ),
             (
-                {"type": "targets", "report": three, "clear": [0x00F1]},
+                {"type": "targets", "report": three, "clear": [0x00F1], "generation": 5},
                 "targets:rejected_clear_lacks_report",
             ),
             (
-                {"type": "targets", "report": three, "clear": [0, 0x00F1, 0x0080, 0x0081]},
+                {"type": "targets", "report": three,
+                 "clear": [0, 0x00F1, 0x0080, 0x0081], "generation": 6},
                 "targets:rejected_bad_array",
             ),
         ]
@@ -546,6 +560,171 @@ def case_e_targets_guard() -> tuple[bool, str]:
         helper.close()
 
 
+def case_f_burst_writes() -> tuple[bool, str]:
+    """一次回调里连写的上行必须**全部**到达（Frida 17 `output.write()` 单飞互斥回归项）。
+
+    2026-10-02 真机现象：助手 `[TARGETS-RESEND] gen=2 attempt=1..72` 每 10s 一次无限增长，
+    而 `targets_ack` / `synth_ack` 一次都没到；agent 侧只有每个回调的**第一条**
+    `logLine` 到得了助手（`cmd:targets` 806 条，`targets:applied` 0 条），
+    但定时器每 tick 只写一行的 `hb` 一直正常。
+
+    根因（2026-10-02 本机 frida 17.18.0 实测，`output.write()` 的最小探针输出）：
+        A1:write_ret=[object Promise] | A1:resolve=9
+        A2:reject=Error: stream has outstanding operation
+        A3:reject=Error: stream has outstanding operation
+        到达服务端: A1-first / B1-first / C1-serial / C2-after-await   （A2/A3 零字节）
+    即 `write()` 返回 Promise 且**同一时刻只允许一个在飞**：上一次未 settle 时的
+    第二次 write 立刻 reject、零字节送达、**不抛错**；`sendLine` 火并忘 ⇒ 整类静默丢失。
+    修法见 `rc003_agent.js` 的「出站串行化」（队列 + settle 驱动逐行冲刷）。
+
+    判据：targets / synth / mode 三条命令的**每一行**上行都必须到达，且到达顺序与发出
+    顺序一致；另断言 `tx_busy_drop == 0`、`write_fail == 0`、`tx_pending_peak >= 2`
+    （后者证明本用例确实制造了"同一回调连写多行"的形状）。
+
+    边界：`synth:frame` 只能在真机的 IOCTL 回调里产生（沙箱里没有目标 IOCTL），
+    这里覆盖的是同一出口（sendLine → 出站队列）的同类形状；真机 `synth:frame`
+    需在真机验收时另行确认（deferred）。
+    """
+    helper = Helper()
+    helper.start()
+    box = Sandbox(port=helper.port)
+    notes: list[str] = []
+    three = [0x00F1, 0x0080, 0x0081]
+    try:
+        box.init(timeout=8.0)
+        if helper.wait_for("hello", 4.0) is None:
+            return False, "未收到 hello"
+        for _ in range(6):
+            helper.send({"type": "renew"})
+            time.sleep(0.2)
+
+        def mark() -> int:
+            return len(helper.lines)
+
+        def view(start: int) -> list[str]:
+            out = []
+            for line in helper.lines[start:]:
+                if line.get("type") == "log":
+                    out.append("log:" + str(line.get("msg", ""))[:32])
+                else:
+                    out.append(str(line.get("type")))
+            return out
+
+        def idx_of(start: int, pred) -> int:
+            for i, line in enumerate(helper.lines[start:]):
+                if pred(line):
+                    return i
+            return -1
+
+        def is_log(msg: str):
+            return lambda l: l.get("type") == "log" and str(l.get("msg", "")) == msg
+
+        def has_log(sub: str):
+            return lambda l: l.get("type") == "log" and sub in str(l.get("msg", ""))
+
+        def is_type(kind: str):
+            return lambda l: l.get("type") == kind
+
+        def wait_until(pred, timeout: float) -> bool:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if pred():
+                    return True
+                time.sleep(0.05)
+            return False
+
+        def wait_new_hb(start: int, timeout: float):
+            """等一条**新到**的 hb。
+
+            不能用 Helper.wait_for：它会立刻返回缓冲区里已有的旧 hb（"命令之前"的快照），
+            用它读计数会得到假结论——2026-10-02 实测就踩过：整条用例只跑 1.3s，
+            旧 hb 里 tx_lines=3 / peak=1，看起来像"修复没生效"。
+            """
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                for line in helper.lines[start:]:
+                    if line.get("type") == "hb":
+                        return line
+                helper.send({"type": "renew"})
+                time.sleep(0.1)
+            return None
+
+        # 0) 基线：突发前的计数快照（必须是新到的 hb）
+        m0 = mark()
+        helper.send({"type": "renew"})
+        hb0 = wait_new_hb(m0, 3.0)
+        if hb0 is None:
+            return False, "；".join(notes + ["未等到基线 hb"])
+        st0 = hb0.get("stat") or {}
+        notes.append("基线: tx_lines={} peak={}".format(st0.get("tx_lines"), st0.get("tx_pending_peak")))
+
+        # 1) targets：同一回调连写 3 行（cmd:targets / targets_ack / targets:applied）
+        start = mark()
+        helper.send({"type": "targets", "report": three,
+                     "clear": three + [0x004A], "generation": 7})
+        if not wait_until(lambda: idx_of(start, is_type("targets_ack")) >= 0
+                          and idx_of(start, has_log("targets:applied")) >= 0, 4.0):
+            notes.append("targets 后收到: " + " | ".join(view(start)))
+            return False, "；".join(notes + ["targets_ack / targets:applied 未全部到达（多行上行被丢）"])
+        i_cmd = idx_of(start, is_log("cmd:targets"))
+        i_ack = idx_of(start, is_type("targets_ack"))
+        i_app = idx_of(start, has_log("targets:applied"))
+        notes.append(f"targets 三行序号 cmd={i_cmd} ack={i_ack} applied={i_app}")
+        if not (0 <= i_cmd < i_ack < i_app):
+            return False, "；".join(notes + ["到达顺序与发出顺序不一致（ack 必须在应用之后）"])
+        ack = helper.lines[start + i_ack]
+        if int(ack.get("generation", -1)) != 7:
+            return False, "；".join(notes + [f"targets_ack.generation={ack.get('generation')}（应为 7）"])
+
+        # 2) synth：同为同一回调 3 行
+        start = mark()
+        helper.send({"type": "synth", "from": 0x003E, "to": 0x00E6})
+        if not wait_until(lambda: idx_of(start, is_type("synth_ack")) >= 0
+                          and idx_of(start, has_log("synth:applied")) >= 0, 4.0):
+            notes.append("synth 后收到: " + " | ".join(view(start)))
+            return False, "；".join(notes + ["synth_ack / synth:applied 未全部到达（多行上行被丢）"])
+        notes.append("synth 三行序号 cmd={} ack={} applied={}".format(
+            idx_of(start, is_log("cmd:synth")), idx_of(start, is_type("synth_ack")),
+            idx_of(start, has_log("synth:applied"))))
+
+        # 3) mode：同一回调连写 2 行（纯日志形状，与 synth:frame 同出口）
+        start = mark()
+        helper.send({"type": "mode", "clear": True})
+        if not wait_until(lambda: idx_of(start, is_log("mode:clear")) >= 0, 4.0):
+            notes.append("mode 后收到: " + " | ".join(view(start)))
+            return False, "；".join(notes + ["mode:clear 未到达（同一回调的第二行被丢）"])
+        notes.append("mode 两行序号 cmd={} clear={}".format(
+            idx_of(start, is_log("cmd:mode")), idx_of(start, is_log("mode:clear"))))
+
+        # 4) 计数面：突发前后必须能看出"连写确实发生了"，且不许再出现单飞互斥
+        m1 = mark()
+        helper.send({"type": "renew"})
+        hb1 = wait_new_hb(m1, 3.0)
+        if hb1 is None:
+            return False, "；".join(notes + ["突发后未等到新 hb"])
+        st1 = hb1.get("stat") or {}
+        d_lines = int(st1.get("tx_lines") or 0) - int(st0.get("tx_lines") or 0)
+        notes.append(
+            "突发后: tx_lines {}->{} (delta={}) tx_pending_peak={} tx_busy_drop={} write_fail={}".format(
+                st0.get("tx_lines"), st1.get("tx_lines"), d_lines,
+                st1.get("tx_pending_peak"), st1.get("tx_busy_drop"), st1.get("write_fail")))
+        if int(st1.get("tx_busy_drop") or 0) != 0:
+            return False, "；".join(notes + ["仍出现 stream has outstanding operation（修复失效）"])
+        if int(st1.get("write_fail") or 0) != 0:
+            return False, "；".join(notes + ["write_fail>0：出站写有失败"])
+        # 本用例共发出 3(targets)+3(synth)+2(mode) = 8 行命令上行，一行都不许少
+        if d_lines < 8:
+            return False, "；".join(notes + [f"tx_lines 只涨了 {d_lines}（本用例应为 8 行）"])
+        if int(st1.get("tx_pending_peak") or 0) < 2:
+            return False, "；".join(notes + ["tx_pending_peak<2：本用例没有真的制造连写形状"])
+        if box.errors:
+            return False, "；".join(notes + [f"agent 抛出了脚本错误: {box.errors[:2]}"])
+        return True, "；".join(notes)
+    finally:
+        box.close()
+        helper.close()
+
+
 def main() -> int:
     print("=== RC003 agent 自检台（无需提权 / 无需设备）===")
     print(f"frida {frida.__version__} | agent {AGENT.name} ({len(AGENT.read_text(encoding='utf-8').splitlines())} 行)")
@@ -557,6 +736,7 @@ def main() -> int:
         ("C 显式解除：disarm", case_c_disarm),
         ("D 助手消失后重新上线：只允许连一次（连接不得堆积）", case_d_reconnect),
         ("E targets 护栏：只许追加哨兵键，被拒的命令不得改动清空范围", case_e_targets_guard),
+        ("F 一次回调连写多行：每一行上行都必须到达（write 单飞互斥回归）", case_f_burst_writes),
     ]
 
     all_ok = True

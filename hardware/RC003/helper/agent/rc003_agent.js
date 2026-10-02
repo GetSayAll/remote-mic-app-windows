@@ -25,6 +25,14 @@
  *   - 连接对象没有 `write`/`read`，只有 `.input` / `.output` 两个流。
  *   - `output.write()` **只接受 ArrayBuffer / TypedArray**；传字符串会被
  *     **静默丢弃**（不抛错、零字节送达）。
+ *   - `output.write()` **返回 Promise，而且同一时刻只允许一个在飞**（2026-10-02 实测，
+ *     `agent_selftest.py` 用例 F 钉住；探针输出见该用例注释）：上一次没 settle 时
+ *     的第二次 write **既不抛错也不排队**，而是立刻以
+ *     `Error: stream has outstanding operation` **reject** —— **零字节送达**。
+ *     火并忘（fire-and-forget）的写法完全看不到这个 reject ⇒ **一次回调里连写多行，
+ *     只有第一行到得了对端**。真机现象正是这一类：`targets_ack`、`targets:applied`、
+ *     `synth_ack`、`synth:frame` 整类消失，而定时器每 tick 只写一行的 `hb` 一直正常。
+ *     对策见 `sendLine` / `txPump`：出站队列 + 串行冲刷，由 Promise settle 驱动。
  *   - 对端关闭后继续 `output.write()` **不抛错**（实测 3/3），
  *     所以"写失败"**不能**用来检测助手死亡。
  *   - `Socket.connect` 到已关闭端口：1.5s 窗口内不 settle；延长观察后约 **2.2s**
@@ -79,7 +87,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-10-02.synth-frame-trace';
+var AGENT_BUILD = '2026-10-02.tx-serialized';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
@@ -143,6 +151,12 @@ var handshakeDone = false;
 var rxBuffer = '';
 var pumpRunning = false;
 
+/* 出站队列状态（见下方「出站串行化」）。 */
+var txQueue = [];
+var txBusy = false;           /* 有一行在飞（等它的 Promise settle） */
+var txSeq = 0;                /* 出站代次：只有最新一次的 settle 回调有权动状态 */
+var txSince = 0;              /* 当前这行开始写的时刻（挂起兜底用） */
+
 var lastRenewAt = 0;
 var tConnect = 0;
 var tLastRx = 0;              /* 最近一次收到下行数据的时刻（看门狗用） */
@@ -162,7 +176,15 @@ var stat = {
   restore_skipped: 0,
   kernel_changed: 0,
   edges_sent: 0,
-  write_fail: 0,
+  write_fail: 0,              /* 写失败/被拒的行数（不含"未连接"的丢弃） */
+  /* 出站串行化的观测面（2026-10-02）。修复前 `targets_ack`/`synth:frame` 整类丢失
+     在计数里完全不可见：`write_fail` 不涨、没有日志、连接也没断。这四个字段让
+     "上行有没有真的出去、一次回调连写了几行、有没有再撞上单飞互斥"从日志一眼可读。 */
+  tx_lines: 0,                /* 真正写完的出站行数（Promise resolve 计数） */
+  tx_pending_peak: 0,         /* 队列峰值深度：>1 = 一次回调里连写过多行 */
+  tx_overflow: 0,             /* 队列满被丢弃的行数 */
+  tx_busy_drop: 0,            /* 因 `stream has outstanding operation` 被拒的行数（修复前=静默丢失量） */
+  tx_stall: 0,                /* 写挂起超过 TX_STALL_MS 而被强制放行的次数 */
   /* `send_dropped` 与 `cmd_rejected` 曾经共用一个 `discarded` 字段，
      导致真机日志里出现"discarded=11"却没人知道那是"没连接上时想上报的 11 条心跳"
      还是"11 条令牌不符的命令"——两者的安全含义完全不同：
@@ -210,17 +232,111 @@ function decodeAscii(buf) {
   return out;
 }
 
-/* 唯一的上行出口。失败只计数，绝不抛出（抛出去会打断 Interceptor 回调）。 */
+/* --------------------------------------------------------- 出站串行化 */
+
+/* Frida 17 实测（2026-10-02，`agent_selftest.py` 用例 F 钉住，勿按直觉改）：
+   `Socket.output.write()` 返回 **Promise**，而且**同一时刻只允许一个在飞**。
+   上一次没 settle 时的第二次 write **不抛错、不排队**，而是立刻以
+   `Error: stream has outstanding operation` **reject** —— 零字节送达。
+   火并忘（fire-and-forget）的写法看不到这个 reject（无人处理它），于是
+   「一次回调里连写多行」的上行只剩第一行到得了助手：真机上 `targets_ack`、
+   `targets:applied`、`synth_ack`、`synth:frame` 就是这样整类消失的
+   （定时器驱动的 `hb` 每 tick 只写一行，所以一直正常——这正是最难查的那种不对称）。
+
+   修法：**所有**上行进同一队列，由 Promise 的 settle 驱动逐行发出：
+   - FIFO ⇒ `targets_ack` 仍在 targets 应用**之后**发出，语义不提前；
+   - 每行都在上一行 settle 之后才写 ⇒ 结构上不可能再撞上"单飞互斥"；
+   - settle 回调带代次（txSeq）⇒ 断线/重连/挂起兜底后的迟到回调不得改写新状态。 */
+var TX_QUEUE_MAX = 512;       /* 积压上限（≈4 分钟的 hb）；满了丢最新那条并计数 */
+var TX_STALL_MS = 2000;       /* 单行写挂起超过这么久就强制放行队列 */
+
+/* "stream has outstanding operation" 只做分类、不留原始文本（隐私红线）。 */
+function isBusyWriteError(e) {
+  return /outstanding operation/i.test(String(e));
+}
+
+/* 清空积压（换连接 / 断线）：这些都是"没发出去的上行"，如实计入 send_dropped。 */
+function txDropAll() {
+  if (txQueue.length > 0) {
+    stat.send_dropped += txQueue.length;
+    txQueue.length = 0;
+  }
+}
+
+/* 队列 → socket 的唯一驱动。串行：一次只写一行，settle 后再写下一行。 */
+function txPump() {
+  if (txBusy || txQueue.length === 0) return;
+  if (!connected || sock === null) { txDropAll(); return; }
+
+  var mine = sock;
+  var myTx = ++txSeq;
+  var line = txQueue.shift();
+
+  txBusy = true;
+  txSince = Date.now();
+
+  var p;
+  try {
+    p = mine.output.write(encodeAscii(line));
+  } catch (e) {
+    /* write 同步抛出（实测路径基本不可达）：这条丢了，并清空积压避免原地打转。 */
+    if (myTx === txSeq) txBusy = false;
+    stat.write_fail++;
+    txDropAll();
+    return;
+  }
+
+  if (!p || typeof p.then !== 'function') {
+    /* 没有 Promise 的环境/桩（agent_logic_test.mjs 的桩就是这种）：按"已写完"处理。 */
+    if (myTx !== txSeq) return;
+    txBusy = false;
+    stat.tx_lines++;
+    txPump();
+    return;
+  }
+
+  p.then(function () {
+    if (myTx !== txSeq) return;        /* 已被更新的一代取代（断线/重连/兜底放行） */
+    txBusy = false;
+    stat.tx_lines++;
+    txPump();
+  }, function (e) {
+    if (myTx !== txSeq) return;
+    txBusy = false;
+    if (isBusyWriteError(e)) stat.tx_busy_drop++;   /* 修复前每一行都死在这里且不留痕 */
+    else stat.write_fail++;
+    txPump();
+  });
+}
+
+/* 入队 + 立即驱动。队列满就丢**最新**那条（保住已经排在前面的 ack/边沿顺序）。 */
+function txEnqueue(line) {
+  if (txQueue.length >= TX_QUEUE_MAX) { stat.tx_overflow++; return; }
+  txQueue.push(line);
+  if (txQueue.length > stat.tx_pending_peak) stat.tx_pending_peak = txQueue.length;
+  txPump();
+}
+
+/* 挂起兜底：Promise 迟迟不 settle 时不让整个上行通道永久停摆。
+   （仓库规则：后台机制的"偶发迟到"按必然事件设计——迟到回调不得污染新状态，
+   所以这里推进代次，让旧回调回来后什么都不做。） */
+function txCheckStall() {
+  if (!txBusy) return;
+  if (Date.now() - txSince < TX_STALL_MS) return;
+  stat.tx_stall++;
+  txSeq++;
+  txBusy = false;
+  logLine('tx:stall');                  /* 走队列，与其它上行同样串行 */
+}
+
+/* 唯一的上行出口。失败只计数，绝不抛出（抛出去会打断 Interceptor 回调）。
+   只入队、不直接写：真正写入由 txPump 串行驱动（见上）。 */
 function sendLine(obj) {
   if (!connected || sock === null) { stat.send_dropped++; return false; }
-  try {
-    sock.output.write(encodeAscii(JSON.stringify(obj) + '\n'));
-    return true;
-  } catch (e) {
-    stat.write_fail++;
-    connected = false;
-    return false;
-  }
+  var line;
+  try { line = JSON.stringify(obj) + '\n'; } catch (e) { stat.write_fail++; return false; }
+  txEnqueue(line);
+  return true;
 }
 
 function logLine(msg) {
@@ -458,6 +574,12 @@ function connectOnce() {
       sock = conn;
       connected = true;
       rxBuffer = '';
+      /* 新连接 = 出站的新一代：旧队列属于上一条连接（连不上的那些上行），
+         作废并如实计数；代次推进让旧连接的迟到 settle 回调什么也不做。 */
+      txDropAll();
+      txSeq++;
+      txBusy = false;
+      txSince = 0;
       try { if (typeof conn.setNoDelay === 'function') conn.setNoDelay(true); } catch (e) { /* 非关键 */ }
       tConnect = Date.now();
       tLastRx = Date.now();
@@ -506,6 +628,11 @@ function dropConnection(reason, slow) {
   tConnect = 0;
   tLastRx = 0;
   pumpRunning = false;
+  /* 出站队列属于这条已经判死的连接：推进代次、丢弃积压（迟到回调不得污染新连接）。
+     `logLine('dropped:…')` 那一行已经在上面被发出（txPump 同步启动），不受这里影响。 */
+  txSeq++;
+  txBusy = false;
+  txDropAll();
   try { if (sock !== null && typeof sock.close === 'function') sock.close(); } catch (e) { /* ignore */ }
   sock = null;
 }
@@ -762,6 +889,10 @@ function heartbeat() {
   }
 
   ensureConnected();
+  /* 出站兜底：队列里若有积压（例如上一次 txPump 因未连接而早退），每个心跳周期推一次；
+     同时检查是否有单行写挂起（迟到回调按必然事件处理）。 */
+  txCheckStall();
+  txPump();
   var leaseNow = leaseOk();
   if (!leaseNow && lastRenewAt !== 0 && connected && !disarmed) {
     /* 租约刚过期：停止清键，并释放可能仍被记为按下的状态 */
@@ -796,6 +927,13 @@ function heartbeat() {
       kernel_changed: stat.kernel_changed,
       edges_sent: stat.edges_sent,
       write_fail: stat.write_fail,
+      /* 出站串行化的观测面：tx_lines 不涨 = 上行根本没出去；
+         tx_busy_drop>0 = 又撞上了 write 单飞互斥（修复回归）。 */
+      tx_lines: stat.tx_lines,
+      tx_pending_peak: stat.tx_pending_peak,
+      tx_overflow: stat.tx_overflow,
+      tx_busy_drop: stat.tx_busy_drop,
+      tx_stall: stat.tx_stall,
       send_dropped: stat.send_dropped,
       cmd_rejected: stat.cmd_rejected,
       connect_raced: stat.connect_raced,
@@ -849,6 +987,11 @@ rpc.exports = {
     releaseEdges('dispose');
     sendLine({ type: 'bye', t: Date.now(), stat: stat });
     connected = false;
+    /* 卸载是"最后一次说话"：bye 已在上面交给 txPump 启动（同步发出），
+       其余积压随连接作废，如实计入 send_dropped。 */
+    txSeq++;
+    txBusy = false;
+    txDropAll();
     try { if (sock !== null && typeof sock.close === 'function') sock.close(); } catch (e) { /* ignore */ }
     sock = null;
     return true;
