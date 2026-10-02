@@ -981,6 +981,8 @@ fn activate_windows_by_app_user_model_id(app_user_model_id: &str) -> RunningActi
         app_user_model_id,
         activation: None,
         hidden_candidates: Vec::new(),
+        minimized_candidates: Vec::new(),
+        visible_candidates: Vec::new(),
     };
     unsafe {
         let _ = EnumWindows(
@@ -989,8 +991,13 @@ fn activate_windows_by_app_user_model_id(app_user_model_id: &str) -> RunningActi
         );
     }
     if context.activation.is_none() {
-        context.activation =
-            unsafe { win_impl::activate_hidden_candidates(&context.hidden_candidates) };
+        context.activation = unsafe {
+            win_impl::activate_visible_or_hidden(
+                &context.minimized_candidates,
+                &context.visible_candidates,
+                &context.hidden_candidates,
+            )
+        };
     }
     match context.activation {
         Some(outcome) if outcome.activated => RunningActivation::Activated(outcome),
@@ -1393,13 +1400,14 @@ fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningAct
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
 
-    // 枚举顶层窗口：找到目标进程的主窗口（无所有者、非工具窗口）→ 恢复/显示
-    // 并强制置前。先优先可见窗口；若只在托盘隐藏，则按枚举顺序回退激活隐藏候选
-    // （第一个候选不一定是主窗口，置前失败会试下一个）。
+    // 枚举顶层窗口：找到目标进程的主窗口（无所有者、非工具窗口）→ 恢复/显示并强制置前。
+    // 优先级：最小化窗口（按键意图通常是还原它）→ 普通可见窗口 → 隐藏候选逐个回退激活。
     let mut context = EnumContext {
         pids,
         activation: None,
         hidden_candidates: Vec::new(),
+        minimized_candidates: Vec::new(),
+        visible_candidates: Vec::new(),
     };
     unsafe {
         let _ = EnumWindows(
@@ -1408,8 +1416,13 @@ fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningAct
         );
     }
     if context.activation.is_none() {
-        context.activation =
-            unsafe { win_impl::activate_hidden_candidates(&context.hidden_candidates) };
+        context.activation = unsafe {
+            win_impl::activate_visible_or_hidden(
+                &context.minimized_candidates,
+                &context.visible_candidates,
+                &context.hidden_candidates,
+            )
+        };
     }
     match context.activation {
         Some(outcome) if outcome.activated => RunningActivation::Activated(outcome),
@@ -1432,10 +1445,10 @@ mod win_impl {
         KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MENU,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect,
-        GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowPlacement,
+        GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
         SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_HIDE, SW_RESTORE, SW_SHOW,
-        WS_EX_TOOLWINDOW,
+        WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
     };
 
     /// 隐藏候选最多记录/尝试的个数：覆盖"消息窗口 + 主窗口 + 辅助窗口"这类组合即可，
@@ -1453,6 +1466,17 @@ mod win_impl {
         /// 目标进程的隐藏（如收进托盘）窗口候选，按枚举顺序排列；仅在无可见窗口时
         /// 逐个回退激活。第一个候选不一定是主窗口（消息/托盘窗口可能排在前面）。
         pub hidden_candidates: Vec<HWND>,
+        /// 最小化的窗口候选（枚举顺序）。优先于可见窗口：按键的意图通常是把它还原出来，
+        /// 而最小化窗口的 `GetWindowRect` 是退化值，不能按"第一个可见窗口"挑选。
+        pub minimized_candidates: Vec<HWND>,
+        /// 普通可见窗口候选（枚举顺序，排除最小化）。
+        pub visible_candidates: Vec<HWND>,
+    }
+
+    fn record_minimized_candidate(candidates: &mut Vec<HWND>, hwnd: HWND) {
+        if candidates.len() < HIDDEN_CANDIDATE_LIMIT {
+            candidates.push(hwnd);
+        }
     }
 
     /// 只读枚举：统计目标（pid 集合 / 窗口 AUMID）当前可见与隐藏的候选窗口数量，
@@ -1478,12 +1502,9 @@ mod win_impl {
         if !(by_pid || by_identity) || !eligible_window_without_logging(hwnd) {
             return BOOL::from(true);
         }
-        let mut rect = RECT::default();
-        let area = if GetWindowRect(hwnd, &mut rect).is_ok() {
-            i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
-        } else {
-            0
-        };
+        let area = layout_size(hwnd)
+            .map(|(width, height)| i64::from(width) * i64::from(height))
+            .unwrap_or(0);
         if IsWindowVisible(hwnd).as_bool() {
             context.visible += 1;
             context.visible_max_area = context.visible_max_area.max(area);
@@ -1517,6 +1538,8 @@ mod win_impl {
         pub app_user_model_id: &'a str,
         pub activation: Option<super::ForegroundActivationOutcome>,
         pub hidden_candidates: Vec<HWND>,
+        pub minimized_candidates: Vec<HWND>,
+        pub visible_candidates: Vec<HWND>,
     }
 
     fn record_hidden_candidate(candidates: &mut Vec<HWND>, hwnd: HWND) {
@@ -1584,6 +1607,28 @@ mod win_impl {
         None
     }
 
+    /// 窗口"布局尺寸"：最小化窗口用 `GetWindowPlacement` 的还原矩形。
+    /// `GetWindowRect` 对最小化窗口返回退化值（实测 160×28），会被尺寸兜底误判成
+    /// "尚未布局的小窗口"——而最小化的主窗口恰恰是按键后要还原的目标（2026-10-03 实测：
+    /// 微信最小化后主窗口被排除，只剩登录小窗口可选，用户看到的就是那个小窗口）。
+    unsafe fn layout_size(hwnd: HWND) -> Option<(i32, i32)> {
+        if IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool() {
+            let mut placement = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            if GetWindowPlacement(hwnd, &mut placement).is_ok() {
+                return Some((
+                    placement.rcNormalPosition.right - placement.rcNormalPosition.left,
+                    placement.rcNormalPosition.bottom - placement.rcNormalPosition.top,
+                ));
+            }
+        }
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect).ok()?;
+        Some((rect.right - rect.left, rect.bottom - rect.top))
+    }
+
     unsafe fn eligible_window(hwnd: HWND) -> bool {
         eligible_window_with_logging(hwnd, true)
     }
@@ -1610,6 +1655,9 @@ mod win_impl {
         let class_len = class_name.len();
         let mut rect = RECT::default();
         let has_rect = GetWindowRect(hwnd, &mut rect).is_ok();
+        let layout = layout_size(hwnd);
+        let has_rect = has_rect && layout.is_some();
+        let (width, height) = layout.unwrap_or((rect.right - rect.left, rect.bottom - rect.top));
         let mut cloaked = 0i32;
         let cloak_result = DwmGetWindowAttribute(
             hwnd,
@@ -1626,8 +1674,8 @@ mod win_impl {
         } else {
             window_rejection_reason(
                 &class_name,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
+                width,
+                height,
                 owned,
                 cloaked != 0,
                 GetWindowTextLengthW(hwnd) > 0,
@@ -1635,12 +1683,13 @@ mod win_impl {
         };
         if log {
             crate::ble::gatt_note(format!(
-                "app_launcher action=window_candidate terminal_result={} reason={} class={} visible={} size_class={}",
+                "app_launcher action=window_candidate terminal_result={} reason={} class={} visible={} minimized={} size_class={}",
                 if reason.is_none() { "accepted" } else { "rejected" },
                 reason.unwrap_or("main_candidate"),
                 class_name,
                 IsWindowVisible(hwnd).as_bool(),
-                if !has_rect { "unknown" } else if rect.right - rect.left < 120 || rect.bottom - rect.top < 80 { "small" } else { "normal" },
+                IsIconic(hwnd).as_bool(),
+                if !has_rect { "unknown" } else if width < 120 || height < 80 { "small" } else { "normal" },
             ));
         }
         reason.is_none()
@@ -1660,12 +1709,15 @@ mod win_impl {
             return BOOL::from(true);
         }
         if IsWindowVisible(hwnd).as_bool() {
-            // 可见但被其它窗口遮挡：直接恢复并强制置前。
+            // 最小化窗口优先：按键的意图通常是把它还原出来，而它的 GetWindowRect 是
+            // 退化值，不能按"第一个可见窗口"挑选（2026-10-03 用户实测：微信最小化后
+            // 按键，主窗口被排除、只剩登录小窗口被激活）。因此不提前停止枚举。
             if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+                record_minimized_candidate(&mut context.minimized_candidates, hwnd);
+            } else {
+                record_minimized_candidate(&mut context.visible_candidates, hwnd);
             }
-            context.activation = Some(show_and_force_foreground(hwnd));
-            return BOOL::from(false);
+            return BOOL::from(true);
         }
         // 隐藏（如收进托盘）的窗口：记录为候选，枚举结束后再逐个激活。
         record_hidden_candidate(&mut context.hidden_candidates, hwnd);
@@ -1687,11 +1739,13 @@ mod win_impl {
             return BOOL::from(true);
         }
         if IsWindowVisible(hwnd).as_bool() {
+            // 同 pid 路径：最小化窗口优先，且不提前停止枚举。
             if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+                record_minimized_candidate(&mut context.minimized_candidates, hwnd);
+            } else {
+                record_minimized_candidate(&mut context.visible_candidates, hwnd);
             }
-            context.activation = Some(show_and_force_foreground(hwnd));
-            return BOOL::from(false);
+            return BOOL::from(true);
         }
         record_hidden_candidate(&mut context.hidden_candidates, hwnd);
         BOOL::from(true)
@@ -1770,6 +1824,28 @@ mod win_impl {
             outcome.last_set_foreground_ok,
         ));
         outcome
+    }
+
+    /// 按优先级激活：最小化候选（还原并置前）→ 可见候选 → 隐藏候选逐个回退。
+    /// 全部失败返回 None（调用方按"被拒绝"处理，不会再启实例）。
+    pub(super) unsafe fn activate_visible_or_hidden(
+        minimized: &[HWND],
+        visible: &[HWND],
+        hidden: &[HWND],
+    ) -> Option<super::ForegroundActivationOutcome> {
+        for hwnd in minimized.iter().chain(visible.iter()) {
+            let outcome = show_and_force_foreground(*hwnd);
+            crate::ble::gatt_note(format!(
+                "app_launcher action=visible_candidate_attempt class={} minimized={} terminal_result={}",
+                window_class_name(*hwnd),
+                minimized.contains(hwnd),
+                if outcome.activated { "passed" } else { "failed" },
+            ));
+            if outcome.activated {
+                return Some(outcome);
+            }
+        }
+        activate_hidden_candidates(hidden)
     }
 
     /// 按枚举顺序逐个尝试隐藏候选：显示（若隐藏）并置前 → 读回复核。某个候选没有
