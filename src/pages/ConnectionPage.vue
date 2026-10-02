@@ -32,6 +32,7 @@ import {
   isRecommendedVoiceEndpoint,
   listAudioEndpoints,
   openVbCableDownloadPage,
+  launchVokie,
   openVokieHomepage,
   remoteModelLabel,
   scanPairedRemotes,
@@ -114,6 +115,7 @@ const vokieInstalled = ref<boolean | null>(null);
 const vokieRunning = ref<boolean | null>(null);
 const checkingVokie = ref(false);
 const openingVokiePage = ref(false);
+const launchingVokie = ref(false);
 const vokieCheckMessage = ref("");
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenVoiceCapture: (() => void) | null = null;
@@ -309,6 +311,19 @@ async function openVokiePage(): Promise<void> {
     vokieCheckMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
     openingVokiePage.value = false;
+  }
+}
+
+/** 打开 Vokie（装了但没运行时）：启动后提示用户点「重新检测」确认在运行。 */
+async function launchVokieApp(): Promise<void> {
+  launchingVokie.value = true;
+  try {
+    await launchVokie();
+    vokieCheckMessage.value = "已打开 Vokie；等它启动完成后点“重新检测”。";
+  } catch (error) {
+    vokieCheckMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    launchingVokie.value = false;
   }
 }
 
@@ -1213,8 +1228,16 @@ onUnmounted(() => {
               v-else-if="vokieRunning === false"
               class="info-callout warning callout-small"
             >
-              Vokie 没有运行：按住遥控器语音键不会唤起它（如果豆包输入法正在使用，出现的是豆包语音条）。启动 Vokie 后再试。
+              Vokie 没有运行：按住遥控器语音键不会唤起它（如果豆包输入法正在使用，出现的是豆包语音条）。打开 Vokie 后再试。
               <div class="button-row">
+                <button
+                  class="primary-button"
+                  type="button"
+                  :disabled="launchingVokie"
+                  @click="launchVokieApp"
+                >
+                  {{ launchingVokie ? "正在打开…" : "打开 Vokie" }}
+                </button>
                 <button
                   class="secondary-button"
                   type="button"
@@ -1310,6 +1333,9 @@ onUnmounted(() => {
           <p v-if="voiceHotkeyMessage" class="tiny muted voice-hotkey-message">
             {{ voiceHotkeyMessage }}
           </p>
+          <div class="info-callout callout-small">
+            避免其他 App 使用同一个快捷键（Vokie、Chatterfly 这类语音工具会抢在输入法前面）。按住语音键时，如果当前输入法还不是你选的工具，可能需要再按住一次才能正常使用。
+          </div>
         </section>
 
         <!-- ③ 照着做 -->

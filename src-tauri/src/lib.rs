@@ -1120,6 +1120,23 @@ async fn get_vokie_installation() -> VokieInstallationSnapshot {
     }
 }
 
+/// 打开 Vokie（连接页第 ② 步「打开 Vokie」按钮，2026-10-01 Andy 需求：
+/// 装了但没运行时，让用户一键把它叫起来）。
+///
+/// 只启动、不改它的配置；只记结果、**不记路径**（隐私红线）。
+#[tauri::command]
+async fn launch_vokie() -> Result<(), String> {
+    let result = tauri::async_runtime::spawn_blocking(sayall_windows::vokie::launch)
+        .await
+        .map_err(|error| format!("打开 Vokie 任务失败：{error}"))
+        .and_then(|inner| inner);
+    sayall_windows::gatt_note(match &result {
+        Ok(()) => "voice_input_tool feature=vokie_launch action=launch phase=completed terminal_result=passed trigger=connection_page".to_owned(),
+        Err(_) => "voice_input_tool feature=vokie_launch action=launch phase=completed terminal_result=failed error_domain=process error_code=launch_failed retryable=true".to_owned(),
+    });
+    result
+}
+
 /// 「其他工具」面板记住的按键（2026-10-01 Andy 反馈：选了「不按键 / 左 Alt」
 /// 后切去豆包再切回「其他工具」，会退回默认右 Alt）。
 ///
@@ -2118,6 +2135,7 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
+        launch_vokie,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
         get_theme_preference,
@@ -2172,6 +2190,7 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_vokie_installation,
+        launch_vokie,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
         get_theme_preference,

@@ -58,34 +58,38 @@ pub fn matches_vokie(name: &str) -> bool {
 /// 拆成独立函数是为了能在临时目录上做确定性单元测试——真机上的开始菜单
 /// 内容不可控，不能拿它当测试夹具。
 pub fn directory_tree_contains_vokie(root: &std::path::Path, max_depth: u8) -> bool {
+    directory_tree_find_vokie(root, max_depth).is_some()
+}
+
+/// 同上，但返回命中的条目路径（用于「打开 Vokie」：直接 ShellExecute 快捷方式）。
+pub fn directory_tree_find_vokie(
+    root: &std::path::Path,
+    max_depth: u8,
+) -> Option<std::path::PathBuf> {
     if max_depth == 0 {
-        return false;
+        return None;
     }
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
-    };
+    let entries = std::fs::read_dir(root).ok()?;
     let mut scanned = 0_u32;
     for entry in entries.flatten() {
         // 防御性上限：开始菜单正常规模远小于此，避免异常目录拖慢检测。
         scanned += 1;
         if scanned > 4096 {
-            return false;
+            return None;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let file_type = entry.file_type().ok()?;
         if file_type.is_dir() {
-            if directory_tree_contains_vokie(&entry.path(), max_depth - 1) {
-                return true;
+            if let Some(found) = directory_tree_find_vokie(&entry.path(), max_depth - 1) {
+                return Some(found);
             }
             continue;
         }
         if matches_vokie(&name) {
-            return true;
+            return Some(entry.path());
         }
     }
-    false
+    None
 }
 
 #[cfg(windows)]
@@ -172,6 +176,12 @@ fn probe_matches(source: VokieInstallSource) -> bool {
 
 #[cfg(windows)]
 fn start_menu_has_vokie() -> bool {
+    start_menu_vokie_shortcut().is_some()
+}
+
+/// 开始菜单里 Vokie 快捷方式的完整路径（用于「打开 Vokie」按钮）。
+#[cfg(windows)]
+fn start_menu_vokie_shortcut() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -183,7 +193,47 @@ fn start_menu_has_vokie() -> bool {
     // 开始菜单层级通常 ≤ 3（程序 → 厂商 → 快捷方式），给 4 层余量。
     roots
         .iter()
-        .any(|root| directory_tree_contains_vokie(root, 4))
+        .find_map(|root| directory_tree_find_vokie(root, 4))
+}
+
+/// 启动 Vokie（连接页「打开 Vokie」按钮，2026-10-01 Andy 需求）。
+///
+/// 入口按可靠性排序：卸载表 `DisplayIcon`（本机实测 `…\Vokie.exe,0`）→
+/// 开始菜单快捷方式（ShellExecute 可直接运行 .lnk）。只用于启动，
+/// **路径不写日志**（隐私红线）；失败返回用户可读原因（调用方展示）。
+#[cfg(windows)]
+pub fn launch() -> Result<(), String> {
+    if let Some(exe) = uninstall_registry_display_icon()
+        .as_deref()
+        .and_then(display_icon_exe)
+    {
+        return crate::app_launcher::launch_path(&exe);
+    }
+    if let Some(shortcut) = start_menu_vokie_shortcut() {
+        return crate::app_launcher::launch_path(&shortcut.to_string_lossy());
+    }
+    Err("没有找到 Vokie 的启动入口，请从开始菜单手动打开".to_owned())
+}
+
+#[cfg(not(windows))]
+pub fn launch() -> Result<(), String> {
+    Err("打开应用仅在 Windows 上可用".to_owned())
+}
+
+/// 解析卸载表 `DisplayIcon` 里的可执行文件路径：去掉引号与 `,<图标索引>` 后缀，
+/// 只接受 `.exe`（`@dll,-1` 这类资源引用返回 None）。纯函数，便于单测。
+pub fn display_icon_exe(display_icon: &str) -> Option<String> {
+    let first = display_icon
+        .split(',')
+        .next()?
+        .trim()
+        .trim_matches('"')
+        .trim();
+    if first.to_ascii_lowercase().ends_with(".exe") {
+        Some(first.to_owned())
+    } else {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -253,6 +303,18 @@ fn entry_is_vokie_uninstall_entry(
     root: windows::Win32::System::Registry::HKEY,
     entry: &str,
 ) -> bool {
+    uninstall_entry_string(root, entry, "DisplayName")
+        .map(|name| matches_vokie(&name))
+        .unwrap_or(false)
+}
+
+/// 读取某个卸载表项下的字符串值（REG_SZ）；读不到返回 None。
+#[cfg(windows)]
+fn uninstall_entry_string(
+    root: windows::Win32::System::Registry::HKEY,
+    entry: &str,
+    value_name: &str,
+) -> Option<String> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_READ, REG_SZ,
@@ -262,10 +324,10 @@ fn entry_is_vokie_uninstall_entry(
     let mut key = HKEY::default();
     if unsafe { RegOpenKeyExW(root, PCWSTR(entry_wide.as_ptr()), None, KEY_READ, &mut key) }.0 != 0
     {
-        return false;
+        return None;
     }
-    let name = wide("DisplayName");
-    let mut buffer = [0u16; 512];
+    let name = wide(value_name);
+    let mut buffer = [0u16; 1024];
     let mut size = std::mem::size_of_val(&buffer) as u32;
     let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
     let result = unsafe {
@@ -278,16 +340,85 @@ fn entry_is_vokie_uninstall_entry(
             Some(&mut size),
         )
     };
-    let matched = result.0 == 0
-        && kind == REG_SZ
-        && size >= 2
-        && matches_vokie(&String::from_utf16_lossy(
-            &buffer[..(size as usize / 2).saturating_sub(1)],
-        ));
     unsafe {
         let _ = RegCloseKey(key);
     }
-    matched
+    if result.0 != 0 || kind != REG_SZ || size < 2 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(
+        &buffer[..(size as usize / 2).saturating_sub(1)],
+    ))
+}
+
+/// 命中 Vokie 的卸载表项的 `DisplayIcon`（卸载入口里最可靠的 exe 路径来源；
+/// 本机实测 `D:\Apps\vokie\Vokie.exe,0`）。
+#[cfg(windows)]
+fn uninstall_registry_display_icon() -> Option<String> {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    const SUBKEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+    const SUBKEY_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
+    for (root, path) in [
+        (windows::Win32::System::Registry::HKEY_CURRENT_USER, SUBKEY),
+        (HKEY_LOCAL_MACHINE, SUBKEY),
+        (HKEY_LOCAL_MACHINE, SUBKEY_WOW),
+    ] {
+        if let Some(icon) = uninstall_root_display_icon(root, path) {
+            return Some(icon);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn uninstall_root_display_icon(
+    root: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+) -> Option<String> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
+    use windows::Win32::System::Registry::{RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, KEY_READ};
+
+    let path = wide(subkey);
+    let mut key = windows::Win32::System::Registry::HKEY::default();
+    if unsafe { RegOpenKeyExW(root, PCWSTR(path.as_ptr()), None, KEY_READ, &mut key) }.0 != 0 {
+        return None;
+    }
+    let mut index = 0_u32;
+    let mut found = None;
+    loop {
+        let mut name = [0u16; 260];
+        let mut len = name.len() as u32;
+        let result = unsafe {
+            RegEnumKeyExW(
+                key,
+                index,
+                Some(PWSTR(name.as_mut_ptr())),
+                &mut len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if result == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        if result.0 != 0 {
+            break;
+        }
+        index += 1;
+        let entry = String::from_utf16_lossy(&name[..len as usize]);
+        let display_name = uninstall_entry_string(key, &entry, "DisplayName");
+        if display_name.as_deref().map(matches_vokie).unwrap_or(false) {
+            found = uninstall_entry_string(key, &entry, "DisplayIcon");
+            break;
+        }
+    }
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    found
 }
 
 #[cfg(windows)]
@@ -357,6 +488,69 @@ mod tests {
             4
         ));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn display_icon_exe_parses_registry_forms() {
+        // 本机实测形态：exe 路径 + ",0" 图标索引。
+        assert_eq!(
+            display_icon_exe(r"D:\Apps\vokie\Vokie.exe,0").as_deref(),
+            Some(r"D:\Apps\vokie\Vokie.exe")
+        );
+        // 带引号 / 前后空格。
+        assert_eq!(
+            display_icon_exe(r#" "C:\Program Files\Vokie\Vokie.exe" , 1 "#).as_deref(),
+            Some(r"C:\Program Files\Vokie\Vokie.exe")
+        );
+        // 无索引、大写扩展名。
+        assert_eq!(
+            display_icon_exe(r"C:\Vokie\VOKIE.EXE").as_deref(),
+            Some(r"C:\Vokie\VOKIE.EXE")
+        );
+        // 资源引用（@dll,-1）与非 exe：不当作可执行入口。
+        assert_eq!(display_icon_exe(r"@C:\Vokie\vokie.dll,-1"), None);
+        assert_eq!(display_icon_exe(""), None);
+    }
+
+    #[test]
+    fn directory_scan_returns_shortcut_path() {
+        let base = std::env::temp_dir().join(format!("sayall-vokie-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("厂商");
+        std::fs::create_dir_all(&nested).unwrap();
+        let shortcut = nested.join("Vokie.lnk");
+        std::fs::write(&shortcut, b"").unwrap();
+        assert_eq!(
+            directory_tree_find_vokie(&base, 4).as_deref(),
+            Some(shortcut.as_path())
+        );
+        assert_eq!(directory_tree_find_vokie(&base, 1), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 真机取证（默认 `#[ignore]`，CI 不跑）：本机装有 Vokie 时，「打开 Vokie」
+    /// 必须能解析出启动入口（只打印"有没有"，不落路径）。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机取证：依赖本机实际安装的 Vokie"]
+    fn launch_entry_resolves_on_this_machine() {
+        let icon = uninstall_registry_display_icon();
+        let shortcut = start_menu_vokie_shortcut();
+        println!(
+            "vokie launch entry: display_icon={} start_menu={}",
+            icon.is_some(),
+            shortcut.is_some()
+        );
+        assert!(
+            icon.is_some() || shortcut.is_some(),
+            "应能解析出至少一个启动入口"
+        );
+        if let Some(icon) = icon.as_deref() {
+            assert!(
+                display_icon_exe(icon).is_some(),
+                "DisplayIcon 应能解析出 exe"
+            );
+        }
     }
 
     #[test]
