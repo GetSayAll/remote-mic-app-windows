@@ -169,7 +169,8 @@ export type ButtonAction =
   | { type: "scroll"; direction: "up" | "down"; steps?: number }
   | { type: "mouse_click"; kind: MouseClickKind }
   | { type: "mouse_move"; direction: MoveDirection; distance: number }
-  | { type: "open_app"; target: string };
+  | { type: "open_app"; target: string }
+  | { type: "focus_input" };
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
 export interface PresetAppInfo {
@@ -196,6 +197,16 @@ export interface FiredGesture {
   trigger: ButtonTrigger;
 }
 
+/** 「聚焦输入框」最近一次结果（focus_service::FocusReport；reason 见 FocusFailure 标识）。 */
+export interface FocusReport {
+  requestId: number;
+  kind: string;
+  focused: boolean;
+  reason?: string;
+  attempts: number;
+  elapsedMs: number;
+}
+
 export interface ButtonMappingSnapshot {
   enabled: boolean;
   gateActive: boolean;
@@ -205,6 +216,7 @@ export interface ButtonMappingSnapshot {
   firedGestures: number;
   lastFired: FiredGesture | null;
   lastError: string | null;
+  lastFocus?: FocusReport;
 }
 
 export interface SendInputSnapshot {
@@ -1282,6 +1294,7 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
 
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
+  if (action.type === "focus_input") return "聚焦输入框";
   if (action.type === "scroll") {
     const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
     return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;

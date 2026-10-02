@@ -199,6 +199,59 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(sendInput.submittedEvents === 4, "Ctrl+C 仿真没有生成四个按下/释放事件");
   steps.push("映射保存、热加载和 SendInput 记录器通过真实 Tauri IPC");
 
+  // 「聚焦输入框」动作：UI 芯片可选 → 自动保存 → 平台受理一次（真实 IPC）。
+  const focusCell = await waitFor(() => {
+    const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
+      (candidate) => candidate.title.startsWith("返回 · 单击"),
+    );
+    return cell ?? null;
+  }, "返回键「单击」映射格");
+  focusCell.click();
+  const focusChip = await waitFor(() => buttonWithText("聚焦输入框"), "「聚焦输入框」动作芯片");
+  focusChip.click();
+  await waitFor(
+    () => (focusCell.title.includes("聚焦输入框") ? true : null),
+    "映射格显示「聚焦输入框」",
+  );
+  const focusSnapshot = await testButtonMapping("back", "single");
+  assert(
+    focusSnapshot.submittedBatches === 2,
+    "「聚焦输入框」动作没有分发到平台的聚焦受理路径",
+  );
+  steps.push("「聚焦输入框」动作在按键页可选、经真实 IPC 分发到平台聚焦受理");
+
+  // 「打开应用 + 聚焦方式」：选预设应用 → 切到「聚焦已记录的输入框」→ 学习一次 →
+  // 读回档案 → 测试打开与聚焦。学习与测试都走真实 IPC（仿真返回固定样本）。
+  await clickButton("记事本");
+  await waitFor(
+    () =>
+      document.body.textContent?.includes("打开后聚焦方式") &&
+      document.body.textContent?.includes("聚焦已记录的输入框")
+        ? true
+        : null,
+    "聚焦方式面板",
+  );
+  mark("focus_profile_panel");
+  await clickButton("聚焦已记录的输入框");
+  await clickButton("开始学习输入框");
+  await waitFor(
+    () => (document.body.textContent?.includes("只记录控件特征，不含输入内容") ? true : null),
+    "学习结果提示",
+  );
+  await waitFor(
+    () => (document.body.textContent?.includes("已记录输入框") ? true : null),
+    "聚焦档案呈现为已记录输入框",
+  );
+  const savedMappings = await getButtonMappings();
+  const profile = savedMappings.focusProfiles?.["notepad"];
+  assert(profile?.strategy === "recorded_element", "聚焦档案没有保存为已记录输入框");
+  assert(
+    profile?.recorded?.automationId === "ci-simulation-input",
+    "聚焦档案没有记录到仿真输入框",
+  );
+  await clickButton("测试打开与聚焦");
+  steps.push("打开应用的聚焦方式三选一、学习输入框与测试打开聚焦经真实 IPC 闭环");
+
   mark("permissions_page");
   await openPage("权限");
   // 诊断摘要 2026-10-01 从关于页迁回权限页（用户指定）：状态与取证入口同页，

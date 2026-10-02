@@ -1469,6 +1469,21 @@ onUnmounted(() => {
         </section>
 
         <section class="action-section">
+          <h4 class="action-section-title">设备操作</h4>
+          <div class="preset-grid">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'focus_input' }"
+              type="button"
+              title="把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）"
+              @click="applyAction({ type: 'focus_input' })"
+            >
+              聚焦输入框
+            </button>
+          </div>
+        </section>
+
+        <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <div class="preset-grid">
             <button
