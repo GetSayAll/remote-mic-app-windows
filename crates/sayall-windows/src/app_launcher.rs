@@ -429,7 +429,12 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
             return launch_explicit(&exe.to_string_lossy(), None, None, true);
         }
         let visibility = window_visibility(WindowSelector::ExecutableNames(app.exe_names));
-        match running_window_disposition(visibility.visible, visibility.hidden) {
+        match running_window_disposition(
+            visibility.visible,
+            visibility.visible_max_area,
+            visibility.hidden,
+            visibility.hidden_max_area,
+        ) {
             RunningWindowDisposition::ActivateVisible => match activate_running(app.exe_names) {
                 RunningActivation::Activated(_) => return Ok(()),
                 RunningActivation::ForegroundDenied => {
@@ -764,12 +769,16 @@ struct ForegroundActivationOutcome {
 /// 微信 / WorkBuddy「打开后点不动，双击标题栏才活」。因此只有"已经有可见窗口"时才
 /// 直接激活；只有隐藏窗口时交给应用自己的打开路径（预设置信入口重新拉起，注册应用
 /// 走激活契约），与开始菜单、桌面快捷方式、任务栏的打开方式一致。
+///
+/// 比面积的原因（同日追加实测）：主窗口收在托盘、而应用还留着登录/入口小窗口时，
+/// 只看"有没有可见窗口"会把那个小窗口当目标（点出来的是它，不是用户要的主窗口）。
+/// 因此只要**隐藏的最大窗口比可见的最大窗口更大**，就按"主窗口隐藏"处理。
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunningWindowDisposition {
-    /// 已有可见窗口：显示/还原并强制置前。
+    /// 已有可见主窗口：显示/还原并强制置前。
     ActivateVisible,
-    /// 只有隐藏窗口：交给应用自己打开，不直接 ShowWindow。
+    /// 主窗口隐藏（哪怕还有小窗口可见）：交给应用自己打开，不直接 ShowWindow。
     DelegateToApp,
     /// 没有窗口：按未运行处理，走启动路径。
     StartFresh,
@@ -778,9 +787,13 @@ enum RunningWindowDisposition {
 #[cfg(windows)]
 fn running_window_disposition(
     visible_windows: usize,
+    visible_max_area: i64,
     hidden_windows: usize,
+    hidden_max_area: i64,
 ) -> RunningWindowDisposition {
-    if visible_windows > 0 {
+    if hidden_windows > 0 && hidden_max_area > visible_max_area {
+        RunningWindowDisposition::DelegateToApp
+    } else if visible_windows > 0 {
         RunningWindowDisposition::ActivateVisible
     } else if hidden_windows > 0 {
         RunningWindowDisposition::DelegateToApp
@@ -812,6 +825,12 @@ fn drive_foreground_activation(
         alt_unlock_submitted: retry.alt_unlock_submitted,
         last_set_foreground_ok: retry.set_foreground_ok,
     }
+}
+
+/// 复核"已知的那个隐藏窗口"是否已经由应用自己显示出来（有界）。供注册应用路径复用。
+#[cfg(windows)]
+pub(crate) fn readback_hidden_window_shown(hwnd: Option<isize>) -> bool {
+    hwnd.is_some_and(|hwnd| win_impl::known_window_shown(hwnd))
 }
 
 /// 重新拉起后等待应用自己显示窗口的复核：6 × 200 ms。冷启动到窗口出现通常在 1 s 内，
@@ -1180,6 +1199,7 @@ fn process_app_user_model_id(pid: u32) -> Option<String> {
 #[cfg(windows)]
 pub(crate) enum WindowSelector<'a> {
     ExecutableNames(&'a [&'a str]),
+    ExecutablePath(&'a str),
     AppUserModelId(&'a str),
 }
 
@@ -1187,10 +1207,44 @@ pub(crate) enum WindowSelector<'a> {
 /// 用于复核"应用是否把我们已知的主窗口自己显示出来"，以及回落时定点显示它——
 /// 只看"有没有可见窗口"会被应用一闪而过的登录/入口小窗口骗过（2026-10-03 实测假阳性）。
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct WindowVisibility {
     pub visible: usize,
     pub hidden: usize,
     pub largest_hidden: Option<isize>,
+    pub visible_max_area: i64,
+    pub hidden_max_area: i64,
+}
+
+#[cfg(windows)]
+impl WindowVisibility {
+    pub(crate) const EMPTY: Self = Self {
+        visible: 0,
+        hidden: 0,
+        largest_hidden: None,
+        visible_max_area: 0,
+        hidden_max_area: 0,
+    };
+
+    /// 合并两个口径（同一应用的 AUMID 与 exe 路径命中可能重叠，取较大者即可）。
+    pub(crate) fn merge(self, other: Self) -> Self {
+        Self {
+            visible: self.visible.max(other.visible),
+            hidden: self.hidden.max(other.hidden),
+            largest_hidden: match (self.largest_hidden, other.largest_hidden) {
+                (Some(left), Some(right)) => {
+                    if self.hidden_max_area >= other.hidden_max_area {
+                        Some(left)
+                    } else {
+                        Some(right)
+                    }
+                }
+                (left, right) => left.or(right),
+            },
+            visible_max_area: self.visible_max_area.max(other.visible_max_area),
+            hidden_max_area: self.hidden_max_area.max(other.hidden_max_area),
+        }
+    }
 }
 
 /// 目标进程/AUMID 当前可见窗口与隐藏窗口的数量（与激活路径同一份过滤规则）。
@@ -1202,8 +1256,12 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
 
     let (pids, app_user_model_id) = match selector {
         WindowSelector::ExecutableNames(names) => (pids_for_exe_names(names), None),
+        WindowSelector::ExecutablePath(path) => (pids_for_executable_path(path), None),
         WindowSelector::AppUserModelId(aumid) => (pids_for_app_user_model_id(aumid), Some(aumid)),
     };
+    if pids.is_empty() && app_user_model_id.is_none() {
+        return WindowVisibility::EMPTY;
+    }
     let mut context = win_impl::VisibilityEnumContext {
         pids: &pids,
         app_user_model_id,
@@ -1211,14 +1269,8 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
         hidden: 0,
         largest_hidden: None,
         largest_hidden_area: 0,
+        visible_max_area: 0,
     };
-    if pids.is_empty() && app_user_model_id.is_none() {
-        return WindowVisibility {
-            visible: 0,
-            hidden: 0,
-            largest_hidden: None,
-        };
-    }
     unsafe {
         let _ = EnumWindows(
             Some(win_impl::enum_visibility_proc),
@@ -1229,7 +1281,41 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
         visible: context.visible,
         hidden: context.hidden,
         largest_hidden: context.largest_hidden,
+        visible_max_area: context.visible_max_area,
+        hidden_max_area: context.largest_hidden_area,
     }
+}
+
+/// 进程快照：可执行文件路径 → pid 集合（不同进程的映像路径可能大小写/前缀不同）。
+#[cfg(windows)]
+fn pids_for_executable_path(executable_path: &str) -> std::collections::HashSet<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut pids = std::collections::HashSet::new();
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return pids;
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        if process_image_path(entry.th32ProcessID)
+            .as_deref()
+            .is_some_and(|image| process_image_matches_target(image, executable_path))
+        {
+            pids.insert(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+    }
+    pids
 }
 
 /// 进程快照：可执行文件名 → pid 集合。
@@ -1378,6 +1464,7 @@ mod win_impl {
         pub hidden: usize,
         pub largest_hidden: Option<isize>,
         pub largest_hidden_area: i64,
+        pub visible_max_area: i64,
     }
 
     pub(super) unsafe extern "system" fn enum_visibility_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -1391,16 +1478,17 @@ mod win_impl {
         if !(by_pid || by_identity) || !eligible_window_without_logging(hwnd) {
             return BOOL::from(true);
         }
+        let mut rect = RECT::default();
+        let area = if GetWindowRect(hwnd, &mut rect).is_ok() {
+            i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
+        } else {
+            0
+        };
         if IsWindowVisible(hwnd).as_bool() {
             context.visible += 1;
+            context.visible_max_area = context.visible_max_area.max(area);
         } else {
             context.hidden += 1;
-            let mut rect = RECT::default();
-            let area = if GetWindowRect(hwnd, &mut rect).is_ok() {
-                i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
-            } else {
-                0
-            };
             if area > context.largest_hidden_area {
                 context.largest_hidden_area = area;
                 context.largest_hidden = Some(hwnd.0 as isize);
@@ -1413,6 +1501,16 @@ mod win_impl {
     pub(super) unsafe fn activate_known_window(hwnd: isize) -> bool {
         let window = HWND(hwnd as *mut core::ffi::c_void);
         show_and_force_foreground(window).activated
+    }
+
+    /// 复核"已知的那个隐藏窗口"是否已经由应用自己显示出来（有界）。
+    pub(super) fn known_window_shown(hwnd: isize) -> bool {
+        let target = HWND(hwnd as *mut core::ffi::c_void);
+        super::readback_with_recheck(
+            || unsafe { IsWindowVisible(target) }.as_bool(),
+            || std::thread::sleep(super::RELAUNCH_VISIBLE_WAIT),
+            super::RELAUNCH_VISIBLE_CHECKS,
+        )
     }
 
     pub(super) struct AppIdentityEnumContext<'a> {
@@ -2159,24 +2257,30 @@ pub(crate) mod tests {
     #[test]
     fn running_window_disposition_prefers_app_owned_opening_for_hidden_windows() {
         use super::*;
-        // 已有可见窗口：直接激活（原有行为，Word/WPS 等）。
+        // 已有可见窗口、没有更大的隐藏窗口：直接激活（原有行为，Word/WPS 等）。
         assert_eq!(
-            running_window_disposition(1, 0),
+            running_window_disposition(1, 900_000, 0, 0),
             RunningWindowDisposition::ActivateVisible
         );
         assert_eq!(
-            running_window_disposition(2, 3),
+            running_window_disposition(2, 900_000, 3, 500_000),
             RunningWindowDisposition::ActivateVisible
         );
         // 只有隐藏窗口（收在托盘）：交给应用自己打开——直接 ShowWindow 会让应用
         // 内部状态与窗口状态脱节，客户端区点击不进入应用（2026-10-03 真机）。
         assert_eq!(
-            running_window_disposition(0, 1),
+            running_window_disposition(0, 0, 1, 900_000),
+            RunningWindowDisposition::DelegateToApp
+        );
+        // 主窗口隐藏、只剩登录/入口小窗口可见（实测微信最小化）：仍按"主窗口隐藏"处理，
+        // 否则点出来的是那个小窗口，不是用户要的主窗口。
+        assert_eq!(
+            running_window_disposition(1, 114_000, 1, 942_000),
             RunningWindowDisposition::DelegateToApp
         );
         // 没有窗口：按未运行处理，走启动路径。
         assert_eq!(
-            running_window_disposition(0, 0),
+            running_window_disposition(0, 0, 0, 0),
             RunningWindowDisposition::StartFresh
         );
     }
