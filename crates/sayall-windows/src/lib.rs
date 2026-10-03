@@ -275,7 +275,11 @@ pub struct WindowsPlatform {
     /// 用户在连接页选的语音输入工具：决定语音会话开始前把哪个输入法
     /// 切进当前会话（`ime::ensure_session_ime`）；Vokie / 其他工具不切。
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
-    /// 「离开窗口时预切输入法」的一次性开关：只在用户刚选过工具后为 true。
+    /// 「选中工具后的一次性输入法对齐」：自身窗口在前台时不能切（TSF 会话切换曾致
+    /// WebView2 整页重载，Bugs/2026-09-12），此时只布防；本应用窗口失去焦点后由
+    /// `align_ime_after_tool_selection` 取走并执行一次（2026-10-03，Andy 要求消除
+    /// "换工具后第一按必拉不起"的窗口期）。
+    ime_align_pending: Arc<Mutex<Option<(VoiceInputTool, std::time::Instant)>>>,
     #[cfg(windows)]
     button_mapping: Arc<ButtonMappingRuntime>,
     raw_input_snapshot: Arc<Mutex<RawInputSnapshot>>,
@@ -348,6 +352,7 @@ impl Default for WindowsPlatform {
         let usage = Arc::new(UsageCounters::default());
         let voice_hold_hotkey = Arc::new(Mutex::new(None));
         let voice_input_tool = Arc::new(Mutex::new(None));
+        let ime_align_pending = Arc::new(Mutex::new(None));
         #[cfg(windows)]
         let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
         #[cfg(windows)]
@@ -402,6 +407,7 @@ impl Default for WindowsPlatform {
                 usage,
                 voice_hold_hotkey,
                 voice_input_tool,
+                ime_align_pending,
                 button_mapping,
                 raw_input_snapshot,
                 voice_key_suppressor,
@@ -429,6 +435,7 @@ impl Default for WindowsPlatform {
                 usage,
                 voice_hold_hotkey,
                 voice_input_tool,
+                ime_align_pending,
                 button_mapping,
                 raw_input_snapshot,
             }
@@ -573,11 +580,68 @@ impl WindowsPlatform {
         }
     }
 
-    /// 更新「你在用的输入工具」：BLE 工作线程在**按住语音键**的那一刻按它决定把
-    /// 哪个输入法切进当前会话（`ime::ensure_session_ime`，唯一切换时机——不做
-    /// 聚焦/离开窗口时的预切，2026-10-01 Andy 明确要求）。
+    /// 更新「你在用的输入工具」：BLE 工作线程在按下语音键时按它决定把哪个输入法
+    /// 切进当前会话（`ime::ensure_session_ime`，按下时兜底切换）；并且**选中即对齐**——
+    /// 用户刚选过工具时立即尝试把系统输入法切到该工具（自身窗口在前台时改为布防，
+    /// 待窗口失去焦点后执行一次）。
+    ///
+    /// 为什么要有"选中即对齐"（2026-10-03 Andy）：报告层合成在按下帧到达时立即改写
+    /// （早于应用知情一个 BLE 往返），若按下时系统输入法还不是所选工具，这一按必然
+    /// 赶不上切换——表现为"换工具后第一按拉不起"。选中即对齐把该窗口期清零；
+    /// 按下时的兜底切换保留（覆盖用户手动改走输入法的情况）。
     pub fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
         *lock(&self.voice_input_tool) = tool;
+        let Some(tool) = tool else {
+            *lock(&self.ime_align_pending) = None;
+            return;
+        };
+        // Vokie / 其他工具明确不切输入法（`ime_target_for` 为 None），也不布防。
+        let Some(target) = ime::ime_target_for(tool) else {
+            *lock(&self.ime_align_pending) = None;
+            crate::ble::gatt_note(
+                "ime_tool_select action=skipped reason=unsupported_tool".to_owned(),
+            );
+            return;
+        };
+        if ime::foreground_is_self() {
+            // 自身窗口在前台：现在切会触发 TSF 会话切换的 WebView 整页重载
+            //（Bugs/2026-09-12），改为布防——窗口失去焦点（用户回到自己的应用）
+            // 后由 `align_ime_after_tool_selection` 执行一次。
+            *lock(&self.ime_align_pending) = Some((tool, std::time::Instant::now()));
+            crate::ble::gatt_note(format!(
+                "ime_tool_select action=pending_self_foreground tool={}",
+                target.label,
+            ));
+        } else {
+            crate::ble::gatt_note(format!(
+                "ime_tool_select action=immediate tool={}",
+                target.label,
+            ));
+            std::thread::Builder::new()
+                .name("sayall-ime-tool-select".to_owned())
+                .spawn(move || {
+                    let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
+                })
+                .ok();
+        }
+    }
+
+    /// 工具选择后的一次性输入法对齐：本应用窗口失去焦点时调用
+    /// （src-tauri `WindowEvent::Focused(false)`）。未布防时 no-op；布防时取走
+    /// 并执行一次切换（`ensure_session_ime` 内部仍会跳过自身仍在前台的情况）。
+    pub fn align_ime_after_tool_selection(&self) {
+        let Some((tool, armed_at)) = lock(&self.ime_align_pending).take() else {
+            return;
+        };
+        crate::ble::gatt_note(format!(
+            "ime_tool_select action=fired trigger=window_blur waited_ms={}",
+            armed_at.elapsed().as_millis(),
+        ));
+        let _ = std::thread::Builder::new()
+            .name("sayall-ime-prealign".to_owned())
+            .spawn(move || {
+                let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
+            });
     }
 
     pub fn voice_input_tool(&self) -> Option<VoiceInputTool> {

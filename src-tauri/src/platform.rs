@@ -66,8 +66,13 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn voice_hold_hotkey(&self) -> Option<KeyChord>;
     fn set_voice_hold_hotkey(&self, hotkey: Option<KeyChord>);
     /// 「你在用的输入工具」：BLE 工作线程在语音会话开始前按它决定把哪个
-    /// 输入法切进当前会话（`ime::ensure_session_ime`）。
+    /// 输入法切进当前会话（`ime::ensure_session_ime`），并在选中时尝试立即对齐
+    /// 系统输入法（见 `WindowsPlatform::set_voice_input_tool`，2026-10-03）。
     fn set_voice_input_tool(&self, _tool: Option<VoiceInputTool>) {}
+    /// 工具选择后的一次性输入法对齐：本应用窗口失去焦点时调用
+    /// （`WindowEvent::Focused(false)`，见 `WindowsPlatform::align_ime_after_tool_selection`）。
+    /// 未布防（用户没刚选过工具）时是 no-op。
+    fn align_ime_after_tool_selection(&self) {}
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
     fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
@@ -215,6 +220,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
         WindowsPlatform::set_voice_input_tool(self, tool)
+    }
+
+    fn align_ime_after_tool_selection(&self) {
+        WindowsPlatform::align_ime_after_tool_selection(self)
     }
 
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
