@@ -123,6 +123,13 @@ jobs:
           $env:VITE_SAYALL_RUNTIME_SIMULATION = "1"
           pnpm tauri build --no-bundle --features runtime-simulation
 
+      # 防回归（2026-10-03 本机实证）：补丁 build.frontendDist 误用 Windows 绝对路径时，
+      # tauri 会把它当单字母 scheme 的 URL，前端资源不嵌入、界面变成目录列表，
+      # 而哈希/签名/内嵌修订号全部正常——只有对 exe 做“资源键是否在二进制里”的检查才能发现。
+      - name: Verify frontend assets are embedded in the executable
+        shell: pwsh
+        run: ./scripts/verify-frontend-embedded.ps1
+
       - name: Test Windows Tauri WebView and IPC runtime simulation
         shell: pwsh
         timeout-minutes: 3
@@ -170,6 +177,11 @@ jobs:
 
       - name: Build unsigned NSIS preview installer
         run: pnpm tauri build --bundles nsis
+
+      # 防回归（2026-10-03 本机实证）：见 verify job 中同名步骤的注释。
+      - name: Verify frontend assets are embedded in the executable
+        shell: pwsh
+        run: ./scripts/verify-frontend-embedded.ps1
 
       - name: Verify runtime simulation is absent from production build
         shell: pwsh

@@ -57,6 +57,12 @@ jobs:
           # 此处求值为空字符串，实测空字符串 + 无密码密钥可免交互完成签名。
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # 防回归（2026-10-03 本机实证）：补丁 build.frontendDist 误用 Windows 绝对路径时，
+      # tauri 会把它当单字母 scheme 的 URL，前端资源不嵌入、界面变成目录列表。
+      - name: Verify frontend assets are embedded in the executable
+        shell: pwsh
+        run: ./scripts/verify-frontend-embedded.ps1
+
       - name: Generate updater manifest and stage release assets
         shell: pwsh
         run: ./scripts/generate-updater-manifest.ps1 -Tag $env:GITHUB_REF_NAME
