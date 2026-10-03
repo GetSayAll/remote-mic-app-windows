@@ -2611,21 +2611,28 @@ pub fn diagnostic_log_path() -> Option<std::path::PathBuf> {
 /// ATVV 诊断日志（宿主默认写入 LocalAppData；SAYALL_GATT_LOG 可覆盖路径）。
 /// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
 /// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。
+///
+/// 2026-10-04 修订：**无路径/打开失败时不再把 "无 sink" 永久冻结**。旧实现用
+/// `get_or_init`，首次调用若没有 env/路径就把 None 钉死——任何"先无后有"的
+/// 场景（运行期晚到的 `initialize_diagnostic_log`、同进程先后依赖 env 的测试）
+/// 会让之后所有功能点日志静默丢失。现在只在成功打开文件后固定 sink；找不到
+/// 路径时每次调用重试（env 查询与一次 open 失败都极廉价），一旦条件具备即自愈。
 fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
-    static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    SINK.get_or_init(|| {
-        let path = DIAGNOSTIC_LOG_PATH
-            .get()
-            .cloned()
-            .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?;
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-            .map(Mutex::new)
-    })
-    .as_ref()
+    static SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+    if let Some(sink) = SINK.get() {
+        return Some(sink);
+    }
+    let path = DIAGNOSTIC_LOG_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let _ = SINK.set(Mutex::new(file));
+    SINK.get()
 }
 
 fn gatt_log(kind: &str, bytes: &[u8]) {
