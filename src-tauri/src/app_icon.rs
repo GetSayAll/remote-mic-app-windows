@@ -428,36 +428,38 @@ mod tests {
         assert_eq!((window_icon.width(), window_icon.height()), (256, 256));
     }
 
+    /// "内容必须铺满画布"这条约定：阈值取 alpha ≥ 128（抗锯齿边缘也算可见），
+    /// 要求外接框 ≥ 98%。旧导出实测 0.81–0.94，会失败；满画布导出实测 1.000。
+    const ICON_FILL_RATIO_MINIMUM: f64 = 0.98;
+
+    fn visible_fill_ratio(image: &Image<'_>) -> f64 {
+        let (width, height) = (image.width() as i64, image.height() as i64);
+        let rgba = image.rgba();
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (width, height, -1_i64, -1_i64);
+        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            if pixel[3] < 128 {
+                continue;
+            }
+            let x = (index as i64) % width;
+            let y = (index as i64) / width;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        if max_x < min_x || max_y < min_y {
+            return 0.0;
+        }
+        let extent = (max_x - min_x + 1).max(max_y - min_y + 1) as f64;
+        extent / width.max(height) as f64
+    }
+
     /// 回归测试（2026-10-03 现场："图标在任务栏和托盘都比别人的小一圈"）：
     ///
     /// 源图若是 macOS 图标网格的导出（图案只占画布 ~87%，四周留白/阴影），缩到
-    /// Windows 尺寸后贴不满画布，任务栏与托盘就会显得比邻居小。这里把"内容必须
-    /// 铺满画布"钉成断言：阈值取 alpha ≥ 128（抗锯齿边缘也算可见），要求外接框
-    /// ≥ 98%。旧资产实测 0.90–0.94，会失败；新资产实测 1.000。
+    /// Windows 尺寸后贴不满画布，任务栏与托盘就会显得比邻居小。
     #[test]
     fn faceted_duck_artwork_fills_the_canvas() {
-        fn visible_fill_ratio(image: &Image<'_>) -> f64 {
-            let (width, height) = (image.width() as i64, image.height() as i64);
-            let rgba = image.rgba();
-            let (mut min_x, mut min_y, mut max_x, mut max_y) = (width, height, -1_i64, -1_i64);
-            for (index, pixel) in rgba.chunks_exact(4).enumerate() {
-                if pixel[3] < 128 {
-                    continue;
-                }
-                let x = (index as i64) % width;
-                let y = (index as i64) / width;
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-            if max_x < min_x || max_y < min_y {
-                return 0.0;
-            }
-            let extent = (max_x - min_x + 1).max(max_y - min_y + 1) as f64;
-            extent / width.max(height) as f64
-        }
-
         let mut checked = Vec::new();
         for size in TRAY_ICON_SIZES {
             let image = faceted_duck_tray_image(size).expect("托盘图标必须可解码");
@@ -468,9 +470,32 @@ mod tests {
 
         for (label, ratio) in checked {
             assert!(
-                ratio >= 0.98,
+                ratio >= ICON_FILL_RATIO_MINIMUM,
                 "几何鸭 {label} 图标内容只占画布 {ratio:.3}：源图带了 macOS 式留白，\
                  在任务栏/托盘会比别的应用小一圈（见 scripts/generate-app-icons.py 的 FILL_RATIO_MINIMUM）"
+            );
+        }
+    }
+
+    /// 同一约定的「默认」（standard）图标分支：这几个 PNG 就是 tauri.conf 的
+    /// `bundle.icon` 列表，窗口/托盘取的就是它们（2026-10-03 由
+    /// `scripts/generate-standard-icon.py` 做了满画布处理）。
+    #[test]
+    fn standard_icon_artwork_fills_the_canvas() {
+        let assets: [(&str, &[u8]); 4] = [
+            ("32x32.png", include_bytes!("../icons/32x32.png")),
+            ("128x128.png", include_bytes!("../icons/128x128.png")),
+            ("128x128@2x.png", include_bytes!("../icons/128x128@2x.png")),
+            ("icon.png", include_bytes!("../icons/icon.png")),
+        ];
+        for (label, bytes) in assets {
+            let image = Image::from_bytes(bytes)
+                .unwrap_or_else(|error| panic!("{label} 解码失败：{error}"));
+            let ratio = visible_fill_ratio(&image);
+            assert!(
+                ratio >= ICON_FILL_RATIO_MINIMUM,
+                "默认图标 {label} 内容只占画布 {ratio:.3}：源图带了 macOS 式留白，\
+                 在任务栏/托盘会比别的应用小一圈（见 scripts/generate-standard-icon.py 的 FILL_RATIO_MINIMUM）"
             );
         }
     }
