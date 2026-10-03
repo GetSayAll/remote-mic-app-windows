@@ -17,6 +17,7 @@ use tauri::{Emitter, Manager};
 mod accent;
 mod app_icon;
 mod diagnostics;
+mod onboarding;
 mod platform;
 mod rc003_task;
 mod settings;
@@ -1232,6 +1233,71 @@ async fn set_voice_input_tool(
     result
 }
 
+/// 首次使用向导（Onboarding）状态与进度。落点是 `onboarding.json`（与 settings.json
+/// 同目录），迁移与失败日志在 `SettingsStore` 内完成；这里只做 IPC 校验与任务调度。
+#[tauri::command]
+async fn get_onboarding_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.ensure_onboarding_state()).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("state_read")),
+    }
+}
+
+#[tauri::command]
+async fn save_onboarding_step(
+    step: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let Some(step) = onboarding::parse_step(&step) else {
+        sayall_windows::gatt_note(
+            "onboarding event=step_save phase=completed terminal_result=failed error_domain=validation error_code=unknown_step retryable=true".to_owned(),
+        );
+        return Err("未知向导步骤".to_owned());
+    };
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.save_onboarding_step(step)).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("step_save")),
+    }
+}
+
+/// 设置页「重新运行设置向导」：只重置向导进度，不清除设备/映射/音频/其他设置。
+#[tauri::command]
+async fn restart_onboarding(
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.restart_onboarding()).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("restart")),
+    }
+}
+
+#[tauri::command]
+async fn complete_onboarding(
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.complete_onboarding()).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("complete")),
+    }
+}
+
+fn onboarding_blocking_failure(event: &str) -> String {
+    sayall_windows::gatt_note(format!(
+        "onboarding event={event} phase=completed terminal_result=failed error_domain=task error_code=join_failed retryable=true"
+    ));
+    format!("向导任务失败（{event}）")
+}
+
 /// Vokie 安装检测的返回体（连接页用它决定显示官网入口还是“没有运行”提示）。
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1360,13 +1426,33 @@ struct FrontendDiagnosticEvent {
     phase: String,
     result: String,
     reason: String,
+    /// 稳定 token 字段（向导等结构式日志用）：逐字校验，非法值记为 invalid。
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
     elapsed_ms: u64,
 }
 
 #[tauri::command]
 fn report_frontend_event(report: FrontendDiagnosticEvent) {
+    let mut tokens = String::new();
+    for (name, value) in [
+        ("step", report.step.as_deref()),
+        ("code", report.code.as_deref()),
+        ("detail", report.detail.as_deref()),
+    ] {
+        if let Some(value) = value {
+            tokens.push(' ');
+            tokens.push_str(name);
+            tokens.push('=');
+            tokens.push_str(diagnostic_token(value));
+        }
+    }
     sayall_windows::gatt_note(format!(
-        "frontend event={} phase={} result={} reason={} elapsed_ms={}",
+        "frontend event={} phase={} result={} reason={}{tokens} elapsed_ms={}",
         diagnostic_token(&report.event),
         diagnostic_token(&report.phase),
         diagnostic_token(&report.result),
@@ -1770,8 +1856,8 @@ static EXIT_SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
 /// failed 日志**——查日志的人会以为退出收尾失败了。收尾一次即够，故显式只做一次。
 ///
 /// 抽成不落日志的纯函数，是为了让单测只验"只执行一次"这条不变量而不去写全局
-/// 诊断日志（`gatt_sink()` 是 `OnceLock`，首次调用即固定，测试里抢先用它会把
-/// 同进程其它日志测试钉死，见 `sayall_windows::gatt_note` 的注释）。
+/// 诊断日志（`gatt_sink()` 成功打开后即固定；2026-10-04 起无 env 的调用不再
+/// 冻结状态，但单测写全局日志仍会带来顺序耦合与噪声，维持不写的约定）。
 fn claim_exit_shutdown(done: &AtomicBool) -> bool {
     !done.swap(true, Ordering::SeqCst)
 }
@@ -2066,6 +2152,11 @@ pub fn run() {
             #[cfg(not(feature = "runtime-simulation"))]
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             let settings = SettingsStore::new(settings_path);
+            // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
+            // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
+            if let Err(error) = settings.ensure_onboarding_state() {
+                eprintln!("{error}");
+            }
             let saved_settings = match settings.load() {
                 Ok(settings) => {
                     sayall_windows::gatt_note(
@@ -2383,6 +2474,10 @@ pub fn run() {
         launch_vokie,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
+        get_onboarding_state,
+        save_onboarding_step,
+        restart_onboarding,
+        complete_onboarding,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -2443,6 +2538,10 @@ pub fn run() {
         launch_vokie,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
+        get_onboarding_state,
+        save_onboarding_step,
+        restart_onboarding,
+        complete_onboarding,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
