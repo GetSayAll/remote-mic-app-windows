@@ -366,7 +366,8 @@ fn refocus_main_window_soon(app: tauri::AppHandle) {
     });
 }
 
-/// 开关打开：确保已授权（必要时弹**一次** UAC 注册），然后触发助手。
+/// 开关打开：**每次都重新授权**（弹一次 UAC 重新注册任务），然后触发助手。
+/// 2026-10-03 Andy 定稿：每次开启都重新弹窗 + 重新授权（见 rc003_task）。
 #[tauri::command]
 async fn enable_rc003_capture(
     state: tauri::State<'_, AppState>,

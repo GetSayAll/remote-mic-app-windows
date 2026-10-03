@@ -1038,9 +1038,9 @@ const rc003CaptureBusy = ref(false);
  * 开关的显示状态：**事件驱动**，`null` = 尚未初始化。
  *
  * 为什么不用「任务是否存在」当真相源：关闭开关只结束助手、**任务保留**
- * （授权保留，这是"只弹一次 UAC"的一部分）——任务还在，若读任务，
- * 开关会立刻弹回开启，「已停用」的提示与三键恢复原生行为全都对不上
- * （2026-09-23 首次 UI 验收正是这个形状）。因此轮询只在首次对账一次，
+ * （提权任务普通权限删不掉；授权视为作废，下次开启必弹 UAC）——任务还在，
+ * 若读任务，开关会立刻弹回开启，「已停用」的提示与三键恢复原生行为全都
+ * 对不上（2026-09-23 首次 UI 验收正是这个形状）。因此轮询只在首次对账一次，
  * 之后以用户的开关操作为准。
  */
 const rc003CaptureEnabled = ref<boolean | null>(rc003UiCache.enabled);
@@ -1141,8 +1141,8 @@ const reconcileRc003Task = async (): Promise<void> => {
 };
 
 /**
- * 切换三键捕获。打开可能在**首次**弹一次 UAC（IPC 会等授权流程结束）；
- * 关闭只结束助手、保留授权——所以之后不会再弹。
+ * 切换三键捕获。打开**每次都会弹一次 UAC**（2026-10-03 起每次开启都重新授权，
+ * IPC 会等授权流程结束）；关闭只结束助手、任务留在系统里但授权作废。
  * 完成后用返回的状态刷新，而不是假设成功；lastError 走页面既有的提示条。
  */
 const captureSwitchEl = ref<HTMLInputElement | null>(null);
@@ -1163,17 +1163,13 @@ function syncCaptureSwitchDom(): void {
 
 async function toggleRc003Capture() {
   if (rc003CaptureBusy.value) return;
-  // 开启方向：**只在这次开启会触发系统授权（UAC）时**先弹确认——判据与
-  // Rust enable_capture 同源（任务未注册，或安装/升级写下了重授权标记），
-  // 由每秒轮询的 rc003Task.authorizationRequired 带给前端。
-  //
-  // 为什么不记「已读过」（2026-09-27 用户报告 + 拍板）：一次性 localStorage
-  // 标记在重装/升级后仍然存活，正是「重装后弹窗消失」的根因；「每次都弹」
-  // 又会在授权仍在的普通开启上反复打扰。按「是否需要授权」弹，与弹窗文案
-  // 「首次开启时系统会弹窗询问 / 升级或重装后会再弹一次询问」逐句对齐。
-  // 状态未知（authorizationRequired 缺失）宁可多弹一次，也不静默跳过。
+  // 开启方向：**每次都先弹确认**（2026-10-03 Andy 定稿）——每次开启都要重新
+  // 授权：IPC 里的 enable 会重新注册任务并弹一次 Windows 授权窗口，弹窗文案
+  // 与之逐句对齐（「每次开启都会弹出 Windows 授权窗口」）。
+  // 也不再记「已读过」：一次性 localStorage 标记在重装/升级后仍然存活，
+  // 正是 2026-09-27「重装后弹窗消失」的根因。
   // 关闭方向永远直接执行，不弹。
-  if (rc003CaptureEnabled.value !== true && rc003Task.value?.authorizationRequired !== false) {
+  if (rc003CaptureEnabled.value !== true) {
     showCaptureConfirm.value = true;
     // 开关 DOM 在点击瞬间已被浏览器翻转，先写回关闭，等确认后再真正执行。
     syncCaptureSwitchDom();

@@ -383,15 +383,13 @@ async function applyVoiceHotkey(keys: string[]) {
 // 由每页挂载时的 getRc003TaskStatus 对账对齐——页面经 <component :is> 切换
 // 时组件重建，每次进页都对账一次，两个入口不会漂移。
 //
-// 判据与文案与 ButtonsPage.toggleRc003Capture 同源：只在「这次开启会触发
-// 系统授权（UAC）」时先弹确认（authorizationRequired !== false），关闭方向
-// 永远直接执行。开关只在需要它的工具下面板里出现（豆包必须开、其他工具建议
-// 开、微信不需要——见 2026-09-30 设计稿 v3）。
+// 判据与文案与 ButtonsPage.toggleRc003Capture 同源：2026-10-03 起**每次
+// 开启都先弹确认**（每次开启都会重新授权、都会弹 Windows 授权窗口），
+// 不再依赖授权判据；关闭方向永远直接执行。开关只在需要它的工具下面板里
+// 出现（豆包必须开、其他工具建议开、微信不需要——见 2026-09-30 设计稿 v3）。
 // ---------------------------------------------------------------------------
 
 const rc003CaptureEnabled = ref<boolean | null>(null);
-/** 这次开启会不会触发系统授权（UAC）。`null` = 尚未对账（宁可多弹一次）。 */
-const rc003AuthorizationRequired = ref<boolean | null>(null);
 const rc003CaptureBusy = ref(false);
 const showCaptureConfirm = ref(false);
 const captureSwitchEl = ref<HTMLInputElement | null>(null);
@@ -417,7 +415,6 @@ async function reconcileRc003Capture(): Promise<void> {
     if (rc003CaptureEnabled.value === null) {
       rc003CaptureEnabled.value = status.enabled;
     }
-    rc003AuthorizationRequired.value = status.authorizationRequired;
   } catch {
     // 对账失败保持 null：开关显示占位符（不可点），不猜状态。
   }
@@ -425,10 +422,10 @@ async function reconcileRc003Capture(): Promise<void> {
 
 async function toggleRc003Capture() {
   if (rc003CaptureBusy.value) return;
-  // 与 ButtonsPage.toggleRc003Capture 同源判据：只在「这次开启会触发系统
-  // 授权（UAC）」时先弹确认（authorizationRequired 缺失宁可多弹）。
+  // 与 ButtonsPage.toggleRc003Capture 同源：每次开启都先弹确认
+  // （2026-10-03 定稿：每次开启都重新授权，都会弹 Windows 授权窗口）。
   // 关闭方向永远直接执行。
-  if (rc003CaptureEnabled.value !== true && rc003AuthorizationRequired.value !== false) {
+  if (rc003CaptureEnabled.value !== true) {
     showCaptureConfirm.value = true;
     // 开关 DOM 在点击瞬间已被浏览器翻转，先写回关闭，等确认后再真正执行。
     syncCaptureSwitchDom();
@@ -1218,7 +1215,7 @@ onUnmounted(() => {
               </span>
             </div>
             <div v-if="rc003CaptureEnabled === false" class="info-callout warning callout-small">
-              还差一步：开启后豆包才能收到遥控器语音键。首次开启会弹出一次系统授权，请点“是”。
+              还差一步：开启后豆包才能收到遥控器语音键。每次开启都会弹出系统授权，请点“是”。
               已开启：现在按住遥控器语音键，豆包的语音条就会出现。
             </div>
             <div v-if="vokieRunning === true" class="info-callout warning callout-small">
@@ -1410,7 +1407,7 @@ onUnmounted(() => {
       <summary>常见问题（点开查看）</summary>
       <ul>
         <li>为什么语音键要“替你按一个键”？遥控器语音键不是键盘按键，输入法只认键盘按键，所以应用替你按住它。</li>
-        <li>“支持更多输入工具”和“按键”页的“全按键支持”是同一个开关，两处随时同步；首次开启会弹一次系统授权。</li>
+        <li>“支持更多输入工具”和“按键”页的“全按键支持”是同一个开关，两处随时同步；每次开启都会弹出一次系统授权。</li>
         <li>“替你按下的键”目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
         <li>微信输入法要求按住约半秒以上（需要联网），快速点按不出字是它自己的要求，不是故障。</li>
         <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单（记事本里会出现“文件(F)、编辑(E)”这类字母）。应用会在你**按住语音键时**把输入法切到所选工具；刚切换过输入工具后的第一次按住如果没反应，松开再按一次即可（第一次那下用于切换输入法）。</li>
@@ -1420,7 +1417,7 @@ onUnmounted(() => {
     </details>
   </section>
   <!-- 授权确认弹窗：与 ButtonsPage 共用同一组件（同一设置项、同一授权流程）；
-       只在「这次开启会触发 UAC」时出现（toggleRc003Capture 决定）。 -->
+       每次开启都先出现（toggleRc003Capture 决定，2026-10-03 起无授权判据）。 -->
   <EnhancedCaptureConfirmDialog
     v-if="showCaptureConfirm"
     @confirm="confirmCaptureDialog"

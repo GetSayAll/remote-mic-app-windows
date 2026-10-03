@@ -1162,20 +1162,34 @@ describe("connection page rc003 capture switch", () => {
 
     await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
+    // 2026-10-03 起每次开启都先弹确认（与按键页同源）：确认后才真正开启。
+    await wrapper
+      .findComponent({ name: "EnhancedCaptureConfirmDialog" })
+      .vm.$emit("confirm");
+    await flushPromises();
     expect(wrapper.text()).toContain("已开启");
     expect(wrapper.text()).not.toContain("还差一步");
     wrapper.unmount();
   });
 
-  it("已授权（authorizationRequired=false）时开启直接执行，不开确认弹窗", async () => {
+  it("每次开启都先弹确认：已授权（authorizationRequired=false）也一样，确认后才 enable", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
     await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
 
-    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    // 未确认：不开确认弹窗前不调 enable，开关 DOM 写回关闭。
+    const dialog = wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" });
+    expect(dialog.exists()).toBe(true);
+    expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
     expect(mocks.disableRc003Capture).not.toHaveBeenCalled();
-    expect(wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" }).exists()).toBe(false);
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
+      false,
+    );
+
+    await dialog.vm.$emit("confirm");
+    await flushPromises();
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
     expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       true,
     );
@@ -1217,6 +1231,11 @@ describe("connection page rc003 capture switch", () => {
     await flushPromises();
 
     await wrapper.find(".capture-switch").setValue(true);
+    await flushPromises();
+    // 每次开启都先弹确认：确认后 enable 失败（UAC 被取消）才走到失败回退。
+    await wrapper
+      .findComponent({ name: "EnhancedCaptureConfirmDialog" })
+      .vm.$emit("confirm");
     await flushPromises();
 
     expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
