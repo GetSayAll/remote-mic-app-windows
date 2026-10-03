@@ -211,7 +211,15 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   gainSlider.dispatchEvent(new Event("change", { bubbles: true }));
   await waitFor(() => (gainSlider.value === "12" ? true : null), "增益滑块显示 12 dB");
   assert(document.body.textContent?.includes("12 dB"), "增益读数没有更新为 12 dB");
-  const savedGain = await getGainDb();
+  // change 之后的落盘是异步 IPC：必须轮询读回，不能拿本地读数当保存完成的证据
+  //（首次实现就这么错过一次：界面显示 12 dB，磁盘当时还是 0 dB）。
+  let savedGain = 0;
+  const gainDeadline = Date.now() + 10_000;
+  while (Date.now() < gainDeadline) {
+    savedGain = await getGainDb();
+    if (savedGain === 12) break;
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
   assert(savedGain === 12, `仿真增益没有经 IPC 落盘：${savedGain}`);
   steps.push("连接页增益滑块经真实 IPC 落盘并读回 12 dB");
 
