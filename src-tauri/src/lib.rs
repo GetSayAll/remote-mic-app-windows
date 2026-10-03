@@ -367,6 +367,111 @@ fn refocus_main_window_soon(app: tauri::AppHandle) {
     });
 }
 
+/// 把主窗口从「最小化 / 收进托盘」恢复到可见并尝试置前（2026-10-03 用户报障：
+/// 「主窗口最小化到任务栏后，点击托盘图标或者双击快捷键（快捷方式）无法打开」）。
+/// 托盘点击 / 托盘菜单 / 第二个实例的显示请求共用这一个入口。
+///
+/// 为什么不能只调 `show()` + `set_focus()`（tao 0.35.3 源码 + 本机最小实验）：
+/// - `show()` 只改 tao 的可见性 flag，且仅在 flag 有差异时才动 Win32
+///   （`window_state.rs` 的 `apply_diff` 在 diff 为空时直接返回）；最小化窗口
+///   仍处于「可见」状态、没有 diff，因此这个调用是空操作；
+/// - `set_focus()` 要求缓存 `!MINIMIZED`（`window.rs::set_focus` 只在
+///   `is_visible && !is_minimized` 时置前），最小化时被整个跳过。
+///   于是「最小化后点托盘」整条链没有任何一次调用真正到达 Win32。
+/// 恢复最小化必须走 `unminimize()`（tao → `ShowWindow(SW_RESTORE)`）；本机实测
+/// `SW_SHOW` 不能恢复最小化窗口（iconic 保持 true），`SW_RESTORE` 可以。
+///
+/// `trigger` 只用于日志（tray_click / tray_menu / second_instance）。结束时用
+/// Win32 读回真实状态落日志：后台线程调用时 unminimize/show 的消息要经事件
+/// 循环落地，读回给 6 × 100 ms 有界复核（已就绪时首轮直接返回，不等待）。
+/// 前台是否抢到单独记 `foreground_after`（tao 的 set_focus 已含 Alt 边沿解锁
+/// 重试），它不影响可见性判定。
+#[cfg(windows)]
+fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsIconic, IsWindowVisible, ShowWindow, SW_RESTORE,
+    };
+
+    let Some(window) = app.get_webview_window("main") else {
+        sayall_windows::gatt_note(format!(
+            "app_lifecycle event=show_main_window trigger={trigger} phase=completed terminal_result=failed reason=window_missing retryable=false"
+        ));
+        return;
+    };
+    // Tauri 自带的是 windows 0.61 的 HWND（tao 依赖），本 crate 用 0.62；
+    // 跨版本只传裸句柄值（与 `app_icon::window_icons` 相同做法）。
+    let hwnd = window
+        .hwnd()
+        .ok()
+        .map(|hwnd| HWND(hwnd.0 as *mut core::ffi::c_void));
+    let minimized_before = window.is_minimized().unwrap_or(false);
+    let iconic_before = hwnd.map(|hwnd| unsafe { IsIconic(hwnd).as_bool() });
+    let visible_before = hwnd.map(|hwnd| unsafe { IsWindowVisible(hwnd).as_bool() });
+
+    if minimized_before || iconic_before == Some(true) {
+        let _ = window.unminimize();
+    }
+    // tao 只在 flag 有差异时动作：缓存与实际漂移（缓存报"未最小化"、实际仍
+    // iconic）时上一步是空操作，这里按 Win32 真实状态补一次恢复。
+    if let Some(hwnd) = hwnd {
+        if unsafe { IsIconic(hwnd).as_bool() } {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+        }
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+
+    // 有界复核：读回 Win32 真实状态（恢复可见是功能判据；前台只是诊断字段）。
+    // 前台切换可能异步完成（app_launcher 的同款已知现象）：窗口已恢复可见后，
+    // 再给前台最多约 2 × 100 ms 的观察窗口；前台一直没来也照常结束，不阻塞。
+    let mut iconic_after = None;
+    let mut visible_after = None;
+    let mut foreground_after = None;
+    if let Some(hwnd) = hwnd {
+        for attempt in 0..6u8 {
+            iconic_after = Some(unsafe { IsIconic(hwnd).as_bool() });
+            visible_after = Some(unsafe { IsWindowVisible(hwnd).as_bool() });
+            foreground_after = Some(unsafe { GetForegroundWindow() == hwnd });
+            let restored = iconic_after == Some(false) && visible_after == Some(true);
+            if restored && (foreground_after == Some(true) || attempt >= 2) {
+                break;
+            }
+            if attempt < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    } else {
+        iconic_after = Some(window.is_minimized().unwrap_or(false));
+        visible_after = Some(window.is_visible().unwrap_or(true));
+    }
+
+    let minimized_after = iconic_after.unwrap_or(minimized_before);
+    let visible_after_value = visible_after.unwrap_or(!minimized_after);
+    let (terminal_result, reason) = if minimized_after {
+        ("failed", "still_minimized")
+    } else if !visible_after_value {
+        ("failed", "still_hidden")
+    } else {
+        ("passed", "none")
+    };
+    let flag = |value: Option<bool>| match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    };
+    sayall_windows::gatt_note(format!(
+        "app_lifecycle event=show_main_window trigger={trigger} phase=completed terminal_result={terminal_result} reason={reason} minimized_before={minimized_before} iconic_before={} visible_before={} iconic_after={} visible_after={} foreground_after={}",
+        flag(iconic_before),
+        flag(visible_before),
+        flag(iconic_after),
+        flag(visible_after),
+        flag(foreground_after),
+    ));
+}
+
 /// 开关打开：**每次都重新授权**（弹一次 UAC 重新注册任务），然后触发助手。
 /// 2026-10-03 Andy 定稿：每次开启都重新弹窗 + 重新授权（见 rc003_task）。
 #[tauri::command]
@@ -1743,6 +1848,55 @@ fn spawn_installer_graceful_exit_watcher(app: tauri::AppHandle) {
     }
 }
 
+/// 监听第二个实例发出的"请显示主窗口"请求（2026-10-03 用户报障）。
+///
+/// 为什么需要：单实例守卫让第二个进程直接退出——「应用已在运行、主窗口最小化
+/// 或收进托盘」时，双击快捷方式 / 再点启动图标没有任何可见反应。第二个实例
+/// 改为在退出前置位命名事件（`instance_signal`），本线程收到后用统一的
+/// `show_main_window` 恢复并置前。
+///
+/// 线程按进程存活设计（阻塞在 wait()）；Tauri 的退出路径是
+/// `std::process::exit`、不执行析构，线程不做（也无法做）退场处理。
+fn spawn_second_instance_listener(app: tauri::AppHandle) {
+    let spawned = std::thread::Builder::new()
+        .name("sayall-second-instance".to_owned())
+        .spawn(move || {
+            let signal = match sayall_windows::instance_signal::ShowMainWindowSignal::create() {
+                Ok(signal) => signal,
+                Err(error) => {
+                    sayall_windows::gatt_note(format!(
+                        "app_lifecycle event=second_instance_listener phase=completed terminal_result=failed error_domain=windows error_code=create_event_failed retryable=true detail_hresult=0x{:08x}",
+                        error.code().0 as u32
+                    ));
+                    return;
+                }
+            };
+            sayall_windows::gatt_note(
+                "app_lifecycle event=second_instance_listener phase=completed terminal_result=passed reason=listening"
+                    .to_owned(),
+            );
+            loop {
+                if !signal.wait() {
+                    sayall_windows::gatt_note(
+                        "app_lifecycle event=second_instance_listener phase=completed terminal_result=failed error_domain=windows error_code=wait_failed retryable=false"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                sayall_windows::gatt_note(
+                    "app_lifecycle event=second_instance_listener phase=observed terminal_result=passed reason=show_requested"
+                        .to_owned(),
+                );
+                show_main_window(&app, "second_instance");
+            }
+        });
+    if let Err(error) = spawned {
+        sayall_windows::gatt_note(format!(
+            "app_lifecycle event=second_instance_listener phase=completed terminal_result=failed error_domain=process error_code=thread_spawn_failed retryable=true detail={error}"
+        ));
+    }
+}
+
 pub fn run() {
     let log_path = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -1787,7 +1941,9 @@ pub fn run() {
     }
     // 单实例守卫（2026-09-05 实证：双实例并存——开发构建与已部署版抢遥控器
     // 连接、抑制器互扰、抢不到连接的实例还会周期性无线电重启杀掉对方的
-    // 连接）。命名互斥体跨进程互斥；已存在实例时本次启动直接退出。
+    // 连接）。命名互斥体跨进程互斥；已存在实例时本次启动**请求它显示主窗口
+    // 后**退出（2026-10-03：此前直接退出，「应用在运行、窗口最小化/收进托盘」
+    // 时双击快捷方式没有任何可见反应）。
     // 注意：互斥体名不得含反斜杠——对象管理器会把名字按路径解析，要求
     // 父对象目录存在（"SayAll\Windows\…" 直接 ERROR_PATH_NOT_FOUND，
     // 2026-09-05 探针实证）；创建失败按 fail-closed 处理（退出）——
@@ -1803,10 +1959,20 @@ pub fn run() {
                 // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=
                 // ERROR_ALREADY_EXISTS（不是失败）；其余残留错误值无意义。
                 if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-                    sayall_windows::gatt_note(
-                        "app_lifecycle event=single_instance phase=completed terminal_result=failed error_domain=process error_code=already_running reason=existing_instance retryable=false".to_owned(),
-                    );
-                    eprintln!("SayAll 已在运行：单实例守卫阻止了第二个实例启动");
+                    // 请求已运行实例把主窗口显示出来（命名事件由对端的
+                    // `spawn_second_instance_listener` 等待；对端是未带此功能的
+                    // 旧版本时请求失败，如实记录但按原样退出）。
+                    let show_request = sayall_windows::instance_signal::request_show_main_window();
+                    let (request_result, request_error) = match &show_request {
+                        Ok(()) => ("passed", "none".to_owned()),
+                        Err(error) => {
+                            ("failed", format!("hresult=0x{:08x}", error.code().0 as u32))
+                        }
+                    };
+                    sayall_windows::gatt_note(format!(
+                        "app_lifecycle event=single_instance phase=completed terminal_result=failed error_domain=process error_code=already_running reason=existing_instance retryable=false show_request_result={request_result} show_request_error={request_error}"
+                    ));
+                    eprintln!("SayAll 已在运行：已请求显示主窗口，第二个实例退出");
                     unsafe {
                         let _ = CloseHandle(handle);
                     }
@@ -1866,12 +2032,7 @@ pub fn run() {
                     .show_menu_on_left_click(false)
                     .tooltip("无线麦 SayAll")
                     .on_menu_event(|app, event| match event.id.as_ref() {
-                        "tray-show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
+                        "tray-show" => show_main_window(app, "tray_menu"),
                         "tray-quit" => app.exit(0),
                         _ => {}
                     })
@@ -1882,10 +2043,7 @@ pub fn run() {
                             ..
                         } = event
                         {
-                            if let Some(window) = tray.app_handle().get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_main_window(tray.app_handle(), "tray_click");
                         }
                     })
                     .build(app)?;
@@ -2125,6 +2283,8 @@ pub fn run() {
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
             spawn_installer_graceful_exit_watcher(app.handle().clone());
+            // 二次启动（双击快捷方式 / 再点启动图标）→ 显示主窗口的监听端。
+            spawn_second_instance_listener(app.handle().clone());
             // "打开无线麦"（自身窗口）后的 tao 可见性缓存同步：`app_launcher` 用
             // Win32 `ShowWindow` 显示已隐藏的自身主窗口（同步生效，其后抢前台才有
             // 意义），但那会绕过 tao 的 `WindowFlags::VISIBLE` 缓存，使随后点 X 的

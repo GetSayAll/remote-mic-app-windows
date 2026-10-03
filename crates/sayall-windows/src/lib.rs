@@ -34,6 +34,8 @@ pub mod focus_service;
 pub mod focus_windows;
 #[cfg(windows)]
 pub mod graceful_exit;
+#[cfg(windows)]
+pub mod instance_signal;
 pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{
