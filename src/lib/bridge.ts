@@ -727,6 +727,59 @@ export async function setOtherVoiceHotkey(keys: KeyCode[]): Promise<KeyCode[] | 
   return invoke<KeyCode[] | null>("set_other_voice_hotkey", { keys });
 }
 
+/**
+ * 首次使用向导状态（Rust `onboarding.json`，设计稿 §6）。
+ *
+ * `isActive` = 未完成当前流程版本；完成前不允许进入主界面。步骤 token 由
+ * `src/onboarding/flow.ts` 的 `normalizeStep` 归一化（未知值 → welcome）。
+ */
+export interface OnboardingState {
+  flowVersion: number;
+  completedVersion: number;
+  step: string;
+  isActive: boolean;
+}
+
+/**
+ * 浏览器预览（`pnpm dev`）兜底：默认「已完成」，预览环境用于页面开发，
+ * 不把开发者锁进向导；真机/仿真环境始终走 Rust 状态文件。
+ */
+const BROWSER_ONBOARDING_STATE: OnboardingState = {
+  flowVersion: 1,
+  completedVersion: 1,
+  step: "complete",
+  isActive: false,
+};
+
+export async function getOnboardingState(): Promise<OnboardingState> {
+  if (!isTauriRuntime()) {
+    return { ...BROWSER_ONBOARDING_STATE };
+  }
+  return invoke<OnboardingState>("get_onboarding_state");
+}
+
+export async function saveOnboardingStep(step: string): Promise<OnboardingState> {
+  if (!isTauriRuntime()) {
+    return { ...BROWSER_ONBOARDING_STATE };
+  }
+  return invoke<OnboardingState>("save_onboarding_step", { step });
+}
+
+/** 设置页「重新运行设置向导」：只重置向导进度，不清除设备/映射/音频/其他设置。 */
+export async function restartOnboarding(): Promise<OnboardingState> {
+  if (!isTauriRuntime()) {
+    return { ...BROWSER_ONBOARDING_STATE };
+  }
+  return invoke<OnboardingState>("restart_onboarding");
+}
+
+export async function completeOnboarding(): Promise<OnboardingState> {
+  if (!isTauriRuntime()) {
+    return { ...BROWSER_ONBOARDING_STATE };
+  }
+  return invoke<OnboardingState>("complete_onboarding");
+}
+
 export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
     return browserSnapshot.platform.rawInput;
