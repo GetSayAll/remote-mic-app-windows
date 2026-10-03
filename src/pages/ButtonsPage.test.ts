@@ -1351,9 +1351,12 @@ describe("全按键支持开启前确认弹窗", () => {
     expect(dialog).toBeDefined();
     // 2026-09-27 用户要求去掉「Windows 平时看不见它们」。
     expect(dialog!.text()).not.toContain("Windows 平时看不见它们");
-    // 2026-09-28 二次定稿：授权语义改成「升级保留、卸载后重装才撤销」。
-    expect(dialog!.text()).toContain("升级/覆盖安装后无需重新授权");
-    expect(dialog!.text()).toContain("卸载后重装才需要");
+    // 2026-10-03 定稿：每次开启都重新弹窗 + 重新授权（每次都会弹 Windows
+    // 授权窗口），旧文案「升级/覆盖安装后无需重新授权」不再成立。
+    expect(dialog!.text()).toContain("每次开启都会弹出 Windows 授权窗口");
+    expect(dialog!.text()).not.toContain("无需重新授权");
+    // 2026-10-03 新增：杀毒软件风险（只提醒，不给处置建议）。
+    expect(dialog!.text()).toContain("杀毒软件");
     expect(dialog!.text()).toContain("防作弊");
 
     // 点弹窗「开启」完成授权 → 真正开启后悬停提示切到「关闭后…将不可映射」。
@@ -1369,7 +1372,7 @@ describe("全按键支持开启前确认弹窗", () => {
     });
   });
 
-  it("需要授权的开启才先弹确认；授权已在时直接开启，不再打扰", async () => {
+  it("每次开启都先弹确认并重新授权：授权已在（authorizationRequired=false）也一样", async () => {
     const page = await mountPage("rc003");
     const checkbox = await openCaptureToggle(page);
 
@@ -1405,7 +1408,9 @@ describe("全按键支持开启前确认弹窗", () => {
       expect(captureCheckboxChecked(page)).toBe(true);
     });
 
-    // ── 场景 B：授权已在（关闭只结束助手、任务保留）→ 直接开启不弹 ──
+    // ── 场景 B：授权已在（任务在、无重授权标记）也照样先弹确认 ──
+    // 2026-10-03 Andy 定稿：每次开启都重新弹窗 + 重新授权（每次都会弹
+    // Windows 授权窗口），判据不再依赖 authorizationRequired。
     // 轮询状态同步改为「授权已在、开关关着」，与真实系统一致；先改 mock
     // 再操作，避免秒级轮询用旧状态覆盖 rc003Task 造成竞态。
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
@@ -1423,7 +1428,24 @@ describe("全按键支持开启前确认弹窗", () => {
     (onSwitch.element as HTMLInputElement).checked = true;
     await onSwitch.trigger("change");
     await flushPromises();
-    expect(confirmDialog(page)).toBeUndefined();
+    const third = confirmDialog(page);
+    expect(third).toBeDefined();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+    // 取消：仍不开启（确认框是每次开启的必经步骤）。
+    await third!.findAll("button").find((b) => b.text() === "取消")!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+    expect(captureCheckboxChecked(page)).toBe(false);
+
+    const reopened = captureRow(page)!.find('input[type="checkbox"]');
+    (reopened.element as HTMLInputElement).checked = true;
+    await reopened.trigger("change");
+    await flushPromises();
+    await confirmDialog(page)!
+      .findAll("button")
+      .find((b) => b.text() === "开启")!
+      .trigger("click");
+    await flushPromises();
     expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => {
       expect(captureCheckboxChecked(page)).toBe(true);

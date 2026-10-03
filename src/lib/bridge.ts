@@ -771,9 +771,9 @@ export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {
 export interface Rc003TaskStatus {
   installed: boolean;
   /**
-   * 这次打开开关会触发系统授权（UAC）：任务未注册，或安装/升级写下了
-   * 重授权标记（重装后任务删不掉，标记是授权应撤销的唯一凭证）。
-   * 与 Rust enable_capture 的判定同源；前端据此决定开启前要不要先弹确认。
+   * 这次打开开关会触发系统授权（UAC）。2026-10-03 起恒为 true：每次开启都会
+   * 重新注册任务并弹一次 Windows 授权窗口。字段保留给诊断与类型兼容，
+   * 前端弹窗判据已不依赖它（每次开启都弹确认，只有关闭方向直接执行）。
    */
   authorizationRequired: boolean;
   /** 用户意图（持久化，默认关闭）。开关显示读它，而不是读 installed。 */
@@ -783,8 +783,9 @@ export interface Rc003TaskStatus {
 }
 
 /**
- * 开关打开：确保已授权（必要时弹一次 UAC，主程序会等它完成），然后触发助手。
- * 开关关闭：结束助手，**授权保留**（这正是"只弹一次 UAC"的一部分）。
+ * 开关打开：**每次都重新授权**（弹一次 UAC 重新注册任务，主程序会等它完成），
+ * 然后触发助手；开关关闭：结束助手，任务留在系统里但授权视为作废
+ * （提权任务普通权限删不掉），下次开启必弹 UAC（2026-10-03 Andy 定稿）。
  */
 export async function getRc003TaskStatus(): Promise<Rc003TaskStatus> {
   if (typeof window === "undefined" || !isTauriRuntime()) {
