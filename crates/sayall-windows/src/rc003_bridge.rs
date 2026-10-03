@@ -1516,19 +1516,26 @@ fn handle_connection(
         clear_ownership(shared);
         let released = apply_usages(shared, targets, &BTreeSet::new());
         released_count = released.len() as u64;
+        // **先落状态、再投边沿**：边沿是"释放已经发生"的通知，一旦投出，任何观察者
+        // （测试、诊断读取、引擎侧回查）都可能立刻读快照——若此时计数与按下集合还没落，
+        // 就会读到"已释放但未计数、pressed 仍非空"的半更新状态。2026-10-03 CI 双核实测：
+        // 顺序反过来时 `silence_watchdog_releases_pressed_buttons` 以「边沿已到、计数为 0」
+        // 失败（本地快机 15/15 全过、CI 慢机可复现），根因是这条竞争，不是等待余量不足。
+        {
+            let mut state = lock(shared);
+            if drop_reason != "helper_bye" {
+                state.watchdog_release_total += 1;
+            }
+            state.pressed.clear();
+            state.last_rx = None;
+            if state.phase == BridgePhase::Connected {
+                state.phase = BridgePhase::Listening;
+            }
+            state.helper_pid = 0;
+        }
         for edge in released {
             let _ = sender.send(EngineMessage::GateEdge(edge));
         }
-        let mut state = lock(shared);
-        if drop_reason != "helper_bye" {
-            state.watchdog_release_total += 1;
-        }
-        state.pressed.clear();
-        state.last_rx = None;
-        if state.phase == BridgePhase::Connected {
-            state.phase = BridgePhase::Listening;
-        }
-        state.helper_pid = 0;
     }
     // 语音合成门禁回落：连接不在了 ⇒ 报告层合成不再可靠，BLE 注入路径必须
     // 自动接回（与 targets 断连清零同哲学：fail-open 回落旧路径）。
