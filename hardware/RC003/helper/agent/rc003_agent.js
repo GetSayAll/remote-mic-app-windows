@@ -113,6 +113,12 @@ var REPORT_ID = 0x01;
 
 var LEASE_MS = 2000;          /* 超过此时间未收到续约就停止清键 */
 var HB_MS = 500;              /* 所有权心跳周期；须显著短于 2s 租约 */
+/* 按下帧呈现前的有界延迟（2026-10-03，见 Bugs/2026-10-03-first-press-lost-before-ime-switch.md）：
+   应用在得知按下之后才切输入法（实测 ~53ms），而本替换在按下帧通过时立即生效——
+   先于切换完成，目标输入法（豆包）收不到按下沿（第一按丢失）。应用在桥接握手声明
+   能力（W 1）后由助手下发 gate 命令开启；初值 150ms（~2.8x 余量，真机数据后定稿）。
+   释放帧不延迟；未开启或 sleep 不可用时行为不变（fail-open）。 */
+var GATE_DELAY_MS = 150;
 var CONNECT_TIMEOUT_MS = 3000;/* init() 最多阻塞宿主这么久 */
 var RECONNECT_MS = 1000;
 /*
@@ -144,6 +150,7 @@ var disarmed = false;
  * 即 OS 收到该键的 UP——粘键在结构上不可能，无需补帧或状态跟踪。 */
 var synthFrom = 0;
 var synthTo = 0;
+var gateDelayMs = 0;          /* 0 = 门未开启；>0 = 按下帧改写前先睡这么久 */
 
 var sock = null;
 var connected = false;
@@ -197,6 +204,8 @@ var stat = {
   synth_applied: 0,           /* 成功应用的 synth 命令数（含 off） */
   synth_rejected: 0,          /* 被白名单拒掉的 synth 命令数 */
   synth_hits: 0,              /* 执行了语音键替换的帧数 */
+  gate_delays: 0,             /* 按下帧执行了门内延迟的帧数（真的睡着过） */
+  gate_fail: 0,               /* Thread.sleep 不可用/失败次数（fail-open，仅计数） */
   lease_expired: 0,
   rx_timeouts: 0,
   read_errors: 0,             /* 读失败导致的断线（此前这条路径不计数，见 pump） */
@@ -474,6 +483,15 @@ function handleCommand(line) {
   }
   /* 语音键热键合成配置。护栏：from 必须是语音键、to 必须是已实测映射的
      合成 usage（见 SYNTH_TO_WHITELIST 注释）。off 关闭并立即复位注入状态。 */
+  if (cmd.type === 'gate') {
+    /* 门内延迟开关（2026-10-03）：应用声明能力（W 1）后由助手下发；幂等。
+       delay_ms 可覆盖常量（测试/调参），非法值回落 GATE_DELAY_MS。 */
+    var gateOn = cmd.on !== false;
+    var want = Number(cmd.delay_ms);
+    gateDelayMs = gateOn ? ((want > 0 && want <= 2000) ? want : GATE_DELAY_MS) : 0;
+    logLine('gate:' + (gateDelayMs > 0 ? 'on delay_ms=' + gateDelayMs : 'off'));
+    return;
+  }
   if (cmd.type === 'synth') {
     if (cmd.off === true) {
       synthFrom = 0; synthTo = 0;
@@ -804,6 +822,20 @@ function installHook() {
         if (mode !== 'clear') { if (synthSeen) synthTrace('skip reason=mode_' + mode); return; }
         if (stat.clears_ok >= MAX_CLEARS) { if (synthSeen) synthTrace('skip reason=clear_cap'); return; }
 
+        /* 门内延迟（2026-10-03）：把语音键按下帧的呈现推迟到应用的输入法切换完成
+           之后（见 GATE_DELAY_MS）。只作用于按下帧（synthSeen）；释放帧不经过这里
+           ⇒ 呈现成对性不变。任何异常 fail-open（不延迟 = 现状），只计数 + 记日志。 */
+        if (synthSeen && gateDelayMs > 0) {
+          try {
+            Thread.sleep(gateDelayMs);
+            stat.gate_delays++;
+            logLine('synth:gate delay_ms=' + gateDelayMs);
+          } catch (e) {
+            stat.gate_fail++;
+            logLine('synth:gate fail=' + String(e).slice(0, 80));
+          }
+        }
+
         /* 只清目标 usage 所在的两个字节，其余一字节不动。
            语音键合成（synthFrom !== 0 时）在同一循环里做槽内替换：
            物理报告含语音键 → 该槽呈现合成 usage；物理释放 → 报告自然回零，
@@ -912,6 +944,7 @@ function heartbeat() {
     clear_usages: usagesHex(clearUsages),
     synth_from: synthFrom,
     synth_to: synthTo,
+    gate_delay_ms: gateDelayMs,
     target_generation: targetGeneration,
     restore: restoreOnLeave,
     disarmed: disarmed,
@@ -944,6 +977,8 @@ function heartbeat() {
       synth_applied: stat.synth_applied,
       synth_rejected: stat.synth_rejected,
       synth_hits: stat.synth_hits,
+      gate_delays: stat.gate_delays,
+      gate_fail: stat.gate_fail,
       read_errors: stat.read_errors,
       lease_expired: stat.lease_expired,
       rx_timeouts: stat.rx_timeouts,

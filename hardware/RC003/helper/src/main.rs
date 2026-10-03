@@ -2389,6 +2389,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         voice_synth: Arc<Mutex<Option<u16>>>,
         /// voice_synth 变化标志：主循环比对后给 agent 补发 synth 命令并清零。
         voice_synth_dirty: Arc<AtomicBool>,
+        /// 门内延迟开关（主程序经 `W` 行声明的能力；绝对状态语义）。
+        voice_gate: Arc<AtomicBool>,
+        /// voice_gate 变化标志：主循环比对后给 agent 补发 gate 命令并清零。
+        voice_gate_dirty: Arc<AtomicBool>,
     }
 
     impl AppBridge {
@@ -2420,6 +2424,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn voice_synth_state(&self) -> (Option<u16>, bool) {
             let synth = self.voice_synth.lock().map(|guard| *guard).unwrap_or(None);
             (synth, self.voice_synth_dirty.swap(false, Ordering::Relaxed))
+        }
+
+        /// 当前门内延迟开关；`dirty` = 自上次读取以来被主程序改过。
+        fn voice_gate_state(&self) -> (bool, bool) {
+            (
+                self.voice_gate.load(Ordering::Relaxed),
+                self.voice_gate_dirty.swap(false, Ordering::Relaxed),
+            )
         }
 
         fn snapshot(&self) -> (u64, u64, u64, String) {
@@ -2668,6 +2680,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         (usage != 0).then_some(Some(usage))
     }
 
+    /// `W <0|1>` —— 主程序声明「语音门内延迟」能力（2026-10-03）。
+    ///
+    /// 语义：按下前活动输入法不是目标工具时，应用要在按下之后才切输入法
+    /// （实测 ~53ms，见 Bugs/2026-10-03-first-press-lost-before-ime-switch.md），
+    /// 而报告层替换在按下帧通过时立即生效——先于切换完成，目标输入法收不到
+    /// 按下沿（第一按丢失）。应用声明该能力后，助手给 agent 下发 gate 命令，
+    /// agent 在按下帧呈现前做有界延迟。旧主程序不发此行 ⇒ 保持原行为。
+    fn parse_bridge_gate_line(line: &str) -> Option<bool> {
+        let mut parts = line.trim().split(' ');
+        if parts.next()? != "W" {
+            return None;
+        }
+        match parts.next()? {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        }
+    }
+
     /// agent `synth_ack` 行 → 已应用的绝对状态。
     ///
     /// `Some(Some(usage))` = 合成生效中；`Some(None)` = 已关闭；`None` = 不是
@@ -2704,6 +2735,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         targets: &Mutex<BridgeCaptureTargets>,
         voice_synth: &Mutex<Option<u16>>,
         voice_synth_dirty: &AtomicBool,
+        voice_gate: &AtomicBool,
+        voice_gate_dirty: &AtomicBool,
         logger: &Logger,
     ) {
         while let Some(pos) = read_buffer.iter().position(|byte| *byte == b'\n') {
@@ -2732,6 +2765,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     *current = synth;
                 }
                 voice_synth_dirty.store(true, Ordering::Relaxed);
+            } else if let Some(on) = parse_bridge_gate_line(&line) {
+                logger.kv(
+                    "[VOICE-GATE]",
+                    &[
+                        ("event", "configured".into()),
+                        ("on", on.to_string()),
+                        ("source", "app_bridge".into()),
+                    ],
+                );
+                voice_gate.store(on, Ordering::Relaxed);
+                voice_gate_dirty.store(true, Ordering::Relaxed);
             }
         }
     }
@@ -2951,6 +2995,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         targets: Arc<Mutex<BridgeCaptureTargets>>,
         voice_synth: Arc<Mutex<Option<u16>>>,
         voice_synth_dirty: Arc<AtomicBool>,
+        voice_gate: Arc<AtomicBool>,
+        voice_gate_dirty: Arc<AtomicBool>,
     ) {
         let mut conn: Option<AppBridgeStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
@@ -3134,6 +3180,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     &targets,
                     &voice_synth,
                     &voice_synth_dirty,
+                    &voice_gate,
+                    &voice_gate_dirty,
                     &logger,
                 );
             }
@@ -3163,6 +3211,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     *current = None;
                 }
                 voice_synth_dirty.store(true, Ordering::Relaxed);
+                // 门内延迟同源回落：主程序没了就没有「何时切好输入法」的事实源，
+                // 继续延迟只会让每次按下白等——关闭（fail-open）。
+                voice_gate.store(false, Ordering::Relaxed);
+                voice_gate_dirty.store(true, Ordering::Relaxed);
                 logger.kv(
                     "[APP-BRIDGE]",
                     &[("event", "disconnected_targets_cleared".into())],
@@ -3196,6 +3248,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let targets = Arc::new(Mutex::new(BridgeCaptureTargets::default()));
         let voice_synth = Arc::new(Mutex::new(None::<u16>));
         let voice_synth_dirty = Arc::new(AtomicBool::new(false));
+        let voice_gate = Arc::new(AtomicBool::new(false));
+        let voice_gate_dirty = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::clone(&voice_gate);
+        let worker_gate_dirty = Arc::clone(&voice_gate_dirty);
         let worker_logger = Logger::with_shared(logger.fallback.clone(), logger.shared.clone());
         let worker_stop = Arc::clone(&stop);
         let worker_stats = Arc::clone(&stats);
@@ -3219,6 +3275,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     worker_targets,
                     worker_synth,
                     worker_synth_dirty,
+                    worker_gate,
+                    worker_gate_dirty,
                 )
             })
             .ok()?;
@@ -3231,6 +3289,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             targets,
             voice_synth,
             voice_synth_dirty,
+            voice_gate,
+            voice_gate_dirty,
         })
     }
 
@@ -4749,6 +4809,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
     }
 
+    /// 门内延迟开关命令（`gate`）的线格式。与 synth 命令同为 JSON 行、同样带令牌。
+    fn voice_gate_command_line(token: &str, on: bool) -> String {
+        format!(
+            "{{\"type\":\"gate\",\"token\":\"{token}\",\"on\":{}}}\n",
+            if on { "true" } else { "false" }
+        )
+    }
+
+    /// 给 agent 下发门内延迟开关（幂等；agent 侧只影响按下帧的呈现时机）。
+    fn send_voice_gate(stream: &mut TcpStream, token: &str, on: bool) -> bool {
+        let line = voice_gate_command_line(token, on);
+        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+    }
+
     /// targets 重发判据（纯函数，语义由单测钉住）。
     ///
     /// 语义要点：判据是「ack 确认的是**最近下发的那份**配置」，而不是「有没有 ack」
@@ -4822,6 +4896,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 最近一次下发给 agent 的语音合成目标：主程序改了「按住说话快捷键」时
         // 在这里检测差异并补发（agent 的 synth 命令幂等，重复应用无害）。
         let mut sent_synth: Option<Option<u16>> = None;
+        // 最近一次下发给 agent 的门内延迟开关（主程序能力声明；None = 尚未下发过）。
+        let mut sent_gate: Option<bool> = None;
         loop {
             if stop_requested(stop) {
                 return;
@@ -4875,6 +4951,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ],
                         );
                         sent_synth = Some(synth_current);
+                    }
+                    // 门内延迟开关（主程序能力声明，2026-10-03）：与 synth 同哲学，
+                    // 变更即单独补发一条 gate 命令；agent 侧幂等，仅影响按下帧的呈现时机。
+                    let (gate_on, gate_dirty) = bridge.voice_gate_state();
+                    if gate_dirty || sent_gate != Some(gate_on) {
+                        if !send_voice_gate(&mut stream, token, gate_on) {
+                            return;
+                        }
+                        logger.kv(
+                            "[VOICE-GATE]",
+                            &[
+                                ("event", "agent_notified".into()),
+                                ("on", gate_on.to_string()),
+                            ],
+                        );
+                        sent_gate = Some(gate_on);
                     }
                 }
             }
@@ -5813,14 +5905,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         //     但内联的还是旧的"只可能发生在**改错文件**时——真机表现是"命令发了没人认"，
         //     极难从日志看出来（一切握手正常，只是按键永久不可见）。这条就是防它。
         check(
-            "内嵌 agent：全按键白名单与动态 targets 协议存在",
+            "内嵌 agent：全按键白名单、动态 targets 与门内延迟协议存在",
             AGENT_JS.contains("0x00F1, 0x0028, 0x0035, 0x004A")
                 && AGENT_JS.contains("if (cmd.type === 'targets')")
                 && AGENT_JS.contains("var reportUsages = [];")
                 && AGENT_JS.contains("var clearUsages = [];")
                 && AGENT_JS.contains("type: 'targets_ack'")
                 && AGENT_JS.contains("reportUsages.indexOf(u) >= 0")
-                && AGENT_JS.contains("clearUsages.indexOf(u) < 0"),
+                && AGENT_JS.contains("clearUsages.indexOf(u) < 0")
+                && AGENT_JS.contains("if (cmd.type === 'gate')")
+                && AGENT_JS.contains("synth:gate delay_ms="),
             format!("agent_sha256={}", agent_sha256_hex()),
         );
 
@@ -6364,6 +6458,26 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
 
         #[test]
+        fn parses_gate_capability_line() {
+            // 主程序侧 voice_gate_line() 的编码，逐字符对齐。
+            assert_eq!(parse_bridge_gate_line("W 1"), Some(true));
+            assert_eq!(parse_bridge_gate_line("W 0"), Some(false));
+            assert_eq!(parse_bridge_gate_line("W 2"), None);
+            assert_eq!(parse_bridge_gate_line("S 00E6"), None);
+            assert_eq!(parse_bridge_gate_line("W"), None);
+        }
+
+        #[test]
+        fn gate_command_line_carries_token_and_state() {
+            let on = voice_gate_command_line("tok", true);
+            assert!(on.contains("\"type\":\"gate\""));
+            assert!(on.contains("\"token\":\"tok\""));
+            assert!(on.contains("\"on\":true"));
+            assert!(on.ends_with('\n'));
+            assert!(voice_gate_command_line("tok", false).contains("\"on\":false"));
+        }
+
+        #[test]
         fn voice_key_usage_constant_matches_agent_whitelist() {
             // agent 的 SYNTH_FROM_WHITELIST = [0x003E]（编译期内联常量，
             // 这里钉住 Rust 侧常量；AGENT_JS 自检另有 contains 钉住 JS 侧）。
@@ -6459,18 +6573,31 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 余量不是"留着好看"：读循环必须把它解析成合成配置（而不是只留字节）。
         #[test]
         fn drain_applies_synth_line_left_in_the_read_buffer() {
-            let mut read_buffer: Vec<u8> = b"S 00E6\n".to_vec();
+            let mut read_buffer: Vec<u8> = b"S 00E6\nW 1\n".to_vec();
             let targets = Mutex::new(BridgeCaptureTargets::default());
             let voice_synth = Mutex::new(None);
             let dirty = AtomicBool::new(false);
+            let gate = AtomicBool::new(false);
+            let gate_dirty = AtomicBool::new(false);
             let logger = Logger::new(None);
 
-            drain_bridge_lines(&mut read_buffer, &targets, &voice_synth, &dirty, &logger);
+            drain_bridge_lines(
+                &mut read_buffer,
+                &targets,
+                &voice_synth,
+                &dirty,
+                &gate,
+                &gate_dirty,
+                &logger,
+            );
 
             assert!(read_buffer.is_empty());
             let observed = *voice_synth.lock().unwrap();
             assert_eq!(observed, Some(0x00E6));
             assert!(dirty.load(Ordering::Relaxed));
+            // 同一批次里的 W 行也必须落地（能力声明与合成配置同一批写出）。
+            assert!(gate.load(Ordering::Relaxed));
+            assert!(gate_dirty.load(Ordering::Relaxed));
         }
 
         /// 未成行的尾巴不能吐掉：没有换行就留在缓冲里等下一次读补齐。
