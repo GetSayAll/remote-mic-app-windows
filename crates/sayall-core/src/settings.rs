@@ -114,11 +114,7 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn normalized(mut self) -> Self {
         self.schema_version = Self::default().schema_version;
-        self.gain_db = if self.gain_db.is_finite() {
-            self.gain_db.clamp(0.0, 24.0)
-        } else {
-            0.0
-        };
+        self.gain_db = crate::normalize_gain_db(self.gain_db);
         self.usage_statistics = self.usage_statistics.normalized();
         self
     }

@@ -504,6 +504,20 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .endpoint-select-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .endpoint-count { font-size: 12.5px; }
 
+/* 语音增益（对齐 Mac 音频面板：左标签、中滑块、右 dB 读数）。 */
+.gain-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.gain-label { font-size: 13.5px; }
+.gain-slider { width: 100%; accent-color: var(--accent); }
+.gain-slider:disabled { cursor: wait; opacity: 0.6; }
+.gain-value { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
+.gain-help { margin: 4px 0 0 56px; font-size: 12.5px; line-height: 1.5; }
+
 /* ---- 连接页改版（2026-09-30 设计稿 v3）：设备行 + 语音输入设置三步 ----
    设备卡等高并排；设置区通栏三列，切换输入工具时三列联动（组件侧 v-if）。 */
 .device-row {

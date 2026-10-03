@@ -27,6 +27,7 @@
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`） | `SettingsPage.vue`、`AppSettings.app_icon` |
+| 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页
@@ -126,3 +127,6 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   入口**先隐藏**（`DEVICE_ACTION_SECTION_ENABLED=false`，与 `VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED`
   同一开关模式）：动作类型与平台受理路径保留，已有映射照常生效。③ 连接页第②步的
   「按住遥控器语音键 = …」行上方还有提示块时补 10px 组间距（现场反馈过挤）。
+- 2026-10-04：新增「增益」（连接页「语音设备」卡片，对齐 Mac `audio.gain.title` /
+  `audio.gain.help`）：0–24 dB、步进 1，0 dB 保持原始音量；读数写「N dB」。
+  名称与说明见上表，验收见 `Testing/WindowsRC003Preview.md` 用例十五。

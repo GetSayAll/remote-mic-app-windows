@@ -1232,6 +1232,61 @@ async fn set_voice_input_tool(
     result
 }
 
+/// 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块：0 = 原始音量）。
+///
+/// 返回的是持久化值（唯一事实来源）；平台运行态由写入路径与启动恢复保持同步。
+#[tauri::command]
+async fn get_gain_db(state: tauri::State<'_, AppState>) -> Result<f32, String> {
+    let settings = state.settings.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.load().map(|settings| settings.gain_db)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取增益设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(gain_db) => format!(
+            "audio_settings feature=gain action=load phase=completed terminal_result=passed gain_db={gain_db}"
+        ),
+        Err(_) => "audio_settings feature=gain action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true".to_owned(),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_gain_db(gain_db: f32, state: tauri::State<'_, AppState>) -> Result<f32, String> {
+    let started = std::time::Instant::now();
+    let settings = state.settings.clone();
+    let platform = state.platform.clone();
+    sayall_windows::gatt_note(format!(
+        "audio_settings feature=gain action=save phase=requested gain_db={gain_db}"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        let saved = settings.save_gain_db(gain_db)?;
+        // 推给平台：BLE 工作线程每批音频前读取，改动从下一批音频生效。
+        platform.set_gain_db(saved);
+        Ok(saved)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存增益设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "audio_settings feature=gain action=save phase=completed terminal_result=passed gain_db={saved} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "audio_settings feature=gain action=save phase=completed terminal_result=failed gain_db={gain_db} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
 /// Vokie 安装检测的返回体（连接页用它决定显示官网入口还是“没有运行”提示）。
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2245,6 +2300,14 @@ pub fn run() {
                 }
             }
 
+            // 增益（对齐 Mac：0 dB = 原始音量）。启动即把持久化值推给平台，
+            // 否则重启后管道会退回 0 dB，直到用户再碰一次滑块。
+            platform.set_gain_db(saved_settings.gain_db);
+            sayall_windows::gatt_note(format!(
+                "audio_settings feature=gain action=restore phase=completed terminal_result=passed gain_db={}",
+                saved_settings.gain_db
+            ));
+
             #[cfg(not(windows))]
             let _ = saved_settings;
 
@@ -2379,6 +2442,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_gain_db,
+        set_gain_db,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,
@@ -2439,6 +2504,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_gain_db,
+        set_gain_db,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,
