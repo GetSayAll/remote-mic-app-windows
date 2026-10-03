@@ -1206,8 +1206,9 @@ async fn set_voice_input_tool(
     ));
     let result = match tauri::async_runtime::spawn_blocking(move || {
         settings.save_voice_input_tool(tool)?;
-        // 推给平台：BLE 工作线程在**按住语音键**的那一刻按它决定切哪个输入法
-        //（唯一切换时机；不做聚焦/离开窗口时的预切，2026-10-01 Andy 要求）。
+        // 推给平台：BLE 工作线程在按下语音键的那一刻按它决定切哪个输入法（按下时兜底切换），
+        // 并且在**选中的当下就尝试对齐**系统输入法（自身窗口在前台时改为布防，等失焦后切；
+        // 见 `sayall_windows::WindowsPlatform::set_voice_input_tool`，2026-10-03 Andy 要求）。
         platform.set_voice_input_tool(tool);
         Ok(tool)
     })
@@ -2323,6 +2324,16 @@ pub fn run() {
                         "window_close action=hide_to_tray label=main hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after} prevent_close=true"
                     ));
                     api.prevent_close();
+                }
+            } else if let tauri::WindowEvent::Focused(false) = event {
+                // 工具选择后的一次性输入法对齐（2026-10-03）：用户刚在连接页选过工具、
+                // 且当时前台是自身窗口（不能立即切——TSF 会话切换曾致 WebView 整页重载，
+                // Bugs/2026-09-12）时，这里在焦点离开后再切一次，让后续语音键按下时
+                // 系统输入法已对齐。未布防时是 no-op。
+                if window.label() == "main" {
+                    if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        state.platform.align_ime_after_tool_selection();
+                    }
                 }
             }
         });

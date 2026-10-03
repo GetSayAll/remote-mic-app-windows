@@ -1619,10 +1619,11 @@ fn handle_control(
             // 不允许叠加——双写互扰 2026-09-29 run8 真机实证）：
             // * 报告层合成生效（rc003 桥已连接且 S 行下发成功）：OS 在报告层
             //   直接收到合成的快捷键 usage（injected=0），这里跳过注入分支与
-            //   chord_retry。但输入法仍要按用户选的工具兜底切一次：合成在报告层
-            //   到达时就已改写（早于本应用知情一个 BLE 往返），本次按下可能来不及，
-            //   这一次切换是为**下一次**按下生效（2026-10-01 Andy 反馈：选了豆包
-            //   但系统没切 → 语音键没反应）。
+            //   chord_retry。输入法仍按用户选的工具兜底切一次：合成在报告层到达时
+            //   就已改写（早于本应用知情一个 BLE 往返），本次按下可能来不及——
+            //   这在**换工具**场景已由"选中即对齐"消除（2026-10-03），剩余场景
+            //  （用户手动改走输入法）这一次切换为**下一次**按下生效，并以
+            //   `voice_hold action=switch_after_chord` 显式留痕。
             // * 合成不生效（和弦 / 白名单外 / 助手断线回落）：走既有 SendInput
             //   注入路径，行为与 2026-09-28 之前一致。
             if crate::key_gate::voice_synth_active() {
@@ -1630,8 +1631,21 @@ fn handle_control(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
                 ));
                 if let Some(tool) = *lock(voice_input_tool) {
-                    if let Err(error) = crate::ime::ensure_session_ime(tool) {
-                        lock(state).last_error = Some(error);
+                    match crate::ime::ensure_session_ime(
+                        tool,
+                        crate::ime::ImeSwitchScope::VoicePress,
+                    ) {
+                        Ok(crate::ime::ImeActivation::Switched) => {
+                            // 竞态标注（2026-10-03）：合成已先于切换发出，本按赶不上
+                            // ——按设计为下一次按下生效；换工具来源已由"选中即对齐"覆盖。
+                            gatt_note(format!(
+                                "voice_hold action=switch_after_chord session={session_id} note=本按的合成早于切换完成，按下一次生效"
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            lock(state).last_error = Some(error);
+                        }
                     }
                 }
             } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
@@ -1648,7 +1662,9 @@ fn handle_control(
                 // 旧实现会把输入法切成微信）。失败仅记录提示，按原行为注入
                 // （不比现状更差）；Vokie / 其他工具返回 NotRequired，不切输入法。
                 if let Some(tool) = *lock(voice_input_tool) {
-                    if let Err(error) = crate::ime::ensure_session_ime(tool) {
+                    if let Err(error) =
+                        crate::ime::ensure_session_ime(tool, crate::ime::ImeSwitchScope::VoicePress)
+                    {
                         lock(state).last_error = Some(error);
                     }
                 }
