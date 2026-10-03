@@ -22,6 +22,73 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 const SESSION_MUTE_WATCH_INTERVAL: Duration = Duration::from_millis(100);
 static AUDIO_ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+/// 0x8889000A = AUDCLNT_E_DEVICE_IN_USE。
+const WASAPI_DEVICE_IN_USE: i32 = 0x8889_000A_u32 as i32;
+
+/// 端点初始化重试档位（毫秒；0 = 首次尝试，其后为失败后的等待）。
+///
+/// 为什么需要（2026-10-02 现场，VB-CABLE 16 Ch 端点）：选择「CABLE In 16 Ch
+/// (2- VB-Audio Virtual Cable)」时 `Initialize` 两次返回 0x8889000A，界面直接
+/// 报错、用户只能改选别的设备；同一参数在独立探针里（先读一次混音格式再
+/// Initialize）可稳定成功，两个渲染端点回环到 CABLE Output 均有信号（探针
+/// `examples/cable_loopback_probe.rs`）。判定为瞬态占用：先读混音格式预热
+/// 音频引擎，再按档重试。总预算 3.05s，显著小于 IPC 请求超时（10s）。
+const OPEN_RETRY_DELAYS_MS: [u64; 5] = [0, 150, 400, 900, 1600];
+
+/// 兜底端点的重试档位：短促两档即可（用户已经等过一次完整重试，兜底要快）。
+const OPEN_FALLBACK_RETRY_DELAYS_MS: [u64; 2] = [0, 200];
+
+fn is_endpoint_in_use(error: &wasapi::WasapiError) -> bool {
+    matches!(error, wasapi::WasapiError::Windows(inner) if inner.code().0 == WASAPI_DEVICE_IN_USE)
+}
+
+/// 端点友好名括号里的设备描述（去掉 Windows 的同名消歧编号，如 `2- `）。
+///
+/// `CABLE In 16 Ch (2- VB-Audio Virtual Cable)` → `vb-audio virtual cable`；
+/// 没有括号时返回 `None`（不猜）。
+fn device_description(name: &str) -> Option<String> {
+    let start = name.find('(')?;
+    let end = name.rfind(')')?;
+    if end <= start + 1 {
+        return None;
+    }
+    let inner = name[start + 1..end].trim();
+    let without_index = match inner.find("- ") {
+        Some(index) if inner[..index].trim().chars().all(|c| c.is_ascii_digit()) => {
+            inner[index + 2..].trim()
+        }
+        _ => inner,
+    };
+    if without_index.is_empty() {
+        None
+    } else {
+        Some(without_index.to_lowercase())
+    }
+}
+
+/// 同一台虚拟声卡设备上的其它 CABLE 候选（取括号里的设备描述相同者）。
+///
+/// 现场（2026-10-02）：`CABLE In 16 Ch (… VB-Audio Virtual Cable)` 初始化被占用时，
+/// 同设备的 `扬声器 (… VB-Audio Virtual Cable)` 能正常推流，且两个端点回环到
+/// `CABLE Output` 都有信号（`examples/cable_loopback_probe.rs`）——允许自动兜底，
+/// 避免把用户堵在错误提示上。跨设备的候选绝不兜底（A/B 声卡的录音端不是输入法
+/// 监听的 `CABLE Output`，静默换设备会让整条语音链断掉）。
+fn same_device_virtual_cable_candidates(
+    failed: &AudioEndpoint,
+    endpoints: &[AudioEndpoint],
+) -> Vec<AudioEndpoint> {
+    let Some(device) = device_description(&failed.name) else {
+        return Vec::new();
+    };
+    endpoints
+        .iter()
+        .filter(|endpoint| endpoint.id != failed.id)
+        .filter(|endpoint| endpoint.is_virtual_cable_candidate)
+        .filter(|endpoint| device_description(&endpoint.name).is_some_and(|other| other == device))
+        .cloned()
+        .collect()
+}
+
 pub struct AudioRuntime {
     sender: SyncSender<AudioMessage>,
     state: Arc<Mutex<AudioSnapshot>>,
@@ -272,12 +339,54 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     }
                     sink = None;
                     queue.clear();
-                    match AudioSink::open(&endpoint_id, attempt_id) {
+                    let mut opened =
+                        AudioSink::open(&endpoint_id, attempt_id, &OPEN_RETRY_DELAYS_MS);
+                    let mut fell_back = false;
+                    if opened.is_err() {
+                        // 兜底：同设备其它 CABLE 端点（现场：16 Ch 被占用时同设备另一个
+                        // 端点可用且同样回环到 CABLE Output）。只在「同设备」范围内换，
+                        // 跨设备静默换会让输入法监听的 CABLE Output 收不到声音。
+                        let endpoints = list_endpoints().unwrap_or_default();
+                        let requested = endpoints
+                            .iter()
+                            .find(|endpoint| endpoint.id == endpoint_id)
+                            .cloned();
+                        if let Some(requested) = requested {
+                            for candidate in
+                                same_device_virtual_cable_candidates(&requested, &endpoints)
+                            {
+                                crate::ble::gatt_note(format!(
+                                    "audio_endpoint attempt_id={attempt_id} action=select phase=fallback result=attempted endpoint_kind={}",
+                                    endpoint_kind(&candidate.id, &candidate.name)
+                                ));
+                                match AudioSink::open(
+                                    &candidate.id,
+                                    attempt_id,
+                                    &OPEN_FALLBACK_RETRY_DELAYS_MS,
+                                ) {
+                                    Ok(sink_from_candidate) => {
+                                        fell_back = true;
+                                        opened = Ok(sink_from_candidate);
+                                        break;
+                                    }
+                                    Err(_) => continue,
+                                }
+                            }
+                        }
+                    }
+                    match opened {
                         Ok(opened) => {
                             let kind = endpoint_kind(&endpoint_id, &opened.name);
-                            let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
+                            let snapshot =
+                                ready_snapshot(opened.endpoint_id.clone(), opened.name.clone());
                             sink = Some(opened);
                             *lock(&state) = snapshot.clone();
+                            if fell_back {
+                                crate::ble::gatt_note(format!(
+                                    "audio_endpoint attempt_id={attempt_id} action=select phase=completed terminal_result=passed reason=fallback_sibling endpoint_kind={kind} elapsed_ms={}",
+                                    started.elapsed().as_millis()
+                                ));
+                            }
                             crate::ble::gatt_note(format!(
                                 "audio_endpoint attempt_id={attempt_id} action=select phase=completed terminal_result=passed endpoint_kind={kind} format_autoconvert=true sample_rate=16000 channels=1 elapsed_ms={}",
                                 started.elapsed().as_millis()
@@ -616,7 +725,7 @@ fn restore_endpoint(
         return snapshot;
     }
 
-    match AudioSink::open(&endpoint_id, attempt_id) {
+    match AudioSink::open(&endpoint_id, attempt_id, &OPEN_RETRY_DELAYS_MS) {
         Ok(opened) => {
             let kind = endpoint_kind(&endpoint_id, &opened.name);
             let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
@@ -832,7 +941,11 @@ struct AudioSink {
 }
 
 impl AudioSink {
-    fn open(endpoint_id: &str, attempt_id: u64) -> Result<Self, PlatformError> {
+    fn open(
+        endpoint_id: &str,
+        attempt_id: u64,
+        retry_delays_ms: &[u64],
+    ) -> Result<Self, PlatformError> {
         let enumerator =
             DeviceEnumerator::new().map_err(|error| audio_error("创建端点枚举器", error))?;
         let device = enumerator
@@ -847,33 +960,71 @@ impl AudioSink {
             endpoint_kind(endpoint_id, &name)
         ));
         ensure_cable_endpoint_unmuted(endpoint_id, is_virtual_cable, "open")?;
-        let mut client = device
-            .get_iaudioclient()
-            .map_err(|error| audio_error("创建 WASAPI 客户端", error))?;
-        let format = WaveFormat::new(
-            16,
-            16,
-            &SampleType::Int,
-            SOURCE_SAMPLE_RATE,
-            SOURCE_CHANNELS,
-            None,
-        );
-        let (default_period, _) = client
-            .get_device_period()
-            .map_err(|error| audio_error("读取 WASAPI 设备周期", error))?;
-        client
-            .initialize_client(
+        let mut opened: Option<(AudioClient, i64)> = None;
+        for (index, delay_ms) in retry_delays_ms.iter().enumerate() {
+            if *delay_ms > 0 {
+                thread::sleep(Duration::from_millis(*delay_ms));
+            }
+            let mut candidate = device
+                .get_iaudioclient()
+                .map_err(|error| audio_error("创建 WASAPI 客户端", error))?;
+            // 预热：读一次设备混音格式会把端点音频引擎拉起来；现场实证冷引擎
+            // 直接 Initialize 会拿到 0x8889000A，读过之后同一参数即可成功。
+            let _ = candidate.get_mixformat();
+            let (default_period, _) = candidate
+                .get_device_period()
+                .map_err(|error| audio_error("读取 WASAPI 设备周期", error))?;
+            let format = WaveFormat::new(
+                16,
+                16,
+                &SampleType::Int,
+                SOURCE_SAMPLE_RATE,
+                SOURCE_CHANNELS,
+                None,
+            );
+            match candidate.initialize_client(
                 &format,
                 &Direction::Render,
                 &StreamMode::PollingShared {
                     autoconvert: true,
                     buffer_duration_hns: default_period,
                 },
-            )
-            .map_err(|error| audio_error("初始化 16 kHz WASAPI 输出", error))?;
-        crate::ble::gatt_note(format!(
-            "audio_endpoint attempt_id={attempt_id} action=open phase=client_initialized result=passed share_mode=shared autoconvert=true requested_sample_rate=16000 requested_channels=1 buffer_period_hns={default_period}"
-        ));
+            ) {
+                Ok(()) => {
+                    crate::ble::gatt_note(format!(
+                        "audio_endpoint attempt_id={attempt_id} action=open phase=client_initialized result=passed share_mode=shared autoconvert=true requested_sample_rate=16000 requested_channels=1 buffer_period_hns={default_period} open_attempt={}",
+                        index + 1
+                    ));
+                    opened = Some((candidate, default_period));
+                    break;
+                }
+                Err(error) if is_endpoint_in_use(&error) => {
+                    let next = retry_delays_ms.get(index + 1).copied();
+                    crate::ble::gatt_note(format!(
+                        "audio_endpoint attempt_id={attempt_id} action=open phase=retry attempt={} hresult=0x{:08X} reason=endpoint_in_use next_delay_ms={}",
+                        index + 1,
+                        WASAPI_DEVICE_IN_USE as u32,
+                        next.map_or(0, |value| value)
+                    ));
+                    if next.is_none() {
+                        return Err(PlatformError::Audio(format!(
+                            "初始化 16 kHz WASAPI 输出失败（{name}，设备被占用 0x{:08X}）：{error}",
+                            WASAPI_DEVICE_IN_USE as u32
+                        )));
+                    }
+                }
+                Err(error) => {
+                    return Err(PlatformError::Audio(format!(
+                        "初始化 16 kHz WASAPI 输出失败（{name}）：{error}"
+                    )));
+                }
+            }
+        }
+        let (mut client, _) = opened.ok_or_else(|| {
+            PlatformError::Audio(format!(
+                "初始化 16 kHz WASAPI 输出失败（{name}，重试后仍未取得音频客户端）"
+            ))
+        })?;
         if is_virtual_cable {
             client
                 .get_audiosessioncontrol()
@@ -1431,5 +1582,83 @@ mod tests {
         runtime
             .interrupt_session()
             .expect("clean up test audio session");
+    }
+
+    #[cfg(windows)]
+    fn wasapi_error(hresult: u32) -> wasapi::WasapiError {
+        wasapi::WasapiError::Windows(windows::core::Error::from_hresult(windows::core::HRESULT(
+            hresult as i32,
+        )))
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn only_endpoint_in_use_triggers_the_open_retry() {
+        // 现场（2026-10-02）VB-CABLE 16 Ch 端点返回的就是这个码；其它 WASAPI
+        // 失败（如格式不支持）必须立即失败，重试只会拖慢报错。
+        assert!(is_endpoint_in_use(&wasapi_error(0x8889_000A)));
+        assert!(!is_endpoint_in_use(&wasapi_error(0x8889_0008)));
+        assert!(!is_endpoint_in_use(&wasapi_error(0x8889_0004)));
+        assert!(!is_endpoint_in_use(&wasapi::WasapiError::UnsupportedFormat));
+    }
+
+    #[test]
+    fn open_retry_schedule_starts_immediate_and_stays_within_request_budget() {
+        assert_eq!(OPEN_RETRY_DELAYS_MS[0], 0, "首次尝试不应先等待");
+        assert!(
+            OPEN_RETRY_DELAYS_MS
+                .windows(2)
+                .all(|pair| pair[1] > pair[0]),
+            "重试间隔必须递增：{OPEN_RETRY_DELAYS_MS:?}"
+        );
+        let total: u64 = OPEN_RETRY_DELAYS_MS.iter().sum();
+        assert!(
+            total <= 4_000,
+            "重试总预算必须显著小于 IPC 请求超时（10s），实际 {total}ms"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_device_fallback_only_accepts_the_sibling_description() {
+        let failed = AudioEndpoint {
+            id: "cable-16ch".to_owned(),
+            name: "CABLE In 16 Ch (2- VB-Audio Virtual Cable)".to_owned(),
+            is_virtual_cable_candidate: true,
+        };
+        let endpoints = vec![
+            failed.clone(),
+            AudioEndpoint {
+                id: "cable-speaker".to_owned(),
+                name: "扬声器 (2- VB-Audio Virtual Cable)".to_owned(),
+                is_virtual_cable_candidate: true,
+            },
+            AudioEndpoint {
+                id: "cable-a".to_owned(),
+                name: "CABLE-A Input (VB-Audio Cable A)".to_owned(),
+                is_virtual_cable_candidate: true,
+            },
+            AudioEndpoint {
+                id: "realtek".to_owned(),
+                name: "扬声器 (Realtek(R) Audio)".to_owned(),
+                is_virtual_cable_candidate: false,
+            },
+        ];
+        let candidates = same_device_virtual_cable_candidates(&failed, &endpoints);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|endpoint| endpoint.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cable-speaker"],
+            "只允许同一台虚拟声卡设备的其它 CABLE 端点兜底"
+        );
+
+        let without_parenthesis = AudioEndpoint {
+            id: "unknown".to_owned(),
+            name: "CABLE Input".to_owned(),
+            is_virtual_cable_candidate: true,
+        };
+        assert!(same_device_virtual_cable_candidates(&without_parenthesis, &endpoints).is_empty());
     }
 }
