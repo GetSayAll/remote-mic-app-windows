@@ -46,13 +46,36 @@ fn icon_bytes(style: AppIconIdentifier) -> &'static [u8] {
     }
 }
 
-/// 目标路径是否就是当前程序（大小写、正反斜杠不敏感）。
+/// 目标路径是否就是当前程序（大小写、正反斜杠、`\\?\` 前缀不敏感）。
+///
+/// 快捷方式里存的可能是短名（8.3）/长名等不同写法——CI 上 `%TEMP%` 就是短名形式
+/// （`RUNNER~1`），而 `IShellLink::GetPath` 会把它解析成长名，只做字符串比较会漏改
+/// （2026-10-03 CI 实证：`retarget_lnk` 返回 `Ok(false)`）。因此字符串规范化之后仍不
+/// 相等时，再用 `canonicalize` 解析两边各自的规范路径比较。
 fn matches_target(target: &str, exe: &Path) -> bool {
-    let normalize = |value: &str| value.trim().replace('/', "\\").to_ascii_lowercase();
+    fn normalize(value: &str) -> String {
+        let trimmed = value.trim();
+        trimmed
+            .strip_prefix(r"\\?\")
+            .unwrap_or(trimmed)
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    }
     if target.trim().is_empty() {
         return false;
     }
-    normalize(target) == normalize(&exe.to_string_lossy())
+    if normalize(target) == normalize(&exe.to_string_lossy()) {
+        return true;
+    }
+    let canonical = |value: &str| {
+        std::fs::canonicalize(value)
+            .ok()
+            .map(|path| normalize(&path.to_string_lossy()))
+    };
+    matches!(
+        (canonical(target), canonical(&exe.to_string_lossy())),
+        (Some(left), Some(right)) if left == right
+    )
 }
 
 /// 快捷方式候选：三个固定位置的 .lnk（存在才算）+「固定到任务栏」目录下的全部 .lnk。
@@ -288,6 +311,34 @@ mod tests {
         ));
         assert!(!matches_target(r"C:\Windows\notepad.exe", exe));
         assert!(!matches_target("", exe));
+        // `\\?\` 前缀（canonicalize 的输出形态）不能因为前缀就把自己漏掉。
+        assert!(matches_target(
+            r"\\?\C:\Users\demo\AppData\Local\SayAll\sayall-windows-app.exe",
+            exe
+        ));
+        // 路径形态差异（这里用 `..` 段模拟短名/长名这类写法差异）：由 canonicalize 兜底。
+        let real = std::env::temp_dir().join("sayall-shortcut-match-test.exe");
+        std::fs::write(&real, b"stub").expect("create stub exe");
+        let detoured = std::env::temp_dir()
+            .join("..")
+            .join(
+                std::env::temp_dir()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+            .join("sayall-shortcut-match-test.exe");
+        assert_ne!(
+            detoured.to_string_lossy(),
+            real.to_string_lossy(),
+            "前提：两种写法字符串不同"
+        );
+        assert!(matches_target(&detoured.to_string_lossy(), &real));
+        assert!(!matches_target(
+            r"C:\definitely\not\sayall-shortcut-match-test.exe",
+            &real
+        ));
+        let _ = std::fs::remove_file(&real);
     }
 
     #[test]
