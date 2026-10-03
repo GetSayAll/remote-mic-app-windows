@@ -20,6 +20,7 @@ mod diagnostics;
 mod platform;
 mod rc003_task;
 mod settings;
+mod shortcut_icons;
 mod startup;
 mod updater;
 
