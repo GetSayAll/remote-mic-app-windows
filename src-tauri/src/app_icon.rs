@@ -500,6 +500,47 @@ mod tests {
         }
     }
 
+    /// `icon.ico` 的首条目必须是最大一档（256px）。
+    ///
+    /// `tauri-codegen`（`image.rs::CachedIcon::new_ico`）只取 `entries()[0]` 解码成 RGBA
+    /// 当窗口/托盘默认图标；若首条目是 16/32px，就会被拉到 32/36px 槽位发糊。
+    /// `scripts/generate-standard-icon.py` 会重排条目表，这条断言保证提交进仓库的
+    /// 资产本身也是这个顺序（2026-10-03：重排后的文件漏提交过一次，靠它兜住）。
+    #[test]
+    fn standard_icon_ico_puts_the_largest_entry_first() {
+        let bytes: &[u8] = include_bytes!("../icons/icon.ico");
+        assert!(bytes.len() > 6, "icon.ico 太短");
+        let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        assert!(count > 1, "icon.ico 条目数异常：{count}");
+        let mut entries = Vec::new();
+        for index in 0..count {
+            let offset = 6 + index * 16;
+            let width = if bytes[offset] == 0 {
+                256
+            } else {
+                bytes[offset] as usize
+            };
+            let height = if bytes[offset + 1] == 0 {
+                256
+            } else {
+                bytes[offset + 1] as usize
+            };
+            entries.push(width * height);
+        }
+        let first = entries[0];
+        assert_eq!(
+            first,
+            entries.iter().copied().max().unwrap_or_default(),
+            "icon.ico 首条目不是最大档：首 {first}，全部 {entries:?}\
+             （tauri-codegen 只取 entries()[0] 当窗口/托盘默认图标）"
+        );
+        assert_eq!(
+            first,
+            256 * 256,
+            "icon.ico 首条目应为 256px：全部 {entries:?}"
+        );
+    }
+
     #[test]
     fn resolution_keeps_known_identifiers() {
         assert_eq!(
