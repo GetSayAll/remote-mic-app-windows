@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="无线麦 SayAll Windows 版语音键快捷键方案：常用预设、按键录入、手动选键、按工具记忆、配置迁移和验收。">
+  <title>语音键快捷键：录入、预设与按工具记忆的具体方案</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f5f6f8; --paper: #fff; --text: #202632; --muted: #596373; --line: #dce1e8; --accent: #155ca6; --code: #eef2f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.8 "Segoe UI", "Microsoft YaHei", sans-serif; }
+    main { max-width: 1080px; margin: 32px auto; padding: 40px 48px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+    h1 { margin: 0 0 16px; font-size: 30px; line-height: 1.4; }
+    h2 { margin: 44px 0 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 24px; line-height: 1.5; }
+    h3 { margin: 26px 0 10px; font-size: 19px; }
+    p { margin: 12px 0; }
+    li { margin: 6px 0; }
+    a { color: var(--accent); overflow-wrap: anywhere; }
+    code { padding: 2px 5px; border-radius: 4px; background: var(--code); font: 0.9em/1.6 Consolas, monospace; overflow-wrap: anywhere; }
+    pre { padding: 18px; border-radius: 8px; background: var(--code); overflow-x: auto; line-height: 1.6; }
+    pre code { padding: 0; background: none; overflow-wrap: normal; }
+    .meta { color: var(--muted); font-size: 14px; }
+    .notice { margin: 20px 0; padding: 14px 18px; border-left: 4px solid var(--accent); background: var(--code); }
+    nav { margin: 24px 0; padding: 14px 20px; border: 1px solid var(--line); border-radius: 8px; }
+    nav ol { margin: 0; padding-left: 22px; }
+    .table-wrap { overflow-x: auto; margin: 18px 0; }
+    table { border-collapse: collapse; width: 100%; min-width: 540px; text-align: left; }
+    th, td { padding: 11px 13px; border: 1px solid var(--line); vertical-align: top; }
+    th { background: var(--code); }
+    footer { margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+    @media (max-width: 720px) { main { margin: 0; padding: 24px 18px; border: 0; border-radius: 0; } h1 { font-size: 25px; } h2 { font-size: 21px; } }
+    @media (prefers-color-scheme: dark) { :root { --bg: #14181f; --paper: #1c222c; --text: #e7ebf2; --muted: #a9b3c2; --line: #374253; --accent: #8fc3ff; --code: #283242; } }
+    @media print { :root { color-scheme: light; --bg: #fff; --paper: #fff; --text: #000; --muted: #444; --line: #bbb; --accent: #000; --code: #f3f3f3; } main { max-width: none; margin: 0; padding: 0; border: 0; } nav { display: none; } pre { white-space: pre-wrap; } .table-wrap { overflow: visible; } table { min-width: 0; } h2, h3 { break-after: avoid; } tr { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>语音键快捷键：录入、预设与按工具记忆的具体方案</h1>
+    <p class="meta">产品：无线麦 SayAll Windows 版 · 归档日期：2026-10-04 · 状态：实施方案，功能尚未实现</p>
+    <p class="meta">研究基准：<code>origin/main</code> · <code>154ac7b9dc2e2e8e485828c10941728d96ac07ab</code></p>
+    <div class="notice">本文件保存会话中确认的完整方案。本次提交只归档文档。文中的接口、配置模型、状态机和验收项是后续实现要求，不代表现有功能已通过验证。</div>
+  </header>
+  <nav aria-label="文档目录">
+    <ol>
+      <li><a href="#baseline">基准、已确认问题与交付边界</a></li>
+      <li><a href="#interaction">用户实际看到的操作流程</a></li>
+      <li><a href="#configuration">配置模型、IPC 与迁移</a></li>
+      <li><a href="#lifecycle">捕获状态机与运行时边界</a></li>
+      <li><a href="#acceptance">实现顺序与明确验收标准</a></li>
+      <li><a href="#references">研究来源与适用边界</a></li>
+    </ol>
+  </nav>
+
+  <section id="baseline">
+    <h2>1. 基准、已确认问题与交付边界</h2>
+    <p>研究基准是 <code>origin/main</code> 的 <code>154ac7b9dc2e2e8e485828c10941728d96ac07ab</code>。研究时工作区与其一致，没有未提交修改。研究阶段没有运行测试或真机实验。</p>
+    <p>已确认的产品方向：微信输入法、豆包输入法、Vokie、其他工具均可修改快捷键，各自记忆；以实际按键录制为主，手动选键兜底；只提供按住说话类预设；保持现有发送能力，暂不扩展增强路径对多键组合的支持。</p>
+    <p>现有实现不是从零开始，主要问题如下：</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">位置</th><th scope="col">当前行为</th><th scope="col">本次处理</th></tr></thead>
+      <tbody>
+        <tr><td><code>VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED</code></td><td>自定义录入入口关闭</td><td>完成下述改造与验收后开放</td></tr>
+        <tr><td><code>finishVoiceHotkeyCapture()</code></td><td>优先保存捕获结果，随后才处理取消原因</td><td>取消与完成分开；取消路径绝不写配置</td></tr>
+        <tr><td>同一函数</td><td>根据微信语音活动推断默认组合并保存</td><td>删除推断保存；只使用实际捕获或用户选择的键</td></tr>
+        <tr><td><code>applyVoiceHotkey()</code> → <code>applyOtherChord()</code></td><td>保存失败被内部捕获，调用方仍可能写入记忆</td><td>改为一次后端配置更新，失败不更新任何记忆</td></tr>
+        <tr><td><code>start/stop_shortcut_capture</code></td><td>全局开关，没有录入会话所有权</td><td>增加会话 ID；旧停止请求不能关闭新录入</td></tr>
+        <tr><td><code>register_shortcut_capture_events()</code></td><td>32 容量队列的发送失败被忽略</td><td>检测丢事件，不能把已知残缺结果当成功</td></tr>
+        <tr><td>输入工具切换</td><td>微信、豆包、Vokie 每次恢复固定组合</td><td>每种工具恢复自己的配置</td></tr>
+        <tr><td><code>voice_synth_target()</code></td><td>增强路径仅接受单个左 Alt、右 Alt</td><td>保持能力边界，其他组合仍走现有 <code>SendInput</code></td></tr>
+      </tbody>
+    </table></div>
+    <p>关键代码见研究基准上的<a href="https://github.com/GetSayAll/remote-mic-app-windows/blob/154ac7b9dc2e2e8e485828c10941728d96ac07ab/src/pages/ConnectionPage.vue#L543">连接页</a>、<a href="https://github.com/GetSayAll/remote-mic-app-windows/blob/154ac7b9dc2e2e8e485828c10941728d96ac07ab/src-tauri/src/lib.rs#L1685">捕获事件转发</a>和<a href="https://github.com/GetSayAll/remote-mic-app-windows/blob/154ac7b9dc2e2e8e485828c10941728d96ac07ab/crates/sayall-windows/src/rc003_bridge.rs#L117">增强路径选择</a>。</p>
+    <p><strong>本次承诺：</strong>配置准确保存、不会因取消或失败误覆盖、支持按键录制与手动纠正。</p>
+    <p><strong>本次不承诺：</strong>任意快捷键都能被完整捕获，或能被任意第三方工具接受。外部程序若吞掉某个键的完整 DOWN/UP，剩余事件可能看起来完全正常；增加等待时间、事件序号或 Raw Input 都不能据此证明没有漏键。</p>
+    <p>遥控器语音键仍为按下开始、释放结束，不增加双击或长按等待。</p>
+  </section>
+
+  <section id="interaction">
+    <h2>2. 用户实际看到的操作流程</h2>
+    <h3>入口与预设</h3>
+    <p>保留连接页现有工具卡片及布局。在第二步“遥控器语音键替你按哪个键”中，为四种工具提供相同的设置能力。</p>
+    <p>显示当前快捷键，下面提供：</p>
+    <ul>
+      <li>常用快捷键：右 Alt、左 Alt、右 Ctrl、左 Ctrl、右 Shift、左 Shift、左 Ctrl + 左 Win、不按键。</li>
+      <li>“录入快捷键”：打开编辑框并开始捕获。</li>
+      <li>“手动选择”：打开同一个编辑框，切换为选键模式。</li>
+      <li>“恢复默认”：恢复当前工具的默认值。</li>
+    </ul>
+    <p>默认值固定为：</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">工具</th><th scope="col">默认值</th></tr></thead>
+      <tbody>
+        <tr><td>微信输入法</td><td>左 Ctrl + 左 Win</td></tr>
+        <tr><td>豆包输入法</td><td>右 Alt</td></tr>
+        <tr><td>Vokie</td><td>右 Alt</td></tr>
+        <tr><td>其他工具</td><td>不按键</td></tr>
+      </tbody>
+    </table></div>
+    <p>旧用户的当前配置优先于这些默认值，不因升级改变。</p>
+    <p>选择常用预设直接保存，保持现有一键选择习惯。录入和手动选择修改草稿，必须点击“保存”才写入。恢复默认只影响当前工具。</p>
+    <h3>按键录制</h3>
+    <p>完整流程为：</p>
+    <ol>
+      <li>点“录入快捷键”，记住打开时的工具与配置版本。</li>
+      <li>若有键未松开，显示“先松开所有按键，再按下快捷键”。</li>
+      <li>按下组合时实时显示左右明确的键名。</li>
+      <li>全部松开后，沿用现有 200 毫秒稳定窗口，接收可能迟到的重放事件。</li>
+      <li>停止捕获，显示待确认结果，例如“录入结果：左 Ctrl + 左 Win”。</li>
+      <li>用户选择“保存”“重新录入”“手动修改”或“取消”。</li>
+    </ol>
+    <p>不会在松手后自动保存。单独 Esc 取消；录入超时、窗口失焦、切换工具、离开页面均取消并保留旧配置。要配置单独 Esc，通过手动选择完成。</p>
+    <p>零事件显示“未录到按键，请重试或手动选择”。已知丢事件或结果冲突显示“未完整录入，请重试或手动选择”，保存按钮不可用。</p>
+    <p>只录到单个修饰键时仍允许确认，因为右 Alt 等本身就是有效设置；但不得把它自动补成其他组合。</p>
+    <h3>手动选择与键范围</h3>
+    <p>手动模式提供八个左右明确的修饰键，以及一个可搜索的普通键选择器。</p>
+    <ul>
+      <li>最多四个不同的键。</li>
+      <li>支持单键、纯修饰键组合、修饰键加一个普通键。</li>
+      <li>不支持多个普通键同时组合，不支持先后两段快捷键。</li>
+      <li>普通键限现有 <code>KeyCode</code> 已支持的键盘键；本次不增加 Fn、F13–F24、小键盘或新标点键码。</li>
+      <li>音量、媒体控制键不进入语音快捷键选择器。</li>
+      <li>Win + L、Ctrl + Alt + Del 不允许保存为语音快捷键。</li>
+    </ul>
+    <p>直接录制系统保留组合仍可能触发系统动作，界面不能声称录制期间可以完全屏蔽它们。边界依据：<a href="https://learn.microsoft.com/en-us/windows/powertoys/keyboard-manager">PowerToys Keyboard Manager 官方文档</a>。</p>
+    <p>所有工具显示：“请与输入工具中设置的按住说话快捷键保持一致。”保存自定义组合时不再出现微信专属提示。</p>
+  </section>
+
+  <section id="configuration">
+    <h2>3. 配置模型、IPC 与迁移</h2>
+    <h3>唯一配置来源</h3>
+    <p>新增一个版本化的语音快捷键配置文件，统一存储当前工具及四套快捷键，避免继续维护三个独立事实源。</p>
+    <pre><code>type VoiceTool = "wechat" | "doubao" | "vokie" | "other";
+
+interface VoiceShortcutConfig {
+  schemaVersion: 1;
+  revision: number;
+  selectedTool: VoiceTool;
+  profiles: Record&lt;VoiceTool, KeyChord | null&gt;;
+}</code></pre>
+    <p>约定：</p>
+    <ul>
+      <li><code>null</code> 明确表示“不按键”。</li>
+      <li>四个工具条目必须齐全；缺省仅在迁移时补齐。</li>
+      <li><code>revision</code> 每次成功修改递增，用于拒绝过期页面提交。</li>
+      <li>新录入的修饰键必须区分左右。</li>
+      <li>录制保留实际按下顺序；手动选择使用 Ctrl、Shift、Alt、Win、普通键的固定顺序，同族左键在前。</li>
+      <li>“是否命中预设”按键集合比较；实际发送保留配置中的顺序。</li>
+    </ul>
+    <p>该模型放在 Tauri 配置层，继续引用 Windows 层的 <code>KeyChord</code>，不向 <code>sayall-core</code> 引入 Windows 类型。</p>
+    <h3>IPC</h3>
+    <p>提供以下接口，替代连接页当前分散的读取与写入：</p>
+    <pre><code>get_voice_shortcut_config()
+  -&gt; VoiceShortcutConfig
+
+select_voice_shortcut_tool({
+  tool,
+  expectedRevision
+})
+  -&gt; VoiceShortcutConfig
+
+save_voice_shortcut({
+  tool,
+  chord,             // KeyChord | null
+  expectedRevision
+})
+  -&gt; VoiceShortcutConfig</code></pre>
+    <p>“恢复默认”调用同一保存接口，默认表只维护一份。</p>
+    <p>后端串行处理修改：校验版本和快捷键 → 写临时文件并完整替换配置 → 更新运行时期望配置 → 返回新版本。写盘失败时旧文件和运行态都保持不变。</p>
+    <p>旧页面提交返回 <code>revision_conflict</code>；前端重新读取并提示重新确认，不自动覆盖更新的设置。前端保存期间禁用重复保存和工具切换，后端仍独立校验。</p>
+    <h3>旧配置迁移规则</h3>
+    <p>首次读取新配置时：</p>
+    <ol>
+      <li>新文件存在且有效：直接使用。</li>
+      <li>新文件不存在：读取旧工具选择、当前语音快捷键及“其他工具”记忆。</li>
+      <li>旧工具选择存在：将当前有效快捷键归到该工具。</li>
+      <li>旧工具选择不存在：沿用现有推断——左 Ctrl + 左 Win 为微信，右 Alt 为豆包，其余为其他工具。</li>
+      <li>当前选中的“其他工具”以当前有效值优先；未选中的“其他工具”使用其旧记忆。旧空数组转换为 <code>null</code>。</li>
+      <li>其余工具补默认值；写入新文件成功后才切换来源。</li>
+    </ol>
+    <p>旧文件保留，不双写。新版配置若损坏或版本不支持，不静默回退到旧文件覆盖用户设置；显示配置错误，并保留文件供诊断。不保证降级后的旧版本能读取新版四套配置。</p>
+  </section>
+
+  <section id="lifecycle">
+    <h2>4. 捕获状态机与运行时边界</h2>
+    <h3>捕获结果由后端负责，前端只显示草稿</h3>
+    <p>共享捕获服务增加以下最小契约：</p>
+    <pre><code>start_shortcut_capture({ owner: "voice" | "buttons" })
+  -&gt; { captureId, preheldKeys }
+
+shortcut-capture-progress
+  -&gt; { captureId, sequence, phase, keys }
+
+stop_shortcut_capture({ captureId, reason })
+  -&gt; {
+       captureId,
+       outcome: "candidate" | "cancelled" | "invalid",
+       keys,
+       issue
+     }</code></pre>
+    <p>前端先订阅事件再开始捕获。只接收自己会话的事件；启动返回前到达的事件按会话暂存，启动失败则丢弃。</p>
+    <p>后端状态转换固定为：</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">状态</th><th scope="col">进入条件</th><th scope="col">离开条件</th></tr></thead>
+      <tbody>
+        <tr><td>等待松键</td><td>开始时发现已按住的键</td><td>这些键全部释放</td></tr>
+        <tr><td>录入中</td><td>无预先按住的键，或等待结束</td><td>组合全部松开、取消或错误</td></tr>
+        <tr><td>等待稳定</td><td>组合全部松开</td><td>200 毫秒无新事件，或出现新事件</td></tr>
+        <tr><td>待确认结果</td><td>稳定窗口结束并完成校验</td><td>捕获服务释放，结果交前端草稿</td></tr>
+        <tr><td>已取消／无效</td><td>取消、15 秒超时、丢事件或非法组合</td><td>清理并返回终态</td></tr>
+      </tbody>
+    </table></div>
+    <p>15 秒超时由后端负责，前端计时只用于提示；WebView 卡住不能让录入长期占用键盘。</p>
+    <p>具体边沿处理：</p>
+    <ul>
+      <li>物理事件和外部重放事件分别跟踪按住状态，重复 DOWN 不重复计数。</li>
+      <li>从实际重叠按住的键生成候选，不能把“先按 Ctrl 松开，再按 Win”拼成组合。</li>
+      <li>两个来源得到相同候选时去重；物理候选是完整重放候选的子集时，采用重放候选并记录来源。</li>
+      <li>两个候选互不包含，或出现多个不同普通键时，结果无效，要求重录或手动选择。</li>
+      <li>队列溢出、未知键、无法配对的事件使本次录入无效。停止前核对生产端事件计数与处理端计数，防止末尾丢事件未被发现。</li>
+      <li>取消优先于任何候选结果，停止接口绝不写配置。</li>
+      <li>捕获期间吞下的 DOWN 必须继续吞掉配对 UP；开始前已放行的 DOWN，其 UP 必须放行。</li>
+      <li>旧会话停止请求幂等返回，不改变新会话。按键映射页同步接入会话 ID，但不修改其动作类型或现有编辑流程。</li>
+    </ul>
+    <p>保留现有输入法临时让位与恢复路径，但不把让位成功当成“捕获完整”的证明。取消微信麦克风观测对快捷键值的推断用途。</p>
+    <h3>保存与实际生效分开</h3>
+    <p>语音中保存，下次生效。执行位置明确为：</p>
+    <ul>
+      <li>后端分别维护已保存配置版本和已应用版本。</li>
+      <li>语音会话开始时锁定工具、快捷键及发送路径；释放使用这份快照，不能重新读最新配置。</li>
+      <li>活动会话期间只更新期望配置，不调用现有 <code>set_voice_hold_hotkey()</code> 切换增强目标，也不切输入法。</li>
+      <li>ATVV 会话结束、快捷键释放完成后应用最新期望版本；多个待应用修改只保留最新版本。</li>
+      <li>增强路径的切换必须等到其源按键释放得到确认，不能只看前端每秒一次的 <code>voice_state</code> 快照。必要的增强状态回执仅补生命周期信息，不增加支持的键或组合。</li>
+      <li>更新增强目标后，匹配回执到达前属于“设置正在生效”。不能在此期间把新 <code>SendInput</code> 与旧增强输出叠加。过渡期发生按下时继续音频生命周期，但不补发迟到的快捷键；界面提示设置尚未生效。</li>
+      <li>断连、睡眠和退出统一结束当前会话及捕获，清理旧按住状态；恢复后只应用最新配置。</li>
+    </ul>
+    <p>UI 区分“已保存，松开后生效”“设置正在生效”“已保存”。这些状态均不代表第三方工具已经响应。</p>
+    <p>捕获期间收到遥控器语音开始事件，应先取消捕获，再执行语音快捷键发送，避免录入服务吞掉自身发送的事件。不能为此延迟 ATVV 音频会话。</p>
+    <p>左右 Alt 的增强路径、其他键的 <code>SendInput</code> 路径保持现状。微信专用恢复逻辑限定为“选中微信且使用默认组合”；不得仅凭其他工具配置了 Ctrl + Win 就启动微信恢复。</p>
+  </section>
+
+  <section id="acceptance">
+    <h2>5. 实现顺序与明确验收标准</h2>
+    <h3>第一项：复现旧问题并建立测试</h3>
+    <p>先为以下问题补失败用例：取消后误保存、保存失败后仍更新记忆、旧停止请求关闭新录入、队列溢出后保存半截结果。</p>
+    <p>完成最小复现后，再修改共享捕获协议与状态机。旧入口继续关闭，直到这部分通过。</p>
+    <h3>第二项：配置与页面接线</h3>
+    <p>实现新配置模型、迁移及三个 IPC；随后接入共享编辑器、四工具独立记忆和手动选键。</p>
+    <p>必须验证：</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">场景</th><th scope="col">通过条件</th></tr></thead>
+      <tbody>
+        <tr><td>微信改为自定义组合，切豆包再切回</td><td>微信恢复自定义值，豆包保持自己的值</td></tr>
+        <tr><td>设置“不按键”后重启</td><td>仍为不按键，不恢复默认</td></tr>
+        <tr><td>保存失败</td><td>当前值、工具记忆和页面选中态均保持旧值</td></tr>
+        <tr><td>页面 A 的旧版本覆盖页面 B 的新版本</td><td>拒绝旧提交，读回新配置</td></tr>
+        <tr><td>迁移旧自定义快捷键</td><td>不丢失、不替换成默认值</td></tr>
+        <tr><td>新配置损坏</td><td>明确报错，不自动写入默认配置</td></tr>
+      </tbody>
+    </table></div>
+    <h3>第三项：录入与生命周期验收</h3>
+    <p>自动化至少覆盖：</p>
+    <ul>
+      <li>左右 Alt、左右 Ctrl、左右 Shift、Ctrl + Win。</li>
+      <li>Ctrl + Shift + K、F6、纯修饰键的两种释放顺序。</li>
+      <li>预先按住、重复 DOWN、重放完整组合、来源冲突。</li>
+      <li>分次按键不拼接、第五个键被拒绝、未知键被拒绝。</li>
+      <li>Esc、取消按钮、超时、失焦、卸载页面均不写盘。</li>
+      <li>启动未返回时关闭页面；旧事件、旧停止请求不影响新录入。</li>
+      <li>队列首部、中间、末尾丢事件均不能成功。</li>
+      <li>语音中修改快捷键，旧组合完整释放后新配置才生效。</li>
+      <li>增强回执迟到、失联、目标切换期间不双发。</li>
+      <li>按键映射页现有录入与安全模式无回归。</li>
+    </ul>
+    <p>运行前端测试与构建、Rust workspace 测试与检查、格式检查、Tauri runtime simulation 和 <code>ci-preflight</code>。具体命令：</p>
+    <pre><code>pnpm test
+pnpm build
+cargo fmt --all -- --check
+cargo test --workspace
+cargo check --workspace
+cargo check -p sayall-windows-app --features runtime-simulation
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1</code></pre>
+    <p>Rust 编译按仓库规范使用 Visual Studio Developer PowerShell，并满足 Tauri 打包资源前置条件。这些检查用于后续功能实现；本次纯文档归档不以代码构建冒充功能验证。</p>
+    <h3>第四项：真机与本地包</h3>
+    <p>录入实验使用实际键盘，分别在微信输入法、豆包输入法、Vokie 运行时测试。每个代表组合重复录入十次，核对左右、键数和顺序；任何一次错误自动保存都判 <code>failed</code>。无法完整捕获的组合必须验证手动修改能准确保存。</p>
+    <p>遥控器分别记录 RC001、RC003，至少覆盖：</p>
+    <ul>
+      <li>默认组合和已在目标工具公开设置中配置的自定义组合。</li>
+      <li>冷态首用、连续会话、快速按下释放。</li>
+      <li>按住中改设置、断连、睡眠恢复。</li>
+      <li>增强开关两种状态，以及增强不可用时的原有边界。</li>
+    </ul>
+    <p>按下出现语音状态、松开结束收音、文字上屏，才记为端到端 <code>passed</code>；不接受仅凭 <code>SendInput</code> 返回成功。未具备设备或工具条件的项目记为 <code>deferred</code>。</p>
+    <p>最后同步 TODO、用户手册、来源与验收记录，交付本地测试包、提交 SHA 和逐项结果。本功能任务不创建发布 Tag、不上传发布资产。</p>
+  </section>
+
+  <section id="references">
+    <h2>研究来源与适用边界</h2>
+    <ul>
+      <li><a href="https://github.com/GetSayAll/remote-mic-app-windows/tree/154ac7b9dc2e2e8e485828c10941728d96ac07ab">Windows 仓库研究基准</a>：连接页、功能开关、配置保存、捕获门控、BLE 语音生命周期和增强目标选择均按此提交检查。</li>
+      <li><a href="../../Bugs/2026-09-27-voice-hotkey-capture-drops-modifier.md">多修饰键录入截断记录</a>、<a href="../../Bugs/2026-09-27-ime-chord-hook-eats-active-hotkey-capture.md">输入法吞键与重放记录</a>：用于确认现有缺陷及历史实验边界，不把文档中尚待真机复测的修复视为已通过。</li>
+      <li><a href="https://github.com/HD838A/remote-mic-app/blob/4fb8140c6276cf556fc8380e6a9ad2941a6baee2/Sources/RemoteMic/KeyboardShortcutPicker.swift">Mac 原版 KeyboardShortcutPicker</a>，提交 <code>4fb8140c6276cf556fc8380e6a9ad2941a6baee2</code>：只参考常用预设、选键和左右修饰键的信息结构，不复制 macOS 平台代码。</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows/powertoys/keyboard-manager">PowerToys Keyboard Manager</a>：参考录制与手动选键并存的交互，以及系统保留快捷键限制；不沿用其要求必须包含普通键的规则，因为本产品需要支持纯修饰键。</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc">Microsoft LowLevelKeyboardProc</a>：低级键盘钩子用于队列投递前观察和处理事件；回调快速返回、后台处理。该能力不保证外部程序已吞掉的事件仍可见。</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput">Microsoft SendInput</a>：发送结果只说明事件提交数量；受到权限及当前按键状态限制，不证明目标输入工具已经响应。</li>
+      <li>实现和交付继续遵守 <a href="../../AGENTS.md">AGENTS.md</a>、<a href="../../LOGGING.md">LOGGING.md</a>、<a href="../product-copy.md">产品文案规范</a>和<a href="../../BRANCH_MANAGEMENT.md">分支管理规范</a>。纯文档归档完成不意味着功能 TODO 完成。</li>
+    </ul>
+  </section>
+  <footer>验证边界：本文件归档的是静态研究和实施要求。按键录入、第三方工具响应、RC001/RC003 及安装包验收仍待后续实现和实际执行。</footer>
+</main>
+</body>
+</html>
