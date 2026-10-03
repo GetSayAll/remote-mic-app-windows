@@ -81,6 +81,7 @@ impl BleRuntime {
         send_input: Arc<SendInputRuntime>,
         voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
         voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
+        gain_db: Arc<Mutex<f32>>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
@@ -98,6 +99,7 @@ impl BleRuntime {
                     send_input,
                     voice_hold_hotkey,
                     voice_input_tool,
+                    gain_db,
                 )
             });
 
@@ -333,6 +335,7 @@ fn worker_loop(
     send_input: Arc<SendInputRuntime>,
     voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
+    gain_db: Arc<Mutex<f32>>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -876,6 +879,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut active_voice_samples,
+                        &gain_db,
                         &bytes,
                     );
                 }
@@ -1789,11 +1793,15 @@ fn handle_audio(
     send_input: &SendInputRuntime,
     held_hotkey: &mut Option<KeyChord>,
     active_voice_samples: &mut u64,
+    gain_db: &Mutex<f32>,
     bytes: &[u8],
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
         return;
     }
+    // 增益逐批刷新（对齐 Mac 每帧读 settings.gainDB 的语义）：用户在滑块上改动后，
+    // 下一批音频立即按新值处理，不需要重开会话；重连后的新管道也因此拿到当前值。
+    pipeline.set_gain_db(*lock(gain_db));
     if let Some(error) = audio.failure() {
         abort_voice_session(
             session,

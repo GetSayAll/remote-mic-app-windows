@@ -650,6 +650,26 @@ export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnap
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
 }
 
+/**
+ * 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块，0 = 原始音量）。
+ *
+ * 读取走持久化值；写入返回实际保存值（越界会被钳制），界面用它回显——
+ * 不假设"写进去什么就存什么"。
+ */
+export async function getGainDb(): Promise<number> {
+  if (!isTauriRuntime()) {
+    return 0;
+  }
+  return invoke<number>("get_gain_db");
+}
+
+export async function setGainDb(gainDb: number): Promise<number> {
+  if (!isTauriRuntime()) {
+    return gainDb;
+  }
+  return invoke<number>("set_gain_db", { gainDb });
+}
+
 export async function openVbCableDownloadPage(): Promise<void> {
   if (!isTauriRuntime()) {
     window.open(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
