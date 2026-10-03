@@ -1278,6 +1278,12 @@ fn handle_connection(
                         let line = voice_synth_line(synth_current);
                         synth_sent_at =
                             write_line(&mut writer, &line).ok().map(|()| Instant::now());
+                        // 门内延迟能力声明（2026-10-03）：与 S 行同批、独立一行；
+                        // 旧助手不认识会忽略（drain 只认 T/S/W，未知行丢弃不断链）。
+                        let gate_ok = write_line(&mut writer, &voice_gate_line()).is_ok();
+                        note(format!(
+                            "rc003_bridge event=voice_gate_sent on=true scope=hello write_ok={gate_ok}"
+                        ));
                         crate::key_gate::set_voice_synth_active(false);
                         note(format!(
                             "rc003_bridge event=voice_synth_sent to={} scope=hello await=ack write_ok={}",
@@ -1557,6 +1563,16 @@ fn voice_synth_line(to: Option<u16>) -> String {
     }
 }
 
+/// 门内延迟能力声明（`W 1`）。助手侧解析见 `parse_bridge_gate_line`。
+///
+/// 应用在按下之后才切输入法（实测 ~53ms），而报告层替换在按下帧通过时立即生效——
+/// 先于切换完成，目标输入法收不到按下沿（第一按丢失，2026-10-03 现场，见
+/// Bugs/2026-10-03-first-press-lost-before-ime-switch.md）。声明后 agent 会把
+/// 按下帧的呈现延迟 `GATE_DELAY_MS`；旧助手不认识该行会忽略（行为不变）。
+fn voice_gate_line() -> String {
+    "W 1".to_owned()
+}
+
 /// 未收到 agent 回执时的 S 行重发节奏：0.5s / 1.5s / 3s，之后每 5s 一次。
 ///
 /// 与 targets 的 ack 重发同哲学：快节奏覆盖偶发丢行/助手晚读，慢节奏兜底；
@@ -1727,6 +1743,12 @@ mod tests {
         // helper 侧 parse_bridge_synth_line 的对侧编码，两种形态逐字符对齐。
         assert_eq!(voice_synth_line(Some(0x00E6)), "S 00E6");
         assert_eq!(voice_synth_line(None), "S -");
+    }
+
+    #[test]
+    fn voice_gate_line_declares_capability() {
+        // helper 侧 parse_bridge_gate_line 的对侧编码，逐字符对齐。
+        assert_eq!(voice_gate_line(), "W 1");
     }
 
     #[test]
@@ -2301,6 +2323,12 @@ mod tests {
             .read_line(&mut synth)
             .expect("HELLO 必须重放合成状态");
         assert_eq!(synth, "S -\n", "初始关闭态也必须是绝对状态");
+        // 门内延迟能力声明（2026-10-03）：与 S 行同批、紧随其后（编码见 voice_gate_line）。
+        let mut gate = String::new();
+        reader
+            .read_line(&mut gate)
+            .expect("HELLO 必须声明门内延迟能力");
+        assert_eq!(gate, "W 1\n", "能力声明必须与 helper 的 W 行解析逐字符对齐");
         // 按 2026-10-03 加固协议回执关闭态：未确认期间主程序会按节奏重发 S 行，
         // 确认后停止——后续断言才不会被重发行干扰（回执同时也是门禁闭环的输入）。
         stream.write_all(b"A -\n").unwrap();
