@@ -1280,10 +1280,13 @@ fn handle_connection(
                             write_line(&mut writer, &line).ok().map(|()| Instant::now());
                         // 门内延迟能力声明（2026-10-03）：与 S 行同批、独立一行；
                         // 旧助手不认识会忽略（drain 只认 T/S/W，未知行丢弃不断链）。
-                        let gate_ok = write_line(&mut writer, &voice_gate_line()).is_ok();
-                        note(format!(
-                            "rc003_bridge event=voice_gate_sent on=true scope=hello write_ok={gate_ok}"
-                        ));
+                        // 应急开关见 VOICE_GATE_DECLARE：关闭时不发该行（门内延迟归零）。
+                        if VOICE_GATE_DECLARE {
+                            let gate_ok = write_line(&mut writer, &voice_gate_line()).is_ok();
+                            note(format!(
+                                "rc003_bridge event=voice_gate_sent on=true scope=hello write_ok={gate_ok}"
+                            ));
+                        }
                         crate::key_gate::set_voice_synth_active(false);
                         note(format!(
                             "rc003_bridge event=voice_synth_sent to={} scope=hello await=ack write_ok={}",
@@ -1576,6 +1579,14 @@ fn voice_synth_line(to: Option<u16>) -> String {
 /// 先于切换完成，目标输入法收不到按下沿（第一按丢失，2026-10-03 现场，见
 /// Bugs/2026-10-03-first-press-lost-before-ime-switch.md）。声明后 agent 会把
 /// 按下帧的呈现延迟 `GATE_DELAY_MS`；旧助手不认识该行会忽略（行为不变）。
+/// **应急开关（2026-10-03 真机事件）**：真机上出现未定性的「豆包无法输入 / 语音键疑似被按住」
+/// 后，先回到今天之前的行为——不发 `W 1`，助手便不会向 agent 转发 gate，门内延迟归零；
+/// 报告层合成（右 Alt 替换）本身保持不变。
+///
+/// 恢复 = 把本常量改回 `true`（或撤销本提交）；恢复前先完成受控 A/B 验证
+/// （见 Bugs/2026-10-03-first-press-lost-before-ime-switch.md 的传播机制一节）。
+const VOICE_GATE_DECLARE: bool = false;
+
 fn voice_gate_line() -> String {
     "W 1".to_owned()
 }
@@ -2331,11 +2342,14 @@ mod tests {
             .expect("HELLO 必须重放合成状态");
         assert_eq!(synth, "S -\n", "初始关闭态也必须是绝对状态");
         // 门内延迟能力声明（2026-10-03）：与 S 行同批、紧随其后（编码见 voice_gate_line）。
-        let mut gate = String::new();
-        reader
-            .read_line(&mut gate)
-            .expect("HELLO 必须声明门内延迟能力");
-        assert_eq!(gate, "W 1\n", "能力声明必须与 helper 的 W 行解析逐字符对齐");
+        // 应急开关关闭期间不发该行（VOICE_GATE_DECLARE=false），此后直接是后续协议行。
+        if VOICE_GATE_DECLARE {
+            let mut gate = String::new();
+            reader
+                .read_line(&mut gate)
+                .expect("HELLO 必须声明门内延迟能力");
+            assert_eq!(gate, "W 1\n", "能力声明必须与 helper 的 W 行解析逐字符对齐");
+        }
         // 按 2026-10-03 加固协议回执关闭态：未确认期间主程序会按节奏重发 S 行，
         // 确认后停止——后续断言才不会被重发行干扰（回执同时也是门禁闭环的输入）。
         stream.write_all(b"A -\n").unwrap();
