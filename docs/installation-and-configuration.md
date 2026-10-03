@@ -44,15 +44,15 @@ SayAll 只能扫描已经由 Windows 配对的遥控器。Windows 的“已配�
 
 ## 4. 安装 VB-CABLE（使用语音时必需）
 
-SayAll 把遥控器声音写入播放端 `CABLE Input`，输入法或会议软件再从录音端 `CABLE Output` 读取。两个名称看似相反，这是 VB-CABLE 的正常信号方向。
+SayAll 把遥控器声音写入播放端（经典驱动叫 `CABLE Input`，新版 16 通道驱动叫 `CABLE In 16 Ch`），输入法或会议软件再从录音端 `CABLE Output` 读取。这些名称看似相反，是 VB-CABLE 的正常信号方向；界面上的“推荐”标记永远打在名字带 CABLE 的那个播放端上。
 
 1. 在 SayAll 中打开“连接”。如果页面提示缺少 VB-CABLE，选择“打开官方下载页”；也可以直接打开 [VB-CABLE 官方页面](https://vb-audio.com/Cable/)。
 2. 下载 VB-CABLE 压缩包，并把全部文件解压到本地文件夹。不要直接在压缩包内运行安装程序。
 3. 64 位 Windows 用户右键 `VBCABLE_Setup_x64.exe`，选择“以管理员身份运行”，然后选择“Install Driver”。
 4. 安装完成后重启 Windows。VB-Audio 的[官方参考手册](https://vb-audio.com/Cable/VBCABLE_ReferenceManual.pdf)也要求安装后重启。
-5. 重新打开 SayAll 的“连接”，选择“刷新设备列表”。如果系统中只有一个 VB-CABLE，SayAll 首次启动时会自动选择它；否则手动选择带加粗“推荐”标记的 `CABLE Input (VB-Audio Virtual Cable)`。
+5. 重新打开 SayAll 的“连接”，选择“刷新设备列表”。如果系统中只有一个 VB-CABLE，SayAll 首次启动时会自动选择它；否则手动选择带加粗“推荐”标记的 CABLE 播放端（`CABLE Input (VB-Audio Virtual Cable)` 或新版驱动的 `CABLE In 16 Ch (… VB-Audio Virtual Cable)`）。
 
-完成标准：语音设备卡片显示 `CABLE Input`，状态为“已就绪”。
+完成标准：语音设备卡片显示一个带 CABLE 名字的播放端（`CABLE Input` 或 `CABLE In 16 Ch`），状态为“已就绪”。
 
 ## 5. 在 SayAll 中连接遥控器
 
@@ -68,7 +68,7 @@ SayAll 会记住用户选择的遥控器和语音设备，之后启动、临时�
 
 - 遥控器连接状态为“已就绪”；
 - “语音按键”显示“已就绪”；
-- “语音设备”显示 `CABLE Input` 且状态为“已就绪”；
+- “语音设备”显示一个带 CABLE 名字的播放端（`CABLE Input` 或 `CABLE In 16 Ch`）且状态为“已就绪”；
 - “按键映射”页底部显示“按键监听已就绪”。
 
 ## 6. 配置语音输入软件
@@ -109,7 +109,7 @@ SayAll 会记住用户选择的遥控器和语音设备，之后启动、临时�
 
 ### 其他软件
 
-1. 在第 ① 步选择“其他工具”，再在第 ② 步选择与该软件一致的语音键（右 Alt / 左 Alt）；不需要 SayAll 按键时选“不按键”，此时语音键仍会向 `CABLE Input` 输出声音。这里选过之后会被记住：中途切去豆包/微信再切回来，会恢复你上次选的按键，不会退回默认值。
+1. 在第 ① 步选择“其他工具”，再在第 ② 步选择与该软件一致的语音键（右 Alt / 左 Alt）；不需要 SayAll 按键时选“不按键”，此时语音键仍会向 CABLE 播放端输出声音。这里选过之后会被记住：中途切去豆包/微信再切回来，会恢复你上次选的按键，不会退回默认值。
 2. 软件的麦克风/输入设备选择 `CABLE Output`。
 3. 如果按住遥控器语音键在你用的软件里没有反应，开启“支持更多输入工具”后再试一次（首次开启会弹一次系统授权）。
 4. 自定义组合键的录入正在重做，暂未开放；当前只提供上述固定按键。
@@ -149,7 +149,7 @@ SayAll 会记住用户选择的遥控器和语音设备，之后启动、临时�
 
 ### 已连接，但语音软件没有声音
 
-依次核对信号方向：SayAll 选择的是 `CABLE Input`，语音软件选择的是 `CABLE Output`。若刚安装 VB-CABLE 但设备列表中没有这两个端点，完成安装程序要求的 Windows 重启，然后在 SayAll 中刷新设备列表。
+依次核对信号方向：SayAll 选择的是 CABLE 播放端（`CABLE Input`，新版驱动为 `CABLE In 16 Ch`），语音软件选择的是 `CABLE Output`。若刚安装 VB-CABLE 但设备列表中没有这两个端点，完成安装程序要求的 Windows 重启，然后在 SayAll 中刷新设备列表。
 
 ### 按住语音键没有触发输入法
 

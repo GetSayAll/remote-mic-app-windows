@@ -310,6 +310,81 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
+  it("recommends the 16 通道版 VB-CABLE 渲染端点（CABLE In 16 Ch），不推荐不带 CABLE 名的同设备端点", async () => {
+    // 2026-10-02 现场：新版 VB-CABLE 驱动把渲染端点命名为「CABLE In 16 Ch」，
+    // 同设备还有一个「扬声器 (2- VB-Audio Virtual Cable)」。两者回环到
+    // CABLE Output 都有信号，但只有带 CABLE 名的端点打「推荐」标记，文案也
+    // 不再硬编码旧驱动名「CABLE Input」。
+    const sixteenChannel: AudioEndpoint = {
+      id: "cable-16ch",
+      name: "CABLE In 16 Ch (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    const cableSpeaker: AudioEndpoint = {
+      id: "cable-speaker",
+      name: "扬声器 (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    mocks.endpoints = [sixteenChannel, cableSpeaker];
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "选择设备")!
+      .trigger("click");
+    await flushPromises();
+
+    const items = wrapper.findAll(".endpoint-list li");
+    expect(items).toHaveLength(2);
+    expect(items[0].text()).toContain("CABLE In 16 Ch");
+    expect(items[0].text()).toContain("推荐");
+    expect(items[1].text()).not.toContain("推荐");
+
+    expect(wrapper.text()).toContain("选择带「推荐」标记的 CABLE 设备");
+    expect(wrapper.text()).not.toContain("这里选择 CABLE Input");
+    wrapper.unmount();
+  });
+
+  it("选中的端点被后端自动兜底替换时，文案按实际使用的设备报出", async () => {
+    // 2026-10-02 现场：点选 CABLE In 16 Ch 打不开，后端自动改用同一台虚拟声卡的
+    // 另一个 CABLE 端点；界面必须报实际设备，不能显示成"已选择 CABLE In 16 Ch"。
+    const sixteenChannel: AudioEndpoint = {
+      id: "cable-16ch",
+      name: "CABLE In 16 Ch (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    const cableSpeaker: AudioEndpoint = {
+      id: "cable-speaker",
+      name: "扬声器 (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    mocks.endpoints = [sixteenChannel, cableSpeaker];
+    mocks.selectAudioEndpoint.mockImplementation(async () => ({
+      ...emptyAudio,
+      phase: "ready",
+      selectedEndpointId: cableSpeaker.id,
+      selectedEndpointName: cableSpeaker.name,
+    }));
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "选择设备")!
+      .trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".endpoint-list li button")
+      .find((button) => button.text() === "选择")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已自动改用 扬声器 (2- VB-Audio Virtual Cable)");
+    expect(wrapper.text()).toContain("暂时打不开");
+    wrapper.unmount();
+  });
+
   // 输入工具卡片（2026-09-30 设计稿 v3）：选工具即自动落该工具的快捷键。
   // 顺序固定为 豆包 > 微信 > 其他（Andy 要求豆包排第一）；选中态跟随持久化的
   // 工具选择，而不是卡片顺序。

@@ -56,17 +56,26 @@ export interface AudioEndpoint {
 }
 
 /**
- * 界面上的“推荐”判据：只有 VB-CABLE 标准包提供的 CABLE Input
- * （渲染端点友好名 `CABLE Input (VB-Audio Virtual Cable)`）值得推荐给
- * 微信输入法等语音工具作麦克风来源。
+ * 界面上的“推荐”判据：值得推荐给输入法当麦克风来源的 VB-CABLE 渲染端点。
+ *
+ * 渲染端点的名字跨 VB-CABLE 驱动版本变化（2026-10-02 现场）：
+ *   经典 2 通道：`CABLE Input (VB-Audio Virtual Cable)`
+ *   新版 16 通道：`CABLE In 16 Ch (2- VB-Audio Virtual Cable)`
+ * 两者都能把声音送回录音端 `CABLE Output`（`examples/cable_loopback_probe.rs`
+ * 实测两个端点回环 peak 均 ≈11k），因此都推荐；VB-CABLE A/B 的
+ * `CABLE-A/B Input` 不带 "VB-Audio Virtual Cable"，不推荐（它们的录音端不是
+ * 输入法默认监听的 CABLE Output）。
  *
  * 后端的 `isVirtualCableCandidate` 是更宽的候选判定（含 VB-CABLE A/B 的
  * CABLE-A/B Input 与 CI 仿真端点），只用于自动选择与安装检测，不足以
- * 决定推荐标记；两者刻意分开，避免给非标准端点打上推荐。
+ * 决定推荐标记；两者刻意分开。
  */
 export function isRecommendedVoiceEndpoint(endpoint: AudioEndpoint): boolean {
   const name = endpoint.name.trim().toLowerCase();
-  return name.includes("cable input") && name.includes("vb-audio");
+  if (!name.includes("vb-audio virtual cable")) {
+    return false;
+  }
+  return name.includes("cable input") || name.includes("cable in");
 }
 
 export interface AudioSnapshot {

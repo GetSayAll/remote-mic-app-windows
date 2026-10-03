@@ -23,7 +23,7 @@
 | 增强按键能力（按键页） | 全按键支持 | `ButtonsPage.vue` |
 | 同一设置在连接页的入口 | 支持更多输入工具 | `ConnectionPage.vue` |
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
-| 虚拟声卡端点 | CABLE Input / CABLE Output（VB-CABLE） | VB-Audio 官方名称 |
+| 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`） | `SettingsPage.vue`、`AppSettings.app_icon` |

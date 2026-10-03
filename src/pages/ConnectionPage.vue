@@ -895,10 +895,18 @@ async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
   selectingEndpointId.value = endpoint.id;
   audioMessage.value = "正在打开语音设备…";
   try {
-    audio.value = await selectAudioEndpoint(endpoint.id);
-    audioMessage.value = automatic
-      ? `已自动选择 ${endpoint.name}`
-      : `已选择 ${endpoint.name}`;
+    const snapshot = await selectAudioEndpoint(endpoint.id);
+    audio.value = snapshot;
+    // 后端可能在打不开所选端点时自动改用同一台虚拟声卡的另一个 CABLE 端点
+    // （2026-10-02 现场：新版驱动的 CABLE In 16 Ch 会瞬态被占用），按实际使用的
+    // 设备报文案，避免界面与事实不符。
+    const actualName = snapshot.selectedEndpointName ?? endpoint.name;
+    audioMessage.value =
+      actualName === endpoint.name
+        ? automatic
+          ? `已自动选择 ${actualName}`
+          : `已选择 ${actualName}`
+        : `已自动改用 ${actualName}（${endpoint.name} 暂时打不开）`;
     showEndpointList.value = false;
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
@@ -1120,7 +1128,7 @@ onUnmounted(() => {
             wasapiReady
               ? "语音设备已就绪。"
               : virtualCableInstalled
-                ? "已检测到 VB-CABLE。这里选择 CABLE Input；在输入法的语音设置里选择 CABLE Output。"
+                ? "已检测到 VB-CABLE。在下面列表里选择带「推荐」标记的 CABLE 设备；输入法的麦克风请选择 CABLE Output。"
                 : "正在检测 VB-CABLE…"
           }}
         </div>
