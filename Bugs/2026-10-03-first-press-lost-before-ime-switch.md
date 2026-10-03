@@ -46,6 +46,19 @@
    复杂度与未知项（WUDFHost 的账号/ACL、File API 同步语义）本迭代不引入；
    先用固定有界延迟，后续若延迟成本显著再评估升级。
 
+## 传播机制（升级路径）
+
+宿主里的 agent 脚本只加载一次（Gadget 已 LoadLibrary 时，改文件/重跑助手都不会换掉实例）。
+本次修复同时把 `AGENT_BUILD` 从 `2026-10-02.tx-serialized` 升到
+`2026-10-03.first-press-gate`：helper 连接宿主时比对运行代次与内嵌代次，不同则记
+`[AGENT-STALE]` 并后台自动刷新（结束旧宿主 → 等系统重建 → 重新注入新脚本；见
+`refresh_agent_in_host`，冷却 1 小时）。
+
+不升代次的实测证据（2026-10-03 本地，包 b5fa8cc 安装后）：新 helper 正常收到桥接 `W` 并
+`[VOICE-GATE] agent_notified`，但宿主内旧 agent 只回通用 `cmd:gate` 回显、不执行门内延迟
+（缺 `gate:on delay_ms=150`）。升代次后重装，日志应出现 `[AGENT-STALE]` 与
+`[AGENT-REFRESH] ... terminal_result=passed`，随后 `agent:load build=2026-10-03.first-press-gate`。
+
 ## 验证
 
 - **agent 逻辑台**（`agent_logic_test.mjs`，无需 frida/提权/遥控器）：gate 默认关 → 不延迟、

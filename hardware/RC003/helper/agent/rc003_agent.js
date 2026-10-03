@@ -87,7 +87,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-10-02.tx-serialized';
+var AGENT_BUILD = '2026-10-03.first-press-gate';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
