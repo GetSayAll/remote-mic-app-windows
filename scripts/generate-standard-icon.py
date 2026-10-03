@@ -21,6 +21,7 @@ macOS 图标网格的导出（图案四周留白 + 柔和投影，实心瓷贴�
 from __future__ import annotations
 
 import pathlib
+import struct
 import sys
 
 from PIL import Image
@@ -51,6 +52,30 @@ ICO_SIZES = ((16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256))
 TILE_ALPHA = 250
 VISIBLE_ALPHA = 128
 FILL_RATIO_MINIMUM = 0.95
+
+
+def reorder_ico_largest_first(path: pathlib.Path) -> list[tuple[int, int]]:
+    """把 .ico 的条目表改成"大图在前"，并返回新顺序。
+
+    `tauri-codegen`（`image.rs::CachedIcon::new_ico`）只取 `entries()[0]`，把它解码成
+    RGBA 当作窗口/托盘默认图标——不排好序就会把 16px 那档当成默认图（32/36px 槽位
+    被放大 → 糊）。PIL 的 ICO writer 固定从小到大写，所以这里重排条目表；数据块不动、
+    偏移量各自有效。
+    """
+    data = bytearray(path.read_bytes())
+    count = struct.unpack_from("<H", data, 4)[0]
+    entries = [bytes(data[6 + index * 16 : 6 + (index + 1) * 16]) for index in range(count)]
+
+    def area(entry: bytes) -> int:
+        width = entry[0] or 256
+        height = entry[1] or 256
+        return width * height
+
+    ordered = sorted(entries, key=area, reverse=True)
+    for index, entry in enumerate(ordered):
+        data[6 + index * 16 : 6 + (index + 1) * 16] = entry
+    path.write_bytes(bytes(data))
+    return [(entry[0] or 256, entry[1] or 256) for entry in ordered]
 
 
 def tile_box(image: Image.Image) -> tuple[int, int, int, int]:
@@ -118,6 +143,9 @@ def main() -> int:
     ico_path = ICON_DIRECTORY / ICO_NAME
     master.save(ico_path, format="ICO", sizes=list(ICO_SIZES))
     written.append(ico_path)
+    order = reorder_ico_largest_first(ico_path)
+    if order[0] != (MASTER_SIZE // 4, MASTER_SIZE // 4):
+        failures.append(f"{ICO_NAME} 首条目是 {order[0]}，应为 256px（tauri-codegen 取 entries()[0]）")
     with Image.open(ico_path) as ico:
         for size in sorted(ico.ico.sizes()):
             frame = ico.ico.getimage(size).convert("RGBA")
@@ -127,7 +155,10 @@ def main() -> int:
 
     for path in written:
         print(path.relative_to(REPOSITORY_ROOT).as_posix())
-    print(f"source={SOURCE.name} tile_box={box} png_targets={len(PNG_TARGETS)} ico_sizes={len(ICO_SIZES)}")
+    print(
+        f"source={SOURCE.name} tile_box={box} png_targets={len(PNG_TARGETS)} "
+        f"ico_order={order}"
+    )
 
     if failures:
         for failure in failures:
