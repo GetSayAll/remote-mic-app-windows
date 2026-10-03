@@ -46,11 +46,11 @@
    `app_lifecycle event=show_main_window trigger=... terminal_result=... minimized_before/iconic_before/visible_before/iconic_after/visible_after/foreground_after`。
    托盘左键与"显示主界面"菜单项统一走它。
 2. 新增 `crates/sayall-windows/src/instance_signal.rs`：会话内命名事件 `Local\SayAll-ShowMainWindow`（**自动重置**：一次置位对应一次显示请求；置位时若无等待者也不会丢）。第二个实例在单实例守卫命中时置位该事件再退出（日志追加 `show_request_result=passed|failed`）；主实例的 `spawn_second_instance_listener` 线程收到后调用 `show_main_window(trigger=second_instance)`。
-3. 新增真机探针 `Testing/probe-main-window-restore.ps1`（托盘回调消息模拟 + 真实最小化/隐藏/二次启动四用例，判据全部为 Win32 读回；含收尾恢复，不会把应用留在不可用状态）。
+3. 新增真机探针 `Testing/probe-main-window-restore.ps1`（五个用例：最小化×2 路径 / 关闭到托盘 / 二次启动 / 任务栏图标 UIA 激活；托盘用例走 shell 同款回调消息，判据全部为 Win32 读回；含收尾恢复，不会把应用留在不可用状态）。
 
 ## 验证
 
-**修复版（`fix/main-window-restore`，`source_revision=131476386512afea3ea2afd952298a0749e8bacf`）本机真机，2026-10-03**：
+**修复版本机真机，2026-10-03**（源码分支 `fix/main-window-restore`，提交 `2e981cff8be16cbe153a2e50dc4a1cdaef1a6347`；安装版本机测试包内嵌同一修订号）：
 
 | 用例 | 结果 | 读回 |
 | --- | --- | --- |
@@ -58,8 +58,12 @@
 | 用例2 最小化(SW_MINIMIZE，覆盖缓存漂移兜底) → 托盘左键 | **passed** | iconic=false visible=true foreground=true |
 | 用例3 关闭到托盘 → 托盘左键 | **passed** | iconic=false visible=true foreground=true |
 | 用例4 最小化 → 二次启动 | **passed** | 第二实例退出；iconic=false visible=true foreground=true |
+| 用例5 真实任务栏图标 UIA 激活（shell 官方路径） | **passed** | iconic=false visible=true foreground=true |
 
-- **真实鼠标点击**（非消息模拟）：经任务栏"显示隐藏的图标"折叠弹窗（`TopLevelWindowForOverflowXamlIsland`）找到真实托盘图标按钮并点击 → 窗口从最小化恢复并置前（iconic=false / visible=true / foreground=true）。
+开发构建与**本地测试安装包安装后的构建**均 5/5 passed（安装包与安装校验见下）。
+
+- **真实 shell 路径激活**（非消息模拟，安装版 5/5 之一）：任务栏通知区会**过滤注入的鼠标点击**（2026-10-03 实测：`SendInput` / `mouse_event` 点击托盘图标均无回调，右键连菜单都不弹——软件无法产生"硬件点击"）。因此"真实点击"改用 UI Automation 的 `InvokePattern` 激活任务栏上的真实图标按钮（`SystemTray.NormalButton`，name=`无线麦 SayAll`，与用户点击同一个系统入口）：最小化后 Invoke → 窗口恢复并置前，并产生完整日志 `show_main_window trigger=tray_click ... foreground_after=true`。该用例已纳入探针（用例5）。
+- 早期一轮"经折叠弹窗点击图标"的测试曾观察到窗口恢复，但**当时没有 `show_main_window` 日志**——恢复来自 shell 自身对最小化窗口的激活（`SetForegroundWindow` 会恢复最小化窗口），不是托盘回调链路的证据。记录在此，避免后来者把它当作托盘路径通过记录。
 - 日志链（一次日志拉取即可定位全链）：
   - `app_lifecycle event=second_instance_listener ... reason=listening`；
   - `... event=show_main_window trigger=tray_click ... iconic_before=true iconic_after=false foreground_after=true`；
@@ -67,9 +71,15 @@
   - 第二实例侧：`app_lifecycle event=single_instance ... error_code=already_running ... show_request_result=passed show_request_error=none`。
 - 自动化：`cargo fmt --all -- --check` passed；`cargo test -p sayall-windows` 253 passed（含 `instance_signal` 3 例：事件名契约、无等待端时请求报错、置位被消费且不重复唤醒）；`cargo check -p sayall-windows-app`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
 - 未覆盖边界（`deferred`）：
-  - 托盘菜单项"显示主界面"的**点击**未做自动化（与已测路径共用同一 `show_main_window`，差异仅在事件来源）——由用户安装本地测试包后手动确认；
+  - 托盘菜单项"显示主界面"的**点击**未做自动化（与已测路径共用同一 `show_main_window`，差异仅在事件来源）——由用户安装后手动确认；
   - 托盘双击：tray-icon 把双击拆成多个 Click 事件，处理逻辑取其中一次 `Click/Left/Up`，与已测路径相同；未单独自动化；
-  - 应用图标固定到任务栏（promoted）与折叠区（overflow）两种位置：本次验证的 dev 构建图标在折叠区（真实点击即经折叠弹窗）；用户安装版图标为任务栏直显（`IsPromoted=1`），回调机制相同，留在安装后复验。
+  - 折叠区（overflow）图标：dev 构建图标在折叠区时以 shell 同款回调消息覆盖（用例1-4）；任务栏直显（promoted）图标以 UIA 激活覆盖（用例5）。两种位置的回调机制相同，均已有真机证据。
+
+## 本地测试包（本机，2026-10-03）
+
+- 安装包：`target\release\bundle\nsis\无线麦 SayAll_0.5.0_x64-setup.exe`（基于最新 `origin/main` + 本修复，提交 `2e981cff`），SHA-256 `c501725d26ef45dfad60f5b48a8072a2ec206492b6fe823c1b30d3767d2de155`；同目录有本机测试签名 `.sig`（与 CI pubkey 不匹配的告警为预期，**不可发布**）。
+- 安装校验 `scripts/verify-local-test-install.ps1 -ExpectRevision -ExpectAppMarker Local\SayAll-ShowMainWindow,event=show_main_window`：helper/gadget 哈希对齐、app exe 3 字节（UNK→NSS）差异、内嵌修订号 `2e981cff`、两个行为标记均命中，窗口截图与启动日志正常——全部 **PASS**；安装后对安装版再跑探针 **5/5 passed**。
+- 说明：本包随后安装在本机 `%LOCALAPPDATA%\无线麦 SayAll`，替换了用户先前从旧工作树构建的安装版；用户配置（`%APPDATA%\app.getsayall.remote-mic.windows`）随升级保留。
 
 ## 隐私检查
 

@@ -1,9 +1,18 @@
 ﻿# 主窗口恢复真机探针（2026-10-03）。
 #
-# 覆盖两条用户入口：托盘左键点击（模拟 shell 发给托盘消息窗口的回调消息，与真实
-# 点击同一条事件链）与二次启动（再次启动同一 exe → 单实例守卫 → 命名事件 →
-# 主实例恢复窗口）。判据全部是 Win32 读回（IsIconic / IsWindowVisible /
-# GetForegroundWindow），不看任何"命令成功"返回值、不依赖应用自身日志。
+# 覆盖用户入口：托盘左键点击、关闭到托盘后唤起、二次启动（再次启动同一 exe →
+# 单实例守卫 → 命名事件 → 主实例恢复窗口）。判据全部是 Win32 读回（IsIconic /
+# IsWindowVisible / GetForegroundWindow），不看任何"命令成功"返回值、不依赖
+# 应用自身日志。
+#
+# 用例 1-4 用托盘回调消息（WM_USER_TRAYICON + WM_LBUTTONUP，即 shell 发给托盘
+# 消息窗口的那条消息）；
+# 用例 5 用 UI Automation 的 Invoke 走**shell 官方激活路径**（与用户点击同一个
+# 系统入口）。
+#
+# 重要探针坑（2026-10-03 实测）：任务栏通知区域**会过滤注入的鼠标点击**
+# （SendInput / mouse_event 都不生效，右键连菜单都不弹）。因此"真实点击"不能
+# 用注入实现，必须用 UIA Invoke，或直接发上面那条回调消息。
 #
 # 用法（先手动启动待测的 sayall-windows-app.exe，再运行）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-main-window-restore.ps1
@@ -17,6 +26,8 @@
 #   tao 的 MINIMIZED 缓存会同步更新）；另测 SW_MINIMIZE 直调路径，用于覆盖缓存与
 #   实际状态漂移时的 Win32 兜底恢复。
 # - 第二个实例由本脚本用运行中进程的 exe 路径启动；它应在单实例守卫处退出。
+# - 用例 5 需要托盘图标显示在任务栏直显区（promoted）；在折叠区时该用例记为
+#   skipped（折叠区路径由用例 1-4 的回调消息覆盖）。
 
 param(
     [int]$ProcessId = 0,
@@ -123,6 +134,18 @@ function Reset-Window {
     # 留在最小化/隐藏状态，污染下一个用例的判定。
     [void][SayallWindowProbe]::ShowWindow($hwnd, 9)  # SW_RESTORE
     [void](Wait-Condition -Condition { -not [SayallWindowProbe]::IsIconic($hwnd) -and [SayallWindowProbe]::IsWindowVisible($hwnd) } -TimeoutMs 2000)
+    Start-Sleep -Milliseconds 300
+}
+
+function Set-WindowMinimized {
+    # 真实最小化路径：WM_SYSCOMMAND + SC_MINIMIZE（标题栏/任务栏"最小化"同款，
+    # tao 的 MINIMIZED 缓存同步更新）。刚被恢复/置前的窗口偶发需要重试，
+    # 这里最多试 3 次，避免用例判定靠运气。
+    for ($i = 0; $i -lt 3; $i++) {
+        [void][SayallWindowProbe]::PostMessage($hwnd, $WM_SYSCOMMAND, [IntPtr]$SC_MINIMIZE, [IntPtr]::Zero)
+        if (Wait-Condition -Condition { [SayallWindowProbe]::IsIconic($hwnd) } -TimeoutMs 900) { return $true }
+    }
+    return $false
 }
 
 if ($ProcessId -le 0) {
@@ -165,8 +188,7 @@ function Invoke-TrayClickAndCheck {
 
 # 用例 1：真实最小化路径（WM_SYSCOMMAND + SC_MINIMIZE，tao 缓存同步更新）→ 托盘左键
 Reset-Window
-[void][SayallWindowProbe]::PostMessage($hwnd, $WM_SYSCOMMAND, [IntPtr]$SC_MINIMIZE, [IntPtr]::Zero)
-$minimized = Wait-Condition -Condition { [SayallWindowProbe]::IsIconic($hwnd) } -TimeoutMs 2000
+$minimized = Set-WindowMinimized
 if (-not $minimized) {
     $results.Add([pscustomobject]@{ Case = '最小化(SC_MINIMIZE)'; Passed = $false; Detail = '窗口未进入最小化，后续用例不可判定' })
     $results | Format-Table -AutoSize
@@ -193,8 +215,7 @@ if ($hidden) {
 # 用例 4：最小化（SC_MINIMIZE）→ 二次启动（双击快捷方式同一条路径）
 if (-not $SkipSecondInstance) {
     Reset-Window
-    [void][SayallWindowProbe]::PostMessage($hwnd, $WM_SYSCOMMAND, [IntPtr]$SC_MINIMIZE, [IntPtr]::Zero)
-    $minimized = Wait-Condition -Condition { [SayallWindowProbe]::IsIconic($hwnd) } -TimeoutMs 2000
+    $minimized = Set-WindowMinimized
     if ($minimized) {
         $second = Start-Process -FilePath $exePath -PassThru
         $secondExited = $second.WaitForExit(15000)
@@ -210,12 +231,54 @@ if (-not $SkipSecondInstance) {
     }
 }
 
+# 用例 5：真实任务栏图标激活（UIA Invoke，shell 官方激活路径；与用户点击同一个
+# 系统入口）。注入鼠标点击会被通知区域过滤（见文件头），所以这里不用鼠标模拟。
+# 图标在任务栏直显区才能找到该 UIA 元素；折叠区时记为 skipped。
+Reset-Window
+$minimized = Set-WindowMinimized
+if (-not $minimized) {
+    $results.Add([pscustomobject]@{ Case = '用例5 任务栏图标 UIA 激活'; Passed = $false; Detail = '窗口未进入最小化，用例不可判定' })
+} else {
+    $uiaReady = $true
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    } catch {
+        $uiaReady = $false
+    }
+    $icon = $null
+    if ($uiaReady) {
+        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        $trayBar = $root.FindFirst([System.Windows.Automation.TreeScope]::Children,
+            (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Shell_TrayWnd')))
+        if ($trayBar) {
+            $icon = $trayBar.FindFirst([System.Windows.Automation.TreeScope]::Descendants,
+                (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, '无线麦 SayAll')))
+        }
+    }
+    if (-not $uiaReady) {
+        $results.Add([pscustomobject]@{ Case = '用例5 任务栏图标 UIA 激活'; Passed = $null; Detail = 'skipped: UI Automation 程序集不可用' })
+    } elseif (-not $icon) {
+        $results.Add([pscustomobject]@{ Case = '用例5 任务栏图标 UIA 激活'; Passed = $null; Detail = 'skipped: 任务栏未找到图标按钮（图标在折叠区）' })
+    } else {
+        ($icon.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+        $restored = Wait-Condition -Condition { -not [SayallWindowProbe]::IsIconic($hwnd) -and [SayallWindowProbe]::IsWindowVisible($hwnd) } -TimeoutMs 3000
+        $state = Get-WindowState -Hwnd $hwnd
+        $results.Add([pscustomobject]@{
+                Case   = '用例5 任务栏图标 UIA 激活'
+                Passed = $restored
+                Detail = ("iconic={0} visible={1} foreground={2}" -f $state.Iconic, $state.Visible, $state.Foreground)
+            })
+    }
+}
+
 # 收尾：无论用例结果如何，把窗口恢复到可见（失败用例可能把窗口留在最小化/隐藏，
 # 探针不允许把待测应用留在不可用状态）。
 Reset-Window
 
 $results | Format-Table -AutoSize
-$failed = @($results | Where-Object { -not $_.Passed }).Count
-Write-Host ("[probe] {0}/{1} passed" -f ($results.Count - $failed), $results.Count)
+$failed = @($results | Where-Object { $_.Passed -eq $false }).Count
+$skipped = @($results | Where-Object { $_.Passed -eq $null }).Count
+Write-Host ("[probe] {0}/{1} passed{2}" -f ($results.Count - $failed - $skipped), $results.Count, $(if ($skipped -gt 0) { "（$skipped skipped）" } else { "" }))
 if ($failed -gt 0) { exit 1 }
 exit 0
