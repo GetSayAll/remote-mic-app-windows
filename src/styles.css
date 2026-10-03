@@ -432,7 +432,15 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mapping-cell:first-child span { font-weight: 600; }
+/* 映射内容（格子里的动作文字：打开记事本 / Enter / 滚轮向上 …）三列统一加粗：
+   曾只给「单击」列加粗（`.mapping-cell:first-child span` 600），双击/长按是常规
+   字重，同一张卡上「打开记事本」比「Enter」粗（2026-10-03 用户反馈）。改为三列
+   统一后，用户实测又发现「中文比英文更重」：中文回退到 Microsoft YaHei UI，该
+   字体只有 Light/Regular/Bold 三档、没有 600，600 被就近升到 Bold(700)；英文走
+   Segoe UI Variable 有真 600 档（SemiBold）。按用户选择统一用 700：英文升到
+   Bold（实测笔画 2.34→2.80px），中文保持 Bold 3.55px，两者差距从 1.2px 缩到
+   0.75px。若日后要更贴合，可选方案与实测数据见本次会话记录。 */
+.mapping-cell span { font-weight: 700; }
 .mapping-cell.set span { color: var(--accent-text); }
 .mapping-cell.editing { background: var(--accent-surface-strong); }
 .mapping-cell.flashed { background: var(--pressed-surface); }
