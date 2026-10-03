@@ -9,9 +9,12 @@
 //! - 落日志 `app_icon action=apply phase=... result=applied|fallback reason=...`
 //!   （对应 Mac 的 `APP_ICON CHANGE`）；
 //! - Mac 换的是 `NSApplication.applicationIconImage`（Dock / 应用切换器 / 设置窗口）；
-//!   Windows 上等价的"各个地方" = **主窗口图标（任务栏 + Alt-Tab + 标题栏）与通知
-//!   区域托盘图标**，设置页顶部标识由前端按同一选择实时渲染。安装包、开始菜单快捷
-//!   方式与可执行文件自身的图标属于安装产物，运行期不可改（Mac 的 bundle 图标同样不变）。
+//!   Windows 上等价的"各个地方" = **主窗口图标（任务栏 + Alt-Tab + 标题栏）、通知
+//!   区域托盘图标、以及开始菜单 / 桌面 / 固定到任务栏的快捷方式图标**，设置页顶部
+//!   标识由前端按同一选择实时渲染。安装包与可执行文件自身的图标属于安装产物，运行期
+//!   不可改（Mac 的 bundle 图标同样不变）；快捷方式图标由
+//!   `crate::shortcut_icons::sync`（2026-10-03：快捷方式 `IconLocation=,0` 取的是 exe
+//!   内嵌图标，不额外同步就不会跟随切换）。
 
 use sayall_core::AppIconIdentifier;
 use tauri::image::Image;
@@ -349,6 +352,22 @@ pub fn apply(app: &AppHandle, requested: AppIconIdentifier) -> AppIconIdentifier
         // 仿真构建不建托盘；真机上托盘创建失败也走这里。只记日志，不报错。
         None => sayall_windows::gatt_note(format!(
             "app_icon action=apply target=tray phase=completed terminal_result=skipped applied={} reason=tray_unavailable",
+            style_label(applied)
+        )),
+    }
+
+    // 快捷方式（开始菜单 / 桌面 / 固定到任务栏）的图标不来自窗口句柄，单独同步
+    // （2026-10-03：切换后开始菜单磁贴与固定项不变，就是缺这一步）。
+    match crate::shortcut_icons::sync(applied) {
+        Ok(report) => sayall_windows::gatt_note(format!(
+            "app_icon action=sync_shortcuts phase=completed terminal_result=passed style={} considered={} updated={} failed={}",
+            style_label(applied),
+            report.considered,
+            report.updated,
+            report.failed
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "app_icon action=sync_shortcuts phase=completed terminal_result=failed style={} error_domain=shell error_code=sync_failed retryable=true",
             style_label(applied)
         )),
     }
