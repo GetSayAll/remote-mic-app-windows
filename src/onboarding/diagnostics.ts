@@ -25,6 +25,7 @@ export type OnboardingEventKind =
   | "remote_observed"
   | "audio_route"
   | "tool_selected"
+  | "authorization"
   | "binding"
   | "completed"
   | "restarted";

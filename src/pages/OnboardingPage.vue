@@ -2,20 +2,37 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   connectRemote,
+  disableRc003Capture,
+  enableRc003Capture,
   getAudioSnapshot,
   getOnboardingState,
+  getOtherVoiceHotkey,
+  getRc003TaskStatus,
+  getVokieInstallation,
+  getVoiceHoldHotkey,
+  getVoiceInputTool,
   isRecommendedVoiceEndpoint,
+  launchVokie,
   listAudioEndpoints,
   openVbCableDownloadPage,
+  openVokieHomepage,
   openWindowsSettings,
   saveOnboardingStep,
   scanPairedRemotes,
   selectAudioEndpoint,
+  setOtherVoiceHotkey,
+  stageOnboardingVoiceBinding,
   subscribeButtonEdges,
+  voiceHoldHotkeyLabel,
   type AudioEndpoint,
   type AudioSnapshot,
+  type KeyChord,
+  type KeyCode,
   type PairedRemote,
+  type Rc003TaskStatus,
   type RuntimeSnapshot,
+  type VoiceInputTool,
+  type VokieInstallation,
 } from "../lib/bridge";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
 import {
@@ -31,17 +48,19 @@ import {
 } from "../onboarding/flow";
 import AudioStep from "../onboarding/steps/AudioStep.vue";
 import RemoteStep from "../onboarding/steps/RemoteStep.vue";
+import VoiceToolStep from "../onboarding/steps/VoiceToolStep.vue";
 import WelcomeStep from "../onboarding/steps/WelcomeStep.vue";
+import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ completed: [] }>();
 
 /**
- * 本分支已实现的最后一步：步骤④（输入工具）接入前，「继续」在这里止步。
+ * 本分支已实现的最后一步：步骤⑤（按住说话验证）接入前，「继续」在这里止步。
  * 向导激活开关（ONBOARDING_WIZARD_ENABLED）在流程完整前恒为 false，
- * 所以这层保护不会被真实用户碰到；P2 完成后删除本常量。
+ * 所以这层保护不会被真实用户碰到；步骤⑤完成后删除本常量。
  */
-const LAST_IMPLEMENTED_STEP: OnboardingStep = "audio";
+const LAST_IMPLEMENTED_STEP: OnboardingStep = "voice_tool";
 
 function isImplemented(candidate: OnboardingStep): boolean {
   return stepIndex(candidate) <= stepIndex(LAST_IMPLEMENTED_STEP);
@@ -70,6 +89,21 @@ const audioMessage = ref("");
 const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
 
+// ---- 输入工具步骤 ----
+const stagedTool = ref<VoiceInputTool | null>(null);
+const currentHotkey = ref<KeyChord | null>(null);
+const otherKeys = ref<KeyCode[] | null>(null);
+const rc003Status = ref<Rc003TaskStatus | null>(null);
+const captureBusy = ref(false);
+const showCaptureConfirm = ref(false);
+const captureHint = ref("");
+const vokie = ref<VokieInstallation | null>(null);
+const vokieBusy = ref(false);
+const toolMessage = ref("");
+const hotkeyLabel = computed(() =>
+  currentHotkey.value ? voiceHoldHotkeyLabel(currentHotkey.value) : "不按键",
+);
+
 /** 门禁上下文：全部来自运行快照与本向导会话内的观察，不发起任何调用。 */
 const gateContext = computed<OnboardingContext>(() => {
   const platform = props.runtime?.platform;
@@ -90,14 +124,15 @@ const gateContext = computed<OnboardingContext>(() => {
         (audioSnapshot.value?.phase ?? platform?.audio.phase ?? "unconfigured") === "ready",
       lastError: audioSnapshot.value?.lastError ?? platform?.audio.lastError ?? null,
     },
-    // 步骤④–⑦ 的上下文在 P2 接入；当前构建不会走到那几步。
+    // 输入工具步骤：工具/授权/运行状态都来自本向导会话内的实时探测。
     voiceTool: {
-      tool: null,
-      doubaoCaptureEnabled: false,
-      vokieInstalled: false,
-      vokieRunning: false,
-      otherHotkeyChosen: false,
+      tool: stagedTool.value,
+      doubaoCaptureEnabled: rc003Status.value?.enabled === true,
+      vokieInstalled: vokie.value?.installed === true,
+      vokieRunning: vokie.value?.running === true,
+      otherHotkeyChosen: otherKeys.value !== null,
     },
+    // 步骤⑤–⑦ 的上下文在后续接入；当前构建不会走到那几步。
     voiceTest: { verified: false },
     controls: { distinctButtons: 0 },
   };
@@ -176,6 +211,9 @@ watch(
     }
     if (current === "audio") {
       void refreshAudioDevices(true);
+    }
+    if (current === "voice_tool") {
+      void prepareVoiceToolStep();
     }
   },
   { immediate: true },
@@ -420,6 +458,201 @@ async function openDownloadPage(): Promise<void> {
     openingVbCablePage.value = false;
   }
 }
+
+// ---- 输入工具步骤 ----
+
+/** 各工具的固定语音键（与连接页同一口径：选卡即自动落该组合）。 */
+function hotkeyForTool(tool: VoiceInputTool): KeyChord | null {
+  switch (tool) {
+    case "doubao":
+    case "vokie":
+      return { keys: ["right_alt"] };
+    case "wechat":
+      return { keys: ["left_control", "left_windows"] };
+    case "other": {
+      const keys = otherKeys.value ?? [];
+      return keys.length ? { keys } : null;
+    }
+  }
+}
+
+async function prepareVoiceToolStep(): Promise<void> {
+  toolMessage.value = "";
+  try {
+    const [tool, hotkey, other, rc003, vokieState] = await Promise.all([
+      getVoiceInputTool(),
+      getVoiceHoldHotkey(),
+      getOtherVoiceHotkey(),
+      getRc003TaskStatus().catch(() => null),
+      getVokieInstallation().catch(() => null),
+    ]);
+    stagedTool.value = tool;
+    currentHotkey.value = hotkey;
+    otherKeys.value = other;
+    rc003Status.value = rc003;
+    vokie.value = vokieState;
+  } catch (error) {
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+/**
+ * 选卡即暂存：落回滚快照 + 应用正式配置与运行时（Rust 事务），保证第⑤步
+ * 真实验证可用；退出未完成流程 / 重跑向导会回滚（设计稿 §5.4）。
+ */
+async function selectTool(tool: VoiceInputTool): Promise<void> {
+  if (tool === "other" && otherKeys.value === null) {
+    stagedTool.value = "other";
+    toolMessage.value = "先为「其他工具」选一个语音键。";
+    void refreshVokieState();
+    return;
+  }
+  const hotkey = hotkeyForTool(tool);
+  const previous = stagedTool.value;
+  stagedTool.value = tool;
+  currentHotkey.value = hotkey;
+  toolMessage.value = "";
+  try {
+    await stageOnboardingVoiceBinding(tool, hotkey);
+    reportOnboardingEvent({
+      kind: "tool_selected",
+      result: "passed",
+      reason: "staged",
+      step: "voice_tool",
+      detail: tool,
+    });
+  } catch (error) {
+    stagedTool.value = previous;
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+    return;
+  }
+  // 豆包/Vokie 同键（右 Alt）：选中即刷新 Vokie 运行状态，冲突要立刻可见。
+  if (tool === "doubao" || tool === "vokie") {
+    void refreshVokieState();
+  }
+}
+
+async function chooseOtherKeys(keys: KeyCode[]): Promise<void> {
+  otherKeys.value = keys;
+  try {
+    await setOtherVoiceHotkey(keys);
+  } catch (error) {
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+  }
+  try {
+    await stageOnboardingVoiceBinding("other", keys.length ? { keys } : null);
+    currentHotkey.value = keys.length ? { keys } : null;
+    reportOnboardingEvent({
+      kind: "tool_selected",
+      result: "passed",
+      reason: "other_keys",
+      step: "voice_tool",
+      detail: keys.length ? "with_keys" : "disabled",
+    });
+  } catch (error) {
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function requestCaptureToggle(): void {
+  if (captureBusy.value) return;
+  // 每次开启都先弹确认（2026-10-03 定稿）；关闭方向直接执行。
+  if (rc003Status.value?.enabled !== true) {
+    showCaptureConfirm.value = true;
+    return;
+  }
+  void applyCaptureToggle();
+}
+
+async function applyCaptureToggle(): Promise<void> {
+  if (captureBusy.value) return;
+  captureBusy.value = true;
+  const wasEnabled = rc003Status.value?.enabled === true;
+  reportOnboardingEvent({
+    kind: "authorization",
+    result: "unknown",
+    reason: wasEnabled ? "disable_requested" : "enable_requested",
+    step: "voice_tool",
+    detail: "doubao",
+  });
+  try {
+    const next = wasEnabled ? await disableRc003Capture() : await enableRc003Capture();
+    rc003Status.value = next;
+    if (next.lastError) {
+      captureHint.value = next.lastError;
+      reportOnboardingEvent({
+        kind: "authorization",
+        result: "failed",
+        reason: "switch_failed",
+        step: "voice_tool",
+        detail: "doubao",
+      });
+      return;
+    }
+    captureHint.value = "";
+    reportOnboardingEvent({
+      kind: "authorization",
+      result: "passed",
+      reason: next.enabled ? "enabled" : "disabled",
+      step: "voice_tool",
+      detail: "doubao",
+    });
+  } catch (error) {
+    captureHint.value = error instanceof Error ? error.message : String(error);
+    try {
+      rc003Status.value = await getRc003TaskStatus();
+    } catch {
+      // 读取失败保持旧状态；错误已在上面显示。
+    }
+    reportOnboardingEvent({
+      kind: "authorization",
+      result: "failed",
+      reason: "switch_error",
+      step: "voice_tool",
+      detail: "doubao",
+    });
+  } finally {
+    captureBusy.value = false;
+  }
+}
+
+function confirmCaptureDialog(): void {
+  showCaptureConfirm.value = false;
+  void applyCaptureToggle();
+}
+
+function closeCaptureDialog(): void {
+  showCaptureConfirm.value = false;
+}
+
+async function refreshVokieState(): Promise<void> {
+  try {
+    vokie.value = await getVokieInstallation();
+  } catch (error) {
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function openVokieSite(): Promise<void> {
+  try {
+    await openVokieHomepage();
+    toolMessage.value = "已打开 Vokie 官网；安装后回来点「重新检测」。";
+  } catch (error) {
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function launchVokieApp(): Promise<void> {
+  vokieBusy.value = true;
+  try {
+    await launchVokie();
+    toolMessage.value = "已发出启动请求；启动后点「重新检测」。";
+  } catch (error) {
+    toolMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    vokieBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -468,6 +701,25 @@ async function openDownloadPage(): Promise<void> {
         @refresh="refreshAudioDevices(false)"
         @open-download="openDownloadPage"
       />
+      <VoiceToolStep
+        v-else-if="step === 'voice_tool'"
+        :tool="stagedTool"
+        :hotkey-label="hotkeyLabel"
+        :capture-enabled="rc003Status?.enabled === true"
+        :capture-busy="captureBusy"
+        :capture-hint="captureHint"
+        :conflict="stagedTool === 'doubao' && vokie?.running === true"
+        :vokie="vokie"
+        :vokie-busy="vokieBusy"
+        :other-keys="otherKeys"
+        :message="toolMessage"
+        @select-tool="selectTool"
+        @toggle-capture="requestCaptureToggle"
+        @open-vokie-site="openVokieSite"
+        @launch-vokie="launchVokieApp"
+        @refresh-vokie="refreshVokieState"
+        @choose-other-keys="chooseOtherKeys"
+      />
     </main>
 
     <p v-if="saveMessage" class="onboarding-error">进度保存失败：{{ saveMessage }}</p>
@@ -495,6 +747,12 @@ async function openDownloadPage(): Promise<void> {
         继续
       </button>
     </footer>
+
+    <EnhancedCaptureConfirmDialog
+      v-if="showCaptureConfirm"
+      @confirm="confirmCaptureDialog"
+      @close="closeCaptureDialog"
+    />
   </div>
 </template>
 
@@ -630,6 +888,94 @@ async function openDownloadPage(): Promise<void> {
   color: var(--accent-text);
   font-size: 11.5px;
   font-style: normal;
+}
+.onboarding-tool-list {
+  display: grid;
+  gap: 8px;
+  max-width: 560px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.onboarding-tool-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong, #c9cbd6);
+  border-radius: 10px;
+  background: var(--surface-control, #f7f7fa);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.onboarding-tool-card.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+}
+.onboarding-tool-card .radio {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border: 1.5px solid var(--border-strong, #c9cbd6);
+  border-radius: 50%;
+  background: var(--surface-raised, #fff);
+}
+.onboarding-tool-card.selected .radio {
+  border-color: var(--accent);
+  box-shadow:
+    inset 0 0 0 3px var(--surface-raised, #fff),
+    inset 0 0 0 8px var(--accent);
+}
+.onboarding-tool-card strong {
+  display: block;
+  font-size: 13.5px;
+}
+.onboarding-tool-card small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.onboarding-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.onboarding-switch-row .switch-state {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.onboarding-switch-row .switch-state.ok {
+  color: var(--success-text, #1a7f4b);
+}
+.onboarding-switch-row .switch-state.warn {
+  color: var(--warning-text, #8a5a00);
+}
+.onboarding-chip-select {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.onboarding-chip-select button {
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong, #c9cbd6);
+  border-radius: 8px;
+  background: var(--surface-raised, #fff);
+  color: var(--text-control);
+  cursor: pointer;
+}
+.onboarding-chip-select button.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  color: var(--accent-text);
+  font-weight: 600;
 }
 .onboarding-error {
   margin: 6px 0;

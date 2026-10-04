@@ -22,6 +22,24 @@ const mocks = vi.hoisted(() => ({
   selectAudioEndpoint: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
   openWindowsSettings: vi.fn(),
+  getVoiceInputTool: vi.fn(),
+  getVoiceHoldHotkey: vi.fn(),
+  getOtherVoiceHotkey: vi.fn(),
+  setOtherVoiceHotkey: vi.fn(),
+  getRc003TaskStatus: vi.fn(),
+  enableRc003Capture: vi.fn(),
+  disableRc003Capture: vi.fn(),
+  getVokieInstallation: vi.fn(),
+  openVokieHomepage: vi.fn(),
+  launchVokie: vi.fn(),
+  stageOnboardingVoiceBinding: vi.fn(),
+  rc003Disabled: {
+    installed: false,
+    authorizationRequired: true,
+    enabled: false,
+    helperPath: null as string | null,
+    lastError: null as string | null,
+  },
   buttonHandler: null as ((edge: { button: string; isPressed: boolean }) => void) | null,
 }));
 
@@ -44,6 +62,17 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     selectAudioEndpoint: mocks.selectAudioEndpoint,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
     openWindowsSettings: mocks.openWindowsSettings,
+    getVoiceInputTool: mocks.getVoiceInputTool,
+    getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
+    getOtherVoiceHotkey: mocks.getOtherVoiceHotkey,
+    setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
+    getRc003TaskStatus: mocks.getRc003TaskStatus,
+    enableRc003Capture: mocks.enableRc003Capture,
+    disableRc003Capture: mocks.disableRc003Capture,
+    getVokieInstallation: mocks.getVokieInstallation,
+    openVokieHomepage: mocks.openVokieHomepage,
+    launchVokie: mocks.launchVokie,
+    stageOnboardingVoiceBinding: mocks.stageOnboardingVoiceBinding,
   };
 });
 
@@ -142,9 +171,8 @@ async function mountWizard(runtime: RuntimeSnapshot): Promise<VueWrapper> {
   return wrapper;
 }
 
-describe("Onboarding wizard shell", () => {
-  beforeEach(() => {
-    mocks.reportFrontendEvent.mockReset();
+function resetWizardMocks(): void {
+  mocks.reportFrontendEvent.mockReset();
     mocks.getOnboardingState.mockReset();
     mocks.saveOnboardingStep.mockReset();
     mocks.scanPairedRemotes.mockReset();
@@ -155,6 +183,17 @@ describe("Onboarding wizard shell", () => {
     mocks.selectAudioEndpoint.mockReset();
     mocks.openVbCableDownloadPage.mockReset();
     mocks.openWindowsSettings.mockReset();
+    mocks.getVoiceInputTool.mockReset();
+    mocks.getVoiceHoldHotkey.mockReset();
+    mocks.getOtherVoiceHotkey.mockReset();
+    mocks.setOtherVoiceHotkey.mockReset();
+    mocks.getRc003TaskStatus.mockReset();
+    mocks.enableRc003Capture.mockReset();
+    mocks.disableRc003Capture.mockReset();
+    mocks.getVokieInstallation.mockReset();
+    mocks.openVokieHomepage.mockReset();
+    mocks.launchVokie.mockReset();
+    mocks.stageOnboardingVoiceBinding.mockReset();
 
     mocks.getOnboardingState.mockResolvedValue(activeState("welcome"));
     mocks.saveOnboardingStep.mockImplementation(async (step: string) => activeState(step));
@@ -176,6 +215,27 @@ describe("Onboarding wizard shell", () => {
       generation: 0,
       lastError: null,
     } satisfies AudioSnapshot);
+    mocks.getVoiceInputTool.mockResolvedValue(null);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    mocks.getOtherVoiceHotkey.mockResolvedValue(null);
+    mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
+    mocks.rc003Disabled = {
+      installed: false,
+      authorizationRequired: true,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    };
+    mocks.getRc003TaskStatus.mockImplementation(async () => mocks.rc003Disabled);
+    mocks.enableRc003Capture.mockImplementation(async () => ({
+      ...mocks.rc003Disabled,
+      enabled: true,
+    }));
+    mocks.disableRc003Capture.mockImplementation(async () => mocks.rc003Disabled);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: false, running: false });
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
+    mocks.launchVokie.mockResolvedValue(undefined);
+    mocks.stageOnboardingVoiceBinding.mockImplementation(async () => activeState("voice_tool"));
     mocks.scanPairedRemotes.mockResolvedValue([]);
     mocks.connectRemote.mockImplementation(async (id: string) => ({
       phase: "connecting",
@@ -190,11 +250,17 @@ describe("Onboarding wizard shell", () => {
       lastError: null,
       remoteId: id,
     }));
-  });
+}
 
+function installWizardHooks(): void {
+  beforeEach(resetWizardMocks);
   afterEach(() => {
     mocks.buttonHandler = null;
   });
+}
+
+describe("Onboarding wizard shell", () => {
+  installWizardHooks();
 
   it("restores the persisted step, logs it, and keeps the wizard open", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
@@ -334,8 +400,12 @@ describe("Onboarding wizard shell", () => {
     expect(mocks.selectAudioEndpoint).toHaveBeenCalledWith(cableEndpoint.id);
     const continueButton = wrapper.find("footer .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
-    // 门禁已满足，但步骤④（输入工具）尚未接入：本分支在 audio 止步，按钮保持禁用。
-    expect(continueButton.attributes("disabled")).toBeDefined();
+    expect(continueButton.attributes("disabled")).toBeUndefined();
+
+    // 继续 → 步骤④（输入工具）。
+    await continueButton.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("选择你要用的输入工具");
   });
 
   it("keeps a recoverable state-read error with a retry entry", async () => {
@@ -352,5 +422,119 @@ describe("Onboarding wizard shell", () => {
       .trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
+  });
+});
+
+describe("Onboarding input tool step", () => {
+  installWizardHooks();
+
+  async function mountToolStep(): Promise<VueWrapper> {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_tool"));
+    return mountWizard(runtimeWith());
+  }
+
+  function toolCard(wrapper: VueWrapper, title: string) {
+    return wrapper.findAll("button").find((button) => button.text().includes(title))!;
+  }
+
+  it("stages the chosen tool with its fixed chord and blocks 豆包 until capture is enabled", async () => {
+    const wrapper = await mountToolStep();
+
+    await toolCard(wrapper, "豆包输入法").trigger("click");
+    await flushPromises();
+    expect(mocks.stageOnboardingVoiceBinding).toHaveBeenCalledWith("doubao", { keys: ["right_alt"] });
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-code")).toBe("tool.doubao.authorization_required");
+    expect(wrapper.text()).toContain("支持更多输入工具");
+
+    // 点击开关 → 确认弹窗 → 开启 → 状态读回 → 门禁通过。
+    await wrapper.find('input[type="checkbox"]').trigger("change");
+    await flushPromises();
+    expect(wrapper.text()).toContain("开启“全按键支持”？");
+    await wrapper.findAll("button").find((button) => button.text() === "开启")!.trigger("click");
+    await flushPromises();
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    expect(continueButton.attributes("data-gate-code")).toBe("ok");
+  });
+
+  it("blocks 豆包 while Vokie is running and recovers after it closes", async () => {
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+    const wrapper = await mountToolStep();
+
+    await toolCard(wrapper, "豆包输入法").trigger("click");
+    await flushPromises();
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-code")).toBe("tool.conflict.vokie_running");
+    expect(wrapper.text()).toContain("请先退出 Vokie");
+
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: false });
+    await wrapper.findAll("button").find((button) => button.text() === "重新检测")!.trigger("click");
+    await flushPromises();
+    // 冲突解除后，剩下一道门是「支持更多输入工具」未开启。
+    expect(continueButton.attributes("data-gate-code")).toBe("tool.doubao.authorization_required");
+  });
+
+  it("walks the Vokie install → launch → running flow", async () => {
+    const wrapper = await mountToolStep();
+
+    await toolCard(wrapper, "Vokie").trigger("click");
+    await flushPromises();
+    expect(mocks.stageOnboardingVoiceBinding).toHaveBeenCalledWith("vokie", { keys: ["right_alt"] });
+    expect(wrapper.text()).toContain("没有检测到 Vokie");
+
+    await wrapper.findAll("button").find((button) => button.text().includes("打开官网"))!.trigger("click");
+    await flushPromises();
+    expect(mocks.openVokieHomepage).toHaveBeenCalledTimes(1);
+
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: false });
+    await wrapper.findAll("button").find((button) => button.text() === "重新检测")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("已安装但没有运行");
+
+    await wrapper.findAll("button").find((button) => button.text().includes("打开 Vokie"))!.trigger("click");
+    await flushPromises();
+    expect(mocks.launchVokie).toHaveBeenCalledTimes(1);
+
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+    await wrapper.findAll("button").find((button) => button.text() === "重新检测")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find("footer .primary-button").attributes("data-gate-ready")).toBe("true");
+  });
+
+  it("requires an explicit key choice for 其他工具 and remembers 不按键", async () => {
+    const wrapper = await mountToolStep();
+
+    await toolCard(wrapper, "其他工具").trigger("click");
+    await flushPromises();
+    expect(mocks.stageOnboardingVoiceBinding).not.toHaveBeenCalled();
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-code")).toBe("tool.hotkey_unset");
+
+    await wrapper.findAll("button").find((button) => button.text() === "右 Alt")!.trigger("click");
+    await flushPromises();
+    expect(mocks.setOtherVoiceHotkey).toHaveBeenCalledWith(["right_alt"]);
+    expect(mocks.stageOnboardingVoiceBinding).toHaveBeenCalledWith("other", { keys: ["right_alt"] });
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+
+    await wrapper.findAll("button").find((button) => button.text() === "不按键")!.trigger("click");
+    await flushPromises();
+    expect(mocks.setOtherVoiceHotkey).toHaveBeenLastCalledWith([]);
+    expect(mocks.stageOnboardingVoiceBinding).toHaveBeenLastCalledWith("other", null);
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+  });
+
+  it("treats 微信输入法 as immediately satisfied on the wizard side", async () => {
+    const wrapper = await mountToolStep();
+
+    await toolCard(wrapper, "微信输入法").trigger("click");
+    await flushPromises();
+    expect(mocks.stageOnboardingVoiceBinding).toHaveBeenCalledWith("wechat", {
+      keys: ["left_control", "left_windows"],
+    });
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    // 门禁已满足，但步骤⑤（按住说话验证）尚未接入：本分支在 voice_tool 止步，按钮保持禁用。
+    expect(continueButton.attributes("disabled")).toBeDefined();
   });
 });

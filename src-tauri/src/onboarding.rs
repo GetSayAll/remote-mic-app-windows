@@ -17,6 +17,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
+use sayall_core::VoiceInputTool;
+use sayall_windows::send_input::KeyChord;
+
 /// 当前向导流程版本。新增真正必要的能力门禁时递增，并按 `completed_version`
 /// 决定补跑范围（本版只预留字段）。
 pub const CURRENT_FLOW_VERSION: u32 = 1;
@@ -95,6 +98,26 @@ pub fn parse_step(value: &str) -> Option<OnboardingStep> {
     })
 }
 
+/// 向导事务中的 staged 语音绑定（设计稿 §5.4 / §6）。
+///
+/// 语义：用户在第④步选择输入工具时**立即**把「工具 + 按住说话快捷键」应用到
+/// 运行时与正式配置（保证第⑤步真实验证可用），同时保存进入向导前的正式值作为
+/// 回滚快照；只有真实验证通过（完成向导）才提交（清除快照、保留当前值）。
+/// 退出未完成流程（下次启动）、重跑向导时回滚到快照，保证老用户的选择不被
+/// 未验证的向导过程永久覆盖。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OnboardingStagedBinding {
+    /// 暂存的输入工具。
+    pub tool: Option<VoiceInputTool>,
+    /// 暂存的按住说话快捷键（None = 不按键）。
+    pub voice_hotkey: Option<KeyChord>,
+    /// 进入向导前的正式输入工具（回滚目标）。
+    pub revert_tool: Option<VoiceInputTool>,
+    /// 进入向导前的正式按住说话快捷键（回滚目标）。
+    pub revert_voice_hotkey: Option<KeyChord>,
+}
+
 /// 持久化的向导状态（`onboarding.json`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -103,6 +126,8 @@ pub struct OnboardingState {
     pub completed_version: u32,
     pub step: OnboardingStep,
     pub migration_version: u32,
+    /// 未提交的 staged 语音绑定；None = 没有进行中的事务。
+    pub staged: Option<OnboardingStagedBinding>,
 }
 
 impl Default for OnboardingState {
@@ -112,6 +137,7 @@ impl Default for OnboardingState {
             completed_version: 0,
             step: OnboardingStep::Welcome,
             migration_version: CURRENT_MIGRATION_VERSION,
+            staged: None,
         }
     }
 }
@@ -232,6 +258,38 @@ mod tests {
         .unwrap();
         assert_eq!(decoded.step, OnboardingStep::Welcome);
         assert!(decoded.is_active());
+    }
+
+    #[test]
+    fn state_without_staged_field_stays_readable_and_staged_round_trips() {
+        // 旧状态（没有 staged 字段）继续可读。
+        let decoded: OnboardingState = serde_json::from_str(
+            r#"{"flow_version":1,"completed_version":0,"step":"voice_tool","migration_version":1}"#,
+        )
+        .unwrap();
+        assert_eq!(decoded.staged, None);
+
+        // staged 事务快照往返（工具 + 快捷键 + 回滚目标）。
+        let mut state = OnboardingState::default();
+        state.step = OnboardingStep::VoiceTool;
+        state.staged = Some(OnboardingStagedBinding {
+            tool: Some(VoiceInputTool::Doubao),
+            voice_hotkey: Some(KeyChord {
+                keys: vec![sayall_windows::send_input::KeyCode::RightAlt],
+            }),
+            revert_tool: Some(VoiceInputTool::Wechat),
+            revert_voice_hotkey: Some(KeyChord {
+                keys: vec![
+                    sayall_windows::send_input::KeyCode::LeftControl,
+                    sayall_windows::send_input::KeyCode::LeftWindows,
+                ],
+            }),
+        });
+        let encoded = serde_json::to_string(&state).unwrap();
+        assert!(encoded.contains("\"staged\""));
+        assert!(encoded.contains("\"right_alt\""));
+        let decoded: OnboardingState = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, state);
     }
 
     #[test]

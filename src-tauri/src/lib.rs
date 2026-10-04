@@ -1366,6 +1366,32 @@ async fn complete_onboarding(
     }
 }
 
+/// 第④步暂存语音绑定：落回滚快照 + 应用正式配置，并把工具/快捷键推给平台。
+///
+/// 平台应用与 `set_voice_input_tool` / `set_voice_hold_hotkey` 同一条链路：
+/// 保证第⑤步真实验证时按下语音键就能按 staged 组合触发。
+#[tauri::command]
+async fn stage_onboarding_voice_binding(
+    tool: VoiceInputTool,
+    hotkey: Option<KeyChord>,
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    let platform = state.platform.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        let staged = settings.stage_onboarding_voice_binding(tool, hotkey.clone())?;
+        platform.set_voice_input_tool(Some(tool));
+        platform.set_voice_hold_hotkey(hotkey);
+        Ok::<_, String>(staged)
+    })
+    .await
+    {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("binding_stage")),
+    }
+}
+
 fn onboarding_blocking_failure(event: &str) -> String {
     sayall_windows::gatt_note(format!(
         "onboarding event={event} phase=completed terminal_result=failed error_domain=task error_code=join_failed retryable=true"
@@ -1381,7 +1407,7 @@ struct VokieInstallationSnapshot {
     running: bool,
 }
 
-fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
+pub(crate) fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
     match tool {
         Some(VoiceInputTool::Wechat) => "wechat",
         Some(VoiceInputTool::Doubao) => "doubao",
@@ -2232,6 +2258,11 @@ pub fn run() {
             if let Err(error) = settings.ensure_onboarding_state() {
                 eprintln!("{error}");
             }
+            // 未完成向导里残留的 staged 语音绑定：启动时回滚正式配置（设计稿 §5.4：
+            // 退出未完成流程必须恢复进入向导前的配置）。无事务时是空操作、不落日志。
+            if let Err(error) = settings.restore_onboarding_staged_binding("startup_recovery") {
+                eprintln!("{error}");
+            }
             let saved_settings = match settings.load() {
                 Ok(settings) => {
                     sayall_windows::gatt_note(
@@ -2554,6 +2585,7 @@ pub fn run() {
         save_onboarding_step,
         restart_onboarding,
         complete_onboarding,
+        stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -2619,6 +2651,7 @@ pub fn run() {
         save_onboarding_step,
         restart_onboarding,
         complete_onboarding,
+        stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

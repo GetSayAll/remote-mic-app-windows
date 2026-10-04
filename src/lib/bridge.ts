@@ -790,6 +790,20 @@ export async function completeOnboarding(): Promise<OnboardingState> {
   return invoke<OnboardingState>("complete_onboarding");
 }
 
+/**
+ * 第④步暂存语音绑定：落回滚快照 + 应用正式配置与运行时（设计稿 §5.4）。
+ * 只有向导进行中可调用；退出未完成流程/重跑向导会回滚到进入向导前的配置。
+ */
+export async function stageOnboardingVoiceBinding(
+  tool: VoiceInputTool,
+  hotkey: KeyChord | null,
+): Promise<OnboardingState> {
+  if (!isTauriRuntime()) {
+    return { ...BROWSER_ONBOARDING_STATE };
+  }
+  return invoke<OnboardingState>("stage_onboarding_voice_binding", { tool, hotkey });
+}
+
 export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
     return browserSnapshot.platform.rawInput;
