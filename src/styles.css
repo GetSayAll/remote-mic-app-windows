@@ -162,9 +162,10 @@ body.pointer-nav input:focus-visible { outline: none; }
 
 body {
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 82% 4%, var(--canvas-glow), transparent 28rem),
-    var(--surface-canvas);
+  /* 2026-10-04 Andy：去掉右上角的强调色光晕（radial-gradient at 82% 4%）——
+     它把右上区域染了一层浅紫，左上（挨着侧栏）没有，看起来像左右留白不相等。
+     强调色 token（--canvas-glow）由 accent.ts 继续提供，暂留备用。 */
+  background: var(--surface-canvas);
   font-size: 16px;
 }
 
@@ -205,7 +206,12 @@ nav { display: grid; gap: 4px; }
 .nav-icon { width: 21px; height: 21px; display: block; }
 .sidebar-footer { margin-top: auto; padding: 10px 4px; color: var(--muted); font-size: 12px; text-align: center; }
 
-.content { min-width: 0; padding: 22px clamp(22px, 3vw, 40px) 26px; overflow: auto; scrollbar-width: none; }
+/* 2026-10-04 Andy：左右留白定为 物理 48 / 52。左侧逻辑 32（@150% = 48 物理）实测吻合。
+   右侧踩坑记录：逻辑值不是 52/1.5 = 34.67 —— 浏览器/WebView2 会把“卡片边框像素”
+   吸附到整数设备像素（取整），34.67 实测只画出 51 物理；取 35.5 时右边缘落在
+   1546.75 → 取整 1547，右边可见画布正好 52 物理（48/52 目标达成，且缩窗口时稳定）。
+   窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
+.content { min-width: 0; padding: 22px 35.5px 26px 32px; overflow: auto; scrollbar-width: none; }
 .content::-webkit-scrollbar { display: none; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
