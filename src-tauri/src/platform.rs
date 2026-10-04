@@ -86,6 +86,16 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
     fn set_mapping_suspension(&self, _suspended: bool) {}
 
+    /// 向导第⑤步前置（探针④）：物理键观察窗口。begin 返回窗口 id
+    /// （0 = 不可用：钩子未运行/仿真）；end 返回窗口内「可能进入 OS 的
+    /// 物理按下沿」计数（None = 计量不可靠，按未知处理、fail-open）。
+    fn begin_key_observation(&self, _exclude_vks: Vec<u32>) -> u64 {
+        0
+    }
+    fn end_key_observation(&self, _window_id: u64) -> Option<u64> {
+        None
+    }
+
     /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
     /// （`ble_session_cleanup` 落盘）后才返回。
     ///
@@ -254,6 +264,14 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_mapping_suspension(&self, suspended: bool) {
         WindowsPlatform::set_mapping_suspension(self, suspended)
+    }
+
+    fn begin_key_observation(&self, exclude_vks: Vec<u32>) -> u64 {
+        WindowsPlatform::begin_key_observation(self, &exclude_vks)
+    }
+
+    fn end_key_observation(&self, window_id: u64) -> Option<u64> {
+        WindowsPlatform::end_key_observation(self, window_id)
     }
 
     fn set_enhanced_capture_enabled(&self, enabled: bool) {

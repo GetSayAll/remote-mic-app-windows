@@ -800,6 +800,24 @@ impl WindowsPlatform {
         self.button_mapping.set_suspended(suspended);
     }
 
+    /// 向导第⑤步前置（探针④）：打开物理键观察窗口（计数语义见 key_gate）。
+    /// 钩子未运行时返回 0（不可用）——调用方按未知处理。
+    pub fn begin_key_observation(&self, exclude_vks: &[u32]) -> u64 {
+        if !key_gate::is_gate_thread_alive() {
+            return 0;
+        }
+        key_gate::begin_key_observation(exclude_vks)
+    }
+
+    /// 关闭物理键观察窗口并取回计数。None = 计量不可靠（窗口过期、钩子
+    /// 中途停止），调用方 fail-open，不得据此判定手动输入。
+    pub fn end_key_observation(&self, window_id: u64) -> Option<u64> {
+        match key_gate::end_key_observation(window_id) {
+            Some(count) if key_gate::is_gate_thread_alive() => Some(count),
+            _ => None,
+        }
+    }
+
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
         scan_paired_remotes()
     }

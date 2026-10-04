@@ -306,6 +306,24 @@ mod windows_impl {
     /// 终点与影响面。本计数由所有权沿日志（rc003_bridge）读快照，分析时
     /// 做差即得窗口内被吞按压次数。钩子线程内只做 fetch_add（无锁无 IO）。
     static PERSISTENT_SWALLOW_TOTAL: AtomicU64 = AtomicU64::new(0);
+    /// 物理键观察窗口（第⑤步「手动输入检测」前置，探针④）：窗口内统计
+    /// 「可能进入 OS 的物理按下沿」——非注入、未被门控吞下（被吞的遥控器
+    /// 孪生边沿到不了测试输入框）、且不在排除集内的 VK（报告层合成把
+    /// 「按住说话」和弦以非注入形态送进 OS，必须到达输入法，不属于手动
+    /// 输入，见 ble.rs 合成门禁）。
+    ///
+    /// 开/关窗走 `OBSERVATION_WINDOW_LOCK`（低频调用）；钩子线程只做原子
+    /// 读/自增。id 单调递增：陈旧 id 的 end 得到 None，迟到回调不得读取
+    /// 更新一代的计数。
+    static OBSERVATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static OBSERVATION_WINDOW_ID: AtomicU64 = AtomicU64::new(0);
+    static OBSERVATION_PHYSICAL_DOWNS: AtomicU64 = AtomicU64::new(0);
+    static OBSERVATION_EXCLUDED_VK: [AtomicBool; 256] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const FALSE: AtomicBool = AtomicBool::new(false);
+        [FALSE; 256]
+    };
+    static OBSERVATION_WINDOW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static ARMED_UNTIL_MS: [AtomicU64; ALL_BUTTONS.len()] = {
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: AtomicU64 = AtomicU64::new(0);
@@ -605,10 +623,17 @@ mod windows_impl {
             return false;
         }
         let Some(button) = button_for_keyboard(vk_code as u16, make_code) else {
+            // 普通键盘键（字母/数字等）：透传。观察窗口记录按下沿。
+            if !is_key_up {
+                observe_os_visible_down(vk_code);
+            }
             return false;
         };
         if !gate_ready(button) {
             // 未映射按键：不吞、不记配对（原始行为透传）。
+            if !is_key_up {
+                observe_os_visible_down(vk_code);
+            }
             return false;
         }
 
@@ -672,6 +697,7 @@ mod windows_impl {
         }
         // 有界等待超时：DOWN 泄漏进 OS（其 UP 沿届时按配对状态放行，防粘键）。
         LEAKED_DOWNS.fetch_add(1, Ordering::Relaxed);
+        observe_os_visible_down(vk_code);
         false
     }
 
@@ -945,6 +971,55 @@ mod windows_impl {
         PERSISTENT_SWALLOW_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// 一次「可能进入 OS 的物理按下沿」计数（见 OBSERVATION_* 注释）。
+    /// 只在透传/泄漏路径调用：门控吞下的边沿到不了输入框，注入事件在
+    /// 调用点已排除（钩子线程只做原子操作）。
+    pub(super) fn observe_os_visible_down(vk_code: u32) {
+        if !OBSERVATION_ACTIVE.load(Ordering::Relaxed) {
+            return;
+        }
+        if OBSERVATION_EXCLUDED_VK[(vk_code & 0xFF) as usize].load(Ordering::Relaxed) {
+            return;
+        }
+        OBSERVATION_PHYSICAL_DOWNS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 打开物理键观察窗口：返回窗口 id（从 1 递增；0 保留给"不可用"）。
+    /// 重复调用关闭旧窗、重开新窗（新 id、计数清零）——旧 id 的 end 只会
+    /// 得到 None。`exclude_vks` 见 OBSERVATION_EXCLUDED_VK 注释。
+    pub fn begin_key_observation(exclude_vks: &[u32]) -> u64 {
+        let _guard = OBSERVATION_WINDOW_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for slot in &OBSERVATION_EXCLUDED_VK {
+            slot.store(false, Ordering::Relaxed);
+        }
+        for vk in exclude_vks {
+            OBSERVATION_EXCLUDED_VK[(vk & 0xFF) as usize].store(true, Ordering::Relaxed);
+        }
+        OBSERVATION_PHYSICAL_DOWNS.store(0, Ordering::Relaxed);
+        let id = OBSERVATION_WINDOW_ID.fetch_add(1, Ordering::Relaxed) + 1;
+        OBSERVATION_ACTIVE.store(true, Ordering::Relaxed);
+        id
+    }
+
+    /// 关闭观察窗口并返回计数；仅当前 id 有效（幂等：重复关闭、陈旧 id 与
+    /// 未开窗都返回 None）。None = 计量不可靠，调用方按未知处理（fail-open，
+    /// 不据此判定手动输入）。
+    pub fn end_key_observation(window_id: u64) -> Option<u64> {
+        let _guard = OBSERVATION_WINDOW_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if window_id == 0
+            || !OBSERVATION_ACTIVE.load(Ordering::Relaxed)
+            || OBSERVATION_WINDOW_ID.load(Ordering::Relaxed) != window_id
+        {
+            return None;
+        }
+        OBSERVATION_ACTIVE.store(false, Ordering::Relaxed);
+        Some(OBSERVATION_PHYSICAL_DOWNS.load(Ordering::Relaxed))
+    }
+
     pub fn is_gate_thread_alive() -> bool {
         GATE_ACTIVE.load(Ordering::Relaxed)
     }
@@ -957,12 +1032,12 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, capture_diagnostics_summary, configure, decide, enhanced_owned_mask,
-    is_gate_thread_alive, leaked_down_count, listener_active, persistent_swallow_total,
-    set_edge_sink, set_enhanced_owned_mask, set_listener_active, set_persistent_mask,
-    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
-    set_voice_synth_active, swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED,
-    HOLD_NONE, HOLD_SWALLOWED_ALL,
+    arm_button, begin_key_observation, capture_diagnostics_summary, configure, decide,
+    end_key_observation, enhanced_owned_mask, is_gate_thread_alive, leaked_down_count,
+    listener_active, persistent_swallow_total, set_edge_sink, set_enhanced_owned_mask,
+    set_listener_active, set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
+    set_shortcut_capture_sink, set_voice_synth_active, swallowed_edge_count, voice_synth_active,
+    KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -1008,6 +1083,12 @@ mod fallback {
     }
     pub fn persistent_swallow_total() -> u64 {
         0
+    }
+    pub fn begin_key_observation(_exclude_vks: &[u32]) -> u64 {
+        0
+    }
+    pub fn end_key_observation(_window_id: u64) -> Option<u64> {
+        None
     }
     pub fn set_voice_synth_active(_active: bool) {}
     pub fn voice_synth_active() -> bool {
@@ -1232,6 +1313,52 @@ mod tests {
             false,
             false
         ));
+    }
+
+    /// 观察窗口测试串行锁：窗口状态是进程级静态量，同一测试二进制内并行
+    /// 跑的两个用例会互相改写（与 GATE_TEST_LOCK 同因）。
+    #[cfg(windows)]
+    static OBSERVATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(windows)]
+    fn lock_observation_tests() -> std::sync::MutexGuard<'static, ()> {
+        OBSERVATION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn observation_window_counts_os_visible_physical_downs_only() {
+        let _lock = lock_observation_tests();
+        let id = windows_impl::begin_key_observation(&[0xA5]);
+        assert!(id > 0, "开窗返回非零 id");
+        // 普通字母按下沿：计数（会进入 OS，可能是手动输入）。
+        windows_impl::observe_os_visible_down(0x41);
+        // 排除集内的合成和弦键（右 Alt）：不计（它必须到达输入法）。
+        windows_impl::observe_os_visible_down(0xA5);
+        assert_eq!(windows_impl::end_key_observation(id), Some(1));
+        // 幂等：重复关闭与陈旧 id 都是 None（迟到回调不得读新窗）。
+        assert_eq!(windows_impl::end_key_observation(id), None);
+        assert_eq!(windows_impl::end_key_observation(0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn observation_window_rotates_ids_and_resets_excludes() {
+        let _lock = lock_observation_tests();
+        let first = windows_impl::begin_key_observation(&[0xA5]);
+        windows_impl::observe_os_visible_down(0xA5); // 旧窗内被排除
+        let second = windows_impl::begin_key_observation(&[]);
+        assert!(second > first, "新窗 id 单调递增");
+        assert_eq!(
+            windows_impl::end_key_observation(first),
+            None,
+            "旧窗 id 不得读取或关闭新窗"
+        );
+        // 排除集随窗口重置：新窗未排除 0xA5，计数生效。
+        windows_impl::observe_os_visible_down(0xA5);
+        assert_eq!(windows_impl::end_key_observation(second), Some(1));
     }
 
     #[cfg(windows)]

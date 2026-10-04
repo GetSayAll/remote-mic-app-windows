@@ -806,6 +806,43 @@ fn set_mapping_suspension(suspended: bool, state: tauri::State<'_, AppState>) ->
     suspended
 }
 
+/// 向导第⑤步前置（探针④）：打开物理键观察窗口。
+///
+/// `exclude_vks` 排除「按住说话」和弦等由报告层合成以非注入形态送进 OS 的键
+/// （它们必须到达输入法，不属于手动输入）。返回窗口 id；0 = 不可用（钩子未
+/// 运行/仿真平台），调用方按未知处理。
+#[tauri::command]
+fn begin_key_observation(exclude_vks: Vec<u32>, state: tauri::State<'_, AppState>) -> u64 {
+    let window = state.platform.begin_key_observation(exclude_vks);
+    if window > 0 {
+        sayall_windows::gatt_note(format!(
+            "input_observation feature=physical_keys action=begin window={window} phase=completed terminal_result=passed"
+        ));
+    } else {
+        sayall_windows::gatt_note(
+            "input_observation feature=physical_keys action=begin phase=completed terminal_result=failed error_domain=hook error_code=gate_inactive retryable=true"
+                .to_owned(),
+        );
+    }
+    window
+}
+
+/// 向导第⑤步前置（探针④）：关闭物理键观察窗口并取回计数。
+/// None = 计量不可靠（窗口过期/钩子停止）——调用方 fail-open。
+#[tauri::command]
+fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Option<u64> {
+    let count = state.platform.end_key_observation(window_id);
+    match count {
+        Some(count) => sayall_windows::gatt_note(format!(
+            "input_observation feature=physical_keys action=end window={window_id} count={count} phase=completed terminal_result=passed"
+        )),
+        None => sayall_windows::gatt_note(format!(
+            "input_observation feature=physical_keys action=end window={window_id} phase=completed terminal_result=failed error_domain=hook error_code=window_unreliable retryable=true"
+        )),
+    }
+    count
+}
+
 #[tauri::command]
 fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
     state.platform.button_mappings()
@@ -2569,6 +2606,8 @@ pub fn run() {
         start_raw_input,
         stop_raw_input,
         set_mapping_suspension,
+        begin_key_observation,
+        end_key_observation,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
@@ -2636,6 +2675,8 @@ pub fn run() {
         start_raw_input,
         stop_raw_input,
         set_mapping_suspension,
+        begin_key_observation,
+        end_key_observation,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
