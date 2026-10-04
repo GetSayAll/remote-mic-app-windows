@@ -60,6 +60,15 @@ impl AppIconIdentifier {
     }
 }
 
+/// 当前配置代次。4 = 2026-10-04 引入 `app_icon` 选择迁移（见 `AppSettings::normalized`）。
+const CURRENT_SCHEMA_VERSION: u32 = 4;
+
+/// `app_icon` 被视为"用户真实选择"的最低代次（2026-10-04）。
+///
+/// 更早的配置里 `app_icon` 只是旧版本任意一次保存时写下的默认值（`standard`），
+/// 用户没做过选择——升级时一律改用几何鸭；从 4 起（本版本写下的选择）才认用户的值。
+const APP_ICON_CHOICE_MIN_SCHEMA_VERSION: u32 = 4;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -101,7 +110,7 @@ where
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            schema_version: 3,
+            schema_version: CURRENT_SCHEMA_VERSION,
             selected_remote_id: None,
             audio_endpoint_id: None,
             audio_endpoint_name: None,
@@ -121,7 +130,13 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn normalized(mut self) -> Self {
-        self.schema_version = Self::default().schema_version;
+        // 2026-10-04 迁移（用户定稿）：旧版本会把当时的默认图标（`standard`，水彩鸭）
+        // 在任意一次保存时写进配置——用户其实没做过选择。所以 4 之前的配置一律改用
+        // 几何鸭；从 4 起才按用户的选择保留。
+        if self.schema_version < APP_ICON_CHOICE_MIN_SCHEMA_VERSION {
+            self.app_icon = AppIconIdentifier::FacetedDuck;
+        }
+        self.schema_version = CURRENT_SCHEMA_VERSION;
         self.gain_db = crate::normalize_gain_db(self.gain_db);
         self.usage_statistics = self.usage_statistics.normalized();
         self
@@ -153,7 +168,7 @@ mod tests {
 
         assert_eq!(settings.audio_endpoint_id.as_deref(), Some("endpoint-1"));
         assert_eq!(settings.audio_endpoint_name, None);
-        assert_eq!(settings.schema_version, 3);
+        assert_eq!(settings.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(!settings.check_prerelease_updates);
         assert_eq!(settings.theme_preference, ThemePreference::System);
         assert_eq!(settings.usage_statistics, UsageStatistics::default());
@@ -216,6 +231,7 @@ mod tests {
             AppIconIdentifier::FacetedDuck
         );
 
+        // 当前代次（4 起）：写下什么就保留什么。
         for icon in [AppIconIdentifier::Standard, AppIconIdentifier::FacetedDuck] {
             let settings = AppSettings {
                 app_icon: icon,
@@ -230,17 +246,63 @@ mod tests {
         // 磁盘上的原始值是 Mac 同源的稳定语义 ID；新装默认写几何鸭。
         let encoded = serde_json::to_string(&AppSettings::default()).unwrap();
         assert!(encoded.contains("\"app_icon\":\"faceted-duck\""));
+        assert!(encoded.contains(&format!("\"schema_version\":{CURRENT_SCHEMA_VERSION}")));
         assert_eq!(AppIconIdentifier::Standard.display_name(), "默认");
         assert_eq!(AppIconIdentifier::FacetedDuck.display_name(), "几何鸭");
+    }
+
+    /// 迁移（2026-10-04 用户定稿）：**本版本之前的配置一律改用几何鸭**。
+    ///
+    /// 旧版本会在任意一次保存时把当时的默认图标（`standard`）写进配置，用户并没有
+    /// 做过选择；从 4 起（本版本写下的选择）才按用户的值保留。
+    #[test]
+    fn pre_choice_schema_configs_are_migrated_to_faceted_duck() {
+        // 3 代显式写了 standard：迁移后是几何鸭（这正是 2026-10-04 真机现场：
+        // 旧包写下的 standard 让窗口/托盘/快捷方式停在旧图标）。
+        let old: AppSettings = serde_json::from_str(
+            r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold","app_icon":"standard"}"#,
+        )
+        .unwrap();
+        let migrated = old.normalized();
+        assert_eq!(migrated.app_icon, AppIconIdentifier::FacetedDuck);
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+
+        // 更早的代次（1/2）连字段都没有：同样落几何鸭。
+        let older: AppSettings = serde_json::from_str(
+            r#"{"schema_version":2,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert_eq!(older.normalized().app_icon, AppIconIdentifier::FacetedDuck);
+
+        // 认不出的 ID 在旧代次里也被迁移覆盖（不让一个坏值把旧配置卡在水彩鸭）。
+        let unknown: AppSettings = serde_json::from_str(
+            r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold","app_icon":"neon-duck"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unknown.normalized().app_icon,
+            AppIconIdentifier::FacetedDuck
+        );
+
+        // 4 起：用户明确选的值原样保留，经一次保存（写回 4）后仍是用户的选择。
+        let chosen: AppSettings = serde_json::from_str(
+            r#"{"schema_version":4,"gain_db":0.0,"voice_trigger_mode":"hold","app_icon":"standard"}"#,
+        )
+        .unwrap();
+        let normalized = chosen.normalized();
+        assert_eq!(normalized.app_icon, AppIconIdentifier::Standard);
+        let reencoded = serde_json::to_string(&normalized).unwrap();
+        let reloaded: AppSettings = serde_json::from_str(&reencoded).unwrap();
+        assert_eq!(reloaded.normalized().app_icon, AppIconIdentifier::Standard);
     }
 
     #[test]
     fn unknown_app_icon_identifier_falls_back_to_standard() {
         // 更早/更新版本写下的图标 ID：只回落图标选择，不把整份设置打成默认值。
         // 回落目标是 `standard`（Mac `resolvedIdentifier` 同款语义），与"缺字段
-        // 走新装默认几何鸭"分开——这条用显式回落值钉住。
+        // 走新装默认几何鸭"分开——这条用显式回落值钉住（用 4 代配置，避开迁移）。
         let settings: AppSettings = serde_json::from_str(
-            r#"{"schema_version":3,"gain_db":12.0,"voice_trigger_mode":"hold","app_icon":"neon-duck"}"#,
+            r#"{"schema_version":4,"gain_db":12.0,"voice_trigger_mode":"hold","app_icon":"neon-duck"}"#,
         )
         .unwrap();
         assert_eq!(settings.app_icon, AppIconIdentifier::Standard);
