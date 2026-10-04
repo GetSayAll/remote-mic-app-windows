@@ -1,0 +1,559 @@
+{
+  "exe": "D:\\SayAll\\src\\GetSayAll\\remote-mic-app-windows\\.worktree\\helper-console-flash\\hardware\\RC003\\helper\\target\\release\\sayall-helper.exe",
+  "sha256": "e7e1ee2972893a3fd82ea94fecffff200a75e46666f82546038a99f9cd201f72",
+  "args": "--selftest --hide-window",
+  "task": "SayAllFlashProbe",
+  "target_name": "sayall-helper.exe",
+  "runs": [
+    {
+      "helper_seen": true,
+      "helper_pid": 2740,
+      "helper_start_ms": 165,
+      "helper_end_ms": 2762,
+      "new_conhost_pids": [],
+      "new_processes": [
+        {
+          "pid": 2740,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 165,
+          "ancestry": [
+            2740,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 30348,
+          "name": "softlandingtask.exe",
+          "parent_pid": 1568,
+          "t_ms": 1340,
+          "ancestry": [
+            30348,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 33308,
+          "name": "taskhostw.exe",
+          "parent_pid": 3288,
+          "t_ms": 1340,
+          "ancestry": [
+            33308,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        }
+      ],
+      "new_visible_windows": [],
+      "observed_s": 2.77,
+      "schtasks_rc": 0,
+      "run": 1
+    },
+    {
+      "helper_seen": true,
+      "helper_pid": 23144,
+      "helper_start_ms": 47,
+      "helper_end_ms": 2771,
+      "new_conhost_pids": [],
+      "new_processes": [
+        {
+          "pid": 23144,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 47,
+          "ancestry": [
+            23144,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "new_visible_windows": [],
+      "observed_s": 2.78,
+      "schtasks_rc": 0,
+      "run": 2
+    },
+    {
+      "helper_seen": true,
+      "helper_pid": 904,
+      "helper_start_ms": 75,
+      "helper_end_ms": 2815,
+      "new_conhost_pids": [
+        25868
+      ],
+      "new_processes": [
+        {
+          "pid": 656,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 1263,
+          "ancestry": [
+            656,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 904,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 75,
+          "ancestry": [
+            904,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 2560,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 1143,
+          "ancestry": [
+            2560,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 2600,
+          "name": "reg.exe",
+          "parent_pid": 656,
+          "t_ms": 1263,
+          "ancestry": [
+            2600,
+            656,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 3012,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 1381,
+          "ancestry": [
+            3012,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 4596,
+          "name": "reg.exe",
+          "parent_pid": 38660,
+          "t_ms": 2212,
+          "ancestry": [
+            4596,
+            38660,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 6444,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 668,
+          "ancestry": [
+            6444,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 21140,
+          "name": "reg.exe",
+          "parent_pid": 2560,
+          "t_ms": 1143,
+          "ancestry": [
+            21140,
+            2560,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 25868,
+          "name": "conhost.exe",
+          "parent_pid": 36932,
+          "t_ms": 1618,
+          "ancestry": [
+            25868,
+            36932,
+            34272,
+            4580
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 30780,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 2094,
+          "ancestry": [
+            30780,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 31332,
+          "name": "reg.exe",
+          "parent_pid": 38512,
+          "t_ms": 2331,
+          "ancestry": [
+            31332,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 32476,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 1977,
+          "ancestry": [
+            32476,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 34948,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 907,
+          "ancestry": [
+            34948,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 35160,
+          "name": "reg.exe",
+          "parent_pid": 37124,
+          "t_ms": 788,
+          "ancestry": [
+            35160,
+            37124,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 36076,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 1738,
+          "ancestry": [
+            36076,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 36932,
+          "name": "schtasks.exe",
+          "parent_pid": 34272,
+          "t_ms": 1618,
+          "ancestry": [
+            36932,
+            34272,
+            4580
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37072,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 1024,
+          "ancestry": [
+            37072,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37112,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 430,
+          "ancestry": [
+            37112,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37124,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 788,
+          "ancestry": [
+            37124,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37180,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 548,
+          "ancestry": [
+            37180,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37452,
+          "name": "vswhere.exe",
+          "parent_pid": 37112,
+          "t_ms": 430,
+          "ancestry": [
+            37452,
+            37112,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37712,
+          "name": "powershell.exe",
+          "parent_pid": 38512,
+          "t_ms": 2694,
+          "ancestry": [
+            37712,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37784,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 2453,
+          "ancestry": [
+            37784,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38276,
+          "name": "reg.exe",
+          "parent_pid": 38512,
+          "t_ms": 1858,
+          "ancestry": [
+            38276,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38512,
+          "name": "cmd.exe",
+          "parent_pid": 19756,
+          "t_ms": 311,
+          "ancestry": [
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38660,
+          "name": "cmd.exe",
+          "parent_pid": 38512,
+          "t_ms": 2212,
+          "ancestry": [
+            38660,
+            38512,
+            19756,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        }
+      ],
+      "new_visible_windows": [
+        {
+          "hwnd": 6883800,
+          "pid": 11968,
+          "class": "XamlExplorerHostIslandWindow",
+          "title": "",
+          "first_ms": 2280,
+          "last_ms": 3141,
+          "visible_ms": 861,
+          "ancestry": [
+            11968,
+            11444
+          ],
+          "helper_related": false
+        }
+      ],
+      "observed_s": 2.83,
+      "schtasks_rc": 0,
+      "run": 3
+    }
+  ],
+  "flash_detected": false,
+  "text": [
+    "console_flash_probe",
+    "time     : 2026-10-04 21:56:59",
+    "exe      : D:\\SayAll\\src\\GetSayAll\\remote-mic-app-windows\\.worktree\\helper-console-flash\\hardware\\RC003\\helper\\target\\release\\sayall-helper.exe",
+    "sha256   : e7e1ee2972893a3fd82ea94fecffff200a75e46666f82546038a99f9cd201f72",
+    "args     : --selftest --hide-window",
+    "target   : sayall-helper.exe",
+    "task     : SayAllFlashProbe",
+    "register : ok=True 成功: 成功创建计划任务 \"SayAllFlashProbe\"。 | 警告: 因为 /ST 早于当前的时间，任务可能无法运行。",
+    "run 1: helper_seen=True pid=2740 start=165ms new_conhost=[] helper_related_conhost=[]",
+    "        windows: total=0 console_class=0 helper_related=0 helper_related_console=0 observed_s=2.77",
+    "        new process: pid=2740 name=sayall-helper.exe parent_pid=3288 helper_related=True t=165ms",
+    "        new process: pid=30348 name=softlandingtask.exe parent_pid=1568 helper_related=False t=1340ms",
+    "        new process: pid=33308 name=taskhostw.exe parent_pid=3288 helper_related=False t=1340ms",
+    "run 2: helper_seen=True pid=23144 start=47ms new_conhost=[] helper_related_conhost=[]",
+    "        windows: total=0 console_class=0 helper_related=0 helper_related_console=0 observed_s=2.78",
+    "        new process: pid=23144 name=sayall-helper.exe parent_pid=3288 helper_related=True t=47ms",
+    "run 3: helper_seen=True pid=904 start=75ms new_conhost=[25868] helper_related_conhost=[]",
+    "        windows: total=1 console_class=0 helper_related=0 helper_related_console=0 observed_s=2.83",
+    "        new process: pid=656 name=cmd.exe parent_pid=38512 helper_related=False t=1263ms",
+    "        new process: pid=904 name=sayall-helper.exe parent_pid=3288 helper_related=True t=75ms",
+    "        new process: pid=2560 name=cmd.exe parent_pid=38512 helper_related=False t=1143ms",
+    "        new process: pid=2600 name=reg.exe parent_pid=656 helper_related=False t=1263ms",
+    "        new process: pid=3012 name=cmd.exe parent_pid=38512 helper_related=False t=1381ms",
+    "        new process: pid=4596 name=reg.exe parent_pid=38660 helper_related=False t=2212ms",
+    "        new process: pid=6444 name=cmd.exe parent_pid=38512 helper_related=False t=668ms",
+    "        new process: pid=21140 name=reg.exe parent_pid=2560 helper_related=False t=1143ms",
+    "        new process: pid=25868 name=conhost.exe parent_pid=36932 helper_related=False t=1618ms",
+    "        new process: pid=30780 name=cmd.exe parent_pid=38512 helper_related=False t=2094ms",
+    "        new process: pid=31332 name=reg.exe parent_pid=38512 helper_related=False t=2331ms",
+    "        new process: pid=32476 name=cmd.exe parent_pid=38512 helper_related=False t=1977ms",
+    "        new process: pid=34948 name=cmd.exe parent_pid=38512 helper_related=False t=907ms",
+    "        new process: pid=35160 name=reg.exe parent_pid=37124 helper_related=False t=788ms",
+    "        new process: pid=36076 name=cmd.exe parent_pid=38512 helper_related=False t=1738ms",
+    "        new process: pid=36932 name=schtasks.exe parent_pid=34272 helper_related=False t=1618ms",
+    "        new process: pid=37072 name=cmd.exe parent_pid=38512 helper_related=False t=1024ms",
+    "        new process: pid=37112 name=cmd.exe parent_pid=38512 helper_related=False t=430ms",
+    "        new process: pid=37124 name=cmd.exe parent_pid=38512 helper_related=False t=788ms",
+    "        new process: pid=37180 name=cmd.exe parent_pid=38512 helper_related=False t=548ms",
+    "        new process: pid=37452 name=vswhere.exe parent_pid=37112 helper_related=False t=430ms",
+    "        new process: pid=37712 name=powershell.exe parent_pid=38512 helper_related=False t=2694ms",
+    "        new process: pid=37784 name=cmd.exe parent_pid=38512 helper_related=False t=2453ms",
+    "        new process: pid=38276 name=reg.exe parent_pid=38512 helper_related=False t=1858ms",
+    "        new process: pid=38512 name=cmd.exe parent_pid=19756 helper_related=False t=311ms",
+    "        new process: pid=38660 name=cmd.exe parent_pid=38512 helper_related=False t=2212ms",
+    "        window shown: t=2280ms..3141ms (visible 861ms) hwnd=6883800 pid=11968 class=XamlExplorerHostIslandWindow helper_related=False title=''",
+    "task deleted",
+    "VERDICT: console_flash_detected=false"
+  ]
+}
