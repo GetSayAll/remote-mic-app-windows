@@ -1130,12 +1130,13 @@ export async function reportThemeResult(report: ThemeResultReport): Promise<void
 /**
  * 应用图标（2026-10-02 用户指定；对齐 Mac main `AppIconController`/`AppIconCatalog`）：
  *
- * - `standard`：内置应用图标（默认，也是老配置的落点）；
- * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」。
+ * - `standard`：「默认」水彩鸭（可切换的另一风格，也是老配置与认不出的 ID 的落点）；
+ * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」，
+ *   2026-10-04 起为新装默认，exe / 安装包自身的图标也用它。
  *
- * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）与托盘图标**；
- * 设置页顶部标识与选项预览用同一 ID 实时渲染。安装包与开始菜单快捷方式的图标
- * 属于安装产物，运行期不变（Mac 的 bundle 图标同样不变）。
+ * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）、托盘图标，
+ * 以及开始菜单 / 桌面 / 固定到任务栏的快捷方式图标**；设置页顶部标识与选项预览用
+ * 同一 ID 实时渲染。exe 与安装包自身的图标是安装产物，运行期不变。
  */
 export type AppIconIdentifier = "standard" | "faceted-duck";
 

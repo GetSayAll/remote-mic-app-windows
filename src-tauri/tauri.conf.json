@@ -38,10 +38,8 @@
     "shortDescription": "把 RC001/RC003 遥控器的语音和按键桥接到 Windows",
     "longDescription": "无线麦 SayAll Windows 版通过公开 Windows API 接收 RC001 和 RC003 遥控器的语音和普通按键。",
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.ico"
+      "icons/app-icons/faceted-duck-256.png",
+      "icons/app-icons/faceted-duck.ico"
     ],
     "windows": {
       "allowDowngrades": false,
@@ -56,9 +54,9 @@
           "English"
         ],
         "displayLanguageSelector": true,
-        "installerIcon": "icons/icon.ico",
+        "installerIcon": "icons/app-icons/faceted-duck.ico",
         "installerHooks": "windows/installer-hooks.nsh",
-        "uninstallerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/app-icons/faceted-duck.ico",
         "startMenuFolder": "无线麦 SayAll"
       }
     },

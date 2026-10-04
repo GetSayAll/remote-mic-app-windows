@@ -26,7 +26,7 @@
 | 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
-| 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`） | `SettingsPage.vue`、`AppSettings.app_icon` |
+| 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
@@ -130,3 +130,7 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
 - 2026-10-04：新增「增益」（连接页「语音设备」卡片，对齐 Mac `audio.gain.title` /
   `audio.gain.help`）：0–24 dB、步进 1，0 dB 保持原始音量；读数写「N dB」。
   名称与说明见上表，验收见 `Testing/WindowsRC003Preview.md` 用例十五。
+- 2026-10-04（应用图标口径，Andy 定稿）：新安装默认选中「几何鸭」；exe 与安装包的
+  图标也用几何鸭（`bundle.icon` / installerIcon / uninstallerIcon 指
+  `icons/app-icons/faceted-duck.ico`）。选项文案不变（「默认」「几何鸭」）；「默认」
+  仍是可切换的水彩鸭风格，切回后窗口/托盘/快捷方式一起还原。验收同用例十四。

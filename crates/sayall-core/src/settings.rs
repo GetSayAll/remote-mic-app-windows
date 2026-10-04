@@ -33,15 +33,20 @@ pub enum VoiceInputTool {
 /// 应用图标（设置页「应用图标」，2026-10-02 用户指定）。
 ///
 /// 对齐 Mac main `Sources/RemoteMic/AppIconController.swift` 的 `AppIconIdentifier`：
-/// 稳定语义 ID（`standard` 是内置应用图标，`faceted-duck` 的图案来自 Mac
+/// 稳定语义 ID（`standard` 是内置水彩鸭图标，`faceted-duck` 的图案来自 Mac
 /// `Resources/AppIcons/faceted-duck.png`、Windows 侧用满画布导出的
 /// `src-tauri/icons/app-icons/faceted-duck-source.png` 派生），未知 ID 一律回落到
 /// `standard`（Mac `AppIconCatalog.resolvedIdentifier(for:)` 同款语义）。
+///
+/// 默认值是 `faceted-duck`（2026-10-04 用户定稿）：新装默认选中「几何鸭」，
+/// exe 与安装包图标也用几何鸭（`src-tauri/tauri.conf.json` 的 `bundle.icon` /
+/// installerIcon）。已保存过选择的配置保持原值，不迁移。这一点与 Mac 的默认
+/// `standard` 有意不同。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppIconIdentifier {
-    #[default]
     Standard,
+    #[default]
     FacetedDuck,
 }
 
@@ -75,7 +80,7 @@ pub struct AppSettings {
     /// 所以不能拿任务的存在与否当这个开关的状态。
     pub rc003_capture_enabled: bool,
     pub theme_preference: ThemePreference,
-    /// 应用图标；老配置没有这个字段时落回内置默认图标。
+    /// 应用图标；老配置没有这个字段时落回**当前默认**（几何鸭，2026-10-04 起）。
     #[serde(default, deserialize_with = "deserialize_app_icon")]
     pub app_icon: AppIconIdentifier,
     pub usage_statistics: UsageStatistics,
@@ -83,11 +88,14 @@ pub struct AppSettings {
 
 /// 认不出的应用图标 ID（更早/更新版本写下的值）回落 `standard`，不让一个
 /// 图标名把整份设置打成默认值（Mac `AppIconCatalog.resolvedIdentifier` 同款语义）。
+///
+/// 与"没有这个字段"分开处理：缺失字段走类型默认（新装 = 几何鸭），只有认不出的
+/// 值才走这里的 `standard` 回落。
 fn deserialize_app_icon<'de, D>(deserializer: D) -> Result<AppIconIdentifier, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(AppIconIdentifier::deserialize(deserializer).unwrap_or_default())
+    Ok(AppIconIdentifier::deserialize(deserializer).unwrap_or(AppIconIdentifier::Standard))
 }
 
 impl Default for AppSettings {
@@ -105,7 +113,7 @@ impl Default for AppSettings {
             check_prerelease_updates: false,
             rc003_capture_enabled: false,
             theme_preference: ThemePreference::System,
-            app_icon: AppIconIdentifier::Standard,
+            app_icon: AppIconIdentifier::FacetedDuck,
             usage_statistics: UsageStatistics::default(),
         }
     }
@@ -196,13 +204,17 @@ mod tests {
     }
 
     #[test]
-    fn app_icon_defaults_to_standard_and_round_trips() {
-        // 老配置 / 新装：没有这个字段时落回内置默认图标（Mac 的 standard）。
+    fn app_icon_defaults_to_faceted_duck_and_round_trips() {
+        // 老配置 / 新装：没有这个字段时落回当前默认（2026-10-04 起 = 几何鸭）。
         let settings: AppSettings = serde_json::from_str(
             r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
         )
         .unwrap();
-        assert_eq!(settings.app_icon, AppIconIdentifier::Standard);
+        assert_eq!(settings.app_icon, AppIconIdentifier::FacetedDuck);
+        assert_eq!(
+            AppSettings::default().app_icon,
+            AppIconIdentifier::FacetedDuck
+        );
 
         for icon in [AppIconIdentifier::Standard, AppIconIdentifier::FacetedDuck] {
             let settings = AppSettings {
@@ -215,15 +227,18 @@ mod tests {
             assert_eq!(decoded.normalized().app_icon, icon);
         }
 
-        // 磁盘上的原始值是 Mac 同源的稳定语义 ID。
+        // 磁盘上的原始值是 Mac 同源的稳定语义 ID；新装默认写几何鸭。
         let encoded = serde_json::to_string(&AppSettings::default()).unwrap();
-        assert!(encoded.contains("\"app_icon\":\"standard\""));
+        assert!(encoded.contains("\"app_icon\":\"faceted-duck\""));
+        assert_eq!(AppIconIdentifier::Standard.display_name(), "默认");
         assert_eq!(AppIconIdentifier::FacetedDuck.display_name(), "几何鸭");
     }
 
     #[test]
     fn unknown_app_icon_identifier_falls_back_to_standard() {
         // 更早/更新版本写下的图标 ID：只回落图标选择，不把整份设置打成默认值。
+        // 回落目标是 `standard`（Mac `resolvedIdentifier` 同款语义），与"缺字段
+        // 走新装默认几何鸭"分开——这条用显式回落值钉住。
         let settings: AppSettings = serde_json::from_str(
             r#"{"schema_version":3,"gain_db":12.0,"voice_trigger_mode":"hold","app_icon":"neon-duck"}"#,
         )

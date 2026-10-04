@@ -422,23 +422,37 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(!document.querySelector('[role="alert"]'), "恢复系统外观后显示错误");
   steps.push("设置页深色/系统外观经 Windows WebView、Tauri capability 与设置持久化闭环");
 
-  // 应用图标（2026-10-02）：仿真后端不建托盘，这里证明选项、IPC 与持久化往返
-  // 可用，并且窗口图标接口不报错（真实托盘/任务栏换图属真机验收，见
+  // 应用图标（2026-10-02；2026-10-04 起新装默认几何鸭）：仿真每次运行都用全新的
+  // 状态目录（= 新装），这里同时证明"默认值经真实 IPC 读回"与选项、切换、持久化
+  // 往返可用；窗口图标接口不报错（真实托盘/任务栏换图属真机验收，见
   // Testing/WindowsRC003Preview.md 用例十四）。
-  const appIconOption = document.querySelector<HTMLInputElement>(
-    'input[name="app-icon"][value="faceted-duck"]:not(:disabled)',
+  const facetedDuckOption = await waitFor(
+    () =>
+      document.querySelector<HTMLInputElement>(
+        'input[name="app-icon"][value="faceted-duck"]:not(:disabled)',
+      ),
+    "设置页应用图标选项可用",
   );
-  assert(appIconOption !== null, "设置页缺少应用图标选项");
-  appIconOption.click();
-  await waitFor(() => (appIconOption.checked ? true : null), "应用图标切换");
+  assert(facetedDuckOption.checked, "新装默认没有选中几何鸭");
+  assert(
+    document.querySelector<HTMLImageElement>("img.app-logo")?.getAttribute("src") ===
+      "/app-icon-faceted-duck.png",
+    "顶部标识没有按新装默认（几何鸭）渲染",
+  );
+  const standardOption = document.querySelector<HTMLInputElement>(
+    'input[name="app-icon"][value="standard"]:not(:disabled)',
+  );
+  assert(standardOption !== null, "设置页缺少「默认」应用图标选项");
+  standardOption.click();
+  await waitFor(() => (standardOption.checked ? true : null), "应用图标切换到默认（水彩鸭）");
   assert(!document.querySelector('[role="alert"]'), "切换应用图标后显示错误");
   // 直达断言：命令参数契约（前端 `{ identifier }` ↔ Rust 命令参数名）。名字不匹配
   // 时 Tauri 判成缺参，前端只会看到 "IPC 不可用"（2026-10-02 本机仿真现场教训）。
-  const appliedIcon = await setAppIcon("faceted-duck");
-  assert(appliedIcon === "faceted-duck", `仿真切换应用图标没有生效：${appliedIcon}`);
-  const restoredIcon = await setAppIcon("standard");
-  assert(restoredIcon === "standard", `仿真还原应用图标没有生效：${restoredIcon}`);
-  steps.push("设置页应用图标选项经真实 IPC 与设置持久化往返");
+  const switchedIcon = await setAppIcon("standard");
+  assert(switchedIcon === "standard", `仿真切换应用图标没有生效：${switchedIcon}`);
+  const restoredIcon = await setAppIcon("faceted-duck");
+  assert(restoredIcon === "faceted-duck", `仿真还原应用图标没有生效：${restoredIcon}`);
+  steps.push("设置页应用图标新装默认几何鸭，切换经真实 IPC 与设置持久化往返");
 
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，
