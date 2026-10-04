@@ -375,6 +375,17 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .buttons-page .page-header h1 { font-size: 24px; margin: 0; }
 .mapping-header-controls { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
+/* 按键页副标题（2026-10-04）：一句话说明这页怎么用。 */
+.page-subtitle { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+/* 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：
+   型号 + 状态/电量 + 重新连接；三种连接态高度一致，不插行、不抖动画布。
+   （2026-10-04 Andy：去掉左侧遥控器图标，卡片只留文字与操作。） */
+.remote-info-card { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 26px var(--shadow-card); }
+.remote-info-main { min-width: 0; display: grid; gap: 3px; }
+.remote-info-main strong { font-size: 13.5px; white-space: nowrap; }
+.remote-info-status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+/* 按钮文案在「重新连接 / 连接中… / 立即连接」之间切换，锁个最小宽度避免卡片左右抖。 */
+.remote-info-card button { min-width: 84px; }
 .device-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-raised); font-size: 13px; white-space: nowrap; }
 .toggle-row { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
 .toggle-input { appearance: none; -webkit-appearance: none; width: 34px; height: 20px; border-radius: 999px; background: var(--toggle-off); position: relative; cursor: pointer; transition: background 0.15s; margin: 0; }

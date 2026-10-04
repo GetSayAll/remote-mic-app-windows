@@ -11,6 +11,8 @@ import {
   buttonLabels,
   buttonTriggerLabel,
   chordLabel,
+  connectRemote,
+  connectionPhaseLabel,
   exportButtonMappingConfiguration,
   getButtonMappingSnapshot,
   getButtonMappings,
@@ -29,6 +31,7 @@ import {
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
+  scanPairedRemotes,
   shortcutCapability,
   startRawInput,
   startShortcutCapture,
@@ -49,6 +52,7 @@ import {
   type FocusStrategy,
   type KeyCode,
   type MoveDirection,
+  type PairedRemote,
   type PresetAppInfo,
   type RawInputPhase,
   type Rc003BridgePhase,
@@ -978,6 +982,78 @@ async function toggleListener(): Promise<void> {
 const rawInput = computed(() => props.runtime?.platform.rawInput);
 const connectionInfo = computed(() => props.runtime?.platform.connection);
 
+/** 头部遥控器信息卡片（2026-10-04）：连接态、电量与「重新连接」按钮。 */
+const connectionReady = computed(() => {
+  const phase = connectionInfo.value?.phase;
+  return phase === "ready" || phase === "streaming";
+});
+/** 圆点配色沿用改造前设备胶囊里的同一套映射（streaming=active / ready=success / 其余 pending）。 */
+const connectionTone = computed(() =>
+  connectionInfo.value?.phase === "streaming"
+    ? "active"
+    : connectionInfo.value?.phase === "ready"
+      ? "success"
+      : "pending",
+);
+const reconnectBusy = ref(false);
+const reconnectLabel = computed(() =>
+  reconnectBusy.value ? "连接中…" : connectionReady.value ? "重新连接" : "立即连接",
+);
+const reconnectDisabled = computed(
+  () => reconnectBusy.value || props.runtime?.platform.bleScanAvailable === false,
+);
+const reconnectTitle = computed(() => {
+  if (reconnectBusy.value) return "正在连接遥控器…";
+  if (props.runtime?.platform.bleScanAvailable === false) {
+    return "蓝牙不可用：先在连接页确认蓝牙已打开，再回来重试";
+  }
+  return connectionReady.value ? "断开后连回当前这支遥控器" : "连接已配对的遥控器";
+});
+
+/**
+ * 选哪支遥控器来重连：优先型号一致，其次蓝牙广播名一致，最后退回第一个候选。
+ * 头部拿不到设备 id（ConnectionSnapshot 里没有），只能按型号/名字匹配。
+ */
+function pickReconnectTarget(
+  remotes: PairedRemote[],
+  current: { model: RemoteModel; name: string | null },
+): PairedRemote | null {
+  const supported = remotes.filter((remote) => remote.isSupportedCandidate);
+  const pool = supported.length > 0 ? supported : remotes;
+  if (pool.length === 0) return null;
+  if (current.model !== "unknown") {
+    const byModel = pool.find((remote) => remote.model === current.model);
+    if (byModel) return byModel;
+  }
+  if (current.name) {
+    const byName = pool.find((remote) => remote.name === current.name);
+    if (byName) return byName;
+  }
+  return pool[0]!;
+}
+
+async function reconnectRemote(): Promise<void> {
+  if (reconnectBusy.value) return;
+  reconnectBusy.value = true;
+  statusMessage.value = null;
+  try {
+    const remotes = await scanPairedRemotes();
+    const target = pickReconnectTarget(remotes, {
+      model: remoteModel.value,
+      name: connectionInfo.value?.remoteName ?? null,
+    });
+    if (!target) {
+      statusMessage.value = "没有找到已配对的遥控器；到连接页扫描后再试。";
+      return;
+    }
+    await connectRemote(target.id);
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    reconnectBusy.value = false;
+  }
+}
+
 /**
  * RC003 三键的传输桥接状态（捕获链第 ② 段）。
  *
@@ -1419,12 +1495,29 @@ onUnmounted(() => {
             ></span>
           </label>
         </div>
+        <p class="page-subtitle">点击按键进行自定义配置</p>
       </div>
       <div class="mapping-header-controls">
-        <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
-          <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
-          <span>{{ deviceLabel }}</span>
-          <BatteryIndicator :connection="connectionInfo" />
+        <!-- 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：图标 + 型号 +
+             状态/电量 + 重新连接。状态行与按钮文案都是常驻的（不靠 v-if 插行），
+             避免头部高度变化把画布顶下去（2026-09-28 抖动教训）。 -->
+        <div class="remote-info-card">
+          <div class="remote-info-main">
+            <strong>{{ deviceLabel }}</strong>
+            <span class="remote-info-status">
+              <span class="status-dot" :class="connectionTone"></span>{{ connectionPhaseLabel(connectionInfo?.phase ?? "idle") }}
+              <BatteryIndicator v-if="connectionReady" :connection="connectionInfo" />
+            </span>
+          </div>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="reconnectDisabled"
+            :title="reconnectTitle"
+            @click="reconnectRemote"
+          >
+            {{ reconnectLabel }}
+          </button>
         </div>
       </div>
     </header>
