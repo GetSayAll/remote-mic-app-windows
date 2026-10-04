@@ -796,6 +796,16 @@ async fn stop_raw_input(state: tauri::State<'_, AppState>) -> Result<RawInputSna
         .map_err(|error| error.to_string())
 }
 
+/// 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+#[tauri::command]
+fn set_mapping_suspension(suspended: bool, state: tauri::State<'_, AppState>) -> bool {
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=mapping_suspension action=set phase=completed terminal_result=passed suspended={suspended}"
+    ));
+    state.platform.set_mapping_suspension(suspended);
+    suspended
+}
+
 #[tauri::command]
 fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
     state.platform.button_mappings()
@@ -2558,6 +2568,7 @@ pub fn run() {
         disable_rc003_capture,
         start_raw_input,
         stop_raw_input,
+        set_mapping_suspension,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
@@ -2624,6 +2635,7 @@ pub fn run() {
         disable_rc003_capture,
         start_raw_input,
         stop_raw_input,
+        set_mapping_suspension,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,

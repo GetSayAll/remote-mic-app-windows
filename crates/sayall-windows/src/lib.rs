@@ -795,6 +795,11 @@ impl WindowsPlatform {
         self.button_mapping.subscribe_button_gestures(callback);
     }
 
+    /// 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+    pub fn set_mapping_suspension(&self, suspended: bool) {
+        self.button_mapping.set_suspended(suspended);
+    }
+
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
         scan_paired_remotes()
     }

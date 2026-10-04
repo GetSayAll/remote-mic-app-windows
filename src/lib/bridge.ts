@@ -811,6 +811,17 @@ export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
   return invoke<RawInputSnapshot>("get_raw_input_snapshot");
 }
 
+/**
+ * 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+ * 进入「普通按键体验」时暂挂，离开时恢复；进程退出后自然复位。
+ */
+export async function setMappingSuspension(suspended: boolean): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return suspended;
+  }
+  return invoke<boolean>("set_mapping_suspension", { suspended });
+}
+
 /** 浏览器 / 仿真环境没有这个机制：恒为 "不存在"，前端据此不显示这一条目。 */
 const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   phase: "stopped",

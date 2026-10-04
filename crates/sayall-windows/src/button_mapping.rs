@@ -58,6 +58,9 @@ pub enum EngineMessage {
     DeviceRemoved,
     /// 按键映射已更新：重建手势配置。
     MappingsChanged,
+    /// 临时暂挂（向导第⑥步"只看不动"）：仍观察边沿与手势，但不执行任何动作。
+    /// 内存态、不落盘；进程结束自然消失。
+    SetSuspended(bool),
     Shutdown,
 }
 
@@ -260,6 +263,8 @@ struct EngineState {
     fired_gestures: u64,
     last_fired: Option<FiredGesture>,
     last_error: Option<String>,
+    /// 向导等场景的临时暂挂：观察照旧，动作不执行。
+    suspended: bool,
 }
 
 /// 常驻抑制（"遥控器优先"）掩码：已映射按键中需要接管原生输入的键位。
@@ -364,6 +369,12 @@ impl ButtonMappingRuntime {
         key_gate::configure(mappings.enabled, mapped_mask);
         key_gate::set_persistent_mask(persistent_suppress_mask(mapped_mask));
         let _ = self.sender.send(EngineMessage::MappingsChanged);
+    }
+
+    /// 临时暂挂：观察照旧（边沿与手势回调不受影响），动作不执行。
+    /// 只存在于引擎内存、不写入用户配置；用于向导第⑥步的"只看不动"。
+    pub fn set_suspended(&self, suspended: bool) {
+        let _ = self.sender.send(EngineMessage::SetSuspended(suspended));
     }
 
     pub fn mappings(&self) -> ButtonMappings {
@@ -597,6 +608,10 @@ fn engine_worker(
                     mappings.enabled, configured
                 ));
             }
+            EngineMessage::SetSuspended(suspended) => {
+                lock_state(&state).suspended = suspended;
+                crate::ble::gatt_note(format!("map_suspension suspended={suspended}"));
+            }
             EngineMessage::Shutdown => break,
         }
     }
@@ -740,13 +755,18 @@ fn fire_gesture(
     native_pending: &mut BTreeSet<RemoteButton>,
 ) -> bool {
     let fired = FiredGesture { button, trigger };
-    {
+    let suspended = {
         let mut state = lock_state(state);
         state.fired_gestures = state.fired_gestures.saturating_add(1);
         state.last_fired = Some(fired);
-    }
+        state.suspended
+    };
     for callback in read_callbacks(gesture_callbacks).iter() {
         callback(fired);
+    }
+    // 暂挂（向导第⑥步）：手势仍被观察与广播，但不执行任何注入/动作。
+    if suspended {
+        return false;
     }
 
     let mappings = read_lock(mappings).clone();
@@ -1591,6 +1611,57 @@ mod tests {
         assert_eq!(snapshot.active_buttons, Vec::new());
         assert_eq!(snapshot.semantic_edge_count, 2);
         assert_eq!(snapshot.last_button, Some(RemoteButton::Ok));
+    }
+
+    /// 向导第⑥步：暂挂期间手势仍被观察（回调照发），但不执行注入；解除后恢复。
+    #[test]
+    fn suspended_engine_observes_gestures_without_injecting() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+        );
+        runtime.set_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
+        let fired = Arc::new(StdMutex::new(Vec::new()));
+        let fired_sink = Arc::clone(&fired);
+        runtime.subscribe_button_gestures(Arc::new(move |gesture| {
+            fired_sink.lock().unwrap().push(gesture);
+        }));
+
+        let sender = runtime.sender();
+        let tap_count = || injector.taps.lock().unwrap().len();
+
+        runtime.set_suspended(true);
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            fired.lock().unwrap().len(),
+            1,
+            "暂挂期间手势仍应被观察（回调照发）"
+        );
+        assert_eq!(tap_count(), 0, "暂挂期间不得注入任何按键");
+
+        runtime.set_suspended(false);
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(fired.lock().unwrap().len(), 2, "解除暂挂后手势继续被观察");
+        assert_eq!(tap_count(), 1, "解除暂挂后应恢复注入");
+
+        drop(runtime);
+        drop(gate);
     }
 
     /// 打开应用动作：门控运行时，手势触发应调用 launch_app 而非 tap。

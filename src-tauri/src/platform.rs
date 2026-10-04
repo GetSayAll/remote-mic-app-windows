@@ -83,6 +83,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         callback: sayall_windows::button_mapping::ButtonGestureCallback,
     );
 
+    /// 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+    fn set_mapping_suspension(&self, _suspended: bool) {}
+
     /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
     /// （`ble_session_cleanup` 落盘）后才返回。
     ///
@@ -247,6 +250,10 @@ impl PlatformRuntime for WindowsPlatform {
         callback: sayall_windows::button_mapping::ButtonGestureCallback,
     ) {
         WindowsPlatform::subscribe_button_gestures(self, callback)
+    }
+
+    fn set_mapping_suspension(&self, suspended: bool) {
+        WindowsPlatform::set_mapping_suspension(self, suspended)
     }
 
     fn set_enhanced_capture_enabled(&self, enabled: bool) {
@@ -655,6 +662,10 @@ mod simulation {
             _callback: sayall_windows::button_mapping::ButtonGestureCallback,
         ) {
             // CI 仿真不产生真实手势。
+        }
+
+        fn set_mapping_suspension(&self, _suspended: bool) {
+            // CI 仿真没有真实映射执行；接口为向导第⑥步保留。
         }
 
         fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
