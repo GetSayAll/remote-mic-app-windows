@@ -743,6 +743,18 @@ mod windows_impl {
             let _ = thread_id_tx.send(GetCurrentThreadId() as u64);
             let _ = CLOCK_BASE.get_or_init(Instant::now);
 
+            // 诊断（临时，2026-10-04）：SAYALL_DIAG_NO_HOOKS ∈ {1,both,gate,all}
+            // 时不安装本 LL 钩子（最小化对照二分）。
+            if matches!(
+                std::env::var("SAYALL_DIAG_NO_HOOKS").as_deref(),
+                Ok("1") | Ok("both") | Ok("gate") | Ok("all")
+            ) {
+                crate::ble::gatt_note(
+                    "key_gate diag=no_hooks_withheld reason=env_flag".to_owned(),
+                );
+                return;
+            }
+
             let mut current: Option<HHOOK> = None;
             bump_to_chain_head(&mut current);
             if current.is_none() {

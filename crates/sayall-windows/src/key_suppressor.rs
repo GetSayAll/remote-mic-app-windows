@@ -278,6 +278,21 @@ mod windows_impl {
             let _ = thread_id_tx.send(GetCurrentThreadId());
             let _ = CLOCK_BASE.get_or_init(Instant::now);
 
+            // 诊断（临时，2026-10-04）：SAYALL_DIAG_NO_HOOKS ∈ {1,both,suppressor,all}
+            // 时不安装本 LL 钩子（最小化对照二分：钩子被证实与"窗口内输入法语音热键失效"相关）。
+            if matches!(
+                std::env::var("SAYALL_DIAG_NO_HOOKS").as_deref(),
+                Ok("1") | Ok("both") | Ok("suppressor") | Ok("all")
+            ) {
+                crate::ble::gatt_note(
+                    "key_suppressor diag=no_hooks_withheld reason=env_flag".to_owned(),
+                );
+                return;
+            }
+            // 诊断（临时）：SAYALL_DIAG_SUPPRESSOR_NO_BUMP=1 时保留钩子但停用
+            // 10s 链头 bump（区分"钩子存在"与"bump 重装"两种因素）。
+            let allow_bump = std::env::var_os("SAYALL_DIAG_SUPPRESSOR_NO_BUMP").is_none();
+
             let mut current: Option<HHOOK> = None;
             bump_to_chain_head(&mut current);
             if current.is_none() {
@@ -287,15 +302,19 @@ mod windows_impl {
             // hWnd=NULL 的线程定时器忽略传入 nIDEvent（Win32 文档），WM_TIMER 的
             // wParam 是系统分配的 id：必须按 SetTimer 返回值匹配，否则定期链头
             // bump 永不执行（2026-09-27 key_gate 侧探针实证同款缺陷）。
-            let bump_timer = SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
+            let bump_timer = if allow_bump {
+                SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None)
+            } else {
+                0
+            };
             SWALLOW_MASTER.store(true, Ordering::Relaxed);
 
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
                 match message.message {
                     WM_QUIT => break,
-                    WM_HOOK_BUMP => bump_to_chain_head(&mut current),
-                    WM_TIMER if message.wParam.0 as usize == bump_timer => {
+                    WM_HOOK_BUMP if allow_bump => bump_to_chain_head(&mut current),
+                    WM_TIMER if allow_bump && message.wParam.0 as usize == bump_timer => {
                         bump_to_chain_head(&mut current)
                     }
                     _ => {}

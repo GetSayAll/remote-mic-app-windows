@@ -130,6 +130,32 @@ pub(crate) fn foreground_is_self() -> bool {
     }
 }
 
+/// 诊断（临时，2026-10-04，随修复提交移除）：在一枚临时 STA 线程上读回
+/// 当前会话的活动输入法是否为目标工具输入法（只查询、不切换）。
+fn sta_query_active_is_target(target: ImeProfile) -> Result<bool, String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if hr.is_err() && hr != windows::core::HRESULT(1) {
+            return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
+        }
+        let result = (|| {
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            Ok(query_active_is_target(&manager, target))
+        })();
+        CoUninitialize();
+        result
+    }
+}
+
 /// 切换触发场景（日志 `scope=`）：报障时一次日志拉取即可归因"这次切换是谁要求的"。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImeSwitchScope {
@@ -175,6 +201,22 @@ pub fn ensure_session_ime(
     // 整页重载（Bugs/2026-09-12），且此时注入的和弦也落在自己窗口上，
     // 激活没有任何收益。返回 Ok——这不是错误，不应置 UI last_error。
     if foreground_is_self() {
+        // 诊断（临时，2026-10-04，随修复提交移除）：自身窗口前台时读回本窗口会话的
+        // 活动输入法，判定"会话输入法未校准"假设。只查询、不激活（激活会重载 WebView2）。
+        let probe = std::thread::Builder::new()
+            .name("sayall-ime-self-probe".to_owned())
+            .spawn(move || sta_query_active_is_target(target))
+            .ok()
+            .and_then(|handle| handle.join().ok());
+        let (probe_ok, active) = match probe {
+            Some(Ok(true)) => (true, "true"),
+            Some(Ok(false)) => (true, "false"),
+            _ => (false, "unknown"),
+        };
+        crate::ble::gatt_note(format!(
+            "ime_self_probe tool={} ok={probe_ok} active_is_target={active}",
+            target.label,
+        ));
         crate::ble::gatt_note(format!(
             "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true error_domain=none error_code=foreground_is_self retryable=false",
             target.label,
