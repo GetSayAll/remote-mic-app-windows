@@ -1,7 +1,7 @@
 # 打开全按键支持 / 启动时助手窗口一闪而过
 
 - 发现日期：2026-10-04（用户现场反馈）
-- 状态：已修复（提权 UAC 路径的真机点击复核 deferred）
+- 状态：已修复（本地测试包已在本机安装并实测；发布动作未授权、未执行）
 - 影响范围：Windows 10/11 x64；无线麦 SayAll Windows 版「全按键支持」（RC003 增强捕获轨）；
   RC001 不经过该助手，不受影响
 - 功能点：RC003 增强捕获 Helper（`sayall-helper.exe`）——计划任务触发（`schtasks /run`）
@@ -61,7 +61,18 @@
   - 主程序侧自动化：`cargo fmt --all -- --check`、`cargo test --workspace`、
     `cargo check --workspace`、`cargo check -p sayall-windows-app --features
     runtime-simulation`（见提交说明）= `passed`；
-  - **deferred**：提权路径的真实 UAC 点击复核（需现场操作）、打开开关/启动 App 的
-    肉眼无感确认（需安装包 + 真机），以及 RC001/RC003 真机链路（与窗口路径无关）。
+  - **本地测试包实测（2026-10-04 22:15 起，安装到本机 currentUser 目录）**：
+    安装器
+    `target/release/bundle/nsis/无线麦 SayAll_0.5.0_x64-setup.exe`
+    （sha256=52ff53b0…）静默安装退出码 0；安装后 `sayall-helper.exe`
+    与构建一致（sha256=e7e1ee29…）且 PE Subsystem=2（GUI）。真机路径观测：
+    ① App 启动自动触发（22:16:34）→ 日志 `elevated=true … console=nul`；
+    ② 受控触发真实计划任务（22:19:00，探针 30 s）→ 新助手 elevated=true、
+    `console=nul`，零助手相关控制台窗口、零 conhost 子进程；
+    ③ 现场拨动开关走启用/授权路径（22:19:02 关 → 22:19:11 开，UAC 由用户点击）→
+    `enable … terminal_result=passed`、`elevated_install … exit_code=0`，
+    同一观测窗口无任何新增可见窗口 = `passed`（本机）。
+  - **deferred**：RC001/RC003 真机按键链路与睡眠恢复（与窗口路径无关，未覆盖）；
+    发布相关动作未执行（未获授权）。
 - 隐私检查：证据只含进程 id、窗口类别/标题、构建 sha256 与助手脱敏日志行；
   不含设备身份、语音内容、个人路径或凭据。
