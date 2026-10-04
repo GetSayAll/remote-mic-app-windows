@@ -615,6 +615,34 @@ fn connect_with_window(port: u16) -> Option<TcpStream> {
     }
 }
 
+/// 主进程侧接受宿主连接（`listener` 已置非阻塞以便轮询超时）。
+///
+/// **Windows 语义坑（2026-10-05 验收实测捕获）**：Winsock 的 `accept` 会让
+/// 新套接字**继承监听套接字的非阻塞模式**（与 Linux 不同）。若只恢复读取
+/// 超时而不恢复阻塞模式，`read_line` 会立即返回 `WouldBlock`，主进程把
+/// 正常连接误判为断开——宿主记录了 start=passed 却永远收不到任何钩子报告
+/// （曾导致门控 gate_active=0、hook_report 缺失）。因此这里必须显式
+/// `set_nonblocking(false)`；回归用例 `prod_accept_path_uses_blocking_stream`
+/// 覆盖该路径（单元测试的阻塞监听器不会暴露此坑）。
+fn accept_host_stream(listener: &TcpListener, deadline: Instant) -> Result<TcpStream, String> {
+    let stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err("accept_timeout".to_owned());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(format!("accept: {error}")),
+        }
+    };
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("set_blocking: {error}"))?;
+    Ok(stream)
+}
+
 fn sanitize_token(value: &str) -> &str {
     if !value.is_empty()
         && value.len() <= 32
@@ -656,20 +684,11 @@ impl KeyHostHandle {
         let child = spawn_host(port, &token)?;
 
         let deadline = Instant::now() + HELLO_TIMEOUT;
-        let stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        let _ = child_kill(child);
-                        return Err("accept_timeout".to_owned());
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => {
-                    let _ = child_kill(child);
-                    return Err(format!("accept: {error}"));
-                }
+        let stream = match accept_host_stream(&listener, deadline) {
+            Ok(stream) => stream,
+            Err(reason) => {
+                let _ = child_kill(child);
+                return Err(reason);
             }
         };
         drop(listener);
@@ -1161,6 +1180,48 @@ mod tests {
             }
         }
         assert!(saw_pong, "未收到 PONG");
+        stream.write_all(b"BYE\n").unwrap();
+        assert_eq!(0, host.join().unwrap());
+    }
+
+    #[test]
+    fn prod_accept_path_uses_blocking_stream() {
+        // 回归（2026-10-05 验收实测）：Windows 的 accept 让新套接字继承监听
+        // 套接字的非阻塞模式；accept_host_stream 必须显式恢复阻塞。测试用
+        // **非阻塞监听器**（与生产一致）——单元测试惯用的阻塞监听器不会暴露此坑。
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let launch = HostLaunch {
+            port,
+            token: "t0ken".to_owned(),
+        };
+        let host = std::thread::spawn(move || run_host(launch));
+        let stream = accept_host_stream(&listener, Instant::now() + Duration::from_secs(5))
+            .expect("accept failed");
+        // 若套接字仍为非阻塞：read_line 会在 HOOK 报告到达前立即 Err(WouldBlock)。
+        // 阻塞模式下它等待宿主的下一条信息（HELLO→OK 后的 HOOK 报告行）。
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("blocking read failed");
+        assert!(line.starts_with("HELLO "), "{line}");
+        let mut stream = stream;
+        stream.write_all(b"OK\n").unwrap();
+        let mut saw_hook = false;
+        for _ in 0..4 {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.starts_with("HOOK ") {
+                saw_hook = true;
+                break;
+            }
+        }
+        assert!(saw_hook, "未收到钩子安装报告（读取被非阻塞误判？）");
         stream.write_all(b"BYE\n").unwrap();
         assert_eq!(0, host.join().unwrap());
     }

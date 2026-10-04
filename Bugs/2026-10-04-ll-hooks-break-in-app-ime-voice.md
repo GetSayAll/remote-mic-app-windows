@@ -60,8 +60,13 @@
 2. 抑制器迁移（含 F5 吞键、bump、武装信号）；✅ 提交 `0cb4158`；
    实现说明：宿主只做机械搬运（钩子/消息泵/BUMP/ASK 转发），决策与全部静态状态留在
    主进程 `key_suppressor::handle_host_message`；ASK/VERDICT 有界 200ms，超时放行。
-   修复两处实测缺陷：OK 与后续命令同段到达被 `BufReader::into_inner` 丢弃、
-   BYE 与钩子安装赛跑导致 WM_QUIT 无人投递的 join 挂起（均已加回归测试）。
+   修复三处实测缺陷（均有回归测试）：OK 与后续命令同段到达被 `BufReader::into_inner`
+   丢弃；BYE 与钩子安装赛跑导致 WM_QUIT 无人投递的 join 挂起；**accept 继承监听
+   套接字的非阻塞模式**（Windows 语义：新套接字拷贝监听套接字的 FIONBIO——首轮
+   验收包实测中主进程把正常连接误判为断开：宿主 `start=passed` 却无任何
+   hook_report、后续 `gate_active=0`；修复 = accept 后显式 `set_nonblocking(false)`；
+   回归用例覆盖**生产 accept 路径**（寻常单测的阻塞监听器不会暴露该坑），阳性
+   对照下必失败——`prod_accept_path_uses_blocking_stream`）。
 3. key_gate 迁移（含观察窗口/录入/边沿流）；✅ 提交 `ae76177`；
    实现说明：决策全部保留在 `key_gate::handle_host_event`（在宿主读线程串行执行，
    配对表 thread-local 语义不变）；宿主对每条键盘事件同步 ASK（kind=gate），
