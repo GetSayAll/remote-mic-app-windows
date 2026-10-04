@@ -138,7 +138,9 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // lpParameters 是单个字符串；助手会自己隐藏控制台（--hide-window）。
+    // lpParameters 是单个字符串；助手自 2026-10-04 起是 **GUI 子系统**程序：
+    // 提权 / 计划任务拉起时不创建任何控制台窗口。`--hide-window` 保留为兼容
+    // 参数（旧版助手用它隐藏自己的黑框；新版接受但无窗口可隐藏）。
     let parameters: Vec<u16> = "--install-task --hide-window"
         .encode_utf16()
         .chain(Some(0))
@@ -153,7 +155,9 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
     sei.lpVerb = PCWSTR(verb.as_ptr());
     sei.lpFile = PCWSTR(file.as_ptr());
     sei.lpParameters = PCWSTR(parameters.as_ptr());
-    sei.nShow = 1; // SW_SHOWNORMAL；助手带 --hide-window 会自行隐藏
+    // SW_HIDE 双保险：新版助手本就没有窗口；万一拉起的是尚未升级的旧版
+    // 控制台助手，也让它隐藏启动，而不是闪一下黑框。
+    sei.nShow = 0;
 
     if let Err(error) = unsafe { ShellExecuteExW(&mut sei) } {
         // 用户点「否」或叉掉 UAC 窗口都走这里：ERROR_CANCELLED (1223)。
