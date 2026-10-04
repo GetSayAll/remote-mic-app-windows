@@ -170,6 +170,10 @@ describe("onboarding gates", () => {
 
   it("reports the first unsatisfied runtime condition on complete (no flow reset)", () => {
     expect(evaluateGate("complete", makeContext()).ok).toBe(true);
+    // 完成页只重查连接是否仍就绪，不要求重新按过按键。
+    expect(
+      evaluateGate("complete", makeContext({ remote: { remoteButtonObserved: false } })).ok,
+    ).toBe(true);
     expect(evaluateGate("complete", makeContext({ remote: { connectionPhase: "reconnecting" } })).code).toBe(
       "remote.not_connected",
     );
@@ -180,6 +184,10 @@ describe("onboarding gates", () => {
       evaluateGate("complete", makeContext({ voiceTool: { tool: "vokie", vokieInstalled: true, vokieRunning: false } }))
         .code,
     ).toBe("tool.vokie.not_running");
+    // 第⑤步的真实验证是完成条件的一部分（会话级事实，未通过不得完成）。
+    expect(evaluateGate("complete", makeContext({ voiceTest: { verified: false } })).code).toBe(
+      "voice_test.not_verified",
+    );
   });
 
   it("requires three distinct control buttons and does not treat voice sessions as control input", () => {

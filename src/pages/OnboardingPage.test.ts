@@ -2,6 +2,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AudioEndpoint,
+  AudioPhase,
   AudioSnapshot,
   ConnectionPhase,
   RawInputPhase,
@@ -33,6 +34,8 @@ const mocks = vi.hoisted(() => ({
   openVokieHomepage: vi.fn(),
   launchVokie: vi.fn(),
   stageOnboardingVoiceBinding: vi.fn(),
+  setMappingSuspension: vi.fn(),
+  completeOnboarding: vi.fn(),
   rc003Disabled: {
     installed: false,
     authorizationRequired: true,
@@ -73,6 +76,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     openVokieHomepage: mocks.openVokieHomepage,
     launchVokie: mocks.launchVokie,
     stageOnboardingVoiceBinding: mocks.stageOnboardingVoiceBinding,
+    setMappingSuspension: mocks.setMappingSuspension,
+    completeOnboarding: mocks.completeOnboarding,
   };
 });
 
@@ -90,6 +95,7 @@ function runtimeWith(
     rawInputPhase?: RawInputPhase;
     voiceState?: VoiceSessionState;
     reconnectAttempt?: number;
+    audioPhase?: AudioPhase;
   } = {},
 ): RuntimeSnapshot {
   return {
@@ -116,7 +122,7 @@ function runtimeWith(
         lastError: null,
       },
       audio: {
-        phase: "unconfigured",
+        phase: patch.audioPhase ?? "unconfigured",
         selectedEndpointId: null,
         selectedEndpointName: null,
         queuedSamples: 0,
@@ -194,6 +200,8 @@ function resetWizardMocks(): void {
     mocks.openVokieHomepage.mockReset();
     mocks.launchVokie.mockReset();
     mocks.stageOnboardingVoiceBinding.mockReset();
+    mocks.setMappingSuspension.mockReset();
+    mocks.completeOnboarding.mockReset();
 
     mocks.getOnboardingState.mockResolvedValue(activeState("welcome"));
     mocks.saveOnboardingStep.mockImplementation(async (step: string) => activeState(step));
@@ -236,6 +244,8 @@ function resetWizardMocks(): void {
     mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.launchVokie.mockResolvedValue(undefined);
     mocks.stageOnboardingVoiceBinding.mockImplementation(async () => activeState("voice_tool"));
+    mocks.setMappingSuspension.mockResolvedValue(true);
+    mocks.completeOnboarding.mockImplementation(async () => activeState("complete"));
     mocks.scanPairedRemotes.mockResolvedValue([]);
     mocks.connectRemote.mockImplementation(async (id: string) => ({
       phase: "connecting",
@@ -536,5 +546,136 @@ describe("Onboarding input tool step", () => {
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     // 门禁已满足，但步骤⑤（按住说话验证）尚未接入：本分支在 voice_tool 止步，按钮保持禁用。
     expect(continueButton.attributes("disabled")).toBeDefined();
+  });
+});
+
+describe("Onboarding controls & completion steps", () => {
+  installWizardHooks();
+
+  const completeReadyRuntime = () =>
+    runtimeWith({
+      connectionPhase: "ready",
+      bleVoiceReady: true,
+      rawInputPhase: "ready",
+      audioPhase: "ready",
+    });
+
+  const readyAudioSnapshot = () =>
+    ({
+      phase: "ready",
+      selectedEndpointId: cableEndpoint.id,
+      selectedEndpointName: cableEndpoint.name,
+      queuedSamples: 0,
+      submittedSamples: 0,
+      generation: 1,
+      lastError: null,
+    }) satisfies AudioSnapshot;
+
+  it("suspends mappings while the controls step collects 3 distinct buttons", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
+    const wrapper = await mountWizard(connectedRuntime());
+
+    expect(mocks.setMappingSuspension).toHaveBeenCalledWith(true);
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-code")).toBe("controls.not_confirmed");
+
+    // 同一个键重复按只累计次数，不算新的不同按键。
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    mocks.buttonHandler?.({ button: "ok", isPressed: true });
+    await flushPromises();
+    expect(continueButton.attributes("data-gate-ready")).toBe("false");
+    expect(wrapper.text()).toContain("× 2");
+
+    mocks.buttonHandler?.({ button: "back", isPressed: true });
+    await flushPromises();
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    expect(onboardingEvents("step_recovered").some((p) => p.step === "controls")).toBe(true);
+
+    // 继续 → 完成步骤：映射执行恢复（回到用户的正式配置）。
+    await continueButton.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("设置完成");
+    expect(mocks.setMappingSuspension).toHaveBeenLastCalledWith(false);
+  });
+
+  it("corrects a mistaken voice-key press during the controls step", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
+    const wrapper = await mountWizard(connectedRuntime());
+
+    await wrapper.setProps({
+      runtime: runtimeWith({
+        connectionPhase: "streaming",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        voiceState: "streaming",
+      }),
+    });
+    await flushPromises();
+    expect(wrapper.text()).toContain("这是语音键");
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("这是语音键");
+  });
+
+  it("skips the not-yet-implemented voice_test step when navigating back from controls", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
+    const wrapper = await mountWizard(connectedRuntime());
+
+    await wrapper.find("footer .secondary-button").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("选择你要用的输入工具");
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("voice_tool");
+    expect(mocks.setMappingSuspension).toHaveBeenLastCalledWith(false);
+  });
+
+  it("re-checks runtime conditions on the complete step and routes an unsatisfied page back", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("complete"));
+    mocks.listAudioEndpoints.mockResolvedValue([cableEndpoint]);
+    mocks.getAudioSnapshot.mockResolvedValue(readyAudioSnapshot());
+    const wrapper = await mountWizard(completeReadyRuntime());
+
+    expect(wrapper.text()).toContain("设置完成");
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-code")).toBe("tool.not_selected");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "去修复")!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("选择你要用的输入工具");
+    expect(
+      onboardingEvents("navigation").some(
+        (p) => p.reason === "fix_regression" && p.detail === "voice_tool",
+      ),
+    ).toBe(true);
+  });
+
+  it("blocks completion until the hold-to-talk verification passes", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("complete"));
+    mocks.listAudioEndpoints.mockResolvedValue([cableEndpoint]);
+    mocks.getAudioSnapshot.mockResolvedValue(readyAudioSnapshot());
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    const wrapper = await mountWizard(completeReadyRuntime());
+
+    const continueButton = wrapper.find("footer .primary-button");
+    expect(continueButton.attributes("data-gate-code")).toBe("voice_test.not_verified");
+    expect(wrapper.text()).toContain("完成一次真实的语音上屏测试");
+
+    // 第⑤步尚未接入：修复请求不跳转（记录 fix_blocked），停留在完成页。
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "去修复")!
+      .trigger("click");
+    await flushPromises();
+    expect(
+      onboardingEvents("navigation").some(
+        (p) => p.reason === "fix_blocked" && p.detail === "voice_test",
+      ),
+    ).toBe(true);
+    expect(wrapper.text()).toContain("设置完成");
+    expect(mocks.saveOnboardingStep).not.toHaveBeenCalledWith("voice_test");
   });
 });

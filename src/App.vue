@@ -35,13 +35,8 @@ const showOnboarding = ref(false);
 function onOnboardingCompleted(): void {
   showOnboarding.value = false;
   // 完成后落到「连接」页：先看到四项就绪状态，再开始日常使用。
+  // 完成事件由向导壳在提交成功处上报（带耗时），这里不重复上报。
   activePage.value = "connection";
-  reportFrontendEvent({
-    event: "onboarding",
-    phase: "completed",
-    result: "passed",
-    reason: "wizard_finished",
-  });
 }
 
 function handleWindowKeydown(event: KeyboardEvent): void {

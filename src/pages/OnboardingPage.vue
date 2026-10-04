@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
+  buttonLabel,
+  completeOnboarding,
   connectRemote,
   disableRc003Capture,
   enableRc003Capture,
@@ -20,33 +22,38 @@ import {
   saveOnboardingStep,
   scanPairedRemotes,
   selectAudioEndpoint,
+  setMappingSuspension,
   setOtherVoiceHotkey,
   stageOnboardingVoiceBinding,
   subscribeButtonEdges,
   voiceHoldHotkeyLabel,
   type AudioEndpoint,
   type AudioSnapshot,
+  type ButtonEdge,
   type KeyChord,
   type KeyCode,
   type PairedRemote,
   type Rc003TaskStatus,
+  type RemoteButton,
   type RuntimeSnapshot,
   type VoiceInputTool,
   type VokieInstallation,
 } from "../lib/bridge";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
 import {
+  CONNECTED_PHASES,
   evaluateGate,
   nextStep,
   normalizeStep,
   phaseOf,
   previousStep,
-  stepIndex,
   type OnboardingBlockCode,
   type OnboardingContext,
   type OnboardingStep,
 } from "../onboarding/flow";
 import AudioStep from "../onboarding/steps/AudioStep.vue";
+import CompleteStep from "../onboarding/steps/CompleteStep.vue";
+import ControlsStep from "../onboarding/steps/ControlsStep.vue";
 import RemoteStep from "../onboarding/steps/RemoteStep.vue";
 import VoiceToolStep from "../onboarding/steps/VoiceToolStep.vue";
 import WelcomeStep from "../onboarding/steps/WelcomeStep.vue";
@@ -56,19 +63,18 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ completed: [] }>();
 
 /**
- * 本分支已实现的最后一步：步骤⑤（按住说话验证）接入前，「继续」在这里止步。
- * 向导激活开关（ONBOARDING_WIZARD_ENABLED）在流程完整前恒为 false，
- * 所以这层保护不会被真实用户碰到；步骤⑤完成后删除本常量。
+ * 步骤⑤（按住说话验证）依赖现场探针①：未接入前，「继续」到它止步；
+ * 其余步骤（含⑥⑦）已全部接入。探针通过、步骤⑤落地后删除本守卫。
  */
-const LAST_IMPLEMENTED_STEP: OnboardingStep = "voice_tool";
-
 function isImplemented(candidate: OnboardingStep): boolean {
-  return stepIndex(candidate) <= stepIndex(LAST_IMPLEMENTED_STEP);
+  return candidate !== "voice_test";
 }
 
 const step = ref<OnboardingStep>("welcome");
 const stateReadFailed = ref("");
 const saveMessage = ref("");
+const wizardStartedAt = Math.round(performance.now());
+const completing = ref(false);
 
 // ---- 遥控器步骤 ----
 const devices = ref<PairedRemote[]>([]);
@@ -91,6 +97,8 @@ const openingVbCablePage = ref(false);
 
 // ---- 输入工具步骤 ----
 const stagedTool = ref<VoiceInputTool | null>(null);
+/** 完成页读到的正式配置（本会话未经过步骤④时的回退来源）。 */
+const configuredTool = ref<VoiceInputTool | null>(null);
 const currentHotkey = ref<KeyChord | null>(null);
 const otherKeys = ref<KeyCode[] | null>(null);
 const rc003Status = ref<Rc003TaskStatus | null>(null);
@@ -103,6 +111,15 @@ const toolMessage = ref("");
 const hotkeyLabel = computed(() =>
   currentHotkey.value ? voiceHoldHotkeyLabel(currentHotkey.value) : "不按键",
 );
+
+// ---- 普通按键体验 / 完成步骤 ----
+const observedButtons = ref<Map<RemoteButton, number>>(new Map());
+const observedList = computed(() =>
+  [...observedButtons.value.entries()].map(([button, count]) => ({ button, count })),
+);
+/** 第⑤步真实验证通过（会话级事实；步骤⑤接入后由 attempt 终态置位）。 */
+const voiceVerified = ref(false);
+let mappingSuspended = false;
 
 /** 门禁上下文：全部来自运行快照与本向导会话内的观察，不发起任何调用。 */
 const gateContext = computed<OnboardingContext>(() => {
@@ -126,15 +143,15 @@ const gateContext = computed<OnboardingContext>(() => {
     },
     // 输入工具步骤：工具/授权/运行状态都来自本向导会话内的实时探测。
     voiceTool: {
-      tool: stagedTool.value,
+      tool: stagedTool.value ?? configuredTool.value,
       doubaoCaptureEnabled: rc003Status.value?.enabled === true,
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
       otherHotkeyChosen: otherKeys.value !== null,
     },
-    // 步骤⑤–⑦ 的上下文在后续接入；当前构建不会走到那几步。
-    voiceTest: { verified: false },
-    controls: { distinctButtons: 0 },
+    // 步骤⑤–⑦ 的上下文：①②④ 的真实验证在会话内由对应步骤置位。
+    voiceTest: { verified: voiceVerified.value },
+    controls: { distinctButtons: observedButtons.value.size },
   };
 });
 
@@ -142,6 +159,7 @@ const gate = computed(() => evaluateGate(step.value, gateContext.value));
 const blockMessage = computed(() => (gate.value.code ? BLOCK_COPY[gate.value.code] : ""));
 const continueEnabled = computed(() => {
   if (!gate.value.ok) return false;
+  if (step.value === "complete") return true;
   const target = nextStep(step.value);
   return target !== null && isImplemented(target);
 });
@@ -201,13 +219,18 @@ watch(
   { immediate: true },
 );
 
-// 步骤进入的副作用：遥控器步骤订阅按键边沿；语音设备步骤刷新端点。
+// 步骤进入的副作用：遥控器/普通按键步骤订阅按键边沿；语音设备步骤刷新端点；
+// 普通按键体验期间暂挂映射执行（离开恢复）；切换步骤时清除误按提示。
 watch(
   step,
-  (current) => {
-    stopRemoteObservation();
-    if (current === "remote") {
-      void startRemoteObservation();
+  (current, previous) => {
+    stopButtonObservation();
+    voiceKeyMistake.value = false;
+    if (previous === "controls" && current !== "controls") {
+      void setMappingSuspensionState(false);
+    }
+    if (current === "remote" || current === "controls") {
+      void startButtonObservation();
     }
     if (current === "audio") {
       void refreshAudioDevices(true);
@@ -215,22 +238,30 @@ watch(
     if (current === "voice_tool") {
       void prepareVoiceToolStep();
     }
+    if (current === "controls") {
+      void setMappingSuspensionState(true);
+    }
+    if (current === "complete") {
+      void refreshCompleteState();
+    }
   },
   { immediate: true },
 );
 
-// 遥控器步骤误按语音键的即时纠偏（语音会话状态由运行快照轮询带入）。
+// 遥控器/普通按键步骤误按语音键的即时纠偏（语音会话状态由运行快照轮询带入）。
 watch(
   () => props.runtime?.platform.connection.voiceState ?? "idle",
   (voiceState) => {
-    if (step.value !== "remote" || voiceState === "idle") return;
-    if (remoteButtonObserved.value || voiceKeyMistake.value) return;
+    if (voiceState === "idle") return;
+    if (step.value !== "remote" && step.value !== "controls") return;
+    if (voiceKeyMistake.value) return;
+    if (step.value === "remote" && remoteButtonObserved.value) return;
     voiceKeyMistake.value = true;
     reportOnboardingEvent({
       kind: "remote_observed",
       result: "passed",
       reason: "voice_button_observed",
-      step: "remote",
+      step: step.value,
       detail: "voice",
     });
   },
@@ -241,7 +272,11 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  stopRemoteObservation();
+  stopButtonObservation();
+  // 安全网：向导卸载（完成/退出）时恢复映射执行；进程退出后内存态自然复位。
+  if (mappingSuspended) {
+    void setMappingSuspension(false);
+  }
 });
 
 async function restoreStep(): Promise<void> {
@@ -277,7 +312,10 @@ async function restoreStep(): Promise<void> {
   }
 }
 
-async function setStep(target: OnboardingStep, reason: "continue" | "back" | "restore"): Promise<void> {
+async function setStep(
+  target: OnboardingStep,
+  reason: "continue" | "back" | "restore" | "fix",
+): Promise<void> {
   step.value = target;
   reportOnboardingEvent({ kind: "step_entered", result: "passed", reason, step: target });
   try {
@@ -311,36 +349,27 @@ async function onContinue(): Promise<void> {
 async function onBack(): Promise<void> {
   const target = previousStep(step.value);
   if (!target) return;
+  // 未接入的步骤（当前只有⑤）不进入，继续往回退一步（临时守卫，与 isImplemented 同批删除）。
+  const resolved = !isImplemented(target) ? previousStep(target) : target;
+  if (!resolved) return;
   reportOnboardingEvent({
     kind: "navigation",
     result: "passed",
     reason: "user_back",
     step: step.value,
-    detail: target,
+    detail: resolved,
   });
-  await setStep(target, "back");
+  await setStep(resolved, "back");
 }
 
-// ---- 遥控器步骤 ----
+// ---- 遥控器 / 普通按键步骤：边沿观察 ----
 
-async function startRemoteObservation(): Promise<void> {
+async function startButtonObservation(): Promise<void> {
   if (buttonEdgeSubscribed) return;
   buttonEdgeSubscribed = true;
   try {
-    const unsubscribe = await subscribeButtonEdges((edge) => {
-      if (!edge.isPressed || step.value !== "remote") return;
-      if (remoteButtonObserved.value) return;
-      remoteButtonObserved.value = true;
-      voiceKeyMistake.value = false;
-      reportOnboardingEvent({
-        kind: "remote_observed",
-        result: "passed",
-        reason: "control_button",
-        step: "remote",
-        detail: edge.button,
-      });
-    });
-    if (step.value !== "remote") {
+    const unsubscribe = await subscribeButtonEdges(handleButtonEdge);
+    if (step.value !== "remote" && step.value !== "controls") {
       unsubscribe();
       buttonEdgeSubscribed = false;
       return;
@@ -351,7 +380,38 @@ async function startRemoteObservation(): Promise<void> {
   }
 }
 
-function stopRemoteObservation(): void {
+function handleButtonEdge(edge: ButtonEdge): void {
+  if (!edge.isPressed) return;
+  if (step.value === "remote") {
+    if (remoteButtonObserved.value) return;
+    remoteButtonObserved.value = true;
+    voiceKeyMistake.value = false;
+    reportOnboardingEvent({
+      kind: "remote_observed",
+      result: "passed",
+      reason: "control_button",
+      step: "remote",
+      detail: edge.button,
+    });
+    return;
+  }
+  if (step.value === "controls") {
+    const counts = observedButtons.value;
+    const next = (counts.get(edge.button) ?? 0) + 1;
+    counts.set(edge.button, next);
+    if (voiceKeyMistake.value) voiceKeyMistake.value = false;
+    // 每次观察都落日志：是否计入新的不同按键由 reason 区分（映射暂挂期间只观察、不注入）。
+    reportOnboardingEvent({
+      kind: "remote_observed",
+      result: "passed",
+      reason: next === 1 ? "control_button" : "control_button_repeat",
+      step: "controls",
+      detail: edge.button,
+    });
+  }
+}
+
+function stopButtonObservation(): void {
   buttonEdgeSubscribed = false;
   if (buttonEdgeUnsubscribe) {
     buttonEdgeUnsubscribe();
@@ -653,6 +713,117 @@ async function launchVokieApp(): Promise<void> {
     vokieBusy.value = false;
   }
 }
+
+// ---- 普通按键体验 / 完成步骤 ----
+
+async function setMappingSuspensionState(suspended: boolean): Promise<void> {
+  if (mappingSuspended === suspended) return;
+  mappingSuspended = suspended;
+  try {
+    await setMappingSuspension(suspended);
+  } catch (error) {
+    saveMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** 完成页重查关键运行条件：正式输入工具、Vokie 运行态、全按键开关、音频端点。 */
+async function refreshCompleteState(): Promise<void> {
+  try {
+    configuredTool.value = await getVoiceInputTool();
+  } catch {
+    // 读取失败保持旧值；门禁会显示未就绪，不给用户虚假的「完成」。
+  }
+  try {
+    vokie.value = await getVokieInstallation();
+  } catch {
+    // 同上。
+  }
+  try {
+    rc003Status.value = await getRc003TaskStatus();
+  } catch {
+    // 同上。
+  }
+  try {
+    audioEndpoints.value = await listAudioEndpoints();
+    audioSnapshot.value = await getAudioSnapshot();
+  } catch {
+    // 同上。
+  }
+}
+
+const completeChecks = computed(() => {
+  const platform = props.runtime?.platform;
+  const remoteReady =
+    CONNECTED_PHASES.includes(platform?.connection.phase ?? "idle") &&
+    (platform?.bleVoiceReady ?? false);
+  return [
+    { label: "遥控器已连接，语音按键可用", ok: remoteReady },
+    { label: "语音设备已就绪", ok: evaluateGate("audio", gateContext.value).ok },
+    { label: "输入工具已就绪", ok: evaluateGate("voice_tool", gateContext.value).ok },
+    { label: "按住说话验证已通过", ok: voiceVerified.value },
+  ];
+});
+
+const regressedStep = computed<OnboardingStep | null>(() => {
+  if (step.value !== "complete") return null;
+  const code = gate.value.code;
+  if (!code) return null;
+  if (code.startsWith("remote.")) return "remote";
+  if (code.startsWith("audio.")) return "audio";
+  if (code.startsWith("tool.")) return "voice_tool";
+  if (code.startsWith("voice_test.")) return "voice_test";
+  return null;
+});
+
+async function onFixStep(): Promise<void> {
+  const target = regressedStep.value;
+  if (!target) return;
+  reportOnboardingEvent({
+    kind: "navigation",
+    result: "passed",
+    reason: "fix_regression",
+    step: "complete",
+    detail: target,
+  });
+  if (!isImplemented(target)) {
+    // 第⑤步未接入前无法跳转（激活开关关闭，真实用户不受影响）。
+    reportOnboardingEvent({
+      kind: "navigation",
+      result: "failed",
+      reason: "fix_blocked",
+      step: "complete",
+      detail: target,
+    });
+    return;
+  }
+  await setStep(target, "fix");
+}
+
+async function onStartUsing(): Promise<void> {
+  if (completing.value || step.value !== "complete" || !gate.value.ok) return;
+  completing.value = true;
+  try {
+    // 提交 staged 语音绑定（Rust 事务）并标记完成；随后交回主界面。
+    await completeOnboarding();
+    reportOnboardingEvent({
+      kind: "completed",
+      result: "passed",
+      reason: "wizard_finished",
+      step: "complete",
+      elapsedMs: Math.round(performance.now() - wizardStartedAt),
+    });
+    emit("completed");
+  } catch (error) {
+    saveMessage.value = error instanceof Error ? error.message : String(error);
+    reportOnboardingEvent({
+      kind: "completed",
+      result: "failed",
+      reason: "complete_save_failed",
+    });
+  } finally {
+    completing.value = false;
+  }
+}
 </script>
 
 <template>
@@ -720,6 +891,16 @@ async function launchVokieApp(): Promise<void> {
         @refresh-vokie="refreshVokieState"
         @choose-other-keys="chooseOtherKeys"
       />
+      <ControlsStep
+        v-else-if="step === 'controls'"
+        :observed="observedList"
+        :voice-key-mistake="voiceKeyMistake"
+      />
+      <CompleteStep
+        v-else-if="step === 'complete'"
+        :checks="completeChecks"
+        @fix="onFixStep"
+      />
     </main>
 
     <p v-if="saveMessage" class="onboarding-error">进度保存失败：{{ saveMessage }}</p>
@@ -742,9 +923,9 @@ async function launchVokieApp(): Promise<void> {
         :title="continueEnabled ? '' : blockMessage"
         :data-gate-code="gate.code ?? 'ok'"
         :data-gate-ready="gate.ok ? 'true' : 'false'"
-        @click="onContinue"
+        @click="step === 'complete' ? onStartUsing() : onContinue()"
       >
-        继续
+        {{ step === "complete" ? "开始使用" : "继续" }}
       </button>
     </footer>
 
@@ -992,5 +1173,21 @@ async function launchVokieApp(): Promise<void> {
 .onboarding-error-block p {
   margin: 0 0 8px;
   font-size: 12.5px;
+}
+.onboarding-check-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.onboarding-check-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.onboarding-check-list .onboarding-ok,
+.onboarding-check-list .onboarding-error {
+  margin: 0;
 }
 </style>

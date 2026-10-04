@@ -129,7 +129,7 @@ export interface OnboardingContext {
 }
 
 /** 语音连接处于这些阶段即视为「已连接」（streaming/draining 是按住期间的瞬态）。 */
-const CONNECTED_PHASES: readonly ConnectionPhase[] = ["ready", "streaming", "draining"];
+export const CONNECTED_PHASES: readonly ConnectionPhase[] = ["ready", "streaming", "draining"];
 
 function pass(): StepGate {
   return { ok: true, code: null };
@@ -218,10 +218,21 @@ function evaluateVoiceTool(voiceTool: OnboardingContext["voiceTool"]): StepGate 
 }
 
 function evaluateComplete(context: OnboardingContext): StepGate {
+  // 完成页只重查"关键运行条件是否仍然成立"（连接/音频/工具前置），
+  // 不重验本会话的按键观察等过程证据——那些是各步当时的门禁，不是完成条件。
   const gates = [
-    evaluateRemote(context.remote),
+    evaluateRemoteReady(context.remote),
     evaluateAudio(context.audio),
     evaluateVoiceTool(context.voiceTool),
+    context.voiceTest.verified ? pass() : block("voice_test.not_verified"),
   ];
   return gates.find((gate) => !gate.ok) ?? pass();
+}
+
+/** 完成页的连接重查：只看连接是否仍就绪，不要求重新按过按键。 */
+function evaluateRemoteReady(remote: OnboardingContext["remote"]): StepGate {
+  if (!CONNECTED_PHASES.includes(remote.connectionPhase) || !remote.bleVoiceReady) {
+    return block("remote.not_connected");
+  }
+  return pass();
 }
