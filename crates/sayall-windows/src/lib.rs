@@ -818,6 +818,11 @@ impl WindowsPlatform {
         }
     }
 
+    /// 观察窗口诊断（见 `key_gate::observed_last_vk`）：最后一次计入的虚拟键码。
+    pub fn observed_last_key(&self) -> Option<u32> {
+        key_gate::observed_last_vk()
+    }
+
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
         scan_paired_remotes()
     }

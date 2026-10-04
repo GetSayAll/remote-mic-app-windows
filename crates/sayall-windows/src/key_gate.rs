@@ -318,6 +318,9 @@ mod windows_impl {
     static OBSERVATION_ACTIVE: AtomicBool = AtomicBool::new(false);
     static OBSERVATION_WINDOW_ID: AtomicU64 = AtomicU64::new(0);
     static OBSERVATION_PHYSICAL_DOWNS: AtomicU64 = AtomicU64::new(0);
+    /// 窗口内最后计入的虚拟键码（诊断：出现误报时一次日志即可定位是哪个键）。
+    /// `u64::MAX` = 未计入任何键。
+    static OBSERVATION_LAST_VK: AtomicU64 = AtomicU64::new(u64::MAX);
     static OBSERVATION_EXCLUDED_VK: [AtomicBool; 256] = {
         #[allow(clippy::declare_interior_mutable_const)]
         const FALSE: AtomicBool = AtomicBool::new(false);
@@ -981,6 +984,7 @@ mod windows_impl {
         if OBSERVATION_EXCLUDED_VK[(vk_code & 0xFF) as usize].load(Ordering::Relaxed) {
             return;
         }
+        OBSERVATION_LAST_VK.store(vk_code as u64, Ordering::Relaxed);
         OBSERVATION_PHYSICAL_DOWNS.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -998,6 +1002,7 @@ mod windows_impl {
             OBSERVATION_EXCLUDED_VK[(vk & 0xFF) as usize].store(true, Ordering::Relaxed);
         }
         OBSERVATION_PHYSICAL_DOWNS.store(0, Ordering::Relaxed);
+        OBSERVATION_LAST_VK.store(u64::MAX, Ordering::Relaxed);
         let id = OBSERVATION_WINDOW_ID.fetch_add(1, Ordering::Relaxed) + 1;
         OBSERVATION_ACTIVE.store(true, Ordering::Relaxed);
         id
@@ -1020,6 +1025,17 @@ mod windows_impl {
         Some(OBSERVATION_PHYSICAL_DOWNS.load(Ordering::Relaxed))
     }
 
+    /// 诊断：窗口内最后一次计入的虚拟键码（`None` = 未计入任何键）。
+    /// 在 `end_key_observation` 之后读取，用于现场一次日志定位误报来源。
+    pub fn observed_last_vk() -> Option<u32> {
+        let value = OBSERVATION_LAST_VK.load(Ordering::Relaxed);
+        if value == u64::MAX {
+            None
+        } else {
+            Some(value as u32)
+        }
+    }
+
     pub fn is_gate_thread_alive() -> bool {
         GATE_ACTIVE.load(Ordering::Relaxed)
     }
@@ -1034,10 +1050,10 @@ mod windows_impl {
 pub use windows_impl::{
     arm_button, begin_key_observation, capture_diagnostics_summary, configure, decide,
     end_key_observation, enhanced_owned_mask, is_gate_thread_alive, leaked_down_count,
-    listener_active, persistent_swallow_total, set_edge_sink, set_enhanced_owned_mask,
-    set_listener_active, set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
-    set_shortcut_capture_sink, set_voice_synth_active, swallowed_edge_count, voice_synth_active,
-    KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    listener_active, observed_last_vk, persistent_swallow_total, set_edge_sink,
+    set_enhanced_owned_mask, set_listener_active, set_persistent_mask, set_remote_connected,
+    set_shortcut_capture_active, set_shortcut_capture_sink, set_voice_synth_active,
+    swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -1088,6 +1104,9 @@ mod fallback {
         0
     }
     pub fn end_key_observation(_window_id: u64) -> Option<u64> {
+        None
+    }
+    pub fn observed_last_vk() -> Option<u32> {
         None
     }
     pub fn set_voice_synth_active(_active: bool) {}
@@ -1333,10 +1352,20 @@ mod tests {
         let _lock = lock_observation_tests();
         let id = windows_impl::begin_key_observation(&[0xA5]);
         assert!(id > 0, "开窗返回非零 id");
+        assert_eq!(
+            windows_impl::observed_last_vk(),
+            None,
+            "新窗口尚未计入任何键"
+        );
         // 普通字母按下沿：计数（会进入 OS，可能是手动输入）。
         windows_impl::observe_os_visible_down(0x41);
         // 排除集内的合成和弦键（右 Alt）：不计（它必须到达输入法）。
         windows_impl::observe_os_visible_down(0xA5);
+        assert_eq!(
+            windows_impl::observed_last_vk(),
+            Some(0x41),
+            "被排除的键不得覆盖最后计入键"
+        );
         assert_eq!(windows_impl::end_key_observation(id), Some(1));
         // 幂等：重复关闭与陈旧 id 都是 None（迟到回调不得读新窗）。
         assert_eq!(windows_impl::end_key_observation(id), None);
@@ -1349,6 +1378,7 @@ mod tests {
         let _lock = lock_observation_tests();
         let first = windows_impl::begin_key_observation(&[0xA5]);
         windows_impl::observe_os_visible_down(0xA5); // 旧窗内被排除
+        assert_eq!(windows_impl::observed_last_vk(), None);
         let second = windows_impl::begin_key_observation(&[]);
         assert!(second > first, "新窗 id 单调递增");
         assert_eq!(
@@ -1358,6 +1388,7 @@ mod tests {
         );
         // 排除集随窗口重置：新窗未排除 0xA5，计数生效。
         windows_impl::observe_os_visible_down(0xA5);
+        assert_eq!(windows_impl::observed_last_vk(), Some(0xA5));
         assert_eq!(windows_impl::end_key_observation(second), Some(1));
     }
 

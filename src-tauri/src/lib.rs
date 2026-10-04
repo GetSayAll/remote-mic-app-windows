@@ -813,10 +813,11 @@ fn set_mapping_suspension(suspended: bool, state: tauri::State<'_, AppState>) ->
 /// 运行/仿真平台），调用方按未知处理。
 #[tauri::command]
 fn begin_key_observation(exclude_vks: Vec<u32>, state: tauri::State<'_, AppState>) -> u64 {
+    let exclude_count = exclude_vks.len();
     let window = state.platform.begin_key_observation(exclude_vks);
     if window > 0 {
         sayall_windows::gatt_note(format!(
-            "input_observation feature=physical_keys action=begin window={window} phase=completed terminal_result=passed"
+            "input_observation feature=physical_keys action=begin window={window} exclude_count={exclude_count} phase=completed terminal_result=passed"
         ));
     } else {
         sayall_windows::gatt_note(
@@ -829,15 +830,21 @@ fn begin_key_observation(exclude_vks: Vec<u32>, state: tauri::State<'_, AppState
 
 /// 向导第⑤步前置（探针④）：关闭物理键观察窗口并取回计数。
 /// None = 计量不可靠（窗口过期/钩子停止）——调用方 fail-open。
+/// `last_vk` 为窗口内最后计入的键（误报归因用；none = 未计入任何键）。
 #[tauri::command]
 fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Option<u64> {
     let count = state.platform.end_key_observation(window_id);
+    let last_vk = state
+        .platform
+        .observed_last_key()
+        .map(|vk| format!("0x{vk:02X}"))
+        .unwrap_or_else(|| "none".to_owned());
     match count {
         Some(count) => sayall_windows::gatt_note(format!(
-            "input_observation feature=physical_keys action=end window={window_id} count={count} phase=completed terminal_result=passed"
+            "input_observation feature=physical_keys action=end window={window_id} count={count} last_vk={last_vk} phase=completed terminal_result=passed"
         )),
         None => sayall_windows::gatt_note(format!(
-            "input_observation feature=physical_keys action=end window={window_id} phase=completed terminal_result=failed error_domain=hook error_code=window_unreliable retryable=true"
+            "input_observation feature=physical_keys action=end window={window_id} last_vk={last_vk} phase=completed terminal_result=failed error_domain=hook error_code=window_unreliable retryable=true"
         )),
     }
     count
