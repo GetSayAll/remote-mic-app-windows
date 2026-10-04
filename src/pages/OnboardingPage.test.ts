@@ -388,7 +388,7 @@ describe("Onboarding wizard shell", () => {
     const wrapper = await mountWizard(runtimeWith());
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
 
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("disabled")).toBeUndefined();
     await continueButton.trigger("click");
     await flushPromises();
@@ -421,7 +421,7 @@ describe("Onboarding wizard shell", () => {
     mocks.buttonHandler?.({ button: "home", isPressed: true });
     await flushPromises();
     expect(onboardingEvents("step_recovered").some((p) => p.step === "remote")).toBe(true);
-    expect(wrapper.find("footer .primary-button").attributes("data-gate-ready")).toBe("true");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
   });
 
   it("scans paired remotes, connects the chosen one, and opens Windows Bluetooth settings", async () => {
@@ -473,8 +473,14 @@ describe("Onboarding wizard shell", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(runtimeWith());
 
-    // 新外壳：返回在内容列左上角；页脚只剩一个主按钮。
-    expect(wrapper.find("footer .secondary-button").exists()).toBe(false);
+    // 新外壳（2026-10-05 反馈后）：返回在内容列左上；不再有整幅页脚横幅；
+    // 复制诊断在动作行左侧、主按钮在右侧。
+    expect(wrapper.find("footer").exists()).toBe(false);
+    expect(wrapper.find(".onboarding-actions-left .onboarding-diagnostics-button").exists()).toBe(true);
+    expect(wrapper.find(".onboarding-actions-right .primary-button").exists()).toBe(true);
+    const back = wrapper.find(".onboarding-back");
+    expect(back.find("svg.onboarding-back-icon").exists()).toBe(true);
+    expect(back.text()).toContain("返回");
     await wrapper.find(".onboarding-back").trigger("click");
     await flushPromises();
 
@@ -482,6 +488,20 @@ describe("Onboarding wizard shell", () => {
     const nav = onboardingEvents("navigation");
     expect(nav.some((p) => p.reason === "user_back" && p.step === "remote" && p.detail === "welcome")).toBe(true);
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("welcome");
+  });
+
+  it("suspends custom button mappings while the remote step is detecting buttons", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(runtimeWith());
+    await flushPromises();
+
+    // 2026-10-05 用户要求：检测按键时不得触发用户已配置的自定义动作。
+    expect(mocks.setMappingSuspension).toHaveBeenCalledWith(true);
+
+    // 离开检测步骤（② → ①）立即恢复执行。
+    await wrapper.find(".onboarding-back").trigger("click");
+    await flushPromises();
+    expect(mocks.setMappingSuspension).toHaveBeenLastCalledWith(false);
   });
 
   it("shows the VB-CABLE install path when no recommended endpoint exists", async () => {
@@ -513,7 +533,7 @@ describe("Onboarding wizard shell", () => {
     const wrapper = await mountWizard(runtimeWith());
 
     expect(mocks.selectAudioEndpoint).toHaveBeenCalledWith(cableEndpoint.id);
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(continueButton.attributes("disabled")).toBeUndefined();
 
@@ -630,7 +650,7 @@ describe("Onboarding input tool step", () => {
     await toolCard(wrapper, "豆包输入法").trigger("click");
     await flushPromises();
     expect(mocks.stageOnboardingVoiceBinding).toHaveBeenCalledWith("doubao", { keys: ["right_alt"] });
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("tool.doubao.authorization_required");
     expect(wrapper.text()).toContain("支持更多输入工具");
 
@@ -651,7 +671,7 @@ describe("Onboarding input tool step", () => {
 
     await toolCard(wrapper, "豆包输入法").trigger("click");
     await flushPromises();
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("tool.conflict.vokie_running");
     expect(wrapper.text()).toContain("请先退出 Vokie");
 
@@ -686,7 +706,7 @@ describe("Onboarding input tool step", () => {
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     await wrapper.findAll("button").find((button) => button.text() === "重新检测")!.trigger("click");
     await flushPromises();
-    expect(wrapper.find("footer .primary-button").attributes("data-gate-ready")).toBe("true");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
   });
 
   it("requires an explicit key choice for 其他工具 and remembers 不按键", async () => {
@@ -695,7 +715,7 @@ describe("Onboarding input tool step", () => {
     await toolCard(wrapper, "其他工具").trigger("click");
     await flushPromises();
     expect(mocks.stageOnboardingVoiceBinding).not.toHaveBeenCalled();
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("tool.hotkey_unset");
 
     await wrapper.findAll("button").find((button) => button.text() === "右 Alt")!.trigger("click");
@@ -719,7 +739,7 @@ describe("Onboarding input tool step", () => {
     expect(mocks.stageOnboardingVoiceBinding).toHaveBeenCalledWith("wechat", {
       keys: ["left_control", "left_windows"],
     });
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     // 门禁已满足：继续可进入第⑤步（按住说话验证）。
     expect(continueButton.attributes("disabled")).toBeUndefined();
@@ -757,7 +777,7 @@ describe("Onboarding controls & completion steps", () => {
     const wrapper = await mountWizard(connectedRuntime());
 
     expect(mocks.setMappingSuspension).toHaveBeenCalledWith(true);
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("controls.not_confirmed");
 
     // 同一个键重复按只累计次数，不算新的不同按键。
@@ -820,7 +840,7 @@ describe("Onboarding controls & completion steps", () => {
     const wrapper = await mountWizard(completeReadyRuntime());
 
     expect(wrapper.text()).toContain("设置完成");
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("tool.not_selected");
 
     await wrapper
@@ -843,7 +863,7 @@ describe("Onboarding controls & completion steps", () => {
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     const wrapper = await mountWizard(completeReadyRuntime());
 
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("voice_test.not_verified");
     expect(wrapper.text()).toContain("完成一次真实的语音上屏测试");
 
@@ -922,7 +942,7 @@ describe("Onboarding voice test step", () => {
     // 2026-10-05 改版定稿：核对卡是提示行（编号），不设勾选框——通过判据只有真实文字上屏。
     expect(wrapper.text()).toContain("按你选的工具核对两件事");
     expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0);
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(onboardingEvents("voice_attempt").some((p) => p.result === "passed")).toBe(true);
 
@@ -948,7 +968,7 @@ describe("Onboarding voice test step", () => {
     expect(
       onboardingEvents("voice_attempt").some((p) => p.reason === "voice.manual_input"),
     ).toBe(true);
-    const continueButton = wrapper.find("footer .primary-button");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-code")).toBe("voice_test.not_verified");
     expect(wrapper.findAll("button").some((button) => button.text() === "重新测试")).toBe(true);
     wrapper.unmount();

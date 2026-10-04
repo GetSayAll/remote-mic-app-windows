@@ -330,13 +330,19 @@ watch(
 );
 
 // 步骤进入的副作用：遥控器/普通按键步骤订阅按键边沿；语音设备步骤刷新端点；
-// 普通按键体验期间暂挂映射执行（离开恢复）；切换步骤时清除误按提示。
+// 按键检测步骤（②遥控器 / ⑥普通按键）期间暂挂映射执行（离开恢复）；切换步骤时
+// 清除误按提示。
 watch(
   step,
   (current, previous) => {
     stopButtonObservation();
     voiceKeyMistake.value = false;
-    if (previous === "controls" && current !== "controls") {
+    // 按键检测只收集边沿，绝不能触发用户已配置的按键动作（2026-10-05 用户要求：
+    // ②步原先不挂起，按下已映射的键会真的执行动作）。两处检测步骤统一挂起，
+    // 离开后立即恢复。
+    const observingButtons = current === "remote" || current === "controls";
+    const observedButtons = previous === "remote" || previous === "controls";
+    if (observedButtons && !observingButtons) {
       void setMappingSuspensionState(false);
     }
     if (previous === "voice_test" && current !== "voice_test") {
@@ -354,7 +360,7 @@ watch(
     if (current === "voice_test") {
       void startVoiceTestSession();
     }
-    if (current === "controls") {
+    if (observingButtons) {
       void setMappingSuspensionState(true);
     }
     if (current === "complete") {
@@ -1612,124 +1618,141 @@ async function retryVoiceTest(): Promise<void> {
           type="button"
           @click="onBack"
         >
-          ← 返回
+          <svg class="onboarding-back-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M9.8 3.6 5.4 8l4.4 4.4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <span>返回</span>
         </button>
 
-        <div v-if="stateReadFailed" class="onboarding-error-block">
-          <p>无法读取设置进度：{{ stateReadFailed }}</p>
-          <button class="secondary-button" type="button" @click="restoreStep">重试</button>
+        <div class="onboarding-content">
+          <div v-if="stateReadFailed" class="onboarding-error-block">
+            <p>无法读取设置进度：{{ stateReadFailed }}</p>
+            <button class="secondary-button" type="button" @click="restoreStep">重试</button>
+          </div>
+
+          <WelcomeStep v-if="step === 'welcome'" />
+          <RemoteStep
+            v-else-if="step === 'remote'"
+            :runtime="runtime"
+            :devices="devices"
+            :scanning="scanning"
+            :scan-message="scanMessage"
+            :connecting-device-id="connectingDeviceId"
+            :operation-message="operationMessage"
+            :button-observed="remoteButtonObserved"
+            :voice-key-mistake="voiceKeyMistake"
+            :gate-code="gate.code"
+            @scan="scanRemotes"
+            @connect="connectDevice"
+            @open-bluetooth-settings="openBluetoothSettings"
+          />
+          <AudioStep
+            v-else-if="step === 'audio'"
+            :endpoints="audioEndpoints"
+            :audio="audioSnapshot"
+            :scanning="scanningAudio"
+            :message="audioMessage"
+            :selecting-endpoint-id="selectingEndpointId"
+            :opening-vb-cable-page="openingVbCablePage"
+            :gate-code="gate.code"
+            @select="chooseEndpoint"
+            @refresh="refreshAudioDevices(false)"
+            @open-download="openDownloadPage"
+          />
+          <VoiceToolStep
+            v-else-if="step === 'voice_tool'"
+            :tool="stagedTool"
+            :hotkey-label="hotkeyLabel"
+            :capture-enabled="rc003Status?.enabled === true"
+            :capture-busy="captureBusy"
+            :capture-hint="captureHint"
+            :conflict="stagedTool === 'doubao' && vokie?.running === true"
+            :vokie="vokie"
+            :vokie-busy="vokieBusy"
+            :other-keys="otherKeys"
+            :message="toolMessage"
+            @select-tool="selectTool"
+            @toggle-capture="requestCaptureToggle"
+            @open-vokie-site="openVokieSite"
+            @launch-vokie="launchVokieApp"
+            @refresh-vokie="refreshVokieState"
+            @choose-other-keys="chooseOtherKeys"
+          />
+          <VoiceTestStep
+            v-else-if="step === 'voice_test'"
+            ref="voiceTestRef"
+            :phase="voicePhase"
+            :result="voiceResult?.result ?? null"
+            :failure-message="voiceFailureMessage"
+            :focused="voiceFocused"
+            :tool-label="voiceToolLabel"
+            :hotkey-text="hotkeyLabel"
+            :audio-text="voiceAudioText"
+            @input="onVoiceInput"
+            @focus="onVoiceBoxFocus"
+            @blur="onVoiceBoxBlur"
+            @retry="retryVoiceTest"
+          />
+          <ControlsStep
+            v-else-if="step === 'controls'"
+            :observed="observedList"
+            :voice-key-mistake="voiceKeyMistake"
+          />
+          <CompleteStep
+            v-else-if="step === 'complete'"
+            :checks="completeChecks"
+            @fix="onFixStep"
+          />
         </div>
 
-        <WelcomeStep v-if="step === 'welcome'" />
-        <RemoteStep
-          v-else-if="step === 'remote'"
-          :runtime="runtime"
-          :devices="devices"
-          :scanning="scanning"
-          :scan-message="scanMessage"
-          :connecting-device-id="connectingDeviceId"
-          :operation-message="operationMessage"
-          :button-observed="remoteButtonObserved"
-          :voice-key-mistake="voiceKeyMistake"
-          :gate-code="gate.code"
-          @scan="scanRemotes"
-          @connect="connectDevice"
-          @open-bluetooth-settings="openBluetoothSettings"
-        />
-        <AudioStep
-          v-else-if="step === 'audio'"
-          :endpoints="audioEndpoints"
-          :audio="audioSnapshot"
-          :scanning="scanningAudio"
-          :message="audioMessage"
-          :selecting-endpoint-id="selectingEndpointId"
-          :opening-vb-cable-page="openingVbCablePage"
-          :gate-code="gate.code"
-          @select="chooseEndpoint"
-          @refresh="refreshAudioDevices(false)"
-          @open-download="openDownloadPage"
-        />
-        <VoiceToolStep
-          v-else-if="step === 'voice_tool'"
-          :tool="stagedTool"
-          :hotkey-label="hotkeyLabel"
-          :capture-enabled="rc003Status?.enabled === true"
-          :capture-busy="captureBusy"
-          :capture-hint="captureHint"
-          :conflict="stagedTool === 'doubao' && vokie?.running === true"
-          :vokie="vokie"
-          :vokie-busy="vokieBusy"
-          :other-keys="otherKeys"
-          :message="toolMessage"
-          @select-tool="selectTool"
-          @toggle-capture="requestCaptureToggle"
-          @open-vokie-site="openVokieSite"
-          @launch-vokie="launchVokieApp"
-          @refresh-vokie="refreshVokieState"
-          @choose-other-keys="chooseOtherKeys"
-        />
-        <VoiceTestStep
-          v-else-if="step === 'voice_test'"
-          ref="voiceTestRef"
-          :phase="voicePhase"
-          :result="voiceResult?.result ?? null"
-          :failure-message="voiceFailureMessage"
-          :focused="voiceFocused"
-          :tool-label="voiceToolLabel"
-          :hotkey-text="hotkeyLabel"
-          :audio-text="voiceAudioText"
-          @input="onVoiceInput"
-          @focus="onVoiceBoxFocus"
-          @blur="onVoiceBoxBlur"
-          @retry="retryVoiceTest"
-        />
-        <ControlsStep
-          v-else-if="step === 'controls'"
-          :observed="observedList"
-          :voice-key-mistake="voiceKeyMistake"
-        />
-        <CompleteStep
-          v-else-if="step === 'complete'"
-          :checks="completeChecks"
-          @fix="onFixStep"
-        />
+        <div class="onboarding-actions">
+          <div class="onboarding-actions-left">
+            <button
+              class="onboarding-diagnostics-button"
+              type="button"
+              :disabled="diagnosticsCopyState === 'busy'"
+              @click="copyDiagnostics"
+            >
+              {{ diagnosticsCopyText }}
+            </button>
+            <span
+              v-if="diagnosticsCopyMessage"
+              class="onboarding-diagnostics-message"
+              :class="{ ok: diagnosticsCopyState === 'copied', bad: diagnosticsCopyState === 'failed' }"
+              role="status"
+            >
+              {{ diagnosticsCopyMessage }}
+            </span>
+          </div>
+
+          <div class="onboarding-actions-right">
+            <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{ blockMessage }}</span>
+            <button
+              class="primary-button"
+              type="button"
+              :disabled="!continueEnabled"
+              :title="continueEnabled ? '' : blockMessage"
+              :data-gate-code="gate.code ?? 'ok'"
+              :data-gate-ready="gate.ok ? 'true' : 'false'"
+              @click="step === 'complete' ? onStartUsing() : onContinue()"
+            >
+              {{ step === "complete" ? "开始使用" : "继续" }}
+            </button>
+          </div>
+        </div>
       </div>
 
       <StepSide :panel="sidePanel" />
     </main>
 
     <p v-if="saveMessage" class="onboarding-error">进度保存失败：{{ saveMessage }}</p>
-
-    <footer class="onboarding-footer">
-      <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{ blockMessage }}</span>
-      <button
-        class="primary-button"
-        type="button"
-        :disabled="!continueEnabled"
-        :title="continueEnabled ? '' : blockMessage"
-        :data-gate-code="gate.code ?? 'ok'"
-        :data-gate-ready="gate.ok ? 'true' : 'false'"
-        @click="step === 'complete' ? onStartUsing() : onContinue()"
-      >
-        {{ step === "complete" ? "开始使用" : "继续" }}
-      </button>
-      <button
-        class="onboarding-diagnostics-button"
-        type="button"
-        :disabled="diagnosticsCopyState === 'busy'"
-        @click="copyDiagnostics"
-      >
-        {{ diagnosticsCopyText }}
-      </button>
-      <span
-        v-if="diagnosticsCopyMessage"
-        class="onboarding-diagnostics-message"
-        :class="{ ok: diagnosticsCopyState === 'copied', bad: diagnosticsCopyState === 'failed' }"
-        role="status"
-      >
-        {{ diagnosticsCopyMessage }}
-      </span>
-    </footer>
 
     <EnhancedCaptureConfirmDialog
       v-if="showCaptureConfirm"
@@ -1797,22 +1820,57 @@ async function retryVoiceTest(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 18px 26px 12px;
-  overflow-y: auto;
+  padding: 24px 40px 18px;
+  overflow: hidden;
   min-height: 0;
+}
+.onboarding-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+/* 底部动作行（2026-10-05 用户要求）：去掉整幅页脚横幅；复制诊断在左、主按钮在右。 */
+.onboarding-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding-top: 4px;
+}
+.onboarding-actions-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+.onboarding-actions-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 .onboarding-back {
   width: fit-content;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  margin-left: -4px;
   padding: 0;
   border: 0;
   background: none;
   color: var(--text-control);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13.5px;
+  line-height: 1.4;
   cursor: pointer;
+}
+.onboarding-back-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
 }
 .onboarding-back:hover {
   color: var(--accent-text);
@@ -1873,33 +1931,33 @@ async function retryVoiceTest(): Promise<void> {
   font-weight: 800;
 }
 .side-caption {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-secondary);
 }
 .onboarding-check-card {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--card);
-  padding: 12px;
+  padding: 14px;
   box-shadow: 0 10px 24px var(--shadow-card);
 }
 .onboarding-check-card h4 {
-  margin: 0 0 8px;
-  font-size: 12.5px;
+  margin: 0 0 9px;
+  font-size: 13.5px;
   color: var(--text-subtle-strong);
 }
 .onboarding-crow {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 8px 11px;
   border-radius: 8px;
   background: var(--surface-subtle);
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-control);
 }
 .onboarding-crow + .onboarding-crow {
-  margin-top: 6px;
+  margin-top: 7px;
 }
 .onboarding-crow .crow-state {
   margin-left: auto;
@@ -1926,34 +1984,37 @@ async function retryVoiceTest(): Promise<void> {
 
 /* ---- 步骤内容 ---- */
 .onboarding-step {
-  max-width: 640px;
+  max-width: 720px;
 }
 .onboarding-step h1 {
-  margin: 0 0 8px;
-  font-size: 21px;
+  margin: 0 0 10px;
+  font-size: 24px;
+  letter-spacing: -0.3px;
+  line-height: 1.25;
 }
 .onboarding-lede {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
+  font-size: 14px;
   color: var(--text-control);
-  line-height: 1.6;
+  line-height: 1.65;
 }
 .onboarding-muted {
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .onboarding-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
   margin: 6px 0 0;
-  padding-left: 18px;
-  font-size: 12.5px;
-  line-height: 1.55;
+  padding-left: 20px;
+  font-size: 13.5px;
+  line-height: 1.6;
 }
 .onboarding-rows {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .onboarding-rows .onboarding-status-row + .onboarding-status-row {
   margin-top: 0;
@@ -1962,13 +2023,13 @@ async function retryVoiceTest(): Promise<void> {
   margin-top: 0;
 }
 .onboarding-card {
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
 }
 .onboarding-card + .onboarding-card {
-  margin-top: 10px;
+  margin-top: 12px;
 }
 .onboarding-card.accent {
   border-color: var(--accent-border);
@@ -1979,12 +2040,13 @@ async function retryVoiceTest(): Promise<void> {
   background: var(--warning-surface-soft);
 }
 .onboarding-card h4 {
-  margin: 0 0 6px;
-  font-size: 13px;
+  margin: 0 0 7px;
+  font-size: 14.5px;
 }
 .onboarding-card p {
-  margin: 6px 0 0;
-  font-size: 12.5px;
+  margin: 7px 0 0;
+  font-size: 13.5px;
+  line-height: 1.6;
   color: var(--text-secondary);
 }
 .onboarding-numlist {
@@ -1998,18 +2060,18 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-numlist li {
   display: flex;
   gap: 9px;
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-size: 13.5px;
+  line-height: 1.6;
 }
 .onboarding-num {
-  flex: 0 0 17px;
-  width: 17px;
-  height: 17px;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
   margin-top: 1px;
   border-radius: 50%;
   background: var(--accent);
   color: var(--text-on-accent);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
   display: grid;
   place-items: center;
@@ -2018,16 +2080,16 @@ async function retryVoiceTest(): Promise<void> {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 12px;
 }
 .onboarding-chip {
-  padding: 6px 12px;
+  padding: 7px 13px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface-control);
   color: var(--text-control);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
 }
 .onboarding-chip.strong {
@@ -2045,19 +2107,19 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-status-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 11px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-subtle);
 }
 .onboarding-status-row + .onboarding-status-row {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 .onboarding-status-row .status-icon {
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
   border-radius: 8px;
   display: grid;
   place-items: center;
@@ -2083,22 +2145,22 @@ async function retryVoiceTest(): Promise<void> {
   flex-direction: column;
 }
 .onboarding-status-row .status-text strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 .onboarding-status-row .status-text small {
   margin-top: 2px;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-secondary);
 }
 .onboarding-status-row .status-state {
   margin-left: auto;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
 }
 .onboarding-status-row .status-value {
   margin-left: auto;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
@@ -2120,9 +2182,9 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-option {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   width: 100%;
-  padding: 11px 12px;
+  padding: 13px 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
@@ -2132,7 +2194,7 @@ async function retryVoiceTest(): Promise<void> {
   cursor: pointer;
 }
 .onboarding-option + .onboarding-option {
-  margin-top: 8px;
+  margin-top: 9px;
 }
 .onboarding-option.selected {
   border-color: var(--accent-border);
@@ -2168,13 +2230,13 @@ async function retryVoiceTest(): Promise<void> {
   gap: 2px;
 }
 .onboarding-option .option-body strong {
-  font-size: 13px;
+  font-size: 14px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 .onboarding-option .option-body small {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-secondary);
 }
 .onboarding-option .option-trailing {
@@ -2214,12 +2276,12 @@ async function retryVoiceTest(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-subtle);
   color: var(--text-control);
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 .onboarding-bchip .dot {
   flex: 0 0 14px;
@@ -2241,14 +2303,14 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-dots {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin-top: 10px;
-  font-size: 12.5px;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13.5px;
   color: var(--text-secondary);
 }
 .onboarding-dots .dot {
-  width: 10px;
-  height: 10px;
+  width: 11px;
+  height: 11px;
   border: 1.5px solid var(--border-strong);
   border-radius: 50%;
 }
@@ -2260,7 +2322,7 @@ async function retryVoiceTest(): Promise<void> {
 /* ---- 语音验证页 ---- */
 .onboarding-status-line {
   margin: 0;
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
 }
 .onboarding-wave-mark {
@@ -2275,14 +2337,16 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-voice-input {
   width: 100%;
   box-sizing: border-box;
-  margin: 2px 0 4px;
-  padding: 11px 13px;
+  min-height: 54px;
+  margin: 16px 0 12px;
+  padding: 14px 15px;
   border: 1.5px solid var(--accent-border);
   border-radius: 10px;
   background: var(--card);
   color: var(--text-primary);
   font: inherit;
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.5;
 }
 .onboarding-voice-input:focus {
   outline: 2px solid var(--accent-border);
@@ -2299,7 +2363,7 @@ async function retryVoiceTest(): Promise<void> {
   border-top: 1px solid var(--border);
 }
 .onboarding-switch-row .switch-state {
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 600;
 }
 .onboarding-switch-row .switch-state.ok {
@@ -2315,14 +2379,14 @@ async function retryVoiceTest(): Promise<void> {
   margin-top: 8px;
 }
 .onboarding-chip-select button {
-  padding: 5px 12px;
+  padding: 6px 13px;
   border: 1px solid var(--border-strong, #c9cbd6);
   border-radius: 8px;
   background: var(--surface-raised, #fff);
   color: var(--text-control);
   cursor: pointer;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 .onboarding-chip-select button.selected {
   border-color: var(--accent-border);
@@ -2331,38 +2395,30 @@ async function retryVoiceTest(): Promise<void> {
   font-weight: 600;
 }
 
-/* ---- 页脚错误与保存失败 ---- */
+/* ---- 保存失败提示 ---- */
 .onboarding-error {
-  margin: 0 26px 6px;
-  font-size: 12.5px;
+  margin: 0 40px 10px;
+  font-size: 13px;
   color: var(--error-text, #b3261e);
 }
 .onboarding-error-block {
   margin: 0 0 12px;
-  padding: 10px 14px;
+  padding: 11px 15px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
 }
 .onboarding-error-block p {
   margin: 0 0 8px;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
-/* ---- 页脚 ---- */
-.onboarding-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 26px 14px;
-  border-top: 1px solid var(--border);
-}
+/* 底部动作行里的门禁提示（右对齐，紧贴主按钮上方）。 */
 .onboarding-block-hint {
-  max-width: 680px;
-  font-size: 12.5px;
+  max-width: 420px;
+  font-size: 13px;
   color: var(--warning-text);
-  text-align: center;
+  text-align: right;
 }
 /* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接。 */
 .onboarding-diagnostics-button {
@@ -2371,7 +2427,7 @@ async function retryVoiceTest(): Promise<void> {
   background: none;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
@@ -2384,7 +2440,7 @@ async function retryVoiceTest(): Promise<void> {
   opacity: 0.6;
 }
 .onboarding-diagnostics-message {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-secondary);
 }
 .onboarding-diagnostics-message.ok {
@@ -2402,6 +2458,9 @@ async function retryVoiceTest(): Promise<void> {
     overflow-y: auto;
   }
   .onboarding-main {
+    overflow: visible;
+  }
+  .onboarding-content {
     overflow: visible;
   }
   .onboarding-side {

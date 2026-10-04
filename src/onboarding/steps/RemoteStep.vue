@@ -92,16 +92,34 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
     <div v-if="!connected" class="onboarding-card accent">
       <h4>首次连接遥控器</h4>
       <ul class="onboarding-numlist">
-        <li><span class="onboarding-num">1</span><span>把遥控器放在电脑旁边。</span></li>
+        <li>
+          <span class="onboarding-num">1</span>
+          <span>把遥控器放在电脑旁边，先按任意键确认它有电。</span>
+        </li>
         <li>
           <span class="onboarding-num">2</span>
-          <span>同时长按「菜单」和「主页」键，直到它进入配对模式。</span>
+          <span>长按遥控器上的「TV」键约 3 秒，直到指示灯开始闪烁（进入配对模式）。</span>
         </li>
         <li>
           <span class="onboarding-num">3</span>
-          <span>在 Windows 蓝牙设置里选择「小米蓝牙语音遥控器」，等待配对完成。</span>
+          <span>
+            如果指示灯没有反应：同时长按「主页」+「菜单」直到指示灯快速闪烁——这会重置遥控器的蓝牙，
+            并让它重新进入配对模式（不同批次的遥控器配对方式可能不同）。
+          </span>
+        </li>
+        <li>
+          <span class="onboarding-num">4</span>
+          <span>
+            在电脑上打开：设置 → 蓝牙和其他设备 → 添加设备 → 蓝牙。列表里如果没有「小米蓝牙语音遥控器」，
+            先点开页面里的「高级选项」（或“更多蓝牙选项”）再等它刷新。
+          </span>
+        </li>
+        <li>
+          <span class="onboarding-num">5</span>
+          <span>选择「小米蓝牙语音遥控器」，等待配对完成。</span>
         </li>
       </ul>
+      <p>配对失败，或遥控器以前配过别的设备：回到第 3 步重置蓝牙后重新配对。</p>
       <div class="onboarding-chips">
         <button
           class="onboarding-chip strong"
