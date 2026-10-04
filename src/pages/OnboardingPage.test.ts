@@ -5,6 +5,7 @@ import type {
   AudioPhase,
   AudioSnapshot,
   ConnectionPhase,
+  DiagnosticReport,
   RawInputPhase,
   RuntimeSnapshot,
   VoiceSessionState,
@@ -37,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   setMappingSuspension: vi.fn(),
   completeOnboarding: vi.fn(),
   getRuntimeSnapshot: vi.fn(),
+  getDiagnosticReport: vi.fn(),
   beginKeyObservation: vi.fn(),
   endKeyObservation: vi.fn(),
   rc003Disabled: {
@@ -82,6 +84,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setMappingSuspension: mocks.setMappingSuspension,
     completeOnboarding: mocks.completeOnboarding,
     getRuntimeSnapshot: mocks.getRuntimeSnapshot,
+    getDiagnosticReport: mocks.getDiagnosticReport,
     beginKeyObservation: mocks.beginKeyObservation,
     endKeyObservation: mocks.endKeyObservation,
   };
@@ -181,6 +184,72 @@ function onboardingEvents(phase: string): Array<Record<string, unknown>> {
     .filter((payload) => payload.event === "onboarding" && payload.phase === phase);
 }
 
+/** 诊断报告夹具：与 Rust `get_diagnostic_report`（schema v2）同形。 */
+function diagnosticReport(): DiagnosticReport {
+  return {
+    schemaVersion: 2,
+    appVersion: "0.5.0",
+    appBuild: "unknown",
+    sourceRevision: "fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901",
+    buildChannel: "local-test",
+    windowsVersion: "10.0.26100",
+    processArchitecture: "x86_64",
+    platform: "windows",
+    verificationStatus: "真机验证中",
+    capabilities: {
+      windowsApiAvailable: true,
+      bleScanAvailable: true,
+      bleVoiceReady: false,
+      wasapiReady: true,
+      rawInputReady: false,
+      sendInputReady: true,
+    },
+    connection: {
+      phase: "idle",
+      capabilitiesConfirmed: false,
+      sampleRate: null,
+      frameSize: null,
+      decodedSamples: 0,
+      generation: 0,
+      reconnectAttempt: 0,
+      powerNotificationsAvailable: false,
+      errorPresent: false,
+    },
+    audio: {
+      phase: "unconfigured",
+      endpointConfigured: false,
+      queuedSamples: 0,
+      submittedSamples: 0,
+      generation: 0,
+      errorPresent: false,
+    },
+    rawInput: {
+      phase: "stopped",
+      matchedDeviceCount: 0,
+      rawEventCount: 0,
+      semanticEdgeCount: 0,
+      lastButton: null,
+      lastIsPressed: null,
+      errorPresent: false,
+    },
+    sendInput: {
+      available: true,
+      submittedBatches: 0,
+      submittedEvents: 0,
+      errorPresent: false,
+    },
+    buttonMapping: {
+      enabled: true,
+      gateActive: false,
+      listenerActive: false,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      errorPresent: false,
+    },
+  };
+}
+
 async function mountWizard(
   runtime: RuntimeSnapshot,
   options: { attach?: boolean } = {},
@@ -220,6 +289,7 @@ function resetWizardMocks(): void {
     mocks.setMappingSuspension.mockReset();
     mocks.completeOnboarding.mockReset();
     mocks.getRuntimeSnapshot.mockReset();
+    mocks.getDiagnosticReport.mockReset();
     mocks.beginKeyObservation.mockReset();
     mocks.endKeyObservation.mockReset();
 
@@ -267,6 +337,7 @@ function resetWizardMocks(): void {
     mocks.setMappingSuspension.mockResolvedValue(true);
     mocks.completeOnboarding.mockImplementation(async () => activeState("complete"));
     mocks.getRuntimeSnapshot.mockImplementation(async () => runtimeWith());
+    mocks.getDiagnosticReport.mockImplementation(async () => diagnosticReport());
     let observationId = 0;
     mocks.beginKeyObservation.mockImplementation(async () => {
       observationId += 1;
@@ -466,6 +537,65 @@ describe("Onboarding wizard shell", () => {
       .trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
+  });
+});
+
+describe("Onboarding diagnostics copy", () => {
+  installWizardHooks();
+
+  const clipboard = { writeText: vi.fn<(text: string) => Promise<void>>() };
+
+  beforeEach(() => {
+    clipboard.writeText.mockReset();
+    clipboard.writeText.mockResolvedValue();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboard.writeText },
+    });
+  });
+
+  afterEach(() => {
+    delete (navigator as { clipboard?: unknown }).clipboard;
+  });
+
+  it("一次复制出含 Windows 版本 / App 版本 / Build 与向导状态的诊断块", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("App 版本: 0.5.0");
+    expect(text).toContain("Build: fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901");
+    expect(text).toContain("Windows 版本: 10.0.26100");
+    expect(text).toContain("步骤标识: remote");
+    expect(text).toContain("门禁: remote.not_connected");
+    // 脱敏：设备 id / 端点身份不进剪贴板（挡住将来加错字段）。
+    expect(text).not.toContain("cable-input");
+    expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
+    const copy = onboardingEvents("action").filter((p) => p.reason === "copy_diagnostics");
+    expect(copy.map((p) => p.result)).toEqual(["unknown", "passed"]);
+  });
+
+  it("剪贴板不可用时不静默：给出失败提示并落 failed 日志", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    clipboard.writeText.mockRejectedValue(new Error("denied"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("复制失败");
+    const copy = onboardingEvents("action").filter((p) => p.reason === "copy_diagnostics");
+    expect(copy.map((p) => p.result)).toEqual(["unknown", "failed"]);
   });
 });
 

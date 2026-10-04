@@ -22,6 +22,20 @@
 - 右栏 = 插图 + 检查卡（按步骤换标题：连接检查 / 音频检查 / 工具检查 / 实时检查 / 按键检查）；
   窗口过矮（高度 ≤ 660）或过窄（宽度 ≤ 1024）时检查卡折到内容下方。
 - 门禁提示语在页脚主按钮上方；失败原因与修复入口在步骤内的警示卡里。
+- 页脚主按钮下方有「复制诊断信息」：过不去时一次复制即可报障。
+
+## 诊断信息（2026-10-05 新增）
+
+1. 任意步骤点页脚「复制诊断信息」→ 应显示「已复制，可直接粘贴发给开发者」；粘贴到记事本检查内容。
+2. 文本必须包含：App 版本、Build（40 位源码修订）、构建通道、**Windows 版本（major.minor.build）**、
+   进程架构、当前步骤与门禁码、连接 / 音频 / 输入工具 / 全按键支持 / Vokie / 普通按键计数。
+3. 隐私检查：不得出现蓝牙地址、HID 路径、音频端点 id / 名称、文件路径、用户名或任何输入文字。
+4. 日志核对：`frontend event=onboarding phase=action reason=copy_diagnostics` 成对出现
+   （begin `result=unknown` → end `result=passed detail=chars_N`）；剪贴板不可用时 end `result=failed`。
+5. 启动日志核对：`app_lifecycle event=process_start ... windows_version=<major.minor.build> windows_build=<build>`
+   —— 不再是 `unknown`。
+
+失败判定：复制提示缺失；文本缺 Windows 版本 / Build；出现设备身份或路径；日志缺 copy_diagnostics 对。
 
 ## 用例一：进入向导与中断继续
 

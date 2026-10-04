@@ -2229,10 +2229,19 @@ pub fn run() {
                 .to_owned(),
         },
     );
+    #[cfg(windows)]
+    let (windows_version, windows_build) = {
+        let current = sayall_windows::compatibility::current_windows_version();
+        (current.to_string(), current.build.to_string())
+    };
+    #[cfg(not(windows))]
+    let (windows_version, windows_build) = ("unknown".to_owned(), "unknown".to_owned());
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=1 process_architecture={} windows_version=unknown windows_build=unknown",
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=2 process_architecture={} windows_version={} windows_build={}",
         if log_ready { "passed" } else { "failed" },
-        std::env::consts::ARCH
+        std::env::consts::ARCH,
+        windows_version,
+        windows_build
     ));
     #[cfg(windows)]
     if let Err(error) = sayall_windows::compatibility::check_current_windows() {

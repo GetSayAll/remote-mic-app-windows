@@ -317,6 +317,16 @@ export interface RuntimeSnapshot {
 export interface DiagnosticReport {
   schemaVersion: number;
   appVersion: string;
+  /** 构建号（CI / 本地构建注入；取不到为 "unknown"）。 */
+  appBuild: string;
+  /** 源码修订（40 位 git SHA；取不到为 "unknown"）。 */
+  sourceRevision: string;
+  /** 发布通道（取不到为 "unknown"）。 */
+  buildChannel: string;
+  /** 运行机器的 Windows 版本（major.minor.build，如 "10.0.26100"）。 */
+  windowsVersion: string;
+  /** 进程架构（x86_64 等）。 */
+  processArchitecture: string;
   platform: string;
   verificationStatus: string;
   capabilities: {
@@ -509,8 +519,13 @@ export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (!isTauriRuntime()) {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       appVersion: browserSnapshot.appVersion,
+      appBuild: "unknown",
+      sourceRevision: "unknown",
+      buildChannel: "unknown",
+      windowsVersion: "unknown",
+      processArchitecture: "browser-preview",
       platform: browserSnapshot.platform.platform,
       verificationStatus: browserSnapshot.platform.verificationStatus,
       capabilities: {

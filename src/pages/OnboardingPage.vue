@@ -8,6 +8,7 @@ import {
   enableRc003Capture,
   endKeyObservation,
   getAudioSnapshot,
+  getDiagnosticReport,
   getOnboardingState,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
@@ -21,6 +22,7 @@ import {
   openVbCableDownloadPage,
   openVokieHomepage,
   openWindowsSettings,
+  remoteModelLabel,
   saveOnboardingStep,
   scanPairedRemotes,
   selectAudioEndpoint,
@@ -54,6 +56,7 @@ import {
   type OnboardingStep,
 } from "../onboarding/flow";
 import { buildSidePanel } from "../onboarding/panel";
+import { formatOnboardingDiagnostics } from "../onboarding/diagnostics-text";
 import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
@@ -390,6 +393,10 @@ onUnmounted(() => {
   if (heartbeatTimer !== null) {
     window.clearInterval(heartbeatTimer);
     heartbeatTimer = null;
+  }
+  if (diagnosticsResetTimer !== null) {
+    window.clearTimeout(diagnosticsResetTimer);
+    diagnosticsResetTimer = null;
   }
   stopButtonObservation();
   stopVoiceTestSession();
@@ -1121,6 +1128,83 @@ async function onStartUsing(): Promise<void> {
   }
 }
 
+// ---- 复制诊断信息（2026-10-05 用户要求：过不去时一次复制即可报障）----
+
+const diagnosticsCopyState = ref<"idle" | "busy" | "copied" | "failed">("idle");
+const diagnosticsCopyMessage = ref("");
+let diagnosticsResetTimer: number | null = null;
+
+const diagnosticsCopyText = computed(() => {
+  if (diagnosticsCopyState.value === "busy") return "正在整理…";
+  if (diagnosticsCopyState.value === "copied") return "已复制到剪贴板";
+  return "复制诊断信息";
+});
+
+/**
+ * 复制给支持人员的诊断块：Rust 侧 `get_diagnostic_report`（版本 / Build / Windows
+ * 版本 / 架构，全部真实读回）+ 向导当前状态（步骤、门禁、连接 / 音频 / 工具）。
+ * 只含稳定 token、计数与布尔；设备与端点身份一律不进（见 diagnostics-text.ts）。
+ */
+async function copyDiagnostics(): Promise<void> {
+  if (diagnosticsCopyState.value === "busy") return;
+  const started = performance.now();
+  const target = step.value;
+  diagnosticsCopyState.value = "busy";
+  diagnosticsCopyMessage.value = "";
+  reportStepAction(target, "copy_diagnostics", "unknown");
+  try {
+    const report = await getDiagnosticReport();
+    const platform = props.runtime?.platform;
+    const recommended = audioEndpoints.value.filter(isRecommendedVoiceEndpoint);
+    const selectedId =
+      audioSnapshot.value?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
+    const text = formatOnboardingDiagnostics(report, {
+      step: target,
+      gateCode: gate.value.code,
+      blockMessage: blockMessage.value ?? "",
+      remoteModel: remoteModelLabel(platform?.connection.remoteModel ?? "unknown"),
+      connectionPhase: platform?.connection.phase ?? "idle",
+      bleVoiceReady: platform?.bleVoiceReady ?? false,
+      rawInputPhase: platform?.rawInput.phase ?? "stopped",
+      reconnectAttempt: platform?.connection.reconnectAttempt ?? 0,
+      audioPhase: audioSnapshot.value?.phase ?? platform?.audio.phase ?? "unconfigured",
+      recommendedEndpointCount: recommended.length,
+      selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
+      queuedSamples: audioSnapshot.value?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
+      toolLabel: voiceToolLabel.value,
+      hotkeyLabel: hotkeyLabel.value,
+      captureEnabled: rc003Status.value?.enabled === true,
+      vokieInstalled: vokie.value?.installed === true,
+      vokieRunning: vokie.value?.running === true,
+      distinctButtonCount: observedButtons.value.size,
+      mappingSuspended: mappingSuspended.value,
+    });
+    if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
+    await navigator.clipboard.writeText(text);
+    diagnosticsCopyState.value = "copied";
+    diagnosticsCopyMessage.value = "已复制，可直接粘贴发给开发者";
+    reportStepAction(target, "copy_diagnostics", "passed", {
+      detail: `chars_${text.length}`,
+      elapsedMs: actionElapsed(started),
+    });
+    if (diagnosticsResetTimer !== null) window.clearTimeout(diagnosticsResetTimer);
+    diagnosticsResetTimer = window.setTimeout(() => {
+      diagnosticsCopyState.value = "idle";
+      diagnosticsCopyMessage.value = "";
+      diagnosticsResetTimer = null;
+    }, 4000);
+  } catch (error) {
+    diagnosticsCopyState.value = "failed";
+    diagnosticsCopyMessage.value = `复制失败：${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    reportStepAction(target, "copy_diagnostics", "failed", {
+      detail: "clipboard",
+      elapsedMs: actionElapsed(started),
+    });
+  }
+}
+
 // ---- 按住说话验证（第⑤步）----
 
 /** 键位名 → Windows 虚拟键码（观察窗口排除集；与捕获协议同口径）。 */
@@ -1620,6 +1704,22 @@ async function retryVoiceTest(): Promise<void> {
       >
         {{ step === "complete" ? "开始使用" : "继续" }}
       </button>
+      <button
+        class="onboarding-diagnostics-button"
+        type="button"
+        :disabled="diagnosticsCopyState === 'busy'"
+        @click="copyDiagnostics"
+      >
+        {{ diagnosticsCopyText }}
+      </button>
+      <span
+        v-if="diagnosticsCopyMessage"
+        class="onboarding-diagnostics-message"
+        :class="{ ok: diagnosticsCopyState === 'copied', bad: diagnosticsCopyState === 'failed' }"
+        role="status"
+      >
+        {{ diagnosticsCopyMessage }}
+      </span>
     </footer>
 
     <EnhancedCaptureConfirmDialog
@@ -2254,6 +2354,35 @@ async function retryVoiceTest(): Promise<void> {
   font-size: 12.5px;
   color: var(--warning-text);
   text-align: center;
+}
+/* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接。 */
+.onboarding-diagnostics-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.onboarding-diagnostics-button:hover {
+  color: var(--accent-text);
+}
+.onboarding-diagnostics-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.onboarding-diagnostics-message {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.onboarding-diagnostics-message.ok {
+  color: var(--success-text, #1a7f4b);
+}
+.onboarding-diagnostics-message.bad {
+  color: var(--warning-text);
 }
 
 /* 窄窗或矮窗（含 150% 缩放下的较小可用高度）：右栏收进内容列底部，

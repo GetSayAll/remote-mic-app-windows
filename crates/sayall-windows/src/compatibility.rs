@@ -71,6 +71,16 @@ pub fn check_current_windows() -> Result<(), UnsupportedWindowsVersion> {
     ))
 }
 
+/// 当前 Windows 版本（major.minor.build），用于诊断报告与启动日志。
+///
+/// 与 `check_current_windows` 同源（`windows_version::OsVersion`），但**不**做
+/// 最低版本裁决：它只回答"用户的机器是什么版本"，供报障定位；读取本身不失败。
+#[cfg(windows)]
+pub fn current_windows_version() -> WindowsVersion {
+    let current = windows_version::OsVersion::current();
+    WindowsVersion::new(current.major, current.minor, current.build)
+}
+
 #[cfg(windows)]
 pub fn show_unsupported_windows_message(error: UnsupportedWindowsVersion) {
     use windows::core::{w, PCWSTR};
@@ -116,5 +126,14 @@ mod tests {
         assert_eq!(error.minimum, MINIMUM_WINDOWS_VERSION);
 
         assert!(check_supported_windows(WindowsVersion::new(6, 3, 9_600)).is_err());
+    }
+
+    /// 诊断报告与启动日志依赖这个读取：本机必须能给出 major.minor.build 三段。
+    #[cfg(windows)]
+    #[test]
+    fn reports_the_current_windows_version() {
+        let version = current_windows_version();
+        assert!(version.major >= 10, "observed {version}");
+        assert_eq!(version.to_string().split('.').count(), 3);
     }
 }
