@@ -121,11 +121,14 @@ fn run_sta(mode: &str) -> Result<(), String> {
                     .nth(3)
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(90);
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
                 let mut stable_hits = 0u32;
                 loop {
                     if std::time::Instant::now() > deadline {
-                        println!("cycle-when-foreground: timeout; foreground never matched {target_exe}");
+                        println!(
+                            "cycle-when-foreground: timeout; foreground never matched {target_exe}"
+                        );
                         return Ok(());
                     }
                     let (pid, name, _hkl) = foreground_info();
@@ -137,8 +140,7 @@ fn run_sta(mode: &str) -> Result<(), String> {
                                 describe(active_profile_raw(&manager))
                             );
                             let alt = rows.iter().find(|row| {
-                                row.clsid != DOUBAO_CLSID
-                                    && row.flags & TF_IPP_FLAG_ENABLED != 0
+                                row.clsid != DOUBAO_CLSID && row.flags & TF_IPP_FLAG_ENABLED != 0
                             });
                             if let Some(alt) = alt {
                                 let _ = manager.ActivateProfile(
@@ -296,9 +298,7 @@ fn fmt_guid(guid: &GUID) -> String {
 /// 前台窗口信息（只读）：pid / 进程名 / 前台线程当前键盘布局。
 fn foreground_info() -> (u32, String, u64) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     unsafe {
         let hwnd = GetForegroundWindow();

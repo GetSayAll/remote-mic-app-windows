@@ -749,9 +749,7 @@ mod windows_impl {
                 std::env::var("SAYALL_DIAG_NO_HOOKS").as_deref(),
                 Ok("1") | Ok("both") | Ok("gate") | Ok("all")
             ) {
-                crate::ble::gatt_note(
-                    "key_gate diag=no_hooks_withheld reason=env_flag".to_owned(),
-                );
+                crate::ble::gatt_note("key_gate diag=no_hooks_withheld reason=env_flag".to_owned());
                 return;
             }
 
