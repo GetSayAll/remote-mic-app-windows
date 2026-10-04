@@ -24,7 +24,11 @@ export type VoiceAttemptFailureCode =
   | "voice.audio_delivery_failed"
   | "voice.session_not_ended"
   | "voice.no_transcript"
-  | "voice.manual_input";
+  | "voice.manual_input"
+  /** 输入框未聚焦（文字落不到窗口里，先让用户点回输入框）。 */
+  | "voice.input_target_not_ready"
+  /** 测试过程中输入框失焦。 */
+  | "voice.focus_lost";
 
 export type VoiceAttemptState =
   | "idle"

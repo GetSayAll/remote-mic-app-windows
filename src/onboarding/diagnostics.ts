@@ -23,6 +23,7 @@ export type OnboardingEventKind =
   | "persist"
   | "navigation"
   | "remote_observed"
+  | "voice_attempt"
   | "audio_route"
   | "tool_selected"
   | "authorization"

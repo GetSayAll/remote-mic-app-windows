@@ -1,15 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
+  beginKeyObservation,
   buttonLabel,
   completeOnboarding,
   connectRemote,
   disableRc003Capture,
   enableRc003Capture,
+  endKeyObservation,
   getAudioSnapshot,
   getOnboardingState,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
+  getRuntimeSnapshot,
   getVokieInstallation,
   getVoiceHoldHotkey,
   getVoiceInputTool,
@@ -51,24 +54,25 @@ import {
   type OnboardingContext,
   type OnboardingStep,
 } from "../onboarding/flow";
+import {
+  createVoiceAttemptTracker,
+  type VoiceAttemptFailureCode,
+  type VoiceAttemptInput,
+  type VoiceAttemptState,
+  type VoiceAttemptTerminal,
+  type VoiceAttemptTracker,
+} from "../onboarding/voice-attempt";
 import AudioStep from "../onboarding/steps/AudioStep.vue";
 import CompleteStep from "../onboarding/steps/CompleteStep.vue";
 import ControlsStep from "../onboarding/steps/ControlsStep.vue";
 import RemoteStep from "../onboarding/steps/RemoteStep.vue";
+import VoiceTestStep from "../onboarding/steps/VoiceTestStep.vue";
 import VoiceToolStep from "../onboarding/steps/VoiceToolStep.vue";
 import WelcomeStep from "../onboarding/steps/WelcomeStep.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ completed: [] }>();
-
-/**
- * 步骤⑤（按住说话验证）依赖现场探针①：未接入前，「继续」到它止步；
- * 其余步骤（含⑥⑦）已全部接入。探针通过、步骤⑤落地后删除本守卫。
- */
-function isImplemented(candidate: OnboardingStep): boolean {
-  return candidate !== "voice_test";
-}
 
 const step = ref<OnboardingStep>("welcome");
 const stateReadFailed = ref("");
@@ -160,8 +164,7 @@ const blockMessage = computed(() => (gate.value.code ? BLOCK_COPY[gate.value.cod
 const continueEnabled = computed(() => {
   if (!gate.value.ok) return false;
   if (step.value === "complete") return true;
-  const target = nextStep(step.value);
-  return target !== null && isImplemented(target);
+  return nextStep(step.value) !== null;
 });
 const currentPhase = computed(() => phaseOf(step.value));
 
@@ -229,6 +232,9 @@ watch(
     if (previous === "controls" && current !== "controls") {
       void setMappingSuspensionState(false);
     }
+    if (previous === "voice_test" && current !== "voice_test") {
+      stopVoiceTestSession();
+    }
     if (current === "remote" || current === "controls") {
       void startButtonObservation();
     }
@@ -237,6 +243,9 @@ watch(
     }
     if (current === "voice_tool") {
       void prepareVoiceToolStep();
+    }
+    if (current === "voice_test") {
+      void startVoiceTestSession();
     }
     if (current === "controls") {
       void setMappingSuspensionState(true);
@@ -273,6 +282,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopButtonObservation();
+  stopVoiceTestSession();
   // 安全网：向导卸载（完成/退出）时恢复映射执行；进程退出后内存态自然复位。
   if (mappingSuspended) {
     void setMappingSuspension(false);
@@ -341,7 +351,7 @@ async function onContinue(): Promise<void> {
     step: step.value,
   });
   const target = nextStep(step.value);
-  if (target && isImplemented(target)) {
+  if (target) {
     await setStep(target, "continue");
   }
 }
@@ -349,17 +359,14 @@ async function onContinue(): Promise<void> {
 async function onBack(): Promise<void> {
   const target = previousStep(step.value);
   if (!target) return;
-  // 未接入的步骤（当前只有⑤）不进入，继续往回退一步（临时守卫，与 isImplemented 同批删除）。
-  const resolved = !isImplemented(target) ? previousStep(target) : target;
-  if (!resolved) return;
   reportOnboardingEvent({
     kind: "navigation",
     result: "passed",
     reason: "user_back",
     step: step.value,
-    detail: resolved,
+    detail: target,
   });
-  await setStep(resolved, "back");
+  await setStep(target, "back");
 }
 
 // ---- 遥控器 / 普通按键步骤：边沿观察 ----
@@ -785,17 +792,6 @@ async function onFixStep(): Promise<void> {
     step: "complete",
     detail: target,
   });
-  if (!isImplemented(target)) {
-    // 第⑤步未接入前无法跳转（激活开关关闭，真实用户不受影响）。
-    reportOnboardingEvent({
-      kind: "navigation",
-      result: "failed",
-      reason: "fix_blocked",
-      step: "complete",
-      detail: target,
-    });
-    return;
-  }
   await setStep(target, "fix");
 }
 
@@ -823,6 +819,354 @@ async function onStartUsing(): Promise<void> {
   } finally {
     completing.value = false;
   }
+}
+
+// ---- 按住说话验证（第⑤步）----
+
+/** 键位名 → Windows 虚拟键码（观察窗口排除集；与捕获协议同口径）。 */
+const VOICE_KEY_CODE_VKS: Record<string, number> = {
+  control: 0x11,
+  left_control: 0xa2,
+  right_control: 0xa3,
+  shift: 0x10,
+  left_shift: 0xa0,
+  right_shift: 0xa1,
+  alt: 0x12,
+  left_alt: 0xa4,
+  right_alt: 0xa5,
+  left_windows: 0x5b,
+  right_windows: 0x5c,
+  enter: 0x0d,
+  escape: 0x1b,
+  space: 0x20,
+  tab: 0x09,
+  apps: 0x5d,
+};
+
+/** 失败码 → 「发生了什么 + 你该怎么办」（设计稿 §7；不贴内部错误原文）。 */
+const VOICE_FAILURE_COPY: Record<VoiceAttemptFailureCode, string> = {
+  "voice.session_not_started":
+    "没有检测到语音会话。确认遥控器已就绪，按住语音键不要放，再试一次。",
+  "voice.no_samples": "收到了语音会话，但没有声音数据。对着遥控器正常说话，再试一次。",
+  "voice.audio_delivery_failed":
+    "声音没有完整送达语音设备。检查设备是否被其他程序占用，再试一次。",
+  "voice.session_not_ended": "松开后这次语音没有正常结束。稍等一下或断开重连遥控器，再试一次。",
+  "voice.no_transcript":
+    "语音链路正常，但输入工具没有写出文字。检查工具麦克风是否选 CABLE Output、工具里的语音键是否和本次设置一致、工具是否在运行。",
+  "voice.manual_input": "检测到键盘输入。这一步请只用遥控器语音键，不要用键盘打字。",
+  "voice.input_target_not_ready": "输入框没有聚焦。先点一下输入框，再按住遥控器语音键。",
+  "voice.focus_lost": "测试过程中输入框失去了焦点。点回输入框，再试一次。",
+};
+
+const VOICE_POLL_MS = 200;
+
+const voiceTestRef = ref<InstanceType<typeof VoiceTestStep> | null>(null);
+const voicePhase = ref<VoiceAttemptState>("waiting_start");
+const voiceResult = ref<VoiceAttemptTerminal | null>(null);
+const voiceFailureMessage = ref("");
+const voiceFocused = ref(false);
+let voiceTracker: VoiceAttemptTracker | null = null;
+let voicePollTimer: number | null = null;
+let voicePollBusy = false;
+let voiceObservationId = 0;
+let voiceAttemptSerial = 0;
+let voiceAttemptCount = 0;
+let voiceSnapshotErrorLogged = false;
+
+const voiceToolLabel = computed(() => {
+  switch (stagedTool.value) {
+    case "doubao":
+      return "豆包输入法";
+    case "wechat":
+      return "微信输入法";
+    case "vokie":
+      return "Vokie";
+    case "other":
+      return "其他工具";
+    default:
+      return "你选的输入工具";
+  }
+});
+
+const voiceAudioText = computed(() => {
+  const name =
+    audioSnapshot.value?.selectedEndpointName ??
+    props.runtime?.platform.audio.selectedEndpointName ??
+    "";
+  const phase = audioSnapshot.value?.phase ?? props.runtime?.platform.audio.phase ?? "unconfigured";
+  if (!name) return "未选择";
+  return `${name}（${phase === "ready" ? "就绪" : "未就绪"}）`;
+});
+
+function voiceAttemptInput(snapshot: RuntimeSnapshot): VoiceAttemptInput {
+  const platform = snapshot.platform;
+  return {
+    voiceState: platform.connection.voiceState,
+    decodedSamples: platform.connection.decodedSamples,
+    audioPhase: platform.audio.phase,
+    submittedSamples: platform.audio.submittedSamples,
+    queuedSamples: platform.audio.queuedSamples,
+    audioLastError: platform.audio.lastError,
+    generation: platform.connection.generation,
+  };
+}
+
+/** 报告层合成会把「按住说话」和弦以非注入形态送进 OS：它不算手动输入，排除。 */
+function observationExcludeVks(): number[] {
+  const chord = currentHotkey.value ?? (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
+  return (chord?.keys ?? [])
+    .map((key) => VOICE_KEY_CODE_VKS[key])
+    .filter((vk): vk is number => vk !== undefined);
+}
+
+async function focusVoiceBox(): Promise<void> {
+  await nextTick();
+  voiceTestRef.value?.focusBox();
+}
+
+async function beginVoiceObservation(): Promise<void> {
+  const serial = voiceAttemptSerial;
+  try {
+    const id = await beginKeyObservation(observationExcludeVks());
+    if (serial !== voiceAttemptSerial) return;
+    voiceObservationId = id;
+    if (id === 0) {
+      // 观察不可用：手动输入检测按未知处理（fail-open），不误判用户。
+      reportOnboardingEvent({
+        kind: "voice_attempt",
+        result: "unknown",
+        reason: "observation_unavailable",
+        step: "voice_test",
+      });
+    }
+  } catch {
+    if (serial === voiceAttemptSerial) {
+      voiceObservationId = 0;
+    }
+  }
+}
+
+async function closeVoiceObservation(): Promise<void> {
+  const id = voiceObservationId;
+  if (id === 0) return;
+  voiceObservationId = 0;
+  try {
+    await endKeyObservation(id);
+  } catch {
+    // 关闭失败无后续影响：窗口是进程内状态，重试会重开。
+  }
+}
+
+async function startVoiceTestSession(): Promise<void> {
+  stopVoiceTestSession();
+  voiceAttemptSerial += 1;
+  voiceResult.value = null;
+  voiceFailureMessage.value = "";
+  voicePhase.value = "waiting_start";
+  voiceSnapshotErrorLogged = false;
+  if (!stagedTool.value) {
+    // 应用重启后直接落在第⑤步：读一次正式配置，供核对卡与排除集使用。
+    await prepareVoiceToolStep();
+  }
+  voiceAttemptCount += 1;
+  let snapshot: RuntimeSnapshot;
+  try {
+    snapshot = await getRuntimeSnapshot();
+  } catch (error) {
+    voiceFailureMessage.value = error instanceof Error ? error.message : String(error);
+    return;
+  }
+  const tracker = createVoiceAttemptTracker({ attemptId: voiceAttemptCount });
+  tracker.arm(voiceAttemptInput(snapshot), Date.now());
+  voiceTracker = tracker;
+  reportOnboardingEvent({
+    kind: "voice_attempt",
+    result: "unknown",
+    reason: "armed",
+    step: "voice_test",
+    detail: `id_${voiceAttemptCount}`,
+  });
+  await beginVoiceObservation();
+  if (voiceTracker !== tracker) return;
+  voicePollTimer = window.setInterval(() => void pollVoiceTest(), VOICE_POLL_MS);
+  void focusVoiceBox();
+}
+
+function stopVoiceTestSession(): void {
+  voiceAttemptSerial += 1;
+  if (voicePollTimer !== null) {
+    window.clearInterval(voicePollTimer);
+    voicePollTimer = null;
+  }
+  if (voiceObservationId !== 0) {
+    void endKeyObservation(voiceObservationId);
+    voiceObservationId = 0;
+  }
+  voiceTracker = null;
+  voicePollBusy = false;
+}
+
+/**
+ * 在任何「通过」判定前结算手动输入检测：关闭当前观察窗口取回计数。
+ * 计数 > 0 → 手动输入（终止 attempt）；None = 计量不可靠（fail-open）。
+ * 尝试未终结时重开新窗口，覆盖后续阶段（转写窗口与会话收尾）。
+ */
+async function settleVoiceManualInput(now: number): Promise<void> {
+  const tracker = voiceTracker;
+  const id = voiceObservationId;
+  if (!tracker || id === 0) return;
+  voiceObservationId = 0;
+  const serial = voiceAttemptSerial;
+  let count: number | null = null;
+  try {
+    count = await endKeyObservation(id);
+  } catch {
+    count = null;
+  }
+  if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
+  if (count === null) {
+    reportOnboardingEvent({
+      kind: "voice_attempt",
+      result: "unknown",
+      reason: "observation_unreliable",
+      step: "voice_test",
+    });
+  } else if (count > 0) {
+    const terminal = tracker.notifyManualInput(now);
+    if (terminal) onVoiceTerminal(terminal);
+  }
+  if (tracker.state() !== "terminal") {
+    await beginVoiceObservation();
+  }
+}
+
+async function pollVoiceTest(): Promise<void> {
+  if (voicePollBusy) return;
+  const tracker = voiceTracker;
+  if (!tracker) return;
+  voicePollBusy = true;
+  const serial = voiceAttemptSerial;
+  try {
+    const snapshot = await getRuntimeSnapshot();
+    if (serial !== voiceAttemptSerial || voiceTracker !== tracker || step.value !== "voice_test") {
+      return;
+    }
+    const frame = voiceAttemptInput(snapshot);
+    const now = Date.now();
+    const stateNow = tracker.state();
+    if (stateNow !== "terminal") {
+      if (
+        stateNow !== "waiting_start" &&
+        !CONNECTED_PHASES.includes(snapshot.platform.connection.phase)
+      ) {
+        // 会话进行中连接掉线：按已知原因终止，不谎报通过。
+        const terminal = tracker.abort("voice.session_not_started", now);
+        if (terminal) {
+          onVoiceTerminal(terminal);
+          void closeVoiceObservation();
+        }
+        return;
+      }
+      if (stateNow === "waiting_start" && frame.voiceState !== "idle" && !voiceFocused.value) {
+        // 会话开始了但输入框没聚焦：文字落不到输入框，先让用户点回去。
+        const terminal = tracker.abort("voice.input_target_not_ready", now);
+        if (terminal) {
+          onVoiceTerminal(terminal);
+          void closeVoiceObservation();
+          void focusVoiceBox();
+        }
+        return;
+      }
+      if (frame.voiceState === "idle" && (stateNow === "streaming" || stateNow === "waiting_end")) {
+        await settleVoiceManualInput(now);
+        if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
+      }
+      const terminal = tracker.observe(frame, now);
+      if (terminal) {
+        onVoiceTerminal(terminal);
+      } else {
+        voicePhase.value = tracker.state();
+      }
+    }
+  } catch {
+    if (serial === voiceAttemptSerial && !voiceSnapshotErrorLogged) {
+      voiceSnapshotErrorLogged = true;
+      reportOnboardingEvent({
+        kind: "voice_attempt",
+        result: "unknown",
+        reason: "snapshot_read_failed",
+        step: "voice_test",
+      });
+    }
+  } finally {
+    voicePollBusy = false;
+  }
+}
+
+function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
+  voiceResult.value = terminal;
+  voicePhase.value = "terminal";
+  if (terminal.result === "passed") {
+    voiceVerified.value = true;
+  } else {
+    voiceFailureMessage.value = terminal.code
+      ? VOICE_FAILURE_COPY[terminal.code]
+      : "这次测试没有通过，再试一次。";
+  }
+  reportOnboardingEvent({
+    kind: "voice_attempt",
+    result: terminal.result,
+    reason: terminal.code ?? "passed",
+    step: "voice_test",
+    detail: `d${terminal.evidence.decodedSamples}_s${terminal.evidence.submittedSamples}_q${terminal.evidence.queuedEnd}_drain${terminal.evidence.drainObserved ? 1 : 0}`,
+    elapsedMs: terminal.elapsedMs,
+  });
+  if (voicePollTimer !== null) {
+    window.clearInterval(voicePollTimer);
+    voicePollTimer = null;
+  }
+  void closeVoiceObservation();
+}
+
+async function onVoiceInput(): Promise<void> {
+  const tracker = voiceTracker;
+  if (!tracker || tracker.state() === "terminal" || tracker.state() === "idle") return;
+  const serial = voiceAttemptSerial;
+  await settleVoiceManualInput(Date.now());
+  if (serial !== voiceAttemptSerial || voiceTracker !== tracker || tracker.state() === "terminal") {
+    return;
+  }
+  const terminal = tracker.notifyTranscript(Date.now());
+  if (terminal) onVoiceTerminal(terminal);
+}
+
+function onVoiceBoxFocus(): void {
+  voiceFocused.value = true;
+}
+
+function onVoiceBoxBlur(): void {
+  voiceFocused.value = false;
+  const tracker = voiceTracker;
+  if (!tracker) return;
+  const state = tracker.state();
+  if (state === "streaming" || state === "waiting_end" || state === "waiting_transcript") {
+    const terminal = tracker.abort("voice.focus_lost", Date.now());
+    if (terminal) {
+      onVoiceTerminal(terminal);
+      void closeVoiceObservation();
+    }
+  }
+}
+
+async function retryVoiceTest(): Promise<void> {
+  reportOnboardingEvent({
+    kind: "step_retry",
+    result: "passed",
+    reason: "user_retry",
+    step: "voice_test",
+  });
+  voiceTestRef.value?.clearBox();
+  await startVoiceTestSession();
 }
 </script>
 
@@ -890,6 +1234,22 @@ async function onStartUsing(): Promise<void> {
         @launch-vokie="launchVokieApp"
         @refresh-vokie="refreshVokieState"
         @choose-other-keys="chooseOtherKeys"
+      />
+      <VoiceTestStep
+        v-else-if="step === 'voice_test'"
+        ref="voiceTestRef"
+        :phase="voicePhase"
+        :result="voiceResult?.result ?? null"
+        :failure-message="voiceFailureMessage"
+        :focused="voiceFocused"
+        :tool-label="voiceToolLabel"
+        :hotkey-text="hotkeyLabel"
+        :audio-text="voiceAudioText"
+        :checklist-key="`${stagedTool ?? 'none'}|${hotkeyLabel}|${voiceAudioText}`"
+        @input="onVoiceInput"
+        @focus="onVoiceBoxFocus"
+        @blur="onVoiceBoxBlur"
+        @retry="retryVoiceTest"
       />
       <ControlsStep
         v-else-if="step === 'controls'"
@@ -1186,8 +1546,30 @@ async function onStartUsing(): Promise<void> {
   gap: 8px;
   align-items: baseline;
 }
-.onboarding-check-list .onboarding-ok,
-.onboarding-check-list .onboarding-error {
+.onboarding-voice-input {
+  width: 100%;
+  max-width: 560px;
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong, #c9cbd6);
+  border-radius: 10px;
+  background: var(--surface-raised, #fff);
+  color: var(--text-primary);
+  font-size: 15px;
+}
+.onboarding-voice-input:focus {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.onboarding-check-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-control);
+}
+.onboarding-check-row input {
   margin: 0;
 }
 </style>
