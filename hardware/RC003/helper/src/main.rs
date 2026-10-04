@@ -43,6 +43,9 @@
 //! 原有的自隐藏动作对可见窗口无效）。手动运行（cmd / PowerShell / run-helper*.cmd）
 //! 由 `bootstrap_console()` 附加到父控制台，输出照旧可见；后台拉起没有父控制台时
 //! stdout/stderr 指向 NUL，`Logger::line` 的 `println!` 成为无害空写。
+//! 注意：GUI 子系统进程拿不到 cmd / PowerShell 的 `>` 与管道重定向（Windows 只给
+//! 控制台子系统子进程接这些句柄；`Start-Process -RedirectStandardOutput` 是显式
+//! 传递、仍可用）。要留档输出请用 `--log <文件>`——日志落点与子系统无关。
 
 // GUI 子系统（仅 Windows）：消灭"助手运行时一闪而过"的黑框/终端窗口。
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -1001,6 +1004,10 @@ mod imp {
     }
 
     /// 设备实例名里需要脱敏的只有蓝牙地址：紧跟在 `_` 之后的 12 位十六进制。
+    ///
+    /// **只用于设备实例名**。令牌等秘密不能用本函数——它对裸十六进制字符串是
+    /// **空操作**（2026-10-04 现场：`[TOKEN]` 的 value 曾误用它，明文令牌直进
+    /// 诊断日志）。令牌一律走 [`token_fingerprint`]。
     fn mask_token(text: &str) -> String {
         let bytes: Vec<char> = text.chars().collect();
         let mut out = String::new();
@@ -1023,6 +1030,35 @@ mod imp {
             i += 1;
         }
         out
+    }
+
+    /// `[TOKEN]` 日志字段的**唯一构造点**：令牌只以指纹形式出现。
+    ///
+    /// 2026-10-04 现场发现：三处 `[TOKEN]` 的 value 走的是 `mask_token`，而它
+    /// 只匹配"下划线 + 12 位十六进制"的蓝牙地址形态——对裸令牌是**空操作**，
+    /// 于是 `session.token` 的明文进了诊断日志（日志会被用户整份发出，等于把
+    /// 认证材料一并交出）。统一走这里后，指纹可对照（同令牌同指纹、异令牌异
+    /// 指纹）但不可用于认证。
+    fn token_log_fields(
+        source: &str,
+        path: Option<&Path>,
+        token: &str,
+    ) -> Vec<(&'static str, String)> {
+        let mut fields = vec![("source", source.to_string())];
+        if let Some(p) = path {
+            fields.push(("path", normalize_display(p)));
+        }
+        fields.push(("value", token_fingerprint(token)));
+        fields
+    }
+
+    /// 令牌指纹：`len=<长度> fp=<sha256 前 8 位十六进制>`。
+    ///
+    /// 与 `mask_token`（蓝牙地址脱敏）**无关**：裸令牌没有可依赖的形态特征，
+    /// 必须显式摘要——两者混淆过一次，见 `token_log_fields` 注释。
+    fn token_fingerprint(token: &str) -> String {
+        let digest = sha256_hex(token.as_bytes());
+        format!("len={} fp={}", token.len(), &digest[..8])
     }
 
     // ============================================================ 日志
@@ -1600,7 +1636,9 @@ mod imp {
   --attach-only         只接管宿主里已有的 tap，绝不注入（诊断用）\n\
   --new-generation      旧世代 tap 无法接管时，另起一份复制体注入（实验性：\n\
                         依赖 Frida 允许同一进程内两个 Gadget 实例，未验证）\n\
-  --log <PATH>          同时写日志文件（**追加**语义，每轮带时间戳分隔头）\n\
+  --log <PATH>          同时写日志文件（**追加**语义，每轮带时间戳分隔头）。\n\
+                        要捕获输出请用它：GUI 子系统进程拿不到 cmd / PowerShell 的\n\
+                        `>` 与管道重定向（Windows 只给控制台子系统子进程接这些）\n\
   --dry-run             只做宿主定位、独占性核对与 Gadget 校验；不准备运行目录、不注入、不监听\n\
                         （**无需提权**：全是只读检查）\n\
   --observe             只观察不拦截（agent 侧不清键）\n\
@@ -1746,14 +1784,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             if let Ok(s) = fs::read_to_string(&path) {
                 let t = s.trim().to_string();
                 if !t.is_empty() {
-                    logger.kv(
-                        "[TOKEN]",
-                        &[
-                            ("source", "file".into()),
-                            ("path", normalize_display(&path)),
-                            ("value", mask_token(&t)),
-                        ],
-                    );
+                    logger.kv("[TOKEN]", &token_log_fields("file", Some(&path), &t));
                     return Ok((t, true));
                 }
             }
@@ -1763,21 +1794,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .map_err(|e| format!("创建运行时目录失败 {}: {e}", dir.display()))?;
         fs::write(&path, &token)
             .map_err(|e| format!("写入令牌文件失败 {}: {e}", path.display()))?;
-        logger.kv(
-            "[TOKEN]",
-            &[
-                (
-                    "source",
-                    if force_new {
-                        "regenerated".into()
-                    } else {
-                        "generated".into()
-                    },
-                ),
-                ("path", normalize_display(&path)),
-                ("value", mask_token(&token)),
-            ],
-        );
+        let source = if force_new {
+            "regenerated"
+        } else {
+            "generated"
+        };
+        logger.kv("[TOKEN]", &token_log_fields(source, Some(&path), &token));
         Ok((token, false))
     }
 
@@ -4192,13 +4214,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 }
             }
         } else {
-            logger.kv(
-                "[TOKEN]",
-                &[
-                    ("source", "explicit".into()),
-                    ("value", mask_token(&args.token)),
-                ],
-            );
+            logger.kv("[TOKEN]", &token_log_fields("explicit", None, &args.token));
         }
 
         // ---- 宿主里是否已有 tap？----
@@ -5294,6 +5310,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 && masked.contains("00805f9b34fb")
                 && !masked.contains("A1B2C3D4E5F6"),
             masked.clone(),
+        );
+
+        // 2b) 令牌日志脱敏（2026-10-04 现场回归）：`[TOKEN]` 只允许写指纹。
+        //     此前 value 走 mask_token——它只认"下划线 + 12 位十六进制"的蓝牙
+        //     形态，对裸令牌是**空操作**，于是 32 位明文令牌进了诊断日志。
+        let sample_token = "0f5bc7ba950a257f62f4c99691e49280";
+        let token_line = token_log_fields(
+            "file",
+            Some(Path::new("C:\\x\\session.token")),
+            sample_token,
+        )
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+        check(
+            "令牌日志脱敏：只写指纹、不含明文",
+            !token_line.contains(sample_token)
+                && token_line.contains("fp=")
+                && token_line.contains("len=32"),
+            token_line,
         );
 
         // 3) 极简 JSON 取值器：协议实际会遇到的几类形态
@@ -6499,6 +6536,58 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    #[cfg(test)]
+    mod token_log_privacy_tests {
+        use super::*;
+
+        /// 与两处固定断言共用：形状必须是 `len=32 fp=<8 hex>`。
+        const SAMPLE: &str = "0f5bc7ba950a257f62f4c99691e49280";
+
+        #[test]
+        fn fingerprint_is_stable_and_never_the_token() {
+            let fp = token_fingerprint(SAMPLE);
+            assert!(fp.starts_with("len=32 fp="), "{fp}");
+            assert_eq!(fp.len(), "len=32 fp=".len() + 8);
+            assert_eq!(fp, token_fingerprint(SAMPLE));
+            assert_ne!(fp, token_fingerprint("00"));
+            assert!(!fp.contains(SAMPLE));
+        }
+
+        #[test]
+        fn token_log_fields_never_carry_the_raw_value() {
+            let path = Path::new("C:\\ProgramData\\SayAll\\rc003-helper\\session.token");
+            let joined = token_log_fields("file", Some(path), SAMPLE)
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(joined.contains("source=file"), "{joined}");
+            assert!(joined.contains("fp="), "{joined}");
+            assert!(!joined.contains(SAMPLE), "日志字段不得含明文令牌: {joined}");
+        }
+
+        #[test]
+        fn load_or_create_token_writes_only_the_fingerprint_to_the_log() {
+            // 回归（2026-10-04）：修复前这一行是 `mask_token(裸令牌)` → 空操作
+            // → 明文进日志。这条测试直接盯住**真实写出的日志文本**。
+            let dir =
+                std::env::temp_dir().join(format!("rc003-token-log-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("创建临时目录");
+            fs::write(dir.join(TOKEN_FILE), SAMPLE).expect("写入令牌文件");
+            let log_path = dir.join("run.log");
+            let logger = Logger::new(Some(log_path.clone()));
+            let (token, from_file) = load_or_create_token(&dir, false, &logger).expect("读取令牌");
+            assert_eq!(token, SAMPLE);
+            assert!(from_file, "磁盘上本来就有令牌");
+            let text = fs::read_to_string(&log_path).expect("读取日志");
+            assert!(text.contains("[TOKEN]"), "{text}");
+            assert!(text.contains("fp="), "{text}");
+            assert!(!text.contains(SAMPLE), "日志不得含明文令牌: {text}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
 
     #[cfg(test)]
     mod agent_refresh_tests {
