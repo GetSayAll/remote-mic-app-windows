@@ -38,6 +38,12 @@
 
 建议（与设计稿 §5.5 / §8 一致）：新增 `voice-session` 事件（`phase=started|ended` + `generation` + 解码/提交/队列增量 + `drain_complete` + 错误分类），前端 attempt 控制器以 `attempt_id` 关联并落唯一终态；或等价方案 = 测试页 ~100–200ms 快照轮询 + 会话终态聚合。**实现前先在真机做正反对照**（正常会话 vs 中途断连/拔电），确认字段能区分「没开始 / 没采样 / 投递失败 / 未结束」。
 
+**2026-10-04 决定**：采用等价方案（快照轮询 + 终态聚合），控制器已落地为
+`src/onboarding/voice-attempt.ts`（纯逻辑 + 10 项测试）：`decodedSamples` 用差值
+（跨会话累计）、`submittedSamples` 用 `begin_session` 归零后的会话值、结束形态 =
+「回到 idle 且 audio ready 且队列为 0」；BLE 推送事件留作后续可选增强。
+真机正反对照仍是第⑤步上线前的验收项。
+
 ## ③ `ms-settings:` 打开方式（只读部分 passed；打开动作待真机）
 
 - 只读检查（2026-10-04 本机）：`HKCR\ms-settings` 协议处理器存在。
