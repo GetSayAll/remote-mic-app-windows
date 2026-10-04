@@ -2,7 +2,6 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   beginKeyObservation,
-  buttonLabel,
   completeOnboarding,
   connectRemote,
   disableRc003Capture,
@@ -54,6 +53,8 @@ import {
   type OnboardingContext,
   type OnboardingStep,
 } from "../onboarding/flow";
+import { buildSidePanel } from "../onboarding/panel";
+import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
   type VoiceAttemptFailureCode,
@@ -178,7 +179,7 @@ const observedList = computed(() =>
 );
 /** 第⑤步真实验证通过（会话级事实；步骤⑤接入后由 attempt 终态置位）。 */
 const voiceVerified = ref(false);
-let mappingSuspended = false;
+const mappingSuspended = ref(false);
 
 /** 门禁上下文：全部来自运行快照与本向导会话内的观察，不发起任何调用。 */
 const gateContext = computed<OnboardingContext>(() => {
@@ -222,6 +223,54 @@ const continueEnabled = computed(() => {
   return nextStep(step.value) !== null;
 });
 const currentPhase = computed(() => phaseOf(step.value));
+
+/** 阶段进度条（设计稿 2026-10-05）：只画位置感，不写步数与百分比。 */
+const PROGRESS_PERCENT: Record<OnboardingStep, number> = {
+  welcome: 4,
+  remote: 18,
+  audio: 34,
+  voice_tool: 50,
+  voice_test: 67,
+  controls: 84,
+  complete: 100,
+};
+const progressPercent = computed(() => PROGRESS_PERCENT[step.value]);
+
+/** 右栏「检查卡」输入快照：全部来自既有状态，不发起调用、不改判据。 */
+const sidePanel = computed(() => {
+  const platform = props.runtime?.platform;
+  const selectedId =
+    audioSnapshot.value?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
+  const recommended = audioEndpoints.value.filter(isRecommendedVoiceEndpoint);
+  const tool = stagedTool.value ?? configuredTool.value;
+  return buildSidePanel(step.value, {
+    connectionPhase: platform?.connection.phase ?? "idle",
+    bleVoiceReady: platform?.bleVoiceReady ?? false,
+    remoteButtonObserved: remoteButtonObserved.value,
+    recommendedEndpointCount: recommended.length,
+    selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
+    wasapiReady:
+      (audioSnapshot.value?.phase ?? platform?.audio.phase ?? "unconfigured") === "ready",
+    audioLastError: audioSnapshot.value?.lastError ?? platform?.audio.lastError ?? null,
+    scanningAudio: scanningAudio.value,
+    tool,
+    hotkeyReady: tool !== null && (tool !== "other" || otherKeys.value !== null),
+    captureEnabled: rc003Status.value?.enabled === true,
+    vokieRunning: vokie.value?.running === true,
+    voicePhase: voicePhase.value,
+    voiceTerminalCode: voiceResult.value?.code ?? null,
+    voiceResultPassed: voiceResult.value?.result === "passed",
+    voiceEvidence: voiceResult.value
+      ? {
+          decodedSamples: voiceResult.value.evidence.decodedSamples,
+          submittedSamples: voiceResult.value.evidence.submittedSamples,
+          drainObserved: voiceResult.value.evidence.drainObserved,
+        }
+      : null,
+    distinctButtons: observedButtons.value.size,
+    mappingSuspended: mappingSuspended.value,
+  });
+});
 
 const BLOCK_COPY: Record<OnboardingBlockCode, string> = {
   "remote.not_connected": "先连接遥控器，再继续。",
@@ -345,7 +394,7 @@ onUnmounted(() => {
   stopButtonObservation();
   stopVoiceTestSession();
   // 安全网：向导卸载（完成/退出）时恢复映射执行；进程退出后内存态自然复位。
-  if (mappingSuspended) {
+  if (mappingSuspended.value) {
     void setMappingSuspension(false);
   }
 });
@@ -955,8 +1004,8 @@ async function launchVokieApp(): Promise<void> {
 // ---- 普通按键体验 / 完成步骤 ----
 
 async function setMappingSuspensionState(suspended: boolean): Promise<void> {
-  if (mappingSuspended === suspended) return;
-  mappingSuspended = suspended;
+  if (mappingSuspended.value === suspended) return;
+  mappingSuspended.value = suspended;
   const started = performance.now();
   const reason = suspended ? "mapping_suspend" : "mapping_resume";
   reportStepAction(step.value, reason, "unknown");
@@ -1457,101 +1506,108 @@ async function retryVoiceTest(): Promise<void> {
         <span class="sep">›</span>
         <span :class="{ on: currentPhase === 'try_it' }">试一下</span>
       </span>
-      <span class="onboarding-title">无线麦 SayAll · 首次设置</span>
+      <span class="onboarding-progress" aria-hidden="true">
+        <span class="onboarding-progress-fill" :style="{ width: `${progressPercent}%` }"></span>
+      </span>
     </header>
 
     <main class="onboarding-body">
-      <div v-if="stateReadFailed" class="onboarding-error-block">
-        <p>无法读取设置进度：{{ stateReadFailed }}</p>
-        <button class="secondary-button" type="button" @click="restoreStep">重试</button>
+      <div class="onboarding-main">
+        <button
+          v-if="previousStep(step)"
+          class="onboarding-back"
+          type="button"
+          @click="onBack"
+        >
+          ← 返回
+        </button>
+
+        <div v-if="stateReadFailed" class="onboarding-error-block">
+          <p>无法读取设置进度：{{ stateReadFailed }}</p>
+          <button class="secondary-button" type="button" @click="restoreStep">重试</button>
+        </div>
+
+        <WelcomeStep v-if="step === 'welcome'" />
+        <RemoteStep
+          v-else-if="step === 'remote'"
+          :runtime="runtime"
+          :devices="devices"
+          :scanning="scanning"
+          :scan-message="scanMessage"
+          :connecting-device-id="connectingDeviceId"
+          :operation-message="operationMessage"
+          :button-observed="remoteButtonObserved"
+          :voice-key-mistake="voiceKeyMistake"
+          :gate-code="gate.code"
+          @scan="scanRemotes"
+          @connect="connectDevice"
+          @open-bluetooth-settings="openBluetoothSettings"
+        />
+        <AudioStep
+          v-else-if="step === 'audio'"
+          :endpoints="audioEndpoints"
+          :audio="audioSnapshot"
+          :scanning="scanningAudio"
+          :message="audioMessage"
+          :selecting-endpoint-id="selectingEndpointId"
+          :opening-vb-cable-page="openingVbCablePage"
+          :gate-code="gate.code"
+          @select="chooseEndpoint"
+          @refresh="refreshAudioDevices(false)"
+          @open-download="openDownloadPage"
+        />
+        <VoiceToolStep
+          v-else-if="step === 'voice_tool'"
+          :tool="stagedTool"
+          :hotkey-label="hotkeyLabel"
+          :capture-enabled="rc003Status?.enabled === true"
+          :capture-busy="captureBusy"
+          :capture-hint="captureHint"
+          :conflict="stagedTool === 'doubao' && vokie?.running === true"
+          :vokie="vokie"
+          :vokie-busy="vokieBusy"
+          :other-keys="otherKeys"
+          :message="toolMessage"
+          @select-tool="selectTool"
+          @toggle-capture="requestCaptureToggle"
+          @open-vokie-site="openVokieSite"
+          @launch-vokie="launchVokieApp"
+          @refresh-vokie="refreshVokieState"
+          @choose-other-keys="chooseOtherKeys"
+        />
+        <VoiceTestStep
+          v-else-if="step === 'voice_test'"
+          ref="voiceTestRef"
+          :phase="voicePhase"
+          :result="voiceResult?.result ?? null"
+          :failure-message="voiceFailureMessage"
+          :focused="voiceFocused"
+          :tool-label="voiceToolLabel"
+          :hotkey-text="hotkeyLabel"
+          :audio-text="voiceAudioText"
+          @input="onVoiceInput"
+          @focus="onVoiceBoxFocus"
+          @blur="onVoiceBoxBlur"
+          @retry="retryVoiceTest"
+        />
+        <ControlsStep
+          v-else-if="step === 'controls'"
+          :observed="observedList"
+          :voice-key-mistake="voiceKeyMistake"
+        />
+        <CompleteStep
+          v-else-if="step === 'complete'"
+          :checks="completeChecks"
+          @fix="onFixStep"
+        />
       </div>
 
-      <WelcomeStep v-if="step === 'welcome'" />
-      <RemoteStep
-        v-else-if="step === 'remote'"
-        :runtime="runtime"
-        :devices="devices"
-        :scanning="scanning"
-        :scan-message="scanMessage"
-        :connecting-device-id="connectingDeviceId"
-        :operation-message="operationMessage"
-        :button-observed="remoteButtonObserved"
-        :voice-key-mistake="voiceKeyMistake"
-        @scan="scanRemotes"
-        @connect="connectDevice"
-        @open-bluetooth-settings="openBluetoothSettings"
-      />
-      <AudioStep
-        v-else-if="step === 'audio'"
-        :endpoints="audioEndpoints"
-        :audio="audioSnapshot"
-        :scanning="scanningAudio"
-        :message="audioMessage"
-        :selecting-endpoint-id="selectingEndpointId"
-        :opening-vb-cable-page="openingVbCablePage"
-        @select="chooseEndpoint"
-        @refresh="refreshAudioDevices(false)"
-        @open-download="openDownloadPage"
-      />
-      <VoiceToolStep
-        v-else-if="step === 'voice_tool'"
-        :tool="stagedTool"
-        :hotkey-label="hotkeyLabel"
-        :capture-enabled="rc003Status?.enabled === true"
-        :capture-busy="captureBusy"
-        :capture-hint="captureHint"
-        :conflict="stagedTool === 'doubao' && vokie?.running === true"
-        :vokie="vokie"
-        :vokie-busy="vokieBusy"
-        :other-keys="otherKeys"
-        :message="toolMessage"
-        @select-tool="selectTool"
-        @toggle-capture="requestCaptureToggle"
-        @open-vokie-site="openVokieSite"
-        @launch-vokie="launchVokieApp"
-        @refresh-vokie="refreshVokieState"
-        @choose-other-keys="chooseOtherKeys"
-      />
-      <VoiceTestStep
-        v-else-if="step === 'voice_test'"
-        ref="voiceTestRef"
-        :phase="voicePhase"
-        :result="voiceResult?.result ?? null"
-        :failure-message="voiceFailureMessage"
-        :focused="voiceFocused"
-        :tool-label="voiceToolLabel"
-        :hotkey-text="hotkeyLabel"
-        :audio-text="voiceAudioText"
-        :checklist-key="`${stagedTool ?? 'none'}|${hotkeyLabel}|${voiceAudioText}`"
-        @input="onVoiceInput"
-        @focus="onVoiceBoxFocus"
-        @blur="onVoiceBoxBlur"
-        @retry="retryVoiceTest"
-      />
-      <ControlsStep
-        v-else-if="step === 'controls'"
-        :observed="observedList"
-        :voice-key-mistake="voiceKeyMistake"
-      />
-      <CompleteStep
-        v-else-if="step === 'complete'"
-        :checks="completeChecks"
-        @fix="onFixStep"
-      />
+      <StepSide :panel="sidePanel" />
     </main>
 
     <p v-if="saveMessage" class="onboarding-error">进度保存失败：{{ saveMessage }}</p>
 
     <footer class="onboarding-footer">
-      <button
-        v-if="previousStep(step)"
-        class="secondary-button"
-        type="button"
-        @click="onBack"
-      >
-        返回
-      </button>
-      <span class="spacer"></span>
       <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{ blockMessage }}</span>
       <button
         class="primary-button"
@@ -1575,188 +1631,556 @@ async function retryVoiceTest(): Promise<void> {
 </template>
 
 <style>
-/* 向导壳与步骤共用样式。类名统一 .onboarding- 前缀，避免与主界面样式冲突。 */
+/* 向导壳与步骤共用样式（2026-10-05 重设计：参考 Mac，两栏 + 右栏检查卡）。
+   类名统一 .onboarding- 前缀，避免与主界面样式冲突。 */
 .onboarding-shell {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
   box-sizing: border-box;
-  padding: 18px 26px 20px;
   background: var(--surface-canvas);
   color: var(--text-primary);
 }
 .onboarding-header {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding-bottom: 12px;
+  justify-content: center;
+  min-height: 46px;
   border-bottom: 1px solid var(--border);
 }
 .onboarding-phase {
   display: inline-flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   font-size: 12.5px;
   color: var(--text-secondary);
 }
 .onboarding-phase .on {
-  color: var(--accent-text);
+  color: var(--text-primary);
   font-weight: 700;
 }
 .onboarding-phase .sep {
-  opacity: 0.6;
+  opacity: 0.55;
 }
-.onboarding-title {
-  font-size: 12.5px;
-  color: var(--text-secondary);
+.onboarding-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+  background: var(--track);
+}
+.onboarding-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+  transition: width 0.25s ease;
 }
 .onboarding-body {
   flex: 1 1 auto;
-  padding: 18px 2px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 58fr) minmax(360px, 42fr);
+  min-height: 0;
 }
-.onboarding-footer {
+.onboarding-main {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 12px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
+  padding: 18px 26px 12px;
+  overflow-y: auto;
+  min-height: 0;
 }
-.onboarding-footer .spacer {
-  margin-left: auto;
+.onboarding-back {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-control);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
 }
-.onboarding-block-hint {
-  max-width: 560px;
+.onboarding-back:hover {
+  color: var(--accent-text);
+}
+
+/* ---- 右栏（插图 + 检查卡） ---- */
+.onboarding-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 26px;
+  border-left: 1px solid var(--border);
+  background: var(--accent-surface);
+  min-height: 0;
+  overflow: hidden;
+}
+.side-visual {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 0;
+}
+.side-photo {
+  width: 138px;
+  max-height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 14px 22px rgba(20, 24, 36, 0.22));
+}
+.side-appicon {
+  width: 76px;
+  height: 76px;
+  border-radius: 18px;
+  box-shadow: 0 10px 22px rgba(20, 24, 36, 0.18);
+}
+.side-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.side-wave i {
+  display: block;
+  width: 5px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.side-done {
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: var(--success-surface);
+  color: var(--success-text);
+  font-size: 38px;
+  font-weight: 800;
+}
+.side-caption {
   font-size: 12.5px;
   color: var(--text-secondary);
-  text-align: right;
 }
+.onboarding-check-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 12px;
+  box-shadow: 0 10px 24px var(--shadow-card);
+}
+.onboarding-check-card h4 {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--text-subtle-strong);
+}
+.onboarding-crow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  font-size: 12.5px;
+  color: var(--text-control);
+}
+.onboarding-crow + .onboarding-crow {
+  margin-top: 6px;
+}
+.onboarding-crow .crow-state {
+  margin-left: auto;
+  font-weight: 700;
+}
+.onboarding-crow .crow-value {
+  margin-left: auto;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.onboarding-crow[data-state="ok"] .crow-state {
+  color: var(--success-text);
+}
+.onboarding-crow[data-state="busy"] .crow-state {
+  color: var(--accent-text);
+}
+.onboarding-crow[data-state="warn"] .crow-state {
+  color: var(--warning-text);
+}
+.onboarding-crow[data-state="pending"] .crow-state {
+  color: var(--pending-text);
+}
+
+/* ---- 步骤内容 ---- */
 .onboarding-step {
-  max-width: 720px;
+  max-width: 640px;
 }
 .onboarding-step h1 {
   margin: 0 0 8px;
-  font-size: 18px;
+  font-size: 21px;
 }
 .onboarding-lede {
-  margin: 0 0 14px;
+  margin: 0 0 12px;
   color: var(--text-control);
+  line-height: 1.6;
 }
 .onboarding-muted {
   color: var(--text-secondary);
   font-size: 12.5px;
 }
-.onboarding-callout {
-  margin: 0 0 12px;
+.onboarding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.onboarding-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.onboarding-rows .onboarding-status-row + .onboarding-status-row {
+  margin-top: 0;
+}
+.onboarding-rows .onboarding-option + .onboarding-option {
+  margin-top: 0;
+}
+.onboarding-card {
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
 }
-.onboarding-callout.ok {
-  border-color: rgba(46, 160, 96, 0.4);
-}
-.onboarding-callout.warn {
-  border-color: rgba(240, 173, 78, 0.55);
-}
-.onboarding-callout ol,
-.onboarding-callout ul {
-  margin: 8px 0 0;
-  padding-left: 22px;
-}
-.onboarding-callout li {
-  margin: 3px 0;
-}
-.onboarding-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+.onboarding-card + .onboarding-card {
   margin-top: 10px;
 }
-.onboarding-message {
-  margin: 8px 0 0;
+.onboarding-card.accent {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+}
+.onboarding-card.warn {
+  border-color: rgba(182, 109, 20, 0.35);
+  background: var(--warning-surface-soft);
+}
+.onboarding-card h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.onboarding-card p {
+  margin: 6px 0 0;
   font-size: 12.5px;
   color: var(--text-secondary);
 }
-.onboarding-status-line {
-  margin: 0 0 6px;
+.onboarding-numlist {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.onboarding-numlist li {
+  display: flex;
+  gap: 9px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.onboarding-num {
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+.onboarding-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.onboarding-chip {
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-control);
+  color: var(--text-control);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.onboarding-chip.strong {
+  border-color: var(--accent-border);
+  background: var(--accent-surface-strong);
+  color: var(--accent-text);
   font-weight: 600;
+}
+.onboarding-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---- 状态行 / 选择卡 ---- */
+.onboarding-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.onboarding-status-row + .onboarding-status-row {
+  margin-top: 8px;
+}
+.onboarding-status-row .status-icon {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  background: var(--accent-surface);
+  color: var(--accent-text);
+}
+.onboarding-status-row[data-state="pending"] .status-icon {
+  background: var(--pending-surface);
+  color: var(--pending-text);
+}
+.onboarding-status-row[data-state="ok"] .status-icon {
+  background: var(--success-surface);
+  color: var(--success-text);
+}
+.onboarding-status-row[data-state="warn"] .status-icon {
+  background: var(--warning-surface);
+  color: var(--warning-text);
+}
+.onboarding-status-row .status-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.onboarding-status-row .status-text strong {
+  font-size: 13px;
+}
+.onboarding-status-row .status-text small {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.onboarding-status-row .status-state {
+  margin-left: auto;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.onboarding-status-row .status-value {
+  margin-left: auto;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.onboarding-status-row[data-state="pending"] .status-state {
+  color: var(--pending-text);
+}
+.onboarding-status-row[data-state="busy"] .status-state {
+  color: var(--accent-text);
+}
+.onboarding-status-row[data-state="ok"] .status-state {
+  color: var(--success-text);
+}
+.onboarding-status-row[data-state="warn"] .status-state {
+  color: var(--warning-text);
+}
+
+.onboarding-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.onboarding-option + .onboarding-option {
+  margin-top: 8px;
+}
+.onboarding-option.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+}
+.onboarding-option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.onboarding-option .option-radio {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  position: relative;
+}
+.onboarding-option.selected .option-radio {
+  border-color: var(--accent);
+}
+.onboarding-option.selected .option-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.onboarding-option .option-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.onboarding-option .option-body strong {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.onboarding-option .option-body small {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.onboarding-option .option-trailing {
+  margin-left: auto;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.onboarding-option.selected .option-trailing {
+  color: var(--accent-text);
+}
+.onboarding-tag {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-text);
+}
+.onboarding-option .option-state.ok {
+  color: var(--success-text);
+}
+.onboarding-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.onboarding-grid2 .onboarding-option {
+  margin-top: 0;
+}
+
+/* ---- 按键 chip 网格 / 进度点 ---- */
+.onboarding-btnchips {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.onboarding-bchip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  color: var(--text-control);
+  font-size: 12.5px;
+}
+.onboarding-bchip .dot {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+}
+.onboarding-bchip.hit {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+.onboarding-bchip.hit .dot {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.onboarding-dots {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.onboarding-dots .dot {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+}
+.onboarding-dots .dot.on {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* ---- 语音验证页 ---- */
+.onboarding-status-line {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.onboarding-wave-mark {
+  margin-right: 6px;
+  color: var(--accent);
+  letter-spacing: 1px;
 }
 .onboarding-ok {
   margin: 0;
   color: var(--success-text, #1a7f4b);
 }
-.onboarding-device-list {
-  display: grid;
-  gap: 8px;
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.onboarding-device-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.onboarding-badge {
-  margin-left: 6px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--accent-surface);
-  color: var(--accent-text);
-  font-size: 11.5px;
-  font-style: normal;
-}
-.onboarding-tool-list {
-  display: grid;
-  gap: 8px;
-  max-width: 560px;
-  margin: 0 0 12px;
-  padding: 0;
-  list-style: none;
-}
-.onboarding-tool-card {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
+.onboarding-voice-input {
   width: 100%;
-  padding: 9px 12px;
-  border: 1px solid var(--border-strong, #c9cbd6);
+  box-sizing: border-box;
+  margin: 2px 0 4px;
+  padding: 11px 13px;
+  border: 1.5px solid var(--accent-border);
   border-radius: 10px;
-  background: var(--surface-control, #f7f7fa);
+  background: var(--card);
   color: var(--text-primary);
-  text-align: left;
-  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
 }
-.onboarding-tool-card.selected {
-  border-color: var(--accent-border);
-  background: var(--accent-surface);
+.onboarding-voice-input:focus {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
 }
-.onboarding-tool-card .radio {
-  flex: 0 0 auto;
-  width: 14px;
-  height: 14px;
-  margin-top: 3px;
-  border: 1.5px solid var(--border-strong, #c9cbd6);
-  border-radius: 50%;
-  background: var(--surface-raised, #fff);
-}
-.onboarding-tool-card.selected .radio {
-  border-color: var(--accent);
-  box-shadow:
-    inset 0 0 0 3px var(--surface-raised, #fff),
-    inset 0 0 0 8px var(--accent);
-}
-.onboarding-tool-card strong {
-  display: block;
-  font-size: 13.5px;
-}
-.onboarding-tool-card small {
-  display: block;
-  margin-top: 2px;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
+
+/* ---- 输入工具页 ---- */
 .onboarding-switch-row {
   display: flex;
   align-items: center;
@@ -1788,6 +2212,8 @@ async function retryVoiceTest(): Promise<void> {
   background: var(--surface-raised, #fff);
   color: var(--text-control);
   cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
 }
 .onboarding-chip-select button.selected {
   border-color: var(--accent-border);
@@ -1795,13 +2221,15 @@ async function retryVoiceTest(): Promise<void> {
   color: var(--accent-text);
   font-weight: 600;
 }
+
+/* ---- 页脚错误与保存失败 ---- */
 .onboarding-error {
-  margin: 6px 0;
+  margin: 0 26px 6px;
   font-size: 12.5px;
-  color: var(--danger-text, #b3261e);
+  color: var(--error-text, #b3261e);
 }
 .onboarding-error-block {
-  margin: 0 0 14px;
+  margin: 0 0 12px;
   padding: 10px 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1811,42 +2239,48 @@ async function retryVoiceTest(): Promise<void> {
   margin: 0 0 8px;
   font-size: 12.5px;
 }
-.onboarding-check-list {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.onboarding-check-list li {
+
+/* ---- 页脚 ---- */
+.onboarding-footer {
   display: flex;
-  gap: 8px;
-  align-items: baseline;
-}
-.onboarding-voice-input {
-  width: 100%;
-  max-width: 560px;
-  margin: 4px 0 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-strong, #c9cbd6);
-  border-radius: 10px;
-  background: var(--surface-raised, #fff);
-  color: var(--text-primary);
-  font-size: 15px;
-}
-.onboarding-voice-input:focus {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 1px;
-}
-.onboarding-check-row {
-  display: flex;
-  gap: 8px;
+  flex-direction: column;
   align-items: center;
-  margin-top: 6px;
-  font-size: 12.5px;
-  color: var(--text-control);
+  gap: 6px;
+  padding: 10px 26px 14px;
+  border-top: 1px solid var(--border);
 }
-.onboarding-check-row input {
-  margin: 0;
+.onboarding-block-hint {
+  max-width: 680px;
+  font-size: 12.5px;
+  color: var(--warning-text);
+  text-align: center;
+}
+
+/* 窄窗或矮窗（含 150% 缩放下的较小可用高度）：右栏收进内容列底部，
+   只保留检查卡，插图隐藏。 */
+@media (max-width: 1024px), (max-height: 660px) {
+  .onboarding-body {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+  .onboarding-main {
+    overflow: visible;
+  }
+  .onboarding-side {
+    flex-direction: row;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 26px;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    overflow: visible;
+  }
+  .side-visual {
+    display: none;
+  }
+  .onboarding-check-card {
+    flex: 1;
+  }
 }
 </style>
+

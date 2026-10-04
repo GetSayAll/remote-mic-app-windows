@@ -303,7 +303,9 @@ describe("Onboarding wizard shell", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(runtimeWith());
 
-    expect(wrapper.text()).toContain("连接小米蓝牙语音遥控器");
+    expect(wrapper.text()).toContain("连接遥控器");
+    expect(wrapper.find(".onboarding-back").exists()).toBe(true);
+    expect(wrapper.text()).toContain("连接检查");
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
     // begin（result=unknown）与终态各一条；终态只允许一条。
     expect(onboardingEvents("started").filter((p) => p.result !== "unknown")).toHaveLength(1);
@@ -321,7 +323,8 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
 
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
-    expect(wrapper.text()).toContain("连接小米蓝牙语音遥控器");
+    expect(wrapper.text()).toContain("连接遥控器");
+    expect(wrapper.find(".onboarding-back").exists()).toBe(true);
     const passed = onboardingEvents("step_passed");
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
   });
@@ -367,7 +370,7 @@ describe("Onboarding wizard shell", () => {
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text() === "连接")!
+      .find((button) => button.text().includes("已配对的小米蓝牙语音遥控器") && button.text().endsWith("连接"))!
       .trigger("click");
     await flushPromises();
     expect(mocks.connectRemote).toHaveBeenCalledWith("dev-1");
@@ -399,7 +402,9 @@ describe("Onboarding wizard shell", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(runtimeWith());
 
-    await wrapper.find("footer .secondary-button").trigger("click");
+    // 新外壳：返回在内容列左上角；页脚只剩一个主按钮。
+    expect(wrapper.find("footer .secondary-button").exists()).toBe(false);
+    await wrapper.find(".onboarding-back").trigger("click");
     await flushPromises();
 
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
@@ -618,7 +623,8 @@ describe("Onboarding controls & completion steps", () => {
     mocks.buttonHandler?.({ button: "ok", isPressed: true });
     await flushPromises();
     expect(continueButton.attributes("data-gate-ready")).toBe("false");
-    expect(wrapper.text()).toContain("× 2");
+    expect(wrapper.text()).toContain("再按 1 个不同的普通按键。");
+    expect(wrapper.findAll(".onboarding-dots .dot.on")).toHaveLength(2);
 
     mocks.buttonHandler?.({ button: "back", isPressed: true });
     await flushPromises();
@@ -656,7 +662,7 @@ describe("Onboarding controls & completion steps", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
     const wrapper = await mountWizard(connectedRuntime());
 
-    await wrapper.find("footer .secondary-button").trigger("click");
+    await wrapper.find(".onboarding-back").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("按住遥控器语音键，试一句话");
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("voice_test");
@@ -770,6 +776,9 @@ describe("Onboarding voice test step", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("成功：文字已经出现在输入框里");
+    // 2026-10-05 改版定稿：核对卡是提示行（编号），不设勾选框——通过判据只有真实文字上屏。
+    expect(wrapper.text()).toContain("按你选的工具核对两件事");
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0);
     const continueButton = wrapper.find("footer .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(onboardingEvents("voice_attempt").some((p) => p.result === "passed")).toBe(true);
@@ -886,7 +895,10 @@ describe("Onboarding per-step diagnostics", () => {
       .find((button) => button.text().includes("扫描已配对设备"))!
       .trigger("click");
     await flushPromises();
-    await wrapper.findAll("button").find((button) => button.text() === "连接")!.trigger("click");
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("已配对的小米蓝牙语音遥控器") && button.text().endsWith("连接"))!
+      .trigger("click");
     await flushPromises();
 
     const connect = onboardingEvents("action").filter((p) => p.reason === "connect_requested");

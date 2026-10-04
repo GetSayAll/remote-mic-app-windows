@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import type { KeyCode, VoiceInputTool, VokieInstallation } from "../../lib/bridge";
+import OptionCard from "../../components/onboarding/OptionCard.vue";
 
 const props = defineProps<{
   tool: VoiceInputTool | null;
@@ -72,35 +73,30 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
       无线麦会替你按住它的语音键；选好后，下面显示这个工具还需要怎么设置。
     </p>
 
-    <div v-if="conflict" class="onboarding-callout warn">
-      <p>检测到 Vokie 正在运行，它会抢先响应右 Alt，豆包收不到语音键。请先退出 Vokie，再点「重新检测」。</p>
-      <div class="onboarding-actions">
-        <button class="secondary-button" type="button" @click="$emit('refreshVokie')">重新检测</button>
+    <div v-if="conflict" class="onboarding-card warn">
+      <h4>检测到 Vokie 正在运行</h4>
+      <p>它会抢先响应右 Alt，豆包收不到语音键。请先退出 Vokie，再点「重新检测」。</p>
+      <div class="onboarding-chips">
+        <button class="onboarding-chip strong" type="button" @click="$emit('refreshVokie')">
+          重新检测
+        </button>
       </div>
     </div>
 
-    <ul class="onboarding-tool-list">
-      <li v-for="card in TOOL_CARDS" :key="card.id">
-        <button
-          class="onboarding-tool-card"
-          :class="{ selected: tool === card.id }"
-          type="button"
-          @click="$emit('selectTool', card.id)"
-        >
-          <span class="radio" aria-hidden="true"></span>
-          <span>
-            <strong>{{ card.title }}</strong>
-            <small>{{ card.blurb }}</small>
-          </span>
-        </button>
-      </li>
-    </ul>
+    <div class="onboarding-grid2">
+      <OptionCard
+        v-for="card in TOOL_CARDS"
+        :key="card.id"
+        :selected="tool === card.id"
+        @select="$emit('selectTool', card.id)"
+      >
+        <strong>{{ card.title }}</strong>
+        <small>{{ card.blurb }}</small>
+      </OptionCard>
+    </div>
 
-    <div v-if="tool === 'doubao'" class="onboarding-callout">
-      <p class="onboarding-status-line">
-        按住遥控器语音键 <span class="muted">=</span> {{ hotkeyLabel }}
-        <em class="onboarding-badge">本次设置</em>
-      </p>
+    <div v-if="tool === 'doubao'" class="onboarding-card">
+      <h4>按住遥控器语音键 = {{ hotkeyLabel }}<span class="onboarding-tag">本次设置</span></h4>
       <p>在豆包里把麦克风选为 CABLE Output；长按语音键保持右 Alt（出厂默认就是它）。</p>
       <div class="onboarding-switch-row">
         <label class="onboarding-switch">
@@ -122,47 +118,48 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
       <p class="onboarding-muted">每次开启都会弹出 Windows 授权窗口，请选择“是”。</p>
     </div>
 
-    <div v-else-if="tool === 'wechat'" class="onboarding-callout">
-      <p class="onboarding-status-line">
-        按住遥控器语音键 <span class="muted">=</span> 左 Ctrl + 左 Win
-        <em class="onboarding-badge">本次设置</em>
-      </p>
+    <div v-else-if="tool === 'wechat'" class="onboarding-card">
+      <h4>按住遥控器语音键 = 左 Ctrl + 左 Win<span class="onboarding-tag">本次设置</span></h4>
       <p>在微信输入法里把麦克风选为 CABLE Output；语音需要联网，按住约半秒以上再说话。</p>
     </div>
 
-    <div v-else-if="tool === 'vokie'" class="onboarding-callout">
-      <p class="onboarding-status-line">
-        按住遥控器语音键 <span class="muted">=</span> {{ hotkeyLabel }}
-        <em class="onboarding-badge">本次设置</em>
-      </p>
+    <div v-else-if="tool === 'vokie'" class="onboarding-card">
+      <h4>按住遥控器语音键 = {{ hotkeyLabel }}<span class="onboarding-tag">本次设置</span></h4>
       <template v-if="vokie && vokie.running">
         <p class="onboarding-ok">Vokie 正在运行，这一项可以继续了。</p>
       </template>
       <template v-else-if="vokie && vokie.installed">
         <p>Vokie 已安装但没有运行：先启动它，再回来「重新检测」。</p>
-        <div class="onboarding-actions">
-          <button class="primary-button" type="button" :disabled="vokieBusy" @click="$emit('launchVokie')">
+        <div class="onboarding-chips">
+          <button
+            class="onboarding-chip strong"
+            type="button"
+            :disabled="vokieBusy"
+            @click="$emit('launchVokie')"
+          >
             {{ vokieBusy ? "正在启动…" : "打开 Vokie" }}
           </button>
-          <button class="secondary-button" type="button" @click="$emit('refreshVokie')">重新检测</button>
+          <button class="onboarding-chip" type="button" @click="$emit('refreshVokie')">
+            重新检测
+          </button>
         </div>
       </template>
       <template v-else>
         <p>没有检测到 Vokie。先安装，再回来「重新检测」。</p>
-        <div class="onboarding-actions">
-          <button class="primary-button" type="button" @click="$emit('openVokieSite')">
+        <div class="onboarding-chips">
+          <button class="onboarding-chip strong" type="button" @click="$emit('openVokieSite')">
             打开官网 vokie.com
           </button>
-          <button class="secondary-button" type="button" @click="$emit('refreshVokie')">重新检测</button>
+          <button class="onboarding-chip" type="button" @click="$emit('refreshVokie')">
+            重新检测
+          </button>
         </div>
       </template>
       <p class="onboarding-muted">在 Vokie 里把麦克风选为 CABLE Output，快捷键保持右 Alt。</p>
     </div>
 
-    <div v-else-if="tool === 'other'" class="onboarding-callout">
-      <p class="onboarding-status-line">
-        按住遥控器语音键 <span class="muted">=</span> {{ hotkeyLabel }}
-      </p>
+    <div v-else-if="tool === 'other'" class="onboarding-card">
+      <h4>按住遥控器语音键 = {{ hotkeyLabel }}</h4>
       <p>选与该工具里一致的语音键；选「不按键」只把声音送到 CABLE，不替它按键：</p>
       <div class="onboarding-chip-select">
         <button
@@ -178,6 +175,6 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
       <p class="onboarding-muted">工具里把麦克风选为 CABLE Output。</p>
     </div>
 
-    <p v-if="message" class="onboarding-message">{{ message }}</p>
+    <p v-if="message" class="onboarding-muted">{{ message }}</p>
   </section>
 </template>
