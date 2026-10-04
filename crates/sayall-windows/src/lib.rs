@@ -36,6 +36,8 @@ pub mod focus_windows;
 pub mod graceful_exit;
 #[cfg(windows)]
 pub mod instance_signal;
+/// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
+pub mod key_host;
 pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{

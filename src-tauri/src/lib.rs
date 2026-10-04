@@ -2035,6 +2035,8 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
         return;
     }
     let started = std::time::Instant::now();
+    // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
+    sayall_windows::key_host::shutdown_global();
     let platform = app.state::<AppState>().platform.clone();
     match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
         Ok(()) => sayall_windows::gatt_note(format!(
@@ -2533,6 +2535,9 @@ pub fn run() {
                 settings,
                 pending_update: std::sync::Mutex::new(None),
             });
+            // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
+            // 失败仅记录日志并保持 fail-open，不阻塞启动。
+            let _ = sayall_windows::key_host::start_global();
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
             spawn_installer_graceful_exit_watcher(app.handle().clone());

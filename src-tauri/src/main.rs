@@ -7,5 +7,18 @@
 )]
 
 fn main() {
+    match sayall_windows::key_host::parse_host_args(std::env::args()) {
+        sayall_windows::key_host::HostArgParse::Launch(launch) => {
+            // 按键宿主模式：不进入 Tauri / 单实例 / GUI 路径，只跑宿主循环。
+            std::process::exit(sayall_windows::key_host::run_host(launch));
+        }
+        sayall_windows::key_host::HostArgParse::Invalid(reason) => {
+            sayall_windows::gatt_note(format!(
+                "key_host action=boot result=failed reason={reason}"
+            ));
+            std::process::exit(64);
+        }
+        sayall_windows::key_host::HostArgParse::NotHost => {}
+    }
     sayall_windows_app::run();
 }
