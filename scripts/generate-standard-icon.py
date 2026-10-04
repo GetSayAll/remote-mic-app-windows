@@ -15,7 +15,11 @@ macOS 图标网格的导出（图案四周留白 + 柔和投影，实心瓷贴�
 输出（覆盖同名文件）：
 - `src-tauri/icons/{32x32,64x64,128x128,128x128@2x,icon}.png`
 - `src-tauri/icons/Square*Logo.png`、`src-tauri/icons/StoreLogo.png`
-- `src-tauri/icons/icon.ico`（16/24/32/48/64/256，快捷方式与安装器同源）
+- `src-tauri/icons/icon.ico`（16/24/32/48/64/256）
+
+角色（2026-10-04 起 exe / 安装包图标改用几何鸭，见 `tauri.conf.json`）：这套资产是
+「默认」（水彩鸭）风格本身——窗口/托盘取 `128x128@2x.png`（`app_icon::standard_window_image`），
+快捷方式取 `icon.ico`（`shortcut_icons.rs` 内嵌）；其余 PNG 是同族满画布输出。
 """
 
 from __future__ import annotations

@@ -140,7 +140,9 @@ describe("settings page", () => {
     setThemePreference.mockReset();
     bridge.getLaunchAtLogin.mockReset().mockResolvedValue(false);
     bridge.setLaunchAtLogin.mockReset();
-    bridge.getAppIcon.mockReset().mockResolvedValue("standard");
+    // 后端默认值（2026-10-04 起 = 几何鸭）：mock 也按新装默认返回，与
+    // `AppSettings::default()` 的用例语义对齐。
+    bridge.getAppIcon.mockReset().mockResolvedValue("faceted-duck");
     bridge.setAppIcon.mockReset();
   });
 
@@ -262,7 +264,7 @@ describe("settings page", () => {
     open.mockRestore();
   });
 
-  it("应用图标默认内置图标，切换后保存并立即生效，顶部标识同步换图", async () => {
+  it("应用图标新装默认几何鸭，切换后保存并立即生效，顶部标识同步换图", async () => {
     bridge.setAppIcon.mockImplementation(async (identifier) => identifier);
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
@@ -273,19 +275,20 @@ describe("settings page", () => {
       "standard",
       "faceted-duck",
     ]);
-    expect(radios[0].element.checked).toBe(true);
+    // 2026-10-04 用户定稿：新装默认选中几何鸭（后端默认值经 getAppIcon 读回）。
+    expect(radios[1].element.checked).toBe(true);
     expect(wrapper.text()).toContain("应用图标");
     expect(wrapper.text()).toContain("默认");
     expect(wrapper.text()).toContain("几何鸭");
-    expect(wrapper.get("img.app-logo").attributes("src")).toBe("/app-logo.png");
-
-    await radios[1].setValue(true);
-    expect(bridge.setAppIcon).toHaveBeenCalledWith("faceted-duck");
-    expect(radios[1].element.checked).toBe(true);
-    // 顶部标识与窗口/托盘用同一个选择：切换后立即换成几何鸭。
     expect(wrapper.get("img.app-logo").attributes("src")).toBe(
       "/app-icon-faceted-duck.png",
     );
+
+    await radios[0].setValue(true);
+    expect(bridge.setAppIcon).toHaveBeenCalledWith("standard");
+    expect(radios[0].element.checked).toBe(true);
+    // 顶部标识与窗口/托盘用同一个选择：切回「默认」即换回水彩鸭。
+    expect(wrapper.get("img.app-logo").attributes("src")).toBe("/app-logo.png");
   });
 
   it("应用图标保存失败时就地报错并回到实际生效的图标", async () => {
