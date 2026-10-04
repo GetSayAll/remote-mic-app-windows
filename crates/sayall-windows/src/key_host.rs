@@ -141,8 +141,10 @@ impl Wire {
         true
     }
 
-    /// 同步询问 F5 吞/放；任何失败（降级/写失败/超时）返回 false = 放行。
-    fn ask_f5(&self, is_down: bool, timeout: Duration) -> bool {
+    /// 同步询问的公共部分：注册待决、发送 `ASK id=N <payload>`、有界等待裁决。
+    /// 任何失败（降级/写失败/超时）返回 false = 放行（fail-open：主进程卡顿
+    /// 不应把键盘按住不放）。
+    fn ask(&self, payload: String, timeout: Duration) -> bool {
         if self.degraded.load(Ordering::Relaxed) {
             return false;
         }
@@ -154,8 +156,7 @@ impl Wire {
             self.degraded.store(true, Ordering::Relaxed);
             return false;
         }
-        let direction = if is_down { "down" } else { "up" };
-        if !self.send_line(&format!("ASK id={id} kind=f5 dir={direction}")) {
+        if !self.send_line(&format!("ASK id={id} {payload}")) {
             if let Ok(mut pending) = self.pending.lock() {
                 pending.remove(&id);
             }
@@ -167,10 +168,25 @@ impl Wire {
                 if let Ok(mut pending) = self.pending.lock() {
                     pending.remove(&id);
                 }
-                // 超时按放行（fail-open）：主进程卡顿不应把键盘按住不放。
                 false
             }
         }
+    }
+
+    /// 同步询问 F5 吞/放（语音键抑制器）。
+    fn ask_f5(&self, is_down: bool, timeout: Duration) -> bool {
+        let direction = if is_down { "down" } else { "up" };
+        self.ask(format!("kind=f5 dir={direction}"), timeout)
+    }
+
+    /// 同步询问门控吞/放（按键映射；主进程侧可能含 60ms 有界武装等待，
+    /// 由共用 ASK_TIMEOUT 预算覆盖）。
+    fn ask_gate(&self, vk: u32, make: u16, flags: u32, is_down: bool, timeout: Duration) -> bool {
+        let direction = if is_down { "down" } else { "up" };
+        self.ask(
+            format!("kind=gate vk={vk} make={make} flags={flags:x} dir={direction}"),
+            timeout,
+        )
     }
 
     fn send_wetype_event(&self, extra: u64) {
@@ -198,6 +214,13 @@ fn suppressor_hook_withheld() -> bool {
 
 fn suppressor_bump_allowed() -> bool {
     std::env::var_os("SAYALL_DIAG_SUPPRESSOR_NO_BUMP").is_none()
+}
+
+fn gate_hook_withheld() -> bool {
+    matches!(
+        std::env::var("SAYALL_DIAG_NO_HOOKS").as_deref(),
+        Ok("1") | Ok("both") | Ok("gate") | Ok("all")
+    )
 }
 
 fn install_suppressor_hook(current: &mut Option<HHOOK>) {
@@ -293,6 +316,89 @@ fn suppressor_hook_thread(
                     install_suppressor_hook(&mut current)
                 }
                 _ => {}
+            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        hook_thread_id.store(0, Ordering::SeqCst);
+        if let Some(hook) = current.take() {
+            let _ = UnhookWindowsHookEx(hook);
+        }
+    }
+}
+
+fn install_gate_hook(current: &mut Option<HHOOK>) -> Result<(), u32> {
+    match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(gate_hook_proc), None, 0) } {
+        Ok(new_hook) => {
+            *current = Some(new_hook);
+            Ok(())
+        }
+        Err(_) => Err(unsafe { windows::Win32::Foundation::GetLastError() }.0),
+    }
+}
+
+/// 门控钩子回调：对每条键盘事件同步询问主进程（决策在主进程
+/// `key_gate::handle_host_event`；含 60ms 有界武装等待）。fail-open：任何
+/// 失败（降级/超时/主进程缺席）按放行。
+unsafe extern "system" fn gate_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        // WM_KEYDOWN=0x0100 / WM_SYSKEYDOWN=0x0104 / WM_KEYUP=0x0101 / WM_SYSKEYUP=0x0105
+        let message = wparam.0 as u32;
+        if matches!(message, 0x0100 | 0x0104 | 0x0101 | 0x0105) {
+            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            let is_down = matches!(message, 0x0100 | 0x0104);
+            if let Some(wire) = HOST_WIRE.get() {
+                if wire.ask_gate(
+                    kb.vkCode,
+                    kb.scanCode as u16,
+                    kb.flags.0,
+                    is_down,
+                    ASK_TIMEOUT,
+                ) {
+                    return LRESULT(1);
+                }
+            }
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+/// 门控钩子线程：安装 + 消息泵（2026-09-27 FIFO 实证：只在启动安装一次，
+/// 无周期性重装/bump）。安装结果经 `HOOK kind=gate installed=...` 报告主进程，
+/// 主进程据此置/清 `key_gate::GATE_ACTIVE`（fail-open：未报告即透传）。
+///
+/// 诊断开关沿用 `SAYALL_DIAG_NO_HOOKS ∈ {1,both,gate,all}`。
+fn gate_hook_thread(wire: Arc<Wire>, hook_thread_id: Arc<AtomicU32>, shutdown: Arc<AtomicBool>) {
+    unsafe {
+        // 消息队列必须在任何 PostThreadMessageW 之前创建（WM_QUIT 竞态）。
+        let mut probe = MSG::default();
+        let _ = PeekMessageW(&mut probe, None, 0, 0, PM_NOREMOVE);
+        let _ = GetModuleHandleW(None);
+        if gate_hook_withheld() {
+            let _ = wire.send_line("HOOK kind=gate installed=0 reason=env_flag");
+            return;
+        }
+        let mut current: Option<HHOOK> = None;
+        if let Err(error) = install_gate_hook(&mut current) {
+            let _ = wire.send_line(&format!("HOOK kind=gate installed=0 err={error}"));
+            return;
+        }
+        hook_thread_id.store(GetCurrentThreadId(), Ordering::SeqCst);
+        // 与 f5 抑制器同款退出握手（见 suppressor_hook_thread 注释）。
+        if shutdown.load(Ordering::SeqCst) {
+            hook_thread_id.store(0, Ordering::SeqCst);
+            if let Some(hook) = current.take() {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            return;
+        }
+        let _ = wire.send_line("HOOK kind=gate installed=1");
+
+        let mut message = MSG::default();
+        while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            if message.message == WM_QUIT {
+                break;
             }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -413,6 +519,7 @@ pub fn run_host(launch: HostLaunch) -> i32 {
     });
     let _ = HOST_WIRE.set(Arc::clone(&wire));
     let hook_thread_id = Arc::new(AtomicU32::new(0));
+    let gate_thread_id = Arc::new(AtomicU32::new(0));
     let shutdown = Arc::new(AtomicBool::new(false));
     let (exit_tx, exit_rx) = mpsc::channel::<i32>();
     let reader_handle = {
@@ -432,32 +539,61 @@ pub fn run_host(launch: HostLaunch) -> i32 {
             .spawn(move || suppressor_hook_thread(wire, hook_thread_id, shutdown))
             .ok()
     };
+    let gate_handle = {
+        let wire = Arc::clone(&wire);
+        let gate_thread_id = Arc::clone(&gate_thread_id);
+        let shutdown = Arc::clone(&shutdown);
+        std::thread::Builder::new()
+            .name("sayall-key-host-gate".to_owned())
+            .spawn(move || gate_hook_thread(wire, gate_thread_id, shutdown))
+            .ok()
+    };
 
     let code = exit_rx.recv().unwrap_or(0);
     // 退出握手（竞态无关）：置位 shutdown 让"尚未进入消息泵"的钩子线程自行
-    // 退出；同时有界重试投递 WM_QUIT 覆盖"已在消息泵中"的路径。二者缺一
-    // 都会在 BYE 与钩子安装赛跑时把 join 挂死。
+    // 退出；同时有界重试投递 WM_QUIT 覆盖"已在消息泵中"的路径。两个钩子
+    // 线程（f5 抑制器、门控）共用同一套握手。
     shutdown.store(true, Ordering::SeqCst);
     let deadline = Instant::now() + Duration::from_millis(500);
+    let mut posted_f5 = false;
+    let mut posted_gate = false;
     loop {
-        let thread_id = hook_thread_id.load(Ordering::SeqCst);
-        if thread_id != 0 {
-            unsafe {
-                let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-            break;
-        }
-        if let Some(handle) = &hook_handle {
-            if handle.is_finished() {
-                break;
+        if !posted_f5 {
+            let thread_id = hook_thread_id.load(Ordering::SeqCst);
+            if thread_id != 0 {
+                unsafe {
+                    let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
+                posted_f5 = true;
             }
         }
-        if Instant::now() >= deadline {
+        if !posted_gate {
+            let thread_id = gate_thread_id.load(Ordering::SeqCst);
+            if thread_id != 0 {
+                unsafe {
+                    let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
+                posted_gate = true;
+            }
+        }
+        let finished = |handle: &Option<std::thread::JoinHandle<()>>| {
+            handle
+                .as_ref()
+                .map(|handle| handle.is_finished())
+                .unwrap_or(true)
+        };
+        if (finished(&hook_handle) && finished(&gate_handle))
+            || (posted_f5 && posted_gate)
+            || Instant::now() >= deadline
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
     if let Some(handle) = hook_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = gate_handle {
         let _ = handle.join();
     }
     if let Some(handle) = reader_handle {
@@ -614,6 +750,9 @@ impl KeyHostHandle {
             match read {
                 Ok(0) | Err(_) => {
                     self.ready.store(false, Ordering::Relaxed);
+                    // 宿主断开 = 两个钩子都不再运行：门控立即失能（透传，
+                    // fail-open）；F5 抑制器的会话武装随宿主缺席自然无效。
+                    crate::key_gate::report_host_disconnected();
                     crate::ble::gatt_note(
                         "key_host action=disconnected result=degraded reason=socket_closed"
                             .to_owned(),
@@ -638,6 +777,11 @@ impl KeyHostHandle {
                             );
                         }
                     } else if command.starts_with("HOOK ") {
+                        if command.contains("kind=gate") {
+                            let installed = command.contains("installed=1");
+                            let error_code = field_u32(command, "err=");
+                            crate::key_gate::report_host_hook_state(installed, error_code);
+                        }
                         crate::ble::gatt_note(format!(
                             "key_host action=hook_report detail={}",
                             sanitize_tokens(command)
@@ -649,25 +793,26 @@ impl KeyHostHandle {
         }
     }
 
-    /// 处理 `ASK id=<n> kind=f5 dir=down|up`：调用既有决策逻辑。
-    /// 未知格式返回 None（不回 VERDICT，宿主按超时放行）。
+    /// 处理 `ASK id=<n> kind=f5 ...` / `ASK id=<n> kind=gate ...`：调用主进程
+    /// 既有决策逻辑。未知格式返回 None（不回 VERDICT，宿主按超时放行）。
     fn handle_ask(&self, rest: &str) -> Option<(u64, bool)> {
-        let mut id: Option<u64> = None;
-        let mut direction: Option<&str> = None;
-        for part in rest.split_whitespace() {
-            if let Some(value) = part.strip_prefix("id=") {
-                id = value.parse().ok();
-            } else if let Some(value) = part.strip_prefix("dir=") {
-                direction = Some(value);
+        let (id, command) = parse_ask(rest)?;
+        let swallow = match command {
+            AskCommand::SuppressorF5 { down } => {
+                crate::key_suppressor::handle_host_message(if down {
+                    crate::key_suppressor::HostSuppressorMessage::F5Down
+                } else {
+                    crate::key_suppressor::HostSuppressorMessage::F5Up
+                })
+                .unwrap_or(true)
             }
-        }
-        let id = id?;
-        let message = match direction {
-            Some("down") => crate::key_suppressor::HostSuppressorMessage::F5Down,
-            Some("up") => crate::key_suppressor::HostSuppressorMessage::F5Up,
-            _ => return None,
+            AskCommand::Gate {
+                vk,
+                make,
+                flags,
+                down,
+            } => crate::key_gate::handle_host_event(vk, make, flags, down),
         };
-        let swallow = crate::key_suppressor::handle_host_message(message).unwrap_or(true);
         Some((id, swallow))
     }
 
@@ -705,6 +850,75 @@ fn parse_wetype_event(rest: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// 解析 `key=<value>` 字段（十进制）。
+fn field_u32(line: &str, key: &str) -> Option<u32> {
+    for part in line.split_whitespace() {
+        if let Some(value) = part.strip_prefix(key) {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
+/// `ASK` 帧（去掉 `ASK` 前缀后）的解析结果。
+#[derive(Debug, PartialEq, Eq)]
+enum AskCommand {
+    /// 语音键抑制器询问：F5 按下/释放沿吞放。
+    SuppressorF5 { down: bool },
+    /// 门控询问：一条键盘事件（vk/make/原始 LL 钩子 flags 位 + 上下沿）。
+    Gate {
+        vk: u32,
+        make: u16,
+        flags: u32,
+        down: bool,
+    },
+}
+
+/// 解析 `id=<n> kind=f5|gate ...`；字段缺失或非法返回 None（调用方不回
+/// VERDICT，宿主按超时放行 = fail-open）。`kind` 缺省按 `f5`（前向兼容）。
+fn parse_ask(rest: &str) -> Option<(u64, AskCommand)> {
+    let mut id: Option<u64> = None;
+    let mut kind: Option<&str> = None;
+    let mut direction: Option<&str> = None;
+    let mut vk: Option<u32> = None;
+    let mut make: Option<u16> = None;
+    let mut flags: Option<u32> = None;
+    for part in rest.split_whitespace() {
+        if let Some(value) = part.strip_prefix("id=") {
+            id = value.parse().ok();
+        } else if let Some(value) = part.strip_prefix("kind=") {
+            kind = Some(value);
+        } else if let Some(value) = part.strip_prefix("dir=") {
+            direction = Some(value);
+        } else if let Some(value) = part.strip_prefix("vk=") {
+            vk = value.parse().ok();
+        } else if let Some(value) = part.strip_prefix("make=") {
+            make = value.parse().ok();
+        } else if let Some(value) = part.strip_prefix("flags=") {
+            flags = u32::from_str_radix(value, 16).ok();
+        }
+    }
+    let id = id?;
+    let down = match direction {
+        Some("down") => true,
+        Some("up") => false,
+        _ => return None,
+    };
+    match kind.unwrap_or("f5") {
+        "f5" => Some((id, AskCommand::SuppressorF5 { down })),
+        "gate" => Some((
+            id,
+            AskCommand::Gate {
+                vk: vk?,
+                make: make?,
+                flags: flags?,
+                down,
+            },
+        )),
+        _ => None,
+    }
 }
 
 /// 日志用 token 清洗（命令原文只允许字母数字与 `_-.=` 参与日志拼接）。
@@ -868,6 +1082,51 @@ mod tests {
     }
 
     #[test]
+    fn parse_ask_frames_dispatch_by_kind() {
+        assert_eq!(
+            Some((1, AskCommand::SuppressorF5 { down: true })),
+            parse_ask("id=1 kind=f5 dir=down")
+        );
+        assert_eq!(
+            Some((2, AskCommand::SuppressorF5 { down: false })),
+            parse_ask("id=2 kind=f5 dir=up")
+        );
+        // 缺省 kind 按 f5（前向兼容）。
+        assert_eq!(
+            Some((3, AskCommand::SuppressorF5 { down: true })),
+            parse_ask("id=3 dir=down")
+        );
+        assert_eq!(
+            Some((
+                4,
+                AskCommand::Gate {
+                    vk: 0xFF,
+                    make: 94,
+                    flags: 0x10,
+                    down: true
+                }
+            )),
+            parse_ask("id=4 kind=gate vk=255 make=94 flags=10 dir=down")
+        );
+        // 门控帧缺字段 → None（fail-open：不回 VERDICT，宿主超时放行）。
+        assert_eq!(None, parse_ask("id=5 kind=gate dir=down"));
+        // 方向缺失/非法 → None。
+        assert_eq!(None, parse_ask("id=6 kind=f5"));
+        assert_eq!(None, parse_ask("id=7 kind=f5 dir=sideways"));
+        // 未知 kind → None。
+        assert_eq!(None, parse_ask("id=8 kind=other dir=down"));
+    }
+
+    #[test]
+    fn field_u32_parses_report_fields() {
+        assert_eq!(
+            Some(5),
+            field_u32("HOOK kind=gate installed=0 err=5", "err=")
+        );
+        assert_eq!(None, field_u32("HOOK kind=gate installed=1", "err="));
+    }
+
+    #[test]
     fn host_handshake_ping_bye_roundtrip() {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -877,7 +1136,7 @@ mod tests {
         };
         let host = std::thread::spawn(move || run_host(launch));
         let (mut stream, _) = listener.accept().unwrap();
-        let mut read_socket = stream.try_clone().unwrap();
+        let read_socket = stream.try_clone().unwrap();
         read_socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

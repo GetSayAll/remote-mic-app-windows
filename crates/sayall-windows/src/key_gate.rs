@@ -1,14 +1,21 @@
-//! 按键映射门控（WH_KEYBOARD_LL 吞键层）。
+//! 按键映射门控（决策层；LL 钩子 2026-10-05 起由按键宿主进程承载）。
 //!
 //! 使命：已配置映射的遥控器按键，其原始键入被吞掉（替换语义，对齐 Mac 原版
 //! `KeyboardEventSuppressor` 的预测式武装模型），由映射引擎另行注入动作；
 //! 未配置映射的按键与物理键盘一律透传。
 //!
-//! 架构（2026-09-05 探针实证，见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）：
+//! 架构（2026-10-05 修订，根因见
+//! Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md——"钩子所在进程 ==
+//! 前台根窗口进程"会让豆包语音热键失效，因此 LL 钩子必须迁出主进程）：
+//! - **决策留驻本模块（主进程），钩子与消息泵在 `crate::key_host` 宿主进程**：
+//!   宿主对每条键盘事件同步询问（ASK/VERDICT，见 `handle_host_event`），
+//!   本模块用既有状态（原子 + 读线程 thread-local 配对表）裁决吞/放。
+//! - 事件顺序：宿主单钩子线程串行发送，主进程单读线程串行处理 → DOWN/UP
+//!   配对语义与进程内钩子时代逐条等价。
 //! - **LL 钩子吞掉的事件不会再投递给 Raw Input**。因此被吞键盘事件的语义边沿
-//!   由本钩子直接喂给映射引擎（`ButtonEdge`），未被吞的由 Raw Input 监听器喂，
+//!   由门控直接喂给映射引擎（`ButtonEdge`），未被吞的由 Raw Input 监听器喂，
 //!   双源汇入引擎的 `ButtonStateMerger` 并集去重。
-//! - 归因（遥控器 vs 物理键盘）：LL 钩子事件无设备信息。三条通路：
+//! - 归因（遥控器 vs 物理键盘）：钩子事件无设备信息。三条通路：
 //!   1. 直接归因族：VK 0xFF 族（厂商键：返回/电源/音量）物理键盘不会产生；
 //!      VK_APPS（0x5D 菜单键）与 VK_SLEEP（0x5F 电源键睡眠形态，均
 //!      2026-09-06 纳入）物理键盘实际极罕见。三者无需武装直接吞（见
@@ -20,15 +27,16 @@
 //!      遥控器连接期间被接管（用户确认接受；断开连接或取消映射即恢复）；
 //!   3. 其余 VK（方向/Enter/音量 VK）需"武装"：Raw Input
 //!      监听器观察到该按键的 HID 报文（独立管线，不受键盘 LL 钩子影响）后
-//!      武装对应按键；钩子在按下沿做 60ms 有界等待（key_suppressor 同款，
+//!      武装对应按键；决策在按下沿做 60ms 有界等待（key_suppressor 同款，
 //!      覆盖监听线程消息泵的调度延迟）。RIT 先投递 WM_INPUT 再调用钩子，
 //!      有界等待是跨线程交接的必要窗口。
 //! - 边沿配对防粘键（2026-09-05 会话复盘规则）：DOWN 漏进 OS 则 UP 必放行；
 //!   本次按住的所有 DOWN 沿都被吞下才吞对应 UP。
 //! - 注入免疫：LLKHF_INJECTED 事件一律放行（自家 SendInput 与其他程序注入）。
-//! - 钩子链头 bump：先挂新钩再卸旧钩，消除吞键空窗（Voice_VibeCoding 同款）。
-//! - 护栏：回调内只读原子状态 + 短睡眠轮询，无 IO/锁；配对表为钩子线程
-//!   thread-local 私有。
+//! - 护栏：决策路径内只做原子/短睡眠（有界 60ms），无 IO；配对表为
+//!   读线程 thread-local 私有（宿主消息在单一读线程上串行处理）。
+//! - 链头 bump：2026-09-27 实证 LL 钩子链为 FIFO（重装只会退向链尾），
+//!   钩子只在宿主启动时安装一次，不再有周期性 bump。
 //!
 //! 与 `key_suppressor`（语音键 F5 会话抑制器）相互独立、并存运行：后者只管
 //! ATVV 语音会话期间的 F5，本模块只管已映射按键。
@@ -238,16 +246,10 @@ mod windows_impl {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::{mpsc, Arc, OnceLock};
-    use std::thread::JoinHandle;
+    use std::sync::{Arc, OnceLock};
     use std::time::Instant;
-    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-        LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
+        KBDLLHOOKSTRUCT_FLAGS, LLKHF_EXTENDED, LLKHF_INJECTED,
     };
 
     /// 按下沿等待武装归因的有界窗口（key_suppressor 实证参数）。
@@ -269,6 +271,10 @@ mod windows_impl {
     /// （Helper 轨解决；同键映射的泄漏由映射引擎对冲，见 button_mapping.rs）。
     const ARM_GRACE_MS: u64 = 4_000;
     static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// 测试构建专用：KeyGate 句柄存活标记（生产构建不存在；测试二进制内
+    /// 没有真实宿主进程，引擎测试靠它维持"门控运行中"的既有断言语义）。
+    #[cfg(test)]
+    static GATE_TEST_HANDLE_ALIVE: AtomicBool = AtomicBool::new(false);
     static SHORTCUT_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SHORTCUT_CAPTURE_PREHELD: [AtomicBool; 256] = {
         #[allow(clippy::declare_interior_mutable_const)]
@@ -333,7 +339,6 @@ mod windows_impl {
         [ZERO; ALL_BUTTONS.len()]
     };
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
-    static HOOK_THREAD_ID: AtomicU64 = AtomicU64::new(0);
     /// 录入会话期间进入捕获处理器的键盘事件数（钩子健康度探针：会话内用户
     /// 按键但该计数不涨 ⇒ 边沿根本没到本钩子，问题在钩子链位置/安装失败，
     /// 而非投递门控）。
@@ -483,31 +488,61 @@ mod windows_impl {
         }
     }
 
-    unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 {
-            // 健康度基线：钩子被系统调用的每一次键盘回调（在 GATE_ACTIVE 判定之前），
-            // 与其中的注入事件数。用于外部注入对照实验区分"没被调用"与"被过滤"。
-            HOOK_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            let kb_probe = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            if kb_probe.flags.contains(LLKHF_INJECTED) {
-                HOOK_CALLS_INJECTED.fetch_add(1, Ordering::Relaxed);
-            }
+    /// 宿主进程转发的一条键盘事件（在按键宿主的**主进程读线程**上串行执行；
+    /// 2026-10-05 由旧 `hook_proc` 等价迁移）。返回是否吞键。
+    ///
+    /// 健康计数与旧实现对齐：`HOOK_CALLS_TOTAL` 对每条事件计数（含门控失能
+    /// 期间——宿主始终转发），`HOOK_CALLS_INJECTED` 计数注入事件。门控失能
+    /// （GATE_ACTIVE=false，宿主未报告钩子存活/已断开）时一律放行（fail-open）。
+    ///
+    /// 注意：`handle_keyboard` 的按下沿可能做 60ms 有界等待（武装交接窗口），
+    /// 期间读线程不处理其他宿主消息——与进程内钩子时代"钩子线程被等待占用"
+    /// 等价；F5 抑制询问的超时预算（200ms）覆盖该占用。
+    pub(crate) fn handle_host_event(
+        vk_code: u32,
+        make_code: u16,
+        flags_raw: u32,
+        is_key_down: bool,
+    ) -> bool {
+        HOOK_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let flags = KBDLLHOOKSTRUCT_FLAGS(flags_raw);
+        let injected = flags.contains(LLKHF_INJECTED);
+        if injected {
+            HOOK_CALLS_INJECTED.fetch_add(1, Ordering::Relaxed);
         }
-        if code >= 0 && GATE_ACTIVE.load(Ordering::Relaxed) {
-            // WM_KEYDOWN=0x0100 / WM_SYSKEYDOWN=0x0104 / WM_KEYUP=0x0101 / WM_SYSKEYUP=0x0105
-            let message = wparam.0 as u32;
-            if matches!(message, 0x0100 | 0x0104 | 0x0101 | 0x0105) {
-                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-                if handle_shortcut_capture(kb.vkCode as u32, kb.scanCode as u16, message, kb.flags)
-                {
-                    return LRESULT(1);
-                }
-                if handle_keyboard(kb.vkCode as u32, kb.scanCode as u16, message, kb.flags) {
-                    return LRESULT(1);
-                }
-            }
+        if !GATE_ACTIVE.load(Ordering::Relaxed) {
+            return false;
         }
-        CallNextHookEx(None, code, wparam, lparam)
+        // WM_KEYDOWN=0x0100 / WM_KEYUP=0x0101（SYS 变体语义相同：仅上下沿区分）。
+        let message = if is_key_down { 0x0100 } else { 0x0101 };
+        if handle_shortcut_capture(vk_code, make_code, message, flags) {
+            return true;
+        }
+        if handle_keyboard(vk_code, make_code, message, flags) {
+            return true;
+        }
+        false
+    }
+
+    /// 宿主进程钩子安装结果报告（key_host 读线程调用）：
+    /// installed=1 → 门控可用（GATE_ACTIVE=true）并计入 bump 成功；
+    /// installed=0 → 门控失能 + 记录失败与错误码（诊断摘要用）。
+    pub(crate) fn report_host_hook_state(installed: bool, error_code: Option<u32>) {
+        if installed {
+            HOOK_BUMPS_OK.fetch_add(1, Ordering::Relaxed);
+            GATE_ACTIVE.store(true, Ordering::Relaxed);
+        } else {
+            HOOK_BUMPS_FAILED.fetch_add(1, Ordering::Relaxed);
+            if let Some(code) = error_code {
+                LAST_HOOK_ERROR.store(code as u64, Ordering::Relaxed);
+            }
+            GATE_ACTIVE.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// 宿主连接断开（退出/被杀/链路故障）：门控失能，全部按键透传（fail-open）。
+    pub(crate) fn report_host_disconnected() {
+        GATE_ACTIVE.store(false, Ordering::Relaxed);
     }
 
     fn handle_shortcut_capture(
@@ -704,93 +739,17 @@ mod windows_impl {
         false
     }
 
-    /// 钩子链头 bump（先挂新钩再卸旧钩，无吞键空窗）。失败时保留旧钩并
-    /// 记录错误码——2026-09-27 实证链位置问题会静默表现为"按键完全到不了
-    /// 捕获通道"，必须可从诊断快照归因。
-    fn bump_to_chain_head(current: &mut Option<HHOOK>) {
-        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
-            Ok(new_hook) => {
-                HOOK_BUMPS_OK.fetch_add(1, Ordering::Relaxed);
-                let old = current.replace(new_hook);
-                if let Some(old) = old {
-                    unsafe {
-                        let _ = UnhookWindowsHookEx(old);
-                    }
-                }
-            }
-            Err(_) => {
-                HOOK_BUMPS_FAILED.fetch_add(1, Ordering::Relaxed);
-                LAST_HOOK_ERROR.store(
-                    unsafe { windows::Win32::Foundation::GetLastError() }.0 as u64,
-                    Ordering::Relaxed,
-                );
-            }
-        }
-    }
-
-    fn hook_thread(thread_id_tx: mpsc::Sender<u64>) {
-        unsafe {
-            // 先创建线程消息队列再通知启动完成（2026-09-06 单测隔离运行实证）：
-            // Drop 的 PostThreadMessageW(WM_QUIT) 在目标线程尚无消息队列时投递
-            // 失败且不报错 → join() 永久挂起（应用退出挂死的同源竞态）。
-            // PeekMessageW(PM_NOREMOVE) 强制创建队列，保证 WM_QUIT 必达。
-            let mut probe = MSG::default();
-            let _ = PeekMessageW(&mut probe, None, 0, 0, PM_NOREMOVE);
-            let instance: HINSTANCE = match GetModuleHandleW(None) {
-                Ok(module) => module.into(),
-                Err(_) => return,
-            };
-            let _ = thread_id_tx.send(GetCurrentThreadId() as u64);
-            let _ = CLOCK_BASE.get_or_init(Instant::now);
-
-            // 诊断（临时，2026-10-04）：SAYALL_DIAG_NO_HOOKS ∈ {1,both,gate,all}
-            // 时不安装本 LL 钩子（最小化对照二分）。
-            if matches!(
-                std::env::var("SAYALL_DIAG_NO_HOOKS").as_deref(),
-                Ok("1") | Ok("both") | Ok("gate") | Ok("all")
-            ) {
-                crate::ble::gatt_note("key_gate diag=no_hooks_withheld reason=env_flag".to_owned());
-                return;
-            }
-
-            let mut current: Option<HHOOK> = None;
-            bump_to_chain_head(&mut current);
-            if current.is_none() {
-                return;
-            }
-            HOOK_THREAD_ID.store(GetCurrentThreadId() as u64, Ordering::Relaxed);
-            GATE_ACTIVE.store(true, Ordering::Relaxed);
-
-            let mut message = MSG::default();
-            while GetMessageW(&mut message, None, 0, 0).as_bool() {
-                // 消息泵是 LL 钩子投递的必要条件（钩子回调经本线程消息队列投递）。
-                // 2026-09-27 起不再有任何"重装钩子抢链头"的定时/消息驱动：LL 钩子链
-                // 为 FIFO（最早安装最先调用，见
-                // docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md），
-                // 重装只会把本钩子推向链尾；钩子只在启动时安装一次。
-                match message.message {
-                    WM_QUIT => break,
-                    _ => {}
-                }
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-
-            GATE_ACTIVE.store(false, Ordering::Relaxed);
-            HOOK_THREAD_ID.store(0, Ordering::Relaxed);
-            if let Some(hook) = current.take() {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = instance;
-        }
-    }
-
-    /// 按键映射门控句柄：持有即运行，丢弃即停止。
-    #[derive(Debug)]
-    pub struct KeyGate {
-        worker: Option<JoinHandle<()>>,
-        thread_id: u64,
-    }
+    /// 按键映射门控句柄（2026-10-05 起为**空句柄**）：LL 钩子由按键宿主进程
+    /// 承载（根因见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
+    /// 本句柄只承载"门控已启用"的生命周期与决策状态重置；真实钩子存活由
+    /// 宿主的 `HOOK kind=gate installed=1` 报告写入 `GATE_ACTIVE`
+    /// （[`report_host_hook_state`]）。
+    ///
+    /// 测试语义：`#[cfg(test)]` 下 `start()`/`Drop` 维护
+    /// `GATE_TEST_HANDLE_ALIVE`，让引擎测试沿用"门控运行中/已停止"的
+    /// 既有断言（测试二进制内没有真实宿主进程）。
+    #[derive(Debug, Default)]
+    pub struct KeyGate;
 
     impl KeyGate {
         pub fn start() -> KeyGate {
@@ -804,21 +763,9 @@ mod windows_impl {
             for slot in &ARMED_UNTIL_MS {
                 slot.store(0, Ordering::Relaxed);
             }
-            let (thread_id_tx, thread_id_rx) = mpsc::channel();
-            let worker = std::thread::Builder::new()
-                .name("sayall-key-gate".to_owned())
-                .spawn(move || hook_thread(thread_id_tx))
-                .ok();
-            let thread_id = thread_id_rx.recv().unwrap_or(0);
-            // 有界等待钩子线程完成安装（GATE_ACTIVE=true）再返回：调用方
-            // （含 is_gate_thread_alive 判定与 Drop 的 WM_QUIT 投递）不应
-            // 观察到半初始化的门控。钩子安装失败时超时返回（调用方看到
-            // 死门控，fail-visible）。
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            while !GATE_ACTIVE.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            KeyGate { worker, thread_id }
+            #[cfg(test)]
+            GATE_TEST_HANDLE_ALIVE.store(true, Ordering::Relaxed);
+            KeyGate
         }
 
         pub fn is_active(&self) -> bool {
@@ -829,20 +776,8 @@ mod windows_impl {
     impl Drop for KeyGate {
         fn drop(&mut self) {
             SHORTCUT_CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
-            GATE_ACTIVE.store(false, Ordering::Relaxed);
-            if self.thread_id != 0 {
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                        self.thread_id as u32,
-                        WM_QUIT,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
-            }
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
+            #[cfg(test)]
+            GATE_TEST_HANDLE_ALIVE.store(false, Ordering::Relaxed);
         }
     }
 
@@ -1046,7 +981,15 @@ mod windows_impl {
         }
     }
 
+    /// 门控是否"运行中"：
+    /// - 生产构建 = 宿主进程钩子存活（`GATE_ACTIVE`，由宿主安装报告驱动，
+    ///   宿主退出/断连即回落 false → 全透传 fail-open）；
+    /// - 测试构建：KeyGate 句柄存活也计（引擎测试无宿主进程）。
     pub fn is_gate_thread_alive() -> bool {
+        #[cfg(test)]
+        if GATE_TEST_HANDLE_ALIVE.load(Ordering::Relaxed) {
+            return true;
+        }
         GATE_ACTIVE.load(Ordering::Relaxed)
     }
 
@@ -1065,6 +1008,15 @@ pub use windows_impl::{
     set_shortcut_capture_active, set_shortcut_capture_sink, set_voice_synth_active,
     swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
+
+/// 宿主消息路径（key_host 读线程调用；仅 crate 内可见）。
+#[cfg(windows)]
+pub(crate) use windows_impl::{
+    handle_host_event, report_host_disconnected, report_host_hook_state,
+};
+
+#[cfg(not(windows))]
+pub(crate) use fallback::{handle_host_event, report_host_disconnected, report_host_hook_state};
 
 #[cfg(not(windows))]
 mod fallback {
@@ -1097,6 +1049,16 @@ mod fallback {
     pub fn set_shortcut_capture_active(_active: bool) -> bool {
         false
     }
+    pub(crate) fn handle_host_event(
+        _vk_code: u32,
+        _make_code: u16,
+        _flags_raw: u32,
+        _is_key_down: bool,
+    ) -> bool {
+        false
+    }
+    pub(crate) fn report_host_hook_state(_installed: bool, _error_code: Option<u32>) {}
+    pub(crate) fn report_host_disconnected() {}
     pub fn swallowed_edge_count() -> u64 {
         0
     }
