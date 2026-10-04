@@ -112,6 +112,8 @@ const mocks = vi.hoisted(() => ({
   getAudioSnapshot: vi.fn(),
   listAudioEndpoints: vi.fn(),
   selectAudioEndpoint: vi.fn(),
+  getGainDb: vi.fn(),
+  setGainDb: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
   getVoiceHoldHotkey: vi.fn(),
   setVoiceHoldHotkey: vi.fn(),
@@ -138,6 +140,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getAudioSnapshot: mocks.getAudioSnapshot,
     listAudioEndpoints: mocks.listAudioEndpoints,
     selectAudioEndpoint: mocks.selectAudioEndpoint,
+    getGainDb: mocks.getGainDb,
+    setGainDb: mocks.setGainDb,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
     getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
     setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
@@ -170,6 +174,8 @@ describe("VB-CABLE first-launch guidance", () => {
       selectedEndpointId: endpointId,
       selectedEndpointName: cableEndpoint.name,
     }));
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
     mocks.openVbCableDownloadPage.mockResolvedValue(undefined);
     mocks.getVoiceHoldHotkey.mockResolvedValue({
       keys: ["left_control", "left_windows"],
@@ -1018,6 +1024,8 @@ describe("connection page remote model", () => {
     mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
     mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
     mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
@@ -1130,6 +1138,8 @@ describe("connection page rc003 capture switch", () => {
         return () => {};
       },
     );
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
     mocks.getRc003TaskStatus.mockResolvedValue(taskStatus());
     mocks.enableRc003Capture.mockResolvedValue(taskStatus({ enabled: true }));
     mocks.disableRc003Capture.mockResolvedValue(taskStatus({ enabled: false }));
@@ -1242,6 +1252,94 @@ describe("connection page rc003 capture switch", () => {
       false,
     );
     expect(wrapper.text()).toContain("授权未完成（UAC 被取消）");
+    wrapper.unmount();
+  });
+});
+
+/**
+ * 语音增益（对齐 Mac 设置页「增益」滑块）：0 dB = 原始音量，0–24 dB 步进 1。
+ * 拖动只改显示，松手（change）才走 IPC；保存失败必须回到上一次生效值并给原因。
+ */
+describe("connection page audio gain", () => {
+  beforeEach(() => {
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+    mocks.getOtherVoiceHotkey.mockResolvedValue(null);
+    mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
+    mocks.startShortcutCapture.mockResolvedValue([]);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("读取已保存的增益并渲染滑块与说明", async () => {
+    mocks.getGainDb.mockResolvedValue(12);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+    expect(slider.exists()).toBe(true);
+    expect(slider.element.value).toBe("12");
+    expect(wrapper.text()).toContain("12 dB");
+    expect(wrapper.text()).toContain("0 dB 保持原始音量");
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("拖动松手后才保存，并以保存返回值回显", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+
+    await slider.setValue("18");
+    await flushPromises();
+
+    expect(mocks.setGainDb).toHaveBeenCalledTimes(1);
+    expect(mocks.setGainDb).toHaveBeenCalledWith(18);
+    expect(wrapper.text()).toContain("18 dB");
+    wrapper.unmount();
+  });
+
+  it("保存失败：回到上一次生效值并就地给出原因", async () => {
+    mocks.getGainDb.mockResolvedValue(6);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+
+    mocks.setGainDb.mockRejectedValueOnce(new Error("保存增益设置失败：磁盘只读"));
+    await slider.setValue("18");
+    await flushPromises();
+
+    expect(wrapper.find('[role="alert"]').text()).toContain("磁盘只读");
+    expect(slider.element.value).toBe("6");
+    expect(wrapper.text()).toContain("6 dB");
+    wrapper.unmount();
+  });
+
+  it("以保存返回值回显（后端钳制过的值才显示）", async () => {
+    mocks.getGainDb.mockResolvedValue(0);
+    // 后端把请求值钳到 24：界面必须显示 24，而不是用户拖到的原值。
+    mocks.setGainDb.mockImplementationOnce(async () => 24);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+
+    await slider.setValue("18");
+    await flushPromises();
+
+    expect(slider.element.value).toBe("24");
+    expect(wrapper.text()).toContain("24 dB");
     wrapper.unmount();
   });
 });

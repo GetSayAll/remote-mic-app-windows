@@ -5,6 +5,7 @@ import {
   getAudioSnapshot,
   getButtonMappings,
   getDiagnosticReport,
+  getGainDb,
   getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
@@ -193,6 +194,34 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(audio.phase === "ready", "仿真音频端点没有进入 WASAPI 就绪");
   assert(audio.selectedEndpointId === endpoints[0].id, "仿真 CABLE Input 没有被自动选择");
   steps.push("连接页面首次检测并自动选择唯一的仿真 CABLE Input");
+
+  // 语音增益（2026-10-04，对齐 Mac 设置页「增益」滑块）：0 dB = 原始音量。
+  // 拖动（input）只改显示、松手（change）才落盘——这里按真实手势派发两个事件，
+  // 再用 IPC 读回持久化值核对。
+  const gainSlider = await waitFor(
+    () => document.querySelector<HTMLInputElement>('input[name="audio-gain"]'),
+    "语音设备卡增益滑块",
+  );
+  assert(
+    document.body.textContent?.includes("0 dB 保持原始音量"),
+    "增益说明文案缺失",
+  );
+  gainSlider.value = "12";
+  gainSlider.dispatchEvent(new Event("input", { bubbles: true }));
+  gainSlider.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitFor(() => (gainSlider.value === "12" ? true : null), "增益滑块显示 12 dB");
+  assert(document.body.textContent?.includes("12 dB"), "增益读数没有更新为 12 dB");
+  // change 之后的落盘是异步 IPC：必须轮询读回，不能拿本地读数当保存完成的证据
+  //（首次实现就这么错过一次：界面显示 12 dB，磁盘当时还是 0 dB）。
+  let savedGain = 0;
+  const gainDeadline = Date.now() + 10_000;
+  while (Date.now() < gainDeadline) {
+    savedGain = await getGainDb();
+    if (savedGain === 12) break;
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+  assert(savedGain === 12, `仿真增益没有经 IPC 落盘：${savedGain}`);
+  steps.push("连接页增益滑块经真实 IPC 落盘并读回 12 dB");
 
   mark("buttons_page");
   await openPage("按键", "按键映射");
@@ -412,6 +441,17 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   steps.push("设置页应用图标选项经真实 IPC 与设置持久化往返");
 
   await openPage("连接");
+  // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，
+  // 而不是界面硬编码 0）——上一步已把 12 dB 写入仿真设置目录。
+  const restoredGainSlider = await waitFor(
+    () => {
+      const slider = document.querySelector<HTMLInputElement>('input[name="audio-gain"]');
+      return slider && slider.value === "12" ? slider : null;
+    },
+    "增益从持久化设置恢复为 12 dB",
+  );
+  assert(restoredGainSlider.value === "12", "增益没有从持久化设置恢复");
+  steps.push("重新进入连接页后增益从持久化设置恢复为 12 dB");
   steps.push("四个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
   mark("voice_session");

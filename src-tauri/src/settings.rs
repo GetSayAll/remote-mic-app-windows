@@ -1,5 +1,6 @@
 use sayall_core::{
-    AppIconIdentifier, AppSettings, ThemePreference, UsageStatistics, VoiceInputTool,
+    normalize_gain_db, AppIconIdentifier, AppSettings, ThemePreference, UsageStatistics,
+    VoiceInputTool,
 };
 use sayall_windows::send_input::{ButtonMappings, KeyChord, KeyCode};
 use std::fs;
@@ -99,6 +100,18 @@ impl SettingsStore {
         self.update("保存输入工具设置", move |settings| {
             settings.voice_input_tool = tool;
         })
+    }
+
+    /// 语音增益（dB，0–24，对齐 Mac `gainDB` 的持久化口径）。
+    ///
+    /// 越界与非有限值在这里钳制后落盘，并返回实际保存值供界面显示：
+    /// 界面滑块与配置文件的取值从此只有一种语义（0 = 原始音量）。
+    pub fn save_gain_db(&self, gain_db: f32) -> Result<f32, String> {
+        let normalized = normalize_gain_db(gain_db);
+        self.update("保存增益设置", move |settings| {
+            settings.gain_db = normalized;
+        })?;
+        Ok(normalized)
     }
 
     pub fn usage_statistics(&self) -> Result<UsageStatistics, String> {
@@ -449,6 +462,30 @@ mod tests {
             store.load().unwrap().voice_input_tool,
             Some(VoiceInputTool::Other)
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn audio_gain_defaults_to_zero_and_persists_clamped() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-audio-gain-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        // 新装 / 老配置：默认 0 dB（原始音量）。
+        assert_eq!(store.load().unwrap().gain_db, 0.0);
+
+        assert_eq!(store.save_gain_db(12.0).unwrap(), 12.0);
+        assert_eq!(store.load().unwrap().gain_db, 12.0);
+
+        // 越界与非法值：按 0–24 dB 钳制后落盘，并返回实际保存值（界面显示同源）。
+        assert_eq!(store.save_gain_db(30.0).unwrap(), 24.0);
+        assert_eq!(store.load().unwrap().gain_db, 24.0);
+        assert_eq!(store.save_gain_db(f32::NAN).unwrap(), 0.0);
+        assert_eq!(store.load().unwrap().gain_db, 0.0);
 
         let _ = std::fs::remove_file(path);
     }
