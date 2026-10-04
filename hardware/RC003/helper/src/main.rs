@@ -33,6 +33,19 @@
 //! 本 spike **不并入产品工作区**（见 Cargo.toml 注释），也不改动 `src-tauri` / 前端。
 //! 它只回答一个问题：把已验证的探针变成"自己的助手 + 自己的 agent + 自己的传输"之后，
 //! 整链还能不能跑通。
+//!
+//! 窗口与输出（2026-10-04）
+//! ----------------------
+//! 本程序构建为 **GUI 子系统**：计划任务 / ShellExecuteEx 拉起时系统不分配控制台，
+//! 也就没有任何窗口可闪。控制台子系统时并非如此——Windows 11 默认终端把控制台
+//! 显示成 Windows Terminal 窗口，从进程启动一直可见到退出（2026-10-04 探针实测
+//! 每轮 2.2–2.3 s；`GetConsoleWindow` 在 ConPTY 托管下只拿到隐藏的 pseudo window，
+//! 原有的自隐藏动作对可见窗口无效）。手动运行（cmd / PowerShell / run-helper*.cmd）
+//! 由 `bootstrap_console()` 附加到父控制台，输出照旧可见；后台拉起没有父控制台时
+//! stdout/stderr 指向 NUL，`Logger::line` 的 `println!` 成为无害空写。
+
+// GUI 子系统（仅 Windows）：消灭"助手运行时一闪而过"的黑框/终端窗口。
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(not(windows))]
 fn main() {
@@ -306,26 +319,77 @@ mod imp {
         unsafe { IsUserAnAdmin() != 0 }
     }
 
-    /// 隐藏本进程的控制台窗口（`--follow-app` / `--hide-window` 时调用）。
+    /// 控制台引导（GUI 子系统下进程没有系统分配的控制台）。
     ///
-    /// 计划任务拉起的是控制台程序，Windows 必然给它分配一个黑框——
-    /// 但用户面对的界面是主程序，这个框是纯干扰（2026-09-23 验收反馈）。
-    /// 启动后立刻隐藏；日志写文件不依赖窗口，排查能力不受影响。
-    /// 手动运行（run-helper.cmd 等）不带 `--follow-app`，保留窗口看日志。
-    fn hide_console_window() {
+    /// 两条路径：
+    /// * 手动运行（cmd / PowerShell / run-helper*.cmd）——父进程有控制台，
+    ///   `AttachConsole(ATTACH_PARENT_PROCESS)` 成功，把无效的 stdout/stderr
+    ///   句柄接到 CONOUT$（控制台输出设备），诊断输出照旧可见；
+    /// * 后台拉起（计划任务 / ShellExecuteEx 提权安装）——没有父控制台，也
+    ///   **不分配**任何控制台，stdout/stderr 指向 NUL：`Logger::line` 每次都
+    ///   `println!`，无效句柄会让它 panic，指向 NUL 后打印成为无害空写，
+    ///   日志落文件不受影响。
+    ///
+    /// 句柄已有效（父进程重定向输出 / 继承句柄）时不覆盖，保持原有去向。
+    /// 返回值只用于 `[ENV]` 诊断字段。
+    ///
+    /// 为什么不用旧的 `hide_console_window()`（2026-10-04 真机实测）：控制台
+    /// 子系统下 Windows 11 默认终端把控制台显示为 Windows Terminal 窗口，从
+    /// 进程启动一直可见到退出（实测每轮 2.2–2.3 s）；`GetConsoleWindow` 在
+    /// ConPTY 托管下返回的只是隐藏的 pseudo window，隐藏动作对可见窗口无效。
+    /// GUI 子系统 + 本函数从根上不再产生窗口。
+    fn bootstrap_console() -> &'static str {
         #[link(name = "kernel32")]
         extern "system" {
-            fn GetConsoleWindow() -> Handle;
+            fn AttachConsole(process_id: u32) -> i32;
+            fn GetStdHandle(std_handle: u32) -> Handle;
+            fn SetStdHandle(std_handle: u32, handle: Handle) -> i32;
+            fn CreateFileW(
+                file_name: *const u16,
+                desired_access: u32,
+                share_mode: u32,
+                security_attributes: *mut c_void,
+                creation_disposition: u32,
+                flags_and_attributes: u32,
+                template_file: Handle,
+            ) -> Handle;
         }
-        #[link(name = "user32")]
-        extern "system" {
-            fn ShowWindow(window: Handle, command: i32) -> i32;
-        }
-        const SW_HIDE: i32 = 0;
+
+        // STD_*_HANDLE 的 DWORD 形态（winbase.h：-10 / -11 / -12）。
+        const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        const OPEN_EXISTING: u32 = 3;
+        const INVALID_HANDLE_VALUE: isize = -1;
+
         unsafe {
-            let window = GetConsoleWindow();
-            if !window.is_null() {
-                ShowWindow(window, SW_HIDE);
+            let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+            let target = if attached { "CONOUT$" } else { "NUL" };
+            for std in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let current = GetStdHandle(std);
+                if !current.is_null() && current as isize != INVALID_HANDLE_VALUE {
+                    continue; // 已有效（重定向 / 继承）：不覆盖
+                }
+                let handle = CreateFileW(
+                    to_wide(target).as_ptr(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null_mut(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if handle as isize != INVALID_HANDLE_VALUE {
+                    SetStdHandle(std, handle);
+                }
+            }
+            if attached {
+                "attached"
+            } else {
+                "nul"
             }
         }
     }
@@ -1292,8 +1356,9 @@ mod imp {
         /// 配合计划任务使用——主程序需要时 `/run` 触发一次，主程序关掉后助手自己退，
         /// 于是系统里不会长期留着一个提权进程。
         follow_app: bool,
-        /// 由主程序经 PowerShell RunAs 提权调用时传入：启动后立刻隐藏
-        /// 自己的控制台（提权实例无人看它的输出，黑窗纯属干扰）。
+        /// 兼容参数：主程序提权安装时传 `--hide-window`。GUI 子系统下进程没有
+        /// 系统分配的控制台窗口可隐藏（窗口行为见 `bootstrap_console` 注释），
+        /// 参数保留只为不改调用方契约；启动时的控制台引导与实际行为无关。
         hide_window: bool,
         dry_run: bool,
         observe: bool,
@@ -1553,7 +1618,7 @@ mod imp {
   --remove-task         【需管理员】移除上述计划任务（卸载 / 用户关闭并移除授权时用）\n\
   --task-status         查询计划任务是否存在（免提权）\n\
   --follow-app          跟随主程序：桥接断连超过宽限期后自行退出（计划任务触发时自动带上）\n\
-  --hide-window         启动后隐藏自己的控制台（主程序提权安装时自动带上）\n\
+  --hide-window         兼容参数：GUI 子系统已无控制台窗口（主程序提权安装时自动带上）\n\
 为什么需要哨兵键（--canary-usage）\n\
 --------------------------------\n\
 RC003 的返回/音量± 在 Windows 侧**本来就零事件**（kbdhid 丢弃了这三个 usage）。\n\
@@ -3395,9 +3460,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         run_task_command(task_delete_args(), "移除", logger)
     }
 
+    /// 子进程 `schtasks` 必须显式 **CREATE_NO_WINDOW**：助手自身是 GUI 子系统、
+    /// 没有可继承的控制台，不给这个标志时 Windows 会给这个控制台子进程新分配
+    /// 一个控制台（= 一个新的终端窗口）——正是本模块要消灭的那种闪现
+    /// （主程序侧的 `silent_command` 出于同一原因早就带上了该标志）。
     fn run_task_command(cmd_args: Vec<String>, label: &str, logger: &Logger) -> bool {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         match std::process::Command::new("schtasks")
             .args(&cmd_args)
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             Ok(output) => {
@@ -3790,6 +3862,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     // ============================================================ 主流程
 
     pub fn run() {
+        // 最先安顿 stdout/stderr（见 `bootstrap_console`）：必须早于任何打印，
+        // 包括参数错误时的 usage 输出。手动运行接父控制台；后台拉起接 NUL，
+        // 不分配控制台、也就没有任何窗口。
+        let console_state = bootstrap_console();
         let mut args = match parse_args() {
             Ok(a) => a,
             Err(e) if e == "HELP" => {
@@ -3810,10 +3886,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if args.follow_app && args.log.is_none() {
             let _ = std::fs::create_dir_all(&args.runtime_dir);
             args.log = Some(args.runtime_dir.join("helper-task.log"));
-        }
-        // 同理：后台拉起不该让用户看到一个黑框。放在最前，把窗口闪现的时间压到最短。
-        if args.follow_app || args.hide_window {
-            hide_console_window();
         }
 
         // ---- 日志落点：优先与主程序同一个文件（2026-10-01 Andy 要求）----
@@ -3869,6 +3941,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("pid", std::process::id().to_string()),
                 ("port", args.port.to_string()),
                 ("runtime_dir", args.runtime_dir.display().to_string()),
+                // 控制台引导结果：attached = 手动运行（父控制台可见输出）；
+                // nul = 后台拉起（无控制台，stdout/stderr 指向 NUL 设备）。
+                // 排查"为什么没有窗口/没有输出"时，这一条就是答案。
+                ("console", console_state.to_string()),
+                // 兼容参数 --hide-window（值不再影响行为：GUI 子系统没有窗口可
+                // 隐藏，见字段注释）；写进日志让"调用方还在传它"可见。
+                ("hide_window", args.hide_window.to_string()),
                 (
                     "target_pid",
                     args.target_pid
@@ -3881,7 +3960,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
 
         if args.selftest {
-            let ok = selftest(&logger);
+            let ok = selftest(&logger, console_state);
             std::process::exit(if ok { 0 } else { 1 });
         }
 
@@ -5163,7 +5242,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// **注册表 HostPid 的读取宽度**。前三者出错的现象是"看起来正常但什么都没匹配到"；
     /// 第四者 2026-09-23 在真机上真的发生了（按 4 字节读 QWORD → 0 个实例 →
     /// 误报"设备未连接"），所以它的宽度契约必须留在这里做回归。
-    fn selftest(logger: &Logger) -> bool {
+    fn selftest(logger: &Logger, console_state: &str) -> bool {
         let mut all_ok = true;
         let mut check = |label: &str, ok: bool, detail: String| {
             all_ok = all_ok && ok;
@@ -6220,6 +6299,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             first && !second && !signal.exists(),
             format!("first={first} second={second}"),
         );
+
+        // 控制台引导（2026-10-04）：stdout/stderr 必须可写。
+        // GUI 子系统 + 计划任务拉起时控制台状态是 `nul`（无窗口、输出进 NUL
+        // 设备）；手动运行是 `attached`（父控制台）。引导失效（句柄无效）时
+        // `Logger::line` 的 `println!` 会 panic，进程表现为"无声消失"——
+        // 这正是 2026-09-28 真机 run4/run5 那类事故的形状，必须可回归。
+        // 计划任务路径（探针 --selftest --hide-window）下执行的就是 nul 分支。
+        {
+            use std::io::Write;
+            let out_ok = std::io::stdout().write_all(b"\n").is_ok();
+            let err_ok = std::io::stderr().write_all(b"\n").is_ok();
+            check(
+                "控制台引导：stdout/stderr 可写（attached / nul 两条路径）",
+                out_ok && err_ok,
+                format!("console={console_state} stdout_ok={out_ok} stderr_ok={err_ok}"),
+            );
+        }
 
         let _ = fs::remove_dir_all(&tmp);
 

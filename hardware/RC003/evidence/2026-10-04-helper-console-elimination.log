@@ -1,0 +1,65 @@
+RC003 助手窗口闪现消除 —— 本机取证（2026-10-04）
+
+背景
+====
+用户报障："APP 启动时、或打开全按键支持时，Helper 运行时一闪而过。"
+定位：sayall-helper.exe 此前是控制台子系统程序，计划任务 / ShellExecuteEx 拉起时
+系统必然为其分配控制台窗口。本机（默认终端 = Windows Terminal）实测：一个
+Windows Terminal 窗口从助手启动一直可见到退出；旧的 hide_console_window()
+（ShowWindow(GetConsoleWindow(), SW_HIDE)）在 ConPTY 托管下只拿到隐藏的
+pseudo window，对可见窗口无效。提权任务（/rl highest）不参与默认终端移交，
+预计退化为经典 conhost 黑框、自隐藏前可见（即"一闪而过"）；该形态需要一次
+UAC 点击，本会话无管理员权限，未本机复现（deferred）。
+
+修复：助手改 GUI 子系统（#![cfg_attr(windows, windows_subsystem = "windows")]），
+不再创建任何控制台；手动运行由 bootstrap_console() 附加父控制台（输出照旧可见），
+后台拉起 stdout/stderr 接 NUL；子进程 schtasks 补 CREATE_NO_WINDOW。
+
+探针
+====
+hardware/RC003/probes/console_flash_probe.py
+  * ~1 ms 采样"新变为可见"的顶层窗口（类别 / pid / 首次与末次可见时间）；
+  * ~100 ms 采样进程表，按父子链把 conhost / 窗口归因到"本次任务新拉起的进程"
+    （机器上可能本来就有用户在用的 sayall-helper，不能按名字存在与否判）；
+  * schtasks /run 触发一次性任务——与主程序触发助手是同一条通路。
+
+结果（同一台机器连续多轮；证据 JSON 同目录）
+============================================
+1) 基线：控制台子系统助手（sha256=2d97bbce…）
+   run1: 助手 48 ms 启动 -> conhost(父=助手) 165 ms -> WT 窗口可见 203..2474 ms
+   run2: 助手 45 ms 启动 -> conhost(父=助手) 164 ms -> WT 窗口可见 188..2415 ms
+   证据: 2026-10-04-console-flash-baseline.json
+
+2) 对照：cmd.exe /c ping（纯控制台程序，无隐藏动作）
+   WT 窗口与进程同生命周期可见（3258 ms）——证明"任务拉起控制台程序 => 出现
+   可见窗口"这条机制在本机成立。
+   证据: 2026-10-04-console-flash-control-cmd.json
+
+3) 修复版：GUI 子系统助手（sha256=e7e1ee29…），3 轮
+   每轮: conhost 无、helper 相关窗口无；助手照常跑完（~2.6-2.8 s）。
+   证据: 2026-10-04-console-flash-fixed.json
+
+4) 修复版 + 子进程路径（--task-status，助手派生 schtasks）
+   带 CREATE_NO_WINDOW：0 个新窗口（会出现一个隐藏的 conhost，用户不可见）。
+   证据: 2026-10-04-console-flash-fixed-taskstatus.json
+   反向对照（临时构建去掉该标志）：WT 窗口闪现 127-235 ms。
+   证据: 2026-10-04-console-flash-counterfactual-no-cnw.json
+
+功能等价（助手自身日志；完整文件 %LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log）
+=================================================================================
+* 计划任务路径（pid=904，GUI 子系统、无控制台）：
+    [ENV] ... console=nul hide_window=true ...
+    [PASS] 控制台引导：stdout/stderr 可写（attached / nul 两条路径）
+           console=nul stdout_ok=true stderr_ok=true
+    结论: 全部通过
+  任务"上次结果: 0"（schtasks /query /v）
+* 手动路径（pid=36092，本机控制台）：
+    [ENV] ... console=attached hide_window=false ...
+    结论: 全部通过（输出在控制台可见，退出码 0）
+
+边界（deferred）
+================
+* 提权路径（/rl highest + ShellExecuteEx runas）的真实 UAC 点击复核：未做。
+  结构性保证 = PE 子系统 GUI（OptionalHeader.Subsystem=2）+ 代码无 AllocConsole
+  + 子进程带 CREATE_NO_WINDOW。
+* RC001/RC003 真机链路与睡眠恢复等不经过窗口路径，本轮未覆盖。
