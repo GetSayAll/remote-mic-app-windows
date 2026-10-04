@@ -1,6 +1,7 @@
 # 主进程 LL 键盘钩子使本窗口输入法语音热键失效（豆包，2026-10-04 实证）
 
-- 状态：根因已定位（真机证据矩阵完整）；修复未实施
+- 状态：根因已定位（真机证据矩阵完整）；**修复已实施（切片 1–3 完成并提交），
+  待 Andy 真机验收**
 - 影响：无线麦「按住说话验证」（向导第⑤步）在**自己的 WebView2 输入框**里无法通过；
   遥控器语音键 → 文字链路在应用窗口内不可用（键盘右 Alt / 遥控器合成右 Alt 均不触发豆包语音条）
 - 范围：RC003 + 豆包输入法（0.8.x）；`crates/sayall-windows/src/key_suppressor.rs`（F5 抑制器）
@@ -55,9 +56,30 @@
 
 **实施切片（每片独立提交）**：
 1. 宿主模式骨架（`--sayall-key-host` argv 分支、IPC 握手、单实例豁免、退出联动、fail-open）；
-2. 抑制器迁移（含 F5 吞键、bump、武装信号）；
-3. key_gate 迁移（含观察窗口/录入/边沿流）；
+   ✅ 提交 `0cbb0e3`；运行验证：宿主启动/握手/退出路径有日志，失败即 fail-open。
+2. 抑制器迁移（含 F5 吞键、bump、武装信号）；✅ 提交 `0cb4158`；
+   实现说明：宿主只做机械搬运（钩子/消息泵/BUMP/ASK 转发），决策与全部静态状态留在
+   主进程 `key_suppressor::handle_host_message`；ASK/VERDICT 有界 200ms，超时放行。
+   修复两处实测缺陷：OK 与后续命令同段到达被 `BufReader::into_inner` 丢弃、
+   BYE 与钩子安装赛跑导致 WM_QUIT 无人投递的 join 挂起（均已加回归测试）。
+3. key_gate 迁移（含观察窗口/录入/边沿流）；✅ 提交 `ae76177`；
+   实现说明：决策全部保留在 `key_gate::handle_host_event`（在宿主读线程串行执行，
+   配对表 thread-local 语义不变）；宿主对每条键盘事件同步 ASK（kind=gate），
+   60ms 有界等待在主进程内照旧；门控存活由宿主 `HOOK kind=gate installed=` 报告
+   驱动 `GATE_ACTIVE`（fail-open：宿主缺席/断连即全透传）。
+   测试语义：`#[cfg(test)]` 下 KeyGate 句柄存活计入 `is_gate_thread_alive()`，
+   引擎测试无需宿主进程。
 4. 清理诊断开关、按本文件矩阵复验 + `Testing/WindowsOnboardingWizard.md` 用例三。
+   进行中：`ime_self_probe` 已移除；`SAYALL_DIAG_*` 开关暂留（验收排障）；
+   `src/lib/key-probe.ts` 暂留至验收通过（纯日志、不改变行为），合入 main 前移除。
+
+**验收方法（Andy 真机）**：
+1. 安装本分支验收包（`ONBOARDING_WIZARD_ENABLED=true`），进入向导第⑤步；
+2. 应用窗口前台时按键盘**右 Alt** 或遥控器**语音键** → 豆包语音条出现 → 说话 →
+   松开应上屏且语音条消失（成对清理）；
+3. 回归：遥控器已映射按键照常触发映射动作（门控经 IPC 后语义不变）；
+   按住说话快捷键（右 Alt 等）成对注入；断连/退出无粘键；
+4. helper 开/关两种状态各跑一遍（宿主与 helper 正交，基础路径不依赖 helper）。
 
 ## 现场调试开关（本次排查引入，修复提交时清理）
 

@@ -45,7 +45,18 @@
    预期：失败文案「输入框没有聚焦。先点一下输入框…」；测试过程中让窗口失焦 →
    预期：失败文案「测试过程中输入框失去了焦点…」。
 5. 快速点按（不足 0.5 秒）：应给出可见失败并可重试，不出现卡死或空白状态。
-6. 日志核对（每次 attempt 必须成对）：
+6. **键盘右 Alt 路径（2026-10-04 钩子迁移修复的核心验收，见
+   Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）**：应用窗口前台、焦点在输入框时，
+   按住键盘**右 Alt**（即所选工具的按住说话快捷键）→ 语音条应出现；松开 → 语音条消失。
+   此前"前台根窗口进程 == LL 钩子所在进程"时该路径必失败；修复后两个 LL 钩子均在
+   按键宿主进程（`sayall-windows-app.exe --sayall-key-host`），宿主永不持有前台窗口。
+   日志核对：`key_host action=hook_report detail=HOOK kind=f5 installed=1` 与
+   `detail=HOOK kind=gate installed=1` 各一条；若缺失，钩子未安装、判定降级。
+7. **门控回归（切片 3 门控迁出后）**：遥控器已映射按键（如方向键 / OK）在映射启用时
+   仍触发配置动作且不残留原生按键；按住说话快捷键注入成对（按下 DOWN / 释放 UP）；
+   断连或退出应用后无粘键（同一按键连按无卡死）。验收时 helper 开 / 关各跑一遍：
+   门控迁移与「全按键支持」helper 相互独立，helper 关闭不得影响上述行为。
+8. 日志核对（每次 attempt 必须成对）：
    - `frontend event=onboarding phase=voice_attempt result=unknown reason=armed …`（一次 attempt 一条）；
    - 终态一条：`result=passed` 或 `result=failed reason=voice.*`，`detail=d…_s…_q…_drain0|1` 为采样 / 投递 / 队列计数；
    - `input_observation … action=begin/end` 成对出现；`action=end … count=0`（正常路径）。
