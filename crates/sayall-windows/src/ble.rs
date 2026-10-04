@@ -351,6 +351,7 @@ fn worker_loop(
     let mut session: Option<BleSession> = None;
     let mut pipeline = AtvvVoicePipeline::default();
     let mut active_voice_samples = 0_u64;
+    let mut voice_gain_log: Option<(u64, f32)> = None;
     let mut connection_generation = 0_u64;
     let mut capabilities_deadline: Option<Instant> = None;
     let mut reconnect_deadline: Option<Instant> = None;
@@ -880,6 +881,7 @@ fn worker_loop(
                         &mut held_hotkey,
                         &mut active_voice_samples,
                         &gain_db,
+                        &mut voice_gain_log,
                         &bytes,
                     );
                 }
@@ -1785,6 +1787,15 @@ fn handle_control(
     }
 }
 
+/// 每会话生效增益的日志去重（2026-10-04）：返回 true 表示这一批音频的
+/// `(generation, gain_db)` 组合还没记过，需要写一条 `audio_gain action=apply`。
+///
+/// 为什么要有它：用户报"增益好像没效果"时，日志必须能直接回答"这一轮说话用的
+/// 是多少 dB"，而不是从 IPC 保存记录反推（会话和保存的时间关系肉眼不可靠）。
+fn should_log_voice_gain(previous: Option<(u64, f32)>, generation: u64, gain_db: f32) -> bool {
+    previous != Some((generation, gain_db))
+}
+
 fn handle_audio(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
@@ -1794,6 +1805,7 @@ fn handle_audio(
     held_hotkey: &mut Option<KeyChord>,
     active_voice_samples: &mut u64,
     gain_db: &Mutex<f32>,
+    voice_gain_log: &mut Option<(u64, f32)>,
     bytes: &[u8],
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
@@ -1801,7 +1813,15 @@ fn handle_audio(
     }
     // 增益逐批刷新（对齐 Mac 每帧读 settings.gainDB 的语义）：用户在滑块上改动后，
     // 下一批音频立即按新值处理，不需要重开会话；重连后的新管道也因此拿到当前值。
-    pipeline.set_gain_db(*lock(gain_db));
+    let effective_gain_db = *lock(gain_db);
+    pipeline.set_gain_db(effective_gain_db);
+    let generation = pipeline.generation();
+    if should_log_voice_gain(*voice_gain_log, generation, effective_gain_db) {
+        *voice_gain_log = Some((generation, effective_gain_db));
+        gatt_note(format!(
+            "audio_gain action=apply phase=completed terminal_result=passed generation={generation} gain_db={effective_gain_db}"
+        ));
+    }
     if let Some(error) = audio.failure() {
         abort_voice_session(
             session,
@@ -3336,6 +3356,17 @@ impl Drop for WinRtApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_gain_logs_once_per_session_and_on_value_changes() {
+        // 每会话首次音频记一条；同一会话同一值不再重复；会话内改值再记一条；
+        // 新会话（generation +1）即使值相同也要重新记（对应"这一轮说话"的判读）。
+        assert!(should_log_voice_gain(None, 1, 0.0));
+        assert!(!should_log_voice_gain(Some((1, 0.0)), 1, 0.0));
+        assert!(should_log_voice_gain(Some((1, 0.0)), 1, 24.0));
+        assert!(!should_log_voice_gain(Some((1, 24.0)), 1, 24.0));
+        assert!(should_log_voice_gain(Some((1, 24.0)), 2, 24.0));
+    }
 
     #[test]
     fn wetype_activation_is_limited_to_the_wetype_default_hotkey() {
