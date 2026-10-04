@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
-import { getRuntimeSnapshot, hideMainWindow, type RuntimeSnapshot } from "./lib/bridge";
+import { getOnboardingState, getRuntimeSnapshot, hideMainWindow, type RuntimeSnapshot } from "./lib/bridge";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
+import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
@@ -16,6 +17,7 @@ import {
 import SettingsPage from "./pages/SettingsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
+import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 
 const activePage = ref<PageId>(loadPersistedPage() ?? "buttons");
@@ -26,6 +28,21 @@ const { bannerVisible, info: updateInfo, dismissBanner, runStartupSilentCheck } 
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
 let initialRuntimeReported = false;
+
+/** 未完成首次设置时进入向导（激活开关见 ONBOARDING_WIZARD_ENABLED）。 */
+const showOnboarding = ref(false);
+
+function onOnboardingCompleted(): void {
+  showOnboarding.value = false;
+  // 完成后落到「连接」页：先看到四项就绪状态，再开始日常使用。
+  activePage.value = "connection";
+  reportFrontendEvent({
+    event: "onboarding",
+    phase: "completed",
+    result: "passed",
+    reason: "wizard_finished",
+  });
+}
 
 function handleWindowKeydown(event: KeyboardEvent): void {
   if (isWindowCloseAccelerator(event)) {
@@ -102,6 +119,21 @@ onMounted(async () => {
     });
   }
   window.addEventListener("keydown", handleWindowKeydown, true);
+  // 首次使用向导：读取向导状态决定是否进入向导模式；读取失败不阻断启动
+  // （Rust 侧已记录失败原因，用户仍可用主界面）。
+  if (ONBOARDING_WIZARD_ENABLED) {
+    try {
+      const onboardingState = await getOnboardingState();
+      showOnboarding.value = onboardingState.isActive;
+    } catch {
+      reportFrontendEvent({
+        event: "onboarding",
+        phase: "state_read",
+        result: "failed",
+        reason: "ipc_failed",
+      });
+    }
+  }
   await refreshRuntime();
   runtimePollTimer = setInterval(() => {
     void refreshRuntime();
@@ -121,7 +153,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <OnboardingPage
+    v-if="showOnboarding"
+    :runtime="runtime"
+    @completed="onOnboardingCompleted"
+  />
+  <div v-else class="app-shell">
     <Sidebar :active-page="activePage" :version="runtime?.appVersion" @select="activePage = $event" />
     <main class="content">
       <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>

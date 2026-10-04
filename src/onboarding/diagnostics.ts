@@ -20,6 +20,7 @@ export type OnboardingEventKind =
   | "step_blocked"
   | "step_retry"
   | "step_recovered"
+  | "persist"
   | "navigation"
   | "remote_observed"
   | "audio_route"

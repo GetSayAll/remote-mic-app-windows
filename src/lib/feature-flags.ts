@@ -20,3 +20,12 @@ export const VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED = false;
  * runtime simulation 改为经 IPC 直接写入并验证受理），只是 UI 暂不暴露入口。
  */
 export const DEVICE_ACTION_SECTION_ENABLED = false;
+
+/**
+ * 首次使用向导（Onboarding）激活开关。
+ *
+ * 流程未完整（步骤④–⑦、staged 事务、attempt 唯一终态）且真机探针未通过前保持
+ * **关闭**：关闭时 App 不读取向导状态、行为与现状完全一致。向导本体、状态机与
+ * 迁移逻辑已实现并有独立测试；全部就绪后打开此开关即可对未完成的用户生效。
+ */
+export const ONBOARDING_WIZARD_ENABLED = false;
