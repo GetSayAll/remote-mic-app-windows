@@ -165,6 +165,81 @@ fn open_log_directory() -> Result<String, String> {
     }
 }
 
+/// 向导入口用到的固定 Windows 设置页（2026-10-04，设计稿 §4.2）。
+///
+/// URI 全部在本仓库代码里固定映射；前端只能传枚举值，不接受任意 URI。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowsSettingsSection {
+    Bluetooth,
+    Sound,
+    Microphone,
+}
+
+fn windows_settings_uri(section: WindowsSettingsSection) -> &'static str {
+    match section {
+        WindowsSettingsSection::Bluetooth => "ms-settings:bluetooth",
+        WindowsSettingsSection::Sound => "ms-settings:sound",
+        WindowsSettingsSection::Microphone => "ms-settings:privacy-microphone",
+    }
+}
+
+fn windows_settings_section_name(section: WindowsSettingsSection) -> &'static str {
+    match section {
+        WindowsSettingsSection::Bluetooth => "bluetooth",
+        WindowsSettingsSection::Sound => "sound",
+        WindowsSettingsSection::Microphone => "microphone",
+    }
+}
+
+/// 打开固定的 Windows 设置页（向导第②步「打开蓝牙设置」等入口）。
+#[tauri::command]
+fn open_windows_settings(section: WindowsSettingsSection) -> Result<(), String> {
+    let name = windows_settings_section_name(section);
+    match sayall_windows::app_launcher::open_uri(windows_settings_uri(section)) {
+        Ok(()) => {
+            sayall_windows::gatt_note(format!(
+                "system_settings action=open phase=completed terminal_result=passed section={name}"
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(format!(
+                "system_settings action=open phase=completed terminal_result=failed section={name} error_domain=shell error_code=open_failed retryable=true"
+            ));
+            Err(format!("无法打开系统设置：{error}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod windows_settings_tests {
+    use super::*;
+
+    #[test]
+    fn maps_sections_to_fixed_ms_settings_uris() {
+        assert_eq!(
+            windows_settings_uri(WindowsSettingsSection::Bluetooth),
+            "ms-settings:bluetooth"
+        );
+        assert_eq!(
+            windows_settings_uri(WindowsSettingsSection::Sound),
+            "ms-settings:sound"
+        );
+        assert_eq!(
+            windows_settings_uri(WindowsSettingsSection::Microphone),
+            "ms-settings:privacy-microphone"
+        );
+    }
+
+    #[test]
+    fn deserializes_only_known_sections() {
+        let bluetooth: WindowsSettingsSection = serde_json::from_str("\"bluetooth\"").unwrap();
+        assert_eq!(bluetooth, WindowsSettingsSection::Bluetooth);
+        assert!(serde_json::from_str::<WindowsSettingsSection>("\"camera\"").is_err());
+    }
+}
+
 /// Ctrl+W：关闭主窗口——与点标题栏"X"走同一动作，`window.hide()` 后由托盘驻留。
 ///
 /// 为什么前端不直接调 `@tauri-apps/api` 的 `getCurrentWindow().close()`：那条路径
@@ -2436,6 +2511,7 @@ pub fn run() {
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
+        open_windows_settings,
         hide_main_window,
         scan_paired_remotes,
         get_connection_snapshot,
@@ -2500,6 +2576,7 @@ pub fn run() {
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
+        open_windows_settings,
         hide_main_window,
         scan_paired_remotes,
         get_connection_snapshot,

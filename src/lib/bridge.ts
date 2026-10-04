@@ -650,6 +650,16 @@ export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnap
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
 }
 
+/** 向导入口用到的固定 Windows 设置页（不接收任意 URI；Rust 侧另有 ms-settings 前缀校验）。 */
+export type WindowsSettingsSection = "bluetooth" | "sound" | "microphone";
+
+export async function openWindowsSettings(section: WindowsSettingsSection): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  return invoke<void>("open_windows_settings", { section });
+}
+
 export async function openVbCableDownloadPage(): Promise<void> {
   if (!isTauriRuntime()) {
     window.open(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
