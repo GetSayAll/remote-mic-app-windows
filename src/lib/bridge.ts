@@ -848,48 +848,6 @@ export async function endKeyObservation(windowId: number): Promise<number | null
   return invoke<number | null>("end_key_observation", { windowId });
 }
 
-/**
- * 向导第⑤步的原生测试输入框（WebView2 的系统键缺陷绕行，见 sayall-windows::voice_box）。
- * 它和记事本同类的原生窗口——输入法的语音热键在那里才可靠；文字由应用自己读取。
- */
-export interface VoiceTestBoxState {
-  open: boolean;
-  focused: boolean;
-  text: string;
-}
-
-/** 打开原生测试输入框（幂等；已开则置前）。 */
-export async function openVoiceTestBox(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke<void>("open_voice_test_box");
-}
-
-/** 关闭原生测试输入框（幂等）。 */
-export async function closeVoiceTestBox(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke<void>("close_voice_test_box");
-}
-
-/** 清空原生测试输入框文字（重试用）。 */
-export async function clearVoiceTestBox(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke<void>("clear_voice_test_box");
-}
-
-/** 把原生测试输入框置前并聚焦编辑器。 */
-export async function focusVoiceTestBox(): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke<void>("focus_voice_test_box");
-}
-
-/** 读取原生测试输入框状态（向导 200ms 轮询）。 */
-export async function getVoiceTestBoxState(): Promise<VoiceTestBoxState> {
-  if (!isTauriRuntime()) {
-    return { open: false, focused: false, text: "" };
-  }
-  return invoke<VoiceTestBoxState>("get_voice_test_box_state");
-}
-
 /** 浏览器 / 仿真环境没有这个机制：恒为 "不存在"，前端据此不显示这一条目。 */
 const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   phase: "stopped",

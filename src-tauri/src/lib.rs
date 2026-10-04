@@ -850,65 +850,6 @@ fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Opt
     count
 }
 
-/// 向导第⑤步：打开原生测试输入框（WebView2 系统键缺陷绕行；见 sayall-windows::voice_box）。
-#[tauri::command]
-fn open_voice_test_box(
-    window: tauri::Window,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let parent = match window.hwnd() {
-        Ok(hwnd) => hwnd.0 as isize,
-        Err(error) => {
-            sayall_windows::gatt_note(
-                "voice_test_box action=open phase=completed terminal_result=failed error_domain=window error_code=handle_failed retryable=true"
-                    .to_owned(),
-            );
-            return Err(format!("读取窗口句柄失败：{error}"));
-        }
-    };
-    match state.platform.open_voice_test_box(parent) {
-        Ok(()) => {
-            sayall_windows::gatt_note(
-                "voice_test_box action=open phase=completed terminal_result=passed".to_owned(),
-            );
-            Ok(())
-        }
-        Err(error) => {
-            sayall_windows::gatt_note(
-                "voice_test_box action=open phase=completed terminal_result=failed error_domain=window error_code=open_failed retryable=true"
-                    .to_owned(),
-            );
-            Err(error)
-        }
-    }
-}
-
-/// 向导第⑤步：关闭原生测试输入框（幂等；离开第⑤步或向导收尾时调用）。
-#[tauri::command]
-fn close_voice_test_box(state: tauri::State<'_, AppState>) {
-    state.platform.close_voice_test_box();
-}
-
-/// 向导第⑤步：清空原生测试输入框（重试用）。
-#[tauri::command]
-fn clear_voice_test_box(state: tauri::State<'_, AppState>) {
-    state.platform.clear_voice_test_box();
-}
-
-/// 向导第⑤步：把原生测试输入框置前并聚焦。
-#[tauri::command]
-fn focus_voice_test_box(state: tauri::State<'_, AppState>) {
-    state.platform.focus_voice_test_box();
-}
-
-/// 向导第⑤步：读取原生测试输入框状态（向导 200ms 轮询 open / focused / text）。
-#[tauri::command]
-fn get_voice_test_box_state(
-    state: tauri::State<'_, AppState>,
-) -> sayall_windows::voice_box::VoiceTestBoxState {
-    state.platform.voice_test_box_state()
-}
-
 #[tauri::command]
 fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
     state.platform.button_mappings()
@@ -2674,11 +2615,6 @@ pub fn run() {
         set_mapping_suspension,
         begin_key_observation,
         end_key_observation,
-        open_voice_test_box,
-        close_voice_test_box,
-        clear_voice_test_box,
-        focus_voice_test_box,
-        get_voice_test_box_state,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
@@ -2748,11 +2684,6 @@ pub fn run() {
         set_mapping_suspension,
         begin_key_observation,
         end_key_observation,
-        open_voice_test_box,
-        close_voice_test_box,
-        clear_voice_test_box,
-        focus_voice_test_box,
-        get_voice_test_box_state,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
