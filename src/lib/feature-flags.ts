@@ -24,8 +24,8 @@ export const DEVICE_ACTION_SECTION_ENABLED = false;
 /**
  * 首次使用向导（Onboarding）激活开关。
  *
- * 流程未完整（步骤④–⑦、staged 事务、attempt 唯一终态）且真机探针未通过前保持
- * **关闭**：关闭时 App 不读取向导状态、行为与现状完全一致。向导本体、状态机与
- * 迁移逻辑已实现并有独立测试；全部就绪后打开此开关即可对未完成的用户生效。
+ * 2026-10-04：步骤①–⑦、staged 事务、attempt 唯一终态与「重新运行向导」入口
+ * 已全部实现；打开开关，供现场验收（遥控器实时语音 + 三种输入工具 + 键盘
+ * 阴性对照）使用。验收通过前本分支不合入 main（main 保持关闭）。
  */
-export const ONBOARDING_WIZARD_ENABLED = false;
+export const ONBOARDING_WIZARD_ENABLED = true;

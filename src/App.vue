@@ -39,6 +39,11 @@ function onOnboardingCompleted(): void {
   activePage.value = "connection";
 }
 
+/** 设置页「重新运行向导」：向导状态已由设置页重置为进行中，这里切回向导。 */
+function onRestartOnboarding(): void {
+  showOnboarding.value = true;
+}
+
 function handleWindowKeydown(event: KeyboardEvent): void {
   if (isWindowCloseAccelerator(event)) {
     if (event.repeat) return;
@@ -164,7 +169,11 @@ onUnmounted(() => {
           ×
         </button>
       </div>
-      <component :is="activeComponent" :runtime="runtime" />
+      <component
+        :is="activeComponent"
+        :runtime="runtime"
+        @restart-onboarding="onRestartOnboarding"
+      />
     </main>
   </div>
 </template>
