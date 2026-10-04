@@ -560,6 +560,17 @@ describe("Onboarding diagnostics copy", () => {
 
   it("一次复制出含 Windows 版本 / App 版本 / Build 与向导状态的诊断块", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 音频端点只读刷新：复制时读真实列表，而不是第①/②步可能还没加载的页面状态。
+    mocks.listAudioEndpoints.mockResolvedValue([cableEndpoint]);
+    mocks.getAudioSnapshot.mockResolvedValue({
+      phase: "ready",
+      selectedEndpointId: cableEndpoint.id,
+      selectedEndpointName: cableEndpoint.name,
+      queuedSamples: 0,
+      submittedSamples: 0,
+      generation: 1,
+      lastError: null,
+    } satisfies AudioSnapshot);
     const wrapper = await mountWizard(runtimeWith());
 
     await wrapper
@@ -575,8 +586,10 @@ describe("Onboarding diagnostics copy", () => {
     expect(text).toContain("Windows 版本: 10.0.26100");
     expect(text).toContain("步骤标识: remote");
     expect(text).toContain("门禁: remote.not_connected");
+    expect(text).toContain("音频: 状态=ready 推荐设备=1 已选推荐=是");
     // 脱敏：设备 id / 端点身份不进剪贴板（挡住将来加错字段）。
     expect(text).not.toContain("cable-input");
+    expect(text).not.toContain("CABLE Input");
     expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
     const copy = onboardingEvents("action").filter((p) => p.reason === "copy_diagnostics");
     expect(copy.map((p) => p.result)).toEqual(["unknown", "passed"]);

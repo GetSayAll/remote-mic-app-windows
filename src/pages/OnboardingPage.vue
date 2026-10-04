@@ -1155,9 +1155,18 @@ async function copyDiagnostics(): Promise<void> {
   try {
     const report = await getDiagnosticReport();
     const platform = props.runtime?.platform;
-    const recommended = audioEndpoints.value.filter(isRecommendedVoiceEndpoint);
-    const selectedId =
-      audioSnapshot.value?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
+    // 音频端点先做一次**只读**刷新（不触发自动选中）：向导只在进入第③步时
+    // 加载过列表，沿用页面状态会让第①/②步复制出的「推荐设备」恒为 0，误导
+    // 支持判断。读取失败退回页面在用状态——复制本身不因此失败。
+    let endpoints = audioEndpoints.value;
+    let audio = audioSnapshot.value;
+    try {
+      [endpoints, audio] = await Promise.all([listAudioEndpoints(), getAudioSnapshot()]);
+    } catch {
+      // 保持页面状态。
+    }
+    const recommended = endpoints.filter(isRecommendedVoiceEndpoint);
+    const selectedId = audio?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
     const text = formatOnboardingDiagnostics(report, {
       step: target,
       gateCode: gate.value.code,
@@ -1167,10 +1176,10 @@ async function copyDiagnostics(): Promise<void> {
       bleVoiceReady: platform?.bleVoiceReady ?? false,
       rawInputPhase: platform?.rawInput.phase ?? "stopped",
       reconnectAttempt: platform?.connection.reconnectAttempt ?? 0,
-      audioPhase: audioSnapshot.value?.phase ?? platform?.audio.phase ?? "unconfigured",
+      audioPhase: audio?.phase ?? platform?.audio.phase ?? "unconfigured",
       recommendedEndpointCount: recommended.length,
       selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
-      queuedSamples: audioSnapshot.value?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
+      queuedSamples: audio?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
       toolLabel: voiceToolLabel.value,
       hotkeyLabel: hotkeyLabel.value,
       captureEnabled: rc003Status.value?.enabled === true,
