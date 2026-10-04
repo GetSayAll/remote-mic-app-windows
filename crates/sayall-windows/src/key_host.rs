@@ -513,10 +513,15 @@ pub fn run_host(launch: HostLaunch) -> i32 {
     }
     // 保持同一个 BufReader 贯穿宿主生命周期：`into_inner` 会丢弃内部已缓冲
     // 数据，主进程连续发送（如 OK 后紧跟 BUMP/PING）时后续命令会静默丢失。
-    let wire = Wire::new(match reader.get_ref().try_clone() {
+    let wire_stream = match reader.get_ref().try_clone() {
         Ok(write) => write,
         Err(_) => return 2,
-    });
+    };
+    // 套接字选项按**使用句柄**设置（Windows 实测：try_clone 句柄不随原句柄
+    // 的 set_read_timeout(None) 复位，见 handshake_with_host 注释）；写端
+    // 在此显式关闭 Nagle，保证事件/ASK 帧即发即走。
+    let _ = wire_stream.set_nodelay(true);
+    let wire = Wire::new(wire_stream);
     let _ = HOST_WIRE.set(Arc::clone(&wire));
     let hook_thread_id = Arc::new(AtomicU32::new(0));
     let gate_thread_id = Arc::new(AtomicU32::new(0));
@@ -643,6 +648,44 @@ fn accept_host_stream(listener: &TcpListener, deadline: Instant) -> Result<TcpSt
     Ok(stream)
 }
 
+/// 宿主握手：带界读取 HELLO → 校验 token → 回 OK。
+///
+/// **读超时的设置与清除必须落在同一句柄**（reader 的底层流）。Windows 实测
+/// （2026-10-05，`rt2` 阳性对照）：经 `try_clone()` 得到的句柄**不随原句柄
+/// 的 `set_read_timeout(None)` 复位**——若在原句柄上清除，reader 句柄仍会在
+/// 5s 后返回 `TimedOut(10060)`，主进程把闲置连接误判为断开（首轮修复包实测：
+/// start 后 +5.0s 出现 `disconnected socket_closed`，而宿主进程存活）。
+fn handshake_with_host(
+    reader: &mut BufReader<TcpStream>,
+    writer: &mut TcpStream,
+    token: &str,
+) -> Result<(), String> {
+    reader
+        .get_ref()
+        .set_read_timeout(Some(HELLO_TIMEOUT))
+        .map_err(|error| format!("set_read_timeout: {error}"))?;
+    let mut hello = String::new();
+    let read = reader
+        .read_line(&mut hello)
+        .map_err(|error| format!("read hello: {error}"))?;
+    if read == 0 {
+        return Err("read hello: eof".to_owned());
+    }
+    let expected = format!("token={token}");
+    if !hello.starts_with("HELLO ") || !hello.contains(&expected) {
+        let _ = writeln!(writer, "DENY");
+        return Err("handshake_token_mismatch".to_owned());
+    }
+    writer
+        .write_all(b"OK\n")
+        .map_err(|error| format!("write ok: {error}"))?;
+    reader
+        .get_ref()
+        .set_read_timeout(None)
+        .map_err(|error| format!("clear_read_timeout: {error}"))?;
+    Ok(())
+}
+
 fn sanitize_token(value: &str) -> &str {
     if !value.is_empty()
         && value.len() <= 32
@@ -695,30 +738,13 @@ impl KeyHostHandle {
         stream
             .set_nodelay(true)
             .map_err(|error| format!("set_nodelay: {error}"))?;
-        stream
-            .set_read_timeout(Some(HELLO_TIMEOUT))
-            .map_err(|error| format!("set_read_timeout: {error}"))?;
         let mut reader = BufReader::new(
             stream
                 .try_clone()
                 .map_err(|error| format!("try_clone: {error}"))?,
         );
-        let mut hello = String::new();
-        reader
-            .read_line(&mut hello)
-            .map_err(|error| format!("read hello: {error}"))?;
-        let expected = format!("token={token}");
         let mut writer = stream;
-        if !hello.starts_with("HELLO ") || !hello.contains(&expected) {
-            let _ = writeln!(writer, "DENY");
-            return Err("handshake_token_mismatch".to_owned());
-        }
-        writer
-            .write_all(b"OK\n")
-            .map_err(|error| format!("write ok: {error}"))?;
-        writer
-            .set_read_timeout(None)
-            .map_err(|error| format!("clear_read_timeout: {error}"))?;
+        handshake_with_host(&mut reader, &mut writer, &token)?;
         Ok(KeyHostHandle {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
@@ -1224,6 +1250,73 @@ mod tests {
         assert!(saw_hook, "未收到钩子安装报告（读取被非阻塞误判？）");
         stream.write_all(b"BYE\n").unwrap();
         assert_eq!(0, host.join().unwrap());
+    }
+
+    #[test]
+    fn prod_handshake_survives_idle_beyond_hello_timeout() {
+        // 回归（2026-10-05 验收实测）：读超时必须落在 reader 自身句柄并可被
+        // 清除——Windows 上 try_clone 的句柄**不随原句柄的 set_read_timeout(None)
+        // 复位**；否则生产读循环的首次读取会在闲置 5s（HELLO_TIMEOUT）后
+        // `TimedOut(10060)`，主进程把活跃连接误判为断开（实测日志：
+        // start 后 +5.0s `disconnected socket_closed`，宿主进程仍存活）。
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let launch = HostLaunch {
+            port,
+            token: "t0ken".to_owned(),
+        };
+        let (done_tx, done_rx) = mpsc::channel::<i32>();
+        std::thread::spawn(move || {
+            let code = run_host(launch);
+            let _ = done_tx.send(code);
+        });
+        let stream = accept_host_stream(&listener, Instant::now() + Duration::from_secs(5))
+            .expect("accept failed");
+        stream.set_nodelay(true).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        handshake_with_host(&mut reader, &mut writer, "t0ken").expect("handshake failed");
+
+        // 先取走握手后立刻到达的钩子安装报告（f5 + gate），让后续读取真正
+        // 进入"无数据可读"的闲置等待——这才是生产读循环的常态。
+        let mut line = String::new();
+        let mut hooks = 0;
+        for _ in 0..4 {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.starts_with("HOOK ") {
+                hooks += 1;
+                if hooks >= 2 {
+                    break;
+                }
+            }
+        }
+        assert!(hooks >= 2, "未取到两个钩子安装报告（hooks={hooks}）");
+
+        // 复刻生产读循环：挂起一次"等待数据"的读取（无超时重置、无重试）。
+        let pending = std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = reader.read_line(&mut line);
+            (result, line)
+        });
+        // 闲置超过 HELLO_TIMEOUT：宿主不得提前退出。
+        std::thread::sleep(Duration::from_millis(5_500));
+        match done_rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => {}
+            other => panic!("宿主在闲置期提前退出：{other:?}"),
+        }
+        // 挂起的读取必须仍有效：PING 能唤醒它（超时残留会让它在 5s 时已 Err）。
+        writer.write_all(b"PING\n").unwrap();
+        let (result, line) = pending.join().unwrap();
+        match result {
+            Ok(n) if n > 0 => assert_eq!("PONG", line.trim()),
+            other => panic!("闲置后挂起读取异常（超时未清除？）：{other:?}"),
+        }
+        writer.write_all(b"BYE\n").unwrap();
+        assert_eq!(0, done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
     }
 
     #[test]

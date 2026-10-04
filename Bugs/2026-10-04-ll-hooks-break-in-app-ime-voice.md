@@ -60,13 +60,18 @@
 2. 抑制器迁移（含 F5 吞键、bump、武装信号）；✅ 提交 `0cb4158`；
    实现说明：宿主只做机械搬运（钩子/消息泵/BUMP/ASK 转发），决策与全部静态状态留在
    主进程 `key_suppressor::handle_host_message`；ASK/VERDICT 有界 200ms，超时放行。
-   修复三处实测缺陷（均有回归测试）：OK 与后续命令同段到达被 `BufReader::into_inner`
+   修复四处实测缺陷（均有回归测试）：OK 与后续命令同段到达被 `BufReader::into_inner`
    丢弃；BYE 与钩子安装赛跑导致 WM_QUIT 无人投递的 join 挂起；**accept 继承监听
    套接字的非阻塞模式**（Windows 语义：新套接字拷贝监听套接字的 FIONBIO——首轮
    验收包实测中主进程把正常连接误判为断开：宿主 `start=passed` 却无任何
    hook_report、后续 `gate_active=0`；修复 = accept 后显式 `set_nonblocking(false)`；
    回归用例覆盖**生产 accept 路径**（寻常单测的阻塞监听器不会暴露该坑），阳性
-   对照下必失败——`prod_accept_path_uses_blocking_stream`）。
+   对照下必失败——`prod_accept_path_uses_blocking_stream`）；**try_clone 句柄不随
+   原句柄清除读超时**（Windows 实测：原句柄上 `set_read_timeout(None)` 后 reader
+   句柄仍在 5s 后 `TimedOut(10060)`——第二版验收包实测 start 后 +5.0s 假断开而
+   宿主进程存活；修复 = 超时在 reader 句柄上设、也在 reader 句柄上清；回归
+   `prod_handshake_survives_idle_beyond_hello_timeout`，阳性对照下必失败；
+   同类加固：写端 Nagle 也按使用句柄显式关闭）。
 3. key_gate 迁移（含观察窗口/录入/边沿流）；✅ 提交 `ae76177`；
    实现说明：决策全部保留在 `key_gate::handle_host_event`（在宿主读线程串行执行，
    配对表 thread-local 语义不变）；宿主对每条键盘事件同步 ASK（kind=gate），
