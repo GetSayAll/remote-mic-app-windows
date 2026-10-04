@@ -100,6 +100,18 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         None
     }
 
+    /// 第⑤步：打开原生测试输入框（WebView2 系统键缺陷绕行；见 voice_box 模块）。
+    /// 默认（非 Windows / 仿真）不可用——调用方按失败处理。
+    fn open_voice_test_box(&self, _parent_hwnd: isize) -> Result<(), String> {
+        Err("当前平台不支持测试输入框".to_owned())
+    }
+    fn close_voice_test_box(&self) {}
+    fn clear_voice_test_box(&self) {}
+    fn focus_voice_test_box(&self) {}
+    fn voice_test_box_state(&self) -> sayall_windows::voice_box::VoiceTestBoxState {
+        Default::default()
+    }
+
     /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
     /// （`ble_session_cleanup` 落盘）后才返回。
     ///
@@ -280,6 +292,26 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn observed_last_key(&self) -> Option<u32> {
         WindowsPlatform::observed_last_key(self)
+    }
+
+    fn open_voice_test_box(&self, parent_hwnd: isize) -> Result<(), String> {
+        WindowsPlatform::open_voice_test_box(self, parent_hwnd)
+    }
+
+    fn close_voice_test_box(&self) {
+        WindowsPlatform::close_voice_test_box(self)
+    }
+
+    fn clear_voice_test_box(&self) {
+        WindowsPlatform::clear_voice_test_box(self)
+    }
+
+    fn focus_voice_test_box(&self) {
+        WindowsPlatform::focus_voice_test_box(self)
+    }
+
+    fn voice_test_box_state(&self) -> sayall_windows::voice_box::VoiceTestBoxState {
+        WindowsPlatform::voice_test_box_state(self)
     }
 
     fn set_enhanced_capture_enabled(&self, enabled: bool) {

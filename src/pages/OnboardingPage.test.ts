@@ -39,6 +39,11 @@ const mocks = vi.hoisted(() => ({
   getRuntimeSnapshot: vi.fn(),
   beginKeyObservation: vi.fn(),
   endKeyObservation: vi.fn(),
+  openVoiceTestBox: vi.fn(),
+  closeVoiceTestBox: vi.fn(),
+  clearVoiceTestBox: vi.fn(),
+  focusVoiceTestBox: vi.fn(),
+  getVoiceTestBoxState: vi.fn(),
   rc003Disabled: {
     installed: false,
     authorizationRequired: true,
@@ -84,6 +89,11 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getRuntimeSnapshot: mocks.getRuntimeSnapshot,
     beginKeyObservation: mocks.beginKeyObservation,
     endKeyObservation: mocks.endKeyObservation,
+    openVoiceTestBox: mocks.openVoiceTestBox,
+    closeVoiceTestBox: mocks.closeVoiceTestBox,
+    clearVoiceTestBox: mocks.clearVoiceTestBox,
+    focusVoiceTestBox: mocks.focusVoiceTestBox,
+    getVoiceTestBoxState: mocks.getVoiceTestBoxState,
   };
 });
 
@@ -181,18 +191,16 @@ function onboardingEvents(phase: string): Array<Record<string, unknown>> {
     .filter((payload) => payload.event === "onboarding" && payload.phase === phase);
 }
 
-async function mountWizard(
-  runtime: RuntimeSnapshot,
-  options: { attach?: boolean } = {},
-): Promise<VueWrapper> {
-  const wrapper = mount(OnboardingPage, {
-    props: { runtime },
-    ...(options.attach ? { attachTo: document.body } : {}),
-  });
+async function mountWizard(runtime: RuntimeSnapshot): Promise<VueWrapper> {
+  const wrapper = mount(OnboardingPage, { props: { runtime } });
   await flushPromises();
   await flushPromises();
   return wrapper;
 }
+
+/** 当前轮询返回的运行快照与原生输入框状态（用例内直接改写）。 */
+let currentSnapshot: RuntimeSnapshot = runtimeWith();
+let boxTextState = { open: true, focused: true, text: "" };
 
 function resetWizardMocks(): void {
   mocks.reportFrontendEvent.mockReset();
@@ -222,6 +230,11 @@ function resetWizardMocks(): void {
     mocks.getRuntimeSnapshot.mockReset();
     mocks.beginKeyObservation.mockReset();
     mocks.endKeyObservation.mockReset();
+    mocks.openVoiceTestBox.mockReset();
+    mocks.closeVoiceTestBox.mockReset();
+    mocks.clearVoiceTestBox.mockReset();
+    mocks.focusVoiceTestBox.mockReset();
+    mocks.getVoiceTestBoxState.mockReset();
 
     mocks.getOnboardingState.mockResolvedValue(activeState("welcome"));
     mocks.saveOnboardingStep.mockImplementation(async (step: string) => activeState(step));
@@ -266,7 +279,16 @@ function resetWizardMocks(): void {
     mocks.stageOnboardingVoiceBinding.mockImplementation(async () => activeState("voice_tool"));
     mocks.setMappingSuspension.mockResolvedValue(true);
     mocks.completeOnboarding.mockImplementation(async () => activeState("complete"));
-    mocks.getRuntimeSnapshot.mockImplementation(async () => runtimeWith());
+    currentSnapshot = runtimeWith();
+    boxTextState = { open: true, focused: true, text: "" };
+    mocks.getRuntimeSnapshot.mockImplementation(async () => currentSnapshot);
+    mocks.openVoiceTestBox.mockResolvedValue(undefined);
+    mocks.closeVoiceTestBox.mockResolvedValue(undefined);
+    mocks.clearVoiceTestBox.mockImplementation(async () => {
+      boxTextState.text = "";
+    });
+    mocks.focusVoiceTestBox.mockResolvedValue(undefined);
+    mocks.getVoiceTestBoxState.mockImplementation(async () => ({ ...boxTextState }));
     let observationId = 0;
     mocks.beginKeyObservation.mockImplementation(async () => {
       observationId += 1;
@@ -724,15 +746,6 @@ describe("Onboarding voice test step", () => {
     vi.useRealTimers();
   });
 
-  function queueSnapshots(...frames: RuntimeSnapshot[]): void {
-    let index = 0;
-    mocks.getRuntimeSnapshot.mockImplementation(async () => {
-      const frame = frames[Math.min(index, frames.length - 1)];
-      index += 1;
-      return frame;
-    });
-  }
-
   const streamingFrame = (patch: Parameters<typeof runtimeWith>[0] = {}) =>
     runtimeWith({
       connectionPhase: "streaming",
@@ -743,31 +756,47 @@ describe("Onboarding voice test step", () => {
       ...patch,
     });
 
-  it("passes a held session once delivered samples and text are observed", async () => {
+  const endedFrame = () =>
+    runtimeWith({
+      connectionPhase: "ready",
+      bleVoiceReady: true,
+      rawInputPhase: "ready",
+      audioPhase: "ready",
+      decodedSamples: 160,
+      submittedSamples: 640,
+      queuedSamples: 0,
+    });
+
+  it("passes a held session once delivered samples and text appear in the native box", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
-    queueSnapshots(
-      runtimeWith(),
-      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
-      streamingFrame({ voiceState: "draining", audioPhase: "draining", decodedSamples: 150, submittedSamples: 640, queuedSamples: 40 }),
-      runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, rawInputPhase: "ready", audioPhase: "ready", decodedSamples: 160, submittedSamples: 640, queuedSamples: 0 }),
-    );
 
-    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
-    await vi.advanceTimersByTimeAsync(200); // 开始帧
-    await vi.advanceTimersByTimeAsync(200); // 收尾帧
-
-    // 文字出现（DOM 输入事件）→ 结算手动输入计数（0）→ 记录转写。
-    await wrapper.find("input.onboarding-voice-input").setValue("你好");
-    await flushPromises();
-    // 观察窗口排除报告层合成的和弦键（微信：左 Ctrl + 左 Win）。
+    const wrapper = await mountWizard(connectedRuntime());
+    // 进入第⑤步即打开原生测试输入框；观察窗口排除合成的和弦键（微信：左 Ctrl + 左 Win）。
+    expect(mocks.openVoiceTestBox).toHaveBeenCalledTimes(1);
     expect(mocks.beginKeyObservation).toHaveBeenCalledWith([0xa2, 0x5b]);
 
+    currentSnapshot = streamingFrame({ decodedSamples: 120, submittedSamples: 320 });
+    await vi.advanceTimersByTimeAsync(200); // 开始帧
+    currentSnapshot = streamingFrame({
+      voiceState: "draining",
+      audioPhase: "draining",
+      decodedSamples: 150,
+      submittedSamples: 640,
+      queuedSamples: 40,
+    });
+    await vi.advanceTimersByTimeAsync(200); // 收尾帧
+
+    // 原生框里出现文字 → 结算手动输入计数（0）→ 记录转写。
+    boxTextState.text = "你好";
+    await vi.advanceTimersByTimeAsync(200);
+
+    currentSnapshot = endedFrame();
     await vi.advanceTimersByTimeAsync(200); // 结束帧 → 通过
     await flushPromises();
 
-    expect(wrapper.text()).toContain("成功：文字已经出现在输入框里");
+    expect(wrapper.text()).toContain("成功：文字已经出现在测试输入框里");
     const continueButton = wrapper.find("footer .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(onboardingEvents("voice_attempt").some((p) => p.result === "passed")).toBe(true);
@@ -775,6 +804,8 @@ describe("Onboarding voice test step", () => {
     await continueButton.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("按一下遥控器的普通按键");
+    // 离开第⑤步关闭原生输入框。
+    expect(mocks.closeVoiceTestBox).toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -782,12 +813,13 @@ describe("Onboarding voice test step", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.endKeyObservation.mockResolvedValue(1);
-    queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 120, submittedSamples: 320 }));
 
-    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    const wrapper = await mountWizard(connectedRuntime());
+    currentSnapshot = streamingFrame({ decodedSamples: 120, submittedSamples: 320 });
     await vi.advanceTimersByTimeAsync(200);
 
-    await wrapper.find("input.onboarding-voice-input").setValue("手打的字");
+    boxTextState.text = "手打的字";
+    await vi.advanceTimersByTimeAsync(200);
     await flushPromises();
 
     expect(wrapper.text()).toContain("检测到键盘输入");
@@ -804,11 +836,12 @@ describe("Onboarding voice test step", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.endKeyObservation.mockResolvedValueOnce(1).mockResolvedValue(0);
-    queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 120, submittedSamples: 320 }));
 
-    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    const wrapper = await mountWizard(connectedRuntime());
+    currentSnapshot = streamingFrame({ decodedSamples: 120, submittedSamples: 320 });
     await vi.advanceTimersByTimeAsync(200);
-    await wrapper.find("input.onboarding-voice-input").setValue("手打的字");
+    boxTextState.text = "手打的字";
+    await vi.advanceTimersByTimeAsync(200);
     await flushPromises();
     expect(wrapper.text()).toContain("检测到键盘输入");
 
@@ -818,8 +851,9 @@ describe("Onboarding voice test step", () => {
       .trigger("click");
     await flushPromises();
 
-    const box = wrapper.find("input.onboarding-voice-input").element as HTMLInputElement;
-    expect(box.value).toBe("");
+    expect(mocks.clearVoiceTestBox).toHaveBeenCalledTimes(1);
+    expect(mocks.focusVoiceTestBox).toHaveBeenCalledTimes(1);
+    expect(boxTextState.text).toBe("");
     expect(wrapper.text()).not.toContain("检测到键盘输入");
     expect(
       onboardingEvents("voice_attempt").filter((p) => p.reason === "armed"),
@@ -828,20 +862,39 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
-  it("asks the user to click back into the box when a session starts unfocused", async () => {
+  it("asks the user to click back into the native box when a session starts unfocused", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
-    queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
 
-    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
-    await wrapper.find("input.onboarding-voice-input").trigger("blur");
-    await flushPromises();
+    const wrapper = await mountWizard(connectedRuntime());
+    boxTextState.focused = false;
+    currentSnapshot = streamingFrame({ decodedSamples: 80, submittedSamples: 100 });
     await vi.advanceTimersByTimeAsync(200);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("输入框没有聚焦");
+    expect(wrapper.text()).toContain("测试输入框没有焦点");
     expect(
       onboardingEvents("voice_attempt").some((p) => p.reason === "voice.input_target_not_ready"),
+    ).toBe(true);
+    expect(mocks.focusVoiceTestBox).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("fails the attempt when the native box is closed mid-session", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+
+    const wrapper = await mountWizard(connectedRuntime());
+    currentSnapshot = streamingFrame({ decodedSamples: 80, submittedSamples: 100 });
+    await vi.advanceTimersByTimeAsync(200);
+
+    boxTextState.open = false;
+    await vi.advanceTimersByTimeAsync(200);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("测试输入框被关掉了");
+    expect(
+      onboardingEvents("voice_attempt").some((p) => p.reason === "voice.focus_lost"),
     ).toBe(true);
     wrapper.unmount();
   });

@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   beginKeyObservation,
   buttonLabel,
+  clearVoiceTestBox,
+  closeVoiceTestBox,
   completeOnboarding,
   connectRemote,
   disableRc003Capture,
   enableRc003Capture,
   endKeyObservation,
+  focusVoiceTestBox,
   getAudioSnapshot,
   getOnboardingState,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
   getRuntimeSnapshot,
+  getVoiceTestBoxState,
   getVokieInstallation,
   getVoiceHoldHotkey,
   getVoiceInputTool,
@@ -20,6 +24,7 @@ import {
   launchVokie,
   listAudioEndpoints,
   openVbCableDownloadPage,
+  openVoiceTestBox,
   openVokieHomepage,
   openWindowsSettings,
   saveOnboardingStep,
@@ -40,6 +45,7 @@ import {
   type RemoteButton,
   type RuntimeSnapshot,
   type VoiceInputTool,
+  type VoiceTestBoxState,
   type VokieInstallation,
 } from "../lib/bridge";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
@@ -234,6 +240,7 @@ watch(
     }
     if (previous === "voice_test" && current !== "voice_test") {
       stopVoiceTestSession();
+      void closeVoiceTestBox();
     }
     if (current === "remote" || current === "controls") {
       void startButtonObservation();
@@ -283,6 +290,7 @@ onMounted(async () => {
 onUnmounted(() => {
   stopButtonObservation();
   stopVoiceTestSession();
+  void closeVoiceTestBox();
   // 安全网：向导卸载（完成/退出）时恢复映射执行；进程退出后内存态自然复位。
   if (mappingSuspended) {
     void setMappingSuspension(false);
@@ -854,17 +862,19 @@ const VOICE_FAILURE_COPY: Record<VoiceAttemptFailureCode, string> = {
   "voice.no_transcript":
     "语音链路正常，但输入工具没有写出文字。检查工具麦克风是否选 CABLE Output、工具里的语音键是否和本次设置一致、工具是否在运行。",
   "voice.manual_input": "检测到键盘输入。这一步请只用遥控器语音键，不要用键盘打字。",
-  "voice.input_target_not_ready": "输入框没有聚焦。先点一下输入框，再按住遥控器语音键。",
-  "voice.focus_lost": "测试过程中输入框失去了焦点。点回输入框，再试一次。",
+  "voice.input_target_not_ready":
+    "测试输入框没有焦点。先点一下弹出的「语音测试输入框」，再按住遥控器语音键。",
+  "voice.focus_lost": "测试输入框被关掉了。点「重新测试」重新打开它，再试一次。",
 };
 
 const VOICE_POLL_MS = 200;
 
-const voiceTestRef = ref<InstanceType<typeof VoiceTestStep> | null>(null);
 const voicePhase = ref<VoiceAttemptState>("waiting_start");
 const voiceResult = ref<VoiceAttemptTerminal | null>(null);
 const voiceFailureMessage = ref("");
-const voiceFocused = ref(false);
+/** 原生测试输入框状态（200ms 轮询：open / focused / text）。 */
+const voiceBox = ref<VoiceTestBoxState>({ open: false, focused: false, text: "" });
+let lastVoiceBoxText = "";
 let voiceTracker: VoiceAttemptTracker | null = null;
 let voicePollTimer: number | null = null;
 let voicePollBusy = false;
@@ -920,8 +930,11 @@ function observationExcludeVks(): number[] {
 }
 
 async function focusVoiceBox(): Promise<void> {
-  await nextTick();
-  voiceTestRef.value?.focusBox();
+  try {
+    await focusVoiceTestBox();
+  } catch {
+    // 置前失败不阻断：用户点一下输入框即可。
+  }
 }
 
 async function beginVoiceObservation(): Promise<void> {
@@ -960,6 +973,7 @@ async function closeVoiceObservation(): Promise<void> {
 async function startVoiceTestSession(): Promise<void> {
   stopVoiceTestSession();
   voiceAttemptSerial += 1;
+  const serial = voiceAttemptSerial;
   voiceResult.value = null;
   voiceFailureMessage.value = "";
   voicePhase.value = "waiting_start";
@@ -967,7 +981,25 @@ async function startVoiceTestSession(): Promise<void> {
   if (!stagedTool.value) {
     // 应用重启后直接落在第⑤步：读一次正式配置，供核对卡与排除集使用。
     await prepareVoiceToolStep();
+    if (serial !== voiceAttemptSerial) return;
   }
+  // 打开原生测试输入框（幂等；WebView2 的系统键缺陷绕行，见 sayall-windows::voice_box）。
+  try {
+    await openVoiceTestBox();
+  } catch (error) {
+    voiceFailureMessage.value = error instanceof Error ? error.message : String(error);
+    return;
+  }
+  if (serial !== voiceAttemptSerial) return;
+  try {
+    const initialBox = await getVoiceTestBoxState();
+    voiceBox.value = initialBox;
+    // 基线 = 当前框内文字：之后任何变化才算"新出现的文字"。
+    lastVoiceBoxText = initialBox.text;
+  } catch {
+    lastVoiceBoxText = "";
+  }
+  if (serial !== voiceAttemptSerial) return;
   voiceAttemptCount += 1;
   let snapshot: RuntimeSnapshot;
   try {
@@ -976,6 +1008,7 @@ async function startVoiceTestSession(): Promise<void> {
     voiceFailureMessage.value = error instanceof Error ? error.message : String(error);
     return;
   }
+  if (serial !== voiceAttemptSerial) return;
   const tracker = createVoiceAttemptTracker({ attemptId: voiceAttemptCount });
   tracker.arm(voiceAttemptInput(snapshot), Date.now());
   voiceTracker = tracker;
@@ -989,7 +1022,6 @@ async function startVoiceTestSession(): Promise<void> {
   await beginVoiceObservation();
   if (voiceTracker !== tracker) return;
   voicePollTimer = window.setInterval(() => void pollVoiceTest(), VOICE_POLL_MS);
-  void focusVoiceBox();
 }
 
 function stopVoiceTestSession(): void {
@@ -1047,16 +1079,24 @@ async function pollVoiceTest(): Promise<void> {
   voicePollBusy = true;
   const serial = voiceAttemptSerial;
   try {
-    const snapshot = await getRuntimeSnapshot();
+    const [snapshot, box] = await Promise.all([getRuntimeSnapshot(), getVoiceTestBoxState()]);
     if (serial !== voiceAttemptSerial || voiceTracker !== tracker || step.value !== "voice_test") {
       return;
     }
+    voiceBox.value = box;
     const frame = voiceAttemptInput(snapshot);
     const now = Date.now();
     const stateNow = tracker.state();
-    if (stateNow !== "terminal") {
+    // 原生输入框里出现新文字 → 先结算手动输入计数，再记为转写。
+    if (stateNow !== "terminal" && box.open && box.text.length > 0 && box.text !== lastVoiceBoxText) {
+      lastVoiceBoxText = box.text;
+      await handleVoiceBoxText();
+      if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
+    }
+    const afterTextState = tracker.state();
+    if (afterTextState !== "terminal") {
       if (
-        stateNow !== "waiting_start" &&
+        afterTextState !== "waiting_start" &&
         !CONNECTED_PHASES.includes(snapshot.platform.connection.phase)
       ) {
         // 会话进行中连接掉线：按已知原因终止，不谎报通过。
@@ -1067,8 +1107,17 @@ async function pollVoiceTest(): Promise<void> {
         }
         return;
       }
-      if (stateNow === "waiting_start" && frame.voiceState !== "idle" && !voiceFocused.value) {
-        // 会话开始了但输入框没聚焦：文字落不到输入框，先让用户点回去。
+      if (!box.open && afterTextState !== "waiting_start") {
+        // 测试输入框被关掉：转写目标消失，按已知原因终止。
+        const terminal = tracker.abort("voice.focus_lost", now);
+        if (terminal) {
+          onVoiceTerminal(terminal);
+          void closeVoiceObservation();
+        }
+        return;
+      }
+      if (afterTextState === "waiting_start" && frame.voiceState !== "idle" && !box.focused) {
+        // 会话开始了但测试输入框没聚焦：文字落不到框里，先让用户点回去。
         const terminal = tracker.abort("voice.input_target_not_ready", now);
         if (terminal) {
           onVoiceTerminal(terminal);
@@ -1077,7 +1126,10 @@ async function pollVoiceTest(): Promise<void> {
         }
         return;
       }
-      if (frame.voiceState === "idle" && (stateNow === "streaming" || stateNow === "waiting_end")) {
+      if (
+        frame.voiceState === "idle" &&
+        (afterTextState === "streaming" || afterTextState === "waiting_end")
+      ) {
         await settleVoiceManualInput(now);
         if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
       }
@@ -1128,7 +1180,7 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
   void closeVoiceObservation();
 }
 
-async function onVoiceInput(): Promise<void> {
+async function handleVoiceBoxText(): Promise<void> {
   const tracker = voiceTracker;
   if (!tracker || tracker.state() === "terminal" || tracker.state() === "idle") return;
   const serial = voiceAttemptSerial;
@@ -1140,24 +1192,6 @@ async function onVoiceInput(): Promise<void> {
   if (terminal) onVoiceTerminal(terminal);
 }
 
-function onVoiceBoxFocus(): void {
-  voiceFocused.value = true;
-}
-
-function onVoiceBoxBlur(): void {
-  voiceFocused.value = false;
-  const tracker = voiceTracker;
-  if (!tracker) return;
-  const state = tracker.state();
-  if (state === "streaming" || state === "waiting_end" || state === "waiting_transcript") {
-    const terminal = tracker.abort("voice.focus_lost", Date.now());
-    if (terminal) {
-      onVoiceTerminal(terminal);
-      void closeVoiceObservation();
-    }
-  }
-}
-
 async function retryVoiceTest(): Promise<void> {
   reportOnboardingEvent({
     kind: "step_retry",
@@ -1165,8 +1199,13 @@ async function retryVoiceTest(): Promise<void> {
     reason: "user_retry",
     step: "voice_test",
   });
-  voiceTestRef.value?.clearBox();
+  try {
+    await clearVoiceTestBox();
+  } catch {
+    // 清空失败不阻断；startVoiceTestSession 会重新读取文字基线。
+  }
   await startVoiceTestSession();
+  void focusVoiceTestBox();
 }
 </script>
 
@@ -1237,18 +1276,15 @@ async function retryVoiceTest(): Promise<void> {
       />
       <VoiceTestStep
         v-else-if="step === 'voice_test'"
-        ref="voiceTestRef"
         :phase="voicePhase"
         :result="voiceResult?.result ?? null"
         :failure-message="voiceFailureMessage"
-        :focused="voiceFocused"
+        :box-open="voiceBox.open"
+        :focused="voiceBox.focused"
         :tool-label="voiceToolLabel"
         :hotkey-text="hotkeyLabel"
         :audio-text="voiceAudioText"
         :checklist-key="`${stagedTool ?? 'none'}|${hotkeyLabel}|${voiceAudioText}`"
-        @input="onVoiceInput"
-        @focus="onVoiceBoxFocus"
-        @blur="onVoiceBoxBlur"
         @retry="retryVoiceTest"
       />
       <ControlsStep

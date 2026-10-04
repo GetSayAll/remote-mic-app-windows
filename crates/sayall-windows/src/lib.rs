@@ -92,6 +92,8 @@ pub mod send_input;
 #[cfg(windows)]
 pub mod send_input_windows;
 pub mod tray_icons;
+/// 第⑤步「按住说话验证」的原生测试输入框（WebView2 系统键缺陷绕行；2026-10-04）。
+pub mod voice_box;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
 pub mod vokie;
 #[cfg(windows)]
@@ -821,6 +823,31 @@ impl WindowsPlatform {
     /// 观察窗口诊断（见 `key_gate::observed_last_vk`）：最后一次计入的虚拟键码。
     pub fn observed_last_key(&self) -> Option<u32> {
         key_gate::observed_last_vk()
+    }
+
+    /// 第⑤步：打开原生测试输入框（幂等；已开则置前）。`parent` 为主窗口 HWND（0 = 无父）。
+    pub fn open_voice_test_box(&self, parent: isize) -> Result<(), String> {
+        voice_box::open(parent)
+    }
+
+    /// 关闭原生测试输入框（幂等）。
+    pub fn close_voice_test_box(&self) {
+        voice_box::close();
+    }
+
+    /// 清空原生测试输入框文字（重试用）。
+    pub fn clear_voice_test_box(&self) {
+        voice_box::clear();
+    }
+
+    /// 把原生测试输入框置前并聚焦编辑器。
+    pub fn focus_voice_test_box(&self) {
+        voice_box::focus();
+    }
+
+    /// 原生测试输入框状态（向导 200ms 轮询：open / focused / text）。
+    pub fn voice_test_box_state(&self) -> voice_box::VoiceTestBoxState {
+        voice_box::state()
     }
 
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
