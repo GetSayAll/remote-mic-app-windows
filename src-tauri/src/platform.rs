@@ -73,6 +73,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// （`WindowEvent::Focused(false)`，见 `WindowsPlatform::align_ime_after_tool_selection`）。
     /// 未布防（用户没刚选过工具）时是 no-op。
     fn align_ime_after_tool_selection(&self) {}
+    /// 语音增益（dB，0–24）：推给平台侧解码管道。默认实现为空——
+    /// 仿真与不支持增益的平台保持 0 dB（原始音量）。
+    fn set_gain_db(&self, _gain_db: f32) {}
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
     fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
@@ -243,6 +246,10 @@ impl PlatformRuntime for WindowsPlatform {
         WindowsPlatform::align_ime_after_tool_selection(self)
     }
 
+    fn set_gain_db(&self, gain_db: f32) {
+        WindowsPlatform::set_gain_db(self, gain_db)
+    }
+
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
         WindowsPlatform::button_mappings(self)
     }
@@ -339,6 +346,9 @@ mod simulation {
         state: Mutex<SimulationState>,
         voice_hold_hotkey: Mutex<Option<KeyChord>>,
         voice_input_tool: Mutex<Option<VoiceInputTool>>,
+        /// 语音增益（dB，0–24）：与真实平台同形，仿真会话也走
+        /// `AtvvVoicePipeline::set_gain_db` 的同一调用形状。
+        gain_db: Mutex<f32>,
         button_mappings: Mutex<sayall_windows::send_input::ButtonMappings>,
     }
 
@@ -654,6 +664,10 @@ mod simulation {
             *lock(&self.voice_input_tool) = tool;
         }
 
+        fn set_gain_db(&self, gain_db: f32) {
+            *lock(&self.gain_db) = sayall_core::normalize_gain_db(gain_db);
+        }
+
         fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
             lock(&self.button_mappings).clone()
         }
@@ -708,6 +722,7 @@ mod simulation {
             }
 
             let mut pipeline = AtvvVoicePipeline::default();
+            pipeline.set_gain_db(*lock(&self.gain_db));
             pipeline
                 .handle_control(&[0x0B, 0x01, 0x00, 0x02, 0x03, 0, 120])
                 .map_err(|error| PlatformError::Protocol(error.to_string()))?;

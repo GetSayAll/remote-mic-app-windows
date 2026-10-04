@@ -1,5 +1,6 @@
 use sayall_core::{
-    AppIconIdentifier, AppSettings, ThemePreference, UsageStatistics, VoiceInputTool,
+    normalize_gain_db, AppIconIdentifier, AppSettings, ThemePreference, UsageStatistics,
+    VoiceInputTool,
 };
 use sayall_windows::send_input::{ButtonMappings, KeyChord, KeyCode};
 use std::fs;
@@ -233,6 +234,18 @@ impl SettingsStore {
             log_onboarding_write_failure("file_write_failed", true);
             format!("保存向导状态失败：{error}")
         })
+    }
+
+    /// 语音增益（dB，0–24，对齐 Mac `gainDB` 的持久化口径）。
+    ///
+    /// 越界与非有限值在这里钳制后落盘，并返回实际保存值供界面显示：
+    /// 界面滑块与配置文件的取值从此只有一种语义（0 = 原始音量）。
+    pub fn save_gain_db(&self, gain_db: f32) -> Result<f32, String> {
+        let normalized = normalize_gain_db(gain_db);
+        self.update("保存增益设置", move |settings| {
+            settings.gain_db = normalized;
+        })?;
+        Ok(normalized)
     }
 
     pub fn usage_statistics(&self) -> Result<UsageStatistics, String> {
@@ -633,6 +646,41 @@ mod tests {
         assert_eq!(decoded.theme_preference, ThemePreference::System);
     }
 
+    /// 2026-10-04 迁移（用户定稿）：旧代次配置里的 `app_icon` 只是旧版本写下的默认值，
+    /// 升级后一律改用几何鸭；在新版本里做出的选择落盘后保持（真机现场：旧包写下的
+    /// `standard` 曾让窗口/托盘/快捷方式停在旧图标）。
+    #[test]
+    fn app_icon_migrates_from_old_schema_and_keeps_new_choice() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-app-icon-migration-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold","app_icon":"standard"}"#,
+        )
+        .unwrap();
+        let store = SettingsStore::new(path.clone());
+
+        // 旧配置读出来 = 几何鸭。
+        assert_eq!(
+            store.load().unwrap().app_icon,
+            AppIconIdentifier::FacetedDuck
+        );
+
+        // 新版本里选择「默认」并落盘：带新代次，之后读回保持。
+        store.save_app_icon(AppIconIdentifier::Standard).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // 配置文件是 pretty JSON（键冒号后有空格），用解析而不是子串比对。
+        let persisted: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(persisted["schema_version"], serde_json::json!(4));
+        assert_eq!(persisted["app_icon"], serde_json::json!("standard"));
+        assert_eq!(store.load().unwrap().app_icon, AppIconIdentifier::Standard);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn theme_preference_defaults_to_system_and_persists() {
         let path = std::env::temp_dir().join(format!(
@@ -696,6 +744,30 @@ mod tests {
             store.load().unwrap().voice_input_tool,
             Some(VoiceInputTool::Other)
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn audio_gain_defaults_to_zero_and_persists_clamped() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-audio-gain-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        // 新装 / 老配置：默认 0 dB（原始音量）。
+        assert_eq!(store.load().unwrap().gain_db, 0.0);
+
+        assert_eq!(store.save_gain_db(12.0).unwrap(), 12.0);
+        assert_eq!(store.load().unwrap().gain_db, 12.0);
+
+        // 越界与非法值：按 0–24 dB 钳制后落盘，并返回实际保存值（界面显示同源）。
+        assert_eq!(store.save_gain_db(30.0).unwrap(), 24.0);
+        assert_eq!(store.load().unwrap().gain_db, 24.0);
+        assert_eq!(store.save_gain_db(f32::NAN).unwrap(), 0.0);
+        assert_eq!(store.load().unwrap().gain_db, 0.0);
 
         let _ = std::fs::remove_file(path);
     }

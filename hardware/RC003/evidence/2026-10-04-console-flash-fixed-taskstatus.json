@@ -1,0 +1,287 @@
+{
+  "exe": "D:\\SayAll\\src\\GetSayAll\\remote-mic-app-windows\\.worktree\\helper-console-flash\\hardware\\RC003\\helper\\target\\release\\sayall-helper.exe",
+  "sha256": "41b26a5fc07b22277ebeb705926ea87835e9e52496ace3e31430202022e663f1",
+  "args": "--task-status --hide-window",
+  "task": "SayAllFlashProbe",
+  "target_name": "sayall-helper.exe",
+  "runs": [
+    {
+      "helper_seen": true,
+      "helper_pid": 36332,
+      "helper_start_ms": 62,
+      "helper_end_ms": 1014,
+      "new_conhost_pids": [
+        37860
+      ],
+      "new_processes": [
+        {
+          "pid": 34408,
+          "name": "schtasks.exe",
+          "parent_pid": 36332,
+          "t_ms": 181,
+          "ancestry": [
+            34408,
+            36332,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 36332,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 62,
+          "ancestry": [
+            36332,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 37860,
+          "name": "conhost.exe",
+          "parent_pid": 34408,
+          "t_ms": 181,
+          "ancestry": [
+            37860,
+            34408,
+            36332,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "new_visible_windows": [],
+      "observed_s": 1.03,
+      "schtasks_rc": 0,
+      "run": 1
+    },
+    {
+      "helper_seen": true,
+      "helper_pid": 33680,
+      "helper_start_ms": 69,
+      "helper_end_ms": 1027,
+      "new_conhost_pids": [
+        34300,
+        36672,
+        38540,
+        38612,
+        38616
+      ],
+      "new_processes": [
+        {
+          "pid": 6532,
+          "name": "git.exe",
+          "parent_pid": 11540,
+          "t_ms": 671,
+          "ancestry": [
+            6532,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 9000,
+          "name": "git.exe",
+          "parent_pid": 11540,
+          "t_ms": 310,
+          "ancestry": [
+            9000,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 17852,
+          "name": "git.exe",
+          "parent_pid": 9000,
+          "t_ms": 429,
+          "ancestry": [
+            17852,
+            9000,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 19268,
+          "name": "git.exe",
+          "parent_pid": 11540,
+          "t_ms": 671,
+          "ancestry": [
+            19268,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 27112,
+          "name": "git.exe",
+          "parent_pid": 11540,
+          "t_ms": 310,
+          "ancestry": [
+            27112,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 33680,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 69,
+          "ancestry": [
+            33680,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 34300,
+          "name": "conhost.exe",
+          "parent_pid": 27112,
+          "t_ms": 310,
+          "ancestry": [
+            34300,
+            27112,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 36672,
+          "name": "conhost.exe",
+          "parent_pid": 9000,
+          "t_ms": 429,
+          "ancestry": [
+            36672,
+            9000,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 37820,
+          "name": "schtasks.exe",
+          "parent_pid": 33680,
+          "t_ms": 189,
+          "ancestry": [
+            37820,
+            33680,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 38540,
+          "name": "conhost.exe",
+          "parent_pid": 6532,
+          "t_ms": 671,
+          "ancestry": [
+            38540,
+            6532,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38612,
+          "name": "conhost.exe",
+          "parent_pid": 19268,
+          "t_ms": 671,
+          "ancestry": [
+            38612,
+            19268,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38616,
+          "name": "conhost.exe",
+          "parent_pid": 37820,
+          "t_ms": 189,
+          "ancestry": [
+            38616,
+            37820,
+            33680,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "new_visible_windows": [],
+      "observed_s": 1.04,
+      "schtasks_rc": 0,
+      "run": 2
+    }
+  ],
+  "flash_detected": true,
+  "text": [
+    "console_flash_probe",
+    "time     : 2026-10-04 21:54:05",
+    "exe      : D:\\SayAll\\src\\GetSayAll\\remote-mic-app-windows\\.worktree\\helper-console-flash\\hardware\\RC003\\helper\\target\\release\\sayall-helper.exe",
+    "sha256   : 41b26a5fc07b22277ebeb705926ea87835e9e52496ace3e31430202022e663f1",
+    "args     : --task-status --hide-window",
+    "target   : sayall-helper.exe",
+    "task     : SayAllFlashProbe",
+    "register : ok=True 成功: 成功创建计划任务 \"SayAllFlashProbe\"。 | 警告: 因为 /ST 早于当前的时间，任务可能无法运行。",
+    "run 1: helper_seen=True pid=36332 start=62ms new_conhost=[37860] helper_related_conhost=[37860]",
+    "        windows: total=0 console_class=0 helper_related=0 helper_related_console=0 observed_s=1.03",
+    "        new process: pid=34408 name=schtasks.exe parent_pid=36332 helper_related=True t=181ms",
+    "        new process: pid=36332 name=sayall-helper.exe parent_pid=3288 helper_related=True t=62ms",
+    "        new process: pid=37860 name=conhost.exe parent_pid=34408 helper_related=True t=181ms",
+    "run 2: helper_seen=True pid=33680 start=69ms new_conhost=[34300, 36672, 38540, 38612, 38616] helper_related_conhost=[38616]",
+    "        windows: total=0 console_class=0 helper_related=0 helper_related_console=0 observed_s=1.04",
+    "        new process: pid=6532 name=git.exe parent_pid=11540 helper_related=False t=671ms",
+    "        new process: pid=9000 name=git.exe parent_pid=11540 helper_related=False t=310ms",
+    "        new process: pid=17852 name=git.exe parent_pid=9000 helper_related=False t=429ms",
+    "        new process: pid=19268 name=git.exe parent_pid=11540 helper_related=False t=671ms",
+    "        new process: pid=27112 name=git.exe parent_pid=11540 helper_related=False t=310ms",
+    "        new process: pid=33680 name=sayall-helper.exe parent_pid=3288 helper_related=True t=69ms",
+    "        new process: pid=34300 name=conhost.exe parent_pid=27112 helper_related=False t=310ms",
+    "        new process: pid=36672 name=conhost.exe parent_pid=9000 helper_related=False t=429ms",
+    "        new process: pid=37820 name=schtasks.exe parent_pid=33680 helper_related=True t=189ms",
+    "        new process: pid=38540 name=conhost.exe parent_pid=6532 helper_related=False t=671ms",
+    "        new process: pid=38612 name=conhost.exe parent_pid=19268 helper_related=False t=671ms",
+    "        new process: pid=38616 name=conhost.exe parent_pid=37820 helper_related=True t=189ms",
+    "task deleted",
+    "VERDICT: console_flash_detected=true"
+  ]
+}

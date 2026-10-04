@@ -20,8 +20,9 @@ use sayall_core::AppIconIdentifier;
 /// 主程序产品名（安装器创建快捷方式用的同一名字）。
 const PRODUCT_NAME: &str = "无线麦 SayAll";
 
-/// 嵌入的多尺寸 .ico：`standard` 与安装包同源，`faceted-duck` 由
-/// `scripts/generate-app-icons.py --ico-only` 从已提交的 PNG 派生。
+/// 嵌入的多尺寸 .ico：`standard`（水彩鸭）由 `scripts/generate-standard-icon.py`
+/// 派生；`faceted-duck`（几何鸭，2026-10-04 起同时是 exe / 安装包 / 卸载器的图标，
+/// 见 `tauri.conf.json` 的 `bundle.icon`）由 `scripts/generate-app-icons.py` 派生。
 const STANDARD_ICO: &[u8] = include_bytes!("../icons/icon.ico");
 const FACETED_DUCK_ICO: &[u8] = include_bytes!("../icons/app-icons/faceted-duck.ico");
 

@@ -1,6 +1,7 @@
 use crate::{
-    process_pcm, AtvvCapabilities, AtvvControlEvent, AtvvError, FrameAccumulator, ImaAdpcmDecoder,
-    VoiceSession, VoiceSessionError, VoiceSessionEvent, VoiceSessionState,
+    normalize_gain_db, process_pcm, AtvvCapabilities, AtvvControlEvent, AtvvError,
+    FrameAccumulator, ImaAdpcmDecoder, VoiceSession, VoiceSessionError, VoiceSessionEvent,
+    VoiceSessionState,
 };
 use thiserror::Error;
 
@@ -72,11 +73,7 @@ impl AtvvVoicePipeline {
     }
 
     pub fn set_gain_db(&mut self, gain_db: f32) {
-        self.gain_db = if gain_db.is_finite() {
-            gain_db.clamp(0.0, 24.0)
-        } else {
-            0.0
-        };
+        self.gain_db = normalize_gain_db(gain_db);
     }
 
     pub fn handle_control(&mut self, bytes: &[u8]) -> Result<PipelineOutput, PipelineError> {
@@ -273,6 +270,43 @@ mod tests {
         assert_eq!(pipeline.state(), VoiceSessionState::Draining);
         pipeline.complete_drain(1).unwrap();
         assert_eq!(pipeline.state(), VoiceSessionState::Idle);
+    }
+
+    /// 增益（对齐 Mac `PCMPostprocessor` 的 dB 缩放）：6.02 dB ≈ ×2；
+    /// 越界值按 0–24 dB 钳制，非有限值回落 0 dB。平台层在每批音频前
+    /// `set_gain_db`，因此这里的输入就是"当前生效值"。
+    #[test]
+    fn applies_decibel_gain_to_decoded_frames() {
+        fn decode_with_gain(gain_db: f32, bytes: &[u8]) -> Vec<i16> {
+            let mut pipeline = AtvvVoicePipeline::default();
+            pipeline.handle_control(&CAPS).unwrap();
+            pipeline.handle_control(&[0x04, 0x03, 0x02, 0x01]).unwrap();
+            pipeline.set_gain_db(gain_db);
+            let PipelineOutput::Samples { samples, .. } = pipeline.handle_audio(bytes).unwrap()
+            else {
+                panic!("expected samples");
+            };
+            samples
+        }
+
+        let frame = [0x00, 0x7F, 0x80, 0xFF];
+        assert_eq!(
+            decode_with_gain(0.0, &frame),
+            vec![0, 2, 0, -13, -22, -34, -87, -184]
+        );
+        assert_eq!(
+            decode_with_gain(6.0206, &frame),
+            vec![0, 4, 0, -26, -44, -68, -174, -368]
+        );
+        // 越界与非法值：按 supported range 钳制，而不是透传或清零整帧。
+        assert_eq!(
+            decode_with_gain(30.0, &frame),
+            decode_with_gain(24.0, &frame)
+        );
+        assert_eq!(
+            decode_with_gain(f32::NAN, &frame),
+            decode_with_gain(0.0, &frame)
+        );
     }
 
     #[test]

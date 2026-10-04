@@ -660,6 +660,26 @@ export async function openWindowsSettings(section: WindowsSettingsSection): Prom
   return invoke<void>("open_windows_settings", { section });
 }
 
+/**
+ * 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块，0 = 原始音量）。
+ *
+ * 读取走持久化值；写入返回实际保存值（越界会被钳制），界面用它回显——
+ * 不假设"写进去什么就存什么"。
+ */
+export async function getGainDb(): Promise<number> {
+  if (!isTauriRuntime()) {
+    return 0;
+  }
+  return invoke<number>("get_gain_db");
+}
+
+export async function setGainDb(gainDb: number): Promise<number> {
+  if (!isTauriRuntime()) {
+    return gainDb;
+  }
+  return invoke<number>("set_gain_db", { gainDb });
+}
+
 export async function openVbCableDownloadPage(): Promise<void> {
   if (!isTauriRuntime()) {
     window.open(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
@@ -1224,12 +1244,13 @@ export async function reportThemeResult(report: ThemeResultReport): Promise<void
 /**
  * 应用图标（2026-10-02 用户指定；对齐 Mac main `AppIconController`/`AppIconCatalog`）：
  *
- * - `standard`：内置应用图标（默认，也是老配置的落点）；
- * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」。
+ * - `standard`：「默认」水彩鸭（可切换的另一风格，也是老配置与认不出的 ID 的落点）；
+ * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」，
+ *   2026-10-04 起为新装默认，exe / 安装包自身的图标也用它。
  *
- * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）与托盘图标**；
- * 设置页顶部标识与选项预览用同一 ID 实时渲染。安装包与开始菜单快捷方式的图标
- * 属于安装产物，运行期不变（Mac 的 bundle 图标同样不变）。
+ * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）、托盘图标，
+ * 以及开始菜单 / 桌面 / 固定到任务栏的快捷方式图标**；设置页顶部标识与选项预览用
+ * 同一 ID 实时渲染。exe 与安装包自身的图标是安装产物，运行期不变。
  */
 export type AppIconIdentifier = "standard" | "faceted-duck";
 

@@ -430,10 +430,15 @@ async fn get_rc003_task_status(
         .map_err(|error| format!("读取 RC003 任务状态失败：{error}"))
 }
 
-/// 助手经计划任务拉起时会在用户会话里短暂创建控制台窗口（随即自隐藏），
-/// 这个创建动作仍会把前台焦点从主程序抢走——窗口随即消失，焦点落在「无」上，
-/// 用户感觉"程序没反应了"。助手进程启动到自隐藏只有几十毫秒，之后把焦点
-/// 还给主窗口即可；延迟留足助手启动 + 自隐藏的时间。
+/// 助手经计划任务拉起时会在用户会话里短暂创建窗口（旧版：控制台黑框），
+/// 这个创建动作会把前台焦点从主程序抢走——窗口随即消失，焦点落在「无」上，
+/// 用户感觉"程序没反应了"。延迟把焦点还给主窗口即可；延迟要留足助手启动时间。
+///
+/// 2026-10-04 起助手是 **GUI 子系统**程序（计划任务 / 提权拉起都不创建任何窗口，
+/// 见 `hardware/RC003/helper/src/main.rs` 的 `bootstrap_console`），本兜底理论上
+/// 已无对象可还——保留是因为：升级过渡期可能仍拉起旧版控制台助手，且"抢焦点"
+/// 若来自其它环节，这里是廉价保险。真实机器验证「打开开关全程无焦点扰动」后
+/// 可以连同本注释一起删除。
 fn refocus_main_window_soon(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(900));
@@ -1451,6 +1456,61 @@ fn onboarding_blocking_failure(event: &str) -> String {
         "onboarding event={event} phase=completed terminal_result=failed error_domain=task error_code=join_failed retryable=true"
     ));
     format!("向导任务失败（{event}）")
+}
+
+/// 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块：0 = 原始音量）。
+///
+/// 返回的是持久化值（唯一事实来源）；平台运行态由写入路径与启动恢复保持同步。
+#[tauri::command]
+async fn get_gain_db(state: tauri::State<'_, AppState>) -> Result<f32, String> {
+    let settings = state.settings.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.load().map(|settings| settings.gain_db)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取增益设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(gain_db) => format!(
+            "audio_settings feature=gain action=load phase=completed terminal_result=passed gain_db={gain_db}"
+        ),
+        Err(_) => "audio_settings feature=gain action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true".to_owned(),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_gain_db(gain_db: f32, state: tauri::State<'_, AppState>) -> Result<f32, String> {
+    let started = std::time::Instant::now();
+    let settings = state.settings.clone();
+    let platform = state.platform.clone();
+    sayall_windows::gatt_note(format!(
+        "audio_settings feature=gain action=save phase=requested gain_db={gain_db}"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        let saved = settings.save_gain_db(gain_db)?;
+        // 推给平台：BLE 工作线程每批音频前读取，改动从下一批音频生效。
+        platform.set_gain_db(saved);
+        Ok(saved)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存增益设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "audio_settings feature=gain action=save phase=completed terminal_result=passed gain_db={saved} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "audio_settings feature=gain action=save phase=completed terminal_result=failed gain_db={gain_db} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
 }
 
 /// Vokie 安装检测的返回体（连接页用它决定显示官网入口还是“没有运行”提示）。
@@ -2498,6 +2558,14 @@ pub fn run() {
                 }
             }
 
+            // 增益（对齐 Mac：0 dB = 原始音量）。启动即把持久化值推给平台，
+            // 否则重启后管道会退回 0 dB，直到用户再碰一次滑块。
+            platform.set_gain_db(saved_settings.gain_db);
+            sayall_windows::gatt_note(format!(
+                "audio_settings feature=gain action=restore phase=completed terminal_result=passed gain_db={}",
+                saved_settings.gain_db
+            ));
+
             #[cfg(not(windows))]
             let _ = saved_settings;
 
@@ -2639,6 +2707,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_gain_db,
+        set_gain_db,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,
@@ -2708,6 +2778,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_gain_db,
+        set_gain_db,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,

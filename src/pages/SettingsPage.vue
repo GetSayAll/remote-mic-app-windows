@@ -94,8 +94,12 @@ const launchAtLoginReady = ref(false);
 const launchAtLoginBusy = ref(false);
 const launchAtLoginError = ref("");
 
-/** 应用图标（2026-10-02）：默认内置图标；切换后窗口/任务栏、托盘与设置页顶部一起换。 */
-const appIcon = ref<AppIconIdentifier>("standard");
+/**
+ * 应用图标（2026-10-02）：占位初值取当前默认（2026-10-04 起 = 几何鸭，与后端
+ * `AppSettings::default()` 同源，避免 IPC 读回前先闪一下水彩鸭）；顶级标识与
+ * 窗口/任务栏、托盘用同一选择。
+ */
+const appIcon = ref<AppIconIdentifier>("faceted-duck");
 const appIconReady = ref(false);
 const appIconBusy = ref(false);
 const appIconError = ref("");

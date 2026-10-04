@@ -24,6 +24,7 @@ import {
   enableRc003Capture,
   getAudioSnapshot,
   getConnectionSnapshot,
+  getGainDb,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
   getVoiceHoldHotkey,
@@ -37,6 +38,7 @@ import {
   remoteModelLabel,
   scanPairedRemotes,
   selectAudioEndpoint,
+  setGainDb,
   setOtherVoiceHotkey,
   setVoiceHoldHotkey,
   setVoiceInputTool,
@@ -88,6 +90,17 @@ const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
 const openingVbCablePage = ref(false);
 const audioMessage = ref("");
+/**
+ * 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块）：0 = 原始音量。
+ *
+ * 拖动（input）只更新显示，松手（change）才走 IPC 落盘——避免拖一次写几十遍
+ * 设置文件；保存返回的钳制值才回显，失败回到上一次生效值并给出原因。
+ */
+const gainDb = ref(0);
+/** 最后一次确认保存的增益：保存失败时回退到它，不留在"看起来生效"的位置。 */
+const savedGainDb = ref(0);
+const savingGain = ref(false);
+const gainError = ref("");
 const voiceHotkey = ref<KeyChord | null>(null);
 const savingVoiceHotkey = ref(false);
 const voiceHotkeyMessage = ref("");
@@ -930,6 +943,26 @@ async function initializeAudio() {
   await detectAudioEndpoints(restoredAudio);
 }
 
+function onGainInput(event: Event): void {
+  gainDb.value = Number((event.target as HTMLInputElement).value);
+}
+
+async function onGainCommit(event: Event): Promise<void> {
+  const desired = Number((event.target as HTMLInputElement).value);
+  savingGain.value = true;
+  gainError.value = "";
+  try {
+    // 以保存返回值为准回显：越界值会被后端钳制（0–24 dB），界面不假装存了别的数。
+    savedGainDb.value = await setGainDb(desired);
+    gainDb.value = savedGainDb.value;
+  } catch (error) {
+    gainError.value = error instanceof Error ? error.message : String(error);
+    gainDb.value = savedGainDb.value;
+  } finally {
+    savingGain.value = false;
+  }
+}
+
 onMounted(async () => {
   window.addEventListener("blur", handleVoiceCaptureBlur);
   void refreshConnection();
@@ -937,6 +970,14 @@ onMounted(async () => {
   void initializeShortcutSettings();
   void reconcileRc003Capture();
   void refreshVokieInstallation();
+  void getGainDb()
+    .then((value) => {
+      gainDb.value = value;
+      savedGainDb.value = value;
+    })
+    .catch((error) => {
+      gainError.value = error instanceof Error ? error.message : String(error);
+    });
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
@@ -1105,6 +1146,28 @@ onUnmounted(() => {
             </button>
           </li>
         </ul>
+
+        <div class="gain-row">
+          <label class="gain-label" for="audio-gain">增益</label>
+          <input
+            id="audio-gain"
+            name="audio-gain"
+            class="gain-slider"
+            type="range"
+            min="0"
+            max="24"
+            step="1"
+            :value="gainDb"
+            :disabled="savingGain"
+            @input="onGainInput"
+            @change="onGainCommit"
+          />
+          <span class="gain-value">{{ gainDb }} dB</span>
+        </div>
+        <p class="muted gain-help">
+          0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。
+        </p>
+        <p v-if="gainError" class="error-text" role="alert">{{ gainError }}</p>
 
         <div v-if="audioScanComplete && !virtualCableInstalled" class="info-callout warning vb-cable-callout">
           <div>

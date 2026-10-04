@@ -277,6 +277,9 @@ pub struct WindowsPlatform {
     /// 用户在连接页选的语音输入工具：决定语音会话开始前把哪个输入法
     /// 切进当前会话（`ime::ensure_session_ime`）；Vokie / 其他工具不切。
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
+    /// 语音增益（dB，0–24）：BLE 工作线程每批音频前读取，改动下一批即生效
+    /// （对齐 Mac 逐帧读 `settings.gainDB` 的语义）。持久化由设置层负责。
+    gain_db: Arc<Mutex<f32>>,
     /// 「选中工具后的一次性输入法对齐」：自身窗口在前台时不能切（TSF 会话切换曾致
     /// WebView2 整页重载，Bugs/2026-09-12），此时只布防；本应用窗口失去焦点后由
     /// `align_ime_after_tool_selection` 取走并执行一次（2026-10-03，Andy 要求消除
@@ -354,6 +357,7 @@ impl Default for WindowsPlatform {
         let usage = Arc::new(UsageCounters::default());
         let voice_hold_hotkey = Arc::new(Mutex::new(None));
         let voice_input_tool = Arc::new(Mutex::new(None));
+        let gain_db = Arc::new(Mutex::new(0.0));
         let ime_align_pending = Arc::new(Mutex::new(None));
         #[cfg(windows)]
         let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
@@ -384,6 +388,7 @@ impl Default for WindowsPlatform {
                 Arc::clone(&send_input),
                 Arc::clone(&voice_hold_hotkey),
                 Arc::clone(&voice_input_tool),
+                Arc::clone(&gain_db),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
@@ -409,6 +414,7 @@ impl Default for WindowsPlatform {
                 usage,
                 voice_hold_hotkey,
                 voice_input_tool,
+                gain_db,
                 ime_align_pending,
                 button_mapping,
                 raw_input_snapshot,
@@ -437,6 +443,7 @@ impl Default for WindowsPlatform {
                 usage,
                 voice_hold_hotkey,
                 voice_input_tool,
+                gain_db,
                 ime_align_pending,
                 button_mapping,
                 raw_input_snapshot,
@@ -648,6 +655,14 @@ impl WindowsPlatform {
 
     pub fn voice_input_tool(&self) -> Option<VoiceInputTool> {
         *lock(&self.voice_input_tool)
+    }
+
+    /// 语音增益（dB，0–24）：写入共享值供 BLE 工作线程逐批读取。
+    ///
+    /// 取值先经 `sayall_core::normalize_gain_db` 钳制——IPC 层已钳过一次，
+    /// 这里再钳一次是为了让"从任何入口进来"的平台状态都落在同一区间。
+    pub fn set_gain_db(&self, gain_db: f32) {
+        *lock(&self.gain_db) = sayall_core::normalize_gain_db(gain_db);
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {

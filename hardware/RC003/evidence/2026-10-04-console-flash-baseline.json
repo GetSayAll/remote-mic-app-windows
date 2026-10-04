@@ -1,0 +1,252 @@
+{
+  "exe": "D:\\SayAll\\src\\GetSayAll\\remote-mic-app-windows\\.worktree\\tmp-console-baseline\\hardware\\RC003\\helper\\target\\release\\sayall-helper.exe",
+  "sha256": "2d97bbce2c4902314b9fe75bcae55aa536dc6b240578279b39bf75cd713a743e",
+  "args": "--selftest --hide-window",
+  "task": "SayAllFlashProbe",
+  "target_name": "sayall-helper.exe",
+  "runs": [
+    {
+      "helper_seen": true,
+      "helper_pid": 36852,
+      "helper_start_ms": 48,
+      "helper_end_ms": 2905,
+      "new_conhost_pids": [
+        22912,
+        37408
+      ],
+      "new_processes": [
+        {
+          "pid": 12864,
+          "name": "powershell.exe",
+          "parent_pid": 11540,
+          "t_ms": 527,
+          "ancestry": [
+            12864,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 22912,
+          "name": "conhost.exe",
+          "parent_pid": 36852,
+          "t_ms": 165,
+          "ancestry": [
+            22912,
+            36852,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 36852,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 48,
+          "ancestry": [
+            36852,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 37408,
+          "name": "conhost.exe",
+          "parent_pid": 12864,
+          "t_ms": 527,
+          "ancestry": [
+            37408,
+            12864,
+            11540,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38040,
+          "name": "openconsole.exe",
+          "parent_pid": 1568,
+          "t_ms": 165,
+          "ancestry": [
+            38040,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        }
+      ],
+      "new_visible_windows": [
+        {
+          "hwnd": 2164072,
+          "pid": 22540,
+          "class": "CASCADIA_HOSTING_WINDOW_CLASS",
+          "title": "Windows Terminal",
+          "first_ms": 203,
+          "last_ms": 2474,
+          "visible_ms": 2271,
+          "ancestry": [
+            22540,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "hwnd": 7146220,
+          "pid": 36852,
+          "class": "PseudoConsoleWindow",
+          "title": "",
+          "first_ms": 255,
+          "last_ms": 259,
+          "visible_ms": 4,
+          "ancestry": [
+            36852,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "observed_s": 2.92,
+      "schtasks_rc": 0,
+      "run": 1
+    },
+    {
+      "helper_seen": true,
+      "helper_pid": 6828,
+      "helper_start_ms": 45,
+      "helper_end_ms": 2919,
+      "new_conhost_pids": [
+        19216
+      ],
+      "new_processes": [
+        {
+          "pid": 6828,
+          "name": "sayall-helper.exe",
+          "parent_pid": 3288,
+          "t_ms": 45,
+          "ancestry": [
+            6828,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 19216,
+          "name": "conhost.exe",
+          "parent_pid": 6828,
+          "t_ms": 164,
+          "ancestry": [
+            19216,
+            6828,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 24204,
+          "name": "openconsole.exe",
+          "parent_pid": 1568,
+          "t_ms": 164,
+          "ancestry": [
+            24204,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        }
+      ],
+      "new_visible_windows": [
+        {
+          "hwnd": 2229608,
+          "pid": 22540,
+          "class": "CASCADIA_HOSTING_WINDOW_CLASS",
+          "title": "Windows Terminal",
+          "first_ms": 188,
+          "last_ms": 2415,
+          "visible_ms": 2227,
+          "ancestry": [
+            22540,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "hwnd": 4197892,
+          "pid": 6828,
+          "class": "PseudoConsoleWindow",
+          "title": "",
+          "first_ms": 238,
+          "last_ms": 243,
+          "visible_ms": 5,
+          "ancestry": [
+            6828,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "observed_s": 2.93,
+      "schtasks_rc": 0,
+      "run": 2
+    }
+  ],
+  "flash_detected": true,
+  "text": [
+    "console_flash_probe",
+    "time     : 2026-10-04 21:53:20",
+    "exe      : D:\\SayAll\\src\\GetSayAll\\remote-mic-app-windows\\.worktree\\tmp-console-baseline\\hardware\\RC003\\helper\\target\\release\\sayall-helper.exe",
+    "sha256   : 2d97bbce2c4902314b9fe75bcae55aa536dc6b240578279b39bf75cd713a743e",
+    "args     : --selftest --hide-window",
+    "target   : sayall-helper.exe",
+    "task     : SayAllFlashProbe",
+    "register : ok=True 成功: 成功创建计划任务 \"SayAllFlashProbe\"。 | 警告: 因为 /ST 早于当前的时间，任务可能无法运行。",
+    "run 1: helper_seen=True pid=36852 start=48ms new_conhost=[22912, 37408] helper_related_conhost=[22912]",
+    "        windows: total=2 console_class=2 helper_related=1 helper_related_console=1 observed_s=2.92",
+    "        new process: pid=12864 name=powershell.exe parent_pid=11540 helper_related=False t=527ms",
+    "        new process: pid=22912 name=conhost.exe parent_pid=36852 helper_related=True t=165ms",
+    "        new process: pid=36852 name=sayall-helper.exe parent_pid=3288 helper_related=True t=48ms",
+    "        new process: pid=37408 name=conhost.exe parent_pid=12864 helper_related=False t=527ms",
+    "        new process: pid=38040 name=openconsole.exe parent_pid=1568 helper_related=False t=165ms",
+    "        window shown: t=203ms..2474ms (visible 2271ms) hwnd=2164072 pid=22540 class=CASCADIA_HOSTING_WINDOW_CLASS helper_related=False title='Windows Terminal'",
+    "        window shown: t=255ms..259ms (visible 4ms) hwnd=7146220 pid=36852 class=PseudoConsoleWindow helper_related=True title=''",
+    "run 2: helper_seen=True pid=6828 start=45ms new_conhost=[19216] helper_related_conhost=[19216]",
+    "        windows: total=2 console_class=2 helper_related=1 helper_related_console=1 observed_s=2.93",
+    "        new process: pid=6828 name=sayall-helper.exe parent_pid=3288 helper_related=True t=45ms",
+    "        new process: pid=19216 name=conhost.exe parent_pid=6828 helper_related=True t=164ms",
+    "        new process: pid=24204 name=openconsole.exe parent_pid=1568 helper_related=False t=164ms",
+    "        window shown: t=188ms..2415ms (visible 2227ms) hwnd=2229608 pid=22540 class=CASCADIA_HOSTING_WINDOW_CLASS helper_related=False title='Windows Terminal'",
+    "        window shown: t=238ms..243ms (visible 5ms) hwnd=4197892 pid=6828 class=PseudoConsoleWindow helper_related=True title=''",
+    "task deleted",
+    "VERDICT: console_flash_detected=true"
+  ]
+}
