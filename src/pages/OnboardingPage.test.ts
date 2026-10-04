@@ -305,7 +305,9 @@ describe("Onboarding wizard shell", () => {
 
     expect(wrapper.text()).toContain("连接小米蓝牙语音遥控器");
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
-    expect(onboardingEvents("started")).toHaveLength(1);
+    // begin（result=unknown）与终态各一条；终态只允许一条。
+    expect(onboardingEvents("started").filter((p) => p.result !== "unknown")).toHaveLength(1);
+    expect(onboardingEvents("started").some((p) => p.reason === "state_read_requested")).toBe(true);
     expect(onboardingEvents("step_entered").some((p) => p.step === "remote")).toBe(true);
   });
 
@@ -844,5 +846,141 @@ describe("Onboarding voice test step", () => {
       onboardingEvents("voice_attempt").some((p) => p.reason === "voice.input_target_not_ready"),
     ).toBe(true);
     wrapper.unmount();
+  });
+});
+
+describe("Onboarding per-step diagnostics", () => {
+  installWizardHooks();
+
+  it("logs scan begin/end with counts only, never device identity or name", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "aa:bb:cc:dd:ee:ff", name: "Secret Remote 2 Pro" },
+    ]);
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("扫描已配对设备"))!
+      .trigger("click");
+    await flushPromises();
+
+    const scan = onboardingEvents("action").filter((p) => p.reason === "scan_requested");
+    expect(scan.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    expect(scan[1].detail).toBe("found_1");
+    // 脱敏：设备 id / 名称不得进入日志载荷。
+    const serialized = JSON.stringify(mocks.reportFrontendEvent.mock.calls);
+    expect(serialized).not.toContain("aa:bb");
+    expect(serialized).not.toContain("Secret");
+    wrapper.unmount();
+  });
+
+  it("logs connect begin/end without the device id", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "AA:BB:CC:DD:EE:FF", name: "小米蓝牙语音遥控器 2 Pro" },
+    ]);
+    const wrapper = await mountWizard(runtimeWith());
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("扫描已配对设备"))!
+      .trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "连接")!.trigger("click");
+    await flushPromises();
+
+    const connect = onboardingEvents("action").filter((p) => p.reason === "connect_requested");
+    expect(connect.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    const serialized = JSON.stringify(mocks.reportFrontendEvent.mock.calls);
+    expect(serialized).not.toContain("AA:BB");
+    wrapper.unmount();
+  });
+
+  it("logs a failed action when button observation subscription fails", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.subscribeButtonEdges.mockRejectedValue(new Error("subscribe failed"));
+    const wrapper = await mountWizard(runtimeWith());
+    await flushPromises();
+
+    const observation = onboardingEvents("action").filter((p) => p.reason === "button_observation");
+    expect(observation.map((p) => p.result)).toEqual(["unknown", "failed"]);
+    wrapper.unmount();
+  });
+
+  it("logs audio refresh/select with counts and route state, without endpoint identity", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("audio"));
+    mocks.listAudioEndpoints.mockResolvedValue([cableEndpoint]);
+    mocks.selectAudioEndpoint.mockResolvedValue({
+      phase: "ready",
+      selectedEndpointId: cableEndpoint.id,
+      selectedEndpointName: cableEndpoint.name,
+      queuedSamples: 0,
+      submittedSamples: 0,
+      generation: 1,
+      lastError: null,
+    } satisfies AudioSnapshot);
+    const wrapper = await mountWizard(runtimeWith());
+    await flushPromises();
+
+    const refresh = onboardingEvents("action").filter((p) => p.reason === "refresh_endpoints");
+    expect(refresh.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    expect(refresh[1].detail).toBe("auto_total_1_rec_1");
+    const select = onboardingEvents("action").filter((p) => p.reason === "select_endpoint");
+    expect(select.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    expect(onboardingEvents("audio_route").at(-1)?.reason).toBe("ready");
+    // 脱敏：端点 id / 名称不得进入日志载荷。
+    const serialized = JSON.stringify(mocks.reportFrontendEvent.mock.calls);
+    expect(serialized).not.toContain("cable-input");
+    expect(serialized).not.toContain("CABLE Input");
+    wrapper.unmount();
+  });
+
+  it("logs a failed action when the Vokie launch request fails", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_tool"));
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: false });
+    mocks.launchVokie.mockRejectedValue(new Error("launch failed"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Vokie"))!
+      .trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("打开 Vokie"))!
+      .trigger("click");
+    await flushPromises();
+
+    const launch = onboardingEvents("action").filter((p) => p.reason === "vokie_launch");
+    expect(launch.map((p) => p.result)).toEqual(["unknown", "failed"]);
+    wrapper.unmount();
+  });
+
+  it("logs complete refresh failures with a desensitized source token", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("complete"));
+    mocks.getVoiceInputTool.mockRejectedValue(new Error("读取失败"));
+    const wrapper = await mountWizard(connectedRuntime());
+    await flushPromises();
+
+    const refresh = onboardingEvents("action").filter((p) => p.reason === "complete_refresh");
+    expect(refresh.map((p) => p.result)).toEqual(["unknown", "failed"]);
+    expect(refresh[1].detail).toBe("tool");
+    wrapper.unmount();
+  });
+
+  it("emits a periodic heartbeat carrying the current step for stuck localization", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+      const wrapper = await mountWizard(runtimeWith());
+      await vi.advanceTimersByTimeAsync(30_000);
+      const beats = onboardingEvents("heartbeat");
+      expect(beats.length).toBeGreaterThanOrEqual(1);
+      expect(beats[0].step).toBe("remote");
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

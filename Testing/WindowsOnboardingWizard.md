@@ -62,6 +62,32 @@
    - `input_observation … action=begin/end` 成对出现；`action=end … count=0`（正常路径）。
    - 日志不得包含任何输入文字内容。
 
+## 分步日志（卡住定位速查，2026-10-05 起）
+
+向导每一步都落 `frontend event=onboarding` 结构化日志；**用户报"卡在某一步"时，
+按时间取最后几条日志即可定位环节**。约定：
+
+- `phase=action` 成对出现：begin 时 `result=unknown`，end 时 `result=passed|failed`
+  且带 `elapsed_ms`；**有 begin 没有 end = 卡在该外部调用**。
+  各步的 reason 速查：
+  - ② 遥控器：`button_observation`（按键边沿订阅）、`scan_requested`（扫描，`detail=found_N`）、
+    `connect_requested`、`open_bluetooth_settings`；
+  - ③ 语音设备：`refresh_endpoints`（`detail=auto|manual_total_N_rec_M`）、`select_endpoint`
+    （`detail=auto|manual|fallback`）、`open_download_page`；另有 `phase=audio_route`
+    （`reason=missing|not_selected|selected|ready`，状态去重）；
+  - ④ 输入工具：`read_tool_state`、`stage_binding`（`detail=<工具>`）、`save_other_keys`、
+    `vokie_detect`（`detail=installed_0|1_running_0|1`）、`open_vokie_site`、`vokie_launch`；
+  - ⑤ 按住说话：`armed` / 终态 / `session_stopped` / `observation_begin_failed` 等
+    （见上一条核对）；
+  - ⑥ 普通按键：`button_observation`、`mapping_suspend` / `mapping_resume`；
+  - ⑦ 完成：`complete_refresh`（失败时 `detail=tool|vokie|capture|audio` 指出来源）。
+- `phase=heartbeat` 每 30 秒一条（`reason=alive`）：携带当前 `step`、门禁 `code` 与
+  步骤内等待摘要（如 `obs_0_n0`、`streaming`）。**长时间停留某一步时最后一跳就是现场**；
+  这是"状态未变化不重复刷"的刻意例外。
+- 脱敏红线：所有 `step/code/detail` 均为稳定 token 或计数，不含设备 id/名称、
+  音频端点 id/名称、文件路径、错误原文与任何用户输入内容（自动化用例对
+  遥控器/端点身份字段做了"绝不出现"断言）。
+
 失败判定：正常路径判定失败或看不到文字；键盘打字仍判通过；焦点类失败文案缺失；快速点按导致卡死、重复 attempt、或出现两个终态；日志缺 attempt 配对或含文字内容。
 
 ## 用例四：步骤⑥⑦（普通按键体验 / 完成）

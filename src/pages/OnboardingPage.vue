@@ -80,6 +80,61 @@ const saveMessage = ref("");
 const wizardStartedAt = Math.round(performance.now());
 const completing = ref(false);
 
+// ---- 分步日志（2026-10-05 用户要求：每一步都可定位"卡在哪"）----
+//
+// 约定（详见 src/onboarding/diagnostics.ts）：
+// - 外部调用/用户操作落 `kind=action` 对：begin=unknown → end=passed|failed；
+//   begin 之后没有 end = 卡在该调用。
+// - `kind=heartbeat` 每 30s 一条，携带当前 step / 门禁码 / 步骤内等待摘要，
+//   是"状态未变化不重复刷"的显式例外（专门用于卡住定位）。
+// - detail 一律脱敏：只允许稳定 token 与计数（设备/端点只用数量，不落 id/名称）。
+function reportStepAction(
+  target: OnboardingStep,
+  reason: string,
+  result: "passed" | "failed" | "unknown",
+  details: { detail?: string; elapsedMs?: number } = {},
+): void {
+  reportOnboardingEvent({
+    kind: "action",
+    result,
+    reason,
+    step: target,
+    ...(details.detail ? { detail: details.detail } : {}),
+    ...(details.elapsedMs !== undefined ? { elapsedMs: details.elapsedMs } : {}),
+  });
+}
+
+function actionElapsed(started: number): number {
+  return Math.max(0, Math.round(performance.now() - started));
+}
+
+let heartbeatTimer: number | null = null;
+
+/** 心跳里的步骤内等待摘要（稳定 token + 脱敏计数）。 */
+function heartbeatDetail(): string | undefined {
+  switch (step.value) {
+    case "remote":
+      return `obs_${remoteButtonObserved.value ? 1 : 0}_n${devices.value.length}`;
+    case "controls":
+      return `n${observedButtons.value.size}`;
+    case "voice_test":
+      return voicePhase.value;
+    default:
+      return undefined;
+  }
+}
+
+function reportHeartbeat(): void {
+  reportOnboardingEvent({
+    kind: "heartbeat",
+    result: "unknown",
+    reason: "alive",
+    step: step.value,
+    code: gate.value.code ?? "ok",
+    ...(heartbeatDetail() ? { detail: heartbeatDetail() } : {}),
+  });
+}
+
 // ---- 遥控器步骤 ----
 const devices = ref<PairedRemote[]>([]);
 const scanning = ref(false);
@@ -277,10 +332,16 @@ watch(
 );
 
 onMounted(async () => {
+  // 心跳是刻意保留的重复日志（卡住定位）；其余事件遵守"状态未变化不重复刷"。
+  heartbeatTimer = window.setInterval(reportHeartbeat, 30_000);
   await restoreStep();
 });
 
 onUnmounted(() => {
+  if (heartbeatTimer !== null) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
   stopButtonObservation();
   stopVoiceTestSession();
   // 安全网：向导卸载（完成/退出）时恢复映射执行；进程退出后内存态自然复位。
@@ -291,6 +352,12 @@ onUnmounted(() => {
 
 async function restoreStep(): Promise<void> {
   stateReadFailed.value = "";
+  const started = performance.now();
+  reportOnboardingEvent({
+    kind: "started",
+    result: "unknown",
+    reason: "state_read_requested",
+  });
   try {
     const state = await getOnboardingState();
     if (!state.isActive) {
@@ -298,7 +365,7 @@ async function restoreStep(): Promise<void> {
         kind: "started",
         result: "passed",
         reason: "already_completed",
-        elapsedMs: 0,
+        elapsedMs: actionElapsed(started),
       });
       emit("completed");
       return;
@@ -309,6 +376,7 @@ async function restoreStep(): Promise<void> {
       result: "passed",
       reason: "restored",
       step: restored,
+      elapsedMs: actionElapsed(started),
     });
     await setStep(restored, "restore");
   } catch (error) {
@@ -317,7 +385,7 @@ async function restoreStep(): Promise<void> {
       kind: "started",
       result: "failed",
       reason: "state_read_failed",
-      elapsedMs: 0,
+      elapsedMs: actionElapsed(started),
     });
   }
 }
@@ -374,16 +442,28 @@ async function onBack(): Promise<void> {
 async function startButtonObservation(): Promise<void> {
   if (buttonEdgeSubscribed) return;
   buttonEdgeSubscribed = true;
+  const started = performance.now();
+  reportStepAction(step.value, "button_observation", "unknown");
   try {
     const unsubscribe = await subscribeButtonEdges(handleButtonEdge);
     if (step.value !== "remote" && step.value !== "controls") {
       unsubscribe();
       buttonEdgeSubscribed = false;
+      reportStepAction(step.value, "button_observation", "passed", {
+        detail: "detached",
+        elapsedMs: actionElapsed(started),
+      });
       return;
     }
     buttonEdgeUnsubscribe = unsubscribe;
+    reportStepAction(step.value, "button_observation", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch {
     buttonEdgeSubscribed = false;
+    reportStepAction(step.value, "button_observation", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   }
 }
 
@@ -429,14 +509,23 @@ function stopButtonObservation(): void {
 async function scanRemotes(): Promise<void> {
   scanning.value = true;
   scanMessage.value = "正在寻找小米遥控器…";
+  const started = performance.now();
+  reportStepAction("remote", "scan_requested", "unknown");
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
       ? `找到 ${devices.value.length} 个已配对的小米遥控器`
       : "没有找到已配对的小米遥控器。先在 Windows 里配对，再回来扫描。";
+    reportStepAction("remote", "scan_requested", "passed", {
+      detail: `found_${devices.value.length}`,
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("remote", "scan_requested", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   } finally {
     scanning.value = false;
   }
@@ -445,30 +534,79 @@ async function scanRemotes(): Promise<void> {
 async function connectDevice(device: PairedRemote): Promise<void> {
   connectingDeviceId.value = device.id;
   operationMessage.value = "";
+  const started = performance.now();
+  // 脱敏：device.id / 名称不进日志，只记录连接请求与结果。
+  reportStepAction("remote", "connect_requested", "unknown");
   try {
     await connectRemote(device.id);
     operationMessage.value = "正在确认语音功能，就绪后按一下普通按键。";
+    reportStepAction("remote", "connect_requested", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("remote", "connect_requested", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   } finally {
     connectingDeviceId.value = "";
   }
 }
 
 async function openBluetoothSettings(): Promise<void> {
+  const started = performance.now();
+  reportStepAction("remote", "open_bluetooth_settings", "unknown");
   try {
     await openWindowsSettings("bluetooth");
     operationMessage.value = "已打开系统蓝牙设置；配对完成后回来点「扫描已配对设备」。";
+    reportStepAction("remote", "open_bluetooth_settings", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("remote", "open_bluetooth_settings", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   }
 }
 
 // ---- 语音设备步骤 ----
 
+/** 语音设备路由状态（脱敏：只有状态 token 与计数，不含端点 id/名称）。 */
+let lastAudioRouteToken = "";
+function reportAudioRoute(): void {
+  const recommended = audioEndpoints.value.filter(isRecommendedVoiceEndpoint);
+  const selectedId =
+    audioSnapshot.value?.selectedEndpointId ??
+    props.runtime?.platform.audio.selectedEndpointId ??
+    null;
+  const ready = (audioSnapshot.value?.phase ?? "unconfigured") === "ready";
+  const reason =
+    recommended.length === 0
+      ? "missing"
+      : !selectedId
+        ? "not_selected"
+        : ready
+          ? "ready"
+          : "selected";
+  const token = `${reason}_${recommended.length}_${audioEndpoints.value.length}`;
+  if (token === lastAudioRouteToken) return;
+  lastAudioRouteToken = token;
+  reportOnboardingEvent({
+    kind: "audio_route",
+    result: reason === "ready" ? "passed" : "unknown",
+    reason,
+    step: "audio",
+    detail: `rec_${recommended.length}_total_${audioEndpoints.value.length}`,
+  });
+}
+
 async function refreshAudioDevices(autoSelect: boolean): Promise<void> {
   scanningAudio.value = true;
   audioMessage.value = "正在读取语音设备…";
+  const started = performance.now();
+  const mode = autoSelect ? "auto" : "manual";
+  reportStepAction("audio", "refresh_endpoints", "unknown", { detail: mode });
   try {
     audioEndpoints.value = await listAudioEndpoints();
     audioSnapshot.value = await getAudioSnapshot();
@@ -476,14 +614,22 @@ async function refreshAudioDevices(autoSelect: boolean): Promise<void> {
     const hasSelection = Boolean(audioSnapshot.value.selectedEndpointId);
     if (autoSelect && !hasSelection && recommended.length === 1) {
       await chooseEndpoint(recommended[0], true);
-      return;
+    } else {
+      audioMessage.value = recommended.length
+        ? `已检测到 ${recommended.length} 个 VB-CABLE 语音设备`
+        : "没有检测到 VB-CABLE；安装完成后要重启电脑，再回来重新检测";
     }
-    audioMessage.value = recommended.length
-      ? `已检测到 ${recommended.length} 个 VB-CABLE 语音设备`
-      : "没有检测到 VB-CABLE；安装完成后要重启电脑，再回来重新检测";
+    reportAudioRoute();
+    reportStepAction("audio", "refresh_endpoints", "passed", {
+      detail: `${mode}_total_${audioEndpoints.value.length}_rec_${recommended.length}`,
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     audioEndpoints.value = [];
     audioMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("audio", "refresh_endpoints", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   } finally {
     scanningAudio.value = false;
   }
@@ -492,6 +638,10 @@ async function refreshAudioDevices(autoSelect: boolean): Promise<void> {
 async function chooseEndpoint(endpoint: AudioEndpoint, automatic = false): Promise<void> {
   selectingEndpointId.value = endpoint.id;
   audioMessage.value = "正在打开语音设备…";
+  const started = performance.now();
+  const mode = automatic ? "auto" : "manual";
+  // 脱敏：endpoint.id / 名称不进日志；mode 与回退标记为稳定 token。
+  reportStepAction("audio", "select_endpoint", "unknown", { detail: mode });
   try {
     const snapshot = await selectAudioEndpoint(endpoint.id);
     audioSnapshot.value = snapshot;
@@ -502,6 +652,10 @@ async function chooseEndpoint(endpoint: AudioEndpoint, automatic = false): Promi
           ? `已自动选择 ${actualName}`
           : `已选择 ${actualName}`
         : `已自动改用 ${actualName}（${endpoint.name} 暂时打不开）`;
+    reportStepAction("audio", "select_endpoint", "passed", {
+      detail: actualName === endpoint.name ? mode : "fallback",
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
     try {
@@ -509,18 +663,30 @@ async function chooseEndpoint(endpoint: AudioEndpoint, automatic = false): Promi
     } catch {
       // 读取失败保持旧快照；错误已在上面显示。
     }
+    reportStepAction("audio", "select_endpoint", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   } finally {
     selectingEndpointId.value = "";
+    reportAudioRoute();
   }
 }
 
 async function openDownloadPage(): Promise<void> {
   openingVbCablePage.value = true;
+  const started = performance.now();
+  reportStepAction("audio", "open_download_page", "unknown");
   try {
     await openVbCableDownloadPage();
     audioMessage.value = "已打开官方下载页；安装需要管理员权限，完成后请重启电脑";
+    reportStepAction("audio", "open_download_page", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("audio", "open_download_page", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   } finally {
     openingVbCablePage.value = false;
   }
@@ -545,6 +711,9 @@ function hotkeyForTool(tool: VoiceInputTool): KeyChord | null {
 
 async function prepareVoiceToolStep(): Promise<void> {
   toolMessage.value = "";
+  const started = performance.now();
+  // 该调用同时服务第④步与第⑤步（重启后直接落在第⑤步时补读配置），故按当前步骤记录。
+  reportStepAction(step.value, "read_tool_state", "unknown");
   try {
     const [tool, hotkey, other, rc003, vokieState] = await Promise.all([
       getVoiceInputTool(),
@@ -558,8 +727,14 @@ async function prepareVoiceToolStep(): Promise<void> {
     otherKeys.value = other;
     rc003Status.value = rc003;
     vokie.value = vokieState;
+    reportStepAction(step.value, "read_tool_state", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction(step.value, "read_tool_state", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   }
 }
 
@@ -579,8 +754,14 @@ async function selectTool(tool: VoiceInputTool): Promise<void> {
   stagedTool.value = tool;
   currentHotkey.value = hotkey;
   toolMessage.value = "";
+  const started = performance.now();
+  reportStepAction("voice_tool", "stage_binding", "unknown", { detail: tool });
   try {
     await stageOnboardingVoiceBinding(tool, hotkey);
+    reportStepAction("voice_tool", "stage_binding", "passed", {
+      detail: tool,
+      elapsedMs: actionElapsed(started),
+    });
     reportOnboardingEvent({
       kind: "tool_selected",
       result: "passed",
@@ -591,6 +772,10 @@ async function selectTool(tool: VoiceInputTool): Promise<void> {
   } catch (error) {
     stagedTool.value = previous;
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("voice_tool", "stage_binding", "failed", {
+      detail: tool,
+      elapsedMs: actionElapsed(started),
+    });
     return;
   }
   // 豆包/Vokie 同键（右 Alt）：选中即刷新 Vokie 运行状态，冲突要立刻可见。
@@ -601,14 +786,31 @@ async function selectTool(tool: VoiceInputTool): Promise<void> {
 
 async function chooseOtherKeys(keys: KeyCode[]): Promise<void> {
   otherKeys.value = keys;
+  const keyDetail = keys.length ? "with_keys" : "disabled";
+  const saveStarted = performance.now();
+  reportStepAction("voice_tool", "save_other_keys", "unknown", { detail: keyDetail });
   try {
     await setOtherVoiceHotkey(keys);
+    reportStepAction("voice_tool", "save_other_keys", "passed", {
+      detail: keyDetail,
+      elapsedMs: actionElapsed(saveStarted),
+    });
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("voice_tool", "save_other_keys", "failed", {
+      detail: keyDetail,
+      elapsedMs: actionElapsed(saveStarted),
+    });
   }
+  const started = performance.now();
+  reportStepAction("voice_tool", "stage_binding", "unknown", { detail: "other" });
   try {
     await stageOnboardingVoiceBinding("other", keys.length ? { keys } : null);
     currentHotkey.value = keys.length ? { keys } : null;
+    reportStepAction("voice_tool", "stage_binding", "passed", {
+      detail: "other",
+      elapsedMs: actionElapsed(started),
+    });
     reportOnboardingEvent({
       kind: "tool_selected",
       result: "passed",
@@ -618,6 +820,10 @@ async function chooseOtherKeys(keys: KeyCode[]): Promise<void> {
     });
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("voice_tool", "stage_binding", "failed", {
+      detail: "other",
+      elapsedMs: actionElapsed(started),
+    });
   }
 }
 
@@ -693,29 +899,54 @@ function closeCaptureDialog(): void {
 }
 
 async function refreshVokieState(): Promise<void> {
+  const started = performance.now();
+  reportStepAction("voice_tool", "vokie_detect", "unknown");
   try {
     vokie.value = await getVokieInstallation();
+    reportStepAction("voice_tool", "vokie_detect", "passed", {
+      detail: `installed_${vokie.value?.installed ? 1 : 0}_running_${vokie.value?.running ? 1 : 0}`,
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("voice_tool", "vokie_detect", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   }
 }
 
 async function openVokieSite(): Promise<void> {
+  const started = performance.now();
+  reportStepAction("voice_tool", "open_vokie_site", "unknown");
   try {
     await openVokieHomepage();
     toolMessage.value = "已打开 Vokie 官网；安装后回来点「重新检测」。";
+    reportStepAction("voice_tool", "open_vokie_site", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("voice_tool", "open_vokie_site", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   }
 }
 
 async function launchVokieApp(): Promise<void> {
   vokieBusy.value = true;
+  const started = performance.now();
+  reportStepAction("voice_tool", "vokie_launch", "unknown");
   try {
     await launchVokie();
     toolMessage.value = "已发出启动请求；启动后点「重新检测」。";
+    reportStepAction("voice_tool", "vokie_launch", "passed", {
+      elapsedMs: actionElapsed(started),
+    });
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("voice_tool", "vokie_launch", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
   } finally {
     vokieBusy.value = false;
   }
@@ -726,36 +957,56 @@ async function launchVokieApp(): Promise<void> {
 async function setMappingSuspensionState(suspended: boolean): Promise<void> {
   if (mappingSuspended === suspended) return;
   mappingSuspended = suspended;
+  const started = performance.now();
+  const reason = suspended ? "mapping_suspend" : "mapping_resume";
+  reportStepAction(step.value, reason, "unknown");
   try {
     await setMappingSuspension(suspended);
+    reportStepAction(step.value, reason, "passed", { elapsedMs: actionElapsed(started) });
   } catch (error) {
     saveMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction(step.value, reason, "failed", { elapsedMs: actionElapsed(started) });
   }
 }
 
 /** 完成页重查关键运行条件：正式输入工具、Vokie 运行态、全按键开关、音频端点。 */
 async function refreshCompleteState(): Promise<void> {
+  const started = performance.now();
+  reportStepAction("complete", "complete_refresh", "unknown");
+  let failedSource: string | null = null;
+  const trackFailure = (source: string) => {
+    if (!failedSource) failedSource = source;
+  };
   try {
     configuredTool.value = await getVoiceInputTool();
   } catch {
     // 读取失败保持旧值；门禁会显示未就绪，不给用户虚假的「完成」。
+    trackFailure("tool");
   }
   try {
     vokie.value = await getVokieInstallation();
   } catch {
     // 同上。
+    trackFailure("vokie");
   }
   try {
     rc003Status.value = await getRc003TaskStatus();
   } catch {
     // 同上。
+    trackFailure("capture");
   }
   try {
     audioEndpoints.value = await listAudioEndpoints();
     audioSnapshot.value = await getAudioSnapshot();
   } catch {
     // 同上。
+    trackFailure("audio");
   }
+  // detail=首个读取失败的来源 token（tool|vokie|capture|audio），不落错误原文。
+  reportStepAction("complete", "complete_refresh", failedSource ? "failed" : "passed", {
+    detail: failedSource ?? undefined,
+    elapsedMs: actionElapsed(started),
+  });
 }
 
 const completeChecks = computed(() => {
@@ -942,6 +1193,14 @@ async function beginVoiceObservation(): Promise<void> {
   } catch {
     if (serial === voiceAttemptSerial) {
       voiceObservationId = 0;
+      // 开窗 IPC 失败：手动输入检测按未知处理（fail-open），但必须留痕，
+      // 否则"没有观察窗口"这类卡点无从定位。
+      reportOnboardingEvent({
+        kind: "voice_attempt",
+        result: "unknown",
+        reason: "observation_begin_failed",
+        step: "voice_test",
+      });
     }
   }
 }
@@ -974,6 +1233,13 @@ async function startVoiceTestSession(): Promise<void> {
     snapshot = await getRuntimeSnapshot();
   } catch (error) {
     voiceFailureMessage.value = error instanceof Error ? error.message : String(error);
+    reportOnboardingEvent({
+      kind: "voice_attempt",
+      result: "failed",
+      reason: "snapshot_read_failed",
+      step: "voice_test",
+      detail: "session_start",
+    });
     return;
   }
   const tracker = createVoiceAttemptTracker({ attemptId: voiceAttemptCount });
@@ -993,6 +1259,8 @@ async function startVoiceTestSession(): Promise<void> {
 }
 
 function stopVoiceTestSession(): void {
+  // 只把"尚未终结的 attempt"记成中止；已到终态的会话离开步骤不算中止。
+  const hadActiveSession = voiceTracker !== null && voiceTracker.state() !== "terminal";
   voiceAttemptSerial += 1;
   if (voicePollTimer !== null) {
     window.clearInterval(voicePollTimer);
@@ -1004,6 +1272,15 @@ function stopVoiceTestSession(): void {
   }
   voiceTracker = null;
   voicePollBusy = false;
+  if (hadActiveSession) {
+    // 会话被中止（离开第⑤步/重开）：attempt 无终态就结束，日志记 unknown 便于定位。
+    reportOnboardingEvent({
+      kind: "voice_attempt",
+      result: "unknown",
+      reason: "session_stopped",
+      step: "voice_test",
+    });
+  }
 }
 
 /**
