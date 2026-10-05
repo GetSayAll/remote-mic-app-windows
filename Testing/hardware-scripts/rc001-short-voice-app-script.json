@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "id": "xiaomi-voice-remote.rc001-short-voice",
+  "sourceRevision": null,
+  "events": [
+    {
+      "atMilliseconds": 0,
+      "kind": "raw",
+      "transport": "ble-gatt",
+      "originalKind": "adapter.state",
+      "payload": {
+        "state": "poweredOn"
+      }
+    },
+    {
+      "atMilliseconds": 10,
+      "kind": "raw",
+      "transport": "ble-gatt",
+      "originalKind": "advertisement",
+      "payload": {
+        "connectable": true,
+        "localName": "Xiaomi Bluetooth Remote 2",
+        "rssi": -48,
+        "serviceUUIDs": [
+          "AB5E0001-5A21-4F05-BC7D-AF01F617B664"
+        ]
+      }
+    },
+    {
+      "atMilliseconds": 20,
+      "kind": "ble_connected"
+    },
+    {
+      "atMilliseconds": 30,
+      "kind": "raw",
+      "transport": "ble-gatt",
+      "originalKind": "gatt.database",
+      "payload": {
+        "characteristicUUIDs": [
+          "AB5E0002-5A21-4F05-BC7D-AF01F617B664",
+          "AB5E0003-5A21-4F05-BC7D-AF01F617B664",
+          "AB5E0004-5A21-4F05-BC7D-AF01F617B664"
+        ],
+        "serviceUUID": "AB5E0001-5A21-4F05-BC7D-AF01F617B664"
+      }
+    },
+    {
+      "atMilliseconds": 40,
+      "kind": "raw",
+      "transport": "ble-gatt",
+      "originalKind": "gatt.notification-state",
+      "payload": {
+        "characteristicUUID": "AB5E0003-5A21-4F05-BC7D-AF01F617B664",
+        "enabled": true
+      }
+    },
+    {
+      "atMilliseconds": 41,
+      "kind": "raw",
+      "transport": "ble-gatt",
+      "originalKind": "gatt.notification-state",
+      "payload": {
+        "characteristicUUID": "AB5E0004-5A21-4F05-BC7D-AF01F617B664",
+        "enabled": true
+      }
+    },
+    {
+      "atMilliseconds": 100,
+      "kind": "voice_control",
+      "dataHex": "04030207"
+    },
+    {
+      "atMilliseconds": 110,
+      "kind": "voice_audio",
+      "dataHex": "11111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "atMilliseconds": 120,
+      "kind": "voice_audio",
+      "dataHex": "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "atMilliseconds": 150,
+      "kind": "voice_control",
+      "dataHex": "00"
+    }
+  ]
+}

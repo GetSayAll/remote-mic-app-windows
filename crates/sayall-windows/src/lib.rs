@@ -34,6 +34,9 @@ pub mod focus_service;
 pub mod focus_windows;
 #[cfg(windows)]
 pub mod graceful_exit;
+// 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
+// 无副作用、不进入基础路径，仅仿真平台消费。
+pub mod hardware_script;
 #[cfg(windows)]
 pub mod instance_signal;
 pub mod registered_apps;

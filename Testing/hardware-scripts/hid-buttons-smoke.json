@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "sayall.hid-buttons-smoke",
+  "sourceRevision": null,
+  "events": [
+    { "atMilliseconds": 0, "kind": "ble_connected" },
+    { "atMilliseconds": 50, "kind": "hid_attached" },
+    { "atMilliseconds": 1000, "kind": "hid_report", "reportID": 1, "dataHex": "4a0000000000" },
+    { "atMilliseconds": 1120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" },
+    { "atMilliseconds": 2000, "kind": "hid_report", "reportID": 1, "dataHex": "280000000000" },
+    { "atMilliseconds": 2120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" },
+    { "atMilliseconds": 3000, "kind": "hid_report", "reportID": 1, "dataHex": "510000000000" },
+    { "atMilliseconds": 3120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" }
+  ]
+}
