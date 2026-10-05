@@ -145,6 +145,30 @@
 - 每轮结束导出 `sayall-diagnostic.log` 相关时间段；报告包含提交、构建路径、Windows 版本、型号、工具、步骤、失败码与日志片段。
 - 脱敏边界：不复制语音内容或识别文字；不记录真实设备地址、HID 路径、端点 ID / 名称。
 
+## 模拟硬件信号（无真机跑向导；2026-10-05 新增）
+
+没有物理遥控器时用模拟信号跑完整向导，用于日常回归与问题复现；**不替代**上面的真机用例。
+
+装置：`GetSayAll/hardware-simulation`（Windows 实现）把 Profile / Scenario 导出成"应用信号脚本"，应用在 `runtime-simulation` 构建里按脚本时间线回放，事件走**生产**解析链路（HID 报告 → `decode_report_usages` + `ButtonStateMerger`；ATVV → `AtvvVoicePipeline`）：
+
+```powershell
+# 1) 生成信号脚本（任一 scenario 均可）
+hardware-sim export-app-script <profile.json> <scenario.json> --out script.json
+# 2) 构建仿真可执行文件（一次性）
+cargo build -p sayall-windows-app --features runtime-simulation     # 或 --release
+# 3) 起前端 dev server（仿真二进制的 devUrl 指向 2430）
+pnpm dev
+# 4) 回放：隔离状态目录 + 指定脚本（应用会保持运行，便于界面走查）
+powershell -NoProfile -ExecutionPolicy Bypass -File Testing\run-hardware-signal-script.ps1 `
+    -ScriptPath Testing\hardware-scripts\rc003-onboarding-walkthrough.json -StopExisting
+```
+
+- 状态隔离：`SAYALL_RUNTIME_SIMULATION_STATE_DIR` 下生成独立的 `settings.json` / `onboarding.json`，**不动**用户的真实向导状态；向导每次从第①步开始。
+- 覆盖：② 的按键门禁、③ 的端点推荐与自动选择、④ 的工具选择、⑤ 的会话与解码采样（`voice_attempt` 终端码）、⑥ 的 3 个不同按键、⑦ 的提交与收尾；日志含 `hardware_script action=apply ... terminal_result=` 逐条记录。
+- 转写文字：模拟轨道没有输入法注入，第⑤步的转写由驱动写入输入框并派发 `input` 事件（真机仍必须真人说话）。
+- 已跑通记录（2026-10-05，RC003 scenario）：①②③④⑥⑦ 全绿，⑤ `voice_attempt result=passed detail=d240_s240_q0_drain1`，收尾 `wizard_finished elapsed_ms=71920`；截图与日志摘录见 `artifacts/local-test/2026-10-05-onboarding-simulation/`。
+- 边界：模拟 ≠ 真机——配对、射频、权限、驱动、真实音质与安装包行为仍按本手册真机执行；两种型号仍要分别做真机用例一~四。
+
 ## 验证边界
 
 - 本手册只覆盖向导；语音质量、按键映射日常行为、安装升级矩阵仍按各自手册。
