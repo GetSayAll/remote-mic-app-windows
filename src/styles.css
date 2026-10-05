@@ -162,9 +162,10 @@ body.pointer-nav input:focus-visible { outline: none; }
 
 body {
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 82% 4%, var(--canvas-glow), transparent 28rem),
-    var(--surface-canvas);
+  /* 2026-10-04 Andy：去掉右上角的强调色光晕（radial-gradient at 82% 4%）——
+     它把右上区域染了一层浅紫，左上（挨着侧栏）没有，看起来像左右留白不相等。
+     强调色 token（--canvas-glow）由 accent.ts 继续提供，暂留备用。 */
+  background: var(--surface-canvas);
   font-size: 16px;
 }
 
@@ -205,7 +206,12 @@ nav { display: grid; gap: 4px; }
 .nav-icon { width: 21px; height: 21px; display: block; }
 .sidebar-footer { margin-top: auto; padding: 10px 4px; color: var(--muted); font-size: 12px; text-align: center; }
 
-.content { min-width: 0; padding: 22px clamp(22px, 3vw, 40px) 26px; overflow: auto; scrollbar-width: none; }
+/* 2026-10-04 Andy：左右留白定为 物理 48 / 52。左侧逻辑 32（@150% = 48 物理）实测吻合。
+   右侧踩坑记录：逻辑值不是 52/1.5 = 34.67 —— 浏览器/WebView2 会把“卡片边框像素”
+   吸附到整数设备像素（取整），34.67 实测只画出 51 物理；取 35.5 时右边缘落在
+   1546.75 → 取整 1547，右边可见画布正好 52 物理（48/52 目标达成，且缩窗口时稳定）。
+   窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
+.content { min-width: 0; padding: 22px 35.5px 26px 32px; overflow: auto; scrollbar-width: none; }
 .content::-webkit-scrollbar { display: none; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
@@ -375,6 +381,17 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .buttons-page .page-header h1 { font-size: 24px; margin: 0; }
 .mapping-header-controls { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
+/* 按键页副标题（2026-10-04）：一句话说明这页怎么用。 */
+.page-subtitle { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+/* 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：
+   型号 + 状态/电量 + 重新连接；三种连接态高度一致，不插行、不抖动画布。
+   （2026-10-04 Andy：去掉左侧遥控器图标，卡片只留文字与操作。） */
+.remote-info-card { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 26px var(--shadow-card); }
+.remote-info-main { min-width: 0; display: grid; gap: 3px; }
+.remote-info-main strong { font-size: 13.5px; white-space: nowrap; }
+.remote-info-status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+/* 按钮文案在「重新连接 / 连接中… / 立即连接」之间切换，锁个最小宽度避免卡片左右抖。 */
+.remote-info-card button { min-width: 84px; }
 .device-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-raised); font-size: 13px; white-space: nowrap; }
 .toggle-row { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
 .toggle-input { appearance: none; -webkit-appearance: none; width: 34px; height: 20px; border-radius: 999px; background: var(--toggle-off); position: relative; cursor: pointer; transition: background 0.15s; margin: 0; }
@@ -432,7 +449,15 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mapping-cell:first-child span { font-weight: 600; }
+/* 映射内容（格子里的动作文字：打开记事本 / Enter / 滚轮向上 …）三列统一加粗：
+   曾只给「单击」列加粗（`.mapping-cell:first-child span` 600），双击/长按是常规
+   字重，同一张卡上「打开记事本」比「Enter」粗（2026-10-03 用户反馈）。改为三列
+   统一后，用户实测又发现「中文比英文更重」：中文回退到 Microsoft YaHei UI，该
+   字体只有 Light/Regular/Bold 三档、没有 600，600 被就近升到 Bold(700)；英文走
+   Segoe UI Variable 有真 600 档（SemiBold）。按用户选择统一用 700：英文升到
+   Bold（实测笔画 2.34→2.80px），中文保持 Bold 3.55px，两者差距从 1.2px 缩到
+   0.75px。若日后要更贴合，可选方案与实测数据见本次会话记录。 */
+.mapping-cell span { font-weight: 700; }
 .mapping-cell.set span { color: var(--accent-text); }
 .mapping-cell.editing { background: var(--accent-surface-strong); }
 .mapping-cell.flashed { background: var(--pressed-surface); }
@@ -495,6 +520,20 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .endpoint-recommend { margin-top: 2px; font-size: 13px; color: var(--accent-muted-text); }
 .endpoint-select-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .endpoint-count { font-size: 12.5px; }
+
+/* 语音增益（对齐 Mac 音频面板：左标签、中滑块、右 dB 读数）。 */
+.gain-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.gain-label { font-size: 13.5px; }
+.gain-slider { width: 100%; accent-color: var(--accent); }
+.gain-slider:disabled { cursor: wait; opacity: 0.6; }
+.gain-value { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
+.gain-help { margin: 4px 0 0 56px; font-size: 12.5px; line-height: 1.5; }
 
 /* ---- 连接页改版（2026-09-30 设计稿 v3）：设备行 + 语音输入设置三步 ----
    设备卡等高并排；设置区通栏三列，切换输入工具时三列联动（组件侧 v-if）。 */

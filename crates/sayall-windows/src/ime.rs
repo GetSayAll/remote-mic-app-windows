@@ -117,7 +117,7 @@ pub enum ImeActivation {
 /// 输入法切进自己的设置窗口毫无收益（听写需要目标应用的文本框），且
 /// 实证会使 WebView2 整页重载（Bugs/2026-09-12：0x04 后 ime_activation
 /// 失败/成功均伴随 document_load，热路径会话零重载）。调用方据此跳过。
-fn foreground_is_self() -> bool {
+pub(crate) fn foreground_is_self() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     unsafe {
         let foreground = GetForegroundWindow();
@@ -130,6 +130,24 @@ fn foreground_is_self() -> bool {
     }
 }
 
+/// 切换触发场景（日志 `scope=`）：报障时一次日志拉取即可归因"这次切换是谁要求的"。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImeSwitchScope {
+    /// 按下语音键时的兜底切换（本次按下可能赶不上，为下一次按下生效）。
+    VoicePress,
+    /// 用户刚在连接页选中输入工具后的一次性对齐（2026-10-03，离开自身窗口焦点后执行）。
+    ToolSelect,
+}
+
+impl ImeSwitchScope {
+    fn label(self) -> &'static str {
+        match self {
+            ImeSwitchScope::VoicePress => "voice_press",
+            ImeSwitchScope::ToolSelect => "tool_select",
+        }
+    }
+}
+
 /// 确保 `tool` 对应的输入法是当前会话的活动输入法（幂等）。
 ///
 /// 必须在 STA 线程上执行（MTA 调用返回 S_OK 但不生效，见模块注释）；
@@ -139,7 +157,10 @@ fn foreground_is_self() -> bool {
 ///
 /// `tool` 由"用户选的输入工具"决定（不是按和弦猜）：选豆包却把和弦配成
 /// Ctrl+Win 时，旧实现会把输入法切成微信（2026-10-01 语义缺口）。
-pub fn ensure_session_ime(tool: VoiceInputTool) -> Result<ImeActivation, String> {
+pub fn ensure_session_ime(
+    tool: VoiceInputTool,
+    scope: ImeSwitchScope,
+) -> Result<ImeActivation, String> {
     let started = std::time::Instant::now();
     let Some(target) = ime_target_for(tool) else {
         // 功能点日志：Vokie / 其他工具明确"不切输入法"也是决策，要能从日志看出
@@ -164,7 +185,7 @@ pub fn ensure_session_ime(tool: VoiceInputTool) -> Result<ImeActivation, String>
     std::thread::Builder::new()
         .name("sayall-ime-activate".to_owned())
         .spawn(move || {
-            let outcome = sta_ensure_ime(target);
+            let outcome = sta_ensure_ime(target, scope);
             let _ = sender.send(outcome);
         })
         .map_err(|error| format!("创建激活线程失败：{error}"))?;
@@ -184,8 +205,9 @@ pub fn ensure_session_ime(tool: VoiceInputTool) -> Result<ImeActivation, String>
         Err(_) => "failed",
     };
     crate::ble::gatt_note(format!(
-        "ime_activation tool={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
+        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
         target.label,
+        scope.label(),
         started.elapsed().as_millis(),
         last_switch_age_ms().map(|age| age.to_string()).unwrap_or_else(|| "never".to_owned()),
         foreground_process_name().is_some(),
@@ -360,7 +382,7 @@ pub fn last_switch_age_ms() -> Option<u64> {
 /// 临时 STA 线程体：CoInitializeEx(STA) → 查询活动输入法 →
 /// （需要时）ActivateProfile + 重绑等待 → CoUninitialize。
 /// 全部调用在本线程内完成（无跨套间封送，无需消息泵）。
-fn sta_ensure_ime(target: ImeProfile) -> Result<ImeActivation, String> {
+fn sta_ensure_ime(target: ImeProfile, scope: ImeSwitchScope) -> Result<ImeActivation, String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
@@ -409,12 +431,58 @@ fn sta_ensure_ime(target: ImeProfile) -> Result<ImeActivation, String> {
             // 冷切换：等目标应用完成输入法会话重绑再放行注入。
             std::thread::sleep(SESSION_REBIND_SETTLE);
             note_switch_happened();
+            // 切换后自校验（2026-10-03，Andy：日志定位不了就加日志）：`ActivateProfile`
+            // 返回成功不等于会话真的切过去（2026-09-05 曾实证 S_OK 但不生效）。这里读回
+            // 活动配置；不一致按有界重试一次，两次结果都落日志——"切成没成"一眼可判，
+            // 也保证"后续按下必能拉起"不会因一次静默失败而失效。
+            // `stuck` 语义：true = 读回仍不是目标（失败方向），false = 已切到目标。
+            let mut verified = query_active_is_target(&manager, target);
+            let mut attempts = 1u32;
+            if !verified {
+                crate::ble::gatt_note(format!(
+                    "ime_verify scope={} attempt=1 stuck=true",
+                    scope.label(),
+                ));
+                let _ = manager.ActivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    LANGID_ZH_CN,
+                    &target.clsid,
+                    &target.guid_profile,
+                    HKL::default(),
+                    TF_IPPMF_FORSESSION,
+                );
+                std::thread::sleep(SESSION_REBIND_SETTLE);
+                note_switch_happened();
+                verified = query_active_is_target(&manager, target);
+                attempts = 2;
+            }
+            crate::ble::gatt_note(format!(
+                "ime_verify scope={} attempt={attempts} stuck={}",
+                scope.label(),
+                !verified,
+            ));
+            if !verified {
+                return Err(format!(
+                    "{} 切换后读回仍不是当前活动输入法（attempts={attempts}）",
+                    target.label
+                ));
+            }
             Ok(ImeActivation::Switched)
         })();
         CoUninitialize();
         result
     }
 }
+
+/// 读回当前会话的活动配置是否为目标（切换后自校验用；语义与 `sta_ensure_ime` 的查询一致）。
+fn query_active_is_target(manager: &ITfInputProcessorProfileMgr, target: ImeProfile) -> bool {
+    let mut profile = TF_INPUTPROCESSORPROFILE::default();
+    match unsafe { manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile) } {
+        Ok(()) => profile.clsid == target.clsid && profile.guidProfile == target.guid_profile,
+        Err(_) => false,
+    }
+}
+
 // ─── 录入期"输入法让位"（路线①，2026-09-27）───────────────────────────────
 //
 // 背景：LL 键盘钩子链为 FIFO（最早安装最先调用，见
@@ -623,9 +691,16 @@ mod ime_target_tests {
     fn vokie_and_other_do_not_touch_input_methods() {
         for tool in [VoiceInputTool::Vokie, VoiceInputTool::Other] {
             assert_eq!(
-                super::ensure_session_ime(tool),
+                super::ensure_session_ime(tool, super::ImeSwitchScope::VoicePress),
                 Ok(super::ImeActivation::NotRequired)
             );
         }
+    }
+
+    /// 切换场景标签稳定（日志消费方按它归因；改动会引起日志口径变化）。
+    #[test]
+    fn ime_switch_scope_labels_are_stable() {
+        assert_eq!(super::ImeSwitchScope::VoicePress.label(), "voice_press");
+        assert_eq!(super::ImeSwitchScope::ToolSelect.label(), "tool_select");
     }
 }

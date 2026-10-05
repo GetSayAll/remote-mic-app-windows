@@ -39,3 +39,39 @@
   - 真机探针（真实 Windows 桌面 + 真实任务栏 `Shell_TrayWnd`）→ `passed`（上表四档颜色跳变，连续两次切换都跟随）
   - 安装包内应用内确认（用户在设置页切换后目视任务栏）→ `deferred`（本机装着 v2 正式版且正在运行，单实例互斥无法并跑开发版；本次不出包，等下一次包内确认）
 - 隐私检查：记录内无设备身份、无语音内容、无个人路径（仅仓库相对路径与 `%TEMP%` 探针输出目录）/凭据
+
+## 2026-10-03 追加：开始菜单 / 桌面 / 固定到任务栏的快捷方式图标不跟随（已修）
+
+- 现场（同一操作人，安装包 0.5.0 修订 `6693a53`）：切换应用图标后，任务栏按钮与托盘已经跟随，
+  但**开始菜单磁贴与桌面快捷方式图标**仍是旧图标（对比图见会话记录）；操作人据此判断「任务栏/
+  开始菜单没改成功」。
+- 复测结论（UI 自动化直接点设置页 + 抓像素判定）：
+  - 运行中的任务栏按钮**本就跟随**：「几何鸭 ⇄ 默认」双向切换后 0.9 s 内按钮图形改变
+    （深色圆角方块 dark=1076 ↔ 绿色条带 green=40；3 s 后稳定），窗口 `ICON_BIG`/`ICON_SMALL`
+    句柄绘制出的指纹与所选资产（`faceted-duck-256.png` / `icons/32x32.png`）一致。
+  - 真正缺口是快捷方式：`IconLocation=,0` 取的是 exe 内嵌图标，运行期不可能跟随切换；本文件
+    最初记录把它当作「安装产物不可改」，操作人 2026-10-03 明确要求改成跟随。
+- 修复：新增 `src-tauri/src/shortcut_icons.rs`——
+  - 把所选风格的 `.ico` 落到 `%LOCALAPPDATA%\SayAll\icons\`（`standard` = `icons/icon.ico`；
+    `faceted-duck` = `icons/app-icons/faceted-duck.ico`，由
+    `scripts/generate-app-icons.py --ico-only` 从已提交 PNG 派生，多尺寸 16/20/24/32/48/256）；
+  - 只改写**目标 exe 等于当前进程 exe** 的快捷方式（开始菜单 / 用户与公共桌面 / 「固定到任务栏」
+    目录下的全部 `.lnk` 里匹配者），随后 `SHChangeNotify(SHCNE_UPDATEITEM)` + `SHCNE_ASSOCCHANGED`
+    刷新 shell 图标缓存；
+  - 日志 `app_icon action=sync_shortcuts phase=completed ... considered/updated/failed`（只记数量，
+    不记路径）；`app_icon::apply` 的启动对账与设置页切换两条路径都会走到。
+- 验证：
+  - `cargo test --release -p sayall-windows-app shortcut_icons` → **4 passed**，含真实 COM 用例
+    （`IShellLinkW` 造 `.lnk` → 改写 → 读回 `IconLocation`）与阴性对照（目标不是本程序的 `.lnk`
+    必须原样不动）。
+  - `cargo test --release -p sayall-windows-app` → **55 passed / 0 failed**。
+  - 真机（本机安装包内，2026-10-03 00:34）：应用启动与操作人在设置页的两次实时切换都记录
+    `sync_shortcuts ... considered=13 updated=2 failed=0`；两个快捷方式的 `IconLocation` 实测已指向
+    `%LOCALAPPDATA%\SayAll\icons\sayall-faceted-duck.ico,0`。
+  - **开始菜单磁贴 / 桌面图标刷新后的目视确认 deferred**：需要操作人目视（shell 缓存已发通知，
+    必要时关掉开始菜单再打开；若仍不刷新，再补刷新手段）。
+- 边界：安装包与 exe 内嵌图标仍是安装产物，不随切换变化；`%LOCALAPPDATA%\SayAll\icons\` 属于应用
+  数据，卸载时随其余用户数据保留。
+- 隐私检查：本轮记录无设备身份、无语音内容、无凭据；只出现 `%LOCALAPPDATA%` 等环境变量表达与
+  探针临时目录。
+

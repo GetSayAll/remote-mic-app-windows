@@ -1,10 +1,14 @@
 //! RC003 三键助手：计划任务的检测 / 授权 / 触发 / 停止。
 //!
-//! 产品流程（用户已拍板）：按键页一个开关 ——
-//! * 打开：若任务未装，弹**一次** UAC 注册（之后不再打扰），然后触发助手；
-//! * 关闭：结束当前助手进程；**任务保留**（授权保留，符合"只弹一次"）；
-//! * 主程序每次启动：若任务已装，自动触发一次 —— 于是"开着开关"的用户
-//!   完全无感，这正是"打开后可以让助手自动跑起来"。
+//! 产品流程（2026-10-03 Andy 定稿：**每次开启都重新弹窗 + 重新授权**）：
+//! * 打开：每次都重走一次 UAC、重新注册任务（用户点了「是」才算重新授权），
+//!   然后触发助手；
+//! * 关闭：结束当前助手进程；**任务保留在系统里**——提权进程创建的任务普通
+//!   权限删不掉（真机实测），"取消授权"只能以「下次开启强制重装任务」落地，
+//!   所以关闭后授权即视为作废，下次开启必然再弹一次 UAC；
+//! * 主程序每次启动：若开关仍开着（设置里 enabled），自动触发一次 —— 这是
+//!   "开着开关的用户重启应用后无需再授权即恢复"的既有语义，不在"每次打开"
+//!   的范围里（"打开"指用户拨动开关这个动作）。
 //!
 //! 任务名必须与助手侧一致：`hardware/RC003/helper/src/main.rs` 的
 //! `SCHEDULED_TASK_NAME`。两侧各有一份常量，靠 `--selftest` 与本文件的
@@ -13,19 +17,16 @@
 /// 与助手侧 `SCHEDULED_TASK_NAME` 必须逐字符一致。
 pub const SCHEDULED_TASK_NAME: &str = "SayAll RC003 Helper";
 
-/// 开关状态。`installed` = 授权（任务在系统里）；
+/// 开关状态。`installed` = 任务在系统里（**不等于**授权有效：2026-10-03 起
+/// 每次开启都重新授权，任务在不在都不影响下次开启必弹 UAC）；
 /// `enabled` = 用户意图（持久化在设置里，默认关闭）。
-/// 两者是**不同的状态**：关闭开关只结束助手、任务保留（授权保留），
+/// 两者是**不同的状态**：关闭开关只结束助手、任务保留，
 /// 所以开关显示读 `enabled`，绝不能读 `installed`。
 ///
-/// `authorization_required` = **这次打开开关会触发系统授权（UAC）**，
-/// 与 `enable_capture` 内部的判定同源（见 [`authorization_needed`]）：
-/// 任务未注册，或卸载器写下了重授权标记（卸载后任务删不掉，标记是
-/// 授权应撤销的唯一凭证；真卸载写下的 `uninstalled=` 新格式在任何
-/// 安装中都不删，升级路径也不再写标记——见 installer-hooks.nsh 的
-/// 授权语义注释——所以升级后授权保留）。
-/// 前端用它决定「开启前要不要先弹确认弹窗」——
-/// 不能只看 `installed`：卸载后重装任务其实还在，但那次开启照样要弹 UAC。
+/// `authorization_required` = **这次打开开关会触发系统授权（UAC）**。
+/// 2026-10-03 起恒为 true（见 [`AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE`]）：
+/// 每次开启都重新授权。字段保留给诊断与 IPC 兼容，前端弹窗判据已不依赖它
+/// （每次开启都弹确认弹窗，只有关闭方向直接执行）。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatus {
@@ -36,12 +37,14 @@ pub struct TaskStatus {
     pub last_error: Option<String>,
 }
 
-/// 「这次打开开关会触发系统授权（UAC）」的纯判据，
-/// 与 `enable_capture` 的 `force_install || !task_installed()` 同源：
-/// 任务未注册，或重授权标记在。两处必须走同一个函数，防止判定漂移。
-fn authorization_needed(installed: bool, reauth_marker: bool) -> bool {
-    reauth_marker || !installed
-}
+/// 「这次打开开关会触发系统授权（UAC）」的唯一判据。
+///
+/// 2026-10-03 Andy 定稿：**每次开启都重新弹窗 + 重新授权**——开关从关到开的
+/// 每一次都要重走一次 UAC，所以这里恒为 true（此前是「任务未注册或重授权
+/// 标记在」才要授权）。`status()` 与 `enable_capture` 共用本判据，防止两处漂移；
+/// 改回旧语义前，必须同步前端弹窗文案（EnhancedCaptureConfirmDialog）与
+/// ButtonsPage / ConnectionPage 的「每次开启都先弹确认」测试。
+const AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE: bool = true;
 
 /// 定位助手 exe。三种布局按序尝试：
 /// 1. 环境变量覆盖（验收 / 非标准安装位置）；
@@ -135,7 +138,9 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // lpParameters 是单个字符串；助手会自己隐藏控制台（--hide-window）。
+    // lpParameters 是单个字符串；助手自 2026-10-04 起是 **GUI 子系统**程序：
+    // 提权 / 计划任务拉起时不创建任何控制台窗口。`--hide-window` 保留为兼容
+    // 参数（旧版助手用它隐藏自己的黑框；新版接受但无窗口可隐藏）。
     let parameters: Vec<u16> = "--install-task --hide-window"
         .encode_utf16()
         .chain(Some(0))
@@ -150,7 +155,9 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
     sei.lpVerb = PCWSTR(verb.as_ptr());
     sei.lpFile = PCWSTR(file.as_ptr());
     sei.lpParameters = PCWSTR(parameters.as_ptr());
-    sei.nShow = 1; // SW_SHOWNORMAL；助手带 --hide-window 会自行隐藏
+    // SW_HIDE 双保险：新版助手本就没有窗口；万一拉起的是尚未升级的旧版
+    // 控制台助手，也让它隐藏启动，而不是闪一下黑框。
+    sei.nShow = 0;
 
     if let Err(error) = unsafe { ShellExecuteExW(&mut sei) } {
         // 用户点「否」或叉掉 UAC 窗口都走这里：ERROR_CANCELLED (1223)。
@@ -190,7 +197,8 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 开关打开：确保已授权，然后触发。失败原样返回（调用方保持开关原状态）。
+/// 开关打开：**每次都重新授权**（弹一次 UAC 重装任务），然后触发。
+/// 失败原样返回（调用方保持开关原状态）。
 pub fn enable_capture() -> Result<(), String> {
     // 清掉可能残留的停用信号：否则"关开关（没助手在跑）→ 立刻再开"时，
     // 新助手一启动就见到信号当场退出，开关开着却永远连不上。
@@ -198,43 +206,40 @@ pub fn enable_capture() -> Result<(), String> {
     let helper = locate_helper_exe().ok_or_else(|| {
         "找不到 sayall-helper.exe（检查安装布局，或设置 SAYALL_RC003_HELPER 指向它）".to_string()
     })?;
-    // 重授权标记（卸载器仅在**真卸载**路径以 revoke=1 写入，内容 =
-    // `uninstalled=<卸载时刻 GetTickCount>`；升级路径的原位卸载不写）：
-    // **即使任务还在也要重装**——提权进程创建的任务普通权限删不掉
-    // （真机实测），标记是"授权已应撤销"的唯一可靠凭证；重装走 UAC，
-    // 用户点了「是」才算重新授权。
-    let force_install = reauth_required();
-    if authorization_needed(task_installed(), force_install) {
+    // 2026-10-03 Andy 定稿：每次开启都重新授权——无条件重装任务，于是每次
+    // 开启都会走一次 UAC（用户点了「是」才算这次授权）。为什么不是"关闭时
+    // 删除任务"：提权进程创建的任务普通权限删不掉（真机实测），撤销只能以
+    // "下次开启强制重装"落地。判据与 `status()` 同源（同一个常量）。
+    if AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE {
         // 重授权成功的判据**不能是退出码**：PowerShell 5.1 对 UAC 取消的
         // 非终止性错误即使加了 -ErrorAction Stop 也可能退出 0（真机实测
         // 两次 passed 且任务 Date 未变）。硬判据是「任务的注册时间真的
         // 变了」——/create /f 会重写任务 XML 的 <Date>。
         let before = task_registered_at();
         task_install_elevated(&helper)?;
-        if force_install {
-            let after = task_registered_at();
-            let verified = match (before.as_deref(), after.as_deref()) {
-                (_, None) => true,       // 基准/事后都读不到任务文件（罕见 ACL）：退回信任退出码
-                (None, Some(_)) => true, // 之前无任务、之后有了 = 新建成功
-                (Some(b), Some(a)) => b != a,
-                (None, None) => true,
-            };
-            if !verified {
-                return Err(
-                    "授权未完成（UAC 未被确认，任务没有重新注册）。三键捕获保持关闭，可再次打开重试。"
-                        .to_string(),
-                );
-            }
+        let after = task_registered_at();
+        let verified = match (before.as_deref(), after.as_deref()) {
+            (_, None) => true,       // 基准/事后都读不到任务文件（罕见 ACL）：退回信任退出码
+            (None, Some(_)) => true, // 之前无任务、之后有了 = 新建成功
+            (Some(b), Some(a)) => b != a,
+            (None, None) => true,
+        };
+        if !verified {
+            return Err(
+                "授权未完成（UAC 未被确认，任务没有重新注册）。三键捕获保持关闭，可再次打开重试。"
+                    .to_string(),
+            );
         }
     }
     let result = task_trigger();
-    if force_install && result.is_ok() {
+    if result.is_ok() {
         clear_reauth_marker();
     }
     result
 }
 
-/// 开关关闭：结束助手，**不移除任务**（授权保留）。
+/// 开关关闭：结束助手，**不移除任务**（提权任务普通权限删不掉；授权视为作废，
+/// 下次开启必弹 UAC——见 [`AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE`]）。
 ///
 /// 主程序是普通权限，**杀不掉提权助手**；`schtasks /end` 只能停"当前任务
 /// 实例"——若实例已换（任务重装、改名后旧进程挂着），它完全落空，
@@ -328,7 +333,9 @@ pub fn status(enabled: bool) -> TaskStatus {
     let installed = task_installed();
     TaskStatus {
         installed,
-        authorization_required: authorization_needed(installed, reauth_required()),
+        // 每次开启都会触发系统授权（UAC）——2026-10-03 起恒为 true，
+        // 与 enable_capture 的强制重装同源（同一个常量）。
+        authorization_required: AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE,
         enabled,
         helper_path: locate_helper_exe().map(|p| p.display().to_string()),
         last_error: None,
@@ -412,21 +419,11 @@ mod tests {
     }
 
     #[test]
-    fn authorization_needed_covers_all_four_states() {
-        // 与 enable_capture 的授权判定同源（前端弹确认弹窗读同一判据）：
-        // 任务不在 → 要授权；重授权标记在（升级/重装后，任务可能还在）→ 也要授权。
-        assert!(authorization_needed(false, false), "任务未注册：要授权");
-        assert!(
-            authorization_needed(false, true),
-            "任务未注册且标记在：要授权"
-        );
-        assert!(
-            authorization_needed(true, true),
-            "卸载后任务删不掉但标记在：仍要授权（正是卸载后重装必须再弹的那次）"
-        );
-        assert!(
-            !authorization_needed(true, false),
-            "任务在且无标记：授权保留，开启不触发 UAC"
-        );
+    fn every_enable_requires_reauthorization() {
+        // 2026-10-03 Andy 定稿：每次打开开关都要重新弹窗 + 重新授权（每次都会
+        // 弹 Windows 授权窗口）。这条一旦改回「任务在就不授权」，必须同步：
+        // ① 前端弹窗（EnhancedCaptureConfirmDialog）文案与
+        // ② ButtonsPage / ConnectionPage 的「每次开启都先弹确认」测试。
+        assert!(AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE);
     }
 }

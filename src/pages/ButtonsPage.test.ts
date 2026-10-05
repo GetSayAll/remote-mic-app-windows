@@ -118,10 +118,14 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       targetUsages: [],
       ownedUsages: [],
     })),
+    // 遥控器信息卡片上的「重新连接」：扫描已配对设备 + 连接（默认空列表，用例内按需覆盖）。
+    scanPairedRemotes: vi.fn(async () => []),
+    connectRemote: vi.fn(async () => runtime.platform.connection),
   };
 });
 
 import {
+  connectRemote,
   exportButtonMappingConfiguration,
   getButtonMappings,
   enableRc003Capture,
@@ -130,13 +134,14 @@ import {
   getRc003TaskStatus,
   importButtonMappingConfiguration,
   learnFocusTarget,
+  scanPairedRemotes,
   subscribeButtonEdges,
   subscribeButtonGestures,
   saveButtonMappings,
   startShortcutCapture,
   stopShortcutCapture,
 } from "../lib/bridge";
-import type { ButtonMappings, Rc003BridgeSnapshot, RuntimeSnapshot } from "../lib/bridge";
+import type { ButtonMappings, PairedRemote, Rc003BridgeSnapshot, RuntimeSnapshot } from "../lib/bridge";
 
 const runtime: RuntimeSnapshot = {
   appVersion: "0.1.0",
@@ -257,6 +262,10 @@ beforeEach(() => {
   });
   // 桥接快照同样要重置实现（mockClear 不清实现，见上）。
   vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("stopped"));
+  // 「重新连接」用的扫描/连接：同样重置实现，避免 mockRejectedValue / 空实现渗进后续用例。
+  vi.mocked(scanPairedRemotes).mockReset();
+  vi.mocked(scanPairedRemotes).mockResolvedValue([]);
+  vi.mocked(connectRemote).mockClear();
 });
 
 /** 构造一份指定相位的桥接快照（其余计数字段对 UI 无关，取零值）。 */
@@ -528,7 +537,31 @@ describe("buttons mapping page", () => {
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
-  it("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
+  it("配置「打开应用」时聚焦方式面板暂时隐藏（2026-10-03 下线的回归守卫）", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    const notepadChip = editor.findAll(".chip").find((chip) => chip.text() === "记事本");
+    expect(notepadChip).toBeDefined();
+    await notepadChip!.trigger("click");
+    await flushPromises();
+
+    // 目标仍能正常选中并写入映射，但「打开后聚焦方式」面板不再暴露。
+    expect(editor.find(".focus-profile").exists()).toBe(false);
+    await vi.waitFor(() => {
+      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+        actions: Record<string, { single: { type: string; target?: string } }>;
+      };
+      if (saved?.actions.ok?.single?.target !== "notepad") {
+        throw new Error("选中目标后未写入映射");
+      }
+    });
+  });
+
+  // 2026-10-03：UI 暂时隐藏（ButtonsPage.vue 的 showAppFocusStrategy=false），
+  // 恢复面板时把这个 skip 去掉即可继续覆盖策略切换与学习流程。
+  it.skip("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
@@ -1327,9 +1360,12 @@ describe("全按键支持开启前确认弹窗", () => {
     expect(dialog).toBeDefined();
     // 2026-09-27 用户要求去掉「Windows 平时看不见它们」。
     expect(dialog!.text()).not.toContain("Windows 平时看不见它们");
-    // 2026-09-28 二次定稿：授权语义改成「升级保留、卸载后重装才撤销」。
-    expect(dialog!.text()).toContain("升级/覆盖安装后无需重新授权");
-    expect(dialog!.text()).toContain("卸载后重装才需要");
+    // 2026-10-03 定稿：每次开启都重新弹窗 + 重新授权（每次都会弹 Windows
+    // 授权窗口），旧文案「升级/覆盖安装后无需重新授权」不再成立。
+    expect(dialog!.text()).toContain("每次开启都会弹出 Windows 授权窗口");
+    expect(dialog!.text()).not.toContain("无需重新授权");
+    // 2026-10-03 新增：杀毒软件风险（只提醒，不给处置建议）。
+    expect(dialog!.text()).toContain("杀毒软件");
     expect(dialog!.text()).toContain("防作弊");
 
     // 点弹窗「开启」完成授权 → 真正开启后悬停提示切到「关闭后…将不可映射」。
@@ -1345,7 +1381,7 @@ describe("全按键支持开启前确认弹窗", () => {
     });
   });
 
-  it("需要授权的开启才先弹确认；授权已在时直接开启，不再打扰", async () => {
+  it("每次开启都先弹确认并重新授权：授权已在（authorizationRequired=false）也一样", async () => {
     const page = await mountPage("rc003");
     const checkbox = await openCaptureToggle(page);
 
@@ -1381,7 +1417,9 @@ describe("全按键支持开启前确认弹窗", () => {
       expect(captureCheckboxChecked(page)).toBe(true);
     });
 
-    // ── 场景 B：授权已在（关闭只结束助手、任务保留）→ 直接开启不弹 ──
+    // ── 场景 B：授权已在（任务在、无重授权标记）也照样先弹确认 ──
+    // 2026-10-03 Andy 定稿：每次开启都重新弹窗 + 重新授权（每次都会弹
+    // Windows 授权窗口），判据不再依赖 authorizationRequired。
     // 轮询状态同步改为「授权已在、开关关着」，与真实系统一致；先改 mock
     // 再操作，避免秒级轮询用旧状态覆盖 rc003Task 造成竞态。
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
@@ -1399,7 +1437,24 @@ describe("全按键支持开启前确认弹窗", () => {
     (onSwitch.element as HTMLInputElement).checked = true;
     await onSwitch.trigger("change");
     await flushPromises();
-    expect(confirmDialog(page)).toBeUndefined();
+    const third = confirmDialog(page);
+    expect(third).toBeDefined();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+    // 取消：仍不开启（确认框是每次开启的必经步骤）。
+    await third!.findAll("button").find((b) => b.text() === "取消")!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(1);
+    expect(captureCheckboxChecked(page)).toBe(false);
+
+    const reopened = captureRow(page)!.find('input[type="checkbox"]');
+    (reopened.element as HTMLInputElement).checked = true;
+    await reopened.trigger("change");
+    await flushPromises();
+    await confirmDialog(page)!
+      .findAll("button")
+      .find((b) => b.text() === "开启")!
+      .trigger("click");
+    await flushPromises();
     expect(vi.mocked(enableRc003Capture)).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => {
       expect(captureCheckboxChecked(page)).toBe(true);
@@ -1458,20 +1513,159 @@ describe("全按键支持开启前确认弹窗", () => {
     ).toBe(false);
   });
 
-  // 2026-10-01 Andy 要求：头部设备胶囊显示遥控器型号（而不是蓝牙广播名）。
+});
+
+describe("按键页头部：副标题与遥控器信息卡片（2026-10-04）", () => {
+  // 2026-10-01 Andy 要求：头部显示遥控器型号（而不是蓝牙广播名）；
+  // 2026-10-04 起头部是从「设备胶囊」改成「遥控器信息卡片」（对标 Mac mappingPage）。
   it.each([
     ["rc001" as const, "小米蓝牙语音遥控器 2"],
     ["rc003" as const, "小米蓝牙语音遥控器 2 Pro"],
-  ])("头部设备胶囊显示遥控器型号（%s）", async (model, expected) => {
+  ])("遥控器信息卡片显示遥控器型号（%s）", async (model, expected) => {
     const page = await mountPage(model);
-    expect(page.find(".device-chip").text()).toContain(expected);
+    expect(page.find(".remote-info-card").text()).toContain(expected);
     page.unmount();
   });
 
-  it("型号未读回时头部设备胶囊退回蓝牙广播名", async () => {
+  it("型号未读回时遥控器信息卡片退回蓝牙广播名", async () => {
     const page = await mountPage("unknown");
-    expect(page.find(".device-chip").text()).toContain("小米蓝牙语音遥控器");
-    expect(page.find(".device-chip").text()).not.toContain("连接后显示");
+    expect(page.find(".remote-info-card").text()).toContain("小米蓝牙语音遥控器");
+    expect(page.find(".remote-info-card").text()).not.toContain("连接后显示");
+    page.unmount();
+  });
+
+  // 2026-10-04 Andy 定稿：标题下加副标题，右上角改「遥控器信息卡片」（图标 + 型号 + 状态/电量 + 重新连接）。
+  it("标题下给出「点击按键进行自定义配置」引导", async () => {
+    const page = await mountPage();
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+    page.unmount();
+  });
+
+  it("信息卡片显示连接状态；电量已知时显示、未知时不占位", async () => {
+    const withBattery = {
+      ...runtime,
+      platform: {
+        ...runtime.platform,
+        connection: { ...runtime.platform.connection, batteryLevel: 92 },
+      },
+    };
+    const page = mount(ButtonsPage, { props: { runtime: withBattery } });
+    await flushPromises();
+    expect(page.find(".remote-info-card").text()).toContain("已连接");
+    expect(page.find(".remote-info-card").text()).toContain("92%");
+    // 2026-10-04 Andy：卡片左侧的遥控器图标不要（只留文字与按钮）。
+    expect(page.find(".remote-info-card .remote-glyph").exists()).toBe(false);
+    page.unmount();
+
+    const page2 = await mountPage();
+    expect(page2.find(".remote-info-card").text()).not.toContain("%");
+    page2.unmount();
+  });
+
+  it("已连接时按钮写「重新连接」，未连接时写「立即连接」", async () => {
+    const page = await mountPage();
+    expect(page.find(".remote-info-card button").text()).toBe("重新连接");
+    page.unmount();
+
+    const offline = {
+      ...runtime,
+      platform: {
+        ...runtime.platform,
+        connection: {
+          ...runtime.platform.connection,
+          phase: "idle" as const,
+          remoteModel: "unknown" as const,
+          remoteName: null,
+        },
+      },
+    };
+    const page2 = mount(ButtonsPage, { props: { runtime: offline } });
+    await flushPromises();
+    expect(page2.find(".remote-info-card button").text()).toBe("立即连接");
+    page2.unmount();
+  });
+
+  it("点「重新连接」：扫描已配对设备，按型号连回当前遥控器", async () => {
+    vi.mocked(scanPairedRemotes).mockResolvedValue([
+      { id: "rc001-id", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true },
+      { id: "rc003-id", name: "客厅遥控器", model: "rc003", isSupportedCandidate: true },
+    ]);
+    const page = await mountPage("rc003");
+    await page.find(".remote-info-card button").trigger("click");
+    expect(vi.mocked(scanPairedRemotes)).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      if (vi.mocked(connectRemote).mock.calls.length === 0) throw new Error("尚未发起连接");
+    });
+    expect(vi.mocked(connectRemote)).toHaveBeenCalledWith("rc003-id");
+    page.unmount();
+  });
+
+  it("型号未知时按蓝牙广播名匹配已配对设备", async () => {
+    vi.mocked(scanPairedRemotes).mockResolvedValue([
+      { id: "other-id", name: "别的遥控器", model: "rc001", isSupportedCandidate: true },
+      { id: "named-id", name: "小米蓝牙语音遥控器", model: "unknown", isSupportedCandidate: true },
+    ]);
+    const page = await mountPage("unknown");
+    await page.find(".remote-info-card button").trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(connectRemote).mock.calls.length === 0) throw new Error("尚未发起连接");
+    });
+    expect(vi.mocked(connectRemote)).toHaveBeenCalledWith("named-id");
+    page.unmount();
+  });
+
+  it("匹配不到型号与名字时退回第一个候选设备", async () => {
+    vi.mocked(scanPairedRemotes).mockResolvedValue([
+      { id: "first-id", name: "遥控器 A", model: "rc001", isSupportedCandidate: true },
+      { id: "second-id", name: "遥控器 B", model: "unknown", isSupportedCandidate: true },
+    ]);
+    const page = await mountPage("rc003");
+    await page.find(".remote-info-card button").trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(connectRemote).mock.calls.length === 0) throw new Error("尚未发起连接");
+    });
+    expect(vi.mocked(connectRemote)).toHaveBeenCalledWith("first-id");
+    page.unmount();
+  });
+
+  it("连接期间按钮禁用并写「连接中…」，完成后恢复", async () => {
+    let release: (value: PairedRemote[]) => void = () => {};
+    vi.mocked(scanPairedRemotes).mockImplementation(
+      () =>
+        new Promise<PairedRemote[]>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const page = await mountPage();
+    await page.find(".remote-info-card button").trigger("click");
+    expect(page.find(".remote-info-card button").text()).toBe("连接中…");
+    expect((page.find(".remote-info-card button").element as HTMLButtonElement).disabled).toBe(true);
+    release([{ id: "rc003-id", name: "客厅遥控器", model: "rc003", isSupportedCandidate: true }]);
+    await flushPromises();
+    expect(page.find(".remote-info-card button").text()).toBe("重新连接");
+    expect((page.find(".remote-info-card button").element as HTMLButtonElement).disabled).toBe(false);
+    page.unmount();
+  });
+
+  it("扫描不到已配对遥控器时给出提示且不发起连接", async () => {
+    vi.mocked(scanPairedRemotes).mockResolvedValue([]);
+    const page = await mountPage();
+    await page.find(".remote-info-card button").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(connectRemote)).not.toHaveBeenCalled();
+    expect(page.find(".mapping-status").text()).toContain("没有找到已配对的遥控器");
+    page.unmount();
+  });
+
+  it("扫描失败时把错误显示在页面提示里，按钮恢复可用", async () => {
+    vi.mocked(scanPairedRemotes).mockRejectedValue(new Error("扫描失败"));
+    const page = await mountPage();
+    await page.find(".remote-info-card button").trigger("click");
+    await vi.waitFor(() => {
+      if (!page.find(".mapping-status").text().includes("扫描失败")) throw new Error("提示尚未出现");
+    });
+    expect(vi.mocked(connectRemote)).not.toHaveBeenCalled();
+    expect((page.find(".remote-info-card button").element as HTMLButtonElement).disabled).toBe(false);
     page.unmount();
   });
 });

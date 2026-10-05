@@ -56,17 +56,26 @@ export interface AudioEndpoint {
 }
 
 /**
- * 界面上的“推荐”判据：只有 VB-CABLE 标准包提供的 CABLE Input
- * （渲染端点友好名 `CABLE Input (VB-Audio Virtual Cable)`）值得推荐给
- * 微信输入法等语音工具作麦克风来源。
+ * 界面上的“推荐”判据：值得推荐给输入法当麦克风来源的 VB-CABLE 渲染端点。
+ *
+ * 渲染端点的名字跨 VB-CABLE 驱动版本变化（2026-10-02 现场）：
+ *   经典 2 通道：`CABLE Input (VB-Audio Virtual Cable)`
+ *   新版 16 通道：`CABLE In 16 Ch (2- VB-Audio Virtual Cable)`
+ * 两者都能把声音送回录音端 `CABLE Output`（`examples/cable_loopback_probe.rs`
+ * 实测两个端点回环 peak 均 ≈11k），因此都推荐；VB-CABLE A/B 的
+ * `CABLE-A/B Input` 不带 "VB-Audio Virtual Cable"，不推荐（它们的录音端不是
+ * 输入法默认监听的 CABLE Output）。
  *
  * 后端的 `isVirtualCableCandidate` 是更宽的候选判定（含 VB-CABLE A/B 的
  * CABLE-A/B Input 与 CI 仿真端点），只用于自动选择与安装检测，不足以
- * 决定推荐标记；两者刻意分开，避免给非标准端点打上推荐。
+ * 决定推荐标记；两者刻意分开。
  */
 export function isRecommendedVoiceEndpoint(endpoint: AudioEndpoint): boolean {
   const name = endpoint.name.trim().toLowerCase();
-  return name.includes("cable input") && name.includes("vb-audio");
+  if (!name.includes("vb-audio virtual cable")) {
+    return false;
+  }
+  return name.includes("cable input") || name.includes("cable in");
 }
 
 export interface AudioSnapshot {
@@ -641,6 +650,26 @@ export async function selectAudioEndpoint(endpointId: string): Promise<AudioSnap
   return invoke<AudioSnapshot>("select_audio_endpoint", { endpointId });
 }
 
+/**
+ * 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块，0 = 原始音量）。
+ *
+ * 读取走持久化值；写入返回实际保存值（越界会被钳制），界面用它回显——
+ * 不假设"写进去什么就存什么"。
+ */
+export async function getGainDb(): Promise<number> {
+  if (!isTauriRuntime()) {
+    return 0;
+  }
+  return invoke<number>("get_gain_db");
+}
+
+export async function setGainDb(gainDb: number): Promise<number> {
+  if (!isTauriRuntime()) {
+    return gainDb;
+  }
+  return invoke<number>("set_gain_db", { gainDb });
+}
+
 export async function openVbCableDownloadPage(): Promise<void> {
   if (!isTauriRuntime()) {
     window.open(VB_CABLE_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
@@ -762,9 +791,9 @@ export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {
 export interface Rc003TaskStatus {
   installed: boolean;
   /**
-   * 这次打开开关会触发系统授权（UAC）：任务未注册，或安装/升级写下了
-   * 重授权标记（重装后任务删不掉，标记是授权应撤销的唯一凭证）。
-   * 与 Rust enable_capture 的判定同源；前端据此决定开启前要不要先弹确认。
+   * 这次打开开关会触发系统授权（UAC）。2026-10-03 起恒为 true：每次开启都会
+   * 重新注册任务并弹一次 Windows 授权窗口。字段保留给诊断与类型兼容，
+   * 前端弹窗判据已不依赖它（每次开启都弹确认，只有关闭方向直接执行）。
    */
   authorizationRequired: boolean;
   /** 用户意图（持久化，默认关闭）。开关显示读它，而不是读 installed。 */
@@ -774,8 +803,9 @@ export interface Rc003TaskStatus {
 }
 
 /**
- * 开关打开：确保已授权（必要时弹一次 UAC，主程序会等它完成），然后触发助手。
- * 开关关闭：结束助手，**授权保留**（这正是"只弹一次 UAC"的一部分）。
+ * 开关打开：**每次都重新授权**（弹一次 UAC 重新注册任务，主程序会等它完成），
+ * 然后触发助手；开关关闭：结束助手，任务留在系统里但授权视为作废
+ * （提权任务普通权限删不掉），下次开启必弹 UAC（2026-10-03 Andy 定稿）。
  */
 export async function getRc003TaskStatus(): Promise<Rc003TaskStatus> {
   if (typeof window === "undefined" || !isTauriRuntime()) {
@@ -1100,12 +1130,13 @@ export async function reportThemeResult(report: ThemeResultReport): Promise<void
 /**
  * 应用图标（2026-10-02 用户指定；对齐 Mac main `AppIconController`/`AppIconCatalog`）：
  *
- * - `standard`：内置应用图标（默认，也是老配置的落点）；
- * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」。
+ * - `standard`：「默认」水彩鸭（可切换的另一风格，也是老配置与认不出的 ID 的落点）；
+ * - `faceted-duck`：来自 Mac `Resources/AppIcons/faceted-duck.png` 的「几何鸭」，
+ *   2026-10-04 起为新装默认，exe / 安装包自身的图标也用它。
  *
- * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）与托盘图标**；
- * 设置页顶部标识与选项预览用同一 ID 实时渲染。安装包与开始菜单快捷方式的图标
- * 属于安装产物，运行期不变（Mac 的 bundle 图标同样不变）。
+ * 切换后由 Rust 同时更换**主窗口图标（任务栏 / Alt-Tab / 标题栏）、托盘图标，
+ * 以及开始菜单 / 桌面 / 固定到任务栏的快捷方式图标**；设置页顶部标识与选项预览用
+ * 同一 ID 实时渲染。exe 与安装包自身的图标是安装产物，运行期不变。
  */
 export type AppIconIdentifier = "standard" | "faceted-duck";
 

@@ -5,13 +5,16 @@ import {
   getAudioSnapshot,
   getButtonMappings,
   getDiagnosticReport,
+  getGainDb,
   getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
+  learnFocusTarget,
   saveButtonMappings,
   scanPairedRemotes,
   setAppIcon,
   stopRawInput,
+  testAppFocus,
   testButtonMapping,
   type PlatformSnapshot,
 } from "./lib/bridge";
@@ -192,6 +195,34 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(audio.selectedEndpointId === endpoints[0].id, "仿真 CABLE Input 没有被自动选择");
   steps.push("连接页面首次检测并自动选择唯一的仿真 CABLE Input");
 
+  // 语音增益（2026-10-04，对齐 Mac 设置页「增益」滑块）：0 dB = 原始音量。
+  // 拖动（input）只改显示、松手（change）才落盘——这里按真实手势派发两个事件，
+  // 再用 IPC 读回持久化值核对。
+  const gainSlider = await waitFor(
+    () => document.querySelector<HTMLInputElement>('input[name="audio-gain"]'),
+    "语音设备卡增益滑块",
+  );
+  assert(
+    document.body.textContent?.includes("0 dB 保持原始音量"),
+    "增益说明文案缺失",
+  );
+  gainSlider.value = "12";
+  gainSlider.dispatchEvent(new Event("input", { bubbles: true }));
+  gainSlider.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitFor(() => (gainSlider.value === "12" ? true : null), "增益滑块显示 12 dB");
+  assert(document.body.textContent?.includes("12 dB"), "增益读数没有更新为 12 dB");
+  // change 之后的落盘是异步 IPC：必须轮询读回，不能拿本地读数当保存完成的证据
+  //（首次实现就这么错过一次：界面显示 12 dB，磁盘当时还是 0 dB）。
+  let savedGain = 0;
+  const gainDeadline = Date.now() + 10_000;
+  while (Date.now() < gainDeadline) {
+    savedGain = await getGainDb();
+    if (savedGain === 12) break;
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+  assert(savedGain === 12, `仿真增益没有经 IPC 落盘：${savedGain}`);
+  steps.push("连接页增益滑块经真实 IPC 落盘并读回 12 dB");
+
   mark("buttons_page");
   await openPage("按键", "按键映射");
   await waitFor(
@@ -283,37 +314,21 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「聚焦输入框」动作经真实 IPC 写入并分发到平台聚焦受理（UI 芯片按用户要求隐藏）");
 
-  // 「打开应用 + 聚焦方式」：选预设应用 → 切到「聚焦已记录的输入框」→ 学习一次 →
-  // 读回档案 → 测试打开与聚焦。学习与测试都走真实 IPC（仿真返回固定样本）。
+  // 「打开应用 + 聚焦方式」：UI 面板自 2026-10-03 起按用户要求隐藏（后端能力与已存配置
+  // 保留）。旅程改为：选中目标后断言面板不再出现，并直接经真实 IPC 覆盖学习与测试两条
+  // 后端受理路径——面板恢复时把这里改回点击「聚焦已记录的输入框 / 开始学习输入框」即可。
   await clickButton("记事本");
   await waitFor(
-    () =>
-      document.body.textContent?.includes("打开后聚焦方式") &&
-      document.body.textContent?.includes("聚焦已记录的输入框")
-        ? true
-        : null,
-    "聚焦方式面板",
+    () => (document.body.textContent?.includes("打开后聚焦方式") ? null : true),
+    "聚焦方式面板保持隐藏",
   );
-  mark("focus_profile_panel");
-  await clickButton("聚焦已记录的输入框");
-  await clickButton("开始学习输入框");
-  await waitFor(
-    () => (document.body.textContent?.includes("只记录控件特征，不含输入内容") ? true : null),
-    "学习结果提示",
-  );
-  await waitFor(
-    () => (document.body.textContent?.includes("已记录输入框") ? true : null),
-    "聚焦档案呈现为已记录输入框",
-  );
-  const savedMappings = await getButtonMappings();
-  const profile = savedMappings.focusProfiles?.["notepad"];
-  assert(profile?.strategy === "recorded_element", "聚焦档案没有保存为已记录输入框");
+  const learned = await learnFocusTarget();
   assert(
-    profile?.recorded?.automationId === "ci-simulation-input",
-    "聚焦档案没有记录到仿真输入框",
+    learned.automationId === "ci-simulation-input",
+    "仿真学习样本不是预期的可编辑目标",
   );
-  await clickButton("测试打开与聚焦");
-  steps.push("打开应用的聚焦方式三选一、学习输入框与测试打开聚焦经真实 IPC 闭环");
+  await testAppFocus("notepad");
+  steps.push("「打开后聚焦方式」面板按用户要求隐藏；学习与测试打开聚焦仍经真实 IPC 覆盖");
 
   mark("permissions_page");
   await openPage("权限");
@@ -407,25 +422,50 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(!document.querySelector('[role="alert"]'), "恢复系统外观后显示错误");
   steps.push("设置页深色/系统外观经 Windows WebView、Tauri capability 与设置持久化闭环");
 
-  // 应用图标（2026-10-02）：仿真后端不建托盘，这里证明选项、IPC 与持久化往返
-  // 可用，并且窗口图标接口不报错（真实托盘/任务栏换图属真机验收，见
+  // 应用图标（2026-10-02；2026-10-04 起新装默认几何鸭）：仿真每次运行都用全新的
+  // 状态目录（= 新装），这里同时证明"默认值经真实 IPC 读回"与选项、切换、持久化
+  // 往返可用；窗口图标接口不报错（真实托盘/任务栏换图属真机验收，见
   // Testing/WindowsRC003Preview.md 用例十四）。
-  const appIconOption = document.querySelector<HTMLInputElement>(
-    'input[name="app-icon"][value="faceted-duck"]:not(:disabled)',
+  const facetedDuckOption = await waitFor(
+    () =>
+      document.querySelector<HTMLInputElement>(
+        'input[name="app-icon"][value="faceted-duck"]:not(:disabled)',
+      ),
+    "设置页应用图标选项可用",
   );
-  assert(appIconOption !== null, "设置页缺少应用图标选项");
-  appIconOption.click();
-  await waitFor(() => (appIconOption.checked ? true : null), "应用图标切换");
+  assert(facetedDuckOption.checked, "新装默认没有选中几何鸭");
+  assert(
+    document.querySelector<HTMLImageElement>("img.app-logo")?.getAttribute("src") ===
+      "/app-icon-faceted-duck.png",
+    "顶部标识没有按新装默认（几何鸭）渲染",
+  );
+  const standardOption = document.querySelector<HTMLInputElement>(
+    'input[name="app-icon"][value="standard"]:not(:disabled)',
+  );
+  assert(standardOption !== null, "设置页缺少「默认」应用图标选项");
+  standardOption.click();
+  await waitFor(() => (standardOption.checked ? true : null), "应用图标切换到默认（水彩鸭）");
   assert(!document.querySelector('[role="alert"]'), "切换应用图标后显示错误");
   // 直达断言：命令参数契约（前端 `{ identifier }` ↔ Rust 命令参数名）。名字不匹配
   // 时 Tauri 判成缺参，前端只会看到 "IPC 不可用"（2026-10-02 本机仿真现场教训）。
-  const appliedIcon = await setAppIcon("faceted-duck");
-  assert(appliedIcon === "faceted-duck", `仿真切换应用图标没有生效：${appliedIcon}`);
-  const restoredIcon = await setAppIcon("standard");
-  assert(restoredIcon === "standard", `仿真还原应用图标没有生效：${restoredIcon}`);
-  steps.push("设置页应用图标选项经真实 IPC 与设置持久化往返");
+  const switchedIcon = await setAppIcon("standard");
+  assert(switchedIcon === "standard", `仿真切换应用图标没有生效：${switchedIcon}`);
+  const restoredIcon = await setAppIcon("faceted-duck");
+  assert(restoredIcon === "faceted-duck", `仿真还原应用图标没有生效：${restoredIcon}`);
+  steps.push("设置页应用图标新装默认几何鸭，切换经真实 IPC 与设置持久化往返");
 
   await openPage("连接");
+  // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，
+  // 而不是界面硬编码 0）——上一步已把 12 dB 写入仿真设置目录。
+  const restoredGainSlider = await waitFor(
+    () => {
+      const slider = document.querySelector<HTMLInputElement>('input[name="audio-gain"]');
+      return slider && slider.value === "12" ? slider : null;
+    },
+    "增益从持久化设置恢复为 12 dB",
+  );
+  assert(restoredGainSlider.value === "12", "增益没有从持久化设置恢复");
+  steps.push("重新进入连接页后增益从持久化设置恢复为 12 dB");
   steps.push("四个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
   mark("voice_session");

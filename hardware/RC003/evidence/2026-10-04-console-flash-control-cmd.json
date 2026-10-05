@@ -1,0 +1,283 @@
+{
+  "exe": "C:\\Windows\\System32\\cmd.exe",
+  "sha256": "97ac98b1a92c286054cce55239cfccdfc23a5517bd07fe693072c9ca96c7dabb",
+  "args": "/c ping -n 4 127.0.0.1",
+  "task": "SayAllFlashProbe",
+  "target_name": "cmd.exe",
+  "runs": [
+    {
+      "helper_seen": true,
+      "helper_pid": 30944,
+      "helper_start_ms": 45,
+      "helper_end_ms": 3962,
+      "new_conhost_pids": [
+        30116
+      ],
+      "new_processes": [
+        {
+          "pid": 30116,
+          "name": "conhost.exe",
+          "parent_pid": 30944,
+          "t_ms": 160,
+          "ancestry": [
+            30116,
+            30944,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 30944,
+          "name": "cmd.exe",
+          "parent_pid": 3288,
+          "t_ms": 45,
+          "ancestry": [
+            30944,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 32616,
+          "name": "openconsole.exe",
+          "parent_pid": 1568,
+          "t_ms": 160,
+          "ancestry": [
+            32616,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 38168,
+          "name": "ping.exe",
+          "parent_pid": 30944,
+          "t_ms": 397,
+          "ancestry": [
+            38168,
+            30944,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "new_visible_windows": [
+        {
+          "hwnd": 61145470,
+          "pid": 3752,
+          "class": "CASCADIA_HOSTING_WINDOW_CLASS",
+          "title": "Windows Terminal",
+          "first_ms": 225,
+          "last_ms": 3449,
+          "visible_ms": 3224,
+          "ancestry": [
+            3752,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "hwnd": 3805314,
+          "pid": 30944,
+          "class": "PseudoConsoleWindow",
+          "title": "",
+          "first_ms": 286,
+          "last_ms": 3408,
+          "visible_ms": 3122,
+          "ancestry": [
+            30944,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "hwnd": 28576188,
+          "pid": 11968,
+          "class": "Xaml_WindowedPopupClass",
+          "title": "主机弹出窗口",
+          "first_ms": 339,
+          "last_ms": 632,
+          "visible_ms": 293,
+          "ancestry": [
+            11968,
+            11444
+          ],
+          "helper_related": false
+        }
+      ],
+      "observed_s": 3.97,
+      "schtasks_rc": 0,
+      "run": 1
+    },
+    {
+      "helper_seen": true,
+      "helper_pid": 34172,
+      "helper_start_ms": 48,
+      "helper_end_ms": 3834,
+      "new_conhost_pids": [
+        32932
+      ],
+      "new_processes": [
+        {
+          "pid": 22836,
+          "name": "ping.exe",
+          "parent_pid": 34172,
+          "t_ms": 284,
+          "ancestry": [
+            22836,
+            34172,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 28624,
+          "name": "openconsole.exe",
+          "parent_pid": 1568,
+          "t_ms": 164,
+          "ancestry": [
+            28624,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "pid": 32932,
+          "name": "conhost.exe",
+          "parent_pid": 34172,
+          "t_ms": 164,
+          "ancestry": [
+            32932,
+            34172,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 34172,
+          "name": "cmd.exe",
+          "parent_pid": 3288,
+          "t_ms": 48,
+          "ancestry": [
+            34172,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        },
+        {
+          "pid": 36176,
+          "name": "chrome.exe",
+          "parent_pid": 32924,
+          "t_ms": 3715,
+          "ancestry": [
+            36176,
+            32924,
+            11968,
+            11444
+          ],
+          "helper_related": false
+        }
+      ],
+      "new_visible_windows": [
+        {
+          "hwnd": 61211006,
+          "pid": 3752,
+          "class": "CASCADIA_HOSTING_WINDOW_CLASS",
+          "title": "Windows Terminal",
+          "first_ms": 196,
+          "last_ms": 3382,
+          "visible_ms": 3186,
+          "ancestry": [
+            3752,
+            1568,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": false
+        },
+        {
+          "hwnd": 28117270,
+          "pid": 34172,
+          "class": "PseudoConsoleWindow",
+          "title": "",
+          "first_ms": 246,
+          "last_ms": 3354,
+          "visible_ms": 3108,
+          "ancestry": [
+            34172,
+            3288,
+            1380,
+            1272,
+            928
+          ],
+          "helper_related": true
+        }
+      ],
+      "observed_s": 3.85,
+      "schtasks_rc": 0,
+      "run": 2
+    }
+  ],
+  "flash_detected": true,
+  "text": [
+    "console_flash_probe",
+    "time     : 2026-10-04 22:08:25",
+    "exe      : C:\\Windows\\System32\\cmd.exe",
+    "sha256   : 97ac98b1a92c286054cce55239cfccdfc23a5517bd07fe693072c9ca96c7dabb",
+    "args     : /c ping -n 4 127.0.0.1",
+    "target   : cmd.exe",
+    "task     : SayAllFlashProbe",
+    "register : ok=True 成功: 成功创建计划任务 \"SayAllFlashProbe\"。 | 警告: 因为 /ST 早于当前的时间，任务可能无法运行。",
+    "run 1: helper_seen=True pid=30944 start=45ms new_conhost=[30116] helper_related_conhost=[30116]",
+    "        windows: total=3 console_class=2 helper_related=1 helper_related_console=1 observed_s=3.97",
+    "        new process: pid=30116 name=conhost.exe parent_pid=30944 helper_related=True t=160ms",
+    "        new process: pid=30944 name=cmd.exe parent_pid=3288 helper_related=True t=45ms",
+    "        new process: pid=32616 name=openconsole.exe parent_pid=1568 helper_related=False t=160ms",
+    "        new process: pid=38168 name=ping.exe parent_pid=30944 helper_related=True t=397ms",
+    "        window shown: t=225ms..3449ms (visible 3224ms) hwnd=61145470 pid=3752 class=CASCADIA_HOSTING_WINDOW_CLASS helper_related=False title='Windows Terminal'",
+    "        window shown: t=286ms..3408ms (visible 3122ms) hwnd=3805314 pid=30944 class=PseudoConsoleWindow helper_related=True title=''",
+    "        window shown: t=339ms..632ms (visible 293ms) hwnd=28576188 pid=11968 class=Xaml_WindowedPopupClass helper_related=False title='主机弹出窗口'",
+    "run 2: helper_seen=True pid=34172 start=48ms new_conhost=[32932] helper_related_conhost=[32932]",
+    "        windows: total=2 console_class=2 helper_related=1 helper_related_console=1 observed_s=3.85",
+    "        new process: pid=22836 name=ping.exe parent_pid=34172 helper_related=True t=284ms",
+    "        new process: pid=28624 name=openconsole.exe parent_pid=1568 helper_related=False t=164ms",
+    "        new process: pid=32932 name=conhost.exe parent_pid=34172 helper_related=True t=164ms",
+    "        new process: pid=34172 name=cmd.exe parent_pid=3288 helper_related=True t=48ms",
+    "        new process: pid=36176 name=chrome.exe parent_pid=32924 helper_related=False t=3715ms",
+    "        window shown: t=196ms..3382ms (visible 3186ms) hwnd=61211006 pid=3752 class=CASCADIA_HOSTING_WINDOW_CLASS helper_related=False title='Windows Terminal'",
+    "        window shown: t=246ms..3354ms (visible 3108ms) hwnd=28117270 pid=34172 class=PseudoConsoleWindow helper_related=True title=''",
+    "task deleted",
+    "VERDICT: console_flash_detected=true"
+  ]
+}

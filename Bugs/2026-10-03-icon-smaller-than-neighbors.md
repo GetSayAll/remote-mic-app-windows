@@ -14,6 +14,10 @@
   - 资产量测（深色瓷贴外接框 / 画布）：旧资产 20px→18px(0.900)、24px→22px(0.917)、32px→30px(0.938)、256px→240px(0.938)；新资产 全部 1.000（16px 一档旧资产因柔和阴影被判为满格，该档不具区分度，其余各档与用户截图比例吻合）。
   - 阳性对照：用旧的 256px 资产当源跑生成器 → `源图内容只占画布 0.934（要求 ≥ 0.95）` 退出码 1；新回归用例在旧资产下 **FAILED**、新资产下 passed。
 - 根因（已确认）：源图是 macOS 图标网格的导出（图案四周带留白与柔和投影，实心内容只占画布 ~87–94%）。Windows 图标惯例是贴满画布，同一份图缩到 16/20/24/32/256 后瓷贴自然比邻居小一圈——与窗口图标注入路径（`ICON_BIG`）无关，那条链路 2026-10-02 已修好并保持有效。
+- 「默认」（standard）图标：同一批 macOS 导出（16/20/24/32 档实心 0.812–0.832），2026-10-03 追加修复——新增 `scripts/generate-standard-icon.py`（探测瓷贴边界 → 裁掉外部阴影 → 拉伸铺满 → 派生全部 PNG 与 `icon.ico`，逐输出卡 0.95 填充比），覆盖窗口/托盘（`bundle.icon` 列表）、安装器图标与快捷方式图标（`shortcut_icons.rs` 内嵌 `icon.ico`，字节不一致才重写）。
+  - 坑位记录：`tauri-codegen`（`image.rs::CachedIcon::new_ico`）只取 `icon.ico` 的 `entries()[0]` 解码为 RGBA 作为窗口/托盘默认图标；旧 `icon.ico` 首条目是 32px、PIL 默认从 16px 写起，不排序就会把 16px 当默认图（拉到 32/36px 槽位 → 糊）。现在脚本固定把 256px 放首位并断言（`ico_order`）。
+  - 追补（同日）：重排后的 `icon.ico` 首次提交时漏掉了（仓库里仍是 16px 首条目，而打包时用的是工作区版本）——现已补提交，并在 `app_icon.rs` 新增`standard_icon_ico_puts_the_largest_entry_first`（直接读 `include_bytes!` 的 ICO 头校验首条目是 256px；用 main 的 16px 首条目版本跑会 FAILED）。
+  - 打包验证：exe 内嵌的 `entries()[0]` RGBA 指纹为新 256px（旧 32px 指纹不在 exe 里）——比原来的 32px 更清晰。
 - 修复（最小改动）：
   - 新源图落库：`src-tauri/icons/app-icons/faceted-duck-source.png`（用户 2026-10-03 提供的满画布导出，实心占比 0.995；设计不变，只换导出）。
   - `scripts/generate-app-icons.py`：默认源改为仓库内源图（`--source` 仍可指向文件或目录），新增 `FILL_RATIO_MINIMUM = 0.95` 守卫，源图留白过多直接拒绝并给出原因；重新生成 16/20/24/32/256 与设置页预览。

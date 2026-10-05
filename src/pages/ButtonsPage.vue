@@ -11,6 +11,8 @@ import {
   buttonLabels,
   buttonTriggerLabel,
   chordLabel,
+  connectRemote,
+  connectionPhaseLabel,
   exportButtonMappingConfiguration,
   getButtonMappingSnapshot,
   getButtonMappings,
@@ -29,6 +31,7 @@ import {
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
+  scanPairedRemotes,
   shortcutCapability,
   startRawInput,
   startShortcutCapture,
@@ -49,6 +52,7 @@ import {
   type FocusStrategy,
   type KeyCode,
   type MoveDirection,
+  type PairedRemote,
   type PresetAppInfo,
   type RawInputPhase,
   type Rc003BridgePhase,
@@ -314,6 +318,10 @@ const focusStrategyOptions: Array<{ value: FocusStrategy; label: string }> = [
   { value: "app_shortcut", label: "用应用快捷键聚焦" },
   { value: "recorded_element", label: "聚焦已记录的输入框" },
 ];
+
+// 2026-10-03 Andy：先隐藏「打开后聚焦方式」面板（后端能力与已存配置保留，UI 暂不暴露）。
+// 需要恢复时把这个开关改回 true 即可；相关测试按同一开关跳过。
+const showAppFocusStrategy = false;
 
 const focusFailureLabels: Record<string, string> = {
   self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
@@ -974,6 +982,78 @@ async function toggleListener(): Promise<void> {
 const rawInput = computed(() => props.runtime?.platform.rawInput);
 const connectionInfo = computed(() => props.runtime?.platform.connection);
 
+/** 头部遥控器信息卡片（2026-10-04）：连接态、电量与「重新连接」按钮。 */
+const connectionReady = computed(() => {
+  const phase = connectionInfo.value?.phase;
+  return phase === "ready" || phase === "streaming";
+});
+/** 圆点配色沿用改造前设备胶囊里的同一套映射（streaming=active / ready=success / 其余 pending）。 */
+const connectionTone = computed(() =>
+  connectionInfo.value?.phase === "streaming"
+    ? "active"
+    : connectionInfo.value?.phase === "ready"
+      ? "success"
+      : "pending",
+);
+const reconnectBusy = ref(false);
+const reconnectLabel = computed(() =>
+  reconnectBusy.value ? "连接中…" : connectionReady.value ? "重新连接" : "立即连接",
+);
+const reconnectDisabled = computed(
+  () => reconnectBusy.value || props.runtime?.platform.bleScanAvailable === false,
+);
+const reconnectTitle = computed(() => {
+  if (reconnectBusy.value) return "正在连接遥控器…";
+  if (props.runtime?.platform.bleScanAvailable === false) {
+    return "蓝牙不可用：先在连接页确认蓝牙已打开，再回来重试";
+  }
+  return connectionReady.value ? "断开后连回当前这支遥控器" : "连接已配对的遥控器";
+});
+
+/**
+ * 选哪支遥控器来重连：优先型号一致，其次蓝牙广播名一致，最后退回第一个候选。
+ * 头部拿不到设备 id（ConnectionSnapshot 里没有），只能按型号/名字匹配。
+ */
+function pickReconnectTarget(
+  remotes: PairedRemote[],
+  current: { model: RemoteModel; name: string | null },
+): PairedRemote | null {
+  const supported = remotes.filter((remote) => remote.isSupportedCandidate);
+  const pool = supported.length > 0 ? supported : remotes;
+  if (pool.length === 0) return null;
+  if (current.model !== "unknown") {
+    const byModel = pool.find((remote) => remote.model === current.model);
+    if (byModel) return byModel;
+  }
+  if (current.name) {
+    const byName = pool.find((remote) => remote.name === current.name);
+    if (byName) return byName;
+  }
+  return pool[0]!;
+}
+
+async function reconnectRemote(): Promise<void> {
+  if (reconnectBusy.value) return;
+  reconnectBusy.value = true;
+  statusMessage.value = null;
+  try {
+    const remotes = await scanPairedRemotes();
+    const target = pickReconnectTarget(remotes, {
+      model: remoteModel.value,
+      name: connectionInfo.value?.remoteName ?? null,
+    });
+    if (!target) {
+      statusMessage.value = "没有找到已配对的遥控器；到连接页扫描后再试。";
+      return;
+    }
+    await connectRemote(target.id);
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    reconnectBusy.value = false;
+  }
+}
+
 /**
  * RC003 三键的传输桥接状态（捕获链第 ② 段）。
  *
@@ -1034,9 +1114,9 @@ const rc003CaptureBusy = ref(false);
  * 开关的显示状态：**事件驱动**，`null` = 尚未初始化。
  *
  * 为什么不用「任务是否存在」当真相源：关闭开关只结束助手、**任务保留**
- * （授权保留，这是"只弹一次 UAC"的一部分）——任务还在，若读任务，
- * 开关会立刻弹回开启，「已停用」的提示与三键恢复原生行为全都对不上
- * （2026-09-23 首次 UI 验收正是这个形状）。因此轮询只在首次对账一次，
+ * （提权任务普通权限删不掉；授权视为作废，下次开启必弹 UAC）——任务还在，
+ * 若读任务，开关会立刻弹回开启，「已停用」的提示与三键恢复原生行为全都
+ * 对不上（2026-09-23 首次 UI 验收正是这个形状）。因此轮询只在首次对账一次，
  * 之后以用户的开关操作为准。
  */
 const rc003CaptureEnabled = ref<boolean | null>(rc003UiCache.enabled);
@@ -1137,8 +1217,8 @@ const reconcileRc003Task = async (): Promise<void> => {
 };
 
 /**
- * 切换三键捕获。打开可能在**首次**弹一次 UAC（IPC 会等授权流程结束）；
- * 关闭只结束助手、保留授权——所以之后不会再弹。
+ * 切换三键捕获。打开**每次都会弹一次 UAC**（2026-10-03 起每次开启都重新授权，
+ * IPC 会等授权流程结束）；关闭只结束助手、任务留在系统里但授权作废。
  * 完成后用返回的状态刷新，而不是假设成功；lastError 走页面既有的提示条。
  */
 const captureSwitchEl = ref<HTMLInputElement | null>(null);
@@ -1159,17 +1239,13 @@ function syncCaptureSwitchDom(): void {
 
 async function toggleRc003Capture() {
   if (rc003CaptureBusy.value) return;
-  // 开启方向：**只在这次开启会触发系统授权（UAC）时**先弹确认——判据与
-  // Rust enable_capture 同源（任务未注册，或安装/升级写下了重授权标记），
-  // 由每秒轮询的 rc003Task.authorizationRequired 带给前端。
-  //
-  // 为什么不记「已读过」（2026-09-27 用户报告 + 拍板）：一次性 localStorage
-  // 标记在重装/升级后仍然存活，正是「重装后弹窗消失」的根因；「每次都弹」
-  // 又会在授权仍在的普通开启上反复打扰。按「是否需要授权」弹，与弹窗文案
-  // 「首次开启时系统会弹窗询问 / 升级或重装后会再弹一次询问」逐句对齐。
-  // 状态未知（authorizationRequired 缺失）宁可多弹一次，也不静默跳过。
+  // 开启方向：**每次都先弹确认**（2026-10-03 Andy 定稿）——每次开启都要重新
+  // 授权：IPC 里的 enable 会重新注册任务并弹一次 Windows 授权窗口，弹窗文案
+  // 与之逐句对齐（「每次开启都会弹出 Windows 授权窗口」）。
+  // 也不再记「已读过」：一次性 localStorage 标记在重装/升级后仍然存活，
+  // 正是 2026-09-27「重装后弹窗消失」的根因。
   // 关闭方向永远直接执行，不弹。
-  if (rc003CaptureEnabled.value !== true && rc003Task.value?.authorizationRequired !== false) {
+  if (rc003CaptureEnabled.value !== true) {
     showCaptureConfirm.value = true;
     // 开关 DOM 在点击瞬间已被浏览器翻转，先写回关闭，等确认后再真正执行。
     syncCaptureSwitchDom();
@@ -1419,12 +1495,29 @@ onUnmounted(() => {
             ></span>
           </label>
         </div>
+        <p class="page-subtitle">点击按键进行自定义配置</p>
       </div>
       <div class="mapping-header-controls">
-        <div class="device-chip" :class="{ connected: connectionInfo?.phase === 'ready' || connectionInfo?.phase === 'streaming' }">
-          <span class="status-dot" :class="connectionInfo?.phase === 'streaming' ? 'active' : connectionInfo?.phase === 'ready' ? 'success' : 'pending'"></span>
-          <span>{{ deviceLabel }}</span>
-          <BatteryIndicator :connection="connectionInfo" />
+        <!-- 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：图标 + 型号 +
+             状态/电量 + 重新连接。状态行与按钮文案都是常驻的（不靠 v-if 插行），
+             避免头部高度变化把画布顶下去（2026-09-28 抖动教训）。 -->
+        <div class="remote-info-card">
+          <div class="remote-info-main">
+            <strong>{{ deviceLabel }}</strong>
+            <span class="remote-info-status">
+              <span class="status-dot" :class="connectionTone"></span>{{ connectionPhaseLabel(connectionInfo?.phase ?? "idle") }}
+              <BatteryIndicator v-if="connectionReady" :connection="connectionInfo" />
+            </span>
+          </div>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="reconnectDisabled"
+            :title="reconnectTitle"
+            @click="reconnectRemote"
+          >
+            {{ reconnectLabel }}
+          </button>
         </div>
       </div>
     </header>
@@ -1694,7 +1787,7 @@ onUnmounted(() => {
               ＋ 添加应用
             </button>
           </div>
-          <div v-if="focusTarget" class="focus-profile">
+          <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile">
             <p class="muted focus-profile-title">打开后聚焦方式</p>
             <div class="preset-grid">
               <button

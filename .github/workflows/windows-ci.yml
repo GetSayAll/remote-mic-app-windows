@@ -12,10 +12,17 @@ on:
       - '.gitignore'
       - 'LICENSE'
   pull_request:
-    # 刻意不在 pull_request 上设 paths-ignore：被 paths-ignore 跳过的 workflow
-    # 不会创建任何 check，而分支保护的必需检查指向 `gate`，纯文档 PR 会一直卡在
-    # "Expected — Waiting for status to be reported"。
-    # 改由 job 级判断（changes）跳过重量级校验，`gate` 始终运行并给出结论。
+    # 2026-10-03 用户决定：纯文档 PR 恢复 paths-ignore，不产生任何 workflow run。
+    # 此前（2026-09-21）为避开“必需检查 gate 永不出现”而让文档 PR 也跑 gate；
+    # gate 必需检查已同步移除，纯文档改动的 CI 开销归零（见 BRANCH_MANAGEMENT.md）。
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'Testing/**'
+      - 'artifacts/**'
+      - 'Screenshots/**'
+      - '.gitignore'
+      - 'LICENSE'
   workflow_dispatch:
 
 permissions:
@@ -31,47 +38,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # 路径感知：判断本次变更是否包含"非文档"内容，决定要不要跑重量级校验。
-  # 忽略清单与原来的 paths-ignore 保持一致（见文件头的 push 配置）。
-  changes:
-    name: changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - id: filter
-        name: Detect relevant changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "非 PR 事件（push）：视为需要完整校验"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          base="${{ github.base_ref }}"
-          git fetch --no-tags origin "$base" || true
-          files="$(git diff --name-only "origin/$base"...HEAD || true)"
-          echo "changed files:"
-          printf '%s\n' "$files"
-          ignore='(^|/)[^/]*\.md$|^(docs|Testing|Screenshots|artifacts)/|^\.gitignore$|^LICENSE$'
-          code="$(printf '%s\n' "$files" | grep -vE "$ignore" | grep -v '^$' || true)"
-          if [ -n "$code" ]; then
-            echo "包含非文档改动，需要完整校验"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "仅文档改动，跳过重量级校验"
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
-
+  # 触发本 workflow 即代表包含非文档改动（纯文档已在触发器被 paths-ignore 过滤）：
+  # verify 无条件运行完整校验。
   verify:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -123,6 +92,13 @@ jobs:
           $env:VITE_SAYALL_RUNTIME_SIMULATION = "1"
           pnpm tauri build --no-bundle --features runtime-simulation
 
+      # 防回归（2026-10-03 本机实证）：补丁 build.frontendDist 误用 Windows 绝对路径时，
+      # tauri 会把它当单字母 scheme 的 URL，前端资源不嵌入、界面变成目录列表，
+      # 而哈希/签名/内嵌修订号全部正常——只有对 exe 做“资源键是否在二进制里”的检查才能发现。
+      - name: Verify frontend assets are embedded in the executable
+        shell: pwsh
+        run: ./scripts/verify-frontend-embedded.ps1
+
       - name: Test Windows Tauri WebView and IPC runtime simulation
         shell: pwsh
         timeout-minutes: 3
@@ -133,9 +109,8 @@ jobs:
   # 构建 NSIS 并执行耗时的安装、升级、降级和卸载测试。
   installer:
     name: Verify Windows installer lifecycle
-    needs: [changes, verify]
+    needs: verify
     if: >-
-      needs.changes.outputs.code == 'true' &&
       needs.verify.result == 'success' &&
       github.event_name != 'pull_request'
     runs-on: windows-latest
@@ -171,6 +146,11 @@ jobs:
       - name: Build unsigned NSIS preview installer
         run: pnpm tauri build --bundles nsis
 
+      # 防回归（2026-10-03 本机实证）：见 verify job 中同名步骤的注释。
+      - name: Verify frontend assets are embedded in the executable
+        shell: pwsh
+        run: ./scripts/verify-frontend-embedded.ps1
+
       - name: Verify runtime simulation is absent from production build
         shell: pwsh
         run: ./scripts/verify-runtime-simulation-isolation.ps1
@@ -201,35 +181,3 @@ jobs:
           path: artifacts/windows-preview/
           if-no-files-found: error
           retention-days: 14
-
-  # 分支保护的必需检查指向这里。它总是运行并给出明确结论，所以：
-  # - 代码改动：verify 必须成功，否则 gate 失败（= 合不进去）；
-  # - 仅文档改动：verify 被 skip，gate 直接成功（不再需要本仓跑 19 分钟）。
-  # 用一个始终存在的 check 作为闸门，避免 paths 过滤导致的"必需检查永不出现"死锁。
-  gate:
-    name: gate
-    needs: [changes, verify, installer]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Evaluate upstream results
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "changes=${{ needs.changes.result }} verify=${{ needs.verify.result }} installer=${{ needs.installer.result }}"
-          if [ "${{ needs.changes.result }}" != "success" ]; then
-            echo "::error::changes job did not succeed"
-            exit 1
-          fi
-          case "${{ needs.verify.result }}" in
-            success) echo "verify passed";;
-            skipped) echo "verify skipped（仅文档改动）";;
-            *) echo "::error::verify did not pass: ${{ needs.verify.result }}"; exit 1;;
-          esac
-          if [ "${{ github.event_name }}" != "pull_request" ] && \
-             [ "${{ needs.changes.outputs.code }}" = "true" ] && \
-             [ "${{ needs.installer.result }}" != "success" ]; then
-            echo "::error::installer did not pass: ${{ needs.installer.result }}"
-            exit 1
-          fi

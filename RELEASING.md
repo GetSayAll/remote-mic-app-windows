@@ -10,6 +10,13 @@
   （本机出包、CI verify、发布流程）都必须先执行 `node scripts/stage-bundle-inputs.cjs`
   ——它构建助手、按锁文件获取并校验 Gadget、再复用 `stage-bundle-resources.cjs` 落地。
   漏掉这一步的报错是 `resource path 'sayall-helper.exe' doesn't exist`（2026-09-27 实测）。
+- **前端资源必须嵌入主程序**：出包后必须运行 `scripts/verify-frontend-embedded.ps1`
+  （本机出包用 `-Executable` / `-FrontendDirectory` 指向实际产物与 `dist-build-*`；
+  CI verify / installer / release 三个 workflow 已各自接入同一脚本）。补丁
+  `build.frontendDist` 必须写**相对路径**（相对 `src-tauri`）；Windows 绝对路径
+  （`D:/...`）会被 tauri 按 URL 解析成单字母 scheme（`d:`），资源被静默跳过嵌入，
+  应用界面会变成目录列表，而哈希、签名、内嵌修订号全部正常（2026-10-03 本机实测）。
+  该检查有阳性对照：对未嵌入的 exe 必须失败。
 - 默认交付物是本地测试包。先在本机生成测试安装器，报告其路径和校验值，并完成与改动风险相称的本地安装、升级、启动和功能验证。
 - 本地验证通过后必须停在“可发布”状态；不得自行创建发布 Tag、GitHub Release、发布草稿或上传发布资产。只有用户在收到验证结果后明确要求“发布预览版”，才获得本次发布授权。“继续”“做完”“合入 main”等指令本身不构成发布授权。
 - 发布源必须是已合入远端 `main` 的精确 SHA；开始前 `git fetch origin main`，发布 worktree 必须干净且与该 SHA 一致。

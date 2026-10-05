@@ -34,9 +34,11 @@ pub mod focus_service;
 pub mod focus_windows;
 #[cfg(windows)]
 pub mod graceful_exit;
-// 硬件信号脚本（仿真回放用；见模块注释）：解析 hardware-simulation 仓库导出的
-// `export-app-script` 结果。无副作用、不进入基础路径，仅仿真平台消费。
+// 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
+// 无副作用、不进入基础路径，仅仿真平台消费。
 pub mod hardware_script;
+#[cfg(windows)]
+pub mod instance_signal;
 pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{
@@ -92,6 +94,7 @@ pub mod send_input;
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
 #[cfg(windows)]
 pub mod send_input_windows;
+pub mod tray_icons;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
 pub mod vokie;
 #[cfg(windows)]
@@ -275,7 +278,14 @@ pub struct WindowsPlatform {
     /// 用户在连接页选的语音输入工具：决定语音会话开始前把哪个输入法
     /// 切进当前会话（`ime::ensure_session_ime`）；Vokie / 其他工具不切。
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
-    /// 「离开窗口时预切输入法」的一次性开关：只在用户刚选过工具后为 true。
+    /// 语音增益（dB，0–24）：BLE 工作线程每批音频前读取，改动下一批即生效
+    /// （对齐 Mac 逐帧读 `settings.gainDB` 的语义）。持久化由设置层负责。
+    gain_db: Arc<Mutex<f32>>,
+    /// 「选中工具后的一次性输入法对齐」：自身窗口在前台时不能切（TSF 会话切换曾致
+    /// WebView2 整页重载，Bugs/2026-09-12），此时只布防；本应用窗口失去焦点后由
+    /// `align_ime_after_tool_selection` 取走并执行一次（2026-10-03，Andy 要求消除
+    /// "换工具后第一按必拉不起"的窗口期）。
+    ime_align_pending: Arc<Mutex<Option<(VoiceInputTool, std::time::Instant)>>>,
     #[cfg(windows)]
     button_mapping: Arc<ButtonMappingRuntime>,
     raw_input_snapshot: Arc<Mutex<RawInputSnapshot>>,
@@ -348,6 +358,8 @@ impl Default for WindowsPlatform {
         let usage = Arc::new(UsageCounters::default());
         let voice_hold_hotkey = Arc::new(Mutex::new(None));
         let voice_input_tool = Arc::new(Mutex::new(None));
+        let gain_db = Arc::new(Mutex::new(0.0));
+        let ime_align_pending = Arc::new(Mutex::new(None));
         #[cfg(windows)]
         let raw_input_snapshot = Arc::new(Mutex::new(RawInputSnapshot::default()));
         #[cfg(windows)]
@@ -377,6 +389,7 @@ impl Default for WindowsPlatform {
                 Arc::clone(&send_input),
                 Arc::clone(&voice_hold_hotkey),
                 Arc::clone(&voice_input_tool),
+                Arc::clone(&gain_db),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
@@ -402,6 +415,8 @@ impl Default for WindowsPlatform {
                 usage,
                 voice_hold_hotkey,
                 voice_input_tool,
+                gain_db,
+                ime_align_pending,
                 button_mapping,
                 raw_input_snapshot,
                 voice_key_suppressor,
@@ -429,6 +444,8 @@ impl Default for WindowsPlatform {
                 usage,
                 voice_hold_hotkey,
                 voice_input_tool,
+                gain_db,
+                ime_align_pending,
                 button_mapping,
                 raw_input_snapshot,
             }
@@ -573,15 +590,80 @@ impl WindowsPlatform {
         }
     }
 
-    /// 更新「你在用的输入工具」：BLE 工作线程在**按住语音键**的那一刻按它决定把
-    /// 哪个输入法切进当前会话（`ime::ensure_session_ime`，唯一切换时机——不做
-    /// 聚焦/离开窗口时的预切，2026-10-01 Andy 明确要求）。
+    /// 更新「你在用的输入工具」：BLE 工作线程在按下语音键时按它决定把哪个输入法
+    /// 切进当前会话（`ime::ensure_session_ime`，按下时兜底切换）；并且**选中即对齐**——
+    /// 用户刚选过工具时立即尝试把系统输入法切到该工具（自身窗口在前台时改为布防，
+    /// 待窗口失去焦点后执行一次）。
+    ///
+    /// 为什么要有"选中即对齐"（2026-10-03 Andy）：报告层合成在按下帧到达时立即改写
+    /// （早于应用知情一个 BLE 往返），若按下时系统输入法还不是所选工具，这一按必然
+    /// 赶不上切换——表现为"换工具后第一按拉不起"。选中即对齐把该窗口期清零；
+    /// 按下时的兜底切换保留（覆盖用户手动改走输入法的情况）。
     pub fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
         *lock(&self.voice_input_tool) = tool;
+        let Some(tool) = tool else {
+            *lock(&self.ime_align_pending) = None;
+            return;
+        };
+        // Vokie / 其他工具明确不切输入法（`ime_target_for` 为 None），也不布防。
+        let Some(target) = ime::ime_target_for(tool) else {
+            *lock(&self.ime_align_pending) = None;
+            crate::ble::gatt_note(
+                "ime_tool_select action=skipped reason=unsupported_tool".to_owned(),
+            );
+            return;
+        };
+        if ime::foreground_is_self() {
+            // 自身窗口在前台：现在切会触发 TSF 会话切换的 WebView 整页重载
+            //（Bugs/2026-09-12），改为布防——窗口失去焦点（用户回到自己的应用）
+            // 后由 `align_ime_after_tool_selection` 执行一次。
+            *lock(&self.ime_align_pending) = Some((tool, std::time::Instant::now()));
+            crate::ble::gatt_note(format!(
+                "ime_tool_select action=pending_self_foreground tool={}",
+                target.label,
+            ));
+        } else {
+            crate::ble::gatt_note(format!(
+                "ime_tool_select action=immediate tool={}",
+                target.label,
+            ));
+            std::thread::Builder::new()
+                .name("sayall-ime-tool-select".to_owned())
+                .spawn(move || {
+                    let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
+                })
+                .ok();
+        }
+    }
+
+    /// 工具选择后的一次性输入法对齐：本应用窗口失去焦点时调用
+    /// （src-tauri `WindowEvent::Focused(false)`）。未布防时 no-op；布防时取走
+    /// 并执行一次切换（`ensure_session_ime` 内部仍会跳过自身仍在前台的情况）。
+    pub fn align_ime_after_tool_selection(&self) {
+        let Some((tool, armed_at)) = lock(&self.ime_align_pending).take() else {
+            return;
+        };
+        crate::ble::gatt_note(format!(
+            "ime_tool_select action=fired trigger=window_blur waited_ms={}",
+            armed_at.elapsed().as_millis(),
+        ));
+        let _ = std::thread::Builder::new()
+            .name("sayall-ime-prealign".to_owned())
+            .spawn(move || {
+                let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
+            });
     }
 
     pub fn voice_input_tool(&self) -> Option<VoiceInputTool> {
         *lock(&self.voice_input_tool)
+    }
+
+    /// 语音增益（dB，0–24）：写入共享值供 BLE 工作线程逐批读取。
+    ///
+    /// 取值先经 `sayall_core::normalize_gain_db` 钳制——IPC 层已钳过一次，
+    /// 这里再钳一次是为了让"从任何入口进来"的平台状态都落在同一区间。
+    pub fn set_gain_db(&self, gain_db: f32) {
+        *lock(&self.gain_db) = sayall_core::normalize_gain_db(gain_db);
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {

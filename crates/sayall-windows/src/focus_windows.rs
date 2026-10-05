@@ -1,4 +1,4 @@
-//! Windows UI Automation 后端（仅 Windows）。
+﻿//! Windows UI Automation 后端（仅 Windows）。
 //!
 //! 约束：UIA 客户端必须在**不拥有窗口的 MTA 线程**上调用（MS Learn
 //! `uiauto-threading`），因此本模块自己起一个专用工作线程，在其上
@@ -132,6 +132,17 @@ mod imp {
             }
         }
         reply_receiver.recv().ok()
+    }
+
+    /// 在共享 UIA 工作线程上执行任务并返回结果（线程用 Per-Monitor V2、MTA 初始化，
+    /// 元素矩形与窗口矩形同坐标系）。供托盘图标等"只读 UIA + 触发用户可见控件"的功能
+    /// 复用，避免各写一份 COM/DPI 初始化。工作线程不可用时返回 `None`。
+    pub(crate) fn with_automation<T, F>(task: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&IUIAutomation) -> T + Send + 'static,
+    {
+        submit(move |session| task(&session.automation))
     }
 
     // ---------- Win32（不需要 UIA，可在任意线程调用） ----------
@@ -599,6 +610,10 @@ pub use imp::{
     foreground_process_id, foreground_title_len, process_alive, scan_candidates, window_of_process,
     FocusAttempt, WindowsFocusBackend,
 };
+
+/// 复用共享 UIA 工作线程（Per-Monitor V2、MTA）执行只读 UIA 任务的入口。
+#[cfg(windows)]
+pub(crate) use imp::with_automation;
 
 /// 非 Windows 平台不提供 UIA 后端；保持模块可编译以便纯逻辑单测。
 #[cfg(not(windows))]

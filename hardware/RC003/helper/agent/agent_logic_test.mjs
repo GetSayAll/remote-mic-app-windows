@@ -88,6 +88,7 @@ function fakeArgs(outPtr) {
 
 const handlers = {};
 const pending = [];                                          // 永不 settle 的 read => 桩连接不会"断线"
+const sleeps = [];                                           // Thread.sleep 桩的调用记录（门内延迟判据）
 
 const sandbox = {
   console,
@@ -110,6 +111,10 @@ const sandbox = {
         input: { read: () => new Promise((_res, _rej) => { pending.push(1); }) },
       });
     },
+  },
+  // 门内延迟的 sleep 桩：只记录调用，不真的睡（判据 = 有没有调用、睡了多少毫秒）。
+  Thread: {
+    sleep(ms) { sleeps.push(ms); },
   },
   // init()/heartbeat() 不会在测试里调用；这两个桩只是防止它们被误触发后真的排上定时器。
   setInterval: () => 0,
@@ -308,6 +313,63 @@ check('targets 热更新被接受（targets_applied=2）',
   const { ptr } = press(0x003E);
   check('synth：off 后语音键恢复原样', ptr.buf[3] === 0x3e,
     `buf3=0x${ptr.buf[3].toString(16)}`);
+}
+
+/* --------- 10. 门内延迟：第一按 vs 输入法切换的赛跑（2026-10-03） --------- */
+/* 应用在按下之后才切输入法（实测 ~53ms），而替换在按下帧通过时立即生效——先于
+   切换完成，目标输入法收不到按下沿。应用声明能力（W 1 → gate 命令）后，按下帧
+   改写前先睡 GATE_DELAY_MS，把呈现推到切换完成之后。
+   阳性对照：对未含门内延迟的旧 agent 跑本组，「恰好睡一次」必然失败。 */
+
+/* 上一节最后把 synth 关了——本节先恢复合成配置，否则替换路径根本不参与。 */
+ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003E, to: 0x00E6 }));
+
+{
+  const before = sleeps.length;
+  const { ptr } = press(0x003E);
+  check('gate 默认关：不延迟，替换照常',
+    sleeps.length === before && ptr.buf[3] === 0xe6,
+    `sleeps=${sleeps.length - before} buf3=0x${ptr.buf[3].toString(16)}`);
+}
+
+{
+  ctx.handleCommand(JSON.stringify({ type: 'gate', on: true, delay_ms: 150 }));
+  const before = sleeps.length;
+  const beforeDelays = ctx.stat.gate_delays;
+  const { ptr } = press(0x003E);
+  check('gate 开：改写前恰好睡一次 delay_ms',
+    sleeps.length === before + 1 && sleeps[sleeps.length - 1] === 150,
+    `sleeps=${JSON.stringify(sleeps.slice(before))}`);
+  check('gate 开：替换仍然生效（0x00E6）',
+    ptr.buf[3] === 0xe6, `buf3=0x${ptr.buf[3].toString(16)}`);
+  check('gate 开：计数 gate_delays +1', ctx.stat.gate_delays === beforeDelays + 1);
+}
+
+{
+  const before = sleeps.length;
+  const { ptr } = press();
+  check('gate 开：释放帧不延迟（成对性不变）',
+    sleeps.length === before && ptr.buf[3] === 0,
+    `sleeps=${sleeps.length - before}`);
+}
+
+{
+  ctx.handleCommand(JSON.stringify({ type: 'mode', clear: false }));
+  const before = sleeps.length;
+  const { ptr } = press(0x003E);
+  check('gate 开但 observe 模式：不延迟也不替换',
+    sleeps.length === before && ptr.buf[3] === 0x3e,
+    `sleeps=${sleeps.length - before} buf3=0x${ptr.buf[3].toString(16)}`);
+  ctx.handleCommand(JSON.stringify({ type: 'mode' }));
+}
+
+{
+  ctx.handleCommand(JSON.stringify({ type: 'gate', on: false }));
+  const before = sleeps.length;
+  const { ptr } = press(0x003E);
+  check('gate 关：恢复不延迟，替换照常',
+    sleeps.length === before && ptr.buf[3] === 0xe6,
+    `sleeps=${sleeps.length - before}`);
 }
 
 check('源码含 synthSetIn（合成视角进门禁，防 canary 死代码同款坑）',

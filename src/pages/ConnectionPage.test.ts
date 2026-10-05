@@ -112,6 +112,8 @@ const mocks = vi.hoisted(() => ({
   getAudioSnapshot: vi.fn(),
   listAudioEndpoints: vi.fn(),
   selectAudioEndpoint: vi.fn(),
+  getGainDb: vi.fn(),
+  setGainDb: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
   getVoiceHoldHotkey: vi.fn(),
   setVoiceHoldHotkey: vi.fn(),
@@ -138,6 +140,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getAudioSnapshot: mocks.getAudioSnapshot,
     listAudioEndpoints: mocks.listAudioEndpoints,
     selectAudioEndpoint: mocks.selectAudioEndpoint,
+    getGainDb: mocks.getGainDb,
+    setGainDb: mocks.setGainDb,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
     getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
     setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
@@ -170,6 +174,8 @@ describe("VB-CABLE first-launch guidance", () => {
       selectedEndpointId: endpointId,
       selectedEndpointName: cableEndpoint.name,
     }));
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
     mocks.openVbCableDownloadPage.mockResolvedValue(undefined);
     mocks.getVoiceHoldHotkey.mockResolvedValue({
       keys: ["left_control", "left_windows"],
@@ -307,6 +313,81 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(items[2].text()).not.toContain("推荐");
     expect(items[0].text()).toContain("其他音频设备");
     expect(items[2].text()).toContain("其他音频设备");
+    wrapper.unmount();
+  });
+
+  it("recommends the 16 通道版 VB-CABLE 渲染端点（CABLE In 16 Ch），不推荐不带 CABLE 名的同设备端点", async () => {
+    // 2026-10-02 现场：新版 VB-CABLE 驱动把渲染端点命名为「CABLE In 16 Ch」，
+    // 同设备还有一个「扬声器 (2- VB-Audio Virtual Cable)」。两者回环到
+    // CABLE Output 都有信号，但只有带 CABLE 名的端点打「推荐」标记，文案也
+    // 不再硬编码旧驱动名「CABLE Input」。
+    const sixteenChannel: AudioEndpoint = {
+      id: "cable-16ch",
+      name: "CABLE In 16 Ch (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    const cableSpeaker: AudioEndpoint = {
+      id: "cable-speaker",
+      name: "扬声器 (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    mocks.endpoints = [sixteenChannel, cableSpeaker];
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "选择设备")!
+      .trigger("click");
+    await flushPromises();
+
+    const items = wrapper.findAll(".endpoint-list li");
+    expect(items).toHaveLength(2);
+    expect(items[0].text()).toContain("CABLE In 16 Ch");
+    expect(items[0].text()).toContain("推荐");
+    expect(items[1].text()).not.toContain("推荐");
+
+    expect(wrapper.text()).toContain("选择带「推荐」标记的 CABLE 设备");
+    expect(wrapper.text()).not.toContain("这里选择 CABLE Input");
+    wrapper.unmount();
+  });
+
+  it("选中的端点被后端自动兜底替换时，文案按实际使用的设备报出", async () => {
+    // 2026-10-02 现场：点选 CABLE In 16 Ch 打不开，后端自动改用同一台虚拟声卡的
+    // 另一个 CABLE 端点；界面必须报实际设备，不能显示成"已选择 CABLE In 16 Ch"。
+    const sixteenChannel: AudioEndpoint = {
+      id: "cable-16ch",
+      name: "CABLE In 16 Ch (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    const cableSpeaker: AudioEndpoint = {
+      id: "cable-speaker",
+      name: "扬声器 (2- VB-Audio Virtual Cable)",
+      isVirtualCableCandidate: true,
+    };
+    mocks.endpoints = [sixteenChannel, cableSpeaker];
+    mocks.selectAudioEndpoint.mockImplementation(async () => ({
+      ...emptyAudio,
+      phase: "ready",
+      selectedEndpointId: cableSpeaker.id,
+      selectedEndpointName: cableSpeaker.name,
+    }));
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "选择设备")!
+      .trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".endpoint-list li button")
+      .find((button) => button.text() === "选择")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已自动改用 扬声器 (2- VB-Audio Virtual Cable)");
+    expect(wrapper.text()).toContain("暂时打不开");
     wrapper.unmount();
   });
 
@@ -943,6 +1024,8 @@ describe("connection page remote model", () => {
     mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
     mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
     mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
@@ -1055,6 +1138,8 @@ describe("connection page rc003 capture switch", () => {
         return () => {};
       },
     );
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
     mocks.getRc003TaskStatus.mockResolvedValue(taskStatus());
     mocks.enableRc003Capture.mockResolvedValue(taskStatus({ enabled: true }));
     mocks.disableRc003Capture.mockResolvedValue(taskStatus({ enabled: false }));
@@ -1087,20 +1172,34 @@ describe("connection page rc003 capture switch", () => {
 
     await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
+    // 2026-10-03 起每次开启都先弹确认（与按键页同源）：确认后才真正开启。
+    await wrapper
+      .findComponent({ name: "EnhancedCaptureConfirmDialog" })
+      .vm.$emit("confirm");
+    await flushPromises();
     expect(wrapper.text()).toContain("已开启");
     expect(wrapper.text()).not.toContain("还差一步");
     wrapper.unmount();
   });
 
-  it("已授权（authorizationRequired=false）时开启直接执行，不开确认弹窗", async () => {
+  it("每次开启都先弹确认：已授权（authorizationRequired=false）也一样，确认后才 enable", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
     await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
 
-    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    // 未确认：不开确认弹窗前不调 enable，开关 DOM 写回关闭。
+    const dialog = wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" });
+    expect(dialog.exists()).toBe(true);
+    expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
     expect(mocks.disableRc003Capture).not.toHaveBeenCalled();
-    expect(wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" }).exists()).toBe(false);
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
+      false,
+    );
+
+    await dialog.vm.$emit("confirm");
+    await flushPromises();
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
     expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       true,
     );
@@ -1143,11 +1242,104 @@ describe("connection page rc003 capture switch", () => {
 
     await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
+    // 每次开启都先弹确认：确认后 enable 失败（UAC 被取消）才走到失败回退。
+    await wrapper
+      .findComponent({ name: "EnhancedCaptureConfirmDialog" })
+      .vm.$emit("confirm");
+    await flushPromises();
 
     expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       false,
     );
     expect(wrapper.text()).toContain("授权未完成（UAC 被取消）");
+    wrapper.unmount();
+  });
+});
+
+/**
+ * 语音增益（对齐 Mac 设置页「增益」滑块）：0 dB = 原始音量，0–24 dB 步进 1。
+ * 拖动只改显示，松手（change）才走 IPC；保存失败必须回到上一次生效值并给原因。
+ */
+describe("connection page audio gain", () => {
+  beforeEach(() => {
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+    mocks.getOtherVoiceHotkey.mockResolvedValue(null);
+    mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
+    mocks.startShortcutCapture.mockResolvedValue([]);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("读取已保存的增益并渲染滑块与说明", async () => {
+    mocks.getGainDb.mockResolvedValue(12);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+    expect(slider.exists()).toBe(true);
+    expect(slider.element.value).toBe("12");
+    expect(wrapper.text()).toContain("12 dB");
+    expect(wrapper.text()).toContain("0 dB 保持原始音量");
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("拖动松手后才保存，并以保存返回值回显", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+
+    await slider.setValue("18");
+    await flushPromises();
+
+    expect(mocks.setGainDb).toHaveBeenCalledTimes(1);
+    expect(mocks.setGainDb).toHaveBeenCalledWith(18);
+    expect(wrapper.text()).toContain("18 dB");
+    wrapper.unmount();
+  });
+
+  it("保存失败：回到上一次生效值并就地给出原因", async () => {
+    mocks.getGainDb.mockResolvedValue(6);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+
+    mocks.setGainDb.mockRejectedValueOnce(new Error("保存增益设置失败：磁盘只读"));
+    await slider.setValue("18");
+    await flushPromises();
+
+    expect(wrapper.find('[role="alert"]').text()).toContain("磁盘只读");
+    expect(slider.element.value).toBe("6");
+    expect(wrapper.text()).toContain("6 dB");
+    wrapper.unmount();
+  });
+
+  it("以保存返回值回显（后端钳制过的值才显示）", async () => {
+    mocks.getGainDb.mockResolvedValue(0);
+    // 后端把请求值钳到 24：界面必须显示 24，而不是用户拖到的原值。
+    mocks.setGainDb.mockImplementationOnce(async () => 24);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const slider = wrapper.find<HTMLInputElement>('input[name="audio-gain"]');
+
+    await slider.setValue("18");
+    await flushPromises();
+
+    expect(slider.element.value).toBe("24");
+    expect(wrapper.text()).toContain("24 dB");
     wrapper.unmount();
   });
 });

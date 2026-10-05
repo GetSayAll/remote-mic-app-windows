@@ -33,6 +33,22 @@
 //! 本 spike **不并入产品工作区**（见 Cargo.toml 注释），也不改动 `src-tauri` / 前端。
 //! 它只回答一个问题：把已验证的探针变成"自己的助手 + 自己的 agent + 自己的传输"之后，
 //! 整链还能不能跑通。
+//!
+//! 窗口与输出（2026-10-04）
+//! ----------------------
+//! 本程序构建为 **GUI 子系统**：计划任务 / ShellExecuteEx 拉起时系统不分配控制台，
+//! 也就没有任何窗口可闪。控制台子系统时并非如此——Windows 11 默认终端把控制台
+//! 显示成 Windows Terminal 窗口，从进程启动一直可见到退出（2026-10-04 探针实测
+//! 每轮 2.2–2.3 s；`GetConsoleWindow` 在 ConPTY 托管下只拿到隐藏的 pseudo window，
+//! 原有的自隐藏动作对可见窗口无效）。手动运行（cmd / PowerShell / run-helper*.cmd）
+//! 由 `bootstrap_console()` 附加到父控制台，输出照旧可见；后台拉起没有父控制台时
+//! stdout/stderr 指向 NUL，`Logger::line` 的 `println!` 成为无害空写。
+//! 注意：GUI 子系统进程拿不到 cmd / PowerShell 的 `>` 与管道重定向（Windows 只给
+//! 控制台子系统子进程接这些句柄；`Start-Process -RedirectStandardOutput` 是显式
+//! 传递、仍可用）。要留档输出请用 `--log <文件>`——日志落点与子系统无关。
+
+// GUI 子系统（仅 Windows）：消灭"助手运行时一闪而过"的黑框/终端窗口。
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(not(windows))]
 fn main() {
@@ -306,26 +322,77 @@ mod imp {
         unsafe { IsUserAnAdmin() != 0 }
     }
 
-    /// 隐藏本进程的控制台窗口（`--follow-app` / `--hide-window` 时调用）。
+    /// 控制台引导（GUI 子系统下进程没有系统分配的控制台）。
     ///
-    /// 计划任务拉起的是控制台程序，Windows 必然给它分配一个黑框——
-    /// 但用户面对的界面是主程序，这个框是纯干扰（2026-09-23 验收反馈）。
-    /// 启动后立刻隐藏；日志写文件不依赖窗口，排查能力不受影响。
-    /// 手动运行（run-helper.cmd 等）不带 `--follow-app`，保留窗口看日志。
-    fn hide_console_window() {
+    /// 两条路径：
+    /// * 手动运行（cmd / PowerShell / run-helper*.cmd）——父进程有控制台，
+    ///   `AttachConsole(ATTACH_PARENT_PROCESS)` 成功，把无效的 stdout/stderr
+    ///   句柄接到 CONOUT$（控制台输出设备），诊断输出照旧可见；
+    /// * 后台拉起（计划任务 / ShellExecuteEx 提权安装）——没有父控制台，也
+    ///   **不分配**任何控制台，stdout/stderr 指向 NUL：`Logger::line` 每次都
+    ///   `println!`，无效句柄会让它 panic，指向 NUL 后打印成为无害空写，
+    ///   日志落文件不受影响。
+    ///
+    /// 句柄已有效（父进程重定向输出 / 继承句柄）时不覆盖，保持原有去向。
+    /// 返回值只用于 `[ENV]` 诊断字段。
+    ///
+    /// 为什么不用旧的 `hide_console_window()`（2026-10-04 真机实测）：控制台
+    /// 子系统下 Windows 11 默认终端把控制台显示为 Windows Terminal 窗口，从
+    /// 进程启动一直可见到退出（实测每轮 2.2–2.3 s）；`GetConsoleWindow` 在
+    /// ConPTY 托管下返回的只是隐藏的 pseudo window，隐藏动作对可见窗口无效。
+    /// GUI 子系统 + 本函数从根上不再产生窗口。
+    fn bootstrap_console() -> &'static str {
         #[link(name = "kernel32")]
         extern "system" {
-            fn GetConsoleWindow() -> Handle;
+            fn AttachConsole(process_id: u32) -> i32;
+            fn GetStdHandle(std_handle: u32) -> Handle;
+            fn SetStdHandle(std_handle: u32, handle: Handle) -> i32;
+            fn CreateFileW(
+                file_name: *const u16,
+                desired_access: u32,
+                share_mode: u32,
+                security_attributes: *mut c_void,
+                creation_disposition: u32,
+                flags_and_attributes: u32,
+                template_file: Handle,
+            ) -> Handle;
         }
-        #[link(name = "user32")]
-        extern "system" {
-            fn ShowWindow(window: Handle, command: i32) -> i32;
-        }
-        const SW_HIDE: i32 = 0;
+
+        // STD_*_HANDLE 的 DWORD 形态（winbase.h：-10 / -11 / -12）。
+        const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        const OPEN_EXISTING: u32 = 3;
+        const INVALID_HANDLE_VALUE: isize = -1;
+
         unsafe {
-            let window = GetConsoleWindow();
-            if !window.is_null() {
-                ShowWindow(window, SW_HIDE);
+            let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+            let target = if attached { "CONOUT$" } else { "NUL" };
+            for std in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let current = GetStdHandle(std);
+                if !current.is_null() && current as isize != INVALID_HANDLE_VALUE {
+                    continue; // 已有效（重定向 / 继承）：不覆盖
+                }
+                let handle = CreateFileW(
+                    to_wide(target).as_ptr(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null_mut(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if handle as isize != INVALID_HANDLE_VALUE {
+                    SetStdHandle(std, handle);
+                }
+            }
+            if attached {
+                "attached"
+            } else {
+                "nul"
             }
         }
     }
@@ -937,6 +1004,10 @@ mod imp {
     }
 
     /// 设备实例名里需要脱敏的只有蓝牙地址：紧跟在 `_` 之后的 12 位十六进制。
+    ///
+    /// **只用于设备实例名**。令牌等秘密不能用本函数——它对裸十六进制字符串是
+    /// **空操作**（2026-10-04 现场：`[TOKEN]` 的 value 曾误用它，明文令牌直进
+    /// 诊断日志）。令牌一律走 [`token_fingerprint`]。
     fn mask_token(text: &str) -> String {
         let bytes: Vec<char> = text.chars().collect();
         let mut out = String::new();
@@ -959,6 +1030,35 @@ mod imp {
             i += 1;
         }
         out
+    }
+
+    /// `[TOKEN]` 日志字段的**唯一构造点**：令牌只以指纹形式出现。
+    ///
+    /// 2026-10-04 现场发现：三处 `[TOKEN]` 的 value 走的是 `mask_token`，而它
+    /// 只匹配"下划线 + 12 位十六进制"的蓝牙地址形态——对裸令牌是**空操作**，
+    /// 于是 `session.token` 的明文进了诊断日志（日志会被用户整份发出，等于把
+    /// 认证材料一并交出）。统一走这里后，指纹可对照（同令牌同指纹、异令牌异
+    /// 指纹）但不可用于认证。
+    fn token_log_fields(
+        source: &str,
+        path: Option<&Path>,
+        token: &str,
+    ) -> Vec<(&'static str, String)> {
+        let mut fields = vec![("source", source.to_string())];
+        if let Some(p) = path {
+            fields.push(("path", normalize_display(p)));
+        }
+        fields.push(("value", token_fingerprint(token)));
+        fields
+    }
+
+    /// 令牌指纹：`len=<长度> fp=<sha256 前 8 位十六进制>`。
+    ///
+    /// 与 `mask_token`（蓝牙地址脱敏）**无关**：裸令牌没有可依赖的形态特征，
+    /// 必须显式摘要——两者混淆过一次，见 `token_log_fields` 注释。
+    fn token_fingerprint(token: &str) -> String {
+        let digest = sha256_hex(token.as_bytes());
+        format!("len={} fp={}", token.len(), &digest[..8])
     }
 
     // ============================================================ 日志
@@ -1292,8 +1392,9 @@ mod imp {
         /// 配合计划任务使用——主程序需要时 `/run` 触发一次，主程序关掉后助手自己退，
         /// 于是系统里不会长期留着一个提权进程。
         follow_app: bool,
-        /// 由主程序经 PowerShell RunAs 提权调用时传入：启动后立刻隐藏
-        /// 自己的控制台（提权实例无人看它的输出，黑窗纯属干扰）。
+        /// 兼容参数：主程序提权安装时传 `--hide-window`。GUI 子系统下进程没有
+        /// 系统分配的控制台窗口可隐藏（窗口行为见 `bootstrap_console` 注释），
+        /// 参数保留只为不改调用方契约；启动时的控制台引导与实际行为无关。
         hide_window: bool,
         dry_run: bool,
         observe: bool,
@@ -1535,7 +1636,9 @@ mod imp {
   --attach-only         只接管宿主里已有的 tap，绝不注入（诊断用）\n\
   --new-generation      旧世代 tap 无法接管时，另起一份复制体注入（实验性：\n\
                         依赖 Frida 允许同一进程内两个 Gadget 实例，未验证）\n\
-  --log <PATH>          同时写日志文件（**追加**语义，每轮带时间戳分隔头）\n\
+  --log <PATH>          同时写日志文件（**追加**语义，每轮带时间戳分隔头）。\n\
+                        要捕获输出请用它：GUI 子系统进程拿不到 cmd / PowerShell 的\n\
+                        `>` 与管道重定向（Windows 只给控制台子系统子进程接这些）\n\
   --dry-run             只做宿主定位、独占性核对与 Gadget 校验；不准备运行目录、不注入、不监听\n\
                         （**无需提权**：全是只读检查）\n\
   --observe             只观察不拦截（agent 侧不清键）\n\
@@ -1553,7 +1656,7 @@ mod imp {
   --remove-task         【需管理员】移除上述计划任务（卸载 / 用户关闭并移除授权时用）\n\
   --task-status         查询计划任务是否存在（免提权）\n\
   --follow-app          跟随主程序：桥接断连超过宽限期后自行退出（计划任务触发时自动带上）\n\
-  --hide-window         启动后隐藏自己的控制台（主程序提权安装时自动带上）\n\
+  --hide-window         兼容参数：GUI 子系统已无控制台窗口（主程序提权安装时自动带上）\n\
 为什么需要哨兵键（--canary-usage）\n\
 --------------------------------\n\
 RC003 的返回/音量± 在 Windows 侧**本来就零事件**（kbdhid 丢弃了这三个 usage）。\n\
@@ -1681,14 +1784,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             if let Ok(s) = fs::read_to_string(&path) {
                 let t = s.trim().to_string();
                 if !t.is_empty() {
-                    logger.kv(
-                        "[TOKEN]",
-                        &[
-                            ("source", "file".into()),
-                            ("path", normalize_display(&path)),
-                            ("value", mask_token(&t)),
-                        ],
-                    );
+                    logger.kv("[TOKEN]", &token_log_fields("file", Some(&path), &t));
                     return Ok((t, true));
                 }
             }
@@ -1698,21 +1794,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .map_err(|e| format!("创建运行时目录失败 {}: {e}", dir.display()))?;
         fs::write(&path, &token)
             .map_err(|e| format!("写入令牌文件失败 {}: {e}", path.display()))?;
-        logger.kv(
-            "[TOKEN]",
-            &[
-                (
-                    "source",
-                    if force_new {
-                        "regenerated".into()
-                    } else {
-                        "generated".into()
-                    },
-                ),
-                ("path", normalize_display(&path)),
-                ("value", mask_token(&token)),
-            ],
-        );
+        let source = if force_new {
+            "regenerated"
+        } else {
+            "generated"
+        };
+        logger.kv("[TOKEN]", &token_log_fields(source, Some(&path), &token));
         Ok((token, false))
     }
 
@@ -2389,6 +2476,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         voice_synth: Arc<Mutex<Option<u16>>>,
         /// voice_synth 变化标志：主循环比对后给 agent 补发 synth 命令并清零。
         voice_synth_dirty: Arc<AtomicBool>,
+        /// 门内延迟开关（主程序经 `W` 行声明的能力；绝对状态语义）。
+        voice_gate: Arc<AtomicBool>,
+        /// voice_gate 变化标志：主循环比对后给 agent 补发 gate 命令并清零。
+        voice_gate_dirty: Arc<AtomicBool>,
     }
 
     impl AppBridge {
@@ -2420,6 +2511,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn voice_synth_state(&self) -> (Option<u16>, bool) {
             let synth = self.voice_synth.lock().map(|guard| *guard).unwrap_or(None);
             (synth, self.voice_synth_dirty.swap(false, Ordering::Relaxed))
+        }
+
+        /// 当前门内延迟开关；`dirty` = 自上次读取以来被主程序改过。
+        fn voice_gate_state(&self) -> (bool, bool) {
+            (
+                self.voice_gate.load(Ordering::Relaxed),
+                self.voice_gate_dirty.swap(false, Ordering::Relaxed),
+            )
         }
 
         fn snapshot(&self) -> (u64, u64, u64, String) {
@@ -2668,6 +2767,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         (usage != 0).then_some(Some(usage))
     }
 
+    /// `W <0|1>` —— 主程序声明「语音门内延迟」能力（2026-10-03）。
+    ///
+    /// 语义：按下前活动输入法不是目标工具时，应用要在按下之后才切输入法
+    /// （实测 ~53ms，见 Bugs/2026-10-03-first-press-lost-before-ime-switch.md），
+    /// 而报告层替换在按下帧通过时立即生效——先于切换完成，目标输入法收不到
+    /// 按下沿（第一按丢失）。应用声明该能力后，助手给 agent 下发 gate 命令，
+    /// agent 在按下帧呈现前做有界延迟。旧主程序不发此行 ⇒ 保持原行为。
+    fn parse_bridge_gate_line(line: &str) -> Option<bool> {
+        let mut parts = line.trim().split(' ');
+        if parts.next()? != "W" {
+            return None;
+        }
+        match parts.next()? {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        }
+    }
+
     /// agent `synth_ack` 行 → 已应用的绝对状态。
     ///
     /// `Some(Some(usage))` = 合成生效中；`Some(None)` = 已关闭；`None` = 不是
@@ -2704,6 +2822,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         targets: &Mutex<BridgeCaptureTargets>,
         voice_synth: &Mutex<Option<u16>>,
         voice_synth_dirty: &AtomicBool,
+        voice_gate: &AtomicBool,
+        voice_gate_dirty: &AtomicBool,
         logger: &Logger,
     ) {
         while let Some(pos) = read_buffer.iter().position(|byte| *byte == b'\n') {
@@ -2732,6 +2852,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     *current = synth;
                 }
                 voice_synth_dirty.store(true, Ordering::Relaxed);
+            } else if let Some(on) = parse_bridge_gate_line(&line) {
+                logger.kv(
+                    "[VOICE-GATE]",
+                    &[
+                        ("event", "configured".into()),
+                        ("on", on.to_string()),
+                        ("source", "app_bridge".into()),
+                    ],
+                );
+                voice_gate.store(on, Ordering::Relaxed);
+                voice_gate_dirty.store(true, Ordering::Relaxed);
             }
         }
     }
@@ -2951,6 +3082,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         targets: Arc<Mutex<BridgeCaptureTargets>>,
         voice_synth: Arc<Mutex<Option<u16>>>,
         voice_synth_dirty: Arc<AtomicBool>,
+        voice_gate: Arc<AtomicBool>,
+        voice_gate_dirty: Arc<AtomicBool>,
     ) {
         let mut conn: Option<AppBridgeStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
@@ -3134,6 +3267,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     &targets,
                     &voice_synth,
                     &voice_synth_dirty,
+                    &voice_gate,
+                    &voice_gate_dirty,
                     &logger,
                 );
             }
@@ -3163,6 +3298,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     *current = None;
                 }
                 voice_synth_dirty.store(true, Ordering::Relaxed);
+                // 门内延迟同源回落：主程序没了就没有「何时切好输入法」的事实源，
+                // 继续延迟只会让每次按下白等——关闭（fail-open）。
+                voice_gate.store(false, Ordering::Relaxed);
+                voice_gate_dirty.store(true, Ordering::Relaxed);
                 logger.kv(
                     "[APP-BRIDGE]",
                     &[("event", "disconnected_targets_cleared".into())],
@@ -3196,6 +3335,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let targets = Arc::new(Mutex::new(BridgeCaptureTargets::default()));
         let voice_synth = Arc::new(Mutex::new(None::<u16>));
         let voice_synth_dirty = Arc::new(AtomicBool::new(false));
+        let voice_gate = Arc::new(AtomicBool::new(false));
+        let voice_gate_dirty = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::clone(&voice_gate);
+        let worker_gate_dirty = Arc::clone(&voice_gate_dirty);
         let worker_logger = Logger::with_shared(logger.fallback.clone(), logger.shared.clone());
         let worker_stop = Arc::clone(&stop);
         let worker_stats = Arc::clone(&stats);
@@ -3219,6 +3362,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     worker_targets,
                     worker_synth,
                     worker_synth_dirty,
+                    worker_gate,
+                    worker_gate_dirty,
                 )
             })
             .ok()?;
@@ -3231,6 +3376,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             targets,
             voice_synth,
             voice_synth_dirty,
+            voice_gate,
+            voice_gate_dirty,
         })
     }
 
@@ -3335,9 +3482,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         run_task_command(task_delete_args(), "移除", logger)
     }
 
+    /// 子进程 `schtasks` 必须显式 **CREATE_NO_WINDOW**：助手自身是 GUI 子系统、
+    /// 没有可继承的控制台，不给这个标志时 Windows 会给这个控制台子进程新分配
+    /// 一个控制台（= 一个新的终端窗口）——正是本模块要消灭的那种闪现
+    /// （主程序侧的 `silent_command` 出于同一原因早就带上了该标志）。
     fn run_task_command(cmd_args: Vec<String>, label: &str, logger: &Logger) -> bool {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         match std::process::Command::new("schtasks")
             .args(&cmd_args)
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             Ok(output) => {
@@ -3730,6 +3884,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     // ============================================================ 主流程
 
     pub fn run() {
+        // 最先安顿 stdout/stderr（见 `bootstrap_console`）：必须早于任何打印，
+        // 包括参数错误时的 usage 输出。手动运行接父控制台；后台拉起接 NUL，
+        // 不分配控制台、也就没有任何窗口。
+        let console_state = bootstrap_console();
         let mut args = match parse_args() {
             Ok(a) => a,
             Err(e) if e == "HELP" => {
@@ -3750,10 +3908,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if args.follow_app && args.log.is_none() {
             let _ = std::fs::create_dir_all(&args.runtime_dir);
             args.log = Some(args.runtime_dir.join("helper-task.log"));
-        }
-        // 同理：后台拉起不该让用户看到一个黑框。放在最前，把窗口闪现的时间压到最短。
-        if args.follow_app || args.hide_window {
-            hide_console_window();
         }
 
         // ---- 日志落点：优先与主程序同一个文件（2026-10-01 Andy 要求）----
@@ -3809,6 +3963,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("pid", std::process::id().to_string()),
                 ("port", args.port.to_string()),
                 ("runtime_dir", args.runtime_dir.display().to_string()),
+                // 控制台引导结果：attached = 手动运行（父控制台可见输出）；
+                // nul = 后台拉起（无控制台，stdout/stderr 指向 NUL 设备）。
+                // 排查"为什么没有窗口/没有输出"时，这一条就是答案。
+                ("console", console_state.to_string()),
+                // 兼容参数 --hide-window（值不再影响行为：GUI 子系统没有窗口可
+                // 隐藏，见字段注释）；写进日志让"调用方还在传它"可见。
+                ("hide_window", args.hide_window.to_string()),
                 (
                     "target_pid",
                     args.target_pid
@@ -3821,7 +3982,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
 
         if args.selftest {
-            let ok = selftest(&logger);
+            let ok = selftest(&logger, console_state);
             std::process::exit(if ok { 0 } else { 1 });
         }
 
@@ -4053,13 +4214,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 }
             }
         } else {
-            logger.kv(
-                "[TOKEN]",
-                &[
-                    ("source", "explicit".into()),
-                    ("value", mask_token(&args.token)),
-                ],
-            );
+            logger.kv("[TOKEN]", &token_log_fields("explicit", None, &args.token));
         }
 
         // ---- 宿主里是否已有 tap？----
@@ -4749,6 +4904,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
     }
 
+    /// 门内延迟开关命令（`gate`）的线格式。与 synth 命令同为 JSON 行、同样带令牌。
+    fn voice_gate_command_line(token: &str, on: bool) -> String {
+        format!(
+            "{{\"type\":\"gate\",\"token\":\"{token}\",\"on\":{}}}\n",
+            if on { "true" } else { "false" }
+        )
+    }
+
+    /// 给 agent 下发门内延迟开关（幂等；agent 侧只影响按下帧的呈现时机）。
+    fn send_voice_gate(stream: &mut TcpStream, token: &str, on: bool) -> bool {
+        let line = voice_gate_command_line(token, on);
+        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+    }
+
     /// targets 重发判据（纯函数，语义由单测钉住）。
     ///
     /// 语义要点：判据是「ack 确认的是**最近下发的那份**配置」，而不是「有没有 ack」
@@ -4822,6 +4991,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 最近一次下发给 agent 的语音合成目标：主程序改了「按住说话快捷键」时
         // 在这里检测差异并补发（agent 的 synth 命令幂等，重复应用无害）。
         let mut sent_synth: Option<Option<u16>> = None;
+        // 最近一次下发给 agent 的门内延迟开关（主程序能力声明；None = 尚未下发过）。
+        let mut sent_gate: Option<bool> = None;
         loop {
             if stop_requested(stop) {
                 return;
@@ -4875,6 +5046,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ],
                         );
                         sent_synth = Some(synth_current);
+                    }
+                    // 门内延迟开关（主程序能力声明，2026-10-03）：与 synth 同哲学，
+                    // 变更即单独补发一条 gate 命令；agent 侧幂等，仅影响按下帧的呈现时机。
+                    let (gate_on, gate_dirty) = bridge.voice_gate_state();
+                    if gate_dirty || sent_gate != Some(gate_on) {
+                        if !send_voice_gate(&mut stream, token, gate_on) {
+                            return;
+                        }
+                        logger.kv(
+                            "[VOICE-GATE]",
+                            &[
+                                ("event", "agent_notified".into()),
+                                ("on", gate_on.to_string()),
+                            ],
+                        );
+                        sent_gate = Some(gate_on);
                     }
                 }
             }
@@ -5071,7 +5258,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// **注册表 HostPid 的读取宽度**。前三者出错的现象是"看起来正常但什么都没匹配到"；
     /// 第四者 2026-09-23 在真机上真的发生了（按 4 字节读 QWORD → 0 个实例 →
     /// 误报"设备未连接"），所以它的宽度契约必须留在这里做回归。
-    fn selftest(logger: &Logger) -> bool {
+    fn selftest(logger: &Logger, console_state: &str) -> bool {
         let mut all_ok = true;
         let mut check = |label: &str, ok: bool, detail: String| {
             all_ok = all_ok && ok;
@@ -5123,6 +5310,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 && masked.contains("00805f9b34fb")
                 && !masked.contains("A1B2C3D4E5F6"),
             masked.clone(),
+        );
+
+        // 2b) 令牌日志脱敏（2026-10-04 现场回归）：`[TOKEN]` 只允许写指纹。
+        //     此前 value 走 mask_token——它只认"下划线 + 12 位十六进制"的蓝牙
+        //     形态，对裸令牌是**空操作**，于是 32 位明文令牌进了诊断日志。
+        let sample_token = "0f5bc7ba950a257f62f4c99691e49280";
+        let token_line = token_log_fields(
+            "file",
+            Some(Path::new("C:\\x\\session.token")),
+            sample_token,
+        )
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+        check(
+            "令牌日志脱敏：只写指纹、不含明文",
+            !token_line.contains(sample_token)
+                && token_line.contains("fp=")
+                && token_line.contains("len=32"),
+            token_line,
         );
 
         // 3) 极简 JSON 取值器：协议实际会遇到的几类形态
@@ -5813,14 +6021,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         //     但内联的还是旧的"只可能发生在**改错文件**时——真机表现是"命令发了没人认"，
         //     极难从日志看出来（一切握手正常，只是按键永久不可见）。这条就是防它。
         check(
-            "内嵌 agent：全按键白名单与动态 targets 协议存在",
+            "内嵌 agent：全按键白名单、动态 targets 与门内延迟协议存在",
             AGENT_JS.contains("0x00F1, 0x0028, 0x0035, 0x004A")
                 && AGENT_JS.contains("if (cmd.type === 'targets')")
                 && AGENT_JS.contains("var reportUsages = [];")
                 && AGENT_JS.contains("var clearUsages = [];")
                 && AGENT_JS.contains("type: 'targets_ack'")
                 && AGENT_JS.contains("reportUsages.indexOf(u) >= 0")
-                && AGENT_JS.contains("clearUsages.indexOf(u) < 0"),
+                && AGENT_JS.contains("clearUsages.indexOf(u) < 0")
+                && AGENT_JS.contains("if (cmd.type === 'gate')")
+                && AGENT_JS.contains("synth:gate delay_ms="),
             format!("agent_sha256={}", agent_sha256_hex()),
         );
 
@@ -6127,6 +6337,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("first={first} second={second}"),
         );
 
+        // 控制台引导（2026-10-04）：stdout/stderr 必须可写。
+        // GUI 子系统 + 计划任务拉起时控制台状态是 `nul`（无窗口、输出进 NUL
+        // 设备）；手动运行是 `attached`（父控制台）。引导失效（句柄无效）时
+        // `Logger::line` 的 `println!` 会 panic，进程表现为"无声消失"——
+        // 这正是 2026-09-28 真机 run4/run5 那类事故的形状，必须可回归。
+        // 计划任务路径（探针 --selftest --hide-window）下执行的就是 nul 分支。
+        {
+            use std::io::Write;
+            let out_ok = std::io::stdout().write_all(b"\n").is_ok();
+            let err_ok = std::io::stderr().write_all(b"\n").is_ok();
+            check(
+                "控制台引导：stdout/stderr 可写（attached / nul 两条路径）",
+                out_ok && err_ok,
+                format!("console={console_state} stdout_ok={out_ok} stderr_ok={err_ok}"),
+            );
+        }
+
         let _ = fs::remove_dir_all(&tmp);
 
         logger.line("");
@@ -6300,7 +6527,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-10-02.tx-serialized";
+    const AGENT_BUILD: &str = "2026-10-03.first-press-gate";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -6309,6 +6536,58 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    #[cfg(test)]
+    mod token_log_privacy_tests {
+        use super::*;
+
+        /// 与两处固定断言共用：形状必须是 `len=32 fp=<8 hex>`。
+        const SAMPLE: &str = "0f5bc7ba950a257f62f4c99691e49280";
+
+        #[test]
+        fn fingerprint_is_stable_and_never_the_token() {
+            let fp = token_fingerprint(SAMPLE);
+            assert!(fp.starts_with("len=32 fp="), "{fp}");
+            assert_eq!(fp.len(), "len=32 fp=".len() + 8);
+            assert_eq!(fp, token_fingerprint(SAMPLE));
+            assert_ne!(fp, token_fingerprint("00"));
+            assert!(!fp.contains(SAMPLE));
+        }
+
+        #[test]
+        fn token_log_fields_never_carry_the_raw_value() {
+            let path = Path::new("C:\\ProgramData\\SayAll\\rc003-helper\\session.token");
+            let joined = token_log_fields("file", Some(path), SAMPLE)
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(joined.contains("source=file"), "{joined}");
+            assert!(joined.contains("fp="), "{joined}");
+            assert!(!joined.contains(SAMPLE), "日志字段不得含明文令牌: {joined}");
+        }
+
+        #[test]
+        fn load_or_create_token_writes_only_the_fingerprint_to_the_log() {
+            // 回归（2026-10-04）：修复前这一行是 `mask_token(裸令牌)` → 空操作
+            // → 明文进日志。这条测试直接盯住**真实写出的日志文本**。
+            let dir =
+                std::env::temp_dir().join(format!("rc003-token-log-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("创建临时目录");
+            fs::write(dir.join(TOKEN_FILE), SAMPLE).expect("写入令牌文件");
+            let log_path = dir.join("run.log");
+            let logger = Logger::new(Some(log_path.clone()));
+            let (token, from_file) = load_or_create_token(&dir, false, &logger).expect("读取令牌");
+            assert_eq!(token, SAMPLE);
+            assert!(from_file, "磁盘上本来就有令牌");
+            let text = fs::read_to_string(&log_path).expect("读取日志");
+            assert!(text.contains("[TOKEN]"), "{text}");
+            assert!(text.contains("fp="), "{text}");
+            assert!(!text.contains(SAMPLE), "日志不得含明文令牌: {text}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
 
     #[cfg(test)]
     mod agent_refresh_tests {
@@ -6361,6 +6640,26 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert_eq!(parse_bridge_synth_line("S zz"), None);
             // 0 usage 视为无效（app 侧不会下发；防呆）。
             assert_eq!(parse_bridge_synth_line("S 0"), None);
+        }
+
+        #[test]
+        fn parses_gate_capability_line() {
+            // 主程序侧 voice_gate_line() 的编码，逐字符对齐。
+            assert_eq!(parse_bridge_gate_line("W 1"), Some(true));
+            assert_eq!(parse_bridge_gate_line("W 0"), Some(false));
+            assert_eq!(parse_bridge_gate_line("W 2"), None);
+            assert_eq!(parse_bridge_gate_line("S 00E6"), None);
+            assert_eq!(parse_bridge_gate_line("W"), None);
+        }
+
+        #[test]
+        fn gate_command_line_carries_token_and_state() {
+            let on = voice_gate_command_line("tok", true);
+            assert!(on.contains("\"type\":\"gate\""));
+            assert!(on.contains("\"token\":\"tok\""));
+            assert!(on.contains("\"on\":true"));
+            assert!(on.ends_with('\n'));
+            assert!(voice_gate_command_line("tok", false).contains("\"on\":false"));
         }
 
         #[test]
@@ -6459,18 +6758,31 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 余量不是"留着好看"：读循环必须把它解析成合成配置（而不是只留字节）。
         #[test]
         fn drain_applies_synth_line_left_in_the_read_buffer() {
-            let mut read_buffer: Vec<u8> = b"S 00E6\n".to_vec();
+            let mut read_buffer: Vec<u8> = b"S 00E6\nW 1\n".to_vec();
             let targets = Mutex::new(BridgeCaptureTargets::default());
             let voice_synth = Mutex::new(None);
             let dirty = AtomicBool::new(false);
+            let gate = AtomicBool::new(false);
+            let gate_dirty = AtomicBool::new(false);
             let logger = Logger::new(None);
 
-            drain_bridge_lines(&mut read_buffer, &targets, &voice_synth, &dirty, &logger);
+            drain_bridge_lines(
+                &mut read_buffer,
+                &targets,
+                &voice_synth,
+                &dirty,
+                &gate,
+                &gate_dirty,
+                &logger,
+            );
 
             assert!(read_buffer.is_empty());
             let observed = *voice_synth.lock().unwrap();
             assert_eq!(observed, Some(0x00E6));
             assert!(dirty.load(Ordering::Relaxed));
+            // 同一批次里的 W 行也必须落地（能力声明与合成配置同一批写出）。
+            assert!(gate.load(Ordering::Relaxed));
+            assert!(gate_dirty.load(Ordering::Relaxed));
         }
 
         /// 未成行的尾巴不能吐掉：没有换行就留在缓冲里等下一次读补齐。
