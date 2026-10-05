@@ -325,7 +325,9 @@ mod simulation {
     const RC001_ID: &str = "ci-simulation-rc001";
     const RC003_ID: &str = "ci-simulation-rc003";
     const CABLE_ENDPOINT_ID: &str = "ci-simulation-cable-input";
-    const CABLE_ENDPOINT_NAME: &str = "CABLE Input (CI Simulation)";
+    // 名称必须包含 "VB-Audio Virtual Cable"：向导的推荐判定（isRecommendedVoiceEndpoint）以此为准，
+    // 仿真端点用真实世界的命名结构，否则第③步在仿真里进不去（2026-10-05 实测）。
+    const CABLE_ENDPOINT_NAME: &str = "CABLE Input (VB-Audio Virtual Cable, CI Simulation)";
     /// 回放启动前的稳定等待：让窗口/前端订阅就位，避免首批边沿早于按钮事件订阅。
     const REPLAY_START_SETTLE: Duration = Duration::from_millis(1_500);
 
