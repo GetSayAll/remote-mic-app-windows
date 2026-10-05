@@ -172,7 +172,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   steps.push("RC001 连接 command 返回 16 kHz ATVV 就绪状态");
 
   await waitFor(
-    () => (document.body.textContent?.includes("CABLE Input (CI Simulation)") ? true : null),
+    () => (document.body.textContent?.includes("CABLE Input (VB-Audio Virtual Cable, CI Simulation)") ? true : null),
     "仿真音频端点",
   );
   // 端点列表默认收起（用户每次只用一个）：自动选择后以"更换设备"入口呈现。
