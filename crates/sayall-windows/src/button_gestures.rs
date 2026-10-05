@@ -219,7 +219,22 @@ impl GestureRecognizer {
 
     /// 处理到期定时器（双击窗口超时/按住确认/长按/连续触发），返回触发的手势。
     pub fn advance(&mut self, now: Instant) -> Vec<(RemoteButton, ButtonTrigger)> {
+        self.advance_with_ticks(now).0
+    }
+
+    /// 同 [`Self::advance`]，另返回**由连续触发计时器产生的拍**（不含双击窗
+    /// 超时补发的单击与首次长按）：引擎据此聚合 `map_repeat` 日志，避免把
+    /// 一次性手势记成连续拍（2026-10-05 评审发现 1）。
+    #[allow(clippy::type_complexity)]
+    pub fn advance_with_ticks(
+        &mut self,
+        now: Instant,
+    ) -> (
+        Vec<(RemoteButton, ButtonTrigger)>,
+        Vec<(RemoteButton, ButtonTrigger)>,
+    ) {
         let mut fired = Vec::new();
+        let mut ticks = Vec::new();
         for (button, (config, state)) in &mut self.buttons {
             if state
                 .double_deadline
@@ -262,6 +277,7 @@ impl GestureRecognizer {
                     if state.pressed {
                         state.long_repeat_deadline = Some(now + interval);
                         fired.push((*button, ButtonTrigger::Long));
+                        ticks.push((*button, ButtonTrigger::Long));
                     } else {
                         state.long_repeat_deadline = None;
                     }
@@ -274,16 +290,17 @@ impl GestureRecognizer {
                 {
                     // 双击共存时，必须先在双击窗结束时确认为单击才允许起拍。
                     let ready = state.pressed && (!config.double_enabled || state.hold_concluded);
+                    // 未就绪（按住中但尚未确认）不留过去时刻的截止时间，否则
+                    // next_deadline 会让引擎以 0 超时空转（2026-10-05 评审发现 5）。
+                    state.repeat_deadline = if ready { Some(now + interval) } else { None };
                     if ready {
-                        state.repeat_deadline = Some(now + interval);
                         fired.push((*button, ButtonTrigger::Single));
-                    } else if !state.pressed {
-                        state.repeat_deadline = None;
+                        ticks.push((*button, ButtonTrigger::Single));
                     }
                 }
             }
         }
-        fired
+        (fired, ticks)
     }
 
     /// 最近的定时器截止时间（引擎线程的 recv_timeout 依据）。
@@ -1011,5 +1028,73 @@ mod tests {
             recognizer.next_deadline(),
             Some(t0 + Duration::from_millis(330))
         );
+
+        // 双击共存 + 开关=单击：按住确认计时器（双击窗）必须参与 next_deadline，
+        // 否则按住确认的单击会迟到（2026-10-05 评审发现 6）。
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with_repeat(
+            RemoteButton::Back,
+            Some(KeyCode::Delete),
+            Some(KeyCode::Space),
+            None,
+            Some(ButtonTrigger::Single),
+        ));
+        recognizer.press(RemoteButton::Back, t0);
+        assert_eq!(recognizer.next_deadline(), Some(t0 + DOUBLE_CLICK_WINDOW));
+    }
+
+    #[test]
+    fn advance_ticks_cover_only_repeat_timers() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with_repeat(
+            RemoteButton::Back,
+            Some(KeyCode::Delete),
+            Some(KeyCode::Space),
+            None,
+            Some(ButtonTrigger::Single),
+        ));
+
+        // 快速点按：双击窗超时补发的单击不是连续拍（2026-10-05 评审发现 1）。
+        recognizer.press(RemoteButton::Back, t0);
+        assert!(recognizer
+            .release(RemoteButton::Back, t0 + Duration::from_millis(60))
+            .is_empty());
+        let (fired, ticks) = recognizer.advance_with_ticks(t0 + Duration::from_millis(360));
+        assert_eq!(fired, vec![(RemoteButton::Back, ButtonTrigger::Single)]);
+        assert!(ticks.is_empty(), "双击窗补发的单击不得记成连续拍");
+
+        // 按住：300ms 确认为单击（不是拍）、350ms 起拍（是拍）。
+        let t1 = t0 + Duration::from_secs(2);
+        recognizer.press(RemoteButton::Back, t1);
+        let (fired, ticks) = recognizer.advance_with_ticks(t1 + DOUBLE_CLICK_WINDOW);
+        assert_eq!(fired, vec![(RemoteButton::Back, ButtonTrigger::Single)]);
+        assert!(ticks.is_empty(), "按住确认的首次单击不算连续拍");
+        let (fired, ticks) = recognizer.advance_with_ticks(t1 + REPEAT_START_DELAY);
+        assert_eq!(fired, vec![(RemoteButton::Back, ButtonTrigger::Single)]);
+        assert_eq!(ticks, vec![(RemoteButton::Back, ButtonTrigger::Single)]);
+    }
+
+    #[test]
+    fn advance_ticks_cover_only_repeat_timers_for_long() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with_repeat(
+            RemoteButton::Back,
+            None,
+            None,
+            Some(KeyCode::Backspace),
+            Some(ButtonTrigger::Long),
+        ));
+
+        // 首次长按是手势本身，不是连续拍；其后按间隔续拍才是。
+        recognizer.press(RemoteButton::Back, t0);
+        let (fired, ticks) = recognizer.advance_with_ticks(t0 + LONG_PRESS_THRESHOLD);
+        assert_eq!(fired, vec![(RemoteButton::Back, ButtonTrigger::Long)]);
+        assert!(ticks.is_empty(), "首次长按不得记成连续拍");
+        let beat = t0 + LONG_PRESS_THRESHOLD + Duration::from_millis(50);
+        let (fired, ticks) = recognizer.advance_with_ticks(beat);
+        assert_eq!(fired, vec![(RemoteButton::Back, ButtonTrigger::Long)]);
+        assert_eq!(ticks, vec![(RemoteButton::Back, ButtonTrigger::Long)]);
     }
 }

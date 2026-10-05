@@ -447,7 +447,7 @@ fn note_repeat_beat(repeat_runs: &mut RepeatRuns, button: RemoteButton, trigger:
     }
 }
 
-/// 结束一趟连续触发并落聚合日志（`reason` = release / reset / reconfigure）。
+/// 结束一趟连续触发并落聚合日志（`reason` = release / reset / reconfigure / shutdown）。
 fn finish_repeat_run(repeat_runs: &mut RepeatRuns, button: RemoteButton, reason: &str) {
     if let Some((trigger, beats, started)) = repeat_runs.remove(&button) {
         crate::ble::gatt_note(format!(
@@ -461,6 +461,15 @@ fn finish_all_repeat_runs(repeat_runs: &mut RepeatRuns, reason: &str) {
     let buttons: Vec<RemoteButton> = repeat_runs.keys().copied().collect();
     for button in buttons {
         finish_repeat_run(repeat_runs, button, reason);
+    }
+}
+
+/// 把定时器到期的**连续拍**并入聚合；`advance_with_ticks` 的第二返回值以外
+/// 的手势（双击窗补发的单击、首次长按）是一次性手势，不进聚合
+/// （2026-10-05 评审发现 1：避免把点按记成 `map_repeat`，污染拍数与时长）。
+fn note_advance_ticks(repeat_runs: &mut RepeatRuns, ticks: Vec<(RemoteButton, ButtonTrigger)>) {
+    for (button, trigger) in ticks {
+        note_repeat_beat(repeat_runs, button, trigger);
     }
 }
 
@@ -495,8 +504,11 @@ fn engine_worker(
                 Ok(message) => message,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
-                    for (button, trigger) in recognizer.advance(now) {
-                        note_repeat_beat(&mut repeat_runs, button, trigger);
+                    // 只有连续触发计时器产生的拍才计入 map_repeat 聚合；
+                    // 双击窗补发的单击与首次长按是一次性手势（2026-10-05 评审发现 1）。
+                    let (fired, ticks) = recognizer.advance_with_ticks(now);
+                    note_advance_ticks(&mut repeat_runs, ticks);
+                    for (button, trigger) in fired {
                         if fire_gesture(
                             button,
                             trigger,
@@ -520,11 +532,19 @@ fn engine_worker(
                     }
                     continue;
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // 引擎线程收尾：把仍在进行中的连续触发聚合日志补齐
+                    // （2026-10-05 评审发现 2）。
+                    finish_all_repeat_runs(&mut repeat_runs, "shutdown");
+                    break;
+                }
             },
             None => match receiver.recv() {
                 Ok(message) => message,
-                Err(_) => break,
+                Err(_) => {
+                    finish_all_repeat_runs(&mut repeat_runs, "shutdown");
+                    break;
+                }
             },
         };
 
@@ -644,7 +664,11 @@ fn engine_worker(
                     mappings.enabled, configured
                 ));
             }
-            EngineMessage::Shutdown => break,
+            EngineMessage::Shutdown => {
+                // 显式关闭同样要补齐进行中的连续触发聚合日志（评审发现 2）。
+                finish_all_repeat_runs(&mut repeat_runs, "shutdown");
+                break;
+            }
         }
     }
 }
@@ -2130,5 +2154,60 @@ mod tests {
 
         drop(runtime);
         drop(gate);
+    }
+
+    #[test]
+    fn repeat_run_signals_ignore_one_shot_gestures() {
+        use crate::button_gestures::GestureRecognizer;
+        use crate::send_input::{ButtonTrigger, KeyChord};
+
+        // 评审发现 1 回归：双击窗补发的单击与按住确认的首次单击都不得计成
+        // map_repeat 拍，只有连续触发计时器产生的拍才进聚合。
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Delete],
+                    },
+                },
+                double: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Space],
+                    },
+                },
+                long: ButtonAction::Disabled,
+                hold_repeat: Some(ButtonTrigger::Single),
+            },
+        );
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+        let mut runs: RepeatRuns = BTreeMap::new();
+        let t0 = Instant::now();
+
+        // 快速点按 → 双击窗超时补发的单击：不是拍。
+        recognizer.press(RemoteButton::Back, t0);
+        assert!(recognizer
+            .release(RemoteButton::Back, t0 + Duration::from_millis(60))
+            .is_empty());
+        let (_, ticks) = recognizer.advance_with_ticks(t0 + Duration::from_millis(360));
+        note_advance_ticks(&mut runs, ticks);
+        assert!(runs.is_empty(), "双击窗补发的单击不得计成连续拍");
+
+        // 按住 → 300ms 的按住确认不是拍，350ms 起拍才是。
+        let t1 = t0 + Duration::from_secs(2);
+        recognizer.press(RemoteButton::Back, t1);
+        let (_, ticks) = recognizer.advance_with_ticks(t1 + Duration::from_millis(300));
+        note_advance_ticks(&mut runs, ticks);
+        assert!(runs.is_empty(), "按住确认的首次单击不得计成连续拍");
+        let (_, ticks) = recognizer.advance_with_ticks(t1 + Duration::from_millis(350));
+        note_advance_ticks(&mut runs, ticks);
+        assert_eq!(runs.get(&RemoteButton::Back).map(|run| run.1), Some(1));
+        assert!(recognizer
+            .release(RemoteButton::Back, t1 + Duration::from_millis(400))
+            .is_empty());
+        finish_repeat_run(&mut runs, RemoteButton::Back, "release");
+        assert!(runs.is_empty(), "释放后该趟聚合必须收尾");
     }
 }

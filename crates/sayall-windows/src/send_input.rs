@@ -401,6 +401,10 @@ impl ButtonAction {
     /// - 单键快捷键（删除/退格/方向/字母/媒体键等）可连续执行；
     /// - 组合键（含修饰键或 ≥2 键：Ctrl+C、Alt+Tab、Win+L）与单独修饰键不可；
     /// - 滚动、鼠标移动可连续；鼠标点击、打开应用、聚焦输入框不可。
+    ///
+    /// 界面侧镜像：`src/pages/ButtonsPage.vue` 的 `actionAllowsRepeat` 与
+    /// `REPEAT_MODIFIER_KEYS`；两侧必须同步（界面放开引擎拒绝的组合会被
+    /// `ButtonMappings::normalized` 在保存时整单拒绝）。
     pub fn allows_repeat(&self) -> bool {
         match self {
             Self::Disabled | Self::OpenApp { .. } | Self::FocusInput | Self::MouseClick { .. } => {

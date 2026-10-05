@@ -2,7 +2,9 @@ use sayall_core::{
     normalize_gain_db, AppIconIdentifier, AppSettings, ThemePreference, UsageStatistics,
     VoiceInputTool,
 };
-use sayall_windows::send_input::{ButtonMappings, KeyChord, KeyCode};
+use sayall_windows::send_input::{
+    ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
+};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -150,6 +152,24 @@ impl SettingsStore {
             }
             Err(error) => return Err(format!("读取按键映射失败：{error}")),
         };
+        // 文件由更高版本写入：本版本拒绝加载（normalized 报错），但先把原始
+        // 内容留一份旁证，避免用户在本版本里保存时覆盖掉更高版本的数据
+        // （2026-10-05 评审发现 3）。
+        if let Some(version) = button_mappings_schema_version(&contents) {
+            if version > u64::from(BUTTON_MAPPINGS_SCHEMA_VERSION) {
+                let backup = path.with_extension(format!("json.v{version}.bak"));
+                if !backup.exists() {
+                    let _ = fs::copy(&path, &backup);
+                }
+                sayall_windows::gatt_note(format!(
+                    "button_mappings schema_version={version} supported_max={BUTTON_MAPPINGS_SCHEMA_VERSION} action=backup backup_file={}",
+                    backup
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown")
+                ));
+            }
+        }
         serde_json::from_str::<ButtonMappings>(&contents)
             .map_err(|error| format!("解析按键映射失败：{error}"))?
             // 旧文件（结构版本 < 1）按旧版自动连发行为迁移为显式开关，
@@ -179,7 +199,10 @@ impl SettingsStore {
         path: &Path,
         mappings: ButtonMappings,
     ) -> Result<(), String> {
+        // 与加载/导入同一口径：旧结构先迁移再校验盖章，避免把 v0 直接写成
+        // v1 却丢掉「旧版自动连发」语义（2026-10-05 评审发现 4）。
         let mappings = mappings
+            .migrate_legacy_hold_repeat()
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))?;
         let configuration = ButtonMappingConfiguration {
@@ -342,6 +365,14 @@ fn parse_settings(contents: &str) -> Result<AppSettings, String> {
 
 fn serialize_settings(settings: &AppSettings) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化应用设置失败：{error}"))
+}
+
+/// 按键映射文件里的结构版本号（缺省或非法均为 None）。
+fn button_mappings_schema_version(contents: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(contents)
+        .ok()?
+        .get("schemaVersion")?
+        .as_u64()
 }
 
 #[cfg(test)]
@@ -749,6 +780,58 @@ mod tests {
             imported.actions(RemoteButton::Back).hold_repeat,
             Some(ButtonTrigger::Single),
             "旧导出导入按加载同一规则迁移"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn load_backs_up_button_mappings_from_a_newer_schema() {
+        let base = std::env::temp_dir().join("sayall-button-mappings-newer-schema");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = SettingsStore::new(base.join("app-settings.json"));
+        let path = store.button_mappings_path();
+        let newer = r#"{"schemaVersion":9,"enabled":true,"actions":{"up":{"single":{"type":"shortcut","chord":{"keys":["delete"]}},"double":{"type":"disabled"},"long":{"type":"disabled"}}}}"#;
+        std::fs::write(&path, newer).unwrap();
+
+        assert!(
+            store.load_button_mappings().is_err(),
+            "更高版本必须拒绝加载（不降级）"
+        );
+        // 原始内容必须先留旁证：本版本随后保存也不至于覆盖更高版本的数据。
+        let backup = path.with_extension("json.v9.bak");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), newer);
+
+        // 重复加载幂等：旁证不被重写，原文件保持不动。
+        assert!(store.load_button_mappings().is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), newer);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn export_migrates_legacy_hold_repeat_like_load_and_import() {
+        let base = std::env::temp_dir().join("sayall-button-mappings-export-migrate");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = SettingsStore::new(base.join("app-settings.json"));
+        let legacy: ButtonMappings = serde_json::from_str(
+            r#"{"enabled":true,"actions":{"back":{"single":{"type":"shortcut","chord":{"keys":["delete"]}},"double":{"type":"disabled"},"long":{"type":"disabled"}}}}"#,
+        )
+        .unwrap();
+
+        let target = base.join("export.json");
+        store.export_button_mappings(&target, legacy).unwrap();
+        let exported = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            exported.contains("\"holdRepeat\": \"single\""),
+            "导出必须与加载/导入同一迁移口径：{exported}"
+        );
+        assert!(
+            exported.contains("\"schemaVersion\": 1"),
+            "导出统一写当前结构版本：{exported}"
         );
 
         let _ = std::fs::remove_dir_all(base);
