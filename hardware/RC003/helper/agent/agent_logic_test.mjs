@@ -112,9 +112,9 @@ const sandbox = {
       });
     },
   },
-  // 门内延迟的 sleep 桩：只记录调用，不真的睡（判据 = 有没有调用、睡了多少毫秒）。
+  // Frida Thread.sleep 接收秒；只记录调用，不真的睡。
   Thread: {
-    sleep(ms) { sleeps.push(ms); },
+    sleep(seconds) { sleeps.push(seconds); },
   },
   // init()/heartbeat() 不会在测试里调用；这两个桩只是防止它们被误触发后真的排上定时器。
   setInterval: () => 0,
@@ -337,12 +337,26 @@ ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003E, to: 0x00E6 }));
   const before = sleeps.length;
   const beforeDelays = ctx.stat.gate_delays;
   const { ptr } = press(0x003E);
-  check('gate 开：改写前恰好睡一次 delay_ms',
-    sleeps.length === before + 1 && sleeps[sleeps.length - 1] === 150,
-    `sleeps=${JSON.stringify(sleeps.slice(before))}`);
+  check('gate 开：150ms 转为 0.15s，改写前恰好睡一次',
+    sleeps.length === before + 1 && sleeps[sleeps.length - 1] === 0.15,
+    `sleep_seconds=${JSON.stringify(sleeps.slice(before))}`);
   check('gate 开：替换仍然生效（0x00E6）',
     ptr.buf[3] === 0xe6, `buf3=0x${ptr.buf[3].toString(16)}`);
   check('gate 开：计数 gate_delays +1', ctx.stat.gate_delays === beforeDelays + 1);
+}
+
+for (const { name, command, seconds } of [
+  { name: '省略 delay_ms 使用默认 150ms', command: {}, seconds: 0.15 },
+  { name: 'delay_ms 为 0 仍使用默认 150ms', command: { delay_ms: 0 }, seconds: 0.15 },
+  { name: '上限 2000ms 转为 2s', command: { delay_ms: 2000 }, seconds: 2 },
+]) {
+  ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+  ctx.handleCommand(JSON.stringify({ type: 'gate', on: true, ...command }));
+  const before = sleeps.length;
+  const { ptr } = press(0x003E);
+  check(`gate 开：${name}，替换仍然生效`,
+    sleeps.length === before + 1 && sleeps[sleeps.length - 1] === seconds && ptr.buf[3] === 0xe6,
+    `sleep_seconds=${JSON.stringify(sleeps.slice(before))} buf3=0x${ptr.buf[3].toString(16)}`);
 }
 
 {
