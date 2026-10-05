@@ -1623,7 +1623,7 @@ async function retryVoiceTest(): Promise<void> {
               d="M9.8 3.6 5.4 8l4.4 4.4"
               fill="none"
               stroke="currentColor"
-              stroke-width="1.7"
+              stroke-width="1.6"
               stroke-linecap="round"
               stroke-linejoin="round"
             />
@@ -1785,7 +1785,7 @@ async function retryVoiceTest(): Promise<void> {
   display: inline-flex;
   gap: 10px;
   align-items: center;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .onboarding-phase .on {
@@ -1813,14 +1813,14 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-body {
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: minmax(0, 58fr) minmax(360px, 42fr);
+  grid-template-columns: minmax(0, 60fr) minmax(360px, 40fr);
   min-height: 0;
 }
 .onboarding-main {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 24px 40px 18px;
+  gap: 14px;
+  padding: 26px 44px 18px;
   overflow: hidden;
   min-height: 0;
 }
@@ -1829,6 +1829,11 @@ async function retryVoiceTest(): Promise<void> {
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
+  /* 短内容垂直居中，避免"内容贴左上角、下方大片留白"（2026-10-05 再反馈）；
+     长内容时 safe center 退化为顶部对齐，滚动可达。 */
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
 }
 /* 底部动作行（2026-10-05 用户要求）：去掉整幅页脚横幅；复制诊断在左、主按钮在右。 */
 .onboarding-actions {
@@ -1856,21 +1861,21 @@ async function retryVoiceTest(): Promise<void> {
   width: fit-content;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  margin-left: -4px;
+  gap: 6px;
+  margin-left: -5px;
   padding: 0;
   border: 0;
   background: none;
   color: var(--text-control);
   font: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.4;
   cursor: pointer;
 }
 .onboarding-back-icon {
-  width: 15px;
-  height: 15px;
-  flex: 0 0 15px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
 }
 .onboarding-back:hover {
   color: var(--accent-text);
@@ -1931,29 +1936,29 @@ async function retryVoiceTest(): Promise<void> {
   font-weight: 800;
 }
 .side-caption {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .onboarding-check-card {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--card);
-  padding: 14px;
+  padding: 16px;
   box-shadow: 0 10px 24px var(--shadow-card);
 }
 .onboarding-check-card h4 {
-  margin: 0 0 9px;
-  font-size: 13.5px;
+  margin: 0 0 10px;
+  font-size: 15px;
   color: var(--text-subtle-strong);
 }
 .onboarding-crow {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 11px;
+  padding: 9px 12px;
   border-radius: 8px;
   background: var(--surface-subtle);
-  font-size: 13.5px;
+  font-size: 14.5px;
   color: var(--text-control);
 }
 .onboarding-crow + .onboarding-crow {
@@ -1987,29 +1992,29 @@ async function retryVoiceTest(): Promise<void> {
   max-width: 720px;
 }
 .onboarding-step h1 {
-  margin: 0 0 10px;
-  font-size: 24px;
+  margin: 0 0 12px;
+  font-size: 27px;
   letter-spacing: -0.3px;
   line-height: 1.25;
 }
 .onboarding-lede {
-  margin: 0 0 14px;
-  font-size: 14px;
+  margin: 0 0 16px;
+  font-size: 15.5px;
   color: var(--text-control);
-  line-height: 1.65;
+  line-height: 1.7;
 }
 .onboarding-muted {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 14px;
 }
 .onboarding-list {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
   margin: 6px 0 0;
   padding-left: 20px;
-  font-size: 13.5px;
-  line-height: 1.6;
+  font-size: 14.5px;
+  line-height: 1.65;
 }
 .onboarding-rows {
   display: flex;
@@ -2023,13 +2028,13 @@ async function retryVoiceTest(): Promise<void> {
   margin-top: 0;
 }
 .onboarding-card {
-  padding: 14px 16px;
+  padding: 16px 18px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
 }
 .onboarding-card + .onboarding-card {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 .onboarding-card.accent {
   border-color: var(--accent-border);
@@ -2040,13 +2045,13 @@ async function retryVoiceTest(): Promise<void> {
   background: var(--warning-surface-soft);
 }
 .onboarding-card h4 {
-  margin: 0 0 7px;
-  font-size: 14.5px;
+  margin: 0 0 8px;
+  font-size: 16px;
 }
 .onboarding-card p {
-  margin: 7px 0 0;
-  font-size: 13.5px;
-  line-height: 1.6;
+  margin: 8px 0 0;
+  font-size: 14.5px;
+  line-height: 1.65;
   color: var(--text-secondary);
 }
 .onboarding-numlist {
@@ -2060,7 +2065,7 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-numlist li {
   display: flex;
   gap: 9px;
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.6;
 }
 .onboarding-num {
@@ -2083,13 +2088,13 @@ async function retryVoiceTest(): Promise<void> {
   margin-top: 12px;
 }
 .onboarding-chip {
-  padding: 7px 13px;
+  padding: 8px 14px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface-control);
   color: var(--text-control);
   font: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
   cursor: pointer;
 }
 .onboarding-chip.strong {
@@ -2145,22 +2150,22 @@ async function retryVoiceTest(): Promise<void> {
   flex-direction: column;
 }
 .onboarding-status-row .status-text strong {
-  font-size: 14px;
+  font-size: 15px;
 }
 .onboarding-status-row .status-text small {
   margin-top: 2px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .onboarding-status-row .status-state {
   margin-left: auto;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   white-space: nowrap;
 }
 .onboarding-status-row .status-value {
   margin-left: auto;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
@@ -2230,18 +2235,18 @@ async function retryVoiceTest(): Promise<void> {
   gap: 2px;
 }
 .onboarding-option .option-body strong {
-  font-size: 14px;
+  font-size: 15px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 .onboarding-option .option-body small {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .onboarding-option .option-trailing {
   margin-left: auto;
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -2250,7 +2255,7 @@ async function retryVoiceTest(): Promise<void> {
   color: var(--accent-text);
 }
 .onboarding-tag {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--accent-text);
 }
@@ -2276,12 +2281,12 @@ async function retryVoiceTest(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 11px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-subtle);
   color: var(--text-control);
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .onboarding-bchip .dot {
   flex: 0 0 14px;
@@ -2305,7 +2310,7 @@ async function retryVoiceTest(): Promise<void> {
   align-items: center;
   gap: 8px;
   margin-top: 12px;
-  font-size: 13.5px;
+  font-size: 14.5px;
   color: var(--text-secondary);
 }
 .onboarding-dots .dot {
@@ -2322,7 +2327,7 @@ async function retryVoiceTest(): Promise<void> {
 /* ---- 语音验证页 ---- */
 .onboarding-status-line {
   margin: 0;
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: 600;
 }
 .onboarding-wave-mark {
@@ -2337,15 +2342,15 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-voice-input {
   width: 100%;
   box-sizing: border-box;
-  min-height: 54px;
-  margin: 16px 0 12px;
-  padding: 14px 15px;
+  min-height: 64px;
+  margin: 20px 0 14px;
+  padding: 16px 16px;
   border: 1.5px solid var(--accent-border);
   border-radius: 10px;
   background: var(--card);
   color: var(--text-primary);
   font: inherit;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.5;
 }
 .onboarding-voice-input:focus {
@@ -2363,7 +2368,7 @@ async function retryVoiceTest(): Promise<void> {
   border-top: 1px solid var(--border);
 }
 .onboarding-switch-row .switch-state {
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
 }
 .onboarding-switch-row .switch-state.ok {
@@ -2379,14 +2384,14 @@ async function retryVoiceTest(): Promise<void> {
   margin-top: 8px;
 }
 .onboarding-chip-select button {
-  padding: 6px 13px;
+  padding: 7px 14px;
   border: 1px solid var(--border-strong, #c9cbd6);
   border-radius: 8px;
   background: var(--surface-raised, #fff);
   color: var(--text-control);
   cursor: pointer;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .onboarding-chip-select button.selected {
   border-color: var(--accent-border);
@@ -2397,26 +2402,26 @@ async function retryVoiceTest(): Promise<void> {
 
 /* ---- 保存失败提示 ---- */
 .onboarding-error {
-  margin: 0 40px 10px;
-  font-size: 13px;
+  margin: 0 44px 10px;
+  font-size: 14px;
   color: var(--error-text, #b3261e);
 }
 .onboarding-error-block {
   margin: 0 0 12px;
-  padding: 11px 15px;
+  padding: 12px 16px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card);
 }
 .onboarding-error-block p {
   margin: 0 0 8px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 /* 底部动作行里的门禁提示（右对齐，紧贴主按钮上方）。 */
 .onboarding-block-hint {
   max-width: 420px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--warning-text);
   text-align: right;
 }
@@ -2427,7 +2432,7 @@ async function retryVoiceTest(): Promise<void> {
   background: none;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13.5px;
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
@@ -2440,7 +2445,7 @@ async function retryVoiceTest(): Promise<void> {
   opacity: 0.6;
 }
 .onboarding-diagnostics-message {
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-secondary);
 }
 .onboarding-diagnostics-message.ok {
