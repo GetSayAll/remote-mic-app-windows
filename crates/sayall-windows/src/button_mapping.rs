@@ -24,7 +24,7 @@
 //! 跳过注入——冷首按单响应；Long/Double 与按住连发始终注入（原生无法
 //! 交付组合语义/连发）。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -427,6 +427,43 @@ impl Drop for ButtonMappingRuntime {
     }
 }
 
+/// 「按住连续触发」一趟的日志聚合（按钮 → 触发方式、拍数、起始时刻）。
+type RepeatRuns = BTreeMap<RemoteButton, (ButtonTrigger, u64, Instant)>;
+
+/// 记录一次连续触发拍：首拍落 start 日志，尾拍在结束日志里带出总拍数。
+fn note_repeat_beat(repeat_runs: &mut RepeatRuns, button: RemoteButton, trigger: ButtonTrigger) {
+    if !repeat_runs.contains_key(&button) {
+        crate::ble::gatt_note(format!(
+            "map_repeat start button={button:?} trigger={trigger:?} interval_ms={}",
+            button
+                .repeat_interval()
+                .map(|interval| interval.as_millis())
+                .unwrap_or(0)
+        ));
+        repeat_runs.insert(button, (trigger, 0, Instant::now()));
+    }
+    if let Some(run) = repeat_runs.get_mut(&button) {
+        run.1 = run.1.saturating_add(1);
+    }
+}
+
+/// 结束一趟连续触发并落聚合日志（`reason` = release / reset / reconfigure）。
+fn finish_repeat_run(repeat_runs: &mut RepeatRuns, button: RemoteButton, reason: &str) {
+    if let Some((trigger, beats, started)) = repeat_runs.remove(&button) {
+        crate::ble::gatt_note(format!(
+            "map_repeat end button={button:?} trigger={trigger:?} beats={beats} duration_ms={} reason={reason}",
+            started.elapsed().as_millis()
+        ));
+    }
+}
+
+fn finish_all_repeat_runs(repeat_runs: &mut RepeatRuns, reason: &str) {
+    let buttons: Vec<RemoteButton> = repeat_runs.keys().copied().collect();
+    for button in buttons {
+        finish_repeat_run(repeat_runs, button, reason);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn engine_worker(
     receiver: Receiver<EngineMessage>,
@@ -446,6 +483,8 @@ fn engine_worker(
     // 映射触发时消费并跳过注入；门控吞下的按压（[`EngineMessage::GateEdge`]）
     // 置位前清除。见模块文档"泄漏对冲"。
     let mut native_pending: BTreeSet<RemoteButton> = BTreeSet::new();
+    // 「按住连续触发」统计：起拍建条目，释放/复位时聚合落一行。
+    let mut repeat_runs: RepeatRuns = BTreeMap::new();
 
     loop {
         let timeout = recognizer
@@ -457,6 +496,7 @@ fn engine_worker(
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
                     for (button, trigger) in recognizer.advance(now) {
+                        note_repeat_beat(&mut repeat_runs, button, trigger);
                         if fire_gesture(
                             button,
                             trigger,
@@ -470,6 +510,7 @@ fn engine_worker(
                                 "lock_workstation",
                                 &mut merger,
                                 &mut recognizer,
+                                &mut repeat_runs,
                                 &snapshot,
                                 &edge_callbacks,
                                 &mut native_pending,
@@ -510,6 +551,7 @@ fn engine_worker(
                     &injector,
                     &usage,
                     &mut native_pending,
+                    &mut repeat_runs,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -528,6 +570,7 @@ fn engine_worker(
                     &injector,
                     &usage,
                     &mut native_pending,
+                    &mut repeat_runs,
                 );
             }
             EngineMessage::GateEdge(edge) => {
@@ -550,6 +593,7 @@ fn engine_worker(
                     &injector,
                     &usage,
                     &mut native_pending,
+                    &mut repeat_runs,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
@@ -564,6 +608,7 @@ fn engine_worker(
                 recognizer.release_all();
                 let edges = merger.release_all();
                 native_pending.clear();
+                finish_all_repeat_runs(&mut repeat_runs, "reset");
                 let now = Instant::now();
                 handle_edges(
                     edges,
@@ -578,6 +623,7 @@ fn engine_worker(
                     &injector,
                     &usage,
                     &mut native_pending,
+                    &mut repeat_runs,
                 );
             }
             EngineMessage::MappingsChanged => {
@@ -585,6 +631,7 @@ fn engine_worker(
                 recognizer.configure(&mappings);
                 // 配置变化重置全部手势状态：挂起的泄漏对冲标记一并失效。
                 native_pending.clear();
+                finish_all_repeat_runs(&mut repeat_runs, "reconfigure");
                 let configured = crate::raw_input::ALL_BUTTONS
                     .iter()
                     .filter(|button| {
@@ -616,6 +663,7 @@ fn handle_edges(
     injector: &Arc<dyn MappingInjector>,
     usage: &Arc<UsageCounters>,
     native_pending: &mut BTreeSet<RemoteButton>,
+    repeat_runs: &mut RepeatRuns,
 ) {
     if edges.is_empty() {
         return;
@@ -666,6 +714,10 @@ fn handle_edges(
         } else {
             recognizer.release(edge.button, now)
         };
+        if !edge.is_pressed {
+            // 含「按住连续触发」的一趟结束：落聚合日志（拍数/时长）。
+            finish_repeat_run(repeat_runs, edge.button, "release");
+        }
         for trigger in fired {
             if fire_gesture(
                 edge.button,
@@ -680,6 +732,7 @@ fn handle_edges(
                     "lock_workstation",
                     merger,
                     recognizer,
+                    repeat_runs,
                     snapshot,
                     edge_callbacks,
                     native_pending,
@@ -697,6 +750,7 @@ fn reset_after_terminal_action(
     reason: &str,
     merger: &mut ButtonStateMerger,
     recognizer: &mut GestureRecognizer,
+    repeat_runs: &mut RepeatRuns,
     snapshot: &Arc<Mutex<RawInputSnapshot>>,
     edge_callbacks: &Arc<RwLock<Vec<ButtonEdgeCallback>>>,
     native_pending: &mut BTreeSet<RemoteButton>,
@@ -704,6 +758,7 @@ fn reset_after_terminal_action(
     recognizer.release_all();
     let releases = merger.release_all();
     native_pending.clear();
+    finish_all_repeat_runs(repeat_runs, "reset");
     crate::ble::gatt_note(format!(
         "map_reset source=terminal_action reason={reason} synthetic_releases={}",
         releases.len()
@@ -1170,6 +1225,8 @@ mod tests {
             RemoteButton::Up,
             ButtonActions {
                 single: single(KeyCode::Up),
+                // 场景 5 断言按住连续触发 4 拍：按新模型显式开启开关。
+                hold_repeat: Some(ButtonTrigger::Single),
                 ..ButtonActions::default()
             },
         );
@@ -1196,6 +1253,7 @@ mod tests {
                 single: single(KeyCode::Enter),
                 double: single(KeyCode::Space),
                 long: ButtonAction::Disabled,
+                hold_repeat: None,
             },
         );
         // 电源→Win+L：锁屏会让真实 UP 延迟到解锁后，引擎须在成功请求锁屏后
@@ -1823,6 +1881,7 @@ mod tests {
                     },
                 },
                 long: ButtonAction::Disabled,
+                hold_repeat: None,
             },
         );
         runtime.set_mappings(mappings);
@@ -1984,5 +2043,92 @@ mod tests {
                 },
             },
         );
+    }
+
+    /// 「按住连续触发」引擎路径（2026-10-05）：门控边沿驱动的连续拍注入、
+    /// 释放即停；配置变化取消进行中的一趟、不得迟到拍。
+    #[test]
+    fn hold_repeat_long_injects_beats_until_release_or_reconfigure() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
+        let ensure_gate = |gate: &mut Option<crate::key_gate::KeyGate>| {
+            if !crate::key_gate::is_gate_thread_alive() {
+                *gate = None;
+                std::thread::sleep(Duration::from_millis(50));
+                *gate = Some(crate::key_gate::KeyGate::start());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+        );
+        let mut mappings = ButtonMappings::default();
+        // 长按=退格 + 开关=长按：550ms 触发后按 50ms 间隔连拍。
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                long: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Backspace],
+                    },
+                },
+                hold_repeat: Some(ButtonTrigger::Long),
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        let taps = || injector.taps.lock().unwrap().clone();
+
+        ensure_gate(&mut gate);
+        let base = taps().len();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: true,
+            }))
+            .unwrap();
+        // 550ms 触发长按 + 50ms 间隔：三拍预算放宽到 2000ms（慢机每拍有延迟）。
+        let got_three = wait_until(|| taps().len() >= base + 3, Duration::from_millis(2000));
+        assert!(
+            got_three,
+            "长按连续触发应注入 ≥3 拍，实际 {}",
+            taps().len() - base
+        );
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let after_release = taps().len() - base;
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(taps().len() - base, after_release, "释放后不得再有连续拍");
+
+        // 配置变化取消进行中的一趟：置空映射后不得再有拍。
+        let before_hold = taps().len();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(|| taps().len() > before_hold, Duration::from_millis(2000)),
+            "第二次按住应先注入拍"
+        );
+        runtime.set_mappings(ButtonMappings::default());
+        let after_reconfigure = taps().len();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(taps().len(), after_reconfigure, "配置变化后不得再有连续拍");
+
+        drop(runtime);
+        drop(gate);
     }
 }

@@ -436,7 +436,8 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
     seen.set(app.path, app.name);
   }
   for (const actions of Object.values(mappings.value.actions)) {
-    for (const action of Object.values(actions)) {
+    // 三列动作（不含「按住连续触发」槽位字段——它不是动作）。
+    for (const action of [actions.single, actions.double, actions.long]) {
       if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
         const base = action.target.split(/[\\/]/).pop() ?? action.target;
         const name = base.replace(/\.(exe|lnk)$/i, "") || action.target;
@@ -505,10 +506,12 @@ function applyAction(action: ButtonAction): void {
   };
   const actions = { ...actionsOf(target.button) };
   actions[target.trigger] = action;
-  next.actions[target.button] = actions;
+  const reconciled = reconcileHoldRepeat(target.button, actions);
+  next.actions[target.button] = reconciled.actions;
   mappings.value = next;
-  // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。
-  void persist();
+  // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
+  // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
+  void persist(reconciled.notice ?? undefined);
 }
 
 /**
@@ -598,6 +601,157 @@ function isActivePreset(keys: KeyCode[]): boolean {
   const action = actionOf(target.button, target.trigger);
   if (action.type !== "shortcut") return false;
   return action.chord.keys.join("+") === keys.join("+");
+}
+
+/**
+ * 「按住连续触发」的界面规则（2026-10-05）：
+ * - 每键至多一个槽位（单击或长按；双击不参与），开关显示在单击/长按两个
+ *   槽位的编辑区，是同一个按键级状态；
+ * - 前提：按键在可连续触发范围内 + 该槽位动作「可连续执行」+ 开在单击时
+ *   不得同时配置长按动作（互斥）；
+ * - 前提被破坏（配置变化）时自动关闭并就地提示；不满足时的开启被阻止并说明。
+ * 口径与 Rust `ButtonAction::allows_repeat` / `ButtonMappings::normalized` 同源。
+ */
+const REPEAT_CAPABLE_BUTTONS: RemoteButton[] = [
+  "back",
+  "up",
+  "down",
+  "left",
+  "right",
+  "volume_up",
+  "volume_down",
+];
+/** 单独修饰键：不可作为「可连续执行」的单键动作（与 Rust `KeyCode::is_modifier` 一致）。 */
+const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
+  "control",
+  "left_control",
+  "right_control",
+  "shift",
+  "left_shift",
+  "right_shift",
+  "alt",
+  "left_alt",
+  "right_alt",
+  "left_windows",
+  "right_windows",
+]);
+
+/** 动作是否可连续执行（与 Rust `ButtonAction::allows_repeat` 同源口径）。 */
+function actionAllowsRepeat(action: ButtonAction): boolean {
+  if (action.type === "scroll" || action.type === "mouse_move") return true;
+  if (action.type !== "shortcut") return false;
+  return action.chord.keys.length === 1 && !REPEAT_MODIFIER_KEYS.has(action.chord.keys[0]);
+}
+
+function holdRepeatOf(button: RemoteButton): "single" | "long" | undefined {
+  return actionsOf(button).holdRepeat;
+}
+
+const repeatSwitchVisible = computed(() => {
+  const target = editingTarget.value;
+  if (!target) return false;
+  return (
+    REPEAT_CAPABLE_BUTTONS.includes(target.button) &&
+    (target.trigger === "single" || target.trigger === "long")
+  );
+});
+
+/** 当前槽位是否被指定为连续触发槽位。 */
+const repeatChecked = computed(() => {
+  const target = editingTarget.value;
+  return !!target && holdRepeatOf(target.button) === target.trigger;
+});
+
+/** 开启被阻止时的原因（null = 可开启；已开启时恒为 null）。 */
+const repeatBlockedReason = computed<string | null>(() => {
+  const target = editingTarget.value;
+  if (!target) return null;
+  const actions = actionsOf(target.button);
+  if (target.trigger === "long") {
+    if (actions.long.type === "disabled") return "请先为该按键配置长按动作";
+    if (!actionAllowsRepeat(actions.long)) {
+      return "该长按动作不支持按住连续触发（组合快捷键、打开应用等只执行一次）";
+    }
+    return null;
+  }
+  if (actions.single.type === "disabled") return "请先为该按键配置单击动作";
+  if (!actionAllowsRepeat(actions.single)) {
+    return "该动作不支持按住连续触发（组合快捷键、打开应用等只执行一次）";
+  }
+  if (actions.long.type !== "disabled") {
+    return holdRepeatOf(target.button) === "long"
+      ? "「按住连续触发」现在开在长按列（长按触发后继续连续）"
+      : "该按键已配置长按动作：按住将触发长按；如需连续触发，请把开关开在长按列，或先清除长按动作";
+  }
+  return null;
+});
+
+const repeatSwitchTitle = computed(() => {
+  const target = editingTarget.value;
+  if (!target) return "";
+  if (repeatBlockedReason.value) return repeatBlockedReason.value;
+  return target.trigger === "long"
+    ? "长按约 0.55 秒触发后，不松手会继续连续执行"
+    : "按住不放会连续执行这个动作";
+});
+
+/**
+ * 动作变更后的「按住连续触发」一致性收口：前提被破坏时自动关闭并返回提示
+ * （互斥显式化，不留下用户看不到的无效状态）。提示经 `persist(message)`
+ * 展示，避免被 persist 的清理逻辑覆盖。
+ */
+function reconcileHoldRepeat(
+  button: RemoteButton,
+  actions: ButtonActions,
+): { actions: ButtonActions; notice: string | null } {
+  const hold = actions.holdRepeat;
+  if (!hold) return { actions, notice: null };
+  const target = hold === "long" ? actions.long : actions.single;
+  const valid =
+    REPEAT_CAPABLE_BUTTONS.includes(button) &&
+    target.type !== "disabled" &&
+    actionAllowsRepeat(target) &&
+    (hold !== "single" || actions.long.type === "disabled");
+  if (valid) return { actions, notice: null };
+  const next = { ...actions };
+  delete next.holdRepeat;
+  return {
+    actions: next,
+    notice:
+      hold === "single" && actions.long.type !== "disabled"
+        ? "该按键已配置长按动作：按住将触发长按；「按住连续触发」已关闭（如需长按后继续连续，请在长按列开启）"
+        : "动作已变更，「按住连续触发」已自动关闭",
+  };
+}
+
+function toggleHoldRepeat(): void {
+  const target = editingTarget.value;
+  if (!target) return;
+  const next: ButtonMappings = { ...mappings.value, actions: { ...mappings.value.actions } };
+  const actions = { ...actionsOf(target.button) };
+  if (repeatChecked.value) {
+    delete actions.holdRepeat;
+    next.actions[target.button] = actions;
+    mappings.value = next;
+    void persist("已关闭「按住连续触发」");
+    return;
+  }
+  const reason = repeatBlockedReason.value;
+  if (reason) {
+    statusMessage.value = reason;
+    return;
+  }
+  const moving = holdRepeatOf(target.button) !== undefined;
+  actions.holdRepeat = target.trigger === "long" ? "long" : "single";
+  next.actions[target.button] = actions;
+  mappings.value = next;
+  void persist(
+    moving
+      ? "「按住连续触发」已移到当前列"
+      : target.trigger === "long"
+        ? "已开启：长按触发后不松手会继续连续"
+        : "已开启：按住不放会连续触发",
+  );
 }
 
 /**
@@ -1906,11 +2060,24 @@ onUnmounted(() => {
           </template>
         </section>
       </div>
+      <label v-if="repeatSwitchVisible" class="toggle-row repeat-toggle" :title="repeatSwitchTitle">
+        <span>按住连续触发</span>
+        <input
+          class="toggle-input"
+          type="checkbox"
+          :checked="repeatChecked"
+          :disabled="busy || (!!repeatBlockedReason && !repeatChecked)"
+          @change="toggleHoldRepeat"
+        />
+      </label>
+      <p v-if="repeatSwitchVisible && repeatBlockedReason" class="muted repeat-hint">
+        {{ repeatBlockedReason }}
+      </p>
       <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
-        未配置双击与长按时，单击在按下瞬间触发（零延迟）；返回/方向/音量键按住会连续触发。
+        未配置双击与长按时，单击在按下瞬间触发；返回/方向/音量键开启「按住连续触发」后，按住不放会连续执行（组合快捷键只触发一次）。配置双击时，按住超过约 0.3 秒即按单击处理并开始连续触发。
       </p>
       <p v-else class="muted editor-note">
-        {{ editingTarget.trigger === "double" ? "双击判定窗口约 0.3 秒：配置后单击会稍等片刻以区分双击。" : "长按约 0.55 秒触发；配置后按住连发停用。" }}
+        {{ editingTarget.trigger === "double" ? "双击判定窗口约 0.3 秒：配置后单击会稍等片刻以区分双击。" : "长按约 0.55 秒触发；「按住连续触发」开在长按时，触发后不松手会继续连续执行（组合快捷键只触发一次）。它与开在单击上的连续触发互斥。" }}
       </p>
     </article>
 
@@ -1961,6 +2128,9 @@ onUnmounted(() => {
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
+/* 「按住连续触发」：编辑面板内的按键级开关（2026-10-05），与动作分组留出间距。 */
+.repeat-toggle { margin-top: 12px; }
+.repeat-hint { margin: 6px 0 0; font-size: 12px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }

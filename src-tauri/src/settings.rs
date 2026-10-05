@@ -152,6 +152,9 @@ impl SettingsStore {
         };
         serde_json::from_str::<ButtonMappings>(&contents)
             .map_err(|error| format!("解析按键映射失败：{error}"))?
+            // 旧文件（结构版本 < 1）按旧版自动连发行为迁移为显式开关，
+            // 再统一校验并盖章为当前版本。
+            .migrate_legacy_hold_repeat()
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))
     }
@@ -207,7 +210,8 @@ impl SettingsStore {
             ));
         }
         // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
-        self.save_button_mappings(configuration.button_mappings)
+        // 旧导出（无显式开关）走与本地加载相同的迁移。
+        self.save_button_mappings(configuration.button_mappings.migrate_legacy_hold_repeat())
     }
 
     pub fn load_voice_hold_hotkey(&self) -> Result<Option<KeyChord>, String> {
@@ -565,6 +569,7 @@ mod tests {
                         keys: vec![KeyCode::Escape],
                     },
                 },
+                hold_repeat: None,
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();
@@ -611,6 +616,7 @@ mod tests {
                 },
                 double: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
+                hold_repeat: None,
             },
         );
 
@@ -677,5 +683,74 @@ mod tests {
         assert!(store.save_voice_hold_hotkey(Some(invalid)).is_err());
 
         let _ = std::fs::remove_file(store.voice_hold_hotkey_path());
+    }
+
+    #[test]
+    fn legacy_button_mapping_file_migrates_hold_repeat_on_load() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::ButtonTrigger;
+
+        let base = std::env::temp_dir().join(format!(
+            "sayall-test-legacy-hold-repeat-{}",
+            std::process::id()
+        ));
+        let settings_path = base.join("settings.json");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = SettingsStore::new(settings_path);
+
+        // 旧版文件：无 schemaVersion / holdRepeat。back=删除（旧版会自动
+        // 连续），ok=Enter（无连发区间）。
+        let mappings_path = store.button_mappings_path();
+        std::fs::create_dir_all(mappings_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mappings_path,
+            r#"{"enabled":true,"actions":{"back":{"single":{"type":"shortcut","chord":{"keys":["delete"]}},"double":{"type":"disabled"},"long":{"type":"disabled"}},"ok":{"single":{"type":"shortcut","chord":{"keys":["enter"]}},"double":{"type":"disabled"},"long":{"type":"disabled"}}}}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load_button_mappings().unwrap();
+        assert_eq!(loaded.schema_version, 1, "加载即盖章为当前版本");
+        assert_eq!(
+            loaded.actions(RemoteButton::Back).hold_repeat,
+            Some(ButtonTrigger::Single),
+            "旧版自动连续的按键迁移为显式开关"
+        );
+        assert_eq!(
+            loaded.actions(RemoteButton::Ok).hold_repeat,
+            None,
+            "无连发区间键不迁移"
+        );
+
+        // 用户显式关闭后保存：再次加载不得被重新打开。
+        let mut edited = loaded.clone();
+        edited
+            .actions
+            .get_mut(&RemoteButton::Back)
+            .unwrap()
+            .hold_repeat = None;
+        store.save_button_mappings(edited).unwrap();
+        let reloaded = store.load_button_mappings().unwrap();
+        assert_eq!(
+            reloaded.actions(RemoteButton::Back).hold_repeat,
+            None,
+            "显式关闭不得被重新推断"
+        );
+
+        // 旧版导出（不含新字段）导入同样走迁移。
+        let legacy_export = base.join("legacy-export.json");
+        std::fs::write(
+            &legacy_export,
+            r#"{"formatVersion":1,"buttonMappings":{"enabled":true,"actions":{"back":{"single":{"type":"shortcut","chord":{"keys":["delete"]}},"double":{"type":"disabled"},"long":{"type":"disabled"}}}}}"#,
+        )
+        .unwrap();
+        let imported = store.import_button_mappings(&legacy_export).unwrap();
+        assert_eq!(
+            imported.actions(RemoteButton::Back).hold_repeat,
+            Some(ButtonTrigger::Single),
+            "旧导出导入按加载同一规则迁移"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

@@ -227,9 +227,16 @@ export interface ButtonActions {
   single: ButtonAction;
   double: ButtonAction;
   long: ButtonAction;
+  /**
+   * 「按住连续触发」指定的槽位（单击或长按；缺省 = 关闭）。
+   * 每键至多一个槽位，互斥由界面与 Rust `normalized()` 强制。
+   */
+  holdRepeat?: "single" | "long";
 }
 
 export interface ButtonMappings {
+  /** 配置结构版本（Rust 侧写入并校验；界面原样回传）。 */
+  schemaVersion?: number;
   enabled: boolean;
   actions: Partial<Record<RemoteButton, ButtonActions>>;
   applications?: CustomAppPick[];
