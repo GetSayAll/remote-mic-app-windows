@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "sayall.rc003-onboarding-walkthrough",
+  "sourceRevision": null,
+  "events": [
+    { "atMilliseconds": 0, "kind": "ble_connected" },
+    { "atMilliseconds": 50, "kind": "hid_attached" },
+    { "atMilliseconds": 2000, "kind": "hid_report", "reportID": 1, "dataHex": "4a0000000000" },
+    { "atMilliseconds": 2120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" },
+    { "atMilliseconds": 40000, "kind": "voice_control", "dataHex": "0b010002030078" },
+    { "atMilliseconds": 40500, "kind": "voice_control", "dataHex": "04030201" },
+    { "atMilliseconds": 41000, "kind": "voice_audio", "dataHex": "1111111111111111111111111111111111111111111111111111111111111111111111111111" },
+    { "atMilliseconds": 41500, "kind": "voice_audio", "dataHex": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111" },
+    { "atMilliseconds": 43000, "kind": "voice_control", "dataHex": "00" },
+    { "atMilliseconds": 50000, "kind": "hid_report", "reportID": 1, "dataHex": "280000000000" },
+    { "atMilliseconds": 50120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" },
+    { "atMilliseconds": 51000, "kind": "hid_report", "reportID": 1, "dataHex": "510000000000" },
+    { "atMilliseconds": 51120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" },
+    { "atMilliseconds": 52000, "kind": "hid_report", "reportID": 1, "dataHex": "650000000000" },
+    { "atMilliseconds": 52120, "kind": "hid_report", "reportID": 1, "dataHex": "000000000000" }
+  ]
+}

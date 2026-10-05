@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 sayall-core = { path = "../sayall-core" }
 serde.workspace = true
+# 硬件信号脚本的 raw 事件保留原文 JSON（见 hardware_script 模块注释）。
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

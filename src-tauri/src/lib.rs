@@ -2115,6 +2115,15 @@ pub fn run() {
             // 10 秒重试循环；用户在按键页显式停止（Stopped）时不重试。
             spawn_raw_input_supervisor(Arc::clone(&platform));
 
+            // 仿真构建 + 指定脚本（`SAYALL_HARDWARE_SIGNAL_SCRIPT`）：回放硬件信号
+            // （按键边沿、ATVV 语音帧），事件走生产解析链路 —— 没有物理遥控器也能
+            // 覆盖 onboarding 向导与按键链路（见 hardware-simulation 仓库）。
+            #[cfg(feature = "runtime-simulation")]
+            if let Some(script_path) = std::env::var_os("SAYALL_HARDWARE_SIGNAL_SCRIPT") {
+                Arc::clone(&platform)
+                    .start_hardware_script_replay(std::path::PathBuf::from(script_path));
+            }
+
             app.manage(AppState {
                 platform,
                 settings,

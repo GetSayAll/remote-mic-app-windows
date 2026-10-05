@@ -92,6 +92,10 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
         Err(PlatformError::UnsupportedPlatform)
     }
+    /// 仿真构建：回放硬件信号脚本（见 `sayall_windows::hardware_script`）。
+    /// 默认什么都不做；只有仿真平台实现它，基础路径不受影响。
+    #[cfg(feature = "runtime-simulation")]
+    fn start_hardware_script_replay(self: Arc<Self>, _path: std::path::PathBuf) {}
 }
 
 impl PlatformRuntime for WindowsPlatform {
@@ -259,15 +263,22 @@ impl PlatformRuntime for WindowsPlatform {
 mod simulation {
     use super::*;
     use sayall_core::{AtvvCapabilities, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
-    use sayall_windows::raw_input::{RawInputPhase, RemoteButton};
+    use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
+    use sayall_windows::hardware_script::{
+        button_edges_for_hid_report, decode_hex, HardwareSignalEvent, HardwareSignalScript,
+    };
+    use sayall_windows::raw_input::{ButtonStateMerger, RawInputPhase, RemoteButton};
     use sayall_windows::send_input::{plan_key_tap, KeyChord};
     use sayall_windows::{AudioPhase, ConnectionPhase, RemoteModel};
     use std::sync::{Mutex, MutexGuard};
+    use std::time::{Duration, Instant};
 
     const RC001_ID: &str = "ci-simulation-rc001";
     const RC003_ID: &str = "ci-simulation-rc003";
     const CABLE_ENDPOINT_ID: &str = "ci-simulation-cable-input";
     const CABLE_ENDPOINT_NAME: &str = "CABLE Input (CI Simulation)";
+    /// 回放启动前的稳定等待：让窗口/前端订阅就位，避免首批边沿早于按钮事件订阅。
+    const REPLAY_START_SETTLE: Duration = Duration::from_millis(1_500);
 
     #[derive(Debug)]
     struct SimulationState {
@@ -275,6 +286,10 @@ mod simulation {
         audio: AudioSnapshot,
         raw_input: RawInputSnapshot,
         send_input: SendInputSnapshot,
+        /// 生产按键状态合并器（键盘 + HID 两路并集）。
+        merger: ButtonStateMerger,
+        /// 生产 ATVV 语音流水线：控制/音频通道字节都经它解码。
+        pipeline: AtvvVoicePipeline,
     }
 
     impl Default for SimulationState {
@@ -287,17 +302,32 @@ mod simulation {
                     available: true,
                     ..SendInputSnapshot::default()
                 },
+                merger: ButtonStateMerger::default(),
+                pipeline: AtvvVoicePipeline::default(),
             }
         }
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Default)]
     pub struct SimulatedPlatform {
         usage: Arc<UsageCounters>,
         state: Mutex<SimulationState>,
+        edge_sinks: Mutex<Vec<ButtonEdgeCallback>>,
+        gesture_sinks: Mutex<Vec<ButtonGestureCallback>>,
         voice_hold_hotkey: Mutex<Option<KeyChord>>,
         voice_input_tool: Mutex<Option<VoiceInputTool>>,
         button_mappings: Mutex<sayall_windows::send_input::ButtonMappings>,
+    }
+
+    /// 手写 Debug：订阅者闭包没有 Debug，跳过 `*_sinks` 两个字段。
+    impl std::fmt::Debug for SimulatedPlatform {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("SimulatedPlatform")
+                .field("usage", &self.usage)
+                .field("state", &self.state)
+                .finish_non_exhaustive()
+        }
     }
 
     impl SimulatedPlatform {
@@ -348,6 +378,223 @@ mod simulation {
                 ..ConnectionSnapshot::default()
             };
             Ok(state.connection.clone())
+        }
+
+        /// 应用单条硬件信号：走**生产**解析链路。
+        ///
+        /// - `hid_report` → `decode_report_usages` + `ButtonStateMerger`（与 Raw Input
+        ///   真机路径同一套解析），产生的语义边沿推给已注册的订阅者；
+        /// - `voice_control` / `voice_audio` → `AtvvVoicePipeline`（与 BLE 真机解码
+        ///   同一套流水线），解码结果写进连接/音频快照；
+        /// - 其余事件更新连接/HID 设备状态或按原样记日志。
+        ///
+        /// 返回给诊断日志的摘要；错误只发生在脚本载荷不合法时（脚本已校验过 hex）。
+        pub fn apply_hardware_signal(&self, event: &HardwareSignalEvent) -> Result<String, String> {
+            match event {
+                HardwareSignalEvent::BleConnected => {
+                    let mut state = lock(&self.state);
+                    state.connection.phase = ConnectionPhase::Ready;
+                    state.connection.remote_name =
+                        Some("Xiaomi Bluetooth Remote 2 Pro (simulated script)".to_owned());
+                    state.connection.remote_model = RemoteModel::Rc003;
+                    state.connection.capabilities = Some(Self::capabilities());
+                    state.connection.power_notifications_available = true;
+                    Ok("connection=ready model=rc003".to_owned())
+                }
+                HardwareSignalEvent::BleDisconnected => {
+                    let mut state = lock(&self.state);
+                    state.connection.phase = ConnectionPhase::Disconnected;
+                    Ok("connection=disconnected".to_owned())
+                }
+                HardwareSignalEvent::HidAttached => {
+                    let mut state = lock(&self.state);
+                    state.raw_input.matched_device_count = 1;
+                    Ok("hid_attached".to_owned())
+                }
+                HardwareSignalEvent::HidRemoved => {
+                    let mut state = lock(&self.state);
+                    state.raw_input.matched_device_count = 0;
+                    let released = state.merger.release_all();
+                    state.raw_input.active_buttons =
+                        state.merger.active_button_set().into_iter().collect();
+                    if let Some(edge) = released.last() {
+                        state.raw_input.last_button = Some(edge.button);
+                        state.raw_input.last_is_pressed = Some(edge.is_pressed);
+                    }
+                    drop(state);
+                    self.publish_edges(&released);
+                    Ok(format!("hid_removed released={}", released.len()))
+                }
+                HardwareSignalEvent::HidReport { data_hex, .. } => {
+                    let bytes = decode_hex(data_hex)
+                        .ok_or_else(|| "hid report payload is not valid hex".to_owned())?;
+                    let edges = {
+                        let mut state = lock(&self.state);
+                        let edges = button_edges_for_hid_report(&mut state.merger, &bytes)
+                            .ok_or_else(|| {
+                                format!("hid report shape is unsupported ({} bytes)", bytes.len())
+                            })?;
+                        state.raw_input.raw_event_count =
+                            state.raw_input.raw_event_count.saturating_add(1);
+                        state.raw_input.semantic_edge_count = state
+                            .raw_input
+                            .semantic_edge_count
+                            .saturating_add(edges.len() as u64);
+                        if let Some(edge) = edges.last() {
+                            state.raw_input.last_button = Some(edge.button);
+                            state.raw_input.last_is_pressed = Some(edge.is_pressed);
+                        }
+                        state.raw_input.active_buttons =
+                            state.merger.active_button_set().into_iter().collect();
+                        edges
+                    };
+                    self.publish_edges(&edges);
+                    Ok(format!("edges={} report_bytes={}", edges.len(), bytes.len()))
+                }
+                HardwareSignalEvent::VoiceControl { data_hex } => {
+                    let bytes = decode_hex(data_hex)
+                        .ok_or_else(|| "voice control payload is not valid hex".to_owned())?;
+                    let mut state = lock(&self.state);
+                    let output = state
+                        .pipeline
+                        .handle_control(&bytes)
+                        .map_err(|error| error.to_string())?;
+                    match output {
+                        PipelineOutput::Ready(capabilities) => {
+                            state.connection.capabilities = Some(capabilities);
+                        }
+                        PipelineOutput::StreamStarted { generation, .. } => {
+                            state.connection.voice_state = VoiceSessionState::Streaming;
+                            state.connection.generation = generation;
+                            state.audio.phase = AudioPhase::Streaming;
+                            state.audio.generation = generation;
+                            // 新会话：投递计数按会话归零（与生产 begin_session 同口径）。
+                            state.audio.submitted_samples = 0;
+                            state.audio.queued_samples = 0;
+                        }
+                        PipelineOutput::StreamStopped { generation, .. } => {
+                            state.connection.voice_state = VoiceSessionState::Draining;
+                            state
+                                .pipeline
+                                .complete_drain(generation)
+                                .map_err(|error| error.to_string())?;
+                            state.connection.voice_state = VoiceSessionState::Idle;
+                            state.audio.phase = AudioPhase::Ready;
+                            state.audio.queued_samples = 0;
+                        }
+                        PipelineOutput::Samples { .. } => {}
+                        PipelineOutput::DecoderSynchronized { .. } => {}
+                        PipelineOutput::UnknownControl { .. } => {}
+                        PipelineOutput::MicrophoneOpenRequested => {
+                            // 脚本不经主机麦克风通道；记录即可（ATVV 直传路径不要求它）。
+                        }
+                    }
+                    Ok(format!("voice={:?}", state.connection.voice_state))
+                }
+                HardwareSignalEvent::VoiceAudio { data_hex } => {
+                    let bytes = decode_hex(data_hex)
+                        .ok_or_else(|| "voice audio payload is not valid hex".to_owned())?;
+                    let mut state = lock(&self.state);
+                    let output = state
+                        .pipeline
+                        .handle_audio(&bytes)
+                        .map_err(|error| error.to_string())?;
+                    let PipelineOutput::Samples { samples, .. } = output else {
+                        return Err("voice audio did not decode into samples".to_owned());
+                    };
+                    let decoded = samples.len() as u64;
+                    state.connection.decoded_samples =
+                        state.connection.decoded_samples.saturating_add(decoded);
+                    state.audio.submitted_samples =
+                        state.audio.submitted_samples.saturating_add(decoded);
+                    Ok(format!("decoded_samples={decoded}"))
+                }
+                HardwareSignalEvent::GattValue {
+                    characteristic_uuid, ..
+                } => Ok(format!("gatt_value uuid={characteristic_uuid} ignored")),
+                HardwareSignalEvent::Raw {
+                    original_kind, ..
+                } => Ok(format!(
+                    "raw original_kind={} ignored",
+                    original_kind.as_deref().unwrap_or("unknown")
+                )),
+            }
+        }
+
+        /// 把语义边沿推给已注册订阅者（`register_button_events` 注册的 Tauri 事件桥）。
+        fn publish_edges(&self, edges: &[sayall_windows::raw_input::ButtonEdge]) {
+            if edges.is_empty() {
+                return;
+            }
+            let sinks = lock(&self.edge_sinks).clone();
+            for edge in edges {
+                for sink in &sinks {
+                    sink(*edge);
+                }
+            }
+        }
+
+        /// 载入并回放硬件信号脚本；回放线程按脚本时间线推进，逐条走
+        /// [`Self::apply_hardware_signal`]。脚本无效时只记日志，不影响应用启动。
+        pub fn replay_hardware_script(self: &Arc<Self>, path: &std::path::Path) {
+            let json = match std::fs::read_to_string(path) {
+                Ok(json) => json,
+                Err(error) => {
+                    sayall_windows::gatt_note(format!(
+                        "hardware_script action=load phase=completed terminal_result=failed reason=read_failed error={error}"
+                    ));
+                    return;
+                }
+            };
+            let script = match HardwareSignalScript::parse(&json) {
+                Ok(script) => script,
+                Err(error) => {
+                    sayall_windows::gatt_note(format!(
+                        "hardware_script action=load phase=completed terminal_result=failed reason=invalid_script error={error}"
+                    ));
+                    return;
+                }
+            };
+            let platform = Arc::clone(self);
+            let spawn = std::thread::Builder::new()
+                .name("sayall-hardware-script-replay".to_owned())
+                .spawn(move || {
+                    std::thread::sleep(REPLAY_START_SETTLE);
+                    let started = Instant::now();
+                    sayall_windows::gatt_note(format!(
+                        "hardware_script action=replay phase=begin script={} events={}",
+                        script.id,
+                        script.events.len()
+                    ));
+                    for index in script.replay_order() {
+                        let entry = &script.events[index];
+                        let target = Duration::from_millis(entry.at_milliseconds);
+                        let elapsed = started.elapsed();
+                        if target > elapsed {
+                            std::thread::sleep(target - elapsed);
+                        }
+                        let outcome = platform.apply_hardware_signal(&entry.event);
+                        let (terminal, detail) = match outcome {
+                            Ok(detail) => ("passed", detail),
+                            Err(error) => ("failed", error),
+                        };
+                        sayall_windows::gatt_note(format!(
+                            "hardware_script action=apply phase=completed index={index} at_ms={} kind={} terminal_result={terminal} detail={detail}",
+                            entry.at_milliseconds,
+                            entry.event.kind_label()
+                        ));
+                    }
+                    sayall_windows::gatt_note(format!(
+                        "hardware_script action=replay phase=end script={}",
+                        script.id
+                    ));
+                });
+            if spawn.is_err() {
+                sayall_windows::gatt_note(
+                    "hardware_script action=replay phase=completed terminal_result=failed reason=thread_spawn_failed"
+                        .to_owned(),
+                );
+            }
         }
     }
 
@@ -636,16 +883,21 @@ mod simulation {
 
         fn subscribe_button_edges(
             &self,
-            _callback: sayall_windows::button_mapping::ButtonEdgeCallback,
+            callback: sayall_windows::button_mapping::ButtonEdgeCallback,
         ) {
-            // CI 仿真不产生真实按键边沿。
+            // 仿真回放产生的边沿经这里注册的订阅者推给前端（与真机同一条事件桥）。
+            lock(&self.edge_sinks).push(callback);
         }
 
         fn subscribe_button_gestures(
             &self,
-            _callback: sayall_windows::button_mapping::ButtonGestureCallback,
+            callback: sayall_windows::button_mapping::ButtonGestureCallback,
         ) {
-            // CI 仿真不产生真实手势。
+            lock(&self.gesture_sinks).push(callback);
+        }
+
+        fn start_hardware_script_replay(self: Arc<Self>, path: std::path::PathBuf) {
+            self.replay_hardware_script(&path);
         }
 
         fn run_simulated_voice_session(&self) -> Result<PlatformSnapshot, PlatformError> {
@@ -777,6 +1029,101 @@ mod simulation {
             assert!(snapshot.wasapi_ready);
             assert!(snapshot.raw_input_ready);
             assert!(snapshot.send_input_ready);
+        }
+
+        /// 回放硬件信号：HID 报告经生产解析 → 语义边沿 → 订阅者（与真机同一条桥）。
+        #[test]
+        fn hardware_script_hid_report_publishes_semantic_edges() {
+            use sayall_windows::hardware_script::HardwareSignalEvent;
+            let platform = SimulatedPlatform::default();
+            let collected = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&collected);
+            platform.subscribe_button_edges(Arc::new(move |edge| {
+                lock(&sink).push(edge);
+            }));
+
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::HidReport {
+                    report_id: Some(1),
+                    data_hex: "280000000000".to_owned(),
+                })
+                .expect("press report must apply");
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::HidReport {
+                    report_id: Some(1),
+                    data_hex: "000000000000".to_owned(),
+                })
+                .expect("release report must apply");
+
+            let edges = lock(&collected);
+            assert_eq!(edges.len(), 2, "press + release edges: {edges:?}");
+            assert!(edges[0].is_pressed);
+            assert!(!edges[1].is_pressed);
+            assert_eq!(edges[0].button, edges[1].button);
+
+            let snapshot = platform.snapshot();
+            assert_eq!(snapshot.raw_input.semantic_edge_count, 2);
+            assert_eq!(snapshot.raw_input.raw_event_count, 2);
+            assert_eq!(snapshot.raw_input.last_button, Some(edges[1].button));
+            assert_eq!(snapshot.raw_input.last_is_pressed, Some(false));
+            assert!(snapshot.raw_input.active_buttons.is_empty());
+        }
+
+        /// 回放硬件信号：ATVV 控制/音频走生产流水线，快照里能看到会话与解码采样。
+        #[test]
+        fn hardware_script_voice_session_updates_snapshot_through_production_pipeline() {
+            use sayall_windows::hardware_script::HardwareSignalEvent;
+            let platform = SimulatedPlatform::default();
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::BleConnected)
+                .expect("ble connect must apply");
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::VoiceControl {
+                    data_hex: "0b010002030078".to_owned(),
+                })
+                .expect("capabilities must apply");
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::VoiceControl {
+                    data_hex: "04030201".to_owned(),
+                })
+                .expect("stream start must apply");
+            assert_eq!(
+                platform.connection_snapshot().voice_state,
+                VoiceSessionState::Streaming
+            );
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::VoiceAudio {
+                    data_hex: "11".repeat(40),
+                })
+                .expect("first audio chunk must apply");
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::VoiceAudio {
+                    data_hex: "11".repeat(80),
+                })
+                .expect("second audio chunk must complete a frame");
+            platform
+                .apply_hardware_signal(&HardwareSignalEvent::VoiceControl {
+                    data_hex: "00".to_owned(),
+                })
+                .expect("stream stop must apply");
+
+            let snapshot = platform.snapshot();
+            assert_eq!(snapshot.connection.voice_state, VoiceSessionState::Idle);
+            assert!(snapshot.connection.decoded_samples > 0);
+            assert_eq!(snapshot.audio.queued_samples, 0);
+            assert_eq!(
+                snapshot.audio.submitted_samples,
+                snapshot.connection.decoded_samples
+            );
+            assert!(snapshot.ble_voice_ready);
+        }
+
+        /// 脚本解析失败时不 panic、不影响平台（回放入口只记日志）。
+        #[test]
+        fn hardware_script_loader_rejects_broken_script_without_touching_state() {
+            use sayall_windows::hardware_script::HardwareSignalScript;
+            assert!(HardwareSignalScript::parse(r#"{"schemaVersion": 1, "id": "", "events": []}"#)
+                .is_err());
         }
     }
 }
