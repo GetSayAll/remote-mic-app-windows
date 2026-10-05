@@ -38,6 +38,9 @@ pub mod graceful_exit;
 pub mod instance_signal;
 /// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
 pub mod key_host;
+// 硬件信号脚本（仿真回放用；见模块注释）：解析 hardware-simulation 仓库导出的
+// `export-app-script` 结果。无副作用、不进入基础路径，仅仿真平台消费。
+pub mod hardware_script;
 pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{
