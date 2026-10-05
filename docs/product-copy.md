@@ -170,3 +170,11 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   （长按 TV 配对 / 主页+菜单 重置 / Windows 高级选项），第②步保留详细版；
   ④ 第⑤步输入框 64px / 字号 16px，与上方核对卡 20px、与下方状态行 14px。
   验收手册「界面结构」已同步。
+- 2026-10-05（第四次修正，Andy 即时反馈）：① 「复制诊断信息」去掉下划线；② 复制内容
+  **改为全英文**（`SayAll diagnostics` / `App version` / `Build` / `Build channel` /
+  `Windows version` / `Architecture` / `Wizard step: <token> (n/7)` / `Gate` / `Blocked` /
+  `Remote` / `Audio` / `Input tool` / `Vokie` / `Buttons observed` / `Mapping`；界面按钮与
+  提示文案仍为中文）；③ 布局回到**自上而下**、标题固定在同一位置（无上一步时保留同高占位），
+  切换步骤与内容变化不掉位置；④ 第⑤步通过提示改绿色成功卡 + 对勾；⑤ ④步卡间距加大
+  （工具格→详情卡 16px、卡内标题→正文 12px、正文→开关行 16px）；⑥ 最后一步右栏改
+  **应用 logo + 对勾徽标**。验收手册「界面结构」「诊断信息」已同步。

@@ -35,7 +35,10 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
           <i v-for="(height, index) in WAVE" :key="index" :style="{ height: `${height}px` }"></i>
         </span>
       </template>
-      <span v-else class="side-done" aria-hidden="true">✓</span>
+      <span v-else class="side-logo-done">
+        <img class="side-appicon" src="/app-logo.png" alt="" />
+        <span class="side-done-badge" aria-hidden="true">✓</span>
+      </span>
       <span v-if="props.panel.caption" class="side-caption">{{ props.panel.caption }}</span>
     </div>
 

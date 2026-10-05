@@ -83,8 +83,11 @@ defineExpose({ focusBox, clearBox });
     </p>
     <p v-if="!focused" class="onboarding-muted">先点一下输入框，再按住遥控器语音键。</p>
 
-    <div v-if="result === 'passed'" class="onboarding-card">
-      <p class="onboarding-ok">成功：文字已经出现在输入框里，这一步通过了。</p>
+    <div v-if="result === 'passed'" class="onboarding-card success">
+      <p class="onboarding-success">
+        <span class="ok-mark" aria-hidden="true">✓</span>
+        <span>成功：文字已经出现在输入框里，这一步通过了。</span>
+      </p>
     </div>
     <div v-else-if="result === 'failed'" class="onboarding-card warn">
       <p>{{ failureMessage }}</p>

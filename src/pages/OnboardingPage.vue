@@ -22,7 +22,6 @@ import {
   openVbCableDownloadPage,
   openVokieHomepage,
   openWindowsSettings,
-  remoteModelLabel,
   saveOnboardingStep,
   scanPairedRemotes,
   selectAudioEndpoint,
@@ -1173,11 +1172,18 @@ async function copyDiagnostics(): Promise<void> {
     }
     const recommended = endpoints.filter(isRecommendedVoiceEndpoint);
     const selectedId = audio?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
+    const chord =
+      currentHotkey.value ?? (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
+    const hotkeyTokens = chord
+      ? chord.keys.length > 0
+        ? chord.keys.join("+")
+        : "none"
+      : "unset";
     const text = formatOnboardingDiagnostics(report, {
       step: target,
       gateCode: gate.value.code,
-      blockMessage: blockMessage.value ?? "",
-      remoteModel: remoteModelLabel(platform?.connection.remoteModel ?? "unknown"),
+      blocked: !gate.value.ok,
+      model: platform?.connection.remoteModel ?? "unknown",
       connectionPhase: platform?.connection.phase ?? "idle",
       bleVoiceReady: platform?.bleVoiceReady ?? false,
       rawInputPhase: platform?.rawInput.phase ?? "stopped",
@@ -1186,8 +1192,8 @@ async function copyDiagnostics(): Promise<void> {
       recommendedEndpointCount: recommended.length,
       selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
       queuedSamples: audio?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
-      toolLabel: voiceToolLabel.value,
-      hotkeyLabel: hotkeyLabel.value,
+      tool: stagedTool.value ?? configuredTool.value ?? "unset",
+      hotkey: hotkeyTokens,
       captureEnabled: rc003Status.value?.enabled === true,
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
@@ -1613,9 +1619,11 @@ async function retryVoiceTest(): Promise<void> {
     <main class="onboarding-body">
       <div class="onboarding-main">
         <button
-          v-if="previousStep(step)"
           class="onboarding-back"
+          :class="{ 'onboarding-back--placeholder': !previousStep(step) }"
           type="button"
+          :aria-hidden="!previousStep(step)"
+          :tabindex="previousStep(step) ? 0 : -1"
           @click="onBack"
         >
           <svg class="onboarding-back-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -1829,11 +1837,11 @@ async function retryVoiceTest(): Promise<void> {
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
-  /* 短内容垂直居中，避免"内容贴左上角、下方大片留白"（2026-10-05 再反馈）；
-     长内容时 safe center 退化为顶部对齐，滚动可达。 */
-  display: flex;
-  flex-direction: column;
-  justify-content: safe center;
+}
+/* 无上一步时保留同高占位：各步标题固定在内容列左上角同一位置（2026-10-05 要求）。 */
+.onboarding-back--placeholder {
+  visibility: hidden;
+  pointer-events: none;
 }
 /* 底部动作行（2026-10-05 用户要求）：去掉整幅页脚横幅；复制诊断在左、主按钮在右。 */
 .onboarding-actions {
@@ -1924,15 +1932,29 @@ async function retryVoiceTest(): Promise<void> {
   border-radius: 3px;
   background: var(--accent);
 }
-.side-done {
-  display: grid;
-  place-items: center;
-  width: 76px;
-  height: 76px;
+.side-logo-done {
+  position: relative;
+  display: inline-flex;
+}
+.side-logo-done .side-appicon {
+  width: 84px;
+  height: 84px;
+  border-radius: 20px;
+  box-shadow: 0 10px 22px rgba(20, 24, 36, 0.18);
+}
+.side-done-badge {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
+  border: 2px solid var(--card);
   background: var(--success-surface);
   color: var(--success-text);
-  font-size: 38px;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
   font-weight: 800;
 }
 .side-caption {
@@ -2045,14 +2067,38 @@ async function retryVoiceTest(): Promise<void> {
   background: var(--warning-surface-soft);
 }
 .onboarding-card h4 {
-  margin: 0 0 8px;
+  margin: 0 0 12px;
   font-size: 16px;
 }
 .onboarding-card p {
-  margin: 8px 0 0;
+  margin: 12px 0 0;
   font-size: 14.5px;
   line-height: 1.65;
   color: var(--text-secondary);
+}
+.onboarding-card.success {
+  border-color: rgba(38, 113, 72, 0.35);
+  background: var(--success-surface);
+}
+.onboarding-success {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  color: var(--success-text, #1a7f4b);
+  font-weight: 700;
+}
+.onboarding-success .ok-mark {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--success-text, #1a7f4b);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 800;
 }
 .onboarding-numlist {
   display: flex;
@@ -2266,6 +2312,7 @@ async function retryVoiceTest(): Promise<void> {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+  margin-bottom: 16px;
 }
 .onboarding-grid2 .onboarding-option {
   margin-top: 0;
@@ -2363,8 +2410,8 @@ async function retryVoiceTest(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 16px;
+  padding-top: 16px;
   border-top: 1px solid var(--border);
 }
 .onboarding-switch-row .switch-state {
@@ -2425,7 +2472,7 @@ async function retryVoiceTest(): Promise<void> {
   color: var(--warning-text);
   text-align: right;
 }
-/* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接。 */
+/* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接（无下划线）。 */
 .onboarding-diagnostics-button {
   padding: 0;
   border: 0;
@@ -2433,8 +2480,7 @@ async function retryVoiceTest(): Promise<void> {
   color: var(--text-secondary);
   font: inherit;
   font-size: 13.5px;
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  text-decoration: none;
   cursor: pointer;
 }
 .onboarding-diagnostics-button:hover {

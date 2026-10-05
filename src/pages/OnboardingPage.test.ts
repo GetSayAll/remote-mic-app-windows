@@ -387,6 +387,9 @@ describe("Onboarding wizard shell", () => {
   it("advances from welcome to remote and persists the new step", async () => {
     const wrapper = await mountWizard(runtimeWith());
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
+    // 标题位置稳定（2026-10-05 要求）：第①步没有上一步，但保留同高占位，
+    // 各步标题固定在同一位置、切换时不抖动。
+    expect(wrapper.find(".onboarding-back--placeholder").exists()).toBe(true);
 
     const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("disabled")).toBeUndefined();
@@ -396,6 +399,7 @@ describe("Onboarding wizard shell", () => {
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
     expect(wrapper.text()).toContain("连接遥控器");
     expect(wrapper.find(".onboarding-back").exists()).toBe(true);
+    expect(wrapper.find(".onboarding-back--placeholder").exists()).toBe(false);
     const passed = onboardingEvents("step_passed");
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
   });
@@ -601,12 +605,15 @@ describe("Onboarding diagnostics copy", () => {
 
     expect(clipboard.writeText).toHaveBeenCalledTimes(1);
     const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("App 版本: 0.5.0");
+    expect(text).toContain("App version: 0.5.0");
     expect(text).toContain("Build: fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901");
-    expect(text).toContain("Windows 版本: 10.0.26100");
-    expect(text).toContain("步骤标识: remote");
-    expect(text).toContain("门禁: remote.not_connected");
-    expect(text).toContain("音频: 状态=ready 推荐设备=1 已选推荐=是");
+    expect(text).toContain("Windows version: 10.0.26100");
+    expect(text).toContain("Wizard step: remote (2/7)");
+    expect(text).toContain("Gate: remote.not_connected");
+    expect(text).toContain("Blocked: yes");
+    expect(text).toContain("Audio: phase=ready recommended=1 selected=yes");
+    // 内容全英文（用户要求）；界面提示仍是中文。
+    expect(text).not.toMatch(/[\u3000-\u9fff\uff00-\uffef]/);
     // 脱敏：设备 id / 端点身份不进剪贴板（挡住将来加错字段）。
     expect(text).not.toContain("cable-input");
     expect(text).not.toContain("CABLE Input");
@@ -939,6 +946,8 @@ describe("Onboarding voice test step", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("成功：文字已经出现在输入框里");
+    // 2026-10-05 要求：通过提示用绿色成功样式 + 对勾。
+    expect(wrapper.find(".onboarding-card.success .onboarding-success .ok-mark").exists()).toBe(true);
     // 2026-10-05 改版定稿：核对卡是提示行（编号），不设勾选框——通过判据只有真实文字上屏。
     expect(wrapper.text()).toContain("按你选的工具核对两件事");
     expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0);
