@@ -30,3 +30,16 @@
   - WebView2 真机（CI 产物安装，2026-09-12）：fork CI（run 34660987204）MSVC 构建 unsigned NSIS 成功，SHA256 校验一致后静默安装；聚焦 SayAll 注入 F5 → **页面不再重载**（无新 `document_load`/`vue_mount`，页面层拦截在真实 WebView2 生效），停留在「连接与语音」页，`passed`。待遥控器语音键原四条件场景复核 `skipped_self_foreground`。
   - 真机（RC003，2026-09-12 08:41–08:43 用户实按）：焦点在 SayAll 按语音键 3 次 → 全部记 `ime_activation outcome=skipped_self_foreground`（守卫生效）且**零 `document_load`**，页面自始至终停留在「连接与语音」页，`passed`；焦点在其他应用的回归 3 次 → `already_active` 热路径、`wetype_check reacted=true`、每次会话推流 5–9 万样本（约 4–6 秒语音）正常，`passed`。两项合计 `passed`。
 - 隐私检查：本文档与修复代码不包含个人路径、设备身份、语音内容或凭据；心跳与上报仅含时间戳和固定事件名。
+
+## 2026-10-05：独立的 WebView2 故障恢复贡献候选
+
+本节处理 WebView2 `ProcessFailed`，与上文已验证的 TSF/F5 重载根因不同；原有 IME 守卫、页面持久化、前台对齐及退出流程保留。
+
+- 来源：本仓库本地提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**（`fix(webview): 保存有限恢复与原生反馈检查点`）；基于上游 `3e11586f7e211df74586baa52b3e1ea7c77a5d56` 单独移植主窗口处理，不引入场景浮层或其他集成功能。
+- 行为：主窗口渲染进程退出只请求一次 `Reload`；再次失败、主浏览器退出或渲染无响应时，通过窗口标题、托盘提示和独立原生消息告知正常退出并重开。已给出故障提示即进入终态，随后即使渲染进程退出也不重载。回调对象缺失时记录 `result=failed reason=missing_sender` 并给出同一原生提示。窗口销毁或原有退出收尾已经认领时不恢复、不弹提示；其他失败类型只记录。`Reload` 返回成功只记为 `phase=submitted result=accepted`，不宣称页面已恢复。
+- 边界：遵循 [Microsoft 的 WebView2 故障事件文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)：渲染退出可以重载；浏览器退出需要重建控件。本贡献为浏览器退出提供原生提示，没有实现控件重建，也不把后台语音状态推断为已恢复。
+- 已执行：提取同一生产策略函数与对应单元测试，用 `rustc --edition=2021 --test` 隔离执行；停用策略时 **failed 3/3**，移植后 **passed 3/3**。覆盖一次重载/一次提示/重复忽略、未知事件不消耗恢复机会、关闭期间不调度恢复或提示。增量评审新增“浏览器退出/无响应先提示，随后渲染退出不得重载”的序列回归：旧实现 **3 passed / 1 failed**，终态守卫前移后 **passed 4/4**。新依赖复用锁文件已有的 `webview2-com 0.38.2`（MIT），仅供 Windows 使用。
+- **deferred**：完整 Cargo/preflight 由父任务串行执行并另补结果；未终止真实 WebView2，也未执行白屏、浏览器崩溃、托盘正常退出、原生提示目视或活动语音期间故障的真机实验。回调对象缺失分支的原生反馈也尚未进行真实 COM 事件验收。策略单测不能证明页面恢复、提示实际可见或 RC001/RC003 语音仍可用。
+
+
+2026-10-05 独立恢复候选已执行 `scripts/ci-preflight.ps1`，7/7 passed：前端测试/构建、Rust 格式、workspace 测试/check 与 runtime-simulation 编译检查。新增终态序列回归确认 browser/unresponsive 已提示后，迟到 renderer 事件不会再次 Reload；回调无 sender 时记录明确失败并提供原生提示。完整 COM 故障触发、实际重载后的页面状态与原生提示/托盘目视仍为 `deferred`，不以 API 接受 Reload 作为页面恢复证明。

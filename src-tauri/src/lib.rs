@@ -31,6 +31,121 @@ use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
 
+#[derive(Default)]
+struct WebviewFailureState {
+    reloaded: bool,
+    notified: bool,
+}
+#[derive(Debug, PartialEq, Eq)]
+enum WebviewFailureAction {
+    Reload,
+    Notify,
+    Ignore,
+}
+impl WebviewFailureState {
+    fn failed(&mut self, kind: i32, closing: bool) -> WebviewFailureAction {
+        if closing || !matches!(kind, 0..=2) {
+            return WebviewFailureAction::Ignore;
+        }
+        if self.notified {
+            return WebviewFailureAction::Ignore;
+        }
+        if kind == 1 && !self.reloaded {
+            self.reloaded = true;
+            return WebviewFailureAction::Reload;
+        }
+        self.notified = true;
+        WebviewFailureAction::Notify
+    }
+}
+
+#[cfg(windows)]
+fn report_webview_unavailable(app: &tauri::AppHandle) {
+    static NOTIFIED: AtomicBool = AtomicBool::new(false);
+    if NOTIFIED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // Native window/tray and a separate native dialog remain usable after the
+    // browser process dies. No JS/IPC or audio worker is needed for this hint.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title("无线麦 — 界面已停止，请通过托盘正常退出后重开");
+    }
+    if let Some(tray) = app.tray_by_id("sayall-tray") {
+        let _ = tray.set_tooltip(Some("无线麦界面已停止；请通过托盘退出后重新打开"));
+    }
+    let _ = std::thread::Builder::new()
+        .name("sayall-webview-error".into())
+        .spawn(|| unsafe {
+            use windows::core::w;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            MessageBoxW(
+                None,
+                w!("无线麦界面暂时无法显示。请通过系统托盘退出无线麦，再重新打开。"),
+                w!("无线麦界面异常"),
+                MB_OK | MB_ICONERROR,
+            );
+        });
+}
+
+#[cfg(windows)]
+fn observe_webview_failure(window: &tauri::WebviewWindow) {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND,
+        ProcessFailedEventHandler,
+    };
+    let role = "main";
+    let app = window.app_handle().clone();
+    let closed = Arc::new(AtomicBool::new(false));
+    let close_flag = Arc::clone(&closed);
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            close_flag.store(true, Ordering::Release);
+        }
+    });
+    let result = window.with_webview(move |webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            sayall_windows::gatt_note(format!("webview event=failure_observer role={role} result=failed stage=controller"));
+            return;
+        };
+        let mut failures = WebviewFailureState::default();
+        // WebView2 owns this handler until its controller closes. The callback
+        // borrows the event sender, never retaining a COM self-reference.
+        let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(-1);
+            let query = args.as_ref().map(|a| a.ProcessFailedKind(&mut kind));
+            let query_code = query.as_ref().and_then(|r| r.as_ref().err()).map(|e| e.code().0).unwrap_or(0);
+            let closing = closed.load(Ordering::Acquire) || EXIT_SHUTDOWN_DONE.load(Ordering::Acquire);
+            let action = failures.failed(kind.0, closing);
+            sayall_windows::gatt_note(format!("webview event=process_failed role={role} kind={} query_code={query_code} closing={closing} action={action:?}", kind.0));
+            match action {
+                WebviewFailureAction::Reload => {
+                    if let Some(core) = sender {
+                        let result = core.Reload();
+                        let code = result.as_ref().err().map(|e| e.code().0).unwrap_or(0);
+                        sayall_windows::gatt_note(format!("webview event=recovery role={role} phase=submitted action=reload result={} code={code} attempt=1", if result.is_ok() { "accepted" } else { "failed" }));
+                        if result.is_err() { failures.notified = true; report_webview_unavailable(&app); }
+                    } else {
+                        sayall_windows::gatt_note(format!("webview event=recovery role={role} phase=completed action=reload result=failed reason=missing_sender attempt=1"));
+                        failures.notified = true;
+                        report_webview_unavailable(&app);
+                    }
+                }
+                WebviewFailureAction::Notify => report_webview_unavailable(&app),
+                WebviewFailureAction::Ignore => {}
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        let result = core.add_ProcessFailed(&handler, &mut token);
+        sayall_windows::gatt_note(format!("webview event=failure_observer role={role} result={} code={}", if result.is_ok() { "passed" } else { "failed" }, result.err().map(|e| e.code().0).unwrap_or(0)));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(format!(
+            "webview event=failure_observer role={role} result=failed stage=dispatch"
+        ));
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSnapshot {
@@ -2359,6 +2474,10 @@ pub fn run() {
                 settings,
                 pending_update: std::sync::Mutex::new(None),
             });
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                observe_webview_failure(&window);
+            }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
             spawn_installer_graceful_exit_watcher(app.handle().clone());
@@ -3037,6 +3156,66 @@ mod tests {
             assert!(
                 !code.contains(token),
                 "安装器钩子出现强杀 `{token}`：强杀会留下未关闭的 GATT 会话并楔死系统蓝牙栈"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod webview_failure_tests {
+    use super::*;
+    #[test]
+    fn webview_failure_reloads_only_renderer_once_and_never_reopens_during_close() {
+        let mut state = WebviewFailureState::default();
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Notify);
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Ignore);
+        assert_eq!(
+            WebviewFailureState::default().failed(0, false),
+            WebviewFailureAction::Notify
+        );
+        assert_eq!(
+            WebviewFailureState::default().failed(1, true),
+            WebviewFailureAction::Ignore
+        );
+        assert_eq!(
+            WebviewFailureState::default().failed(3, false),
+            WebviewFailureAction::Ignore
+        );
+    }
+
+    #[test]
+    fn unknown_webview_failure_does_not_consume_recovery_budget() {
+        let mut state = WebviewFailureState::default();
+        assert_eq!(state.failed(-1, false), WebviewFailureAction::Ignore);
+        assert_eq!(state.failed(99, false), WebviewFailureAction::Ignore);
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
+    }
+
+    #[test]
+    fn closing_webview_failure_does_not_schedule_recovery_or_notification() {
+        let mut state = WebviewFailureState::default();
+        for kind in [0, 1, 2] {
+            assert_eq!(state.failed(kind, true), WebviewFailureAction::Ignore);
+        }
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
+    }
+    #[test]
+    fn notified_webview_failure_is_terminal_even_if_renderer_exits_later() {
+        for first_kind in [0, 2] {
+            let mut state = WebviewFailureState::default();
+            assert_eq!(
+                state.failed(first_kind, false),
+                WebviewFailureAction::Notify
+            );
+            assert_eq!(
+                state.failed(1, false),
+                WebviewFailureAction::Ignore,
+                "browser exit or unresponsive notification must prevent a later reload"
+            );
+            assert_eq!(
+                state.failed(first_kind, false),
+                WebviewFailureAction::Ignore
             );
         }
     }
