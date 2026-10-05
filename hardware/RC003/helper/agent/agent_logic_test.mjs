@@ -73,12 +73,15 @@ function fakePtr(initial) {
   };
 }
 
-const num = (n) => ({ toUInt32: () => n, isNull: () => false });
+const num = (n) => ({ toUInt32: () => n, isNull: () => false, toString: () => String(n) });
 
 /** NtDeviceIoControlFile 的 10 个参数（只有 5..9 被 agent 用到）。 */
 function fakeArgs(outPtr) {
   const a = new Array(10).fill(null).map(() => num(0));
   a[5] = num(0x80018483);                                   // IoControlCode
+  a[0] = num(10);
+  a[4] = { isNull: () => false, readU32: () => 0,
+    add: () => ({ readU64: () => ({ toString: () => '9' }) }) };
   a[6] = { isNull: () => false, readByteArray: () => toArrayBuffer(Uint8Array.from([0, 0, 0, 0, 0x02, 0x01, 0, 0])) };
   a[7] = num(8);                                            // InputBufferLength
   a[8] = outPtr;                                            // OutputBuffer
@@ -89,6 +92,9 @@ function fakeArgs(outPtr) {
 const handlers = {};
 const pending = [];                                          // 永不 settle 的 read => 桩连接不会"断线"
 const sleeps = [];                                           // Thread.sleep 桩的调用记录（门内延迟判据）
+const messages = [];
+let detachCount = 0;
+let attachCount = 0;
 
 const sandbox = {
   console,
@@ -96,10 +102,16 @@ const sandbox = {
   Process: {
     id: 4242,
     arch: 'x64',
+    pointerSize: 8,
     getModuleByName: () => ({ getExportByName: () => ({ isNull: () => false }) }),
   },
   Interceptor: {
-    attach(_fn, cb) { handlers.onEnter = cb.onEnter; handlers.onLeave = cb.onLeave; },
+    attach(_fn, cb) {
+      handlers.onEnter = cb.onEnter; handlers.onLeave = cb.onLeave;
+      attachCount++;
+      return { detach() { detachCount++; } };
+    },
+    flush() {},
   },
   Memory: { protect() { return true; } },
   Socket: {
@@ -107,7 +119,7 @@ const sandbox = {
       return Promise.resolve({
         setNoDelay() {},
         close() {},
-        output: { write() {} },
+        output: { write(bytes) { messages.push(JSON.parse(String.fromCharCode(...new Uint8Array(bytes.buffer || bytes)))); } },
         input: { read: () => new Promise((_res, _rej) => { pending.push(1); }) },
       });
     },
@@ -138,11 +150,21 @@ ctx.handleCommand('{"type":"renew"}');                       // 首次续约 = �
 ctx.installHook();
 check('installHook 注册了 onEnter', typeof handlers.onEnter === 'function');
 
-function press(...usages) {
+function beginPress(...usages) {
   const ptr = fakePtr(report(...usages));
   const self = {};
   handlers.onEnter.call(self, fakeArgs(ptr));
   return { ptr, self };
+}
+
+function press(...usages) {
+  const result = beginPress(...usages);
+  // 普通输入模拟同步完成；保留提交时的补丁，方便断言提交给内核的字节。
+  const restore = ctx.restoreOnLeave;
+  ctx.restoreOnLeave = false;
+  handlers.onLeave.call(result.self, num(0));
+  ctx.restoreOnLeave = restore;
+  return result;
 }
 
 /* --------------------------------- 1. 默认（无哨兵键）：非目标键一字节不动 */
@@ -380,6 +402,120 @@ check('源码含 synthSetIn（合成视角进门禁，防 canary 死代码同款
 check('源码含 clearSetIn（清空集合视角）', src.includes('function clearSetIn('));
 check('onEnter 门禁调用 shouldTouchReport',
   src.includes('if (!shouldTouchReport(bytes)) return;'));
+
+ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 100, report: [], clear: [] }));
+const beforeObservation = messages.length;
+const unmapped = press(0x0028, 0x0004);
+press();
+const observations = messages.slice(beforeObservation).filter((m) => m.type === 'observed');
+check('未映射键仅观察：已知键按下/释放均报告，不含非遥控键',
+  observations.length === 2 && JSON.stringify(observations[0].usages) === '[40]' && observations[1].usages.length === 0);
+check('仅观察不改报告、不投递执行边沿',
+  unmapped.ptr.buf[3] === 0x28 && unmapped.ptr.buf[5] === 0x04 &&
+  !messages.slice(beforeObservation).some((m) => m.type === 'edge' && m.usages.length));
+const detachesBefore = detachCount;
+ctx.handleCommand(JSON.stringify({ type: 'disarm', instance: 'foreign-agent', stop_id: 'wrong' }));
+check('另一 Agent 的停止请求不得撤钩', detachCount === detachesBefore);
+ctx.handleCommand(JSON.stringify({ type: 'disarm', instance: ctx.agentInstance, stop_id: 'stop-1' }));
+check('disarm 撤钩后确认 stopped', detachCount === detachesBefore + 1 &&
+  messages.at(-1).type === 'stopped' && messages.at(-1).hook_detached === true);
+check('停止回执绑定同 Agent 与本轮请求', messages.at(-1).instance === ctx.agentInstance &&
+  messages.at(-1).stop_id === 'stop-1' && typeof ctx.agentInstance === 'string');
+ctx.handleCommand(JSON.stringify({ type: 'disarm', instance: ctx.agentInstance, stop_id: 'stop-2' }));
+check('重复 disarm 幂等', detachCount === detachesBefore + 1);
+check('重复停止回显新的请求编号', messages.at(-1).stop_id === 'stop-2');
+const attachesBefore = attachCount;
+ctx.handleCommand(JSON.stringify({ type: 'arm' }));
+ctx.handleCommand(JSON.stringify({ type: 'arm' }));
+check('重新 arm 恰好挂钩一次', attachCount === attachesBefore + 1);
+ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003e, to: 0x00e6 }));
+press(0x003e);
+const beforeHeldStop = messages.length;
+const beforeHeldDetach = detachCount;
+ctx.handleCommand(JSON.stringify({ type: 'disarm', instance: ctx.agentInstance, stop_id: 'held-stop' }));
+ctx.handleCommand(JSON.stringify({ type: 'disarm', instance: ctx.agentInstance, stop_id: 'held-retry' }));
+ctx.handleCommand(JSON.stringify({ type: 'arm' }));
+ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+check('合成键持有中不伪报释放，也不能重新 arm',
+  detachCount === beforeHeldDetach && ctx.disarmed &&
+  !messages.slice(beforeHeldStop).some((m) => m.type === 'stopped'));
+const held = press(0x003e);
+check('清理等待中迟到续约不重新合成', held.ptr.buf[3] === 0x3e && ctx.disarmed);
+ctx.tLastRx = Date.now() - 10000;
+ctx.tConnect = Date.now() - 10000;
+ctx.heartbeat();
+check('持键清理超过看门狗期限仍保留同一连接', ctx.connected && ctx.stopPending);
+ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+const failedRelease = beginPress();
+check('释放 onEnter 尚未完成不能提前确认', detachCount === beforeHeldDetach);
+handlers.onLeave.call(failedRelease.self, num(0xc0000001));
+check('失败的释放提交不能确认清理', detachCount === beforeHeldDetach);
+const pendingRelease = beginPress();
+handlers.onLeave.call(pendingRelease.self, num(0x103));
+check('pending 的释放提交不能确认清理', detachCount === beforeHeldDetach);
+const otherDevice = beginPress();
+otherDevice.self.reportHandle = '11';
+handlers.onLeave.call(otherDevice.self, num(0));
+check('另一 handle 的零帧不能确认合成键释放', detachCount === beforeHeldDetach);
+const shortRelease = beginPress();
+shortRelease.self.ioStatus = { isNull: () => false, readU32: () => 0,
+  add: () => ({ readU64: () => ({ toString: () => '0' }) }) };
+handlers.onLeave.call(shortRelease.self, num(0));
+check('未完成9字节的提交不能确认释放', detachCount === beforeHeldDetach);
+const release = beginPress();
+handlers.onLeave.call(release.self, num(0));
+check('真实释放后撤钩并确认', detachCount === beforeHeldDetach + 1 &&
+  messages.at(-1).type === 'stopped' && messages.at(-1).released_all);
+check('持键停止重试仍等真实释放并回显最新请求', messages.at(-1).stop_id === 'held-retry');
+
+ctx.handleCommand(JSON.stringify({ type: 'arm' }));
+ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 101, report: [], clear: [] }));
+press(0x0028);
+ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 102, report: [0x0028], clear: [0x0028] }));
+const beforeMappedHeld = messages.length;
+const mappedHeld = press(0x0028);
+check('新增映射不接管原生已按住的键', mappedHeld.ptr.buf[3] === 0x28 &&
+  !messages.slice(beforeMappedHeld).some((m) => m.type === 'edge' && m.usages.length));
+press();
+check('新增映射等真实 UP 后下一按才接管', press(0x0028).ptr.buf[3] === 0);
+press();
+for (const change of [{ off: true }, { from: 0x003e, to: 0x00e2 }]) {
+  ctx.handleCommand(JSON.stringify({ type: 'arm' }));
+  ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+  ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003e, to: 0x00e6 }));
+  press(0x003e);
+  ctx.handleCommand(JSON.stringify({ type: 'synth', ...change }));
+  const before = detachCount;
+  ctx.handleCommand(JSON.stringify({ type: 'disarm', instance: ctx.agentInstance, stop_id: 'change-stop' }));
+  press(0x003e);
+  check(`synth ${change.off ? 'off' : 'change'} 后停止仍保留旧持有来源`, ctx.stopPending && detachCount === before);
+  press();
+  check(`synth ${change.off ? 'off' : 'change'} 后真实释放可完成停止`, detachCount === before + 1 && !ctx.stopPending);
+}
+
+ctx.handleCommand(JSON.stringify({ type: 'arm' }));
+ctx.handleCommand(JSON.stringify({ type: 'renew' }));
+ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003e, to: 0x00e6 }));
+press(0x003e);
+const beforeSynthOff = messages.length;
+ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+check('持键时 synth off 不得提前确认报告路径已释放',
+  !messages.slice(beforeSynthOff).some((m) => m.type === 'synth_ack' && m.off));
+press();
+check('真实完成释放后确认 synth off，重复命令幂等',
+  messages.slice(beforeSynthOff).some((m) => m.type === 'synth_ack' && m.off));
+
+const firstInstance = messages.find((m) => m.type === 'hello')?.instance;
+ctx.connected = false;
+ctx.connectOnce().catch(() => {});
+await new Promise((r) => setImmediate(r));
+check('Agent 实例标识跨 socket 重连稳定', typeof firstInstance === 'string' &&
+  firstInstance.length >= 32 && messages.filter((m) => m.type === 'hello').at(-1).instance === firstInstance);
+const otherCtx = createContext({ ...sandbox, rpc: {} });
+runInContext(src, otherCtx, { filename: 'rc003_agent.js' });
+check('同宿主新脚本实例不能沿用旧实例标识', otherCtx.agentInstance !== firstInstance);
 
 const failed = results.filter((r) => !r.ok);
 for (const r of results) {

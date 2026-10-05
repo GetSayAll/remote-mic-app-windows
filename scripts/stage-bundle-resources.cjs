@@ -30,3 +30,14 @@ for (const [src, dst] of pairs) {
   fs.copyFileSync(from, to);
   console.log("[stage] " + dst + " <- " + src);
 }
+
+// Keep redistributable license notices alongside the bundled binaries.
+const notices = path.join(root, "src-tauri", "licenses");
+fs.mkdirSync(notices, { recursive: true });
+for (const [source, name] of [
+  ["LICENSE", "LICENSE"],
+  ["ATTRIBUTION.md", "ATTRIBUTION.md"],
+  ["hardware/RC003/helper/vendor/Frida-COPYING.txt", "Frida-COPYING.txt"],
+]) {
+  fs.copyFileSync(path.join(root, source), path.join(notices, name));
+}

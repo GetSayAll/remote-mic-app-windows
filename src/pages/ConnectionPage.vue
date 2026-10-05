@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import BatteryIndicator from "../components/BatteryIndicator.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
+import BatteryIndicator from "../components/BatteryIndicator.vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import type {
   AudioEndpoint,
   AudioSnapshot,
+  AudioRouteSnapshot,
+  CaptureInputSnapshot,
   ConnectionSnapshot,
   KeyChord,
   PairedRemote,
-  Rc003TaskStatus,
   RuntimeSnapshot,
   VoiceInputTool,
 } from "../lib/bridge";
@@ -19,19 +20,23 @@ import {
   chordLabel,
   connectRemote,
   connectionPhaseLabel,
-  disableRc003Capture,
   disconnectRemote,
-  enableRc003Capture,
   getAudioSnapshot,
+  getAudioRouteSnapshot,
+  getCaptureInput,
+  listCaptureInputs,
+  setCaptureInput,
+  resolveCaptureRecovery,
   getConnectionSnapshot,
+  getRc003TaskStatus, enableRc003Capture, disableRc003Capture, type Rc003TaskStatus,
   getGainDb,
   getOtherVoiceHotkey,
-  getRc003TaskStatus,
   getVoiceHoldHotkey,
   getVoiceInputTool,
   getVokieInstallation,
-  isRecommendedVoiceEndpoint,
   listAudioEndpoints,
+  isRecommendedVoiceEndpoint,
+  captureInputErrorLabel,
   openVbCableDownloadPage,
   launchVokie,
   openVokieHomepage,
@@ -77,6 +82,59 @@ const emptyAudio = (): AudioSnapshot => ({
 
 const connection = ref<ConnectionSnapshot>(emptyConnection());
 const audio = ref<AudioSnapshot>(emptyAudio());
+const audioRoute = ref<AudioRouteSnapshot | null>(null);
+const routeError = ref("");
+const showAdvancedAudio = ref(false);
+let audioRouteRequest = 0;
+let reportedAudioRoute = "";
+function reportAudioRoute(phase: string, reason: string | null) {
+  const phases = ["paired", "manual", "unconfigured", "unavailable"];
+  const reasons = ["capture_missing", "render_missing", "ambiguous", "unsupported", "identity_changed", "render_mismatch", "audio_unready", "metadata_unavailable", "enumeration_failed", "snapshot_read_failed"];
+  const safePhase = phases.includes(phase) ? phase : "unknown";
+  const safeReason = reason === null ? "none" : reasons.includes(reason) ? reason : "unknown";
+  const signature = `${safePhase}_${safeReason}`;
+  if (signature === reportedAudioRoute) return;
+  reportedAudioRoute = signature;
+  reportFrontendEvent({ event: "audio_route_status", phase: "completed", result: safePhase === "paired" ? "passed" : safePhase === "unavailable" ? "failed" : "unknown", reason: signature });
+}
+const captureInput = ref<CaptureInputSnapshot>({ settings: { enabled: false, endpointId: null, endpointName: null }, phase: "disabled", recoveryPending: false, lastError: null });
+const captureEndpoints = ref<AudioEndpoint[]>([]);
+const captureBusy = ref(false);
+let captureRevision = 0;
+const captureMessage = ref("");
+const capturePhase = computed(() => ({ active: "本次说话正在使用所选输入设备", relinquished: "检测到外部改选，本次已让出控制", recovery_required: "上次会话未完整恢复，请选择如何处理", failed: "输入设备服务不可用", unsupported: "仅 Windows 应用支持" }[captureInput.value.phase] ?? (captureInput.value.settings.enabled ? "已开启，仅在遥控器说话期间切换" : "已关闭")));
+async function refreshCaptureInput() {
+  if (captureBusy.value) return;
+  const revision = captureRevision;
+  try { const snapshot = await getCaptureInput(); if (revision === captureRevision && !captureBusy.value) captureInput.value = snapshot; }
+  catch (error) { if (revision === captureRevision) captureMessage.value = String(error); }
+}
+async function scanCaptureInputs() {
+  captureBusy.value = true;
+  try { captureEndpoints.value = await listCaptureInputs(); }
+  catch (error) { captureMessage.value = String(error); }
+  finally { captureBusy.value = false; }
+}
+async function changeCaptureInput(enabled: boolean, endpointId = captureInput.value.settings.endpointId) {
+  const endpoint = captureEndpoints.value.find(e => e.id === endpointId);
+  const revision = ++captureRevision;
+  captureBusy.value = true; captureMessage.value = "";
+  try {
+    const result = await setCaptureInput({ enabled, endpointId, endpointName: endpointId ? (endpoint?.name ?? captureInput.value.settings.endpointName) : null });
+    if (revision === captureRevision) {
+      captureInput.value = result;
+      await Promise.all([refreshAudio(), refreshAudioRoute()]);
+    }
+  } catch (error) { captureMessage.value = String(error); await refreshCaptureInput(); }
+  finally { captureBusy.value = false; }
+}
+async function recoverCaptureInput(restore: boolean) {
+  const revision = ++captureRevision;
+  captureBusy.value = true; captureMessage.value = "";
+  try { const result = await resolveCaptureRecovery(restore); if (revision === captureRevision) captureInput.value = result; }
+  catch (error) { captureMessage.value = String(error); }
+  finally { captureBusy.value = false; }
+}
 const scanning = ref(false);
 const connectingDeviceId = ref("");
 const disconnecting = ref(false);
@@ -84,7 +142,6 @@ const devices = ref<PairedRemote[]>([]);
 const scanMessage = ref("");
 const operationMessage = ref("");
 const audioEndpoints = ref<AudioEndpoint[]>([]);
-const showEndpointList = ref(false);
 const scanningAudio = ref(false);
 const audioScanComplete = ref(false);
 const selectingEndpointId = ref("");
@@ -164,13 +221,13 @@ const VOICE_TOOL_CHORDS: Record<VoiceInputTool, KeyCode[] | null> = {
 
 /** 工具卡片顺序：豆包第一（2026-09-30 Andy 要求），Vokie 在“其他工具”之前（2026-10-01 新增）。 */
 const TOOL_CARDS: Array<{ id: VoiceInputTool; name: string; note: string }> = [
-  { id: "doubao", name: "豆包输入法", note: "要开启“支持更多输入工具”" },
+  { id: "doubao", name: "豆包输入法", note: "使用右 Alt 语音键" },
   { id: "wechat", name: "微信输入法", note: "用默认语音键，最省事" },
   { id: "vokie", name: "Vokie", note: "流式显示，智能整理，不占用输入法" },
   { id: "other", name: "其他工具", note: "自己指定按键" },
 ];
 
-/** "其他工具"可选的按键（报告层合成白名单 = 左右 Alt；不按键 = 只收语音）。 */
+/** "其他工具"提供的快捷键；不按键时只接收语音。 */
 const OTHER_CHORD_OPTIONS: Array<{ id: string; keys: KeyCode[]; label: string }> = [
   { id: "right_alt", keys: ["right_alt"], label: "右 Alt" },
   { id: "left_alt", keys: ["left_alt"], label: "左 Alt" },
@@ -238,7 +295,7 @@ function deriveToolFromChord(chord: KeyChord | null): VoiceInputTool {
 
 /**
  * 选择输入工具：立即把该工具要求的"按住说话快捷键"落盘（用户不需要理解快捷键），
- * 并把工具选择持久化（决定下次进页展示哪套引导与开关）。
+ * 并把工具选择持久化（决定下次进页展示哪套引导）。
  */
 async function selectVoiceInputTool(tool: VoiceInputTool): Promise<void> {
   if (savingVoiceInputTool.value) return;
@@ -404,6 +461,7 @@ async function applyVoiceHotkey(keys: string[]) {
 
 const rc003CaptureEnabled = ref<boolean | null>(null);
 const rc003CaptureBusy = ref(false);
+const rc003CaptureCleanupPending = ref(false);
 const showCaptureConfirm = ref(false);
 const captureSwitchEl = ref<HTMLInputElement | null>(null);
 const rc003CaptureHint = ref("");
@@ -423,6 +481,8 @@ function syncCaptureSwitchDom(): void {
 async function reconcileRc003Capture(): Promise<void> {
   try {
     const status = await getRc003TaskStatus();
+    if (unmounted) return;
+    rc003CaptureCleanupPending.value = status.cleanupPending;
     // 首次对账（null → 权威值）直接采纳；此后以本页用户操作为准，
     // 不被每秒变化无关的 installed 抖动带偏（与 ButtonsPage 同策略）。
     if (rc003CaptureEnabled.value === null) {
@@ -454,6 +514,7 @@ async function applyCaptureToggle() {
   try {
     const next: Rc003TaskStatus =
       wasEnabled === true ? await disableRc003Capture() : await enableRc003Capture();
+    rc003CaptureCleanupPending.value = next.cleanupPending;
     if (next.lastError) {
       rc003CaptureHint.value = next.lastError;
       reportFrontendEvent({
@@ -510,7 +571,7 @@ function closeCaptureDialog(): void {
  * 时被系统补执行。Esc（未按修饰键）取消；15 秒未完成自动结束，此时已录到
  * 的组合不再丢弃。
  *
- * 入口只在"其他工具"面板（自定义组合键，feature flag 控制）；微信 / 豆包
+ * 入口在"其他工具"面板；微信 / 豆包
  * 两个工具的快捷键是固定组合，选择即自动设置。
  */
 async function beginVoiceHotkeyCapture(): Promise<void> {
@@ -702,9 +763,8 @@ async function refreshVoiceHotkey() {
 }
 
 /**
- * 初始化快捷键设置与输入工具：两者一起读，工具缺失（老配置）时按当前
- * 快捷键推断并落存一次——此后以用户的选择为准（其他工具 + 右 Alt 与
- * 豆包 + 右 Alt 的组合相同，只有落存的工具能把它们区分开）。
+ * 初始化只读快捷键与输入工具。工具缺失时按快捷键展示建议引导，不写配置：
+ * 右 Alt 无法区分豆包、Vokie 与其他工具，持久化只来自用户显式选择。
  */
 async function initializeShortcutSettings(): Promise<void> {
   const [chord, storedTool] = await Promise.all([
@@ -712,7 +772,16 @@ async function initializeShortcutSettings(): Promise<void> {
       voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
       return null;
     }),
-    getVoiceInputTool().catch(() => null),
+    getVoiceInputTool().catch((error) => {
+      voiceHotkeyMessage.value = error instanceof Error ? error.message : String(error);
+      reportFrontendEvent({
+        event: "voice_input_tool_load",
+        phase: "completed",
+        result: "failed",
+        reason: "read_failed_configuration_preserved",
+      });
+      return null;
+    }),
   ]);
   voiceHotkey.value = chord;
   if (storedTool) {
@@ -721,7 +790,6 @@ async function initializeShortcutSettings(): Promise<void> {
   }
   const derived = deriveToolFromChord(chord);
   voiceInputTool.value = derived;
-  void setVoiceInputTool(derived).catch(() => undefined);
 }
 
 watch(
@@ -759,10 +827,6 @@ const atvvReady = computed(() =>
 
 const audioBusy = computed(() => ["streaming", "draining"].includes(audio.value.phase));
 
-const wasapiReady = computed(() =>
-  ["ready", "streaming", "draining"].includes(audio.value.phase),
-);
-
 const virtualCableEndpoints = computed(() =>
   audioEndpoints.value.filter((endpoint) => endpoint.isVirtualCableCandidate),
 );
@@ -795,18 +859,50 @@ const connectionTitle = computed(() => {
 });
 
 const audioTone = computed(() => {
-  if (audio.value.phase === "failed") return "error";
+  if (routeError.value || audioRoute.value?.phase === "unavailable") return "error";
+  if (audioRoute.value?.phase !== "paired") return "pending";
   if (audio.value.phase === "streaming") return "active";
-  if (audio.value.phase === "ready") return "success";
-  if (audio.value.phase === "draining") return "warning";
-  return "pending";
+  return "success";
 });
 
-const audioDetail = computed(() => {
-  if (audio.value.lastError) return audio.value.lastError;
-  if (audio.value.selectedEndpointName) return "语音会写入选中的设备";
-  return "不会自动改动系统默认设备，需要在这里明确选择";
+const audioRouteTitle = computed(() => {
+  if (routeError.value) return "声音通道状态读取失败";
+  if (!audioRoute.value) return "正在确认声音通道…";
+  return { paired: "声音传输已就绪", manual: "使用手动声音通道", unconfigured: "请选择目标麦克风", unavailable: "声音通道暂不可用" }[audioRoute.value.phase];
 });
+const audioRouteDetail = computed(() => {
+  if (routeError.value) return "暂时无法确认声音是否进入目标麦克风，请刷新后重试。";
+  const route = audioRoute.value;
+  if (!route) return "正在检查所选麦克风对应的声音通道。";
+  if (route.phase === "paired") return "遥控器声音会进入所选麦克风，内部声音通道已自动配对。";
+  if (route.phase === "manual") return "已保留手动写入端；尚未确认它是否通向所选麦克风，可在高级设置中检查。";
+  const reasons: Record<string, string> = {
+    capture_missing: "所选麦克风已不可用，请确认设备连接后刷新。",
+    render_missing: "未找到所选麦克风对应的声音写入端，请检查虚拟音频设备。",
+    ambiguous: "存在多个候选声音通道，无法明确配对，尚未自动选择。",
+    unsupported: "此设备无法自动配对声音通道，可在高级设置中检查手动写入端。",
+    identity_changed: "声音设备身份发生变化，尚未确认对应通道，请重新选择目标麦克风。",
+    render_mismatch: "当前写入端与目标麦克风不属于已确认的同一通道，请重新选择目标麦克风。",
+    audio_unready: "声音通道已识别，但写入端尚未就绪，请刷新状态。",
+    metadata_unavailable: "无法读取音频设备的关联信息，尚未自动连接声音通道。",
+    enumeration_failed: "无法读取音频设备列表，请刷新后重试。",
+  };
+  return reasons[route.reason ?? ""] ?? (route.phase === "unconfigured" ? "选择目标麦克风后，程序会自动连接对应的声音通道。" : "尚未确认声音通道，请刷新状态或检查高级设置。");
+});
+
+async function refreshAudioRoute() {
+  const request = ++audioRouteRequest;
+  try {
+    const snapshot = await getAudioRouteSnapshot();
+    if (unmounted || request !== audioRouteRequest) return;
+    audioRoute.value = snapshot; routeError.value = "";
+    reportAudioRoute(snapshot.phase, snapshot.reason);
+  } catch {
+    if (unmounted || request !== audioRouteRequest) return;
+    audioRoute.value = null; routeError.value = "read_failed";
+    reportAudioRoute("unavailable", "snapshot_read_failed");
+  }
+}
 
 async function refreshConnection() {
   try {
@@ -870,7 +966,7 @@ async function disconnect() {
   }
 }
 
-async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
+async function detectAudioEndpoints() {
   scanningAudio.value = true;
   audioMessage.value = "正在读取语音设备…";
   try {
@@ -879,16 +975,12 @@ async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
     const virtualCables = audioEndpoints.value.filter(
       (endpoint) => endpoint.isVirtualCableCandidate,
     );
-    if (virtualCables.length === 1 && autoSelectVirtualCable && !audio.value.selectedEndpointId) {
-      await chooseAudioEndpoint(virtualCables[0], true);
-      return;
-    }
     audioMessage.value = virtualCables.length
       ? `已检测到 ${virtualCables.length} 个 VB-CABLE 语音设备`
       : "未检测到 VB-CABLE；安装完成后需要重启电脑，再重新检测";
   } catch (error) {
     audioEndpoints.value = [];
-    audioScanComplete.value = true;
+    audioScanComplete.value = false;
     audioMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
     scanningAudio.value = false;
@@ -896,12 +988,10 @@ async function detectAudioEndpoints(autoSelectVirtualCable: boolean) {
 }
 
 async function scanAudio() {
-  await detectAudioEndpoints(false);
-  // 用户主动读取端点 = 想看列表；选好即收起（每次只用一个端点）。
-  showEndpointList.value = audioEndpoints.value.length > 0;
+  await Promise.all([detectAudioEndpoints(), scanCaptureInputs(), refreshCaptureInput(), refreshAudio(), refreshAudioRoute()]);
 }
 
-async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
+async function chooseAudioEndpoint(endpoint: AudioEndpoint) {
   selectingEndpointId.value = endpoint.id;
   audioMessage.value = "正在打开语音设备…";
   try {
@@ -913,11 +1003,9 @@ async function chooseAudioEndpoint(endpoint: AudioEndpoint, automatic = false) {
     const actualName = snapshot.selectedEndpointName ?? endpoint.name;
     audioMessage.value =
       actualName === endpoint.name
-        ? automatic
-          ? `已自动选择 ${actualName}`
-          : `已选择 ${actualName}`
+        ? `已选择 ${actualName}`
         : `已自动改用 ${actualName}（${endpoint.name} 暂时打不开）`;
-    showEndpointList.value = false;
+    await refreshAudioRoute();
   } catch (error) {
     audioMessage.value = error instanceof Error ? error.message : String(error);
     await refreshAudio();
@@ -939,8 +1027,8 @@ async function openVbCablePage() {
 }
 
 async function initializeAudio() {
-  const restoredAudio = await refreshAudio();
-  await detectAudioEndpoints(restoredAudio);
+  await refreshAudio();
+  await Promise.all([detectAudioEndpoints(), scanCaptureInputs(), refreshAudioRoute()]);
 }
 
 function onGainInput(event: Event): void {
@@ -964,11 +1052,12 @@ async function onGainCommit(event: Event): Promise<void> {
 }
 
 onMounted(async () => {
+  void reconcileRc003Capture();
+  void refreshCaptureInput();
   window.addEventListener("blur", handleVoiceCaptureBlur);
   void refreshConnection();
   void initializeAudio();
   void initializeShortcutSettings();
-  void reconcileRc003Capture();
   void refreshVokieInstallation();
   void getGainDb()
     .then((value) => {
@@ -979,8 +1068,11 @@ onMounted(async () => {
       gainError.value = error instanceof Error ? error.message : String(error);
     });
   pollTimer = setInterval(() => {
+    void reconcileRc003Capture();
+    void refreshCaptureInput();
     void refreshConnection();
     void refreshAudio();
+    void refreshAudioRoute();
   }, 1_000);
   const stopCaptureEdges = await subscribeShortcutCaptureEdges((edge) => {
     void acceptVoiceCaptureEdge(edge);
@@ -1015,8 +1107,7 @@ onUnmounted(() => {
     </header>
 
     <!-- ============ 设备：遥控器 + 语音设备 ============ -->
-    <div class="device-row">
-      <article class="card">
+      <article class="card remote-connection-card">
         <div class="card-title-row">
           <div>
             <h2>遥控器连接</h2>
@@ -1067,6 +1158,7 @@ onUnmounted(() => {
         <p v-if="scanMessage" class="muted scan-summary">{{ scanMessage }}</p>
         <p v-if="operationMessage" class="operation-message">{{ operationMessage }}</p>
 
+        <p class="muted">选择带“推荐”标记的 CABLE 设备。</p>
         <ul v-if="devices.length" class="device-list">
           <li v-for="device in devices" :key="device.id">
             <div><strong>{{ device.name }}</strong><small>{{ remoteModelLabel(device.model) }}</small></div>
@@ -1079,12 +1171,10 @@ onUnmounted(() => {
             </button>
           </li>
         </ul>
-      </article>
-
-      <article class="card">
+      <section class="voice-device-section" aria-labelledby="voice-devices-title">
         <div class="card-title-row">
           <div>
-            <h2>语音设备</h2>
+            <h3 id="voice-devices-title">语音设备</h3>
           </div>
           <button
             class="secondary-button"
@@ -1096,40 +1186,65 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="status-panel" aria-live="polite">
+        <div class="voice-device-columns">
+        <div class="status-panel audio-route-status" aria-live="polite">
           <div class="status-copy">
             <div class="status-heading">
               <span class="status-dot" :class="audioTone"></span>
-              <strong>{{ audio.selectedEndpointName ?? audioPhaseLabel(audio.phase) }}</strong>
+              <strong>{{ audioRouteTitle }}</strong>
             </div>
-            <small>{{ audioDetail }}</small>
+            <small>{{ audioRouteDetail }}</small>
           </div>
         </div>
 
-        <p v-if="audioMessage" class="muted scan-summary">{{ audioMessage }}</p>
-        <div v-if="audioEndpoints.length" class="endpoint-select-row">
-          <button
-            class="secondary-button"
-            type="button"
-            @click="showEndpointList = !showEndpointList"
-          >
-            {{ showEndpointList ? "收起列表" : audio.selectedEndpointId ? "更换设备" : "选择设备" }}
-          </button>
-          <span v-if="!showEndpointList" class="muted endpoint-count">
-            共 {{ audioEndpoints.length }} 个设备可选
-          </span>
+        <section class="capture-input-settings" aria-label="会话麦克风输入">
+          <div class="capture-input-target">
+          <label for="capture-input-target">目标麦克风输入</label>
+          <div class="button-row">
+            <select id="capture-input-target" :value="captureInput.settings.endpointId ?? ''" :disabled="captureBusy || audioBusy || !runtime?.platform.windowsApiAvailable || captureInput.recoveryPending"
+              @change="changeCaptureInput(captureInput.settings.enabled, ($event.target as HTMLSelectElement).value || null)">
+              <option value="">请选择输入设备</option>
+              <option v-if="captureInput.settings.endpointId && !captureEndpoints.some(e => e.id === captureInput.settings.endpointId)" :value="captureInput.settings.endpointId">{{ captureInput.settings.endpointName }}</option>
+              <option v-for="endpoint in captureEndpoints" :key="endpoint.id" :value="endpoint.id">{{ endpoint.name }}</option>
+            </select>
+            <button type="button" class="secondary-button" :disabled="captureBusy || !runtime?.platform.windowsApiAvailable" @click="scanCaptureInputs">读取输入设备</button>
+          </div>
+          <p aria-live="polite">{{ capturePhase }}</p>
+          <button v-if="audioRoute?.phase === 'unavailable' && captureInput.settings.endpointId" type="button" class="secondary-button" :disabled="captureBusy || audioBusy || !runtime?.platform.windowsApiAvailable || captureInput.recoveryPending" @click="changeCaptureInput(captureInput.settings.enabled)">重新连接声音通道</button>
+          </div>
+          <div class="capture-input-behavior">
+          <label class="setting-row">
+            <span>遥控器说话时临时切换麦克风输入</span>
+            <input type="checkbox" :checked="captureInput.settings.enabled"
+              :disabled="captureBusy || audioBusy || !runtime?.platform.windowsApiAvailable || !captureInput.settings.endpointId || captureInput.recoveryPending"
+              @change="changeCaptureInput(($event.target as HTMLInputElement).checked)" />
+          </label>
+          <p class="muted">按住语音键时切换到所选麦克风，松开后恢复。其他应用或你手动改选时，会保留新的选择。VB-CABLE 请选 CABLE Output；程序会处理声音传输。软件自行指定的麦克风不受此开关控制。</p>
+          </div>
+          <div v-if="audioBusy || captureMessage || captureInput.lastError || captureInput.recoveryPending" class="capture-input-feedback">
+          <p v-if="audioBusy" class="muted">请松开语音键后更改会话输入设备。</p>
+          <p v-if="captureMessage || captureInput.lastError" role="status">{{ captureInputErrorLabel(captureMessage || captureInput.lastError) }}</p>
+          <div v-if="captureInput.recoveryPending" class="info-callout warning">
+            <p>上次退出未能确认输入设备恢复。如果此后改过麦克风，请保留当前选择。恢复只处理仍符合原会话记录的设备。</p>
+            <div class="button-row">
+              <button type="button" :disabled="captureBusy" @click="recoverCaptureInput(false)">保留当前选择</button>
+              <button type="button" class="secondary-button" :disabled="captureBusy" @click="recoverCaptureInput(true)">尝试恢复会话前设备</button>
+            </div>
+          </div>
+          </div>
+        </section>
         </div>
-        <ul v-if="showEndpointList && audioEndpoints.length" class="device-list endpoint-list">
+        <details class="audio-advanced" @toggle="showAdvancedAudio = ($event.target as HTMLDetailsElement).open">
+          <summary>高级：声音传输诊断</summary>
+          <template v-if="showAdvancedAudio">
+          <p class="muted">手动写入端只用于诊断或已有特殊配置。它决定遥控器声音写到哪里，不改变 Windows 默认扬声器；选择扬声器可能直接播放声音，不能代表目标麦克风已收到声音。</p>
+          <p class="muted">当前写入端：{{ audio.selectedEndpointName ?? audioPhaseLabel(audio.phase) }}</p>
+          <p v-if="audioMessage || audio.lastError" role="status">{{ audioMessage || audio.lastError }}</p>
+        <ul v-if="audioEndpoints.length" class="device-list endpoint-list">
           <li v-for="endpoint in audioEndpoints" :key="endpoint.id">
             <div>
               <strong>{{ endpoint.name }}</strong>
-              <strong
-                v-if="isRecommendedVoiceEndpoint(endpoint)"
-                class="endpoint-recommend"
-              >
-                推荐
-              </strong>
-              <small v-else>其他音频设备</small>
+              <small>{{ isRecommendedVoiceEndpoint(endpoint) ? "推荐" : "仅用于手动诊断" }}</small>
             </div>
             <button
               type="button"
@@ -1146,6 +1261,8 @@ onUnmounted(() => {
             </button>
           </li>
         </ul>
+          </template>
+        </details>
 
         <div class="gain-row">
           <label class="gain-label" for="audio-gain">增益</label>
@@ -1183,17 +1300,8 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
-        <div v-else class="info-callout" :class="{ warning: !wasapiReady }">
-          {{
-            wasapiReady
-              ? "语音设备已就绪。"
-              : virtualCableInstalled
-                ? "已检测到 VB-CABLE。在下面列表里选择带「推荐」标记的 CABLE 设备；输入法的麦克风请选择 CABLE Output。"
-                : "正在检测 VB-CABLE…"
-          }}
-        </div>
+      </section>
       </article>
-    </div>
 
     <!-- ============ 语音输入设置（三步） ============ -->
     <article class="card setup-card">
@@ -1269,7 +1377,7 @@ onUnmounted(() => {
                 :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
               >
                 {{
-                  rc003CaptureEnabled === true
+                  rc003CaptureCleanupPending ? "正在收尾" : rc003CaptureEnabled === true
                     ? "已开启"
                     : rc003CaptureEnabled === false
                       ? "需要开启"
@@ -1277,8 +1385,11 @@ onUnmounted(() => {
                 }}
               </span>
             </div>
-            <div v-if="rc003CaptureEnabled === false" class="info-callout warning callout-small">
+            <div v-if="rc003CaptureCleanupPending" class="info-callout warning callout-small">全按键支持正在收尾，请稍后查看状态。</div>
+            <div v-else-if="rc003CaptureEnabled === false" class="info-callout warning callout-small">
               还差一步：开启后豆包才能收到遥控器语音键。每次开启都会弹出系统授权，请点“是”。
+            </div>
+            <div v-else-if="rc003CaptureEnabled === true" class="info-callout callout-small">
               已开启：现在按住遥控器语音键，豆包的语音条就会出现。
             </div>
             <div v-if="vokieRunning === true" class="info-callout warning callout-small">
@@ -1297,7 +1408,6 @@ onUnmounted(() => {
                 {{ toolChordPill("wechat").label }}
               </span>
             </div>
-            <p class="tiny muted">微信输入法不需要“支持更多输入工具”开关。</p>
           </div>
 
           <div v-else-if="voiceInputTool === 'vokie'" class="tool-panel">
@@ -1357,6 +1467,32 @@ onUnmounted(() => {
           </div>
 
           <div v-else-if="voiceInputTool === 'other'" class="tool-panel">
+            <div class="switch-line">
+              <label class="toggle-row" for="capture-switch-other">
+                <span>支持更多输入工具</span>
+                <span
+                  v-if="rc003CaptureEnabled === null"
+                  class="toggle-placeholder"
+                  aria-hidden="true"
+                ></span>
+                <input
+                  v-else
+                  id="capture-switch-other"
+                  ref="captureSwitchEl"
+                  type="checkbox"
+                  class="toggle-input capture-switch"
+                  :checked="rc003CaptureEnabled === true"
+                  :disabled="rc003CaptureBusy"
+                  @change="toggleRc003Capture"
+                />
+              </label>
+              <span
+                class="switch-state"
+                :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
+              >
+                {{ rc003CaptureCleanupPending ? "正在收尾" : rc003CaptureEnabled === true ? "已开启" : "未开启" }}
+              </span>
+            </div>
             <p class="tiny muted" style="margin-top: 0">选与你输入工具里一致的语音键：</p>
             <div class="chip-select">
               <button
@@ -1384,36 +1520,8 @@ onUnmounted(() => {
               >
                 {{ capturingVoiceHotkey ? "录入中…（按 Esc 取消）" : "自定义组合键" }}
               </button>
-              <button v-else class="chip" type="button" disabled>自定义组合键（暂未开放）</button>
+              <button v-if="!VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED" class="chip disabled-chip" type="button" disabled title="暂未开放">自定义组合键（暂未开放）</button>
             </div>
-            <div class="switch-line">
-              <label class="toggle-row" for="capture-switch-other">
-                <span>支持更多输入工具</span>
-                <span
-                  v-if="rc003CaptureEnabled === null"
-                  class="toggle-placeholder"
-                  aria-hidden="true"
-                ></span>
-                <input
-                  v-else
-                  id="capture-switch-other"
-                  ref="captureSwitchEl"
-                  type="checkbox"
-                  class="toggle-input capture-switch"
-                  :checked="rc003CaptureEnabled === true"
-                  :disabled="rc003CaptureBusy"
-                  @change="toggleRc003Capture"
-                />
-              </label>
-              <span
-                class="switch-state"
-                :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
-              >
-                {{ rc003CaptureEnabled === true ? "已开启" : "未开启" }}
-              </span>
-            </div>
-            <p class="tiny muted">建议开启：部分输入工具需要它才能收到遥控器按键。</p>
-            <p v-if="rc003CaptureHint" class="tiny muted">{{ rc003CaptureHint }}</p>
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{
                 voiceCaptureDisplay.length
@@ -1428,6 +1536,8 @@ onUnmounted(() => {
             </p>
           </div>
 
+          <p v-if="voiceInputTool === 'other' && rc003CaptureCleanupPending" role="status" class="tiny muted">全按键支持正在收尾，请稍后查看状态。</p>
+          <p v-if="rc003CaptureHint" class="tiny error-text">{{ rc003CaptureHint }}</p>
           <p v-if="voiceHotkeyMessage" class="tiny muted voice-hotkey-message">
             {{ voiceHotkeyMessage }}
           </p>
@@ -1444,21 +1554,21 @@ onUnmounted(() => {
           </div>
 
           <ol v-if="voiceInputTool === 'doubao'" class="checklist">
-            <li><span class="mark">1</span><span>豆包麦克风选 CABLE Output</span></li>
+            <li><span class="mark">1</span><span>豆包麦克风选择与上方相同的目标；使用系统默认时开启临时切换</span></li>
             <li><span class="mark">2</span><span>豆包长按语音键选 右 Alt</span></li>
             <li><span class="mark">3</span><span>切到豆包后，按住遥控器语音键说话</span></li>
           </ol>
           <ol v-else-if="voiceInputTool === 'wechat'" class="checklist">
-            <li><span class="mark">1</span><span>微信输入法麦克风选 CABLE Output</span></li>
+            <li><span class="mark">1</span><span>微信输入法麦克风选择与上方相同的目标；使用系统默认时开启临时切换</span></li>
             <li><span class="mark">2</span><span>切到微信输入法后，按住遥控器语音键说话</span></li>
           </ol>
           <ol v-else-if="voiceInputTool === 'vokie'" class="checklist">
-            <li><span class="mark">1</span><span>Vokie 麦克风选 CABLE Output</span></li>
+            <li><span class="mark">1</span><span>Vokie 麦克风选择与上方相同的目标；使用系统默认时开启临时切换</span></li>
             <li><span class="mark">2</span><span>Vokie 快捷键保持默认的 右 Alt</span></li>
             <li><span class="mark">3</span><span>在要写字的地方按住遥控器语音键说话</span></li>
           </ol>
           <ol v-else-if="voiceInputTool === 'other'" class="checklist">
-            <li><span class="mark">1</span><span>输入工具麦克风选 CABLE Output</span></li>
+            <li><span class="mark">1</span><span>输入工具麦克风选择与上方相同的目标；使用系统默认时开启临时切换</span></li>
             <li><span class="mark">2</span><span>语音键与第 2 步选的键一致</span></li>
             <li><span class="mark">3</span><span>切到该输入法后，按住遥控器语音键说话</span></li>
           </ol>
@@ -1474,7 +1584,7 @@ onUnmounted(() => {
         <li>“替你按下的键”目前提供 左 Ctrl + 左 Win、右 Alt、左 Alt 和不按键四种；自由录入正在重做，暂未开放。</li>
         <li>微信输入法要求按住约半秒以上（需要联网），快速点按不出字是它自己的要求，不是故障。</li>
         <li>豆包要是当前输入法，否则按住遥控器语音键只会弹出 Windows 的 Alt 菜单（记事本里会出现“文件(F)、编辑(E)”这类字母）。应用会在你**按住语音键时**把输入法切到所选工具；刚切换过输入工具后的第一次按住如果没反应，松开再按一次即可（第一次那下用于切换输入法）。</li>
-        <li>Vokie、微信输入法或豆包如果没有单独的麦克风选项，把系统默认录音设备设为 CABLE Output。</li>
+        <li>输入工具如果使用系统默认麦克风，可开启上方“遥控器说话时临时切换麦克风输入”，按住期间切换、松开后恢复，无需一直更改系统默认设备。</li>
         <li>Vokie 和豆包用的是同一个快捷键（右 Alt），同一时间只会有一个在响应：Vokie 要在运行中，豆包要是当前输入法；两个同时开着时 Vokie 会抢先。</li>
       </ul>
     </details>
@@ -1487,3 +1597,28 @@ onUnmounted(() => {
     @close="closeCaptureDialog"
   />
 </template>
+
+<style scoped>
+.remote-connection-card { margin-bottom: 14px; }
+.voice-device-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.voice-device-section h3 { margin: 0; font-size: 16px; }
+.voice-device-columns { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 2.1fr); gap: 16px; margin-top: 14px; align-items: start; }
+.audio-route-status { margin: 0; min-width: 0; }
+.capture-input-settings { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; }
+.capture-input-target, .capture-input-behavior { min-width: 0; padding-left: 16px; border-left: 1px solid var(--border); }
+.capture-input-target > label { display: block; margin-bottom: 8px; font-weight: 600; }
+.capture-input-target select { min-height: 36px; }
+.capture-input-target .button-row { justify-content: flex-start; }
+.capture-input-behavior .setting-row { align-items: flex-start; padding: 0; border: 0; gap: 12px; }
+.capture-input-behavior .setting-row span { text-align: left; font-weight: 600; color: var(--text-primary); }
+.capture-input-behavior input { flex-shrink: 0; }
+.capture-input-settings p { margin: 10px 0 0; font-size: 13px; }
+.capture-input-feedback { grid-column: 1 / -1; min-width: 0; }
+.audio-advanced { margin-top: 14px; font-size: 13px; }
+.audio-advanced > summary { color: var(--muted); cursor: pointer; }
+.audio-advanced > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 1020px) {
+  .voice-device-columns, .capture-input-settings { grid-template-columns: minmax(0, 1fr); }
+  .capture-input-target, .capture-input-behavior { padding-left: 0; border-left: 0; }
+}
+</style>

@@ -8,21 +8,8 @@
 //! - **LL 钩子吞掉的事件不会再投递给 Raw Input**。因此被吞键盘事件的语义边沿
 //!   由本钩子直接喂给映射引擎（`ButtonEdge`），未被吞的由 Raw Input 监听器喂，
 //!   双源汇入引擎的 `ButtonStateMerger` 并集去重。
-//! - 归因（遥控器 vs 物理键盘）：LL 钩子事件无设备信息。三条通路：
-//!   1. 直接归因族：VK 0xFF 族（厂商键：返回/电源/音量）物理键盘不会产生；
-//!      VK_APPS（0x5D 菜单键）与 VK_SLEEP（0x5F 电源键睡眠形态，均
-//!      2026-09-06 纳入）物理键盘实际极罕见。三者无需武装直接吞（见
-//!      docs/investigations/2026-09-06-left-double-response-arm-deadlock.md
-//!      的结构性武装死锁：孤立按压首沿在 60ms 有界等待内无法武装必泄漏）；
-//!   2. 常驻抑制族（"遥控器优先"，2026-09-07 用户选定方案 C 落地）：Home/TV
-//!      已映射且遥控器在线（`set_remote_connected`，ble.rs 相位提交点同步）
-//!      时无需武装直接吞——孤立首按不再泄漏，代价是物理键盘 Home/` 在
-//!      遥控器连接期间被接管（用户确认接受；断开连接或取消映射即恢复）；
-//!   3. 其余 VK（方向/Enter/音量 VK）需"武装"：Raw Input
-//!      监听器观察到该按键的 HID 报文（独立管线，不受键盘 LL 钩子影响）后
-//!      武装对应按键；钩子在按下沿做 60ms 有界等待（key_suppressor 同款，
-//!      覆盖监听线程消息泵的调度延迟）。RIT 先投递 WM_INPUT 再调用钩子，
-//!      有界等待是跨线程交接的必要窗口。
+//! - 返回、音量、TV/Home 只允许设备来源已验证的报告层接管；LL 层始终放行。
+//! - 其他旧映射仍保留既有 VK/有界武装路径，其限制不扩展为来源证明。
 //! - 边沿配对防粘键（2026-09-05 会话复盘规则）：DOWN 漏进 OS 则 UP 必放行；
 //!   本次按住的所有 DOWN 沿都被吞下才吞对应 UP。
 //! - 注入免疫：LLKHF_INJECTED 事件一律放行（自家 SendInput 与其他程序注入）。
@@ -37,6 +24,18 @@ use crate::send_input::KeyCode;
 use serde::Serialize;
 use std::sync::Arc;
 
+static REPORT_CAPTURE_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static CAPTURE_OWNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn set_report_capture_enabled(value: bool) {
+    REPORT_CAPTURE_ENABLED.store(value, std::sync::atomic::Ordering::Release);
+}
+pub(crate) fn set_enhanced_owned_mask(mask: u64) {
+    CAPTURE_OWNED.store(mask, std::sync::atomic::Ordering::Release);
+}
+pub fn enhanced_owned_mask() -> u64 {
+    CAPTURE_OWNED.load(std::sync::atomic::Ordering::Acquire)
+}
 /// 录入边沿的来源。
 ///
 /// `Real` = 物理按键事件本身；`Injected` = 外部钩子（微信输入法等）在
@@ -244,6 +243,7 @@ mod windows_impl {
     use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, SetWindowsHookExW,
         TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
@@ -282,30 +282,12 @@ mod windows_impl {
     static PREHELD_PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static MAPPED_MASK: AtomicU64 = AtomicU64::new(0);
-    /// 已由报告层增强链路确认接管的按键。命中的按键不得再走全局键盘钩子，
-    /// 否则会把同名物理键盘按键也吞掉；增强所有权丢失时清零即恢复旧兜底。
-    static ENHANCED_OWNED_MASK: AtomicU64 = AtomicU64::new(0);
-    /// 常驻抑制掩码（"遥控器优先"）：遥 online 期间无需武装直接吞。
-    /// 由映射引擎在映射变化时写入（当前仅 Home/TV，见 button_mapping.rs）。
-    static PERSISTENT_MASK: AtomicU64 = AtomicU64::new(0);
-    /// 遥控器在线状态（BLE 连接相位推导，ble.rs 在相位提交点同步）。
-    /// 常驻抑制键仅在线时接管；离线恢复物理键盘原生透传（不劫持）。
-    static REMOTE_CONNECTED: AtomicBool = AtomicBool::new(false);
-    /// 语音键报告层合成生效门禁（2026-09-29）：rc003_bridge 在「助手已连接
-    /// 且 S 行（合成目标）写出成功」时置位，连接收尾/桥 Drop 时回落。
-    /// ble.rs 据此停用 SendInput 注入路径（防止同一语音会话双写互扰，
-    /// 2026-09-29 run8 真机实证）。模块级原子与 ENHANCED_OWNED_MASK 同模式。
+    // Report-layer voice synthesis is independent from ordinary key capture.
     static VOICE_SYNTH_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static POLICY_GENERATION: AtomicU64 = AtomicU64::new(0);
     static LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
     static SWALLOWED_EDGES: AtomicU64 = AtomicU64::new(0);
     static LEAKED_DOWNS: AtomicU64 = AtomicU64::new(0);
-    /// 常驻抑制吞键累计（按下沿，每次按住的 DOWN 计一次）。只增不减。
-    /// 2026-09-28 TV 键偶发拦截调查：增强所有权丢失窗口（ownership_timeout /
-    /// ownership_released → ownership_resumed）内，方案 C 常驻抑制接管 TV，
-    /// 物理键盘同名键（反引号 VK 0xC0）随之被吞——该窗口此前只知起点不知
-    /// 终点与影响面。本计数由所有权沿日志（rc003_bridge）读快照，分析时
-    /// 做差即得窗口内被吞按压次数。钩子线程内只做 fetch_add（无锁无 IO）。
-    static PERSISTENT_SWALLOW_TOTAL: AtomicU64 = AtomicU64::new(0);
     static ARMED_UNTIL_MS: [AtomicU64; ALL_BUTTONS.len()] = {
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: AtomicU64 = AtomicU64::new(0);
@@ -325,7 +307,6 @@ mod windows_impl {
     /// vk/注入标记（`last_unmapped_injected`）——区分"边沿没到"与"边沿到了
     /// 但被映射丢弃"（后者此前表现为静默零边沿，无法归因）。
     static CAPTURE_UNMAPPED_SEEN: AtomicU64 = AtomicU64::new(0);
-    static LAST_UNMAPPED_VK: AtomicU64 = AtomicU64::new(0);
     static LAST_UNMAPPED_INJECTED: AtomicU64 = AtomicU64::new(0);
     /// 钩子收到的全部键盘回调数（含未激活录入时的每一键；健康度基线）与其中
     /// 的注入事件数。用于区分"钩子没被系统调用"与"钩子被调用但事件被上层
@@ -344,11 +325,45 @@ mod windows_impl {
     thread_local! {
         /// (vk, make) → 按住配对状态（true=本次按住的 DOWN 全部被吞）。
         /// 仅钩子线程读写。
-        static HOLD_PAIRING: RefCell<HashMap<(u16, u16), bool>> =
+        static HOLD_PAIRING: RefCell<HashMap<(u16, u16), HoldPairing>> =
             RefCell::new(HashMap::new());
         /// 录入模式吞下的 DOWN 集合。即使界面在录到非修饰键后立即关闭模式，
         /// 对应 UP 与按住自动重复 DOWN 仍继续吞到物理释放，避免不对称边沿。
         static CAPTURE_PAIRING: RefCell<HashSet<(u16, u16)>> = RefCell::new(HashSet::new());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct HoldPairing {
+        pub all_swallowed: bool,
+        pub generation: u64,
+    }
+
+    pub fn seed_native_hold(
+        previous: Option<HoldPairing>,
+        state: i16,
+        generation: u64,
+    ) -> Option<HoldPairing> {
+        previous.or_else(|| {
+            (state < 0).then_some(HoldPairing {
+                all_swallowed: false,
+                // Treat an already-native hold as belonging to the previous policy.
+                generation: generation.wrapping_sub(1),
+            })
+        })
+    }
+
+    /// A cancelled captured hold drains privately until UP. A leaked hold keeps
+    /// its native release; neither can be adopted by the next configuration.
+    pub fn cancelled_down(
+        pairing: Option<HoldPairing>,
+        generation: u64,
+        ready: bool,
+    ) -> Option<bool> {
+        match pairing {
+            Some(hold) if !ready || hold.generation != generation => Some(hold.all_swallowed),
+            None if !ready => Some(false),
+            _ => None,
+        }
     }
 
     pub const HOLD_NONE: u32 = 0;
@@ -362,17 +377,6 @@ mod windows_impl {
     fn mapped(button: RemoteButton) -> bool {
         let mask = MAPPED_MASK.load(Ordering::Relaxed);
         mask != 0 && (mask >> button.ordinal()) & 1 == 1
-    }
-
-    /// 常驻抑制键（"遥控器优先"）：位掩码由映射引擎写入（已映射的 Home/TV）。
-    fn persistent(button: RemoteButton) -> bool {
-        let mask = PERSISTENT_MASK.load(Ordering::Relaxed);
-        mask != 0 && (mask >> button.ordinal()) & 1 == 1
-    }
-
-    /// 遥控器在线（BLE 连接相位推导，ble.rs 同步）。
-    fn remote_connected() -> bool {
-        REMOTE_CONNECTED.load(Ordering::Relaxed)
     }
 
     /// 直接归因族（无需武装即可吞）：
@@ -402,26 +406,19 @@ mod windows_impl {
             && ENABLED.load(Ordering::Relaxed)
             && LISTENER_ACTIVE.load(Ordering::Relaxed)
             && mapped(button)
-            && !enhanced_owned(button)
-    }
-
-    fn enhanced_owned(button: RemoteButton) -> bool {
-        let mask = ENHANCED_OWNED_MASK.load(Ordering::Relaxed);
-        (mask >> button.ordinal()) & 1 == 1
     }
 
     /// 纯决策函数（单元测试覆盖）：给定钩子事件与归因状态，是否吞键。
     ///
     /// - 注入事件一律放行；
     /// - 未映射/总开关关闭/监听器停止 → 放行（替换语义不生效=原始行为）；
-    /// - 无需武装即可归因（直接归因族 VK 0xFF/0x5D/0x5F，或常驻抑制键
-    ///   Home/TV 已映射且遥控器在线——调用方把两者折算进本参数）→ 吞；
+    /// - 返回、音量、TV/Home 的两个边沿均放行；其余保留既有归因策略；
     /// - 其余按下沿按武装归因；
     /// - 释放沿只看按住配对：本次按住的 DOWN 全被吞才吞 UP（防粘键规则）。
     #[allow(clippy::too_many_arguments)]
     pub fn decide(
-        _vk_code: u32,
-        _make_code: u16,
+        vk_code: u32,
+        make_code: u16,
         is_key_up: bool,
         injected: bool,
         direct_attributed: bool,
@@ -429,16 +426,29 @@ mod windows_impl {
         hold_pairing: u32,
         gate_ready: bool,
     ) -> bool {
-        if injected {
-            return false;
-        }
-        if !gate_ready {
+        if injected || requires_report_source(vk_code, make_code) {
             return false;
         }
         if is_key_up {
             return hold_pairing == HOLD_SWALLOWED_ALL;
         }
+        if !gate_ready {
+            return false;
+        }
         direct_attributed || armed_now
+    }
+
+    fn requires_report_source(vk: u32, scan: u16) -> bool {
+        matches!(
+            button_for_keyboard(vk as u16, scan),
+            Some(
+                RemoteButton::Back
+                    | RemoteButton::VolumeUp
+                    | RemoteButton::VolumeDown
+                    | RemoteButton::Tv
+                    | RemoteButton::Home
+            )
+        )
     }
 
     fn track_down(current: Option<bool>, down_swallowed: bool) -> bool {
@@ -452,8 +462,11 @@ mod windows_impl {
     /// 取走一次按住的配对裁决（UP 沿无论吞放都消费条目，纯函数供单测）：
     /// true=本次按住的 DOWN 全部被吞（吞 UP）；false/缺失=放行 UP。
     /// 条目在 UP 沿必定清除——泄漏污染不跨按住残留。
-    pub fn take_up_pairing(pairing: &mut HashMap<(u16, u16), bool>, key: (u16, u16)) -> bool {
-        pairing.remove(&key).unwrap_or(false)
+    pub fn take_up_pairing(
+        pairing: &mut HashMap<(u16, u16), HoldPairing>,
+        key: (u16, u16),
+    ) -> bool {
+        pairing.remove(&key).is_some_and(|hold| hold.all_swallowed)
     }
 
     fn feed_edge(button: RemoteButton, is_pressed: bool) {
@@ -560,11 +573,10 @@ mod windows_impl {
                             },
                         });
                     }
-                    // 未能映射成协议键：记录最后一次原始 vk/注入标记，
+                    // 未能映射成协议键：只记录计数与注入标记，不记录用户按键，
                     // 使"边沿到了但没投递"可归因（否则表现为静默零边沿）。
                     (None, _) => {
                         CAPTURE_UNMAPPED_SEEN.fetch_add(1, Ordering::Relaxed);
-                        LAST_UNMAPPED_VK.store(vk_code as u64, Ordering::Relaxed);
                         LAST_UNMAPPED_INJECTED.store(injected as u64, Ordering::Relaxed);
                     }
                     _ => {}
@@ -607,11 +619,14 @@ mod windows_impl {
         let Some(button) = button_for_keyboard(vk_code as u16, make_code) else {
             return false;
         };
-        if !gate_ready(button) {
-            // 未映射按键：不吞、不记配对（原始行为透传）。
+        // RC003 mappings have one report-capture source. The keyboard hook must
+        // leave physical keyboards alone, including while capture is unavailable.
+        if super::REPORT_CAPTURE_ENABLED.load(Ordering::Acquire) {
             return false;
         }
-
+        if requires_report_source(vk_code, make_code) {
+            return false;
+        }
         if is_key_up {
             // UP 沿无论吞放都消费配对条目：泄漏污染只在"本次按住"内生效
             //（2026-09-06 调查档案"后续发现"的修复——此前泄漏后的条目跨按住
@@ -626,15 +641,41 @@ mod windows_impl {
             return swallow;
         }
 
-        // 按下沿：直接归因族（VK 0xFF 厂商键 + VK_APPS 菜单键 + VK_SLEEP）与
-        // 常驻抑制键（Home/TV"遥控器优先"：已映射 + 遥控器在线）无需武装；
-        // 其余等待武装（有界 60ms）。常驻抑制键跳过有界等待，响应零额外延迟。
-        // 路径分类供 PERSISTENT_SWALLOW_TOTAL 计数：direct 族（0xFF/0x5D/0x5F）
-        // 与 TV/Home 的 VK（0xC0/0x24）不相交，via_persistent && !via_direct
-        // 恒等于"常驻抑制吞键"。
-        let via_direct = direct_attributed(vk_code);
-        let via_persistent = persistent(button) && remote_connected();
-        let attributed = if via_direct || via_persistent {
+        let generation = POLICY_GENERATION.load(Ordering::Acquire);
+        let key = (vk_code as u16, make_code);
+        let mut previous = HOLD_PAIRING.with(|pairing| pairing.borrow().get(&key).copied());
+        if previous.is_none() {
+            // LowLevelKeyboardProc runs BEFORE asynchronous state is updated.
+            // Only a positive high-bit observation proves an earlier native DOWN;
+            // zero is also returned for inaccessible desktops and proves no identity.
+            // https://learn.microsoft.com/windows/win32/winmsg/lowlevelkeyboardproc
+            let state = unsafe { GetAsyncKeyState(vk_code as i32) };
+            previous = seed_native_hold(None, state, generation);
+            if let Some(hold) = previous {
+                HOLD_PAIRING.with(|pairing| {
+                    pairing.borrow_mut().insert(key, hold);
+                });
+                crate::ble::gatt_note(
+                    "map_gate_existing_native_down attribution=unknown release=passthrough"
+                        .to_owned(),
+                );
+            }
+        }
+        if let Some(swallow) = cancelled_down(previous, generation, gate_ready(button)) {
+            HOLD_PAIRING.with(|pairing| {
+                pairing.borrow_mut().entry(key).or_insert(HoldPairing {
+                    all_swallowed: false,
+                    generation,
+                });
+            });
+            if swallow {
+                SWALLOWED_EDGES.fetch_add(1, Ordering::Relaxed);
+            }
+            return swallow;
+        }
+
+        // Shared keys have already been excluded; retain the other existing mappings.
+        let attributed = if direct_attributed(vk_code) {
             true
         } else if armed(button) {
             true
@@ -654,16 +695,21 @@ mod windows_impl {
         // 配对状态：true=本次按住的 DOWN 全部被吞（供 UP 沿裁决）。
         HOLD_PAIRING.with(|pairing| {
             let mut pairing = pairing.borrow_mut();
-            let next = track_down(
-                pairing.get(&(vk_code as u16, make_code)).copied(),
-                attributed,
+            let next = track_down(pairing.get(&key).map(|hold| hold.all_swallowed), attributed);
+            pairing.insert(
+                key,
+                HoldPairing {
+                    all_swallowed: next,
+                    generation,
+                },
             );
-            pairing.insert((vk_code as u16, make_code), next);
         });
         if attributed {
             SWALLOWED_EDGES.fetch_add(1, Ordering::Relaxed);
-            if via_persistent && !via_direct {
-                PERSISTENT_SWALLOW_TOTAL.fetch_add(1, Ordering::Relaxed);
+            // A context change may happen during the bounded attribution wait.
+            // Keep the captured pair, but never dispatch that stale DOWN.
+            if POLICY_GENERATION.load(Ordering::Acquire) != generation || !gate_ready(button) {
+                return true;
             }
             // 自我续期武装：覆盖同一次按住的后续事件（多键盘事件/未知固件形态）。
             ARMED_UNTIL_MS[button.ordinal()].store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
@@ -758,9 +804,6 @@ mod windows_impl {
             SHORTCUT_CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
             ENABLED.store(false, Ordering::Relaxed);
             MAPPED_MASK.store(0, Ordering::Relaxed);
-            ENHANCED_OWNED_MASK.store(0, Ordering::Relaxed);
-            PERSISTENT_MASK.store(0, Ordering::Relaxed);
-            REMOTE_CONNECTED.store(false, Ordering::Relaxed);
             LISTENER_ACTIVE.store(false, Ordering::Relaxed);
             for slot in &ARMED_UNTIL_MS {
                 slot.store(0, Ordering::Relaxed);
@@ -814,44 +857,25 @@ mod windows_impl {
         MAPPED_MASK.store(mapped_mask, Ordering::Relaxed);
     }
 
-    /// 更新常驻抑制掩码（"遥控器优先"，映射引擎在映射变化时调用）：
-    /// 当前为已映射的 Home/TV 位。仅在掩码位命中且遥控器在线时，
-    /// 该键按下沿无需武装直接吞（跳过 60ms 有界等待，零额外延迟）。
-    pub fn set_persistent_mask(mask: u64) {
-        PERSISTENT_MASK.store(mask, Ordering::Relaxed);
-    }
-
-    /// 仅在 Helper 已确认相同代次、相同目标集合后设置。清零是 fail-open：
-    /// 报告层失联时立刻恢复既有 Raw Input + 全局钩子路径。
-    pub fn set_enhanced_owned_mask(mask: u64) {
-        ENHANCED_OWNED_MASK.store(mask, Ordering::Relaxed);
-    }
-
-    pub fn enhanced_owned_mask() -> u64 {
-        ENHANCED_OWNED_MASK.load(Ordering::Relaxed)
-    }
-
-    /// 语音键报告层合成门禁（见 VOICE_SYNTH_ACTIVE 注释）。
-    /// 写入方：rc003_bridge（鉴权后置位 / 变更 / 收尾回落）；读取方：ble.rs。
     pub fn set_voice_synth_active(active: bool) {
         VOICE_SYNTH_ACTIVE.store(active, Ordering::Relaxed);
     }
-
     pub fn voice_synth_active() -> bool {
         VOICE_SYNTH_ACTIVE.load(Ordering::Relaxed)
     }
 
-    /// 同步遥控器在线状态（ble.rs 在连接相位提交点调用）：
-    /// 在线时常驻抑制键接管（吞 + 引擎执行映射动作）；离线时恢复
-    /// 原生透传（物理键盘 Home/` 不被劫持）。
-    pub fn set_remote_connected(connected: bool) {
-        REMOTE_CONNECTED.store(connected, Ordering::Relaxed);
+    pub fn cancel_pending_holds() {
+        POLICY_GENERATION.fetch_add(1, Ordering::AcqRel);
+        for slot in &ARMED_UNTIL_MS {
+            slot.store(0, Ordering::Relaxed);
+        }
     }
 
     /// Raw Input 监听器起止：监听器停止时门控不吞任何键（无归因来源）。
     pub fn set_listener_active(active: bool) {
         LISTENER_ACTIVE.store(active, Ordering::Relaxed);
         if !active {
+            cancel_pending_holds();
             for slot in &ARMED_UNTIL_MS {
                 slot.store(0, Ordering::Relaxed);
             }
@@ -881,11 +905,10 @@ mod windows_impl {
     /// 系统调用的健康度基线（含未录入期间的每一键）。
     pub fn capture_diagnostics_summary() -> String {
         format!(
-            "keys_seen={} injected_accepted={} unmapped_seen={} last_unmapped_vk=0x{:02X} last_unmapped_injected={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={}",
+            "keys_seen={} injected_accepted={} unmapped_seen={} last_unmapped_injected={} calls_total={} calls_injected={} gate_active={} capture_active={} bumps_ok={} bumps_failed={} last_bump_error={}",
             CAPTURE_KEYS_SEEN.load(Ordering::Relaxed),
             CAPTURE_INJECTED_ACCEPTED.load(Ordering::Relaxed),
             CAPTURE_UNMAPPED_SEEN.load(Ordering::Relaxed),
-            LAST_UNMAPPED_VK.load(Ordering::Relaxed) & 0xFF,
             LAST_UNMAPPED_INJECTED.load(Ordering::Relaxed),
             HOOK_CALLS_TOTAL.load(Ordering::Relaxed),
             HOOK_CALLS_INJECTED.load(Ordering::Relaxed),
@@ -940,11 +963,6 @@ mod windows_impl {
         LEAKED_DOWNS.load(Ordering::Relaxed)
     }
 
-    /// 常驻抑制吞键累计（见 PERSISTENT_SWALLOW_TOTAL 注释）。任意线程可调用。
-    pub fn persistent_swallow_total() -> u64 {
-        PERSISTENT_SWALLOW_TOTAL.load(Ordering::Relaxed)
-    }
-
     pub fn is_gate_thread_alive() -> bool {
         GATE_ACTIVE.load(Ordering::Relaxed)
     }
@@ -957,12 +975,10 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, capture_diagnostics_summary, configure, decide, enhanced_owned_mask,
-    is_gate_thread_alive, leaked_down_count, listener_active, persistent_swallow_total,
-    set_edge_sink, set_enhanced_owned_mask, set_listener_active, set_persistent_mask,
-    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
-    set_voice_synth_active, swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED,
-    HOLD_NONE, HOLD_SWALLOWED_ALL,
+    arm_button, cancel_pending_holds, capture_diagnostics_summary, configure, decide,
+    is_gate_thread_alive, leaked_down_count, listener_active, set_edge_sink, set_listener_active,
+    set_shortcut_capture_active, set_shortcut_capture_sink, set_voice_synth_active,
+    swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(not(windows))]
@@ -983,12 +999,11 @@ mod fallback {
     }
 
     pub fn configure(_enabled: bool, _mapped_mask: u64) {}
-    pub fn set_persistent_mask(_mask: u64) {}
-    pub fn set_enhanced_owned_mask(_mask: u64) {}
-    pub fn enhanced_owned_mask() -> u64 {
-        0
+    pub fn set_voice_synth_active(_active: bool) {}
+    pub fn voice_synth_active() -> bool {
+        false
     }
-    pub fn set_remote_connected(_connected: bool) {}
+    pub fn cancel_pending_holds() {}
     pub fn set_listener_active(_active: bool) {}
     pub fn arm_button(_button: RemoteButton, _grace_ms: u64) {}
     pub fn set_edge_sink(_sink: std::sync::Arc<dyn Fn(ButtonEdge) + Send + Sync>) {}
@@ -1000,18 +1015,11 @@ mod fallback {
         0
     }
     pub fn capture_diagnostics_summary() -> String {
-        "keys_seen=0 injected_accepted=0 unmapped_seen=0 last_unmapped_vk=0x00 last_unmapped_injected=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0"
+        "keys_seen=0 injected_accepted=0 unmapped_seen=0 last_unmapped_injected=0 calls_total=0 calls_injected=0 gate_active=0 capture_active=0 bumps_ok=0 bumps_failed=0 last_bump_error=0"
             .to_owned()
     }
     pub fn leaked_down_count() -> u64 {
         0
-    }
-    pub fn persistent_swallow_total() -> u64 {
-        0
-    }
-    pub fn set_voice_synth_active(_active: bool) {}
-    pub fn voice_synth_active() -> bool {
-        false
     }
     pub fn is_gate_thread_alive() -> bool {
         false
@@ -1050,6 +1058,74 @@ pub(crate) fn lock_gate_tests() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     #[cfg(windows)]
     use super::*;
+
+    // 2026-09-15 user contract: these expose the current production defect.
+    // Opt-in known-defect checks, kept out of the default stable test run.
+    // Run with the keyboard_coexistence filter and --ignored; remove these
+    // ignores when device-bound suppression satisfies the contract.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "known defect; explicit keyboard_coexistence --ignored regression run"]
+    fn keyboard_coexistence_four_second_arm_is_not_device_identity() {
+        for (vk, scan) in [
+            (0xC0, 0x35),
+            (0x24, 0x47),
+            (0x0D, 0x1C),
+            (0x25, 0x4B),
+            (0x26, 0x48),
+            (0x27, 0x4D),
+            (0x28, 0x50),
+        ] {
+            assert!(
+                !decide(vk, scan, false, false, false, true, HOLD_NONE, true),
+                "a prior remote use cannot identify this keyboard DOWN: vk={vk:#x}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn keyboard_coexistence_online_persistent_mask_is_not_device_identity() {
+        // Old online/armed attribution may never own either edge of these keys.
+        for (vk, scan) in [(0xC0, 0x35), (0x24, 0x47)] {
+            assert!(
+                !decide(vk, scan, false, false, true, false, HOLD_NONE, true),
+                "remote online cannot identify a keyboard DOWN: vk={vk:#x}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn five_shared_keys_never_acquire_ll_ownership_even_across_restart() {
+        for (vk, scan) in [
+            (0xff, 0x6a),
+            (0xff, 0x30),
+            (0xff, 0x2e),
+            (0xaf, 0),
+            (0xae, 0),
+            (0xc0, 0x35),
+            (0x24, 0x47),
+        ] {
+            for up in [false, true] {
+                for hold in [HOLD_NONE, HOLD_LEAKED, HOLD_SWALLOWED_ALL] {
+                    assert!(!decide(vk, scan, up, false, true, true, hold, true));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "known defect; explicit keyboard_coexistence --ignored regression run"]
+    fn keyboard_coexistence_virtual_key_alone_is_not_device_identity() {
+        for vk in [0xFF, 0x5D, 0x5F] {
+            assert!(
+                !windows_impl::direct_attributed(vk),
+                "an uncommon VK still carries no device identity: vk={vk:#x}"
+            );
+        }
+    }
 
     #[test]
     fn capture_protocol_preserves_sided_modifiers_and_letters() {
@@ -1093,8 +1169,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn vendor_vk_family_is_directly_attributed_without_arming() {
-        // 返回键 VK 0xFF + make 0x6A：物理键盘不产生未分配 VK，直接归因吞键。
-        assert!(decide(
+        // Back now requires a verified report, including vendor VK forms.
+        assert!(!decide(
             0xFF, 0x6A, false, false, true, false, HOLD_NONE, true
         ));
     }
@@ -1125,41 +1201,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn persistent_suppression_folds_into_no_arm_attribution() {
-        // 常驻抑制键（Home/TV"遥控器优先"）在钩子层折算进"无需武装归因"参数：
-        // 已映射 + 遥控器在线 → 未武装也吞（孤立冷首按单响应，2026-09-07 方案 C）。
-        assert!(decide(
-            0xC0, 0x35, false, false, true, false, HOLD_NONE, true
-        ));
-        // UP 沿仍按配对裁决：DOWN 全吞 → UP 吞（防粘键规则不变）。
-        assert!(decide(
-            0xC0,
-            0x35,
-            true,
-            false,
-            true,
-            false,
-            HOLD_SWALLOWED_ALL,
-            true
-        ));
-        // 注入一律放行（自家注入与其他程序注入不受常驻抑制影响）。
-        assert!(!decide(
-            0xC0, 0x35, false, true, true, false, HOLD_NONE, true
-        ));
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn up_edge_consumes_pairing_entry_even_when_leaked() {
         // UP 沿无论吞放都消费配对条目（take_up_pairing）：
         // 泄漏污染只在"本次按住"内生效，不跨按住残留。
         let mut pairing = std::collections::HashMap::new();
         // 第一次按住：DOWN 泄漏（false）→ UP 放行且条目被消费。
-        pairing.insert((0x5D, 0x5D), false);
+        pairing.insert(
+            (0x5D, 0x5D),
+            windows_impl::HoldPairing {
+                all_swallowed: false,
+                generation: 1,
+            },
+        );
         assert!(!windows_impl::take_up_pairing(&mut pairing, (0x5D, 0x5D)));
         assert!(pairing.is_empty(), "泄漏条目必须在 UP 沿清除");
         // 第二次按住：DOWN 全吞 → UP 吞（不受上一次泄漏污染）。
-        pairing.insert((0x5D, 0x5D), true);
+        pairing.insert(
+            (0x5D, 0x5D),
+            windows_impl::HoldPairing {
+                all_swallowed: true,
+                generation: 1,
+            },
+        );
         assert!(windows_impl::take_up_pairing(&mut pairing, (0x5D, 0x5D)));
         assert!(pairing.is_empty(), "全吞条目同样在 UP 沿清除");
         // 配对未知（钩子中途启动）→ 放行。
@@ -1195,6 +1258,71 @@ mod tests {
         assert!(!decide(
             0x0D, 0x1C, true, false, false, true, HOLD_NONE, true
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_holds_drain_and_releases_survive_disable_disconnect_and_restart() {
+        use windows_impl::{cancelled_down, take_up_pairing, HoldPairing};
+        for all_swallowed in [true, false] {
+            let hold = HoldPairing {
+                all_swallowed,
+                generation: 1,
+            };
+            assert_eq!(cancelled_down(Some(hold), 1, false), Some(all_swallowed));
+            assert_eq!(cancelled_down(Some(hold), 2, true), Some(all_swallowed));
+            let mut pairing = std::collections::HashMap::from([((0x0D, 0x1C), hold)]);
+            assert_eq!(take_up_pairing(&mut pairing, (0x0D, 0x1C)), all_swallowed);
+            assert!(pairing.is_empty());
+            assert!(!take_up_pairing(&mut pairing, (0x0D, 0x1C)));
+        }
+        assert!(decide(
+            0x0D,
+            0x1C,
+            true,
+            false,
+            false,
+            false,
+            HOLD_SWALLOWED_ALL,
+            false
+        ));
+        assert!(!decide(
+            0x0D,
+            0x1C,
+            true,
+            false,
+            false,
+            false,
+            HOLD_LEAKED,
+            false
+        ));
+        assert_eq!(cancelled_down(None, 2, false), Some(false));
+        assert_eq!(cancelled_down(None, 2, true), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn previously_native_down_survives_process_restart_or_another_keyboard() {
+        use windows_impl::{cancelled_down, seed_native_hold, take_up_pairing, HoldPairing};
+        for observed in [i16::MIN, -1] {
+            let seeded = seed_native_hold(None, observed, 0).unwrap();
+            assert!(!seeded.all_swallowed);
+            assert_eq!(cancelled_down(Some(seeded), 0, true), Some(false));
+            let mut holds = std::collections::HashMap::from([((0x0D, 0x1C), seeded)]);
+            assert!(!take_up_pairing(&mut holds, (0x0D, 0x1C)));
+        }
+        // The unreliable low bit and a zero/unknown result never seed a hold.
+        assert!(seed_native_hold(None, 1, 3).is_none());
+        assert!(seed_native_hold(None, 0, 3).is_none());
+        let own = HoldPairing {
+            all_swallowed: true,
+            generation: 3,
+        };
+        assert!(
+            seed_native_hold(Some(own), i16::MIN, 3)
+                .unwrap()
+                .all_swallowed
+        );
     }
 
     #[cfg(windows)]
@@ -1244,7 +1372,6 @@ mod tests {
             "keys_seen=",
             "injected_accepted=",
             "unmapped_seen=",
-            "last_unmapped_vk=",
             "last_unmapped_injected=",
             "calls_total=",
             "calls_injected=",

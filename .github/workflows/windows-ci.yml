@@ -80,6 +80,20 @@ jobs:
       - name: Stage bundle resources (helper + frida gadget)
         run: node scripts/stage-bundle-inputs.cjs
 
+      - name: Test enhanced capture Agent
+        run: node --test hardware/RC003/helper/agent/agent_logic_test.mjs
+
+      - name: Test Helper lifecycle
+        run: cargo test --manifest-path hardware/RC003/helper/Cargo.toml --locked
+
+      - name: Test isolated installer cleanup contracts
+        shell: pwsh
+        run: |
+          node --test scripts/test-windows-overlay-install.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-windows-capture-cleanup.ps1
+          ./scripts/test-windows-retired-files.ps1
+
       - name: Test Rust workspace
         run: cargo test --workspace
 
@@ -158,6 +172,14 @@ jobs:
       - name: Verify installer identity and create checksums
         shell: pwsh
         run: ./scripts/verify-windows-bundle.ps1
+
+      - name: Test installer write access and reinstall choices
+        shell: pwsh
+        run: |
+          node scripts/test-windows-overlay-compile.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-windows-installer-write-log.ps1
+          ./scripts/test-windows-reinstall-flow.ps1
 
       - name: Test install upgrade downgrade and uninstall matrix
         shell: pwsh

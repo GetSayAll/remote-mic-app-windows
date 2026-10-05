@@ -1,11 +1,68 @@
 !include WinVer.nsh
+!define SAYALL_CLEANUP_VERIFIER "${__FILEDIR__}\verify-capture-cleanup.ps1"
+!define SAYALL_CLEANUP_HELPER "${__FILEDIR__}\..\sayall-helper.exe"
+!define SAYALL_RETIRED_RECYCLER "${__FILEDIR__}\recycle-retired-files.ps1"
+
+Var SayAllInstallResultDirectory
+Var SayAllInstallStage
+Var SayAllReinstall
+Var SayAllPreviousInstallDirectory
+Var SayAllReinstallRadio
+Var SayAllOverlayRadio
+
+; One current-run result, using fixed event/component identifiers only. Logging
+; is best-effort and preserves the caller's error flag and process error level.
+!macro SayAllLogInstallResult _mode _event _component
+  Push $R6
+  Push $R7
+  ${If} ${Errors}
+    StrCpy $R6 1
+  ${Else}
+    StrCpy $R6 0
+  ${EndIf}
+  CreateDirectory "$SayAllInstallResultDirectory"
+  ClearErrors
+  FileOpen $R7 "$SayAllInstallResultDirectory\installer-result.log" ${_mode}
+  ${IfNot} ${Errors}
+    !if "${_mode}" == "a"
+      FileSeek $R7 0 END
+    !endif
+    FileWrite $R7 "event=${_event} component=${_component}$\r$\n"
+    FileClose $R7
+  ${EndIf}
+  ${If} $R6 = 1
+    SetErrors
+  ${Else}
+    ClearErrors
+  ${EndIf}
+  Pop $R7
+  Pop $R6
+!macroend
+
+; Deliberately enumerate shipped resources: a new payload needs an explicit
+; diagnostic component instead of putting an arbitrary resource path in a log.
+!macro SayAllSetResourceComponent _name
+  !if "${_name}" == "frida-gadget.dll"
+    StrCpy $SayAllInstallStage gadget
+  !else if "${_name}" == "sayall-helper.exe"
+    StrCpy $SayAllInstallStage helper
+  !else if "${_name}" == "licenses\ATTRIBUTION.md"
+    StrCpy $SayAllInstallStage license_attribution
+  !else if "${_name}" == "licenses\Frida-COPYING.txt"
+    StrCpy $SayAllInstallStage license_frida
+  !else
+    !error "Missing fixed diagnostic component for bundle resource"
+  !endif
+!macroend
 
 !define SAYALL_MINIMUM_WINDOWS_BUILD 17763
 !define SAYALL_DOWNGRADE_ERROR_LEVEL 1638
 !define SAYALL_VB_CABLE_SERVICE_KEY "SYSTEM\CurrentControlSet\Services\VBAudioVACMME"
 !define SAYALL_VB_CABLE_DOWNLOAD_URL "https://vb-audio.com/Cable/"
 
-; ── 部署前先请应用优雅退出（2026-09-16）───────────────────────────────
+; 历史说明（2026-09-16）：下述默认 Tauri 流程是当时故障的来源。
+; 当前 windows/installer.nsi 在正常退出后按用户选择卸载再安装或直接覆盖；
+; 两条路径均无强杀调用，清理失败则停止，后面只做一次保守进程复核。
 ;
 ; 背景：Tauri 默认模板的 `CheckIfAppIsRunning`（utils.nsh）在检测到应用正在
 ; 运行时不会给应用任何退出机会，而是直接强杀。**本仓库构建产物的实际分支**
@@ -35,7 +92,7 @@
 ;
 ; 本宏在 `NSIS_HOOK_PREINSTALL` / `NSIS_HOOK_PREUNINSTALL` 中执行，而 Tauri 的
 ; `CheckIfAppIsRunning` 在 `Section Install` 里**紧随其后**才跑。因此应用只要能
-; 在这段宽限期内自行退出，后续检测自然落空、连弹窗都不会出现；超时才落回原有行为。
+; 在这段宽限期内自行退出，后续检测自然落空、连弹窗都不会出现；超时则中止，不进入 Tauri 强杀分支。
 ;
 ; 信号用**会话内**命名事件：非提权进程没有 `SeCreateGlobalPrivilege`，无法创建
 ; `Global\` 命名对象；而安装器与应用同处一个登录会话，`Local\` 命名空间对两者
@@ -60,6 +117,7 @@
 !define SAYALL_LEGACY_RUNNING_ERROR_LEVEL 1639
 
 !macro SayAllRequestGracefulExit _uid
+  StrCpy $SayAllInstallStage app_exit
   Push $R8
   Push $R9
   ; 先确认是否真有实例在跑。`FindProcessCurrentUser` 的返回值语义由实测确定
@@ -101,6 +159,12 @@
         ${If} $R9 > 0
           Goto sayall_wait_${_uid}
         ${EndIf}
+      sayall_timeout_${_uid}:
+        SetErrorLevel ${SAYALL_LEGACY_RUNNING_ERROR_LEVEL}
+        ${IfNot} ${Silent}
+          MessageBox MB_ICONINFORMATION|MB_OK "无线麦仍在完成退出清理，本次安装已停止。请待应用正常退出后重试。$\r$\nSayAll is still cleaning up. Installation has stopped without terminating it."
+        ${EndIf}
+        Abort
       sayall_done_${_uid}:
     ${Else}
       ; 进程在跑但事件打不开 = 运行的是没有监听线程的旧版（0.2.10 及更早）。
@@ -123,15 +187,181 @@
   Pop $R8
 !macroend
 
-!macro NSIS_HOOK_PREINSTALL
+; The app owns normal shutdown. Confirm its elevated capture Helper has also
+; released inputs and detached its hook before the installer touches resources.
+!macro SayAllVerifyCaptureCleanup
+  Push $R8
+  Push $R9
+  InitPluginsDir
+  StrCpy $SayAllInstallStage cleanup_verifier
+  ClearErrors
+  File /oname=$PLUGINSDIR\SayAllVerifyCaptureCleanup.ps1 "${SAYALL_CLEANUP_VERIFIER}"
+  !insertmacro SayAllRequireWriteSuccess cleanup_verifier
+  StrCpy $SayAllInstallStage cleanup_helper
+  ClearErrors
+  File /oname=$PLUGINSDIR\sayall-helper.exe "${SAYALL_CLEANUP_HELPER}"
+  !insertmacro SayAllRequireWriteSuccess cleanup_helper
+  StrCpy $SayAllInstallStage capture_cleanup
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\SayAllVerifyCaptureCleanup.ps1" -CleanupHelperPath "$PLUGINSDIR\sayall-helper.exe"'
+  Pop $R8
+  Pop $R9
+  DetailPrint "$R9"
+  ${If} $R8 != 0
+    SetErrorLevel 1639
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONINFORMATION|MB_OK "未能确认按键组件已完成自动清理，本次安装尚未替换文件。清理记录已保留，稍后再次安装会继续恢复。$\r$\nAutomatic input cleanup is not confirmed. No application files have been replaced; cleanup records are preserved for the next installation attempt."
+    ${EndIf}
+    Abort
+  ${EndIf}
+  Pop $R9
+  Pop $R8
+!macroend
+
+; The vendored template never invokes Tauri's force-exit macro. Recheck after
+; cleanup so an instance launched during the wait causes an abort, not a kill.
+!macro SayAllAssertAppStopped _uid
+  StrCpy $SayAllInstallStage app_stopped
+  nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+  Pop $R9
+  ${If} $R9 = 0
+    SetErrorLevel 1639
+    Abort "SayAll restarted during cleanup. Installation stopped."
+  ${EndIf}
+!macroend
+
+!macro SayAllRequireWriteSuccess _component
+  StrCpy $SayAllInstallStage "${_component}"
+  ${If} ${Errors}
+    SetErrorLevel 1603
+    Abort "Unable to write the application payload. Installation stopped."
+  ${EndIf}
+!macroend
+
+; Open the nearest existing directory for FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY.
+; OPEN_EXISTING and BACKUP_SEMANTICS check access without creating a probe file.
+!macro SayAllRequireWritableDirectory _directory _uid
+  StrCpy $SayAllInstallStage directory_access
+  Push $R7
+  Push $R8
+  Push $R9
+  StrCpy $R8 "${_directory}"
+  sayall_access_parent_${_uid}:
+    System::Call 'kernel32::GetFileAttributesW(w R8) i .R9 ?e'
+    Pop $R7
+    ${If} $R9 = -1
+      ; Only a missing file/path can use the nearest existing parent. Access
+      ; denial or any other attribute failure must not bypass this preflight.
+      ${If} $R7 != 2
+      ${AndIf} $R7 != 3
+        Goto sayall_access_failed_${_uid}
+      ${EndIf}
+      ${GetParent} "$R8" $R9
+      ${If} $R9 == ""
+      ${OrIf} $R9 == $R8
+        Goto sayall_access_failed_${_uid}
+      ${EndIf}
+      StrCpy $R8 $R9
+      Goto sayall_access_parent_${_uid}
+    ${EndIf}
+    IntOp $R9 $R9 & 16
+    ${If} $R9 = 0
+      Goto sayall_access_failed_${_uid}
+    ${EndIf}
+    System::Call 'kernel32::CreateFileW(w R8, i 6, i 7, p 0, i 3, i 0x02000000, p 0) p .R9'
+    ${If} $R9 = -1
+      Goto sayall_access_failed_${_uid}
+    ${EndIf}
+    System::Call 'kernel32::CloseHandle(p R9)'
+    !insertmacro SayAllLogInstallResult a passed directory_access
+    Goto sayall_access_done_${_uid}
+  sayall_access_failed_${_uid}:
+    SetErrorLevel 5
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONSTOP|MB_OK "当前权限无法写入安装目录，本次安装已停止，尚未退出应用或卸载程序。请选择可写目录，或使用同一账户的管理员权限运行安装包。"
+    ${EndIf}
+    Abort "Installation directory access denied before cleanup."
+  sayall_access_done_${_uid}:
+    Pop $R9
+    Pop $R8
+    Pop $R7
+!macroend
+
+!macro SayAllUninstallBeforeInstall
+  ${If} $SayAllReinstall = 1
+    InitPluginsDir
+    StrCpy $SayAllInstallStage reinstall_uninstaller
+    ClearErrors
+    WriteUninstaller "$PLUGINSDIR\SayAllReinstallUninstall.exe"
+    !insertmacro SayAllRequireWriteSuccess reinstall_uninstaller
+    StrCpy $SayAllInstallStage reinstall_uninstall
+    !insertmacro SayAllLogInstallResult a start reinstall_uninstall
+    ClearErrors
+    ; _?= must be last and unquoted: NSIS consumes the remaining directory text.
+    ; Run current cleanup logic, never an obsolete installed uninstaller.
+    ExecWait '"$PLUGINSDIR\SayAllReinstallUninstall.exe" /S /UPDATE _?=$SayAllPreviousInstallDirectory' $R8
+    ${If} ${Errors}
+    ${OrIf} $R8 != 0
+      SetErrorLevel 1603
+      Abort "Uninstall before installation failed. Installation stopped."
+    ${EndIf}
+    ; Check a user-visible side effect instead of trusting the child exit code.
+    IfFileExists "$SayAllPreviousInstallDirectory\${MAINBINARYNAME}.exe" 0 +3
+      SetErrorLevel 1603
+      Abort "Previous application remains. Installation stopped."
+    !insertmacro SayAllLogInstallResult a completed reinstall_uninstall
+  ${Else}
+    !insertmacro SayAllLogInstallResult a selected overlay
+  ${EndIf}
+!macroend
+
+!macro SayAllRecycleProductFiles
+  InitPluginsDir
+  StrCpy $SayAllInstallStage product_recycler
+  ClearErrors
+  File /oname=$PLUGINSDIR\SayAllRecycleRetiredFiles.ps1 "${SAYALL_RETIRED_RECYCLER}"
+  !insertmacro SayAllRequireWriteSuccess product_recycler
+  StrCpy $SayAllInstallStage product_cleanup
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\SayAllRecycleRetiredFiles.ps1" -InstallDirectory "$INSTDIR" -ProductFiles'
+  Pop $R8
+  Pop $R9
+  DetailPrint "$R9"
+  ${If} $R8 != 0
+    !insertmacro SayAllLogInstallResult a failed product_cleanup
+    SetErrorLevel 1603
+    Abort "Product files could not be recycled. User settings are preserved."
+  ${EndIf}
+  !insertmacro SayAllLogInstallResult a completed product_cleanup
+!macroend
+
+!macro SayAllRecycleRetiredFiles
+  InitPluginsDir
+  StrCpy $SayAllInstallStage retired_recycler
+  ClearErrors
+  File /oname=$PLUGINSDIR\SayAllRecycleRetiredFiles.ps1 "${SAYALL_RETIRED_RECYCLER}"
+  !insertmacro SayAllRequireWriteSuccess retired_recycler
+  StrCpy $SayAllInstallStage retired_cleanup
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\SayAllRecycleRetiredFiles.ps1" -InstallDirectory "$INSTDIR"'
+  Pop $R8
+  Pop $R9
+  DetailPrint "$R9"
+  ${If} $R8 != 0
+    SetErrorLevel 1603
+    Abort "Retired product files could not be recycled. No permanent deletion was attempted."
+  ${EndIf}
+!macroend
+
+!macro SayAllValidateUpgrade
+  StrCpy $SayAllInstallStage platform_check
   ${IfNot} ${AtLeastBuild} ${SAYALL_MINIMUM_WINDOWS_BUILD}
     MessageBox MB_ICONSTOP|MB_OK "无线麦 SayAll 需要 Windows 10 1809（内部版本 17763）或更高版本。$\r$\nSayAll requires Windows 10 1809 (build 17763) or later."
+    !insertmacro SayAllLogInstallResult a failed platform_check
     SetErrorLevel 1633
     Quit
   ${EndIf}
 
   Push $R8
   Push $R9
+  StrCpy $SayAllInstallStage version_check
   ReadRegStr $R8 SHCTX "${UNINSTKEY}" "DisplayVersion"
   ${If} $R8 != ""
     nsis_tauri_utils::SemverCompare "${VERSION}" $R8
@@ -141,286 +371,30 @@
         MessageBox MB_ICONSTOP|MB_OK "已安装较新版本的无线麦 SayAll，不能用此旧版本覆盖。$\r$\nA newer version of SayAll is already installed. This older installer cannot replace it."
       ${EndIf}
       SetErrorLevel ${SAYALL_DOWNGRADE_ERROR_LEVEL}
+      !insertmacro SayAllLogInstallResult a failed version_check
       Quit
     ${EndIf}
   ${EndIf}
   Pop $R9
   Pop $R8
 
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro SayAllValidateUpgrade
   ; 版本校验通过后才请正在运行的实例优雅退出：升级路径的关键一步。
   !insertmacro SayAllRequestGracefulExit install
-  ; 升级覆盖写 sayall-helper.exe 前，必须让旧助手退出——否则
-  ; 「无法打开要写入的文件」（2026-09-24 真机复现：跑了一天的旧助手
-  ; 锁住 exe，主程序的优雅退出对它无效）。
-  !insertmacro SayAllStopHelper install 0
-  ; ── 授权语义（2026-09-28 Andy 拍板；同日二次定稿补维护模式）──────────
-  ; 开关的持久化意图在 AppSettings（app_config_dir），跨升级/重装幸存；
-  ; 授权本体是提权创建的计划任务（普通权限删不掉，跨安装幸存）。撤销的
-  ; 唯一凭证是真卸载时写下的重授权标记——因此本钩子对标记的删除必须
-  ; **有条件**（见 SayAllClearFreshReauthMarker）：
-  ;
-  ;   * 真卸载（Windows「设置 → 应用」/ 双击 uninstall.exe / /S）：卸载器
-  ;     被拷进临时目录（$EXEDIR != $INSTDIR），直接写 `uninstalled=<tick>`。
-  ;     卸载后重装（任意时距）：标记一律**保留**——应用启动对账据此把
-  ;     开关回落为关闭，重开时强制重装任务（必弹 UAC）。
-  ;   * 维护模式卸载（双击安装包 → 已安装页选「卸载」）：旧卸载器被
-  ;     `_?=$INSTDIR` 原位调用，只写待决文件（pending-uninstall=旧版本）；
-  ;     向导随即继续重装（PageLeaveReinstall 成功路径不退出），走到本钩子
-  ;     由 SayAllResolveUninstallPending 裁决：待决版本 == 本版本 → 写撤销
-  ;     凭证；否则（升级）→ 删待决、授权保留。
-  ;   * 过渡清理（只针对旧版卸载器）：877a3c5 时代及更早的卸载器没有
-  ;     $EXEDIR 判断，升级路径也会写标记（裸 tick / 旧格式 reauth）——
-  ;     fresh（≤120s）或 legacy 才删除，否则升级会把开关打回关闭。
-  ;     残留风险（过渡期，TODO.md 同步）：旧版卸载器**真卸载**后 120 秒内
-  ;     重装，裸 tick 标记会被误判为升级产物而删除、授权被保留；旧格式
-  ;     reauth 标记无论时距都会被清理（升级语义优先）。换装一次本修复后
-  ;     的安装包，两类旧格式即从现场消失。
-  !insertmacro SayAllResolveUninstallPending install
-  !insertmacro SayAllClearFreshReauthMarker install
-  ; 计划任务由提权进程创建，普通权限安装器删不掉它（删除命令静默失败，
-  ; 任务本来就跨升级幸存）——升级恰恰要靠幸存的任务承载授权，helper 与
-  ; 主程序同路径覆盖更新，幸存的任务指向的路径依然有效。安装路径不得
-  ; 删任务。
-!macroend
-
-; ── 停止增强捕获助手并等它真正退出（2026-09-24）──────────────────────
-;
-; 为什么不能直接杀：助手是提权进程，普通权限安装器的 taskkill 必被拒；
-; 唯一通道是让它自愿退出——schtasks /end（调度器有权终止任务实例）+
-; 停用信号文件（路径必须与 rc003_task.rs 的 stop_signal_path 逐字符一致，
-; 新助手每 50ms 轮询一次）。**跑了一整天以上的旧助手两种都不认识**
-; （真机：up=27.8h 的实例锁住 exe，升级写文件必然失败），等待超时后
-; 只能中止安装并请用户以管理员运行 helper 目录里的 stop-helper.cmd。
-!define SAYALL_HELPER_EXIT_MAX_WAIT_MS 8000
-!define SAYALL_HELPER_EXIT_POLL_MS 250
-
-; ── 重授权标记的新鲜度窗口（2026-09-28）────────────────────────────
-; 升级钩子（旧卸载器完成 → PREINSTALL）的真实时距是秒级、最坏约 40s
-; （优雅退出 20s + 助手退出等待 8s + 文件清理）；窗口取 2 倍以上余量。
-; 卸载后超过窗口的重装会把标记保留下来 → 撤销生效。
-!define SAYALL_REAUTH_MARKER_FRESH_MS 120000
-
-; 读取重授权标记的年龄。结果放在 $R9（**会覆盖 $R9**，调用方若需保留请自行
-; Push/Pop），$R8 由本宏保存恢复。输出取值：
-;   "revoked" —— 标记在且内容是新格式 `uninstalled=<tick>`（2026-09-28 起，
-;                真卸载的撤销凭证；升级路径根本不会写下它）——**任何安装都
-;                不得删除**，应用启动据此把开关回落为关闭；
-;   "fresh"   —— 标记在且内容是裸 tick、年龄在 [0, FRESH_MS] 内（只能是
-;                877a3c5 时代旧版卸载器刚在升级路径写下的过渡产物）；
-;   "stale"   —— 标记在但已过期 / 跨重启（撤销生效，不得删除）；
-;   "legacy"  —— 标记在但内容是旧格式字面 `reauth`（main/codex 时代卸载器
-;                所写，只可能出现在本次升级的旧卸载段）；
-;   "absent"  —— 标记不存在。
-!macro SayAllReauthMarkerAge _uid
-  Push $R8
-  ClearErrors
-  FileOpen $R8 "$LOCALAPPDATA\SayAll\rc003-reauth-required" r
-  ${If} ${Errors}
-    StrCpy $R9 "absent"
-    Goto sayall_age_done_${_uid}
-  ${EndIf}
-  FileRead $R8 $R9
-  FileClose $R8
-  ${If} $R9 == "reauth"
-    StrCpy $R9 "legacy"
-    Goto sayall_age_done_${_uid}
-  ${EndIf}
-  ; 新格式 `uninstalled=<tick>`（2026-09-28）：真卸载的撤销凭证——无论距离
-  ; 卸载多久，安装器一律不得删除。按固定长度前缀判断，不依赖 IntOp 对
-  ; 非数字内容的隐式归零（"uninstalled=…" 被当 0 会「碰巧」得到 stale，
-  ; 但那种巧合撑不起撤销语义）。
-  StrCpy $R8 $R9 12
-  ${If} $R8 == "uninstalled="
-    StrCpy $R9 "revoked"
-    Goto sayall_age_done_${_uid}
-  ${EndIf}
-  ; 裸 tick（877a3c5 时代格式）：IntOp 是带符号 32 位，跨重启 / tick 回绕
-  ; 都会算出负年龄 → stale（撤销生效），方向安全。
-  System::Call "kernel32::GetTickCount() i .R8"
-  IntOp $R8 $R8 - $R9
-  ${If} $R8 >= 0
-  ${AndIf} $R8 <= ${SAYALL_REAUTH_MARKER_FRESH_MS}
-    StrCpy $R9 "fresh"
-  ${Else}
-    StrCpy $R9 "stale"
-  ${EndIf}
-  sayall_age_done_${_uid}:
-  Pop $R8
-!macroend
-
-; 升级路径专用的**过渡清理**：只删除旧版卸载器在升级路径写下的标记——
-; 裸 tick 且新鲜（877a3c5 时代）或旧格式 reauth（main/codex 时代）。
-; 新格式 revoked（真卸载凭证）与 stale 一律不动。
-!macro SayAllClearFreshReauthMarker _uid
-  Push $R9
-  !insertmacro SayAllReauthMarkerAge ${_uid}clear
-  ${If} $R9 == "fresh"
-  ${OrIf} $R9 == "legacy"
-    Delete "$LOCALAPPDATA\SayAll\rc003-reauth-required"
-  ${EndIf}
-  Pop $R9
-!macroend
-
-; ── 维护模式卸载的裁决（2026-09-28 二次定稿）────────────────────────
-; 原位调用的旧卸载器只会留下待决文件（见 SayAllStopHelper 的 Else 分支），
-; 本宏在 PREINSTALL 里裁决——能走到安装节 = 本轮安装必然继续，「卸载后
-; 向导被取消」的场景不会进入这里（待决文件留到下一次安装裁决）：
-;   * 待决文件不存在（真卸载的 revoked 标记、静默升级、全新安装、
-;     「不卸载」的升级/修复）→ 无操作；
-;   * 内容 == pending-uninstall=${VERSION}（同版本）→ 维护模式卸载后
-;     向导重装：写撤销凭证 `uninstalled=<tick>`（新格式，任何安装不得
-;     删除），应用启动据此回落开关，重开时必弹 UAC；
-;   * 内容是其他版本 → 升级路径的原位卸载：删待决文件，授权保留。
-; 待决文件无论哪条出路都会被删除——它只是「原位卸载刚发生」的瞬时信号，
-; 不承载跨安装语义（跨安装凭证只有 uninstalled= 标记）。本宏必须先于
-; SayAllClearFreshReauthMarker 执行：裁决写下的凭证是 revoked 新格式，
-; 过渡清理不会碰它，顺序即语义。
-!macro SayAllResolveUninstallPending _uid
-  Push $R8
-  Push $R9
-  Push $0
-  ClearErrors
-  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-uninstall-pending" r
-  ${If} ${Errors}
-    Goto sayall_pending_done_${_uid}
-  ${EndIf}
-  FileRead $0 $R9
-  FileClose $0
-  ${If} $R9 == "pending-uninstall=${VERSION}"
-    ; 同版本：维护模式卸载 → 撤销授权（与真卸载同一凭证格式）
-    CreateDirectory "$LOCALAPPDATA\SayAll"
-    System::Call "kernel32::GetTickCount() i .R8"
-    FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
-    ${If} $0 != 0
-      FileWrite $0 "uninstalled=$R8"
-      FileClose $0
-    ${EndIf}
-  ${EndIf}
-  Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending"
-  sayall_pending_done_${_uid}:
-  Pop $0
-  Pop $R9
-  Pop $R8
-!macroend
-
-!macro SayAllStopHelper _uid _revoke_auth
-  Push $R8
-  Push $R9
-  Push $0
-  nsExec::Exec 'schtasks /end /f /tn "SayAll RC003 Helper"'
-  CreateDirectory "$LOCALAPPDATA\SayAll"
-  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-capture-stop" w
-  ${If} $0 != 0
-    FileWrite $0 "stop"
-    FileClose $0
-  ${EndIf}
-  StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
-  sayall_helper_wait_${_uid}:
-    nsis_tauri_utils::FindProcessCurrentUser "sayall-helper.exe"
-    Pop $R8
-    ${If} $R8 != 0
-      Goto sayall_helper_done_${_uid}
-    ${EndIf}
-    Sleep ${SAYALL_HELPER_EXIT_POLL_MS}
-    IntOp $R9 $R9 - ${SAYALL_HELPER_EXIT_POLL_MS}
-    ${If} $R9 > 0
-      Goto sayall_helper_wait_${_uid}
-    ${EndIf}
-  sayall_helper_done_${_uid}:
-  ; 超时仍在跑（旧版助手不认识停用信号）：中止并给出可操作的出路。
-  nsis_tauri_utils::FindProcessCurrentUser "sayall-helper.exe"
-  Pop $R8
-  ${If} $R8 = 0
-    ${IfNot} ${Silent}
-      MessageBox MB_ICONSTOP|MB_OK "增强捕获助手仍在运行且无法自动停止（可能是较早版本）。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper is still running and cannot be stopped automatically. Run stop-helper.cmd as administrator, then retry."
-    ${EndIf}
-    Abort
-  ${EndIf}
-  ; `FindProcessCurrentUser` 在普通权限安装器里可能看不到提升权限的 Helper。
-  ; 进程枚举只能作快速判据，覆盖前还要直接探测目标映像的写锁；这与 NSIS
-  ; 随后的 File 指令面对的是同一个外部事实。首次安装文件不存在时直接跳过，
-  ; 避免 FileOpen 的 append 模式为了探测而创建空文件。
-  IfFileExists "$INSTDIR\sayall-helper.exe" 0 sayall_helper_image_unlocked_${_uid}
-  StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
-  sayall_helper_image_wait_${_uid}:
-    ClearErrors
-    FileOpen $0 "$INSTDIR\sayall-helper.exe" a
-    ${IfNot} ${Errors}
-      FileClose $0
-      Goto sayall_helper_image_unlocked_${_uid}
-    ${EndIf}
-    Sleep ${SAYALL_HELPER_EXIT_POLL_MS}
-    IntOp $R9 $R9 - ${SAYALL_HELPER_EXIT_POLL_MS}
-    ${If} $R9 > 0
-      Goto sayall_helper_image_wait_${_uid}
-    ${EndIf}
-    ${IfNot} ${Silent}
-      MessageBox MB_ICONSTOP|MB_OK "增强捕获助手的程序文件仍被占用，安装器无法安全覆盖。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper image is still locked. Run stop-helper.cmd as administrator, then retry."
-    ${EndIf}
-    Abort
-  sayall_helper_image_unlocked_${_uid}:
-  ; 写「需重新授权」标记 / 待决文件（**仅卸载路径**，_revoke_auth=1）：
-  ; 提权任务普通权限删不掉（真机实测），卸载时这是「授权已应撤销」的唯一
-  ; 可靠凭证；应用启动据此回落开关，下次开启强制重装任务（必弹 UAC）。
-  ; 升级路径（_revoke_auth=0）**不得**写标记。卸载器的两种调用形态
-  ; （2026-09-28 真机复测 + 同日维护模式二次修正）：
-  ;
-  ;   * 真卸载（$EXEDIR != $INSTDIR）：NSIS 把卸载器拷进 %TEMP%\~nsu*.tmp
-  ;     再跑——Windows「设置 → 应用」、双击 uninstall.exe、uninstall.exe /S
-  ;     都走这条。直接写新格式 `uninstalled=<tick>`（撤销凭证，任何安装
-  ;     不得删除），并清掉可能残留的待决文件（被撤销凭证取代）。
-  ;   * 原位调用（$EXEDIR == $INSTDIR）：安装器以 `_?=$INSTDIR` 调旧卸载器
-  ;     （生成的 installer.nsi 的 reinst_uninstall 段）。**两种意图共用此
-  ;     形态且此刻不可区分**：升级（旧版本 → 新安装器接续安装）与维护模式
-  ;     卸载（同版本 → PageLeaveReinstall 卸载成功后**不退出**，继续走目录
-  ;     页与安装节重装）。因此这里只写**待决文件**
-  ;     `pending-uninstall=${VERSION}`，把裁决推迟到 PREINSTALL（见
-  ;     SayAllResolveUninstallPending）：同版本 = 维护卸载 → 撤销；不同
-  ;     版本 = 升级 → 授权保留。若此处直接写标记，升级会把授权打回关闭；
-  ;     若什么都不写，维护卸载的撤销会丢失（Andy 2026-09-28 现场报告：
-  ;     「设置 → 应用」卸载已生效，维护模式卸载不行）。
-  !if ${_revoke_auth} == 1
-    ${If} $EXEDIR != $INSTDIR
-      ; 真卸载：撤销凭证 + 清掉残留的待决文件（被本凭证取代）
-      CreateDirectory "$LOCALAPPDATA\SayAll"
-      System::Call "kernel32::GetTickCount() i .R8"
-      FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-reauth-required" w
-      ${If} $0 != 0
-        FileWrite $0 "uninstalled=$R8"
-        FileClose $0
-      ${EndIf}
-      Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-pending"
-    ${Else}
-      ; 原位调用（升级卸载 / 维护模式卸载共用形态）：写待决文件，
-      ; 由 PREINSTALL 的 SayAllResolveUninstallPending 按版本裁决
-      CreateDirectory "$LOCALAPPDATA\SayAll"
-      FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-uninstall-pending" w
-      ${If} $0 != 0
-        FileWrite $0 "pending-uninstall=${VERSION}"
-        FileClose $0
-      ${EndIf}
-    ${EndIf}
-  !endif
-  Pop $0
-  Pop $R9
-  Pop $R8
+  !insertmacro SayAllVerifyCaptureCleanup
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; 卸载同样不得强杀正在连接的应用（AGENTS.md 同一条规则）。
   !insertmacro SayAllRequestGracefulExit uninstall
-  ; 卸载也要先停助手，再删它的文件与授权。
-  !insertmacro SayAllStopHelper uninstall 1
-
-  ; ── 授权不跨卸载保留（2026-09-24 产品决策）────────────────────────
-  ; 卸载即撤销增强捕获的授权：删除计划任务，重装/升级后打开开关需要
-  ; 重新走一次 UAC。任务由同用户的提权进程创建（owner=该用户），
-  ; 非提权删除自己的任务通常被允许；即便个别环境拒绝，应用启动侧
-  ; 还有"设置说开着但任务不存在 → 回落关闭"的对账兜底。
-  nsExec::Exec 'schtasks /delete /f /tn "SayAll RC003 Helper"'
+  !insertmacro SayAllVerifyCaptureCleanup
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  !insertmacro SayAllRecycleRetiredFiles
   Push $R8
   ReadRegStr $R8 HKLM "${SAYALL_VB_CABLE_SERVICE_KEY}" "DisplayName"
   ${If} $R8 == ""

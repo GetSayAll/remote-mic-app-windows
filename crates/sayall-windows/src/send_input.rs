@@ -109,9 +109,6 @@ pub enum KeyCode {
     F10,
     F11,
     F12,
-    /// `~ 键（VK_OEM_3）。遥控器 TV 键的原生等价键：TV usage 0x0035 在
-    /// Windows 键盘映射里就是 OEM_3，被吞后必须能按原样回注。
-    Oem3,
 }
 
 impl KeyCode {
@@ -198,7 +195,6 @@ impl KeyCode {
             Self::MediaPrev => 0xB1,
             Self::MediaNext => 0xB0,
             Self::MediaPlayPause => 0xB3,
-            Self::Oem3 => 0xC0,
         }
     }
 
@@ -212,7 +208,6 @@ impl KeyCode {
             Self::RightAlt => (0x38, true),
             Self::LeftWindows => (0x5B, true),
             Self::RightWindows => (0x5C, true),
-            Self::Oem3 => (0x29, false),
             _ => return None,
         })
     }
@@ -243,17 +238,6 @@ impl KeyCode {
                 | Self::RightWindows
         )
     }
-
-    /// 单键和弦的 HID 键盘 usage（`None` = 该键没有标准键盘 usage）。
-    ///
-    /// 用途：语音键报告层合成（helper 在 WUDFHost 报告层把语音键 usage 替换为
-    /// 该 usage，`injected=0`，第三方输入法热键才收得到）。报告层一次只能替换
-    /// **一个** usage 槽，因此这里只提供单键查询；和弦（多键）不适用报告层合成。
-    ///
-    /// ⚠️ 这张表只是客观映射（KeyCode → USB HID Keyboard/Keypad usage），
-    /// **不等于该 usage 可以被合成**——替换 usage 会在翻译链最上游重新推
-    /// VK/扫描码，必须逐键实测（见 agent 的 SYNTH_TO_WHITELIST 与探针
-    /// wudf_ioctl_synth.py）。能否合成由调用方白名单过滤，本表不回答。
     pub fn hid_usage(&self) -> Option<u16> {
         let usage = match self {
             // 修饰键（0xE0-0xE7）。无侧别的别名按左侧语义（SendInput 同）。
@@ -346,6 +330,13 @@ pub struct KeyChord {
     pub keys: Vec<KeyCode>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskSwitchView {
+    Applications,
+    Desktops,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ButtonAction {
@@ -353,6 +344,9 @@ pub enum ButtonAction {
     Disabled,
     Shortcut {
         chord: KeyChord,
+    },
+    TaskSwitch {
+        view: TaskSwitchView,
     },
     /// 打开/激活预设应用（Mac presetApplication 对齐；target = 预设 id）。
     OpenApp {
@@ -570,7 +564,7 @@ pub struct ButtonMappings {
     pub enabled: bool,
     pub actions: BTreeMap<RemoteButton, ButtonActions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub applications: Vec<crate::app_launcher::CustomAppPick>,
+    pub applications: Vec<crate::registered_apps::AppLibraryEntry>,
     /// 聚焦档案：键 = `OpenApp` 的 target（预设 id 或自定义应用路径）。
     ///
     /// 与 `applications` 解耦：预置应用（如微信）也要能记录输入框，而且仓库扫描/
@@ -606,7 +600,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             enabled: bool,
             actions: Option<BTreeMap<RemoteButton, ButtonActionsWire>>,
             #[serde(default)]
-            applications: Vec<crate::app_launcher::CustomAppPick>,
+            applications: Vec<crate::registered_apps::AppLibraryEntry>,
             #[serde(default)]
             focus_profiles: BTreeMap<String, crate::focus::AppFocusProfile>,
         }
@@ -628,6 +622,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 
 impl ButtonMappings {
     pub fn normalized(self) -> Result<Self, SendInputError> {
+        // Device capability controls execution, never the user's saved mappings.
         let mut this = self;
         this.applications = crate::registered_apps::normalize_library(this.applications)
             .map_err(SendInputError::Backend)?;
@@ -692,10 +687,8 @@ impl ButtonMappings {
 /// （见 button_mapping.rs 与 2026-09-06 调查档案修复记录）。映射动作与
 /// 原生动作相同（如 右→右、确定→Enter）且该次按压走了泄漏路径（原始键
 /// 已进 OS）时，注入会被跳过——原生动作已交付，注入即双响应。
-/// 厂商键（返回/电源 VK 0xFF 族，Windows 无默认动作）无对应 KeyCode →
-/// None：这些键的映射动作无法由原生覆盖。TV（OEM_3 `~/~）自 2026-09-27
-/// 起有对应：usage 0x0035 在 Windows 键盘映射里就是 OEM_3，被吞的
-/// Disabled 触发需要按原样回注（见 button_mapping 吞键缝隙修复）。
+/// 厂商键（返回/电源 VK 0xFF 族，Windows 无默认动作）、TV（OEM_3 `~/~）
+/// 无对应 KeyCode → None：这些键的映射动作无法由原生覆盖。
 pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
     Some(match button {
         RemoteButton::Ok => KeyCode::Enter,
@@ -708,8 +701,7 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
         RemoteButton::VolumeMute => KeyCode::VolumeMute,
         RemoteButton::VolumeUp => KeyCode::VolumeUp,
         RemoteButton::VolumeDown => KeyCode::VolumeDown,
-        RemoteButton::Tv => KeyCode::Oem3,
-        RemoteButton::Back | RemoteButton::Power => return None,
+        RemoteButton::Back | RemoteButton::Tv | RemoteButton::Power => return None,
     })
 }
 
@@ -995,7 +987,7 @@ mod tests {
     #[test]
     fn application_library_round_trips_without_adding_button_bindings() {
         let mut mappings = ButtonMappings::default();
-        let app = crate::app_launcher::CustomAppPick {
+        let app = crate::registered_apps::AppLibraryEntry {
             name: "Example".into(),
             path: "shell:AppsFolder\\Example!App".into(),
         };
@@ -1030,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn native_key_covers_common_keys_and_none_for_vendor() {
+    fn native_key_covers_common_keys_and_none_for_vendor_and_tv() {
         // 泄漏对冲依据：常见键的原生动作可由同键映射覆盖（泄漏路径免注入）。
         assert_eq!(native_key(RemoteButton::Ok), Some(KeyCode::Enter));
         assert_eq!(native_key(RemoteButton::Home), Some(KeyCode::Home));
@@ -1039,12 +1031,11 @@ mod tests {
         assert_eq!(native_key(RemoteButton::Left), Some(KeyCode::Left));
         assert_eq!(native_key(RemoteButton::Right), Some(KeyCode::Right));
         assert_eq!(native_key(RemoteButton::Menu), Some(KeyCode::Apps));
-        // TV usage 0x0035 的原生等价键是 OEM_3（`~）：2026-09-27 吞键缝隙
-        // 修复起有对应，被吞的 Disabled 触发按原样回注。
-        assert_eq!(native_key(RemoteButton::Tv), Some(KeyCode::Oem3));
-        // 厂商键（Windows 无默认动作）：原生无法覆盖。
+        // 厂商键（Windows 无默认动作）与 TV（OEM_3 `~/~ 无对应 KeyCode）：
+        // 原生无法覆盖，泄漏路径只能注入（结构性双响应残留，Helper 轨解决）。
         assert_eq!(native_key(RemoteButton::Back), None);
         assert_eq!(native_key(RemoteButton::Power), None);
+        assert_eq!(native_key(RemoteButton::Tv), None);
     }
 
     #[test]
@@ -1345,8 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_preserves_back_and_volume_customization() {
-        // 返回/音量±现在属于可配置按键；左键也必须保留。
+    fn normalized_preserves_unavailable_button_customization() {
         let mut mappings = ButtonMappings::default();
         let single_escape = ButtonActions {
             single: ButtonAction::Shortcut {
@@ -1385,7 +1375,7 @@ mod tests {
         ] {
             assert!(
                 normalized.actions.contains_key(&button),
-                "{button:?} 自定义必须保留"
+                "{button:?} 配置必须保留，与当前设备能力无关"
             );
         }
         assert!(normalized.actions.contains_key(&RemoteButton::Tv));
@@ -1397,6 +1387,9 @@ mod tests {
                 | (1u64 << RemoteButton::VolumeUp.ordinal())
                 | (1u64 << RemoteButton::VolumeDown.ordinal())
         );
+        let encoded = serde_json::to_string(&normalized).unwrap();
+        let restored: ButtonMappings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.normalized().unwrap(), normalized);
     }
 
     #[test]

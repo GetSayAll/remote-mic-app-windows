@@ -1,0 +1,602 @@
+[
+  {
+    "id": "preset-agent",
+    "name": "Agent",
+    "kind": "direct",
+    "builtIn": true,
+    "buttonMappings": {
+      "enabled": true,
+      "actions": {
+        "up": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "up"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "down": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "down"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "left": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "left"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "right": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "right"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "back": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "backspace"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "ok": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "enter"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "volume_up": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "volume_up"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "volume_down": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "volume_down"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "power": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "escape"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "home": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "home"
+              ]
+            }
+          },
+          "double": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "control",
+                "home"
+              ]
+            }
+          },
+          "long": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "control",
+                "end"
+              ]
+            }
+          }
+        },
+        "tv": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "tab"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "task_switch",
+            "view": "desktops"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "preset-chat",
+    "name": "聊天工具",
+    "kind": "direct",
+    "builtIn": true,
+    "buttonMappings": {
+      "enabled": true,
+      "actions": {
+        "up": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "up"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "down": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "down"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "left": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "left"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "right": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "right"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "back": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "backspace"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "ok": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "enter"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "volume_up": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "volume_up"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "volume_down": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "volume_down"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "power": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "escape"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "home": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "home"
+              ]
+            }
+          },
+          "double": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "control",
+                "home"
+              ]
+            }
+          },
+          "long": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "control",
+                "end"
+              ]
+            }
+          }
+        },
+        "tv": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "tab"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "task_switch",
+            "view": "desktops"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "preset-browser",
+    "name": "浏览器",
+    "kind": "direct",
+    "builtIn": true,
+    "buttonMappings": {
+      "enabled": true,
+      "actions": {
+        "up": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "up"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "down": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "down"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "left": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "left"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "right": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "right"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "back": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "backspace"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "ok": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "enter"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "volume_up": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "volume_up"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "volume_down": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "volume_down"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "power": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "escape"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "disabled"
+          }
+        },
+        "home": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "home"
+              ]
+            }
+          },
+          "double": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "control",
+                "home"
+              ]
+            }
+          },
+          "long": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "control",
+                "end"
+              ]
+            }
+          }
+        },
+        "tv": {
+          "single": {
+            "type": "shortcut",
+            "chord": {
+              "keys": [
+                "tab"
+              ]
+            }
+          },
+          "double": {
+            "type": "disabled"
+          },
+          "long": {
+            "type": "task_switch",
+            "view": "desktops"
+          }
+        }
+      }
+    }
+  }
+]

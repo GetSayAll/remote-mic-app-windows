@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import ConnectionPage from "./ConnectionPage.vue";
+import { reportFrontendEvent } from "../lib/frontend-diagnostics";
+vi.mock("../lib/frontend-diagnostics", () => ({ reportFrontendEvent: vi.fn() }));
 
 type ShortcutCaptureHandler = (edge: {
   key: string;
@@ -25,7 +27,7 @@ function selectedToolCard(wrapper: VueWrapper): string {
   return wrapper.find(".tool-card.selected").find("strong").text();
 }
 
-/** 切到"其他工具"并进入自定义组合键录入（录入入口在 feature flag 之后）。 */
+/** 切到"其他工具"并进入自定义组合键录入。 */
 async function startCustomCapture(wrapper: VueWrapper): Promise<void> {
   await wrapper
     .findAll(".tool-card")
@@ -89,7 +91,7 @@ const runtime: RuntimeSnapshot = {
     buttonMapping: {
       enabled: true,
       gateActive: false,
-      listenerActive: false,
+      observedButtons: [], listenerActive: false,
       swallowedEdges: 0,
       leakedDowns: 0,
       firedGestures: 0,
@@ -107,11 +109,14 @@ const cableEndpoint: AudioEndpoint = {
 
 const mocks = vi.hoisted(() => ({
   endpoints: [] as AudioEndpoint[],
+  getCaptureInput: vi.fn(), listCaptureInputs: vi.fn(), setCaptureInput: vi.fn(), resolveCaptureRecovery: vi.fn(),
   captureEdgeHandler: null as ShortcutCaptureHandler | null,
   getConnectionSnapshot: vi.fn(),
   getAudioSnapshot: vi.fn(),
+  getAudioRouteSnapshot: vi.fn(),
   listAudioEndpoints: vi.fn(),
   selectAudioEndpoint: vi.fn(),
+  getRc003TaskStatus: vi.fn(), enableRc003Capture: vi.fn(), disableRc003Capture: vi.fn(),
   getGainDb: vi.fn(),
   setGainDb: vi.fn(),
   openVbCableDownloadPage: vi.fn(),
@@ -127,19 +132,20 @@ const mocks = vi.hoisted(() => ({
   startShortcutCapture: vi.fn(),
   stopShortcutCapture: vi.fn(),
   subscribeShortcutCaptureEdges: vi.fn(),
-  getRc003TaskStatus: vi.fn(),
-  enableRc003Capture: vi.fn(),
-  disableRc003Capture: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/bridge")>();
   return {
     ...original,
+    getCaptureInput: mocks.getCaptureInput, listCaptureInputs: mocks.listCaptureInputs,
+    setCaptureInput: mocks.setCaptureInput, resolveCaptureRecovery: mocks.resolveCaptureRecovery,
     getConnectionSnapshot: mocks.getConnectionSnapshot,
     getAudioSnapshot: mocks.getAudioSnapshot,
+    getAudioRouteSnapshot: mocks.getAudioRouteSnapshot,
     listAudioEndpoints: mocks.listAudioEndpoints,
     selectAudioEndpoint: mocks.selectAudioEndpoint,
+    getRc003TaskStatus: mocks.getRc003TaskStatus, enableRc003Capture: mocks.enableRc003Capture, disableRc003Capture: mocks.disableRc003Capture,
     getGainDb: mocks.getGainDb,
     setGainDb: mocks.setGainDb,
     openVbCableDownloadPage: mocks.openVbCableDownloadPage,
@@ -155,18 +161,21 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     startShortcutCapture: mocks.startShortcutCapture,
     stopShortcutCapture: mocks.stopShortcutCapture,
     subscribeShortcutCaptureEdges: mocks.subscribeShortcutCaptureEdges,
-    getRc003TaskStatus: mocks.getRc003TaskStatus,
-    enableRc003Capture: mocks.enableRc003Capture,
-    disableRc003Capture: mocks.disableRc003Capture,
   };
 });
 
 describe("VB-CABLE first-launch guidance", () => {
   beforeEach(() => {
+    mocks.getRc003TaskStatus.mockResolvedValue({ installed: false, authorizationRequired: true, enabled: false, helperPath: null, lastError: null, cleanupPending:false, canRetryCleanup:false });
     mocks.endpoints = [];
+    mocks.getCaptureInput.mockResolvedValue({ settings: { enabled: false, endpointId: null, endpointName: null }, phase: "disabled", recoveryPending: false, lastError: null });
+    mocks.listCaptureInputs.mockResolvedValue([{ id: "capture", name: "CABLE Output", isVirtualCableCandidate: true }]);
+    mocks.setCaptureInput.mockImplementation(async settings => ({ settings, phase: "idle", recoveryPending: false, lastError: null }));
+    mocks.resolveCaptureRecovery.mockResolvedValue({ settings: { enabled: false, endpointId: null, endpointName: null }, phase: "idle", recoveryPending: false, lastError: null });
     mocks.captureEdgeHandler = null;
     mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
     mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.getAudioRouteSnapshot.mockResolvedValue({ phase: "unconfigured", reason: null, captureEndpointId: null, captureEndpointName: null, renderEndpointId: null, renderEndpointName: null });
     mocks.listAudioEndpoints.mockImplementation(async () => mocks.endpoints);
     mocks.selectAudioEndpoint.mockImplementation(async (endpointId: string) => ({
       ...emptyAudio,
@@ -188,13 +197,6 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.launchVokie.mockResolvedValue(undefined);
-    mocks.getRc003TaskStatus.mockResolvedValue({
-      installed: true,
-      authorizationRequired: false,
-      enabled: false,
-      helperPath: null,
-      lastError: null,
-    });
     mocks.startShortcutCapture.mockResolvedValue([]);
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
@@ -207,6 +209,19 @@ describe("VB-CABLE first-launch guidance", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("shows cleanup pending instead of ready in the input tool guide", async () => {
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getRc003TaskStatus.mockResolvedValue({ installed:true, authorizationRequired:true, enabled:true, cleanupPending:true, canRetryCleanup:true, helperPath:null, lastError:null });
+    const page = mount(ConnectionPage, {props:{runtime}});
+    try {
+      await flushPromises();
+      const guide=page.get('.tool-panel');
+      expect(guide.text()).toContain("全按键支持正在收尾");
+      expect(guide.text()).not.toContain("豆包的语音条就会出现");
+    } finally { page.unmount(); }
   });
 
   it("groups each status dot with its heading for vertical alignment", async () => {
@@ -222,14 +237,30 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("automatically selects the only VB-CABLE endpoint when no endpoint was configured", async () => {
+  it("keeps voice devices inside the remote connection card and input-tool setup separate", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    const connectionCard = wrapper.findAll("article.card").find(card => card.find("h2").text() === "遥控器连接")!;
+    expect(connectionCard.find('section[aria-labelledby="voice-devices-title"]').exists()).toBe(true);
+    expect(connectionCard.get('#voice-devices-title').text()).toBe("语音设备");
+    expect(connectionCard.find('#capture-input-target').exists()).toBe(true);
+    expect(connectionCard.get('details.audio-advanced').attributes('open')).toBeUndefined();
+    expect(connectionCard.find('.setup-card').exists()).toBe(false);
+    expect(wrapper.get('.setup-card h2').text()).toBe("语音输入设置");
+    expect(mocks.setCaptureInput).not.toHaveBeenCalled();
+    expect(mocks.selectAudioEndpoint).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("does not guess a render endpoint from the only listed cable when no microphone was configured", async () => {
     mocks.endpoints = [cableEndpoint];
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    expect(mocks.selectAudioEndpoint).toHaveBeenCalledOnce();
-    expect(mocks.selectAudioEndpoint).toHaveBeenCalledWith(cableEndpoint.id);
-    expect(wrapper.text()).toContain("已自动选择 CABLE Input");
+    expect(mocks.selectAudioEndpoint).not.toHaveBeenCalled();
+    expect(wrapper.text()).not.toContain("CABLE Input");
+    expect(wrapper.get('details.audio-advanced').attributes('open')).toBeUndefined();
+    expect(wrapper.text()).toContain("选择目标麦克风");
     expect(wrapper.text()).not.toContain("需要安装 VB-CABLE");
     expect(wrapper.text()).not.toContain("系统语音输入");
     wrapper.unmount();
@@ -276,8 +307,28 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.openVbCableDownloadPage).toHaveBeenCalledOnce();
     wrapper.unmount();
   });
+  it("keeps capture locking disabled and requires a separate capture selection", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } }); await flushPromises();
+    expect(mocks.setCaptureInput).not.toHaveBeenCalled();
+    expect(wrapper.get('.capture-input-settings input[type="checkbox"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('.capture-input-settings .button-row button').trigger('click'); await flushPromises();
+    await wrapper.get('#capture-input-target').setValue('capture'); await flushPromises();
+    expect(mocks.setCaptureInput).toHaveBeenLastCalledWith({ enabled: false, endpointId: 'capture', endpointName: 'CABLE Output' });
+    await wrapper.get('.capture-input-settings input[type="checkbox"]').setValue(true); await flushPromises();
+    expect(mocks.setCaptureInput).toHaveBeenLastCalledWith({ enabled: true, endpointId: 'capture', endpointName: 'CABLE Output' });
+    wrapper.unmount();
+  });
+  it("does not silently restore a crash journal", async () => {
+    mocks.getCaptureInput.mockResolvedValue({ settings: { enabled: true, endpointId: 'capture', endpointName: 'CABLE Output' }, phase: 'recovery_required', recoveryPending: true, lastError: null });
+    const wrapper = mount(ConnectionPage, { props: { runtime } }); await flushPromises();
+    expect(mocks.resolveCaptureRecovery).not.toHaveBeenCalled();
+    const keep = wrapper.findAll('.capture-input-settings button').find(b => b.text() === '保留当前选择')!;
+    await keep.trigger('click'); await flushPromises(); expect(mocks.resolveCaptureRecovery).toHaveBeenCalledWith(false);
+    wrapper.unmount();
+  });
 
-  it("recommends only the standard VB-Audio CABLE Input, never the other endpoints", async () => {
+
+  it("keeps manual render selection inside collapsed advanced diagnostics", async () => {
     const cableA: AudioEndpoint = {
       id: "cable-a",
       name: "CABLE-A Input (VB-Audio Cable A)",
@@ -292,17 +343,13 @@ describe("VB-CABLE first-launch guidance", () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    // 多个候选端点时不自动选择，需要用户显式展开列表。
     expect(mocks.selectAudioEndpoint).not.toHaveBeenCalled();
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "选择设备")!
-      .trigger("click");
+    expect(wrapper.find('.endpoint-list').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("扬声器 (Realtek Audio)");
+    const advanced = wrapper.get('details.audio-advanced');
+    (advanced.element as HTMLDetailsElement).open = true;
+    await advanced.trigger('toggle');
     await flushPromises();
-
-    const marks = wrapper.findAll(".endpoint-list .endpoint-recommend");
-    expect(marks).toHaveLength(1);
-    expect(marks[0].text()).toBe("推荐");
 
     const items = wrapper.findAll(".endpoint-list li");
     expect(items).toHaveLength(3);
@@ -311,8 +358,47 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(items[2].text()).toContain("扬声器");
     expect(items[0].text()).not.toContain("推荐");
     expect(items[2].text()).not.toContain("推荐");
-    expect(items[0].text()).toContain("其他音频设备");
-    expect(items[2].text()).toContain("其他音频设备");
+    expect(items[2].text()).toContain("仅用于手动诊断");
+    wrapper.unmount();
+  });
+
+  it("retries the saved audio route without changing the microphone switch or target", async () => {
+    const settings = { enabled: false, endpointId: "capture", endpointName: "CABLE Output" };
+    mocks.getCaptureInput.mockResolvedValue({ settings, phase: "disabled", recoveryPending: false, lastError: null });
+    mocks.getAudioRouteSnapshot.mockResolvedValue({ phase: "unavailable", reason: "audio_unready", captureEndpointId: "capture", captureEndpointName: "CABLE Output", renderEndpointId: null, renderEndpointName: null });
+    const wrapper = mount(ConnectionPage, { props: { runtime } }); await flushPromises();
+    expect(mocks.setCaptureInput).not.toHaveBeenCalled();
+    const retry = wrapper.findAll('button').find(button => button.text() === "重新连接声音通道");
+    expect(retry).toBeDefined();
+    await retry!.trigger('click'); await flushPromises();
+    expect(mocks.setCaptureInput).toHaveBeenCalledExactlyOnceWith(settings);
+    expect((wrapper.get('.capture-input-settings input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("logs route changes once without endpoint identities or polling duplicates", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } }); await flushPromises();
+    const refresh = wrapper.findAll('button').find(button => button.text() === "刷新设备列表")!;
+    await refresh.trigger('click'); await flushPromises();
+    const routeReports = () => vi.mocked(reportFrontendEvent).mock.calls.map(([event]) => event).filter(event => event.event === "audio_route_status");
+    expect(routeReports()).toHaveLength(1);
+    mocks.getAudioRouteSnapshot.mockResolvedValue({ phase: "unavailable", reason: "capture_missing", captureEndpointId: "private-endpoint", captureEndpointName: "private-name", renderEndpointId: null, renderEndpointName: null });
+    await refresh.trigger('click'); await flushPromises();
+    expect(routeReports()).toHaveLength(2);
+    expect(routeReports()[1]).toMatchObject({ result: "failed", reason: "unavailable_capture_missing" });
+    expect(JSON.stringify(routeReports())).not.toContain("private");
+    wrapper.unmount();
+  });
+
+  it("does not report ready from a working render endpoint when pairing is ambiguous", async () => {
+    mocks.endpoints = [cableEndpoint];
+    mocks.getAudioSnapshot.mockResolvedValue({ ...emptyAudio, phase: "ready", selectedEndpointId: cableEndpoint.id, selectedEndpointName: cableEndpoint.name });
+    mocks.getAudioRouteSnapshot.mockResolvedValue({ phase: "unavailable", reason: "ambiguous", captureEndpointId: "capture", captureEndpointName: "CABLE Output", renderEndpointId: null, renderEndpointName: null });
+    const wrapper = mount(ConnectionPage, { props: { runtime } }); await flushPromises();
+    expect(wrapper.text()).toContain("无法明确配对");
+    expect(wrapper.text()).not.toContain("语音设备已就绪");
+    expect(wrapper.text()).not.toContain("声音传输已就绪");
+    expect(mocks.selectAudioEndpoint).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -334,12 +420,11 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.endpoints = [sixteenChannel, cableSpeaker];
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "选择设备")!
-      .trigger("click");
+    const advanced = wrapper.get(".audio-advanced");
+    (advanced.element as HTMLDetailsElement).open = true;
+    await advanced.trigger("toggle");
     await flushPromises();
+
 
     const items = wrapper.findAll(".endpoint-list li");
     expect(items).toHaveLength(2);
@@ -347,7 +432,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(items[0].text()).toContain("推荐");
     expect(items[1].text()).not.toContain("推荐");
 
-    expect(wrapper.text()).toContain("选择带「推荐」标记的 CABLE 设备");
+    expect(wrapper.text()).toContain("选择带“推荐”标记的 CABLE 设备");
     expect(wrapper.text()).not.toContain("这里选择 CABLE Input");
     wrapper.unmount();
   });
@@ -374,12 +459,11 @@ describe("VB-CABLE first-launch guidance", () => {
     }));
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "选择设备")!
-      .trigger("click");
+    const advanced = wrapper.get(".audio-advanced");
+    (advanced.element as HTMLDetailsElement).open = true;
+    await advanced.trigger("toggle");
     await flushPromises();
+
     await wrapper
       .findAll(".endpoint-list li button")
       .find((button) => button.text() === "选择")!
@@ -401,21 +485,40 @@ describe("VB-CABLE first-launch guidance", () => {
     const order = wrapper.findAll(".tool-card strong").map((node) => node.text());
     expect(order).toEqual(["豆包输入法", "微信输入法", "Vokie", "其他工具"]);
     expect(selectedToolCard(wrapper)).toBe("微信输入法");
-    // 微信不需要"支持更多输入工具"开关，面板不渲染它。
+    // 输入工具配置保持基础语音路径，不启动按键增强 Helper。
     expect(wrapper.find(".capture-switch").exists()).toBe(false);
-    expect(wrapper.text()).toContain("微信输入法不需要“支持更多输入工具”开关");
+    expect(wrapper.find("#capture-switch-doubao").exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("老配置没有工具选择时按当前快捷键推断并落存一次", async () => {
+  it("未选择工具时只按当前快捷键展示引导，不在初始化时写入配置", async () => {
     mocks.getVoiceInputTool.mockResolvedValue(null);
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
-    expect(selectedToolCard(wrapper)).toBe("豆包输入法");
-    expect(mocks.setVoiceInputTool).toHaveBeenCalledWith("doubao");
-    wrapper.unmount();
+    try {
+      expect(selectedToolCard(wrapper)).toBe("豆包输入法");
+      expect(mocks.setVoiceInputTool).not.toHaveBeenCalled();
+      expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("读取输入工具失败时提示读取失败，不把共享右 Alt 推断写回覆盖已存工具", async () => {
+    mocks.getVoiceInputTool.mockRejectedValue(new Error("读取输入工具失败"));
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    try {
+      expect(mocks.setVoiceInputTool).not.toHaveBeenCalled();
+      expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
+      expect(wrapper.find(".voice-hotkey-message").text()).toContain("读取输入工具失败");
+    } finally {
+      wrapper.unmount();
+    }
   });
 
   it("点豆包卡片：自动把快捷键设为右 Alt、落存工具选择并显示该工具的清单", async () => {
@@ -433,7 +536,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(selectedToolCard(wrapper)).toBe("豆包输入法");
     expect(wrapper.text()).toContain("按住说话快捷键已设为 右 Alt");
     expect(wrapper.findAll(".checklist li").map((item) => item.text())).toEqual([
-      "1豆包麦克风选 CABLE Output",
+      "1豆包麦克风选择与上方相同的目标；使用系统默认时开启临时切换",
       "2豆包长按语音键选 右 Alt",
       "3切到豆包后，按住遥控器语音键说话",
     ]);
@@ -509,7 +612,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["right_alt"] });
     expect(selectedToolCard(wrapper)).toBe("Vokie");
     expect(wrapper.findAll(".checklist li").map((item) => item.text())).toEqual([
-      "1Vokie 麦克风选 CABLE Output",
+      "1Vokie 麦克风选择与上方相同的目标；使用系统默认时开启临时切换",
       "2Vokie 快捷键保持默认的 右 Alt",
       "3在要写字的地方按住遥控器语音键说话",
     ]);
@@ -697,7 +800,7 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
-  it("点其他工具卡片：不改变当前快捷键，改为提供按键芯片与自定义占位", async () => {
+  it("点其他工具卡片：不改变当前快捷键，改为提供按键芯片与自定义录入", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -711,13 +814,7 @@ describe("VB-CABLE first-launch guidance", () => {
     expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
     const chips = wrapper.findAll(".chip-select .chip").map((chip) => chip.text());
     expect(chips.slice(0, 3)).toEqual(["右 Alt", "左 Alt", "不按键"]);
-    // 自定义组合键入口：feature flag 关闭时是禁用占位，打开时是可点入口。
-    expect(chips[3]).toBe(
-      VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED ? "自定义组合键" : "自定义组合键（暂未开放）",
-    );
-    expect(wrapper.find(".chip-select .chip:disabled").exists()).toBe(
-      !VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED,
-    );
+    expect(chips[3]).toBe(VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED ? "自定义组合键" : "自定义组合键（暂未开放）");
     wrapper.unmount();
   });
 
@@ -1034,13 +1131,6 @@ describe("connection page remote model", () => {
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
-    mocks.getRc003TaskStatus.mockResolvedValue({
-      installed: true,
-      authorizationRequired: false,
-      enabled: false,
-      helperPath: null,
-      lastError: null,
-    });
     mocks.startShortcutCapture.mockResolvedValue([]);
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(

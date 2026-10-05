@@ -61,6 +61,7 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 stale_remote_event_count: 0,
             },
             button_mapping: ButtonMappingSnapshot {
+                observed_buttons: Vec::new(),
                 enabled: true,
                 gate_active: true,
                 listener_active: true,

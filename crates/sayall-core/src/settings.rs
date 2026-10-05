@@ -17,10 +17,19 @@ pub enum ThemePreference {
     Dark,
 }
 
+/// A capture endpoint is distinct from the render endpoint receiving decoded PCM.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CaptureInputSettings {
+    pub enabled: bool,
+    pub endpoint_id: Option<String>,
+    pub endpoint_name: Option<String>,
+}
+
 /// 用户在连接页选择的输入工具（决定"按住说话快捷键"的默认组合与引导步骤）。
 ///
-/// `None` = 用户从未选择过（老配置）：前端按当前快捷键推断一次后落存，
-/// 不在这里猜——推断规则只属于界面，Rust 侧只做持久化。
+/// `None` 表示用户尚未选择；页面可按当前快捷键显示初始选项，
+/// 只有用户显式选择才持久化。既有默认快捷键的运行行为由平台层保持。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceInputTool {
@@ -72,22 +81,20 @@ const APP_ICON_CHOICE_MIN_SCHEMA_VERSION: u32 = 4;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub ui_preferences: UiPreferences,
     pub schema_version: u32,
     pub selected_remote_id: Option<String>,
     pub audio_endpoint_id: Option<String>,
     pub audio_endpoint_name: Option<String>,
+    pub capture_input: CaptureInputSettings,
     pub gain_db: f32,
     pub voice_trigger_mode: VoiceTriggerMode,
     /// 连接页选择的输入工具（微信输入法 / 豆包输入法 / 其他工具）。
     pub voice_input_tool: Option<VoiceInputTool>,
     pub launch_at_login: bool,
     pub open_window_at_launch: bool,
-    pub check_prerelease_updates: bool,
-    /// RC003 三键增强捕获的用户意图（按键页开关）。默认 **关闭**——
-    /// 只有用户主动打开过才为 true。注意它与「计划任务是否还在系统里」
-    /// 是两回事：关闭开关只结束助手、任务保留（授权保留，避免重复 UAC），
-    /// 所以不能拿任务的存在与否当这个开关的状态。
     pub rc003_capture_enabled: bool,
+    pub check_prerelease_updates: bool,
     pub theme_preference: ThemePreference,
     /// 应用图标；老配置没有这个字段时落回**当前默认**（几何鸭，2026-10-04 起）。
     #[serde(default, deserialize_with = "deserialize_app_icon")]
@@ -110,20 +117,55 @@ where
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            ui_preferences: UiPreferences::default(),
             schema_version: CURRENT_SCHEMA_VERSION,
             selected_remote_id: None,
             audio_endpoint_id: None,
             audio_endpoint_name: None,
+            capture_input: CaptureInputSettings::default(),
             gain_db: 0.0,
             voice_trigger_mode: VoiceTriggerMode::Hold,
             voice_input_tool: None,
             launch_at_login: false,
             open_window_at_launch: true,
-            check_prerelease_updates: false,
             rc003_capture_enabled: false,
+            check_prerelease_updates: false,
             theme_preference: ThemePreference::System,
             app_icon: AppIconIdentifier::FacetedDuck,
             usage_statistics: UsageStatistics::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UiPreferences {
+    pub lock_button_selection: bool,
+    pub templates_expanded: bool,
+    pub associations_expanded: bool,
+}
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            lock_button_selection: true,
+            templates_expanded: true,
+            associations_expanded: true,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiPreference {
+    LockButtonSelection,
+    TemplatesExpanded,
+    AssociationsExpanded,
+}
+impl UiPreferences {
+    pub fn set(&mut self, field: UiPreference, enabled: bool) {
+        match field {
+            UiPreference::LockButtonSelection => self.lock_button_selection = enabled,
+            UiPreference::TemplatesExpanded => self.templates_expanded = enabled,
+            UiPreference::AssociationsExpanded => self.associations_expanded = enabled,
         }
     }
 }
@@ -307,5 +349,38 @@ mod tests {
         .unwrap();
         assert_eq!(settings.app_icon, AppIconIdentifier::Standard);
         assert_eq!(settings.gain_db, 12.0);
+    }
+}
+
+#[cfg(test)]
+mod enhancement_default_tests {
+    use super::AppSettings;
+    #[test]
+    fn legacy_helper_opt_in_does_not_authorize_unified_capture() {
+        let loaded: AppSettings = serde_json::from_str(
+            r#"{"restore_hid_enhancement":true,"capture_input":{"enabled":true,"endpointId":"capture-test"},"ui_preferences":{"lockButtonSelection":false}}"#,
+        ).unwrap();
+        let encoded = serde_json::to_value(loaded).unwrap();
+        assert_eq!(encoded["rc003_capture_enabled"], false);
+        assert!(encoded.get("restore_hid_enhancement").is_none());
+        assert_eq!(encoded["capture_input"]["endpointId"], "capture-test");
+        assert_eq!(encoded["ui_preferences"]["lockButtonSelection"], false);
+        assert!(encoded["ui_preferences"]
+            .get("hidEnhancementExpanded")
+            .is_none());
+    }
+    #[test]
+    fn unified_capture_requires_explicit_opt_in_and_reopens_saved_intent() {
+        assert!(!AppSettings::default().rc003_capture_enabled);
+        assert!(
+            !serde_json::from_str::<AppSettings>("{}")
+                .unwrap()
+                .rc003_capture_enabled
+        );
+        let saved: AppSettings = serde_json::from_str(r#"{"rc003_capture_enabled":true}"#).unwrap();
+        assert!(saved.rc003_capture_enabled);
+        let reopened: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(reopened.rc003_capture_enabled);
     }
 }

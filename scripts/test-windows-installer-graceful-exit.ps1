@@ -16,8 +16,8 @@ Set-StrictMode -Version Latest
 #
 # 1. 应用启动后创建会话内命名事件并落 `reason=listening` → 证明它"可被请求退出"；
 # 2. 安装/卸载开始后该事件被置位 → 日志出现 `reason=installer_requested_exit`；
-# 3. 应用自己关会话并落 `ble_session_shutdown ... terminal_result=passed`；
-# 4. 进程消失发生在安装器的强杀时刻之前 → 证明是"自己退出"而非"被杀"。
+# 3. 应用统一 ExitCleanup 的逐阶段与 overall 日志全部 passed。
+# 4. 进程在安装器等待预算内自行退出；超时安装器中止，不允许强杀。
 #
 # 边界：无蓝牙硬件时会话清理本身是空操作，故本脚本只断言**退出机制**。真机上
 # "升级期间不断开正在使用的遥控器"仍需人工验收，见 Testing/WindowsInstallerGracefulExit.md。
@@ -33,15 +33,24 @@ $diagnosticLogPath = Join-Path $env:LOCALAPPDATA "SayAll/Logs/sayall-diagnostic.
 # 与 crates/sayall-windows/src/graceful_exit.rs 的 GRACEFUL_EXIT_EVENT_NAME 一致；
 # src-tauri 的契约测试断言它与 installer-hooks.nsh 中的定义逐字相同。
 $gracefulExitEventName = "Local\SayAll-GracefulExit"
-# 安装器可能强杀的最早时刻：钩子先固定静默 1.5s，必要时再补 6.5s。
-# 与 src-tauri/windows/installer-hooks.nsh 的 SETTLE + TAIL 对应（契约测试守着它）。
-$installerGraceMilliseconds = 8000
+# 复用实际 NSIS 等待预算；超时钩子会 Abort，不能落入 Tauri 强杀分支。
+$installerHooks = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repositoryRoot "src-tauri/windows/installer-hooks.nsh")
+$installerGraceMilliseconds = 0
+foreach ($name in @("SAYALL_GRACEFUL_EXIT_SETTLE_MS", "SAYALL_GRACEFUL_EXIT_MAX_WAIT_MS")) {
+    $definition = [regex]::Match($installerHooks, "(?m)^!define $name ([0-9]+)\s*$")
+    if (-not $definition.Success) { throw "Missing installer timeout definition: $name" }
+    $installerGraceMilliseconds += [int]$definition.Groups[1].Value
+}
 $listenerReadyMarker = "reason=listening"
 $installerRequestedMarker = "reason=installer_requested_exit"
 $exitMarkers = @(
     "reason=installer_requested_exit",
-    "app_exit ble_session_shutdown phase=completed terminal_result=passed",
-    "app_exit platform_shutdown phase=completed terminal_result=passed"
+    "app_shutdown stage=supervisor_stop phase=completed terminal_result=passed",
+    "app_shutdown stage=input_quiesce phase=completed terminal_result=passed",
+    "app_shutdown stage=raw_input_stop phase=completed terminal_result=passed",
+    "app_shutdown stage=ble_disconnect phase=completed terminal_result=passed",
+    "app_shutdown stage=capture_route result=passed",
+    "app_shutdown stage=overall phase=completed terminal_result=passed failed_stages=0"
 )
 $listenerMarkers = @("reason=listening")
 
@@ -178,20 +187,23 @@ function Wait-LogMarkers([string] $path, [long] $offset, [string[]] $markers, [i
 }
 
 function Assert-LogMarkers([string[]] $lines, [string[]] $markers, [string] $label) {
+    if (@($lines | Where-Object { $_ -match 'app_shutdown .*terminal_result=failed' }).Count -gt 0) {
+        throw "$label 包含正常退出清理失败，不能以其它 passed 标记抵消"
+    }
     foreach ($marker in $markers) {
         if (@($lines | Where-Object { $_.Contains($marker) }).Count -eq 0) {
             $dump = [string]::Join("`n", $lines)
-            throw "$label 缺少日志标记 `"$marker`"：应用没有走优雅退出路径，安装器随后会强杀它。`n--- 本次新增日志 ---`n$dump"
+            throw "$label 缺少日志标记 `"$marker`"：未证实完整正常清理；不得将进程消失或安装器成功当作清理通过。`n--- 本次新增日志 ---`n$dump"
         }
     }
 }
 
-function Assert-ExitedBeforeInstallerKill($exited, [double] $elapsedMilliseconds, [string] $label) {
+function Assert-ExitedWithinInstallerBudget($exited, [double] $elapsedMilliseconds, [string] $label) {
     if (-not $exited) {
         throw "$label 期间应用始终没有退出：安装器的优雅退出请求没有生效"
     }
     if ($elapsedMilliseconds -ge $installerGraceMilliseconds) {
-        throw ("{0} 期间应用在 {1:N0}ms 后才消失，已达到安装器可能强杀的时刻（{2}ms）：无法排除它是被杀而不是自己退出" -f `
+        throw ("{0} 期间应用在 {1:N0}ms 后才消失，已达到安装器等待预算（{2}ms）；正常退出未在预算内完成" -f `
             $label, $elapsedMilliseconds, $installerGraceMilliseconds)
     }
 }
@@ -260,7 +272,7 @@ try {
     }
 
     Assert-LogMarkers $installLines $exitMarkers "安装覆盖运行中的应用"
-    Assert-ExitedBeforeInstallerKill $installExited $installElapsedMs "安装覆盖运行中的应用"
+    Assert-ExitedWithinInstallerBudget $installExited $installElapsedMs "安装覆盖运行中的应用"
 
     $afterInstallEntries = @(Wait-SingleInstallation)
     if ($afterInstallEntries.Count -ne 1) {
@@ -292,7 +304,7 @@ try {
     }
 
     Assert-LogMarkers $uninstallLines $exitMarkers "卸载运行中的应用"
-    Assert-ExitedBeforeInstallerKill $uninstallExited $uninstallElapsedMs "卸载运行中的应用"
+    Assert-ExitedWithinInstallerBudget $uninstallExited $uninstallElapsedMs "卸载运行中的应用"
     $appProcess = $null
 
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
@@ -305,15 +317,15 @@ try {
     $normalUninstallCompleted = $true
 
     Write-Host "Verified installer graceful exit while the app was running: $($installer.Name)"
-    Write-Host ("Install over running app: app exited by itself in {0:N0}ms (installer kill needs >= {1}ms)" -f $installElapsedMs, $installerGraceMilliseconds)
+    Write-Host ("Install over running app: app exited by itself in {0:N0}ms (installer wait budget: {1}ms; timeout aborts)" -f $installElapsedMs, $installerGraceMilliseconds)
     Write-Host ("Uninstall while running: app exited by itself in {0:N0}ms" -f $uninstallElapsedMs)
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         @"
 ### Windows installer graceful exit
 
-- silent install, then `/S /UPDATE` over a **running** app: passed (app exited on its own in $([int]$installElapsedMs)ms; installer force-kill threshold is ${installerGraceMilliseconds}ms)
+- silent install, then `/S /UPDATE` over a **running** app: passed (app exited on its own in $([int]$installElapsedMs)ms; installer wait budget is ${installerGraceMilliseconds}ms; timeout aborts without killing)
 - `$installerRequestedMarker`: passed
-- `app_exit ble_session_shutdown phase=completed terminal_result=passed`: passed
+- all `app_shutdown` resource stages and `overall ... passed failed_stages=0`: passed
 - `/S` uninstall while the app was running: passed (app exited on its own in $([int]$uninstallElapsedMs)ms)
 - uninstall entry removed afterwards: passed
 
@@ -322,17 +334,15 @@ This does not validate a real BLE session being closed mid-upgrade (no Bluetooth
     }
 } finally {
     if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-        # 绝不在正常路径强杀：强杀会留下未关闭的 GATT 会话。先请求优雅退出，只有
-        # 请求无效时才退化为强杀，并留下明确警告。
+        # 失败收尾也只能请求正常退出。若仍存活，保留安装以便排查，不强杀。
         if (Request-GracefulExit) {
             $null = Wait-ProcessExit $appProcess 30
         }
         if (-not $appProcess.HasExited) {
-            Write-Warning "Graceful exit request did not stop the app; falling back to a forced stop. A real BLE session may now be left open - restart Windows if Bluetooth stops working."
-            Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+            Write-Warning "Normal cleanup is incomplete; the app and installation are retained. No forced stop was attempted."
         }
     }
-    if (-not $normalUninstallCompleted) {
+    if (-not $normalUninstallCompleted -and ($null -eq $appProcess -or $appProcess.HasExited)) {
         foreach ($remainingEntry in @(Get-SayAllUninstallEntries)) {
             try {
                 Invoke-SilentUninstall $remainingEntry

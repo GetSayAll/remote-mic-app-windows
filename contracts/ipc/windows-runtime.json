@@ -49,6 +49,7 @@
       "staleRemoteEventCount": 0
     },
     "buttonMapping": {
+      "observedButtons": [],
       "enabled": true,
       "gateActive": true,
       "listenerActive": true,

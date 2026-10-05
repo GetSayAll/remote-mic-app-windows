@@ -3,9 +3,9 @@
 //! 设计要点（关键行为均已对插件源码核对，见 ATTRIBUTION.md 2026-09-05 更新调研节）：
 //! - 检查与安装全部走 Rust 侧：前端只调用本模块的两个 command，
 //!   便于把全部分支决策、外部调用结果与耗时写入 SAYALL_GATT_LOG 诊断日志。
-//! - Windows 上 `download_and_install` 内部会 `std::process::exit(0)`（Drop 清理
-//!   不会执行），因此 BLE 断开等成对清理必须注册在 `on_before_exit` 回调里，
-//!   而不是依赖进程退出路径——2026-09-05"部署不得强杀"教训的更新版。
+//! - Windows 上 `install` 会在启动安装器后直接退出，清理必须先于 install
+//!   得到确认。on_before_exit 不返回结果，不能作为拒绝替换安装的检查点；
+//!   保留插件默认回调执行 Tauri 自身清理。
 //! - 安装器以 passive（/P + /UPDATE + /R）运行：显示进度条、装完自动重启应用。
 //! - 默认端点来自 tauri.conf.json（GitHub Releases stable latest.json）；用户
 //!   显式开启预览版后，通过 GitHub Releases Atom feed 选择最高 SemVer 的已发布
@@ -266,28 +266,12 @@ async fn resolve_update_endpoint(include_prereleases: bool) -> Result<UpdateEndp
     }
 }
 
-/// 构建更新器：注册安装前清理回调 + 端点覆盖 + 检查超时。
+/// 构建更新器：端点覆盖 + 检查超时，保留插件默认的 Tauri 退出清理。
 fn build_updater(
     app: &AppHandle,
-    platform: Arc<dyn crate::platform::PlatformRuntime>,
     runtime_endpoint: Option<reqwest::Url>,
 ) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app.updater_builder().timeout(CHECK_TIMEOUT);
-    // on_before_exit 在安装器启动前、std::process::exit(0) 前同步执行：
-    // 显式断开 BLE 链路（正常断开序列 CCCD 退订/服务释放），避免残留
-    // 未关闭的 GATT 会话把链路留成僵死状态。
-    builder = builder.on_before_exit(move || {
-        let started = Instant::now();
-        let outcome = if platform.disconnect_remote().is_ok() {
-            "ok"
-        } else {
-            "err"
-        };
-        note(format!(
-            "install.before_exit disconnect={outcome} took_ms={}",
-            elapsed_ms(started)
-        ));
-    });
     if let Some(endpoint) = runtime_endpoint {
         builder = builder.endpoints(vec![endpoint]).map_err(|_error| {
             note("check.fail stage=runtime_endpoint_reject error_domain=updater error_code=endpoint_rejected reason=runtime_endpoint_invalid retryable=false".to_owned());
@@ -333,12 +317,11 @@ pub async fn check_app_update(
             date: None,
         });
     }
-    let platform = Arc::clone(&state.platform);
     let runtime_endpoint = match endpoint {
         UpdateEndpoint::Runtime(url) => Some(url),
         UpdateEndpoint::ConfiguredStable | UpdateEndpoint::NoPublishedPreview => None,
     };
-    let updater = build_updater(&app, platform, runtime_endpoint)?;
+    let updater = build_updater(&app, runtime_endpoint)?;
     match updater.check().await {
         Ok(Some(update)) => {
             let info = AppUpdateInfo {
@@ -450,6 +433,16 @@ pub async fn set_app_update_preferences(
     })
 }
 
+fn install_after_cleanup(
+    clean: bool,
+    install: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if !clean {
+        return Err("更新准备未完成，请通过系统托盘退出无线麦并重新打开后再试。".to_owned());
+    }
+    install()
+}
+
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let started = Instant::now();
@@ -476,7 +469,7 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
     let finish_app = app.clone();
 
     let result = update
-        .download_and_install(
+        .download(
             move |chunk_length, total| {
                 let Ok(mut progress) = chunk_progress.lock() else {
                     return;
@@ -514,6 +507,36 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
         )
         .await;
 
+    // download verifies the package before any lifecycle resource is released.
+    // The plugin callback cannot veto install, so keep this check before install.
+    let result = match result {
+        Ok(bytes) => {
+            let cleanup = state.exit_cleanup.clone();
+            let cleanup_started = Instant::now();
+            let clean =
+                tauri::async_runtime::spawn_blocking(move || cleanup.shutdown_blocking()).await;
+            match clean {
+                Ok(clean) => {
+                    note(format!(
+                        "install.pre_install cleanup={} installer_started=false took_ms={}",
+                        if clean { "confirmed" } else { "unconfirmed" },
+                        elapsed_ms(cleanup_started)
+                    ));
+                    install_after_cleanup(clean, || {
+                        update
+                            .install(bytes)
+                            .map_err(|error| install_error_message(&error))
+                    })
+                }
+                Err(_) => {
+                    note("install.fail stage=cleanup error_domain=runtime error_code=task_failed reason=cleanup_unconfirmed installer_started=false retryable=true".to_owned());
+                    Err("更新准备未完成，请通过系统托盘退出无线麦并重新打开后再试。".to_owned())
+                }
+            }
+        }
+        Err(error) => Err(install_error_message(&error)),
+    };
+
     match result {
         Ok(()) => {
             // Windows 上安装成功时进程在 install 内部 exit(0)，此分支仅在
@@ -530,7 +553,14 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
                 "install.fail downloaded={downloaded} error_domain=updater error_code=install_failed reason=download_or_install_failure retryable=true took_ms={}",
                 elapsed_ms(started)
             ));
-            Err(install_error_message(&error))
+            // A newer check may have selected a different update while downloading.
+            // Retain this retry only when it cannot replace that newer selection.
+            if let Ok(mut pending) = state.pending_update.lock() {
+                if pending.is_none() {
+                    *pending = Some(update);
+                }
+            }
+            Err(error)
         }
     }
 }
@@ -538,6 +568,37 @@ pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unconfirmed_cleanup_never_starts_installation() {
+        let mut installed = false;
+        let result = install_after_cleanup(false, || {
+            installed = true;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(
+            !installed,
+            "cleanup failure must leave the current installation untouched"
+        );
+    }
+
+    #[test]
+    fn confirmed_cleanup_installs_once() {
+        let mut installs = 0;
+        install_after_cleanup(true, || {
+            installs += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installs, 1);
+    }
+
+    #[test]
+    fn installation_error_is_preserved_after_confirmed_cleanup() {
+        let result = install_after_cleanup(true, || Err("installer launch failed".to_owned()));
+        assert_eq!(result.unwrap_err(), "installer launch failed");
+    }
 
     fn feed(tags: &[&str]) -> ReleasesFeed {
         ReleasesFeed {
@@ -686,18 +747,34 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn updater_notes_land_in_diagnostic_log() {
-        let path = std::env::temp_dir().join(format!(
-            "sayall-updater-note-test-{}.log",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        // 本测试二进制内无其他代码先初始化 gatt_sink（OnceLock 首次调用生效）。
-        // SAFETY: 测试进程内单线程操作该环境变量，其余测试不读取它。
-        unsafe { std::env::set_var("SAYALL_GATT_LOG", &path) };
+        const CHILD: &str = "SAYALL_UPDATER_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // The production sink is process-wide and other tests legitimately use it.
+            // Set the child's environment before startup, never race OnceLock/env in this process.
+            let path = std::env::temp_dir().join(format!(
+                "sayall-updater-note-test-{}-{}.log",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "updater::tests::updater_notes_land_in_diagnostic_log",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("SAYALL_GATT_LOG", &path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated diagnostic sink test failed");
+            return;
+        }
+        let path = std::path::PathBuf::from(std::env::var_os("SAYALL_GATT_LOG").unwrap());
         note("check.fail stage=endpoint_override_parse error_domain=url error_code=parse_failed reason=invalid_override retryable=false".to_owned());
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
-        unsafe { std::env::remove_var("SAYALL_GATT_LOG") };
-        let _ = std::fs::remove_file(&path);
         assert!(
             contents.contains("updater.check.fail stage=endpoint_override_parse")
                 && contents.contains("error_code=parse_failed")

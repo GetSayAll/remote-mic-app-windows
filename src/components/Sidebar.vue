@@ -19,6 +19,9 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
       "M7.6 13.6h8.8",
     ],
   },
+  template: {
+    strokes: ["M5 3.8h11l3 3v13.4H5z", "M16 3.8v3.5h3", "M8.2 11h7.6", "M8.2 14.5h7.6", "M8.2 18h4.6"],
+  },
   link: {
     // SF "link"：两段互扣链环（对角）
     strokes: [
