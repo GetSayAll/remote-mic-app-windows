@@ -137,3 +137,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   现场：旧包写下的 `standard` 让升级后仍停在旧图标）**：本版本之前的配置一律改用
   几何鸭（旧版本会把默认值写进配置，用户没做过选择），本版本里做出的选择才保留。
   验收同用例十四。
+- 2026-10-05：按键「按住时连续执行」交互定稿为 **radio 三选一**（关闭 / 重复单击动作 /
+  重复长按动作；双击不参与），替代初版“开关开在单击/长按槽位”的隐式表达；文案与可用性
+  规则见 [docs/plan/2026-10-05-button-hold-repeat-radio.md](plan/2026-10-05-button-hold-repeat-radio.md)。
+  用户可见字符串在 `ButtonsPage.vue`（选项、悬停原因、状态条、说明句），验收见
+  [Testing/WindowsButtonGestureRepeat.md](../Testing/WindowsButtonGestureRepeat.md)。
+  双击语义保持现状：先点一下、紧接着按住不放，在“关闭”状态松手仍按双击处理（Andy 确认）。
