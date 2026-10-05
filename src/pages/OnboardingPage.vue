@@ -1918,8 +1918,9 @@ async function retryVoiceTest(): Promise<void> {
 .side-appicon {
   width: 76px;
   height: 76px;
-  border-radius: 18px;
-  box-shadow: 0 10px 22px rgba(20, 24, 36, 0.18);
+  /* drop-shadow 跟随图标自身轮廓；box-shadow 会沿元素盒画一圈，
+     在图标透明边距外形成"多一层边框"的观感（2026-10-05 反馈）。 */
+  filter: drop-shadow(0 10px 18px rgba(20, 24, 36, 0.18));
 }
 .side-wave {
   display: inline-flex;
@@ -1939,8 +1940,7 @@ async function retryVoiceTest(): Promise<void> {
 .side-logo-done .side-appicon {
   width: 84px;
   height: 84px;
-  border-radius: 20px;
-  box-shadow: 0 10px 22px rgba(20, 24, 36, 0.18);
+  filter: drop-shadow(0 10px 18px rgba(20, 24, 36, 0.18));
 }
 .side-done-badge {
   position: absolute;
@@ -2026,6 +2026,7 @@ async function retryVoiceTest(): Promise<void> {
   line-height: 1.7;
 }
 .onboarding-muted {
+  margin: 12px 0;
   color: var(--text-secondary);
   font-size: 14px;
 }
@@ -2077,13 +2078,16 @@ async function retryVoiceTest(): Promise<void> {
   color: var(--text-secondary);
 }
 .onboarding-card.success {
+  margin: 16px 0;
   border-color: rgba(38, 113, 72, 0.35);
   background: var(--success-surface);
 }
-.onboarding-success {
+.onboarding-card .onboarding-success {
   display: flex;
   align-items: center;
   gap: 9px;
+  /* 提高一级优先级压过 `.onboarding-card p` 的 12px 上边距：
+     否则成功卡内文字上 29px、下 17px，上下不对称（2026-10-05 反馈）。 */
   margin: 0;
   color: var(--success-text, #1a7f4b);
   font-weight: 700;
@@ -2301,6 +2305,7 @@ async function retryVoiceTest(): Promise<void> {
   color: var(--accent-text);
 }
 .onboarding-tag {
+  margin-left: 8px;
   font-size: 12px;
   font-weight: 700;
   color: var(--accent-text);
@@ -2409,10 +2414,17 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-switch-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
+}
+/* 文字与开关：同一行内垂直居中，间距固定（原先 label 是行内布局，靠空格分隔）。 */
+.onboarding-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
 }
 .onboarding-switch-row .switch-state {
   font-size: 14px;
