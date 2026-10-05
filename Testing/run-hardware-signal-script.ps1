@@ -1,14 +1,16 @@
-﻿# 用"模拟硬件信号"驱动应用：在仿真构建上回放 hardware-simulation 仓库导出的
-# 信号脚本（按键边沿 + ATVV 语音帧），事件走生产解析链路，因此可以在没有物理
-# 遥控器的机器上覆盖 onboarding 向导、按键链路等场景。
+﻿# 用"模拟硬件信号"驱动应用：在仿真构建上回放信号脚本（按键边沿 + ATVV 语音帧），
+# 事件走生产解析链路，因此可以在没有物理遥控器的机器上覆盖 onboarding 向导、
+# 按键链路等场景。本仓库自带脚本、自带格式说明，**不依赖任何私有仓库**。
 #
 # 前置：
 #   1) 构建仿真可执行文件（一次即可）：
 #        cargo build -p sayall-windows-app --features runtime-simulation
-#      加 -Release 时用 `--release` 构建。
-#   2) 信号脚本由 hardware-simulation 仓库生成：
-#        hardware-sim export-app-script <profile.json> <scenario.json> --out <脚本.json>
-#      仓库内自带两个手写示例（Testing/hardware-scripts/）。
+#      加 -Release 时用 `--release` 构建。debug/release 的 cargo 产物都是 dev 模式，
+#      需要同时起前端 dev server（pnpm dev，端口 2430）。
+#   2) 信号脚本：直接用/改写 Testing/hardware-scripts/ 里的示例（格式见该目录
+#      README.md）。若手上有内部模拟器（GetSayAll/hardware-simulation，私有），
+#      也可以用 `hardware-sim export-app-script <profile> <scenario> --out <脚本>`
+#      生成同格式脚本——可选，不是依赖。
 #
 # 行为：
 #   - 用隔离状态目录启动应用（向导从第①步开始，不动用户既有状态）；
