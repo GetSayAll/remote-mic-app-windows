@@ -601,6 +601,7 @@ mod tests {
                     },
                 },
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();
@@ -648,6 +649,7 @@ mod tests {
                 double: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
 

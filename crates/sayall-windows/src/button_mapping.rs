@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -430,6 +430,75 @@ impl Drop for ButtonMappingRuntime {
 /// 「按住连续触发」一趟的日志聚合（按钮 → 触发方式、拍数、起始时刻）。
 type RepeatRuns = BTreeMap<RemoteButton, (ButtonTrigger, u64, Instant)>;
 
+/// OK 键「移动光标后按 OK 点击」的判定窗口：用遥控器移动过光标后的 5 秒内，
+/// 按 OK 直接点击光标位置（方案见 `docs/plan/2026-10-06-ok-context-click.md`）。
+const OK_CONTEXT_CLICK_WINDOW: Duration = Duration::from_secs(5);
+
+/// 上下文点击是否命中窗口（纯函数，便于按合成时间测试边界）。
+fn ok_context_click_window_hit(enabled: bool, last_move: Option<Instant>, now: Instant) -> bool {
+    enabled
+        && last_move.is_some_and(|at| now.saturating_duration_since(at) <= OK_CONTEXT_CLICK_WINDOW)
+}
+
+/// OK 按下沿的上下文点击判定与注入：命中窗口时注入一次左键单击并返回 `true`
+/// （调用方据此吞掉本次按压）；未命中或注入失败返回 `false`（走原本的手势路径，
+/// 注入失败时用户至少还能拿到原动作）。
+///
+/// 只对 OK 键生效；开关关闭时不留日志，避免每次按 OK 都刷一行。
+fn ok_context_click_applies(
+    edge: &ButtonEdge,
+    mappings: &Arc<RwLock<ButtonMappings>>,
+    last_remote_move_at: Option<Instant>,
+    now: Instant,
+    injector: &Arc<dyn MappingInjector>,
+) -> bool {
+    if !edge.is_pressed || edge.button != RemoteButton::Ok {
+        return false;
+    }
+    let (mappings_enabled, switch_on) = {
+        let mappings = read_lock(mappings);
+        (
+            mappings.enabled,
+            mappings.actions(RemoteButton::Ok).ok_context_click,
+        )
+    };
+    if !mappings_enabled || !switch_on {
+        return false;
+    }
+    let elapsed = last_remote_move_at.map(|at| now.saturating_duration_since(at));
+    if !ok_context_click_window_hit(true, last_remote_move_at, now) {
+        crate::ble::gatt_note(match elapsed {
+            Some(elapsed) => format!(
+                "map_ok_click action=skip reason=window_expired elapsed_ms={} window_ms={}",
+                elapsed.as_millis(),
+                OK_CONTEXT_CLICK_WINDOW.as_millis()
+            ),
+            None => "map_ok_click action=skip reason=no_recent_move".to_owned(),
+        });
+        return false;
+    }
+    // 门控未运行时不注入：原始键可能未被吞（同 map_skip_inject 的理由）。
+    if !key_gate::is_gate_thread_alive() {
+        crate::ble::gatt_note("map_ok_click action=skip reason=gate_not_alive".to_owned());
+        return false;
+    }
+    match injector.mouse_click(MouseClickKind::Left) {
+        Ok(()) => {
+            crate::ble::gatt_note(format!(
+                "map_ok_click action=click elapsed_ms={}",
+                elapsed.map(|value| value.as_millis()).unwrap_or(0)
+            ));
+            true
+        }
+        Err(error) => {
+            crate::ble::gatt_note(format!(
+                "map_ok_click action=skip reason=inject_failed error_domain=send_input error={error}"
+            ));
+            false
+        }
+    }
+}
+
 /// 记录一次连续触发拍：首拍落 start 日志，尾拍在结束日志里带出总拍数。
 fn note_repeat_beat(repeat_runs: &mut RepeatRuns, button: RemoteButton, trigger: ButtonTrigger) {
     if !repeat_runs.contains_key(&button) {
@@ -494,6 +563,8 @@ fn engine_worker(
     let mut native_pending: BTreeSet<RemoteButton> = BTreeSet::new();
     // 「按住连续触发」统计：起拍建条目，释放/复位时聚合落一行。
     let mut repeat_runs: RepeatRuns = BTreeMap::new();
+    // OK 键上下文点击：最近一次由遥控器注入成功的鼠标移动时刻（5 秒窗口）。
+    let mut last_remote_move_at: Option<Instant> = None;
 
     loop {
         let timeout = recognizer
@@ -517,6 +588,7 @@ fn engine_worker(
                             &gesture_callbacks,
                             &injector,
                             &mut native_pending,
+                            &mut last_remote_move_at,
                         ) {
                             reset_after_terminal_action(
                                 "lock_workstation",
@@ -572,6 +644,7 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut last_remote_move_at,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -591,6 +664,7 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut last_remote_move_at,
                 );
             }
             EngineMessage::GateEdge(edge) => {
@@ -614,6 +688,7 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut last_remote_move_at,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
@@ -644,6 +719,7 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut last_remote_move_at,
                 );
             }
             EngineMessage::MappingsChanged => {
@@ -688,6 +764,7 @@ fn handle_edges(
     usage: &Arc<UsageCounters>,
     native_pending: &mut BTreeSet<RemoteButton>,
     repeat_runs: &mut RepeatRuns,
+    last_remote_move_at: &mut Option<Instant>,
 ) {
     if edges.is_empty() {
         return;
@@ -734,7 +811,14 @@ fn handle_edges(
             ));
         }
         let fired = if edge.is_pressed {
-            recognizer.press(edge.button, now)
+            // OK 上下文点击：命中窗口时立即点击光标位置，并吞掉本次按压
+            // （单击/双击/长按都不执行）；注入失败则回落到正常路径。
+            if ok_context_click_applies(&edge, &mappings, *last_remote_move_at, now, injector) {
+                recognizer.swallow_press(edge.button);
+                Vec::new()
+            } else {
+                recognizer.press(edge.button, now)
+            }
         } else {
             recognizer.release(edge.button, now)
         };
@@ -751,6 +835,7 @@ fn handle_edges(
                 gesture_callbacks,
                 injector,
                 native_pending,
+                last_remote_move_at,
             ) {
                 reset_after_terminal_action(
                     "lock_workstation",
@@ -817,6 +902,7 @@ fn fire_gesture(
     gesture_callbacks: &Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: &Arc<dyn MappingInjector>,
     native_pending: &mut BTreeSet<RemoteButton>,
+    last_remote_move_at: &mut Option<Instant>,
 ) -> bool {
     let fired = FiredGesture { button, trigger };
     {
@@ -927,8 +1013,11 @@ fn fire_gesture(
             crate::ble::gatt_note(format!(
                 "map_fire button={button:?} trigger={trigger:?} action=mouse_move direction={direction:?} distance={distance}"
             ));
-            if let Err(error) = injector.mouse_move(direction, distance) {
-                lock_state(state).last_error = Some(format!("鼠标移动失败：{error}"));
+            // 只有注入成功才算"用户刚刚用遥控器移动过光标"：OK 上下文点击
+            // 的窗口据此刷新（失败不刷新，见 map_ok_click 的 skip 日志）。
+            match injector.mouse_move(direction, distance) {
+                Ok(()) => *last_remote_move_at = Some(Instant::now()),
+                Err(error) => lock_state(state).last_error = Some(format!("鼠标移动失败：{error}")),
             }
         }
         ButtonAction::Shortcut { chord } => {
@@ -1278,6 +1367,7 @@ mod tests {
                 double: single(KeyCode::Space),
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         // 电源→Win+L：锁屏会让真实 UP 延迟到解锁后，引擎须在成功请求锁屏后
@@ -1906,6 +1996,7 @@ mod tests {
                 },
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         runtime.set_mappings(mappings);
@@ -2179,6 +2270,7 @@ mod tests {
                 },
                 long: ButtonAction::Disabled,
                 hold_repeat: Some(ButtonTrigger::Single),
+                ok_context_click: false,
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -2209,5 +2301,162 @@ mod tests {
             .is_empty());
         finish_repeat_run(&mut runs, RemoteButton::Back, "release");
         assert!(runs.is_empty(), "释放后该趟聚合必须收尾");
+    }
+
+    #[test]
+    fn ok_context_click_window_boundaries() {
+        let t0 = Instant::now();
+        assert!(ok_context_click_window_hit(true, Some(t0), t0));
+        assert!(ok_context_click_window_hit(
+            true,
+            Some(t0),
+            t0 + OK_CONTEXT_CLICK_WINDOW
+        ));
+        assert!(
+            !ok_context_click_window_hit(
+                true,
+                Some(t0),
+                t0 + OK_CONTEXT_CLICK_WINDOW + Duration::from_millis(1)
+            ),
+            "超过 5 秒必须落空"
+        );
+        assert!(!ok_context_click_window_hit(false, Some(t0), t0));
+        assert!(!ok_context_click_window_hit(true, None, t0));
+    }
+
+    #[test]
+    fn ok_context_click_fires_after_a_remote_move_and_swallows_the_press() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let mut gate: Option<crate::key_gate::KeyGate> = Some(crate::key_gate::KeyGate::start());
+        let ensure_gate = |gate: &mut Option<crate::key_gate::KeyGate>| {
+            if !crate::key_gate::is_gate_thread_alive() {
+                *gate = None;
+                std::thread::sleep(Duration::from_millis(50));
+                *gate = Some(crate::key_gate::KeyGate::start());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+        );
+        let mut mappings = ButtonMappings::default();
+        // 上键单击 = 移动光标（移动注入成功会刷新 OK 点击窗口）。
+        mappings.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: ButtonAction::MouseMove {
+                    direction: MoveDirection::Right,
+                    distance: 40,
+                },
+                ..ButtonActions::default()
+            },
+        );
+        // OK：单击 = 回车（原动作）+ 开启上下文点击。
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Enter],
+                    },
+                },
+                ok_context_click: true,
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        let clicks = || injector.clicks.lock().unwrap().clone();
+        let taps = || injector.taps.lock().unwrap().len();
+
+        // 1) 遥控器移动光标：注入成功 → 窗口刷新。
+        ensure_gate(&mut gate);
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Up,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(
+                || !injector.moves.lock().unwrap().is_empty(),
+                Duration::from_millis(1000)
+            ),
+            "上键应注入一次鼠标移动"
+        );
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Up,
+                is_pressed: false,
+            }))
+            .unwrap();
+
+        // 2) 窗口内按 OK：注入左键单击；不注入原动作（回车）。
+        let taps_before = taps();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(|| !clicks().is_empty(), Duration::from_millis(1000)),
+            "窗口内按 OK 应注入一次点击"
+        );
+        assert_eq!(clicks(), vec![MouseClickKind::Left]);
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(taps(), taps_before, "上下文点击不得再执行 OK 的原动作");
+        assert_eq!(clicks().len(), 1, "一次按压只点一次");
+
+        // 3) 关闭开关后：按 OK 走原动作，不再点击。
+        let mut off = ButtonMappings::default();
+        off.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Enter],
+                    },
+                },
+                ok_context_click: false,
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(off);
+        std::thread::sleep(Duration::from_millis(50));
+        let taps_before_off = taps();
+        let clicks_before_off = clicks().len();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(|| taps() > taps_before_off, Duration::from_millis(1000)),
+            "开关关闭后按 OK 应执行原动作"
+        );
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(clicks().len(), clicks_before_off, "开关关闭后不得点击");
+
+        drop(runtime);
+        drop(gate);
     }
 }

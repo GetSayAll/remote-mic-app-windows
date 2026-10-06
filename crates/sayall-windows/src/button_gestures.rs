@@ -116,6 +116,8 @@ struct ButtonGestureState {
     repeat_deadline: Option<Instant>,
     /// 长按路径的连续触发计时器。
     long_repeat_deadline: Option<Instant>,
+    /// 上下文点击吞掉本次按压：忽略到释放为止，不触发任何手势。
+    swallowing: bool,
 }
 
 /// 手势识别器：每键独立状态机。所有方法都不会 panic，未配置的按键被忽略。
@@ -152,6 +154,10 @@ impl GestureRecognizer {
         let Some((config, state)) = self.buttons.get_mut(&button) else {
             return Vec::new();
         };
+        if state.swallowing {
+            // 上下文点击已接管本次按压（见 [`Self::swallow_press`]）：忽略到释放为止。
+            return Vec::new();
+        }
         if state.waiting_for_second {
             // 第二击：取消双击窗口，标记第二击并重启长按计时。
             state.waiting_for_second = false;
@@ -183,6 +189,11 @@ impl GestureRecognizer {
         let Some((config, state)) = self.buttons.get_mut(&button) else {
             return Vec::new();
         };
+        if state.swallowing {
+            // 上下文点击那一趟的释放：静默收尾并解除吞掉标记。
+            *state = ButtonGestureState::default();
+            return Vec::new();
+        }
         state.pressed = false;
         state.long_deadline = None;
         state.repeat_deadline = None;
@@ -215,6 +226,15 @@ impl GestureRecognizer {
         }
         // 手势路径且未配置双击：立即触发单击。
         vec![ButtonTrigger::Single]
+    }
+
+    /// 上下文点击吞掉本次按压：清空该键的挂起状态（双击窗、长按、连发计时），
+    /// 随后的释放沿静默收尾、不触发任何手势。只影响该键，其他按键不受影响。
+    pub fn swallow_press(&mut self, button: RemoteButton) {
+        if let Some((_, state)) = self.buttons.get_mut(&button) {
+            *state = ButtonGestureState::default();
+            state.swallowing = true;
+        }
     }
 
     /// 处理到期定时器（双击窗口超时/按住确认/长按/连续触发），返回触发的手势。
@@ -370,6 +390,7 @@ mod tests {
                 double: action(double),
                 long: action(long),
                 hold_repeat,
+                ok_context_click: false,
             },
         );
         mappings
@@ -428,6 +449,7 @@ mod tests {
                 double: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -453,6 +475,7 @@ mod tests {
                 double: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -491,6 +514,7 @@ mod tests {
                 },
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -1016,6 +1040,7 @@ mod tests {
                 },
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -1096,5 +1121,79 @@ mod tests {
         let (fired, ticks) = recognizer.advance_with_ticks(beat);
         assert_eq!(fired, vec![(RemoteButton::Back, ButtonTrigger::Long)]);
         assert_eq!(ticks, vec![(RemoteButton::Back, ButtonTrigger::Long)]);
+    }
+
+    #[test]
+    fn swallow_press_clears_pending_state_and_stays_silent() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with(
+            RemoteButton::Ok,
+            Some(KeyCode::Enter),
+            Some(KeyCode::Space),
+            Some(KeyCode::Escape),
+        ));
+
+        // 先制造一个挂起的双击窗：轻点一次、松开。
+        recognizer.press(RemoteButton::Ok, t0);
+        assert!(recognizer
+            .release(RemoteButton::Ok, t0 + Duration::from_millis(60))
+            .is_empty());
+
+        // 上下文点击吞掉下一次按压：挂起状态被清空，且不产生迟到手势。
+        recognizer.swallow_press(RemoteButton::Ok);
+        assert!(recognizer
+            .press(RemoteButton::Ok, t0 + Duration::from_millis(200))
+            .is_empty());
+        assert!(recognizer
+            .release(RemoteButton::Ok, t0 + Duration::from_millis(260))
+            .is_empty());
+        assert!(
+            recognizer.advance(t0 + Duration::from_secs(1)).is_empty(),
+            "被吞掉的按压不得留下迟到的单击/双击"
+        );
+
+        // 吞掉标记随释放解除：下一次正常按压回到既有语义（双击窗后补单击）。
+        let t1 = t0 + Duration::from_secs(2);
+        recognizer.press(RemoteButton::Ok, t1);
+        assert!(recognizer
+            .release(RemoteButton::Ok, t1 + Duration::from_millis(50))
+            .is_empty());
+        assert_eq!(
+            recognizer.advance(t1 + Duration::from_millis(50) + DOUBLE_CLICK_WINDOW),
+            vec![(RemoteButton::Ok, ButtonTrigger::Single)]
+        );
+    }
+
+    #[test]
+    fn swallow_press_suppresses_long_press_until_release() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with(
+            RemoteButton::Ok,
+            Some(KeyCode::Enter),
+            None,
+            Some(KeyCode::Escape),
+        ));
+
+        recognizer.swallow_press(RemoteButton::Ok);
+        assert!(recognizer.press(RemoteButton::Ok, t0).is_empty());
+        assert!(
+            recognizer
+                .advance(t0 + LONG_PRESS_THRESHOLD + Duration::from_millis(10))
+                .is_empty(),
+            "被吞掉的按压不得触发长按"
+        );
+        assert!(recognizer
+            .release(RemoteButton::Ok, t0 + Duration::from_millis(800))
+            .is_empty());
+
+        // 释放后该键可正常使用（长按阈值仍是唯一条件）。
+        let t1 = t0 + Duration::from_secs(2);
+        recognizer.press(RemoteButton::Ok, t1);
+        assert_eq!(
+            recognizer.advance(t1 + LONG_PRESS_THRESHOLD),
+            vec![(RemoteButton::Ok, ButtonTrigger::Long)]
+        );
     }
 }

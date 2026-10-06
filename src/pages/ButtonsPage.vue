@@ -727,6 +727,38 @@ const repeatLongTitle = computed(
 );
 
 /**
+ * OK 键「移动光标后按 OK 点击」（2026-10-06 定稿，方案见
+ * `docs/plan/2026-10-06-ok-context-click.md`、产品逻辑见
+ * `docs/product/button-behavior.md` §2）：按键级开关、默认关、只对 OK 键提供，
+ * 三个槽位页都在同一位置显示（与当前编辑哪个槽位无关）。
+ */
+const okClickVisible = computed(
+  () => editingTarget.value?.button === "ok" && editingTarget.value.trigger !== "double",
+);
+
+const okClickChecked = computed(() => actionsOf("ok").okContextClick === true);
+
+function toggleOkContextClick(): void {
+  const target = editingTarget.value;
+  if (!target || target.button !== "ok") return;
+  const actions = { ...actionsOf("ok") };
+  if (actions.okContextClick) {
+    delete actions.okContextClick;
+  } else {
+    actions.okContextClick = true;
+  }
+  mappings.value = {
+    ...mappings.value,
+    actions: { ...mappings.value.actions, [target.button]: actions },
+  };
+  void persist(
+    actions.okContextClick
+      ? "已开启：用遥控器移动光标后，按 OK 会点击光标位置"
+      : "已关闭：移动光标后按 OK 点击",
+  );
+}
+
+/**
  * 动作变更后的「按住时连续执行」一致性收口：已选目标不再可用时自动回到
  * 「关闭」并返回提示（不偷改选择到另一个目标，保留用户的显式选择）。
  * 提示经 `persist(message)` 展示，避免被 persist 的清理逻辑覆盖。
@@ -2128,6 +2160,19 @@ onUnmounted(() => {
         </div>
         <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
       </div>
+      <label v-if="okClickVisible" class="toggle-row ok-click-toggle" title="刚用遥控器移动过光标时，按 OK 会点击光标位置">
+        <span>移动光标后按 OK 点击</span>
+        <input
+          class="toggle-input"
+          type="checkbox"
+          :checked="okClickChecked"
+          :disabled="busy"
+          @change="toggleOkContextClick"
+        />
+      </label>
+      <p v-if="okClickVisible" class="muted ok-click-hint">
+        刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。
+      </p>
       <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
         {{ doubleConfiguredOnEditingButton ? "配置了双击：单击会稍等片刻（约 0.3 秒）以区分双击。" : "单击在按下瞬间执行。" }}
       </p>
@@ -2189,6 +2234,9 @@ onUnmounted(() => {
 .repeat-label { font-size: 13px; }
 .repeat-options { display: flex; flex-wrap: wrap; gap: 8px; }
 .repeat-hint { flex-basis: 100%; margin: 0; font-size: 12px; }
+/* OK 键「移动光标后按 OK 点击」：按键级开关 + 常驻说明句（2026-10-06）。 */
+.ok-click-toggle { margin-top: 12px; }
+.ok-click-hint { margin: 6px 0 0; font-size: 12px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }

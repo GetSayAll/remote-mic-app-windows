@@ -547,6 +547,17 @@ pub struct ButtonActions {
     /// 每键至多一个槽位：互斥由界面与 [`ButtonMappings::normalized`] 强制。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_repeat: Option<ButtonTrigger>,
+    /// OK 键：用遥控器移动过光标后的 5 秒内，按 OK 直接点击光标位置
+    /// （本次按压不触发单击/双击/长按）。只对 OK 键生效，默认关。
+    ///
+    /// 产品逻辑见 `docs/product/button-behavior.md` §2；方案见
+    /// `docs/plan/2026-10-06-ok-context-click.md`。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ok_context_click: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for ButtonActions {
@@ -556,6 +567,7 @@ impl Default for ButtonActions {
             double: ButtonAction::Disabled,
             long: ButtonAction::Disabled,
             hold_repeat: None,
+            ok_context_click: false,
         }
     }
 }
@@ -595,6 +607,8 @@ struct ButtonActionsCells {
     long: ButtonAction,
     #[serde(default)]
     hold_repeat: Option<ButtonTrigger>,
+    #[serde(default)]
+    ok_context_click: bool,
 }
 
 impl From<ButtonActionsWire> for ButtonActions {
@@ -605,6 +619,7 @@ impl From<ButtonActionsWire> for ButtonActions {
                 double: cells.double,
                 long: cells.long,
                 hold_repeat: cells.hold_repeat,
+                ok_context_click: cells.ok_context_click,
             },
             ButtonActionsWire::Legacy(action) => Self {
                 single: action,
@@ -1464,6 +1479,7 @@ mod tests {
                     chord: chord(&[KeyCode::Control, KeyCode::C]),
                 },
                 hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();

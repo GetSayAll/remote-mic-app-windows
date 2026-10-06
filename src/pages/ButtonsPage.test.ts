@@ -871,6 +871,59 @@ describe("buttons mapping page", () => {
     });
   });
 
+  it("「移动光标后按 OK 点击」：只出现在 OK 键，开启/关闭写入 okContextClick", async () => {
+    const wrapper = await mountPage();
+    const findCard = (label: string) =>
+      wrapper.findAll(".mapping-card").find((card) => card.text().includes(label))!;
+    const toggle = () => wrapper.find(".mapping-editor .ok-click-toggle input");
+
+    // 只对 OK 键显示。
+    await findCard("上").findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
+
+    // 说明句写明 5 秒窗口与“原动作都不执行”。
+    await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).toContain("刚用遥控器移动过光标（5 秒内）");
+    expect(wrapper.find(".mapping-editor").text()).toContain("单击、双击、长按都不会执行");
+    expect((toggle().element as HTMLInputElement).disabled).toBe(false);
+
+    await toggle().setValue(true);
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { okContextClick?: boolean }>;
+    };
+    expect(saved.actions.ok!.okContextClick).toBe(true);
+
+    // 长按页显示同一开关（按键级）；双击页不显示。
+    await findCard("确定").findAll(".mapping-cell")[2]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
+    await findCard("确定").findAll(".mapping-cell")[1]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
+
+    // 关闭：先等上一轮保存结束（busy 释放），再清空字段。
+    await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    await vi.waitFor(() => {
+      if ((toggle().element as HTMLInputElement).disabled) throw new Error("等待保存结束");
+    });
+    expect((toggle().element as HTMLInputElement).checked).toBe(true);
+    await toggle().setValue(false);
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length < 2) throw new Error("关闭未保存");
+    });
+    const off = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+      actions: Record<string, { okContextClick?: boolean }>;
+    };
+    expect(off.actions.ok!.okContextClick).toBeUndefined();
+    await vi.waitFor(() => {
+      if (!wrapper.find(".mapping-status").text().includes("已关闭")) {
+        throw new Error("缺少关闭提示");
+      }
+    });
+  });
+
   it("配置「打开应用」时聚焦方式面板暂时隐藏（2026-10-03 下线的回归守卫）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));

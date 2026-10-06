@@ -232,6 +232,11 @@ export interface ButtonActions {
    * 每键至多一个槽位，互斥由界面与 Rust `normalized()` 强制。
    */
   holdRepeat?: "single" | "long";
+  /**
+   * OK 键：用遥控器移动过光标后的 5 秒内，按 OK 直接点击光标位置
+   * （缺省 = 关闭；只对 OK 键生效）。
+   */
+  okContextClick?: boolean;
 }
 
 export interface ButtonMappings {

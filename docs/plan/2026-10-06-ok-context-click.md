@@ -2,7 +2,7 @@
 
 - 日期：2026-10-06
 - 需求人：Andy（2026-10-06 提出，同日定下三个决定）
-- 状态：**定稿待实现**（含 §4 文案，待 Andy 复核后开发）
+- 状态：**已实现（自动化 passed）**，真机验收待执行（见 `Testing/WindowsOkContextClick.md`）
 - 前提说明：**不查 Mac 原版参考**——Mac 侧没有此功能（Andy 明确）；本功能是 Windows 侧的上下文增强
 - 关联：沿用现有鼠标动作（`MouseClick`/`MouseMove` 注入，见 `send_input.rs`）与按键编辑页
 - 产品逻辑整理见 `docs/product/button-behavior.md`（面向学习参考，不含平台细节）
@@ -73,8 +73,8 @@
   注入左键单击、吞掉本次按压、记结构化日志（命中与跳过都记，便于一次日志拉取定位）。
 - `crates/sayall-windows/src/button_gestures.rs`：新增"本次按压吞掉"入口（清空该键挂起状态并
   抑制到释放），不影响其他按键。
-- 前端：`src/lib/bridge.ts` + `src/pages/ButtonsPage.vue`（OK 编辑页三个槽位页同位置显示、
-  恒可用，按键级）+ 测试；文案按 §4。
+- 前端：`src/lib/bridge.ts` + `src/pages/ButtonsPage.vue`（OK 键、单击/长按页底部显示、恒可用；
+  双击页不显示，与「按住时连续执行」一致）+ 测试；文案按 §4。
 - 文档：`docs/product-copy.md` 决定索引、用户手册 §7 一句、`TODO.md`、Testing 手册新增用例组。
 
 ## 6. 验收（真机，RC001 与 RC003 分别执行）

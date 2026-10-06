@@ -148,3 +148,10 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   “要连续执行单击动作，请先清除长按动作”；页面说明句只陈述本页事实（单击页/长按页删去
   “开启后会连续执行”），行为说明移入选项悬停；自动关闭提示同样不指向灰选项。
   口径见方案文档 §3/§4/§5。
+- 2026-10-06：OK 键「移动光标后按 OK 点击」（按键级开关、默认关）：开启后，用遥控器移动过
+  光标后的 5 秒内，按 OK 直接点击光标位置，本次按压的单击/双击/长按都不执行；窗口外行为不变。
+  开关名“移动光标后按 OK 点击”，悬停“刚用遥控器移动过光标时，按 OK 会点击光标位置”，
+  常驻说明句见方案表；不为每次点击加提示（点击是高频动作）。产品逻辑整理见
+  [docs/product/button-behavior.md](product/button-behavior.md) §2，方案见
+  [docs/plan/2026-10-06-ok-context-click.md](plan/2026-10-06-ok-context-click.md)。
+  验收见 [Testing/WindowsOkContextClick.md](../Testing/WindowsOkContextClick.md)。
