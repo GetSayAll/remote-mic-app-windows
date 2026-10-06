@@ -46,12 +46,23 @@ pub struct TaskStatus {
 /// ButtonsPage / ConnectionPage 的「每次开启都先弹确认」测试。
 const AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE: bool = true;
 
-/// 定位助手 exe。三种布局按序尝试：
+/// 定位助手 exe。按序尝试：
 /// 1. 环境变量覆盖（验收 / 非标准安装位置）；
-/// 2. 与主程序同目录（产品化布局：安装器把两者放在一起）；
-/// 3. 开发布局：`target/debug/sayall-windows-app.exe` 向上找到仓库根，
-///    再进 `hardware/RC003/helper/target/release/`。
+/// 2. 与主程序同目录（产品化布局：安装器把两者放在一起）——文件名按**本机原生架构**取
+///    （x64 = `sayall-helper.exe`，arm64 = `sayall-helper-arm64.exe`，见 ADR 0003）；
+/// 3. 开发布局：`target/debug/sayall-windows-app.exe` 向上找到仓库根，再进
+///    `hardware/RC003/helper/target/[<triple>/]release/sayall-helper.exe`
+///    （cargo 产物名恒为包名，arm64 只多一层 triple 目录）。
+///
+/// 架构由 [`sayall_windows::os_arch::native_arch`] 判定，**不**用编译期常量或
+/// `PROCESSOR_ARCHITECTURE`——x64 主程序在 ARM64 上运行时那两者都报 x64（Issue #206）。
 pub fn locate_helper_exe() -> Option<std::path::PathBuf> {
+    locate_helper_exe_for(sayall_windows::os_arch::native_arch())
+}
+
+pub fn locate_helper_exe_for(
+    arch: sayall_windows::os_arch::NativeArch,
+) -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("SAYALL_RC003_HELPER") {
         let path = std::path::PathBuf::from(path);
         if path.is_file() {
@@ -60,7 +71,7 @@ pub fn locate_helper_exe() -> Option<std::path::PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     if let Some(dir) = exe.parent() {
-        let candidate = dir.join("sayall-helper.exe");
+        let candidate = dir.join(arch.helper_file_name());
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -68,19 +79,76 @@ pub fn locate_helper_exe() -> Option<std::path::PathBuf> {
         let mut dir = dir.to_path_buf();
         for _ in 0..4 {
             dir = dir.parent()?.to_path_buf();
-            let candidate = dir
+            let mut candidate = dir
                 .join("hardware")
                 .join("RC003")
                 .join("helper")
-                .join("target")
-                .join("release")
-                .join("sayall-helper.exe");
+                .join("target");
+            if let Some(triple) = dev_target_triple(arch) {
+                candidate = candidate.join(triple);
+            }
+            let candidate = candidate.join("release").join("sayall-helper.exe");
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+/// 该架构的 cargo `--target` 目录名。x64 用默认 target 目录（无 triple），
+/// arm64 必须显式 `--target aarch64-pc-windows-msvc`（交叉编译），因此多一层。
+fn dev_target_triple(arch: sayall_windows::os_arch::NativeArch) -> Option<&'static str> {
+    match arch {
+        sayall_windows::os_arch::NativeArch::Arm64 => Some("aarch64-pc-windows-msvc"),
+        _ => None,
+    }
+}
+
+/// 增强捕获在本机的可用性（IPC `get_capture_support` 的返回体）。
+///
+/// 为什么要有它：ARM64 上"打开开关 → 永远停在正在启动"曾经没有任何解释（Issue #206），
+/// 用户与排查者都只能看到 25 秒后的一条失败日志。这里把结论前移：本机架构有没有对应的
+/// 助手 / Gadget，界面据此置灰并说明原因。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSupport {
+    /// 本机**原生**架构：`x64` / `arm64` / `unknown`（探测失败或不受支持的原生架构）。
+    pub native_arch: String,
+    /// 本架构应当存在的助手文件名（诊断用；界面不显示）。
+    pub helper_expected: String,
+    pub available: bool,
+    /// `arch_unsupported` = 本机原生架构不属于 x64 / arm64；
+    /// `helper_missing` = 架构对得上，但安装包里没有对应的助手（载荷缺失）。
+    pub reason: Option<String>,
+}
+
+/// 可用性判定（纯函数，便于单测覆盖两种不可用原因）。
+pub(crate) fn capture_support_decision(
+    arch: sayall_windows::os_arch::NativeArch,
+    helper_found: bool,
+) -> (bool, Option<&'static str>) {
+    if arch.is_explicitly_unsupported() {
+        return (false, Some("arch_unsupported"));
+    }
+    if !helper_found {
+        return (false, Some("helper_missing"));
+    }
+    (true, None)
+}
+
+/// 本机增强捕获的可用性。探测失败（`unknown`）时沿用 x64 路径与既有行为：
+/// 一次探测失败不足以把功能判死。
+pub fn capture_support() -> CaptureSupport {
+    let arch = sayall_windows::os_arch::native_arch();
+    let helper_found = locate_helper_exe_for(arch).is_some();
+    let (available, reason) = capture_support_decision(arch, helper_found);
+    CaptureSupport {
+        native_arch: arch.as_str().to_string(),
+        helper_expected: arch.helper_file_name().to_string(),
+        available,
+        reason: reason.map(|value| value.to_string()),
+    }
 }
 
 /// 任务是否已注册（= 用户已授权）。只看退出码，不解析 GBK 输出。
@@ -200,11 +268,30 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
 /// 开关打开：**每次都重新授权**（弹一次 UAC 重装任务），然后触发。
 /// 失败原样返回（调用方保持开关原状态）。
 pub fn enable_capture() -> Result<(), String> {
+    // 本机没有对应架构的载荷时直接拒绝（界面已按 `get_capture_support` 置灰，这里是兜底）：
+    // 放它走下去只会白弹一次系统授权窗口，然后必然连不上（Issue #206）。
+    let support = capture_support();
+    if !support.available {
+        sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed \
+             reason={} native_arch={} helper_expected={} retryable=false",
+            support.reason.as_deref().unwrap_or("unavailable"),
+            support.native_arch,
+            support.helper_expected
+        ));
+        return Err(match support.reason.as_deref() {
+            Some("arch_unsupported") => "这台电脑暂不支持全按键支持。".to_string(),
+            _ => "安装包缺少本机需要的组件，全按键支持暂不可用；请重新安装本版本。".to_string(),
+        });
+    }
     // 清掉可能残留的停用信号：否则"关开关（没助手在跑）→ 立刻再开"时，
     // 新助手一启动就见到信号当场退出，开关开着却永远连不上。
     let _ = std::fs::remove_file(stop_signal_path());
     let helper = locate_helper_exe().ok_or_else(|| {
-        "找不到 sayall-helper.exe（检查安装布局，或设置 SAYALL_RC003_HELPER 指向它）".to_string()
+        format!(
+            "找不到 {}（检查安装布局，或设置 SAYALL_RC003_HELPER 指向它）",
+            support.helper_expected
+        )
     })?;
     // 2026-10-03 Andy 定稿：每次开启都重新授权——无条件重装任务，于是每次
     // 开启都会走一次 UAC（用户点了「是」才算这次授权）。为什么不是"关闭时
@@ -425,5 +512,77 @@ mod tests {
         // ① 前端弹窗（EnhancedCaptureConfirmDialog）文案与
         // ② ButtonsPage / ConnectionPage 的「每次开启都先弹确认」测试。
         assert!(AUTHORIZATION_REQUIRED_ON_EVERY_ENABLE);
+    }
+
+    #[test]
+    fn capture_support_reasons_are_stable_strings() {
+        use sayall_windows::os_arch::NativeArch;
+        // 不受支持的原生架构（如 32 位 ARM）：无论助手在不在，都判不可用且原因固定
+        assert_eq!(
+            capture_support_decision(NativeArch::Other, true),
+            (false, Some("arch_unsupported"))
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::Other, false),
+            (false, Some("arch_unsupported"))
+        );
+        // 架构对得上但载荷缺失：只有这一种情况算 helper_missing
+        assert_eq!(
+            capture_support_decision(NativeArch::X64, false),
+            (false, Some("helper_missing"))
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::Arm64, false),
+            (false, Some("helper_missing"))
+        );
+        // 正常与"探测失败"都必须可用：探测失败不改既有行为
+        assert_eq!(
+            capture_support_decision(NativeArch::X64, true),
+            (true, None)
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::Arm64, true),
+            (true, None)
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::Unknown, true),
+            (true, None)
+        );
+        // 这两条字符串是前端契约（`reason` 字段），改名即破坏界面判据
+        assert_eq!(
+            capture_support_decision(NativeArch::Other, false).1,
+            Some("arch_unsupported")
+        );
+    }
+
+    #[test]
+    fn helper_file_name_follows_the_native_arch() {
+        use sayall_windows::os_arch::NativeArch;
+        // 安装目录里的文件名按架构分（ADR 0003）；开发布局里 cargo 产物名不变，
+        // 只多一层 triple 目录。
+        assert_eq!(NativeArch::X64.helper_file_name(), "sayall-helper.exe");
+        assert_eq!(
+            NativeArch::Arm64.helper_file_name(),
+            "sayall-helper-arm64.exe"
+        );
+        assert_eq!(
+            dev_target_triple(NativeArch::Arm64),
+            Some("aarch64-pc-windows-msvc")
+        );
+        assert_eq!(dev_target_triple(NativeArch::X64), None);
+        assert_eq!(dev_target_triple(NativeArch::Unknown), None);
+    }
+
+    #[test]
+    fn capture_support_reports_a_consistent_shape() {
+        // 本机是 x64 且仓库里就有助手产物（开发布局）——这依赖环境，故只断言形状不变量：
+        // 字段命名是前端契约，available 与 reason 必须自洽。
+        let support = capture_support();
+        assert!(matches!(
+            support.native_arch.as_str(),
+            "x64" | "arm64" | "unknown"
+        ));
+        assert!(support.helper_expected.ends_with(".exe"));
+        assert_eq!(support.available, support.reason.is_none());
     }
 }

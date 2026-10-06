@@ -77,6 +77,8 @@ pub mod key_gate;
 mod key_suppressor;
 #[cfg(windows)]
 mod lock_open_with_guard;
+/// 本机的原生系统架构（x64 / arm64），与"本进程的仿真架构"区分开。
+pub mod os_arch;
 #[cfg(windows)]
 mod power;
 pub mod raw_input;
