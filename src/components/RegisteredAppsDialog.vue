@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { scanRegisteredApps, type CustomAppPick } from "../lib/bridge";
-const props = defineProps<{ knownApps: CustomAppPick[]; saving: boolean; saveError: string | null }>();
-const emit = defineEmits<{ close: []; add: [apps: CustomAppPick[]] }>();
+import { scanRegisteredApps, type AppLibraryEntry } from "../lib/bridge";
+const props = defineProps<{ knownApps: AppLibraryEntry[]; saving: boolean; saveError: string | null }>();
+const emit = defineEmits<{ close: []; add: [apps: AppLibraryEntry[]] }>();
 const dialog = ref<HTMLDialogElement | null>(null);
-const apps = ref<CustomAppPick[]>([]);
+const apps = ref<AppLibraryEntry[]>([]);
 const selected = ref(new Set<string>());
 const query = ref("");
 const scanning = ref(false);

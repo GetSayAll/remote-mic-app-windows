@@ -2,6 +2,30 @@
 
 日期：2026-09-16
 
+## 2026-10-05 上游移植的当前契约与隔离验证
+
+以下为当前代码的增量结论；后文 2026-09-16 的模板、预算与现场结果保留为历史记录，不能替代本次实现的验收。
+
+- 自持 NSIS 模板及钩子先请求应用正常退出；无监听、超时或清理未确认时中止，不强杀应用或设备宿主。安装写入前独立核对 Helper 退出及与停止请求匹配的持久清理回执，进程消失不能单独证明资源已释放。
+- 交互安装可选择直接覆盖或卸载后重装；后者仅执行当前产品卸载器，保留配置，核对旧程序文件确已移除后继续安装。静默与被动安装默认覆盖。清理脚本在 NSIS 编译时嵌入，无需另加 Tauri bundle 资源。
+- 应用内更新通过插件 `download` 下载并验签，完整退出清理得到确认后才调用 `install`。清理失败或工作线程失败不会启动安装器，提示“更新准备未完成，请通过系统托盘退出无线麦并重新打开后再试。”；保留已进入停止状态的边界，不宣称同进程重试可恢复。插件默认的 Tauri 退出清理保留。
+- 普通退出可以在未确认捕获清理时保留回执并继续关闭本地资源；替换安装必须拒绝未确认的清理。再次开启捕获前必须重试实际残留清理，不能伪造成功回执。
+
+| 验证入口 | 本次结果 | 可证明的范围 |
+| --- | --- | --- |
+| `node --test hardware/RC003/helper/agent/agent_logic_test.mjs` | passed，80/80 | 停止实例匹配、真实释放回执、持键取消及合成关闭 ACK；保留上游延迟单位表达式 |
+| `cargo test --manifest-path hardware/RC003/helper/Cargo.toml --locked` | passed，51；3 个夹具入口 ignored | 自持子进程身份、停止/恢复协议；未附加真实设备宿主 |
+| Helper `cargo check` / `cargo build --release --locked` | passed | 独立 Helper 编译，不能证明实际注入或释放 |
+| `scripts/test-windows-capture-cleanup.ps1` | passed，63 项断言 | 模拟进程、任务与回执下的启停、重复调用和失败恢复 |
+| `scripts/test-windows-retired-files.ps1` | passed，8 项断言 | 退役文件选择与路径约束，未运行 `-RealRecycle` |
+| `node --test scripts/test-windows-overlay-install.cjs` | passed，4/4 | 模板与钩子的静态契约 |
+| `node --test scripts/test-windows-overlay-compile.cjs` | passed，1/1 | 实际生产模板用替身 payload 经 NSIS 编译；产出的安装器未执行 |
+| `scripts/test-windows-installer-write-log.ps1` | passed，2 组夹具 | 文件被占用时拒绝替换、释放后替换；日志失败不改写原错误与寄存器 |
+| `scripts/test-windows-reinstall-flow.ps1` | passed，6/6 | 独立 NSIS 文本夹具的覆盖、重装、拒绝、非法路径、子卸载失败及新父进程路径 |
+| 更新安装闸门的隔离 Rust 单元测试 | passed，3/3；先观察清理失败用例为 failed | 清理未确认不调用安装、确认后只调用一次、安装错误保留；不启动真实更新器 |
+
+本次真实安装、应用运行中升级/卸载、配置保留、Explorer 普通权限重启、RC001/RC003 冷态首用与活动语音期间升级均为 **deferred**。尚未执行完整生产安装器的运行时验收，不能把上述夹具结果扩大为机器安装或硬件通过。
+
 ## 验证目标
 
 确认"应用正在运行"时执行安装或卸载**不会强杀应用**，而是：

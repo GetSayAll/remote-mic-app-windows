@@ -69,6 +69,18 @@
   --pressed-ring: rgba(239, 148, 32, 0.55);
 }
 
+:root.scene-overlay-document,
+:root.scene-overlay-document body,
+:root.scene-overlay-document #app {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
 html[data-theme="dark"] {
   color-scheme: dark;
   --accent: #8f92ff;
@@ -171,7 +183,7 @@ body {
 
 /* 侧栏对齐 macOS SettingsView：宽 108px、图标 21 semibold、文字 13 semibold、
    选中 = 强调色 + 10% 背景（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
-.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); min-height: 100vh; }
+.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); height: 100dvh; }
 .sidebar {
   position: sticky;
   top: 0;
@@ -213,6 +225,20 @@ nav { display: grid; gap: 4px; }
    窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
 .content { min-width: 0; padding: 22px 35.5px 26px 32px; overflow: auto; scrollbar-width: none; }
 .content::-webkit-scrollbar { display: none; }
+/* 普通页面只在内容区滚动，始终保留原生滚动条槽，折叠不改变卡片宽度。 */
+.content { --content-inline-padding: 32px; min-height: 0; }
+.content.content-buttons {
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  scrollbar-gutter: auto;
+  padding-inline: 0;
+  padding-bottom: 0;
+}
+.content-buttons > .error-banner,
+.content-buttons > .update-banner { flex-shrink: 0; margin-inline: var(--content-inline-padding); }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); gap: 14px; align-items: start; }
@@ -221,7 +247,16 @@ nav { display: grid; gap: 4px; }
 .card p { line-height: 1.5; }
 .muted { color: var(--muted); }
 .card-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.collapsible-card > summary { padding: 9px 2px; line-height: 24px; cursor: pointer; border-radius: 4px; }
+.collapsible-card > summary::marker { color: var(--muted); }
+.collapsible-card > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.collapsible-card > summary h2 { display: inline; margin: 0; }
+.collapsible-card > summary .section-count { margin-left: 10px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.collapsible-card > .collapsible-body { margin-top: 8px; }
+.collapsible-body > p:first-child { margin-top: 0; }
 .button-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.capture-input-settings, .capture-input-settings .button-row { min-width: 0; max-width: 100%; }
+.capture-input-settings select { box-sizing: border-box; min-width: 0; width: 100%; max-width: 100%; }
 .error-text { margin: 10px 0 0; color: var(--error-text); font-size: 13.5px; }
 .primary-button, .secondary-button, .device-list button {
   min-height: 30px;
@@ -379,6 +414,10 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 /* ---- 按键映射页（Mac RemoteMappingCanvas 对标） ---- */
 /* 头部对齐 Mac mappingPage：标题 + 启用开关居左同行，遥控器状态最右。 */
 .mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.mapping-section-tabs { display: flex; gap: 6px; margin: 0 0 14px; padding: 4px; width: fit-content; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
+.mapping-section-tab { min-height: 32px; padding: 5px 13px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; }
+.mapping-section-tab:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mapping-section-tab.active { background: var(--accent-surface); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent-border); }
 .buttons-page .page-header h1 { font-size: 24px; margin: 0; }
 .mapping-header-controls { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
 /* 按键页副标题（2026-10-04）：一句话说明这页怎么用。 */
@@ -398,15 +437,15 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .toggle-input:checked { background: var(--accent); }
 .toggle-input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--toggle-thumb); box-shadow: 0 1px 3px var(--toggle-shadow); transition: left 0.15s; }
 .toggle-input:checked::after { left: 16px; }
-/* 画布对齐 Mac RemoteMappingLayout：高度 570、宽度流式（占满容器，
+/* 画布对齐 Mac RemoteMappingLayout：高度 640、宽度流式（占满容器，
    卡宽 = clamp((容器宽-260)/2, 270, 300)）；容器不足最小画布 800px 时
    （小于最小窗口 980 的恢复态窗口）按视口连续缩放兜底，左边原点。 */
 .mapping-canvas {
   position: relative;
   width: 100%;
   min-width: 800px;
-  height: 570px;
-  margin-bottom: calc(-570px * (1 - var(--map-scale)));
+  height: 640px;
+  margin-bottom: calc(-640px * (1 - var(--map-scale)));
   flex: 0 0 auto;
   --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 640px);
   transform: scale(var(--map-scale));
@@ -420,14 +459,15 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-connections polygon.selected { fill: var(--accent); }
 .mapping-connections polygon.active { fill: var(--pressed); }
 /* 遥控器图无底板（PNG 自带透明背景）；连线画在图之上（z-index 高于照片）。 */
-.remote-photo { position: absolute; z-index: 1; width: 202px; height: 410px; margin: 0; border-radius: 14px; overflow: hidden; top: 80px; }
+.remote-photo { position: absolute; z-index: 1; width: 202px; height: 410px; margin: 0; border-radius: 14px; overflow: hidden; }
 .remote-photo img { width: 100%; height: 100%; object-fit: cover; user-select: none; }
 /* 锚点橙点对齐 Mac：8px 纯圆点（无光环）。 */
 .anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; transition: opacity 0.06s; }
 .anchor-dot.visible { opacity: 1; }
-.mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease; }
+.mapping-card { position: absolute; height: var(--mapping-card-height); padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease; }
 .mapping-card.left { left: 0; }
 .mapping-card.right { right: 0; }
+.mapping-card.center { left: 50%; transform: translateX(-50%); }
 .mapping-card:hover { background: var(--surface-hover); border-color: var(--accent-border); box-shadow: 0 3px 12px var(--shadow-control); }
 .mapping-card.selected { background: var(--accent-surface); border-color: var(--accent-border); }
 .mapping-card.active { background: var(--pressed-surface); border-color: var(--pressed-border); }
@@ -505,7 +545,6 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-footer-status small { color: var(--muted); font-size: 12.5px; }
 .lock-hint { font-size: 12.5px; }
 .footer-listener-toggle { min-height: 24px; padding: 2px 10px; font-size: 12.5px; }
-.mapping-footer .button-row { margin-left: auto; }
 .mapping-status { margin: 10px 0 0; }
 .usage-hint-details { margin-top: 10px; font-size: 13px; }
 .usage-hint-details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
@@ -543,6 +582,7 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   gap: 14px;
   align-items: stretch;
 }
+/* 连接页：设备合并为通栏卡片；语音输入设置三列随工具选择联动。 */
 .chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .setup-card { margin-top: 14px; }
 .setup-card > .card-title-row p { margin: 3px 0 0; font-size: 13px; }
@@ -677,9 +717,8 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
 
 @media (max-width: 1020px) {
-  .content { padding: 20px 22px 26px; }
+  .content { --content-inline-padding: 22px; padding: 20px var(--content-inline-padding) 26px; }
   .two-column { grid-template-columns: 1fr; }
-  .device-row { grid-template-columns: 1fr; }
   .setup-columns { grid-template-columns: 1fr; }
   .setup-col + .setup-col {
     padding-left: 0;

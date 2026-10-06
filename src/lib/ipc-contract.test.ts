@@ -89,6 +89,7 @@ describe("Rust and TypeScript IPC contract", () => {
       },
       buttonMapping: {
         ...fixture.buttonMapping,
+        observedButtons: [],
         lastFired:
           fixture.buttonMapping.lastFired === null
             ? null
@@ -159,6 +160,7 @@ describe("Rust and TypeScript IPC contract", () => {
       "staleRemoteEventCount",
     ]);
     expectExactKeys(platformSnapshot.buttonMapping, [
+      "observedButtons",
       "enabled",
       "gateActive",
       "listenerActive",

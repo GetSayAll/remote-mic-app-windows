@@ -32,7 +32,8 @@ use std::time::Duration;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
+    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    INFINITE,
 };
 
 /// 命名事件名（与会话内安装器约定）。见模块头部的同步要求。
@@ -71,6 +72,11 @@ impl GracefulExitSignal {
     /// 无限期等待安装器请求退出。返回 `true` 表示收到请求。
     pub fn wait(&self) -> bool {
         unsafe { WaitForSingleObject(self.handle, INFINITE) == WAIT_OBJECT_0 }
+    }
+
+    /// A failed cleanup keeps the application alive and must allow another installer request.
+    pub fn reset(&self) -> windows::core::Result<()> {
+        unsafe { ResetEvent(self.handle) }
     }
 
     /// 有界等待（供单元测试与需要兜底的调用方使用）。
@@ -132,5 +138,17 @@ mod tests {
         setter.join().expect("setter thread");
         // 手动重置：置位后保持，后续等待立即返回（防"等待线程晚于信号启动"）。
         assert!(signal.wait_timeout(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn reset_allows_a_second_exit_request_after_incomplete_cleanup() {
+        let name = format!("Local\\SayAll-GracefulExit-retry-{}", std::process::id());
+        let signal = GracefulExitSignal::create_named(&name).unwrap();
+        signal_named(&name).unwrap();
+        assert!(signal.wait_timeout(Duration::from_millis(50)));
+        signal.reset().unwrap();
+        assert!(!signal.wait_timeout(Duration::from_millis(20)));
+        signal_named(&name).unwrap();
+        assert!(signal.wait_timeout(Duration::from_millis(50)));
     }
 }

@@ -1,6 +1,6 @@
-export type PageId = "buttons" | "connection" | "permissions" | "settings";
+export type PageId = "buttons" | "templates" | "connection" | "permissions" | "settings";
 
-export type NavIcon = "keyboard" | "link" | "shield" | "gear";
+export type NavIcon = "keyboard" | "template" | "link" | "shield" | "gear";
 
 export interface NavigationItem {
   id: PageId;
@@ -11,6 +11,7 @@ export interface NavigationItem {
 
 export const navigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
+  { id: "templates", label: "模板", icon: "template" },
   { id: "connection", label: "连接", icon: "link" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main

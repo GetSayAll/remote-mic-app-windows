@@ -353,3 +353,11 @@
   **不是微软承诺稳定的公开接口**"*；其 README 亦列出游戏反作弊识别风险。
 - **不要效仿的部分**：其按键映射支持单击/双击/长按配置，与本仓库"语音键只支持按下开始、释放结束"
   的产品规则冲突——语音键不借鉴其手势策略，只借鉴报告层捕获机理。
+
+
+## 2026-10-05 模板、语音路由与安全生命周期贡献
+
+本次从 `luck-gh/remote-mic-app-windows` 的功能提交移植到上游 `3e11586f7e211df74586baa52b3e1ea7c77a5d56`，作者沿用 **GuoHowe（GitHub: luck-gh）**。来源提交：模板 `51f0f5c5904a2206d3f8759b0fd88cc92cda4e98`、增强生命周期 `0b2ac63b1d98af3614f1632ede09129e4d005477`、声音路由 `1150a34154c7994364d9945a17a150976eb78c47`。这些来源记录用于追溯实现，原分支的实机观察不视为本次融合版本验收；新行为与验证边界见 `Testing/WindowsTemplates.md`、`Testing/CaptureInputSession.md`、`Testing/WindowsInstallerGracefulExit.md`。独立的延迟单位 PR #200 及 WebView 恢复 PR 不包含在此次移植中。
+
+- 安装模板实质改编自 [Tauri tauri-cli-v2.11.4 NSIS 模板](https://github.com/tauri-apps/tauri/blob/8909f221d1515955fc843808032bdc5d62209c96/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi)，固定提交 `8909f221d1515955fc843808032bdc5d62209c96`，MIT / Apache-2.0 双许可证；沿用[官方自定义模板配置](https://v2.tauri.app/distribute/windows-installer/#custom-installer-template)。改动限于既有安装选择、正常退出、写权限预检、当前包卸载器与已知退役文件回收；不强杀运行实例。
+- 默认麦克风写入使用 **未文档化的 Windows `IPolicyConfig::SetDefaultEndpoint` ABI**，不是微软承诺稳定的公开 setter。固定 ABI 参考 [AudioEndPointLibrary / PolicyConfig.h](https://github.com/Belphemur/AudioEndPointLibrary/blob/4fd74314f7a8e4ceaaa6767cdc9f936c3916a2a8/DefSound/PolicyConfig.h)（EreTIk 来源）及 [Sunshine 的交叉定义](https://github.com/LizardByte/Sunshine/blob/f54f9dfc57848971e85cda7fb4b7723594926422/src/platform/windows/PolicyConfig.h)。两者 GPL，与本项目 GPL-3.0-only 相容；仅独立声明 IID、CLSID 和 slot 13，不复制切换器实现或二进制。读回/通知用现有 MMDevice API；[OnDefaultDeviceChanged](https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immnotificationclient-ondefaultdevicechanged) 不标识修改者，故不能保证同值外改或读写间竞态可归因。该能力默认关闭，任何观测到的外部冲突都会让出；异常结束依靠 journal 和明确恢复选择，不猜测用户意图。

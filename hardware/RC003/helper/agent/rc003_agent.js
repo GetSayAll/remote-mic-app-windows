@@ -1,6 +1,7 @@
 'use strict';
 /*
  * rc003_agent.js —— RC003 增强捕获轨（路线 A）的 Gadget 侧 agent。
+ * 下文实测叙述来自固定上游提交的历史证据，不代表当前本地版本已通过真机验收。
  *
  * 定位
  * ----
@@ -70,10 +71,13 @@
  *
  * 协议（换行分隔的 JSON，纯 ASCII，两个方向都是）
  * ---------------------------------------------
- *   agent -> helper : {"type":"hello",...} / {"type":"hb",...} / {"type":"edge",...}
+ *   agent -> helper : {"type":"hello","instance":"...",...} / {"type":"hb",...} / {"type":"edge",...}
  *                     / {"type":"log","msg":"..."} / {"type":"bye"}
+ *                     / {"type":"stopped","instance":"...","stop_id":"...",
+ *                        "hook_detached":true,"released_all":true}
  *   helper -> agent : {"type":"renew"}                  续约（唯一必需的）
- *                     {"type":"disarm"} / {"type":"arm"}
+ *                     {"type":"disarm","instance":"...","stop_id":"..."} / {"type":"arm"}
+ *                       所有下行仍携带 token；instance 每脚本生成、跨重连稳定，stop_id 每次停止唯一。
  *                     {"type":"mode","clear":true|false}
  *                     {"type":"restore","on":true|false}
  *                     {"type":"targets","report":[...],"clear":[...]}
@@ -87,7 +91,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-10-03.first-press-gate';
+var AGENT_BUILD = '2026-10-03.cleanup-instance';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
@@ -151,6 +155,19 @@ var disarmed = false;
 var synthFrom = 0;
 var synthTo = 0;
 var gateDelayMs = 0;          /* 0 = 门未开启；>0 = 按下帧改写前先睡这么久 */
+var hookListener = null;
+var observedUsages = [];
+var physicalUsages = [];
+var blockedUsages = [];
+var synthHeld = false;
+var synthOffAckPending = false;
+var synthHeldFrom = 0;
+var synthHeldTo = 0;
+var synthHeldHandle = '';
+var synthGeneration = 0;
+var synthWritesInFlight = 0;
+var synthCompletionUncertain = false;
+var stopPending = false;
 
 var sock = null;
 var connected = false;
@@ -171,6 +188,12 @@ var retryNotBefore = 0;       /* 连接重试的最早时刻（鉴权失败后�
 var connecting = false;       /* 有 connect 尚在飞行中（并发守卫，见 connectOnce） */
 var attemptSeq = 0;           /* 尝试序号：只有最新一次尝试有权写 sock */
 var tReady = Date.now();
+/* 每次脚本加载生成，跨 socket 重连保持；只用于实例关联，鉴权仍由 token 承担。 */
+var agentInstance = Process.id.toString(16) + '-' + tReady.toString(16);
+for (var noncePart = 0; noncePart < 4; noncePart++) {
+  agentInstance += '-' + ('00000000' + Math.floor(Math.random() * 0x100000000).toString(16)).slice(-8);
+}
+var stopRequestId = '';
 
 var stat = {
   ioctl_calls: 0,
@@ -432,13 +455,24 @@ function handleCommand(line) {
   }
 
   if (cmd.type === 'renew') {
+    if (stopPending) return;
     if (lastRenewAt === 0) logLine('renew:first');           /* 首次续约 = 武装时刻 */
     lastRenewAt = Date.now();
     if (handshakeDone === false) handshakeDone = true;
     return;
   }
-  if (cmd.type === 'arm') { disarmed = false; return; }
-  if (cmd.type === 'disarm') { disarmed = true; lastRenewAt = 0; releaseEdges('disarm'); return; }
+  if (cmd.type === 'arm') {
+    if (stopPending) { logLine('arm:rejected_cleanup_pending'); return; }
+    disarmed = !installHook(); return;
+  }
+  if (cmd.type === 'disarm' || cmd.type === 'bye') {
+    if (cmd.instance !== agentInstance || typeof cmd.stop_id !== 'string'
+        || !/^[0-9a-zA-Z-]{1,128}$/.test(cmd.stop_id)) {
+      stat.cmd_rejected++; logLine('stop:rejected_identity'); return;
+    }
+    stopRequestId = cmd.stop_id;
+    stopCapture(cmd.type); return;
+  }
   if (cmd.type === 'mode') {
     mode = (cmd.clear === false) ? 'observe' : 'clear';
     logLine('mode:' + mode);
@@ -471,6 +505,11 @@ function handleCommand(line) {
     var retained = [];
     var before = currentUsages();
     for (var ri = 0; ri < before.length; ri++) if (rep.indexOf(before[ri]) >= 0) retained.push(before[ri]);
+    blockedUsages = blockedUsages.filter(function (u) { return rep.indexOf(u) >= 0; });
+    for (var bi = 0; bi < rep.length; bi++) {
+      if (reportUsages.indexOf(rep[bi]) < 0 && physicalUsages.indexOf(rep[bi]) >= 0
+          && blockedUsages.indexOf(rep[bi]) < 0) blockedUsages.push(rep[bi]);
+    }
     reportUsages = rep.slice();
     clearUsages = clr.slice();
     targetGeneration = Math.floor(nextGeneration);
@@ -496,7 +535,9 @@ function handleCommand(line) {
     if (cmd.off === true) {
       synthFrom = 0; synthTo = 0;
       stat.synth_applied++;
-      sendLine({ type: 'synth_ack', t: Date.now(), off: true });
+      synthOffAckPending = synthHeld || synthWritesInFlight > 0 || synthCompletionUncertain;
+      if (!synthOffAckPending) sendLine({ type: 'synth_ack', t: Date.now(), off: true });
+      else logLine('synth:off_awaiting_physical_release');
       logLine('synth:off');
       return;
     }
@@ -514,7 +555,36 @@ function handleCommand(line) {
     return;
   }
   if (cmd.type === 'restore') { restoreOnLeave = (cmd.on !== false); return; }
-  if (cmd.type === 'bye') { disarmed = true; lastRenewAt = 0; releaseEdges('bye'); return; }
+}
+
+function stopCapture(reason) {
+  disarmed = true;
+  lastRenewAt = 0;
+  gateDelayMs = 0;
+  releaseEdges(reason);
+  emitObservation([]);
+  if (synthHeld || synthWritesInFlight > 0) {
+    stopPending = true;
+    logLine('stop:awaiting_physical_release');
+    return;
+  }
+  completeStop();
+}
+
+function completeStop() {
+  stopPending = false;
+  synthFrom = 0; synthTo = 0;
+  var detached = false;
+  try {
+    if (hookListener !== null) {
+      hookListener.detach();
+      hookListener = null;
+      Interceptor.flush();
+    }
+    detached = true;
+  } catch (e) { logLine('stop:detach_failed'); }
+  sendLine({ type: 'stopped', instance: agentInstance, stop_id: stopRequestId,
+    hook_detached: detached, released_all: true });
 }
 
 function releaseEdges(reason) {
@@ -607,6 +677,7 @@ function connectOnce() {
         token: params.token || '',
         agent: 'rc003_agent/1',
         build: AGENT_BUILD,
+        instance: agentInstance,
         pid: Process.id,
         arch: Process.arch,
         mode: mode,
@@ -665,9 +736,25 @@ function targetSetIn(bytes) {
     var u = bytes[o] | (bytes[o + 1] << 8);
     if (u === 0) continue;
     /* 用 reportUsages 而不是 clearUsages：额外哨兵键只清、不上报。 */
-    if (reportUsages.indexOf(u) >= 0 && found.indexOf(u) < 0) found.push(u);
+    if (reportUsages.indexOf(u) >= 0 && blockedUsages.indexOf(u) < 0 && found.indexOf(u) < 0) found.push(u);
   }
   return found;
+}
+
+/* 听键独立于映射目标：只报告白名单状态，不扩大清键/执行范围。 */
+function knownUsagesIn(bytes) {
+  var found = [];
+  for (var o = 3; o <= 7; o += 2) {
+    var usage = bytes[o] | (bytes[o + 1] << 8);
+    if (TARGET_USAGES.indexOf(usage) >= 0 && found.indexOf(usage) < 0) found.push(usage);
+  }
+  return found.sort(function (a, b) { return a - b; });
+}
+
+function emitObservation(usages) {
+  if (sameSet(observedUsages, usages)) return;
+  observedUsages = usages.slice();
+  sendLine({ type: 'observed', t: Date.now(), usages: observedUsages });
 }
 
 /* 清空集合视角。**与 targetSetIn 必须是两个函数**，这不是重复代码：
@@ -683,7 +770,7 @@ function clearSetIn(bytes) {
     var o = slots[i];
     var u = bytes[o] | (bytes[o + 1] << 8);
     if (u === 0) continue;
-    if (clearUsages.indexOf(u) >= 0 && found.indexOf(u) < 0) found.push(u);
+    if (clearUsages.indexOf(u) >= 0 && blockedUsages.indexOf(u) < 0 && found.indexOf(u) < 0) found.push(u);
   }
   return found;
 }
@@ -692,12 +779,16 @@ function clearSetIn(bytes) {
    （上报 ∪ 清空 ∪ 合成）——2026-09-26 canary 死代码事故的同款坑：
    只含语音键的报告若在门禁处早退，替换逻辑永远执行不到。 */
 function synthSetIn(bytes) {
-  if (synthFrom === 0) return false;
+  return containsUsage(bytes, synthFrom);
+}
+
+function containsUsage(bytes, usage) {
+  if (usage === 0) return false;
   var slots = [3, 5, 7];
   for (var i = 0; i < slots.length; i++) {
     var o = slots[i];
     var u = bytes[o] | (bytes[o + 1] << 8);
-    if (u === synthFrom) return true;
+    if (u === usage) return true;
   }
   return false;
 }
@@ -758,6 +849,7 @@ function writeReport(ptr, bytes) {
 }
 
 function installHook() {
+  if (hookListener !== null) return true;
   var ntdll = Process.getModuleByName('ntdll.dll');
   var fn = ntdll.getExportByName('NtDeviceIoControlFile');
   if (fn === null || fn.isNull()) {
@@ -765,7 +857,7 @@ function installHook() {
     return false;
   }
 
-  Interceptor.attach(fn, {
+  hookListener = Interceptor.attach(fn, {
     onEnter: function (args) {
       this.hit = false;
       try {
@@ -793,6 +885,14 @@ function installHook() {
         this.restored = false;
 
         var bytes = new Uint8Array(outPtr.readByteArray(9));
+        this.reportHandle = args[0].toString();
+        this.ioStatus = args[4];
+        this.releaseGeneration = synthHeld && !containsUsage(bytes, synthHeldFrom) ? synthGeneration : -1;
+        physicalUsages = knownUsagesIn(bytes);
+        blockedUsages = blockedUsages.filter(function (u) { return physicalUsages.indexOf(u) >= 0; });
+        // 停止只放行原报告；必须在 onLeave 确认同 handle 的同步完成后才撤钩。
+        if (stopPending) return;
+        if (leaseOk()) emitObservation(physicalUsages);
         var found = targetSetIn(bytes);      /* 主程序动态上报集合 */
         var toClear = clearSetIn(bytes);     /* 上报集合 + 哨兵键（如有） */
         this.orig = bytes;
@@ -828,6 +928,8 @@ function installHook() {
         if (synthSeen && gateDelayMs > 0) {
           try {
             Thread.sleep(gateDelayMs);
+            // 延迟期间配置/租约可能被撤销；迟到报告不得重新呈现合成按下。
+            if (!leaseOk() || synthFrom === 0) return;
             stat.gate_delays++;
             logLine('synth:gate delay_ms=' + gateDelayMs);
           } catch (e) {
@@ -855,7 +957,7 @@ function installHook() {
             continue;
           }
           /* 用 clearUsages：产品路径覆盖动态目标；验收时可能多一个哨兵键。 */
-          if (clearUsages.indexOf(u) < 0) continue;
+          if (clearUsages.indexOf(u) < 0 || blockedUsages.indexOf(u) >= 0) continue;
           patched[o] = 0;
           patched[o + 1] = 0;
           changed = true;
@@ -872,6 +974,14 @@ function installHook() {
             back[8] === patched[8]) {
           stat.clears_ok++;
           if (synthChanged) stat.synth_hits++;
+          if (synthChanged) {
+            synthHeld = true;
+            synthHeldFrom = synthFrom; synthHeldTo = synthTo;
+            synthHeldHandle = this.reportHandle;
+            synthGeneration++;
+            synthWritesInFlight++;
+            this.synthWritten = true;
+          }
           if (synthChanged) synthTrace('replace ok to=0x' + synthTo.toString(16));
           this.cleared = true;
         } else {
@@ -884,6 +994,35 @@ function installHook() {
     },
 
     onLeave: function (retval) {
+      if (this.hit && this.ioStatus) {
+        var completed = false;
+        try {
+          completed = retval.toUInt32() === 0 && !this.ioStatus.isNull()
+            && this.ioStatus.readU32() === 0
+            && Number(this.ioStatus.add(Process.pointerSize).readU64().toString()) === 9;
+        } catch (e) { /* 完成语义不可读，保持未确认。 */ }
+        if (this.synthWritten) {
+          synthWritesInFlight--;
+          // STATUS_PENDING 无完成通知可用，不保存裸指针，也不假报已释放。
+          if (retval.toUInt32() === 0x103) {
+            synthCompletionUncertain = true;
+            logLine('synth:completion_unconfirmed reason=pending');
+          }
+        }
+        if (completed && this.releaseGeneration === synthGeneration
+            && this.reportHandle === synthHeldHandle && synthWritesInFlight === 0
+            && !synthCompletionUncertain) {
+          synthHeld = false;
+          synthHeldFrom = 0; synthHeldTo = 0; synthHeldHandle = '';
+          if (synthOffAckPending) {
+            synthOffAckPending = false;
+            sendLine({ type: 'synth_ack', t: Date.now(), off: true });
+          }
+          if (stopPending) completeStop();
+        } else if (stopPending && this.releaseGeneration >= 0 && !completed) {
+          logLine('stop:release_unconfirmed reason=ioctl_not_completed');
+        }
+      }
       if (!this.hit || !this.cleared || !restoreOnLeave) return;
       try {
         var cur = new Uint8Array(this.outPtr.readByteArray(9));
@@ -911,10 +1050,10 @@ function heartbeat() {
   var now = Date.now();
 
   /* 连接健康判定（顺序有意义：先判"对面不认我们"，再判"对面不在了"）。 */
-  if (connected && tConnect !== 0 && lastRenewAt === 0 && (now - tConnect) > AUTH_TIMEOUT_MS) {
+  if (!stopPending && connected && tConnect !== 0 && lastRenewAt === 0 && (now - tConnect) > AUTH_TIMEOUT_MS) {
     stat.auth_rejected++;
     dropConnection('auth_mismatch', true);
-  } else if (connected && tLastRx !== 0 && (now - tLastRx) > RX_TIMEOUT_MS) {
+  } else if (!stopPending && connected && tLastRx !== 0 && (now - tLastRx) > RX_TIMEOUT_MS) {
     /* 下行静默超过看门狗窗口 ⇒ 助手不在了（或被换代）。这是唯一可靠的断线判据。 */
     stat.rx_timeouts++;
     dropConnection('rx_silence', false);
@@ -1017,9 +1156,7 @@ rpc.exports = {
 
   /* 助手主动卸载 / Gadget 被卸载时调用：立刻停止清键。 */
   dispose: function () {
-    disarmed = true;
-    lastRenewAt = 0;
-    releaseEdges('dispose');
+    stopCapture('dispose');
     sendLine({ type: 'bye', t: Date.now(), stat: stat });
     connected = false;
     /* 卸载是"最后一次说话"：bye 已在上面交给 txPump 启动（同步发出），

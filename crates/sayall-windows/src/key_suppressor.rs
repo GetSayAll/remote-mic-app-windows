@@ -543,6 +543,30 @@ mod tests {
     }
 
     #[test]
+    fn link_guard_transition_preserves_release_pairing() {
+        let swallowed = super::decide(0x74, false, false, true, false, super::HOLD_NONE);
+        let hold = super::track_down(super::HOLD_NONE, swallowed);
+        assert!(super::decide(0x74, true, false, false, false, hold));
+        // 应用中途启动或按下沿已泄漏时，连接保护也不得吞释放沿。
+        assert!(!super::decide(
+            0x74,
+            true,
+            false,
+            true,
+            false,
+            super::HOLD_NONE
+        ));
+        assert!(!super::decide(
+            0x74,
+            true,
+            false,
+            true,
+            false,
+            super::HOLD_LEAKED
+        ));
+    }
+
+    #[test]
     fn only_injected_wetype_marker_counts_as_liveness_evidence() {
         // 存活标记只认微信输入法自注入的 0xFC：物理 0xFC 不存在，非 0xFC 的
         // 注入事件（含本应用自己的和弦注入）绝不能被当成存活证据——否则

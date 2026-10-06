@@ -4,11 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
   audioPhaseLabel,
+  captureInputErrorLabel,
   chordLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
   GITHUB_REPOSITORY_URL,
-  identityShortcutByButton,
   isRecommendedVoiceEndpoint,
   OFFICIAL_WEBSITE_URL,
   openGitHubRepository,
@@ -16,7 +16,6 @@ import {
   openOfficialWebsite,
   openVbCableDownloadPage,
   remoteModelLabel,
-  shortcutCapability,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
   type ConnectionPhase,
@@ -36,47 +35,6 @@ describe("mouse actions", () => {
   it("summarizes the focus-input action", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
-  });
-});
-
-describe("mapping capability matrix（单响应判定，用于信息提示）", () => {
-  it("直接归因族（电源/菜单）全部触发单响应", () => {
-    expect(shortcutCapability("power", "long", "rc003")).toBe("all");
-    expect(shortcutCapability("power", "single", "rc003")).toBe("all");
-    expect(shortcutCapability("menu", "double", "rc003")).toBe("all");
-  });
-
-  it("武装族（确定/方向/主页）单击可同键对冲，双击/长按判定为附带原生动作", () => {
-    expect(shortcutCapability("ok", "single", "rc003")).toBe("identity");
-    expect(shortcutCapability("ok", "double", "rc003")).toBe("none");
-    expect(shortcutCapability("ok", "long", "rc003")).toBe("none");
-    expect(shortcutCapability("up", "single", "rc003")).toBe("identity");
-    expect(shortcutCapability("down", "single", "rc001")).toBe("identity");
-    expect(shortcutCapability("left", "single", "rc003")).toBe("identity");
-    expect(shortcutCapability("left", "double", "rc001")).toBe("none");
-    expect(shortcutCapability("right", "long", "rc001")).toBe("none");
-    expect(shortcutCapability("home", "single", "rc003")).toBe("identity");
-  });
-
-  it("TV 仍无同键能力，但返回/音量±已开放自定义", () => {
-    expect(shortcutCapability("tv", "single", "rc003")).toBe("none");
-    expect(shortcutCapability("tv", "long", "rc001")).toBe("none");
-    for (const button of ["back", "volume_up", "volume_down"] as const) {
-      expect(shortcutCapability(button, "single", "rc003")).toBe("all");
-      expect(shortcutCapability(button, "double", "rc001")).toBe("all");
-      expect(shortcutCapability(button, "long", "unknown")).toBe("all");
-    }
-  });
-
-  it("identityShortcutByButton 对齐 Rust native_key（泄漏对冲判定依据）", () => {
-    expect(identityShortcutByButton.ok).toBe("enter");
-    expect(identityShortcutByButton.up).toBe("up");
-    expect(identityShortcutByButton.down).toBe("down");
-    expect(identityShortcutByButton.left).toBe("left");
-    expect(identityShortcutByButton.right).toBe("right");
-    expect(identityShortcutByButton.home).toBe("home");
-    expect(identityShortcutByButton.tv).toBeUndefined();
-    expect(identityShortcutByButton.power).toBeUndefined();
   });
 });
 
@@ -302,5 +260,23 @@ describe("诊断日志目录入口", () => {
   it("浏览器预览下明确不可用而不是静默失败", async () => {
     await expect(openLogDirectory()).rejects.toThrow("当前是浏览器预览，无法打开日志目录");
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("microphone failure labels", () => {
+  it("keeps external selections and tells how to handle pending recovery", () => {
+    expect(captureInputErrorLabel("external_change")).toContain("保留现在的选择");
+    expect(captureInputErrorLabel("journal_invalid")).toContain("选择恢复原设备或保留当前选择");
+    expect(captureInputErrorLabel("restore_not_confirmed")).toContain("尚未确认");
+  });
+  it("offers a next step without exposing diagnostic fields or Windows error codes", () => {
+    for (const code of ["capture_endpoint_missing", "normal_roles_split", "route_worker_busy", "route_worker_unavailable_hr_80004005", "unknown_internal_code"]) {
+      const label = captureInputErrorLabel(code);
+      expect(label).toMatch(/请/);
+      expect(label).not.toContain(code);
+      expect(label).not.toContain("80004005");
+    }
+    expect(captureInputErrorLabel("cancelled")).toContain("已取消");
+    expect(captureInputErrorLabel(null)).toBe("");
   });
 });

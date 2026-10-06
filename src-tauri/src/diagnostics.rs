@@ -198,6 +198,7 @@ mod tests {
                 stale_remote_event_count: 0,
             },
             button_mapping: sayall_windows::button_mapping::ButtonMappingSnapshot {
+                observed_buttons: Vec::new(),
                 enabled: true,
                 gate_active: true,
                 listener_active: true,

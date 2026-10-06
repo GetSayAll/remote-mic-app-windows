@@ -1,5 +1,12 @@
 //! Public Windows AppsFolder discovery and launch targets.
-use crate::app_launcher::CustomAppPick;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLibraryEntry {
+    pub name: String,
+    pub path: String,
+}
 pub const REGISTERED_PREFIX: &str = "shell:AppsFolder\\";
 
 #[derive(Debug, Clone)]
@@ -18,7 +25,7 @@ pub fn is_registered_target(target: &str) -> bool {
     })
 }
 
-pub fn normalize_library(apps: Vec<CustomAppPick>) -> Result<Vec<CustomAppPick>, String> {
+pub fn normalize_library(apps: Vec<AppLibraryEntry>) -> Result<Vec<AppLibraryEntry>, String> {
     if apps.len() > 2000 {
         return Err("应用列表最多支持 2000 项".into());
     }
@@ -44,7 +51,7 @@ pub fn normalize_library(apps: Vec<CustomAppPick>) -> Result<Vec<CustomAppPick>,
 }
 
 #[cfg(windows)]
-pub fn scan_registered_apps() -> Result<Vec<CustomAppPick>, String> {
+pub fn scan_registered_apps() -> Result<Vec<AppLibraryEntry>, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     static SCANNING: AtomicBool = AtomicBool::new(false);
@@ -87,7 +94,7 @@ pub fn scan_registered_apps() -> Result<Vec<CustomAppPick>, String> {
 }
 
 #[cfg(windows)]
-fn scan_sta(started: std::time::Instant) -> Result<Vec<CustomAppPick>, String> {
+fn scan_sta(started: std::time::Instant) -> Result<Vec<AppLibraryEntry>, String> {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::System::Com::{
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
@@ -118,7 +125,7 @@ fn scan_sta(started: std::time::Instant) -> Result<Vec<CustomAppPick>, String> {
         }
         result
     }
-    let result = (|| -> windows::core::Result<Vec<CustomAppPick>> {
+    let result = (|| -> windows::core::Result<Vec<AppLibraryEntry>> {
         unsafe {
             let folder: IShellItem =
                 SHCreateItemInKnownFolder(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, PCWSTR::null())?;
@@ -150,7 +157,7 @@ fn scan_sta(started: std::time::Instant) -> Result<Vec<CustomAppPick>, String> {
                 };
                 let path = format!("{REGISTERED_PREFIX}{id}");
                 if !name.is_empty() && is_registered_target(&path) {
-                    apps.push(CustomAppPick { name, path });
+                    apps.push(AppLibraryEntry { name, path });
                 }
             }
             Ok(apps)
@@ -160,7 +167,7 @@ fn scan_sta(started: std::time::Instant) -> Result<Vec<CustomAppPick>, String> {
 }
 
 #[cfg(not(windows))]
-pub fn scan_registered_apps() -> Result<Vec<CustomAppPick>, String> {
+pub fn scan_registered_apps() -> Result<Vec<AppLibraryEntry>, String> {
     Err("仅 Windows 支持应用扫描".into())
 }
 
@@ -577,7 +584,7 @@ mod tests {
 
     #[test]
     fn library_deduplicates_targets_and_rejects_commands() {
-        let app = CustomAppPick {
+        let app = AppLibraryEntry {
             name: " Example ".into(),
             path: format!("{REGISTERED_PREFIX}Example.App!Main"),
         };
@@ -590,7 +597,7 @@ mod tests {
             "shell:AppsFolder\\bad\\path",
             "shell:AppsFolder\\bad\nvalue",
         ] {
-            assert!(normalize_library(vec![CustomAppPick {
+            assert!(normalize_library(vec![AppLibraryEntry {
                 name: "Invalid".into(),
                 path: target.into()
             }])

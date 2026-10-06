@@ -138,7 +138,7 @@ async function recordExternalEntry(
   );
   steps.push(
     message === null
-      ? `设置页“${label}”入口经真实 IPC 交由系统浏览器打开（成功不显示提示）`
+      ? `设置页“${label}”入口点击后未显示错误；浏览器可见打开结果 deferred`
       : `设置页“${label}”入口返回不可用（deferred）：${message}`,
   );
 }
@@ -156,17 +156,26 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(runtime.platform.platform === "windows-ci-simulation", "应用未使用 Windows CI 仿真后端");
   steps.push("Tauri WebView 通过真实 IPC 读取仿真运行快照");
 
-  await clickButton("扫描已配对设备");
+  const pairing = await waitFor(
+    () => document.querySelector<HTMLDetailsElement>(".driver-guide .pairing-guide"),
+    "配对与重新连接区域",
+  );
+  const pairingSummary = pairing.querySelector<HTMLElement>("summary");
+  assert(pairingSummary?.textContent?.trim() === "配对与重新连接", "驱动页缺少配对展开入口");
+  if (!pairing.open) pairingSummary.click();
+  await waitFor(() => (pairing.open ? true : null), "配对与重新连接展开");
+  await clickButton("扫描已配对遥控器");
   await waitFor(
-    () => (document.body.textContent?.includes("找到 2 个已配对的小米遥控器") ? true : null),
+    () => (document.querySelectorAll(".driver-guide .device-list li").length === 2 ? true : null),
     "RC001/RC003 扫描结果",
   );
   const remotes = await scanPairedRemotes();
   assert(remotes.length === 2, "仿真扫描没有同时返回 RC001 和 RC003");
   assert(remotes.some((remote) => remote.model === "rc001"), "仿真扫描缺少 RC001");
   assert(remotes.some((remote) => remote.model === "rc003"), "仿真扫描缺少 RC003");
-  steps.push("连接页面渲染 RC001/RC003 扫描结果");
+  steps.push("驱动页展开配对区域，经扫描按钮渲染 RC001/RC003 结果");
 
+  await openPage("连接");
   const rc001 = remotes.find((remote) => remote.model === "rc001");
   assert(rc001, "找不到 RC001 仿真设备");
   const connection = await connectRemote(rc001.id);
@@ -174,26 +183,22 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(connection.capabilities?.sampleRate === 16_000, "RC001 仿真能力不是 16 kHz");
   steps.push("RC001 连接 command 返回 16 kHz ATVV 就绪状态");
 
-  await waitFor(
-    () => (document.body.textContent?.includes("CABLE Input (VB-Audio Virtual Cable, CI Simulation)") ? true : null),
-    "仿真音频端点",
-  );
-  // 端点列表默认收起（用户每次只用一个）：自动选择后以"更换设备"入口呈现。
-  await waitFor(
-    () =>
-      Array.from(document.querySelectorAll<HTMLButtonElement>("button")).some((button) =>
-        button.textContent?.trim().includes("更换设备"),
-      )
-        ? true
-        : null,
-    "自动选择仿真 CABLE Input",
-  );
+  const advancedAudio = await waitFor(() => document.querySelector<HTMLDetailsElement>(".audio-advanced"), "高级声音诊断");
+  assert(!advancedAudio.open, "声音写入端不应默认出现在常规界面");
+  assert(document.querySelector("#capture-input-target"), "常规界面缺少目标麦克风选择");
+  assert(!document.querySelector(".endpoint-list"), "常规界面泄漏了播放设备列表");
+  // 仿真后端不提供真实 Capture 拓扑，显式高级选择仅验证原有 WASAPI 通道。
+  advancedAudio.open = true;
+  advancedAudio.dispatchEvent(new Event("toggle"));
+  const renderChoice = await waitFor(() => document.querySelector<HTMLButtonElement>(".audio-advanced .endpoint-list button"), "高级手动写入端");
+  if (!renderChoice.disabled) renderChoice.click();
+  await waitFor(() => document.querySelector<HTMLButtonElement>(".audio-advanced .endpoint-list button")?.textContent?.trim() === "当前设备" ? true : null, "手动声音写入端确认");
   const endpoints = await listAudioEndpoints();
   assert(endpoints.length === 1, "仿真音频端点数量异常");
   const audio = await getAudioSnapshot();
   assert(audio.phase === "ready", "仿真音频端点没有进入 WASAPI 就绪");
-  assert(audio.selectedEndpointId === endpoints[0].id, "仿真 CABLE Input 没有被自动选择");
-  steps.push("连接页面首次检测并自动选择唯一的仿真 CABLE Input");
+  assert(audio.selectedEndpointId === endpoints[0].id, "仿真 CABLE Input 没有被明确选择");
+  steps.push("连接页面仅常规展示目标麦克风；高级显式选择仿真声音写入端，真实通道配对 deferred");
 
   // 语音增益（2026-10-04，对齐 Mac 设置页「增益」滑块）：0 dB = 原始音量。
   // 拖动（input）只改显示、松手（change）才落盘——这里按真实手势派发两个事件，
@@ -329,6 +334,15 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   await testAppFocus("notepad");
   steps.push("「打开后聚焦方式」面板按用户要求隐藏；学习与测试打开聚焦仍经真实 IPC 覆盖");
+  mark("templates_page");
+  await openPage("模板");
+  await waitFor(
+    () => document.querySelector(".complete-template-panel"),
+    "模板配置与内置目录加载",
+  );
+  assert(document.querySelector(".run-modes") !== null, "模板页缺少独立模板切换设置");
+  steps.push("模板页通过真实 IPC 加载完整按键模板与独立切换设置");
+
 
   mark("permissions_page");
   await openPage("权限");
@@ -466,7 +480,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   assert(restoredGainSlider.value === "12", "增益没有从持久化设置恢复");
   steps.push("重新进入连接页后增益从持久化设置恢复为 12 dB");
-  steps.push("四个侧栏页面均在 Windows WebView 中完成导航和渲染");
+  steps.push("五个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
   mark("voice_session");
   const voice = await invoke<PlatformSnapshot>("run_runtime_simulation_voice_session");

@@ -13,13 +13,14 @@ describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
     expect(navigationItems.map((item) => item.id)).toEqual([
       "buttons",
+      "templates",
       "connection",
       "permissions",
       "settings",
     ]);
     // 2026-10-02 用户指定：末位页从「关于」改名「设置」，图标换成 Mac 同款齿轮。
-    expect(navigationItems[3].label).toBe("设置");
-    expect(navigationItems[3].icon).toBe("gear");
+    expect(navigationItems[4].label).toBe("设置");
+    expect(navigationItems[4].icon).toBe("gear");
     expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
   });
 });

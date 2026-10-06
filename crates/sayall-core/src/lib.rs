@@ -13,7 +13,8 @@ pub use frame::FrameAccumulator;
 pub use pcm::{normalize_gain_db, process_pcm};
 pub use pipeline::{AtvvVoicePipeline, PipelineError, PipelineOutput};
 pub use settings::{
-    AppIconIdentifier, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
+    AppIconIdentifier, AppSettings, CaptureInputSettings, ThemePreference, UiPreference,
+    UiPreferences, VoiceInputTool, VoiceTriggerMode,
 };
 pub use statistics::{DailyUsage, UsageStatistics};
 pub use voice::{VoiceSession, VoiceSessionError, VoiceSessionEvent, VoiceSessionState};

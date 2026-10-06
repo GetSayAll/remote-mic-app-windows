@@ -4,9 +4,9 @@ import RegisteredAppsDialog from "./RegisteredAppsDialog.vue";
 import { scanRegisteredApps } from "../lib/bridge";
 vi.mock("../lib/bridge", () => ({ scanRegisteredApps: vi.fn() }));
 const apps = [
-  { name: "Alpha", path: "shell:AppsFolder\\Alpha!App" },
-  { name: "Beta", path: "shell:AppsFolder\\Beta!App" },
-  { name: "Gamma", path: "shell:AppsFolder\\Gamma!App" },
+  { applicationId: "alpha", name: "Alpha", path: "shell:AppsFolder\\Alpha!App" },
+  { applicationId: "beta", name: "Beta", path: "shell:AppsFolder\\Beta!App" },
+  { applicationId: "gamma", name: "Gamma", path: "shell:AppsFolder\\Gamma!App" },
 ];
 beforeEach(() => { vi.mocked(scanRegisteredApps).mockReset(); vi.mocked(scanRegisteredApps).mockResolvedValue(apps); });
 describe("registered app picker", () => {

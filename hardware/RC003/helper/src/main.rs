@@ -1,4 +1,5 @@
-//! rc003-helper —— RC003 增强捕获轨（路线 A）的提权助手（产品化 spike）。
+//! rc003-helper —— RC003 增强捕获轨（路线 A）的提权助手。
+//! 下文历史实测来自固定上游提交，不代表当前本地版本已通过真机验收。
 //!
 //! 它做什么
 //! --------
@@ -23,27 +24,15 @@
 //! 为什么需要提权
 //! --------------
 //! 宿主位于 session 0，普通用户令牌 `OpenProcess(PROCESS_ALL_ACCESS)` 返回 err=5。
-//! 因此本程序必须由用户本人以管理员身份启动——自动化工具不应代用户提权（本仓库实测的安全边界）。
+//! 产品通过用户明确授权的固定最高权限手动计划任务启动本助手；主程序保持普通用户权限。
 //!
 //! 代价与边界（与 ADR 0002 修订记录、路线选型文档一致）
 //! --------------------------------------------------
 //! 不装内核驱动、不改 Secure Boot / 测试签名 / 驱动签名策略、不写注册表过滤项、
-//! 不装计划任务、不需要重启。改动面只有：运行时目录里三个文件 + 目标宿主的进程内存。
+//! 计划任务只按需运行，不添加登录触发器。基础语音路径不依赖本助手。
 //!
-//! 本 spike **不并入产品工作区**（见 Cargo.toml 注释），也不改动 `src-tauri` / 前端。
-//! 它只回答一个问题：把已验证的探针变成"自己的助手 + 自己的 agent + 自己的传输"之后，
-//! 整链还能不能跑通。
-//!
-//! 窗口与输出（2026-10-04）
-//! ----------------------
-//! 本程序构建为 **GUI 子系统**：计划任务 / ShellExecuteEx 拉起时系统不分配控制台，
-//! 也就没有任何窗口可闪。控制台子系统时并非如此——Windows 11 默认终端把控制台
-//! 显示成 Windows Terminal 窗口，从进程启动一直可见到退出（2026-10-04 探针实测
-//! 每轮 2.2–2.3 s；`GetConsoleWindow` 在 ConPTY 托管下只拿到隐藏的 pseudo window，
-//! 原有的自隐藏动作对可见窗口无效）。手动运行（cmd / PowerShell / run-helper*.cmd）
-//! 由 `bootstrap_console()` 附加到父控制台，输出照旧可见；后台拉起没有父控制台时
-//! stdout/stderr 指向 NUL，`Logger::line` 的 `println!` 成为无害空写。
-//! 注意：GUI 子系统进程拿不到 cmd / PowerShell 的 `>` 与管道重定向（Windows 只给
+//! 本独立构建产物是产品可选的 RC003 全按键支持助手，由宿主与安装器管理启停。
+//! `--cleanup-only` 只核对并释放上一轮资源，不注入、不 arm、不续约；未知状态保持未确认。
 //! 控制台子系统子进程接这些句柄；`Start-Process -RedirectStandardOutput` 是显式
 //! 传递、仍可用）。要留档输出请用 `--log <文件>`——日志落点与子系统无关。
 
@@ -68,7 +57,7 @@ mod imp {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -80,14 +69,6 @@ mod imp {
     /// RC003 的硬件 token（VID 0x2717 / PID 0x32B8 / REV 00a4），与仓库既有取证一致。
     const RC003_HARDWARE_TOKEN: &str = "vid&012717_pid&32b8_rev&00a4";
 
-    /// 检测到宿主里跑的是上一代 agent 时自动刷新的冷却时间：
-    /// 一台机器一小时内最多自动刷新一次，防"刷新→仍旧→再刷新"的循环。
-    const AGENT_REFRESH_COOLDOWN_SECS: u64 = 3600;
-    /// 冷却时间戳文件名（放运行时目录，跨助手进程重启仍生效）。
-    const AGENT_REFRESH_STAMP: &str = "agent-refresh.stamp";
-    /// 本轮准备好的 gadget DLL 路径：stale 分支自动刷新时用它重新注入。
-    static PREPARED_GADGET_DLL: std::sync::OnceLock<std::path::PathBuf> =
-        std::sync::OnceLock::new();
     /// BLE HID-over-GATT 服务的 UUID 前缀（设备实例名以它开头）。
     const HID_SERVICE_PREFIX: &str = "{00001812-0000-1000-8000-00805f9b34fb}";
     const ENUM_ROOT: &str = "SYSTEM\\CurrentControlSet\\Enum";
@@ -136,6 +117,241 @@ mod imp {
     /// 控制台事件（Ctrl+C / 关窗 / 注销 / 关机）置位；由 `SetConsoleCtrlHandler`
     /// 的处理器写入。必须是 `static`：处理器签名固定，拿不到闭包捕获。
     static CTRL_STOP: AtomicBool = AtomicBool::new(false);
+    static AGENT_AUTHORIZED: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct AgentIdentity {
+        host_pid: u32,
+        host_created: u64,
+        instance: String,
+    }
+
+    struct CleanupState {
+        target_pid: u32,
+        target_created: u64,
+        identity: Option<AgentIdentity>,
+        pending: bool,
+        unresolved_multiple: bool,
+        attach_prior_terminal: bool,
+        capture_attempted: bool,
+        version_rejected: bool,
+    }
+    impl CleanupState {
+        fn new(target_pid: u32, target_created: u64) -> Self {
+            Self {
+                target_pid,
+                target_created,
+                identity: None,
+                pending: false,
+                unresolved_multiple: false,
+                attach_prior_terminal: false,
+                capture_attempted: false,
+                version_rejected: false,
+            }
+        }
+        fn admit(&mut self, identity: AgentIdentity) -> bool {
+            if identity.host_pid != self.target_pid
+                || identity.host_created != self.target_created
+                || self.identity.as_ref().is_some_and(|old| old != &identity)
+            {
+                // 不覆盖第一笔未确认身份，也不让另一实例的 ACK 消除它。
+                self.unresolved_multiple = true;
+                return false;
+            }
+            self.identity = Some(identity);
+            self.pending = true; // 本轮 arm 后，上一轮 stopped 不再是清理证明。
+            true
+        }
+        fn confirm(&mut self, identity: &AgentIdentity) {
+            if self.identity.as_ref() == Some(identity) {
+                self.pending = false;
+            }
+        }
+        fn is_clean(&self) -> bool {
+            self.identity.is_some() && !self.pending && !self.unresolved_multiple
+        }
+        fn begin_capture(&mut self) -> std::io::Result<()> {
+            // Persist host before injection, then the instance before arm/renew.
+            set_capture_identity(Some(AgentIdentity {
+                host_pid: self.target_pid,
+                host_created: self.target_created,
+                instance: self
+                    .identity
+                    .as_ref()
+                    .map(|id| id.instance.clone())
+                    .unwrap_or_default(),
+            }));
+            write_cleanup_state("requested", false)?;
+            self.capture_attempted = true;
+            Ok(())
+        }
+        fn version_blocked_without_capture(&self) -> bool {
+            self.attach_prior_terminal
+                && self.version_rejected
+                && !self.capture_attempted
+                && self.identity.is_none()
+                && !self.pending
+                && !self.unresolved_multiple
+        }
+    }
+
+    // 仅观测慢路径：不改变产品超时、续约、调度或消息队列策略。
+    const LATENCY_SLOW_MS: u64 = 250;
+    const LATENCY_REPORT_MS: u64 = 10_000;
+    const LATENCY_NAMES: [&str; 6] = [
+        "agent_rx_age",
+        "handle_line",
+        "stdout",
+        "append",
+        "bridge_queue",
+        "bridge_write",
+    ];
+    #[derive(Clone, Copy)]
+    enum LatencyStage {
+        AgentRxAge,
+        HandleLine,
+        Stdout,
+        Append,
+        BridgeQueue,
+        BridgeWrite,
+    }
+    struct LatencyCounters {
+        // 高32位为次数，低32位为最大毫秒值；整项交换防跨窗口count/max错配。
+        stages: [AtomicU64; 6],
+        clock_invalid: AtomicU64,
+        last_report_ms: AtomicU64,
+    }
+    struct LatencySummary {
+        stages: [(u32, u32); 6],
+        clock_invalid: u64,
+    }
+    impl LatencySummary {
+        fn fields(&self) -> String {
+            let mut fields = String::new();
+            for (index, (count, maximum)) in self.stages.iter().enumerate() {
+                if *count > 0 {
+                    fields.push_str(&format!(
+                        " {}_slow_count={} {}_max_ms={}",
+                        LATENCY_NAMES[index], count, LATENCY_NAMES[index], maximum
+                    ));
+                }
+            }
+            fields
+        }
+    }
+    impl LatencyCounters {
+        const fn new() -> Self {
+            Self {
+                stages: [const { AtomicU64::new(0) }; 6],
+                clock_invalid: AtomicU64::new(0),
+                last_report_ms: AtomicU64::new(0),
+            }
+        }
+        fn record(&self, stage: LatencyStage, elapsed_ms: u64) {
+            if elapsed_ms < LATENCY_SLOW_MS {
+                return;
+            }
+            let elapsed = elapsed_ms.min(u32::MAX as u64) as u32;
+            let _ = self.stages[stage as usize].fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |old| {
+                    let count = ((old >> 32) as u32).saturating_add(1);
+                    let maximum = (old as u32).max(elapsed);
+                    Some((u64::from(count) << 32) | u64::from(maximum))
+                },
+            );
+        }
+        fn record_agent_age(&self, agent_ms: Option<u64>, read_ms: u64, clock_valid: bool) {
+            let Some(agent_ms) = agent_ms else {
+                return;
+            };
+            if !clock_valid || agent_ms > read_ms {
+                self.clock_invalid.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            self.record(LatencyStage::AgentRxAge, read_ms - agent_ms);
+        }
+        fn take_summary(&self, now_ms: u64) -> Option<LatencySummary> {
+            if self.clock_invalid.load(Ordering::Relaxed) == 0
+                && self.stages.iter().all(|s| s.load(Ordering::Relaxed) == 0)
+            {
+                return None;
+            }
+            let last = self.last_report_ms.load(Ordering::Relaxed);
+            if now_ms.saturating_sub(last) < LATENCY_REPORT_MS
+                || self
+                    .last_report_ms
+                    .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_err()
+            {
+                return None;
+            }
+            let stages = std::array::from_fn(|i| {
+                let packed = self.stages[i].swap(0, Ordering::Relaxed);
+                ((packed >> 32) as u32, packed as u32)
+            });
+            Some(LatencySummary {
+                stages,
+                clock_invalid: self.clock_invalid.swap(0, Ordering::Relaxed),
+            })
+        }
+    }
+    fn wall_interval_valid(previous: u64, current: u64, monotonic_ms: u64) -> bool {
+        current >= previous && (current - previous).abs_diff(monotonic_ms) <= 1_000
+    }
+    fn elapsed_ms(start: Instant) -> u64 {
+        start.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+    static LATENCY: LatencyCounters = LatencyCounters::new();
+    static LATENCY_STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+    #[cfg(test)]
+    mod latency_diagnostic_tests {
+        use super::*;
+
+        #[test]
+        fn slow_samples_are_bounded_aggregated_and_drained_before_output() {
+            let counters = LatencyCounters::new();
+            counters.record(LatencyStage::Stdout, 249);
+            assert!(counters.take_summary(10_000).is_none());
+            counters.record(LatencyStage::Stdout, 250);
+            counters.record(LatencyStage::Stdout, 800);
+            assert!(counters.take_summary(9_999).is_none());
+            let summary = counters.take_summary(10_000).unwrap();
+            assert_eq!(summary.stages[LatencyStage::Stdout as usize], (2, 800));
+            assert_eq!(summary.fields(), " stdout_slow_count=2 stdout_max_ms=800");
+            assert!(counters.take_summary(20_000).is_none());
+            // 汇总输出自身慢写只能留到下一窗口，不递归报告。
+            counters.record(LatencyStage::Append, 300);
+            assert!(counters.take_summary(10_001).is_none());
+            assert_eq!(
+                counters.take_summary(20_000).unwrap().stages[LatencyStage::Append as usize],
+                (1, 300)
+            );
+        }
+
+        #[test]
+        fn wall_clock_discontinuities_are_not_reported_as_latency() {
+            let counters = LatencyCounters::new();
+            counters.record_agent_age(Some(2_000), 1_000, true);
+            counters.record_agent_age(Some(1_000), 3_000, false);
+            counters.record_agent_age(Some(1_000), 1_400, true);
+            counters.record_agent_age(None, 1_400, true);
+            let summary = counters.take_summary(10_000).unwrap();
+            assert_eq!(summary.clock_invalid, 2);
+            assert_eq!(summary.stages[LatencyStage::AgentRxAge as usize], (1, 400));
+            assert!(wall_interval_valid(1_000, 1_500, 500));
+            assert!(!wall_interval_valid(2_000, 1_500, 500));
+            assert!(!wall_interval_valid(1_000, 31_500, 500));
+        }
+    }
+    static CAPTURE_STARTED_MS: AtomicU64 = AtomicU64::new(0);
+    static CAPTURE_IDENTITY: Mutex<Option<AgentIdentity>> = Mutex::new(None);
+
+    fn set_capture_identity(identity: Option<AgentIdentity>) {
+        *CAPTURE_IDENTITY.lock().unwrap_or_else(|p| p.into_inner()) = identity;
+    }
 
     /// 被拒的 hello 计数（令牌不匹配）。只用于把日志折叠成"前几次 + 之后每 30 次一条"。
     static REJECTED_HELLOS: AtomicU64 = AtomicU64::new(0);
@@ -148,7 +364,7 @@ mod imp {
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
         fn CloseHandle(h: Handle) -> i32;
-        fn TerminateProcess(h: Handle, exit_code: u32) -> i32;
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
         fn GetLastError() -> u32;
         fn VirtualAllocEx(
             h: Handle,
@@ -179,6 +395,13 @@ mod imp {
         fn GetModuleHandleW(name: *const u16) -> Handle;
         fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
         fn QueryFullProcessImageNameW(h: Handle, flags: u32, buf: *mut u16, size: *mut u32) -> i32;
+        fn GetProcessTimes(
+            h: Handle,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
         fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
         fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
         fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
@@ -542,6 +765,31 @@ mod imp {
         }
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    fn process_creation_time(pid: u32) -> Option<u64> {
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let (mut creation, mut exit, mut kernel, mut user) = (
+                FileTime::default(),
+                FileTime::default(),
+                FileTime::default(),
+                FileTime::default(),
+            );
+            let ok = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(process);
+            (ok != 0).then_some(((creation.high as u64) << 32) | creation.low as u64)
+        }
+    }
+
     /// 目标进程已加载的模块。**需要提权**（宿主在 session 0）。
     ///
     /// 这是"注入到底成没成 / 之前那一代还在不在"的**唯一可信判据**：
@@ -775,166 +1023,6 @@ mod imp {
         no_host: usize,
         /// 读取失败的节点（脱敏描述 + 原因）；自检会断言此处为空
         failures: Vec<String>,
-    }
-
-    /// 走遍整棵 `Enum` 树，收集所有带 `WUDFDiagnosticInfo\HostPid` 的设备实例。
-    /// 必须走全量（而不是只找 RC003）：独占性判据需要知道同一宿主还承载了谁。
-    /// 纯决策：这次 stale 握手要不要自动刷新（可自检）。
-    ///
-    /// 条件：提权（结束 session 0 宿主必需）＋ 宿主代次非空且与内嵌代次不同
-    /// ＋ 距上次自动刷新超过冷却时间。
-    fn should_auto_refresh_agent(
-        elevated: bool,
-        running_build: &str,
-        embedded_build: &str,
-        last_refresh_unix: Option<u64>,
-        now_unix: u64,
-    ) -> bool {
-        if !elevated || running_build.is_empty() || running_build == embedded_build {
-            return false;
-        }
-        match last_refresh_unix {
-            Some(last) => now_unix >= last && now_unix - last >= AGENT_REFRESH_COOLDOWN_SECS,
-            None => true,
-        }
-    }
-
-    fn now_unix() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    }
-
-    fn read_refresh_stamp(dir: &std::path::Path) -> Option<u64> {
-        std::fs::read_to_string(dir.join(AGENT_REFRESH_STAMP))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
-    }
-
-    fn write_refresh_stamp(dir: &std::path::Path, now: u64) {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(dir.join(AGENT_REFRESH_STAMP), now.to_string());
-    }
-
-    /// stale 分支入口：条件满足就后台自动刷新宿主里的 agent（不阻塞连接线程）。
-    fn spawn_agent_refresh_if_needed(running_build: &str, host_pid: u32, logger: &Logger) {
-        let Some(dll) = PREPARED_GADGET_DLL.get().cloned() else {
-            return; // 本轮没准备好 DLL（dry-run / 自检路径），不刷新
-        };
-        let dir = dll.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let last = read_refresh_stamp(&dir);
-        if !should_auto_refresh_agent(is_elevated(), running_build, AGENT_BUILD, last, now_unix()) {
-            return;
-        }
-        write_refresh_stamp(&dir, now_unix());
-        let logger = logger.fork();
-        let _ = std::thread::Builder::new()
-            .name("sayall-helper-agent-refresh".into())
-            .spawn(move || refresh_agent_in_host(host_pid, &dll, &logger));
-    }
-
-    /// 自动刷新：结束旧宿主 → 等新宿主跟上设备 → 重新注入 gadget。
-    /// 新宿主的 agent 从本轮的运行时目录加载，代次即当前内嵌代次。
-    /// 失败只记日志：不影响既有会话与后续重连。
-    fn refresh_agent_in_host(old_pid: u32, dll: &std::path::Path, logger: &Logger) {
-        logger.kv(
-            "[AGENT-REFRESH]",
-            &[
-                ("phase", "requested".into()),
-                ("host_pid", old_pid.to_string()),
-                ("target_build", AGENT_BUILD.to_string()),
-            ],
-        );
-        if let Err(error) = terminate_process(old_pid) {
-            logger.kv(
-                "[AGENT-REFRESH]",
-                &[
-                    ("phase", "completed".into()),
-                    ("terminal_result", "failed".into()),
-                    ("stage", "terminate".into()),
-                    ("detail", error),
-                ],
-            );
-            return;
-        }
-        // 宿主被结束后由系统重建；轮询直到出现"另一个 RC003 宿主 pid"。
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let mut new_pid = 0_u32;
-        while std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(500));
-            if let Ok(scan) = enum_hosts() {
-                if let Some(entry) = scan
-                    .entries
-                    .iter()
-                    .find(|e| e.is_rc003 && e.pid != 0 && e.pid != old_pid)
-                {
-                    new_pid = entry.pid;
-                    break;
-                }
-            }
-        }
-        if new_pid == 0 {
-            logger.kv(
-                "[AGENT-REFRESH]",
-                &[
-                    ("phase", "completed".into()),
-                    ("terminal_result", "failed".into()),
-                    ("stage", "wait_new_host".into()),
-                ],
-            );
-            return;
-        }
-        match inject_gadget(new_pid, dll, logger) {
-            // 不 cleanup：远端线程/缓冲区交给宿主进程自身的生命周期（与主流程
-            // 退出时才清理的取舍一致）；句柄泄漏两个，刷新最多每小时一次。
-            Ok(injection) => {
-                std::mem::forget(injection);
-                logger.kv(
-                    "[AGENT-REFRESH]",
-                    &[
-                        ("phase", "completed".into()),
-                        ("terminal_result", "passed".into()),
-                        ("host_pid", new_pid.to_string()),
-                    ],
-                );
-            }
-            Err(error) => logger.kv(
-                "[AGENT-REFRESH]",
-                &[
-                    ("phase", "completed".into()),
-                    ("terminal_result", "failed".into()),
-                    ("stage", "inject".into()),
-                    ("detail", error),
-                ],
-            ),
-        }
-    }
-
-    /// 结束目标进程（提权后对 session 0 的 WUDFHost 有效）。
-    fn terminate_process(pid: u32) -> Result<(), String> {
-        const PROCESS_TERMINATE: u32 = 0x0001;
-        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-        if handle.is_null() {
-            return Err(format!(
-                "OpenProcess(PROCESS_TERMINATE, {pid}) 失败，GetLastError={}",
-                unsafe { GetLastError() }
-            ));
-        }
-        let ok = unsafe { TerminateProcess(handle, 1) } != 0;
-        unsafe {
-            let _ = CloseHandle(handle);
-        }
-        if ok {
-            Ok(())
-        } else {
-            Err(format!(
-                "TerminateProcess({pid}) 失败，GetLastError={}",
-                unsafe { GetLastError() }
-            ))
-        }
     }
 
     fn enum_hosts() -> Result<HostScan, String> {
@@ -1240,15 +1328,6 @@ mod imp {
         /// `---------- 新一轮运行 ... ----------`。后果是 `grep '新一轮运行'` 的**运行起点
         /// 计数是错的**：真实 6 轮被数成 11 条。而这条分隔线当初加进来的**唯一目的**
         /// 就是让每轮起点可辨——它自己把它破坏了。
-        /// 派生一个同落点的 Logger：后台线程用（Logger 不是 Send 结构体之外
-        /// 的共享对象，续约线程用的是同款做法）。
-        fn fork(&self) -> Logger {
-            Logger {
-                fallback: self.fallback.clone(),
-                shared: self.shared.clone(),
-            }
-        }
-
         fn new(path: Option<PathBuf>) -> Self {
             if let Some(p) = &path {
                 if let Some(dir) = p.parent() {
@@ -1317,24 +1396,41 @@ mod imp {
             // 目的地优先级：主程序诊断日志（用户只拉一份）→ 助手自己的文件。
             // 脱敏对两个落点都做：两份文件都可能被用户发出来。
             let text = redact_personal_paths(msg);
+            let stdout_started = Instant::now();
             println!("{text}");
+            LATENCY.record(LatencyStage::Stdout, elapsed_ms(stdout_started));
             let record = format!(
                 "{} pid={} component=rc003-helper {}",
                 utc_stamp(),
                 std::process::id(),
                 text
             );
-            if let Some(shared) = &self.shared {
-                if append_record(shared, &record) {
-                    return;
+            let append_started = Instant::now();
+            for target in self.shared.iter().chain(self.fallback.iter()) {
+                if append_record(target, &record) {
+                    break;
                 }
             }
-            if let Some(fallback) = &self.fallback {
-                if append_record(fallback, &record) {
-                    return;
-                }
-            }
+            LATENCY.record(LatencyStage::Append, elapsed_ms(append_started));
             // 两个落点都写不进去：至少 stdout 已经拿到全文（手动运行时可见）。
+        }
+
+        fn latency_summary(&self) {
+            let elapsed = elapsed_ms(*LATENCY_STARTED.get_or_init(Instant::now));
+            let Some(summary) = LATENCY.take_summary(elapsed) else {
+                return;
+            };
+            // 计数已被交换清零；本次诊断写入本身的慢耗时只会进入下一轮。
+            // 不经 println/Logger::line，避免递归或再争用 stdout。
+            let record = format!("{} pid={} component=rc003-helper [LATENCY] diagnosis=unknown slow_ms={} min_interval_ms={} agent_rx_clock=wall clock_invalid={}{}",
+                utc_stamp(), std::process::id(), LATENCY_SLOW_MS, LATENCY_REPORT_MS, summary.clock_invalid, summary.fields());
+            let started = Instant::now();
+            for target in self.shared.iter().chain(self.fallback.iter()) {
+                if append_record(target, &record) {
+                    break;
+                }
+            }
+            LATENCY.record(LatencyStage::Append, elapsed_ms(started));
         }
 
         fn kv(&self, tag: &str, kv: &[(&str, String)]) {
@@ -1387,11 +1483,12 @@ mod imp {
         remove_task: bool,
         /// 只查询计划任务是否存在与是否最高权限（**不需要提权**）。
         task_status: bool,
-        /// 跟随主程序：桥接断连超过宽限期后自行退出。
+        /// 跟随主程序：显式停用或已绑定的 App 进程退出时正常收尾。
         ///
         /// 配合计划任务使用——主程序需要时 `/run` 触发一次，主程序关掉后助手自己退，
         /// 于是系统里不会长期留着一个提权进程。
         follow_app: bool,
+        cleanup_only: bool,
         /// 兼容参数：主程序提权安装时传 `--hide-window`。GUI 子系统下进程没有
         /// 系统分配的控制台窗口可隐藏（窗口行为见 `bootstrap_console` 注释），
         /// 参数保留只为不改调用方契约；启动时的控制台引导与实际行为无关。
@@ -1416,8 +1513,8 @@ mod imp {
         synth: Option<(u16, u16)>,
     }
 
-    fn parse_args() -> Result<Args, String> {
-        let mut args = Args {
+    fn default_args() -> Args {
+        Args {
             target_pid: None,
             port: DEFAULT_PORT,
             token: String::new(),
@@ -1432,6 +1529,7 @@ mod imp {
             remove_task: false,
             task_status: false,
             follow_app: false,
+            cleanup_only: false,
             hide_window: false,
             dry_run: false,
             observe: false,
@@ -1444,8 +1542,11 @@ mod imp {
             attach_only: false,
             new_generation: false,
             synth: None,
-        };
+        }
+    }
 
+    fn parse_args() -> Result<Args, String> {
+        let mut args = default_args();
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
             let mut value = || it.next().ok_or_else(|| format!("{flag} 缺少取值"));
@@ -1483,6 +1584,7 @@ mod imp {
                 "--remove-task" => args.remove_task = true,
                 "--task-status" => args.task_status = true,
                 "--follow-app" => args.follow_app = true,
+                "--cleanup-only" => args.cleanup_only = true,
                 "--hide-window" => args.hide_window = true,
                 "--canary-usage" => {
                     let raw = value()?;
@@ -1655,7 +1757,8 @@ mod imp {
                         主程序打开三键开关时装一次，之后用 schtasks /run 拉起，不再弹 UAC\n\
   --remove-task         【需管理员】移除上述计划任务（卸载 / 用户关闭并移除授权时用）\n\
   --task-status         查询计划任务是否存在（免提权）\n\
-  --follow-app          跟随主程序：桥接断连超过宽限期后自行退出（计划任务触发时自动带上）\n\
+  --follow-app          跟随主程序：显式停用或绑定的 App 进程退出时收尾；首次身份绑定限时20秒\n\
+  --cleanup-only        只恢复并确认上一轮清理，不注入、不续约、不启用捕获\n\
   --hide-window         兼容参数：GUI 子系统已无控制台窗口（主程序提权安装时自动带上）\n\
 为什么需要哨兵键（--canary-usage）\n\
 --------------------------------\n\
@@ -2344,12 +2447,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     const BRIDGE_RETRY_MS: u64 = 2000;
     /// 心跳间隔。主程序侧静默看门狗是 3000 ms，这里留两倍余量。
     const BRIDGE_PING_MS: u64 = 1000;
-    /// 主路径读不出来时，跨账户兜底搜索（枚举 `C:\Users\*`）的限频。
-    const BRIDGE_FALLBACK_SEARCH_S: u64 = 30;
-    /// `--follow-app` 的宽限期：桥接断连超过这么久就认为主程序已经不在了。
-    ///
-    /// 必须比"主程序重启一次"的耗时更长（debug 版冷启动通常数秒），
-    /// 否则主程序只是重开一下，助手却先退了——那会表现为"有时好用有时不好用"。
+    /// 首次身份绑定的期限，以及已有 App 实例的桥接失联诊断阈值。
+    /// 超过阈值不能证明 App 已退出；退出事实来自已绑定进程对象的 signaled 状态。
     const FOLLOW_APP_GRACE_MS: u64 = 20_000;
     /// 单次连接与应答的超时。
     const BRIDGE_IO_TIMEOUT_MS: u64 = 2000;
@@ -2359,9 +2458,121 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         port: u16,
         pipe: Option<String>,
         token: String,
+        pid: Option<u32>,
         /// 主程序的诊断日志路径（`log=`）。**只用于决定助手往哪儿写日志**，
         /// 不参与连接；不得写进日志正文（隐私规则：正文不落个人路径）。
         log: Option<PathBuf>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AppProcessState {
+        Unbound,
+        Running,
+        Exited,
+        Unknown(u32),
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FollowAppAction {
+        Continue,
+        StopRequested,
+        AppExited,
+        Reconnect,
+        IdentityUnknown(u32),
+        StartupFailed,
+    }
+
+    fn follow_app_action(
+        explicit_stop: bool,
+        state: AppProcessState,
+        bridge_stale: bool,
+    ) -> FollowAppAction {
+        if explicit_stop {
+            return FollowAppAction::StopRequested;
+        }
+        match state {
+            AppProcessState::Exited => FollowAppAction::AppExited,
+            AppProcessState::Running if bridge_stale => FollowAppAction::Reconnect,
+            AppProcessState::Unknown(error) => FollowAppAction::IdentityUnknown(error),
+            AppProcessState::Unbound if bridge_stale => FollowAppAction::StartupFailed,
+            _ => FollowAppAction::Continue,
+        }
+    }
+
+    struct AppProcess {
+        handle: OwnedHandle,
+        pid: u32,
+        created: u64,
+    }
+    impl AppProcess {
+        fn open(pid: u32) -> std::io::Result<Self> {
+            let raw =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | 0x0010_0000, 0, pid) };
+            if raw.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            let (mut creation, mut exit, mut kernel, mut user) = (
+                FileTime::default(),
+                FileTime::default(),
+                FileTime::default(),
+                FileTime::default(),
+            );
+            if unsafe { GetProcessTimes(raw, &mut creation, &mut exit, &mut kernel, &mut user) }
+                == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self {
+                handle,
+                pid,
+                created: ((creation.high as u64) << 32) | creation.low as u64,
+            })
+        }
+        fn from_pipe(pipe: &fs::File, expected_pid: u32) -> Result<Self, String> {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetNamedPipeServerProcessId(pipe: Handle, pid: *mut u32) -> i32;
+            }
+            let mut actual_pid = 0;
+            if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut actual_pid) } == 0 {
+                return Err(format!("pipe_server_identity_failed(os={})", lasts_error()));
+            }
+            if expected_pid == 0 || actual_pid != expected_pid {
+                return Err("pipe_server_pid_mismatch".into());
+            }
+            Self::open(actual_pid)
+                .map_err(|error| format!("app_process_open_failed(os={:?})", error.raw_os_error()))
+        }
+        fn state(&self) -> AppProcessState {
+            match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } {
+                0 => AppProcessState::Exited,
+                258 => AppProcessState::Running,
+                _ => AppProcessState::Unknown(lasts_error()),
+            }
+        }
+        fn same_instance(&self, other: &Self) -> bool {
+            self.pid == other.pid && self.created == other.created
+        }
+    }
+
+    fn retain_app_process(
+        bound: &mut Option<AppProcess>,
+        observed: AppProcess,
+        follow_app: bool,
+    ) -> bool {
+        if !follow_app {
+            return true;
+        } // 手工 Helper 允许 App 重启后重新连接。
+        if bound
+            .as_ref()
+            .is_some_and(|original| !original.same_instance(&observed))
+        {
+            return false;
+        }
+        if bound.is_none() {
+            *bound = Some(observed);
+        }
+        true
     }
 
     enum AppBridgeStream {
@@ -2434,12 +2645,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     enum BridgeOutbound {
         Edges(Vec<u16>),
+        Observed(Vec<u16>),
         Ownership(BridgeCaptureTargets),
         /// agent 已应用语音键合成配置的确认（绝对状态；`None` = 关闭）。
         ///
         /// 只用于转发给主程序置门禁——门禁不再认"S 行写进 socket"
         /// （2026-10-03 加固：写出成功 ≠ 报告层已生效）。
         SynthAck(Option<u16>),
+    }
+
+    struct QueuedBridgeOutbound {
+        queued_at: Instant,
+        message: BridgeOutbound,
     }
 
     /// 主程序桥接：把 agent 上报的动态目标按键边沿转发给主程序。
@@ -2459,16 +2676,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 转发。断线期间丢失的变化无需逐条补发——重连后拿最近的绝对状态再发一次即可对齐。
     /// 这是选绝对语义而不是"逐键按下/抬起事件"的主要理由。
     struct AppBridge {
-        tx: mpsc::Sender<BridgeOutbound>,
+        tx: mpsc::Sender<QueuedBridgeOutbound>,
         handle: Option<JoinHandle<()>>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
-        /// 最后一次**成功连上主程序**的时刻（epoch ms）。
-        ///
-        /// `--follow-app` 拿它当"主程序还在不在"的信号：主程序关掉 ⇒ 桥接断掉
-        /// ⇒ 这个值不再更新 ⇒ 助手自行退出。比让主程序反过来去杀进程干净得多
-        /// （主程序是普通权限，本来就杀不掉一个提权进程）。
-        last_connected_ms: Arc<AtomicU64>,
         targets: Arc<Mutex<BridgeCaptureTargets>>,
         /// 语音键报告层合成的目标 usage（`None` = 关闭）。来源 = 主程序经桥
         /// 下发的 `S` 行（绝对状态语义）；app 的「按住说话快捷键」是唯一事实源
@@ -2483,22 +2694,31 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     impl AppBridge {
-        fn last_connected_ms(&self) -> u64 {
-            self.last_connected_ms.load(Ordering::Relaxed)
+        fn enqueue(&self, message: BridgeOutbound) {
+            let _ = self.tx.send(QueuedBridgeOutbound {
+                queued_at: Instant::now(),
+                message,
+            });
         }
         /// 转发一份绝对状态（空 = 全部释放）。
         fn push_edges(&self, usages: Vec<u16>) {
-            let _ = self.tx.send(BridgeOutbound::Edges(usages));
+            self.enqueue(BridgeOutbound::Edges(usages));
+        }
+
+        fn push_observed(&self, usages: Vec<u16>) {
+            self.enqueue(BridgeOutbound::Observed(usages));
         }
 
         fn push_ownership(&self, targets: BridgeCaptureTargets) {
-            let _ = self.tx.send(BridgeOutbound::Ownership(targets));
+            self.enqueue(BridgeOutbound::Ownership(targets));
         }
 
         /// 转发 agent 的合成回执（绝对状态）给主程序（门禁闭环的输入）。
         fn push_synth_ack(&self, state: Option<u16>) {
-            let _ = self.tx.send(BridgeOutbound::SynthAck(state));
+            self.enqueue(BridgeOutbound::SynthAck(state));
         }
+
+        /// 转发 agent 的合成回执（绝对状态）给主程序（门禁闭环的输入）。
 
         fn capture_targets(&self) -> BridgeCaptureTargets {
             self.targets
@@ -2563,66 +2783,403 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// `schtasks /end` 只能停"当前任务实例"——若实例已换（重装任务/改名后
     /// 旧进程还挂着），停用就完全落空，旧助手继续映射（2026-09-24 真机复现）。
     /// 文件信号是普通权限也能投递的唯一通道：同用户提权进程可读可删。
+    static APP_STATE_DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+    fn capture_state_directory(descriptor: Option<&Path>) -> PathBuf {
+        descriptor
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| default_app_bridge_path().parent().unwrap().to_path_buf())
+    }
+
     fn app_stop_signal_path() -> PathBuf {
-        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
-            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
-            format!("{home}\\AppData\\Local")
-        });
-        PathBuf::from(base)
-            .join("SayAll")
+        APP_STATE_DIRECTORY
+            .get()
+            .cloned()
+            .unwrap_or_else(|| capture_state_directory(None))
             .join("rc003-capture-stop")
     }
 
-    /// 信号存在则删除并返回 true（谁见到谁删，避免残留信号误杀下一轮）。
-    fn take_stop_signal(path: &Path) -> bool {
-        if path.exists() {
-            let _ = fs::remove_file(path);
-            return true;
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CleanupReceipt {
+        helper_pid: u32,
+        started_unix_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completed_unix_ms: Option<u64>,
+        status: String,
+        // Terminal receipts need no resource identity. Recovery of an unfinished
+        // receipt always requires both host fields; absence never means released.
+        #[serde(default)]
+        host_pid: u32,
+        #[serde(default)]
+        host_created: u64,
+        #[serde(default)]
+        agent_instance: String,
+    }
+    impl CleanupReceipt {
+        fn parse(text: &str) -> Option<Self> {
+            let receipt: Self = serde_json::from_str(text).ok()?;
+            (receipt.helper_pid > 0
+                && receipt.started_unix_ms > 0
+                && receipt
+                    .completed_unix_ms
+                    .is_none_or(|end| end >= receipt.started_unix_ms)
+                && matches!(
+                    receipt.status.as_str(),
+                    "requested"
+                        | "unconfirmed"
+                        | "passed"
+                        | "agent_version_blocked"
+                        | "host_exited"
+                        | "not_started"
+                )
+                && (receipt.status != "host_exited"
+                    || (receipt.host_pid > 0 && receipt.host_created > 0))
+                && (receipt.agent_instance.is_empty()
+                    || valid_agent_instance(&receipt.agent_instance)))
+            .then_some(receipt)
         }
-        false
+        fn settled(&self) -> bool {
+            self.completed_unix_ms.is_some()
+                && matches!(
+                    self.status.as_str(),
+                    "passed" | "agent_version_blocked" | "host_exited" | "not_started"
+                )
+        }
+        fn resource_identity(&self) -> Option<AgentIdentity> {
+            (self.host_pid > 0 && self.host_created > 0).then(|| AgentIdentity {
+                host_pid: self.host_pid,
+                host_created: self.host_created,
+                instance: self.agent_instance.clone(),
+            })
+        }
     }
 
-    /// 兜底：在 `C:\Users\*\AppData\Local\SayAll\rc003-bridge.ini` 里找**最近修改**的一份。
-    ///
-    /// **为什么需要**：助手以管理员身份运行。若提权时用的是**另一个账户**的凭据
-    /// （而非当前账户的"提升"形态），助手的 `%LOCALAPPDATA%` 就指向那个账户，
-    /// 于是读不到当前用户写的描述文件——功能会静默不可用。提权进程读取任意用户目录
-    /// 没有权限障碍，因此按**固定相对路径**枚举即可兜住这种情况。
-    fn find_app_bridge_elsewhere(logger: &Logger) -> Option<PathBuf> {
-        let users_root = Path::new("C:\\Users");
-        let entries = fs::read_dir(users_root).ok()?;
-        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-        for entry in entries.flatten() {
-            let candidate = entry
-                .path()
-                .join("AppData")
-                .join("Local")
-                .join("SayAll")
-                .join("rc003-bridge.ini");
-            let Ok(metadata) = fs::metadata(&candidate) else {
+    fn valid_agent_instance(value: &str) -> bool {
+        (32..=128).contains(&value.len())
+            && value.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
+    }
+
+    fn prior_cleanup_is_clear(previous: Option<&str>) -> bool {
+        previous
+            .is_none_or(|text| CleanupReceipt::parse(text).is_some_and(|receipt| receipt.settled()))
+    }
+
+    fn previous_cleanup_is_clear() -> bool {
+        let path = app_stop_signal_path().with_file_name("rc003-capture-cleanup.json");
+        match fs::read_to_string(path) {
+            Ok(previous) => prior_cleanup_is_clear(Some(&previous)),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+
+    fn previous_cleanup_has_terminal_proof() -> bool {
+        let path = app_stop_signal_path().with_file_name("rc003-capture-cleanup.json");
+        fs::read_to_string(path)
+            .ok()
+            .is_some_and(|previous| prior_cleanup_is_clear(Some(&previous)))
+    }
+
+    fn write_cleanup_state(status: &str, completed: bool) -> std::io::Result<()> {
+        let started = CAPTURE_STARTED_MS.load(Ordering::Relaxed);
+        if started == 0 {
+            return Ok(());
+        } // 离线单测不写用户状态。
+        let path = app_stop_signal_path().with_file_name("rc003-capture-cleanup.json");
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("cleanup directory missing"))?;
+        fs::create_dir_all(parent)?;
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let identity = CAPTURE_IDENTITY
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let receipt = CleanupReceipt {
+            helper_pid: std::process::id(),
+            started_unix_ms: started,
+            completed_unix_ms: completed.then(now_ms_u64),
+            status: status.into(),
+            host_pid: identity.as_ref().map_or(0, |id| id.host_pid),
+            host_created: identity.as_ref().map_or(0, |id| id.host_created),
+            agent_instance: identity.map(|id| id.instance).unwrap_or_default(),
+        };
+        let body = serde_json::to_vec(&receipt).map_err(std::io::Error::other)?;
+        fs::write(&temporary, body)?;
+        // Windows rename 不覆盖现有目标；单次替换保证读者不会见到半份 JSON。
+        let source = to_wide(&temporary.to_string_lossy());
+        let target = to_wide(&path.to_string_lossy());
+        if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0x1 | 0x8) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// 停止意图必须持续存在：已排队但尚未启动的任务也必须看见。
+    /// 只有主程序在新的显式授权启动前清除，不由 Helper 消耗。
+    fn take_stop_signal(path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn recorded_host(identity: &AgentIdentity) -> Result<Option<AppProcess>, &'static str> {
+        match AppProcess::open(identity.host_pid) {
+            Ok(host) if host.created != identity.host_created => Ok(None),
+            Ok(host) => match host.state() {
+                AppProcessState::Exited => Ok(None),
+                AppProcessState::Running => Ok(Some(host)),
+                _ => Err("host_state_unknown"),
+            },
+            Err(error) if error.raw_os_error() == Some(87) => Ok(None),
+            Err(_) => Err("host_open_unknown"),
+        }
+    }
+
+    fn socket_peer_matches(stream: &TcpStream, expected_pid: u32) -> bool {
+        #[link(name = "iphlpapi")]
+        extern "system" {
+            fn GetExtendedTcpTable(
+                table: *mut c_void,
+                size: *mut u32,
+                order: i32,
+                family: u32,
+                table_class: u32,
+                reserved: u32,
+            ) -> u32;
+        }
+        let (Ok(local), Ok(peer)) = (stream.local_addr(), stream.peer_addr()) else {
+            return false;
+        };
+        let mut size = 0u32;
+        if unsafe { GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, 2, 5, 0) } != 122 {
+            return false;
+        }
+        let mut bytes = vec![0u8; size as usize];
+        if unsafe { GetExtendedTcpTable(bytes.as_mut_ptr().cast(), &mut size, 0, 2, 5, 0) } != 0
+            || bytes.len() < 4
+        {
+            return false;
+        }
+        let count = u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as usize;
+        if count > (bytes.len() - 4) / 24 {
+            return false;
+        }
+        let mut owners = Vec::new();
+        for row in bytes[4..4 + count * 24].chunks_exact(24) {
+            let field =
+                |offset: usize| u32::from_ne_bytes(row[offset..offset + 4].try_into().unwrap());
+            if field(0) != 5 {
                 continue;
-            };
-            let Ok(modified) = metadata.modified() else {
-                continue;
-            };
-            if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
-                best = Some((modified, candidate));
+            }
+            let a = std::net::SocketAddr::from((
+                Ipv4Addr::from(field(4).to_ne_bytes()),
+                u16::from_be(field(8) as u16),
+            ));
+            let b = std::net::SocketAddr::from((
+                Ipv4Addr::from(field(12).to_ne_bytes()),
+                u16::from_be(field(16) as u16),
+            ));
+            if (a == local && b == peer) || (a == peer && b == local) {
+                owners.push((a, b, field(20)));
             }
         }
-        if let Some((_, path)) = &best {
-            logger.kv(
-                "[APP-BRIDGE]",
-                &[
-                    ("event", "descriptor_found_elsewhere".into()),
-                    ("path", path.display().to_string()),
-                    (
-                        "note",
-                        "默认 %LOCALAPPDATA% 下没有找到；已按 C:\\Users\\* 枚举兜底".into(),
-                    ),
-                ],
-            );
+        owners.len() == 2
+            && owners.contains(&(local, peer, std::process::id()))
+            && owners.contains(&(peer, local, expected_pid))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RecoveryHello {
+        #[serde(rename = "type")]
+        kind: String,
+        token: String,
+        pid: u32,
+        agent: String,
+        build: String,
+        instance: String,
+    }
+
+    fn recover_connection(
+        mut stream: TcpStream,
+        expected: &AgentIdentity,
+        host: &AppProcess,
+        token: &str,
+        logger: &Logger,
+        runtime_dir: &Path,
+        recovery_deadline: Instant,
+    ) -> Result<&'static str, &'static str> {
+        if !socket_peer_matches(&stream, expected.host_pid) {
+            return Err("tcp_owner_mismatch");
         }
-        best.map(|(_, path)| path)
+        stream
+            .set_nonblocking(false)
+            .map_err(|_| "socket_mode_setup")?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(READ_POLL_MS)))
+            .map_err(|_| "socket_timeout_setup")?;
+        let mut pending = Vec::new();
+        let mut chunk = [0; 4096];
+        let hello = loop {
+            match host.state() {
+                AppProcessState::Exited => return Ok("host_exited"),
+                AppProcessState::Running => {}
+                _ => return Err("host_state_unknown"),
+            }
+            if Instant::now() >= recovery_deadline {
+                return Err("hello_timeout");
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return Err("connection_ended_before_hello"),
+                Ok(count) => {
+                    pending.extend_from_slice(&chunk[..count]);
+                    if pending.len() > 65536 {
+                        return Err("hello_too_large");
+                    }
+                    if let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                        break serde_json::from_slice::<RecoveryHello>(&pending[..end])
+                            .map_err(|_| "hello_invalid")?;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return Err("hello_read_failed"),
+            }
+        };
+        if hello.kind != "hello"
+            || hello.token != token
+            || hello.pid != expected.host_pid
+            || hello.agent != "rc003_agent/1"
+            || hello.build != AGENT_BUILD
+            || !valid_agent_instance(&hello.instance)
+            || (!expected.instance.is_empty() && hello.instance != expected.instance)
+            || !socket_peer_matches(&stream, expected.host_pid)
+        {
+            return Err("recovery_identity_mismatch");
+        }
+        // Wait for hello before checking an unrecorded instance: a LoadLibrary
+        // thread may still be finishing after its original Helper was killed.
+        if expected.instance.is_empty() {
+            let modules = enum_modules(expected.host_pid).map_err(|_| "host_modules_unknown")?;
+            let taps = resident_taps(&modules);
+            if taps.len() != 1 || !Path::new(&taps[0].path).starts_with(runtime_dir) {
+                return Err("unrecorded_agent_ambiguous");
+            }
+        }
+        let identity = AgentIdentity {
+            instance: hello.instance,
+            ..expected.clone()
+        };
+        set_capture_identity(Some(identity.clone()));
+        write_cleanup_state("requested", false).map_err(|_| "identity_write_failed")?;
+        logger.line("[RECOVERY] phase=stop_requested capture_authorized=false");
+        match stop_agent_outcome(&mut stream, token, &identity, Some(host)) {
+            StopOutcome::Confirmed => Ok("passed"),
+            StopOutcome::HostExited => Ok("host_exited"),
+            StopOutcome::Unconfirmed => Err("stop_unconfirmed"),
+        }
+    }
+
+    fn reconcile_previous_capture(
+        listener: &TcpListener,
+        args: &Args,
+        logger: &Logger,
+        cleanup_only: bool,
+    ) -> Result<(), &'static str> {
+        let path = app_stop_signal_path().with_file_name("rc003-capture-cleanup.json");
+        let previous = match fs::read_to_string(path) {
+            Ok(text) => Some(CleanupReceipt::parse(&text).ok_or("receipt_invalid")?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err("receipt_unreadable"),
+        };
+        if previous.as_ref().is_none_or(CleanupReceipt::settled) {
+            if cleanup_only {
+                CAPTURE_STARTED_MS.store(now_ms_u64(), Ordering::Relaxed);
+                set_capture_identity(None);
+                write_cleanup_state("not_started", true).map_err(|_| "terminal_write_failed")?;
+                logger.line(
+                    "[RECOVERY] result=not_started previous_settled=true capture_authorized=false",
+                );
+            }
+            return Ok(());
+        }
+        let previous = previous.unwrap();
+        let identity = previous
+            .resource_identity()
+            .ok_or("prior_host_identity_missing")?;
+        match AppProcess::open(previous.helper_pid) {
+            Ok(process)
+                if (process.created / 10_000).saturating_sub(11_644_473_600_000)
+                    <= previous.started_unix_ms =>
+            {
+                if process.state() != AppProcessState::Exited {
+                    return Err("prior_helper_still_alive");
+                }
+            }
+            Err(error) if error.raw_os_error() != Some(87) => {
+                return Err("prior_helper_state_unknown")
+            }
+            _ => {}
+        }
+        let host = recorded_host(&identity)?;
+        CAPTURE_STARTED_MS.store(now_ms_u64(), Ordering::Relaxed);
+        set_capture_identity(Some(identity.clone()));
+        let Some(host) = host else {
+            write_cleanup_state("host_exited", true).map_err(|_| "terminal_write_failed")?;
+            logger.line("[RECOVERY] result=host_exited capture_authorized=false");
+            return Ok(());
+        };
+        let token = fs::read_to_string(args.runtime_dir.join(TOKEN_FILE))
+            .map_err(|_| "recovery_token_unavailable")?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err("recovery_token_empty");
+        }
+        write_cleanup_state("requested", false).map_err(|_| "recovery_write_failed")?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| "listener_setup_failed")?;
+        let deadline = Instant::now() + Duration::from_secs(DEFAULT_AWAIT_HELLO_S);
+        logger.line("[RECOVERY] phase=waiting_agent capture_authorized=false");
+        let result = loop {
+            match host.state() {
+                AppProcessState::Exited => break Ok("host_exited"),
+                AppProcessState::Running => {}
+                _ => break Err("host_state_unknown"),
+            }
+            if Instant::now() >= deadline {
+                break Err("recovery_connect_timeout");
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    break recover_connection(
+                        stream,
+                        &identity,
+                        &host,
+                        token,
+                        logger,
+                        &args.runtime_dir,
+                        deadline,
+                    )
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(READ_POLL_MS))
+                }
+                Err(_) => break Err("recovery_accept_failed"),
+            }
+        };
+        let status = result.as_ref().copied().unwrap_or("unconfirmed");
+        write_cleanup_state(status, true).map_err(|_| "terminal_write_failed")?;
+        logger.kv(
+            "[RECOVERY]",
+            &[
+                ("result", status.into()),
+                ("capture_authorized", "false".into()),
+            ],
+        );
+        result.map(|_| ())
     }
 
     /// 解析描述文件（`key=value`）。规则与主程序侧 `rc003_bridge::parse_descriptor` 一致。
@@ -2635,6 +3192,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut port = None;
         let mut pipe = None;
         let mut token = None;
+        let mut pid = None;
         let mut log = None;
         let mut version = 0u32;
         for line in text.lines() {
@@ -2650,6 +3208,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 "port" => port = value.trim().parse().ok(),
                 "pipe" => pipe = Some(value.trim().to_string()),
                 "token" => token = Some(value.trim().to_string()),
+                "pid" => pid = value.trim().parse().ok(),
                 "log" if !value.trim().is_empty() => log = Some(PathBuf::from(value.trim())),
                 _ => {}
             }
@@ -2669,6 +3228,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             port,
             pipe,
             token,
+            pid,
             log,
         })
     }
@@ -2700,9 +3260,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     fn bridge_write_line(stream: &mut impl Write, line: &str) -> std::io::Result<()> {
-        stream.write_all(line.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()
+        let started = Instant::now();
+        let result = (|| {
+            stream.write_all(line.as_bytes())?;
+            stream.write_all(b"\n")?;
+            stream.flush()
+        })();
+        LATENCY.record(LatencyStage::BridgeWrite, elapsed_ms(started));
+        result
     }
 
     /// 边沿 payload 编码：空集合 → `-`（主程序据此释放全部），否则 `f1,80,81`
@@ -2972,7 +3537,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     fn bridge_connect(
         path: Option<&Path>,
         logger: &Logger,
-    ) -> Result<(AppBridgeStream, PathBuf, BridgeCaptureTargets, Vec<u8>), String> {
+    ) -> Result<
+        (
+            AppBridgeStream,
+            PathBuf,
+            BridgeCaptureTargets,
+            Vec<u8>,
+            Option<AppProcess>,
+        ),
+        String,
+    > {
         let path = match path {
             Some(path) => path.to_path_buf(),
             None => return Err("descriptor_path_unknown".to_string()),
@@ -3050,6 +3624,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 AppBridgeStream::Tcp(tcp)
             }
         };
+        let app_process = match &stream {
+            AppBridgeStream::Pipe(pipe) => {
+                Some(AppProcess::from_pipe(pipe, target.pid.unwrap_or(0))?)
+            }
+            AppBridgeStream::Tcp(_) => {
+                let pid = target.pid.ok_or_else(|| "tcp_app_pid_missing".to_owned())?;
+                Some(AppProcess::open(pid).map_err(|_| "tcp_app_process_unavailable".to_owned())?)
+            }
+        };
         let hello = format!(
             "HELLO {} {} {}\n",
             BRIDGE_PROTOCOL_VERSION,
@@ -3063,17 +3646,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let (ack, surplus) = bridge_read_ack(&mut stream)?;
         let targets = parse_bridge_target_line(&ack, "OK")
             .ok_or_else(|| format!("rejected_or_bad_config({})", ack.trim()))?;
+        if app_process
+            .as_ref()
+            .is_some_and(|process| process.state() != AppProcessState::Running)
+        {
+            return Err("app_process_not_running_after_handshake".into());
+        }
         if let AppBridgeStream::Tcp(tcp) = &stream {
             tcp.set_nonblocking(true).ok();
         }
         // `surplus`：与 `OK` 同一次读到达的后续字节（真实主程序紧跟一行
         // `S <usage>`）。调用方必须交回读循环——丢掉等于吞掉合成配置。
-        Ok((stream, path, targets, surplus))
+        Ok((stream, path, targets, surplus, app_process))
     }
 
     fn app_bridge_worker(
         path: PathBuf,
-        rx: mpsc::Receiver<BridgeOutbound>,
+        rx: mpsc::Receiver<QueuedBridgeOutbound>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
         logger: Logger,
@@ -3090,25 +3679,68 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut last_attempt: Option<Instant> = None;
         let mut last_ping = Instant::now();
         let mut resolved: Option<PathBuf> = Some(path);
-        let mut last_fallback_search: Option<Instant> = None;
         let mut failures_logged = 0u64;
         let mut read_buffer: Vec<u8> = Vec::new();
         let mut had_connection = false;
+        let mut app_process: Option<AppProcess> = None;
+        let mut last_follow_action = FollowAppAction::Continue;
 
         while !stop.load(Ordering::Relaxed) {
-            // 0) 停用信号：主程序关开关时写此文件。检测到即整个进程退出——
-            //    比起由主程序反杀（它没有权限）或靠 schtasks /end（覆盖不了
-            //    "实例已换"的情况），这是唯一对所有情形都成立的停止通道。
-            //    只在 --follow-app 下生效：手动调试运行不该被残留信号误杀。
-            if follow_app && take_stop_signal(&app_stop_signal_path()) {
-                logger.line("[STOP-SIGNAL] 主程序请求停用，助手退出");
-                std::process::exit(0);
+            if follow_app {
+                let idle_ms =
+                    now_ms_u64().saturating_sub(last_connected_ms.load(Ordering::Relaxed));
+                let state = app_process
+                    .as_ref()
+                    .map(AppProcess::state)
+                    .unwrap_or(AppProcessState::Unbound);
+                let action = follow_app_action(
+                    take_stop_signal(&app_stop_signal_path()),
+                    state,
+                    idle_ms > FOLLOW_APP_GRACE_MS,
+                );
+                if action != last_follow_action {
+                    let (event, reason, error) = match action {
+                        FollowAppAction::Continue => ("resumed", "bridge_available", 0),
+                        FollowAppAction::StopRequested => ("exit", "explicit_stop", 0),
+                        FollowAppAction::AppExited => ("exit", "bound_app_process_signaled", 0),
+                        FollowAppAction::Reconnect => {
+                            ("reconnecting", "bound_app_still_running", 0)
+                        }
+                        FollowAppAction::IdentityUnknown(error) => {
+                            ("waiting", "bound_app_query_failed", error)
+                        }
+                        FollowAppAction::StartupFailed => {
+                            ("exit", "startup_app_identity_unconfirmed", 0)
+                        }
+                    };
+                    logger.kv(
+                        "[FOLLOW-APP]",
+                        &[
+                            ("event", event.into()),
+                            ("reason", reason.into()),
+                            ("idle_ms", idle_ms.to_string()),
+                            ("grace_ms", FOLLOW_APP_GRACE_MS.to_string()),
+                            ("os_error", error.to_string()),
+                        ],
+                    );
+                    last_follow_action = action;
+                }
+                if matches!(
+                    action,
+                    FollowAppAction::StopRequested
+                        | FollowAppAction::AppExited
+                        | FollowAppAction::StartupFailed
+                ) {
+                    CTRL_STOP.store(true, Ordering::Relaxed);
+                    break;
+                }
             }
 
             // 1) 消化待发消息。用 try_recv 而不是 recv_timeout：断线期间积压的消息
             //    只需要"最后一份绝对状态"，逐条补发没有意义（见 AppBridge 的说明）。
-            while let Ok(message) = rx.try_recv() {
-                match message {
+            while let Ok(queued) = rx.try_recv() {
+                LATENCY.record(LatencyStage::BridgeQueue, elapsed_ms(queued.queued_at));
+                match queued.message {
                     BridgeOutbound::Edges(usages) => {
                         last_known = usages;
                         if let Some(stream) = conn.as_mut() {
@@ -3117,6 +3749,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                     stats.edges_forwarded.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(_) => conn = None,
+                            }
+                        }
+                    }
+                    BridgeOutbound::Observed(usages) => {
+                        if let Some(stream) = conn.as_mut() {
+                            if bridge_write_line(
+                                stream,
+                                &format!("R {} {}", now_ms(), format_edge_payload(&usages)),
+                            )
+                            .is_err()
+                            {
+                                conn = None;
                             }
                         }
                     }
@@ -3148,34 +3792,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     .unwrap_or(true);
                 if due {
                     last_attempt = Some(Instant::now());
-                    // **不做 exists 预筛。** 早先这里是
-                    // `.filter(|p| p.exists()).or_else(兜底搜索)`，后果是：文件不存在时
-                    // candidate 直接变成 None，于是日志打出 `descriptor_path_unknown`
-                    // —— 读起来像"路径配置错了"，而真实原因往往只是**主程序没在跑**。
-                    // 2026-09-23 真机日志上就是这样误导的（reason=descriptor_path_unknown
-                    // 与同一行的 note"主程序未运行属正常"自相矛盾）。现在把"文件不存在"
-                    // 交给 bridge_connect 用 `descriptor_missing(<完整路径>)` 如实表达：
-                    // 原因与路径一起打出来，可以直接拿去核对。
-                    // 另外原写法还会每 2 秒枚举一次 C:\Users\*，这里改为限频。
-                    let mut candidate = resolved.clone();
-                    let primary_unreadable = candidate
-                        .as_ref()
-                        .map(|path| !path.exists())
-                        .unwrap_or(true);
-                    if primary_unreadable {
-                        let due_search = last_fallback_search
-                            .map(|at: Instant| at.elapsed().as_secs() >= BRIDGE_FALLBACK_SEARCH_S)
-                            .unwrap_or(true);
-                        if due_search {
-                            last_fallback_search = Some(Instant::now());
-                            if let Some(found) = find_app_bridge_elsewhere(&logger) {
-                                resolved = Some(found.clone());
-                                candidate = Some(found);
-                            }
-                        }
-                    }
+                    // 只连接当前用户明确的描述文件，不扫描其他用户配置。
+                    let candidate = resolved.clone();
                     match bridge_connect(candidate.as_deref(), &logger) {
-                        Ok((stream, location, configured, surplus)) => {
+                        Ok((stream, location, configured, surplus, observed_process)) => {
+                            if follow_app && observed_process.is_none() {
+                                logger.line(
+                                    "[APP-BRIDGE] event=unavailable reason=app_identity_not_bound",
+                                );
+                                stream.shutdown();
+                                continue;
+                            }
+                            if let Some(observed) = observed_process {
+                                if !retain_app_process(&mut app_process, observed, follow_app) {
+                                    logger.line("[APP-BRIDGE] event=unavailable reason=app_instance_changed original_binding_retained=true");
+                                    stream.shutdown();
+                                    continue;
+                                }
+                            }
                             let transport = stream.transport();
                             stats.connects.fetch_add(1, Ordering::Relaxed);
                             last_connected_ms.store(now_ms_u64(), Ordering::Relaxed);
@@ -3281,7 +3915,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     if bridge_write_line(stream, &format!("P {stamp}")).is_err() {
                         conn = None;
                     } else {
-                        // 心跳写成功 = 主程序那一头确实还在，刷新"最后连通时刻"。
+                        // 这里只刷新桥接健康时刻；不能把写超时当作进程已经退出。
                         last_connected_ms.store(stamp, Ordering::Relaxed);
                     }
                 }
@@ -3315,6 +3949,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 当成"正常收尾"而不再等待后续释放（虽然它自己有看门狗兜底）。
         if let Some(stream) = conn.as_mut() {
             let _ = bridge_send_edges(stream, &[]);
+            let _ = bridge_write_line(stream, &format!("R {} -", now_ms()));
             let _ = bridge_write_line(stream, "BYE helper_shutdown");
             stream.shutdown();
         }
@@ -3329,8 +3964,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(BridgeStats::default());
-        // 初值 = 进程启动时刻（不是 0）：主程序还没开时也要等满宽限期才退出，
-        // 否则一启动就满足"很久没连上"而立刻自杀。
+        // 首次实际管道身份绑定必须在现有宽限期内完成。
         let last_connected_ms = Arc::new(AtomicU64::new(now_ms_u64()));
         let targets = Arc::new(Mutex::new(BridgeCaptureTargets::default()));
         let voice_synth = Arc::new(Mutex::new(None::<u16>));
@@ -3342,8 +3976,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let worker_logger = Logger::with_shared(logger.fallback.clone(), logger.shared.clone());
         let worker_stop = Arc::clone(&stop);
         let worker_stats = Arc::clone(&stats);
-        // 初值 = 进程启动时刻，而不是 0：这样"主程序还没开"也要等满宽限期才退出，
-        // 否则一启动就满足"很久没连上"而立刻自杀。
+        // 首次未完成实际身份绑定时沿用同一宽限期，避免提权 Helper 长期遗留。
         let worker_last = Arc::clone(&last_connected_ms);
         let worker_targets = Arc::clone(&targets);
         let worker_synth = Arc::clone(&voice_synth);
@@ -3372,7 +4005,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             handle: Some(handle),
             stop,
             stats,
-            last_connected_ms,
             targets,
             voice_synth,
             voice_synth_dirty,
@@ -3616,34 +4248,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 // 代次核对：宿主里的实例是上一代脚本时，本轮改的逻辑**不会生效**。
                 // 不打这一条，现象是"日志一切正常，但行为还是旧的"——最难查的一类。
                 let build = extract_str(line, "build").unwrap_or_default();
-                if !build.is_empty() && build != AGENT_BUILD {
-                    // 旧代 agent 不会自愈（脚本在宿主里只加载一次）：满足冷却与提权
-                    // 条件时后台刷新一次——结束旧宿主、等新宿主、重新注入。
-                    spawn_agent_refresh_if_needed(
-                        &build,
-                        extract_num(line, "pid").unwrap_or(0) as u32,
-                        logger,
-                    );
+                if build != AGENT_BUILD {
+                    session.authenticated = false;
                     logger.kv(
                         "[AGENT-STALE]",
                         &[
                             ("running", build),
-                            ("embedded", AGENT_BUILD.to_string()),
-                            (
-                                "host_pid",
-                                extract_num(line, "pid").unwrap_or(0).to_string(),
-                            ),
-                            (
-                                "note",
-                                "宿主里跑的是上一代脚本（本轮接管的是旧实例）。\
-                                助手已尝试自动刷新（结束旧宿主 → 等新宿主 → 重新注入）；
-                                自动刷新受冷却限制，失败时会重试。若仍反复出现，
-                                可重启机器或以管理员结束该 WUDFHost 进程。\
-                                 另一条会因租约过期停清键，不适合做验收判据。"
-                                    .into(),
-                            ),
+                            ("expected", AGENT_BUILD.into()),
+                            ("result", "failed".into()),
+                            ("reason", "resident_agent_version_mismatch".into()),
+                            ("recovery", "await_host_lifecycle_no_force_restart".into()),
                         ],
                     );
+                    return false;
                 }
             }
             "hb" => {
@@ -3722,6 +4339,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     "[SYNTH-ACK]",
                     &[("state", state), ("to_app", to_app.to_string())],
                 );
+            }
+            "observed" => {
+                if !session.authenticated {
+                    return false;
+                }
+                if let Some(bridge) = bridge {
+                    let usages = extract_num_array(line, "usages")
+                        .into_iter()
+                        .filter_map(|usage| u16::try_from(usage).ok())
+                        .filter(|usage| TARGET_USAGES.contains(usage))
+                        .collect();
+                    bridge.push_observed(usages);
+                }
             }
             "edge" => {
                 if !session.authenticated {
@@ -3900,12 +4530,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
         };
 
+        // An explicit cross-user descriptor also selects its stop/receipt directory.
+        // No state is written under the elevated account's own profile by mistake.
+        let _ = APP_STATE_DIRECTORY.set(capture_state_directory(args.app_bridge.as_deref()));
+
         // 计划任务触发的运行**没有启动器**替它传 --log。不给默认日志的话，
         // 一旦出问题（比如连不上主程序、起来就退）就只能靠猜——这正是
         // "日志停在 write_failed 就不再增长"那类事故的形状。
         // 放运行时目录里：提权进程可写，且与令牌/Gadget 同处一个地方。
         // 只对 --follow-app 生效，不改变手动运行"必须显式 --log"的既有约定。
-        if args.follow_app && args.log.is_none() {
+        if (args.follow_app || args.cleanup_only) && args.log.is_none() {
             let _ = std::fs::create_dir_all(&args.runtime_dir);
             args.log = Some(args.runtime_dir.join("helper-task.log"));
         }
@@ -4058,6 +4692,34 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
 
         // ---- 定位宿主 ----
+        // The listener is the process-lifetime singleton. Recovery occurs before
+        // runtime preparation or any bridge worker; closing the App cannot cancel it.
+        let listener = if args.dry_run {
+            None
+        } else {
+            let listener = match bind_listener(args.port) {
+                Ok(listener) => listener,
+                Err(_) => {
+                    logger.line("[RECOVERY] result=busy reason=active_helper_exists");
+                    std::process::exit(8);
+                }
+            };
+            let cleanup_only =
+                args.cleanup_only || (args.follow_app && take_stop_signal(&app_stop_signal_path()));
+            if let Err(reason) = reconcile_previous_capture(&listener, &args, &logger, cleanup_only)
+            {
+                logger.kv(
+                    "[RECOVERY]",
+                    &[("result", "unconfirmed".into()), ("reason", reason.into())],
+                );
+                std::process::exit(15);
+            }
+            if cleanup_only {
+                return;
+            }
+            Some(listener)
+        };
+
         let (target_pid, entries) = match resolve_target(&args, &logger) {
             Ok(v) => v,
             Err(code) => std::process::exit(code),
@@ -4200,6 +4862,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             return;
         }
 
+        let target_created = match process_creation_time(target_pid) {
+            Some(created) if created > 0 => created,
+            _ => {
+                logger.line("[STOP] host_identity_unconfirmed；未注入宿主");
+                std::process::exit(15);
+            }
+        };
+        let mut cleanup = CleanupState::new(target_pid, target_created);
+
         // ---- 令牌：默认跨运行稳定（见 TOKEN_FILE 注释） ----
         // 必须**在**探测常驻 tap 之前做：磁盘上本来就有令牌，才谈得上"接管上一代"。
         if args.token.is_empty() {
@@ -4340,6 +5011,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 Some(bridge)
             }
             None => {
+                if args.follow_app {
+                    logger.line(
+                        "[FOLLOW-APP] event=exit reason=startup_bridge_unavailable injected=false",
+                    );
+                    std::process::exit(15);
+                }
                 logger.kv(
                     "[APP-BRIDGE]",
                     &[
@@ -4360,14 +5037,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 若先准备再发现端口被占，就等于"失败的一次运行也动了磁盘状态"
         // （2026-09-23 真机实测：第二轮撞端口 10048 时已经写完了配置）。
         // 仍然保持"先监听、后注入"：让 agent 的 init() 一连就能连上，不白等 3 秒。
-        let listener = match bind_listener(args.port) {
-            Ok(l) => l,
-            Err(e) => {
-                logger.line(&format!("[STOP] {e}"));
-                std::process::exit(8);
-            }
-        };
+        let listener = listener.expect("dry-run returned before capture preparation");
         logger.kv("[LISTEN]", &[("addr", format!("127.0.0.1:{}", args.port))]);
+
+        if !previous_cleanup_is_clear() {
+            logger.line(
+                "[STOP] result=blocked reason=prior_cleanup_unconfirmed receipt_preserved=true",
+            );
+            std::process::exit(15);
+        }
 
         let prepared = match prepare_runtime(&args, &gadget_src, &logger, &plan) {
             Ok(f) => f,
@@ -4380,8 +5058,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
         }
 
-        // 记下本轮准备好的 DLL：stale 自动刷新要用它重新注入。
-        let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
+        CAPTURE_STARTED_MS.store(now_ms_u64(), Ordering::Relaxed);
+        set_capture_identity(Some(AgentIdentity {
+            host_pid: target_pid,
+            host_created: target_created,
+            instance: String::new(),
+        }));
+        cleanup.attach_prior_terminal =
+            matches!(plan, DllPlan::Attach) && previous_cleanup_has_terminal_proof();
+        if args.follow_app
+            && (CTRL_STOP.load(Ordering::Relaxed) || take_stop_signal(&app_stop_signal_path()))
+        {
+            let written = write_cleanup_state("not_started", true).is_ok();
+            logger.line("[START-CANCELLED] stop_intent_observed injected=false");
+            std::process::exit(if written { 0 } else { 15 });
+        }
 
         let mut injection: Option<Injection> = match plan {
             DllPlan::Attach => {
@@ -4400,13 +5091,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 );
                 None
             }
-            _ => match inject_gadget(target_pid, &prepared.dll, &logger) {
-                Ok(i) => Some(i),
-                Err(e) => {
-                    logger.line(&format!("[STOP] {e}"));
-                    std::process::exit(9);
+            _ => {
+                if cleanup.begin_capture().is_err() {
+                    logger.line("[STOP] cleanup_state_write_failed；未注入宿主");
+                    std::process::exit(15);
                 }
-            },
+                match inject_gadget(target_pid, &prepared.dll, &logger) {
+                    Ok(i) => Some(i),
+                    Err(e) => {
+                        logger.line(&format!("[STOP] {e}"));
+                        let _ = write_cleanup_state("unconfirmed", true);
+                        std::process::exit(9);
+                    }
+                }
+            }
         };
         logger.kv("[DLL]", &dll_report_fields(&plan, &prepared));
 
@@ -4432,6 +5130,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             let mut tick: u64 = 0;
             while !renew_stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(RENEW_MS));
+                if !AGENT_AUTHORIZED.load(Ordering::Relaxed) {
+                    continue;
+                }
                 tick += 1;
                 let mut guard = match renew_shared.lock() {
                     Ok(g) => g,
@@ -4487,9 +5188,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         logger.line("");
 
         let started = Instant::now();
-        // 进程启动的 epoch 时刻：`--follow-app` 在"从未连上过主程序"时用它做基准，
-        // 这样宽限期是从启动开始算的，而不是从 1970 年算（那会立刻退出）。
-        let started_ms = now_ms_u64();
         // `--duration` 的绝对到期时刻。用绝对时刻而不是"每轮比较 elapsed"，
         // 是为了让 serve_connection 也能自己判断（否则会话一建立，主循环的检查
         // 就再也不会被执行——2026-09-23 实测到的缺陷）。
@@ -4520,38 +5218,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut no_hello = false;
 
         loop {
+            logger.latency_summary();
             if stop_requested(&stop) {
                 break;
             }
-            // 跟随主程序：桥接断连超过宽限期 ⇒ 主程序已经关了（或开关被关掉）
-            // ⇒ 助手自行退出，不在系统里留下一个提权进程。
-            //
-            // 用桥接的"最后连通时刻"当信号，而不是让主程序反过来结束我们——
-            // 主程序是普通权限，本来也无法结束一个提权进程；而且它若被强杀，
-            // 就不会有机会通知任何人，只有这种"对端消失 ⇒ 自退"的写法兜得住。
-            if args.follow_app {
-                let idle_ms = now_ms_u64().saturating_sub(
-                    app_bridge
-                        .as_ref()
-                        .map(|bridge| bridge.last_connected_ms())
-                        .unwrap_or(started_ms),
-                );
-                if idle_ms > FOLLOW_APP_GRACE_MS {
-                    logger.kv(
-                        "[FOLLOW-APP]",
-                        &[
-                            ("event", "exit".into()),
-                            ("idle_ms", idle_ms.to_string()),
-                            ("grace_ms", FOLLOW_APP_GRACE_MS.to_string()),
-                            (
-                                "note",
-                                "主程序已不在（关闭或开关已关）；助手退出，不留后台进程".into(),
-                            ),
-                        ],
-                    );
-                    break;
-                }
-            }
+            // follow-app 在已有桥接 worker 内依据绑定进程/显式停止判定，
+            // 通过同一 CTRL_STOP 收尾，不能由这里的桥接时间戳推断 App 死亡。
             if !saw_authenticated {
                 if let Some(d) = hello_deadline {
                     if Instant::now() >= d {
@@ -4602,6 +5274,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         deadline,
                         app_bridge.as_ref(),
                         &conn_stale,
+                        &mut cleanup,
                     );
                     if session.authenticated {
                         saw_authenticated = true;
@@ -4712,12 +5385,38 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ),
             ],
         );
-        logger.line("[NOTE] 已向 agent 发送 disarm；agent 也会在租约到期后自行停止清键。");
+        let version_blocked = cleanup.version_blocked_without_capture();
+        let cleanup_failed = !version_blocked && (!cleanup.is_clean() || !saw_authenticated);
+        let cleanup_status = if version_blocked {
+            "agent_version_blocked"
+        } else if cleanup_failed {
+            "unconfirmed"
+        } else {
+            "passed"
+        };
+        if write_cleanup_state(cleanup_status, true).is_err() {
+            logger.line("[CLEANUP] result=unconfirmed reason=state_write_failed");
+            std::process::exit(15);
+        }
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                ("result", cleanup_status.into()),
+                ("module_unloaded", "false".into()),
+            ],
+        );
 
         if let Some(inj) = injection.as_mut() {
             inj.cleanup();
         }
 
+        if version_blocked {
+            logger.line("[START-FAILED] reason=resident_agent_version_mismatch capture_acquired=false terminal_result=agent_version_blocked retryable=false");
+            std::process::exit(16);
+        }
+        if cleanup_failed {
+            std::process::exit(15);
+        }
         if no_hello {
             logger.line(&format!(
                 "[NO-HELLO] {} 秒内没有收到**已鉴权**的 agent hello。这不是「设备坏了」，\
@@ -4972,6 +5671,201 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         deadline: Option<Instant>,
         bridge: Option<&AppBridge>,
         conn_stale: &Arc<AtomicBool>,
+        cleanup: &mut CleanupState,
+    ) {
+        AGENT_AUTHORIZED.store(false, Ordering::Relaxed);
+        serve_connection_inner(
+            &mut stream,
+            session,
+            logger,
+            token,
+            observe,
+            restore,
+            canary,
+            synth,
+            stop,
+            deadline,
+            bridge,
+            conn_stale,
+            cleanup,
+        );
+        AGENT_AUTHORIZED.store(false, Ordering::Relaxed);
+        if session
+            .hello
+            .as_deref()
+            .is_some_and(|line| extract_str(line, "token").as_deref() == Some(token))
+        {
+            let current_build = session
+                .hello
+                .as_deref()
+                .and_then(|line| extract_str(line, "build"));
+            if current_build.as_deref() != Some(AGENT_BUILD) {
+                // Reject without sending any legacy command. Only an untouched
+                // attach with a real prior terminal proof may avoid new cleanup debt.
+                cleanup.version_rejected = session.hello.as_deref().is_some_and(|hello| {
+                    current_build
+                        .as_ref()
+                        .is_some_and(|build| !build.is_empty())
+                        && extract_str(hello, "agent").as_deref() == Some("rc003_agent/1")
+                        && extract_num(hello, "pid") == Some(u64::from(cleanup.target_pid))
+                });
+                if !cleanup.version_rejected {
+                    logger.line(
+                        "[START-FAILED] reason=agent_identity_unknown cleanup_result=unconfirmed",
+                    );
+                }
+                CTRL_STOP.store(true, Ordering::Relaxed);
+                return;
+            }
+            let Some(identity) = session
+                .hello
+                .as_deref()
+                .and_then(|hello| agent_identity(hello, cleanup))
+            else {
+                cleanup.unresolved_multiple = true;
+                CTRL_STOP.store(true, Ordering::Relaxed);
+                return;
+            };
+            let confirmed = stop_agent(&mut stream, token, &identity);
+            if confirmed {
+                cleanup.confirm(&identity);
+            }
+            logger.kv(
+                "[AGENT-STOP]",
+                &[
+                    (
+                        "result",
+                        if confirmed { "passed" } else { "unconfirmed" }.into(),
+                    ),
+                    ("hook_detached", confirmed.to_string()),
+                    ("module_unloaded", "false".into()),
+                    (
+                        "identity_match",
+                        (cleanup.identity.as_ref() == Some(&identity)).to_string(),
+                    ),
+                    (
+                        "unresolved_multiple",
+                        cleanup.unresolved_multiple.to_string(),
+                    ),
+                ],
+            );
+        }
+    }
+
+    fn agent_identity(hello: &str, cleanup: &CleanupState) -> Option<AgentIdentity> {
+        let host_pid = u32::try_from(extract_num(hello, "pid")?).ok()?;
+        let instance = extract_str(hello, "instance")?;
+        if host_pid != cleanup.target_pid
+            || instance.len() < 32
+            || instance.len() > 128
+            || !instance.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
+        {
+            return None;
+        }
+        let host_created = process_creation_time(host_pid)?;
+        Some(AgentIdentity {
+            host_pid,
+            host_created,
+            instance,
+        })
+    }
+
+    fn stop_ack_matches(line: &str, identity: &AgentIdentity, request: &str) -> bool {
+        extract_str(line, "type").as_deref() == Some("stopped")
+            && extract_str(line, "instance").as_deref() == Some(identity.instance.as_str())
+            && extract_str(line, "stop_id").as_deref() == Some(request)
+            && extract_bool(line, "hook_detached")
+            && extract_bool(line, "released_all")
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum StopOutcome {
+        Confirmed,
+        HostExited,
+        Unconfirmed,
+    }
+
+    fn stop_agent(stream: &mut TcpStream, token: &str, identity: &AgentIdentity) -> bool {
+        stop_agent_outcome(stream, token, identity, None) == StopOutcome::Confirmed
+    }
+
+    fn stop_agent_outcome(
+        stream: &mut TcpStream,
+        token: &str,
+        identity: &AgentIdentity,
+        host: Option<&AppProcess>,
+    ) -> StopOutcome {
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let request = random_token();
+        let command = format!("{{\"type\":\"disarm\",\"token\":\"{token}\",\"instance\":\"{}\",\"stop_id\":\"{request}\"}}\n", identity.instance);
+        if stream.write_all(command.as_bytes()).is_err() {
+            return StopOutcome::Unconfirmed;
+        }
+        let started = Instant::now();
+        let mut waiting_reported = false;
+        let mut pending = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(host) = host {
+                match host.state() {
+                    AppProcessState::Exited => return StopOutcome::HostExited,
+                    AppProcessState::Running => {}
+                    _ => return StopOutcome::Unconfirmed,
+                }
+            }
+            if !waiting_reported && started.elapsed() >= Duration::from_secs(3) {
+                // 主程序/安装器可在自己的预算到期后返回 blocked；本连接仍保留，
+                // 持键稍后真实释放的 stopped 回执不能因 Helper 提前退出而遗失。
+                let _ = write_cleanup_state("unconfirmed", false);
+                waiting_reported = true;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return StopOutcome::Unconfirmed,
+                Ok(count) => {
+                    pending.extend_from_slice(&chunk[..count]);
+                    if pending.len() > 65536 {
+                        return StopOutcome::Unconfirmed;
+                    }
+                    while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                        let line: Vec<_> = pending.drain(..=end).collect();
+                        let line = String::from_utf8_lossy(&line);
+                        if stop_ack_matches(&line, identity, &request) {
+                            return StopOutcome::Confirmed;
+                        }
+                        if extract_str(&line, "type").as_deref() == Some("stopped")
+                            && extract_str(&line, "instance").as_deref()
+                                == Some(identity.instance.as_str())
+                            && extract_str(&line, "stop_id").as_deref() == Some(request.as_str())
+                        {
+                            return StopOutcome::Unconfirmed;
+                        }
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return StopOutcome::Unconfirmed,
+            }
+        }
+    }
+
+    fn serve_connection_inner(
+        stream: &mut TcpStream,
+        session: &mut Session,
+        logger: &Logger,
+        token: &str,
+        observe: bool,
+        restore: bool,
+        canary: &[u16],
+        synth: Option<(u16, u16)>,
+        stop: &Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        bridge: Option<&AppBridge>,
+        conn_stale: &Arc<AtomicBool>,
+        cleanup: &mut CleanupState,
     ) {
         if stream
             .set_read_timeout(Some(Duration::from_millis(READ_POLL_MS)))
@@ -4993,7 +5887,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let mut sent_synth: Option<Option<u16>> = None;
         // 最近一次下发给 agent 的门内延迟开关（主程序能力声明；None = 尚未下发过）。
         let mut sent_gate: Option<bool> = None;
+        let mut previous_read_clock: Option<(u64, Instant)> = None;
         loop {
+            logger.latency_summary();
             if stop_requested(stop) {
                 return;
             }
@@ -5016,7 +5912,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if let Some(bridge) = bridge {
                     let current = bridge.capture_targets();
                     if sent_targets.as_ref() != Some(&current) {
-                        if !send_dynamic_targets(&mut stream, token, &current) {
+                        if !send_dynamic_targets(stream, token, &current) {
                             return;
                         }
                         sent_targets = Some(current);
@@ -5030,7 +5926,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 下发同哲学）；agent 侧幂等，重复应用无害。
                     let (synth_current, synth_dirty) = bridge.voice_synth_state();
                     if synth_dirty || sent_synth.as_ref() != Some(&synth_current) {
-                        if !send_voice_synth(&mut stream, token, synth_current) {
+                        if !send_voice_synth(stream, token, synth_current) {
                             return;
                         }
                         logger.kv(
@@ -5051,7 +5947,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 变更即单独补发一条 gate 命令；agent 侧幂等，仅影响按下帧的呈现时机。
                     let (gate_on, gate_dirty) = bridge.voice_gate_state();
                     if gate_dirty || sent_gate != Some(gate_on) {
-                        if !send_voice_gate(&mut stream, token, gate_on) {
+                        if !send_voice_gate(stream, token, gate_on) {
                             return;
                         }
                         logger.kv(
@@ -5087,7 +5983,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     resend_attempts,
                     wait.as_millis()
                 ));
-                if !send_dynamic_targets(&mut stream, token, sent) {
+                if !send_dynamic_targets(stream, token, sent) {
                     return;
                 }
                 sent_at = Some(Instant::now());
@@ -5096,6 +5992,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             match stream.read(&mut chunk) {
                 Ok(0) => break, // 对端关闭
                 Ok(n) => {
+                    let read_at = Instant::now();
+                    let read_ms = now_ms_u64();
+                    let clock_valid = previous_read_clock
+                        .map(|(wall, monotonic)| {
+                            wall_interval_valid(
+                                wall,
+                                read_ms,
+                                read_at
+                                    .duration_since(monotonic)
+                                    .as_millis()
+                                    .min(u64::MAX as u128) as u64,
+                            )
+                        })
+                        .unwrap_or(true);
+                    previous_read_clock = Some((read_ms, read_at));
                     buf.extend_from_slice(&chunk[..n]);
                     while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                         let raw: Vec<u8> = buf.drain(..=pos).collect();
@@ -5106,11 +6017,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         }
                         session.lines += 1;
                         session.last_rx = Instant::now();
-                        if !handle_line(line, session, logger, token, bridge) {
+                        // 现有 agent t 是墙钟；只用于接收年龄，绝不冒充单调耗时。
+                        LATENCY.record_agent_age(extract_num(line, "t"), read_ms, clock_valid);
+                        let handle_started = Instant::now();
+                        let keep_session = handle_line(line, session, logger, token, bridge);
+                        LATENCY.record(LatencyStage::HandleLine, elapsed_ms(handle_started));
+                        if !keep_session {
                             logger.line("[INFO] 连接结束（令牌不符或 agent 主动 bye）。");
                             return;
                         }
                         if session.authenticated && !session.config_sent {
+                            let identity = session
+                                .hello
+                                .as_deref()
+                                .and_then(|hello| agent_identity(hello, cleanup));
+                            if !identity.is_some_and(|identity| cleanup.admit(identity)) {
+                                cleanup.unresolved_multiple = true;
+                                logger.line("[CLEANUP] result=blocked reason=agent_identity_mismatch arm_sent=false");
+                                CTRL_STOP.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                            if cleanup.begin_capture().is_err() {
+                                logger.line("[CLEANUP] result=blocked reason=requested_write_failed capture_authorized=false");
+                                CTRL_STOP.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                            AGENT_AUTHORIZED.store(true, Ordering::Relaxed);
                             session.config_sent = true;
                             let targets = bridge
                                 .map(|bridge| bridge.capture_targets())
@@ -5129,14 +6061,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 None => synth,
                             };
                             send_session_config(
-                                &mut stream,
-                                logger,
-                                token,
-                                observe,
-                                restore,
-                                canary,
-                                &targets,
-                                synth,
+                                stream, logger, token, observe, restore, canary, &targets, synth,
                             );
                             sent_targets = Some(targets);
                             sent_at = Some(Instant::now());
@@ -5421,6 +6346,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             remove_task: false,
             task_status: false,
             follow_app: false,
+            cleanup_only: false,
             hide_window: false,
             dry_run: false,
             observe: false,
@@ -5626,6 +6552,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         // 否则"不需要设备、不需要提权、不碰网络"这条自检承诺就破了。
                         None,
                         &stale,
+                        &mut CleanupState::new(0, 0),
                     );
                     let _ = tx.send(t0.elapsed().as_millis() as u64);
                 }
@@ -6252,6 +7179,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 None,
                                 None,
                                 &stale_flag,
+                                &mut CleanupState::new(0, 0),
                             );
                             let _ = stale_tx.send(t0.elapsed().as_millis() as u64);
                         }
@@ -6325,15 +7253,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("query={} | delete={}", query.join(" "), delete.join(" ")),
         );
 
-        // 停用信号：存在则取走并删除，第二次必须读不到——"谁见到谁删"
-        // 语义若坏掉，残留信号会把下一次启动的助手当场误杀。
+        // 停止意图不被 Helper 消耗，延后启动的计划任务必须仍能看到。
         let signal = tmp.join("rc003-capture-stop");
         fs::write(&signal, b"stop").expect("写停用信号失败");
         let first = take_stop_signal(&signal);
         let second = take_stop_signal(&signal);
         check(
-            "停用信号：存在即取走并删除、二次读取为否",
-            first && !second && !signal.exists(),
+            "停用信号：重复读取仍为真，不删除启动撤销意图",
+            first && second && signal.exists(),
             format!("first={first} second={second}"),
         );
 
@@ -6524,10 +7451,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 2026-09-26 哨兵键那一轮就是这样白跑的：以为在验新逻辑，其实接管的是旧实例。
     /// 有了代次，接管旧实例时日志会打 `[AGENT-STALE]`，让这件事一眼可见。
     ///
-    /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
-    /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
-    /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-10-03.first-press-gate";
+    /// 旧/未知代次不允许接管；本助手不结束共享宿主来替换 DLL。
+    const AGENT_BUILD: &str = "2026-10-03.cleanup-instance";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -6590,33 +7515,845 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     #[cfg(test)]
-    mod agent_refresh_tests {
-        use super::{should_auto_refresh_agent, AGENT_REFRESH_COOLDOWN_SECS};
+    mod follow_app_tests {
+        use super::*;
 
         #[test]
-        fn refresh_only_when_stale_elevated_and_outside_cooldown() {
-            let now = 1_000_000_u64;
-            // 代次一致 / 提权不足 / 代次未知：都不刷新。
-            assert!(!should_auto_refresh_agent(true, "a", "a", None, now));
-            assert!(!should_auto_refresh_agent(false, "old", "new", None, now));
-            assert!(!should_auto_refresh_agent(true, "", "new", None, now));
-            // 首次 stale：刷新。
-            assert!(should_auto_refresh_agent(true, "old", "new", None, now));
-            // 冷却内：不刷新；冷却外：刷新。
-            assert!(!should_auto_refresh_agent(
-                true,
-                "old",
-                "new",
-                Some(now - (AGENT_REFRESH_COOLDOWN_SECS - 1)),
-                now
+        fn explicit_stop_and_real_exit_are_distinct_from_live_app_bridge_loss() {
+            assert_eq!(
+                follow_app_action(true, AppProcessState::Running, false),
+                FollowAppAction::StopRequested
+            );
+            assert_eq!(
+                follow_app_action(false, AppProcessState::Exited, false),
+                FollowAppAction::AppExited
+            );
+            assert_eq!(
+                follow_app_action(false, AppProcessState::Running, true),
+                FollowAppAction::Reconnect
+            );
+            assert_eq!(
+                follow_app_action(false, AppProcessState::Running, false),
+                FollowAppAction::Continue
+            );
+            assert_eq!(
+                follow_app_action(false, AppProcessState::Unknown(5), true),
+                FollowAppAction::IdentityUnknown(5)
+            );
+        }
+
+        #[test]
+        fn never_bound_startup_is_bounded_and_still_accepts_explicit_cancel() {
+            assert_eq!(
+                follow_app_action(false, AppProcessState::Unbound, false),
+                FollowAppAction::Continue
+            );
+            assert_eq!(
+                follow_app_action(false, AppProcessState::Unbound, true),
+                FollowAppAction::StartupFailed
+            );
+            assert_eq!(
+                follow_app_action(true, AppProcessState::Unbound, false),
+                FollowAppAction::StopRequested
+            );
+        }
+
+        // 仅由下方回归子进程调用；不用现有 App、设备、任务或用户状态文件。
+        #[test]
+        #[ignore]
+        fn named_pipe_peer() {
+            let pipe = std::env::var("SAYALL_TEST_OWN_PIPE").unwrap();
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn CreateNamedPipeW(
+                    name: *const u16,
+                    open_mode: u32,
+                    pipe_mode: u32,
+                    max_instances: u32,
+                    out_size: u32,
+                    in_size: u32,
+                    timeout: u32,
+                    attributes: *mut c_void,
+                ) -> Handle;
+                fn ConnectNamedPipe(pipe: Handle, overlapped: *mut c_void) -> i32;
+            }
+            use std::os::windows::io::FromRawHandle;
+            let raw = unsafe {
+                CreateNamedPipeW(
+                    to_wide(&pipe).as_ptr(),
+                    3,
+                    0,
+                    1,
+                    4096,
+                    4096,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(raw, INVALID_HANDLE_VALUE);
+            let mut file = unsafe { fs::File::from_raw_handle(raw) };
+            println!("PIPE_READY");
+            std::io::stdout().flush().unwrap();
+            let connected = unsafe { ConnectNamedPipe(raw, std::ptr::null_mut()) };
+            assert!(connected != 0 || lasts_error() == 535);
+            let mut hello = [0; 512];
+            if file.read(&mut hello).unwrap_or(0) > 0 {
+                file.write_all(b"OK 2 1 -\n").unwrap();
+            }
+            let mut done = String::new();
+            std::io::stdin().read_line(&mut done).unwrap();
+        }
+
+        struct OwnPeer {
+            child: std::process::Child,
+            pipe: String,
+        }
+        impl OwnPeer {
+            fn start() -> Self {
+                use std::io::{BufRead, BufReader};
+                use std::os::windows::process::CommandExt;
+                let pipe = format!(r"\\.\pipe\SayAll.Test.FollowApp.{}", random_token());
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "imp::follow_app_tests::named_pipe_peer",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("SAYALL_TEST_OWN_PIPE", &pipe)
+                    .creation_flags(0x08000000)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut output = BufReader::new(child.stdout.take().unwrap());
+                loop {
+                    let mut line = String::new();
+                    assert!(output.read_line(&mut line).unwrap() > 0);
+                    if line.contains("PIPE_READY") {
+                        break;
+                    }
+                }
+                child.stdout = Some(output.into_inner());
+                Self { child, pipe }
+            }
+            fn finish(&mut self) -> bool {
+                if let Some(mut input) = self.child.stdin.take() {
+                    let _ = input.write_all(b"exit\n");
+                }
+                // 出错时也只正常解除自己测试管道的等待，不终止任何进程。
+                let _ = open_named_pipe(&self.pipe);
+                self.child.wait().is_ok_and(|status| status.success())
+            }
+        }
+        impl Drop for OwnPeer {
+            fn drop(&mut self) {
+                let _ = self.finish();
+            }
+        }
+
+        #[test]
+        fn windows_own_pipe_binds_real_process_handle_and_keeps_exited_identity() {
+            let mut peer = OwnPeer::start();
+            let mut pipe = open_named_pipe(&peer.pipe).unwrap();
+            assert!(AppProcess::from_pipe(&pipe, peer.child.id().wrapping_add(1)).is_err());
+            let process = AppProcess::from_pipe(&pipe, peer.child.id()).unwrap();
+            assert_eq!(process.state(), AppProcessState::Running);
+            pipe.write_all(b"HELLO 2 test 1\n").unwrap();
+            let mut ack = [0; 64];
+            assert!(pipe.read(&mut ack).unwrap() > 0);
+            assert_eq!(
+                follow_app_action(false, process.state(), true),
+                FollowAppAction::Reconnect
+            );
+            assert!(peer.finish(), "自有管道子进程必须正常退出");
+            assert_eq!(process.state(), AppProcessState::Exited);
+            let mut other = AppProcess::open(std::process::id()).unwrap();
+            assert!(!process.same_instance(&other));
+            // 模拟数字 PID 被复用，原句柄及实际创建时刻仍不能被新实例取代。
+            other.pid = process.pid;
+            assert!(!process.same_instance(&other));
+            assert_eq!(
+                follow_app_action(false, process.state(), false),
+                FollowAppAction::AppExited
+            );
+            let mut binding = Some(process);
+            assert!(!retain_app_process(
+                &mut binding,
+                AppProcess::open(std::process::id()).unwrap(),
+                true
             ));
-            assert!(should_auto_refresh_agent(
-                true,
-                "old",
-                "new",
-                Some(now - AGENT_REFRESH_COOLDOWN_SECS),
-                now
+            assert!(retain_app_process(
+                &mut binding,
+                AppProcess::open(std::process::id()).unwrap(),
+                false
             ));
+            assert_eq!(binding.as_ref().unwrap().state(), AppProcessState::Exited);
+        }
+    }
+
+    #[cfg(test)]
+    mod recovery_tests {
+        use super::*;
+        use std::io::{BufRead, BufReader};
+        use std::os::windows::process::CommandExt;
+        const INSTANCE: &str = "0123456789abcdef0123456789abcdef";
+
+        // These two entries are only invoked in owned child processes below.
+        // Their LOCALAPPDATA/runtime and sockets are isolated from the real App.
+        #[test]
+        #[ignore]
+        fn process_fixture() {
+            assert_eq!(
+                std::env::var("SAYALL_OWNED_RECOVERY_TEST").as_deref(),
+                Ok("1")
+            );
+            let mut byte = [0];
+            let _ = std::io::stdin().read(&mut byte);
+        }
+
+        #[test]
+        #[ignore]
+        fn recovery_worker() {
+            assert_eq!(
+                std::env::var("SAYALL_OWNED_RECOVERY_TEST").as_deref(),
+                Ok("1")
+            );
+            let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
+            let mut args = default_args();
+            args.runtime_dir = root.join("runtime");
+            args.port = std::env::var("SAYALL_RECOVERY_TEST_PORT")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_ne!(args.port, DEFAULT_PORT);
+            args.cleanup_only = true;
+            let listener = bind_listener(args.port).unwrap();
+            fs::write(root.join("listening"), b"ready").unwrap();
+            let result = reconcile_previous_capture(&listener, &args, &Logger::new(None), true);
+            let expected_error = std::env::var("SAYALL_RECOVERY_EXPECT_ERROR").ok();
+            match expected_error {
+                Some(reason) => assert_eq!(result, Err(reason.as_str())),
+                None => assert_eq!(result, Ok(())),
+            }
+        }
+
+        struct OwnChild(std::process::Child);
+        impl OwnChild {
+            fn fixture() -> Self {
+                Self(
+                    std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--ignored",
+                            "--exact",
+                            "imp::recovery_tests::process_fixture",
+                        ])
+                        .env("SAYALL_OWNED_RECOVERY_TEST", "1")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .creation_flags(0x0800_0000)
+                        .spawn()
+                        .unwrap(),
+                )
+            }
+            fn finish(&mut self) {
+                let deadline = Instant::now() + Duration::from_secs(6);
+                loop {
+                    if let Some(status) = self.0.try_wait().unwrap() {
+                        assert!(status.success());
+                        return;
+                    }
+                    assert!(Instant::now() < deadline, "owned recovery child timed out");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        impl Drop for OwnChild {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    // Only a handle returned by this test's own spawn is killed,
+                    // including on panic; never an installed App/Helper/host PID.
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+
+        struct Case {
+            root: PathBuf,
+            port: u16,
+        }
+        impl Case {
+            fn new(label: &str) -> Self {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("target/dev/recovery-tests")
+                    .join(format!("{}-{}-{label}", std::process::id(), random_token()));
+                fs::create_dir_all(root.join("SayAll")).unwrap();
+                fs::create_dir_all(root.join("runtime")).unwrap();
+                fs::write(
+                    root.join("runtime").join(TOKEN_FILE),
+                    "synthetic-recovery-token",
+                )
+                .unwrap();
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                let port = listener.local_addr().unwrap().port();
+                assert_ne!(port, DEFAULT_PORT);
+                Self { root, port }
+            }
+            fn path(&self) -> PathBuf {
+                self.root.join("SayAll/rc003-capture-cleanup.json")
+            }
+            fn write(&self, receipt: &CleanupReceipt) {
+                fs::write(self.path(), serde_json::to_vec(receipt).unwrap()).unwrap();
+            }
+            fn read(&self) -> CleanupReceipt {
+                CleanupReceipt::parse(&fs::read_to_string(self.path()).unwrap()).unwrap()
+            }
+            fn start(&self, error: Option<&str>) -> OwnChild {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "imp::recovery_tests::recovery_worker",
+                        "--nocapture",
+                    ])
+                    .env("SAYALL_OWNED_RECOVERY_TEST", "1")
+                    .env("LOCALAPPDATA", &self.root)
+                    .env("SAYALL_RECOVERY_TEST_PORT", self.port.to_string())
+                    .env_remove("SAYALL_RECOVERY_EXPECT_ERROR")
+                    .creation_flags(0x0800_0000);
+                if let Some(error) = error {
+                    command.env("SAYALL_RECOVERY_EXPECT_ERROR", error);
+                }
+                let child = OwnChild(command.spawn().unwrap());
+                let deadline = Instant::now() + Duration::from_secs(4);
+                while !self.root.join("listening").exists() {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                child
+            }
+        }
+
+        fn pending_for(host: &AppProcess) -> CleanupReceipt {
+            let mut old_helper = OwnChild::fixture();
+            let old_pid = old_helper.0.id();
+            let started = now_ms_u64();
+            old_helper.0.kill().unwrap();
+            old_helper.0.wait().unwrap();
+            CleanupReceipt {
+                helper_pid: old_pid,
+                started_unix_ms: started,
+                completed_unix_ms: None,
+                status: "requested".into(),
+                host_pid: host.pid,
+                host_created: host.created,
+                agent_instance: INSTANCE.into(),
+            }
+        }
+
+        #[test]
+        fn connection_at_budget_end_does_not_restart_hello_wait() {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            assert_ne!(address.port(), DEFAULT_PORT);
+            let host = AppProcess::open(std::process::id()).unwrap();
+            let identity = AgentIdentity {
+                host_pid: host.pid,
+                host_created: host.created,
+                instance: INSTANCE.into(),
+            };
+            let deadline = Instant::now();
+            let (result_tx, result_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let result = recover_connection(
+                    stream,
+                    &identity,
+                    &host,
+                    "synthetic-recovery-token",
+                    &Logger::new(None),
+                    Path::new("unused-no-hello"),
+                    deadline,
+                );
+                result_tx.send(result).unwrap();
+            });
+            let stream = TcpStream::connect(address).unwrap();
+            let result = result_rx.recv_timeout(Duration::from_secs(1));
+            drop(stream);
+            worker.join().unwrap();
+            assert_eq!(result, Ok(Err("hello_timeout")));
+        }
+
+        #[test]
+        fn settled_receipt_cleanup_only_creates_truthful_not_started_generation() {
+            let case = Case::new("settled");
+            fs::write(
+                case.path(),
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"passed"}"#,
+            )
+            .unwrap();
+            let mut worker = case.start(None);
+            let pid = worker.0.id();
+            worker.finish();
+            let receipt = case.read();
+            assert_eq!(receipt.status, "not_started");
+            assert_eq!(receipt.helper_pid, pid);
+            assert_eq!(receipt.host_pid, 0);
+            assert!(receipt.settled());
+        }
+
+        #[test]
+        fn killed_owned_helper_recovers_only_by_fresh_stop_and_never_arms() {
+            let host = AppProcess::open(std::process::id()).unwrap();
+            let case = Case::new("helper-killed");
+            let previous = pending_for(&host);
+            case.write(&previous);
+            let mut worker = case.start(None);
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, case.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            writeln!(stream, "{{\"type\":\"hello\",\"token\":\"synthetic-recovery-token\",\"pid\":{},\"agent\":\"rc003_agent/1\",\"build\":\"{AGENT_BUILD}\",\"instance\":\"{INSTANCE}\"}}", host.pid).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut command = String::new();
+            reader.read_line(&mut command).unwrap();
+            assert_eq!(extract_str(&command, "type").as_deref(), Some("disarm"));
+            let request = extract_str(&command, "stop_id").unwrap();
+            writeln!(stream, "{{\"type\":\"stopped\",\"instance\":\"{INSTANCE}\",\"stop_id\":\"late-prior-request\",\"hook_detached\":true,\"released_all\":true}}").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                worker.0.try_wait().unwrap().is_none(),
+                "late ACK must not finish recovery"
+            );
+            assert_eq!(case.read().status, "requested");
+            writeln!(stream, "{{\"type\":\"stopped\",\"instance\":\"{INSTANCE}\",\"stop_id\":\"{request}\",\"hook_detached\":true,\"released_all\":true}}").unwrap();
+            let mut remaining = String::new();
+            reader.read_to_string(&mut remaining).unwrap();
+            assert!(
+                remaining.is_empty(),
+                "cleanup-only must send no arm/renew/config/injection commands"
+            );
+            worker.finish();
+            let receipt = case.read();
+            assert_eq!(receipt.status, "passed");
+            assert_ne!(receipt.helper_pid, previous.helper_pid);
+            assert_eq!(receipt.helper_pid, worker.0.id());
+            assert_eq!(receipt.host_created, host.created);
+            assert_eq!(receipt.agent_instance, INSTANCE);
+        }
+
+        #[test]
+        fn killed_owned_host_or_reused_pid_records_host_exited_without_an_ack() {
+            let case = Case::new("host-killed");
+            let mut child = OwnChild::fixture();
+            let host = AppProcess::open(child.0.id()).unwrap();
+            let previous = pending_for(&host);
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            assert_eq!(host.state(), AppProcessState::Exited);
+            case.write(&previous);
+            case.start(None).finish();
+            assert_eq!(case.read().status, "host_exited");
+
+            let current = AppProcess::open(std::process::id()).unwrap();
+            let case = Case::new("pid-reused");
+            let mut previous = pending_for(&current);
+            previous.host_created -= 1;
+            case.write(&previous);
+            case.start(None).finish();
+            assert_eq!(case.read().status, "host_exited");
+            assert_eq!(current.state(), AppProcessState::Running);
+        }
+
+        #[test]
+        fn unknown_prior_identity_is_preserved_and_cannot_become_not_started() {
+            let case = Case::new("unknown");
+            let bytes = b"{\"helper_pid\":2,\"started_unix_ms\":3,\"status\":\"unconfirmed\"}";
+            fs::write(case.path(), bytes).unwrap();
+            case.start(Some("prior_host_identity_missing")).finish();
+            assert_eq!(fs::read(case.path()).unwrap(), bytes);
+        }
+
+        #[test]
+        fn different_agent_instance_gets_no_control_and_keeps_cleanup_unconfirmed() {
+            let host = AppProcess::open(std::process::id()).unwrap();
+            let case = Case::new("wrong-agent");
+            case.write(&pending_for(&host));
+            let mut worker = case.start(Some("recovery_identity_mismatch"));
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, case.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            writeln!(stream, "{{\"type\":\"hello\",\"token\":\"synthetic-recovery-token\",\"pid\":{},\"agent\":\"rc003_agent/1\",\"build\":\"{AGENT_BUILD}\",\"instance\":\"ffffffffffffffffffffffffffffffff\"}}", host.pid).unwrap();
+            let mut commands = String::new();
+            stream.read_to_string(&mut commands).unwrap();
+            assert!(commands.is_empty());
+            worker.finish();
+            let receipt = case.read();
+            assert_eq!(receipt.status, "unconfirmed");
+            assert_eq!(receipt.agent_instance, INSTANCE);
+        }
+    }
+
+    #[cfg(test)]
+    mod cooperative_cleanup_tests {
+        use super::*;
+
+        static CONNECTION_TEST_GATE: Mutex<()> = Mutex::new(());
+
+        fn identity(pid: u32, created: u64, instance: &str) -> AgentIdentity {
+            AgentIdentity {
+                host_pid: pid,
+                host_created: created,
+                instance: instance.into(),
+            }
+        }
+
+        #[test]
+        fn only_the_same_agent_can_clear_a_failed_stop() {
+            let agent = identity(42, 100, "a");
+            let mut cleanup = CleanupState::new(42, 100);
+            assert!(cleanup.admit(agent.clone()));
+            assert!(!cleanup.is_clean()); // failed stop leaves this identity pending
+            assert!(cleanup.admit(agent.clone())); // reconnect, same script
+            cleanup.confirm(&identity(42, 100, "other"));
+            assert!(!cleanup.is_clean());
+            cleanup.confirm(&agent);
+            assert!(cleanup.is_clean());
+            assert!(cleanup.admit(agent.clone())); // arm again invalidates old proof
+            assert!(!cleanup.is_clean());
+            cleanup.confirm(&agent);
+            assert!(cleanup.is_clean());
+        }
+
+        #[test]
+        fn different_agent_or_reused_host_never_drops_prior_uncertainty() {
+            for other in [
+                identity(42, 100, "b"),
+                identity(42, 101, "a"),
+                identity(43, 100, "a"),
+            ] {
+                let agent = identity(42, 100, "a");
+                let mut cleanup = CleanupState::new(42, 100);
+                assert!(cleanup.admit(agent.clone()));
+                assert!(!cleanup.admit(other.clone()));
+                cleanup.confirm(&other);
+                cleanup.confirm(&agent);
+                assert!(
+                    !cleanup.is_clean(),
+                    "multiple identities must remain blocked"
+                );
+            }
+        }
+
+        #[test]
+        fn cancelled_start_cannot_replace_unconfirmed_or_malformed_receipt() {
+            assert!(prior_cleanup_is_clear(None));
+            assert!(prior_cleanup_is_clear(Some(
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"passed"}"#
+            )));
+            for previous in [
+                "",
+                "{}",
+                r#"{"status":"passed"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":2,"status":"passed"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":3,"status":"requested"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"unconfirmed"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":+3,"completed_unix_ms":4,"status":"passed"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":03,"completed_unix_ms":4,"status":"passed"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"passed","status":"passed"}"#,
+            ] {
+                assert!(!prior_cleanup_is_clear(Some(previous)));
+            }
+        }
+
+        #[test]
+        fn stop_ack_requires_the_current_agent_and_request() {
+            let agent = identity(42, 100, "a");
+            let ack = r#"{"type":"stopped","instance":"a","stop_id":"request-2","hook_detached":true,"released_all":true}"#;
+            assert!(stop_ack_matches(ack, &agent, "request-2"));
+            assert!(!stop_ack_matches(ack, &agent, "request-1"));
+            assert!(!stop_ack_matches(ack, &identity(42, 100, "b"), "request-2"));
+            assert!(!stop_ack_matches(
+                r#"{"type":"stopped","hook_detached":true,"released_all":true}"#,
+                &agent,
+                "request-2"
+            ));
+        }
+
+        fn session() -> Session {
+            Session {
+                connected_at: Instant::now(),
+                last_rx: Instant::now(),
+                hello: None,
+                edges: Vec::new(),
+                lines: 0,
+                authenticated: false,
+                config_sent: false,
+                target_ack: None,
+            }
+        }
+
+        #[test]
+        fn stale_or_missing_build_never_authorizes_capture() {
+            let logger = Logger::new(None);
+            for build in ["old", ""] {
+                let mut session = session();
+                let hello =
+                    format!("{{\"type\":\"hello\",\"token\":\"test\",\"build\":\"{build}\"}}");
+                assert!(!handle_line(&hello, &mut session, &logger, "test", None));
+                assert!(!session.authenticated);
+            }
+            let mut session = session();
+            let hello =
+                format!("{{\"type\":\"hello\",\"token\":\"test\",\"build\":\"{AGENT_BUILD}\"}}");
+            assert!(handle_line(&hello, &mut session, &logger, "test", None));
+            assert!(session.authenticated);
+        }
+
+        #[test]
+        fn rejected_resident_version_sends_no_control_commands() {
+            let _guard = CONNECTION_TEST_GATE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for (fields, known_version) in [
+                (r#""pid":42,"agent":"rc003_agent/1","build":"old""#, true),
+                (r#""pid":42,"agent":"rc003_agent/1""#, false),
+                (r#""pid":42,"agent":"rc003_agent/1","build":"""#, false),
+                (r#""pid":43,"agent":"rc003_agent/1","build":"old""#, false),
+                (r#""pid":42,"agent":"unknown","build":"old""#, false),
+            ] {
+                CTRL_STOP.store(false, Ordering::Relaxed);
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                let addr = listener.local_addr().unwrap();
+                let peer = std::thread::spawn(move || {
+                    let mut stream = TcpStream::connect(addr).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    writeln!(stream, "{{\"type\":\"hello\",\"token\":\"test\",{fields}}}").unwrap();
+                    let mut received = Vec::new();
+                    stream.read_to_end(&mut received).unwrap();
+                    received
+                });
+                let (stream, _) = listener.accept().unwrap();
+                let mut cleanup = CleanupState::new(42, 100);
+                cleanup.attach_prior_terminal = true;
+                serve_connection(
+                    stream,
+                    &mut session(),
+                    &Logger::new(None),
+                    "test",
+                    false,
+                    true,
+                    &[],
+                    None,
+                    &Arc::new(AtomicBool::new(false)),
+                    None,
+                    None,
+                    &Arc::new(AtomicBool::new(false)),
+                    &mut cleanup,
+                );
+                let received = peer.join().unwrap();
+                CTRL_STOP.store(false, Ordering::Relaxed);
+                assert!(
+                    received.is_empty(),
+                    "rejected build must not receive legacy disarm or capture commands"
+                );
+                assert!(cleanup.identity.is_none());
+                assert_eq!(
+                    cleanup.version_blocked_without_capture(),
+                    known_version,
+                    "unknown or malformed identity must not become a no-capture terminal: {fields}"
+                );
+            }
+        }
+
+        #[test]
+        fn version_blocked_requires_prior_terminal_and_an_entirely_untouched_attach() {
+            let mut cleanup = CleanupState::new(42, 100);
+            cleanup.version_rejected = true;
+            assert!(
+                !cleanup.version_blocked_without_capture(),
+                "absence of prior receipt is not proof"
+            );
+            cleanup.attach_prior_terminal = true;
+            assert!(cleanup.version_blocked_without_capture());
+            assert!(
+                !cleanup.is_clean(),
+                "start rejection must not claim stop ACK success"
+            );
+            cleanup.begin_capture().unwrap();
+            assert!(
+                !cleanup.version_blocked_without_capture(),
+                "injection or capture authorization invalidates the prior proof"
+            );
+            cleanup.capture_attempted = false;
+            let agent = identity(42, 100, "a");
+            assert!(cleanup.admit(agent.clone()));
+            assert!(!cleanup.version_blocked_without_capture());
+            cleanup.confirm(&agent);
+            assert!(
+                !cleanup.version_blocked_without_capture(),
+                "even a later ACK cannot turn a used round into never-started"
+            );
+            assert!(cleanup.is_clean());
+        }
+
+        #[test]
+        fn version_blocked_receipt_is_terminal_without_claiming_cleanup_passed() {
+            assert!(prior_cleanup_is_clear(Some(
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"agent_version_blocked"}"#
+            )));
+            for invalid in [
+                r#"{"helper_pid":2,"started_unix_ms":3,"status":"agent_version_blocked"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":2,"status":"agent_version_blocked"}"#,
+                r#"{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"unknown"}"#,
+            ] {
+                assert!(!prior_cleanup_is_clear(Some(invalid)));
+            }
+        }
+
+        #[test]
+        fn recovery_terminal_records_host_identity_without_claiming_an_agent_ack() {
+            for status in ["passed", "host_exited", "not_started"] {
+                let receipt = format!(
+                    r#"{{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"{status}","host_pid":42,"host_created":100,"agent_instance":"0123456789abcdef0123456789abcdef"}}"#
+                );
+                assert!(prior_cleanup_is_clear(Some(&receipt)), "{status}");
+            }
+            for status in ["requested", "unconfirmed", "unknown"] {
+                let receipt = format!(
+                    r#"{{"helper_pid":2,"started_unix_ms":3,"completed_unix_ms":4,"status":"{status}","host_pid":42,"host_created":100,"agent_instance":"0123456789abcdef0123456789abcdef"}}"#
+                );
+                assert!(!prior_cleanup_is_clear(Some(&receipt)));
+            }
+        }
+
+        #[test]
+        fn token_source_log_never_contains_token_value() {
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/dev/cleanup-tests")
+                .join(std::process::id().to_string());
+            fs::create_dir_all(&dir).unwrap();
+            let synthetic = "synthetic-secret-for-token-log-regression";
+            fs::write(dir.join(TOKEN_FILE), synthetic).unwrap();
+            let log_path = dir.join("token.log");
+            let logger = Logger::new(Some(log_path.clone()));
+            assert_eq!(
+                load_or_create_token(&dir, false, &logger).unwrap(),
+                (synthetic.into(), true)
+            );
+            let log = fs::read_to_string(log_path).unwrap();
+            assert!(log.contains("source=file"));
+            assert!(!log.contains(synthetic), "token value must not reach logs");
+            assert!(
+                log.contains("fp="),
+                "upstream token summary must remain redacted"
+            );
+        }
+
+        fn cleanup_exchange(delay: Duration, reply: &'static [u8]) -> bool {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut command = [0u8; 512];
+                let count = stream.read(&mut command).unwrap();
+                let command = String::from_utf8_lossy(&command[..count]);
+                assert!(command.contains("disarm"));
+                let request = extract_str(&command, "stop_id").unwrap();
+                let reply = String::from_utf8_lossy(reply).replace("$REQUEST", &request);
+                std::thread::sleep(delay);
+                stream.write_all(reply.as_bytes()).unwrap();
+            });
+            let confirmed = stop_agent(
+                &mut TcpStream::connect(addr).unwrap(),
+                "test",
+                &identity(42, 100, "a"),
+            );
+            peer.join().unwrap();
+            confirmed
+        }
+
+        #[test]
+        fn physical_release_after_initial_wait_keeps_its_receiver() {
+            assert!(cleanup_exchange(
+                Duration::from_millis(3200),
+                b"{\"type\":\"stopped\",\"instance\":\"a\",\"stop_id\":\"$REQUEST\",\"hook_detached\":true,\"released_all\":true}\n"
+            ));
+        }
+
+        #[test]
+        fn rejected_detach_or_lost_socket_is_not_success() {
+            assert!(!cleanup_exchange(
+                Duration::ZERO,
+                b"{\"type\":\"stopped\",\"instance\":\"a\",\"stop_id\":\"$REQUEST\",\"hook_detached\":false,\"released_all\":true}\n"
+            ));
+            assert!(!cleanup_exchange(Duration::ZERO, b""));
+        }
+
+        #[test]
+        fn delayed_stop_ack_from_an_earlier_request_cannot_finish_this_stop() {
+            assert!(!cleanup_exchange(Duration::ZERO,
+                b"{\"type\":\"stopped\",\"instance\":\"a\",\"stop_id\":\"old\",\"hook_detached\":true,\"released_all\":true}\n"));
+            assert!(cleanup_exchange(Duration::ZERO,
+                b"{\"type\":\"stopped\",\"instance\":\"a\",\"stop_id\":\"old\",\"hook_detached\":true,\"released_all\":true}\n{\"type\":\"stopped\",\"instance\":\"a\",\"stop_id\":\"$REQUEST\",\"hook_detached\":true,\"released_all\":true}\n"));
+        }
+
+        #[test]
+        fn real_socket_reconnect_can_confirm_the_same_agents_previous_failed_stop() {
+            use std::io::{BufRead, BufReader};
+            let _guard = CONNECTION_TEST_GATE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let pid = std::process::id();
+            let created = process_creation_time(pid).unwrap();
+            let mut cleanup = CleanupState::new(pid, created);
+            let instance = "0123456789abcdef0123456789abcdef";
+            for acknowledge in [false, true] {
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                let addr = listener.local_addr().unwrap();
+                let peer = std::thread::spawn(move || {
+                    let mut stream = TcpStream::connect(addr).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    writeln!(stream, "{{\"type\":\"hello\",\"token\":\"test\",\"build\":\"{AGENT_BUILD}\",\"pid\":{pid},\"instance\":\"{instance}\"}}\n{{\"type\":\"bye\"}}").unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut command = String::new();
+                        assert!(reader.read_line(&mut command).unwrap() > 0);
+                        if extract_str(&command, "type").as_deref() == Some("disarm") {
+                            if acknowledge {
+                                let request = extract_str(&command, "stop_id").unwrap();
+                                writeln!(stream, "{{\"type\":\"stopped\",\"instance\":\"{instance}\",\"stop_id\":\"{request}\",\"hook_detached\":true,\"released_all\":true}}").unwrap();
+                            }
+                            break;
+                        }
+                    }
+                });
+                let (stream, _) = listener.accept().unwrap();
+                serve_connection(
+                    stream,
+                    &mut session(),
+                    &Logger::new(None),
+                    "test",
+                    false,
+                    true,
+                    &[],
+                    None,
+                    &Arc::new(AtomicBool::new(false)),
+                    None,
+                    None,
+                    &Arc::new(AtomicBool::new(false)),
+                    &mut cleanup,
+                );
+                peer.join().unwrap();
+                assert_eq!(cleanup.is_clean(), acknowledge);
+            }
         }
     }
 
@@ -6798,6 +8535,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     #[cfg(test)]
     mod shared_log_tests {
         use super::*;
+
+        #[test]
+        fn explicit_descriptor_keeps_cleanup_in_the_app_users_directory() {
+            let descriptor = Path::new(r"C:\Users\synthetic\AppData\Local\SayAll\rc003-bridge.ini");
+            assert_eq!(
+                capture_state_directory(Some(descriptor)),
+                descriptor.parent().unwrap()
+            );
+            assert_eq!(
+                capture_state_directory(None),
+                default_app_bridge_path().parent().unwrap()
+            );
+        }
 
         const DESCRIPTOR: &str = r"C:\Users\x\AppData\Local\SayAll\rc003-bridge.ini";
         const CONVENTION: &str = r"C:\Users\x\AppData\Local\SayAll\Logs\sayall-diagnostic.log";

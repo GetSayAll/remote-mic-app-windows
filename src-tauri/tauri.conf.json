@@ -20,7 +20,8 @@
         "minHeight": 800,
         "decorations": true,
         "resizable": true,
-        "center": true
+        "center": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -57,12 +58,14 @@
         "installerIcon": "icons/app-icons/faceted-duck.ico",
         "installerHooks": "windows/installer-hooks.nsh",
         "uninstallerIcon": "icons/app-icons/faceted-duck.ico",
-        "startMenuFolder": "无线麦 SayAll"
+        "startMenuFolder": "无线麦 SayAll",
+        "template": "windows/installer.nsi"
       }
     },
     "resources": [
       "sayall-helper.exe",
-      "frida-gadget.dll"
+      "frida-gadget.dll",
+      "licenses/*"
     ]
   },
   "plugins": {

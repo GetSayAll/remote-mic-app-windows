@@ -17,6 +17,7 @@ import SettingsPage from "./pages/SettingsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
+import TemplatesPage from "./pages/TemplatesPage.vue";
 
 const activePage = ref<PageId>(loadPersistedPage() ?? "buttons");
 watch(activePage, (page) => persistActivePage(page));
@@ -49,6 +50,7 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 
 const activeComponent = computed(() => ({
   buttons: ButtonsPage,
+  templates: TemplatesPage,
   connection: ConnectionPage,
   permissions: PermissionsPage,
   settings: SettingsPage,
@@ -123,7 +125,7 @@ onUnmounted(() => {
 <template>
   <div class="app-shell">
     <Sidebar :active-page="activePage" :version="runtime?.appVersion" @select="activePage = $event" />
-    <main class="content">
+    <main class="content" :class="{ 'content-buttons': activePage === 'buttons' }">
       <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>
       <div v-if="updateBannerVisible" class="update-banner">
         <span>发现新版本 {{ updateInfo?.version }}</span>

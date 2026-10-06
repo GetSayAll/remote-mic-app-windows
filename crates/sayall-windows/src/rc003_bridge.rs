@@ -2,29 +2,19 @@
 //!
 //! ## 三段链条与本模块的位置
 //!
-//! RC003 的返回 / 音量± 三键被 Windows 的 HID→VK 映射表丢弃（`kbdhid` 在映射阶段
-//! 丢掉这三个 usage），主程序侧**所有常规输入通道**（Raw Input、键盘钩子）都收不到
-//! 它们。启用“全按键支持”后，其余已映射按键也复用同一条报告层链路，避免依赖
-//! 全局物理键盘钩子。于是整条链路被切成三段：
+//! RC003 的十三个普通按键共用报告层捕获，语音独立走 ATVV；快捷键可选报告合成或 SendInput。
+//! 当前模板与本应用菜单所需的按键组成动态目标集；回执授予映射执行能力。
 //!
 //! 1. **捕获**（`hardware/RC003/helper` + Gadget 侧 agent）：在承载该设备的
 //!    用户态 `WUDFHost.exe` 内、于报告层把动态目标 usage 拦下（选择性清空），
-//!    并把按键边沿经 loopback 上报给提权助手。**已真机验证**。
+//!    并把按键状态上报给提权助手；当前组合版本的真机结果另行验收。
 //! 2. **传输**（本模块）：把助手手里的边沿送进主程序。← **这里**
 //! 3. **重映射**（`button_mapping` 引擎）：边沿驱动手势识别与动作注入。
-//!    **无需任何改动。**
+//!    本地模板、菜单及短/双/长按继续共用原引擎。
 //!
-//! ## 为什么第 ③ 段一行都不用改
-//!
-//! RC001 上这三键本来就以「被吞的键盘边沿」形态流经
-//! [`EngineMessage::GateEdge`]——见 `key_gate` 的"直接归因族"（VK 0xFF 族厂商键）。
-//! 本模块把助手送来的边沿投进**同一条**通道，因此 RC003 与 RC001 在引擎下游
-//! 完全同构：手势识别、映射查表、`SendInput` 注入、按住连发、泄漏对冲全部复用。
-//!
-//! 选 `GateEdge` 而不是 `HidUsages` 是有意的：后者会**整体替换**引擎内 HID 来源的
-//! 按下集合（`ButtonStateMerger::update_hid_usages` 是替换语义），若同时有 RC001
-//! 在跑，会把 RC001 的 HID 状态一起冲掉。`GateEdge` 只按键操作语义键位，
-//! 不会触碰其它来源的集合。
+//! 捕获边沿使用独立的 [`EngineMessage::DriverEdge`] 来源，避免 Raw Input 的迟到
+//! UP 释放捕获通道的按住状态。`R` 物理观察只驱动界面，零映射不会执行动作。
+//! 没有当前所有权时暂停 RC003 自定义映射，保持原生输入，不启用键盘吞键兜底。
 //!
 //! ## 方向与发现机制：为什么是「主程序监听、助手连接」
 //!
@@ -32,9 +22,9 @@
 //!   主程序是普通权限，默认**读不到**该目录的写入（也不该去猜）。
 //! - 反过来则权限确定成立：主程序在 `%LOCALAPPDATA%\SayAll\` 下写桥接描述文件，
 //!   提权助手读取用户目录**没有障碍**。
-//! - 因此：**主程序创建命名管道并写出「管道 + 兼容端口 + 令牌」描述文件，助手
+//! - 因此：**主程序创建命名管道并写出「管道 + 诊断端口 + 令牌」描述文件，助手
 //!   读取后回连。** 命名管道是 Windows 产品主路径，不经过会改写 loopback 的
-//!   Winsock/WFP/TUN；随机 TCP 端口保留给旧 Helper 与离线兼容测试。
+//!   Winsock/WFP/TUN；随机 TCP 端口用于同协议的本地测试与诊断。
 //!
 //! ## 威胁模型（必须如实理解，别把它当成安全边界）
 //!
@@ -57,6 +47,8 @@
 //! | `O <gen> <usages>` | 助手 → app | agent 已应用目标；随后随心跳续租所有权 |
 //! | `E <t_ms> <u1,u2,...>` | 助手 → app | 边沿：当前按下的 usage 集合（十六进制） |
 //! | `E <t_ms> -` | 助手 → app | 边沿：集合为空 = 全部释放 |
+//! | `R <t_ms> <usages>` | 助手 → app | 全部普通按键的物理观察，仅供界面 |
+//! | `S <usage>` / `A <usage>` | app → 助手 / 助手 → app | 可选语音合成配置及回执；`-` 表示关闭 |
 //! | `P <t_ms>` | 助手 → app | 心跳（每 1s） |
 //! | `BYE <reason>` | 助手 → app | 助手收尾，按键即将释放 |
 //!
@@ -99,6 +91,11 @@ use crate::raw_input::{button_for_usage, ButtonEdge, ENHANCED_CAPTURE_BUTTON_USA
 /// （与 key_suppressor 的知识同源）。ATVV 语音会话走 BLE 协议层，不经这个
 /// usage；且它在 Windows 输入流本来就未映射——报告层替换它零损失。
 pub const VOICE_KEY_HID_USAGE: u16 = 0x003E;
+
+// A disconnect or submitted S - cannot prove the old report path released its key.
+static VOICE_SYNTH_DISABLED_CONFIRMED: AtomicBool = AtomicBool::new(false);
+// Set when an enable command may have reached the Agent; only an off ACK clears it.
+static VOICE_SYNTH_DISABLE_REQUIRED: AtomicBool = AtomicBool::new(false);
 
 /// 报告层合成**已实测可用**的目标 usage 白名单（2026-09-29）。
 ///
@@ -149,14 +146,14 @@ const SILENCE_TIMEOUT: Duration = Duration::from_millis(3_000);
 const READ_POLL: Duration = Duration::from_millis(250);
 
 /// 命名管道空闲读退避。`PIPE_NOWAIT` 连接在无数据时读会**立即**返回
-/// `ERROR_NO_DATA`，退避缺失会让连接线程变成忙等（2026-10-02 真机实测：
+/// `ERROR_NO_DATA`，退避缺失会让连接线程变成忙等（上游 2026-10-02 实验：
 /// Helper 一连上 `sayall-rc003-bridge-conn` 就吃满一个核，应用 UI 被饿死、
 /// 点不动也关不掉）。取 2ms：边沿投递的额外上界延迟 ≤2ms（在本链路噪声内），
 /// 空闲轮询 500Hz 的 CPU 成本可忽略；TCP 路径由 `READ_POLL` 读超时提供
 /// 同等的"非忙等"语义。
 const PIPE_IDLE_BACKOFF: Duration = Duration::from_millis(2);
 
-/// agent 租约为 2s；所有权心跳必须在租约到期前失效，先恢复旧键盘路径。
+/// agent 租约为 2s；所有权心跳提前失效，暂停自定义映射并保留原生输入。
 const OWNERSHIP_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 /// 未通过鉴权的连接允许的错误次数，超过即断开（与助手侧 REJECT 折叠计数同旨）。
@@ -167,7 +164,7 @@ const MAX_LINE_BYTES: usize = 4_096;
 
 /// Windows 命名管道绕开 Winsock/WFP。现场已确认 Clash/Meta TUN 会把计划任务
 /// Helper 发往当前 loopback 端口的 SYN 改送到另一个端口，导致 TCP 永久超时；
-/// 命名管道不经过 IP 栈，同时保留 TCP 作为旧 Helper/离线测试兼容路径。
+/// 命名管道不经过 IP 栈；TCP 使用相同协议，用于本地测试与诊断。
 const PIPE_BUFFER_BYTES: u32 = 4_096;
 
 /// 桥接阶段（诊断用）。
@@ -181,7 +178,7 @@ pub enum BridgePhase {
     Listening,
     /// 助手已连接且通过鉴权。
     Connected,
-    /// 监听失败（端口等）：普通键继续走旧路径，三键保持原有降级语义。
+    /// 监听失败：暂停自定义映射，保留原生输入。
     Failed,
 }
 
@@ -242,6 +239,10 @@ pub enum BridgeLine {
     },
     /// 绝对状态边沿。`usages` 为空表示"全部释放"。
     Edges {
+        usages: Vec<u16>,
+    },
+    /// Physical UI observation, independent of capture targets; never executes actions.
+    Observed {
         usages: Vec<u16>,
     },
     Ping,
@@ -322,14 +323,18 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
                 helper_pid,
             }))
         }
-        "E" => {
+        "E" | "R" => {
             parts
                 .next()
                 .ok_or_else(|| "E 缺少时间戳".to_string())?
                 .parse::<u64>()
                 .map_err(|_| "E 时间戳不是整数".to_string())?;
             let usages = parse_usage_payload(parts.next().unwrap_or("-"))?;
-            Ok(Some(BridgeLine::Edges { usages }))
+            Ok(Some(if head == "R" {
+                BridgeLine::Observed { usages }
+            } else {
+                BridgeLine::Edges { usages }
+            }))
         }
         "P" => Ok(Some(BridgeLine::Ping)),
         "A" => {
@@ -422,6 +427,7 @@ struct BridgeShared {
     last_rx: Option<Instant>,
     owned: BTreeSet<u16>,
     ownership_last_rx: Option<Instant>,
+    mapping: std::sync::Weak<crate::button_mapping::ButtonMappingRuntime>,
 }
 
 impl Default for BridgeShared {
@@ -440,6 +446,7 @@ impl Default for BridgeShared {
             last_rx: None,
             owned: BTreeSet::new(),
             ownership_last_rx: None,
+            mapping: std::sync::Weak::new(),
         }
     }
 }
@@ -480,21 +487,19 @@ fn usage_mask(usages: &BTreeSet<u16>) -> u64 {
 }
 
 fn clear_ownership(shared: &Arc<Mutex<BridgeShared>>) {
-    let had_ownership = {
+    let (had_ownership, mapping) = {
         let mut state = lock(shared);
         let had = !state.owned.is_empty();
         state.owned.clear();
         state.ownership_last_rx = None;
-        had
+        (had, state.mapping.upgrade())
     };
     crate::key_gate::set_enhanced_owned_mask(0);
+    if let Some(mapping) = mapping {
+        mapping.set_capture_owned(0);
+    }
     if had_ownership {
-        // persistent_swallow= 是常驻抑制吞键累计快照：与 ownership_resumed
-        // 的快照做差，即得本窗口内被吞的按压次数（含物理键盘同名键）。
-        note(format!(
-            "enhanced_capture event=ownership_released fallback=legacy persistent_swallow={}",
-            crate::key_gate::persistent_swallow_total()
-        ));
+        note("enhanced_capture event=ownership_released native=passthrough".to_owned());
     }
 }
 
@@ -623,12 +628,13 @@ impl Rc003Bridge {
         Self::start_in(default_bridge_dir(), sender)
     }
 
-    /// 在指定目录启动：创建命名管道与兼容 loopback 端口 → 写出描述文件 → 等待助手回连。
+    /// 在指定目录启动：创建命名管道与诊断 loopback 端口 → 写出描述文件 → 等待助手回连。
     ///
     /// 端口与令牌由主程序决定，助手只读不改；监听失败**不是**致命错误
-    /// （桥接不可用时普通键继续走旧路径，三键保持接线前的降级语义），
+    /// （桥接不可用时暂停 RC003 自定义映射，保留原生输入），
     /// 但会在诊断日志里留下 `phase=failed` 的记录。
     pub fn start_in(dir: PathBuf, sender: Sender<EngineMessage>) -> Arc<Self> {
+        VOICE_SYNTH_DISABLED_CONFIRMED.store(false, Ordering::Release);
         let stop = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Mutex::new(BridgeShared::default()));
         let current: Arc<Mutex<Option<CurrentConn>>> = Arc::new(Mutex::new(None));
@@ -742,6 +748,13 @@ impl Rc003Bridge {
     }
 
     /// 监听到的端口（0 = 未监听）。
+    pub(crate) fn attach_mapping_runtime(
+        &self,
+        mapping: &Arc<crate::button_mapping::ButtonMappingRuntime>,
+    ) {
+        lock(&self.shared).mapping = Arc::downgrade(mapping);
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -791,8 +804,8 @@ impl Rc003Bridge {
             targets.generation
         };
 
-        // 先撤销旧所有权，再让 Helper 切换目标；这段窗口宁可走旧逻辑，也不能
-        // 因为仍把键盘钩子关着而让按键完全不可用。
+        // 先撤销旧所有权，再让 Helper 切换目标；期间自定义映射暂停，
+        // 不恢复无设备归属的全局键盘吞键。
         clear_ownership(&self.shared);
         let retained: BTreeSet<u16> = lock(&self.shared)
             .pressed
@@ -801,7 +814,7 @@ impl Rc003Bridge {
             .collect();
         let releases = apply_usages(&self.shared, &self.targets, &retained);
         for edge in releases {
-            let _ = self.sender.send(EngineMessage::GateEdge(edge));
+            let _ = self.sender.send(EngineMessage::DriverEdge(edge));
         }
         note(format!(
             "enhanced_capture event=targets_changed generation={generation} enabled={enabled} usages={}",
@@ -830,6 +843,7 @@ impl Rc003Bridge {
             if *synth == to_usage {
                 return;
             }
+            VOICE_SYNTH_DISABLED_CONFIRMED.store(false, Ordering::Release);
             *synth = to_usage;
         }
         note(format!(
@@ -838,6 +852,38 @@ impl Rc003Bridge {
                 .map(|u| format!("0x{u:04X}"))
                 .unwrap_or_else(|| "off".to_owned())
         ));
+    }
+
+    /// True only after the connected Agent acknowledged S - following real release.
+    pub fn voice_synth_disabled_confirmed() -> bool {
+        VOICE_SYNTH_DISABLED_CONFIRMED.load(Ordering::Acquire)
+    }
+
+    pub fn voice_synth_disable_required() -> bool {
+        VOICE_SYNTH_DISABLE_REQUIRED.load(Ordering::Acquire)
+    }
+
+    /// Only call after capture cleanup produced a matching settled receipt and the
+    /// Helper exited. Disconnect, a scheduler response or a timeout is not proof.
+    pub fn confirm_capture_cleanup_completed() {
+        VOICE_SYNTH_DISABLE_REQUIRED.store(false, Ordering::Release);
+        VOICE_SYNTH_DISABLED_CONFIRMED.store(true, Ordering::Release);
+        crate::key_gate::set_voice_synth_active(false);
+        note("rc003_bridge event=voice_synth_disable terminal_result=passed proof=capture_cleanup_receipt".to_owned());
+    }
+
+    pub fn wait_voice_synth_disabled(&self, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while Self::voice_synth_disable_required() && !Self::voice_synth_disabled_confirmed() {
+            if started.elapsed() >= timeout || self.stop.load(Ordering::Acquire) {
+                note(
+                    "rc003_bridge event=voice_synth_disable terminal_result=unconfirmed".to_owned(),
+                );
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
     }
 
     /// 报告层合成门禁判据：已收到与当前目标一致的 agent 回执（`A` 行，经
@@ -855,6 +901,7 @@ impl Rc003Bridge {
 impl Drop for Rc003Bridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        VOICE_SYNTH_DISABLED_CONFIRMED.store(false, Ordering::Release);
         // 桥没了 = 合成通道没了：门禁必须回落（正常路径连接收尾已清，
         // 这里兜底连接线程卡在阻塞读而收尾尚未执行的情形）。
         crate::key_gate::set_voice_synth_active(false);
@@ -1269,12 +1316,16 @@ fn handle_connection(
                         // 鉴权后立即对齐语音合成状态（绝对语义，同 OK 行的 targets）。
                         // 门禁（是否跳过 SendInput 注入）只认 agent 回执（`A` 行）：
                         // "写进 socket" ≠ "报告层已生效"（2026-10-03 加固）。
+                        VOICE_SYNTH_DISABLED_CONFIRMED.store(false, Ordering::Release);
                         let synth_current = *lock(voice_synth_to);
                         last_sent_synth = synth_current;
                         synth_confirmed = false;
                         synth_resend_attempts = 0;
                         // None 也必须显式发送：helper/agent 可以跨应用或 helper 重启
                         // 常驻，省略 S - 会让上一轮 RightAlt 合成继续生效。
+                        if synth_current.is_some() {
+                            VOICE_SYNTH_DISABLE_REQUIRED.store(true, Ordering::Release);
+                        }
                         let line = voice_synth_line(synth_current);
                         synth_sent_at =
                             write_line(&mut writer, &line).ok().map(|()| Instant::now());
@@ -1310,7 +1361,7 @@ fn handle_connection(
                     let wanted: BTreeSet<u16> = usages.into_iter().collect();
                     let edges = apply_usages(shared, targets, &wanted);
                     for edge in edges {
-                        if sender.send(EngineMessage::GateEdge(edge)).is_err() {
+                        if sender.send(EngineMessage::DriverEdge(edge)).is_err() {
                             drop_reason = "engine_gone";
                             break 'outer;
                         }
@@ -1335,6 +1386,13 @@ fn handle_connection(
                         session_edges += 1;
                     }
                 }
+                BridgeLine::Observed { usages } => {
+                    let observed: BTreeSet<_> = usages
+                        .into_iter()
+                        .filter(|u| BRIDGE_ALLOWED_USAGES.contains(u))
+                        .collect();
+                    let _ = sender.send(EngineMessage::HidObservation(usage_mask(&observed)));
+                }
                 BridgeLine::Ping => {}
                 BridgeLine::Ownership { generation, usages } => {
                     let reported: BTreeSet<u16> = usages.into_iter().collect();
@@ -1348,15 +1406,14 @@ fn handle_connection(
                             state.ownership_last_rx = Some(Instant::now());
                         }
                         crate::key_gate::set_enhanced_owned_mask(new_mask);
+                        let mapping = lock(shared).mapping.upgrade();
+                        if let Some(mapping) = mapping {
+                            mapping.set_capture_owned(new_mask);
+                        }
                         if resumed {
-                            // 恢复沿（此前静默——2026-09-28 TV 键偶发拦截调查：
-                            // "fallback=legacy 窗口"只有起点没有终点，窗口时长
-                            // 与窗口内物理键被吞次数都不可观测）。
                             note(format!(
-                                "enhanced_capture event=ownership_resumed usages={} \
-                                 persistent_swallow={}",
-                                format_usage_payload(&reported),
-                                crate::key_gate::persistent_swallow_total()
+                                "enhanced_capture event=ownership_resumed usages={}",
+                                format_usage_payload(&reported)
                             ));
                         }
                     } else {
@@ -1375,6 +1432,8 @@ fn handle_connection(
                         // `None` = 已关闭：确认收到，但门禁保持 false。
                         synth_confirmed = true;
                         crate::key_gate::set_voice_synth_active(to.is_some());
+                        VOICE_SYNTH_DISABLED_CONFIRMED.store(to.is_none(), Ordering::Release);
+                        VOICE_SYNTH_DISABLE_REQUIRED.store(to.is_some(), Ordering::Release);
                         note(format!(
                             "rc003_bridge event=voice_synth_ack to={} active={} confirm=agent",
                             to.map(|u| format!("0x{u:04X}"))
@@ -1438,6 +1497,9 @@ fn handle_connection(
             {
                 let synth_current = *lock(voice_synth_to);
                 if synth_current != last_sent_synth {
+                    if synth_current.is_some() {
+                        VOICE_SYNTH_DISABLE_REQUIRED.store(true, Ordering::Release);
+                    }
                     let line = voice_synth_line(synth_current);
                     if write_line(&mut writer, &line).is_err() {
                         drop_reason = "voice_synth_write_error";
@@ -1484,10 +1546,8 @@ fn handle_connection(
             if ownership_expired {
                 clear_ownership(shared);
                 note(format!(
-                    "enhanced_capture event=ownership_timeout timeout_ms={} fallback=legacy \
-                     persistent_swallow={}",
-                    OWNERSHIP_TIMEOUT.as_millis(),
-                    crate::key_gate::persistent_swallow_total()
+                    "enhanced_capture event=ownership_timeout timeout_ms={} native=passthrough",
+                    OWNERSHIP_TIMEOUT.as_millis()
                 ));
             }
         }
@@ -1517,6 +1577,7 @@ fn handle_connection(
     let mut released_count = 0u64;
     if drop_reason != "replaced" {
         clear_ownership(shared);
+        let _ = sender.send(EngineMessage::HidObservation(0));
         let released = apply_usages(shared, targets, &BTreeSet::new());
         released_count = released.len() as u64;
         // **先落状态、再投边沿**：边沿是"释放已经发生"的通知，一旦投出，任何观察者
@@ -1537,7 +1598,7 @@ fn handle_connection(
             state.helper_pid = 0;
         }
         for edge in released {
-            let _ = sender.send(EngineMessage::GateEdge(edge));
+            let _ = sender.send(EngineMessage::DriverEdge(edge));
         }
     }
     // 语音合成门禁回落：连接不在了 ⇒ 报告层合成不再可靠，BLE 注入路径必须
@@ -1554,6 +1615,7 @@ fn handle_connection(
         let mut guard = lock(current);
         let still_mine = guard.as_ref().map(|conn| conn.id == my_id).unwrap_or(false);
         if still_mine {
+            VOICE_SYNTH_DISABLED_CONFIRMED.store(false, Ordering::Release);
             *guard = None;
         }
     }
@@ -1757,10 +1819,26 @@ mod tests {
     }
 
     #[test]
-    fn voice_synth_line_encodes_on_and_off() {
-        // helper 侧 parse_bridge_synth_line 的对侧编码，两种形态逐字符对齐。
-        assert_eq!(voice_synth_line(Some(0x00E6)), "S 00E6");
-        assert_eq!(voice_synth_line(None), "S -");
+    fn observation_protocol_is_independent_of_capture_targets_and_excludes_voice() {
+        assert_eq!(
+            parse_bridge_line("R 1 f1,28,65,80"),
+            Ok(Some(BridgeLine::Observed {
+                usages: vec![0xf1, 0x28, 0x65, 0x80]
+            }))
+        );
+        assert_eq!(
+            parse_bridge_line("R 2 -"),
+            Ok(Some(BridgeLine::Observed { usages: vec![] }))
+        );
+        assert!(parse_bridge_line("R invalid f1").is_err());
+        let physical: BTreeSet<_> = ENHANCED_CAPTURE_BUTTON_USAGES
+            .iter()
+            .map(|(_, usage)| *usage)
+            .chain([VOICE_KEY_HID_USAGE])
+            .filter(|u| BRIDGE_ALLOWED_USAGES.contains(u))
+            .collect();
+        assert_eq!(usage_mask(&physical), (1 << 13) - 1);
+        assert!(!physical.contains(&VOICE_KEY_HID_USAGE));
     }
 
     #[test]
@@ -2032,7 +2110,7 @@ mod tests {
             .expect("命名管道边沿必须送入映射引擎");
         assert!(matches!(
             edge,
-            EngineMessage::GateEdge(ButtonEdge {
+            EngineMessage::DriverEdge(ButtonEdge {
                 button: RemoteButton::Back,
                 is_pressed: true
             })
@@ -2145,11 +2223,26 @@ mod tests {
             "收到与期望一致的回执后门禁必须置真"
         );
 
+        assert!(Rc003Bridge::voice_synth_disable_required());
+        bridge.set_voice_synth(None);
+        assert!(!bridge.wait_voice_synth_disabled(Duration::from_millis(20)));
+        stream.write_all(b"A -\n").unwrap();
+        stream.flush().unwrap();
+        assert!(bridge.wait_voice_synth_disabled(Duration::from_secs(2)));
+        assert!(!Rc003Bridge::voice_synth_disable_required());
+        drop(stream);
+        // PIPE_NOWAIT can temporarily report zero bytes after the client closes;
+        // the existing silence watchdog is the final bounded disconnect proof.
+        let deadline = Instant::now() + SILENCE_TIMEOUT + Duration::from_secs(2);
+        while Rc003Bridge::voice_synth_disabled_confirmed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!Rc003Bridge::voice_synth_disabled_confirmed());
         drop(bridge);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 空闲命名管道连接不得忙等（2026-10-02 真机实测：Helper 一连上，
+    /// 空闲命名管道连接不得忙等（上游 2026-10-02 实验：Helper 一连上，
     /// `sayall-rc003-bridge-conn` 单线程吃满一个核，应用 UI 被饿死、
     /// 点不动也关不掉）。判据 = 空闲窗口内退避次数必须被限速：去掉
     /// `bridge_idle_backoff` 里的 sleep（阳性对照）时同一窗口会到数十万次；
@@ -2377,7 +2470,7 @@ mod tests {
         let mut second = Vec::new();
         for _ in 0..40 {
             match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(EngineMessage::GateEdge(edge)) => {
+                Ok(EngineMessage::DriverEdge(edge)) => {
                     if edge.is_pressed {
                         if edge.button == crate::raw_input::RemoteButton::Back {
                             first.push(edge);
@@ -2402,7 +2495,7 @@ mod tests {
         let mut released = 0;
         for _ in 0..40 {
             match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(EngineMessage::GateEdge(edge)) if !edge.is_pressed => released += 1,
+                Ok(EngineMessage::DriverEdge(edge)) if !edge.is_pressed => released += 1,
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -2413,7 +2506,7 @@ mod tests {
         assert_eq!(released, 2, "两个键都必须收到释放边沿");
 
         // 助手若仍连着但不再续报目标所有权，主程序必须在 helper 的 2 秒租约前
-        // 先撤销报告层所有权，让普通键自动恢复旧的键盘路径。P 只维持桥接连接，
+        // 先撤销报告层所有权并暂停自定义映射。P 只维持桥接连接，
         // 不应续期所有权。
         for _ in 0..7 {
             stream.write_all(b"P\n").unwrap();
@@ -2428,7 +2521,7 @@ mod tests {
         }
         assert!(
             bridge.snapshot().owned_usages.is_empty(),
-            "所有权超时后必须恢复旧路径，不能继续劫持物理键盘边沿"
+            "所有权超时后必须撤销映射能力，物理键盘继续透传"
         );
 
         // 热更新为主页键：主程序先撤销旧所有权，再下发新一代目标；主页边沿
@@ -2447,7 +2540,7 @@ mod tests {
             .expect("主页边沿应被动态桥接");
         assert!(matches!(
             home,
-            EngineMessage::GateEdge(ButtonEdge {
+            EngineMessage::DriverEdge(ButtonEdge {
                 button: RemoteButton::Home,
                 is_pressed: true
             })
@@ -2457,7 +2550,7 @@ mod tests {
         assert!(bridge.snapshot().owned_usages.is_empty());
         assert!(
             bridge.snapshot().target_usages.is_empty(),
-            "关闭全按键支持必须清空增强目标；非三键随后完全沿用旧路径"
+            "关闭全按键支持必须清空增强目标并恢复原生输入"
         );
 
         drop(bridge);
@@ -2468,11 +2561,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn replaced_connection_preserves_new_synth_off_confirmation() {
+        let _gate = crate::key_gate::lock_gate_tests();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let old_client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (old_server, _) = listener.accept().unwrap();
+        let current = Arc::new(Mutex::new(Some(CurrentConn {
+            id: 2,
+            stream: BridgeIo::Tcp(old_client),
+        })));
+        let shared = Arc::new(Mutex::new(BridgeShared::default()));
+        let targets = Arc::new(Mutex::new(CaptureTargets::default()));
+        let synth = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sender, _receiver) = channel();
+        VOICE_SYNTH_DISABLED_CONFIRMED.store(true, Ordering::Release);
+        handle_connection(
+            BridgeIo::Tcp(old_server),
+            1,
+            &stop,
+            &shared,
+            &current,
+            &targets,
+            &synth,
+            "fixture-token",
+            &sender,
+        );
+        assert!(
+            Rc003Bridge::voice_synth_disabled_confirmed(),
+            "the replaced connection must not invalidate its successor's off ACK"
+        );
+        assert_eq!(lock(&current).as_ref().unwrap().id, 2);
+        VOICE_SYNTH_DISABLED_CONFIRMED.store(false, Ordering::Release);
+    }
+
     /// 新连接接管旧连接后，**接手方必须继续正常工作**。
     ///
     /// 这条用例钉住一个"写出来又被自测抓到"的缺陷：收尾时无条件清掉当前连接，
     /// 会把刚接手的新连接一起清掉，于是新连接下一轮认为自己被替换、主动让位——
-    /// 两个连接互相让位，桥接整体哑掉。现场表现就是"助手重启以后再按三键毫无反应"，
+    /// 两个连接互相让位，桥接整体哑掉。现场表现是助手重启后按键没有响应，
     /// 而且日志上看不出任何错误（两边都只是安静退出）。
     ///
     /// 同时覆盖第二半：被接管的旧连接**不得**释放状态，否则会误伤接手方
@@ -2513,7 +2641,7 @@ mod tests {
         let mut saw_back = false;
         for _ in 0..40 {
             match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(EngineMessage::GateEdge(edge))
+                Ok(EngineMessage::DriverEdge(edge))
                     if edge.is_pressed && edge.button == crate::raw_input::RemoteButton::Back =>
                 {
                     saw_back = true;
@@ -2536,7 +2664,7 @@ mod tests {
         let mut saw_volume = false;
         for _ in 0..40 {
             match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(EngineMessage::GateEdge(edge))
+                Ok(EngineMessage::DriverEdge(edge))
                     if edge.is_pressed
                         && edge.button == crate::raw_input::RemoteButton::VolumeUp =>
                 {
@@ -2589,7 +2717,7 @@ mod tests {
         let mut pressed = false;
         for _ in 0..40 {
             match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(EngineMessage::GateEdge(edge)) if edge.is_pressed => {
+                Ok(EngineMessage::DriverEdge(edge)) if edge.is_pressed => {
                     pressed = true;
                     break;
                 }
@@ -2610,7 +2738,7 @@ mod tests {
         let mut released = false;
         for _ in 0..60 {
             match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(EngineMessage::GateEdge(edge)) if !edge.is_pressed => {
+                Ok(EngineMessage::DriverEdge(edge)) if !edge.is_pressed => {
                     released = true;
                     break;
                 }
@@ -2622,6 +2750,12 @@ mod tests {
             released,
             "连接消失后必须自动释放按下状态，否则映射会卡在长按/连发语义"
         );
+        // Edge delivery precedes the worker's final snapshot update. Observe
+        // that completion separately instead of racing the channel receiver.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while bridge.snapshot().watchdog_release_total == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(
             bridge.snapshot().watchdog_release_total >= 1,
             "强制释放必须被计数，否则现场无法区分'助手正常收尾'与'被强杀'"

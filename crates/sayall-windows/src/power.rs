@@ -1,7 +1,11 @@
 use crate::{ble::WorkerMessage, PlatformError};
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::sync::mpsc::Sender;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc::Sender,
+    Arc,
+};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Power::{
     PowerRegisterSuspendResumeNotification, PowerUnregisterSuspendResumeNotification,
@@ -51,6 +55,7 @@ pub fn disable_background_power_throttling() -> Result<(), PlatformError> {
 
 struct CallbackContext {
     sender: Sender<WorkerMessage>,
+    lifecycle_epoch: Arc<AtomicU64>,
 }
 
 pub struct PowerNotifications {
@@ -59,8 +64,14 @@ pub struct PowerNotifications {
 }
 
 impl PowerNotifications {
-    pub fn register(sender: Sender<WorkerMessage>) -> Result<Self, PlatformError> {
-        let mut context = Box::new(CallbackContext { sender });
+    pub fn register(
+        sender: Sender<WorkerMessage>,
+        lifecycle_epoch: Arc<AtomicU64>,
+    ) -> Result<Self, PlatformError> {
+        let mut context = Box::new(CallbackContext {
+            sender,
+            lifecycle_epoch,
+        });
         let parameters = DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
             Callback: Some(power_callback),
             Context: (&mut *context as *mut CallbackContext).cast::<c_void>(),
@@ -110,7 +121,10 @@ unsafe extern "system" fn power_callback(
         return 0;
     };
     let message = match event_type {
-        PBT_APMSUSPEND => Some(WorkerMessage::SystemSuspended),
+        PBT_APMSUSPEND => {
+            context.lifecycle_epoch.fetch_add(1, Ordering::SeqCst);
+            Some(WorkerMessage::SystemSuspended)
+        }
         PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMECRITICAL | PBT_APMRESUMESUSPEND => {
             Some(WorkerMessage::SystemResumed)
         }
@@ -130,7 +144,11 @@ mod tests {
     #[test]
     fn callback_forwards_suspend_and_resume_without_touching_ble_state() {
         let (sender, receiver) = mpsc::channel();
-        let context = CallbackContext { sender };
+        let lifecycle_epoch = Arc::new(AtomicU64::new(0));
+        let context = CallbackContext {
+            sender,
+            lifecycle_epoch: Arc::clone(&lifecycle_epoch),
+        };
         let context_pointer = (&context as *const CallbackContext).cast::<c_void>();
 
         unsafe {
@@ -138,6 +156,7 @@ mod tests {
             power_callback(context_pointer, PBT_APMRESUMEAUTOMATIC, std::ptr::null());
         }
 
+        assert_eq!(lifecycle_epoch.load(Ordering::SeqCst), 1);
         assert!(matches!(
             receiver.recv().unwrap(),
             WorkerMessage::SystemSuspended

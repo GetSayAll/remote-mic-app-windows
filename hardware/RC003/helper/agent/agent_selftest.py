@@ -388,14 +388,20 @@ def case_c_disarm() -> tuple[bool, str]:
     box = Sandbox(port=helper.port)
     try:
         box.init(timeout=8.0)
-        if helper.wait_for("hello", 4.0) is None:
+        hello = helper.wait_for("hello", 4.0)
+        if hello is None:
             return False, "未收到 hello"
         for _ in range(6):
             helper.send({"type": "renew"})
             time.sleep(0.2)
         if helper.wait_for("hb", 3.0, lambda l: l.get("lease_ok") is True) is None:
             return False, "未进入已武装状态"
-        helper.send({"type": "disarm"})
+        helper.send({"type": "disarm", "instance": hello.get("instance"), "stop_id": "selftest-stop"})
+        stopped = helper.wait_for("stopped", 3.0, lambda line:
+            line.get("instance") == hello.get("instance") and line.get("stop_id") == "selftest-stop"
+            and line.get("hook_detached") is True and line.get("released_all") is True)
+        if stopped is None:
+            return False, "未收到同 Agent 与本次请求的真实 stopped 回执"
         off = helper.wait_for("hb", 3.0, lambda l: l.get("disarmed") is True)
         if off is None:
             return False, "disarm 后 hb.disarmed 未置真"
