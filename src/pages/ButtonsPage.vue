@@ -72,8 +72,12 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
  * --map-scale 连续缩放兜底（小于最小窗口的恢复态窗口）。 */
 const CANVAS_MIN_WIDTH = 800;
 const CANVAS_HEIGHT = 570;
-const REMOTE_WIDTH = 202;
-const REMOTE_HEIGHT = 410;
+// 遥控器实物图尺寸（2026-10-07 放大到可见约 115×480）：PNG 为 404×820，含透明边
+// ——可见遥控器只占图内 187×768（46.3%×93.7%），所以容器比可见尺寸大：
+// 250×508 ⇒ 可见 ≈ 115.9×475.8（缩放约 1.24×，图与容器同比例，object-fit: cover
+// 不裁掉可见像素）。锚点/橙点/连线一律用归一化比例 × 本尺寸，故全部按比例跟随。
+const REMOTE_WIDTH = 250;
+const REMOTE_HEIGHT = 508;
 const CARD_HEIGHT = 72;
 const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
 
@@ -1552,7 +1556,7 @@ onUnmounted(() => {
         <polygon :points="arrowPolygon(VOICE_PLACEMENT)" :class="{ active: voiceActive }" />
       </svg>
 
-      <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
+      <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${REMOTE_TOP}px` }">
         <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙语音遥控器 2 Pro 示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
