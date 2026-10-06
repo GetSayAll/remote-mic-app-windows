@@ -5,6 +5,7 @@
 - 状态：**定稿待实现**（含 §4 文案，待 Andy 复核后开发）
 - 前提说明：**不查 Mac 原版参考**——Mac 侧没有此功能（Andy 明确）；本功能是 Windows 侧的上下文增强
 - 关联：沿用现有鼠标动作（`MouseClick`/`MouseMove` 注入，见 `send_input.rs`）与按键编辑页
+- 产品逻辑整理见 `docs/product/button-behavior.md`（面向学习参考，不含平台细节）
 
 ## 1. 需求与语义
 

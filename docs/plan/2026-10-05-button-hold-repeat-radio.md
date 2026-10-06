@@ -6,6 +6,7 @@
 - 关联：本文件取代初版「按住连续触发」开关（单击/长按槽位二选一）的交互口径；
   引擎与服务端存储格式**不变**（`ButtonActions.hold_repeat: Option<ButtonTrigger>`，
   线格式 `holdRepeat: "single" | "long"`，schema v1）
+- 产品逻辑整理见 `docs/product/button-behavior.md`（面向学习参考，不含平台细节）
 
 ---
 
