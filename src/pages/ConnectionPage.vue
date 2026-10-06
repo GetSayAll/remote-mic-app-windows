@@ -7,6 +7,7 @@ import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import type {
   AudioEndpoint,
   AudioSnapshot,
+  CaptureSupport,
   ConnectionSnapshot,
   KeyChord,
   PairedRemote,
@@ -23,6 +24,7 @@ import {
   disconnectRemote,
   enableRc003Capture,
   getAudioSnapshot,
+  getCaptureSupport,
   getConnectionSnapshot,
   getGainDb,
   getOtherVoiceHotkey,
@@ -409,6 +411,35 @@ const captureSwitchEl = ref<HTMLInputElement | null>(null);
 const rc003CaptureHint = ref("");
 
 /**
+ * 本机对「全按键支持」（本页叫「支持更多输入工具」）的支持情况（2026-10-07
+ * issue #206）：`null` = 尚未读到，按可用处理，不因一次 IPC 失败把功能锁死。
+ */
+const captureSupport = ref<CaptureSupport | null>(null);
+const captureUnsupported = computed(() => captureSupport.value?.available === false);
+
+/**
+ * 本机不可用时的文案（与按键页同一句，名称随本页入口）：
+ * 用户可见文案的规范来源是 docs/product-copy.md（§2 名称表 / §7 决定索引）。
+ */
+const CAPTURE_UNSUPPORTED_TITLE =
+  "“支持更多输入工具”在这台电脑上暂不可用；新版本支持后会恢复正常。";
+const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持“支持更多输入工具”，其他按键不受影响。";
+
+/**
+ * 开关右侧的状态字。本机不可用时统一说「暂不可用」——不给「需要开启」这类
+ * 做不到的暗示。两个面板（豆包 / 其他工具）原本的措辞保留（available=true
+ * 时行为不变）。
+ */
+function captureStateLabel(state: "doubao" | "other"): string {
+  if (captureUnsupported.value) return "暂不可用";
+  if (rc003CaptureEnabled.value === true) return "已开启";
+  if (state === "doubao") {
+    return rc003CaptureEnabled.value === false ? "需要开启" : "正在读取…";
+  }
+  return "未开启";
+}
+
+/**
  * 把开关的 DOM 状态写回绑定值。原生复选框被点击的瞬间浏览器先翻了 checked，
  * 而操作失败（状态没变）时 Vue 判定 props 无变化、不会生成 DOM 补丁——
  * 会出现「状态是关、界面是开」（ButtonsPage 2026-09-25 真机实证，同法防御）。
@@ -421,6 +452,14 @@ function syncCaptureSwitchDom(): void {
 }
 
 async function reconcileRc003Capture(): Promise<void> {
+  // 本机支持情况单独取、单独兜（2026-10-07 issue #206）：读不到就保持上一次的
+  // 值，不因为一次 IPC 失败把开关锁成不可用。
+  try {
+    const support = await getCaptureSupport();
+    captureSupport.value = support ?? null;
+  } catch {
+    // 读不到支持情况：保持当前值（按可用处理）。
+  }
   try {
     const status = await getRc003TaskStatus();
     // 首次对账（null → 权威值）直接采纳；此后以本页用户操作为准，
@@ -435,6 +474,12 @@ async function reconcileRc003Capture(): Promise<void> {
 
 async function toggleRc003Capture() {
   if (rc003CaptureBusy.value) return;
+  // 本机不可用（ARM64，issue #206）：开关已置灰，这里再守一道——合成事件与
+  // 键盘操作都可能绕过原生 disabled。不弹确认、不动 IPC，把 DOM 写回绑定值。
+  if (captureUnsupported.value) {
+    syncCaptureSwitchDom();
+    return;
+  }
   // 与 ButtonsPage.toggleRc003Capture 同源：每次开启都先弹确认
   // （2026-10-03 定稿：每次开启都重新授权，都会弹 Windows 授权窗口）。
   // 关闭方向永远直接执行。
@@ -1246,7 +1291,11 @@ onUnmounted(() => {
               </span>
             </div>
             <div class="switch-line">
-              <label class="toggle-row" for="capture-switch-doubao">
+              <label
+                class="toggle-row"
+                for="capture-switch-doubao"
+                :title="captureUnsupported ? CAPTURE_UNSUPPORTED_TITLE : undefined"
+              >
                 <span>支持更多输入工具</span>
                 <span
                   v-if="rc003CaptureEnabled === null"
@@ -1260,7 +1309,7 @@ onUnmounted(() => {
                   type="checkbox"
                   class="toggle-input capture-switch"
                   :checked="rc003CaptureEnabled === true"
-                  :disabled="rc003CaptureBusy"
+                  :disabled="rc003CaptureBusy || captureUnsupported"
                   @change="toggleRc003Capture"
                 />
               </label>
@@ -1268,16 +1317,18 @@ onUnmounted(() => {
                 class="switch-state"
                 :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
               >
-                {{
-                  rc003CaptureEnabled === true
-                    ? "已开启"
-                    : rc003CaptureEnabled === false
-                      ? "需要开启"
-                      : "正在读取…"
-                }}
+                {{ captureStateLabel("doubao") }}
               </span>
             </div>
-            <div v-if="rc003CaptureEnabled === false" class="info-callout warning callout-small">
+            <!-- 本机不可用（ARM64，issue #206）：先说清这台电脑用不了，再说别的。
+                 与按键页「全按键支持」同一句口径，只有名称随本页入口变化。 -->
+            <div v-if="captureUnsupported" class="info-callout warning callout-small">
+              {{ CAPTURE_UNSUPPORTED_NOTE }}
+            </div>
+            <div
+              v-else-if="rc003CaptureEnabled === false"
+              class="info-callout warning callout-small"
+            >
               还差一步：开启后豆包才能收到遥控器语音键。每次开启都会弹出系统授权，请点“是”。
               已开启：现在按住遥控器语音键，豆包的语音条就会出现。
             </div>
@@ -1387,7 +1438,11 @@ onUnmounted(() => {
               <button v-else class="chip" type="button" disabled>自定义组合键（暂未开放）</button>
             </div>
             <div class="switch-line">
-              <label class="toggle-row" for="capture-switch-other">
+              <label
+                class="toggle-row"
+                for="capture-switch-other"
+                :title="captureUnsupported ? CAPTURE_UNSUPPORTED_TITLE : undefined"
+              >
                 <span>支持更多输入工具</span>
                 <span
                   v-if="rc003CaptureEnabled === null"
@@ -1401,7 +1456,7 @@ onUnmounted(() => {
                   type="checkbox"
                   class="toggle-input capture-switch"
                   :checked="rc003CaptureEnabled === true"
-                  :disabled="rc003CaptureBusy"
+                  :disabled="rc003CaptureBusy || captureUnsupported"
                   @change="toggleRc003Capture"
                 />
               </label>
@@ -1409,10 +1464,12 @@ onUnmounted(() => {
                 class="switch-state"
                 :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
               >
-                {{ rc003CaptureEnabled === true ? "已开启" : "未开启" }}
+                {{ captureStateLabel("other") }}
               </span>
             </div>
-            <p class="tiny muted">建议开启：部分输入工具需要它才能收到遥控器按键。</p>
+            <!-- 本机不可用（ARM64，issue #206）：说明句与豆包面板逐字一致。 -->
+            <p v-if="captureUnsupported" class="tiny muted">{{ CAPTURE_UNSUPPORTED_NOTE }}</p>
+            <p v-else class="tiny muted">建议开启：部分输入工具需要它才能收到遥控器按键。</p>
             <p v-if="rc003CaptureHint" class="tiny muted">{{ rc003CaptureHint }}</p>
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{

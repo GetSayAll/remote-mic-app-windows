@@ -828,6 +828,49 @@ export async function disableRc003Capture(): Promise<Rc003TaskStatus> {
   return invoke<Rc003TaskStatus>("disable_rc003_capture");
 }
 
+/** 本机无法使用「全按键支持」的原因（`available` 为 false 时一定有值）。 */
+export type CaptureUnsupportedReason = "arch_unsupported" | "helper_missing";
+
+/**
+ * 「全按键支持」在这台电脑上是否可用（2026-10-07 issue #206）。
+ *
+ * 背景：Windows 11 ARM64 上增强捕获起不来（产品只提供 x64 载荷，ARM64 上加载
+ * 不了），后端因此在启动时把已持久化的开启意图回落为关闭、并停止重试空转；
+ * 界面据此把开关与三键卡片置灰、说明原因与恢复方式，不再让页面永久停在
+ * 「正在启动」。`available=false` 时桥接相位是 `stopped`（状态点不显示）。
+ */
+export interface CaptureSupport {
+  /** 本机原生架构。 */
+  nativeArch: "x64" | "arm64" | "unknown";
+  /** 本机架构对应的载荷文件名（诊断信息，不进用户可见文案）。 */
+  helperExpected: string;
+  /** false = 本机无法使用「全按键支持」：界面必须置灰入口并说明原因。 */
+  available: boolean;
+  reason: CaptureUnsupportedReason | null;
+}
+
+/** 浏览器预览没有真实平台：按「可用」渲染，保证界面能完整走查。 */
+const BROWSER_CAPTURE_SUPPORT: CaptureSupport = {
+  nativeArch: "unknown",
+  helperExpected: "sayall-helper.exe",
+  available: true,
+  reason: null,
+};
+
+/**
+ * 读取本机的支持情况（挂载时一次 + 随页面既有轮询刷新）。
+ *
+ * 与 `getRc003TaskStatus` 同口径：非 Tauri 环境返回浏览器预览值，Tauri 环境
+ * IPC 失败时抛错，由调用方 `.catch` 后保持上一次的值（读不到就不置灰，
+ * 不因为一次 IPC 失败把功能锁死）。
+ */
+export async function getCaptureSupport(): Promise<CaptureSupport> {
+  if (typeof window === "undefined" || !isTauriRuntime()) {
+    return BROWSER_CAPTURE_SUPPORT;
+  }
+  return invoke<CaptureSupport>("get_capture_support");
+}
+
 export async function startRawInput(): Promise<RawInputSnapshot> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法启动按键监听");
