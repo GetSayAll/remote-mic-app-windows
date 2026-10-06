@@ -663,7 +663,7 @@ function holdRepeatBlockedReason(
   if (slot === "long") {
     if (actions.long.type === "disabled") return "先给这个按键配置长按动作";
     if (!actionAllowsRepeat(actions.long)) {
-      return "“长按”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；改成单个按键后可选";
+      return "“长按”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；把它改成单个按键后可选";
     }
     return null;
   }
@@ -672,7 +672,11 @@ function holdRepeatBlockedReason(
     return "“单击”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；改成单个按键后可选";
   }
   if (actions.long.type !== "disabled") {
-    return "这个按键已有长按动作，按住会先执行长按；要连续执行，请选“重复长按动作”";
+    // 指路前先确认「重复长按动作」真的可选：长按动作只执行一次时它同样是
+    // 灰的，原句会指向一个点不到的选项（2026-10-05 用户反馈）。
+    return holdRepeatBlockedReason(actions, "long") === null
+      ? "这个按键已有长按动作，按住会先执行长按；要连续执行，请选“重复长按动作”"
+      : "这个按键已有长按动作：按住会执行长按。要连续执行单击动作，请先清除长按动作";
   }
   return null;
 }
@@ -703,11 +707,24 @@ const repeatPageReason = computed<string | null>(() => {
   return null;
 });
 
-/** 当前编辑按键是否配置了双击（单击页说明句据此切换口径）。 */
+/** 当前编辑按键是否配置了双击（单击页说明句与「重复单击动作」悬停据此切换口径）。 */
 const doubleConfiguredOnEditingButton = computed(() => {
   const target = editingTarget.value;
   return !!target && actionsOf(target.button).double.type !== "disabled";
 });
+
+/** 「重复单击动作」的悬停说明（不可选时为原因；配双击时按压住确认口径）。 */
+const repeatSingleTitle = computed(() => {
+  if (repeatSingleReason.value) return repeatSingleReason.value;
+  return doubleConfiguredOnEditingButton.value
+    ? "按住超过约 0.3 秒开始，单击动作会不断重复，直到松手"
+    : "按住不放，单击动作会不断重复，直到松手";
+});
+
+/** 「重复长按动作」的悬停说明（不可选时为原因）。 */
+const repeatLongTitle = computed(
+  () => repeatLongReason.value ?? "按住约 0.55 秒后，长按动作会不断重复，直到松手",
+);
 
 /**
  * 动作变更后的「按住时连续执行」一致性收口：已选目标不再可用时自动回到
@@ -726,13 +743,14 @@ function reconcileHoldRepeat(
   if (valid) return { actions, notice: null };
   const next = { ...actions };
   delete next.holdRepeat;
-  return {
-    actions: next,
-    notice:
-      slot === "single" && actions.long.type !== "disabled"
+  // 自动关闭的提示同样不得指向灰掉的选项（长按动作只执行一次时它不可选）。
+  const notice =
+    slot === "single" && actions.long.type !== "disabled"
+      ? holdRepeatBlockedReason(actions, "long") === null
         ? "这个按键已配置长按动作：按住会先执行长按，“按住时连续执行”已关闭（要连续执行，请选“重复长按动作”）"
-        : "动作已变更，“按住时连续执行”已关闭",
-  };
+        : "这个按键已配置长按动作：按住会执行长按，而它只执行一次，“按住时连续执行”已关闭"
+      : "动作已变更，“按住时连续执行”已关闭";
+  return { actions: next, notice };
 }
 
 function selectHoldRepeat(choice: HoldRepeatChoice): void {
@@ -2091,7 +2109,7 @@ onUnmounted(() => {
             class="chip"
             :class="{ selected: repeatChoice === 'single' }"
             type="button"
-            :title="repeatSingleReason ?? '按住不放，单击动作会不断重复，直到松手'"
+            :title="repeatSingleTitle"
             :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
             @click="selectHoldRepeat('single')"
           >
@@ -2101,7 +2119,7 @@ onUnmounted(() => {
             class="chip"
             :class="{ selected: repeatChoice === 'long' }"
             type="button"
-            :title="repeatLongReason ?? '按住约 0.55 秒后，长按动作会不断重复，直到松手'"
+            :title="repeatLongTitle"
             :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
             @click="selectHoldRepeat('long')"
           >
@@ -2111,10 +2129,10 @@ onUnmounted(() => {
         <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
       </div>
       <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
-        {{ doubleConfiguredOnEditingButton ? "已配置双击：单击会稍等片刻（约 0.3 秒）以区分双击；按住超过约 0.3 秒会按单击处理，然后开始连续执行。" : "单击在按下瞬间执行。开启“按住时连续执行”后，按住不放会连续执行。" }}
+        {{ doubleConfiguredOnEditingButton ? "配置了双击：单击会稍等片刻（约 0.3 秒）以区分双击。" : "单击在按下瞬间执行。" }}
       </p>
       <p v-else class="muted editor-note">
-        {{ editingTarget.trigger === "double" ? "配置后单击会稍等片刻（约 0.3 秒）以区分双击。双击不会连续执行。" : "长按约 0.55 秒后执行。开启“按住时连续执行”后，不松手会继续连续执行。" }}
+        {{ editingTarget.trigger === "double" ? "配置后单击会稍等片刻（约 0.3 秒）以区分双击。双击不会连续执行。" : "长按约 0.55 秒后执行。" }}
       </p>
     </article>
 
