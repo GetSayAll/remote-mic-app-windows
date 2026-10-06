@@ -340,6 +340,38 @@
     一并分发。在此之前该组件**仅用于开发期与增强轨验证**。
   - **使用边界**：基础语音主路径不得依赖本组件（`AGENTS.md` 架构边界条款）。助手只承载
     "按设备源头捕获"这一可选增强轨，未就绪时按键回到 Windows 原生行为。
+- **产品注入载体登记（arm64 架构）：Frida Gadget 17.18.0（2026-10-07，Issue #206 / ADR 0003）**。
+  与上一条同一发行 tag，按架构各登记一条（ADR 0003 §6）。本机无 ARM64 主机、无 ARM64
+  工具集，本条目只登记来源与完整性；ARM64 上的实际可用性尚未验证（deferred）。
+  - **来源**：`frida/frida` 发行 tag `17.18.0`，资产
+    `frida-gadget-17.18.0-windows-arm64.dll.xz`，
+    下载地址 `https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-windows-arm64.dll.xz`。
+  - **完整性**：压缩包 5 555 660 字节，SHA-256
+    `9362da1d004c5bac3f42e10a6f5ab13a93a6a9de452015737c15b72fcce5ea90`
+    （与 GitHub Releases API 的 `asset.digest` 逐字符一致，非本地自证）；解压产物
+    `frida-gadget-arm64.dll` 21 078 016 字节，SHA-256
+    `323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff`，
+    PE machine `0xAA64`（ARM64，架构正确）。
+  - **固定方式**：与 x64 条目同一机制——机器可读清单
+    `hardware/RC003/helper/vendor/frida-gadget.lock.json` 按架构各记一条，`fetch_frida_gadget.py`
+    按锁定值逐级校验（压缩包哈希 → 解压 → 产物哈希 → PE 头与架构），任何一步不符即非零退出，
+    不留下未校验的 DLL 供助手加载；二进制不入库。`verify_gadget` 的单一 SHA-256 常量按本登记
+    改为按架构两份。
+  - **许可**：与 x64 条目同源同许可——**wxWindows Library Licence, Version 3.1** 及其
+    exception notice 第 2 条（以二进制形式随本产品分发被允许，无需开源本产品代码）；
+    残留风险与 x64 条目相同：尚未逐组件许可复核，正式发布前收口，在此之前仅用于开发期与
+    增强轨验证。
+  - **使用边界**：与 x64 条目相同——基础语音主路径不得依赖本组件（`AGENTS.md` 架构边界条款）；
+    助手按系统原生架构（`IsWow64Process2` 的 `nativeMachine`）选择注入哪一份 Gadget，未就绪时
+    按键回到 Windows 原生行为。
+- **ARM64 注入架构选择的参考实现结论（2026-10-07，Issue #206 调研）**：Frida 自 **16.5.0** 起
+  支持 Windows on ARM——arm64 版按**目标进程架构**选择要注入的 agent，可注入原生 arm64 进程，
+  也可注入在 ARM64 上仿真的 x86_64 / x86 进程（引文见
+  `https://github.com/frida/frida/discussions/3350`）；平台侧边界据微软 Arm64X 文档
+  （`https://learn.microsoft.com/en-us/windows/arm/arm64x-pe`）：**普通 x64 DLL 不能被 ARM64
+  进程加载**，同一镜像要同时服务 Arm64 与 x64/Arm64EC 进程必须构造成 Arm64X/Arm64EC。
+  本仓库据此判定：ARM64 上注入原生 ARM64 的 `WUDFHost.exe` 必须使用 arm64 Gadget，x64 Gadget
+  结构性不可用（与安全软件无关），与 ADR 0003 的"按系统原生架构选择"结论一致。
 - **本仓库只读实测（`structural`，2026-09-23）**：本机 RC003 的宿主节点
   `Enum\BTHLEDevice\{00001812-…}_Dev_VID&012717_PID&32b8_REV&00a4_…\9&3aacf7b9&0&0055` 声明
   `Service = mshidumdf`、`LowerFilters = WUDFRd`、`WUDF\DriverList = HidOverGatt`、
