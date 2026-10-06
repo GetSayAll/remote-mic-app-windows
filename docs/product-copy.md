@@ -76,6 +76,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
 
 - 用户可见字符串只允许出现在：`src/pages/*.vue`、`src/components/*.vue`、
   `src/lib/*.ts` 的 label 函数、`src/navigation.ts`、`docs/installation-and-configuration.md`。
+- **原生兜底例外**：界面已经不工作时也必须能显示的原生文案写在 Rust
+  （`src-tauri/src/lib.rs` 的托盘菜单项与「界面未能正常显示」的窗口标题）。
+  改动它们同样要过 §6 清单，并在 §7 记一条决定。
 - 同一概念只定义一次，其他地方引用（型号、按键名、阶段文案都走 label 函数）。
 - 新增或修改用户可见功能时同步用户手册对应章节，并按 [AGENTS.md](../AGENTS.md) 检查 `TODO.md`。
 
@@ -137,3 +140,8 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   现场：旧包写下的 `standard` 让升级后仍停在旧图标）**：本版本之前的配置一律改用
   几何鸭（旧版本会把默认值写进配置，用户没做过选择），本版本里做出的选择才保留。
   验收同用例十四。
+- 2026-10-07（界面故障的兜底标题，Andy 定稿）：WebView2 失效后写进窗口标题的文案为
+  `无线麦 SayAll 界面未能正常显示，请从托盘退出后重开`。写在 Rust（界面已停止时也要能显示，
+  见 §5 例外）；写出判据是**故障后宽限期内前端心跳没有报到**，不是 `Reload` 的返回值；
+  页面恢复报到后标题自动还原。设计与日志字段见
+  [Bugs/2026-09-12-voice-chord-focused-webview-reload.md](../Bugs/2026-09-12-voice-chord-focused-webview-reload.md)。
