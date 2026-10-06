@@ -18,7 +18,7 @@ Windows UI 的唯一产品设计基准是无线麦 macOS 原版。Windows 使用
 - WASAPI 输出到用户明确选择的端点；
 - Windows 能通过公共 API 稳定提供的 Raw Input 按键；
 - SendInput、按键映射、统计、诊断和设置；
-- Windows 10/11 x64。
+- Windows 10/11；x64 是完整支持的目标；ARM64 上基础语音与基础按键可用，“全按键支持”（增强捕获）需要安装包内按架构携带的 arm64 助手与 Gadget，范围与依据见 [ADR 0003](../decisions/0003-arm64-enhanced-capture-scope.md)。
 
 第一阶段不包含：
 

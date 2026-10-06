@@ -2,7 +2,12 @@
 
 ## 支持范围
 
-- Windows 10 1809（build 17763）及更高版本，x64；
+- Windows 10 1809（build 17763）及更高版本；
+- 架构：**x64 是完整支持的目标**（主程序、安装器与更新通道均为 x64 单包）；
+  **ARM64 上基础语音与基础按键可用**，「全按键支持」（增强捕获）需要安装包内按架构
+  携带的 arm64 助手与 Gadget，运行时按系统原生架构（`IsWow64Process2` 的 `nativeMachine`）
+  选择；助手或 Gadget 缺失时该功能明确提示暂不可用，基础路径不受影响。范围与依据见
+  [docs/decisions/0003-arm64-enhanced-capture-scope.md](docs/decisions/0003-arm64-enhanced-capture-scope.md)；
 - 小米蓝牙遥控器 2 / RC001 与小米蓝牙遥控器 2 Pro / RC003；
 - Rust + Tauri 2 + Vue 3；Windows 平台 API 只位于 `sayall-windows`。
 

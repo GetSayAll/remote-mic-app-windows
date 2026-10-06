@@ -242,3 +242,27 @@
 
 - [ ] **语音键 F5 抑制器的"链头 bump"去留 —— 待 F5 实测判定（关联 issue #111）**：现状（`main` / 0.3.0）：`crates/sayall-windows/src/key_suppressor.rs` 在启动安装钩子后，仍在**会话开始**（`:410` 投递 `WM_HOOK_BUMP`）与**每 10 秒**（`:290` 定时器、`:297-299` 分支）重装钩子；2026-09-27 修掉 `hWnd=NULL` 线程定时器忽略 `nIDEvent` 的缺陷后，这个重装**真的会执行**（此前静默失效，"一直没生效也相安无事"不构成删除依据）。但同日 FIFO 实证已推翻"重装可抢占链头"的前提（`docs/investigations/2026-09-27-ll-hook-chain-order-fifo.md`：LL 钩子链先安装先调用，重装只会把本钩子推向链尾），该文对 suppressor 侧写的是"移除或保留**需以 F5 实测为准**"，至今未执行——只有 `key_gate.rs` 落了改动（`bump_to_chain_head` 函数名保留，实际只在启动安装一次）。这也是 issue #111（Alt+Tab/开始菜单置顶失效）报障人列出的三条指控之一（另两条：钩子常驻——属实；回调内 60ms 有界等待——只在 F5 按下沿成立）；该症状在仓库内**零复现、零取证**，代码里也没有吞 Alt/Tab 的路径，已按"要对照实验与日志"回复，未以"已修复"关闭。**判定方式见 `Testing/WindowsF5SuppressorBump.md`**：基线组（含 bump）对候选组（仅移除两处 bump）跑冷启动/闲置/IME 钩子早晚装与重建/睡眠恢复/快速连按/断连重连，RC001 与 RC003 分别记录；实验分支需先补 `bumps_ok=`/`bumps_failed=` 计数，否则"重装确实发生"不可证。结论落地前不得凭推理删除该逻辑，也不得把删除当成 #111 的"修复"。
 - [ ] **全按键接管名单：方向 / 确定 / Enter 等高频键是否排除（产品决策，待 Andy 拍板）**：0.3.0 起 RC003「全按键支持」在报告层按 usage 清空报告，无法区分"遥控器"与"物理键盘"——配置了动作的键，其物理键盘同键会被映射动作接管；该代价已登记为"设计内，未修"，原文明确标注"Menu/方向/Enter 等高频键被接管后是否需要排除，属产品决策，**待 Andy 拍板后再动**"（`Bugs/2026-09-27-fullkey-swallowed-keys.md` 的"物理键盘同 usage 劫持"条）。Home/TV 属方案 C 既定取舍，不在待决范围。已按该边界回复 issue #100（遥控器方向键长按与键盘方向键冲突），并索取版本/映射表/「全按键支持」开关两档对照。拍板前不得先改目标集下发或名单逻辑；改动后须按 `Testing/WindowsRC003EnhancedCapture.md` 做 13 键真机回归（RC001/RC003 各一次）。
+
+### 2026-10-07 Issue #206 立项：ARM64 上的「全按键支持」（只做增强轨）
+
+**核验结论**：Issue #206 成立，且是结构性问题——产品链路只产出 x64 助手与 x64 Gadget（三处硬断言：`hardware/RC003/helper/vendor/fetch_frida_gadget.py:153`、`hardware/RC003/helper/src/main.rs:6404`、`scripts/generate-updater-manifest.ps1:57`），而 ARM64 上的注入目标只能是原生 ARM64 的 `WUDFHost.exe`，ARM64 进程无法加载普通 x64 镜像（微软 Arm64X 文档），因此该路径在 ARM64 上必然失败，与安全软件无关；同时运行时没有任何架构门禁或提示，失败后约 25 秒静默放弃（`src-tauri/src/lib.rs:591/680`），界面永久停在「正在启动」（`src/pages/ButtonsPage.vue:1125-1149`）。完整证据链见 [Bugs/2026-10-07-issue206-arm64-unsupported.md](Bugs/2026-10-07-issue206-arm64-unsupported.md)。
+
+**Andy 拍板（2026-10-07）**：① 范围只做增强轨的 ARM64 支持，主程序 / 安装器 / 更新通道保持 x64 单包，不出原生 arm64 主程序、不新增 `windows-aarch64` 通道；② 能力与提示**同版本交付**，不单独发「诚实降级」版本；③ 单安装包内同时携带 x64 与 arm64 两份助手与 Gadget，运行时按系统原生架构选择。决策与代价见 [docs/decisions/0003-arm64-enhanced-capture-scope.md](docs/decisions/0003-arm64-enhanced-capture-scope.md)。
+
+**实施（P1，能力 + 自动化）——2026-10-07 全部落地（分支 `feat/arm64-enhanced-capture`，明细见 ADR 实施记录）**：
+
+- [x] **助手与 Gadget 的架构化**：`fetch_frida_gadget.py` 换成按架构校验与获取（`--arch` / `--all`，PE machine 期望值按条目取；产物已通过校验时跳过重复下载解压）；`vendor/frida-gadget.lock.json` 新增 arm64 条目（压缩包 `sha256:9362da1d…` 与官方 `asset.digest` 逐字符一致，解压产物 `323a91b3…` / 21078016 字节 / machine `0xAA64` 为本机实算，另加 `runtimeName` 字段说明"注入时统一叫 `frida-gadget.dll`"）；`verify_gadget` 与自检断言均按架构两份，并新增「锁定文件同时登记两份」自检项；`ATTRIBUTION.md` 登记 arm64 载体与参考实现结论。
+- [x] **运行时架构选择**：新增 `crates/sayall-windows/src/os_arch.rs`（`IsWow64Process2` 的 `nativeMachine`；`Other` / `Unknown` 与 `x64` / `arm64` 分开，探测失败按"维持现状"处理）；`src-tauri/src/rc003_task.rs` 的 `locate_helper_exe_for(arch)` 按架构选安装目录文件名（arm64 = `sayall-helper-arm64.exe`）与开发布局 triple 目录；启动日志新增 `native_arch=` 字段（与编译期 `process_architecture` 并存，只有前者反映系统架构）。
+- [x] **注入前的架构一致性校验**：新增 `pe_machine_from_bytes` / `arch_gate` / `arch_preflight`，在 `inject_gadget` 第一步（任何 `OpenProcess` 之前）比对助手 / 宿主 / Gadget 三方架构并落 `[ARCH]` 日志；拒绝文案不再归因"安全软件拦截"（原误导读法已消除）；`arch_tests` 8 例含"拒绝文案不得含'安全软件'"与四种组合判定。
+- [x] **打包与安装器双载荷**：默认 `tauri.conf.json` 的 `resources` **保持 x64 两件**（tauri-build 编译期校验资源存在，写死 arm64 会让没有 ARM64 工具链的机器连 `cargo check` 都跑不了），新增 `src-tauri/tauri.arm64-payload.conf.json` 覆盖四件；两个 staging 脚本支持 arm64 分支与 `SAYALL_REQUIRE_ARM64_PAYLOAD=1` 强制；`installer-hooks.nsh` 的进程查找、写锁探测、优雅退出同时覆盖 `sayall-helper-arm64.exe`；`verify-local-test-install.ps1` / `verify-windows-bundle.ps1` 按实际暂存的载荷集合校验；`generate-updater-manifest.ps1` 的平台键保持 `windows-x86_64` 不动。
+- [x] **不可用时说清结果并去空转**：`rc003_task::capture_support()` + 新 IPC `get_capture_support`（`nativeArch` / `helperExpected` / `available` / `reason`）；启动对账与自动拉起在不可用时回落开关、落 `terminal_result=revoked|skipped reason=arch_unsupported|helper_missing` 并**不进入 25 秒重试**；前端在按键页与连接页置灰开关、给出原因与恢复方式（文案按 product-copy 登记）。
+- [x] **文档口径统一**：`TECHNICAL.md` / `docs/installation-and-configuration.md` / `docs/architecture/windows-tauri-roadmap.md` / `DEVELOPMENT.md` 按架构表述；`docs/product-copy.md` 登记新文案。
+- [x] **CI 与产物**：`verify` 增加 `cargo check --target aarch64-pc-windows-msvc`（不需要链接器，覆盖 arm64 编译路径）；`installer` 强制包含 arm64 载荷（`windows-2025` 镜像自带 ARM64 组件）。产物命名不经改动（单包双载荷，资产名与更新通道不变）。
+
+**验收（P2，`deferred`，需 ARM64 真机）**：
+
+- [ ] ARM64 上先跑 `sayall-helper.exe --selftest` 与 `--dry-run`（后者不提权、不注入）：确认宿主定位与 Gadget 校验通过，且日志出现架构选择与前置校验字段；再验证「x64 主程序启动 arm64 助手」含提权与计划任务路径。
+- [ ] 开启开关 → 助手连上 → 按 `Testing/WindowsRC003EnhancedCapture.md` 全 13 键逐项；RC003 与 RC001 分别记录；含冷态首用、连续会话、快速连按、断连与睡眠恢复；x64 侧回归同矩阵。
+- [ ] 不可用场景（人为移除 arm64 载荷）验证提示与置灰，确认不再空转。
+
+**依赖与待决**：① ARM64 真机来源（报障人机器或另行借测）——没有真机前，本项只能完成到自动化与打包层，不得宣称通过；② 是否同期回复 Issue #206（回复要点已写在 Bug 文档末尾，需补发完整的对账字段与助手侧 `[HOST]` / `[VERIFY]` / `[INJECT]` 行）。
