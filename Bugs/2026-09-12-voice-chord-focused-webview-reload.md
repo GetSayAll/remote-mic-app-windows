@@ -35,11 +35,11 @@
 
 本节处理 WebView2 `ProcessFailed`，与上文已验证的 TSF/F5 重载根因不同；原有 IME 守卫、页面持久化、前台对齐及退出流程保留。
 
-- 来源：本仓库本地提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**（`fix(webview): 保存有限恢复与原生反馈检查点`）；基于上游 `3e11586f7e211df74586baa52b3e1ea7c77a5d56` 单独移植主窗口处理，不引入场景浮层或其他集成功能。
-- 行为：主窗口渲染进程退出只请求一次 `Reload`；再次失败、主浏览器退出或渲染无响应时，通过窗口标题、托盘提示和独立原生消息告知正常退出并重开。已给出故障提示即进入终态，随后即使渲染进程退出也不重载。回调对象缺失时记录 `result=failed reason=missing_sender` 并给出同一原生提示。窗口销毁或原有退出收尾已经认领时不恢复、不弹提示；其他失败类型只记录。`Reload` 返回成功只记为 `phase=submitted result=accepted`，不宣称页面已恢复。
-- 边界：遵循 [Microsoft 的 WebView2 故障事件文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)：渲染退出可以重载；浏览器退出需要重建控件。本贡献为浏览器退出提供原生提示，没有实现控件重建，也不把后台语音状态推断为已恢复。
-- 已执行：提取同一生产策略函数与对应单元测试，用 `rustc --edition=2021 --test` 隔离执行；停用策略时 **failed 3/3**，移植后 **passed 3/3**。覆盖一次重载/一次提示/重复忽略、未知事件不消耗恢复机会、关闭期间不调度恢复或提示。增量评审新增“浏览器退出/无响应先提示，随后渲染退出不得重载”的序列回归：旧实现 **3 passed / 1 failed**，终态守卫前移后 **passed 4/4**。新依赖复用锁文件已有的 `webview2-com 0.38.2`（MIT），仅供 Windows 使用。
-- **deferred**：完整 Cargo/preflight 由父任务串行执行并另补结果；未终止真实 WebView2，也未执行白屏、浏览器崩溃、托盘正常退出、原生提示目视或活动语音期间故障的真机实验。回调对象缺失分支的原生反馈也尚未进行真实 COM 事件验收。策略单测不能证明页面恢复、提示实际可见或 RC001/RC003 语音仍可用。
+- 来源：本仓库本地提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**；由交付分支 `fix/webview-bounded-reload`（仓库 main 线）承载，只移植主窗口处理，不引入场景浮层或其他集成功能。同一作者 fork 提交 `adddb0cc210885aff4ba19dec6684d199aa8e31e`（PR #202）另含窗口标题、托盘提示与系统对话框；按评审意见该提示层不随本分支进入 main，另作独立工作。
+- 行为：主窗口渲染进程退出只请求一次 `Reload`；同一进程内此后任何失败（浏览器退出、渲染无响应、再次渲染退出）都不再重载，终止决策以 `action=Notify` 落日志。回调对象缺失时记录 `result=failed reason=missing_sender`。`Reload` 返回成功只记为 `phase=submitted result=accepted`，不宣称页面已恢复。窗口销毁或原有退出收尾已经认领时不动作。本增量只含：有界重载 + 结构化日志；**不修改窗口标题、不写托盘提示、不弹系统对话框**（评审裁剪，见 PR 说明）。
+- 边界：遵循 [Microsoft 的 WebView2 故障事件文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)：渲染退出可以重载；浏览器进程退出需要重建控件，本实现只落日志、不伪造恢复。现有"应用仍在运行但界面停止"场景下也没有用户可见提示，属已知边界，提示层待独立工作处理。
+- 已执行：提取同一生产策略函数与对应单元测试，用 `rustc --edition=2021 --test` 隔离执行；停用策略时 **failed 3/3**，移植后 **passed 3/3**。覆盖一次重载/重复忽略、未知事件不消耗恢复机会、关闭期间不调度恢复。序列回归：浏览器退出或渲染无响应进入终态后，迟到 renderer 事件不得重载（终态守卫前移后 **passed 4/4**）。新依赖复用锁文件已有的 `webview2-com 0.38.2`（MIT），仅供 Windows 使用。
+- **deferred**：交付分支上的 `cargo fmt` / `cargo test --workspace` / `cargo check` / runtime-simulation 编译在本机复跑，以 PR 校验为准；未终止真实 WebView2，也未执行白屏、浏览器崩溃、活动语音期间故障的真机实验。策略单测不能证明页面恢复或 RC001/RC003 语音仍可用。
 
 
-2026-10-05 独立恢复候选已执行 `scripts/ci-preflight.ps1`，7/7 passed：前端测试/构建、Rust 格式、workspace 测试/check 与 runtime-simulation 编译检查。新增终态序列回归确认 browser/unresponsive 已提示后，迟到 renderer 事件不会再次 Reload；回调无 sender 时记录明确失败并提供原生提示。完整 COM 故障触发、实际重载后的页面状态与原生提示/托盘目视仍为 `deferred`，不以 API 接受 Reload 作为页面恢复证明。
+2026-10-05 独立恢复候选的验证记录（随交付分支复跑）：`cargo check -p sayall-windows-app` 与 `cargo check -p sayall-windows-app --features runtime-simulation` 通过（新增代码零警告）；终态序列回归确认 browser/unresponsive 之后迟到 renderer 事件不会再次 Reload；回调无 sender 时记录明确失败。完整 COM 故障触发与重载后的页面状态仍为 `deferred`，不以 API 接受 Reload 作为页面恢复证明。

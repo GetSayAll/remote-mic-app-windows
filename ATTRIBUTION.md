@@ -356,6 +356,6 @@
 
 ## 2026-10-05 WebView2 故障处理来源
 
-- 主窗口有界恢复、原生反馈与策略测试改编自本仓库提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**；本次独立上游移植只涉及 `src-tauri/src/lib.rs` 的 WebView2 故障处理，按上游已有退出标记适配，不改 IME、语音或安装器流程。
-- 官方行为参考：[Microsoft WebView2 process-related events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)。使用公开 `ProcessFailed`/`Reload` API；浏览器退出仅提供原生提示，控件重建与真实故障恢复验收不在已验证范围。
+- 主窗口有界恢复与相关策略测试改编自本仓库提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**；上游移植只涉及 `src-tauri/src/lib.rs` 的 WebView2 故障处理，按上游已有退出标记适配，不改 IME、语音或安装器流程。同一作者在其 fork 提交 `adddb0cc210885aff4ba19dec6684d199aa8e31e`（PR #202）中另带原生退出提示；提示部分（窗口标题、托盘提示、系统对话框）未随本仓库 `fix/webview-bounded-reload` 分支进入 main，按评审意见独立处理。
+- 官方行为参考：[Microsoft WebView2 process-related events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)。使用公开 `ProcessFailed`/`Reload` API；浏览器进程退出只能重建控件，本实现只落结构化日志，不伪造恢复；控件重建、任何用户可见提示与真实故障恢复验收不在已验证范围。
 - 直接依赖复用 Tauri/Wry 已锁定的 `webview2-com 0.38.2`，来源 [wravery/webview2-rs](https://github.com/wravery/webview2-rs)，许可 MIT；没有复制其示例实现。验证边界见 [2026-09-12 Bug 记录的增量节](Bugs/2026-09-12-voice-chord-focused-webview-reload.md#2026-10-05独立的-webview2-故障恢复贡献候选)。

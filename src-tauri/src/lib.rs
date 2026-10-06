@@ -34,7 +34,7 @@ use updater::{
 #[derive(Default)]
 struct WebviewFailureState {
     reloaded: bool,
-    notified: bool,
+    gave_up: bool,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum WebviewFailureAction {
@@ -47,44 +47,16 @@ impl WebviewFailureState {
         if closing || !matches!(kind, 0..=2) {
             return WebviewFailureAction::Ignore;
         }
-        if self.notified {
+        if self.gave_up {
             return WebviewFailureAction::Ignore;
         }
         if kind == 1 && !self.reloaded {
             self.reloaded = true;
             return WebviewFailureAction::Reload;
         }
-        self.notified = true;
+        self.gave_up = true;
         WebviewFailureAction::Notify
     }
-}
-
-#[cfg(windows)]
-fn report_webview_unavailable(app: &tauri::AppHandle) {
-    static NOTIFIED: AtomicBool = AtomicBool::new(false);
-    if NOTIFIED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    // Native window/tray and a separate native dialog remain usable after the
-    // browser process dies. No JS/IPC or audio worker is needed for this hint.
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title("无线麦 — 界面已停止，请通过托盘正常退出后重开");
-    }
-    if let Some(tray) = app.tray_by_id("sayall-tray") {
-        let _ = tray.set_tooltip(Some("无线麦界面已停止；请通过托盘退出后重新打开"));
-    }
-    let _ = std::thread::Builder::new()
-        .name("sayall-webview-error".into())
-        .spawn(|| unsafe {
-            use windows::core::w;
-            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-            MessageBoxW(
-                None,
-                w!("无线麦界面暂时无法显示。请通过系统托盘退出无线麦，再重新打开。"),
-                w!("无线麦界面异常"),
-                MB_OK | MB_ICONERROR,
-            );
-        });
 }
 
 #[cfg(windows)]
@@ -94,7 +66,6 @@ fn observe_webview_failure(window: &tauri::WebviewWindow) {
         ProcessFailedEventHandler,
     };
     let role = "main";
-    let app = window.app_handle().clone();
     let closed = Arc::new(AtomicBool::new(false));
     let close_flag = Arc::clone(&closed);
     window.on_window_event(move |event| {
@@ -123,14 +94,17 @@ fn observe_webview_failure(window: &tauri::WebviewWindow) {
                         let result = core.Reload();
                         let code = result.as_ref().err().map(|e| e.code().0).unwrap_or(0);
                         sayall_windows::gatt_note(format!("webview event=recovery role={role} phase=submitted action=reload result={} code={code} attempt=1", if result.is_ok() { "accepted" } else { "failed" }));
-                        if result.is_err() { failures.notified = true; report_webview_unavailable(&app); }
+                        // 重载失败即进入终态：等待下一次事件只会得到同样的结果，
+                        // 反复重试在界面已经停止时没有收益。
+                        if result.is_err() { failures.gave_up = true; }
                     } else {
                         sayall_windows::gatt_note(format!("webview event=recovery role={role} phase=completed action=reload result=failed reason=missing_sender attempt=1"));
-                        failures.notified = true;
-                        report_webview_unavailable(&app);
+                        failures.gave_up = true;
                     }
                 }
-                WebviewFailureAction::Notify => report_webview_unavailable(&app),
+                // 终止决策本身（action=Notify）已随上面的 process_failed 行落盘；
+                // 这里不重复告警，也不产生新的界面动作。
+                WebviewFailureAction::Notify => {}
                 WebviewFailureAction::Ignore => {}
             }
             Ok(())
@@ -3201,7 +3175,7 @@ mod webview_failure_tests {
         assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
     }
     #[test]
-    fn notified_webview_failure_is_terminal_even_if_renderer_exits_later() {
+    fn terminal_webview_failure_stays_terminal_even_if_renderer_exits_later() {
         for first_kind in [0, 2] {
             let mut state = WebviewFailureState::default();
             assert_eq!(
@@ -3211,7 +3185,7 @@ mod webview_failure_tests {
             assert_eq!(
                 state.failed(1, false),
                 WebviewFailureAction::Ignore,
-                "browser exit or unresponsive notification must prevent a later reload"
+                "browser exit or unresponsive state must prevent a later reload"
             );
             assert_eq!(
                 state.failed(first_kind, false),
