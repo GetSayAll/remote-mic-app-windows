@@ -1,6 +1,6 @@
 # OK 键「移动光标后按 OK 点击」真机验收（RC001 / RC003）
 
-> 状态：**待执行**（自动化已 passed；本手册全部用例需真实遥控器与安装包）。
+> 状态：**真机 passed**（2026-10-06，RC001 与 RC003 分别执行，Andy 执行）。
 > 适用：2026-10-06 起的本地测试包/安装版；**RC001 与 RC003 分别执行**。
 > 功能口径见 `docs/plan/2026-10-06-ok-context-click.md` 与
 > `docs/product/button-behavior.md` §2。
@@ -53,7 +53,10 @@ OK 编辑页的按键级开关（默认关）。开启后：用遥控器移动�
 
 ## 证据
 
-- 每个用例记录：型号、时间、配置、观察到的界面效果、日志行（`mouse_move`、`map_ok_click`、`map_fire`）。
+- **2026-10-06：RC001 与 RC003 全用例 passed（Andy 执行）**；构建 = 本地测试包
+  `artifacts/local-test/2026-10-05-hold-repeat/无线麦 SayAll_0.5.0_ok-click-a181433_x64-setup.exe`
+  （SHA-256 `bc2d753edb4cd05d3b24876cdd697d18788334b7d95c7bad85870bf2eb44275c`）。
+- 后续复验每个用例记录：型号、时间、配置、观察到的界面效果、日志行（`mouse_move`、`map_ok_click`、`map_fire`）。
 - 日志不含语音内容与个人路径；截图/日志存档到 `artifacts/local-test/`。
 
 ## 失败处置
