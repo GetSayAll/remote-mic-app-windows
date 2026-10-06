@@ -24,7 +24,42 @@ const pairs = [
   ["hardware/RC003/helper/vendor/frida-gadget.dll", "frida-gadget.dll"],
 ];
 
-for (const [src, dst] of pairs) {
+// ── arm64 双载荷（可选，2026-10-07 issue206）────────────────────────────
+// 与默认配置的关系：src-tauri/tauri.conf.json 的 bundle.resources **只声明上面两件
+// x64**，理由见 stage-bundle-inputs.cjs 顶部与 RELEASING.md（tauri-build 在编译期
+// 校验资源存在，而 arm64 助手要 VS 的 VC.Tools.ARM64 才能构建；写进默认配置会让
+// 本机任何 cargo check / cargo test 直接失败）。这两件只有在**真的暂存成功**之后，
+// 才由 src-tauri/tauri.arm64-payload.conf.json 覆盖式声明，安装包才携带它们。
+//
+// 缺 arm64 源时的行为（两份要么都暂存、要么都不暂存，避免半套载荷被 --config 声明）：
+//   * 默认：打印警告并跳过（本机/部分环境没有 ARM64 工具集，缺它不是错误）；
+//   * SAYALL_REQUIRE_ARM64_PAYLOAD=1（发布 / CI 的 installer job）：退出码 3 硬失败。
+const arm64Pairs = [
+  ["hardware/RC003/helper/target/aarch64-pc-windows-msvc/release/sayall-helper.exe", "sayall-helper-arm64.exe"],
+  ["hardware/RC003/helper/vendor/frida-gadget-arm64.dll", "frida-gadget-arm64.dll"],
+];
+
+const missingArm64 = arm64Pairs.filter(([src]) => !fs.existsSync(path.join(root, src)));
+if (missingArm64.length > 0 && process.env.SAYALL_REQUIRE_ARM64_PAYLOAD === "1") {
+  console.error("[stage] SAYALL_REQUIRE_ARM64_PAYLOAD=1 但 arm64 载荷缺失，终止（本路径要求安装包必须含 arm64）：");
+  for (const [src] of missingArm64) {
+    console.error("[stage]   缺：" + src);
+  }
+  process.exit(3);
+}
+if (missingArm64.length > 0) {
+  console.warn("[stage] 警告：arm64 载荷缺失，本次只暂存 x64 两件（与默认 tauri.conf.json 一致）。");
+  for (const [src] of missingArm64) {
+    console.warn("[stage]   缺：" + src);
+  }
+  if (missingArm64.length < arm64Pairs.length) {
+    console.warn("[stage]   只到齐一半 → 两份都不暂存，避免半套载荷被 arm64 覆盖配置声明。");
+  }
+  console.warn("[stage]   影响：安装包不含 arm64 载荷；Windows 11 ARM64 上应用会明确提示不支持\"全按键支持\"。");
+  console.warn("[stage]   补法：见 scripts/stage-bundle-inputs.cjs 的工具链检测提示。");
+}
+
+for (const [src, dst] of pairs.concat(missingArm64.length === 0 ? arm64Pairs : [])) {
   const from = path.join(root, src);
   const to = path.join(root, "src-tauri", dst);
   fs.copyFileSync(from, to);

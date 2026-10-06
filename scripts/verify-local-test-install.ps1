@@ -4,10 +4,14 @@
 # - 安装后的 app exe / helper / gadget 与构建产物对齐；app exe 允许 3 字节 UNK→NSS 安装期补丁差；
 # - -ExpectRevision 断言内嵌修订号 = 当前 HEAD（bundle 内嵌的是构建时的 git HEAD）；
 # - -ExpectAppMarker / -ExpectHelperMarker 断言二进制里含指定行为标记字符串；
-# - 被占用文件（如正在运行的 helper）会被安装器静默跳过且退出码仍 0 ⇒ 哈希不符时自动跑第二遍。
+# - 被占用文件（如正在运行的 helper）会被安装器静默跳过且退出码仍 0 ⇒ 哈希不符时自动跑第二遍；
+# - 载荷集合：安装目录里实际存在的载荷必须与**出包时暂存到 src-tauri 的集合**一致。
+#   arm64 两件是可选的（本机没有 VS ARM64 工具集就暂存不到），未暂存时**不得**误报失败；
+#   暂存到了就必须在安装目录里逐件校验到（2026-10-07 issue206）。
 #
 # 依赖一次成功构建的同仓库产物：target\release\sayall-windows-app.exe、
-# src-tauri\sayall-helper.exe（staging 落地）、hardware\RC003\helper\vendor\frida-gadget.dll。
+# src-tauri\sayall-helper.exe（staging 落地）、hardware\RC003\helper\vendor\frida-gadget.dll；
+# arm64 两件（src-tauri\sayall-helper-arm64.exe / src-tauri\frida-gadget-arm64.dll）可选。
 #
 # 用法：
 #   powershell -File scripts\verify-local-test-install.ps1 -ExpectRevision
@@ -57,9 +61,13 @@ Start-Sleep -Seconds 8
 $instExe = Join-Path $appDir.FullName "sayall-windows-app.exe"
 $instHelper = Join-Path $appDir.FullName "sayall-helper.exe"
 $instGadget = Join-Path $appDir.FullName "frida-gadget.dll"
+$instHelperArm64 = Join-Path $appDir.FullName "sayall-helper-arm64.exe"
+$instGadgetArm64 = Join-Path $appDir.FullName "frida-gadget-arm64.dll"
 $srcExe = Join-Path $repo "target\release\sayall-windows-app.exe"
 $srcHelper = Join-Path $repo "src-tauri\sayall-helper.exe"
 $srcGadget = Join-Path $repo "hardware\RC003\helper\vendor\frida-gadget.dll"
+$srcHelperArm64 = Join-Path $repo "src-tauri\sayall-helper-arm64.exe"
+$srcGadgetArm64 = Join-Path $repo "src-tauri\frida-gadget-arm64.dll"
 
 # ---- 3. 二进制对齐（含被占用文件的重试安装） ----
 Write-Host "二进制对齐："
@@ -80,6 +88,33 @@ Check "gadget 哈希对齐" ($g1 -eq $g2)
 $diff = (& python $py diff $instExe $srcExe) | Out-String
 $diffOk = $diff -match "differing_bytes=3"
 Check "app exe 差 3 字节（UNK→NSS）" $diffOk ($diff.Trim())
+
+# ---- 3b. arm64 载荷集合：只在**出包时真的暂存了**才校验 ----
+# 为什么不做"必须不存在"的反向断言：升级安装不会删除旧包留下的文件，而 NSIS 只覆盖
+# 本包声明的资源——ARM64 机器上从双载荷包升级到单载荷包时，旧 arm64 文件会留在
+# 安装目录里，"不存在"断言会把这种情况误报成失败（2026-10-07 issue206）。
+$arm64Pairs = @(
+    @{ Name = "helper-arm64 哈希对齐"; Installed = $instHelperArm64; Staged = $srcHelperArm64 },
+    @{ Name = "gadget-arm64 哈希对齐"; Installed = $instGadgetArm64; Staged = $srcGadgetArm64 }
+)
+$arm64StagedCount = 0
+foreach ($pair in $arm64Pairs) {
+    if (-not (Test-Path $pair.Staged)) {
+        Write-Host ("  [skip] " + $pair.Name + " —— 本次出包未暂存 arm64 载荷")
+        continue
+    }
+    $arm64StagedCount++
+    if (-not (Test-Path $pair.Installed)) {
+        Check $pair.Name $false "出包暂存了 arm64 载荷，但安装目录里没有该文件"
+        continue
+    }
+    $a = & python $py sha $pair.Installed
+    $b = & python $py sha $pair.Staged
+    Check $pair.Name ($a -eq $b) ("installed=" + $a + " staged=" + $b)
+}
+if ($arm64StagedCount -eq 0) {
+    Write-Host "  本包为单载荷包（只有 x64 两件）；ARM64 机器上应用会明确提示不支持「全按键支持」"
+}
 
 # ---- 4. 修订号与行为标记 ----
 if ($ExpectRevision) {

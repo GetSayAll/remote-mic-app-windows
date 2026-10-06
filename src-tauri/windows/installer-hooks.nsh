@@ -194,6 +194,20 @@
 !define SAYALL_HELPER_EXIT_MAX_WAIT_MS 8000
 !define SAYALL_HELPER_EXIT_POLL_MS 250
 
+; ── 双载荷助手：两个进程名（2026-10-07 issue206）─────────────────────
+; 安装包同时携带两份助手：x64 机器上跑 `sayall-helper.exe`，Windows 11 ARM64 上跑
+; `sayall-helper-arm64.exe`（只有原生架构的助手才能注入原生 WUDFHost.exe，见
+; docs/decisions/0003-arm64-enhanced-capture-scope.md）。因此"还在不在跑"与
+; "映像有没有被写锁"两类判据都必须**同时覆盖两个名字**：只认 x64 那份时，
+; ARM64 机器上正在运行的助手会被整段逻辑漏掉——安装器照样去覆盖写它，直接撞上
+; "无法打开要写入的文件"（与 2026-09-24 真机记录同一失败模式）。
+; 名字是冻结的接口名（见 RELEASING.md），不要在这里改名。
+; 判定语义沿用实测结论：`FindProcessCurrentUser` 返回 0 = 在跑，非 0 = 没在跑
+; （见 SayAllRequestGracefulExit 内注释）；先查 x64，只有它没在跑时才查 arm64，
+; 等待预算与轮询节奏与旧实现完全一致。
+!define SAYALL_HELPER_IMAGE "sayall-helper.exe"
+!define SAYALL_HELPER_IMAGE_ARM64 "sayall-helper-arm64.exe"
+
 ; ── 重授权标记的新鲜度窗口（2026-09-28）────────────────────────────
 ; 升级钩子（旧卸载器完成 → PREINSTALL）的真实时距是秒级、最坏约 40s
 ; （优雅退出 20s + 助手退出等待 8s + 文件清理）；窗口取 2 倍以上余量。
@@ -316,8 +330,13 @@
   ${EndIf}
   StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
   sayall_helper_wait_${_uid}:
-    nsis_tauri_utils::FindProcessCurrentUser "sayall-helper.exe"
+    nsis_tauri_utils::FindProcessCurrentUser "${SAYALL_HELPER_IMAGE}"
     Pop $R8
+    ${If} $R8 != 0
+      ; x64 那份没在跑 → 再看 arm64 那份（ARM64 机器上跑的是它）
+      nsis_tauri_utils::FindProcessCurrentUser "${SAYALL_HELPER_IMAGE_ARM64}"
+      Pop $R8
+    ${EndIf}
     ${If} $R8 != 0
       Goto sayall_helper_done_${_uid}
     ${EndIf}
@@ -328,8 +347,12 @@
     ${EndIf}
   sayall_helper_done_${_uid}:
   ; 超时仍在跑（旧版助手不认识停用信号）：中止并给出可操作的出路。
-  nsis_tauri_utils::FindProcessCurrentUser "sayall-helper.exe"
+  nsis_tauri_utils::FindProcessCurrentUser "${SAYALL_HELPER_IMAGE}"
   Pop $R8
+  ${If} $R8 != 0
+    nsis_tauri_utils::FindProcessCurrentUser "${SAYALL_HELPER_IMAGE_ARM64}"
+    Pop $R8
+  ${EndIf}
   ${If} $R8 = 0
     ${IfNot} ${Silent}
       MessageBox MB_ICONSTOP|MB_OK "增强捕获助手仍在运行且无法自动停止（可能是较早版本）。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper is still running and cannot be stopped automatically. Run stop-helper.cmd as administrator, then retry."
@@ -340,11 +363,42 @@
   ; 进程枚举只能作快速判据，覆盖前还要直接探测目标映像的写锁；这与 NSIS
   ; 随后的 File 指令面对的是同一个外部事实。首次安装文件不存在时直接跳过，
   ; 避免 FileOpen 的 append 模式为了探测而创建空文件。
-  IfFileExists "$INSTDIR\sayall-helper.exe" 0 sayall_helper_image_unlocked_${_uid}
+  ;
+  ; 两份载荷各探一次（2026-10-07 issue206）：ARM64 机器上运行的是
+  ; `sayall-helper-arm64.exe`，只探 x64 那份会把它漏掉，覆盖安装照样撞上
+  ; "无法打开要写入的文件"。顺序 x64 → arm64，各自沿用同一个 8s 预算与
+  ; 250ms 轮询节奏；任一份在预算内没释放就中止（与旧实现的差别仅为现在也
+  ; 看得见 arm64 那份）。两份都不存在（首次安装 / 单载荷包）时零等待跳过。
+  ;
+  ; 这里刻意写成两段字面代码而不是复用一个宏：src-tauri/src/lib.rs 的
+  ; installer_waits_for_helper_image_lock_before_overwrite 断言了下面
+  ; `IfFileExists "$INSTDIR\sayall-helper.exe"` 与 `FileOpen $0 "$INSTDIR\sayall-helper.exe" a`
+  ; 两行**字面文本**，改成宏会让该契约测试失效；测试文件不在本改动范围内。
+  IfFileExists "$INSTDIR\sayall-helper.exe" 0 sayall_helper_image_arm64_${_uid}
   StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
   sayall_helper_image_wait_${_uid}:
     ClearErrors
     FileOpen $0 "$INSTDIR\sayall-helper.exe" a
+    ${IfNot} ${Errors}
+      FileClose $0
+      Goto sayall_helper_image_arm64_${_uid}
+    ${EndIf}
+    Sleep ${SAYALL_HELPER_EXIT_POLL_MS}
+    IntOp $R9 $R9 - ${SAYALL_HELPER_EXIT_POLL_MS}
+    ${If} $R9 > 0
+      Goto sayall_helper_image_wait_${_uid}
+    ${EndIf}
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONSTOP|MB_OK "增强捕获助手的程序文件仍被占用，安装器无法安全覆盖。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper image is still locked. Run stop-helper.cmd as administrator, then retry."
+    ${EndIf}
+    Abort
+  ; arm64 那份：同样的存在性前置判据 + 同样的预算与节奏（理由见上）。
+  sayall_helper_image_arm64_${_uid}:
+  IfFileExists "$INSTDIR\sayall-helper-arm64.exe" 0 sayall_helper_image_unlocked_${_uid}
+  StrCpy $R9 ${SAYALL_HELPER_EXIT_MAX_WAIT_MS}
+  sayall_helper_image_wait_arm64_${_uid}:
+    ClearErrors
+    FileOpen $0 "$INSTDIR\sayall-helper-arm64.exe" a
     ${IfNot} ${Errors}
       FileClose $0
       Goto sayall_helper_image_unlocked_${_uid}
@@ -352,7 +406,7 @@
     Sleep ${SAYALL_HELPER_EXIT_POLL_MS}
     IntOp $R9 $R9 - ${SAYALL_HELPER_EXIT_POLL_MS}
     ${If} $R9 > 0
-      Goto sayall_helper_image_wait_${_uid}
+      Goto sayall_helper_image_wait_arm64_${_uid}
     ${EndIf}
     ${IfNot} ${Silent}
       MessageBox MB_ICONSTOP|MB_OK "增强捕获助手的程序文件仍被占用，安装器无法安全覆盖。请以管理员身份运行安装目录旁 helper 目录中的 stop-helper.cmd，然后重新执行安装/卸载。$\r$\n$\r$\nThe RC003 helper image is still locked. Run stop-helper.cmd as administrator, then retry."
