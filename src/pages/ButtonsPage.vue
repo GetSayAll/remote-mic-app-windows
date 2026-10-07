@@ -74,8 +74,12 @@ const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
  * --map-scale 连续缩放兜底（小于最小窗口的恢复态窗口）。 */
 const CANVAS_MIN_WIDTH = 800;
 const CANVAS_HEIGHT = 570;
-const REMOTE_WIDTH = 202;
-const REMOTE_HEIGHT = 410;
+// 遥控器实物图尺寸（2026-10-07 放大到可见约 115×480）：PNG 为 404×820，含透明边
+// ——可见遥控器只占图内 187×768（46.3%×93.7%），所以容器比可见尺寸大：
+// 250×508 ⇒ 可见 ≈ 115.9×475.8（缩放约 1.24×，图与容器同比例，object-fit: cover
+// 不裁掉可见像素）。锚点/橙点/连线一律用归一化比例 × 本尺寸，故全部按比例跟随。
+const REMOTE_WIDTH = 250;
+const REMOTE_HEIGHT = 508;
 const CARD_HEIGHT = 72;
 const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
 
@@ -438,7 +442,8 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
     seen.set(app.path, app.name);
   }
   for (const actions of Object.values(mappings.value.actions)) {
-    for (const action of Object.values(actions)) {
+    // 三列动作（不含「按住连续触发」槽位字段——它不是动作）。
+    for (const action of [actions.single, actions.double, actions.long]) {
       if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
         const base = action.target.split(/[\\/]/).pop() ?? action.target;
         const name = base.replace(/\.(exe|lnk)$/i, "") || action.target;
@@ -507,10 +512,12 @@ function applyAction(action: ButtonAction): void {
   };
   const actions = { ...actionsOf(target.button) };
   actions[target.trigger] = action;
-  next.actions[target.button] = actions;
+  const reconciled = reconcileHoldRepeat(target.button, actions);
+  next.actions[target.button] = reconciled.actions;
   mappings.value = next;
-  // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。
-  void persist();
+  // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
+  // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
+  void persist(reconciled.notice ?? undefined);
 }
 
 /**
@@ -600,6 +607,221 @@ function isActivePreset(keys: KeyCode[]): boolean {
   const action = actionOf(target.button, target.trigger);
   if (action.type !== "shortcut") return false;
   return action.chord.keys.join("+") === keys.join("+");
+}
+
+/**
+ * 「按住时连续执行」的界面规则（2026-10-05 radio 三选一定稿）：
+ * - 按键级三态：关闭 / 重复单击动作 / 重复长按动作（双击不参与），显示在
+ *   单击、长按两个编辑页底部，两页是同一个状态；
+ * - 选项可用性由配置决定：未配置动作 / 动作只执行一次 / 单击与长按并存
+ *   （长按会接管按住，单击不能连续）；不可选时给「原因 + 恢复方式」；
+ * - 已选目标不再可用（配置变化）时自动回到「关闭」并提示，不偷改选择。
+ * 定稿依据：docs/plan/2026-10-05-button-hold-repeat-radio.md。
+ * 口径与 Rust `ButtonAction::allows_repeat` / `ButtonMappings::normalized` 同源。
+ */
+const REPEAT_CAPABLE_BUTTONS: RemoteButton[] = [
+  "back",
+  "up",
+  "down",
+  "left",
+  "right",
+  "volume_up",
+  "volume_down",
+];
+/** 单独修饰键：不可作为「可连续执行」的单键动作（与 Rust `KeyCode::is_modifier` 一致）。 */
+const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
+  "control",
+  "left_control",
+  "right_control",
+  "shift",
+  "left_shift",
+  "right_shift",
+  "alt",
+  "left_alt",
+  "right_alt",
+  "left_windows",
+  "right_windows",
+]);
+
+/** 动作是否可连续执行（与 Rust `ButtonAction::allows_repeat` 同源口径）。 */
+function actionAllowsRepeat(action: ButtonAction): boolean {
+  if (action.type === "scroll" || action.type === "mouse_move") return true;
+  if (action.type !== "shortcut") return false;
+  return action.chord.keys.length === 1 && !REPEAT_MODIFIER_KEYS.has(action.chord.keys[0]);
+}
+
+const repeatGroupVisible = computed(() => {
+  const target = editingTarget.value;
+  if (!target) return false;
+  return (
+    REPEAT_CAPABLE_BUTTONS.includes(target.button) &&
+    (target.trigger === "single" || target.trigger === "long")
+  );
+});
+
+type HoldRepeatChoice = "off" | "single" | "long";
+
+/** 选项不可选的原因（null = 可选）；radio 展示与一致性收口共用同一判据。 */
+function holdRepeatBlockedReason(
+  actions: ButtonActions,
+  slot: "single" | "long",
+): string | null {
+  if (slot === "long") {
+    if (actions.long.type === "disabled") return "先给这个按键配置长按动作";
+    if (!actionAllowsRepeat(actions.long)) {
+      return "“长按”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；把它改成单个按键后可选";
+    }
+    return null;
+  }
+  if (actions.single.type === "disabled") return "先给这个按键配置单击动作";
+  if (!actionAllowsRepeat(actions.single)) {
+    return "“单击”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；改成单个按键后可选";
+  }
+  if (actions.long.type !== "disabled") {
+    // 指路前先确认「重复长按动作」真的可选：长按动作只执行一次时它同样是
+    // 灰的，原句会指向一个点不到的选项（2026-10-05 用户反馈）。
+    return holdRepeatBlockedReason(actions, "long") === null
+      ? "这个按键已有长按动作，按住会先执行长按；要连续执行，请选“重复长按动作”"
+      : "这个按键已有长按动作：按住会执行长按。要连续执行单击动作，请先清除长按动作";
+  }
+  return null;
+}
+
+/** 当前按键的「按住时连续执行」状态（按键级，两页同源）。 */
+const repeatChoice = computed<HoldRepeatChoice>(() => {
+  const target = editingTarget.value;
+  const hold = target ? actionsOf(target.button).holdRepeat : undefined;
+  return hold === "long" ? "long" : hold === "single" ? "single" : "off";
+});
+
+const repeatSingleReason = computed<string | null>(() => {
+  const target = editingTarget.value;
+  return target ? holdRepeatBlockedReason(actionsOf(target.button), "single") : null;
+});
+
+const repeatLongReason = computed<string | null>(() => {
+  const target = editingTarget.value;
+  return target ? holdRepeatBlockedReason(actionsOf(target.button), "long") : null;
+});
+
+/** 常驻原因行：只解释当前页面对应的选项。 */
+const repeatPageReason = computed<string | null>(() => {
+  const target = editingTarget.value;
+  if (!target) return null;
+  if (target.trigger === "single") return repeatSingleReason.value;
+  if (target.trigger === "long") return repeatLongReason.value;
+  return null;
+});
+
+/** 当前编辑按键是否配置了双击（单击页说明句与「重复单击动作」悬停据此切换口径）。 */
+const doubleConfiguredOnEditingButton = computed(() => {
+  const target = editingTarget.value;
+  return !!target && actionsOf(target.button).double.type !== "disabled";
+});
+
+/** 「重复单击动作」的悬停说明（不可选时为原因；配双击时按压住确认口径）。 */
+const repeatSingleTitle = computed(() => {
+  if (repeatSingleReason.value) return repeatSingleReason.value;
+  return doubleConfiguredOnEditingButton.value
+    ? "按住超过约 0.3 秒开始，单击动作会不断重复，直到松手"
+    : "按住不放，单击动作会不断重复，直到松手";
+});
+
+/** 「重复长按动作」的悬停说明（不可选时为原因）。 */
+const repeatLongTitle = computed(
+  () => repeatLongReason.value ?? "按住约 0.55 秒后，长按动作会不断重复，直到松手",
+);
+
+/**
+ * OK 键「移动光标后按 OK 点击」（2026-10-06 定稿，方案见
+ * `docs/plan/2026-10-06-ok-context-click.md`、产品逻辑见
+ * `docs/product/button-behavior.md` §2）：按键级开关、默认关、只对 OK 键提供，
+ * 三个槽位页都在同一位置显示（与当前编辑哪个槽位无关）。
+ */
+const okClickVisible = computed(
+  () => editingTarget.value?.button === "ok" && editingTarget.value.trigger !== "double",
+);
+
+const okClickChecked = computed(() => actionsOf("ok").okContextClick === true);
+
+function toggleOkContextClick(): void {
+  const target = editingTarget.value;
+  if (!target || target.button !== "ok") return;
+  const actions = { ...actionsOf("ok") };
+  if (actions.okContextClick) {
+    delete actions.okContextClick;
+  } else {
+    actions.okContextClick = true;
+  }
+  mappings.value = {
+    ...mappings.value,
+    actions: { ...mappings.value.actions, [target.button]: actions },
+  };
+  void persist(
+    actions.okContextClick
+      ? "已开启：用遥控器移动光标后，按 OK 会点击光标位置"
+      : "已关闭：移动光标后按 OK 点击",
+  );
+}
+
+/**
+ * 动作变更后的「按住时连续执行」一致性收口：已选目标不再可用时自动回到
+ * 「关闭」并返回提示（不偷改选择到另一个目标，保留用户的显式选择）。
+ * 提示经 `persist(message)` 展示，避免被 persist 的清理逻辑覆盖。
+ */
+function reconcileHoldRepeat(
+  button: RemoteButton,
+  actions: ButtonActions,
+): { actions: ButtonActions; notice: string | null } {
+  const hold = actions.holdRepeat;
+  if (!hold) return { actions, notice: null };
+  const slot = hold === "long" ? "long" : "single";
+  const valid =
+    REPEAT_CAPABLE_BUTTONS.includes(button) && holdRepeatBlockedReason(actions, slot) === null;
+  if (valid) return { actions, notice: null };
+  const next = { ...actions };
+  delete next.holdRepeat;
+  // 自动关闭的提示同样不得指向灰掉的选项（长按动作只执行一次时它不可选）。
+  const notice =
+    slot === "single" && actions.long.type !== "disabled"
+      ? holdRepeatBlockedReason(actions, "long") === null
+        ? "这个按键已配置长按动作：按住会先执行长按，“按住时连续执行”已关闭（要连续执行，请选“重复长按动作”）"
+        : "这个按键已配置长按动作：按住会执行长按，而它只执行一次，“按住时连续执行”已关闭"
+      : "动作已变更，“按住时连续执行”已关闭";
+  return { actions: next, notice };
+}
+
+function selectHoldRepeat(choice: HoldRepeatChoice): void {
+  const target = editingTarget.value;
+  if (!target) return;
+  const reason =
+    choice === "single"
+      ? repeatSingleReason.value
+      : choice === "long"
+        ? repeatLongReason.value
+        : null;
+  if (reason) {
+    statusMessage.value = reason;
+    return;
+  }
+  if (repeatChoice.value === choice) return;
+  const actions = { ...actionsOf(target.button) };
+  if (choice === "off") {
+    delete actions.holdRepeat;
+  } else {
+    actions.holdRepeat = choice;
+  }
+  mappings.value = {
+    ...mappings.value,
+    actions: { ...mappings.value.actions, [target.button]: actions },
+  };
+  void persist(
+    choice === "off"
+      ? "已关闭“按住时连续执行”"
+      : choice === "long"
+        ? "已开启：长按后不松手会继续连续执行"
+        : "已开启：按住不放会连续执行",
+  );
 }
 
 /**
@@ -1605,7 +1827,7 @@ onUnmounted(() => {
         <polygon :points="arrowPolygon(VOICE_PLACEMENT)" :class="{ active: voiceActive }" />
       </svg>
 
-      <figure class="remote-photo" :style="{ left: `${remoteLeft}px` }">
+      <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${REMOTE_TOP}px` }">
         <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙语音遥控器 2 Pro 示意图" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
@@ -1959,11 +2181,60 @@ onUnmounted(() => {
           </template>
         </section>
       </div>
+      <div v-if="repeatGroupVisible" class="repeat-group">
+        <span class="repeat-label">按住时连续执行</span>
+        <div class="repeat-options">
+          <button
+            class="chip"
+            :class="{ selected: repeatChoice === 'off' }"
+            type="button"
+            title="按住不放只执行一次"
+            :disabled="busy"
+            @click="selectHoldRepeat('off')"
+          >
+            关闭
+          </button>
+          <button
+            class="chip"
+            :class="{ selected: repeatChoice === 'single' }"
+            type="button"
+            :title="repeatSingleTitle"
+            :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
+            @click="selectHoldRepeat('single')"
+          >
+            重复单击动作
+          </button>
+          <button
+            class="chip"
+            :class="{ selected: repeatChoice === 'long' }"
+            type="button"
+            :title="repeatLongTitle"
+            :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
+            @click="selectHoldRepeat('long')"
+          >
+            重复长按动作
+          </button>
+        </div>
+        <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
+      </div>
+      <label v-if="okClickVisible" class="toggle-row ok-click-toggle" title="刚用遥控器移动过光标时，按 OK 会点击光标位置">
+        <span>移动光标后按 OK 点击</span>
+        <input
+          class="toggle-input"
+          type="checkbox"
+          :checked="okClickChecked"
+          :disabled="busy"
+          @change="toggleOkContextClick"
+        />
+      </label>
+      <p v-if="okClickVisible" class="muted ok-click-hint">
+        刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。
+      </p>
       <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
-        未配置双击与长按时，单击在按下瞬间触发（零延迟）；返回/方向/音量键按住会连续触发。
+        {{ doubleConfiguredOnEditingButton ? "配置了双击：单击会稍等片刻（约 0.3 秒）以区分双击。" : "单击在按下瞬间执行。" }}
       </p>
       <p v-else class="muted editor-note">
-        {{ editingTarget.trigger === "double" ? "双击判定窗口约 0.3 秒：配置后单击会稍等片刻以区分双击。" : "长按约 0.55 秒触发；配置后按住连发停用。" }}
+        {{ editingTarget.trigger === "double" ? "配置后单击会稍等片刻（约 0.3 秒）以区分双击。双击不会连续执行。" : "长按约 0.55 秒后执行。" }}
       </p>
     </article>
 
@@ -2014,6 +2285,15 @@ onUnmounted(() => {
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
+/* 「按住时连续执行」：编辑面板内的按键级 radio 三选一（2026-10-05），
+   与动作分组留出间距。 */
+.repeat-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.repeat-label { font-size: 13px; }
+.repeat-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.repeat-hint { flex-basis: 100%; margin: 0; font-size: 12px; }
+/* OK 键「移动光标后按 OK 点击」：按键级开关 + 常驻说明句（2026-10-06）。 */
+.ok-click-toggle { margin-top: 12px; }
+.ok-click-hint { margin: 6px 0 0; font-size: 12px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }

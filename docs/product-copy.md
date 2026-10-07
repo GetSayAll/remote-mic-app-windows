@@ -81,6 +81,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
 
 - 用户可见字符串只允许出现在：`src/pages/*.vue`、`src/components/*.vue`、
   `src/lib/*.ts` 的 label 函数、`src/navigation.ts`、`docs/installation-and-configuration.md`。
+- **原生兜底例外**：界面已经不工作时也必须能显示的原生文案写在 Rust
+  （`src-tauri/src/lib.rs` 的托盘菜单项与「界面未能正常显示」的窗口标题）。
+  改动它们同样要过 §6 清单，并在 §7 记一条决定。
 - 同一概念只定义一次，其他地方引用（型号、按键名、阶段文案都走 label 函数）。
 - 新增或修改用户可见功能时同步用户手册对应章节，并按 [AGENTS.md](../AGENTS.md) 检查 `TODO.md`。
 
@@ -142,6 +145,29 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   现场：旧包写下的 `standard` 让升级后仍停在旧图标）**：本版本之前的配置一律改用
   几何鸭（旧版本会把默认值写进配置，用户没做过选择），本版本里做出的选择才保留。
   验收同用例十四。
+- 2026-10-05：按键「按住时连续执行」交互定稿为 **radio 三选一**（关闭 / 重复单击动作 /
+  重复长按动作；双击不参与），替代初版“开关开在单击/长按槽位”的隐式表达；文案与可用性
+  规则见 [docs/plan/2026-10-05-button-hold-repeat-radio.md](plan/2026-10-05-button-hold-repeat-radio.md)。
+  用户可见字符串在 `ButtonsPage.vue`（选项、悬停原因、状态条、说明句），验收见
+  [Testing/WindowsButtonGestureRepeat.md](../Testing/WindowsButtonGestureRepeat.md)。
+  双击语义保持现状：先点一下、紧接着按住不放，在“关闭”状态松手仍按双击处理（Andy 确认）。
+  同日真机反馈修订（Andy）：**置灰指路不得指向灰掉的选项、说明句不得承诺被置灰的功能**——
+  单击页“已有长按动作”的指路先确认“重复长按动作”可选，长按动作只执行一次时改为
+  “要连续执行单击动作，请先清除长按动作”；页面说明句只陈述本页事实（单击页/长按页删去
+  “开启后会连续执行”），行为说明移入选项悬停；自动关闭提示同样不指向灰选项。
+  口径见方案文档 §3/§4/§5。
+- 2026-10-06：OK 键「移动光标后按 OK 点击」（按键级开关、默认关）：开启后，用遥控器移动过
+  光标后的 5 秒内，按 OK 直接点击光标位置，本次按压的单击/双击/长按都不执行；窗口外行为不变。
+  开关名“移动光标后按 OK 点击”，悬停“刚用遥控器移动过光标时，按 OK 会点击光标位置”，
+  常驻说明句见方案表；不为每次点击加提示（点击是高频动作）。产品逻辑整理见
+  [docs/product/button-behavior.md](product/button-behavior.md) §2，方案见
+  [docs/plan/2026-10-06-ok-context-click.md](plan/2026-10-06-ok-context-click.md)。
+  验收见 [Testing/WindowsOkContextClick.md](../Testing/WindowsOkContextClick.md)。
+- 2026-10-07（界面故障的兜底标题，Andy 定稿）：WebView2 失效后写进窗口标题的文案为
+  `无线麦 SayAll 界面未能正常显示，请从托盘退出后重开`。写在 Rust（界面已停止时也要能显示，
+  见 §5 例外）；写出判据是**故障后宽限期内前端心跳没有报到**，不是 `Reload` 的返回值；
+  页面恢复报到后标题自动还原。设计与日志字段见
+  [Bugs/2026-09-12-voice-chord-focused-webview-reload.md](../Bugs/2026-09-12-voice-chord-focused-webview-reload.md)。
 - 2026-10-07（ARM64 上「全按键支持」不可用，issue #206）：Windows 11 ARM64 上增强
   捕获无法启动，界面因此改为**明确不可用**，而不是长期停在「正在启动」。两处入口
   一致，名称随各页自己的写法：按键页「全按键支持」、连接页“支持更多输入工具”。
@@ -156,3 +182,4 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   只讲平台结果、不讲机制（内部链路名一律不用，见 §3 术语红线）。可用平台上
   （`available=true`）文案与行为一字不变。验收：`src/pages/ButtonsPage.test.ts`、
   `src/pages/ConnectionPage.test.ts`；ARM64 真机验收 `deferred`（本机是 x64）。
+

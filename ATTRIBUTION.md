@@ -58,6 +58,7 @@
 
 - `HD838A/remote-mic-app`：无线麦 macOS 原版的信息架构、产品文案、RC003 图片、RC001/RC003 型号识别、ATVV 行为和测试边界；RC001 支持参考提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`。
   - 2026-09-05 按键映射功能移植补充（均为语义移植，非代码复制）：`RemoteButtonGestureRecognizer` + `HIDRemoteScheduler` 的手势参数（双击窗口 300ms、长按 550ms、连发起始 350ms、返回 50ms/方向与音量 100ms 连发）与"按配置动态启用双击/长按识别、未配置时单击零延迟"的语义；`KeyboardEventSuppressor` 的预测式武装 + 有限窗口匹配吞键模型；`RemoteMappingCanvas` 的按键卡片布局表（锚点/目标 Y 坐标逐键移植）与三态高亮（按下=橙、选中=强调、普通=中性）；`MappingSelectionPolicy` 的"锁定当前按键"默认值。Mac 版 `KeyboardEventSuppressor` 的 UP 沿无配对兜底（DOWN 泄漏+UP 吞下=粘键缺陷）未移植——Windows 版沿用本仓库 2026-09-05 规则（DOWN 漏进 OS 则 UP 必放行）。
+  - 2026-10-05 按键「按住时连续执行」（Windows 扩展语义；参数与互斥理由参考 Mac `HIDRemoteScheduler.repeatIntervalMilliseconds`（返回 50ms、方向/音量 100ms）与 `HIDRemoteMonitor.startRepeatIfNeeded` 的「无次级手势才启动连发」互斥依据，未复制代码）：**与 Mac 的差异（Windows 自有语义）**——连发改为按键级显式开关（界面 2026-10-05 定稿为 radio 三选一：关闭 / 重复单击动作 / 重复长按动作；连发目标为单击或长按槽位，用户指定，双击不参与；见 `docs/plan/2026-10-05-button-hold-repeat-radio.md`）；长按动作触发后可继续按间隔续拍；双击共存时按住超过双击窗（0.3s）即确认为单击并起拍；可连续性按动作白名单判定（单键、滚动、鼠标移动；组合快捷键、打开应用、聚焦输入框、鼠标点击只执行一次）。旧配置按旧版自动连发行为迁移为显式开关；旧版对组合键（如 Ctrl+C）的连发在新模型中不再生效（有意修正）。
   - 2026-09-09 按键映射配置导入导出补充（本地 Mac 仓库 HEAD `feba1d6`，语义参考，未复制代码）：参考 `AppSettings.exportedConfigurationData/importConfiguration` 的版本化 JSON、导入前完整解码校验与一次性应用，以及 `SettingsView.exportConfiguration/importConfiguration` 的系统文件选择器、用户取消静默、成功/失败反馈。Windows 版仅迁移按键映射，不导入 Mac 专属设置或统计；格式使用独立 `formatVersion: 1` + `buttonMappings` 契约，不宣称与 Mac 配置文件互通。
   - 2026-10-02 设置页改版与应用图标切换（Mac main `e8af2da2`，语义参考，未复制代码；同日按用户指正修正：Mac 菜单栏状态图标在 Windows 不存在，已整体撤掉）：
     ① **设置页信息架构**参考 `Sources/RemoteMic/SettingsView.swift` 的 `aboutPage`——顶部一行为应用图标 + 名称 + 标语，其右为"当前版本 + 检查更新 + 检查预发布版本开关 + 一条分隔线 + 更新状态"，其后是带分组标题的"通用""问题反馈"卡片，卡内每行 = 行内图标 + 标题 + 右侧控件（`settings.section.settings` 的标题是"设置"、图标是 `gearshape`，因此 Windows 侧栏末位页从"关于"改名"设置"并换齿轮图标）。Windows 没有的模块（Dock/菜单栏图标、应用语言、重新运行设置向导、服务环境、会员、分享）不移植；"诊断与日志"保持在权限页（2026-10-01 用户指定），不在设置页重复。
@@ -385,3 +386,9 @@
   **不是微软承诺稳定的公开接口**"*；其 README 亦列出游戏反作弊识别风险。
 - **不要效仿的部分**：其按键映射支持单击/双击/长按配置，与本仓库"语音键只支持按下开始、释放结束"
   的产品规则冲突——语音键不借鉴其手势策略，只借鉴报告层捕获机理。
+
+## 2026-10-05 WebView2 故障处理来源
+
+- 主窗口有界恢复与相关策略测试改编自本仓库提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**；上游移植只涉及 `src-tauri/src/lib.rs` 的 WebView2 故障处理，按上游已有退出标记适配，不改 IME、语音或安装器流程。同一作者在其 fork 提交 `adddb0cc210885aff4ba19dec6684d199aa8e31e`（PR #202）中另带一次性原生提示（窗口标题改写、托盘 tooltip、`MessageBoxW`）：该实现未采纳（写标题的判据是 `Reload` 的返回值而非界面是否真的没回来，且写出后没有恢复路径）；本仓库改用心跳判据的标题提示（页面恢复报到即还原），设计见 Bug 记录的 2026-10-07 节。
+- 官方行为参考：[Microsoft WebView2 process-related events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)。使用公开 `ProcessFailed`/`Reload` API；浏览器进程退出只能重建控件，本实现只落结构化日志，不伪造恢复；控件重建、托盘 tooltip 与系统对话框未实现；真实故障恢复验收不在已验证范围。
+- 直接依赖复用 Tauri/Wry 已锁定的 `webview2-com 0.38.2`，来源 [wravery/webview2-rs](https://github.com/wravery/webview2-rs)，许可 MIT；没有复制其示例实现。验证边界见 [2026-09-12 Bug 记录的增量节](Bugs/2026-09-12-voice-chord-focused-webview-reload.md#2026-10-05独立的-webview2-故障恢复贡献候选)。

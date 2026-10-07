@@ -579,6 +579,393 @@ describe("buttons mapping page", () => {
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
   });
 
+  it("「按住时连续执行」：选“重复单击动作”写入 holdRepeat=single，改回“关闭”清空", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const chip = (label: string) =>
+      wrapper
+        .find(".mapping-editor")
+        .findAll(".repeat-options .chip")
+        .find((item) => item.text() === label);
+
+    // 默认“关闭”选中；单击动作可连续 → “重复单击动作”可选。
+    expect(wrapper.find(".mapping-editor .repeat-options .chip.selected").text()).toBe("关闭");
+    expect((chip("重复单击动作")!.element as HTMLButtonElement).disabled).toBe(false);
+
+    await chip("重复单击动作")!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未自动保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.holdRepeat).toBe("single");
+    expect(wrapper.find(".mapping-editor .repeat-options .chip.selected").text()).toBe(
+      "重复单击动作",
+    );
+
+    // 改回“关闭”：负载里不再带 holdRepeat（先等上一轮保存结束、busy 释放）。
+    await vi.waitFor(() => {
+      if ((chip("关闭")!.element as HTMLButtonElement).disabled) throw new Error("等待保存结束");
+    });
+    await chip("关闭")!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length < 2) throw new Error("关闭未保存");
+    });
+    const off = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+      actions: Record<string, { holdRepeat?: string }>;
+    };
+    expect(off.actions.up!.holdRepeat).toBeUndefined();
+  });
+
+  it("「按住时连续执行」：长按动作未配置时“重复长按动作”置灰，配置后可选中并保存 long", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    const chip = (label: string) =>
+      wrapper
+        .find(".mapping-editor")
+        .findAll(".repeat-options .chip")
+        .find((item) => item.text() === label);
+    expect(wrapper.find(".mapping-editor").text()).toContain("先给这个按键配置长按动作");
+    expect((chip("重复长按动作")!.element as HTMLButtonElement).disabled).toBe(true);
+
+    // 选择可连续执行的长按动作（Backspace）后该选项可用。
+    const backspaceChip = wrapper
+      .find(".mapping-editor")
+      .findAll(".chip")
+      .find((item) => item.text() === "Backspace");
+    await backspaceChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("长按动作未保存");
+    });
+    await vi.waitFor(() => {
+      const pending = chip("重复长按动作")!;
+      if ((pending.element as HTMLButtonElement).disabled) {
+        throw new Error("选择可连续的长按动作后该选项应可用");
+      }
+    });
+    await chip("重复长按动作")!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length < 2) throw new Error("选项未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+      actions: Record<string, { holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.holdRepeat).toBe("long");
+  });
+
+  it("「按住时连续执行」：已选“重复单击动作”后再配置长按 → 自动回到“关闭”并提示", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+          holdRepeat: "single",
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    const backspaceChip = wrapper
+      .find(".mapping-editor")
+      .findAll(".chip")
+      .find((item) => item.text() === "Backspace");
+    await backspaceChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.holdRepeat).toBeUndefined();
+    await vi.waitFor(() => {
+      const status = wrapper.find(".mapping-status");
+      if (!status.exists()) throw new Error("提示尚未展示");
+      if (!status.text().includes("已关闭")) throw new Error("提示未说明已被关闭");
+      if (!status.text().includes("重复长按动作")) throw new Error("提示未给出下一步");
+    });
+  });
+
+  it("「按住时连续执行」：组合键置灰、非连发按键与双击页不显示", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["control", "c"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const findCard = (label: string) =>
+      wrapper.findAll(".mapping-card").find((card) => card.text().includes(label))!;
+
+    // 确定键：不在可连续按键范围内 → 不渲染选项组。
+    await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(false);
+
+    // 方向键 + 组合键动作：“重复单击动作”置灰并说明原因。
+    await findCard("上").findAll(".mapping-cell")[0]!.trigger("click");
+    const chip = wrapper
+      .find(".mapping-editor")
+      .findAll(".repeat-options .chip")
+      .find((item) => item.text() === "重复单击动作");
+    expect(chip).toBeDefined();
+    expect((chip!.element as HTMLButtonElement).disabled).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).toContain("只执行一次");
+
+    // 双击页不提供该选项组。
+    await findCard("上").findAll(".mapping-cell")[1]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(false);
+  });
+
+  it("「按住时连续执行」：单击与长按并存时“重复单击动作”置灰并指向“重复长按动作”", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "shortcut", chord: { keys: ["backspace"] } },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const chip = (label: string) =>
+      wrapper
+        .find(".mapping-editor")
+        .findAll(".repeat-options .chip")
+        .find((item) => item.text() === label);
+    expect((chip("重复单击动作")!.element as HTMLButtonElement).disabled).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).toContain("请选“重复长按动作”");
+    expect(chip("重复单击动作")!.attributes("title")).toBe(
+      "这个按键已有长按动作，按住会先执行长按；要连续执行，请选“重复长按动作”",
+    );
+    expect((chip("重复长按动作")!.element as HTMLButtonElement).disabled).toBe(false);
+    expect(chip("重复长按动作")!.attributes("title")).toBe(
+      "按住约 0.55 秒后，长按动作会不断重复，直到松手",
+    );
+  });
+
+  it("说明文案：单击/长按/双击页只讲本页事实，「连续执行」行为在选项悬停里", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    const chip = (label: string) =>
+      wrapper
+        .find(".mapping-editor")
+        .findAll(".repeat-options .chip")
+        .find((item) => item.text() === label);
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor").text()).toContain("单击在按下瞬间执行");
+    // 说明句不再承诺“开启后会连续执行”；行为说明只在选项悬停里。
+    expect(wrapper.find(".mapping-editor").text()).not.toContain("开启“按住时连续执行”后");
+    expect(chip("重复单击动作")!.attributes("title")).toBe(
+      "按住不放，单击动作会不断重复，直到松手",
+    );
+    await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    expect(wrapper.find(".mapping-editor").text()).toContain("长按约 0.55 秒后执行");
+    // 未配置长按动作：该选项置灰，悬停显示原因而不是行为说明。
+    expect(chip("重复长按动作")!.attributes("title")).toBe("先给这个按键配置长按动作");
+    await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    expect(wrapper.find(".mapping-editor").text()).toContain("双击不会连续执行");
+  });
+
+  it("说明文案：已配置双击时，单击页说明句与「重复单击动作」悬停切换为按住确认口径", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "shortcut", chord: { keys: ["space"] } },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor").text()).toContain(
+      "配置了双击：单击会稍等片刻（约 0.3 秒）以区分双击",
+    );
+    const chip = wrapper
+      .find(".mapping-editor")
+      .findAll(".repeat-options .chip")
+      .find((item) => item.text() === "重复单击动作");
+    expect(chip!.attributes("title")).toBe(
+      "按住超过约 0.3 秒开始，单击动作会不断重复，直到松手",
+    );
+  });
+
+  it("「按住时连续执行」：长按动作只执行一次时，两句提示不指向灰掉的选项", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "open_app", target: "shell:AppsFolder\\Example!App" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    // 单击页：两个选项都不可选，提示给出“先清除长按动作”这条真正可行的下一步。
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const singleHint = wrapper.find(".mapping-editor").text();
+    expect(singleHint).toContain("请先清除长按动作");
+    expect(singleHint).not.toContain("请选“重复长按动作”");
+    // 长按页：原因不变，且说明句不再承诺“开启后会连续执行”。
+    await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    const longHint = wrapper.find(".mapping-editor").text();
+    expect(longHint).toContain("“长按”的动作只执行一次");
+    expect(longHint).not.toContain("请选“重复长按动作”");
+    expect(longHint).not.toContain("开启“按住时连续执行”后");
+  });
+
+  it("「按住时连续执行」：选“重复单击动作”后配置不可重复的长按 → 提示不指向灰选项", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+          holdRepeat: "single",
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    const appChip = wrapper
+      .find(".mapping-editor")
+      .findAll(".chip")
+      .find((item) => item.text() === "记事本");
+    await appChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.holdRepeat).toBeUndefined();
+    await vi.waitFor(() => {
+      const status = wrapper.find(".mapping-status");
+      if (!status.exists()) throw new Error("提示尚未展示");
+      if (!status.text().includes("已关闭")) throw new Error("提示未说明已被关闭");
+      if (status.text().includes("请选“重复长按动作”")) {
+        throw new Error("提示不得指向灰掉的选项");
+      }
+    });
+  });
+
+  it("「移动光标后按 OK 点击」：只出现在 OK 键，开启/关闭写入 okContextClick", async () => {
+    const wrapper = await mountPage();
+    const findCard = (label: string) =>
+      wrapper.findAll(".mapping-card").find((card) => card.text().includes(label))!;
+    const toggle = () => wrapper.find(".mapping-editor .ok-click-toggle input");
+
+    // 只对 OK 键显示。
+    await findCard("上").findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
+
+    // 说明句写明 5 秒窗口与“原动作都不执行”。
+    await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).toContain("刚用遥控器移动过光标（5 秒内）");
+    expect(wrapper.find(".mapping-editor").text()).toContain("单击、双击、长按都不会执行");
+    expect((toggle().element as HTMLInputElement).disabled).toBe(false);
+
+    await toggle().setValue(true);
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { okContextClick?: boolean }>;
+    };
+    expect(saved.actions.ok!.okContextClick).toBe(true);
+
+    // 长按页显示同一开关（按键级）；双击页不显示。
+    await findCard("确定").findAll(".mapping-cell")[2]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
+    await findCard("确定").findAll(".mapping-cell")[1]!.trigger("click");
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
+
+    // 关闭：先等上一轮保存结束（busy 释放），再清空字段。
+    await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    await vi.waitFor(() => {
+      if ((toggle().element as HTMLInputElement).disabled) throw new Error("等待保存结束");
+    });
+    expect((toggle().element as HTMLInputElement).checked).toBe(true);
+    await toggle().setValue(false);
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length < 2) throw new Error("关闭未保存");
+    });
+    const off = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+      actions: Record<string, { okContextClick?: boolean }>;
+    };
+    expect(off.actions.ok!.okContextClick).toBeUndefined();
+    await vi.waitFor(() => {
+      if (!wrapper.find(".mapping-status").text().includes("已关闭")) {
+        throw new Error("缺少关闭提示");
+      }
+    });
+  });
+
   it("配置「打开应用」时聚焦方式面板暂时隐藏（2026-10-03 下线的回归守卫）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
