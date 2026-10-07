@@ -136,6 +136,10 @@ try {
     if (-not (Test-Path -LiteralPath $installLocation -PathType Container)) {
         throw "Installed SayAll directory is missing: $installLocation"
     }
+    # 载荷集合断言（2026-10-07，Issue #206）：这条路径是**全新安装**（脚本开头就断言系统里没有
+    # 既有安装），因而是「本包真的把暂存的每一件载荷都装进来了」的判别性判据——安装矩阵走的是
+    # 升级路径，上一版留下的文件会让"缺件"看不出来。NSIS 压缩之后再没有别的办法看出来。
+    & (Join-Path $PSScriptRoot "verify-installed-payload-set.ps1") -InstallDirectory $installLocation
 
     $startMenuRoot = [Environment]::GetFolderPath("StartMenu")
     $startMenuDirectory = Join-Path (Join-Path $startMenuRoot "Programs") $startMenuFolderName
