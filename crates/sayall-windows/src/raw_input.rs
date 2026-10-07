@@ -70,9 +70,11 @@ impl RemoteButton {
             .expect("ALL_BUTTONS covers every RemoteButton variant")
     }
 
-    /// 按住连发间隔（单击动作的自动重复），对齐 Mac 原版 HIDRemoteScheduler：
-    /// 返回 50ms、方向键/音量± 100ms、其余按键不连发。仅当该键只配置了单击
-    /// （未配置双击/长按）时由手势引擎启用。
+    /// 按住连续触发间隔，对齐 Mac 原版 HIDRemoteScheduler：返回 50ms、
+    /// 方向键/音量± 100ms、其余按键不支持。是否真正触发由显式开关
+    /// （`ButtonActions.hold_repeat`：radio 三选一指定单击/长按槽位）与该槽位
+    /// 动作是否可连续执行决定，见 button_gestures.rs。
+    /// 界面侧镜像：`src/pages/ButtonsPage.vue` 的 `REPEAT_CAPABLE_BUTTONS`。
     pub fn repeat_interval(self) -> Option<Duration> {
         match self {
             Self::Back => Some(Duration::from_millis(50)),
