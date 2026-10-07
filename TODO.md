@@ -259,10 +259,11 @@
 - [x] **文档口径统一**：`TECHNICAL.md` / `docs/installation-and-configuration.md` / `docs/architecture/windows-tauri-roadmap.md` / `DEVELOPMENT.md` 按架构表述；`docs/product-copy.md` 登记新文案。
 - [x] **CI 与产物**：`verify` 增加 `cargo check --target aarch64-pc-windows-msvc`（不需要链接器，覆盖 arm64 编译路径）；`installer` 强制包含 arm64 载荷（`windows-2025` 镜像自带 ARM64 组件）。产物命名不经改动（单包双载荷，资产名与更新通道不变）。
 
-**验收（P2，`deferred`，需 ARM64 真机）**：
+**验收（P2，需 ARM64 真机）**：
 
-- [ ] ARM64 上先跑 `sayall-helper.exe --selftest` 与 `--dry-run`（后者不提权、不注入）：确认宿主定位与 Gadget 校验通过，且日志出现架构选择与前置校验字段；再验证「x64 主程序启动 arm64 助手」含提权与计划任务路径。
-- [ ] 开启开关 → 助手连上 → 按 `Testing/WindowsRC003EnhancedCapture.md` 全 13 键逐项；RC003 与 RC001 分别记录；含冷态首用、连续会话、快速连按、断连与睡眠恢复；x64 侧回归同矩阵。
+- [x] **ARM64 真机实测通过（2026-10-07，报障人，RC003）**：`--selftest` 与 `--dry-run` 均退出码 0；`[VERIFY] … machine=arm64 0xAA64 arch_expected=arm64 0xAA64`（sha256 `323a91b3…` 与锁定值一致）；注入链 `[TASK]`（注册的就是 `sayall-helper-arm64.exe`）→ `[ARCH]` 三方一致 → `[INJECT] hmodule_return=0x87550000` → `[VERIFY-MODULE] module_present=true` → `helper_authenticated version=2 transport=named_pipe` → `ownership_resumed`。**「x64 主程序 → 计划任务 → arm64 助手」这条承重链已由真机实证**。
+- [ ] 13 键全量走查与边界矩阵：本次实测覆盖三键（音量± 连按 3/3、返回 2/2，均命中配置动作）与对照组按键，**仍缺**冷态首用、连续会话、快速连按、断连与睡眠恢复；RC001 同链路仍 `deferred`（机制不同，不能外推）。
 - [ ] 不可用场景（人为移除 arm64 载荷）验证提示与置灰，确认不再空转。
+- [x] **升级路径缺陷已修（2026-10-07 实测发现）**：覆盖安装保留的旧计划任务仍指向 x64 助手 → ARM64 首次自动拉起跑错架构（闸门拦下但空转约 25 秒）。修法：启动对账比对任务 XML 的 `<Exec><Command>` 文件名与按架构选中的助手名（`rc003_task::task_target_matches`，不记路径），不一致即回落开关并落 `reason=task_target_mismatch`，不重试、不擅自弹 UAC。顺带修 `[DLL]` 的 copied 路径：复制后对副本重算摘要（`verify_copied_gadget`），不再报 `sha256_verified=false`。**修复需在"旧 x64 包 → 新包"升级场景复测（`deferred`）**。
 
 **依赖与待决**：① ARM64 真机来源（报障人机器或另行借测）——没有真机前，本项只能完成到自动化与打包层，不得宣称通过；② 是否同期回复 Issue #206（回复要点已写在 Bug 文档末尾，需补发完整的对账字段与助手侧 `[HOST]` / `[VERIFY]` / `[INJECT]` 行）。

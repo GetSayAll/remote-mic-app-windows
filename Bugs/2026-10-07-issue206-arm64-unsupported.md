@@ -1,8 +1,9 @@
 # ARM64 上「全按键支持」永久停在「正在启动」：x64 助手与 Gadget 无法用于 ARM64 宿主
 
 - 发现日期：2026-10-06（Issue #206 提交）；2026-10-07 完成核验
-- 状态：已修复（能力与提示同版本交付，分支 `feat/arm64-enhanced-capture`）；ARM64 真机验收
-  `deferred`——见 [ADR 0003](../docs/decisions/0003-arm64-enhanced-capture-scope.md)「实施记录」
+- 状态：主问题**已修复并经 ARM64 真机实测通过**（2026-10-07，报障人在 RC003 上执行）；
+  之后在升级路径上又发现并修复一个后续缺陷（计划任务目标架构对账，见本文「后续修复」）——
+  见 [ADR 0003](../docs/decisions/0003-arm64-enhanced-capture-scope.md)「实施记录」
 - 影响范围：Windows 11 家庭版 ARM64（内部版本 26200，Snapdragon X Elite）；应用
   SayAll Windows 0.5.0（发布 tag `v0.5.0` = `e5374a9`）；RC003；「全按键支持」（增强捕获）。
   基础语音与其它按键路径不受影响（报障人确认其它按键正常）
@@ -106,10 +107,36 @@ bridge_phase=listening helper_pid=0
 - 工作区：`cargo fmt --all -- --check`、helper `cargo fmt -- --check`、`cargo test --workspace`
   全绿；`cargo check -p sayall-windows-app --features runtime-simulation` 与前端 `pnpm test`
   / `pnpm build` 见 ADR 实施记录与本分支交付说明。
-- **真机验收（`deferred`，需 ARM64 机器）**：ARM64 上 `sayall-helper.exe --selftest` 与
-  `--dry-run` → 开启开关 → 助手连上 → 全 13 键按 `Testing/WindowsRC003EnhancedCapture.md`
-  逐项；RC003 与 RC001 分别记录；含冷态首用、连续会话、快速连按、断连与睡眠恢复。x64 侧回归
-  同矩阵。
+- **ARM64 真机实测——`passed`（2026-10-07，报障人，RC003）**：
+  - 只读自检两步通过：`--selftest` 退出码 0（含第 6b 项"同时登记 x86_64 与 arm64"）；
+    `--dry-run` 退出码 0，`[VERIFY] … size=21078016 sha256=323a91b3… machine=arm64 0xAA64
+    arch_expected=arm64 0xAA64`（与锁定值逐字符一致）。
+  - 注入链：`[TASK] … /tr "…\sayall-helper-arm64.exe" --follow-app` →
+    `[ARCH] injector=arm64 0xAA64 target=arm64 0xAA64 gadget=arm64 0xAA64 image=…\WUDFHost.exe`
+    → `[INJECT] … hmodule_return=0x87550000` → `[VERIFY-MODULE] module_present=true
+    gadget_modules_in_host=1` → `rc003_bridge event=helper_authenticated helper_pid=23232
+    version=2 transport=named_pipe` → `enhanced_capture event=ownership_resumed
+    usages=28,35,4a,4f,50,51,52,65,66,80`。
+  - 三键：音量+ / 音量− 各连按 3 次全部命中（`map_fire … steps=3`），返回键 2/2 命中
+    （`action=shortcut chord=VolumeMute`）；对照的原有按键（下键）正常，语音与连接无回归。
+  - 由此**收窄**：`x64 主程序 → 计划任务 → arm64 助手` 这条此前纯属推断的链已实证。
+- 仍 `deferred`：RC001 的同一链路（机制不同，不能外推）；冷态首用、断连、睡眠恢复矩阵；
+  安装器生命周期矩阵本机未跑（会改动本机已装应用，交由 CI 的 `installer` job）。
+
+## 后续修复（2026-10-07 报障人实测发现）
+
+**升级路径缺陷——计划任务仍指向旧架构的助手**：覆盖安装保留了旧版注册的计划任务，ARM64
+机器上它仍指向 `sayall-helper.exe`，于是升级后第一次自动拉起跑了 x64 助手；架构闸门正确拦下
+（`[STOP] 架构不一致…`，文案清楚），但界面要空转约 25 秒重试后才失败。手动关一次开关再开
+（强制重装任务）后一切正常。
+
+**修复**：启动对账新增"任务目标架构"判据——读计划任务 XML 的 `<Exec><Command>`（只取文件名，
+完整路径不进日志），与按架构选中的助手名比对；不一致即回落开关并落
+`terminal_result=revoked reason=task_target_mismatch expected_helper=…`，不进入重试、不在启动
+时擅自弹 UAC（重装任务要提权，保持"用户开关一次即重新授权"的语义）。
+**顺带修**：`[DLL]` 汇报在 copied 路径原先固定写 `sha256_verified=false`（报障人据此问"是不是
+没校验就用了"）——现在复制后对副本重算摘要，copied 路径同样报 `true`，摘要不符则硬失败（不再
+只记一条日志接着注入）。
 
 ## 对报障人的回复要点
 

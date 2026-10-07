@@ -121,16 +121,35 @@ Issue #206（2026-10-06，Windows 11 ARM64 内部版本 26200，Snapdragon X Eli
   arm64 压缩包摘要与 GitHub Releases API 的 `asset.digest` 逐字符一致。
 - `cargo fmt --all -- --check` 与 helper 的 `cargo fmt -- --check`：`passed`。
 
+### ARM64 真机实测（2026-10-07，报障人，RC003）——`passed`
+
+- 只读自检两步通过；`[VERIFY]` 打出 `size=21078016 sha256=323a91b3… machine=arm64 0xAA64
+  arch_expected=arm64 0xAA64`（与锁定值逐字符一致）。
+- 注入链全通：`[TASK]` 注册的就是 `sayall-helper-arm64.exe` →
+  `[ARCH] injector=arm64 0xAA64 target=arm64 0xAA64 gadget=arm64 0xAA64` →
+  `[INJECT] hmodule_return=0x87550000` → `[VERIFY-MODULE] module_present=true` →
+  `helper_authenticated version=2 transport=named_pipe` → `ownership_resumed`（10 个 usage）。
+- 三键各自命中配置动作（音量± 连按 3/3、返回 2/2），对照按键正常，语音无回归。
+- 结论：**「x64 主程序 → 计划任务 → arm64 助手」与 ARM64 上的注入/报告层链路均已实证**；
+  arm64 助手也已在 CI 上真实编译链接，且安装目录载荷集合由 CI 断言（`verify-installed-payload-set.ps1`，两处调用）。
+
+### 实测后追加的修复（升级路径，2026-10-07）
+
+报障人在升级场景发现：覆盖安装保留的旧计划任务仍指向 `sayall-helper.exe`，ARM64 上首次
+自动拉起因此跑 x64 助手（架构闸门正确拦下，但界面仍空转约 25 秒才失败）。
+- 启动对账新增任务目标判据（`rc003_task::task_target_matches`，只比文件名、不记路径）：
+  不一致 → 回落开关 + `reason=task_target_mismatch`，不重试、不擅自弹 UAC。
+- 顺带修 `[DLL]` 汇报：copied 路径改为"复制后对副本重算摘要"（`verify_copied_gadget`），
+  该路径不再写 `sha256_verified=false`（原文案会被读成"没校验就用了"），摘要不符即硬失败。
+
 ### 仍未验证（`deferred`）
 
-- **arm64 助手的链接与产物**：本机 VS BuildTools 2022 缺 `Microsoft.VisualStudio.Component.VC.Tools.ARM64`
-  （Windows SDK 有 arm64 库、MSVC 没有），`aarch64-pc-windows-msvc` target 亦未安装；本机只能
-  做到源码级与 CI 编译级覆盖，出包需在带该组件的机器或 CI 上完成。CI 侧 `windows-2025` 镜像
-  自带 ARM64 组件（`actions/runner-images` 的组件表在列）。
-- **ARM64 真机全链**：宿主定位、注入、报告层拦截、边沿锁存与清键、桥协议 v2，以及
-  「x64 主程序启动 arm64 助手（含提权与计划任务路径）」都要在 ARM64 真机上重跑；
-  `x64 → arm64` 的 `CreateProcess` / `ShellExecuteEx(runas)` 组合尚无实证。
 - **RC001 是否同受影响**：RC001 的增强轨机制不同，不能由 RC003 外推。
+- **ARM64 上的边界矩阵**：冷态首用、断连、睡眠恢复、13 键全量走查（本次实测覆盖三键与对照组）。
+- **升级路径修复的复测**：需在"旧 x64 包 → 新包"的升级场景里确认开关回落 + 日志
+  `reason=task_target_mismatch` 出现（本次修复随下一版包提供）。
+- **安装器生命周期矩阵**：本机未跑（会改动本机已安装的应用），由 CI 的 `installer` job 覆盖
+  （`windows-2025` 镜像自带 ARM64 组件，强制变量保证载荷齐全）。
 
 ## 依据来源（参考实现与官方资产）
 
