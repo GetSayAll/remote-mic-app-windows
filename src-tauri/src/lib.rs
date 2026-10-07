@@ -2216,6 +2216,17 @@ pub fn run() {
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     false
+                } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
+                    // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
+                    // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
+                    // 但界面要空转约 25 秒才失败。这里回落开关，等用户拨一次开关重建任务——
+                    // 重装任务要提权，不在启动时擅自弹 UAC（与"每次开启都重新授权"同源）。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason=task_target_mismatch expected_helper={}",
+                        support.helper_expected
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    false
                 } else if reauth_required || !task_installed {
                     // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
                     // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验

@@ -2204,11 +2204,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     }
                     s
                 })?;
+                // 复制之后**对副本重算摘要**，两个作用（2026-10-07 报障人实测后加）：
+                // ① 堵住"写下去之后、注入之前被换掉"的窗口；
+                // ② 让 [DLL] 的 sha256_verified 在 copied 路径上也有真实含义——此前 copied 路径
+                //    固定写 false，被读成"没校验就用了"（来源其实已在 [VERIFY] 校验过）。
+                verify_copied_gadget(&dll, GADGET_SHA256)?;
+                verified = true;
                 logger.kv(
                     "[PREP]",
                     &[
                         ("dll", normalize_display(&dll)),
                         ("action", "copied".into()),
+                        ("sha256_verified", "true".into()),
                         (
                             "bytes",
                             fs::metadata(&dll).map(|m| m.len()).unwrap_or(0).to_string(),
@@ -6610,6 +6617,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         Ok(())
     }
 
+    /// 复制之后对副本重算摘要（`expected` 作参数是为了让两个分支都能被单测直接覆盖）。
+    /// 摘要不符=硬失败：运行时目录里的那份马上要被注入，不能"记一条日志接着用"。
+    fn verify_copied_gadget(dll: &Path, expected: &str) -> Result<(), String> {
+        let digest = sha256_hex(
+            &fs::read(dll).map_err(|e| format!("复制后读回 Gadget 失败 {}: {e}", dll.display()))?,
+        );
+        if digest != expected {
+            return Err(format!(
+                "复制后的 Gadget 摘要不符：期望 {expected}，实际 {digest}（运行时目录 {}）",
+                dll.display()
+            ));
+        }
+        Ok(())
+    }
+
     fn agent_sha256_hex() -> String {
         sha256_hex(AGENT_JS.as_bytes())
     }
@@ -7339,6 +7361,35 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(is_gadget_module("frida-gadget-arm64.dll"));
             assert!(is_gadget_module("FRIDA-GADGET.DLL"));
             assert!(!is_gadget_module("frida-gadget.dll.bak"));
+        }
+    }
+
+    /// 复制后的摘要复核（2026-10-07 报障人实测后加：copied 路径原先固定报 sha256_verified=false，
+    /// 被读成"没校验就用了"）。
+    #[cfg(test)]
+    mod copied_gadget_verify_tests {
+        use super::*;
+
+        #[test]
+        fn copied_gadget_must_match_the_expected_digest() {
+            let dir =
+                std::env::temp_dir().join(format!("sayall-copy-verify-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("frida-gadget.dll");
+            fs::write(&path, b"payload").unwrap();
+            let digest = sha256_hex(b"payload");
+
+            // 摘要一致 → 通过（真实运行里 expected 恒为 GADGET_SHA256）
+            assert!(verify_copied_gadget(&path, &digest).is_ok());
+
+            // 摘要不一致（"写下去之后被换掉"的窗口）→ 必须报错，不得只记日志接着注入
+            let error = verify_copied_gadget(&path, GADGET_SHA256).unwrap_err();
+            assert!(error.contains("摘要不符"), "{error}");
+
+            // 读不到也要报错（不是静默通过）
+            assert!(verify_copied_gadget(&dir.join("missing.dll"), &digest).is_err());
+
+            let _ = fs::remove_dir_all(&dir);
         }
     }
 }

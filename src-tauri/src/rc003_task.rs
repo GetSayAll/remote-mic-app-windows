@@ -388,10 +388,9 @@ fn clear_reauth_marker() {
     let _ = std::fs::remove_file(reauth_marker_path());
 }
 
-/// 任务的注册时间（任务 XML 的 `<Date>`），作为「任务真的被重装过」的
-/// 硬判据。文件是 UTF-16LE 编码（带 BOM），需手动解码——这是系统任务
-/// 存放位置的约定路径，当前用户对自己创建的任务可读。
-fn task_registered_at() -> Option<String> {
+/// 计划任务 XML 原文（UTF-16LE，带 BOM）。读不到就返回 `None`：任务缺失、被删除
+/// 或当前用户没有读权限都走这一条。
+fn task_xml() -> Option<String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
     let bytes = std::fs::read(
         std::path::Path::new(&root)
@@ -404,14 +403,55 @@ fn task_registered_at() -> Option<String> {
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
-    let text = String::from_utf16(&units).ok()?;
-    extract_task_date(&text)
+    String::from_utf16(&units).ok()
+}
+
+/// 任务的注册时间（任务 XML 的 `<Date>`），作为「任务真的被重装过」的硬判据。
+fn task_registered_at() -> Option<String> {
+    extract_task_date(&task_xml()?)
 }
 
 fn extract_task_date(xml: &str) -> Option<String> {
     let start = xml.find("<Date>")? + "<Date>".len();
     let end = xml[start..].find("</Date>")? + start;
     Some(xml[start..end].to_string())
+}
+
+/// 任务注册的可执行文件名（`<Exec><Command>` 的最后一段路径）。
+/// **只取文件名**：完整路径是个人路径，不进日志。
+fn extract_task_command(xml: &str) -> Option<String> {
+    let start = xml.find("<Command>")? + "<Command>".len();
+    let end = xml[start..].find("</Command>")? + start;
+    let raw = xml[start..end].trim().trim_matches('"');
+    let name = raw.rsplit(|c| c == '\\' || c == '/').next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// 计划任务指向的助手是不是**本架构**那一份（纯函数，便于单测）。
+/// `None` = 拿不到命令：那属于"任务缺失"另一条判据，这里不表态。
+pub(crate) fn task_target_verdict(command: Option<&str>, expected: &str) -> Option<bool> {
+    Some(command?.trim().eq_ignore_ascii_case(expected))
+}
+
+/// 计划任务当前指向的助手是否与本机架构相符。
+///
+/// **为什么需要**（2026-10-07 报障人 ARM64 实测发现）：覆盖安装会保留旧版注册的计划任务，
+/// 任务目标写的是**当时那个助手**的路径。从"只有 x64"的版本升到带 arm64 载荷的版本后，
+/// ARM64 机器上的任务仍指向 `sayall-helper.exe`：启动自动拉起会去跑 x64 助手，架构闸门
+/// 会拦下它（文案清楚），但界面要等约 25 秒重试完才失败，用户会以为功能坏了。
+/// 所以启动对账先比一次：不一致就回落开关，等用户拨一次开关重建任务——重装任务要提权，
+/// 不在启动时擅自弹 UAC（与"每次开启都重新授权"的既有语义一致）。
+pub fn task_target_matches(helper_file_name: &str) -> Option<bool> {
+    // 任务不存在时 `task_installed()` 那条判据已经会处理，这里不重复表态。
+    if !task_installed() {
+        return None;
+    }
+    let xml = task_xml()?;
+    task_target_verdict(extract_task_command(&xml).as_deref(), helper_file_name)
 }
 
 /// `enabled` 来自持久化的用户意图（AppSettings.rc003_capture_enabled），
@@ -503,6 +543,47 @@ mod tests {
             Some("2026-09-24T20:27:20".to_string())
         );
         assert_eq!(extract_task_date("<Task></Task>"), None);
+    }
+
+    #[test]
+    fn extracts_task_command_file_name_without_paths() {
+        // 真实任务 XML 的形态：<Command> 是完整路径（可能带引号），参数在 <Arguments> 里。
+        // 这里只允许取文件名——完整路径是个人路径，不能进日志。
+        let xml = r#"<?xml version="1.0"?><Task><Actions><Exec>
+            <Command>"C:\Users\someone\AppData\Local\无线麦 SayAll\sayall-helper.exe"</Command>
+            <Arguments>--follow-app</Arguments></Exec></Actions></Task>"#;
+        assert_eq!(
+            extract_task_command(xml).as_deref(),
+            Some("sayall-helper.exe")
+        );
+        // 不带引号 / 正斜杠 / 尾随空白都要能吃下
+        assert_eq!(
+            extract_task_command("<Command>C:/x/sayall-helper-arm64.exe </Command>").as_deref(),
+            Some("sayall-helper-arm64.exe")
+        );
+        // 没有 <Command> 或值为空 → None（交给"任务缺失"那条判据）
+        assert_eq!(extract_task_command("<Task></Task>"), None);
+        assert_eq!(extract_task_command("<Command>   </Command>"), None);
+    }
+
+    #[test]
+    fn task_target_verdict_flags_the_other_arch_helper() {
+        // 2026-10-07 报障人现场：ARM64 机器上任务仍指向 x64 助手（覆盖安装保留了旧任务）
+        assert_eq!(
+            task_target_verdict(Some("sayall-helper.exe"), "sayall-helper-arm64.exe"),
+            Some(false)
+        );
+        assert_eq!(
+            task_target_verdict(Some("sayall-helper-arm64.exe"), "sayall-helper-arm64.exe"),
+            Some(true)
+        );
+        // Windows 路径大小写不敏感
+        assert_eq!(
+            task_target_verdict(Some("SAYALL-HELPER-ARM64.EXE"), "sayall-helper-arm64.exe"),
+            Some(true)
+        );
+        // 拿不到命令 → 不表态
+        assert_eq!(task_target_verdict(None, "sayall-helper.exe"), None);
     }
 
     #[test]
