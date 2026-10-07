@@ -51,9 +51,17 @@ makensis 只警告然后把字面量留下，实际会去删相对路径。探�
 - 钩子：`makensis -INPUTCHARSET UTF8` 探针编译 `passed`（0 警告）；
   `cargo test -p sayall-windows-app --lib installer_` 10 passed（含既有契约断言）。
 - 脚本：`test-windows-silent-install.ps1` PowerShell 解析通过。
-- **`deferred`**：提权清理那一支（`ExecShell "runas"` + 被占用文件的"重启后删除"）需要真实非提权
-  管理员账户 + 已跑过助手的机器才能复现与验证；CI runner 是提权账户，只能覆盖非提权删除与
-  `Run` 值两条。建议在本机跑一次"装 → 开全按键支持 → 卸载"，确认目录消失、必要时 UAC 弹窗出现。
+- CI（run 37633120610，sha `17756c0`）：`verify` 16m27s **success**；
+  `Verify Windows installer lifecycle` 9m32s **success**，其中静默安装/卸载步骤输出
+  `Leftovers removed: run-at-login entry, RC003 runtime directory`
+  —— 该行只在两条断言都通过后才打印（`Run` 值仍在即 `throw`，运行时目录仍在即 `throw`），
+  夹具在卸载前由脚本人为造出（`Run` 值指向已装 exe + 运行时目录里的 `session.token`
+  与 `gen-ci-fixture/frida-gadget.dll`），因此这是**真实装/卸上的断言通过**，不是空断言。
+- **`deferred`**：提权清理那一支（`ExecShell "runas"` + 被占用文件的"重启后删除"）需要真实**非提权**
+  管理员账户 + 已跑过助手的机器才能复现与验证。CI runner 用提权账户、夹具也由同一账户创建，
+  所以它覆盖的是"非提权删除能成功"与 `Run` 值两条，**覆盖不到**原始场景里
+  「提权助手建的 ACL 拒绝普通用户删除已有文件」。请在本机跑一次"装 → 开全按键支持 → 卸载"，
+  确认目录消失、必要时出现一次 Windows 授权窗口。
 
 ## 隐私检查
 

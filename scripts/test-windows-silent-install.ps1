@@ -221,6 +221,7 @@ try {
 - HKCU uninstall entry and one Start Menu shortcut: passed
 - installed process alive for 8 seconds: passed
 - `/S` uninstall removed app files, shortcut and uninstall entry: passed
+- `HKCU\...\Run` 的 `SayAll` 与 `%PROGRAMDATA%\SayAll\rc003-helper` 同时清除: passed
 - `%APPDATA%\\$($config.identifier)` marker retained: passed
 
 This does not validate visible UI rendering, SmartScreen, Windows 10 1809, real hardware, or a signed public installer.
