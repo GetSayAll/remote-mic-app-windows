@@ -158,6 +158,20 @@ try {
     $utf8WithoutBom = [Text.UTF8Encoding]::new($false)
     [IO.File]::WriteAllText($preservationMarker, "CI uninstall preservation marker`n", $utf8WithoutBom)
 
+    # 卸载残留断言的前置（2026-10-07）：把两类"应用/助手在运行时才会产生"的状态人为造出来——
+    # 否则 CI 里它们从来不存在，断言就是空断言。
+    # ① 登录自启动项（用户在设置里开过开关就会有；卸载必须删掉它）；
+    # ② 运行时目录（助手写的；这里以普通权限造，覆盖"非提权卸载器也要清"的那一支——
+    #    真机上它由提权助手创建、ACL 更严，那条提权分支由 installer-hooks 的 runas 路径覆盖）。
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    New-Item -Path $runKey -Force | Out-Null
+    Set-ItemProperty -Path $runKey -Name "SayAll" -Value "`"$appExecutable`""
+    $runtimeDirectory = Join-Path $env:PROGRAMDATA "SayAll\rc003-helper"
+    $runtimeGeneration = Join-Path $runtimeDirectory "gen-ci-fixture"
+    New-Item -ItemType Directory -Force -Path $runtimeGeneration | Out-Null
+    [IO.File]::WriteAllText((Join-Path $runtimeDirectory "session.token"), "ci-fixture`n", $utf8WithoutBom)
+    [IO.File]::WriteAllText((Join-Path $runtimeGeneration "frida-gadget.dll"), "ci-fixture`n", $utf8WithoutBom)
+
     $appProcess = Start-Process -FilePath $appExecutable -PassThru
     Start-Sleep -Seconds 8
     $appProcess.Refresh()
@@ -186,11 +200,19 @@ try {
     if (-not (Test-Path -LiteralPath $preservationMarker -PathType Leaf)) {
         throw "Silent uninstall unexpectedly removed the SayAll app-config marker"
     }
+    # 卸载残留（2026-10-07）：启动项必须删掉，运行时目录必须清空。
+    if ($null -ne (Get-ItemProperty -Path $runKey -Name "SayAll" -ErrorAction SilentlyContinue)) {
+        throw "SayAll run-at-login entry remains after silent uninstall"
+    }
+    if (Test-Path -LiteralPath $runtimeDirectory) {
+        throw "SayAll RC003 runtime directory remains after silent uninstall: $runtimeDirectory"
+    }
 
     Write-Host "Verified silent current-user install and uninstall: $($installers[0].Name)"
     Write-Host "Install location: $installLocation"
     Write-Host "Launch smoke test: process remained alive for 8 seconds"
     Write-Host "App config retained: $appConfigDirectory"
+    Write-Host "Leftovers removed: run-at-login entry, RC003 runtime directory"
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         @"
 ### Windows NSIS lifecycle

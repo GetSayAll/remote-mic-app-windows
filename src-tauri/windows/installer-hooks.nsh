@@ -463,8 +463,73 @@
 !macro NSIS_HOOK_PREUNINSTALL
   ; 卸载同样不得强杀正在连接的应用（AGENTS.md 同一条规则）。
   !insertmacro SayAllRequestGracefulExit uninstall
+
+  ; ── 卸载清理标记：必须在停助手**之前**写 ────────────────────────────
+  ; 运行时目录（%PROGRAMDATA%\SayAll\rc003-helper）是提权进程建的：ACL 只给普通用户
+  ; 「读 + 在目录内新建」，不给删已有文件，所以非提权的卸载器删不掉它
+  ; （2026-10-07 实测：234 MB / 11 个文件，含 Gadget 与令牌）。
+  ; 助手本身就是提权进程——先写标记，它见到停用信号时顺手把目录删干净，
+  ; 这条路径不需要再弹一次 UAC。路径与助手侧 uninstall_cleanup_signal_path() 逐字符一致。
+  CreateDirectory "$LOCALAPPDATA\SayAll"
+  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-uninstall-cleanup" w
+  FileWrite $0 "cleanup"
+  FileClose $0
+
   ; 卸载也要先停助手，再删它的文件与授权。
   !insertmacro SayAllStopHelper uninstall 1
+
+  ; ── 登录自启动项（HKCU）：卸载后不能留 ──────────────────────────────
+  ; 留着就是一个指向已删 exe 的启动项（应用只在用户关掉开关时才删它）。
+  ; HKCU 无需提权。
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SayAll"
+
+  ; ── 运行时目录兜底清理 ────────────────────────────────────────────
+  ; 助手自清过（上面那条路径）时这里已经没了，零开销跳过。
+  ; 还在的话：先做一次非提权删除（管用就免费），仍留下时——交互式卸载用 runas
+  ; 拉起安装目录里的助手做一次提权清理；静默安装在无人应答 UAC 的环境里跳过提权，
+  ; 只保留非提权尝试（CI 的静默卸载正是这一支）。
+  ;
+  ; 注意：`$PROGRAMDATA` **不是** NSIS 变量（makensis 只会警告然后把它当字面量，
+  ; 结果是去删相对路径——2026-10-07 探针编译抓到）。必须从环境变量读。
+  Push $R7
+  ReadEnvStr $R7 "ProgramData"
+  IfFileExists "$R7\SayAll\rc003-helper\*.*" 0 sayall_runtime_cleanup_tidy_uninstall
+  RMDir /r "$R7\SayAll\rc003-helper"
+  IfFileExists "$R7\SayAll\rc003-helper\*.*" 0 sayall_runtime_cleanup_tidy_uninstall
+  ${IfNot} ${Silent}
+    ; 清理与架构无关：优先 x64 那份（ARM64 上它以仿真运行），缺了再用 arm64 那份。
+    IfFileExists "$INSTDIR\sayall-helper.exe" 0 sayall_runtime_cleanup_arm64_uninstall
+    ExecShell "runas" "$INSTDIR\sayall-helper.exe" "--uninstall-cleanup"
+    Goto sayall_runtime_cleanup_wait_uninstall
+    sayall_runtime_cleanup_arm64_uninstall:
+    IfFileExists "$INSTDIR\sayall-helper-arm64.exe" 0 sayall_runtime_cleanup_tidy_uninstall
+    ExecShell "runas" "$INSTDIR\sayall-helper-arm64.exe" "--uninstall-cleanup"
+    sayall_runtime_cleanup_wait_uninstall:
+    ; ExecShell 拿不到子进程退出码，所以按"目录是否消失"等待，预算 20s（清理通常 <1s）。
+    StrCpy $R9 20000
+    sayall_runtime_cleanup_wait_loop_uninstall:
+      Sleep 250
+      IntOp $R9 $R9 - 250
+      IfFileExists "$R7\SayAll\rc003-helper\*.*" 0 sayall_runtime_cleanup_tidy_uninstall
+      ${If} $R9 > 0
+        Goto sayall_runtime_cleanup_wait_loop_uninstall
+      ${EndIf}
+  ${EndIf}
+  sayall_runtime_cleanup_tidy_uninstall:
+  ; 目录空了就把父目录也收掉（非递归，只有真的空才成功）。
+  RMDir "$R7\SayAll"
+  ; 仍剩下东西：如实告知（授权被取消，或文件被宿主占用 → 助手已把它安排在下次重启删除）。
+  IfFileExists "$R7\SayAll\rc003-helper\*.*" 0 sayall_runtime_cleanup_reported_uninstall
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONINFORMATION|MB_OK "增强捕获的运行时数据未能立即全部删除（授权被取消，或文件正被遥控器宿主占用）。已安排的部分会在下次重启后自动删除；其余文件在 $\"%ProgramData%\SayAll\rc003-helper$\" 下，可手动删除。$\r$\n$\r$\nSome RC003 runtime data could not be removed now. Files that were in use are scheduled for deletion at the next restart."
+    ${EndIf}
+  sayall_runtime_cleanup_reported_uninstall:
+  Pop $R7
+
+  ; 两个信号文件都是"投递用"的：助手在跑就被它取走（take_stop_signal 取走即删），
+  ; 没在跑就会留在这里。卸载完不该留下它们——残留的停用信号会让重装后的助手一启动就退出。
+  Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-cleanup"
+  Delete "$LOCALAPPDATA\SayAll\rc003-capture-stop"
 
   ; ── 授权不跨卸载保留（2026-09-24 产品决策）────────────────────────
   ; 卸载即撤销增强捕获的授权：删除计划任务，重装/升级后打开开关需要

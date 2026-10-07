@@ -193,6 +193,8 @@ mod imp {
         /// 注册控制台事件处理器。第二参数非零 = 追加到链尾。
         /// 返回非零表示注册成功。
         fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+        /// 删除失败时把文件安排到下次重启删除（卸载清理用；需要提权才能写待删清单）。
+        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -1546,6 +1548,9 @@ mod imp {
         /// （与 --canary-usage 同哲学），产品路径由主程序下行配置联动。
         /// `None` = 不启用（语音键保持 Windows 原生行为）。
         synth: Option<(u16, u16)>,
+        /// 卸载清理：删除运行时目录（本进程需已提权），被占用的文件安排到下次重启删除。
+        /// 由卸载器在提权后拉起；也可以由仍在运行的助手在看到卸载标记时自行执行。
+        uninstall_cleanup: bool,
     }
 
     fn parse_args() -> Result<Args, String> {
@@ -1576,6 +1581,7 @@ mod imp {
             attach_only: false,
             new_generation: false,
             synth: None,
+            uninstall_cleanup: false,
         };
 
         let mut it = std::env::args().skip(1);
@@ -1646,6 +1652,7 @@ mod imp {
                 "--force" => args.force = true,
                 "--require-exclusive-host" => args.require_exclusive_host = true,
                 "--selftest" => args.selftest = true,
+                "--uninstall-cleanup" => args.uninstall_cleanup = true,
                 "--new-token" => args.new_token = true,
                 "--attach-only" => args.attach_only = true,
                 "--new-generation" => args.new_generation = true,
@@ -1760,6 +1767,8 @@ mod imp {
   --new-token           强制换一个新令牌（**会让常驻 tap 无法接管**，见下）\n\
   --gadget <PATH>       Gadget 路径（默认与可执行文件同目录；文件名随架构：\n\
                         x64 = frida-gadget.dll，arm64 = frida-gadget-arm64.dll）\n\
+  --uninstall-cleanup   删除运行时目录后退出（需提权；删不掉的文件安排到下次重启删除）。\n\
+                        由卸载器调用；仍在运行的助手见到卸载标记也会自行执行\n\
   --runtime-dir <PATH>  运行时目录（默认 %ProgramData%\\SayAll\\rc003-helper）\n\
   --duration <SEC>      运行多少秒后自动收尾（默认 0 = 一直运行）。\n\
                         到点会打 [TIMEUP] 并发 disarm；**会话存活期间同样生效**\n\
@@ -2728,6 +2737,128 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         false
     }
 
+    /// 卸载清理标记（与停用信号同目录，`%LOCALAPPDATA%\SayAll\rc003-uninstall-cleanup`）。
+    ///
+    /// **为什么需要**：运行时目录是提权进程建的，ACL 只给普通用户读+新建、不给删已有文件，
+    /// 所以非提权的卸载器删不掉它（2026-10-07 实测：本机 234 MB / 11 个文件）。而助手本身
+    /// 就是提权进程——卸载器在停用之前写下本标记，助手见到停用信号时就顺手把目录删干净，
+    /// 这条路径**不需要再弹一次 UAC**。路径与安装器侧 `installer-hooks.nsh` 逐字符一致。
+    fn uninstall_cleanup_signal_path() -> PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+            format!("{home}\\AppData\\Local")
+        });
+        PathBuf::from(base)
+            .join("SayAll")
+            .join("rc003-uninstall-cleanup")
+    }
+
+    /// 卸载清理的逐项计数（一条日志说清结果，别让排查再去数文件）。
+    struct CleanupReport {
+        files_deleted: usize,
+        files_pending_reboot: usize,
+        dirs_deleted: usize,
+        failures: Vec<String>,
+    }
+
+    impl CleanupReport {
+        fn is_clean(&self) -> bool {
+            self.failures.is_empty()
+        }
+    }
+
+    /// 把文件安排到"下次重启删除"（`MoveFileEx` DELAY_UNTIL_REBOOT）。
+    /// 写待删清单需要提权；失败就返回 false，由调用方记成 failures。
+    fn schedule_delete_on_reboot(path: &Path) -> bool {
+        const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
+        let wide = to_wide(path.to_string_lossy().as_ref());
+        unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+    }
+
+    /// 删干净运行时目录（递归）。删不掉的文件（典型：宿主仍映射着那一代 Gadget）安排到
+    /// 下次重启删除——这不是错误，只是要等设备断开或重启才真的消失。目录空了再把父目录
+    /// `%PROGRAMDATA%\SayAll` 一并收掉：留个空壳同样算没清干净。
+    fn cleanup_runtime_dir(dir: &Path, logger: &Logger) -> CleanupReport {
+        let mut report = CleanupReport {
+            files_deleted: 0,
+            files_pending_reboot: 0,
+            dirs_deleted: 0,
+            failures: Vec::new(),
+        };
+        cleanup_dir_recursive(dir, &mut report);
+        // 目录本身也要收掉：只清空内容不算"删干净"（卸载后不留空壳）。
+        if fs::remove_dir(dir).is_ok() {
+            report.dirs_deleted += 1;
+        }
+        if let Some(parent) = dir.parent() {
+            let empty = parent
+                .read_dir()
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if empty && fs::remove_dir(parent).is_ok() {
+                report.dirs_deleted += 1;
+            }
+        }
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                ("dir", normalize_display(dir)),
+                ("files_deleted", report.files_deleted.to_string()),
+                (
+                    "files_pending_reboot",
+                    report.files_pending_reboot.to_string(),
+                ),
+                ("dirs_deleted", report.dirs_deleted.to_string()),
+                (
+                    "failures",
+                    if report.failures.is_empty() {
+                        "-".to_string()
+                    } else {
+                        report.failures.join("; ")
+                    },
+                ),
+            ],
+        );
+        report
+    }
+
+    fn cleanup_dir_recursive(dir: &Path, report: &mut CleanupReport) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                // 只记最后一段目录名：路径属个人环境，日志里不留。
+                report.failures.push(format!(
+                    "read_dir {}: {error}",
+                    dir.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                cleanup_dir_recursive(&path, report);
+                if fs::remove_dir(&path).is_ok() {
+                    report.dirs_deleted += 1;
+                }
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => report.files_deleted += 1,
+                Err(_) => {
+                    if schedule_delete_on_reboot(&path) {
+                        report.files_pending_reboot += 1;
+                    } else {
+                        report.failures.push(format!(
+                            "delete {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     /// 兜底：在 `C:\Users\*\AppData\Local\SayAll\rc003-bridge.ini` 里找**最近修改**的一份。
     ///
     /// **为什么需要**：助手以管理员身份运行。若提权时用的是**另一个账户**的凭据
@@ -3219,6 +3350,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     fn app_bridge_worker(
         path: PathBuf,
+        runtime_dir: PathBuf,
         rx: mpsc::Receiver<BridgeOutbound>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
@@ -3248,6 +3380,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             //    只在 --follow-app 下生效：手动调试运行不该被残留信号误杀。
             if follow_app && take_stop_signal(&app_stop_signal_path()) {
                 logger.line("[STOP-SIGNAL] 主程序请求停用，助手退出");
+                // 卸载场景：卸载器在停用之前写下清理标记。趁本进程还活着（而且本来就是提权的）
+                // 把运行时目录删干净——这样"功能开着的时候卸载"不需要再弹一次 UAC。
+                if take_stop_signal(&uninstall_cleanup_signal_path()) {
+                    let report = cleanup_runtime_dir(&runtime_dir, &logger);
+                    logger.line(&format!(
+                        "[CLEANUP] 卸载清理（助手自清）：删除 {} 个文件 / {} 个目录，待重启删除 {} 个，失败 {} 项",
+                        report.files_deleted,
+                        report.dirs_deleted,
+                        report.files_pending_reboot,
+                        report.failures.len()
+                    ));
+                }
                 std::process::exit(0);
             }
 
@@ -3468,6 +3612,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     fn spawn_app_bridge(
         path: Option<PathBuf>,
+        runtime_dir: PathBuf,
         logger: &Logger,
         follow_app: bool,
     ) -> Option<AppBridge> {
@@ -3499,6 +3644,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .spawn(move || {
                 app_bridge_worker(
                     path,
+                    runtime_dir,
                     rx,
                     worker_stop,
                     worker_stats,
@@ -4051,7 +4197,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // "日志停在 write_failed 就不再增长"那类事故的形状。
         // 放运行时目录里：提权进程可写，且与令牌/Gadget 同处一个地方。
         // 只对 --follow-app 生效，不改变手动运行"必须显式 --log"的既有约定。
-        if args.follow_app && args.log.is_none() {
+        if args.follow_app && args.log.is_none() && !args.uninstall_cleanup {
+            // 注意 `!args.uninstall_cleanup`：卸载清理这一趟**只能删，不能造**——
+            // 这个分支会 create_dir_all 运行时目录并写 helper-task.log，
+            // 放进清理路径里就等于"清完立刻又建回来"（2026-10-07 卸载清理实现时补的护栏）。
             let _ = std::fs::create_dir_all(&args.runtime_dir);
             args.log = Some(args.runtime_dir.join("helper-task.log"));
         }
@@ -4126,6 +4275,41 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("agent_sha256", agent_sha256_hex()),
             ],
         );
+
+        if args.uninstall_cleanup {
+            // 卸载清理：只做一件事——把运行时目录删干净。由卸载器在提权后拉起；
+            // 仍在运行的助手见到卸载标记时也会自己走这条路径（见 app_bridge_worker）。
+            if !is_elevated() {
+                logger.line("[STOP] --uninstall-cleanup 需要管理员权限（把删不掉的文件安排到重启删除需要提权）。");
+                std::process::exit(2);
+            }
+            if !args.runtime_dir.exists() {
+                logger.kv(
+                    "[CLEANUP]",
+                    &[
+                        ("dir", normalize_display(&args.runtime_dir)),
+                        ("result", "nothing_to_do".into()),
+                    ],
+                );
+                std::process::exit(0);
+            }
+            let report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+            if report.is_clean() {
+                logger.line(&format!(
+                    "[CLEANUP] 已清理运行时目录（删除 {} 个目录 / {} 个文件）",
+                    report.dirs_deleted, report.files_deleted
+                ));
+                std::process::exit(0);
+            }
+            logger.line(&format!(
+                "[CLEANUP] 部分文件未能在本次删除：待重启删除 {} 个，失败 {} 项（{}）",
+                report.files_pending_reboot,
+                report.failures.len(),
+                report.failures.join("; ")
+            ));
+            // 待重启删除也算"已安排"（退出码 0）；只有真的失败才非零。
+            std::process::exit(if report.failures.is_empty() { 0 } else { 1 });
+        }
 
         if args.selftest {
             let ok = selftest(&logger, console_state);
@@ -4471,7 +4655,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 刻意放在端口绑定之前：它只决定"边沿能不能送到主程序"，与"能不能捕获、
         // 能不能清键"完全解耦。主程序没运行时它会安静地每 2 秒重试（日志折叠成
         // 前 3 次 + 每 30 次一条），**不得**因此影响捕获链路。
-        let app_bridge = match spawn_app_bridge(args.app_bridge.clone(), &logger, args.follow_app) {
+        let app_bridge = match spawn_app_bridge(
+            args.app_bridge.clone(),
+            args.runtime_dir.clone(),
+            &logger,
+            args.follow_app,
+        ) {
             Some(bridge) => {
                 logger.kv(
                     "[APP-BRIDGE]",
@@ -5582,6 +5771,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             attach_only: false,
             new_generation: false,
             synth: None,
+            uninstall_cleanup: false,
         };
         let cfg = serde_like_config(&args);
         check(
@@ -6494,6 +6684,39 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             "停用信号：存在即取走并删除、二次读取为否",
             first && !second && !signal.exists(),
             format!("first={first} second={second}"),
+        );
+
+        // 卸载清理（2026-10-07）：标记路径必须与安装器侧逐字符一致，清理必须真的删掉一整棵目录树。
+        // 路径错一个字符 → 助手看不见标记 → 卸载器退回"提权清理"（多弹一次 UAC）；因此钉字符串。
+        check(
+            "卸载清理标记路径与安装器侧约定一致",
+            uninstall_cleanup_signal_path()
+                .ends_with(std::path::Path::new("SayAll").join("rc003-uninstall-cleanup")),
+            format!("{}", uninstall_cleanup_signal_path().display()),
+        );
+        let cleanup_root = std::env::temp_dir().join(format!(
+            "rc003-helper-cleanup-selftest-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&cleanup_root);
+        let nested = cleanup_root.join("gen-abc");
+        let _ = fs::create_dir_all(&nested);
+        let _ = fs::write(cleanup_root.join("session.token"), b"x");
+        let _ = fs::write(nested.join("frida-gadget.dll"), b"x");
+        let report = cleanup_runtime_dir(&cleanup_root, logger);
+        check(
+            "卸载清理：递归删除整个运行时目录（含世代子目录）",
+            report.files_deleted == 2
+                && report.files_pending_reboot == 0
+                && report.failures.is_empty()
+                && !cleanup_root.exists(),
+            format!(
+                "files_deleted={} dirs_deleted={} pending_reboot={} failures={}",
+                report.files_deleted,
+                report.dirs_deleted,
+                report.files_pending_reboot,
+                report.failures.len()
+            ),
         );
 
         // 控制台引导（2026-10-04）：stdout/stderr 必须可写。
