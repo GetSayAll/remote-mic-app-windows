@@ -163,6 +163,14 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   [docs/product/button-behavior.md](product/button-behavior.md) §2，方案见
   [docs/plan/2026-10-06-ok-context-click.md](plan/2026-10-06-ok-context-click.md)。
   验收见 [Testing/WindowsOkContextClick.md](../Testing/WindowsOkContextClick.md)。
+- 2026-10-07（卸载清理，Andy 要求"卸载干净"）：卸载时清理「全按键支持」留下的数据。
+  ① 需要再清一次运行时数据时**不额外解释**——由 Windows 自己弹授权窗口（文案不归我们写）；
+  ② 清不掉的兜底提示（写在 `installer-hooks.nsh`，属 §5 的安装器例外）：
+     「增强捕获的运行时数据未能立即全部删除（授权被取消，或文件正被遥控器宿主占用）。
+     已安排的部分会在下次重启后自动删除；其余文件在 `%ProgramData%\SayAll\rc003-helper` 下，可手动删除。」
+     —— 只说结果与下一步，不出现「助手 / 提权 / 注入 / 计划任务」等 §3 红线词；
+  ③ 用户数据（设置 / 按键映射 / 使用统计）**卸载后保留**，与既有口径一致。
+  审计与验证见 [Bugs/2026-10-07-uninstall-leftovers.md](../Bugs/2026-10-07-uninstall-leftovers.md)。
 - 2026-10-07（界面故障的兜底标题，Andy 定稿）：WebView2 失效后写进窗口标题的文案为
   `无线麦 SayAll 界面未能正常显示，请从托盘退出后重开`。写在 Rust（界面已停止时也要能显示，
   见 §5 例外）；写出判据是**故障后宽限期内前端心跳没有报到**，不是 `Reload` 的返回值；
