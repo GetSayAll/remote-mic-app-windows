@@ -30,6 +30,11 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # 发布路径必须带 arm64 载荷（见下方 staging / build 两步），因此本 job 也要
+          # 装 aarch64 目标供 `cargo build --target aarch64-pc-windows-msvc` 使用；
+          # 链接器由 windows-2025 镜像自带的 VS ARM64 工具集提供。
+          targets: aarch64-pc-windows-msvc
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -45,11 +50,19 @@ jobs:
           Write-Host "正式更新签名密钥已就绪"
 
       # 同 windows-ci.yml：bundle.resources 的两件文件不入库，编译期就需要它们存在。
-      - name: Stage bundle resources (helper + frida gadget)
+      # 发布路径**强制**要求 arm64 双载荷（windows-2025 镜像自带 VS ARM64 工具集）：
+      # SAYALL_REQUIRE_ARM64_PAYLOAD=1 让 arm64 缺失时 staging 非零退出，而不是静默
+      # 产出一个在 Windows 11 ARM64 上缺载荷的安装包。
+      - name: Stage bundle resources (helper + frida gadget, x64 + arm64)
+        env:
+          SAYALL_REQUIRE_ARM64_PAYLOAD: "1"
         run: node scripts/stage-bundle-inputs.cjs
 
       - name: Build signed NSIS installer
-        run: pnpm tauri build --bundles nsis
+        # arm64 覆盖配置：默认 tauri.conf.json 只声明 x64 两件（tauri-build 编译期
+        # 校验资源存在，arm64 助手在没有 VS ARM64 工具集的机器上构建不出来），
+        # 这里把 bundle.resources 覆盖成四件。--config 可重复，按 RFC 7396 顺序合并。
+        run: pnpm tauri build --bundles nsis --config src-tauri/tauri.arm64-payload.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # 密码变量缺失时 tauri build 会交互式等待输入（无 TTY 的 CI 上挂死，

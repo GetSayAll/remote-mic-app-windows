@@ -18,6 +18,7 @@ import {
   getButtonMappings,
   disableRc003Capture,
   enableRc003Capture,
+  getCaptureSupport,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   identityShortcutByButton,
@@ -46,6 +47,7 @@ import {
   type ButtonMappingSnapshot,
   type ButtonMappings,
   type ButtonTrigger,
+  type CaptureSupport,
   type CustomAppPick,
   type AppFocusProfile,
   type FiredGesture,
@@ -831,6 +833,17 @@ const TRI_KEY_CAPTURE_HINT = "返回 / 音量+ / 音量−需要开启全按键�
 const TRI_KEY_GATED_TITLE = `${TRI_KEY_CAPTURE_HINT}，开启后恢复正常`;
 
 /**
+ * 本机不可用（ARM64，2026-10-07 issue #206）时说不得「开启后恢复正常」——
+ * 这台电脑根本开不了。三句都只讲用户能懂的事：哪个开关、为什么、怎么办。
+ * 用户可见文案的规范来源是 docs/product-copy.md（§2 名称表 / §7 决定索引）。
+ */
+const CAPTURE_UNSUPPORTED_TITLE =
+  "全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。";
+const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持全按键支持，其他按键不受影响。";
+const TRI_KEY_UNSUPPORTED_TITLE =
+  "返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。";
+
+/**
  * 编辑器提示（信息性）：Home/TV 已落地"遥控器优先"（2026-09-07 方案 C）——
  * 已配置映射且遥控器连接期间原生按键被接管，任意按压（含闲置后首次）严格
  * 单响应；确定/方向的同键映射仍由泄漏对冲保证单响应，其余配置冷首按附带
@@ -878,11 +891,16 @@ const capabilityNote = computed<string | null>(() => {
  * 全按键支持开关的悬停提示（2026-09-28 Andy 定稿）：随开关状态切换两句。
  * 状态未就绪（null）按关闭态口径显示——占位符阶段开关本体都不存在，
  * 真正可悬停时对账大概率已落地。
+ *
+ * 2026-10-07 增补：本机不可用（ARM64）时固定为不可用口径——因为本机开不了，
+ * 「开启后支持使用…」这句在这类机器上是谎话。
  */
 const captureSwitchTitle = computed(() =>
-  rc003CaptureEnabled.value === true
-    ? "关闭后返回 / 音量+ / 音量−将不可映射"
-    : "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化",
+  captureUnsupported.value
+    ? CAPTURE_UNSUPPORTED_TITLE
+    : rc003CaptureEnabled.value === true
+      ? "关闭后返回 / 音量+ / 音量−将不可映射"
+      : "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化",
 );
 
 let saveQueue: Promise<void> = Promise.resolve();
@@ -1371,18 +1389,36 @@ const rc003BridgeTone = computed(() => {
 });
 
 /**
+ * 「全按键支持」在本机是否可用（2026-10-07 issue #206，Windows 11 ARM64）。
+ *
+ * `null` = 尚未读到（首帧、或对账失败）：按可用处理——宁可暂时给出可点的开关，
+ * 也不因一次 IPC 失败把功能锁死；真不可用时后端启动即把开启意图回落为关闭，
+ * 开关也不会显示成开启。
+ */
+const captureSupport = ref<CaptureSupport | null>(null);
+const captureUnsupported = computed(() => captureSupport.value?.available === false);
+/** 三键卡片/格子的置灰提示：本机开不了时不说「开启后恢复正常」。 */
+const triKeyGatedTitle = computed(() =>
+  captureUnsupported.value ? TRI_KEY_UNSUPPORTED_TITLE : TRI_KEY_GATED_TITLE,
+);
+
+/**
  * 返回/音量± 在「全按键支持」关闭时不可用：卡片置灰禁用并给悬停提示
  * （2026-10-03 Andy 定稿：置灰禁用 +「…需要开启全按键支持才能使用，开启后恢复正常」）。
  * 状态未就绪（null）按关闭态处理——与开关悬停提示、能力说明同一口径；开启后
  * 卡片与命中路径立即恢复（响应式，无需重进页面）。
  * 注意：不能只靠模板的 disabled 属性——合成事件会绕过原生 disabled，动作函数
  * （selectButton/openEditor）必须同样自守。
+ *
+ * 2026-10-07 增补：本机不可用（ARM64）时无条件置灰——开关这时也点不动，
+ * 「开启后恢复正常」不成立（issue #206）。
  */
 function captureGated(button: RemoteButton): boolean {
-  return (
-    rc003CaptureEnabled.value !== true &&
-    (button === "back" || button === "volume_up" || button === "volume_down")
-  );
+  const isThreeKey =
+    button === "back" || button === "volume_up" || button === "volume_down";
+  if (!isThreeKey) return false;
+  if (captureUnsupported.value) return true;
+  return rc003CaptureEnabled.value !== true;
 }
 
 // 开启成功但桥接段异步失败（助手起不来等）：开关已是开启态、不会再走
@@ -1417,6 +1453,10 @@ watch([rc003CaptureEnabled, rc003BridgePhase], ([enabled, phase]) => {
  */
 let rc003FirstReconcile = true;
 const reconcileRc003Task = async (): Promise<void> => {
+  // 本机支持情况单独取、单独兜（2026-10-07 issue #206）：读不到就保持上一次的
+  // 值，不因为一次 IPC 失败把开关锁成不可用。开销是一次内存读，随既有轮询刷新。
+  const support = await getCaptureSupport().catch(() => null);
+  if (support) captureSupport.value = support;
   try {
     const [task, bridge] = await Promise.all([
       getRc003TaskStatus(),
@@ -1461,6 +1501,12 @@ function syncCaptureSwitchDom(): void {
 
 async function toggleRc003Capture() {
   if (rc003CaptureBusy.value) return;
+  // 本机不可用（ARM64，issue #206）：开关已置灰，这里再守一道——合成事件与
+  // 键盘操作都可能绕过原生 disabled。不弹确认、不动 IPC，把 DOM 写回绑定值。
+  if (captureUnsupported.value) {
+    syncCaptureSwitchDom();
+    return;
+  }
   // 开启方向：**每次都先弹确认**（2026-10-03 Andy 定稿）——每次开启都要重新
   // 授权：IPC 里的 enable 会重新注册任务并弹一次 Windows 授权窗口，弹窗文案
   // 与之逐句对齐（「每次开启都会弹出 Windows 授权窗口」）。
@@ -1683,7 +1729,8 @@ onUnmounted(() => {
                下方画布整体顶下去（页面抖动），胶囊底色+状态光晕也把标题区染了色
                （2026-09-28 Andy 报告）。 -->
           <!-- 悬停提示随开关状态切换（2026-09-28 Andy 定稿）：关闭态指向
-               「开启后支持使用…」，开启态指向「关闭后…将不可映射」。 -->
+               「开启后支持使用…」，开启态指向「关闭后…将不可映射」；本机不可用
+               （ARM64，issue #206）时固定为不可用口径。 -->
           <label
             class="toggle-row"
             :title="captureSwitchTitle"
@@ -1703,19 +1750,25 @@ onUnmounted(() => {
               type="checkbox"
               class="toggle-input"
               :checked="rc003CaptureEnabled === true"
-              :disabled="rc003CaptureBusy"
+              :disabled="rc003CaptureBusy || captureUnsupported"
               @change="toggleRc003Capture"
             />
             <!-- 状态圆点只在开关**打开**时出现（2026-09-28 Andy 要求），颜色随
                  桥接相位变化：绿=助手已连接、黄=启动中/未知、红=开启失败；
-                 关闭时不占位，避免"关着还亮个点"读成已启用。 -->
+                 关闭时不占位，避免"关着还亮个点"读成已启用。
+                 本机不可用时即使读到开启意图也不画点：桥接恒为 stopped，
+                 这里画得出来的只有"还在等"那一句（2026-10-07 issue #206）。 -->
             <span
-              v-if="rc003CaptureEnabled === true"
+              v-if="rc003CaptureEnabled === true && !captureUnsupported"
               class="status-dot"
               :class="rc003BridgeTone"
               :title="rc003BridgeText ?? '全按键支持已开启'"
             ></span>
           </label>
+          <!-- 本机不可用（ARM64，issue #206）：开关旁一句短说明，说结果不说机制。 -->
+          <span v-if="captureUnsupported" class="capture-unavailable-note">
+            {{ CAPTURE_UNSUPPORTED_NOTE }}
+          </span>
         </div>
         <p class="page-subtitle">点击按键进行自定义配置</p>
       </div>
@@ -1809,7 +1862,7 @@ onUnmounted(() => {
           'is-locked': captureGated(placement.button),
         }"
         :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
-        :title="captureGated(placement.button) ? TRI_KEY_GATED_TITLE : undefined"
+        :title="captureGated(placement.button) ? triKeyGatedTitle : undefined"
         :aria-disabled="captureGated(placement.button) || undefined"
         @click="selectButton(placement.button)"
       >
@@ -1842,7 +1895,7 @@ onUnmounted(() => {
             :disabled="captureGated(placement.button)"
             :title="
               captureGated(placement.button)
-                ? TRI_KEY_GATED_TITLE
+                ? triKeyGatedTitle
                 : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
             "
             @click.stop="openEditor(placement.button, trigger)"

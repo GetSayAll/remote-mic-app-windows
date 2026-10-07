@@ -703,6 +703,31 @@ async fn get_rc003_task_status(
         .map_err(|error| format!("读取 RC003 任务状态失败：{error}"))
 }
 
+/// 全按键支持在本机的可用性：原生架构（x64 / arm64）与对应载荷是否存在。
+///
+/// 界面据此在"本机根本用不了"时置灰开关并说明原因，而不是让用户打开后永远停在
+/// 「正在启动」（Issue #206：ARM64 上的 x64 助手必然注入失败）。
+///
+/// 仿真构建恒返回"可用"：仿真跑在开发机 / CI 上，那里未必有助手的 release 产物，
+/// 若按真实探测置灰，会把既有的全按键支持界面回归流程一起锁死。可用性判定本身
+/// （两种不可用原因）由 `rc003_task` 的纯函数单测覆盖。
+#[tauri::command]
+fn get_capture_support() -> rc003_task::CaptureSupport {
+    #[cfg(feature = "runtime-simulation")]
+    {
+        rc003_task::CaptureSupport {
+            native_arch: "x64".to_string(),
+            helper_expected: "sayall-helper.exe".to_string(),
+            available: true,
+            reason: None,
+        }
+    }
+    #[cfg(not(feature = "runtime-simulation"))]
+    {
+        rc003_task::capture_support()
+    }
+}
+
 /// 助手经计划任务拉起时会在用户会话里短暂创建窗口（旧版：控制台黑框），
 /// 这个创建动作会把前台焦点从主程序抢走——窗口随即消失，焦点落在「无」上，
 /// 用户感觉"程序没反应了"。延迟把焦点还给主窗口即可；延迟要留足助手启动时间。
@@ -939,6 +964,19 @@ fn classify_auto_trigger(snapshot: &BridgeSnapshot) -> AutoTriggerCheck {
 fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: SettingsStore) {
     const MAX_AUTO_TRIGGER_ATTEMPTS: u32 = 4;
     const AUTO_TRIGGER_RETRY_MS: u64 = 5_000;
+    // 本机没有对应架构的载荷时，重试 5 次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
+    // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会又转 25 秒空转。
+    let support = rc003_task::capture_support();
+    if !support.available {
+        sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=skipped \
+             reason={} native_arch={} helper_expected={} retryable=false",
+            support.reason.as_deref().unwrap_or("unavailable"),
+            support.native_arch,
+            support.helper_expected
+        ));
+        return;
+    }
     sayall_windows::gatt_note(
         "rc003 feature=enhanced-capture action=auto_trigger phase=started reason=app_startup"
             .to_owned(),
@@ -2336,9 +2374,10 @@ pub fn run() {
         },
     );
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=1 process_architecture={} windows_version=unknown windows_build=unknown",
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=1 process_architecture={} native_arch={} windows_version=unknown windows_build=unknown",
         if log_ready { "passed" } else { "failed" },
-        std::env::consts::ARCH
+        std::env::consts::ARCH,
+        sayall_windows::os_arch::native_arch()
     ));
     #[cfg(windows)]
     if let Err(error) = sayall_windows::compatibility::check_current_windows() {
@@ -2513,7 +2552,31 @@ pub fn run() {
             let rc003_auto_trigger_allowed = if saved_settings.rc003_capture_enabled {
                 let reauth_required = rc003_task::reauth_required();
                 let task_installed = rc003_task::task_installed();
-                if reauth_required || !task_installed {
+                // 架构 / 载荷前置：本机原生架构没有对应的助手与 Gadget 时，打开开关也永远
+                // 连不上（Issue #206：x64 助手对 ARM64 宿主）。先回落为关闭并落一条可分流
+                // 的日志，不做任何重试——界面据 get_capture_support 说明原因。
+                let support = rc003_task::capture_support();
+                if !support.available {
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} native_arch={} helper_expected={}",
+                        support.reason.as_deref().unwrap_or("unavailable"),
+                        support.native_arch,
+                        support.helper_expected
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    false
+                } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
+                    // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
+                    // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
+                    // 但界面要空转约 25 秒才失败。这里回落开关，等用户拨一次开关重建任务——
+                    // 重装任务要提权，不在启动时擅自弹 UAC（与"每次开启都重新授权"同源）。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason=task_target_mismatch expected_helper={}",
+                        support.helper_expected
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    false
+                } else if reauth_required || !task_installed {
                     // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
                     // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验
                     // 复盘的取证盲区）。reason 只陈述两个探针能支撑的结论。
@@ -2786,6 +2849,7 @@ pub fn run() {
         get_raw_input_snapshot,
         get_rc003_bridge_snapshot,
         get_rc003_task_status,
+        get_capture_support,
         enable_rc003_capture,
         disable_rc003_capture,
         start_raw_input,
@@ -2848,6 +2912,7 @@ pub fn run() {
         get_raw_input_snapshot,
         get_rc003_bridge_snapshot,
         get_rc003_task_status,
+        get_capture_support,
         enable_rc003_capture,
         disable_rc003_capture,
         start_raw_input,

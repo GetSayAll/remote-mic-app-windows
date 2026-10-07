@@ -121,6 +121,14 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     // 遥控器信息卡片上的「重新连接」：扫描已配对设备 + 连接（默认空列表，用例内按需覆盖）。
     scanPairedRemotes: vi.fn(async () => []),
     connectRemote: vi.fn(async () => runtime.platform.connection),
+    // 本机对「全按键支持」的支持情况：默认可用（x64 真机 / 受支持的平台），
+    // 不可用的分支由「全按键支持在本机不可用（issue #206）」用例覆盖。
+    getCaptureSupport: vi.fn(async () => ({
+      nativeArch: "x64" as const,
+      helperExpected: "sayall-helper.exe",
+      available: true,
+      reason: null,
+    })),
   };
 });
 
@@ -128,6 +136,7 @@ import {
   connectRemote,
   exportButtonMappingConfiguration,
   getButtonMappings,
+  getCaptureSupport,
   enableRc003Capture,
   disableRc003Capture,
   getRc003BridgeSnapshot,
@@ -141,7 +150,13 @@ import {
   startShortcutCapture,
   stopShortcutCapture,
 } from "../lib/bridge";
-import type { ButtonMappings, PairedRemote, Rc003BridgeSnapshot, RuntimeSnapshot } from "../lib/bridge";
+import type {
+  ButtonMappings,
+  CaptureSupport,
+  PairedRemote,
+  Rc003BridgeSnapshot,
+  RuntimeSnapshot,
+} from "../lib/bridge";
 
 const runtime: RuntimeSnapshot = {
   appVersion: "0.1.0",
@@ -262,6 +277,8 @@ beforeEach(() => {
   });
   // 桥接快照同样要重置实现（mockClear 不清实现，见上）。
   vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("stopped"));
+  // 「全按键支持」的支持情况同样要重置（默认可用，回归基线）。
+  vi.mocked(getCaptureSupport).mockResolvedValue(SUPPORTED_CAPTURE);
   // 「重新连接」用的扫描/连接：同样重置实现，避免 mockRejectedValue / 空实现渗进后续用例。
   vi.mocked(scanPairedRemotes).mockReset();
   vi.mocked(scanPairedRemotes).mockResolvedValue([]);
@@ -306,6 +323,31 @@ const TRI_KEY_GATED_TITLE = `${TRI_KEY_HINT}，开启后恢复正常`;
 const CAPTURE_SWITCH_OFF_TITLE =
   "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化";
 const CAPTURE_SWITCH_ON_TITLE = "关闭后返回 / 音量+ / 音量−将不可映射";
+
+/** 本机支持「全按键支持」（x64 等受支持平台）：回归基线。 */
+const SUPPORTED_CAPTURE: CaptureSupport = {
+  nativeArch: "x64",
+  helperExpected: "sayall-helper.exe",
+  available: true,
+  reason: null,
+};
+
+/** 本机不支持（Windows 11 ARM64，issue #206）：界面必须置灰并说明原因。 */
+const UNSUPPORTED_CAPTURE: CaptureSupport = {
+  nativeArch: "arm64",
+  helperExpected: "sayall-helper-arm64.exe",
+  available: false,
+  reason: "arch_unsupported",
+};
+
+/** 2026-10-07 定稿：本机不可用时的开关悬停提示（原因 + 恢复方式）。 */
+const CAPTURE_UNSUPPORTED_TITLE =
+  "全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。";
+/** 2026-10-07 定稿：开关旁的短说明（≤ 40 字）。 */
+const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持全按键支持，其他按键不受影响。";
+/** 2026-10-07 定稿：三键卡片/格子的不可用悬停提示（不写「开启后恢复正常」）。 */
+const TRI_KEY_UNSUPPORTED_TITLE =
+  "返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。";
 
 /** 三键捕获开启前的确认弹窗（未弹出时为 undefined）。 */
 function confirmDialog(page: VueWrapper) {
@@ -2053,6 +2095,147 @@ describe("按键页头部：副标题与遥控器信息卡片（2026-10-04）", 
     });
     expect(vi.mocked(connectRemote)).not.toHaveBeenCalled();
     expect((page.find(".remote-info-card button").element as HTMLButtonElement).disabled).toBe(false);
+    page.unmount();
+  });
+});
+
+/**
+ * 「全按键支持」在本机不可用（2026-10-07 issue #206，Windows 11 ARM64）。
+ *
+ * 现场形状：开关打开后界面永久停在「全按键支持已开启，正在启动」。因此本组
+ * 用例同时钉住两件事——置灰（开关 + 三键卡片）与「不再有永久等待文案」，
+ * 且可用平台上（available=true）行为一字不变。
+ */
+describe("全按键支持在本机不可用（issue #206）", () => {
+  /** 开关旁不可用说明（短说明）：位于标题行内、开关标签之后。 */
+  function unavailableNote(page: VueWrapper) {
+    return page.find(".capture-unavailable-note");
+  }
+
+  it("开关置灰并给出原因与恢复方式，页面不再出现「正在启动」", async () => {
+    // 故意给报障现场的形状（持久化意图仍为开启、桥接相位停在 listening）：
+    // 后端已把开启意图回落为关闭，界面也必须自己守住这一口径——否则后端未及
+    // 回落或缓存先落地时，又会渲染出「全按键支持已开启，正在启动」。
+    vi.mocked(getCaptureSupport).mockResolvedValue(UNSUPPORTED_CAPTURE);
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("listening"));
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const row = captureRow(page)!;
+    const checkbox = row.find('input[type="checkbox"]');
+    expect((checkbox.element as HTMLInputElement).disabled, "不可用时开关必须置灰").toBe(true);
+    expect(row.attributes("title"), "开关悬停提示指向原因与恢复方式").toBe(
+      CAPTURE_UNSUPPORTED_TITLE,
+    );
+    // 状态点（含它的悬停文案）在不可用时不出现：没有任何「正在启动」。
+    expect(row.find(".status-dot").exists()).toBe(false);
+    expect(row.html()).not.toContain("正在启动");
+    expect(page.html()).not.toContain("全按键支持已开启");
+
+    // 合成事件会绕过原生 disabled：动作入口必须自守，不弹确认、不动 IPC。
+    await checkbox.trigger("change");
+    await flushPromises();
+    expect(confirmDialog(page)).toBeUndefined();
+    expect(vi.mocked(enableRc003Capture)).not.toHaveBeenCalled();
+    expect(vi.mocked(disableRc003Capture)).not.toHaveBeenCalled();
+
+    // 开关旁一句短说明（≤ 40 字）。
+    const note = unavailableNote(page);
+    expect(note.exists(), "不可用时必须就地说明").toBe(true);
+    expect(note.text()).toContain(CAPTURE_UNSUPPORTED_NOTE);
+    page.unmount();
+  });
+
+  it("三键卡片与格子置灰，悬停提示说清原因（不再写「开启后恢复正常」）", async () => {
+    vi.mocked(getCaptureSupport).mockResolvedValue(UNSUPPORTED_CAPTURE);
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const backCard = page
+      .findAll(".mapping-card")
+      .find((card) => card.find(".mapping-card-title strong").text() === "返回")!;
+    expect(backCard.classes()).toContain("is-locked");
+    expect(backCard.attributes("title")).toBe(TRI_KEY_UNSUPPORTED_TITLE);
+    expect(backCard.attributes("title")).not.toContain("开启后恢复正常");
+    expect(backCard.attributes("title")).not.toContain("需要全按键支持才能使用");
+    const backCell = backCard.findAll(".mapping-cell")[0]!;
+    expect((backCell.element as HTMLButtonElement).disabled).toBe(true);
+    expect(backCell.attributes("title")).toBe(TRI_KEY_UNSUPPORTED_TITLE);
+    await backCell.trigger("click");
+    expect(page.find(".mapping-editor").exists()).toBe(false);
+
+    const volumeCard = page
+      .findAll(".mapping-card")
+      .find((card) => card.find(".mapping-card-title strong").text().includes("音量"))!;
+    expect(volumeCard.classes()).toContain("is-locked");
+    expect(volumeCard.attributes("title")).toBe(TRI_KEY_UNSUPPORTED_TITLE);
+
+    // 其余按键不受影响（短说明里的「其他按键不受影响」必须是真的）。
+    const powerCard = page
+      .findAll(".mapping-card")
+      .find((card) => card.find(".mapping-card-title strong").text() === "电源")!;
+    expect(powerCard.classes()).not.toContain("is-locked");
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    expect(page.find(".mapping-editor").exists()).toBe(true);
+    page.unmount();
+  });
+
+  it("available=true 时行为不变：开关可点、三键仍走「开启后恢复正常」口径", async () => {
+    vi.mocked(getCaptureSupport).mockResolvedValue(SUPPORTED_CAPTURE);
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const row = captureRow(page)!;
+    expect((row.find('input[type="checkbox"]').element as HTMLInputElement).disabled).toBe(
+      false,
+    );
+    expect(row.attributes("title")).toBe(CAPTURE_SWITCH_OFF_TITLE);
+    expect(unavailableNote(page).exists()).toBe(false);
+
+    const backCard = page
+      .findAll(".mapping-card")
+      .find((card) => card.find(".mapping-card-title strong").text() === "返回")!;
+    expect(backCard.classes()).toContain("is-locked");
+    expect(backCard.attributes("title")).toBe(TRI_KEY_GATED_TITLE);
+    page.unmount();
+  });
+
+  it("available=true 且开关开启时状态点照常出现（不误伤 x64 平台）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("listening"));
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const dot = captureRow(page)!.find(".status-dot");
+    expect(dot.exists()).toBe(true);
+    expect(dot.attributes("title")).toContain("正在启动");
+    expect(unavailableNote(page).exists()).toBe(false);
+    page.unmount();
+  });
+
+  it("支持情况读不到（IPC 失败）时不置灰：不因一次失败把功能锁死", async () => {
+    vi.mocked(getCaptureSupport).mockRejectedValue(new Error("ipc unavailable"));
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const row = captureRow(page)!;
+    expect((row.find('input[type="checkbox"]').element as HTMLInputElement).disabled).toBe(
+      false,
+    );
+    expect(unavailableNote(page).exists()).toBe(false);
     page.unmount();
   });
 });

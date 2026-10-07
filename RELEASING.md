@@ -24,6 +24,47 @@
 - Preview 的 CI 未签名 NSIS artifact 只能用于受限验收，不能宣称为公开可信安装包；公开分发需同时满足 Authenticode（若流程已启用）、updater minisign 签名、SHA-256 和来源元数据要求。
 - Tag、Release Notes、资产和 `latest.json` 建立后视为不可变。内容变化回到普通 PR，使用新版本/Build；不得覆盖旧 Tag 或资产。
 
+## 双载荷：x64 + arm64（2026-10-07 issue206）
+
+- **交付形态不变**：主程序、安装器和更新通道仍是 **x64 单包单通道**；变的是安装包
+  同时携带**两份助手与两份 Gadget**，运行时按系统原生架构选一份：
+  - x64：`sayall-helper.exe`、`frida-gadget.dll`
+  - arm64：`sayall-helper-arm64.exe`、`frida-gadget-arm64.dll`
+  原因：Windows 11 ARM64 上"全按键支持"只能注入原生 ARM64 的 `WUDFHost.exe`，
+  x64 助手进不去（见 `docs/decisions/0003-arm64-enhanced-capture-scope.md`）。
+- **默认 `src-tauri/tauri.conf.json` 的 `bundle.resources` 必须保持只有 x64 两件**。
+  tauri-build 在**编译期**校验资源路径存在（见 `scripts/stage-bundle-inputs.cjs` 顶部
+  2026-09-27 实测记录），而 arm64 助手要链接成 `aarch64-pc-windows-msvc` 就需要 VS 的
+  `Microsoft.VisualStudio.Component.VC.Tools.ARM64` —— 本机与部分环境没有它。写进默认
+  配置会让任何 `cargo check` / `cargo test` 直接失败，破坏全仓库日常验证回路。
+- **arm64 走覆盖式声明**：只有 arm64 两件真的暂存到 `src-tauri/` 之后，出包/CI 才追加
+  `--config src-tauri/tauri.arm64-payload.conf.json`（把 `bundle.resources` 覆盖成四件）。
+  tauri 的 `--config` **可重复**，按 RFC 7396 顺序合并、数组整体覆盖（2026-10-07 用
+  tauri-cli 2.11.4 实测：两个 `--config` 都被接受，且其 `helpers/config.rs` 用
+  `json_patch::merge`），所以它可以与 `tauri.local-build.conf.json` 叠加。
+- **强制变量 `SAYALL_REQUIRE_ARM64_PAYLOAD=1`**：arm64 载荷缺失时让 staging 与落地
+  步骤**非零退出**（退出码 3），而不是打印警告后继续。发布路径（CI `installer` job）
+  必须设置它——发布不允许静默退化成单载荷包。默认不带该变量时允许跳过并打印明确
+  警告（本机缺工具集是正常情况）。
+- **工具链判据**（两条都要满足，否则视为"缺 arm64"）：`rustup target list --installed`
+  含 `aarch64-pc-windows-msvc`，且 vswhere 能查到 `Microsoft.VisualStudio.Component.VC.Tools.ARM64`
+  （注意 vswhere 查不到时**仍以 0 退出**、输出为空，判据是 stdout 非空而不是退出码）。
+  诊断命令：`node scripts/stage-bundle-inputs.cjs --check-arm64`（不构建任何东西）。
+- **CI 分工**：`verify` job 装 aarch64 目标并跑
+  `cargo check --target aarch64-pc-windows-msvc --manifest-path hardware/RC003/helper/Cargo.toml`
+  （`cargo check` 不调用链接器，因此不依赖 VS ARM64 工具集，只为让 arm64 助手的编译
+  路径在 CI 里被真实覆盖）；`installer` job 设 `SAYALL_REQUIRE_ARM64_PAYLOAD=1` 并以
+  `--config src-tauri/tauri.arm64-payload.conf.json` 出包。
+- **校验判据（集合一致）**：`scripts/verify-windows-bundle.ps1` 断言暂存集合与 arm64
+  覆盖配置声明的集合一致，且 `SAYALL_REQUIRE_ARM64_PAYLOAD=1` 时 arm64 必须真的暂存到；
+  `scripts/verify-local-test-install.ps1` 对**已暂存**的 arm64 两件做安装目录哈希对齐。
+  未暂存时两者都不得误报失败（否则 ARM64 机器上从双载荷包升级到单载荷包时会误判）。
+- **安装器钩子覆盖两个名字**：`src-tauri/windows/installer-hooks.nsh` 的进程查找、
+  映像写锁探测与升级前等待同时覆盖 `sayall-helper.exe` 与 `sayall-helper-arm64.exe`，
+  否则 ARM64 机器上正在运行的助手会被漏掉、覆盖安装撞上"无法打开要写入的文件"。
+- **边界（deferred）**：本机没有 ARM64 硬件，"ARM64 上真的能跑"必须由真机验收给出，
+  不得用 x64 主机上的构建/校验结果代替。
+
 ## 版本号唯一来源（2026-09-30 收敛）
 
 - 应用版本号**只写在** `src-tauri/tauri.conf.json` 的 `version`。安装包文件名、exe 的

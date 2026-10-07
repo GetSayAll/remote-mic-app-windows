@@ -1,6 +1,12 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AudioEndpoint, AudioSnapshot, ConnectionSnapshot, RuntimeSnapshot } from "../lib/bridge";
+import type {
+  AudioEndpoint,
+  AudioSnapshot,
+  CaptureSupport,
+  ConnectionSnapshot,
+  RuntimeSnapshot,
+} from "../lib/bridge";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import ConnectionPage from "./ConnectionPage.vue";
 
@@ -105,6 +111,22 @@ const cableEndpoint: AudioEndpoint = {
   isVirtualCableCandidate: true,
 };
 
+/** 本机支持「全按键支持」（x64 等受支持平台）：连接页回归基线。 */
+const supportedCaptureSupport = (): CaptureSupport => ({
+  nativeArch: "x64",
+  helperExpected: "sayall-helper.exe",
+  available: true,
+  reason: null,
+});
+
+/** 本机不支持（Windows 11 ARM64，issue #206）：开关必须置灰并说明原因。 */
+const unsupportedCaptureSupport = (): CaptureSupport => ({
+  nativeArch: "arm64",
+  helperExpected: "sayall-helper-arm64.exe",
+  available: false,
+  reason: "arch_unsupported",
+});
+
 const mocks = vi.hoisted(() => ({
   endpoints: [] as AudioEndpoint[],
   captureEdgeHandler: null as ShortcutCaptureHandler | null,
@@ -130,6 +152,7 @@ const mocks = vi.hoisted(() => ({
   getRc003TaskStatus: vi.fn(),
   enableRc003Capture: vi.fn(),
   disableRc003Capture: vi.fn(),
+  getCaptureSupport: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -158,6 +181,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getRc003TaskStatus: mocks.getRc003TaskStatus,
     enableRc003Capture: mocks.enableRc003Capture,
     disableRc003Capture: mocks.disableRc003Capture,
+    getCaptureSupport: mocks.getCaptureSupport,
   };
 });
 
@@ -196,6 +220,8 @@ describe("VB-CABLE first-launch guidance", () => {
       lastError: null,
     });
     mocks.startShortcutCapture.mockResolvedValue([]);
+    // 本机支持情况：默认可用；不可用分支由 issue #206 的用例覆盖。
+    mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
       async (handler: ShortcutCaptureHandler) => {
@@ -1042,6 +1068,8 @@ describe("connection page remote model", () => {
       lastError: null,
     });
     mocks.startShortcutCapture.mockResolvedValue([]);
+    // 本机支持情况：默认可用；不可用分支由 issue #206 的用例覆盖。
+    mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
       async (handler: ShortcutCaptureHandler) => {
@@ -1131,6 +1159,8 @@ describe("connection page rc003 capture switch", () => {
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.startShortcutCapture.mockResolvedValue([]);
+    // 本机支持情况：默认可用；不可用分支由 issue #206 的用例覆盖。
+    mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.subscribeShortcutCaptureEdges.mockImplementation(
       async (handler: ShortcutCaptureHandler) => {
@@ -1274,6 +1304,8 @@ describe("connection page audio gain", () => {
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.openVokieHomepage.mockResolvedValue(undefined);
     mocks.startShortcutCapture.mockResolvedValue([]);
+    // 本机支持情况：默认可用；不可用分支由 issue #206 的用例覆盖。
+    mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
     mocks.stopShortcutCapture.mockResolvedValue(undefined);
     mocks.getGainDb.mockResolvedValue(0);
     mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
@@ -1340,6 +1372,139 @@ describe("connection page audio gain", () => {
 
     expect(slider.element.value).toBe("24");
     expect(wrapper.text()).toContain("24 dB");
+    wrapper.unmount();
+  });
+});
+
+/**
+ * 「支持更多输入工具」在本机不可用（2026-10-07 issue #206，Windows 11 ARM64）：
+ * 与按键页「全按键支持」同一个设置项，必须同样置灰并说清原因与恢复方式，
+ * 文案与按键页互相一致（见 docs/product-copy.md §2 名称表与 §7 决定索引）。
+ */
+describe("connection page capture support unavailable (issue #206)", () => {
+  /** 2026-10-07 定稿：本机不可用时的开关悬停提示（原因 + 恢复方式）。 */
+  const UNSUPPORTED_TITLE =
+    "“支持更多输入工具”在这台电脑上暂不可用；新版本支持后会恢复正常。";
+  /** 2026-10-07 定稿：本机不可用时的就地说明（与按键页同一句，仅名称随本页）。 */
+  const UNSUPPORTED_NOTE = "这台电脑暂不支持“支持更多输入工具”，其他按键不受影响。";
+
+  const taskStatus = (
+    overrides: Partial<import("../lib/bridge").Rc003TaskStatus> = {},
+  ) => ({
+    installed: true,
+    authorizationRequired: false,
+    enabled: false,
+    helperPath: null,
+    lastError: null,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    // 开关只在需要它的工具面板里渲染：这里固定为豆包（要求开启）。
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+    mocks.getOtherVoiceHotkey.mockResolvedValue(null);
+    mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
+    mocks.getRc003TaskStatus.mockResolvedValue(taskStatus());
+    mocks.enableRc003Capture.mockResolvedValue(taskStatus({ enabled: true }));
+    mocks.disableRc003Capture.mockResolvedValue(taskStatus({ enabled: false }));
+    mocks.startShortcutCapture.mockResolvedValue([]);
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.subscribeShortcutCaptureEdges.mockImplementation(
+      async (handler: ShortcutCaptureHandler) => {
+        mocks.captureEdgeHandler = handler;
+        return () => {};
+      },
+    );
+    // 本机不支持：本组用例的基线。
+    mocks.getCaptureSupport.mockResolvedValue(unsupportedCaptureSupport());
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("开关置灰、状态说「暂不可用」，并给出原因与恢复方式（不再劝人开启）", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const label = wrapper.find('label[for="capture-switch-doubao"]');
+    expect(label.attributes("title"), "开关悬停提示指向原因与恢复方式").toBe(
+      UNSUPPORTED_TITLE,
+    );
+    const input = wrapper.find<HTMLInputElement>(".capture-switch");
+    expect(input.element.disabled, "不可用时开关必须置灰").toBe(true);
+    expect(wrapper.find(".switch-state").text()).toBe("暂不可用");
+    expect(wrapper.text()).toContain(UNSUPPORTED_NOTE);
+    // 不可用时不再出现「需要开启 / 还差一步」这类劝开启的文案。
+    expect(wrapper.text()).not.toContain("需要开启");
+    expect(wrapper.text()).not.toContain("还差一步");
+
+    // 合成事件会绕过原生 disabled：动作入口必须自守，不弹确认、不动 IPC。
+    input.element.checked = true;
+    await input.trigger("change");
+    await flushPromises();
+    expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
+    expect(mocks.disableRc003Capture).not.toHaveBeenCalled();
+    expect(
+      wrapper.findComponent({ name: "EnhancedCaptureConfirmDialog" }).exists(),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("「其他工具」面板的开关同样置灰并说明；说明句与豆包面板一致", async () => {
+    mocks.getVoiceInputTool.mockResolvedValue("other");
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const label = wrapper.find('label[for="capture-switch-other"]');
+    expect(label.attributes("title")).toBe(UNSUPPORTED_TITLE);
+    expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(true);
+    expect(wrapper.text()).toContain(UNSUPPORTED_NOTE);
+    expect(wrapper.text()).not.toContain("建议开启");
+    wrapper.unmount();
+  });
+
+  it("available=true 时行为不变：开关可点、状态与提示照旧", async () => {
+    mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const label = wrapper.find('label[for="capture-switch-doubao"]');
+    expect(label.attributes("title")).toBeUndefined();
+    expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(false);
+    expect(wrapper.find(".switch-state").text()).toBe("需要开启");
+    expect(wrapper.text()).toContain("还差一步");
+    expect(wrapper.text()).not.toContain(UNSUPPORTED_NOTE);
+
+    // 开启路径照旧（每次开启先弹确认）。
+    await wrapper.find(".capture-switch").setValue(true);
+    await flushPromises();
+    await wrapper
+      .findComponent({ name: "EnhancedCaptureConfirmDialog" })
+      .vm.$emit("confirm");
+    await flushPromises();
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    expect(wrapper.find(".switch-state").text()).toBe("已开启");
+    wrapper.unmount();
+  });
+
+  it("支持情况读不到（IPC 失败）时不置灰：不因一次失败把功能锁死", async () => {
+    mocks.getCaptureSupport.mockRejectedValue(new Error("ipc unavailable"));
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(false);
+    expect(wrapper.find(".switch-state").text()).toBe("需要开启");
     wrapper.unmount();
   });
 });

@@ -393,6 +393,10 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 /* 按钮文案在「重新连接 / 连接中… / 立即连接」之间切换，锁个最小宽度避免卡片左右抖。 */
 .remote-info-card button { min-width: 84px; }
 .device-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-raised); font-size: 13px; white-space: nowrap; }
+/* 不可用说明（ARM64 上的「全按键支持」，2026-10-07 issue #206）：
+   紧跟在开关标签之后，与标题行同一行（空间不足时由 flex-wrap 换行）。
+   只在平台决定不可用时渲染，不在会话内切换，因此不涉及运行时抖动。 */
+.capture-unavailable-note { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 .toggle-row { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
 .toggle-input { appearance: none; -webkit-appearance: none; width: 34px; height: 20px; border-radius: 999px; background: var(--toggle-off); position: relative; cursor: pointer; transition: background 0.15s; margin: 0; }
 .toggle-input:checked { background: var(--accent); }
