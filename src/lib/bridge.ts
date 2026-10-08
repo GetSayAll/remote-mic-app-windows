@@ -462,7 +462,7 @@ export interface AppUpdateProgress {
 const browserSnapshot: RuntimeSnapshot = {
   // 浏览器预览没有安装包可读，这里跟随当前应用版本：它是预览里"设置页版本号"
   // 与侧栏底部的唯一来源，写死旧值会让预览显示一个不存在的版本。
-  appVersion: "0.8.0",
+  appVersion: "0.8.1",
   platform: {
     platform: "browser-preview",
     windowsApiAvailable: false,
