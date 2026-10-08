@@ -762,8 +762,8 @@ mod imp {
     struct HostEntry {
         pid: u32,
         enumerator: String,
-        device: String,
-        instance: String,
+        /// 不保留设备名与实例名：它们含设备接口路径（VID/PID/REV/实例序号），属
+        /// `LOGGING.md` 隐私红线里的"HID 路径"。排错只需要 pid / 枚举器 / 是否命中 RC003。
         is_rc003: bool,
     }
 
@@ -1130,8 +1130,8 @@ mod imp {
                                 PidRead::Error(rc) => format!("注册表返回码 {rc}"),
                                 _ => format!("{other:?}"),
                             };
-                            scan.failures
-                                .push(format!("{enumerator} / {} :: {why}", mask_token(&device)));
+                            // 只报枚举器与原因：设备名/接口路径不进日志（隐私红线）。
+                            scan.failures.push(format!("{enumerator} :: {why}"));
                             continue;
                         }
                     };
@@ -1139,8 +1139,6 @@ mod imp {
                     scan.entries.push(HostEntry {
                         pid,
                         enumerator: enumerator.clone(),
-                        device: device.clone(),
-                        instance,
                         is_rc003: enumerator.eq_ignore_ascii_case("bthledevice")
                             && folded.starts_with(&HID_SERVICE_PREFIX.to_lowercase())
                             && folded.contains(RC003_HARDWARE_TOKEN),
@@ -1154,33 +1152,22 @@ mod imp {
         Ok(scan)
     }
 
-    /// 设备实例名里需要脱敏的只有蓝牙地址：紧跟在 `_` 之后的 12 位十六进制。
+    /// 宿主成员行的分类文本（纯函数，自检覆盖）。
     ///
-    /// **只用于设备实例名**。令牌等秘密不能用本函数——它对裸十六进制字符串是
-    /// **空操作**（2026-10-04 现场：`[TOKEN]` 的 value 曾误用它，明文令牌直进
-    /// 诊断日志）。令牌一律走 [`token_fingerprint`]。
-    fn mask_token(text: &str) -> String {
-        let bytes: Vec<char> = text.chars().collect();
-        let mut out = String::new();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            if bytes[i] == '_' && i + 13 <= bytes.len() {
-                let candidate: String = bytes[i + 1..i + 13].iter().collect();
-                let is_hex = candidate.chars().all(|c| c.is_ascii_hexdigit());
-                let boundary_ok = match bytes.get(i + 13) {
-                    None => true,
-                    Some(c) => !c.is_ascii_hexdigit() && *c != '-',
-                };
-                if is_hex && boundary_ok {
-                    out.push_str("_<BT-ADDR>");
-                    i += 13;
-                    continue;
-                }
-            }
-            out.push(bytes[i]);
-            i += 1;
-        }
-        out
+    /// 为什么不再打设备接口路径（2026-10-08 用户要求 + `LOGGING.md` 隐私红线）：原来这一行
+    /// 打的是 `{enumerator}\{device}\{instance}`——地址虽已脱敏，但路径本体、VID/PID/REV 与
+    /// 实例序号仍在，属"不得记录 HID 路径"。排错真正需要的是"这个宿主里有几个成员、哪个
+    /// 是我们的"，用序号 + 分类即可表达。
+    fn member_line(index: usize, enumerator: &str, is_rc003: bool) -> String {
+        format!(
+            "    [{}] index={index} enumerator={enumerator} class={}",
+            if is_rc003 { "RC003" } else { "其它" },
+            if is_rc003 {
+                "rc003_hid_service_match"
+            } else {
+                "other_device"
+            },
+        )
     }
 
     /// `[TOKEN]` 日志字段的**唯一构造点**：令牌只以指纹形式出现。
@@ -4542,14 +4529,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ),
                 ],
             );
-            for m in &members {
-                logger.line(&format!(
-                    "    [{}] {}\\{}\\{}",
-                    if m.is_rc003 { "RC003" } else { "其它" },
-                    m.enumerator,
-                    mask_token(&m.device),
-                    mask_token(&m.instance)
-                ));
+            for (index, m) in members.iter().enumerate() {
+                logger.line(&member_line(index + 1, &m.enumerator, m.is_rc003));
             }
             // 共享宿主**不再直接拒绝**（2026-09-25 产品决策：用户需要长期同时
             // 连接另一个 BLE 键鼠设备）。原来的独占前提只是为了兜住"改写别的
@@ -5807,20 +5788,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             );
         }
 
-        // 2) mask_token：只脱敏紧跟在 `_` 之后的 12 位十六进制
-        //    注意：设备实例名里的厂商段是大写（`PID&32b8`），脱敏后必须原样保留，
-        //    断言须按实际大小写写，否则会误报（此前的 FAIL 就是这个测试自身的 bug）。
-        let device =
-            "{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_A1B2C3D4E5F6";
-        let masked = mask_token(device);
+        // 2) 宿主成员行：只报序号 + 枚举器 + 分类，不带设备接口路径
+        //    （LOGGING.md 隐私红线：不得记录 HID 路径。2026-10-08 现场发现该行含
+        //    `BTHLEDevice\{…}_Dev_VID&…\…`——地址已遮，但路径本体与实例序号仍在）
+        let line = member_line(1, "BTHLEDevice", true);
+        let other = member_line(2, "USB", false);
         check(
-            "mask_token 只打掉蓝牙地址",
-            masked == "{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>"
-                && masked.ends_with("_<BT-ADDR>")
-                && masked.contains("PID&32b8")
-                && masked.contains("00805f9b34fb")
-                && !masked.contains("A1B2C3D4E5F6"),
-            masked.clone(),
+            "宿主成员行不含设备接口路径",
+            line.contains("index=1")
+                && line.contains("enumerator=BTHLEDevice")
+                && line.contains("class=rc003_hid_service_match")
+                && other.contains("class=other_device")
+                && !line.contains('\\')
+                && !line.contains("Dev_VID"),
+            format!("{line} / {other}"),
         );
 
         // 2b) 令牌日志脱敏（2026-10-04 现场回归）：`[TOKEN]` 只允许写指纹。
@@ -6392,10 +6373,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let quiet = Logger::new(None);
         let token_detail = |t1: &str, from1: bool, t2: &str, from2: bool, t3: Option<&str>| {
             format!(
-                "1st(from_file={from1})={} 2nd(from_file={from2})={} new={} 文件已更新={}",
-                mask_token(t1),
-                mask_token(t2),
-                t3.map(mask_token).unwrap_or_else(|| "-".into()),
+                "1st(from_file={from1}) fp={} 2nd(from_file={from2}) fp={} new_fp={} 文件已更新={}",
+                token_fingerprint(t1),
+                token_fingerprint(t2),
+                t3.map(token_fingerprint).unwrap_or_else(|| "-".into()),
                 t3.map(|t| fs::read_to_string(tmp.join(TOKEN_FILE))
                     .map(|s| s.trim() == t)
                     .unwrap_or(false))
