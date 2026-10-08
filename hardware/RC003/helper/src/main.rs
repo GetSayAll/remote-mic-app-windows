@@ -1872,16 +1872,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         Attach,
     }
 
-    /// 纯决策函数（自检覆盖）。`resident_token_ok` 表示"宿主里的 tap 用的是我们手上这个令牌"，
-    /// 它是**能否接管**的唯一判据；接不上就只剩"另起一代"或"人工清干净"两条路。
+    /// 纯决策函数（自检覆盖）。`token_assumed_reusable` 只表示"令牌文件在助手启动前就已存在"，
+    /// 即**假定**可复用——它证明不了"宿主里的 tap 用的就是手上这个令牌"。那只有**已鉴权握手**
+    /// 能证明（见 ATTACH_VERIFY_MS 的核验与升级注入；2026-10-08 现场教训：把"文件存在"
+    /// 当成"一致"，接管后静默跳过注入，三键与语音键全断，日志还写着"令牌一致"）。
+    /// 假定不成立时就只剩"另起一代"或"人工清干净"两条路。
     fn decide_plan(
         has_resident_tap: bool,
-        token_reusable: bool,
+        token_assumed_reusable: bool,
         attach_only: bool,
         new_generation: bool,
     ) -> Result<DllPlan, String> {
         if has_resident_tap {
-            if token_reusable {
+            if token_assumed_reusable {
                 return Ok(DllPlan::Attach);
             }
             if attach_only {
@@ -4751,7 +4754,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     "[ATTACH]",
                     &[
                         ("action", "skip_injection".into()),
-                        ("reason", "宿主里已有我们那一代 tap（令牌一致）".into()),
+                        ("reason", "宿主里已有我们那一代 tap（按可复用令牌接管；一致性由握手核验）".into()),
                         ("path", normalize_display(&prepared.dll)),
                         (
                             "note",
