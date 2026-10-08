@@ -764,13 +764,10 @@ mod imp {
         enumerator: String,
         /// **只在卸载清理时用**：对 RC003 设备做一次禁用→启用，放掉还在映射 Gadget 的
         /// 宿主进程（2026-10-08 方案 B）。存的是**完整设备实例 ID**
-        /// （`<枚举器>\<设备>\<实例>`）——只存最后一段会让 `SetupDiOpenDeviceInfoW` 打不开
-        /// 设备（2026-10-08 真机复测实证：日志 `禁用设备失败`）。**绝不进日志**——它含设备
-        /// 接口路径（VID/PID/REV/实例序号），属 `LOGGING.md` 隐私红线的"HID 路径"。
+        /// （`<枚举器>\<设备>\<实例>`）——只存最后一段会让设备枚举找不到它（2026-10-08
+        /// 真机复测实证）。**绝不进日志**——它含设备接口路径（VID/PID/REV/实例序号），
+        /// 属 `LOGGING.md` 隐私红线的"HID 路径"。
         rc003_instance_id: Option<String>,
-        /// 设备的类 GUID（`{xxxxxxxx-xxxx-…}`，来自枚举键的 `ClassGUID` 值）：
-        /// `SetupDiCreateDeviceInfoList` 需要它，传 NULL 时 `DIF_PROPERTYCHANGE` 调用不成立。
-        rc003_class_guid: Option<[u8; 16]>,
         /// 不保留设备名：它同样含设备接口路径，排错不需要它。
         is_rc003: bool,
     }
@@ -1153,12 +1150,6 @@ mod imp {
                         }
                     };
                     let is_rc003 = device_is_rc003(enumerator.as_str(), device.as_str());
-                    let class_guid = if is_rc003 {
-                        reg_read_string(device_key, "ClassGUID")
-                            .and_then(|value| parse_guid(&value))
-                    } else {
-                        None
-                    };
                     scan.entries.push(HostEntry {
                         pid,
                         enumerator: enumerator.clone(),
@@ -1167,7 +1158,6 @@ mod imp {
                         } else {
                             None
                         },
-                        rc003_class_guid: class_guid,
                         is_rc003,
                     });
                 }
@@ -2882,11 +2872,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 先查一遍已有清单：同一个路径**不重复登记**（2026-10-08 现场：一天里多次卸载/升级，
     /// 同一个 dll 在 `PendingFileRenameOperations` 里留了 8 条重复）。写待删清单需要提权；
     /// 失败就返回 false，由调用方记成 failures。
-    fn schedule_delete_on_reboot(path: &Path) -> bool {
+    fn schedule_delete_on_reboot(path: &Path, logger: &Logger) -> bool {
         const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
-        if pending_reboot_listing_contains(&pending_reboot_blob(), path) {
+        // 判重之后**把结论写进日志**（只写文件名，不写路径）：这条清单在真机上是"每轮都在长"的
+        // 重点怀疑对象，命中与否 + 读到的字节数能直接区分"读取失败"和"匹配失败"。
+        let listing = pending_reboot_blob();
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        if pending_reboot_listing_contains(&listing, path) {
+            logger.line(&format!(
+                "[CLEANUP] 待重启清单已含 {file_name}（listing_bytes={}），跳过重复登记",
+                listing.len()
+            ));
             return true;
         }
+        logger.line(&format!(
+            "[CLEANUP] 待重启清单未含 {file_name}（listing_bytes={}），登记到下次重启删除",
+            listing.len()
+        ));
         let wide = to_wide(path.to_string_lossy().as_ref());
         unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
     }
@@ -2932,11 +2934,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if rc != ERROR_SUCCESS {
             return String::new();
         }
+        multi_sz_bytes_to_string(&buf)
+    }
+
+    /// REG_MULTI_SZ 的字节 → 字符串：**整段保留**，嵌入的 `\0` 不截断。
+    ///
+    /// 为什么不能用 `from_wide`：它在第一个 `\0` 处停下，于是清单里只看得见**第一条**。
+    /// 2026-10-08 真机实证的后果——目标不在第一条时判重永远未命中，每轮卸载各多登记一条
+    /// （同一天里同一个 dll 攒到 5 条）。
+    fn multi_sz_bytes_to_string(buf: &[u8]) -> String {
         let wide: Vec<u16> = buf
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
-        from_wide(&wide)
+        String::from_utf16_lossy(&wide)
     }
 
     /// 纯判定（自检覆盖）：待删清单里是否已含这个路径。条目形如 `*1\??\C:\…`，按不区分
@@ -2977,19 +2988,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     const DICS_FLAG_GLOBAL: u32 = 0x0000_0001;
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const WAIT_OBJECT_0: u32 = 0;
+    const DIGCF_PRESENT: u32 = 0x0000_0002;
+    const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
 
     #[link(name = "setupapi")]
     extern "system" {
-        fn SetupDiCreateDeviceInfoList(
+        fn SetupDiGetClassDevsW(
             class_guid: *const c_void,
+            enumerator: *const u16,
             hwnd_parent: *mut c_void,
+            flags: u32,
         ) -> *mut c_void;
-        fn SetupDiOpenDeviceInfoW(
+        fn SetupDiEnumDeviceInfo(set: *mut c_void, index: u32, info: *mut SpDevinfoData) -> i32;
+        fn SetupDiGetDeviceInstanceIdW(
             set: *mut c_void,
-            instance_id: *const u16,
-            hwnd_parent: *mut c_void,
-            open_flags: u32,
             info: *mut SpDevinfoData,
+            instance_id: *mut u16,
+            instance_id_len: u32,
+            required_len: *mut u32,
         ) -> i32;
         fn SetupDiSetClassInstallParamsW(
             set: *mut c_void,
@@ -3018,71 +3034,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         dir.exists()
     }
 
-    /// 读一个 REG_SZ 值（读不到 / 类型不符返回 None）。只用于设备类 GUID 这类枚举信息。
-    fn reg_read_string(key: Handle, name: &str) -> Option<String> {
-        let wide_name = to_wide(name);
-        let mut kind = 0u32;
-        let mut len = 0u32;
-        let rc = unsafe {
-            RegQueryValueExW(
-                key,
-                wide_name.as_ptr(),
-                std::ptr::null_mut(),
-                &mut kind,
-                std::ptr::null_mut(),
-                &mut len,
-            )
-        };
-        // REG_SZ == 1；枚举键下取不到或类型不符都当没有。
-        if rc != ERROR_SUCCESS || len == 0 || kind != 1 {
-            return None;
-        }
-        let mut buf = vec![0u8; len as usize];
-        let rc = unsafe {
-            RegQueryValueExW(
-                key,
-                wide_name.as_ptr(),
-                std::ptr::null_mut(),
-                &mut kind,
-                buf.as_mut_ptr(),
-                &mut len,
-            )
-        };
-        if rc != ERROR_SUCCESS {
-            return None;
-        }
-        let wide: Vec<u16> = buf
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        Some(from_wide(&wide))
-    }
-
-    /// 解析注册表里的类 GUID 文本（`{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`）为 16 字节内存布局，
-    /// 供 `SetupDiCreateDeviceInfoList` 使用（纯函数，单测覆盖）。
-    fn parse_guid(text: &str) -> Option<[u8; 16]> {
-        let cleaned: String = text
-            .trim()
-            .trim_start_matches('{')
-            .trim_end_matches('}')
-            .chars()
-            .filter(|ch| *ch != '-')
-            .collect();
-        if cleaned.len() != 32 {
-            return None;
-        }
-        let mut bytes = [0u8; 16];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            let pair = cleaned.get(index * 2..index * 2 + 2)?;
-            *byte = u8::from_str_radix(pair, 16).ok()?;
-        }
-        // GUID 前三个字段在内存里是小端：按 Windows GUID 布局逐段反转。
-        bytes[0..4].reverse();
-        bytes[4..6].reverse();
-        bytes[6..8].reverse();
-        Some(bytes)
-    }
-
     /// 卸载清理专用：对遥控器设备做一次**禁用 → 启用**，放掉仍在映射 Gadget 的宿主进程；
     /// 之后再删运行时目录就不会被文件锁挡住（2026-10-08 方案 B：不把"断开遥控器"推给用户，
     /// 也不弹窗）。
@@ -3095,48 +3046,68 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// - 任何一步失败都只返回 false，不 panic、不打断卸载。
     /// - 只在这轮清理**确有删不掉的文件**时才被调用（调用方保证）。
     #[cfg(windows)]
-    fn reset_rc003_device_link(
-        instance_id: &str,
-        class_guid: Option<[u8; 16]>,
-        host_pid: Option<u32>,
-        logger: &Logger,
-    ) -> bool {
-        let switch_state = |disable: bool| -> Result<(), String> {
+    fn reset_rc003_device_link(instance_id: &str, host_pid: Option<u32>, logger: &Logger) -> bool {
+        let switch_state = |disable: bool, header_cb_size: u32| -> Result<(), String> {
             unsafe {
-                let guid_ptr = match class_guid.as_ref() {
-                    Some(guid) => guid.as_ptr() as *const c_void,
-                    None => std::ptr::null(),
-                };
-                let set = SetupDiCreateDeviceInfoList(guid_ptr, std::ptr::null_mut());
+                // 用 devcon（微软参考实现）的做法：在 `ALLCLASSES | PRESENT` 集合里**枚举出活设备**，
+                // 再对该元素调类安装器。早先用 `SetupDiCreateDeviceInfoList` + `SetupDiOpenDeviceInfoW`
+                // 拿到的元素不绑定活设备，`CallClassInstaller` 直接报 CR_NO_SUCH_DEVINST
+                // (0xE0000201)——2026-10-08 真机实证（OpenDeviceInfo 成功、下一句就挂）。
+                let set = SetupDiGetClassDevsW(
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    DIGCF_PRESENT | DIGCF_ALLCLASSES,
+                );
                 if set.is_null() || set as isize == -1 {
-                    return Err(format!(
-                        "CreateDeviceInfoList: {}",
-                        std::io::Error::last_os_error()
-                    ));
+                    return Err(format!("GetClassDevs: {}", std::io::Error::last_os_error()));
                 }
-                let mut info = SpDevinfoData {
-                    cb_size: std::mem::size_of::<SpDevinfoData>() as u32,
-                    class_guid: [0u8; 16],
-                    dev_inst: 0,
-                    reserved: 0,
+                let mut found: Option<SpDevinfoData> = None;
+                let mut index = 0u32;
+                while found.is_none() {
+                    let mut info = SpDevinfoData {
+                        cb_size: std::mem::size_of::<SpDevinfoData>() as u32,
+                        class_guid: [0u8; 16],
+                        dev_inst: 0,
+                        reserved: 0,
+                    };
+                    if SetupDiEnumDeviceInfo(set, index, &mut info) == 0 {
+                        break;
+                    }
+                    index += 1;
+                    let mut buffer = [0u16; 512];
+                    if SetupDiGetDeviceInstanceIdW(
+                        set,
+                        &mut info,
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u32,
+                        std::ptr::null_mut(),
+                    ) != 0
+                        && from_wide(&buffer).eq_ignore_ascii_case(instance_id)
+                    {
+                        found = Some(info);
+                    }
+                }
+                let mut info = match found {
+                    Some(info) => info,
+                    None => {
+                        let _ = SetupDiDestroyDeviceInfoList(set);
+                        return Err(format!("枚举 {index} 个设备未找到目标实例"));
+                    }
                 };
-                let wide = to_wide(instance_id);
                 let mut params = SpPropchangeParams {
                     header: SpClassInstallHeader {
-                        cb_size: std::mem::size_of::<SpPropchangeParams>() as u32,
+                        // 注意：这里是 **header 自身** 的大小（8），不是整个 SP_PROPCHANGE_PARAMS。
+                        // 2026-10-08 真机实证：填 20 时 SetupDiSetClassInstallParams 直接报
+                        // 1784（ERROR_INVALID_USER_BUFFER）；MS 样例（Disabling a Device）填的
+                        // 就是 sizeof(SP_CLASSINSTALL_HEADER)，而调用本身传整块 20 字节。
+                        cb_size: header_cb_size,
                         install_function: DIF_PROPERTYCHANGE,
                     },
                     state_change: if disable { DICS_DISABLE } else { DICS_ENABLE },
                     scope: DICS_FLAG_GLOBAL,
                     hw_profile: 0,
                 };
-                if SetupDiOpenDeviceInfoW(set, wide.as_ptr(), std::ptr::null_mut(), 0, &mut info)
-                    == 0
-                {
-                    let error = std::io::Error::last_os_error();
-                    let _ = SetupDiDestroyDeviceInfoList(set);
-                    return Err(format!("OpenDeviceInfo: {error}"));
-                }
                 if SetupDiSetClassInstallParamsW(
                     set,
                     &mut info,
@@ -3179,7 +3150,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         };
 
         logger.line("[CLEANUP] 运行时文件被宿主占用：对遥控器设备做一次禁用→启用以释放文件锁（不记录设备身份）。");
-        if let Err(error) = switch_state(true) {
+        // cbSize 的期望值在 MS 样例与部分文档之间不一致：8 = SP_CLASSINSTALL_HEADER
+        // （MS「Disabling a Device」样例），20 = 整个 SP_PROPCHANGE_PARAMS。
+        // 2026-10-08 真机实证：填 20 时 SetupDiSetClassInstallParams 报 1784
+        // （ERROR_INVALID_USER_BUFFER）。两个值都试——先按样例的 8，错误码是 1784 时换 20；
+        // 哪个能过就用哪个把设备启回来（禁用与启用必须用同一个值，否则会留禁用态）。
+        let mut working_cb_size = std::mem::size_of::<SpClassInstallHeader>() as u32;
+        let mut disabled = switch_state(true, working_cb_size);
+        if let Err(first) = &disabled {
+            if first.contains("1784") {
+                working_cb_size = std::mem::size_of::<SpPropchangeParams>() as u32;
+                logger.line(&format!(
+                    "[CLEANUP] SetClassInstallParams 用 cbSize={}（header）报 1784，换 cbSize={}（整块）再试。",
+                    std::mem::size_of::<SpClassInstallHeader>(),
+                    std::mem::size_of::<SpPropchangeParams>()
+                ));
+                disabled = switch_state(true, working_cb_size);
+            }
+        }
+        if let Err(error) = disabled {
             logger.line(&format!(
                 "[CLEANUP] 禁用设备失败：{error}；跳过释放，回退到「安排到重启删除」。"
             ));
@@ -3192,7 +3181,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 无论宿主是否退出，都必须把设备放回去。
         let mut reenabled = false;
         for _ in 0..5 {
-            if switch_state(false).is_ok() {
+            if switch_state(false, working_cb_size).is_ok() {
                 reenabled = true;
                 break;
             }
@@ -3217,7 +3206,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     #[cfg(not(windows))]
     fn reset_rc003_device_link(
         _instance_id: &str,
-        _class_guid: Option<[u8; 16]>,
         _host_pid: Option<u32>,
         _logger: &Logger,
     ) -> bool {
@@ -3234,7 +3222,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             dirs_deleted: 0,
             failures: Vec::new(),
         };
-        cleanup_dir_recursive(dir, &mut report);
+        cleanup_dir_recursive(dir, &mut report, logger);
         // 目录本身也要收掉：只清空内容不算"删干净"（卸载后不留空壳）。
         if fs::remove_dir(dir).is_ok() {
             report.dirs_deleted += 1;
@@ -3271,7 +3259,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         report
     }
 
-    fn cleanup_dir_recursive(dir: &Path, report: &mut CleanupReport) {
+    fn cleanup_dir_recursive(dir: &Path, report: &mut CleanupReport, logger: &Logger) {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) => {
@@ -3286,7 +3274,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         for entry in entries.flatten() {
             let path = entry.path();
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                cleanup_dir_recursive(&path, report);
+                cleanup_dir_recursive(&path, report, logger);
                 if fs::remove_dir(&path).is_ok() {
                     report.dirs_deleted += 1;
                 }
@@ -3295,7 +3283,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             match fs::remove_file(&path) {
                 Ok(()) => report.files_deleted += 1,
                 Err(_) => {
-                    if schedule_delete_on_reboot(&path) {
+                    if schedule_delete_on_reboot(&path, logger) {
                         report.files_pending_reboot += 1;
                     } else {
                         report.failures.push(format!(
@@ -4774,12 +4762,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if let Ok(scan) = enum_hosts() {
                     if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
                         if let Some(instance) = entry.rc003_instance_id.clone() {
-                            if reset_rc003_device_link(
-                                &instance,
-                                entry.rc003_class_guid,
-                                Some(entry.pid),
-                                &logger,
-                            ) {
+                            if reset_rc003_device_link(&instance, Some(entry.pid), &logger) {
                                 report = cleanup_runtime_dir(&args.runtime_dir, &logger);
                             }
                         }
@@ -7715,6 +7698,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
 
         #[test]
+        fn pending_listing_matches_when_the_target_is_not_the_first_entry() {
+            // 回归（2026-10-08 真机）：REG_MULTI_SZ 若用 `from_wide` 读会在第一个 `\0` 截断，
+            // 目标不在第一条时判重永远未命中 → 每轮卸载各多登记一条。
+            let first = "*1\\??\\C:\\Other\\app.dll\0";
+            let second = "*1\\??\\C:\\ProgramData\\SayAll\\rc003-helper\\frida-gadget.dll\0";
+            let bytes: Vec<u8> = format!("{first}{second}\0")
+                .encode_utf16()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect();
+            let listing = multi_sz_bytes_to_string(&bytes);
+            let path = PathBuf::from(r"C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll");
+            assert!(listing.contains("app.dll"), "两条都要保留，不能被截断");
+            assert!(pending_reboot_listing_contains(&listing, &path));
+        }
+
+        #[test]
         fn host_release_gate_ignores_is_clean_and_looks_at_the_directory() {
             // 2026-10-08 真机复测的教训：只有"待重启删除"时 is_clean() 为真，但文件还在
             // 目录里——此时**必须**触发设备环。
@@ -7735,21 +7734,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             );
             let missing = existing.join("sayall-definitely-not-there-0000");
             assert!(!host_release_still_needed(&missing, &pending_only));
-        }
-
-        #[test]
-        fn guid_text_parses_into_windows_memory_layout() {
-            // 注册表里的类 GUID 形如 {4d36e96b-e325-11ce-bfc1-08002be10318}；
-            // 前三个字段在内存里是小端。
-            let bytes = parse_guid("{4d36e96b-e325-11ce-bfc1-08002be10318}").expect("parse");
-            assert_eq!(bytes[0..4], [0x6b, 0xe9, 0x36, 0x4d]);
-            assert_eq!(bytes[4..8], [0x25, 0xe3, 0xce, 0x11]);
-            assert_eq!(
-                bytes[8..16],
-                [0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18]
-            );
-            assert!(parse_guid("not-a-guid").is_none());
-            assert!(parse_guid("{4d36e96b-e325-11ce-bfc1-08002be1031}").is_none());
         }
 
         #[test]
