@@ -1232,7 +1232,10 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                         ));
                         capture_inactive_logged = true;
                     }
-                } else if capture_inactive_logged {
+                } else if capture_inactive_logged && !snapshot.owned_usages.is_empty() {
+                    // 只有真的拿回所有权才算恢复。若此时恰好是"用户把增强键全部取消映射"
+                    // （target 清空、owned 也为空），记 capture_resumed 同样是假阳性——
+                    // 与 0.8.1 的教训同型：判据必须是"确实生效"，不是"失败条件消失"。
                     sayall_windows::gatt_note(format!(
                         "rc003 feature=enhanced-capture action=capture_resumed phase=completed \
                          terminal_result=passed owned_usages={} elapsed_ms={connected_ms}",
