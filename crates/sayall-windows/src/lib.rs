@@ -24,6 +24,7 @@ pub use bluetooth_radio::prepare_bluetooth_radio_recovery;
 mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
+mod diagnostic_log;
 pub mod file_dialog;
 /// 聚焦输入框的纯逻辑（跨平台可编译、可单测）。
 pub mod focus;

@@ -2610,7 +2610,10 @@ pub fn initialize_diagnostic_log(
         .unwrap_or(false);
     let _ = DIAGNOSTIC_LOG_PATH.set(path);
     let _ = DIAGNOSTIC_LOG_METADATA.set(metadata);
-    parent_ready && gatt_sink().is_some()
+    parent_ready
+        && diagnostic_log_path()
+            .map(|path| crate::diagnostic_log::probe(&path))
+            .unwrap_or(false)
 }
 
 /// 诊断日志实际落盘目录（供"打开日志目录"入口定位）。
@@ -2640,65 +2643,49 @@ pub fn diagnostic_log_path() -> Option<std::path::PathBuf> {
 /// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
 /// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。
 ///
-/// 2026-10-04 修订：**无路径/打开失败时不再把 "无 sink" 永久冻结**。旧实现用
-/// `get_or_init`，首次调用若没有 env/路径就把 None 钉死——任何"先无后有"的
-/// 场景（运行期晚到的 `initialize_diagnostic_log`、同进程先后依赖 env 的测试）
-/// 会让之后所有功能点日志静默丢失。现在的语义是**延迟且一次性**：成功打开文件
-/// 之前每次调用都按当前环境重新判定（env 查询与一次 open 失败都极廉价，条件具备
-/// 即自愈）；2026-10-05 评审把这条路径钉进了回归——同进程内先后设置
-/// SAYALL_GATT_LOG 的测试因此互不绑定（`load_backs_up_button_mappings_from_a_newer_schema`
-/// 先调用日志会把 once 绑定成 None，导致 `updater_notes_land_in_diagnostic_log` 写不进去）。
-/// 一旦打开就固定指向同一文件，与既有语义一致。
-fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
-    static SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
-    if let Some(sink) = SINK.get() {
-        return Some(sink);
-    }
-    let path = DIAGNOSTIC_LOG_PATH
+/// 2026-10-08 起改为**每次写入重新打开文件**（`diagnostic_log::append_line`），原因有二：
+///
+/// ① 轮转：单个文件超过 10 MB 就换新文件；主程序与提权助手共用同一份日志，
+///    任何长句柄都会在**对方**轮转之后继续写给已被改名的旧文件，导致新文件缺行；
+/// ② 自愈：旧实现用 `OnceLock` 钉住句柄，首次调用若没有 env/路径就把"无 sink"
+///    永久冻结（2026-10-04 修订为延迟判定；2026-10-05 评审把"同进程内先后设置
+///    SAYALL_GATT_LOG 的测试互不绑定"钉进了回归）。每次重开的语义天然满足这条回归。
+fn diagnostic_log_append(line: &str) -> bool {
+    let Some(path) = DIAGNOSTIC_LOG_PATH
         .get()
         .cloned()
-        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()?;
-    let _ = SINK.set(Mutex::new(file));
-    SINK.get()
+        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))
+    else {
+        return false;
+    };
+    crate::diagnostic_log::append_line(&path, line)
 }
 
 fn gatt_log(kind: &str, bytes: &[u8]) {
-    use std::io::Write as _;
     // 原始音频包既是高频数据又可能承载语音内容，生产诊断日志绝不落盘。
     // 会话级音频统计由 audio.rs 在开始、排空、失败时聚合记录。
     if kind == "A" {
         return;
     }
-    if let Some(sink) = gatt_sink() {
-        if let Ok(mut file) = sink.lock() {
-            let timestamp = utc_timestamp();
-            let metadata = DIAGNOSTIC_LOG_METADATA.get();
-            let preview: String = bytes
-                .iter()
-                .take(24)
-                .map(|byte| format!("{byte:02X}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let _ = writeln!(
-                file,
-                "{timestamp} pid={} ver={} build={} component=gatt event=packet direction={kind} byte_count={} preview=[{preview}]",
-                std::process::id(),
-                metadata
-                    .map(|value| value.app_version.as_str())
-                    .unwrap_or("unknown"),
-                metadata
-                    .map(|value| value.app_build.as_str())
-                    .unwrap_or("unknown"),
-                bytes.len()
-            );
-            let _ = file.flush();
-        }
-    }
+    let timestamp = utc_timestamp();
+    let metadata = DIAGNOSTIC_LOG_METADATA.get();
+    let preview: String = bytes
+        .iter()
+        .take(24)
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = diagnostic_log_append(&format!(
+        "{timestamp} pid={} ver={} build={} component=gatt event=packet direction={kind} byte_count={} preview=[{preview}]",
+        std::process::id(),
+        metadata
+            .map(|value| value.app_version.as_str())
+            .unwrap_or("unknown"),
+        metadata
+            .map(|value| value.app_build.as_str())
+            .unwrap_or("unknown"),
+        bytes.len()
+    ));
 }
 
 /// 功能点结构化诊断标记（同 SAYALL_GATT_LOG 开关；AGENTS.md"功能点必须自带
@@ -2708,24 +2695,27 @@ fn gatt_log(kind: &str, bytes: &[u8]) {
 /// 2026-09-05 起对 src-tauri 应用层公开（应用内更新流程等非 GATT 功能点
 /// 复用同一日志载体与格式），保持"一次日志拉取"覆盖全部功能点。
 pub fn gatt_note(note: String) {
-    use std::io::Write as _;
-    if let Some(sink) = gatt_sink() {
-        if let Ok(mut file) = sink.lock() {
-            let timestamp = utc_timestamp();
-            let metadata = DIAGNOSTIC_LOG_METADATA.get();
-            let _ = writeln!(
-                file,
-                "{timestamp} pid={} ver={} build={} source_revision={} build_channel={} release_tag={} {note}",
-                std::process::id(),
-                metadata.map(|value| value.app_version.as_str()).unwrap_or("unknown"),
-                metadata.map(|value| value.app_build.as_str()).unwrap_or("unknown"),
-                metadata.map(|value| value.source_revision.as_str()).unwrap_or("unknown"),
-                metadata.map(|value| value.build_channel.as_str()).unwrap_or("unknown"),
-                metadata.map(|value| value.release_tag.as_str()).unwrap_or("unknown"),
-            );
-            let _ = file.flush();
-        }
-    }
+    let timestamp = utc_timestamp();
+    let metadata = DIAGNOSTIC_LOG_METADATA.get();
+    let _ = diagnostic_log_append(&format!(
+        "{timestamp} pid={} ver={} build={} source_revision={} build_channel={} release_tag={} {note}",
+        std::process::id(),
+        metadata.map(|value| value.app_version.as_str()).unwrap_or("unknown"),
+        metadata.map(|value| value.app_build.as_str()).unwrap_or("unknown"),
+        metadata.map(|value| value.source_revision.as_str()).unwrap_or("unknown"),
+        metadata.map(|value| value.build_channel.as_str()).unwrap_or("unknown"),
+        metadata.map(|value| value.release_tag.as_str()).unwrap_or("unknown"),
+    ));
+}
+
+/// 轮转文件名用的紧凑 UTC 时间戳（形如 `20261008T063158984Z`）：只保留 ASCII
+/// 字母数字——既可做 Windows 文件名，也可按字典序当时间序（`diagnostic_log::prune`
+/// 依赖这一点）。
+pub(crate) fn utc_stamp_compact() -> String {
+    utc_timestamp()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn utc_timestamp() -> String {

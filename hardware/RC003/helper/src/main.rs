@@ -122,6 +122,11 @@ mod imp {
     /// 8 s ≈ 两个 agent 重连周期（RECONNECT_MS）之和再加余量。
     const ATTACH_VERIFY_MS: u64 = 8_000;
 
+    /// `[HB]` 心跳的落盘节流：agent 的 hb 很密（实测约 2 条/秒），逐条写会把日志刷爆
+    /// （2026-10-08 实测单机累计 768 MB、约 107 MB/天）。现在只在**状态变化**时或
+    /// 每 `HB_LOG_EVERY` 记一条；协议动作（ownership 续约等）不受影响，仍按每条处理。
+    const HB_LOG_EVERY: Duration = Duration::from_secs(30);
+
     /// targets 下发后等不到 `targets_ack` 时的重发节奏：前 `ACK_RESEND_FAST_N` 次
     /// 每 `ACK_RESEND_FAST_MS` 一次，之后放慢到 `ACK_RESEND_SLOW_MS`。
     ///
@@ -1358,9 +1363,23 @@ mod imp {
     ///
     /// **必须整行一次写入**：主程序可能同时在往同一文件追加，逐字段 `write!` 会
     /// 让两边的行互相穿插。写入失败返回 false，由调用方换下一个落点。
+    /// 单个日志文件的体积上限与保留份数：与主程序
+    /// `crates/sayall-windows/src/diagnostic_log.rs` 保持一致
+    /// （10 MB + 保留 5 份）——**两处都改才算改完**（助手与主程序共用同一份日志，
+    /// 见 LOGGING.md「单一日志文件」；两份实现分属不同 workspace，无法直接共享代码）。
+    const SHARED_LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+    const SHARED_LOG_KEEP_ROTATED: usize = 5;
+
     fn append_record(path: &Path, record: &str) -> bool {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
+        }
+        // 超上限先轮转（改名成带时间戳的旧文件）再追加；每次都重新打开，
+        // 因此主程序侧轮转之后，这里不会继续写给已被改名的旧文件。
+        let incoming = record.len() as u64 + 1;
+        let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        if current + incoming > SHARED_LOG_ROTATE_BYTES {
+            rotate_shared_log(path);
         }
         let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
             return false;
@@ -1369,6 +1388,56 @@ mod imp {
         line.push_str(record);
         line.push('\n');
         file.write_all(line.as_bytes()).is_ok()
+    }
+
+    /// 轮转共用日志：`<主名>-<UTC 时间戳>-p<进程号>.log`。时间戳只含 ASCII 字母数字
+    /// （可做文件名，也可按字典序当时间序），随后按份数删除最旧的。
+    fn rotate_shared_log(path: &Path) {
+        let stamp: String = utc_stamp()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect();
+        let stem = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| "sayall-diagnostic".to_string());
+        let rotated = path.with_file_name(format!("{stem}-{stamp}-p{}.log", std::process::id()));
+        if fs::rename(path, &rotated).is_err() {
+            // 主程序已经轮转过（或文件不存在）：不是错误，继续写新文件即可。
+            return;
+        }
+        prune_shared_rotated(path, SHARED_LOG_KEEP_ROTATED);
+    }
+
+    fn prune_shared_rotated(path: &Path, keep: usize) {
+        let Some(dir) = path.parent() else { return };
+        let stem = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let prefix = format!("{stem}-");
+        let mut rotated: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .map(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with(&prefix) && name.ends_with(".log")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        if rotated.len() <= keep {
+            return;
+        }
+        rotated.sort();
+        for old in rotated.iter().take(rotated.len() - keep) {
+            let _ = fs::remove_file(old);
+        }
     }
 
     struct Logger {
@@ -3862,6 +3931,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 接管后心跳一切正常、`edges` 却永远不会出现——最容易被误判成"注入没成功"。
         config_sent: bool,
         target_ack: Option<BridgeCaptureTargets>,
+        /// 上一次把心跳写进日志的时刻，以及当时的状态三元组（lease_ok / handshake /
+        /// disarmed）。心跳降噪（2026-10-08）：agent 的 hb 实测约 2 条/秒，逐条落盘会
+        /// 把日志刷爆；现在只在状态变化或每 `HB_LOG_EVERY` 记一条，
+        /// ownership 续约等协议动作不受影响。
+        last_hb_log: Option<(Instant, (bool, bool, bool))>,
     }
 
     fn now_ms() -> u128 {
@@ -3969,22 +4043,35 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if !session.authenticated {
                     return false;
                 }
-                let stat = extract_substring(line, "\"stat\":").unwrap_or_default();
-                logger.kv(
-                    "[HB]",
-                    &[
-                        ("up", format!("{}s", extract_num(line, "up").unwrap_or(0))),
-                        ("lease_ok", extract_bool(line, "lease_ok").to_string()),
-                        ("handshake", extract_bool(line, "handshake").to_string()),
-                        ("disarmed", extract_bool(line, "disarmed").to_string()),
-                        (
-                            "renew_age_ms",
-                            extract_num(line, "since_renew_ms").unwrap_or(0).to_string(),
-                        ),
-                        ("stat", stat),
-                    ],
-                );
-                if extract_bool(line, "lease_ok") {
+                let lease_ok = extract_bool(line, "lease_ok");
+                let handshake = extract_bool(line, "handshake");
+                let disarmed = extract_bool(line, "disarmed");
+                // 心跳降噪：状态变化立即记，否则每 HB_LOG_EVERY 记一条（agent 的
+                // hb ≈2 条/秒；逐条落盘是 2026-10-08 日志膨胀的主因）。
+                let state = (lease_ok, handshake, disarmed);
+                let due = match session.last_hb_log {
+                    Some((at, previous)) => previous != state || at.elapsed() >= HB_LOG_EVERY,
+                    None => true,
+                };
+                if due {
+                    session.last_hb_log = Some((Instant::now(), state));
+                    let stat = extract_substring(line, "\"stat\":").unwrap_or_default();
+                    logger.kv(
+                        "[HB]",
+                        &[
+                            ("up", format!("{}s", extract_num(line, "up").unwrap_or(0))),
+                            ("lease_ok", lease_ok.to_string()),
+                            ("handshake", handshake.to_string()),
+                            ("disarmed", disarmed.to_string()),
+                            (
+                                "renew_age_ms",
+                                extract_num(line, "since_renew_ms").unwrap_or(0).to_string(),
+                            ),
+                            ("stat", stat),
+                        ],
+                    );
+                }
+                if lease_ok {
                     if let (Some(bridge), Some(ack)) = (bridge, session.target_ack.clone()) {
                         bridge.push_ownership(ack);
                     }
@@ -4754,7 +4841,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     "[ATTACH]",
                     &[
                         ("action", "skip_injection".into()),
-                        ("reason", "宿主里已有我们那一代 tap（按可复用令牌接管；一致性由握手核验）".into()),
+                        (
+                            "reason",
+                            "宿主里已有我们那一代 tap（按可复用令牌接管；一致性由握手核验）".into(),
+                        ),
                         ("path", normalize_display(&prepared.dll)),
                         (
                             "note",
@@ -4840,7 +4930,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
         logger.line("未列入 report_usages 的按键保持 Windows 原生行为；语音键不参与本链路。");
         logger.line(&format!(
-            "每 2 秒会打印一次 [HB] 心跳；Ctrl+C 或直接关掉本窗口结束\
+            "心跳（[HB]）只在状态变化或每 30 秒记一条（避免把日志刷爆）；Ctrl+C 或直接关掉本窗口结束\
              （会先给 agent 发 disarm；即使来不及，agent 也会在 {LEASE_MS} ms 租约到期后自行停止清键）。\
              {}",
             if args.duration > 0 {
@@ -4872,6 +4962,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             authenticated: false,
             config_sent: false,
             target_ack: None,
+            last_hb_log: None,
         };
         let mut last_hb_warn = Instant::now();
         // 是否曾经接到过**已鉴权**的 agent。注意不能用 `session.authenticated`：
@@ -5004,6 +5095,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         authenticated: false,
                         config_sent: false,
                         target_ack: None,
+                        last_hb_log: None,
                     };
                     if let Ok(mut guard) = shared.lock() {
                         *guard = Some(stream.try_clone().expect("clone stream"));
@@ -6036,6 +6128,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         authenticated: false,
                         config_sent: false,
                         target_ack: None,
+                        last_hb_log: None,
                     };
                     let quiet = Logger::new(None);
                     let stop = Arc::new(AtomicBool::new(false));
@@ -6242,17 +6335,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             (true, false, true, 60_000, false),
             (false, false, false, 60_000, false),
         ];
-        let attach_ok = attach_verify_cases
-            .iter()
-            .all(|(plan_is_attach, saw, escalated, elapsed, want)| {
-                attach_verification_expired(
-                    *plan_is_attach,
-                    *saw,
-                    *escalated,
-                    *elapsed,
-                    ATTACH_VERIFY_MS,
-                ) == *want
-            });
+        let attach_ok =
+            attach_verify_cases
+                .iter()
+                .all(|(plan_is_attach, saw, escalated, elapsed, want)| {
+                    attach_verification_expired(
+                        *plan_is_attach,
+                        *saw,
+                        *escalated,
+                        *elapsed,
+                        ATTACH_VERIFY_MS,
+                    ) == *want
+                });
         check(
             "接管核验：窗口内无鉴权握手即另起一代（旧世代 tap 自愈）",
             attach_ok,
@@ -6692,6 +6786,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 authenticated: false,
                                 config_sent: false,
                                 target_ack: None,
+                                last_hb_log: None,
                             };
                             let quiet = Logger::new(None);
                             let stop = Arc::new(AtomicBool::new(false));
@@ -7158,6 +7253,76 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(text.contains("fp="), "{text}");
             assert!(!text.contains(SAMPLE), "日志不得含明文令牌: {text}");
             let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// 共用日志轮转（2026-10-08 用户明确要求：**单个文件不得超过 10 MB，超过即生成
+    /// 新的日志文件**）。这里验证轮转改名、内容不丢、份数修剪与上限常量。
+    #[cfg(test)]
+    mod log_rotation_tests {
+        use super::*;
+
+        fn scratch(tag: &str) -> PathBuf {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "sayall-helper-log-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("scratch dir");
+            dir
+        }
+
+        #[test]
+        fn rotation_renames_current_file_and_keeps_writing() {
+            let dir = scratch("rotate");
+            let path = dir.join("sayall-diagnostic.log");
+            assert!(append_record(&path, "before"));
+            rotate_shared_log(&path);
+            assert!(append_record(&path, "after"));
+            let current = fs::read_to_string(&path).expect("current log");
+            assert!(current.contains("after"), "{current}");
+            let rotated: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("sayall-diagnostic-"))
+                .collect();
+            assert_eq!(rotated.len(), 1, "{rotated:?}");
+            assert!(rotated[0].ends_with(".log"), "{rotated:?}");
+            let old = fs::read_to_string(dir.join(&rotated[0])).expect("rotated log");
+            assert!(old.contains("before"), "{old}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn prune_keeps_only_the_newest_rotated_files() {
+            let dir = scratch("prune");
+            let path = dir.join("sayall-diagnostic.log");
+            fs::write(&path, b"current").expect("seed current");
+            for index in 0..8 {
+                let name = format!("sayall-diagnostic-2026100{index}T000000000Z-p1.log");
+                fs::write(dir.join(name), b"old").expect("seed rotated");
+            }
+            prune_shared_rotated(&path, 5);
+            let mut left: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("sayall-diagnostic-"))
+                .collect();
+            left.sort();
+            assert_eq!(left.len(), 5, "{left:?}");
+            assert!(left[0].contains("20261003"), "最旧的应被删掉：{left:?}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn rotation_cap_is_ten_megabytes_and_keeps_five() {
+            assert_eq!(SHARED_LOG_ROTATE_BYTES, 10 * 1024 * 1024);
+            assert_eq!(SHARED_LOG_KEEP_ROTATED, 5);
         }
     }
 
