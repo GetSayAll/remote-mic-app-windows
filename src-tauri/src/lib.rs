@@ -2557,13 +2557,14 @@ fn register_shortcut_capture_events(app: tauri::AppHandle) {
             }
         })
         .ok();
-    // 10s 诊断心跳（临时排查设施，PR 前移除）：把钩子健康度基线（calls_total /
-    // capture_active 等）周期落盘，便于在无需界面交互的情况下用外部注入对照，
-    // 区分"钩子没被系统调用"与"钩子被调用但事件被上层吞掉/过滤"。只读原子。
+    // 诊断心跳：把钩子健康度基线（calls_total / capture_active 等）周期落盘，便于在
+    // 无需界面交互的情况下用外部注入对照，区分"钩子没被系统调用"与"钩子被调用但事件
+    // 被上层吞掉/过滤"。只读原子。2026-10-08 起从 10 秒放宽到 60 秒：心跳的作用是
+    // 证明"进程活着、计数在动"与保留趋势，不需要秒级分辨率；配合日志轮转把体积压下来。
     std::thread::Builder::new()
         .name("sayall-shortcut-capture-diag".to_owned())
         .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_secs(60));
             sayall_windows::gatt_note(format!(
                 "shortcut_capture action=diag phase=heartbeat {}",
                 sayall_windows::key_gate::capture_diagnostics_summary()
