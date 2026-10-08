@@ -35,7 +35,9 @@ sayall-windows    WinRT BLE、Raw Input、SendInput、WASAPI
 
 ## 开发环境
 
-- Windows 10 1809 或更高版本，x64；
+- Windows 10 1809 或更高版本，x64（开发机；对 ARM64 助手做交叉编译需要 Visual Studio 的
+  “MSVC v143 - VS 2022 C++ ARM64/ARM64EC 生成工具”组件与 `rustup target add aarch64-pc-windows-msvc`，
+  两者都缺失时只是不出 ARM64 载荷，不影响 x64 开发与验证）；
 - Rust stable；
 - Node.js 22 或更高版本；
 - pnpm 9 或更高版本；

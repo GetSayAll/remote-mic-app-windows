@@ -271,6 +271,10 @@ try {
     if ($currentInstallation.InstallLocation -ne $initialInstallLocation) {
         throw "Upgrade changed install location from $initialInstallLocation to $($currentInstallation.InstallLocation)"
     }
+    # 载荷集合断言（2026-10-07，Issue #206）：出包暂存了几件载荷，安装目录里就必须有对应的几件，
+    # 且两份助手各自是对应架构。放在这里是因为它是**安装结果**的直接判据——NSIS 压过之后，
+    # setup 的字节看不出载荷集合（verify-windows-bundle.ps1 只能校验暂存集合与覆盖配置声明）。
+    & (Join-Path $PSScriptRoot "verify-installed-payload-set.ps1") -InstallDirectory $currentInstallation.InstallLocation
     $null = Assert-SingleShortcut
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash -ne $settingsHash) {
         throw "Upgrade changed the seeded settings file"

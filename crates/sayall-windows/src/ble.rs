@@ -2639,21 +2639,28 @@ pub fn diagnostic_log_path() -> Option<std::path::PathBuf> {
 /// ATVV 诊断日志（宿主默认写入 LocalAppData；SAYALL_GATT_LOG 可覆盖路径）。
 /// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
 /// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。
+///
+/// sink 绑定是**延迟且一次性**的：在成功打开文件之前，每次调用都按当前环境
+/// 重新判定（同进程内先后设置 SAYALL_GATT_LOG 的测试因此互不绑定，2026-10-05
+/// 评审发现：`load_backs_up_button_mappings_from_a_newer_schema` 先调用日志，
+/// 会把 once 绑定成 None，导致 `updater_notes_land_in_diagnostic_log` 写不进去）；
+/// 一旦打开就固定指向同一文件，与既有语义一致。
 fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
-    static SINK: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    SINK.get_or_init(|| {
-        let path = DIAGNOSTIC_LOG_PATH
-            .get()
-            .cloned()
-            .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?;
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-            .map(Mutex::new)
-    })
-    .as_ref()
+    static SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+    if let Some(sink) = SINK.get() {
+        return Some(sink);
+    }
+    let path = DIAGNOSTIC_LOG_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let _ = SINK.set(Mutex::new(file));
+    SINK.get()
 }
 
 fn gatt_log(kind: &str, bytes: &[u8]) {

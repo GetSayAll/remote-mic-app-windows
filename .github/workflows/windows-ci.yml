@@ -58,6 +58,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          # arm64 助手的**编译路径**要在 CI 里被真实覆盖（本机常常没有 VS 的 ARM64
+          # 工具集，那条路径永远不会被执行到），因此显式装 aarch64 目标供下方
+          # `cargo check --target` 使用。
+          targets: aarch64-pc-windows-msvc
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -77,11 +81,22 @@ jobs:
 
       # tauri.conf 的 bundle.resources 声明了 helper 与 gadget，而这两个文件不入库
       # ⇒ tauri-build 在编译期就会校验路径存在，先暂存再编译（2026-09-27 PR #127 实测）。
-      - name: Stage bundle resources (helper + frida gadget)
+      # 本 job 不设 SAYALL_REQUIRE_ARM64_PAYLOAD：arm64 载荷在 verify 里是**可选**的
+      # （runner 具备 ARM64 工具集时会一并构建并暂存，缺了也不算失败；发布路径的强制
+      # 要求设在 installer job 的 staging 步骤）。
+      - name: Stage bundle resources (helper + frida gadget; arm64 optional here)
         run: node scripts/stage-bundle-inputs.cjs
 
       - name: Test Rust workspace
         run: cargo test --workspace
+
+      # arm64 助手的编译路径必须被真实覆盖：本机与部分环境没有 VS ARM64 工具集，
+      # 那条路径平时永远不会被执行到（issue206 的根因之一）。
+      # `cargo check` 只做类型检查并产出元数据，**不调用链接器**，因此不依赖
+      # Microsoft.VisualStudio.Component.VC.Tools.ARM64；真正需要该组件的是 installer
+      # job 的 staging 步骤（`cargo build --target aarch64-pc-windows-msvc`）。
+      - name: Check RC003 helper compiles for Windows on ARM (aarch64)
+        run: cargo check --target aarch64-pc-windows-msvc --manifest-path hardware/RC003/helper/Cargo.toml
 
       - name: Check Windows Tauri host
         run: cargo check --workspace
@@ -128,6 +143,11 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # staging 要 **构建** arm64 助手（cargo build --target aarch64-...），因此本
+          # job 也必须装 aarch64 目标；链接器由 windows-2025 镜像自带的 VS ARM64
+          # 工具集提供（见下方 staging 步骤的注释）。
+          targets: aarch64-pc-windows-msvc
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -136,15 +156,27 @@ jobs:
         shell: pwsh
         run: ./scripts/ensure-updater-signing-key.ps1
 
-      - name: Stage bundle resources (helper + frida gadget)
+      # arm64 双载荷（2026-10-07 issue206）：默认 src-tauri/tauri.conf.json 只声明 x64
+      # 两件，因为 tauri-build 在**编译期**校验资源存在，而 arm64 助手需要 VS 的
+      # Microsoft.VisualStudio.Component.VC.Tools.ARM64 才能构建（本机没有它 ⇒ 写进
+      # 默认配置会让任何 cargo check / cargo test 都直接失败）。
+      # windows-2025 托管镜像自带 ARM64 构建工具（actions/runner-images 的 Windows2025
+      # 组件表里 Microsoft.VisualStudio.Component.VC.Tools.ARM64 在列），因此发布路径
+      # **强制**要求 arm64 载荷：这里设 SAYALL_REQUIRE_ARM64_PAYLOAD=1，缺失即让 staging
+      # 非零退出，不允许静默产出一个在 Windows 11 ARM64 上缺载荷的安装包。
+      - name: Stage bundle resources (helper + frida gadget, x64 + arm64)
+        env:
+          SAYALL_REQUIRE_ARM64_PAYLOAD: "1"
         run: node scripts/stage-bundle-inputs.cjs
 
       - name: Build predecessor NSIS upgrade fixture
         shell: pwsh
         run: ./scripts/build-windows-upgrade-fixture.ps1
 
+      # arm64 覆盖配置（tauri 的 --config 可重复，按 RFC 7396 顺序合并，数组整体覆盖）：
+      # staging 已保证四件载荷都在 src-tauri/，这里把 bundle.resources 覆盖成四件。
       - name: Build unsigned NSIS preview installer
-        run: pnpm tauri build --bundles nsis
+        run: pnpm tauri build --bundles nsis --config src-tauri/tauri.arm64-payload.conf.json
 
       # 防回归（2026-10-03 本机实证）：见 verify job 中同名步骤的注释。
       - name: Verify frontend assets are embedded in the executable

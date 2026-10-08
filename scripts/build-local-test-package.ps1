@@ -8,7 +8,11 @@
 # 3) staging 脚本按 hardware/RC003/helper/target/release 取助手 ⇒ 跑 staging 时不要设
 #    CARGO_TARGET_DIR；应用构建可用 -CargoTargetDir 指向已有缓存的 target 目录；
 # 4) TAURI_CONFIG 不进 cargo 指纹 ⇒ 构建前 touch src-tauri/src/lib.rs，避免复用旧内嵌；
-# 5) 嵌入校验对象必须是**裸构建 exe**（NSIS setup 是压缩包装，明文路径查不到、否则必误报）。
+# 5) 嵌入校验对象必须是**裸构建 exe**（NSIS setup 是压缩包装，明文路径查不到、否则必误报）；
+# 6) 双载荷（2026-10-07）：arm64 两件**只有 staging 真落地**时才用 `--config
+#    src-tauri/tauri.arm64-payload.conf.json` 覆盖式声明；`--config` 可重复，按
+#    RFC 7396 顺序合并（数组整体覆盖），因此两份配置叠加是安全的。默认
+#    src-tauri/tauri.conf.json 必须保持 x64 单载荷，理由见 RELEASING.md。
 #
 # 签名：默认读取本机测试密钥 %LOCALAPPDATA%\SayAll\local-test-updater.key；口令取
 # -SigningKeyPassword → 环境变量 TAURI_SIGNING_PRIVATE_KEY_PASSWORD → 本机测试约定
@@ -78,7 +82,7 @@ Write-Host "[2/6] 校验 frida-gadget（vendor 锁定文件）"
 if ($LASTEXITCODE -ne 0) { throw "frida-gadget 校验失败" }
 
 # ---- 3/6 staging：构建助手并落地 src-tauri（注意：本步不要设 CARGO_TARGET_DIR） ----
-Write-Host "[3/6] stage-bundle-inputs（助手 release + gadget 落地）"
+Write-Host "[3/6] stage-bundle-inputs（助手 release + gadget 落地；arm64 载荷视本机工具链而定）"
 Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
 & node (Join-Path $repo "scripts\stage-bundle-inputs.cjs")
 if ($LASTEXITCODE -ne 0) { throw "staging 失败" }
@@ -103,7 +107,21 @@ if (Test-Path $SigningKeyPath) {
 } else {
     Write-Host "[5/6] 未找到本机测试密钥，跳过 updater 签名"
 }
-Invoke-Pnpm @("tauri", "build", "--bundles", "nsis", "--ci", "--config", "src-tauri/tauri.local-build.conf.json")
+# arm64 双载荷：只有 staging 真的把两件都落到 src-tauri 之后，才用 --config 覆盖式
+# 声明它们（默认 src-tauri/tauri.conf.json 必须保持 x64 单载荷：tauri-build 在编译期
+# 校验资源存在，而 arm64 助手在本机缺 VS ARM64 工具集时根本构建不出来——写进默认
+# 配置会让全仓库的 cargo check / cargo test 直接失败）。理由与接口见 RELEASING.md。
+$arm64PayloadNames = @("sayall-helper-arm64.exe", "frida-gadget-arm64.dll")
+$arm64Missing = @($arm64PayloadNames | Where-Object { -not (Test-Path (Join-Path $repo ("src-tauri\" + $_))) })
+$tauriArgs = @("tauri", "build", "--bundles", "nsis", "--ci", "--config", "src-tauri/tauri.local-build.conf.json")
+if ($arm64Missing.Count -eq 0) {
+    $tauriArgs += @("--config", "src-tauri/tauri.arm64-payload.conf.json")
+    Write-Host "[5/6] 本包含 arm64 载荷（追加 --config src-tauri/tauri.arm64-payload.conf.json）"
+} else {
+    Write-Host ("[5/6] 警告：本包不含 arm64 载荷（缺 " + ($arm64Missing -join ", ") + "）")
+    Write-Host "[5/6] 警告：ARM64 机器上安装后应用会明确提示不支持「全按键支持」；语音路径不受影响"
+}
+Invoke-Pnpm $tauriArgs
 if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
 
 # ---- 6/6 嵌入校验（裸 exe！）与产物报告 ----

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "xiaomi-voice-remote.hid-button",
+  "sourceRevision": null,
+  "events": [
+    {
+      "atMilliseconds": 0,
+      "kind": "hid_attached"
+    },
+    {
+      "atMilliseconds": 10,
+      "kind": "hid_report",
+      "reportID": 1,
+      "dataHex": "280000000000"
+    },
+    {
+      "atMilliseconds": 20,
+      "kind": "hid_report",
+      "reportID": 1,
+      "dataHex": "000000000000"
+    },
+    {
+      "atMilliseconds": 30,
+      "kind": "hid_removed"
+    }
+  ]
+}
