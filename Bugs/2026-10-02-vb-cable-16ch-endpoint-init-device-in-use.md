@@ -60,3 +60,28 @@
     或日志出现 `phase=retry` / `reason=fallback_sibling` 后成功。
 - 隐私检查：未含设备地址、端点 GUID、个人路径、语音内容或凭据；端点名称为 VB-Audio 官方
   通用名称。
+
+## 追加（2026-10-08）：同一个坑在「启动恢复」路径再犯——兜底已抽成共享函数
+
+操作人现场：启动应用时提示
+`恢复上次选择的输出端点失败：… CABLE In 16 Ch … 0x8889000A`。
+
+- 日志（revision `01796bd`）：`action=restore phase=requested` → `action=open phase=retry`
+  **5 档全 0x8889000A**（0/150/400/900/1600 ms，共 3.1 s）→ `action=restore …
+  terminal_result=failed`，界面直接报错。
+- 根因：10-02 的兜底只加在「用户点选」路径；**启动恢复路径漏了**——两条路径各有一份开端点逻辑，
+  只修了一条。本次故障的形态就是它复发。
+- 本机复现（`cargo run -p sayall-windows --example wasapi_probe`，产品同参数）：
+  `[hold:#0] #0 ok 扬声器 (2- VB-Audio Virtual Cable)` → `[hold:#0] #3 fail 0x8889000A
+  CABLE In 16 Ch (…)`：**同一进程持有同一虚拟设备的另一端点时，16 Ch 端点初始化必失败**；
+  `[reopen] two shared clients ok`：共享模式同端点可多客户端 —— 兜底到同设备兄弟端点安全。
+- 修复：`open_with_sibling_fallback`（开端点 + 同设备兜底）由**两条路径共用**；恢复成功后按
+  **实际打开的端点**上报（界面沿用「已自动改用 …」文案）；日志新增
+  `action=restore … reason=fallback_sibling`；判据抽成纯函数 `sibling_fallback_candidates`
+  并加单测。
+- 验证：`cargo test -p sayall-windows --lib` **320 passed / 0 failed / 12 ignored**（含新增
+  `sibling_fallback_needs_the_requested_endpoint_in_the_list`）。真机复测：本分支构建全新安装后
+  启动，恢复**直接成功**（`action=restore … terminal_result=passed`，`open_attempt=1`，未触发兜底）；
+  兜底分支的"真实触发时自动改用"端到端确认仍为 **deferred**（未再复现瞬态占用现场）。
+- 未覆盖边界：跨进程「兄弟端点被独占」的形态未构造（共享模式同一端点允许多客户端，探针已验证）；
+  驱动侧为何把 16 Ch 判为被占用仍未定位到持有者——两条路径现在共用兜底，不再依赖这个未知项。
