@@ -2957,71 +2957,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         !needle.is_empty() && listing.to_lowercase().contains(&needle)
     }
 
-    // ── 卸载清理专用 FFI：SetupAPI 设备状态切换 + 进程等待 ──────────────
-    //
-    // 为什么自声明：助手是自包含 spike，不引 windows crate（既有 FFI 同样自声明）。
-    #[repr(C)]
-    struct SpDevinfoData {
-        cb_size: u32,
-        class_guid: [u8; 16],
-        dev_inst: u32,
-        reserved: usize,
-    }
-
-    #[repr(C)]
-    struct SpClassInstallHeader {
-        cb_size: u32,
-        install_function: u32,
-    }
-
-    #[repr(C)]
-    struct SpPropchangeParams {
-        header: SpClassInstallHeader,
-        state_change: u32,
-        scope: u32,
-        hw_profile: u32,
-    }
-
-    const DIF_PROPERTYCHANGE: u32 = 0x0000_0012;
-    const DICS_ENABLE: u32 = 0x0000_0001;
-    const DICS_DISABLE: u32 = 0x0000_0002;
-    const DICS_FLAG_GLOBAL: u32 = 0x0000_0001;
+    // 进程等待用的常量（kernel32 的 OpenProcess / WaitForSingleObject / CloseHandle
+    // 本文件已声明，复用即可）。
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const WAIT_OBJECT_0: u32 = 0;
-    const DIGCF_PRESENT: u32 = 0x0000_0002;
-    const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
-
-    #[link(name = "setupapi")]
-    extern "system" {
-        fn SetupDiGetClassDevsW(
-            class_guid: *const c_void,
-            enumerator: *const u16,
-            hwnd_parent: *mut c_void,
-            flags: u32,
-        ) -> *mut c_void;
-        fn SetupDiEnumDeviceInfo(set: *mut c_void, index: u32, info: *mut SpDevinfoData) -> i32;
-        fn SetupDiGetDeviceInstanceIdW(
-            set: *mut c_void,
-            info: *mut SpDevinfoData,
-            instance_id: *mut u16,
-            instance_id_len: u32,
-            required_len: *mut u32,
-        ) -> i32;
-        fn SetupDiSetClassInstallParamsW(
-            set: *mut c_void,
-            info: *mut SpDevinfoData,
-            params: *mut SpClassInstallHeader,
-            size: u32,
-        ) -> i32;
-        fn SetupDiCallClassInstaller(
-            function: u32,
-            set: *mut c_void,
-            info: *mut SpDevinfoData,
-        ) -> i32;
-        fn SetupDiDestroyDeviceInfoList(set: *mut c_void) -> i32;
-    }
-
-    // kernel32 的 OpenProcess / WaitForSingleObject / CloseHandle 本文件已声明（复用即可）。
 
     /// 清理后是否还需要"放掉宿主再删一次"。
     ///
@@ -3034,183 +2973,142 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         dir.exists()
     }
 
-    /// 卸载清理专用：对遥控器设备做一次**禁用 → 启用**，放掉仍在映射 Gadget 的宿主进程；
-    /// 之后再删运行时目录就不会被文件锁挡住（2026-10-08 方案 B：不把"断开遥控器"推给用户，
-    /// 也不弹窗）。
+    /// 卸载清理专用：放掉仍在映射 Gadget 的宿主，让运行时目录能当场删净；
+    /// 之后再删就不会被文件锁挡住（2026-10-08 方案 B：不把"断开遥控器"推给用户，也不弹窗）。
     ///
-    /// 安全边界（写在前面，改这里前先读）：
-    /// - **永远重新启用**：禁用成功之后无论后面发生什么，都会尝试重新启用（最多 5 次）；
-    ///   只有启用也失败时才会留下"设备被禁用"的状态，且会在日志里明确写出来。
-    /// - 共享宿主（宿主里还挂着别的设备）下禁用不会让宿主退出：等待超时后照常重新启用，
-    ///   由调用方回退到"安排到重启删除"。
+    /// **为什么是"结束宿主"而不是"禁用设备"**（请勿回退，2026-10-08 真机逐条实证）：
+    /// gadget 是助手用 Frida **注入**进 UMDF 宿主的，不是驱动加载，于是：
+    /// - `pnputil /restart-device` 成功返回（exit=0）也**不卸载**注入模块——映射仍在，文件删不掉；
+    /// - `pnputil /disable-device` 被系统拒绝：`Cannot disable critical system device`
+    ///   （`SetupDiCallClassInstaller` 同码 CR_NO_SUCH_DEVINST 0xE0000201，与实例 ID / 参数无关）；
+    /// - **结束宿主进程**后，两份 `frida-gadget` 映射随进程消亡，运行时目录**普通删除即成功**
+    ///   （真机：`plain_delete=ok`、`runtime_dir_exists=False`，不需要 takeown / 改 ACL）。
+    ///
+    /// 安全边界（改这里前先读）：
+    /// - **只结束"独占 RC003"的宿主**：宿主同时承载别的 HID 设备（2026-09-25 起产品允许）时不动手，
+    ///   回退到"安排到重启删除"——误杀会让用户别的 BLE 设备一起掉。
+    /// - 只结束**确实持有 gadget 注入**的宿主（防 pid 复用 / 误伤）。
     /// - 任何一步失败都只返回 false，不 panic、不打断卸载。
     /// - 只在这轮清理**确有删不掉的文件**时才被调用（调用方保证）。
     #[cfg(windows)]
-    fn reset_rc003_device_link(instance_id: &str, host_pid: Option<u32>, logger: &Logger) -> bool {
-        let switch_state = |disable: bool, header_cb_size: u32| -> Result<(), String> {
-            unsafe {
-                // 用 devcon（微软参考实现）的做法：在 `ALLCLASSES | PRESENT` 集合里**枚举出活设备**，
-                // 再对该元素调类安装器。早先用 `SetupDiCreateDeviceInfoList` + `SetupDiOpenDeviceInfoW`
-                // 拿到的元素不绑定活设备，`CallClassInstaller` 直接报 CR_NO_SUCH_DEVINST
-                // (0xE0000201)——2026-10-08 真机实证（OpenDeviceInfo 成功、下一句就挂）。
-                let set = SetupDiGetClassDevsW(
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    DIGCF_PRESENT | DIGCF_ALLCLASSES,
-                );
-                if set.is_null() || set as isize == -1 {
-                    return Err(format!("GetClassDevs: {}", std::io::Error::last_os_error()));
-                }
-                let mut found: Option<SpDevinfoData> = None;
-                let mut index = 0u32;
-                while found.is_none() {
-                    let mut info = SpDevinfoData {
-                        cb_size: std::mem::size_of::<SpDevinfoData>() as u32,
-                        class_guid: [0u8; 16],
-                        dev_inst: 0,
-                        reserved: 0,
-                    };
-                    if SetupDiEnumDeviceInfo(set, index, &mut info) == 0 {
-                        break;
-                    }
-                    index += 1;
-                    let mut buffer = [0u16; 512];
-                    if SetupDiGetDeviceInstanceIdW(
-                        set,
-                        &mut info,
-                        buffer.as_mut_ptr(),
-                        buffer.len() as u32,
-                        std::ptr::null_mut(),
-                    ) != 0
-                        && from_wide(&buffer).eq_ignore_ascii_case(instance_id)
-                    {
-                        found = Some(info);
-                    }
-                }
-                let mut info = match found {
-                    Some(info) => info,
-                    None => {
-                        let _ = SetupDiDestroyDeviceInfoList(set);
-                        return Err(format!("枚举 {index} 个设备未找到目标实例"));
-                    }
-                };
-                let mut params = SpPropchangeParams {
-                    header: SpClassInstallHeader {
-                        // 注意：这里是 **header 自身** 的大小（8），不是整个 SP_PROPCHANGE_PARAMS。
-                        // 2026-10-08 真机实证：填 20 时 SetupDiSetClassInstallParams 直接报
-                        // 1784（ERROR_INVALID_USER_BUFFER）；MS 样例（Disabling a Device）填的
-                        // 就是 sizeof(SP_CLASSINSTALL_HEADER)，而调用本身传整块 20 字节。
-                        cb_size: header_cb_size,
-                        install_function: DIF_PROPERTYCHANGE,
-                    },
-                    state_change: if disable { DICS_DISABLE } else { DICS_ENABLE },
-                    scope: DICS_FLAG_GLOBAL,
-                    hw_profile: 0,
-                };
-                if SetupDiSetClassInstallParamsW(
-                    set,
-                    &mut info,
-                    &mut params.header,
-                    std::mem::size_of::<SpPropchangeParams>() as u32,
-                ) == 0
-                {
-                    let error = std::io::Error::last_os_error();
-                    let _ = SetupDiDestroyDeviceInfoList(set);
-                    return Err(format!("SetClassInstallParams: {error}"));
-                }
-                if SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set, &mut info) == 0 {
-                    let error = std::io::Error::last_os_error();
-                    let _ = SetupDiDestroyDeviceInfoList(set);
-                    return Err(format!("CallClassInstaller: {error}"));
-                }
-                let _ = SetupDiDestroyDeviceInfoList(set);
-                Ok(())
-            }
-        };
-
-        // 宿主进程退出了吗？退出了文件锁就没了。开不到句柄（多半已退出）也算退出。
-        let host_exited = |pid: u32, budget_ms: u32| -> bool {
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_millis(budget_ms as u64);
-            loop {
-                let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
-                if handle.is_null() {
-                    return true;
-                }
-                let waited = unsafe { WaitForSingleObject(handle, 200) };
-                let _ = unsafe { CloseHandle(handle) };
-                if waited == WAIT_OBJECT_0 {
-                    return true;
-                }
-                if std::time::Instant::now() >= deadline {
-                    return false;
-                }
-            }
-        };
-
-        logger.line("[CLEANUP] 运行时文件被宿主占用：对遥控器设备做一次禁用→启用以释放文件锁（不记录设备身份）。");
-        // cbSize 的期望值在 MS 样例与部分文档之间不一致：8 = SP_CLASSINSTALL_HEADER
-        // （MS「Disabling a Device」样例），20 = 整个 SP_PROPCHANGE_PARAMS。
-        // 2026-10-08 真机实证：填 20 时 SetupDiSetClassInstallParams 报 1784
-        // （ERROR_INVALID_USER_BUFFER）。两个值都试——先按样例的 8，错误码是 1784 时换 20；
-        // 哪个能过就用哪个把设备启回来（禁用与启用必须用同一个值，否则会留禁用态）。
-        let mut working_cb_size = std::mem::size_of::<SpClassInstallHeader>() as u32;
-        let mut disabled = switch_state(true, working_cb_size);
-        if let Err(first) = &disabled {
-            if first.contains("1784") {
-                working_cb_size = std::mem::size_of::<SpPropchangeParams>() as u32;
-                logger.line(&format!(
-                    "[CLEANUP] SetClassInstallParams 用 cbSize={}（header）报 1784，换 cbSize={}（整块）再试。",
-                    std::mem::size_of::<SpClassInstallHeader>(),
-                    std::mem::size_of::<SpPropchangeParams>()
-                ));
-                disabled = switch_state(true, working_cb_size);
-            }
-        }
-        if let Err(error) = disabled {
-            logger.line(&format!(
-                "[CLEANUP] 禁用设备失败：{error}；跳过释放，回退到「安排到重启删除」。"
-            ));
+    fn release_injected_host(
+        pid: u32,
+        members: usize,
+        rc003_members: usize,
+        logger: &Logger,
+    ) -> bool {
+        if members != 1 || rc003_members != 1 {
+            logger.kv(
+                "[CLEANUP]",
+                &[
+                    ("host_release", "skipped_shared_host".into()),
+                    ("members", members.to_string()),
+                    ("rc003_members", rc003_members.to_string()),
+                ],
+            );
             return false;
         }
-        let released = match host_pid {
-            Some(pid) => host_exited(pid, 8_000),
-            None => true,
-        };
-        // 无论宿主是否退出，都必须把设备放回去。
-        let mut reenabled = false;
-        for _ in 0..5 {
-            if switch_state(false, working_cb_size).is_ok() {
-                reenabled = true;
-                break;
+        let taps = match enum_modules(pid) {
+            Ok(modules) => resident_taps(&modules).len(),
+            Err(error) => {
+                logger.line(&format!("[CLEANUP] 无法枚举宿主模块，跳过释放：{error}"));
+                return false;
             }
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        }
-        if !reenabled {
-            logger.line(
-                "[CLEANUP] ⚠ 设备重新启用失败：设备可能停在禁用状态，请在设备管理器里手动启用（这一次卸载不会重试）。",
-            );
+        };
+        if taps == 0 {
+            logger.line("[CLEANUP] 宿主里没有 gadget 注入（可能已自行卸载），跳过释放。");
             return false;
         }
         logger.kv(
             "[CLEANUP]",
             &[
-                ("device_cycle", "reenabled".into()),
-                ("host_released", released.to_string()),
+                ("host_release", "terminating".into()),
+                ("gadget_maps", taps.to_string()),
             ],
+        );
+        if let Err(error) = terminate_process(pid) {
+            logger.line(&format!("[CLEANUP] 结束宿主失败：{error}"));
+            return false;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let released = loop {
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                break true;
+            }
+            let waited = unsafe { WaitForSingleObject(handle, 200) };
+            let _ = unsafe { CloseHandle(handle) };
+            if waited == WAIT_OBJECT_0 {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+        };
+        logger.kv(
+            "[CLEANUP]",
+            &[(
+                "host_release",
+                if released {
+                    "released".into()
+                } else {
+                    "timeout".into()
+                },
+            )],
         );
         released
     }
 
     #[cfg(not(windows))]
-    fn reset_rc003_device_link(
-        _instance_id: &str,
-        _host_pid: Option<u32>,
+    fn release_injected_host(
+        _pid: u32,
+        _members: usize,
+        _rc003_members: usize,
         _logger: &Logger,
     ) -> bool {
         false
     }
+
+    /// 宿主被终结后，它挂载的设备节点可能停在 `Error`（真机实证：遥控器本体 OK、HID 子节点 Error，
+    /// 此时按键不可用）。用系统自带 `pnputil` 修：**移除失效节点 → 扫描硬件改动**让节点重新枚举。
+    /// 真机实证（2026-10-08）：只 `restart-device` 不生效（Error 仍为 1），
+    /// `remove-device` + `scan-devices` 后恢复 0；之后宿主重新拉起且**不再有 gadget 映射**（锁保持释放）。
+    /// 这一步放在删除运行时目录**之后**：删除只需要映射消失，不必等设备恢复。
+    #[cfg(windows)]
+    fn recover_device_nodes(instance_id: &str, logger: &Logger) {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        let removed = std::process::Command::new("pnputil")
+            .args(["/remove-device", instance_id])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        let scanned = std::process::Command::new("pnputil")
+            .arg("/scan-devices")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                (
+                    "device_recover",
+                    if removed && scanned {
+                        "ok".into()
+                    } else {
+                        "partial".into()
+                    },
+                ),
+                ("remove_ok", removed.to_string()),
+                ("scan_ok", scanned.to_string()),
+            ],
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn recover_device_nodes(_instance_id: &str, _logger: &Logger) {}
 
     /// 删干净运行时目录（递归）。删不掉的文件（典型：宿主仍映射着那一代 Gadget）安排到
     /// 下次重启删除——这不是错误，只是要等设备断开或重启才真的消失。目录空了再把父目录
@@ -4756,14 +4654,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             // 「已清理运行时目录（删除 0 个目录 / 0 个文件）」）。
             if host_release_still_needed(&args.runtime_dir, &report) {
                 // 2026-10-08 方案 B（用户要求：不把"断开遥控器"推给用户，也不弹窗）：
-                // 宿主进程映射着 Gadget 时文件删不掉——由提权助手对遥控器设备做一次
-                // 禁用→启用，把宿主放掉，再重试删除；失败或共享宿主时自动回退到
+                // 宿主进程映射着 Gadget 时文件删不掉——由提权助手结束**持有注入且独占 RC003**
+                // 的宿主，把映射随进程放掉，再重试删除；共享宿主或任一失败都自动回退到
                 // 「安排到重启删除」（仍然不弹窗）。
                 if let Ok(scan) = enum_hosts() {
                     if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
-                        if let Some(instance) = entry.rc003_instance_id.clone() {
-                            if reset_rc003_device_link(&instance, Some(entry.pid), &logger) {
-                                report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+                        let pid = entry.pid;
+                        let members = scan.entries.iter().filter(|item| item.pid == pid).count();
+                        let rc003_members = scan
+                            .entries
+                            .iter()
+                            .filter(|item| item.pid == pid && item.is_rc003)
+                            .count();
+                        if release_injected_host(pid, members, rc003_members, &logger) {
+                            report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+                            // 删除只需要映射消失；设备节点的恢复放在删除之后做（要跑 pnputil，慢一拍）。
+                            if let Some(instance) = entry.rc003_instance_id.clone() {
+                                recover_device_nodes(&instance, &logger);
                             }
                         }
                     }
