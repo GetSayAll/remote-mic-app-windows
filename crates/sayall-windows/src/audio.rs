@@ -339,41 +339,8 @@ fn worker_loop(receiver: Receiver<AudioMessage>, state: Arc<Mutex<AudioSnapshot>
                     }
                     sink = None;
                     queue.clear();
-                    let mut opened =
-                        AudioSink::open(&endpoint_id, attempt_id, &OPEN_RETRY_DELAYS_MS);
-                    let mut fell_back = false;
-                    if opened.is_err() {
-                        // 兜底：同设备其它 CABLE 端点（现场：16 Ch 被占用时同设备另一个
-                        // 端点可用且同样回环到 CABLE Output）。只在「同设备」范围内换，
-                        // 跨设备静默换会让输入法监听的 CABLE Output 收不到声音。
-                        let endpoints = list_endpoints().unwrap_or_default();
-                        let requested = endpoints
-                            .iter()
-                            .find(|endpoint| endpoint.id == endpoint_id)
-                            .cloned();
-                        if let Some(requested) = requested {
-                            for candidate in
-                                same_device_virtual_cable_candidates(&requested, &endpoints)
-                            {
-                                crate::ble::gatt_note(format!(
-                                    "audio_endpoint attempt_id={attempt_id} action=select phase=fallback result=attempted endpoint_kind={}",
-                                    endpoint_kind(&candidate.id, &candidate.name)
-                                ));
-                                match AudioSink::open(
-                                    &candidate.id,
-                                    attempt_id,
-                                    &OPEN_FALLBACK_RETRY_DELAYS_MS,
-                                ) {
-                                    Ok(sink_from_candidate) => {
-                                        fell_back = true;
-                                        opened = Ok(sink_from_candidate);
-                                        break;
-                                    }
-                                    Err(_) => continue,
-                                }
-                            }
-                        }
-                    }
+                    let (opened, fell_back) =
+                        open_with_sibling_fallback(&endpoint_id, attempt_id, "select");
                     match opened {
                         Ok(opened) => {
                             let kind = endpoint_kind(&endpoint_id, &opened.name);
@@ -688,6 +655,49 @@ fn render_endpoint_inactive_counts() -> windows::core::Result<(u32, u32, u32)> {
     ))
 }
 
+/// 兜底候选：目标端点必须仍在端点列表里（否则无从判断"同设备"，不猜）。
+fn sibling_fallback_candidates(
+    endpoint_id: &str,
+    endpoints: &[AudioEndpoint],
+) -> Vec<AudioEndpoint> {
+    match endpoints.iter().find(|endpoint| endpoint.id == endpoint_id) {
+        Some(requested) => same_device_virtual_cable_candidates(requested, endpoints),
+        None => Vec::new(),
+    }
+}
+
+/// 打开端点；失败时按「同设备其它 CABLE 端点」兜底，返回 `(结果, 是否用了兜底)`。
+///
+/// **两条路径共用**（用户点选 / 启动恢复）。2026-10-08 的现场就是"各写一份、只修一条"：
+/// 0x8889000A 的兜底 2026-10-02 只加在用户点选路径，启动恢复路径于是把
+/// 「恢复上次选择的输出端点失败」直接甩给用户（重试 5 档全 0x8889000A，耗时 3.1 s）。
+/// 抽成一个函数，以后不会再漂移。
+///
+/// 兜底只在「同设备」范围内换（`same_device_virtual_cable_candidates`）：跨设备静默换会让
+/// 输入法监听的 `CABLE Output` 收不到声音。
+fn open_with_sibling_fallback(
+    endpoint_id: &str,
+    attempt_id: u64,
+    log_action: &str,
+) -> (Result<AudioSink, PlatformError>, bool) {
+    let opened = AudioSink::open(endpoint_id, attempt_id, &OPEN_RETRY_DELAYS_MS);
+    if opened.is_ok() {
+        return (opened, false);
+    }
+    let endpoints = list_endpoints().unwrap_or_default();
+    for candidate in sibling_fallback_candidates(endpoint_id, &endpoints) {
+        crate::ble::gatt_note(format!(
+            "audio_endpoint attempt_id={attempt_id} action={log_action} phase=fallback result=attempted endpoint_kind={}",
+            endpoint_kind(&candidate.id, &candidate.name)
+        ));
+        if let Ok(sink) = AudioSink::open(&candidate.id, attempt_id, &OPEN_FALLBACK_RETRY_DELAYS_MS)
+        {
+            return (Ok(sink), true);
+        }
+    }
+    (opened, false)
+}
+
 fn restore_endpoint(
     sink: &mut Option<AudioSink>,
     state: &Arc<Mutex<AudioSnapshot>>,
@@ -725,12 +735,19 @@ fn restore_endpoint(
         return snapshot;
     }
 
-    match AudioSink::open(&endpoint_id, attempt_id, &OPEN_RETRY_DELAYS_MS) {
+    let (opened, fell_back) = open_with_sibling_fallback(&endpoint_id, attempt_id, "restore");
+    match opened {
         Ok(opened) => {
-            let kind = endpoint_kind(&endpoint_id, &opened.name);
-            let snapshot = ready_snapshot(endpoint_id, opened.name.clone());
+            let kind = endpoint_kind(&opened.endpoint_id, &opened.name);
+            let snapshot = ready_snapshot(opened.endpoint_id.clone(), opened.name.clone());
             *sink = Some(opened);
             *lock(state) = snapshot.clone();
+            if fell_back {
+                crate::ble::gatt_note(format!(
+                    "audio_endpoint attempt_id={attempt_id} action=restore phase=completed terminal_result=passed reason=fallback_sibling endpoint_kind={kind} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ));
+            }
             crate::ble::gatt_note(format!(
                 "audio_endpoint attempt_id={attempt_id} action=restore phase=completed terminal_result=passed endpoint_kind={kind} elapsed_ms={}",
                 started.elapsed().as_millis()
@@ -1615,6 +1632,24 @@ mod tests {
         assert!(
             total <= 4_000,
             "重试总预算必须显著小于 IPC 请求超时（10s），实际 {total}ms"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sibling_fallback_needs_the_requested_endpoint_in_the_list() {
+        // 目标端点不在列表里（换过设备 / 驱动重装）时不猜兜底，直接报原错误。
+        // 这条判据由「用户点选」与「启动恢复」两条路径共用（2026-10-08：恢复路径漏用兜底
+        // 导致 0x8889000A 直接把错误甩给用户）。
+        let endpoints = vec![AudioEndpoint {
+            id: "cable-speaker".to_owned(),
+            name: "扬声器 (2- VB-Audio Virtual Cable)".to_owned(),
+            is_virtual_cable_candidate: true,
+        }];
+        assert!(sibling_fallback_candidates("cable-16ch", &endpoints).is_empty());
+        assert!(
+            sibling_fallback_candidates("cable-speaker", &endpoints).is_empty(),
+            "目标端点自己不算兜底候选"
         );
     }
 
