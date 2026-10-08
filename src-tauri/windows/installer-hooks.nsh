@@ -486,7 +486,7 @@
   ; ── 运行时目录兜底清理 ────────────────────────────────────────────
   ; 助手自清过（上面那条路径）时这里已经没了，零开销跳过。
   ; 还在的话：先做一次非提权删除（管用就免费），仍留下时——交互式卸载用 runas
-  ; 拉起安装目录里的助手做一次提权清理；静默安装在无人应答 UAC 的环境里跳过提权，
+  ; 拉起安装目录里的助手做一次提权清理（含需要时的设备环）；静默安装在无人应答 UAC 的环境里跳过提权，
   ; 只保留非提权尝试（CI 的静默卸载正是这一支）。
   ;
   ; 注意：`$PROGRAMDATA` **不是** NSIS 变量（makensis 只会警告然后把它当字面量，
@@ -505,7 +505,9 @@
     IfFileExists "$INSTDIR\sayall-helper-arm64.exe" 0 sayall_runtime_cleanup_tidy_uninstall
     ExecShell "runas" "$INSTDIR\sayall-helper-arm64.exe" "--uninstall-cleanup"
     sayall_runtime_cleanup_wait_uninstall:
-    ; ExecShell 拿不到子进程退出码，所以按"目录是否消失"等待，预算 20s（清理通常 <1s）。
+    ; ExecShell 拿不到子进程退出码，所以按"目录是否消失"等待，预算 20s。
+    ; 提权助手这一趟会：删能删的 → 对遥控器设备做禁用→启用（放掉映射着 Gadget 的
+    ; 宿主进程，方案 B）→ 再删一次 → 仍删不掉才安排到重启删除。整趟通常 <10s。
     StrCpy $R9 20000
     sayall_runtime_cleanup_wait_loop_uninstall:
       Sleep 250
@@ -518,12 +520,10 @@
   sayall_runtime_cleanup_tidy_uninstall:
   ; 目录空了就把父目录也收掉（非递归，只有真的空才成功）。
   RMDir "$R7\SayAll"
-  ; 仍剩下东西：如实告知（授权被取消，或文件被宿主占用 → 助手已把它安排在下次重启删除）。
-  IfFileExists "$R7\SayAll\rc003-helper\*.*" 0 sayall_runtime_cleanup_reported_uninstall
-    ${IfNot} ${Silent}
-      MessageBox MB_ICONINFORMATION|MB_OK "增强捕获的运行时数据未能立即全部删除（授权被取消，或文件正被遥控器宿主占用）。已安排的部分会在下次重启后自动删除；其余文件在 $\"%ProgramData%\SayAll\rc003-helper$\" 下，可手动删除。$\r$\n$\r$\nSome RC003 runtime data could not be removed now. Files that were in use are scheduled for deletion at the next restart."
-    ${EndIf}
-  sayall_runtime_cleanup_reported_uninstall:
+  ; 2026-10-08 产品决定（用户明确）：**卸载不再弹窗**。删不掉的东西由助手先做设备环
+  ; 释放锁、再删；仍删不掉的一律安排到重启后自动删除——用户既不需要先断开遥控器，
+  ; 也不需要读一个"未能立即全部删除"的提示。助手那一趟的结论落在诊断日志的
+  ; `[CLEANUP]` 行里（日志目录在 LOCALAPPDATA，卸载不会删它，便于事后核对）。
   Pop $R7
 
   ; 两个信号文件都是"投递用"的：助手在跑就被它取走（take_stop_signal 取走即删），
