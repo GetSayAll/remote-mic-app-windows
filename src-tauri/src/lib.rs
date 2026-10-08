@@ -934,7 +934,7 @@ enum AutoTriggerCheck {
     Connected,
     /// 桥在监听、助手未连上：继续触发。
     Retry,
-    /// 桥不在监听（failed/stopped）：触发无意义，放弃。
+    /// 桥不在监听（failed/stopped）：触发无意义，等待重查。
     Abort,
 }
 
@@ -946,26 +946,102 @@ fn classify_auto_trigger(snapshot: &BridgeSnapshot) -> AutoTriggerCheck {
     }
 }
 
-/// 启动时自动拉起助手，带**有界重试 + 全程日志 + 卡实例兜底**。
+/// 常驻对账的节奏参数（纯常量，测试钉住）。
 ///
-/// 背景（2026-09-27 真机复盘）：此前的实现是 `let _ = task_trigger()`
-/// ——触发被拒（上一次任务实例还挂着，`MultipleInstancesPolicy=IgnoreNew`
-/// 让 `/run` 每次都失败）、或助手读了过期描述文件时，既无日志也无重试，
-/// 开关开着、桥停在 listening，界面就永远显示「正在启动」。
+/// 2026-10-04 用户要求「重启后自动恢复全按键支持」。旧实现是**一次性**的：
+/// 4 轮 × 5s + 兜底一次，约 25s 后放弃并把结果交给按键页。结构上必然失败的
+/// 场景：电脑重启后应用随登录自启，此刻 RC003 往往还没被 Windows 枚举
+/// （遥控器未唤醒/未连接）——助手会以退出码 11 直接退出（[STOP] 读到 WUDF
+/// 宿主但都不是承载 RC003 的实例，见 helper 的 `resolve_target`）。一次性
+/// 重试全部落空后**不再拉起**：开关开着、界面永远停在「正在启动」，用户
+/// 只能手动关开一次（还要再弹一次 UAC）。产品规则是「用户侧零介入」，
+/// 恢复必须由应用在设备晚到、助手崩溃、宿主重启等场景下自己完成。
+const AUTO_TRIGGER_RAPID_MS: u64 = 5_000;
+/// 稳态重试间隔：设备晚到时最迟一个间隔内自动恢复，又不会把日志刷爆。
+const AUTO_TRIGGER_STEADY_MS: u64 = 30_000;
+/// 已连接后的观察间隔：助手掉线（崩溃 / 宿主重启）要能被发现并重新拉起。
+const AUTO_TRIGGER_WATCH_MS: u64 = 15_000;
+/// 开关关闭 / 桥不在监听时的复查间隔（不触发，只等待状态变化）。
+const AUTO_TRIGGER_IDLE_MS: u64 = 30_000;
+/// 前几轮快速重试的轮数。
+const AUTO_TRIGGER_RAPID_ATTEMPTS: u32 = 4;
+/// 第几轮做 `/end` + `/run` 兜底（清可能卡住的任务实例）。
+const AUTO_TRIGGER_ESCALATE_ATTEMPT: u32 = 5;
+/// 稳态期每多少轮再兜底一次（防同一个卡实例问题复发）。
+const AUTO_TRIGGER_REESCALATE_EVERY: u32 = 10;
+/// 连续失败时的日志折叠：前 3 轮与每 10 轮各留一条。
+const AUTO_TRIGGER_LOG_EVERY: u32 = 10;
+
+/// 第 `consecutive` 轮失败后的等待时长（纯函数）。
 ///
-/// 行为：
-/// * 每轮先看桥接快照——助手已连上立即收工；桥 failed/stopped 放弃；
-/// * 重试前**重读设置**：用户中途关掉开关就立即收手（否则重试会顶掉
-///   用户的「关闭」意图）；
-/// * 最多 `MAX_AUTO_TRIGGER_ATTEMPTS` 轮触发，每轮间隔
-///   `AUTO_TRIGGER_RETRY_MS`；
-/// * 全部落空后兜底一次 `/end`（结束可能卡住的任务实例）+ `/run`，
-///   并把最终对账结果落日志——此后不再重试，状态由按键页如实呈现。
+/// 快速期 = 前 `AUTO_TRIGGER_RAPID_ATTEMPTS` 轮，加上第
+/// `AUTO_TRIGGER_ESCALATE_ATTEMPT` 轮本身（兜底轮后仍快速复查一次）；
+/// 此后进入稳态。
+fn auto_trigger_retry_delay_ms(consecutive: u32) -> u64 {
+    if consecutive <= AUTO_TRIGGER_RAPID_ATTEMPTS || consecutive == AUTO_TRIGGER_ESCALATE_ATTEMPT {
+        AUTO_TRIGGER_RAPID_MS
+    } else {
+        AUTO_TRIGGER_STEADY_MS
+    }
+}
+
+/// 这一轮是否值得写一条触发日志（前 3 轮 + 每 10 轮）：
+/// 稳态每 30 秒一轮，逐轮写会把诊断日志刷满；而 `attempt=` 字段保证
+/// 任何时刻都能从日志恢复出「已经连续重试了多少轮」。
+fn auto_trigger_attempt_should_log(consecutive: u32) -> bool {
+    consecutive <= 3 || consecutive % AUTO_TRIGGER_LOG_EVERY == 0
+}
+
+/// 这一轮是否做兜底（`/end` 清掉可能卡住的实例后再 `/run`）。
+///
+/// 只在计划轮次发生：`IgnoreNew` 下卡实例会让每次 `/run` 都被拒，兜底必须
+/// 存在；但每轮都 `/end` 会干扰一个可能正在正常注入 / 等待 hello 的助手，
+/// 所以第 5 轮一次、稳态每 10 轮一次。
+fn auto_trigger_should_escalate(consecutive: u32) -> bool {
+    consecutive == AUTO_TRIGGER_ESCALATE_ATTEMPT
+        || (consecutive > AUTO_TRIGGER_ESCALATE_ATTEMPT
+            && consecutive % AUTO_TRIGGER_REESCALATE_EVERY == 0)
+}
+
+/// 常驻对账的单轮动作（纯函数输出，测试钉住）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileAction {
+    /// 开关未开：不触发，按空闲节奏复查（绝不顶掉用户的「关闭」意图）。
+    Standby,
+    /// 桥不在监听（failed/stopped）：触发无意义，按空闲节奏复查。
+    WaitBridge,
+    /// 助手已连接：转入观察。
+    Connected,
+    /// 桥在监听但助手未连上：触发助手。
+    Trigger,
+}
+
+/// 开关与桥接快照 → 本轮动作。
+fn decide_reconcile_round(enabled: bool, check: AutoTriggerCheck) -> ReconcileAction {
+    if !enabled {
+        return ReconcileAction::Standby;
+    }
+    match check {
+        AutoTriggerCheck::Connected => ReconcileAction::Connected,
+        AutoTriggerCheck::Abort => ReconcileAction::WaitBridge,
+        AutoTriggerCheck::Retry => ReconcileAction::Trigger,
+    }
+}
+
+/// 助手自动拉起的**常驻对账**（2026-10-04 起从「一次性重试」改为常驻，
+/// 原因见上面常量注释；2026-09-27 真机复盘确立的判据不变：以桥接快照这个
+/// 独立外部观察为准，而不是 `schtasks /run` 的退出码）。
+///
+/// 应用存活期间一直运行的循环，每轮重读设置与桥接快照：
+/// * 开关关着 → 不触发（`Standby`）；
+/// * 桥 failed/stopped → 触发无意义，只重查（`WaitBridge`）；
+/// * 助手已连接 → 观察，掉线后重新进入恢复（重新来一轮快速期）；
+/// * 桥在监听、助手未连上 → 触发：前 4 轮每 5 秒，第 5 轮 `/end` + `/run`
+///   兜底一次，此后每 30 秒稳态重试，稳态期每 10 轮再兜底一次。
 fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: SettingsStore) {
-    const MAX_AUTO_TRIGGER_ATTEMPTS: u32 = 4;
-    const AUTO_TRIGGER_RETRY_MS: u64 = 5_000;
-    // 本机没有对应架构的载荷时，重试 5 次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
-    // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会又转 25 秒空转。
+    // 本机没有对应架构的载荷时，重试多少次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
+    // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会空转——
+    // 常驻对账尤其不能每 30 秒去撞一条必然连不上的路径。
     let support = rc003_task::capture_support();
     if !support.available {
         sayall_windows::gatt_note(format!(
@@ -981,92 +1057,119 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
         "rc003 feature=enhanced-capture action=auto_trigger phase=started reason=app_startup"
             .to_owned(),
     );
-    for attempt in 1..=MAX_AUTO_TRIGGER_ATTEMPTS {
-        match classify_auto_trigger(&platform.rc003_bridge_snapshot()) {
-            AutoTriggerCheck::Connected => {
-                sayall_windows::gatt_note(
-                    "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=helper_connected".to_owned(),
-                );
-                return;
-            }
-            AutoTriggerCheck::Abort => {
-                sayall_windows::gatt_note(
-                    "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=failed reason=bridge_not_listening retryable=false".to_owned(),
-                );
-                return;
-            }
-            AutoTriggerCheck::Retry => {}
-        }
-        let enabled_now = settings
+    // 连续「开关开着、桥在监听、但助手没连上」的轮数；连上或用户关闭即清零。
+    let mut consecutive: u32 = 0;
+    let mut was_connected = false;
+    // 以下标志只控制「状态刚变化时记一条」，避免空闲期重复刷屏。
+    let mut bridge_unavailable_logged = false;
+    let mut active_seen = false;
+    loop {
+        let enabled = settings
             .load()
             .map(|settings| settings.rc003_capture_enabled)
             .unwrap_or(false);
-        if !enabled_now {
-            sayall_windows::gatt_note(
-                "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=disabled_by_user_during_retry".to_owned(),
-            );
-            return;
+        let snapshot = platform.rc003_bridge_snapshot();
+        match decide_reconcile_round(enabled, classify_auto_trigger(&snapshot)) {
+            ReconcileAction::Standby => {
+                if active_seen {
+                    // 用户关闭开关（关闭动作自己已有日志）：对账转入等待，
+                    // 用户之后再次打开时由这里或 enable 命令重新拉起。
+                    sayall_windows::gatt_note(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=standby reason=disabled_by_user"
+                            .to_owned(),
+                    );
+                    active_seen = false;
+                }
+                consecutive = 0;
+                was_connected = false;
+                bridge_unavailable_logged = false;
+                std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
+            }
+            ReconcileAction::WaitBridge => {
+                if !bridge_unavailable_logged {
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=failed reason=bridge_not_listening retryable=true {}",
+                        bridge_health_summary(&snapshot)
+                    ));
+                    bridge_unavailable_logged = true;
+                }
+                active_seen = true;
+                was_connected = false;
+                consecutive = 0;
+                std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
+            }
+            ReconcileAction::Connected => {
+                if !was_connected {
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=helper_connected trigger_attempts={consecutive}"
+                    ));
+                }
+                active_seen = true;
+                was_connected = true;
+                consecutive = 0;
+                bridge_unavailable_logged = false;
+                std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_WATCH_MS));
+            }
+            ReconcileAction::Trigger => {
+                bridge_unavailable_logged = false;
+                if was_connected {
+                    // 助手掉线（崩溃 / 宿主重启 / 被系统回收）：重新进入恢复，
+                    // 先来一轮快速期。
+                    sayall_windows::gatt_note(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=started reason=helper_disconnected"
+                            .to_owned(),
+                    );
+                    was_connected = false;
+                    consecutive = 0;
+                }
+                active_seen = true;
+                consecutive += 1;
+                let escalate = auto_trigger_should_escalate(consecutive);
+                let loggable = auto_trigger_attempt_should_log(consecutive);
+                if escalate {
+                    // 很可能是上一次任务实例还挂着（`IgnoreNew` 下每次 `/run`
+                    // 都被拒）：此刻快照是「桥在监听、没有已连接助手」，
+                    // `/end` 清掉当前实例不会误杀正在工作的助手。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=started reason=helper_not_connected_after_retries attempt={consecutive}"
+                    ));
+                    match rc003_task::task_stop() {
+                        Ok(()) => sayall_windows::gatt_note(
+                            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=passed".to_owned(),
+                        ),
+                        Err(error) => sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=failed detail={error}"
+                        )),
+                    }
+                } else if loggable {
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=trigger attempt={consecutive}"
+                    ));
+                }
+                if escalate || loggable {
+                    match rc003_task::task_trigger() {
+                        Ok(()) => sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=auto_trigger{} phase={} terminal_result=passed attempt={consecutive}",
+                            if escalate { "_escalate" } else { "" },
+                            if escalate { "retriggered" } else { "triggered" }
+                        )),
+                        Err(error) => sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=auto_trigger{} phase={} terminal_result=failed attempt={consecutive} detail={error} {}",
+                            if escalate { "_escalate" } else { "" },
+                            if escalate { "retriggered" } else { "triggered" },
+                            bridge_health_summary(&snapshot)
+                        )),
+                    }
+                } else {
+                    // 折叠轮：仍要触发，只是不写日志（防止稳态每 30 秒刷屏；
+                    // 每 10 轮的 loggable 轮会把状态与健康摘要写全）。
+                    let _ = rc003_task::task_trigger();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(
+                    auto_trigger_retry_delay_ms(consecutive),
+                ));
+            }
         }
-        sayall_windows::gatt_note(format!(
-            "rc003 feature=enhanced-capture action=auto_trigger phase=trigger attempt={attempt}"
-        ));
-        match rc003_task::task_trigger() {
-            Ok(()) => sayall_windows::gatt_note(format!(
-                "rc003 feature=enhanced-capture action=auto_trigger phase=triggered terminal_result=passed attempt={attempt}"
-            )),
-            Err(error) => sayall_windows::gatt_note(format!(
-                "rc003 feature=enhanced-capture action=auto_trigger phase=triggered terminal_result=failed attempt={attempt} detail={error}"
-            )),
-        }
-        std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_RETRY_MS));
-    }
-    // 有界重试全部落空。`IgnoreNew` 下最常见的原因是上一次任务实例还挂着
-    // （每次 `/run` 都被拒）。此刻桥上没有已连接的助手（最后一轮 classify
-    // 是 Retry 才会走到这里），`/end` 结束当前实例是安全的，结束后再触发
-    // 一次；仍连不上就交还给按键页的状态行，不再无限重试。
-    sayall_windows::gatt_note(
-        "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=started reason=helper_not_connected_after_retries".to_owned(),
-    );
-    match classify_auto_trigger(&platform.rc003_bridge_snapshot()) {
-        AutoTriggerCheck::Connected => {
-            sayall_windows::gatt_note(
-                "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=passed reason=helper_connected".to_owned(),
-            );
-            return;
-        }
-        AutoTriggerCheck::Abort => {
-            sayall_windows::gatt_note(
-                "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=failed reason=bridge_not_listening retryable=false".to_owned(),
-            );
-            return;
-        }
-        AutoTriggerCheck::Retry => {}
-    }
-    match rc003_task::task_stop() {
-        Ok(()) => sayall_windows::gatt_note(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=passed".to_owned(),
-        ),
-        Err(error) => sayall_windows::gatt_note(format!(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=failed detail={error}"
-        )),
-    }
-    match rc003_task::task_trigger() {
-        Ok(()) => sayall_windows::gatt_note(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=retriggered terminal_result=passed".to_owned(),
-        ),
-        Err(error) => sayall_windows::gatt_note(format!(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=retriggered terminal_result=failed detail={error}"
-        )),
-    }
-    std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_RETRY_MS));
-    match classify_auto_trigger(&platform.rc003_bridge_snapshot()) {
-        AutoTriggerCheck::Connected => sayall_windows::gatt_note(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=passed reason=helper_connected".to_owned(),
-        ),
-        _ => sayall_windows::gatt_note(format!(
-            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=completed terminal_result=failed reason=helper_still_not_connected retryable=false {}",
-            bridge_health_summary(&platform.rc003_bridge_snapshot())
-        )),
     }
 }
 
@@ -2544,12 +2647,16 @@ pub fn run() {
             // （卸载器写入），以及任务意外缺失。用户重新打开时 enable 会强制
             // 重装任务（必弹 UAC）并清除标记。
             //
-            // 实际触发放在 platform 创建之后（见下方 rc003_auto_trigger_allowed）：
-            // bridge 的描述文件（命名管道 + 兼容端口 + 令牌）由 platform 创建时写出，**先触发
-            // 助手再写描述文件**会让助手读到上一轮主程序的过期端口，从此永远
-            // 连不上（2026-09-27 真机复盘，「正在启动」永不结束的成因之一）。
+            // 实际触发放在 platform 创建之后（见下方常驻对账的启动）：bridge 的
+            // 描述文件（命名管道 + 兼容端口 + 令牌）由 platform 创建时写出，
+            // **先触发助手再写描述文件**会让助手读到上一轮主程序的过期端口，
+            // 从此永远连不上（2026-09-27 真机复盘，「正在启动」永不结束的成因之一）。
+            //
+            // 这里只做**授权对账**：卸载标记在 / 任务缺失 → 开关回落为关闭；
+            // 是否触发不在这里定死——常驻对账每轮自己重读设置与桥接快照
+            // （2026-10-04 起，见 rc003_auto_trigger_reconcile）。
             #[cfg(windows)]
-            let rc003_auto_trigger_allowed = if saved_settings.rc003_capture_enabled {
+            if saved_settings.rc003_capture_enabled {
                 let reauth_required = rc003_task::reauth_required();
                 let task_installed = rc003_task::task_installed();
                 // 架构 / 载荷前置：本机原生架构没有对应的助手与 Gadget 时，打开开关也永远
@@ -2564,7 +2671,6 @@ pub fn run() {
                         support.helper_expected
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
-                    false
                 } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
                     // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
                     // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
@@ -2575,7 +2681,6 @@ pub fn run() {
                         support.helper_expected
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
-                    false
                 } else if reauth_required || !task_installed {
                     // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
                     // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验
@@ -2589,13 +2694,8 @@ pub fn run() {
                         }
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
-                    false
-                } else {
-                    true
                 }
-            } else {
-                false
-            };
+            }
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
             // 不阻断主程序启动，用户可在“关于”页重试。
             #[cfg(windows)]
@@ -2643,12 +2743,12 @@ pub fn run() {
                     .unwrap_or(false),
             );
 
-            // 自动拉起助手。此刻 bridge 已在监听、描述文件已写出（platform 创建
-            // 时完成），助手读到的端口/令牌一定是本轮的。失败**不再静默**：
-            // 有界重试 + 全程落日志 + IgnoreNew 卡实例的 /end 兜底，见
-            // rc003_auto_trigger_reconcile（2026-09-27 真机复盘）。
+            // 助手自动恢复的**常驻对账**（2026-10-04 起：设备晚到、助手掉线都
+            // 要能自愈，见 rc003_auto_trigger_reconcile 的注释）。启动点必须在
+            // platform 之后：描述文件已写出，助手读到的端口/令牌一定是本轮的
+            // （2026-09-27 真机复盘）；开关关闭时它只安静等待用户意图变化。
             #[cfg(windows)]
-            if rc003_auto_trigger_allowed {
+            {
                 let platform_for_trigger = Arc::clone(&platform);
                 let settings_for_trigger = settings.clone();
                 std::thread::spawn(move || {
@@ -3054,6 +3154,97 @@ mod tests {
             classify_auto_trigger(&BridgeSnapshot::default()),
             AutoTriggerCheck::Abort
         );
+    }
+
+    /// 常驻对账的单轮路由（2026-10-04「重启后自动恢复」）：
+    /// 用户意图优先——开关关着时即便桥在监听也绝不触发（不得顶掉「关闭」）；
+    /// 桥不在监听时触发无意义（也保证 CI 仿真不去碰真实计划任务）。
+    #[test]
+    fn reconcile_round_requires_enabled_switch_and_listening_bridge() {
+        assert_eq!(
+            decide_reconcile_round(false, AutoTriggerCheck::Retry),
+            ReconcileAction::Standby
+        );
+        assert_eq!(
+            decide_reconcile_round(false, AutoTriggerCheck::Connected),
+            ReconcileAction::Standby
+        );
+        assert_eq!(
+            decide_reconcile_round(false, AutoTriggerCheck::Abort),
+            ReconcileAction::Standby
+        );
+        assert_eq!(
+            decide_reconcile_round(true, AutoTriggerCheck::Retry),
+            ReconcileAction::Trigger
+        );
+        assert_eq!(
+            decide_reconcile_round(true, AutoTriggerCheck::Connected),
+            ReconcileAction::Connected
+        );
+        assert_eq!(
+            decide_reconcile_round(true, AutoTriggerCheck::Abort),
+            ReconcileAction::WaitBridge
+        );
+    }
+
+    /// 常驻对账的节奏：前几轮 5 秒快速重试，兜底轮之后进入 30 秒稳态——
+    /// 重启后设备晚到（遥控器未唤醒）时不再一次性放弃（旧实现约 25 秒后
+    /// 就不再拉起，开关会永远停在「正在启动」）。
+    #[test]
+    fn auto_trigger_rhythm_is_rapid_then_steady() {
+        for attempt in 1..=AUTO_TRIGGER_RAPID_ATTEMPTS {
+            assert_eq!(
+                auto_trigger_retry_delay_ms(attempt),
+                AUTO_TRIGGER_RAPID_MS,
+                "attempt={attempt}"
+            );
+        }
+        assert_eq!(
+            auto_trigger_retry_delay_ms(AUTO_TRIGGER_ESCALATE_ATTEMPT),
+            AUTO_TRIGGER_RAPID_MS,
+            "兜底轮仍按快速节奏，之后才进入稳态"
+        );
+        assert_eq!(
+            auto_trigger_retry_delay_ms(AUTO_TRIGGER_ESCALATE_ATTEMPT + 1),
+            AUTO_TRIGGER_STEADY_MS
+        );
+        assert_eq!(
+            auto_trigger_retry_delay_ms(u32::MAX),
+            AUTO_TRIGGER_STEADY_MS
+        );
+        assert!(AUTO_TRIGGER_STEADY_MS >= AUTO_TRIGGER_RAPID_MS);
+    }
+
+    /// 兜底只在计划轮次发生：第 5 轮与稳态每 10 轮。既不放过卡住的任务实例
+    /// （`IgnoreNew` 下每次 `/run` 都被拒），也不每轮都 `/end` 干扰一个可能
+    /// 正在正常注入 / 等待 hello 的助手。
+    #[test]
+    fn auto_trigger_escalates_only_at_planned_rounds() {
+        for attempt in 1..AUTO_TRIGGER_ESCALATE_ATTEMPT {
+            assert!(!auto_trigger_should_escalate(attempt), "attempt={attempt}");
+        }
+        assert!(auto_trigger_should_escalate(AUTO_TRIGGER_ESCALATE_ATTEMPT));
+        for attempt in (AUTO_TRIGGER_ESCALATE_ATTEMPT + 1)..AUTO_TRIGGER_REESCALATE_EVERY {
+            assert!(!auto_trigger_should_escalate(attempt), "attempt={attempt}");
+        }
+        assert!(auto_trigger_should_escalate(AUTO_TRIGGER_REESCALATE_EVERY));
+        assert!(auto_trigger_should_escalate(
+            AUTO_TRIGGER_REESCALATE_EVERY * 5
+        ));
+    }
+
+    /// 日志折叠：前 3 轮与每 10 轮各一条，稳态不刷屏；`attempt=` 字段保证
+    /// 任何时刻都能从日志恢复出「已经连续重试了多少轮」。
+    #[test]
+    fn auto_trigger_logging_folds_but_stays_auditable() {
+        assert!(auto_trigger_attempt_should_log(1));
+        assert!(auto_trigger_attempt_should_log(2));
+        assert!(auto_trigger_attempt_should_log(3));
+        for folded in 4..AUTO_TRIGGER_LOG_EVERY {
+            assert!(!auto_trigger_attempt_should_log(folded), "attempt={folded}");
+        }
+        assert!(auto_trigger_attempt_should_log(AUTO_TRIGGER_LOG_EVERY));
+        assert!(auto_trigger_attempt_should_log(AUTO_TRIGGER_LOG_EVERY * 3));
     }
 
     /// 版本号唯一来源（2026-09-30 收敛）：安装包名、exe 版本资源、关于页显示、

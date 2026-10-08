@@ -20,6 +20,7 @@
 - 修复：
   - `src-tauri/src/lib.rs`：自动触发移到 platform 创建之后；`let _ = task_trigger()` 替换为 `rc003_auto_trigger_reconcile`——每轮以桥接快照（独立外部观察）判定（`classify_auto_trigger` 纯函数 + 回归测试），最多 4 轮触发、每轮间隔 5s、重试前重读设置（用户中途关闭即收手）；全部落空后 `/end`（清卡住实例）+ `/run` 兜底一次；全程结构化日志（`action=auto_trigger` / `auto_trigger_escalate`）。
   - `hardware/RC003/helper/src/main.rs`：`[APP-BRIDGE] event=unavailable` 的 note 按 reason 区分，版本不符给出「检查两侧 BRIDGE_PROTOCOL_VERSION」的指引，不再误导为「主程序未运行」。
+- **2026-10-04 后续（用户需求驱动）**：上面「全部落空后……此后不再重试」的一次性语义已改为**常驻对账**——电脑重启后 RC003 尚未枚举（遥控器未唤醒，助手退出码 11）或助手中途掉线（崩溃 / 宿主重启）时，应用持续重试（前 4 轮 5s → `/end`+`/run` 兜底一次 → 30s 稳态，稳态每 10 轮再兜底一次）直到连上或用户关闭开关；用户关闭开关即停止触发。见 TODO.md 2026-10-04 更新与 `src-tauri/src/lib.rs` 的 `rc003_auto_trigger_reconcile`。
 - 验证：
   - `cargo test -p sayall-windows-app --lib`：36 passed（含新增 `auto_trigger_check_routes_by_bridge_phase`、`auto_trigger_check_aborts_on_simulation_default_snapshot`），`passed`。
   - `cargo check -p sayall-windows-app`（默认 + `--features runtime-simulation`）、`cargo check`（helper crate）、`cargo fmt -p sayall-windows-app -- --check`：`passed`。
