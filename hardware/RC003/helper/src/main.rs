@@ -122,6 +122,14 @@ mod imp {
     /// 8 s ≈ 两个 agent 重连周期（RECONNECT_MS）之和再加余量。
     const ATTACH_VERIFY_MS: u64 = 8_000;
 
+    /// 「结束旧宿主 → 等系统重新枚举出新宿主」的等待窗口与轮询间隔（2026-10-08 自愈路径）。
+    ///
+    /// 为什么是 12 s：真机实证宿主消亡后设备节点可能先落到 `Error`，系统重新枚举 +
+    /// `pnputil` 恢复跑完要数秒；12 s 覆盖这段并留余量。窗口内等不到就放弃——**不回退**到
+    /// "同一宿主内再注一代"（那条路已被真机证伪，回退只会把"没恢复"伪装成"试过了"）。
+    const HOST_RESTART_WAIT_MS: u64 = 12_000;
+    const HOST_RESTART_POLL_MS: u64 = 400;
+
     /// `[HB]` 心跳的落盘节流：agent 的 hb 很密（实测约 2 条/秒），逐条写会把日志刷爆
     /// （2026-10-08 实测单机累计 768 MB、约 107 MB/天）。现在只在**状态变化**时或
     /// 每 `HB_LOG_EVERY` 记一条；协议动作（ownership 续约等）不受影响，仍按每条处理。
@@ -1987,6 +1995,102 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         verify_ms: u64,
     ) -> bool {
         plan_is_attach && !saw_authenticated && !escalated && elapsed_ms >= verify_ms
+    }
+
+    /// 接管核验超时后该走哪条自愈路：能不能用**结束宿主 + 干净首注**代替"同一宿主内再注一代"
+    /// （纯函数，自检 + `#[cfg(test)]` 覆盖真值表）。
+    ///
+    /// 因果（2026-10-08 真机）："同一宿主内注入第二份 Gadget"这条路在用法文本里就标着
+    /// 「实验性：依赖 Frida 允许同一进程内两个 Gadget 实例，未验证」；当天真机证伪——助手在
+    /// 同一个宿主里再注了一代，应用侧随后一直 `agent_never_acked`，按键不映射。当天人工验证
+    /// **有效**的机制是：结束那个宿主 → 系统重新枚举出新宿主 → 对新宿主做一次干净首注
+    /// （观察到 `[TAP] resident=0` → `[INJECT] … hmodule_return=…` → `[HELLO] auth=true`）。
+    ///
+    /// 但结束宿主是**破坏性**动作，两条闸门必须同时成立：
+    /// 1) 宿主**独占 RC003**（`members == 1 && rc003_members == 1`）——判据与既有
+    ///    `[EXCLUSIVE] verdict=exclusive_rc003_host` / `release_injected_host` 完全一致。
+    ///    共享宿主同时承载用户别的 BLE 设备，误杀会把它们一起弄掉（硬性安全闸）；
+    /// 2) 宿主里**确实有我们的 gadget**（`gadget_maps > 0`）——防 pid 复用 / 误伤无关宿主。
+    ///
+    /// 另外只在**没升级过**时判（`escalated == false`），保住"只升级一次"：同一轮里不允许
+    /// 反复结束宿主。
+    fn should_restart_host_for_clean_inject(
+        escalated: bool,
+        members: usize,
+        rc003_members: usize,
+        gadget_maps: usize,
+    ) -> bool {
+        !escalated && members == 1 && rc003_members == 1 && gadget_maps > 0
+    }
+
+    /// 「结束旧宿主 → 等系统重新枚举出新宿主」——干净首注的自愈前置（2026-10-08 真机验证有效）。
+    ///
+    /// 调用前**必须**由 `should_restart_host_for_clean_inject` 判定过（独占 RC003 + 确有我们的
+    /// gadget）。本函数不自行放宽那条安全闸：该不该杀是判据问题，怎么杀、怎么等是执行问题。
+    ///
+    /// 顺序（与当天人工验证的步骤一致）：
+    /// 1. `terminate_process`：宿主消亡是让那一代 tap 消失的**唯一**途径（模块映射随进程走）；
+    /// 2. `recover_device_nodes`：宿主消亡后设备节点可能停在 `Error`（遥控器本体 OK、HID 子节点
+    ///    Error，按键不可用）。复用卸载路径那套 `pnputil remove + scan`，不改其语义。
+    ///    **实例 ID 绝不进日志**（`LOGGING.md` 隐私红线：含设备接口路径）。
+    /// 3. 有界轮询：`≤ HOST_RESTART_WAIT_MS`、每 `HOST_RESTART_POLL_MS` 扫一次 `enum_hosts()`，
+    ///    找同一个 RC003 的**新 pid**（判据与 `refresh_agent_in_host` 一致：`is_rc003` 且
+    ///    pid 变了。RC003 在本产品里是单台设备，不做多实例区分——残留边界见函数尾注）。
+    ///
+    /// 失败只返回 `Err`（调用方写日志并继续等握手），**不回退**到"同一宿主内再注一代"。
+    fn restart_rc003_host(
+        old_pid: u32,
+        instance_id: Option<&str>,
+        logger: &Logger,
+    ) -> Result<u32, String> {
+        logger.kv(
+            "[HOST]",
+            &[
+                ("action", "terminate_stale_tap_host".into()),
+                ("pid", old_pid.to_string()),
+                (
+                    "note",
+                    "旧世代 tap 的令牌接不上：同一宿主内再注一代真机未恢复，改为结束宿主后干净首注"
+                        .into(),
+                ),
+            ],
+        );
+        if let Err(error) = terminate_process(old_pid) {
+            logger.kv(
+                "[HOST]",
+                &[
+                    ("action", "terminate_failed".into()),
+                    ("detail", error.clone()),
+                ],
+            );
+            return Err(error);
+        }
+        if let Some(instance) = instance_id {
+            recover_device_nodes(instance, logger);
+        }
+        let deadline = Instant::now() + Duration::from_millis(HOST_RESTART_WAIT_MS);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(HOST_RESTART_POLL_MS));
+            if let Ok(scan) = enum_hosts() {
+                if let Some(entry) = scan
+                    .entries
+                    .iter()
+                    .find(|e| e.is_rc003 && e.pid != 0 && e.pid != old_pid)
+                {
+                    logger.kv(
+                        "[HOST]",
+                        &[
+                            ("action", "new_host_ready".into()),
+                            ("pid", entry.pid.to_string()),
+                        ],
+                    );
+                    return Ok(entry.pid);
+                }
+            }
+        }
+        Err(format!(
+            "{HOST_RESTART_WAIT_MS} ms 内没有出现新的 RC003 宿主"
+        ))
     }
 
     /// 绑定回环端口。单独抽出来有两个目的：①让失败文案**可操作**；
@@ -5281,47 +5385,144 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 (Instant::now() - started).as_millis() as u64,
                 ATTACH_VERIFY_MS,
             ) {
+                // "只升级一次"：不论下面走哪条路，这轮之后都不再重复判定（语义与原来一致）。
+                let escalated_before = escalated_attach;
                 escalated_attach = true;
-                logger.kv(
-                    "[ATTACH]",
-                    &[
-                        ("verify", "failed".into()),
-                        ("reason", "no_authenticated_agent".into()),
-                        ("action", "inject_new_generation".into()),
-                        (
-                            "note",
-                            "常驻 tap 握的是我们接不上的旧令牌（旧世代）；按自愈规则另起一代注入"
-                                .into(),
-                        ),
-                    ],
-                );
-                let generation_plan = DllPlan::Generation(String::new());
-                match prepare_runtime(&args, &gadget_src, &logger, &generation_plan) {
-                    Ok(prepared) => {
-                        reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
-                        let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
-                        match inject_gadget(target_pid, &prepared.dll, &logger) {
-                            Ok(injected) => {
-                                logger.kv(
-                                    "[DLL]",
-                                    &dll_report_fields(&generation_plan, &prepared),
-                                );
-                                injection = Some(injected);
-                                // 新世代的 agent 也要一个完整的握手窗口。
-                                hello_deadline = if args.await_hello > 0 {
-                                    Some(Instant::now() + Duration::from_secs(args.await_hello))
-                                } else {
-                                    None
-                                };
+                // 旧世代 tap 的动作选择：重算一次独占性与注入存在性（判据与启动时的
+                // `[EXCLUSIVE]` 同一口径；旧宿主可能此间换了 pid 或换了成员，不复用旧结论）。
+                let members: Vec<&HostEntry> =
+                    entries.iter().filter(|e| e.pid == target_pid).collect();
+                let rc003_members = members.iter().filter(|e| e.is_rc003).count();
+                let rc003_instance_id = members.iter().find_map(|e| e.rc003_instance_id.clone());
+                let (gadget_maps, module_scan_error) = match enum_modules(target_pid) {
+                    Ok(modules) => (resident_taps(&modules).len(), None),
+                    Err(error) => (0, Some(error)),
+                };
+                if should_restart_host_for_clean_inject(
+                    escalated_before,
+                    members.len(),
+                    rc003_members,
+                    gadget_maps,
+                ) {
+                    logger.kv(
+                        "[ATTACH]",
+                        &[
+                            ("verify", "failed".into()),
+                            ("reason", "no_authenticated_agent".into()),
+                            ("action", "restart_host_clean_inject".into()),
+                            ("members", members.len().to_string()),
+                            ("rc003_members", rc003_members.to_string()),
+                            ("gadget_maps", gadget_maps.to_string()),
+                            (
+                                "note",
+                                "常驻 tap 握的是我们接不上的旧令牌（旧世代）；同一宿主内再注一代真机未恢复，\
+                                 改为结束这个独占宿主后对新宿主做一次干净首注"
+                                    .into(),
+                            ),
+                        ],
+                    );
+                    match restart_rc003_host(target_pid, rc003_instance_id.as_deref(), &logger) {
+                        Ok(new_pid) => {
+                            // 干净首注走 Canonical：新宿主里 resident=0，不需要分代目录。
+                            let clean_plan = DllPlan::Canonical;
+                            match prepare_runtime(&args, &gadget_src, &logger, &clean_plan) {
+                                Ok(prepared) => {
+                                    // 干净首注不再需要"同一宿主里的第二份"分代目录，顺手把旧的分代
+                                    // 目录回收掉（与原来那一代注入分支同样的收尾；仍被占用的自动保留）。
+                                    reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
+                                    let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
+                                    match inject_gadget(new_pid, &prepared.dll, &logger) {
+                                        Ok(injected) => {
+                                            logger.kv(
+                                                "[DLL]",
+                                                &dll_report_fields(&clean_plan, &prepared),
+                                            );
+                                            injection = Some(injected);
+                                            // 新宿主的 agent 也要一个完整的握手窗口。
+                                            hello_deadline = if args.await_hello > 0 {
+                                                Some(
+                                                    Instant::now()
+                                                        + Duration::from_secs(args.await_hello),
+                                                )
+                                            } else {
+                                                None
+                                            };
+                                        }
+                                        Err(error) => logger.line(&format!(
+                                            "[WARN] 干净首注失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                                        )),
+                                    }
+                                }
+                                Err(error) => logger.line(&format!(
+                                    "[WARN] 干净首注准备运行时目录失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                                )),
                             }
-                            Err(error) => logger.line(&format!(
-                                "[WARN] 另起一代注入失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
-                            )),
                         }
+                        Err(error) => logger.line(&format!(
+                            "[WARN] 结束旧宿主后没等到新宿主：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                        )),
                     }
-                    Err(error) => logger.line(&format!(
-                        "[WARN] 另起一代准备运行时目录失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
-                    )),
+                } else {
+                    // 硬性安全闸：**绝不结束宿主**。共享宿主（误杀会波及用户其它 BLE 设备）或
+                    // 宿主里没有我们的 gadget（可能是别人的 frida-gadget，或 pid 复用），
+                    // 都退回原有的"另起一代"尝试（该路径真机未恢复，仅作为不改既有行为的保底）。
+                    logger.kv(
+                        "[ATTACH]",
+                        &[
+                            ("verify", "failed".into()),
+                            ("reason", "no_authenticated_agent".into()),
+                            ("action", "inject_new_generation".into()),
+                            ("members", members.len().to_string()),
+                            ("rc003_members", rc003_members.to_string()),
+                            ("gadget_maps", gadget_maps.to_string()),
+                            (
+                                "skip_host_restart",
+                                if members.len() != 1 || rc003_members != 1 {
+                                    "shared_host".into()
+                                } else if module_scan_error.is_some() {
+                                    "module_scan_failed".into()
+                                } else {
+                                    "no_resident_tap".into()
+                                },
+                            ),
+                            (
+                                "note",
+                                "常驻 tap 握的是我们接不上的旧令牌（旧世代）；按自愈规则另起一代注入"
+                                    .into(),
+                            ),
+                        ],
+                    );
+                    let generation_plan = DllPlan::Generation(String::new());
+                    match prepare_runtime(&args, &gadget_src, &logger, &generation_plan) {
+                        Ok(prepared) => {
+                            reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
+                            let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
+                            match inject_gadget(target_pid, &prepared.dll, &logger) {
+                                Ok(injected) => {
+                                    logger.kv(
+                                        "[DLL]",
+                                        &dll_report_fields(&generation_plan, &prepared),
+                                    );
+                                    injection = Some(injected);
+                                    // 新世代的 agent 也要一个完整的握手窗口。
+                                    hello_deadline = if args.await_hello > 0 {
+                                        Some(
+                                            Instant::now()
+                                                + Duration::from_secs(args.await_hello),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                }
+                                Err(error) => logger.line(&format!(
+                                    "[WARN] 另起一代注入失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                                )),
+                            }
+                        }
+                        Err(error) => logger.line(&format!(
+                            "[WARN] 另起一代准备运行时目录失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                        )),
+                    }
                 }
             }
             if !saw_authenticated {
@@ -6615,6 +6816,34 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("{} 例", attach_verify_cases.len()),
         );
 
+        // 14c) 旧世代 tap 的自愈动作选择：只有「独占 RC003 + 宿主确含我们的 Gadget」才允许
+        // 结束宿主去做干净首注（2026-10-08 真机验证有效的路径，取代"同宿主再注一代"）；
+        // 共享宿主 / 无注入 / 已升级过 ⇒ 一律不结束宿主（硬性安全闸）。
+        let host_restart_cases: [(bool, usize, usize, usize, bool); 7] = [
+            (false, 1, 1, 1, true),
+            (false, 1, 1, 2, true),
+            (false, 2, 1, 1, false),
+            (false, 1, 0, 1, false),
+            (false, 0, 0, 1, false),
+            (false, 1, 1, 0, false),
+            (true, 1, 1, 1, false),
+        ];
+        let host_restart_ok = host_restart_cases.iter().all(
+            |(escalated, members, rc003_members, gadget_maps, want)| {
+                should_restart_host_for_clean_inject(
+                    *escalated,
+                    *members,
+                    *rc003_members,
+                    *gadget_maps,
+                ) == *want
+            },
+        );
+        check(
+            "旧世代 tap 自愈：仅独占 RC003 且宿主含我们的 Gadget 时才结束宿主做干净首注",
+            host_restart_ok,
+            format!("{} 例", host_restart_cases.len()),
+        );
+
         // 15) 复用/覆盖判定：决定"会不会去撞那个被宿主锁住的文件"的就是这一行
         let dll_cases: [(bool, bool, DllAction); 3] = [
             (true, true, DllAction::Reuse),
@@ -7684,6 +7913,41 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 Some(now - AGENT_REFRESH_COOLDOWN_SECS),
                 now
             ));
+        }
+    }
+
+    #[cfg(test)]
+    mod attach_host_restart_tests {
+        use super::should_restart_host_for_clean_inject;
+
+        #[test]
+        fn restarts_only_for_exclusive_rc003_host_holding_our_gadget() {
+            // 独占 RC003（members==1 && rc003_members==1）+ 宿主里确有我们的 gadget
+            // ⇒ 允许结束宿主（2026-10-08 真机验证有效的干净首注前置）。
+            assert!(should_restart_host_for_clean_inject(false, 1, 1, 1));
+            assert!(should_restart_host_for_clean_inject(false, 1, 1, 2));
+        }
+
+        #[test]
+        fn never_restarts_a_shared_host() {
+            // 硬性安全闸：共享宿主同时承载用户别的 BLE 设备，误杀会把它们一起弄掉。
+            assert!(!should_restart_host_for_clean_inject(false, 2, 1, 1));
+            assert!(!should_restart_host_for_clean_inject(false, 3, 0, 1));
+            // "同一个 pid 只有一个成员、但它不是 RC003"同样不是独占 RC003。
+            assert!(!should_restart_host_for_clean_inject(false, 1, 0, 1));
+            assert!(!should_restart_host_for_clean_inject(false, 0, 0, 1));
+        }
+
+        #[test]
+        fn never_restarts_without_our_gadget_in_the_host() {
+            // 宿主里没有我们的 gadget（可能是别人的 frida-gadget，或 pid 复用）⇒ 不动手。
+            assert!(!should_restart_host_for_clean_inject(false, 1, 1, 0));
+        }
+
+        #[test]
+        fn never_restarts_twice_in_one_run() {
+            // "只升级一次"：同一轮里不允许反复结束宿主。
+            assert!(!should_restart_host_for_clean_inject(true, 1, 1, 1));
         }
     }
 
