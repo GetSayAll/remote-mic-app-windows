@@ -10,6 +10,8 @@ use sayall_windows::{
 };
 use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
+#[cfg(windows)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
@@ -31,6 +33,349 @@ use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
+
+#[derive(Default)]
+struct WebviewFailureState {
+    reloaded: bool,
+    gave_up: bool,
+}
+#[derive(Debug, PartialEq, Eq)]
+enum WebviewFailureAction {
+    Reload,
+    Notify,
+    Ignore,
+}
+impl WebviewFailureState {
+    fn failed(&mut self, kind: i32, closing: bool) -> WebviewFailureAction {
+        if closing || !matches!(kind, 0..=2) {
+            return WebviewFailureAction::Ignore;
+        }
+        if self.gave_up {
+            return WebviewFailureAction::Ignore;
+        }
+        if kind == 1 && !self.reloaded {
+            self.reloaded = true;
+            return WebviewFailureAction::Reload;
+        }
+        self.gave_up = true;
+        WebviewFailureAction::Notify
+    }
+}
+
+/// 终止原因：记入日志，区分"哪一类失败导致不再重试"。
+fn terminal_reason(kind: i32) -> &'static str {
+    match kind {
+        0 => "browser_process_exited",
+        1 => "renderer_exited_after_reload",
+        2 => "renderer_unresponsive",
+        _ => "other",
+    }
+}
+
+/// 界面提示（窗口标题）的判定结果。
+#[derive(Debug, PartialEq, Eq)]
+enum UiHintDecision {
+    /// 宽限期内页面没有报到：界面确实没有回来，写提示。
+    Show,
+    /// 页面报到过：界面已经回来，不写。
+    SkipPageAlive,
+    /// 应用已在退出收尾：不写。
+    SkipExiting,
+}
+
+/// 是否该把"界面未能正常显示"写进窗口标题（2026-10-07）。
+///
+/// 判据是**页面是否报到**——前端每秒一次 `get_runtime_snapshot` 轮询就是心跳，
+/// 不是 `Reload` 的返回值：WebView2 对渲染进程失败会自行尝试恢复，
+/// 接口报错时页面可能已经好了，接口被接受时页面也可能再没回来。
+fn ui_hint_decision(baseline_ms: u64, latest_ms: u64, closing: bool) -> UiHintDecision {
+    if latest_ms > baseline_ms {
+        return UiHintDecision::SkipPageAlive;
+    }
+    if closing {
+        return UiHintDecision::SkipExiting;
+    }
+    UiHintDecision::Show
+}
+
+/// 界面提示状态：只排定一次判定；写入时记住原标题，供页面回来时恢复。
+#[derive(Debug, Default)]
+struct WebviewUiHintState {
+    scheduled: bool,
+    showing: Option<String>,
+}
+
+impl WebviewUiHintState {
+    /// 排定一次判定；已排定或已在显示时返回 false（幂等）。
+    fn schedule(&mut self) -> bool {
+        if self.scheduled || self.showing.is_some() {
+            return false;
+        }
+        self.scheduled = true;
+        true
+    }
+
+    /// 记下"提示已写入"并保存原标题；重复调用返回 false。
+    fn mark_showing(&mut self, previous_title: String) -> bool {
+        if self.showing.is_some() {
+            return false;
+        }
+        self.scheduled = false;
+        self.showing = Some(previous_title);
+        true
+    }
+
+    /// 取出要恢复的标题并收起提示；没有提示时返回 None。
+    fn take_for_restore(&mut self) -> Option<String> {
+        self.scheduled = false;
+        self.showing.take()
+    }
+}
+
+#[cfg(windows)]
+fn observe_webview_failure(window: &tauri::WebviewWindow) {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND,
+        ProcessFailedEventHandler,
+    };
+    let role = "main";
+    let app = window.app_handle().clone();
+    let closed = Arc::new(AtomicBool::new(false));
+    let close_flag = Arc::clone(&closed);
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            close_flag.store(true, Ordering::Release);
+        }
+    });
+    let result = window.with_webview(move |webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            sayall_windows::gatt_note(format!("webview event=failure_observer role={role} result=failed stage=controller"));
+            return;
+        };
+        let mut failures = WebviewFailureState::default();
+        // WebView2 owns this handler until its controller closes. The callback
+        // borrows the event sender, never retaining a COM self-reference.
+        let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(-1);
+            let query = args.as_ref().map(|a| a.ProcessFailedKind(&mut kind));
+            let query_code = query.as_ref().and_then(|r| r.as_ref().err()).map(|e| e.code().0).unwrap_or(0);
+            let closing = closed.load(Ordering::Acquire) || EXIT_SHUTDOWN_DONE.load(Ordering::Acquire);
+            let action = failures.failed(kind.0, closing);
+            sayall_windows::gatt_note(format!("webview event=process_failed role={role} kind={} query_code={query_code} closing={closing} action={action:?}", kind.0));
+            match action {
+                WebviewFailureAction::Reload => {
+                    if let Some(core) = sender {
+                        let result = core.Reload();
+                        let code = result.as_ref().err().map(|e| e.code().0).unwrap_or(0);
+                        sayall_windows::gatt_note(format!("webview event=recovery role={role} phase=submitted action=reload result={} code={code} attempt=1", if result.is_ok() { "accepted" } else { "failed" }));
+                        // 重载失败即进入终态：等待下一次事件只会得到同样的结果，
+                        // 反复重试在界面已经停止时没有收益。
+                        if result.is_err() { failures.gave_up = true; }
+                        // 提交过重载也要判定页面是否真的回来：接口被接受而页面
+                        // 再没回来时不会有第二次事件，只看终态会漏掉这种静默失败。
+                        schedule_ui_hint(&app, if result.is_ok() { "reload_submitted" } else { "reload_failed" });
+                    } else {
+                        sayall_windows::gatt_note(format!("webview event=recovery role={role} phase=completed action=reload result=failed reason=missing_sender attempt=1"));
+                        failures.gave_up = true;
+                        schedule_ui_hint(&app, "reload_missing_sender");
+                    }
+                }
+                // 终止决策本身（action=Notify）已随上面的 process_failed 行落盘；
+                // 这里只排定"界面是否真的回来"的判定（页面报到就不写提示）。
+                WebviewFailureAction::Notify => schedule_ui_hint(&app, terminal_reason(kind.0)),
+                WebviewFailureAction::Ignore => {}
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        let result = core.add_ProcessFailed(&handler, &mut token);
+        sayall_windows::gatt_note(format!("webview event=failure_observer role={role} result={} code={}", if result.is_ok() { "passed" } else { "failed" }, result.err().map(|e| e.code().0).unwrap_or(0)));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(format!(
+            "webview event=failure_observer role={role} result=failed stage=dispatch"
+        ));
+    }
+}
+
+/// 界面未能正常显示时写进窗口标题的文案（2026-10-07 定稿，见 docs/product-copy.md）。
+/// 放在 Rust 是因为界面已经不工作时它也必须能显示，与托盘菜单文案同理。
+#[cfg(windows)]
+const WEBVIEW_UNAVAILABLE_TITLE: &str = "无线麦 SayAll 界面未能正常显示，请从托盘退出后重开";
+
+/// 判定宽限期：前端每秒报到一次，连续 5 秒没有信号才认定界面没有回来。
+/// 窗口收进托盘时 WebView 会把定时器节流，可能误判为"没回来"；页面一旦恢复
+/// 报到（窗口重新显示后最多一个轮询周期）就恢复原标题并落 `result=cleared`。
+#[cfg(windows)]
+const UI_HINT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 前端最后一次报到的时刻（毫秒）；0 表示本次进程内还没有过报到。
+#[cfg(windows)]
+static LAST_FRONTEND_SIGNAL_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(windows)]
+static WEBVIEW_UI_HINT: std::sync::Mutex<WebviewUiHintState> =
+    std::sync::Mutex::new(WebviewUiHintState {
+        scheduled: false,
+        showing: None,
+    });
+
+#[cfg(windows)]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn with_ui_hint<R>(apply: impl FnOnce(&mut WebviewUiHintState) -> R) -> R {
+    let mut state = WEBVIEW_UI_HINT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    apply(&mut state)
+}
+
+#[cfg(windows)]
+fn signal_age_field(baseline: u64) -> String {
+    if baseline == 0 {
+        "none".to_owned()
+    } else {
+        now_ms().saturating_sub(baseline).to_string()
+    }
+}
+
+/// 页面报到（每次 `get_runtime_snapshot` 调用）：刷新"页面还活着"的时间戳，
+/// 并把已写出的界面提示恢复成原标题。
+#[cfg(windows)]
+fn note_frontend_signal(app: &tauri::AppHandle) {
+    LAST_FRONTEND_SIGNAL_MS.store(now_ms(), Ordering::Release);
+    let Some(previous) = with_ui_hint(WebviewUiHintState::take_for_restore) else {
+        return;
+    };
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            sayall_windows::gatt_note(
+                "webview event=ui_hint phase=completed action=title result=restore_skipped reason=window_missing".to_owned(),
+            );
+            return;
+        };
+        match window.set_title(&previous) {
+            Ok(()) => sayall_windows::gatt_note(
+                "webview event=ui_hint phase=completed action=title result=cleared reason=page_alive".to_owned(),
+            ),
+            Err(_) => sayall_windows::gatt_note(
+                "webview event=ui_hint phase=completed action=title result=restore_failed reason=set_title_rejected".to_owned(),
+            ),
+        }
+    });
+}
+
+/// 排定一次界面提示判定（幂等）。`reason` 记入日志，便于定位是哪类失败触发的。
+#[cfg(windows)]
+fn schedule_ui_hint(app: &tauri::AppHandle, reason: &'static str) {
+    if !with_ui_hint(WebviewUiHintState::schedule) {
+        sayall_windows::gatt_note(format!(
+            "webview event=ui_hint phase=completed action=title result=skipped reason=already_scheduled reason_detail={reason}"
+        ));
+        return;
+    }
+    let baseline = LAST_FRONTEND_SIGNAL_MS.load(Ordering::Acquire);
+    sayall_windows::gatt_note(format!(
+        "webview event=ui_hint phase=started action=title reason={reason} grace_ms={} signal_age_ms={}",
+        UI_HINT_GRACE.as_millis(),
+        signal_age_field(baseline)
+    ));
+    let handle = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("sayall-webview-hint".into())
+        .spawn(move || {
+            std::thread::sleep(UI_HINT_GRACE);
+            resolve_ui_hint(&handle, baseline, reason);
+        });
+    if spawned.is_err() {
+        with_ui_hint(WebviewUiHintState::take_for_restore);
+        sayall_windows::gatt_note(
+            "webview event=ui_hint phase=completed action=title result=failed reason=thread_spawn_failed"
+                .to_owned(),
+        );
+    }
+}
+
+/// 宽限期结束后的判定：页面报到过就不写、退出收尾中不写，否则把提示写进窗口标题。
+#[cfg(windows)]
+fn resolve_ui_hint(app: &tauri::AppHandle, baseline: u64, reason: &'static str) {
+    let latest = LAST_FRONTEND_SIGNAL_MS.load(Ordering::Acquire);
+    let closing = EXIT_SHUTDOWN_DONE.load(Ordering::Acquire);
+    match ui_hint_decision(baseline, latest, closing) {
+        UiHintDecision::SkipPageAlive => {
+            with_ui_hint(WebviewUiHintState::take_for_restore);
+            sayall_windows::gatt_note(format!(
+                "webview event=ui_hint phase=completed action=title result=skipped reason=page_alive reason_detail={reason} signal_delta_ms={}",
+                latest.saturating_sub(baseline)
+            ));
+        }
+        UiHintDecision::SkipExiting => {
+            with_ui_hint(WebviewUiHintState::take_for_restore);
+            sayall_windows::gatt_note(format!(
+                "webview event=ui_hint phase=completed action=title result=skipped reason=app_exiting reason_detail={reason}"
+            ));
+        }
+        UiHintDecision::Show => {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                // 主线程上再判一次：宽限期内到达、尚未被消费的信号不能漏判。
+                let latest = LAST_FRONTEND_SIGNAL_MS.load(Ordering::Acquire);
+                if latest > baseline {
+                    with_ui_hint(WebviewUiHintState::take_for_restore);
+                    sayall_windows::gatt_note(format!(
+                        "webview event=ui_hint phase=completed action=title result=skipped reason=page_alive_at_write reason_detail={reason}"
+                    ));
+                    return;
+                }
+                if EXIT_SHUTDOWN_DONE.load(Ordering::Acquire) {
+                    with_ui_hint(WebviewUiHintState::take_for_restore);
+                    sayall_windows::gatt_note(format!(
+                        "webview event=ui_hint phase=completed action=title result=skipped reason=app_exiting_at_write reason_detail={reason}"
+                    ));
+                    return;
+                }
+                let Some(window) = handle.get_webview_window("main") else {
+                    with_ui_hint(WebviewUiHintState::take_for_restore);
+                    sayall_windows::gatt_note(format!(
+                        "webview event=ui_hint phase=completed action=title result=skipped reason=window_missing reason_detail={reason}"
+                    ));
+                    return;
+                };
+                let previous_title = window.title().unwrap_or_default();
+                let window_visible = window.is_visible().unwrap_or(true);
+                // 读不到原标题就不写：宁可没有提示，也不能写下一个无法恢复的标题。
+                if previous_title.is_empty() {
+                    with_ui_hint(WebviewUiHintState::take_for_restore);
+                    sayall_windows::gatt_note(format!(
+                        "webview event=ui_hint phase=completed action=title result=skipped reason=title_unreadable reason_detail={reason}"
+                    ));
+                    return;
+                }
+                if !with_ui_hint(|state| state.mark_showing(previous_title)) {
+                    return;
+                }
+                match window.set_title(WEBVIEW_UNAVAILABLE_TITLE) {
+                    Ok(()) => sayall_windows::gatt_note(format!(
+                        "webview event=ui_hint phase=completed action=title result=written reason={reason} window_visible={window_visible} signal_age_ms={}",
+                        signal_age_field(baseline)
+                    )),
+                    Err(_) => {
+                        with_ui_hint(WebviewUiHintState::take_for_restore);
+                        sayall_windows::gatt_note(format!(
+                            "webview event=ui_hint phase=completed action=title result=failed reason=set_title_rejected reason_detail={reason}"
+                        ));
+                    }
+                }
+            });
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +451,10 @@ fn get_runtime_snapshot(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> RuntimeSnapshot {
+    // 前端每秒轮询一次：这是"页面还活着"的唯一权威信号，
+    // 也是界面提示（窗口标题）写出与恢复的判据。
+    #[cfg(windows)]
+    note_frontend_signal(&app);
     RuntimeSnapshot {
         // 版本统一取 package_info（tauri.conf.json 的 version，与安装包/更新器
         // 比较同源）。此前用编译期 CARGO_PKG_VERSION（Cargo.toml），两者在
@@ -430,6 +779,31 @@ async fn get_rc003_task_status(
         .map_err(|error| format!("读取 RC003 任务状态失败：{error}"))
 }
 
+/// 全按键支持在本机的可用性：原生架构（x64 / arm64）与对应载荷是否存在。
+///
+/// 界面据此在"本机根本用不了"时置灰开关并说明原因，而不是让用户打开后永远停在
+/// 「正在启动」（Issue #206：ARM64 上的 x64 助手必然注入失败）。
+///
+/// 仿真构建恒返回"可用"：仿真跑在开发机 / CI 上，那里未必有助手的 release 产物，
+/// 若按真实探测置灰，会把既有的全按键支持界面回归流程一起锁死。可用性判定本身
+/// （两种不可用原因）由 `rc003_task` 的纯函数单测覆盖。
+#[tauri::command]
+fn get_capture_support() -> rc003_task::CaptureSupport {
+    #[cfg(feature = "runtime-simulation")]
+    {
+        rc003_task::CaptureSupport {
+            native_arch: "x64".to_string(),
+            helper_expected: "sayall-helper.exe".to_string(),
+            available: true,
+            reason: None,
+        }
+    }
+    #[cfg(not(feature = "runtime-simulation"))]
+    {
+        rc003_task::capture_support()
+    }
+}
+
 /// 助手经计划任务拉起时会在用户会话里短暂创建窗口（旧版：控制台黑框），
 /// 这个创建动作会把前台焦点从主程序抢走——窗口随即消失，焦点落在「无」上，
 /// 用户感觉"程序没反应了"。延迟把焦点还给主窗口即可；延迟要留足助手启动时间。
@@ -666,6 +1040,19 @@ fn classify_auto_trigger(snapshot: &BridgeSnapshot) -> AutoTriggerCheck {
 fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: SettingsStore) {
     const MAX_AUTO_TRIGGER_ATTEMPTS: u32 = 4;
     const AUTO_TRIGGER_RETRY_MS: u64 = 5_000;
+    // 本机没有对应架构的载荷时，重试 5 次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
+    // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会又转 25 秒空转。
+    let support = rc003_task::capture_support();
+    if !support.available {
+        sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=skipped \
+             reason={} native_arch={} helper_expected={} retryable=false",
+            support.reason.as_deref().unwrap_or("unavailable"),
+            support.native_arch,
+            support.helper_expected
+        ));
+        return;
+    }
     sayall_windows::gatt_note(
         "rc003 feature=enhanced-capture action=auto_trigger phase=started reason=app_startup"
             .to_owned(),
@@ -2237,9 +2624,10 @@ pub fn run() {
     #[cfg(not(windows))]
     let (windows_version, windows_build) = ("unknown".to_owned(), "unknown".to_owned());
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=2 process_architecture={} windows_version={} windows_build={}",
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=2 process_architecture={} native_arch={} windows_version={} windows_build={}",
         if log_ready { "passed" } else { "failed" },
         std::env::consts::ARCH,
+        sayall_windows::os_arch::native_arch(),
         windows_version,
         windows_build
     ));
@@ -2426,7 +2814,31 @@ pub fn run() {
             let rc003_auto_trigger_allowed = if saved_settings.rc003_capture_enabled {
                 let reauth_required = rc003_task::reauth_required();
                 let task_installed = rc003_task::task_installed();
-                if reauth_required || !task_installed {
+                // 架构 / 载荷前置：本机原生架构没有对应的助手与 Gadget 时，打开开关也永远
+                // 连不上（Issue #206：x64 助手对 ARM64 宿主）。先回落为关闭并落一条可分流
+                // 的日志，不做任何重试——界面据 get_capture_support 说明原因。
+                let support = rc003_task::capture_support();
+                if !support.available {
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} native_arch={} helper_expected={}",
+                        support.reason.as_deref().unwrap_or("unavailable"),
+                        support.native_arch,
+                        support.helper_expected
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    false
+                } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
+                    // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
+                    // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
+                    // 但界面要空转约 25 秒才失败。这里回落开关，等用户拨一次开关重建任务——
+                    // 重装任务要提权，不在启动时擅自弹 UAC（与"每次开启都重新授权"同源）。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason=task_target_mismatch expected_helper={}",
+                        support.helper_expected
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    false
+                } else if reauth_required || !task_installed {
                     // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
                     // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验
                     // 复盘的取证盲区）。reason 只陈述两个探针能支撑的结论。
@@ -2624,6 +3036,10 @@ pub fn run() {
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                observe_webview_failure(&window);
+            }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
             spawn_installer_graceful_exit_watcher(app.handle().clone());
@@ -2699,6 +3115,7 @@ pub fn run() {
         get_raw_input_snapshot,
         get_rc003_bridge_snapshot,
         get_rc003_task_status,
+        get_capture_support,
         enable_rc003_capture,
         disable_rc003_capture,
         start_raw_input,
@@ -2770,6 +3187,7 @@ pub fn run() {
         get_raw_input_snapshot,
         get_rc003_bridge_snapshot,
         get_rc003_task_status,
+        get_capture_support,
         enable_rc003_capture,
         disable_rc003_capture,
         start_raw_input,
@@ -3322,5 +3740,150 @@ mod tests {
                 "安装器钩子出现强杀 `{token}`：强杀会留下未关闭的 GATT 会话并楔死系统蓝牙栈"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod webview_failure_tests {
+    use super::*;
+    #[test]
+    fn webview_failure_reloads_only_renderer_once_and_never_reopens_during_close() {
+        let mut state = WebviewFailureState::default();
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Notify);
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Ignore);
+        assert_eq!(
+            WebviewFailureState::default().failed(0, false),
+            WebviewFailureAction::Notify
+        );
+        assert_eq!(
+            WebviewFailureState::default().failed(1, true),
+            WebviewFailureAction::Ignore
+        );
+        assert_eq!(
+            WebviewFailureState::default().failed(3, false),
+            WebviewFailureAction::Ignore
+        );
+    }
+
+    #[test]
+    fn unknown_webview_failure_does_not_consume_recovery_budget() {
+        let mut state = WebviewFailureState::default();
+        assert_eq!(state.failed(-1, false), WebviewFailureAction::Ignore);
+        assert_eq!(state.failed(99, false), WebviewFailureAction::Ignore);
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
+    }
+
+    #[test]
+    fn closing_webview_failure_does_not_schedule_recovery_or_notification() {
+        let mut state = WebviewFailureState::default();
+        for kind in [0, 1, 2] {
+            assert_eq!(state.failed(kind, true), WebviewFailureAction::Ignore);
+        }
+        assert_eq!(state.failed(1, false), WebviewFailureAction::Reload);
+    }
+    #[test]
+    fn terminal_webview_failure_stays_terminal_even_if_renderer_exits_later() {
+        for first_kind in [0, 2] {
+            let mut state = WebviewFailureState::default();
+            assert_eq!(
+                state.failed(first_kind, false),
+                WebviewFailureAction::Notify
+            );
+            assert_eq!(
+                state.failed(1, false),
+                WebviewFailureAction::Ignore,
+                "browser exit or unresponsive state must prevent a later reload"
+            );
+            assert_eq!(
+                state.failed(first_kind, false),
+                WebviewFailureAction::Ignore
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ui_hint_tests {
+    use super::*;
+
+    #[test]
+    fn ui_hint_is_written_only_when_the_page_never_reports_after_the_failure() {
+        assert_eq!(ui_hint_decision(1_000, 1_000, false), UiHintDecision::Show);
+        assert_eq!(
+            ui_hint_decision(1_000, 1_001, false),
+            UiHintDecision::SkipPageAlive,
+            "故障后排定、宽限期内页面报到过 => 界面已恢复，不写提示"
+        );
+        assert_eq!(
+            ui_hint_decision(0, 5, false),
+            UiHintDecision::SkipPageAlive,
+            "进程内已有过报到即视为界面正常"
+        );
+    }
+
+    #[test]
+    fn ui_hint_is_never_written_while_the_app_is_shutting_down() {
+        assert_eq!(
+            ui_hint_decision(1_000, 1_000, true),
+            UiHintDecision::SkipExiting
+        );
+        assert_eq!(
+            ui_hint_decision(1_000, 1_500, true),
+            UiHintDecision::SkipPageAlive,
+            "两个理由同时成立时先记页面活着，日志才能解释为什么没写"
+        );
+    }
+
+    #[test]
+    fn ui_hint_state_schedules_once_shows_once_and_restores_once() {
+        let mut state = WebviewUiHintState::default();
+        assert!(state.schedule());
+        assert!(!state.schedule(), "重复排定必须被忽略");
+        assert!(state.mark_showing("无线麦 SayAll".to_owned()));
+        assert!(
+            !state.mark_showing("无线麦 SayAll".to_owned()),
+            "已在显示时不重复写"
+        );
+        assert!(!state.schedule(), "已在显示时不再排定");
+        assert_eq!(state.take_for_restore().as_deref(), Some("无线麦 SayAll"));
+        assert_eq!(state.take_for_restore(), None, "恢复只发生一次");
+        assert!(state.schedule(), "收起后可以再次排定");
+    }
+
+    #[test]
+    fn ui_hint_state_cancels_a_pending_schedule_without_touching_the_title() {
+        let mut state = WebviewUiHintState::default();
+        assert!(state.schedule());
+        assert_eq!(state.take_for_restore(), None, "还没写入时没有标题要恢复");
+        assert!(state.schedule(), "取消后可以重新排定");
+    }
+
+    #[test]
+    fn terminal_reason_distinguishes_the_failure_kinds() {
+        assert_eq!(terminal_reason(0), "browser_process_exited");
+        assert_eq!(terminal_reason(1), "renderer_exited_after_reload");
+        assert_eq!(terminal_reason(2), "renderer_unresponsive");
+        assert_eq!(terminal_reason(-1), "other");
+        assert_eq!(terminal_reason(9), "other");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_hint_copy_follows_the_product_naming_rules() {
+        assert_eq!(
+            WEBVIEW_UNAVAILABLE_TITLE,
+            "无线麦 SayAll 界面未能正常显示，请从托盘退出后重开"
+        );
+        for banned in ["注入", "进程", "重载", "钩子", "提权", "端口"] {
+            assert!(
+                !WEBVIEW_UNAVAILABLE_TITLE.contains(banned),
+                "用户可见文案不得含内部术语：{banned}"
+            );
+        }
+        assert!(
+            WEBVIEW_UNAVAILABLE_TITLE.contains("无线麦 SayAll"),
+            "产品名必须用名称表写法（含空格）"
+        );
     }
 }

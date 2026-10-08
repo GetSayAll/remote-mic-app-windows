@@ -393,6 +393,10 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 /* 按钮文案在「重新连接 / 连接中… / 立即连接」之间切换，锁个最小宽度避免卡片左右抖。 */
 .remote-info-card button { min-width: 84px; }
 .device-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-raised); font-size: 13px; white-space: nowrap; }
+/* 不可用说明（ARM64 上的「全按键支持」，2026-10-07 issue #206）：
+   紧跟在开关标签之后，与标题行同一行（空间不足时由 flex-wrap 换行）。
+   只在平台决定不可用时渲染，不在会话内切换，因此不涉及运行时抖动。 */
+.capture-unavailable-note { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 .toggle-row { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
 .toggle-input { appearance: none; -webkit-appearance: none; width: 34px; height: 20px; border-radius: 999px; background: var(--toggle-off); position: relative; cursor: pointer; transition: background 0.15s; margin: 0; }
 .toggle-input:checked { background: var(--accent); }
@@ -419,8 +423,10 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-connections polygon { fill: var(--mapping-line); }
 .mapping-connections polygon.selected { fill: var(--accent); }
 .mapping-connections polygon.active { fill: var(--pressed); }
-/* 遥控器图无底板（PNG 自带透明背景）；连线画在图之上（z-index 高于照片）。 */
-.remote-photo { position: absolute; z-index: 1; width: 202px; height: 410px; margin: 0; border-radius: 14px; overflow: hidden; top: 80px; }
+/* 遥控器图无底板（PNG 自带透明背景）；连线画在图之上（z-index 高于照片）。
+   尺寸必须与 ButtonsPage.vue 的 REMOTE_WIDTH/REMOTE_HEIGHT 一致（2026-10-07 放大
+   到可见约 115×480 ⇒ 容器 250×508）；left/top 由组件按同一组常量内联给出，避免漂移。 */
+.remote-photo { position: absolute; z-index: 1; width: 250px; height: 508px; margin: 0; border-radius: 14px; overflow: hidden; }
 .remote-photo img { width: 100%; height: 100%; object-fit: cover; user-select: none; }
 /* 锚点橙点对齐 Mac：8px 纯圆点（无光环）。 */
 .anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; transition: opacity 0.06s; }

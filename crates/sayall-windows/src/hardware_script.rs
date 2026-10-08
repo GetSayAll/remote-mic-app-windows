@@ -282,8 +282,16 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                "raw", "raw", "ble_connected", "raw", "raw", "raw", "voice_control",
-                "voice_audio", "voice_audio", "voice_control"
+                "raw",
+                "raw",
+                "ble_connected",
+                "raw",
+                "raw",
+                "raw",
+                "voice_control",
+                "voice_audio",
+                "voice_audio",
+                "voice_control"
             ]
         );
         let raw = script
@@ -298,7 +306,10 @@ mod tests {
                 _ => None,
             })
             .expect("exported script must contain raw events");
-        assert_eq!(raw, ("ble-gatt".to_owned(), Some("adapter.state".to_owned())));
+        assert_eq!(
+            raw,
+            ("ble-gatt".to_owned(), Some("adapter.state".to_owned()))
+        );
         // 语音事件必须能过 hex 校验（解析期已做），这里复核可解码。
         let voice = script
             .events

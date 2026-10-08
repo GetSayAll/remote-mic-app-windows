@@ -38,8 +38,8 @@ pub mod graceful_exit;
 pub mod instance_signal;
 /// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
 pub mod key_host;
-// 硬件信号脚本（仿真回放用；见模块注释）：解析 hardware-simulation 仓库导出的
-// `export-app-script` 结果。无副作用、不进入基础路径，仅仿真平台消费。
+// 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
+// 无副作用、不进入基础路径，仅仿真平台消费。
 pub mod hardware_script;
 pub mod registered_apps;
 #[cfg(windows)]
@@ -79,6 +79,8 @@ pub mod key_gate;
 mod key_suppressor;
 #[cfg(windows)]
 mod lock_open_with_guard;
+/// 本机的原生系统架构（x64 / arm64），与"本进程的仿真架构"区分开。
+pub mod os_arch;
 #[cfg(windows)]
 mod power;
 pub mod raw_input;

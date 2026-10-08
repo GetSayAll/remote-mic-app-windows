@@ -193,6 +193,8 @@ mod imp {
         /// 注册控制台事件处理器。第二参数非零 = 追加到链尾。
         /// 返回非零表示注册成功。
         fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+        /// 删除失败时把文件安排到下次重启删除（卸载清理用；需要提权才能写待删清单）。
+        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -539,6 +541,138 @@ mod imp {
                 return None;
             }
             Some(from_wide(&buf[..size as usize]))
+        }
+    }
+
+    /// PE 文件头里的 machine 字段（`IMAGE_FILE_MACHINE_*`）。
+    ///
+    /// 纯函数、只吃字节，便于单测——真机取证覆盖不到"x64 助手对 ARM64 宿主"这类组合，
+    /// 而 Issue #206 正是这种组合。
+    /// 读法：`MZ` → `e_lfanew`(0x3C) → `PE\0\0` → FileHeader.Machine。
+    fn pe_machine_from_bytes(bytes: &[u8]) -> Option<u16> {
+        if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+            return None;
+        }
+        let e_lfanew =
+            u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+        let sig_end = e_lfanew.checked_add(6)?;
+        if bytes.len() < sig_end || &bytes[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+            return None;
+        }
+        Some(u16::from_le_bytes([
+            bytes[e_lfanew + 4],
+            bytes[e_lfanew + 5],
+        ]))
+    }
+
+    /// 只读文件头（最多 4 KiB）取 machine：不为一个字段读进整份 20 MB 的 DLL。
+    fn pe_machine_of_file(path: &Path) -> Option<u16> {
+        let mut buf = [0u8; 4096];
+        let mut file = fs::File::open(path).ok()?;
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            match std::io::Read::read(&mut file, &mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => return None,
+            }
+        }
+        pe_machine_from_bytes(&buf[..filled])
+    }
+
+    /// machine 值的可读名（日志与错误文案共用）。
+    fn machine_name(machine: u16) -> &'static str {
+        match machine {
+            0x8664 => "x64",
+            0xAA64 => "arm64",
+            0x014C => "x86",
+            _ => "unknown",
+        }
+    }
+
+    /// **注入前**的架构闸门（Issue #206 的直接教训）。
+    ///
+    /// 必须满足：助手自身架构 == 目标宿主架构 == Gadget 架构。任一不等都在这里拒绝——
+    /// 放过去的话，失败会以 `CreateRemoteThread` 的 `GetLastError` 形式出现，看起来像
+    /// "安全软件拦截注入"，把排查引向错误方向（Issue #206 现场就是这样被归因的）。
+    fn arch_gate(injector: u16, target: u16, gadget: u16) -> Result<(), String> {
+        if injector != target {
+            return Err(format!(
+                "架构不一致：本助手是 {}（machine=0x{injector:04X}），目标宿主是 {}（machine=0x{target:04X}）。\
+                 x64 助手无法向 ARM64 宿主注入，反之亦然；请使用与系统架构匹配的安装包\
+                 （安装包按系统架构携带两份助手与 Gadget，主程序会自行选择）。",
+                machine_name(injector),
+                machine_name(target)
+            ));
+        }
+        if gadget != target {
+            return Err(format!(
+                "Gadget 架构与目标宿主不一致：Gadget 是 {}（machine=0x{gadget:04X}），宿主是 {}（machine=0x{target:04X}）。\
+                 目标进程无法加载其它架构的镜像；请改用与系统架构匹配的安装包。",
+                machine_name(gadget),
+                machine_name(target)
+            ));
+        }
+        Ok(())
+    }
+
+    /// 注入前把三方架构摆进日志，并在不一致时拒绝。
+    ///
+    /// 目标映像路径读不到时**不阻断**（fail-open + 显式告警）：宿主是系统进程，提权后正常
+    /// 都能读到；若某类环境一律读不到就一律拒绝，会把当前可用的 x64 路径一起打断。
+    /// 但拒绝一定发生在"读得到且不一致"的时候——那正是 Issue #206 的场景。
+    fn arch_preflight(pid: u32, gadget: &Path, logger: &Logger) -> Result<(), String> {
+        let target =
+            process_image_path(pid).and_then(|p| pe_machine_of_file(Path::new(&p)).map(|m| (p, m)));
+        let gadget_machine = pe_machine_of_file(gadget);
+        let injector = format!("{} 0x{:04X}", ARCH_NAME, INJECTOR_MACHINE);
+        match (&target, gadget_machine) {
+            (Some((path, target_machine)), Some(gadget_machine)) => {
+                logger.kv(
+                    "[ARCH]",
+                    &[
+                        ("injector", injector.clone()),
+                        (
+                            "target",
+                            format!("{} 0x{target_machine:04X}", machine_name(*target_machine)),
+                        ),
+                        (
+                            "gadget",
+                            format!("{} 0x{gadget_machine:04X}", machine_name(gadget_machine)),
+                        ),
+                        ("image", normalize_display(Path::new(path))),
+                    ],
+                );
+                arch_gate(INJECTOR_MACHINE, *target_machine, gadget_machine)
+            }
+            _ => {
+                logger.kv(
+                    "[ARCH]",
+                    &[
+                        ("injector", injector),
+                        (
+                            "target",
+                            match &target {
+                                Some((_, m)) => format!("{} 0x{m:04X}", machine_name(*m)),
+                                None => "unreadable".to_string(),
+                            },
+                        ),
+                        (
+                            "gadget",
+                            gadget_machine
+                                .map(|m| format!("{} 0x{m:04X}", machine_name(m)))
+                                .unwrap_or_else(|| "unreadable".to_string()),
+                        ),
+                        (
+                            "note",
+                            "架构校验未完成（映像路径或 Gadget 头读不到）：本次按原路径继续，\
+                             若随后失败请先看本行"
+                                .to_string(),
+                        ),
+                    ],
+                );
+                Ok(())
+            }
         }
     }
 
@@ -1414,6 +1548,9 @@ mod imp {
         /// （与 --canary-usage 同哲学），产品路径由主程序下行配置联动。
         /// `None` = 不启用（语音键保持 Windows 原生行为）。
         synth: Option<(u16, u16)>,
+        /// 卸载清理：删除运行时目录（本进程需已提权），被占用的文件安排到下次重启删除。
+        /// 由卸载器在提权后拉起；也可以由仍在运行的助手在看到卸载标记时自行执行。
+        uninstall_cleanup: bool,
     }
 
     fn parse_args() -> Result<Args, String> {
@@ -1444,6 +1581,7 @@ mod imp {
             attach_only: false,
             new_generation: false,
             synth: None,
+            uninstall_cleanup: false,
         };
 
         let mut it = std::env::args().skip(1);
@@ -1514,6 +1652,7 @@ mod imp {
                 "--force" => args.force = true,
                 "--require-exclusive-host" => args.require_exclusive_host = true,
                 "--selftest" => args.selftest = true,
+                "--uninstall-cleanup" => args.uninstall_cleanup = true,
                 "--new-token" => args.new_token = true,
                 "--attach-only" => args.attach_only = true,
                 "--new-generation" => args.new_generation = true,
@@ -1626,7 +1765,10 @@ mod imp {
   --port <PORT>         监听端口（默认 47831；自检时可用 0 自动分配）\n\
   --token <TOKEN>       握手令牌（默认读取/创建运行时目录里的 session.token，跨运行稳定）\n\
   --new-token           强制换一个新令牌（**会让常驻 tap 无法接管**，见下）\n\
-  --gadget <PATH>       frida-gadget.dll 路径（默认与可执行文件同目录）\n\
+  --gadget <PATH>       Gadget 路径（默认与可执行文件同目录；文件名随架构：\n\
+                        x64 = frida-gadget.dll，arm64 = frida-gadget-arm64.dll）\n\
+  --uninstall-cleanup   删除运行时目录后退出（需提权；删不掉的文件安排到下次重启删除）。\n\
+                        由卸载器调用；仍在运行的助手见到卸载标记也会自行执行\n\
   --runtime-dir <PATH>  运行时目录（默认 %ProgramData%\\SayAll\\rc003-helper）\n\
   --duration <SEC>      运行多少秒后自动收尾（默认 0 = 一直运行）。\n\
                         到点会打 [TIMEUP] 并发 disarm；**会话存活期间同样生效**\n\
@@ -1870,7 +2012,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 加它的理由很直接：2026-09-23 那次故障，用户在**没有提权**的情况下无法预先知道
     /// "第二次运行必然会失败"，只能等提权跑完看报错。
     fn inspect_runtime_readonly(args: &Args, logger: &Logger) {
-        let dll = args.runtime_dir.join("frida-gadget.dll");
+        let dll = args.runtime_dir.join(RUNTIME_GADGET_NAME);
         let exists = dll.exists();
         let digest = if exists {
             fs::read(&dll).ok().map(|b| sha256_hex(&b))
@@ -1993,9 +2135,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let (target_dir, dll) = match plan {
             DllPlan::Generation(_) => {
                 let gd = dir.join(&gen_name);
-                (gd.clone(), gd.join("frida-gadget.dll"))
+                (gd.clone(), gd.join(RUNTIME_GADGET_NAME))
             }
-            _ => (dir.clone(), dir.join("frida-gadget.dll")),
+            _ => (dir.clone(), dir.join(RUNTIME_GADGET_NAME)),
         };
 
         let mut reused = false;
@@ -2071,11 +2213,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     }
                     s
                 })?;
+                // 复制之后**对副本重算摘要**，两个作用（2026-10-07 报障人实测后加）：
+                // ① 堵住"写下去之后、注入之前被换掉"的窗口；
+                // ② 让 [DLL] 的 sha256_verified 在 copied 路径上也有真实含义——此前 copied 路径
+                //    固定写 false，被读成"没校验就用了"（来源其实已在 [VERIFY] 校验过）。
+                verify_copied_gadget(&dll, GADGET_SHA256)?;
+                verified = true;
                 logger.kv(
                     "[PREP]",
                     &[
                         ("dll", normalize_display(&dll)),
                         ("action", "copied".into()),
+                        ("sha256_verified", "true".into()),
                         (
                             "bytes",
                             fs::metadata(&dll).map(|m| m.len()).unwrap_or(0).to_string(),
@@ -2185,6 +2334,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .to_str()
             .ok_or_else(|| "Gadget 路径不是合法 UTF-8".to_string())?;
 
+        // **注入前**的架构闸门：助手 / 宿主 / Gadget 三者必须同架构。放在最前是有意的——
+        // 一旦走到 OpenProcess / CreateRemoteThread，失败就只剩一个 GetLastError，
+        // 会被读成"安全软件拦截注入"（Issue #206 现场就是这样被归因的）。
+        arch_preflight(pid, dll, logger)?;
+
         let mut inj = Injection {
             thread_handle: std::ptr::null_mut(),
             remote_buf: std::ptr::null_mut(),
@@ -2258,7 +2412,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 let err = lasts_error();
                 inj.cleanup();
                 return Err(format!(
-                    "CreateRemoteThread 失败，GetLastError={err}（安全软件拦截注入时常见）"
+                    "CreateRemoteThread 失败，GetLastError={err}。架构一致性已在注入前校验通过\
+                     （见上方 [ARCH] 行）；此处仍失败时，最常见的原因是安全软件拦截注入。"
                 ));
             }
             inj.thread_handle = thread;
@@ -2580,6 +2735,128 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             return true;
         }
         false
+    }
+
+    /// 卸载清理标记（与停用信号同目录，`%LOCALAPPDATA%\SayAll\rc003-uninstall-cleanup`）。
+    ///
+    /// **为什么需要**：运行时目录是提权进程建的，ACL 只给普通用户读+新建、不给删已有文件，
+    /// 所以非提权的卸载器删不掉它（2026-10-07 实测：本机 234 MB / 11 个文件）。而助手本身
+    /// 就是提权进程——卸载器在停用之前写下本标记，助手见到停用信号时就顺手把目录删干净，
+    /// 这条路径**不需要再弹一次 UAC**。路径与安装器侧 `installer-hooks.nsh` 逐字符一致。
+    fn uninstall_cleanup_signal_path() -> PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+            format!("{home}\\AppData\\Local")
+        });
+        PathBuf::from(base)
+            .join("SayAll")
+            .join("rc003-uninstall-cleanup")
+    }
+
+    /// 卸载清理的逐项计数（一条日志说清结果，别让排查再去数文件）。
+    struct CleanupReport {
+        files_deleted: usize,
+        files_pending_reboot: usize,
+        dirs_deleted: usize,
+        failures: Vec<String>,
+    }
+
+    impl CleanupReport {
+        fn is_clean(&self) -> bool {
+            self.failures.is_empty()
+        }
+    }
+
+    /// 把文件安排到"下次重启删除"（`MoveFileEx` DELAY_UNTIL_REBOOT）。
+    /// 写待删清单需要提权；失败就返回 false，由调用方记成 failures。
+    fn schedule_delete_on_reboot(path: &Path) -> bool {
+        const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
+        let wide = to_wide(path.to_string_lossy().as_ref());
+        unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+    }
+
+    /// 删干净运行时目录（递归）。删不掉的文件（典型：宿主仍映射着那一代 Gadget）安排到
+    /// 下次重启删除——这不是错误，只是要等设备断开或重启才真的消失。目录空了再把父目录
+    /// `%PROGRAMDATA%\SayAll` 一并收掉：留个空壳同样算没清干净。
+    fn cleanup_runtime_dir(dir: &Path, logger: &Logger) -> CleanupReport {
+        let mut report = CleanupReport {
+            files_deleted: 0,
+            files_pending_reboot: 0,
+            dirs_deleted: 0,
+            failures: Vec::new(),
+        };
+        cleanup_dir_recursive(dir, &mut report);
+        // 目录本身也要收掉：只清空内容不算"删干净"（卸载后不留空壳）。
+        if fs::remove_dir(dir).is_ok() {
+            report.dirs_deleted += 1;
+        }
+        if let Some(parent) = dir.parent() {
+            let empty = parent
+                .read_dir()
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if empty && fs::remove_dir(parent).is_ok() {
+                report.dirs_deleted += 1;
+            }
+        }
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                ("dir", normalize_display(dir)),
+                ("files_deleted", report.files_deleted.to_string()),
+                (
+                    "files_pending_reboot",
+                    report.files_pending_reboot.to_string(),
+                ),
+                ("dirs_deleted", report.dirs_deleted.to_string()),
+                (
+                    "failures",
+                    if report.failures.is_empty() {
+                        "-".to_string()
+                    } else {
+                        report.failures.join("; ")
+                    },
+                ),
+            ],
+        );
+        report
+    }
+
+    fn cleanup_dir_recursive(dir: &Path, report: &mut CleanupReport) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                // 只记最后一段目录名：路径属个人环境，日志里不留。
+                report.failures.push(format!(
+                    "read_dir {}: {error}",
+                    dir.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                cleanup_dir_recursive(&path, report);
+                if fs::remove_dir(&path).is_ok() {
+                    report.dirs_deleted += 1;
+                }
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => report.files_deleted += 1,
+                Err(_) => {
+                    if schedule_delete_on_reboot(&path) {
+                        report.files_pending_reboot += 1;
+                    } else {
+                        report.failures.push(format!(
+                            "delete {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// 兜底：在 `C:\Users\*\AppData\Local\SayAll\rc003-bridge.ini` 里找**最近修改**的一份。
@@ -3073,6 +3350,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     fn app_bridge_worker(
         path: PathBuf,
+        runtime_dir: PathBuf,
         rx: mpsc::Receiver<BridgeOutbound>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
@@ -3102,6 +3380,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             //    只在 --follow-app 下生效：手动调试运行不该被残留信号误杀。
             if follow_app && take_stop_signal(&app_stop_signal_path()) {
                 logger.line("[STOP-SIGNAL] 主程序请求停用，助手退出");
+                // 卸载场景：卸载器在停用之前写下清理标记。趁本进程还活着（而且本来就是提权的）
+                // 把运行时目录删干净——这样"功能开着的时候卸载"不需要再弹一次 UAC。
+                if take_stop_signal(&uninstall_cleanup_signal_path()) {
+                    let report = cleanup_runtime_dir(&runtime_dir, &logger);
+                    logger.line(&format!(
+                        "[CLEANUP] 卸载清理（助手自清）：删除 {} 个文件 / {} 个目录，待重启删除 {} 个，失败 {} 项",
+                        report.files_deleted,
+                        report.dirs_deleted,
+                        report.files_pending_reboot,
+                        report.failures.len()
+                    ));
+                }
                 std::process::exit(0);
             }
 
@@ -3322,6 +3612,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     fn spawn_app_bridge(
         path: Option<PathBuf>,
+        runtime_dir: PathBuf,
         logger: &Logger,
         follow_app: bool,
     ) -> Option<AppBridge> {
@@ -3353,6 +3644,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .spawn(move || {
                 app_bridge_worker(
                     path,
+                    runtime_dir,
                     rx,
                     worker_stop,
                     worker_stats,
@@ -3905,7 +4197,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // "日志停在 write_failed 就不再增长"那类事故的形状。
         // 放运行时目录里：提权进程可写，且与令牌/Gadget 同处一个地方。
         // 只对 --follow-app 生效，不改变手动运行"必须显式 --log"的既有约定。
-        if args.follow_app && args.log.is_none() {
+        if args.follow_app && args.log.is_none() && !args.uninstall_cleanup {
+            // 注意 `!args.uninstall_cleanup`：卸载清理这一趟**只能删，不能造**——
+            // 这个分支会 create_dir_all 运行时目录并写 helper-task.log，
+            // 放进清理路径里就等于"清完立刻又建回来"（2026-10-07 卸载清理实现时补的护栏）。
             let _ = std::fs::create_dir_all(&args.runtime_dir);
             args.log = Some(args.runtime_dir.join("helper-task.log"));
         }
@@ -3980,6 +4275,41 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("agent_sha256", agent_sha256_hex()),
             ],
         );
+
+        if args.uninstall_cleanup {
+            // 卸载清理：只做一件事——把运行时目录删干净。由卸载器在提权后拉起；
+            // 仍在运行的助手见到卸载标记时也会自己走这条路径（见 app_bridge_worker）。
+            if !is_elevated() {
+                logger.line("[STOP] --uninstall-cleanup 需要管理员权限（把删不掉的文件安排到重启删除需要提权）。");
+                std::process::exit(2);
+            }
+            if !args.runtime_dir.exists() {
+                logger.kv(
+                    "[CLEANUP]",
+                    &[
+                        ("dir", normalize_display(&args.runtime_dir)),
+                        ("result", "nothing_to_do".into()),
+                    ],
+                );
+                std::process::exit(0);
+            }
+            let report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+            if report.is_clean() {
+                logger.line(&format!(
+                    "[CLEANUP] 已清理运行时目录（删除 {} 个目录 / {} 个文件）",
+                    report.dirs_deleted, report.files_deleted
+                ));
+                std::process::exit(0);
+            }
+            logger.line(&format!(
+                "[CLEANUP] 部分文件未能在本次删除：待重启删除 {} 个，失败 {} 项（{}）",
+                report.files_pending_reboot,
+                report.failures.len(),
+                report.failures.join("; ")
+            ));
+            // 待重启删除也算"已安排"（退出码 0）；只有真的失败才非零。
+            std::process::exit(if report.failures.is_empty() { 0 } else { 1 });
+        }
 
         if args.selftest {
             let ok = selftest(&logger, console_state);
@@ -4142,8 +4472,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Some(p) => p,
             None => {
                 logger.line(
-                    "[STOP] 找不到 frida-gadget.dll。请用 --gadget 指定，或先运行 \
-                     vendor/fetch_frida_gadget.py 获取（版本与 SHA-256 见 vendor/frida-gadget.lock.json）。",
+                    &format!(
+                        "[STOP] 找不到本架构的 Gadget（{GADGET_FILE_NAME}）。请用 --gadget 指定，或先运行 \
+                         vendor/fetch_frida_gadget.py 获取（版本与 SHA-256 见 vendor/frida-gadget.lock.json；\
+                         锁定文件按架构各登记一条，本助手是 {ARCH_NAME}）。"
+                    ),
                 );
                 std::process::exit(4);
             }
@@ -4322,7 +4655,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 刻意放在端口绑定之前：它只决定"边沿能不能送到主程序"，与"能不能捕获、
         // 能不能清键"完全解耦。主程序没运行时它会安静地每 2 秒重试（日志折叠成
         // 前 3 次 + 每 30 次一条），**不得**因此影响捕获链路。
-        let app_bridge = match spawn_app_bridge(args.app_bridge.clone(), &logger, args.follow_app) {
+        let app_bridge = match spawn_app_bridge(
+            args.app_bridge.clone(),
+            args.runtime_dir.clone(),
+            &logger,
+            args.follow_app,
+        ) {
             Some(bridge) => {
                 logger.kv(
                     "[APP-BRIDGE]",
@@ -5433,6 +5771,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             attach_only: false,
             new_generation: false,
             synth: None,
+            uninstall_cleanup: false,
         };
         let cfg = serde_like_config(&args);
         check(
@@ -5446,14 +5785,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         // 6) 与锁定文件的一致性（编译期内联，确定性断言；不依赖运行时 CWD）
         check(
-            "Gadget 锁定文件与 GADGET_SHA256 / GADGET_VERSION 一致",
+            "Gadget 锁定文件与 GADGET_SHA256 / GADGET_VERSION 一致（本架构）",
             GADGET_LOCK_JSON.contains(GADGET_SHA256)
                 && GADGET_LOCK_JSON.contains(GADGET_VERSION)
-                && GADGET_LOCK_JSON.contains("windows-x86_64"),
+                && GADGET_LOCK_JSON.contains(GADGET_LOCK_ARCH_TOKEN),
             format!(
                 "常量 sha256={GADGET_SHA256} version={GADGET_VERSION}；锁定文件 {} 字节",
                 GADGET_LOCK_JSON.len()
             ),
+        );
+
+        // 6b) 双架构登记必须同时存在：只留一条时，另一架构的助手会拿着错值去校验，
+        //     表现为"Gadget SHA-256 不符"，而根因其实是登记缺失。
+        check(
+            "Gadget 锁定文件同时登记 x86_64 与 arm64 两份（按架构各一条）",
+            GADGET_LOCK_JSON.contains("windows-x86_64")
+                && GADGET_LOCK_JSON.contains("windows-arm64")
+                && GADGET_LOCK_JSON.contains("frida-gadget-arm64.dll"),
+            format!("本架构 token={GADGET_LOCK_ARCH_TOKEN}"),
         );
 
         // 7) HostPid 解码的宽度契约（2026-09-23 真机踩到的根因，回归测试）
@@ -6337,6 +6686,39 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("first={first} second={second}"),
         );
 
+        // 卸载清理（2026-10-07）：标记路径必须与安装器侧逐字符一致，清理必须真的删掉一整棵目录树。
+        // 路径错一个字符 → 助手看不见标记 → 卸载器退回"提权清理"（多弹一次 UAC）；因此钉字符串。
+        check(
+            "卸载清理标记路径与安装器侧约定一致",
+            uninstall_cleanup_signal_path()
+                .ends_with(std::path::Path::new("SayAll").join("rc003-uninstall-cleanup")),
+            format!("{}", uninstall_cleanup_signal_path().display()),
+        );
+        let cleanup_root = std::env::temp_dir().join(format!(
+            "rc003-helper-cleanup-selftest-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&cleanup_root);
+        let nested = cleanup_root.join("gen-abc");
+        let _ = fs::create_dir_all(&nested);
+        let _ = fs::write(cleanup_root.join("session.token"), b"x");
+        let _ = fs::write(nested.join("frida-gadget.dll"), b"x");
+        let report = cleanup_runtime_dir(&cleanup_root, logger);
+        check(
+            "卸载清理：递归删除整个运行时目录（含世代子目录）",
+            report.files_deleted == 2
+                && report.files_pending_reboot == 0
+                && report.failures.is_empty()
+                && !cleanup_root.exists(),
+            format!(
+                "files_deleted={} dirs_deleted={} pending_reboot={} failures={}",
+                report.files_deleted,
+                report.dirs_deleted,
+                report.files_pending_reboot,
+                report.failures.len()
+            ),
+        );
+
         // 控制台引导（2026-10-04）：stdout/stderr 必须可写。
         // GUI 子系统 + 计划任务拉起时控制台状态是 `nul`（无窗口、输出进 NUL
         // 设备）；手动运行是 `attached`（父控制台）。引导失效（句柄无效）时
@@ -6379,32 +6761,46 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     /// 默认 Gadget 位置：按顺序试若干候选，**并把选中的路径交给调用方记录**。
     /// 不打印路径的话，"找不到 / 找到的是另一个" 都会变成需要反查的谜题。
+    ///
+    /// 候选名按**本助手的架构**取（`GADGET_FILE_NAME`）：arm64 助手只看 arm64 那一份，
+    /// 避免在同一台机器上误取到另一架构的 Gadget（Issue #206 的根因之一）。
     fn default_gadget_path() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
         let dir = exe.parent()?;
         let mut candidates = vec![
-            dir.join("frida-gadget.dll"),
-            dir.join("vendor").join("frida-gadget.dll"),
-            // 开发布局：target/release/rc003-helper.exe → helper/vendor/frida-gadget.dll
+            dir.join(GADGET_FILE_NAME),
+            dir.join("vendor").join(GADGET_FILE_NAME),
+            // 开发布局：两种 target 目录深度都要覆盖
+            //   target/release/sayall-helper.exe            → helper/vendor/
+            //   target/aarch64-pc-windows-msvc/release/...  → helper/vendor/
             dir.join("..")
                 .join("..")
                 .join("vendor")
-                .join("frida-gadget.dll"),
+                .join(GADGET_FILE_NAME),
+            dir.join("..")
+                .join("..")
+                .join("..")
+                .join("vendor")
+                .join(GADGET_FILE_NAME),
         ];
         // 以当前工作目录为基准（从 helper/ 或仓库根直接调用 exe 时）
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join("vendor").join("frida-gadget.dll"));
-            candidates.push(cwd.join("frida-gadget.dll"));
+            candidates.push(cwd.join("vendor").join(GADGET_FILE_NAME));
+            candidates.push(cwd.join(GADGET_FILE_NAME));
         }
         candidates.into_iter().find(|p| p.exists())
     }
 
-    /// 校验 Gadget 的 SHA-256。锁定值来自 `vendor/frida-gadget.lock.json`，
+    /// 校验 Gadget 的 SHA-256 与**架构**。锁定值来自 `vendor/frida-gadget.lock.json`，
     /// 这里是编译期常量——改版本必须同时改锁定文件与本常量（见 ATTRIBUTION.md 登记）。
+    ///
+    /// 架构单列一项检查与一行日志：SHA 已经隐含锁定架构，但把 machine 打进日志才能一眼
+    /// 看出"手上这份是哪个架构"——Issue #206 的排查正是卡在缺这一行证据上。
     fn verify_gadget(path: &Path, logger: &Logger) -> Result<(), String> {
         let bytes =
             fs::read(path).map_err(|e| format!("读取 Gadget 失败 {}: {e}", path.display()))?;
         let digest = sha256_hex(&bytes);
+        let machine = pe_machine_from_bytes(&bytes);
         logger.kv(
             "[VERIFY]",
             &[
@@ -6412,12 +6808,48 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("size", bytes.len().to_string()),
                 ("sha256", digest.clone()),
                 ("expected", GADGET_SHA256.to_string()),
+                (
+                    "machine",
+                    machine
+                        .map(|m| format!("{} 0x{m:04X}", machine_name(m)))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ),
+                (
+                    "arch_expected",
+                    format!("{} 0x{:04X}", ARCH_NAME, INJECTOR_MACHINE),
+                ),
             ],
         );
+        if let Some(m) = machine {
+            if m != INJECTOR_MACHINE {
+                return Err(format!(
+                    "Gadget 架构不符：本助手是 {}（machine=0x{:04X}），Gadget 是 {}（machine=0x{m:04X}）。\
+                     请改用与系统架构匹配的安装包，或用 --gadget 指向本架构那一份。",
+                    ARCH_NAME,
+                    INJECTOR_MACHINE,
+                    machine_name(m)
+                ));
+            }
+        }
         if digest != GADGET_SHA256 {
             return Err(format!(
                 "Gadget SHA-256 不符：期望 {}，实际 {digest}。请重新运行 vendor/fetch_frida_gadget.py。",
                 GADGET_SHA256
+            ));
+        }
+        Ok(())
+    }
+
+    /// 复制之后对副本重算摘要（`expected` 作参数是为了让两个分支都能被单测直接覆盖）。
+    /// 摘要不符=硬失败：运行时目录里的那份马上要被注入，不能"记一条日志接着用"。
+    fn verify_copied_gadget(dll: &Path, expected: &str) -> Result<(), String> {
+        let digest = sha256_hex(
+            &fs::read(dll).map_err(|e| format!("复制后读回 Gadget 失败 {}: {e}", dll.display()))?,
+        );
+        if digest != expected {
+            return Err(format!(
+                "复制后的 Gadget 摘要不符：期望 {expected}，实际 {digest}（运行时目录 {}）",
+                dll.display()
             ));
         }
         Ok(())
@@ -6507,9 +6939,41 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         h.iter().map(|v| format!("{v:08x}")).collect()
     }
 
-    /// Gadget 的固定版本与 SHA-256（来自 vendor/frida-gadget.lock.json，2026-09-23 校验）。
+    /// Gadget 的固定版本与 SHA-256（来自 vendor/frida-gadget.lock.json，2026-10-07 起**按架构各一条**）。
+    ///
+    /// 为什么分两份：宿主（承载遥控器的 `WUDFHost.exe`）在 ARM64 系统上是原生 ARM64 进程，
+    /// 而 ARM64 进程不能加载 x64 镜像；因此"助手架构 == 宿主架构 == Gadget 架构"是硬前提，
+    /// 每个助手只认自己那一份（Issue #206 现场：x64 助手对 ARM64 宿主，注入必然失败）。
+    #[cfg(target_arch = "x86_64")]
     const GADGET_SHA256: &str = "350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687";
-    /// Gadget 的固定版本号（与锁定文件 entries[0].version 必须一致）。
+    #[cfg(target_arch = "aarch64")]
+    const GADGET_SHA256: &str = "323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff";
+    /// 锁定文件里本架构条目的 `component` 后缀（自检第 6 项拿它做确定性断言）。
+    #[cfg(target_arch = "x86_64")]
+    const GADGET_LOCK_ARCH_TOKEN: &str = "windows-x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const GADGET_LOCK_ARCH_TOKEN: &str = "windows-arm64";
+    /// 与助手同目录（及 vendor/、开发布局）里**本架构那一份** Gadget 的文件名。
+    /// x64 保持历史名不变；arm64 加后缀，两者可以在同一目录共存。
+    #[cfg(target_arch = "x86_64")]
+    const GADGET_FILE_NAME: &str = "frida-gadget.dll";
+    #[cfg(target_arch = "aarch64")]
+    const GADGET_FILE_NAME: &str = "frida-gadget-arm64.dll";
+    /// 注入进宿主后的**运行时**文件名。两种架构都用这个名字：同一台机器只会用到其中一种，
+    /// 而世代目录名（`frida-gadget.<hash>.dll`）、常驻 tap 识别（`is_gadget_module`）与
+    /// 既有验收脚本都按这个名字工作，改它会牵动整条接管/清键链路。
+    const RUNTIME_GADGET_NAME: &str = "frida-gadget.dll";
+    /// 本助手自身的 PE machine，用于注入前的架构比对（见 `arch_gate`）。x64 / ARM64。
+    #[cfg(target_arch = "x86_64")]
+    const INJECTOR_MACHINE: u16 = 0x8664;
+    #[cfg(target_arch = "aarch64")]
+    const INJECTOR_MACHINE: u16 = 0xAA64;
+    /// 本助手架构的短名，只用于日志与错误文案。
+    #[cfg(target_arch = "x86_64")]
+    const ARCH_NAME: &str = "x64";
+    #[cfg(target_arch = "aarch64")]
+    const ARCH_NAME: &str = "arm64";
+    /// Gadget 的固定版本号（与锁定文件 entries[*].version 必须一致）。
     const GADGET_VERSION: &str = "17.18.0";
     /// agent 脚本随二进制内嵌，保证"运行的就是校验过的那一份"，不受运行时目录被改动影响。
     /// （写入运行时目录是为了让 Gadget 能按相对路径加载它；内容以本常量为准。）
@@ -7008,6 +7472,147 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ),
                 Some(Duration::from_millis(ACK_RESEND_SLOW_MS))
             );
+        }
+    }
+
+    /// 架构相关的不变量（Issue #206 回归）。
+    ///
+    /// 为什么用纯函数测：真机取证覆盖不到"x64 助手 + ARM64 宿主"这种组合（需要一台 ARM64
+    /// 机器），而这正是线上翻车的那一组；把判定抽成纯函数后，四种组合都能在 CI 里钉住。
+    #[cfg(test)]
+    mod arch_tests {
+        use super::*;
+
+        /// 造一份最小可解析的 PE 头（只到 FileHeader.Machine 为止）。
+        fn pe_bytes(machine: u16, e_lfanew: u32) -> Vec<u8> {
+            let mut b = vec![0u8; (e_lfanew as usize) + 8];
+            b[0] = b'M';
+            b[1] = b'Z';
+            b[0x3C..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
+            b[e_lfanew as usize..e_lfanew as usize + 4].copy_from_slice(b"PE\0\0");
+            b[e_lfanew as usize + 4..e_lfanew as usize + 6].copy_from_slice(&machine.to_le_bytes());
+            b
+        }
+
+        #[test]
+        fn pe_machine_reads_x64_and_arm64_headers() {
+            assert_eq!(pe_machine_from_bytes(&pe_bytes(0x8664, 0x80)), Some(0x8664));
+            assert_eq!(pe_machine_from_bytes(&pe_bytes(0xAA64, 0xF0)), Some(0xAA64));
+        }
+
+        /// 阴性对照：这些输入都不许被"猜"出架构——猜错的代价是把架构不匹配放过去。
+        #[test]
+        fn pe_machine_rejects_malformed_input() {
+            assert_eq!(pe_machine_from_bytes(b""), None);
+            assert_eq!(pe_machine_from_bytes(b"not a pe file at all........"), None);
+            // 只有 MZ、没有 PE 签名
+            let mut mz = vec![0u8; 0x100];
+            mz[0] = b'M';
+            mz[1] = b'Z';
+            assert_eq!(pe_machine_from_bytes(&mz), None);
+            // e_lfanew 越界：返回 None，不得 panic
+            let mut oob = pe_bytes(0x8664, 0x80);
+            oob[0x3C..0x40].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
+            assert_eq!(pe_machine_from_bytes(&oob), None);
+            // 签名不对
+            let mut bad = pe_bytes(0x8664, 0x80);
+            bad[0x80] = b'X';
+            assert_eq!(pe_machine_from_bytes(&bad), None);
+        }
+
+        #[test]
+        fn arch_gate_accepts_only_matching_triples() {
+            // 本机：x64 助手 + x64 宿主 + x64 Gadget
+            assert!(arch_gate(0x8664, 0x8664, 0x8664).is_ok());
+            // ARM64 机器上的正确组合
+            assert!(arch_gate(0xAA64, 0xAA64, 0xAA64).is_ok());
+            // Issue #206 现场：x64 助手对 ARM64 宿主 —— 必须在闸门处拒绝
+            let cross = arch_gate(0x8664, 0xAA64, 0x8664).unwrap_err();
+            assert!(cross.contains("架构不一致"), "{cross}");
+            assert!(cross.contains("x64"), "{cross}");
+            assert!(cross.contains("arm64"), "{cross}");
+            // Gadget 与宿主不一致（例如 ARM64 宿主配了 x64 Gadget）
+            let bad_gadget = arch_gate(0xAA64, 0xAA64, 0x8664).unwrap_err();
+            assert!(bad_gadget.contains("Gadget 架构"), "{bad_gadget}");
+        }
+
+        /// 拒绝文案不得再把人引向"安全软件拦截注入"（Issue #206 的错误归因）。
+        #[test]
+        fn arch_gate_messages_do_not_blame_antivirus() {
+            let msg = arch_gate(0x8664, 0xAA64, 0x8664).unwrap_err();
+            assert!(!msg.contains("安全软件"), "{msg}");
+            assert!(!msg.contains("拦截"), "{msg}");
+        }
+
+        #[test]
+        fn per_arch_constants_are_self_consistent() {
+            #[cfg(target_arch = "x86_64")]
+            {
+                assert_eq!(INJECTOR_MACHINE, 0x8664);
+                assert_eq!(ARCH_NAME, "x64");
+                assert_eq!(GADGET_FILE_NAME, "frida-gadget.dll");
+                assert!(GADGET_LOCK_ARCH_TOKEN.ends_with("x86_64"));
+                assert_eq!(GADGET_SHA256.len(), 64);
+                assert!(GADGET_LOCK_JSON.contains(GADGET_SHA256));
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                assert_eq!(INJECTOR_MACHINE, 0xAA64);
+                assert_eq!(ARCH_NAME, "arm64");
+                assert_eq!(GADGET_FILE_NAME, "frida-gadget-arm64.dll");
+                assert!(GADGET_LOCK_ARCH_TOKEN.ends_with("arm64"));
+                assert_eq!(GADGET_SHA256.len(), 64);
+                assert!(GADGET_LOCK_JSON.contains(GADGET_SHA256));
+            }
+            // 运行时名两种架构一致（世代目录名与常驻 tap 识别都按它工作）
+            assert_eq!(RUNTIME_GADGET_NAME, "frida-gadget.dll");
+        }
+
+        /// 两份 Gadget 的摘要必须不同：相同就意味着锁定文件抄错了一条。
+        #[test]
+        fn the_two_lock_entries_carry_different_hashes() {
+            let x64 = "350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687";
+            let arm64 = "323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff";
+            assert_ne!(x64, arm64);
+            assert!(GADGET_LOCK_JSON.contains(x64), "锁定文件缺少 x64 摘要");
+            assert!(GADGET_LOCK_JSON.contains(arm64), "锁定文件缺少 arm64 摘要");
+        }
+
+        /// 打包后的 arm64 文件名也必须被"常驻 tap 识别"认出来，否则会漏报 module_present。
+        #[test]
+        fn bundled_arm64_name_is_recognized_as_a_gadget_module() {
+            assert!(is_gadget_module("frida-gadget-arm64.dll"));
+            assert!(is_gadget_module("FRIDA-GADGET.DLL"));
+            assert!(!is_gadget_module("frida-gadget.dll.bak"));
+        }
+    }
+
+    /// 复制后的摘要复核（2026-10-07 报障人实测后加：copied 路径原先固定报 sha256_verified=false，
+    /// 被读成"没校验就用了"）。
+    #[cfg(test)]
+    mod copied_gadget_verify_tests {
+        use super::*;
+
+        #[test]
+        fn copied_gadget_must_match_the_expected_digest() {
+            let dir =
+                std::env::temp_dir().join(format!("sayall-copy-verify-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("frida-gadget.dll");
+            fs::write(&path, b"payload").unwrap();
+            let digest = sha256_hex(b"payload");
+
+            // 摘要一致 → 通过（真实运行里 expected 恒为 GADGET_SHA256）
+            assert!(verify_copied_gadget(&path, &digest).is_ok());
+
+            // 摘要不一致（"写下去之后被换掉"的窗口）→ 必须报错，不得只记日志接着注入
+            let error = verify_copied_gadget(&path, GADGET_SHA256).unwrap_err();
+            assert!(error.contains("摘要不符"), "{error}");
+
+            // 读不到也要报错（不是静默通过）
+            assert!(verify_copied_gadget(&dir.join("missing.dll"), &digest).is_err());
+
+            let _ = fs::remove_dir_all(&dir);
         }
     }
 }

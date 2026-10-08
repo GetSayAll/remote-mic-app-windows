@@ -503,7 +503,11 @@ mod simulation {
                         edges
                     };
                     self.publish_edges(&edges);
-                    Ok(format!("edges={} report_bytes={}", edges.len(), bytes.len()))
+                    Ok(format!(
+                        "edges={} report_bytes={}",
+                        edges.len(),
+                        bytes.len()
+                    ))
                 }
                 HardwareSignalEvent::VoiceControl { data_hex } => {
                     let bytes = decode_hex(data_hex)
@@ -564,11 +568,10 @@ mod simulation {
                     Ok(format!("decoded_samples={decoded}"))
                 }
                 HardwareSignalEvent::GattValue {
-                    characteristic_uuid, ..
+                    characteristic_uuid,
+                    ..
                 } => Ok(format!("gatt_value uuid={characteristic_uuid} ignored")),
-                HardwareSignalEvent::Raw {
-                    original_kind, ..
-                } => Ok(format!(
+                HardwareSignalEvent::Raw { original_kind, .. } => Ok(format!(
                     "raw original_kind={} ignored",
                     original_kind.as_deref().unwrap_or("unknown")
                 )),
@@ -1185,8 +1188,10 @@ mod simulation {
         #[test]
         fn hardware_script_loader_rejects_broken_script_without_touching_state() {
             use sayall_windows::hardware_script::HardwareSignalScript;
-            assert!(HardwareSignalScript::parse(r#"{"schemaVersion": 1, "id": "", "events": []}"#)
-                .is_err());
+            assert!(
+                HardwareSignalScript::parse(r#"{"schemaVersion": 1, "id": "", "events": []}"#)
+                    .is_err()
+            );
         }
     }
 }
