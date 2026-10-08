@@ -45,6 +45,24 @@ use crate::send_input::KeyCode;
 use serde::Serialize;
 use std::sync::Arc;
 
+/// 注入事件的「回声」读数（Issue #195，2026-10-08）：一次注入动作之后，
+/// 本进程键钩子宿主实际看到的注入事件增量，以及最后一条注入事件的原始字段。
+///
+/// 语义边界：`count > 0` 只证明事件进了系统输入流并回到本进程宿主钩子，
+/// **不证明前台窗口收到了它**（UIPI、链上更早/更晚的第三方钩子、焦点归属
+/// 都不在这条读数里）。因此日志用 `result=queued` + `echo_delta`，不再用
+/// 「result=ok」暗示成功；前台可见性必须另行真机验证。
+///
+/// `vk`/`scan`/`flags` 是**最后一条**注入事件的字段，可能来自其他程序的
+/// 注入（宿主钩子看得到全系统的注入事件），判读时以 `count` 为主。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InjectedEcho {
+    pub count: u64,
+    pub vk: u32,
+    pub scan: u32,
+    pub flags: u32,
+}
+
 /// 录入边沿的来源。
 ///
 /// `Real` = 物理按键事件本身；`Injected` = 外部钩子（微信输入法等）在
@@ -358,6 +376,15 @@ mod windows_impl {
     /// 过滤/吞掉"（2026-09-27 真机：录入期 keys_seen 恒为 0，需外部注入对照）。
     static HOOK_CALLS_TOTAL: AtomicU64 = AtomicU64::new(0);
     static HOOK_CALLS_INJECTED: AtomicU64 = AtomicU64::new(0);
+    /// 最后一条注入事件的原始字段（vk/扫描码/flags）。与 `HOOK_CALLS_INJECTED`
+    /// 一起构成注入「回声」读数（见 `super::InjectedEcho`，Issue #195）：
+    /// 映射动作注入后 `map_inject result=queued echo_delta=… last_*` 用它判断
+    /// 「事件是否真的进了系统输入流」，并当场暴露拿错扫描码（如 Escape 填成
+    /// HID usage 0x29 会变成反引号）这类错误。写读都是原子，允许字段间轻微
+    /// 不同步（判读以 count 为主）。
+    static INJECTED_LAST_VK: AtomicU64 = AtomicU64::new(0);
+    static INJECTED_LAST_SCAN: AtomicU64 = AtomicU64::new(0);
+    static INJECTED_LAST_FLAGS: AtomicU64 = AtomicU64::new(0);
     /// 链头 bump 成败与最后一次失败错误码（2026-09-27：SetWindowsHookExW
     /// 失败此前静默保留旧钩，链位置问题不可见）。
     static HOOK_BUMPS_OK: AtomicU64 = AtomicU64::new(0);
@@ -509,6 +536,9 @@ mod windows_impl {
         let injected = flags.contains(LLKHF_INJECTED);
         if injected {
             HOOK_CALLS_INJECTED.fetch_add(1, Ordering::Relaxed);
+            INJECTED_LAST_VK.store(vk_code as u64, Ordering::Relaxed);
+            INJECTED_LAST_SCAN.store(make_code as u64, Ordering::Relaxed);
+            INJECTED_LAST_FLAGS.store(flags_raw as u64, Ordering::Relaxed);
         }
         if !GATE_ACTIVE.load(Ordering::Relaxed) {
             return false;
@@ -919,6 +949,21 @@ mod windows_impl {
         PERSISTENT_SWALLOW_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// 注入事件计数快照（用作 [`injected_echo_since`] 的起点）。
+    pub fn injected_event_count() -> u64 {
+        HOOK_CALLS_INJECTED.load(Ordering::Relaxed)
+    }
+
+    /// 相对快照 `before` 的注入事件读数（见 [`super::InjectedEcho`]）。
+    pub fn injected_echo_since(before: u64) -> super::InjectedEcho {
+        super::InjectedEcho {
+            count: injected_event_count().saturating_sub(before),
+            vk: INJECTED_LAST_VK.load(Ordering::Relaxed) as u32,
+            scan: INJECTED_LAST_SCAN.load(Ordering::Relaxed) as u32,
+            flags: INJECTED_LAST_FLAGS.load(Ordering::Relaxed) as u32,
+        }
+    }
+
     /// 一次「可能进入 OS 的物理按下沿」计数（见 OBSERVATION_* 注释）。
     /// 只在透传/泄漏路径调用：门控吞下的边沿到不了输入框，注入事件在
     /// 调用点已排除（钩子线程只做原子操作）。
@@ -1002,11 +1047,12 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     arm_button, begin_key_observation, capture_diagnostics_summary, configure, decide,
-    end_key_observation, enhanced_owned_mask, is_gate_thread_alive, leaked_down_count,
-    listener_active, observed_last_vk, persistent_swallow_total, set_edge_sink,
-    set_enhanced_owned_mask, set_listener_active, set_persistent_mask, set_remote_connected,
-    set_shortcut_capture_active, set_shortcut_capture_sink, set_voice_synth_active,
-    swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    end_key_observation, enhanced_owned_mask, injected_echo_since, injected_event_count,
+    is_gate_thread_alive, leaked_down_count, listener_active, observed_last_vk,
+    persistent_swallow_total, set_edge_sink, set_enhanced_owned_mask, set_listener_active,
+    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
+    set_shortcut_capture_sink, set_voice_synth_active, swallowed_edge_count, voice_synth_active,
+    KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 /// 宿主消息路径（key_host 读线程调用；仅 crate 内可见）。
@@ -1071,6 +1117,12 @@ mod fallback {
     }
     pub fn persistent_swallow_total() -> u64 {
         0
+    }
+    pub fn injected_event_count() -> u64 {
+        0
+    }
+    pub fn injected_echo_since(_before: u64) -> super::InjectedEcho {
+        super::InjectedEcho::default()
     }
     pub fn begin_key_observation(_exclude_vks: &[u32]) -> u64 {
         0
