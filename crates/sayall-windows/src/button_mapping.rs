@@ -1053,9 +1053,22 @@ fn fire_gesture(
                     .collect::<Vec<_>>()
                     .join("+")
             ));
+            // 成功判据分两层（Issue #195，2026-10-08）：`tap` 的 Ok 只表示事件
+            // 已入队（SendInput 提交数 = 计划数），不能当成"前台收到了键"——
+            // 0.5.0 现场就是 `map_inject result=ok` 与"测试页一个键都没有"同时
+            // 成立。这里补上第二层：本进程键钩子宿主看到的注入事件回声
+            // （`echo_delta`/`last_*`，见 key_gate::InjectedEcho）。
+            let echo_before = crate::key_gate::injected_event_count();
             match injector.tap(&chord) {
                 Ok(()) => {
-                    crate::ble::gatt_note("map_inject result=ok".to_owned());
+                    // 锁屏动作走 Win32 API（LockWorkStation），不进输入流：
+                    // 没有可观测的注入回声，不得套用 SendInput 分支的判据。
+                    if terminal_action {
+                        crate::ble::gatt_note(LOCK_WORKSTATION_INJECT_NOTE.to_owned());
+                    } else {
+                        let echo = observe_injection_echo(echo_before);
+                        crate::ble::gatt_note(shortcut_injection_note(echo));
+                    }
                     return terminal_action;
                 }
                 Err(error) => {
@@ -1115,6 +1128,55 @@ fn fire_gesture(
         }
     }
     false
+}
+
+/// 锁屏动作（Win+L）不走 SendInput：`map_inject` 行必须显式说明"无回声是
+/// 设计如此"，否则会被读成"钩子没看到注入"（那是 SendInput 分支的失败判据）。
+const LOCK_WORKSTATION_INJECT_NOTE: &str =
+    "map_inject result=queued note=lock_workstation_via_api_no_sendinput_echo";
+
+/// 注入回声的有界等待预算：与门控的 60ms 有界等待同源——注入事件要先经
+/// 系统输入流回到宿主钩子，再由宿主经本机 IPC 送回主进程读线程；引擎线程
+/// 在这里做有界轮询，等到即返回（正常路径首轮即命中，不引入固定延迟）。
+const INJECTION_ECHO_WAIT_MS: u64 = 60;
+
+/// 等待并读取本次注入的回声读数。门控未运行（宿主钩子未安装/已断开）时
+/// 不等待：此时"没有回声"是预期的，直接记录读数即可（避免白等 60ms）。
+fn observe_injection_echo(before: u64) -> crate::key_gate::InjectedEcho {
+    // 单测环境没有真实宿主钩子，等也等不到回声：直接读数，不给每个注入
+    // 用例强加 60ms（诊断路径的测试豁免，不影响生产行为）。
+    if cfg!(test) || !crate::key_gate::is_gate_thread_alive() {
+        return crate::key_gate::injected_echo_since(before);
+    }
+    let deadline = Instant::now() + std::time::Duration::from_millis(INJECTION_ECHO_WAIT_MS);
+    loop {
+        let echo = crate::key_gate::injected_echo_since(before);
+        if echo.count > 0 || Instant::now() >= deadline {
+            return echo;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// `map_inject` 日志行（纯函数，含回声分支）：
+/// - `result=queued`：事件已入队，**不声称成功**；
+/// - `echo_delta>0`：宿主钩子确实看到注入事件经过系统输入流（`last_*` 是
+///   最后一条的 vk/扫描码/flags，可当场核对目标键与扫描码）；
+/// - `echo_delta=0`：这次注入没有被宿主钩子看到——要么宿主/钩子不在，
+///   要么事件在到达本进程钩子之前就被别的钩子丢掉了。前台是否可见都不能
+///   由本行推出，仍需真机验收。
+fn shortcut_injection_note(echo: crate::key_gate::InjectedEcho) -> String {
+    if echo.count == 0 {
+        "map_inject result=queued echo_delta=0 note=hook_did_not_observe_injected_key".to_owned()
+    } else {
+        format!(
+            "map_inject result=queued echo_delta={} last_vk=0x{:02X} last_scan=0x{:02X} last_flags=0x{:X}",
+            echo.count,
+            echo.vk & 0xFF,
+            echo.scan & 0xFF,
+            echo.flags
+        )
+    }
 }
 
 fn read_lock<T>(mutex: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -1564,6 +1626,39 @@ mod tests {
 
         drop(runtime);
         drop(gate);
+    }
+
+    /// Issue #195：`map_inject` 的成功判据分两层——入队（queued）与回声
+    /// （宿主钩子是否看到这次注入）。日志模板必须同时覆盖"看到"与"没看到"
+    /// 两种形态，且不得再出现「result=ok」这种只证明入队的措辞。
+    #[test]
+    fn shortcut_injection_note_reports_queue_and_hook_echo() {
+        let observed = shortcut_injection_note(crate::key_gate::InjectedEcho {
+            count: 2,
+            vk: 0x1B,
+            scan: 0x01,
+            flags: 0x90,
+        });
+        assert_eq!(
+            observed,
+            "map_inject result=queued echo_delta=2 last_vk=0x1B last_scan=0x01 last_flags=0x90"
+        );
+        assert!(
+            !observed.contains("result=ok"),
+            "不得再把入队当成功：{observed}"
+        );
+
+        let missing = shortcut_injection_note(crate::key_gate::InjectedEcho::default());
+        assert_eq!(
+            missing,
+            "map_inject result=queued echo_delta=0 note=hook_did_not_observe_injected_key"
+        );
+
+        // 锁屏动作没有 SendInput 回声，措辞必须自证"设计如此"。
+        assert_eq!(
+            LOCK_WORKSTATION_INJECT_NOTE,
+            "map_inject result=queued note=lock_workstation_via_api_no_sendinput_echo"
+        );
     }
 
     /// 吞键缝隙回归（2026-09-27 真机，见 Bugs/2026-09-27-fullkey-swallowed-keys.md）：

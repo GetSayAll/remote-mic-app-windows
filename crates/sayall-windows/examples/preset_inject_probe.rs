@@ -37,8 +37,11 @@ mod windows_impl {
         WM_QUIT,
     };
 
-    /// OS 捕获的注入事件（vkCode + DOWN/UP）。
-    type Captured = Vec<(u32, bool)>;
+    /// OS 捕获的注入事件（vkCode + 扫描码 + DOWN/UP）。
+    ///
+    /// 扫描码自 Issue #195 起纳入比对：映射动作必须是**带 PS/2 Set-1 扫描码**
+    /// 的事件（纯虚拟键注入在 LL 层 `scanCode=0`，按物理键位认键的应用收不到）。
+    type Captured = Vec<(u32, u16, bool)>;
 
     static CAPTURE: Mutex<Captured> = Mutex::new(Vec::new());
     static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -318,7 +321,7 @@ mod windows_impl {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
                 if kb.flags.contains(LLKHF_INJECTED) {
                     let is_key_up = matches!(message, 0x0101 | 0x0105);
-                    lock_capture().push((kb.vkCode as u32, is_key_up));
+                    lock_capture().push((kb.vkCode as u32, kb.scanCode as u16, is_key_up));
                 }
             }
         }
@@ -360,8 +363,22 @@ mod windows_impl {
         let plan = plan_key_tap(&chord).map_err(|error| error.to_string())?;
         Ok(plan
             .iter()
-            .map(|event| (expected_vk(event.key), event.is_key_up))
+            .map(|event| {
+                (
+                    expected_vk(event.key),
+                    expected_scan(event.key),
+                    event.is_key_up,
+                )
+            })
             .collect())
+    }
+
+    /// 期望的 LL 层扫描码：带物理扫描码的键必须原样到达（Issue #195 的
+    /// 判据）；媒体键没有 Set-1 扫描码，走虚拟键注入，实测 LL 层 `scanCode=0`。
+    fn expected_scan(key: KeyCode) -> u16 {
+        key.physical_scan_code()
+            .map(|(scan_code, _)| scan_code)
+            .unwrap_or(0)
     }
 
     /// 期望的 LL 层 VK：通用修饰键（Ctrl/Shift/Alt）以扫描码注入

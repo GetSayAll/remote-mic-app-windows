@@ -202,8 +202,24 @@ impl KeyCode {
         }
     }
 
+    /// PS/2 Set-1 物理扫描码 + 扩展（E0）标志。`None` = 该键没有标准
+    /// Set-1 扫描码（媒体键：系统只给出 ACPI/E0 形态），调用方回落虚拟键注入。
+    ///
+    /// 为什么映射动作也必须带扫描码（Issue #195，2026-10-08）：`SendInput`
+    /// 的纯虚拟键事件到达系统时 `scanCode = 0`（本机 LL 钩子探针实测；与
+    /// docs/investigations/2026-09-23-rc003-hid-host-write-tap-result.md
+    /// §4.5 的 Raw Input 观察一致）。按**物理键位**认键的消费者（键盘测试
+    /// 网页、部分 Electron 应用、游戏）因此收不到这些键——同一个 Esc 映射，
+    /// 只补上扫描码 0x01 就能被它们识别（报告人 0.5.0/0.5.1 对照 + 真机 UAT）。
+    ///
+    /// ⚠️ 扫描码不是 HID usage：[`KeyCode::hid_usage`] 的 Escape 是 0x29，
+    /// 而 0x29 是反引号（OEM_3）的扫描码，填错会打出 `` ` ``。
+    ///
+    /// 物理身份优先：左右修饰键、左右 Win 用各自的扫描码 + E0 前缀，保持
+    /// 「按住说话」等和弦与真实硬件同形（2026-09-06 定案）。
     pub fn physical_scan_code(self) -> Option<(u16, bool)> {
         Some(match self {
+            // 修饰键：左右必须各自成对（E0 前缀区分物理身份）。
             Self::Control | Self::LeftControl => (0x1D, false),
             Self::RightControl => (0x1D, true),
             Self::Shift | Self::LeftShift => (0x2A, false),
@@ -212,8 +228,83 @@ impl KeyCode {
             Self::RightAlt => (0x38, true),
             Self::LeftWindows => (0x5B, true),
             Self::RightWindows => (0x5C, true),
+            // 主键区非扩展键。
+            Self::Backspace => (0x0E, false),
+            Self::Tab => (0x0F, false),
+            Self::Enter => (0x1C, false),
+            Self::Escape => (0x01, false),
+            Self::Space => (0x39, false),
             Self::Oem3 => (0x29, false),
-            _ => return None,
+            // 导航簇与菜单键是扩展键：漏掉 E0 会退化成小键盘数字键。
+            Self::Home => (0x47, true),
+            Self::Up => (0x48, true),
+            Self::PageUp => (0x49, true),
+            Self::Left => (0x4B, true),
+            Self::Right => (0x4D, true),
+            Self::End => (0x4F, true),
+            Self::Down => (0x50, true),
+            Self::PageDown => (0x51, true),
+            Self::Insert => (0x52, true),
+            Self::Delete => (0x53, true),
+            Self::Apps => (0x5D, true),
+            // 字母（QWERTY 行 0x10-0x19 / 主行 0x1E-0x26 / 下排 0x2C-0x32）。
+            Self::Q => (0x10, false),
+            Self::W => (0x11, false),
+            Self::E => (0x12, false),
+            Self::R => (0x13, false),
+            Self::T => (0x14, false),
+            Self::Y => (0x15, false),
+            Self::U => (0x16, false),
+            Self::I => (0x17, false),
+            Self::O => (0x18, false),
+            Self::P => (0x19, false),
+            Self::A => (0x1E, false),
+            Self::S => (0x1F, false),
+            Self::D => (0x20, false),
+            Self::F => (0x21, false),
+            Self::G => (0x22, false),
+            Self::H => (0x23, false),
+            Self::J => (0x24, false),
+            Self::K => (0x25, false),
+            Self::L => (0x26, false),
+            Self::Z => (0x2C, false),
+            Self::X => (0x2D, false),
+            Self::C => (0x2E, false),
+            Self::V => (0x2F, false),
+            Self::B => (0x30, false),
+            Self::N => (0x31, false),
+            Self::M => (0x32, false),
+            // 数字行：Digit1-9 = 0x02-0x0A，Digit0 在行尾 = 0x0B。
+            Self::Digit1 => (0x02, false),
+            Self::Digit2 => (0x03, false),
+            Self::Digit3 => (0x04, false),
+            Self::Digit4 => (0x05, false),
+            Self::Digit5 => (0x06, false),
+            Self::Digit6 => (0x07, false),
+            Self::Digit7 => (0x08, false),
+            Self::Digit8 => (0x09, false),
+            Self::Digit9 => (0x0A, false),
+            Self::Digit0 => (0x0B, false),
+            // 功能键：F1-F10 = 0x3B-0x44，F11/F12 另起（0x57/0x58）。
+            Self::F1 => (0x3B, false),
+            Self::F2 => (0x3C, false),
+            Self::F3 => (0x3D, false),
+            Self::F4 => (0x3E, false),
+            Self::F5 => (0x3F, false),
+            Self::F6 => (0x40, false),
+            Self::F7 => (0x41, false),
+            Self::F8 => (0x42, false),
+            Self::F9 => (0x43, false),
+            Self::F10 => (0x44, false),
+            Self::F11 => (0x57, false),
+            Self::F12 => (0x58, false),
+            // 媒体键：无标准 Set-1 扫描码，保持虚拟键注入（见上方说明）。
+            Self::VolumeMute
+            | Self::VolumeDown
+            | Self::VolumeUp
+            | Self::MediaPrev
+            | Self::MediaNext
+            | Self::MediaPlayPause => return None,
         })
     }
 
@@ -1384,6 +1475,182 @@ mod tests {
             KeyCode::RightShift.physical_scan_code(),
             Some((0x36, false))
         );
+    }
+
+    /// Issue #195 阳性对照：Escape 没有扫描码时，替换键在按物理键位认键的
+    /// 应用里收不到（VK-only 注入的事件 `scanCode=0`，本机探针 2026-10-08
+    /// 与 docs/investigations/2026-09-23-rc003-hid-host-write-tap-result.md
+    /// §4.5 一致）。Escape 的 PS/2 Set-1 扫描码是 0x01。
+    ///
+    /// 禁止把 `hid_usage()` 当扫描码：Escape 的 HID usage 是 0x29，而 0x29
+    /// 正是反引号（OEM_3）的扫描码——填错就会打出 `` ` ``。
+    #[test]
+    fn escape_uses_its_own_set1_scan_code_and_never_the_hid_usage() {
+        assert_eq!(KeyCode::Escape.physical_scan_code(), Some((0x01, false)));
+        assert_eq!(KeyCode::Oem3.physical_scan_code(), Some((0x29, false)));
+        assert_eq!(
+            KeyCode::Escape.hid_usage(),
+            Some(0x29),
+            "撞号事实本身要钉住：usage 0x29 ≠ 扫描码"
+        );
+    }
+
+    #[test]
+    fn standard_mapping_keys_carry_set1_scan_codes() {
+        // 期望值取自本机 MapVirtualKeyW(VK, MAPVK_VK_TO_VSC_EX) 实测
+        // （2026-10-08，见 Bugs/2026-10-08-issue-195-injected-keys-need-scan-code.md）。
+        for (key, scan) in [
+            (KeyCode::Backspace, 0x0E),
+            (KeyCode::Tab, 0x0F),
+            (KeyCode::Enter, 0x1C),
+            (KeyCode::Space, 0x39),
+            (KeyCode::Q, 0x10),
+            (KeyCode::A, 0x1E),
+            (KeyCode::Z, 0x2C),
+            (KeyCode::M, 0x32),
+            (KeyCode::Digit0, 0x0B),
+            (KeyCode::Digit1, 0x02),
+            (KeyCode::Digit9, 0x0A),
+            (KeyCode::F1, 0x3B),
+            (KeyCode::F10, 0x44),
+            (KeyCode::F11, 0x57),
+            (KeyCode::F12, 0x58),
+        ] {
+            assert_eq!(key.physical_scan_code(), Some((scan, false)), "{key:?}");
+            assert!(!key.is_extended(), "{key:?} 不是扩展键");
+        }
+
+        // 扩展键：扫描码与 E0 前缀必须同时正确——漏掉扩展标志会把方向键
+        // 变成小键盘数字键（NumLock 语义）。
+        for (key, scan) in [
+            (KeyCode::Home, 0x47),
+            (KeyCode::Up, 0x48),
+            (KeyCode::PageUp, 0x49),
+            (KeyCode::Left, 0x4B),
+            (KeyCode::Right, 0x4D),
+            (KeyCode::End, 0x4F),
+            (KeyCode::Down, 0x50),
+            (KeyCode::PageDown, 0x51),
+            (KeyCode::Insert, 0x52),
+            (KeyCode::Delete, 0x53),
+            (KeyCode::Apps, 0x5D),
+        ] {
+            assert_eq!(key.physical_scan_code(), Some((scan, true)), "{key:?}");
+            assert!(key.is_extended(), "{key:?}");
+        }
+    }
+
+    /// 媒体键没有 PS/2 Set-1 扫描码（系统只给出 ACPI/E0 形态），维持既有
+    /// VK 注入路径。这里是边界记录，不是遗漏。
+    #[test]
+    fn media_keys_stay_virtual_key_only() {
+        for key in [
+            KeyCode::VolumeMute,
+            KeyCode::VolumeDown,
+            KeyCode::VolumeUp,
+            KeyCode::MediaPrev,
+            KeyCode::MediaNext,
+            KeyCode::MediaPlayPause,
+        ] {
+            assert_eq!(key.physical_scan_code(), None, "{key:?}");
+        }
+    }
+
+    /// 表内不得出现重复的 (扫描码, 扩展) 组合——抓复制粘贴错值。
+    #[test]
+    fn set1_scan_codes_are_unique_across_keys() {
+        let mut keys = vec![
+            KeyCode::Backspace,
+            KeyCode::Tab,
+            KeyCode::Enter,
+            KeyCode::Escape,
+            KeyCode::Space,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::End,
+            KeyCode::Home,
+            KeyCode::Left,
+            KeyCode::Up,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Insert,
+            KeyCode::Delete,
+            KeyCode::Apps,
+            KeyCode::Oem3,
+            KeyCode::Control,
+            KeyCode::RightControl,
+            KeyCode::Shift,
+            KeyCode::RightShift,
+            KeyCode::Alt,
+            KeyCode::RightAlt,
+            KeyCode::LeftWindows,
+            KeyCode::RightWindows,
+        ];
+        keys.extend((0..=9).map(|index| {
+            [
+                KeyCode::Digit0,
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::Digit3,
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+                KeyCode::Digit6,
+                KeyCode::Digit7,
+                KeyCode::Digit8,
+                KeyCode::Digit9,
+            ][index]
+        }));
+        keys.extend([
+            KeyCode::A,
+            KeyCode::B,
+            KeyCode::C,
+            KeyCode::D,
+            KeyCode::E,
+            KeyCode::F,
+            KeyCode::G,
+            KeyCode::H,
+            KeyCode::I,
+            KeyCode::J,
+            KeyCode::K,
+            KeyCode::L,
+            KeyCode::M,
+            KeyCode::N,
+            KeyCode::O,
+            KeyCode::P,
+            KeyCode::Q,
+            KeyCode::R,
+            KeyCode::S,
+            KeyCode::T,
+            KeyCode::U,
+            KeyCode::V,
+            KeyCode::W,
+            KeyCode::X,
+            KeyCode::Y,
+            KeyCode::Z,
+        ]);
+        keys.extend([
+            KeyCode::F1,
+            KeyCode::F2,
+            KeyCode::F3,
+            KeyCode::F4,
+            KeyCode::F5,
+            KeyCode::F6,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F9,
+            KeyCode::F10,
+            KeyCode::F11,
+            KeyCode::F12,
+        ]);
+
+        let mut seen = std::collections::BTreeMap::new();
+        for key in keys {
+            if let Some(entry) = key.physical_scan_code() {
+                if let Some(previous) = seen.insert(entry, key) {
+                    panic!("{key:?} 与 {previous:?} 共用扫描码 {entry:?}");
+                }
+            }
+        }
     }
 
     #[test]
