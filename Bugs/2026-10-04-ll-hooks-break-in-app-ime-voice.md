@@ -81,7 +81,7 @@
    引擎测试无需宿主进程。
 4. 清理诊断开关、按本文件矩阵复验 + `Testing/WindowsOnboardingWizard.md` 用例三。
    进行中：`ime_self_probe` 已移除；`SAYALL_DIAG_*` 开关暂留（验收排障）；
-   `src/lib/key-probe.ts` 暂留至验收通过（纯日志、不改变行为），合入 main 前移除。
+   `src/lib/key-probe.ts` 已在合入 main 前移除（2026-10-08，随本分支合入 main）。
 
 **验收方法（Andy 真机）**：
 1. 安装本分支验收包（`ONBOARDING_WIZARD_ENABLED=true`），进入向导第⑤步；

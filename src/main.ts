@@ -5,7 +5,6 @@ import { initializeAccentColor } from "./lib/accent";
 import { initializeTheme } from "./lib/theme";
 import { installFrontendDiagnostics, reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { installFocusModalityTracking } from "./lib/focus-modality";
-import { installKeyProbe } from "./lib/key-probe";
 import "./styles.css";
 
 installFrontendDiagnostics();
@@ -53,10 +52,6 @@ if (isTauriRuntime()) {
 // 默认保留原生焦点指示，仅在最近一次交互是指针时抑制，消除遥控器按键在
 // 鼠标点过的控件上凭空点亮的幽灵焦点环。
 installFocusModalityTracking();
-
-// 临时诊断（2026-10-04）：Alt 类键 DOM 到达取证（WebView2 键投递排查），
-// 完成后随修复提交移除或转正。
-installKeyProbe();
 
 if (import.meta.env.VITE_SAYALL_RUNTIME_SIMULATION === "1") {
   void import("./runtime-simulation").then(({ runRuntimeSimulationSmoke }) =>
