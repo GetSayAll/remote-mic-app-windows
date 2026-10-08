@@ -19,6 +19,7 @@ use tauri::{Emitter, Manager};
 mod accent;
 mod app_icon;
 mod diagnostics;
+mod onboarding;
 mod platform;
 mod rc003_task;
 mod settings;
@@ -510,6 +511,81 @@ fn open_log_directory() -> Result<String, String> {
             );
             Err(format!("无法打开日志目录：{error}"))
         }
+    }
+}
+
+/// 向导入口用到的固定 Windows 设置页（2026-10-04，设计稿 §4.2）。
+///
+/// URI 全部在本仓库代码里固定映射；前端只能传枚举值，不接受任意 URI。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowsSettingsSection {
+    Bluetooth,
+    Sound,
+    Microphone,
+}
+
+fn windows_settings_uri(section: WindowsSettingsSection) -> &'static str {
+    match section {
+        WindowsSettingsSection::Bluetooth => "ms-settings:bluetooth",
+        WindowsSettingsSection::Sound => "ms-settings:sound",
+        WindowsSettingsSection::Microphone => "ms-settings:privacy-microphone",
+    }
+}
+
+fn windows_settings_section_name(section: WindowsSettingsSection) -> &'static str {
+    match section {
+        WindowsSettingsSection::Bluetooth => "bluetooth",
+        WindowsSettingsSection::Sound => "sound",
+        WindowsSettingsSection::Microphone => "microphone",
+    }
+}
+
+/// 打开固定的 Windows 设置页（向导第②步「打开蓝牙设置」等入口）。
+#[tauri::command]
+fn open_windows_settings(section: WindowsSettingsSection) -> Result<(), String> {
+    let name = windows_settings_section_name(section);
+    match sayall_windows::app_launcher::open_uri(windows_settings_uri(section)) {
+        Ok(()) => {
+            sayall_windows::gatt_note(format!(
+                "system_settings action=open phase=completed terminal_result=passed section={name}"
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(format!(
+                "system_settings action=open phase=completed terminal_result=failed section={name} error_domain=shell error_code=open_failed retryable=true"
+            ));
+            Err(format!("无法打开系统设置：{error}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod windows_settings_tests {
+    use super::*;
+
+    #[test]
+    fn maps_sections_to_fixed_ms_settings_uris() {
+        assert_eq!(
+            windows_settings_uri(WindowsSettingsSection::Bluetooth),
+            "ms-settings:bluetooth"
+        );
+        assert_eq!(
+            windows_settings_uri(WindowsSettingsSection::Sound),
+            "ms-settings:sound"
+        );
+        assert_eq!(
+            windows_settings_uri(WindowsSettingsSection::Microphone),
+            "ms-settings:privacy-microphone"
+        );
+    }
+
+    #[test]
+    fn deserializes_only_known_sections() {
+        let bluetooth: WindowsSettingsSection = serde_json::from_str("\"bluetooth\"").unwrap();
+        assert_eq!(bluetooth, WindowsSettingsSection::Bluetooth);
+        assert!(serde_json::from_str::<WindowsSettingsSection>("\"camera\"").is_err());
     }
 }
 
@@ -1215,6 +1291,60 @@ async fn stop_raw_input(state: tauri::State<'_, AppState>) -> Result<RawInputSna
         .map_err(|error| error.to_string())
 }
 
+/// 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+#[tauri::command]
+fn set_mapping_suspension(suspended: bool, state: tauri::State<'_, AppState>) -> bool {
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=mapping_suspension action=set phase=completed terminal_result=passed suspended={suspended}"
+    ));
+    state.platform.set_mapping_suspension(suspended);
+    suspended
+}
+
+/// 向导第⑤步前置（探针④）：打开物理键观察窗口。
+///
+/// `exclude_vks` 排除「按住说话」和弦等由报告层合成以非注入形态送进 OS 的键
+/// （它们必须到达输入法，不属于手动输入）。返回窗口 id；0 = 不可用（钩子未
+/// 运行/仿真平台），调用方按未知处理。
+#[tauri::command]
+fn begin_key_observation(exclude_vks: Vec<u32>, state: tauri::State<'_, AppState>) -> u64 {
+    let exclude_count = exclude_vks.len();
+    let window = state.platform.begin_key_observation(exclude_vks);
+    if window > 0 {
+        sayall_windows::gatt_note(format!(
+            "input_observation feature=physical_keys action=begin window={window} exclude_count={exclude_count} phase=completed terminal_result=passed"
+        ));
+    } else {
+        sayall_windows::gatt_note(
+            "input_observation feature=physical_keys action=begin phase=completed terminal_result=failed error_domain=hook error_code=gate_inactive retryable=true"
+                .to_owned(),
+        );
+    }
+    window
+}
+
+/// 向导第⑤步前置（探针④）：关闭物理键观察窗口并取回计数。
+/// None = 计量不可靠（窗口过期/钩子停止）——调用方 fail-open。
+/// `last_vk` 为窗口内最后计入的键（误报归因用；none = 未计入任何键）。
+#[tauri::command]
+fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Option<u64> {
+    let count = state.platform.end_key_observation(window_id);
+    let last_vk = state
+        .platform
+        .observed_last_key()
+        .map(|vk| format!("0x{vk:02X}"))
+        .unwrap_or_else(|| "none".to_owned());
+    match count {
+        Some(count) => sayall_windows::gatt_note(format!(
+            "input_observation feature=physical_keys action=end window={window_id} count={count} last_vk={last_vk} phase=completed terminal_result=passed"
+        )),
+        None => sayall_windows::gatt_note(format!(
+            "input_observation feature=physical_keys action=end window={window_id} last_vk={last_vk} phase=completed terminal_result=failed error_domain=hook error_code=window_unreliable retryable=true"
+        )),
+    }
+    count
+}
+
 #[tauri::command]
 fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
     state.platform.button_mappings()
@@ -1727,6 +1857,97 @@ async fn set_voice_input_tool(
     result
 }
 
+/// 首次使用向导（Onboarding）状态与进度。落点是 `onboarding.json`（与 settings.json
+/// 同目录），迁移与失败日志在 `SettingsStore` 内完成；这里只做 IPC 校验与任务调度。
+#[tauri::command]
+async fn get_onboarding_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.ensure_onboarding_state()).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("state_read")),
+    }
+}
+
+#[tauri::command]
+async fn save_onboarding_step(
+    step: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let Some(step) = onboarding::parse_step(&step) else {
+        sayall_windows::gatt_note(
+            "onboarding event=step_save phase=completed terminal_result=failed error_domain=validation error_code=unknown_step retryable=true".to_owned(),
+        );
+        return Err("未知向导步骤".to_owned());
+    };
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.save_onboarding_step(step)).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("step_save")),
+    }
+}
+
+/// 设置页「重新运行设置向导」：只重置向导进度，不清除设备/映射/音频/其他设置。
+#[tauri::command]
+async fn restart_onboarding(
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.restart_onboarding()).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("restart")),
+    }
+}
+
+#[tauri::command]
+async fn complete_onboarding(
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || settings.complete_onboarding()).await {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("complete")),
+    }
+}
+
+/// 第④步暂存语音绑定：落回滚快照 + 应用正式配置，并把工具/快捷键推给平台。
+///
+/// 平台应用与 `set_voice_input_tool` / `set_voice_hold_hotkey` 同一条链路：
+/// 保证第⑤步真实验证时按下语音键就能按 staged 组合触发。
+#[tauri::command]
+async fn stage_onboarding_voice_binding(
+    tool: VoiceInputTool,
+    hotkey: Option<KeyChord>,
+    state: tauri::State<'_, AppState>,
+) -> Result<onboarding::OnboardingStateView, String> {
+    let settings = state.settings.clone();
+    let platform = state.platform.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        let staged = settings.stage_onboarding_voice_binding(tool, hotkey.clone())?;
+        platform.set_voice_input_tool(Some(tool));
+        platform.set_voice_hold_hotkey(hotkey);
+        Ok::<_, String>(staged)
+    })
+    .await
+    {
+        Ok(Ok(value)) => Ok(value.view()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(onboarding_blocking_failure("binding_stage")),
+    }
+}
+
+fn onboarding_blocking_failure(event: &str) -> String {
+    sayall_windows::gatt_note(format!(
+        "onboarding event={event} phase=completed terminal_result=failed error_domain=task error_code=join_failed retryable=true"
+    ));
+    format!("向导任务失败（{event}）")
+}
+
 /// 语音增益（dB，0–24；对齐 Mac 设置页「增益」滑块：0 = 原始音量）。
 ///
 /// 返回的是持久化值（唯一事实来源）；平台运行态由写入路径与启动恢复保持同步。
@@ -1790,7 +2011,7 @@ struct VokieInstallationSnapshot {
     running: bool,
 }
 
-fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
+pub(crate) fn voice_input_tool_name(tool: Option<VoiceInputTool>) -> &'static str {
     match tool {
         Some(VoiceInputTool::Wechat) => "wechat",
         Some(VoiceInputTool::Doubao) => "doubao",
@@ -1910,13 +2131,33 @@ struct FrontendDiagnosticEvent {
     phase: String,
     result: String,
     reason: String,
+    /// 稳定 token 字段（向导等结构式日志用）：逐字校验，非法值记为 invalid。
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
     elapsed_ms: u64,
 }
 
 #[tauri::command]
 fn report_frontend_event(report: FrontendDiagnosticEvent) {
+    let mut tokens = String::new();
+    for (name, value) in [
+        ("step", report.step.as_deref()),
+        ("code", report.code.as_deref()),
+        ("detail", report.detail.as_deref()),
+    ] {
+        if let Some(value) = value {
+            tokens.push(' ');
+            tokens.push_str(name);
+            tokens.push('=');
+            tokens.push_str(diagnostic_token(value));
+        }
+    }
     sayall_windows::gatt_note(format!(
-        "frontend event={} phase={} result={} reason={} elapsed_ms={}",
+        "frontend event={} phase={} result={} reason={}{tokens} elapsed_ms={}",
         diagnostic_token(&report.event),
         diagnostic_token(&report.phase),
         diagnostic_token(&report.result),
@@ -2320,8 +2561,8 @@ static EXIT_SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
 /// failed 日志**——查日志的人会以为退出收尾失败了。收尾一次即够，故显式只做一次。
 ///
 /// 抽成不落日志的纯函数，是为了让单测只验"只执行一次"这条不变量而不去写全局
-/// 诊断日志（`gatt_sink()` 是 `OnceLock`，首次调用即固定，测试里抢先用它会把
-/// 同进程其它日志测试钉死，见 `sayall_windows::gatt_note` 的注释）。
+/// 诊断日志（`gatt_sink()` 成功打开后即固定；2026-10-04 起无 env 的调用不再
+/// 冻结状态，但单测写全局日志仍会带来顺序耦合与噪声，维持不写的约定）。
 fn claim_exit_shutdown(done: &AtomicBool) -> bool {
     !done.swap(true, Ordering::SeqCst)
 }
@@ -2344,6 +2585,8 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
         return;
     }
     let started = std::time::Instant::now();
+    // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
+    sayall_windows::key_host::shutdown_global();
     let platform = app.state::<AppState>().platform.clone();
     match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
         Ok(()) => sayall_windows::gatt_note(format!(
@@ -2476,11 +2719,20 @@ pub fn run() {
                 .to_owned(),
         },
     );
+    #[cfg(windows)]
+    let (windows_version, windows_build) = {
+        let current = sayall_windows::compatibility::current_windows_version();
+        (current.to_string(), current.build.to_string())
+    };
+    #[cfg(not(windows))]
+    let (windows_version, windows_build) = ("unknown".to_owned(), "unknown".to_owned());
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=1 process_architecture={} native_arch={} windows_version=unknown windows_build=unknown",
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=2 process_architecture={} native_arch={} windows_version={} windows_build={}",
         if log_ready { "passed" } else { "failed" },
         std::env::consts::ARCH,
-        sayall_windows::os_arch::native_arch()
+        sayall_windows::os_arch::native_arch(),
+        windows_version,
+        windows_build
     ));
     #[cfg(windows)]
     if let Err(error) = sayall_windows::compatibility::check_current_windows() {
@@ -2617,6 +2869,16 @@ pub fn run() {
             #[cfg(not(feature = "runtime-simulation"))]
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             let settings = SettingsStore::new(settings_path);
+            // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
+            // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
+            if let Err(error) = settings.ensure_onboarding_state() {
+                eprintln!("{error}");
+            }
+            // 未完成向导里残留的 staged 语音绑定：启动时回滚正式配置（设计稿 §5.4：
+            // 退出未完成流程必须恢复进入向导前的配置）。无事务时是空操作、不落日志。
+            if let Err(error) = settings.restore_onboarding_staged_binding("startup_recovery") {
+                eprintln!("{error}");
+            }
             let saved_settings = match settings.load() {
                 Ok(settings) => {
                     sayall_windows::gatt_note(
@@ -2871,6 +3133,9 @@ pub fn run() {
                 settings,
                 pending_update: std::sync::Mutex::new(None),
             });
+            // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
+            // 失败仅记录日志并保持 fail-open，不阻塞启动。
+            let _ = sayall_windows::key_host::start_global();
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 observe_webview_failure(&window);
@@ -2938,6 +3203,7 @@ pub fn run() {
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
+        open_windows_settings,
         hide_main_window,
         scan_paired_remotes,
         get_connection_snapshot,
@@ -2954,6 +3220,9 @@ pub fn run() {
         disable_rc003_capture,
         start_raw_input,
         stop_raw_input,
+        set_mapping_suspension,
+        begin_key_observation,
+        end_key_observation,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
@@ -2979,6 +3248,11 @@ pub fn run() {
         launch_vokie,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
+        get_onboarding_state,
+        save_onboarding_step,
+        restart_onboarding,
+        complete_onboarding,
+        stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,
@@ -3001,6 +3275,7 @@ pub fn run() {
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
+        open_windows_settings,
         hide_main_window,
         scan_paired_remotes,
         get_connection_snapshot,
@@ -3017,6 +3292,9 @@ pub fn run() {
         disable_rc003_capture,
         start_raw_input,
         stop_raw_input,
+        set_mapping_suspension,
+        begin_key_observation,
+        end_key_observation,
         get_button_mappings,
         save_button_mappings,
         reset_button_mappings,
@@ -3042,6 +3320,11 @@ pub fn run() {
         launch_vokie,
         get_other_voice_hotkey,
         set_other_voice_hotkey,
+        get_onboarding_state,
+        save_onboarding_step,
+        restart_onboarding,
+        complete_onboarding,
+        stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
         get_launch_at_login,

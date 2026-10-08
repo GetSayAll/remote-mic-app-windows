@@ -59,6 +59,24 @@ fn run_sta(mode: &str) -> Result<(), String> {
             )
             .map_err(|e| format!("CoCreateInstance(profiles mgr): {e}"))?;
 
+            if mode == "watch" {
+                // 逐秒采样：前台窗口（pid/进程名/HKL）+ 本线程会话的活动 TSF 配置。
+                // 用于判定"GetActiveProfile 读到的是谁的会话"（自身进程 vs 前台窗口）。
+                let seconds: u64 = std::env::args()
+                    .nth(2)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(30);
+                for step in 0..seconds {
+                    let (pid, name, hkl) = foreground_info();
+                    println!(
+                        "t={step:>3}s fg_pid={pid} fg={name} fg_hkl=0x{hkl:08X} active={}",
+                        describe(active_profile_raw(&manager))
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+                return Ok(());
+            }
+
             let original = active_profile_raw(&manager);
             println!("active_before={}", describe(original));
             let rows = enumerate(&manager)?;
@@ -71,12 +89,13 @@ fn run_sta(mode: &str) -> Result<(), String> {
                     ""
                 };
                 println!(
-                    "langid=0x{langid:04X} clsid={clsid} guidProfile={guid} flags=0x{flags:08X} enabled={enabled}{mark}",
+                    "langid=0x{langid:04X} clsid={clsid} guidProfile={guid} flags=0x{flags:08X} enabled={enabled} hkl=0x{hkl:08X}{mark}",
                     langid = row.langid,
                     clsid = fmt_guid(&row.clsid),
                     guid = fmt_guid(&row.guid_profile),
                     flags = row.flags,
                     enabled = row.flags & TF_IPP_FLAG_ENABLED != 0,
+                    hkl = row.hkl,
                 );
             }
 
@@ -92,6 +111,72 @@ fn run_sta(mode: &str) -> Result<(), String> {
                     return Ok(());
                 }
             }
+            if mode == "cycle-when-foreground" {
+                // 诊断用：等待目标进程窗口成为前台并稳定约 0.6s，然后模拟一次
+                // "Win+Space 切走再切回豆包"（与用户手动切换形态一致的会话级切回）。
+                let target_exe = std::env::args()
+                    .nth(2)
+                    .unwrap_or_else(|| "sayall-windows-app.exe".to_owned());
+                let timeout_secs: u64 = std::env::args()
+                    .nth(3)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(90);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let mut stable_hits = 0u32;
+                loop {
+                    if std::time::Instant::now() > deadline {
+                        println!(
+                            "cycle-when-foreground: timeout; foreground never matched {target_exe}"
+                        );
+                        return Ok(());
+                    }
+                    let (pid, name, _hkl) = foreground_info();
+                    if name.eq_ignore_ascii_case(&target_exe) {
+                        stable_hits += 1;
+                        if stable_hits >= 3 {
+                            println!(
+                                "cycle-when-foreground: matched pid={pid} name={name} before={}",
+                                describe(active_profile_raw(&manager))
+                            );
+                            let alt = rows.iter().find(|row| {
+                                row.clsid != DOUBAO_CLSID && row.flags & TF_IPP_FLAG_ENABLED != 0
+                            });
+                            if let Some(alt) = alt {
+                                let _ = manager.ActivateProfile(
+                                    TF_PROFILETYPE_INPUTPROCESSOR,
+                                    alt.langid,
+                                    &alt.clsid,
+                                    &alt.guid_profile,
+                                    HKL::default(),
+                                    TF_IPPMF_FORSESSION,
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(180));
+                            }
+                            let _ = manager.ActivateProfile(
+                                TF_PROFILETYPE_INPUTPROCESSOR,
+                                LANGID_ZH_CN,
+                                &DOUBAO_CLSID,
+                                &DOUBAO_PROFILE,
+                                HKL::default(),
+                                TF_IPPMF_FORSESSION,
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(180));
+                            println!(
+                                "cycle-when-foreground: done after={} alt_langid={}",
+                                describe(active_profile_raw(&manager)),
+                                alt.map(|row| format!("0x{:04X}", row.langid))
+                                    .unwrap_or_else(|| "none".to_owned())
+                            );
+                            return Ok(());
+                        }
+                    } else {
+                        stable_hits = 0;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+
             if mode != "activate-doubao" {
                 return Ok(());
             }
@@ -112,7 +197,7 @@ fn run_sta(mode: &str) -> Result<(), String> {
             );
 
             // 还原探针前的活动配置（探针不留副作用）。
-            if let Some((clsid, profile, langid)) = original {
+            if let Some((clsid, profile, langid, _hkl)) = original {
                 let _ = manager.ActivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,
                     langid,
@@ -139,6 +224,7 @@ struct Row {
     clsid: GUID,
     guid_profile: GUID,
     flags: u32,
+    hkl: u64,
 }
 
 fn enumerate(manager: &ITfInputProcessorProfileMgr) -> Result<Vec<Row>, String> {
@@ -160,6 +246,7 @@ fn enumerate(manager: &ITfInputProcessorProfileMgr) -> Result<Vec<Row>, String> 
                 clsid: profile.clsid,
                 guid_profile: profile.guidProfile,
                 flags: profile.dwFlags,
+                hkl: profile.hkl.0 as u64,
             });
         }
         if (fetched as usize) < batch.len() {
@@ -169,16 +256,21 @@ fn enumerate(manager: &ITfInputProcessorProfileMgr) -> Result<Vec<Row>, String> 
     Ok(rows)
 }
 
-fn active_profile_raw(manager: &ITfInputProcessorProfileMgr) -> Option<(GUID, GUID, u16)> {
+fn active_profile_raw(manager: &ITfInputProcessorProfileMgr) -> Option<(GUID, GUID, u16, u64)> {
     let mut profile = TF_INPUTPROCESSORPROFILE::default();
     unsafe { manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile) }.ok()?;
-    Some((profile.clsid, profile.guidProfile, profile.langid))
+    Some((
+        profile.clsid,
+        profile.guidProfile,
+        profile.langid,
+        profile.hkl.0 as u64,
+    ))
 }
 
-fn describe(active: Option<(GUID, GUID, u16)>) -> String {
+fn describe(active: Option<(GUID, GUID, u16, u64)>) -> String {
     match active {
-        Some((clsid, guid, langid)) => format!(
-            "clsid={} guidProfile={} langid=0x{langid:04X}",
+        Some((clsid, guid, langid, hkl)) => format!(
+            "clsid={} guidProfile={} langid=0x{langid:04X} hkl=0x{hkl:08X}",
             fmt_guid(&clsid),
             fmt_guid(&guid)
         ),
@@ -201,4 +293,47 @@ fn fmt_guid(guid: &GUID) -> String {
         guid.data4[6],
         guid.data4[7],
     )
+}
+
+/// 前台窗口信息（只读）：pid / 进程名 / 前台线程当前键盘布局。
+fn foreground_info() -> (u32, String, u64) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid: u32 = 0;
+        let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let hkl = GetKeyboardLayout(tid).0 as u64;
+        let name = process_image_path(pid)
+            .map(|path| path.rsplit('\\').next().unwrap_or(&path).to_owned())
+            .unwrap_or_else(|| "?".to_owned());
+        (pid, name, hkl)
+    }
+}
+
+fn process_image_path(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0u16; 32768];
+    let mut length = buffer.len() as u32;
+    let queried = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    }
+    .is_ok();
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    queried.then(|| String::from_utf16_lossy(&buffer[..length as usize]))
 }

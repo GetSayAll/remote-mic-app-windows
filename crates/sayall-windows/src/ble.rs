@@ -2640,10 +2640,14 @@ pub fn diagnostic_log_path() -> Option<std::path::PathBuf> {
 /// 控制通知与 TRANSMIT 写入保留长度及有限预览用于协议取证；音频通知不在这里
 /// 逐包落盘，防止泄露语音内容并避免高频刷盘，改由音频会话终态聚合记录。
 ///
-/// sink 绑定是**延迟且一次性**的：在成功打开文件之前，每次调用都按当前环境
-/// 重新判定（同进程内先后设置 SAYALL_GATT_LOG 的测试因此互不绑定，2026-10-05
-/// 评审发现：`load_backs_up_button_mappings_from_a_newer_schema` 先调用日志，
-/// 会把 once 绑定成 None，导致 `updater_notes_land_in_diagnostic_log` 写不进去）；
+/// 2026-10-04 修订：**无路径/打开失败时不再把 "无 sink" 永久冻结**。旧实现用
+/// `get_or_init`，首次调用若没有 env/路径就把 None 钉死——任何"先无后有"的
+/// 场景（运行期晚到的 `initialize_diagnostic_log`、同进程先后依赖 env 的测试）
+/// 会让之后所有功能点日志静默丢失。现在的语义是**延迟且一次性**：成功打开文件
+/// 之前每次调用都按当前环境重新判定（env 查询与一次 open 失败都极廉价，条件具备
+/// 即自愈）；2026-10-05 评审把这条路径钉进了回归——同进程内先后设置
+/// SAYALL_GATT_LOG 的测试因此互不绑定（`load_backs_up_button_mappings_from_a_newer_schema`
+/// 先调用日志会把 once 绑定成 None，导致 `updater_notes_land_in_diagnostic_log` 写不进去）。
 /// 一旦打开就固定指向同一文件，与既有语义一致。
 fn gatt_sink() -> Option<&'static Mutex<std::fs::File>> {
     static SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();

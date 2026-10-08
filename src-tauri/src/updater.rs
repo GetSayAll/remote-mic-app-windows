@@ -691,7 +691,8 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        // 本测试二进制内无其他代码先初始化 gatt_sink（OnceLock 首次调用生效）。
+        // 无 env 时 gatt_sink 不再冻结初始化（2026-10-04 修订）：本测试通过
+        // SAYALL_GATT_LOG 设置 sink 后调用 note()，断言标记行写入文件。
         // SAFETY: 测试进程内单线程操作该环境变量，其余测试不读取它。
         unsafe { std::env::set_var("SAYALL_GATT_LOG", &path) };
         note("check.fail stage=endpoint_override_parse error_domain=url error_code=parse_failed reason=invalid_override retryable=false".to_owned());

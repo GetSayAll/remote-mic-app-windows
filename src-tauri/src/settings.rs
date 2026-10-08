@@ -10,6 +10,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::onboarding::{self, OnboardingState, OnboardingStep};
+
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
@@ -104,6 +106,138 @@ impl SettingsStore {
         })
     }
 
+    /// 首次使用向导状态（`onboarding.json`，设计稿 §6）。
+    ///
+    /// 第一次调用执行一次性迁移判定并落盘，必须在任何其他设置写入之前调用
+    /// （Tauri setup 最前段）。之后每次读取都返回已持久化的状态，不重写。
+    pub fn ensure_onboarding_state(&self) -> Result<OnboardingState, String> {
+        let _guard = lock(&self.access);
+        self.ensure_onboarding_state_unlocked()
+    }
+
+    fn ensure_onboarding_state_unlocked(&self) -> Result<OnboardingState, String> {
+        let path = onboarding::state_path(&self.path);
+        match fs::read_to_string(&path) {
+            Ok(contents) => match serde_json::from_str::<OnboardingState>(&contents) {
+                Ok(state) => Ok(state.normalized()),
+                Err(_) => {
+                    // 损坏状态：保守修复（有旧安装证据按老用户、否则全新开始），
+                    // 立即重写为有效文件，绝不静默丢弃成"没走过向导"。
+                    let repaired = onboarding::resolve_initial_state(
+                        onboarding::install_evidence_exists(&self.path),
+                    );
+                    self.write_onboarding_state(&repaired)?;
+                    sayall_windows::gatt_note(format!(
+                        "onboarding event=migration phase=completed result=passed source={} reason=state_repaired_from_corrupt completed_version={}",
+                        if repaired.completed_version > 0 {
+                            "existing_install"
+                        } else {
+                            "fresh_install"
+                        },
+                        repaired.completed_version
+                    ));
+                    Ok(repaired)
+                }
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // 全新安装 vs 老用户升级：只看配置目录里有没有旧安装证据，
+                // 一次性 migration_version 防止第二次启动误判（设计稿 §6.2）。
+                let evidence = onboarding::install_evidence_exists(&self.path);
+                let state = onboarding::resolve_initial_state(evidence);
+                self.write_onboarding_state(&state)?;
+                sayall_windows::gatt_note(format!(
+                    "onboarding event=migration phase=completed result=passed source={} completed_version={} migration_version={}",
+                    if evidence { "existing_install" } else { "fresh_install" },
+                    state.completed_version,
+                    state.migration_version
+                ));
+                Ok(state)
+            }
+            Err(error) => {
+                sayall_windows::gatt_note(
+                    "onboarding event=state_read phase=completed terminal_result=failed error_domain=settings error_code=read_failed reason=state_file_unreadable retryable=true".to_owned(),
+                );
+                Err(format!("读取向导状态失败：{error}"))
+            }
+        }
+    }
+
+    /// 持久化当前步骤。步骤未变化时不重写、不重复刷日志。
+    pub fn save_onboarding_step(&self, step: OnboardingStep) -> Result<OnboardingState, String> {
+        let _guard = lock(&self.access);
+        let mut state = self.ensure_onboarding_state_unlocked()?;
+        if state.step != step {
+            state.step = step;
+            state.flow_version = onboarding::CURRENT_FLOW_VERSION;
+            self.write_onboarding_state(&state)?;
+            sayall_windows::gatt_note(format!(
+                "onboarding event=step_persisted step={}",
+                state.step.as_str()
+            ));
+        }
+        Ok(state)
+    }
+
+    /// 设置页「重新运行设置向导」：先回滚未提交的 staged 绑定，再重置向导进度；
+    /// 不清除设备/映射/音频/其他设置。
+    pub fn restart_onboarding(&self) -> Result<OnboardingState, String> {
+        let _guard = lock(&self.access);
+        self.restore_onboarding_staged_binding_unlocked("wizard_restart")?;
+        let mut state = self.ensure_onboarding_state_unlocked()?;
+        state.step = OnboardingStep::Welcome;
+        state.completed_version = 0;
+        state.flow_version = onboarding::CURRENT_FLOW_VERSION;
+        self.write_onboarding_state(&state)?;
+        sayall_windows::gatt_note(format!(
+            "onboarding event=restarted flow_version={}",
+            state.flow_version
+        ));
+        Ok(state)
+    }
+
+    /// 完成向导：提交 staged 事务（保留当前正式值、清除回滚快照）并标记完成。
+    pub fn complete_onboarding(&self) -> Result<OnboardingState, String> {
+        let _guard = lock(&self.access);
+        let mut state = self.ensure_onboarding_state_unlocked()?;
+        if let Some(staged) = state.staged.take() {
+            sayall_windows::gatt_note(format!(
+                "onboarding event=binding action=verified tool={} hotkey_count={}",
+                crate::voice_input_tool_name(staged.tool),
+                staged
+                    .voice_hotkey
+                    .as_ref()
+                    .map(|chord| chord.keys.len())
+                    .unwrap_or(0)
+            ));
+        }
+        state.flow_version = onboarding::CURRENT_FLOW_VERSION;
+        state.completed_version = state.flow_version;
+        self.write_onboarding_state(&state)?;
+        sayall_windows::gatt_note(format!(
+            "onboarding event=completed flow_version={}",
+            state.flow_version
+        ));
+        Ok(state)
+    }
+
+    fn write_onboarding_state(&self, state: &OnboardingState) -> Result<(), String> {
+        let path = onboarding::state_path(&self.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                log_onboarding_write_failure("create_dir_failed", true);
+                format!("创建应用设置目录失败：{error}")
+            })?;
+        }
+        let contents = serde_json::to_vec_pretty(state).map_err(|error| {
+            log_onboarding_write_failure("serialize_failed", false);
+            format!("序列化向导状态失败：{error}")
+        })?;
+        fs::write(&path, contents).map_err(|error| {
+            log_onboarding_write_failure("file_write_failed", true);
+            format!("保存向导状态失败：{error}")
+        })
+    }
+
     /// 语音增益（dB，0–24，对齐 Mac `gainDB` 的持久化口径）。
     ///
     /// 越界与非有限值在这里钳制后落盘，并返回实际保存值供界面显示：
@@ -118,6 +252,98 @@ impl SettingsStore {
 
     pub fn usage_statistics(&self) -> Result<UsageStatistics, String> {
         self.load().map(|settings| settings.usage_statistics)
+    }
+
+    /// 暂存语音绑定（第④步选输入工具）：先落回滚快照，再应用正式值。
+    ///
+    /// 必须在向导进行中调用；快照只取**第一次**进入事务时的正式值（后续换工具
+    /// 不覆盖回滚基线）。持久化顺序：快照先写、正式值后写——中途崩溃也不会
+    /// 丢失回滚目标（设计稿 §5.4 / §6）。运行时应用（platform）由命令层负责。
+    pub fn stage_onboarding_voice_binding(
+        &self,
+        tool: VoiceInputTool,
+        hotkey: Option<KeyChord>,
+    ) -> Result<OnboardingState, String> {
+        let _guard = lock(&self.access);
+        let mut state = self.ensure_onboarding_state_unlocked()?;
+        if !state.is_active() {
+            return Err("首次设置向导未在进行中".to_owned());
+        }
+        let staged = match state.staged.clone() {
+            Some(existing) => onboarding::OnboardingStagedBinding {
+                tool: Some(tool),
+                voice_hotkey: hotkey.clone(),
+                revert_tool: existing.revert_tool,
+                revert_voice_hotkey: existing.revert_voice_hotkey,
+            },
+            None => onboarding::OnboardingStagedBinding {
+                tool: Some(tool),
+                voice_hotkey: hotkey.clone(),
+                revert_tool: self.load_unlocked()?.voice_input_tool,
+                revert_voice_hotkey: self.load_voice_hold_hotkey_unlocked()?,
+            },
+        };
+        state.staged = Some(staged.clone());
+        self.write_onboarding_state(&state)?;
+        self.update_unlocked("保存输入工具设置", move |settings| {
+            settings.voice_input_tool = Some(tool);
+        })?;
+        self.save_voice_hold_hotkey_unlocked(hotkey)?;
+        sayall_windows::gatt_note(format!(
+            "onboarding event=binding action=staged tool={} hotkey_count={} revert_tool={} revert_hotkey_count={}",
+            crate::voice_input_tool_name(Some(tool)),
+            staged
+                .voice_hotkey
+                .as_ref()
+                .map(|chord| chord.keys.len())
+                .unwrap_or(0),
+            crate::voice_input_tool_name(staged.revert_tool),
+            staged
+                .revert_voice_hotkey
+                .as_ref()
+                .map(|chord| chord.keys.len())
+                .unwrap_or(0)
+        ));
+        Ok(state)
+    }
+
+    /// 回滚并清除 staged 事务（启动恢复 / 重跑向导用）。返回是否处理了事务。
+    ///
+    /// 写序：先把回滚值写回正式配置，成功后才清除快照——中途失败时快照保留，
+    /// 下次启动重试（幂等）。已完成状态下残留快照只清除、不动正式配置。
+    pub fn restore_onboarding_staged_binding(&self, reason: &str) -> Result<bool, String> {
+        let _guard = lock(&self.access);
+        self.restore_onboarding_staged_binding_unlocked(reason)
+    }
+
+    fn restore_onboarding_staged_binding_unlocked(&self, reason: &str) -> Result<bool, String> {
+        let mut state = self.ensure_onboarding_state_unlocked()?;
+        let Some(staged) = state.staged.clone() else {
+            return Ok(false);
+        };
+        if state.is_active() {
+            self.update_unlocked("恢复输入工具设置", move |settings| {
+                settings.voice_input_tool = staged.revert_tool;
+            })?;
+            self.save_voice_hold_hotkey_unlocked(staged.revert_voice_hotkey.clone())?;
+            sayall_windows::gatt_note(format!(
+                "onboarding event=binding action=restored reason={reason} tool={} hotkey_count={}",
+                crate::voice_input_tool_name(staged.revert_tool),
+                staged
+                    .revert_voice_hotkey
+                    .as_ref()
+                    .map(|chord| chord.keys.len())
+                    .unwrap_or(0)
+            ));
+        } else {
+            // 异常组合（已完成却留有未提交快照）：只清快照，不动正式配置。
+            sayall_windows::gatt_note(format!(
+                "onboarding event=binding action=cleared reason={reason}_state_inconsistent"
+            ));
+        }
+        state.staged = None;
+        self.write_onboarding_state(&state)?;
+        Ok(true)
     }
 
     pub fn record_usage(
@@ -270,6 +496,13 @@ impl SettingsStore {
         hotkey: Option<KeyChord>,
     ) -> Result<Option<KeyChord>, String> {
         let _guard = lock(&self.access);
+        self.save_voice_hold_hotkey_unlocked(hotkey)
+    }
+
+    fn save_voice_hold_hotkey_unlocked(
+        &self,
+        hotkey: Option<KeyChord>,
+    ) -> Result<Option<KeyChord>, String> {
         if let Some(chord) = &hotkey {
             chord
                 .clone()
@@ -340,6 +573,14 @@ impl SettingsStore {
 
     fn update(&self, operation: &str, update: impl FnOnce(&mut AppSettings)) -> Result<(), String> {
         let _guard = lock(&self.access);
+        self.update_unlocked(operation, update)
+    }
+
+    fn update_unlocked(
+        &self,
+        operation: &str,
+        update: impl FnOnce(&mut AppSettings),
+    ) -> Result<(), String> {
         let mut settings = self.load_unlocked()?;
         settings.schema_version = AppSettings::default().schema_version;
         update(&mut settings);
@@ -355,6 +596,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn log_onboarding_write_failure(reason: &str, retryable: bool) {
+    sayall_windows::gatt_note(format!(
+        "onboarding event=state_write phase=completed terminal_result=failed error_domain=settings error_code=write_failed reason={reason} retryable={retryable}"
+    ));
 }
 
 fn parse_settings(contents: &str) -> Result<AppSettings, String> {
@@ -716,6 +963,277 @@ mod tests {
         assert!(store.save_voice_hold_hotkey(Some(invalid)).is_err());
 
         let _ = std::fs::remove_file(store.voice_hold_hotkey_path());
+    }
+
+    fn onboarding_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-onboarding-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn onboarding_fresh_install_starts_at_welcome_and_is_idempotent() {
+        let base = onboarding_test_dir("fresh");
+        let store = SettingsStore::new(base.join("settings.json"));
+
+        let state = store.ensure_onboarding_state().unwrap();
+        assert!(state.is_active());
+        assert_eq!(state.step, OnboardingStep::Welcome);
+        assert_eq!(state.flow_version, onboarding::CURRENT_FLOW_VERSION);
+        assert_eq!(
+            state.migration_version,
+            onboarding::CURRENT_MIGRATION_VERSION
+        );
+        assert!(onboarding::state_path(&store.path).exists());
+
+        // 二次调用幂等：不重写、不重置进度。
+        let again = store.ensure_onboarding_state().unwrap();
+        assert_eq!(state, again);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_existing_install_is_migrated_to_completed() {
+        let base = onboarding_test_dir("existing");
+        let store = SettingsStore::new(base.join("settings.json"));
+        std::fs::write(
+            base.join("settings.json"),
+            r#"{"schema_version":3,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+
+        let state = store.ensure_onboarding_state().unwrap();
+        assert!(!state.is_active());
+        assert_eq!(state.completed_version, onboarding::CURRENT_FLOW_VERSION);
+
+        // 第二次启动仍是完成态（一次性迁移位防止误判）。
+        let again = store.ensure_onboarding_state().unwrap();
+        assert!(!again.is_active());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_corrupt_state_is_repaired_conservatively() {
+        // 有旧安装证据：按老用户修复，重写为有效文件。
+        let base = onboarding_test_dir("repair-existing");
+        let store = SettingsStore::new(base.join("settings.json"));
+        std::fs::write(base.join("settings.json"), "{}").unwrap();
+        std::fs::write(onboarding::state_path(&store.path), "not json").unwrap();
+
+        let state = store.ensure_onboarding_state().unwrap();
+        assert!(!state.is_active());
+        let repaired: OnboardingState = serde_json::from_str(
+            &std::fs::read_to_string(onboarding::state_path(&store.path)).unwrap(),
+        )
+        .unwrap();
+        assert!(!repaired.is_active());
+
+        // 无任何证据：按全新修复，从欢迎开始。
+        let base2 = onboarding_test_dir("repair-fresh");
+        let store2 = SettingsStore::new(base2.join("settings.json"));
+        std::fs::write(onboarding::state_path(&store2.path), "not json").unwrap();
+        let state2 = store2.ensure_onboarding_state().unwrap();
+        assert!(state2.is_active());
+        assert_eq!(state2.step, OnboardingStep::Welcome);
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(base2);
+    }
+
+    #[test]
+    fn onboarding_unknown_step_in_file_normalizes_to_welcome_without_losing_completion() {
+        let base = onboarding_test_dir("unknown-step");
+        let store = SettingsStore::new(base.join("settings.json"));
+        std::fs::write(
+            onboarding::state_path(&store.path),
+            r#"{"flow_version":1,"completed_version":1,"step":"legacy_step","migration_version":1}"#,
+        )
+        .unwrap();
+
+        let state = store.ensure_onboarding_state().unwrap();
+        assert_eq!(state.step, OnboardingStep::Welcome);
+        assert!(!state.is_active());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_step_save_restart_and_complete_lifecycle() {
+        let base = onboarding_test_dir("lifecycle");
+        let store = SettingsStore::new(base.join("settings.json"));
+
+        store
+            .save_onboarding_step(OnboardingStep::VoiceTest)
+            .unwrap();
+        assert_eq!(
+            store.ensure_onboarding_state().unwrap().step,
+            OnboardingStep::VoiceTest
+        );
+
+        let restarted = store.restart_onboarding().unwrap();
+        assert!(restarted.is_active());
+        assert_eq!(restarted.step, OnboardingStep::Welcome);
+
+        let completed = store.complete_onboarding().unwrap();
+        assert!(!completed.is_active());
+        assert_eq!(
+            completed.completed_version,
+            onboarding::CURRENT_FLOW_VERSION
+        );
+        // 完成后再次读取不被重置，重启也不会重新激活。
+        assert!(!store.ensure_onboarding_state().unwrap().is_active());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_staged_binding_snapshots_once_applies_formal_and_restores() {
+        let base = onboarding_test_dir("staged-binding");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let right_alt = KeyChord {
+            keys: vec![KeyCode::RightAlt],
+        };
+
+        // 迁移判定先行（全新 → 进行中）；再模拟"老用户完成过、又主动重跑向导"：
+        // 正式配置是他之前的选择，重跑后进入 active，staged 应以此为回滚基线。
+        assert!(store.ensure_onboarding_state().unwrap().is_active());
+        store.complete_onboarding().unwrap();
+        store
+            .save_voice_input_tool(Some(VoiceInputTool::Wechat))
+            .unwrap();
+        store
+            .save_voice_hold_hotkey(SettingsStore::default_voice_hold_hotkey())
+            .unwrap();
+        assert!(store.restart_onboarding().unwrap().is_active());
+
+        // 第一次暂存：应用正式值，并记录回滚基线。
+        let state = store
+            .stage_onboarding_voice_binding(VoiceInputTool::Doubao, Some(right_alt.clone()))
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().voice_input_tool,
+            Some(VoiceInputTool::Doubao)
+        );
+        assert_eq!(
+            store.load_voice_hold_hotkey().unwrap(),
+            Some(right_alt.clone())
+        );
+        let staged = state.staged.clone().unwrap();
+        assert_eq!(staged.revert_tool, Some(VoiceInputTool::Wechat));
+        assert_eq!(
+            staged.revert_voice_hotkey,
+            SettingsStore::default_voice_hold_hotkey()
+        );
+
+        // 二次暂存（换工具）：回滚基线保持第一次的值，不被覆盖。
+        store
+            .stage_onboarding_voice_binding(VoiceInputTool::Vokie, None)
+            .unwrap();
+        let staged = store.ensure_onboarding_state().unwrap().staged.unwrap();
+        assert_eq!(staged.revert_tool, Some(VoiceInputTool::Wechat));
+        assert_eq!(
+            staged.revert_voice_hotkey,
+            SettingsStore::default_voice_hold_hotkey()
+        );
+        assert_eq!(store.load_voice_hold_hotkey().unwrap(), None);
+
+        // 回滚：正式配置恢复、快照清除；再次回滚是幂等空操作。
+        assert!(store
+            .restore_onboarding_staged_binding("test_restore")
+            .unwrap());
+        assert_eq!(
+            store.load().unwrap().voice_input_tool,
+            Some(VoiceInputTool::Wechat)
+        );
+        assert_eq!(
+            store.load_voice_hold_hotkey().unwrap(),
+            SettingsStore::default_voice_hold_hotkey()
+        );
+        assert!(store.ensure_onboarding_state().unwrap().staged.is_none());
+        assert!(!store
+            .restore_onboarding_staged_binding("test_restore_again")
+            .unwrap());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_stage_requires_active_flow() {
+        let base = onboarding_test_dir("stage-inactive");
+        let store = SettingsStore::new(base.join("settings.json"));
+        store.complete_onboarding().unwrap();
+
+        assert!(store
+            .stage_onboarding_voice_binding(VoiceInputTool::Doubao, None)
+            .is_err());
+        assert!(!store
+            .restore_onboarding_staged_binding("test_inactive")
+            .unwrap());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_restart_rolls_back_staged_binding_before_reset() {
+        let base = onboarding_test_dir("restart-rollback");
+        let store = SettingsStore::new(base.join("settings.json"));
+        assert!(store.ensure_onboarding_state().unwrap().is_active());
+        store
+            .save_voice_input_tool(Some(VoiceInputTool::Wechat))
+            .unwrap();
+        store
+            .stage_onboarding_voice_binding(
+                VoiceInputTool::Doubao,
+                Some(KeyChord {
+                    keys: vec![KeyCode::RightAlt],
+                }),
+            )
+            .unwrap();
+
+        let state = store.restart_onboarding().unwrap();
+        assert!(state.is_active());
+        assert_eq!(state.step, OnboardingStep::Welcome);
+        assert!(state.staged.is_none());
+        assert_eq!(
+            store.load().unwrap().voice_input_tool,
+            Some(VoiceInputTool::Wechat)
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn onboarding_complete_commits_staged_binding_values() {
+        let base = onboarding_test_dir("complete-commit");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let right_alt = KeyChord {
+            keys: vec![KeyCode::RightAlt],
+        };
+        assert!(store.ensure_onboarding_state().unwrap().is_active());
+        store
+            .save_voice_input_tool(Some(VoiceInputTool::Wechat))
+            .unwrap();
+        store
+            .stage_onboarding_voice_binding(VoiceInputTool::Doubao, Some(right_alt.clone()))
+            .unwrap();
+
+        let state = store.complete_onboarding().unwrap();
+        assert!(!state.is_active());
+        assert!(state.staged.is_none());
+        // 提交：保留暂存时应用的正式值（验证通过后的最终状态）。
+        assert_eq!(
+            store.load().unwrap().voice_input_tool,
+            Some(VoiceInputTool::Doubao)
+        );
+        assert_eq!(
+            store.load_voice_hold_hotkey().unwrap(),
+            Some(right_alt.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

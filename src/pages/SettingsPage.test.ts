@@ -29,6 +29,7 @@ const bridge = vi.hoisted(() => ({
   setLaunchAtLogin: vi.fn<(enabled: boolean) => Promise<boolean>>(),
   getAppIcon: vi.fn<() => Promise<"standard" | "faceted-duck">>(),
   setAppIcon: vi.fn<(identifier: "standard" | "faceted-duck") => Promise<"standard" | "faceted-duck">>(),
+  restartOnboarding: vi.fn<() => Promise<{ flowVersion: number; completedVersion: number; step: string; isActive: boolean }>>(),
 }));
 
 vi.mock("../lib/app-update", async (importOriginal) => {
@@ -144,6 +145,9 @@ describe("settings page", () => {
     // `AppSettings::default()` 的用例语义对齐。
     bridge.getAppIcon.mockReset().mockResolvedValue("faceted-duck");
     bridge.setAppIcon.mockReset();
+    bridge.restartOnboarding
+      .mockReset()
+      .mockResolvedValue({ flowVersion: 1, completedVersion: 0, step: "welcome", isActive: true });
   });
 
   it("页面标题为「设置」，顶部显示应用标识、标语与当前版本", async () => {
@@ -377,5 +381,34 @@ describe("settings page", () => {
       .findAll("button")
       .find((b) => b.text().includes("下载并安装"));
     expect(installButton).toBeUndefined();
+  });
+
+  it("首次设置：重新运行向导重置进度并通知宿主进入向导", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "重新运行向导")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(bridge.restartOnboarding).toHaveBeenCalledTimes(1);
+    expect(wrapper.emitted("restart-onboarding")).toHaveLength(1);
+  });
+
+  it("首次设置：重置失败时就地报错，不发进入向导事件", async () => {
+    bridge.restartOnboarding.mockRejectedValueOnce(new Error("ipc failed"));
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "重新运行向导")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain("无法开始设置向导");
+    expect(wrapper.emitted("restart-onboarding")).toBeUndefined();
   });
 });

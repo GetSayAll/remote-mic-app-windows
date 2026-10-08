@@ -89,7 +89,9 @@ describe("permissions page", () => {
     await flushPromises();
 
     const report = wrapper.get(".diagnostic-output").text();
-    expect(report).toContain('"schemaVersion": 1');
+    expect(report).toContain('"schemaVersion": 2');
+    expect(report).toContain('"windowsVersion"');
+    expect(report).toContain('"sourceRevision"');
     expect(report).not.toContain("remoteName");
     expect(report).not.toContain("selectedEndpointName");
     expect(report).not.toContain("lastError");
