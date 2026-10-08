@@ -284,3 +284,7 @@
 - [x] **卸载残留已清（2026-10-07，Andy 要求"卸载干净"）**：审计发现两处残留——`%PROGRAMDATA%\SayAll\rc003-helper\`（本机实测 **234 MB / 11 个文件**；提权进程建的 ACL 只给普通用户读 + 新建，非提权卸载器删不掉）与 `HKCU\...\Run` 的 `SayAll` 值。修法：助手新增 `--uninstall-cleanup`（递归删除，被占用文件用 `MoveFileEx(DELAY_UNTIL_REBOOT)` 安排到重启后删除，非提权调用退出码 2 拒绝）；卸载器先写清理标记让**运行中的助手自清（零 UAC）**，未清掉时交互式卸载用 `ExecShell "runas"` 拉起助手做提权清理、静默安装跳过提权；同时删 `Run` 值与两个信号文件；`--follow-app` 的建目录分支加 `!args.uninstall_cleanup` 护栏（否则"清完又建回来"）。验证：helper **34 passed** + `--selftest` 全通过（含两条新项）+ `makensis -INPUTCHARSET UTF8` 探针编译 **0 警告**（并当场抓到"`$PROGRAMDATA` 不是 NSIS 变量"这个真 bug）+ 安装器契约测试 10 passed + 静默安装测试新增"卸载前造夹具 → 卸载后断言消失"。**提权清理那一支真机复测 `deferred`**（需非提权管理员账户 + 跑过助手的机器）。记录见 [Bugs/2026-10-07-uninstall-leftovers.md](Bugs/2026-10-07-uninstall-leftovers.md)。
 
 **依赖与待决**：① ARM64 真机来源（报障人机器或另行借测）——没有真机前，本项只能完成到自动化与打包层，不得宣称通过；② 是否同期回复 Issue #206（回复要点已写在 Bug 文档末尾，需补发完整的对账字段与助手侧 `[HOST]` / `[VERIFY]` / `[INJECT]` 行）。
+
+### 2026-10-08 现场发现：诊断日志体积治理（登记，待排期）
+
+- [ ] `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log` 实测单机累计 **768 MB**，当前写入速率约 **107 MB/天**（每 10 秒一条心跳，`[HB]` 载荷为完整 JSON 统计；另有事件行）。计划：① 写轮转（按大小与进程启动切换、限制保留份数）；② 心跳降频或瘦身（保留可诊断判据字段，不再整包 JSON 落盘）；③ 升级/首次启动时清理历史大文件。判据：**一次用户报障 + 一次日志拉取仍能定位环节**（不牺牲可诊断性）。发现场景与证据链见 [Bugs/2026-10-08-rc003-stale-tap-self-heal.md](Bugs/2026-10-08-rc003-stale-tap-self-heal.md)。
