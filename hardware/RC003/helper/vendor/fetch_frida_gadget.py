@@ -2,11 +2,18 @@
 
 版本与哈希的**唯一事实来源**是同目录的 ``frida-gadget.lock.json``。本脚本不信任
 网络返回的任何内容：它先按锁定值校验下载产物的 SHA-256，再解压，再校验解压产物的
-SHA-256；任何一步不符都以非零退出码终止，绝不留下未校验的 DLL 让助手去加载。
+SHA-256 与 **PE machine**（架构）；任何一步不符都以非零退出码终止，绝不留下未校验
+的 DLL 让助手去加载。
+
+为什么按架构各一份：承载 RC003 的宿主 ``WUDFHost.exe`` 在 ARM64 系统上是原生 ARM64
+进程，而 ARM64 进程不能加载 x64 镜像（Issue #206 现场：x64 助手对 ARM64 宿主，注入必然
+失败）。锁定文件里每个架构一条，助手只认自己那一份。
 
 用法
 ----
-    python fetch_frida_gadget.py                # 下载（若缺）+ 校验 + 解压
+    python fetch_frida_gadget.py                # x86_64（默认，与历史行为一致）
+    python fetch_frida_gadget.py --arch arm64   # 只处理 arm64
+    python fetch_frida_gadget.py --all          # 两套都处理（出包/CI 用）
     python fetch_frida_gadget.py --verify-only  # 只校验本地已存在的文件，不联网
 
 只依赖标准库（urllib / lzma / hashlib / json）。退出码：
@@ -41,6 +48,19 @@ EXIT_MISMATCH = 3
 EXIT_DOWNLOAD = 4
 EXIT_EXTRACT = 5
 
+# 锁定文件里的 arch 取值 → PE machine（校验解压产物用）。扩展名写死是为了让"期望值"
+# 与被校验的东西一一对应；新增架构时必须同时改这里与锁定文件。
+ARCH_MACHINES = {"x86_64": 0x8664, "arm64": 0xAA64}
+# 允许的别名（命令行与锁定文件都容错），统一收敛到 canonical 名。
+ARCH_ALIASES = {
+    "x86_64": "x86_64",
+    "x64": "x86_64",
+    "amd64": "x86_64",
+    "arm64": "arm64",
+    "aarch64": "arm64",
+}
+DEFAULT_ARCH = "x86_64"
+
 
 def say(message: str) -> None:
     print(message, flush=True)
@@ -54,16 +74,40 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_lock() -> dict:
+def normalize_arch(value: str) -> str | None:
+    return ARCH_ALIASES.get(str(value).strip().lower())
+
+
+def load_entries() -> list[dict]:
     if not LOCK_PATH.exists():
         say(f"[fail] 锁定文件缺失: {LOCK_PATH}")
         raise SystemExit(EXIT_LOCK)
     try:
         payload = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
-        return payload["entries"][0]
+        entries = payload["entries"]
     except (KeyError, ValueError) as exc:
         say(f"[fail] 锁定文件格式不符: {exc}")
         raise SystemExit(EXIT_LOCK)
+    if not isinstance(entries, list) or not entries:
+        say("[fail] 锁定文件没有任何 entries")
+        raise SystemExit(EXIT_LOCK)
+    return entries
+
+
+def select_entries(entries: list[dict], wanted: list[str]) -> list[dict]:
+    by_arch: dict[str, dict] = {}
+    for entry in entries:
+        arch = normalize_arch(entry.get("arch", ""))
+        if arch is None:
+            say(f"[fail] 锁定文件里有无法识别的 arch: {entry.get('arch')!r}")
+            raise SystemExit(EXIT_LOCK)
+        by_arch.setdefault(arch, entry)
+    missing = [arch for arch in wanted if arch not in by_arch]
+    if missing:
+        say(f"[fail] 锁定文件缺少架构条目: {', '.join(missing)}（现有: {', '.join(by_arch)}）")
+        raise SystemExit(EXIT_LOCK)
+    # 保持 wanted 的顺序，输出可预测
+    return [by_arch[arch] for arch in wanted]
 
 
 def verify(path: Path, expected: str, label: str) -> bool:
@@ -110,23 +154,39 @@ def extract(source: Path, target: Path) -> bool:
     return True
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="获取并校验 Frida Gadget")
-    parser.add_argument(
-        "--verify-only",
-        action="store_true",
-        help="只校验本地已存在的文件，不下载、不联网",
-    )
-    args = parser.parse_args()
+def pe_machine_of(path: Path) -> int | None:
+    """读 PE 头里的 machine（只读前 0x400 字节）。解析不了返回 None。"""
+    with path.open("rb") as handle:
+        header = handle.read(0x400)
+    if len(header) < 0x40 or header[:2] != b"MZ":
+        return None
+    pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+    if pe_offset + 6 > len(header) or header[pe_offset : pe_offset + 4] != b"PE\0\0":
+        return None
+    return int.from_bytes(header[pe_offset + 4 : pe_offset + 6], "little")
 
-    entry = load_lock()
+
+def handle_entry(entry: dict, verify_only: bool) -> int:
+    arch = normalize_arch(entry["arch"])
+    assert arch is not None  # select_entries 已经校验过
+    expected_machine = ARCH_MACHINES[arch]
     version = entry["version"]
-    say(f"=== Frida Gadget {version} ({entry['arch']}) ===")
+    say("")
+    say(f"=== Frida Gadget {version} ({arch}) ===")
 
     source = HERE / entry["compressed"]["name"]
     target = HERE / entry["target"]
 
-    if not args.verify_only:
+    # 快路径：产物已存在且摘要+架构都对 → 一个字节都不写。出包会重复调用本脚本，
+    # 每次都重解压 20 MB 既慢又会让"是否真的换过 DLL"更难判读。
+    if target.exists():
+        if verify(target, entry["extracted"]["sha256"], "解压产物") and (
+            pe_machine_of(target) == expected_machine
+        ):
+            say(f"[ .. ] 已存在且校验通过，跳过下载与解压: {target.name}")
+            return EXIT_OK
+
+    if not verify_only:
         if not source.exists():
             if not download(entry["source"]["url"], source):
                 return EXIT_DOWNLOAD
@@ -136,28 +196,65 @@ def main() -> int:
     if not verify(source, entry["compressed"]["sha256"], "压缩包"):
         return EXIT_MISMATCH
 
-    if not args.verify_only:
+    if not verify_only:
         if not extract(source, target):
             return EXIT_EXTRACT
 
     if not verify(target, entry["extracted"]["sha256"], "解压产物"):
         return EXIT_MISMATCH
 
-    with target.open("rb") as handle:
-        header = handle.read(0x200)
-    if header[:2] != b"MZ":
-        say("[fail] 解压产物不是 PE 文件（缺少 MZ 头）")
+    machine = pe_machine_of(target)
+    if machine is None:
+        say("[fail] 解压产物不是可解析的 PE 文件（缺少 MZ/PE 头）")
         return EXIT_MISMATCH
-    pe_offset = int.from_bytes(header[0x3C:0x40], "little")
-    machine = int.from_bytes(header[pe_offset + 4 : pe_offset + 6], "little")
-    if machine != 0x8664:
-        say(f"[fail] 架构不符: machine=0x{machine:04X}，期望 0x8664 (x86_64)")
+    if machine != expected_machine:
+        say(
+            f"[fail] 架构不符: machine=0x{machine:04X}，"
+            f"期望 0x{expected_machine:04X} ({arch})"
+        )
         return EXIT_MISMATCH
-    say("[ ok ] PE 头有效，machine=0x8664 (x86_64)")
+    say(f"[ ok ] PE 头有效，machine=0x{machine:04X} ({arch})")
+    return EXIT_OK
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="获取并校验 Frida Gadget（按架构）")
+    parser.add_argument(
+        "--arch",
+        default=DEFAULT_ARCH,
+        help=f"要处理的架构（默认 {DEFAULT_ARCH}，与历史行为一致）",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="处理锁定文件里的全部架构（出包/CI 用）",
+    )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="只校验本地已存在的文件，不下载、不联网",
+    )
+    args = parser.parse_args()
+
+    if args.all:
+        wanted = ["x86_64", "arm64"]
+    else:
+        arch = normalize_arch(args.arch)
+        if arch is None:
+            say(f"[fail] 未知架构: {args.arch}（可选: {', '.join(sorted(set(ARCH_ALIASES)))})")
+            return EXIT_LOCK
+        wanted = [arch]
+
+    entries = select_entries(load_entries(), wanted)
+    for entry in entries:
+        code = handle_entry(entry, args.verify_only)
+        if code != EXIT_OK:
+            return code
 
     say("")
-    say(f"就绪: {target}")
-    say(f"版本由锁定文件固定: {version} / {entry['source']['tag']}")
+    for entry in entries:
+        say(f"就绪: {HERE / entry['target']}")
+        say(f"版本由锁定文件固定: {entry['version']} / {entry['source']['tag']} ({entry['arch']})")
     return EXIT_OK
 
 

@@ -20,3 +20,12 @@ export const VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED = false;
  * runtime simulation 改为经 IPC 直接写入并验证受理），只是 UI 暂不暴露入口。
  */
 export const DEVICE_ACTION_SECTION_ENABLED = false;
+
+/**
+ * 首次使用向导（Onboarding）激活开关。
+ *
+ * 2026-10-04：步骤①–⑦、staged 事务、attempt 唯一终态与「重新运行向导」入口
+ * 已全部实现；打开开关，供现场验收（遥控器实时语音 + 三种输入工具 + 键盘
+ * 阴性对照）使用。验收通过前本分支不合入 main（main 保持关闭）。
+ */
+export const ONBOARDING_WIZARD_ENABLED = true;

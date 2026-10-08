@@ -58,6 +58,7 @@
 
 - `HD838A/remote-mic-app`：无线麦 macOS 原版的信息架构、产品文案、RC003 图片、RC001/RC003 型号识别、ATVV 行为和测试边界；RC001 支持参考提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`。
   - 2026-09-05 按键映射功能移植补充（均为语义移植，非代码复制）：`RemoteButtonGestureRecognizer` + `HIDRemoteScheduler` 的手势参数（双击窗口 300ms、长按 550ms、连发起始 350ms、返回 50ms/方向与音量 100ms 连发）与"按配置动态启用双击/长按识别、未配置时单击零延迟"的语义；`KeyboardEventSuppressor` 的预测式武装 + 有限窗口匹配吞键模型；`RemoteMappingCanvas` 的按键卡片布局表（锚点/目标 Y 坐标逐键移植）与三态高亮（按下=橙、选中=强调、普通=中性）；`MappingSelectionPolicy` 的"锁定当前按键"默认值。Mac 版 `KeyboardEventSuppressor` 的 UP 沿无配对兜底（DOWN 泄漏+UP 吞下=粘键缺陷）未移植——Windows 版沿用本仓库 2026-09-05 规则（DOWN 漏进 OS 则 UP 必放行）。
+  - 2026-10-05 按键「按住时连续执行」（Windows 扩展语义；参数与互斥理由参考 Mac `HIDRemoteScheduler.repeatIntervalMilliseconds`（返回 50ms、方向/音量 100ms）与 `HIDRemoteMonitor.startRepeatIfNeeded` 的「无次级手势才启动连发」互斥依据，未复制代码）：**与 Mac 的差异（Windows 自有语义）**——连发改为按键级显式开关（界面 2026-10-05 定稿为 radio 三选一：关闭 / 重复单击动作 / 重复长按动作；连发目标为单击或长按槽位，用户指定，双击不参与；见 `docs/plan/2026-10-05-button-hold-repeat-radio.md`）；长按动作触发后可继续按间隔续拍；双击共存时按住超过双击窗（0.3s）即确认为单击并起拍；可连续性按动作白名单判定（单键、滚动、鼠标移动；组合快捷键、打开应用、聚焦输入框、鼠标点击只执行一次）。旧配置按旧版自动连发行为迁移为显式开关；旧版对组合键（如 Ctrl+C）的连发在新模型中不再生效（有意修正）。
   - 2026-09-09 按键映射配置导入导出补充（本地 Mac 仓库 HEAD `feba1d6`，语义参考，未复制代码）：参考 `AppSettings.exportedConfigurationData/importConfiguration` 的版本化 JSON、导入前完整解码校验与一次性应用，以及 `SettingsView.exportConfiguration/importConfiguration` 的系统文件选择器、用户取消静默、成功/失败反馈。Windows 版仅迁移按键映射，不导入 Mac 专属设置或统计；格式使用独立 `formatVersion: 1` + `buttonMappings` 契约，不宣称与 Mac 配置文件互通。
   - 2026-10-02 设置页改版与应用图标切换（Mac main `e8af2da2`，语义参考，未复制代码；同日按用户指正修正：Mac 菜单栏状态图标在 Windows 不存在，已整体撤掉）：
     ① **设置页信息架构**参考 `Sources/RemoteMic/SettingsView.swift` 的 `aboutPage`——顶部一行为应用图标 + 名称 + 标语，其右为"当前版本 + 检查更新 + 检查预发布版本开关 + 一条分隔线 + 更新状态"，其后是带分组标题的"通用""问题反馈"卡片，卡内每行 = 行内图标 + 标题 + 右侧控件（`settings.section.settings` 的标题是"设置"、图标是 `gearshape`，因此 Windows 侧栏末位页从"关于"改名"设置"并换齿轮图标）。Windows 没有的模块（Dock/菜单栏图标、应用语言、重新运行设置向导、服务环境、会员、分享）不移植；"诊断与日志"保持在权限页（2026-10-01 用户指定），不在设置页重复。
@@ -85,6 +86,7 @@
 
 - `HD838A/remote-mic-app#249`，提交 `090a3cfc24f0e3e733b2347ee2daf87c60e10097`：Windows 独立实现、ATVV 测试夹具、语音边沿、安装升级、公开边界和 Mac 风格 UI 原型；Raw Input 参考了 `hid_identity.py` 与 `raw_input_windows.py`，SendInput 的批量提交、物理修饰键和失败回滚参考了 `win32_input.py` 与 `win32_keys.py`，均以 Rust/windows-rs 重新实现。
 - `GetSayAll/hardware-simulation`，提交 `65248499cac7da3ad46cd0c11dca1478f7733255`：RC001 短语音时间线的控制通知、40 + 80 字节音频拆包和停止通知；本仓库只保留纯 ATVV 回放所需字段。
+- `GetSayAll/hardware-simulation`，提交 `9823b70`（PR #3，分支 `feat/windows-rust-simulation`）：Windows（Rust）模拟实现与 `hardware-sim export-app-script` 的**应用信号脚本契约**（`schemaVersion` / `atMilliseconds` / `kind`；`hid_report` 带 `reportID`+`dataHex`；`voice_control`/`voice_audio` 带 `dataHex`；未识别事件保留 `raw` 的 `transport`+`originalKind`+`payload`）。本仓库消费侧解析器见 `crates/sayall-windows/src/hardware_script.rs`，并以该仓库的真实导出产物做契约测试——两侧改动需同步。
 - `ZSTDJan/windows-remote-mic-app`：WinRT BLE、Raw Input、音频输出、发布门禁和真实硬件验证边界；其语音页按语音程序配置"按住说话快捷键"、按下注入 DOWN/松开释放的行为，是本仓库按住说话快捷键设置的产品参考。Round 1 拆解曾记两项技巧参考，后续实证修正（Round 2/3）：**physicalize 技巧——结构性无效（勿模仿）**：`legacy_key_suppressor_windows.py` L142-155 的做法（仅对自家 keybd_event 注入的带 "RMICRC03" 标记右 Alt，在自家钩子的私有副本上清 INJECTED 标志→转发→恢复）曾被解读为"使下游应用钩子视为物理键，前提是自家钩子位于目标应用钩子之前（链头）"——该解读不成立（Round 2 E 三层实证：LL 钩子每钩子收到私有结构副本，修改不跨钩子传播，CallNextHookEx 转发通道不存在，应用层收到原始键；Round 3 J 语义复查：清标志对下游钩子/应用层均不可见，且 ZSTDJan 进程内也无读者——对声明目标是 no-op；其真正能影响豆包读值的是 `doubao_rpc.py` 的 Frida 版 attach 方案，未接线进生产流程，违反本仓库 A2/A4/A5 边界，仅作机理记录）。**WeType 语音触发配方——本机实证有效（Round 3 J 翻案）**：SendInput 注入 Ctrl+Win 按住（纯 wVk 或扫描码配方均可）可唤起 WeType 语音（会话级 TSF 激活前提下：开麦/吞键/释放关麦全链实证，注入 ground truth 由常驻捕获器独立记录）；**Round 2 F 曾判"三配方无反应"，系其 TSF 激活用了线程级 flags（dwFlags=0，会话级应为 TF_IPPMF_FORSESSION=0x20000000）、WeType 从未真正激活所致——教训：测试 IME 行为前必须以会话级激活 + 行为判据（候选框版式）双重确认活动输入法**。**配方形态约束（2026-09-04 P 实证，evidence/p）：和弦必须逐事件注入且两键间隔 ≥80ms——WeType 拒绝单次 SendInput 批量零间隔提交的 Ctrl+Win（sent=2/2 全到达仍无吞键无开麦；逐事件 80ms 两轮 2/2 触发，A 失败→B 通过→A 失败→B 通过交替序列排除状态漂移）**；应用曾把该配方误合并为单批零间隔导致真机不出字（Bugs\2026-09-04-wetype-zero-gap-injection.md，含第二层缺陷：遥控器 F5 须由抑制器吞掉，否则"额外按键"拒绝；钩子链头 bump 加固同日落地），已修复并 RC001 真机端到端 passed（2026-09-04，用户确认文字上屏）。
 - `richlearntodo-debug/vibe-flow`，提交 `047f9d3ead54bf30de9b884adf8f7b5adefe9993`：自然 ATVV 会话、WASAPI 音频生命周期和硬件验收清单。
   - **Windows 深色模式专项调研补充（2026-09-08，本地参考库 HEAD `b47f7cdce8b753fade0c64c97332bebe80f17d2d`；主应用 UI 源码未开源，依据为 `docs/ARCHITECTURE.md`、`docs/PRODUCT_AUDIT_2026-09-01_ZH.md` 与用户指南）**：其产品支持浅色、深色、跟随 Windows 三档且运行中切换不重启 Host/Bridge/Capture；审计结论要求深色采用低饱和中性色层级，并完成各页实际截图检查。本仓库只借鉴“三档主题、主题是纯显示行为、不得重启后台服务”和视觉验收边界，不复制实现；SayAll 将选择器放在“关于”页面，并通过自身 `SettingsStore` 持久化，详见 `docs/plan/2026-09-08-windows-dark-mode.md`。
@@ -340,6 +342,38 @@
     一并分发。在此之前该组件**仅用于开发期与增强轨验证**。
   - **使用边界**：基础语音主路径不得依赖本组件（`AGENTS.md` 架构边界条款）。助手只承载
     "按设备源头捕获"这一可选增强轨，未就绪时按键回到 Windows 原生行为。
+- **产品注入载体登记（arm64 架构）：Frida Gadget 17.18.0（2026-10-07，Issue #206 / ADR 0003）**。
+  与上一条同一发行 tag，按架构各登记一条（ADR 0003 §6）。本机无 ARM64 主机、无 ARM64
+  工具集，本条目只登记来源与完整性；ARM64 上的实际可用性尚未验证（deferred）。
+  - **来源**：`frida/frida` 发行 tag `17.18.0`，资产
+    `frida-gadget-17.18.0-windows-arm64.dll.xz`，
+    下载地址 `https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-windows-arm64.dll.xz`。
+  - **完整性**：压缩包 5 555 660 字节，SHA-256
+    `9362da1d004c5bac3f42e10a6f5ab13a93a6a9de452015737c15b72fcce5ea90`
+    （与 GitHub Releases API 的 `asset.digest` 逐字符一致，非本地自证）；解压产物
+    `frida-gadget-arm64.dll` 21 078 016 字节，SHA-256
+    `323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff`，
+    PE machine `0xAA64`（ARM64，架构正确）。
+  - **固定方式**：与 x64 条目同一机制——机器可读清单
+    `hardware/RC003/helper/vendor/frida-gadget.lock.json` 按架构各记一条，`fetch_frida_gadget.py`
+    按锁定值逐级校验（压缩包哈希 → 解压 → 产物哈希 → PE 头与架构），任何一步不符即非零退出，
+    不留下未校验的 DLL 供助手加载；二进制不入库。`verify_gadget` 的单一 SHA-256 常量按本登记
+    改为按架构两份。
+  - **许可**：与 x64 条目同源同许可——**wxWindows Library Licence, Version 3.1** 及其
+    exception notice 第 2 条（以二进制形式随本产品分发被允许，无需开源本产品代码）；
+    残留风险与 x64 条目相同：尚未逐组件许可复核，正式发布前收口，在此之前仅用于开发期与
+    增强轨验证。
+  - **使用边界**：与 x64 条目相同——基础语音主路径不得依赖本组件（`AGENTS.md` 架构边界条款）；
+    助手按系统原生架构（`IsWow64Process2` 的 `nativeMachine`）选择注入哪一份 Gadget，未就绪时
+    按键回到 Windows 原生行为。
+- **ARM64 注入架构选择的参考实现结论（2026-10-07，Issue #206 调研）**：Frida 自 **16.5.0** 起
+  支持 Windows on ARM——arm64 版按**目标进程架构**选择要注入的 agent，可注入原生 arm64 进程，
+  也可注入在 ARM64 上仿真的 x86_64 / x86 进程（引文见
+  `https://github.com/frida/frida/discussions/3350`）；平台侧边界据微软 Arm64X 文档
+  （`https://learn.microsoft.com/en-us/windows/arm/arm64x-pe`）：**普通 x64 DLL 不能被 ARM64
+  进程加载**，同一镜像要同时服务 Arm64 与 x64/Arm64EC 进程必须构造成 Arm64X/Arm64EC。
+  本仓库据此判定：ARM64 上注入原生 ARM64 的 `WUDFHost.exe` 必须使用 arm64 Gadget，x64 Gadget
+  结构性不可用（与安全软件无关），与 ADR 0003 的"按系统原生架构选择"结论一致。
 - **本仓库只读实测（`structural`，2026-09-23）**：本机 RC003 的宿主节点
   `Enum\BTHLEDevice\{00001812-…}_Dev_VID&012717_PID&32b8_REV&00a4_…\9&3aacf7b9&0&0055` 声明
   `Service = mshidumdf`、`LowerFilters = WUDFRd`、`WUDF\DriverList = HidOverGatt`、
@@ -353,3 +387,9 @@
   **不是微软承诺稳定的公开接口**"*；其 README 亦列出游戏反作弊识别风险。
 - **不要效仿的部分**：其按键映射支持单击/双击/长按配置，与本仓库"语音键只支持按下开始、释放结束"
   的产品规则冲突——语音键不借鉴其手势策略，只借鉴报告层捕获机理。
+
+## 2026-10-05 WebView2 故障处理来源
+
+- 主窗口有界恢复与相关策略测试改编自本仓库提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**；上游移植只涉及 `src-tauri/src/lib.rs` 的 WebView2 故障处理，按上游已有退出标记适配，不改 IME、语音或安装器流程。同一作者在其 fork 提交 `adddb0cc210885aff4ba19dec6684d199aa8e31e`（PR #202）中另带一次性原生提示（窗口标题改写、托盘 tooltip、`MessageBoxW`）：该实现未采纳（写标题的判据是 `Reload` 的返回值而非界面是否真的没回来，且写出后没有恢复路径）；本仓库改用心跳判据的标题提示（页面恢复报到即还原），设计见 Bug 记录的 2026-10-07 节。
+- 官方行为参考：[Microsoft WebView2 process-related events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)。使用公开 `ProcessFailed`/`Reload` API；浏览器进程退出只能重建控件，本实现只落结构化日志，不伪造恢复；控件重建、托盘 tooltip 与系统对话框未实现；真实故障恢复验收不在已验证范围。
+- 直接依赖复用 Tauri/Wry 已锁定的 `webview2-com 0.38.2`，来源 [wravery/webview2-rs](https://github.com/wravery/webview2-rs)，许可 MIT；没有复制其示例实现。验证边界见 [2026-09-12 Bug 记录的增量节](Bugs/2026-09-12-voice-chord-focused-webview-reload.md#2026-10-05独立的-webview2-故障恢复贡献候选)。

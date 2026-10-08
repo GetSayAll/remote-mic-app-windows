@@ -8,6 +8,16 @@ use serde::Serialize;
 pub struct DiagnosticReport {
     pub schema_version: u32,
     pub app_version: String,
+    /// CI / 本地构建产物的构建号（`SAYALL_APP_BUILD`，无则 `unknown`）。
+    pub app_build: String,
+    /// 源码修订（40 位 git SHA，取不到时为 `unknown`）。
+    pub source_revision: String,
+    /// 发布通道（`SAYALL_BUILD_CHANNEL`，无则 `unknown`）。
+    pub build_channel: String,
+    /// 运行机器的 Windows 版本（major.minor.build，如 `10.0.26100`）。
+    pub windows_version: String,
+    /// 进程架构（`x86_64` 等）。
+    pub process_architecture: String,
     pub platform: String,
     pub verification_status: String,
     pub capabilities: DiagnosticCapabilities,
@@ -94,9 +104,22 @@ impl DiagnosticReport {
         send_input: &SendInputSnapshot,
     ) -> Self {
         let atvv = platform.connection.capabilities.as_ref();
+        #[cfg(windows)]
+        let windows_version = sayall_windows::compatibility::current_windows_version().to_string();
+        #[cfg(not(windows))]
+        let windows_version = "unknown".to_owned();
         Self {
-            schema_version: 1,
+            schema_version: 2,
             app_version: app_version.to_owned(),
+            app_build: option_env!("SAYALL_APP_BUILD")
+                .unwrap_or("unknown")
+                .to_owned(),
+            source_revision: env!("SAYALL_SOURCE_REVISION").to_owned(),
+            build_channel: option_env!("SAYALL_BUILD_CHANNEL")
+                .unwrap_or("unknown")
+                .to_owned(),
+            windows_version,
+            process_architecture: std::env::consts::ARCH.to_owned(),
             platform: platform.platform.clone(),
             verification_status: platform.verification_status.clone(),
             capabilities: DiagnosticCapabilities {
@@ -219,6 +242,15 @@ mod tests {
         let report = DiagnosticReport::capture("0.1.0", &platform, &send_input);
         let json = serde_json::to_string(&report).unwrap();
 
+        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.app_version, "0.1.0");
+        // 环境字段必须真实可用（Build/Windows 版本是报障的定位前提）。
+        assert!(!report.app_build.is_empty());
+        assert!(!report.source_revision.is_empty());
+        assert!(report.source_revision.len() == 40 || report.source_revision == "unknown");
+        assert!(!report.process_architecture.is_empty());
+        #[cfg(windows)]
+        assert_eq!(report.windows_version.split('.').count(), 3);
         assert_eq!(report.connection.generation, 7);
         assert!(report.audio.endpoint_configured);
         assert_eq!(report.raw_input.last_button, Some(RemoteButton::Ok));

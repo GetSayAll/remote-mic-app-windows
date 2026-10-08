@@ -24,6 +24,7 @@ pub use bluetooth_radio::prepare_bluetooth_radio_recovery;
 mod button_gestures;
 pub mod button_mapping;
 pub mod compatibility;
+mod diagnostic_log;
 pub mod file_dialog;
 /// 聚焦输入框的纯逻辑（跨平台可编译、可单测）。
 pub mod focus;
@@ -32,10 +33,17 @@ pub mod focus_service;
 /// Windows UI Automation 后端（MTA 工作线程；非 Windows 平台不参与编译）。
 #[cfg(windows)]
 pub mod focus_windows;
+/// "前台窗口是不是我们自己"——诊断心跳的门（只比较进程号，不记录窗口身份）。
+pub mod foreground;
 #[cfg(windows)]
 pub mod graceful_exit;
 #[cfg(windows)]
 pub mod instance_signal;
+/// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
+pub mod key_host;
+// 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
+// 无副作用、不进入基础路径，仅仿真平台消费。
+pub mod hardware_script;
 pub mod registered_apps;
 #[cfg(windows)]
 pub use ble::{
@@ -74,6 +82,8 @@ pub mod key_gate;
 mod key_suppressor;
 #[cfg(windows)]
 mod lock_open_with_guard;
+/// 本机的原生系统架构（x64 / arm64），与"本进程的仿真架构"区分开。
+pub mod os_arch;
 #[cfg(windows)]
 mod power;
 pub mod raw_input;
@@ -808,6 +818,34 @@ impl WindowsPlatform {
     /// 订阅已触发手势（单击/双击/长按反馈）。
     pub fn subscribe_button_gestures(&self, callback: button_mapping::ButtonGestureCallback) {
         self.button_mapping.subscribe_button_gestures(callback);
+    }
+
+    /// 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+    pub fn set_mapping_suspension(&self, suspended: bool) {
+        self.button_mapping.set_suspended(suspended);
+    }
+
+    /// 向导第⑤步前置（探针④）：打开物理键观察窗口（计数语义见 key_gate）。
+    /// 钩子未运行时返回 0（不可用）——调用方按未知处理。
+    pub fn begin_key_observation(&self, exclude_vks: &[u32]) -> u64 {
+        if !key_gate::is_gate_thread_alive() {
+            return 0;
+        }
+        key_gate::begin_key_observation(exclude_vks)
+    }
+
+    /// 关闭物理键观察窗口并取回计数。None = 计量不可靠（窗口过期、钩子
+    /// 中途停止），调用方 fail-open，不得据此判定手动输入。
+    pub fn end_key_observation(&self, window_id: u64) -> Option<u64> {
+        match key_gate::end_key_observation(window_id) {
+            Some(count) if key_gate::is_gate_thread_alive() => Some(count),
+            _ => None,
+        }
+    }
+
+    /// 观察窗口诊断（见 `key_gate::observed_last_vk`）：最后一次计入的虚拟键码。
+    pub fn observed_last_key(&self) -> Option<u32> {
+        key_gate::observed_last_vk()
     }
 
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {

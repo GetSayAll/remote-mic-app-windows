@@ -2162,6 +2162,41 @@ pub fn open_directory(_path: &std::path::Path) -> Result<(), String> {
     Err("打开目录仅在 Windows 上可用".to_owned())
 }
 
+/// 打开固定的 Windows 设置页（`ms-settings:` URI）。
+///
+/// 只接受 `ms-settings:` 前缀：URI 一律来自本仓库代码里的固定映射（向导的
+/// 「打开蓝牙设置」入口），不做成"打开任意 URI"的通用能力——与
+/// `open_directory` 同款最小权限考虑（WebView 不能借此打开任意目标）。
+/// 复用 `launch_explicit` 已验证的 COM 套间初始化与 80ms 保活链路；
+/// 不解除 foreground lock（设置页场景与"打开目录"同类，2026-09-26 教训：
+/// Alt 按住期间解锁会干扰 explorer）。
+#[cfg(windows)]
+pub fn open_uri(uri: &str) -> Result<(), String> {
+    if !uri.starts_with("ms-settings:") {
+        return Err("只支持打开系统设置页".to_owned());
+    }
+    launch_explicit(uri, None, None, false)
+}
+
+#[cfg(not(windows))]
+pub fn open_uri(_uri: &str) -> Result<(), String> {
+    Err("打开系统设置仅在 Windows 上可用".to_owned())
+}
+
+#[cfg(test)]
+mod open_uri_tests {
+    use super::*;
+
+    #[test]
+    fn open_uri_rejects_non_settings_targets_before_launching() {
+        // 只允许 ms-settings: 前缀（调用方只会传本仓库代码里的固定映射）；
+        // 其余目标在启动前就被拒绝，避免变成"打开任意 URI"的通用能力。
+        assert!(open_uri("https://example.com").is_err());
+        assert!(open_uri("file:///C:/Windows/System32").is_err());
+        assert!(open_uri("").is_err());
+    }
+}
+
 /// 原生文件选择器：选择自定义应用（.exe/.lnk）。
 /// 在短命 STA COM 线程内运行 IFileOpenDialog，避免占用调用方套间。
 #[cfg(windows)]

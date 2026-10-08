@@ -110,6 +110,23 @@ mod imp {
     /// 30 s 足够覆盖 agent 侧的 CONNECT_TIMEOUT(3 s) + 重连周期(1 s)。
     const DEFAULT_AWAIT_HELLO_S: u64 = 30;
 
+    /// 「接管常驻 tap」（`DllPlan::Attach`）的核验窗口：窗口内拿不到**已鉴权**的
+    /// agent 握手，就判定宿主里那份 tap 属于旧世代，改为另起一代注入。
+    ///
+    /// 为什么必须有（2026-10-08 现场实证）：磁盘上存在 `session.token` 只说明
+    /// "以前跑过一代"，**不说明**宿主里那份 tap 用的就是这个令牌——卸载/重装会
+    /// 重新生成令牌，而承载遥控器的宿主进程（WUDFHost）仍映射着上一代的 Gadget，
+    /// 那个 agent 拿的是旧令牌，永远握手不上（`[REJECT] reason=token_mismatch`）。
+    /// 旧实现据此选了 Attach 并静默跳过注入：桥连着、界面显示"已开启"（应用侧只看桥），
+    /// 但一条按键边沿都不过桥（`edges=0`），用户看到的是「全按键支持开着但没用」。
+    /// 8 s ≈ 两个 agent 重连周期（RECONNECT_MS）之和再加余量。
+    const ATTACH_VERIFY_MS: u64 = 8_000;
+
+    /// `[HB]` 心跳的落盘节流：agent 的 hb 很密（实测约 2 条/秒），逐条写会把日志刷爆
+    /// （2026-10-08 实测单机累计 768 MB、约 107 MB/天）。现在只在**状态变化**时或
+    /// 每 `HB_LOG_EVERY` 记一条；协议动作（ownership 续约等）不受影响，仍按每条处理。
+    const HB_LOG_EVERY: Duration = Duration::from_secs(30);
+
     /// targets 下发后等不到 `targets_ack` 时的重发节奏：前 `ACK_RESEND_FAST_N` 次
     /// 每 `ACK_RESEND_FAST_MS` 一次，之后放慢到 `ACK_RESEND_SLOW_MS`。
     ///
@@ -193,6 +210,8 @@ mod imp {
         /// 注册控制台事件处理器。第二参数非零 = 追加到链尾。
         /// 返回非零表示注册成功。
         fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+        /// 删除失败时把文件安排到下次重启删除（卸载清理用；需要提权才能写待删清单）。
+        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -542,6 +561,138 @@ mod imp {
         }
     }
 
+    /// PE 文件头里的 machine 字段（`IMAGE_FILE_MACHINE_*`）。
+    ///
+    /// 纯函数、只吃字节，便于单测——真机取证覆盖不到"x64 助手对 ARM64 宿主"这类组合，
+    /// 而 Issue #206 正是这种组合。
+    /// 读法：`MZ` → `e_lfanew`(0x3C) → `PE\0\0` → FileHeader.Machine。
+    fn pe_machine_from_bytes(bytes: &[u8]) -> Option<u16> {
+        if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+            return None;
+        }
+        let e_lfanew =
+            u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+        let sig_end = e_lfanew.checked_add(6)?;
+        if bytes.len() < sig_end || &bytes[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+            return None;
+        }
+        Some(u16::from_le_bytes([
+            bytes[e_lfanew + 4],
+            bytes[e_lfanew + 5],
+        ]))
+    }
+
+    /// 只读文件头（最多 4 KiB）取 machine：不为一个字段读进整份 20 MB 的 DLL。
+    fn pe_machine_of_file(path: &Path) -> Option<u16> {
+        let mut buf = [0u8; 4096];
+        let mut file = fs::File::open(path).ok()?;
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            match std::io::Read::read(&mut file, &mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => return None,
+            }
+        }
+        pe_machine_from_bytes(&buf[..filled])
+    }
+
+    /// machine 值的可读名（日志与错误文案共用）。
+    fn machine_name(machine: u16) -> &'static str {
+        match machine {
+            0x8664 => "x64",
+            0xAA64 => "arm64",
+            0x014C => "x86",
+            _ => "unknown",
+        }
+    }
+
+    /// **注入前**的架构闸门（Issue #206 的直接教训）。
+    ///
+    /// 必须满足：助手自身架构 == 目标宿主架构 == Gadget 架构。任一不等都在这里拒绝——
+    /// 放过去的话，失败会以 `CreateRemoteThread` 的 `GetLastError` 形式出现，看起来像
+    /// "安全软件拦截注入"，把排查引向错误方向（Issue #206 现场就是这样被归因的）。
+    fn arch_gate(injector: u16, target: u16, gadget: u16) -> Result<(), String> {
+        if injector != target {
+            return Err(format!(
+                "架构不一致：本助手是 {}（machine=0x{injector:04X}），目标宿主是 {}（machine=0x{target:04X}）。\
+                 x64 助手无法向 ARM64 宿主注入，反之亦然；请使用与系统架构匹配的安装包\
+                 （安装包按系统架构携带两份助手与 Gadget，主程序会自行选择）。",
+                machine_name(injector),
+                machine_name(target)
+            ));
+        }
+        if gadget != target {
+            return Err(format!(
+                "Gadget 架构与目标宿主不一致：Gadget 是 {}（machine=0x{gadget:04X}），宿主是 {}（machine=0x{target:04X}）。\
+                 目标进程无法加载其它架构的镜像；请改用与系统架构匹配的安装包。",
+                machine_name(gadget),
+                machine_name(target)
+            ));
+        }
+        Ok(())
+    }
+
+    /// 注入前把三方架构摆进日志，并在不一致时拒绝。
+    ///
+    /// 目标映像路径读不到时**不阻断**（fail-open + 显式告警）：宿主是系统进程，提权后正常
+    /// 都能读到；若某类环境一律读不到就一律拒绝，会把当前可用的 x64 路径一起打断。
+    /// 但拒绝一定发生在"读得到且不一致"的时候——那正是 Issue #206 的场景。
+    fn arch_preflight(pid: u32, gadget: &Path, logger: &Logger) -> Result<(), String> {
+        let target =
+            process_image_path(pid).and_then(|p| pe_machine_of_file(Path::new(&p)).map(|m| (p, m)));
+        let gadget_machine = pe_machine_of_file(gadget);
+        let injector = format!("{} 0x{:04X}", ARCH_NAME, INJECTOR_MACHINE);
+        match (&target, gadget_machine) {
+            (Some((path, target_machine)), Some(gadget_machine)) => {
+                logger.kv(
+                    "[ARCH]",
+                    &[
+                        ("injector", injector.clone()),
+                        (
+                            "target",
+                            format!("{} 0x{target_machine:04X}", machine_name(*target_machine)),
+                        ),
+                        (
+                            "gadget",
+                            format!("{} 0x{gadget_machine:04X}", machine_name(gadget_machine)),
+                        ),
+                        ("image", normalize_display(Path::new(path))),
+                    ],
+                );
+                arch_gate(INJECTOR_MACHINE, *target_machine, gadget_machine)
+            }
+            _ => {
+                logger.kv(
+                    "[ARCH]",
+                    &[
+                        ("injector", injector),
+                        (
+                            "target",
+                            match &target {
+                                Some((_, m)) => format!("{} 0x{m:04X}", machine_name(*m)),
+                                None => "unreadable".to_string(),
+                            },
+                        ),
+                        (
+                            "gadget",
+                            gadget_machine
+                                .map(|m| format!("{} 0x{m:04X}", machine_name(m)))
+                                .unwrap_or_else(|| "unreadable".to_string()),
+                        ),
+                        (
+                            "note",
+                            "架构校验未完成（映像路径或 Gadget 头读不到）：本次按原路径继续，\
+                             若随后失败请先看本行"
+                                .to_string(),
+                        ),
+                    ],
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// 目标进程已加载的模块。**需要提权**（宿主在 session 0）。
     ///
     /// 这是"注入到底成没成 / 之前那一代还在不在"的**唯一可信判据**：
@@ -611,9 +762,23 @@ mod imp {
     struct HostEntry {
         pid: u32,
         enumerator: String,
-        device: String,
-        instance: String,
+        /// **只在卸载清理时用**：对 RC003 设备做一次禁用→启用，放掉还在映射 Gadget 的
+        /// 宿主进程（2026-10-08 方案 B）。存的是**完整设备实例 ID**
+        /// （`<枚举器>\<设备>\<实例>`）——只存最后一段会让设备枚举找不到它（2026-10-08
+        /// 真机复测实证）。**绝不进日志**——它含设备接口路径（VID/PID/REV/实例序号），
+        /// 属 `LOGGING.md` 隐私红线的"HID 路径"。
+        rc003_instance_id: Option<String>,
+        /// 不保留设备名：它同样含设备接口路径，排错不需要它。
         is_rc003: bool,
+    }
+
+    /// RC003 识别判据（纯函数）：BTHLEDevice 枚举器 + HID 服务前缀 + 本型号硬件串。
+    /// 抽出来是为了让**扫描与卸载清理共用同一判据**，避免两处漂移。
+    fn device_is_rc003(enumerator: &str, device: &str) -> bool {
+        let folded = device.to_lowercase();
+        enumerator.eq_ignore_ascii_case("bthledevice")
+            && folded.starts_with(&HID_SERVICE_PREFIX.to_lowercase())
+            && folded.contains(RC003_HARDWARE_TOKEN)
     }
 
     fn reg_subkeys(key: Handle) -> Vec<String> {
@@ -979,20 +1144,21 @@ mod imp {
                                 PidRead::Error(rc) => format!("注册表返回码 {rc}"),
                                 _ => format!("{other:?}"),
                             };
-                            scan.failures
-                                .push(format!("{enumerator} / {} :: {why}", mask_token(&device)));
+                            // 只报枚举器与原因：设备名/接口路径不进日志（隐私红线）。
+                            scan.failures.push(format!("{enumerator} :: {why}"));
                             continue;
                         }
                     };
-                    let folded = device.to_lowercase();
+                    let is_rc003 = device_is_rc003(enumerator.as_str(), device.as_str());
                     scan.entries.push(HostEntry {
                         pid,
                         enumerator: enumerator.clone(),
-                        device: device.clone(),
-                        instance,
-                        is_rc003: enumerator.eq_ignore_ascii_case("bthledevice")
-                            && folded.starts_with(&HID_SERVICE_PREFIX.to_lowercase())
-                            && folded.contains(RC003_HARDWARE_TOKEN),
+                        rc003_instance_id: if is_rc003 {
+                            Some(format!("{enumerator}\\{device}\\{instance}"))
+                        } else {
+                            None
+                        },
+                        is_rc003,
                     });
                 }
                 unsafe { RegCloseKey(device_key) };
@@ -1003,33 +1169,22 @@ mod imp {
         Ok(scan)
     }
 
-    /// 设备实例名里需要脱敏的只有蓝牙地址：紧跟在 `_` 之后的 12 位十六进制。
+    /// 宿主成员行的分类文本（纯函数，自检覆盖）。
     ///
-    /// **只用于设备实例名**。令牌等秘密不能用本函数——它对裸十六进制字符串是
-    /// **空操作**（2026-10-04 现场：`[TOKEN]` 的 value 曾误用它，明文令牌直进
-    /// 诊断日志）。令牌一律走 [`token_fingerprint`]。
-    fn mask_token(text: &str) -> String {
-        let bytes: Vec<char> = text.chars().collect();
-        let mut out = String::new();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            if bytes[i] == '_' && i + 13 <= bytes.len() {
-                let candidate: String = bytes[i + 1..i + 13].iter().collect();
-                let is_hex = candidate.chars().all(|c| c.is_ascii_hexdigit());
-                let boundary_ok = match bytes.get(i + 13) {
-                    None => true,
-                    Some(c) => !c.is_ascii_hexdigit() && *c != '-',
-                };
-                if is_hex && boundary_ok {
-                    out.push_str("_<BT-ADDR>");
-                    i += 13;
-                    continue;
-                }
-            }
-            out.push(bytes[i]);
-            i += 1;
-        }
-        out
+    /// 为什么不再打设备接口路径（2026-10-08 用户要求 + `LOGGING.md` 隐私红线）：原来这一行
+    /// 打的是 `{enumerator}\{device}\{instance}`——地址虽已脱敏，但路径本体、VID/PID/REV 与
+    /// 实例序号仍在，属"不得记录 HID 路径"。排错真正需要的是"这个宿主里有几个成员、哪个
+    /// 是我们的"，用序号 + 分类即可表达。
+    fn member_line(index: usize, enumerator: &str, is_rc003: bool) -> String {
+        format!(
+            "    [{}] index={index} enumerator={enumerator} class={}",
+            if is_rc003 { "RC003" } else { "其它" },
+            if is_rc003 {
+                "rc003_hid_service_match"
+            } else {
+                "other_device"
+            },
+        )
     }
 
     /// `[TOKEN]` 日志字段的**唯一构造点**：令牌只以指纹形式出现。
@@ -1212,9 +1367,23 @@ mod imp {
     ///
     /// **必须整行一次写入**：主程序可能同时在往同一文件追加，逐字段 `write!` 会
     /// 让两边的行互相穿插。写入失败返回 false，由调用方换下一个落点。
+    /// 单个日志文件的体积上限与保留份数：与主程序
+    /// `crates/sayall-windows/src/diagnostic_log.rs` 保持一致
+    /// （10 MB + 保留 5 份）——**两处都改才算改完**（助手与主程序共用同一份日志，
+    /// 见 LOGGING.md「单一日志文件」；两份实现分属不同 workspace，无法直接共享代码）。
+    const SHARED_LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+    const SHARED_LOG_KEEP_ROTATED: usize = 5;
+
     fn append_record(path: &Path, record: &str) -> bool {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
+        }
+        // 超上限先轮转（改名成带时间戳的旧文件）再追加；每次都重新打开，
+        // 因此主程序侧轮转之后，这里不会继续写给已被改名的旧文件。
+        let incoming = record.len() as u64 + 1;
+        let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        if current + incoming > SHARED_LOG_ROTATE_BYTES {
+            rotate_shared_log(path);
         }
         let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
             return false;
@@ -1223,6 +1392,56 @@ mod imp {
         line.push_str(record);
         line.push('\n');
         file.write_all(line.as_bytes()).is_ok()
+    }
+
+    /// 轮转共用日志：`<主名>-<UTC 时间戳>-p<进程号>.log`。时间戳只含 ASCII 字母数字
+    /// （可做文件名，也可按字典序当时间序），随后按份数删除最旧的。
+    fn rotate_shared_log(path: &Path) {
+        let stamp: String = utc_stamp()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect();
+        let stem = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| "sayall-diagnostic".to_string());
+        let rotated = path.with_file_name(format!("{stem}-{stamp}-p{}.log", std::process::id()));
+        if fs::rename(path, &rotated).is_err() {
+            // 主程序已经轮转过（或文件不存在）：不是错误，继续写新文件即可。
+            return;
+        }
+        prune_shared_rotated(path, SHARED_LOG_KEEP_ROTATED);
+    }
+
+    fn prune_shared_rotated(path: &Path, keep: usize) {
+        let Some(dir) = path.parent() else { return };
+        let stem = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let prefix = format!("{stem}-");
+        let mut rotated: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .map(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with(&prefix) && name.ends_with(".log")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        if rotated.len() <= keep {
+            return;
+        }
+        rotated.sort();
+        for old in rotated.iter().take(rotated.len() - keep) {
+            let _ = fs::remove_file(old);
+        }
     }
 
     struct Logger {
@@ -1414,6 +1633,9 @@ mod imp {
         /// （与 --canary-usage 同哲学），产品路径由主程序下行配置联动。
         /// `None` = 不启用（语音键保持 Windows 原生行为）。
         synth: Option<(u16, u16)>,
+        /// 卸载清理：删除运行时目录（本进程需已提权），被占用的文件安排到下次重启删除。
+        /// 由卸载器在提权后拉起；也可以由仍在运行的助手在看到卸载标记时自行执行。
+        uninstall_cleanup: bool,
     }
 
     fn parse_args() -> Result<Args, String> {
@@ -1444,6 +1666,7 @@ mod imp {
             attach_only: false,
             new_generation: false,
             synth: None,
+            uninstall_cleanup: false,
         };
 
         let mut it = std::env::args().skip(1);
@@ -1514,6 +1737,7 @@ mod imp {
                 "--force" => args.force = true,
                 "--require-exclusive-host" => args.require_exclusive_host = true,
                 "--selftest" => args.selftest = true,
+                "--uninstall-cleanup" => args.uninstall_cleanup = true,
                 "--new-token" => args.new_token = true,
                 "--attach-only" => args.attach_only = true,
                 "--new-generation" => args.new_generation = true,
@@ -1626,7 +1850,10 @@ mod imp {
   --port <PORT>         监听端口（默认 47831；自检时可用 0 自动分配）\n\
   --token <TOKEN>       握手令牌（默认读取/创建运行时目录里的 session.token，跨运行稳定）\n\
   --new-token           强制换一个新令牌（**会让常驻 tap 无法接管**，见下）\n\
-  --gadget <PATH>       frida-gadget.dll 路径（默认与可执行文件同目录）\n\
+  --gadget <PATH>       Gadget 路径（默认与可执行文件同目录；文件名随架构：\n\
+                        x64 = frida-gadget.dll，arm64 = frida-gadget-arm64.dll）\n\
+  --uninstall-cleanup   删除运行时目录后退出（需提权；删不掉的文件安排到下次重启删除）。\n\
+                        由卸载器调用；仍在运行的助手见到卸载标记也会自行执行\n\
   --runtime-dir <PATH>  运行时目录（默认 %ProgramData%\\SayAll\\rc003-helper）\n\
   --duration <SEC>      运行多少秒后自动收尾（默认 0 = 一直运行）。\n\
                         到点会打 [TIMEUP] 并发 disarm；**会话存活期间同样生效**\n\
@@ -1718,16 +1945,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         Attach,
     }
 
-    /// 纯决策函数（自检覆盖）。`resident_token_ok` 表示"宿主里的 tap 用的是我们手上这个令牌"，
-    /// 它是**能否接管**的唯一判据；接不上就只剩"另起一代"或"人工清干净"两条路。
+    /// 纯决策函数（自检覆盖）。`token_assumed_reusable` 只表示"令牌文件在助手启动前就已存在"，
+    /// 即**假定**可复用——它证明不了"宿主里的 tap 用的就是手上这个令牌"。那只有**已鉴权握手**
+    /// 能证明（见 ATTACH_VERIFY_MS 的核验与升级注入；2026-10-08 现场教训：把"文件存在"
+    /// 当成"一致"，接管后静默跳过注入，三键与语音键全断，日志还写着"令牌一致"）。
+    /// 假定不成立时就只剩"另起一代"或"人工清干净"两条路。
     fn decide_plan(
         has_resident_tap: bool,
-        token_reusable: bool,
+        token_assumed_reusable: bool,
         attach_only: bool,
         new_generation: bool,
     ) -> Result<DllPlan, String> {
         if has_resident_tap {
-            if token_reusable {
+            if token_assumed_reusable {
                 return Ok(DllPlan::Attach);
             }
             if attach_only {
@@ -1745,6 +1975,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             return Err("--attach-only 要求宿主里已有 tap，但模块枚举没有发现。".to_string());
         }
         Ok(DllPlan::Canonical)
+    }
+
+    /// 接管核验判据（纯函数，自检覆盖）：选了「接管常驻 tap」、窗口内**没有**拿到
+    /// 已鉴权的 agent 握手、且还没升级过 ⇒ 那份 tap 是旧世代，应当另起一代注入。
+    fn attach_verification_expired(
+        plan_is_attach: bool,
+        saw_authenticated: bool,
+        escalated: bool,
+        elapsed_ms: u64,
+        verify_ms: u64,
+    ) -> bool {
+        plan_is_attach && !saw_authenticated && !escalated && elapsed_ms >= verify_ms
     }
 
     /// 绑定回环端口。单独抽出来有两个目的：①让失败文案**可操作**；
@@ -1870,7 +2112,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 加它的理由很直接：2026-09-23 那次故障，用户在**没有提权**的情况下无法预先知道
     /// "第二次运行必然会失败"，只能等提权跑完看报错。
     fn inspect_runtime_readonly(args: &Args, logger: &Logger) {
-        let dll = args.runtime_dir.join("frida-gadget.dll");
+        let dll = args.runtime_dir.join(RUNTIME_GADGET_NAME);
         let exists = dll.exists();
         let digest = if exists {
             fs::read(&dll).ok().map(|b| sha256_hex(&b))
@@ -1993,9 +2235,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let (target_dir, dll) = match plan {
             DllPlan::Generation(_) => {
                 let gd = dir.join(&gen_name);
-                (gd.clone(), gd.join("frida-gadget.dll"))
+                (gd.clone(), gd.join(RUNTIME_GADGET_NAME))
             }
-            _ => (dir.clone(), dir.join("frida-gadget.dll")),
+            _ => (dir.clone(), dir.join(RUNTIME_GADGET_NAME)),
         };
 
         let mut reused = false;
@@ -2071,11 +2313,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     }
                     s
                 })?;
+                // 复制之后**对副本重算摘要**，两个作用（2026-10-07 报障人实测后加）：
+                // ① 堵住"写下去之后、注入之前被换掉"的窗口；
+                // ② 让 [DLL] 的 sha256_verified 在 copied 路径上也有真实含义——此前 copied 路径
+                //    固定写 false，被读成"没校验就用了"（来源其实已在 [VERIFY] 校验过）。
+                verify_copied_gadget(&dll, GADGET_SHA256)?;
+                verified = true;
                 logger.kv(
                     "[PREP]",
                     &[
                         ("dll", normalize_display(&dll)),
                         ("action", "copied".into()),
+                        ("sha256_verified", "true".into()),
                         (
                             "bytes",
                             fs::metadata(&dll).map(|m| m.len()).unwrap_or(0).to_string(),
@@ -2185,6 +2434,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .to_str()
             .ok_or_else(|| "Gadget 路径不是合法 UTF-8".to_string())?;
 
+        // **注入前**的架构闸门：助手 / 宿主 / Gadget 三者必须同架构。放在最前是有意的——
+        // 一旦走到 OpenProcess / CreateRemoteThread，失败就只剩一个 GetLastError，
+        // 会被读成"安全软件拦截注入"（Issue #206 现场就是这样被归因的）。
+        arch_preflight(pid, dll, logger)?;
+
         let mut inj = Injection {
             thread_handle: std::ptr::null_mut(),
             remote_buf: std::ptr::null_mut(),
@@ -2258,7 +2512,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 let err = lasts_error();
                 inj.cleanup();
                 return Err(format!(
-                    "CreateRemoteThread 失败，GetLastError={err}（安全软件拦截注入时常见）"
+                    "CreateRemoteThread 失败，GetLastError={err}。架构一致性已在注入前校验通过\
+                     （见上方 [ARCH] 行）；此处仍失败时，最常见的原因是安全软件拦截注入。"
                 ));
             }
             inj.thread_handle = thread;
@@ -2580,6 +2835,363 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             return true;
         }
         false
+    }
+
+    /// 卸载清理标记（与停用信号同目录，`%LOCALAPPDATA%\SayAll\rc003-uninstall-cleanup`）。
+    ///
+    /// **为什么需要**：运行时目录是提权进程建的，ACL 只给普通用户读+新建、不给删已有文件，
+    /// 所以非提权的卸载器删不掉它（2026-10-07 实测：本机 234 MB / 11 个文件）。而助手本身
+    /// 就是提权进程——卸载器在停用之前写下本标记，助手见到停用信号时就顺手把目录删干净，
+    /// 这条路径**不需要再弹一次 UAC**。路径与安装器侧 `installer-hooks.nsh` 逐字符一致。
+    fn uninstall_cleanup_signal_path() -> PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+            format!("{home}\\AppData\\Local")
+        });
+        PathBuf::from(base)
+            .join("SayAll")
+            .join("rc003-uninstall-cleanup")
+    }
+
+    /// 卸载清理的逐项计数（一条日志说清结果，别让排查再去数文件）。
+    struct CleanupReport {
+        files_deleted: usize,
+        files_pending_reboot: usize,
+        dirs_deleted: usize,
+        failures: Vec<String>,
+    }
+
+    impl CleanupReport {
+        fn is_clean(&self) -> bool {
+            self.failures.is_empty()
+        }
+    }
+
+    /// 把文件安排到"下次重启删除"（`MoveFileEx` DELAY_UNTIL_REBOOT）。
+    ///
+    /// 先查一遍已有清单：同一个路径**不重复登记**（2026-10-08 现场：一天里多次卸载/升级，
+    /// 同一个 dll 在 `PendingFileRenameOperations` 里留了 8 条重复）。写待删清单需要提权；
+    /// 失败就返回 false，由调用方记成 failures。
+    fn schedule_delete_on_reboot(path: &Path, logger: &Logger) -> bool {
+        const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
+        // 判重之后**把结论写进日志**（只写文件名，不写路径）：这条清单在真机上是"每轮都在长"的
+        // 重点怀疑对象，命中与否 + 读到的字节数能直接区分"读取失败"和"匹配失败"。
+        let listing = pending_reboot_blob();
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        if pending_reboot_listing_contains(&listing, path) {
+            logger.line(&format!(
+                "[CLEANUP] 待重启清单已含 {file_name}（listing_bytes={}），跳过重复登记",
+                listing.len()
+            ));
+            return true;
+        }
+        logger.line(&format!(
+            "[CLEANUP] 待重启清单未含 {file_name}（listing_bytes={}），登记到下次重启删除",
+            listing.len()
+        ));
+        let wide = to_wide(path.to_string_lossy().as_ref());
+        unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+    }
+
+    /// 读取 `PendingFileRenameOperations` 的原始内容（多字符串；转成一个字符串只用于包含判断）。
+    /// 读不到返回空串——包含判断于是为 false，照常走 `MoveFileEx`。
+    fn pending_reboot_blob() -> String {
+        let sub = to_wide("SYSTEM\\CurrentControlSet\\Control\\Session Manager");
+        let name = to_wide("PendingFileRenameOperations");
+        let mut key: Handle = std::ptr::null_mut();
+        let rc = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, KEY_READ, &mut key) };
+        if rc != ERROR_SUCCESS {
+            return String::new();
+        }
+        let mut kind = 0u32;
+        let mut len = 0u32;
+        let rc = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                std::ptr::null_mut(),
+                &mut len,
+            )
+        };
+        if rc != ERROR_SUCCESS || len == 0 {
+            unsafe { RegCloseKey(key) };
+            return String::new();
+        }
+        let mut buf = vec![0u8; len as usize];
+        let rc = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                buf.as_mut_ptr(),
+                &mut len,
+            )
+        };
+        unsafe { RegCloseKey(key) };
+        if rc != ERROR_SUCCESS {
+            return String::new();
+        }
+        multi_sz_bytes_to_string(&buf)
+    }
+
+    /// REG_MULTI_SZ 的字节 → 字符串：**整段保留**，嵌入的 `\0` 不截断。
+    ///
+    /// 为什么不能用 `from_wide`：它在第一个 `\0` 处停下，于是清单里只看得见**第一条**。
+    /// 2026-10-08 真机实证的后果——目标不在第一条时判重永远未命中，每轮卸载各多登记一条
+    /// （同一天里同一个 dll 攒到 5 条）。
+    fn multi_sz_bytes_to_string(buf: &[u8]) -> String {
+        let wide: Vec<u16> = buf
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&wide)
+    }
+
+    /// 纯判定（自检覆盖）：待删清单里是否已含这个路径。条目形如 `*1\??\C:\…`，按不区分
+    /// 大小写的包含判断即可——这张清单只作去重用，不解析语义。
+    fn pending_reboot_listing_contains(listing: &str, path: &Path) -> bool {
+        let needle = path.to_string_lossy().to_lowercase();
+        !needle.is_empty() && listing.to_lowercase().contains(&needle)
+    }
+
+    // 进程等待用的常量（kernel32 的 OpenProcess / WaitForSingleObject / CloseHandle
+    // 本文件已声明，复用即可）。
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+
+    /// 清理后是否还需要"放掉宿主再删一次"。
+    ///
+    /// **判据只能是目录还在不在**：`CleanupReport::is_clean()` 只看 `failures`，被宿主锁住的
+    /// 文件会被记成 `files_pending_reboot`（不是失败）→ 报告说"干净"、目录里却还留着 dll。
+    /// 2026-10-08 真机复测就是栽在这里：设备环一次都没跑，两个 dll 仍留在目录里等重启。
+    fn host_release_still_needed(dir: &Path, report: &CleanupReport) -> bool {
+        // 形参 `report` 刻意保留：提醒读者"这里**故意**不看 report"。
+        let _ = report;
+        dir.exists()
+    }
+
+    /// 卸载清理专用：放掉仍在映射 Gadget 的宿主，让运行时目录能当场删净；
+    /// 之后再删就不会被文件锁挡住（2026-10-08 方案 B：不把"断开遥控器"推给用户，也不弹窗）。
+    ///
+    /// **为什么是"结束宿主"而不是"禁用设备"**（请勿回退，2026-10-08 真机逐条实证）：
+    /// gadget 是助手用 Frida **注入**进 UMDF 宿主的，不是驱动加载，于是：
+    /// - `pnputil /restart-device` 成功返回（exit=0）也**不卸载**注入模块——映射仍在，文件删不掉；
+    /// - `pnputil /disable-device` 被系统拒绝：`Cannot disable critical system device`
+    ///   （`SetupDiCallClassInstaller` 同码 CR_NO_SUCH_DEVINST 0xE0000201，与实例 ID / 参数无关）；
+    /// - **结束宿主进程**后，两份 `frida-gadget` 映射随进程消亡，运行时目录**普通删除即成功**
+    ///   （真机：`plain_delete=ok`、`runtime_dir_exists=False`，不需要 takeown / 改 ACL）。
+    ///
+    /// 安全边界（改这里前先读）：
+    /// - **只结束"独占 RC003"的宿主**：宿主同时承载别的 HID 设备（2026-09-25 起产品允许）时不动手，
+    ///   回退到"安排到重启删除"——误杀会让用户别的 BLE 设备一起掉。
+    /// - 只结束**确实持有 gadget 注入**的宿主（防 pid 复用 / 误伤）。
+    /// - 任何一步失败都只返回 false，不 panic、不打断卸载。
+    /// - 只在这轮清理**确有删不掉的文件**时才被调用（调用方保证）。
+    #[cfg(windows)]
+    fn release_injected_host(
+        pid: u32,
+        members: usize,
+        rc003_members: usize,
+        logger: &Logger,
+    ) -> bool {
+        if members != 1 || rc003_members != 1 {
+            logger.kv(
+                "[CLEANUP]",
+                &[
+                    ("host_release", "skipped_shared_host".into()),
+                    ("members", members.to_string()),
+                    ("rc003_members", rc003_members.to_string()),
+                ],
+            );
+            return false;
+        }
+        let taps = match enum_modules(pid) {
+            Ok(modules) => resident_taps(&modules).len(),
+            Err(error) => {
+                logger.line(&format!("[CLEANUP] 无法枚举宿主模块，跳过释放：{error}"));
+                return false;
+            }
+        };
+        if taps == 0 {
+            logger.line("[CLEANUP] 宿主里没有 gadget 注入（可能已自行卸载），跳过释放。");
+            return false;
+        }
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                ("host_release", "terminating".into()),
+                ("gadget_maps", taps.to_string()),
+            ],
+        );
+        if let Err(error) = terminate_process(pid) {
+            logger.line(&format!("[CLEANUP] 结束宿主失败：{error}"));
+            return false;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let released = loop {
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                break true;
+            }
+            let waited = unsafe { WaitForSingleObject(handle, 200) };
+            let _ = unsafe { CloseHandle(handle) };
+            if waited == WAIT_OBJECT_0 {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+        };
+        logger.kv(
+            "[CLEANUP]",
+            &[(
+                "host_release",
+                if released {
+                    "released".into()
+                } else {
+                    "timeout".into()
+                },
+            )],
+        );
+        released
+    }
+
+    #[cfg(not(windows))]
+    fn release_injected_host(
+        _pid: u32,
+        _members: usize,
+        _rc003_members: usize,
+        _logger: &Logger,
+    ) -> bool {
+        false
+    }
+
+    /// 宿主被终结后，它挂载的设备节点可能停在 `Error`（真机实证：遥控器本体 OK、HID 子节点 Error，
+    /// 此时按键不可用）。用系统自带 `pnputil` 修：**移除失效节点 → 扫描硬件改动**让节点重新枚举。
+    /// 真机实证（2026-10-08）：只 `restart-device` 不生效（Error 仍为 1），
+    /// `remove-device` + `scan-devices` 后恢复 0；之后宿主重新拉起且**不再有 gadget 映射**（锁保持释放）。
+    /// 这一步放在删除运行时目录**之后**：删除只需要映射消失，不必等设备恢复。
+    #[cfg(windows)]
+    fn recover_device_nodes(instance_id: &str, logger: &Logger) {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        let removed = std::process::Command::new("pnputil")
+            .args(["/remove-device", instance_id])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        let scanned = std::process::Command::new("pnputil")
+            .arg("/scan-devices")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                (
+                    "device_recover",
+                    if removed && scanned {
+                        "ok".into()
+                    } else {
+                        "partial".into()
+                    },
+                ),
+                ("remove_ok", removed.to_string()),
+                ("scan_ok", scanned.to_string()),
+            ],
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn recover_device_nodes(_instance_id: &str, _logger: &Logger) {}
+
+    /// 删干净运行时目录（递归）。删不掉的文件（典型：宿主仍映射着那一代 Gadget）安排到
+    /// 下次重启删除——这不是错误，只是要等设备断开或重启才真的消失。目录空了再把父目录
+    /// `%PROGRAMDATA%\SayAll` 一并收掉：留个空壳同样算没清干净。
+    fn cleanup_runtime_dir(dir: &Path, logger: &Logger) -> CleanupReport {
+        let mut report = CleanupReport {
+            files_deleted: 0,
+            files_pending_reboot: 0,
+            dirs_deleted: 0,
+            failures: Vec::new(),
+        };
+        cleanup_dir_recursive(dir, &mut report, logger);
+        // 目录本身也要收掉：只清空内容不算"删干净"（卸载后不留空壳）。
+        if fs::remove_dir(dir).is_ok() {
+            report.dirs_deleted += 1;
+        }
+        if let Some(parent) = dir.parent() {
+            let empty = parent
+                .read_dir()
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if empty && fs::remove_dir(parent).is_ok() {
+                report.dirs_deleted += 1;
+            }
+        }
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                ("dir", normalize_display(dir)),
+                ("files_deleted", report.files_deleted.to_string()),
+                (
+                    "files_pending_reboot",
+                    report.files_pending_reboot.to_string(),
+                ),
+                ("dirs_deleted", report.dirs_deleted.to_string()),
+                (
+                    "failures",
+                    if report.failures.is_empty() {
+                        "-".to_string()
+                    } else {
+                        report.failures.join("; ")
+                    },
+                ),
+            ],
+        );
+        report
+    }
+
+    fn cleanup_dir_recursive(dir: &Path, report: &mut CleanupReport, logger: &Logger) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                // 只记最后一段目录名：路径属个人环境，日志里不留。
+                report.failures.push(format!(
+                    "read_dir {}: {error}",
+                    dir.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                cleanup_dir_recursive(&path, report, logger);
+                if fs::remove_dir(&path).is_ok() {
+                    report.dirs_deleted += 1;
+                }
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => report.files_deleted += 1,
+                Err(_) => {
+                    if schedule_delete_on_reboot(&path, logger) {
+                        report.files_pending_reboot += 1;
+                    } else {
+                        report.failures.push(format!(
+                            "delete {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// 兜底：在 `C:\Users\*\AppData\Local\SayAll\rc003-bridge.ini` 里找**最近修改**的一份。
@@ -3073,6 +3685,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     fn app_bridge_worker(
         path: PathBuf,
+        runtime_dir: PathBuf,
         rx: mpsc::Receiver<BridgeOutbound>,
         stop: Arc<AtomicBool>,
         stats: Arc<BridgeStats>,
@@ -3102,6 +3715,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             //    只在 --follow-app 下生效：手动调试运行不该被残留信号误杀。
             if follow_app && take_stop_signal(&app_stop_signal_path()) {
                 logger.line("[STOP-SIGNAL] 主程序请求停用，助手退出");
+                // 卸载场景：卸载器在停用之前写下清理标记。趁本进程还活着（而且本来就是提权的）
+                // 把运行时目录删干净——这样"功能开着的时候卸载"不需要再弹一次 UAC。
+                if take_stop_signal(&uninstall_cleanup_signal_path()) {
+                    let report = cleanup_runtime_dir(&runtime_dir, &logger);
+                    logger.line(&format!(
+                        "[CLEANUP] 卸载清理（助手自清）：删除 {} 个文件 / {} 个目录，待重启删除 {} 个，失败 {} 项",
+                        report.files_deleted,
+                        report.dirs_deleted,
+                        report.files_pending_reboot,
+                        report.failures.len()
+                    ));
+                }
                 std::process::exit(0);
             }
 
@@ -3322,6 +3947,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     fn spawn_app_bridge(
         path: Option<PathBuf>,
+        runtime_dir: PathBuf,
         logger: &Logger,
         follow_app: bool,
     ) -> Option<AppBridge> {
@@ -3353,6 +3979,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .spawn(move || {
                 app_bridge_worker(
                     path,
+                    runtime_dir,
                     rx,
                     worker_stop,
                     worker_stats,
@@ -3543,6 +4170,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 接管后心跳一切正常、`edges` 却永远不会出现——最容易被误判成"注入没成功"。
         config_sent: bool,
         target_ack: Option<BridgeCaptureTargets>,
+        /// 上一次把心跳写进日志的时刻，以及当时的状态三元组（lease_ok / handshake /
+        /// disarmed）。心跳降噪（2026-10-08）：agent 的 hb 实测约 2 条/秒，逐条落盘会
+        /// 把日志刷爆；现在只在状态变化或每 `HB_LOG_EVERY` 记一条，
+        /// ownership 续约等协议动作不受影响。
+        last_hb_log: Option<(Instant, (bool, bool, bool))>,
     }
 
     fn now_ms() -> u128 {
@@ -3650,22 +4282,35 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if !session.authenticated {
                     return false;
                 }
-                let stat = extract_substring(line, "\"stat\":").unwrap_or_default();
-                logger.kv(
-                    "[HB]",
-                    &[
-                        ("up", format!("{}s", extract_num(line, "up").unwrap_or(0))),
-                        ("lease_ok", extract_bool(line, "lease_ok").to_string()),
-                        ("handshake", extract_bool(line, "handshake").to_string()),
-                        ("disarmed", extract_bool(line, "disarmed").to_string()),
-                        (
-                            "renew_age_ms",
-                            extract_num(line, "since_renew_ms").unwrap_or(0).to_string(),
-                        ),
-                        ("stat", stat),
-                    ],
-                );
-                if extract_bool(line, "lease_ok") {
+                let lease_ok = extract_bool(line, "lease_ok");
+                let handshake = extract_bool(line, "handshake");
+                let disarmed = extract_bool(line, "disarmed");
+                // 心跳降噪：状态变化立即记，否则每 HB_LOG_EVERY 记一条（agent 的
+                // hb ≈2 条/秒；逐条落盘是 2026-10-08 日志膨胀的主因）。
+                let state = (lease_ok, handshake, disarmed);
+                let due = match session.last_hb_log {
+                    Some((at, previous)) => previous != state || at.elapsed() >= HB_LOG_EVERY,
+                    None => true,
+                };
+                if due {
+                    session.last_hb_log = Some((Instant::now(), state));
+                    let stat = extract_substring(line, "\"stat\":").unwrap_or_default();
+                    logger.kv(
+                        "[HB]",
+                        &[
+                            ("up", format!("{}s", extract_num(line, "up").unwrap_or(0))),
+                            ("lease_ok", lease_ok.to_string()),
+                            ("handshake", handshake.to_string()),
+                            ("disarmed", disarmed.to_string()),
+                            (
+                                "renew_age_ms",
+                                extract_num(line, "since_renew_ms").unwrap_or(0).to_string(),
+                            ),
+                            ("stat", stat),
+                        ],
+                    );
+                }
+                if lease_ok {
                     if let (Some(bridge), Some(ack)) = (bridge, session.target_ack.clone()) {
                         bridge.push_ownership(ack);
                     }
@@ -3905,7 +4550,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // "日志停在 write_failed 就不再增长"那类事故的形状。
         // 放运行时目录里：提权进程可写，且与令牌/Gadget 同处一个地方。
         // 只对 --follow-app 生效，不改变手动运行"必须显式 --log"的既有约定。
-        if args.follow_app && args.log.is_none() {
+        if args.follow_app && args.log.is_none() && !args.uninstall_cleanup {
+            // 注意 `!args.uninstall_cleanup`：卸载清理这一趟**只能删，不能造**——
+            // 这个分支会 create_dir_all 运行时目录并写 helper-task.log，
+            // 放进清理路径里就等于"清完立刻又建回来"（2026-10-07 卸载清理实现时补的护栏）。
             let _ = std::fs::create_dir_all(&args.runtime_dir);
             args.log = Some(args.runtime_dir.join("helper-task.log"));
         }
@@ -3980,6 +4628,70 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("agent_sha256", agent_sha256_hex()),
             ],
         );
+
+        if args.uninstall_cleanup {
+            // 卸载清理：只做一件事——把运行时目录删干净。由卸载器在提权后拉起；
+            // 仍在运行的助手见到卸载标记时也会自己走这条路径（见 app_bridge_worker）。
+            if !is_elevated() {
+                logger.line("[STOP] --uninstall-cleanup 需要管理员权限（把删不掉的文件安排到重启删除需要提权）。");
+                std::process::exit(2);
+            }
+            if !args.runtime_dir.exists() {
+                logger.kv(
+                    "[CLEANUP]",
+                    &[
+                        ("dir", normalize_display(&args.runtime_dir)),
+                        ("result", "nothing_to_do".into()),
+                    ],
+                );
+                std::process::exit(0);
+            }
+            let mut report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+            // 判据必须是**目录还在不在**，不能是 `report.is_clean()`：`is_clean` 只看 failures，
+            // 被宿主锁住的文件会被记成 `files_pending_reboot`（不是失败），旧判据因此直接跳过
+            // 设备环。2026-10-08 真机复测实证：那次卸载里设备环一次都没跑，两个 dll 仍留在
+            // 目录里等重启（日志 `files_pending_reboot=2 failures=-` 紧跟着
+            // 「已清理运行时目录（删除 0 个目录 / 0 个文件）」）。
+            if host_release_still_needed(&args.runtime_dir, &report) {
+                // 2026-10-08 方案 B（用户要求：不把"断开遥控器"推给用户，也不弹窗）：
+                // 宿主进程映射着 Gadget 时文件删不掉——由提权助手结束**持有注入且独占 RC003**
+                // 的宿主，把映射随进程放掉，再重试删除；共享宿主或任一失败都自动回退到
+                // 「安排到重启删除」（仍然不弹窗）。
+                if let Ok(scan) = enum_hosts() {
+                    if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
+                        let pid = entry.pid;
+                        let members = scan.entries.iter().filter(|item| item.pid == pid).count();
+                        let rc003_members = scan
+                            .entries
+                            .iter()
+                            .filter(|item| item.pid == pid && item.is_rc003)
+                            .count();
+                        if release_injected_host(pid, members, rc003_members, &logger) {
+                            report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+                            // 删除只需要映射消失；设备节点的恢复放在删除之后做（要跑 pnputil，慢一拍）。
+                            if let Some(instance) = entry.rc003_instance_id.clone() {
+                                recover_device_nodes(&instance, &logger);
+                            }
+                        }
+                    }
+                }
+            }
+            if report.is_clean() {
+                logger.line(&format!(
+                    "[CLEANUP] 已清理运行时目录（删除 {} 个目录 / {} 个文件）",
+                    report.dirs_deleted, report.files_deleted
+                ));
+                std::process::exit(0);
+            }
+            logger.line(&format!(
+                "[CLEANUP] 部分文件未能在本次删除：待重启删除 {} 个，失败 {} 项（{}）",
+                report.files_pending_reboot,
+                report.failures.len(),
+                report.failures.join("; ")
+            ));
+            // 待重启删除也算"已安排"（退出码 0）；只有真的失败才非零。
+            std::process::exit(if report.failures.is_empty() { 0 } else { 1 });
+        }
 
         if args.selftest {
             let ok = selftest(&logger, console_state);
@@ -4098,14 +4810,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ),
                 ],
             );
-            for m in &members {
-                logger.line(&format!(
-                    "    [{}] {}\\{}\\{}",
-                    if m.is_rc003 { "RC003" } else { "其它" },
-                    m.enumerator,
-                    mask_token(&m.device),
-                    mask_token(&m.instance)
-                ));
+            for (index, m) in members.iter().enumerate() {
+                logger.line(&member_line(index + 1, &m.enumerator, m.is_rc003));
             }
             // 共享宿主**不再直接拒绝**（2026-09-25 产品决策：用户需要长期同时
             // 连接另一个 BLE 键鼠设备）。原来的独占前提只是为了兜住"改写别的
@@ -4142,8 +4848,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Some(p) => p,
             None => {
                 logger.line(
-                    "[STOP] 找不到 frida-gadget.dll。请用 --gadget 指定，或先运行 \
-                     vendor/fetch_frida_gadget.py 获取（版本与 SHA-256 见 vendor/frida-gadget.lock.json）。",
+                    &format!(
+                        "[STOP] 找不到本架构的 Gadget（{GADGET_FILE_NAME}）。请用 --gadget 指定，或先运行 \
+                         vendor/fetch_frida_gadget.py 获取（版本与 SHA-256 见 vendor/frida-gadget.lock.json；\
+                         锁定文件按架构各登记一条，本助手是 {ARCH_NAME}）。"
+                    ),
                 );
                 std::process::exit(4);
             }
@@ -4322,7 +5031,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 刻意放在端口绑定之前：它只决定"边沿能不能送到主程序"，与"能不能捕获、
         // 能不能清键"完全解耦。主程序没运行时它会安静地每 2 秒重试（日志折叠成
         // 前 3 次 + 每 30 次一条），**不得**因此影响捕获链路。
-        let app_bridge = match spawn_app_bridge(args.app_bridge.clone(), &logger, args.follow_app) {
+        let app_bridge = match spawn_app_bridge(
+            args.app_bridge.clone(),
+            args.runtime_dir.clone(),
+            &logger,
+            args.follow_app,
+        ) {
             Some(bridge) => {
                 logger.kv(
                     "[APP-BRIDGE]",
@@ -4389,7 +5103,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     "[ATTACH]",
                     &[
                         ("action", "skip_injection".into()),
-                        ("reason", "宿主里已有我们那一代 tap（令牌一致）".into()),
+                        (
+                            "reason",
+                            "宿主里已有我们那一代 tap（按可复用令牌接管；一致性由握手核验）".into(),
+                        ),
                         ("path", normalize_display(&prepared.dll)),
                         (
                             "note",
@@ -4475,7 +5192,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
         logger.line("未列入 report_usages 的按键保持 Windows 原生行为；语音键不参与本链路。");
         logger.line(&format!(
-            "每 2 秒会打印一次 [HB] 心跳；Ctrl+C 或直接关掉本窗口结束\
+            "心跳（[HB]）只在状态变化或每 30 秒记一条（避免把日志刷爆）；Ctrl+C 或直接关掉本窗口结束\
              （会先给 agent 发 disarm；即使来不及，agent 也会在 {LEASE_MS} ms 租约到期后自行停止清键）。\
              {}",
             if args.duration > 0 {
@@ -4507,17 +5224,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             authenticated: false,
             config_sent: false,
             target_ack: None,
+            last_hb_log: None,
         };
         let mut last_hb_warn = Instant::now();
         // 是否曾经接到过**已鉴权**的 agent。注意不能用 `session.authenticated`：
         // 连接可以断掉重来，那个字段会被重置；而"这辈子到底有没有连上过"才是判据。
         let mut saw_authenticated = false;
-        let hello_deadline = if args.await_hello > 0 {
+        let mut hello_deadline = if args.await_hello > 0 {
             Some(started + Duration::from_secs(args.await_hello))
         } else {
             None
         };
         let mut no_hello = false;
+        // 接管核验（见 ATTACH_VERIFY_MS）：Attach 只说明"宿主里有一份我们的 Gadget"，
+        // 不说明"它握的令牌与手上这份一致"——窗口内等不到已鉴权握手就另起一代注入。
+        let attach_plan = matches!(plan, DllPlan::Attach);
+        let mut escalated_attach = false;
 
         loop {
             if stop_requested(&stop) {
@@ -4550,6 +5272,56 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ],
                     );
                     break;
+                }
+            }
+            if attach_verification_expired(
+                attach_plan,
+                saw_authenticated,
+                escalated_attach,
+                (Instant::now() - started).as_millis() as u64,
+                ATTACH_VERIFY_MS,
+            ) {
+                escalated_attach = true;
+                logger.kv(
+                    "[ATTACH]",
+                    &[
+                        ("verify", "failed".into()),
+                        ("reason", "no_authenticated_agent".into()),
+                        ("action", "inject_new_generation".into()),
+                        (
+                            "note",
+                            "常驻 tap 握的是我们接不上的旧令牌（旧世代）；按自愈规则另起一代注入"
+                                .into(),
+                        ),
+                    ],
+                );
+                let generation_plan = DllPlan::Generation(String::new());
+                match prepare_runtime(&args, &gadget_src, &logger, &generation_plan) {
+                    Ok(prepared) => {
+                        reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
+                        let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
+                        match inject_gadget(target_pid, &prepared.dll, &logger) {
+                            Ok(injected) => {
+                                logger.kv(
+                                    "[DLL]",
+                                    &dll_report_fields(&generation_plan, &prepared),
+                                );
+                                injection = Some(injected);
+                                // 新世代的 agent 也要一个完整的握手窗口。
+                                hello_deadline = if args.await_hello > 0 {
+                                    Some(Instant::now() + Duration::from_secs(args.await_hello))
+                                } else {
+                                    None
+                                };
+                            }
+                            Err(error) => logger.line(&format!(
+                                "[WARN] 另起一代注入失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                            )),
+                        }
+                    }
+                    Err(error) => logger.line(&format!(
+                        "[WARN] 另起一代准备运行时目录失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                    )),
                 }
             }
             if !saw_authenticated {
@@ -4585,6 +5357,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         authenticated: false,
                         config_sent: false,
                         target_ack: None,
+                        last_hb_log: None,
                     };
                     if let Ok(mut guard) = shared.lock() {
                         *guard = Some(stream.try_clone().expect("clone stream"));
@@ -5296,20 +6069,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             );
         }
 
-        // 2) mask_token：只脱敏紧跟在 `_` 之后的 12 位十六进制
-        //    注意：设备实例名里的厂商段是大写（`PID&32b8`），脱敏后必须原样保留，
-        //    断言须按实际大小写写，否则会误报（此前的 FAIL 就是这个测试自身的 bug）。
-        let device =
-            "{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_A1B2C3D4E5F6";
-        let masked = mask_token(device);
+        // 2) 宿主成员行：只报序号 + 枚举器 + 分类，不带设备接口路径
+        //    （LOGGING.md 隐私红线：不得记录 HID 路径。2026-10-08 现场发现该行含
+        //    `BTHLEDevice\{…}_Dev_VID&…\…`——地址已遮，但路径本体与实例序号仍在）
+        let line = member_line(1, "BTHLEDevice", true);
+        let other = member_line(2, "USB", false);
         check(
-            "mask_token 只打掉蓝牙地址",
-            masked == "{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&012717_PID&32b8_REV&00a4_<BT-ADDR>"
-                && masked.ends_with("_<BT-ADDR>")
-                && masked.contains("PID&32b8")
-                && masked.contains("00805f9b34fb")
-                && !masked.contains("A1B2C3D4E5F6"),
-            masked.clone(),
+            "宿主成员行不含设备接口路径",
+            line.contains("index=1")
+                && line.contains("enumerator=BTHLEDevice")
+                && line.contains("class=rc003_hid_service_match")
+                && other.contains("class=other_device")
+                && !line.contains('\\')
+                && !line.contains("Dev_VID"),
+            format!("{line} / {other}"),
         );
 
         // 2b) 令牌日志脱敏（2026-10-04 现场回归）：`[TOKEN]` 只允许写指纹。
@@ -5433,6 +6206,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             attach_only: false,
             new_generation: false,
             synth: None,
+            uninstall_cleanup: false,
         };
         let cfg = serde_like_config(&args);
         check(
@@ -5446,14 +6220,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         // 6) 与锁定文件的一致性（编译期内联，确定性断言；不依赖运行时 CWD）
         check(
-            "Gadget 锁定文件与 GADGET_SHA256 / GADGET_VERSION 一致",
+            "Gadget 锁定文件与 GADGET_SHA256 / GADGET_VERSION 一致（本架构）",
             GADGET_LOCK_JSON.contains(GADGET_SHA256)
                 && GADGET_LOCK_JSON.contains(GADGET_VERSION)
-                && GADGET_LOCK_JSON.contains("windows-x86_64"),
+                && GADGET_LOCK_JSON.contains(GADGET_LOCK_ARCH_TOKEN),
             format!(
                 "常量 sha256={GADGET_SHA256} version={GADGET_VERSION}；锁定文件 {} 字节",
                 GADGET_LOCK_JSON.len()
             ),
+        );
+
+        // 6b) 双架构登记必须同时存在：只留一条时，另一架构的助手会拿着错值去校验，
+        //     表现为"Gadget SHA-256 不符"，而根因其实是登记缺失。
+        check(
+            "Gadget 锁定文件同时登记 x86_64 与 arm64 两份（按架构各一条）",
+            GADGET_LOCK_JSON.contains("windows-x86_64")
+                && GADGET_LOCK_JSON.contains("windows-arm64")
+                && GADGET_LOCK_JSON.contains("frida-gadget-arm64.dll"),
+            format!("本架构 token={GADGET_LOCK_ARCH_TOKEN}"),
         );
 
         // 7) HostPid 解码的宽度契约（2026-09-23 真机踩到的根因，回归测试）
@@ -5606,6 +6390,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         authenticated: false,
                         config_sent: false,
                         target_ack: None,
+                        last_hb_log: None,
                     };
                     let quiet = Logger::new(None);
                     let stop = Arc::new(AtomicBool::new(false));
@@ -5802,6 +6587,34 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             check(&format!("放置策略：{label}"), ok, detail);
         }
 
+        // 14b) 接管核验：Attach 等不到已鉴权握手 ⇒ 另起一代（2026-10-08 现场：卸载残留的
+        // 旧世代 tap 让"接管"永远接不上，三键与语音键全断，且界面显示正常）
+        let attach_verify_cases: [(bool, bool, bool, u64, bool); 6] = [
+            (true, false, false, ATTACH_VERIFY_MS, true),
+            (true, false, false, 60_000, true),
+            (true, true, false, 60_000, false),
+            (true, false, false, ATTACH_VERIFY_MS - 1, false),
+            (true, false, true, 60_000, false),
+            (false, false, false, 60_000, false),
+        ];
+        let attach_ok =
+            attach_verify_cases
+                .iter()
+                .all(|(plan_is_attach, saw, escalated, elapsed, want)| {
+                    attach_verification_expired(
+                        *plan_is_attach,
+                        *saw,
+                        *escalated,
+                        *elapsed,
+                        ATTACH_VERIFY_MS,
+                    ) == *want
+                });
+        check(
+            "接管核验：窗口内无鉴权握手即另起一代（旧世代 tap 自愈）",
+            attach_ok,
+            format!("{} 例", attach_verify_cases.len()),
+        );
+
         // 15) 复用/覆盖判定：决定"会不会去撞那个被宿主锁住的文件"的就是这一行
         let dll_cases: [(bool, bool, DllAction); 3] = [
             (true, true, DllAction::Reuse),
@@ -5841,10 +6654,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let quiet = Logger::new(None);
         let token_detail = |t1: &str, from1: bool, t2: &str, from2: bool, t3: Option<&str>| {
             format!(
-                "1st(from_file={from1})={} 2nd(from_file={from2})={} new={} 文件已更新={}",
-                mask_token(t1),
-                mask_token(t2),
-                t3.map(mask_token).unwrap_or_else(|| "-".into()),
+                "1st(from_file={from1}) fp={} 2nd(from_file={from2}) fp={} new_fp={} 文件已更新={}",
+                token_fingerprint(t1),
+                token_fingerprint(t2),
+                t3.map(token_fingerprint).unwrap_or_else(|| "-".into()),
                 t3.map(|t| fs::read_to_string(tmp.join(TOKEN_FILE))
                     .map(|s| s.trim() == t)
                     .unwrap_or(false))
@@ -6235,6 +7048,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 authenticated: false,
                                 config_sent: false,
                                 target_ack: None,
+                                last_hb_log: None,
                             };
                             let quiet = Logger::new(None);
                             let stop = Arc::new(AtomicBool::new(false));
@@ -6337,6 +7151,39 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("first={first} second={second}"),
         );
 
+        // 卸载清理（2026-10-07）：标记路径必须与安装器侧逐字符一致，清理必须真的删掉一整棵目录树。
+        // 路径错一个字符 → 助手看不见标记 → 卸载器退回"提权清理"（多弹一次 UAC）；因此钉字符串。
+        check(
+            "卸载清理标记路径与安装器侧约定一致",
+            uninstall_cleanup_signal_path()
+                .ends_with(std::path::Path::new("SayAll").join("rc003-uninstall-cleanup")),
+            format!("{}", uninstall_cleanup_signal_path().display()),
+        );
+        let cleanup_root = std::env::temp_dir().join(format!(
+            "rc003-helper-cleanup-selftest-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&cleanup_root);
+        let nested = cleanup_root.join("gen-abc");
+        let _ = fs::create_dir_all(&nested);
+        let _ = fs::write(cleanup_root.join("session.token"), b"x");
+        let _ = fs::write(nested.join("frida-gadget.dll"), b"x");
+        let report = cleanup_runtime_dir(&cleanup_root, logger);
+        check(
+            "卸载清理：递归删除整个运行时目录（含世代子目录）",
+            report.files_deleted == 2
+                && report.files_pending_reboot == 0
+                && report.failures.is_empty()
+                && !cleanup_root.exists(),
+            format!(
+                "files_deleted={} dirs_deleted={} pending_reboot={} failures={}",
+                report.files_deleted,
+                report.dirs_deleted,
+                report.files_pending_reboot,
+                report.failures.len()
+            ),
+        );
+
         // 控制台引导（2026-10-04）：stdout/stderr 必须可写。
         // GUI 子系统 + 计划任务拉起时控制台状态是 `nul`（无窗口、输出进 NUL
         // 设备）；手动运行是 `attached`（父控制台）。引导失效（句柄无效）时
@@ -6379,32 +7226,46 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     /// 默认 Gadget 位置：按顺序试若干候选，**并把选中的路径交给调用方记录**。
     /// 不打印路径的话，"找不到 / 找到的是另一个" 都会变成需要反查的谜题。
+    ///
+    /// 候选名按**本助手的架构**取（`GADGET_FILE_NAME`）：arm64 助手只看 arm64 那一份，
+    /// 避免在同一台机器上误取到另一架构的 Gadget（Issue #206 的根因之一）。
     fn default_gadget_path() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
         let dir = exe.parent()?;
         let mut candidates = vec![
-            dir.join("frida-gadget.dll"),
-            dir.join("vendor").join("frida-gadget.dll"),
-            // 开发布局：target/release/rc003-helper.exe → helper/vendor/frida-gadget.dll
+            dir.join(GADGET_FILE_NAME),
+            dir.join("vendor").join(GADGET_FILE_NAME),
+            // 开发布局：两种 target 目录深度都要覆盖
+            //   target/release/sayall-helper.exe            → helper/vendor/
+            //   target/aarch64-pc-windows-msvc/release/...  → helper/vendor/
             dir.join("..")
                 .join("..")
                 .join("vendor")
-                .join("frida-gadget.dll"),
+                .join(GADGET_FILE_NAME),
+            dir.join("..")
+                .join("..")
+                .join("..")
+                .join("vendor")
+                .join(GADGET_FILE_NAME),
         ];
         // 以当前工作目录为基准（从 helper/ 或仓库根直接调用 exe 时）
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join("vendor").join("frida-gadget.dll"));
-            candidates.push(cwd.join("frida-gadget.dll"));
+            candidates.push(cwd.join("vendor").join(GADGET_FILE_NAME));
+            candidates.push(cwd.join(GADGET_FILE_NAME));
         }
         candidates.into_iter().find(|p| p.exists())
     }
 
-    /// 校验 Gadget 的 SHA-256。锁定值来自 `vendor/frida-gadget.lock.json`，
+    /// 校验 Gadget 的 SHA-256 与**架构**。锁定值来自 `vendor/frida-gadget.lock.json`，
     /// 这里是编译期常量——改版本必须同时改锁定文件与本常量（见 ATTRIBUTION.md 登记）。
+    ///
+    /// 架构单列一项检查与一行日志：SHA 已经隐含锁定架构，但把 machine 打进日志才能一眼
+    /// 看出"手上这份是哪个架构"——Issue #206 的排查正是卡在缺这一行证据上。
     fn verify_gadget(path: &Path, logger: &Logger) -> Result<(), String> {
         let bytes =
             fs::read(path).map_err(|e| format!("读取 Gadget 失败 {}: {e}", path.display()))?;
         let digest = sha256_hex(&bytes);
+        let machine = pe_machine_from_bytes(&bytes);
         logger.kv(
             "[VERIFY]",
             &[
@@ -6412,12 +7273,48 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ("size", bytes.len().to_string()),
                 ("sha256", digest.clone()),
                 ("expected", GADGET_SHA256.to_string()),
+                (
+                    "machine",
+                    machine
+                        .map(|m| format!("{} 0x{m:04X}", machine_name(m)))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ),
+                (
+                    "arch_expected",
+                    format!("{} 0x{:04X}", ARCH_NAME, INJECTOR_MACHINE),
+                ),
             ],
         );
+        if let Some(m) = machine {
+            if m != INJECTOR_MACHINE {
+                return Err(format!(
+                    "Gadget 架构不符：本助手是 {}（machine=0x{:04X}），Gadget 是 {}（machine=0x{m:04X}）。\
+                     请改用与系统架构匹配的安装包，或用 --gadget 指向本架构那一份。",
+                    ARCH_NAME,
+                    INJECTOR_MACHINE,
+                    machine_name(m)
+                ));
+            }
+        }
         if digest != GADGET_SHA256 {
             return Err(format!(
                 "Gadget SHA-256 不符：期望 {}，实际 {digest}。请重新运行 vendor/fetch_frida_gadget.py。",
                 GADGET_SHA256
+            ));
+        }
+        Ok(())
+    }
+
+    /// 复制之后对副本重算摘要（`expected` 作参数是为了让两个分支都能被单测直接覆盖）。
+    /// 摘要不符=硬失败：运行时目录里的那份马上要被注入，不能"记一条日志接着用"。
+    fn verify_copied_gadget(dll: &Path, expected: &str) -> Result<(), String> {
+        let digest = sha256_hex(
+            &fs::read(dll).map_err(|e| format!("复制后读回 Gadget 失败 {}: {e}", dll.display()))?,
+        );
+        if digest != expected {
+            return Err(format!(
+                "复制后的 Gadget 摘要不符：期望 {expected}，实际 {digest}（运行时目录 {}）",
+                dll.display()
             ));
         }
         Ok(())
@@ -6507,9 +7404,41 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         h.iter().map(|v| format!("{v:08x}")).collect()
     }
 
-    /// Gadget 的固定版本与 SHA-256（来自 vendor/frida-gadget.lock.json，2026-09-23 校验）。
+    /// Gadget 的固定版本与 SHA-256（来自 vendor/frida-gadget.lock.json，2026-10-07 起**按架构各一条**）。
+    ///
+    /// 为什么分两份：宿主（承载遥控器的 `WUDFHost.exe`）在 ARM64 系统上是原生 ARM64 进程，
+    /// 而 ARM64 进程不能加载 x64 镜像；因此"助手架构 == 宿主架构 == Gadget 架构"是硬前提，
+    /// 每个助手只认自己那一份（Issue #206 现场：x64 助手对 ARM64 宿主，注入必然失败）。
+    #[cfg(target_arch = "x86_64")]
     const GADGET_SHA256: &str = "350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687";
-    /// Gadget 的固定版本号（与锁定文件 entries[0].version 必须一致）。
+    #[cfg(target_arch = "aarch64")]
+    const GADGET_SHA256: &str = "323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff";
+    /// 锁定文件里本架构条目的 `component` 后缀（自检第 6 项拿它做确定性断言）。
+    #[cfg(target_arch = "x86_64")]
+    const GADGET_LOCK_ARCH_TOKEN: &str = "windows-x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const GADGET_LOCK_ARCH_TOKEN: &str = "windows-arm64";
+    /// 与助手同目录（及 vendor/、开发布局）里**本架构那一份** Gadget 的文件名。
+    /// x64 保持历史名不变；arm64 加后缀，两者可以在同一目录共存。
+    #[cfg(target_arch = "x86_64")]
+    const GADGET_FILE_NAME: &str = "frida-gadget.dll";
+    #[cfg(target_arch = "aarch64")]
+    const GADGET_FILE_NAME: &str = "frida-gadget-arm64.dll";
+    /// 注入进宿主后的**运行时**文件名。两种架构都用这个名字：同一台机器只会用到其中一种，
+    /// 而世代目录名（`frida-gadget.<hash>.dll`）、常驻 tap 识别（`is_gadget_module`）与
+    /// 既有验收脚本都按这个名字工作，改它会牵动整条接管/清键链路。
+    const RUNTIME_GADGET_NAME: &str = "frida-gadget.dll";
+    /// 本助手自身的 PE machine，用于注入前的架构比对（见 `arch_gate`）。x64 / ARM64。
+    #[cfg(target_arch = "x86_64")]
+    const INJECTOR_MACHINE: u16 = 0x8664;
+    #[cfg(target_arch = "aarch64")]
+    const INJECTOR_MACHINE: u16 = 0xAA64;
+    /// 本助手架构的短名，只用于日志与错误文案。
+    #[cfg(target_arch = "x86_64")]
+    const ARCH_NAME: &str = "x64";
+    #[cfg(target_arch = "aarch64")]
+    const ARCH_NAME: &str = "arm64";
+    /// Gadget 的固定版本号（与锁定文件 entries[*].version 必须一致）。
     const GADGET_VERSION: &str = "17.18.0";
     /// agent 脚本随二进制内嵌，保证"运行的就是校验过的那一份"，不受运行时目录被改动影响。
     /// （写入运行时目录是为了让 Gadget 能按相对路径加载它；内容以本常量为准。）
@@ -6586,6 +7515,144 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(text.contains("fp="), "{text}");
             assert!(!text.contains(SAMPLE), "日志不得含明文令牌: {text}");
             let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// 共用日志轮转（2026-10-08 用户明确要求：**单个文件不得超过 10 MB，超过即生成
+    /// 新的日志文件**）。这里验证轮转改名、内容不丢、份数修剪与上限常量。
+    #[cfg(test)]
+    mod log_rotation_tests {
+        use super::*;
+
+        fn scratch(tag: &str) -> PathBuf {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "sayall-helper-log-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("scratch dir");
+            dir
+        }
+
+        #[test]
+        fn rotation_renames_current_file_and_keeps_writing() {
+            let dir = scratch("rotate");
+            let path = dir.join("sayall-diagnostic.log");
+            assert!(append_record(&path, "before"));
+            rotate_shared_log(&path);
+            assert!(append_record(&path, "after"));
+            let current = fs::read_to_string(&path).expect("current log");
+            assert!(current.contains("after"), "{current}");
+            let rotated: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("sayall-diagnostic-"))
+                .collect();
+            assert_eq!(rotated.len(), 1, "{rotated:?}");
+            assert!(rotated[0].ends_with(".log"), "{rotated:?}");
+            let old = fs::read_to_string(dir.join(&rotated[0])).expect("rotated log");
+            assert!(old.contains("before"), "{old}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn prune_keeps_only_the_newest_rotated_files() {
+            let dir = scratch("prune");
+            let path = dir.join("sayall-diagnostic.log");
+            fs::write(&path, b"current").expect("seed current");
+            for index in 0..8 {
+                let name = format!("sayall-diagnostic-2026100{index}T000000000Z-p1.log");
+                fs::write(dir.join(name), b"old").expect("seed rotated");
+            }
+            prune_shared_rotated(&path, 5);
+            let mut left: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("sayall-diagnostic-"))
+                .collect();
+            left.sort();
+            assert_eq!(left.len(), 5, "{left:?}");
+            assert!(left[0].contains("20261003"), "最旧的应被删掉：{left:?}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn rotation_cap_is_ten_megabytes_and_keeps_five() {
+            assert_eq!(SHARED_LOG_ROTATE_BYTES, 10 * 1024 * 1024);
+            assert_eq!(SHARED_LOG_KEEP_ROTATED, 5);
+        }
+    }
+
+    /// 卸载清理的两个纯判定（2026-10-08 方案 B 配套）：待删清单去重、RC003 设备判据。
+    #[cfg(test)]
+    mod uninstall_cleanup_tests {
+        use super::*;
+
+        #[test]
+        fn pending_listing_detects_an_existing_entry_case_insensitively() {
+            let listing = "*1\\??\\C:\\ProgramData\\SayAll\\rc003-helper\\frida-gadget.dll\0\0";
+            let path = PathBuf::from(r"c:\programdata\sayall\rc003-helper\frida-gadget.dll");
+            assert!(pending_reboot_listing_contains(listing, &path));
+            let other = PathBuf::from(r"C:\ProgramData\SayAll\rc003-helper\rc003_agent.js");
+            assert!(!pending_reboot_listing_contains(listing, &other));
+            // 空清单绝不能误判成"已登记"（否则 locked 文件根本不会被安排删除）。
+            assert!(!pending_reboot_listing_contains("", &path));
+        }
+
+        #[test]
+        fn pending_listing_matches_when_the_target_is_not_the_first_entry() {
+            // 回归（2026-10-08 真机）：REG_MULTI_SZ 若用 `from_wide` 读会在第一个 `\0` 截断，
+            // 目标不在第一条时判重永远未命中 → 每轮卸载各多登记一条。
+            let first = "*1\\??\\C:\\Other\\app.dll\0";
+            let second = "*1\\??\\C:\\ProgramData\\SayAll\\rc003-helper\\frida-gadget.dll\0";
+            let bytes: Vec<u8> = format!("{first}{second}\0")
+                .encode_utf16()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect();
+            let listing = multi_sz_bytes_to_string(&bytes);
+            let path = PathBuf::from(r"C:\ProgramData\SayAll\rc003-helper\frida-gadget.dll");
+            assert!(listing.contains("app.dll"), "两条都要保留，不能被截断");
+            assert!(pending_reboot_listing_contains(&listing, &path));
+        }
+
+        #[test]
+        fn host_release_gate_ignores_is_clean_and_looks_at_the_directory() {
+            // 2026-10-08 真机复测的教训：只有"待重启删除"时 is_clean() 为真，但文件还在
+            // 目录里——此时**必须**触发设备环。
+            let pending_only = CleanupReport {
+                files_deleted: 0,
+                files_pending_reboot: 2,
+                dirs_deleted: 0,
+                failures: Vec::new(),
+            };
+            assert!(
+                pending_only.is_clean(),
+                "前提：被锁住的文件只算 pending，is_clean 会是 true"
+            );
+            let existing = std::env::temp_dir();
+            assert!(
+                host_release_still_needed(&existing, &pending_only),
+                "目录还在（只剩待重启删除的文件）时仍必须放宿主再删一次"
+            );
+            let missing = existing.join("sayall-definitely-not-there-0000");
+            assert!(!host_release_still_needed(&missing, &pending_only));
+        }
+
+        #[test]
+        fn rc003_match_needs_enumerator_service_prefix_and_hardware_token() {
+            let device = format!("{}_Dev_{}", HID_SERVICE_PREFIX, RC003_HARDWARE_TOKEN);
+            assert!(device_is_rc003("BTHLEDevice", &device));
+            assert!(device_is_rc003("bthledevice", &device));
+            assert!(!device_is_rc003("USB", &device));
+            assert!(!device_is_rc003(
+                "BTHLEDevice",
+                "some-other-bluetooth-device"
+            ));
         }
     }
 
@@ -7008,6 +8075,147 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 ),
                 Some(Duration::from_millis(ACK_RESEND_SLOW_MS))
             );
+        }
+    }
+
+    /// 架构相关的不变量（Issue #206 回归）。
+    ///
+    /// 为什么用纯函数测：真机取证覆盖不到"x64 助手 + ARM64 宿主"这种组合（需要一台 ARM64
+    /// 机器），而这正是线上翻车的那一组；把判定抽成纯函数后，四种组合都能在 CI 里钉住。
+    #[cfg(test)]
+    mod arch_tests {
+        use super::*;
+
+        /// 造一份最小可解析的 PE 头（只到 FileHeader.Machine 为止）。
+        fn pe_bytes(machine: u16, e_lfanew: u32) -> Vec<u8> {
+            let mut b = vec![0u8; (e_lfanew as usize) + 8];
+            b[0] = b'M';
+            b[1] = b'Z';
+            b[0x3C..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
+            b[e_lfanew as usize..e_lfanew as usize + 4].copy_from_slice(b"PE\0\0");
+            b[e_lfanew as usize + 4..e_lfanew as usize + 6].copy_from_slice(&machine.to_le_bytes());
+            b
+        }
+
+        #[test]
+        fn pe_machine_reads_x64_and_arm64_headers() {
+            assert_eq!(pe_machine_from_bytes(&pe_bytes(0x8664, 0x80)), Some(0x8664));
+            assert_eq!(pe_machine_from_bytes(&pe_bytes(0xAA64, 0xF0)), Some(0xAA64));
+        }
+
+        /// 阴性对照：这些输入都不许被"猜"出架构——猜错的代价是把架构不匹配放过去。
+        #[test]
+        fn pe_machine_rejects_malformed_input() {
+            assert_eq!(pe_machine_from_bytes(b""), None);
+            assert_eq!(pe_machine_from_bytes(b"not a pe file at all........"), None);
+            // 只有 MZ、没有 PE 签名
+            let mut mz = vec![0u8; 0x100];
+            mz[0] = b'M';
+            mz[1] = b'Z';
+            assert_eq!(pe_machine_from_bytes(&mz), None);
+            // e_lfanew 越界：返回 None，不得 panic
+            let mut oob = pe_bytes(0x8664, 0x80);
+            oob[0x3C..0x40].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
+            assert_eq!(pe_machine_from_bytes(&oob), None);
+            // 签名不对
+            let mut bad = pe_bytes(0x8664, 0x80);
+            bad[0x80] = b'X';
+            assert_eq!(pe_machine_from_bytes(&bad), None);
+        }
+
+        #[test]
+        fn arch_gate_accepts_only_matching_triples() {
+            // 本机：x64 助手 + x64 宿主 + x64 Gadget
+            assert!(arch_gate(0x8664, 0x8664, 0x8664).is_ok());
+            // ARM64 机器上的正确组合
+            assert!(arch_gate(0xAA64, 0xAA64, 0xAA64).is_ok());
+            // Issue #206 现场：x64 助手对 ARM64 宿主 —— 必须在闸门处拒绝
+            let cross = arch_gate(0x8664, 0xAA64, 0x8664).unwrap_err();
+            assert!(cross.contains("架构不一致"), "{cross}");
+            assert!(cross.contains("x64"), "{cross}");
+            assert!(cross.contains("arm64"), "{cross}");
+            // Gadget 与宿主不一致（例如 ARM64 宿主配了 x64 Gadget）
+            let bad_gadget = arch_gate(0xAA64, 0xAA64, 0x8664).unwrap_err();
+            assert!(bad_gadget.contains("Gadget 架构"), "{bad_gadget}");
+        }
+
+        /// 拒绝文案不得再把人引向"安全软件拦截注入"（Issue #206 的错误归因）。
+        #[test]
+        fn arch_gate_messages_do_not_blame_antivirus() {
+            let msg = arch_gate(0x8664, 0xAA64, 0x8664).unwrap_err();
+            assert!(!msg.contains("安全软件"), "{msg}");
+            assert!(!msg.contains("拦截"), "{msg}");
+        }
+
+        #[test]
+        fn per_arch_constants_are_self_consistent() {
+            #[cfg(target_arch = "x86_64")]
+            {
+                assert_eq!(INJECTOR_MACHINE, 0x8664);
+                assert_eq!(ARCH_NAME, "x64");
+                assert_eq!(GADGET_FILE_NAME, "frida-gadget.dll");
+                assert!(GADGET_LOCK_ARCH_TOKEN.ends_with("x86_64"));
+                assert_eq!(GADGET_SHA256.len(), 64);
+                assert!(GADGET_LOCK_JSON.contains(GADGET_SHA256));
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                assert_eq!(INJECTOR_MACHINE, 0xAA64);
+                assert_eq!(ARCH_NAME, "arm64");
+                assert_eq!(GADGET_FILE_NAME, "frida-gadget-arm64.dll");
+                assert!(GADGET_LOCK_ARCH_TOKEN.ends_with("arm64"));
+                assert_eq!(GADGET_SHA256.len(), 64);
+                assert!(GADGET_LOCK_JSON.contains(GADGET_SHA256));
+            }
+            // 运行时名两种架构一致（世代目录名与常驻 tap 识别都按它工作）
+            assert_eq!(RUNTIME_GADGET_NAME, "frida-gadget.dll");
+        }
+
+        /// 两份 Gadget 的摘要必须不同：相同就意味着锁定文件抄错了一条。
+        #[test]
+        fn the_two_lock_entries_carry_different_hashes() {
+            let x64 = "350beb0e801dc7dc39d21512960d1048b9f21dc72c0ee5ced5cf5d9dc8ea6687";
+            let arm64 = "323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff";
+            assert_ne!(x64, arm64);
+            assert!(GADGET_LOCK_JSON.contains(x64), "锁定文件缺少 x64 摘要");
+            assert!(GADGET_LOCK_JSON.contains(arm64), "锁定文件缺少 arm64 摘要");
+        }
+
+        /// 打包后的 arm64 文件名也必须被"常驻 tap 识别"认出来，否则会漏报 module_present。
+        #[test]
+        fn bundled_arm64_name_is_recognized_as_a_gadget_module() {
+            assert!(is_gadget_module("frida-gadget-arm64.dll"));
+            assert!(is_gadget_module("FRIDA-GADGET.DLL"));
+            assert!(!is_gadget_module("frida-gadget.dll.bak"));
+        }
+    }
+
+    /// 复制后的摘要复核（2026-10-07 报障人实测后加：copied 路径原先固定报 sha256_verified=false，
+    /// 被读成"没校验就用了"）。
+    #[cfg(test)]
+    mod copied_gadget_verify_tests {
+        use super::*;
+
+        #[test]
+        fn copied_gadget_must_match_the_expected_digest() {
+            let dir =
+                std::env::temp_dir().join(format!("sayall-copy-verify-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("frida-gadget.dll");
+            fs::write(&path, b"payload").unwrap();
+            let digest = sha256_hex(b"payload");
+
+            // 摘要一致 → 通过（真实运行里 expected 恒为 GADGET_SHA256）
+            assert!(verify_copied_gadget(&path, &digest).is_ok());
+
+            // 摘要不一致（"写下去之后被换掉"的窗口）→ 必须报错，不得只记日志接着注入
+            let error = verify_copied_gadget(&path, GADGET_SHA256).unwrap_err();
+            assert!(error.contains("摘要不符"), "{error}");
+
+            // 读不到也要报错（不是静默通过）
+            assert!(verify_copied_gadget(&dir.join("missing.dll"), &digest).is_err());
+
+            let _ = fs::remove_dir_all(&dir);
         }
     }
 }

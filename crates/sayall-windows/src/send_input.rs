@@ -202,8 +202,24 @@ impl KeyCode {
         }
     }
 
+    /// PS/2 Set-1 物理扫描码 + 扩展（E0）标志。`None` = 该键没有标准
+    /// Set-1 扫描码（媒体键：系统只给出 ACPI/E0 形态），调用方回落虚拟键注入。
+    ///
+    /// 为什么映射动作也必须带扫描码（Issue #195，2026-10-08）：`SendInput`
+    /// 的纯虚拟键事件到达系统时 `scanCode = 0`（本机 LL 钩子探针实测；与
+    /// docs/investigations/2026-09-23-rc003-hid-host-write-tap-result.md
+    /// §4.5 的 Raw Input 观察一致）。按**物理键位**认键的消费者（键盘测试
+    /// 网页、部分 Electron 应用、游戏）因此收不到这些键——同一个 Esc 映射，
+    /// 只补上扫描码 0x01 就能被它们识别（报告人 0.5.0/0.5.1 对照 + 真机 UAT）。
+    ///
+    /// ⚠️ 扫描码不是 HID usage：[`KeyCode::hid_usage`] 的 Escape 是 0x29，
+    /// 而 0x29 是反引号（OEM_3）的扫描码，填错会打出 `` ` ``。
+    ///
+    /// 物理身份优先：左右修饰键、左右 Win 用各自的扫描码 + E0 前缀，保持
+    /// 「按住说话」等和弦与真实硬件同形（2026-09-06 定案）。
     pub fn physical_scan_code(self) -> Option<(u16, bool)> {
         Some(match self {
+            // 修饰键：左右必须各自成对（E0 前缀区分物理身份）。
             Self::Control | Self::LeftControl => (0x1D, false),
             Self::RightControl => (0x1D, true),
             Self::Shift | Self::LeftShift => (0x2A, false),
@@ -212,8 +228,83 @@ impl KeyCode {
             Self::RightAlt => (0x38, true),
             Self::LeftWindows => (0x5B, true),
             Self::RightWindows => (0x5C, true),
+            // 主键区非扩展键。
+            Self::Backspace => (0x0E, false),
+            Self::Tab => (0x0F, false),
+            Self::Enter => (0x1C, false),
+            Self::Escape => (0x01, false),
+            Self::Space => (0x39, false),
             Self::Oem3 => (0x29, false),
-            _ => return None,
+            // 导航簇与菜单键是扩展键：漏掉 E0 会退化成小键盘数字键。
+            Self::Home => (0x47, true),
+            Self::Up => (0x48, true),
+            Self::PageUp => (0x49, true),
+            Self::Left => (0x4B, true),
+            Self::Right => (0x4D, true),
+            Self::End => (0x4F, true),
+            Self::Down => (0x50, true),
+            Self::PageDown => (0x51, true),
+            Self::Insert => (0x52, true),
+            Self::Delete => (0x53, true),
+            Self::Apps => (0x5D, true),
+            // 字母（QWERTY 行 0x10-0x19 / 主行 0x1E-0x26 / 下排 0x2C-0x32）。
+            Self::Q => (0x10, false),
+            Self::W => (0x11, false),
+            Self::E => (0x12, false),
+            Self::R => (0x13, false),
+            Self::T => (0x14, false),
+            Self::Y => (0x15, false),
+            Self::U => (0x16, false),
+            Self::I => (0x17, false),
+            Self::O => (0x18, false),
+            Self::P => (0x19, false),
+            Self::A => (0x1E, false),
+            Self::S => (0x1F, false),
+            Self::D => (0x20, false),
+            Self::F => (0x21, false),
+            Self::G => (0x22, false),
+            Self::H => (0x23, false),
+            Self::J => (0x24, false),
+            Self::K => (0x25, false),
+            Self::L => (0x26, false),
+            Self::Z => (0x2C, false),
+            Self::X => (0x2D, false),
+            Self::C => (0x2E, false),
+            Self::V => (0x2F, false),
+            Self::B => (0x30, false),
+            Self::N => (0x31, false),
+            Self::M => (0x32, false),
+            // 数字行：Digit1-9 = 0x02-0x0A，Digit0 在行尾 = 0x0B。
+            Self::Digit1 => (0x02, false),
+            Self::Digit2 => (0x03, false),
+            Self::Digit3 => (0x04, false),
+            Self::Digit4 => (0x05, false),
+            Self::Digit5 => (0x06, false),
+            Self::Digit6 => (0x07, false),
+            Self::Digit7 => (0x08, false),
+            Self::Digit8 => (0x09, false),
+            Self::Digit9 => (0x0A, false),
+            Self::Digit0 => (0x0B, false),
+            // 功能键：F1-F10 = 0x3B-0x44，F11/F12 另起（0x57/0x58）。
+            Self::F1 => (0x3B, false),
+            Self::F2 => (0x3C, false),
+            Self::F3 => (0x3D, false),
+            Self::F4 => (0x3E, false),
+            Self::F5 => (0x3F, false),
+            Self::F6 => (0x40, false),
+            Self::F7 => (0x41, false),
+            Self::F8 => (0x42, false),
+            Self::F9 => (0x43, false),
+            Self::F10 => (0x44, false),
+            Self::F11 => (0x57, false),
+            Self::F12 => (0x58, false),
+            // 媒体键：无标准 Set-1 扫描码，保持虚拟键注入（见上方说明）。
+            Self::VolumeMute
+            | Self::VolumeDown
+            | Self::VolumeUp
+            | Self::MediaPrev
+            | Self::MediaNext
+            | Self::MediaPlayPause => return None,
         })
     }
 
@@ -238,6 +329,24 @@ impl KeyCode {
                 | Self::MediaNext
                 | Self::MediaPlayPause
                 | Self::RightControl
+                | Self::RightAlt
+                | Self::LeftWindows
+                | Self::RightWindows
+        )
+    }
+
+    /// 是否为「单独按下无连续语义」的修饰键（不参与按住连续触发的单键判定）。
+    pub fn is_modifier(self) -> bool {
+        matches!(
+            self,
+            Self::Control
+                | Self::LeftControl
+                | Self::RightControl
+                | Self::Shift
+                | Self::LeftShift
+                | Self::RightShift
+                | Self::Alt
+                | Self::LeftAlt
                 | Self::RightAlt
                 | Self::LeftWindows
                 | Self::RightWindows
@@ -377,6 +486,29 @@ pub enum ButtonAction {
     },
 }
 
+impl ButtonAction {
+    /// 「按住连续触发」是否适用于该动作：只允许可连续执行的动作。
+    ///
+    /// - 单键快捷键（删除/退格/方向/字母/媒体键等）可连续执行；
+    /// - 组合键（含修饰键或 ≥2 键：Ctrl+C、Alt+Tab、Win+L）与单独修饰键不可；
+    /// - 滚动、鼠标移动可连续；鼠标点击、打开应用、聚焦输入框不可。
+    ///
+    /// 界面侧镜像：`src/pages/ButtonsPage.vue` 的 `actionAllowsRepeat` 与
+    /// `REPEAT_MODIFIER_KEYS`；两侧必须同步（界面放开引擎拒绝的组合会被
+    /// `ButtonMappings::normalized` 在保存时整单拒绝）。
+    pub fn allows_repeat(&self) -> bool {
+        match self {
+            Self::Disabled | Self::OpenApp { .. } | Self::FocusInput | Self::MouseClick { .. } => {
+                false
+            }
+            Self::Scroll { .. } | Self::MouseMove { .. } => true,
+            Self::Shortcut { chord } => {
+                matches!(chord.keys.as_slice(), [key] if !key.is_modifier())
+            }
+        }
+    }
+}
+
 pub fn default_scroll_steps() -> u16 {
     1
 }
@@ -501,6 +633,22 @@ pub struct ButtonActions {
     pub single: ButtonAction,
     pub double: ButtonAction,
     pub long: ButtonAction,
+    /// 「按住连续触发」指定的槽位（单击或长按；`None` = 关闭）。
+    ///
+    /// 每键至多一个槽位：互斥由界面与 [`ButtonMappings::normalized`] 强制。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_repeat: Option<ButtonTrigger>,
+    /// OK 键：用遥控器移动过光标后的 5 秒内，按 OK 直接点击光标位置
+    /// （本次按压不触发单击/双击/长按）。只对 OK 键生效，默认关。
+    ///
+    /// 产品逻辑见 `docs/product/button-behavior.md` §2；方案见
+    /// `docs/plan/2026-10-06-ok-context-click.md`。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ok_context_click: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for ButtonActions {
@@ -509,6 +657,8 @@ impl Default for ButtonActions {
             single: ButtonAction::Disabled,
             double: ButtonAction::Disabled,
             long: ButtonAction::Disabled,
+            hold_repeat: None,
+            ok_context_click: false,
         }
     }
 }
@@ -541,10 +691,15 @@ enum ButtonActionsWire {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ButtonActionsCells {
     single: ButtonAction,
     double: ButtonAction,
     long: ButtonAction,
+    #[serde(default)]
+    hold_repeat: Option<ButtonTrigger>,
+    #[serde(default)]
+    ok_context_click: bool,
 }
 
 impl From<ButtonActionsWire> for ButtonActions {
@@ -554,6 +709,8 @@ impl From<ButtonActionsWire> for ButtonActions {
                 single: cells.single,
                 double: cells.double,
                 long: cells.long,
+                hold_repeat: cells.hold_repeat,
+                ok_context_click: cells.ok_context_click,
             },
             ButtonActionsWire::Legacy(action) => Self {
                 single: action,
@@ -563,9 +720,16 @@ impl From<ButtonActionsWire> for ButtonActions {
     }
 }
 
+/// 按键映射配置结构版本：0 = 本功能之前的旧文件（加载时按旧行为迁移），
+/// 1 = 含显式「按住连续触发」（`holdRepeat`）。保存/导出统一写当前版本。
+pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ButtonMappings {
+    /// 配置结构版本：serde 缺省 0（旧文件）；程序内 `Default` 与
+    /// `normalized()` 输出一律为当前版本。
+    pub schema_version: u32,
     /// 自定义按键功能总开关（UI 的"启用自定义按键功能"）。
     pub enabled: bool,
     pub actions: BTreeMap<RemoteButton, ButtonActions>,
@@ -586,6 +750,7 @@ fn default_enabled() -> bool {
 impl Default for ButtonMappings {
     fn default() -> Self {
         Self {
+            schema_version: BUTTON_MAPPINGS_SCHEMA_VERSION,
             enabled: true,
             actions: BTreeMap::new(),
             applications: Vec::new(),
@@ -602,6 +767,8 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Wire {
+            #[serde(default)]
+            schema_version: u32,
             #[serde(default = "default_enabled")]
             enabled: bool,
             actions: Option<BTreeMap<RemoteButton, ButtonActionsWire>>,
@@ -618,6 +785,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             .map(|(button, cell)| (button, ButtonActions::from(cell)))
             .collect();
         Ok(Self {
+            schema_version: wire.schema_version,
             enabled: wire.enabled,
             actions,
             applications: wire.applications,
@@ -627,8 +795,40 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
+    /// 旧文件（结构版本 0，本功能之前保存）迁移：为「旧版自动连发成立」的
+    /// 按键补上显式 `holdRepeat = 单击`，让升级用户的按住行为保持不变。
+    ///
+    /// 规则 = 旧版 `GestureConfig::for_button` 的连发条件：单击已配置、无双击、
+    /// 无长按、动作可连续执行（新判定）、该键有连发区间。**只填空值**：文件里
+    /// 已有显式值的按键不覆盖。调用方在 `normalized()` 之前、load/import 路径上执行。
+    pub fn migrate_legacy_hold_repeat(mut self) -> Self {
+        if self.schema_version >= BUTTON_MAPPINGS_SCHEMA_VERSION {
+            return self;
+        }
+        for (button, actions) in self.actions.iter_mut() {
+            if actions.hold_repeat.is_some()
+                || button.repeat_interval().is_none()
+                || actions.single == ButtonAction::Disabled
+                || actions.double != ButtonAction::Disabled
+                || actions.long != ButtonAction::Disabled
+                || !actions.single.allows_repeat()
+            {
+                continue;
+            }
+            actions.hold_repeat = Some(ButtonTrigger::Single);
+        }
+        self
+    }
+
     pub fn normalized(self) -> Result<Self, SendInputError> {
         let mut this = self;
+        if this.schema_version > BUTTON_MAPPINGS_SCHEMA_VERSION {
+            return Err(SendInputError::Backend(format!(
+                "按键映射配置版本 {} 高于当前支持的版本 {}",
+                this.schema_version, BUTTON_MAPPINGS_SCHEMA_VERSION
+            )));
+        }
+        this.schema_version = BUTTON_MAPPINGS_SCHEMA_VERSION;
         this.applications = crate::registered_apps::normalize_library(this.applications)
             .map_err(SendInputError::Backend)?;
         // 非法聚焦档案整条丢弃（策略与字段不自洽、超出长度/条数上限）。
@@ -655,6 +855,37 @@ impl ButtonMappings {
                     }
                     _ => {}
                 }
+            }
+        }
+        for (button, actions) in this.actions.iter() {
+            let Some(trigger) = actions.hold_repeat else {
+                continue;
+            };
+            if trigger == ButtonTrigger::Double {
+                return Err(SendInputError::Backend(
+                    "按住连续触发不支持双击槽位".to_owned(),
+                ));
+            }
+            if button.repeat_interval().is_none() {
+                return Err(SendInputError::Backend(format!(
+                    "按键 {button:?} 不支持按住连续触发"
+                )));
+            }
+            if trigger == ButtonTrigger::Single && actions.long != ButtonAction::Disabled {
+                return Err(SendInputError::Backend(
+                    "按住连续触发开在单击时不得同时配置长按动作".to_owned(),
+                ));
+            }
+            let target = actions.trigger(trigger);
+            if *target == ButtonAction::Disabled {
+                return Err(SendInputError::Backend(format!(
+                    "按住连续触发指向的 {trigger:?} 槽位未配置动作"
+                )));
+            }
+            if !target.allows_repeat() {
+                return Err(SendInputError::Backend(format!(
+                    "按住连续触发指向的动作不支持连续执行（{trigger:?}）"
+                )));
             }
         }
         Ok(this)
@@ -1246,6 +1477,182 @@ mod tests {
         );
     }
 
+    /// Issue #195 阳性对照：Escape 没有扫描码时，替换键在按物理键位认键的
+    /// 应用里收不到（VK-only 注入的事件 `scanCode=0`，本机探针 2026-10-08
+    /// 与 docs/investigations/2026-09-23-rc003-hid-host-write-tap-result.md
+    /// §4.5 一致）。Escape 的 PS/2 Set-1 扫描码是 0x01。
+    ///
+    /// 禁止把 `hid_usage()` 当扫描码：Escape 的 HID usage 是 0x29，而 0x29
+    /// 正是反引号（OEM_3）的扫描码——填错就会打出 `` ` ``。
+    #[test]
+    fn escape_uses_its_own_set1_scan_code_and_never_the_hid_usage() {
+        assert_eq!(KeyCode::Escape.physical_scan_code(), Some((0x01, false)));
+        assert_eq!(KeyCode::Oem3.physical_scan_code(), Some((0x29, false)));
+        assert_eq!(
+            KeyCode::Escape.hid_usage(),
+            Some(0x29),
+            "撞号事实本身要钉住：usage 0x29 ≠ 扫描码"
+        );
+    }
+
+    #[test]
+    fn standard_mapping_keys_carry_set1_scan_codes() {
+        // 期望值取自本机 MapVirtualKeyW(VK, MAPVK_VK_TO_VSC_EX) 实测
+        // （2026-10-08，见 Bugs/2026-10-08-issue-195-injected-keys-need-scan-code.md）。
+        for (key, scan) in [
+            (KeyCode::Backspace, 0x0E),
+            (KeyCode::Tab, 0x0F),
+            (KeyCode::Enter, 0x1C),
+            (KeyCode::Space, 0x39),
+            (KeyCode::Q, 0x10),
+            (KeyCode::A, 0x1E),
+            (KeyCode::Z, 0x2C),
+            (KeyCode::M, 0x32),
+            (KeyCode::Digit0, 0x0B),
+            (KeyCode::Digit1, 0x02),
+            (KeyCode::Digit9, 0x0A),
+            (KeyCode::F1, 0x3B),
+            (KeyCode::F10, 0x44),
+            (KeyCode::F11, 0x57),
+            (KeyCode::F12, 0x58),
+        ] {
+            assert_eq!(key.physical_scan_code(), Some((scan, false)), "{key:?}");
+            assert!(!key.is_extended(), "{key:?} 不是扩展键");
+        }
+
+        // 扩展键：扫描码与 E0 前缀必须同时正确——漏掉扩展标志会把方向键
+        // 变成小键盘数字键（NumLock 语义）。
+        for (key, scan) in [
+            (KeyCode::Home, 0x47),
+            (KeyCode::Up, 0x48),
+            (KeyCode::PageUp, 0x49),
+            (KeyCode::Left, 0x4B),
+            (KeyCode::Right, 0x4D),
+            (KeyCode::End, 0x4F),
+            (KeyCode::Down, 0x50),
+            (KeyCode::PageDown, 0x51),
+            (KeyCode::Insert, 0x52),
+            (KeyCode::Delete, 0x53),
+            (KeyCode::Apps, 0x5D),
+        ] {
+            assert_eq!(key.physical_scan_code(), Some((scan, true)), "{key:?}");
+            assert!(key.is_extended(), "{key:?}");
+        }
+    }
+
+    /// 媒体键没有 PS/2 Set-1 扫描码（系统只给出 ACPI/E0 形态），维持既有
+    /// VK 注入路径。这里是边界记录，不是遗漏。
+    #[test]
+    fn media_keys_stay_virtual_key_only() {
+        for key in [
+            KeyCode::VolumeMute,
+            KeyCode::VolumeDown,
+            KeyCode::VolumeUp,
+            KeyCode::MediaPrev,
+            KeyCode::MediaNext,
+            KeyCode::MediaPlayPause,
+        ] {
+            assert_eq!(key.physical_scan_code(), None, "{key:?}");
+        }
+    }
+
+    /// 表内不得出现重复的 (扫描码, 扩展) 组合——抓复制粘贴错值。
+    #[test]
+    fn set1_scan_codes_are_unique_across_keys() {
+        let mut keys = vec![
+            KeyCode::Backspace,
+            KeyCode::Tab,
+            KeyCode::Enter,
+            KeyCode::Escape,
+            KeyCode::Space,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::End,
+            KeyCode::Home,
+            KeyCode::Left,
+            KeyCode::Up,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Insert,
+            KeyCode::Delete,
+            KeyCode::Apps,
+            KeyCode::Oem3,
+            KeyCode::Control,
+            KeyCode::RightControl,
+            KeyCode::Shift,
+            KeyCode::RightShift,
+            KeyCode::Alt,
+            KeyCode::RightAlt,
+            KeyCode::LeftWindows,
+            KeyCode::RightWindows,
+        ];
+        keys.extend((0..=9).map(|index| {
+            [
+                KeyCode::Digit0,
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::Digit3,
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+                KeyCode::Digit6,
+                KeyCode::Digit7,
+                KeyCode::Digit8,
+                KeyCode::Digit9,
+            ][index]
+        }));
+        keys.extend([
+            KeyCode::A,
+            KeyCode::B,
+            KeyCode::C,
+            KeyCode::D,
+            KeyCode::E,
+            KeyCode::F,
+            KeyCode::G,
+            KeyCode::H,
+            KeyCode::I,
+            KeyCode::J,
+            KeyCode::K,
+            KeyCode::L,
+            KeyCode::M,
+            KeyCode::N,
+            KeyCode::O,
+            KeyCode::P,
+            KeyCode::Q,
+            KeyCode::R,
+            KeyCode::S,
+            KeyCode::T,
+            KeyCode::U,
+            KeyCode::V,
+            KeyCode::W,
+            KeyCode::X,
+            KeyCode::Y,
+            KeyCode::Z,
+        ]);
+        keys.extend([
+            KeyCode::F1,
+            KeyCode::F2,
+            KeyCode::F3,
+            KeyCode::F4,
+            KeyCode::F5,
+            KeyCode::F6,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F9,
+            KeyCode::F10,
+            KeyCode::F11,
+            KeyCode::F12,
+        ]);
+
+        let mut seen = std::collections::BTreeMap::new();
+        for key in keys {
+            if let Some(entry) = key.physical_scan_code() {
+                if let Some(previous) = seen.insert(entry, key) {
+                    panic!("{key:?} 与 {previous:?} 共用扫描码 {entry:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn missing_button_mapping_is_disabled_and_invalid_chords_fail_closed() {
         let mappings = ButtonMappings::default();
@@ -1316,6 +1723,7 @@ mod tests {
         assert_eq!(mappings.mapped_mask(), expected_bit);
 
         let disabled = ButtonMappings {
+            schema_version: BUTTON_MAPPINGS_SCHEMA_VERSION,
             enabled: false,
             actions: mappings.actions.clone(),
             applications: Vec::new(),
@@ -1337,6 +1745,8 @@ mod tests {
                 long: ButtonAction::Shortcut {
                     chord: chord(&[KeyCode::Control, KeyCode::C]),
                 },
+                hold_repeat: None,
+                ok_context_click: false,
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();
@@ -1461,5 +1871,323 @@ mod tests {
             !normalized.focus_profiles.contains_key("bad-target"),
             "非法档案必须被丢弃"
         );
+    }
+
+    fn shortcut(keys: &[KeyCode]) -> ButtonAction {
+        ButtonAction::Shortcut { chord: chord(keys) }
+    }
+
+    fn actions_with(single: ButtonAction, hold_repeat: Option<ButtonTrigger>) -> ButtonActions {
+        ButtonActions {
+            single,
+            hold_repeat,
+            ..ButtonActions::default()
+        }
+    }
+
+    #[test]
+    fn allows_repeat_matches_the_continuous_action_matrix() {
+        for key in [
+            KeyCode::Delete,
+            KeyCode::Backspace,
+            KeyCode::Down,
+            KeyCode::A,
+            KeyCode::F5,
+            KeyCode::MediaPlayPause,
+        ] {
+            assert!(
+                shortcut(&[key]).allows_repeat(),
+                "{key:?} 单键动作应可连续执行"
+            );
+        }
+        for keys in [
+            vec![KeyCode::Control, KeyCode::C],
+            vec![KeyCode::LeftWindows, KeyCode::L],
+            vec![KeyCode::Shift, KeyCode::Enter],
+            vec![KeyCode::LeftControl],
+            vec![KeyCode::RightAlt],
+        ] {
+            assert!(!shortcut(&keys).allows_repeat(), "{keys:?} 不应可连续执行");
+        }
+        assert!(ButtonAction::Scroll {
+            direction: ScrollDirection::Up,
+            steps: 3
+        }
+        .allows_repeat());
+        assert!(ButtonAction::MouseMove {
+            direction: MoveDirection::Right,
+            distance: 40
+        }
+        .allows_repeat());
+        assert!(!ButtonAction::MouseClick {
+            kind: MouseClickKind::Left
+        }
+        .allows_repeat());
+        assert!(!ButtonAction::OpenApp {
+            target: "wechat".to_owned()
+        }
+        .allows_repeat());
+        assert!(!ButtonAction::FocusInput.allows_repeat());
+        assert!(!ButtonAction::Disabled.allows_repeat());
+    }
+
+    #[test]
+    fn modifier_identity_covers_every_modifier_alias() {
+        for key in [
+            KeyCode::Control,
+            KeyCode::LeftControl,
+            KeyCode::RightControl,
+            KeyCode::Shift,
+            KeyCode::LeftShift,
+            KeyCode::RightShift,
+            KeyCode::Alt,
+            KeyCode::LeftAlt,
+            KeyCode::RightAlt,
+            KeyCode::LeftWindows,
+            KeyCode::RightWindows,
+        ] {
+            assert!(key.is_modifier(), "{key:?} 应识别为修饰键");
+        }
+        for key in [KeyCode::Delete, KeyCode::A, KeyCode::Left, KeyCode::F5] {
+            assert!(!key.is_modifier(), "{key:?} 不是修饰键");
+        }
+    }
+
+    #[test]
+    fn hold_repeat_serializes_camel_case_with_schema_version() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Back,
+            actions_with(shortcut(&[KeyCode::Delete]), Some(ButtonTrigger::Single)),
+        );
+        let json = serde_json::to_string(&mappings).unwrap();
+        assert!(json.contains("\"schemaVersion\":1"), "版本必须落盘：{json}");
+        assert!(
+            json.contains("\"holdRepeat\":\"single\""),
+            "开关必须落盘：{json}"
+        );
+        let decoded: ButtonMappings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, mappings);
+
+        // 关闭状态不写字段（与既有配置保持最小 diff），读回仍是 None。
+        let mut off = ButtonMappings::default();
+        off.actions.insert(
+            RemoteButton::Back,
+            actions_with(shortcut(&[KeyCode::Delete]), None),
+        );
+        let off_json = serde_json::to_string(&off).unwrap();
+        assert!(!off_json.contains("holdRepeat"), "关闭不落字段：{off_json}");
+        let decoded: ButtonMappings = serde_json::from_str(&off_json).unwrap();
+        assert_eq!(decoded.actions(RemoteButton::Back).hold_repeat, None);
+    }
+
+    #[test]
+    fn legacy_files_migrate_hold_repeat_from_the_old_auto_repeat_rule() {
+        // 旧版 button-mappings.json（无 schemaVersion / holdRepeat）。
+        let legacy = serde_json::json!({
+            "actions": {
+                "back": { "single": { "type": "shortcut", "chord": { "keys": ["delete"] } }, "double": { "type": "disabled" }, "long": { "type": "disabled" } },
+                "up": { "single": { "type": "shortcut", "chord": { "keys": ["up"] } }, "double": { "type": "disabled" }, "long": { "type": "disabled" } },
+                "ok": { "single": { "type": "shortcut", "chord": { "keys": ["enter"] } }, "double": { "type": "disabled" }, "long": { "type": "disabled" } },
+                "left": { "single": { "type": "shortcut", "chord": { "keys": ["control", "c"] } }, "double": { "type": "disabled" }, "long": { "type": "disabled" } },
+                "down": { "single": { "type": "shortcut", "chord": { "keys": ["down"] } }, "double": { "type": "shortcut", "chord": { "keys": ["space"] } }, "long": { "type": "disabled" } },
+                "menu": { "single": { "type": "shortcut", "chord": { "keys": ["escape"] } }, "double": { "type": "disabled" }, "long": { "type": "shortcut", "chord": { "keys": ["enter"] } } }
+            }
+        });
+        let migrated = serde_json::from_value::<ButtonMappings>(legacy)
+            .unwrap()
+            .migrate_legacy_hold_repeat()
+            .normalized()
+            .unwrap();
+        assert_eq!(migrated.schema_version, 1);
+        assert_eq!(
+            migrated.actions(RemoteButton::Back).hold_repeat,
+            Some(ButtonTrigger::Single),
+            "返回键=删除：旧版会自动连发，迁移为显式开启"
+        );
+        assert_eq!(
+            migrated.actions(RemoteButton::Up).hold_repeat,
+            Some(ButtonTrigger::Single)
+        );
+        assert_eq!(
+            migrated.actions(RemoteButton::Ok).hold_repeat,
+            None,
+            "OK 无连发区间"
+        );
+        assert_eq!(
+            migrated.actions(RemoteButton::Left).hold_repeat,
+            None,
+            "组合键不可连续"
+        );
+        assert_eq!(
+            migrated.actions(RemoteButton::Down).hold_repeat,
+            None,
+            "有双击不迁移"
+        );
+        assert_eq!(
+            migrated.actions(RemoteButton::Menu).hold_repeat,
+            None,
+            "有长按不迁移"
+        );
+    }
+
+    #[test]
+    fn explicit_hold_repeat_is_not_re_migrated() {
+        // 版本 1、显式关闭：再次加载不得被重新打开。
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "actions": {
+                "back": { "single": { "type": "shortcut", "chord": { "keys": ["delete"] } }, "double": { "type": "disabled" }, "long": { "type": "disabled" } }
+            }
+        });
+        let mappings = serde_json::from_value::<ButtonMappings>(json)
+            .unwrap()
+            .migrate_legacy_hold_repeat()
+            .normalized()
+            .unwrap();
+        assert_eq!(
+            mappings.actions(RemoteButton::Back).hold_repeat,
+            None,
+            "版本 1 的显式关闭不得被重新打开"
+        );
+
+        // 版本 1 且显式开启：原样保留。
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "actions": {
+                "back": { "single": { "type": "shortcut", "chord": { "keys": ["delete"] } }, "double": { "type": "disabled" }, "long": { "type": "disabled" }, "holdRepeat": "single" }
+            }
+        });
+        let mappings = serde_json::from_value::<ButtonMappings>(json)
+            .unwrap()
+            .migrate_legacy_hold_repeat()
+            .normalized()
+            .unwrap();
+        assert_eq!(
+            mappings.actions(RemoteButton::Back).hold_repeat,
+            Some(ButtonTrigger::Single)
+        );
+    }
+
+    #[test]
+    fn normalized_rejects_invalid_hold_repeat_combinations() {
+        let with_actions = |button: RemoteButton, actions: ButtonActions| {
+            let mut mappings = ButtonMappings::default();
+            mappings.actions.insert(button, actions);
+            mappings
+        };
+        let cases: Vec<(&str, ButtonMappings)> = vec![
+            (
+                "双击槽位",
+                with_actions(
+                    RemoteButton::Back,
+                    ButtonActions {
+                        double: shortcut(&[KeyCode::Space]),
+                        hold_repeat: Some(ButtonTrigger::Double),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+            (
+                "单击未配置",
+                with_actions(
+                    RemoteButton::Back,
+                    ButtonActions {
+                        hold_repeat: Some(ButtonTrigger::Single),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+            (
+                "单击与长按互斥",
+                with_actions(
+                    RemoteButton::Back,
+                    ButtonActions {
+                        single: shortcut(&[KeyCode::Delete]),
+                        long: shortcut(&[KeyCode::Backspace]),
+                        hold_repeat: Some(ButtonTrigger::Single),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+            (
+                "组合键不可连续",
+                with_actions(
+                    RemoteButton::Back,
+                    ButtonActions {
+                        single: shortcut(&[KeyCode::Control, KeyCode::C]),
+                        hold_repeat: Some(ButtonTrigger::Single),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+            (
+                "无连发区间键",
+                with_actions(
+                    RemoteButton::Ok,
+                    ButtonActions {
+                        single: shortcut(&[KeyCode::Delete]),
+                        hold_repeat: Some(ButtonTrigger::Single),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+            (
+                "长按未配置",
+                with_actions(
+                    RemoteButton::Back,
+                    ButtonActions {
+                        hold_repeat: Some(ButtonTrigger::Long),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+            (
+                "长按动作不可连续",
+                with_actions(
+                    RemoteButton::Back,
+                    ButtonActions {
+                        long: ButtonAction::OpenApp {
+                            target: "wechat".to_owned(),
+                        },
+                        hold_repeat: Some(ButtonTrigger::Long),
+                        ..ButtonActions::default()
+                    },
+                ),
+            ),
+        ];
+        for (name, mappings) in cases {
+            assert!(mappings.normalized().is_err(), "{name} 必须被拒绝");
+        }
+
+        // 合法组合：单击=删除 + 开关=单击；长按=退格 + 开关=长按。
+        let ok_single = with_actions(
+            RemoteButton::Back,
+            ButtonActions {
+                single: shortcut(&[KeyCode::Delete]),
+                hold_repeat: Some(ButtonTrigger::Single),
+                ..ButtonActions::default()
+            },
+        );
+        assert!(ok_single.normalized().is_ok());
+        let ok_long = with_actions(
+            RemoteButton::Back,
+            ButtonActions {
+                long: shortcut(&[KeyCode::Backspace]),
+                hold_repeat: Some(ButtonTrigger::Long),
+                ..ButtonActions::default()
+            },
+        );
+        assert!(ok_long.normalized().is_ok());
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected_not_silently_downgraded() {
+        let json = serde_json::json!({
+            "schemaVersion": 99,
+            "actions": {}
+        });
+        let mappings = serde_json::from_value::<ButtonMappings>(json).unwrap();
+        assert!(mappings.normalized().is_err(), "未来版本必须拒绝");
     }
 }

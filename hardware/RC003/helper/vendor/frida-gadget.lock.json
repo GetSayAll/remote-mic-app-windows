@@ -1,12 +1,13 @@
 {
   "schema": "sayall.vendored-binary.lock/1",
   "purpose": "RC003 增强捕获轨（路线 A）的注入载体。助手把该 DLL 加载进承载 RC003 的 WUDFHost.exe，在其进程内挂 ntdll!NtDeviceIoControlFile 并按 usage 选择性拦截键盘报告。",
-  "note": "本文件是版本与完整性的唯一事实来源。任何升级都必须同时更新 version / url / sha256 三项，并在 ATTRIBUTION.md 记录变更。",
+  "note": "本文件是版本与完整性的唯一事实来源。任何升级都必须同时更新 version / url / sha256 三项，并在 ATTRIBUTION.md 记录变更。entries 按架构各一条（x86_64 / arm64）：宿主在 ARM64 系统上是原生 ARM64 进程，ARM64 进程不能加载 x64 镜像，因此每个助手只认自己那一份（src/main.rs 的 GADGET_LOCK_ARCH_TOKEN 与 GADGET_SHA256 都按编译架构取）。字段约定：target = 随安装包分发的文件名；runtimeName = 注入时在运行时目录里的名字（两种架构一致，世代目录与常驻 tap 识别都按它工作）。",
   "entries": [
     {
       "name": "frida-gadget",
       "component": "frida-gadget-17.18.0-windows-x86_64.dll",
       "target": "frida-gadget.dll",
+      "runtimeName": "frida-gadget.dll",
       "version": "17.18.0",
       "arch": "x86_64",
       "releasePublishedAt": "2026-09-09T19:25:03Z",
@@ -40,6 +41,45 @@
         "residualRisk": "本次仅核对了仓库根 COPYING。正式发布前应做一次逐组件许可复核（尤其是 Gadget 内嵌的第三方组件），并把许可全文随安装包一并分发。"
       },
       "usageBoundary": "仅作为开发期与增强轨的注入载体登记。基础语音主路径不得依赖本组件（AGENTS.md 架构边界）。"
+    },
+    {
+      "name": "frida-gadget",
+      "component": "frida-gadget-17.18.0-windows-arm64.dll",
+      "target": "frida-gadget-arm64.dll",
+      "runtimeName": "frida-gadget.dll",
+      "version": "17.18.0",
+      "arch": "arm64",
+      "releasePublishedAt": "2026-09-09T19:25:03Z",
+      "source": {
+        "kind": "github-release",
+        "repo": "frida/frida",
+        "tag": "17.18.0",
+        "asset": "frida-gadget-17.18.0-windows-arm64.dll.xz",
+        "url": "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-windows-arm64.dll.xz"
+      },
+      "compressed": {
+        "name": "frida-gadget-17.18.0-windows-arm64.dll.xz",
+        "size": 5555660,
+        "sha256": "9362da1d004c5bac3f42e10a6f5ab13a93a6a9de452015737c15b72fcce5ea90"
+      },
+      "extracted": {
+        "name": "frida-gadget-arm64.dll",
+        "size": 21078016,
+        "sha256": "323a91b3842d31c324dafd5e3e504a06d3c8a82f849c05734838a38cb23b17ff"
+      },
+      "integrity": {
+        "compressedSha256Origin": "GitHub Releases API 的 asset.digest 字段（非本地计算，可独立复核）",
+        "verifiedOn": "2026-10-07",
+        "verifiedBy": "本机下载后本地重算，与 API 摘要逐字符一致；解压产物 PE 头为 MZ / machine=0xAA64"
+      },
+      "license": {
+        "name": "wxWindows Library Licence, Version 3.1",
+        "file": "COPYING（frida/frida 仓库根）",
+        "redistributionBasis": "该许可的 exception notice 第 2 条：\"The exception is that you may use, copy, link, modify and distribute under your own terms, binary object code versions of works based on the Library.\"",
+        "implication": "以二进制形式随本产品分发被明确允许；无需开源本产品代码。第 3 条同时说明：若在库中并入 GPL/LGPL 代码，该例外不适用于并入部分。",
+        "residualRisk": "本次仅核对了仓库根 COPYING。正式发布前应做一次逐组件许可复核（尤其是 Gadget 内嵌的第三方组件），并把许可全文随安装包一并分发。"
+      },
+      "usageBoundary": "同一 Gadget 的 arm64 构建，只用于 ARM64 系统上承载 RC003 的宿主（ARM64 进程无法加载 x64 镜像，Issue #206）。基础语音主路径不得依赖本组件（AGENTS.md 架构边界）。"
     }
   ]
 }

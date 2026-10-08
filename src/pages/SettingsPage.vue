@@ -6,6 +6,7 @@ import {
   getLaunchAtLogin,
   openGitHubRepository,
   openOfficialWebsite,
+  restartOnboarding,
   setAppIcon,
   setLaunchAtLogin,
 } from "../lib/bridge";
@@ -13,6 +14,7 @@ import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+const emit = defineEmits<{ "restart-onboarding": [] }>();
 
 const {
   phase,
@@ -106,6 +108,29 @@ const appIconError = ref("");
 const appIconPreview = computed(
   () => appIconOptions.find((option) => option.value === appIcon.value)?.preview ?? "/app-logo.png",
 );
+
+/** 首次设置：重新运行向导（只重置向导进度，不清除设备/映射/音频/其他设置）。 */
+const onboardingBusy = ref(false);
+const onboardingError = ref("");
+
+async function runOnboardingWizard(): Promise<void> {
+  if (onboardingBusy.value) return;
+  onboardingBusy.value = true;
+  onboardingError.value = "";
+  try {
+    const state = await restartOnboarding();
+    if (!state.isActive) {
+      // 重置后仍不是进行中：保守报错，不把用户放进一个空向导。
+      onboardingError.value = "无法开始设置向导，请稍后重试。";
+      return;
+    }
+    emit("restart-onboarding");
+  } catch {
+    onboardingError.value = "无法开始设置向导，请稍后重试。";
+  } finally {
+    onboardingBusy.value = false;
+  }
+}
 
 /**
  * “问题反馈”的外部入口（2026-10-01 用户指定：官网与 GitHub 入口；2026-10-02
@@ -234,6 +259,10 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
     strokes: [
       "M12 3.8c-4.8 0-8.7 3.1-8.7 7 0 2.3 1.3 4.3 3.3 5.6l-1 3.5 4-2.2c.8.2 1.6.3 2.4.3 4.8 0 8.7-3.1 8.7-7S16.8 3.8 12 3.8z",
     ],
+  },
+  onboarding: {
+    // SF "arrow.triangle.2.circlepath" 近似：环形箭头（重新走一遍）
+    strokes: ["M19.6 12a7.6 7.6 0 1 1-2.3-5.4", "M17.6 2.8v4h-4"],
   },
 };
 </script>
@@ -464,6 +493,41 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           </div>
         </div>
         <p v-if="appIconError" class="error-text" role="alert">{{ appIconError }}</p>
+      </div>
+    </section>
+
+    <!-- 首次设置（向导重跑入口）：老用户机器已标记完成，需要入口才能重走一遍。 -->
+    <section class="settings-section">
+      <h2 class="section-title">首次设置</h2>
+      <div class="card settings-group">
+        <div class="settings-row">
+          <span class="settings-row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path
+                v-for="(path, index) in ROW_ICONS.onboarding.strokes"
+                :key="`os${index}`"
+                :d="path"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <div class="settings-row-text">
+            <strong>重新运行设置向导</strong>
+            <p class="muted">重新走一遍首次设置；不会清除按键映射、设备与语音设置。</p>
+          </div>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="onboardingBusy"
+            @click="runOnboardingWizard"
+          >
+            重新运行向导
+          </button>
+        </div>
+        <p v-if="onboardingError" class="error-text" role="alert">{{ onboardingError }}</p>
       </div>
     </section>
 

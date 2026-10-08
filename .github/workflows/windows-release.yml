@@ -30,6 +30,11 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # 发布路径必须带 arm64 载荷（见下方 staging / build 两步），因此本 job 也要
+          # 装 aarch64 目标供 `cargo build --target aarch64-pc-windows-msvc` 使用；
+          # 链接器由 windows-2025 镜像自带的 VS ARM64 工具集提供。
+          targets: aarch64-pc-windows-msvc
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -45,11 +50,19 @@ jobs:
           Write-Host "正式更新签名密钥已就绪"
 
       # 同 windows-ci.yml：bundle.resources 的两件文件不入库，编译期就需要它们存在。
-      - name: Stage bundle resources (helper + frida gadget)
+      # 发布路径**强制**要求 arm64 双载荷（windows-2025 镜像自带 VS ARM64 工具集）：
+      # SAYALL_REQUIRE_ARM64_PAYLOAD=1 让 arm64 缺失时 staging 非零退出，而不是静默
+      # 产出一个在 Windows 11 ARM64 上缺载荷的安装包。
+      - name: Stage bundle resources (helper + frida gadget, x64 + arm64)
+        env:
+          SAYALL_REQUIRE_ARM64_PAYLOAD: "1"
         run: node scripts/stage-bundle-inputs.cjs
 
       - name: Build signed NSIS installer
-        run: pnpm tauri build --bundles nsis
+        # arm64 覆盖配置：默认 tauri.conf.json 只声明 x64 两件（tauri-build 编译期
+        # 校验资源存在，arm64 助手在没有 VS ARM64 工具集的机器上构建不出来），
+        # 这里把 bundle.resources 覆盖成四件。--config 可重复，按 RFC 7396 顺序合并。
+        run: pnpm tauri build --bundles nsis --config src-tauri/tauri.arm64-payload.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # 密码变量缺失时 tauri build 会交互式等待输入（无 TTY 的 CI 上挂死，
@@ -81,15 +94,69 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $assets = Get-ChildItem -LiteralPath "artifacts/windows-release" -File | ForEach-Object { $_.FullName }
+          # Release Notes 正文（按 docs/release-notes-spec.md 撰写；聚合口径 = 相对上一个
+          # 已发布版本 v0.5.0）。内容变化要回到普通 PR 改这里，再打新 tag，不覆盖旧正文。
           $notes = @"
-          无线麦 SayAll Windows 版 $tag
+          # 无线麦 SayAll Windows 版 $tag 预览版
 
-          - 应用内更新通道资产：latest.json + SayAll-Windows-x64-setup.exe(.sig)（minisign 签名，应用内检查更新自动验签安装）
-          - 校验和见 SHA256SUMS.txt
-          - Authenticode 代码签名仍待建立（首次运行可能触发 SmartScreen 提示）
-          - 人工核对后 Publish 本草稿：Publish 即对全量用户开启本版本更新（releases/latest 指向最新已发布稳定版）
+          本次更新（相对上一个已发布版本 v0.5.0）：
+
+          ## 新增
+
+          - 首次设置向导：新装第一次打开时会带你走一遍真实的设置流程——连接遥控器、选择语音设备、选择输入工具、按住说话验证、再按几个普通按键，每一步都确认可用后才放行；中途退出，下次打开接着来。
+          - 已经用过的电脑不会被向导打断，想重走可以到设置页点「重新运行向导」。
+          - 按键新增「按住时连续执行」：可以选关闭、重复单击动作或重复长按动作。
+          - OK 键新增「移动光标后按 OK 点击」：刚用遥控器移动过光标时，按 OK 会直接点一下光标位置（按键级开关，默认关闭）。
+          - 连接页新增语音增益（0–24 dB）：觉得录进去的声音偏小可以调大。
+          - 新增「几何鸭」应用图标，并作为新装默认：窗口、任务栏、托盘、开始菜单与桌面快捷方式会一起变化，安装包图标也一并更换。
+          - 在 Windows 11 ARM64 电脑上，「全按键支持」现在可用。
+          - 界面出现故障时会自动尝试恢复；仍未恢复时窗口标题会给出提示，按提示从托盘退出重开即可。
+          - 向导页脚新增「复制诊断信息」：流程卡住时一键复制报障信息。
+
+          ## 改进
+
+          - 修复应用窗口在前台时，按遥控器语音键唤不起输入法语音的问题。
+          - 修复部分应用收不到遥控器映射按键的问题：此前替换后的按键只带虚拟键、不带物理键位，按物理键位识别的程序（键盘测试类网页、部分 Electron 应用）会漏掉这些按键，现在补齐了扫描码。
+          - 「全按键支持」的自愈更稳：重启电脑后遥控器晚一点唤醒、升级或重装后残留的旧状态、功能中途断开，都会自动恢复——不再出现开关显示已开启、按键却没反应的情况。
+          - 在 ARM64 电脑上，升级安装后若「全按键支持」暂时不可用，界面会说明原因与恢复方式，不再一直停在「正在启动」。
+          - 卸载更干净：卸载会清理运行时数据与登录启动项；设置、按键映射与使用统计按约定保留。
+          - 窗口默认大小与最小尺寸重新定稿：高缩放的大屏上不再局促，内容区留白与页面头部一并调整。
+          - 按键页整体改版（对齐 Mac）：遥控器实物图放大到看得清按键；「全按键支持」关闭时三张按键卡片置灰并说明怎么恢复。
+          - 安装或升级时不再弹出黑色命令行窗口；诊断日志不再写入访问凭据。
+          - 诊断日志单个文件不超过 10 MB，超出自动换新文件：报障要发的那份日志始终是当前文件，不会越攒越大。
+          - 卸载时不再出现「运行时数据未能立即删除、请重启或手动清理」的提示：即使遥控器还连着，也会自动释放占用运行数据的系统进程，把运行数据当场清理干净。
+          - 启动恢复上次选择的语音设备更稳：目标端点被占用时（常见于新版 VB-CABLE 的 16 Ch 端点），会自动改用同一台虚拟声卡上的另一个 CABLE 端点，不再报「设备被占用」。
+
+          ## 验证
+
+          - 前端测试、Rust 工作区测试与 Windows 运行时仿真检查：passed
+          - 安装、升级、降级与卸载矩阵（含应用运行中执行安装）：passed
+          - 首次设置向导全流程在本机仿真环境跑通（含语音会话、音频与按键门禁）：passed
+          - 「全按键支持」在 Windows 11 ARM64 真机上验证：passed
+          - 语音增益在真机上以回录电平对比验证：passed
+          - 「全按键支持」升级/重装后残留旧状态时的自愈判定：passed（单元测试覆盖判定逻辑与边界，含「窗口内不得提前放弃」与「不得重复注入」）
+          - 「全按键支持」的上述自愈在真实遥控器上的端到端确认：passed（受控复现旧状态残留后，8 秒内自动另起一代注入，按键与语音恢复正常）
+          - 映射按键的扫描码补全在真机上以低级键盘钩子实测对照验证：passed
+          - 诊断日志轮转（单文件 10 MB 上限）在真机上验证：passed（769 MB 旧日志在首次写入时被轮转，当前文件从 KB 级重新计起）
+          - 卸载运行数据的宿主释放机制（结束持有注入的宿主 → 运行数据当场删净 → 设备节点自动恢复）在真机上以受控注入验证：passed
+          - 语音设备端点被占用时的同设备兜底（VB-CABLE 16 Ch 现场）：本机探针与单元测试 passed；真实触发时自动改用的端到端确认：deferred（未再复现瞬态占用现场）
+          - 首次设置向导的配对、射频、权限、真实音质与遥控器逐项走查：deferred
+
+          ## 已知边界
+
+          - 安装器尚未配置 Windows 代码签名，首次运行可能出现 SmartScreen 提示。
+          - 「全按键支持」属于系统级按键接管，需要系统授权（每次开启都会弹出 Windows 授权窗口）；个别带防作弊保护的游戏可能按键失灵或游戏打不开，建议玩这类游戏前关闭该开关。
+          - 已经用过的电脑升级后不会自动进入首次设置向导，可在设置页点「重新运行向导」。
+          - 如果遇到「全按键支持」开着、按键却没反应：应用会自动尝试恢复；万一仍不行，把遥控器断开再重新配对一次即可。
+          - 个别输入工具在换到别的窗口后的第一次按键仍可能需要再按一次，我们还在改进。
+
+          更新资产：
+          - SayAll-Windows-$($tag.TrimStart('v'))-x64-setup.exe
+          - SayAll-Windows-$($tag.TrimStart('v'))-x64-setup.exe.sig
+          - latest.json
+          - SHA256SUMS.txt
           "@
-          gh release create $tag --draft --title "无线麦 SayAll Windows $tag" --notes $notes @assets
+          gh release create $tag --draft --prerelease --title "无线麦 SayAll Windows $tag 预览版" --notes $notes @assets
           if ($LASTEXITCODE -ne 0) {
             throw "gh release create 失败（exit $LASTEXITCODE；若 Release 已存在请人工核对后处理，本流程不做任何删除/覆盖）"
           }

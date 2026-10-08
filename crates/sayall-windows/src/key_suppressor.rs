@@ -38,35 +38,21 @@
 #[cfg(windows)]
 mod windows_impl {
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-    use std::sync::mpsc;
     use std::sync::OnceLock;
-    use std::thread::JoinHandle;
     use std::time::Instant;
-    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetTimer,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
-        LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_APP, WM_QUIT, WM_TIMER,
-    };
 
     const ARM_GRACE_MS: u64 = 250;
     const BOUNDED_WAIT_MS: u64 = 60;
-    const VK_F5: u32 = 0x74;
-    /// 链头 bump 的线程消息（WM_APP 私有区）。
-    const WM_HOOK_BUMP: u32 = WM_APP + 0x50;
-    const BUMP_TIMER_ID: usize = 0x5A11;
-    const BUMP_TIMER_MS: u32 = 10_000;
+    /// 遥控器语音键在键盘层的虚拟键码（F5）；宿主进程的按键过滤共用。
+    pub(crate) const VK_F5: u32 = 0x74;
 
     static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
     /// 连接建立/重连阶段临时接管 F5。此时遥控器的原生 F5 可能先于 ATVV
     /// 控制通知到达；若放行会触发记事本“插入时间/日期”等前台副作用。
     static LINK_GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
     static ARMED_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
-    static SWALLOW_MASTER: AtomicBool = AtomicBool::new(false);
-    /// 抑制器决策计数（AGENTS.md 功能点日志规范；仅钩子线程原子递增，
-    /// 会话开始时由工作线程快照落盘——钩子线程绝不做文件 IO）。
+    /// 抑制器决策计数（AGENTS.md 功能点日志规范；仅决策线程原子递增，
+    /// 会话开始时由工作线程快照落盘——宿主协议线程不做文件 IO 之外的阻塞）。
     static F5_DOWN_SEEN: AtomicU64 = AtomicU64::new(0);
     static F5_DOWN_SWALLOWED: AtomicU64 = AtomicU64::new(0);
     static F5_DOWN_LEAKED: AtomicU64 = AtomicU64::new(0);
@@ -84,7 +70,6 @@ mod windows_impl {
     pub const HOLD_SWALLOWED_ALL: u32 = 1;
     pub const HOLD_LEAKED: u32 = 2;
     static CLOCK_BASE: OnceLock<Instant> = OnceLock::new();
-    static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
     fn now_ms() -> u64 {
         CLOCK_BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
@@ -115,7 +100,7 @@ mod windows_impl {
     /// 2026-09-05 kb-live 全解码）；钩子休眠时边沿泄漏、无此标记。该标记与
     /// ConsentStore 开麦时间戳 100% 交叉一致，因此成为**与版本解耦**的存活
     /// 判据（2026-09-23 issue #118 起 ConsentStore 对 2.1.4.6 失明）。
-    const VK_WETYPE_MARKER: u32 = 0xFC;
+    pub(crate) const VK_WETYPE_MARKER: u32 = 0xFC;
     static WETYPE_MARKER_COUNT: AtomicU64 = AtomicU64::new(0);
     static WETYPE_MARKER_LAST_EXTRA: AtomicU64 = AtomicU64::new(0);
 
@@ -123,15 +108,6 @@ mod windows_impl {
     /// 物理键盘不会产生 0xFC，因此只认注入形态。
     pub fn is_wetype_marker(vk_code: u32, injected: bool) -> bool {
         injected && vk_code == VK_WETYPE_MARKER
-    }
-
-    /// 钩子线程内记录（无 IO、无锁、仅原子递增）。extra 是目标程序自定义的
-    /// 魔数（非用户数据），只用于确认归因。
-    fn note_key_event(vk_code: u32, injected: bool, extra: u64) {
-        if is_wetype_marker(vk_code, injected) {
-            WETYPE_MARKER_COUNT.fetch_add(1, Ordering::Relaxed);
-            WETYPE_MARKER_LAST_EXTRA.store(extra, Ordering::Relaxed);
-        }
     }
 
     /// 存活标记累计值：会话开始前取基线，检测点取当前值，前进即证明微信输入法
@@ -179,85 +155,83 @@ mod windows_impl {
         }
     }
 
-    unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && SWALLOW_MASTER.load(Ordering::Relaxed) {
-            // WM_KEYDOWN=0x0100 / WM_SYSKEYDOWN=0x0104 / WM_KEYUP=0x0101 / WM_SYSKEYUP=0x0105
-            let message = wparam.0 as u32;
-            if matches!(message, 0x0100 | 0x0104 | 0x0101 | 0x0105) {
-                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-                // 功能点观测：微信输入法存活标记（只增计数，不参与吞键判定）。
-                note_key_event(
-                    kb.vkCode,
-                    kb.flags.contains(LLKHF_INJECTED),
-                    kb.dwExtraInfo as u64,
-                );
-                if kb.vkCode == VK_F5 {
-                    let is_key_up = matches!(message, 0x0101 | 0x0105);
-                    if is_key_up {
-                        let hold = HOLD_PAIRING.swap(HOLD_NONE, Ordering::Relaxed);
-                        if decide(
-                            VK_F5,
-                            true,
-                            session_active(),
-                            LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
-                            armed(),
-                            hold,
-                        ) {
-                            return LRESULT(1);
-                        }
-                        // DOWN 沿曾泄漏进 OS（或配对未知）：放行 UP，防止粘键。
-                        return CallNextHookEx(None, code, wparam, lparam);
-                    }
-                    // DOWN 沿：先试武装状态，未武装则 60ms 有界等待。
-                    let waited = !swallow_ready();
-                    let swallowed = if !waited {
-                        true
-                    } else {
-                        let deadline = now_ms() + BOUNDED_WAIT_MS;
-                        let mut armed_late = false;
-                        while now_ms() < deadline {
-                            if swallow_ready() {
-                                armed_late = true;
-                                break;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(2));
-                        }
-                        armed_late
-                    };
-                    if waited && swallowed {
-                        F5_DOWN_WAITED_ARMED_LATE.fetch_add(1, Ordering::Relaxed);
-                    }
-                    F5_DOWN_SEEN.fetch_add(1, Ordering::Relaxed);
-                    if swallowed {
-                        F5_DOWN_SWALLOWED.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        F5_DOWN_LEAKED.fetch_add(1, Ordering::Relaxed);
-                    }
-                    let hold = HOLD_PAIRING.load(Ordering::Relaxed);
-                    let next = track_down(hold, swallowed);
-                    HOLD_PAIRING.store(next, Ordering::Relaxed);
-                    if swallowed {
-                        return LRESULT(1);
-                    }
-                    // 有界等待超时：DOWN 泄漏进 OS（配对状态已标记 LEAKED，
-                    // 其 UP 沿届时放行，避免粘键）。
-                    return CallNextHookEx(None, code, wparam, lparam);
-                }
-            }
-        }
-        CallNextHookEx(None, code, wparam, lparam)
+    /// 宿主协议消息（按键宿主进程转发；协议见 `crate::key_host`）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum HostSuppressorMessage {
+        /// 遥控器语音键（F5）按下沿：需要吞/放裁决。
+        F5Down,
+        /// 遥控器语音键（F5）释放沿：按配对状态裁决。
+        F5Up,
+        /// 微信输入法存活标记（被动计数，无需裁决）。
+        WetypeMarker { extra: u64 },
     }
 
-    /// 钩子链头 bump：先挂新钩（立即成为链头），再卸旧钩——重叠安装无吞键空窗
-    /// （Voice_VibeCoding 同款技巧）。新钩安装失败时保留旧钩。
-    fn bump_to_chain_head(current: &mut Option<HHOOK>) {
-        if let Ok(new_hook) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) }
-        {
-            let old = current.replace(new_hook);
-            if let Some(old) = old {
-                unsafe {
-                    let _ = UnhookWindowsHookEx(old);
+    /// 宿主协议入口：在宿主转发线程上执行既有 F5 决策逻辑。
+    ///
+    /// 语义与迁移前的钩子回调逐行对齐（2026-10-04 切片 2）；区别只在：
+    /// 60ms 有界等待从"钩子回调内"移到"宿主转发线程内的决策"，钩子回调
+    /// 只做一次同步 IPC 询问。返回 `Some(swallow)` 供宿主回应 `VERDICT`；
+    /// `None` = 无需裁决（异步事件）。
+    pub(crate) fn handle_host_message(message: HostSuppressorMessage) -> Option<bool> {
+        match message {
+            HostSuppressorMessage::WetypeMarker { extra } => {
+                WETYPE_MARKER_COUNT.fetch_add(1, Ordering::Relaxed);
+                WETYPE_MARKER_LAST_EXTRA.store(extra, Ordering::Relaxed);
+                None
+            }
+            HostSuppressorMessage::F5Up => {
+                let hold = HOLD_PAIRING.swap(HOLD_NONE, Ordering::Relaxed);
+                let swallow = decide(
+                    VK_F5,
+                    true,
+                    session_active(),
+                    LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
+                    armed(),
+                    hold,
+                );
+                // 功能点日志：F5 边沿级别的吞/放裁决（每语音会话约 2 条），
+                // 首按失败类报障可直接定位"泄漏/等待超时/配对"环节。
+                crate::ble::gatt_note(format!(
+                    "suppressor_ask dir=up swallow={} hold={hold}",
+                    if swallow { 1 } else { 0 }
+                ));
+                Some(swallow)
+            }
+            HostSuppressorMessage::F5Down => {
+                // DOWN 沿：先试武装状态，未武装则 60ms 有界等待。
+                let waited = !swallow_ready();
+                let swallowed = if !waited {
+                    true
+                } else {
+                    let deadline = now_ms() + BOUNDED_WAIT_MS;
+                    let mut armed_late = false;
+                    while now_ms() < deadline {
+                        if swallow_ready() {
+                            armed_late = true;
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    armed_late
+                };
+                if waited && swallowed {
+                    F5_DOWN_WAITED_ARMED_LATE.fetch_add(1, Ordering::Relaxed);
                 }
+                F5_DOWN_SEEN.fetch_add(1, Ordering::Relaxed);
+                if swallowed {
+                    F5_DOWN_SWALLOWED.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    F5_DOWN_LEAKED.fetch_add(1, Ordering::Relaxed);
+                }
+                let hold = HOLD_PAIRING.load(Ordering::Relaxed);
+                let next = track_down(hold, swallowed);
+                HOLD_PAIRING.store(next, Ordering::Relaxed);
+                crate::ble::gatt_note(format!(
+                    "suppressor_ask dir=down swallow={} waited_late={} hold={next}",
+                    if swallowed { 1 } else { 0 },
+                    if waited && swallowed { 1 } else { 0 }
+                ));
+                Some(swallowed)
             }
         }
     }
@@ -267,79 +241,24 @@ mod windows_impl {
         let _ = REMOTE_HID_ACTIVITY_NOTIFY.set(callback);
     }
 
-    // ---- 钩子线程（LL 钩子 + 消息泵 + bump 消息/定时器） ----
+    // 钩子线程（LL 钩子 + 消息泵 + 链头 bump）已迁至 `crate::key_host` 的宿主
+    // 进程：根因见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md（钩子所在
+    // 进程 == 前台根窗口进程时输入法语音热键失效）。主进程只保留决策状态与
+    // 模块级 API；宿主通过 `handle_host_message` 走既有逻辑。
 
-    fn hook_thread(thread_id_tx: mpsc::Sender<u32>) {
-        unsafe {
-            let instance: HINSTANCE = match GetModuleHandleW(None) {
-                Ok(module) => module.into(),
-                Err(_) => return,
-            };
-            let _ = thread_id_tx.send(GetCurrentThreadId());
-            let _ = CLOCK_BASE.get_or_init(Instant::now);
-
-            let mut current: Option<HHOOK> = None;
-            bump_to_chain_head(&mut current);
-            if current.is_none() {
-                return;
-            }
-            HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::Relaxed);
-            // hWnd=NULL 的线程定时器忽略传入 nIDEvent（Win32 文档），WM_TIMER 的
-            // wParam 是系统分配的 id：必须按 SetTimer 返回值匹配，否则定期链头
-            // bump 永不执行（2026-09-27 key_gate 侧探针实证同款缺陷）。
-            let bump_timer = SetTimer(None, BUMP_TIMER_ID, BUMP_TIMER_MS, None);
-            SWALLOW_MASTER.store(true, Ordering::Relaxed);
-
-            let mut message = MSG::default();
-            while GetMessageW(&mut message, None, 0, 0).as_bool() {
-                match message.message {
-                    WM_QUIT => break,
-                    WM_HOOK_BUMP => bump_to_chain_head(&mut current),
-                    WM_TIMER if message.wParam.0 as usize == bump_timer => {
-                        bump_to_chain_head(&mut current)
-                    }
-                    _ => {}
-                }
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-
-            SWALLOW_MASTER.store(false, Ordering::Relaxed);
-            HOOK_THREAD_ID.store(0, Ordering::Relaxed);
-            if let Some(hook) = current.take() {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = instance;
-        }
-    }
-
-    /// 语音键抑制器句柄：持有即运行，丢弃即停止。会话武装走模块级
-    /// [`set_session_active`]（BLE 工作线程直接调用，无需传递句柄）。
-    #[derive(Debug)]
-    pub struct VoiceKeySuppressor {
-        worker: Option<JoinHandle<()>>,
-        thread_id: u32,
-    }
+    /// 语音键抑制器句柄：钩子迁出后为**空句柄**（保留类型与接线以最小化改动）。
+    /// 会话武装走模块级 [`set_session_active`]（BLE 工作线程直接调用）。
+    #[derive(Debug, Default)]
+    pub struct VoiceKeySuppressor;
 
     impl VoiceKeySuppressor {
-        /// 启动抑制线程（钩子 + 消息泵；Raw Input 归因由主监听器转发）。
+        /// 重置决策状态（钩子的实际安装由按键宿主进程在启动时完成）。
         pub fn start() -> VoiceKeySuppressor {
             SESSION_ACTIVE.store(false, Ordering::Relaxed);
             LINK_GUARD_ACTIVE.store(false, Ordering::Relaxed);
             ARMED_UNTIL_MS.store(0, Ordering::Relaxed);
             HOLD_PAIRING.store(HOLD_NONE, Ordering::Relaxed);
-            let (thread_id_tx, thread_id_rx) = mpsc::channel();
-            let worker = std::thread::Builder::new()
-                .name("sayall-voice-key-suppressor".to_owned())
-                .spawn(move || hook_thread(thread_id_tx))
-                .ok();
-            let thread_id = thread_id_rx.recv().unwrap_or(0);
-            VoiceKeySuppressor { worker, thread_id }
-        }
-
-        /// ATVV 语音会话起止（等价模块级 [`set_session_active`]）。
-        pub fn set_session_active(&self, active: bool) {
-            set_session_active(active);
+            VoiceKeySuppressor
         }
     }
 
@@ -404,32 +323,12 @@ mod windows_impl {
                 REMOTE_F5_RAW_OBSERVED.load(Ordering::Relaxed),
                 LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
             ));
-            let thread_id = HOOK_THREAD_ID.load(Ordering::Relaxed);
-            if thread_id != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(thread_id, WM_HOOK_BUMP, WPARAM(0), LPARAM(0));
-                }
-            }
+            // 钩子在宿主进程：会话开始请求一次链头 bump（与迁移前等价；
+            // 宿主未就绪时为 no-op）。
+            crate::key_host::bump_suppressor_hook();
         } else {
             SESSION_ACTIVE.store(false, Ordering::Relaxed);
             ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
-        }
-    }
-
-    impl Drop for VoiceKeySuppressor {
-        fn drop(&mut self) {
-            SWALLOW_MASTER.store(false, Ordering::Relaxed);
-            SESSION_ACTIVE.store(false, Ordering::Relaxed);
-            HOLD_PAIRING.store(HOLD_NONE, Ordering::Relaxed);
-            HOOK_THREAD_ID.store(0, Ordering::Relaxed);
-            if self.thread_id != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-                }
-            }
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
         }
     }
 }
@@ -443,10 +342,13 @@ pub use windows_impl::{
 #[cfg(windows)]
 pub use windows_impl::{wetype_marker_count, wetype_marker_last_extra};
 
-#[cfg(all(windows, test))]
-pub use windows_impl::{
-    decide, is_wetype_marker, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+#[cfg(windows)]
+pub(crate) use windows_impl::{
+    handle_host_message, is_wetype_marker, HostSuppressorMessage, VK_F5,
 };
+
+#[cfg(all(windows, test))]
+pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL};
 
 #[cfg(test)]
 mod tests {
