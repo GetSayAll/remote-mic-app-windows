@@ -370,7 +370,8 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   await openPage("设置");
   mark("settings_page");
   // 2026-10-02 设置页改版（对齐 Mac 新设置页）：顶部模块 = 应用标识 + 版本 +
-  // 检查更新；通用 / 问题反馈两个分组在卡外有分组标题。
+  // 检查更新；各分组在卡外有分组标题。2026-10-08 起多一个「首次设置」分组
+  // （向导重跑入口，随首次设置向导一起交付）。
   const settingsOverview = document.querySelector<HTMLElement>("article.settings-overview");
   assert(settingsOverview !== null, "设置页缺少顶部标识与检查更新模块");
   assert(
@@ -385,9 +386,13 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     document.querySelectorAll<HTMLElement>(".settings-section .section-title"),
   ).map((element) => element.textContent?.trim());
   assert(
-    sectionTitles.join(" / ") === "通用 / 问题反馈",
+    sectionTitles.join(" / ") === "通用 / 首次设置 / 问题反馈",
     `设置页分组标题异常：${sectionTitles.join(" / ")}`,
   );
+  const wizardEntry = Array.from(
+    document.querySelectorAll<HTMLButtonElement>(".settings-section .settings-row button"),
+  ).find((button) => button.textContent?.trim() === "重新运行向导");
+  assert(wizardEntry !== null, "设置页缺少「重新运行向导」入口");
   const entryLabels = Array.from(
     document.querySelectorAll<HTMLButtonElement>(".settings-section .button-row button"),
   ).map((button) => button.textContent?.trim());
@@ -395,7 +400,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     entryLabels.length === 2 && entryLabels[0] === "官网" && entryLabels[1] === "GitHub",
     `设置页问题反馈入口异常：${entryLabels.join(" / ")}`,
   );
-  steps.push("设置页顶部为应用标识/版本/检查更新，问题反馈分组提供官网与 GitHub 入口");
+  steps.push("设置页顶部为应用标识/版本/检查更新，含「重新运行向导」入口与问题反馈（官网/GitHub）");
   await recordExternalEntry("官网", steps, simulationOptions.skipExternalEntries);
   await recordExternalEntry("GitHub", steps, simulationOptions.skipExternalEntries);
 

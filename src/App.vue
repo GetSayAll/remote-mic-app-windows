@@ -32,6 +32,16 @@ let initialRuntimeReported = false;
 /** 未完成首次设置时进入向导（激活开关见 ONBOARDING_WIZARD_ENABLED）。 */
 const showOnboarding = ref(false);
 
+/**
+ * 运行时仿真冒烟（构建期 `VITE_SAYALL_RUNTIME_SIMULATION=1`）跑的是**主界面**旅程
+ * （`src/runtime-simulation.ts`：连接 / 按键 / 设置等页面 + IPC），不是首启体验。
+ * 它用全新的隔离状态目录启动，状态判定必然走向导；向导一渲染，旅程等待的导航与
+ * 页面就不存在（2026-10-08 CI 实测：`等待 导航"连接" 超时`）。因此该构建下跳过
+ * 向导门禁。真机首启与硬件信号走查（`Testing/run-hardware-signal-script.ps1`，不带
+ * 这个构建标志）不受影响，仍按状态进入向导。
+ */
+const runtimeSimulationBuild = import.meta.env.VITE_SAYALL_RUNTIME_SIMULATION === "1";
+
 function onOnboardingCompleted(): void {
   showOnboarding.value = false;
   // 完成后落到「连接」页：先看到四项就绪状态，再开始日常使用。
@@ -120,8 +130,8 @@ onMounted(async () => {
   }
   window.addEventListener("keydown", handleWindowKeydown, true);
   // 首次使用向导：读取向导状态决定是否进入向导模式；读取失败不阻断启动
-  // （Rust 侧已记录失败原因，用户仍可用主界面）。
-  if (ONBOARDING_WIZARD_ENABLED) {
+  // （Rust 侧已记录失败原因，用户仍可用主界面）。仿真冒烟构建跳过（见上方说明）。
+  if (ONBOARDING_WIZARD_ENABLED && !runtimeSimulationBuild) {
     try {
       const onboardingState = await getOnboardingState();
       showOnboarding.value = onboardingState.isActive;
