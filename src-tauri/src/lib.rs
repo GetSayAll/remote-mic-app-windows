@@ -1022,6 +1022,20 @@ fn classify_auto_trigger(snapshot: &BridgeSnapshot) -> AutoTriggerCheck {
     }
 }
 
+/// 捕获是否「该生效却一直没生效」（纯判定，单测覆盖）。
+///
+/// `target_usages` = 应用下发给 agent 的目标集合；`owned_usages` = agent 已 ACK
+/// 且仍在租约内的集合。下发过目标、宽限期内一个都没被接管，说明捕获链没通——
+/// 典型原因：宿主里是旧世代的 tap（令牌接不上）、注入失败、或 agent 读不到配置。
+fn capture_inactive_due_to_missing_ownership(
+    target_usages: usize,
+    owned_usages: usize,
+    connected_ms: u64,
+    grace_ms: u64,
+) -> bool {
+    target_usages > 0 && owned_usages == 0 && connected_ms >= grace_ms
+}
+
 /// 常驻对账的节奏参数（纯常量，测试钉住）。
 ///
 /// 2026-10-04 用户要求「重启后自动恢复全按键支持」。旧实现是**一次性**的：
@@ -1037,6 +1051,14 @@ const AUTO_TRIGGER_RAPID_MS: u64 = 5_000;
 const AUTO_TRIGGER_STEADY_MS: u64 = 30_000;
 /// 已连接后的观察间隔：助手掉线（崩溃 / 宿主重启）要能被发现并重新拉起。
 const AUTO_TRIGGER_WATCH_MS: u64 = 15_000;
+/// 「桥连上了」到「捕获真的在生效」之间允许的宽限。
+///
+/// 桥连接只说明助手进程活着；捕获要生效还需要 agent 拿到所有权（ACK）。
+/// 2026-10-08 现场：卸载残留的旧世代 tap 让 agent 永远握不上手，三键与语音键
+/// 全断，而当时日志里只有一条 `reason=helper_connected` 的"成功"——界面于是
+/// 显示"已开启"却按不动。超过本宽限仍没有所有权就落一条可分流的
+/// `capture_inactive`，恢复时再落一条 `capture_resumed`。
+const AUTO_TRIGGER_CAPTURE_GRACE_MS: u64 = 20_000;
 /// 开关关闭 / 桥不在监听时的复查间隔（不触发，只等待状态变化）。
 const AUTO_TRIGGER_IDLE_MS: u64 = 30_000;
 /// 前几轮快速重试的轮数。
@@ -1139,6 +1161,9 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
     // 以下标志只控制「状态刚变化时记一条」，避免空闲期重复刷屏。
     let mut bridge_unavailable_logged = false;
     let mut active_seen = false;
+    // 捕获是否真的在生效：桥连上 ≠ 捕获生效（见 AUTO_TRIGGER_CAPTURE_GRACE_MS）。
+    let mut connected_since: Option<std::time::Instant> = None;
+    let mut capture_inactive_logged = false;
     loop {
         let enabled = settings
             .load()
@@ -1159,6 +1184,8 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 consecutive = 0;
                 was_connected = false;
                 bridge_unavailable_logged = false;
+                connected_since = None;
+                capture_inactive_logged = false;
                 std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
             }
             ReconcileAction::WaitBridge => {
@@ -1172,6 +1199,8 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 active_seen = true;
                 was_connected = false;
                 consecutive = 0;
+                connected_since = None;
+                capture_inactive_logged = false;
                 std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
             }
             ReconcileAction::Connected => {
@@ -1179,6 +1208,37 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                     sayall_windows::gatt_note(format!(
                         "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=helper_connected trigger_attempts={consecutive}"
                     ));
+                    connected_since = Some(std::time::Instant::now());
+                    capture_inactive_logged = false;
+                }
+                // 「助手连上」不等于「捕获生效」：agent 没拿到所有权时按键一条都不过桥。
+                // 超过宽限仍未接管就落一条可分流的失败日志（含去向提示），恢复时补一条
+                // 成功——不让「显示已开启、实际按不动」成为静默状态（2026-10-08 现场）。
+                let connected_ms = connected_since
+                    .map(|since| since.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                if capture_inactive_due_to_missing_ownership(
+                    snapshot.target_usages.len(),
+                    snapshot.owned_usages.len(),
+                    connected_ms,
+                    AUTO_TRIGGER_CAPTURE_GRACE_MS,
+                ) {
+                    if !capture_inactive_logged {
+                        sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=capture_inactive phase=completed \
+                             terminal_result=failed reason=agent_never_acked retryable=true \
+                             elapsed_ms={connected_ms} hint=reconnect_remote {}",
+                            bridge_health_summary(&snapshot)
+                        ));
+                        capture_inactive_logged = true;
+                    }
+                } else if capture_inactive_logged {
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=capture_resumed phase=completed \
+                         terminal_result=passed owned_usages={} elapsed_ms={connected_ms}",
+                        snapshot.owned_usages.len()
+                    ));
+                    capture_inactive_logged = false;
                 }
                 active_seen = true;
                 was_connected = true;
@@ -1197,6 +1257,8 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                     );
                     was_connected = false;
                     consecutive = 0;
+                    connected_since = None;
+                    capture_inactive_logged = false;
                 }
                 active_seen = true;
                 consecutive += 1;
@@ -3399,6 +3461,31 @@ mod tests {
             classify_auto_trigger(&snapshot_with_phase(BridgePhase::Stopped)),
             AutoTriggerCheck::Abort
         );
+    }
+
+    /// 「桥连上」不等于「捕获生效」（2026-10-08 现场：卸载残留的旧世代 tap 让 agent
+    /// 永远握不上手，界面显示"已开启"、三键与语音键全断，而日志里只有一条成功）。
+    /// 判据：下发过捕获目标 + agent 一个都没接管 + 过了宽限 ⇒ 判捕获未生效。
+    #[test]
+    fn capture_inactive_needs_targets_without_ownership_after_grace() {
+        assert!(capture_inactive_due_to_missing_ownership(
+            3, 0, 20_000, 20_000
+        ));
+        assert!(capture_inactive_due_to_missing_ownership(
+            3, 0, 60_000, 20_000
+        ));
+        // 宽限内不算：助手刚连上、agent 还在握手。
+        assert!(!capture_inactive_due_to_missing_ownership(
+            3, 0, 19_999, 20_000
+        ));
+        // agent 已接管 ⇒ 正常，不报。
+        assert!(!capture_inactive_due_to_missing_ownership(
+            3, 3, 60_000, 20_000
+        ));
+        // 没有下发目标（用户没映射增强键）⇒ 不适用，不许误报。
+        assert!(!capture_inactive_due_to_missing_ownership(
+            0, 0, 60_000, 20_000
+        ));
     }
 
     /// 兜底失败行必须自带"差在哪一步"的对账字段（2026-10-01 现场教训：

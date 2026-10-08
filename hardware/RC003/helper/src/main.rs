@@ -110,6 +110,18 @@ mod imp {
     /// 30 s 足够覆盖 agent 侧的 CONNECT_TIMEOUT(3 s) + 重连周期(1 s)。
     const DEFAULT_AWAIT_HELLO_S: u64 = 30;
 
+    /// 「接管常驻 tap」（`DllPlan::Attach`）的核验窗口：窗口内拿不到**已鉴权**的
+    /// agent 握手，就判定宿主里那份 tap 属于旧世代，改为另起一代注入。
+    ///
+    /// 为什么必须有（2026-10-08 现场实证）：磁盘上存在 `session.token` 只说明
+    /// "以前跑过一代"，**不说明**宿主里那份 tap 用的就是这个令牌——卸载/重装会
+    /// 重新生成令牌，而承载遥控器的宿主进程（WUDFHost）仍映射着上一代的 Gadget，
+    /// 那个 agent 拿的是旧令牌，永远握手不上（`[REJECT] reason=token_mismatch`）。
+    /// 旧实现据此选了 Attach 并静默跳过注入：桥连着、界面显示"已开启"（应用侧只看桥），
+    /// 但一条按键边沿都不过桥（`edges=0`），用户看到的是「全按键支持开着但没用」。
+    /// 8 s ≈ 两个 agent 重连周期（RECONNECT_MS）之和再加余量。
+    const ATTACH_VERIFY_MS: u64 = 8_000;
+
     /// targets 下发后等不到 `targets_ack` 时的重发节奏：前 `ACK_RESEND_FAST_N` 次
     /// 每 `ACK_RESEND_FAST_MS` 一次，之后放慢到 `ACK_RESEND_SLOW_MS`。
     ///
@@ -1887,6 +1899,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             return Err("--attach-only 要求宿主里已有 tap，但模块枚举没有发现。".to_string());
         }
         Ok(DllPlan::Canonical)
+    }
+
+    /// 接管核验判据（纯函数，自检覆盖）：选了「接管常驻 tap」、窗口内**没有**拿到
+    /// 已鉴权的 agent 握手、且还没升级过 ⇒ 那份 tap 是旧世代，应当另起一代注入。
+    fn attach_verification_expired(
+        plan_is_attach: bool,
+        saw_authenticated: bool,
+        escalated: bool,
+        elapsed_ms: u64,
+        verify_ms: u64,
+    ) -> bool {
+        plan_is_attach && !saw_authenticated && !escalated && elapsed_ms >= verify_ms
     }
 
     /// 绑定回环端口。单独抽出来有两个目的：①让失败文案**可操作**；
@@ -4850,12 +4874,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 是否曾经接到过**已鉴权**的 agent。注意不能用 `session.authenticated`：
         // 连接可以断掉重来，那个字段会被重置；而"这辈子到底有没有连上过"才是判据。
         let mut saw_authenticated = false;
-        let hello_deadline = if args.await_hello > 0 {
+        let mut hello_deadline = if args.await_hello > 0 {
             Some(started + Duration::from_secs(args.await_hello))
         } else {
             None
         };
         let mut no_hello = false;
+        // 接管核验（见 ATTACH_VERIFY_MS）：Attach 只说明"宿主里有一份我们的 Gadget"，
+        // 不说明"它握的令牌与手上这份一致"——窗口内等不到已鉴权握手就另起一代注入。
+        let attach_plan = matches!(plan, DllPlan::Attach);
+        let mut escalated_attach = false;
 
         loop {
             if stop_requested(&stop) {
@@ -4888,6 +4916,56 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ],
                     );
                     break;
+                }
+            }
+            if attach_verification_expired(
+                attach_plan,
+                saw_authenticated,
+                escalated_attach,
+                (Instant::now() - started).as_millis() as u64,
+                ATTACH_VERIFY_MS,
+            ) {
+                escalated_attach = true;
+                logger.kv(
+                    "[ATTACH]",
+                    &[
+                        ("verify", "failed".into()),
+                        ("reason", "no_authenticated_agent".into()),
+                        ("action", "inject_new_generation".into()),
+                        (
+                            "note",
+                            "常驻 tap 握的是我们接不上的旧令牌（旧世代）；按自愈规则另起一代注入"
+                                .into(),
+                        ),
+                    ],
+                );
+                let generation_plan = DllPlan::Generation(String::new());
+                match prepare_runtime(&args, &gadget_src, &logger, &generation_plan) {
+                    Ok(prepared) => {
+                        reap_generations(&args.runtime_dir, prepared.dll.parent(), &logger);
+                        let _ = PREPARED_GADGET_DLL.set(prepared.dll.clone());
+                        match inject_gadget(target_pid, &prepared.dll, &logger) {
+                            Ok(injected) => {
+                                logger.kv(
+                                    "[DLL]",
+                                    &dll_report_fields(&generation_plan, &prepared),
+                                );
+                                injection = Some(injected);
+                                // 新世代的 agent 也要一个完整的握手窗口。
+                                hello_deadline = if args.await_hello > 0 {
+                                    Some(Instant::now() + Duration::from_secs(args.await_hello))
+                                } else {
+                                    None
+                                };
+                            }
+                            Err(error) => logger.line(&format!(
+                                "[WARN] 另起一代注入失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                            )),
+                        }
+                    }
+                    Err(error) => logger.line(&format!(
+                        "[WARN] 另起一代准备运行时目录失败：{error}；继续等待 agent 握手，超时按 [NO-HELLO] 报错。"
+                    )),
                 }
             }
             if !saw_authenticated {
@@ -6150,6 +6228,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             };
             check(&format!("放置策略：{label}"), ok, detail);
         }
+
+        // 14b) 接管核验：Attach 等不到已鉴权握手 ⇒ 另起一代（2026-10-08 现场：卸载残留的
+        // 旧世代 tap 让"接管"永远接不上，三键与语音键全断，且界面显示正常）
+        let attach_verify_cases: [(bool, bool, bool, u64, bool); 6] = [
+            (true, false, false, ATTACH_VERIFY_MS, true),
+            (true, false, false, 60_000, true),
+            (true, true, false, 60_000, false),
+            (true, false, false, ATTACH_VERIFY_MS - 1, false),
+            (true, false, true, 60_000, false),
+            (false, false, false, 60_000, false),
+        ];
+        let attach_ok = attach_verify_cases
+            .iter()
+            .all(|(plan_is_attach, saw, escalated, elapsed, want)| {
+                attach_verification_expired(
+                    *plan_is_attach,
+                    *saw,
+                    *escalated,
+                    *elapsed,
+                    ATTACH_VERIFY_MS,
+                ) == *want
+            });
+        check(
+            "接管核验：窗口内无鉴权握手即另起一代（旧世代 tap 自愈）",
+            attach_ok,
+            format!("{} 例", attach_verify_cases.len()),
+        );
 
         // 15) 复用/覆盖判定：决定"会不会去撞那个被宿主锁住的文件"的就是这一行
         let dll_cases: [(bool, bool, DllAction); 3] = [
