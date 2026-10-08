@@ -762,9 +762,21 @@ mod imp {
     struct HostEntry {
         pid: u32,
         enumerator: String,
-        /// 不保留设备名与实例名：它们含设备接口路径（VID/PID/REV/实例序号），属
-        /// `LOGGING.md` 隐私红线里的"HID 路径"。排错只需要 pid / 枚举器 / 是否命中 RC003。
+        /// **只在卸载清理时用**：对 RC003 设备做一次禁用→启用，放掉还在映射 Gadget 的
+        /// 宿主进程（2026-10-08 方案 B）。**绝不进日志**——它含设备接口路径（VID/PID/REV/
+        /// 实例序号），属 `LOGGING.md` 隐私红线的"HID 路径"；排错只用 pid / 枚举器 / 命中。
+        rc003_instance_id: Option<String>,
+        /// 不保留设备名：它同样含设备接口路径，排错不需要它。
         is_rc003: bool,
+    }
+
+    /// RC003 识别判据（纯函数）：BTHLEDevice 枚举器 + HID 服务前缀 + 本型号硬件串。
+    /// 抽出来是为了让**扫描与卸载清理共用同一判据**，避免两处漂移。
+    fn device_is_rc003(enumerator: &str, device: &str) -> bool {
+        let folded = device.to_lowercase();
+        enumerator.eq_ignore_ascii_case("bthledevice")
+            && folded.starts_with(&HID_SERVICE_PREFIX.to_lowercase())
+            && folded.contains(RC003_HARDWARE_TOKEN)
     }
 
     fn reg_subkeys(key: Handle) -> Vec<String> {
@@ -1135,13 +1147,16 @@ mod imp {
                             continue;
                         }
                     };
-                    let folded = device.to_lowercase();
+                    let is_rc003 = device_is_rc003(enumerator.as_str(), device.as_str());
                     scan.entries.push(HostEntry {
                         pid,
                         enumerator: enumerator.clone(),
-                        is_rc003: enumerator.eq_ignore_ascii_case("bthledevice")
-                            && folded.starts_with(&HID_SERVICE_PREFIX.to_lowercase())
-                            && folded.contains(RC003_HARDWARE_TOKEN),
+                        rc003_instance_id: if is_rc003 {
+                            Some(instance.clone())
+                        } else {
+                            None
+                        },
+                        is_rc003,
                     });
                 }
                 unsafe { RegCloseKey(device_key) };
@@ -2851,11 +2866,246 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 把文件安排到"下次重启删除"（`MoveFileEx` DELAY_UNTIL_REBOOT）。
-    /// 写待删清单需要提权；失败就返回 false，由调用方记成 failures。
+    ///
+    /// 先查一遍已有清单：同一个路径**不重复登记**（2026-10-08 现场：一天里多次卸载/升级，
+    /// 同一个 dll 在 `PendingFileRenameOperations` 里留了 8 条重复）。写待删清单需要提权；
+    /// 失败就返回 false，由调用方记成 failures。
     fn schedule_delete_on_reboot(path: &Path) -> bool {
         const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
+        if pending_reboot_listing_contains(&pending_reboot_blob(), path) {
+            return true;
+        }
         let wide = to_wide(path.to_string_lossy().as_ref());
         unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+    }
+
+    /// 读取 `PendingFileRenameOperations` 的原始内容（多字符串；转成一个字符串只用于包含判断）。
+    /// 读不到返回空串——包含判断于是为 false，照常走 `MoveFileEx`。
+    fn pending_reboot_blob() -> String {
+        let sub = to_wide("SYSTEM\\CurrentControlSet\\Control\\Session Manager");
+        let name = to_wide("PendingFileRenameOperations");
+        let mut key: Handle = std::ptr::null_mut();
+        let rc = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, KEY_READ, &mut key) };
+        if rc != ERROR_SUCCESS {
+            return String::new();
+        }
+        let mut kind = 0u32;
+        let mut len = 0u32;
+        let rc = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                std::ptr::null_mut(),
+                &mut len,
+            )
+        };
+        if rc != ERROR_SUCCESS || len == 0 {
+            unsafe { RegCloseKey(key) };
+            return String::new();
+        }
+        let mut buf = vec![0u8; len as usize];
+        let rc = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                buf.as_mut_ptr(),
+                &mut len,
+            )
+        };
+        unsafe { RegCloseKey(key) };
+        if rc != ERROR_SUCCESS {
+            return String::new();
+        }
+        let wide: Vec<u16> = buf
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        from_wide(&wide)
+    }
+
+    /// 纯判定（自检覆盖）：待删清单里是否已含这个路径。条目形如 `*1\??\C:\…`，按不区分
+    /// 大小写的包含判断即可——这张清单只作去重用，不解析语义。
+    fn pending_reboot_listing_contains(listing: &str, path: &Path) -> bool {
+        let needle = path.to_string_lossy().to_lowercase();
+        !needle.is_empty() && listing.to_lowercase().contains(&needle)
+    }
+
+    // ── 卸载清理专用 FFI：SetupAPI 设备状态切换 + 进程等待 ──────────────
+    //
+    // 为什么自声明：助手是自包含 spike，不引 windows crate（既有 FFI 同样自声明）。
+    #[repr(C)]
+    struct SpDevinfoData {
+        cb_size: u32,
+        class_guid: [u8; 16],
+        dev_inst: u32,
+        reserved: usize,
+    }
+
+    #[repr(C)]
+    struct SpClassInstallHeader {
+        cb_size: u32,
+        install_function: u32,
+    }
+
+    #[repr(C)]
+    struct SpPropchangeParams {
+        header: SpClassInstallHeader,
+        state_change: u32,
+        scope: u32,
+        hw_profile: u32,
+    }
+
+    const DIF_PROPERTYCHANGE: u32 = 0x0000_0012;
+    const DICS_ENABLE: u32 = 0x0000_0001;
+    const DICS_DISABLE: u32 = 0x0000_0002;
+    const DICS_FLAG_GLOBAL: u32 = 0x0000_0001;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+
+    #[link(name = "setupapi")]
+    extern "system" {
+        fn SetupDiCreateDeviceInfoList(
+            class_guid: *const c_void,
+            hwnd_parent: *mut c_void,
+        ) -> *mut c_void;
+        fn SetupDiOpenDeviceInfoW(
+            set: *mut c_void,
+            instance_id: *const u16,
+            hwnd_parent: *mut c_void,
+            open_flags: u32,
+            info: *mut SpDevinfoData,
+        ) -> i32;
+        fn SetupDiSetClassInstallParamsW(
+            set: *mut c_void,
+            info: *mut SpDevinfoData,
+            params: *mut SpClassInstallHeader,
+            size: u32,
+        ) -> i32;
+        fn SetupDiCallClassInstaller(
+            function: u32,
+            set: *mut c_void,
+            info: *mut SpDevinfoData,
+        ) -> i32;
+        fn SetupDiDestroyDeviceInfoList(set: *mut c_void) -> i32;
+    }
+
+    // kernel32 的 OpenProcess / WaitForSingleObject / CloseHandle 本文件已声明（复用即可）。
+
+    /// 卸载清理专用：对遥控器设备做一次**禁用 → 启用**，放掉仍在映射 Gadget 的宿主进程；
+    /// 之后再删运行时目录就不会被文件锁挡住（2026-10-08 方案 B：不把"断开遥控器"推给用户，
+    /// 也不弹窗）。
+    ///
+    /// 安全边界（写在前面，改这里前先读）：
+    /// - **永远重新启用**：禁用成功之后无论后面发生什么，都会尝试重新启用（最多 5 次）；
+    ///   只有启用也失败时才会留下"设备被禁用"的状态，且会在日志里明确写出来。
+    /// - 共享宿主（宿主里还挂着别的设备）下禁用不会让宿主退出：等待超时后照常重新启用，
+    ///   由调用方回退到"安排到重启删除"。
+    /// - 任何一步失败都只返回 false，不 panic、不打断卸载。
+    /// - 只在这轮清理**确有删不掉的文件**时才被调用（调用方保证）。
+    #[cfg(windows)]
+    fn reset_rc003_device_link(instance_id: &str, host_pid: Option<u32>, logger: &Logger) -> bool {
+        let switch_state = |disable: bool| -> bool {
+            unsafe {
+                let set = SetupDiCreateDeviceInfoList(std::ptr::null(), std::ptr::null_mut());
+                if set.is_null() || set as isize == -1 {
+                    return false;
+                }
+                let mut info = SpDevinfoData {
+                    cb_size: std::mem::size_of::<SpDevinfoData>() as u32,
+                    class_guid: [0u8; 16],
+                    dev_inst: 0,
+                    reserved: 0,
+                };
+                let wide = to_wide(instance_id);
+                let mut params = SpPropchangeParams {
+                    header: SpClassInstallHeader {
+                        cb_size: std::mem::size_of::<SpPropchangeParams>() as u32,
+                        install_function: DIF_PROPERTYCHANGE,
+                    },
+                    state_change: if disable { DICS_DISABLE } else { DICS_ENABLE },
+                    scope: DICS_FLAG_GLOBAL,
+                    hw_profile: 0,
+                };
+                let ok =
+                    SetupDiOpenDeviceInfoW(set, wide.as_ptr(), std::ptr::null_mut(), 0, &mut info)
+                        != 0
+                        && SetupDiSetClassInstallParamsW(
+                            set,
+                            &mut info,
+                            &mut params.header,
+                            std::mem::size_of::<SpPropchangeParams>() as u32,
+                        ) != 0
+                        && SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set, &mut info) != 0;
+                let _ = SetupDiDestroyDeviceInfoList(set);
+                ok
+            }
+        };
+
+        // 宿主进程退出了吗？退出了文件锁就没了。开不到句柄（多半已退出）也算退出。
+        let host_exited = |pid: u32, budget_ms: u32| -> bool {
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(budget_ms as u64);
+            loop {
+                let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+                if handle.is_null() {
+                    return true;
+                }
+                let waited = unsafe { WaitForSingleObject(handle, 200) };
+                let _ = unsafe { CloseHandle(handle) };
+                if waited == WAIT_OBJECT_0 {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+            }
+        };
+
+        logger.line("[CLEANUP] 运行时文件被宿主占用：对遥控器设备做一次禁用→启用以释放文件锁（不记录设备身份）。");
+        if !switch_state(true) {
+            logger.line("[CLEANUP] 禁用设备失败：跳过释放，回退到「安排到重启删除」。");
+            return false;
+        }
+        let released = match host_pid {
+            Some(pid) => host_exited(pid, 8_000),
+            None => true,
+        };
+        // 无论宿主是否退出，都必须把设备放回去。
+        let mut reenabled = false;
+        for _ in 0..5 {
+            if switch_state(false) {
+                reenabled = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        if !reenabled {
+            logger.line(
+                "[CLEANUP] ⚠ 设备重新启用失败：设备可能停在禁用状态，请在设备管理器里手动启用（这一次卸载不会重试）。",
+            );
+            return false;
+        }
+        logger.kv(
+            "[CLEANUP]",
+            &[
+                ("device_cycle", "reenabled".into()),
+                ("host_released", released.to_string()),
+            ],
+        );
+        released
+    }
+
+    #[cfg(not(windows))]
+    fn reset_rc003_device_link(
+        _instance_id: &str,
+        _host_pid: Option<u32>,
+        _logger: &Logger,
+    ) -> bool {
+        false
     }
 
     /// 删干净运行时目录（递归）。删不掉的文件（典型：宿主仍映射着那一代 Gadget）安排到
@@ -4394,7 +4644,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 );
                 std::process::exit(0);
             }
-            let report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+            let mut report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+            if !report.is_clean() {
+                // 2026-10-08 方案 B（用户要求：不把"断开遥控器"推给用户，也不弹窗）：
+                // 宿主进程映射着 Gadget 时文件删不掉——由提权助手对遥控器设备做一次
+                // 禁用→启用，把宿主放掉，再重试删除；失败或共享宿主时自动回退到
+                // 「安排到重启删除」（仍然不弹窗）。
+                if let Ok(scan) = enum_hosts() {
+                    if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
+                        if let Some(instance) = entry.rc003_instance_id.clone() {
+                            if reset_rc003_device_link(&instance, Some(entry.pid), &logger) {
+                                report = cleanup_runtime_dir(&args.runtime_dir, &logger);
+                            }
+                        }
+                    }
+                }
+            }
             if report.is_clean() {
                 logger.line(&format!(
                     "[CLEANUP] 已清理运行时目录（删除 {} 个目录 / {} 个文件）",
@@ -7304,6 +7569,35 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn rotation_cap_is_ten_megabytes_and_keeps_five() {
             assert_eq!(SHARED_LOG_ROTATE_BYTES, 10 * 1024 * 1024);
             assert_eq!(SHARED_LOG_KEEP_ROTATED, 5);
+        }
+    }
+
+    /// 卸载清理的两个纯判定（2026-10-08 方案 B 配套）：待删清单去重、RC003 设备判据。
+    #[cfg(test)]
+    mod uninstall_cleanup_tests {
+        use super::*;
+
+        #[test]
+        fn pending_listing_detects_an_existing_entry_case_insensitively() {
+            let listing = "*1\\??\\C:\\ProgramData\\SayAll\\rc003-helper\\frida-gadget.dll\0\0";
+            let path = PathBuf::from(r"c:\programdata\sayall\rc003-helper\frida-gadget.dll");
+            assert!(pending_reboot_listing_contains(listing, &path));
+            let other = PathBuf::from(r"C:\ProgramData\SayAll\rc003-helper\rc003_agent.js");
+            assert!(!pending_reboot_listing_contains(listing, &other));
+            // 空清单绝不能误判成"已登记"（否则 locked 文件根本不会被安排删除）。
+            assert!(!pending_reboot_listing_contains("", &path));
+        }
+
+        #[test]
+        fn rc003_match_needs_enumerator_service_prefix_and_hardware_token() {
+            let device = format!("{}_Dev_{}", HID_SERVICE_PREFIX, RC003_HARDWARE_TOKEN);
+            assert!(device_is_rc003("BTHLEDevice", &device));
+            assert!(device_is_rc003("bthledevice", &device));
+            assert!(!device_is_rc003("USB", &device));
+            assert!(!device_is_rc003(
+                "BTHLEDevice",
+                "some-other-bluetooth-device"
+            ));
         }
     }
 

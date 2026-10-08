@@ -3722,6 +3722,27 @@ mod tests {
         }
     }
 
+    /// 2026-10-08 产品决定（用户明确）：**卸载不再弹窗**——删不掉的东西由提权助手先做
+    /// 设备环释放锁、再删，仍删不掉的一律安排到重启后自动删除。这条断言防止有人
+    /// 再把"未能立即删除"的提示加回来。
+    #[test]
+    fn uninstall_never_shows_a_cleanup_message_box() {
+        let uninstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREUNINSTALL");
+        assert!(
+            !uninstall.contains("MessageBox"),
+            "卸载路径不允许出现 MessageBox（2026-10-08：不把「断开遥控器」推给用户，也不弹窗）"
+        );
+        // 清理链路的关键环节仍在：标记 + 提权助手。
+        assert!(
+            uninstall.contains("rc003-uninstall-cleanup"),
+            "卸载必须写清理标记，让运行中的助手自清（零 UAC）"
+        );
+        assert!(
+            uninstall.contains("--uninstall-cleanup"),
+            "卸载必须能拉起提权助手做清理（含需要时的设备环）"
+        );
+    }
+
     /// 安装器宽限必须**明显大于**应用自己的收尾预算，否则应用会在清理完成前被强杀，
     /// 又回到"留下孤立 GATT 会话"的老路。
     #[test]
