@@ -10,24 +10,41 @@
 
 ## 判定（A/B，单变量）
 
-变量 = 应用是否声明 `W 1`（门内延迟 150ms 的唯一开关），其余完全一致：
+变量 = 应用是否声明 `W 1`（门内延迟的唯一开关，配置目标为 150ms），其余完全一致：
 
 | 组 | 结果 |
 |---|---|
 | 开启（包 `979c59e`，后并入 main `af6b736f`）| 症状出现；报告层 agent 轨迹异常：两次 `synth:frame seen` 后**无任何后续**、一次 `synth:gate delay_ms=150` 后 `skip reason=nochange`；音频会话 `generation=8 finish` → 紧邻 `generation=9 begin`（生命周期错乱）|
 | 关闭（包 `fdc08ab`，仅关声明）| **症状不再出现**（用户复现确认）；豆包恢复此前「有时能拉起、有时拉不起」的行为 |
 
-⇒ 结论：**门内延迟（在报告层钩子内 `Thread.sleep(150)`）是引入者。**
+⇒ 结论：**当时的门内延迟实现（在报告层钩子内 `Thread.sleep(150)`）是引入者。**
+该调用实际请求等待 150 秒，并非预期的 150ms；上述 A/B 不能证明正确的 150ms 延迟也会导致同样的回归。
 
 ## 机制假设（待受控实验验证）
 
-门内延迟在 WUDFHost 的 HID ioctl 回调里阻塞 150ms，等于把**设备 HID 读完成推迟 150ms**。
-RC003 是单条 BLE 链路同时承载 HID 报告与 ATVV 语音，宿主侧对 HID 的阻塞会反压到设备侧：
+旧实现请求在 WUDFHost 的 HID ioctl 回调里等待 150 秒。
+RC003 是单条 BLE 链路同时承载 HID 报告与 ATVV 语音，宿主侧对 HID 的阻塞可能反压到设备侧：
 
 - 释放帧/后续帧的处理被推迟或异常（对应 `seen 后无后续`）；
 - 设备语音会话生命周期错乱（应用侧看到「正在接收」不结束）→ 表现为「语音键被按住」。
 
-代码侧旁证：`outPtr` 在 sleep 期间可能被栈复用/失效，sleep 后仍按原指针写入（无失效检查）。
+另一项待验证的假设：`outPtr` 在 sleep 期间可能被栈复用/失效，sleep 后仍按原指针写入（无失效检查）。
+上述反压和指针生命周期假设尚未由受控实验确认。
+
+## 2026-10-05 单位勘误与回归验证
+
+[Frida Thread.sleep API](https://frida.re/docs/javascript-api/#thread) 的参数单位是秒，
+而 gate 命令的 `delay_ms`、默认值和日志均使用毫秒。调用边界改为
+`Thread.sleep(gateDelayMs / 1000)`，使 150ms 对应 0.15 秒；同步更新 JS 与助手的 `AGENT_BUILD`。
+不改变默认值、命令语义或 `VOICE_GATE_DECLARE = false`。
+
+- `passed`：先修正 Node 测试桩与断言的单位，在旧实现上复现 4 项失败（51/55）；
+  修复后运行 `node hardware/RC003/helper/agent/agent_logic_test.mjs`，55/55 通过。
+  覆盖显式 150ms、默认值、`delay_ms=0` 仍取默认值、2000ms 上限，以及释放帧、observe、关闭门禁不等待。
+- `passed`：助手 `--selftest --no-app-bridge`（日志写入任务目录）59/59 通过；
+  仅更新 JS 代次时，已有的一致性自检会失败，同步助手代次后恢复通过。
+- `deferred`：Node 桩只验证传给 Frida 的参数和报告改写，不实际等待或运行 HID 钩子。
+  RC001/RC003 真机时序、首按成功率、阻塞和指针生命周期仍需受控验收；本次不重新启用门内延迟。
 
 ## 处置
 
