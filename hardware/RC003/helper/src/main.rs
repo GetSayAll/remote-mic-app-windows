@@ -2995,6 +2995,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     // kernel32 的 OpenProcess / WaitForSingleObject / CloseHandle 本文件已声明（复用即可）。
 
+    /// 清理后是否还需要"放掉宿主再删一次"。
+    ///
+    /// **判据只能是目录还在不在**：`CleanupReport::is_clean()` 只看 `failures`，被宿主锁住的
+    /// 文件会被记成 `files_pending_reboot`（不是失败）→ 报告说"干净"、目录里却还留着 dll。
+    /// 2026-10-08 真机复测就是栽在这里：设备环一次都没跑，两个 dll 仍留在目录里等重启。
+    fn host_release_still_needed(dir: &Path, report: &CleanupReport) -> bool {
+        // 形参 `report` 刻意保留：提醒读者"这里**故意**不看 report"。
+        let _ = report;
+        dir.exists()
+    }
+
     /// 卸载清理专用：对遥控器设备做一次**禁用 → 启用**，放掉仍在映射 Gadget 的宿主进程；
     /// 之后再删运行时目录就不会被文件锁挡住（2026-10-08 方案 B：不把"断开遥控器"推给用户，
     /// 也不弹窗）。
@@ -4645,7 +4656,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 std::process::exit(0);
             }
             let mut report = cleanup_runtime_dir(&args.runtime_dir, &logger);
-            if !report.is_clean() {
+            // 判据必须是**目录还在不在**，不能是 `report.is_clean()`：`is_clean` 只看 failures，
+            // 被宿主锁住的文件会被记成 `files_pending_reboot`（不是失败），旧判据因此直接跳过
+            // 设备环。2026-10-08 真机复测实证：那次卸载里设备环一次都没跑，两个 dll 仍留在
+            // 目录里等重启（日志 `files_pending_reboot=2 failures=-` 紧跟着
+            // 「已清理运行时目录（删除 0 个目录 / 0 个文件）」）。
+            if host_release_still_needed(&args.runtime_dir, &report) {
                 // 2026-10-08 方案 B（用户要求：不把"断开遥控器"推给用户，也不弹窗）：
                 // 宿主进程映射着 Gadget 时文件删不掉——由提权助手对遥控器设备做一次
                 // 禁用→启用，把宿主放掉，再重试删除；失败或共享宿主时自动回退到
@@ -7586,6 +7602,29 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(!pending_reboot_listing_contains(listing, &other));
             // 空清单绝不能误判成"已登记"（否则 locked 文件根本不会被安排删除）。
             assert!(!pending_reboot_listing_contains("", &path));
+        }
+
+        #[test]
+        fn host_release_gate_ignores_is_clean_and_looks_at_the_directory() {
+            // 2026-10-08 真机复测的教训：只有"待重启删除"时 is_clean() 为真，但文件还在
+            // 目录里——此时**必须**触发设备环。
+            let pending_only = CleanupReport {
+                files_deleted: 0,
+                files_pending_reboot: 2,
+                dirs_deleted: 0,
+                failures: Vec::new(),
+            };
+            assert!(
+                pending_only.is_clean(),
+                "前提：被锁住的文件只算 pending，is_clean 会是 true"
+            );
+            let existing = std::env::temp_dir();
+            assert!(
+                host_release_still_needed(&existing, &pending_only),
+                "目录还在（只剩待重启删除的文件）时仍必须放宿主再删一次"
+            );
+            let missing = existing.join("sayall-definitely-not-there-0000");
+            assert!(!host_release_still_needed(&missing, &pending_only));
         }
 
         #[test]
