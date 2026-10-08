@@ -33,6 +33,8 @@ pub mod focus_service;
 /// Windows UI Automation 后端（MTA 工作线程；非 Windows 平台不参与编译）。
 #[cfg(windows)]
 pub mod focus_windows;
+/// "前台窗口是不是我们自己"——诊断心跳的门（只比较进程号，不记录窗口身份）。
+pub mod foreground;
 #[cfg(windows)]
 pub mod graceful_exit;
 #[cfg(windows)]
