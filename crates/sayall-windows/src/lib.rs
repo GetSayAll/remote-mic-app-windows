@@ -589,6 +589,9 @@ impl WindowsPlatform {
     ///   wudf_ioctl_synth.py 的方法论约束）。
     /// * `None`（快捷键清空）→ 下发 `S -` 关闭合成。
     pub fn set_voice_hold_hotkey(&self, hotkey: Option<send_input::KeyChord>) {
+        // 诊断时间基线（2026-10-09）：按下时"距快捷键（合成目标）变更多久"进
+        // `voice_attempt`；任何一次 set 都算（含清空与启动时的配置装载）。
+        ime::note_hotkey_change();
         *lock(&self.voice_hold_hotkey) = hotkey.clone();
         #[cfg(windows)]
         {
@@ -607,6 +610,9 @@ impl WindowsPlatform {
     /// 赶不上切换——表现为"换工具后第一按拉不起"。选中即对齐把该窗口期清零；
     /// 按下时的兜底切换保留（覆盖用户手动改走输入法的情况）。
     pub fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+        // 诊断时间基线（2026-10-09）：失败样本全部来自"切完工具、快速切到目标
+        // 窗口"，按下时"距选工具多久"由此起算并进 `voice_attempt`。
+        ime::note_tool_select();
         *lock(&self.voice_input_tool) = tool;
         let Some(tool) = tool else {
             *lock(&self.ime_align_pending) = None;

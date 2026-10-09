@@ -156,6 +156,15 @@ fn read_qword(key: HKEY, name: &str) -> Option<u64> {
 
 /// Missing or partially unreadable observations must not trigger recovery.
 pub(crate) fn wetype_mic_observation() -> Option<MicObservation> {
+    mic_observation_for("wetype")
+}
+
+/// 指定标记（ConsentStore 条目名子串，**须小写**）的麦克风观测，语义与微信版一致：
+/// 缺条目、条目不可读一律返回 None（调用方不得据此做任何推断）。
+///
+/// 2026-10-09 起供 `voice_verify` 复用：豆包=`doubao`（本机实测条目
+/// `ImeService.exe` 路径含该片段，录音启停更新时间戳）、Vokie=`vokie`。
+pub(crate) fn mic_observation_for(marker: &str) -> Option<MicObservation> {
     let subkey = wide(CONSENT_NONPACKAGED);
     let mut root = HKEY::default();
     if unsafe {
@@ -198,7 +207,7 @@ pub(crate) fn wetype_mic_observation() -> Option<MicObservation> {
         }
         index += 1;
         let entry = String::from_utf16_lossy(&name[..len as usize]);
-        if !entry.to_ascii_lowercase().contains("wetype") {
+        if !entry.to_ascii_lowercase().contains(marker) {
             continue;
         }
         let mut key = HKEY::default();
@@ -231,6 +240,38 @@ pub(crate) fn wetype_mic_observation() -> Option<MicObservation> {
         let _ = RegCloseKey(root);
     }
     (complete && observation.entries > 0).then_some(observation)
+}
+
+/// 每次语音按下的"输入法是否真的开麦"验证（2026-10-09 Andy：日志需要增加）。
+///
+/// 纯日志、不改状态、有界退出：在固定延迟点读回 ConsentStore 观测，与按下前的
+/// 基线比对，落 `voice_verify ... mic=observed|not_observed|unknown`。
+/// `observed` = 输入法在按下后确实开始/持续录音（语音条被拉起的客观旁证）；
+/// `unknown` = 观测不可用，不得据此推断（如该输入法不写 ConsentStore）。
+pub(crate) fn spawn_mic_verify(
+    session: u64,
+    tool: &'static str,
+    marker: &'static str,
+    baseline: Option<MicObservation>,
+) {
+    const SAMPLES_MS: [u64; 2] = [800, 2500];
+    let _ = std::thread::Builder::new()
+        .name("sayall-mic-verify".to_owned())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            for delay in SAMPLES_MS {
+                let elapsed = started.elapsed().as_millis() as u64;
+                if elapsed < delay {
+                    std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
+                }
+                let response = response_since(baseline, mic_observation_for(marker));
+                crate::ble::gatt_note(format!(
+                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={}",
+                    started.elapsed().as_millis(),
+                    response.as_log_str(),
+                ));
+            }
+        });
 }
 
 #[cfg(test)]

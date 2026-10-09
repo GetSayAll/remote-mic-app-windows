@@ -67,6 +67,47 @@ fn is_wetype_voice_hotkey(chord: &KeyChord) -> bool {
         && chord.keys.contains(&KeyCode::LeftWindows)
 }
 
+/// 本次按下将走的注入路径（与下方 `chord_press` 分支条件严格同源；供日志与单测，
+/// 避免日志判据与分支判据各写一遍后漂移）。
+fn press_path(synth_gate: bool, has_hotkey: bool) -> &'static str {
+    if synth_gate {
+        "report_layer"
+    } else if has_hotkey {
+        "send_input"
+    } else {
+        "none"
+    }
+}
+
+/// 报告层合成目标标签（日志 `synth=`）：`off` 或具体 HID usage。
+fn synth_label(target: Option<u16>) -> String {
+    match target {
+        Some(usage) => format!("0x{usage:04X}"),
+        None => "off".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod voice_attempt_tests {
+    use super::{press_path, synth_label};
+
+    #[test]
+    fn attempt_path_mirrors_branch_precedence() {
+        // 门禁优先：合成生效时 SendInput 分支必须不可达（双写互扰，2026-09-29）。
+        assert_eq!(press_path(true, true), "report_layer");
+        assert_eq!(press_path(true, false), "report_layer");
+        assert_eq!(press_path(false, true), "send_input");
+        assert_eq!(press_path(false, false), "none");
+    }
+
+    #[test]
+    fn synth_state_label_formats_usage_or_off() {
+        assert_eq!(synth_label(None), "off");
+        assert_eq!(synth_label(Some(0x00E6)), "0x00E6");
+        assert_eq!(synth_label(Some(0x00E2)), "0x00E2");
+    }
+}
+
 pub struct BleRuntime {
     sender: Sender<WorkerMessage>,
     state: Arc<Mutex<ConnectionSnapshot>>,
@@ -1632,7 +1673,30 @@ fn handle_control(
             //   `voice_hold action=switch_after_chord` 显式留痕。
             // * 合成不生效（和弦 / 白名单外 / 助手断线回落）：走既有 SendInput
             //   注入路径，行为与 2026-09-28 之前一致。
-            if crate::key_gate::voice_synth_active() {
+            // 2026-10-09 诊断（Andy：日志需要增加；失败样本全部来自"切完工具、快速
+            // 切到目标窗口"）：按下这一瞬的路径、合成门禁、以及三个"新鲜度"年龄
+            // （距选工具 / 距快捷键变更 / 距上次会话切换）合并成一行；配合
+            // `voice_verify`（输入法是否真的开麦）即可在复现窗口一次定位。
+            let synth_gate = crate::key_gate::voice_synth_active();
+            let attempt_tool = *lock(voice_input_tool);
+            let attempt_hotkey = lock(voice_hold_hotkey).clone();
+            let synth_target = attempt_hotkey
+                .as_ref()
+                .and_then(crate::rc003_bridge::voice_synth_target);
+            let verify_marker = crate::ime::mic_marker_for(attempt_tool);
+            let verify_baseline = verify_marker.and_then(crate::wetype_revive::mic_observation_for);
+            gatt_note(format!(
+                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
+                crate::ime::tool_label(attempt_tool),
+                press_path(synth_gate, attempt_hotkey.is_some()),
+                synth_label(synth_target),
+                synth_gate,
+                crate::ime::foreground_is_self(),
+                crate::ime::age_label(crate::ime::tool_select_age_ms()),
+                crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
+                crate::ime::age_label(crate::ime::last_switch_age_ms()),
+            ));
+            if synth_gate {
                 gatt_note(format!(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
                 ));
@@ -1716,6 +1780,14 @@ fn handle_control(
                 gatt_note(format!(
                     "chord_press result=skipped session={session_id} reason=no_hotkey"
                 ));
+            }
+            if let Some(marker) = verify_marker {
+                crate::wetype_revive::spawn_mic_verify(
+                    u64::from(session_id),
+                    crate::ime::tool_label(attempt_tool),
+                    marker,
+                    verify_baseline,
+                );
             }
             if let Err(error) = audio.begin_session(generation) {
                 gatt_note(format!(
