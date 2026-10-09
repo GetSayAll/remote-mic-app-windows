@@ -645,18 +645,35 @@ impl WindowsPlatform {
 
     /// 工具选择后的一次性输入法对齐：本应用窗口失去焦点时调用
     /// （src-tauri `WindowEvent::Focused(false)`）。未布防时 no-op；布防时取走
-    /// 并执行一次切换（`ensure_session_ime` 内部仍会跳过自身仍在前台的情况）。
+    /// 并执行一次切换。
+    ///
+    /// 2026-10-09（真机实证）：旧实现取走布防后**立刻**在新线程里调
+    /// `ensure_session_ime`——但失焦事件到达时新窗口往往还没完成激活，
+    /// `GetForegroundWindow()` 仍指向我们自己，于是被 `skipped_self_foreground`
+    /// 跳过；布防是 `take()` 一次性的，对齐就此永久丢失（日志
+    /// `last_switch_age_ms=never`）。现在改为**有界等待**：轮询到"前台不再是自己"
+    /// 再执行一次；始终不变则照旧跳过（保留 2026-09-12 的 WebView 整页重载保护）。
     pub fn align_ime_after_tool_selection(&self) {
         let Some((tool, armed_at)) = lock(&self.ime_align_pending).take() else {
             return;
         };
-        crate::ble::gatt_note(format!(
-            "ime_tool_select action=fired trigger=window_blur waited_ms={}",
-            armed_at.elapsed().as_millis(),
-        ));
         let _ = std::thread::Builder::new()
             .name("sayall-ime-prealign".to_owned())
             .spawn(move || {
+                let settle = ime::wait_until_foreground_settles(
+                    ime::PREALIGN_SETTLE_BUDGET_MS,
+                    ime::PREALIGN_SETTLE_POLL_MS,
+                );
+                crate::ble::gatt_note(format!(
+                    "ime_tool_select action=fired trigger=window_blur waited_ms={} settle_ms={} polls={} still_self={}",
+                    armed_at.elapsed().as_millis(),
+                    settle.elapsed_ms,
+                    settle.polls,
+                    settle.still_self,
+                ));
+                if settle.still_self {
+                    return;
+                }
                 let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
             });
     }

@@ -130,6 +130,95 @@ pub(crate) fn foreground_is_self() -> bool {
     }
 }
 
+/// 有界等待"前台不再是我们自己"的预算与步进（2026-10-09 预对齐竞态修复）。
+///
+/// 为什么需要：窗口失焦事件（`WindowEvent::Focused(false)`）到达时，新窗口
+/// 往往还没完成激活，`GetForegroundWindow()` 仍可能指向我们自己；旧实现直接
+/// 在这一瞬间判断并**一次性消费**布防，于是对齐被 `skipped_self_foreground`
+/// 吞掉且不再重试（真机实证 2026-10-09：`last_switch_age_ms=never`）。
+pub(crate) const PREALIGN_SETTLE_BUDGET_MS: u64 = 500;
+pub(crate) const PREALIGN_SETTLE_POLL_MS: u64 = 25;
+
+/// 有界等待的结果（进日志：一次拉取即可归因"等没等到、等了多久"）。
+pub(crate) struct ForegroundSettle {
+    pub elapsed_ms: u128,
+    pub polls: u32,
+    pub still_self: bool,
+}
+
+/// 纯判定（单测覆盖）：`samples[i]` = 第 i 次轮询时"前台是否仍是本进程"。
+/// 首次出现 `false` 即视为新窗口已接管；全 `true`（含空样本）视为未让出。
+#[derive(Debug, PartialEq, Eq)]
+enum SettleOutcome {
+    SettledAfter(u32),
+    StillSelf,
+}
+
+fn settle_outcome(samples: &[bool]) -> SettleOutcome {
+    match samples.iter().position(|still_self| !*still_self) {
+        Some(index) => SettleOutcome::SettledAfter((index + 1) as u32),
+        None => SettleOutcome::StillSelf,
+    }
+}
+
+/// 有界等待：轮询 `foreground_is_self()` 到"不再是自己"或预算耗尽。
+/// 判定统一走 `settle_outcome`（单一来源），时间只负责"何时放弃"。
+pub(crate) fn wait_until_foreground_settles(budget_ms: u64, poll_ms: u64) -> ForegroundSettle {
+    let started = std::time::Instant::now();
+    let mut samples: Vec<bool> = Vec::new();
+    loop {
+        samples.push(foreground_is_self());
+        let exhausted = started.elapsed().as_millis() as u64 >= budget_ms;
+        match settle_outcome(&samples) {
+            SettleOutcome::SettledAfter(polls) => {
+                return ForegroundSettle {
+                    elapsed_ms: started.elapsed().as_millis(),
+                    polls,
+                    still_self: false,
+                };
+            }
+            SettleOutcome::StillSelf if exhausted => {
+                return ForegroundSettle {
+                    elapsed_ms: started.elapsed().as_millis(),
+                    polls: samples.len() as u32,
+                    still_self: true,
+                };
+            }
+            SettleOutcome::StillSelf => {
+                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prealign_settle_tests {
+    use super::{settle_outcome, SettleOutcome};
+
+    #[test]
+    fn settle_stops_at_the_first_non_self_sample() {
+        assert_eq!(settle_outcome(&[false]), SettleOutcome::SettledAfter(1));
+        assert_eq!(
+            settle_outcome(&[true, false]),
+            SettleOutcome::SettledAfter(2)
+        );
+        assert_eq!(
+            settle_outcome(&[true, true, false]),
+            SettleOutcome::SettledAfter(3)
+        );
+    }
+
+    #[test]
+    fn settle_reports_still_self_when_every_sample_is_self() {
+        assert_eq!(settle_outcome(&[]), SettleOutcome::StillSelf);
+        assert_eq!(settle_outcome(&[true]), SettleOutcome::StillSelf);
+        assert_eq!(
+            settle_outcome(&[true, true, true]),
+            SettleOutcome::StillSelf
+        );
+    }
+}
+
 /// 切换触发场景（日志 `scope=`）：报障时一次日志拉取即可归因"这次切换是谁要求的"。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImeSwitchScope {
