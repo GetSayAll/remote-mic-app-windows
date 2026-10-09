@@ -130,6 +130,58 @@ pub(crate) fn foreground_is_self() -> bool {
     }
 }
 
+/// 前台窗口诊断探针（2026-10-09，Andy 同意加日志）：进程号 + 窗口类名**稳定哈希**。
+///
+/// 类名哈希用于跨日志回答"失败与成功的那几按是不是打在同一个窗口类型上"
+/// （如 Chromium 类窗口 vs 记事本），不落盘明文类名；FNV-1a 64 位取高 32 位、
+/// 输出 8 位十六进制，跨进程与版本稳定（类名先转小写再哈希）。
+pub(crate) struct ForegroundProbe {
+    pub pid: u32,
+    pub class_token: String,
+}
+
+pub(crate) fn foreground_probe() -> ForegroundProbe {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return ForegroundProbe {
+                pid: 0,
+                class_token: "none".to_owned(),
+            };
+        }
+        let mut process_id: u32 = 0;
+        GetWindowThreadProcessId(foreground, Some(&mut process_id));
+        let mut buffer = [0u16; 256];
+        let len = GetClassNameW(foreground, &mut buffer);
+        let class = if len > 0 {
+            String::from_utf16_lossy(&buffer[..len as usize])
+        } else {
+            String::new()
+        };
+        ForegroundProbe {
+            pid: process_id,
+            class_token: if class.is_empty() {
+                "unknown".to_owned()
+            } else {
+                class_token(&class)
+            },
+        }
+    }
+}
+
+/// 窗口类名的稳定哈希（FNV-1a 64 → 高 32 位，8 位十六进制；输入先转小写）。
+pub(crate) fn class_token(class: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in class.to_ascii_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", (hash >> 32) as u32)
+}
+
 /// 有界等待"前台不再是我们自己"的预算与步进（2026-10-09 预对齐竞态修复）。
 ///
 /// 为什么需要：窗口失焦事件（`WindowEvent::Focused(false)`）到达时，新窗口
@@ -293,13 +345,16 @@ pub fn ensure_session_ime(
         Ok(ImeActivation::NotRequired) => "not_required",
         Err(_) => "failed",
     };
+    let probe = foreground_probe();
     crate::ble::gatt_note(format!(
-        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
+        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} fg_pid={} fg_class={} error_domain={} error_code={} retryable={}",
         target.label,
         scope.label(),
         started.elapsed().as_millis(),
         age_label(last_switch_age_ms()),
         foreground_process_name().is_some(),
+        probe.pid,
+        probe.class_token,
         if result.is_ok() { "none" } else { "tsf" },
         if result.is_ok() { "none" } else { "activation_failed" },
         result.is_err(),
@@ -559,6 +614,16 @@ mod press_context_tests {
         assert_eq!(mic_marker_for(Some(VoiceInputTool::Vokie)), Some("vokie"));
         assert_eq!(mic_marker_for(Some(VoiceInputTool::Other)), None);
         assert_eq!(mic_marker_for(None), None);
+    }
+
+    #[test]
+    fn class_token_is_stable_and_case_insensitive() {
+        let notepad = class_token("Notepad");
+        assert_eq!(notepad.len(), 8);
+        assert!(notepad.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(notepad, class_token("notepad"));
+        assert_eq!(notepad, class_token("Notepad"));
+        assert_ne!(notepad, class_token("Chrome_WidgetWin_1"));
     }
 
     #[test]

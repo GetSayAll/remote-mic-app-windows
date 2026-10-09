@@ -1685,13 +1685,16 @@ fn handle_control(
                 .and_then(crate::rc003_bridge::voice_synth_target);
             let verify_marker = crate::ime::mic_marker_for(attempt_tool);
             let verify_baseline = verify_marker.and_then(crate::wetype_revive::mic_observation_for);
+            let fg_probe = crate::ime::foreground_probe();
             gatt_note(format!(
-                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
+                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} fg_pid={} fg_class={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
                 crate::ime::tool_label(attempt_tool),
                 press_path(synth_gate, attempt_hotkey.is_some()),
                 synth_label(synth_target),
                 synth_gate,
                 crate::ime::foreground_is_self(),
+                fg_probe.pid,
+                fg_probe.class_token,
                 crate::ime::age_label(crate::ime::tool_select_age_ms()),
                 crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
                 crate::ime::age_label(crate::ime::last_switch_age_ms()),

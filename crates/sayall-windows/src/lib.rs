@@ -670,12 +670,15 @@ impl WindowsPlatform {
                     ime::PREALIGN_SETTLE_BUDGET_MS,
                     ime::PREALIGN_SETTLE_POLL_MS,
                 );
+                let probe = ime::foreground_probe();
                 crate::ble::gatt_note(format!(
-                    "ime_tool_select action=fired trigger=window_blur waited_ms={} settle_ms={} polls={} still_self={}",
+                    "ime_tool_select action=fired trigger=window_blur waited_ms={} settle_ms={} polls={} still_self={} fg_pid={} fg_class={}",
                     armed_at.elapsed().as_millis(),
                     settle.elapsed_ms,
                     settle.polls,
                     settle.still_self,
+                    probe.pid,
+                    probe.class_token,
                 ));
                 if settle.still_self {
                     return;
