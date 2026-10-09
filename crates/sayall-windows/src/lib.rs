@@ -663,6 +663,7 @@ impl WindowsPlatform {
         let Some((tool, armed_at)) = lock(&self.ime_align_pending).take() else {
             return;
         };
+        let tool_now = std::sync::Arc::clone(&self.voice_input_tool);
         let _ = std::thread::Builder::new()
             .name("sayall-ime-prealign".to_owned())
             .spawn(move || {
@@ -681,6 +682,20 @@ impl WindowsPlatform {
                     probe.class_token,
                 ));
                 if settle.still_self {
+                    return;
+                }
+                // 最小切换间隔（2026-10-09 真机实证）：相隔约 2 秒的连续真实切换会让
+                // Chromium 目标窗口进入僵死态（语音条拉不起、连按不复位、7 秒仍不出）；
+                // 间隔 ≥5 秒的同序列完全正常。把过近的切换等到间隔满足再执行；若等待
+                // 期间用户已重新选择工具（当前值不同于布防值），本次让位给新的选择。
+                let gap_waited_ms = ime::wait_for_switch_gap();
+                let superseded = *lock(&tool_now) != Some(tool);
+                if gap_waited_ms > 0 || superseded {
+                    crate::ble::gatt_note(format!(
+                        "ime_tool_select action=gap_applied waited_ms={gap_waited_ms} superseded={superseded}"
+                    ));
+                }
+                if superseded {
                     return;
                 }
                 let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
