@@ -1,13 +1,24 @@
 /**
- * 向导「复制诊断信息」的文本生成（2026-10-05 用户要求）。
+ * 向导「复制诊断信息」的文本生成（2026-10-05 用户要求；2026-10-10 扩字段）。
  *
  * 目标：onboarding 过不去时，用户一次复制即可给出定位所需的环境与状态，而不必
  * 教他导出日志。**内容一律英文**（2026-10-05 二次要求）；界面按钮与状态提示仍是
- * 中文（那是应用 UI）。分三段：
+ * 中文（那是应用 UI）。分四段：
  * - 环境：App 版本 / Build（源码修订）/ 构建通道 / Windows 版本 / 进程架构 ——
  *   都来自 Rust `get_diagnostic_report`（真实读回，不是前端拼装）；
  * - 向导：当前步骤（英文 token + 序号）、门禁码、是否被阻断；
- * - 运行状态：连接 / 音频 / 输入工具 / 全按键支持 / Vokie / 普通按键观察。
+ * - 链路：连接（是否有错误记录、②步是否已收到按键）、输入通道计数、音频
+ *   （是否有错误记录）、输入工具、Vokie、语音测试；
+ * - 会话内计数：普通按键观察数（⑥步 3 键门禁）、按键映射是否被暂挂。
+ *
+ * 2026-10-10 增补（现场"按键已收到，但遥控器已连接没选上"）：
+ * - `button_observed`：②步是否已观察到普通按键（原来只在界面与日志里，块里没有，
+ *   那次报障只能靠截图补形状）；
+ * - `Raw input:` 行：输入通道的阶段与四个计数（绑定接口数 / 原始报文 / 语义边沿 /
+ *   被丢弃报文）——"按键收不到"与"绑定失效"的分界靠这几个数；
+ * - `error=`（连接、音频各一处）：只给布尔，区分"从未尝试"与"试过且失败"，
+ *   错误原文一律不进（脱敏红线）；
+ * - `Voice test:` 行：第⑤步 attempt 的当前阶段与终态码（无终态时写 `none`）。
  *
  * 脱敏红线（与 LOGGING.md 不同）：本块是**用户主动复制**发给支持人员的内容，
  * 允许出现稳定 token（`voice_test`、`rc003` 等）；但绝不包含设备 id/名称（蓝牙
@@ -40,11 +51,25 @@ export interface OnboardingDiagnosticsSnapshot {
   bleVoiceReady: boolean;
   rawInputPhase: string;
   reconnectAttempt: number;
+  /** 连接层是否有错误记录（只给布尔；错误原文不进）。 */
+  connectionErrorPresent: boolean;
+  /** 本向导会话第②步是否已观察到普通按键。 */
+  remoteButtonObserved: boolean;
+  /** 输入通道：绑定的接口数（0 = HID 接口不在位）。 */
+  rawInputMatchedDeviceCount: number;
+  /** 输入通道：原始报文数。 */
+  rawInputRawEventCount: number;
+  /** 输入通道：语义按键边沿数。 */
+  rawInputSemanticEdgeCount: number;
+  /** 输入通道：来自遥控器但被路径过滤丢弃的报文数（绑定失效的直接证据）。 */
+  rawInputStaleEventCount: number;
   audioPhase: string;
   /** 带「推荐」标记的端点数量（只给数量，不给 id/名称）。 */
   recommendedEndpointCount: number;
   selectedRecommended: boolean;
   queuedSamples: number;
+  /** 音频层是否有错误记录（只给布尔；错误原文不进）。 */
+  audioErrorPresent: boolean;
   /** 输入工具 token（doubao / wechat / vokie / other / unset）。 */
   tool: string;
   /** 按住说话快捷键 token（right_alt / left_control+left_windows / none）。 */
@@ -52,6 +77,10 @@ export interface OnboardingDiagnosticsSnapshot {
   captureEnabled: boolean;
   vokieInstalled: boolean;
   vokieRunning: boolean;
+  /** 第⑤步 attempt 的当前阶段（VoiceAttemptState token）。 */
+  voiceTestPhase: string;
+  /** 第⑤步 attempt 的终态码（如 voice.no_transcript；无终态时 null）。 */
+  voiceTerminalCode: string | null;
   distinctButtonCount: number;
   mappingSuspended: boolean;
 }
@@ -83,15 +112,21 @@ export function formatOnboardingDiagnostics(
     `Blocked: ${yesNo(snapshot.blocked)}`,
     `Remote: phase=${snapshot.connectionPhase} model=${snapshot.model} voice_ready=${yesNo(
       snapshot.bleVoiceReady,
-    )} input_phase=${snapshot.rawInputPhase} reconnects=${snapshot.reconnectAttempt}`,
+    )} reconnects=${snapshot.reconnectAttempt} error=${yesNo(
+      snapshot.connectionErrorPresent,
+    )} button_observed=${yesNo(snapshot.remoteButtonObserved)}`,
+    `Raw input: phase=${snapshot.rawInputPhase} matched=${snapshot.rawInputMatchedDeviceCount} raw_events=${snapshot.rawInputRawEventCount} semantic_edges=${snapshot.rawInputSemanticEdgeCount} stale_events=${snapshot.rawInputStaleEventCount}`,
     `Audio: phase=${snapshot.audioPhase} recommended=${snapshot.recommendedEndpointCount} selected=${yesNo(
       snapshot.selectedRecommended,
-    )} queued_samples=${snapshot.queuedSamples}`,
+    )} queued_samples=${snapshot.queuedSamples} error=${yesNo(snapshot.audioErrorPresent)}`,
     `Input tool: ${snapshot.tool} hotkey=${snapshot.hotkey} full_key_support=${
       snapshot.captureEnabled ? "on" : "off"
     }`,
     `Vokie: ${
       snapshot.vokieRunning ? "running" : snapshot.vokieInstalled ? "installed" : "not_detected"
+    }`,
+    `Voice test: phase=${snapshot.voiceTestPhase} terminal=${
+      snapshot.voiceTerminalCode ?? "none"
     }`,
     `Buttons observed: ${snapshot.distinctButtonCount}/3`,
     `Mapping: ${snapshot.mappingSuspended ? "suspended" : "active"}`,

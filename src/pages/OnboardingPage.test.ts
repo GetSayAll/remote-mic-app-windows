@@ -711,6 +711,14 @@ describe("Onboarding diagnostics copy", () => {
     expect(text).toContain("Gate: remote.not_connected");
     expect(text).toContain("Blocked: yes");
     expect(text).toContain("Audio: phase=ready recommended=1 selected=yes");
+    // 2026-10-10 新增：②步按键观察、输入通道计数、错误位与语音测试状态
+    // （②步"按键已收到但未连接"的现场靠这几项就能自证）。
+    expect(text).toContain("button_observed=no");
+    expect(text).toContain(
+      "Raw input: phase=stopped matched=0 raw_events=0 semantic_edges=0 stale_events=0",
+    );
+    expect(text).toContain("Voice test: phase=waiting_start terminal=none");
+    expect(text).toContain("error=no");
     // 内容全英文（用户要求）；界面提示仍是中文。
     expect(text).not.toMatch(/[\u3000-\u9fff\uff00-\uffef]/);
     // 脱敏：设备 id / 端点身份不进剪贴板（挡住将来加错字段）。
