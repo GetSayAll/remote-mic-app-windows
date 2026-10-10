@@ -36,7 +36,12 @@
 1. 任意步骤点左下「复制诊断信息」→ 应显示「已复制，可直接粘贴发给开发者」；粘贴到记事本检查内容。
 2. 文本为**英文**（`SayAll diagnostics` 开头），必须包含：App version、Build（40 位源码修订）、
    Build channel、**Windows version（major.minor.build）**、Architecture、`Wizard step: <token> (n/7)`、
-   Gate、Blocked、Remote / Audio / Input tool / Vokie / Buttons observed / Mapping。
+   Gate、Blocked，以及运行行：`Remote`（含 `error=` 与 **`button_observed=`**——②步是否已收到
+   普通按键）、**`Raw input`**（phase / matched / raw_events / semantic_edges / stale_events）、
+   `Audio`（含 `error=`）、`Input tool`、`Vokie`、**`Voice test`**（attempt 阶段与终态码，
+   无终态写 `none`）、`Buttons observed`、`Mapping`。
+   现场形状自证（2026-10-10）：②步"按键已收到但应用未连接"应表现为
+   `Remote: phase=idle … button_observed=yes` + 门禁 `remote.not_connected`。
 3. 隐私检查：不得出现蓝牙地址、HID 路径、音频端点 id / 名称、文件路径、用户名或任何输入文字。
 4. 日志核对：`frontend event=onboarding phase=action reason=copy_diagnostics` 成对出现
    （begin `result=unknown` → end `result=passed detail=chars_N`）；剪贴板不可用时 end `result=failed`。
@@ -61,9 +66,17 @@
 1. 第②步点「打开蓝牙设置」：系统「蓝牙和其他设备」页应真实弹出。
 2. 第②步的「首次连接遥控器」卡应写清：长按「TV」约 3 秒进入配对；没有反应时同时长按「主页」+「菜单」
    重置蓝牙并重新进入配对；Windows 列表里找不到时先点开「高级选项」（或“更多蓝牙选项”）再刷新。
-3. 扫描并连接遥控器；按一下普通按键：门禁从「按一下普通按键」变为可继续；按语音键不应误判为普通按键。
+3. 自动连接（2026-10-10 新增）：进入②步时，若系统里**恰好只有 1 个**已配对的小米遥控器
+   且应用还没连上，应自动扫描并连接（先显示「正在寻找小米遥控器…」，随后自动连上，
+   连接行变绿）；应用会话已就绪、或候选不唯一 / 一个都没有时不自动连接。
+   停在②步期间在系统里新配对遥控器（输入通道变为在位）后同样自动连接。
+   候选不唯一时用手动流程：扫描 → 选中设备「连接」（日志 `detail=manual`）。
+4. 扫描并连接遥控器；按一下普通按键：门禁从「按一下普通按键」变为可继续；按语音键不应误判为普通按键。
    此期间按已配置映射的键（如 OK → Enter）**不应触发**用户的自定义动作（检测步骤暂挂映射）。
-4. 第③步：检测到带「推荐」标记的 CABLE 设备并自动选中；没有时给出安装与重启说明。
+5. 两态文案（2026-10-10 新增，现场反馈）：**按键已收到但应用还没连接**时（例如候选不唯一、
+   或自动连接失败），按键行说明必须是「按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。」，
+   不得写「这一项可以继续了」；连接就绪且已按键后恢复「这一项可以继续了。」。
+6. 第③步：检测到带「推荐」标记的 CABLE 设备并自动选中；没有时给出安装与重启说明。
 
 ## 用例三（核心）：第⑤步「按住说话验证」，三种工具各跑一遍
 
@@ -103,9 +116,12 @@
 - `phase=action` 成对出现：begin 时 `result=unknown`，end 时 `result=passed|failed`
   且带 `elapsed_ms`；**有 begin 没有 end = 卡在该外部调用**。
   各步的 reason 速查：
-  - ② 遥控器：`button_observation`（按键边沿订阅）、`scan_requested`（扫描，`detail=found_N`）、
-    `connect_requested`、`open_bluetooth_settings`、`mapping_suspend` / `mapping_resume`
-    （检测期间暂挂自定义按键）；
+  - ② 遥控器：`button_observation`（按键边沿订阅）、`scan_requested`（扫描；begin 行
+    `detail=auto|manual`，end 行 `detail=auto_found_N` / `manual_found_N`）、
+    `connect_requested`（`detail=auto|manual`；auto = 候选唯一时的自动连接，
+    2026-10-10 起）、`open_bluetooth_settings`、`mapping_suspend` / `mapping_resume`
+    （检测期间暂挂自定义按键）；**停在②步且没有 `scan_requested` = 自动连接未触发**
+    （输入通道不在位 / 应用已连接 / 用户已手动断开）；
   - ③ 语音设备：`refresh_endpoints`（`detail=auto|manual_total_N_rec_M`）、`select_endpoint`
     （`detail=auto|manual|fallback`）、`open_download_page`；另有 `phase=audio_route`
     （`reason=missing|not_selected|selected|ready`，状态去重）；

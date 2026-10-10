@@ -233,3 +233,15 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   只讲平台结果、不讲机制（内部链路名一律不用，见 §3 术语红线）。可用平台上
   （`available=true`）文案与行为一字不变。验收：`src/pages/ButtonsPage.test.ts`、
   `src/pages/ConnectionPage.test.ts`；ARM64 真机验收 `deferred`（本机是 x64）。
+- 2026-10-10（向导②步现场反馈：把"按键已收到"说成"可以继续了"会与门禁打架；Andy 定方向）：
+  ① 向导第②步按键行的说明句分两态——应用已连接时仍是「这一项可以继续了。」；**未连接**时改
+     「按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。」（不再写"这一项可以继续了"，
+     避免与页脚"先连接遥控器，再继续"互相矛盾；引用界面按钮名用中文双引号，见 §4）。
+  ② 同轮行为变化：进入第②步、或停留在第②步时系统侧遥控器刚出现（系统侧配对完成）后，
+     若**恰好只有一个**已配对的小米遥控器就自动扫描并连接——原来必须手动"扫描已配对设备"
+     → 选中设备"连接"；候选不唯一 / 一个都没有 / 已连接 / 已手动断开时不介入。
+     验收见 `Testing/WindowsOnboardingWizard.md` 用例二第 3–5 项。
+  ③ 报障入口同轮扩字段（不是用户文案，但属同一现场）：诊断块新增 `button_observed=`、
+     连接与音频的 `error=`、`Raw input:` 行与 `Voice test:` 行，`input_phase` 移到
+     Raw input 行；隐私口径不变（只有稳定 token / 计数 / 布尔）。记录：
+     [Bugs/2026-10-10-onboarding-remote-connect-row-inconsistent.md](../Bugs/2026-10-10-onboarding-remote-connect-row-inconsistent.md)。
