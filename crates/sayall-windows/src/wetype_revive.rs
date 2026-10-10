@@ -2,12 +2,11 @@
 //! Updates leave historical executable entries behind; enumeration order is
 //! unrelated to the version that is currently recording.
 
-use crate::send_input::{KeyChord, KeyCode};
-use crate::send_input_windows::SendInputRuntime;
 use crate::ConnectionSnapshot;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
+use windows::core::BOOL;
+use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, HWND, LPARAM};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
     REG_QWORD, REG_VALUE_TYPE,
@@ -250,10 +249,73 @@ pub(crate) fn mic_observation_for(marker: &str) -> Option<MicObservation> {
 /// 连续"未响应"计数（跨按下累计；任一按下判为 Observed 即归零）。
 static IME_HEAL_STEPS: AtomicU32 = AtomicU32::new(0);
 
-/// 步进上限：覆盖 ≤5 个输入法配置。每失败一按只推进 1 步——无法从本进程
-/// 读到"目标窗口自己的输入法"（会话级查询会撒谎：僵死时它仍报 doubao），
-/// 而目标输入法必在环形列表的 ≤(N-1) 步内，连续失败 ≤cap 次后必然落回目标。
+/// 连续救回上限（防循环的行为卫生上限；用户每重按一次至多触发一次救回）。
 const IME_HEAL_STEP_CAP: u32 = 4;
+
+/// EnumWindows 回调：采集"替身窗口"候选（经由 LPARAM 传出）。
+unsafe extern "system" fn collect_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let found = &mut *(lparam.0 as *mut Vec<HWND>);
+    found.push(hwnd);
+    BOOL(1)
+}
+
+/// 程序化"焦点往返"（2026-10-10 真机验证，替换步进方案）：**不改变前台窗口、
+/// 不切换任何输入法**——借目标线程里的替身窗口，让前台窗口收到一对
+/// `WM_KILLFOCUS/WM_SETFOCUS`，使其重绑输入法上下文；僵死态的直达解药。
+///
+/// 为什么是它：会话级切换（`TF_IPPMF_FORSESSION`）够不到"窗口自己的输入法"；
+/// 通知类消息（`WM_INPUTLANGCHANGE` / `WM_INPUTLANGCHANGEREQUEST`）实测均无效；
+/// 用户手动"点走再点回"有效，本函数即其最小等价（真机：僵死中 bounce →
+/// 下一次按下 `mic=observed`）。
+///
+/// 有界返回，只输出诊断片段供 `voice_heal` 日志；不做重试。
+pub(crate) fn focus_bounce_foreground() -> String {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let target = GetForegroundWindow();
+        if target.0.is_null() {
+            return "target=none".to_owned();
+        }
+        let target_thread = GetWindowThreadProcessId(target, None);
+        let current_thread = GetCurrentThreadId();
+        let mut windows: Vec<HWND> = Vec::new();
+        let _ = EnumWindows(
+            Some(collect_window),
+            LPARAM(&mut windows as *mut _ as isize),
+        );
+        let attached = AttachThreadInput(current_thread, target_thread, true);
+        if !attached.as_bool() {
+            return format!("target=0x{:X} attached=false", target.0 as usize);
+        }
+        // 替身窗口必须在目标线程里，且 SetFocus 成功；一个失败换下一个。
+        let mut kicker: Option<HWND> = None;
+        for hwnd in windows.iter().copied() {
+            if hwnd == target || GetWindowThreadProcessId(hwnd, None) != target_thread {
+                continue;
+            }
+            if SetFocus(Some(hwnd)).is_ok() {
+                kicker = Some(hwnd);
+                break;
+            }
+        }
+        if kicker.is_none() {
+            // 无可用替身：退化为直接摘焦点（底层调用仍会发生）。
+            let _ = SetFocus(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let restored = SetFocus(Some(target)).is_ok();
+        let detached = AttachThreadInput(current_thread, target_thread, false).as_bool();
+        format!(
+            "target=0x{:X} attached=true kicker=0x{:X} restored={restored} detached={detached}",
+            target.0 as usize,
+            kicker.map(|hwnd| hwnd.0 as usize).unwrap_or(0)
+        )
+    }
+}
 
 /// 自动救回的上下文：仅当按下目标工具有可切换的输入法目标时携带。
 pub(crate) struct ImeHealContext {
@@ -292,10 +354,10 @@ fn wait_session_end(state: &Arc<Mutex<ConnectionSnapshot>>, budget_ms: u64) -> b
 /// `observed` = 输入法在按下后确实开始/持续录音（语音条被拉起的客观旁证）；
 /// `unknown` = 观测不可用，不得据此推断（如该输入法不写 ConsentStore）。
 ///
-/// 2026-10-10 起附带**自动救回**（Andy 真机验证：僵死状态下手动 Win+Space
-/// 切走再切回目标输入法即可恢复）：两轮判据均确认未响应 → 等会话结束后注入
-/// 一次 Win+Space（步进 1）。失败粘滞时用户每重按一次自动前进 1 步，
-/// 至多 cap 步必然落回目标输入法，重按即恢复；恢复（observed）即归零。
+/// 2026-10-10 起附带**自动救回**（直达、用户无感）：两轮判据均确认未响应 →
+/// 等会话结束后对前台窗口做一次程序化"焦点往返"（`focus_bounce_foreground`，
+/// 不切换输入法、不改前台窗口）。恢复（observed）即计数归零；连续未恢复
+/// 达到 cap 上限后停止继续动作（防循环）。
 pub(crate) fn spawn_mic_verify(
     session: u64,
     tool: &'static str,
@@ -322,7 +384,7 @@ pub(crate) fn spawn_mic_verify(
                 ));
             }
             if verdict == MicResponse::Observed {
-                // 真正被唤起过一次：整套状态健康，步进归零。
+                // 真正被唤起过一次：整套状态健康，救回计数归零。
                 IME_HEAL_STEPS.store(0, Ordering::Relaxed);
             }
             let eligible = heal.is_some();
@@ -332,7 +394,7 @@ pub(crate) fn spawn_mic_verify(
             let Some(heal) = heal else { return };
             if !wait_session_end(&heal.state, 6000) {
                 crate::ble::gatt_note(format!(
-                    "voice_heal session={session} tool={tool} action=winspace skipped=session_active"
+                    "voice_heal session={session} tool={tool} action=focus_bounce skipped=session_active"
                 ));
                 return;
             }
@@ -340,24 +402,22 @@ pub(crate) fn spawn_mic_verify(
             let steps = IME_HEAL_STEPS.load(Ordering::Relaxed);
             if steps >= IME_HEAL_STEP_CAP {
                 crate::ble::gatt_note(format!(
-                    "voice_heal session={session} tool={tool} action=winspace skipped=cap steps={steps} cap={IME_HEAL_STEP_CAP}"
+                    "voice_heal session={session} tool={tool} action=focus_bounce skipped=cap steps={steps} cap={IME_HEAL_STEP_CAP}"
                 ));
                 return;
             }
-            let chord = KeyChord {
-                keys: vec![KeyCode::LeftWindows, KeyCode::Space],
-            };
-            let runtime = SendInputRuntime::new();
-            let result = runtime.tap(chord);
-            if result.is_ok() {
-                IME_HEAL_STEPS.fetch_add(1, Ordering::Relaxed);
+            if crate::ime::foreground_is_self() {
+                crate::ble::gatt_note(format!(
+                    "voice_heal session={session} tool={tool} action=focus_bounce skipped=self_foreground"
+                ));
+                return;
             }
+            let outcome = focus_bounce_foreground();
+            IME_HEAL_STEPS.fetch_add(1, Ordering::Relaxed);
             crate::ble::gatt_note(format!(
-                "voice_heal session={session} tool={tool} action=winspace step={} cap={} injected={} result={}",
+                "voice_heal session={session} tool={tool} action=focus_bounce step={} cap={} {outcome}",
                 IME_HEAL_STEPS.load(Ordering::Relaxed),
                 IME_HEAL_STEP_CAP,
-                result.is_ok(),
-                if result.is_ok() { "ok" } else { "failed" },
             ));
         });
 }

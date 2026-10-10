@@ -664,6 +664,69 @@ mod press_context_tests {
         assert_eq!(switch_gap_wait_ms(Some(9000)), 0);
     }
 
+    /// 诊断：枚举 TSF 键盘配置（clsid/guid/hkl/flags）并读当前活动配置，
+    /// 用于"直达切换"方案选型（2026-10-10）：
+    /// `cargo test -p sayall-windows --lib -- --ignored --nocapture dump_tsf_profiles`
+    #[test]
+    #[ignore = "diagnostic: enumerates installed TSF keyboard profiles"]
+    fn dump_tsf_profiles() {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
+        };
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() && hr != windows::core::HRESULT(1) {
+                println!("CoInitializeEx failed: {hr:?}");
+                return;
+            }
+            // COM 对象必须在 CoUninitialize 之前析构（否则 Release 落在反初始化后 → AV）。
+            let dump = (|| {
+                let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                    &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                    None,
+                    CLSCTX_INPROC_SERVER,
+                )
+                .expect("profile manager");
+                let enumerator = manager.EnumProfiles(0x0804).expect("EnumProfiles(zh-CN)");
+                let mut profiles = [TF_INPUTPROCESSORPROFILE::default(); 16];
+                let mut fetched: u32 = 0;
+                loop {
+                    if enumerator.Next(&mut profiles, &mut fetched).is_err() || fetched == 0 {
+                        break;
+                    }
+                    for profile in &profiles[..fetched as usize] {
+                        if profile.dwProfileType != TF_PROFILETYPE_INPUTPROCESSOR {
+                            continue;
+                        }
+                        println!(
+                            "tip clsid={:08X} guid={:08X} hkl=0x{:08X} flags=0x{:08X}",
+                            profile.clsid.data1,
+                            profile.guidProfile.data1,
+                            profile.hkl.0 as usize,
+                            profile.dwFlags,
+                        );
+                    }
+                    if (fetched as usize) < profiles.len() {
+                        break;
+                    }
+                }
+                let mut current = TF_INPUTPROCESSORPROFILE::default();
+                if manager
+                    .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut current)
+                    .is_ok()
+                {
+                    println!(
+                        "active clsid={:08X} guid={:08X} hkl=0x{:08X}",
+                        current.clsid.data1, current.guidProfile.data1, current.hkl.0 as usize,
+                    );
+                }
+            })();
+            CoUninitialize();
+            dump
+        }
+    }
+
     #[test]
     fn tool_labels_are_stable_log_tokens() {
         assert_eq!(tool_label(Some(VoiceInputTool::Wechat)), "wechat");
