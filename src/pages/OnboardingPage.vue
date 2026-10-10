@@ -567,24 +567,27 @@ function stopButtonObservation(): void {
   }
 }
 
-async function scanRemotes(): Promise<void> {
+async function scanRemotes(mode: "auto" | "manual" = "manual"): Promise<void> {
+  if (scanning.value) return;
   scanning.value = true;
   scanMessage.value = "正在寻找小米遥控器…";
   const started = performance.now();
-  reportStepAction("remote", "scan_requested", "unknown");
+  // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ②步自动连接触发）。
+  reportStepAction("remote", "scan_requested", "unknown", { detail: mode });
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
       ? `找到 ${devices.value.length} 个已配对的小米遥控器`
       : "没有找到已配对的小米遥控器。先在 Windows 里配对，再回来扫描。";
     reportStepAction("remote", "scan_requested", "passed", {
-      detail: `found_${devices.value.length}`,
+      detail: `${mode}_found_${devices.value.length}`,
       elapsedMs: actionElapsed(started),
     });
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction("remote", "scan_requested", "failed", {
+      detail: mode,
       elapsedMs: actionElapsed(started),
     });
   } finally {
@@ -592,21 +595,24 @@ async function scanRemotes(): Promise<void> {
   }
 }
 
-async function connectDevice(device: PairedRemote): Promise<void> {
+async function connectDevice(device: PairedRemote, mode: "auto" | "manual" = "manual"): Promise<void> {
   connectingDeviceId.value = device.id;
-  operationMessage.value = "";
+  operationMessage.value =
+    mode === "auto" ? "找到 1 个已配对遥控器，正在自动连接…" : "";
   const started = performance.now();
-  // 脱敏：device.id / 名称不进日志，只记录连接请求与结果。
-  reportStepAction("remote", "connect_requested", "unknown");
+  // 脱敏：device.id / 名称不进日志，只记录连接请求、方式与结果。
+  reportStepAction("remote", "connect_requested", "unknown", { detail: mode });
   try {
     await connectRemote(device.id);
     operationMessage.value = "正在确认语音功能，就绪后按一下普通按键。";
     reportStepAction("remote", "connect_requested", "passed", {
+      detail: mode,
       elapsedMs: actionElapsed(started),
     });
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction("remote", "connect_requested", "failed", {
+      detail: mode,
       elapsedMs: actionElapsed(started),
     });
   } finally {
@@ -628,6 +634,45 @@ async function openBluetoothSettings(): Promise<void> {
     reportStepAction("remote", "open_bluetooth_settings", "failed", {
       elapsedMs: actionElapsed(started),
     });
+  }
+}
+
+// ---- 遥控器步骤：自动连接（2026-10-10 现场反馈） ----
+//
+// 系统侧配对完成后，普通按键会先到（按键检查随之变绿），但"继续"还要求应用连上
+// 遥控器（语音会话）。为消除"按键已收到、连接未建立"这一中间状态：进入②步、
+// 或系统侧遥控器刚出现时，若恰好只有一个已配对遥控器就自动连接。候选不唯一、
+// 一个都没有、连接已就绪/进行中/用户已手动断开时不触发；自动连接与手动点设备卡
+// 走同一条 connectDevice（保存设备 + 连接），日志用 detail=auto|manual 区分。
+const shouldAutoConnectRemote = computed(() => {
+  if (step.value !== "remote") return false;
+  const platform = props.runtime?.platform;
+  if ((platform?.connection.phase ?? "idle") !== "idle") return false;
+  // 系统里确实有遥控器（输入通道已在位）才值得扫描；还没配对时保持手动流程。
+  return (platform?.rawInput.phase ?? "stopped") === "ready";
+});
+
+/** 防重入：一次触发只跑一轮扫描 + 连接。 */
+let autoConnectRunning = false;
+
+watch(shouldAutoConnectRemote, (should) => {
+  if (!should || autoConnectRunning) return;
+  void autoConnectSingleRemote();
+});
+
+async function autoConnectSingleRemote(): Promise<void> {
+  if (scanning.value || connectingDeviceId.value) return;
+  autoConnectRunning = true;
+  try {
+    await scanRemotes("auto");
+    if (step.value !== "remote" || devices.value.length !== 1) return;
+    if ((props.runtime?.platform.connection.phase ?? "idle") !== "idle") return;
+    if (connectingDeviceId.value) return;
+    const device = devices.value[0];
+    if (!device) return;
+    await connectDevice(device, "auto");
+  } finally {
+    autoConnectRunning = false;
   }
 }
 
