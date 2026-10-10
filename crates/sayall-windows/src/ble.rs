@@ -1785,11 +1785,26 @@ fn handle_control(
                 ));
             }
             if let Some(marker) = verify_marker {
+                // 自动救回条件（2026-10-10）：工具有可切换的输入法目标，且本次不是
+                // 微信默认和弦（那条路径由既有 wetype_check 阶梯负责恢复，避免双重动作）。
+                let heal = if attempt_tool.and_then(crate::ime::ime_target_for).is_some()
+                    && !attempt_hotkey
+                        .as_ref()
+                        .map(is_wetype_voice_hotkey)
+                        .unwrap_or(false)
+                {
+                    Some(crate::wetype_revive::ImeHealContext {
+                        state: std::sync::Arc::clone(state),
+                    })
+                } else {
+                    None
+                };
                 crate::wetype_revive::spawn_mic_verify(
                     u64::from(session_id),
                     crate::ime::tool_label(attempt_tool),
                     marker,
                     verify_baseline,
+                    heal,
                 );
             }
             if let Err(error) = audio.begin_session(generation) {

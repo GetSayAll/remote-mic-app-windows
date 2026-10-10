@@ -2,6 +2,11 @@
 //! Updates leave historical executable entries behind; enumeration order is
 //! unrelated to the version that is currently recording.
 
+use crate::send_input::{KeyChord, KeyCode};
+use crate::send_input_windows::SendInputRuntime;
+use crate::ConnectionSnapshot;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
@@ -242,35 +247,118 @@ pub(crate) fn mic_observation_for(marker: &str) -> Option<MicObservation> {
     (complete && observation.entries > 0).then_some(observation)
 }
 
+/// 连续"未响应"计数（跨按下累计；任一按下判为 Observed 即归零）。
+static IME_HEAL_STEPS: AtomicU32 = AtomicU32::new(0);
+
+/// 步进上限：覆盖 ≤5 个输入法配置。每失败一按只推进 1 步——无法从本进程
+/// 读到"目标窗口自己的输入法"（会话级查询会撒谎：僵死时它仍报 doubao），
+/// 而目标输入法必在环形列表的 ≤(N-1) 步内，连续失败 ≤cap 次后必然落回目标。
+const IME_HEAL_STEP_CAP: u32 = 4;
+
+/// 自动救回的上下文：仅当按下目标工具有可切换的输入法目标时携带。
+pub(crate) struct ImeHealContext {
+    pub state: Arc<Mutex<ConnectionSnapshot>>,
+}
+
+/// 是否执行自动救回（纯函数，单测覆盖）：仅在"确认未响应"且具备条件时动作。
+fn should_heal(verdict: MicResponse, eligible: bool) -> bool {
+    eligible && verdict == MicResponse::NotObserved
+}
+
+/// 有界等待语音会话结束（结束才注入，避免与按住中的和弦叠加）。
+fn wait_session_end(state: &Arc<Mutex<ConnectionSnapshot>>, budget_ms: u64) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        let idle = {
+            let guard = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.voice_state != sayall_core::VoiceSessionState::Streaming
+        };
+        if idle {
+            return true;
+        }
+        if started.elapsed().as_millis() as u64 >= budget_ms {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// 每次语音按下的"输入法是否真的开麦"验证（2026-10-09 Andy：日志需要增加）。
 ///
-/// 纯日志、不改状态、有界退出：在固定延迟点读回 ConsentStore 观测，与按下前的
-/// 基线比对，落 `voice_verify ... mic=observed|not_observed|unknown`。
+/// 在固定延迟点读回 ConsentStore 观测，与按下前的基线比对，落
+/// `voice_verify ... mic=observed|not_observed|unknown`。
 /// `observed` = 输入法在按下后确实开始/持续录音（语音条被拉起的客观旁证）；
 /// `unknown` = 观测不可用，不得据此推断（如该输入法不写 ConsentStore）。
+///
+/// 2026-10-10 起附带**自动救回**（Andy 真机验证：僵死状态下手动 Win+Space
+/// 切走再切回目标输入法即可恢复）：两轮判据均确认未响应 → 等会话结束后注入
+/// 一次 Win+Space（步进 1）。失败粘滞时用户每重按一次自动前进 1 步，
+/// 至多 cap 步必然落回目标输入法，重按即恢复；恢复（observed）即归零。
 pub(crate) fn spawn_mic_verify(
     session: u64,
     tool: &'static str,
     marker: &'static str,
     baseline: Option<MicObservation>,
+    heal: Option<ImeHealContext>,
 ) {
     const SAMPLES_MS: [u64; 2] = [800, 2500];
     let _ = std::thread::Builder::new()
         .name("sayall-mic-verify".to_owned())
         .spawn(move || {
             let started = std::time::Instant::now();
+            let mut verdict = MicResponse::Unknown;
             for delay in SAMPLES_MS {
                 let elapsed = started.elapsed().as_millis() as u64;
                 if elapsed < delay {
                     std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
                 }
-                let response = response_since(baseline, mic_observation_for(marker));
+                verdict = response_since(baseline, mic_observation_for(marker));
                 crate::ble::gatt_note(format!(
                     "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={}",
                     started.elapsed().as_millis(),
-                    response.as_log_str(),
+                    verdict.as_log_str(),
                 ));
             }
+            if verdict == MicResponse::Observed {
+                // 真正被唤起过一次：整套状态健康，步进归零。
+                IME_HEAL_STEPS.store(0, Ordering::Relaxed);
+            }
+            let eligible = heal.is_some();
+            if !should_heal(verdict, eligible) {
+                return;
+            }
+            let Some(heal) = heal else { return };
+            if !wait_session_end(&heal.state, 6000) {
+                crate::ble::gatt_note(format!(
+                    "voice_heal session={session} tool={tool} action=winspace skipped=session_active"
+                ));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            let steps = IME_HEAL_STEPS.load(Ordering::Relaxed);
+            if steps >= IME_HEAL_STEP_CAP {
+                crate::ble::gatt_note(format!(
+                    "voice_heal session={session} tool={tool} action=winspace skipped=cap steps={steps} cap={IME_HEAL_STEP_CAP}"
+                ));
+                return;
+            }
+            let chord = KeyChord {
+                keys: vec![KeyCode::LeftWindows, KeyCode::Space],
+            };
+            let runtime = SendInputRuntime::new();
+            let result = runtime.tap(chord);
+            if result.is_ok() {
+                IME_HEAL_STEPS.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::ble::gatt_note(format!(
+                "voice_heal session={session} tool={tool} action=winspace step={} cap={} injected={} result={}",
+                IME_HEAL_STEPS.load(Ordering::Relaxed),
+                IME_HEAL_STEP_CAP,
+                result.is_ok(),
+                if result.is_ok() { "ok" } else { "failed" },
+            ));
         });
 }
 
@@ -293,6 +381,14 @@ mod tests {
         let mut result = MicObservation::default();
         result.record(start, start + 1);
         result
+    }
+
+    #[test]
+    fn should_heal_only_on_confirmed_not_observed_and_eligible() {
+        assert!(should_heal(MicResponse::NotObserved, true));
+        assert!(!should_heal(MicResponse::NotObserved, false));
+        assert!(!should_heal(MicResponse::Observed, true));
+        assert!(!should_heal(MicResponse::Unknown, true));
     }
 
     #[test]
