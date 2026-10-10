@@ -41,6 +41,21 @@ const modelLabel = computed(() =>
   remoteModelLabel(props.runtime?.platform.connection.remoteModel ?? "unknown"),
 );
 
+/**
+ * 按键行的说明句（2026-10-10 现场反馈）：系统侧按键通道可用 ≠ 应用自己的会话
+ * 已建立——遥控器与电脑配对完成后，按键就能被收到（第②步的按键行随之变绿），
+ * 但"继续"还要求应用连上遥控器。此时不再写"这一项可以继续了"（会与"先连接
+ * 遥控器，再继续"打架），改成指出还差的那一步。
+ */
+const buttonRowDesc = computed(() => {
+  if (!props.buttonObserved) {
+    return "按一下遥控器上的普通按键（比如主页键），不要按语音键。";
+  }
+  return connected.value
+    ? "这一项可以继续了。"
+    : "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。";
+});
+
 /** 扫描状态行：只在"扫描过 / 正在扫描"时出现，不新增空状态文案。 */
 const scanRow = computed(() => {
   if (props.scanning) {
@@ -159,11 +174,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       <StatusRow
         :state="buttonObserved ? 'ok' : 'pending'"
         :title="buttonObserved ? '已收到遥控器按键' : '等待控制按键'"
-        :desc="
-          buttonObserved
-            ? '这一项可以继续了。'
-            : '按一下遥控器上的普通按键（比如主页键），不要按语音键。'
-        "
+        :desc="buttonRowDesc"
       />
     </div>
 

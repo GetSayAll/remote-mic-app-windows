@@ -428,6 +428,37 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
   });
 
+  it("按键已收到但遥控器未连接时，说明句指出还差连接这一步", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 两个已配对遥控器：自动连接不介入，保留"按键已收到、连接未建立"这一现场状态
+    // （2026-10-10 用户报障：系统侧按键通道可用 ≠ 应用自己的会话已建立）。
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
+      { id: "dev-2", name: "小米蓝牙语音遥控器 2", model: "rc001", isSupportedCandidate: true },
+    ]);
+    const wrapper = await mountWizard(runtimeWith({ rawInputPhase: "ready" }));
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+    expect(wrapper.text()).toContain("按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。");
+    expect(wrapper.text()).not.toContain("这一项可以继续了");
+    expect(onboardingEvents("step_blocked").some((p) => p.code === "remote.not_connected")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("已连接且已收到按键时，说明句仍是这一项可以继续了", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(connectedRuntime());
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("这一项可以继续了。");
+    wrapper.unmount();
+  });
+
   it("scans paired remotes, connects the chosen one, and opens Windows Bluetooth settings", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     mocks.scanPairedRemotes.mockResolvedValue([
