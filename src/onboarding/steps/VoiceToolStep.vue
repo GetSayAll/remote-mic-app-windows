@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import type { KeyCode, VoiceInputTool, VokieInstallation } from "../../lib/bridge";
 import OptionCard from "../../components/onboarding/OptionCard.vue";
+import { captureFailureText } from "../../lib/capture-switch";
 
 const props = defineProps<{
   tool: VoiceInputTool | null;
@@ -46,6 +47,15 @@ const OTHER_OPTIONS: Array<{ label: string; keys: KeyCode[] }> = [
  * 后由 watch 同步（与连接页/按键页同款防御）。
  */
 const captureSwitchEl = ref<HTMLInputElement | null>(null);
+
+/**
+ * 开关三态与失败文案（2026-10-10 Andy 定稿，与连接页/按键页同一条规范）：
+ * 开关与状态提示合并成一个开关——只有关闭 / 开启 / 正在操作三态，进行中不配文字；
+ * 只有失败才显示一句普通用户能读懂的原因（原文只进诊断日志）。
+ * 名称按本页写法加引号（见 docs/product-copy.md §4）。
+ */
+const CAPTURE_FAILURE_NAME = "“支持更多输入工具”";
+const captureFailure = computed(() => captureFailureText(props.captureHint, CAPTURE_FAILURE_NAME));
 
 function onCaptureChange(): void {
   if (captureSwitchEl.value) {
@@ -101,20 +111,21 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
       <div class="onboarding-switch-row">
         <label class="onboarding-switch">
           <span>支持更多输入工具</span>
-          <input
-            ref="captureSwitchEl"
-            type="checkbox"
-            class="toggle-input"
-            :checked="captureEnabled"
-            :disabled="captureBusy"
-            @change="onCaptureChange"
-          />
+          <span class="toggle-switch-slot">
+            <input
+              ref="captureSwitchEl"
+              type="checkbox"
+              class="toggle-input"
+              :checked="captureEnabled"
+              :disabled="captureBusy"
+              @change="onCaptureChange"
+            />
+            <span v-if="captureBusy" class="toggle-spinner" aria-hidden="true"></span>
+          </span>
         </label>
-        <span class="switch-state" :class="captureEnabled ? 'ok' : 'warn'">
-          {{ captureBusy ? "正在设置…" : captureEnabled ? "已开启" : "需要开启" }}
-        </span>
       </div>
-      <p v-if="captureHint" class="onboarding-error">{{ captureHint }}</p>
+      <!-- 失败文案是开关旁唯一的文字（2026-10-10）：普通用户语言，其余情况不显示。 -->
+      <p v-if="captureFailure" class="onboarding-error">{{ captureFailure }}</p>
       <p class="onboarding-muted">每次开启都会弹出 Windows 授权窗口，请选择“是”。</p>
     </div>
 

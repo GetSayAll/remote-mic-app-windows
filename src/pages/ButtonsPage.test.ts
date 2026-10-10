@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import ButtonsPage from "./ButtonsPage.vue";
 
@@ -229,8 +229,30 @@ async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promis
   await vi.waitFor(() => {
     if (!edgeHandler || !gestureHandler) throw new Error("事件订阅未完成");
   });
+  mountedPages.push(wrapper);
   return wrapper;
 }
+
+/**
+ * 本文件挂载过的页面，用例结束统一卸载。
+ *
+ * 为什么必须卸载：页面里有一个每秒对账的 interval（读任务状态与桥接相位），
+ * 留在挂载态的页面会继续按**当前用例的 mock** 轮询并回写 localStorage 缓存——
+ * 上一用例遗留的开关值（enabled=false）会覆盖本用例刚写下的缓存，制造跨用例
+ * 串扰。2026-10-10 实测：缓存用例偶发读到 { enabled:false, phase:'connected' }
+ * （本文件新增用例改变时序后稳定复现）。
+ */
+const mountedPages: VueWrapper[] = [];
+afterEach(() => {
+  while (mountedPages.length) {
+    const page = mountedPages.pop()!;
+    try {
+      page.unmount();
+    } catch {
+      // 用例里已自行卸载：忽略重复卸载。
+    }
+  }
+});
 
 beforeEach(() => {
   edgeHandler = null;
@@ -1498,7 +1520,7 @@ describe("buttons mapping page", () => {
     expect(checkbox.classes()).toContain("toggle-input");
   });
 
-  it("桥接状态收进开关旁的行内圆点，不再插入独立状态行（2026-09-28 抖动修复）", async () => {
+  it("开关与状态提示合并成一个开关（2026-10-10）：桥接相位不产生文字与圆点，也不再插入独立状态行", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -1508,31 +1530,31 @@ describe("buttons mapping page", () => {
     });
     const page = await mountPage("rc003");
 
-    // listening：黄点 + 悬停文案；页面上不存在独立的胶囊状态行。
+    // listening（启动中）：开关仍是开启态，页面上没有圆点、没有「正在启动」。
     vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("listening"));
     await vi.waitFor(
       () => {
-        const dot = captureRow(page)!.find(".status-dot");
-        expect(dot.exists()).toBe(true);
-        expect(dot.classes()).toContain("pending");
-        expect(dot.attributes("title")).toContain("正在启动");
+        const row = captureRow(page)!;
+        expect(row.find('input[type="checkbox"]').exists()).toBe(true);
+        expect((row.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true);
       },
       { timeout: 3000 },
     );
+    expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
+    expect(page.text()).not.toContain("正在启动");
+    expect(page.text()).not.toContain("全按键支持已开启");
     expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
 
-    // connected：绿点。同样不允许出现独立状态行。
+    // connected：同样没有圆点、没有任何状态文字。
     vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
-    await vi.waitFor(
-      () => {
-        expect(captureRow(page)!.find(".status-dot").classes()).toContain("success");
-      },
-      { timeout: 3000 },
-    );
+    await page.vm.$nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
     expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
   });
 
-  it("状态圆点只在开关打开时出现（2026-09-28 Andy 要求）：关闭时即使桥接快照在也不显示", async () => {
+  it("关闭态不显示任何状态文案（圆点与状态字都已并入开关，2026-10-10）", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -1540,8 +1562,7 @@ describe("buttons mapping page", () => {
       helperPath: null,
       lastError: null,
     });
-    // 桥接快照故意给 connected：旧实现只要 rc003BridgeText 非空就画点，
-    // 开关关着也亮绿点——本用例就是那条行为的阳性对照。
+    // 桥接快照故意给 connected：旧实现只要桥接有相位就画点——本用例是那条行为的阴性对照。
     vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
     const page = await mountPage("rc003");
     await vi.waitFor(
@@ -1551,6 +1572,9 @@ describe("buttons mapping page", () => {
       { timeout: 3000 },
     );
     expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
+    expect(captureRow(page)!.find(".toggle-spinner").exists()).toBe(false);
+    expect(page.text()).not.toContain("未开启");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
   });
 
   it("状态未就绪时渲染同尺寸占位符、不渲染开关本体（与「启动行为」同法的无动画挂载，2026-09-28）", async () => {
@@ -1562,14 +1586,15 @@ describe("buttons mapping page", () => {
     expect(row.find(".toggle-placeholder").exists()).toBe(true);
   });
 
-  it("缓存命中时进页首帧即渲染开关与圆点终值，不等 IPC（2026-09-28 Andy 要求：无延迟、无灰→绿跳变）", () => {
+  it("缓存命中时进页首帧即渲染开关终值，不等 IPC（2026-09-28 Andy 要求：无延迟跳变）", () => {
     localStorage.setItem(
       "sayall.rc003Capture.uiCache",
       JSON.stringify({ enabled: true, phase: "connected" }),
     );
     // 状态与桥接快照的 IPC 永不返回：旧行为里开关要等首次对账（串在映射
-    // 加载 + 三次订阅之后）、圆点要等 1 秒轮询首跳——本用例证明两者都在
-    // 首帧就位，IPC 迟到不产生可见的空档或状态跳变。
+    // 加载 + 三次订阅之后）——本用例证明开关在首帧就位，IPC 迟到不产生
+    // 可见的空档或状态跳变；状态提示已并入开关（2026-10-10），因此没有任何
+    // 状态文字或圆点需要等。
     vi.mocked(getRc003TaskStatus).mockImplementation(() => new Promise(() => {}));
     vi.mocked(getRc003BridgeSnapshot).mockImplementation(() => new Promise(() => {}));
     const page = mount(ButtonsPage, { props: { runtime } });
@@ -1577,9 +1602,8 @@ describe("buttons mapping page", () => {
     const checkbox = row.find('input[type="checkbox"]');
     expect(checkbox.exists()).toBe(true);
     expect((checkbox.element as HTMLInputElement).checked).toBe(true);
-    const dot = row.find(".status-dot");
-    expect(dot.exists()).toBe(true);
-    expect(dot.classes()).toContain("success");
+    expect(row.find(".status-dot").exists()).toBe(false);
+    expect(row.find(".toggle-spinner").exists()).toBe(false);
     page.unmount();
   });
 
@@ -1643,10 +1667,11 @@ describe("buttons mapping page", () => {
     expect(row.find('input[type="checkbox"]').exists()).toBe(false);
     expect(row.find(".toggle-placeholder").exists()).toBe(true);
     expect(row.find(".status-dot").exists()).toBe(false);
+    expect(row.find(".toggle-spinner").exists()).toBe(false);
     page.unmount();
   });
 
-  it("桥接段异步失败：红点 + 底部提示条给出失败文案（开关已开、无法走 toggle 失败分支）", async () => {
+  it("桥接段异步失败：开关下方一句用户语言（开关已开、无法走 toggle 失败分支，2026-10-10）", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -1658,15 +1683,23 @@ describe("buttons mapping page", () => {
     vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("failed"));
     await vi.waitFor(
       () => {
-        const dot = captureRow(page)!.find(".status-dot");
-        expect(dot.exists()).toBe(true);
-        expect(dot.classes()).toContain("error");
+        expect(page.find(".page-subtitle").text()).toContain("全按键支持没有启动成功");
       },
       { timeout: 3000 },
     );
-    await vi.waitFor(() => {
-      expect(page.text()).toContain("全按键支持开启失败");
-    });
+    // 失败文案是唯一允许出现在开关旁的文字：圆点与「正在启动」都不再有。
+    expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
+    expect(page.text()).not.toContain("正在启动");
+    // 同一句里给出下一步，不带内部细节。
+    expect(page.find(".page-subtitle").text()).toContain("断开遥控器再重新配对");
+    // 桥接恢复后失败文案消失，回到副标题。
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
+    await vi.waitFor(
+      () => {
+        expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+      },
+      { timeout: 3000 },
+    );
   });
 
   it("UAC 被取消（enable 拒绝）时开关保持关闭、显示错误（2026-09-24 用户报告）", async () => {
@@ -1717,9 +1750,13 @@ describe("buttons mapping page", () => {
     expect(uacDialog).toBeDefined();
     await uacDialog!.findAll("button").find((b) => b.text() === "开启")!.trigger("click");
     await vi.waitFor(() => {
-      // 错误走到页面既有的提示条……
-      expect(page.text()).toContain("UAC 被取消");
+      // 失败文案只有一句用户语言：说清结果与下一步，不带内部原文（2026-10-10）。
+      expect(page.find(".page-subtitle").text()).toBe(
+        "没有完成系统授权，全按键支持保持关闭。",
+      );
     });
+    expect(page.text()).not.toContain("UAC");
+    expect(page.text()).not.toContain("授权未完成");
     // ……且开关仍是关闭：实际系统状态没变，开关翻过去就是"证据说谎"。
     const captureRow = page
       .findAll(".toggle-row")
@@ -2207,7 +2244,7 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     page.unmount();
   });
 
-  it("available=true 且开关开启时状态点照常出现（不误伤 x64 平台）", async () => {
+  it("available=true 且开关开启时也不出现任何状态提示（不误伤 x64 平台，2026-10-10）", async () => {
     vi.mocked(getRc003TaskStatus).mockResolvedValue({
       installed: true,
       authorizationRequired: false,
@@ -2219,10 +2256,57 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     const page = await mountPage("rc003");
     await flushPromises();
 
-    const dot = captureRow(page)!.find(".status-dot");
-    expect(dot.exists()).toBe(true);
-    expect(dot.attributes("title")).toContain("正在启动");
+    const row = captureRow(page)!;
+    expect((row.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true);
+    expect(row.find(".status-dot").exists()).toBe(false);
+    expect(row.find(".toggle-spinner").exists()).toBe(false);
+    expect(page.text()).not.toContain("正在启动");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
     expect(unavailableNote(page).exists()).toBe(false);
+    page.unmount();
+  });
+
+  it("正在操作：开关置灰 + 转圈，且不配任何文字（2026-10-10）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    // enable 挂起 = 操作进行中（真机上这一段是授权窗口期间）。
+    let release!: (value: Awaited<ReturnType<typeof enableRc003Capture>>) => void;
+    vi.mocked(enableRc003Capture).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const row = captureRow(page)!;
+    const checkbox = row.find('input[type="checkbox"]');
+    await vi.waitFor(() => {
+      expect((checkbox.element as HTMLInputElement).disabled).toBe(false);
+    });
+    (checkbox.element as HTMLInputElement).checked = true;
+    await checkbox.trigger("change");
+    const dialog = confirmDialog(page);
+    await dialog!.findAll("button").find((b) => b.text() === "开启")!.trigger("click");
+    await flushPromises();
+
+    expect((checkbox.element as HTMLInputElement).disabled, "进行中必须置灰").toBe(true);
+    expect(row.find(".toggle-spinner").exists()).toBe(true);
+    expect(page.text()).not.toContain("正在操作");
+    expect(page.text()).not.toContain("正在启动");
+
+    release({ installed: true, authorizationRequired: false, enabled: true, helperPath: null, lastError: null });
+    await vi.waitFor(() => {
+      expect(row.find(".toggle-spinner").exists()).toBe(false);
+    });
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
     page.unmount();
   });
 

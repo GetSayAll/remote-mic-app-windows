@@ -6,6 +6,10 @@ import BatteryIndicator from "../components/BatteryIndicator.vue";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import { DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
 import {
+  captureFailureText,
+  captureSwitchState as captureSwitchStateFn,
+} from "../lib/capture-switch";
+import {
   actionSummary,
   buttonLabel,
   buttonLabels,
@@ -840,6 +844,14 @@ const TRI_KEY_GATED_TITLE = `${TRI_KEY_CAPTURE_HINT}，开启后恢复正常`;
 const CAPTURE_UNSUPPORTED_TITLE =
   "全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。";
 const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持全按键支持，其他按键不受影响。";
+/**
+ * 失败文案（2026-10-10 Andy 定稿）：只有失败才显示；其余情况一个字都不显示。
+ * 本页名称不带引号，与既有短说明同口径（见 docs/product-copy.md §7 2026-10-07 与
+ * 2026-10-10 两条）。
+ */
+const CAPTURE_FAILURE_NAME = "全按键支持";
+const CAPTURE_BRIDGE_FAILED_TEXT =
+  "全按键支持没有启动成功。请关闭后重新开启；仍不行就先断开遥控器再重新配对。";
 const TRI_KEY_UNSUPPORTED_TITLE =
   "返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。";
 
@@ -1360,33 +1372,12 @@ const rc003CaptureBusy = ref(false);
  * 之后以用户的开关操作为准。
  */
 const rc003CaptureEnabled = ref<boolean | null>(rc003UiCache.enabled);
-/** 桥接相位（从快照中提取）：首帧可由缓存给出终值，后续随对账刷新。 */
+/** 桥接相位（从快照中提取）：首帧可由缓存给出终值，后续随对账刷新。失败时进开关文案。 */
 const rc003BridgePhase = ref<Rc003BridgePhase | null>(rc003UiCache.phase);
-const rc003BridgeText = computed(() => {
-  const phase = rc003BridgePhase.value;
-  if (!phase || phase === "stopped") return null;
-  switch (phase) {
-    case "listening":
-      return "全按键支持已开启，正在启动";
-    case "connected":
-      return "全按键支持已开启";
-    case "failed":
-      return "全按键支持开启失败";
-    default:
-      return null;
-  }
-});
-const rc003BridgeTone = computed(() => {
-  switch (rc003BridgePhase.value) {
-    case "connected":
-      return "success";
-    case "failed":
-      return "error";
-    default:
-      // listening 及未知相位：等待中（黄点）。文案仍可从开关圆点的 title 读到。
-      return "pending";
-  }
-});
+/** 桥接段失败（开关已开、助手没起来）：作为「开启失败」进开关下方文案。 */
+const rc003BridgeFailed = ref(false);
+/** 上一次开关操作失败的**原文**：只进日志与映射，界面显示映射后的用户语言。 */
+const rc003CaptureFailureRaw = ref<string | null>(null);
 
 /**
  * 「全按键支持」在本机是否可用（2026-10-07 issue #206，Windows 11 ARM64）。
@@ -1397,6 +1388,26 @@ const rc003BridgeTone = computed(() => {
  */
 const captureSupport = ref<CaptureSupport | null>(null);
 const captureUnsupported = computed(() => captureSupport.value?.available === false);
+
+/**
+ * 开关三态（2026-10-10 Andy 定稿）：关闭 / 开启 / 正在操作；本机不可用时置灰。
+ * 状态提示不再单列——进行中由开关自身的置灰 + 转圈表达，不配文字。
+ */
+const captureSwitchState = computed(() =>
+  captureSwitchStateFn({
+    enabled: rc003CaptureEnabled.value,
+    busy: rc003CaptureBusy.value,
+    unsupported: captureUnsupported.value,
+  }),
+);
+/**
+ * 失败文案（唯一允许出现在开关旁的文字）：操作失败显示映射后的原因；桥接段
+ * 失败（开启后助手没起来）显示固定一句。其余情况为 null —— 一个字都不显示。
+ */
+const captureFailure = computed(() => {
+  if (rc003BridgeFailed.value) return CAPTURE_BRIDGE_FAILED_TEXT;
+  return captureFailureText(rc003CaptureFailureRaw.value, CAPTURE_FAILURE_NAME);
+});
 /** 三键卡片/格子的置灰提示：本机开不了时不说「开启后恢复正常」。 */
 const triKeyGatedTitle = computed(() =>
   captureUnsupported.value ? TRI_KEY_UNSUPPORTED_TITLE : TRI_KEY_GATED_TITLE,
@@ -1422,11 +1433,15 @@ function captureGated(button: RemoteButton): boolean {
 }
 
 // 开启成功但桥接段异步失败（助手起不来等）：开关已是开启态、不会再走
-// applyCaptureToggle 的失败分支，必须在这里把失败送进底部提示条，
-// 否则用户只看到一个黄点永远不变绿（2026-09-28 状态行移除后的唯一显性告警）。
+// applyCaptureToggle 的失败分支，必须在这里把失败变成开关下方的文案，
+// 否则用户只看到一个不再变化的开关（2026-10-10：状态圆点已并入开关）。
 watch(rc003BridgePhase, (phase, previous) => {
+  if (phase === "connected") {
+    rc003BridgeFailed.value = false;
+    return;
+  }
   if (phase === "failed" && previous !== "failed") {
-    statusMessage.value = "全按键支持开启失败：请关闭全按键支持后重新开启；若反复失败请联系开发者。";
+    rc003BridgeFailed.value = true;
     reportFrontendEvent({
       event: "rc003_capture_bridge_failed",
       phase: "completed",
@@ -1538,6 +1553,10 @@ function closeCaptureDialog(): void {
 async function applyCaptureToggle() {
   if (rc003CaptureBusy.value) return;
   rc003CaptureBusy.value = true;
+  // 新的操作开始：清掉上一次的失败文案（含桥接段失败）——正在操作不配文字，
+  // 旧失败原因也不允许残留（2026-10-10 定稿）。
+  rc003CaptureFailureRaw.value = null;
+  rc003BridgeFailed.value = false;
   const wasEnabled = rc003CaptureEnabled.value;
   try {
     const next = wasEnabled ? await disableRc003Capture() : await enableRc003Capture();
@@ -1545,11 +1564,11 @@ async function applyCaptureToggle() {
     if (next.lastError) {
       // 操作失败（UAC 取消 / 停止被拒）：**保持开关原状态**。
       // 实际系统状态没变，开关却翻过去，就是又一次"证据说谎"。
-      statusMessage.value = next.lastError;
+      rc003CaptureFailureRaw.value = next.lastError;
       return;
     }
-    // 成功后的反馈由面板里的常驻能力说明承担（随状态实时切换），
-    // 提示条不再重复一条一次性的话；失败仍走提示条（见上）。
+    // 成功后的反馈由开关自身承担（2026-10-10）：不再重复一条一次性的话；
+    // 失败才写文案（见上）。
     rc003CaptureEnabled.value = next.enabled;
     reportFrontendEvent({
       event: "rc003_capture_toggle",
@@ -1558,7 +1577,7 @@ async function applyCaptureToggle() {
       reason: `enabled=${String(next.enabled)}`,
     });
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    rc003CaptureFailureRaw.value = error instanceof Error ? error.message : String(error);
     // **同步回退到点击前的状态**——不依赖"我没动过它"，也不等下一次异步
     // 对账：原生复选框在 click 时 DOM 已经先翻了，只有显式写回才确定。
     rc003CaptureEnabled.value = wasEnabled === true;
@@ -1736,41 +1755,45 @@ onUnmounted(() => {
             :title="captureSwitchTitle"
           >
             <span>全按键支持</span>
-            <!-- 终值就绪前用同尺寸占位符顶位、就绪后才创建开关本体——与
+            <!-- 开关 + 状态提示合并成一个开关（2026-10-10 Andy 定稿，见
+                 docs/product-copy.md §4）：只有关闭 / 开启 / 正在操作三态，
+                 进行中=置灰 + 转圈且不配文字；只有失败才在标题下方显示一句原因。
+                 终值就绪前用同尺寸占位符顶位、就绪后才创建开关本体——与
                  「启动行为」页登录自启动开关同法（2026-09-28 Andy 要求）：
                  开关创建即带正确 checked，不产生"状态回来后关→开"的滑动动画。 -->
-            <span
-              v-if="rc003CaptureEnabled === null"
-              class="toggle-placeholder"
-              aria-hidden="true"
-            ></span>
-            <input
-              v-else
-              ref="captureSwitchEl"
-              type="checkbox"
-              class="toggle-input"
-              :checked="rc003CaptureEnabled === true"
-              :disabled="rc003CaptureBusy || captureUnsupported"
-              @change="toggleRc003Capture"
-            />
-            <!-- 状态圆点只在开关**打开**时出现（2026-09-28 Andy 要求），颜色随
-                 桥接相位变化：绿=助手已连接、黄=启动中/未知、红=开启失败；
-                 关闭时不占位，避免"关着还亮个点"读成已启用。
-                 本机不可用时即使读到开启意图也不画点：桥接恒为 stopped，
-                 这里画得出来的只有"还在等"那一句（2026-10-07 issue #206）。 -->
-            <span
-              v-if="rc003CaptureEnabled === true && !captureUnsupported"
-              class="status-dot"
-              :class="rc003BridgeTone"
-              :title="rc003BridgeText ?? '全按键支持已开启'"
-            ></span>
+            <span class="toggle-switch-slot">
+              <span
+                v-if="rc003CaptureEnabled === null"
+                class="toggle-placeholder"
+                aria-hidden="true"
+              ></span>
+              <input
+                v-else
+                ref="captureSwitchEl"
+                type="checkbox"
+                class="toggle-input"
+                :checked="rc003CaptureEnabled === true"
+                :disabled="rc003CaptureBusy || captureUnsupported"
+                @change="toggleRc003Capture"
+              />
+              <span
+                v-if="captureSwitchState === 'busy'"
+                class="toggle-spinner"
+                aria-hidden="true"
+              ></span>
+            </span>
           </label>
           <!-- 本机不可用（ARM64，issue #206）：开关旁一句短说明，说结果不说机制。 -->
           <span v-if="captureUnsupported" class="capture-unavailable-note">
             {{ CAPTURE_UNSUPPORTED_NOTE }}
           </span>
         </div>
-        <p class="page-subtitle">点击按键进行自定义配置</p>
+        <!-- 标题下方一行：平时是页面副标题；只有开关操作失败/启动失败时改说原因
+             （2026-10-10 定稿：其余情况不显示任何状态文案）。位置不动、不插行，
+             沿用 2026-09-28 的防抖动约定。 -->
+        <p class="page-subtitle" :class="{ 'is-failure': captureFailure }">
+          {{ captureFailure ?? "点击按键进行自定义配置" }}
+        </p>
       </div>
       <div class="mapping-header-controls">
         <!-- 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：图标 + 型号 +

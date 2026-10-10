@@ -383,6 +383,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-header-controls { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
 /* 按键页副标题（2026-10-04）：一句话说明这页怎么用。 */
 .page-subtitle { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+/* 副标题这一行兼作「全按键支持」开关的失败原因位（2026-10-10 定稿）：
+   平时是页面副标题，失败时改说原因——同一行内切换，不插行、不顶动画布。 */
+.page-subtitle.is-failure { color: var(--warning-text); font-weight: 600; }
 /* 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：
    型号 + 状态/电量 + 重新连接；三种连接态高度一致，不插行、不抖动画布。
    （2026-10-04 Andy：去掉左侧遥控器图标，卡片只留文字与操作。） */
@@ -648,9 +651,32 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
-.switch-state { font-size: 12.5px; font-weight: 600; }
-.switch-state.ok { color: var(--success-text); }
-.switch-state.warn { color: var(--warning-text); }
+/* 开关 + 状态提示合并成一个开关（2026-10-10 Andy 定稿，见 docs/product-copy.md §4）：
+   三态（关闭 / 开启 / 正在操作）；进行中=置灰 + 转圈，不配任何文字。
+   槽位包住开关本体与转圈，两者同尺寸叠放，不改变行高（防 2026-09-28 的插行抖动）。 */
+.toggle-switch-slot { position: relative; display: inline-flex; align-items: center; flex: none; }
+.toggle-spinner {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid var(--toggle-thumb);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: toggle-spin 0.7s linear infinite;
+  pointer-events: none;
+}
+@keyframes toggle-spin {
+  to { transform: rotate(360deg); }
+}
+/* 置灰只在开关本体上表达；**不换光标**（2026-10-10 现场反馈：关闭开关的一瞬间指针还在
+   开关上，禁用态的「禁止」光标会闪一下——那个红色禁止标志就是这么来的）。 */
+.toggle-input:disabled { opacity: 0.7; }
+/* 唯一的开关旁文字：失败原因（普通用户语言）。其余状态一个字都不显示。 */
+.capture-failure { color: var(--warning-text); font-weight: 600; }
 .chip-select { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .chip-select .chip { min-height: 28px; font-size: 12.5px; }
 .chip-select .chip[aria-pressed="true"] {

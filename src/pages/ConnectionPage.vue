@@ -4,6 +4,10 @@ import BatteryIndicator from "../components/BatteryIndicator.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
+import {
+  captureFailureText,
+  captureSwitchState as captureSwitchStateFn,
+} from "../lib/capture-switch";
 import type {
   AudioEndpoint,
   AudioSnapshot,
@@ -408,6 +412,7 @@ const rc003CaptureEnabled = ref<boolean | null>(null);
 const rc003CaptureBusy = ref(false);
 const showCaptureConfirm = ref(false);
 const captureSwitchEl = ref<HTMLInputElement | null>(null);
+/** 失败原文（只进诊断日志与映射；界面显示映射后的用户语言，见 captureFailure）。 */
 const rc003CaptureHint = ref("");
 
 /**
@@ -424,20 +429,26 @@ const captureUnsupported = computed(() => captureSupport.value?.available === fa
 const CAPTURE_UNSUPPORTED_TITLE =
   "“支持更多输入工具”在这台电脑上暂不可用；新版本支持后会恢复正常。";
 const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持“支持更多输入工具”，其他按键不受影响。";
+/** 失败文案里的名称（本页入口名，写法见 docs/product-copy.md §4）。 */
+const CAPTURE_FAILURE_NAME = "“支持更多输入工具”";
 
 /**
- * 开关右侧的状态字。本机不可用时统一说「暂不可用」——不给「需要开启」这类
- * 做不到的暗示。两个面板（豆包 / 其他工具）原本的措辞保留（available=true
- * 时行为不变）。
+ * 开关状态（2026-10-10 Andy 定稿，见 docs/product-copy.md §4 与 2026-10-10 决定）：
+ * 开关与状态提示合并成一个开关；只有三种状态（关闭 / 开启 / 正在操作），
+ * 且**只有失败才显示文案**——状态字、状态圆点、"还差一步""建议开启"都淘汰。
  */
-function captureStateLabel(state: "doubao" | "other"): string {
-  if (captureUnsupported.value) return "暂不可用";
-  if (rc003CaptureEnabled.value === true) return "已开启";
-  if (state === "doubao") {
-    return rc003CaptureEnabled.value === false ? "需要开启" : "正在读取…";
-  }
-  return "未开启";
-}
+const captureSwitchState = computed(() =>
+  captureSwitchStateFn({
+    enabled: rc003CaptureEnabled.value,
+    busy: rc003CaptureBusy.value,
+    unsupported: captureUnsupported.value,
+  }),
+);
+
+/** 失败时显示的一句用户语言；其余情况为 null（模板据此不渲染任何文字）。 */
+const captureFailure = computed(() =>
+  captureFailureText(rc003CaptureHint.value, CAPTURE_FAILURE_NAME),
+);
 
 /**
  * 把开关的 DOM 状态写回绑定值。原生复选框被点击的瞬间浏览器先翻了 checked，
@@ -1297,45 +1308,42 @@ onUnmounted(() => {
                 :title="captureUnsupported ? CAPTURE_UNSUPPORTED_TITLE : undefined"
               >
                 <span>支持更多输入工具</span>
-                <span
-                  v-if="rc003CaptureEnabled === null"
-                  class="toggle-placeholder"
-                  aria-hidden="true"
-                ></span>
-                <input
-                  v-else
-                  id="capture-switch-doubao"
-                  ref="captureSwitchEl"
-                  type="checkbox"
-                  class="toggle-input capture-switch"
-                  :checked="rc003CaptureEnabled === true"
-                  :disabled="rc003CaptureBusy || captureUnsupported"
-                  @change="toggleRc003Capture"
-                />
+                <!-- 开关 + 状态提示合并成一个开关（2026-10-10 Andy 定稿，见
+                     docs/product-copy.md §4）：只有关闭 / 开启 / 正在操作三态，
+                     进行中=置灰 + 转圈且不配文字；只有失败才在下方显示一句原因。 -->
+                <span class="toggle-switch-slot">
+                  <span
+                    v-if="rc003CaptureEnabled === null"
+                    class="toggle-placeholder"
+                    aria-hidden="true"
+                  ></span>
+                  <input
+                    v-else
+                    id="capture-switch-doubao"
+                    ref="captureSwitchEl"
+                    type="checkbox"
+                    class="toggle-input capture-switch"
+                    :checked="rc003CaptureEnabled === true"
+                    :disabled="rc003CaptureBusy || captureUnsupported"
+                    @change="toggleRc003Capture"
+                  />
+                  <span
+                    v-if="captureSwitchState === 'busy'"
+                    class="toggle-spinner"
+                    aria-hidden="true"
+                  ></span>
+                </span>
               </label>
-              <span
-                class="switch-state"
-                :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
-              >
-                {{ captureStateLabel("doubao") }}
-              </span>
             </div>
             <!-- 本机不可用（ARM64，issue #206）：先说清这台电脑用不了，再说别的。
                  与按键页「全按键支持」同一句口径，只有名称随本页入口变化。 -->
             <div v-if="captureUnsupported" class="info-callout warning callout-small">
               {{ CAPTURE_UNSUPPORTED_NOTE }}
             </div>
-            <div
-              v-else-if="rc003CaptureEnabled === false"
-              class="info-callout warning callout-small"
-            >
-              还差一步：开启后豆包才能收到遥控器语音键。每次开启都会弹出系统授权，请点“是”。
-              已开启：现在按住遥控器语音键，豆包的语音条就会出现。
-            </div>
             <div v-if="vokieRunning === true" class="info-callout warning callout-small">
               检测到 Vokie 正在运行：它和豆包用的是同一个快捷键（右 Alt），按住遥控器语音键可能唤起 Vokie。要用豆包，请先退出 Vokie。
             </div>
-            <p v-if="rc003CaptureHint" class="tiny muted">{{ rc003CaptureHint }}</p>
+            <p v-if="captureFailure" class="tiny capture-failure">{{ captureFailure }}</p>
           </div>
 
           <div v-else-if="voiceInputTool === 'wechat'" class="tool-panel">
@@ -1444,33 +1452,33 @@ onUnmounted(() => {
                 :title="captureUnsupported ? CAPTURE_UNSUPPORTED_TITLE : undefined"
               >
                 <span>支持更多输入工具</span>
-                <span
-                  v-if="rc003CaptureEnabled === null"
-                  class="toggle-placeholder"
-                  aria-hidden="true"
-                ></span>
-                <input
-                  v-else
-                  id="capture-switch-other"
-                  ref="captureSwitchEl"
-                  type="checkbox"
-                  class="toggle-input capture-switch"
-                  :checked="rc003CaptureEnabled === true"
-                  :disabled="rc003CaptureBusy || captureUnsupported"
-                  @change="toggleRc003Capture"
-                />
+                <span class="toggle-switch-slot">
+                  <span
+                    v-if="rc003CaptureEnabled === null"
+                    class="toggle-placeholder"
+                    aria-hidden="true"
+                  ></span>
+                  <input
+                    v-else
+                    id="capture-switch-other"
+                    ref="captureSwitchEl"
+                    type="checkbox"
+                    class="toggle-input capture-switch"
+                    :checked="rc003CaptureEnabled === true"
+                    :disabled="rc003CaptureBusy || captureUnsupported"
+                    @change="toggleRc003Capture"
+                  />
+                  <span
+                    v-if="captureSwitchState === 'busy'"
+                    class="toggle-spinner"
+                    aria-hidden="true"
+                  ></span>
+                </span>
               </label>
-              <span
-                class="switch-state"
-                :class="rc003CaptureEnabled === true ? 'ok' : 'warn'"
-              >
-                {{ captureStateLabel("other") }}
-              </span>
             </div>
             <!-- 本机不可用（ARM64，issue #206）：说明句与豆包面板逐字一致。 -->
             <p v-if="captureUnsupported" class="tiny muted">{{ CAPTURE_UNSUPPORTED_NOTE }}</p>
-            <p v-else class="tiny muted">建议开启：部分输入工具需要它才能收到遥控器按键。</p>
-            <p v-if="rc003CaptureHint" class="tiny muted">{{ rc003CaptureHint }}</p>
+            <p v-if="captureFailure" class="tiny capture-failure">{{ captureFailure }}</p>
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{
                 voiceCaptureDisplay.length
