@@ -102,41 +102,13 @@ const SESSION_REBIND_SETTLE: Duration = Duration::from_millis(50);
 /// 激活结果：AlreadyActive = 会话已是目标输入法（调用方可零延迟注入）；
 /// Switched = 本次执行了会话切换（含重绑等待）；
 /// SkippedSelfForeground = 前台是 SayAll 自身窗口，已跳过激活；
-/// SkippedRecentSwitch = 距上次真实切换过近，按最小间隔规则跳过本次切换（2026-10-09）；
 /// NotRequired = 该工具不需要切输入法（Vokie / 其他工具）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImeActivation {
     AlreadyActive,
     Switched,
     SkippedSelfForeground,
-    SkippedRecentSwitch,
     NotRequired,
-}
-
-/// 两次"真实会话切换"的最小间隔（2026-10-09 真机实证）。
-///
-/// 背景：Andy 复现——"微信切换 → 豆包切换"相隔约 2 秒时，Chromium 目标窗口
-/// （DimAgent）进入僵死态：豆包语音连按不复位、7 秒后仍不出；而间隔 ≥5 秒的
-/// 同序列（E4 手动验证）与历史 ≥4.4 秒样本全部正常。因此对**相邻真实切换**
-/// 强制最小间隔：过近的切换推迟（对齐路径）或跳过（按下兜底路径），
-/// 宁可损失一次按下的兜底，也不制造僵死态。
-pub(crate) const MIN_SWITCH_GAP_MS: u64 = 5000;
-
-/// 距上次切换若不足最小间隔，返回需要补足的等待毫秒数（纯函数，单测覆盖）。
-pub(crate) fn switch_gap_wait_ms(age_ms: Option<u64>) -> u64 {
-    match age_ms {
-        Some(age) if age < MIN_SWITCH_GAP_MS => MIN_SWITCH_GAP_MS - age,
-        _ => 0,
-    }
-}
-
-/// 等到距上次真实切换满足最小间隔；返回实际等待的毫秒数（0 = 无需等待）。
-pub(crate) fn wait_for_switch_gap() -> u64 {
-    let wait = switch_gap_wait_ms(last_switch_age_ms());
-    if wait > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(wait));
-    }
-    wait
 }
 
 /// 前台窗口是否属于 SayAll 自身进程。
@@ -370,7 +342,6 @@ pub fn ensure_session_ime(
         Ok(ImeActivation::AlreadyActive) => "already_active",
         Ok(ImeActivation::Switched) => "switched",
         Ok(ImeActivation::SkippedSelfForeground) => "skipped_self_foreground",
-        Ok(ImeActivation::SkippedRecentSwitch) => "skipped_recent_switch",
         Ok(ImeActivation::NotRequired) => "not_required",
         Err(_) => "failed",
     };
@@ -655,15 +626,6 @@ mod press_context_tests {
         assert_ne!(notepad, class_token("Chrome_WidgetWin_1"));
     }
 
-    #[test]
-    fn switch_gap_wait_respects_minimum_spacing() {
-        assert_eq!(switch_gap_wait_ms(None), 0);
-        assert_eq!(switch_gap_wait_ms(Some(0)), MIN_SWITCH_GAP_MS);
-        assert_eq!(switch_gap_wait_ms(Some(2000)), MIN_SWITCH_GAP_MS - 2000);
-        assert_eq!(switch_gap_wait_ms(Some(MIN_SWITCH_GAP_MS)), 0);
-        assert_eq!(switch_gap_wait_ms(Some(9000)), 0);
-    }
-
     /// 诊断：枚举 TSF 键盘配置（clsid/guid/hkl/flags）并读当前活动配置，
     /// 用于"直达切换"方案选型（2026-10-10）：
     /// `cargo test -p sayall-windows --lib -- --ignored --nocapture dump_tsf_profiles`
@@ -776,16 +738,6 @@ fn sta_ensure_ime(target: ImeProfile, scope: ImeSwitchScope) -> Result<ImeActiva
             if active_is_target {
                 return Ok(ImeActivation::AlreadyActive);
             }
-            // 最小切换间隔（2026-10-09）：按下兜底路径遇"距上次真实切换过近"直接
-            // 跳过本次切换——过近的第二次真实切换是目标窗口僵死态的诱因；补切由
-            // 对齐路径按间隔完成（见 lib.rs 对齐线程的 wait_for_switch_gap）。
-            if scope == ImeSwitchScope::VoicePress {
-                if let Some(age) = last_switch_age_ms() {
-                    if age < MIN_SWITCH_GAP_MS {
-                        return Ok(ImeActivation::SkippedRecentSwitch);
-                    }
-                }
-            }
             manager
                 .ActivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,
@@ -841,8 +793,31 @@ fn sta_ensure_ime(target: ImeProfile, scope: ImeSwitchScope) -> Result<ImeActiva
             Ok(ImeActivation::Switched)
         })();
         CoUninitialize();
+        // 切换后的"重绑保障"（2026-10-10 真机数据）：会话切换完成 ≠ 目标窗口
+        // 已重绑输入法上下文。仅在对齐路径（ToolSelect）行动——那时用户刚点进
+        // 目标窗口、尚未开始输入；按下路径（VoicePress）的和弦已在下行，
+        // 不在此处插入焦点往返（由失败后的自动救回兜底）。
+        if matches!(result, Ok(ImeActivation::Switched)) && scope == ImeSwitchScope::ToolSelect {
+            post_switch_rebind_safeguard();
+        }
         result
     }
+}
+
+/// 切换后的"重绑保障"（2026-10-10 真机数据结论）：真实切换后目标窗口需要一次
+/// 焦点往返才完成输入法上下文重绑——切换后约 2.5 秒内的按下高概率失败
+/// （记事本 1–2 秒桶 0/4 全败；DimAgent 快按同败），超过后基本正常。
+/// 用户手动"点走再点回"与程序化焦点往返均已验证可解；这里趁用户刚点进目标
+/// 窗口、尚未开始输入的窗口期主动做一次不可见焦点往返，把"首按失败"消灭在
+/// 发生之前。失败路径全部有界，只留结构化日志供测试定位。
+fn post_switch_rebind_safeguard() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if foreground_is_self() {
+        crate::ble::gatt_note("ime_post_switch_bounce skipped=self_foreground".to_owned());
+        return;
+    }
+    let outcome = crate::wetype_revive::focus_bounce_foreground();
+    crate::ble::gatt_note(format!("ime_post_switch_bounce {outcome}"));
 }
 
 /// 读回当前会话的活动配置是否为目标（切换后自校验用；语义与 `sta_ensure_ime` 的查询一致）。
