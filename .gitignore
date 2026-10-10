@@ -85,6 +85,9 @@ hardware/RC003/evidence/helper-run.log
 # 本机开发启动器：硬编码本机 node 位置，不入库（见文件头说明）
 /dev-app.cmd
 
+# 本地测试包构建配置（出包脚本按需重新生成），不入库
+/src-tauri/tauri.local-test.conf.json
+
 # 打包资源暂存（构建产物，由出包脚本复制）
 /src-tauri/resources/
 
@@ -99,3 +102,4 @@ hardware/RC003/evidence/helper-run.log
 
 # 本地出包的临时前端产物（safe-delete 守卫绕法），不入库
 dist-build/
+dist-build-*/

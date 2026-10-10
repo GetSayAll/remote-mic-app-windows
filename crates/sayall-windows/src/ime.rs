@@ -130,6 +130,147 @@ pub(crate) fn foreground_is_self() -> bool {
     }
 }
 
+/// 前台窗口诊断探针（2026-10-09，Andy 同意加日志）：进程号 + 窗口类名**稳定哈希**。
+///
+/// 类名哈希用于跨日志回答"失败与成功的那几按是不是打在同一个窗口类型上"
+/// （如 Chromium 类窗口 vs 记事本），不落盘明文类名；FNV-1a 64 位取高 32 位、
+/// 输出 8 位十六进制，跨进程与版本稳定（类名先转小写再哈希）。
+pub(crate) struct ForegroundProbe {
+    pub pid: u32,
+    pub class_token: String,
+}
+
+pub(crate) fn foreground_probe() -> ForegroundProbe {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return ForegroundProbe {
+                pid: 0,
+                class_token: "none".to_owned(),
+            };
+        }
+        let mut process_id: u32 = 0;
+        GetWindowThreadProcessId(foreground, Some(&mut process_id));
+        let mut buffer = [0u16; 256];
+        let len = GetClassNameW(foreground, &mut buffer);
+        let class = if len > 0 {
+            String::from_utf16_lossy(&buffer[..len as usize])
+        } else {
+            String::new()
+        };
+        ForegroundProbe {
+            pid: process_id,
+            class_token: if class.is_empty() {
+                "unknown".to_owned()
+            } else {
+                class_token(&class)
+            },
+        }
+    }
+}
+
+/// 窗口类名的稳定哈希（FNV-1a 64 → 高 32 位，8 位十六进制；输入先转小写）。
+pub(crate) fn class_token(class: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in class.to_ascii_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", (hash >> 32) as u32)
+}
+
+/// 有界等待"前台不再是我们自己"的预算与步进（2026-10-09 预对齐竞态修复）。
+///
+/// 为什么需要：窗口失焦事件（`WindowEvent::Focused(false)`）到达时，新窗口
+/// 往往还没完成激活，`GetForegroundWindow()` 仍可能指向我们自己；旧实现直接
+/// 在这一瞬间判断并**一次性消费**布防，于是对齐被 `skipped_self_foreground`
+/// 吞掉且不再重试（真机实证 2026-10-09：`last_switch_age_ms=never`）。
+pub(crate) const PREALIGN_SETTLE_BUDGET_MS: u64 = 500;
+pub(crate) const PREALIGN_SETTLE_POLL_MS: u64 = 25;
+
+/// 有界等待的结果（进日志：一次拉取即可归因"等没等到、等了多久"）。
+pub(crate) struct ForegroundSettle {
+    pub elapsed_ms: u128,
+    pub polls: u32,
+    pub still_self: bool,
+}
+
+/// 纯判定（单测覆盖）：`samples[i]` = 第 i 次轮询时"前台是否仍是本进程"。
+/// 首次出现 `false` 即视为新窗口已接管；全 `true`（含空样本）视为未让出。
+#[derive(Debug, PartialEq, Eq)]
+enum SettleOutcome {
+    SettledAfter(u32),
+    StillSelf,
+}
+
+fn settle_outcome(samples: &[bool]) -> SettleOutcome {
+    match samples.iter().position(|still_self| !*still_self) {
+        Some(index) => SettleOutcome::SettledAfter((index + 1) as u32),
+        None => SettleOutcome::StillSelf,
+    }
+}
+
+/// 有界等待：轮询 `foreground_is_self()` 到"不再是自己"或预算耗尽。
+/// 判定统一走 `settle_outcome`（单一来源），时间只负责"何时放弃"。
+pub(crate) fn wait_until_foreground_settles(budget_ms: u64, poll_ms: u64) -> ForegroundSettle {
+    let started = std::time::Instant::now();
+    let mut samples: Vec<bool> = Vec::new();
+    loop {
+        samples.push(foreground_is_self());
+        let exhausted = started.elapsed().as_millis() as u64 >= budget_ms;
+        match settle_outcome(&samples) {
+            SettleOutcome::SettledAfter(polls) => {
+                return ForegroundSettle {
+                    elapsed_ms: started.elapsed().as_millis(),
+                    polls,
+                    still_self: false,
+                };
+            }
+            SettleOutcome::StillSelf if exhausted => {
+                return ForegroundSettle {
+                    elapsed_ms: started.elapsed().as_millis(),
+                    polls: samples.len() as u32,
+                    still_self: true,
+                };
+            }
+            SettleOutcome::StillSelf => {
+                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prealign_settle_tests {
+    use super::{settle_outcome, SettleOutcome};
+
+    #[test]
+    fn settle_stops_at_the_first_non_self_sample() {
+        assert_eq!(settle_outcome(&[false]), SettleOutcome::SettledAfter(1));
+        assert_eq!(
+            settle_outcome(&[true, false]),
+            SettleOutcome::SettledAfter(2)
+        );
+        assert_eq!(
+            settle_outcome(&[true, true, false]),
+            SettleOutcome::SettledAfter(3)
+        );
+    }
+
+    #[test]
+    fn settle_reports_still_self_when_every_sample_is_self() {
+        assert_eq!(settle_outcome(&[]), SettleOutcome::StillSelf);
+        assert_eq!(settle_outcome(&[true]), SettleOutcome::StillSelf);
+        assert_eq!(
+            settle_outcome(&[true, true, true]),
+            SettleOutcome::StillSelf
+        );
+    }
+}
+
 /// 切换触发场景（日志 `scope=`）：报障时一次日志拉取即可归因"这次切换是谁要求的"。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImeSwitchScope {
@@ -204,13 +345,16 @@ pub fn ensure_session_ime(
         Ok(ImeActivation::NotRequired) => "not_required",
         Err(_) => "failed",
     };
+    let probe = foreground_probe();
     crate::ble::gatt_note(format!(
-        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} error_domain={} error_code={} retryable={}",
+        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} fg_pid={} fg_class={} error_domain={} error_code={} retryable={}",
         target.label,
         scope.label(),
         started.elapsed().as_millis(),
-        last_switch_age_ms().map(|age| age.to_string()).unwrap_or_else(|| "never".to_owned()),
+        age_label(last_switch_age_ms()),
         foreground_process_name().is_some(),
+        probe.pid,
+        probe.class_token,
         if result.is_ok() { "none" } else { "tsf" },
         if result.is_ok() { "none" } else { "activation_failed" },
         result.is_err(),
@@ -360,23 +504,199 @@ fn foreground_process_name() -> Option<String> {
     }
 }
 
-/// 最近一次真正执行了会话切换（Switched）的时刻：用于把"首次按下没反应"
-/// 与"刚刚切过输入法"关联起来（2026-10-01：Andy 实测记事本里第一次按下
-/// 右 Alt 漏进记事本变成菜单助记符，说明目标应用的输入法会话还没接上）。
-static LAST_SWITCH_AT: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
-    std::sync::OnceLock::new();
+type AgeSlot = std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>>;
 
-fn note_switch_happened() {
-    let slot = LAST_SWITCH_AT.get_or_init(|| std::sync::Mutex::new(None));
+fn note_now(slot: &AgeSlot) {
+    let slot = slot.get_or_init(|| std::sync::Mutex::new(None));
     let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = Some(std::time::Instant::now());
 }
 
-/// 距离最近一次会话切换过去了多少毫秒；从未切过返回 None。
-pub fn last_switch_age_ms() -> Option<u64> {
-    let slot = LAST_SWITCH_AT.get_or_init(|| std::sync::Mutex::new(None));
+fn age_of(slot: &AgeSlot) -> Option<u64> {
+    let slot = slot.get_or_init(|| std::sync::Mutex::new(None));
     let guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.map(|instant| instant.elapsed().as_millis() as u64)
+}
+
+/// 年龄字段统一格式（None → `never`）：`voice_attempt` / `ime_activation` 共用。
+pub(crate) fn age_label(age: Option<u64>) -> String {
+    age.map(|value| value.to_string())
+        .unwrap_or_else(|| "never".to_owned())
+}
+
+/// 最近一次真正执行了会话切换（Switched）的时刻：用于把"首次按下没反应"
+/// 与"刚刚切过输入法"关联起来（2026-10-01：Andy 实测记事本里第一次按下
+/// 右 Alt 漏进记事本变成菜单助记符，说明目标应用的输入法会话还没接上）。
+static LAST_SWITCH_AT: AgeSlot = std::sync::OnceLock::new();
+
+/// 最近一次「用户选中输入工具」（`set_voice_input_tool` 被调用）的时刻（2026-10-09）。
+///
+/// 为什么记：Andy 复现的失败样本全部来自"切完工具、快速切到目标窗口"——按下时
+/// 距这次选择的毫秒数与路径/门禁一起落 `voice_attempt`，快慢窗口可直接量化，
+/// 不再依赖人工回忆"大概隔了几秒"。
+static LAST_TOOL_SELECT_AT: AgeSlot = std::sync::OnceLock::new();
+
+/// 最近一次「按住说话快捷键变更」（报告层合成目标随之下发）的时刻（2026-10-09）。
+static LAST_HOTKEY_CHANGE_AT: AgeSlot = std::sync::OnceLock::new();
+
+fn note_switch_happened() {
+    note_now(&LAST_SWITCH_AT);
+}
+
+/// 记录一次「选中输入工具」（任何一次 set 调用都算，含应用启动时的配置装载）。
+pub(crate) fn note_tool_select() {
+    note_now(&LAST_TOOL_SELECT_AT);
+}
+
+/// 记录一次「按住说话快捷键变更」（任何一次 set 调用都算，含清空）。
+pub(crate) fn note_hotkey_change() {
+    note_now(&LAST_HOTKEY_CHANGE_AT);
+}
+
+/// 距离最近一次会话切换过去了多少毫秒；从未切过返回 None。
+pub fn last_switch_age_ms() -> Option<u64> {
+    age_of(&LAST_SWITCH_AT)
+}
+
+/// 距离最近一次「选中输入工具」过去了多少毫秒；从未选过返回 None。
+pub(crate) fn tool_select_age_ms() -> Option<u64> {
+    age_of(&LAST_TOOL_SELECT_AT)
+}
+
+/// 距离最近一次「按住说话快捷键变更」过去了多少毫秒；从未变过返回 None。
+pub(crate) fn hotkey_change_age_ms() -> Option<u64> {
+    age_of(&LAST_HOTKEY_CHANGE_AT)
+}
+
+/// 工具标签（日志用；与 `ime_target_for` 的 label 语义一致）。
+pub(crate) fn tool_label(tool: Option<VoiceInputTool>) -> &'static str {
+    match tool {
+        Some(VoiceInputTool::Wechat) => "wechat",
+        Some(VoiceInputTool::Doubao) => "doubao",
+        Some(VoiceInputTool::Vokie) => "vokie",
+        Some(VoiceInputTool::Other) => "other",
+        None => "none",
+    }
+}
+
+/// 该工具"是否真的开麦"的观测标记（ConsentStore 条目名匹配片段，2026-10-09）。
+///
+/// - 豆包：本机实测条目 `ImeService.exe` 的路径含 `doubao`，录音启停会更新
+///   其 LastUsedTimeStart/Stop（与微信同一公开观测通道）；
+/// - 微信：沿用既有 `wetype` 片段（`wetype_check` 阶梯已用同一观测做恢复裁决，
+///   这里只复用观测本身，不改其恢复逻辑）；
+/// - Vokie：`Vokie.exe`；
+/// - 其他/未选：没有可依赖的条目，返回 None（判据按 `unknown` 处理，不推断）。
+pub(crate) fn mic_marker_for(tool: Option<VoiceInputTool>) -> Option<&'static str> {
+    match tool {
+        Some(VoiceInputTool::Doubao) => Some("doubao"),
+        Some(VoiceInputTool::Wechat) => Some("wetype"),
+        Some(VoiceInputTool::Vokie) => Some("vokie"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod press_context_tests {
+    use super::*;
+
+    #[test]
+    fn age_label_formats_none_as_never() {
+        assert_eq!(age_label(None), "never");
+        assert_eq!(age_label(Some(0)), "0");
+        assert_eq!(age_label(Some(1234)), "1234");
+    }
+
+    #[test]
+    fn mic_markers_cover_shipped_tools_only() {
+        assert_eq!(mic_marker_for(Some(VoiceInputTool::Doubao)), Some("doubao"));
+        assert_eq!(mic_marker_for(Some(VoiceInputTool::Wechat)), Some("wetype"));
+        assert_eq!(mic_marker_for(Some(VoiceInputTool::Vokie)), Some("vokie"));
+        assert_eq!(mic_marker_for(Some(VoiceInputTool::Other)), None);
+        assert_eq!(mic_marker_for(None), None);
+    }
+
+    #[test]
+    fn class_token_is_stable_and_case_insensitive() {
+        let notepad = class_token("Notepad");
+        assert_eq!(notepad.len(), 8);
+        assert!(notepad.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(notepad, class_token("notepad"));
+        assert_eq!(notepad, class_token("Notepad"));
+        assert_ne!(notepad, class_token("Chrome_WidgetWin_1"));
+    }
+
+    /// 诊断：枚举 TSF 键盘配置（clsid/guid/hkl/flags）并读当前活动配置，
+    /// 用于"直达切换"方案选型（2026-10-10）：
+    /// `cargo test -p sayall-windows --lib -- --ignored --nocapture dump_tsf_profiles`
+    #[test]
+    #[ignore = "diagnostic: enumerates installed TSF keyboard profiles"]
+    fn dump_tsf_profiles() {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
+        };
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() && hr != windows::core::HRESULT(1) {
+                println!("CoInitializeEx failed: {hr:?}");
+                return;
+            }
+            // COM 对象必须在 CoUninitialize 之前析构（否则 Release 落在反初始化后 → AV）。
+            let dump = (|| {
+                let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                    &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                    None,
+                    CLSCTX_INPROC_SERVER,
+                )
+                .expect("profile manager");
+                let enumerator = manager.EnumProfiles(0x0804).expect("EnumProfiles(zh-CN)");
+                let mut profiles = [TF_INPUTPROCESSORPROFILE::default(); 16];
+                let mut fetched: u32 = 0;
+                loop {
+                    if enumerator.Next(&mut profiles, &mut fetched).is_err() || fetched == 0 {
+                        break;
+                    }
+                    for profile in &profiles[..fetched as usize] {
+                        if profile.dwProfileType != TF_PROFILETYPE_INPUTPROCESSOR {
+                            continue;
+                        }
+                        println!(
+                            "tip clsid={:08X} guid={:08X} hkl=0x{:08X} flags=0x{:08X}",
+                            profile.clsid.data1,
+                            profile.guidProfile.data1,
+                            profile.hkl.0 as usize,
+                            profile.dwFlags,
+                        );
+                    }
+                    if (fetched as usize) < profiles.len() {
+                        break;
+                    }
+                }
+                let mut current = TF_INPUTPROCESSORPROFILE::default();
+                if manager
+                    .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut current)
+                    .is_ok()
+                {
+                    println!(
+                        "active clsid={:08X} guid={:08X} hkl=0x{:08X}",
+                        current.clsid.data1, current.guidProfile.data1, current.hkl.0 as usize,
+                    );
+                }
+            })();
+            CoUninitialize();
+            dump
+        }
+    }
+
+    #[test]
+    fn tool_labels_are_stable_log_tokens() {
+        assert_eq!(tool_label(Some(VoiceInputTool::Wechat)), "wechat");
+        assert_eq!(tool_label(Some(VoiceInputTool::Doubao)), "doubao");
+        assert_eq!(tool_label(Some(VoiceInputTool::Vokie)), "vokie");
+        assert_eq!(tool_label(Some(VoiceInputTool::Other)), "other");
+        assert_eq!(tool_label(None), "none");
+    }
 }
 
 /// 临时 STA 线程体：CoInitializeEx(STA) → 查询活动输入法 →
@@ -467,11 +787,37 @@ fn sta_ensure_ime(target: ImeProfile, scope: ImeSwitchScope) -> Result<ImeActiva
                     target.label
                 ));
             }
+            // 2026-10-09 诊断（Andy：失败样本全部来自"切完工具快速切到窗口"）：
+            // 切换当下读回成功 ≠ 之后一直有效。追加有界读回探针记录保持情况。
+            spawn_readback_probes(target, scope);
             Ok(ImeActivation::Switched)
         })();
         CoUninitialize();
+        // 切换后的"重绑保障"（2026-10-10 真机数据）：会话切换完成 ≠ 目标窗口
+        // 已重绑输入法上下文。仅在对齐路径（ToolSelect）行动——那时用户刚点进
+        // 目标窗口、尚未开始输入；按下路径（VoicePress）的和弦已在下行，
+        // 不在此处插入焦点往返（由失败后的自动救回兜底）。
+        if matches!(result, Ok(ImeActivation::Switched)) && scope == ImeSwitchScope::ToolSelect {
+            post_switch_rebind_safeguard();
+        }
         result
     }
+}
+
+/// 切换后的"重绑保障"（2026-10-10 真机数据结论）：真实切换后目标窗口需要一次
+/// 焦点往返才完成输入法上下文重绑——切换后约 2.5 秒内的按下高概率失败
+/// （记事本 1–2 秒桶 0/4 全败；DimAgent 快按同败），超过后基本正常。
+/// 用户手动"点走再点回"与程序化焦点往返均已验证可解；这里趁用户刚点进目标
+/// 窗口、尚未开始输入的窗口期主动做一次不可见焦点往返，把"首按失败"消灭在
+/// 发生之前。失败路径全部有界，只留结构化日志供测试定位。
+fn post_switch_rebind_safeguard() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if foreground_is_self() {
+        crate::ble::gatt_note("ime_post_switch_bounce skipped=self_foreground".to_owned());
+        return;
+    }
+    let outcome = crate::wetype_revive::focus_bounce_foreground();
+    crate::ble::gatt_note(format!("ime_post_switch_bounce {outcome}"));
 }
 
 /// 读回当前会话的活动配置是否为目标（切换后自校验用；语义与 `sta_ensure_ime` 的查询一致）。
@@ -480,6 +826,75 @@ fn query_active_is_target(manager: &ITfInputProcessorProfileMgr, target: ImeProf
     match unsafe { manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile) } {
         Ok(()) => profile.clsid == target.clsid && profile.guidProfile == target.guid_profile,
         Err(_) => false,
+    }
+}
+
+/// 切换成功后的读回探针延迟（毫秒，自切换返回起累计）。2026-10-09 诊断新增。
+const READBACK_PROBE_DELAYS_MS: [u64; 3] = [500, 1500, 3000];
+
+/// 并发探针上限：每次切换最多 2 组，超出直接留痕跳过（防连续按下堆线程）。
+static READBACK_PROBES_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// 切换成功后追加读回探针：验证"切过去"是否**保持**——静默回退、目标应用侧
+/// 重绑输入法都会在这里现形，也给"多久才真正接上"提供时间线。
+/// 只读、有界退出、不写任何状态；并发上限 2。
+fn spawn_readback_probes(target: ImeProfile, scope: ImeSwitchScope) {
+    use std::sync::atomic::Ordering;
+    if READBACK_PROBES_IN_FLIGHT.load(Ordering::Relaxed) >= 2 {
+        crate::ble::gatt_note(format!("ime_readback scope={} skipped=busy", scope.label()));
+        return;
+    }
+    READBACK_PROBES_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+    let spawned = std::thread::Builder::new()
+        .name("sayall-ime-readback".to_owned())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            for delay in READBACK_PROBE_DELAYS_MS {
+                let elapsed = started.elapsed().as_millis() as u64;
+                if elapsed < delay {
+                    std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
+                }
+                let active = probe_active_is_target(target);
+                crate::ble::gatt_note(format!(
+                    "ime_readback scope={} followup_ms={} active_is_target={}",
+                    scope.label(),
+                    started.elapsed().as_millis(),
+                    active
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                ));
+            }
+            READBACK_PROBES_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+        });
+    if spawned.is_err() {
+        READBACK_PROBES_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// 独立线程（自带 STA + 管理器）读回活动输入法是否为目标；初始化失败返回 None。
+fn probe_active_is_target(target: ImeProfile) -> Option<bool> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // S_OK(0) 或 S_FALSE(1)（本线程已初始化）都算成功。
+        if hr.is_err() && hr != windows::core::HRESULT(1) {
+            return None;
+        }
+        let result = (|| {
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .ok()?;
+            Some(query_active_is_target(&manager, target))
+        })();
+        CoUninitialize();
+        result
     }
 }
 

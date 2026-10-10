@@ -589,6 +589,9 @@ impl WindowsPlatform {
     ///   wudf_ioctl_synth.py 的方法论约束）。
     /// * `None`（快捷键清空）→ 下发 `S -` 关闭合成。
     pub fn set_voice_hold_hotkey(&self, hotkey: Option<send_input::KeyChord>) {
+        // 诊断时间基线（2026-10-09）：按下时"距快捷键（合成目标）变更多久"进
+        // `voice_attempt`；任何一次 set 都算（含清空与启动时的配置装载）。
+        ime::note_hotkey_change();
         *lock(&self.voice_hold_hotkey) = hotkey.clone();
         #[cfg(windows)]
         {
@@ -607,6 +610,9 @@ impl WindowsPlatform {
     /// 赶不上切换——表现为"换工具后第一按拉不起"。选中即对齐把该窗口期清零；
     /// 按下时的兜底切换保留（覆盖用户手动改走输入法的情况）。
     pub fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+        // 诊断时间基线（2026-10-09）：失败样本全部来自"切完工具、快速切到目标
+        // 窗口"，按下时"距选工具多久"由此起算并进 `voice_attempt`。
+        ime::note_tool_select();
         *lock(&self.voice_input_tool) = tool;
         let Some(tool) = tool else {
             *lock(&self.ime_align_pending) = None;
@@ -645,18 +651,45 @@ impl WindowsPlatform {
 
     /// 工具选择后的一次性输入法对齐：本应用窗口失去焦点时调用
     /// （src-tauri `WindowEvent::Focused(false)`）。未布防时 no-op；布防时取走
-    /// 并执行一次切换（`ensure_session_ime` 内部仍会跳过自身仍在前台的情况）。
+    /// 并执行一次切换。
+    ///
+    /// 2026-10-09（真机实证）：旧实现取走布防后**立刻**在新线程里调
+    /// `ensure_session_ime`——但失焦事件到达时新窗口往往还没完成激活，
+    /// `GetForegroundWindow()` 仍指向我们自己，于是被 `skipped_self_foreground`
+    /// 跳过；布防是 `take()` 一次性的，对齐就此永久丢失（日志
+    /// `last_switch_age_ms=never`）。现在改为**有界等待**：轮询到"前台不再是自己"
+    /// 再执行一次；始终不变则照旧跳过（保留 2026-09-12 的 WebView 整页重载保护）。
     pub fn align_ime_after_tool_selection(&self) {
         let Some((tool, armed_at)) = lock(&self.ime_align_pending).take() else {
             return;
         };
-        crate::ble::gatt_note(format!(
-            "ime_tool_select action=fired trigger=window_blur waited_ms={}",
-            armed_at.elapsed().as_millis(),
-        ));
+        let tool_now = std::sync::Arc::clone(&self.voice_input_tool);
         let _ = std::thread::Builder::new()
             .name("sayall-ime-prealign".to_owned())
             .spawn(move || {
+                let settle = ime::wait_until_foreground_settles(
+                    ime::PREALIGN_SETTLE_BUDGET_MS,
+                    ime::PREALIGN_SETTLE_POLL_MS,
+                );
+                let probe = ime::foreground_probe();
+                crate::ble::gatt_note(format!(
+                    "ime_tool_select action=fired trigger=window_blur waited_ms={} settle_ms={} polls={} still_self={} fg_pid={} fg_class={}",
+                    armed_at.elapsed().as_millis(),
+                    settle.elapsed_ms,
+                    settle.polls,
+                    settle.still_self,
+                    probe.pid,
+                    probe.class_token,
+                ));
+                if settle.still_self {
+                    return;
+                }
+                // 若等待期间用户已重新选择工具（当前值不同于布防值），本次让位给新选择。
+                let superseded = *lock(&tool_now) != Some(tool);
+                if superseded {
+                    crate::ble::gatt_note("ime_tool_select action=superseded".to_owned());
+                    return;
+                }
                 let _ = ime::ensure_session_ime(tool, ime::ImeSwitchScope::ToolSelect);
             });
     }
