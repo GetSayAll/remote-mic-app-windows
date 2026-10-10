@@ -47,7 +47,7 @@ export function captureFailureText(
   const text = (raw ?? "").trim();
   if (!text) return null;
   if (text.includes("授权") || text.includes("UAC") || text.includes("提权")) {
-    return `没有完成系统授权，${name}保持关闭。可以再试一次。`;
+    return `没有完成系统授权，${name}保持关闭。`;
   }
   if (text.includes("暂不支持")) {
     return `这台电脑暂不支持${name}。`;
@@ -56,7 +56,7 @@ export function captureFailureText(
     return `安装包缺少本机需要的组件，${name}暂不可用；请重新安装本版本。`;
   }
   if (text.includes("停用") || text.includes("关闭")) {
-    return `关闭没有完成，${name}仍是开启状态。可以再试一次。`;
+    return `关闭没有完成，${name}仍是开启状态。`;
   }
-  return `开启没有成功，${name}保持关闭。可以再试一次。`;
+  return `开启没有成功，${name}保持关闭。`;
 }

@@ -672,7 +672,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 @keyframes toggle-spin {
   to { transform: rotate(360deg); }
 }
-.toggle-input:disabled { cursor: not-allowed; opacity: 0.7; }
+/* 置灰只在开关本体上表达；**不换光标**（2026-10-10 现场反馈：关闭开关的一瞬间指针还在
+   开关上，禁用态的「禁止」光标会闪一下——那个红色禁止标志就是这么来的）。 */
+.toggle-input:disabled { opacity: 0.7; }
 /* 唯一的开关旁文字：失败原因（普通用户语言）。其余状态一个字都不显示。 */
 .capture-failure { color: var(--warning-text); font-weight: 600; }
 .chip-select { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }

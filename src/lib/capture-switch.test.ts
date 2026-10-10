@@ -31,15 +31,15 @@ describe("captureFailureText（失败文案面向普通用户）", () => {
 
   it("授权被取消：说清结果是保持关闭，可以再试", () => {
     const raw = "启用全按键支持失败：授权未完成（UAC 被取消）。三键捕获保持关闭，可再次打开重试。";
-    expect(captureFailureText(raw, NAME)).toBe("没有完成系统授权，全按键支持保持关闭。可以再试一次。");
+    expect(captureFailureText(raw, NAME)).toBe("没有完成系统授权，全按键支持保持关闭。");
   });
 
   it("授权流程里其它失败（提权/计划任务退出码）同样归到系统授权一句", () => {
     expect(captureFailureText("授权未完成（助手注册计划任务失败，退出码 1）。可再次打开重试。", NAME)).toBe(
-      "没有完成系统授权，全按键支持保持关闭。可以再试一次。",
+      "没有完成系统授权，全按键支持保持关闭。",
     );
     expect(captureFailureText("提权安装失败：系统找不到指定的文件。", NAME)).toBe(
-      "没有完成系统授权，全按键支持保持关闭。可以再试一次。",
+      "没有完成系统授权，全按键支持保持关闭。",
     );
   });
 
@@ -52,14 +52,14 @@ describe("captureFailureText（失败文案面向普通用户）", () => {
 
   it("关闭失败：说清功能仍是开启状态", () => {
     expect(captureFailureText("停用全按键支持失败：拒绝访问。", NAME)).toBe(
-      "关闭没有完成，全按键支持仍是开启状态。可以再试一次。",
+      "关闭没有完成，全按键支持仍是开启状态。",
     );
   });
 
   it("映射不到的原文回落通用句；任何输出都不得带内部术语", () => {
     const raw = "启用全按键支持失败：shell_execute_failed hresult=0x80070005";
     const text = captureFailureText(raw, NAME);
-    expect(text).toBe("开启没有成功，全按键支持保持关闭。可以再试一次。");
+    expect(text).toBe("开启没有成功，全按键支持保持关闭。");
     for (const bad of ["UAC", "计划任务", "hresult", "退出码", "helper", "Gadget", "令牌", "提权"]) {
       expect(text).not.toContain(bad);
     }

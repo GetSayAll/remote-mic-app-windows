@@ -1752,7 +1752,7 @@ describe("buttons mapping page", () => {
     await vi.waitFor(() => {
       // 失败文案只有一句用户语言：说清结果与下一步，不带内部原文（2026-10-10）。
       expect(page.find(".page-subtitle").text()).toBe(
-        "没有完成系统授权，全按键支持保持关闭。可以再试一次。",
+        "没有完成系统授权，全按键支持保持关闭。",
       );
     });
     expect(page.text()).not.toContain("UAC");

@@ -1320,7 +1320,7 @@ describe("connection page rc003 capture switch", () => {
     );
     // 失败文案是映射后的用户语言：说清结果与下一步，不带内部原文。
     expect(wrapper.find(".capture-failure").text()).toBe(
-      "没有完成系统授权，“支持更多输入工具”保持关闭。可以再试一次。",
+      "没有完成系统授权，“支持更多输入工具”保持关闭。",
     );
     expect(wrapper.text()).not.toContain("UAC");
     expect(wrapper.text()).not.toContain("授权未完成");

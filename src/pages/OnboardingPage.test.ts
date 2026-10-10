@@ -710,7 +710,7 @@ describe("Onboarding input tool step", () => {
     await flushPromises();
     expect(wrapper.find(".toggle-spinner").exists()).toBe(false);
     expect(wrapper.find(".onboarding-error").text()).toBe(
-      "没有完成系统授权，“支持更多输入工具”保持关闭。可以再试一次。",
+      "没有完成系统授权，“支持更多输入工具”保持关闭。",
     );
     expect(wrapper.text()).not.toContain("UAC");
     expect(wrapper.text()).not.toContain("授权未完成");
