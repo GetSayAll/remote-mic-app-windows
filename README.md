@@ -6,12 +6,14 @@
 
 <p align="center">小米蓝牙遥控器的可视化按键映射</p>
 
+[微博](https://weibo.com/getSayAll) · [官网](https://sayall.app/)
+
 <table>
   <tr>
     <td align="center">
-      <img src="Screenshots/wechat-group-qrcode.jpg" alt="无线麦 SayAll Windows 版微信群二维码" width="220"><br>
-      <strong>Windows 用户交流群</strong><br>
-      微信扫码加入交流群
+      <a href="Screenshots/douyin-sayall.jpg"><img src="Screenshots/douyin-sayall.jpg" alt="无线麦 SayAll.App 抖音二维码" width="220"></a><br>
+      <strong>抖音 · GetSayAll</strong><br>
+      保存图片后，在抖音扫一扫
     </td>
     <td align="center">
       <a href="Screenshots/xhs-sayall.jpg"><img src="Screenshots/xhs-sayall.jpg" alt="无线麦小红书二维码" width="220"></a><br>
@@ -55,6 +57,8 @@
 两种型号的按键映射都已在 Windows 真机上验收通过。当前为预览版本：安装包还没有 Windows 代码签名，首次运行时可能出现 SmartScreen 提示，按安装指南说明继续即可。
 
 ## 用户安装与配置
+
+备用下载：[百度网盘](https://pan.baidu.com/s/1yuBRBCDEWnnwfzbxye5rnQ?pwd=9qhx)，提取码：`9qhx`。
 
 首次安装、遥控器配对、语音软件设置、按键映射、更新和排障步骤，见 [安装与配置指南](docs/installation-and-configuration.md)。各版本的更新内容见 [GitHub Releases](https://github.com/GetSayAll/remote-mic-app-windows/releases)。
 
