@@ -103,6 +103,7 @@ const snapshot: OnboardingDiagnosticsSnapshot = {
   vokieRunning: false,
   voiceTestPhase: "terminal",
   voiceTerminalCode: "voice.no_transcript",
+  voiceLateAccepted: false,
   distinctButtonCount: 2,
   mappingSuspended: true,
   imeDetected: true,
@@ -150,7 +151,7 @@ describe("formatOnboardingDiagnostics", () => {
       "Input tool: wechat hotkey=left_control+left_windows full_key_support=off",
     );
     expect(text).toContain("Vokie: not_detected");
-    expect(text).toContain("Voice test: phase=terminal terminal=voice.no_transcript");
+    expect(text).toContain("Voice test: phase=terminal terminal=voice.no_transcript late=no");
     expect(text).toContain("Buttons observed: 2/3");
     expect(text).toContain(
       "IME: detected=yes match=no installed_count=3 expected_tool=wechat",
@@ -169,6 +170,17 @@ describe("formatOnboardingDiagnostics", () => {
     expect(text).toContain(
       "IME: detected=no match=unknown installed_count=0 expected_tool=wechat",
     );
+  });
+
+  it("迟到接受在文本里自证（terminal=late_transcript late=yes）", () => {
+    // 2026-10-13 现场报告：3 秒窗口失败后文字仍出现（对齐 Mac 现值门禁）。
+    const text = formatOnboardingDiagnostics(report, {
+      ...snapshot,
+      voiceTerminalCode: "late_transcript",
+      voiceLateAccepted: true,
+    });
+
+    expect(text).toContain("Voice test: phase=terminal terminal=late_transcript late=yes");
   });
 
   it("②步现场（按键已收到但应用未连接）在文本里能自证", () => {

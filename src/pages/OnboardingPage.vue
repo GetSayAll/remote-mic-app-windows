@@ -273,8 +273,8 @@ const sidePanel = computed(() => {
     captureEnabled: rc003Status.value?.enabled === true,
     vokieRunning: vokie.value?.running === true,
     voicePhase: voicePhase.value,
-    voiceTerminalCode: voiceResult.value?.code ?? null,
-    voiceResultPassed: voiceResult.value?.result === "passed",
+    voiceTerminalCode: voiceStepTerminalCode.value,
+    voiceResultPassed: voiceLateAccepted.value || voiceResult.value?.result === "passed",
     voiceEvidence: voiceResult.value
       ? {
           decodedSamples: voiceResult.value.evidence.decodedSamples,
@@ -1402,7 +1402,8 @@ async function copyDiagnostics(): Promise<void> {
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
       voiceTestPhase: voicePhase.value,
-      voiceTerminalCode: voiceResult.value?.code ?? null,
+      voiceTerminalCode: voiceStepTerminalCode.value,
+      voiceLateAccepted: voiceLateAccepted.value,
       distinctButtonCount: observedButtons.value.size,
       mappingSuspended: mappingSuspended.value,
       imeDetected: ime?.detected === true,
@@ -1482,6 +1483,13 @@ const voiceFocused = ref(false);
 /** 输入法兜底提示（2026-10-13 现场）：非空时试一下页显示一张说明卡。 */
 const imeHint = ref("");
 let imeCheckRunning = false;
+/**
+ * 迟到接受（对齐 Mac 的现值门禁；2026-10-13 现场报告「文字出现但无法继续」）：
+ * Mac 的门禁按输入框现值实时复算，迟到的文字会把「继续」放开；Windows 原先只看
+ * 3 秒窗口内的 DOM input 事件，迟到的文字成为死路。这里给 `voice.no_transcript`
+ * 一类失败保留翻案通道，见 `settleLateTranscript`。
+ */
+const voiceLateAccepted = ref(false);
 let voiceTracker: VoiceAttemptTracker | null = null;
 let voicePollTimer: number | null = null;
 let voicePollBusy = false;
@@ -1489,6 +1497,20 @@ let voiceObservationId = 0;
 let voiceAttemptSerial = 0;
 let voiceAttemptCount = 0;
 let voiceSnapshotErrorLogged = false;
+/** 终态时刻（迟到延迟毫秒的证据起点）。 */
+let voiceTerminalAt = 0;
+/** 迟到文字被物理键计数否掉后不再翻案（同一 attempt 只裁决一次）。 */
+let voiceLateRefusedManual = false;
+
+/** 第⑤步结果卡：迟到接受后按通过显示（attempt 本身的终态记录不改写）。 */
+const voiceStepResult = computed<"passed" | "failed" | null>(() =>
+  voiceLateAccepted.value ? "passed" : (voiceResult.value?.result ?? null),
+);
+
+/** 侧栏与诊断块共用的终态码：迟到接受后写 late_transcript（attempt 记录不变）。 */
+const voiceStepTerminalCode = computed(() =>
+  voiceLateAccepted.value ? "late_transcript" : (voiceResult.value?.code ?? null),
+);
 
 const voiceToolLabel = computed(() => {
   switch (stagedTool.value) {
@@ -1594,6 +1616,9 @@ async function startVoiceTestSession(): Promise<void> {
   stopVoiceTestSession();
   voiceAttemptSerial += 1;
   voiceResult.value = null;
+  voiceLateAccepted.value = false;
+  voiceLateRefusedManual = false;
+  voiceTerminalAt = 0;
   voiceFailureMessage.value = "";
   voicePhase.value = "waiting_start";
   voiceSnapshotErrorLogged = false;
@@ -1691,6 +1716,65 @@ async function settleVoiceManualInput(now: number): Promise<void> {
   }
 }
 
+/**
+ * 迟到接受（对齐 Mac 的现值门禁）：`voice.no_transcript`（"没看到文字"）失败后，
+ * 文字仍可能出现。结算物理键观察窗口：窗口内出现物理键（用户自己打字）保持失败
+ * 并留痕——阴性对照不因迟到接受而放松；否则翻案为通过，并记录迟到毫秒。
+ * attempt 自身的终态记录不改写；「继续」由 `voiceVerified` 放行。
+ */
+async function settleLateTranscript(): Promise<void> {
+  const terminal = voiceResult.value;
+  if (!terminal || terminal.result === "passed" || terminal.code !== "voice.no_transcript") return;
+  if (voiceLateAccepted.value || voiceLateRefusedManual) return;
+  const id = voiceObservationId;
+  let count: number | null = null;
+  if (id !== 0) {
+    voiceObservationId = 0;
+    try {
+      count = await endKeyObservation(id);
+    } catch {
+      count = null;
+    }
+  }
+  if (voiceResult.value !== terminal || voiceTracker === null) return;
+  const delay = Math.max(0, Date.now() - voiceTerminalAt);
+  if (count === null) {
+    reportOnboardingEvent({
+      kind: "voice_attempt",
+      result: "unknown",
+      reason: "observation_unreliable",
+      step: "voice_test",
+    });
+  } else if (count > 0) {
+    voiceLateRefusedManual = true;
+    reportOnboardingEvent({
+      kind: "voice_attempt",
+      result: "failed",
+      reason: "late_transcript_manual",
+      step: "voice_test",
+      detail: `after_${delay}`,
+    });
+    if (voicePollTimer !== null) {
+      window.clearInterval(voicePollTimer);
+      voicePollTimer = null;
+    }
+    return;
+  }
+  voiceLateAccepted.value = true;
+  voiceVerified.value = true;
+  reportOnboardingEvent({
+    kind: "voice_attempt",
+    result: "passed",
+    reason: "late_transcript",
+    step: "voice_test",
+    detail: `after_${delay}`,
+  });
+  if (voicePollTimer !== null) {
+    window.clearInterval(voicePollTimer);
+    voicePollTimer = null;
+  }
+}
+
 async function pollVoiceTest(): Promise<void> {
   if (voicePollBusy) return;
   const tracker = voiceTracker;
@@ -1698,6 +1782,14 @@ async function pollVoiceTest(): Promise<void> {
   voicePollBusy = true;
   const serial = voiceAttemptSerial;
   try {
+    if (tracker.state() === "terminal") {
+      // 迟到监视：只读输入框现值（不发快照 IPC）；仅「没看到文字」的失败可翻案。
+      if (voiceResult.value?.code === "voice.no_transcript" && !voiceLateAccepted.value) {
+        const late = voiceTestRef.value?.readValue() ?? "";
+        if (late.trim() !== "") await settleLateTranscript();
+      }
+      return;
+    }
     const snapshot = await getRuntimeSnapshot();
     if (serial !== voiceAttemptSerial || voiceTracker !== tracker || step.value !== "voice_test") {
       return;
@@ -1736,6 +1828,28 @@ async function pollVoiceTest(): Promise<void> {
         await settleVoiceManualInput(now);
         if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
       }
+      if (stateNow === "waiting_transcript") {
+        // 输入框现值兜底：工具写入了文字但没有派发 DOM input 事件时，事件判据看不到
+        // （Windows 独有边界；Mac 按输入框现值判定）。先结算物理键计数再记转写——
+        // 人在窗口里打字仍会先被判成手动输入。
+        const text = voiceTestRef.value?.readValue() ?? "";
+        if (text.trim() !== "") {
+          await settleVoiceManualInput(now);
+          if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
+          if (tracker.state() === "terminal") return;
+          const readback = tracker.notifyTranscript(Date.now());
+          if (readback) {
+            reportOnboardingEvent({
+              kind: "voice_attempt",
+              result: "unknown",
+              reason: "transcript_value_readback",
+              step: "voice_test",
+            });
+            onVoiceTerminal(readback);
+            return;
+          }
+        }
+      }
       const terminal = tracker.observe(frame, now);
       if (terminal) {
         onVoiceTerminal(terminal);
@@ -1761,6 +1875,7 @@ async function pollVoiceTest(): Promise<void> {
 function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
   voiceResult.value = terminal;
   voicePhase.value = "terminal";
+  voiceTerminalAt = Date.now();
   if (terminal.result === "passed") {
     voiceVerified.value = true;
   } else {
@@ -1776,6 +1891,11 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
     detail: `d${terminal.evidence.decodedSamples}_s${terminal.evidence.submittedSamples}_q${terminal.evidence.queuedEnd}_drain${terminal.evidence.drainObserved ? 1 : 0}`,
     elapsedMs: terminal.elapsedMs,
   });
+  if (terminal.code === "voice.no_transcript") {
+    // 迟到文字仍可翻案（见 settleLateTranscript）：保留轮询作迟到监视、保留物理键
+    // 观察窗口，才能区分"用户自己打字"与"工具迟到上屏"。
+    return;
+  }
   if (voicePollTimer !== null) {
     window.clearInterval(voicePollTimer);
     voicePollTimer = null;
@@ -1785,7 +1905,11 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
 
 async function onVoiceInput(): Promise<void> {
   const tracker = voiceTracker;
-  if (!tracker || tracker.state() === "terminal" || tracker.state() === "idle") return;
+  if (!tracker || tracker.state() === "idle") return;
+  if (tracker.state() === "terminal") {
+    await settleLateTranscript();
+    return;
+  }
   const serial = voiceAttemptSerial;
   await settleVoiceManualInput(Date.now());
   if (serial !== voiceAttemptSerial || voiceTracker !== tracker || tracker.state() === "terminal") {
@@ -1965,7 +2089,7 @@ async function retryVoiceTest(): Promise<void> {
             v-else-if="step === 'voice_test'"
             ref="voiceTestRef"
             :phase="voicePhase"
-            :result="voiceResult?.result ?? null"
+            :result="voiceStepResult"
             :failure-message="voiceFailureMessage"
             :focused="voiceFocused"
             :tool-label="voiceToolLabel"

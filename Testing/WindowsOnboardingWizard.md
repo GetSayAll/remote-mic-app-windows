@@ -159,20 +159,28 @@
    预期：失败文案「输入框没有聚焦。先点一下输入框…」；测试过程中让窗口失焦 →
    预期：失败文案「测试过程中输入框失去了焦点…」。
 6. 快速点按（不足 0.5 秒）：应给出可见失败并可重试，不出现卡死或空白状态。
-7. **键盘右 Alt 路径（2026-10-04 钩子迁移修复的核心验收，见
+8. **键盘右 Alt 路径（2026-10-04 钩子迁移修复的核心验收，见
    Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）**：应用窗口前台、焦点在输入框时，
    按住键盘**右 Alt**（即所选工具的按住说话快捷键）→ 语音条应出现；松开 → 语音条消失。
    此前"前台根窗口进程 == LL 钩子所在进程"时该路径必失败；修复后两个 LL 钩子均在
    按键宿主进程（`sayall-windows-app.exe --sayall-key-host`），宿主永不持有前台窗口。
    日志核对：`key_host action=hook_report detail=HOOK kind=f5 installed=1` 与
    `detail=HOOK kind=gate installed=1` 各一条；若缺失，钩子未安装、判定降级。
-8. **门控回归（切片 3 门控迁出后）**：遥控器已映射按键（如方向键 / OK）在映射启用时
+7. **迟到文字（2026-10-13 修复，现场报告「文字出现但无法继续」）**：文字晚于「松开后
+   3 秒」窗口才出现（冷启动首用时最容易遇到）时，**不再判死**——文字出现在输入框后，
+   结果卡自动转为「成功：文字已经出现在输入框里」，「继续」可用；日志追加一条
+   `phase=voice_attempt result=passed reason=late_transcript detail=after_<ms>`（毫秒 =
+   迟到延迟），诊断块显示 `terminal=late_transcript late=yes`。
+   阴性对照不变：失败后改用键盘打字 → 保持失败，日志 `reason=late_transcript_manual`。
+   文字写进输入框但没有派发输入事件（少数输入法）也按现值判定，日志 `reason=transcript_value_readback`。
+9. **门控回归（切片 3 门控迁出后）**：遥控器已映射按键（如方向键 / OK）在映射启用时
    仍触发配置动作且不残留原生按键；按住说话快捷键注入成对（按下 DOWN / 释放 UP）；
    断连或退出应用后无粘键（同一按键连按无卡死）。验收时 helper 开 / 关各跑一遍：
    门控迁移与「全按键支持」helper 相互独立，helper 关闭不得影响上述行为。
-9. 日志核对（每次 attempt 必须成对）：
+10. 日志核对（每次 attempt 必须成对）：
    - `frontend event=onboarding phase=voice_attempt result=unknown reason=armed …`（一次 attempt 一条）；
    - 终态一条：`result=passed` 或 `result=failed reason=voice.*`，`detail=d…_s…_q…_drain0|1` 为采样 / 投递 / 队列计数；
+   - 迟到接受 / 迟到否决 / 现值读回各一条（`late_transcript` / `late_transcript_manual` / `transcript_value_readback`）；
    - `input_observation … action=begin/end` 成对出现；`action=end … count=0`（正常路径）。
    - 日志不得包含任何输入文字内容。
 
@@ -195,8 +203,9 @@
     （`reason=missing|not_selected|selected|ready`，状态去重）；
   - ④ 输入工具：`read_tool_state`、`stage_binding`（`detail=<工具>`）、`save_other_keys`、
     `vokie_detect`（`detail=installed_0|1_running_0|1`）、`open_vokie_site`、`vokie_launch`；
-  - ⑤ 按住说话：`armed` / 终态 / `session_stopped` / `observation_begin_failed` 等
-    （见上一条核对）；
+  - ⑤ 按住说话：`armed` / 终态 / `session_stopped` / `observation_begin_failed` /
+    `transcript_value_readback`（现值读回）/ `late_transcript` / `late_transcript_manual`
+    等（见上一条核对）；
   - ⑥ 普通按键：`button_observation`、`mapping_suspend` / `mapping_resume`；
   - ⑦ 完成：`complete_refresh`（失败时 `detail=tool|vokie|capture|audio` 指出来源）。
 - `phase=heartbeat` 每 30 秒一条（`reason=alive`）：携带当前 `step`、门禁 `code` 与
@@ -206,7 +215,7 @@
   音频端点 id/名称、文件路径、错误原文与任何用户输入内容（自动化用例对
   遥控器/端点身份字段做了"绝不出现"断言）。
 
-失败判定：正常路径判定失败或看不到文字；键盘打字仍判通过；焦点类失败文案缺失；快速点按导致卡死、重复 attempt、或出现两个终态；日志缺 attempt 配对或含文字内容。
+失败判定：正常路径判定失败或看不到文字；键盘打字仍判通过（含失败后用键盘打字）；焦点类失败文案缺失；快速点按导致卡死、重复 attempt、或出现两个终态；日志缺 attempt 配对或含文字内容。
 
 ## 用例四：步骤⑥⑦（普通按键体验 / 完成）
 

@@ -15,6 +15,11 @@
  * 3. 结束后的失败优先级：音频错误 > 无解码采样 > 有采样未投递 > 排空异常；
  * 4. 通过 = 投递完成 + 转写文字在窗口内出现 + 未检测到物理键盘输入；
  * 5. 排水/转写各有一个截止时间，超时分别给 `session_not_ended` / `no_transcript`。
+ *
+ * 终态不可改写这条规则只约束**本模块**（迟到帧/迟到 notify 不得覆盖已产生的终态）。
+ * 页面层对 `voice.no_transcript` 另有一条受控的「迟到接受」通道（2026-10-13，对齐
+ * Mac 按输入框现值实时复算的门禁）：晚到的文字在物理键计数为 0 时把「继续」放开，
+ * 用 `late_transcript` 单独留痕；attempt 记录本身仍保持 no_transcript。
  */
 import type { AudioPhase, VoiceSessionState } from "../lib/bridge";
 

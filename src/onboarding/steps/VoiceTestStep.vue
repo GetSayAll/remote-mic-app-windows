@@ -58,7 +58,12 @@ function clearBox(): void {
   }
 }
 
-defineExpose({ focusBox, clearBox });
+/** 读回输入框现值（通过判据不只依赖 DOM input 事件，见 OnboardingPage 第⑤步注释）。 */
+function readValue(): string {
+  return box.value?.value ?? "";
+}
+
+defineExpose({ focusBox, clearBox, readValue });
 </script>
 
 <template>
