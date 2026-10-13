@@ -44,13 +44,14 @@ const modelLabel = computed(() =>
 );
 
 /**
- * 「扫描已配对设备 / 打开蓝牙设置」的显示开关。
- *
- * 2026-10-13 现场：**暂时放出来看效果**——不论连接状态与设备列表都显示。
- * 恢复原规则（未连接、且还没找到已配对遥控器时显示）时，把下面一行换回
- * `!connected.value && props.devices.length === 0`。
+ * 连接后显示的名称（2026-10-13 现场：必须能分清 2 / 2 Pro）。
+ * 优先用扫描列表里那台的系统名称（与设备行完全一致）；列表里没有（如启动恢复的连接）
+ * 就用运行时上报的蓝牙名称；两者都拿不到才退回型号标签。
  */
-const showPairingActions = computed(() => true);
+const connectedName = computed(() => {
+  const known = props.devices.find((device) => device.id === props.connectedDeviceId);
+  return known?.name ?? props.runtime?.platform.connection.remoteName ?? modelLabel.value;
+});
 
 /**
  * 设备行是否就是当前已连接的那台（2026-10-13 现场要求：连接后给"已连接"状态）。
@@ -84,10 +85,11 @@ const buttonRowDesc = computed(() => {
 /** 扫描状态行：只在"扫描过 / 正在扫描"时出现，不新增空状态文案。 */
 const scanRow = computed(() => {
   if (props.scanning) {
+    // 2026-10-13 现场：去掉"保持遥控器在旁边…"那句（点击后不再出提示词）。
     return {
       state: "busy" as const,
       title: "正在寻找小米遥控器…",
-      desc: "保持遥控器在旁边；已配对的设备会出现在下方。",
+      desc: "",
     };
   }
   if (props.devices.length > 0) {
@@ -129,8 +131,9 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       无线麦只支持小米蓝牙语音遥控器 2 和小米蓝牙语音遥控器 2 Pro（RC001 / RC003）。
     </p>
 
-    <!-- 动作按钮只在还没找到已配对遥控器时出现；配对流程说明在第①步，本步不重复。 -->
-    <div v-if="showPairingActions" class="onboarding-chips">
+    <!-- 「扫描已配对设备」保持常显（2026-10-13 现场），下方留出间距；
+         「打开蓝牙设置」入口已移到第①步的配对流程（失败修复卡里仍保留一份，见文件底部）。 -->
+    <div class="onboarding-chips onboarding-chips-scan">
       <button
         class="onboarding-chip strong"
         type="button"
@@ -138,9 +141,6 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
         @click="$emit('scan')"
       >
         {{ scanning ? "正在扫描…" : "扫描已配对设备" }}
-      </button>
-      <button class="onboarding-chip" type="button" @click="$emit('openBluetoothSettings')">
-        打开蓝牙设置
       </button>
     </div>
 
@@ -187,9 +187,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       />
     </div>
 
-    <p v-if="connected" class="onboarding-muted">
-      {{ modelLabel }} · {{ phaseLabel }}
-    </p>
+    <p v-if="connected" class="onboarding-muted">{{ connectedName }} · {{ phaseLabel }}</p>
     <p v-if="reconnecting" class="onboarding-muted">
       正在自动恢复连接（第 {{ reconnectAttempt }} 次尝试），最多等约 60 秒，不需要重新配对。
     </p>

@@ -591,7 +591,7 @@ async function scanRemotes(mode: "auto" | "manual" = "manual"): Promise<void> {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
       ? `找到 ${devices.value.length} 个已配对的小米遥控器`
-      : "没有找到已配对的小米遥控器。先在 Windows 里配对，再回来扫描。";
+      : "当前没有已配对设备，请先按照上一步完成设备配对。";
     reportStepAction("remote", "scan_requested", "passed", {
       detail: `${mode}_found_${devices.value.length}`,
       elapsedMs: actionElapsed(started),
@@ -649,6 +649,30 @@ async function openBluetoothSettings(): Promise<void> {
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction("remote", "open_bluetooth_settings", "failed", {
+      elapsedMs: actionElapsed(started),
+    });
+  }
+}
+
+/**
+ * 第①步配对流程里的「打开蓝牙设置」（2026-10-13 现场）：只唤起系统设置页，
+ * **成功不写任何提示**（①步是照做的清单，不需要"已打开…"回执）。
+ * 失败原因仍写进 operationMessage 并落结构化日志——第①步没有消息区，
+ * 用户走到第②步时能看到原因，诊断块里也有这一步的 action 记录。
+ */
+async function openBluetoothSettingsFromWelcome(): Promise<void> {
+  const started = performance.now();
+  reportStepAction("remote", "open_bluetooth_settings", "unknown", { detail: "welcome" });
+  try {
+    await openWindowsSettings("bluetooth");
+    reportStepAction("remote", "open_bluetooth_settings", "passed", {
+      detail: "welcome",
+      elapsedMs: actionElapsed(started),
+    });
+  } catch (error) {
+    operationMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("remote", "open_bluetooth_settings", "failed", {
+      detail: "welcome",
       elapsedMs: actionElapsed(started),
     });
   }
@@ -1203,7 +1227,8 @@ let diagnosticsResetTimer: number | null = null;
 
 const diagnosticsCopyText = computed(() => {
   if (diagnosticsCopyState.value === "busy") return "正在整理…";
-  if (diagnosticsCopyState.value === "copied") return "已复制到剪贴板";
+  // 成功不再改按钮文字（2026-10-13 现场：复制后只留下方那条绿色提示，
+  // 按钮上的「已复制到剪贴板」与它重复）。
   return "复制诊断信息";
 });
 
@@ -1732,7 +1757,10 @@ async function retryVoiceTest(): Promise<void> {
             <button class="secondary-button" type="button" @click="restoreStep">重试</button>
           </div>
 
-          <WelcomeStep v-if="step === 'welcome'" />
+          <WelcomeStep
+            v-if="step === 'welcome'"
+            @open-bluetooth-settings="openBluetoothSettingsFromWelcome"
+          />
           <RemoteStep
             v-else-if="step === 'remote'"
             :runtime="runtime"
@@ -2165,6 +2193,15 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-card.accent {
   border-color: var(--accent-border);
   background: var(--accent-surface);
+  /* 第①步卡片（只有这一步用 accent）：现场定稿文案排满后，要在 1100×688
+     （最小窗口）下保证「继续」可见——只收紧这张卡内部的间距。 */
+  padding: 13px 18px;
+}
+.onboarding-card.accent .onboarding-numlist {
+  gap: 4px;
+}
+.onboarding-card.accent .onboarding-numlist li {
+  line-height: 1.5;
 }
 .onboarding-card.warn {
   border-color: rgba(182, 109, 20, 0.35);
@@ -2239,6 +2276,19 @@ async function retryVoiceTest(): Promise<void> {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+/* ② 步的扫描按钮：常显并与下方内容留出间距（2026-10-13 现场）。 */
+.onboarding-chips-scan {
+  margin-bottom: 16px;
+}
+/* ① 步配对流程里的动作按钮行（步骤 2 下方，2026-10-13 现场指定位置与间距）：
+   缩进到与文字列对齐（18px 编号 + 9px 间距），并与上下两条留出间距。 */
+.onboarding-numlist li.onboarding-numlist-action {
+  margin: 1px 0 3px;
+  padding-left: 27px;
+}
+.onboarding-numlist li.onboarding-numlist-action .onboarding-chip {
+  padding: 6px 12px;
 }
 .onboarding-chip {
   padding: 8px 14px;
