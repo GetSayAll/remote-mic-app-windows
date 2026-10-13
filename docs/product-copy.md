@@ -446,3 +446,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   焦点环与边框之间透出 1px 背景缝、圆角处并线，看起来像多了一圈断掉的框；改为 `outline-offset: 0`
   （外圈与边框合成一整圈；实测四边各为一条连续细线、无缝隙）。指针模态下的全局抑制规则不受影响。
   像素证据见 [Bugs/2026-10-13-voice-input-focus-double-ring.md](../Bugs/2026-10-13-voice-input-focus-double-ring.md)。
+- 2026-10-14（Andy 追问"第一次进来和从上一个页面进来，输入框边框为什么不一样？"后**定稿**）：
+  ⑤步输入框**聚焦时不显示焦点环，统一只留 1.5px 细边框**（`:focus` 与 `:focus-visible` 都置
+  `outline: none`）。原因：该框由向导自动聚焦，"第一次进来"（未用鼠标）显示焦点环、
+  "从上一页进来"（点过继续）被全局 `body.pointer-nav` 约定抑制——同一聚焦状态两种外观。
+  像素比对（7 vs 3 设备像素）与取舍说明见
+  [Bugs/2026-10-13-voice-input-focus-double-ring.md](../Bugs/2026-10-13-voice-input-focus-double-ring.md)。

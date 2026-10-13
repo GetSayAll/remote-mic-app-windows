@@ -2875,15 +2875,18 @@ async function retryVoiceTest(): Promise<void> {
   font-size: 16px;
   line-height: 1.5;
 }
-.onboarding-voice-input:focus {
-  /* 2026-10-13 现场（Andy 截图：重启后第一次进入⑤步，"输入框外围多一圈不完整的框"）：
-     原来是 outline-offset: 1px —— 同色 outline 与边框之间透出 1px 背景缝，
-     在非指针模态（开机直接落在⑤步、还没有任何点击时）渲染成"两圈同色细线 + 发丝缝"，
-     圆角处缝隙还会并线，看起来像多了一圈断掉的框。offset 0 让外圈与边框合成一整圈
-     （实测：四边各为一条 3 CSS px 的连续细线，无缝隙）；指针模态下的全局
-     `body.pointer-nav` 抑制规则（outline: none）不受影响，行为不变。 */
-  outline: 2px solid var(--accent-border);
-  outline-offset: 0;
+.onboarding-voice-input:focus,
+.onboarding-voice-input:focus-visible {
+  /* 2026-10-14 现场定稿（Andy 选定"统一为细边框"）：⑤步输入框聚焦时不显示焦点环，
+     只保留 1.5px 细边框。
+     起因（2026-10-13 现场两轮）：这个输入框由向导自动聚焦——"第一次进来"（重启后直接落在
+     ⑤步、还没用鼠标）会显示焦点环（先是一圈"断框"样式、后合成一整圈），而"从上一个页面
+     进来"（点过"继续"）被全应用 `body.pointer-nav` 约定抑制、只剩细边框：同一个聚焦状态
+     两种外观。统一：`:focus` 与 `:focus-visible` 都置 none（压过全局
+     `input:focus-visible` 的 2px 焦点环；指针模态下本来就是 none）。
+     取舍说明：本框自动聚焦、步骤文案已引导用户点击，键盘用户不依赖该焦点环；
+     其余控件的全局焦点环约定不变。 */
+  outline: none;
 }
 
 /* ---- 输入工具页 ---- */
