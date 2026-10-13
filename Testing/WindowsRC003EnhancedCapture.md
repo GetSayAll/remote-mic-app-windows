@@ -16,6 +16,10 @@
    `voice_path fallback … tool=doubao reason=report_layer_inactive note=tool_ignores_injected_keys`
    ——豆包在这条路径上必然不出字（它按设计丢弃注入键）；
 4. 反向用例：只断开不换机（目标被清空）**不应**触发重启；连续换机应每次各触发一次。
+5. 即时路径（2026-10-13 晚起）：主程序发布新目标时同步发一行裸 `R`，助手记
+   `[RETARGET] event=request source=app_bridge` 并**立即**复查——重启行带 `trigger=app`
+   （轮询兜底为 `trigger=poll`）。预期：换机后 1 秒内完成重定位，随后的第一次按下即
+   `path=report_layer`。
 
 ## 2026-09-27 全按键动态目标增量验收
 

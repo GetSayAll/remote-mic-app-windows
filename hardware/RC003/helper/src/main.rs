@@ -107,6 +107,8 @@ mod imp {
     /// 目标地址 watchdog 的轮询间隔（2026-10-13 现场）：换遥控器后助手要自动
     /// 重选宿主，2 秒足够快、又不至于频繁扫注册表。
     const RETARGET_POLL_MS: u64 = 2000;
+    /// watchdog 的分片睡眠：既让"主程序请求"能在 100 ms 内被响应，也用于凑出轮询间隔。
+    const RETARGET_WAKE_MS: u64 = 100;
     /// 注入/接管后等待**已鉴权** hello 的默认上限（秒）。
     /// 为什么设默认：2026-09-23 之前，"注入返回非 0 但 agent 从未连上"这种现象
     /// 只会表现为日志一片安静、程序一直等下去——把"失败"伪装成"正在工作"。
@@ -3548,6 +3550,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 下发什么就转发什么，被拒的配置会在 agent 日志里留下 `synth:rejected`
     /// 证据链。注意目标 usage 不受 `TARGET_USAGES` 限制（0x00E6 等合成键
     /// 本来就不在三键集合里），也不能照搬 target 行的集合校验。
+    /// 解析主程序的「立即重选宿主」请求行：`R`（无载荷，2026-10-13 现场新增）。
+    ///
+    /// 主程序在发布新目标（连接/恢复换机）的同一刻发这一行，助手据此**立即**复查
+    /// 目标并重选宿主——把"换机后约 6 秒内按下可能赶不上"的窗口压到毫秒级。
+    /// 轮询 watchdog 仍保留（兜底：请求行丢失、或换机由别的原因触发）。
+    /// 「立即重选宿主」请求的跨线程载体（2026-10-13 现场）。
+    ///
+    /// 主程序发布新目标时发 `R` 行；读行线程置位，目标 watchdog 立刻复查
+    /// （不必等下一个 2 秒轮询）。用模块级原子而不是穿参：与 `crate::key_gate`
+    /// 同一模式——本仓库里"跨组件、单点归属、Drop 有回落"的状态就是这么放的。
+    static RETARGET_NOW: AtomicBool = AtomicBool::new(false);
+
+    fn parse_bridge_retarget_line(line: &str) -> bool {
+        line.trim() == "R"
+    }
+
     fn parse_bridge_synth_line(line: &str) -> Option<Option<u16>> {
         let mut parts = line.trim().split(' ');
         if parts.next()? != "S" {
@@ -3650,6 +3668,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     *current = synth;
                 }
                 voice_synth_dirty.store(true, Ordering::Relaxed);
+            } else if parse_bridge_retarget_line(&line) {
+                // 主程序刚发布了新目标：立刻叫醒 watchdog（不在这里做判断，
+                // 判定逻辑与轮询路径共用一份，避免两处漂移）。
+                logger.kv(
+                    "[RETARGET]",
+                    &[("event", "request".into()), ("source", "app_bridge".into())],
+                );
+                RETARGET_NOW.store(true, Ordering::Relaxed);
             } else if let Some(on) = parse_bridge_gate_line(&line) {
                 logger.kv(
                     "[VOICE-GATE]",
@@ -6451,14 +6477,29 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 目标 watchdog 循环（说明见调用点）：换机后重启自己，让新实例重新定位宿主。
+    ///
+    /// 两条触发：① **主程序请求**（`R` 行 ⇒ [`RETARGET_NOW`]）——请求意味着"目标刚刚
+    /// 变了"，立刻复查、跳过去抖（把换机后的空窗压到毫秒级）；② 2 秒轮询兜底——
+    /// 请求行丢了、或目标由别的原因变化时仍能自愈，此时保留去抖（同一新地址连续看到
+    /// 两次才动手，避免文件写入/清除交错时误判）。
     fn retarget_watch_loop(served_pid: u32, stop: Arc<AtomicBool>, logger: Logger) {
         let mut last_seen = read_target_address(&logger);
         let mut pending: Option<(u64, u32)> = None;
+        let mut pending_ticks: u64 = 0;
         while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(RETARGET_POLL_MS));
+            // 100 ms 分片睡眠：请求到达时最多等一片就响应；轮询间隔由 tick 计数控制。
+            std::thread::sleep(Duration::from_millis(RETARGET_WAKE_MS));
             if stop.load(Ordering::Relaxed) {
                 break;
             }
+            let requested = RETARGET_NOW.swap(false, Ordering::Relaxed);
+            if !requested {
+                pending_ticks += 1;
+                if pending_ticks * RETARGET_WAKE_MS < RETARGET_POLL_MS {
+                    continue;
+                }
+            }
+            pending_ticks = 0;
             let current = read_target_address(&logger);
             if !target_address_requires_recheck(last_seen, current) {
                 continue;
@@ -6466,16 +6507,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             let Some(address) = current else {
                 continue;
             };
-            // 去抖：同一新地址要连续看到两次才动手（文件写入与清除交错时不动手）。
-            match pending {
-                Some((seen, ticks)) if seen == address && ticks >= 1 => {}
-                Some((seen, _)) if seen == address => {
-                    pending = Some((address, 1));
-                    continue;
-                }
-                _ => {
-                    pending = Some((address, 0));
-                    continue;
+            if !requested {
+                // 去抖：同一新地址要连续看到两次才动手（文件写入与清除交错时不动手）。
+                match pending {
+                    Some((seen, ticks)) if seen == address && ticks >= 1 => {}
+                    Some((seen, _)) if seen == address => {
+                        pending = Some((address, 1));
+                        continue;
+                    }
+                    _ => {
+                        pending = Some((address, 0));
+                        continue;
+                    }
                 }
             }
             last_seen = Some(address);
@@ -6495,6 +6538,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 &[
                     ("event", "restart".into()),
                     ("reason", "target_host_changed".into()),
+                    (
+                        "trigger",
+                        if requested { "app" } else { "poll" }.into(),
+                    ),
                     ("candidates", scan.entries.len().to_string()),
                 ],
             );
@@ -8144,6 +8191,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         #[test]
         /// 2026-10-13 现场：换遥控器后助手要自动重选宿主——判据是"目标地址变成
         /// 另一个已能解析出宿主的值"。断开（清空目标）不动手，重复值不动手。
+        /// `R` 行（"立即重选宿主"）只认裸行：带载荷的行不当成请求，避免把别的
+        /// 状态行误触发成重启（2026-10-13 现场新增行，协议与 T/S/W 同族）。
+        #[test]
+        fn retarget_request_parses_only_the_bare_line() {
+            assert!(parse_bridge_retarget_line("R"));
+            assert!(parse_bridge_retarget_line("R\r"));
+            assert!(parse_bridge_retarget_line("  R  "));
+            assert!(!parse_bridge_retarget_line("R 1"));
+            assert!(!parse_bridge_retarget_line("T 7 0x004A"));
+            assert!(!parse_bridge_retarget_line("S -"));
+            assert!(!parse_bridge_retarget_line(""));
+        }
+
         #[test]
         fn target_recheck_only_on_a_new_non_empty_address() {
             assert!(target_address_requires_recheck(None, Some(0x00c0_5d39_c2d9_db)));

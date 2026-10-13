@@ -36,11 +36,23 @@
      ——"按住没反应"的报障可一眼归因到路径而不是输入法。
 3. 应用侧不需要新协议：目标文件本来就是每次连接/恢复时发布的（日志 `remote_target action=published`），
    助手读同一个文件（同源格式）。
+4. **即时路径（同日晚追加，Andy 要求"换完立刻按也要中"）**：主程序发布新目标的同一刻向助手
+   发一行裸 `R`（无载荷，与 `T`/`S`/`W` 同族的文本协议），助手置位后**立刻**复查目标并重选宿主
+   ——把"换机后约 6 秒内按下赶不上"的窗口压到毫秒级；2 秒轮询兜底保留（请求行丢失/别的原因换机
+   仍能自愈），请求路径跳过去抖（请求本身即"目标刚变"的证据）。
 
 ## 验证
 
-- 助手：`cargo test --manifest-path hardware/RC003/helper/Cargo.toml` **52 passed**
-  （含新增 2 例：目标变化判定、按地址选宿主）。
+- 助手：`cargo test --manifest-path hardware/RC003/helper/Cargo.toml` **53 passed**
+  （含新增 3 例：目标变化判定、按地址选宿主、`R` 行解析）。
+- **真机 passed（2026-10-13 22:55，构建 `5cc5d12`）**：换机后
+  `14:55:15.6 remote_target action=published` → `14:55:21.3 [RETARGET] event=restart reason=target_host_changed candidates=10`
+  → `14:55:21.4 event=restarted child_spawned=true` → 新实例 `[REG] … 按主程序目标地址消歧
+  candidates=2 target_matched=1` → `[HOST] pid=12544 WUDFHost.exe` → `[EXCLUSIVE] verdict=exclusive_rc003_host`
+  → `[APP-BRIDGE] connected` → `synth:frame replace ok`；随后两次语音 `path=report_layer`、
+  `mic=observed`（豆包出字），全程**未**关开「全按键支持」。轮询路径的这组证据即上表；
+  即时路径（`R` 行）为当日晚追加，待下一轮真机复核（预期换机后 1 秒内出现
+  `[RETARGET] event=request` + `trigger=app` 的 restart 行）。
 - 应用：`cargo fmt --all -- --check`、`cargo test -p sayall-windows --lib`、`cargo check --workspace`、
   `cargo check -p sayall-windows-app --features runtime-simulation` passed。
 - **deferred（真机）**：甲→乙换机后，助手日志应出现 `[RETARGET] event=restart`，新实例的 `[REG]`
