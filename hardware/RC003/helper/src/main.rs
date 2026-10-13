@@ -70,7 +70,7 @@ mod imp {
     use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
@@ -3617,6 +3617,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 同一模式——本仓库里"跨组件、单点归属、Drop 有回落"的状态就是这么放的。
     static RETARGET_NOW: AtomicBool = AtomicBool::new(false);
 
+    /// 最近一次"握手令牌不匹配"的**宿主 pid**（2026-10-13 现场）。
+    ///
+    /// 握手在连接线程里处理，而"要不要为此结束宿主重来"的判断属于主循环（它知道
+    /// 当前服务的 `target_pid` 与"是否还在接管核验窗口内"）。两边用这一枚原子交接：
+    /// 连接线程只登记事实，主循环只在 `pid == target_pid` 且核验未通过时动手。
+    static MISMATCH_HOST_PID: AtomicU32 = AtomicU32::new(0);
+
     fn parse_bridge_retarget_line(line: &str) -> bool {
         line.trim() == "R"
     }
@@ -4647,6 +4654,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 令牌不匹配的连接是**预期现象**，不是攻击：宿主里可能还常驻着
                     // 旧世代的 agent，它每秒重连一次。逐条打印会把 [EDGE] 淹掉，
                     // 所以折叠成计数器（前 3 次 + 之后每 30 次一条）。
+                    //
+                    // 2026-10-13：**登记宿主 pid**——主循环据此提前结束"接管核验"白等
+                    // （旧 tap 一旦用错令牌握过手，就已经证明接管不可能；现场白等 6.4 秒）。
+                    let mismatch_host = extract_num(line, "pid").unwrap_or(0);
+                    if mismatch_host > 0 {
+                        MISMATCH_HOST_PID.store(mismatch_host as u32, Ordering::Relaxed);
+                    }
                     let n = REJECTED_HELLOS.fetch_add(1, Ordering::Relaxed) + 1;
                     if n <= 3 || n % 30 == 0 {
                         logger.kv(
@@ -5734,13 +5748,36 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     break;
                 }
             }
+            // 令牌不匹配 ⇒ 接管已被证明不可能，立刻走干净首注，不必等满核验窗口。
+            let mismatch_here = {
+                let pid = MISMATCH_HOST_PID.load(Ordering::Relaxed);
+                if pid != 0 && pid == target_pid {
+                    MISMATCH_HOST_PID.store(0, Ordering::Relaxed);
+                    true
+                } else {
+                    false
+                }
+            };
+            if mismatch_here {
+                logger.kv(
+                    "[ATTACH]",
+                    &[
+                        ("verify", "failed".into()),
+                        ("reason", "no_authenticated_agent".into()),
+                        ("trigger", "token_mismatch".into()),
+                        ("action", "early_restart_host_clean_inject".into()),
+                        ("served_pid", target_pid.to_string()),
+                    ],
+                );
+            }
             if attach_verification_expired(
                 attach_plan,
                 saw_authenticated,
                 escalated_attach,
                 (Instant::now() - started).as_millis() as u64,
                 ATTACH_VERIFY_MS,
-            ) {
+            ) || (attach_plan && !saw_authenticated && !escalated_attach && mismatch_here)
+            {
                 // "只升级一次"：不论下面走哪条路，这轮之后都不再重复判定（语义与原来一致）。
                 let escalated_before = escalated_attach;
                 escalated_attach = true;
