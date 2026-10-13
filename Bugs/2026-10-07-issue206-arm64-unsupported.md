@@ -147,6 +147,69 @@ bridge_phase=listening helper_pid=0
 - 索取：完整的 `auto_trigger_escalate` 失败行（含 5 个对账字段）与助手侧的
   `[HOST]` / `[VERIFY]` / `[INJECT]` 行，用于确认宿主定位与 Gadget 校验在 ARM64 上均通过。
 
+## 2026-10-13 第三轮：两处根因与修复（任务电池策略 / 唤醒后重试风暴）
+
+报障人在 0.8.6 复测后追加了两份分析（Issue #206）。两个根因都成立，修复已实现；
+真机复测随下一版包（`deferred`）。
+
+### 根因一：计划任务电池策略在电池供电下静默拦截助手
+
+- 现场证据（报障人对照实验）：任务电源管理为「在电池模式停止 / 不用电池启动」
+  （`<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>` 与
+  `<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>`）；14:46:15 机器切到电池后
+  正在跑的助手随当中断；同一命令手写、不带电源策略的任务立刻能跑，原任务却是
+  「LastRunTime 更新、上次结果 0、无进程、共享日志零输出」= 动作被调度器静默拦下。
+  应用 escalate 只能看到"助手没连上"，于是无限重试（attempt 40+）。
+- 本机复现（2026-10-13，x64 开发机最小实验）：`schtasks /create` 命令行形态建出的任务
+  实测两项均为 true；改用 XML 注册（`/create /xml`）并显式置 false 后，两项落库为 false；
+  无触发器任务 `schtasks /run` 手动触发可执行（可观察副作用：写出探测文件）；自写
+  `<Date>` 保留且重装后会变（应用侧"重授权成功"判据不失效）。临时任务建完即删、无残留。
+- 修复：助手注册任务改用 XML（`task_xml`）：两项电池策略置 false；
+  `<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`（不限期——命令行默认 PT72H 会让常驻
+  助手跑满 3 天被静默结束一次，经用户确认一并改掉）；无触发器（只手动触发）。
+  启动对账新增"任务电源策略"判据：旧任务两项为 true 时回落开关并落
+  `terminal_result=revoked reason=task_power_policy_mismatch expected=battery_flags_off`，
+  用户拨一次开关即重建为新形态（重装要提权，不在启动时擅自弹 UAC）。
+- 顺带（报障人建议）：助手退出码 14（`/rl highest` 未生效、令牌没有 SeDebugPrivilege）
+  在应用侧单独分流——日志加 `reason=se_debug_unavailable retryable=false`，原文改
+  「系统授权没有生效…」。边界：捕获运行的退出码走计划任务，应用看不到；该分流覆盖的是
+  应用直接等到的次数（`--install-task` 等）。
+
+### 根因二：失败尝试自激的 arrival 把退避清零 → ~2 次/秒重试风暴
+
+- 现场证据：报障人从日志确认 `wake_reconnect triggered=device_arrived backoff_reset=true`
+  由"失败尝试本身引发的新 device_arrived"反复触发：约 2 次/秒、18 分钟 2317 次；
+  并指出它连带压制了无线电恢复窗口（连续失败计数被不断清零，到不了阈值）。
+- 修复：给提前重连加**安静窗下限**（`PROMOTION_QUIET_WINDOW` = 基础退避 2s）：上次尝试
+  结束后 2 秒内的 arrival/wake 不再提前；被抑制的触发只落折叠日志
+  （`wake_reconnect skipped reason=post_attempt_quiet_window … suppressed_total=` 第 1 条 +
+  每 100 条一条）；提前成功时日志新增 `since_attempt_ms=`。语义不变：仍只提前、不延后、
+  不门控；真实唤醒最坏多等一个基础间隔（2s，远小于改造前的 30s）。
+- 测试：`quiet_window_blocks_promotions_right_after_a_failed_attempt`、
+  `advance_reconnect_respects_the_quiet_window`、
+  `self_induced_arrival_storm_is_throttled_to_the_base_cadence`（含阳性对照：去掉安静窗
+  必须重现 ~0.5s 节奏；安静窗下两次尝试间隔不小于基础退避）。
+
+### 其余现场结论（记录口径）
+
+- 睡眠唤醒"卡死"本体在**对端**：链路 `Connected` 而 `Uncached` 服务发现 `Unreachable`，
+  PC 侧手段（重启应用/系统、无线电关开）全部无效；遥控器断电重连立刻恢复 → 遥控器
+  固件/链路侧状态，应用无法自愈。本轮不加新的用户提示文案（决定留待后续）。
+- 22 秒短睡通过 vs 40+ 分钟待机失败：待机时长/唤醒路径是关键变量。复现配方 =
+  拔电（电池供电）→ 合盖待机 ≥40 分钟 → 开盖。
+- 断连重连项经报障人实测通过（`schtasks /end` 终止助手 → ≤18 秒自动接管、无人工）。
+
+### 验证（本机，2026-10-13）
+
+- 助手：`cargo test --manifest-path hardware/RC003/helper/Cargo.toml` **48 passed**
+  （含 `task_xml_tests` 3 例）；release 构建 + `--selftest` 退出码 0，含新项
+  「计划任务 XML 注册：电池策略关闭 + 不限期 + 最高权限 + 只手动触发 + 跟随主程序」。
+- `cargo test -p sayall-windows --lib` **332 passed**（含风暴回归 3 例）；
+  `cargo test -p sayall-windows-app` **108 passed / 1 ignored**（含电源策略判据 1 例）。
+- 真机复测 `deferred`：需在报障人机器（ARM64 + 电池 + 长待机）复测
+  ① 拔电后助手能自启；② 长待机唤醒后无重试风暴（查 `wake_reconnect` 折叠行与新节奏）；
+  ③ 旧任务升级后回落开关那一条日志。
+
 ## 隐私检查
 
 本文不含个人路径（一律写 `%LOCALAPPDATA%` 或仓库相对路径）、不含设备身份、蓝牙地址、
