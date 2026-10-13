@@ -164,9 +164,15 @@
      也直接切换（`ime_activation scope=wizard_inline`）。
 4. 阴性对照：不碰遥控器，直接用键盘在输入框打字。
    预期：判定失败，文案「检测到键盘输入。这一步请只用遥控器语音键，不要用键盘打字。」；「重新测试」清空输入框并重新开始，再跑一次正常路径应通过。
+   判定口径（2026-10-13 收窄，现场误报修复）：只有「可能产生文字的按键」且「按下时没有 Ctrl/Alt/Win 按住」才计入——
+   纯修饰键、功能键 / 方向键 / 截图键（如裸 PrintScreen）、以及 Ctrl/Alt/Win 组合热键（如截图 Win+Shift+S）都不算；
+   打大写字母（Shift+字母）与裸字母照常计入，阴性对照不放松。反例复核：⑤步停留期间按一次截图热键，
+   再完成一次正常语音会话 → 应通过（日志 `input_observation … action=end count=0 keys=none`）。
 5. 焦点用例：先点输入框以外的地方（失焦）再按住语音键 →
-   预期：失败文案「输入框没有聚焦。先点一下输入框…」；测试过程中让窗口失焦 →
+   预期：失败文案「输入框没有聚焦。先点一下输入框…」；测试过程中输入框**真的**失去焦点（点到别处）→
    预期：失败文案「测试过程中输入框失去了焦点…」。
+   2026-10-13 现场修正：别的窗口盖上来（工具语音条、截图遮罩、系统弹窗）产生的**窗口级 blur 不算失焦**——
+   输入框仍持有焦点、文字照样落进去，必须判通过（此前会把已上屏的会话误判成「输入框没有聚焦」）。
 6. 快速点按（不足 0.5 秒）：应给出可见失败并可重试，不出现卡死或空白状态。
 8. **键盘右 Alt 路径（2026-10-04 钩子迁移修复的核心验收，见
    Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）**：应用窗口前台、焦点在输入框时，
@@ -190,7 +196,8 @@
    - `frontend event=onboarding phase=voice_attempt result=unknown reason=armed …`（一次 attempt 一条）；
    - 终态一条：`result=passed` 或 `result=failed reason=voice.*`，`detail=d…_s…_q…_drain0|1` 为采样 / 投递 / 队列计数；
    - 迟到接受 / 迟到否决 / 现值读回各一条（`late_transcript` / `late_transcript_manual` / `transcript_value_readback`）；
-   - `input_observation … action=begin/end` 成对出现；`action=end … count=0`（正常路径）。
+   - `input_observation … action=begin/end` 成对出现；`action=end … count=0`（正常路径，判定口径见用例三.4）；
+     `action=end` 行含 `keys=`（窗口内计入的按键列表，最多 12 个）——出现非 0 计数时一眼看清是哪些键被计入。
    - 日志不得包含任何输入文字内容。
 
 ## 分步日志（卡住定位速查，2026-10-05 起）

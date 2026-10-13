@@ -1630,7 +1630,8 @@ fn begin_key_observation(exclude_vks: Vec<u32>, state: tauri::State<'_, AppState
 
 /// 向导第⑤步前置（探针④）：关闭物理键观察窗口并取回计数。
 /// None = 计量不可靠（窗口过期/钩子停止）——调用方 fail-open。
-/// `last_vk` 为窗口内最后计入的键（误报归因用；none = 未计入任何键）。
+/// `last_vk` 为窗口内最后计入的键（误报归因用；none = 未计入任何键）；
+/// `keys` 为窗口内计入的按键码列表（最多 12 个，一次日志拉取定位误报来源）。
 #[tauri::command]
 fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Option<u64> {
     let count = state.platform.end_key_observation(window_id);
@@ -1639,12 +1640,23 @@ fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Opt
         .observed_last_key()
         .map(|vk| format!("0x{vk:02X}"))
         .unwrap_or_else(|| "none".to_owned());
+    let observed: Vec<String> = state
+        .platform
+        .observed_keys()
+        .into_iter()
+        .map(|vk| format!("0x{vk:02X}"))
+        .collect();
+    let keys = if observed.is_empty() {
+        "none".to_owned()
+    } else {
+        observed.join(",")
+    };
     match count {
         Some(count) => sayall_windows::gatt_note(format!(
-            "input_observation feature=physical_keys action=end window={window_id} count={count} last_vk={last_vk} phase=completed terminal_result=passed"
+            "input_observation feature=physical_keys action=end window={window_id} count={count} last_vk={last_vk} keys={keys} phase=completed terminal_result=passed"
         )),
         None => sayall_windows::gatt_note(format!(
-            "input_observation feature=physical_keys action=end window={window_id} last_vk={last_vk} phase=completed terminal_result=failed error_domain=hook error_code=window_unreliable retryable=true"
+            "input_observation feature=physical_keys action=end window={window_id} last_vk={last_vk} keys={keys} phase=completed terminal_result=failed error_domain=hook error_code=window_unreliable retryable=true"
         )),
     }
     count

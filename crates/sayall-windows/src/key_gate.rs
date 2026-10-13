@@ -263,7 +263,7 @@ mod windows_impl {
     use crate::raw_input::{button_for_keyboard, ButtonEdge, RemoteButton, ALL_BUTTONS};
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::Instant;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -350,6 +350,24 @@ mod windows_impl {
         const FALSE: AtomicBool = AtomicBool::new(false);
         [FALSE; 256]
     };
+    /// 「非 Shift 修饰键」（Ctrl/Alt/Win）当前按住掩码：由透传路径上的每条
+    /// **非注入**键盘事件维护（DOWN 置位、UP 清位；开窗时清零）。注入事件不参与
+    /// ——注入的修饰位不是用户按住。
+    ///
+    /// 用途（2026-10-13 现场）：区分"往输入框打字"与"系统/工具热键"。现场实证：
+    /// 窗口内计到 3 个按下沿、最后一个 VK 0x53（S）——与截图热键 Win+Shift+S 的
+    /// 三个按下沿（Win、Shift、S）吻合；一次**成功的语音会话**因此被判成
+    /// `voice.manual_input`。Shift 不在掩码里：打大写/符号要用它，阴性对照
+    /// （键盘打字必报）不得因此放宽。
+    static HELD_HOTKEY_MODS: AtomicU64 = AtomicU64::new(0);
+    /// 观察窗口内计入的按键码（诊断；只原子写、最多 `OBSERVATION_KEYS_MAX` 个）。
+    /// 旧实现只留 last_vk，现场一次日志拉取无法还原"是哪几个键被计入"——
+    /// 误报归因必须一次到位。
+    static OBSERVATION_KEYS: [AtomicU32; OBSERVATION_KEYS_MAX] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO: AtomicU32 = AtomicU32::new(0);
+        [ZERO; OBSERVATION_KEYS_MAX]
+    };
     static OBSERVATION_WINDOW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static ARMED_UNTIL_MS: [AtomicU64; ALL_BUTTONS.len()] = {
         #[allow(clippy::declare_interior_mutable_const)]
@@ -404,6 +422,9 @@ mod windows_impl {
         static CAPTURE_PAIRING: RefCell<HashSet<(u16, u16)>> = RefCell::new(HashSet::new());
     }
 
+    /// 观察窗口计入键列表的容量（诊断口径；超出部分只计数不记键）。
+    const OBSERVATION_KEYS_MAX: usize = 12;
+
     pub const HOLD_NONE: u32 = 0;
     pub const HOLD_SWALLOWED_ALL: u32 = 1;
     pub const HOLD_LEAKED: u32 = 2;
@@ -426,6 +447,42 @@ mod windows_impl {
     /// 遥控器在线（BLE 连接相位推导，ble.rs 同步）。
     fn remote_connected() -> bool {
         REMOTE_CONNECTED.load(Ordering::Relaxed)
+    }
+
+    /// VK → 「非 Shift 修饰键」位（见 `HELD_HOTKEY_MODS`）。
+    /// Shift（0x10/A0/A1）刻意缺席：它是打字的一部分。
+    fn hotkey_mod_bit(vk_code: u32) -> Option<u64> {
+        match vk_code {
+            0x11 | 0xA2 | 0xA3 => Some(1), // Ctrl
+            0x12 | 0xA4 | 0xA5 => Some(2), // Alt（含合成「按住说话」的右 Alt）
+            0x5B | 0x5C => Some(4),        // Win
+            _ => None,
+        }
+    }
+
+    /// 维护「非 Shift 修饰键」按住掩码。在每条**非注入**键盘事件上调用
+    /// （含 UP 沿；注入事件在 `handle_keyboard` 已提前返回）。
+    pub(super) fn track_hotkey_mods(vk_code: u32, is_key_up: bool) {
+        if let Some(bit) = hotkey_mod_bit(vk_code) {
+            if is_key_up {
+                HELD_HOTKEY_MODS.fetch_and(!bit, Ordering::Relaxed);
+            } else {
+                HELD_HOTKEY_MODS.fetch_or(bit, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// 「可能产生文字」的按键：只有它们的按下沿才可能构成"往输入框打字"。
+    /// 功能键/方向键/媒体键/修饰键本身都不算（2026-10-13 现场：旧口径把截图
+    /// 热键与遥控器泄漏边沿也算了进去）。
+    fn text_capable_vk(vk_code: u32) -> bool {
+        matches!(
+            vk_code,
+            0x08 | 0x09 | 0x0D | 0x20 | 0x2E // 退格 / 制表 / 回车 / 空格 / 删除
+                | 0x30..=0x39 | 0x41..=0x5A // 数字 / 字母
+                | 0x60..=0x6F // 小键盘
+                | 0xBA..=0xC0 | 0xDB..=0xDE | 0xE2 // 常见符号键
+        )
     }
 
     /// 直接归因族（无需武装即可吞）：
@@ -690,6 +747,10 @@ mod windows_impl {
         if injected {
             return false;
         }
+        // 维护"非 Shift 修饰键按住"状态：观察窗口计数判据之一（见
+        // `HELD_HOTKEY_MODS`）。必须放在吞键/透传分支之前——修饰键本身不吞，
+        // 但它决定了随后按键算不算"打字"。
+        track_hotkey_mods(vk_code, is_key_up);
         let Some(button) = button_for_keyboard(vk_code as u16, make_code) else {
             // 普通键盘键（字母/数字等）：透传。观察窗口记录按下沿。
             if !is_key_up {
@@ -974,8 +1035,23 @@ mod windows_impl {
         if OBSERVATION_EXCLUDED_VK[(vk_code & 0xFF) as usize].load(Ordering::Relaxed) {
             return;
         }
+        // 只在"可能成为往输入框打字"时计入（2026-10-13 现场误报修复）：
+        // - 键本身要能产生文字（修饰键/功能键/方向键/媒体键不算）；
+        // - 按下当时不得有 Ctrl/Alt/Win 按住（那是系统/工具热键，例如截图
+        //   Win+Shift+S：Win、Shift、S 三个按下沿，旧口径把 S 计入 → 假阳性）。
+        // 阴性对照（不碰遥控器、直接用键盘打字）不受影响：字母/数字/空格
+        // 等没有修饰键按住时照常计入。
+        if !text_capable_vk(vk_code) {
+            return;
+        }
+        if HELD_HOTKEY_MODS.load(Ordering::Relaxed) != 0 {
+            return;
+        }
         OBSERVATION_LAST_VK.store(vk_code as u64, Ordering::Relaxed);
-        OBSERVATION_PHYSICAL_DOWNS.fetch_add(1, Ordering::Relaxed);
+        let index = OBSERVATION_PHYSICAL_DOWNS.fetch_add(1, Ordering::Relaxed) as usize;
+        if index < OBSERVATION_KEYS_MAX {
+            OBSERVATION_KEYS[index].store(vk_code & 0xFF, Ordering::Relaxed);
+        }
     }
 
     /// 打开物理键观察窗口：返回窗口 id（从 1 递增；0 保留给"不可用"）。
@@ -993,6 +1069,11 @@ mod windows_impl {
         }
         OBSERVATION_PHYSICAL_DOWNS.store(0, Ordering::Relaxed);
         OBSERVATION_LAST_VK.store(u64::MAX, Ordering::Relaxed);
+        for slot in &OBSERVATION_KEYS {
+            slot.store(0, Ordering::Relaxed);
+        }
+        // 掩码随窗清零：窗外状态不继承（其余按事件成对维护）。
+        HELD_HOTKEY_MODS.store(0, Ordering::Relaxed);
         let id = OBSERVATION_WINDOW_ID.fetch_add(1, Ordering::Relaxed) + 1;
         OBSERVATION_ACTIVE.store(true, Ordering::Relaxed);
         id
@@ -1026,6 +1107,18 @@ mod windows_impl {
         }
     }
 
+    /// 诊断：窗口内计入的按键码（按计入顺序，最多 `OBSERVATION_KEYS_MAX` 个）。
+    /// 与 `observed_last_vk` 同一读取时机（`end_key_observation` 之后）。
+    pub fn observed_keys() -> Vec<u32> {
+        let counted = OBSERVATION_PHYSICAL_DOWNS
+            .load(Ordering::Relaxed)
+            .min(OBSERVATION_KEYS_MAX as u64) as usize;
+        OBSERVATION_KEYS[..counted]
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .collect()
+    }
+
     /// 门控是否"运行中"：
     /// - 生产构建 = 宿主进程钩子存活（`GATE_ACTIVE`，由宿主安装报告驱动，
     ///   宿主退出/断连即回落 false → 全透传 fail-open）；
@@ -1048,7 +1141,7 @@ mod windows_impl {
 pub use windows_impl::{
     arm_button, begin_key_observation, capture_diagnostics_summary, configure, decide,
     end_key_observation, enhanced_owned_mask, injected_echo_since, injected_event_count,
-    is_gate_thread_alive, leaked_down_count, listener_active, observed_last_vk,
+    is_gate_thread_alive, leaked_down_count, listener_active, observed_keys, observed_last_vk,
     persistent_swallow_total, set_edge_sink, set_enhanced_owned_mask, set_listener_active,
     set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
     set_shortcut_capture_sink, set_voice_synth_active, swallowed_edge_count, voice_synth_active,
@@ -1133,6 +1226,13 @@ mod fallback {
     pub fn observed_last_vk() -> Option<u32> {
         None
     }
+
+    pub fn observed_keys() -> Vec<u32> {
+        Vec::new()
+    }
+
+    pub fn track_hotkey_mods(_vk_code: u32, _is_key_up: bool) {}
+
     pub fn set_voice_synth_active(_active: bool) {}
     pub fn voice_synth_active() -> bool {
         false
@@ -1374,22 +1474,24 @@ mod tests {
     #[test]
     fn observation_window_counts_os_visible_physical_downs_only() {
         let _lock = lock_observation_tests();
-        let id = windows_impl::begin_key_observation(&[0xA5]);
+        let id = windows_impl::begin_key_observation(&[0x48]);
         assert!(id > 0, "开窗返回非零 id");
         assert_eq!(
             windows_impl::observed_last_vk(),
             None,
             "新窗口尚未计入任何键"
         );
+        assert!(windows_impl::observed_keys().is_empty());
         // 普通字母按下沿：计数（会进入 OS，可能是手动输入）。
         windows_impl::observe_os_visible_down(0x41);
-        // 排除集内的合成和弦键（右 Alt）：不计（它必须到达输入法）。
-        windows_impl::observe_os_visible_down(0xA5);
+        // 排除集内的合成和弦键：不计（它必须到达输入法/工具）。
+        windows_impl::observe_os_visible_down(0x48);
         assert_eq!(
             windows_impl::observed_last_vk(),
             Some(0x41),
             "被排除的键不得覆盖最后计入键"
         );
+        assert_eq!(windows_impl::observed_keys(), vec![0x41]);
         assert_eq!(windows_impl::end_key_observation(id), Some(1));
         // 幂等：重复关闭与陈旧 id 都是 None（迟到回调不得读新窗）。
         assert_eq!(windows_impl::end_key_observation(id), None);
@@ -1400,8 +1502,8 @@ mod tests {
     #[test]
     fn observation_window_rotates_ids_and_resets_excludes() {
         let _lock = lock_observation_tests();
-        let first = windows_impl::begin_key_observation(&[0xA5]);
-        windows_impl::observe_os_visible_down(0xA5); // 旧窗内被排除
+        let first = windows_impl::begin_key_observation(&[0x53]);
+        windows_impl::observe_os_visible_down(0x53); // 旧窗内被排除
         assert_eq!(windows_impl::observed_last_vk(), None);
         let second = windows_impl::begin_key_observation(&[]);
         assert!(second > first, "新窗 id 单调递增");
@@ -1410,10 +1512,68 @@ mod tests {
             None,
             "旧窗 id 不得读取或关闭新窗"
         );
-        // 排除集随窗口重置：新窗未排除 0xA5，计数生效。
-        windows_impl::observe_os_visible_down(0xA5);
-        assert_eq!(windows_impl::observed_last_vk(), Some(0xA5));
+        // 排除集随窗口重置：新窗未排除 0x53，计数生效。
+        windows_impl::observe_os_visible_down(0x53);
+        assert_eq!(windows_impl::observed_last_vk(), Some(0x53));
         assert_eq!(windows_impl::end_key_observation(second), Some(1));
+    }
+
+    /// 2026-10-13 现场误报回归：截图热键（Win+Shift+S）与功能键不得被算成
+    /// "键盘打字"；Shift+字母（打大写）与裸字母仍必须计入（阴性对照不放松）。
+    #[cfg(windows)]
+    #[test]
+    fn observation_ignores_modifiers_and_hotkey_combos() {
+        let _lock = lock_observation_tests();
+        // 纯修饰键按下沿（Win / Shift / Ctrl）：不算打字。
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::observe_os_visible_down(0x5B);
+        windows_impl::observe_os_visible_down(0xA0);
+        windows_impl::observe_os_visible_down(0x11);
+        assert_eq!(windows_impl::observed_last_vk(), None);
+        assert_eq!(windows_impl::end_key_observation(id), Some(0));
+
+        // Win+Shift+S（现场形态）：S 在 Win 按住期间按下 → 不算。
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::track_hotkey_mods(0x5B, false);
+        windows_impl::observe_os_visible_down(0x53);
+        assert_eq!(windows_impl::end_key_observation(id), Some(0));
+        // 对照：放开 Win 之后再按 S，算打字（同一实现、不同按住状态）。
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::track_hotkey_mods(0x5B, true);
+        windows_impl::observe_os_visible_down(0x53);
+        assert_eq!(windows_impl::end_key_observation(id), Some(1));
+
+        // Shift+字母（打大写）算打字：Shift 不抑制计数。
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::track_hotkey_mods(0x10, false);
+        windows_impl::observe_os_visible_down(0x54);
+        assert_eq!(windows_impl::end_key_observation(id), Some(1));
+        windows_impl::track_hotkey_mods(0x10, true);
+
+        // 功能键 / 方向键 / 截图键（裸 PrintScreen）：不算。
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::observe_os_visible_down(0x74);
+        windows_impl::observe_os_visible_down(0x25);
+        windows_impl::observe_os_visible_down(0x2C);
+        assert_eq!(windows_impl::end_key_observation(id), Some(0));
+
+        // 掩码随窗清零：上一窗遗留的 Win 位不得泄漏到下一窗。
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::observe_os_visible_down(0x53);
+        assert_eq!(windows_impl::end_key_observation(id), Some(1));
+    }
+
+    /// 诊断列表：计入的键按顺序记录（一次日志拉取即可定位误报来源）。
+    #[cfg(windows)]
+    #[test]
+    fn observation_records_counted_key_list() {
+        let _lock = lock_observation_tests();
+        let id = windows_impl::begin_key_observation(&[]);
+        windows_impl::observe_os_visible_down(0x48);
+        windows_impl::observe_os_visible_down(0x10); // Shift：不计
+        windows_impl::observe_os_visible_down(0x4A);
+        assert_eq!(windows_impl::observed_keys(), vec![0x48, 0x4A]);
+        assert_eq!(windows_impl::end_key_observation(id), Some(2));
     }
 
     #[cfg(windows)]

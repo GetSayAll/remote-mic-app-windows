@@ -102,6 +102,10 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn observed_last_key(&self) -> Option<u32> {
         None
     }
+    /// 观察窗口诊断：窗口内计入的按键码列表（空 = 未计入或不可用）。
+    fn observed_keys(&self) -> Vec<u32> {
+        Vec::new()
+    }
 
     /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
     /// （`ble_session_cleanup` 落盘）后才返回。
@@ -291,6 +295,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn observed_last_key(&self) -> Option<u32> {
         WindowsPlatform::observed_last_key(self)
+    }
+
+    fn observed_keys(&self) -> Vec<u32> {
+        WindowsPlatform::observed_keys(self)
     }
 
     fn set_enhanced_capture_enabled(&self, enabled: bool) {

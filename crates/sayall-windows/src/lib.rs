@@ -945,6 +945,12 @@ impl WindowsPlatform {
         key_gate::observed_last_vk()
     }
 
+    /// 观察窗口诊断（见 `key_gate::observed_keys`）：窗口内计入的按键码列表
+    /// （按计入顺序，最多 12 个）。与 `observed_last_key` 同一读取时机。
+    pub fn observed_keys(&self) -> Vec<u32> {
+        key_gate::observed_keys()
+    }
+
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
         scan_paired_remotes()
     }
