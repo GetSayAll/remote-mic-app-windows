@@ -3015,6 +3015,15 @@ pub fn run() {
                         support.helper_expected
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
+                } else if rc003_task::task_power_policy_matches() == Some(false) {
+                    // 旧版任务带电池策略（`schtasks /create` 命令行形态固定写 true，
+                    // 2026-10-13 issue #206 第三轮报障人对照实验定位）：电池供电时
+                    // 调度器静默拦截任务动作，助手永远起不来。新版本用 XML 注册并显式
+                    // 关闭；旧任务同样回落开关，等用户拨一次开关重建（重装要提权）。
+                    sayall_windows::gatt_note(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason=task_power_policy_mismatch expected=battery_flags_off".to_owned(),
+                    );
+                    let _ = settings.save_rc003_capture_enabled(false);
                 } else if reauth_required || !task_installed {
                     // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
                     // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验

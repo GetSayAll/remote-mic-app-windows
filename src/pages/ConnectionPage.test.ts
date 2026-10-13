@@ -1194,11 +1194,16 @@ describe("connection page rc003 capture switch", () => {
     wrapper.unmount();
   });
 
-  it("豆包面板在开关未开启时提示「还差一步」，开启后提示已就绪", async () => {
+  it("开关与状态提示合并成一个开关（2026-10-10）：未开启时没有状态字、也不劝开启", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.text()).toContain("需要开启");
-    expect(wrapper.text()).toContain("还差一步");
+    // 关闭态：开关本身即状态，一个字都不显示。
+    expect(wrapper.find(".capture-switch").exists()).toBe(true);
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("需要开启");
+    expect(wrapper.text()).not.toContain("未开启");
+    expect(wrapper.text()).not.toContain("还差一步");
+    expect(wrapper.text()).not.toContain("建议开启");
 
     await wrapper.find(".capture-switch").setValue(true);
     await flushPromises();
@@ -1207,8 +1212,40 @@ describe("connection page rc003 capture switch", () => {
       .findComponent({ name: "EnhancedCaptureConfirmDialog" })
       .vm.$emit("confirm");
     await flushPromises();
-    expect(wrapper.text()).toContain("已开启");
-    expect(wrapper.text()).not.toContain("还差一步");
+    // 开启态同样没有状态字（「已开启」不再渲染）。
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(true);
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("已开启");
+    wrapper.unmount();
+  });
+
+  it("正在操作：开关置灰并出现转圈，且不配任何文字（2026-10-10）", async () => {
+    // enable 挂起 = 操作进行中（真机上这一段是授权窗口期间）。
+    let release!: (value: Awaited<ReturnType<typeof mocks.enableRc003Capture>>) => void;
+    mocks.enableRc003Capture.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    await wrapper.find(".capture-switch").setValue(true);
+    await flushPromises();
+    await wrapper
+      .findComponent({ name: "EnhancedCaptureConfirmDialog" })
+      .vm.$emit("confirm");
+    await flushPromises();
+
+    const input = wrapper.find<HTMLInputElement>(".capture-switch");
+    expect(input.element.disabled, "进行中必须置灰").toBe(true);
+    expect(wrapper.find(".toggle-switch-slot .toggle-spinner").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("正在操作");
+    expect(wrapper.text()).not.toContain("正在启动");
+
+    release(taskStatus({ enabled: true }));
+    await flushPromises();
+    expect(wrapper.find(".toggle-spinner").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1263,7 +1300,7 @@ describe("connection page rc003 capture switch", () => {
     wrapper.unmount();
   });
 
-  it("操作失败（lastError）：开关回退原状态并显示提示，不静默保持翻转", async () => {
+  it("操作失败（lastError）：开关回退原状态，并只显示普通用户能读懂的原因（2026-10-10）", async () => {
     mocks.enableRc003Capture.mockResolvedValue(
       taskStatus({ enabled: false, lastError: "授权未完成（UAC 被取消）" }),
     );
@@ -1281,7 +1318,12 @@ describe("connection page rc003 capture switch", () => {
     expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(
       false,
     );
-    expect(wrapper.text()).toContain("授权未完成（UAC 被取消）");
+    // 失败文案是映射后的用户语言：说清结果与下一步，不带内部原文。
+    expect(wrapper.find(".capture-failure").text()).toBe(
+      "没有完成系统授权，“支持更多输入工具”保持关闭。",
+    );
+    expect(wrapper.text()).not.toContain("UAC");
+    expect(wrapper.text()).not.toContain("授权未完成");
     wrapper.unmount();
   });
 });
@@ -1433,7 +1475,7 @@ describe("connection page capture support unavailable (issue #206)", () => {
     vi.clearAllMocks();
   });
 
-  it("开关置灰、状态说「暂不可用」，并给出原因与恢复方式（不再劝人开启）", async () => {
+  it("开关置灰、保留「本机暂不支持」说明；不再有状态字与劝开启文案（2026-10-10）", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
 
@@ -1443,9 +1485,9 @@ describe("connection page capture support unavailable (issue #206)", () => {
     );
     const input = wrapper.find<HTMLInputElement>(".capture-switch");
     expect(input.element.disabled, "不可用时开关必须置灰").toBe(true);
-    expect(wrapper.find(".switch-state").text()).toBe("暂不可用");
+    // 状态字已并入开关；本机不可用仍保留一句能力边界说明（issue #206 承诺）。
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
     expect(wrapper.text()).toContain(UNSUPPORTED_NOTE);
-    // 不可用时不再出现「需要开启 / 还差一步」这类劝开启的文案。
     expect(wrapper.text()).not.toContain("需要开启");
     expect(wrapper.text()).not.toContain("还差一步");
 
@@ -1474,7 +1516,7 @@ describe("connection page capture support unavailable (issue #206)", () => {
     wrapper.unmount();
   });
 
-  it("available=true 时行为不变：开关可点、状态与提示照旧", async () => {
+  it("available=true 时：开关可点、无状态字，开启路径照旧", async () => {
     mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
@@ -1482,8 +1524,8 @@ describe("connection page capture support unavailable (issue #206)", () => {
     const label = wrapper.find('label[for="capture-switch-doubao"]');
     expect(label.attributes("title")).toBeUndefined();
     expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(false);
-    expect(wrapper.find(".switch-state").text()).toBe("需要开启");
-    expect(wrapper.text()).toContain("还差一步");
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
+    expect(wrapper.find(".capture-failure").exists()).toBe(false);
     expect(wrapper.text()).not.toContain(UNSUPPORTED_NOTE);
 
     // 开启路径照旧（每次开启先弹确认）。
@@ -1494,7 +1536,10 @@ describe("connection page capture support unavailable (issue #206)", () => {
       .vm.$emit("confirm");
     await flushPromises();
     expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
-    expect(wrapper.find(".switch-state").text()).toBe("已开启");
+    expect((wrapper.find(".capture-switch").element as HTMLInputElement).checked).toBe(true);
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
+    // 一次成功的操作不留任何文案（"其余情况不显示文案"）。
+    expect(wrapper.find(".capture-failure").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1504,7 +1549,8 @@ describe("connection page capture support unavailable (issue #206)", () => {
     await flushPromises();
 
     expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(false);
-    expect(wrapper.find(".switch-state").text()).toBe("需要开启");
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
+    expect(wrapper.find(".capture-failure").exists()).toBe(false);
     wrapper.unmount();
   });
 });

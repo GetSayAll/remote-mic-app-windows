@@ -2426,16 +2426,7 @@ async function retryVoiceTest(): Promise<void> {
   gap: 10px;
   cursor: pointer;
 }
-.onboarding-switch-row .switch-state {
-  font-size: 14px;
-  font-weight: 600;
-}
-.onboarding-switch-row .switch-state.ok {
-  color: var(--success-text, #1a7f4b);
-}
-.onboarding-switch-row .switch-state.warn {
-  color: var(--warning-text, #8a5a00);
-}
+/* 状态字已随「开关与状态提示合并」删除（2026-10-10）：失败文案走 .onboarding-error。 */
 .onboarding-chip-select {
   display: flex;
   flex-wrap: wrap;
