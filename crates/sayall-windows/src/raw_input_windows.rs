@@ -395,14 +395,22 @@ fn run_listener(
     }
 
     // 设备选择：缺失（系统 HOGP 接口缺失/遥控器未连接）不视为失败，进入 Awaiting；
-    // 多设备歧义仍按失败处理，由上层重启。
+    // 多候选（两支同型号遥控器同时在线，或同一支换过实例、旧实例还在枚举里）**不再判失败**
+    // ——2026-10-13 现场：此时判失败会让监听器每 10 秒重启一次（日志里连续 listener_start_failed），
+    // 这 10 秒 | 更长窗口内按键完全不可用，而且失败与用户看到的现象毫无关联。候选只决定
+    // "从哪一路开始听"；真正的归属由「应用正在用的那支」（`remote_target`）在枚举过滤
+    // （`filter_paths_for_target`）、绑定审计与报文接受（同地址的其他实例路径也接受）三处收窄。
     let selected_path = match select_single_device_path(&paths) {
         Ok(path) => normalize_device_path(&path),
         Err(DevicePathError::Missing) => String::new(),
-        Err(error) => {
-            let _ = unsafe { DestroyWindow(window) };
-            let _ = unsafe { UnregisterClassW(class_name_ptr, Some(instance)) };
-            return Err(error.to_string());
+        Err(DevicePathError::Ambiguous(count)) => {
+            let first =
+                normalize_device_path(paths.first().map(String::as_str).unwrap_or_default());
+            crate::ble::gatt_note(format!(
+                "raw_input binding_initial action=ambiguous_pick selected_path={first} \
+                 matched_device_count={count}"
+            ));
+            first
         }
     };
     THREAD_CONTEXT.with(|slot| {
