@@ -661,6 +661,47 @@ fn worker_loop(
 
         match message {
             WorkerMessage::Connect { device_id, reply } => {
+                // 换遥控器：先把上一支**显式断开**（2026-10-13 现场要求：同时有多支遥控器时，
+                // 连接另一支之前应先把之前那支断开——同屏只保持一条遥控器链路，旧链路的状态、
+                // 语音订阅、按住键与门控归因都随之释放）。
+                // 幂等：真正的资源释放在 `invalidate_connection`；这里只是把它提前，并让状态先
+                // 回到"未连接"，使"先断开、再连新的"在状态与日志上都成立。
+                // 同一支（id 相同）不算换机，保持原行为（内部照常 invalidate 后重连）。
+                if preferred_device_id
+                    .as_deref()
+                    .is_some_and(|current| current != device_id)
+                {
+                    match invalidate_connection(
+                        &mut session,
+                        &mut pipeline,
+                        &audio,
+                        &send_input,
+                        &mut held_hotkey,
+                        &mut connection_generation,
+                    ) {
+                        Ok(()) => {
+                            let snapshot = ConnectionSnapshot::default();
+                            *lock(&state) = snapshot.clone();
+                            apply_input_connection_phase(snapshot.phase);
+                            gatt_note(
+                                "ble_switch action=disconnect_previous terminal_result=passed"
+                                    .to_owned(),
+                            );
+                        }
+                        Err(error) => {
+                            // 清理失败不阻断本次连接：`attempt_connection` 会再清一次（幂等），
+                            // 真失败会在那里以 BleCleanup 上报给界面（沿用 2026-09-05 口径）。
+                            gatt_note(format!(
+                                "ble_switch action=disconnect_previous terminal_result=failed error_domain=bluetooth error_code={} retryable=true",
+                                ble_error_code(&error)
+                            ));
+                        }
+                    }
+                    reconnect_deadline = None;
+                    capabilities_deadline = None;
+                    backoff.reset();
+                    radio_recovery.reset();
+                }
                 preferred_device_id = Some(device_id.clone());
                 system_suspended = false;
                 reconnect_deadline = None;
