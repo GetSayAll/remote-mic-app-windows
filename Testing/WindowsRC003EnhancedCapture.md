@@ -4,12 +4,19 @@
 
 ## 2026-09-27 全按键动态目标增量验收
 
-- 捕获集合 = “全按键支持已开启”且当前至少配置一个动作的按键；未映射键不清空，保留 Windows 原始行为。
+- 捕获集合 = “全按键支持已开启”时**恒含三键**（返回 / 音量+ / 音量−；清空它们零副作用——这三个 usage 对 Windows 本就不可见）∪ 当前至少配置一个动作的按键；其余未映射键不清空，保留 Windows 原始行为（2026-10-13 修订，见下节）。
 - 语音键 usage `0x003E` 永远不进入目标集合。
 - 主程序只在收到相同 `generation + usages` 的 agent ACK 后撤掉该键的旧键盘门控；ACK 超时、Helper 断开、关闭功能或删除映射必须恢复旧逻辑。
 - 自动化判据：`agent_logic_test.mjs` 对 13 个 usage 逐键验证报告槽被清零，并验证空目标恢复原报告；`rc003_bridge` 真 TCP 用例验证 `OK/T/O`、动态主页边沿和关闭时撤销所有权。
 - 真机判据（RC001、RC003 分别执行）：为确定、主页、TV、四方向、菜单、电源、静音和三键逐个配置可观察动作；开启时每键只触发映射动作且物理键盘同名键完全原生，关闭后除返回/音量±外全部沿用旧逻辑。覆盖按下中关闭、Helper 强杀、1.5s 所有权超时、冷态首按与连续按压。
 - 当前结果：自动化 `passed`；RC001/RC003 全 13 键真机与共享宿主上其它蓝牙键盘兼容性 `deferred`。
+
+#### 2026-10-13 增量：三键恒被接管（“零配置”按下也有高亮）
+
+- 修订点：目标集 = `mapped_mask | ALWAYS_CAPTURED_BUTTONS`（开启时）——返回 / 音量+ / 音量− 在「全按键支持」开启期间**恒**被报告层接管，与是否配置了动作无关；其余按键“只在配置了映射时接管”不变（最小接管）。
+- 原因：零配置时三键零事件会让“按下即高亮”这一观察反馈缺失（其他按键有），向导「按键检测」同样收不到三键；三键在 Windows 输入栈里本来就不可见，清空它们不改变任何系统可见行为。详见 `Bugs/2026-10-13-trikeys-need-mapping-to-highlight.md`。
+- 自动化判据（`passed`，本机 Windows）：`cargo test -p sayall-windows --lib` **332 passed / 0 failed**——`three_keys_are_captured_without_any_mapping`（零配置目标集 = `80,81,f1`）、`capture_targets_are_three_keys_plus_mapped_only`（已配置 Home + 三键；未配置的确定/方向不进入）、`three_key_edges_pass_the_minimal_target_set`（最小目标集下三键边沿放行、未配置主页仍被丢弃），以及 `OK/T` 协议行与开关语义断言（`end_to_end_loopback_delivers_edges`、`enhanced_capture_enable_pushes_targets_and_disable_clears`）。修复前三条新增/改写用例分别红在“目标集为空 / 只有 Home / OK 行缺 `81`”。
+- 真机判据（**deferred**，RC001 与 RC003 分别执行）：开启「全按键支持」且**不配置任何动作**时按下 返回 / 音量+ / 音量− → 按键页卡片按下即高亮（向导按键检测同样收到）；随后给三键各配一个动作 → 按下只执行映射动作、无原生副作用；关闭开关 → 三键卡片回到置灰禁用。
 
 ### 本地安装包验证（2026-09-27）
 

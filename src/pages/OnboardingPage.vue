@@ -143,6 +143,8 @@ const devices = ref<PairedRemote[]>([]);
 const scanning = ref(false);
 const scanMessage = ref("");
 const connectingDeviceId = ref("");
+/** 本向导会话里连接成功的那台设备（设备行显示"已连接"；启动恢复的连接为空）。 */
+const connectedDeviceId = ref("");
 const operationMessage = ref("");
 const remoteButtonObserved = ref(false);
 const voiceKeyMistake = ref(false);
@@ -388,6 +390,17 @@ watch(
   },
 );
 
+// 连接就绪 → 清掉连接过程消息（2026-10-13 现场反馈）：循环里的消息只在"处理中"
+// 有意义，连接成立后（例如「已打开系统蓝牙设置…」）继续留着就是过期信息。
+watch(
+  () => props.runtime?.platform.connection.phase ?? "idle",
+  (phase, previous) => {
+    if (!CONNECTED_PHASES.includes(phase)) return;
+    if (previous && CONNECTED_PHASES.includes(previous)) return;
+    operationMessage.value = "";
+  },
+);
+
 onMounted(async () => {
   // 心跳是刻意保留的重复日志（卡住定位）；其余事件遵守"状态未变化不重复刷"。
   heartbeatTimer = window.setInterval(reportHeartbeat, 30_000);
@@ -567,24 +580,27 @@ function stopButtonObservation(): void {
   }
 }
 
-async function scanRemotes(): Promise<void> {
+async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promise<void> {
+  if (scanning.value) return;
   scanning.value = true;
   scanMessage.value = "正在寻找小米遥控器…";
   const started = performance.now();
-  reportStepAction("remote", "scan_requested", "unknown");
+  // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ②步自动连接触发）。
+  reportStepAction("remote", "scan_requested", "unknown", { detail: mode });
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
       ? `找到 ${devices.value.length} 个已配对的小米遥控器`
-      : "没有找到已配对的小米遥控器。先在 Windows 里配对，再回来扫描。";
+      : "当前没有已配对设备，请先按照上一步完成设备配对。";
     reportStepAction("remote", "scan_requested", "passed", {
-      detail: `found_${devices.value.length}`,
+      detail: `${mode}_found_${devices.value.length}`,
       elapsedMs: actionElapsed(started),
     });
   } catch (error) {
     devices.value = [];
     scanMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction("remote", "scan_requested", "failed", {
+      detail: mode,
       elapsedMs: actionElapsed(started),
     });
   } finally {
@@ -592,21 +608,28 @@ async function scanRemotes(): Promise<void> {
   }
 }
 
-async function connectDevice(device: PairedRemote): Promise<void> {
+async function connectDevice(device: PairedRemote, mode: "auto" | "manual" = "manual"): Promise<void> {
   connectingDeviceId.value = device.id;
-  operationMessage.value = "";
+  operationMessage.value =
+    mode === "auto" ? "找到 1 个已配对遥控器，正在自动连接…" : "";
   const started = performance.now();
-  // 脱敏：device.id / 名称不进日志，只记录连接请求与结果。
-  reportStepAction("remote", "connect_requested", "unknown");
+  // 脱敏：device.id / 名称不进日志，只记录连接请求、方式与结果。
+  reportStepAction("remote", "connect_requested", "unknown", { detail: mode });
   try {
     await connectRemote(device.id);
-    operationMessage.value = "正在确认语音功能，就绪后按一下普通按键。";
+    connectedDeviceId.value = device.id;
+    // 成功不写进度消息（2026-10-13 现场要求：那条"正在确认语音功能…"与下方按键行
+    // 引导重复、按键已收到后还会变成过期信息）。连接过程由连接检查卡片的
+    // 进行中/已就绪表达；失败仍给出原因。
+    operationMessage.value = "";
     reportStepAction("remote", "connect_requested", "passed", {
+      detail: mode,
       elapsedMs: actionElapsed(started),
     });
   } catch (error) {
     operationMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction("remote", "connect_requested", "failed", {
+      detail: mode,
       elapsedMs: actionElapsed(started),
     });
   } finally {
@@ -630,6 +653,90 @@ async function openBluetoothSettings(): Promise<void> {
     });
   }
 }
+
+/**
+ * 第①步配对流程里的「打开蓝牙设置」（2026-10-13 现场）：只唤起系统设置页，
+ * **成功不写任何提示**（①步是照做的清单，不需要"已打开…"回执）。
+ * 失败原因仍写进 operationMessage 并落结构化日志——第①步没有消息区，
+ * 用户走到第②步时能看到原因，诊断块里也有这一步的 action 记录。
+ */
+async function openBluetoothSettingsFromWelcome(): Promise<void> {
+  const started = performance.now();
+  reportStepAction("remote", "open_bluetooth_settings", "unknown", { detail: "welcome" });
+  try {
+    await openWindowsSettings("bluetooth");
+    reportStepAction("remote", "open_bluetooth_settings", "passed", {
+      detail: "welcome",
+      elapsedMs: actionElapsed(started),
+    });
+  } catch (error) {
+    operationMessage.value = error instanceof Error ? error.message : String(error);
+    reportStepAction("remote", "open_bluetooth_settings", "failed", {
+      detail: "welcome",
+      elapsedMs: actionElapsed(started),
+    });
+  }
+}
+
+// ---- 遥控器步骤：自动连接（2026-10-10 现场反馈） ----
+//
+// 系统侧配对完成后，普通按键会先到（按键检查随之变绿），但"继续"还要求应用连上
+// 遥控器（语音会话）。为消除"按键已收到、连接未建立"这一中间状态：进入②步、
+// 或系统侧遥控器刚出现时，若恰好只有一个已配对遥控器就自动连接。候选不唯一、
+// 一个都没有、连接已就绪/进行中/用户已手动断开时不触发；自动连接与手动点设备卡
+// 走同一条 connectDevice（保存设备 + 连接），日志用 detail=auto|manual 区分。
+const shouldAutoConnectRemote = computed(() => {
+  if (step.value !== "remote") return false;
+  const platform = props.runtime?.platform;
+  if ((platform?.connection.phase ?? "idle") !== "idle") return false;
+  // 系统里确实有遥控器（输入通道已在位）才值得扫描；还没配对时保持手动流程。
+  return (platform?.rawInput.phase ?? "stopped") === "ready";
+});
+
+/** 防重入：一次触发只跑一轮扫描 + 连接（两个触发点共用）。 */
+let autoConnectRunning = false;
+
+/**
+ * ②步的自动动作（2026-10-13 现场扩了一条）：**进入②步先把已配对设备直接列出来**，
+ * 再按原条件（未连接 + 输入通道在位 + 候选唯一）自动连接。
+ *
+ * 背景：原先只有"未连接且输入通道在位"才自动扫描，应用已连接 / 启动时恢复了会话时
+ * 进②步看到的是空列表，用户必须自己点「扫描已配对设备」。现在两个触发点
+ * （进入②步 / 遥控器在②步期间出现）共用本函数：先保证列表已带出，再决定要不要连。
+ * 谁先跑到谁负责整轮，后到的由 `autoConnectRunning` 吸收，不会连扫两轮。
+ */
+async function ensureRemoteListAndMaybeConnect(mode: "entry" | "auto"): Promise<void> {
+  if (autoConnectRunning || connectingDeviceId.value) return;
+  autoConnectRunning = true;
+  try {
+    if (scanning.value) return; // 已有一轮扫描在跑（例如用户刚点了扫描），由它带出列表。
+    if (devices.value.length === 0) {
+      await scanRemotes(mode);
+    }
+    if (step.value !== "remote" || devices.value.length !== 1) return;
+    if (!shouldAutoConnectRemote.value) return;
+    const device = devices.value[0];
+    if (!device) return;
+    await connectDevice(device, "auto");
+  } finally {
+    autoConnectRunning = false;
+  }
+}
+
+// 触发点一：进入②步（不论连接状态，先把列表带出来）。
+watch(
+  () => step.value,
+  (value) => {
+    if (value !== "remote") return;
+    void ensureRemoteListAndMaybeConnect("entry");
+  },
+);
+
+// 触发点二：停在②步期间系统侧遥控器出现（输入通道变为在位）。
+watch(shouldAutoConnectRemote, (should) => {
+  if (!should) return;
+  void ensureRemoteListAndMaybeConnect("auto");
+});
 
 // ---- 语音设备步骤 ----
 
@@ -1141,7 +1248,8 @@ let diagnosticsResetTimer: number | null = null;
 
 const diagnosticsCopyText = computed(() => {
   if (diagnosticsCopyState.value === "busy") return "正在整理…";
-  if (diagnosticsCopyState.value === "copied") return "已复制到剪贴板";
+  // 成功不再改按钮文字（2026-10-13 现场：复制后只留下方那条绿色提示，
+  // 按钮上的「已复制到剪贴板」与它重复）。
   return "复制诊断信息";
 });
 
@@ -1172,8 +1280,23 @@ async function copyDiagnostics(): Promise<void> {
     }
     const recommended = endpoints.filter(isRecommendedVoiceEndpoint);
     const selectedId = audio?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
+    // 输入工具与按住说话快捷键同理做一次**只读**读取（2026-10-13 现场）：向导只在
+    // ④/⑤步加载过它们，①/②步复制出的「unset」会把已配置豆包的机器误导成未配置。
+    // 读取失败退回页面状态——复制本身不因此失败。
+    let toolFromDisk: VoiceInputTool | null = null;
+    let hotkeyFromDisk: KeyChord | null = null;
+    try {
+      [toolFromDisk, hotkeyFromDisk] = await Promise.all([
+        getVoiceInputTool(),
+        getVoiceHoldHotkey(),
+      ]);
+    } catch {
+      // 保持页面状态。
+    }
     const chord =
-      currentHotkey.value ?? (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
+      currentHotkey.value ??
+      hotkeyFromDisk ??
+      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
     const hotkeyTokens = chord
       ? chord.keys.length > 0
         ? chord.keys.join("+")
@@ -1188,15 +1311,25 @@ async function copyDiagnostics(): Promise<void> {
       bleVoiceReady: platform?.bleVoiceReady ?? false,
       rawInputPhase: platform?.rawInput.phase ?? "stopped",
       reconnectAttempt: platform?.connection.reconnectAttempt ?? 0,
+      // 错误只给布尔（原文不进诊断块；错误文本属内部细节）。
+      connectionErrorPresent: (platform?.connection.lastError ?? null) !== null,
+      remoteButtonObserved: remoteButtonObserved.value,
+      rawInputMatchedDeviceCount: platform?.rawInput.matchedDeviceCount ?? 0,
+      rawInputRawEventCount: platform?.rawInput.rawEventCount ?? 0,
+      rawInputSemanticEdgeCount: platform?.rawInput.semanticEdgeCount ?? 0,
+      rawInputStaleEventCount: platform?.rawInput.staleRemoteEventCount ?? 0,
       audioPhase: audio?.phase ?? platform?.audio.phase ?? "unconfigured",
       recommendedEndpointCount: recommended.length,
       selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
       queuedSamples: audio?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
-      tool: stagedTool.value ?? configuredTool.value ?? "unset",
+      audioErrorPresent: (audio?.lastError ?? platform?.audio.lastError ?? null) !== null,
+      tool: stagedTool.value ?? toolFromDisk ?? configuredTool.value ?? "unset",
       hotkey: hotkeyTokens,
       captureEnabled: rc003Status.value?.enabled === true,
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
+      voiceTestPhase: voicePhase.value,
+      voiceTerminalCode: voiceResult.value?.code ?? null,
       distinctButtonCount: observedButtons.value.size,
       mappingSuspended: mappingSuspended.value,
     });
@@ -1645,7 +1778,10 @@ async function retryVoiceTest(): Promise<void> {
             <button class="secondary-button" type="button" @click="restoreStep">重试</button>
           </div>
 
-          <WelcomeStep v-if="step === 'welcome'" />
+          <WelcomeStep
+            v-if="step === 'welcome'"
+            @open-bluetooth-settings="openBluetoothSettingsFromWelcome"
+          />
           <RemoteStep
             v-else-if="step === 'remote'"
             :runtime="runtime"
@@ -1653,6 +1789,7 @@ async function retryVoiceTest(): Promise<void> {
             :scanning="scanning"
             :scan-message="scanMessage"
             :connecting-device-id="connectingDeviceId"
+            :connected-device-id="connectedDeviceId"
             :operation-message="operationMessage"
             :button-observed="remoteButtonObserved"
             :voice-key-mistake="voiceKeyMistake"
@@ -1721,6 +1858,13 @@ async function retryVoiceTest(): Promise<void> {
         </div>
 
         <div class="onboarding-actions">
+          <!-- 门禁提示独立占一整行（2026-10-13 现场要求：提示句保持一行不换行）；
+               行高固定，提示出现/消失时按钮不跳位。 -->
+          <div class="onboarding-block-line" aria-live="polite">
+            <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{
+              blockMessage
+            }}</span>
+          </div>
           <div class="onboarding-actions-left">
             <button
               class="onboarding-diagnostics-button"
@@ -1739,9 +1883,7 @@ async function retryVoiceTest(): Promise<void> {
               {{ diagnosticsCopyMessage }}
             </span>
           </div>
-
           <div class="onboarding-actions-right">
-            <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{ blockMessage }}</span>
             <button
               class="primary-button"
               type="button"
@@ -1847,10 +1989,20 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-actions {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
+  gap: 6px 18px;
   padding-top: 4px;
+}
+/* 门禁提示：独立占整行、保持一行不换行（2026-10-13 现场要求）；min-height 让
+   提示出现/消失时下面的按钮行不跳位。 */
+.onboarding-block-line {
+  flex: 0 0 100%;
+  min-height: 24px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
 }
 .onboarding-actions-left {
   display: flex;
@@ -2062,6 +2214,15 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-card.accent {
   border-color: var(--accent-border);
   background: var(--accent-surface);
+  /* 第①步卡片（只有这一步用 accent）：现场定稿文案排满后，要在 1100×688
+     （最小窗口）下保证「继续」可见——只收紧这张卡内部的间距。 */
+  padding: 13px 18px;
+}
+.onboarding-card.accent .onboarding-numlist {
+  gap: 4px;
+}
+.onboarding-card.accent .onboarding-numlist li {
+  line-height: 1.5;
 }
 .onboarding-card.warn {
   border-color: rgba(182, 109, 20, 0.35);
@@ -2136,6 +2297,19 @@ async function retryVoiceTest(): Promise<void> {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+/* ② 步的扫描按钮：常显并与下方内容留出间距（2026-10-13 现场）。 */
+.onboarding-chips-scan {
+  margin-bottom: 16px;
+}
+/* ① 步配对流程里的动作按钮行（步骤 2 下方，2026-10-13 现场指定位置与间距）：
+   缩进到与文字列对齐（18px 编号 + 9px 间距），并与上下两条留出间距。 */
+.onboarding-numlist li.onboarding-numlist-action {
+  margin: 1px 0 3px;
+  padding-left: 27px;
+}
+.onboarding-numlist li.onboarding-numlist-action .onboarding-chip {
+  padding: 6px 12px;
 }
 .onboarding-chip {
   padding: 8px 14px;
@@ -2304,6 +2478,30 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-option.selected .option-trailing {
   color: var(--accent-text);
 }
+/* 设备行动作词做成按钮观感（2026-10-13 现场：原来像纯文本，用户不知道要不要点）；
+   连接中/已连接改成状态胶囊。 */
+.onboarding-option .option-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-surface);
+  color: var(--accent-text);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.onboarding-option .option-action.connecting {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.onboarding-option .option-action.connected {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--success-text);
+}
 .onboarding-tag {
   margin-left: 8px;
   font-size: 12px;
@@ -2470,10 +2668,12 @@ async function retryVoiceTest(): Promise<void> {
 
 /* 底部动作行里的门禁提示（右对齐，紧贴主按钮上方）。 */
 .onboarding-block-hint {
-  max-width: 420px;
   font-size: 14px;
+  line-height: 24px;
   color: var(--warning-text);
   text-align: right;
+  /* 保持一行不换行（2026-10-13 现场要求）；本行独占整行宽度，最长提示也放得下。 */
+  white-space: nowrap;
 }
 /* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接（无下划线）。 */
 .onboarding-diagnostics-button {

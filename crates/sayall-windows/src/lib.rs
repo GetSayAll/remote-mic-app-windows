@@ -471,8 +471,10 @@ impl Default for WindowsPlatform {
 ///
 /// 1. `enhanced_capture_enabled` 原子量 store——`set_button_mappings` 推送目标集时
 ///    读它，任何后续映射保存都必须沿用当前开关意图；
-/// 2. `set_capture_targets` 把「已启用映射的按键」下发给报告层。漏掉这一步就是
-///    2026-09-28 真机回归（见 `WindowsPlatform::set_enhanced_capture_enabled` 文档）。
+/// 2. `set_capture_targets` 把目标集下发给报告层：**三键恒在内**（返回/音量±，
+///    恒接管的理由见 `rc003_bridge::ALWAYS_CAPTURED_BUTTONS`）∪ 已启用映射的按键。
+///    漏掉这一步就是 2026-09-28 真机回归（见
+///    `WindowsPlatform::set_enhanced_capture_enabled` 文档）。
 ///
 /// **刻意不翻 `mappings.enabled`**（2026-09-28 第二次真机回归的修复）：那是按键
 /// 映射功能自己的总开关（UI「总开关」，保存路径恒 true），驱动映射引擎注入、
@@ -1104,9 +1106,22 @@ pub fn is_supported_remote_name(raw_name: &str) -> bool {
 }
 
 pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
-    match raw_name.trim().to_lowercase().as_str() {
-        "xiaomi bluetooth remote 2" | "小米蓝牙遥控器2" => RemoteModel::Rc001,
-        "xiaomi bluetooth remote 2 pro" | "小米蓝牙遥控器2 pro" | "arn9" => {
+    // 系统上报的名称可能是中文（中文 Windows 的「小米蓝牙语音遥控器 2 / 2 Pro」）、
+    // 英文广告名或型号代号，空格与大小写不稳定：先归一化（去空白 + 小写）再按白名单
+    // 精确匹配。2026-10-13 现场：中文「语音遥控器」名此前落到 Unknown，第②步连接后
+    // 只能显示占位文案，用户分不清 2 / 2 Pro。仍然不从通用名称里猜型号
+    // （「小米蓝牙语音遥控器」这类没有型号后缀的名称保持 Unknown）。
+    let compact: String = raw_name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    match compact.as_str() {
+        "xiaomibluetoothremote2" | "小米蓝牙遥控器2" | "小米蓝牙语音遥控器2" => {
+            RemoteModel::Rc001
+        }
+        "xiaomibluetoothremote2pro" | "小米蓝牙遥控器2pro" | "小米蓝牙语音遥控器2pro" | "arn9" => {
             RemoteModel::Rc003
         }
         _ => RemoteModel::Unknown,
@@ -1284,6 +1299,25 @@ mod tests {
             remote_model_from_name("Xiaomi Bluetooth Remote 2 Pro"),
             RemoteModel::Rc003
         );
+        // 中文 Windows 上报的名称（2026-10-13 现场：此前落到 Unknown，②步连接后
+        // 显示占位文案，分不清 2 / 2 Pro）。
+        assert_eq!(
+            remote_model_from_name("小米蓝牙语音遥控器 2"),
+            RemoteModel::Rc001
+        );
+        assert_eq!(
+            remote_model_from_name("小米蓝牙语音遥控器 2 Pro"),
+            RemoteModel::Rc003
+        );
+        assert_eq!(
+            remote_model_from_name("小米蓝牙遥控器 2 pro"),
+            RemoteModel::Rc003
+        );
+        // 没有型号后缀的名称不猜（两种型号都可能是它）。
+        assert_eq!(
+            remote_model_from_name("小米蓝牙语音遥控器"),
+            RemoteModel::Unknown
+        );
         assert_eq!(remote_model_from_name("MI RC"), RemoteModel::Unknown);
 
         assert_eq!(
@@ -1424,13 +1458,15 @@ mod tests {
             snapshot.target_usages
         );
 
-        // 开启：已映射按键（返回=0x00F1，真机 first_edge 同值）必须进入目标集。
+        // 开启：已映射按键（返回=0x00F1，真机 first_edge 同值）与**恒接管的三键**
+        // （返回/音量±，2026-10-13 现场反馈：零配置时按下也要有事件，卡片才高亮）
+        // 必须一起进入目标集。
         apply_enhanced_capture_state(&atomic, &engine, &bridge, true);
         let snapshot = bridge.snapshot();
         assert_eq!(
             snapshot.target_usages,
-            vec![0x00F1],
-            "enable 后目标集必须含已映射按键的 usage"
+            vec![0x0080, 0x0081, 0x00F1],
+            "enable 后目标集必须含已映射按键与三键的 usage"
         );
         assert!(
             atomic.load(Ordering::Relaxed),
