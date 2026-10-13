@@ -147,6 +147,14 @@ const connectingDeviceId = ref("");
 const connectedDeviceId = ref("");
 const operationMessage = ref("");
 const remoteButtonObserved = ref(false);
+/**
+ * 等待按键期间收到过"另一支遥控器"的报文（2026-10-13 现场：两支遥控器在 Windows 里名字
+ * 完全相同，用户按错一支时界面毫无解释）。判据是 Raw Input 的 `stale_remote_event_count`
+ * 在**本步内**增长——该计数只在"报文来自遥控器设备、但不属于应用正在用的那支"时自增
+ * （2026-10-13 起还会接受同地址的其他实例路径，所以增长 = 另一支确实在发按键）。
+ */
+const otherRemoteActivity = ref(false);
+let lastStaleRemoteEventCount = 0;
 const voiceKeyMistake = ref(false);
 let buttonEdgeUnsubscribe: (() => void) | null = null;
 let buttonEdgeSubscribed = false;
@@ -610,6 +618,9 @@ async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promis
 
 async function connectDevice(device: PairedRemote, mode: "auto" | "manual" = "manual"): Promise<void> {
   connectingDeviceId.value = device.id;
+  // 换机/连接动作本身清掉"另一支在发按键"的提示与基线（2026-10-13 现场）。
+  otherRemoteActivity.value = false;
+  lastStaleRemoteEventCount = props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0;
   operationMessage.value =
     mode === "auto" ? "找到 1 个已配对遥控器，正在自动连接…" : "";
   const started = performance.now();
@@ -728,6 +739,9 @@ watch(
   () => step.value,
   (value) => {
     if (value !== "remote") return;
+    // 进入②步时以当前计数为基线：只对"这一步里新增的"另一支按键反应（2026-10-13 现场）。
+    lastStaleRemoteEventCount = props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0;
+    otherRemoteActivity.value = false;
     void ensureRemoteListAndMaybeConnect("entry");
   },
 );
@@ -737,6 +751,23 @@ watch(shouldAutoConnectRemote, (should) => {
   if (!should) return;
   void ensureRemoteListAndMaybeConnect("auto");
 });
+
+/**
+ * 另一支遥控器在发按键（2026-10-13 现场）：等待本步的普通按键期间，只要目标是"应用正在用的
+ * 那一支"以外的遥控器，报文会被丢弃并计入 stale 计数。计数一涨就给用户一句解释，
+ * 而不是让界面看起来"按了没反应"。整步只提示一次。
+ */
+watch(
+  () => props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0,
+  (count) => {
+    const grew = count > lastStaleRemoteEventCount;
+    lastStaleRemoteEventCount = count;
+    if (!grew) return;
+    if (step.value !== "remote" || remoteButtonObserved.value || otherRemoteActivity.value) return;
+    otherRemoteActivity.value = true;
+    reportStepAction("remote", "other_remote_button", "passed");
+  },
+);
 
 // ---- 语音设备步骤 ----
 
@@ -1792,6 +1823,7 @@ async function retryVoiceTest(): Promise<void> {
             :connected-device-id="connectedDeviceId"
             :operation-message="operationMessage"
             :button-observed="remoteButtonObserved"
+            :other-remote-activity="otherRemoteActivity"
             :voice-key-mistake="voiceKeyMistake"
             :gate-code="gate.code"
             @scan="scanRemotes"

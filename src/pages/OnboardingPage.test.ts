@@ -110,6 +110,8 @@ function runtimeWith(
     queuedSamples?: number;
     audioLastError?: string | null;
     connectionGeneration?: number;
+    remoteModel?: "rc001" | "rc003" | "unknown";
+    staleRemoteEventCount?: number;
   } = {},
 ): RuntimeSnapshot {
   return {
@@ -126,7 +128,7 @@ function runtimeWith(
       connection: {
         phase: patch.connectionPhase ?? "idle",
         remoteName: null,
-        remoteModel: "unknown",
+        remoteModel: patch.remoteModel ?? "unknown",
         capabilities: null,
         voiceState: patch.voiceState ?? "idle",
         decodedSamples: patch.decodedSamples ?? 0,
@@ -153,7 +155,7 @@ function runtimeWith(
         lastIsPressed: null,
         activeButtons: [],
         lastError: null,
-        staleRemoteEventCount: 0,
+        staleRemoteEventCount: patch.staleRemoteEventCount ?? 0,
       },
       buttonMapping: {
         enabled: true,
@@ -518,6 +520,58 @@ describe("Onboarding wizard shell", () => {
       .find((row) => row.text().includes("已收到遥控器按键"));
     expect(buttonRow).toBeDefined();
     expect(buttonRow!.find("small").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("已连接时显示具体型号（2 / 2 Pro），不只给系统名字", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 本机现场：Windows 给两支遥控器的名字完全一样（「小米蓝牙语音遥控器」）。
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器", model: "rc003", isSupportedCandidate: true },
+    ]);
+    const wrapper = await mountWizard(runtimeWith());
+    await flushPromises();
+
+    // 手动连接那一支 → 型号（GATT 读回）随之可见。
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("小米蓝牙语音遥控器"))!
+      .trigger("click");
+    await flushPromises();
+    await wrapper.setProps({
+      runtime: runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, remoteModel: "rc003" }),
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("小米蓝牙语音遥控器 2 Pro · 已连接");
+    expect(wrapper.findAll(".onboarding-option")[0]!.text()).toContain("小米蓝牙语音遥控器 2 Pro");
+    wrapper.unmount();
+  });
+
+  it("按到另一支遥控器时给出解释，而不是让界面看起来没反应", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器", model: "rc003", isSupportedCandidate: true },
+    ]);
+    const connected = () =>
+      runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, remoteModel: "rc003" });
+    const wrapper = await mountWizard(connected());
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("另一支遥控器");
+
+    // Raw Input 把"另一支"的报文计入 stale → 给一句解释（整步只提示一次并落日志）。
+    await wrapper.setProps({ runtime: { ...connected(), platform: { ...connected().platform, rawInput: { ...connected().platform.rawInput, staleRemoteEventCount: 5 } } } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("刚收到的是另一支遥控器的按键");
+    expect(wrapper.text()).toContain("当前连接的是「小米蓝牙语音遥控器 2 Pro」");
+    const logged = onboardingEvents("action").filter((p) => p.reason === "other_remote_button");
+    expect(logged).toHaveLength(1);
+
+    // 收到本体按键后让位给正常的"已收到遥控器按键"。
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("刚收到的是另一支遥控器的按键");
+    expect(wrapper.text()).toContain("已收到遥控器按键");
     wrapper.unmount();
   });
 

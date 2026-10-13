@@ -22,6 +22,11 @@ const props = defineProps<{
   voiceKeyMistake: boolean;
   /** 当前门禁失败码（只用于显示修复卡；判据仍由 flow.evaluateGate 独裁）。 */
   gateCode: string | null;
+  /**
+   * 等待按键期间收到过"另一支遥控器"的报文（Raw Input 按目标地址过滤后剩下的那些，
+   * 2026-10-13 现场：两支遥控器名字相同、用户按错一支时界面完全没解释）。
+   */
+  otherRemoteActivity: boolean;
 }>();
 
 defineEmits<{
@@ -45,13 +50,20 @@ const modelLabel = computed(() =>
 
 /**
  * 连接后显示的名称（2026-10-13 现场：必须能分清 2 / 2 Pro）。
- * 优先用扫描列表里那台的系统名称（与设备行完全一致）；列表里没有（如启动恢复的连接）
- * 就用运行时上报的蓝牙名称；两者都拿不到才退回型号标签。
+ * 优先用**型号**（运行时按 GATT 型号读回，是唯一能区分两支同型号名字的字段）；
+ * 型号未知时退回扫描列表里的系统名称，再退回运行时蓝牙名称。
  */
 const connectedName = computed(() => {
   const known = props.devices.find((device) => device.id === props.connectedDeviceId);
   return known?.name ?? props.runtime?.platform.connection.remoteName ?? modelLabel.value;
 });
+
+/** 连接后能确定的具体型号标签（型号未知时为空串，避免露出「连接后显示」占位）。 */
+const connectedModelLabel = computed(() =>
+  (props.runtime?.platform.connection.remoteModel ?? "unknown") === "unknown"
+    ? ""
+    : modelLabel.value,
+);
 
 /**
  * 设备行是否就是当前已连接的那台（2026-10-13 现场要求：连接后给"已连接"状态）。
@@ -159,7 +171,13 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
         :disabled="connectingDeviceId === device.id || isConnectedDevice(device)"
         @select="$emit('connect', device)"
       >
-        <strong>{{ device.name }}</strong>
+        <!-- 已连接那行显示型号（2026-10-13 现场：同一支 Windows 名字可能完全一样，
+             只有型号能分清 2 / 2 Pro）。 -->
+        <strong>{{
+          isConnectedDevice(device) && connectedModelLabel
+            ? connectedModelLabel
+            : device.name
+        }}</strong>
         <small>已配对的小米蓝牙语音遥控器</small>
         <template #trailing>
           <span
@@ -187,7 +205,22 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       />
     </div>
 
-    <p v-if="connected" class="onboarding-muted">{{ connectedName }} · {{ phaseLabel }}</p>
+    <p v-if="connected" class="onboarding-muted">
+      {{ connectedModelLabel || connectedName }} · {{ phaseLabel }}
+    </p>
+
+    <!-- 按错了遥控器：明确说是"另一支"在发按键（2026-10-13 现场），
+         不然界面看起来就是"按了没反应"。 -->
+    <div v-if="otherRemoteActivity && !buttonObserved" class="onboarding-card warn">
+      <h4>刚收到的是另一支遥控器的按键</h4>
+      <p v-if="connected">
+        当前连接的是「{{ connectedModelLabel || connectedName }}」。请按这一支的普通按键；
+        要用另一支，就点它那一行的「连接」。
+      </p>
+      <p v-else>
+        请先在上面点一行「连接」，选中你手上正在按的这一支。
+      </p>
+    </div>
     <p v-if="reconnecting" class="onboarding-muted">
       正在自动恢复连接（第 {{ reconnectAttempt }} 次尝试），最多等约 60 秒，不需要重新配对。
     </p>
