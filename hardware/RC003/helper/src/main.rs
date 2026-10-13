@@ -4118,31 +4118,122 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// （两边各有一份常量，靠自检核对字符串、靠联调核对行为）。
     const SCHEDULED_TASK_NAME: &str = "SayAll RC003 Helper";
 
-    /// `schtasks /create` 的参数。**纯函数**——自检要对它做断言，
-    /// 真正的执行在 `manage_scheduled_task`（装/删任务都要提权，不该在自检里发生）。
+    /// 任务注册时间戳（纯函数）：Task Scheduler XML 的 `<Date>` 用本地时间
+    /// `YYYY-MM-DDTHH:MM:SS`——与 `schtasks` 命令行自己写出的形态一致。
+    /// 应用侧以"任务重装后 `<Date>` 变化"作为重授权成功的硬判据
+    /// （`src-tauri/src/rc003_task.rs` 的 `task_registered_at`），所以每次注册
+    /// 都必须写入**当前**时间。
+    fn task_date_stamp(local: LocalTime) -> String {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            local.year, local.month, local.day, local.hour, local.minute, local.second
+        )
+    }
+
+    /// XML 文本转义（纯函数）：`& < > "` 必须转义——可执行文件路径里全都可能出现。
+    fn xml_escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for ch in text.chars() {
+            match ch {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    /// 计划任务 XML（纯函数——自检与单测对它做断言，真正的执行在
+    /// `manage_scheduled_task`，装/删任务都要提权，不该在自检里发生）。
     ///
-    /// 建的是一个**只能手动触发**的任务：`/sc once /st 00:00` 指向一个已经过去的时间，
-    /// 于是调度器永远不会自动跑它，只有主程序 `schtasks /run` 时才会启动。
-    /// **为什么不用 `/sc daily`**：那会让调度器每天真的拉起一次提权进程，
-    /// 而我们要的是"主程序需要时才跑、跑完就退"。
+    /// 为什么改成 XML 注册（2026-10-13，issue #206 第三轮）：`schtasks /create`
+    /// 的命令行形态**固定**写出 `<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>`
+    /// 与 `<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>`，且没有任何开关能改；
+    /// 电池供电时调度器会**静默拦截**任务动作（LastRunTime 照更新、上次结果 0、
+    /// 进程不出现）——报障人用对照实验定位：同一命令手写、不带电源策略的任务
+    /// 立刻能跑，原任务一动不动。XML 里把两项显式置 false。
     ///
-    /// `/rl highest` 是关键：任务本身以最高权限运行，
+    /// 顺带两件（同一处回填，均为实测教训）：
+    /// * `<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`（不限期）——命令行默认
+    ///   PT72H，常驻助手跑满 3 天会被静默结束一次（对账会在 ≤30s 内重新拉起，但没必要）；
+    /// * **没有任何触发器**（`<Triggers />`）——比 `/sc once /st 00:00` 的"过去时间"
+    ///   更直白：调度器永远不会自己跑它，只有主程序 `schtasks /run` 时才启动。
+    ///
+    /// `<RunLevel>HighestAvailable</RunLevel>` 是关键：任务本身以最高权限运行，
     /// 于是**触发它的主程序可以保持普通权限**——这正是"只弹一次 UAC"的实现方式。
-    fn task_create_args(helper_exe: &Path) -> Vec<String> {
+    /// （`HighestAvailable` 的注册需要提权，所以本 XML 只应由提权助手写出。）
+    fn task_xml(helper_exe: &Path, local: LocalTime) -> String {
+        let exe = xml_escape(&helper_exe.display().to_string());
+        let date = task_date_stamp(local);
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>{date}</Date>
+    <Description>无线麦 SayAll：由应用注册与维护（开启「全按键支持」时使用）</Description>
+  </RegistrationInfo>
+  <Triggers />
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+      <Arguments>--follow-app</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
+        )
+    }
+
+    /// `schtasks /create /xml` 的注册参数（纯函数，自检断言）。
+    fn task_create_from_xml_args(xml_path: &Path) -> Vec<String> {
         vec![
             "/create".to_string(),
             "/tn".to_string(),
             SCHEDULED_TASK_NAME.to_string(),
-            "/tr".to_string(),
-            format!("\"{}\" --follow-app", helper_exe.display()),
-            "/sc".to_string(),
-            "once".to_string(),
-            "/st".to_string(),
-            "00:00".to_string(),
-            "/rl".to_string(),
-            "highest".to_string(),
+            "/xml".to_string(),
+            xml_path.display().to_string(),
             "/f".to_string(),
         ]
+    }
+
+    /// 把任务 XML 写到临时文件：**UTF-16LE 带 BOM**——`schtasks /create /xml`
+    /// 认这个编码（2026-10-13 本机实测的注册形态；解析失败会直接报错而不是半注册）。
+    fn write_task_xml_temp(xml: &str) -> std::io::Result<PathBuf> {
+        let path =
+            std::env::temp_dir().join(format!("sayall-rc003-task-{}.xml", std::process::id()));
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for unit in xml.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, bytes)?;
+        Ok(path)
     }
 
     fn task_query_args() -> Vec<String> {
@@ -4188,7 +4279,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 );
                 return false;
             }
-            if !run_task_command(task_create_args(&self_exe), "安装", logger) {
+            // XML 注册（2026-10-13）：见 `task_xml` 的注释——命令行形态无法关闭
+            // 电池策略，电池供电下调度器会静默拦截任务动作。
+            let mut local = LocalTime::default();
+            unsafe { GetLocalTime(&mut local) };
+            let xml = task_xml(&self_exe, local);
+            let xml_path = match write_task_xml_temp(&xml) {
+                Ok(path) => path,
+                Err(error) => {
+                    logger.line(&format!("[STOP] 写入任务 XML 失败：{error}"));
+                    return false;
+                }
+            };
+            let ok = run_task_command(task_create_from_xml_args(&xml_path), "安装", logger);
+            let _ = std::fs::remove_file(&xml_path);
+            if !ok {
                 return false;
             }
             logger.kv(
@@ -4198,7 +4303,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ("exe", self_exe.display().to_string()),
                     (
                         "note",
-                        "已最高权限注册；此后主程序用 `schtasks /run` 触发即可，不再弹 UAC".into(),
+                        "已最高权限注册（电池供电下同样可运行、不限期）；此后主程序用 \
+                         `schtasks /run` 触发即可，不再弹 UAC"
+                            .into(),
                     ),
                 ],
             );
@@ -4254,6 +4361,68 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 logger.line(&format!("[STOP] 无法执行 schtasks（{label}）：{error}"));
                 false
             }
+        }
+    }
+
+    /// 计划任务 XML 注册形态（2026-10-13，issue #206 第三轮）。
+    ///
+    /// 为什么用纯函数测：真正的安装要提权且会改系统状态（不该在自检/单测里发生），
+    /// 而"电池策略被命令行默认值打开"正是线上真实翻车点——抽成纯函数后，
+    /// 契约可以在无提权环境里钉住。
+    #[cfg(test)]
+    mod task_xml_tests {
+        use super::*;
+
+        fn sample_time() -> LocalTime {
+            LocalTime {
+                year: 2026,
+                month: 10,
+                day: 13,
+                day_of_week: 2,
+                hour: 9,
+                minute: 30,
+                second: 5,
+                ms: 0,
+            }
+        }
+
+        #[test]
+        fn battery_policy_stays_off_and_the_time_limit_is_removed() {
+            let xml = task_xml(Path::new("C:\\SayAll\\sayall-helper.exe"), sample_time());
+            assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+            assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+            assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+            assert!(!xml.contains("PT72H"), "72 小时静默终止必须被去掉");
+            assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+            assert!(xml.contains("<Command>C:\\SayAll\\sayall-helper.exe</Command>"));
+            assert!(xml.contains("<Arguments>--follow-app</Arguments>"));
+            // 只手动触发：没有任何触发器元素。
+            assert!(xml.contains("<Triggers />"));
+            assert!(!xml.contains("<TimeTrigger>"));
+            assert!(xml.contains("<Date>2026-10-13T09:30:05</Date>"));
+        }
+
+        #[test]
+        fn command_path_is_xml_escaped() {
+            let xml = task_xml(Path::new("C:\\a&b\\<weird>\\helper.exe"), sample_time());
+            assert!(
+                xml.contains("<Command>C:\\a&amp;b\\&lt;weird&gt;\\helper.exe</Command>"),
+                "{xml}"
+            );
+            assert!(!xml.contains("<weird>"), "未转义的尖括号会破坏 XML：{xml}");
+        }
+
+        #[test]
+        fn registration_args_point_schtasks_at_the_xml_file() {
+            let args = task_create_from_xml_args(Path::new("C:\\Temp\\task.xml"));
+            assert_eq!(args[0], "/create");
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "/tn" && pair[1] == SCHEDULED_TASK_NAME));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "/xml" && pair[1] == "C:\\Temp\\task.xml"));
+            assert!(args.iter().any(|arg| arg == "/f"));
         }
     }
 
@@ -7328,27 +7497,51 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
         }
 
-        // 30) 计划任务创建参数：**纯函数**，不碰系统就能钉住契约。
-        //     这是"只弹一次 UAC"方案的根基，每一条都对应一种会走样的产品行为：
-        //     丢 `/rl highest` ⇒ 触发后仍是普通权限（拿不到报告）；
-        //     改成 `/sc daily` ⇒ 调度器每天真的拉起一个提权进程；
+        // 30) 计划任务注册形态：**纯函数**，不碰系统就能钉住契约。
+        //     2026-10-13（issue #206 第三轮）从命令行参数改为 XML——命令行形态
+        //     **固定**打开电池策略，电池供电下调度器会静默拦截任务动作（真机定位），
+        //     而命令行没有任何开关能改它。每一条断言都对应一种会走样的产品行为：
+        //     电池策略为 true ⇒ 拔电后助手永远起不来（界面停在"开启中"）；
+        //     PT72H ⇒ 常驻助手跑满 3 天被静默结束一次；
+        //     丢 HighestAvailable ⇒ 触发后仍是普通权限（拿不到报告）；
+        //     有触发器 ⇒ 调度器自己拉起提权进程（要的是只手动触发）；
         //     丢 `--follow-app` ⇒ 主程序关了助手还挂在后台；
-        //     `/tr` 里丢引号 ⇒ 路径带空格时任务指向错误的位置。
-        //     真正的安装/删除要提权且会改系统状态，所以**只**在这里验证参数本身。
-        let create = task_create_args(std::path::Path::new("C:\\fake\\rc003-helper.exe"));
+        //     路径未转义 ⇒ XML 解析失败或指向错误位置。
+        //     真正的安装/删除要提权且会改系统状态，所以**只**在这里验证 XML 与参数本身。
+        let sample_local = LocalTime {
+            year: 2026,
+            month: 10,
+            day: 13,
+            day_of_week: 2,
+            hour: 9,
+            minute: 30,
+            second: 5,
+            ms: 0,
+        };
+        let xml = task_xml(
+            std::path::Path::new("C:\\fake\\rc003-helper.exe"),
+            sample_local,
+        );
+        let create = task_create_from_xml_args(std::path::Path::new("C:\\Temp\\rc003-task.xml"));
         let create_text = create.join(" ");
-        let exe_part = "\"C:\\fake\\rc003-helper.exe\" --follow-app";
         check(
-            "计划任务创建参数：手动触发 + 最高权限 + 跟随主程序 + 路径带引号",
+            "计划任务 XML 注册：电池策略关闭 + 不限期 + 最高权限 + 只手动触发 + 跟随主程序",
             create
                 .windows(2)
                 .any(|pair| pair[0] == "/tn" && pair[1] == SCHEDULED_TASK_NAME)
-                && create_text.contains(exe_part)
-                && create_text.contains("/rl highest")
-                && create_text.contains("/sc once")
-                && create_text.contains("/st 00:00")
-                && !create_text.contains("/sc daily"),
-            create_text,
+                && create_text.contains("/xml C:\\Temp\\rc003-task.xml")
+                && create_text.contains("/f")
+                && xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>")
+                && xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>")
+                && xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
+                && !xml.contains("PT72H")
+                && xml.contains("<RunLevel>HighestAvailable</RunLevel>")
+                && xml.contains("<Triggers />")
+                && !xml.contains("<TimeTrigger>")
+                && xml.contains("<Command>C:\\fake\\rc003-helper.exe</Command>")
+                && xml.contains("<Arguments>--follow-app</Arguments>")
+                && xml.contains("<Date>2026-10-13T09:30:05</Date>"),
+            format!("xml_len={} create={create_text}", xml.len()),
         );
 
         // 31) 查询与删除：任务名必须一致（否则状态查询正常、删除却删错对象），
