@@ -87,6 +87,20 @@
   （只记布尔，不记身份）——下次这类问题一眼可断。
 - 同轮修好 `runtime-simulation` 仿真构建（上一轮加字段时漏改仿真平台的两处字面量，特性构建编译不过）。
 
+## 第五轮（同日晚，Andy 返工"没切换"）
+
+- **现象**：向导里"系统输入法没有自动切换"，按语音键也没有兜底切换。
+- **证据**（他本机 `1be64f3` 包的日志）：每次检查都到 `ime_activation … skipped_self_foreground`
+  （前台是应用自己 ⇒ 按 2026-09-12 守卫跳过）；工具卡那条对齐则出现
+  `ime_tool_select action=fired trigger=window_blur … still_self=true` 之后**再无任何尝试**。
+- **根因两条**：① 向导窗在前台时守卫必然跳过（设计如此，防 WebView 整页重载）；
+  ② 一次性布防在"失焦事件先到、前台仍是自己"时被 `take()` 取走后直接 return ⇒ 对齐永久丢失。
+- **修复**：布防放回（`action=kept_pending reason=still_self`），下一次失焦再试；
+  向导内的"直接切"做成**实验开关**（`%LOCALAPPDATA%\SayAll\ime-inline-switch.ini` 或
+  `SAYALL_IME_INLINE_SWITCH=1`，日志 `ime_inline_switch enabled=true` /
+  `ime_activation scope=wizard_inline`），Andy 已确认先装包试一次再决定保留或撤掉。
+- 文案定稿：核对卡第一项「输入法切到“<工具名>”。」（仅微信 / 豆包）、麦克风一项补"语音输入设置"。
+
 ## 隐私
 
 - 未把任何蓝牙地址写进日志、文案、诊断块或仓库；本记录中的地址片段来自用户本机排查时的日志摘录，

@@ -1505,6 +1505,14 @@ const voiceToolLabel = computed(() => {
   }
 });
 
+/**
+ * 只有微信 / 豆包需要「先把输入法切到它」这一项（2026-10-13 现场要求）——
+ * Vokie / 其他工具不依赖切换输入法，列出来只会造成误导。
+ */
+const voiceToolNeedsIme = computed(
+  () => stagedTool.value === "wechat" || stagedTool.value === "doubao",
+);
+
 const voiceAudioText = computed(() => {
   const name =
     audioSnapshot.value?.selectedEndpointName ??
@@ -1963,6 +1971,7 @@ async function retryVoiceTest(): Promise<void> {
             :tool-label="voiceToolLabel"
             :hotkey-text="hotkeyLabel"
             :audio-text="voiceAudioText"
+            :show-ime-checklist="voiceToolNeedsIme"
             :ime-hint="imeHint"
             @input="onVoiceInput"
             @focus="onVoiceBoxFocus"

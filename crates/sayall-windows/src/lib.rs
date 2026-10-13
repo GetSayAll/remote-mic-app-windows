@@ -57,8 +57,9 @@ mod ime;
 /// 模块本体私有，只导出这几个入口（见 `ime` 模块头与 `ImeStatus` 的语义约定）。
 #[cfg(windows)]
 pub use ime::{
-    describe_active_ime_name, ensure_ime_for_tool, ime_status_for, ime_status_log_line,
-    list_installed_ime_names, ImeStatus, MAX_INSTALLED_IME_NAMES,
+    describe_active_ime_name, ensure_ime_for_tool, ensure_ime_for_tool_inline, ime_status_for,
+    ime_status_log_line, inline_switch_enabled, list_installed_ime_names, ImeStatus,
+    MAX_INSTALLED_IME_NAMES,
 };
 
 /// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
@@ -716,6 +717,7 @@ impl WindowsPlatform {
             return;
         };
         let tool_now = std::sync::Arc::clone(&self.voice_input_tool);
+        let align_pending = std::sync::Arc::clone(&self.ime_align_pending);
         let _ = std::thread::Builder::new()
             .name("sayall-ime-prealign".to_owned())
             .spawn(move || {
@@ -734,6 +736,17 @@ impl WindowsPlatform {
                     probe.class_token,
                 ));
                 if settle.still_self {
+                    // 2026-10-13 现场：这里不能"取走即丢"。用户点一下别的窗口又立刻回到本窗口
+                    // （或点击任务栏）时，失焦事件先到、此刻前台还是自己；旧实现 take() 一次性的
+                    // 对齐就此永久丢失——现场日志两次 `fired … still_self=true` 之后再无任何切换
+                    // 尝试，表现为"系统输入法没有自动切换"。放回布防，等下一次失焦再试。
+                    if *lock(&tool_now) == Some(tool) {
+                        *lock(&align_pending) = Some((tool, armed_at));
+                        crate::ble::gatt_note(format!(
+                            "ime_tool_select action=kept_pending reason=still_self waited_ms={}",
+                            armed_at.elapsed().as_millis(),
+                        ));
+                    }
                     return;
                 }
                 // 若等待期间用户已重新选择工具（当前值不同于布防值），本次让位给新选择。

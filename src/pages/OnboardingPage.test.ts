@@ -1460,9 +1460,10 @@ describe("Onboarding voice test step", () => {
     // 2026-10-05 要求：通过提示用绿色成功样式 + 对勾。
     expect(wrapper.find(".onboarding-card.success .onboarding-success .ok-mark").exists()).toBe(true);
     // 2026-10-05 改版定稿：核对卡是提示行（编号），不设勾选框——通过判据只有真实文字上屏。
-    // 2026-10-13 现场：核对项从两件变三件（新增"输入法切到用户选的工具"）。
+    // 2026-10-13 现场定稿：微信 / 豆包时三项且"输入法"排第一；Vokie / 其他工具两项。
     expect(wrapper.text()).toContain("按你选的工具核对三件事");
-    expect(wrapper.text()).toContain("输入法切到“微信输入法”");
+    expect(wrapper.text()).toContain("输入法切到“微信输入法”。");
+    expect(wrapper.text()).toContain("麦克风选 CABLE Output（在“微信输入法”的语音输入设置里）。");
     expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0);
     const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
@@ -1522,6 +1523,30 @@ describe("Onboarding voice test step", () => {
     ).toHaveLength(2);
     expect(onboardingEvents("step_retry").some((p) => p.step === "voice_test")).toBe(true);
     wrapper.unmount();
+  });
+
+  it("核对卡按工具分两档：豆包 / 微信三项（输入法排第一），Vokie / 其他两项（2026-10-13 现场）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    let items = wrapper.findAll(".onboarding-numlist li");
+    expect(wrapper.text()).toContain("按你选的工具核对三件事");
+    expect(items).toHaveLength(3);
+    expect(items[0]!.text()).toContain("输入法切到“豆包输入法”。");
+
+    // 换成不需要切输入法的工具：那一项消失、标题回到两件事。
+    wrapper.unmount();
+    mocks.getVoiceInputTool.mockResolvedValue("vokie");
+    const vokie = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    items = vokie.findAll(".onboarding-numlist li");
+    expect(vokie.text()).toContain("按你选的工具核对两件事");
+    expect(items).toHaveLength(2);
+    expect(vokie.text()).not.toContain("输入法切到");
+    vokie.unmount();
   });
 
   it("试一下页：点输入框时确保输入法，切不过去就给解释（2026-10-13 现场）", async () => {

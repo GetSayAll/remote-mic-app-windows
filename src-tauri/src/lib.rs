@@ -2241,14 +2241,19 @@ async fn get_ime_status(state: tauri::State<'_, AppState>) -> Result<ImeStatus, 
 ///
 /// 切换失败**不报错**：界面用 `matchesExpected=false` + `active` 给出解释
 /// （"这句话没出字，是因为当前输入法是 X，不是 Y"）。
+///
+/// **实验开关（2026-10-13 现场，临时）**：`inline_switch_enabled()` 为真时改走
+/// "允许在自身窗口前台时也切"的实验路径（验证 Bugs/2026-09-12 的整页重载是否仍复现）；
+/// 开关关闭时行为与常规路径完全一致。
 #[tauri::command]
 async fn ensure_voice_tool_ime(state: tauri::State<'_, AppState>) -> Result<ImeStatus, String> {
-    Ok(ime_status_command(
-        state.settings.clone(),
-        "ensured",
-        sayall_windows::ensure_ime_for_tool,
-    )
-    .await)
+    let query: fn(Option<VoiceInputTool>) -> ImeStatus = if sayall_windows::inline_switch_enabled()
+    {
+        sayall_windows::ensure_ime_for_tool_inline
+    } else {
+        sayall_windows::ensure_ime_for_tool
+    };
+    Ok(ime_status_command(state.settings.clone(), "ensured", query).await)
 }
 
 /// 首次使用向导（Onboarding）状态与进度。落点是 `onboarding.json`（与 settings.json

@@ -278,6 +278,9 @@ pub(crate) enum ImeSwitchScope {
     VoicePress,
     /// 用户刚在连接页选中输入工具后的一次性对齐（2026-10-03，离开自身窗口焦点后执行）。
     ToolSelect,
+    /// 向导「试一下」页的**实验**路径（2026-10-13 现场开关）：允许在自身窗口前台时也切。
+    /// 目的：验证"向导内直接切"是否真的触发 WebView 整页重载（见 Bugs/2026-09-12）。
+    WizardInline,
 }
 
 impl ImeSwitchScope {
@@ -285,6 +288,7 @@ impl ImeSwitchScope {
         match self {
             ImeSwitchScope::VoicePress => "voice_press",
             ImeSwitchScope::ToolSelect => "tool_select",
+            ImeSwitchScope::WizardInline => "wizard_inline",
         }
     }
 }
@@ -302,6 +306,22 @@ pub fn ensure_session_ime(
     tool: VoiceInputTool,
     scope: ImeSwitchScope,
 ) -> Result<ImeActivation, String> {
+    ensure_session_ime_inner(tool, scope, false)
+}
+
+/// 实验路径（2026-10-13 现场开关，见 [`inline_switch_enabled`]）：允许在"前台是本应用
+/// 自己"时也执行一次切换。只供向导「试一下」页使用；实验结论出来就删掉。
+pub fn ensure_session_ime_allowing_self_window(
+    tool: VoiceInputTool,
+) -> Result<ImeActivation, String> {
+    ensure_session_ime_inner(tool, ImeSwitchScope::WizardInline, true)
+}
+
+fn ensure_session_ime_inner(
+    tool: VoiceInputTool,
+    scope: ImeSwitchScope,
+    allow_self_foreground: bool,
+) -> Result<ImeActivation, String> {
     let started = std::time::Instant::now();
     let Some(target) = ime_target_for(tool) else {
         // 功能点日志：Vokie / 其他工具明确"不切输入法"也是决策，要能从日志看出
@@ -315,9 +335,9 @@ pub fn ensure_session_ime(
     // 前台是自身 WebView 时跳过激活：TSF 会话切换实证会触发 WebView2
     // 整页重载（Bugs/2026-09-12），且此时注入的和弦也落在自己窗口上，
     // 激活没有任何收益。返回 Ok——这不是错误，不应置 UI last_error。
-    if foreground_is_self() {
+    if !allow_self_foreground && foreground_is_self() {
         crate::ble::gatt_note(format!(
-            "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true error_domain=none error_code=foreground_is_self retryable=false",
+            "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true self_foreground=true error_domain=none error_code=foreground_is_self retryable=false",
             target.label,
         ));
         return Ok(ImeActivation::SkippedSelfForeground);
@@ -1107,6 +1127,61 @@ pub fn ensure_ime_for_tool(tool: Option<VoiceInputTool>) -> ImeStatus {
     ime_status_for(tool)
 }
 
+/// 实验路径（2026-10-13 现场开关）：与 [`ensure_ime_for_tool`] 相同，但允许在
+/// **前台是本应用自己**时也执行一次切换——用于验证"向导内直接切"是否真的触发
+/// WebView 整页重载（Bugs/2026-09-12）。只在 [`inline_switch_enabled`] 为真时由调用方使用；
+/// 实验结论出来就删掉（连同 [`ImeSwitchScope::WizardInline`]）。
+pub fn ensure_ime_for_tool_inline(tool: Option<VoiceInputTool>) -> ImeStatus {
+    match tool {
+        None => crate::ble::gatt_note(
+            "ime_activation tool=none outcome=not_required elapsed_ms=0 reason=no_tool_selected"
+                .to_owned(),
+        ),
+        Some(tool) => {
+            let _ = ensure_session_ime_allowing_self_window(tool);
+        }
+    }
+    ime_status_for(tool)
+}
+
+/// 实验开关（2026-10-13 现场，**临时**）：`%LOCALAPPDATA%\SayAll\ime-inline-switch.ini`
+/// 存在，或环境变量 `SAYALL_IME_INLINE_SWITCH` 为真值（`1`/`true`/`yes`，不区分大小写）时，
+/// 向导「试一下」页的输入法检查允许在自身窗口前台时也切换。
+///
+/// 为什么做成开关而不是直接开：这条路径与 Bugs/2026-09-12 的守卫冲突——真机必现"前台是
+/// 应用自己时切输入法 ⇒ WebView 整页重载"。先让用户装包试一次，看现在是否仍会重载、
+/// 切换是否真的生效，再决定保留还是撤掉。开关状态只记一次日志（进程内）。
+pub fn inline_switch_enabled() -> bool {
+    let enabled = inline_switch_flag_from(std::env::var(ENV_INLINE_SWITCH).ok().as_deref())
+        || inline_switch_file_path().is_file();
+    if enabled {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            crate::ble::gatt_note(
+                "ime_inline_switch action=read enabled=true source=env_or_file".to_owned(),
+            );
+        }
+    }
+    enabled
+}
+
+/// 环境变量名（与 `SAYALL_GATT_LOG` 同一套"本地排查开关"口径）。
+pub const ENV_INLINE_SWITCH: &str = "SAYALL_IME_INLINE_SWITCH";
+
+fn inline_switch_file_path() -> std::path::PathBuf {
+    crate::rc003_bridge::default_bridge_dir().join("ime-inline-switch.ini")
+}
+
+/// 环境变量值的纯判定（单测覆盖）：只有明确的真值算开，其余（含 `0`/空/乱填）都算关。
+/// 不建"存在即开"的模糊地带——这类开关乱判会让排查结论失真。
+fn inline_switch_flag_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|raw| raw.trim().to_ascii_lowercase()),
+        Some(ref value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
+}
+
 /// STA 线程体：读活动输入法（是否存在 + 显示名）、目标输入法名、已安装列表。
 fn sta_probe_ime(expect_target: Option<ImeProfile>) -> Result<ImeProbe, String> {
     use windows::Win32::System::Com::{
@@ -1439,9 +1514,24 @@ mod ime_target_tests {
 
     /// 切换场景标签稳定（日志消费方按它归因；改动会引起日志口径变化）。
     #[test]
+    /// 实验开关的环境变量纯判定（2026-10-13 现场）：只有明确真值算开。
+    #[test]
+    fn inline_switch_flag_only_accepts_explicit_truthy_values() {
+        assert!(super::inline_switch_flag_from(Some("1")));
+        assert!(super::inline_switch_flag_from(Some(" true ")));
+        assert!(super::inline_switch_flag_from(Some("YES")));
+        assert!(super::inline_switch_flag_from(Some("On")));
+        assert!(!super::inline_switch_flag_from(None));
+        assert!(!super::inline_switch_flag_from(Some("")));
+        assert!(!super::inline_switch_flag_from(Some("0")));
+        assert!(!super::inline_switch_flag_from(Some("也许")));
+    }
+
+    #[test]
     fn ime_switch_scope_labels_are_stable() {
         assert_eq!(super::ImeSwitchScope::VoicePress.label(), "voice_press");
         assert_eq!(super::ImeSwitchScope::ToolSelect.label(), "tool_select");
+        assert_eq!(super::ImeSwitchScope::WizardInline.label(), "wizard_inline");
     }
 }
 
