@@ -729,6 +729,40 @@ describe("Onboarding diagnostics copy", () => {
     expect(copy.map((p) => p.result)).toEqual(["unknown", "passed"]);
   });
 
+  it("①/②步复制时只读刷新输入工具与快捷键，不沿用页面未加载的 unset", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 页面在②步还没读过这两项（④/⑤步才加载）：复制时应直接读磁盘真值。
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("Input tool: doubao hotkey=right_alt full_key_support=off");
+  });
+
+  it("只读刷新失败时退回页面状态，复制本身不失败", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.getVoiceInputTool.mockRejectedValue(new Error("read failed"));
+    mocks.getVoiceHoldHotkey.mockRejectedValue(new Error("read failed"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("Input tool: unset hotkey=unset");
+    expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
+  });
+
   it("剪贴板不可用时不静默：给出失败提示并落 failed 日志", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     clipboard.writeText.mockRejectedValue(new Error("denied"));

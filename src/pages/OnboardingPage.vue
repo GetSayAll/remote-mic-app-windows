@@ -1217,8 +1217,23 @@ async function copyDiagnostics(): Promise<void> {
     }
     const recommended = endpoints.filter(isRecommendedVoiceEndpoint);
     const selectedId = audio?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
+    // 输入工具与按住说话快捷键同理做一次**只读**读取（2026-10-13 现场）：向导只在
+    // ④/⑤步加载过它们，①/②步复制出的「unset」会把已配置豆包的机器误导成未配置。
+    // 读取失败退回页面状态——复制本身不因此失败。
+    let toolFromDisk: VoiceInputTool | null = null;
+    let hotkeyFromDisk: KeyChord | null = null;
+    try {
+      [toolFromDisk, hotkeyFromDisk] = await Promise.all([
+        getVoiceInputTool(),
+        getVoiceHoldHotkey(),
+      ]);
+    } catch {
+      // 保持页面状态。
+    }
     const chord =
-      currentHotkey.value ?? (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
+      currentHotkey.value ??
+      hotkeyFromDisk ??
+      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
     const hotkeyTokens = chord
       ? chord.keys.length > 0
         ? chord.keys.join("+")
@@ -1245,7 +1260,7 @@ async function copyDiagnostics(): Promise<void> {
       selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
       queuedSamples: audio?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
       audioErrorPresent: (audio?.lastError ?? platform?.audio.lastError ?? null) !== null,
-      tool: stagedTool.value ?? configuredTool.value ?? "unset",
+      tool: stagedTool.value ?? toolFromDisk ?? configuredTool.value ?? "unset",
       hotkey: hotkeyTokens,
       captureEnabled: rc003Status.value?.enabled === true,
       vokieInstalled: vokie.value?.installed === true,

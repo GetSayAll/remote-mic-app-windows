@@ -245,3 +245,10 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
      连接与音频的 `error=`、`Raw input:` 行与 `Voice test:` 行，`input_phase` 移到
      Raw input 行；隐私口径不变（只有稳定 token / 计数 / 布尔）。记录：
      [Bugs/2026-10-10-onboarding-remote-connect-row-inconsistent.md](../Bugs/2026-10-10-onboarding-remote-connect-row-inconsistent.md)。
+- 2026-10-13（诊断块保真修正，现场发现）：向导①–③步复制出的诊断块把已配置的输入工具报成
+  `Input tool: unset hotkey=unset`——读的是页面状态，而页面到④/⑤步才加载这两项；支持会
+  据此误判"还没配置工具"。现照音频端点的做法在复制时做一次**只读**刷新
+  （`getVoiceInputTool` / `getVoiceHoldHotkey`，失败退回页面状态、不影响复制成功）；
+  取值优先级 = 向导会话已暂存 > 磁盘读取 > 页面已加载。新装机器上快捷键按生效值显示
+  （默认 左 Ctrl + 左 Win），不再是 `unset`。记录：
+  [Bugs/2026-10-13-diagnostics-tool-unset-false-negative.md](../Bugs/2026-10-13-diagnostics-tool-unset-false-negative.md)。

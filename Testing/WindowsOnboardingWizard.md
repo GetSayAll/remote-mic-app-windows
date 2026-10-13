@@ -42,6 +42,9 @@
    无终态写 `none`）、`Buttons observed`、`Mapping`。
    现场形状自证（2026-10-10）：②步"按键已收到但应用未连接"应表现为
    `Remote: phase=idle … button_observed=yes` + 门禁 `remote.not_connected`。
+   复制时会对音频端点、**输入工具与按住说话快捷键**做一次只读刷新（2026-10-13 起）——
+   已配置豆包的机器在任何步骤复制都应显示 `Input tool: doubao hotkey=…`，不是 `unset`；
+   新装机器上快捷键按生效值显示（默认 左 Ctrl + 左 Win）。
 3. 隐私检查：不得出现蓝牙地址、HID 路径、音频端点 id / 名称、文件路径、用户名或任何输入文字。
 4. 日志核对：`frontend event=onboarding phase=action reason=copy_diagnostics` 成对出现
    （begin `result=unknown` → end `result=passed detail=chars_N`）；剪贴板不可用时 end `result=failed`。
