@@ -55,6 +55,8 @@ const AWAITING_DEVICE_MESSAGE: &str =
      睡眠唤醒或蓝牙栈僵死）。监听已就位，系统恢复该接口后会自动重新绑定，\
      无需手动重连或重启应用。";
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+/// "目标地址兜底路径"是否已经记过日志（每次监听器启动重置；2026-10-13）。
+static TARGET_PATH_ACCEPT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static THREAD_CONTEXT: RefCell<Option<ListenerContext>> = const { RefCell::new(None) };
@@ -413,6 +415,8 @@ fn run_listener(
             binding_present: !selected_path.is_empty(),
         });
     });
+    // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
+    TARGET_PATH_ACCEPT_LOGGED.store(false, Ordering::Relaxed);
 
     {
         let mut state = snapshot.lock().unwrap();
@@ -823,7 +827,13 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             .as_mut()
             .ok_or_else(|| "Raw Input listener context is unavailable".to_owned())?;
         let normalized = normalize_device_path(&device_path);
-        if normalized != context.selected_path {
+        // 接受条件（2026-10-13 现场加固）：报文路径等于绑定路径，**或**属于"应用正在用的那支"
+        // 遥控器（蓝牙地址匹配）。后者修的是"同一支遥控器的 HID 接口换过实例、旧绑定还在"
+        // ——旧实例仍留在枚举里、审计因此不重绑，报文从新实例到达时会被整批丢掉（现场：
+        // 两支遥控器都在按、界面一个按键都收不到）。
+        let target_accept = crate::remote_target::get()
+            .is_some_and(|address| crate::remote_target::matches_address(&normalized, address));
+        if normalized != context.selected_path && !target_accept {
             // 绑定失配：报文可能来自别的设备（物理键盘等），也可能是遥控器的 HID
             // 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
             // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
@@ -854,6 +864,15 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 let _ = count;
             }
             return Ok(());
+        }
+        if normalized != context.selected_path {
+            // 走的是新增的"目标地址"兜底路径：旧绑定没跟上实例变化，但输入没受影响。
+            // 只记第一次（无设备身份、无路径），下一次现场看这条就知道兜底在工作。
+            if !TARGET_PATH_ACCEPT_LOGGED.swap(true, Ordering::Relaxed) {
+                crate::ble::gatt_note(
+                    "raw_input target_path_accept first_seen path_matches_bound=false".to_owned(),
+                );
+            }
         }
         context.snapshot.lock().unwrap().raw_event_count += 1;
 

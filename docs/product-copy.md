@@ -386,3 +386,12 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
      普通（重）连接，行为不变。边界：Windows 自己在 HID/HOGP 层维持的蓝牙链路不由应用控制，
      应用释放的是自己的会话、语音订阅与按键归因目标。
   验收见 `Testing/WindowsOnboardingWizard.md` 用例二第 1、4 项。
+- 2026-10-13（向导现场第八轮，Andy 截图 + 本机日志）：① **②步显示具体型号**——已连接那一行的标题与
+  下方「… · 已连接」优先显示型号（小米蓝牙语音遥控器 2 / 2 Pro，运行时按 GATT 读回），型号未知才
+  退回系统名字；起因是本机 Windows 给两支遥控器的名字**完全相同**（都叫「小米蓝牙语音遥控器」）。
+  ② **按到另一支遥控器时给一句解释**：等待②步普通按键期间，Raw Input 的 `stale_remote_event_count`
+  在本步内增长 ⇒ 提示「刚收到的是另一支遥控器的按键…」+ 日志 `other_remote_button`（整步一次）；
+  此前被过滤的报文只有计数、界面毫无解释，现场表现就是"两支都按了、都没反应"。③ Raw Input 接受
+  **同地址的其他实例路径**（同一支遥控器换过 HID 实例时的兜底），首次记
+  `raw_input target_path_accept`。记录：
+  [Bugs/2026-10-13-two-remotes-same-name-no-response.md](../Bugs/2026-10-13-two-remotes-same-name-no-response.md)。
