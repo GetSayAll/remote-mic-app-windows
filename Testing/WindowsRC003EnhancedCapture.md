@@ -2,6 +2,21 @@
 
 本手册最初覆盖「返回 / 音量+ / 音量−」三键在 RC003 上的**按设备源头捕获**（提权助手 + HID 宿主内 tap）。2026-09-27 起产品实现已扩展为全部 13 个可映射按键的动态目标捕获；旧证据仍只证明其记录的三键范围，不自动扩大。
 
+## 换遥控器后的自动重选宿主（2026-10-13 起）
+
+开「全按键支持」时换遥控器（断开甲支 → 连乙支）：助手会自动重选宿主，**不需要**用户关开开关。
+
+判据与预期：
+
+1. 换机后应用日志出现 `remote_target action=published`（每次连接/恢复都会发布目标）；
+2. 助手日志随后出现 `[RETARGET] event=restart reason=target_host_changed candidates=N`，
+   接着是新实例的 `[REG]` / `[HOST]` / `[EXCLUSIVE]` 三段（按新目标重新定位）；
+3. 按语音键：`voice_attempt … path=report_layer`（豆包应能出字）；
+   若仍是 `path=send_input`，应用会额外记一行
+   `voice_path fallback … tool=doubao reason=report_layer_inactive note=tool_ignores_injected_keys`
+   ——豆包在这条路径上必然不出字（它按设计丢弃注入键）；
+4. 反向用例：只断开不换机（目标被清空）**不应**触发重启；连续换机应每次各触发一次。
+
 ## 2026-09-27 全按键动态目标增量验收
 
 - 捕获集合 = “全按键支持已开启”时**恒含三键**（返回 / 音量+ / 音量−；清空它们零副作用——这三个 usage 对 Windows 本就不可见）∪ 当前至少配置一个动作的按键；其余未映射键不清空，保留 Windows 原始行为（2026-10-13 修订，见下节）。

@@ -1833,6 +1833,17 @@ fn handle_control(
                 crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
                 crate::ime::age_label(crate::ime::last_switch_age_ms()),
             ));
+
+            // 2026-10-13 现场：报告层没生效时走 SendInput 注入——**豆包按设计丢弃注入键**
+            // （LLKHF_INJECTED，见 docs/investigations/2026-09-04-avoid-driver-signing-input-paths.md），
+            // 这一按必然出不了字。单列一行，让"按住语音键没反应"的报障一眼归因到路径。
+            if press_path(synth_gate, attempt_hotkey.is_some()) == "send_input"
+                && matches!(attempt_tool, Some(VoiceInputTool::Doubao))
+            {
+                gatt_note(format!(
+                    "voice_path fallback session={session_id} tool=doubao reason=report_layer_inactive note=tool_ignores_injected_keys"
+                ));
+            }
             if synth_gate {
                 gatt_note(format!(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
