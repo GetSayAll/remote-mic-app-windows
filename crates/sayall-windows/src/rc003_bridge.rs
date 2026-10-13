@@ -889,9 +889,9 @@ impl Rc003Bridge {
     /// 主程序在发布新目标（连接/恢复换机）的同一刻调用：助手据此立刻复查目标地址，
     /// 把"换机后几秒内按下可能赶不上"的窗口压到毫秒级。幂等——重复请求只置一次位。
     pub fn request_retarget(&self) {
-        if !self.retarget_requested.swap(true, Ordering::Relaxed) {
-            note("rc003_bridge event=retarget_requested".to_owned());
-        }
+        // 每次都记一条：这条日志是"请求确实发出去了"的唯一凭据（换机链路排查用）。
+        self.retarget_requested.store(true, Ordering::Relaxed);
+        note("rc003_bridge event=retarget_requested".to_owned());
     }
 
     /// 报告层合成门禁判据：已收到与当前目标一致的 agent 回执（`A` 行，经

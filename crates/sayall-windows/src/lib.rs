@@ -970,7 +970,13 @@ impl WindowsPlatform {
             // 刚点连接而能力协商还没回来的那段时间里，两支遥控器同时在线就又会
             // 歧义失败（现场：`raw_input_listener` 每 10 秒失败一次，向导卡在
             // `remote.listener_not_ready`）。
-            crate::remote_target::set(crate::bluetooth_address_from_device_id(&device_id));
+            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
+            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
+            let address = crate::bluetooth_address_from_device_id(&device_id);
+            crate::remote_target::set(address);
+            if address.is_some() {
+                self.rc003_bridge.request_retarget();
+            }
             self.runtime.connect(device_id)
         }
 
@@ -998,7 +1004,13 @@ impl WindowsPlatform {
         {
             // 启动时按已保存的选择立刻发布（同 `connect_remote` 的理由）：
             // 不等会话 Ready，Raw Input 就能在"两支同型号同时在位"时绑对那一支。
-            crate::remote_target::set(crate::bluetooth_address_from_device_id(&device_id));
+            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
+            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
+            let address = crate::bluetooth_address_from_device_id(&device_id);
+            crate::remote_target::set(address);
+            if address.is_some() {
+                self.rc003_bridge.request_retarget();
+            }
             self.runtime.restore(device_id)
         }
 
