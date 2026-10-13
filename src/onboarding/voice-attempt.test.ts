@@ -70,6 +70,56 @@ describe("voice attempt tracker", () => {
     expect(terminal?.code).toBe("voice.no_samples");
   });
 
+  it("撕裂快照（音频忙、语音仍 idle）不当作会话开始（2026-10-14 现场回归）", () => {
+    // 现场日志：失败判在会话开始后 4ms（d0_s0_q0_drain0），随后该会话实际投递 24720 采样、
+    // 文字上屏。成因 = 快照按子系统依次读取，会话开始落在 connection 与 audio 两次读取之间，
+    // 产生 {voiceState:idle, audioPhase:streaming} 的撕裂帧；旧逻辑把它当成"开始→立即结束"。
+    const attempt = tracker();
+    attempt.arm(frame({ decodedSamples: 100 }), 0);
+    expect(
+      attempt.observe(frame({ voiceState: "idle", audioPhase: "streaming", decodedSamples: 100 }), 200),
+    ).toBeNull();
+    expect(attempt.state()).toBe("waiting_start");
+
+    // 真实会话照常被观测、终态为通过（文字在窗口内出现）。
+    expect(
+      attempt.observe(
+        frame({ voiceState: "streaming", audioPhase: "streaming", decodedSamples: 120 }),
+        400,
+      ),
+    ).toBeNull();
+    expect(
+      attempt.observe(
+        frame({ voiceState: "streaming", audioPhase: "streaming", decodedSamples: 300, submittedSamples: 5200 }),
+        1600,
+      ),
+    ).toBeNull();
+    expect(
+      attempt.observe(
+        frame({ voiceState: "idle", audioPhase: "ready", decodedSamples: 320, submittedSamples: 5200 }),
+        1800,
+      ),
+    ).toBeNull();
+    expect(attempt.state()).toBe("waiting_transcript");
+    const terminal = attempt.notifyTranscript(1900);
+    expect(terminal?.result).toBe("passed");
+    expect(terminal?.evidence.startObserved).toBe(true);
+    expect(terminal?.evidence.submittedSamples).toBe(5200);
+  });
+
+  it("音频忙帧之后，真实空会话仍判 no_samples（守卫不过度放宽）", () => {
+    const attempt = tracker();
+    attempt.arm(frame({ decodedSamples: 100 }), 0);
+    attempt.observe(frame({ voiceState: "idle", audioPhase: "streaming", decodedSamples: 100 }), 200);
+    attempt.observe(frame({ voiceState: "streaming", audioPhase: "streaming", decodedSamples: 100 }), 400);
+    const terminal = attempt.observe(
+      frame({ voiceState: "idle", audioPhase: "ready", decodedSamples: 100, submittedSamples: 0 }),
+      600,
+    );
+    expect(terminal?.result).toBe("failed");
+    expect(terminal?.code).toBe("voice.no_samples");
+  });
+
   it("classifies decoded-but-not-delivered as a delivery failure", () => {
     const attempt = tracker();
     attempt.arm(frame({ decodedSamples: 100 }), 0);

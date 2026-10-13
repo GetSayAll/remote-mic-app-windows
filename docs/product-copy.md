@@ -452,3 +452,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   "从上一页进来"（点过继续）被全局 `body.pointer-nav` 约定抑制——同一聚焦状态两种外观。
   像素比对（7 vs 3 设备像素）与取舍说明见
   [Bugs/2026-10-13-voice-input-focus-double-ring.md](../Bugs/2026-10-13-voice-input-focus-double-ring.md)。
+- 2026-10-14（向导现场，Andy 截图：**文字已上屏、也有语音条，却判"收到了语音会话，但没有声音数据"**）：
+  跟踪器把一帧**撕裂快照**（`connection.voiceState=idle` + `audio.phase=streaming`——会话开始恰好落在
+  快照分段读取的两段之间）当成"开始→立即结束"，用 0/0 计数判 `voice.no_samples`；该会话实际投递
+  24720 采样并成功上屏。修复：**会话开始以 `connection.voiceState` 为准**，音频忙而语音仍 idle 的帧
+  不视为开始（解码计数照常累计，极短按压路径不变）。回归用例 2 条（撕裂帧不误判 / 真·空会话仍判
+  no_samples）。记录：[Bugs/2026-10-14-voice-no-samples-torn-snapshot.md](../Bugs/2026-10-14-voice-no-samples-torn-snapshot.md)。
