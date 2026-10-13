@@ -252,3 +252,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   取值优先级 = 向导会话已暂存 > 磁盘读取 > 页面已加载。新装机器上快捷键按生效值显示
   （默认 左 Ctrl + 左 Win），不再是 `unset`。记录：
   [Bugs/2026-10-13-diagnostics-tool-unset-false-negative.md](../Bugs/2026-10-13-diagnostics-tool-unset-false-negative.md)。
+- 2026-10-13（向导②步现场反馈第二轮，Andy 截图）：① 首次连接说明卡（含「扫描已配对设备」
+  「打开蓝牙设置」）只在「未连接、且没有在处理连接」时显示——原判据只有 `!connected`，
+  点「连接」后 connecting 阶段卡片会闪现 1–3 秒再消失；② 连接成功**不再写**
+  「正在确认语音功能，就绪后按一下普通按键。」（与下方按键行引导重复、按键收到后即过期），
+  连接就绪时还会清掉残留的连接过程消息（如「已打开系统蓝牙设置…」）；连接失败原因照常显示。
+  记录：[Bugs/2026-10-13-remote-step-card-flash-and-stale-message.md](../Bugs/2026-10-13-remote-step-card-flash-and-stale-message.md)。

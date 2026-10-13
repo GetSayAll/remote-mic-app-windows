@@ -388,6 +388,17 @@ watch(
   },
 );
 
+// 连接就绪 → 清掉连接过程消息（2026-10-13 现场反馈）：循环里的消息只在"处理中"
+// 有意义，连接成立后（例如「已打开系统蓝牙设置…」）继续留着就是过期信息。
+watch(
+  () => props.runtime?.platform.connection.phase ?? "idle",
+  (phase, previous) => {
+    if (!CONNECTED_PHASES.includes(phase)) return;
+    if (previous && CONNECTED_PHASES.includes(previous)) return;
+    operationMessage.value = "";
+  },
+);
+
 onMounted(async () => {
   // 心跳是刻意保留的重复日志（卡住定位）；其余事件遵守"状态未变化不重复刷"。
   heartbeatTimer = window.setInterval(reportHeartbeat, 30_000);
@@ -604,7 +615,10 @@ async function connectDevice(device: PairedRemote, mode: "auto" | "manual" = "ma
   reportStepAction("remote", "connect_requested", "unknown", { detail: mode });
   try {
     await connectRemote(device.id);
-    operationMessage.value = "正在确认语音功能，就绪后按一下普通按键。";
+    // 成功不写进度消息（2026-10-13 现场要求：那条"正在确认语音功能…"与下方按键行
+    // 引导重复、按键已收到后还会变成过期信息）。连接过程由连接检查卡片的
+    // 进行中/已就绪表达；失败仍给出原因。
+    operationMessage.value = "";
     reportStepAction("remote", "connect_requested", "passed", {
       detail: mode,
       elapsedMs: actionElapsed(started),

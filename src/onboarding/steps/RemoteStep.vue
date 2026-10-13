@@ -34,6 +34,22 @@ const connectionPhase = computed(() => props.runtime?.platform.connection.phase 
 const connected = computed(() =>
   (CONNECTED_PHASES as readonly string[]).includes(connectionPhase.value),
 );
+/**
+ * 应用正在处理连接（扫描/连接/重连/睡眠挂起）：此时不显示"首次连接"说明卡。
+ *
+ * 2026-10-13 现场反馈：卡片原判据只有 `!connected`，而 `connected` 只认
+ * ready/streaming/draining——点「连接」后应用要经过 connecting → awaiting_capabilities
+ * 约 1–3 秒，这段窗口内卡片会重新出现、就绪后再消失（看起来是"闪一下"）。
+ */
+const connectionInFlight = computed(
+  () =>
+    (
+      ["connecting", "discovering", "awaiting_capabilities", "reconnecting", "suspended"] as readonly string[]
+    ).includes(connectionPhase.value) ||
+    props.scanning ||
+    props.connectingDeviceId !== "",
+);
+const showFirstConnectCard = computed(() => !connected.value && !connectionInFlight.value);
 const reconnecting = computed(() => connectionPhase.value === "reconnecting");
 const reconnectAttempt = computed(() => props.runtime?.platform.connection.reconnectAttempt ?? 0);
 const phaseLabel = computed(() => connectionPhaseLabel(connectionPhase.value));
@@ -104,7 +120,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       无线麦只支持小米蓝牙语音遥控器 2 和小米蓝牙语音遥控器 2 Pro（RC001 / RC003）。
     </p>
 
-    <div v-if="!connected" class="onboarding-card accent">
+    <div v-if="showFirstConnectCard" class="onboarding-card accent">
       <h4>首次连接遥控器</h4>
       <ul class="onboarding-numlist">
         <li>
