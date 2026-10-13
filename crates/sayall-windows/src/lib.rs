@@ -57,9 +57,8 @@ mod ime;
 /// 模块本体私有，只导出这几个入口（见 `ime` 模块头与 `ImeStatus` 的语义约定）。
 #[cfg(windows)]
 pub use ime::{
-    describe_active_ime_name, ensure_ime_for_tool, ensure_ime_for_tool_inline, ime_status_for,
-    ime_status_log_line, inline_switch_enabled, list_installed_ime_names, ImeStatus,
-    MAX_INSTALLED_IME_NAMES,
+    describe_active_ime_name, ensure_ime_for_tool, ime_status_for, ime_status_log_line,
+    list_installed_ime_names, ImeStatus, MAX_INSTALLED_IME_NAMES,
 };
 
 /// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
