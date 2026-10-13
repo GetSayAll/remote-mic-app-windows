@@ -1863,7 +1863,9 @@ describe("Onboarding voice test step", () => {
     // 2026-10-14 现场定稿：聚焦时只保留细边框——此前"第一次进来"（未用鼠标）显示焦点环、
     // "从上一页进来"被 body.pointer-nav 抑制，同一个聚焦状态两种外观；
     // 这里锁样式源码防回改（像素证据见 Bugs 记录）。
-    const source = readFileSync(join(process.cwd(), "src/pages/OnboardingPage.vue"), "utf8");
+    // 跨平台：CI 检出可能是 CRLF、本地是 LF——先归一化行尾再匹配（2026-10-14 CI 实测教训）。
+    const source = readFileSync(join(process.cwd(), "src/pages/OnboardingPage.vue"), "utf8")
+      .replace(/\r\n/g, "\n");
     const block = source.match(
       /\.onboarding-voice-input:focus,\n\.onboarding-voice-input:focus-visible \{([\s\S]*?)\n\}/,
     );
