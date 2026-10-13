@@ -6602,10 +6602,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 &[
                     ("event", "restart".into()),
                     ("reason", "target_host_changed".into()),
-                    (
-                        "trigger",
-                        if requested { "app" } else { "poll" }.into(),
-                    ),
+                    ("trigger", if requested { "app" } else { "poll" }.into()),
                     ("candidates", scan.entries.len().to_string()),
                 ],
             );
@@ -6623,7 +6620,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Err(_) => {
                 logger.kv(
                     "[RETARGET]",
-                    &[("event", "restart_failed".into()), ("reason", "current_exe".into())],
+                    &[
+                        ("event", "restart_failed".into()),
+                        ("reason", "current_exe".into()),
+                    ],
                 );
                 return;
             }
@@ -6634,12 +6634,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 let _ = child;
                 logger.kv(
                     "[RETARGET]",
-                    &[("event", "restarted".into()), ("child_spawned", "true".into())],
+                    &[
+                        ("event", "restarted".into()),
+                        ("child_spawned", "true".into()),
+                    ],
                 );
             }
             Err(_) => logger.kv(
                 "[RETARGET]",
-                &[("event", "restart_failed".into()), ("reason", "spawn".into())],
+                &[
+                    ("event", "restart_failed".into()),
+                    ("reason", "spawn".into()),
+                ],
             ),
         }
     }
@@ -6799,10 +6805,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 2c) 目标地址消歧（2026-10-13 现场：两支同型号遥控器同时在线时两条链路
         //     都拒绝盲选）。只认自己这一版格式；匹配不区分大小写；别的地址不命中。
         let address = 0x00C0_5D39_C2D9_DBu64;
-        let instance =
-            r"BTHLEDevice\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\9&1&0055";
-        let other_instance =
-            r"BTHLEDevice\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\9&1&0055";
+        let instance = r"BTHLEDevice\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\9&1&0055";
+        let other_instance = r"BTHLEDevice\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\9&1&0055";
         check(
             "目标地址匹配（两支同型号遥控器消歧）",
             parse_target_body("version=1\naddress=c05d39c2d9db\n") == Some(address)
@@ -8270,7 +8274,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         #[test]
         fn target_recheck_only_on_a_new_non_empty_address() {
-            assert!(target_address_requires_recheck(None, Some(0x00c0_5d39_c2d9_db)));
+            assert!(target_address_requires_recheck(
+                None,
+                Some(0x00c0_5d39_c2d9_db)
+            ));
             assert!(target_address_requires_recheck(
                 Some(0x00c0_5d39_c2d9_db),
                 Some(0x00e8_5540_b1b7_6b)
@@ -8280,7 +8287,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 Some(0x00c0_5d39_c2d9_db)
             ));
             // 主程序断开清空目标：继续服务当前宿主，不重启。
-            assert!(!target_address_requires_recheck(Some(0x00c0_5d39_c2d9_db), None));
+            assert!(!target_address_requires_recheck(
+                Some(0x00c0_5d39_c2d9_db),
+                None
+            ));
             assert!(!target_address_requires_recheck(None, None));
         }
 
