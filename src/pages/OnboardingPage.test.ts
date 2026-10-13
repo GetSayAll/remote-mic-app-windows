@@ -476,29 +476,36 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("按键已收到。还差一步：点遥控器一行右侧的“连接”。");
-    expect(wrapper.text()).not.toContain("扫描已配对设备");
     wrapper.unmount();
   });
 
-  it("已连接且已收到按键时，说明句仍是这一项可以继续了", async () => {
+  it("已连接且已收到按键时，按键行不再写任何说明句", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(connectedRuntime());
 
     mocks.buttonHandler?.({ button: "home", isPressed: true });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("这一项可以继续了。");
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+    // 2026-10-13 现场：整行就绪 + 门禁放行，不再重复写"这一项可以继续了。"——
+    // 该行此时只剩标题，没有 <small> 说明句。
+    expect(wrapper.text()).not.toContain("这一项可以继续了");
+    const buttonRow = wrapper
+      .findAll(".onboarding-status-row")
+      .find((row) => row.text().includes("已收到遥控器按键"));
+    expect(buttonRow).toBeDefined();
+    expect(buttonRow!.find("small").exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("打开蓝牙设置、扫描、连接：找到设备后动作按钮收起，连接成功后行上显示已连接", async () => {
+  it("打开蓝牙设置、扫描、连接：连接成功后行上显示已连接", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     mocks.scanPairedRemotes.mockResolvedValue([
       { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
     ]);
     const wrapper = await mountWizard(runtimeWith());
 
-    // 还没找到设备：两个动作按钮可见（配对流程说明在第①步，本步不重复）。
+    // 两个动作按钮可见（2026-10-13 现场：暂时按"总是显示"放出，见 RemoteStep）。
     await wrapper
       .findAll("button")
       .find((button) => button.text().includes("打开蓝牙设置"))!
@@ -513,10 +520,9 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
     expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("小米蓝牙语音遥控器 2 Pro");
-    // 找到了：动作按钮收起，由设备行接管；连接做成按钮观感（2026-10-13 现场）。
+    // 找到设备后动作按钮仍在（暂时放的），设备行的「连接」做成按钮观感。
     const buttonTexts = wrapper.findAll("button").map((button) => button.text());
-    expect(buttonTexts.some((text) => text.includes("扫描已配对设备"))).toBe(false);
-    expect(buttonTexts.some((text) => text.includes("打开蓝牙设置"))).toBe(false);
+    expect(buttonTexts.some((text) => text.includes("扫描已配对设备"))).toBe(true);
     expect(wrapper.findAll(".option-action").map((node) => node.text())).toEqual(["连接"]);
 
     await wrapper
