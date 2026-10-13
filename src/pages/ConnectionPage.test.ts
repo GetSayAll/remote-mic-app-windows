@@ -5,6 +5,7 @@ import type {
   AudioSnapshot,
   CaptureSupport,
   ConnectionSnapshot,
+  Rc003BridgeSnapshot,
   RuntimeSnapshot,
 } from "../lib/bridge";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
@@ -153,6 +154,7 @@ const mocks = vi.hoisted(() => ({
   enableRc003Capture: vi.fn(),
   disableRc003Capture: vi.fn(),
   getCaptureSupport: vi.fn(),
+  getRc003BridgeSnapshot: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -182,6 +184,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     enableRc003Capture: mocks.enableRc003Capture,
     disableRc003Capture: mocks.disableRc003Capture,
     getCaptureSupport: mocks.getCaptureSupport,
+    getRc003BridgeSnapshot: mocks.getRc003BridgeSnapshot,
   };
 });
 
@@ -1135,6 +1138,28 @@ describe("connection page rc003 capture switch", () => {
     lastError: null,
     ...overrides,
   });
+  /** 桥接快照夹具（本页只关心 phase 与 captureHealth，其余字段按"空"填）。 */
+  const bridgeSnapshot = (
+    phase: Rc003BridgeSnapshot["phase"],
+    captureHealth: Rc003BridgeSnapshot["captureHealth"] = "off",
+  ): Rc003BridgeSnapshot => ({
+    phase,
+    port: 0,
+    helperPid: 0,
+    acceptedTotal: 0,
+    deniedTotal: 0,
+    replacedTotal: 0,
+    edgesApplied: 0,
+    usagesDropped: 0,
+    malformedTotal: 0,
+    watchdogReleaseTotal: 0,
+    pressedUsages: [],
+    lastRxAgeMs: null,
+    targetGeneration: 0,
+    targetUsages: [],
+    ownedUsages: [],
+    captureHealth,
+  });
 
   afterEach(() => {
     // 本 describe 不继承上面 VB-CABLE describe 的 afterEach（作用域只在
@@ -1173,6 +1198,41 @@ describe("connection page rc003 capture switch", () => {
     mocks.getRc003TaskStatus.mockResolvedValue(taskStatus());
     mocks.enableRc003Capture.mockResolvedValue(taskStatus({ enabled: true }));
     mocks.disableRc003Capture.mockResolvedValue(taskStatus({ enabled: false }));
+    // 生效状态默认"没开"（关闭态）：开着却没生效的分支由 2026-10-13 的用例覆盖。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(bridgeSnapshot("stopped", "off"));
+  });
+
+  it("「开着但没生效」给一句用户语言（2026-10-13）：只在后端说没生效时出现", async () => {
+    mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: true }));
+    // 遥控器链路正常（语音功能就绪）+ 后端说没生效 → 显示提示句。
+    mocks.getConnectionSnapshot.mockResolvedValue({ ...emptyConnection, phase: "ready" });
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      bridgeSnapshot("connected", "inactive"),
+    );
+    let wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain(
+      "“支持更多输入工具”还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
+    );
+    wrapper.unmount();
+
+    // active：真的生效 → 收回提示（本页提示只在开关旁那一位）。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(bridgeSnapshot("connected", "active"));
+    wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("还没有生效");
+    wrapper.unmount();
+
+    // 遥控器链路本身断掉（idle）：不显示这句——那种情形由连接区的既有文案说明，
+    // 也不把用户往遥控器侧引（2026-10-13 定稿）。
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      bridgeSnapshot("connected", "inactive"),
+    );
+    wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("还没有生效");
+    wrapper.unmount();
   });
 
   it("挂载对账后开关显示权威状态，对账失败显示占位符", async () => {

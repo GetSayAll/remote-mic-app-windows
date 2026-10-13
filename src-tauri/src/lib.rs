@@ -388,6 +388,8 @@ struct RuntimeSnapshot {
 struct AppState {
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
+    /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
+    capture_health: Arc<std::sync::atomic::AtomicU8>,
     /// check_app_update 暂存的待安装更新（install_app_update 取走）。
     /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
     pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
@@ -399,6 +401,10 @@ impl std::fmt::Debug for AppState {
             .debug_struct("AppState")
             .field("platform", &self.platform)
             .field("settings", &self.settings)
+            .field(
+                "capture_health",
+                &CaptureHealth::current(&self.capture_health).as_str(),
+            )
             .field(
                 "pending_update",
                 &if self
@@ -746,6 +752,19 @@ async fn get_raw_input_snapshot(
         .map_err(|error| format!("读取 Raw Input 状态失败：{error}"))
 }
 
+/// 桥接快照 + 「全按键支持」实际生效状态（界面用；2026-10-13）。
+///
+/// 合在一条命令里返回：界面本来就每秒读一次桥接快照（内存读），再开一条 IPC 只是
+/// 多一次往返；生效状态由常驻对账线程发布，判据只此一处（见 `CaptureHealth`）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Rc003BridgeView {
+    #[serde(flatten)]
+    bridge: BridgeSnapshot,
+    /// `off` / `starting` / `active` / `inactive`（前端 `Rc003CaptureHealth` 逐字对应）。
+    capture_health: &'static str,
+}
+
 /// RC003 三键传输桥接状态（捕获链第 ② 段）。
 ///
 /// 单独开一条命令而不是塞进 `RawInputSnapshot`：后者是既有的 IPC 契约，
@@ -753,11 +772,16 @@ async fn get_raw_input_snapshot(
 #[tauri::command]
 async fn get_rc003_bridge_snapshot(
     state: tauri::State<'_, AppState>,
-) -> Result<BridgeSnapshot, String> {
+) -> Result<Rc003BridgeView, String> {
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
+    let capture_health = CaptureHealth::current(&state.capture_health).as_str();
+    let bridge = tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
         .await
-        .map_err(|error| format!("读取 RC003 桥接状态失败：{error}"))
+        .map_err(|error| format!("读取 RC003 桥接状态失败：{error}"))?;
+    Ok(Rc003BridgeView {
+        bridge,
+        capture_health,
+    })
 }
 
 /// 全按键支持 Helper 的计划任务状态（授权 = 任务在系统里）。
@@ -1074,6 +1098,74 @@ fn capture_should_restart_helper(
         && since_last_attempt_ms.map_or(true, |age| age >= capture_recover_interval_ms(attempts))
 }
 
+/// 「全按键支持」的**实际生效状态**（发布给界面：开关开着 ≠ 生效）。
+///
+/// 2026-10-13 现场：开关一直显示已开启，而宿主里的 agent 早已消失、功能静默失效
+/// 2.5 天，界面没有任何提示。判据（桥接快照 + 宽限）只存在于常驻对账这一处，因此
+/// 由它发布、界面只读——「多久算没生效」绝不前后端各写一份（口径漂移正是 0.8.1
+/// 的教训：界面显示已开启、链路却死着）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CaptureHealth {
+    /// 开关关着（对账 standby）。
+    Off = 0,
+    /// 开关开着、助手还没连上，或刚连上还在宽限期内：启动中，界面不显示任何文案。
+    Starting = 1,
+    /// 过了宽限仍没有所有权：开着但没生效（界面显示一句用户语言的提示）。
+    Inactive = 2,
+    /// agent 已接管：真的在生效。
+    Active = 3,
+}
+
+impl CaptureHealth {
+    /// 发布到界面读的那份值（`AtomicU8`，不需要锁）。
+    fn publish(self, slot: &std::sync::atomic::AtomicU8) {
+        slot.store(self as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 读取当前发布值（未知编码按 `Off` 处理，界面不显示文案）。
+    fn current(slot: &std::sync::atomic::AtomicU8) -> Self {
+        match slot.load(std::sync::atomic::Ordering::Relaxed) {
+            2 => Self::Inactive,
+            3 => Self::Active,
+            1 => Self::Starting,
+            _ => Self::Off,
+        }
+    }
+
+    /// IPC token（前端 `Rc003CaptureHealth` 逐字对应）。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Starting => "starting",
+            Self::Inactive => "inactive",
+            Self::Active => "active",
+        }
+    }
+}
+
+/// 本轮发布给界面的生效状态（纯判定，单测覆盖）。
+///
+/// `inactive_by_grace` 用与日志同一条判据（`capture_inactive_due_to_missing_ownership`），
+/// 免得界面与日志各有一套「没生效」的定义。
+fn capture_health_for_round(
+    enabled: bool,
+    bridge_connected: bool,
+    owned_usages: usize,
+    inactive_by_grace: bool,
+) -> CaptureHealth {
+    if !enabled {
+        return CaptureHealth::Off;
+    }
+    if bridge_connected && owned_usages > 0 {
+        return CaptureHealth::Active;
+    }
+    if bridge_connected && inactive_by_grace {
+        return CaptureHealth::Inactive;
+    }
+    CaptureHealth::Starting
+}
+
 /// 常驻对账的节奏参数（纯常量，测试钉住）。
 ///
 /// 2026-10-04 用户要求「重启后自动恢复全按键支持」。旧实现是**一次性**的：
@@ -1177,7 +1269,11 @@ fn decide_reconcile_round(enabled: bool, check: AutoTriggerCheck) -> ReconcileAc
 ///   见 `CAPTURE_RECOVER_AFTER_MS`），仍无效则降速重试；
 /// * 桥在监听、助手未连上 → 触发：前 4 轮每 5 秒，第 5 轮 `/end` + `/run`
 ///   兜底一次，此后每 30 秒稳态重试，稳态期每 10 轮再兜底一次。
-fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: SettingsStore) {
+fn rc003_auto_trigger_reconcile(
+    platform: Arc<dyn PlatformRuntime>,
+    settings: SettingsStore,
+    capture_health: Arc<std::sync::atomic::AtomicU8>,
+) {
     // 本机没有对应架构的载荷时，重试多少次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
     // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会空转——
     // 常驻对账尤其不能每 30 秒去撞一条必然连不上的路径。
@@ -1235,6 +1331,7 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 capture_inactive_since = None;
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
+                CaptureHealth::Off.publish(&capture_health);
                 std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
             }
             ReconcileAction::WaitBridge => {
@@ -1253,6 +1350,7 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 capture_inactive_since = None;
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
+                CaptureHealth::Starting.publish(&capture_health);
                 std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
             }
             ReconcileAction::Connected => {
@@ -1275,12 +1373,22 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 let connected_ms = connected_since
                     .map(|since| since.elapsed().as_millis() as u64)
                     .unwrap_or(0);
-                if capture_inactive_due_to_missing_ownership(
+                let inactive_by_grace = capture_inactive_due_to_missing_ownership(
                     snapshot.target_usages.len(),
                     snapshot.owned_usages.len(),
                     connected_ms,
                     AUTO_TRIGGER_CAPTURE_GRACE_MS,
-                ) {
+                );
+                // 界面读的就是这一份：`Active` = 真的接管了，`Inactive` = 开着却没生效
+                // （界面据此显示一句用户语言的提示，2026-10-13）。
+                capture_health_for_round(
+                    true,
+                    true,
+                    snapshot.owned_usages.len(),
+                    inactive_by_grace,
+                )
+                .publish(&capture_health);
+                if inactive_by_grace {
                     let inactive_since =
                         *capture_inactive_since.get_or_insert_with(std::time::Instant::now);
                     if !capture_inactive_logged {
@@ -1358,6 +1466,7 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
+                CaptureHealth::Starting.publish(&capture_health);
                 if was_connected {
                     // 助手掉线（崩溃 / 宿主重启 / 被系统回收）：重新进入恢复，
                     // 先来一轮快速期。
@@ -3200,12 +3309,21 @@ pub fn run() {
             // 要能自愈，见 rc003_auto_trigger_reconcile 的注释）。启动点必须在
             // platform 之后：描述文件已写出，助手读到的端口/令牌一定是本轮的
             // （2026-09-27 真机复盘）；开关关闭时它只安静等待用户意图变化。
+            // 「全按键支持」实际生效状态（界面用：开关开着 ≠ 生效；2026-10-13）：
+            // 常驻对账线程是唯一的判据来源，它发布、界面只读。
+            let capture_health =
+                Arc::new(std::sync::atomic::AtomicU8::new(CaptureHealth::Off as u8));
             #[cfg(windows)]
             {
                 let platform_for_trigger = Arc::clone(&platform);
                 let settings_for_trigger = settings.clone();
+                let health_for_trigger = Arc::clone(&capture_health);
                 std::thread::spawn(move || {
-                    rc003_auto_trigger_reconcile(platform_for_trigger, settings_for_trigger);
+                    rc003_auto_trigger_reconcile(
+                        platform_for_trigger,
+                        settings_for_trigger,
+                        health_for_trigger,
+                    );
                 });
             }
 
@@ -3322,6 +3440,7 @@ pub fn run() {
             app.manage(AppState {
                 platform,
                 settings,
+                capture_health,
                 pending_update: std::sync::Mutex::new(None),
             });
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
@@ -3645,6 +3764,46 @@ mod tests {
         // 阈值本身必须大于「宽限 + 观察间隔」，否则会在助手还在握手时就动手。
         assert!(CAPTURE_RECOVER_AFTER_MS > AUTO_TRIGGER_CAPTURE_GRACE_MS);
         assert!(CAPTURE_RECOVER_AFTER_MS >= AUTO_TRIGGER_WATCH_MS);
+    }
+
+    /// 界面读的「实际生效状态」按**所有权**判，不按开关位置（2026-10-13 现场：
+    /// 开关显示已开启、功能静默失效 2.5 天）。界面只在 `inactive` 时显示提示，
+    /// 所以这一档的边界必须钉死：`active` 要有所有权、`starting` 不给文案。
+    #[test]
+    fn capture_health_reflects_ownership_not_switch_position() {
+        // 开关关着：off（对账 standby）。
+        assert_eq!(
+            capture_health_for_round(false, true, 12, true),
+            CaptureHealth::Off
+        );
+        // 真接管：active。
+        assert_eq!(
+            capture_health_for_round(true, true, 12, false),
+            CaptureHealth::Active
+        );
+        // 有目标、过宽限仍没人接管：inactive（界面此时才显示提示）。
+        assert_eq!(
+            capture_health_for_round(true, true, 0, true),
+            CaptureHealth::Inactive
+        );
+        // 助手刚连上、还在宽限内：starting（不显示文案）。
+        assert_eq!(
+            capture_health_for_round(true, true, 0, false),
+            CaptureHealth::Starting
+        );
+        // 助手没连上 / 桥不在监听：starting。
+        assert_eq!(
+            capture_health_for_round(true, false, 0, true),
+            CaptureHealth::Starting
+        );
+        // 发布 → 读取往返，且 token 与前端 `Rc003CaptureHealth` 逐字对应。
+        let slot = std::sync::atomic::AtomicU8::new(0);
+        CaptureHealth::Inactive.publish(&slot);
+        assert_eq!(CaptureHealth::current(&slot), CaptureHealth::Inactive);
+        assert_eq!(CaptureHealth::current(&slot).as_str(), "inactive");
+        assert_eq!(CaptureHealth::Off.as_str(), "off");
+        assert_eq!(CaptureHealth::Starting.as_str(), "starting");
+        assert_eq!(CaptureHealth::Active.as_str(), "active");
     }
 
     /// 兜底失败行必须自带"差在哪一步"的对账字段（2026-10-01 现场教训：

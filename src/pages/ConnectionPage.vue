@@ -6,7 +6,9 @@ import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import { reasonToken, reportFrontendEvent } from "../lib/frontend-diagnostics";
 import {
   captureFailureText,
+  captureInactiveText,
   captureSwitchState as captureSwitchStateFn,
+  shouldShowCaptureInactive,
 } from "../lib/capture-switch";
 import type {
   AudioEndpoint,
@@ -15,6 +17,7 @@ import type {
   ConnectionSnapshot,
   KeyChord,
   PairedRemote,
+  Rc003CaptureHealth,
   Rc003TaskStatus,
   RuntimeSnapshot,
   VoiceInputTool,
@@ -32,6 +35,7 @@ import {
   getConnectionSnapshot,
   getGainDb,
   getOtherVoiceHotkey,
+  getRc003BridgeSnapshot,
   getRc003TaskStatus,
   getVoiceHoldHotkey,
   getVoiceInputTool,
@@ -451,6 +455,28 @@ const captureFailure = computed(() =>
 );
 
 /**
+ * 「全按键支持」实际生效状态（2026-10-13）：Rust 常驻对账发布，本页只读。
+ * 开关开着 ≠ 生效——`inactive` 才显示提示（见 captureInactiveNote）。
+ */
+const rc003CaptureHealth = ref<Rc003CaptureHealth>("off");
+
+/**
+ * 「开着但没生效」的提示（2026-10-13 Andy 定稿，文案见 captureInactiveText）：
+ * 后端说 `inactive` 才出现，且只在**遥控器链路正常**时出现——链路本身断掉时
+ * 页面已有连接状态与既有文案说明，不把用户往遥控器侧引（这条链断在 PC 内部）。
+ * 与失败句同一位：失败句优先（那是用户刚做的动作），一次只显示一句。
+ */
+const captureInactiveNote = computed(() =>
+  shouldShowCaptureInactive({
+    switchState: captureSwitchState.value,
+    health: rc003CaptureHealth.value,
+    linkReady: atvvReady.value,
+  })
+    ? captureInactiveText(CAPTURE_FAILURE_NAME)
+    : null,
+);
+
+/**
  * 把开关的 DOM 状态写回绑定值。原生复选框被点击的瞬间浏览器先翻了 checked，
  * 而操作失败（状态没变）时 Vue 判定 props 无变化、不会生成 DOM 补丁——
  * 会出现「状态是关、界面是开」（ButtonsPage 2026-09-25 真机实证，同法防御）。
@@ -480,6 +506,14 @@ async function reconcileRc003Capture(): Promise<void> {
     }
   } catch {
     // 对账失败保持 null：开关显示占位符（不可点），不猜状态。
+  }
+  // 「全按键支持」实际生效状态（2026-10-13）：单独取、单独兜——任务状态读不到
+  // 不该连带把生效状态也冻住（反之亦然）。内存读，随既有轮询每秒刷新。
+  try {
+    const bridge = await getRc003BridgeSnapshot();
+    rc003CaptureHealth.value = bridge.captureHealth;
+  } catch {
+    // 读不到保持上一次的值，最多晚一秒反映。
   }
 }
 
@@ -1038,6 +1072,9 @@ onMounted(async () => {
   pollTimer = setInterval(() => {
     void refreshConnection();
     void refreshAudio();
+    // 「全按键支持」实际生效状态随既有轮询刷新（内存读，开销可忽略）：
+    // 开关开着但没生效时要能在这里变成一句提示（2026-10-13）。
+    void reconcileRc003Capture();
   }, 1_000);
   const stopCaptureEdges = await subscribeShortcutCaptureEdges((edge) => {
     void acceptVoiceCaptureEdge(edge);
@@ -1344,7 +1381,9 @@ onUnmounted(() => {
             <div v-if="vokieRunning === true" class="info-callout warning callout-small">
               检测到 Vokie 正在运行：它和豆包用的是同一个快捷键（右 Alt），按住遥控器语音键可能唤起 Vokie。要用豆包，请先退出 Vokie。
             </div>
-            <p v-if="captureFailure" class="tiny capture-failure">{{ captureFailure }}</p>
+            <p v-if="captureFailure || captureInactiveNote" class="tiny capture-failure">
+              {{ captureFailure ?? captureInactiveNote }}
+            </p>
           </div>
 
           <div v-else-if="voiceInputTool === 'wechat'" class="tool-panel">
@@ -1479,7 +1518,9 @@ onUnmounted(() => {
             </div>
             <!-- 本机不可用（ARM64，issue #206）：说明句与豆包面板逐字一致。 -->
             <p v-if="captureUnsupported" class="tiny muted">{{ CAPTURE_UNSUPPORTED_NOTE }}</p>
-            <p v-if="captureFailure" class="tiny capture-failure">{{ captureFailure }}</p>
+            <p v-if="captureFailure || captureInactiveNote" class="tiny capture-failure">
+              {{ captureFailure ?? captureInactiveNote }}
+            </p>
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{
                 voiceCaptureDisplay.length

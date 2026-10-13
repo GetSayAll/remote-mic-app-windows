@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { captureFailureText, captureSwitchState } from "./capture-switch";
+import {
+  captureFailureText,
+  captureInactiveText,
+  captureSwitchState,
+  shouldShowCaptureInactive,
+} from "./capture-switch";
 
 describe("captureSwitchState（2026-10-10 开关三态契约）", () => {
   it("本机不可用优先于一切：即使正在操作或读到开启也报 unavailable", () => {
@@ -61,6 +66,47 @@ describe("captureFailureText（失败文案面向普通用户）", () => {
     const text = captureFailureText(raw, NAME);
     expect(text).toBe("开启没有成功，全按键支持保持关闭。");
     for (const bad of ["UAC", "计划任务", "hresult", "退出码", "helper", "Gadget", "令牌", "提权"]) {
+      expect(text).not.toContain(bad);
+    }
+  });
+});
+
+describe("「开着但没生效」提示（2026-10-13 定稿）", () => {
+  it("显示条件：开关开启 + 后端说没生效 + 遥控器链路正常，三者缺一不可", () => {
+    const base = { switchState: "on", health: "inactive", linkReady: true } as const;
+    expect(shouldShowCaptureInactive(base)).toBe(true);
+    // 开关状态不对：关着 / 正在操作 / 本机不可用都不显示。
+    for (const switchState of ["off", "busy", "unavailable"] as const) {
+      expect(shouldShowCaptureInactive({ ...base, switchState })).toBe(false);
+    }
+    // 后端说还在启动（助手正在连）或已经生效：都不显示。
+    for (const health of ["off", "starting", "active"] as const) {
+      expect(shouldShowCaptureInactive({ ...base, health })).toBe(false);
+    }
+    // 遥控器链路本身断掉：由连接区既有文案说明，这里不重复、不把用户往遥控器侧引。
+    expect(shouldShowCaptureInactive({ ...base, linkReady: false })).toBe(false);
+  });
+
+  it("提示句说清「现状 + 下一步」，且不得出现内部术语或遥控器指令", () => {
+    const text = captureInactiveText("全按键支持");
+    expect(text).toBe(
+      "全按键支持还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
+    );
+    // 名称随入口变化（连接页写“支持更多输入工具”）。
+    expect(captureInactiveText("“支持更多输入工具”")).toBe(
+      "“支持更多输入工具”还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
+    );
+    for (const bad of [
+      "UAC",
+      "计划任务",
+      "退出码",
+      "helper",
+      "Gadget",
+      "令牌",
+      "提权",
+      "按一下遥控器", // 2026-10-13 现场证伪：这条线断在 PC 内部，按遥控器无效。
+      "唤醒",
+    ]) {
       expect(text).not.toContain(bad);
     }
   });

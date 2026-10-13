@@ -7,7 +7,9 @@ import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
 import {
   captureFailureText,
+  captureInactiveText,
   captureSwitchState as captureSwitchStateFn,
+  shouldShowCaptureInactive,
 } from "../lib/capture-switch";
 import {
   actionSummary,
@@ -62,6 +64,7 @@ import {
   type PresetAppInfo,
   type RawInputPhase,
   type Rc003BridgePhase,
+  type Rc003CaptureHealth,
   type Rc003TaskStatus,
   type RemoteButton,
   type RemoteModel,
@@ -1376,6 +1379,11 @@ const rc003CaptureEnabled = ref<boolean | null>(rc003UiCache.enabled);
 const rc003BridgePhase = ref<Rc003BridgePhase | null>(rc003UiCache.phase);
 /** 桥接段失败（开关已开、助手没起来）：作为「开启失败」进开关下方文案。 */
 const rc003BridgeFailed = ref(false);
+/**
+ * 「全按键支持」实际生效状态（2026-10-13）：由 Rust 的常驻对账发布，本页只读。
+ * 开关开着 ≠ 生效——`inactive` 才显示提示（见 captureInactiveNote）。
+ */
+const rc003CaptureHealth = ref<Rc003CaptureHealth>("off");
 /** 上一次开关操作失败的**原文**：只进日志与映射，界面显示映射后的用户语言。 */
 const rc003CaptureFailureRaw = ref<string | null>(null);
 
@@ -1408,6 +1416,20 @@ const captureFailure = computed(() => {
   if (rc003BridgeFailed.value) return CAPTURE_BRIDGE_FAILED_TEXT;
   return captureFailureText(rc003CaptureFailureRaw.value, CAPTURE_FAILURE_NAME);
 });
+/**
+ * 「开着但没生效」的提示（2026-10-13 定稿）：后端说 `inactive` 才出现，且**只在
+ * 遥控器链路正常时**出现——链路本身断掉时由头部连接状态与连接页既有文案说明，
+ * 这里不重复、也不把用户往遥控器侧引（这条链断在 PC 内部，现场已证伪按遥控器有用）。
+ */
+const captureInactiveNote = computed(() =>
+  shouldShowCaptureInactive({
+    switchState: captureSwitchState.value,
+    health: rc003CaptureHealth.value,
+    linkReady: connectionReady.value,
+  })
+    ? captureInactiveText(CAPTURE_FAILURE_NAME)
+    : null,
+);
 /** 三键卡片/格子的置灰提示：本机开不了时不说「开启后恢复正常」。 */
 const triKeyGatedTitle = computed(() =>
   captureUnsupported.value ? TRI_KEY_UNSUPPORTED_TITLE : TRI_KEY_GATED_TITLE,
@@ -1486,6 +1508,7 @@ const reconcileRc003Task = async (): Promise<void> => {
     }
     if (bridge) {
       rc003BridgePhase.value = bridge.phase;
+      rc003CaptureHealth.value = bridge.captureHealth;
     }
   } catch {
     // 对账失败：状态保持当前值（缓存或 null），等下一秒轮询重试
@@ -1788,11 +1811,14 @@ onUnmounted(() => {
             {{ CAPTURE_UNSUPPORTED_NOTE }}
           </span>
         </div>
-        <!-- 标题下方一行：平时是页面副标题；只有开关操作失败/启动失败时改说原因
-             （2026-10-10 定稿：其余情况不显示任何状态文案）。位置不动、不插行，
-             沿用 2026-09-28 的防抖动约定。 -->
-        <p class="page-subtitle" :class="{ 'is-failure': captureFailure }">
-          {{ captureFailure ?? "点击按键进行自定义配置" }}
+        <!-- 标题下方一行：平时是页面副标题；只有开关操作失败/启动失败、或
+             「开着却没生效」时改说原因（2026-10-10 定稿 + 2026-10-13 定稿：
+             其余情况不显示任何状态文案）。位置不动、不插行，沿用 2026-09-28 的防抖动约定。 -->
+        <p
+          class="page-subtitle"
+          :class="{ 'is-failure': captureFailure || captureInactiveNote }"
+        >
+          {{ captureFailure ?? captureInactiveNote ?? "点击按键进行自定义配置" }}
         </p>
       </div>
       <div class="mapping-header-controls">

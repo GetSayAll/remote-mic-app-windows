@@ -117,6 +117,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       targetGeneration: 0,
       targetUsages: [],
       ownedUsages: [],
+      captureHealth: "off",
     })),
     // 遥控器信息卡片上的「重新连接」：扫描已配对设备 + 连接（默认空列表，用例内按需覆盖）。
     scanPairedRemotes: vi.fn(async () => []),
@@ -308,7 +309,10 @@ beforeEach(() => {
 });
 
 /** 构造一份指定相位的桥接快照（其余计数字段对 UI 无关，取零值）。 */
-function bridgeSnapshot(phase: Rc003BridgeSnapshot["phase"]): Rc003BridgeSnapshot {
+function bridgeSnapshot(
+  phase: Rc003BridgeSnapshot["phase"],
+  captureHealth: Rc003BridgeSnapshot["captureHealth"] = "off",
+): Rc003BridgeSnapshot {
   return {
     phase,
     port: 0,
@@ -325,6 +329,7 @@ function bridgeSnapshot(phase: Rc003BridgeSnapshot["phase"]): Rc003BridgeSnapsho
     targetGeneration: 0,
     targetUsages: [],
     ownedUsages: [],
+    captureHealth,
   };
 }
 
@@ -1575,6 +1580,47 @@ describe("buttons mapping page", () => {
     expect(captureRow(page)!.find(".toggle-spinner").exists()).toBe(false);
     expect(page.text()).not.toContain("未开启");
     expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+  });
+
+  it("「开着但没生效」给一句用户语言（2026-10-13）：只在后端说没生效时出现，生效后收回", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    // inactive：过了宽限仍没有所有权（宿主重建、agent 消失就是这个形状）。
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected", "inactive"));
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        expect(page.find(".page-subtitle").text()).toContain("还没有生效");
+      },
+      { timeout: 3000 },
+    );
+    // 副标题那一位换成提示句（不插行），用告警色。
+    expect(page.find(".page-subtitle").text()).toBe(
+      "全按键支持还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
+    );
+    expect(page.find(".page-subtitle").classes()).toContain("is-failure");
+    // 提示句里不得出现内部术语，也不得把用户往遥控器侧引（现场已证伪）。
+    expect(page.find(".page-subtitle").text()).not.toContain("UAC");
+    expect(page.find(".page-subtitle").text()).not.toContain("遥控器");
+
+    // starting（助手正在连）与 active（真的生效）：都不显示，回到副标题。
+    for (const health of ["starting", "active"] as const) {
+      vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(
+        bridgeSnapshot("connected", health),
+      );
+      await vi.waitFor(
+        () => {
+          expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+        },
+        { timeout: 3000 },
+      );
+      expect(page.find(".page-subtitle").classes()).not.toContain("is-failure");
+    }
   });
 
   it("状态未就绪时渲染同尺寸占位符、不渲染开关本体（与「启动行为」同法的无动画挂载，2026-09-28）", async () => {

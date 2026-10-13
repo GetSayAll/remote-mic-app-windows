@@ -156,7 +156,19 @@ export interface Rc003BridgeSnapshot {
   targetGeneration: number;
   targetUsages: number[];
   ownedUsages: number[];
+  /**
+   * 「全按键支持」的**实际生效状态**（2026-10-13）：开关开着 ≠ 生效。
+   *
+   * Rust 的常驻对账线程发布（判据只此一处，界面只读，见 `CaptureHealth`）：
+   * `off` 开关关着 / `starting` 助手没连上或还在宽限期内（不显示文案）/
+   * `active` agent 已接管 / `inactive` 过了宽限仍没有所有权——此时界面显示
+   * 一句「还没有生效…」的用户语言（文案见 `captureInactiveText`）。
+   */
+  captureHealth: Rc003CaptureHealth;
 }
+
+/** `captureHealth` 的取值（与 Rust `CaptureHealth::as_str` 逐字对应）。 */
+export type Rc003CaptureHealth = "off" | "starting" | "active" | "inactive";
 
 /** `stopped` = 该平台没有这个机制（非 Windows），或桥接未启用。 */
 export type Rc003BridgePhase = "stopped" | "listening" | "connected" | "failed";
@@ -912,6 +924,7 @@ const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   targetGeneration: 0,
   targetUsages: [],
   ownedUsages: [],
+  captureHealth: "off",
 };
 
 export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {
