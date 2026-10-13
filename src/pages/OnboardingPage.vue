@@ -734,6 +734,37 @@ async function ensureRemoteListAndMaybeConnect(mode: "entry" | "auto"): Promise<
   }
 }
 
+/**
+ * 已连接那一支的稳定身份：运行时快照的**设备令牌优先**（同一支换 HID 实例令牌不变），
+ * 老快照没有令牌时退回"本会话连接成功那一台的 id"。
+ */
+const connectedRemoteIdentity = computed(
+  () => props.runtime?.platform.connection.remoteToken || connectedDeviceId.value || "",
+);
+
+/**
+ * 换连另一支遥控器 ⇒ 之前那支收到的按键不算数（2026-10-13 现场：连甲支、按甲支通过后，
+ * 换连乙支仍显示「已收到遥控器按键」，没重新按一下就能继续）。
+ *
+ * 只在"从一支具体遥控器换成另一支具体遥控器"时清：
+ * - 从未连接 → 首次连接不清（保留"按键已收到。还差一步：连接"的既有流程）；
+ * - 切换过程中快照瞬时清空（先断开上一支）不算换机，也不清。
+ */
+let lastConnectedRemoteIdentity = connectedRemoteIdentity.value;
+watch(connectedRemoteIdentity, (identity) => {
+  // 瞬时清空（切换时先断开上一支）不更新记录，否则"清空 → 新一支"会被当成首次连接。
+  if (!identity) return;
+  const previous = lastConnectedRemoteIdentity;
+  lastConnectedRemoteIdentity = identity;
+  if (!previous || identity === previous) return;
+  if (!remoteButtonObserved.value) return;
+  remoteButtonObserved.value = false;
+  voiceKeyMistake.value = false;
+  otherRemoteActivity.value = false;
+  lastStaleRemoteEventCount = props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0;
+  reportStepAction("remote", "button_observation_reset", "unknown", { detail: "remote_switched" });
+});
+
 // 触发点一：进入②步（不论连接状态，先把列表带出来）。
 watch(
   () => step.value,

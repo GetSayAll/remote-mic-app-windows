@@ -570,6 +570,63 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
+  it("换连另一支遥控器后要重新按一下（之前那支收到的按键不算数）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器", model: "rc003", isSupportedCandidate: true, token: "aaaa1111" },
+      { id: "dev-2", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true, token: "bbbb2222" },
+    ]);
+    // 启动恢复：已经连着甲支（2 Pro），令牌来自运行时快照。
+    const connectedA = runtimeWith({
+      connectionPhase: "ready",
+      bleVoiceReady: true,
+      rawInputPhase: "ready",
+      remoteModel: "rc003",
+    });
+    connectedA.platform.connection.remoteToken = "aaaa1111";
+    const wrapper = await mountWizard(connectedA);
+    await flushPromises();
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
+
+    // 现场（2026-10-13）：按甲支通过后换连乙支，必须重新接收按键。切换期间快照会先清掉
+    // 旧令牌（断开上一支）、再带上新令牌——瞬时清空不算换机，不重置。
+    const between = runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, rawInputPhase: "ready" });
+    await wrapper.setProps({ runtime: between });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+
+    const connectedB = runtimeWith({
+      connectionPhase: "ready",
+      bleVoiceReady: true,
+      rawInputPhase: "ready",
+      remoteModel: "rc001",
+    });
+    connectedB.platform.connection.remoteToken = "bbbb2222";
+    await wrapper.setProps({ runtime: connectedB });
+    await flushPromises();
+
+    // 回到"等待控制按键"，门禁重新阻断，日志留一条。
+    expect(wrapper.text()).toContain("等待控制按键");
+    expect(wrapper.text()).toContain("按一下遥控器上的普通按键");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("false");
+    expect(
+      onboardingEvents("action").some(
+        (p) => p.step === "remote" && p.reason === "button_observation_reset",
+      ),
+    ).toBe(true);
+
+    // 重新按一下 → 恢复通过。
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
+    wrapper.unmount();
+  });
+
   it("按到另一支遥控器时给出解释，而不是让界面看起来没反应", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     mocks.scanPairedRemotes.mockResolvedValue([
