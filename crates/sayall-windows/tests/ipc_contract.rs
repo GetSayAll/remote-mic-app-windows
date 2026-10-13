@@ -25,6 +25,7 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 battery_level: Some(99),
                 remote_name: Some("Xiaomi Bluetooth Remote 2".into()),
                 remote_model: RemoteModel::Rc001,
+                remote_token: Some("0a1b2c3d".into()),
                 capabilities: Some(AtvvCapabilities {
                     version: 256,
                     codecs: 1,
@@ -81,18 +82,21 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 name: "Xiaomi Bluetooth Remote 2".into(),
                 model: RemoteModel::Rc001,
                 is_supported_candidate: true,
+                token: "11112222".into(),
             },
             PairedRemote {
                 id: "fixture-rc003".into(),
                 name: "Xiaomi Bluetooth Remote 2 Pro".into(),
                 model: RemoteModel::Rc003,
                 is_supported_candidate: true,
+                token: "33334444".into(),
             },
             PairedRemote {
                 id: "fixture-unknown".into(),
                 name: "Approved Fixture Remote".into(),
                 model: RemoteModel::Unknown,
                 is_supported_candidate: true,
+                token: "55556666".into(),
             },
         ],
     });

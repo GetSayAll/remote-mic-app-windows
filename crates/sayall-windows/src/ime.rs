@@ -42,8 +42,8 @@ use sayall_core::settings::VoiceInputTool;
 use windows::core::GUID;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
-    ITfInputProcessorProfileMgr, GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
-    TF_IPPMF_FORSESSION, TF_PROFILETYPE_INPUTPROCESSOR,
+    ITfInputProcessorProfileMgr, ITfInputProcessorProfiles, GUID_TFCAT_TIP_KEYBOARD,
+    TF_INPUTPROCESSORPROFILE, TF_IPPMF_FORSESSION, TF_PROFILETYPE_INPUTPROCESSOR,
 };
 
 /// TF_InputProcessorProfiles（msctf.dll，公开 COM 类）。
@@ -302,6 +302,14 @@ pub fn ensure_session_ime(
     tool: VoiceInputTool,
     scope: ImeSwitchScope,
 ) -> Result<ImeActivation, String> {
+    ensure_session_ime_inner(tool, scope, false)
+}
+
+fn ensure_session_ime_inner(
+    tool: VoiceInputTool,
+    scope: ImeSwitchScope,
+    allow_self_foreground: bool,
+) -> Result<ImeActivation, String> {
     let started = std::time::Instant::now();
     let Some(target) = ime_target_for(tool) else {
         // 功能点日志：Vokie / 其他工具明确"不切输入法"也是决策，要能从日志看出
@@ -315,9 +323,9 @@ pub fn ensure_session_ime(
     // 前台是自身 WebView 时跳过激活：TSF 会话切换实证会触发 WebView2
     // 整页重载（Bugs/2026-09-12），且此时注入的和弦也落在自己窗口上，
     // 激活没有任何收益。返回 Ok——这不是错误，不应置 UI last_error。
-    if foreground_is_self() {
+    if !allow_self_foreground && foreground_is_self() {
         crate::ble::gatt_note(format!(
-            "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true error_domain=none error_code=foreground_is_self retryable=false",
+            "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true self_foreground=true error_domain=none error_code=foreground_is_self retryable=false",
             target.label,
         ));
         return Ok(ImeActivation::SkippedSelfForeground);
@@ -898,6 +906,307 @@ fn probe_active_is_target(target: ImeProfile) -> Option<bool> {
     }
 }
 
+// ─── 输入法状态只读查询（试一下页 / 诊断信息，2026-10-13）──────────────────
+//
+// 现场需求（2026-10-13 Andy）：向导「试一下」页里，用户点输入框、按语音键时都要
+// 确保输入法已切到用户选的工具；做不到时要能给解释；诊断信息里要能看到「当前
+// 选中的输入法」与「系统里的输入法」，以便判断"语音没出字是不是因为没切输入法"。
+//
+// 口径：
+// - 全部**只读**、全部在临时 STA 线程上执行（COM 套间陷阱同模块头：MTA 上读到的
+//   不是真实会话状态），线程模型与有界等待复用 `ensure_session_ime` 那一套；
+// - 失败一律降级（Err / `detected=false`），绝不 panic、绝不阻断调用方；
+// - 显示名来自 TSF `GetLanguageProfileDescription`（与激活用的是同一份配置）。
+
+/// 已安装输入法显示名的展示上限（超出丢弃：诊断文本不是枚举清单，本机实测远低于该值）。
+pub const MAX_INSTALLED_IME_NAMES: usize = 16;
+
+/// 枚举输入法配置时的扫描总数上限：正常机器远低于此值；给它只是为了
+/// "枚举器不推进"时不至于死循环。
+const MAX_SCANNED_IME_PROFILES: usize = 256;
+
+/// 一次只读查询读到的东西（STA 线程内构造，跨线程返回）。#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ImeProbe {
+    /// 成功读到当前会话的活动输入法配置。
+    active_detected: bool,
+    /// 活动输入法显示名（读不到为 None）。
+    active_name: Option<String>,
+    /// 工具对应输入法的显示名（未选工具 / 不需要切 / 读不到都是 None）。
+    expected_name: Option<String>,
+    /// 系统里可用的输入法显示名（已去重、排序、截断）。
+    installed: Vec<String>,
+}
+
+/// 输入法状态（IPC 与诊断信息共用）。
+///
+/// 命名/语义约定（前端据此决定提不提示）：
+/// - `detected=false`：本次查询不可用（线程/COM/读取失败），其余字段都不可信；
+/// - `matches_expected=None`：判定不出来（未选工具、工具不需要切输入法、
+///   名字读不到）——**界面不要据此提示**（fail-open，避免误报"输入法没切"）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImeStatus {
+    pub detected: bool,
+    pub active: Option<String>,
+    pub installed: Vec<String>,
+    pub expected: Option<String>,
+    pub matches_expected: Option<bool>,
+}
+
+impl ImeStatus {
+    /// 查询不可用（线程创建失败 / 超时 / COM 初始化失败）：全部按未检测。
+    pub fn unavailable() -> Self {
+        Self {
+            detected: false,
+            active: None,
+            installed: Vec::new(),
+            expected: None,
+            matches_expected: None,
+        }
+    }
+}
+
+/// `ime_status` 结构化日志行（纯函数：格式由单测钉住，命令层只负责 `gatt_note`）。
+///
+/// 只记状态、布尔与计数（工具 token 与耗时）；输入法**显示名**留给诊断信息
+/// （`DiagnosticReport.ime`），日志行不含个人路径/设备身份。
+/// `terminal_result` 表达的是"这次查询本身能不能用"（`detected`），不是"输入法切成了没"
+/// ——后者看 `matches_expected`（以及切换路径的 `ime_activation` 日志）。
+pub fn ime_status_log_line(
+    action: &str,
+    tool: Option<VoiceInputTool>,
+    status: &ImeStatus,
+    elapsed_ms: u128,
+) -> String {
+    format!(
+        "ime_status action={action} phase=completed terminal_result={} tool={} detected={} matches_expected={} installed_count={} elapsed_ms={elapsed_ms}",
+        if status.detected { "passed" } else { "failed" },
+        tool_label(tool),
+        status.detected,
+        status
+            .matches_expected
+            .map_or("unknown", |matches| if matches { "true" } else { "false" }),
+        status.installed.len(),
+    )
+}
+
+/// 输入法显示名归一化（只用于**比较**，不改对外展示的名字）：去首尾空白、
+/// 折叠内部连续空白、Unicode 小写（"WETYPE" 与 "wetype" 视为同名）。
+pub(crate) fn normalize_ime_name(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// 活动输入法名 vs 目标输入法名：是否同一个（判定不出来返回 None）。
+///
+/// 两个名字都来自同一次 TSF `GetLanguageProfileDescription`，所以在本应用能拿到的
+/// 信息里"名字相同"与"配置相同"等价；空名一律按判定不出来处理（fail-open）。
+fn judge_matches(active: Option<&str>, expected: Option<&str>) -> Option<bool> {
+    let (Some(active), Some(expected)) = (active, expected) else {
+        return None;
+    };
+    let active = normalize_ime_name(active);
+    let expected = normalize_ime_name(expected);
+    if active.is_empty() || expected.is_empty() {
+        return None;
+    }
+    Some(active == expected)
+}
+
+/// 已安装输入法名规范化（纯函数）：折叠空白、丢空项、大小写无关去重、
+/// 按（归一化名，原名）稳定排序、截断到 `MAX_INSTALLED_IME_NAMES`。
+///
+/// 系统枚举出重复与空描述是常态（同一 CLSID 的多语言配置、描述为空的注册项），
+/// 而诊断文本需要的是稳定输出：同一台机器重复采集必须得到同一个列表。
+pub(crate) fn normalize_installed_ime_names(
+    names: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut cleaned: Vec<String> = names
+        .into_iter()
+        .map(|name| name.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|name| !name.is_empty())
+        .collect();
+    cleaned.sort_by_key(|name| (name.to_lowercase(), name.clone()));
+    cleaned.dedup_by(|left, right| left.to_lowercase() == right.to_lowercase());
+    cleaned.truncate(MAX_INSTALLED_IME_NAMES);
+    cleaned
+}
+
+/// 在临时 STA 线程上执行一次只读查询：创建 → 调用 → 退出全在同一线程内完成
+/// （无跨套间封送、无需消息泵），经 channel 有界等待（`ACTIVATION_JOIN_TIMEOUT`）。
+/// 超时不 join 线程：查询迟到不影响调用方，线程自然结束。
+fn run_sta_ime_query<T, F>(thread_name: &str, query: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(thread_name.to_owned())
+        .spawn(move || {
+            let _ = sender.send(query());
+        })
+        .map_err(|error| format!("创建输入法查询线程失败：{error}"))?;
+    match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err("输入法查询超时（500ms）".to_owned()),
+    }
+}
+
+/// 当前会话活动输入法的显示名。
+///
+/// 读不到（TSF 不可用 / 没有活动配置 / 描述为空）返回 Err——调用方按"未知"处理，
+/// 不阻断任何流程。
+pub fn describe_active_ime_name() -> Result<String, String> {
+    let probe = run_sta_ime_query("sayall-ime-name", || sta_probe_ime(None))?;
+    probe
+        .active_name
+        .ok_or_else(|| "读不到当前活动输入法的显示名".to_owned())
+}
+
+/// 系统里可用的输入法显示名（zh-CN 键盘配置；去重、稳定排序、最多 16 个）。
+pub fn list_installed_ime_names() -> Result<Vec<String>, String> {
+    run_sta_ime_query("sayall-ime-list", || sta_probe_ime(None)).map(|probe| probe.installed)
+}
+
+/// 输入法状态：当前会话活动输入法 + 系统可用输入法 + 与所选工具的匹配情况。
+///
+/// 纯只读，不改任何输入法状态；查询不可用返回 `ImeStatus::unavailable()`。
+pub fn ime_status_for(tool: Option<VoiceInputTool>) -> ImeStatus {
+    let target = tool.and_then(ime_target_for);
+    match run_sta_ime_query("sayall-ime-status", move || sta_probe_ime(target)) {
+        Ok(probe) => ImeStatus {
+            detected: probe.active_detected,
+            active: probe.active_name.clone(),
+            installed: probe.installed,
+            expected: probe.expected_name.clone(),
+            matches_expected: judge_matches(
+                probe.active_name.as_deref(),
+                probe.expected_name.as_deref(),
+            ),
+        },
+        Err(_) => ImeStatus::unavailable(),
+    }
+}
+
+/// STA 线程体：读活动输入法（是否存在 + 显示名）、目标输入法名、已安装列表。
+fn sta_probe_ime(expect_target: Option<ImeProfile>) -> Result<ImeProbe, String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // S_OK(0) 或 S_FALSE(1)（本线程已初始化）都算成功。
+        if hr.is_err() && hr != windows::core::HRESULT(1) {
+            return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
+        }
+        let result = (|| {
+            let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| format!("创建 TSF 配置管理器失败：{error}"))?;
+            // 显示名要 `ITfInputProcessorProfiles`（同一个 coclass，Win8+ 上
+            // `TF_InputProcessorProfiles` 同时实现两个接口）。
+            let profiles: ITfInputProcessorProfiles = CoCreateInstance(
+                &CLSID_TF_INPUT_PROCESSOR_PROFILES,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| format!("创建 TSF 配置列表接口失败：{error}"))?;
+            let mut profile = TF_INPUTPROCESSORPROFILE::default();
+            let active_detected = manager
+                .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut profile)
+                .is_ok()
+                && profile.clsid != GUID::from_u128(0);
+            let active_name = if active_detected {
+                profile_description(
+                    &profiles,
+                    profile.langid,
+                    &profile.clsid,
+                    &profile.guidProfile,
+                )
+            } else {
+                None
+            };
+            let expected_name = expect_target.and_then(|target| {
+                profile_description(&profiles, LANGID_ZH_CN, &target.clsid, &target.guid_profile)
+            });
+            let installed = enumerate_installed_ime_names(&manager, &profiles);
+            Ok(ImeProbe {
+                active_detected,
+                active_name,
+                expected_name,
+                installed,
+            })
+        })();
+        CoUninitialize();
+        result
+    }
+}
+
+/// 单个输入法配置的显示名（读不到或为空返回 None）。
+unsafe fn profile_description(
+    profiles: &ITfInputProcessorProfiles,
+    langid: u16,
+    clsid: &GUID,
+    guid_profile: &GUID,
+) -> Option<String> {
+    let description = profiles
+        .GetLanguageProfileDescription(clsid, langid, guid_profile)
+        .ok()?;
+    let name = description.to_string();
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// 枚举 zh-CN 的键盘输入处理器显示名（有界扫描；失败降级为空列表）。
+unsafe fn enumerate_installed_ime_names(
+    manager: &ITfInputProcessorProfileMgr,
+    profiles: &ITfInputProcessorProfiles,
+) -> Vec<String> {
+    let Ok(enumerator) = manager.EnumProfiles(LANGID_ZH_CN) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    let mut batch = [TF_INPUTPROCESSORPROFILE::default(); 16];
+    let mut fetched: u32 = 0;
+    let mut scanned: usize = 0;
+    loop {
+        // `Next` 每次都重写 `fetched`；出错时短路，不看旧值。
+        if enumerator.Next(&mut batch, &mut fetched).is_err() || fetched == 0 {
+            break;
+        }
+        for profile in &batch[..fetched as usize] {
+            scanned += 1;
+            // 键盘布局（非输入处理器）不进列表：诊断要的是"输入法"。
+            if profile.dwProfileType != TF_PROFILETYPE_INPUTPROCESSOR {
+                continue;
+            }
+            if let Some(name) = profile_description(
+                profiles,
+                profile.langid,
+                &profile.clsid,
+                &profile.guidProfile,
+            ) {
+                names.push(name);
+            }
+        }
+        if (fetched as usize) < batch.len() || scanned >= MAX_SCANNED_IME_PROFILES {
+            break;
+        }
+    }
+    normalize_installed_ime_names(names)
+}
+
 // ─── 录入期"输入法让位"（路线①，2026-09-27）───────────────────────────────
 //
 // 背景：LL 键盘钩子链为 FIFO（最早安装最先调用，见
@@ -1114,8 +1423,135 @@ mod ime_target_tests {
 
     /// 切换场景标签稳定（日志消费方按它归因；改动会引起日志口径变化）。
     #[test]
+    #[test]
     fn ime_switch_scope_labels_are_stable() {
         assert_eq!(super::ImeSwitchScope::VoicePress.label(), "voice_press");
         assert_eq!(super::ImeSwitchScope::ToolSelect.label(), "tool_select");
+    }
+}
+
+/// 输入法状态的**纯逻辑**测试（2026-10-13）。
+///
+/// 只测不碰 COM 的部分：真机 TSF 读取（`describe_active_ime_name` /
+/// `list_installed_ime_names` / `ime_status_for` 的 STA 分支）在 CI 里无法断言
+/// 结果（不同机器输入法不同，runner 上也没有交互会话），故意不写用例——
+/// 需要真机复核的部分见交付说明。本模块整体位于 `#[cfg(windows)]` 的 `ime`
+/// 模块内，因此在非 Windows 上不会编译。
+#[cfg(test)]
+mod ime_status_tests {
+    use super::{
+        ime_status_log_line, judge_matches, normalize_ime_name, normalize_installed_ime_names,
+        ImeStatus, MAX_INSTALLED_IME_NAMES,
+    };
+    use sayall_core::settings::VoiceInputTool;
+
+    #[test]
+    fn installed_names_drop_empty_dedupe_case_insensitively_and_sort() {
+        let names = vec![
+            "  WeType  ".to_owned(),
+            "".to_owned(),
+            "   ".to_owned(),
+            "wetype".to_owned(),
+            "  Microsoft   Pinyin ".to_owned(),
+            "Microsoft Pinyin".to_owned(),
+            "DouBao 输入法".to_owned(),
+        ];
+        assert_eq!(
+            normalize_installed_ime_names(names),
+            vec![
+                "DouBao 输入法".to_owned(),
+                "Microsoft Pinyin".to_owned(),
+                "WeType".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_names_are_truncated_after_sorting() {
+        let names: Vec<String> = (0..MAX_INSTALLED_IME_NAMES + 5)
+            .map(|index| format!("ime-{index:02}"))
+            .collect();
+        let normalized = normalize_installed_ime_names(names);
+        assert_eq!(normalized.len(), MAX_INSTALLED_IME_NAMES);
+        // 截断的是排序后的尾部（保留前 MAX 个），不是随机丢弃。
+        assert_eq!(normalized[0], "ime-00");
+        assert_eq!(normalized[MAX_INSTALLED_IME_NAMES - 1], "ime-15");
+    }
+
+    #[test]
+    fn matches_expected_ignores_case_and_surrounding_whitespace() {
+        assert_eq!(judge_matches(Some("WeType"), Some("wetype")), Some(true));
+        assert_eq!(
+            judge_matches(Some(" 微信输入法"), Some("微信输入法 ")),
+            Some(true)
+        );
+        assert_eq!(
+            judge_matches(Some("豆包输入法"), Some("微信输入法")),
+            Some(false)
+        );
+        // 判定不出来一律 None：界面按 fail-open 不提示（防误报"输入法没切"）。
+        assert_eq!(judge_matches(None, Some("wetype")), None);
+        assert_eq!(judge_matches(Some("wetype"), None), None);
+        assert_eq!(judge_matches(Some(""), Some("wetype")), None);
+        assert_eq!(judge_matches(Some("wetype"), Some("   ")), None);
+        // 内部连续空白折叠成单个空格后再比较。
+        assert_eq!(
+            judge_matches(Some("Microsoft   Pinyin"), Some("Microsoft Pinyin")),
+            Some(true)
+        );
+        assert_eq!(normalize_ime_name("  We Type  "), "we type");
+    }
+
+    /// 日志行格式稳定（消费方按它归因；改动会引起日志口径变化）——真机排障时
+    /// 一次日志拉取要能直接回答"查询可用吗、切对了吗、系统里有几个输入法"。
+    #[test]
+    fn ime_status_log_line_is_stable_and_never_carries_names() {
+        let status = ImeStatus {
+            detected: true,
+            active: Some("微信输入法".to_owned()),
+            installed: vec![
+                "豆包输入法".to_owned(),
+                "微信输入法".to_owned(),
+                "微软拼音".to_owned(),
+            ],
+            expected: Some("微信输入法".to_owned()),
+            matches_expected: Some(false),
+        };
+        let line = ime_status_log_line("queried", Some(VoiceInputTool::Wechat), &status, 7);
+        assert_eq!(
+            line,
+            "ime_status action=queried phase=completed terminal_result=passed tool=wechat detected=true matches_expected=false installed_count=3 elapsed_ms=7"
+        );
+        // 输入法显示名只进诊断信息，不进日志行。
+        assert!(!line.contains("微信输入法"));
+        assert_eq!(
+            ime_status_log_line("ensured", None, &ImeStatus::unavailable(), 0),
+            "ime_status action=ensured phase=completed terminal_result=failed tool=none detected=false matches_expected=unknown installed_count=0 elapsed_ms=0"
+        );
+    }
+
+    /// IPC 契约：字段名 camelCase、`None` 序列化成 `null`（前端按 null 判"判定不出来"）。
+    #[test]
+    fn ime_status_serializes_with_camel_case_keys() {
+        let status = ImeStatus {
+            detected: true,
+            active: Some("微信输入法".to_owned()),
+            installed: vec!["豆包输入法".to_owned(), "微信输入法".to_owned()],
+            expected: Some("微信输入法".to_owned()),
+            matches_expected: Some(false),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["detected"], serde_json::json!(true));
+        assert_eq!(json["matchesExpected"], serde_json::json!(false));
+        assert_eq!(json["active"], serde_json::json!("微信输入法"));
+        assert_eq!(json["expected"], serde_json::json!("微信输入法"));
+        assert_eq!(json["installed"][0], serde_json::json!("豆包输入法"));
+
+        let unavailable = serde_json::to_value(ImeStatus::unavailable()).unwrap();
+        assert_eq!(unavailable["detected"], serde_json::json!(false));
+        assert!(unavailable["active"].is_null());
+        assert!(unavailable["expected"].is_null());
+        assert!(unavailable["matchesExpected"].is_null());
+        assert_eq!(unavailable["installed"], serde_json::json!([]));
     }
 }

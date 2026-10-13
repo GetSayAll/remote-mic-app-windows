@@ -642,6 +642,9 @@ pub struct Rc003Bridge {
     targets: Arc<Mutex<CaptureTargets>>,
     /// 语音键报告层合成目标（`None` = 关闭）。来源 = app 的「按住说话快捷键」。
     voice_synth_to: Arc<Mutex<Option<u16>>>,
+    /// 「立即重选宿主」请求标志（2026-10-13 现场）：置位后由连接线程发一行 `R`。
+    /// 用标志而不是直接写 socket：socket 归连接线程所有，跨线程写会与它的重发/握手交错。
+    retarget_requested: Arc<AtomicBool>,
     sender: Sender<EngineMessage>,
     worker: Mutex<Option<JoinHandle<()>>>,
     file: Option<PathBuf>,
@@ -665,6 +668,7 @@ impl Rc003Bridge {
         let current: Arc<Mutex<Option<CurrentConn>>> = Arc::new(Mutex::new(None));
         let targets = Arc::new(Mutex::new(CaptureTargets::default()));
         let voice_synth_to = Arc::new(Mutex::new(None::<u16>));
+        let retarget_requested = Arc::new(AtomicBool::new(false));
         let next_id = Arc::new(AtomicU64::new(1));
 
         let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
@@ -680,6 +684,7 @@ impl Rc003Bridge {
                     current,
                     targets,
                     voice_synth_to,
+                    retarget_requested,
                     sender,
                     worker: Mutex::new(None),
                     file: None,
@@ -739,6 +744,7 @@ impl Rc003Bridge {
             let current = Arc::clone(&current);
             let targets = Arc::clone(&targets);
             let voice_synth_to = Arc::clone(&voice_synth_to);
+            let retarget_requested = Arc::clone(&retarget_requested);
             let next_id = Arc::clone(&next_id);
             std::thread::Builder::new()
                 .name("sayall-rc003-bridge".to_owned())
@@ -750,6 +756,7 @@ impl Rc003Bridge {
                         current,
                         targets,
                         voice_synth_to,
+                        retarget_requested,
                         next_id,
                         pipe_name,
                         &token_for_worker,
@@ -765,6 +772,7 @@ impl Rc003Bridge {
             current,
             targets,
             voice_synth_to,
+            retarget_requested,
             sender,
             worker: Mutex::new(worker),
             file,
@@ -876,6 +884,16 @@ impl Rc003Bridge {
         ));
     }
 
+    /// 请求助手**立即**重选宿主（发一行 `R`，无载荷；2026-10-13 现场）。
+    ///
+    /// 主程序在发布新目标（连接/恢复换机）的同一刻调用：助手据此立刻复查目标地址，
+    /// 把"换机后几秒内按下可能赶不上"的窗口压到毫秒级。幂等——重复请求只置一次位。
+    pub fn request_retarget(&self) {
+        // 每次都记一条：这条日志是"请求确实发出去了"的唯一凭据（换机链路排查用）。
+        self.retarget_requested.store(true, Ordering::Relaxed);
+        note("rc003_bridge event=retarget_requested".to_owned());
+    }
+
     /// 报告层合成门禁判据：已收到与当前目标一致的 agent 回执（`A` 行，经
     /// 助手转发；2026-10-03 加固）。断连、配置关闭或回执未到时为 `false`，
     /// BLE 层据此恢复 SendInput 注入路径——失败保持可见，不再静默吞掉。
@@ -980,6 +998,7 @@ fn accept_loop(
     current: Arc<Mutex<Option<CurrentConn>>>,
     targets: Arc<Mutex<CaptureTargets>>,
     voice_synth_to: Arc<Mutex<Option<u16>>>,
+    retarget_requested: Arc<AtomicBool>,
     next_id: Arc<AtomicU64>,
     pipe_name: Option<String>,
     token: &str,
@@ -1016,6 +1035,7 @@ fn accept_loop(
                     &current,
                     &targets,
                     &voice_synth_to,
+                    &retarget_requested,
                     &next_id,
                     token,
                     &sender,
@@ -1040,6 +1060,7 @@ fn accept_loop(
                         &current,
                         &targets,
                         &voice_synth_to,
+                        &retarget_requested,
                         &next_id,
                         token,
                         &sender,
@@ -1072,6 +1093,7 @@ fn adopt_connection(
     current: &Arc<Mutex<Option<CurrentConn>>>,
     targets: &Arc<Mutex<CaptureTargets>>,
     voice_synth_to: &Arc<Mutex<Option<u16>>>,
+    retarget_requested: &Arc<AtomicBool>,
     next_id: &Arc<AtomicU64>,
     token: &str,
     sender: &Sender<EngineMessage>,
@@ -1112,6 +1134,7 @@ fn adopt_connection(
     let thread_current = Arc::clone(current);
     let thread_targets = Arc::clone(targets);
     let thread_synth = Arc::clone(voice_synth_to);
+    let thread_retarget = Arc::clone(retarget_requested);
     let thread_sender = sender.clone();
     let thread_token = token.to_string();
     let spawned = std::thread::Builder::new()
@@ -1125,6 +1148,7 @@ fn adopt_connection(
                 &thread_current,
                 &thread_targets,
                 &thread_synth,
+                &thread_retarget,
                 &thread_token,
                 &thread_sender,
             )
@@ -1186,6 +1210,7 @@ fn handle_connection(
     current: &Arc<Mutex<Option<CurrentConn>>>,
     targets: &Arc<Mutex<CaptureTargets>>,
     voice_synth_to: &Arc<Mutex<Option<u16>>>,
+    retarget_requested: &Arc<AtomicBool>,
     token: &str,
     sender: &Sender<EngineMessage>,
 ) {
@@ -1512,6 +1537,15 @@ fn handle_connection(
                         ));
                     }
                 }
+            }
+            // 「立即重选宿主」请求（`R` 行，无载荷，2026-10-13 现场）：只发一次；
+            // 写失败按断线处理（与 T/S 行同哲学）。
+            if retarget_requested.swap(false, Ordering::Relaxed) {
+                if write_line(&mut writer, "R").is_err() {
+                    drop_reason = "retarget_write_error";
+                    break;
+                }
+                note("rc003_bridge event=retarget_sent".to_owned());
             }
             let ownership_expired = lock(shared)
                 .ownership_last_rx

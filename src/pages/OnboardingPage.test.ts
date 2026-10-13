@@ -10,6 +10,8 @@ import type {
   RuntimeSnapshot,
   VoiceSessionState,
 } from "../lib/bridge";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import OnboardingPage from "./OnboardingPage.vue";
 
 const mocks = vi.hoisted(() => ({
@@ -26,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   openWindowsSettings: vi.fn(),
   getVoiceInputTool: vi.fn(),
   getVoiceHoldHotkey: vi.fn(),
+  getImeStatus: vi.fn(),
   getOtherVoiceHotkey: vi.fn(),
   setOtherVoiceHotkey: vi.fn(),
   getRc003TaskStatus: vi.fn(),
@@ -72,6 +75,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     openWindowsSettings: mocks.openWindowsSettings,
     getVoiceInputTool: mocks.getVoiceInputTool,
     getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
+    getImeStatus: mocks.getImeStatus,
     getOtherVoiceHotkey: mocks.getOtherVoiceHotkey,
     setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
     getRc003TaskStatus: mocks.getRc003TaskStatus,
@@ -189,7 +193,7 @@ function onboardingEvents(phase: string): Array<Record<string, unknown>> {
 /** 诊断报告夹具：与 Rust `get_diagnostic_report`（schema v2）同形。 */
 function diagnosticReport(): DiagnosticReport {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     appVersion: "0.5.0",
     appBuild: "unknown",
     sourceRevision: "fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901",
@@ -248,6 +252,13 @@ function diagnosticReport(): DiagnosticReport {
       leakedDowns: 0,
       firedGestures: 0,
       errorPresent: false,
+    },
+    ime: {
+      detected: true,
+      activeName: "微软拼音",
+      installedNames: ["微软拼音", "微信输入法"],
+      expectedName: "微信输入法",
+      matchesExpected: false,
     },
   };
 }
@@ -317,6 +328,14 @@ function resetWizardMocks(): void {
     } satisfies AudioSnapshot);
     mocks.getVoiceInputTool.mockResolvedValue(null);
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
+    // 默认：输入法读不到（fail-open——界面不提示）。个别用例再覆盖成"读得到"。
+    mocks.getImeStatus.mockResolvedValue({
+      detected: false,
+      active: null,
+      installed: [],
+      expected: null,
+      matchesExpected: null,
+    });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
     mocks.rc003Disabled = {
@@ -523,6 +542,28 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
+  it("启动恢复的连接也能标出已连接那一行（两行同名时靠设备令牌对上）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 本机现场：两支遥控器名字完全一样，连接还是启动时恢复的（界面没点过「连接」）。
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true, token: "aaaa1111" },
+      { id: "dev-2", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true, token: "bbbb2222" },
+    ]);
+    const ready = runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, remoteModel: "rc001" });
+    ready.platform.connection.remoteToken = "bbbb2222";
+    const wrapper = await mountWizard(ready);
+    await flushPromises();
+
+    const rows = wrapper.findAll(".onboarding-option");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).not.toContain("已连接");
+    expect(rows[1]!.text()).toContain("已连接");
+    // 已连接那一行显示型号——型号是唯一能区分两支同名遥控器的字段。
+    expect(rows[1]!.text()).toContain("小米蓝牙语音遥控器 2");
+    expect(rows[1]!.attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+
   it("已连接时显示具体型号（2 / 2 Pro），不只给系统名字", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     // 本机现场：Windows 给两支遥控器的名字完全一样（「小米蓝牙语音遥控器」）。
@@ -545,6 +586,63 @@ describe("Onboarding wizard shell", () => {
 
     expect(wrapper.text()).toContain("小米蓝牙语音遥控器 2 Pro · 已连接");
     expect(wrapper.findAll(".onboarding-option")[0]!.text()).toContain("小米蓝牙语音遥控器 2 Pro");
+    wrapper.unmount();
+  });
+
+  it("换连另一支遥控器后要重新按一下（之前那支收到的按键不算数）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器", model: "rc003", isSupportedCandidate: true, token: "aaaa1111" },
+      { id: "dev-2", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true, token: "bbbb2222" },
+    ]);
+    // 启动恢复：已经连着甲支（2 Pro），令牌来自运行时快照。
+    const connectedA = runtimeWith({
+      connectionPhase: "ready",
+      bleVoiceReady: true,
+      rawInputPhase: "ready",
+      remoteModel: "rc003",
+    });
+    connectedA.platform.connection.remoteToken = "aaaa1111";
+    const wrapper = await mountWizard(connectedA);
+    await flushPromises();
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
+
+    // 现场（2026-10-13）：按甲支通过后换连乙支，必须重新接收按键。切换期间快照会先清掉
+    // 旧令牌（断开上一支）、再带上新令牌——瞬时清空不算换机，不重置。
+    const between = runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, rawInputPhase: "ready" });
+    await wrapper.setProps({ runtime: between });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+
+    const connectedB = runtimeWith({
+      connectionPhase: "ready",
+      bleVoiceReady: true,
+      rawInputPhase: "ready",
+      remoteModel: "rc001",
+    });
+    connectedB.platform.connection.remoteToken = "bbbb2222";
+    await wrapper.setProps({ runtime: connectedB });
+    await flushPromises();
+
+    // 回到"等待控制按键"，门禁重新阻断，日志留一条。
+    expect(wrapper.text()).toContain("等待控制按键");
+    expect(wrapper.text()).toContain("按一下遥控器上的普通按键");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("false");
+    expect(
+      onboardingEvents("action").some(
+        (p) => p.step === "remote" && p.reason === "button_observation_reset",
+      ),
+    ).toBe(true);
+
+    // 重新按一下 → 恢复通过。
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已收到遥控器按键");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
     wrapper.unmount();
   });
 
@@ -1245,6 +1343,8 @@ describe("Onboarding controls & completion steps", () => {
 
   it("navigates back from controls to the voice test step and releases the suspension", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
+    // 真实用户能到⑥步，说明④步已经选过工具；补上这个前置（2026-10-13 起⑤步缺工具会退回④步）。
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
     const wrapper = await mountWizard(connectedRuntime());
 
     await wrapper.find(".onboarding-back").trigger("click");
@@ -1364,7 +1464,10 @@ describe("Onboarding voice test step", () => {
     // 2026-10-05 要求：通过提示用绿色成功样式 + 对勾。
     expect(wrapper.find(".onboarding-card.success .onboarding-success .ok-mark").exists()).toBe(true);
     // 2026-10-05 改版定稿：核对卡是提示行（编号），不设勾选框——通过判据只有真实文字上屏。
-    expect(wrapper.text()).toContain("按你选的工具核对两件事");
+    // 2026-10-13 现场定稿：微信 / 豆包时三项且"输入法"排第一；Vokie / 其他工具两项。
+    expect(wrapper.text()).toContain("按你选的工具核对三件事");
+    expect(wrapper.text()).toContain("输入法切到“微信输入法”。");
+    expect(wrapper.text()).toContain("麦克风选 CABLE Output（在“微信输入法”的语音输入设置里）。");
     expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0);
     const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
@@ -1423,6 +1526,129 @@ describe("Onboarding voice test step", () => {
       onboardingEvents("voice_attempt").filter((p) => p.reason === "armed"),
     ).toHaveLength(2);
     expect(onboardingEvents("step_retry").some((p) => p.step === "voice_test")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("核对卡按工具分两档：豆包 / 微信三项（输入法排第一），Vokie / 其他两项（2026-10-13 现场）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    let items = wrapper.findAll(".onboarding-numlist li");
+    expect(wrapper.text()).toContain("按你选的工具核对三件事");
+    expect(items).toHaveLength(3);
+    expect(items[0]!.text()).toContain("输入法切到“豆包输入法”。");
+
+    // 换成不需要切输入法的工具：那一项消失、标题回到两件事。
+    wrapper.unmount();
+    mocks.getVoiceInputTool.mockResolvedValue("vokie");
+    const vokie = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    items = vokie.findAll(".onboarding-numlist li");
+    expect(vokie.text()).toContain("按你选的工具核对两件事");
+    expect(items).toHaveLength(2);
+    expect(vokie.text()).not.toContain("输入法切到");
+    vokie.unmount();
+  });
+
+  it("试一下页：点输入框时确保输入法，切不过去就给解释（2026-10-13 现场）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getImeStatus.mockResolvedValue({
+      detected: true,
+      active: "微软拼音",
+      installed: ["微软拼音", "豆包输入法"],
+      expected: "豆包输入法",
+      matchesExpected: false,
+    });
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+
+    await wrapper.find("input.onboarding-voice-input").trigger("focus");
+    await flushPromises();
+
+    expect(mocks.getImeStatus).toHaveBeenCalled();
+    expect(wrapper.text()).toContain("输入法还没切到“豆包输入法”");
+    expect(wrapper.text()).toContain("现在系统里选的是“微软拼音”");
+    expect(
+      onboardingEvents("action").some((p) => p.reason === "ime_check" && p.result === "failed"),
+    ).toBe(true);
+
+    // 已经切好：不打扰。
+    mocks.getImeStatus.mockResolvedValue({
+      detected: true,
+      active: "豆包输入法",
+      installed: ["豆包输入法"],
+      expected: "豆包输入法",
+      matchesExpected: true,
+    });
+    await wrapper.find("input.onboarding-voice-input").trigger("focus");
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("输入法还没切到");
+    expect(
+      onboardingEvents("action").some((p) => p.reason === "ime_check" && p.result === "passed"),
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("读不到输入法状态时不提示（fail-open）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+
+    await wrapper.find("input.onboarding-voice-input").trigger("focus");
+    await flushPromises();
+
+    expect(mocks.getImeStatus).toHaveBeenCalled();
+    expect(wrapper.text()).not.toContain("输入法还没切到");
+    wrapper.unmount();
+  });
+
+  it("重启后直接落在⑤步：按磁盘配置补读工具与快捷键（不再显示“你选的输入工具”）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    // 工具名出现在核对卡里（此前 stagedTool 未读 ⇒ 回退文案"你选的输入工具"，2026-10-13 现场）。
+    expect(wrapper.text()).toContain("输入法切到“微信输入法”。");
+    expect(wrapper.text()).not.toContain("你选的输入工具");
+    expect(mocks.getVoiceInputTool).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("重启后落在⑤步但从未选过工具：退回④步补选（不给缺前置状态的一页做验证）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue(null);
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("选择你要用的输入工具");
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("voice_tool");
+    expect(
+      onboardingEvents("action").some(
+        (p) => p.reason === "tool_missing_fallback" && p.result === "failed",
+      ),
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("按语音键（会话开始）时也检查一次输入法（只读、不切换）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await wrapper.find("input.onboarding-voice-input").trigger("focus");
+    await flushPromises();
+    mocks.getImeStatus.mockClear();
+
+    await vi.advanceTimersByTimeAsync(200);
+    await flushPromises();
+
+    expect(mocks.getImeStatus).toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -1590,13 +1816,38 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
+  it("别的窗口盖上来时的窗口级 blur 不算失去输入目标（文字仍会落进输入框）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    const box = wrapper.find("input.onboarding-voice-input");
+    await box.trigger("focus");
+    await flushPromises();
+    // 工具语音条/系统弹窗抢焦点：浏览器补一个 blur，但元素仍持有 DOM 焦点。
+    await box.trigger("blur");
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(200);
+    await flushPromises();
+
+    // 不得据此判失败（2026-10-13 现场：文字已上屏却提示"输入框没有聚焦"）。
+    expect(wrapper.text()).not.toContain("输入框没有聚焦");
+    expect(wrapper.text()).not.toContain("失去了焦点");
+    expect(
+      onboardingEvents("voice_attempt").some((p) => p.reason === "voice.input_target_not_ready"),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
   it("asks the user to click back into the box when a session starts unfocused", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
 
     const wrapper = await mountWizard(connectedRuntime(), { attach: true });
-    await wrapper.find("input.onboarding-voice-input").trigger("blur");
+    await (wrapper.find("input.onboarding-voice-input").element as HTMLInputElement).blur();
     await flushPromises();
     await vi.advanceTimersByTimeAsync(200);
     await flushPromises();
@@ -1606,6 +1857,20 @@ describe("Onboarding voice test step", () => {
       onboardingEvents("voice_attempt").some((p) => p.reason === "voice.input_target_not_ready"),
     ).toBe(true);
     wrapper.unmount();
+  });
+
+  it("⑤步输入框聚焦时不显示焦点环（统一为细边框）", () => {
+    // 2026-10-14 现场定稿：聚焦时只保留细边框——此前"第一次进来"（未用鼠标）显示焦点环、
+    // "从上一页进来"被 body.pointer-nav 抑制，同一个聚焦状态两种外观；
+    // 这里锁样式源码防回改（像素证据见 Bugs 记录）。
+    // 跨平台：CI 检出可能是 CRLF、本地是 LF——先归一化行尾再匹配（2026-10-14 CI 实测教训）。
+    const source = readFileSync(join(process.cwd(), "src/pages/OnboardingPage.vue"), "utf8")
+      .replace(/\r\n/g, "\n");
+    const block = source.match(
+      /\.onboarding-voice-input:focus,\n\.onboarding-voice-input:focus-visible \{([\s\S]*?)\n\}/,
+    );
+    expect(block?.[1]).toBeDefined();
+    expect(block?.[1]).toContain("outline: none");
   });
 });
 

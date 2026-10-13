@@ -53,6 +53,13 @@ pub use ble::{
 };
 #[cfg(windows)]
 mod ime;
+/// 输入法状态只读查询与「按工具确保输入法」（试一下页 / 诊断信息，2026-10-13）：
+/// 模块本体私有，只导出这几个入口（见 `ime` 模块头与 `ImeStatus` 的语义约定）。
+#[cfg(windows)]
+pub use ime::{
+    describe_active_ime_name, ime_status_for, ime_status_log_line, list_installed_ime_names,
+    ImeStatus, MAX_INSTALLED_IME_NAMES,
+};
 
 /// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
 /// 语音和弦判定失效（其热键只在自身为当前会话活动输入法时生效），物理边沿
@@ -144,6 +151,37 @@ pub struct PairedRemote {
     pub name: String,
     pub model: RemoteModel,
     pub is_supported_candidate: bool,
+    /// 设备稳定令牌（`device_token(id)`）：给界面把"已扫描到的某一行"和"当前连着的设备"对上，
+    /// 不用把设备身份送进前端（2026-10-13 现场：两支遥控器名字完全相同，靠名字认不出）。
+    #[serde(default)]
+    pub token: String,
+}
+
+/// 设备身份的**稳定短令牌**：FNV-1a 64 取低 32 位、8 位十六进制。
+///
+/// 用途只有一个——让界面把"扫描列表里的这一行"与"运行时当前连着的设备"对齐
+/// （2026-10-13 现场：两支遥控器在 Windows 里同名，行与连接状态无法对应）。
+/// 它不是安全边界、也不进日志：与 `LOGGING.md` 的脱敏口径一致（只做不可逆的短标识）。
+/// 归一化大小写与首尾空白——注册表实例 id 是大写、Raw Input 路径是小写，同一台设备
+/// 在不同来源里的写法必须得到同一个令牌。
+pub fn device_token(raw: &str) -> String {
+    let normalized = raw.trim().to_ascii_lowercase();
+    // 2026-10-13 现场加固：能解析出蓝牙地址就以**地址**为基准。Windows 对同一支遥控器
+    // 可能给出不同形态的 id（扫描拿到的 id 与上次连接保存、启动恢复用的 id 形态可能不同，
+    // 例如分隔符/前后缀差异），只对整串做哈希会让"已连接那一支"与扫描行对不上
+    // （现场：②步下方写着"已连接"，上面两行设备却都没标出来）。解析不出地址的
+    // （模拟设备、其他来源）退回整串，行为与旧版一致。
+    #[cfg(windows)]
+    let normalized = match crate::ble::bluetooth_address_from_device_id(&normalized) {
+        Some(address) => format!("{address:012x}"),
+        None => normalized,
+    };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +264,10 @@ pub struct ConnectionSnapshot {
     pub battery_level: Option<u8>,
     pub remote_name: Option<String>,
     pub remote_model: RemoteModel,
+    /// 当前连接设备的稳定令牌（`device_token`；与扫描列表同一套算法）。
+    /// 只用于界面把"已连接"标到正确的那一行——不落日志、不进诊断块（2026-10-13 现场）。
+    #[serde(default)]
+    pub remote_token: Option<String>,
     pub capabilities: Option<AtvvCapabilities>,
     pub voice_state: VoiceSessionState,
     pub decoded_samples: u64,
@@ -274,6 +316,7 @@ impl Default for ConnectionSnapshot {
             battery_level: None,
             remote_name: None,
             remote_model: RemoteModel::Unknown,
+            remote_token: None,
             capabilities: None,
             voice_state: VoiceSessionState::Idle,
             decoded_samples: 0,
@@ -673,6 +716,7 @@ impl WindowsPlatform {
             return;
         };
         let tool_now = std::sync::Arc::clone(&self.voice_input_tool);
+        let align_pending = std::sync::Arc::clone(&self.ime_align_pending);
         let _ = std::thread::Builder::new()
             .name("sayall-ime-prealign".to_owned())
             .spawn(move || {
@@ -691,6 +735,17 @@ impl WindowsPlatform {
                     probe.class_token,
                 ));
                 if settle.still_self {
+                    // 2026-10-13 现场：这里不能"取走即丢"。用户点一下别的窗口又立刻回到本窗口
+                    // （或点击任务栏）时，失焦事件先到、此刻前台还是自己；旧实现 take() 一次性的
+                    // 对齐就此永久丢失——现场日志两次 `fired … still_self=true` 之后再无任何切换
+                    // 尝试，表现为"系统输入法没有自动切换"。放回布防，等下一次失焦再试。
+                    if *lock(&tool_now) == Some(tool) {
+                        *lock(&align_pending) = Some((tool, armed_at));
+                        crate::ble::gatt_note(format!(
+                            "ime_tool_select action=kept_pending reason=still_self waited_ms={}",
+                            armed_at.elapsed().as_millis(),
+                        ));
+                    }
                     return;
                 }
                 // 若等待期间用户已重新选择工具（当前值不同于布防值），本次让位给新选择。
@@ -890,6 +945,12 @@ impl WindowsPlatform {
         key_gate::observed_last_vk()
     }
 
+    /// 观察窗口诊断（见 `key_gate::observed_keys`）：窗口内计入的按键码列表
+    /// （按计入顺序，最多 12 个）。与 `observed_last_key` 同一读取时机。
+    pub fn observed_keys(&self) -> Vec<u32> {
+        key_gate::observed_keys()
+    }
+
     pub fn scan_paired_remotes(&self) -> Result<Vec<PairedRemote>, PlatformError> {
         scan_paired_remotes()
     }
@@ -915,7 +976,13 @@ impl WindowsPlatform {
             // 刚点连接而能力协商还没回来的那段时间里，两支遥控器同时在线就又会
             // 歧义失败（现场：`raw_input_listener` 每 10 秒失败一次，向导卡在
             // `remote.listener_not_ready`）。
-            crate::remote_target::set(crate::bluetooth_address_from_device_id(&device_id));
+            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
+            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
+            let address = crate::bluetooth_address_from_device_id(&device_id);
+            crate::remote_target::set(address);
+            if address.is_some() {
+                self.rc003_bridge.request_retarget();
+            }
             self.runtime.connect(device_id)
         }
 
@@ -943,7 +1010,13 @@ impl WindowsPlatform {
         {
             // 启动时按已保存的选择立刻发布（同 `connect_remote` 的理由）：
             // 不等会话 Ready，Raw Input 就能在"两支同型号同时在位"时绑对那一支。
-            crate::remote_target::set(crate::bluetooth_address_from_device_id(&device_id));
+            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
+            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
+            let address = crate::bluetooth_address_from_device_id(&device_id);
+            crate::remote_target::set(address);
+            if address.is_some() {
+                self.rc003_bridge.request_retarget();
+            }
             self.runtime.restore(device_id)
         }
 
@@ -1172,8 +1245,10 @@ fn scan_paired_remotes() -> Result<Vec<PairedRemote>, PlatformError> {
         if !is_supported_remote_name(&name) {
             continue;
         }
+        let id = device.Id().map_err(windows_error)?.to_string();
         remotes.push(PairedRemote {
-            id: device.Id().map_err(windows_error)?.to_string(),
+            token: device_token(&id),
+            id,
             model: remote_model_from_name(&name),
             name,
             is_supported_candidate: true,
@@ -1287,6 +1362,43 @@ mod tests {
         for name in ["", "Mi Mouse", "MI RC2", "小米", "Unknown Remote"] {
             assert!(!is_supported_remote_name(name), "unexpected match: {name}");
         }
+    }
+
+    #[test]
+    fn device_token_folds_different_id_forms_of_the_same_address() {
+        // 2026-10-13 现场：扫描拿到的 id 与启动恢复保存的 id 可能形态不同（前后缀/分隔符），
+        // 令牌必须由**蓝牙地址**派生，两种形态才算同一支；大小写不影响。
+        let winrt_form = device_token("BluetoothLE#BluetoothLEc0:5d:39:c2:d9:db");
+        let with_adapter_prefix =
+            device_token("BluetoothLE#BluetoothLEaa:bb:cc:dd:ee:ff-c0:5d:39:c2:d9:db");
+        let uppercase_path = device_token(r"\\?\BTHLE#BluetoothLE#C0:5D:39:C2:D9:DB");
+        assert_eq!(winrt_form, with_adapter_prefix);
+        assert_eq!(winrt_form, uppercase_path);
+        assert_ne!(
+            winrt_form,
+            device_token("BluetoothLE#BluetoothLEaa:bb:cc:dd:ee:ff")
+        );
+        // 解析不出地址的 id 退回整串哈希（与旧行为一致），同样归一大小写与空白。
+        assert_eq!(
+            device_token(" ci-simulation-rc001 "),
+            device_token("CI-SIMULATION-RC001")
+        );
+    }
+
+    #[test]
+    fn device_token_is_stable_case_insensitive_and_distinct() {
+        // 同一台设备在不同来源里大小写/空白不同（注册表大写、Raw Input 小写），
+        // 令牌必须一致，否则界面又把"已连接"标错行（2026-10-13 现场）。
+        let upper = "BluetoothLE#BluetoothLEc0:5D:39:C2:D9:DB-11:22";
+        let lower = "  bluetoothle#bluetoothlec0:5d:39:c2:d9:db-11:22  ";
+        assert_eq!(device_token(upper), device_token(lower));
+        assert_eq!(device_token(upper).len(), 8);
+        assert!(device_token(upper).chars().all(|c| c.is_ascii_hexdigit()));
+        // 两支同型号遥控器（只差地址）必须得到不同令牌。
+        assert_ne!(
+            device_token("BluetoothLE#BluetoothLEc0:5d:39:c2:d9:db"),
+            device_token("BluetoothLE#BluetoothLEe8:55:40:b1:b7:6b")
+        );
     }
 
     #[test]

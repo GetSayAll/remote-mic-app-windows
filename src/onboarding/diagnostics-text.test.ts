@@ -7,7 +7,7 @@ import {
 } from "./diagnostics-text";
 
 const report: DiagnosticReport = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   appVersion: "0.5.0",
   appBuild: "1001",
   sourceRevision: "fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901",
@@ -67,6 +67,13 @@ const report: DiagnosticReport = {
     firedGestures: 0,
     errorPresent: false,
   },
+  ime: {
+    detected: false,
+    activeName: null,
+    installedNames: [],
+    expectedName: null,
+    matchesExpected: null,
+  },
 };
 
 const snapshot: OnboardingDiagnosticsSnapshot = {
@@ -99,6 +106,9 @@ const snapshot: OnboardingDiagnosticsSnapshot = {
   voiceLateAccepted: false,
   distinctButtonCount: 2,
   mappingSuspended: true,
+  imeDetected: true,
+  imeMatchesExpected: false,
+  imeInstalledCount: 3,
 };
 
 describe("formatOnboardingDiagnostics", () => {
@@ -143,7 +153,23 @@ describe("formatOnboardingDiagnostics", () => {
     expect(text).toContain("Vokie: not_detected");
     expect(text).toContain("Voice test: phase=terminal terminal=voice.no_transcript late=no");
     expect(text).toContain("Buttons observed: 2/3");
+    expect(text).toContain(
+      "IME: detected=yes match=no installed_count=3 expected_tool=wechat",
+    );
     expect(text).toContain("Mapping: suspended");
+  });
+
+  it("读不到输入法时只写 detected=no，不臆测（2026-10-13 现场）", () => {
+    const text = formatOnboardingDiagnostics(report, {
+      ...snapshot,
+      imeDetected: false,
+      imeMatchesExpected: null,
+      imeInstalledCount: 0,
+    });
+
+    expect(text).toContain(
+      "IME: detected=no match=unknown installed_count=0 expected_tool=wechat",
+    );
   });
 
   it("迟到接受在文本里自证（terminal=late_transcript late=yes）", () => {

@@ -395,14 +395,22 @@ fn run_listener(
     }
 
     // 设备选择：缺失（系统 HOGP 接口缺失/遥控器未连接）不视为失败，进入 Awaiting；
-    // 多设备歧义仍按失败处理，由上层重启。
+    // 多候选（两支同型号遥控器同时在线，或同一支换过实例、旧实例还在枚举里）**不再判失败**
+    // ——2026-10-13 现场：此时判失败会让监听器每 10 秒重启一次（日志里连续 listener_start_failed），
+    // 这 10 秒 | 更长窗口内按键完全不可用，而且失败与用户看到的现象毫无关联。候选只决定
+    // "从哪一路开始听"；真正的归属由「应用正在用的那支」（`remote_target`）在枚举过滤
+    // （`filter_paths_for_target`）、绑定审计与报文接受（同地址的其他实例路径也接受）三处收窄。
     let selected_path = match select_single_device_path(&paths) {
         Ok(path) => normalize_device_path(&path),
         Err(DevicePathError::Missing) => String::new(),
-        Err(error) => {
-            let _ = unsafe { DestroyWindow(window) };
-            let _ = unsafe { UnregisterClassW(class_name_ptr, Some(instance)) };
-            return Err(error.to_string());
+        Err(DevicePathError::Ambiguous(count)) => {
+            let first =
+                normalize_device_path(paths.first().map(String::as_str).unwrap_or_default());
+            crate::ble::gatt_note(format!(
+                "raw_input binding_initial action=ambiguous_pick selected_path={first} \
+                 matched_device_count={count}"
+            ));
+            first
         }
     };
     THREAD_CONTEXT.with(|slot| {
@@ -827,15 +835,19 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             .as_mut()
             .ok_or_else(|| "Raw Input listener context is unavailable".to_owned())?;
         let normalized = normalize_device_path(&device_path);
-        // 接受条件（2026-10-13 现场加固）：报文路径等于绑定路径，**或**属于"应用正在用的那支"
-        // 遥控器（蓝牙地址匹配）。后者修的是"同一支遥控器的 HID 接口换过实例、旧绑定还在"
-        // ——旧实例仍留在枚举里、审计因此不重绑，报文从新实例到达时会被整批丢掉（现场：
-        // 两支遥控器都在按、界面一个按键都收不到）。
-        let target_accept = crate::remote_target::get()
-            .is_some_and(|address| crate::remote_target::matches_address(&normalized, address));
-        if normalized != context.selected_path && !target_accept {
-            // 绑定失配：报文可能来自别的设备（物理键盘等），也可能是遥控器的 HID
-            // 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
+        // 接受判据（2026-10-13 现场，纯逻辑在 `raw_input::report_path_accepted`）：
+        // 有目标地址时**只认那一支**（绑定路径或同地址的其他实例）；绑定若停在另一支上，
+        // 那一支的报文一律按"另一支"处理；还没有目标时沿用旧行为（只认绑定路径）。
+        // 现场教训：只看"报文路径 == 绑定路径"，会在启动抢绑或换机时把**另一支遥控器**的
+        // 按键当成本机按键（用户连的是 2 Pro、按 2 却让②步通过了）。
+        let accepted = crate::raw_input::report_path_accepted(
+            &context.selected_path,
+            crate::remote_target::get(),
+            &normalized,
+        );
+        if !accepted {
+            // 绑定失配或"不是当前那一支"：报文可能来自别的设备（物理键盘等），也可能是
+            // 遥控器的 HID 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
             // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
             // 区分开的唯一线索（2026-09-18 现场正是无法区分这两者才迟迟定不了位）。
             if crate::raw_input::device_path_matches_xiaomi_remote(&normalized) {

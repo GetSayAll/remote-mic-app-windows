@@ -7,6 +7,7 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   endKeyObservation,
+  getImeStatus,
   getAudioSnapshot,
   getDiagnosticReport,
   getOnboardingState,
@@ -33,6 +34,7 @@ import {
   type AudioEndpoint,
   type AudioSnapshot,
   type ButtonEdge,
+  type ImeStatus,
   type KeyChord,
   type KeyCode,
   type PairedRemote,
@@ -169,6 +171,8 @@ const openingVbCablePage = ref(false);
 
 // ---- 输入工具步骤 ----
 const stagedTool = ref<VoiceInputTool | null>(null);
+/** 本次加载是否已读过输入工具配置（重启后落在⑤步时补读一次，见步骤 watcher）。 */
+let voiceToolStateLoaded = false;
 /** 完成页读到的正式配置（本会话未经过步骤④时的回退来源）。 */
 const configuredTool = ref<VoiceInputTool | null>(null);
 const currentHotkey = ref<KeyChord | null>(null);
@@ -367,6 +371,11 @@ watch(
       void prepareVoiceToolStep();
     }
     if (current === "voice_test") {
+      // 重启后直接落在⑤步时补读工具配置（2026-10-13 现场：不补读会显示"你选的输入工具"，
+      // 甚至从没选过工具也能停在⑤步）。只在本次加载还没读过时读一次，避免与④步重复。
+      if (!voiceToolStateLoaded) {
+        void prepareVoiceToolStep();
+      }
       void startVoiceTestSession();
     }
     if (observingButtons) {
@@ -734,6 +743,37 @@ async function ensureRemoteListAndMaybeConnect(mode: "entry" | "auto"): Promise<
   }
 }
 
+/**
+ * 已连接那一支的稳定身份：运行时快照的**设备令牌优先**（同一支换 HID 实例令牌不变），
+ * 老快照没有令牌时退回"本会话连接成功那一台的 id"。
+ */
+const connectedRemoteIdentity = computed(
+  () => props.runtime?.platform.connection.remoteToken || connectedDeviceId.value || "",
+);
+
+/**
+ * 换连另一支遥控器 ⇒ 之前那支收到的按键不算数（2026-10-13 现场：连甲支、按甲支通过后，
+ * 换连乙支仍显示「已收到遥控器按键」，没重新按一下就能继续）。
+ *
+ * 只在"从一支具体遥控器换成另一支具体遥控器"时清：
+ * - 从未连接 → 首次连接不清（保留"按键已收到。还差一步：连接"的既有流程）；
+ * - 切换过程中快照瞬时清空（先断开上一支）不算换机，也不清。
+ */
+let lastConnectedRemoteIdentity = connectedRemoteIdentity.value;
+watch(connectedRemoteIdentity, (identity) => {
+  // 瞬时清空（切换时先断开上一支）不更新记录，否则"清空 → 新一支"会被当成首次连接。
+  if (!identity) return;
+  const previous = lastConnectedRemoteIdentity;
+  lastConnectedRemoteIdentity = identity;
+  if (!previous || identity === previous) return;
+  if (!remoteButtonObserved.value) return;
+  remoteButtonObserved.value = false;
+  voiceKeyMistake.value = false;
+  otherRemoteActivity.value = false;
+  lastStaleRemoteEventCount = props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0;
+  reportStepAction("remote", "button_observation_reset", "unknown", { detail: "remote_switched" });
+});
+
 // 触发点一：进入②步（不论连接状态，先把列表带出来）。
 watch(
   () => step.value,
@@ -910,6 +950,7 @@ function hotkeyForTool(tool: VoiceInputTool): KeyChord | null {
 
 async function prepareVoiceToolStep(): Promise<void> {
   toolMessage.value = "";
+  voiceToolStateLoaded = true;
   const started = performance.now();
   // 该调用同时服务第④步与第⑤步（重启后直接落在第⑤步时补读配置），故按当前步骤记录。
   reportStepAction(step.value, "read_tool_state", "unknown");
@@ -929,6 +970,13 @@ async function prepareVoiceToolStep(): Promise<void> {
     reportStepAction(step.value, "read_tool_state", "passed", {
       elapsedMs: actionElapsed(started),
     });
+    // ⑤步需要"已经选过工具"才成立（核对卡、输入法检查、语音键都按它来）。重启后若
+    // 直接落在⑤步而磁盘上从未选过工具（2026-10-13 现场：⑤步显示"你选的输入工具"），
+    // 就退回④步补选——不能让人在缺前置状态的一页上做验证。
+    if (step.value === "voice_test" && tool === null) {
+      reportStepAction("voice_test", "tool_missing_fallback", "failed", { detail: "to_tool_step" });
+      await setStep("voice_tool", "fix");
+    }
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction(step.value, "read_tool_state", "failed", {
@@ -1324,11 +1372,19 @@ async function copyDiagnostics(): Promise<void> {
     } catch {
       // 保持页面状态。
     }
+    // 输入法状态**只读**读一次（2026-10-13 现场）：用户报"语音没出字"时，先看这行是不是
+    // "没切输入法"。这里只查询、不切换——复制诊断信息不该顺手改用户的输入法。
+    // 读取失败按"读不到"写（detected=no），复制本身不因此失败。
+    let ime: ImeStatus | null = null;
+    try {
+      ime = await getImeStatus();
+    } catch {
+      ime = null;
+    }
     const chord =
       currentHotkey.value ??
       hotkeyFromDisk ??
-      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
-    const hotkeyTokens = chord
+      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);    const hotkeyTokens = chord
       ? chord.keys.length > 0
         ? chord.keys.join("+")
         : "none"
@@ -1364,6 +1420,9 @@ async function copyDiagnostics(): Promise<void> {
       voiceLateAccepted: voiceLateAccepted.value,
       distinctButtonCount: observedButtons.value.size,
       mappingSuspended: mappingSuspended.value,
+      imeDetected: ime?.detected === true,
+      imeMatchesExpected: ime?.matchesExpected ?? null,
+      imeInstalledCount: ime?.installed.length ?? 0,
     });
     if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
     await navigator.clipboard.writeText(text);
@@ -1435,6 +1494,9 @@ const voicePhase = ref<VoiceAttemptState>("waiting_start");
 const voiceResult = ref<VoiceAttemptTerminal | null>(null);
 const voiceFailureMessage = ref("");
 const voiceFocused = ref(false);
+/** 输入法兜底提示（2026-10-13 现场）：非空时试一下页显示一张说明卡。 */
+const imeHint = ref("");
+let imeCheckRunning = false;
 /**
  * 迟到接受（对齐 Mac 的现值门禁；2026-10-13 现场报告「文字出现但无法继续」）：
  * Mac 的门禁按输入框现值实时复算，迟到的文字会把「继续」放开；Windows 原先只看
@@ -1478,6 +1540,14 @@ const voiceToolLabel = computed(() => {
       return "你选的输入工具";
   }
 });
+
+/**
+ * 只有微信 / 豆包需要「先把输入法切到它」这一项（2026-10-13 现场要求）——
+ * Vokie / 其他工具不依赖切换输入法，列出来只会造成误导。
+ */
+const voiceToolNeedsIme = computed(
+  () => stagedTool.value === "wechat" || stagedTool.value === "doubao",
+);
 
 const voiceAudioText = computed(() => {
   const name =
@@ -1764,6 +1834,10 @@ async function pollVoiceTest(): Promise<void> {
         }
         return;
       }
+      if (stateNow === "waiting_start" && frame.voiceState !== "idle") {
+        // 语音键按下：与点输入框同一套检查——不是所选工具就用文字提醒（只查不切）。
+        void checkVoiceIme("voice_key");
+      }
       if (frame.voiceState === "idle" && (stateNow === "streaming" || stateNow === "waiting_end")) {
         await settleVoiceManualInput(now);
         if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
@@ -1861,6 +1935,46 @@ async function onVoiceInput(): Promise<void> {
 
 function onVoiceBoxFocus(): void {
   voiceFocused.value = true;
+  // 点输入框时查一次输入法，不对就用文字提醒（2026-10-13 现场：用户按语音键却出不了字，
+  // 常见原因就是当前会话的输入法不是他选的那个工具）。**只查不切**——自动切换已按
+  // Andy 2026-10-13 的决定去掉。
+  void checkVoiceIme("focus");
+}
+
+/**
+ * 输入法**只读检查 + 文字提醒**（2026-10-13 现场定稿，Andy 明确要求去掉自动切换）：
+ * 在用户真正动手的那两个点上（点输入框、按语音键）查一次当前输入法是不是所选工具，
+ * 不是就用文字告诉他怎么切——而不是让用户对着"语音没出字"猜原因，也不动用户的输入法。
+ *
+ * fail-open：读不到输入法状态（老系统/TSF 不可用）时**不提示**，绝不瞎报。
+ */
+async function checkVoiceIme(trigger: "focus" | "voice_key"): Promise<void> {
+  if (imeCheckRunning) return;
+  imeCheckRunning = true;
+  try {
+    const status = await getImeStatus();
+    const expected = status.expected ?? "";
+    const active = status.active ?? "";
+    if (!status.detected || !expected || status.matchesExpected === null) {
+      imeHint.value = "";
+      reportStepAction("voice_test", "ime_check", "unknown", { detail: trigger });
+      return;
+    }
+    if (status.matchesExpected) {
+      imeHint.value = "";
+      reportStepAction("voice_test", "ime_check", "passed", { detail: trigger });
+      return;
+    }
+    imeHint.value = active
+      ? `输入法还没切到“${expected}”：现在系统里选的是“${active}”。请在桌面右下角把输入法切成“${expected}”，或者回到上一步改选你的工具。`
+      : `输入法还没切到“${expected}”。请在桌面右下角把输入法切成“${expected}”，或者回到上一步改选你的工具。`;
+    reportStepAction("voice_test", "ime_check", "failed", { detail: `${trigger}_mismatch` });
+  } catch {
+    imeHint.value = "";
+    reportStepAction("voice_test", "ime_check", "unknown", { detail: `${trigger}_error` });
+  } finally {
+    imeCheckRunning = false;
+  }
 }
 
 function onVoiceBoxBlur(): void {
@@ -1996,6 +2110,8 @@ async function retryVoiceTest(): Promise<void> {
             :tool-label="voiceToolLabel"
             :hotkey-text="hotkeyLabel"
             :audio-text="voiceAudioText"
+            :show-ime-checklist="voiceToolNeedsIme"
+            :ime-hint="imeHint"
             @input="onVoiceInput"
             @focus="onVoiceBoxFocus"
             @blur="onVoiceBoxBlur"
@@ -2759,9 +2875,18 @@ async function retryVoiceTest(): Promise<void> {
   font-size: 16px;
   line-height: 1.5;
 }
-.onboarding-voice-input:focus {
-  outline: 2px solid var(--accent-border);
-  outline-offset: 1px;
+.onboarding-voice-input:focus,
+.onboarding-voice-input:focus-visible {
+  /* 2026-10-14 现场定稿（Andy 选定"统一为细边框"）：⑤步输入框聚焦时不显示焦点环，
+     只保留 1.5px 细边框。
+     起因（2026-10-13 现场两轮）：这个输入框由向导自动聚焦——"第一次进来"（重启后直接落在
+     ⑤步、还没用鼠标）会显示焦点环（先是一圈"断框"样式、后合成一整圈），而"从上一个页面
+     进来"（点过"继续"）被全应用 `body.pointer-nav` 约定抑制、只剩细边框：同一个聚焦状态
+     两种外观。统一：`:focus` 与 `:focus-visible` 都置 none（压过全局
+     `input:focus-visible` 的 2px 焦点环；指针模态下本来就是 none）。
+     取舍说明：本框自动聚焦、步骤文案已引导用户点击，键盘用户不依赖该焦点环；
+     其余控件的全局焦点环约定不变。 */
+  outline: none;
 }
 
 /* ---- 输入工具页 ---- */
