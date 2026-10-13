@@ -1625,6 +1625,7 @@ onMounted(async () => {
   }
 
   const stopEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
+    const arrival = performance.now();
     const next = new Set(activeButtons.value);
     if (edge.isPressed) {
       next.add(edge.button);
@@ -1634,6 +1635,24 @@ onMounted(async () => {
     activeButtons.value = next;
     if (!lockSelection.value && edge.isPressed) {
       selectedButton.value = edge.button;
+    }
+    // 高亮时序取证（2026-10-13 现场反馈"有时快、有时有延迟、卡片和线条不一起亮"）：
+    // 每次按下/松开各落一行，elapsed_ms = "收到边沿 → 下一帧"。与同一时刻的引擎
+    // 日志 `map_edges` 对齐，可把延迟拆成 设备→引擎 / 引擎→前端 / 前端出画面 三段，
+    // 不必再靠反复试错定位；字段全部是稳定 token（detail = 语义键名）。
+    const reportEdge = () =>
+      reportFrontendEvent({
+        event: "button_edge",
+        phase: "completed",
+        result: "passed",
+        reason: edge.isPressed ? "pressed" : "released",
+        detail: edge.button,
+        elapsedMs: Math.max(0, Math.round(performance.now() - arrival)),
+      });
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(reportEdge);
+    } else {
+      window.setTimeout(reportEdge, 0);
     }
   });
   if (unmounted) {
