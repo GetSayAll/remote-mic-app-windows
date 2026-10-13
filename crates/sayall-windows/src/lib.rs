@@ -1087,9 +1087,22 @@ pub fn is_supported_remote_name(raw_name: &str) -> bool {
 }
 
 pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
-    match raw_name.trim().to_lowercase().as_str() {
-        "xiaomi bluetooth remote 2" | "小米蓝牙遥控器2" => RemoteModel::Rc001,
-        "xiaomi bluetooth remote 2 pro" | "小米蓝牙遥控器2 pro" | "arn9" => {
+    // 系统上报的名称可能是中文（中文 Windows 的「小米蓝牙语音遥控器 2 / 2 Pro」）、
+    // 英文广告名或型号代号，空格与大小写不稳定：先归一化（去空白 + 小写）再按白名单
+    // 精确匹配。2026-10-13 现场：中文「语音遥控器」名此前落到 Unknown，第②步连接后
+    // 只能显示占位文案，用户分不清 2 / 2 Pro。仍然不从通用名称里猜型号
+    // （「小米蓝牙语音遥控器」这类没有型号后缀的名称保持 Unknown）。
+    let compact: String = raw_name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    match compact.as_str() {
+        "xiaomibluetoothremote2" | "小米蓝牙遥控器2" | "小米蓝牙语音遥控器2" => {
+            RemoteModel::Rc001
+        }
+        "xiaomibluetoothremote2pro" | "小米蓝牙遥控器2pro" | "小米蓝牙语音遥控器2pro" | "arn9" => {
             RemoteModel::Rc003
         }
         _ => RemoteModel::Unknown,
@@ -1266,6 +1279,25 @@ mod tests {
         assert_eq!(
             remote_model_from_name("Xiaomi Bluetooth Remote 2 Pro"),
             RemoteModel::Rc003
+        );
+        // 中文 Windows 上报的名称（2026-10-13 现场：此前落到 Unknown，②步连接后
+        // 显示占位文案，分不清 2 / 2 Pro）。
+        assert_eq!(
+            remote_model_from_name("小米蓝牙语音遥控器 2"),
+            RemoteModel::Rc001
+        );
+        assert_eq!(
+            remote_model_from_name("小米蓝牙语音遥控器 2 Pro"),
+            RemoteModel::Rc003
+        );
+        assert_eq!(
+            remote_model_from_name("小米蓝牙遥控器 2 pro"),
+            RemoteModel::Rc003
+        );
+        // 没有型号后缀的名称不猜（两种型号都可能是它）。
+        assert_eq!(
+            remote_model_from_name("小米蓝牙语音遥控器"),
+            RemoteModel::Unknown
         );
         assert_eq!(remote_model_from_name("MI RC"), RemoteModel::Unknown);
 
