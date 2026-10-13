@@ -2430,6 +2430,9 @@ impl BleSession {
             apply_input_connection_phase(snapshot.phase);
             snapshot.remote_name = Some(name.clone());
             snapshot.remote_model = model;
+            // 界面靠这个令牌把"已连接"标到扫描列表里正确的那一行（2026-10-13 现场：
+            // 两支遥控器同名，且连接可能是启动时恢复的、界面并没有"我点过连接"的记录）。
+            snapshot.remote_token = Some(crate::device_token(device_id));
             snapshot.last_error = None;
         }
         pending.service = Some(connect_stage(

@@ -144,6 +144,27 @@ pub struct PairedRemote {
     pub name: String,
     pub model: RemoteModel,
     pub is_supported_candidate: bool,
+    /// 设备稳定令牌（`device_token(id)`）：给界面把"已扫描到的某一行"和"当前连着的设备"对上，
+    /// 不用把设备身份送进前端（2026-10-13 现场：两支遥控器名字完全相同，靠名字认不出）。
+    #[serde(default)]
+    pub token: String,
+}
+
+/// 设备身份的**稳定短令牌**：FNV-1a 64 取低 32 位、8 位十六进制。
+///
+/// 用途只有一个——让界面把"扫描列表里的这一行"与"运行时当前连着的设备"对齐
+/// （2026-10-13 现场：两支遥控器在 Windows 里同名，行与连接状态无法对应）。
+/// 它不是安全边界、也不进日志：与 `LOGGING.md` 的脱敏口径一致（只做不可逆的短标识）。
+/// 归一化大小写与首尾空白——注册表实例 id 是大写、Raw Input 路径是小写，同一台设备
+/// 在不同来源里的写法必须得到同一个令牌。
+pub fn device_token(raw: &str) -> String {
+    let normalized = raw.trim().to_ascii_lowercase();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +247,10 @@ pub struct ConnectionSnapshot {
     pub battery_level: Option<u8>,
     pub remote_name: Option<String>,
     pub remote_model: RemoteModel,
+    /// 当前连接设备的稳定令牌（`device_token`；与扫描列表同一套算法）。
+    /// 只用于界面把"已连接"标到正确的那一行——不落日志、不进诊断块（2026-10-13 现场）。
+    #[serde(default)]
+    pub remote_token: Option<String>,
     pub capabilities: Option<AtvvCapabilities>,
     pub voice_state: VoiceSessionState,
     pub decoded_samples: u64,
@@ -274,6 +299,7 @@ impl Default for ConnectionSnapshot {
             battery_level: None,
             remote_name: None,
             remote_model: RemoteModel::Unknown,
+            remote_token: None,
             capabilities: None,
             voice_state: VoiceSessionState::Idle,
             decoded_samples: 0,
@@ -1172,8 +1198,10 @@ fn scan_paired_remotes() -> Result<Vec<PairedRemote>, PlatformError> {
         if !is_supported_remote_name(&name) {
             continue;
         }
+        let id = device.Id().map_err(windows_error)?.to_string();
         remotes.push(PairedRemote {
-            id: device.Id().map_err(windows_error)?.to_string(),
+            token: device_token(&id),
+            id,
             model: remote_model_from_name(&name),
             name,
             is_supported_candidate: true,
@@ -1287,6 +1315,22 @@ mod tests {
         for name in ["", "Mi Mouse", "MI RC2", "小米", "Unknown Remote"] {
             assert!(!is_supported_remote_name(name), "unexpected match: {name}");
         }
+    }
+
+    #[test]
+    fn device_token_is_stable_case_insensitive_and_distinct() {
+        // 同一台设备在不同来源里大小写/空白不同（注册表大写、Raw Input 小写），
+        // 令牌必须一致，否则界面又把"已连接"标错行（2026-10-13 现场）。
+        let upper = "BluetoothLE#BluetoothLEc0:5D:39:C2:D9:DB-11:22";
+        let lower = "  bluetoothle#bluetoothlec0:5d:39:c2:d9:db-11:22  ";
+        assert_eq!(device_token(upper), device_token(lower));
+        assert_eq!(device_token(upper).len(), 8);
+        assert!(device_token(upper).chars().all(|c| c.is_ascii_hexdigit()));
+        // 两支同型号遥控器（只差地址）必须得到不同令牌。
+        assert_ne!(
+            device_token("BluetoothLE#BluetoothLEc0:5d:39:c2:d9:db"),
+            device_token("BluetoothLE#BluetoothLEe8:55:40:b1:b7:6b")
+        );
     }
 
     #[test]

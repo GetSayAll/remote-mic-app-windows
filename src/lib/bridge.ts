@@ -309,6 +309,8 @@ export interface ConnectionSnapshot {
   batteryLevel?: number | null;
   remoteName: string | null;
   remoteModel: RemoteModel;
+  /** 当前连接设备的稳定令牌（Rust `device_token`，与扫描列表同一套算法）；老快照没有此字段。 */
+  remoteToken?: string | null;
   capabilities: AtvvCapabilities | null;
   voiceState: VoiceSessionState;
   decodedSamples: number;
@@ -411,6 +413,8 @@ export interface PairedRemote {
   name: string;
   model: RemoteModel;
   isSupportedCandidate: boolean;
+  /** 设备稳定令牌（Rust `device_token`）：把扫描行与"当前连着的设备"对上；老快照没有此字段。 */
+  token?: string;
 }
 
 /** 应用内更新（Rust updater command 契约，camelCase 对齐 src-tauri/src/updater.rs）。 */

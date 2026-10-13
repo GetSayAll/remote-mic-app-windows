@@ -523,6 +523,28 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
+  it("启动恢复的连接也能标出已连接那一行（两行同名时靠设备令牌对上）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 本机现场：两支遥控器名字完全一样，连接还是启动时恢复的（界面没点过「连接」）。
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true, token: "aaaa1111" },
+      { id: "dev-2", name: "小米蓝牙语音遥控器", model: "rc001", isSupportedCandidate: true, token: "bbbb2222" },
+    ]);
+    const ready = runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, remoteModel: "rc001" });
+    ready.platform.connection.remoteToken = "bbbb2222";
+    const wrapper = await mountWizard(ready);
+    await flushPromises();
+
+    const rows = wrapper.findAll(".onboarding-option");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).not.toContain("已连接");
+    expect(rows[1]!.text()).toContain("已连接");
+    // 已连接那一行显示型号——型号是唯一能区分两支同名遥控器的字段。
+    expect(rows[1]!.text()).toContain("小米蓝牙语音遥控器 2");
+    expect(rows[1]!.attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+
   it("已连接时显示具体型号（2 / 2 Pro），不只给系统名字", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     // 本机现场：Windows 给两支遥控器的名字完全一样（「小米蓝牙语音遥控器」）。
