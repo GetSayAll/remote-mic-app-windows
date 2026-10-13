@@ -20,6 +20,9 @@
    `[RETARGET] event=request source=app_bridge` 并**立即**复查——重启行带 `trigger=app`
    （轮询兜底为 `trigger=poll`）。预期：换机后 1 秒内完成重定位，随后的第一次按下即
    `path=report_layer`。
+6. 交接期端口竞争（2026-10-13 真机回归后加固）：换机重启时新旧实例短暂重叠，接班人可能
+   撞上单实例端口——应看到接班人记 `[WAIT] event=listen_retry … outcome=bound` 并在旧实例
+   退出后接管；**不得**出现 `[STOP] 绑定 127.0.0.1:47831 失败`（出现即回归）。
 
 ## 2026-09-27 全按键动态目标增量验收
 

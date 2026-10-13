@@ -109,6 +109,9 @@ mod imp {
     const RETARGET_POLL_MS: u64 = 2000;
     /// watchdog 的分片睡眠：既让"主程序请求"能在 100 ms 内被响应，也用于凑出轮询间隔。
     const RETARGET_WAKE_MS: u64 = 100;
+    /// 单实例端口的有界等待预算与步长（交接期重叠；见 [`bind_listener_with_retry`]）。
+    const LISTEN_RETRY_BUDGET_MS: u64 = 3000;
+    const LISTEN_RETRY_STEP_MS: u64 = 150;
     /// 注入/接管后等待**已鉴权** hello 的默认上限（秒）。
     /// 为什么设默认：2026-09-23 之前，"注入返回非 0 但 agent 从未连上"这种现象
     /// 只会表现为日志一片安静、程序一直等下去——把"失败"伪装成"正在工作"。
@@ -2105,18 +2108,70 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// ——端口就是单实例锁。2026-09-23 真机实测撞到过一次：上一轮还在 `--duration`
     /// 窗口内，第二轮双击就得到了 `os error 10048`，而当时那条消息只说了"失败"。
     fn bind_listener(port: u16) -> Result<TcpListener, String> {
-        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
-            Ok(l) => Ok(l),
-            Err(e) => {
-                let mut s = format!("绑定 127.0.0.1:{port} 失败：{e}");
-                if e.raw_os_error() == Some(WSAEADDRINUSE) {
-                    s.push_str(&format!(
-                        "。这通常意味着**已经有另一次 sayall-helper 在跑**（端口 {port} 即单实例锁）：\
-                         先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉），或用 --port 换端口。\
-                         谁在占：netstat -ano | findstr :{port}"
-                    ));
+        bind_listener_with_retry(port, LISTEN_RETRY_BUDGET_MS, LISTEN_RETRY_STEP_MS, None)
+    }
+
+    /// 单实例端口的**有界重试**版本（2026-10-13 现场）。
+    ///
+    /// 背景：换遥控器后助手会"重启自己"（先起新实例、旧实例随后收尾），两者短暂重叠时
+    /// 新实例会撞上端口锁 —— 没有重试就直接 `[STOP]` 退出，**换机后一个助手都不剩**
+    /// （现场实证：新实例 15:10:45.72 起、15:10:45.85 退出，旧实例 15:10:46.12 才释放）。
+    /// 因此给一小段有界等待：让旧实例把端口让出来。真正的"另一个实例在跑"仍然会在
+    /// 预算耗尽后按原样退出——单实例语义不变，只是不再在交接瞬间误杀接班人。
+    fn bind_listener_with_retry(
+        port: u16,
+        budget_ms: u64,
+        step_ms: u64,
+        logger: Option<&Logger>,
+    ) -> Result<TcpListener, String> {
+        let started = std::time::Instant::now();
+        let mut attempt: u32 = 0;
+        loop {
+            match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
+                Ok(l) => {
+                    if attempt > 0 {
+                        if let Some(logger) = logger {
+                            logger.kv(
+                                "[WAIT]",
+                                &[
+                                    ("event", "listen_retry".into()),
+                                    ("attempt", attempt.to_string()),
+                                    ("waited_ms", started.elapsed().as_millis().to_string()),
+                                    ("outcome", "bound".into()),
+                                ],
+                            );
+                        }
+                    }
+                    return Ok(l);
                 }
-                Err(s)
+                Err(e) => {
+                    let retryable = e.raw_os_error() == Some(WSAEADDRINUSE);
+                    if retryable && (started.elapsed().as_millis() as u64) + step_ms <= budget_ms {
+                        attempt += 1;
+                        if let Some(logger) = logger {
+                            logger.kv(
+                                "[WAIT]",
+                                &[
+                                    ("event", "listen_retry".into()),
+                                    ("attempt", attempt.to_string()),
+                                    ("waited_ms", started.elapsed().as_millis().to_string()),
+                                    ("reason", "address_in_use".into()),
+                                ],
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(step_ms));
+                        continue;
+                    }
+                    let mut s = format!("绑定 127.0.0.1:{port} 失败：{e}");
+                    if retryable {
+                        s.push_str(&format!(
+                            "。这通常意味着**已经有另一次 sayall-helper 在跑**（端口 {port} 即单实例锁）：\
+                             先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉），或用 --port 换端口。\
+                             谁在占：netstat -ano | findstr :{port}"
+                        ));
+                    }
+                    return Err(s);
+                }
             }
         }
     }
@@ -5455,7 +5510,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 若先准备再发现端口被占，就等于"失败的一次运行也动了磁盘状态"
         // （2026-09-23 真机实测：第二轮撞端口 10048 时已经写完了配置）。
         // 仍然保持"先监听、后注入"：让 agent 的 init() 一连就能连上，不白等 3 秒。
-        let listener = match bind_listener(args.port) {
+        //
+        // 2026-10-13：换机重启时新旧实例会短暂重叠（新实例先起、旧实例随后收尾），
+        // 这里改成**有界重试**（3 s / 150 ms），把交接期的端口竞争让过去；真正的
+        // "另一个实例在跑"仍会在预算耗尽后按原样 `[STOP]` 退出。
+        let listener = match bind_listener_with_retry(
+            args.port,
+            LISTEN_RETRY_BUDGET_MS,
+            LISTEN_RETRY_STEP_MS,
+            Some(&logger),
+        ) {
             Ok(l) => l,
             Err(e) => {
                 logger.line(&format!("[STOP] {e}"));
