@@ -29,7 +29,7 @@ const checklist = computed(() => {
   return items;
 });
 
-defineEmits<{ input: []; focus: []; blur: []; retry: [] }>();
+const emit = defineEmits<{ input: []; focus: []; blur: []; retry: [] }>();
 
 const box = ref<HTMLInputElement | null>(null);
 
@@ -47,6 +47,24 @@ const statusText = computed(() => {
       return "等待你按住遥控器语音键。";
   }
 });
+
+function onFocus(): void {
+  emit("focus");
+}
+
+/**
+ * 2026-10-13 现场：**文字已经上屏，却提示"输入框没有聚焦"**。
+ *
+ * 别的窗口盖上来（工具自己的语音条、系统弹窗…）时，浏览器会给输入框补一个 blur 事件，
+ * 但输入框**仍然持有 DOM 焦点**（`document.activeElement` 没变）——文字照样落在它里面。
+ * 这种"窗口级 blur"不能当成"输入框失去焦点"：只有元素**真的**不再持有焦点（用户点到
+ * 别处）才算。
+ */
+function onBlur(): void {
+  const element = box.value;
+  if (element && document.activeElement === element) return;
+  emit("blur");
+}
 
 function focusBox(): void {
   box.value?.focus();
@@ -96,8 +114,8 @@ defineExpose({ focusBox, clearBox, readValue });
       autocomplete="off"
       spellcheck="false"
       @input="$emit('input')"
-      @focus="$emit('focus')"
-      @blur="$emit('blur')"
+      @focus="onFocus"
+      @blur="onBlur"
     />
 
     <p v-if="statusText" class="onboarding-status-line">

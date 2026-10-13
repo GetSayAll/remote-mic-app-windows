@@ -1814,13 +1814,38 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
+  it("别的窗口盖上来时的窗口级 blur 不算失去输入目标（文字仍会落进输入框）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    const box = wrapper.find("input.onboarding-voice-input");
+    await box.trigger("focus");
+    await flushPromises();
+    // 工具语音条/系统弹窗抢焦点：浏览器补一个 blur，但元素仍持有 DOM 焦点。
+    await box.trigger("blur");
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(200);
+    await flushPromises();
+
+    // 不得据此判失败（2026-10-13 现场：文字已上屏却提示"输入框没有聚焦"）。
+    expect(wrapper.text()).not.toContain("输入框没有聚焦");
+    expect(wrapper.text()).not.toContain("失去了焦点");
+    expect(
+      onboardingEvents("voice_attempt").some((p) => p.reason === "voice.input_target_not_ready"),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
   it("asks the user to click back into the box when a session starts unfocused", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
 
     const wrapper = await mountWizard(connectedRuntime(), { attach: true });
-    await wrapper.find("input.onboarding-voice-input").trigger("blur");
+    await (wrapper.find("input.onboarding-voice-input").element as HTMLInputElement).blur();
     await flushPromises();
     await vi.advanceTimersByTimeAsync(200);
     await flushPromises();
