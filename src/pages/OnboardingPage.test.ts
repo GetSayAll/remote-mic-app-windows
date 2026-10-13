@@ -404,6 +404,24 @@ describe("Onboarding wizard shell", () => {
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
   });
 
+  it("第①步给完整配对流程，且不再写底部提示句", async () => {
+    const wrapper = await mountWizard(runtimeWith());
+
+    // 完整流程（2026-10-13：由第②步移入，含准备项/有电确认/主页+菜单重置/Windows 高级选项）。
+    expect(wrapper.text()).toContain("第一次使用：遥控器怎么连电脑");
+    expect(wrapper.text()).toContain("准备好：小米蓝牙语音遥控器 2 或 2 Pro（只支持这两种型号），并打开电脑的蓝牙。");
+    expect(wrapper.text()).toContain("先按任意键确认它有电");
+    expect(wrapper.text()).toContain("长按「TV」键约 3 秒");
+    expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    expect(wrapper.text()).toContain("回到第 4 步重置蓝牙后重新配对");
+    // 底部那段提示按现场要求删掉。
+    expect(wrapper.text()).not.toContain("设置中途可以随时退出");
+    // 编号连续 1–6，不留缺口（合并准备项后重新编号）。
+    const nums = wrapper.findAll(".onboarding-num").map((node) => node.text());
+    expect(nums).toEqual(["1", "2", "3", "4", "5", "6"]);
+    wrapper.unmount();
+  });
+
   it("blocks the remote step until connected, listening and a control button is observed", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(runtimeWith());
@@ -428,14 +446,11 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
   });
 
-  it("按键已收到但遥控器未连接时，说明句指出还差连接这一步", async () => {
+  it("按键已收到但还没找到遥控器时，说明句指向扫描", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 两个已配对遥控器：自动连接不介入，保留"按键已收到、连接未建立"这一现场状态
+    // 系统里没有已配对遥控器：自动连接不介入（扫描 0 台），保留"按键已收到、未连接"现场
     // （2026-10-10 用户报障：系统侧按键通道可用 ≠ 应用自己的会话已建立）。
-    mocks.scanPairedRemotes.mockResolvedValue([
-      { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
-      { id: "dev-2", name: "小米蓝牙语音遥控器 2", model: "rc001", isSupportedCandidate: true },
-    ]);
+    mocks.scanPairedRemotes.mockResolvedValue([]);
     const wrapper = await mountWizard(runtimeWith({ rawInputPhase: "ready" }));
 
     mocks.buttonHandler?.({ button: "home", isPressed: true });
@@ -445,6 +460,23 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.text()).toContain("按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。");
     expect(wrapper.text()).not.toContain("这一项可以继续了");
     expect(onboardingEvents("step_blocked").some((p) => p.code === "remote.not_connected")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("设备已列出（候选不唯一）时，说明句改为指向设备行上的连接", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
+      { id: "dev-2", name: "小米蓝牙语音遥控器 2", model: "rc001", isSupportedCandidate: true },
+    ]);
+    const wrapper = await mountWizard(runtimeWith({ rawInputPhase: "ready" }));
+    await flushPromises();
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("按键已收到。还差一步：点遥控器一行右侧的“连接”。");
+    expect(wrapper.text()).not.toContain("扫描已配对设备");
     wrapper.unmount();
   });
 
@@ -459,12 +491,20 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
-  it("scans paired remotes, connects the chosen one, and opens Windows Bluetooth settings", async () => {
+  it("打开蓝牙设置、扫描、连接：找到设备后动作按钮收起，连接成功后行上显示已连接", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     mocks.scanPairedRemotes.mockResolvedValue([
       { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
     ]);
     const wrapper = await mountWizard(runtimeWith());
+
+    // 还没找到设备：两个动作按钮可见（配对流程说明在第①步，本步不重复）。
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("打开蓝牙设置"))!
+      .trigger("click");
+    await flushPromises();
+    expect(mocks.openWindowsSettings).toHaveBeenCalledWith("bluetooth");
 
     await wrapper
       .findAll("button")
@@ -473,22 +513,45 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
     expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("小米蓝牙语音遥控器 2 Pro");
+    // 找到了：动作按钮收起，由设备行接管；连接做成按钮观感（2026-10-13 现场）。
+    const buttonTexts = wrapper.findAll("button").map((button) => button.text());
+    expect(buttonTexts.some((text) => text.includes("扫描已配对设备"))).toBe(false);
+    expect(buttonTexts.some((text) => text.includes("打开蓝牙设置"))).toBe(false);
+    expect(wrapper.findAll(".option-action").map((node) => node.text())).toEqual(["连接"]);
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("已配对的小米蓝牙语音遥控器") && button.text().endsWith("连接"))!
+      .find((button) => button.text().includes("小米蓝牙语音遥控器 2 Pro"))!
       .trigger("click");
     await flushPromises();
     expect(mocks.connectRemote).toHaveBeenCalledWith("dev-1");
-    // 连接成功不写进度消息（2026-10-13 现场要求），设备卡仍在、按键行继续给引导。
+    // 连接成功不写进度消息（2026-10-13 现场要求），引导由按键行承担。
     expect(wrapper.text()).not.toContain("正在确认语音功能");
+
+    // 运行时快照进入 ready：设备行换成"已连接"状态，且不再可点。
+    const ready = runtimeWith({ connectionPhase: "ready", bleVoiceReady: true });
+    await wrapper.setProps({ runtime: ready });
+    await flushPromises();
+    expect(wrapper.findAll(".option-action").map((node) => node.text())).toEqual(["已连接"]);
+    expect(wrapper.findAll(".onboarding-option")[0]!.attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+
+  it("扫描没有找到已配对遥控器时，动作按钮保留", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([]);
+    const wrapper = await mountWizard(runtimeWith());
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("打开蓝牙设置"))!
+      .find((button) => button.text().includes("扫描已配对设备"))!
       .trigger("click");
     await flushPromises();
-    expect(mocks.openWindowsSettings).toHaveBeenCalledWith("bluetooth");
+
+    expect(wrapper.text()).toContain("没有找到已配对的小米遥控器");
+    expect(wrapper.text()).toContain("扫描已配对设备");
+    expect(wrapper.text()).toContain("打开蓝牙设置");
+    wrapper.unmount();
   });
 
   it("进入②步且系统里恰好一个已配对遥控器时自动连接（日志带 auto 标记）", async () => {
@@ -557,35 +620,6 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
     expect(mocks.scanPairedRemotes).not.toHaveBeenCalled();
     disconnected.unmount();
-  });
-
-  it("点「连接」后首次连接说明卡不再闪现（连接中收起）", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    mocks.scanPairedRemotes.mockResolvedValue([
-      { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
-    ]);
-    // 连接请求挂起：组件停在"连接中"，正是原来卡片闪现的那个窗口。
-    mocks.connectRemote.mockImplementation(() => new Promise(() => {}));
-    const wrapper = await mountWizard(runtimeWith());
-
-    // 未连接且没在处理连接：说明卡与扫描按钮可见。
-    expect(wrapper.text()).toContain("首次连接遥控器");
-    expect(wrapper.text()).toContain("扫描已配对设备");
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("扫描已配对设备"))!
-      .trigger("click");
-    await flushPromises();
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("已配对的小米蓝牙语音遥控器") && button.text().endsWith("连接"))!
-      .trigger("click");
-    await flushPromises();
-
-    // 连接期间卡片收起（原实现会在 connecting 阶段把它重新显示出来 = 闪现）。
-    expect(wrapper.text()).not.toContain("首次连接遥控器");
-    wrapper.unmount();
   });
 
   it("连接成功不再写「正在确认语音功能…」进度消息", async () => {

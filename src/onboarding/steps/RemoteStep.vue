@@ -15,6 +15,8 @@ const props = defineProps<{
   scanning: boolean;
   scanMessage: string;
   connectingDeviceId: string;
+  /** 本向导会话里连接成功的那台设备 id（启动恢复的连接拿不到，按目标状态即可）。 */
+  connectedDeviceId: string;
   operationMessage: string;
   buttonObserved: boolean;
   voiceKeyMistake: boolean;
@@ -34,28 +36,28 @@ const connectionPhase = computed(() => props.runtime?.platform.connection.phase 
 const connected = computed(() =>
   (CONNECTED_PHASES as readonly string[]).includes(connectionPhase.value),
 );
-/**
- * 应用正在处理连接（扫描/连接/重连/睡眠挂起）：此时不显示"首次连接"说明卡。
- *
- * 2026-10-13 现场反馈：卡片原判据只有 `!connected`，而 `connected` 只认
- * ready/streaming/draining——点「连接」后应用要经过 connecting → awaiting_capabilities
- * 约 1–3 秒，这段窗口内卡片会重新出现、就绪后再消失（看起来是"闪一下"）。
- */
-const connectionInFlight = computed(
-  () =>
-    (
-      ["connecting", "discovering", "awaiting_capabilities", "reconnecting", "suspended"] as readonly string[]
-    ).includes(connectionPhase.value) ||
-    props.scanning ||
-    props.connectingDeviceId !== "",
-);
-const showFirstConnectCard = computed(() => !connected.value && !connectionInFlight.value);
 const reconnecting = computed(() => connectionPhase.value === "reconnecting");
 const reconnectAttempt = computed(() => props.runtime?.platform.connection.reconnectAttempt ?? 0);
 const phaseLabel = computed(() => connectionPhaseLabel(connectionPhase.value));
 const modelLabel = computed(() =>
   remoteModelLabel(props.runtime?.platform.connection.remoteModel ?? "unknown"),
 );
+
+/**
+ * 「扫描已配对设备 / 打开蓝牙设置」只在**还没找到已配对遥控器**时出现
+ * （2026-10-13 现场要求）：找到了就直接在设备行上选，动作按钮不再占位；
+ * 配对流程说明已移到第①步，本步不再重复。
+ */
+const showPairingActions = computed(() => !connected.value && props.devices.length === 0);
+
+/**
+ * 设备行是否就是当前已连接的那台（2026-10-13 现场要求：连接后给"已连接"状态）。
+ * 用本向导会话记录到的设备 id：自动连接与手动连接都走 connectDevice，都会记录；
+ * 启动恢复的连接页面拿不到 id，但那种情况下列表还没扫过、没有行可标记。
+ */
+function isConnectedDevice(device: PairedRemote): boolean {
+  return connected.value && props.connectedDeviceId === device.id;
+}
 
 /**
  * 按键行的说明句（2026-10-10 现场反馈）：系统侧按键通道可用 ≠ 应用自己的会话
@@ -67,9 +69,12 @@ const buttonRowDesc = computed(() => {
   if (!props.buttonObserved) {
     return "按一下遥控器上的普通按键（比如主页键），不要按语音键。";
   }
-  return connected.value
-    ? "这一项可以继续了。"
-    : "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。";
+  if (connected.value) return "这一项可以继续了。";
+  // 说明句跟着用户当下能看到的下一步走：还没扫到设备 → 先扫；
+  // 设备已列出（候选不唯一 / 自动连接没触发）→ 直接点设备行右侧的按钮。
+  return props.devices.length === 0
+    ? "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。"
+    : "按键已收到。还差一步：点遥控器一行右侧的“连接”。";
 });
 
 /** 扫描状态行：只在"扫描过 / 正在扫描"时出现，不新增空状态文案。 */
@@ -120,50 +125,19 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       无线麦只支持小米蓝牙语音遥控器 2 和小米蓝牙语音遥控器 2 Pro（RC001 / RC003）。
     </p>
 
-    <div v-if="showFirstConnectCard" class="onboarding-card accent">
-      <h4>首次连接遥控器</h4>
-      <ul class="onboarding-numlist">
-        <li>
-          <span class="onboarding-num">1</span>
-          <span>把遥控器放在电脑旁边，先按任意键确认它有电。</span>
-        </li>
-        <li>
-          <span class="onboarding-num">2</span>
-          <span>长按遥控器上的「TV」键约 3 秒，直到指示灯开始闪烁（进入配对模式）。</span>
-        </li>
-        <li>
-          <span class="onboarding-num">3</span>
-          <span>
-            如果指示灯没有反应：同时长按「主页」+「菜单」直到指示灯快速闪烁——这会重置遥控器的蓝牙，
-            并让它重新进入配对模式（不同批次的遥控器配对方式可能不同）。
-          </span>
-        </li>
-        <li>
-          <span class="onboarding-num">4</span>
-          <span>
-            在电脑上打开：设置 → 蓝牙和其他设备 → 添加设备 → 蓝牙。列表里如果没有「小米蓝牙语音遥控器」，
-            先点开页面里的「高级选项」（或“更多蓝牙选项”）再等它刷新。
-          </span>
-        </li>
-        <li>
-          <span class="onboarding-num">5</span>
-          <span>选择「小米蓝牙语音遥控器」，等待配对完成。</span>
-        </li>
-      </ul>
-      <p>配对失败，或遥控器以前配过别的设备：回到第 3 步重置蓝牙后重新配对。</p>
-      <div class="onboarding-chips">
-        <button
-          class="onboarding-chip strong"
-          type="button"
-          :disabled="scanning"
-          @click="$emit('scan')"
-        >
-          {{ scanning ? "正在扫描…" : "扫描已配对设备" }}
-        </button>
-        <button class="onboarding-chip" type="button" @click="$emit('openBluetoothSettings')">
-          打开蓝牙设置
-        </button>
-      </div>
+    <!-- 动作按钮只在还没找到已配对遥控器时出现；配对流程说明在第①步，本步不重复。 -->
+    <div v-if="showPairingActions" class="onboarding-chips">
+      <button
+        class="onboarding-chip strong"
+        type="button"
+        :disabled="scanning"
+        @click="$emit('scan')"
+      >
+        {{ scanning ? "正在扫描…" : "扫描已配对设备" }}
+      </button>
+      <button class="onboarding-chip" type="button" @click="$emit('openBluetoothSettings')">
+        打开蓝牙设置
+      </button>
     </div>
 
     <div class="onboarding-rows">
@@ -177,13 +151,28 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
         v-for="device in devices"
         :key="device.id"
         indicator="none"
-        :disabled="connectingDeviceId === device.id"
+        :selected="isConnectedDevice(device)"
+        :disabled="connectingDeviceId === device.id || isConnectedDevice(device)"
         @select="$emit('connect', device)"
       >
         <strong>{{ device.name }}</strong>
         <small>已配对的小米蓝牙语音遥控器</small>
         <template #trailing>
-          {{ connectingDeviceId === device.id ? "正在连接…" : "连接" }}
+          <span
+            class="option-action"
+            :class="{
+              connecting: connectingDeviceId === device.id,
+              connected: isConnectedDevice(device),
+            }"
+          >
+            {{
+              connectingDeviceId === device.id
+                ? "正在连接…"
+                : isConnectedDevice(device)
+                  ? "已连接"
+                  : "连接"
+            }}
+          </span>
         </template>
       </OptionCard>
 

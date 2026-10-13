@@ -143,6 +143,8 @@ const devices = ref<PairedRemote[]>([]);
 const scanning = ref(false);
 const scanMessage = ref("");
 const connectingDeviceId = ref("");
+/** 本向导会话里连接成功的那台设备（设备行显示"已连接"；启动恢复的连接为空）。 */
+const connectedDeviceId = ref("");
 const operationMessage = ref("");
 const remoteButtonObserved = ref(false);
 const voiceKeyMistake = ref(false);
@@ -615,6 +617,7 @@ async function connectDevice(device: PairedRemote, mode: "auto" | "manual" = "ma
   reportStepAction("remote", "connect_requested", "unknown", { detail: mode });
   try {
     await connectRemote(device.id);
+    connectedDeviceId.value = device.id;
     // 成功不写进度消息（2026-10-13 现场要求：那条"正在确认语音功能…"与下方按键行
     // 引导重复、按键已收到后还会变成过期信息）。连接过程由连接检查卡片的
     // 进行中/已就绪表达；失败仍给出原因。
@@ -1737,6 +1740,7 @@ async function retryVoiceTest(): Promise<void> {
             :scanning="scanning"
             :scan-message="scanMessage"
             :connecting-device-id="connectingDeviceId"
+            :connected-device-id="connectedDeviceId"
             :operation-message="operationMessage"
             :button-observed="remoteButtonObserved"
             :voice-key-mistake="voiceKeyMistake"
@@ -1805,6 +1809,13 @@ async function retryVoiceTest(): Promise<void> {
         </div>
 
         <div class="onboarding-actions">
+          <!-- 门禁提示独立占一整行（2026-10-13 现场要求：提示句保持一行不换行）；
+               行高固定，提示出现/消失时按钮不跳位。 -->
+          <div class="onboarding-block-line" aria-live="polite">
+            <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{
+              blockMessage
+            }}</span>
+          </div>
           <div class="onboarding-actions-left">
             <button
               class="onboarding-diagnostics-button"
@@ -1823,9 +1834,7 @@ async function retryVoiceTest(): Promise<void> {
               {{ diagnosticsCopyMessage }}
             </span>
           </div>
-
           <div class="onboarding-actions-right">
-            <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{ blockMessage }}</span>
             <button
               class="primary-button"
               type="button"
@@ -1931,10 +1940,20 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-actions {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
+  gap: 6px 18px;
   padding-top: 4px;
+}
+/* 门禁提示：独立占整行、保持一行不换行（2026-10-13 现场要求）；min-height 让
+   提示出现/消失时下面的按钮行不跳位。 */
+.onboarding-block-line {
+  flex: 0 0 100%;
+  min-height: 24px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
 }
 .onboarding-actions-left {
   display: flex;
@@ -2388,6 +2407,30 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-option.selected .option-trailing {
   color: var(--accent-text);
 }
+/* 设备行动作词做成按钮观感（2026-10-13 现场：原来像纯文本，用户不知道要不要点）；
+   连接中/已连接改成状态胶囊。 */
+.onboarding-option .option-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-surface);
+  color: var(--accent-text);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.onboarding-option .option-action.connecting {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.onboarding-option .option-action.connected {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--success-text);
+}
 .onboarding-tag {
   margin-left: 8px;
   font-size: 12px;
@@ -2563,10 +2606,12 @@ async function retryVoiceTest(): Promise<void> {
 
 /* 底部动作行里的门禁提示（右对齐，紧贴主按钮上方）。 */
 .onboarding-block-hint {
-  max-width: 420px;
   font-size: 14px;
+  line-height: 24px;
   color: var(--warning-text);
   text-align: right;
+  /* 保持一行不换行（2026-10-13 现场要求）；本行独占整行宽度，最长提示也放得下。 */
+  white-space: nowrap;
 }
 /* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接（无下划线）。 */
 .onboarding-diagnostics-button {
