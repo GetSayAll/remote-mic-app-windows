@@ -1341,6 +1341,8 @@ describe("Onboarding controls & completion steps", () => {
 
   it("navigates back from controls to the voice test step and releases the suspension", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
+    // 真实用户能到⑥步，说明④步已经选过工具；补上这个前置（2026-10-13 起⑤步缺工具会退回④步）。
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
     const wrapper = await mountWizard(connectedRuntime());
 
     await wrapper.find(".onboarding-back").trigger("click");
@@ -1598,6 +1600,36 @@ describe("Onboarding voice test step", () => {
 
     expect(mocks.getImeStatus).toHaveBeenCalled();
     expect(wrapper.text()).not.toContain("输入法还没切到");
+    wrapper.unmount();
+  });
+
+  it("重启后直接落在⑤步：按磁盘配置补读工具与快捷键（不再显示“你选的输入工具”）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    // 工具名出现在核对卡里（此前 stagedTool 未读 ⇒ 回退文案"你选的输入工具"，2026-10-13 现场）。
+    expect(wrapper.text()).toContain("输入法切到“微信输入法”。");
+    expect(wrapper.text()).not.toContain("你选的输入工具");
+    expect(mocks.getVoiceInputTool).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("重启后落在⑤步但从未选过工具：退回④步补选（不给缺前置状态的一页做验证）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue(null);
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("选择你要用的输入工具");
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("voice_tool");
+    expect(
+      onboardingEvents("action").some(
+        (p) => p.reason === "tool_missing_fallback" && p.result === "failed",
+      ),
+    ).toBe(true);
     wrapper.unmount();
   });
 

@@ -171,6 +171,8 @@ const openingVbCablePage = ref(false);
 
 // ---- 输入工具步骤 ----
 const stagedTool = ref<VoiceInputTool | null>(null);
+/** 本次加载是否已读过输入工具配置（重启后落在⑤步时补读一次，见步骤 watcher）。 */
+let voiceToolStateLoaded = false;
 /** 完成页读到的正式配置（本会话未经过步骤④时的回退来源）。 */
 const configuredTool = ref<VoiceInputTool | null>(null);
 const currentHotkey = ref<KeyChord | null>(null);
@@ -369,6 +371,11 @@ watch(
       void prepareVoiceToolStep();
     }
     if (current === "voice_test") {
+      // 重启后直接落在⑤步时补读工具配置（2026-10-13 现场：不补读会显示"你选的输入工具"，
+      // 甚至从没选过工具也能停在⑤步）。只在本次加载还没读过时读一次，避免与④步重复。
+      if (!voiceToolStateLoaded) {
+        void prepareVoiceToolStep();
+      }
       void startVoiceTestSession();
     }
     if (observingButtons) {
@@ -943,6 +950,7 @@ function hotkeyForTool(tool: VoiceInputTool): KeyChord | null {
 
 async function prepareVoiceToolStep(): Promise<void> {
   toolMessage.value = "";
+  voiceToolStateLoaded = true;
   const started = performance.now();
   // 该调用同时服务第④步与第⑤步（重启后直接落在第⑤步时补读配置），故按当前步骤记录。
   reportStepAction(step.value, "read_tool_state", "unknown");
@@ -962,6 +970,13 @@ async function prepareVoiceToolStep(): Promise<void> {
     reportStepAction(step.value, "read_tool_state", "passed", {
       elapsedMs: actionElapsed(started),
     });
+    // ⑤步需要"已经选过工具"才成立（核对卡、输入法检查、语音键都按它来）。重启后若
+    // 直接落在⑤步而磁盘上从未选过工具（2026-10-13 现场：⑤步显示"你选的输入工具"），
+    // 就退回④步补选——不能让人在缺前置状态的一页上做验证。
+    if (step.value === "voice_test" && tool === null) {
+      reportStepAction("voice_test", "tool_missing_fallback", "failed", { detail: "to_tool_step" });
+      await setStep("voice_tool", "fix");
+    }
   } catch (error) {
     toolMessage.value = error instanceof Error ? error.message : String(error);
     reportStepAction(step.value, "read_tool_state", "failed", {
