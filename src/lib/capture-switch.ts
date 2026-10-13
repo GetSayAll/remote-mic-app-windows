@@ -10,6 +10,8 @@
  * - 功能启动中（助手还在连）不显示文案——正在操作由开关态表达。
  */
 
+import type { Rc003CaptureHealth } from "./bridge";
+
 /** 开关的可见状态：不可用 / 正在操作 / 开启 / 关闭。 */
 export type CaptureSwitchState = "unavailable" | "busy" | "on" | "off";
 
@@ -31,6 +33,42 @@ export function captureSwitchState(input: {
   if (input.unsupported) return "unavailable";
   if (input.busy) return "busy";
   return input.enabled === true ? "on" : "off";
+}
+
+/**
+ * 「开关开着、但功能还没真的生效」的一句提示（2026-10-13 Andy 定稿，
+ * 见 docs/product-copy.md §7 的同日决定）。
+ *
+ * 只在**遥控器链路正常**时显示这句：链路本身断掉时由连接区既有的文案说明
+ * （「暂时没有找到小米语音遥控器…」，`ble.rs` 的 `Unreachable` 分支），这里不重复、
+ * 也不把用户往遥控器侧引——这条链路断在 PC 内部（助手 ↔ 宿主内 agent），
+ * 2026-10-13 现场已证伪「按遥控器就能恢复」。
+ *
+ * 与失败句同一位（开关旁唯一允许有文字的地方）：一次只显示一句，操作失败优先
+ * （那是用户刚做的动作），其次才是这一句。
+ */
+export function captureInactiveText(name: string): string {
+  return `${name}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。`;
+}
+
+/**
+ * 是否显示上面那句「开着但没生效」的提示（纯判定，两处入口共用，单测钉住）。
+ *
+ * 三个条件全满足才显示：
+ * 1. 开关在**开启**态（关着、正在操作、本机不可用都不显示）；
+ * 2. 后端发布的实际生效状态是 `inactive`（过了宽限仍没有所有权，见 Rust
+ *    `CaptureHealth`）——`starting` 是助手还在连，属于正常过程；
+ * 3. 遥控器链路正常（`linkReady`）：链路本身断掉时由连接区既有的文案说明
+ *    （「暂时没有找到小米语音遥控器…」），不重复、也不把用户往遥控器侧引。
+ */
+export function shouldShowCaptureInactive(input: {
+  switchState: CaptureSwitchState;
+  health: Rc003CaptureHealth;
+  linkReady: boolean;
+}): boolean {
+  return (
+    input.switchState === "on" && input.health === "inactive" && input.linkReady
+  );
 }
 
 /**
