@@ -46,6 +46,8 @@ pub mod key_host;
 pub mod hardware_script;
 pub mod registered_apps;
 #[cfg(windows)]
+pub(crate) use ble::bluetooth_address_from_device_id;
+#[cfg(windows)]
 pub use ble::{
     diagnostic_log_directory, gatt_note, initialize_diagnostic_log, DiagnosticLogMetadata,
 };
@@ -905,6 +907,13 @@ impl WindowsPlatform {
     pub fn connect_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
         #[cfg(windows)]
         {
+            // 用户在应用里选/换遥控器的**那一刻**就发布「正在用的那支」的地址
+            // （2026-10-13 现场补充）：会话要等能力协商完才 Ready，而 Raw Input
+            // 绑定与助手选宿主都需要这个地址——只等 Ready 的话，应用刚启动、或
+            // 刚点连接而能力协商还没回来的那段时间里，两支遥控器同时在线就又会
+            // 歧义失败（现场：`raw_input_listener` 每 10 秒失败一次，向导卡在
+            // `remote.listener_not_ready`）。
+            crate::remote_target::set(crate::bluetooth_address_from_device_id(&device_id));
             self.runtime.connect(device_id)
         }
 
@@ -930,6 +939,9 @@ impl WindowsPlatform {
     pub fn restore_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
         #[cfg(windows)]
         {
+            // 启动时按已保存的选择立刻发布（同 `connect_remote` 的理由）：
+            // 不等会话 Ready，Raw Input 就能在"两支同型号同时在位"时绑对那一支。
+            crate::remote_target::set(crate::bluetooth_address_from_device_id(&device_id));
             self.runtime.restore(device_id)
         }
 

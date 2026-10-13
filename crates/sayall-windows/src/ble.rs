@@ -2712,7 +2712,12 @@ impl BleSession {
     }
 }
 
-fn bluetooth_address_from_device_id(device_id: &str) -> Option<u64> {
+/// 从配对设备 id 里取出**对端**蓝牙地址（id 里同时含本机与对端地址，取最后一个）。
+///
+/// `pub(crate)`：2026-10-13 起 `WindowsPlatform::connect_remote` / `restore_remote`
+/// 也用它——用户选/换遥控器的一刻就发布目标地址给 `remote_target`，不必等
+/// BLE 会话 Ready（否则"应用刚启动/刚点连接"那段时间两支遥控器同时在线仍会歧义）。
+pub(crate) fn bluetooth_address_from_device_id(device_id: &str) -> Option<u64> {
     device_id
         .as_bytes()
         .windows(17)
