@@ -61,6 +61,13 @@
   - 新增日志：`action=capture_recover phase=started reason=agent_never_acked attempt= inactive_ms= next_interval_ms=`、
     `action=capture_recover phase=helper_restarted terminal_result=passed|failed attempt=`；
     `capture_resumed` 增加 `recover_attempts=`，让「这次恢复是自愈救回来的」在日志里可判。
+- 顺带纠错：`capture_inactive` 行的 `hint=reconnect_remote` 改为 `hint=auto_restart_helper`。
+  hint 字段写的是**下一步动作**，而这条线断在 PC 内部（助手 ↔ 宿主内 agent），遥控器侧
+  动作对它无效——该措辞是 2026-10-08 同型现场加上的，本次现场证伪：用户在失效期间按了
+  多次遥控器（session 43–49），恢复只发生在换新助手实例那一刻。界面文案若复用这里的
+  结论，同样不能把用户往遥控器侧引；遥控器侧「按一下任意键可以加快唤醒」只对 BLE
+  连接阶段的 `Unreachable`（「暂时没有找到小米语音遥控器」）成立，依据见
+  `crates/sayall-windows/src/ble.rs` 的同名文案与 2026-09-22 实测注释。
 - 未采用的方案：助手侧自检「没有 agent 会话」后自我重启（助手进程是提权实例，
   重启本身还是要走计划任务，等价于应用侧动作，却把状态判断留在了两处）。
 

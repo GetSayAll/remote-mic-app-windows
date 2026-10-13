@@ -1284,10 +1284,15 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                     let inactive_since =
                         *capture_inactive_since.get_or_insert_with(std::time::Instant::now);
                     if !capture_inactive_logged {
+                        // hint 说**下一步动作**，不是猜测：这条线断在 PC 内部（助手 ↔ 宿主内
+                        // agent），遥控器侧动作对它无效。原文案曾写 `reconnect_remote`
+                        // （2026-10-08 同型现场时的判断），2026-10-13 现场证伪——用户在失效
+                        // 期间按了多次遥控器，恢复只发生在换新助手实例那一刻（见
+                        // Bugs/2026-10-13-rc003-capture-silent-inactive.md）。
                         sayall_windows::gatt_note(format!(
                             "rc003 feature=enhanced-capture action=capture_inactive phase=completed \
                              terminal_result=failed reason=agent_never_acked retryable=true \
-                             elapsed_ms={connected_ms} hint=reconnect_remote {}",
+                             elapsed_ms={connected_ms} hint=auto_restart_helper {}",
                             bridge_health_summary(&snapshot)
                         ));
                         capture_inactive_logged = true;
