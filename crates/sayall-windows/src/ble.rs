@@ -407,7 +407,8 @@ fn worker_loop(
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
     // 提前重连的状态（2026-10-13，issue #206）：上次连接尝试结束的时刻，
-    // 供安静窗判定；以及被安静窗抑制的触发累计数（折叠日志，成功提前即清零）。
+    // 供安静窗判定；以及被安静窗抑制的触发累计数（折叠日志；成功提前或成功连上即清零，
+    // 保证"首条"日志按 episode 计，不被上一轮的大数字吞掉）。
     let mut last_attempt_finished: Option<Instant> = None;
     let mut suppressed_promotions: u64 = 0;
     // 语音会话纪元：每次会话开始（StreamStarted）+1。wetype_check 重试
@@ -485,6 +486,10 @@ fn worker_loop(
                                     &mut capabilities_deadline,
                                 );
                                 last_attempt_finished = Some(Instant::now());
+                                if result.is_ok() {
+                                    // 连上了：抑制计数按 episode 收口（自审 2026-10-13）。
+                                    suppressed_promotions = 0;
+                                }
                                 if let Some(note) =
                                     attempt_probe(&mut resource_probe, attempt, &result)
                                 {
@@ -674,6 +679,10 @@ fn worker_loop(
                     &mut capabilities_deadline,
                 );
                 last_attempt_finished = Some(Instant::now());
+                if result.is_ok() {
+                    // 连上了：抑制计数按 episode 收口（自审 2026-10-13）。
+                    suppressed_promotions = 0;
+                }
                 if let Some(note) = attempt_probe(&mut resource_probe, 0, &result) {
                     gatt_note(note);
                 }
