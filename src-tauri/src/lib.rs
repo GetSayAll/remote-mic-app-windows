@@ -1036,6 +1036,44 @@ fn capture_inactive_due_to_missing_ownership(
     target_usages > 0 && owned_usages == 0 && connected_ms >= grace_ms
 }
 
+/// 「捕获该生效却没生效」持续多久后，应用**自己重来一次助手**（纯判定，单测覆盖）。
+///
+/// 2026-10-13 现场（诊断日志实测）：设备宿主进程被系统重建后，宿主里的 agent 随之
+/// 消失，而**助手进程还活着**——对账停在「助手已连接」分支只能观察，永远不会重新
+/// 解析宿主并注入。用户侧表现是「开关开着、按键与语音键全断、界面没有任何提示」，
+/// 静默失效 2.5 天；用户把开关关开一次（= 起一个新助手实例）立刻恢复。本常量把
+/// 那次手动操作交给应用自己：持续这么久没有所有权就 `/end` + `/run` 换一个新实例。
+const CAPTURE_RECOVER_AFTER_MS: u64 = 60_000;
+/// 前几次「自动重来」之间的最短间隔（防抖；新助手注入 + 握手本身也要时间）。
+const CAPTURE_RECOVER_MIN_INTERVAL_MS: u64 = 60_000;
+/// 连续多次「自动重来」仍无效后的间隔：不修链路，但也不每 60 秒反复重启。
+const CAPTURE_RECOVER_STEADY_MS: u64 = 300_000;
+/// 快速间隔用在前几次尝试上。
+const CAPTURE_RECOVER_RAPID_ATTEMPTS: u32 = 3;
+
+/// 第 `attempts` 次之后，「自动重来」两轮之间的最小间隔（纯函数）。
+fn capture_recover_interval_ms(attempts: u32) -> u64 {
+    if attempts < CAPTURE_RECOVER_RAPID_ATTEMPTS {
+        CAPTURE_RECOVER_MIN_INTERVAL_MS
+    } else {
+        CAPTURE_RECOVER_STEADY_MS
+    }
+}
+
+/// 是否该「自动重来一次助手」（纯判定，单测覆盖）。
+///
+/// `inactive_ms` = 捕获连续失效了多久；`since_last_attempt_ms` = 距上次自动重来多久
+/// （`None` = 还没试过）；`attempts` = 已经自动重来过几次。两个条件都满足才动作：
+/// 先给足时间（助手可能正在注入 / 握手），再按尝试次数做防抖。
+fn capture_should_restart_helper(
+    inactive_ms: u64,
+    since_last_attempt_ms: Option<u64>,
+    attempts: u32,
+) -> bool {
+    inactive_ms >= CAPTURE_RECOVER_AFTER_MS
+        && since_last_attempt_ms.map_or(true, |age| age >= capture_recover_interval_ms(attempts))
+}
+
 /// 常驻对账的节奏参数（纯常量，测试钉住）。
 ///
 /// 2026-10-04 用户要求「重启后自动恢复全按键支持」。旧实现是**一次性**的：
@@ -1134,6 +1172,9 @@ fn decide_reconcile_round(enabled: bool, check: AutoTriggerCheck) -> ReconcileAc
 /// * 开关关着 → 不触发（`Standby`）；
 /// * 桥 failed/stopped → 触发无意义，只重查（`WaitBridge`）；
 /// * 助手已连接 → 观察，掉线后重新进入恢复（重新来一轮快速期）；
+///   助手活着但**捕获没生效**（agent 拿不到所有权）持续到阈值 → 自己
+///   `/end` + `/run` 重来一次助手（等价于用户手动关开一次开关，
+///   见 `CAPTURE_RECOVER_AFTER_MS`），仍无效则降速重试；
 /// * 桥在监听、助手未连上 → 触发：前 4 轮每 5 秒，第 5 轮 `/end` + `/run`
 ///   兜底一次，此后每 30 秒稳态重试，稳态期每 10 轮再兜底一次。
 fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: SettingsStore) {
@@ -1164,6 +1205,11 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
     // 捕获是否真的在生效：桥连上 ≠ 捕获生效（见 AUTO_TRIGGER_CAPTURE_GRACE_MS）。
     let mut connected_since: Option<std::time::Instant> = None;
     let mut capture_inactive_logged = false;
+    // 失效是从哪一刻开始连续的、上次自动重来是什么时候、已经重来过几次
+    // （2026-10-13：静默失效不再只写日志，见 CAPTURE_RECOVER_AFTER_MS）。
+    let mut capture_inactive_since: Option<std::time::Instant> = None;
+    let mut capture_recover_last_at: Option<std::time::Instant> = None;
+    let mut capture_recover_attempts: u32 = 0;
     loop {
         let enabled = settings
             .load()
@@ -1186,6 +1232,9 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 bridge_unavailable_logged = false;
                 connected_since = None;
                 capture_inactive_logged = false;
+                capture_inactive_since = None;
+                capture_recover_last_at = None;
+                capture_recover_attempts = 0;
                 std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
             }
             ReconcileAction::WaitBridge => {
@@ -1201,6 +1250,9 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                 consecutive = 0;
                 connected_since = None;
                 capture_inactive_logged = false;
+                capture_inactive_since = None;
+                capture_recover_last_at = None;
+                capture_recover_attempts = 0;
                 std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
             }
             ReconcileAction::Connected => {
@@ -1210,10 +1262,16 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                     ));
                     connected_since = Some(std::time::Instant::now());
                     capture_inactive_logged = false;
+                    capture_inactive_since = None;
                 }
                 // 「助手连上」不等于「捕获生效」：agent 没拿到所有权时按键一条都不过桥。
                 // 超过宽限仍未接管就落一条可分流的失败日志（含去向提示），恢复时补一条
                 // 成功——不让「显示已开启、实际按不动」成为静默状态（2026-10-08 现场）。
+                //
+                // 也不能停在日志上（2026-10-13 现场）：宿主进程被系统重建后 agent 消失、
+                // 助手进程却还活着，这个分支永远等不到恢复——功能静默失效 2.5 天，用户
+                // 把开关关开一次才好。持续失效到阈值就自己重来一次助手（等价于那次手动
+                // 关开），恢复不了就按尝试次数降速重试，不把结果留给用户。
                 let connected_ms = connected_since
                     .map(|since| since.elapsed().as_millis() as u64)
                     .unwrap_or(0);
@@ -1223,6 +1281,8 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                     connected_ms,
                     AUTO_TRIGGER_CAPTURE_GRACE_MS,
                 ) {
+                    let inactive_since =
+                        *capture_inactive_since.get_or_insert_with(std::time::Instant::now);
                     if !capture_inactive_logged {
                         sayall_windows::gatt_note(format!(
                             "rc003 feature=enhanced-capture action=capture_inactive phase=completed \
@@ -1232,16 +1292,58 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                         ));
                         capture_inactive_logged = true;
                     }
+                    let inactive_ms = inactive_since.elapsed().as_millis() as u64;
+                    let since_last_ms =
+                        capture_recover_last_at.map(|at| at.elapsed().as_millis() as u64);
+                    if capture_should_restart_helper(
+                        inactive_ms,
+                        since_last_ms,
+                        capture_recover_attempts,
+                    ) {
+                        capture_recover_attempts += 1;
+                        let attempt = capture_recover_attempts;
+                        sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=capture_recover phase=started \
+                             reason=agent_never_acked attempt={attempt} inactive_ms={inactive_ms} \
+                             next_interval_ms={} {}",
+                            capture_recover_interval_ms(attempt),
+                            bridge_health_summary(&snapshot)
+                        ));
+                        // 此刻助手进程活着但拿不到所有权（在它手里这条链路已是死路），
+                        // `/end` 清掉它不会误杀正在工作的助手；`/run` 起新实例，新实例
+                        // 重新解析宿主 → 注入或接管 → 所有权回来即恢复。
+                        let restarted =
+                            rc003_task::task_stop().and_then(|()| rc003_task::task_trigger());
+                        match restarted {
+                            Ok(()) => sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=capture_recover \
+                                 phase=helper_restarted terminal_result=passed attempt={attempt}"
+                            )),
+                            Err(error) => sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=capture_recover \
+                                 phase=helper_restarted terminal_result=failed attempt={attempt} \
+                                 detail={error}"
+                            )),
+                        }
+                        capture_recover_last_at = Some(std::time::Instant::now());
+                        // 新助手要重新注入 / 握手：从头计时，别连环干掉刚起来的实例。
+                        capture_inactive_since = Some(std::time::Instant::now());
+                    }
                 } else if capture_inactive_logged && !snapshot.owned_usages.is_empty() {
                     // 只有真的拿回所有权才算恢复。若此时恰好是"用户把增强键全部取消映射"
                     // （target 清空、owned 也为空），记 capture_resumed 同样是假阳性——
                     // 与 0.8.1 的教训同型：判据必须是"确实生效"，不是"失败条件消失"。
+                    // `recover_attempts` 让"这次恢复是自愈救回来的"在日志里可判。
                     sayall_windows::gatt_note(format!(
                         "rc003 feature=enhanced-capture action=capture_resumed phase=completed \
-                         terminal_result=passed owned_usages={} elapsed_ms={connected_ms}",
+                         terminal_result=passed owned_usages={} elapsed_ms={connected_ms} \
+                         recover_attempts={capture_recover_attempts}",
                         snapshot.owned_usages.len()
                     ));
                     capture_inactive_logged = false;
+                    capture_inactive_since = None;
+                    capture_recover_last_at = None;
+                    capture_recover_attempts = 0;
                 }
                 active_seen = true;
                 was_connected = true;
@@ -1262,6 +1364,9 @@ fn rc003_auto_trigger_reconcile(platform: Arc<dyn PlatformRuntime>, settings: Se
                     consecutive = 0;
                     connected_since = None;
                     capture_inactive_logged = false;
+                    capture_inactive_since = None;
+                    capture_recover_last_at = None;
+                    capture_recover_attempts = 0;
                 }
                 active_seen = true;
                 consecutive += 1;
@@ -3505,6 +3610,36 @@ mod tests {
         assert!(!capture_inactive_due_to_missing_ownership(
             0, 0, 60_000, 20_000
         ));
+    }
+
+    /// 静默失效必须自己恢复，且在日志判据之外真做了动作（2026-10-13 现场：宿主进程重建
+    /// 后 agent 消失、助手进程还活着，「全按键支持」静默失效 2.5 天，用户手动关开一次
+    /// 开关才恢复）。判据两段：先给足时间（助手可能正在注入 / 握手），再按尝试次数防抖。
+    #[test]
+    fn capture_restarts_helper_only_after_inactive_grace_and_throttled() {
+        // 还没到阈值：不动。
+        assert!(!capture_should_restart_helper(59_999, None, 0));
+        // 到阈值且从未重来过：动。
+        assert!(capture_should_restart_helper(60_000, None, 0));
+        // 距上次重来太近：不动（新助手要重新注入 / 握手）。
+        assert!(!capture_should_restart_helper(120_000, Some(59_999), 1));
+        assert!(capture_should_restart_helper(120_000, Some(60_000), 1));
+        // 连续多次无效后降速：同样的"失效很久"不再允许 60 秒一次的快速间隔。
+        assert!(!capture_should_restart_helper(400_000, Some(60_000), 3));
+        assert!(capture_should_restart_helper(400_000, Some(300_000), 3));
+        // 分档常量钉住（前几次快速、之后慢速）。
+        assert_eq!(
+            capture_recover_interval_ms(0),
+            CAPTURE_RECOVER_MIN_INTERVAL_MS
+        );
+        assert_eq!(
+            capture_recover_interval_ms(2),
+            CAPTURE_RECOVER_MIN_INTERVAL_MS
+        );
+        assert_eq!(capture_recover_interval_ms(3), CAPTURE_RECOVER_STEADY_MS);
+        // 阈值本身必须大于「宽限 + 观察间隔」，否则会在助手还在握手时就动手。
+        assert!(CAPTURE_RECOVER_AFTER_MS > AUTO_TRIGGER_CAPTURE_GRACE_MS);
+        assert!(CAPTURE_RECOVER_AFTER_MS >= AUTO_TRIGGER_WATCH_MS);
     }
 
     /// 兜底失败行必须自带"差在哪一步"的对账字段（2026-10-01 现场教训：
