@@ -105,6 +105,10 @@
   据此把"向导内直接切"从实验路径收成**正式路径**（删掉开关与 `ensure_ime_for_tool_inline`，
   `ensure_ime_for_tool` 直接走允许自身窗口前台的分支，scope 仍记 `wizard_inline`）。
   生产路径（按下语音键 / 工具选择）的守卫**保持不变**——本次只验证了向导这条检查路径。
+- **当晚最终决定（Andy）**：不要向导里的自动切换，**只保留文字提醒** ⇒ ⑤步的输入法处理改为
+  纯只读检查（`get_ime_status`）+ 说明卡；删掉 `ensure_voice_tool_ime` 命令、
+  `ensure_ime_for_tool` 与 `ImeSwitchScope::WizardInline`。生产路径（按下语音键的兜底切换、
+  工具选择的立即切换/布防）与主页面工具卡行为不变。
 
 ## 隐私
 

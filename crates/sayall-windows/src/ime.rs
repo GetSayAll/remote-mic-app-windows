@@ -278,9 +278,6 @@ pub(crate) enum ImeSwitchScope {
     VoicePress,
     /// 用户刚在连接页选中输入工具后的一次性对齐（2026-10-03，离开自身窗口焦点后执行）。
     ToolSelect,
-    /// 向导「试一下」页的检查路径（2026-10-13 真机结论）：允许在自身窗口前台时也切——
-    /// 输入框就在本应用窗口里，前台必然是应用自己；实测切换不会触发 WebView 整页重载。
-    WizardInline,
 }
 
 impl ImeSwitchScope {
@@ -288,7 +285,6 @@ impl ImeSwitchScope {
         match self {
             ImeSwitchScope::VoicePress => "voice_press",
             ImeSwitchScope::ToolSelect => "tool_select",
-            ImeSwitchScope::WizardInline => "wizard_inline",
         }
     }
 }
@@ -307,14 +303,6 @@ pub fn ensure_session_ime(
     scope: ImeSwitchScope,
 ) -> Result<ImeActivation, String> {
     ensure_session_ime_inner(tool, scope, false)
-}
-
-/// 允许在"前台是本应用自己"时也执行一次切换（2026-10-13 真机结论后转为正式路径）：
-/// 只供向导「试一下」页的检查使用，见 [`ensure_ime_for_tool`]；生产语音路径不走这里。
-pub fn ensure_session_ime_allowing_self_window(
-    tool: VoiceInputTool,
-) -> Result<ImeActivation, String> {
-    ensure_session_ime_inner(tool, ImeSwitchScope::WizardInline, true)
 }
 
 fn ensure_session_ime_inner(
@@ -1103,32 +1091,6 @@ pub fn ime_status_for(tool: Option<VoiceInputTool>) -> ImeStatus {
     }
 }
 
-/// 先（幂等地）确保 `tool` 对应的输入法是当前会话的活动输入法，再回读一次状态。
-///
-/// 「试一下」页点输入框、按语音键都走这里：切换失败不阻断流程，界面从
-/// `matches_expected=false` 得到"这次没切过去"的可解释依据。
-///
-/// **允许在自身窗口前台时切换（2026-10-13 真机结论）**：这条路径与生产语音路径不同——
-/// 向导的输入框就在本应用窗口里，前台必然是应用自己。2026-09-12 的守卫（切了会让 WebView
-/// 整页重载）在这里原本会让切换永远不发生、只剩提示；2026-10-13 用开关做了真机实验：
-/// 点输入框时在自身窗口前台直接切 **切得过去、页面没有重载、文字正常进框**，
-/// 因此本条路径正式放行（生产路径的守卫不动）。
-/// 判定仍留在 `ime_activation` 日志里（`scope=wizard_inline`）。
-pub fn ensure_ime_for_tool(tool: Option<VoiceInputTool>) -> ImeStatus {
-    match tool {
-        // 未选工具：与 Vokie / 其他工具同一语义——不碰输入法，只回读状态。
-        None => crate::ble::gatt_note(
-            "ime_activation tool=none outcome=not_required elapsed_ms=0 reason=no_tool_selected"
-                .to_owned(),
-        ),
-        Some(tool) => {
-            // 失败已由 `ime_activation` 结构化日志留痕，这里只看回读结果。
-            let _ = ensure_session_ime_allowing_self_window(tool);
-        }
-    }
-    ime_status_for(tool)
-}
-
 /// STA 线程体：读活动输入法（是否存在 + 显示名）、目标输入法名、已安装列表。
 fn sta_probe_ime(expect_target: Option<ImeProfile>) -> Result<ImeProbe, String> {
     use windows::Win32::System::Com::{
@@ -1465,7 +1427,6 @@ mod ime_target_tests {
     fn ime_switch_scope_labels_are_stable() {
         assert_eq!(super::ImeSwitchScope::VoicePress.label(), "voice_press");
         assert_eq!(super::ImeSwitchScope::ToolSelect.label(), "tool_select");
-        assert_eq!(super::ImeSwitchScope::WizardInline.label(), "wizard_inline");
     }
 }
 

@@ -2192,7 +2192,7 @@ fn log_ime_status(
 
 /// 两个输入法状态命令共用的执行体：读工具 → 在阻塞线程池里取状态 → 落结构化日志。
 ///
-/// 放阻塞线程池而不是主线程：TSF 查询有界但最坏 500ms（`ensure_ime_for_tool` 还要
+/// 放阻塞线程池而不是主线程：TSF 查询有界但最坏 500ms（查询本身还要
 /// 叠加会话切换的重绑等待），Tauri 的同步命令跑在主线程，会卡住 WebView。
 /// 任何失败都降级成 `ImeStatus::unavailable()`，命令不报错（界面 fail-open）。
 async fn ime_status_command(
@@ -2232,24 +2232,6 @@ async fn get_ime_status(state: tauri::State<'_, AppState>) -> Result<ImeStatus, 
         state.settings.clone(),
         "queried",
         sayall_windows::ime_status_for,
-    )
-    .await)
-}
-
-/// 试一下页：点输入框 / 按语音键时调用——先（幂等）确保所选工具的输入法是当前
-/// 会话活动输入法，再回读一次状态。
-///
-/// 切换失败**不报错**：界面用 `matchesExpected=false` + `active` 给出解释
-/// （"这句话没出字，是因为当前输入法是 X，不是 Y"）。
-///
-/// 该检查允许在**本应用窗口前台**时也切（输入框就在本窗口里，前台必然是应用自己）；
-/// 2026-10-13 真机实验结论：点输入框时直接切得过去、页面不重载、文字正常进框。
-#[tauri::command]
-async fn ensure_voice_tool_ime(state: tauri::State<'_, AppState>) -> Result<ImeStatus, String> {
-    Ok(ime_status_command(
-        state.settings.clone(),
-        "ensured",
-        sayall_windows::ensure_ime_for_tool,
     )
     .await)
 }
@@ -3666,7 +3648,6 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_ime_status,
-        ensure_voice_tool_ime,
         get_gain_db,
         set_gain_db,
         get_vokie_installation,
@@ -3740,7 +3721,6 @@ pub fn run() {
         get_voice_input_tool,
         set_voice_input_tool,
         get_ime_status,
-        ensure_voice_tool_ime,
         get_gain_db,
         set_gain_db,
         get_vokie_installation,

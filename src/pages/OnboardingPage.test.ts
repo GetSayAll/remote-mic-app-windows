@@ -26,7 +26,7 @@ const mocks = vi.hoisted(() => ({
   openWindowsSettings: vi.fn(),
   getVoiceInputTool: vi.fn(),
   getVoiceHoldHotkey: vi.fn(),
-  ensureVoiceToolIme: vi.fn(),
+  getImeStatus: vi.fn(),
   getOtherVoiceHotkey: vi.fn(),
   setOtherVoiceHotkey: vi.fn(),
   getRc003TaskStatus: vi.fn(),
@@ -73,7 +73,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     openWindowsSettings: mocks.openWindowsSettings,
     getVoiceInputTool: mocks.getVoiceInputTool,
     getVoiceHoldHotkey: mocks.getVoiceHoldHotkey,
-    ensureVoiceToolIme: mocks.ensureVoiceToolIme,
+    getImeStatus: mocks.getImeStatus,
     getOtherVoiceHotkey: mocks.getOtherVoiceHotkey,
     setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
     getRc003TaskStatus: mocks.getRc003TaskStatus,
@@ -327,7 +327,7 @@ function resetWizardMocks(): void {
     mocks.getVoiceInputTool.mockResolvedValue(null);
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["left_control", "left_windows"] });
     // 默认：输入法读不到（fail-open——界面不提示）。个别用例再覆盖成"读得到"。
-    mocks.ensureVoiceToolIme.mockResolvedValue({
+    mocks.getImeStatus.mockResolvedValue({
       detected: false,
       active: null,
       installed: [],
@@ -1552,7 +1552,7 @@ describe("Onboarding voice test step", () => {
   it("试一下页：点输入框时确保输入法，切不过去就给解释（2026-10-13 现场）", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
-    mocks.ensureVoiceToolIme.mockResolvedValue({
+    mocks.getImeStatus.mockResolvedValue({
       detected: true,
       active: "微软拼音",
       installed: ["微软拼音", "豆包输入法"],
@@ -1564,7 +1564,7 @@ describe("Onboarding voice test step", () => {
     await wrapper.find("input.onboarding-voice-input").trigger("focus");
     await flushPromises();
 
-    expect(mocks.ensureVoiceToolIme).toHaveBeenCalled();
+    expect(mocks.getImeStatus).toHaveBeenCalled();
     expect(wrapper.text()).toContain("输入法还没切到“豆包输入法”");
     expect(wrapper.text()).toContain("现在系统里选的是“微软拼音”");
     expect(
@@ -1572,7 +1572,7 @@ describe("Onboarding voice test step", () => {
     ).toBe(true);
 
     // 已经切好：不打扰。
-    mocks.ensureVoiceToolIme.mockResolvedValue({
+    mocks.getImeStatus.mockResolvedValue({
       detected: true,
       active: "豆包输入法",
       installed: ["豆包输入法"],
@@ -1596,12 +1596,12 @@ describe("Onboarding voice test step", () => {
     await wrapper.find("input.onboarding-voice-input").trigger("focus");
     await flushPromises();
 
-    expect(mocks.ensureVoiceToolIme).toHaveBeenCalled();
+    expect(mocks.getImeStatus).toHaveBeenCalled();
     expect(wrapper.text()).not.toContain("输入法还没切到");
     wrapper.unmount();
   });
 
-  it("按语音键（会话开始）时也确保一次输入法", async () => {
+  it("按语音键（会话开始）时也检查一次输入法（只读、不切换）", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     queueSnapshots(runtimeWith(), streamingFrame({ decodedSamples: 80, submittedSamples: 100 }));
@@ -1609,12 +1609,12 @@ describe("Onboarding voice test step", () => {
     const wrapper = await mountWizard(connectedRuntime(), { attach: true });
     await wrapper.find("input.onboarding-voice-input").trigger("focus");
     await flushPromises();
-    mocks.ensureVoiceToolIme.mockClear();
+    mocks.getImeStatus.mockClear();
 
     await vi.advanceTimersByTimeAsync(200);
     await flushPromises();
 
-    expect(mocks.ensureVoiceToolIme).toHaveBeenCalled();
+    expect(mocks.getImeStatus).toHaveBeenCalled();
     wrapper.unmount();
   });
 

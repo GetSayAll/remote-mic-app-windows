@@ -1292,16 +1292,6 @@ export interface ImeStatus {
   matchesExpected: boolean | null;
 }
 
-/**
- * 确保"用户选的输入工具"就是当前会话输入法（幂等），并返回检查结果。
- * 试一下页在**点输入框**与**按语音键**两处各调用一次；浏览器预览下返回"读不到"。
- */
-export async function ensureVoiceToolIme(): Promise<ImeStatus> {
-  if (!isTauriRuntime()) {
-    return { detected: false, active: null, installed: [], expected: null, matchesExpected: null };
-  }
-  return invoke<ImeStatus>("ensure_voice_tool_ime");
-}
 
 /**
  * **只读**查询输入法状态（不切输入法）。复制诊断信息时用它，避免"复制一下顺手改了

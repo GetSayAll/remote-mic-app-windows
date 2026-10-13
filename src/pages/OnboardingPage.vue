@@ -7,14 +7,13 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   endKeyObservation,
-  ensureVoiceToolIme,
+  getImeStatus,
   getAudioSnapshot,
   getDiagnosticReport,
   getOnboardingState,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
   getRuntimeSnapshot,
-  getImeStatus,
   getVokieInstallation,
   getVoiceHoldHotkey,
   getVoiceInputTool,
@@ -1821,8 +1820,8 @@ async function pollVoiceTest(): Promise<void> {
         return;
       }
       if (stateNow === "waiting_start" && frame.voiceState !== "idle") {
-        // 语音键按下：与点输入框同一套兜底——确保用户选的输入法是当前会话输入法。
-        void ensureVoiceIme("voice_key");
+        // 语音键按下：与点输入框同一套检查——不是所选工具就用文字提醒（只查不切）。
+        void checkVoiceIme("voice_key");
       }
       if (frame.voiceState === "idle" && (stateNow === "streaming" || stateNow === "waiting_end")) {
         await settleVoiceManualInput(now);
@@ -1921,23 +1920,24 @@ async function onVoiceInput(): Promise<void> {
 
 function onVoiceBoxFocus(): void {
   voiceFocused.value = true;
-  // 点输入框的那一刻就把输入法摆好（2026-10-13 现场：用户按语音键却出不了字，
-  // 常见原因就是当前会话的输入法不是他选的那个工具）。
-  void ensureVoiceIme("focus");
+  // 点输入框时查一次输入法，不对就用文字提醒（2026-10-13 现场：用户按语音键却出不了字，
+  // 常见原因就是当前会话的输入法不是他选的那个工具）。**只查不切**——自动切换已按
+  // Andy 2026-10-13 的决定去掉。
+  void checkVoiceIme("focus");
 }
 
 /**
- * 输入法兜底（2026-10-13 现场）：确保用户选的输入工具就是当前会话输入法，
- * 并在切换不成/切不过去时给一句解释——而不是让用户对着"语音没出字"猜原因。
- * 与连接页同一套逻辑：在用户真正动手的那两个点上（点输入框、按语音键）给结果。
+ * 输入法**只读检查 + 文字提醒**（2026-10-13 现场定稿，Andy 明确要求去掉自动切换）：
+ * 在用户真正动手的那两个点上（点输入框、按语音键）查一次当前输入法是不是所选工具，
+ * 不是就用文字告诉他怎么切——而不是让用户对着"语音没出字"猜原因，也不动用户的输入法。
  *
  * fail-open：读不到输入法状态（老系统/TSF 不可用）时**不提示**，绝不瞎报。
  */
-async function ensureVoiceIme(trigger: "focus" | "voice_key"): Promise<void> {
+async function checkVoiceIme(trigger: "focus" | "voice_key"): Promise<void> {
   if (imeCheckRunning) return;
   imeCheckRunning = true;
   try {
-    const status = await ensureVoiceToolIme();
+    const status = await getImeStatus();
     const expected = status.expected ?? "";
     const active = status.active ?? "";
     if (!status.detected || !expected || status.matchesExpected === null) {
