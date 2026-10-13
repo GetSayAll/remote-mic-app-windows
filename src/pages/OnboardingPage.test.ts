@@ -672,8 +672,51 @@ describe("Onboarding input tool step", () => {
     expect(continueButton.attributes("data-gate-code")).toBe("ok");
   });
 
-  it("blocks 豆包 while Vokie is running and recovers after it closes", async () => {
-    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+  it("向导里的同一个开关：无状态字、进行中转圈、失败只给用户语言（2026-10-10）", async () => {
+    const wrapper = await mountToolStep();
+    await toolCard(wrapper, "豆包输入法").trigger("click");
+    await flushPromises();
+
+    // 关闭态：开关与状态提示已合并成一个开关——开关行里只有名字，没有状态字。
+    expect(wrapper.find(".switch-state").exists()).toBe(false);
+    const switchRow = wrapper.find(".onboarding-switch-row");
+    expect(switchRow.text()).toBe("支持更多输入工具");
+    expect(switchRow.find(".toggle-placeholder").exists()).toBe(false);
+
+    // 进行中：开关置灰 + 转圈，且不配文字（真机上这一段是授权窗口期间）。
+    let release!: (value: Awaited<ReturnType<typeof mocks.enableRc003Capture>>) => void;
+    mocks.enableRc003Capture.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    await wrapper.find('input[type="checkbox"]').trigger("change");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "开启")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find<HTMLInputElement>('input[type="checkbox"]').element.disabled).toBe(true);
+    expect(wrapper.find(".toggle-spinner").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("正在设置");
+
+    // 失败：唯一允许出现的文字是映射后的用户语言，不带内部原文。
+    release({
+      installed: false,
+      authorizationRequired: true,
+      enabled: false,
+      helperPath: null,
+      lastError: "启用全按键支持失败：授权未完成（UAC 被取消）。",
+    });
+    await flushPromises();
+    expect(wrapper.find(".toggle-spinner").exists()).toBe(false);
+    expect(wrapper.find(".onboarding-error").text()).toBe(
+      "没有完成系统授权，“支持更多输入工具”保持关闭。",
+    );
+    expect(wrapper.text()).not.toContain("UAC");
+    expect(wrapper.text()).not.toContain("授权未完成");
+  });
+
+  it("blocks 豆包 while Vokie is running and recovers after it closes", async () => {    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     const wrapper = await mountToolStep();
 
     await toolCard(wrapper, "豆包输入法").trigger("click");
