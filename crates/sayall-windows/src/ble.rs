@@ -129,6 +129,9 @@ impl BleRuntime {
         voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
         gain_db: Arc<Mutex<f32>>,
     ) -> Self {
+        // 进程启动先清「正在用的遥控器」：地址只在会话真的建立后才有意义，
+        // 上一轮的残留会把 Raw Input 绑定与助手选宿主的过滤条件带偏（2026-10-13）。
+        crate::remote_target::set(None);
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let worker_state = Arc::clone(&state);
@@ -1676,6 +1679,12 @@ fn handle_control(
 
     match output {
         PipelineOutput::Ready(capabilities) => {
+            // 会话真的建立了：把「应用正在用的那支遥控器」发布出去（2026-10-13）。
+            // 两台同型号遥控器同时在线时，Raw Input 绑定与增强捕获助手都靠它消歧；
+            // 发布在 Ready 而不是连接握手更早的时刻——此时的地址确实已经在用。
+            if let Some(session) = session.as_ref() {
+                crate::remote_target::set(Some(session.address));
+            }
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Ready;
             apply_input_connection_phase(snapshot.phase);
@@ -2095,6 +2104,10 @@ struct BleSession {
     battery_monitor: Option<crate::battery::BatteryMonitor>,
     name: String,
     model: RemoteModel,
+    /// 对端蓝牙地址（2026-10-13）：连接建立时发布给 `remote_target`，用来在两支
+    /// 同型号遥控器同时在线时消歧（Raw Input 绑定 + 增强捕获助手选宿主）。
+    /// 只走进程内与本地文件，**不进日志**。
+    address: u64,
     device: BluetoothLEDevice,
     service: GattDeviceService,
     transmit: GattCharacteristic,
@@ -2126,6 +2139,8 @@ struct BleSession {
 /// behind and can eventually make every new WinRT request fail with
 /// ERROR_NOT_ENOUGH_MEMORY (0x80070008).
 struct PendingBleConnection {
+    /// 与 [`BleSession::address`] 同值：装配阶段就带着，`finish` 时交给会话。
+    address: u64,
     device: Option<BluetoothLEDevice>,
     service: Option<GattDeviceService>,
     transmit: Option<GattCharacteristic>,
@@ -2138,8 +2153,9 @@ struct PendingBleConnection {
 }
 
 impl PendingBleConnection {
-    fn new(device: BluetoothLEDevice) -> Self {
+    fn new(device: BluetoothLEDevice, address: u64) -> Self {
         Self {
+            address,
             device: Some(device),
             service: None,
             transmit: None,
@@ -2179,6 +2195,7 @@ impl PendingBleConnection {
             battery_monitor: None,
             name,
             model,
+            address: self.address,
             device: self.device.take().expect("pending BLE device is owned"),
             service: self.service.take().expect("pending GATT service is owned"),
             battery_service: None,
@@ -2317,7 +2334,7 @@ impl BleSession {
                 )
             },
         )?;
-        let mut pending = PendingBleConnection::new(device);
+        let mut pending = PendingBleConnection::new(device, address);
         // 连接参数吞吐优化（2026-09-07）：RC001 送达率实测仅 ~52%（18 会话
         // 全部 39%-68%，同 09-04 RC003 初次配对的 55% 症状；09-04 RC001
         // 基准为 100%）。ThroughputOptimized 收紧连接间隔，提升 15ms/120B
@@ -2695,7 +2712,12 @@ impl BleSession {
     }
 }
 
-fn bluetooth_address_from_device_id(device_id: &str) -> Option<u64> {
+/// 从配对设备 id 里取出**对端**蓝牙地址（id 里同时含本机与对端地址，取最后一个）。
+///
+/// `pub(crate)`：2026-10-13 起 `WindowsPlatform::connect_remote` / `restore_remote`
+/// 也用它——用户选/换遥控器的一刻就发布目标地址给 `remote_target`，不必等
+/// BLE 会话 Ready（否则"应用刚启动/刚点连接"那段时间两支遥控器同时在线仍会歧义）。
+pub(crate) fn bluetooth_address_from_device_id(device_id: &str) -> Option<u64> {
     device_id
         .as_bytes()
         .windows(17)

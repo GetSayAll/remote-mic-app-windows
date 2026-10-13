@@ -2916,6 +2916,85 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         PathBuf::from(base).join("SayAll").join("rc003-bridge.ini")
     }
 
+    /// 「应用正在用的那支遥控器」目标文件（与桥接描述文件同目录，主程序在会话
+    /// 建立时写出）。
+    ///
+    /// **为什么要读它（2026-10-13 现场）**：同一台电脑上两支同型号遥控器同时在线
+    /// 时，主程序两条链路都拒绝盲选——Raw Input 绑定失败、助手这里报「定位到多个
+    /// 候选宿主」，整机按键与「全按键支持」全断、界面上没有任何解释。这份文件给出
+    /// **应用正在用的那支**的蓝牙地址，助手据此在多个候选里挑出属于它的宿主；
+    /// 读不到 ⇒ 保持旧行为（多候选仍然拒绝，宁可不用也不选错）。
+    ///
+    /// 隐私：地址只用于匹配，**绝不进日志**——日志只落"匹配到几个候选"。
+    fn app_target_path() -> PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+            format!("{home}\\AppData\\Local")
+        });
+        PathBuf::from(base).join("SayAll").join("rc003-target.ini")
+    }
+
+    /// 读目标地址：先看本账户的 `%LOCALAPPDATA%`，再按 `C:\Users\*` 兜底
+    /// （提权用的是另一个账户时的同一套理由，见 [`find_app_bridge_elsewhere`]）。
+    fn read_target_address(logger: &Logger) -> Option<u64> {
+        let read = |path: &Path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|text| parse_target_body(&text))
+        };
+        if let Some(address) = read(&app_target_path()) {
+            return Some(address);
+        }
+        let entries = fs::read_dir("C:\\Users").ok()?;
+        for entry in entries.flatten() {
+            let candidate = entry
+                .path()
+                .join("AppData")
+                .join("Local")
+                .join("SayAll")
+                .join("rc003-target.ini");
+            if let Some(address) = read(&candidate) {
+                logger.kv(
+                    "[REG]",
+                    &[("note", "目标文件按 C:\\Users\\* 枚举兜底读到".into())],
+                );
+                return Some(address);
+            }
+        }
+        None
+    }
+
+    /// 解析目标文件正文（与主程序 `remote_target::file_body` 同源）：
+    /// `version=1` + `address=<12 位十六进制>`；其它形态一律 `None`，不猜。
+    fn parse_target_body(text: &str) -> Option<u64> {
+        let mut version_ok = false;
+        let mut address: Option<u64> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("version=") {
+                version_ok = value.trim() == "1";
+            } else if let Some(value) = line.strip_prefix("address=") {
+                let value = value.trim().to_ascii_lowercase();
+                if value.len() == 12 {
+                    address = u64::from_str_radix(&value, 16).ok().filter(|v| *v != 0);
+                }
+            }
+        }
+        if version_ok {
+            address
+        } else {
+            None
+        }
+    }
+
+    /// 设备实例 id 是否属于这支遥控器（12 位十六进制地址；不区分大小写，
+    /// 注册表实例 id 是大写、Raw Input 路径是小写）。
+    fn instance_matches_address(instance: &str, address: u64) -> bool {
+        instance
+            .to_ascii_lowercase()
+            .contains(&format!("{address:012x}"))
+    }
+
     /// 主程序请求停止的信号文件（与桥接描述文件同目录）。
     ///
     /// **为什么需要**：助手是提权进程，普通权限的主程序杀不掉它；
@@ -6382,6 +6461,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
         let pids: BTreeSet<u32> = rc003.iter().map(|e| e.pid).collect();
         if pids.len() > 1 {
+            // 两台同型号遥控器同时在线（2026-10-13 现场）时，先按主程序写出的
+            // 「正在用的那支」目标地址消歧；选不出唯一一支时保持旧行为（拒绝盲选）。
+            if let Some(address) = read_target_address(logger) {
+                let matched: BTreeSet<u32> = rc003
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .rc003_instance_id
+                            .as_deref()
+                            .map(|instance| instance_matches_address(instance, address))
+                            .unwrap_or(false)
+                    })
+                    .map(|entry| entry.pid)
+                    .collect();
+                logger.kv(
+                    "[REG]",
+                    &[
+                        ("note", "按主程序目标地址消歧（rc003-target.ini）".into()),
+                        ("candidates", pids.len().to_string()),
+                        ("target_matched", matched.len().to_string()),
+                    ],
+                );
+                if matched.len() == 1 {
+                    return Ok((*matched.iter().next().unwrap(), entries));
+                }
+            }
             logger.kv(
                 "[STOP]",
                 &[(
@@ -6453,6 +6558,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 && !line.contains('\\')
                 && !line.contains("Dev_VID"),
             format!("{line} / {other}"),
+        );
+
+        // 2c) 目标地址消歧（2026-10-13 现场：两支同型号遥控器同时在线时两条链路
+        //     都拒绝盲选）。只认自己这一版格式；匹配不区分大小写；别的地址不命中。
+        let address = 0x00C0_5D39_C2D9_DBu64;
+        let instance =
+            r"BTHLEDevice\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\9&1&0055";
+        let other_instance =
+            r"BTHLEDevice\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\9&1&0055";
+        check(
+            "目标地址匹配（两支同型号遥控器消歧）",
+            parse_target_body("version=1\naddress=c05d39c2d9db\n") == Some(address)
+                && parse_target_body("version=2\naddress=c05d39c2d9db\n").is_none()
+                && parse_target_body("address=c05d39c2d9db\n").is_none()
+                && instance_matches_address(instance, address)
+                && !instance_matches_address(other_instance, address),
+            "解析三种形态 ok；实例 id 命中/不命中各一（地址本身不打印）".to_owned(),
         );
 
         // 2b) 令牌日志脱敏（2026-10-04 现场回归）：`[TOKEN]` 只允许写指纹。
@@ -7887,6 +8009,50 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    #[cfg(test)]
+    mod target_address_tests {
+        use super::*;
+
+        /// 目标地址解析：只认 `version=1` + 12 位十六进制；半截 / 旧版 / 0 一律 `None`
+        /// （带歪过滤条件比不带更糟：会去注入另一支遥控器的宿主）。
+        #[test]
+        fn target_body_requires_its_own_version_and_a_full_address() {
+            let address = 0x00C0_5D39_C2D9_DBu64;
+            assert_eq!(
+                parse_target_body("version=1\naddress=c05d39c2d9db\n"),
+                Some(address)
+            );
+            assert_eq!(
+                parse_target_body("version=1\naddress=C05D39C2D9DB\n"),
+                Some(address)
+            );
+            assert_eq!(parse_target_body("address=c05d39c2d9db\n"), None);
+            assert_eq!(parse_target_body("version=2\naddress=c05d39c2d9db\n"), None);
+            assert_eq!(parse_target_body("version=1\naddress=000000000000\n"), None);
+            assert_eq!(parse_target_body("version=1\naddress=zz\n"), None);
+            assert_eq!(parse_target_body(""), None);
+        }
+
+        /// 实例 id 匹配：注册表实例 id 大写、Raw Input 路径小写都要命中；
+        /// 另一支同型号遥控器不命中（2026-10-13 现场的两支）。
+        #[test]
+        fn instance_matching_is_case_insensitive_and_discriminates_siblings() {
+            let address = 0x00C0_5D39_C2D9_DBu64;
+            assert!(instance_matches_address(
+                r"BTHLEDevice\{…}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\9&1&0055",
+                address
+            ));
+            assert!(instance_matches_address(
+                r"\\?\hid#{00001812-…}_dev_vid&012717_pid&32b8_rev&00a4_c05d39c2d9db#a&1&0000",
+                address
+            ));
+            assert!(!instance_matches_address(
+                r"BTHLEDevice\{…}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\9&1&0055",
+                address
+            ));
+        }
+    }
 
     #[cfg(test)]
     mod token_log_privacy_tests {
