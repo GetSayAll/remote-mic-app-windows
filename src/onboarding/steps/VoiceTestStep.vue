@@ -10,6 +10,8 @@ const props = defineProps<{
   toolLabel: string;
   hotkeyText: string;
   audioText: string;
+  /** 输入法兜底提示（2026-10-13 现场）：非空时显示一张说明卡，空串不显示。 */
+  imeHint: string;
 }>();
 
 defineEmits<{ input: []; focus: []; blur: []; retry: [] }>();
@@ -52,7 +54,7 @@ defineExpose({ focusBox, clearBox });
     </p>
 
     <div class="onboarding-card warn">
-      <h4>开始之前，按你选的工具核对两件事</h4>
+      <h4>开始之前，按你选的工具核对三件事</h4>
       <ul class="onboarding-numlist">
         <li>
           <span class="onboarding-num">1</span>
@@ -62,8 +64,16 @@ defineExpose({ focusBox, clearBox });
           <span class="onboarding-num">2</span>
           <span>工具里的语音键和这次设置一致（{{ hotkeyText }}）。</span>
         </li>
+        <li>
+          <span class="onboarding-num">3</span>
+          <span>输入法切到“{{ toolLabel }}”：文字要靠它打进输入框（点输入框时应用会帮你切）。</span>
+        </li>
       </ul>
       <p>本次设置快捷键：{{ hotkeyText }}（“本次设置”）；语音设备：{{ audioText }}。</p>
+    </div>
+
+    <div v-if="imeHint" class="onboarding-card warn">
+      <p>{{ imeHint }}</p>
     </div>
 
     <input

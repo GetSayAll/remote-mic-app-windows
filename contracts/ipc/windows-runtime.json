@@ -13,6 +13,7 @@
       "phase": "ready",
       "remoteName": "Xiaomi Bluetooth Remote 2",
       "remoteModel": "rc001",
+      "remoteToken": "0a1b2c3d",
       "capabilities": {
         "version": 256,
         "codecs": 1,
@@ -67,19 +68,22 @@
       "id": "fixture-rc001",
       "name": "Xiaomi Bluetooth Remote 2",
       "model": "rc001",
-      "isSupportedCandidate": true
+      "isSupportedCandidate": true,
+      "token": "11112222"
     },
     {
       "id": "fixture-rc003",
       "name": "Xiaomi Bluetooth Remote 2 Pro",
       "model": "rc003",
-      "isSupportedCandidate": true
+      "isSupportedCandidate": true,
+      "token": "33334444"
     },
     {
       "id": "fixture-unknown",
       "name": "Approved Fixture Remote",
       "model": "unknown",
-      "isSupportedCandidate": true
+      "isSupportedCandidate": true,
+      "token": "55556666"
     }
   ]
 }

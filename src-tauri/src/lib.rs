@@ -5,7 +5,7 @@ use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
 };
 use sayall_windows::{
-    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformSnapshot,
+    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, ImeStatus, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
 };
 use serde::{Deserialize, Serialize};
@@ -472,17 +472,38 @@ fn get_runtime_snapshot(
 }
 
 #[tauri::command]
-fn get_diagnostic_report(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> DiagnosticReport {
-    let platform = state.platform.snapshot();
-    let send_input = state.platform.send_input_snapshot();
-    DiagnosticReport::capture(
-        &app.package_info().version.to_string(),
-        &platform,
-        &send_input,
-    )
+async fn get_diagnostic_report(app: tauri::AppHandle) -> DiagnosticReport {
+    // 参数只留 `AppHandle`（owned）：Tauri 的 async 命令若含引用参数必须返回
+    // `Result`，而这份报告的 IPC 形状要保持"直接是报告对象"（前端 `invoke<T>`）。
+    let (platform, send_input, settings) = {
+        let state = app.state::<AppState>();
+        (
+            state.platform.snapshot(),
+            state.platform.send_input_snapshot(),
+            state.settings.clone(),
+        )
+    };
+    let app_version = app.package_info().version.to_string();
+    // 输入法状态是实时读回（TSF 查询有界但最坏 500ms）：整份报告放阻塞线程池，
+    // 不占主线程（Tauri 的同步命令跑在主线程）。
+    let platform_for_task = platform.clone();
+    let send_input_for_task = send_input.clone();
+    let app_version_for_task = app_version.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        let tool = load_voice_input_tool(&settings);
+        DiagnosticReport::capture(
+            &app_version_for_task,
+            &platform_for_task,
+            &send_input_for_task,
+            tool,
+        )
+    })
+    .await
+    {
+        Ok(report) => report,
+        // 任务失败（线程池/panic）不能吞掉整份诊断：退回"输入法不可用"的一次采集。
+        Err(_) => DiagnosticReport::capture(&app_version, &platform, &send_input, None),
+    }
 }
 
 /// 在系统文件资源管理器里打开诊断日志目录（关于页"打开日志目录"入口）。
@@ -2141,6 +2162,95 @@ async fn set_voice_input_tool(
     result
 }
 
+/// 「用户选的输入工具」的唯一来源（`settings.json`，与 `get_voice_input_tool` 同源）。
+///
+/// 为什么不问平台：`PlatformRuntime` 只有 setter（`set_voice_input_tool`），没有
+/// getter；平台侧持有的那份本身也始终由 `settings.json` 写入（启动装载 + 每次保存），
+/// 读设置文件不会引入第二份真值。
+fn load_voice_input_tool(settings: &SettingsStore) -> Option<VoiceInputTool> {
+    settings
+        .load()
+        .ok()
+        .and_then(|settings| settings.voice_input_tool)
+}
+
+/// 输入法状态日志（`ime_status`，AGENTS.md「功能点自带日志」口径）：格式与字段
+/// 由 `sayall_windows::ime_status_log_line` 单一来源（含单测），这里只负责落盘。
+fn log_ime_status(
+    action: &str,
+    tool: Option<VoiceInputTool>,
+    status: &ImeStatus,
+    started: std::time::Instant,
+) {
+    sayall_windows::gatt_note(sayall_windows::ime_status_log_line(
+        action,
+        tool,
+        status,
+        started.elapsed().as_millis(),
+    ));
+}
+
+/// 两个输入法状态命令共用的执行体：读工具 → 在阻塞线程池里取状态 → 落结构化日志。
+///
+/// 放阻塞线程池而不是主线程：TSF 查询有界但最坏 500ms（`ensure_ime_for_tool` 还要
+/// 叠加会话切换的重绑等待），Tauri 的同步命令跑在主线程，会卡住 WebView。
+/// 任何失败都降级成 `ImeStatus::unavailable()`，命令不报错（界面 fail-open）。
+async fn ime_status_command(
+    settings: SettingsStore,
+    action: &'static str,
+    query: fn(Option<VoiceInputTool>) -> ImeStatus,
+) -> ImeStatus {
+    let started = std::time::Instant::now();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let tool = load_voice_input_tool(&settings);
+        (tool, query(tool))
+    })
+    .await;
+    match outcome {
+        Ok((tool, status)) => {
+            log_ime_status(action, tool, &status, started);
+            status
+        }
+        Err(_) => {
+            sayall_windows::gatt_note(format!(
+                "ime_status action={action} phase=completed terminal_result=failed tool=unknown detected=false matches_expected=unknown installed_count=0 error_domain=task error_code=join_failed retryable=true elapsed_ms={}",
+                started.elapsed().as_millis(),
+            ));
+            ImeStatus::unavailable()
+        }
+    }
+}
+
+/// 试一下页 / 诊断：当前输入法状态（**只读**，不切换任何输入法）。
+///
+/// 返回形状（camelCase）：`{ detected, active, installed, expected, matchesExpected }`；
+/// `matchesExpected = null` 表示判定不出来（界面不要提示），查询不可用则
+/// `detected = false`。
+#[tauri::command]
+async fn get_ime_status(state: tauri::State<'_, AppState>) -> Result<ImeStatus, String> {
+    Ok(ime_status_command(
+        state.settings.clone(),
+        "queried",
+        sayall_windows::ime_status_for,
+    )
+    .await)
+}
+
+/// 试一下页：点输入框 / 按语音键时调用——先（幂等）确保所选工具的输入法是当前
+/// 会话活动输入法，再回读一次状态。
+///
+/// 切换失败**不报错**：界面用 `matchesExpected=false` + `active` 给出解释
+/// （"这句话没出字，是因为当前输入法是 X，不是 Y"）。
+#[tauri::command]
+async fn ensure_voice_tool_ime(state: tauri::State<'_, AppState>) -> Result<ImeStatus, String> {
+    Ok(ime_status_command(
+        state.settings.clone(),
+        "ensured",
+        sayall_windows::ensure_ime_for_tool,
+    )
+    .await)
+}
+
 /// 首次使用向导（Onboarding）状态与进度。落点是 `onboarding.json`（与 settings.json
 /// 同目录），迁移与失败日志在 `SettingsStore` 内完成；这里只做 IPC 校验与任务调度。
 #[tauri::command]
@@ -3552,6 +3662,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_ime_status,
+        ensure_voice_tool_ime,
         get_gain_db,
         set_gain_db,
         get_vokie_installation,
@@ -3624,6 +3736,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_ime_status,
+        ensure_voice_tool_ime,
         get_gain_db,
         set_gain_db,
         get_vokie_installation,

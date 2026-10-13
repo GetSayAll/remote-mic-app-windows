@@ -786,6 +786,9 @@ fn worker_loop(
                 }
             }
             WorkerMessage::Restore { device_id, reply } => {
+                // 令牌在这里就带上（2026-10-13 现场：启动恢复时如果等到"连接成功"才设，
+                // 中途任何一次快照重建都会把它丢掉，界面就一直标不出"已连接"那一行）。
+                let remote_token = Some(crate::device_token(&device_id));
                 preferred_device_id = Some(device_id);
                 backoff.reset();
                 radio_recovery.reset();
@@ -793,6 +796,7 @@ fn worker_loop(
                 let snapshot = if system_suspended {
                     ConnectionSnapshot {
                         phase: ConnectionPhase::Suspended,
+                        remote_token,
                         last_error: Some(
                             "Windows 当前处于睡眠状态，恢复后将重新连接小米语音遥控器".to_owned(),
                         ),
@@ -802,6 +806,7 @@ fn worker_loop(
                     reconnect_deadline = Some(Instant::now());
                     ConnectionSnapshot {
                         phase: ConnectionPhase::Reconnecting,
+                        remote_token,
                         last_error: Some("正在恢复上次选择的小米语音遥控器".to_owned()),
                         ..ConnectionSnapshot::default()
                     }
@@ -1124,6 +1129,7 @@ fn worker_loop(
                     phase: ConnectionPhase::Suspended,
                     remote_name: previous.remote_name,
                     remote_model: previous.remote_model,
+                    remote_token: previous.remote_token,
                     last_error: Some("Windows 已进入睡眠，小米语音遥控器资源已释放".to_owned()),
                     ..ConnectionSnapshot::default()
                 };
@@ -1150,6 +1156,7 @@ fn worker_loop(
                         phase: ConnectionPhase::Reconnecting,
                         remote_name: previous.remote_name,
                         remote_model: previous.remote_model,
+                        remote_token: previous.remote_token,
                         last_error: Some("Windows 已恢复，正在重新连接小米语音遥控器".to_owned()),
                         ..ConnectionSnapshot::default()
                     };
@@ -1256,6 +1263,9 @@ fn attempt_connection(
         remote_model: previous
             .as_ref()
             .map_or(RemoteModel::Unknown, |snapshot| snapshot.remote_model),
+        // 令牌在**每一次尝试建立连接时**都重新带上（2026-10-13 现场）：它只由目标设备 id
+        // 决定，与连接阶段无关；重建快照时若不带，界面就认不出"已连接那一支"是哪一行。
+        remote_token: Some(crate::device_token(device_id)),
         reconnect_attempt,
         ..ConnectionSnapshot::default()
     };
@@ -1288,6 +1298,7 @@ fn attempt_connection(
         phase: ConnectionPhase::AwaitingCapabilities,
         remote_name: Some(connected.name.clone()),
         remote_model: connected.model,
+        remote_token: Some(crate::device_token(device_id)),
         reconnect_attempt,
         ..ConnectionSnapshot::default()
     };
@@ -1731,6 +1742,13 @@ fn handle_control(
             apply_input_connection_phase(snapshot.phase);
             snapshot.capabilities = Some(capabilities);
             snapshot.voice_state = VoiceSessionState::Idle;
+            // 2026-10-13 现场：②步"下面写着已连接、上面两行都没标出来"这类归因，一眼要看
+            // 出"Ready 那一刻令牌在不在"。只记布尔，不记身份（与脱敏口径一致）。
+            gatt_note(format!(
+                "ble_identity action=ready token_present={} reconnect_attempt={}",
+                snapshot.remote_token.is_some(),
+                snapshot.reconnect_attempt,
+            ));
             snapshot.last_error = None;
         }
         PipelineOutput::MicrophoneOpenRequested => {

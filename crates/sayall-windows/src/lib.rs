@@ -53,6 +53,13 @@ pub use ble::{
 };
 #[cfg(windows)]
 mod ime;
+/// 输入法状态只读查询与「按工具确保输入法」（试一下页 / 诊断信息，2026-10-13）：
+/// 模块本体私有，只导出这几个入口（见 `ime` 模块头与 `ImeStatus` 的语义约定）。
+#[cfg(windows)]
+pub use ime::{
+    describe_active_ime_name, ensure_ime_for_tool, ime_status_for, ime_status_log_line,
+    list_installed_ime_names, ImeStatus, MAX_INSTALLED_IME_NAMES,
+};
 
 /// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
 /// 语音和弦判定失效（其热键只在自身为当前会话活动输入法时生效），物理边沿
@@ -159,6 +166,16 @@ pub struct PairedRemote {
 /// 在不同来源里的写法必须得到同一个令牌。
 pub fn device_token(raw: &str) -> String {
     let normalized = raw.trim().to_ascii_lowercase();
+    // 2026-10-13 现场加固：能解析出蓝牙地址就以**地址**为基准。Windows 对同一支遥控器
+    // 可能给出不同形态的 id（扫描拿到的 id 与上次连接保存、启动恢复用的 id 形态可能不同，
+    // 例如分隔符/前后缀差异），只对整串做哈希会让"已连接那一支"与扫描行对不上
+    // （现场：②步下方写着"已连接"，上面两行设备却都没标出来）。解析不出地址的
+    // （模拟设备、其他来源）退回整串，行为与旧版一致。
+    #[cfg(windows)]
+    let normalized = match crate::ble::bluetooth_address_from_device_id(&normalized) {
+        Some(address) => format!("{address:012x}"),
+        None => normalized,
+    };
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in normalized.as_bytes() {
         hash ^= u64::from(*byte);
@@ -1315,6 +1332,27 @@ mod tests {
         for name in ["", "Mi Mouse", "MI RC2", "小米", "Unknown Remote"] {
             assert!(!is_supported_remote_name(name), "unexpected match: {name}");
         }
+    }
+
+    #[test]
+    fn device_token_folds_different_id_forms_of_the_same_address() {
+        // 2026-10-13 现场：扫描拿到的 id 与启动恢复保存的 id 可能形态不同（前后缀/分隔符），
+        // 令牌必须由**蓝牙地址**派生，两种形态才算同一支；大小写不影响。
+        let winrt_form = device_token("BluetoothLE#BluetoothLEc0:5d:39:c2:d9:db");
+        let with_adapter_prefix =
+            device_token("BluetoothLE#BluetoothLEaa:bb:cc:dd:ee:ff-c0:5d:39:c2:d9:db");
+        let uppercase_path = device_token(r"\\?\BTHLE#BluetoothLE#C0:5D:39:C2:D9:DB");
+        assert_eq!(winrt_form, with_adapter_prefix);
+        assert_eq!(winrt_form, uppercase_path);
+        assert_ne!(
+            winrt_form,
+            device_token("BluetoothLE#BluetoothLEaa:bb:cc:dd:ee:ff")
+        );
+        // 解析不出地址的 id 退回整串哈希（与旧行为一致），同样归一大小写与空白。
+        assert_eq!(
+            device_token(" ci-simulation-rc001 "),
+            device_token("CI-SIMULATION-RC001")
+        );
     }
 
     #[test]

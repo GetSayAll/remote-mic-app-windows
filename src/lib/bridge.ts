@@ -406,6 +406,14 @@ export interface DiagnosticReport {
     firedGestures: number;
     errorPresent: boolean;
   };
+  /** 输入法（2026-10-13 现场，schemaVersion 3）：诊断"语音没出字是不是没切输入法"。 */
+  ime: {
+    detected: boolean;
+    activeName: string | null;
+    installedNames: string[];
+    expectedName: string | null;
+    matchesExpected: boolean | null;
+  };
 }
 
 export interface PairedRemote {
@@ -547,7 +555,7 @@ export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (!isTauriRuntime()) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       appVersion: browserSnapshot.appVersion,
       appBuild: "unknown",
       sourceRevision: "unknown",
@@ -606,6 +614,13 @@ export async function getDiagnosticReport(): Promise<DiagnosticReport> {
         leakedDowns: 0,
         firedGestures: 0,
         errorPresent: false,
+      },
+      ime: {
+        detected: false,
+        activeName: null,
+        installedNames: [],
+        expectedName: null,
+        matchesExpected: null,
       },
     };
   }
@@ -1260,6 +1275,43 @@ export async function setVoiceInputTool(tool: VoiceInputTool): Promise<VoiceInpu
   }
   const saved = await invoke<VoiceInputTool | null>("set_voice_input_tool", { tool });
   return saved ?? tool;
+}
+
+/**
+ * 输入法状态（2026-10-13 现场）：诊断"语音没出字是不是因为没切输入法"。
+ *
+ * - `detected=false`：读不到输入法状态——界面**不提示**（fail-open，宁可不说也不能瞎说）；
+ * - `expected=null`：当前的输入工具不需要切输入法（如 Vokie / 其他工具）；
+ * - `matchesExpected`：`null` = 判定不出来，同样是"不提示"。
+ */
+export interface ImeStatus {
+  detected: boolean;
+  active: string | null;
+  installed: string[];
+  expected: string | null;
+  matchesExpected: boolean | null;
+}
+
+/**
+ * 确保"用户选的输入工具"就是当前会话输入法（幂等），并返回检查结果。
+ * 试一下页在**点输入框**与**按语音键**两处各调用一次；浏览器预览下返回"读不到"。
+ */
+export async function ensureVoiceToolIme(): Promise<ImeStatus> {
+  if (!isTauriRuntime()) {
+    return { detected: false, active: null, installed: [], expected: null, matchesExpected: null };
+  }
+  return invoke<ImeStatus>("ensure_voice_tool_ime");
+}
+
+/**
+ * **只读**查询输入法状态（不切输入法）。复制诊断信息时用它，避免"复制一下顺手改了
+ * 用户输入法"。浏览器预览下返回"读不到"。
+ */
+export async function getImeStatus(): Promise<ImeStatus> {
+  if (!isTauriRuntime()) {
+    return { detected: false, active: null, installed: [], expected: null, matchesExpected: null };
+  }
+  return invoke<ImeStatus>("get_ime_status");
 }
 
 /** 检查应用更新；浏览器预览下返回"无更新"占位（不发起网络请求）。 */

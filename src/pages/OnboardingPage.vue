@@ -7,12 +7,14 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   endKeyObservation,
+  ensureVoiceToolIme,
   getAudioSnapshot,
   getDiagnosticReport,
   getOnboardingState,
   getOtherVoiceHotkey,
   getRc003TaskStatus,
   getRuntimeSnapshot,
+  getImeStatus,
   getVokieInstallation,
   getVoiceHoldHotkey,
   getVoiceInputTool,
@@ -33,6 +35,7 @@ import {
   type AudioEndpoint,
   type AudioSnapshot,
   type ButtonEdge,
+  type ImeStatus,
   type KeyChord,
   type KeyCode,
   type PairedRemote,
@@ -1355,11 +1358,19 @@ async function copyDiagnostics(): Promise<void> {
     } catch {
       // 保持页面状态。
     }
+    // 输入法状态**只读**读一次（2026-10-13 现场）：用户报"语音没出字"时，先看这行是不是
+    // "没切输入法"。这里只查询、不切换——复制诊断信息不该顺手改用户的输入法。
+    // 读取失败按"读不到"写（detected=no），复制本身不因此失败。
+    let ime: ImeStatus | null = null;
+    try {
+      ime = await getImeStatus();
+    } catch {
+      ime = null;
+    }
     const chord =
       currentHotkey.value ??
       hotkeyFromDisk ??
-      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);
-    const hotkeyTokens = chord
+      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);    const hotkeyTokens = chord
       ? chord.keys.length > 0
         ? chord.keys.join("+")
         : "none"
@@ -1394,6 +1405,9 @@ async function copyDiagnostics(): Promise<void> {
       voiceTerminalCode: voiceResult.value?.code ?? null,
       distinctButtonCount: observedButtons.value.size,
       mappingSuspended: mappingSuspended.value,
+      imeDetected: ime?.detected === true,
+      imeMatchesExpected: ime?.matchesExpected ?? null,
+      imeInstalledCount: ime?.installed.length ?? 0,
     });
     if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
     await navigator.clipboard.writeText(text);
@@ -1465,6 +1479,9 @@ const voicePhase = ref<VoiceAttemptState>("waiting_start");
 const voiceResult = ref<VoiceAttemptTerminal | null>(null);
 const voiceFailureMessage = ref("");
 const voiceFocused = ref(false);
+/** 输入法兜底提示（2026-10-13 现场）：非空时试一下页显示一张说明卡。 */
+const imeHint = ref("");
+let imeCheckRunning = false;
 let voiceTracker: VoiceAttemptTracker | null = null;
 let voicePollTimer: number | null = null;
 let voicePollBusy = false;
@@ -1703,6 +1720,10 @@ async function pollVoiceTest(): Promise<void> {
         }
         return;
       }
+      if (stateNow === "waiting_start" && frame.voiceState !== "idle") {
+        // 语音键按下：与点输入框同一套兜底——确保用户选的输入法是当前会话输入法。
+        void ensureVoiceIme("voice_key");
+      }
       if (frame.voiceState === "idle" && (stateNow === "streaming" || stateNow === "waiting_end")) {
         await settleVoiceManualInput(now);
         if (serial !== voiceAttemptSerial || voiceTracker !== tracker) return;
@@ -1768,6 +1789,45 @@ async function onVoiceInput(): Promise<void> {
 
 function onVoiceBoxFocus(): void {
   voiceFocused.value = true;
+  // 点输入框的那一刻就把输入法摆好（2026-10-13 现场：用户按语音键却出不了字，
+  // 常见原因就是当前会话的输入法不是他选的那个工具）。
+  void ensureVoiceIme("focus");
+}
+
+/**
+ * 输入法兜底（2026-10-13 现场）：确保用户选的输入工具就是当前会话输入法，
+ * 并在切换不成/切不过去时给一句解释——而不是让用户对着"语音没出字"猜原因。
+ * 与连接页同一套逻辑：在用户真正动手的那两个点上（点输入框、按语音键）给结果。
+ *
+ * fail-open：读不到输入法状态（老系统/TSF 不可用）时**不提示**，绝不瞎报。
+ */
+async function ensureVoiceIme(trigger: "focus" | "voice_key"): Promise<void> {
+  if (imeCheckRunning) return;
+  imeCheckRunning = true;
+  try {
+    const status = await ensureVoiceToolIme();
+    const expected = status.expected ?? "";
+    const active = status.active ?? "";
+    if (!status.detected || !expected || status.matchesExpected === null) {
+      imeHint.value = "";
+      reportStepAction("voice_test", "ime_check", "unknown", { detail: trigger });
+      return;
+    }
+    if (status.matchesExpected) {
+      imeHint.value = "";
+      reportStepAction("voice_test", "ime_check", "passed", { detail: trigger });
+      return;
+    }
+    imeHint.value = active
+      ? `输入法还没切到“${expected}”：现在系统里选的是“${active}”。请在桌面右下角把输入法切成“${expected}”，或者回到上一步改选你的工具。`
+      : `输入法还没切到“${expected}”。请在桌面右下角把输入法切成“${expected}”，或者回到上一步改选你的工具。`;
+    reportStepAction("voice_test", "ime_check", "failed", { detail: `${trigger}_mismatch` });
+  } catch {
+    imeHint.value = "";
+    reportStepAction("voice_test", "ime_check", "unknown", { detail: `${trigger}_error` });
+  } finally {
+    imeCheckRunning = false;
+  }
 }
 
 function onVoiceBoxBlur(): void {
@@ -1903,6 +1963,7 @@ async function retryVoiceTest(): Promise<void> {
             :tool-label="voiceToolLabel"
             :hotkey-text="hotkeyLabel"
             :audio-text="voiceAudioText"
+            :ime-hint="imeHint"
             @input="onVoiceInput"
             @focus="onVoiceBoxFocus"
             @blur="onVoiceBoxBlur"

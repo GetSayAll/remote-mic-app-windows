@@ -83,10 +83,25 @@ export interface OnboardingDiagnosticsSnapshot {
   voiceTerminalCode: string | null;
   distinctButtonCount: number;
   mappingSuspended: boolean;
+  /**
+   * 输入法（2026-10-13 现场）：③诊断"语音没出字是不是因为没切输入法"。
+   * 复制块**保持全英文**（既有约定）——不放输入法显示名（含中文），名字留在本机日志里；
+   * 这里只给"读没读到 / 是不是所选工具 / 系统里装了几个"。
+   */
+  imeDetected: boolean;
+  /** 当前会话输入法是否就是所选工具对应的那个（判定不出来为 null）。 */
+  imeMatchesExpected: boolean | null;
+  /** 系统里可用的输入法数量。 */
+  imeInstalledCount: number;
 }
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
+}
+
+/** 三态（yes / no / unknown）：输入法是否匹配允许"判定不出来"。 */
+function threeState(value: boolean | null): string {
+  return value === null ? "unknown" : yesNo(value);
 }
 
 export function formatOnboardingDiagnostics(
@@ -129,6 +144,11 @@ export function formatOnboardingDiagnostics(
       snapshot.voiceTerminalCode ?? "none"
     }`,
     `Buttons observed: ${snapshot.distinctButtonCount}/3`,
+    // 输入法（2026-10-13 现场）：只给英文 token 与布尔/计数——"是不是没切输入法"看 match，
+    // 输入法显示名留在本机日志（复制块保持全英文是既有约定）。
+    `IME: detected=${yesNo(snapshot.imeDetected)} match=${threeState(
+      snapshot.imeMatchesExpected,
+    )} installed_count=${snapshot.imeInstalledCount} expected_tool=${snapshot.tool}`,
     `Mapping: ${snapshot.mappingSuspended ? "suspended" : "active"}`,
   );
   return lines.join("\n");
