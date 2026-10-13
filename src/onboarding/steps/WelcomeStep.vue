@@ -24,7 +24,7 @@ defineEmits<{ openBluetoothSettings: [] }>();
         <li>
           <span class="onboarding-num">2</span>
           <span>
-            在电脑上打开蓝牙设置（可直接点击下方按钮），打开电脑的蓝牙开关后点击添加设备并选择蓝牙选项。
+            在电脑上打开蓝牙设置（可直接点击下方按钮），打开电脑的蓝牙开关后点击「添加设备」然后选择「蓝牙」选项。
           </span>
         </li>
         <li class="onboarding-numlist-action">

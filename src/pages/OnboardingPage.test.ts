@@ -412,7 +412,9 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.text()).toContain(
       "准备好：小米蓝牙语音遥控器 2 或 2 Pro（目前只支持这两种型号），并确保它有电。",
     );
-    expect(wrapper.text()).toContain("在电脑上打开蓝牙设置（可直接点击下方按钮）");
+    expect(wrapper.text()).toContain(
+      "在电脑上打开蓝牙设置（可直接点击下方按钮），打开电脑的蓝牙开关后点击「添加设备」然后选择「蓝牙」选项。",
+    );
     expect(wrapper.text()).toContain("长按「TV」键约 3 秒");
     expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
     expect(wrapper.text()).toContain("先点开「显示所有设备」");
