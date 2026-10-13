@@ -580,7 +580,7 @@ function stopButtonObservation(): void {
   }
 }
 
-async function scanRemotes(mode: "auto" | "manual" = "manual"): Promise<void> {
+async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promise<void> {
   if (scanning.value) return;
   scanning.value = true;
   scanMessage.value = "正在寻找小米遥控器…";
@@ -693,22 +693,28 @@ const shouldAutoConnectRemote = computed(() => {
   return (platform?.rawInput.phase ?? "stopped") === "ready";
 });
 
-/** 防重入：一次触发只跑一轮扫描 + 连接。 */
+/** 防重入：一次触发只跑一轮扫描 + 连接（两个触发点共用）。 */
 let autoConnectRunning = false;
 
-watch(shouldAutoConnectRemote, (should) => {
-  if (!should || autoConnectRunning) return;
-  void autoConnectSingleRemote();
-});
-
-async function autoConnectSingleRemote(): Promise<void> {
-  if (scanning.value || connectingDeviceId.value) return;
+/**
+ * ②步的自动动作（2026-10-13 现场扩了一条）：**进入②步先把已配对设备直接列出来**，
+ * 再按原条件（未连接 + 输入通道在位 + 候选唯一）自动连接。
+ *
+ * 背景：原先只有"未连接且输入通道在位"才自动扫描，应用已连接 / 启动时恢复了会话时
+ * 进②步看到的是空列表，用户必须自己点「扫描已配对设备」。现在两个触发点
+ * （进入②步 / 遥控器在②步期间出现）共用本函数：先保证列表已带出，再决定要不要连。
+ * 谁先跑到谁负责整轮，后到的由 `autoConnectRunning` 吸收，不会连扫两轮。
+ */
+async function ensureRemoteListAndMaybeConnect(mode: "entry" | "auto"): Promise<void> {
+  if (autoConnectRunning || connectingDeviceId.value) return;
   autoConnectRunning = true;
   try {
-    await scanRemotes("auto");
+    if (scanning.value) return; // 已有一轮扫描在跑（例如用户刚点了扫描），由它带出列表。
+    if (devices.value.length === 0) {
+      await scanRemotes(mode);
+    }
     if (step.value !== "remote" || devices.value.length !== 1) return;
-    if ((props.runtime?.platform.connection.phase ?? "idle") !== "idle") return;
-    if (connectingDeviceId.value) return;
+    if (!shouldAutoConnectRemote.value) return;
     const device = devices.value[0];
     if (!device) return;
     await connectDevice(device, "auto");
@@ -716,6 +722,21 @@ async function autoConnectSingleRemote(): Promise<void> {
     autoConnectRunning = false;
   }
 }
+
+// 触发点一：进入②步（不论连接状态，先把列表带出来）。
+watch(
+  () => step.value,
+  (value) => {
+    if (value !== "remote") return;
+    void ensureRemoteListAndMaybeConnect("entry");
+  },
+);
+
+// 触发点二：停在②步期间系统侧遥控器出现（输入通道变为在位）。
+watch(shouldAutoConnectRemote, (should) => {
+  if (!should) return;
+  void ensureRemoteListAndMaybeConnect("auto");
+});
 
 // ---- 语音设备步骤 ----
 

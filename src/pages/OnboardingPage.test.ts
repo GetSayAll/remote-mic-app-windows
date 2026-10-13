@@ -532,7 +532,8 @@ describe("Onboarding wizard shell", () => {
       .find((button) => button.text().includes("扫描已配对设备"))!
       .trigger("click");
     await flushPromises();
-    expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
+    // 进入②步的那次自动扫描（entry）+ 本次手动扫描。
+    expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain("小米蓝牙语音遥控器 2 Pro");
     // 扫描按钮常显（2026-10-13 现场），② 步不再有「打开蓝牙设置」（已移到第①步）；
     // 设备行的「连接」做成按钮观感。
@@ -581,14 +582,12 @@ describe("Onboarding wizard shell", () => {
 
   it("扫描进行中只给状态行标题，不再写“保持遥控器在旁边”那句", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 扫描挂起：组件停在"正在扫描"。
+    // 扫描挂起：组件停在"正在扫描"（按钮文字也变成「正在扫描…」）。
     mocks.scanPairedRemotes.mockImplementation(() => new Promise(() => {}));
     const wrapper = await mountWizard(runtimeWith());
+    await flushPromises();
 
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("扫描已配对设备"))!
-      .trigger("click");
+    await wrapper.find(".onboarding-chips button").trigger("click");
     await flushPromises();
 
     expect(wrapper.text()).toContain("正在寻找小米遥控器…");
@@ -610,8 +609,8 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.text()).toContain("找到 1 个已配对的小米遥控器");
     expect(wrapper.text()).toContain("已配对的小米蓝牙语音遥控器");
     const scan = onboardingEvents("action").filter((p) => p.reason === "scan_requested");
-    expect(scan[0].detail).toBe("auto");
-    expect(scan[1].detail).toBe("auto_found_1");
+    // 2026-10-13：进入②步的自动扫描（entry）先带出列表，再由自动连接接手。
+    expect(scan.map((p) => p.detail)).toEqual(["entry", "entry_found_1"]);
     const connect = onboardingEvents("action").filter((p) => p.reason === "connect_requested");
     expect(connect.map((p) => p.result)).toEqual(["unknown", "passed"]);
     expect(connect[0].detail).toBe("auto");
@@ -624,8 +623,11 @@ describe("Onboarding wizard shell", () => {
       { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
     ]);
     const wrapper = await mountWizard(runtimeWith());
-    // 系统里还没有遥控器（HID 接口不在位）：保持手动流程，不自动扫描。
-    expect(mocks.scanPairedRemotes).not.toHaveBeenCalled();
+    // 2026-10-13 现场：进入②步先扫一次把设备列出来（不再等输入通道在位）。
+    expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("找到 1 个已配对的小米遥控器");
+    // 未连接但输入通道还没在位：先不自动连接。
+    expect(mocks.connectRemote).not.toHaveBeenCalled();
 
     await wrapper.setProps({ runtime: runtimeWith({ rawInputPhase: "ready" }) });
     await flushPromises();
@@ -649,18 +651,28 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
-  it("已连接或用户已手动断开时不自动扫描与连接", async () => {
+  it("已连接或用户已手动断开时不自动连接，但列表仍直接带出", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.scanPairedRemotes.mockResolvedValue([
+      { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
+    ]);
     const connected = await mountWizard(connectedRuntime());
     await flushPromises();
-    expect(mocks.scanPairedRemotes).not.toHaveBeenCalled();
+    // 2026-10-13 现场：应用已连接（含启动恢复）时原来不扫描 → ②步空列表；现在照扫。
+    expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
+    expect(mocks.connectRemote).not.toHaveBeenCalled();
+    expect(connected.text()).toContain("小米蓝牙语音遥控器 2 Pro");
+    const entryScan = onboardingEvents("action").filter((p) => p.reason === "scan_requested");
+    expect(entryScan[entryScan.length - 1].detail).toBe("entry_found_1");
     connected.unmount();
 
+    mocks.scanPairedRemotes.mockClear();
     const disconnected = await mountWizard(
       runtimeWith({ connectionPhase: "disconnected", rawInputPhase: "ready" }),
     );
     await flushPromises();
-    expect(mocks.scanPairedRemotes).not.toHaveBeenCalled();
+    expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
+    expect(mocks.connectRemote).not.toHaveBeenCalled();
     disconnected.unmount();
   });
 
@@ -1394,8 +1406,10 @@ describe("Onboarding per-step diagnostics", () => {
     await flushPromises();
 
     const scan = onboardingEvents("action").filter((p) => p.reason === "scan_requested");
-    expect(scan.map((p) => p.result)).toEqual(["unknown", "passed"]);
-    expect(scan[1].detail).toBe("manual_found_1");
+    // 进入②步的 entry 扫描 + 手动点击的一次；两次都只带计数。
+    expect(scan.map((p) => p.result)).toEqual(["unknown", "passed", "unknown", "passed"]);
+    expect(scan[1].detail).toBe("entry_found_1");
+    expect(scan[3].detail).toBe("manual_found_1");
     // 脱敏：设备 id / 名称不得进入日志载荷。
     const serialized = JSON.stringify(mocks.reportFrontendEvent.mock.calls);
     expect(serialized).not.toContain("aa:bb");
