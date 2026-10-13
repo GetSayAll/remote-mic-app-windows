@@ -464,8 +464,10 @@ impl Default for WindowsPlatform {
 ///
 /// 1. `enhanced_capture_enabled` 原子量 store——`set_button_mappings` 推送目标集时
 ///    读它，任何后续映射保存都必须沿用当前开关意图；
-/// 2. `set_capture_targets` 把「已启用映射的按键」下发给报告层。漏掉这一步就是
-///    2026-09-28 真机回归（见 `WindowsPlatform::set_enhanced_capture_enabled` 文档）。
+/// 2. `set_capture_targets` 把目标集下发给报告层：**三键恒在内**（返回/音量±，
+///    恒接管的理由见 `rc003_bridge::ALWAYS_CAPTURED_BUTTONS`）∪ 已启用映射的按键。
+///    漏掉这一步就是 2026-09-28 真机回归（见
+///    `WindowsPlatform::set_enhanced_capture_enabled` 文档）。
 ///
 /// **刻意不翻 `mappings.enabled`**（2026-09-28 第二次真机回归的修复）：那是按键
 /// 映射功能自己的总开关（UI「总开关」，保存路径恒 true），驱动映射引擎注入、
@@ -1439,13 +1441,15 @@ mod tests {
             snapshot.target_usages
         );
 
-        // 开启：已映射按键（返回=0x00F1，真机 first_edge 同值）必须进入目标集。
+        // 开启：已映射按键（返回=0x00F1，真机 first_edge 同值）与**恒接管的三键**
+        // （返回/音量±，2026-10-13 现场反馈：零配置时按下也要有事件，卡片才高亮）
+        // 必须一起进入目标集。
         apply_enhanced_capture_state(&atomic, &engine, &bridge, true);
         let snapshot = bridge.snapshot();
         assert_eq!(
             snapshot.target_usages,
-            vec![0x00F1],
-            "enable 后目标集必须含已映射按键的 usage"
+            vec![0x0080, 0x0081, 0x00F1],
+            "enable 后目标集必须含已映射按键与三键的 usage"
         );
         assert!(
             atomic.load(Ordering::Relaxed),
