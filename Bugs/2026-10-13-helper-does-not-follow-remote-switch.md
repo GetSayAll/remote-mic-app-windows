@@ -81,6 +81,25 @@
 这里是端口锁，不能靠"时间上应该来得及"。同类改动必须先在真机做一次"交接观察"，
 不能只看单侧日志（本次两侧日志都在，一次拉取即定性）。
 
+## 同日晚追加：令牌不匹配时立即走干净首注（提交 `ab144e9`）
+
+上表"换机到可用"的真机读数里有一段明显白等：新令牌识破发生在 +2.3 秒
+（`[REJECT] reason=token_mismatch` 已在滚动），但旧逻辑要等满 `ATTACH_VERIFY_MS`（5 秒）
+才决定"接管不了、杀宿主重来"（`[ATTACH] verify=failed reason=no_authenticated_agent
+action=restart_host_clean_inject`，+8.8 秒才动手），到新宿主就绪共约 11 秒、可用约 18 秒
+（另有一例 62 秒）。
+
+改动：连接线程在握手令牌不匹配时登记宿主 pid（`MISMATCH_HOST_PID`）；主循环若发现该 pid
+就是当前服务的 `target_pid`、且接管核验尚未通过，则**立即**走"结束宿主 → 新宿主 → 干净首注"，
+日志 `[ATTACH] verify=failed reason=no_authenticated_agent trigger=token_mismatch
+action=early_restart_host_clean_inject served_pid=N`。判定分工不变：连接线程只登记事实，
+主循环动手（它才知道 `target_pid` 与核验状态）；"同一宿主内再注一代"那条路仍不启用
+（真机已验证恢复不了）。预期把换机到可用压到约 12 秒（省掉的那一段白等在真机日志里有明确起止）。
+
+- 验证：`cargo test --manifest-path hardware/RC003/helper/Cargo.toml` 53 passed；rustfmt 已跑。
+- **deferred（真机）**：换回"持有旧世代 tap"的那一支，确认 `trigger=token_mismatch` 在
+  令牌识破后约 1 秒内出现（而不是 +8.8 秒的窗口到期值），并记录新的换机到可用时长。
+
 ## 隐私
 
 - 日志只记事件、原因与计数；目标地址、宿主 pid、实例路径一律不进日志（沿用两侧既有口径）。
