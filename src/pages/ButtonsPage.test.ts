@@ -1259,6 +1259,28 @@ describe("buttons mapping page", () => {
     });
   });
 
+  it("ends the fired-gesture flash with the release edge, not a fixed 600ms tail", async () => {
+    const wrapper = await mountPage();
+    const flashed = () => wrapper.find(".mapping-cell.flashed").exists();
+
+    // 按下 + 动作触发（映射已配）：闪烁反馈出现。
+    edgeHandler!({ button: "ok", isPressed: true });
+    gestureHandler!({ button: "ok", trigger: "single" });
+    await vi.waitFor(() => {
+      if (!flashed()) throw new Error("未出现闪烁反馈");
+    });
+
+    // 松开：闪烁反馈必须跟着灭（现场反馈"配了映射就不能同灭"——原来固定 600ms）。
+    // 允许一段最短可见时间（150ms），但必须显著早于 600ms 兜底。
+    const releasedAt = performance.now();
+    edgeHandler!({ button: "ok", isPressed: false });
+    expect(flashed(), "最短可见时间内不应同帧消失").toBe(true);
+    await vi.waitFor(() => {
+      if (flashed()) throw new Error("松开后闪烁反馈仍在");
+    });
+    expect(performance.now() - releasedAt).toBeLessThan(400);
+  });
+
   /** 编辑器内按标签找 chip 并返回其禁用态。 */
   function chipState(wrapper: VueWrapper, label: string): boolean {
     const chip = wrapper
