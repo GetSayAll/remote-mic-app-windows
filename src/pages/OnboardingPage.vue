@@ -2876,8 +2876,14 @@ async function retryVoiceTest(): Promise<void> {
   line-height: 1.5;
 }
 .onboarding-voice-input:focus {
+  /* 2026-10-13 现场（Andy 截图：重启后第一次进入⑤步，"输入框外围多一圈不完整的框"）：
+     原来是 outline-offset: 1px —— 同色 outline 与边框之间透出 1px 背景缝，
+     在非指针模态（开机直接落在⑤步、还没有任何点击时）渲染成"两圈同色细线 + 发丝缝"，
+     圆角处缝隙还会并线，看起来像多了一圈断掉的框。offset 0 让外圈与边框合成一整圈
+     （实测：四边各为一条 3 CSS px 的连续细线，无缝隙）；指针模态下的全局
+     `body.pointer-nav` 抑制规则（outline: none）不受影响，行为不变。 */
   outline: 2px solid var(--accent-border);
-  outline-offset: 1px;
+  outline-offset: 0;
 }
 
 /* ---- 输入工具页 ---- */

@@ -441,3 +441,8 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   Shift+字母（打大写）与裸字母照常计入，阴性对照不放松。`action=end` 日志行新增 `keys=` 列表
   （最多 12 个）便于一次定位。记录：
   [Bugs/2026-10-13-manual-input-false-positive-hotkeys.md](../Bugs/2026-10-13-manual-input-false-positive-hotkeys.md)。
+- 2026-10-13（向导现场第十四轮图2，Andy 截图：**重启后第一次进⑤步，输入框外围"多一圈不完整的框"**）：
+  非指针模态（开机直接落在⑤步、还没有任何点击）下输入框自动聚焦时，`outline-offset: 1px` 让同色
+  焦点环与边框之间透出 1px 背景缝、圆角处并线，看起来像多了一圈断掉的框；改为 `outline-offset: 0`
+  （外圈与边框合成一整圈；实测四边各为一条连续细线、无缝隙）。指针模态下的全局抑制规则不受影响。
+  像素证据见 [Bugs/2026-10-13-voice-input-focus-double-ring.md](../Bugs/2026-10-13-voice-input-focus-double-ring.md)。

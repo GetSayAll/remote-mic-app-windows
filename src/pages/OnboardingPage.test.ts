@@ -10,6 +10,8 @@ import type {
   RuntimeSnapshot,
   VoiceSessionState,
 } from "../lib/bridge";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import OnboardingPage from "./OnboardingPage.vue";
 
 const mocks = vi.hoisted(() => ({
@@ -1855,6 +1857,17 @@ describe("Onboarding voice test step", () => {
       onboardingEvents("voice_attempt").some((p) => p.reason === "voice.input_target_not_ready"),
     ).toBe(true);
     wrapper.unmount();
+  });
+
+  it("⑤步输入框的聚焦环与边框合成一整圈（不再渲染成两圈细小断框）", () => {
+    // 2026-10-13 现场：重启后第一次进入⑤步（非指针模态、输入框自动聚焦）时，
+    // outline-offset: 1px 让同色 outline 与边框之间透出 1px 背景缝，看起来
+    // 像"多了一圈不完整的框"；offset 0 让两者合成一整圈。这是 CSS 契约，
+    // jsdom 量不了像素，锁样式源码值防回归（像素证据见 Bugs 记录）。
+    const source = readFileSync(join(process.cwd(), "src/pages/OnboardingPage.vue"), "utf8");
+    const block = source.match(/\.onboarding-voice-input:focus \{([\s\S]*?)\n\}/);
+    expect(block?.[1]).toBeDefined();
+    expect(block?.[1]).toContain("outline-offset: 0");
   });
 });
 
