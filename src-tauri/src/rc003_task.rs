@@ -254,13 +254,34 @@ pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
     }
     let mut exit_code = 0u32;
     let _ = unsafe { GetExitCodeProcess(process, &mut exit_code) };
-    sayall_windows::gatt_note(format!(
-        "rc003 feature=enhanced-capture action=elevated_install outcome=helper_exit exit_code={exit_code}"
-    ));
+    // 退出码分流（2026-10-13，issue #206 第三轮报障人建议）：
+    // 14 = 助手在`/rl highest` 任务路径上仍拿不到 SeDebugPrivilege（见助手
+    // `enable_se_debug` 的退出码 14）——"再试一次"通常无效，日志里必须能一步分流。
+    // 注意边界：捕获运行的退出码走计划任务，应用看不到；这里能覆盖的是应用直接
+    // 等到的那些次数（--install-task 等）。
     if exit_code != 0 {
-        return Err(format!(
-            "授权未完成（助手注册计划任务失败，退出码 {exit_code}）。可再次打开重试。"
+        let reason = if exit_code == 14 {
+            "se_debug_unavailable"
+        } else {
+            "task_install_failed"
+        };
+        sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=elevated_install outcome=helper_exit exit_code={exit_code} reason={reason} retryable={}",
+            exit_code != 14
         ));
+    } else {
+        sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=elevated_install outcome=helper_exit exit_code=0"
+                .to_owned(),
+        );
+    }
+    if exit_code != 0 {
+        return Err(if exit_code == 14 {
+            // 原文只进诊断日志；界面把含"授权"的句子映射成用户语言。
+            "系统授权没有生效（助手没有获得所需权限）。".to_string()
+        } else {
+            format!("授权未完成（助手注册计划任务失败，退出码 {exit_code}）。可再次打开重试。")
+        });
     }
     Ok(())
 }
@@ -454,6 +475,45 @@ pub fn task_target_matches(helper_file_name: &str) -> Option<bool> {
     task_target_verdict(extract_task_command(&xml).as_deref(), helper_file_name)
 }
 
+/// 读取任务 XML 里的布尔设置项（纯函数）。`None` = 元素缺失或不是 true/false。
+fn extract_task_bool(xml: &str, tag: &str) -> Option<bool> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    match xml[start..end].trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// 任务电源策略判据（纯函数）：`DisallowStartIfOnBatteries` 与
+/// `StopIfGoingOnBatteries` 两项都为 false 才算通过。任一项缺失 → `None`
+/// （不表态，交给别的判据）。
+///
+/// **为什么需要**（2026-10-13，issue #206 第三轮报障人实测）：旧版助手用
+/// `schtasks /create` 的命令行形态注册任务，它会**固定**写出这两项为 true，
+/// 而命令行没有任何开关能改。电池供电时调度器**静默拦截**任务动作：
+/// LastRunTime 照更新、上次结果 0、进程不出现——助手从此起不来，应用只能看到
+/// "助手没连上"并无限重试（报障人用对照实验定位：同一命令手写、不带电源策略的
+/// 任务立刻能跑）。新版本改用 XML 注册、两项显式置 false（见助手 `task_xml`）；
+/// 本判据供启动对账发现"旧形态任务"，回落开关等用户拨一次重建。
+pub(crate) fn task_power_policy_verdict(xml: &str) -> Option<bool> {
+    let disallow = extract_task_bool(xml, "DisallowStartIfOnBatteries")?;
+    let stop = extract_task_bool(xml, "StopIfGoingOnBatteries")?;
+    Some(!disallow && !stop)
+}
+
+/// 计划任务当前的电源策略是否与本版本注册的形态一致（供启动对账）。
+/// 任务缺失/读不到 → `None`（由 `task_installed` 那条判据处理，这里不重复表态）。
+pub fn task_power_policy_matches() -> Option<bool> {
+    if !task_installed() {
+        return None;
+    }
+    task_power_policy_verdict(&task_xml()?)
+}
+
 /// `enabled` 来自持久化的用户意图（AppSettings.rc003_capture_enabled），
 /// **不是**"任务是否存在"——两者是不同的状态（见 TaskStatus 注释）。
 pub fn status(enabled: bool) -> TaskStatus {
@@ -584,6 +644,40 @@ mod tests {
         );
         // 拿不到命令 → 不表态
         assert_eq!(task_target_verdict(None, "sayall-helper.exe"), None);
+    }
+
+    #[test]
+    fn power_policy_verdict_reads_both_battery_flags() {
+        // 2026-10-13 报障人现场形态：`schtasks /create` 命令行注册的任务
+        // 两个电池策略都是 true → 电池供电下助手被静默拦下。
+        let cli_style = r#"<?xml version="1.0"?><Task><Settings>
+            <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+            <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+            </Settings></Task>"#;
+        assert_eq!(task_power_policy_verdict(cli_style), Some(false));
+
+        // 本版本 XML 注册的形态：两项都为 false。
+        let xml_style = r#"<?xml version="1.0"?><Task><Settings>
+            <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+            <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+            </Settings></Task>"#;
+        assert_eq!(task_power_policy_verdict(xml_style), Some(true));
+
+        // 半为真也算不通过（保守：宁可回落一次重建，也不让静默趴窝存在）。
+        let half = r#"<Task><Settings>
+            <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+            <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+            </Settings></Task>"#;
+        assert_eq!(task_power_policy_verdict(half), Some(false));
+
+        // 任一项读不到 → 不表态（任务缺失/格式变化由其它判据处理）。
+        assert_eq!(task_power_policy_verdict("<Task></Task>"), None);
+        assert_eq!(
+            task_power_policy_verdict(
+                "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+            ),
+            None
+        );
     }
 
     #[test]
