@@ -50,6 +50,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+/// 提前重连的安静窗下限（2026-10-13，issue #206 第三轮报障人真机实测）：
+/// 失败尝试**本身**会引发一条新的 HID arrival（`device_arrived`），而 arrival
+/// 每次都会清零退避——不加下限时两者互相喂养，形成 ~2 次/秒、18 分钟 2317 次
+/// 的重试风暴。取基础退避值：提前可以，但不得比基础节奏更快。
+const PROMOTION_QUIET_WINDOW: Duration = RECONNECT_BASE_DELAY;
 /// ATVV 麦克风会话延长节拍：遥控器固件对未续期的会话只推约 5-6 秒音频
 /// （2026-09-04 RC003 实测：两次长按 12.95s/8.32s 各只解码 ~5.7s，
 /// 恰为免费窗口；RC001 短按从不触窗）。宿主须周期发送 MIC_EXTEND(0x0E)
@@ -401,6 +406,10 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 提前重连的状态（2026-10-13，issue #206）：上次连接尝试结束的时刻，
+    // 供安静窗判定；以及被安静窗抑制的触发累计数（折叠日志，成功提前即清零）。
+    let mut last_attempt_finished: Option<Instant> = None;
+    let mut suppressed_promotions: u64 = 0;
     // 语音会话纪元：每次会话开始（StreamStarted）+1。wetype_check 重试
     // 阶梯（最长 ~7.4s）用它区分"本会话仍在流式"与"旧会话已结束、
     // 新会话已开始"——仅看全局 voice_state 会把新会话误判为旧会话，
@@ -475,6 +484,7 @@ fn worker_loop(
                                     &mut connection_generation,
                                     &mut capabilities_deadline,
                                 );
+                                last_attempt_finished = Some(Instant::now());
                                 if let Some(note) =
                                     attempt_probe(&mut resource_probe, attempt, &result)
                                 {
@@ -663,6 +673,7 @@ fn worker_loop(
                     &mut connection_generation,
                     &mut capabilities_deadline,
                 );
+                last_attempt_finished = Some(Instant::now());
                 if let Some(note) = attempt_probe(&mut resource_probe, 0, &result) {
                     gatt_note(note);
                 }
@@ -748,7 +759,7 @@ fn worker_loop(
             }
             WorkerMessage::WakeReconnect => {
                 // 遥控器 HID 活动（正在按键）：仅当无活动会话、有首选设备、
-                // 未挂起时立即重试连接；清零退避让下一次尝试马上发生。
+                // 未挂起、且已过安静窗时立即重试连接；清零退避让下一次尝试马上发生。
                 advance_reconnect(
                     &session,
                     &preferred_device_id,
@@ -756,6 +767,8 @@ fn worker_loop(
                     &mut backoff,
                     &mut reconnect_deadline,
                     &state,
+                    last_attempt_finished,
+                    &mut suppressed_promotions,
                     "hidi",
                 );
             }
@@ -769,6 +782,8 @@ fn worker_loop(
                     &mut backoff,
                     &mut reconnect_deadline,
                     &state,
+                    last_attempt_finished,
+                    &mut suppressed_promotions,
                     "device_arrived",
                 );
             }
@@ -1483,12 +1498,15 @@ fn schedule_reconnect(
     ));
 }
 
-/// 是否应当把下一次重连**立即提前**（纯判定）。
+/// 是否应当把下一次重连**立即提前**（纯判定，只判结构条件）。
 ///
 /// 抽成纯函数是因为 worker 循环本身无法在单测里驱动，而这条判定是
 /// `WakeReconnect`（用户按键）与 `RemoteDeviceArrived`（HID 接口出现）
 /// 共用的唯一分岔点——两种触发源的语义完全一致，若各自内联，改一处
 /// 漏一处就会让"设备上线立即重连"在某个路径上静默失效。
+///
+/// "距离上次尝试是否已过安静窗"由 [`quiet_window_elapsed`] 单独判定
+/// （2026-10-13，issue #206：自激 arrival 风暴需要时间下限）。
 fn should_advance_reconnect(
     session: &Option<BleSession>,
     preferred_device_id: &Option<String>,
@@ -1503,10 +1521,30 @@ fn should_advance_reconnect(
         && reconnect_deadline.is_some()
 }
 
+/// 安静窗是否已过：上次连接尝试结束后至少 `PROMOTION_QUIET_WINDOW` 才允许提前。
+///
+/// 为什么需要（2026-10-13，issue #206 第三轮）：报障人真机日志显示
+/// `wake_reconnect triggered=device_arrived backoff_reset=true` 以约 2 次/秒的
+/// 节奏反复出现——失败尝试本身会引发新的 HID arrival，每一条 arrival 都把退避
+/// 清零一次，于是"提前"变成了"风暴"（18 分钟 2317 次尝试），还会把无线电恢复
+/// 窗口挡在门外（连续失败计数被不断清零，到不了阈值）。
+/// 本下限只限制提前的**频率**，不新增等待、不门控：真实唤醒的 arrival 多数
+/// 不受影响；落在窗内的最坏代价是多等一个基础退避间隔（2s，远小于改造前的 30s）。
+fn quiet_window_elapsed(last_attempt_finished: Option<Instant>, now: Instant) -> bool {
+    last_attempt_finished.map_or(true, |finished| {
+        now.saturating_duration_since(finished) >= PROMOTION_QUIET_WINDOW
+    })
+}
+
 /// 执行"提前重连"：清零退避并把 deadline 拉到当下。返回是否真的提前了。
 ///
 /// 只提前、不新增等待：本函数从不延后任何已排定的重连，因此不可能降低
 /// 成功率（AGENTS.md 2026-09-05 晚要求"延迟优化不得降低成功率"）。
+///
+/// 2026-10-13（issue #206 第三轮）追加**安静窗**：上次尝试结束后不足
+/// `PROMOTION_QUIET_WINDOW` 的触发一律不提前；被抑制的触发只落折叠日志
+/// （首次与每 100 次一条，`suppressed_total` 计数），避免把诊断日志反向刷爆。
+#[allow(clippy::too_many_arguments)]
 fn advance_reconnect(
     session: &Option<BleSession>,
     preferred_device_id: &Option<String>,
@@ -1514,6 +1552,8 @@ fn advance_reconnect(
     backoff: &mut ReconnectBackoff,
     reconnect_deadline: &mut Option<Instant>,
     state: &Arc<Mutex<ConnectionSnapshot>>,
+    last_attempt_finished: Option<Instant>,
+    suppressed_total: &mut u64,
     reason: &str,
 ) -> bool {
     if !should_advance_reconnect(
@@ -1524,11 +1564,28 @@ fn advance_reconnect(
     ) {
         return false;
     }
+    let now = Instant::now();
+    if !quiet_window_elapsed(last_attempt_finished, now) {
+        *suppressed_total = suppressed_total.saturating_add(1);
+        if *suppressed_total == 1 || *suppressed_total % 100 == 0 {
+            gatt_note(format!(
+                "wake_reconnect skipped reason=post_attempt_quiet_window trigger={reason} suppressed_total={suppressed_total}"
+            ));
+        }
+        return false;
+    }
     gatt_note(format!(
-        "wake_reconnect triggered={reason} backoff_reset=true"
+        "wake_reconnect triggered={reason} backoff_reset=true since_attempt_ms={}",
+        last_attempt_finished
+            .map(|finished| now
+                .saturating_duration_since(finished)
+                .as_millis()
+                .to_string())
+            .unwrap_or_else(|| "none".to_owned())
     ));
     backoff.reset();
     *reconnect_deadline = Some(Instant::now());
+    *suppressed_total = 0;
     let mut snapshot = lock(state);
     if snapshot.phase == ConnectionPhase::Reconnecting {
         snapshot.reconnect_attempt = 0;
@@ -3868,6 +3925,7 @@ mod tests {
         }));
         let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
         let mut deadline = Some(Instant::now() + Duration::from_secs(30));
+        let mut suppressed = 0_u64;
 
         let advanced = advance_reconnect(
             &None,
@@ -3876,6 +3934,8 @@ mod tests {
             &mut backoff,
             &mut deadline,
             &state,
+            None,
+            &mut suppressed,
             "device_arrived",
         );
         assert!(advanced);
@@ -3896,10 +3956,154 @@ mod tests {
             &mut backoff,
             &mut deadline_past,
             &state,
+            None,
+            &mut suppressed,
             "device_arrived",
         );
         assert!(advanced);
         assert!(deadline_past.unwrap() <= Instant::now());
+    }
+
+    #[test]
+    fn quiet_window_blocks_promotions_right_after_a_failed_attempt() {
+        // 2026-10-13 issue #206 第三轮：失败尝试自身会引发新的 device_arrived，
+        // 无时间下限时 arrival 会把退避一次次清零（真机实测 ~2 次/秒风暴）。
+        let now = Instant::now();
+        assert!(quiet_window_elapsed(None, now), "首次尝试前没有安静窗");
+        assert!(
+            !quiet_window_elapsed(Some(now), now),
+            "刚结束的尝试必须挡下自激 arrival"
+        );
+        assert!(!quiet_window_elapsed(
+            Some(now - Duration::from_millis(500)),
+            now
+        ));
+        assert!(quiet_window_elapsed(
+            Some(now - PROMOTION_QUIET_WINDOW),
+            now
+        ));
+    }
+
+    #[test]
+    fn advance_reconnect_respects_the_quiet_window() {
+        let state = Arc::new(Mutex::new(ConnectionSnapshot {
+            phase: ConnectionPhase::Reconnecting,
+            reconnect_attempt: 7,
+            ..ConnectionSnapshot::default()
+        }));
+        let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
+        let scheduled = Instant::now() + Duration::from_secs(30);
+        let mut deadline = Some(scheduled);
+        let mut suppressed = 0_u64;
+
+        // 安静窗内：不提前、deadline 原样、退避不清零；只累计折叠计数。
+        let advanced = advance_reconnect(
+            &None,
+            &Some("device-id".to_owned()),
+            false,
+            &mut backoff,
+            &mut deadline,
+            &state,
+            Some(Instant::now()),
+            &mut suppressed,
+            "device_arrived",
+        );
+        assert!(!advanced, "安静窗内的 arrival 不得提前重连");
+        assert_eq!(deadline, Some(scheduled), "deadline 必须保持原样");
+        assert_eq!(lock(&state).reconnect_attempt, 7, "抑制时不得清零退避");
+        assert_eq!(suppressed, 1);
+
+        // 窗口之外：恢复正常提前（只限制频率，不取消能力）。
+        let old_finished = Instant::now() - PROMOTION_QUIET_WINDOW - Duration::from_millis(1);
+        let advanced = advance_reconnect(
+            &None,
+            &Some("device-id".to_owned()),
+            false,
+            &mut backoff,
+            &mut deadline,
+            &state,
+            Some(old_finished),
+            &mut suppressed,
+            "device_arrived",
+        );
+        assert!(advanced, "窗口之外仍必须能提前");
+        assert!(deadline.unwrap() <= Instant::now());
+        assert_eq!(lock(&state).reconnect_attempt, 0);
+        assert_eq!(suppressed, 0, "成功提前后抑制计数清零");
+    }
+
+    #[test]
+    fn self_induced_arrival_storm_is_throttled_to_the_base_cadence() {
+        // 形状来自 2026-10-13 真机日志（issue #206）：每次尝试失败后 ~0.2s
+        // 到来一条自激 arrival；~0.5s/次的节奏下 18 分钟累计 2317 次。
+        // 纯模型（不 sleep）：arrival 与排定的 deadline，谁先到处理谁。
+        fn run(quiet_window: bool) -> Vec<Duration> {
+            let attempt_cost = Duration::from_millis(300);
+            let arrival_lag = Duration::from_millis(200);
+            let start = Instant::now();
+            let horizon = start + Duration::from_secs(120);
+            let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
+            let mut deadline = Some(start);
+            let mut pending_arrival: Option<Instant> = None;
+            let mut last_finished: Option<Instant> = None;
+            let mut previous: Option<Instant> = None;
+            let mut gaps = Vec::new();
+            loop {
+                let next = match (deadline, pending_arrival) {
+                    (Some(d), Some(a)) => Some(d.min(a)),
+                    (Some(d), None) => Some(d),
+                    (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
+                let Some(event) = next else { break };
+                if event >= horizon {
+                    break;
+                }
+                if pending_arrival == Some(event) {
+                    let allowed = if quiet_window {
+                        quiet_window_elapsed(last_finished, event)
+                    } else {
+                        true // 阳性对照：修复前的形态（任何 arrival 都提前）
+                    };
+                    if allowed {
+                        backoff.reset();
+                        deadline = Some(event);
+                    }
+                    pending_arrival = None;
+                    continue;
+                }
+                if let Some(prev) = previous {
+                    gaps.push(event.saturating_duration_since(prev));
+                }
+                previous = Some(event);
+                let finished = event + attempt_cost;
+                last_finished = Some(finished);
+                let (_, delay) = backoff.schedule_next();
+                deadline = Some(finished + delay);
+                pending_arrival = Some(finished + arrival_lag);
+            }
+            gaps
+        }
+
+        let gated = run(true);
+        assert!(
+            gated.len() >= 5,
+            "安静窗下 120 秒至少该有几次尝试：{gated:?}"
+        );
+        assert!(
+            gated.iter().all(|gap| *gap >= RECONNECT_BASE_DELAY),
+            "两次尝试的间隔不得小于基础退避：{gated:?}"
+        );
+
+        let control = run(false);
+        assert!(
+            control.iter().any(|gap| *gap < Duration::from_millis(600)),
+            "阳性对照：去掉安静窗必须重现 ~0.5s 节奏：{control:?}"
+        );
+        assert!(
+            control.len() > gated.len() * 3,
+            "阳性对照的尝试次数应显著更多：gated={gated:?} control={control:?}"
+        );
     }
 
     #[test]
