@@ -432,9 +432,15 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .remote-photo { position: absolute; z-index: 1; width: 250px; height: 508px; margin: 0; border-radius: 14px; overflow: hidden; }
 .remote-photo img { width: 100%; height: 100%; object-fit: cover; user-select: none; }
 /* 锚点橙点对齐 Mac：8px 纯圆点（无光环）。 */
-.anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; transition: opacity 0.06s; }
+/* 按下高亮必须与连线同帧：连线本来就是瞬变，而卡片曾用 160ms 过渡、锚点 60ms。
+   浏览器预览实测（150ms 短按）：连线 4ms 到完整按下色，卡片要到 ~151ms、松手后
+   还要 ~200ms 才退回——短按（现场实测最短按住 99ms）下卡片根本画不到完整按下色，
+   看起来就是"有时快、有时慢、卡片和线条不一起亮"（2026-10-13 现场反馈）。
+   按下/松开是跟随物理按键的状态，一律不做过渡；hover/选中也一并即时，避免同一张
+   卡上出现两种时序。 */
+.anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; }
 .anchor-dot.visible { opacity: 1; }
-.mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease; }
+.mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; }
 .mapping-card.left { left: 0; }
 .mapping-card.right { right: 0; }
 .mapping-card:hover { background: var(--surface-hover); border-color: var(--accent-border); box-shadow: 0 3px 12px var(--shadow-control); }

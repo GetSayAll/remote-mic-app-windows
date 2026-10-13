@@ -10,6 +10,19 @@ let edgeHandler: EdgeHandler | null = null;
 let gestureHandler: GestureHandler | null = null;
 let shortcutCaptureHandler: ShortcutCaptureHandler | null = null;
 
+/** 高亮时序取证用的前端日志 spy（保留真实的 reasonToken 等实现）。 */
+const { reportFrontendEventSpy } = vi.hoisted(() => ({
+  reportFrontendEventSpy: vi.fn<(event: Record<string, unknown>) => void>(),
+}));
+
+vi.mock("../lib/frontend-diagnostics", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/frontend-diagnostics")>();
+  return {
+    ...actual,
+    reportFrontendEvent: (event: Record<string, unknown>) => reportFrontendEventSpy(event),
+  };
+});
+
 vi.mock("../lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/bridge")>();
   return {
@@ -262,6 +275,7 @@ beforeEach(() => {
   vi.mocked(getButtonMappings).mockClear();
   vi.mocked(subscribeButtonEdges).mockClear();
   vi.mocked(subscribeButtonGestures).mockClear();
+  reportFrontendEventSpy.mockClear();
   vi.mocked(saveButtonMappings).mockClear();
   // mockClear 只清调用记录，**不清实现**：学习输入框的默认实现要在每个用例里重置。
   vi.mocked(learnFocusTarget).mockClear();
@@ -1228,6 +1242,39 @@ describe("buttons mapping page", () => {
     });
   });
 
+  it("logs the button-edge highlight timing for the highlight-latency ground truth", async () => {
+    await mountPage();
+    reportFrontendEventSpy.mockClear();
+
+    // 按下沿：必须落一条 button_edge（含"收到边沿 → 下一帧"的 elapsedMs），
+    // 否则现场只能看到引擎侧 map_edges、看不到高亮有没有出画面。
+    edgeHandler!({ button: "up", isPressed: true });
+    await vi.waitFor(() => {
+      const reported = reportFrontendEventSpy.mock.calls
+        .map(([event]) => event as Record<string, unknown>)
+        .find((event) => event.event === "button_edge");
+      if (!reported) throw new Error("按下边沿未落结构化日志");
+      expect(reported).toMatchObject({
+        event: "button_edge",
+        phase: "completed",
+        result: "passed",
+        reason: "pressed",
+        detail: "up",
+      });
+      expect(typeof reported.elapsedMs).toBe("number");
+    });
+
+    // 松开沿同样要落一条——"高亮迟迟不灭"这类现场只能靠它区分。
+    edgeHandler!({ button: "up", isPressed: false });
+    await vi.waitFor(() => {
+      const reasons = reportFrontendEventSpy.mock.calls
+        .map(([event]) => event as Record<string, unknown>)
+        .filter((event) => event.event === "button_edge")
+        .map((event) => event.reason);
+      if (!reasons.includes("released")) throw new Error("松开边沿未落结构化日志");
+    });
+  });
+
   it("shows the fired gesture feedback from engine events", async () => {
     const wrapper = await mountPage();
     gestureHandler!({ button: "ok", trigger: "single" });
@@ -1237,6 +1284,28 @@ describe("buttons mapping page", () => {
         throw new Error("手势触发后格子未出现闪烁反馈");
       }
     });
+  });
+
+  it("ends the fired-gesture flash with the release edge, not a fixed 600ms tail", async () => {
+    const wrapper = await mountPage();
+    const flashed = () => wrapper.find(".mapping-cell.flashed").exists();
+
+    // 按下 + 动作触发（映射已配）：闪烁反馈出现。
+    edgeHandler!({ button: "ok", isPressed: true });
+    gestureHandler!({ button: "ok", trigger: "single" });
+    await vi.waitFor(() => {
+      if (!flashed()) throw new Error("未出现闪烁反馈");
+    });
+
+    // 松开：闪烁反馈必须跟着灭（现场反馈"配了映射就不能同灭"——原来固定 600ms）。
+    // 允许一段最短可见时间（150ms），但必须显著早于 600ms 兜底。
+    const releasedAt = performance.now();
+    edgeHandler!({ button: "ok", isPressed: false });
+    expect(flashed(), "最短可见时间内不应同帧消失").toBe(true);
+    await vi.waitFor(() => {
+      if (flashed()) throw new Error("松开后闪烁反馈仍在");
+    });
+    expect(performance.now() - releasedAt).toBeLessThan(400);
   });
 
   /** 编辑器内按标签找 chip 并返回其禁用态。 */

@@ -251,9 +251,40 @@ let captureTimeout: number | null = null;
 let captureRequestId = 0;
 let snapshotTimer: number | null = null;
 let flashTimer: number | null = null;
+/** 本次闪烁反馈的起点（性能时钟，用于"松开即灭、最短 150ms"的补足计算）。 */
+let flashStartedAt = 0;
+/** 闪烁反馈的最短可见时间：极短按也要看得见这一下反馈。 */
+const FLASH_MIN_MS = 150;
+/** 闪烁反馈的兜底时长：松开沿丢失（断连/异常）时不让它一直亮着。 */
+const FLASH_FALLBACK_MS = 600;
 let resizeObserver: ResizeObserver | null = null;
 let unmounted = false;
 let resourcesReady = false;
+
+/**
+ * 松开沿结束本次按压的闪烁反馈（与按下高亮、连线**同灭**）。
+ *
+ * 现场（2026-10-13）：未配映射的键"同亮同灭"，配了映射的反而不行——固定 600ms 的
+ * 闪烁比按下高亮多亮约 400ms。现在闪烁跟随这一次按压：按下手势触发时起算，
+ * 松开沿到达即结束；不足 150ms 的极短按补足到 150ms（保证看得见）。
+ */
+function endFiredFlash(button: RemoteButton): void {
+  const flash = firedFlash.value;
+  if (!flash || flash.button !== button) return;
+  if (flashTimer !== null) {
+    window.clearTimeout(flashTimer);
+    flashTimer = null;
+  }
+  const remaining = FLASH_MIN_MS - (performance.now() - flashStartedAt);
+  if (remaining <= 0) {
+    firedFlash.value = null;
+    return;
+  }
+  flashTimer = window.setTimeout(() => {
+    firedFlash.value = null;
+    flashTimer = null;
+  }, remaining);
+}
 
 function releasePageResources(): void {
   window.removeEventListener("keydown", handleCaptureKeydown, true);
@@ -1667,6 +1698,7 @@ onMounted(async () => {
   }
 
   const stopEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
+    const arrival = performance.now();
     const next = new Set(activeButtons.value);
     if (edge.isPressed) {
       next.add(edge.button);
@@ -1677,6 +1709,25 @@ onMounted(async () => {
     if (!lockSelection.value && edge.isPressed) {
       selectedButton.value = edge.button;
     }
+    if (!edge.isPressed) endFiredFlash(edge.button);
+    // 高亮时序取证（2026-10-13 现场反馈"有时快、有时有延迟、卡片和线条不一起亮"）：
+    // 每次按下/松开各落一行，elapsed_ms = "收到边沿 → 下一帧"。与同一时刻的引擎
+    // 日志 `map_edges` 对齐，可把延迟拆成 设备→引擎 / 引擎→前端 / 前端出画面 三段，
+    // 不必再靠反复试错定位；字段全部是稳定 token（detail = 语义键名）。
+    const reportEdge = () =>
+      reportFrontendEvent({
+        event: "button_edge",
+        phase: "completed",
+        result: "passed",
+        reason: edge.isPressed ? "pressed" : "released",
+        detail: edge.button,
+        elapsedMs: Math.max(0, Math.round(performance.now() - arrival)),
+      });
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(reportEdge);
+    } else {
+      window.setTimeout(reportEdge, 0);
+    }
   });
   if (unmounted) {
     stopEdges();
@@ -1684,13 +1735,19 @@ onMounted(async () => {
   }
   unlistenEdges = stopEdges;
 
+  // 动作触发反馈（闪烁）：起点 = 手势触发，终点 = **松开沿**（或 600ms 兜底）。
+  // 现场（2026-10-13）：配了映射的键"不能同灭"——固定 600ms 的闪烁比按下高亮多亮
+  // 约 400ms，看起来像卡片没跟着连线熄灭。闪烁现在跟随这一次按压，只有极短按
+  // （<150ms）才补足到最短可见时间；按住连发每拍重新起算。
   const stopGestures = await subscribeButtonGestures((gesture: FiredGesture) => {
     lastFired.value = gesture;
     firedFlash.value = { button: gesture.button, trigger: gesture.trigger };
+    flashStartedAt = performance.now();
     if (flashTimer !== null) window.clearTimeout(flashTimer);
     flashTimer = window.setTimeout(() => {
       firedFlash.value = null;
-    }, 600);
+      flashTimer = null;
+    }, FLASH_FALLBACK_MS);
   });
   if (unmounted) {
     stopGestures();

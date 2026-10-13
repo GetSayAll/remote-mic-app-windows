@@ -45,7 +45,11 @@
 //! 主程序是监听方，且**只接受出示正确令牌的连接**。
 //!
 //! 纵深防御在**白名单 + 动态目标集**：桥接只接受 13 个已知语义按键，且只有
-//! 当前启用并已配置映射的动态目标可以进入映射引擎；语音键始终排除。
+//! 当前启用、在动态目标集内的按键可以进入映射引擎。目标集 =
+//! **三键恒在内**（返回 / 音量±，见 [`ALWAYS_CAPTURED_BUTTONS`]）∪ 已配置映射的
+//! 按键——三键若只在"配置了映射"时才接管，"什么都没配"时按下就零事件
+//! （卡片不高亮、向导按键检测也收不到），而其他按键照常高亮，体验自相矛盾
+//! （2026-10-13 现场反馈）。语音键始终排除。
 //!
 //! ## 协议（ASCII 行，`\n` 结尾；助手 → 主程序）
 //!
@@ -93,7 +97,9 @@ use windows::Win32::System::Pipes::{
 use serde::Serialize;
 
 use crate::button_mapping::EngineMessage;
-use crate::raw_input::{button_for_usage, ButtonEdge, ENHANCED_CAPTURE_BUTTON_USAGES};
+use crate::raw_input::{
+    button_for_usage, ButtonEdge, RemoteButton, ENHANCED_CAPTURE_BUTTON_USAGES,
+};
 
 /// 语音键的 HID 键盘 usage：遥控器语音键同时以键盘 **F5（0x003E）** 上报
 /// （与 key_suppressor 的知识同源）。ATVV 语音会话走 BLE 协议层，不经这个
@@ -136,6 +142,31 @@ pub const BRIDGE_ALLOWED_USAGES: [u16; 13] = [
     0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F, 0x0080,
     0x0081,
 ];
+
+/// 「全按键支持」开启时**无条件**接管的三个按键（返回 / 音量+ / 音量−）。
+///
+/// 这三个 usage 在 Windows 的 HID→VK 映射表里没有条目（`kbdhid` 在映射阶段丢弃），
+/// 任何常规输入通道都看不见它们——只有报告层接管才有事件。因此**不能**"只在
+/// 已配置映射时才接管"：那样在"开着全按键支持、什么都没配"时按下它们零反应
+/// （卡片不高亮、向导按键检测也收不到），而其他按键照常高亮（原生路径），
+/// 体验自相矛盾（2026-10-13 现场反馈）。按下即有高亮是配置动作之前的必要反馈，
+/// 也是向导"按键检测"的一环。
+///
+/// 恒持有代价为零：清空这三个 usage 不改变任何既有的系统可见行为——它们本就
+/// 到不了操作系统与任何应用（证据
+/// `docs/investigations/2026-09-23-rc003-hid-host-write-tap-result.md`）。
+const ALWAYS_CAPTURED_BUTTONS: [RemoteButton; 3] = [
+    RemoteButton::Back,
+    RemoteButton::VolumeUp,
+    RemoteButton::VolumeDown,
+];
+
+/// [`ALWAYS_CAPTURED_BUTTONS`] 的位掩码（与 `ButtonMappings::mapped_mask` 同口径）。
+fn always_captured_mask() -> u64 {
+    ALWAYS_CAPTURED_BUTTONS
+        .iter()
+        .fold(0u64, |mask, button| mask | (1u64 << button.ordinal()))
+}
 
 /// 等待 `HELLO` 的上限。超时即断开——避免连接被空占。
 const HELLO_TIMEOUT: Duration = Duration::from_millis(5_000);
@@ -768,14 +799,19 @@ impl Rc003Bridge {
         }
     }
 
-    /// 更新增强捕获目标。只有功能开启且已配置映射的按键才被报告层接管；
-    /// 关闭功能或删除映射会立即撤销所有权并恢复既有 Raw Input/键盘门控路径。
+    /// 更新增强捕获目标。
+    ///
+    /// 目标集 = **三键恒在内**（返回 / 音量±，见 [`ALWAYS_CAPTURED_BUTTONS`]）∪
+    /// 已配置映射的按键（仅功能开启时）；其余按键只在配置了映射后才被接管
+    /// （未配置者保持原生路径 = 最小接管）。关闭功能或删除映射会立即撤销相应
+    /// 所有权并恢复既有 Raw Input/键盘门控路径。
     pub fn set_capture_targets(&self, enabled: bool, mapped_mask: u64) {
         let usages: BTreeSet<u16> = if enabled {
+            let capture_mask = mapped_mask | always_captured_mask();
             ENHANCED_CAPTURE_BUTTON_USAGES
                 .iter()
                 .filter_map(|(button, usage)| {
-                    (((mapped_mask >> button.ordinal()) & 1) == 1).then_some(*usage)
+                    (((capture_mask >> button.ordinal()) & 1) == 1).then_some(*usage)
                 })
                 .collect()
         } else {
@@ -2293,6 +2329,86 @@ mod tests {
         assert_eq!(lock(&shared).usages_dropped, 1);
     }
 
+    /// 三键（返回/音量±）在**没有任何配置**时也必须进捕获目标（2026-10-13 现场反馈）。
+    ///
+    /// 现象：开着「全按键支持」但没给三键配动作时，按下它们零事件——卡片不高亮、
+    /// 向导按键检测也收不到；而其他按键照常高亮（原生路径），体验自相矛盾。
+    /// 恒接管三键的代价为零：这三个 usage 被 Windows 的 HID→VK 映射表丢弃，
+    /// 清空它们不改变任何既有的系统可见行为（证据
+    /// docs/investigations/2026-09-23-rc003-hid-host-write-tap-result.md）。
+    #[test]
+    fn three_keys_are_captured_without_any_mapping() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-trikeys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+
+        bridge.set_capture_targets(true, 0);
+        assert_eq!(
+            bridge.snapshot().target_usages,
+            vec![0x0080, 0x0081, 0x00F1],
+            "零配置时目标集必须恰好是三键"
+        );
+
+        bridge.set_capture_targets(false, 0);
+        assert!(
+            bridge.snapshot().target_usages.is_empty(),
+            "关闭全按键支持必须清空目标"
+        );
+
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目标集 = 三键 ∪ 已配置映射的按键；未配置的其他按键仍不被接管（保持最小接管）。
+    #[test]
+    fn capture_targets_are_three_keys_plus_mapped_only() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-targets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Home]));
+        assert_eq!(
+            bridge.snapshot().target_usages,
+            vec![0x004A, 0x0080, 0x0081, 0x00F1],
+            "已配置的 Home 与三键都在目标里；未配置的确定/方向不得进入"
+        );
+
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 三键边沿在"零配置"的目标集下必须被放行（按下即高亮全靠这一步）；
+    /// 未配置的其他按键边沿仍被丢弃——白名单语义与最小接管同时成立。
+    #[test]
+    fn three_key_edges_pass_the_minimal_target_set() {
+        let shared = Arc::new(Mutex::new(BridgeShared::default()));
+        let targets = targets(&[0x00F1, 0x0080, 0x0081]);
+
+        // 未配置的其他按键（主页）仍被丢弃——报告层不会接管白名单之外的语义键。
+        let dropped = apply_usages(&shared, &targets, &[0x004A].into_iter().collect());
+        assert!(dropped.is_empty(), "未配置的 Home 不得进入映射引擎");
+        assert_eq!(lock(&shared).usages_dropped, 1);
+
+        // 三键边沿必须放行：按下即高亮（以及后续映射）全靠它。
+        let edges = apply_usages(&shared, &targets, &[0x00F1].into_iter().collect());
+        assert_eq!(
+            edges,
+            vec![ButtonEdge {
+                button: RemoteButton::Back,
+                is_pressed: true
+            }]
+        );
+        assert_eq!(lock(&shared).usages_dropped, 1, "三键不得计入丢弃");
+    }
+
     /// 端到端（离线、免提权、免设备）：真 TcpStream 走完整协议。
     #[test]
     fn end_to_end_loopback_delivers_edges() {
@@ -2335,7 +2451,10 @@ mod tests {
         assert!(ok.starts_with("OK "), "实际收到 {ok:?}");
         let ok_parts: Vec<_> = ok.trim().split(' ').collect();
         let generation = ok_parts[2].parse::<u64>().expect("OK 携带目标代次");
-        assert_eq!(ok_parts[3], "80,f1", "OK 携带当前动态目标");
+        assert_eq!(
+            ok_parts[3], "80,81,f1",
+            "OK 携带当前动态目标：已配置的返回/音量+ 与恒接管的三键（音量−）"
+        );
         let mut synth = String::new();
         reader
             .read_line(&mut synth)
@@ -2355,18 +2474,18 @@ mod tests {
         stream.write_all(b"A -\n").unwrap();
         stream.flush().unwrap();
         stream
-            .write_all(format!("O {generation} f1,80\n").as_bytes())
+            .write_all(format!("O {generation} 80,81,f1\n").as_bytes())
             .unwrap();
         stream.flush().unwrap();
         for _ in 0..20 {
-            if bridge.snapshot().owned_usages == vec![0x0080, 0x00F1] {
+            if bridge.snapshot().owned_usages == vec![0x0080, 0x0081, 0x00F1] {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
         }
         assert_eq!(
             bridge.snapshot().owned_usages,
-            vec![0x0080, 0x00F1],
+            vec![0x0080, 0x0081, 0x00F1],
             "只有 agent ACK 后才建立增强所有权"
         );
 
@@ -2439,7 +2558,10 @@ mod tests {
             .read_line(&mut target_line)
             .expect("必须收到 T 热更新");
         assert!(target_line.starts_with("T "), "实际收到 {target_line:?}");
-        assert!(target_line.trim().ends_with("4a"));
+        assert!(
+            target_line.trim().ends_with("4a,80,81,f1"),
+            "热更新必须带上恒接管的三键：实际收到 {target_line:?}"
+        );
         stream.write_all(b"E 3 4a\n").unwrap();
         stream.flush().unwrap();
         let home = receiver

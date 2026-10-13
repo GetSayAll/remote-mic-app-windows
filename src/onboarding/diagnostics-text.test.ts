@@ -78,15 +78,24 @@ const snapshot: OnboardingDiagnosticsSnapshot = {
   bleVoiceReady: true,
   rawInputPhase: "ready",
   reconnectAttempt: 0,
+  connectionErrorPresent: false,
+  remoteButtonObserved: true,
+  rawInputMatchedDeviceCount: 1,
+  rawInputRawEventCount: 6,
+  rawInputSemanticEdgeCount: 3,
+  rawInputStaleEventCount: 0,
   audioPhase: "ready",
   recommendedEndpointCount: 1,
   selectedRecommended: true,
   queuedSamples: 0,
+  audioErrorPresent: false,
   tool: "wechat",
   hotkey: "left_control+left_windows",
   captureEnabled: false,
   vokieInstalled: false,
   vokieRunning: false,
+  voiceTestPhase: "terminal",
+  voiceTerminalCode: "voice.no_transcript",
   distinctButtonCount: 2,
   mappingSuspended: true,
 };
@@ -121,15 +130,44 @@ describe("formatOnboardingDiagnostics", () => {
     const text = formatOnboardingDiagnostics(report, snapshot);
 
     expect(text).toContain(
-      "Remote: phase=ready model=rc003 voice_ready=yes input_phase=ready reconnects=0",
+      "Remote: phase=ready model=rc003 voice_ready=yes reconnects=0 error=no button_observed=yes",
     );
-    expect(text).toContain("Audio: phase=ready recommended=1 selected=yes queued_samples=0");
+    expect(text).toContain(
+      "Raw input: phase=ready matched=1 raw_events=6 semantic_edges=3 stale_events=0",
+    );
+    expect(text).toContain("Audio: phase=ready recommended=1 selected=yes queued_samples=0 error=no");
     expect(text).toContain(
       "Input tool: wechat hotkey=left_control+left_windows full_key_support=off",
     );
     expect(text).toContain("Vokie: not_detected");
+    expect(text).toContain("Voice test: phase=terminal terminal=voice.no_transcript");
     expect(text).toContain("Buttons observed: 2/3");
     expect(text).toContain("Mapping: suspended");
+  });
+
+  it("②步现场（按键已收到但应用未连接）在文本里能自证", () => {
+    // 2026-10-10 用户报障的现场形状：系统侧输入通道在位、按键已收到，
+    // 但应用自己的会话从未建立（idle / 型号未读回 / 无重连）。
+    const text = formatOnboardingDiagnostics(report, {
+      ...snapshot,
+      step: "remote",
+      model: "unknown",
+      connectionPhase: "idle",
+      bleVoiceReady: false,
+      rawInputPhase: "ready",
+      remoteButtonObserved: true,
+      rawInputMatchedDeviceCount: 1,
+      rawInputSemanticEdgeCount: 1,
+      voiceTestPhase: "waiting_start",
+      voiceTerminalCode: null,
+    });
+
+    expect(text).toContain("Wizard step: remote (2/7)");
+    expect(text).toContain("phase=idle model=unknown voice_ready=no");
+    expect(text).toContain("button_observed=yes");
+    expect(text).toContain("Raw input: phase=ready matched=1");
+    // 没有产生过 attempt 终态时写 none，不写内部字段名。
+    expect(text).toContain("Voice test: phase=waiting_start terminal=none");
   });
 
   it("门禁通过时不输出门禁行，Blocked 记为 no", () => {
