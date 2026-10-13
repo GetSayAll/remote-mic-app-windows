@@ -94,6 +94,11 @@ mod raw_input_windows;
 pub mod rc003_bridge;
 #[cfg(any(windows, test))]
 mod reconnect;
+/// 「应用正在用的那支遥控器」的单一来源（2026-10-13）：把 BLE 会话的地址发布给
+/// Raw Input 绑定与提权助手，用来消解"两台同型号遥控器同时在线"造成的歧义。
+/// 跨平台可编译（便于单测）；非 Windows 上没有消费者。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod remote_target;
 #[cfg(windows)]
 mod resource_probe;
 pub mod send_input;

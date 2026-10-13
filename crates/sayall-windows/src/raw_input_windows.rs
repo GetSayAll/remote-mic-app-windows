@@ -928,7 +928,12 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
             }
         }
     }
-    Ok(paths)
+    // 两台同型号遥控器同时在线时按「应用正在用的那支」收窄候选（2026-10-13）：
+    // 地址未知时这一行是恒等变换（行为与过去完全一致）。
+    Ok(crate::raw_input::filter_paths_for_target(
+        &paths,
+        crate::remote_target::get(),
+    ))
 }
 
 fn get_device_name(device: windows::Win32::Foundation::HANDLE) -> Result<String, String> {

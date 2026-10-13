@@ -186,6 +186,24 @@ pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathE
     select_single_device_path_preferring(paths, "")
 }
 
+/// 只留属于**应用正在用的那支遥控器**的候选（2026-10-13 现场：两台同型号遥控器
+/// 同时在线时，两条链路都拒绝盲选，整机按键全断且没有解释）。
+///
+/// - `target = None`（地址未知）⇒ 原样返回，行为与过去完全一致；
+/// - 地址已知 ⇒ 按地址过滤；**一个都不匹配时返回空**，由调用方按「设备不在位」
+///   处理（转等待、等接口恢复）——绝不能退回未过滤集合：那会在两支同型号遥控器
+///   之间绑错设备（用户按 A 支、程序听 B 支），比暂时不绑定更糟。
+pub fn filter_paths_for_target(paths: &[String], target: Option<u64>) -> Vec<String> {
+    match target {
+        None => paths.to_vec(),
+        Some(address) => paths
+            .iter()
+            .filter(|path| crate::remote_target::matches_address(path, address))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// 在多个候选中选出唯一绑定，且**优先保持既有绑定**（2026-09-18）。
 ///
 /// 与不传偏好的版本差别只在"多候选"这一支：先看旧路径是否仍在候选里，在就继续
