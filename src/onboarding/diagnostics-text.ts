@@ -18,7 +18,8 @@
  *   被丢弃报文）——"按键收不到"与"绑定失效"的分界靠这几个数；
  * - `error=`（连接、音频各一处）：只给布尔，区分"从未尝试"与"试过且失败"，
  *   错误原文一律不进（脱敏红线）；
- * - `Voice test:` 行：第⑤步 attempt 的当前阶段与终态码（无终态时写 `none`）。
+ * - `Voice test:` 行：第⑤步 attempt 的当前阶段与终态码（无终态时写 `none`；
+ *   迟到接受后终态码写 `late_transcript`）与 `late=` 布尔。
  *
  * 脱敏红线（与 LOGGING.md 不同）：本块是**用户主动复制**发给支持人员的内容，
  * 允许出现稳定 token（`voice_test`、`rc003` 等）；但绝不包含设备 id/名称（蓝牙
@@ -79,8 +80,10 @@ export interface OnboardingDiagnosticsSnapshot {
   vokieRunning: boolean;
   /** 第⑤步 attempt 的当前阶段（VoiceAttemptState token）。 */
   voiceTestPhase: string;
-  /** 第⑤步 attempt 的终态码（如 voice.no_transcript；无终态时 null）。 */
+  /** 第⑤步 attempt 的终态码（如 voice.no_transcript；无终态时 null；迟到接受后为 late_transcript）。 */
   voiceTerminalCode: string | null;
+  /** 第⑤步是否走了「迟到接受」（3 秒窗口失败后文字仍出现；对齐 Mac 现值门禁）。 */
+  voiceLateAccepted: boolean;
   distinctButtonCount: number;
   mappingSuspended: boolean;
 }
@@ -127,7 +130,7 @@ export function formatOnboardingDiagnostics(
     }`,
     `Voice test: phase=${snapshot.voiceTestPhase} terminal=${
       snapshot.voiceTerminalCode ?? "none"
-    }`,
+    } late=${yesNo(snapshot.voiceLateAccepted)}`,
     `Buttons observed: ${snapshot.distinctButtonCount}/3`,
     `Mapping: ${snapshot.mappingSuspended ? "suspended" : "active"}`,
   );

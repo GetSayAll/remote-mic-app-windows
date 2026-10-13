@@ -1426,6 +1426,170 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
+  it("accepts a late transcript after the failed 3s window（2026-10-13 报告：文字出现但无法继续；对齐 Mac 现值门禁）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200); // 开始帧
+    await vi.advanceTimersByTimeAsync(200); // 收尾帧 → waiting_transcript
+
+    // 3 秒窗口内没有文字 → 超时失败（现场截图：文字行 "!"）。
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("输入工具没有写出文字");
+
+    // 文字迟到到达：观察窗口内没有物理键 → 翻案为通过（不是死路）。
+    await wrapper.find("input.onboarding-voice-input").setValue("你好啊");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("成功：文字已经出现在输入框里");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    const late = onboardingEvents("voice_attempt").filter((p) => p.reason === "late_transcript");
+    expect(late).toHaveLength(1);
+    expect(late[0].result).toBe("passed");
+    expect(String(late[0].detail)).toMatch(/^after_\d+$/);
+
+    // 迟到接受同样要能继续（现场症状是"无法继续"）。
+    await continueButton.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("按一下遥控器的普通按键");
+    wrapper.unmount();
+  });
+
+  it("still refuses late text when a physical key was counted（阴性对照不放松）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("输入工具没有写出文字");
+
+    // 迟到结算时报出 1 个物理键：这是用户自己打的字，保持失败。
+    mocks.endKeyObservation.mockResolvedValueOnce(1);
+    await wrapper.find("input.onboarding-voice-input").setValue("手打的字");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("输入工具没有写出文字");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
+    expect(continueButton.attributes("data-gate-ready")).toBe("false");
+    expect(
+      onboardingEvents("voice_attempt").some((p) => p.reason === "late_transcript_manual"),
+    ).toBe(true);
+    expect(
+      onboardingEvents("voice_attempt").filter((p) => p.reason === "late_transcript"),
+    ).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("sees text that lands in the box without a DOM input event（读回输入框现值）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200); // 开始帧
+    await vi.advanceTimersByTimeAsync(200); // 收尾帧 → waiting_transcript
+
+    // 文字进了输入框，但没有派发 DOM input 事件（本测试直接写 value，不 trigger）。
+    const box = wrapper.find("input.onboarding-voice-input").element as HTMLInputElement;
+    box.value = "你好啊";
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(200); // 下一帧轮询读回现值 → 通过
+    await flushPromises();
+
+    expect(box.value).toBe("你好啊");
+    expect(wrapper.text()).toContain("成功：文字已经出现在输入框里");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    expect(
+      onboardingEvents("voice_attempt").some((p) => p.reason === "transcript_value_readback"),
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("accepts event-less late text through the late watch（失败后读回现值）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("输入工具没有写出文字");
+
+    const box = wrapper.find("input.onboarding-voice-input").element as HTMLInputElement;
+    box.value = "你好啊"; // 迟到且没有 DOM 事件
+    await vi.advanceTimersByTimeAsync(200); // 迟到监视帧读回现值
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("成功：文字已经出现在输入框里");
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    wrapper.unmount();
+  });
+
   it("asks the user to click back into the box when a session starts unfocused", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
