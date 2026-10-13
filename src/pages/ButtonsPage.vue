@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
-import { reportFrontendEvent } from "../lib/frontend-diagnostics";
+import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
 import {
   captureFailureText,
@@ -1446,7 +1446,7 @@ watch(rc003BridgePhase, (phase, previous) => {
       event: "rc003_capture_bridge_failed",
       phase: "completed",
       result: "failed",
-      reason: `bridge_phase=${String(phase)}`,
+      reason: reasonToken("bridge_phase", phase),
     });
   }
 });
@@ -1574,7 +1574,7 @@ async function applyCaptureToggle() {
       event: "rc003_capture_toggle",
       phase: "completed",
       result: "passed",
-      reason: `enabled=${String(next.enabled)}`,
+      reason: reasonToken("enabled", next.enabled),
     });
   } catch (error) {
     rc003CaptureFailureRaw.value = error instanceof Error ? error.message : String(error);
@@ -1585,7 +1585,7 @@ async function applyCaptureToggle() {
       event: "rc003_capture_toggle",
       phase: "completed",
       result: "failed",
-      reason: `was_enabled=${String(wasEnabled === true)} switch_reverted`,
+      reason: reasonToken("was_enabled", wasEnabled === true, "switch_reverted"),
     });
     // 再用权威状态（设置里的意图）校正一次，防止本地值与系统状态漂移。
     void getRc003TaskStatus()
@@ -1595,7 +1595,7 @@ async function applyCaptureToggle() {
           event: "rc003_capture_toggle",
           phase: "reconciled",
           result: "unknown",
-          reason: `authoritative_enabled=${String(status.enabled)}`,
+          reason: reasonToken("authoritative_enabled", status.enabled),
         });
       })
       .catch(() => {});

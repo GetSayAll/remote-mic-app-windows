@@ -28,6 +28,28 @@ export function reportFrontendEvent(event: FrontendDiagnosticEvent): void {
   });
 }
 
+/**
+ * 把若干片段拼成结构化日志里的**稳定 token**。
+ *
+ * 为什么必须这样拼：Rust 侧 `diagnostic_token()` 只放行 `[A-Za-z0-9_.-]{1,64}`，
+ * 其余（空格、`=`、中文、自由文本）一律记成 `invalid`——2026-10-10 真机实测：
+ * `reason: \`was_enabled=false switch_reverted\`` 这类写法在日志里全是
+ * `reason=invalid`，失败原因等于没记（原文也不该进日志，见隐私红线）。
+ *
+ * 规则：片段用 `_` 连接；布尔展开成 `true` / `false`；非法字符替换成 `_`；
+ * 去首尾 `_`；截断到 64 字符；全空回落 `unknown`。
+ */
+export function reasonToken(...parts: Array<string | boolean | number | null | undefined>): string {
+  const joined = parts
+    .filter((part) => part !== null && part !== undefined && part !== "")
+    .map((part) => String(part))
+    .join("_")
+    .replace(/[^A-Za-z0-9_.-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+  return joined === "" ? "unknown" : joined;
+}
+
 export function installFrontendDiagnostics(): void {
   reportFrontendEvent({
     event: "script_evaluation",
