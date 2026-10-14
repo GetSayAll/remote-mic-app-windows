@@ -23,6 +23,11 @@
 6. 交接期端口竞争（2026-10-13 真机回归后加固）：换机重启时新旧实例短暂重叠，接班人可能
    撞上单实例端口——应看到接班人记 `[WAIT] event=listen_retry … outcome=bound` 并在旧实例
    退出后接管；**不得**出现 `[STOP] 绑定 127.0.0.1:47831 失败`（出现即回归）。
+7. （2026-10-14 追加）单实例连接位只接受**目标宿主**的 agent：另一支同型号遥控器宿主里的
+   残留 agent 再重连也会被 `[REJECT] reason=host_pid_mismatch` 拒绝（折叠日志），不会占位——
+   修复前它会静默占住连接位（界面全绿、报告层合成与语音键全失效，见
+   `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`）；"结束旧宿主换新宿主"的自动刷新
+   同样只认目标地址那一支（`refresh_host_candidate`）。
 
 ## 2026-09-27 全按键动态目标增量验收
 
@@ -473,6 +478,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[HOST]` / `[EXCLUSIVE]` | 宿主 pid / 进程名 / 是否独占 RC003 |
 | `[CANARY]` | `enabled` `report_usages` `clear_usages` `canary` |
 | `[HELLO]` | `auth` `pid` `agent` **`build`（脚本代次）** `mode` `restore` `lease_ms` |
+| `[REJECT]` | `reason=token_mismatch\|host_pid_mismatch` `total` `agent_pid` `target_pid`（折叠：前 3 条 + 每 30 条一条；`host_pid_mismatch` = 另一支同型号遥控器宿主里的残留 agent 在重连，见 §10） |
 | `[AGENT-STALE]` | `running` `embedded` `host_pid` —— **出现即表示本轮接管的是旧脚本，新逻辑不会生效**（见 §0.1） |
 | `[TOKEN]` | `source=file\|generated\|explicit` |
 | `[PREP]` | `dll` `action=reuse\|overwrite\|skip_copy_attaching_existing_tap` `reason` |
@@ -503,6 +509,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[STOP] 复制 Gadget 失败 … os error 32` | 宿主仍映射着运行时目录那份 DLL | 更新版已不会这样：会走 `[ATTACH]` 接管或 `[STALE-TAP]` 提示 |
 | `[STALE-TAP]` + 退出码 13 | 宿主里的 tap 是**旧世代**（令牌已换，接不上） | 按提示清一次：断开重配对 RC003（最干净）/ 设备管理器禁用再启用 / 重启 |
 | `[NO-HELLO]` + 退出码 12 | 注入了但 30 s 内没有**已鉴权**会话 | 看 `[VERIFY-MODULE] gadget_modules_in_host`；确认没有第二个助手在抢端口 |
+| `[REJECT] reason=host_pid_mismatch`（折叠） | 另一支同型号遥控器宿主里的残留 agent 在抢连接位；含宿主 pid 不变量的版本会拒绝它，功能不受影响 | 无需处置。修复前（≤ 0.8.6）它会**静默占位**——配置回执与心跳全绿、`synth:frame` 零条，按键/语音全失效；升级即可。记录见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md` |
 | 按了键但一条 `[EDGE]` 都没有 | 可能是设备没上报，也可能是探针/链路坏了 | **先做阳性对照**：用哨兵键或 `observe` 模式确认同一设备上已知可用的键（确定/主页）能出来 |
 | `[EDGE]` 有、但主程序里三键映射不触发 | 清空与转发是两件事：第 ② 段（桥接）没通 | 看 `[SUMMARY] app_bridge=`：`connects=0` → 启动主程序并确认 `%LOCALAPPDATA%\SayAll\rc003-bridge.ini` 存在；据 `app_bridge_last_error` 定位（`descriptor_missing` / `rejected(DENY…)` / `version_mismatch`）。判据见 §7.5 |
 | 哨兵键不恢复 | fail-open 失效——**这是真问题** | 立刻按 Ctrl+C / 关窗；仍不恢复就断开重配对 RC003；把日志留档 |

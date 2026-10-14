@@ -173,6 +173,16 @@ mod imp {
     /// 被拒的 hello 计数（令牌不匹配）。只用于把日志折叠成"前几次 + 之后每 30 次一条"。
     static REJECTED_HELLOS: AtomicU64 = AtomicU64::new(0);
 
+    /// 被拒的 hello 计数（宿主 pid 不匹配，2026-10-14）。同样折叠成"前几次 + 之后每 30 次一条"。
+    static REJECTED_FOREIGN_HELLOS: AtomicU64 = AtomicU64::new(0);
+
+    /// 当前服务的宿主 pid（0 = 未知）。启动时 = `resolve_target` 解析出的目标宿主；两条
+    /// "结束宿主换新宿主"的自愈路径（干净首注、旧代 agent 刷新）成功后会更新它。
+    ///
+    /// `handle_line` 的宿主不变量读它：只接受"正在服务的那个宿主"里的 agent。不更新的话，
+    /// 自愈换宿主后回来的新 agent 会被不变量当成外来者拒掉——修一个坏、造一个更坏的。
+    static SERVED_HOST_PID: AtomicU32 = AtomicU32::new(0);
+
     // ============================================================ Win32 FFI
 
     type Handle = *mut c_void;
@@ -1000,6 +1010,22 @@ mod imp {
         let _ = std::fs::write(dir.join(AGENT_REFRESH_STAMP), now.to_string());
     }
 
+    /// 结束旧宿主后"新宿主"的选择判据（纯函数，单测 + 自检覆盖）。
+    ///
+    /// 2026-10-14 现场：两支同型号遥控器同时在线时，若只按"任一新 RC003 宿主"选，可能挑到
+    /// **另一支**的宿主——注入到那里的 agent 看不到本支遥控器的报告，报告层合成静默失效
+    /// （与"外来宿主 agent 抢连接位"同族）。目标地址已知时必须落在目标实例上；地址未知
+    /// （手动调试、上一轮未发布）时退化为原行为。
+    fn refresh_host_candidate(
+        pid: u32,
+        old_pid: u32,
+        is_rc003: bool,
+        address_known: bool,
+        address_matches: bool,
+    ) -> bool {
+        is_rc003 && pid != 0 && pid != old_pid && (!address_known || address_matches)
+    }
+
     /// stale 分支入口：条件满足就后台自动刷新宿主里的 agent（不阻塞连接线程）。
     fn spawn_agent_refresh_if_needed(running_build: &str, host_pid: u32, logger: &Logger) {
         let Some(dll) = PREPARED_GADGET_DLL.get().cloned() else {
@@ -1041,17 +1067,26 @@ mod imp {
             );
             return;
         }
-        // 宿主被结束后由系统重建；轮询直到出现"另一个 RC003 宿主 pid"。
+        // 宿主被结束后由系统重建；轮询直到出现"目标地址对应的新 RC003 宿主 pid"。
+        // 判据见 `refresh_host_candidate`：目标地址已知时必须还是**这支**遥控器
+        // （两支同型号在线时不得挑到另一支的宿主——它的 agent 看不到本支报告）。
+        let target_address = read_target_address(logger);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut new_pid = 0_u32;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(500));
             if let Ok(scan) = enum_hosts() {
-                if let Some(entry) = scan
-                    .entries
-                    .iter()
-                    .find(|e| e.is_rc003 && e.pid != 0 && e.pid != old_pid)
-                {
+                if let Some(entry) = scan.entries.iter().find(|e| {
+                    refresh_host_candidate(
+                        e.pid,
+                        old_pid,
+                        e.is_rc003,
+                        target_address.is_some(),
+                        target_address
+                            .map(|address| host_entry_matches_address(e, address))
+                            .unwrap_or(false),
+                    )
+                }) {
                     new_pid = entry.pid;
                     break;
                 }
@@ -1073,6 +1108,9 @@ mod imp {
             // 退出时才清理的取舍一致）；句柄泄漏两个，刷新最多每小时一次。
             Ok(injection) => {
                 std::mem::forget(injection);
+                // 新宿主接管"当前服务的宿主"：宿主不变量（SERVED_HOST_PID）必须跟着走，
+                // 否则刷新后回来的新 agent 会被当成"外来宿主"拒掉（见该静态的注释）。
+                SERVED_HOST_PID.store(new_pid, Ordering::Relaxed);
                 logger.kv(
                     "[AGENT-REFRESH]",
                     &[
@@ -4637,11 +4675,26 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         u64::try_from(now_ms()).unwrap_or(u64::MAX)
     }
 
+    /// 已鉴权握手是否来自"助手正在服务的那个宿主"（宿主 pid 不变量，纯判定，单测 + 自检覆盖）。
+    ///
+    /// 2026-10-14 现场：另一支同型号遥控器宿主里的残留 agent 同样握有有效令牌，能通过
+    /// 鉴权并应答一切配置（`[HELLO]` / `[TARGETS-ACK]` / `[SYNTH-ACK]` / `[HB]` 全绿），
+    /// 但它看不到本支遥控器的报告——报告层合成会**静默失效**（语音键到按住说话快捷键的
+    /// 改写根本不会发生），而所有界面与日志看起来都正常。判据：握手自报的宿主 pid 必须
+    /// 等于 `resolve_target` 解析出的目标宿主 pid（`SERVED_HOST_PID`）。
+    ///
+    /// 判据缺失（agent 未自报 pid、或调用方没有目标 pid——自检夹具）时放行：退化为
+    /// 修复前行为，只减不增。
+    fn agent_host_matches_target(agent_pid: u64, target_pid: u32) -> bool {
+        agent_pid == 0 || target_pid == 0 || agent_pid == u64::from(target_pid)
+    }
+
     fn handle_line(
         line: &str,
         session: &mut Session,
         logger: &Logger,
         token: &str,
+        target_pid: u32,
         bridge: Option<&AppBridge>,
     ) -> bool {
         let kind = extract_str(line, "type").unwrap_or_default();
@@ -4677,6 +4730,34 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ],
                         );
                     }
+                    return false;
+                }
+                // 宿主 pid 不变量（2026-10-14 现场，见 Bugs/2026-10-14-foreign-host-agent-takes-slot.md）：
+                // 令牌通过只证明"这是我们自己的 agent"，不证明"它在我们正在服务的那个宿主里"。
+                // 同一台机器可能同时有两支同型号遥控器、各自一个宿主进程，且两个宿主里都可能有
+                // 我们留下的 gadget/agent：外来宿主的 agent 握手与配置全绿，但它看不到本支遥控器
+                // 的报告——报告层合成会静默失效（界面全绿、语音条拉不起）。拒绝它，连接位留给
+                // 目标宿主的 agent；判据缺失（任一侧为 0）退化为放行。
+                let hello_pid = extract_num(line, "pid").unwrap_or(0);
+                if !agent_host_matches_target(hello_pid, target_pid) {
+                    let n = REJECTED_FOREIGN_HELLOS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n <= 3 || n % 30 == 0 {
+                        logger.kv(
+                            "[REJECT]",
+                            &[
+                                ("reason", "host_pid_mismatch".into()),
+                                ("total", n.to_string()),
+                                ("agent_pid", hello_pid.to_string()),
+                                ("target_pid", target_pid.to_string()),
+                                (
+                                    "note",
+                                    "另一支同型号遥控器宿主里的残留 agent 在重连：它能应答配置但看不到本支遥控器的报告，绝不允许占用唯一连接位；连接已断开，等目标宿主的 agent"
+                                        .into(),
+                                ),
+                            ],
+                        );
+                    }
+                    session.authenticated = false;
                     return false;
                 }
                 logger.kv(
@@ -5224,6 +5305,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Ok(v) => v,
             Err(code) => std::process::exit(code),
         };
+        // 宿主不变量（见 `SERVED_HOST_PID` 的注释）：从这一刻起，只接受这个宿主的 agent。
+        SERVED_HOST_PID.store(target_pid, Ordering::Relaxed);
 
         let name = process_name(target_pid).unwrap_or_else(|| "?".to_string());
         let image = process_image_path(target_pid).unwrap_or_else(|| "?".to_string());
@@ -5816,6 +5899,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     );
                     match restart_rc003_host(target_pid, rc003_instance_id.as_deref(), &logger) {
                         Ok(new_pid) => {
+                            // 新宿主接管"当前服务的宿主"：宿主不变量必须跟着走，
+                            // 否则干净首注后回来的新 agent 会被当成"外来宿主"拒掉。
+                            SERVED_HOST_PID.store(new_pid, Ordering::Relaxed);
                             // 干净首注走 Canonical：新宿主里 resident=0，不需要分代目录。
                             let clean_plan = DllPlan::Canonical;
                             match prepare_runtime(&args, &gadget_src, &logger, &clean_plan) {
@@ -6473,8 +6559,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         }
                         session.lines += 1;
                         session.last_rx = Instant::now();
-                        if !handle_line(line, session, logger, token, bridge) {
-                            logger.line("[INFO] 连接结束（令牌不符或 agent 主动 bye）。");
+                        if !handle_line(
+                            line,
+                            session,
+                            logger,
+                            token,
+                            SERVED_HOST_PID.load(Ordering::Relaxed),
+                            bridge,
+                        ) {
+                            logger.line("[INFO] 连接结束（准入未通过或 agent 主动 bye）。");
                             return;
                         }
                         if session.authenticated && !session.config_sent {
@@ -7410,6 +7503,45 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             "旧世代 tap 自愈：仅独占 RC003 且宿主含我们的 Gadget 时才结束宿主做干净首注",
             host_restart_ok,
             format!("{} 例", host_restart_cases.len()),
+        );
+
+        // 14d) 宿主 pid 不变量与刷新宿主选择（2026-10-14 现场）：已鉴权握手必须来自
+        // `resolve_target` 解析出的宿主；两支同型号在线时，"结束旧宿主换新宿主"也只认
+        // 目标地址那一支。否则另一支宿主的残留 agent 会占用唯一连接位 / 被注入——它能
+        // 应答一切配置但看不到本支遥控器的报告，报告层合成静默失效、界面全绿。
+        let host_pid_cases: [(u64, u32, bool); 4] = [
+            (8220, 31728, false),
+            (31728, 31728, true),
+            (0, 31728, true),
+            (8220, 0, true),
+        ];
+        let host_pid_ok = host_pid_cases.iter().all(|(agent_pid, target_pid, want)| {
+            agent_host_matches_target(*agent_pid, *target_pid) == *want
+        });
+        check(
+            "宿主 pid 不变量：外来宿主的已鉴权握手被拒绝（语音合成静默失效的根因）",
+            host_pid_ok,
+            format!("{} 例", host_pid_cases.len()),
+        );
+
+        let refresh_cases: [(u32, u32, bool, bool, bool, bool); 6] = [
+            (8220, 31728, true, true, false, false),
+            (41111, 31728, true, true, true, true),
+            (8220, 31728, true, false, false, true),
+            (8220, 31728, false, true, true, false),
+            (0, 31728, true, true, true, false),
+            (31728, 31728, true, true, true, false),
+        ];
+        let refresh_ok = refresh_cases.iter().all(
+            |(pid, old_pid, is_rc003, address_known, address_matches, want)| {
+                refresh_host_candidate(*pid, *old_pid, *is_rc003, *address_known, *address_matches)
+                    == *want
+            },
+        );
+        check(
+            "刷新宿主选择：目标地址已知时只认这支遥控器的宿主（两支同型号在线）",
+            refresh_ok,
+            format!("{} 例", refresh_cases.len()),
         );
 
         // 15) 复用/覆盖判定：决定"会不会去撞那个被宿主锁住的文件"的就是这一行
@@ -8659,6 +8791,120 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn never_restarts_twice_in_one_run() {
             // "只升级一次"：同一轮里不允许反复结束宿主。
             assert!(!should_restart_host_for_clean_inject(true, 1, 1, 1));
+        }
+    }
+
+    #[cfg(test)]
+    mod agent_host_guard_tests {
+        use super::*;
+
+        fn session() -> Session {
+            Session {
+                connected_at: Instant::now(),
+                last_rx: Instant::now(),
+                hello: None,
+                edges: Vec::new(),
+                lines: 0,
+                authenticated: false,
+                config_sent: false,
+                target_ack: None,
+                last_hb_log: None,
+            }
+        }
+
+        fn hello_line(token: &str, pid: u64) -> String {
+            format!(
+                "{{\"type\":\"hello\",\"t\":0,\"token\":\"{token}\",\"agent\":\"rc003_agent/1\",\
+                 \"build\":\"{AGENT_BUILD}\",\"pid\":{pid},\"mode\":\"clear\",\"restore\":true,\
+                 \"lease_ms\":2000}}"
+            )
+        }
+
+        #[test]
+        fn foreign_host_agent_hello_is_rejected_and_never_takes_the_slot() {
+            // 2026-10-14 现场：另一支同型号遥控器宿主里的残留 agent 令牌有效、能应答一切配置，
+            // 但看不到本支遥控器的报告——报告层合成因此静默失效（界面全绿、语音条拉不起）。
+            // 它绝不允许成为"已鉴权会话"，连接位要留给目标宿主的 agent。
+            let line = hello_line("tok", 8220);
+            let mut state = session();
+            let alive = handle_line(&line, &mut state, &Logger::new(None), "tok", 31728, None);
+            assert!(!alive, "外来宿主 agent 的握手必须被拒绝并断开");
+            assert!(!state.authenticated, "被拒的外来 agent 不得标记为已鉴权");
+        }
+
+        #[test]
+        fn target_host_agent_hello_is_accepted() {
+            let line = hello_line("tok", 31728);
+            let mut state = session();
+            let alive = handle_line(&line, &mut state, &Logger::new(None), "tok", 31728, None);
+            assert!(alive, "目标宿主 agent 的握手必须正常通过");
+            assert!(state.authenticated);
+            assert!(state.hello.is_some());
+        }
+
+        #[test]
+        fn missing_agent_pid_falls_back_to_accept() {
+            // 判据缺失（agent 未自报 pid）：退化为修复前行为，只减不增。
+            let line = hello_line("tok", 0);
+            let mut state = session();
+            assert!(handle_line(
+                &line,
+                &mut state,
+                &Logger::new(None),
+                "tok",
+                31728,
+                None
+            ));
+            assert!(state.authenticated);
+        }
+
+        #[test]
+        fn unknown_target_pid_falls_back_to_accept() {
+            // 目标未知（自检夹具路径把 0 传进来）：不做宿主过滤。
+            let line = hello_line("tok", 8220);
+            let mut state = session();
+            assert!(handle_line(
+                &line,
+                &mut state,
+                &Logger::new(None),
+                "tok",
+                0,
+                None
+            ));
+        }
+
+        #[test]
+        fn wrong_token_is_rejected_before_the_pid_check() {
+            let before = REJECTED_HELLOS.load(Ordering::Relaxed);
+            let line = hello_line("bad", 31728);
+            let mut state = session();
+            assert!(!handle_line(
+                &line,
+                &mut state,
+                &Logger::new(None),
+                "tok",
+                31728,
+                None
+            ));
+            assert!(!state.authenticated);
+            assert!(
+                REJECTED_HELLOS.load(Ordering::Relaxed) > before,
+                "令牌不符仍走原有折叠计数路径"
+            );
+        }
+
+        #[test]
+        fn refresh_prefers_the_target_remotes_host_when_two_are_online() {
+            // 结束旧宿主后的"新宿主"选择：两支同型号在线时必须落在目标地址那一支上，
+            // 否则注入到另一支的宿主，agent 看不到本支报告（同样的静默失效）。
+            assert!(!refresh_host_candidate(8220, 31728, true, true, false));
+            assert!(refresh_host_candidate(41111, 31728, true, true, true));
+            // 地址未知（手动调试）：退化为原行为，任一新 RC003 宿主都可作为刷新目标。
+            assert!(refresh_host_candidate(8220, 31728, true, false, false));
+            // 非 RC003 / pid 无效 / 还是刚结束的那个：一律不是候选。
+            assert!(!refresh_host_candidate(8220, 31728, false, true, true));
+            assert!(!refresh_host_candidate(0, 31728, true, true, true));
+            assert!(!refresh_host_candidate(31728, 31728, true, true, true));
         }
     }
 
