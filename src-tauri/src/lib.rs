@@ -1017,6 +1017,9 @@ async fn enable_rc003_capture(
         "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=passed"
             .to_owned(),
     );
+    // 对账线程立刻重查（2026-10-14）：不等它把 30 秒的空闲周期睡满——用户刚点开
+    // 开关就该进入快速重试（现场实测曾要等 9.1 秒才等到下一个 tick 才触发重试）。
+    wake_capture_reconcile();
     refocus_main_window_soon(app);
     Ok(rc003_task::status(true))
 }
@@ -1039,6 +1042,9 @@ async fn disable_rc003_capture(
         .map_err(|error| format!("停用全按键支持失败：{error}"))?;
     // 同上：内层 Result 必须自己判，否则停用失败也会静默成功。
     outcome.map_err(|error| format!("停用全按键支持失败：{error}"))?;
+    // 对账线程立刻重查（2026-10-14）：把 capture_health 尽快发布成 Off——界面状态
+    // 不该比用户动作慢半拍（30 秒空闲周期内界面会停在旧值）。
+    wake_capture_reconcile();
     // 结束助手同样可能抢走前台（taskkill / 控制台进程退出），一并还焦点。
     refocus_main_window_soon(app);
     Ok(rc003_task::status(false))
@@ -1268,6 +1274,40 @@ fn auto_trigger_should_escalate(consecutive: u32) -> bool {
             && consecutive % AUTO_TRIGGER_REESCALATE_EVERY == 0)
 }
 
+/// 对账线程的唤醒信号（2026-10-14 现场）：每次 enable / disable 命令**成功改变开关**后
+/// 自增一代，常驻对账的睡眠随即提前结束、马上重查。缺了它，开关动作要等最长一个
+/// Standby/Watch 周期（30 秒）才被对账看见——实测现场"启用后 9.1 秒才等到下一个 tick"
+/// 才触发重试；关闭方向则是界面状态慢半拍。
+static CAPTURE_RECONCILE_WAKE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 由开关命令调用：唤醒常驻对账。幂等——多调用只会多一轮重查，不改变任何状态。
+fn wake_capture_reconcile() {
+    CAPTURE_RECONCILE_WAKE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 对账"可打断睡眠"的轮询粒度：唤醒信号在 ≤250 ms 内被看到，又不至于忙轮询。
+const RECONCILE_WAKE_POLL_MS: u64 = 250;
+
+/// 单次轮询的纯判定（单测覆盖）：唤醒信号变了、或已到点，都要结束睡眠。
+fn reconcile_sleep_step(now_gen: u64, seen_gen: u64, now_ms: u64, deadline_ms: u64) -> bool {
+    now_gen != seen_gen || now_ms >= deadline_ms
+}
+
+/// 可被 [`wake_capture_reconcile`] 打断的睡眠：语义与 `sleep(ms)` 相同，只是会提前返回。
+/// `wake_seen` 由调用方跨轮持有，记录"已经消化到哪一代"信号——同一代不会被消费两次。
+fn interruptible_reconcile_sleep(ms: u64, wake_seen: &mut u64) {
+    let started = std::time::Instant::now();
+    loop {
+        let now_gen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if reconcile_sleep_step(now_gen, *wake_seen, elapsed_ms, ms) {
+            *wake_seen = now_gen;
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(RECONCILE_WAKE_POLL_MS));
+    }
+}
+
 /// 常驻对账的单轮动作（纯函数输出，测试钉住）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReconcileAction {
@@ -1332,6 +1372,8 @@ fn rc003_auto_trigger_reconcile(
     // 连续「开关开着、桥在监听、但助手没连上」的轮数；连上或用户关闭即清零。
     let mut consecutive: u32 = 0;
     let mut was_connected = false;
+    // 已经"消化"过哪一代唤醒信号（2026-10-14）：开关命令唤醒后，下一轮重查立即发生。
+    let mut wake_seen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
     // 以下标志只控制「状态刚变化时记一条」，避免空闲期重复刷屏。
     let mut bridge_unavailable_logged = false;
     let mut active_seen = false;
@@ -1369,7 +1411,7 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Off.publish(&capture_health);
-                std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
+                interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
             }
             ReconcileAction::WaitBridge => {
                 if !bridge_unavailable_logged {
@@ -1388,7 +1430,7 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Starting.publish(&capture_health);
-                std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_IDLE_MS));
+                interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
             }
             ReconcileAction::Connected => {
                 if !was_connected {
@@ -1508,7 +1550,7 @@ fn rc003_auto_trigger_reconcile(
                 was_connected = true;
                 consecutive = 0;
                 bridge_unavailable_logged = false;
-                std::thread::sleep(std::time::Duration::from_millis(AUTO_TRIGGER_WATCH_MS));
+                interruptible_reconcile_sleep(AUTO_TRIGGER_WATCH_MS, &mut wake_seen);
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
@@ -1571,9 +1613,10 @@ fn rc003_auto_trigger_reconcile(
                     // 每 10 轮的 loggable 轮会把状态与健康摘要写全）。
                     let _ = rc003_task::task_trigger();
                 }
-                std::thread::sleep(std::time::Duration::from_millis(
+                interruptible_reconcile_sleep(
                     auto_trigger_retry_delay_ms(consecutive),
-                ));
+                    &mut wake_seen,
+                );
             }
         }
     }
@@ -4085,6 +4128,22 @@ mod tests {
         }
         assert!(auto_trigger_attempt_should_log(AUTO_TRIGGER_LOG_EVERY));
         assert!(auto_trigger_attempt_should_log(AUTO_TRIGGER_LOG_EVERY * 3));
+    }
+
+    /// 对账睡眠可被打断（2026-10-14 现场）：enable/disable 命令发出唤醒信号后，对账线程
+    /// 必须立刻醒来重查状态，而不是把最长 30 秒的 Standby/Watch 睡满——否则"刚开启要等
+    /// 半分钟才触发重试"（现场实测 9.1 秒才等到又一个 tick）、"刚关闭界面状态慢半拍"。
+    #[test]
+    fn reconcile_sleep_wakes_on_signal_and_expires_on_deadline() {
+        // 信号未变、未到点 → 继续睡。
+        assert!(!reconcile_sleep_step(5, 5, 0, 1_000));
+        // 信号变化 → 立刻醒（哪怕还剩整段时长）。
+        assert!(reconcile_sleep_step(6, 5, 0, 1_000));
+        // 到点 / 超时 → 醒。
+        assert!(reconcile_sleep_step(5, 5, 1_000, 1_000));
+        assert!(reconcile_sleep_step(5, 5, 1_200, 1_000));
+        // 两个条件同时满足 → 醒。
+        assert!(reconcile_sleep_step(6, 5, 2_000, 1_000));
     }
 
     /// 版本号唯一来源（2026-09-30 收敛）：安装包名、exe 版本资源、关于页显示、
