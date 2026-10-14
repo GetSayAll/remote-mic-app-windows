@@ -1,7 +1,7 @@
 # 另一支遥控器宿主里的残留 agent 抢占唯一连接位：界面全绿、语音与报告层合成静默失效
 
 - 发现日期：2026-10-14
-- 状态：已修复（自动化 passed；真机复验见文末「验证记录」）
+- 状态：已修复（自动化 passed；真机复验 passed，见文末「验证记录」）
 - 影响范围：0.8.6 及更早（加入宿主 pid 不变量之前的所有版本）；Windows 11、RC003、
   **两支同型号遥控器同时在线**且两个宿主里都留有我们的 Gadget/agent；RC001 与只有一支
   遥控器的用户不涉及
@@ -81,11 +81,25 @@
 - `node hardware/RC003/helper/agent/agent_logic_test.mjs`：55/55 通过（本次未改 agent JS）。
 - `cargo fmt --manifest-path hardware/RC003/helper/Cargo.toml -- --check`：passed。
 
-## 验证记录（真机）
+## 验证记录（真机，2026-10-14）
 
-- 2026-10-14 待补：本地测试包安装后复验——① 另一支宿主（8220）的 agent 重连时被
-  `[REJECT] reason=host_pid_mismatch` 拒绝、不再占位；② 语音键按下 `synth:frame replace`
-  与新会话 `mic=observed`。
+- 环境：本地测试包 `无线麦 SayAll_0.8.6_x64-setup.exe`（SHA-256 `a6da1ab1…e0a3d`），
+  内嵌修订 `a3a307f9`；安装校验 helper/gadget 哈希对齐、helper 含新标记
+  `host_pid_mismatch`；app exe 与构建产物差 3 字节（已知安装期补丁，复核通过）。
+- **修复前复发窗口（同一现场，旧构建，作为对照）**：12:57:12–14 旧助手被 8220 的
+  `[HELLO] auth=true pid=8220` 风暴接管（数十条；与 12:23 同型）；随后 13:03:49
+  （session 128）、13:04:07、13:12:25 三次按下全部 `mic=not_observed`——该故障在旧版上
+  是反复发生的，不是一次性偶发。
+- 修复后（新助手 pid 42288 + 新应用 pid 39704）：
+  1. 外来宿主**再次第一个来连**（13:18:10.436）→ 被拒绝：
+     `[REJECT] reason=host_pid_mismatch total=1 agent_pid=8220 target_pid=31728`；
+  2. 目标宿主接管：13:18:10.679 `[HELLO] auth=true pid=31728` →
+     `targets:applied` / `synth:applied` → `ownership_resumed`；
+  3. 语音键**按一次就成**：13:19:22 / 13:22:02 / 13:22:59 三次按下，每次
+     `[AGENT] msg=synth:frame replace ok to=0xe6` + `voice_verify … mic=observed`
+     （session 5/6/7），`voice_heal` 零触发；豆包 ConsentStore 记录 13:22:59Z 开始录音。
+- 仍未验证（deferred）：刷新/干净首注换宿主后新 agent 被接纳的完整路径（需"宿主里是
+  旧代 agent"现场）；跨天/睡眠组合。
 
 ## 边界与后续
 
