@@ -100,6 +100,11 @@
 2. 遥控器链路中断（本次 94 秒）时主窗口在托盘、没有任何提示：是否用托盘级提醒、
    提醒阈值与频率**仍未决策**。
 3. 复制诊断信息里的 `full_key_support=` 目前读设置、不读实际状态（同一类「显示与事实不一致」）。
+   **已实现（2026-10-14，`fix/diagnostics-capture-state`）**：诊断块在 `full_key_support=`
+   （开关设置）之后并列 `capture=`（**真实捕获状态**，读回 `CaptureHealth`：off / starting /
+   active / inactive；读不到写 `unknown`），并在复制时对开关状态与捕获状态各做一次只读刷新
+   （①–③步复制不再把开着的开关误报成 off）。「开关开着却没生效」= `full_key_support=on
+   capture=inactive`，用户复制一次即自证。
 
 ## 隐私检查
 

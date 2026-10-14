@@ -40,13 +40,18 @@
    Build channel、**Windows version（major.minor.build）**、Architecture、`Wizard step: <token> (n/7)`、
    Gate、Blocked，以及运行行：`Remote`（含 `error=` 与 **`button_observed=`**——②步是否已收到
    普通按键）、**`Raw input`**（phase / matched / raw_events / semantic_edges / stale_events）、
-   `Audio`（含 `error=`）、`Input tool`、`Vokie`、**`Voice test`**（attempt 阶段与终态码，
+   `Audio`（含 `error=`）、`Input tool`（含 **`capture=`**——「全按键支持」的**真实捕获状态**
+   off / starting / active / inactive / unknown；与 `full_key_support=`（开关设置）并列——
+   「开关开着却没生效」表现为 `full_key_support=on capture=inactive`，2026-10-14）、`Vokie`、
+   **`Voice test`**（attempt 阶段与终态码，
    无终态写 `none`）、`Buttons observed`、`Mapping`。
    现场形状自证（2026-10-10）：②步"按键已收到但应用未连接"应表现为
    `Remote: phase=idle … button_observed=yes` + 门禁 `remote.not_connected`。
    复制时会对音频端点、**输入工具与按住说话快捷键**做一次只读刷新（2026-10-13 起）——
    已配置豆包的机器在任何步骤复制都应显示 `Input tool: doubao hotkey=…`，不是 `unset`；
    新装机器上快捷键按生效值显示（默认 左 Ctrl + 左 Win）。
+   同口径（2026-10-14 起）：**「全按键支持」的开关状态与真实捕获状态（`capture=`）也做只读刷新**
+   ——①–③步复制不再把开着开关的机器报成 `full_key_support=off`；捕获状态读不到写 `capture=unknown`。
    同日起多一段 **`IME:`**（当前输入法是不是所选工具 / 系统里可用输入法数量 / 工具 token）——
    ③诊断"语音没出字是不是因为没切输入法"时先看这一行：
    `IME: detected=yes match=no installed_count=3 expected_tool=doubao`（`detected=no` = 读不到，

@@ -458,3 +458,11 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   24720 采样并成功上屏。修复：**会话开始以 `connection.voiceState` 为准**，音频忙而语音仍 idle 的帧
   不视为开始（解码计数照常累计，极短按压路径不变）。回归用例 2 条（撕裂帧不误判 / 真·空会话仍判
   no_samples）。记录：[Bugs/2026-10-14-voice-no-samples-torn-snapshot.md](../Bugs/2026-10-14-voice-no-samples-torn-snapshot.md)。
+- 2026-10-14（诊断块保真修正第二轮，接 2026-10-13 同题）：`full_key_support=` 是「全按键支持」
+  的开关**设置**（且向导只在④/⑤步读过它——①–③步复制会把开着的开关误报成 `off`），判定
+  "开关开着却没生效"时它会误导支持。诊断块在该项后并列 `capture=`（**真实捕获状态**，读回
+  `CaptureHealth`：off / starting / active / inactive；读不到写 `unknown`），复制时对开关状态
+  与捕获状态各做一次**只读**刷新（失败各自回落页面状态 / `unknown`，复制本身不失败）。
+  自此「开关开着却没生效」= `full_key_support=on capture=inactive`，用户复制一次即自证。
+  记录：[Bugs/2026-10-13-rc003-capture-silent-inactive.md](../Bugs/2026-10-13-rc003-capture-silent-inactive.md)
+  未覆盖边界 §3。

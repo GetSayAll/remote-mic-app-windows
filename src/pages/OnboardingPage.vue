@@ -12,6 +12,7 @@ import {
   getDiagnosticReport,
   getOnboardingState,
   getOtherVoiceHotkey,
+  getRc003BridgeSnapshot,
   getRc003TaskStatus,
   getRuntimeSnapshot,
   getVokieInstallation,
@@ -38,6 +39,7 @@ import {
   type KeyChord,
   type KeyCode,
   type PairedRemote,
+  type Rc003CaptureHealth,
   type Rc003TaskStatus,
   type RemoteButton,
   type RuntimeSnapshot,
@@ -1381,6 +1383,24 @@ async function copyDiagnostics(): Promise<void> {
     } catch {
       ime = null;
     }
+    // 「全按键支持」的两层事实各做一次**只读**读取（2026-10-14 现场）：
+    // ① `full_key_support=` 是开关设置——向导只在④/⑤步读过它，①–③步复制出的
+    //    `off` 会把开着开关的机器误导成未开启；
+    // ② 开关开着 ≠ 生效（助手没连上 / 宿主换代 / agent 掉了都可能静默失效），
+    //    真实捕获状态读回 `CaptureHealth`（off/starting/active/inactive）。
+    // 读取失败各自回落（页面状态 / unknown）——复制本身不因此失败。
+    let rc003FromDisk: Rc003TaskStatus | null = null;
+    try {
+      rc003FromDisk = await getRc003TaskStatus();
+    } catch {
+      // 保持页面状态。
+    }
+    let captureHealth: Rc003CaptureHealth | "unknown" = "unknown";
+    try {
+      captureHealth = (await getRc003BridgeSnapshot()).captureHealth;
+    } catch {
+      captureHealth = "unknown";
+    }
     const chord =
       currentHotkey.value ??
       hotkeyFromDisk ??
@@ -1412,7 +1432,8 @@ async function copyDiagnostics(): Promise<void> {
       audioErrorPresent: (audio?.lastError ?? platform?.audio.lastError ?? null) !== null,
       tool: stagedTool.value ?? toolFromDisk ?? configuredTool.value ?? "unset",
       hotkey: hotkeyTokens,
-      captureEnabled: rc003Status.value?.enabled === true,
+      captureEnabled: (rc003FromDisk?.enabled ?? rc003Status.value?.enabled) === true,
+      captureHealth,
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
       voiceTestPhase: voicePhase.value,

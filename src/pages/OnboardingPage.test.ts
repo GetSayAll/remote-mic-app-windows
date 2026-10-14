@@ -7,6 +7,7 @@ import type {
   ConnectionPhase,
   DiagnosticReport,
   RawInputPhase,
+  Rc003BridgeSnapshot,
   RuntimeSnapshot,
   VoiceSessionState,
 } from "../lib/bridge";
@@ -32,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   getOtherVoiceHotkey: vi.fn(),
   setOtherVoiceHotkey: vi.fn(),
   getRc003TaskStatus: vi.fn(),
+  getRc003BridgeSnapshot: vi.fn(),
   enableRc003Capture: vi.fn(),
   disableRc003Capture: vi.fn(),
   getVokieInstallation: vi.fn(),
@@ -79,6 +81,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getOtherVoiceHotkey: mocks.getOtherVoiceHotkey,
     setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
     getRc003TaskStatus: mocks.getRc003TaskStatus,
+    getRc003BridgeSnapshot: mocks.getRc003BridgeSnapshot,
     enableRc003Capture: mocks.enableRc003Capture,
     disableRc003Capture: mocks.disableRc003Capture,
     getVokieInstallation: mocks.getVokieInstallation,
@@ -276,6 +279,31 @@ async function mountWizard(
   return wrapper;
 }
 
+/** 桥接快照夹具（诊断块只看 captureHealth，其余字段按"零值"填）。 */
+function rc003BridgeSnapshot(
+  overrides: Partial<Rc003BridgeSnapshot> = {},
+): Rc003BridgeSnapshot {
+  return {
+    phase: "connected",
+    port: 0,
+    helperPid: 0,
+    acceptedTotal: 0,
+    deniedTotal: 0,
+    replacedTotal: 0,
+    edgesApplied: 0,
+    usagesDropped: 0,
+    malformedTotal: 0,
+    watchdogReleaseTotal: 0,
+    pressedUsages: [],
+    lastRxAgeMs: null,
+    targetGeneration: 0,
+    targetUsages: [],
+    ownedUsages: [],
+    captureHealth: "off",
+    ...overrides,
+  };
+}
+
 function resetWizardMocks(): void {
   mocks.reportFrontendEvent.mockReset();
     mocks.getOnboardingState.mockReset();
@@ -293,6 +321,7 @@ function resetWizardMocks(): void {
     mocks.getOtherVoiceHotkey.mockReset();
     mocks.setOtherVoiceHotkey.mockReset();
     mocks.getRc003TaskStatus.mockReset();
+    mocks.getRc003BridgeSnapshot.mockReset();
     mocks.enableRc003Capture.mockReset();
     mocks.disableRc003Capture.mockReset();
     mocks.getVokieInstallation.mockReset();
@@ -346,6 +375,7 @@ function resetWizardMocks(): void {
       lastError: null,
     };
     mocks.getRc003TaskStatus.mockImplementation(async () => mocks.rc003Disabled);
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(rc003BridgeSnapshot());
     mocks.enableRc003Capture.mockImplementation(async () => ({
       ...mocks.rc003Disabled,
       enabled: true,
@@ -1073,6 +1103,72 @@ describe("Onboarding diagnostics copy", () => {
 
     const text = clipboard.writeText.mock.calls[0][0];
     expect(text).toContain("Input tool: doubao hotkey=right_alt full_key_support=off");
+  });
+
+  it("②步复制读回「全按键支持」的真实状态：开关开着但没生效也自证（2026-10-14）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 开关设置在磁盘上是开的（②步页面上从没读过它，旧行为会误报 off）；
+    // 同时捕获状态是"没生效"——两者并列写进块里，不用日志就能分流。
+    mocks.getRc003TaskStatus.mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "inactive" }),
+    );
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("full_key_support=on capture=inactive");
+  });
+
+  it("捕获状态读不到时写 capture=unknown，复制本身不失败", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.getRc003BridgeSnapshot.mockRejectedValue(new Error("read failed"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("capture=unknown");
+    expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
+  });
+
+  it("复制时开关读失败退回页面状态、捕获读失败写 unknown，都不影响复制", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_tool"));
+    // ④步加载时读到「开启」；复制时的只读刷新失败 → 退回页面状态（on）。
+    mocks.getRc003TaskStatus.mockResolvedValueOnce({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    mocks.getRc003TaskStatus.mockRejectedValueOnce(new Error("read failed"));
+    mocks.getRc003BridgeSnapshot.mockRejectedValue(new Error("read failed"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("full_key_support=on capture=unknown");
   });
 
   it("只读刷新失败时退回页面状态，复制本身不失败", async () => {
