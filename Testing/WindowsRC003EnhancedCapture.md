@@ -521,7 +521,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | --- | --- | --- |
 | `[STOP] 绑定 127.0.0.1:47831 失败` + 退出码 8 | 上一轮还在运行（单实例锁） | 先结束上一个助手窗口；或等 `--duration` 到期 |
 | `[STOP] 复制 Gadget 失败 … os error 32` | 宿主仍映射着运行时目录那份 DLL | 更新版已不会这样：会走 `[ATTACH]` 接管或 `[STALE-TAP]` 提示 |
-| `[STALE-TAP]` + 退出码 13 | 宿主里的 tap 是**旧世代**（令牌已换，接不上） | 按提示清一次：断开重配对 RC003（最干净）/ 设备管理器禁用再启用 / 重启 |
+| `[STALE-TAP]` + 退出码 13 | 宿主里的 tap 是**旧世代**（令牌已换，接不上），且自动恢复的安全闸不满足（宿主非独占 / 显式钉了 `--token` 等） | 按提示清一次：断开重配对 RC003（最干净）/ 设备管理器禁用再启用 / 重启。安全闸满足时不会到这步：助手会 `action=auto_recover_stale_tap` 自动结束宿主 + 干净首注（2026-10-14 起） |
 | `[NO-HELLO]` + 退出码 12 | 注入了但 30 s 内没有**已鉴权**会话 | 看 `[VERIFY-MODULE] gadget_modules_in_host`；确认没有第二个助手在抢端口 |
 | `[REJECT] reason=host_pid_mismatch`（折叠） | 另一支同型号遥控器宿主里的残留 agent 在抢连接位；含宿主 pid 不变量的版本会拒绝它，功能不受影响 | 无需处置。修复前（≤ 0.8.6）它会**静默占位**——配置回执与心跳全绿、`synth:frame` 零条，按键/语音全失效；升级即可。记录见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md` |
 | `voice_effect … result=missing reason=no_frame` 连发（≥2 次）+ `capture_inactive reason=voice_synth_no_effect` | 按下没有**生效证据**（本支遥控器对应的报告层改写没发生）：典型是宿主里跑着不产生帧结果的 agent；健康面会降级并在界面提示，60 s 后自动重来一次 | 无需手动处置（自动重来 + 界面提示）；若长时间不恢复，查同段 `helper_pid` 与 `[REJECT]` 行、确认包内含 `F` 行转发（helper 标记 `synth:frame replace ok`）。判据本体见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`「跟进」 |

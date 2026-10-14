@@ -98,17 +98,21 @@
      核验窗口**，第一轮直接升级到"结束宿主 + 干净首注"（复用
      `should_restart_host_for_clean_inject` / `restart_rc003_host`）；新增纯判定
      `stale_attach_escalates_immediately`。
-   - `[ATTACH]`/`[DLL]`/`[SUMMARY]` 对新变体如实标注（`reason=no_reusable_token`、
-     `action=attach_stale_existing_tap`、`how=attached_stale_existing_tap`）。
+   - `[ATTACH]`/`[DLL]` 对新变体如实标注（`reason=no_reusable_token`、`action=attach_stale_existing_tap`）；
+     `[SUMMARY]` 的 `how=` 写**本轮实际**拿回 tap 的动作（升级轮 = `restart_host_clean_inject`，
+     不再照抄启动时的放置计划名——2026-10-14 复核修正）。
 2. **卸载清理释放宿主前先启用 SeDebugPrivilege**（`fd110c7`，同文件）：`--uninstall-cleanup`
    分支在正常流程的 `enable_se_debug()` 之前就 exit——宿主是 session 0 的 SYSTEM 进程，
    没有 SeDebug 时 `enum_modules` 直接 `GetLastError=5`，`release_injected_host` 被
    "跳过释放"。现于该分支 `host_release_still_needed` 时先启用；失败不中止清理
    （仍回退"安排到重启删除"），日志落 `[CLEANUP] sedebug=not_enabled reason=`。
-3. **开关命令唤醒常驻对账**（`07eeb29`，`src-tauri/src/lib.rs`）：新增
+3. **开关命令唤醒常驻对账**（`07eeb29` + 复核修订，`src-tauri/src/lib.rs`）：新增
    `CAPTURE_RECONCILE_WAKE`（世代计数）+ `wake_capture_reconcile()`；enable/disable
-   命令成功后各唤醒一次；对账 4 处长睡眠改为 `interruptible_reconcile_sleep`
-   （≤250 ms 粒度、世代消化，语义与 sleep 相同）。现场实测 enable 后曾要等 9.1 秒
+   命令成功后各唤醒一次（disable 侧在设置落盘后即唤醒，写停用信号失败也会尽快发布 Off）；
+   对账 4 处长睡眠改为 `interruptible_reconcile_sleep`（≤250 ms 粒度、世代消化）。
+   **唤醒轮只重查、不重复 `/run`**（`phase=recheck reason=wake`）——enable 自己已
+   task_trigger 过，立刻再触发会在 `IgnoreNew` 下被拒、留误导性 failed 行，还会让
+   consecutive 提前起算（2026-10-14 复核）。现场实测 enable 后曾要等 9.1 秒
    （Standby 周期到点）才触发重试。
 
 **评估后不做**（记录理由）：
@@ -119,7 +123,7 @@
 
 ## 验证
 
-自动化（本分支全绿；RC003 真机 `deferred`）：
+自动化（本分支全绿）：
 
 - helper：`cargo test --manifest-path hardware/RC003/helper/Cargo.toml` **70 passed**
   （基线 65 + `stale_tap_recovery_tests` 5 例）；`--selftest` **74 项全过**
@@ -160,15 +164,35 @@
 ## 未覆盖边界
 
 - `AttachStale`"旧 agent 不重连"窗口：见上（`deferred`）。
+- 对账唤醒的**运行时效果**（`phase=recheck reason=wake`、无重复 trigger、disable 后状态快速发布
+  Off）：自动化覆盖纯判定与打断语义（Rust 单测含真实打断用例）；真机观察 `deferred`。
 - "停用自清"不释放宿主的决策理由见「修复——评估后不做」；若将来再出现"安装器清理同样失败"
   的残余现场，再评估该路径。
 
+## 合入前独立复核与修订（2026-10-14 晚）
+
+两路独立复核（helper / 应用+前端）结论：helper 侧 2 项必改 + 6 项建议、应用前端侧可合入 +
+若干完善，本分支已全部处理：
+
+- helper：`--help` 重复行删除；`[SUMMARY] how=` 按**实际恢复动作**取值（抽 `summary_how` + 单测）；
+  启动门 gadget 计数限定"运行时目录归属"（`auto_recover_stale_tap_gate` + 单测/selftest，堵住
+  "别人注入的同名 frida-gadget 也被判可杀宿主"的新入口）；显式钉 `--token` 时不做自动恢复
+  （保守留人工路径）；三处"等核验"文案改为"第一轮即升级"；`[DLL]` 的 `touched_files` 在
+  AttachStale 轮移除（该轮实际会写 config/agent/token，字段名不再误导）；`inject_new_generation`
+  保底分支补人工清理指引；README / Testing 手册 / run-helper.ps1 三处文档同步。
+- 应用/前端：唤醒轮跳过重复 `/run`；disable 唤醒移到设置落盘后；失败解释补 `off` 分支与
+  `failure_text_branch detail=capture_<health>` 日志；细化回调陈旧保护加 `!voiceLateAccepted`
+  防御；补 3 个页面级回归（在途细化作废 / 读失败回落 / 非豆包不分流）+ `normalizeCaptureHealth`
+  用例 + Rust 真实打断用例；三个既有"迟到接受"用例显式模拟"开关开着"的生产现场（原 mock 默认
+  `off` 会命中新分流）。
+
 ## 后续项
 
-- 向导第⑤步失败解释**已按捕获状态分流**（`1cfe352`，原"就绪提示"评估的落地形态）：
+- 向导第⑤步失败解释**已按捕获状态分流**（`1cfe352` + 复核修订，原"就绪提示"评估的落地形态）：
   `voice.no_transcript` 失败瞬间现读 `capture=`——`starting` →「还在准备中…等几秒后点“重新测试”」、
-  `inactive` →「关掉再打开」指引、`active`/读不到 → 保持原排查文案；仅对豆包分流
-  （唯一按设计忽略注入键、必须走报告层合成的工具）。起始引导不改（`starting` 期不打断
+  `inactive` →「关掉再打开」指引、`off` →「现在是关闭的，请先打开它」、`active`/读不到 → 保持原
+  排查文案；仅对豆包分流（唯一按设计忽略注入键、必须走报告层合成的工具）。分流落定落
+  `failure_text_branch detail=capture_<health>` 日志。起始引导不改（`starting` 期不打断
   "等待按键"，维持既有决定）；真机目视 deferred（下次出包时顺带看一眼失败卡）。
 - 顺带发现**已修**：`target_address_tests` 的错位 `#[test]` 已归位（`7b33186`），
   `target_body_requires_its_own_version_and_a_full_address` 恢复运行（单跑 1 passed）。
