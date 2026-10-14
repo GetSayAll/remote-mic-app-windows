@@ -2897,6 +2897,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 只用于转发给主程序置门禁——门禁不再认"S 行写进 socket"
         /// （2026-10-03 加固：写出成功 ≠ 报告层已生效）。
         SynthAck(Option<u16>),
+        /// 语音键"帧结果"（2026-10-14 按下生效判据）：agent 看到一次按下帧的
+        /// 实际处理结果。**不是绝对状态**——每条都是独立事件，断线不补发；
+        /// `at` 用于丢弃重连窗口里的过期结果（过期补发会被当成"按下刚发生"
+        /// 的正面证据，方向最坏：它掩盖真实的静默失效）。
+        VoiceFrame {
+            frame: AgentVoiceFrame,
+            at: Instant,
+        },
     }
 
     /// 主程序桥接：把 agent 上报的动态目标按键边沿转发给主程序。
@@ -2955,6 +2963,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 转发 agent 的合成回执（绝对状态）给主程序（门禁闭环的输入）。
         fn push_synth_ack(&self, state: Option<u16>) {
             let _ = self.tx.send(BridgeOutbound::SynthAck(state));
+        }
+
+        /// 转发一次"语音帧结果"（每按一次至多一条；见 `BridgeOutbound::VoiceFrame`）。
+        fn push_voice_frame(&self, frame: AgentVoiceFrame) {
+            let _ = self.tx.send(BridgeOutbound::VoiceFrame {
+                frame,
+                at: Instant::now(),
+            });
         }
 
         fn capture_targets(&self) -> BridgeCaptureTargets {
@@ -3727,6 +3743,35 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
+    /// 语音键"帧结果"（2026-10-14 按下生效判据的输入）。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum AgentVoiceFrame {
+        /// agent 真的执行了一次改写（`synth:frame replace ok …`）。
+        Replaced,
+        /// agent 看到按下但没有改写（`synth:frame skip reason=…`）。
+        Skipped(String),
+    }
+
+    /// 「转发给主程序的帧结果」的新鲜度上限：超过即丢弃（见 `BridgeOutbound::VoiceFrame`）。
+    const VOICE_FRAME_FRESH_MS: u64 = 1_000;
+
+    /// 从 agent 的 log 行抽取"报告层帧结果"（纯函数，单测 + 自检覆盖）。
+    ///
+    /// 判据是**我们自己的 agent 脚本**产出的固定行首（见 rc003_agent.js 的
+    /// synthTrace），代次由 AGENT_BUILD 与自检逐字锁死——不用通用解析。
+    /// `synth:frame seen …` 不是结论（它只说明看到了按下），返回 `None`。
+    fn parse_agent_voice_frame(msg: &str) -> Option<AgentVoiceFrame> {
+        if msg.starts_with("synth:frame replace ok") {
+            return Some(AgentVoiceFrame::Replaced);
+        }
+        let skip = msg.strip_prefix("synth:frame skip")?;
+        let reason = skip
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("reason="))
+            .unwrap_or("unknown");
+        Some(AgentVoiceFrame::Skipped(reason.chars().take(32).collect()))
+    }
+
     /// 解析读缓冲里的完整行：`T <generation> <usages>`（动态目标）与
     /// `S <usage>` / `S -`（语音键报告层合成）。
     ///
@@ -4073,6 +4118,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         // agent 回执原样转发（绝对状态）——主程序据此置/清门禁。
                         if let Some(stream) = conn.as_mut() {
                             let _ = bridge_write_line(stream, &synth_ack_line(state));
+                        }
+                    }
+                    BridgeOutbound::VoiceFrame { frame, at } => {
+                        // 独立事件（不做绝对状态补发）：只发新鲜结果，重连窗口里的
+                        // 过期结果直接丢弃——补发方向最坏（会掩盖静默失效）。
+                        if at.elapsed().as_millis() as u64 <= VOICE_FRAME_FRESH_MS {
+                            if let Some(stream) = conn.as_mut() {
+                                let line = match &frame {
+                                    AgentVoiceFrame::Replaced => "F ok".to_string(),
+                                    AgentVoiceFrame::Skipped(reason) => {
+                                        format!("F skip {reason}")
+                                    }
+                                };
+                                let _ = bridge_write_line(stream, &line);
+                            }
                         }
                     }
                 }
@@ -4940,10 +5000,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 }
             }
             "log" => {
-                logger.kv(
-                    "[AGENT]",
-                    &[("msg", extract_str(line, "msg").unwrap_or_default())],
-                );
+                // 语音帧结果只转发给主程序（2026-10-14 按下生效判据）；未鉴权不转发
+                // ——与 edges 同一条准入边界（未鉴权连接不得影响主程序状态）。
+                let msg = extract_str(line, "msg").unwrap_or_default();
+                if session.authenticated {
+                    if let (Some(frame), Some(bridge)) = (parse_agent_voice_frame(&msg), bridge) {
+                        bridge.push_voice_frame(frame);
+                    }
+                }
+                logger.kv("[AGENT]", &[("msg", msg)]);
             }
             "bye" => {
                 logger.kv("[BYE]", &[("raw", line.to_string())]);
@@ -7544,6 +7609,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("{} 例", refresh_cases.len()),
         );
 
+        // 14e) 语音帧结果解析（2026-10-14 按下生效判据的输入）：agent 的 log 行 → `F` 行。
+        // `seen` 不给结论、`skip` 带原因、`replace` 才算正面证据——三类各自钉一例。
+        let voice_frame_cases: [(&str, Option<AgentVoiceFrame>); 4] = [
+            (
+                "synth:frame replace ok to=0xe6",
+                Some(AgentVoiceFrame::Replaced),
+            ),
+            (
+                "synth:frame skip reason=lease",
+                Some(AgentVoiceFrame::Skipped("lease".to_owned())),
+            ),
+            (
+                "synth:frame seen mode=clear lease=1 disarmed=0 connected=1 clears_ok=70",
+                None,
+            ),
+            ("dropped:rx_timeout", None),
+        ];
+        let voice_frame_ok = voice_frame_cases
+            .iter()
+            .all(|(msg, want)| parse_agent_voice_frame(msg).as_ref() == want.as_ref());
+        check(
+            "语音帧结果解析：replace / skip / seen 三分（F 行转发的输入）",
+            voice_frame_ok,
+            format!("{} 例", voice_frame_cases.len()),
+        );
+
         // 15) 复用/覆盖判定：决定"会不会去撞那个被宿主锁住的文件"的就是这一行
         let dll_cases: [(bool, bool, DllAction); 3] = [
             (true, true, DllAction::Reuse),
@@ -8905,6 +8996,53 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(!refresh_host_candidate(8220, 31728, false, true, true));
             assert!(!refresh_host_candidate(0, 31728, true, true, true));
             assert!(!refresh_host_candidate(31728, 31728, true, true, true));
+        }
+    }
+
+    /// 从 agent 的 log 行抽取"报告层帧结果"（纯函数，供 `F` 行转发；
+    /// 判据是**我们自己的 agent 脚本**产出的固定行首，见 rc003_agent.js 的 synthTrace，
+    /// 代次由 AGENT_BUILD 与自检锁死——不用通用解析）：
+    /// `synth:frame replace ok…` → Replaced；`synth:frame skip reason=…` → Skipped；
+    /// 其它（含 `seen`）→ None。
+    #[cfg(test)]
+    mod agent_voice_frame_tests {
+        use super::{parse_agent_voice_frame, AgentVoiceFrame};
+
+        #[test]
+        fn replace_ok_is_a_positive_frame() {
+            assert_eq!(
+                parse_agent_voice_frame("synth:frame replace ok to=0xe6"),
+                Some(AgentVoiceFrame::Replaced)
+            );
+        }
+
+        #[test]
+        fn skip_carries_its_reason() {
+            assert_eq!(
+                parse_agent_voice_frame("synth:frame skip reason=lease"),
+                Some(AgentVoiceFrame::Skipped("lease".to_owned()))
+            );
+            assert_eq!(
+                parse_agent_voice_frame("synth:frame skip reason=verify_mismatch"),
+                Some(AgentVoiceFrame::Skipped("verify_mismatch".to_owned()))
+            );
+            // 没带原因也要当 skip（不整行作废）。
+            assert_eq!(
+                parse_agent_voice_frame("synth:frame skip"),
+                Some(AgentVoiceFrame::Skipped("unknown".to_owned()))
+            );
+        }
+
+        #[test]
+        fn seen_and_unrelated_lines_are_ignored() {
+            assert_eq!(
+                parse_agent_voice_frame(
+                    "synth:frame seen mode=clear lease=1 disarmed=0 connected=1 clears_ok=70"
+                ),
+                None
+            );
+            assert_eq!(parse_agent_voice_frame("dropped:rx_timeout"), None);
+            assert_eq!(parse_agent_voice_frame(""), None);
         }
     }
 

@@ -1081,6 +1081,20 @@ fn capture_inactive_due_to_missing_ownership(
     target_usages > 0 && owned_usages == 0 && connected_ms >= grace_ms
 }
 
+/// 连续多少次"按下后报告层没有真的改写"才判"没生效"（2026-10-14）。
+///
+/// 单次缺失可能只是检查窗口里的一次抖动，连续缺失才足以说明链路坏了——
+/// 与"一次报障 + 一次日志拉取"的定位判据对齐。
+const VOICE_EFFECT_MISSING_STREAK_THRESHOLD: u64 = 2;
+
+/// 纯判定（单测覆盖）：帧证据连续缺失达到阈值 ⇒ 捕获没生效。
+///
+/// 输入来自 `BridgeSnapshot::voice_frames_missing_streak`（BLE 层按下判定线程写入；
+/// 助手重新鉴权时清零）。判定与日志、界面提示共用这一条判据。
+fn capture_inactive_due_to_missing_voice_effect(missing_streak: u64) -> bool {
+    missing_streak >= VOICE_EFFECT_MISSING_STREAK_THRESHOLD
+}
+
 /// 「捕获该生效却没生效」持续多久后，应用**自己重来一次助手**（纯判定，单测覆盖）。
 ///
 /// 2026-10-13 现场（诊断日志实测）：设备宿主进程被系统重建后，宿主里的 agent 随之
@@ -1178,11 +1192,13 @@ fn capture_health_for_round(
     if !enabled {
         return CaptureHealth::Off;
     }
-    if bridge_connected && owned_usages > 0 {
-        return CaptureHealth::Active;
-    }
+    // 「没生效」优先于「有所有权」：所有权只说明三键接管成立；报告层合成的按下
+    // 生效判定连续失败时（2026-10-14），功能其实没生效，界面必须显示提示。
     if bridge_connected && inactive_by_grace {
         return CaptureHealth::Inactive;
+    }
+    if bridge_connected && owned_usages > 0 {
+        return CaptureHealth::Active;
     }
     CaptureHealth::Starting
 }
@@ -1399,7 +1415,16 @@ fn rc003_auto_trigger_reconcile(
                     snapshot.owned_usages.len(),
                     connected_ms,
                     AUTO_TRIGGER_CAPTURE_GRACE_MS,
+                ) || capture_inactive_due_to_missing_voice_effect(
+                    snapshot.voice_frames_missing_streak,
                 );
+                // 失效原因只按事实分叉：所有权一个都没拿到 vs 拿得到、但按下的报告层
+                // 改写连续缺失（2026-10-14 现场形态）。
+                let inactive_reason = if snapshot.owned_usages.is_empty() {
+                    "agent_never_acked"
+                } else {
+                    "voice_synth_no_effect"
+                };
                 // 界面读的就是这一份：`Active` = 真的接管了，`Inactive` = 开着却没生效
                 // （界面据此显示一句用户语言的提示，2026-10-13）。
                 capture_health_for_round(
@@ -1420,7 +1445,7 @@ fn rc003_auto_trigger_reconcile(
                         // Bugs/2026-10-13-rc003-capture-silent-inactive.md）。
                         sayall_windows::gatt_note(format!(
                             "rc003 feature=enhanced-capture action=capture_inactive phase=completed \
-                             terminal_result=failed reason=agent_never_acked retryable=true \
+                             terminal_result=failed reason={inactive_reason} retryable=true \
                              elapsed_ms={connected_ms} hint=auto_restart_helper {}",
                             bridge_health_summary(&snapshot)
                         ));
@@ -1438,7 +1463,7 @@ fn rc003_auto_trigger_reconcile(
                         let attempt = capture_recover_attempts;
                         sayall_windows::gatt_note(format!(
                             "rc003 feature=enhanced-capture action=capture_recover phase=started \
-                             reason=agent_never_acked attempt={attempt} inactive_ms={inactive_ms} \
+                             reason={inactive_reason} attempt={attempt} inactive_ms={inactive_ms} \
                              next_interval_ms={} {}",
                             capture_recover_interval_ms(attempt),
                             bridge_health_summary(&snapshot)
@@ -1568,13 +1593,14 @@ fn bridge_health_summary(snapshot: &BridgeSnapshot) -> String {
         BridgePhase::Failed => "failed",
     };
     format!(
-        "bridge_phase={phase} bridge_port={} accepted_total={} denied_total={} replaced_total={} malformed_total={} helper_pid={}",
+        "bridge_phase={phase} bridge_port={} accepted_total={} denied_total={} replaced_total={} malformed_total={} helper_pid={} voice_frames_missing_streak={}",
         snapshot.port,
         snapshot.accepted_total,
         snapshot.denied_total,
         snapshot.replaced_total,
         snapshot.malformed_total,
-        snapshot.helper_pid
+        snapshot.helper_pid,
+        snapshot.voice_frames_missing_streak
     )
 }
 
@@ -3890,6 +3916,12 @@ mod tests {
             capture_health_for_round(true, true, 12, false),
             CaptureHealth::Active
         );
+        // 「没生效」优先于「有所有权」：所有权只说明三键接管成立；报告层合成的
+        // 按下生效判定失败时（2026-10-14），功能其实没生效，界面必须显示提示。
+        assert_eq!(
+            capture_health_for_round(true, true, 12, true),
+            CaptureHealth::Inactive
+        );
         // 有目标、过宽限仍没人接管：inactive（界面此时才显示提示）。
         assert_eq!(
             capture_health_for_round(true, true, 0, true),
@@ -3913,6 +3945,19 @@ mod tests {
         assert_eq!(CaptureHealth::Off.as_str(), "off");
         assert_eq!(CaptureHealth::Starting.as_str(), "starting");
         assert_eq!(CaptureHealth::Active.as_str(), "active");
+    }
+
+    /// 「按下后报告层没有真的改写」也算"没生效"（2026-10-14）：连续缺失达到阈值时，
+    /// 界面提示与自动重来必须能触发——即使所有权心跳一切正常（2026-10-14 现场形态：
+    /// hb lease 全绿、ownership_resumed，但一次 replace 都没有，语音键静默失效）。
+    #[test]
+    fn capture_inactive_requires_consecutive_missing_voice_effects() {
+        // 单次缺失不算（可能是检查窗口内的一次抖动），连续两次才算。
+        assert!(!capture_inactive_due_to_missing_voice_effect(0));
+        assert!(!capture_inactive_due_to_missing_voice_effect(1));
+        assert!(capture_inactive_due_to_missing_voice_effect(2));
+        assert!(capture_inactive_due_to_missing_voice_effect(5));
+        assert_eq!(VOICE_EFFECT_MISSING_STREAK_THRESHOLD, 2);
     }
 
     /// 兜底失败行必须自带"差在哪一步"的对账字段（2026-10-01 现场教训：

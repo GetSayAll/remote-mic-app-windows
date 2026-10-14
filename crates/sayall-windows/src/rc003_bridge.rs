@@ -128,6 +128,94 @@ pub(crate) fn voice_synth_target(chord: &crate::send_input::KeyChord) -> Option<
     VOICE_SYNTHABLE_USAGES.contains(&usage).then_some(usage)
 }
 
+/// 报告层"语音键帧"结果的两种形态（助手转发的 agent 帧回执，2026-10-14）。
+///
+/// 来源：agent 每次看到语音键按下帧时产生的 `synth:frame` 日志行（经助手解析成
+/// `F` 行）。`Replaced` = 本次按下真的发生了一次改写（每按一次恰有一条）；
+/// `Skipped { reason }` = agent 看到按下但没有改写（租约过期 / 清键上限 / 模式
+/// 不匹配等）。它是「按下生效判据」的唯一正面证据——配置回执只说明配置被接受。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoiceFrameKind {
+    Replaced,
+    Skipped { reason: String },
+}
+
+/// 帧证据快照（判定的比较基准）：`seq` 单调递增，同 `seq` 视为"同一事件"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceFrameStamp {
+    pub seq: u64,
+    pub replaced: bool,
+    pub reason: String,
+    pub at: Instant,
+}
+
+/// 最近一次帧结果 + 「按下生效判定」的连续缺失计数。
+///
+/// 模块级静态（与 `key_gate` 的门控原子同模式）：BLE 侧的按下判定线程要跨组件
+/// 读取证据，而 `Rc003Bridge` 实例在另一支队里、按装配顺序拿不到（同取舍见
+/// `voice_synth_active` 的说明）。
+#[derive(Default)]
+struct VoiceFrameState {
+    seq: u64,
+    replaced: bool,
+    reason: String,
+    at: Option<Instant>,
+    missing_streak: u64,
+}
+
+static VOICE_FRAME_STATE: Mutex<VoiceFrameState> = Mutex::new(VoiceFrameState {
+    seq: 0,
+    replaced: false,
+    reason: String::new(),
+    at: None,
+    missing_streak: 0,
+});
+
+/// 连接线程收到 `F` 行时记录（每按一次至多两条：replace / skip）。
+pub(crate) fn note_voice_frame(replaced: bool, reason: &str) {
+    let seq = {
+        let mut state = lock(&VOICE_FRAME_STATE);
+        state.seq += 1;
+        state.replaced = replaced;
+        state.reason = reason.to_owned();
+        state.at = Some(Instant::now());
+        state.seq
+    };
+    note(format!(
+        "rc003_bridge event=voice_frame state={} reason={} seq={seq}",
+        if replaced { "replaced" } else { "skipped" },
+        reason
+    ));
+}
+
+/// 最近一次帧证据（`None` = 本轮助手会话还没有任何帧结果）。
+pub(crate) fn voice_frame_stamp() -> Option<VoiceFrameStamp> {
+    let state = lock(&VOICE_FRAME_STATE);
+    state.at.map(|at| VoiceFrameStamp {
+        seq: state.seq,
+        replaced: state.replaced,
+        reason: state.reason.clone(),
+        at,
+    })
+}
+
+/// 按下生效判定的结果入账：`replaced` 归零连续缺失；缺失累计。
+/// 由 BLE 侧的判定线程调用；`BridgeSnapshot::voice_frames_missing_streak` 读它。
+pub(crate) fn note_voice_effect_verdict(replaced: bool) {
+    let mut state = lock(&VOICE_FRAME_STATE);
+    if replaced {
+        state.missing_streak = 0;
+    } else {
+        state.missing_streak += 1;
+    }
+}
+
+/// 助手重新鉴权（新一轮会话）时清零连续缺失：给新实例一次干净的机会——
+/// 否则旧缺失会把健康面一直钉在 inactive（恢复后若没人再按，就没人来清零）。
+pub(crate) fn reset_voice_effect_streak() {
+    lock(&VOICE_FRAME_STATE).missing_streak = 0;
+}
+
 /// 桥接描述文件名。约定路径见 [`default_bridge_dir`]。
 pub const BRIDGE_FILE_NAME: &str = "rc003-bridge.ini";
 
@@ -250,6 +338,8 @@ pub struct BridgeSnapshot {
     pub target_usages: Vec<u16>,
     /// 已由 agent ACK 且仍在所有权租约内的集合。
     pub owned_usages: Vec<u16>,
+    /// 「按下生效判定」连续缺失数（`replaced` 归零；连续 ≥2 会被对账判为没生效）。
+    pub voice_frames_missing_streak: u64,
 }
 
 /// 默认桥接描述文件目录：`%LOCALAPPDATA%\SayAll`。
@@ -287,6 +377,13 @@ pub enum BridgeLine {
     /// 不再认"S 行写进 socket"（2026-10-03 加固：写出成功 ≠ 报告层已生效）。
     SynthAck {
         to: Option<u16>,
+    },
+    /// 报告层合成帧结果（助手转发的 agent 帧回执，2026-10-14 按下生效判据的输入）。
+    ///
+    /// 与 `SynthAck`（配置级、绝对状态）不同：这是**逐次按下**的事件，
+    /// 每按一次至多一条（`seen` 不转发）。缺它就是"本次按下没有真的改写"。
+    VoiceFrame {
+        kind: VoiceFrameKind,
     },
     Bye {
         reason: String,
@@ -384,6 +481,17 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
                 .map_err(|_| "O 目标代次不是整数".to_string())?;
             let usages = parse_usage_payload(parts.next().unwrap_or("-"))?;
             Ok(Some(BridgeLine::Ownership { generation, usages }))
+        }
+        "F" => {
+            let kind = parts.next().ok_or_else(|| "F 缺少结果".to_string())?;
+            // 原因只用于日志分流；长度封顶防止异常输入撑大日志行（帧行本应很短）。
+            let reason: String = parts.next().unwrap_or("unknown").chars().take(32).collect();
+            let kind = match kind {
+                "ok" => VoiceFrameKind::Replaced,
+                "skip" => VoiceFrameKind::Skipped { reason },
+                other => return Err(format!("未知的 F 结果 {other:?}")),
+            };
+            Ok(Some(BridgeLine::VoiceFrame { kind }))
         }
         "BYE" => Ok(Some(BridgeLine::Bye {
             reason: parts.collect::<Vec<_>>().join(" "),
@@ -804,6 +912,7 @@ impl Rc003Bridge {
             target_generation: targets.generation,
             target_usages: targets.usages.iter().copied().collect(),
             owned_usages: state.owned.iter().copied().collect(),
+            voice_frames_missing_streak: lock(&VOICE_FRAME_STATE).missing_streak,
         }
     }
 
@@ -1307,6 +1416,9 @@ fn handle_connection(
                             continue;
                         }
                         authenticated = true;
+                        // 新一轮助手会话：给「按下生效判定」的连续缺失清零——恢复后若没人
+                        // 再按，就没人来清零（见 reset_voice_effect_streak 的说明）。
+                        reset_voice_effect_streak();
                         {
                             let mut state = lock(shared);
                             state.phase = BridgePhase::Connected;
@@ -1458,6 +1570,14 @@ fn handle_connection(
                     note(format!("rc003_bridge event=helper_bye reason={reason}"));
                     drop_reason = "helper_bye";
                     break 'outer;
+                }
+                BridgeLine::VoiceFrame { kind } => {
+                    // 逐次按下的帧结果：只更新证据（绝对状态语义不适用——每条都是
+                    // 独立事件，断线不补发；补发会把旧结果当成下一次按下的证据）。
+                    match kind {
+                        VoiceFrameKind::Replaced => note_voice_frame(true, ""),
+                        VoiceFrameKind::Skipped { reason } => note_voice_frame(false, &reason),
+                    }
                 }
                 // 鉴权后重复 HELLO：当作协议噪音忽略，不改状态。
                 BridgeLine::Hello { .. } => {}
@@ -1953,6 +2073,103 @@ mod tests {
             })
         );
         assert!(parse_bridge_line("O nope f1").is_err());
+    }
+
+    #[test]
+    fn parses_voice_frame_lines() {
+        // 报告层"按下是否真的改写"的帧回执（2026-10-14 生效判据）：
+        // 助手转发的 agent 帧结果。`ok` = 本次按下确实改写；`skip` = 看到但没改写。
+        assert_eq!(
+            parse_bridge_line("F ok").unwrap(),
+            Some(BridgeLine::VoiceFrame {
+                kind: VoiceFrameKind::Replaced
+            })
+        );
+        assert_eq!(
+            parse_bridge_line("F skip lease").unwrap(),
+            Some(BridgeLine::VoiceFrame {
+                kind: VoiceFrameKind::Skipped {
+                    reason: "lease".to_owned()
+                }
+            })
+        );
+        // 缺原因按 unknown 记，不整行作废（原因只用于日志分流）。
+        assert_eq!(
+            parse_bridge_line("F skip").unwrap(),
+            Some(BridgeLine::VoiceFrame {
+                kind: VoiceFrameKind::Skipped {
+                    reason: "unknown".to_owned()
+                }
+            })
+        );
+        assert!(parse_bridge_line("F").is_err());
+        assert!(parse_bridge_line("F zz").is_err());
+    }
+
+    /// 端到端（离线、免提权、免设备）：`F` 行经真 TcpStream 更新帧证据快照。
+    ///
+    /// 证据是"按下生效判据"的输入（见 ble.rs 的 voice_effect）：只有它前进，
+    /// 每次按下才可能被判为 replaced。串行约定与其它桥测试一致（桥会写全局门控）。
+    #[test]
+    fn loopback_voice_frame_lines_update_evidence() {
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-voice-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+
+        let descriptor_path = dir.join(BRIDGE_FILE_NAME);
+        let text = std::fs::read_to_string(&descriptor_path).expect("描述文件必须已写出");
+        let (port, token, _version) = parse_descriptor(&text).expect("描述文件必须可解析");
+        let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .expect("必须能连上桥接端口");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(2_000)))
+            .ok();
+        let hello = format!("HELLO {BRIDGE_PROTOCOL_VERSION} {token} 777\n");
+        stream.write_all(hello.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut ok = String::new();
+        reader.read_line(&mut ok).expect("必须收到 OK");
+        assert!(ok.starts_with("OK "), "实际收到 {ok:?}");
+
+        // 未鉴权前发送的 F 行不得被采纳：这里已经鉴权，先记录当前 seq。
+        let before = voice_frame_stamp();
+
+        stream.write_all(b"F ok\n").unwrap();
+        stream.flush().unwrap();
+        let stamp = wait_for_voice_frame(before.as_ref().map(|stamp| stamp.seq));
+        assert!(stamp.replaced, "F ok 必须记录为 replaced");
+
+        stream.write_all(b"F skip lease\n").unwrap();
+        stream.flush().unwrap();
+        let skipped = wait_for_voice_frame(Some(stamp.seq));
+        assert!(!skipped.replaced, "F skip 不得记录为 replaced");
+        assert_eq!(skipped.reason, "lease");
+
+        drop(stream);
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 轮询等待帧证据 seq 前进（桥在独立线程处理，测试里不能假设时序）。
+    fn wait_for_voice_frame(after_seq: Option<u64>) -> VoiceFrameStamp {
+        let deadline = Instant::now() + Duration::from_millis(2_000);
+        loop {
+            if let Some(stamp) = voice_frame_stamp() {
+                let advanced = after_seq.map(|seq| stamp.seq > seq).unwrap_or(true);
+                if advanced {
+                    return stamp;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "2s 内没有等到帧证据前进（after_seq={after_seq:?}）"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
