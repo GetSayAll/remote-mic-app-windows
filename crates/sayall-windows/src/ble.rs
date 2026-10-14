@@ -510,6 +510,10 @@ pub(crate) enum WorkerMessage {
         connection_generation: u64,
         status: BluetoothConnectionStatus,
     },
+    ConnectionParametersChanged {
+        connection_generation: u64,
+        observation: ConnectionParametersObservation,
+    },
     CallbackError {
         connection_generation: u64,
         error: String,
@@ -555,6 +559,7 @@ fn worker_loop(
         "worker_start",
         "checkpoint=ble_worker",
     ));
+    gatt_note("ble_recovery_policy mode=retry_only radio_cycle=disabled".to_owned());
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         *lock(&state) = failed_snapshot(format!("WinRT 初始化失败：{error}"));
         return;
@@ -1073,6 +1078,10 @@ fn worker_loop(
                 connection_generation: message_generation,
                 status,
             } => {
+                gatt_note(format!(
+                    "ble_link phase=changed connection_generation={message_generation} status={status:?} stale={}",
+                    message_generation != connection_generation
+                ));
                 if message_generation == connection_generation
                     && status == BluetoothConnectionStatus::Disconnected
                 {
@@ -1109,6 +1118,17 @@ fn worker_loop(
                         snapshot.last_error = Some("小米语音遥控器蓝牙连接已断开".to_owned());
                     }
                 }
+            }
+            WorkerMessage::ConnectionParametersChanged {
+                connection_generation: message_generation,
+                observation,
+            } => {
+                gatt_note(connection_params_event_note(
+                    message_generation,
+                    connection_generation,
+                    session.is_some(),
+                    observation,
+                ));
             }
             WorkerMessage::CallbackError {
                 connection_generation: message_generation,
@@ -1734,11 +1754,11 @@ fn advance_reconnect(
     true
 }
 
-/// `ThroughputOptimized` 连接参数请求的两层失败（P1-1，2026-09-22）。
+/// `ThroughputOptimized` 连接参数请求的失败分层（P1-1，2026-09-22）。
 ///
 /// 此前两层共用**同一行**日志，分不出是哪一层：
-/// - `BluetoothLEPreferredConnectionParameters::ThroughputOptimized()` 构造
-///   失败 —— 宿主低于 Windows 11 22000，属**常态**，重试无意义；
+/// - 预设构造在旧版 Windows 失败 —— 版本门禁，重试无意义；
+/// - 预设构造在 Windows 11 失败 —— 保留 HRESULT，不能误报成版本门禁；
 /// - `RequestPreferredConnectionParameters` 调用失败 —— API 可用但被拒，
 ///   这才是需要换路径（连接后延迟申请 / UI 线程申请）的信号。
 ///
@@ -1749,22 +1769,108 @@ fn advance_reconnect(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnParamsFailure {
     /// 构造失败：宿主不满足 Windows 11 22000+。
-    Unsupported { build: u32 },
+    Unsupported { build: u32, hresult: u32 },
+    /// Windows 11 上构造失败：保留原始 HRESULT。
+    PresetFailed { build: u32, hresult: u32 },
     /// 构造成功但请求被拒：API 可用，需另行排查。
     RequestFailed { hresult: u32 },
 }
 
-/// 两层失败各自的日志行。区分要点：
+/// 仅记录连接参数数值或 HRESULT。请求被接受不代表链路已经采用这些数值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionParametersObservation {
+    Observed {
+        interval_units: u16,
+        latency_events: u16,
+        timeout_units: u16,
+    },
+    Unavailable(u32),
+    NotConnected,
+}
+
+fn read_connection_parameters(device: &BluetoothLEDevice) -> ConnectionParametersObservation {
+    let result = (|| {
+        let parameters = device.GetConnectionParameters()?;
+        Ok::<_, windows::core::Error>((
+            parameters.ConnectionInterval()?,
+            parameters.ConnectionLatency()?,
+            parameters.LinkTimeout()?,
+        ))
+    })();
+    match result {
+        Ok((0, 0, 0)) => ConnectionParametersObservation::NotConnected,
+        Ok((interval_units, latency_events, timeout_units)) => {
+            ConnectionParametersObservation::Observed {
+                interval_units,
+                latency_events,
+                timeout_units,
+            }
+        }
+        Err(error) => ConnectionParametersObservation::Unavailable(error.code().0 as u32),
+    }
+}
+
+fn connection_params_request_note(connection_generation: u64) -> String {
+    format!(
+        "conn_params phase=completed terminal_result=submitted mode=throughput_optimized connection_generation={connection_generation} effective=unknown"
+    )
+}
+
+fn connection_params_observation_note(
+    connection_generation: u64,
+    source: &str,
+    observation: ConnectionParametersObservation,
+) -> String {
+    match observation {
+        ConnectionParametersObservation::Observed {
+            interval_units,
+            latency_events,
+            timeout_units,
+        } => format!(
+            "conn_params phase=observed terminal_result=observed source={source} connection_generation={connection_generation} interval_units={interval_units} latency_events={latency_events} timeout_units={timeout_units}"
+        ),
+        ConnectionParametersObservation::Unavailable(hresult) => format!(
+            "conn_params phase=observed terminal_result=unknown source={source} connection_generation={connection_generation} error_domain=bluetooth error_code=readback_unavailable hresult=0x{hresult:08X}"
+        ),
+        ConnectionParametersObservation::NotConnected => format!(
+            "conn_params phase=observed terminal_result=unknown source={source} connection_generation={connection_generation} reason=not_connected"
+        ),
+    }
+}
+
+fn connection_params_event_note(
+    message_generation: u64,
+    current_generation: u64,
+    has_session: bool,
+    observation: ConnectionParametersObservation,
+) -> String {
+    if message_generation != current_generation {
+        format!(
+            "conn_params phase=observed terminal_result=ignored source=changed connection_generation={message_generation} reason=stale_callback"
+        )
+    } else if !has_session {
+        format!(
+            "conn_params phase=observed terminal_result=ignored source=changed connection_generation={message_generation} reason=no_active_session"
+        )
+    } else {
+        connection_params_observation_note(message_generation, "changed", observation)
+    }
+}
+
+/// 各失败原因的日志行。区分要点：
 /// - `os_build` / `requires_build`：让日志**自证**版本，下次不必再向用户追问；
 /// - `hresult`：请求被拒时保留原始错误码（09-17 起的 HRESULT 保真手法）；
 /// - `retryable`：版本不足重试无意义（false），API 被拒可重试（true）。
 fn conn_params_failure_note(failure: ConnParamsFailure) -> String {
     match failure {
-        ConnParamsFailure::Unsupported { build } => format!(
-            "conn_params result=unavailable error_domain=bluetooth error_code=unsupported_os reason=throughput_optimized_unsupported os_build={build} requires_build=22000 retryable=false mode=throughput_optimized"
+        ConnParamsFailure::Unsupported { build, hresult } => format!(
+            "conn_params phase=completed terminal_result=unavailable result=unavailable error_domain=bluetooth error_code=unsupported_os reason=throughput_optimized_unsupported os_build={build} requires_build=22000 hresult=0x{hresult:08X} retryable=false mode=throughput_optimized"
+        ),
+        ConnParamsFailure::PresetFailed { build, hresult } => format!(
+            "conn_params phase=completed terminal_result=unavailable result=unavailable error_domain=bluetooth error_code=preset_failed reason=preset_failed os_build={build} hresult=0x{hresult:08X} retryable=true mode=throughput_optimized"
         ),
         ConnParamsFailure::RequestFailed { hresult } => format!(
-            "conn_params result=unavailable error_domain=bluetooth error_code=request_failed reason=request_failed hresult=0x{hresult:08X} retryable=true mode=throughput_optimized"
+            "conn_params phase=completed terminal_result=unavailable result=unavailable error_domain=bluetooth error_code=request_failed reason=request_failed hresult=0x{hresult:08X} retryable=true mode=throughput_optimized"
         ),
     }
 }
@@ -1809,6 +1915,7 @@ fn handle_control(
             // 发布在 Ready 而不是连接握手更早的时刻——此时的地址确实已经在用。
             if let Some(session) = session.as_ref() {
                 crate::remote_target::set(Some(session.address));
+                session.log_connection_parameters("ready");
             }
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Ready;
@@ -2249,6 +2356,7 @@ fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> 
 }
 
 struct BleSession {
+    connection_generation: u64,
     battery_monitor: Option<crate::battery::BatteryMonitor>,
     name: String,
     model: RemoteModel,
@@ -2264,6 +2372,7 @@ struct BleSession {
     audio_token: i64,
     control_token: i64,
     connection_token: i64,
+    params_token: Option<i64>,
     /// GATT 电量订阅（0x180F/0x2A19，可选增强）：订阅成功时持有三件套并在
     /// cleanup 成对释放；失败或设备无 BAS 时为 None，由 60s 缓存轮询兜底。
     battery_service: Option<GattDeviceService>,
@@ -2289,6 +2398,7 @@ struct BleSession {
 struct PendingBleConnection {
     /// 与 [`BleSession::address`] 同值：装配阶段就带着，`finish` 时交给会话。
     address: u64,
+    connection_generation: u64,
     device: Option<BluetoothLEDevice>,
     service: Option<GattDeviceService>,
     transmit: Option<GattCharacteristic>,
@@ -2297,13 +2407,15 @@ struct PendingBleConnection {
     audio_token: Option<i64>,
     control_token: Option<i64>,
     connection_token: Option<i64>,
+    params_token: Option<i64>,
     params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
 }
 
 impl PendingBleConnection {
-    fn new(device: BluetoothLEDevice, address: u64) -> Self {
+    fn new(device: BluetoothLEDevice, address: u64, connection_generation: u64) -> Self {
         Self {
             address,
+            connection_generation,
             device: Some(device),
             service: None,
             transmit: None,
@@ -2312,6 +2424,7 @@ impl PendingBleConnection {
             audio_token: None,
             control_token: None,
             connection_token: None,
+            params_token: None,
             params_request: None,
         }
     }
@@ -2340,6 +2453,7 @@ impl PendingBleConnection {
 
     fn finish(mut self, name: String, model: RemoteModel) -> BleSession {
         BleSession {
+            connection_generation: self.connection_generation,
             battery_monitor: None,
             name,
             model,
@@ -2374,6 +2488,7 @@ impl PendingBleConnection {
                 .connection_token
                 .take()
                 .expect("pending connection subscription is owned"),
+            params_token: self.params_token.take(),
             params_request: self.params_request.take(),
             microphone_opened: false,
             cleanup_started: false,
@@ -2408,6 +2523,23 @@ impl PendingBleConnection {
                 failures += 1;
             }
         }
+        if let (Some(device), Some(token)) = (self.device.as_ref(), self.params_token.take()) {
+            attempted += 1;
+            match device.RemoveConnectionParametersChanged(token) {
+                Ok(()) => gatt_note(format!(
+                    "conn_params phase=monitor_closed terminal_result=passed source=partial_cleanup connection_generation={}",
+                    self.connection_generation
+                )),
+                Err(error) => {
+                    failures += 1;
+                    gatt_note(format!(
+                        "conn_params phase=monitor_closed terminal_result=failed source=partial_cleanup connection_generation={} error_domain=bluetooth error_code=unsubscribe_failed hresult=0x{:08X}",
+                        self.connection_generation,
+                        error.code().0 as u32
+                    ));
+                }
+            }
+        }
         if let Some(audio) = self.audio.as_ref() {
             attempted += 1;
             if disable_notifications(audio).is_err() {
@@ -2422,8 +2554,19 @@ impl PendingBleConnection {
         }
         if let Some(request) = self.params_request.take() {
             attempted += 1;
-            if request.Close().is_err() {
-                failures += 1;
+            match request.Close() {
+                Ok(()) => gatt_note(format!(
+                    "conn_params phase=released terminal_result=submitted source=partial_cleanup connection_generation={} effective=unknown",
+                    self.connection_generation
+                )),
+                Err(error) => {
+                    failures += 1;
+                    gatt_note(format!(
+                        "conn_params phase=released terminal_result=failed source=partial_cleanup connection_generation={} error_domain=bluetooth error_code=close_failed hresult=0x{:08X}",
+                        self.connection_generation,
+                        error.code().0 as u32
+                    ));
+                }
             }
         }
         if let Some(service) = self.service.take() {
@@ -2455,6 +2598,38 @@ impl Drop for PendingBleConnection {
 }
 
 impl BleSession {
+    fn close_params_monitor(&mut self, retrying: bool) -> bool {
+        let Some(token) = self.params_token else {
+            return false;
+        };
+        match self.device.RemoveConnectionParametersChanged(token) {
+            Ok(()) => {
+                self.params_token = None;
+                gatt_note(format!(
+                    "conn_params phase=monitor_closed terminal_result=passed source=session_cleanup connection_generation={} retrying={retrying}",
+                    self.connection_generation
+                ));
+                false
+            }
+            Err(error) => {
+                gatt_note(format!(
+                    "conn_params phase=monitor_closed terminal_result=failed source=session_cleanup connection_generation={} retrying={retrying} error_domain=bluetooth error_code=unsubscribe_failed hresult=0x{:08X}",
+                    self.connection_generation,
+                    error.code().0 as u32
+                ));
+                true
+            }
+        }
+    }
+
+    fn log_connection_parameters(&self, source: &str) {
+        gatt_note(connection_params_observation_note(
+            self.connection_generation,
+            source,
+            read_connection_parameters(&self.device),
+        ));
+    }
+
     fn connect(
         device_id: &str,
         sender: Sender<WorkerMessage>,
@@ -2482,38 +2657,78 @@ impl BleSession {
                 )
             },
         )?;
-        let mut pending = PendingBleConnection::new(device, address);
-        // 连接参数吞吐优化（2026-09-07）：RC001 送达率实测仅 ~52%（18 会话
-        // 全部 39%-68%，同 09-04 RC003 初次配对的 55% 症状；09-04 RC001
-        // 基准为 100%）。ThroughputOptimized 收紧连接间隔，提升 15ms/120B
-        // 音频帧的实时送达；对两型号统一生效（RC003 只会更好）。
-        // Windows 11（22000+）起可用：旧宿主调用失败降级默认参数，不阻断
-        // 连接，结果落 gatt_note（"功能点必须自带日志"）。
+        let mut pending = PendingBleConnection::new(device, address, connection_generation);
+        let parameters_sender = sender.clone();
+        let parameters_handler =
+            TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
+                move |device, _| {
+                    if let Some(device) = device.as_ref() {
+                        let _ =
+                            parameters_sender.send(WorkerMessage::ConnectionParametersChanged {
+                                connection_generation,
+                                observation: read_connection_parameters(device),
+                            });
+                    }
+                    Ok(())
+                },
+            );
+        match pending
+            .device()
+            .ConnectionParametersChanged(&parameters_handler)
+        {
+            Ok(token) => {
+                pending.params_token = Some(token);
+                gatt_note(format!(
+                    "conn_params phase=monitor terminal_result=passed connection_generation={connection_generation}"
+                ));
+            }
+            Err(error) => gatt_note(format!(
+                "conn_params phase=monitor terminal_result=unavailable connection_generation={connection_generation} error_domain=bluetooth error_code=subscribe_failed hresult=0x{:08X}",
+                error.code().0 as u32
+            )),
+        }
+        // 历史策略：为遥控器请求高吞吐连接参数。2026-09-07 的 RC001
+        // 送达率实验发生在 Windows 10 build 19041；该 API 在该版本不可用，
+        // 因而不能把旧实验的变化归因于本请求。Windows 11（22000+）起
+        // 可用；请求成功也不代表链路实际采用了该参数，须看读回日志。
+        // 旧宿主调用失败时沿用默认参数，不阻断连接。
+        gatt_note(format!(
+            "conn_params phase=requested mode=throughput_optimized connection_generation={connection_generation}"
+        ));
         let params_request = match BluetoothLEPreferredConnectionParameters::ThroughputOptimized() {
             Ok(parameters) => match pending
                 .device()
                 .RequestPreferredConnectionParameters(&parameters)
             {
                 Ok(request) => {
-                    gatt_note("conn_params result=ok mode=throughput_optimized".to_owned());
+                    gatt_note(connection_params_request_note(connection_generation));
                     Some(request)
                 }
                 Err(error) => {
                     // 第二层：构造成功、请求被拒。落 HRESULT 以便定位是谁拒绝
                     // （此前 `Err(_)` 直接丢弃，只剩一句无法归因的话）。
-                    gatt_note(conn_params_failure_note(ConnParamsFailure::RequestFailed {
-                        hresult: error.code().0 as u32,
-                    }));
+                    gatt_note(format!(
+                        "{} connection_generation={connection_generation}",
+                        conn_params_failure_note(ConnParamsFailure::RequestFailed {
+                            hresult: error.code().0 as u32,
+                        })
+                    ));
                     None
                 }
             },
-            Err(_) => {
-                // 第一层：版本门禁。落 os_build 让日志自证——本次排查就因为
-                // 日志里没有版本信息，不得不专门去查了一次系统版本。
+            Err(error) => {
+                // 旧版 Windows 的版本门禁与新版系统的真实调用失败必须分开。
                 let build = windows_version::OsVersion::current().build;
-                gatt_note(conn_params_failure_note(ConnParamsFailure::Unsupported {
-                    build,
-                }));
+                let hresult = error.code().0 as u32;
+                let failure = if build < 22000 {
+                    ConnParamsFailure::Unsupported { build, hresult }
+                } else {
+                    ConnParamsFailure::PresetFailed { build, hresult }
+                };
+                gatt_note(format!(
+                    "{} connection_generation={connection_generation}",
+                    conn_params_failure_note(failure)
+                ));
                 None
             }
         };
@@ -2808,6 +3023,9 @@ impl BleSession {
             {
                 best_effort_failures += 1;
             }
+            if self.close_params_monitor(false) {
+                best_effort_failures += 1;
+            }
             // The remote CCCD can no longer be written after a physical
             // disconnect. Handler removal and object Close are the ownership
             // boundary; notification disable is best-effort in that state.
@@ -2818,8 +3036,19 @@ impl BleSession {
                 best_effort_failures += 1;
             }
             if let Some(request) = self.params_request.take() {
-                if request.Close().is_err() {
-                    best_effort_failures += 1;
+                match request.Close() {
+                    Ok(()) => gatt_note(format!(
+                        "conn_params phase=released terminal_result=submitted source=session_cleanup connection_generation={} effective=unknown",
+                        self.connection_generation
+                    )),
+                    Err(error) => {
+                        best_effort_failures += 1;
+                        gatt_note(format!(
+                            "conn_params phase=released terminal_result=failed source=session_cleanup connection_generation={} error_domain=bluetooth error_code=close_failed hresult=0x{:08X}",
+                            self.connection_generation,
+                            error.code().0 as u32
+                        ));
+                    }
                 }
             }
             gatt_note(format!(
@@ -2830,6 +3059,9 @@ impl BleSession {
                     "partial"
                 }
             ));
+        } else if !self.device_closed {
+            // 退订失败时保留 token，在设备对象仍未关闭的下一轮真正重试。
+            self.close_params_monitor(true);
         }
 
         let mut errors = Vec::new();
@@ -2841,7 +3073,15 @@ impl BleSession {
         }
         if !self.device_closed {
             match self.device.Close() {
-                Ok(()) => self.device_closed = true,
+                Ok(()) => {
+                    self.device_closed = true;
+                    if self.params_token.take().is_some() {
+                        gatt_note(format!(
+                            "conn_params phase=monitor_closed terminal_result=unknown source=device_close connection_generation={} reason=unsubscribe_failed_device_closed",
+                            self.connection_generation
+                        ));
+                    }
+                }
                 Err(error) => errors.push(format!("关闭蓝牙设备：{error}")),
             }
         }
@@ -4344,15 +4584,24 @@ mod tests {
     fn conn_params_failures_are_distinguishable_in_logs() {
         // P1-1：两层失败此前共用同一行日志，拿到日志也分不出是版本门禁
         // 还是 API 被拒——而这两种情况的处置完全不同（前者无解、后者可换路径）。
-        let unsupported = conn_params_failure_note(ConnParamsFailure::Unsupported { build: 19041 });
+        let unsupported = conn_params_failure_note(ConnParamsFailure::Unsupported {
+            build: 19041,
+            hresult: 0x8000_4002,
+        });
         let request_failed = conn_params_failure_note(ConnParamsFailure::RequestFailed {
             hresult: 0x8007_0008,
+        });
+        let preset_failed = conn_params_failure_note(ConnParamsFailure::PresetFailed {
+            build: 22631,
+            hresult: 0x8000_4005,
         });
 
         assert_ne!(unsupported, request_failed, "两层失败必须落到不同的日志行");
 
         // 版本门禁：日志自证版本，且重试无意义。
         assert!(unsupported.contains("os_build=19041"));
+        assert!(unsupported.contains("hresult=0x80004002"));
+        assert!(unsupported.contains("phase=completed terminal_result=unavailable"));
         assert!(unsupported.contains("requires_build=22000"));
         assert!(unsupported.contains("reason=throughput_optimized_unsupported"));
         assert!(
@@ -4361,8 +4610,12 @@ mod tests {
         );
         // API 被拒：带 HRESULT 以便定位，且可重试。
         assert!(request_failed.contains("hresult=0x80070008"));
+        assert!(request_failed.contains("phase=completed terminal_result=unavailable"));
         assert!(request_failed.contains("reason=request_failed"));
         assert!(request_failed.contains("retryable=true"));
+        assert!(preset_failed.contains("error_code=preset_failed"));
+        assert!(preset_failed.contains("os_build=22631"));
+        assert!(preset_failed.contains("hresult=0x80004005"));
 
         // 旧的那句无法归因的原因串不应再出现在任何一层。
         for note in [&unsupported, &request_failed] {
@@ -4371,5 +4624,55 @@ mod tests {
                 "旧的无区分原因串不应再出现：{note}"
             );
         }
+    }
+
+    #[test]
+    fn conn_params_log_separates_request_from_effective_link() {
+        let requested = connection_params_request_note(7);
+        assert!(requested.contains("terminal_result=submitted"));
+        assert!(requested.contains("effective=unknown"));
+        assert!(!requested.contains("terminal_result=passed"));
+
+        let observed = connection_params_observation_note(
+            7,
+            "changed",
+            ConnectionParametersObservation::Observed {
+                interval_units: 12,
+                latency_events: 0,
+                timeout_units: 500,
+            },
+        );
+        assert!(observed.contains("terminal_result=observed"));
+        assert!(observed.contains("interval_units=12"));
+        assert!(observed.contains("latency_events=0"));
+        assert!(observed.contains("timeout_units=500"));
+
+        let unavailable = connection_params_observation_note(
+            7,
+            "ready",
+            ConnectionParametersObservation::Unavailable(0x8000_4002),
+        );
+        assert!(unavailable.contains("terminal_result=unknown"));
+        assert!(unavailable.contains("hresult=0x80004002"));
+
+        let disconnected = connection_params_observation_note(
+            7,
+            "ready",
+            ConnectionParametersObservation::NotConnected,
+        );
+        assert!(disconnected.contains("terminal_result=unknown"));
+        assert!(disconnected.contains("reason=not_connected"));
+    }
+
+    #[test]
+    fn conn_params_change_distinguishes_stale_from_no_session() {
+        let observation = ConnectionParametersObservation::NotConnected;
+        let stale = connection_params_event_note(6, 7, true, observation);
+        assert!(stale.contains("reason=stale_callback"));
+        let no_session = connection_params_event_note(7, 7, false, observation);
+        assert!(no_session.contains("reason=no_active_session"));
+        assert!(!no_session.contains("reason=stale_callback"));
+        let active = connection_params_event_note(7, 7, true, observation);
+        assert!(active.contains("reason=not_connected"));
     }
 }
