@@ -158,6 +158,17 @@
   dirs_deleted=2` → `device_recover=ok` → **`已清理运行时目录（删除了 2 个目录 / 1 个文件）`**
   ——宿主被结束、dll 当场删掉、无待重启残留（旧行为：`GetLastError=5` 跳过释放、dll 留待重启、
   宿主带旧 tap 留下）；随后全新安装正常启动。
+- **修复 3 运行时效果真机复验（passed，2026-10-15 凌晨，0.8.6 新包内嵌 `0fe3c8d`）**：升级安装后
+  （16:26:40 启动）`action=auto_trigger phase=triggered → completed terminal_result=passed
+  reason=helper_connected trigger_attempts=1`；随后用户重启应用并操作开关，16:38:51 出现
+  `action=auto_trigger phase=recheck terminal_result=passed reason=wake`，其后 `completed` 为
+  `trigger_attempts=0`——**唤醒轮只重查、没有再次 trigger**，与复核修订的行为一致。
+- **语音链路真机复验（passed，同晚，0.8.6 新包）**：语音会话 41–44（豆包 + 报告层合成）逐会话
+  `[AGENT] synth:frame replace ok to=0xe6` → `voice_effect result=replaced window_ms=500` →
+  `voice_verify mic=observed`（800 / 2500 ms 两次）；其中 session 41 为向导第⑤步现场
+  （`frontend … phase=voice_attempt result=passed reason=passed elapsed_ms=3606`）；**文字上屏由
+  用户确认**（2026-10-15）。同场按键侧 `[EDGE]` 捕获 back / volume_up / volume_down 正常；
+  升级未写入重授权标记（授权与开关状态按升级语义保留）。
 - `AttachStale` 在"旧 agent 从不重连"下的快速升级：判据已自动化；真机构造依赖旧 agent 静默现场
   （`deferred`）。
 
@@ -165,7 +176,9 @@
 
 - `AttachStale`"旧 agent 不重连"窗口：见上（`deferred`）。
 - 对账唤醒的**运行时效果**（`phase=recheck reason=wake`、无重复 trigger、disable 后状态快速发布
-  Off）：自动化覆盖纯判定与打断语义（Rust 单测含真实打断用例）；真机观察 `deferred`。
+  Off）：自动化覆盖纯判定与打断语义（Rust 单测含真实打断用例）；`reason=wake` 与
+  `trigger_attempts=0` 已获真机证据（见上"修复 3 运行时效果真机复验"）；disable 方向的状态发布
+  仍为 `deferred`（新包现场未复现 disable 操作）。
 - "停用自清"不释放宿主的决策理由见「修复——评估后不做」；若将来再出现"安装器清理同样失败"
   的残余现场，再评估该路径。
 
