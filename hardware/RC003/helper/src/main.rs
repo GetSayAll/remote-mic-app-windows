@@ -5437,6 +5437,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 // 宿主进程映射着 Gadget 时文件删不掉——由提权助手结束**持有注入且独占 RC003**
                 // 的宿主，把映射随进程放掉，再重试删除；共享宿主或任一失败都自动回退到
                 // 「安排到重启删除」（仍然不弹窗）。
+                //
+                // SeDebugPrivilege（2026-10-14 现场）：释放宿主要先枚举它——宿主是 session 0
+                // 的 SYSTEM 进程，没有 SeDebug 时 `enum_modules` 直接 err=5 → "跳过释放" →
+                // 宿主带着旧 Gadget 留下（重装后首次启用必撞 STALE-TAP、语音键恢复窗口内全失败）。
+                // 本分支在正常流程的 `enable_se_debug()` 之前就 exit，必须自己先启用。
+                // 失败不中止清理：仍会回退到"安排到重启删除"（本分支的另一半职责），
+                // 但日志里要把"为什么没释放"说明白。
+                if let Err(reason) = enable_se_debug() {
+                    logger.kv(
+                        "[CLEANUP]",
+                        &[
+                            ("sedebug", "not_enabled".into()),
+                            ("reason", reason),
+                            (
+                                "note",
+                                "无法枚举 session 0 宿主；宿主释放可能被跳过，转为安排到重启删除"
+                                    .into(),
+                            ),
+                        ],
+                    );
+                }
                 if let Ok(scan) = enum_hosts() {
                     if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
                         let pid = entry.pid;
