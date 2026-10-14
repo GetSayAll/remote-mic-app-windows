@@ -102,6 +102,10 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn observed_last_key(&self) -> Option<u32> {
         None
     }
+    /// 观察窗口诊断：窗口内计入的按键码列表（空 = 未计入或不可用）。
+    fn observed_keys(&self) -> Vec<u32> {
+        Vec::new()
+    }
 
     /// 退出前优雅关闭（2026-09-16）：关闭 BLE 会话并在**有界时间**内等待其完成
     /// （`ble_session_cleanup` 落盘）后才返回。
@@ -293,6 +297,10 @@ impl PlatformRuntime for WindowsPlatform {
         WindowsPlatform::observed_last_key(self)
     }
 
+    fn observed_keys(&self) -> Vec<u32> {
+        WindowsPlatform::observed_keys(self)
+    }
+
     fn set_enhanced_capture_enabled(&self, enabled: bool) {
         // 必须是**纯委托**：开关的平台侧语义（key_gate enabled 位、原子量 store、
         // 动态目标下发）全部收敛在 WindowsPlatform::set_enhanced_capture_enabled
@@ -392,12 +400,14 @@ mod simulation {
                     name: "Xiaomi Bluetooth Remote 2".to_owned(),
                     model: RemoteModel::Rc001,
                     is_supported_candidate: true,
+                    token: sayall_windows::device_token(RC001_ID),
                 },
                 PairedRemote {
                     id: RC003_ID.to_owned(),
                     name: "Xiaomi Bluetooth Remote 2 Pro".to_owned(),
                     model: RemoteModel::Rc003,
                     is_supported_candidate: true,
+                    token: sayall_windows::device_token(RC003_ID),
                 },
             ]
         }
@@ -425,6 +435,8 @@ mod simulation {
                 phase: ConnectionPhase::Ready,
                 remote_name: Some(remote.name),
                 remote_model: remote.model,
+                // 与真机同形：连接成功后带上设备稳定令牌，界面才能把"已连接"标到正确那一行。
+                remote_token: Some(remote.token),
                 capabilities: Some(Self::capabilities()),
                 voice_state: VoiceSessionState::Idle,
                 generation: state.connection.generation,

@@ -67,11 +67,16 @@ const connectedModelLabel = computed(() =>
 
 /**
  * 设备行是否就是当前已连接的那台（2026-10-13 现场要求：连接后给"已连接"状态）。
- * 用本向导会话记录到的设备 id：自动连接与手动连接都走 connectDevice，都会记录；
- * 启动恢复的连接页面拿不到 id，但那种情况下列表还没扫过、没有行可标记。
+ *
+ * 判据优先级：**设备稳定令牌**（运行时快照的 `remoteToken` ↔ 扫描行的 `token`）——
+ * 这是唯一在"启动恢复的连接"（界面没点过连接）和"两支遥控器同名"时都能对上行的办法；
+ * 老快照/浏览器兜底没有令牌时，退回"本向导会话里连接成功的那台 id"。
  */
 function isConnectedDevice(device: PairedRemote): boolean {
-  return connected.value && props.connectedDeviceId === device.id;
+  if (!connected.value) return false;
+  const token = props.runtime?.platform.connection.remoteToken ?? "";
+  if (token && device.token) return device.token === token;
+  return props.connectedDeviceId === device.id;
 }
 
 /**

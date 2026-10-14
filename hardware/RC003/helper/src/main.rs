@@ -70,7 +70,7 @@ mod imp {
     use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
@@ -104,6 +104,14 @@ mod imp {
     /// 2026-09-23 真机实测的缺陷正是这里——原先用 `BufReader::lines()` 阻塞读，
     /// 于是 `--duration` 在会话存活期间**永不生效**（300 s 的跑到了 445 s 仍在运行）。
     const READ_POLL_MS: u64 = 250;
+    /// 目标地址 watchdog 的轮询间隔（2026-10-13 现场）：换遥控器后助手要自动
+    /// 重选宿主，2 秒足够快、又不至于频繁扫注册表。
+    const RETARGET_POLL_MS: u64 = 2000;
+    /// watchdog 的分片睡眠：既让"主程序请求"能在 100 ms 内被响应，也用于凑出轮询间隔。
+    const RETARGET_WAKE_MS: u64 = 100;
+    /// 单实例端口的有界等待预算与步长（交接期重叠；见 [`bind_listener_with_retry`]）。
+    const LISTEN_RETRY_BUDGET_MS: u64 = 3000;
+    const LISTEN_RETRY_STEP_MS: u64 = 150;
     /// 注入/接管后等待**已鉴权** hello 的默认上限（秒）。
     /// 为什么设默认：2026-09-23 之前，"注入返回非 0 但 agent 从未连上"这种现象
     /// 只会表现为日志一片安静、程序一直等下去——把"失败"伪装成"正在工作"。
@@ -2246,18 +2254,70 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// ——端口就是单实例锁。2026-09-23 真机实测撞到过一次：上一轮还在 `--duration`
     /// 窗口内，第二轮双击就得到了 `os error 10048`，而当时那条消息只说了"失败"。
     fn bind_listener(port: u16) -> Result<TcpListener, String> {
-        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
-            Ok(l) => Ok(l),
-            Err(e) => {
-                let mut s = format!("绑定 127.0.0.1:{port} 失败：{e}");
-                if e.raw_os_error() == Some(WSAEADDRINUSE) {
-                    s.push_str(&format!(
-                        "。这通常意味着**已经有另一次 sayall-helper 在跑**（端口 {port} 即单实例锁）：\
-                         先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉），或用 --port 换端口。\
-                         谁在占：netstat -ano | findstr :{port}"
-                    ));
+        bind_listener_with_retry(port, LISTEN_RETRY_BUDGET_MS, LISTEN_RETRY_STEP_MS, None)
+    }
+
+    /// 单实例端口的**有界重试**版本（2026-10-13 现场）。
+    ///
+    /// 背景：换遥控器后助手会"重启自己"（先起新实例、旧实例随后收尾），两者短暂重叠时
+    /// 新实例会撞上端口锁 —— 没有重试就直接 `[STOP]` 退出，**换机后一个助手都不剩**
+    /// （现场实证：新实例 15:10:45.72 起、15:10:45.85 退出，旧实例 15:10:46.12 才释放）。
+    /// 因此给一小段有界等待：让旧实例把端口让出来。真正的"另一个实例在跑"仍然会在
+    /// 预算耗尽后按原样退出——单实例语义不变，只是不再在交接瞬间误杀接班人。
+    fn bind_listener_with_retry(
+        port: u16,
+        budget_ms: u64,
+        step_ms: u64,
+        logger: Option<&Logger>,
+    ) -> Result<TcpListener, String> {
+        let started = std::time::Instant::now();
+        let mut attempt: u32 = 0;
+        loop {
+            match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
+                Ok(l) => {
+                    if attempt > 0 {
+                        if let Some(logger) = logger {
+                            logger.kv(
+                                "[WAIT]",
+                                &[
+                                    ("event", "listen_retry".into()),
+                                    ("attempt", attempt.to_string()),
+                                    ("waited_ms", started.elapsed().as_millis().to_string()),
+                                    ("outcome", "bound".into()),
+                                ],
+                            );
+                        }
+                    }
+                    return Ok(l);
                 }
-                Err(s)
+                Err(e) => {
+                    let retryable = e.raw_os_error() == Some(WSAEADDRINUSE);
+                    if retryable && (started.elapsed().as_millis() as u64) + step_ms <= budget_ms {
+                        attempt += 1;
+                        if let Some(logger) = logger {
+                            logger.kv(
+                                "[WAIT]",
+                                &[
+                                    ("event", "listen_retry".into()),
+                                    ("attempt", attempt.to_string()),
+                                    ("waited_ms", started.elapsed().as_millis().to_string()),
+                                    ("reason", "address_in_use".into()),
+                                ],
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(step_ms));
+                        continue;
+                    }
+                    let mut s = format!("绑定 127.0.0.1:{port} 失败：{e}");
+                    if retryable {
+                        s.push_str(&format!(
+                            "。这通常意味着**已经有另一次 sayall-helper 在跑**（端口 {port} 即单实例锁）：\
+                             先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉），或用 --port 换端口。\
+                             谁在占：netstat -ano | findstr :{port}"
+                        ));
+                    }
+                    return Err(s);
+                }
             }
         }
     }
@@ -3691,6 +3751,29 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 下发什么就转发什么，被拒的配置会在 agent 日志里留下 `synth:rejected`
     /// 证据链。注意目标 usage 不受 `TARGET_USAGES` 限制（0x00E6 等合成键
     /// 本来就不在三键集合里），也不能照搬 target 行的集合校验。
+    /// 解析主程序的「立即重选宿主」请求行：`R`（无载荷，2026-10-13 现场新增）。
+    ///
+    /// 主程序在发布新目标（连接/恢复换机）的同一刻发这一行，助手据此**立即**复查
+    /// 目标并重选宿主——把"换机后约 6 秒内按下可能赶不上"的窗口压到毫秒级。
+    /// 轮询 watchdog 仍保留（兜底：请求行丢失、或换机由别的原因触发）。
+    /// 「立即重选宿主」请求的跨线程载体（2026-10-13 现场）。
+    ///
+    /// 主程序发布新目标时发 `R` 行；读行线程置位，目标 watchdog 立刻复查
+    /// （不必等下一个 2 秒轮询）。用模块级原子而不是穿参：与 `crate::key_gate`
+    /// 同一模式——本仓库里"跨组件、单点归属、Drop 有回落"的状态就是这么放的。
+    static RETARGET_NOW: AtomicBool = AtomicBool::new(false);
+
+    /// 最近一次"握手令牌不匹配"的**宿主 pid**（2026-10-13 现场）。
+    ///
+    /// 握手在连接线程里处理，而"要不要为此结束宿主重来"的判断属于主循环（它知道
+    /// 当前服务的 `target_pid` 与"是否还在接管核验窗口内"）。两边用这一枚原子交接：
+    /// 连接线程只登记事实，主循环只在 `pid == target_pid` 且核验未通过时动手。
+    static MISMATCH_HOST_PID: AtomicU32 = AtomicU32::new(0);
+
+    fn parse_bridge_retarget_line(line: &str) -> bool {
+        line.trim() == "R"
+    }
+
     fn parse_bridge_synth_line(line: &str) -> Option<Option<u16>> {
         let mut parts = line.trim().split(' ');
         if parts.next()? != "S" {
@@ -3793,6 +3876,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     *current = synth;
                 }
                 voice_synth_dirty.store(true, Ordering::Relaxed);
+            } else if parse_bridge_retarget_line(&line) {
+                // 主程序刚发布了新目标：立刻叫醒 watchdog（不在这里做判断，
+                // 判定逻辑与轮询路径共用一份，避免两处漂移）。
+                logger.kv(
+                    "[RETARGET]",
+                    &[("event", "request".into()), ("source", "app_bridge".into())],
+                );
+                RETARGET_NOW.store(true, Ordering::Relaxed);
             } else if let Some(on) = parse_bridge_gate_line(&line) {
                 logger.kv(
                     "[VOICE-GATE]",
@@ -4709,6 +4800,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 令牌不匹配的连接是**预期现象**，不是攻击：宿主里可能还常驻着
                     // 旧世代的 agent，它每秒重连一次。逐条打印会把 [EDGE] 淹掉，
                     // 所以折叠成计数器（前 3 次 + 之后每 30 次一条）。
+                    //
+                    // 2026-10-13：**登记宿主 pid**——主循环据此提前结束"接管核验"白等
+                    // （旧 tap 一旦用错令牌握过手，就已经证明接管不可能；现场白等 6.4 秒）。
+                    let mismatch_host = extract_num(line, "pid").unwrap_or(0);
+                    if mismatch_host > 0 {
+                        MISMATCH_HOST_PID.store(mismatch_host as u32, Ordering::Relaxed);
+                    }
                     let n = REJECTED_HELLOS.fetch_add(1, Ordering::Relaxed) + 1;
                     if n <= 3 || n % 30 == 0 {
                         logger.kv(
@@ -5573,7 +5671,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 若先准备再发现端口被占，就等于"失败的一次运行也动了磁盘状态"
         // （2026-09-23 真机实测：第二轮撞端口 10048 时已经写完了配置）。
         // 仍然保持"先监听、后注入"：让 agent 的 init() 一连就能连上，不白等 3 秒。
-        let listener = match bind_listener(args.port) {
+        //
+        // 2026-10-13：换机重启时新旧实例会短暂重叠（新实例先起、旧实例随后收尾），
+        // 这里改成**有界重试**（3 s / 150 ms），把交接期的端口竞争让过去；真正的
+        // "另一个实例在跑"仍会在预算耗尽后按原样 `[STOP]` 退出。
+        let listener = match bind_listener_with_retry(
+            args.port,
+            LISTEN_RETRY_BUDGET_MS,
+            LISTEN_RETRY_STEP_MS,
+            Some(&logger),
+        ) {
             Ok(l) => l,
             Err(e) => {
                 logger.line(&format!("[STOP] {e}"));
@@ -5685,6 +5792,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
         });
 
+        // ---- 目标 watchdog（2026-10-13 现场）：换遥控器后**自动重选宿主** ----
+        //
+        // 助手只在启动时按 `rc003-target.ini` 里的目标地址选一次宿主（`resolve_target`）。
+        // 换一支遥控器后，新遥控器由**另一个 WUDFHost 进程**承载，旧宿主上继续改写报告
+        // 没有任何作用——现场表现是"按住语音键没反应"，用户只能靠关-开「全按键支持」
+        // 让助手重启来恢复。这里定期复查目标地址：地址变成另一个**已能解析出宿主**的值、
+        // 且该宿主与当前服务的不一样 ⇒ 记一条 `[RETARGET]` 并**重启自己**：
+        // 新实例走已验证的启动路径重新定位与注入，不在运行中手写第二条注入路径。
+        let retarget_stop = Arc::clone(&stop);
+        let retarget_logger = Logger::with_shared(args.log.clone(), shared_log.clone());
+        let retarget_handle = std::thread::spawn(move || {
+            retarget_watch_loop(target_pid, retarget_stop, retarget_logger);
+        });
+        let _ = retarget_handle;
+
         logger.line("");
         logger.line(
             "已武装。主程序会动态下发已配置按键；[CONFIG] / [HB] 的 report_usages 是当前实际目标。",
@@ -5773,13 +5895,36 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     break;
                 }
             }
+            // 令牌不匹配 ⇒ 接管已被证明不可能，立刻走干净首注，不必等满核验窗口。
+            let mismatch_here = {
+                let pid = MISMATCH_HOST_PID.load(Ordering::Relaxed);
+                if pid != 0 && pid == target_pid {
+                    MISMATCH_HOST_PID.store(0, Ordering::Relaxed);
+                    true
+                } else {
+                    false
+                }
+            };
+            if mismatch_here {
+                logger.kv(
+                    "[ATTACH]",
+                    &[
+                        ("verify", "failed".into()),
+                        ("reason", "no_authenticated_agent".into()),
+                        ("trigger", "token_mismatch".into()),
+                        ("action", "early_restart_host_clean_inject".into()),
+                        ("served_pid", target_pid.to_string()),
+                    ],
+                );
+            }
             if attach_verification_expired(
                 attach_plan,
                 saw_authenticated,
                 escalated_attach,
                 (Instant::now() - started).as_millis() as u64,
                 ATTACH_VERIFY_MS,
-            ) {
+            ) || (attach_plan && !saw_authenticated && !escalated_attach && mismatch_here)
+            {
                 // "只升级一次"：不论下面走哪条路，这轮之后都不再重复判定（语义与原来一致）。
                 let escalated_before = escalated_attach;
                 escalated_attach = true;
@@ -6549,6 +6694,146 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         );
     }
 
+    /// 目标地址变化后是否需要重新核对宿主（纯逻辑，单测覆盖）。
+    ///
+    /// - `current = None`（主程序清空了目标，例如断开连接）⇒ **不动**：没有目标时
+    ///   继续服务当前宿主即可，草率重启只会打断正在用的人；
+    /// - `current = Some(a)` 且与上次相同 ⇒ 不动；
+    /// - `current = Some(b)` 且与上次不同 ⇒ 需要核对（换机 / 换目标）。
+    fn target_address_requires_recheck(previous: Option<u64>, current: Option<u64>) -> bool {
+        matches!(current, Some(address) if Some(address) != previous)
+    }
+
+    /// 按目标地址在候选宿主里选出**承载这支遥控器**的那个 pid（纯逻辑，单测覆盖）。
+    /// 与 `resolve_target` 的消歧判据同源：宿主实例 id 里含目标地址。
+    /// 单个宿主条目是否承载目标地址（`resolve_target` 与 watchdog 共用同一判据）。
+    fn host_entry_matches_address(entry: &HostEntry, address: u64) -> bool {
+        entry
+            .rc003_instance_id
+            .as_deref()
+            .map(|instance| instance_matches_address(instance, address))
+            .unwrap_or(false)
+    }
+
+    fn host_pid_for_address(entries: &[HostEntry], address: u64) -> Option<u32> {
+        entries
+            .iter()
+            .filter(|entry| entry.is_rc003)
+            .filter(|entry| host_entry_matches_address(entry, address))
+            .map(|entry| entry.pid)
+            .next()
+    }
+
+    /// 目标 watchdog 循环（说明见调用点）：换机后重启自己，让新实例重新定位宿主。
+    ///
+    /// 两条触发：① **主程序请求**（`R` 行 ⇒ [`RETARGET_NOW`]）——请求意味着"目标刚刚
+    /// 变了"，立刻复查、跳过去抖（把换机后的空窗压到毫秒级）；② 2 秒轮询兜底——
+    /// 请求行丢了、或目标由别的原因变化时仍能自愈，此时保留去抖（同一新地址连续看到
+    /// 两次才动手，避免文件写入/清除交错时误判）。
+    fn retarget_watch_loop(served_pid: u32, stop: Arc<AtomicBool>, logger: Logger) {
+        let mut last_seen = read_target_address(&logger);
+        let mut pending: Option<(u64, u32)> = None;
+        let mut pending_ticks: u64 = 0;
+        while !stop.load(Ordering::Relaxed) {
+            // 100 ms 分片睡眠：请求到达时最多等一片就响应；轮询间隔由 tick 计数控制。
+            std::thread::sleep(Duration::from_millis(RETARGET_WAKE_MS));
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let requested = RETARGET_NOW.swap(false, Ordering::Relaxed);
+            if !requested {
+                pending_ticks += 1;
+                if pending_ticks * RETARGET_WAKE_MS < RETARGET_POLL_MS {
+                    continue;
+                }
+            }
+            pending_ticks = 0;
+            let current = read_target_address(&logger);
+            if !target_address_requires_recheck(last_seen, current) {
+                continue;
+            }
+            let Some(address) = current else {
+                continue;
+            };
+            if !requested {
+                // 去抖：同一新地址要连续看到两次才动手（文件写入与清除交错时不动手）。
+                match pending {
+                    Some((seen, ticks)) if seen == address && ticks >= 1 => {}
+                    Some((seen, _)) if seen == address => {
+                        pending = Some((address, 1));
+                        continue;
+                    }
+                    _ => {
+                        pending = Some((address, 0));
+                        continue;
+                    }
+                }
+            }
+            last_seen = Some(address);
+            pending = None;
+            let scan = match enum_hosts() {
+                Ok(scan) => scan,
+                Err(_) => continue,
+            };
+            let Some(pid) = host_pid_for_address(&scan.entries, address) else {
+                continue;
+            };
+            if pid == served_pid {
+                continue;
+            }
+            logger.kv(
+                "[RETARGET]",
+                &[
+                    ("event", "restart".into()),
+                    ("reason", "target_host_changed".into()),
+                    ("trigger", if requested { "app" } else { "poll" }.into()),
+                    ("candidates", scan.entries.len().to_string()),
+                ],
+            );
+            restart_helper_process(&logger);
+            stop.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
+
+    /// 重启自己：把同一套参数交给一份新进程，新进程启动时按当前目标重新定位宿主。
+    /// 失败只记日志（旧宿主继续服务，行为不比之前更差）。
+    fn restart_helper_process(logger: &Logger) {
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(_) => {
+                logger.kv(
+                    "[RETARGET]",
+                    &[
+                        ("event", "restart_failed".into()),
+                        ("reason", "current_exe".into()),
+                    ],
+                );
+                return;
+            }
+        };
+        let forwarded: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        match std::process::Command::new(exe).args(forwarded).spawn() {
+            Ok(child) => {
+                let _ = child;
+                logger.kv(
+                    "[RETARGET]",
+                    &[
+                        ("event", "restarted".into()),
+                        ("child_spawned", "true".into()),
+                    ],
+                );
+            }
+            Err(_) => logger.kv(
+                "[RETARGET]",
+                &[
+                    ("event", "restart_failed".into()),
+                    ("reason", "spawn".into()),
+                ],
+            ),
+        }
+    }
+
     fn resolve_target(args: &Args, logger: &Logger) -> Result<(u32, Vec<HostEntry>), i32> {
         let scan = match enum_hosts() {
             Ok(s) => s,
@@ -6613,13 +6898,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             if let Some(address) = read_target_address(logger) {
                 let matched: BTreeSet<u32> = rc003
                     .iter()
-                    .filter(|entry| {
-                        entry
-                            .rc003_instance_id
-                            .as_deref()
-                            .map(|instance| instance_matches_address(instance, address))
-                            .unwrap_or(false)
-                    })
+                    .filter(|entry| host_entry_matches_address(entry, address))
                     .map(|entry| entry.pid)
                     .collect();
                 logger.kv(
@@ -8162,6 +8441,81 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 目标地址解析：只认 `version=1` + 12 位十六进制；半截 / 旧版 / 0 一律 `None`
         /// （带歪过滤条件比不带更糟：会去注入另一支遥控器的宿主）。
         #[test]
+        /// 2026-10-13 现场：换遥控器后助手要自动重选宿主——判据是"目标地址变成
+        /// 另一个已能解析出宿主的值"。断开（清空目标）不动手，重复值不动手。
+        /// `R` 行（"立即重选宿主"）只认裸行：带载荷的行不当成请求，避免把别的
+        /// 状态行误触发成重启（2026-10-13 现场新增行，协议与 T/S/W 同族）。
+        #[test]
+        fn retarget_request_parses_only_the_bare_line() {
+            assert!(parse_bridge_retarget_line("R"));
+            assert!(parse_bridge_retarget_line("R\r"));
+            assert!(parse_bridge_retarget_line("  R  "));
+            assert!(!parse_bridge_retarget_line("R 1"));
+            assert!(!parse_bridge_retarget_line("T 7 0x004A"));
+            assert!(!parse_bridge_retarget_line("S -"));
+            assert!(!parse_bridge_retarget_line(""));
+        }
+
+        #[test]
+        fn target_recheck_only_on_a_new_non_empty_address() {
+            assert!(target_address_requires_recheck(
+                None,
+                Some(0x00c0_5d39_c2d9_db)
+            ));
+            assert!(target_address_requires_recheck(
+                Some(0x00c0_5d39_c2d9_db),
+                Some(0x00e8_5540_b1b7_6b)
+            ));
+            assert!(!target_address_requires_recheck(
+                Some(0x00c0_5d39_c2d9_db),
+                Some(0x00c0_5d39_c2d9_db)
+            ));
+            // 主程序断开清空目标：继续服务当前宿主，不重启。
+            assert!(!target_address_requires_recheck(
+                Some(0x00c0_5d39_c2d9_db),
+                None
+            ));
+            assert!(!target_address_requires_recheck(None, None));
+        }
+
+        /// 宿主解析：只认承载目标地址的那一个；没有匹配返回 None（不盲选）。
+        #[test]
+        fn host_pid_for_address_matches_only_the_target_instance() {
+            let entries = vec![
+                HostEntry {
+                    pid: 100,
+                    enumerator: "BTHLEDevice".to_string(),
+                    is_rc003: true,
+                    rc003_instance_id: Some(
+                        "BTHLEDevice\\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\\9&2E2B90C9&1&0055".to_string()
+                    ),
+                },
+                HostEntry {
+                    pid: 200,
+                    enumerator: "BTHLEDevice".to_string(),
+                    is_rc003: true,
+                    rc003_instance_id: Some(
+                        "BTHLEDevice\\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\\9&220DF34&1&0055".to_string()
+                    ),
+                },
+                HostEntry {
+                    pid: 300,
+                    enumerator: "USB".to_string(),
+                    is_rc003: false,
+                    rc003_instance_id: None,
+                },
+            ];
+            assert_eq!(
+                host_pid_for_address(&entries, 0x00c0_5d39_c2d9_db),
+                Some(200)
+            );
+            assert_eq!(
+                host_pid_for_address(&entries, 0x00e8_5540_b1b7_6b),
+                Some(100)
+            );
+            assert_eq!(host_pid_for_address(&entries, 0x0011_2233_4455_66), None);
+        }
+
         fn target_body_requires_its_own_version_and_a_full_address() {
             let address = 0x00C0_5D39_C2D9_DBu64;
             assert_eq!(

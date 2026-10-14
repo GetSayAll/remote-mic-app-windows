@@ -122,6 +122,7 @@ describe("Rust and TypeScript IPC contract", () => {
       "batteryLevel",
       "remoteName",
       "remoteModel",
+      "remoteToken",
       "capabilities",
       "voiceState",
       "decodedSamples",
@@ -180,7 +181,7 @@ describe("Rust and TypeScript IPC contract", () => {
 
     expect(pairedRemotes.map((remote) => remote.model)).toEqual(["rc001", "rc003", "unknown"]);
     for (const remote of pairedRemotes) {
-      expectExactKeys(remote, ["id", "name", "model", "isSupportedCandidate"]);
+      expectExactKeys(remote, ["id", "name", "model", "isSupportedCandidate", "token"]);
       expect(remote).not.toHaveProperty("is_supported_candidate");
     }
   });

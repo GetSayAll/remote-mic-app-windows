@@ -10,7 +10,8 @@
  * - `audio.queuedSamples / phase / lastError`：投递排空与失败分类。
  *
  * 规则（一次 attempt 一个终态；迟到回调与下一次会话不得改写已产生的终态）：
- * 1. 开始 = 观测到非 idle 的语音状态；基准在 arm 后的第一帧快照上固定；
+ * 1. 开始 = 观测到非 idle 的**语音状态**（`connection.voiceState`；`audio.phase` 忙而语音仍
+ *    idle 的帧不构成开始——快照按子系统依次读取，会话开始可能落在两次读取之间，见 2026-10-14 现场）；
  * 2. 结束 = 观测到回到 idle（成功路径上 audio 已先完成排空，queued 归零）；
  * 3. 结束后的失败优先级：音频错误 > 无解码采样 > 有采样未投递 > 排空异常；
  * 4. 通过 = 投递完成 + 转写文字在窗口内出现 + 未检测到物理键盘输入；
@@ -182,6 +183,14 @@ export function createVoiceAttemptTracker(
         } else {
           return null;
         }
+      } else if (input.voiceState === "idle") {
+        // 2026-10-14 现场（⑤步判「收到了语音会话，但没有声音数据」但文字已经上屏、语音条也出现）：
+        // 跨子系统快照撕裂——一帧里 audio.phase 已是 streaming、connection.voiceState 还是 idle
+        // （RuntimeSnapshot 依次读各子系统，真实会话开始恰好落在两次读取之间）。
+        // 会话是否开始以 **voiceState** 为准：音频忙而语音仍 idle 不构成"已开始"；
+        // 旧逻辑把它当成"开始→立即结束"，用 0/0 计数把随后真实上屏的会话判成了 no_samples。
+        // 解码计数仍照常累计（见 observe 开头），极短按压走上面的解码差值路径，不受影响。
+        return null;
       } else {
         sessionStartObserved = true;
         generation = input.generation || generation;
