@@ -22,8 +22,15 @@ describe("voiceFailureText（失败解释按捕获状态分流）", () => {
     expect(text).not.toContain("语音链路正常");
   });
 
-  it("no_transcript + active/unknown/off：保留原有排查文案", () => {
-    for (const health of ["active", "unknown", "off"] as const) {
+  it("no_transcript + off：提示开关未打开（豆包 + 关闭是必然失败）", () => {
+    const text = voiceFailureText("voice.no_transcript", "off");
+    expect(text).toContain("关闭");
+    expect(text).toContain("重新测试");
+    expect(text).not.toContain("语音链路正常");
+  });
+
+  it("no_transcript + active/unknown：保留原有排查文案", () => {
+    for (const health of ["active", "unknown"] as const) {
       expect(voiceFailureText("voice.no_transcript", health)).toBe(
         VOICE_FAILURE_COPY["voice.no_transcript"],
       );

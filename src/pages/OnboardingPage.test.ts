@@ -1697,6 +1697,116 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
+  // 复核补测（2026-10-14）：三类边界——在途细化不覆盖新会话 / 细化读失败回落 /
+  // 非豆包不分流。第一类正是首版被 Vue ref 深代理陷阱静默拦死的那条路径。
+  it("重试后的旧细化回调不覆盖新会话（会话世代作废旧回调）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    let resolveSnapshotDeferred: { resolve?: (value: Rc003BridgeSnapshot) => void } = {};
+    mocks.getRc003BridgeSnapshot.mockImplementation(
+      () =>
+        new Promise<Rc003BridgeSnapshot>((resolve) => {
+          resolveSnapshotDeferred.resolve = resolve;
+        }),
+    );
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(3_200); // no_transcript 终态；细化读取挂起
+    await flushPromises();
+    expect(wrapper.text()).toContain("语音链路正常");
+
+    // 用户点「重新测试」：会话世代 +1；旧回调随后返回也不得写入。
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "重新测试")!
+      .trigger("click");
+    await flushPromises();
+    resolveSnapshotDeferred.resolve?.(rc003BridgeSnapshot({ captureHealth: "starting" }));
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("还在准备中");
+    expect(wrapper.text()).not.toContain("语音链路正常");
+    wrapper.unmount();
+  });
+
+  it("细化现读捕获状态失败 → 回落 unknown，保留原排查文案", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getRc003BridgeSnapshot.mockRejectedValue(new Error("read failed"));
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(3_200);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("语音链路正常");
+    expect(wrapper.text()).not.toContain("还在准备中");
+    wrapper.unmount();
+  });
+
+  it("非豆包工具不分流：不读捕获状态，仍用原排查文案", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "starting" }),
+    );
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(3_200);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("语音链路正常");
+    expect(mocks.getRc003BridgeSnapshot).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("clears the box and re-arms a fresh attempt on retry", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
@@ -1852,6 +1962,11 @@ describe("Onboarding voice test step", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    // 生产现场：豆包语音测试时开关必然开着、报告层正常——显式给 active，让失败卡
+    // 保留原排查文案（off/starting 会命中 2026-10-14 的分流提示）。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "active" }),
+    );
     queueSnapshots(
       runtimeWith(),
       streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
@@ -1898,6 +2013,10 @@ describe("Onboarding voice test step", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    // 同上：显式 active，避免失败卡命中 2026-10-14 的捕获状态分流提示。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "active" }),
+    );
     queueSnapshots(
       runtimeWith(),
       streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
@@ -1980,6 +2099,10 @@ describe("Onboarding voice test step", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+    // 同上：显式 active，避免失败卡命中 2026-10-14 的捕获状态分流提示。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "active" }),
+    );
     queueSnapshots(
       runtimeWith(),
       streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),

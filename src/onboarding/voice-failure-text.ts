@@ -40,6 +40,11 @@ export function voiceFailureText(
     if (captureHealth === "inactive") {
       return "“支持更多输入工具”还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开，然后重新测试。";
     }
+    if (captureHealth === "off") {
+      // 豆包 + 报告层关闭 = 必然收不到文字（语音键走了它按设计忽略的注入回退）。
+      // 常规向导路径到不了这里（步骤④会拦），但用户中途去别的页面关掉开关是可达路径。
+      return "“支持更多输入工具”现在是关闭的，请先打开它，再点“重新测试”。";
+    }
   }
   return code ? VOICE_FAILURE_COPY[code] : "这次测试没有通过，再试一次。";
 }

@@ -2119,10 +2119,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 （`os error 32` = ERROR_SHARING_VIOLATION）——这正是「第二次运行直接报错」的根因。\n\
 现在启动时会先用模块枚举核对宿主里是否已有 tap：\n\
   * 有 tap 且令牌可接管 → **跳过复制、跳过注入**，直接接管（agent 自己会重连）；\n\
-  * 有 tap 且令牌可接管 → **跳过复制、跳过注入**，直接接管（agent 自己会重连）；\n\
-  * 有 tap 但令牌接不上   → 安全闸满足（宿主独占 RC003 + 确有我们的 Gadget）时**自动恢复**：\n\
-                           暂定接管 → 不等核验窗口直接结束宿主 + 干净首注；不满足则打 [STALE-TAP]\n\
-                           并说明怎么清（**不会**再去撞那个被占用的文件）；\n\
+  * 有 tap 但令牌接不上   → 安全闸满足（宿主独占 RC003 + 运行时目录下确有我们的 Gadget，\n\
+                           且未显式钉 `--token`）时**自动恢复**：第一轮即结束宿主 + 干净首注；\n\
+                           不满足则打 [STALE-TAP] 并说明怎么清（**不会**再去撞那个被占用的文件）；\n\
   * 没有 tap             → 正常复制 + 注入；复制前先按 SHA-256 复用已存在的同名文件。\n\n\
 结束方式：Ctrl+C 或直接关掉窗口 → 会先给 agent 发 disarm 再退出。\n\
 若助手被强杀（任务管理器结束进程），来不及发 disarm —— 此时由 **agent 侧租约**\n\
@@ -2147,7 +2146,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 不碰 DLL（本次是接管常驻 tap，宿主已经映射着它了）。
         Attach,
         /// 同上"不碰 DLL"，但宿主里的 tap 是**接不上的旧世代**（令牌文件缺失，无从复用）：
-        /// 先按接管登记等握手核验；核验（或令牌拒绝）失败后自动升级为"结束宿主 + 干净首注"。
+        /// **第一轮即升级**为"结束宿主 + 干净首注"——不等 `ATTACH_VERIFY_MS` 核验窗口
+        /// （旧 agent 不可能握着本进程刚生成的令牌，"接管"必失败）。
         /// 2026-10-14 现场：该组合此前直接 `[STALE-TAP]` 退出码 13 等人工，恢复窗口内
         /// 语音键全失败（覆盖安装后"令牌文件被清理、宿主残留旧 tap"）。
         AttachStale,
@@ -2159,9 +2159,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 当成"一致"，接管后静默跳过注入，三键与语音键全断，日志还写着"令牌一致"）。
     /// 假定不成立时就剩"另起一代""自动结束宿主干净首注""人工清干净"三条路。
     ///
-    /// `allow_stale_recovery`：安全闸（宿主独占 RC003 + 确有我们的 gadget，判据即
-    /// `should_restart_host_for_clean_inject`）满足时，允许把"令牌接不上"转为 `AttachStale`
-    /// ——暂定接管、核验失败自动升级到干净首注，而不是退出等人工。
+    /// `allow_stale_recovery`：安全闸（宿主独占 RC003 + 运行时目录下确有我们的 gadget，
+    /// 且未显式钉 `--token`，判据见 `auto_recover_stale_tap_gate`）满足时，允许把
+    /// "令牌接不上"转为 `AttachStale`——第一轮即升级到干净首注，而不是退出等人工。
     fn decide_plan(
         has_resident_tap: bool,
         token_assumed_reusable: bool,
@@ -2241,6 +2241,37 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         gadget_maps: usize,
     ) -> bool {
         !escalated && members == 1 && rc003_members == 1 && gadget_maps > 0
+    }
+
+    /// 启动阶段「旧世代 tap 自动恢复」的安全闸（纯函数，单测覆盖）。
+    ///
+    /// = `should_restart_host_for_clean_inject`（独占 RC003 + 确有我们的 gadget，同一口径）
+    /// 且**未显式钉 `--token`**：显式钉住的令牌可能恰好能接管常驻 tap，结束宿主是多余的
+    /// ——保持旧行为（退出等人工）的保守方向。`--new-token`（显式的"换令牌"意图）不在
+    /// 此列：清掉接不上的旧 tap 正是它要的，所以仍允许自动恢复。
+    fn auto_recover_stale_tap_gate(
+        members: usize,
+        rc003_members: usize,
+        runtime_owned_taps: usize,
+        explicit_pinned_token: bool,
+    ) -> bool {
+        should_restart_host_for_clean_inject(false, members, rc003_members, runtime_owned_taps)
+            && !explicit_pinned_token
+    }
+
+    /// 收尾 [SUMMARY] 的 `how=`（纯函数，单测覆盖）。
+    ///
+    /// 语义是"这一轮**最终**怎么拿到 tap"：升级段做过恢复动作（`recovered_via`）就写那个
+    /// 动作；没升级过才回落启动时的放置计划。不能只看 `plan`——AttachStale 轮默认升级，
+    /// 按 plan 写会把实际做的 `restart_host_clean_inject` 错报成 `attached_stale_existing_tap`
+    /// （2026-10-14 复核）。
+    fn summary_how(recovered_via: Option<&'static str>, plan: &DllPlan) -> &'static str {
+        recovered_via.unwrap_or(match plan {
+            DllPlan::Attach => "attached_existing_tap",
+            DllPlan::AttachStale => "attached_stale_existing_tap",
+            DllPlan::Generation(_) => "injected_new_generation",
+            DllPlan::Canonical => "injected",
+        })
     }
 
     /// 「结束旧宿主 → 等系统重新枚举出新宿主」——干净首注的自愈前置（2026-10-08 真机验证有效）。
@@ -2576,10 +2607,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
             DllPlan::AttachStale => {
                 v.push(("action", "attach_stale_existing_tap".into()));
-                v.push(("touched_files", "false".into()));
                 v.push((
                     "note",
-                    "宿主里是接不上的旧世代 tap：先按接管登记；核验（或令牌拒绝）失败即结束该宿主做干净首注"
+                    "宿主里是接不上的旧世代 tap：本分支不碰 dll（config/agent/token 仍按准备流程写入）；\
+                     第一轮即结束该宿主做干净首注"
                         .into(),
                 ));
             }
@@ -5714,6 +5745,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         // ---- 令牌：默认跨运行稳定（见 TOKEN_FILE 注释） ----
         // 必须**在**探测常驻 tap 之前做：磁盘上本来就有令牌，才谈得上"接管上一代"。
+        // "显式钉住的令牌"（`--token` 且未同时要求换新）在自动恢复门上单独保守处理——
+        // 它可能恰好能接管常驻 tap，结束宿主是多余的（见 auto_recover_stale_tap_gate）。
+        let explicit_pinned_token = !args.token.is_empty() && !args.new_token;
         if args.token.is_empty() {
             match load_or_create_token(&args.runtime_dir, args.new_token, &logger) {
                 Ok((t, from_file)) => {
@@ -5793,14 +5827,26 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
         };
 
-        // 旧世代 tap 的自动恢复门（2026-10-14 现场）：判据与主循环升级路径完全同一口径
-        // ——宿主独占 RC003 且确有我们的 gadget 映射（`should_restart_host_for_clean_inject`）。
-        // 满足时"令牌接不上"转为 `AttachStale`：先按接管登记，核验（或令牌拒绝）失败即自动
-        // 结束宿主做干净首注，不再退出等人工；不满足时保留原 `[STALE-TAP]` 人工路径。
+        // 旧世代 tap 的自动恢复门（2026-10-14 现场；判据即 `auto_recover_stale_tap_gate`）：
+        // 宿主独占 RC003 + **运行时目录下**确有我们的 gadget 映射 + 未显式钉 `--token`。
+        // 满足时"令牌接不上"转为 `AttachStale`：第一轮即结束宿主做干净首注，不再退出等人工；
+        // 不满足时保留原 `[STALE-TAP]` 人工路径。
         let members: Vec<&HostEntry> = entries.iter().filter(|e| e.pid == target_pid).collect();
         let rc003_members = members.iter().filter(|e| e.is_rc003).count();
-        let allow_stale_recovery =
-            should_restart_host_for_clean_inject(false, members.len(), rc003_members, taps.len());
+        // 归属核对（2026-10-14 复核）：`resident_taps` 只按模块基名匹配，别人注入的
+        // frida-gadget 同名模块也会计入——自动恢复只认**运行时目录下**的那一份
+        // （失败方向更保守：退回人工路径，绝不动手）。
+        let runtime_root = args.runtime_dir.to_string_lossy().to_ascii_lowercase();
+        let runtime_owned_taps = taps
+            .iter()
+            .filter(|m| m.path.to_ascii_lowercase().starts_with(&runtime_root))
+            .count();
+        let allow_stale_recovery = auto_recover_stale_tap_gate(
+            members.len(),
+            rc003_members,
+            runtime_owned_taps,
+            explicit_pinned_token,
+        );
         let plan = match decide_plan(
             !taps.is_empty(),
             args.token_from_file,
@@ -5856,7 +5902,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ("action", "auto_recover_stale_tap".into()),
                     (
                         "note",
-                        "宿主里是接不上的旧世代 tap，且安全闸满足：先按接管登记；核验（或令牌拒绝）失败即结束宿主做干净首注（此前该组合会退出码 13 等人工）"
+                        "宿主里是接不上的旧世代 tap，且安全闸满足：第一轮即升级——结束宿主做干净首注，不等核验窗口（此前该组合会退出码 13 等人工）"
                             .into(),
                     ),
                 ],
@@ -5946,7 +5992,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             DllPlan::Attach | DllPlan::AttachStale => {
                 let reason = match plan {
                     DllPlan::AttachStale => {
-                        "宿主里是接不上的旧世代 tap（无令牌可复用）：先按接管登记；核验（或令牌拒绝）失败即结束宿主做干净首注"
+                        "宿主里是接不上的旧世代 tap（无令牌可复用）：第一轮即结束宿主做干净首注，不等核验窗口"
                     }
                     _ => "宿主里已有我们那一代 tap（按可复用令牌接管；一致性由握手核验）",
                 };
@@ -6108,6 +6154,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 8 秒窗口会白白拖长恢复）。第一轮直接升级到干净首注。
         let stale_tap_clean_inject = matches!(plan, DllPlan::AttachStale);
         let mut escalated_attach = false;
+        // 升级段实际执行的恢复动作（2026-10-14 复核）：收尾 [SUMMARY] 的 `how=` 必须写
+        // "这一轮最终怎么拿到 tap"，不能照抄启动时的放置计划——AttachStale 轮默认升级，
+        // 若仍按 plan 写 `attached_stale_existing_tap` 就是系统性错报（与 2026-09-23
+        // "接管轮照搬另一条路径字段"同型）。
+        let mut recovered_via: Option<&'static str> = None;
 
         loop {
             if stop_requested(&stop) {
@@ -6250,6 +6301,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                                 &dll_report_fields(&clean_plan, &prepared),
                                             );
                                             injection = Some(injected);
+                                            recovered_via = Some("restart_host_clean_inject");
                                             // 新宿主的 agent 也要一个完整的握手窗口。
                                             hello_deadline = if args.await_hello > 0 {
                                                 Some(
@@ -6299,7 +6351,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ),
                             (
                                 "note",
-                                "常驻 tap 握的是我们接不上的旧令牌（旧世代）；按自愈规则另起一代注入"
+                                "常驻 tap 握的是我们接不上的旧令牌（旧世代）；按自愈规则另起一代注入（该路径真机未验证；\
+                                 若仍不恢复，按 [STALE-TAP] 的人工清理指引处理）"
                                     .into(),
                             ),
                         ],
@@ -6316,6 +6369,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                         &dll_report_fields(&generation_plan, &prepared),
                                     );
                                     injection = Some(injected);
+                                    recovered_via = Some("injected_new_generation");
                                     // 新世代的 agent 也要一个完整的握手窗口。
                                     hello_deadline = if args.await_hello > 0 {
                                         Some(
@@ -6487,16 +6541,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         .filter(|error| !error.is_empty())
                         .unwrap_or_else(|| "-".to_string()),
                 ),
-                (
-                    "how",
-                    match plan {
-                        DllPlan::Attach => "attached_existing_tap",
-                        DllPlan::AttachStale => "attached_stale_existing_tap",
-                        DllPlan::Generation(_) => "injected_new_generation",
-                        DllPlan::Canonical => "injected",
-                    }
-                    .to_string(),
-                ),
+                // how = 这一轮**最终**怎么拿到 tap：升级段做过恢复动作就写那个动作，
+                // 否则才回落启动时的放置计划（见 recovered_via 的注释）。
+                ("how", summary_how(recovered_via, &plan).to_string()),
             ],
         );
         logger.line("[NOTE] 已向 agent 发送 disarm；agent 也会在租约到期后自行停止清键。");
@@ -7906,6 +7953,28 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             "旧世代暂定接管：不等核验窗口，第一轮直接升级到干净首注",
             stale_escalate_ok,
             format!("{} 例", stale_escalate_cases.len()),
+        );
+
+        // 14f) 启动阶段自动恢复门（2026-10-14 复核）：= 既有安全闸（独占 RC003 + 确有
+        //      我们的 gadget）+ 未显式钉 --token（显式令牌可能恰好能接管，保守留人工路径）。
+        let stale_gate_cases: [(usize, usize, usize, bool, bool); 6] = [
+            (1, 1, 1, false, true),
+            (1, 1, 2, false, true),
+            (2, 1, 1, false, false),
+            (1, 0, 1, false, false),
+            (1, 1, 0, false, false),
+            (1, 1, 1, true, false),
+        ];
+        let stale_gate_ok =
+            stale_gate_cases
+                .iter()
+                .all(|(members, rc003_members, owned, pinned, want)| {
+                    auto_recover_stale_tap_gate(*members, *rc003_members, *owned, *pinned) == *want
+                });
+        check(
+            "启动恢复门：独占 RC003 + 运行时目录下确有我们的 Gadget + 未显式钉 --token",
+            stale_gate_ok,
+            format!("{} 例", stale_gate_cases.len()),
         );
 
         // 14d) 宿主 pid 不变量与刷新宿主选择（2026-10-14 现场）：已鉴权握手必须来自
@@ -9375,6 +9444,42 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(!f(true, false, true));
             // 非 AttachStale（普通 Attach / Canonical）不受影响。
             assert!(!f(false, false, false));
+        }
+
+        #[test]
+        fn stale_recovery_gate_needs_exclusivity_our_tap_and_no_pinned_token() {
+            use super::auto_recover_stale_tap_gate as gate;
+            assert!(gate(1, 1, 1, false));
+            assert!(gate(1, 1, 2, false));
+            assert!(!gate(2, 1, 1, false)); // 共享宿主
+            assert!(!gate(1, 0, 1, false)); // 非 RC003
+            assert!(!gate(1, 1, 0, false)); // 没有运行时目录下的 gadget
+            assert!(!gate(1, 1, 1, true)); // 显式钉 --token：保守（可能恰好能接管）
+        }
+
+        #[test]
+        fn summary_how_reports_the_recovery_that_actually_ran() {
+            use super::summary_how;
+            // 升级段做过恢复 → 写恢复动作（AttachStale 默认升级，不能错报成"接管"）。
+            assert_eq!(
+                summary_how(Some("restart_host_clean_inject"), &DllPlan::AttachStale),
+                "restart_host_clean_inject"
+            );
+            assert_eq!(
+                summary_how(Some("injected_new_generation"), &DllPlan::Attach),
+                "injected_new_generation"
+            );
+            // 没升级过 → 回落启动时的放置计划。
+            assert_eq!(
+                summary_how(None, &DllPlan::AttachStale),
+                "attached_stale_existing_tap"
+            );
+            assert_eq!(summary_how(None, &DllPlan::Attach), "attached_existing_tap");
+            assert_eq!(summary_how(None, &DllPlan::Canonical), "injected");
+            assert_eq!(
+                summary_how(None, &DllPlan::Generation(String::new())),
+                "injected_new_generation"
+            );
         }
     }
 

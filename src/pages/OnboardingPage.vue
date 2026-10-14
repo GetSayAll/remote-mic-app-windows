@@ -1497,7 +1497,6 @@ const VOICE_KEY_CODE_VKS: Record<string, number> = {
   apps: 0x5d,
 };
 
-
 const VOICE_POLL_MS = 200;
 
 const voiceTestRef = ref<InstanceType<typeof VoiceTestStep> | null>(null);
@@ -1928,8 +1927,18 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
       // （2026-10-14 测试实证：首版实现因此被静默拦成"永远只显示基线文案"）。
       const attemptSerial = voiceAttemptSerial;
       void readCaptureHealthForVoiceFailure().then((captureHealth) => {
-        if (attemptSerial === voiceAttemptSerial && voiceResult.value?.result === "failed") {
+        if (
+          attemptSerial === voiceAttemptSerial &&
+          voiceResult.value?.result === "failed" &&
+          !voiceLateAccepted.value
+        ) {
           voiceFailureMessage.value = voiceFailureText(code, captureHealth);
+          // 分流采用了哪一支要留痕（2026-10-14 / LOGGING.md 的"一次报障一次日志"：
+          // 失败瞬间的 capture 值与几十秒后复制诊断时的当前值可能不同，没有这行
+          // 就分不清"分流判错"还是"现场已变"）。
+          reportStepAction("voice_test", "failure_text_branch", "passed", {
+            detail: `capture_${captureHealth}`,
+          });
         }
       });
     }

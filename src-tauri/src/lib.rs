@@ -1037,14 +1037,15 @@ async fn disable_rc003_capture(
         .settings
         .save_rc003_capture_enabled(false)
         .map_err(|error| format!("保存全按键支持开关失败：{error}"))?;
+    // 对账线程立刻重查（2026-10-14 复核调整时机）：设置已落盘为关闭——对账只认 settings，
+    // 立即发布 Off，界面状态不该比用户动作慢半拍；即使随后的停用助手失败（写停用信号
+    // 失败会早退），"开关已关"这个事实也已被对账看到。
+    wake_capture_reconcile();
     let outcome = tauri::async_runtime::spawn_blocking(rc003_task::disable_capture)
         .await
         .map_err(|error| format!("停用全按键支持失败：{error}"))?;
     // 同上：内层 Result 必须自己判，否则停用失败也会静默成功。
     outcome.map_err(|error| format!("停用全按键支持失败：{error}"))?;
-    // 对账线程立刻重查（2026-10-14）：把 capture_health 尽快发布成 Off——界面状态
-    // 不该比用户动作慢半拍（30 秒空闲周期内界面会停在旧值）。
-    wake_capture_reconcile();
     // 结束助手同样可能抢走前台（taskkill / 控制台进程退出），一并还焦点。
     refocus_main_window_soon(app);
     Ok(rc003_task::status(false))
@@ -1286,6 +1287,8 @@ fn wake_capture_reconcile() {
 }
 
 /// 对账"可打断睡眠"的轮询粒度：唤醒信号在 ≤250 ms 内被看到，又不至于忙轮询。
+/// 成本：只有**睡眠期间**每 250 ms 醒一次做两个原子读（无锁、无分配）——与原本
+/// 30 秒一次的调度相比仍是可忽略开销（2026-10-14 复核确认）。
 const RECONCILE_WAKE_POLL_MS: u64 = 250;
 
 /// 单次轮询的纯判定（单测覆盖）：唤醒信号变了、或已到点，都要结束睡眠。
@@ -1294,15 +1297,18 @@ fn reconcile_sleep_step(now_gen: u64, seen_gen: u64, now_ms: u64, deadline_ms: u
 }
 
 /// 可被 [`wake_capture_reconcile`] 打断的睡眠：语义与 `sleep(ms)` 相同，只是会提前返回。
+/// 返回值指出**为什么**结束：`true` = 被唤醒信号提前打断，`false` = 正常到点
+/// （Trigger 分支据此跳过"唤醒轮"的重复触发，见其注释）。
 /// `wake_seen` 由调用方跨轮持有，记录"已经消化到哪一代"信号——同一代不会被消费两次。
-fn interruptible_reconcile_sleep(ms: u64, wake_seen: &mut u64) {
+fn interruptible_reconcile_sleep(ms: u64, wake_seen: &mut u64) -> bool {
     let started = std::time::Instant::now();
     loop {
         let now_gen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
         let elapsed_ms = started.elapsed().as_millis() as u64;
+        let woken = now_gen != *wake_seen;
         if reconcile_sleep_step(now_gen, *wake_seen, elapsed_ms, ms) {
             *wake_seen = now_gen;
-            return;
+            return woken;
         }
         std::thread::sleep(std::time::Duration::from_millis(RECONCILE_WAKE_POLL_MS));
     }
@@ -1374,6 +1380,10 @@ fn rc003_auto_trigger_reconcile(
     let mut was_connected = false;
     // 已经"消化"过哪一代唤醒信号（2026-10-14）：开关命令唤醒后，下一轮重查立即发生。
     let mut wake_seen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
+    // 上一条睡眠是否**被唤醒提前结束**：Trigger 分支据此跳过"唤醒轮"的重复 /run——
+    // enable 自己已经 task_trigger 过，立刻再触发会在 IgnoreNew 下被拒、留下误导性的
+    // failed 行，还会让 consecutive 提前起算（2026-10-14 复核）。
+    let mut last_sleep_woken = false;
     // 以下标志只控制「状态刚变化时记一条」，避免空闲期重复刷屏。
     let mut bridge_unavailable_logged = false;
     let mut active_seen = false;
@@ -1386,6 +1396,8 @@ fn rc003_auto_trigger_reconcile(
     let mut capture_recover_last_at: Option<std::time::Instant> = None;
     let mut capture_recover_attempts: u32 = 0;
     loop {
+        // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
+        let woken_early = std::mem::take(&mut last_sleep_woken);
         let enabled = settings
             .load()
             .map(|settings| settings.rc003_capture_enabled)
@@ -1411,7 +1423,8 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Off.publish(&capture_health);
-                interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
+                last_sleep_woken =
+                    interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
             }
             ReconcileAction::WaitBridge => {
                 if !bridge_unavailable_logged {
@@ -1430,7 +1443,8 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Starting.publish(&capture_health);
-                interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
+                last_sleep_woken =
+                    interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
             }
             ReconcileAction::Connected => {
                 if !was_connected {
@@ -1550,7 +1564,8 @@ fn rc003_auto_trigger_reconcile(
                 was_connected = true;
                 consecutive = 0;
                 bridge_unavailable_logged = false;
-                interruptible_reconcile_sleep(AUTO_TRIGGER_WATCH_MS, &mut wake_seen);
+                last_sleep_woken =
+                    interruptible_reconcile_sleep(AUTO_TRIGGER_WATCH_MS, &mut wake_seen);
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
@@ -1571,49 +1586,62 @@ fn rc003_auto_trigger_reconcile(
                     capture_recover_attempts = 0;
                 }
                 active_seen = true;
-                consecutive += 1;
-                let escalate = auto_trigger_should_escalate(consecutive);
-                let loggable = auto_trigger_attempt_should_log(consecutive);
-                if escalate {
-                    // 很可能是上一次任务实例还挂着（`IgnoreNew` 下每次 `/run`
-                    // 都被拒）：此刻快照是「桥在监听、没有已连接助手」，
-                    // `/end` 清掉当前实例不会误杀正在工作的助手。
-                    sayall_windows::gatt_note(format!(
-                        "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=started reason=helper_not_connected_after_retries attempt={consecutive}"
-                    ));
-                    match rc003_task::task_stop() {
-                        Ok(()) => sayall_windows::gatt_note(
-                            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=passed".to_owned(),
-                        ),
-                        Err(error) => sayall_windows::gatt_note(format!(
-                            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=failed detail={error}"
-                        )),
-                    }
-                } else if loggable {
-                    sayall_windows::gatt_note(format!(
-                        "rc003 feature=enhanced-capture action=auto_trigger phase=trigger attempt={consecutive}"
-                    ));
-                }
-                if escalate || loggable {
-                    match rc003_task::task_trigger() {
-                        Ok(()) => sayall_windows::gatt_note(format!(
-                            "rc003 feature=enhanced-capture action=auto_trigger{} phase={} terminal_result=passed attempt={consecutive}",
-                            if escalate { "_escalate" } else { "" },
-                            if escalate { "retriggered" } else { "triggered" }
-                        )),
-                        Err(error) => sayall_windows::gatt_note(format!(
-                            "rc003 feature=enhanced-capture action=auto_trigger{} phase={} terminal_result=failed attempt={consecutive} detail={error} {}",
-                            if escalate { "_escalate" } else { "" },
-                            if escalate { "retriggered" } else { "triggered" },
-                            bridge_health_summary(&snapshot)
-                        )),
-                    }
+                if woken_early {
+                    // 刚被唤醒的轮次（2026-10-14 复核）：开关动作本身已及时处理——
+                    // enable 命令里已经 `task_trigger` 过，这里立刻再 /run 会在
+                    // `IgnoreNew` 下被拒、留下误导性的 failed 行，还会让 consecutive
+                    // 提前起算（第 5 轮兜底从 ~50s 提前到 ~25s，可能结束一个慢启动但
+                    // 健康的助手）。本轮只作一次观察；真正的重复触发留给下一轮正常节奏。
+                    sayall_windows::gatt_note(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=recheck \
+                         terminal_result=passed reason=wake"
+                            .to_owned(),
+                    );
                 } else {
-                    // 折叠轮：仍要触发，只是不写日志（防止稳态每 30 秒刷屏；
-                    // 每 10 轮的 loggable 轮会把状态与健康摘要写全）。
-                    let _ = rc003_task::task_trigger();
+                    consecutive += 1;
+                    let escalate = auto_trigger_should_escalate(consecutive);
+                    let loggable = auto_trigger_attempt_should_log(consecutive);
+                    if escalate {
+                        // 很可能是上一次任务实例还挂着（`IgnoreNew` 下每次 `/run`
+                        // 都被拒）：此刻快照是「桥在监听、没有已连接助手」，
+                        // `/end` 清掉当前实例不会误杀正在工作的助手。
+                        sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=started reason=helper_not_connected_after_retries attempt={consecutive}"
+                        ));
+                        match rc003_task::task_stop() {
+                            Ok(()) => sayall_windows::gatt_note(
+                                "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=passed".to_owned(),
+                            ),
+                            Err(error) => sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=auto_trigger_escalate phase=task_ended terminal_result=failed detail={error}"
+                            )),
+                        }
+                    } else if loggable {
+                        sayall_windows::gatt_note(format!(
+                            "rc003 feature=enhanced-capture action=auto_trigger phase=trigger attempt={consecutive}"
+                        ));
+                    }
+                    if escalate || loggable {
+                        match rc003_task::task_trigger() {
+                            Ok(()) => sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=auto_trigger{} phase={} terminal_result=passed attempt={consecutive}",
+                                if escalate { "_escalate" } else { "" },
+                                if escalate { "retriggered" } else { "triggered" }
+                            )),
+                            Err(error) => sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=auto_trigger{} phase={} terminal_result=failed attempt={consecutive} detail={error} {}",
+                                if escalate { "_escalate" } else { "" },
+                                if escalate { "retriggered" } else { "triggered" },
+                                bridge_health_summary(&snapshot)
+                            )),
+                        }
+                    } else {
+                        // 折叠轮：仍要触发，只是不写日志（防止稳态每 30 秒刷屏；
+                        // 每 10 轮的 loggable 轮会把状态与健康摘要写全）。
+                        let _ = rc003_task::task_trigger();
+                    }
                 }
-                interruptible_reconcile_sleep(
+                last_sleep_woken = interruptible_reconcile_sleep(
                     auto_trigger_retry_delay_ms(consecutive),
                     &mut wake_seen,
                 );
@@ -4144,6 +4172,30 @@ mod tests {
         assert!(reconcile_sleep_step(5, 5, 1_200, 1_000));
         // 两个条件同时满足 → 醒。
         assert!(reconcile_sleep_step(6, 5, 2_000, 1_000));
+    }
+
+    /// `interruptible_reconcile_sleep` 的运行时语义（2026-10-14 复核补充）：到点返回
+    /// `false`；被唤醒要**提前**返回且报告 `true`。用全局唤醒计数——仅本测试触碰它
+    /// （对账线程不在测试里跑）。
+    #[test]
+    fn interruptible_sleep_wakes_early_and_reports_it() {
+        let mut seen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
+
+        // 到点路径：没有任何唤醒信号 → 正常到点（false）。
+        let started = std::time::Instant::now();
+        assert!(!interruptible_reconcile_sleep(50, &mut seen));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+
+        // 唤醒路径：10 秒的睡眠在 ~100ms 后被另一个唤醒信号打断（true）。
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            wake_capture_reconcile();
+        });
+        let started = std::time::Instant::now();
+        let woken = interruptible_reconcile_sleep(10_000, &mut seen);
+        assert!(woken);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        handle.join().unwrap();
     }
 
     /// 版本号唯一来源（2026-09-30 收敛）：安装包名、exe 版本资源、关于页显示、
