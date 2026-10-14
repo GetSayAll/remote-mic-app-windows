@@ -92,6 +92,55 @@ fn synth_label(target: Option<u16>) -> String {
     }
 }
 
+/// 「按下生效判定」的检查延迟（毫秒）。
+///
+/// 证据在本地环路即时产生：这个延迟只留足"应用先看到按下、帧结果随后到"的
+/// 竞态余量；再长只会推迟判据可见性。
+const VOICE_EFFECT_CHECK_MS: u64 = 500;
+/// 允许"证据先于按下被应用看到"的容差（毫秒）。
+///
+/// 报告层改写发生在本地（即时），本应用通常晚一个 BLE 往返才看到 ATVV 按下通知——
+/// 证据时间落在按下之前一点点是正常竞态，不是失败。
+const VOICE_EFFECT_SLACK_MS: u64 = 500;
+
+/// 本次按下的报告层生效判定（纯函数，单测覆盖）。
+///
+/// 2026-10-14 现场：配置回执（`synth_confirmed`）全绿 ≠ 本次按下真的改写过——
+/// 错宿主 agent 能把配置答得满分，而一次 `replace` 都没有（界面全绿、语音条拉不起）。
+/// 判据只看 agent 的帧证据：
+/// - `latest.seq > before.seq`：按下之后有新帧结果 → 按它的种类定性；
+/// - 或 `latest.at` 落在按下之前的容差内：本地改写先发生、通知晚到的正常竞态；
+/// - 都不能证明 → `Missing`（显式失败，不再静默）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VoiceEffectVerdict {
+    Replaced,
+    Skipped(String),
+    Missing,
+}
+
+fn voice_effect_verdict(
+    before: Option<crate::rc003_bridge::VoiceFrameStamp>,
+    latest: Option<crate::rc003_bridge::VoiceFrameStamp>,
+    press_at: Instant,
+    slack: Duration,
+) -> VoiceEffectVerdict {
+    let Some(latest) = latest else {
+        return VoiceEffectVerdict::Missing;
+    };
+    let fresh = before
+        .map(|baseline| latest.seq > baseline.seq)
+        .unwrap_or(true)
+        || latest.at + slack >= press_at;
+    if !fresh {
+        return VoiceEffectVerdict::Missing;
+    }
+    if latest.replaced {
+        VoiceEffectVerdict::Replaced
+    } else {
+        VoiceEffectVerdict::Skipped(latest.reason)
+    }
+}
+
 #[cfg(test)]
 mod voice_attempt_tests {
     use super::{press_path, synth_label};
@@ -110,6 +159,120 @@ mod voice_attempt_tests {
         assert_eq!(synth_label(None), "off");
         assert_eq!(synth_label(Some(0x00E6)), "0x00E6");
         assert_eq!(synth_label(Some(0x00E2)), "0x00E2");
+    }
+}
+
+/// 本次按下的报告层生效判定（纯函数，单测覆盖；输入 = 按下前后的帧证据快照）。
+#[cfg(test)]
+mod voice_effect_verdict_tests {
+    use super::{voice_effect_verdict, VoiceEffectVerdict};
+    use crate::rc003_bridge::VoiceFrameStamp;
+    use std::time::{Duration, Instant};
+
+    fn frame(seq: u64, replaced: bool, reason: &str, at: Instant) -> VoiceFrameStamp {
+        VoiceFrameStamp {
+            seq,
+            replaced,
+            reason: reason.to_owned(),
+            at,
+        }
+    }
+
+    #[test]
+    fn no_evidence_is_missing() {
+        let press = Instant::now();
+        let slack = Duration::from_millis(500);
+        assert_eq!(
+            voice_effect_verdict(None, None, press, slack),
+            VoiceEffectVerdict::Missing
+        );
+    }
+
+    #[test]
+    fn evidence_from_an_earlier_press_is_missing() {
+        // 上一按的证据（3 秒前）与本次无关：不得当成生效。
+        let press = Instant::now();
+        let slack = Duration::from_millis(500);
+        let old = frame(
+            7,
+            true,
+            "",
+            press
+                .checked_sub(Duration::from_millis(3_000))
+                .expect("测试时钟回退溢出"),
+        );
+        assert_eq!(
+            voice_effect_verdict(Some(old.clone()), Some(old), press, slack),
+            VoiceEffectVerdict::Missing
+        );
+    }
+
+    #[test]
+    fn new_replace_after_the_press_is_replaced() {
+        let press = Instant::now();
+        let slack = Duration::from_millis(500);
+        let before = frame(
+            7,
+            true,
+            "",
+            press
+                .checked_sub(Duration::from_millis(3_000))
+                .expect("测试时钟回退溢出"),
+        );
+        let now = frame(8, true, "", press + Duration::from_millis(120));
+        assert_eq!(
+            voice_effect_verdict(Some(before), Some(now), press, slack),
+            VoiceEffectVerdict::Replaced
+        );
+    }
+
+    #[test]
+    fn new_skip_after_the_press_reports_its_reason() {
+        let press = Instant::now();
+        let slack = Duration::from_millis(500);
+        let now = frame(9, false, "lease", press + Duration::from_millis(60));
+        assert_eq!(
+            voice_effect_verdict(None, Some(now), press, slack),
+            VoiceEffectVerdict::Skipped("lease".to_owned())
+        );
+    }
+
+    #[test]
+    fn evidence_arriving_before_the_app_noticed_the_press_still_counts() {
+        // 报告层改写在本地即时发生，ATVV 通知晚到 ⇒ 证据可能"先于"按下被应用看到
+        // （seq 已包含它，时间在按下之前不久）。容差内必须算生效。
+        let press = Instant::now();
+        let slack = Duration::from_millis(500);
+        let before = frame(
+            8,
+            true,
+            "",
+            press
+                .checked_sub(Duration::from_millis(100))
+                .expect("测试时钟回退溢出"),
+        );
+        assert_eq!(
+            voice_effect_verdict(Some(before.clone()), Some(before), press, slack),
+            VoiceEffectVerdict::Replaced
+        );
+    }
+
+    #[test]
+    fn stale_pre_arrival_outside_slack_is_missing() {
+        let press = Instant::now();
+        let slack = Duration::from_millis(500);
+        let before = frame(
+            8,
+            true,
+            "",
+            press
+                .checked_sub(Duration::from_millis(900))
+                .expect("测试时钟回退溢出"),
+        );
+        assert_eq!(
+            voice_effect_verdict(Some(before.clone()), Some(before), press, slack),
+            VoiceEffectVerdict::Missing
+        );
     }
 }
 
@@ -1755,6 +1918,10 @@ fn handle_control(
                 ));
             }
             if synth_gate {
+                // 生效判据的按下时刻与基线：必须在此刻取——IME 切换等后续动作可能耗时，
+                // 之后取会把期间到达的帧证据误算进基线（见 spawn_voice_effect_check）。
+                let effect_press_at = Instant::now();
+                let effect_before = crate::rc003_bridge::voice_frame_stamp();
                 gatt_note(format!(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
                 ));
@@ -1776,6 +1943,7 @@ fn handle_control(
                         }
                     }
                 }
+                spawn_voice_effect_check(session_id, attempt_tool, effect_before, effect_press_at);
             } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
                 let wetype_hotkey = is_wetype_voice_hotkey(&chord);
                 let mic_baseline = wetype_hotkey.then(wetype_mic_observation).flatten();
@@ -3088,6 +3256,58 @@ fn spawn_wetype_check(
             });
         })
         .ok();
+}
+
+/// 每次"报告层按下"后的生效判定（2026-10-14）。
+///
+/// 在固定延迟点读取帧证据快照，与按下前快照比对，落
+/// `voice_effect session=… result=replaced|missing …`；`missing` 计入桥的连续缺失数
+/// ——`lib.rs` 对账据此把健康面降到 `inactive`（界面显示既有提示、到阈值自动重来
+/// 一次助手），「界面全绿、按下无效」不再有静默态。
+fn spawn_voice_effect_check(
+    session_id: u8,
+    tool: Option<VoiceInputTool>,
+    before: Option<crate::rc003_bridge::VoiceFrameStamp>,
+    press_at: Instant,
+) {
+    let _ = std::thread::Builder::new()
+        .name("sayall-voice-effect".to_owned())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(VOICE_EFFECT_CHECK_MS));
+            let verdict = voice_effect_verdict(
+                before,
+                crate::rc003_bridge::voice_frame_stamp(),
+                press_at,
+                Duration::from_millis(VOICE_EFFECT_SLACK_MS),
+            );
+            match verdict {
+                VoiceEffectVerdict::Replaced => {
+                    crate::rc003_bridge::note_voice_effect_verdict(true);
+                    gatt_note(format!(
+                        "voice_effect session={session_id} result=replaced window_ms={VOICE_EFFECT_CHECK_MS}"
+                    ));
+                }
+                VoiceEffectVerdict::Skipped(reason) => {
+                    crate::rc003_bridge::note_voice_effect_verdict(false);
+                    gatt_note(format!(
+                        "voice_effect session={session_id} result=missing reason=agent_skip skip_reason={reason} window_ms={VOICE_EFFECT_CHECK_MS}"
+                    ));
+                }
+                VoiceEffectVerdict::Missing => {
+                    crate::rc003_bridge::note_voice_effect_verdict(false);
+                    // 豆包按设计丢弃注入键：缺失即"本次按下必然没生效"，没有可用的
+                    // 注入兜底（token 与既有 fallback 行一致，供日志分流）。
+                    let note = if matches!(tool, Some(VoiceInputTool::Doubao)) {
+                        " note=tool_ignores_injected_keys"
+                    } else {
+                        ""
+                    };
+                    gatt_note(format!(
+                        "voice_effect session={session_id} result=missing reason=no_frame window_ms={VOICE_EFFECT_CHECK_MS}{note}"
+                    ));
+                }
+            }
+        });
 }
 
 fn subscribe(
