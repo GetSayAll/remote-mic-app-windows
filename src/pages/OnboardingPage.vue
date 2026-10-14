@@ -46,7 +46,9 @@ import {
   type VoiceInputTool,
   type VokieInstallation,
 } from "../lib/bridge";
+import { normalizeCaptureHealth } from "../lib/capture-switch";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
+import { voiceFailureText } from "../onboarding/voice-failure-text";
 import {
   CONNECTED_PHASES,
   evaluateGate,
@@ -63,7 +65,6 @@ import { formatOnboardingDiagnostics } from "../onboarding/diagnostics-text";
 import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
-  type VoiceAttemptFailureCode,
   type VoiceAttemptInput,
   type VoiceAttemptState,
   type VoiceAttemptTerminal,
@@ -1401,11 +1402,9 @@ async function copyDiagnostics(): Promise<void> {
       reportStepAction(target, "read_capture_state", "failed", { detail: "capture_unknown" });
     }
     // 载荷与类型不符（缺字段 / 未知 token）时同样回落 unknown——块里只允许稳定 token。
-    const health = captureSnapshot?.captureHealth;
-    const captureHealth: Rc003CaptureHealth | "unknown" =
-      health === "off" || health === "starting" || health === "active" || health === "inactive"
-        ? health
-        : "unknown";
+    const captureHealth: Rc003CaptureHealth | "unknown" = normalizeCaptureHealth(
+      captureSnapshot?.captureHealth,
+    );
     const chord =
       currentHotkey.value ??
       hotkeyFromDisk ??
@@ -1496,21 +1495,6 @@ const VOICE_KEY_CODE_VKS: Record<string, number> = {
   space: 0x20,
   tab: 0x09,
   apps: 0x5d,
-};
-
-/** 失败码 → 「发生了什么 + 你该怎么办」（设计稿 §7；不贴内部错误原文）。 */
-const VOICE_FAILURE_COPY: Record<VoiceAttemptFailureCode, string> = {
-  "voice.session_not_started":
-    "没有检测到语音会话。确认遥控器已就绪，按住语音键不要放，再试一次。",
-  "voice.no_samples": "收到了语音会话，但没有声音数据。对着遥控器正常说话，再试一次。",
-  "voice.audio_delivery_failed":
-    "声音没有完整送达语音设备。检查设备是否被其他程序占用，再试一次。",
-  "voice.session_not_ended": "松开后这次语音没有正常结束。稍等一下或断开重连遥控器，再试一次。",
-  "voice.no_transcript":
-    "语音链路正常，但输入工具没有写出文字。检查工具麦克风是否选 CABLE Output、工具里的语音键是否和本次设置一致、工具是否在运行。",
-  "voice.manual_input": "检测到键盘输入。这一步请只用遥控器语音键，不要用键盘打字。",
-  "voice.input_target_not_ready": "输入框没有聚焦。先点一下输入框，再按住遥控器语音键。",
-  "voice.focus_lost": "测试过程中输入框失去了焦点。点回输入框，再试一次。",
 };
 
 const VOICE_POLL_MS = 200;
@@ -1912,6 +1896,20 @@ async function pollVoiceTest(): Promise<void> {
   }
 }
 
+/**
+ * 失败瞬间现读捕获状态（2026-10-14 现场）：失败解释要用**当时**的事实，不能拿进入
+ * 步骤时的旧值。读不到按 `unknown`（不加解释句、保留原排查文案）。
+ * 仅 `voice.no_transcript` + 豆包（按设计忽略注入键、必须走报告层合成的工具）时调用。
+ */
+async function readCaptureHealthForVoiceFailure(): Promise<Rc003CaptureHealth | "unknown"> {
+  try {
+    const snapshot = await getRc003BridgeSnapshot();
+    return normalizeCaptureHealth(snapshot?.captureHealth);
+  } catch {
+    return "unknown";
+  }
+}
+
 function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
   voiceResult.value = terminal;
   voicePhase.value = "terminal";
@@ -1919,9 +1917,31 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
   if (terminal.result === "passed") {
     voiceVerified.value = true;
   } else {
-    voiceFailureMessage.value = terminal.code
-      ? VOICE_FAILURE_COPY[terminal.code]
-      : "这次测试没有通过，再试一次。";
+    const code = terminal.code ?? null;
+    // 先落基线文案（同步、不留空窗）；「支持更多输入工具」未生效时的专门解释再异步细化
+    // （判据在**失败瞬间**现读，见 readCaptureHealthForVoiceFailure）。
+    voiceFailureMessage.value = voiceFailureText(code, "unknown");
+    if (code === "voice.no_transcript" && stagedTool.value === "doubao") {
+      // 陈旧保护用**会话世代**（voiceAttemptSerial）而不是对象引用：`voiceResult` 是
+      // `ref`，Vue 会把赋进去的对象深包装成独立 proxy——"原对象 === proxy" 恒为 false
+      // （2026-10-14 测试实证：首版实现因此被静默拦成"永远只显示基线文案"）。
+      const attemptSerial = voiceAttemptSerial;
+      void readCaptureHealthForVoiceFailure().then((captureHealth) => {
+        if (
+          attemptSerial === voiceAttemptSerial &&
+          voiceResult.value?.result === "failed" &&
+          !voiceLateAccepted.value
+        ) {
+          voiceFailureMessage.value = voiceFailureText(code, captureHealth);
+          // 分流采用了哪一支要留痕（2026-10-14 / LOGGING.md 的"一次报障一次日志"：
+          // 失败瞬间的 capture 值与几十秒后复制诊断时的当前值可能不同，没有这行
+          // 就分不清"分流判错"还是"现场已变"）。
+          reportStepAction("voice_test", "failure_text_branch", "passed", {
+            detail: `capture_${captureHealth}`,
+          });
+        }
+      });
+    }
   }
   reportOnboardingEvent({
     kind: "voice_attempt",

@@ -3,6 +3,7 @@ import {
   captureFailureText,
   captureInactiveText,
   captureSwitchState,
+  normalizeCaptureHealth,
   shouldShowCaptureInactive,
 } from "./capture-switch";
 
@@ -109,5 +110,18 @@ describe("「开着但没生效」提示（2026-10-13 定稿）", () => {
     ]) {
       expect(text).not.toContain(bad);
     }
+  });
+});
+
+describe("normalizeCaptureHealth（2026-10-14：捕获状态载荷规范化）", () => {
+  it("只接受四个稳定 token；缺失 / 未知值一律 unknown（不猜测）", () => {
+    expect(normalizeCaptureHealth("off")).toBe("off");
+    expect(normalizeCaptureHealth("starting")).toBe("starting");
+    expect(normalizeCaptureHealth("active")).toBe("active");
+    expect(normalizeCaptureHealth("inactive")).toBe("inactive");
+    expect(normalizeCaptureHealth(undefined)).toBe("unknown");
+    expect(normalizeCaptureHealth("")).toBe("unknown");
+    expect(normalizeCaptureHealth("Active")).toBe("unknown"); // 逐字比较，不做大小写宽松
+    expect(normalizeCaptureHealth("nonsense")).toBe("unknown");
   });
 });

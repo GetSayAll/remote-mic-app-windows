@@ -98,3 +98,14 @@ export function captureFailureText(
   }
   return `开启没有成功，${name}保持关闭。`;
 }
+
+/**
+ * 捕获状态的载荷规范化（2026-10-14）：桥快照里只认四个稳定 token（与 Rust
+ * `CaptureHealth::as_str` 逐字对应）；缺失 / 未知值一律回落 `unknown`——界面按
+ * "读不到"处理，不猜测、不显示文案。
+ */
+export function normalizeCaptureHealth(raw: unknown): Rc003CaptureHealth | "unknown" {
+  return raw === "off" || raw === "starting" || raw === "active" || raw === "inactive"
+    ? raw
+    : "unknown";
+}

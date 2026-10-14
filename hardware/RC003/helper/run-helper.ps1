@@ -38,7 +38,8 @@
 #   ever reached injection. The helper now enumerates the host's modules first:
 #     * our tap is there and the token matches -> attach; no copy, no injection
 #     * our tap is there but the token cannot match (pre-fix generation)
-#       -> [STALE-TAP] with the exact clean-up steps (exit 13)
+#       -> auto-recover when the safety gate passes (kill the exclusive RC003 host,
+#          then clean-inject); otherwise [STALE-TAP] with the exact clean-up steps (exit 13)
 #     * no tap -> copy (reusing the file when its SHA-256 already matches) + inject
 #   The token is now PERSISTED in the runtime dir (session.token) instead of
 #   being regenerated per run, which is what makes "attach" possible at all.
