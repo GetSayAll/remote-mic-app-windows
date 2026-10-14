@@ -28,6 +28,11 @@
    修复前它会静默占住连接位（界面全绿、报告层合成与语音键全失效，见
    `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`）；"结束旧宿主换新宿主"的自动刷新
    同样只认目标地址那一支（`refresh_host_candidate`）。
+8. （2026-10-14 追加）**按下生效判据**：每次走报告层合成的按下，500 ms 后应出现
+   `voice_effect session=… result=replaced`（同时 helper 侧有对应的
+   `[AGENT] msg=synth:frame replace ok`）；连续 ≥2 次 `result=missing reason=no_frame`
+   会让健康面降为 inactive（界面出提示，60 s 后 `capture_recover` 自动重来一次）。
+   配置级回执（`synth_confirmed=true`）不再单独算生效，判据与处置见 §9 表与 §10 表。
 
 ## 2026-09-27 全按键动态目标增量验收
 
@@ -496,6 +501,11 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[EDGE]` | `buttons` `raw=t=… usages=0x00F1,… buttons=… n=…` |
 | `[HB]` | agent 心跳：`mode` `report_usages` `clear_usages` `lease_ok` `stat{…}` |
 | `[AGENT]` | agent 侧 `logLine` 通道；`targets:applied clear=… canary=…` 在这里 |
+| `[AGENT] msg=synth:frame …` | 语音键**逐次按下**的帧结果：`seen`（只说明看到按下，不构成结论）→ `replace ok to=0xe6` / `skip reason=…`；助手转成 `F ok` / `F skip <reason>` 发给主程序（2026-10-14 起，生效判据的输入） |
+| `F ok` / `F skip <reason>`（助手 → 主程序，桥） | 逐次帧结果的转发：只发 1000 ms 内**新鲜**结果，断线不补发（补发会把旧结果伪装成"刚发生的生效证据"）；`seen` 不转发 |
+| `voice_effect session=… result=…`（主程序） | 每次报告层按下 500 ms 后的**生效判定**：`result=replaced` = 本次真的改写过；`result=missing reason=no_frame note=tool_ignores_injected_keys` = 没有任何帧证据；`result=missing reason=agent_skip skip_reason=…` = agent 明确跳过。连续 ≥2 次 missing 会降级健康面（见下行） |
+| `capture_inactive … reason=voice_synth_no_effect … voice_frames_missing_streak=N`（主程序） | 所有权/配置回执全绿、但按下连续无生效证据 ⇒ 健康面 inactive（界面显示既有提示）；与 `reason=agent_never_acked`（一个所有权都没拿到）并列，`capture=` 诊断字段随之非 active |
+| `capture_recover … reason=… attempt=N`（主程序） | inactive 持续 60 s 后的自动重来（重启助手）：间隔 60 s，连续 3 次无效后转 300 s 稳态；`phase=helper_restarted terminal_result=passed\|failed` 是动作结果 |
 | `[APP-BRIDGE]` | 第 ② 段：`event=enabled\|disabled\|connected\|unavailable\|descriptor_found_elsewhere\|closed\|replaced_by_new_connection` `descriptor` `reason` `tries` |
 | `[DRY-RUN-BRIDGE]` | `--dry-run` 下的**只读**探测（不连接）：`descriptor` `probe=ok\|absent\|invalid`；`probe=absent` 表示主程序没在运行（正常现象） |
 | `[TIMEUP]` / `[NOTE]` / `[SUMMARY]` | 收尾三行。`[SUMMARY]`：`uptime_s` `agent_lines` `renews_sent` `edges` `distinct_buttons` `authenticated_ever` `how` `app_bridge=connects=N failed=M edges=K` `app_bridge_last_error` |
@@ -514,6 +524,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[STALE-TAP]` + 退出码 13 | 宿主里的 tap 是**旧世代**（令牌已换，接不上） | 按提示清一次：断开重配对 RC003（最干净）/ 设备管理器禁用再启用 / 重启 |
 | `[NO-HELLO]` + 退出码 12 | 注入了但 30 s 内没有**已鉴权**会话 | 看 `[VERIFY-MODULE] gadget_modules_in_host`；确认没有第二个助手在抢端口 |
 | `[REJECT] reason=host_pid_mismatch`（折叠） | 另一支同型号遥控器宿主里的残留 agent 在抢连接位；含宿主 pid 不变量的版本会拒绝它，功能不受影响 | 无需处置。修复前（≤ 0.8.6）它会**静默占位**——配置回执与心跳全绿、`synth:frame` 零条，按键/语音全失效；升级即可。记录见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md` |
+| `voice_effect … result=missing reason=no_frame` 连发（≥2 次）+ `capture_inactive reason=voice_synth_no_effect` | 按下没有**生效证据**（本支遥控器对应的报告层改写没发生）：典型是宿主里跑着不产生帧结果的 agent；健康面会降级并在界面提示，60 s 后自动重来一次 | 无需手动处置（自动重来 + 界面提示）；若长时间不恢复，查同段 `helper_pid` 与 `[REJECT]` 行、确认包内含 `F` 行转发（helper 标记 `synth:frame replace ok`）。判据本体见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`「跟进」 |
 | 按了键但一条 `[EDGE]` 都没有 | 可能是设备没上报，也可能是探针/链路坏了 | **先做阳性对照**：用哨兵键或 `observe` 模式确认同一设备上已知可用的键（确定/主页）能出来 |
 | `[EDGE]` 有、但主程序里三键映射不触发 | 清空与转发是两件事：第 ② 段（桥接）没通 | 看 `[SUMMARY] app_bridge=`：`connects=0` → 启动主程序并确认 `%LOCALAPPDATA%\SayAll\rc003-bridge.ini` 存在；据 `app_bridge_last_error` 定位（`descriptor_missing` / `rejected(DENY…)` / `version_mismatch`）。判据见 §7.5 |
 | 哨兵键不恢复 | fail-open 失效——**这是真问题** | 立刻按 Ctrl+C / 关窗；仍不恢复就断开重配对 RC003；把日志留档 |

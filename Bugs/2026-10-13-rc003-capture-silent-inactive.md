@@ -80,6 +80,10 @@
 - **RC003 真机「宿主重建 → agent 消失 → 自愈」链路：deferred**——需要构造宿主进程被系统
   重建的现场（本次为自然发生，未受控复现）；本修复复用已被真机验证过的手动路径
   （关开一次开关的那条 `/end` + `/run` + 重新注入），不新增注入逻辑。
+- 2026-10-14 跟进：「按下无生效证据」这一形态（`reason=voice_synth_no_effect`）已实现并
+  真机 passed——同一条 `capture_recover` 路径在 `attempt=1` 上
+  `phase=helper_restarted terminal_result=passed`；见
+  `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`「跟进」。宿主重建形态本身仍 deferred。
 
 ## 未覆盖边界（不在本修复范围；逐条标注决策状态）
 

@@ -108,5 +108,50 @@
 - 仍未验证（deferred）：真机"宿主里是旧代 agent → 自动刷新换宿主 → 新 agent 被接纳"路径
   （需旧代 agent 现场）；RC001 不涉及。
 - 后续项（本次不做）：应用侧为每次按下加"报告层确实改写了一次"的生效判据（现在只有配置
-  回执，ack ≠ 生效）；残留 agent 的主动清理。
+  回执，ack ≠ 生效）；残留 agent 的主动清理。**第一条当天已落地，见文末「跟进」。**
 - 隐私检查：本文不含个人路径、蓝牙地址、语音内容或凭据；宿主仅以 pid 引用，令牌只见指纹。
+
+## 跟进：按下生效判据（2026-10-14 当天落地）
+
+上文「后续项」的第一条已实现（分支 `fix/rc003-agent-host-guard`，提交 `bae95e8`，
+协议为加法、不升 `BRIDGE_PROTOCOL_VERSION`）：
+
+- 助手把 agent 的逐次帧结果转成 `F ok` / `F skip <reason>` 转发给主程序；只发 1000 ms
+  内的新鲜结果，断线不补发（过期结果补发会伪装成"刚发生的生效证据"，方向最坏）。
+- 应用侧：每次"报告层按下"500 ms 后比对按下前后的帧证据快照，落
+  `voice_effect … result=replaced|missing`（`reason=no_frame` / `agent_skip`），不生效计入
+  连续缺失；对账在连续缺失 ≥2 且过宽限后判 `capture_inactive
+  reason=voice_synth_no_effect`（界面既有提示 + 60 s `capture_recover` 自动重来），
+  健康优先级改为「没生效」胜「有所有权」——配置级回执不再能独自把界面刷绿。
+- 有意不做注入兜底（v1）：豆包对注入键按设计丢弃（`note=tool_ignores_injected_keys`），
+  自动改走注入会与报告层双写互扰（已记录风险）。残留 agent 的主动清理仍未做。
+
+真机验证（本地测试包 `无线麦 SayAll_0.8.6_x64-setup.exe`，SHA-256
+`f3e4da10…27cdb0`，内嵌修订 `6ae4e709`；helper/gadget 哈希对齐，包内确认含
+`voice_effect session=` 与 `synth:frame replace ok` 标记；日志 UTC）：
+
+1. 正向（新助手 pid 24544，含 F 转发的本包构建）：14:03:30/33/37 三次按下（session 11/12/13）每次
+   `[AGENT] msg=synth:frame replace ok to=0xe6` → `voice_effect … result=replaced
+   window_ms=500` → `voice_verify mic=observed`；无 inactive、无 heal。
+2. 负向（换入**不转发 F** 的旧助手 pid 38820、应用不变，模拟"配置全绿但无生效证据"）：
+   14:10:41/44/48 三次按下（session 14/15/16）每次都是 `synth_confirmed=true` +
+   `chord_press skipped`，而 `voice_effect … result=missing reason=no_frame`
+   （`note=tool_ignores_injected_keys`）→ 14:10:57 `capture_inactive
+   reason=voice_synth_no_effect … voice_frames_missing_streak=3`
+   （同行 `bridge_phase=connected`、`helper_pid=38820`——所有权全绿不再掩盖按下失效）→
+   界面出现既有提示「"支持更多输入工具"还没有生效，正在自动重试；如果一直不恢复，
+   请把开关关掉再打开。」（PrintWindow 截图留档）→ 14:11:57（+60 s）
+   `capture_recover reason=voice_synth_no_effect attempt=1` →
+   `phase=helper_restarted terminal_result=passed`。
+3. 恢复：换回新助手并重启应用后 14:13:34/37 两次按下（session 17/18）
+   `result=replaced`、`mic=observed`；界面提示消失（截图留档）。
+
+- 自动化（合并前）：helper 62 passed（含帧结果解析 3 例）、`sayall-windows`
+  356 passed（含 verdict 6 例 + 桥回环 1 例）、`sayall-windows-app` capture 7 例、
+  agent logic 55/55、agent selftest 全过、helper `--selftest` 新增「语音帧结果解析」4 例
+  `[PASS]`；合并 `origin/main`（`6ae4e70`）后复跑：helper 65、`sayall-windows` 350、
+  app 全套 111、fmt / workspace check / runtime-simulation check 全绿。
+- deferred：本次负向以"不转发 F 的旧助手"构造证据缺失；"外来 agent 与目标 agent 再次
+  抢位"的完整现场依赖自然发生，未能受控重放。宿主里是旧代 agent 的刷新路径仍 deferred
+  （同上文）。RC001 不涉及。
+- 隐私检查：同本文；未记录设备地址、令牌或语音内容。
