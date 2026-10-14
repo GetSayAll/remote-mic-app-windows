@@ -99,6 +99,7 @@ const snapshot: OnboardingDiagnosticsSnapshot = {
   tool: "wechat",
   hotkey: "left_control+left_windows",
   captureEnabled: false,
+  captureHealth: "off",
   vokieInstalled: false,
   vokieRunning: false,
   voiceTestPhase: "terminal",
@@ -148,7 +149,7 @@ describe("formatOnboardingDiagnostics", () => {
     );
     expect(text).toContain("Audio: phase=ready recommended=1 selected=yes queued_samples=0 error=no");
     expect(text).toContain(
-      "Input tool: wechat hotkey=left_control+left_windows full_key_support=off",
+      "Input tool: wechat hotkey=left_control+left_windows full_key_support=off capture=off",
     );
     expect(text).toContain("Vokie: not_detected");
     expect(text).toContain("Voice test: phase=terminal terminal=voice.no_transcript late=no");
@@ -170,6 +171,35 @@ describe("formatOnboardingDiagnostics", () => {
     expect(text).toContain(
       "IME: detected=no match=unknown installed_count=0 expected_tool=wechat",
     );
+  });
+
+  it("「全按键支持」开关开着但捕获没生效时在块里自证（2026-10-14）", () => {
+    // 现场场景（rc003-capture-silent-inactive）：开关显示开启，实际没有所有权。
+    // 单看 full_key_support=on 会误导支持；capture= 与它并列后不用日志就能分流。
+    const text = formatOnboardingDiagnostics(report, {
+      ...snapshot,
+      captureEnabled: true,
+      captureHealth: "inactive",
+    });
+
+    expect(text).toContain("full_key_support=on capture=inactive");
+    // `starting`（助手/桥未就绪、可能长期停留）同样不是生效——不能只认 inactive。
+    expect(
+      formatOnboardingDiagnostics(report, {
+        ...snapshot,
+        captureEnabled: true,
+        captureHealth: "starting",
+      }),
+    ).toContain("full_key_support=on capture=starting");
+  });
+
+  it("捕获状态读不到时写 capture=unknown，不臆测（2026-10-14）", () => {
+    const text = formatOnboardingDiagnostics(report, {
+      ...snapshot,
+      captureHealth: "unknown",
+    });
+
+    expect(text).toContain("full_key_support=off capture=unknown");
   });
 
   it("迟到接受在文本里自证（terminal=late_transcript late=yes）", () => {

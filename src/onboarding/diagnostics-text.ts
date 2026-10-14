@@ -21,12 +21,19 @@
  * - `Voice test:` 行：第⑤步 attempt 的当前阶段与终态码（无终态时写 `none`；
  *   迟到接受后终态码写 `late_transcript`）与 `late=` 布尔。
  *
+ * 2026-10-14 增补（现场"全按键支持开着却没生效"）：
+ * - `capture=`：`full_key_support=` 是开关**设置**（向导只在④/⑤/⑦步读过它）；
+ *   这里并列写实际捕获状态（读回 `CaptureHealth`：off / starting / active /
+ *   inactive；读不到写 unknown）。`active` 才算生效；`inactive`（过宽限仍无
+ *   所有权）与可能长期停留的 `starting`（助手/桥未就绪）都是没生效——用户
+ *   复制一次即自证。
+ *
  * 脱敏红线（与 LOGGING.md 不同）：本块是**用户主动复制**发给支持人员的内容，
  * 允许出现稳定 token（`voice_test`、`rc003` 等）；但绝不包含设备 id/名称（蓝牙
  * 地址、HID 路径）、音频端点 id/名称、文件路径、用户名、任何输入文字。
  * 端点与设备一律只给数量/布尔，型号只给 token。
  */
-import type { DiagnosticReport } from "../lib/bridge";
+import type { DiagnosticReport, Rc003CaptureHealth } from "../lib/bridge";
 import type { OnboardingStep } from "./flow";
 
 /** 步骤固定顺序（诊断里的 "n/7" 由它推导）。 */
@@ -76,6 +83,14 @@ export interface OnboardingDiagnosticsSnapshot {
   /** 按住说话快捷键 token（right_alt / left_control+left_windows / none）。 */
   hotkey: string;
   captureEnabled: boolean;
+  /**
+   * 「全按键支持」的**实际捕获状态**（2026-10-14）：读回 `CaptureHealth`
+   * （off / starting / active / inactive），读不到时写 unknown。
+   * 与 `captureEnabled`（开关设置）并列——只有 `active` 才算生效；`inactive`
+   * （过宽限仍无所有权）与可能长期停留的 `starting`（助手/桥未就绪）都是没
+   * 生效，不用日志就能在块里分流（对照 rc003-capture-silent-inactive 现场）。
+   */
+  captureHealth: Rc003CaptureHealth | "unknown";
   vokieInstalled: boolean;
   vokieRunning: boolean;
   /** 第⑤步 attempt 的当前阶段（VoiceAttemptState token）。 */
@@ -139,7 +154,7 @@ export function formatOnboardingDiagnostics(
     )} queued_samples=${snapshot.queuedSamples} error=${yesNo(snapshot.audioErrorPresent)}`,
     `Input tool: ${snapshot.tool} hotkey=${snapshot.hotkey} full_key_support=${
       snapshot.captureEnabled ? "on" : "off"
-    }`,
+    } capture=${snapshot.captureHealth}`,
     `Vokie: ${
       snapshot.vokieRunning ? "running" : snapshot.vokieInstalled ? "installed" : "not_detected"
     }`,
