@@ -165,14 +165,13 @@
 
 ## 后续项
 
-- 向导第⑤步（voice_test）就绪提示：报告层未就绪时用户按下会走无效的注入回退
-  （`tool_ignores_injected_keys` 为设计已知），失败重试通道已有（`no_transcript` → 「重新测试」）。
-  是否在第⑤步显示与 `captureInactiveText` 同源的提示（**第三个落点**）需按
-  `docs/product-copy.md` 再次定稿（落点 / 时机 / 措辞）；已登记 TODO。
-- 顺带发现（不属于本修复）：`hardware/RC003/helper/src/main.rs` 的 `target_address_tests`
-  有一条错位的 `#[test]` 属性（重复属性警告 +
-  `target_body_requires_its_own_version_and_a_full_address` 未被当作测试运行）；
-  属测试基础设施，待单独工作项处理。
+- 向导第⑤步失败解释**已按捕获状态分流**（`1cfe352`，原"就绪提示"评估的落地形态）：
+  `voice.no_transcript` 失败瞬间现读 `capture=`——`starting` →「还在准备中…等几秒后点“重新测试”」、
+  `inactive` →「关掉再打开」指引、`active`/读不到 → 保持原排查文案；仅对豆包分流
+  （唯一按设计忽略注入键、必须走报告层合成的工具）。起始引导不改（`starting` 期不打断
+  "等待按键"，维持既有决定）；真机目视 deferred（下次出包时顺带看一眼失败卡）。
+- 顺带发现**已修**：`target_address_tests` 的错位 `#[test]` 已归位（`7b33186`），
+  `target_body_requires_its_own_version_and_a_full_address` 恢复运行（单跑 1 passed）。
 
 ## 隐私检查
 
