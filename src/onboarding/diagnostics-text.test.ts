@@ -183,6 +183,14 @@ describe("formatOnboardingDiagnostics", () => {
     });
 
     expect(text).toContain("full_key_support=on capture=inactive");
+    // `starting`（助手/桥未就绪、可能长期停留）同样不是生效——不能只认 inactive。
+    expect(
+      formatOnboardingDiagnostics(report, {
+        ...snapshot,
+        captureEnabled: true,
+        captureHealth: "starting",
+      }),
+    ).toContain("full_key_support=on capture=starting");
   });
 
   it("捕获状态读不到时写 capture=unknown，不臆测（2026-10-14）", () => {

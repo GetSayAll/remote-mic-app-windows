@@ -22,10 +22,11 @@
  *   迟到接受后终态码写 `late_transcript`）与 `late=` 布尔。
  *
  * 2026-10-14 增补（现场"全按键支持开着却没生效"）：
- * - `capture=`：`full_key_support=` 是开关**设置**（且向导只在④/⑤步读过它）；
+ * - `capture=`：`full_key_support=` 是开关**设置**（向导只在④/⑤/⑦步读过它）；
  *   这里并列写实际捕获状态（读回 `CaptureHealth`：off / starting / active /
- *   inactive；读不到写 unknown）。「开关开着却没生效」= `full_key_support=on
- *   capture=inactive`，用户复制一次即自证。
+ *   inactive；读不到写 unknown）。`active` 才算生效；`inactive`（过宽限仍无
+ *   所有权）与可能长期停留的 `starting`（助手/桥未就绪）都是没生效——用户
+ *   复制一次即自证。
  *
  * 脱敏红线（与 LOGGING.md 不同）：本块是**用户主动复制**发给支持人员的内容，
  * 允许出现稳定 token（`voice_test`、`rc003` 等）；但绝不包含设备 id/名称（蓝牙
@@ -85,8 +86,9 @@ export interface OnboardingDiagnosticsSnapshot {
   /**
    * 「全按键支持」的**实际捕获状态**（2026-10-14）：读回 `CaptureHealth`
    * （off / starting / active / inactive），读不到时写 unknown。
-   * 与 `captureEnabled`（开关设置）并列——「开关开着却没生效」= on + inactive，
-   * 不用日志就能在块里分流（对照 rc003-capture-silent-inactive 现场）。
+   * 与 `captureEnabled`（开关设置）并列——只有 `active` 才算生效；`inactive`
+   * （过宽限仍无所有权）与可能长期停留的 `starting`（助手/桥未就绪）都是没
+   * 生效，不用日志就能在块里分流（对照 rc003-capture-silent-inactive 现场）。
    */
   captureHealth: Rc003CaptureHealth | "unknown";
   vokieInstalled: boolean;

@@ -1384,23 +1384,28 @@ async function copyDiagnostics(): Promise<void> {
       ime = null;
     }
     // 「全按键支持」的两层事实各做一次**只读**读取（2026-10-14 现场）：
-    // ① `full_key_support=` 是开关设置——向导只在④/⑤步读过它，①–③步复制出的
+    // ① `full_key_support=` 是开关设置——向导只在④/⑤/⑦步读过它，①–③步复制出的
     //    `off` 会把开着开关的机器误导成未开启；
-    // ② 开关开着 ≠ 生效（助手没连上 / 宿主换代 / agent 掉了都可能静默失效），
-    //    真实捕获状态读回 `CaptureHealth`（off/starting/active/inactive）。
-    // 读取失败各自回落（页面状态 / unknown）——复制本身不因此失败。
-    let rc003FromDisk: Rc003TaskStatus | null = null;
-    try {
-      rc003FromDisk = await getRc003TaskStatus();
-    } catch {
-      // 保持页面状态。
+    // ② 开关开着 ≠ 生效：真实捕获状态读回 `CaptureHealth`——只有 `active` 才算
+    //    生效；`inactive`（过宽限仍无所有权）与可能长期停留的 `starting`（助手/
+    //    桥未就绪）都是没生效。
+    // 读取失败各自回落（页面状态 / unknown）并各留一条失败日志——复制本身不失败。
+    const [rc003FromDisk, captureSnapshot] = await Promise.all([
+      getRc003TaskStatus().catch(() => null),
+      getRc003BridgeSnapshot().catch(() => null),
+    ]);
+    if (rc003FromDisk === null) {
+      reportStepAction(target, "read_capture_switch", "failed", { detail: "fallback_page_state" });
     }
-    let captureHealth: Rc003CaptureHealth | "unknown" = "unknown";
-    try {
-      captureHealth = (await getRc003BridgeSnapshot()).captureHealth;
-    } catch {
-      captureHealth = "unknown";
+    if (captureSnapshot === null) {
+      reportStepAction(target, "read_capture_state", "failed", { detail: "capture_unknown" });
     }
+    // 载荷与类型不符（缺字段 / 未知 token）时同样回落 unknown——块里只允许稳定 token。
+    const health = captureSnapshot?.captureHealth;
+    const captureHealth: Rc003CaptureHealth | "unknown" =
+      health === "off" || health === "starting" || health === "active" || health === "inactive"
+        ? health
+        : "unknown";
     const chord =
       currentHotkey.value ??
       hotkeyFromDisk ??

@@ -102,9 +102,11 @@
 3. 复制诊断信息里的 `full_key_support=` 目前读设置、不读实际状态（同一类「显示与事实不一致」）。
    **已实现（2026-10-14，`fix/diagnostics-capture-state`）**：诊断块在 `full_key_support=`
    （开关设置）之后并列 `capture=`（**真实捕获状态**，读回 `CaptureHealth`：off / starting /
-   active / inactive；读不到写 `unknown`），并在复制时对开关状态与捕获状态各做一次只读刷新
-   （①–③步复制不再把开着的开关误报成 off）。「开关开着却没生效」= `full_key_support=on
-   capture=inactive`，用户复制一次即自证。
+   active / inactive；读不到或未知 token 写 `unknown`），并在复制时对开关状态与捕获状态各做
+   一次只读刷新（读失败各留一条 `read_capture_switch` / `read_capture_state` 失败日志；
+   ①–③步复制不再把开着的开关误报成 off）。「开关开着却没生效」的判据 = `capture=` 不是
+   `active`（`inactive` 过宽限仍无所有权；`starting` 助手/桥未就绪、可能长期停留）。
+   **真机复核 deferred**（需新包观察真实块输出）。
 
 ## 隐私检查
 

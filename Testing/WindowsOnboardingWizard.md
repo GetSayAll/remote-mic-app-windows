@@ -42,7 +42,9 @@
    普通按键）、**`Raw input`**（phase / matched / raw_events / semantic_edges / stale_events）、
    `Audio`（含 `error=`）、`Input tool`（含 **`capture=`**——「全按键支持」的**真实捕获状态**
    off / starting / active / inactive / unknown；与 `full_key_support=`（开关设置）并列——
-   「开关开着却没生效」表现为 `full_key_support=on capture=inactive`，2026-10-14）、`Vokie`、
+   只有 `active` 才算生效，`inactive`（过宽限无所有权）与可能长期停留的 `starting`（助手/桥
+   未就绪）都是没生效，2026-10-14；浏览器预览与未启用该机制的环境显示 `capture=off`，属正常）、
+   `Vokie`、
    **`Voice test`**（attempt 阶段与终态码，
    无终态写 `none`）、`Buttons observed`、`Mapping`。
    现场形状自证（2026-10-10）：②步"按键已收到但应用未连接"应表现为
@@ -51,7 +53,9 @@
    已配置豆包的机器在任何步骤复制都应显示 `Input tool: doubao hotkey=…`，不是 `unset`；
    新装机器上快捷键按生效值显示（默认 左 Ctrl + 左 Win）。
    同口径（2026-10-14 起）：**「全按键支持」的开关状态与真实捕获状态（`capture=`）也做只读刷新**
-   ——①–③步复制不再把开着开关的机器报成 `full_key_support=off`；捕获状态读不到写 `capture=unknown`。
+   ——①–③步复制不再把开着开关的机器报成 `full_key_support=off`；捕获状态读不到、或出现未知
+   token 时写 `capture=unknown`（读取失败各留一条 `read_capture_switch` / `read_capture_state`
+   失败日志）。**本条待真机复核**（复制真实块对照 `capture=active|inactive|starting`）。
    同日起多一段 **`IME:`**（当前输入法是不是所选工具 / 系统里可用输入法数量 / 工具 token）——
    ③诊断"语音没出字是不是因为没切输入法"时先看这一行：
    `IME: detected=yes match=no installed_count=3 expected_tool=doubao`（`detected=no` = 读不到，

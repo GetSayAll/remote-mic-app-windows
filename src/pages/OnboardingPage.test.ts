@@ -1102,7 +1102,7 @@ describe("Onboarding diagnostics copy", () => {
     await flushPromises();
 
     const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("Input tool: doubao hotkey=right_alt full_key_support=off");
+    expect(text).toContain("Input tool: doubao hotkey=right_alt full_key_support=off capture=off");
   });
 
   it("②步复制读回「全按键支持」的真实状态：开关开着但没生效也自证（2026-10-14）", async () => {
@@ -1145,6 +1145,30 @@ describe("Onboarding diagnostics copy", () => {
     const text = clipboard.writeText.mock.calls[0][0];
     expect(text).toContain("capture=unknown");
     expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
+    // 失败也留痕：块里只有 unknown 时，靠这条行动日志分流「读不到」与「真 off」。
+    expect(
+      onboardingEvents("action").some(
+        (p) => p.reason === "read_capture_state" && p.result === "failed",
+      ),
+    ).toBe(true);
+  });
+
+  it("载荷里出现未知捕获状态时回落 capture=unknown（白名单校验）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    // 类型约束在运行时不存在：后端多回了一个未知 token 也不能原样进块。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "bogus" as never }),
+    );
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("复制诊断信息"))!
+      .trigger("click");
+    await flushPromises();
+
+    const text = clipboard.writeText.mock.calls[0][0];
+    expect(text).toContain("capture=unknown");
   });
 
   it("复制时开关读失败退回页面状态、捕获读失败写 unknown，都不影响复制", async () => {
@@ -1169,6 +1193,14 @@ describe("Onboarding diagnostics copy", () => {
 
     const text = clipboard.writeText.mock.calls[0][0];
     expect(text).toContain("full_key_support=on capture=unknown");
+    // 恰好两次：④步加载一次 + 复制时刷新一次——第二次失败被独立留痕，
+    // 断言调用次数可防「④步不再读」时该用例退化成假绿。
+    expect(mocks.getRc003TaskStatus).toHaveBeenCalledTimes(2);
+    expect(
+      onboardingEvents("action").some(
+        (p) => p.reason === "read_capture_switch" && p.result === "failed",
+      ),
+    ).toBe(true);
   });
 
   it("只读刷新失败时退回页面状态，复制本身不失败", async () => {

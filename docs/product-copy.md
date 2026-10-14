@@ -463,6 +463,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   "开关开着却没生效"时它会误导支持。诊断块在该项后并列 `capture=`（**真实捕获状态**，读回
   `CaptureHealth`：off / starting / active / inactive；读不到写 `unknown`），复制时对开关状态
   与捕获状态各做一次**只读**刷新（失败各自回落页面状态 / `unknown`，复制本身不失败）。
-  自此「开关开着却没生效」= `full_key_support=on capture=inactive`，用户复制一次即自证。
+  自此生效与否以 `capture=` 为准——只有 `active` 才算生效；`inactive`（过宽限仍无所有权）
+  与可能长期停留的 `starting`（助手/桥未就绪）都是没生效，用户复制一次即自证。
+  读取失败各留一条 `read_capture_switch` / `read_capture_state` 失败日志（复制本身不失败）。
+  **真机复核 deferred**（需新包观察真实块输出）。
   记录：[Bugs/2026-10-13-rc003-capture-silent-inactive.md](../Bugs/2026-10-13-rc003-capture-silent-inactive.md)
   未覆盖边界 §3。
