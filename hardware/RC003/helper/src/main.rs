@@ -973,21 +973,38 @@ mod imp {
     /// 纯决策：这次 stale 握手要不要自动刷新（可自检）。
     ///
     /// 条件：提权（结束 session 0 宿主必需）＋ 宿主代次非空且与内嵌代次不同
-    /// ＋ 距上次自动刷新超过冷却时间。
+    /// ＋ **该"旧代→内嵌代"组合尚未尝试过**（2026-10-14：同一组合只自动刷新
+    /// 一次——刷新后仍不收敛时不再反复结束宿主；原"冷却后无限重试"在报障
+    /// 场景里会退化成"每小时杀一次宿主"）＋ 距上次自动刷新超过冷却时间
+    /// （防抖动，多个宿主/组合之间至少隔一个冷却）。
     fn should_auto_refresh_agent(
         elevated: bool,
         running_build: &str,
         embedded_build: &str,
+        already_attempted: bool,
         last_refresh_unix: Option<u64>,
         now_unix: u64,
     ) -> bool {
         if !elevated || running_build.is_empty() || running_build == embedded_build {
             return false;
         }
+        if already_attempted {
+            return false;
+        }
         match last_refresh_unix {
             Some(last) => now_unix >= last && now_unix - last >= AGENT_REFRESH_COOLDOWN_SECS,
             None => true,
         }
+    }
+
+    /// 纯决策（可自检）：stale 自动刷新前的独占安全闸（2026-10-14）。
+    ///
+    /// 只对"独自承载 RC003"的宿主刷新：共享宿主同时承载用户别的 BLE 设备，
+    /// 结束它会把它们一起弄掉——判据与 `should_restart_host_for_clean_inject`
+    /// 的 members 闸门同源。命不中时跳过且**不写尝试记录**——宿主恢复独占后
+    /// 仍允许该组合的首次自动刷新。
+    fn should_refresh_stale_agent_host(members: usize, rc003_members: usize) -> bool {
+        members == 1 && rc003_members == 1
     }
 
     fn now_unix() -> u64 {
@@ -997,17 +1014,80 @@ mod imp {
             .unwrap_or(0)
     }
 
-    fn read_refresh_stamp(dir: &std::path::Path) -> Option<u64> {
-        std::fs::read_to_string(dir.join(AGENT_REFRESH_STAMP))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+    /// 自动刷新记录（`agent-refresh.stamp`，放运行时目录，跨助手进程重启仍生效）。
+    ///
+    /// - `last_refresh_unix`：上次自动刷新时刻（全局冷却用）；
+    /// - `tried`：已尝试过的"旧代→内嵌代"组合（每个组合只自动刷新一次）。
+    ///
+    /// 兼容旧格式（历史文件只有一个 unix 秒）：只恢复冷却时刻、尝试记录为空——
+    /// 旧记录无法证明"刷的就是当前组合"，因此仍允许该组合的一次自动刷新。
+    #[derive(Default, Debug, PartialEq, Eq)]
+    struct AgentRefreshStamp {
+        last_refresh_unix: Option<u64>,
+        tried: Vec<String>,
     }
 
-    fn write_refresh_stamp(dir: &std::path::Path, now: u64) {
+    fn refresh_attempt_key(running_build: &str, embedded_build: &str) -> String {
+        format!("{running_build}->{embedded_build}")
+    }
+
+    fn parse_refresh_stamp(text: &str) -> AgentRefreshStamp {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return AgentRefreshStamp::default();
+        }
+        // 旧格式：单个 unix 秒。
+        if let Ok(seconds) = trimmed.parse::<u64>() {
+            return AgentRefreshStamp {
+                last_refresh_unix: Some(seconds),
+                tried: Vec::new(),
+            };
+        }
+        let mut stamp = AgentRefreshStamp::default();
+        for line in trimmed.lines() {
+            if let Some(value) = line.strip_prefix("last_refresh=") {
+                stamp.last_refresh_unix = value.trim().parse().ok();
+            } else if let Some(key) = line.strip_prefix("tried=") {
+                let key = key.trim();
+                // 上限防异常文件把无界字符串带进内存；代次键正常远小于此值。
+                if !key.is_empty() && key.len() <= 256 {
+                    stamp.tried.push(key.to_string());
+                }
+            }
+        }
+        stamp
+    }
+
+    fn format_refresh_stamp(stamp: &AgentRefreshStamp) -> String {
+        let mut out = String::new();
+        if let Some(last) = stamp.last_refresh_unix {
+            out.push_str(&format!("last_refresh={last}\n"));
+        }
+        for key in &stamp.tried {
+            out.push_str(&format!("tried={key}\n"));
+        }
+        out
+    }
+
+    fn read_refresh_stamp(dir: &std::path::Path) -> AgentRefreshStamp {
+        std::fs::read_to_string(dir.join(AGENT_REFRESH_STAMP))
+            .map(|text| parse_refresh_stamp(&text))
+            .unwrap_or_default()
+    }
+
+    fn write_refresh_stamp(dir: &std::path::Path, stamp: &AgentRefreshStamp) {
         let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(dir.join(AGENT_REFRESH_STAMP), now.to_string());
+        let _ = std::fs::write(dir.join(AGENT_REFRESH_STAMP), format_refresh_stamp(stamp));
+    }
+
+    /// 目标 pid 的宿主成员计数 `(members, rc003_members)`；扫描失败返回 None。
+    /// 口径与 `[EXCLUSIVE]` 判据一致：members = 该 pid 的所有带 HostPid 节点，
+    /// rc003_members = 其中 `is_rc003` 的数量。
+    fn host_membership(pid: u32) -> Option<(usize, usize)> {
+        let scan = enum_hosts().ok()?;
+        let members: Vec<&HostEntry> = scan.entries.iter().filter(|e| e.pid == pid).collect();
+        let rc003_members = members.iter().filter(|e| e.is_rc003).count();
+        Some((members.len(), rc003_members))
     }
 
     /// 结束旧宿主后"新宿主"的选择判据（纯函数，单测 + 自检覆盖）。
@@ -1027,20 +1107,86 @@ mod imp {
     }
 
     /// stale 分支入口：条件满足就后台自动刷新宿主里的 agent（不阻塞连接线程）。
+    ///
+    /// 2026-10-14 加固（外部报障"设备约每小时中断一次"复核）：
+    /// - **独占闸门**：共享宿主一律跳过（不写尝试记录，宿主恢复独占后仍可再试）；
+    /// - **每组合一次**：同一"旧代→内嵌代"组合只自动刷新一次，之后只落折叠日志。
     fn spawn_agent_refresh_if_needed(running_build: &str, host_pid: u32, logger: &Logger) {
         let Some(dll) = PREPARED_GADGET_DLL.get().cloned() else {
             return; // 本轮没准备好 DLL（dry-run / 自检路径），不刷新
         };
         let dir = dll.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let last = read_refresh_stamp(&dir);
-        if !should_auto_refresh_agent(is_elevated(), running_build, AGENT_BUILD, last, now_unix()) {
+        let mut stamp = read_refresh_stamp(&dir);
+        let key = refresh_attempt_key(running_build, AGENT_BUILD);
+        let already_attempted = stamp.tried.iter().any(|tried| tried == &key);
+        if !should_auto_refresh_agent(
+            is_elevated(),
+            running_build,
+            AGENT_BUILD,
+            already_attempted,
+            stamp.last_refresh_unix,
+            now_unix(),
+        ) {
+            if already_attempted {
+                log_refresh_skipped_already_attempted(logger, running_build, host_pid);
+            }
             return;
         }
-        write_refresh_stamp(&dir, now_unix());
+        // 独占闸门在写记录**之前**：共享宿主跳过时不留痕，宿主变独占后可再刷新。
+        let Some((members, rc003_members)) = host_membership(host_pid) else {
+            logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "skipped".into()),
+                    ("reason", "host_scan_failed".into()),
+                    ("host_pid", host_pid.to_string()),
+                ],
+            );
+            return;
+        };
+        if !should_refresh_stale_agent_host(members, rc003_members) {
+            logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "skipped".into()),
+                    ("reason", "shared_host".into()),
+                    ("host_pid", host_pid.to_string()),
+                    ("members", members.to_string()),
+                    ("rc003_members", rc003_members.to_string()),
+                ],
+            );
+            return;
+        }
+        stamp.last_refresh_unix = Some(now_unix());
+        stamp.tried.push(key);
+        write_refresh_stamp(&dir, &stamp);
         let logger = logger.fork();
         let _ = std::thread::Builder::new()
             .name("sayall-helper-agent-refresh".into())
             .spawn(move || refresh_agent_in_host(host_pid, &dll, &logger));
+    }
+
+    /// 同一组合已被尝试过：不再自动刷新，只折叠落日志（前 3 条 + 每 30 条一条）。
+    static REFRESH_SKIPS: AtomicU64 = AtomicU64::new(0);
+
+    fn log_refresh_skipped_already_attempted(logger: &Logger, running_build: &str, host_pid: u32) {
+        let n = REFRESH_SKIPS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 3 || n % 30 == 0 {
+            logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "skipped".into()),
+                    ("reason", "already_attempted_once".into()),
+                    ("running", running_build.to_string()),
+                    ("embedded", AGENT_BUILD.to_string()),
+                    ("host_pid", host_pid.to_string()),
+                    ("total", n.to_string()),
+                ],
+            );
+        }
     }
 
     /// 自动刷新：结束旧宿主 → 等新宿主跟上设备 → 重新注入 gadget。
@@ -4840,8 +4986,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 // 不打这一条，现象是"日志一切正常，但行为还是旧的"——最难查的一类。
                 let build = extract_str(line, "build").unwrap_or_default();
                 if !build.is_empty() && build != AGENT_BUILD {
-                    // 旧代 agent 不会自愈（脚本在宿主里只加载一次）：满足冷却与提权
-                    // 条件时后台刷新一次——结束旧宿主、等新宿主、重新注入。
+                    // 旧代 agent 不会自愈（脚本在宿主里只加载一次）：满足提权/独占
+                    // 闸门、冷却与"每组合一次"条件时后台刷新——结束旧宿主、等新
+                    // 宿主、重新注入。
                     spawn_agent_refresh_if_needed(
                         &build,
                         extract_num(line, "pid").unwrap_or(0) as u32,
@@ -4859,9 +5006,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             (
                                 "note",
                                 "宿主里跑的是上一代脚本（本轮接管的是旧实例）。\
-                                助手已尝试自动刷新（结束旧宿主 → 等新宿主 → 重新注入）；
-                                自动刷新受冷却限制，失败时会重试。若仍反复出现，
-                                可重启机器或以管理员结束该 WUDFHost 进程。\
+                                同一代次组合只自动刷新一次（结束旧宿主 → 等新宿主 → 重新注入）；
+                                共享宿主不刷新（见 [AGENT-REFRESH] reason=shared_host）。\
+                                若本条持续出现而功能未恢复，可重启机器或以管理员结束该 WUDFHost 进程。\
                                  另一条会因租约过期停清键，不适合做验收判据。"
                                     .into(),
                             ),
@@ -8821,22 +8968,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     #[cfg(test)]
     mod agent_refresh_tests {
-        use super::{should_auto_refresh_agent, AGENT_REFRESH_COOLDOWN_SECS};
+        use super::{
+            format_refresh_stamp, parse_refresh_stamp, refresh_attempt_key,
+            should_auto_refresh_agent, should_refresh_stale_agent_host, AgentRefreshStamp,
+            AGENT_REFRESH_COOLDOWN_SECS,
+        };
 
         #[test]
         fn refresh_only_when_stale_elevated_and_outside_cooldown() {
             let now = 1_000_000_u64;
             // 代次一致 / 提权不足 / 代次未知：都不刷新。
-            assert!(!should_auto_refresh_agent(true, "a", "a", None, now));
-            assert!(!should_auto_refresh_agent(false, "old", "new", None, now));
-            assert!(!should_auto_refresh_agent(true, "", "new", None, now));
+            assert!(!should_auto_refresh_agent(true, "a", "a", false, None, now));
+            assert!(!should_auto_refresh_agent(
+                false, "old", "new", false, None, now
+            ));
+            assert!(!should_auto_refresh_agent(
+                true, "", "new", false, None, now
+            ));
             // 首次 stale：刷新。
-            assert!(should_auto_refresh_agent(true, "old", "new", None, now));
+            assert!(should_auto_refresh_agent(
+                true, "old", "new", false, None, now
+            ));
             // 冷却内：不刷新；冷却外：刷新。
             assert!(!should_auto_refresh_agent(
                 true,
                 "old",
                 "new",
+                false,
                 Some(now - (AGENT_REFRESH_COOLDOWN_SECS - 1)),
                 now
             ));
@@ -8844,9 +9002,75 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 true,
                 "old",
                 "new",
+                false,
                 Some(now - AGENT_REFRESH_COOLDOWN_SECS),
                 now
             ));
+        }
+
+        #[test]
+        fn same_build_pair_is_never_refreshed_twice() {
+            // 2026-10-14：同一"旧代→内嵌代"组合只自动刷新一次——刷新后仍不
+            // 收敛时不再等冷却反复结束宿主（原行为会变成每小时杀一次宿主）。
+            let now = 1_000_000_u64;
+            let long_after = now + AGENT_REFRESH_COOLDOWN_SECS * 24;
+            assert!(!should_auto_refresh_agent(
+                true, "old", "new", true, None, long_after
+            ));
+            assert!(!should_auto_refresh_agent(
+                true,
+                "old",
+                "new",
+                true,
+                Some(now),
+                long_after
+            ));
+            // 没有尝试记录时仍按冷却节奏走（阳性对照：不能把开关写死成"永不刷新"）。
+            assert!(should_auto_refresh_agent(
+                true, "old", "new", false, None, now
+            ));
+        }
+
+        #[test]
+        fn refresh_stamp_roundtrips_and_accepts_legacy_timestamp() {
+            // 空文件 = 无记录。
+            assert_eq!(parse_refresh_stamp(""), AgentRefreshStamp::default());
+            // 旧格式（仅单个 unix 秒）：只恢复"上次刷新时刻"，尝试记录为空——
+            // 无法证明旧记录刷的就是当前组合，因此仍允许该组合的一次自动刷新。
+            assert_eq!(
+                parse_refresh_stamp("1730000000\n"),
+                AgentRefreshStamp {
+                    last_refresh_unix: Some(1_730_000_000),
+                    tried: Vec::new(),
+                }
+            );
+            // 新格式：last_refresh + tried 多行，roundtrip 稳定。
+            let mut stamp = AgentRefreshStamp::default();
+            stamp.last_refresh_unix = Some(1_730_000_100);
+            stamp.tried.push(refresh_attempt_key("old-a", "new-b"));
+            stamp.tried.push(refresh_attempt_key("old-c", "new-b"));
+            let text = format_refresh_stamp(&stamp);
+            assert_eq!(parse_refresh_stamp(&text), stamp);
+            // 键包含两侧代次：任一版本变化都会得到新键（允许一次新的自动刷新）。
+            assert_ne!(
+                refresh_attempt_key("old", "new"),
+                refresh_attempt_key("old2", "new")
+            );
+            assert_ne!(
+                refresh_attempt_key("old", "new"),
+                refresh_attempt_key("old", "new2")
+            );
+        }
+
+        #[test]
+        fn shared_host_is_never_auto_refreshed() {
+            // 硬性安全闸：共享宿主同时承载用户别的 BLE 设备，结束它会一起弄掉
+            // （判据与 should_restart_host_for_clean_inject 的 members 闸门同源）。
+            assert!(should_refresh_stale_agent_host(1, 1));
+            assert!(!should_refresh_stale_agent_host(2, 1));
+            assert!(!should_refresh_stale_agent_host(2, 2));
+            assert!(!should_refresh_stale_agent_host(1, 0));
+            assert!(!should_refresh_stale_agent_host(0, 0));
         }
     }
 

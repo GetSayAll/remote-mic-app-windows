@@ -152,6 +152,9 @@ if (found.length === 0) return;      // ← 只含哨兵键的报告在这里就
 接管旧 tap——握手正常、命令照发、日志漂亮，只是行为还是旧的。所以新增了 `AGENT_BUILD`
 代次：接管到旧实例时日志会打 `[AGENT-STALE] running=… embedded=…`。
 **看到这一条，就必须先让宿主换新（重启机器最稳），再重跑验收，否则又是白跑一轮。**
+（2026-10-14 起助手会自动换代：同一"旧代→内嵌代"组合只自动刷新一次、共享宿主
+不刷新——`[AGENT-REFRESH]` 以 `requested`+`completed` 成对出现，跳过时带
+`terminal_result=skipped reason=shared_host|host_scan_failed|already_attempted_once`。）
 
 **修复已在真机上验证（2026-09-26 21:48，见 §3.1）**：`canary_hits` 会随主页键增长、
 `clears_ok` 从 0 涨到 14，同一轮里"未武装 → 武装"的对照闭合，E2 判据成立。
@@ -480,6 +483,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[HELLO]` | `auth` `pid` `agent` **`build`（脚本代次）** `mode` `restore` `lease_ms` |
 | `[REJECT]` | `reason=token_mismatch\|host_pid_mismatch` `total` `agent_pid` `target_pid`（折叠：前 3 条 + 每 30 条一条；`host_pid_mismatch` = 另一支同型号遥控器宿主里的残留 agent 在重连，见 §10） |
 | `[AGENT-STALE]` | `running` `embedded` `host_pid` —— **出现即表示本轮接管的是旧脚本，新逻辑不会生效**（见 §0.1） |
+| `[AGENT-REFRESH]` | `phase=requested\|completed`；completed 可带 `terminal_result=skipped reason=shared_host\|host_scan_failed\|already_attempted_once` —— 同一代次组合只自动刷新一次、共享宿主不刷新（2026-10-14） |
 | `[TOKEN]` | `source=file\|generated\|explicit` |
 | `[PREP]` | `dll` `action=reuse\|overwrite\|skip_copy_attaching_existing_tap` `reason` |
 | `[TAP]` / `[ATTACH]` | 宿主内已有 tap 的路径 / 接管决定（`skip_injection`） |

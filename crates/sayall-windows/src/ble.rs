@@ -584,9 +584,6 @@ fn worker_loop(
     // 17:35 实测：用户失败后 0.7s 即再按）。阶梯线程在关键点核对
     // armed 时的纪元，不符即退出，让新会话自带的新一轮检测接管。
     let voice_session_epoch: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    // 僵死链路自动恢复预算：每个窗口最多两次，冷却后自动开启下一窗口；
-    // 成功连接、主动断开或系统恢复时重置，不能永久退化成普通重连。
-    let mut radio_recovery = crate::bluetooth_radio::RadioRecoveryBudget::default();
     // 资源探针（2026-09-16）：判定 0x80070008 成因的必要证据，见
     // resource_probe 模块头部的判读方法。
     let mut resource_probe = crate::resource_probe::ResourceProbe::default();
@@ -678,105 +675,19 @@ fn worker_loop(
                                             &mut reconnect_deadline,
                                             &user_facing_connection_error(&error, true),
                                         );
-                                        // 僵死链路自动恢复（2026-09-05 真机取证：
-                                        // 应用强杀后 OS 侧链路/缓存可能僵死，普通
-                                        // 重试永不恢复，公开 API 中只有关开蓝牙
-                                        // 无线电能触达修复；调研与验证见
-                                        // ATTRIBUTION.md 与 Testing\investigation）。
-                                        // 连续失败达标时执行；每窗口限制次数，耗尽后
-                                        // 冷却再开新窗口，避免永久退化成无限普通重连。
-                                        //
-                                        // 按错误码分流（2026-09-16，A/B 对照结论）：
-                                        // 僵死态（`windows_resource_exhausted` /
-                                        // `winrt_operation_aborted`）下无线电 Off/On 与
-                                        // 提权 PnP 重启**都已实测无效**——143 次 Off/On
-                                        // 「执行成功」后连接仅恢复 3 次（2.10%），与不开关
-                                        // 的对照组（0.62%）统计上无差异（[-0.01pp]，
-                                        // 双比例 z=-0.022 / p=0.982）。原因是启动预热
-                                        // 缓存的 Radio 对象让 Off/On 命中缓存而未触达
-                                        // 真实蓝牙栈。继续开关只会空转，还会在 PnP 分支
-                                        // 弹 UAC。此态只保留普通重连。
-                                        // 其余故障（遥控器不可达、GATT 状态失败、超时等）
-                                        // 仍走 Off/On——那是无线电恢复唯一还可能有效的
-                                        // 场景，兜底必须保留。
-                                        //
-                                        // 证据与复算：ATTRIBUTION.md「2026-09-16 A/B
-                                        // 对照」；脚本 scripts/analyze-radio-recovery-ab.py；
-                                        // 判读标准 Testing/WindowsBleResourceRecovery.md。
+                                        // 2026-10-14 产品决策：已移除"连续失败后关开蓝牙
+                                        // 无线电"的自动恢复——它会一次断开用户全部蓝牙
+                                        // 设备（报障现象：「整个蓝牙周期性中断」），而历史
+                                        // A/B（ATTRIBUTION.md「2026-09-16 A/B 对照」）
+                                        // 从未证明其收益。僵死态与普通失败一样只按既有
+                                        // 退避持续重连；僵死态的用户文案在
+                                        // `user_facing_connection_error` 内分流（见下）。
                                         let error_code = ble_error_code(&error);
                                         if crate::bluetooth_radio::is_stack_exhausted(error_code) {
                                             gatt_note(format!(
-                                                "ble_recovery_decision action=skip_recovery reason=stack_exhausted_proven_ineffective error_code={error_code} consecutive_failures={} radio_cycle=skipped pnp_restart=skipped",
+                                                "ble_failure_class action=persistent_retry reason=stack_exhausted error_code={error_code} consecutive_failures={}",
                                                 backoff.attempt()
                                             ));
-                                            // 不提示「重启电脑」：那不是用户该承担的动作
-                                            // （2026-09-16 用户明确否决）。只陈述当前状态，
-                                            // 并说明应用仍在自动重试。
-                                            lock(&state).last_error = Some(
-                                                "蓝牙链路暂时不可用，正在持续重试…".to_owned(),
-                                            );
-                                            // 刻意**不**调用 `begin_cycle`：僵死态下连
-                                            // 「低频试探」也没有收益证据，留着只会继续弹
-                                            // UAC。普通重连仍按既有退避继续。
-                                        } else if let Some(recovery_cycle) = radio_recovery
-                                            .begin_cycle(backoff.attempt(), Instant::now())
-                                        {
-                                            if recovery_cycle.reopened {
-                                                gatt_note(format!(
-                                                    "ble_radio_recovery phase=window_reopened window={} cooldown_ms={}",
-                                                    recovery_cycle.window,
-                                                    crate::bluetooth_radio::RADIO_RECOVERY_RETRY_COOLDOWN.as_millis()
-                                                ));
-                                            }
-                                            gatt_note(format!(
-                                                "ble_radio_recovery phase=requested consecutive_failures={} window={} cycle={} max_cycles={}",
-                                                backoff.attempt(),
-                                                recovery_cycle.window,
-                                                recovery_cycle.cycle,
-                                                crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES
-                                            ));
-                                            {
-                                                let mut snapshot = lock(&state);
-                                                snapshot.last_error = Some(format!(
-                                                    "连续 {} 次重连失败，正在自动重启蓝牙无线电以清除僵死链路（恢复窗口 {}，第 {}/{} 次）…",
-                                                    backoff.attempt(),
-                                                    recovery_cycle.window,
-                                                    recovery_cycle.cycle,
-                                                    crate::bluetooth_radio::RADIO_RECOVERY_MAX_CYCLES,
-                                                ));
-                                            }
-                                            match crate::bluetooth_radio::cycle_bluetooth_radio() {
-                                                Ok(()) => {
-                                                    gatt_note(format!(
-                                                        "ble_radio_recovery phase=completed terminal_result=passed window={} cycle={} retry_delay_ms=2000",
-                                                        recovery_cycle.window,
-                                                        recovery_cycle.cycle
-                                                    ));
-                                                    lock(&state).last_error = Some(
-                                                        "蓝牙无线电已重启，正在重新连接小米语音遥控器…"
-                                                            .to_owned(),
-                                                    );
-                                                }
-                                                Err(radio_error) => {
-                                                    gatt_note(format!(
-                                                        "ble_radio_recovery phase=completed terminal_result=failed window={} cycle={} error_domain=bluetooth_radio error_code=cycle_failed retryable=true",
-                                                        recovery_cycle.window,
-                                                        recovery_cycle.cycle
-                                                    ));
-                                                    lock(&state).last_error = Some(format!(
-                                                        "蓝牙自动恢复本轮未成功：{radio_error}。应用会继续自动重连并在冷却后再次恢复，无需手动开关蓝牙。"
-                                                    ));
-                                                }
-                                            }
-                                            // 无论成功失败：重置退避节奏并快速重试，
-                                            // 避免在已恢复的链路上继续长间隔等待。
-                                            backoff.reset();
-                                            {
-                                                let mut snapshot = lock(&state);
-                                                snapshot.reconnect_attempt = 0;
-                                            }
-                                            reconnect_deadline =
-                                                Some(Instant::now() + Duration::from_secs(2));
                                         }
                                     }
                                 }
@@ -863,14 +774,12 @@ fn worker_loop(
                     reconnect_deadline = None;
                     capabilities_deadline = None;
                     backoff.reset();
-                    radio_recovery.reset();
                 }
                 preferred_device_id = Some(device_id.clone());
                 system_suspended = false;
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
-                radio_recovery.reset();
                 let result = attempt_connection(
                     &device_id,
                     false,
@@ -920,7 +829,6 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
-                radio_recovery.reset();
                 let result = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -954,7 +862,6 @@ fn worker_loop(
                 let remote_token = Some(crate::device_token(&device_id));
                 preferred_device_id = Some(device_id);
                 backoff.reset();
-                radio_recovery.reset();
                 reconnect_deadline = None;
                 let snapshot = if system_suspended {
                     ConnectionSnapshot {
@@ -1108,7 +1015,6 @@ fn worker_loop(
                     }
                     if phase == ConnectionPhase::Ready {
                         backoff.reset();
-                        radio_recovery.reset();
                         lock(&state).reconnect_attempt = 0;
                     }
                     if phase == ConnectionPhase::Failed {
@@ -1311,7 +1217,6 @@ fn worker_loop(
                 }
                 system_suspended = false;
                 backoff.reset();
-                radio_recovery.reset();
                 if preferred_device_id.is_some() {
                     reconnect_deadline = Some(Instant::now());
                     let previous = lock(&state).clone();
@@ -1456,7 +1361,6 @@ fn attempt_connection(
             return Err(error);
         }
     };
-    crate::bluetooth_radio::refresh_bluetooth_radio_cache();
     let snapshot = ConnectionSnapshot {
         phase: ConnectionPhase::AwaitingCapabilities,
         remote_name: Some(connected.name.clone()),
@@ -1649,6 +1553,12 @@ fn keep_reconnecting_after_cleanup_failure(
 /// 返回半句话（不含重试计划），由 `schedule_reconnect` 追加
 /// "；将在 N 秒后进行第 N 次重连"。
 fn user_facing_connection_error(error: &PlatformError, reconnecting: bool) -> String {
+    // 蓝牙栈僵死态（2026-09-16 判定；2026-10-14 起不再有任何自动恢复动作，
+    // 与普通失败一样只按退避持续重连）：文案只陈述状态，不承诺"重启蓝牙/
+    // 重启电脑"，也不把系统级动作推给用户。
+    if reconnecting && crate::bluetooth_radio::is_stack_exhausted(ble_error_code(error)) {
+        return "蓝牙链路暂时不可用，正在持续重试…".to_owned();
+    }
     // 按 GATT 状态语义分流。未带分类标记的 `PlatformError::Gatt`
     // （如"特征不支持 Notify 或 Indicate"）走默认分支，保留技术描述。
     if let Some(kind) = gatt_status_kind(error) {
