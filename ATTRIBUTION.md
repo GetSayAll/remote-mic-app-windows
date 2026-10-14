@@ -119,6 +119,13 @@
 
 ## BLE 僵死链路自动恢复调研来源（2026-09-05，重连健壮性专项）
 
+### 2026-10-14 蓝牙鼠标共存与连接参数读回
+
+- Microsoft `BluetoothLEPreferredConnectionParameters.ThroughputOptimized` 说明该模式提高吞吐、增加功耗，并减少其他蓝牙设备的并发连接容量：<https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothlepreferredconnectionparameters.throughputoptimized>。
+- Microsoft `BluetoothLEDevice.RequestPreferredConnectionParameters` 建议只在需要高吞吐的时段持有请求，并在多外设场景考虑更保守的参数；`GetConnectionParameters` 返回系统合并后的实际连接参数，须与请求返回结果分开观察：<https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothledevice.requestpreferredconnectionparameters>、<https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothledevice.getconnectionparameters>。
+- Microsoft `BluetoothLEDevice.ConnectionParametersChanged` 在连接参数变化时发出事件：<https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothledevice.connectionparameterschanged>。
+- 本轮只用公开 WinRT `ConnectionParametersChanged` / `GetConnectionParameters` 增加遥控器链路读回与生命周期日志，未复制外部代码，未改连接参数策略。旧版 MX Anywhere 3 报障缺同一时刻日志，不能据此认定该参数是鼠标卡住的根因；先验收已合入的无线电恢复删除（`74aa3bb`），见 `Bugs/2026-10-14-bluetooth-mouse-freeze.md`。
+
 场景：应用被强杀（未走正常关闭）后 Windows 侧残留僵死 GATT/HID 链路或服务缓存，普通重试永不恢复（本机真机取证：CCCD 订阅写入 E_ABORT、HID 接口从系统消失；examples\radio_probe 与 examples\gatt_snoop 探针复现）。已实现 `bluetooth_radio.rs` 自动恢复：重连连续失败达阈值时关开蓝牙无线电；每窗口最多 2 次并在 60 秒冷却后重开窗口，避免无限普通重连；应用启动时预取 Radio 对象与权限，避免故障发生后 WinRT 枚举自身也返回 `0x80070008`。2026-09-13 依据微软 `Close` 所有权边界与 MS Q&A 99038 的 service/device 成对释放结论，进一步补齐连接构建中途失败的全量显式清理；此前仅订阅后期分支清理，会让普通重试自身可能累积 WinRT BLE 资源。真机验证：系统栈健康时无线电开关周期后重连循环立即成功（Testing\investigation\sayall-gatt-20260905-live.log T/C 能力交换取证）；预热缓存和失败路径清理版僵死态仍待安装包复验。**2026-10-14 更新：整套"自动关开蓝牙无线电"（含 PnP 重启回退）已按产品决策移除**——该动作会断开用户全部蓝牙设备（现场报障「整个蓝牙周期性中断」），失败路径改为只按退避持续重连；僵死态文案与分类日志保留，见 `crates/sayall-windows/src/bluetooth_radio.rs` 模块头。关键参考：
 
 - **微软官方 GATT 客户端文档**（Dispose 后系统"小超时"自动断开、重建设备对象按需重连；BluetoothLEDevice.Close 仅当本应用是唯一持有者才关连接；GATT 连接/发现可能因系统队列等待数分钟且当前不能取消）：`learn.microsoft.com/windows/apps/develop/devices-sensors/gatt-client`、`learn.microsoft.com/uwp/api/windows.devices.bluetooth.bluetoothledevice.close`
