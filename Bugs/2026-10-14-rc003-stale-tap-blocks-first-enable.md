@@ -127,18 +127,36 @@
 - 主仓：`cargo test --workspace`（`sayall-windows` 350 + `sayall-windows-app` 112 + 集成 2 项全过）；
   `cargo check --workspace`；`cargo check -p sayall-windows-app --features runtime-simulation`；
   `cargo fmt --all -- --check`；`scripts/ci-preflight.ps1` **7 步全过**（与 push 后 CI 的对应步骤等价）。
-- 真机验收（deferred，待出本地测试包后执行）：
-  1. 覆盖安装（遥控器连着、不重启系统）：应见 `[CLEANUP] host_release=terminating → released`、
-     运行时目录删净；随后首次启用**不再**出现 `[STALE-TAP]`，语音键即使按得快也不失败。
-  2. 用旧构建制造"宿主残留旧 tap + 无令牌文件"现场后换新构建启用：应见
-     `[STALE-TAP] action=auto_recover_stale_tap` → `[ATTACH] reason=no_reusable_token` →
-     `restart_host_clean_inject` → 新宿主注入；恢复窗口 ≈3 秒（旧行为 ~12.5 秒，且要再等
-     最长 30 秒的对账 tick 才触发第二次尝试）。
+- 真机验收（旧计划措辞已被本轮实证修正，见下）：~~覆盖安装应见 host_release~~ ——
+  **静默覆盖安装不会触发卸载清理**（实证：无 `[STOP-SIGNAL]` / `[CLEANUP]` / `--uninstall-cleanup` 运行）；
+  原 bug 的"无令牌 + 残留"组合来自**卸载 / 重装**路径。
+
+**RC003 真机（2026-10-14 晚，passed）**：
+
+- 环境：本地测试包 `无线麦 SayAll_0.8.6_x64-setup.exe`（SHA-256 `AE698F9B…4B62`，
+  内嵌修订 `3acebc3`）；安装后 `sayall-helper.exe` 与构建产物哈希逐字节一致、gadget 哈希与锁一致、
+  app exe 与构建产物仅差 3 字节（已知良性 bundle 标记）；`verify-frontend-embedded.ps1` 10/10
+  （阴性对照按预期失败）。
+- **修复 1 现场（passed）**：构造"无令牌文件 + 宿主残留旧 tap"（操作序列：首次启用 → 助手正常
+  接管 → 关闭开关触发助手自清删除运行时令牌 → 再次启用）。再启用时：
+  `[STALE-TAP] action=auto_recover_stale_tap`（23:13:27.085 本地）→ `[ATTACH] verify=failed
+  reason=no_reusable_token action=restart_host_clean_inject`（**不等 8 秒核验窗口**）→
+  `[HOST] terminate_stale_tap_host pid=43756` → `[CLEANUP] device_recover=ok` →
+  `[HOST] new_host_ready pid=40688` → `[INJECT]` → `[HELLO] auth=true` → `ownership_resumed`
+  （23:13:30.236）。**恢复窗口 3.1 秒、全程无人工**（旧行为：退出码 13 + 提示重配对/禁用启用/重启
+  + 最长 30 秒对账等待 + ~12 秒恢复）。
+- **恢复后首按即成功（passed）**：用户按住语音键一次——`[AGENT] synth:frame replace ok to=0xe6`
+  + `voice_effect result=replaced` + `voice_verify … mic=observed`（session 35），文字上屏（用户确认）。
+
+**仍 deferred**：
+- 修复 2 的直接真机验证（"卸载 / 版本升级时 `--uninstall-cleanup` 先启用 SeDebug → 应见
+  `[CLEANUP] host_release=terminating → released`、运行时目录删净"）：本轮未走到该路径
+  （覆盖安装不触发清理）；建议下一次卸载或版本升级时用日志核对。
+- `AttachStale` 在"旧 agent 从不重连"下的快速升级：判据已自动化；真机构造依赖旧 agent 静默现场。
 
 ## 未覆盖边界
 
-- 真机验收：见上（`deferred`，需本地测试包 + RC003 真机）。
-- `AttachStale` 在"旧 agent 从不重连"下的快速升级：自动化覆盖判据；真机构造该窗口（deferred）。
+- 修复 2 真机路径与"旧 agent 不重连"窗口：见上（`deferred`）。
 - "停用自清"不释放宿主的决策理由见「修复——评估后不做」；若将来再出现"安装器清理同样失败"
   的残余现场，再评估该路径。
 
