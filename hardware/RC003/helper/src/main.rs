@@ -8865,9 +8865,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     mod target_address_tests {
         use super::*;
 
-        /// 目标地址解析：只认 `version=1` + 12 位十六进制；半截 / 旧版 / 0 一律 `None`
-        /// （带歪过滤条件比不带更糟：会去注入另一支遥控器的宿主）。
-        #[test]
         /// 2026-10-13 现场：换遥控器后助手要自动重选宿主——判据是"目标地址变成
         /// 另一个已能解析出宿主的值"。断开（清空目标）不动手，重复值不动手。
         /// `R` 行（"立即重选宿主"）只认裸行：带载荷的行不当成请求，避免把别的
@@ -8943,6 +8940,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert_eq!(host_pid_for_address(&entries, 0x0011_2233_4455_66), None);
         }
 
+        /// 目标地址解析：只认 `version=1` + 12 位十六进制；半截 / 旧版 / 0 一律 `None`
+        /// （带歪过滤条件比不带更糟：会去注入另一支遥控器的宿主）。
+        #[test]
         fn target_body_requires_its_own_version_and_a_full_address() {
             let address = 0x00C0_5D39_C2D9_DBu64;
             assert_eq!(
