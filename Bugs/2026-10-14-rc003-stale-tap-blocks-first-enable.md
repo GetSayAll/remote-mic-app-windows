@@ -148,15 +148,18 @@
 - **恢复后首按即成功（passed）**：用户按住语音键一次——`[AGENT] synth:frame replace ok to=0xe6`
   + `voice_effect result=replaced` + `voice_verify … mic=observed`（session 35），文字上屏（用户确认）。
 
-**仍 deferred**：
-- 修复 2 的直接真机验证（"卸载 / 版本升级时 `--uninstall-cleanup` 先启用 SeDebug → 应见
-  `[CLEANUP] host_release=terminating → released`、运行时目录删净"）：本轮未走到该路径
-  （覆盖安装不触发清理）；建议下一次卸载或版本升级时用日志核对。
-- `AttachStale` 在"旧 agent 从不重连"下的快速升级：判据已自动化；真机构造依赖旧 agent 静默现场。
+- **修复 2 直接验证（passed，2026-10-14 晚，操作人执行卸载/重装）**：卸载清理实例 24980
+  （elevated，`--uninstall-cleanup`）在"dll 被宿主映射"时：`[CLEANUP] host_release=terminating
+  gadget_maps=1` → `host_release=released` → 复删 `files_deleted=1 files_pending_reboot=0
+  dirs_deleted=2` → `device_recover=ok` → **`已清理运行时目录（删除了 2 个目录 / 1 个文件）`**
+  ——宿主被结束、dll 当场删掉、无待重启残留（旧行为：`GetLastError=5` 跳过释放、dll 留待重启、
+  宿主带旧 tap 留下）；随后全新安装正常启动。
+- `AttachStale` 在"旧 agent 从不重连"下的快速升级：判据已自动化；真机构造依赖旧 agent 静默现场
+  （`deferred`）。
 
 ## 未覆盖边界
 
-- 修复 2 真机路径与"旧 agent 不重连"窗口：见上（`deferred`）。
+- `AttachStale`"旧 agent 不重连"窗口：见上（`deferred`）。
 - "停用自清"不释放宿主的决策理由见「修复——评估后不做」；若将来再出现"安装器清理同样失败"
   的残余现场，再评估该路径。
 
