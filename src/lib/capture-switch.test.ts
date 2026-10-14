@@ -3,6 +3,7 @@ import {
   captureFailureText,
   captureInactiveText,
   captureSwitchState,
+  normalizeCaptureHealth,
   shouldShowCaptureInactive,
 } from "./capture-switch";
 

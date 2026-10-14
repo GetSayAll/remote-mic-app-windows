@@ -1629,6 +1629,74 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
+  // 2026-10-14 现场：`voice.no_transcript` 不总是"麦克风 / 工具配置错"——「支持更多输入工具」
+  // 未生效时豆包收不到报告层合成出的语音键，失败解释按**失败瞬间**的捕获状态分流。
+  it("no_transcript 失败 + 捕获状态 starting：解释为「还在准备中」", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "starting" }),
+    );
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200); // 开始帧（streaming）
+    await vi.advanceTimersByTimeAsync(200); // 收尾帧 → waiting_transcript
+    await vi.advanceTimersByTimeAsync(3_200); // 转写窗口（3 秒）到期 → no_transcript
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("还在准备中");
+    expect(wrapper.text()).toContain("“支持更多输入工具”");
+    expect(wrapper.text()).not.toContain("语音链路正常");
+    wrapper.unmount();
+  });
+
+  it("no_transcript 失败 + 捕获状态 inactive：给出「关掉再打开」指引", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "inactive" }),
+    );
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(3_200);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("还没有生效");
+    expect(wrapper.text()).toContain("关掉再打开");
+    expect(wrapper.text()).not.toContain("语音链路正常");
+    wrapper.unmount();
+  });
+
   it("clears the box and re-arms a fresh attempt on retry", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
