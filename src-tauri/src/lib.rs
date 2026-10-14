@@ -3272,11 +3272,9 @@ pub fn run() {
                     saved_settings.launch_at_login
                 ));
             }
-            // Radio::RequestAccessAsync 可能显示系统授权，微软要求从可交互的 UI
-            // 上下文调用。setup 线程在创建 BLE 后台线程前预热并缓存 Radio，
-            // 使蓝牙栈资源耗尽时仍能自动关开无线电，而不是再依赖失败的枚举。
-            #[cfg(all(windows, not(feature = "runtime-simulation")))]
-            sayall_windows::prepare_bluetooth_radio_recovery();
+            // 2026-10-14：原先在此预热并缓存 Radio 对象（供自动关开无线电
+            // 恢复使用）。该机制已按产品决策移除（会断开全部蓝牙设备），
+            // 不再预热、不再请求无线电控制权限。
             let platform = create_platform();
             let button_mappings = match settings.load_button_mappings() {
                 Ok(mappings) => {
