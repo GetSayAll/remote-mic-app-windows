@@ -12,9 +12,16 @@ import {
 } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
+import { settingsComponent as commonPhrasesSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ "restart-onboarding": [] }>();
+
+/**
+ * 常用语设置区（可选私有组件）：公开空壳返回 null → 不渲染区块；
+ * 私有构建注入后渲染常用语管理页（会员门禁提示由组件内部处理）。
+ */
+const commonPhrasesSettings = commonPhrasesSettingsComponent();
 
 const {
   phase,
@@ -494,6 +501,12 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
         </div>
         <p v-if="appIconError" class="error-text" role="alert">{{ appIconError }}</p>
       </div>
+    </section>
+
+    <!-- 常用语（可选私有组件；缺组件时整块不渲染——公开构建隐藏入口）。 -->
+    <section v-if="commonPhrasesSettings" class="settings-section">
+      <h2 class="section-title">常用语</h2>
+      <component :is="commonPhrasesSettings" />
     </section>
 
     <!-- 首次设置（向导重跑入口）：老用户机器已标记完成，需要入口才能重走一遍。 -->

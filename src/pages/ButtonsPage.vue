@@ -25,6 +25,7 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
+  getCommonPhrasePanelSnapshot,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   identityShortcutByButton,
@@ -34,6 +35,7 @@ import {
   mouseClickLabels,
   mouseMoveLabels,
   pickCustomApp,
+  registerCommonPhraseAvailability,
   registerPresetAppNames,
   remoteModelLabel,
   resetButtonMappings,
@@ -222,6 +224,8 @@ const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
+/** 常用语组件是否可用（页面加载快照后更新；不可用时不显示动作入口）。 */
+const commonPhrasesAvailable = ref(false);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -1680,16 +1684,20 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps] = await Promise.all([
+  const [loaded, snapshot, apps, commonPhrases] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    getCommonPhrasePanelSnapshot(),
   ]);
   if (unmounted) {
     return;
   }
   presetApps.value = apps.filter((app) => app.installed);
   registerPresetAppNames(presetApps.value);
+  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
+  commonPhrasesAvailable.value = commonPhrases.available;
+  registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -2130,6 +2138,21 @@ onUnmounted(() => {
               @click="applyAction({ type: 'focus_input' })"
             >
               聚焦输入框
+            </button>
+          </div>
+        </section>
+
+        <section v-if="commonPhrasesAvailable" class="action-section">
+          <h4 class="action-section-title">常用语</h4>
+          <div class="preset-grid">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
+              type="button"
+              title="打开常用语面板，按方向键和 OK 键插入对应常用语"
+              @click="applyAction({ type: 'open_common_phrases' })"
+            >
+              打开常用语
             </button>
           </div>
         </section>

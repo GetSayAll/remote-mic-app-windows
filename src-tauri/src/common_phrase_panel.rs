@@ -181,6 +181,8 @@ pub struct CommonPhrasePanelSnapshot {
     pub available: bool,
     pub access: &'static str,
     pub can_use: bool,
+    /// 一次性失败提示的原因 key（读取即消费；界面按 key 分叉文案）。
+    pub notice: Option<String>,
     pub entries: Vec<CommonPhrasePanelEntryWire>,
 }
 
@@ -202,11 +204,14 @@ fn access_label(access: CommonPhraseAccess) -> &'static str {
 
 #[tauri::command]
 pub fn common_phrase_panel_snapshot() -> CommonPhrasePanelSnapshot {
+    // 可用性统一走 `is_available()`（空壳与私有注入共用同一口径）。
+    let available = is_available();
     match host() {
         Some(host) => CommonPhrasePanelSnapshot {
-            available: true,
+            available,
             access: access_label(host.access()),
             can_use: host.can_use(),
+            notice: host.take_panel_notice(),
             entries: host
                 .panel_entries()
                 .into_iter()
@@ -219,18 +224,21 @@ pub fn common_phrase_panel_snapshot() -> CommonPhrasePanelSnapshot {
                 .collect(),
         },
         None => CommonPhrasePanelSnapshot {
-            available: false,
+            available,
             access: "unavailable",
             can_use: false,
+            notice: None,
             entries: Vec::new(),
         },
     }
 }
 
 #[tauri::command]
-pub fn close_common_phrase_panel() {
+pub fn close_common_phrase_panel(reason: Option<String>) {
     if let Some(host) = host() {
-        host.close("close_button");
+        // 原因进入面板关闭日志（close_button / notice_timeout 等），便于从日志
+        // 区分用户主动关闭与提示到点自动收尾。
+        host.close(reason.as_deref().unwrap_or("close_button"));
     }
 }
 

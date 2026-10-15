@@ -66,6 +66,17 @@ vi.mock("../lib/bridge", async (importOriginal) => {
   return { ...actual, ...bridge };
 });
 
+// 私有常用语 UI（公开空壳在真实运行时返回 null）：测试里用开关控制「已注入/未注入」。
+const privateUi = vi.hoisted(() => ({
+  settingsComponent: vi.fn<() => unknown>(() => null),
+}));
+
+vi.mock("../private/windows-common-phrases", () => ({
+  COMPONENT_MARKER: "windows-common-phrases/stub",
+  panelComponent: () => null,
+  settingsComponent: () => privateUi.settingsComponent(),
+}));
+
 const runtime: RuntimeSnapshot = {
   appVersion: "0.5.0",
   platform: {
@@ -148,6 +159,9 @@ describe("settings page", () => {
     bridge.restartOnboarding
       .mockReset()
       .mockResolvedValue({ flowVersion: 1, completedVersion: 0, step: "welcome", isActive: true });
+    // 常用语设置区默认按「公开空壳」口径（无私有组件 → 不显示区块）。
+    privateUi.settingsComponent.mockReset();
+    privateUi.settingsComponent.mockReturnValue(null);
   });
 
   it("页面标题为「设置」，顶部显示应用标识、标语与当前版本", async () => {
@@ -410,5 +424,29 @@ describe("settings page", () => {
 
     expect(wrapper.get('[role="alert"]').text()).toContain("无法开始设置向导");
     expect(wrapper.emitted("restart-onboarding")).toBeUndefined();
+  });
+
+  it("常用语设置区：私有组件缺失（公开空壳）时不渲染区块", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="phrase-settings"]').exists()).toBe(false);
+    expect(
+      wrapper.findAll(".settings-section .section-title").map((item) => item.text()),
+    ).not.toContain("常用语");
+  });
+
+  it("常用语设置区：私有组件注入后渲染区块", async () => {
+    const { h } = await import("vue");
+    privateUi.settingsComponent.mockReturnValue({
+      render: () => h("div", { "data-test": "phrase-settings" }, "常用语设置"),
+    });
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="phrase-settings"]').exists()).toBe(true);
+    expect(
+      wrapper.findAll(".settings-section .section-title").map((item) => item.text()),
+    ).toContain("常用语");
   });
 });

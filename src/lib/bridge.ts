@@ -191,7 +191,8 @@ export type ButtonAction =
   | { type: "mouse_click"; kind: MouseClickKind }
   | { type: "mouse_move"; direction: MoveDirection; distance: number }
   | { type: "open_app"; target: string }
-  | { type: "focus_input" };
+  | { type: "focus_input" }
+  | { type: "open_common_phrases" };
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
 export interface PresetAppInfo {
@@ -1622,9 +1623,26 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
   }
 }
 
+/** 常用语组件是否可用（按键页加载快照后注册；测试可注入）。 */
+let commonPhrasesAvailable = false;
+
+/**
+ * 注册常用语组件可用性（按键页加载 `getCommonPhrasePanelSnapshot()` 后调用）。
+ *
+ * 为什么用模块级缓存而不是每次问 IPC：`actionSummary` 是同步的渲染路径函数，
+ * 不能等待异步快照——与预设应用名的处理方式一致。
+ */
+export function registerCommonPhraseAvailability(available: boolean): void {
+  commonPhrasesAvailable = available;
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
   if (action.type === "focus_input") return "聚焦输入框";
+  if (action.type === "open_common_phrases") {
+    // 缺私有组件（公开构建）时如实标注，不静默替换成含义不同的动作。
+    return commonPhrasesAvailable ? "打开常用语" : "打开常用语（当前不可用）";
+  }
   if (action.type === "scroll") {
     const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
     return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;
@@ -1683,12 +1701,14 @@ export interface CommonPhrasePanelSnapshot {
   available: boolean;
   access: CommonPhraseAccess;
   canUse: boolean;
+  /** 一次性失败提示的原因 key（**读取即消费**，Rust 侧读取后清空）；无提示为 null。 */
+  notice: string | null;
   entries: CommonPhrasePanelEntry[];
 }
 
 /** 空快照：未注入私有组件或浏览器预览环境的回落值。 */
 export function emptyCommonPhrasePanelSnapshot(): CommonPhrasePanelSnapshot {
-  return { available: false, access: "unavailable", canUse: false, entries: [] };
+  return { available: false, access: "unavailable", canUse: false, notice: null, entries: [] };
 }
 
 /** 读取浮层面板数据。未注入私有组件时 available=false、entries 为空。 */
@@ -1704,10 +1724,10 @@ export async function getCommonPhrasePanelSnapshot(): Promise<CommonPhrasePanelS
 }
 
 /** 关闭浮层面板（右上角关闭按钮；返回键由遥控器路径关闭）。 */
-export async function closeCommonPhrasePanel(): Promise<void> {
+export async function closeCommonPhrasePanel(reason?: string): Promise<void> {
   if (!isTauriRuntime()) return;
   try {
-    await invoke("close_common_phrase_panel");
+    await invoke("close_common_phrase_panel", { reason: reason ?? null });
   } catch {
     // 关闭失败不阻塞界面：面板会在下一次按键或收尾路径里被关掉。
   }

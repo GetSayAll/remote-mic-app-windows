@@ -115,6 +115,15 @@ pub trait CommonPhraseHost: Send + Sync {
         Vec::new()
     }
 
+    /// 取走面板当前要显示的一次性提示（失败反馈等）。
+    ///
+    /// 返回失败原因的稳定 key（如 `input_unavailable`），无提示时返回 `None`。
+    /// **读取即消费**：同一条提示只下发一次（面板每次显示都会重读快照）。
+    /// 用户文案由界面层按 key 分叉，不在这里拼。
+    fn take_panel_notice(&self) -> Option<String> {
+        None
+    }
+
     /// 鼠标点选面板某个位置（与遥控器按下等价）；返回是否已受理。
     fn select(&self, button: RemoteButton) -> bool {
         let _ = button;

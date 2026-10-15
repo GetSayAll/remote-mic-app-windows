@@ -143,6 +143,14 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       available: true,
       reason: null,
     })),
+    // 常用语组件可用性：默认不可用（公开构建口径）；可用分支由专门用例覆盖。
+    getCommonPhrasePanelSnapshot: vi.fn(async () => ({
+      available: false,
+      access: "unavailable" as const,
+      canUse: false,
+      notice: null,
+      entries: [],
+    })),
   };
 });
 
@@ -151,6 +159,7 @@ import {
   exportButtonMappingConfiguration,
   getButtonMappings,
   getCaptureSupport,
+  getCommonPhrasePanelSnapshot,
   enableRc003Capture,
   disableRc003Capture,
   getRc003BridgeSnapshot,
@@ -320,6 +329,15 @@ beforeEach(() => {
   vi.mocked(scanPairedRemotes).mockReset();
   vi.mocked(scanPairedRemotes).mockResolvedValue([]);
   vi.mocked(connectRemote).mockClear();
+  // 常用语可用性：mockClear 不清实现，显式复位为公开构建口径（不可用）。
+  vi.mocked(getCommonPhrasePanelSnapshot).mockReset();
+  vi.mocked(getCommonPhrasePanelSnapshot).mockResolvedValue({
+    available: false,
+    access: "unavailable",
+    canUse: false,
+    notice: null,
+    entries: [],
+  });
 });
 
 /** 构造一份指定相位的桥接快照（其余计数字段对 UI 无关，取零值）。 */
@@ -486,6 +504,68 @@ describe("buttons mapping page", () => {
     // 对照组：其他动作分组不受影响。
     expect(titles).toContain("鼠标滚轮");
     expect(titles).toContain("打开应用");
+    wrapper.unmount();
+  });
+
+  it("常用语组件不可用时隐藏动作入口，已保存的绑定不被静默替换", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        power: {
+          single: { type: "open_common_phrases" },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+    // 按键格摘要：保留该动作并标注当前不可用（不静默替换成别的动作）。
+    expect(powerCard.text()).toContain("打开常用语（当前不可用）");
+
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
+    expect(titles, `动作分组：${titles.join(" / ")}`).not.toContain("常用语");
+    expect(
+      wrapper.findAll(".mapping-editor button").some((button) => button.text() === "打开常用语"),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("常用语组件可用时提供动作入口，选中后保存为打开常用语", async () => {
+    vi.mocked(getCommonPhrasePanelSnapshot).mockResolvedValue({
+      available: true,
+      access: "allowed",
+      canUse: true,
+      notice: null,
+      entries: [],
+    });
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    const section = wrapper
+      .findAll(".action-section")
+      .find((item) => item.find(".action-section-title").text() === "常用语")!;
+    expect(section, "组件可用时必须出现「常用语」动作分组").toBeTruthy();
+    const chip = section.findAll("button.chip").find((button) => button.text() === "打开常用语")!;
+    expect(chip).toBeTruthy();
+    await chip.trigger("click");
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(saved.actions.power?.single).toEqual({ type: "open_common_phrases" });
+    // 选中后按键格摘要显示为可用态（不带「当前不可用」后缀）。
+    expect(powerCard.text()).toContain("打开常用语");
+    expect(powerCard.text()).not.toContain("当前不可用");
     wrapper.unmount();
   });
 
