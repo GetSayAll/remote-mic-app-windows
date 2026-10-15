@@ -613,14 +613,17 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 target.arguments.is_some(),
                 target.working_dir.is_some()
             ));
-            return launch_explicit(
+            let launched = launch_explicit(
                 &target.exe_path,
                 target.arguments.as_deref(),
                 target.working_dir.as_deref(),
                 true,
             );
+            launched?;
+            return foreground_after_launch(app);
         }
-        return launch_new(app.exe_names);
+        launch_new(app.exe_names)?;
+        return foreground_after_launch(app);
     }
     if is_custom_path_target(id) {
         let path = std::path::Path::new(id);
@@ -873,6 +876,42 @@ pub(crate) fn readback_hidden_window_shown(hwnd: Option<isize>) -> bool {
 /// 没有出现就按失败处理、回落到旧的显示隐藏窗口路径。
 const RELAUNCH_VISIBLE_CHECKS: u8 = 6;
 const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 启动之后的**有界置前**预算：10 × 150 ms。
+///
+/// 为什么必须有它（2026-10-15 现场）：ShellExecute 启动打包应用（计算器）后，
+/// 新开的窗口**不会**自动拿到前台（实测：前台窗口仍属于别的进程），用户的第一按
+/// 表现为"打开了但没到最前"、第二按才置前。启动完成后按本应用窗口口径
+/// （含 AUMID 合并）轮询，窗口一出现就强制置前。
+const LAUNCH_FOREGROUND_CHECKS: u8 = 10;
+const LAUNCH_FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// 启动完成后的有界置前；等不到窗口就返回 `Ok`（应用可能仍在启动，界面稍后自行出现）。
+#[cfg(windows)]
+fn foreground_after_launch(app: &PresetApp) -> Result<(), String> {
+    for _ in 0..LAUNCH_FOREGROUND_CHECKS {
+        if let Some(hwnd) = target_window_visibility(app.id).and_then(|visit| visit.largest_visible)
+        {
+            let activated = unsafe { win_impl::activate_known_window(hwnd) };
+            crate::ble::gatt_note(format!(
+                "app_launcher action=activate_or_launch preset={} phase=foreground_after_launch terminal_result={}",
+                app.id,
+                if activated { "passed" } else { "failed" }
+            ));
+            return if activated {
+                Ok(())
+            } else {
+                Err("Windows 拒绝将目标应用切换到前台".to_owned())
+            };
+        }
+        std::thread::sleep(LAUNCH_FOREGROUND_WAIT);
+    }
+    crate::ble::gatt_note(format!(
+        "app_launcher action=activate_or_launch preset={} phase=foreground_after_launch terminal_result=skipped reason=window_not_observed_within_budget",
+        app.id
+    ));
+    Ok(())
+}
 
 /// `SetForegroundWindow` 之后 Windows 可能异步完成前台切换，单次读回会把成功的
 /// 置前误判为失败。这里做有界复核：首次读回，失败后等待 `wait()` 再读回，最多
@@ -2322,12 +2361,8 @@ pub fn application_readiness(target: &str) -> ApplicationReadiness {
         }
     } else if let Some(app) = preset_app(target) {
         // 与激活路径同一份口径（AUMID 合并）：打包应用的窗口按映像名看不到。
-        let visibility = target_window_visibility(target)
-            .unwrap_or(WindowVisibility::EMPTY);
-        (
-            visibility,
-            !pids_for_exe_names(app.exe_names).is_empty(),
-        )
+        let visibility = target_window_visibility(target).unwrap_or(WindowVisibility::EMPTY);
+        (visibility, !pids_for_exe_names(app.exe_names).is_empty())
     } else if is_custom_path_target(target) {
         let resolved = if target.to_ascii_lowercase().ends_with(".lnk") {
             resolve_lnk(target)

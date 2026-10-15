@@ -25,15 +25,21 @@ fn main() {
             let result = sayall_windows::app_launcher::activate_or_launch(target);
             println!("activate {target}: ok={}", result.is_ok());
         }
+        // 置前读回：前台窗口的进程 id（调用方再与目标进程对照）。
+        let foreground = unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let hwnd = GetForegroundWindow();
+            let mut pid = 0u32;
+            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            pid
+        };
+        println!("foreground_pid={foreground}");
     }
     for target in targets {
         let readiness = sayall_windows::app_launcher::application_readiness(&target);
         println!(
             "{target}: known={} running_process={} visible_window={} window_presence={}",
-            readiness.known,
-            readiness.running_process,
-            readiness.visible_window,
-            readiness.running
+            readiness.known, readiness.running_process, readiness.visible_window, readiness.running
         );
     }
 }
