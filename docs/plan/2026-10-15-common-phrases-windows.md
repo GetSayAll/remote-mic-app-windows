@@ -31,21 +31,13 @@
 | 私有 `936abc8` | **B1 修复**：选中先快照目标再关面板 + 回归用例 | 23 passed |
 | 公开 `363f5ec` | **批次 2**：来源失效 `reset` 调用点、认领边沿配对自持（M2）、退出路径 `shutdown()` 接线（trait 默认方法 + `shutdown_platform_for_exit`） | `cargo test --workspace`（sayall-windows 359 passed，+5 条新测试）；`cargo check -p sayall-windows-app --features runtime-simulation`；`scripts/ci-preflight.ps1` 7 步通过 |
 | 私有 `a5f6aed` | **批次 2**：`WindowsCommonPhraseHost::shutdown` 等完在途插入（含 250 ms 恢复窗）；`spawn_with_factory` 测试钩子 | 24 passed（+1 条新用例） |
+| 公开 `2086e2f` | **批次 3**：动作 union + 「当前不可用」摘要（M1）、「打开常用语」动作入口按 available 显隐、设置页挂载点（M6）、`take_panel_notice` 接缝与 `close_common_phrase_panel` 关闭原因 | `pnpm test` 372 passed（+4 条新用例）；`pnpm build`（含私有 UI 注入编译）；`cargo test --workspace`；`ci-preflight.ps1` 7 步 |
+| 私有 `6736364` | **批次 3**：失败反馈链（report sink → 重开面板 + 一次性 notice；同步失败路径同样接入）、提示文案按原因分叉 + 到时自动关闭（5 s/3 s） | 26 passed（+2 条新用例） |
 
 ## 剩余工作（按批，含落点）
 
-> 2026-10-15 晚更新：批次 2 已完成并提交（见上表）。剩余从批次 3 开始；
-> 真机走查清单（文末）待出包后执行。
-
-### 批次 3（契约与失败反馈）
-
-4. **公开构建映射页兼容**（评审 M1，会让映射页崩）：`src/lib/bridge.ts:187-194` 补
-   `open_common_phrases` union 成员 + `actionSummary`（`:1625-1643`）分支，显示"打开常用语（当前不可用）"，
-   可用性来源接 `common_phrase_panel_snapshot().available`（顺带让 `is_available()` 有消费方）。
-5. **失败提示接到 UI**（评审 B3）：报告 sink 现在是空闭包、面板已隐藏、窗口 372px 放不下提示行。
-   方案：失败时把面板重新显示并下发原因（文案按失败原因分叉），或按 macOS 做独立提示窗。
-6. **设置页挂载点**：条件渲染 `settingsComponent()`；动作列表可见性按 `available`
-   （让空壳导出不是死代码，评审 M6）。
+> 2026-10-15 晚更新：批次 2、3 已完成并提交（见上表；批次 3 = 公开 `2086e2f` /
+> 私有 `6736364`）。剩余从批次 4 开始；真机走查清单（文末）待出包后执行。
 
 ### 批次 4（卫生与文档）
 
@@ -55,7 +47,8 @@
 10. 注入脚本护栏（评审 M8）：注入前预清目标、校验 UI 入口与生成产物新鲜度、打印"不要提交"；
     生成器接入 `verify`（重新生成逐字节比对）。
 11. 文档：`Testing/WindowsCommonPhrases.md`（含物理键盘同吞用例、真机清单）、`TODO.md`、
-    `docs/product-copy.md` 术语登记、`feature/common-phrases/platform-windows.md`（Mac 规范要求）。
+    `docs/product-copy.md` 术语登记（**批次 3 新增待登记**：「打开常用语」「打开常用语（当前不可用）」、
+    动作分组「常用语」、失败提示 7 条文案）、`feature/common-phrases/platform-windows.md`（Mac 规范要求）。
 
 ## 已拍板决定
 
@@ -82,8 +75,8 @@
 
 ## 评审结论索引（两份独立评审，均已记录）
 
-- 私有包：B1（已修）选中永不插入；B2（已修，批次 2）收尾调用点补齐（公开 `reset`/`shutdown` + 私有 `shutdown` 等完在途事务）；B3 失败反馈链断；M1 门禁开关可绕过；M3 `cancel_pending` 阻塞；M4 快照泄漏；M5 刷新事件未接；M6 静默失败无日志；M7 生成器未接 CI；M8 注入护栏缺失；M9 引用文档不存在；M10 fmt 硬伤。
-- 公开接缝：B1（已修）`WS_EX_NOACTIVATE` 被 tao 抹掉；M1（待修）映射页 union 缺失；M2（已修，批次 2）认领配对自持（公开侧记账，释放沿配对消费）；M3（已修）收尾/掩码；M4（已修）多屏居中；M5（已修）面板页样式；M6 前端挂载点。
+- 私有包：B1（已修）选中永不插入；B2（已修，批次 2）收尾调用点补齐（公开 `reset`/`shutdown` + 私有 `shutdown` 等完在途事务）；B3（已修，批次 3）失败反馈链接通（report sink → 重开面板 + 一次性提示 + 文案分叉）；M1 门禁开关可绕过；M3 `cancel_pending` 阻塞；M4 快照泄漏；M5 刷新事件未接；M6 静默失败无日志；M7 生成器未接 CI；M8 注入护栏缺失；M9 引用文档不存在；M10 fmt 硬伤。
+- 公开接缝：B1（已修）`WS_EX_NOACTIVATE` 被 tao 抹掉；M1（已修，批次 3）映射页 union 与摘要补齐；M2（已修，批次 2）认领配对自持（公开侧记账，释放沿配对消费）；M3（已修）收尾/掩码；M4（已修）多屏居中；M5（已修）面板页样式；M6（已修，批次 3）前端挂载点（设置页条件渲染 + 动作入口按可用性显隐）。
 - 已确认无问题：内置内容与 macOS 同哈希、生成产物逐字节一致、七类非法输入全部失败、剪贴板内存所有权路径、工作线程锁无死锁、认领一次性语义、日志不含正文。
 
 ## 真机走查清单（出包后）
@@ -101,3 +94,10 @@
    phase=completed result=services_stopped`。
 9. **断连配对（批次 2 新增）**：面板打开期间断遥控器电源 → 面板关闭、按键六个键
    恢复原映射，且无幽灵单击/长按（按一次只响应一次）。
+10. **失败提示（批次 3 新增）**：光标不在输入框时选一条常用语 → 面板重新显示并给出
+    「光标不在输入框中…」提示，约 5 秒后自动关闭；日志见 `COMMON_PHRASES FEEDBACK
+    phase=requested reason=input_unavailable` 与 `PANEL phase=closed reason=notice_timeout`；
+    提示期内可重试。
+11. **公开构建兼容（批次 3 新增）**：公开构建（无私有组件）打开按键页 → 无「常用语」
+    动作分组；若配置里有「打开常用语」绑定，摘要显示「打开常用语（当前不可用）」
+    且页面不崩。
