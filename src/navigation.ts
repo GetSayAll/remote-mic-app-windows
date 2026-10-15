@@ -2,7 +2,7 @@ import { privateFeaturePages, type PrivateFeaturePage } from "./private/feature-
 
 export type PageId = "buttons" | "connection" | "permissions" | "settings";
 
-export type NavIcon = "keyboard" | "link" | "shield" | "gear";
+export type NavIcon = "keyboard" | "link" | "shield" | "gear" | "member";
 
 export interface NavigationItem {
   id: string;
