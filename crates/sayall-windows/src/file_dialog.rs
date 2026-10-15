@@ -25,6 +25,27 @@ pub fn pick_button_mapping_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
+/// 选择组合动作 JSON 的导入文件（与按键映射同一对话框口径）。
+#[cfg(windows)]
+pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
+    pick_json_path(DialogKind::Open)
+}
+
+#[cfg(windows)]
+pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
+    pick_json_path(DialogKind::Save)
+}
+
+#[cfg(not(windows))]
+pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
+#[cfg(not(windows))]
+pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 enum DialogKind {

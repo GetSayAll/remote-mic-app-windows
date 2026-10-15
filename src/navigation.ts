@@ -1,6 +1,6 @@
-export type PageId = "buttons" | "connection" | "permissions" | "settings";
+export type PageId = "buttons" | "macros" | "connection" | "permissions" | "settings";
 
-export type NavIcon = "keyboard" | "link" | "shield" | "gear";
+export type NavIcon = "keyboard" | "layers" | "link" | "shield" | "gear";
 
 export interface NavigationItem {
   id: PageId;
@@ -9,8 +9,15 @@ export interface NavigationItem {
   icon: NavIcon;
 }
 
+import { COMBINATION_ACTIONS_ENABLED } from "./lib/feature-flags";
+
 export const navigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
+  // 2026-10-15 组合动作（对齐 Mac 侧边栏「组合动作」条目与层叠方块图标）；
+  // 入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。
+  ...(COMBINATION_ACTIONS_ENABLED
+    ? [{ id: "macros", label: "组合动作", icon: "layers" } as NavigationItem]
+    : []),
   { id: "connection", label: "连接", icon: "link" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main

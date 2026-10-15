@@ -28,6 +28,7 @@
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
+| 组合动作（侧边栏页 + 按键页动作分组） | 组合动作；步骤类型写「打开应用」「等待应用」「单键或快捷键」「聚焦学习过的输入框」「打开网址」「执行已有组合动作」（对齐 Mac `macro.step.*`）；终态写「组合动作执行成功」「组合动作已执行，但无法确认第三方 App 的结果」「组合动作已取消」「组合动作执行超时」等（对齐 Mac `macro.status.execution.*`） | `MacrosPage.vue`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`macroActionLabel` / `macroTerminalLabel` / `macroStepSummary`） |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页
@@ -482,3 +483,6 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   当前值可能不同，没有这行分不清“分流判错”还是“现场已变”）。文案表与分流函数移入
   `src/onboarding/voice-failure-text.ts`（单测 6 例）。
   记录：[Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md](../Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md)。
+- 2026-10-15（组合动作 P3 落地）：组合动作页与按键页「组合动作」分组文案定稿——页面名、步骤类型、
+  终态句与 Mac macro.step.* / macro.status.execution.* 同义；绑定在按键页设置，组合动作页只管理
+  动作库（对齐 Mac 最新设计）；失败/取消/超时各有独立句，不把"请求已发送"写成成功。

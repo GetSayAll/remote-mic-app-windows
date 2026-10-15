@@ -143,6 +143,59 @@ fn main() {
         return;
     }
 
+    if std::env::args().any(|arg| arg == "--learn-point") {
+        // 「记录点击位置」生产函数：读取物理光标并要求它落在目标窗口内。
+        let target = arg_value("--learn-point").unwrap_or_default();
+        match sayall_windows::app_launcher::learn_focus_point(&target) {
+            Ok(point) => println!(
+                "learned_point x_ratio={:.4} y_ratio={:.4} window={}x{}",
+                point.x_ratio, point.y_ratio, point.window_width, point.window_height
+            ),
+            Err(reason) => println!("learn_point_failed={reason}"),
+        }
+        return;
+    }
+
+    if std::env::args().any(|arg| arg == "--point-click") {
+        // 「按记录位置点击」生产组合：解析坐标 → 移动光标 → 左键单击 → 读回焦点。
+        let target = arg_value("--point-click").unwrap_or_default();
+        let x_ratio: f64 = arg_value("--x-ratio")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.5);
+        let y_ratio: f64 = arg_value("--y-ratio")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.5);
+        let point = sayall_windows::focus::RecordedPoint {
+            x_ratio,
+            y_ratio,
+            window_width: arg_value("--window-width")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1200),
+            window_height: arg_value("--window-height")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(800),
+        };
+        match sayall_windows::app_launcher::recorded_point_absolute(&target, &point) {
+            Ok((x, y)) => {
+                println!("absolute=({x},{y})");
+                let runtime = sayall_windows::send_input_windows::SendInputRuntime::new();
+                match runtime.move_cursor_and_click(x, y) {
+                    Ok(_) => println!("click_submitted=ok"),
+                    Err(error) => println!("click_submitted=failed error={error}"),
+                }
+            }
+            Err(reason) => println!("point_dispatch_failed={reason}"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if let Some(pid) = fw::foreground_process_id() {
+            println!(
+                "focused_after={}",
+                describe(&fw::capture_focused_target(pid))
+            );
+        }
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--frontmost") {
         // 生产组合：FocusRunner（串行队列 + 重试 + 读回）驱动真实 UIA 后端。
         use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner, FocusTask};

@@ -1,6 +1,7 @@
 use sayall_core::{
-    normalize_gain_db, AppIconIdentifier, AppSettings, ThemePreference, UsageStatistics,
-    VoiceInputTool,
+    merge_library, normalize_gain_db, validate_library, AppIconIdentifier, AppSettings,
+    MacroLibraryDocument, ThemePreference, UsageStatistics, VoiceInputTool,
+    MACRO_LIBRARY_FORMAT_VERSION,
 };
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
@@ -463,6 +464,126 @@ impl SettingsStore {
         self.save_button_mappings(configuration.button_mappings.migrate_legacy_hold_repeat())
     }
 
+    pub fn load_combined_actions(&self) -> Result<MacroLibraryDocument, String> {
+        let _guard = lock(&self.access);
+        let path = self.combined_actions_path();
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(MacroLibraryDocument::default())
+            }
+            Err(error) => return Err(format!("读取组合动作失败：{error}")),
+        };
+        // 文件由更高版本写入：拒绝加载并留旁证备份（同 button-mappings 护栏）。
+        if let Some(version) = combined_actions_format_version(&contents) {
+            if version > u64::from(MACRO_LIBRARY_FORMAT_VERSION) {
+                let backup = path.with_extension(format!("json.v{version}.bak"));
+                if !backup.exists() {
+                    let _ = fs::copy(&path, &backup);
+                }
+                sayall_windows::gatt_note(format!(
+                    "combined_actions format_version={version} supported_max={MACRO_LIBRARY_FORMAT_VERSION} action=backup backup_file={}",
+                    backup
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown")
+                ));
+                return Err(format!(
+                    "组合动作由更高版本写入（format_version={version}），请升级应用"
+                ));
+            }
+        }
+        let document: MacroLibraryDocument = serde_json::from_str(&contents)
+            .map_err(|error| format!("解析组合动作失败：{error}"))?;
+        // 盖章当前结构版本：0 是早期版本默认值落盘的结果（2026-10-15 现场），
+        // 归一化后既不影响加载，也修好"导出后再导入被判版本不符"。
+        let document = document.normalized();
+        validate_library(&document).map_err(|issues| {
+            format!(
+                "组合动作无效：{}",
+                issues
+                    .iter()
+                    .map(|issue| issue.code())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })?;
+        Ok(document)
+    }
+
+    /// 保存组合动作库：整库校验通过才落盘（失败不改变现状）。
+    pub fn save_combined_actions(
+        &self,
+        document: MacroLibraryDocument,
+    ) -> Result<MacroLibraryDocument, String> {
+        let _guard = lock(&self.access);
+        let document = document.normalized();
+        validate_library(&document).map_err(|issues| {
+            format!(
+                "组合动作无效：{}",
+                issues
+                    .iter()
+                    .map(|issue| issue.code())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })?;
+        let path = self.combined_actions_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
+        }
+        let contents = serde_json::to_vec_pretty(&document)
+            .map_err(|error| format!("序列化组合动作失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("保存组合动作失败：{error}"))?;
+        Ok(document)
+    }
+
+    pub fn export_combined_actions(
+        &self,
+        path: &Path,
+        document: MacroLibraryDocument,
+    ) -> Result<(), String> {
+        let document = document.normalized();
+        validate_library(&document).map_err(|issues| {
+            format!(
+                "组合动作无效：{}",
+                issues
+                    .iter()
+                    .map(|issue| issue.code())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })?;
+        let contents = serde_json::to_vec_pretty(&document)
+            .map_err(|error| format!("序列化组合动作失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("写入组合动作文件失败：{error}"))
+    }
+
+    /// 导入 = 与现有库合并（同 `macro_id@version` 一致跳过 / 不同报错 / 新增追加），
+    /// 完整校验通过才触碰现有配置（对齐 Mac 不可变版本语义）。
+    pub fn import_combined_actions(&self, path: &Path) -> Result<MacroLibraryDocument, String> {
+        let metadata =
+            fs::metadata(path).map_err(|error| format!("读取组合动作文件失败：{error}"))?;
+        if metadata.len() > sayall_core::MAX_LIBRARY_BYTES as u64 {
+            return Err("组合动作文件过大".to_owned());
+        }
+        let contents = fs::read(path).map_err(|error| format!("读取组合动作文件失败：{error}"))?;
+        let incoming: MacroLibraryDocument = serde_json::from_slice(&contents)
+            .map_err(|error| format!("解析组合动作文件失败：{error}"))?;
+        // 更高版本拒绝（含未来结构）；0 等旧默认值是历史落盘形态，归一化放行
+        // （2026-10-15：本版本早期导出的文件正好是 0，否则导出→导入必被拒）。
+        if incoming.format_version > MACRO_LIBRARY_FORMAT_VERSION {
+            return Err(format!(
+                "不支持的组合动作文件版本：{}",
+                incoming.format_version
+            ));
+        }
+        let incoming = incoming.normalized();
+        let current = self.load_combined_actions()?;
+        let merged = merge_library(&current, incoming).map_err(|issue| issue.code())?;
+        self.save_combined_actions(merged)
+    }
+
     pub fn load_voice_hold_hotkey(&self) -> Result<Option<KeyChord>, String> {
         let _guard = lock(&self.access);
         self.load_voice_hold_hotkey_unlocked()
@@ -563,6 +684,10 @@ impl SettingsStore {
         self.path.with_file_name("button-mappings.json")
     }
 
+    fn combined_actions_path(&self) -> PathBuf {
+        self.path.with_file_name("combined-actions.json")
+    }
+
     fn voice_hold_hotkey_path(&self) -> PathBuf {
         self.path.with_file_name("voice-hold-hotkey.json")
     }
@@ -619,6 +744,14 @@ fn button_mappings_schema_version(contents: &str) -> Option<u64> {
     serde_json::from_str::<serde_json::Value>(contents)
         .ok()?
         .get("schemaVersion")?
+        .as_u64()
+}
+
+/// 组合动作库文件里的结构版本号（缺省或非法均为 None）。
+fn combined_actions_format_version(contents: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(contents)
+        .ok()?
+        .get("formatVersion")?
         .as_u64()
 }
 
@@ -679,6 +812,204 @@ mod tests {
         assert!(!decoded.open_window_at_launch);
         assert!(!decoded.check_prerelease_updates);
         assert_eq!(decoded.theme_preference, ThemePreference::System);
+    }
+
+    /// 组合动作库：缺失文件 → 空库；保存/读取往返；坏数据拒绝加载。
+    #[test]
+    fn combined_actions_roundtrip_and_default() {
+        use sayall_core::{MacroAction, MacroParameters, MacroStep, MACRO_SCHEMA_VERSION};
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-combined-actions-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        // 不存在 → 空库（不是错误）。
+        assert_eq!(
+            store.load_combined_actions().unwrap(),
+            MacroLibraryDocument::default()
+        );
+        let document = MacroLibraryDocument {
+            format_version: MACRO_LIBRARY_FORMAT_VERSION,
+            definitions: vec![sayall_core::MacroDefinition {
+                schema_version: MACRO_SCHEMA_VERSION.to_owned(),
+                macro_id: "macro.abcdef".to_owned(),
+                version: "1.0.0".to_owned(),
+                name: "测试动作".to_owned(),
+                summary: None,
+                steps: vec![MacroStep {
+                    step_id: "step.01".to_owned(),
+                    action: MacroAction::OpenApplication,
+                    timeout_ms: None,
+                    parameters: MacroParameters {
+                        target: Some("vscode".to_owned()),
+                        ..MacroParameters::default()
+                    },
+                }],
+            }],
+        };
+        store.save_combined_actions(document.clone()).unwrap();
+        assert_eq!(store.load_combined_actions().unwrap(), document);
+        // 坏数据（名称超长）：保存被拒；直接写盘后加载也被拒（不改变现状=不加载）。
+        let mut broken = document.clone();
+        broken.definitions[0].name = "长".repeat(21);
+        assert!(store.save_combined_actions(broken.clone()).is_err());
+        std::fs::write(
+            dir.join("combined-actions.json"),
+            serde_json::to_vec(&broken).unwrap(),
+        )
+        .unwrap();
+        assert!(store.load_combined_actions().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 高版本组合动作文件：拒载 + 留 `.bak` 旁证（同 button-mappings 护栏）。
+    #[test]
+    fn combined_actions_higher_version_rejected_with_backup() {
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-combined-actions-v9-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        std::fs::write(
+            dir.join("combined-actions.json"),
+            r#"{"formatVersion":9,"definitions":[]}"#.to_owned(),
+        )
+        .unwrap();
+        assert!(store.load_combined_actions().is_err());
+        assert!(dir.join("combined-actions.json.v9.bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 结构版本落盘与往返（2026-10-15 现场回归）：空库保存必须写当前版本，
+    /// 否则导出→导入被判"不支持的版本：0"；旧文件里的 0 加载时归一化放行。
+    #[test]
+    fn combined_actions_format_version_is_stamped_and_legacy_zero_is_accepted() {
+        use sayall_core::{MacroAction, MacroParameters, MacroStep, MACRO_SCHEMA_VERSION};
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-combined-version-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        let definition = sayall_core::MacroDefinition {
+            schema_version: MACRO_SCHEMA_VERSION.to_owned(),
+            macro_id: "macro.abcdef".to_owned(),
+            version: "1.0.0".to_owned(),
+            name: "测试动作".to_owned(),
+            summary: None,
+            steps: vec![MacroStep {
+                step_id: "step.01".to_owned(),
+                action: MacroAction::OpenApplication,
+                timeout_ms: None,
+                parameters: MacroParameters {
+                    target: Some("notepad".to_owned()),
+                    ..MacroParameters::default()
+                },
+            }],
+        };
+        // 保存（从空库起步，正是现场路径）→ 文件里必须是当前版本。
+        store
+            .save_combined_actions(sayall_core::MacroLibraryDocument {
+                format_version: 0,
+                definitions: vec![definition.clone()],
+            })
+            .unwrap();
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("combined-actions.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted["formatVersion"],
+            serde_json::json!(MACRO_LIBRARY_FORMAT_VERSION)
+        );
+
+        // 导出 → 清空 → 导入：往返必须成功（版本 0 的历史文件同样可导入）。
+        let export_path = dir.join("export.json");
+        store
+            .export_combined_actions(
+                &export_path,
+                sayall_core::MacroLibraryDocument {
+                    format_version: 0,
+                    definitions: vec![definition.clone()],
+                },
+            )
+            .unwrap();
+        store
+            .save_combined_actions(sayall_core::MacroLibraryDocument::default())
+            .unwrap();
+        let imported = store.import_combined_actions(&export_path).unwrap();
+        assert_eq!(imported.format_version, MACRO_LIBRARY_FORMAT_VERSION);
+        assert_eq!(imported.definitions.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 导入 = 合并：新增追加、同版本一致跳过、同版本不同内容报错且不触碰现状。
+    #[test]
+    fn combined_actions_import_merges_without_touching_current_on_failure() {
+        use sayall_core::{MacroAction, MacroParameters, MacroStep, MACRO_SCHEMA_VERSION};
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-combined-import-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        let make = |id: &str, name: &str| sayall_core::MacroDefinition {
+            schema_version: MACRO_SCHEMA_VERSION.to_owned(),
+            macro_id: id.to_owned(),
+            version: "1.0.0".to_owned(),
+            name: name.to_owned(),
+            summary: None,
+            steps: vec![MacroStep {
+                step_id: "step.01".to_owned(),
+                action: MacroAction::FocusInput,
+                timeout_ms: None,
+                parameters: MacroParameters {
+                    target: Some("vscode".to_owned()),
+                    ..MacroParameters::default()
+                },
+            }],
+        };
+        store
+            .save_combined_actions(MacroLibraryDocument {
+                format_version: MACRO_LIBRARY_FORMAT_VERSION,
+                definitions: vec![make("macro.aaaaaaa", "原动作")],
+            })
+            .unwrap();
+        // 新增 + 完全一致 → 成功合并为 2 条。
+        let import_path = dir.join("import.json");
+        std::fs::write(
+            &import_path,
+            serde_json::to_vec_pretty(&MacroLibraryDocument {
+                format_version: MACRO_LIBRARY_FORMAT_VERSION,
+                definitions: vec![
+                    make("macro.aaaaaaa", "原动作"),
+                    make("macro.bbbbbbb", "新动作"),
+                ],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let merged = store.import_combined_actions(&import_path).unwrap();
+        assert_eq!(merged.definitions.len(), 2);
+        // 同版本不同内容 → 报错，且现状不变。
+        std::fs::write(
+            &import_path,
+            serde_json::to_vec_pretty(&MacroLibraryDocument {
+                format_version: MACRO_LIBRARY_FORMAT_VERSION,
+                definitions: vec![make("macro.aaaaaaa", "改名不改版本")],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(store.import_combined_actions(&import_path).is_err());
+        assert_eq!(store.load_combined_actions().unwrap().definitions.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 2026-10-04 迁移（用户定稿）：旧代次配置里的 `app_icon` 只是旧版本写下的默认值，
@@ -1261,7 +1592,11 @@ mod tests {
         .unwrap();
 
         let loaded = store.load_button_mappings().unwrap();
-        assert_eq!(loaded.schema_version, 1, "加载即盖章为当前版本");
+        assert_eq!(
+            loaded.schema_version,
+            sayall_windows::send_input::BUTTON_MAPPINGS_SCHEMA_VERSION,
+            "加载即盖章为当前版本"
+        );
         assert_eq!(
             loaded.actions(RemoteButton::Back).hold_repeat,
             Some(ButtonTrigger::Single),
@@ -1350,7 +1685,10 @@ mod tests {
             "导出必须与加载/导入同一迁移口径：{exported}"
         );
         assert!(
-            exported.contains("\"schemaVersion\": 1"),
+            exported.contains(&format!(
+                "\"schemaVersion\": {}",
+                sayall_windows::send_input::BUTTON_MAPPINGS_SCHEMA_VERSION
+            )),
             "导出统一写当前结构版本：{exported}"
         );
 
