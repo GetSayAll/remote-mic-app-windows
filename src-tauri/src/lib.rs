@@ -29,7 +29,7 @@ mod startup;
 mod updater;
 
 use diagnostics::DiagnosticReport;
-use membership::{MembershipRuntime, MembershipSnapshot};
+use membership::{EmailCodeDelivery, MembershipRuntime, MembershipSnapshot};
 use platform::PlatformRuntime;
 use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
@@ -438,6 +438,37 @@ fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnaps
 #[tauri::command]
 fn refresh_membership(state: tauri::State<'_, AppState>) -> Result<MembershipSnapshot, String> {
     state.membership.refresh().map_err(|error| error.code)
+}
+
+/// 给邮箱发一封登录验证码（2026-10-15）。
+#[tauri::command]
+fn start_membership_email_login(
+    state: tauri::State<'_, AppState>,
+    email: String,
+) -> Result<EmailCodeDelivery, String> {
+    state
+        .membership
+        .start_email_login(&email)
+        .map_err(|error| error.code)
+}
+
+/// 提交验证码完成登录。
+#[tauri::command]
+fn verify_membership_email_login(
+    state: tauri::State<'_, AppState>,
+    email: String,
+    code: String,
+) -> Result<MembershipSnapshot, String> {
+    state
+        .membership
+        .verify_email_login(&email, &code)
+        .map_err(|error| error.code)
+}
+
+/// 退出登录。只影响本机。
+#[tauri::command]
+fn logout_membership(state: tauri::State<'_, AppState>) -> Result<MembershipSnapshot, String> {
+    state.membership.logout().map_err(|error| error.code)
 }
 
 /// 读取 Windows 系统强调色（设置 > 个性化 > 颜色）。前端用返回的 RGB 派生
@@ -3744,6 +3775,9 @@ pub fn run() {
         get_runtime_snapshot,
         get_membership_snapshot,
         refresh_membership,
+        start_membership_email_login,
+        verify_membership_email_login,
+        logout_membership,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -3819,6 +3853,9 @@ pub fn run() {
         get_runtime_snapshot,
         get_membership_snapshot,
         refresh_membership,
+        start_membership_email_login,
+        verify_membership_email_login,
+        logout_membership,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,

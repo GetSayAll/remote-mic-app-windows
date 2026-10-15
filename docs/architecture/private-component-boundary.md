@@ -20,15 +20,16 @@
 
 | 位置 | 作用 |
 | --- | --- |
-| `src-tauri/src/membership/runtime.rs` | `MembershipRuntime` 接口、`MembershipSnapshot`、`MembershipError` 与公开空实现 `UnavailableMembershipRuntime` |
+| `src-tauri/src/membership/runtime.rs` | `MembershipRuntime` 接口、`MembershipSnapshot`、`EmailCodeDelivery`、`MembershipError` 与公开空实现 `UnavailableMembershipRuntime` |
 | `src-tauri/src/membership/hook.rs` | **注入点**。公开版本返回 `None`；私有构建用同名文件替换其内容 |
 | `src-tauri/src/membership/mod.rs` | `install()`：拿到 `hook` 的运行时，拿不到就用空实现 |
-| `src-tauri/src/lib.rs` | 把运行时放进 `AppState`；四条生命周期接线：`get_membership_snapshot`、`refresh_membership`、窗口获得焦点、`RunEvent::ExitRequested` |
+| `src-tauri/src/lib.rs` | 把运行时放进 `AppState`；生命周期接线：`get_membership_snapshot`、`refresh_membership`、`start_membership_email_login`、`verify_membership_email_login`、`logout_membership`、窗口获得焦点、`RunEvent::ExitRequested` |
 
 接口契约：
 
 - `snapshot()` 必须**非阻塞**（界面按秒轮询）。
-- `refresh()` 失败只回**稳定错误码**，不把服务端文案或不透明标识带到前端。
+- 所有返回 `Result` 的操作失败时只回**稳定错误码**，不把服务端文案或不透明标识带到前端。
+- 登录相关方法都有默认实现（返回「不可用」），公开构建因此无需改动即可满足接口。
 - `on_foreground()` / `shutdown()` 成对存在；公开实现是 no-op。
 - `MembershipSnapshot` 是隐私边界：只放展示所需的派生值（账号显示名、是否已开通、
   可用截止时刻）。**凭据、令牌、邮箱原文、安装标识、设备标识一律不越过 Rust 边界。**

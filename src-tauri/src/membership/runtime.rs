@@ -7,6 +7,10 @@
 use serde::Serialize;
 
 /// 会员功能的可用性。
+///
+/// `Available` 只由私有实现构造：公开构建永远产不出它，所以公开构建下 rustc 会
+/// 报「variant 从未构造」。这不是缺陷——公开构建能表达的值本来就少一个。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MembershipAvailability {
@@ -56,6 +60,15 @@ impl MembershipError {
     }
 }
 
+/// 登录验证码的投递结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailCodeDelivery {
+    /// 服务端的投递状态；界面只据此显示「已发送」。
+    pub delivery: String,
+    pub expires_at: Option<String>,
+}
+
 /// 宿主访问会员功能的唯一接口。
 pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
     /// 读取当前摘要。必须是非阻塞的：界面按秒轮询调用。
@@ -63,6 +76,25 @@ pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
 
     /// 主动刷新（进入前台、用户点刷新）。失败返回稳定错误码。
     fn refresh(&self) -> Result<MembershipSnapshot, MembershipError>;
+
+    /// 给邮箱发一封登录验证码。
+    fn start_email_login(&self, _email: &str) -> Result<EmailCodeDelivery, MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
+
+    /// 提交验证码完成登录。
+    fn verify_email_login(
+        &self,
+        _email: &str,
+        _code: &str,
+    ) -> Result<MembershipSnapshot, MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
+
+    /// 退出登录。只影响本机；账号与权益不因此改变。
+    fn logout(&self) -> Result<MembershipSnapshot, MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
 
     /// 主窗口重新获得焦点。默认不做事。
     fn on_foreground(&self) {}
@@ -88,6 +120,25 @@ impl MembershipRuntime for UnavailableMembershipRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_public_build_refuses_every_membership_operation() {
+        let runtime = UnavailableMembershipRuntime;
+        for code in [
+            runtime.refresh().expect_err("refresh").code,
+            runtime
+                .start_email_login("user@example.com")
+                .expect_err("start")
+                .code,
+            runtime
+                .verify_email_login("user@example.com", "123456")
+                .expect_err("verify")
+                .code,
+            runtime.logout().expect_err("logout").code,
+        ] {
+            assert_eq!(code, "membership_unavailable");
+        }
+    }
 
     #[test]
     fn the_public_build_installs_an_unavailable_runtime() {
