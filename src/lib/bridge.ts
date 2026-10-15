@@ -1667,3 +1667,58 @@ export async function pickCustomApp(): Promise<CustomAppPick | null> {
     return null;
   }
 }
+
+/** 常用语门禁状态（与 Rust 侧 CommonPhraseAccess 一一对应）。 */
+export type CommonPhraseAccess = "unavailable" | "denied" | "allowed";
+
+/** 浮层面板一个位置的数据：只含短显示，不含完整句。 */
+export interface CommonPhrasePanelEntry {
+  button: string;
+  label: string;
+}
+
+/** 浮层面板快照（渲染圆盘用）。 */
+export interface CommonPhrasePanelSnapshot {
+  /** 私有组件是否已注入（未注入时公开构建隐藏入口）。 */
+  available: boolean;
+  access: CommonPhraseAccess;
+  canUse: boolean;
+  entries: CommonPhrasePanelEntry[];
+}
+
+/** 空快照：未注入私有组件或浏览器预览环境的回落值。 */
+export function emptyCommonPhrasePanelSnapshot(): CommonPhrasePanelSnapshot {
+  return { available: false, access: "unavailable", canUse: false, entries: [] };
+}
+
+/** 读取浮层面板数据。未注入私有组件时 available=false、entries 为空。 */
+export async function getCommonPhrasePanelSnapshot(): Promise<CommonPhrasePanelSnapshot> {
+  if (!isTauriRuntime()) {
+    return emptyCommonPhrasePanelSnapshot();
+  }
+  try {
+    return await invoke<CommonPhrasePanelSnapshot>("common_phrase_panel_snapshot");
+  } catch {
+    return emptyCommonPhrasePanelSnapshot();
+  }
+}
+
+/** 关闭浮层面板（右上角关闭按钮；返回键由遥控器路径关闭）。 */
+export async function closeCommonPhrasePanel(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    await invoke("close_common_phrase_panel");
+  } catch {
+    // 关闭失败不阻塞界面：面板会在下一次按键或收尾路径里被关掉。
+  }
+}
+
+/** 鼠标点选圆盘某个位置（与遥控器按下等价）。返回是否已受理。 */
+export async function selectCommonPhrase(button: string): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    return await invoke<boolean>("select_common_phrase", { button });
+  } catch {
+    return false;
+  }
+}
