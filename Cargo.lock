@@ -3168,6 +3168,7 @@ dependencies = [
  "rustls",
  "sayall-core",
  "sayall-windows",
+ "sayall-windows-common-phrases",
  "semver",
  "serde",
  "serde_json",

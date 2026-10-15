@@ -18,6 +18,7 @@ use tauri::{Emitter, Manager};
 
 mod accent;
 mod app_icon;
+mod common_phrase_panel;
 mod diagnostics;
 mod onboarding;
 mod platform;
@@ -3317,6 +3318,16 @@ pub fn run() {
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
             );
+            // 常用语浮层窗口（可选私有组件）：窗口先建好并隐藏；组件未注入时能力不可用。
+            let common_phrases_available = common_phrase_panel::install(app.handle());
+            sayall_windows::gatt_note(format!(
+                "COMMON_PHRASES COMPONENT phase=installed result={}",
+                if common_phrases_available {
+                    "available"
+                } else {
+                    "unavailable"
+                }
+            ));
             // 托盘图标：主窗口关闭后驻留；菜单 = 显示主界面 / 退出；
             // 左键点击托盘 = 显示并聚焦主窗口（Mac StatusIcon 同款行为）。
             #[cfg(all(windows, not(feature = "runtime-simulation")))]
@@ -3747,6 +3758,9 @@ pub fn run() {
         import_button_mapping_configuration,
         test_button_mapping,
         learn_focus_target,
+        common_phrase_panel::common_phrase_panel_snapshot,
+        common_phrase_panel::close_common_phrase_panel,
+        common_phrase_panel::select_common_phrase,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,
@@ -3820,6 +3834,9 @@ pub fn run() {
         import_button_mapping_configuration,
         test_button_mapping,
         learn_focus_target,
+        common_phrase_panel::common_phrase_panel_snapshot,
+        common_phrase_panel::close_common_phrase_panel,
+        common_phrase_panel::select_common_phrase,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,
