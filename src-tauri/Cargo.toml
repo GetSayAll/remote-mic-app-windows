@@ -10,7 +10,9 @@ name = "sayall_windows_app"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-runtime-simulation = []
+# 走查/仿真构建：转发给常用语组件，让「会员走查开关」
+# （SAYALL_COMMON_PHRASES_ASSUME_MEMBER=1）在该构建上生效（评审 M1 的走查通道）。
+runtime-simulation = ["sayall-windows-common-phrases/runtime-simulation"]
 # 验证用 debug 包也隐藏控制台窗口（打包时启用；dev 流程不受影响）。
 hide-console = []
 

@@ -8,3 +8,8 @@ description = "常用语可选组件的公开空壳（私有实现在构建期�
 
 [dependencies]
 sayall-windows = { path = "../sayall-windows" }
+
+[features]
+# 与私有实现同名：公开宿主的 `runtime-simulation` 构建会转发启用它；
+# 空壳声明保证公开构建同样可编译（无行为）。
+runtime-simulation = []
