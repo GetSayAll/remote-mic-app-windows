@@ -3088,6 +3088,10 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     let started = std::time::Instant::now();
     // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
     sayall_windows::key_host::shutdown_global();
+    // 常用语收尾（幂等；未接入组件时空操作）：关面板并**等待**在途插入事务
+    // 完成（含剪贴板恢复窗口）。退出是 process::exit，不执行析构——必须在这里
+    // 显式等待，否则用户剪贴板可能停在常用语文本上。
+    sayall_windows::common_phrases::current_common_phrase_host().shutdown();
     let platform = app.state::<AppState>().platform.clone();
     match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
         Ok(()) => sayall_windows::gatt_note(format!(

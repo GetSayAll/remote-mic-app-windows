@@ -74,6 +74,14 @@ pub trait CommonPhraseHost: Send + Sync {
     }
 
     /// 处理一次按键边沿；返回 `true` 表示已被面板消费（不得进入手势识别，也不执行原映射）。
+    ///
+    /// 配对约定（公开侧自持，2026-10-15 评审 M2）：引擎自己记录**被认领的按下**；
+    /// 该键随后的释放沿由引擎直接消费，**不依赖本方法在释放沿的返回值**——即使
+    /// 那一刻面板已关闭、本方法返回 `false`，释放沿也不会漏进手势识别（否则会对
+    /// 一个从未开始的按压做释放判定，触发幽灵单击/双击）。实现方仍会收到这段
+    /// 释放沿（`is_pressed=false`），可据此清理内部在按状态。
+    /// 反之，若释放沿被本方法认领、而引擎没有该键的认领记录（按下沿未被认领），
+    /// 引擎会先清掉该键的手势状态再消费，避免按压残留被错判成后续手势。
     fn handle(&self, button: RemoteButton, is_pressed: bool, source: &str) -> bool {
         let _ = (button, is_pressed, source);
         false
@@ -93,6 +101,14 @@ pub trait CommonPhraseHost: Send + Sync {
     fn close(&self, reason: &str) {
         let _ = reason;
     }
+
+    /// 应用退出时的收尾（进程结束前的最后一次调用；幂等）。
+    ///
+    /// 实现方必须**等待**在途的插入事务完成（含剪贴板恢复窗口）再让内部
+    /// 工作线程退出。为什么必须显式：退出路径是 `std::process::exit`，不执行
+    /// 析构——只靠 `Drop` 会让「已写脏剪贴板」的事务在恢复前被掐断，把用户
+    /// 剪贴板永久留在常用语文本上。未接入组件时空操作。
+    fn shutdown(&self) {}
 
     /// 面板五个位置的当前数据（供浮层渲染；只含短显示）。
     fn panel_entries(&self) -> Vec<CommonPhrasePanelEntry> {
