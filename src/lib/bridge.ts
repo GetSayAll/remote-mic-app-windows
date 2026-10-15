@@ -1964,6 +1964,29 @@ function appTargetLabel(target: string | undefined): string {
   return stem || target;
 }
 
+/** 聚焦学习失败的机器码 → 用户文案（底层错误形如 `SendInput failed: no_candidate`）。 */
+export function focusLearnErrorLabel(message: string): string {
+  const code = message.replace(/^SendInput failed:\s*/i, "").trim();
+  switch (code) {
+    case "no_candidate":
+      return "没有采到可用的输入框：请在倒计时里切到目标 App 并点击它的输入框，然后重试";
+    case "self_foreground":
+      return "学习期间无线麦在窗口最前面：请先切到目标 App 再重试";
+    case "not_foreground":
+      return "目标 App 不在最前面：请先切到它再重试";
+    case "target_exited":
+      return "目标 App 已经退出：请先打开它再学习";
+    case "not_accessible":
+      return "这个输入框读不到（可能是管理员权限窗口或受限应用）";
+    case "timeout":
+      return "学习超时，请重试";
+    case "cancelled":
+      return "学习已取消";
+    default:
+      return message;
+  }
+}
+
 /** 组合动作启动失败的机器码 → 用户文案（Rust 侧只给稳定 token）。 */
 export function macroStartErrorLabel(code: string): string | null {
   if (code === "already_running") return "这个组合动作正在执行，请稍后再试";

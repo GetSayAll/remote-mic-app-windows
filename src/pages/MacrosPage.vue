@@ -12,6 +12,8 @@ import {
   cancelMacro,
   deleteMacro,
   exportCombinedActions,
+  focusLearnErrorLabel,
+  getButtonMappings,
   getCombinedActions,
   getMacroRunStatus,
   importCombinedActions,
@@ -29,6 +31,7 @@ import {
   nextMacroVersion,
   registerMacroNames,
   registerPresetAppNames,
+  saveButtonMappings,
   saveMacro,
   startShortcutCapture,
   stopShortcutCapture,
@@ -527,31 +530,67 @@ function semanticKeyOf(code: KeyCode): string | null {
   return null;
 }
 
-// ===== 学习输入框（复用按键页的学习链路）=====
+// ===== 学习输入框（复用按键页的学习链路；必须把结果写进聚焦档案）=====
+
+/** 该 App 的聚焦档案策略（键 = 应用目标，与按键映射 `focusProfiles` 同源）。 */
+const focusProfileStrategies = ref<Record<string, string>>({});
+
+async function refreshFocusProfiles(): Promise<void> {
+  try {
+    const mappings = await getButtonMappings();
+    const strategies: Record<string, string> = {};
+    for (const [target, profile] of Object.entries(mappings.focusProfiles ?? {})) {
+      strategies[target] = profile.strategy;
+    }
+    focusProfileStrategies.value = strategies;
+  } catch {
+    // 读取失败：状态显示为"未知"，不阻断页面其余功能。
+  }
+}
+
+/** 该目标是否已学习过输入框（策略 = 聚焦已记录的输入框才可执行本步骤）。 */
+function focusReady(target: string | undefined): boolean {
+  if (!target) return false;
+  return focusProfileStrategies.value[target] === "recorded_element";
+}
 
 function startLearning(): void {
   const stepId = selectedStepId.value;
-  if (!stepId) return;
+  const target = draft.value?.steps.find((item) => item.stepId === stepId)?.parameters.target;
+  if (!stepId || !target) {
+    setStatus("先给这一步选择目标 App", "error");
+    return;
+  }
   learningStepId.value = stepId;
   learningCountdown.value = 10;
   setStatus("10 秒后自动记录，请切换并点击目标输入框");
   learningTimer = setInterval(() => {
     learningCountdown.value -= 1;
     if (learningCountdown.value <= 0) {
-      void finishLearning();
+      void finishLearning(target);
     }
   }, 1000);
 }
 
-async function finishLearning(): Promise<void> {
+async function finishLearning(target: string): Promise<void> {
   if (learningTimer) clearInterval(learningTimer);
   learningTimer = undefined;
   learningStepId.value = null;
   try {
-    await learnFocusTarget();
+    const recorded = await learnFocusTarget();
+    // 与按键页**同一落盘口径**：写入该目标的聚焦档案（策略=聚焦已记录的输入框）。
+    // 早前版本只显示"成功"却不写档案，导致这一步永远找不到输入框记录
+    // （2026-10-15 现场：组合动作页学习"成功"、步骤仍报不可用）。
+    const mappings = await getButtonMappings();
+    const nextProfiles = {
+      ...(mappings.focusProfiles ?? {}),
+      [target]: { strategy: "recorded_element" as const, recorded },
+    };
+    await saveButtonMappings({ ...mappings, focusProfiles: nextProfiles });
+    await refreshFocusProfiles();
     setStatus("输入框学习成功", "success");
   } catch (error) {
-    setStatus(`输入框学习失败：${messageOf(error)}`, "error");
+    setStatus(`输入框学习失败：${focusLearnErrorLabel(messageOf(error))}`, "error");
   }
 }
 
@@ -685,6 +724,7 @@ onMounted(async () => {
   } catch {
     presetApps.value = [];
   }
+  await refreshFocusProfiles();
   await reloadLibrary();
 });
 </script>
@@ -1027,7 +1067,7 @@ onMounted(async () => {
                   v-else-if="draft.steps[selectedStepIndex].action === 'focus_input'"
                   class="step-card-body"
                 >
-                  <label class="field">
+                  <div class="field">
                     <span class="field-label">目标 App</span>
                     <select
                       class="text-input"
@@ -1038,16 +1078,30 @@ onMounted(async () => {
                         {{ app.name }}
                       </option>
                     </select>
-                  </label>
+                    <span
+                      class="focus-state"
+                      :data-ready="focusReady(draft.steps[selectedStepIndex].parameters.target)"
+                      data-testid="focus-state"
+                    >
+                      {{
+                        focusReady(draft.steps[selectedStepIndex].parameters.target)
+                          ? "已学习这个 App 的输入框"
+                          : "还没有学习过这个 App 的输入框"
+                      }}
+                    </span>
+                  </div>
                   <div class="btn-row">
-                    <button class="btn" type="button" @click="startLearning">学习输入框</button>
+                    <button class="btn primary" type="button" @click="startLearning">
+                      {{ focusReady(draft.steps[selectedStepIndex].parameters.target) ? "重新学习" : "学习输入框" }}
+                    </button>
                     <span v-if="learningStepId === draft.steps[selectedStepIndex].stepId" class="countdown">
                       {{ learningCountdown }} 秒后自动记录，请切换并点击目标输入框
                     </span>
                   </div>
                   <span class="field-hint">
-                    点击后会倒计时 10 秒；请切换到目标 App 并点击输入框，倒计时结束时自动记录。
-                    需要先在按键页学习过该 App 的输入框。
+                    前置：① 目标 App 已经打开；② 倒计时结束前切到它、把光标点进要聚焦的输入框并保持在那里
+                    （密码框、搜索框、地址栏、只读区域不会被记录）；③ 倒计时结束时自动采样并记录。
+                    记录只属于这台电脑；也可以在按键页学习，两边共用同一份档案。
                   </span>
                 </div>
 
@@ -1690,6 +1744,14 @@ onMounted(async () => {
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 600;
+}
+.focus-state {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+}
+.focus-state[data-ready="true"] {
+  color: var(--success-text);
 }
 .review-summary {
   display: flex;

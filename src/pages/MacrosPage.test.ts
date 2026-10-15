@@ -31,6 +31,8 @@ const testMacroStepSpy = vi.hoisted(() => vi.fn());
 const testMacroSpy = vi.hoisted(() => vi.fn());
 const getMacroRunStatusSpy = vi.hoisted(() => vi.fn());
 const learnFocusTargetSpy = vi.hoisted(() => vi.fn());
+const getButtonMappingsSpy = vi.hoisted(() => vi.fn());
+const saveButtonMappingsSpy = vi.hoisted(() => vi.fn());
 const startShortcutCaptureSpy = vi.hoisted(() => vi.fn());
 const stopShortcutCaptureSpy = vi.hoisted(() => vi.fn());
 const exportSpy = vi.hoisted(() => vi.fn());
@@ -52,6 +54,8 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getMacroRunStatus: getMacroRunStatusSpy,
     cancelMacro: vi.fn(async () => true),
     learnFocusTarget: learnFocusTargetSpy,
+    getButtonMappings: getButtonMappingsSpy,
+    saveButtonMappings: saveButtonMappingsSpy,
     startShortcutCapture: startShortcutCaptureSpy,
     stopShortcutCapture: stopShortcutCaptureSpy,
     subscribeShortcutCaptureEdges: vi.fn(async (handler: CaptureHandler) => {
@@ -96,6 +100,8 @@ beforeEach(() => {
     automationId: "chat-input",
     className: "RichEdit",
   });
+  getButtonMappingsSpy.mockReset().mockResolvedValue({ enabled: true, actions: {} });
+  saveButtonMappingsSpy.mockReset().mockImplementation(async (mappings: unknown) => mappings);
   startShortcutCaptureSpy.mockReset().mockResolvedValue([]);
   stopShortcutCaptureSpy.mockReset().mockResolvedValue(null);
   exportSpy.mockReset().mockResolvedValue(true);
@@ -350,14 +356,13 @@ describe("组合动作页 · 编辑向导", () => {
     expect(select.text()).not.toContain("打开记事本并聚焦");
   });
 
-  it("学习输入框：点击后倒计时并在结束时调用学习接口", async () => {
+  it("学习输入框：倒计时结束后写入该 App 的聚焦档案（与按键页同一落盘口径）", async () => {
     vi.useFakeTimers();
     const wrapper = await mountPage();
     await findButton(wrapper, "编辑").trigger("click");
     await flushPromises();
     await findButton(wrapper, "编排步骤").trigger("click");
     await flushPromises();
-    // 当前选中第 1 步（打开应用）；切到聚焦步骤。
     const focusItem = wrapper
       .findAll(".step-edit-item")
       .find((item) => item.text().includes("聚焦学习过的输入框"))!;
@@ -369,7 +374,60 @@ describe("组合动作页 · 编辑向导", () => {
     await vi.advanceTimersByTimeAsync(10_500);
     await flushPromises();
     expect(learnFocusTargetSpy).toHaveBeenCalled();
+    // 关键回归（2026-10-15 现场）：学到的记录必须落进 focusProfiles，
+    // 否则"聚焦学习过的输入框"步骤永远没有档案可用。
+    expect(saveButtonMappingsSpy).toHaveBeenCalled();
+    const saved = saveButtonMappingsSpy.mock.calls.at(-1)![0] as {
+      focusProfiles: Record<string, { strategy: string }>;
+    };
+    expect(saved.focusProfiles.notepad?.strategy).toBe("recorded_element");
     expect(wrapper.text()).toContain("输入框学习成功");
+  });
+
+  it("学习失败显示中文原因（不再出现 SendInput failed / no_candidate 机器码）", async () => {
+    vi.useFakeTimers();
+    learnFocusTargetSpy.mockRejectedValueOnce(new Error("SendInput failed: no_candidate"));
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const focusItem = wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!;
+    await focusItem.trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "学习输入框").trigger("click");
+    await vi.advanceTimersByTimeAsync(10_500);
+    await flushPromises();
+    expect(wrapper.text()).toContain("没有采到可用的输入框");
+    expect(wrapper.text()).not.toContain("no_candidate");
+    expect(saveButtonMappingsSpy).not.toHaveBeenCalled();
+  });
+
+  it("已学习过的 App 显示「已学习」并提供「重新学习」（前置可见）", async () => {
+    getButtonMappingsSpy.mockResolvedValue({
+      enabled: true,
+      actions: {},
+      focusProfiles: {
+        notepad: {
+          strategy: "recorded_element",
+          recorded: { controlType: "Edit", automationId: "editor", className: "RichEdit" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const focusItem = wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!;
+    await focusItem.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="focus-state"]').text()).toContain("已学习");
+    expect(findButton(wrapper, "重新学习")).toBeTruthy();
   });
 
   it("保存失败显示错误状态且不关闭编辑器", async () => {
