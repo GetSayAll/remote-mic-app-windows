@@ -633,6 +633,9 @@ mod windows_impl {
     /// 宿主连接断开（退出/被杀/链路故障）：门控失能，全部按键透传（fail-open）。
     pub(crate) fn report_host_disconnected() {
         GATE_ACTIVE.store(false, Ordering::Relaxed);
+        // 宿主断连即 fail-open：常用语面板遮蔽一起清零，否则六个键会被永久吞掉
+        // 而面板已不可操作（断连/退出必须成对清理）。
+        PHRASE_PANEL_MASK.store(0, Ordering::Relaxed);
     }
 
     fn handle_shortcut_capture(
@@ -875,6 +878,9 @@ mod windows_impl {
             MAPPED_MASK.store(0, Ordering::Relaxed);
             ENHANCED_OWNED_MASK.store(0, Ordering::Relaxed);
             PERSISTENT_MASK.store(0, Ordering::Relaxed);
+            // 常用语面板遮蔽同样清零：门控重启（宿主重装钩子）后不得残留"六个键被吞"，
+            // 清零是 fail-open，与 `set_phrase_panel_mask` 的文档承诺一致。
+            PHRASE_PANEL_MASK.store(0, Ordering::Relaxed);
             REMOTE_CONNECTED.store(false, Ordering::Relaxed);
             LISTENER_ACTIVE.store(false, Ordering::Relaxed);
             for slot in &ARMED_UNTIL_MS {
