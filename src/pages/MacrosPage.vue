@@ -16,6 +16,7 @@ import {
   getMacroRunStatus,
   importCombinedActions,
   learnFocusTarget,
+  latestMacroDefinitions,
   listPresetApps,
   macroActionLabel,
   macroChordLabel,
@@ -39,6 +40,7 @@ import {
   type MacroAction,
   type MacroChord,
   type MacroDefinition,
+  type MacroLibraryDocument,
   type MacroModifier,
   type MacroRunReport,
   type MacroStep,
@@ -121,16 +123,15 @@ function setStatus(message: string, kind: "info" | "success" | "error" = "info")
 async function reloadLibrary(): Promise<void> {
   try {
     const library = await getCombinedActions();
-    definitions.value = library.definitions;
-    registerMacroNames(library.definitions);
+    applyLibrary(library);
     if (
       selectedMacroId.value &&
-      !library.definitions.some((item) => item.macroId === selectedMacroId.value)
+      !definitions.value.some((item) => item.macroId === selectedMacroId.value)
     ) {
-      selectedMacroId.value = library.definitions[0]?.macroId ?? null;
+      selectedMacroId.value = definitions.value[0]?.macroId ?? null;
     }
     if (!selectedMacroId.value) {
-      selectedMacroId.value = library.definitions[0]?.macroId ?? null;
+      selectedMacroId.value = definitions.value[0]?.macroId ?? null;
     }
   } catch (error) {
     setStatus(`组合动作读取失败：${messageOf(error)}`, "error");
@@ -141,6 +142,18 @@ async function reloadLibrary(): Promise<void> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 应用一次库响应：列表与选择器只保留每条动作的**最新版本**。
+ *
+ * 库文件按不可变版本累积（编辑一次 = 新版本追加），直接铺开会让同一条
+ * 动作显示成多行——2026-10-15 现场「编辑后变成两个」即此。
+ */
+function applyLibrary(library: MacroLibraryDocument): void {
+  const latest = latestMacroDefinitions(library.definitions);
+  definitions.value = latest;
+  registerMacroNames(latest);
 }
 
 /**
@@ -197,9 +210,8 @@ function toggleDelete(macroId: string): void {
 async function confirmDelete(macroId: string): Promise<void> {
   try {
     const library = await deleteMacro(macroId);
-    definitions.value = library.definitions;
-    registerMacroNames(library.definitions);
-    selectedMacroId.value = library.definitions[0]?.macroId ?? null;
+    applyLibrary(library);
+    selectedMacroId.value = definitions.value[0]?.macroId ?? null;
     pendingDeleteId.value = null;
     setStatus("组合动作已删除", "success");
   } catch (error) {
@@ -220,8 +232,7 @@ async function duplicateMacro(definition: MacroDefinition): Promise<void> {
   };
   try {
     const library = await saveMacro(copy);
-    definitions.value = library.definitions;
-    registerMacroNames(library.definitions);
+    applyLibrary(library);
     selectedMacroId.value = copy.macroId;
     setStatus("组合动作副本已创建", "success");
   } catch (error) {
@@ -245,8 +256,7 @@ async function onImport(): Promise<void> {
       setStatus("已取消导入");
       return;
     }
-    definitions.value = library.definitions;
-    registerMacroNames(library.definitions);
+    applyLibrary(library);
     setStatus("组合动作已导入", "success");
   } catch (error) {
     setStatus(`导入失败：${messageOf(error)}`, "error");
@@ -602,8 +612,7 @@ async function saveDraft(): Promise<void> {
   }
   try {
     const library = await saveMacro(definition);
-    definitions.value = library.definitions;
-    registerMacroNames(library.definitions);
+    applyLibrary(library);
     selectedMacroId.value = definition.macroId;
     wizardVisible.value = false;
     draft.value = null;

@@ -1735,6 +1735,42 @@ export function macroNameById(macroId: string): string | null {
   return macroNames.get(macroId) ?? null;
 }
 
+/**
+ * 同一条组合动作只保留最新版本（面向用户的是「动作」而不是「版本」）。
+ *
+ * 库文件按不可变版本累积（编辑一次 = 新版本追加，绑定引用按最新版解析）；
+ * 列表 / 选择器必须先用本函数去重，否则编辑一次就会多出一行
+ * （2026-10-15 现场：1.0.0 与 1.0.1 同时显示成两个动作）。
+ * 顺序 = 首次出现的顺序（列表稳定，编辑后不跳位）。
+ */
+export function latestMacroDefinitions(definitions: MacroDefinition[]): MacroDefinition[] {
+  const parse = (version: string): [number, number, number] | null => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  };
+  const greater = (candidate: string, current: string): boolean => {
+    const left = parse(candidate);
+    const right = parse(current);
+    if (left && right) {
+      for (let index = 0; index < 3; index += 1) {
+        if (left[index] !== right[index]) return left[index] > right[index];
+      }
+      return false;
+    }
+    return candidate > current;
+  };
+  const latest: MacroDefinition[] = [];
+  for (const definition of definitions) {
+    const index = latest.findIndex((item) => item.macroId === definition.macroId);
+    if (index === -1) {
+      latest.push(definition);
+    } else if (greater(definition.version, latest[index].version)) {
+      latest[index] = definition;
+    }
+  }
+  return latest;
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
   if (action.type === "focus_input") return "聚焦输入框";

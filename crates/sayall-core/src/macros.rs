@@ -188,12 +188,57 @@ pub struct MacroDefinition {
     pub steps: Vec<MacroStep>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MacroLibraryDocument {
     pub format_version: u32,
     #[serde(default)]
     pub definitions: Vec<MacroDefinition>,
+}
+
+impl Default for MacroLibraryDocument {
+    /// 空库必须是**当前结构版本**：早期版本用 derive 默认值写出 `formatVersion: 0`，
+    /// 导致导出后再导入被判"不支持的版本"（2026-10-15 现场实测）。
+    fn default() -> Self {
+        Self {
+            format_version: MACRO_LIBRARY_FORMAT_VERSION,
+            definitions: Vec::new(),
+        }
+    }
+}
+
+impl MacroLibraryDocument {
+    /// 盖章为当前结构版本（加载/保存/导入/导出统一走这里；未来版本已在
+    /// 存储层按 `formatVersion` 预检拒绝，不会走到本函数）。
+    pub fn normalized(mut self) -> Self {
+        self.format_version = MACRO_LIBRARY_FORMAT_VERSION;
+        self
+    }
+}
+
+/// 按 `macro_id` 分组、每组取最新版本（语义版本；解析失败按字符串比较）。
+///
+/// 面向用户的一层是**动作**而不是**版本**：界面与动作选择器必须用它去重，
+/// 否则同一条动作编辑一次就会多出一行（2026-10-15 现场：1.0.0 与 1.0.1 同时列出）。
+/// 保持首次出现的顺序（列表顺序稳定，避免编辑后跳位）。
+pub fn latest_definitions(definitions: &[MacroDefinition]) -> Vec<MacroDefinition> {
+    let mut latest: Vec<MacroDefinition> = Vec::new();
+    for definition in definitions {
+        match latest
+            .iter_mut()
+            .find(|existing| existing.macro_id == definition.macro_id)
+        {
+            Some(existing) => {
+                if compare_versions(&definition.version, &existing.version)
+                    == std::cmp::Ordering::Greater
+                {
+                    *existing = definition.clone();
+                }
+            }
+            None => latest.push(definition.clone()),
+        }
+    }
+    latest
 }
 
 /// 校验问题：机器可读 code（前端映射到用户文案），不带自由文本细节。
@@ -1024,5 +1069,59 @@ mod tests {
         assert!(validate_definition(&def)
             .unwrap_err()
             .contains(&MacroIssue::MissingParameter("state")));
+    }
+
+    /// 空库必须是当前结构版本：早期 derive 默认值写出 `formatVersion: 0`，
+    /// 导出→导入会因版本不符被拒（2026-10-15 现场实测）。
+    #[test]
+    fn empty_library_uses_current_format_version() {
+        let document = MacroLibraryDocument::default();
+        assert_eq!(document.format_version, MACRO_LIBRARY_FORMAT_VERSION);
+        let json = serde_json::to_value(&document).unwrap();
+        assert_eq!(json["formatVersion"], MACRO_LIBRARY_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn normalized_stamps_current_format_version() {
+        let document = MacroLibraryDocument {
+            format_version: 0,
+            definitions: vec![definition(open_app_steps())],
+        };
+        assert_eq!(
+            document.normalized().format_version,
+            MACRO_LIBRARY_FORMAT_VERSION
+        );
+    }
+
+    /// 面向用户的是「动作」而不是「版本」：同 id 多版本必须只留最新一条
+    /// （2026-10-15 现场：编辑一次后列表多出一行）。
+    #[test]
+    fn latest_definitions_groups_by_id_and_keeps_latest() {
+        let base = definition(open_app_steps());
+        let mut older = base.clone();
+        older.version = "1.0.0".to_owned();
+        older.name = "旧名字".to_owned();
+        let mut newer = base.clone();
+        newer.version = "1.0.1".to_owned();
+        newer.name = "新名字".to_owned();
+        let mut other = base.clone();
+        other.macro_id = "macro.bbbbbbb".to_owned();
+        other.version = "1.0.0".to_owned();
+
+        // 文件顺序 = 旧版本在前（真实现场形态）：只留新版本，且保持首次出现顺序。
+        let grouped = latest_definitions(&[older.clone(), newer.clone(), other.clone()]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].name, "新名字");
+        assert_eq!(grouped[0].version, "1.0.1");
+        assert_eq!(grouped[1].macro_id, "macro.bbbbbbb");
+
+        // 顺序颠倒（新版本在前）同样只留新版本。
+        let grouped = latest_definitions(&[newer.clone(), older.clone()]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].version, "1.0.1");
+
+        // 单条与空输入原样返回。
+        assert_eq!(latest_definitions(&[newer.clone()]), vec![newer]);
+        assert!(latest_definitions(&[]).is_empty());
     }
 }

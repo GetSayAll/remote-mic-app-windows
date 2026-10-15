@@ -10,6 +10,7 @@ import {
   GITHUB_REPOSITORY_URL,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
+  latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
   openGitHubRepository,
   openLogDirectory,
@@ -291,6 +292,49 @@ describe("设置页外部入口（官网 / GitHub）", () => {
       OFFICIAL_WEBSITE_URL,
       GITHUB_REPOSITORY_URL,
     ]);
+  });
+});
+
+describe("组合动作：同一条动作只保留最新版本（2026-10-15 现场回归）", () => {
+  const make = (macroId: string, version: string, name: string) => ({
+    schemaVersion: "0.1",
+    macroId,
+    version,
+    name,
+    steps: [
+      {
+        stepId: "step.01",
+        action: "open_application" as const,
+        parameters: { target: "notepad" },
+      },
+    ],
+  });
+
+  it("同 id 多版本只保留最新，顺序按首次出现（编辑后不跳位）", () => {
+    const grouped = latestMacroDefinitions([
+      make("macro.aaaaaaa1", "1.0.0", "旧名字"),
+      make("macro.aaaaaaa1", "1.0.1", "新名字"),
+      make("macro.bbbbbbb2", "1.0.0", "另一个"),
+    ]);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0].name).toBe("新名字");
+    expect(grouped[0].version).toBe("1.0.1");
+    expect(grouped[1].macroId).toBe("macro.bbbbbbb2");
+  });
+
+  it("新版本在前时同样只留最新", () => {
+    const grouped = latestMacroDefinitions([
+      make("macro.aaaaaaa1", "1.0.2", "最新"),
+      make("macro.aaaaaaa1", "1.0.0", "旧"),
+    ]);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0].version).toBe("1.0.2");
+  });
+
+  it("空库与单条原样返回", () => {
+    expect(latestMacroDefinitions([])).toEqual([]);
+    const single = [make("macro.aaaaaaa1", "1.0.0", "唯一")];
+    expect(latestMacroDefinitions(single)).toEqual(single);
   });
 });
 

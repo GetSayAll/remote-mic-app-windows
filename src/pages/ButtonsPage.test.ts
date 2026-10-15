@@ -620,6 +620,38 @@ describe("buttons mapping page", () => {
     expect(saved.actions.power!.single.macroVersion).toBe("1.0.0");
   });
 
+  it("组合动作分组：同一条动作多版本只显示一个芯片（2026-10-15 现场回归）", async () => {
+    vi.mocked(getCombinedActions).mockResolvedValueOnce({
+      formatVersion: 1,
+      definitions: [
+        {
+          schemaVersion: "0.1",
+          macroId: "macro.aaaaaaa1",
+          version: "1.0.0",
+          name: "旧名字",
+          steps: [{ stepId: "step.01", action: "open_application", parameters: { target: "notepad" } }],
+        },
+        {
+          schemaVersion: "0.1",
+          macroId: "macro.aaaaaaa1",
+          version: "1.0.1",
+          name: "新名字",
+          steps: [{ stepId: "step.01", action: "open_application", parameters: { target: "notepad" } }],
+        },
+      ],
+    });
+    const wrapper = await mountPage();
+    const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
+    await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    const macroSection = editor.findAll(".action-section").find((section) =>
+      section.text().includes("组合动作"),
+    )!;
+    const chips = macroSection.findAll(".chip");
+    expect(chips).toHaveLength(1);
+    expect(chips[0].text()).toBe("新名字");
+  });
+
   it("组合动作分组：空库时只提示去组合动作页创建", async () => {
     vi.mocked(getCombinedActions).mockResolvedValueOnce({ formatVersion: 1, definitions: [] });
     const wrapper = await mountPage();

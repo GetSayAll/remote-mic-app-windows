@@ -37,6 +37,7 @@ import {
   pickCustomApp,
   registerPresetAppNames,
   registerMacroNames,
+  latestMacroDefinitions,
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
@@ -1698,8 +1699,9 @@ onMounted(async () => {
   // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
   await getCombinedActions()
     .then((library) => {
-      macroDefinitions.value = library.definitions;
-      registerMacroNames(library.definitions);
+      // 同 id 多版本只取最新（编辑一次 = 版本追加，直接铺开会多出芯片）。
+      macroDefinitions.value = latestMacroDefinitions(library.definitions);
+      registerMacroNames(macroDefinitions.value);
     })
     .catch(() => undefined);
   mappings.value = loaded;

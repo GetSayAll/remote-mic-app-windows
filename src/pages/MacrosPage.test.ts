@@ -124,6 +124,40 @@ describe("组合动作页 · 库浏览", () => {
     expect(wrapper.text()).toContain("把打开 App、按键或输入框聚焦组合起来，再设到遥控器按键上。");
   });
 
+  it("同一条动作多版本只显示一条（2026-10-15 现场：编辑后变两个）", async () => {
+    // 现场形态：编辑一次后文件里同时有 1.0.0 与 1.0.1 两个版本。
+    getCombinedActionsSpy.mockResolvedValue({
+      formatVersion: 1,
+      definitions: [
+        baseDefinition,
+        { ...baseDefinition, version: "1.0.1", name: "改名后的动作" },
+      ],
+    });
+    const wrapper = await mountPage();
+    const items = wrapper.findAll(".macro-item");
+    expect(items).toHaveLength(1);
+    expect(items[0].text()).toContain("改名后的动作");
+  });
+
+  it("保存返回多版本时列表仍只显示一条（保存后不出现重复）", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "测试与保存").trigger("click");
+    await flushPromises();
+    // 后端按不可变版本语义把新版本追加在旧版本之后。
+    saveMacroSpy.mockResolvedValue({
+      formatVersion: 1,
+      definitions: [
+        baseDefinition,
+        { ...baseDefinition, version: "1.0.1", name: "打开记事本并聚焦" },
+      ],
+    });
+    await findButton(wrapper, "保存修改").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".macro-item")).toHaveLength(1);
+  });
+
   it("删除是两段式确认；确认后调 delete_macro", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "删除").trigger("click");
