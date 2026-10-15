@@ -1855,6 +1855,7 @@ mod tests {
                     keys: vec![KeyCode::RightAlt],
                 }),
                 recorded: None,
+                point: None,
             },
         );
         let json = serde_json::to_string(&mappings).unwrap();
@@ -1880,6 +1881,7 @@ mod tests {
                     automation_id: "chat-input".to_owned(),
                     ..Default::default()
                 }),
+                point: None,
             },
         );
         // 非法：app_shortcut 但没有快捷键 → 整条丢弃

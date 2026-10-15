@@ -415,6 +415,10 @@ impl MappingInjector for UnsupportedInjector {
     fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
         Err("学习输入框仅在 Windows 上可用".to_owned())
     }
+
+    fn learn_focus_point(&self, _target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        Err("记录点击位置仅在 Windows 上可用".to_owned())
+    }
 }
 
 impl Default for WindowsPlatform {
@@ -955,6 +959,13 @@ impl WindowsPlatform {
     pub fn learn_focus_target(&self) -> Result<focus::RecordedFocusTarget, PlatformError> {
         self.button_mapping
             .learn_focus_target()
+            .map_err(PlatformError::SendInput)
+    }
+
+    /// UI「记录点击位置」：读取物理光标并要求其落在目标应用窗口内。
+    pub fn learn_focus_point(&self, target: &str) -> Result<focus::RecordedPoint, PlatformError> {
+        self.button_mapping
+            .learn_focus_point(target)
             .map_err(PlatformError::SendInput)
     }
 
@@ -1575,6 +1586,17 @@ mod tests {
                     control_type: "Edit".to_owned(),
                     automation_id: "chat-input".to_owned(),
                     ..Default::default()
+                })
+            }
+            fn learn_focus_point(
+                &self,
+                _target: &str,
+            ) -> Result<crate::focus::RecordedPoint, String> {
+                Ok(crate::focus::RecordedPoint {
+                    x_ratio: 0.5,
+                    y_ratio: 0.5,
+                    window_width: 1200,
+                    window_height: 800,
                 })
             }
         }

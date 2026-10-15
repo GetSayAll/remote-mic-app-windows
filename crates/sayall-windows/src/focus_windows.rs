@@ -283,6 +283,23 @@ mod imp {
         candidates: Vec<FocusCandidate>,
     }
 
+    /// 候选门槛档位：自动选择用硬门槛（排除地址栏等），
+    /// 「按记录聚焦」用学习门槛（记录来自用户主动点击，排除词不参与）。
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CandidateGate {
+        Auto,
+        Recorded,
+    }
+
+    impl CandidateGate {
+        fn accepts(self, candidate: &FocusCandidate) -> bool {
+            match self {
+                Self::Auto => candidate.passes_hard_gate(),
+                Self::Recorded => candidate.passes_learning_gate(),
+            }
+        }
+    }
+
     fn snapshot_candidate(
         element: &IUIAutomationElement,
         window_frame: Option<(f64, f64, f64, f64)>,
@@ -315,7 +332,11 @@ mod imp {
         }
     }
 
-    fn collect_candidates(session: &Session, hwnd: HWND) -> Result<ScanResult, FocusFailure> {
+    fn collect_candidates(
+        session: &Session,
+        hwnd: HWND,
+        gate: CandidateGate,
+    ) -> Result<ScanResult, FocusFailure> {
         let automation = &session.automation;
         let root = unsafe { automation.ElementFromHandle(hwnd) }
             .map_err(|_| FocusFailure::NotAccessible)?;
@@ -336,7 +357,7 @@ mod imp {
             };
             let mut candidate = snapshot_candidate(&element, window_frame);
             candidate.control_type = control_type_name(automation, &element);
-            if candidate.passes_hard_gate() {
+            if gate.accepts(&candidate) {
                 candidates.push(candidate);
             }
         }
@@ -354,7 +375,8 @@ mod imp {
         // HWND 未实现 Send：只把裸指针宽度值送过线程边界。
         let raw = hwnd.0 as isize;
         submit(move |session| {
-            collect_candidates(session, hwnd_from_raw(raw)).map(|result| result.candidates)
+            collect_candidates(session, hwnd_from_raw(raw), CandidateGate::Auto)
+                .map(|result| result.candidates)
         })
         .unwrap_or(Err(FocusFailure::NotAccessible))
     }
@@ -398,10 +420,16 @@ mod imp {
         let Some((hwnd, _)) = target_window(pid) else {
             return FocusAttempt::TargetExited;
         };
+        // 「按记录聚焦」的候选与自动选择用不同门槛（记录来自用户主动点击），
+        // 两次枚举必须用同一档，否则序号对不上。
+        let gate = match &choice {
+            FocusChoice::Recorded(_) => CandidateGate::Recorded,
+            _ => CandidateGate::Auto,
+        };
         let raw = hwnd.0 as isize;
         let result = submit(move |session| {
             let hwnd = hwnd_from_raw(raw);
-            let scan = match collect_candidates(session, hwnd) {
+            let scan = match collect_candidates(session, hwnd, gate) {
                 Ok(scan) => scan,
                 Err(reason) => return FocusAttempt::Failed(reason),
             };
@@ -436,7 +464,7 @@ mod imp {
                 };
                 let mut candidate = snapshot_candidate(&element, None);
                 candidate.control_type = control_type_name(automation, &element);
-                if !candidate.passes_hard_gate() {
+                if !gate.accepts(&candidate) {
                     continue;
                 }
                 if seen == index {
@@ -484,12 +512,14 @@ mod imp {
                 return None;
             }
             // 学习必须命中「能输入」的元素：只读网页根、按钮、密码框一律不记。
+            // 门槛用学习档：用户主动点击的元素就是目标（地址栏这类排除词只在自动
+            // 选择路径生效，见 `FocusCandidate::passes_learning_gate`）。
             let focused_candidate = {
                 let mut candidate = snapshot_candidate(&focused, None);
                 candidate.control_type = control_type_name(&session.automation, &focused);
                 candidate
             };
-            if !focused_candidate.passes_hard_gate() {
+            if !focused_candidate.passes_learning_gate() {
                 return None;
             }
             let target = RecordedFocusTarget {

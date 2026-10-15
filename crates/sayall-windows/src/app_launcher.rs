@@ -1555,20 +1555,24 @@ fn activate_process_windows(pids: &std::collections::HashSet<u32>) -> RunningAct
 #[cfg(windows)]
 mod win_impl {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+    };
+    use windows::Win32::UI::HiDpi::{
+        GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
         KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MENU,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowPlacement,
-        GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-        SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_HIDE, SW_RESTORE, SW_SHOW,
-        WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        GetClassNameW, GetForegroundWindow, GetPhysicalCursorPos, GetWindow, GetWindowLongW,
+        GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId,
+        IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_HIDE,
+        SW_RESTORE, SW_SHOW, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
     };
 
     /// 隐藏候选最多记录/尝试的个数：覆盖"消息窗口 + 主窗口 + 辅助窗口"这类组合即可，
@@ -2075,6 +2079,65 @@ mod win_impl {
         foreground != 0 && foreground == target
     }
 
+    /// 该窗口当前是否持有前台（点按前的前置条件校验）。
+    pub(super) fn window_is_foreground(hwnd_raw: isize) -> bool {
+        let foreground = unsafe { GetForegroundWindow() };
+        foreground_matches_window(foreground.0 as isize, hwnd_raw)
+    }
+
+    /// 物理像素口径下的窗口矩形 `(x, y, width, height)`；最小化/退化矩形返回 `None`。
+    pub(super) fn window_rect_physical(hwnd_raw: isize) -> Option<(f64, f64, f64, f64)> {
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+        with_physical_dpi(|| unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect).ok()?;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            Some((
+                f64::from(rect.left),
+                f64::from(rect.top),
+                f64::from(width),
+                f64::from(height),
+            ))
+        })
+    }
+
+    /// 物理像素口径下的当前光标位置。
+    pub(super) fn cursor_position_physical() -> Option<(f64, f64)> {
+        with_physical_dpi(|| unsafe {
+            let mut point = POINT::default();
+            GetPhysicalCursorPos(&mut point).ok()?;
+            Some((f64::from(point.x), f64::from(point.y)))
+        })
+    }
+
+    /// 在线程上临时建立 Per-Monitor V2 上下文，保证读到的坐标是物理像素
+    /// （与 `send_input_windows` 的鼠标操作同一口径）。
+    pub(super) fn with_physical_dpi<T>(operation: impl FnOnce() -> T) -> T {
+        let previous = unsafe { GetThreadDpiAwarenessContext() };
+        if previous.0.is_null() {
+            return operation();
+        }
+        let switched =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if switched.0.is_null() {
+            return operation();
+        }
+        struct DpiGuard(DPI_AWARENESS_CONTEXT);
+        impl Drop for DpiGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    SetThreadDpiAwarenessContext(self.0);
+                }
+            }
+        }
+        let _guard = DpiGuard(previous);
+        operation()
+    }
+
     unsafe fn submit_alt_edge(key_up: bool) -> bool {
         let input = INPUT {
             r#type: INPUT_KEYBOARD,
@@ -2094,6 +2157,95 @@ mod win_impl {
         };
         SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1
     }
+}
+
+/// 目标应用当前可见主窗口的物理矩形 `(x, y, width, height)`。
+///
+/// 供「记录点击位置」与「按记录位置聚焦」共用：两者必须用同一口径的窗口矩形，
+/// 否则比例换算会引入系统性偏移。
+#[cfg(windows)]
+pub(crate) fn target_window_rect(target: &str) -> Option<(f64, f64, f64, f64)> {
+    let visibility = target_window_visibility(target)?;
+    let hwnd = visibility.largest_visible?;
+    win_impl::window_rect_physical(hwnd)
+}
+
+/// 「记录点击位置」：物理光标必须落在目标应用的可见窗口内。
+///
+/// 面向完全不暴露无障碍接口的应用（2026-10-15 实测：微信 4.x 对
+/// `OBJID_CLIENT` / `UiaRootObjectId` 都返回 0，UIA 树里没有任何可聚焦元素）。
+/// 学习只读取光标位置与窗口矩形，不读任何内容。
+#[cfg(windows)]
+pub fn learn_focus_point(target: &str) -> Result<crate::focus::RecordedPoint, String> {
+    let started = std::time::Instant::now();
+    let cursor = win_impl::cursor_position_physical();
+    let rect = target_window_rect(target);
+    let outcome = crate::focus::RecordedPoint::from_cursor(cursor, rect).ok_or_else(|| {
+        if cursor.is_none() {
+            "cursor_unavailable"
+        } else if rect.is_none() {
+            "target_window_missing"
+        } else {
+            "cursor_outside_target"
+        }
+        .to_owned()
+    })?;
+    crate::ble::gatt_note(format!(
+        "app_launcher action=learn_focus_point phase=completed terminal_result=passed window={}x{} elapsed_ms={}",
+        outcome.window_width,
+        outcome.window_height,
+        started.elapsed().as_millis()
+    ));
+    Ok(outcome)
+}
+
+#[cfg(not(windows))]
+pub fn learn_focus_point(_target: &str) -> Result<crate::focus::RecordedPoint, String> {
+    Err("unsupported".to_owned())
+}
+
+/// 按记录的相对坐标聚焦：等到目标窗口出现且在前面，再换算绝对坐标。
+///
+/// 目标窗口的当前尺寸必须与记录时相差不超过 25%，否则拒绝点击（布局变化后位置
+/// 不再可信，宁可失败也不要点错地方）。失败原因为稳定 token：
+/// `target_window_missing` / `not_foreground` / `window_size_changed`。
+#[cfg(windows)]
+pub fn recorded_point_absolute(
+    target: &str,
+    point: &crate::focus::RecordedPoint,
+) -> Result<(i32, i32), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+        let hwnd = target_window_visibility(target).and_then(|visit| visit.largest_visible);
+        match hwnd {
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    return Err("target_window_missing".to_owned());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+            Some(raw) => {
+                if !win_impl::window_is_foreground(raw) {
+                    if std::time::Instant::now() >= deadline {
+                        return Err("not_foreground".to_owned());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    continue;
+                }
+                let rect = win_impl::window_rect_physical(raw)
+                    .ok_or_else(|| "target_window_missing".to_owned())?;
+                return point
+                    .absolute_in(rect)
+                    .ok_or_else(|| "window_size_changed".to_owned());
+            }
+        }
+    }
+}
+
+/// `launch_app` 之后的等待：目标窗口出现（用于「按记录位置点击」前拿到真实矩形）。
+#[cfg(windows)]
+pub(crate) fn win_impl_window_rect(hwnd: isize) -> Option<(f64, f64, f64, f64)> {
+    win_impl::window_rect_physical(hwnd)
 }
 
 #[cfg(windows)]

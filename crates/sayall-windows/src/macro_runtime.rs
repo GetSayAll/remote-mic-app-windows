@@ -1005,6 +1005,27 @@ impl MacroStepper for WindowsMacroStepper {
                 // 注入已发；目标 App 内是否真的聚焦无法确认。
                 StepOutcome::Unknown
             }
+            crate::focus::FocusStrategy::RecordedPoint => {
+                let Some(point) = profile.and_then(|profile| profile.point) else {
+                    return StepOutcome::MissingDependency;
+                };
+                if self.injector.launch_app(target).is_err() {
+                    return StepOutcome::Failed;
+                }
+                // 生产路径由注入器换算绝对坐标并点击；失败原因（窗口未出现 / 不在前台 /
+                // 窗口尺寸变化）在注入器日志里，这里只汇报步骤失败。
+                match self.injector.launch_app_and_focus(
+                    target,
+                    Some(&crate::focus::AppFocusProfile {
+                        strategy: crate::focus::FocusStrategy::RecordedPoint,
+                        point: Some(point),
+                        ..Default::default()
+                    }),
+                ) {
+                    Ok(()) => StepOutcome::Unknown,
+                    Err(_) => StepOutcome::Failed,
+                }
+            }
             crate::focus::FocusStrategy::RecordedElement => {
                 let Some(recorded) = profile.and_then(|profile| profile.recorded) else {
                     return StepOutcome::MissingDependency;

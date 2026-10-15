@@ -31,6 +31,7 @@ const testMacroStepSpy = vi.hoisted(() => vi.fn());
 const testMacroSpy = vi.hoisted(() => vi.fn());
 const getMacroRunStatusSpy = vi.hoisted(() => vi.fn());
 const learnFocusTargetSpy = vi.hoisted(() => vi.fn());
+const learnFocusPointSpy = vi.hoisted(() => vi.fn());
 const getButtonMappingsSpy = vi.hoisted(() => vi.fn());
 const saveButtonMappingsSpy = vi.hoisted(() => vi.fn());
 const startShortcutCaptureSpy = vi.hoisted(() => vi.fn());
@@ -54,6 +55,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getMacroRunStatus: getMacroRunStatusSpy,
     cancelMacro: vi.fn(async () => true),
     learnFocusTarget: learnFocusTargetSpy,
+    learnFocusPoint: learnFocusPointSpy,
     getButtonMappings: getButtonMappingsSpy,
     saveButtonMappings: saveButtonMappingsSpy,
     startShortcutCapture: startShortcutCaptureSpy,
@@ -99,6 +101,12 @@ beforeEach(() => {
     controlType: "Edit",
     automationId: "chat-input",
     className: "RichEdit",
+  });
+  learnFocusPointSpy.mockReset().mockResolvedValue({
+    xRatio: 0.5,
+    yRatio: 0.82,
+    windowWidth: 1200,
+    windowHeight: 800,
   });
   getButtonMappingsSpy.mockReset().mockResolvedValue({ enabled: true, actions: {} });
   saveButtonMappingsSpy.mockReset().mockImplementation(async (mappings: unknown) => mappings);
@@ -402,6 +410,54 @@ describe("组合动作页 · 编辑向导", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("没有采到可用的输入框");
     expect(wrapper.text()).not.toContain("no_candidate");
+    expect(saveButtonMappingsSpy).not.toHaveBeenCalled();
+  });
+
+  it("记录点击位置：写入 recorded_point 档案（没有 UIA 树的应用走这条路）", async () => {
+    vi.useFakeTimers();
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const focusItem = wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!;
+    await focusItem.trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "记录点击位置").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("秒后自动记录鼠标位置");
+    await vi.advanceTimersByTimeAsync(6_500);
+    await flushPromises();
+    vi.useRealTimers();
+    expect(learnFocusPointSpy).toHaveBeenCalledWith("notepad");
+    const saved = saveButtonMappingsSpy.mock.calls.at(-1)![0] as {
+      focusProfiles: Record<string, { strategy: string; point?: { yRatio: number } }>;
+    };
+    expect(saved.focusProfiles.notepad?.strategy).toBe("recorded_point");
+    expect(saved.focusProfiles.notepad?.point?.yRatio).toBeCloseTo(0.82);
+    expect(wrapper.text()).toContain("点击位置记录成功");
+  });
+
+  it("记录位置失败时提示中文原因（光标不在目标窗口内）", async () => {
+    vi.useFakeTimers();
+    learnFocusPointSpy.mockRejectedValueOnce(new Error("SendInput failed: cursor_outside_target"));
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const focusItem = wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!;
+    await focusItem.trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "记录点击位置").trigger("click");
+    await vi.advanceTimersByTimeAsync(6_500);
+    await flushPromises();
+    vi.useRealTimers();
+    expect(wrapper.text()).toContain("鼠标不在目标应用的窗口里");
     expect(saveButtonMappingsSpy).not.toHaveBeenCalled();
   });
 

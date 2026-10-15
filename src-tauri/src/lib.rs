@@ -2313,6 +2313,21 @@ async fn learn_focus_target(
         .map_err(|error| error.to_string())
 }
 
+/// 「记录点击位置」：读取物理光标并要求它落在目标应用窗口内。
+///
+/// 面向完全不暴露无障碍接口的应用（微信 4.x）。UI 负责把它写进对应目标的聚焦档案。
+#[tauri::command]
+async fn learn_focus_point(
+    target: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::focus::RecordedPoint, String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_point(target))
+        .await
+        .map_err(|error| format!("记录点击位置任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
 /// 「测试打开与聚焦」：按目标与其聚焦档案走一次生产路径（异步受理）。
 #[tauri::command]
 async fn test_app_focus(target: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -4066,6 +4081,7 @@ pub fn run() {
         get_macro_run_status,
         test_button_mapping,
         learn_focus_target,
+        learn_focus_point,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,
@@ -4149,6 +4165,7 @@ pub fn run() {
         get_macro_run_status,
         test_button_mapping,
         learn_focus_target,
+        learn_focus_point,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,

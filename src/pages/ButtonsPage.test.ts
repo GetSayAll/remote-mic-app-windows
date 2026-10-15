@@ -53,6 +53,12 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       automationId: "chat-input",
       className: "RichEdit",
     })),
+    learnFocusPoint: vi.fn(async () => ({
+      xRatio: 0.5,
+      yRatio: 0.82,
+      windowWidth: 1200,
+      windowHeight: 800,
+    })),
     testAppFocus: vi.fn(async () => undefined),
     exportButtonMappingConfiguration: vi.fn(async () => true),
     importButtonMappingConfiguration: vi.fn(async () => ({
@@ -172,6 +178,7 @@ import {
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   importButtonMappingConfiguration,
+  learnFocusPoint,
   learnFocusTarget,
   scanPairedRemotes,
   subscribeButtonEdges,
@@ -299,6 +306,13 @@ beforeEach(() => {
     controlType: "Edit",
     automationId: "chat-input",
     className: "RichEdit",
+  });
+  vi.mocked(learnFocusPoint).mockClear();
+  vi.mocked(learnFocusPoint).mockResolvedValue({
+    xRatio: 0.5,
+    yRatio: 0.82,
+    windowWidth: 1200,
+    windowHeight: 800,
   });
   vi.mocked(exportButtonMappingConfiguration).mockClear();
   vi.mocked(importButtonMappingConfiguration).mockClear();
@@ -485,7 +499,7 @@ describe("buttons mapping page", () => {
     wrapper.unmount();
   });
 
-  it("「设备操作 / 聚焦输入框」入口先隐藏（2026-10-03 用户要求）", async () => {
+  it("「设备操作 / 聚焦输入框」入口恢复暴露（2026-10-15 用户要求，参考 Mac 端）", async () => {
     const wrapper = await mountPage();
     await flushPromises();
     const powerCard = wrapper
@@ -495,13 +509,18 @@ describe("buttons mapping page", () => {
     await flushPromises();
 
     const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
-    expect(titles, `动作分组：${titles.join(" / ")}`).not.toContain("设备操作");
-    expect(
-      wrapper.findAll(".mapping-editor button").some((button) => button.text() === "聚焦输入框"),
-    ).toBe(false);
-    // 对照组：其他动作分组不受影响。
-    expect(titles).toContain("鼠标滚轮");
-    expect(titles).toContain("打开应用");
+    expect(titles, `动作分组：${titles.join(" / ")}`).toContain("设备操作");
+    const focusChip = wrapper
+      .findAll(".mapping-editor button")
+      .find((button) => button.text() === "聚焦输入框");
+    expect(focusChip, "「聚焦输入框」动作入口必须可见").toBeDefined();
+
+    // 选中后写入映射（不切换应用、不输入文字，只有动作类型）。
+    await focusChip!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+      type: "focus_input",
+    });
     wrapper.unmount();
   });
 
@@ -1090,7 +1109,7 @@ describe("buttons mapping page", () => {
     });
   });
 
-  it("配置「打开应用」时聚焦方式面板暂时隐藏（2026-10-03 下线的回归守卫）", async () => {
+  it("配置「打开应用」时聚焦方式面板可见（2026-10-15 恢复）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
@@ -1100,8 +1119,13 @@ describe("buttons mapping page", () => {
     await notepadChip!.trigger("click");
     await flushPromises();
 
-    // 目标仍能正常选中并写入映射，但「打开后聚焦方式」面板不再暴露。
-    expect(editor.find(".focus-profile").exists()).toBe(false);
+    // 目标选中后「打开后聚焦方式」面板必须出现，并带四种策略。
+    const panel = editor.find(".focus-profile");
+    expect(panel.exists()).toBe(true);
+    const labels = panel.findAll(".chip").map((chip) => chip.text());
+    for (const label of ["只打开应用", "用应用快捷键聚焦", "聚焦已记录的输入框", "记录点击位置"]) {
+      expect(labels, `策略选项：${labels.join(" / ")}`).toContain(label);
+    }
     await vi.waitFor(() => {
       const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
         actions: Record<string, { single: { type: string; target?: string } }>;
@@ -1112,9 +1136,7 @@ describe("buttons mapping page", () => {
     });
   });
 
-  // 2026-10-03：UI 暂时隐藏（ButtonsPage.vue 的 showAppFocusStrategy=false），
-  // 恢复面板时把这个 skip 去掉即可继续覆盖策略切换与学习流程。
-  it.skip("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
+  it("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
@@ -1180,6 +1202,42 @@ describe("buttons mapping page", () => {
         throw new Error("学习失败文案未出现");
       }
     });
+
+    // 记录点击位置（面向微信 4.x 这类没有 UIA 树的应用）：6 秒后采集鼠标位置。
+    vi.useFakeTimers();
+    await panel.findAll(".chip").find((chip) => chip.text() === "记录点击位置")!.trigger("click");
+    await flushPromises();
+    await panel.findAll(".chip").find((chip) => chip.text() === "开始记录位置")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("正在记录鼠标位置");
+    await vi.advanceTimersByTimeAsync(6500);
+    await flushPromises();
+    vi.useRealTimers();
+    const recordedPoint = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      focusProfiles?: Record<string, { strategy: string; point?: { yRatio: number } }>;
+    };
+    expect(recordedPoint.focusProfiles?.notepad?.strategy).toBe("recorded_point");
+    expect(recordedPoint.focusProfiles?.notepad?.point?.yRatio).toBeCloseTo(0.82);
+    expect(wrapper.text()).toContain("已记录位置");
+  });
+
+  it("记录点击位置失败时提示中文原因（光标不在目标窗口内）", async () => {
+    vi.useFakeTimers();
+    vi.mocked(learnFocusPoint).mockRejectedValueOnce(new Error("cursor_outside_target"));
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    await editor.findAll(".chip").find((chip) => chip.text() === "记事本")!.trigger("click");
+    await flushPromises();
+    const panel = editor.find(".focus-profile");
+    await panel.findAll(".chip").find((chip) => chip.text() === "记录点击位置")!.trigger("click");
+    await flushPromises();
+    await panel.findAll(".chip").find((chip) => chip.text() === "开始记录位置")!.trigger("click");
+    await vi.advanceTimersByTimeAsync(6500);
+    await flushPromises();
+    vi.useRealTimers();
+    expect(wrapper.text()).toContain("鼠标不在目标应用的窗口里");
   });
 
   it("configures mouse actions with independent validated amounts", async () => {    const wrapper = await mountPage();

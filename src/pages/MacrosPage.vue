@@ -13,10 +13,12 @@ import {
   deleteMacro,
   exportCombinedActions,
   focusLearnErrorLabel,
+  focusPointErrorLabel,
   getButtonMappings,
   getCombinedActions,
   getMacroRunStatus,
   importCombinedActions,
+  learnFocusPoint,
   learnFocusTarget,
   latestMacroDefinitions,
   listPresetApps,
@@ -81,6 +83,8 @@ const capturedChord = ref<KeyChord | null>(null);
 const captureActive = ref(false);
 const learningStepId = ref<string | null>(null);
 const learningCountdown = ref(0);
+/** 「记录点击位置」的倒计时（与学习输入框共用 `learningStepId`/`learningTimer`）。 */
+const pointCountdown = ref(0);
 
 const testRunId = ref<string | null>(null);
 const testReport = ref<MacroRunReport | null>(null);
@@ -552,6 +556,50 @@ async function refreshFocusProfiles(): Promise<void> {
 function focusReady(target: string | undefined): boolean {
   if (!target) return false;
   return focusProfileStrategies.value[target] === "recorded_element";
+}
+
+/** 该目标是否已记录点击位置（策略 = 记录点击位置；面向没有 UIA 树的应用）。 */
+function focusPointReady(target: string | undefined): boolean {
+  if (!target) return false;
+  return focusProfileStrategies.value[target] === "recorded_point";
+}
+
+/** 「记录点击位置」：6 秒后采集鼠标位置，写入该目标的 recorded_point 档案。 */
+function startPointRecording(): void {
+  const stepId = selectedStepId.value;
+  const target = draft.value?.steps.find((item) => item.stepId === stepId)?.parameters.target;
+  if (!stepId || !target) {
+    setStatus("先给这一步选择目标 App", "error");
+    return;
+  }
+  learningStepId.value = stepId;
+  pointCountdown.value = 6;
+  setStatus("6 秒后自动记录鼠标位置：请先把鼠标停在目标输入框上");
+  learningTimer = setInterval(() => {
+    pointCountdown.value -= 1;
+    if (pointCountdown.value <= 0) {
+      void finishPointRecording(target);
+    }
+  }, 1000);
+}
+
+async function finishPointRecording(target: string): Promise<void> {
+  if (learningTimer) clearInterval(learningTimer);
+  learningTimer = undefined;
+  learningStepId.value = null;
+  try {
+    const point = await learnFocusPoint(target);
+    const mappings = await getButtonMappings();
+    const nextProfiles = {
+      ...(mappings.focusProfiles ?? {}),
+      [target]: { strategy: "recorded_point" as const, point },
+    };
+    await saveButtonMappings({ ...mappings, focusProfiles: nextProfiles });
+    await refreshFocusProfiles();
+    setStatus("点击位置记录成功", "success");
+  } catch (error) {
+    setStatus(`记录位置失败：${focusPointErrorLabel(messageOf(error))}`, "error");
+  }
 }
 
 function startLearning(): void {
@@ -1080,13 +1128,18 @@ onMounted(async () => {
                     </select>
                     <span
                       class="focus-state"
-                      :data-ready="focusReady(draft.steps[selectedStepIndex].parameters.target)"
+                      :data-ready="
+                        focusReady(draft.steps[selectedStepIndex].parameters.target) ||
+                          focusPointReady(draft.steps[selectedStepIndex].parameters.target)
+                      "
                       data-testid="focus-state"
                     >
                       {{
                         focusReady(draft.steps[selectedStepIndex].parameters.target)
                           ? "已学习这个 App 的输入框"
-                          : "还没有学习过这个 App 的输入框"
+                          : focusPointReady(draft.steps[selectedStepIndex].parameters.target)
+                            ? "已记录这个 App 的点击位置"
+                            : "还没有学习过这个 App 的输入框"
                       }}
                     </span>
                   </div>
@@ -1094,14 +1147,32 @@ onMounted(async () => {
                     <button class="btn primary" type="button" @click="startLearning">
                       {{ focusReady(draft.steps[selectedStepIndex].parameters.target) ? "重新学习" : "学习输入框" }}
                     </button>
-                    <span v-if="learningStepId === draft.steps[selectedStepIndex].stepId" class="countdown">
-                      {{ learningCountdown }} 秒后自动记录，请切换并点击目标输入框
+                    <button
+                      class="btn"
+                      type="button"
+                      @click="startPointRecording"
+                      title="目标应用在 UIA 里没有输入框时（例如微信 4.x）：把鼠标停在目标输入框上，按这个按钮记录位置"
+                    >
+                      {{ focusPointReady(draft.steps[selectedStepIndex].parameters.target) ? "重新记录位置" : "记录点击位置" }}
+                    </button>
+                    <span
+                      v-if="learningStepId === draft.steps[selectedStepIndex].stepId"
+                      class="countdown"
+                    >
+                      <template v-if="pointCountdown > 0">
+                        {{ pointCountdown }} 秒后自动记录鼠标位置：请先把鼠标停在目标输入框上
+                      </template>
+                      <template v-else>
+                        {{ learningCountdown }} 秒后自动记录，请切换并点击目标输入框
+                      </template>
                     </span>
                   </div>
                   <span class="field-hint">
                     前置：① 目标 App 已经打开；② 倒计时结束前切到它、把光标点进要聚焦的输入框并保持在那里
-                    （密码框、搜索框、地址栏、只读区域不会被记录）；③ 倒计时结束时自动采样并记录。
-                    记录只属于这台电脑；也可以在按键页学习，两边共用同一份档案。
+                    （密码框、只读区域不会被记录；地址栏可以，因为你是主动点的）；③ 倒计时结束时自动采样并记录。
+                    目标应用完全没有向系统暴露输入框时（微信 4.x 实测），改用「记录点击位置」：
+                    把鼠标停在要点击的输入框上，6 秒后记录该相对位置，之后按这个位置点击聚焦。
+                    记录只属于这台电脑；也可以在按键页记录，两边共用同一份档案。
                   </span>
                 </div>
 

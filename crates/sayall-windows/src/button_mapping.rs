@@ -91,6 +91,13 @@ pub trait MappingInjector: Send + Sync {
     ///
     /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
     fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
+
+    /// 「记录点击位置」：读取当前物理光标并要求它落在目标应用窗口内。
+    ///
+    /// 面向完全不暴露无障碍接口的应用（微信 4.x）。同步、无阻塞。
+    fn learn_focus_point(&self, target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        crate::app_launcher::learn_focus_point(target)
+    }
 }
 
 /// 生产注入器：批量 SendInput tap（DOWN+UP），部分交付时由 send_input 层回滚。
@@ -211,6 +218,16 @@ impl MappingInjector for SendInputInjector {
                 .flatten()
                 .map(|_| ())
                 .ok_or_else(|| "聚焦服务不可用".to_owned())
+            }
+            crate::focus::FocusStrategy::RecordedPoint => {
+                let point = profile
+                    .and_then(|profile| profile.point)
+                    .ok_or_else(|| "该应用还没有记录点击位置".to_owned())?;
+                let (x, y) = crate::app_launcher::recorded_point_absolute(target, &point)?;
+                self.runtime
+                    .move_cursor_and_click(x, y)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }
         }
     }
@@ -420,6 +437,11 @@ impl ButtonMappingRuntime {
     /// UI「开始学习输入框」：阻塞至多 3 秒，返回捕获到的输入框特征。
     pub fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
         self.injector.learn_focus_target()
+    }
+
+    /// UI「记录点击位置」：读取物理光标并要求其落在目标应用窗口内。
+    pub fn learn_focus_point(&self, target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        self.injector.learn_focus_point(target)
     }
 
     /// 订阅语义按键边沿（Tauri 层转发为前端事件；画布高亮数据源）。
@@ -2114,6 +2136,7 @@ mod tests {
                     automation_id: "chat-input".to_owned(),
                     ..Default::default()
                 }),
+                point: None,
             },
         );
         runtime.set_mappings(mappings);

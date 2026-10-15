@@ -300,7 +300,11 @@ export interface PresetAppInfo {
 }
 
 /** 打开应用后的聚焦方式（对齐 Rust `FocusStrategy`）。 */
-export type FocusStrategy = "open_only" | "app_shortcut" | "recorded_element";
+export type FocusStrategy =
+  | "open_only"
+  | "app_shortcut"
+  | "recorded_element"
+  | "recorded_point";
 
 /** 相对目标顶层窗口的归一化矩形（物理像素换算成比例）。 */
 export interface NormalizedRect {
@@ -326,11 +330,20 @@ export interface RecordedFocusTarget {
   contextTokens?: string[];
 }
 
+/** 「记录点击位置」：相对目标窗口的归一化坐标（0..1）与记录时的窗口尺寸。 */
+export interface RecordedPoint {
+  xRatio: number;
+  yRatio: number;
+  windowWidth: number;
+  windowHeight: number;
+}
+
 /** 「打开应用」目标的聚焦档案（键 = open_app 的 target）。 */
 export interface AppFocusProfile {
   strategy: FocusStrategy;
   shortcut?: KeyChord;
   recorded?: RecordedFocusTarget;
+  point?: RecordedPoint;
 }
 
 /** 每键三列（单击/双击/长按），对齐 Mac 原版 ButtonTrigger。 */
@@ -1241,6 +1254,19 @@ export async function learnFocusTarget(): Promise<RecordedFocusTarget> {
   return invoke<RecordedFocusTarget>("learn_focus_target");
 }
 
+/**
+ * 「记录点击位置」：把当前鼠标所在的相对位置记到目标应用上。
+ *
+ * 只读取光标坐标与目标窗口矩形，不读任何内容；光标不在目标窗口内时抛
+ * `cursor_outside_target`（见 `focusPointErrorLabel`）。
+ */
+export async function learnFocusPoint(target: string): Promise<RecordedPoint> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法记录点击位置");
+  }
+  return invoke<RecordedPoint>("learn_focus_point", { target });
+}
+
 /** 「测试打开与聚焦」：按目标与聚焦档案走一次生产路径（异步受理）。 */
 export async function testAppFocus(target: string): Promise<void> {
   if (!isTauriRuntime()) {
@@ -1982,6 +2008,25 @@ export function focusLearnErrorLabel(message: string): string {
       return "学习超时，请重试";
     case "cancelled":
       return "学习已取消";
+    default:
+      return message;
+  }
+}
+
+/** 「记录点击位置」失败的机器码 → 用户文案（底层错误同样可能带 `SendInput failed:` 前缀）。 */
+export function focusPointErrorLabel(message: string): string {
+  const code = message.replace(/^SendInput failed:\s*/i, "").trim();
+  switch (code) {
+    case "cursor_outside_target":
+      return "鼠标不在目标应用的窗口里：把鼠标停在要点击的位置（例如输入框）上再试";
+    case "target_window_missing":
+      return "目标应用没有可见窗口：先打开它再试";
+    case "not_foreground":
+      return "目标应用没有在最前面：先切到它再试";
+    case "window_size_changed":
+      return "目标窗口的大小和记录时相差太大：请重新记录一次位置";
+    case "cursor_unavailable":
+      return "读不到鼠标位置：请重试";
     default:
       return message;
   }

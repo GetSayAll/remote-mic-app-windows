@@ -50,6 +50,11 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn learn_focus_target(
         &self,
     ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError>;
+    /// 「记录点击位置」：读取物理光标并要求其落在目标应用窗口内。
+    fn learn_focus_point(
+        &self,
+        target: String,
+    ) -> Result<sayall_windows::focus::RecordedPoint, PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
     /// 仿真旅程是否跳过「外部入口（官网 / GitHub）」这两步。
@@ -252,6 +257,13 @@ impl PlatformRuntime for WindowsPlatform {
         &self,
     ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError> {
         WindowsPlatform::learn_focus_target(self)
+    }
+
+    fn learn_focus_point(
+        &self,
+        target: String,
+    ) -> Result<sayall_windows::focus::RecordedPoint, PlatformError> {
+        WindowsPlatform::learn_focus_point(self, &target)
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
@@ -965,6 +977,19 @@ mod simulation {
                 window_title: String::new(),
                 normalized_rect: None,
                 context_tokens: Vec::new(),
+            })
+        }
+
+        fn learn_focus_point(
+            &self,
+            _target: String,
+        ) -> Result<sayall_windows::focus::RecordedPoint, PlatformError> {
+            // 固定样本：CI 断言 UI 的位置记录状态机能落到「已记录位置」。
+            Ok(sayall_windows::focus::RecordedPoint {
+                x_ratio: 0.5,
+                y_ratio: 0.82,
+                window_width: 1200,
+                window_height: 800,
             })
         }
 
