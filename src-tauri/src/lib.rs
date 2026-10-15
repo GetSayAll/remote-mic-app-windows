@@ -429,46 +429,68 @@ impl std::fmt::Debug for AppState {
 
 /// 会员摘要（2026-10-15）：公开构建恒为「不可用」，私有构建返回账号与权益。
 /// 隐私红线同 [`MembershipSnapshot`]：不含凭据、令牌与邮箱原文。
+///
+/// 读的是内存快照，因此保持同步：它由界面按秒轮询，必须立刻返回。
 #[tauri::command]
 fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
     state.membership.snapshot()
 }
 
 /// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
+///
+/// 会走网络，所以必须离开主线程：阻塞在窗口线程上会让界面白屏、拖动卡顿。
 #[tauri::command]
-fn refresh_membership(state: tauri::State<'_, AppState>) -> Result<MembershipSnapshot, String> {
-    state.membership.refresh().map_err(|error| error.code)
+async fn refresh_membership(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.refresh()).await
 }
 
 /// 给邮箱发一封登录验证码（2026-10-15）。
 #[tauri::command]
-fn start_membership_email_login(
+async fn start_membership_email_login(
     state: tauri::State<'_, AppState>,
     email: String,
 ) -> Result<EmailCodeDelivery, String> {
-    state
-        .membership
-        .start_email_login(&email)
-        .map_err(|error| error.code)
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.start_email_login(&email)).await
 }
 
 /// 提交验证码完成登录。
 #[tauri::command]
-fn verify_membership_email_login(
+async fn verify_membership_email_login(
     state: tauri::State<'_, AppState>,
     email: String,
     code: String,
 ) -> Result<MembershipSnapshot, String> {
-    state
-        .membership
-        .verify_email_login(&email, &code)
-        .map_err(|error| error.code)
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.verify_email_login(&email, &code)).await
 }
 
 /// 退出登录。只影响本机。
 #[tauri::command]
-fn logout_membership(state: tauri::State<'_, AppState>) -> Result<MembershipSnapshot, String> {
-    state.membership.logout().map_err(|error| error.code)
+async fn logout_membership(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.logout()).await
+}
+
+/// 在阻塞线程池上执行一次会员操作。
+///
+/// 所有会走网络的操作都必须经这里：会员客户端是同步阻塞的，直接在命令线程
+/// （同步命令就是主线程）上调用会冻结窗口。失败只回稳定错误码。
+async fn run_membership<T, F>(operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, membership::MembershipError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(operation).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.code),
+        Err(_) => Err("membership_task_failed".to_string()),
+    }
 }
 
 /// 读取 Windows 系统强调色（设置 > 个性化 > 颜色）。前端用返回的 RGB 派生

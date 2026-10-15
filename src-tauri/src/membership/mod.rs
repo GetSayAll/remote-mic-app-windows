@@ -13,7 +13,7 @@ mod runtime;
 /// 只再导出宿主实际用到的类型：`membership` 是私有模块，未被引用的再导出会被
 /// rustc 判为 unused import。私有实现需要其余类型时，走 `super::runtime::{...}`
 /// （见 `hook.rs`）。
-pub use runtime::{EmailCodeDelivery, MembershipRuntime, MembershipSnapshot};
+pub use runtime::{EmailCodeDelivery, MembershipError, MembershipRuntime, MembershipSnapshot};
 
 pub fn install() -> std::sync::Arc<dyn MembershipRuntime> {
     hook::install().unwrap_or_else(|| std::sync::Arc::new(runtime::UnavailableMembershipRuntime))

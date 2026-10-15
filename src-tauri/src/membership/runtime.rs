@@ -70,6 +70,10 @@ pub struct EmailCodeDelivery {
 }
 
 /// 宿主访问会员功能的唯一接口。
+///
+/// 线程约定：`snapshot()` 会被主线程按秒调用，**必须立刻返回**；其余方法都会走
+/// 网络，`on_foreground()` 由窗口事件在主线程触发，因此实现**必须把阻塞工作放到
+/// 别的线程**，不得在调用线程上等待 I/O。
 pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
     /// 读取当前摘要。必须是非阻塞的：界面按秒轮询调用。
     fn snapshot(&self) -> MembershipSnapshot;
