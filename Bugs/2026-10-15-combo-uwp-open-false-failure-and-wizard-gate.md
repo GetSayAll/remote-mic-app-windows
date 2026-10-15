@@ -72,3 +72,40 @@ explorer: known=true running_process=true  visible_window=false window_presence=
   需按 AUMID 匹配窗口才能补强）——记入 TODO「组合动作」条目，暂未实现。
 - 真机复验 deferred：重装后重测「打开计算器」应显示"无法确认第三方 App 的结果"
   且后续步骤继续执行；向导空名称应被拦在第一步。
+
+## 第三轮（2026-10-15 晚，用户复测）
+
+**现象**：多次执行「打开计算器」会打开多个窗口；测试结果显示「请求已发送，请在目标
+App 确认结果」而不是「已完成」；结果出来得慢（约 8 秒）。
+
+**证据（本机实测）**：
+
+```
+# calc.exe 或 shell:AppsFolder\… 每启动一次就多一个实例
+before: 2  → Start-Process calc → 3   （用户看到"多个窗口"的机制）
+before: 3  → AUMID 激活 → 4 → 5      （AUMID 启动同样新开实例）
+
+# 判据口径对照（修复前代码）
+calc:                                          visible_window=false   ← 按映像名看不到窗口
+shell:AppsFolder\Microsoft.WindowsCalculator…: visible_window=true    ← 只有 AUMID 口径看得见
+```
+
+**根因**：打包应用（计算器）的窗口只有按 **AUMID** 才能枚举到；"已运行"识别不到 ⇒
+每次执行都走"启动"分支 ⇒ 新开窗口；同时就绪判据（只有映像名口径）等不到窗口 ⇒
+耗满 8 秒超时 ⇒ 报"结果不可确认"。三个现象同源。
+
+**修复**：预设应用新增 AUMID 表（`preset_aumid`，只登记本机实测确认项：计算器）；
+`target_window_visibility` 合并「映像名 + AUMID」两个口径，`application_readiness`
+与激活路径共用；窗口枚举新增 `largest_visible`；打包应用**已有可见窗口时只前置、
+绝不重新启动**（`activate_known_window`，失败即报"Windows 拒绝切换到前台"）。
+
+**真机验证（修复后，同一台机器）**：
+
+```
+calc: known=true running_process=true visible_window=true window_presence=true   ← 首轮命中，不再等超时
+activate calc: ok=true
+激活前进程数 5 → 激活后进程数 5（无新实例；修复前每执行一次 +1）
+```
+
+**边界**：AUMID 表按应用逐个登记（未登记的应用维持原路径）；"等待应用 → 窗口已出现"
+对未登记 AUMID 的打包应用仍不可判定。

@@ -358,6 +358,24 @@ pub struct CustomAppPick {
     pub path: String,
 }
 
+/// 预设应用的**打包应用（UWP/MSIX）AUMID 表**。
+///
+/// 为什么需要它（2026-10-15 现场）：这类应用的窗口**不属于自己的进程**
+/// （或按 exe 名匹配不到），按进程/映像名枚举窗口永远看不到；只有按 AUMID
+/// 才能看见。而"看不见窗口"会连带两个错误行为：
+/// ①「打开应用」误判未运行 → 再次启动 → 每次执行都新开一个窗口
+///   （计算器实测：calc.exe 与 `shell:AppsFolder\…` 激活都会新开实例）；
+/// ② 就绪判据等不到窗口 → 步骤报"结果不可确认"且耗满超时。
+///
+/// 表内只登记**本机实测确认**的条目；未登记的应用维持原有（按进程/映像名）路径。
+pub fn preset_aumid(id: &str) -> Option<&'static str> {
+    match id {
+        // 本机实测（Windows 11，2026-10-15）：按 exe 名看不到窗口，按 AUMID 可见。
+        "calc" => Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+        _ => None,
+    }
+}
+
 /// 判断 OpenApp 目标是否为自定义路径（非预设 id）。
 #[cfg(windows)]
 fn is_custom_path_target(target: &str) -> bool {
@@ -429,6 +447,24 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
             return launch_explicit(&exe.to_string_lossy(), None, None, true);
         }
         let visibility = window_visibility(WindowSelector::ExecutableNames(app.exe_names));
+        // 打包应用（登记了 AUMID）：窗口按映像名常常看不到，只有 AUMID 口径可见。
+        // 已经开着 → **只前置，绝不重新启动**——这类应用每次启动都会新开一个实例
+        // （2026-10-15 现场：多次执行打开多个计算器窗口）。
+        if let Some(aumid) = preset_aumid(app.id) {
+            let merged = visibility.merge(window_visibility(WindowSelector::AppUserModelId(aumid)));
+            if let Some(hwnd) = merged.largest_visible {
+                let activated = unsafe { win_impl::activate_known_window(hwnd) };
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=activate_or_launch preset={} phase=aumid_activate_existing terminal_result={}",
+                    app.id,
+                    if activated { "passed" } else { "failed" }
+                ));
+                if activated {
+                    return Ok(());
+                }
+                return Err("Windows 拒绝将目标应用切换到前台".to_owned());
+            }
+        }
         match running_window_disposition(
             visibility.visible,
             visibility.visible_max_area,
@@ -1219,6 +1255,9 @@ pub(crate) struct WindowVisibility {
     pub visible: usize,
     pub hidden: usize,
     pub largest_hidden: Option<isize>,
+    /// 面积最大的**可见**窗口（按 AUMID/进程匹配到的"主窗口"；用于"已运行就前置"
+    /// 而不是重新启动——打包应用重新启动会新开实例，2026-10-15 现场）。
+    pub largest_visible: Option<isize>,
     pub visible_max_area: i64,
     pub hidden_max_area: i64,
 }
@@ -1229,6 +1268,7 @@ impl WindowVisibility {
         visible: 0,
         hidden: 0,
         largest_hidden: None,
+        largest_visible: None,
         visible_max_area: 0,
         hidden_max_area: 0,
     };
@@ -1248,6 +1288,16 @@ impl WindowVisibility {
                 }
                 (left, right) => left.or(right),
             },
+            largest_visible: match (self.largest_visible, other.largest_visible) {
+                (Some(left), Some(right)) => {
+                    if self.visible_max_area >= other.visible_max_area {
+                        Some(left)
+                    } else {
+                        Some(right)
+                    }
+                }
+                (left, right) => left.or(right),
+            },
             visible_max_area: self.visible_max_area.max(other.visible_max_area),
             hidden_max_area: self.hidden_max_area.max(other.hidden_max_area),
         }
@@ -1256,6 +1306,35 @@ impl WindowVisibility {
 
 /// 目标进程/AUMID 当前可见窗口与隐藏窗口的数量（与激活路径同一份过滤规则）。
 /// 只读枚举：不显示、不置前、不写任何窗口状态。
+///
+/// 预设应用若登记了 AUMID（[`preset_aumid`]），结果**合并两个口径**——打包应用的
+/// 窗口按进程/映像名常常看不到，只有 AUMID 口径可见（2026-10-15 实测）。
+#[cfg(windows)]
+pub(crate) fn target_window_visibility(target: &str) -> Option<WindowVisibility> {
+    if crate::registered_apps::is_registered_target(target) {
+        let aumid = target.strip_prefix(crate::registered_apps::REGISTERED_PREFIX)?;
+        return Some(window_visibility(WindowSelector::AppUserModelId(aumid)));
+    }
+    if let Some(app) = preset_app(target) {
+        let by_exe = window_visibility(WindowSelector::ExecutableNames(app.exe_names));
+        return Some(match preset_aumid(app.id) {
+            Some(aumid) => by_exe.merge(window_visibility(WindowSelector::AppUserModelId(aumid))),
+            None => by_exe,
+        });
+    }
+    if is_custom_path_target(target) {
+        let resolved = if target.to_ascii_lowercase().ends_with(".lnk") {
+            resolve_lnk(target)
+                .map(|shortcut| shortcut.exe_path)
+                .unwrap_or_else(|| target.to_owned())
+        } else {
+            target.to_owned()
+        };
+        return Some(window_visibility(WindowSelector::ExecutablePath(&resolved)));
+    }
+    None
+}
+
 #[cfg(windows)]
 pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibility {
     use windows::Win32::Foundation::LPARAM;
@@ -1276,6 +1355,7 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
         hidden: 0,
         largest_hidden: None,
         largest_hidden_area: 0,
+        largest_visible: None,
         visible_max_area: 0,
     };
     unsafe {
@@ -1288,6 +1368,7 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
         visible: context.visible,
         hidden: context.hidden,
         largest_hidden: context.largest_hidden,
+        largest_visible: context.largest_visible,
         visible_max_area: context.visible_max_area,
         hidden_max_area: context.largest_hidden_area,
     }
@@ -1488,6 +1569,7 @@ mod win_impl {
         pub hidden: usize,
         pub largest_hidden: Option<isize>,
         pub largest_hidden_area: i64,
+        pub largest_visible: Option<isize>,
         pub visible_max_area: i64,
     }
 
@@ -1507,7 +1589,10 @@ mod win_impl {
             .unwrap_or(0);
         if IsWindowVisible(hwnd).as_bool() {
             context.visible += 1;
-            context.visible_max_area = context.visible_max_area.max(area);
+            if area >= context.visible_max_area {
+                context.visible_max_area = area;
+                context.largest_visible = Some(hwnd.0 as isize);
+            }
         } else {
             context.hidden += 1;
             if area > context.largest_hidden_area {
@@ -2236,8 +2321,11 @@ pub fn application_readiness(target: &str) -> ApplicationReadiness {
             None => return unknown,
         }
     } else if let Some(app) = preset_app(target) {
+        // 与激活路径同一份口径（AUMID 合并）：打包应用的窗口按映像名看不到。
+        let visibility = target_window_visibility(target)
+            .unwrap_or(WindowVisibility::EMPTY);
         (
-            window_visibility(WindowSelector::ExecutableNames(app.exe_names)),
+            visibility,
             !pids_for_exe_names(app.exe_names).is_empty(),
         )
     } else if is_custom_path_target(target) {
@@ -2290,6 +2378,28 @@ mod application_readiness_tests {
     #[test]
     fn preset_target_is_resolvable() {
         let readiness = application_readiness("notepad");
+        assert!(readiness.known);
+    }
+
+    /// 打包应用 AUMID 表：登记项可用，未登记项不猜（2026-10-15 现场）。
+    #[test]
+    fn preset_aumid_table_is_explicit() {
+        assert_eq!(
+            preset_aumid("calc"),
+            Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App")
+        );
+        assert_eq!(preset_aumid("notepad"), None);
+        assert_eq!(preset_aumid("unknown-app"), None);
+    }
+
+    /// AUMID 口径的就绪判据可用：`shell:AppsFolder\…` 目标（注册应用路径）
+    /// 走同一套 `window_visibility`，是本机实测"唯一能看见计算器窗口"的口径。
+    #[cfg(windows)]
+    #[test]
+    fn aumid_selector_targets_are_resolvable() {
+        let readiness = application_readiness(
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        );
         assert!(readiness.known);
     }
 
