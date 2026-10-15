@@ -1,0 +1,16 @@
+/* 常用语浮层窗口专用：覆盖主界面样式表里"不透明背景 + 940px 最小宽度"的假设。
+   浮层窗口只有 300×372，且要求透明 + 无阴影；主样式表的 :root/body 背景与
+   html,body,#app 的 min-width 会让面板变成一块灰色方框并横向溢出。 */
+.common-phrases-panel-body {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.common-phrases-panel-body #common-phrases-panel {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}

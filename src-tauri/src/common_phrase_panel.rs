@@ -85,6 +85,10 @@ fn panel_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
+    // 关键：让 tao 自己的样式表带上 WS_EX_NOACTIVATE（`.focused(false)` 只压住首次显示）。
+    // 只靠手工 SetWindowLongPtrW 不行：tao 在第一次 show 的样式 diff 里会整体重写 ex-style
+    // 把 NOACTIVATE 抹掉，用户一鼠标点面板浮层就变成前台窗口，粘贴会落错地方。
+    .focusable(false)
     .visible(false)
     .build()?;
     apply_no_activate(window.hwnd().map(|handle| handle.0 as isize).ok());
@@ -126,9 +130,18 @@ impl PhrasePanelWindow for AppPanelWindow {
         let app = self.app.clone();
         let window = self.window.clone();
         let _ = app.clone().run_on_main_thread(move || {
-            // 居中显示（多屏时落在光标所在屏的可用区域中央）。
+            // 显示前的前台进程（判据：show 不得改变前台窗口）。
+            let before = sayall_windows::focus_windows::foreground_process_id();
+            // 居中显示：优先落在**光标所在屏**（`current_monitor()` 是"窗口当前所在屏"，
+            // 窗口未定位时恒为主屏，副屏用户会看不到面板却仍被吞键）。
             if let Ok(size) = window.outer_size() {
-                if let Ok(Some(monitor)) = window.current_monitor() {
+                let target = app
+                    .cursor_position()
+                    .ok()
+                    .and_then(|cursor| app.monitor_from_point(cursor.x, cursor.y).ok().flatten())
+                    .or_else(|| window.current_monitor().ok().flatten())
+                    .or_else(|| app.primary_monitor().ok().flatten());
+                if let Some(monitor) = target {
                     let area = monitor.size();
                     let position = monitor.position();
                     let x = position.x + ((area.width as i32 - size.width as i32) / 2).max(0);
@@ -138,7 +151,15 @@ impl PhrasePanelWindow for AppPanelWindow {
             }
             let _ = window.show();
             let _ = window.emit(PANEL_REFRESH_EVENT, ());
-            sayall_windows::gatt_note("COMMON_PHRASES PANEL phase=shown result=visible".to_owned());
+            // 真机判据：面板显示与鼠标点选都不得抢走前台焦点（前后进程号应一致，
+            // 且都不是本应用）。点击面板后的读数另行从日志观察。
+            let after = sayall_windows::focus_windows::foreground_process_id();
+            sayall_windows::gatt_note(format!(
+                "COMMON_PHRASES PANEL phase=shown result=visible fg_before={:?} fg_after={:?} self_pid={}",
+                before,
+                after,
+                std::process::id()
+            ));
         });
     }
 
@@ -147,6 +168,7 @@ impl PhrasePanelWindow for AppPanelWindow {
         let window = self.window.clone();
         let _ = app.clone().run_on_main_thread(move || {
             let _ = window.hide();
+            sayall_windows::gatt_note("COMMON_PHRASES PANEL phase=hidden result=done".to_owned());
         });
         sayall_windows::gatt_note("COMMON_PHRASES PANEL phase=hidden result=requested".to_owned());
     }

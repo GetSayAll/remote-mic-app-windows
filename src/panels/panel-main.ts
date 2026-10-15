@@ -7,6 +7,8 @@ import { createApp, h } from "vue";
 import { panelComponent } from "../private/windows-common-phrases";
 import { reportFrontendEvent } from "../lib/frontend-diagnostics";
 import "../styles.css";
+// 浮层窗口专用覆盖：透明背景 + 去掉主界面的 940px 最小宽度（见该文件注释）。
+import "./panel-window.css";
 
 const component = panelComponent();
 const root = document.querySelector<HTMLElement>("#common-phrases-panel");
