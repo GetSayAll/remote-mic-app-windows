@@ -4,7 +4,7 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
-import { DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
+import { COMBINATION_ACTIONS_ENABLED, DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
 import {
   captureFailureText,
   captureInactiveText,
@@ -22,6 +22,7 @@ import {
   exportButtonMappingConfiguration,
   getButtonMappingSnapshot,
   getButtonMappings,
+  getCombinedActions,
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
@@ -35,6 +36,7 @@ import {
   mouseMoveLabels,
   pickCustomApp,
   registerPresetAppNames,
+  registerMacroNames,
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
@@ -59,6 +61,7 @@ import {
   type FiredGesture,
   type FocusStrategy,
   type KeyCode,
+  type MacroDefinition,
   type MoveDirection,
   type PairedRemote,
   type PresetAppInfo,
@@ -222,6 +225,8 @@ const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
+/** 组合动作库（「组合动作」动作分组的候选；2026-10-15）。 */
+const macroDefinitions = ref<MacroDefinition[]>([]);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -1690,6 +1695,13 @@ onMounted(async () => {
   }
   presetApps.value = apps.filter((app) => app.installed);
   registerPresetAppNames(presetApps.value);
+  // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
+  await getCombinedActions()
+    .then((library) => {
+      macroDefinitions.value = library.definitions;
+      registerMacroNames(library.definitions);
+    })
+    .catch(() => undefined);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -2130,6 +2142,38 @@ onUnmounted(() => {
               @click="applyAction({ type: 'focus_input' })"
             >
               聚焦输入框
+            </button>
+          </div>
+        </section>
+
+        <!-- 组合动作（自定义动作；2026-10-15）：把已有动作绑定到本按键。
+             入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。 -->
+        <section v-if="COMBINATION_ACTIONS_ENABLED" class="action-section">
+          <h4 class="action-section-title">组合动作</h4>
+          <p v-if="macroDefinitions.length === 0" class="muted">
+            还没有组合动作。先到“组合动作”页创建。
+          </p>
+          <div v-else class="preset-grid">
+            <button
+              v-for="macro in macroDefinitions"
+              :key="macro.macroId"
+              class="chip custom-app"
+              :class="{
+                selected:
+                  selectedAction?.type === 'run_macro' &&
+                  selectedAction.macroId === macro.macroId,
+              }"
+              type="button"
+              :title="`${macro.steps.length} 个步骤`"
+              @click="
+                applyAction({
+                  type: 'run_macro',
+                  macroId: macro.macroId,
+                  macroVersion: macro.version,
+                })
+              "
+            >
+              {{ macro.name }}
             </button>
           </div>
         </section>

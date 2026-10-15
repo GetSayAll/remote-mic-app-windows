@@ -66,6 +66,21 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       },
     })),
     resetButtonMappings: vi.fn(async () => ({ enabled: true, actions: {} })),
+    // 组合动作分组候选（2026-10-15）：默认给一条动作，个别用例覆盖为空库。
+    getCombinedActions: vi.fn(async () => ({
+      formatVersion: 1,
+      definitions: [
+        {
+          schemaVersion: "0.1",
+          macroId: "macro.aaaaaaa1",
+          version: "1.0.0",
+          name: "打开记事本并聚焦",
+          steps: [
+            { stepId: "step.01", action: "open_application", parameters: { target: "notepad" } },
+          ],
+        },
+      ],
+    })),
     scanRegisteredApps: vi.fn(async () => [
       { name: "Registered Example", path: "shell:AppsFolder\\Example!App" },
     ]),
@@ -151,6 +166,7 @@ import {
   exportButtonMappingConfiguration,
   getButtonMappings,
   getCaptureSupport,
+  getCombinedActions,
   enableRc003Capture,
   disableRc003Capture,
   getRc003BridgeSnapshot,
@@ -576,6 +592,41 @@ describe("buttons mapping page", () => {
     expect(singleCell.classes()).toContain("set");
     await singleCell.trigger("click");
     expect(wrapper.find(".mapping-editor").text()).toContain("确定 · 单击");
+  });
+
+  it("组合动作分组：选中即写入 run_macro 并即时保存（2026-10-15）", async () => {
+    const wrapper = await mountPage();
+    const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
+    await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+
+    const editor = wrapper.find(".mapping-editor");
+    expect(editor.text()).toContain("组合动作");
+    const macroChip = editor.findAll(".chip").find((chip) => chip.text() === "打开记事本并聚焦");
+    expect(macroChip).toBeTruthy();
+    await macroChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) {
+        throw new Error("自动保存未触发");
+      }
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<
+        string,
+        { single: { type: string; macroId?: string; macroVersion?: string } }
+      >;
+    };
+    expect(saved.actions.power!.single.type).toBe("run_macro");
+    expect(saved.actions.power!.single.macroId).toBe("macro.aaaaaaa1");
+    expect(saved.actions.power!.single.macroVersion).toBe("1.0.0");
+  });
+
+  it("组合动作分组：空库时只提示去组合动作页创建", async () => {
+    vi.mocked(getCombinedActions).mockResolvedValueOnce({ formatVersion: 1, definitions: [] });
+    const wrapper = await mountPage();
+    const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
+    await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    expect(editor.text()).toContain("还没有组合动作。先到“组合动作”页创建。");
   });
 
   it("applies a preset to the editing target and auto-persists (对齐 Mac 即时保存)", async () => {

@@ -17,6 +17,7 @@ import {
 import SettingsPage from "./pages/SettingsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
+import MacrosPage from "./pages/MacrosPage.vue";
 import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 
@@ -76,6 +77,7 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 
 const activeComponent = computed(() => ({
   buttons: ButtonsPage,
+  macros: MacrosPage,
   connection: ConnectionPage,
   permissions: PermissionsPage,
   settings: SettingsPage,

@@ -29,3 +29,12 @@ export const DEVICE_ACTION_SECTION_ENABLED = false;
  * 阴性对照）使用。验收通过前本分支不合入 main（main 保持关闭）。
  */
 export const ONBOARDING_WIZARD_ENABLED = true;
+
+/**
+ * 侧边栏「组合动作」页与按键页的组合动作动作分组激活开关。
+ *
+ * 2026-10-15：数据层（P1）、执行器与按键绑定（P2）已落地；页面随 P3 一并
+ * 开发完成后打开。此开关只控制入口显隐，已绑定的组合动作照常执行
+ * （与 `DEVICE_ACTION_SECTION_ENABLED` 同款"隐藏入口、保留路径"语义）。
+ */
+export const COMBINATION_ACTIONS_ENABLED = true;

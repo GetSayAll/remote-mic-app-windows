@@ -96,6 +96,16 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn cancel_macro(&self, _macro_id: &str) -> bool {
         false
     }
+    /// 组合动作运行状态（UI 轮询：运行中标志 + 最近报告）。
+    fn macro_run_status(
+        &self,
+        _macro_id: &str,
+    ) -> sayall_windows::macro_runtime::MacroRunStatus {
+        sayall_windows::macro_runtime::MacroRunStatus {
+            running: false,
+            report: None,
+        }
+    }
     fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
     fn subscribe_button_edges(&self, callback: sayall_windows::button_mapping::ButtonEdgeCallback);
@@ -305,6 +315,13 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn cancel_macro(&self, macro_id: &str) -> bool {
         WindowsPlatform::macro_runtime(self).cancel(macro_id)
+    }
+
+    fn macro_run_status(
+        &self,
+        macro_id: &str,
+    ) -> sayall_windows::macro_runtime::MacroRunStatus {
+        WindowsPlatform::macro_runtime(self).run_status(macro_id)
     }
 
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot {

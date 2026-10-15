@@ -191,7 +191,106 @@ export type ButtonAction =
   | { type: "mouse_click"; kind: MouseClickKind }
   | { type: "mouse_move"; direction: MoveDirection; distance: number }
   | { type: "open_app"; target: string }
-  | { type: "focus_input" };
+  | { type: "focus_input" }
+  | { type: "run_macro"; macroId: string; macroVersion: string };
+
+// ===== 组合动作（Rust `sayall_core::macros` 的 camelCase 镜像）=====
+
+export type MacroAction =
+  | "open_application"
+  | "wait_for_application"
+  | "send_shortcut"
+  | "focus_input"
+  | "open_url"
+  | "run_macro";
+
+export type MacroModifier = "control" | "alt" | "shift" | "win";
+
+/** 修饰键固定显示顺序（对齐 Mac PRODUCT_SPEC：Control → Option → Shift → Command）。 */
+export const macroModifierOrder: MacroModifier[] = ["control", "alt", "shift", "win"];
+export const macroModifierLabels: Record<MacroModifier, string> = {
+  control: "Ctrl",
+  alt: "Alt",
+  shift: "Shift",
+  win: "Win",
+};
+
+export interface MacroChord {
+  modifiers: MacroModifier[];
+  /** 语义键名（`n`、`return`、`escape`、`space`、方向键名、`f1`…`f12`）。 */
+  key: string;
+}
+
+export type ApplicationWaitState = "running" | "visible_window";
+
+export interface MacroParameters {
+  target?: string;
+  state?: ApplicationWaitState;
+  chord?: MacroChord;
+  url?: string;
+  nestedMacroId?: string;
+  nestedMacroName?: string;
+}
+
+export interface MacroStep {
+  stepId: string;
+  action: MacroAction;
+  timeoutMs?: number;
+  parameters: MacroParameters;
+}
+
+export interface MacroDefinition {
+  schemaVersion: string;
+  macroId: string;
+  version: string;
+  name: string;
+  summary?: string;
+  steps: MacroStep[];
+}
+
+export interface MacroLibraryDocument {
+  formatVersion: number;
+  definitions: MacroDefinition[];
+}
+
+export type MacroTerminalResult =
+  | "completed"
+  | "completed_with_unknown_result"
+  | "step_failed"
+  | "missing_dependency"
+  | "permission_denied"
+  | "timed_out"
+  | "cancelled"
+  | "invalid_macro"
+  | "nested_too_deep"
+  | "cycle_detected";
+
+export type MacroStepOutcome =
+  | "done"
+  | "unknown"
+  | "missing_dependency"
+  | "permission_denied"
+  | "failed";
+
+export interface MacroStepReport {
+  index: number;
+  stepId: string;
+  action: MacroAction;
+  outcome: MacroStepOutcome;
+  elapsedMs: number;
+}
+
+export interface MacroRunReport {
+  macroId: string;
+  result: MacroTerminalResult;
+  elapsedMs: number;
+  steps: MacroStepReport[];
+}
+
+export interface MacroRunStatus {
+  running: boolean;
+  report: MacroRunReport | null;
+}
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
 export interface PresetAppInfo {
@@ -1622,6 +1721,20 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
   }
 }
 
+/** 组合动作名（页面加载库后更新；`actionSummary` 显示引用名）。 */
+const macroNames: Map<string, string> = new Map();
+
+export function registerMacroNames(definitions: Array<{ macroId: string; name: string }>): void {
+  macroNames.clear();
+  for (const definition of definitions) {
+    macroNames.set(definition.macroId, definition.name);
+  }
+}
+
+export function macroNameById(macroId: string): string | null {
+  return macroNames.get(macroId) ?? null;
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
   if (action.type === "focus_input") return "聚焦输入框";
@@ -1638,6 +1751,10 @@ export function actionSummary(action: ButtonAction | undefined): string {
     const base = action.target.split(/[\\/]/).pop() ?? action.target;
     const stem = base.replace(/\.(exe|lnk)$/i, "");
     return `打开${stem || action.target}`;
+  }
+  if (action.type === "run_macro") {
+    const known = macroNameById(action.macroId);
+    return known ? `执行${known}` : "执行组合动作";
   }
   return chordLabel(action.chord);
 }
@@ -1666,4 +1783,223 @@ export async function pickCustomApp(): Promise<CustomAppPick | null> {
   } catch {
     return null;
   }
+}
+
+// ===== 组合动作 IPC =====
+
+/** 浏览器预览用的演示库（只服务界面预览与快照断言，不进入生产路径）。 */
+const previewMacroLibrary: MacroLibraryDocument = {
+  formatVersion: 1,
+  definitions: [
+    {
+      schemaVersion: "0.1",
+      macroId: "macro.preview01",
+      version: "1.0.0",
+      name: "打开记事本并聚焦",
+      steps: [
+        {
+          stepId: "step.01",
+          action: "open_application",
+          parameters: { target: "notepad" },
+        },
+        {
+          stepId: "step.02",
+          action: "focus_input",
+          parameters: { target: "notepad" },
+        },
+      ],
+    },
+  ],
+};
+
+export async function getCombinedActions(): Promise<MacroLibraryDocument> {
+  if (!isTauriRuntime()) {
+    return structuredClone(previewMacroLibrary);
+  }
+  return invoke<MacroLibraryDocument>("get_combined_actions");
+}
+
+export async function saveMacro(definition: MacroDefinition): Promise<MacroLibraryDocument> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法保存组合动作");
+  return invoke<MacroLibraryDocument>("save_macro", { definition });
+}
+
+export async function deleteMacro(macroId: string): Promise<MacroLibraryDocument> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法删除组合动作");
+  return invoke<MacroLibraryDocument>("delete_macro", { macroId });
+}
+
+/** 导出组合动作库；用户取消返回 false。 */
+export async function exportCombinedActions(): Promise<boolean> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法导出组合动作");
+  return invoke<boolean>("export_combined_actions");
+}
+
+/** 导入组合动作（合并入库）；用户取消返回 null。 */
+export async function importCombinedActions(): Promise<MacroLibraryDocument | null> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法导入组合动作");
+  return invoke<MacroLibraryDocument | null>("import_combined_actions");
+}
+
+/** 测试运行已保存的组合动作（按最新版本；异步受理）。 */
+export async function testMacro(macroId: string): Promise<void> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法测试组合动作");
+  return invoke<void>("test_macro", { macroId });
+}
+
+/** 测试运行未保存的草稿定义；返回本次运行 ID（用于轮询状态）。 */
+export async function testMacroDefinition(definition: MacroDefinition): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法测试组合动作");
+  return invoke<string>("test_macro_definition", { definition });
+}
+
+/** 测试运行草稿里的单个步骤；返回本次运行 ID。 */
+export async function testMacroStep(
+  definition: MacroDefinition,
+  stepId: string,
+): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法测试步骤");
+  return invoke<string>("test_macro_step", { definition, stepId });
+}
+
+export async function cancelMacro(macroId: string): Promise<boolean> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法取消组合动作");
+  return invoke<boolean>("cancel_macro", { macroId });
+}
+
+export async function getMacroRunStatus(macroId: string): Promise<MacroRunStatus> {
+  if (!isTauriRuntime()) {
+    return { running: false, report: null };
+  }
+  return invoke<MacroRunStatus>("get_macro_run_status", { macroId });
+}
+
+/** 组合动作步骤类型的中文名（对齐 Mac `macro.step.*` 文案）。 */
+export const macroActionLabels: Record<MacroAction, string> = {
+  open_application: "打开应用",
+  wait_for_application: "等待应用",
+  send_shortcut: "单键或快捷键",
+  focus_input: "聚焦学习过的输入框",
+  open_url: "打开网址",
+  run_macro: "执行已有组合动作",
+};
+
+export function macroActionLabel(action: MacroAction): string {
+  return macroActionLabels[action] ?? action;
+}
+
+/** 组合键显示（修饰键固定顺序，`Ctrl + Alt + N`；与按键页文本惯例一致）。 */
+export function macroChordLabel(chord: MacroChord): string {
+  const modifiers = macroModifierOrder
+    .filter((modifier) => chord.modifiers.includes(modifier))
+    .map((modifier) => macroModifierLabels[modifier]);
+  const key = chord.key.length === 1 ? chord.key.toUpperCase() : keyLabel(chord.key);
+  return [...modifiers, key].join(" + ");
+}
+
+/** 步骤摘要（列表与详情共用一行说明）。 */
+export function macroStepSummary(step: MacroStep): string {
+  const parameters = step.parameters;
+  switch (step.action) {
+    case "open_application":
+      return appTargetLabel(parameters.target);
+    case "wait_for_application":
+      return `${appTargetLabel(parameters.target)} · ${
+        parameters.state === "running" ? "App 已打开" : "App 窗口已出现"
+      }`;
+    case "send_shortcut":
+      return parameters.chord ? macroChordLabel(parameters.chord) : "尚未录入按键";
+    case "focus_input":
+      return `${appTargetLabel(parameters.target)} · 聚焦学习过的输入框`;
+    case "open_url":
+      return parameters.url ?? "尚未填写网址";
+    case "run_macro":
+      return parameters.nestedMacroName ?? "尚未选择组合动作";
+  }
+}
+
+function appTargetLabel(target: string | undefined): string {
+  if (!target) return "尚未选择 App";
+  const known = presetAppNames.get(target);
+  if (known) return known;
+  if (!target.includes("\\") && !target.includes("/")) return target;
+  const base = target.split(/[\\/]/).pop() ?? target;
+  const stem = base.replace(/\.(exe|lnk)$/i, "");
+  return stem || target;
+}
+
+/** 整宏终态的用户文案（对齐 Mac `macro.status.execution.*`）。 */
+export function macroTerminalLabel(result: MacroTerminalResult): string {
+  switch (result) {
+    case "completed":
+      return "组合动作执行成功";
+    case "completed_with_unknown_result":
+      return "组合动作已执行，但无法确认第三方 App 的结果";
+    case "cancelled":
+      return "组合动作已取消";
+    case "timed_out":
+      return "组合动作执行超时";
+    case "invalid_macro":
+      return "这条组合动作的设置有问题";
+    case "missing_dependency":
+      return "需要使用的 App 或输入框记录不在这台电脑上";
+    case "permission_denied":
+      return "组合动作缺少系统权限";
+    case "nested_too_deep":
+      return "组合动作嵌套超过 8 层";
+    case "cycle_detected":
+      return "组合动作不能直接或间接执行自己";
+    case "step_failed":
+      return "组合动作中的步骤执行失败";
+  }
+}
+
+/** 单步结果文案（对齐 Mac `macro.test.step.*`）。 */
+export function macroStepOutcomeLabel(outcome: MacroStepOutcome): string {
+  switch (outcome) {
+    case "done":
+      return "步骤已完成";
+    case "unknown":
+      return "请求已发送，请在目标 App 确认结果";
+    case "missing_dependency":
+      return "所需动作或设置不可用";
+    case "permission_denied":
+      return "权限未授权";
+    case "failed":
+      return "执行失败，后续步骤已停止";
+  }
+}
+
+/** 生成新的组合动作 ID（与库的稳定 ID 规则一致：`macro.` + 32 位十六进制）。 */
+export function newMacroId(): string {
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `macro.${hex}`;
+}
+
+/** 生成新的步骤 ID（宏内唯一）。 */
+export function newStepId(): string {
+  const bytes = new Uint8Array(8);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  return `step.${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** 下一个补丁版本号（编辑保存总是新版本，对齐不可变版本语义）。 */
+export function nextMacroVersion(version: string): string {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!match) return "1.0.0";
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
 }

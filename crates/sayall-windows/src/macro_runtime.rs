@@ -13,13 +13,15 @@ use sayall_core::macros::{
     MacroDefinition, MacroLibraryDocument, MacroModifier, MacroStep,
     DEFAULT_MACRO_OVERALL_TIMEOUT_MS, MAX_NESTED_DEPTH,
 };
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 /// 单步执行结果（平台层返回；运行循环据此决定继续/停止/降级终态）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepOutcome {
     /// 步骤完成且结果可确认。
     Done,
@@ -34,7 +36,8 @@ pub enum StepOutcome {
 }
 
 /// 整宏终态（对齐 Mac status；`Unknown` 单列，不混入 Completed）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MacroTerminalResult {
     Completed,
     CompletedWithUnknownResult,
@@ -72,7 +75,8 @@ impl MacroTerminalResult {
 }
 
 /// 单步报告（参数只留 action 名与结果，不含目标/网址/按键——脱敏红线）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MacroStepReport {
     pub index: usize,
     pub step_id: String,
@@ -82,7 +86,8 @@ pub struct MacroStepReport {
 }
 
 /// 一次执行的完整报告。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MacroRunReport {
     pub macro_id: String,
     pub result: MacroTerminalResult,
@@ -331,6 +336,14 @@ fn run_nested(
     }
 }
 
+/// UI 轮询用的运行状态（`running` 与最近一次报告）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroRunStatus {
+    pub running: bool,
+    pub report: Option<MacroRunReport>,
+}
+
 /// 启动失败原因（IPC 层映射到用户文案）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MacroStartError {
@@ -400,6 +413,14 @@ impl MacroRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(macro_id)
             .cloned()
+    }
+
+    /// UI 轮询用：运行中标志 + 最近一次报告。
+    pub fn run_status(&self, macro_id: &str) -> MacroRunStatus {
+        MacroRunStatus {
+            running: self.is_running(macro_id),
+            report: self.last_report(macro_id),
+        }
     }
 
     /// 按库里**最新已保存版本**执行（对齐 Mac：编辑后引用自动生效）。
