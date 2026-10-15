@@ -949,6 +949,13 @@ mod windows_impl {
     }
 
     fn phrase_panel_owned(button: RemoteButton) -> bool {
+        // 遥控器离线（断连、睡眠、宿主重启）时不再遮蔽：此刻面板已不可操作，
+        // 继续吞会把六个键（含**物理键盘**的 Enter/方向键/Back）永久吃掉。
+        // 与 `remote_connected()` 的既有语义一致，也是对 `set_phrase_panel_mask`
+        // "清零是 fail-open" 承诺的兜底（不依赖上层一定调到 reset/断连清理）。
+        if !remote_connected() {
+            return false;
+        }
         (PHRASE_PANEL_MASK.load(Ordering::Relaxed) >> button.ordinal()) & 1 == 1
     }
 
