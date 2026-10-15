@@ -97,10 +97,7 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         false
     }
     /// 组合动作运行状态（UI 轮询：运行中标志 + 最近报告）。
-    fn macro_run_status(
-        &self,
-        _macro_id: &str,
-    ) -> sayall_windows::macro_runtime::MacroRunStatus {
+    fn macro_run_status(&self, _macro_id: &str) -> sayall_windows::macro_runtime::MacroRunStatus {
         sayall_windows::macro_runtime::MacroRunStatus {
             running: false,
             report: None,
@@ -317,10 +314,7 @@ impl PlatformRuntime for WindowsPlatform {
         WindowsPlatform::macro_runtime(self).cancel(macro_id)
     }
 
-    fn macro_run_status(
-        &self,
-        macro_id: &str,
-    ) -> sayall_windows::macro_runtime::MacroRunStatus {
+    fn macro_run_status(&self, macro_id: &str) -> sayall_windows::macro_runtime::MacroRunStatus {
         WindowsPlatform::macro_runtime(self).run_status(macro_id)
     }
 

@@ -1,3 +1,4 @@
+use sayall_core::{MacroDefinition, MacroLibraryDocument};
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
 use sayall_windows::rc003_bridge::{BridgePhase, BridgeSnapshot};
@@ -8,7 +9,6 @@ use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, ImeStatus, PairedRemote, PlatformSnapshot,
     WindowsPlatform,
 };
-use sayall_core::{MacroDefinition, MacroLibraryDocument};
 use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
 #[cfg(windows)]
@@ -1948,8 +1948,8 @@ async fn save_macro(
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
     let macro_id = definition.macro_id.clone();
-    let result = match
-        tauri::async_runtime::spawn_blocking(move || -> Result<MacroLibraryDocument, String> {
+    let result = match tauri::async_runtime::spawn_blocking(
+        move || -> Result<MacroLibraryDocument, String> {
             let current = settings.load_combined_actions()?;
             let incoming = MacroLibraryDocument {
                 format_version: sayall_core::MACRO_LIBRARY_FORMAT_VERSION,
@@ -1961,12 +1961,13 @@ async fn save_macro(
             // 保存即热加载（与按键映射同一模式）：RunMacro 引用立即解析新版本。
             platform.set_macro_library(saved.clone());
             Ok(saved)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(format!("保存组合动作任务失败：{error}")),
-        };
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存组合动作任务失败：{error}")),
+    };
     sayall_windows::gatt_note(match &result {
         Ok(document) => format!(
             "shortcut_settings feature=combined_actions action=save phase=completed terminal_result=passed macro_id={macro_id} definitions={} elapsed_ms={}",
@@ -1995,19 +1996,20 @@ async fn delete_macro(
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
     let log_macro_id = macro_id.clone();
-    let result = match
-        tauri::async_runtime::spawn_blocking(move || -> Result<MacroLibraryDocument, String> {
+    let result = match tauri::async_runtime::spawn_blocking(
+        move || -> Result<MacroLibraryDocument, String> {
             let mut current = settings.load_combined_actions()?;
             current.definitions.retain(|item| item.macro_id != macro_id);
             let saved = settings.save_combined_actions(current)?;
             platform.set_macro_library(saved.clone());
             Ok(saved)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(format!("删除组合动作任务失败：{error}")),
-        };
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("删除组合动作任务失败：{error}")),
+    };
     sayall_windows::gatt_note(match &result {
         Ok(document) => format!(
             "shortcut_settings feature=combined_actions action=delete phase=completed terminal_result=passed macro_id={log_macro_id} definitions={} elapsed_ms={}",
