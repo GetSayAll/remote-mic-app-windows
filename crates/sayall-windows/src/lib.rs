@@ -21,6 +21,9 @@ mod ble;
 mod bluetooth_radio;
 mod button_gestures;
 pub mod button_mapping;
+/// 常用语（内置内容、用户副本、五键分配、面板期认领与插入事务；纯逻辑，跨平台可单测）：
+/// 平台实现见 `clipboard_windows` 与 `phrase_insert_windows`。
+pub mod common_phrases;
 pub mod compatibility;
 mod diagnostic_log;
 pub mod file_dialog;

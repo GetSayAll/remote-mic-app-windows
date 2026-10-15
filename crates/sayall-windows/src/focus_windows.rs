@@ -363,6 +363,47 @@ mod imp {
         HWND(raw as *mut core::ffi::c_void)
     }
 
+    /// 常用语插入前的只读校验：目标进程里**当前持有键盘焦点**的元素是不是可用的输入目标。
+    ///
+    /// 与「聚焦输入框」共用同一硬门槛（[`FocusCandidate::passes_hard_gate`]）：可用、可聚焦、
+    /// 非密码框、非只读、语义不含敏感/排除词，且焦点元素确实属于目标进程。
+    /// 只读：不修改任何目标状态，也不读取任何输入内容。
+    ///
+    /// 返回 `Ok(false)` = 当前没有可用输入目标（无焦点、焦点在别的进程、只读或密码框）；
+    /// `Err` = 目标进程不存在或 UIA 不可用（应用没有无障碍树）。
+    pub fn focused_input_available(pid: u32) -> Result<bool, FocusFailure> {
+        if !process_alive(pid) {
+            return Err(FocusFailure::TargetExited);
+        }
+        let Some((hwnd, _)) = target_window(pid) else {
+            return Err(FocusFailure::TargetExited);
+        };
+        let raw = hwnd.0 as isize;
+        submit(move |session| {
+            let hwnd = hwnd_from_raw(raw);
+            let Ok(root) = (unsafe { session.automation.ElementFromHandle(hwnd) }) else {
+                return Ok(false);
+            };
+            let window_frame = unsafe { root.CurrentBoundingRectangle() }
+                .ok()
+                .and_then(|rect| sane_rect(&rect));
+            let Ok(focused) = (unsafe { session.automation.GetFocusedElement() }) else {
+                return Ok(false);
+            };
+            let focused_pid = unsafe { focused.CurrentProcessId() }
+                .map(|value| value as u32)
+                .unwrap_or(0);
+            if focused_pid != pid {
+                // 焦点在别的应用（例如用户已经切走）：不得把文本插到别处。
+                return Ok(false);
+            }
+            let mut candidate = snapshot_candidate(&focused, window_frame);
+            candidate.control_type = control_type_name(&session.automation, &focused);
+            Ok(candidate.passes_hard_gate())
+        })
+        .unwrap_or(Err(FocusFailure::NotAccessible))
+    }
+
     /// 读回判定：目标元素当前是否持有键盘焦点。
     fn element_has_focus(session: &Session, element: &IUIAutomationElement) -> bool {
         if unsafe { element.CurrentHasKeyboardFocus() }
@@ -607,8 +648,8 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     capture_focused_target, capture_for_process, current_process_id, focus_best, focus_target,
-    foreground_process_id, foreground_title_len, process_alive, scan_candidates, window_of_process,
-    FocusAttempt, WindowsFocusBackend,
+    focused_input_available, foreground_process_id, foreground_title_len, process_alive,
+    scan_candidates, window_of_process, FocusAttempt, WindowsFocusBackend,
 };
 
 /// 复用共享 UIA 工作线程（Per-Monitor V2、MTA）执行只读 UIA 任务的入口。

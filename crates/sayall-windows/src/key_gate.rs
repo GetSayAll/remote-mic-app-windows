@@ -312,6 +312,9 @@ mod windows_impl {
     /// 常驻抑制掩码（"遥控器优先"）：遥 online 期间无需武装直接吞。
     /// 由映射引擎在映射变化时写入（当前仅 Home/TV，见 button_mapping.rs）。
     static PERSISTENT_MASK: AtomicU64 = AtomicU64::new(0);
+    /// 常用语面板遮蔽掩码（见 `set_phrase_panel_mask`）：面板打开期间命中的按键
+    /// 无论是否映射都直接吞掉。
+    static PHRASE_PANEL_MASK: AtomicU64 = AtomicU64::new(0);
     /// 遥控器在线状态（BLE 连接相位推导，ble.rs 在相位提交点同步）。
     /// 常驻抑制键仅在线时接管；离线恢复物理键盘原生透传（不劫持）。
     static REMOTE_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -758,6 +761,29 @@ mod windows_impl {
             }
             return false;
         };
+        if phrase_panel_owned(button) {
+            // 常用语面板打开期间：这六个键无论是否映射都在边沿处直接吞，
+            // 且跳过武装与门控总开关（未映射键的原生动作会漏进前台应用）。
+            // 释放沿沿用既有配对裁决：DOWN 全被吞才吞 UP（防粘键，2026-09-05 规则）。
+            let key_id = (vk_code as u16, make_code);
+            if is_key_up {
+                let swallow =
+                    HOLD_PAIRING.with(|pairing| take_up_pairing(&mut pairing.borrow_mut(), key_id));
+                if swallow {
+                    SWALLOWED_EDGES.fetch_add(1, Ordering::Relaxed);
+                    feed_edge(button, false);
+                }
+                return swallow;
+            }
+            HOLD_PAIRING.with(|pairing| {
+                let mut pairing = pairing.borrow_mut();
+                let next = track_down(pairing.get(&key_id).copied(), true);
+                pairing.insert(key_id, next);
+            });
+            SWALLOWED_EDGES.fetch_add(1, Ordering::Relaxed);
+            feed_edge(button, true);
+            return true;
+        }
         if !gate_ready(button) {
             // 未映射按键：不吞、不记配对（原始行为透传）。
             if !is_key_up {
@@ -890,6 +916,34 @@ mod windows_impl {
     /// 报告层失联时立刻恢复既有 Raw Input + 全局钩子路径。
     pub fn set_enhanced_owned_mask(mask: u64) {
         ENHANCED_OWNED_MASK.store(mask, Ordering::Relaxed);
+    }
+
+    /// 常用语面板遮蔽掩码（面板打开期间由私有常用语组件置位，关闭时清零）。
+    ///
+    /// 语义：命中位的按键**无论是否映射**都在边沿处直接吞（未映射的 OK 是原生
+    /// Enter、方向键是原生方向键，不遮蔽就会漏进前台应用）。与常驻抑制族不同，
+    /// 它不看门控总开关与遥控器在线状态：面板只可能在遥控器在线且按键可用时打开。
+    /// 清零是 fail-open（面板关闭后立刻恢复原映射）。
+    pub fn set_phrase_panel_mask(mask: u64) {
+        PHRASE_PANEL_MASK.store(mask, Ordering::Relaxed);
+    }
+
+    /// 面板六个按键（OK/左/上/右/下/返回）的遮蔽掩码。
+    pub fn phrase_panel_mask() -> u64 {
+        [
+            RemoteButton::Ok,
+            RemoteButton::Left,
+            RemoteButton::Up,
+            RemoteButton::Right,
+            RemoteButton::Down,
+            RemoteButton::Back,
+        ]
+        .iter()
+        .fold(0, |mask, button| mask | (1u64 << button.ordinal()))
+    }
+
+    fn phrase_panel_owned(button: RemoteButton) -> bool {
+        (PHRASE_PANEL_MASK.load(Ordering::Relaxed) >> button.ordinal()) & 1 == 1
     }
 
     pub fn enhanced_owned_mask() -> u64 {
@@ -1142,10 +1196,10 @@ pub use windows_impl::{
     arm_button, begin_key_observation, capture_diagnostics_summary, configure, decide,
     end_key_observation, enhanced_owned_mask, injected_echo_since, injected_event_count,
     is_gate_thread_alive, leaked_down_count, listener_active, observed_keys, observed_last_vk,
-    persistent_swallow_total, set_edge_sink, set_enhanced_owned_mask, set_listener_active,
-    set_persistent_mask, set_remote_connected, set_shortcut_capture_active,
-    set_shortcut_capture_sink, set_voice_synth_active, swallowed_edge_count, voice_synth_active,
-    KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    persistent_swallow_total, phrase_panel_mask, set_edge_sink, set_enhanced_owned_mask,
+    set_listener_active, set_persistent_mask, set_phrase_panel_mask, set_remote_connected,
+    set_shortcut_capture_active, set_shortcut_capture_sink, set_voice_synth_active,
+    swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 /// 宿主消息路径（key_host 读线程调用；仅 crate 内可见）。
@@ -1176,6 +1230,10 @@ mod fallback {
 
     pub fn configure(_enabled: bool, _mapped_mask: u64) {}
     pub fn set_persistent_mask(_mask: u64) {}
+    pub fn set_phrase_panel_mask(_mask: u64) {}
+    pub fn phrase_panel_mask() -> u64 {
+        0
+    }
     pub fn set_enhanced_owned_mask(_mask: u64) {}
     pub fn enhanced_owned_mask() -> u64 {
         0

@@ -91,6 +91,12 @@ pub trait MappingInjector: Send + Sync {
     ///
     /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
     fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
+
+    /// 可选常用语组件（私有实现，构建期注入）。默认返回空实现：
+    /// 未注入时常用语不可用，且不影响任何按键行为。
+    fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
+        Arc::new(crate::common_phrases::DisabledCommonPhraseHost)
+    }
 }
 
 /// 生产注入器：批量 SendInput tap（DOWN+UP），部分交付时由 send_input 层回滚。
@@ -99,6 +105,8 @@ pub struct SendInputInjector {
     /// 聚焦服务：单线程串行执行 UIA 聚焦（不阻塞按键/手势线程）。
     focus: Mutex<Option<crate::focus_service::FocusRunner>>,
     focus_policy: crate::focus_service::FocusRetryPolicy,
+    /// 可选常用语组件（私有实现注入；默认不可用）。
+    common_phrase_host: RwLock<Arc<dyn crate::common_phrases::CommonPhraseHost>>,
 }
 
 impl SendInputInjector {
@@ -108,7 +116,22 @@ impl SendInputInjector {
             runtime,
             focus: Mutex::new(None),
             focus_policy: crate::focus_service::FocusRetryPolicy::default(),
+            common_phrase_host: RwLock::new(Arc::new(
+                crate::common_phrases::DisabledCommonPhraseHost,
+            )),
         }
+    }
+
+    /// 绑定可选常用语组件（私有实现，构建期注入；未绑定即不可用）。
+    ///
+    /// 绑定后：`OpenCommonPhrases` 动作可打开面板，面板打开期间六个按键边沿由
+    /// `CommonPhraseHost::handle` 在**手势识别之前**认领。
+    pub fn set_common_phrase_host(&self, host: Arc<dyn crate::common_phrases::CommonPhraseHost>) {
+        let mut slot = self
+            .common_phrase_host
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = host;
     }
 
     /// 惰性启动聚焦服务（首次用到时才创建线程）。
@@ -227,6 +250,13 @@ impl MappingInjector for SendInputInjector {
         self.with_focus_runner(|runner| runner.learn_target())
             .unwrap_or(Err(crate::focus_service::FocusFailure::Cancelled))
             .map_err(|reason| reason.as_str().to_owned())
+    }
+
+    fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
+        self.common_phrase_host
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -826,15 +856,40 @@ fn handle_edges(
             ));
         }
         let fired = if edge.is_pressed {
+            // 常用语面板（可选私有组件）：在手势识别之前认领本次边沿。
+            // 面板打开期间这六个键不区分单击/双击/长按，按下即响应；
+            // 命中即结束，不进入 recognizer，也不执行原映射。
+            if injector.common_phrase_host().handle(
+                edge.button,
+                true,
+                crate::common_phrases::PHRASE_SOURCE_DEFAULT,
+            ) {
+                Vec::new()
+            }
             // OK 上下文点击：命中窗口时立即点击光标位置，并吞掉本次按压
             // （单击/双击/长按都不执行）；注入失败则回落到正常路径。
-            if ok_context_click_applies(&edge, &mappings, *last_remote_move_at, now, injector) {
+            else if ok_context_click_applies(
+                &edge,
+                &mappings,
+                *last_remote_move_at,
+                now,
+                injector,
+            ) {
                 recognizer.swallow_press(edge.button);
                 Vec::new()
             } else {
                 recognizer.press(edge.button, now)
             }
         } else {
+            // 释放沿同样先问面板：面板打开时按下的键，其松键必须继续被消费。
+            if injector.common_phrase_host().handle(
+                edge.button,
+                false,
+                crate::common_phrases::PHRASE_SOURCE_DEFAULT,
+            ) {
+                finish_repeat_run(repeat_runs, edge.button, "phrase_panel");
+                continue;
+            }
             recognizer.release(edge.button, now)
         };
         if !edge.is_pressed {
@@ -1124,6 +1179,19 @@ fn fire_gesture(
                     );
                     lock_state(state).last_error = Some(format!("聚焦输入框失败：{error}"));
                 }
+            }
+        }
+        ButtonAction::OpenCommonPhrases => {
+            let host = injector.common_phrase_host();
+            let opened = host.open(crate::common_phrases::PHRASE_SOURCE_DEFAULT);
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=open_common_phrases result={} access={:?}",
+                if opened { "opened" } else { "unavailable" },
+                host.access()
+            ));
+            if !opened {
+                lock_state(state).last_error =
+                    Some("常用语当前不可用（需要会员，或未接入常用语组件）".to_owned());
             }
         }
     }

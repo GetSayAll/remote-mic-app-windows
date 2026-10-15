@@ -1,0 +1,10 @@
+[package]
+name = "sayall-windows-common-phrases"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "常用语可选组件的公开空壳（私有实现在构建期注入本目录）"
+
+[dependencies]
+sayall-windows = { path = "../sayall-windows" }

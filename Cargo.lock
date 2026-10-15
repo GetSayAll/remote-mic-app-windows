@@ -3180,6 +3180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sayall-windows-common-phrases"
+version = "0.0.0"
+dependencies = [
+ "sayall-windows",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1924,6 +1924,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut shortcut_count = 0_usize;
     let mut open_app_count = 0_usize;
     let mut focus_input_count = 0_usize;
+    let mut common_phrases_count = 0_usize;
     let mut scroll_count = 0_usize;
     let mut mouse_count = 0_usize;
     let mut disabled_count = 0_usize;
@@ -1933,6 +1934,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
                 ButtonAction::FocusInput => focus_input_count += 1,
+                ButtonAction::OpenCommonPhrases => common_phrases_count += 1,
                 ButtonAction::Scroll { .. } => scroll_count += 1,
                 ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
                     mouse_count += 1
@@ -1942,7 +1944,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -1994,6 +1996,9 @@ async fn test_button_mapping(
         .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
         .map_err(|error| error.to_string()),
         ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
+        ButtonAction::OpenCommonPhrases => {
+            Err("「打开常用语」不在试一下范围内：请绑定按键后到目标应用里使用".to_owned())
+        }
     }
 }
 
