@@ -16,6 +16,7 @@
 //! **手势识别之前**，命中即直接执行并结束，不得进入单击/双击/长按判定，也不得写成持久绑定。
 
 use crate::raw_input::RemoteButton;
+use std::sync::Arc;
 
 /// 面板按键认领的来源标识（Windows 只有一条遥控器来源；保留参数以便未来多来源）。
 pub const PHRASE_SOURCE_DEFAULT: &str = "remote";
@@ -110,6 +111,36 @@ pub trait CommonPhraseHost: Send + Sync {
 pub struct DisabledCommonPhraseHost;
 
 impl CommonPhraseHost for DisabledCommonPhraseHost {}
+
+/// 进程级注入点：宿主启动时把私有组件安装在这里。
+///
+/// 为什么用全局槽而不是往引擎里层层传递：引擎的注入器接口（`MappingInjector`）
+/// 已经是唯一的按键分发入口，`common_phrase_host()` 的默认实现直接读这里即可，
+/// 无需改动 `Platform` / `ButtonMappingRuntime` 的构造与全部测试调用点。
+/// 本应用是单实例桌面应用（一个引擎、一个遥控器来源），因此单一槽位成立。
+static COMMON_PHRASE_HOST: std::sync::OnceLock<std::sync::RwLock<Arc<dyn CommonPhraseHost>>> =
+    std::sync::OnceLock::new();
+
+fn common_phrase_slot() -> &'static std::sync::RwLock<Arc<dyn CommonPhraseHost>> {
+    COMMON_PHRASE_HOST.get_or_init(|| std::sync::RwLock::new(Arc::new(DisabledCommonPhraseHost)))
+}
+
+/// 安装/替换常用语组件（宿主启动时调用一次；重复调用以后写入者为准）。
+pub fn set_common_phrase_host(host: Arc<dyn CommonPhraseHost>) {
+    let slot = common_phrase_slot();
+    match slot.write() {
+        Ok(mut guard) => *guard = host,
+        Err(poisoned) => *poisoned.into_inner() = host,
+    }
+}
+
+/// 当前已安装的常用语组件（未安装时是空实现）。
+pub fn current_common_phrase_host() -> Arc<dyn CommonPhraseHost> {
+    match common_phrase_slot().read() {
+        Ok(guard) => Arc::clone(&guard),
+        Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+    }
+}
 
 #[cfg(test)]
 mod tests {

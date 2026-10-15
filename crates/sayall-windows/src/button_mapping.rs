@@ -92,10 +92,10 @@ pub trait MappingInjector: Send + Sync {
     /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
     fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
 
-    /// 可选常用语组件（私有实现，构建期注入）。默认返回空实现：
-    /// 未注入时常用语不可用，且不影响任何按键行为。
+    /// 可选常用语组件（私有实现，构建期由宿主安装到进程级槽位）。
+    /// 未安装时返回空实现：常用语不可用，且不影响任何按键行为。
     fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
-        Arc::new(crate::common_phrases::DisabledCommonPhraseHost)
+        crate::common_phrases::current_common_phrase_host()
     }
 }
 
@@ -253,10 +253,19 @@ impl MappingInjector for SendInputInjector {
     }
 
     fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
-        self.common_phrase_host
+        let local = self
+            .common_phrase_host
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .clone();
+        // 组件通常由宿主启动时安装到进程级槽位；本地字段为空实现时读槽位。
+        if matches!(
+            local.access(),
+            crate::common_phrases::CommonPhraseAccess::Unavailable
+        ) {
+            return crate::common_phrases::current_common_phrase_host();
+        }
+        local
     }
 }
 
