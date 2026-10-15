@@ -29,21 +29,13 @@
 | 私有 `6e823f8` | 圆盘面板 Vue + 面板数据/点选 | 注入后 `pnpm build` 通过 |
 | 私有 `7dafe52` | 门禁桩真机开关 `SAYALL_COMMON_PHRASES_ASSUME_MEMBER` | 23 例 |
 | 私有 `936abc8` | **B1 修复**：选中先快照目标再关面板 + 回归用例 | 23 passed |
+| 公开 `363f5ec` | **批次 2**：来源失效 `reset` 调用点、认领边沿配对自持（M2）、退出路径 `shutdown()` 接线（trait 默认方法 + `shutdown_platform_for_exit`） | `cargo test --workspace`（sayall-windows 359 passed，+5 条新测试）；`cargo check -p sayall-windows-app --features runtime-simulation`；`scripts/ci-preflight.ps1` 7 步通过 |
+| 私有 `a5f6aed` | **批次 2**：`WindowsCommonPhraseHost::shutdown` 等完在途插入（含 250 ms 恢复窗）；`spawn_with_factory` 测试钩子 | 24 passed（+1 条新用例） |
 
 ## 剩余工作（按批，含落点）
 
-### 批次 2（收尾与不粘键）
-
-1. **公开侧补 `reset`/`shutdown` 调用点**：`crates/sayall-windows/src/button_mapping.rs:744-774`
-   （DeviceRemoved / ListenerStopped 只释放按住状态）→ `common_phrase_host().reset("device_removed"|"listener_stopped")`；
-   应用退出路径 → `shutdown()`（私有 `PhraseInsertService::shutdown`，`insert_windows.rs`），
-   睡眠唤醒同理。
-2. **认领边沿配对自持**（评审 M2）：公开侧自己维护"面板已认领的按下"集合，
-   释放沿命中直接消费、不进 recognizer；`handle` 认领了集合外的释放沿时先清该键 recognizer 状态。
-   落点 `button_mapping.rs:867-877`（按下）/`:892-901`（释放）；
-   文档要求写进 `crates/sayall-windows/src/common_phrases.rs:77-82` 的 trait 注释；补两条公开测试
-   （认领早于手势识别 / 认领的 DOWN 不漏出手势）。
-3. **退出路径保证剪贴板恢复**：确认 250 ms 恢复窗口内退出时 `Drop`/`shutdown` 等待在途事务。
+> 2026-10-15 晚更新：批次 2 已完成并提交（见上表）。剩余从批次 3 开始；
+> 真机走查清单（文末）待出包后执行。
 
 ### 批次 3（契约与失败反馈）
 
@@ -90,8 +82,8 @@
 
 ## 评审结论索引（两份独立评审，均已记录）
 
-- 私有包：B1（已修）选中永不插入；B2（部分修）收尾调用点缺失；B3 失败反馈链断；M1 门禁开关可绕过；M3 `cancel_pending` 阻塞；M4 快照泄漏；M5 刷新事件未接；M6 静默失败无日志；M7 生成器未接 CI；M8 注入护栏缺失；M9 引用文档不存在；M10 fmt 硬伤。
-- 公开接缝：B1（已修）`WS_EX_NOACTIVATE` 被 tao 抹掉；M1（待修）映射页 union 缺失；M2（待修）认领配对；M3（已修）收尾/掩码；M4（已修）多屏居中；M5（已修）面板页样式；M6 前端挂载点。
+- 私有包：B1（已修）选中永不插入；B2（已修，批次 2）收尾调用点补齐（公开 `reset`/`shutdown` + 私有 `shutdown` 等完在途事务）；B3 失败反馈链断；M1 门禁开关可绕过；M3 `cancel_pending` 阻塞；M4 快照泄漏；M5 刷新事件未接；M6 静默失败无日志；M7 生成器未接 CI；M8 注入护栏缺失；M9 引用文档不存在；M10 fmt 硬伤。
+- 公开接缝：B1（已修）`WS_EX_NOACTIVATE` 被 tao 抹掉；M1（待修）映射页 union 缺失；M2（已修，批次 2）认领配对自持（公开侧记账，释放沿配对消费）；M3（已修）收尾/掩码；M4（已修）多屏居中；M5（已修）面板页样式；M6 前端挂载点。
 - 已确认无问题：内置内容与 macOS 同哈希、生成产物逐字节一致、七类非法输入全部失败、剪贴板内存所有权路径、工作线程锁无死锁、认领一次性语义、日志不含正文。
 
 ## 真机走查清单（出包后）
@@ -103,4 +95,9 @@
 4. 返回键关闭且不透传；插入后剪贴板恢复原内容；
 5. 光标不在输入框 → 失败提示约 5 秒且不插到别处；
 6. 面板打开期间遥控器断连/睡眠 → 六个键立即可用（fail-open）；
-7. 连续插入、快速连按、面板开关后原映射逐键一致。
+7. 连续插入、快速连按、面板开关后原映射逐键一致；
+8. **退出剪贴板恢复（批次 2 新增）**：插入后立刻从托盘退出应用 → 重开应用检查
+   剪贴板应为原内容（不得停在常用语文本上）；日志应见 `COMMON_PHRASES SHUTDOWN
+   phase=completed result=services_stopped`。
+9. **断连配对（批次 2 新增）**：面板打开期间断遥控器电源 → 面板关闭、按键六个键
+   恢复原映射，且无幽灵单击/长按（按一次只响应一次）。
