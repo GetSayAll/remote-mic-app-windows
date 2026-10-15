@@ -32,9 +32,13 @@
   - ⏳ 2026-10-15 P3 页面与 IPC（`dc618cd`）：`MacrosPage.vue` 库浏览 + 三步向导 + 每步测试 + 快捷键录入 + 输入框学习；按键页「组合动作」分组；侧边栏入口 + `COMBINATION_ACTIONS_ENABLED`；桥接层 9 条 IPC 与文案映射。
   - ⏳ 2026-10-15 现场修复一轮（`33280c0`）：编辑后"变两个"= 显示层把版本当动作铺开（同 id 多版本只留最新，页面/按键页统一收口）+ `formatVersion` 落盘为 0 导致导出→导入被拒（归一化盖章）。记录：`Bugs/2026-10-15-combo-edit-shows-two-and-format-version-zero.md`。
   - ⏳ 2026-10-15 现场修复二轮（`18265e6`）：UWP 应用（计算器）"已打开却判失败"= 窗口属于 ApplicationFrameHost，就绪判据新增 `running_process`，超时后进程在跑改判 `Unknown` 且后续步骤继续；向导门禁（名称空不给进下一步、选动作不再自动跳步、改替换语义）与错误文案映射（`invalid:name_empty` → 中文）。含真机探针 `examples/app_readiness_probe.rs`。记录：`Bugs/2026-10-15-combo-uwp-open-false-failure-and-wizard-gate.md`。
+  - ⏳ 2026-10-15 现场修复三轮（`ce7a850` + `f4dc733` + `8a3157b`）：打包应用（计算器）按 **AUMID** 判定"是否已在运行/要不要前置"，不再每次新开实例、不再等满超时；启动成功后主动置前——修"第一按只打开、第二按才到前台"（真机：冷启动与后台两种场景，`ApplicationFrameHost` 置前、实例数恒为 1）。探针 `app_readiness_probe --activate` 支持真机激活取证。记录：`Bugs/2026-10-02-registered-apps-open-new-instance.md`。
+  - ⏳ 2026-10-15 现场修复四轮（`1b8b029`）：聚焦步骤「学习输入框」结果**只显示成功却没落盘**（按键页写 `focusProfiles`，宏页面不写）⇒ 步骤永远缺档案；改为与按键页同一落盘口径，步骤卡显示前置状态（已学习 / 还没有）、失败文案由机器码（`SendInput failed: no_candidate`）改为中文原因。记录：`Bugs/2026-10-15-combo-focus-learn-not-persisted.md`。
+  - ⏳ 2026-10-15 现场修复五轮（`fa23260`）：**地址栏可学习**（门槛分档：自动选择仍拒绝地址栏，用户主动点击允许记录；真机 Chrome omnibox 修复前 `NoCandidate` → 修复后 `learned id_chars=9`）；**新增「记录点击位置」策略**（微信 4.x 对 `OBJID_CLIENT`/`UiaRootObjectId` 都返回 0、UIA 树里没有任何输入框 ⇒ 按位置点击兜底：记录相对坐标 + 窗口尺寸校验 ±25%，真机记事本取证 `absolute=(2389,694)`、`click_submitted=ok`、焦点落回 `Document`）；按键页恢复「聚焦输入框」动作与「打开后聚焦方式」面板（2026-10-03 隐藏，本轮按 Mac 端恢复并多一档位置记录）。新探针 `Testing/probe-msaa-provider.ps1`。记录：`Bugs/2026-10-15-focus-address-bar-and-recorded-point.md`。
   - **已知边界（记入本条待办）**：「等待应用 → App 窗口已出现」对纯 UWP 目标不可判定（窗口不属于目标进程）——需按 AUMID 匹配窗口才能补强；当前会在超时后判失败。
-  - 自动化 passed（两轮修复后重跑）：`cargo test --workspace`（core 54 / windows 377 / app 117）、`cargo fmt --all -- --check`、vitest 392 passed | 11 skipped、`vue-tsc`。
-  - **待办**：真机复验（重装后重测"打开计算器"应显示"无法确认第三方 App 的结果"且后续步骤继续；空名称门禁；导出/导入往返）；RC001/RC003 全矩阵验收仍 deferred。
+  - **已知边界**：完全不暴露无障碍接口的应用（微信 4.x、WorkBuddy）只能走「记录点击位置」；窗口尺寸变化超过 25% 会拒绝点击并要求重新记录。
+  - 自动化 passed（五轮修复后重跑）：`cargo test --workspace`（core 54 / windows 382 / app 117）、`cargo fmt --all -- --check`、vitest 398 passed | 10 skipped、`vue-tsc` + `vite build`。
+  - **待办**：真机复验（RC001/RC003 全矩阵、微信「记录点击位置」的目视确认）仍 deferred。
 - [ ] 增强捕获：换遥控器后**自动重选宿主**（2026-10-13 现场提出，助手侧已实现）：助手新增目标
   watchdog（每 2 秒复查 `rc003-target.ini`），目标地址变为另一支且宿主不同 ⇒ 记
   `[RETARGET] event=restart` 并重启自己（复用启动路径重新定位/注入）；应用侧在"报告层没生效 + 豆包"
