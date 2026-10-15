@@ -1926,6 +1926,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut focus_input_count = 0_usize;
     let mut scroll_count = 0_usize;
     let mut mouse_count = 0_usize;
+    let mut macro_count = 0_usize;
     let mut disabled_count = 0_usize;
     for actions in mappings.actions.values() {
         for action in [&actions.single, &actions.double, &actions.long] {
@@ -1937,12 +1938,13 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
                 ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
                     mouse_count += 1
                 }
+                ButtonAction::RunMacro { .. } => macro_count += 1,
                 ButtonAction::Disabled => disabled_count += 1,
             }
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} scroll_count={scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -1993,6 +1995,18 @@ async fn test_button_mapping(
         .await
         .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
         .map_err(|error| error.to_string()),
+        ButtonAction::RunMacro { macro_id, .. } => {
+            // 「测试」= 按最新已保存版本执行一次组合动作（异步受理，终态见
+            // 组合动作页的状态行与 `map_macro_*` 日志）。
+            tauri::async_runtime::spawn_blocking(move || {
+                platform
+                    .start_macro(&macro_id)
+                    .map(|_| platform.send_input_snapshot())
+            })
+            .await
+            .map_err(|error| format!("测试组合动作任务失败：{error}"))?
+            .map_err(|error| error.to_string())
+        }
         ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
     }
 }
@@ -3498,6 +3512,25 @@ pub fn run() {
             };
             // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
             platform.set_button_mappings(button_mappings);
+            // 组合动作库：与按键映射同一启动时序同步到执行器（RunMacro 引用
+            // 在引擎点火前即可解析；缺失引用按 missing_dependency 处理）。
+            let combined_actions = match settings.load_combined_actions() {
+                Ok(document) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=combined_actions action=load phase=completed terminal_result=passed definitions={}",
+                        document.definitions.len()
+                    ));
+                    document
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=combined_actions action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                    sayall_core::MacroLibraryDocument::default()
+                }
+            };
+            platform.set_macro_library(combined_actions);
             // 授权对账可能已把持久化意图回落为 false，因此这里重新读取最终值，
             // 不使用 setup 开头那份可能已经过期的 saved_settings。
             platform.set_enhanced_capture_enabled(

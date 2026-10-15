@@ -484,6 +484,17 @@ pub enum ButtonAction {
         direction: MoveDirection,
         distance: u16,
     },
+    /// 执行组合动作（对齐 Mac 统一按键绑定的 `.macro(MacroReference)`）。
+    ///
+    /// `macro_id` 指向 `combined-actions.json` 里的稳定 ID；运行时解析
+    /// **最新已保存版本**（Mac 语义：编辑组合动作后所有引用自动生效）。
+    /// `macro_version` 只作审计/展示（保存时所指版本）。
+    #[serde(rename_all = "camelCase")]
+    RunMacro {
+        macro_id: String,
+        #[serde(default)]
+        macro_version: String,
+    },
 }
 
 impl ButtonAction {
@@ -498,9 +509,12 @@ impl ButtonAction {
     /// `ButtonMappings::normalized` 在保存时整单拒绝）。
     pub fn allows_repeat(&self) -> bool {
         match self {
-            Self::Disabled | Self::OpenApp { .. } | Self::FocusInput | Self::MouseClick { .. } => {
-                false
-            }
+            Self::Disabled
+            | Self::OpenApp { .. }
+            | Self::FocusInput
+            | Self::MouseClick { .. }
+            // 组合动作不可连发（对齐 Mac：绑定组合动作即禁用连发）。
+            | Self::RunMacro { .. } => false,
             Self::Scroll { .. } | Self::MouseMove { .. } => true,
             Self::Shortcut { chord } => {
                 matches!(chord.keys.as_slice(), [key] if !key.is_modifier())
@@ -720,9 +734,12 @@ impl From<ButtonActionsWire> for ButtonActions {
     }
 }
 
-/// 按键映射配置结构版本：0 = 本功能之前的旧文件（加载时按旧行为迁移），
-/// 1 = 含显式「按住连续触发」（`holdRepeat`）。保存/导出统一写当前版本。
-pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 1;
+/// 按键映射配置结构版本：
+/// 0 = 本功能之前的旧文件（加载时按旧行为迁移），
+/// 1 = 含显式「按住连续触发」（`holdRepeat`），
+/// 2 = 新增组合动作绑定（`runMacro`；旧版本应用读到此动作类型会整体拒载，
+///     靠版本护栏备份原文件，不静默丢配置）。
+pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -802,7 +819,10 @@ impl ButtonMappings {
     /// 无长按、动作可连续执行（新判定）、该键有连发区间。**只填空值**：文件里
     /// 已有显式值的按键不覆盖。调用方在 `normalized()` 之前、load/import 路径上执行。
     pub fn migrate_legacy_hold_repeat(mut self) -> Self {
-        if self.schema_version >= BUTTON_MAPPINGS_SCHEMA_VERSION {
+        // 固定阈值 1（写入显式 `holdRepeat` 的最低代次），**不要用
+        // `BUTTON_MAPPINGS_SCHEMA_VERSION`**：当前版本升到 2 后，用当前版本
+        // 当阈值会把 1 代文件重新按"旧版自动连发"补写，覆盖用户显式关闭。
+        if self.schema_version >= 1 {
             return self;
         }
         for (button, actions) in self.actions.iter_mut() {
@@ -845,13 +865,22 @@ impl ButtonMappings {
         let _ = dropped;
         for actions in this.actions.values_mut() {
             for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
-                if let ButtonAction::Shortcut { chord } = action {
-                    *chord = chord.clone().validated()?;
-                }
                 match action {
+                    ButtonAction::Shortcut { chord } => {
+                        *chord = chord.clone().validated()?;
+                    }
                     ButtonAction::Scroll { steps, .. } => validate_mouse_amount(*steps, 100)?,
                     ButtonAction::MouseMove { distance, .. } => {
                         validate_mouse_amount(*distance, 2000)?
+                    }
+                    ButtonAction::RunMacro { macro_id, .. } => {
+                        // 与组合动作库同一套 ID 规则（单一来源）；引用是否存在
+                        // 由执行期按库解析（缺失 = missing_dependency）。
+                        if !sayall_core::macros::is_valid_macro_id(macro_id) {
+                            return Err(SendInputError::Backend(
+                                "组合动作引用无效（macro_id）".to_owned(),
+                            ));
+                        }
                     }
                     _ => {}
                 }
@@ -1961,7 +1990,12 @@ mod tests {
             actions_with(shortcut(&[KeyCode::Delete]), Some(ButtonTrigger::Single)),
         );
         let json = serde_json::to_string(&mappings).unwrap();
-        assert!(json.contains("\"schemaVersion\":1"), "版本必须落盘：{json}");
+        assert!(
+            json.contains(&format!(
+                "\"schemaVersion\":{BUTTON_MAPPINGS_SCHEMA_VERSION}"
+            )),
+            "版本必须落盘：{json}"
+        );
         assert!(
             json.contains("\"holdRepeat\":\"single\""),
             "开关必须落盘：{json}"
@@ -1999,7 +2033,7 @@ mod tests {
             .migrate_legacy_hold_repeat()
             .normalized()
             .unwrap();
-        assert_eq!(migrated.schema_version, 1);
+        assert_eq!(migrated.schema_version, BUTTON_MAPPINGS_SCHEMA_VERSION);
         assert_eq!(
             migrated.actions(RemoteButton::Back).hold_repeat,
             Some(ButtonTrigger::Single),
@@ -2067,6 +2101,79 @@ mod tests {
             mappings.actions(RemoteButton::Back).hold_repeat,
             Some(ButtonTrigger::Single)
         );
+    }
+
+    #[test]
+    fn run_macro_wire_is_camel_case_and_not_repeatable() {
+        let action = ButtonAction::RunMacro {
+            macro_id: "macro.abcdef".to_owned(),
+            macro_version: "1.0.0".to_owned(),
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["type"], "run_macro");
+        assert_eq!(json["macroId"], "macro.abcdef");
+        assert_eq!(json["macroVersion"], "1.0.0");
+        let decoded: ButtonAction = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, action);
+        assert!(!action.allows_repeat(), "组合动作不可连发");
+        // 版本缺省（旧代码写入的绑定）可读。
+        let legacy: ButtonAction = serde_json::from_value(
+            serde_json::json!({"type": "run_macro", "macroId": "macro.abcdef"}),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy,
+            ButtonAction::RunMacro {
+                macro_id: "macro.abcdef".to_owned(),
+                macro_version: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn normalized_rejects_invalid_macro_reference() {
+        // 空 / 过短 / 非法字符 / 控制字符的引用一律拒绝。
+        for macro_id in ["", "a", "macro!!", "macro.abcdef\u{7}"] {
+            let mut mappings = ButtonMappings::default();
+            mappings.actions.insert(
+                RemoteButton::Home,
+                ButtonActions {
+                    single: ButtonAction::RunMacro {
+                        macro_id: macro_id.to_owned(),
+                        macro_version: "1.0.0".to_owned(),
+                    },
+                    ..ButtonActions::default()
+                },
+            );
+            assert!(mappings.normalized().is_err(), "macro_id={macro_id:?}");
+        }
+        // 合法引用通过（引用是否存在由执行期解析）。
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Home,
+            ButtonActions {
+                single: ButtonAction::RunMacro {
+                    macro_id: "macro.abcdef".to_owned(),
+                    macro_version: "1.0.0".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        assert!(mappings.normalized().is_ok());
+        // 组合动作不可作为「按住连续触发」目标。
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::RunMacro {
+                    macro_id: "macro.abcdef".to_owned(),
+                    macro_version: "1.0.0".to_owned(),
+                },
+                hold_repeat: Some(ButtonTrigger::Single),
+                ..ButtonActions::default()
+            },
+        );
+        assert!(mappings.normalized().is_err());
     }
 
     #[test]

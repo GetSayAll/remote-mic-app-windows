@@ -89,6 +89,8 @@ pub mod key_gate;
 mod key_suppressor;
 #[cfg(windows)]
 mod lock_open_with_guard;
+/// 组合动作执行器（模型/校验在 sayall-core；平台步骤经 MacroStepper 注入）。
+pub mod macro_runtime;
 /// 本机的原生系统架构（x64 / arm64），与"本进程的仿真架构"区分开。
 pub mod os_arch;
 #[cfg(windows)]
@@ -343,6 +345,13 @@ pub struct WindowsPlatform {
     ime_align_pending: Arc<Mutex<Option<(VoiceInputTool, std::time::Instant)>>>,
     #[cfg(windows)]
     button_mapping: Arc<ButtonMappingRuntime>,
+    /// 组合动作运行时（引擎 RunMacro 手势与 UI 测试入口共用）。
+    macro_runtime: Arc<macro_runtime::MacroRuntime>,
+    /// 组合动作执行器读取的聚焦档案镜像：与 `set_button_mappings` 同步
+    /// （执行器不直接持有 `ButtonMappingRuntime`，避免引用环）。
+    #[cfg(windows)]
+    macro_focus_profiles:
+        Arc<std::sync::RwLock<std::collections::BTreeMap<String, focus::AppFocusProfile>>>,
     raw_input_snapshot: Arc<Mutex<RawInputSnapshot>>,
     // 抑制器与门控句柄"持有即运行"：字段本身不被读取，随平台生命周期保活
     //（Drop 时停止钩子线程）。
@@ -428,10 +437,28 @@ impl Default for WindowsPlatform {
             let injector: Arc<dyn MappingInjector> = Arc::new(
                 button_mapping::SendInputInjector::new(Arc::clone(&send_input)),
             );
+            // 组合动作执行器：聚焦档案经共享镜像读取（由 set_button_mappings 同步），
+            // 平台步骤实现走真实 SendInput / 应用启动 / UIA 聚焦 / 受限 URL 打开。
+            let macro_focus_profiles =
+                Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new()));
+            let macro_source: Arc<dyn macro_runtime::MacroStepperSource> = Arc::new(
+                macro_runtime::WindowsMacroStepperSource::new(Arc::clone(&injector), {
+                    let profiles = Arc::clone(&macro_focus_profiles);
+                    Arc::new(move |target: &str| {
+                        profiles
+                            .read()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .get(target)
+                            .cloned()
+                    })
+                }),
+            );
+            let macro_runtime = Arc::new(macro_runtime::MacroRuntime::new(macro_source));
             let button_mapping = Arc::new(ButtonMappingRuntime::new(
                 injector,
                 Arc::clone(&usage),
                 Arc::clone(&raw_input_snapshot),
+                Arc::clone(&macro_runtime),
             ));
             // 语音键 F5 抑制器与 BLE 工作线程通过模块级静态状态协作，
             // 这里只负责随平台生命周期启动/停止。
@@ -473,6 +500,8 @@ impl Default for WindowsPlatform {
                 gain_db,
                 ime_align_pending,
                 button_mapping,
+                macro_runtime,
+                macro_focus_profiles,
                 raw_input_snapshot,
                 voice_key_suppressor,
                 key_gate,
@@ -490,10 +519,14 @@ impl Default for WindowsPlatform {
             let mut initial = raw_input_snapshot.lock().unwrap();
             initial.phase = RawInputPhase::Unsupported;
             drop(initial);
+            let macro_runtime = Arc::new(macro_runtime::MacroRuntime::new(Arc::new(
+                macro_runtime::UnsupportedStepperSource,
+            )));
             let button_mapping = Arc::new(ButtonMappingRuntime::new(
                 Arc::new(UnsupportedInjector),
                 Arc::clone(&usage),
                 Arc::clone(&raw_input_snapshot),
+                Arc::clone(&macro_runtime),
             ));
             Self {
                 usage,
@@ -502,6 +535,7 @@ impl Default for WindowsPlatform {
                 gain_db,
                 ime_align_pending,
                 button_mapping,
+                macro_runtime,
                 raw_input_snapshot,
             }
         }
@@ -845,12 +879,31 @@ impl WindowsPlatform {
     pub fn set_button_mappings(&self, mappings: send_input::ButtonMappings) {
         #[cfg(windows)]
         let mapped_mask = mappings.mapped_mask();
+        #[cfg(windows)]
+        {
+            // 组合动作执行器读的聚焦档案镜像：与映射同一次热加载更新。
+            let mut profiles = self
+                .macro_focus_profiles
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *profiles = mappings.focus_profiles.clone();
+        }
         self.button_mapping.set_mappings(mappings);
         #[cfg(windows)]
         self.rc003_bridge.set_capture_targets(
             self.enhanced_capture_enabled.load(Ordering::Relaxed),
             mapped_mask,
         );
+    }
+
+    /// 同步组合动作库快照（Tauri 层在加载/保存后调用；引擎与执行器共用）。
+    pub fn set_macro_library(&self, document: sayall_core::MacroLibraryDocument) {
+        self.macro_runtime.set_library(document);
+    }
+
+    /// 组合动作运行时句柄（IPC 层做"测试动作/测试这步/取消"时用）。
+    pub fn macro_runtime(&self) -> Arc<macro_runtime::MacroRuntime> {
+        Arc::clone(&self.macro_runtime)
     }
 
     /// 同步用户的“全按键支持”意图：只切换捕获通道（报告层增强 vs 原有
@@ -1541,6 +1594,9 @@ mod tests {
             Arc::new(NoopInjector),
             Arc::new(UsageCounters::default()),
             Arc::new(Mutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = engine.mappings();
         // UI「总开关」保存路径恒为 true；按键映射功能与全按键支持开关解耦。

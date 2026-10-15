@@ -2183,6 +2183,106 @@ pub fn open_uri(_uri: &str) -> Result<(), String> {
     Err("打开系统设置仅在 Windows 上可用".to_owned())
 }
 
+/// 组合动作「打开网址」：只接受 `sayall_core` 校验过的 http/https 完整网址
+/// （保存与运行前各挡一次；本地文件、自定义 Scheme、账号密码、控制字符一律拒绝），
+/// 交给系统默认浏览器。复用 `launch_explicit` 已验证的 COM 套间初始化与保活链路。
+///
+/// 隐私：网址内容不进日志（调用方只记录 action 名与结果）。
+#[cfg(windows)]
+pub fn open_web_url(url: &str) -> Result<(), String> {
+    sayall_core::validate_http_url(url).map_err(|_| "只能打开 http 或 https 网址".to_owned())?;
+    launch_explicit(url, None, None, false)
+}
+
+#[cfg(not(windows))]
+pub fn open_web_url(_url: &str) -> Result<(), String> {
+    Err("打开网址仅在 Windows 上可用".to_owned())
+}
+
+/// 组合动作「等待应用」的就绪判据（只读枚举：不显示、不置前、不写任何窗口状态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplicationReadiness {
+    /// 进程/窗口存在（含最小化与收在托盘）。
+    pub running: bool,
+    /// 存在可见窗口。
+    pub visible_window: bool,
+    /// 判据是否可用：目标无法解析（未知 id/路径）时为 false，
+    /// 等待步骤按"不可判定"处理而不是谎报就绪。
+    pub known: bool,
+}
+
+/// 解析目标并按既有窗口枚举口径读取就绪状态。
+#[cfg(windows)]
+pub fn application_readiness(target: &str) -> ApplicationReadiness {
+    let unknown = ApplicationReadiness {
+        running: false,
+        visible_window: false,
+        known: false,
+    };
+    let visibility = if crate::registered_apps::is_registered_target(target) {
+        match target.strip_prefix(crate::registered_apps::REGISTERED_PREFIX) {
+            Some(aumid) => window_visibility(WindowSelector::AppUserModelId(aumid)),
+            None => return unknown,
+        }
+    } else if let Some(app) = preset_app(target) {
+        window_visibility(WindowSelector::ExecutableNames(app.exe_names))
+    } else if is_custom_path_target(target) {
+        let resolved = if target.to_ascii_lowercase().ends_with(".lnk") {
+            resolve_lnk(target)
+                .map(|shortcut| shortcut.exe_path)
+                .unwrap_or_else(|| target.to_owned())
+        } else {
+            target.to_owned()
+        };
+        window_visibility(WindowSelector::ExecutablePath(&resolved))
+    } else {
+        return unknown;
+    };
+    ApplicationReadiness {
+        running: visibility.visible + visibility.hidden > 0,
+        visible_window: visibility.visible > 0,
+        known: true,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn application_readiness(_target: &str) -> ApplicationReadiness {
+    ApplicationReadiness {
+        running: false,
+        visible_window: false,
+        known: false,
+    }
+}
+
+#[cfg(test)]
+mod application_readiness_tests {
+    use super::*;
+
+    /// 无法解析的目标必须报 `known=false`（等待步骤按不可判定处理），
+    /// 而不是把"找不到窗口"当成"没就绪"。
+    #[test]
+    fn unknown_target_reports_unresolvable() {
+        let readiness = application_readiness("not-a-known-app-id");
+        assert!(!readiness.known);
+    }
+
+    /// 预设 id 可解析（是否运行取决于现场，至少判据可用）。
+    #[cfg(windows)]
+    #[test]
+    fn preset_target_is_resolvable() {
+        let readiness = application_readiness("notepad");
+        assert!(readiness.known);
+    }
+
+    /// 网址白名单在打开前再挡一次（defense in depth）。
+    #[test]
+    fn web_url_rejects_non_http_schemes() {
+        assert!(open_web_url("file:///C:/Windows/System32/drivers/etc/hosts").is_err());
+        assert!(open_web_url("javascript:alert(1)").is_err());
+        assert!(open_web_url("https://user:pass@example.com").is_err());
+    }
+}
+
 #[cfg(test)]
 mod open_uri_tests {
     use super::*;

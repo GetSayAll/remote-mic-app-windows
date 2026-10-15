@@ -251,7 +251,8 @@ impl MacroIssue {
     }
 }
 
-fn is_valid_macro_id(id: &str) -> bool {
+/// 稳定 ID 校验（组合动作库与按键绑定共用同一套规则，单一来源）。
+pub fn is_valid_macro_id(id: &str) -> bool {
     let len = id.len();
     if !(MACRO_ID_MIN_LEN..=MACRO_ID_MAX_LEN).contains(&len) {
         return false;

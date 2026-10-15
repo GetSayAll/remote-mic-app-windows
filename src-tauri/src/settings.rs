@@ -1520,7 +1520,11 @@ mod tests {
         .unwrap();
 
         let loaded = store.load_button_mappings().unwrap();
-        assert_eq!(loaded.schema_version, 1, "加载即盖章为当前版本");
+        assert_eq!(
+            loaded.schema_version,
+            sayall_windows::send_input::BUTTON_MAPPINGS_SCHEMA_VERSION,
+            "加载即盖章为当前版本"
+        );
         assert_eq!(
             loaded.actions(RemoteButton::Back).hold_repeat,
             Some(ButtonTrigger::Single),
@@ -1609,7 +1613,10 @@ mod tests {
             "导出必须与加载/导入同一迁移口径：{exported}"
         );
         assert!(
-            exported.contains("\"schemaVersion\": 1"),
+            exported.contains(&format!(
+                "\"schemaVersion\": {}",
+                sayall_windows::send_input::BUTTON_MAPPINGS_SCHEMA_VERSION
+            )),
             "导出统一写当前结构版本：{exported}"
         );
 
