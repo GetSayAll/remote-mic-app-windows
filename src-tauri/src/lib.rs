@@ -19,6 +19,7 @@ use tauri::{Emitter, Manager};
 mod accent;
 mod app_icon;
 mod diagnostics;
+mod membership;
 mod onboarding;
 mod platform;
 mod rc003_task;
@@ -28,6 +29,7 @@ mod startup;
 mod updater;
 
 use diagnostics::DiagnosticReport;
+use membership::{MembershipRuntime, MembershipSnapshot};
 use platform::PlatformRuntime;
 use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
@@ -390,6 +392,8 @@ struct AppState {
     settings: SettingsStore,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
+    membership: Arc<dyn MembershipRuntime>,
     /// check_app_update 暂存的待安装更新（install_app_update 取走）。
     /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
     pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
@@ -401,6 +405,7 @@ impl std::fmt::Debug for AppState {
             .debug_struct("AppState")
             .field("platform", &self.platform)
             .field("settings", &self.settings)
+            .field("membership", &self.membership)
             .field(
                 "capture_health",
                 &CaptureHealth::current(&self.capture_health).as_str(),
@@ -420,6 +425,19 @@ impl std::fmt::Debug for AppState {
             )
             .finish()
     }
+}
+
+/// 会员摘要（2026-10-15）：公开构建恒为「不可用」，私有构建返回账号与权益。
+/// 隐私红线同 [`MembershipSnapshot`]：不含凭据、令牌与邮箱原文。
+#[tauri::command]
+fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
+    state.membership.snapshot()
+}
+
+/// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
+#[tauri::command]
+fn refresh_membership(state: tauri::State<'_, AppState>) -> Result<MembershipSnapshot, String> {
+    state.membership.refresh().map_err(|error| error.code)
 }
 
 /// 读取 Windows 系统强调色（设置 > 个性化 > 颜色）。前端用返回的 RGB 派生
@@ -3082,6 +3100,9 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     let started = std::time::Instant::now();
     // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
     sayall_windows::key_host::shutdown_global();
+    // 会员组件收尾（2026-10-15）：私有实现在这里释放网络与凭据刷新任务，
+    // 公开实现是 no-op。
+    app.state::<AppState>().membership.shutdown();
     let platform = app.state::<AppState>().platform.clone();
     match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
         Ok(()) => sayall_windows::gatt_note(format!(
@@ -3643,6 +3664,7 @@ pub fn run() {
                 platform,
                 settings,
                 capture_health,
+                membership: membership::install(),
                 pending_update: std::sync::Mutex::new(None),
             });
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
@@ -3696,6 +3718,14 @@ pub fn run() {
                     ));
                     api.prevent_close();
                 }
+            } else if let tauri::WindowEvent::Focused(true) = event {
+                // 会员组件回到前台时刷新（2026-10-15）：节流由私有实现负责，
+                // 公开实现是 no-op，不产生任何后台活动。
+                if window.label() == "main" {
+                    if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        state.membership.on_foreground();
+                    }
+                }
             } else if let tauri::WindowEvent::Focused(false) = event {
                 // 工具选择后的一次性输入法对齐（2026-10-03）：用户刚在连接页选过工具、
                 // 且当时前台是自身窗口（不能立即切——TSF 会话切换曾致 WebView 整页重载，
@@ -3712,6 +3742,8 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_membership_snapshot,
+        refresh_membership,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -3785,6 +3817,8 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_membership_snapshot,
+        refresh_membership,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,

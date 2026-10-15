@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import type { Component } from "vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import { getOnboardingState, getRuntimeSnapshot, hideMainWindow, type RuntimeSnapshot } from "./lib/bridge";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
+import { privatePageComponents } from "./private/feature-pages";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
@@ -12,7 +14,6 @@ import {
   loadPersistedPage,
   persistActivePage,
   touchLiveness,
-  type PageId,
 } from "./navigation";
 import SettingsPage from "./pages/SettingsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
@@ -20,7 +21,7 @@ import ConnectionPage from "./pages/ConnectionPage.vue";
 import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 
-const activePage = ref<PageId>(loadPersistedPage() ?? "buttons");
+const activePage = ref<string>(loadPersistedPage() ?? "buttons");
 watch(activePage, (page) => persistActivePage(page));
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
@@ -74,12 +75,16 @@ function handleWindowKeydown(event: KeyboardEvent): void {
   }
 }
 
-const activeComponent = computed(() => ({
+/** 公开页面 + 私有页面（通常为空）的组件表。私有页面缺席时保持原行为。 */
+const pageComponents: Record<string, Component> = {
   buttons: ButtonsPage,
   connection: ConnectionPage,
   permissions: PermissionsPage,
   settings: SettingsPage,
-})[activePage.value]);
+  ...privatePageComponents(),
+};
+
+const activeComponent = computed(() => pageComponents[activePage.value] ?? ButtonsPage);
 
 // 横幅不在"设置"页重复显示（页面内已有完整更新面板）。
 const updateBannerVisible = computed(

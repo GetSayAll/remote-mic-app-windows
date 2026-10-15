@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { NavIcon, PageId } from "../navigation";
+import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
 
-defineProps<{ activePage: PageId; version?: string | null }>();
-const emit = defineEmits<{ select: [page: PageId] }>();
+defineProps<{ activePage: string; version?: string | null }>();
+const emit = defineEmits<{ select: [page: string] }>();
 
 /**
  * 侧栏图标：SVG path 组（24x24 视窗，描边风格），形状对齐
