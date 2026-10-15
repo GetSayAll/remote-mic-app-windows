@@ -30,8 +30,11 @@
   - ⏳ 2026-10-15 P1 数据层（`e0da196`）：`crates/sayall-core/src/macros.rs` 纯模型 + 校验（严格字段白名单 `deny_unknown_fields`、URL http/https 白名单、chord 规则、保存期跨定义循环检测、不可变版本冲突、语义版本解析），51 例单测；持久化 `combined-actions.json`（高版本拒载 + `.bak` 旁证、导入 = 不可变版本语义合并、失败不改变现状）。
   - ⏳ 2026-10-15 P2 执行器与绑定（`325e2eb`）：`crates/sayall-windows/src/macro_runtime.rs` 运行循环（顺序执行、单步超时 = min(步设,整宏剩余)、首败即停、同宏重入拒绝、嵌套 ≤8 层 + 循环拦截、启动时库快照、取消传播、`unknown` 独立终态）；生产 stepper 走 SendInput / 应用激活 / 就绪轮询 / UIA 聚焦（读回确认）/ 受限 URL 打开；`ButtonAction::RunMacro`（wire camelCase，按键映射 schema 1→2，旧版本应用走既有 `.bak` 护栏；迁移阈值改固定常量 1 防升版误重放）；`app_launcher::application_readiness` + `open_web_url`；引擎 `map_macro*` 日志（不含目标/网址/按键）。
   - ⏳ 2026-10-15 P3 页面与 IPC（`dc618cd`）：`MacrosPage.vue` 库浏览 + 三步向导 + 每步测试 + 快捷键录入 + 输入框学习；按键页「组合动作」分组；侧边栏入口 + `COMBINATION_ACTIONS_ENABLED`；桥接层 9 条 IPC 与文案映射。
-  - 自动化 passed：`cargo test --workspace`（core 51 / windows 376+2 集成 / app 116）、`cargo fmt --all -- --check`、`cargo check --features runtime-simulation`、vitest 384 passed | 11 skipped、`vue-tsc` + `vite build`。
-  - **待办**：`scripts/ci-preflight.ps1` 与出包后的真机验收（RC001/RC003 分别：冷态首用、连续会话、快速连按、断连、睡眠恢复；组合动作页目视与按键页绑定闭环）——当前均 deferred。
+  - ⏳ 2026-10-15 现场修复一轮（`33280c0`）：编辑后"变两个"= 显示层把版本当动作铺开（同 id 多版本只留最新，页面/按键页统一收口）+ `formatVersion` 落盘为 0 导致导出→导入被拒（归一化盖章）。记录：`Bugs/2026-10-15-combo-edit-shows-two-and-format-version-zero.md`。
+  - ⏳ 2026-10-15 现场修复二轮（`18265e6`）：UWP 应用（计算器）"已打开却判失败"= 窗口属于 ApplicationFrameHost，就绪判据新增 `running_process`，超时后进程在跑改判 `Unknown` 且后续步骤继续；向导门禁（名称空不给进下一步、选动作不再自动跳步、改替换语义）与错误文案映射（`invalid:name_empty` → 中文）。含真机探针 `examples/app_readiness_probe.rs`。记录：`Bugs/2026-10-15-combo-uwp-open-false-failure-and-wizard-gate.md`。
+  - **已知边界（记入本条待办）**：「等待应用 → App 窗口已出现」对纯 UWP 目标不可判定（窗口不属于目标进程）——需按 AUMID 匹配窗口才能补强；当前会在超时后判失败。
+  - 自动化 passed（两轮修复后重跑）：`cargo test --workspace`（core 54 / windows 377 / app 117）、`cargo fmt --all -- --check`、vitest 392 passed | 11 skipped、`vue-tsc`。
+  - **待办**：真机复验（重装后重测"打开计算器"应显示"无法确认第三方 App 的结果"且后续步骤继续；空名称门禁；导出/导入往返）；RC001/RC003 全矩阵验收仍 deferred。
 - [ ] 增强捕获：换遥控器后**自动重选宿主**（2026-10-13 现场提出，助手侧已实现）：助手新增目标
   watchdog（每 2 秒复查 `rc003-target.ini`），目标地址变为另一支且宿主不同 ⇒ 记
   `[RETARGET] event=restart` 并重启自己（复用启动路径重新定位/注入）；应用侧在"报告层没生效 + 豆包"
