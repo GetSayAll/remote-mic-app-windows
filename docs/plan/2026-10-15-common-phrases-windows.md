@@ -33,22 +33,18 @@
 | 私有 `a5f6aed` | **批次 2**：`WindowsCommonPhraseHost::shutdown` 等完在途插入（含 250 ms 恢复窗）；`spawn_with_factory` 测试钩子 | 24 passed（+1 条新用例） |
 | 公开 `2086e2f` | **批次 3**：动作 union + 「当前不可用」摘要（M1）、「打开常用语」动作入口按 available 显隐、设置页挂载点（M6）、`take_panel_notice` 接缝与 `close_common_phrase_panel` 关闭原因 | `pnpm test` 372 passed（+4 条新用例）；`pnpm build`（含私有 UI 注入编译）；`cargo test --workspace`；`ci-preflight.ps1` 7 步 |
 | 私有 `6736364` | **批次 3**：失败反馈链（report sink → 重开面板 + 一次性 notice；同步失败路径同样接入）、提示文案按原因分叉 + 到时自动关闭（5 s/3 s） | 26 passed（+2 条新用例） |
+| 公开 `f517a9d` | **批次 4**：面板窗口主线程调度失败补日志（评审 M6 公开侧）；`Testing/WindowsCommonPhrases.md`、`feature/common-phrases/platform-windows.md`、TODO 条目与 product-copy 登记随本批落盘 | `cargo fmt --check`；`cargo test --workspace`；`ci-preflight` |
+| 私有 `fccd323` | **批次 4**：门禁开关收紧（M1）、插入事务锁外执行（M3）、用户复制分支释放快照（M4）、静默失败补日志（M6）、`host.rs` rustfmt（M10）、注入脚本护栏 + 生成产物校验接入 CI（M8） | 30 passed（+4 条新用例）；`-Check` 与 verify 三态对照；CI 路由单测 |
 
 ## 剩余工作（按批，含落点）
 
-> 2026-10-15 晚更新：批次 2、3 已完成并提交（见上表；批次 3 = 公开 `2086e2f` /
-> 私有 `6736364`）。剩余从批次 4 开始；真机走查清单（文末）待出包后执行。
+> 2026-10-15 晚：**批次 1–4 全部完成并提交**（见上表；公开 `f517a9d` / 私有 `fccd323`）。
+> 剩余仅两类：
+> 1. **真机验收（deferred）**：按 `Testing/WindowsCommonPhrases.md` 的 P1–P9 走查，
+>    RC001 / RC003 分别执行；出包后回填。
+> 2. **私有 M5（刷新事件未接）顺延**：与设置页常用语组件的实现同一轮处理
+>    （`settingsComponent()` 当前为 null，公开挂载点已就绪）。
 
-### 批次 4（卫生与文档）
-
-7. 门禁开关：`initial_access()` 改精确 `=="1"` + 仅 debug / `runtime-simulation` 构建生效 + 显式日志（评审 M1）。
-8. `cancel_pending` 不阻塞按键线程（评审 M3）；"用户自行复制"分支释放快照（评审 M4，补用例）。
-9. 静默失败补日志（线程起不来 / 队列中毒 / 归档读失败 / `run_on_main_thread` 失败）；私有 `host.rs` 跑 `cargo fmt`（评审 M10）。
-10. 注入脚本护栏（评审 M8）：注入前预清目标、校验 UI 入口与生成产物新鲜度、打印"不要提交"；
-    生成器接入 `verify`（重新生成逐字节比对）。
-11. 文档：`Testing/WindowsCommonPhrases.md`（含物理键盘同吞用例、真机清单）、`TODO.md`、
-    `docs/product-copy.md` 术语登记（**批次 3 新增待登记**：「打开常用语」「打开常用语（当前不可用）」、
-    动作分组「常用语」、失败提示 7 条文案）、`feature/common-phrases/platform-windows.md`（Mac 规范要求）。
 
 ## 已拍板决定
 
@@ -75,8 +71,8 @@
 
 ## 评审结论索引（两份独立评审，均已记录）
 
-- 私有包：B1（已修）选中永不插入；B2（已修，批次 2）收尾调用点补齐（公开 `reset`/`shutdown` + 私有 `shutdown` 等完在途事务）；B3（已修，批次 3）失败反馈链接通（report sink → 重开面板 + 一次性提示 + 文案分叉）；M1 门禁开关可绕过；M3 `cancel_pending` 阻塞；M4 快照泄漏；M5 刷新事件未接；M6 静默失败无日志；M7 生成器未接 CI；M8 注入护栏缺失；M9 引用文档不存在；M10 fmt 硬伤。
-- 公开接缝：B1（已修）`WS_EX_NOACTIVATE` 被 tao 抹掉；M1（已修，批次 3）映射页 union 与摘要补齐；M2（已修，批次 2）认领配对自持（公开侧记账，释放沿配对消费）；M3（已修）收尾/掩码；M4（已修）多屏居中；M5（已修）面板页样式；M6（已修，批次 3）前端挂载点（设置页条件渲染 + 动作入口按可用性显隐）。
+- 私有包：B1（已修）选中永不插入；B2（已修，批次 2）收尾调用点补齐（公开 `reset`/`shutdown` + 私有 `shutdown` 等完在途事务）；B3（已修，批次 3）失败反馈链接通（report sink → 重开面板 + 一次性提示 + 文案分叉）；M1（已修，批次 4）门禁开关收紧（精确 `"1"` + 仅 dev/runtime-simulation + 日志）；M3（已修，批次 4）`cancel_pending` 不再被在途事务阻塞（锁外执行）；M4（已修，批次 4）用户复制分支释放快照；M5（顺延）刷新事件未接——随设置页组件实现轮次处理；M6（已修，批次 4）静默失败补日志（线程/中毒/归档；公开侧 `run_on_main_thread` 见公开接缝行）；M7（已修，批次 4）生成器接入 CI（`verify-generated.mjs` + `modules.json`）；M8（已修，批次 4）注入护栏（预清/UI 入口/产物新鲜度/勿提交提示）；M9（已修，批次 4）引用文档随本批落盘（Testing / feature / product-copy）；M10（已修，批次 4）`host.rs` rustfmt。
+- 公开接缝：B1（已修）`WS_EX_NOACTIVATE` 被 tao 抹掉；M1（已修，批次 3）映射页 union 与摘要补齐；M2（已修，批次 2）认领配对自持（公开侧记账，释放沿配对消费）；M3（已修）收尾/掩码；M4（已修）多屏居中；M5（已修）面板页样式；M6（已修，批次 3/4）前端挂载点（设置页条件渲染 + 动作入口按可用性显隐）与公开宿主 `run_on_main_thread` 失败日志。
 - 已确认无问题：内置内容与 macOS 同哈希、生成产物逐字节一致、七类非法输入全部失败、剪贴板内存所有权路径、工作线程锁无死锁、认领一次性语义、日志不含正文。
 
 ## 真机走查清单（出包后）

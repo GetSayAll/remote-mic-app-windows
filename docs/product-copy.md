@@ -28,6 +28,7 @@
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
+| 常用语（会员能力：按键动作 + 浮层面板） | 常用语；动作名「打开常用语」；缺私有组件时已保存的绑定显示「打开常用语（当前不可用）」；失败提示按原因分叉（见 §7 2026-10-15 条） | `src/lib/bridge.ts`（`actionSummary`）、`ButtonsPage.vue`、`SettingsPage.vue`；面板内文案在私有组件 |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页
@@ -482,3 +483,10 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   当前值可能不同，没有这行分不清“分流判错”还是“现场已变”）。文案表与分流函数移入
   `src/onboarding/voice-failure-text.ts`（单测 6 例）。
   记录：[Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md](../Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md)。
+- 2026-10-15：常用语文案定稿（会员能力，按键动作 + 浮层面板）。动作名「打开常用语」；
+  缺私有组件时动作摘要显示「打开常用语（当前不可用）」（不静默替换动作）；面板提示
+  「按方向键和 OK 键插入对应常用语 / 按返回键关闭面板」；插入失败提示按原因分叉——光标不在
+  输入框中（把光标放进输入框后再试）/ 输入目标已改变 / 这个位置还没有设置常用语 / 剪贴板暂时
+  不可用 / 剪贴板没能恢复原内容 / 没能完成粘贴 / 兜底「没能插入常用语，请重试」；输入框类
+  提示 5 秒、其余 3 秒后面板自动收起。实施记录 `docs/plan/2026-10-15-common-phrases-windows.md`、
+  验收 `Testing/WindowsCommonPhrases.md`、平台边界 `feature/common-phrases/platform-windows.md`。
