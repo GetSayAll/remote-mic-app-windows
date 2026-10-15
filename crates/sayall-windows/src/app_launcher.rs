@@ -2204,6 +2204,13 @@ pub fn open_web_url(_url: &str) -> Result<(), String> {
 pub struct ApplicationReadiness {
     /// 进程/窗口存在（含最小化与收在托盘）。
     pub running: bool,
+    /// 目标**进程**存在（Toolhelp 快照按映像名/路径匹配）。
+    ///
+    /// UWP / 打包应用（计算器、设置等）没有归属自己的可见窗口——窗口属于
+    /// `ApplicationFrameHost.exe`，按 pid 匹配窗口永远看不到它们；这一路是唯一
+    /// 能确认「应用确实起来了」的判据（2026-10-15 现场：打开计算器等满 8 秒
+    /// 被判失败，实际已打开）。
+    pub running_process: bool,
     /// 存在可见窗口。
     pub visible_window: bool,
     /// 判据是否可用：目标无法解析（未知 id/路径）时为 false，
@@ -2216,16 +2223,23 @@ pub struct ApplicationReadiness {
 pub fn application_readiness(target: &str) -> ApplicationReadiness {
     let unknown = ApplicationReadiness {
         running: false,
+        running_process: false,
         visible_window: false,
         known: false,
     };
-    let visibility = if crate::registered_apps::is_registered_target(target) {
+    let (visibility, running_process) = if crate::registered_apps::is_registered_target(target) {
         match target.strip_prefix(crate::registered_apps::REGISTERED_PREFIX) {
-            Some(aumid) => window_visibility(WindowSelector::AppUserModelId(aumid)),
+            Some(aumid) => (
+                window_visibility(WindowSelector::AppUserModelId(aumid)),
+                !pids_for_app_user_model_id(aumid).is_empty(),
+            ),
             None => return unknown,
         }
     } else if let Some(app) = preset_app(target) {
-        window_visibility(WindowSelector::ExecutableNames(app.exe_names))
+        (
+            window_visibility(WindowSelector::ExecutableNames(app.exe_names)),
+            !pids_for_exe_names(app.exe_names).is_empty(),
+        )
     } else if is_custom_path_target(target) {
         let resolved = if target.to_ascii_lowercase().ends_with(".lnk") {
             resolve_lnk(target)
@@ -2234,12 +2248,16 @@ pub fn application_readiness(target: &str) -> ApplicationReadiness {
         } else {
             target.to_owned()
         };
-        window_visibility(WindowSelector::ExecutablePath(&resolved))
+        (
+            window_visibility(WindowSelector::ExecutablePath(&resolved)),
+            !pids_for_executable_path(&resolved).is_empty(),
+        )
     } else {
         return unknown;
     };
     ApplicationReadiness {
         running: visibility.visible + visibility.hidden > 0,
+        running_process,
         visible_window: visibility.visible > 0,
         known: true,
     }
@@ -2249,6 +2267,7 @@ pub fn application_readiness(target: &str) -> ApplicationReadiness {
 pub fn application_readiness(_target: &str) -> ApplicationReadiness {
     ApplicationReadiness {
         running: false,
+        running_process: false,
         visible_window: false,
         known: false,
     }

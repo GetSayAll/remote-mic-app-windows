@@ -855,6 +855,18 @@ pub struct WindowsMacroStepper {
 #[cfg(windows)]
 const READINESS_POLL_INTERVAL_MS: u64 = 100;
 
+/// `open_application` 超时后的判定（纯函数，便于单测）：
+/// 进程确实存在 ⇒ `Unknown`（应用起来了、窗口没被观察到——UWP 常态，
+/// 不得谎报成功也不得误报失败）；进程也不在 ⇒ `Failed`。
+#[cfg(windows)]
+fn open_application_timeout_outcome(process_running: bool) -> StepOutcome {
+    if process_running {
+        StepOutcome::Unknown
+    } else {
+        StepOutcome::Failed
+    }
+}
+
 #[cfg(windows)]
 impl WindowsMacroStepper {
     /// 有界等待：`predicate` 为真即返回 true，超时返回 false。
@@ -912,10 +924,20 @@ impl MacroStepper for WindowsMacroStepper {
             return StepOutcome::Done;
         }
         if ready {
-            StepOutcome::Done
-        } else {
-            StepOutcome::Failed
+            return StepOutcome::Done;
         }
+        // 窗口没等到 ≠ 没打开：UWP / 打包应用（计算器、设置…）的窗口属于
+        // ApplicationFrameHost.exe，按进程匹配窗口永远看不到（2026-10-15 现场：
+        // 计算器已打开却被判失败、整条动作中止）。此时按进程存在报"结果不可确认"，
+        // 后续步骤继续执行。
+        let process_running = crate::app_launcher::application_readiness(target).running_process;
+        if process_running {
+            crate::ble::gatt_note(
+                "map_macro_step_detail action=open_application readiness=process_running_window_not_observed"
+                    .to_owned(),
+            );
+        }
+        open_application_timeout_outcome(process_running)
     }
 
     fn wait_for_application(
@@ -932,7 +954,8 @@ impl MacroStepper for WindowsMacroStepper {
                 return true;
             }
             match state {
-                ApplicationWaitState::Running => readiness.running,
+                // 「App 已打开」= 进程存在（UWP 应用没有归属自己的窗口）。
+                ApplicationWaitState::Running => readiness.running_process || readiness.running,
                 ApplicationWaitState::VisibleWindow => readiness.visible_window,
             }
         });
@@ -1664,5 +1687,15 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "执行线程未结束");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// 2026-10-15 现场回归：UWP 应用（计算器）窗口归属于 ApplicationFrameHost，
+    /// 按进程等窗口永远等不到；进程已在 ⇒ 必须报「结果不可确认」而不是失败，
+    /// 后续步骤不能因此中止。
+    #[cfg(windows)]
+    #[test]
+    fn open_application_timeout_reports_unknown_when_process_is_running() {
+        assert_eq!(open_application_timeout_outcome(true), StepOutcome::Unknown);
+        assert_eq!(open_application_timeout_outcome(false), StepOutcome::Failed);
     }
 }

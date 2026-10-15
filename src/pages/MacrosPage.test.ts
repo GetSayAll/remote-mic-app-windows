@@ -192,7 +192,7 @@ describe("组合动作页 · 库浏览", () => {
 });
 
 describe("组合动作页 · 编辑向导", () => {
-  it("新建：名称 20 字硬截，选择第一个动作后进入编排步骤", async () => {
+  it("新建：名称 20 字硬截；基本设置里选动作是替换不是累加，且不越过名称门禁", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "新建").trigger("click");
     await flushPromises();
@@ -202,10 +202,45 @@ describe("组合动作页 · 编辑向导", () => {
     await nameInput.setValue("一二三四五六七八九十一二三四五六七八九十二十一");
     expect((nameInput.element as HTMLInputElement).value).toHaveLength(20);
 
+    // 名称已填：选动作停留本步（不自动跳第②步，2026-10-15 门禁修复）。
     await findButton(wrapper, "打开应用").trigger("click");
     await flushPromises();
+    expect(wrapper.find(".basic-body").exists()).toBe(true);
+    expect(wrapper.text()).toContain("已有 1 个步骤");
+
+    await findButton(wrapper, "下一步").trigger("click");
+    await flushPromises();
     expect(wrapper.find(".steps-body").exists()).toBe(true);
-    expect(wrapper.text()).toContain("请继续配置步骤");
+  });
+
+  it("名称为空时不给进入下一步（点按钮与点步骤都拦下，2026-10-15 现场）", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "新建").trigger("click");
+    await flushPromises();
+    // 先选一个动作（此时名称仍为空）。
+    await findButton(wrapper, "打开应用").trigger("click");
+    await flushPromises();
+    // 「下一步」禁用。
+    const next = findButton(wrapper, "下一步");
+    expect(next.attributes("disabled")).toBeDefined();
+    // 点步骤 pill 也被拦下并给出原因。
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".basic-body").exists()).toBe(true);
+    expect(wrapper.text()).toContain("先填写组合动作名称");
+  });
+
+  it("测试启动失败显示中文原因而不是机器码（invalid:name_empty）", async () => {
+    testMacroDefinitionSpy.mockRejectedValueOnce(new Error("invalid:name_empty"));
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "测试与保存").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "▶ 测试动作").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("测试失败：请先填写组合动作名称");
+    expect(wrapper.text()).not.toContain("invalid:name_empty");
   });
 
   it("编辑已存动作：保存走新版本号（patch +1）", async () => {
@@ -229,6 +264,9 @@ describe("组合动作页 · 编辑向导", () => {
     await flushPromises();
     await wrapper.get('.basic-body input[type="text"]').setValue("新动作");
     await findButton(wrapper, "打开应用").trigger("click");
+    await flushPromises();
+    // 基本设置 →（下一步）编排步骤 →（下一步）测试与保存。
+    await findButton(wrapper, "下一步").trigger("click");
     await flushPromises();
     await findButton(wrapper, "下一步").trigger("click");
     await flushPromises();

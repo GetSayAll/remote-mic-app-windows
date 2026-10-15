@@ -1964,6 +1964,25 @@ function appTargetLabel(target: string | undefined): string {
   return stem || target;
 }
 
+/** 组合动作启动失败的机器码 → 用户文案（Rust 侧只给稳定 token）。 */
+export function macroStartErrorLabel(code: string): string | null {
+  if (code === "already_running") return "这个组合动作正在执行，请稍后再试";
+  if (code === "not_found") return "找不到这个组合动作，请重新打开页面";
+  if (code.startsWith("invalid:")) {
+    const issues = code.slice("invalid:".length).split(",");
+    if (issues.includes("name_empty")) return "请先填写组合动作名称";
+    if (issues.includes("name_too_long")) return "组合动作名称太长，最多 20 个字符";
+    if (issues.includes("too_few_steps") || issues.includes("too_many_steps")) {
+      return "步骤数量不对，请检查后重试";
+    }
+    if (issues.some((issue) => issue.startsWith("missing_parameter"))) {
+      return "有步骤还没填写完整，请检查每一步的参数";
+    }
+    return "这条组合动作的设置不完整，请检查名称与步骤";
+  }
+  return null;
+}
+
 /** 整宏终态的用户文案（对齐 Mac `macro.status.execution.*`）。 */
 export function macroTerminalLabel(result: MacroTerminalResult): string {
   switch (result) {

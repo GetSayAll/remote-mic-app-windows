@@ -20,6 +20,7 @@ import {
   listPresetApps,
   macroActionLabel,
   macroChordLabel,
+  macroStartErrorLabel,
   macroStepOutcomeLabel,
   macroStepSummary,
   macroTerminalLabel,
@@ -281,14 +282,33 @@ function addStep(action: MacroAction): void {
     action,
     parameters: defaultParameters(action),
   };
-  draft.value.steps.push(step);
+  if (editorStep.value === "basic") {
+    // 基本设置里选择第一个动作：**替换**而不是累加（对齐 Mac），停留在本步；
+    // 名称与步骤在最后一起保存（早前版本在这里自动跳到第②步，绕过了
+    // "名称为空不给下一步"的门禁，2026-10-15 现场实测）。
+    draft.value.steps = [step];
+  } else {
+    draft.value.steps.push(step);
+  }
   selectedStepId.value = step.stepId;
   capturedChord.value = null;
-  if (editorStep.value === "basic") {
-    // 三步向导：基本设置里选择第一个动作后进入编排（对齐 Mac）。
-    editorStep.value = "steps";
-    setStatus("请继续配置步骤");
+}
+
+/** 向导步骤跳转门禁：名称非空才能进第②步，有步骤才能进第③步。 */
+function goToStep(step: EditorStep): void {
+  if (step === "basic") {
+    editorStep.value = "basic";
+    return;
   }
+  if (!draft.value?.name.trim()) {
+    setStatus("先填写组合动作名称", "error");
+    return;
+  }
+  if (step === "review" && (draft.value?.steps.length ?? 0) === 0) {
+    setStatus("先添加第一个步骤", "error");
+    return;
+  }
+  editorStep.value = step;
 }
 
 function defaultParameters(action: MacroAction): MacroStep["parameters"] {
@@ -551,7 +571,7 @@ async function runDraftTest(): Promise<void> {
     setStatus("组合动作已开始执行");
     startPollingRun(testRunId.value);
   } catch (error) {
-    setStatus(`测试失败：${messageOf(error)}`, "error");
+    setStatus(testFailureText(error), "error");
   }
 }
 
@@ -564,7 +584,7 @@ async function runStepTest(stepId: string): Promise<void> {
     testRunning.value = true;
     startPollingRun(testRunId.value);
   } catch (error) {
-    setStatus(`测试失败：${messageOf(error)}`, "error");
+    setStatus(testFailureText(error), "error");
   }
 }
 
@@ -605,6 +625,14 @@ async function cancelTest(): Promise<void> {
 async function saveDraft(): Promise<void> {
   const definition = currentDraft();
   if (!definition) return;
+  if (!definition.name.trim()) {
+    setStatus("请先填写组合动作名称", "error");
+    return;
+  }
+  if (definition.steps.length === 0) {
+    setStatus("至少添加一个步骤", "error");
+    return;
+  }
   if (isNewMacro.value) {
     definition.version = "1.0.0";
   } else {
@@ -632,8 +660,18 @@ async function testSavedMacro(macroId: string): Promise<void> {
     setStatus("组合动作已开始执行");
     startPollingRun(macroId);
   } catch (error) {
-    setStatus(`测试失败：${messageOf(error)}`, "error");
+    setStatus(testFailureText(error), "error");
   }
+}
+
+/**
+ * 测试启动失败的文案：Rust 返回稳定 token（`invalid:name_empty` 等），
+ * 映射成用户语言；无法识别的（传输层错误）保留原文。
+ */
+function testFailureText(error: unknown): string {
+  const raw = messageOf(error);
+  const mapped = macroStartErrorLabel(raw);
+  return mapped ? `测试失败：${mapped}` : `测试失败：${raw}`;
 }
 
 function stepReportFor(stepId: string) {
@@ -766,7 +804,7 @@ onMounted(async () => {
               class="step-pill"
               :class="{ active: editorStep === 'basic' }"
               type="button"
-              @click="editorStep = 'basic'"
+              @click="goToStep('basic')"
             >
               <span class="dot">1</span>基本设置
             </button>
@@ -775,7 +813,7 @@ onMounted(async () => {
               class="step-pill"
               :class="{ active: editorStep === 'steps' }"
               type="button"
-              @click="editorStep = 'steps'"
+              @click="goToStep('steps')"
             >
               <span class="dot">2</span>编排步骤
             </button>
@@ -784,7 +822,7 @@ onMounted(async () => {
               class="step-pill"
               :class="{ active: editorStep === 'review' }"
               type="button"
-              @click="editorStep = 'review'"
+              @click="goToStep('review')"
             >
               <span class="dot">3</span>测试与保存
             </button>
@@ -1103,7 +1141,7 @@ onMounted(async () => {
             v-if="editorStep !== 'basic'"
             class="btn"
             type="button"
-            @click="editorStep = editorStep === 'review' ? 'steps' : 'basic'"
+            @click="goToStep(editorStep === 'review' ? 'steps' : 'basic')"
           >
             上一步
           </button>
@@ -1112,7 +1150,7 @@ onMounted(async () => {
             class="btn primary"
             type="button"
             :disabled="editorStep === 'basic' && (!draft.name.trim() || draft.steps.length === 0)"
-            @click="editorStep = editorStep === 'basic' ? 'steps' : 'review'"
+            @click="goToStep(editorStep === 'basic' ? 'steps' : 'review')"
           >
             下一步
           </button>
