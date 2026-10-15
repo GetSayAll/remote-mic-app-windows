@@ -32,7 +32,8 @@ use std::time::Duration;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
+    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    INFINITE,
 };
 
 /// 命名事件名（与会话内安装器约定）。见模块头部的同步要求。
@@ -65,6 +66,13 @@ impl GracefulExitSignal {
     pub fn create_named(name: &str) -> windows::core::Result<Self> {
         let name = wide(name);
         let handle = unsafe { CreateEventW(None, true, false, PCWSTR::from_raw(name.as_ptr())) }?;
+        // 防御陈旧置位（2026-10-15 实测"应用启动即退出"）：手动重置事件一经置位
+        // 就保持，且只要还有任一持有者（例如诊断/测试脚本 OpenEventW + SetEvent 后
+        // 不关句柄）对象就不销毁——新实例照常创建会立刻等到这个陈旧信号、启动即
+        // 退出。启动时清除一次；安装器若在此之前置位，说明它针对的是"上一个实例"
+        // （本实例尚未运行，没有需要退出的理由），清除无碍；在本行之后的信号正常
+        // 唤醒等待（竞态窗口为毫秒级，极端情况下安装器退回其有界等待路径）。
+        let _ = unsafe { ResetEvent(handle) };
         Ok(Self { handle })
     }
 
@@ -132,5 +140,27 @@ mod tests {
         setter.join().expect("setter thread");
         // 手动重置：置位后保持，后续等待立即返回（防"等待线程晚于信号启动"）。
         assert!(signal.wait_timeout(Duration::from_millis(10)));
+    }
+
+    /// 防御回归（2026-10-15 实测"应用启动即退出"）：命名事件可能处于**陈旧的
+    /// 置位状态**——第三方脚本 `OpenEventW + SetEvent` 后不关句柄，事件对象既
+    /// 不销毁又保持置位；此时新实例照常创建会立刻等到这个陈旧信号、启动即退出。
+    /// 启动时必须清除陈旧置位。
+    #[test]
+    fn a_stale_signalled_event_is_cleared_on_create() {
+        const NAME: &str = r"Local\SayAll-GracefulExit-test-stale";
+        // 模拟旧持有者 + 一次"空发"置位。
+        let holder = GracefulExitSignal::create_named(NAME).expect("create named event");
+        signal_named(NAME).expect("set named event");
+        assert!(
+            holder.wait_timeout(Duration::from_millis(10)),
+            "置位必须先生效"
+        );
+        // 新实例创建：陈旧置位必须被清除，watcher 不得立即返回。
+        let newcomer = GracefulExitSignal::create_named(NAME).expect("create named event");
+        assert!(
+            !newcomer.wait_timeout(Duration::from_millis(100)),
+            "陈旧信号必须在新实例启动时被清除（否则应用启动即退出）"
+        );
     }
 }
