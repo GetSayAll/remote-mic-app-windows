@@ -129,7 +129,7 @@ impl PhrasePanelWindow for AppPanelWindow {
     fn show(&self) {
         let app = self.app.clone();
         let window = self.window.clone();
-        let _ = app.clone().run_on_main_thread(move || {
+        let dispatched = app.clone().run_on_main_thread(move || {
             // 显示前的前台进程（判据：show 不得改变前台窗口）。
             let before = sayall_windows::focus_windows::foreground_process_id();
             // 居中显示：优先落在**光标所在屏**（`current_monitor()` 是"窗口当前所在屏"，
@@ -161,15 +161,28 @@ impl PhrasePanelWindow for AppPanelWindow {
                 std::process::id()
             ));
         });
+        if let Err(error) = dispatched {
+            // 主线程调度失败 = 面板不会出现：不得静默（评审 M6）。
+            sayall_windows::gatt_note(format!(
+                "COMMON_PHRASES PANEL phase=shown result=failed reason=run_on_main_thread detail={error}"
+            ));
+        }
     }
 
     fn hide(&self) {
         let app = self.app.clone();
         let window = self.window.clone();
-        let _ = app.clone().run_on_main_thread(move || {
+        let dispatched = app.clone().run_on_main_thread(move || {
             let _ = window.hide();
             sayall_windows::gatt_note("COMMON_PHRASES PANEL phase=hidden result=done".to_owned());
         });
+        if let Err(error) = dispatched {
+            // 主线程调度失败 = 面板可能留在屏幕上、掩码也不会随窗口隐藏而撤：
+            // 不得静默（评审 M6）。
+            sayall_windows::gatt_note(format!(
+                "COMMON_PHRASES PANEL phase=hidden result=failed reason=run_on_main_thread detail={error}"
+            ));
+        }
         sayall_windows::gatt_note("COMMON_PHRASES PANEL phase=hidden result=requested".to_owned());
     }
 }
