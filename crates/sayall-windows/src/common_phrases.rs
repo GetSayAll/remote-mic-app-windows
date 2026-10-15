@@ -39,6 +39,14 @@ pub trait PhrasePanelWindow: Send + Sync {
     fn hide(&self);
 }
 
+/// 面板上某个位置的数据（只含短显示，不含完整句）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonPhrasePanelEntry {
+    pub button: RemoteButton,
+    /// 该位置的短显示；未分配时为空字符串。
+    pub label: String,
+}
+
 /// 可选常用语组件适配接口。所有方法都有默认实现（不可用 + 不认领），
 /// 因此未接入私有组件时引擎行为与改动前完全一致。
 pub trait CommonPhraseHost: Send + Sync {
@@ -84,6 +92,17 @@ pub trait CommonPhraseHost: Send + Sync {
     fn close(&self, reason: &str) {
         let _ = reason;
     }
+
+    /// 面板五个位置的当前数据（供浮层渲染；只含短显示）。
+    fn panel_entries(&self) -> Vec<CommonPhrasePanelEntry> {
+        Vec::new()
+    }
+
+    /// 鼠标点选面板某个位置（与遥控器按下等价）；返回是否已受理。
+    fn select(&self, button: RemoteButton) -> bool {
+        let _ = button;
+        false
+    }
 }
 
 /// 未接入私有组件时的空实现：不可用、不认领、不影响任何按键行为。
@@ -119,6 +138,8 @@ mod tests {
         // 收尾路径必须可调用且无副作用。
         host.reset("test");
         host.close("test");
+        assert!(host.panel_entries().is_empty());
+        assert!(!host.select(RemoteButton::Ok));
     }
 
     #[test]
