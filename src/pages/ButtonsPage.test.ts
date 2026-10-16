@@ -335,6 +335,7 @@ beforeEach(() => {
     available: false,
     access: "unavailable",
     canUse: false,
+    previewMode: false,
     notice: null,
     entries: [],
   });
@@ -541,6 +542,7 @@ describe("buttons mapping page", () => {
       available: true,
       access: "allowed",
       canUse: true,
+      previewMode: false,
       notice: null,
       entries: [],
     });

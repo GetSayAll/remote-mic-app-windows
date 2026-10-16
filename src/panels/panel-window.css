@@ -1,11 +1,15 @@
 /* 常用语浮层窗口专用：覆盖主界面样式表里"不透明背景 + 940px 最小宽度"的假设。
    浮层窗口只有 300×372，且要求透明 + 无阴影；主样式表的 :root/body 背景与
    html,body,#app 的 min-width 会让面板变成一块灰色方框并横向溢出。
-   html 层必须显式覆盖：只写 body（类）与 #common-phrases-panel 不够——
-   html 仍被主表的 940px min-width 撑着，面板会被 flex 居中推到 300px 宽的
-   视口之外，屏幕上只剩 html 背景色（用户视角就是"面板一片空白"）。 */
+   html 层必须显式覆盖（背景与 min-width 都要）：
+   - min-width：只写 body（类）与 #common-phrases-panel 不够——html 仍被主表的
+     940px min-width 撑着，面板会被 flex 居中推到 300px 宽的视口之外，屏幕上只剩
+     html 背景色（用户视角就是"面板一片空白"）；
+   - background：主表 :root { background: var(--surface-canvas) } 会在圆角面板
+     四周露出浅灰方边（用户视角"面板有一圈白边"），这里必须清成透明。 */
 html {
   min-width: 0;
+  background: transparent;
 }
 
 .common-phrases-panel-body {

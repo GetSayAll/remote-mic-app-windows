@@ -34,6 +34,7 @@ import {
   listPresetApps,
   mouseClickLabels,
   mouseMoveLabels,
+  openCommonPhraseExample,
   pickCustomApp,
   registerCommonPhraseAvailability,
   registerPresetAppNames,
@@ -76,6 +77,9 @@ import {
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+
+/** 「调整常用语」入口：切到设置页的常用语区（App 层处理页面切换）。 */
+const emit = defineEmits<{ "open-common-phrases-editor": [] }>();
 
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
@@ -543,6 +547,15 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
+}
+
+/** 「常用语示例」：打开常用语面板（会员=普通、非会员=只读预览；判定在宿主层）。 */
+async function openExample(): Promise<void> {
+  try {
+    await openCommonPhraseExample();
+  } catch {
+    // 未接通私有组件（公开构建）：入口不渲染，正常不会到这里；留静默兜底。
+  }
 }
 
 function applyAction(action: ButtonAction): void {
@@ -2153,6 +2166,22 @@ onUnmounted(() => {
               @click="applyAction({ type: 'open_common_phrases' })"
             >
               打开常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="编辑常用语内容与五键分配（在设置页）"
+              @click="emit('open-common-phrases-editor')"
+            >
+              调整常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="预览常用语面板（未开通会员时为只读示例）"
+              @click="openExample"
+            >
+              常用语示例
             </button>
           </div>
         </section>

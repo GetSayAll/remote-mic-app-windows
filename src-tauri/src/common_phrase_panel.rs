@@ -194,6 +194,8 @@ pub struct CommonPhrasePanelSnapshot {
     pub available: bool,
     pub access: &'static str,
     pub can_use: bool,
+    /// 「常用语示例」只读预览模式（前端据此显示"登录会员后可使用"）。
+    pub preview_mode: bool,
     /// 一次性失败提示的原因 key（读取即消费；界面按 key 分叉文案）。
     pub notice: Option<String>,
     pub entries: Vec<CommonPhrasePanelEntryWire>,
@@ -224,6 +226,7 @@ pub fn common_phrase_panel_snapshot() -> CommonPhrasePanelSnapshot {
             available,
             access: access_label(host.access()),
             can_use: host.can_use(),
+            preview_mode: host.panel_preview_mode(),
             notice: host.take_panel_notice(),
             entries: host
                 .panel_entries()
@@ -240,6 +243,7 @@ pub fn common_phrase_panel_snapshot() -> CommonPhrasePanelSnapshot {
             available,
             access: "unavailable",
             can_use: false,
+            preview_mode: false,
             notice: None,
             entries: Vec::new(),
         },
@@ -262,6 +266,19 @@ pub fn select_common_phrase(button: String) -> bool {
         return false;
     };
     host.select(button)
+}
+
+/// 下行命令通道（编辑器"调整常用语"、示例入口等）：公开侧一条命令转发到私有组件。
+///
+/// 未接入组件（公开构建）返回 `unavailable`；未知命令返回 `unsupported`——调用方
+/// 必须按错误处理，不得静默当成功。
+#[tauri::command]
+pub fn common_phrase_dispatch(command: String, payload: Option<String>) -> Result<String, String> {
+    let Some(host) = host() else {
+        return Err("unavailable".to_owned());
+    };
+    host.dispatch(&command, payload.as_deref().unwrap_or(""))
+        .ok_or_else(|| "unsupported".to_owned())
 }
 
 /// 面板位置 → 前端契约字符串。

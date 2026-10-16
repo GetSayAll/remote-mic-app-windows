@@ -129,6 +129,20 @@ pub trait CommonPhraseHost: Send + Sync {
         let _ = button;
         false
     }
+
+    /// 面板是否处于「常用语示例」（只读预览）模式。
+    fn panel_preview_mode(&self) -> bool {
+        false
+    }
+
+    /// 下行命令通道：编辑器（"调整常用语"）等扩展能力走这里，公开侧用一条
+    /// Tauri 命令转发。`command` 是稳定命令 ID，`payload` 与返回值都是 JSON。
+    /// 未接入组件（公开构建）或未知命令一律返回 `None`——调用方按"不支持"处理，
+    /// 不得静默当成功（外部调用成功判据）。
+    fn dispatch(&self, command: &str, payload: &str) -> Option<String> {
+        let _ = (command, payload);
+        None
+    }
 }
 
 /// 未接入私有组件时的空实现：不可用、不认领、不影响任何按键行为。

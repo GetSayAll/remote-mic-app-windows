@@ -1701,6 +1701,8 @@ export interface CommonPhrasePanelSnapshot {
   available: boolean;
   access: CommonPhraseAccess;
   canUse: boolean;
+  /** 「常用语示例」只读预览模式（前端据此显示"登录会员后可使用"）。 */
+  previewMode: boolean;
   /** 一次性失败提示的原因 key（**读取即消费**，Rust 侧读取后清空）；无提示为 null。 */
   notice: string | null;
   entries: CommonPhrasePanelEntry[];
@@ -1708,7 +1710,14 @@ export interface CommonPhrasePanelSnapshot {
 
 /** 空快照：未注入私有组件或浏览器预览环境的回落值。 */
 export function emptyCommonPhrasePanelSnapshot(): CommonPhrasePanelSnapshot {
-  return { available: false, access: "unavailable", canUse: false, notice: null, entries: [] };
+  return {
+    available: false,
+    access: "unavailable",
+    canUse: false,
+    previewMode: false,
+    notice: null,
+    entries: [],
+  };
 }
 
 /** 读取浮层面板数据。未注入私有组件时 available=false、entries 为空。 */
@@ -1741,4 +1750,107 @@ export async function selectCommonPhrase(button: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** 下行命令的返回体（`{"ok":true,"value":...}` / `{"ok":false,"error":"..."}`）。 */
+interface CommonPhraseDispatchResult {
+  ok: boolean;
+  value?: string;
+  error?: string;
+}
+
+/**
+ * 下行命令通道（编辑器"调整常用语"、示例入口等）。未注入组件（公开构建）或
+ * 未知命令会抛错——调用方必须按错误处理，不得静默当成功。
+ */
+async function dispatchCommonPhrase(command: string, payload?: unknown): Promise<string> {
+  if (!isTauriRuntime()) {
+    throw new Error("unavailable");
+  }
+  const raw = await invoke<string>("common_phrase_dispatch", {
+    command,
+    payload: payload === undefined ? null : JSON.stringify(payload),
+  });
+  const result = JSON.parse(raw) as CommonPhraseDispatchResult;
+  if (!result.ok) {
+    throw new Error(result.error ?? "edit_failed");
+  }
+  return result.value ?? "";
+}
+
+/** 编辑器（“调整常用语”）条目。 */
+export interface CommonPhraseEditorEntry {
+  id: string;
+  chineseText: string;
+  chineseLabel: string;
+  englishText: string;
+  englishLabel: string;
+  /** 内置条目（编辑后自动落成用户副本）。 */
+  builtIn: boolean;
+}
+
+/** 编辑器快照（“调整常用语”页数据源）。 */
+export interface CommonPhraseEditorSnapshot {
+  storeAvailable: boolean;
+  loadFailed: boolean;
+  /** 会员门禁：false 时界面显示会员提示、禁用编辑。 */
+  allowed: boolean;
+  entries: CommonPhraseEditorEntry[];
+  /** 五个位置（ok/left/up/right/down）→ 条目 id；无分配的键位缺键。 */
+  assignments: Record<string, string>;
+}
+
+/** 读取编辑器快照。未接通时抛错（调用方按会员提示处理）。 */
+export async function getCommonPhraseEditorSnapshot(): Promise<CommonPhraseEditorSnapshot> {
+  return JSON.parse(await dispatchCommonPhrase("editor_snapshot")) as CommonPhraseEditorSnapshot;
+}
+
+/** 编辑器保存输入：不给 id = 新建；给 id = 替换该条目。 */
+export interface CommonPhraseEditInput {
+  id?: string | null;
+  chineseText: string;
+  chineseLabel: string;
+  englishText?: string;
+  englishLabel?: string;
+}
+
+/** 保存一条常用语；返回条目 id（新建时为新用户副本 id）。 */
+export async function saveCommonPhrase(input: CommonPhraseEditInput): Promise<string> {
+  return dispatchCommonPhrase("editor_save", {
+    id: input.id ?? null,
+    chineseText: input.chineseText,
+    chineseLabel: input.chineseLabel,
+    englishText: input.englishText ?? "",
+    englishLabel: input.englishLabel ?? "",
+  });
+}
+
+/** 把某个面板位置分配给指定条目（立即保存）。 */
+export async function assignCommonPhrase(button: string, id: string): Promise<void> {
+  await dispatchCommonPhrase("editor_assign", { button, id });
+}
+
+/** 删除一条常用语（同时清掉相关分配）。 */
+export async function deleteCommonPhrase(id: string): Promise<void> {
+  await dispatchCommonPhrase("editor_delete", { id });
+}
+
+/** 按偏移量调整顺序（越界不留痕）。 */
+export async function moveCommonPhrase(id: string, offset: number): Promise<void> {
+  await dispatchCommonPhrase("editor_move", { id, offset });
+}
+
+/** 导入备份（整份替换；被改动的内置项转用户副本保留）。 */
+export async function importCommonPhrases(json: string): Promise<void> {
+  await dispatchCommonPhrase("editor_import", { json });
+}
+
+/** 导出备份（JSON 文本）。 */
+export async function exportCommonPhrases(): Promise<string> {
+  return dispatchCommonPhrase("editor_export");
+}
+
+/** 打开「常用语示例」（会员=普通面板、非会员=只读预览）。 */
+export async function openCommonPhraseExample(): Promise<void> {
+  await dispatchCommonPhrase("open_example");
 }

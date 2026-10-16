@@ -54,6 +54,11 @@ function onRestartOnboarding(): void {
   showOnboarding.value = true;
 }
 
+/** 按键页「调整常用语」：切到设置页——编辑器在设置页的"常用语"区块内。 */
+function onOpenCommonPhrasesEditor(): void {
+  activePage.value = "settings";
+}
+
 function handleWindowKeydown(event: KeyboardEvent): void {
   if (isWindowCloseAccelerator(event)) {
     if (event.repeat) return;
@@ -183,6 +188,7 @@ onUnmounted(() => {
         :is="activeComponent"
         :runtime="runtime"
         @restart-onboarding="onRestartOnboarding"
+        @open-common-phrases-editor="onOpenCommonPhrasesEditor"
       />
     </main>
   </div>
