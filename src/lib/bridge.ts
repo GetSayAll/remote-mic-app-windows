@@ -1742,6 +1742,22 @@ export async function closeCommonPhrasePanel(reason?: string): Promise<void> {
   }
 }
 
+/**
+ * 订阅「面板显示」事件（宿主每次 show 面板都会广播）。
+ *
+ * 存在的理由：面板窗口是 NOACTIVATE，focus/visibility 变化不保证触发，
+ * 仅靠前端事件会在"编辑常用语后再打开面板"时显示旧数据（2026-10-16 实测）。
+ * 返回取消订阅函数。
+ */
+export async function onCommonPhrasePanelShown(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen("common-phrases-panel-shown", () => handler());
+  return unlisten;
+}
+
 /** 鼠标点选圆盘某个位置（与遥控器按下等价）。返回是否已受理。 */
 export async function selectCommonPhrase(button: string): Promise<boolean> {
   if (!isTauriRuntime()) return false;
