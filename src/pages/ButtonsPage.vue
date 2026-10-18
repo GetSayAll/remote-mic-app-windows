@@ -25,6 +25,7 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
+  getLockMappingSelection,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   identityShortcutByButton,
@@ -38,6 +39,7 @@ import {
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
+  saveLockMappingSelection,
   scanPairedRemotes,
   shortcutCapability,
   startRawInput,
@@ -260,6 +262,44 @@ const FLASH_FALLBACK_MS = 600;
 let resizeObserver: ResizeObserver | null = null;
 let unmounted = false;
 let resourcesReady = false;
+
+/**
+ * 「锁定当前按键」持久化（2026-10-18，用户定稿：跨页面切换与跨重启保持）。
+ *
+ * 背景：本开关此前只是页面局部状态，切页重建组件后回到默认「开启」，用户侧表现
+ * 为"关不掉"。现在落进应用设置文件（`lock_mapping_selection`）：挂载时读回、
+ * 变更时保存；保存失败回退到最近落盘值并把错误显示在页脚提示里。
+ */
+let lockSelectionPersisted = true;
+/** 用户是否在加载返回前动过开关：迟到的加载结果不得覆盖更新的选择。 */
+let lockSelectionTouched = false;
+/** 保存串行队列：执行时取当前值，快速往返（关→开）收敛到最后一次选择。 */
+let lockSelectionSaveQueue: Promise<void> = Promise.resolve();
+
+async function persistLockSelection(): Promise<void> {
+  const task = lockSelectionSaveQueue.then(async () => {
+    const value = lockSelection.value;
+    if (value === lockSelectionPersisted) return; // 加载回填 / 失败回退的重入：无需落盘
+    try {
+      lockSelectionPersisted = await saveLockMappingSelection(value);
+    } catch (error) {
+      // 只有用户没有再改时才回退开关，避免覆盖更新的选择。
+      if (lockSelection.value === value) {
+        lockSelection.value = lockSelectionPersisted;
+        statusMessage.value = error instanceof Error ? error.message : String(error);
+      }
+    }
+  });
+  lockSelectionSaveQueue = task;
+  await task;
+}
+
+watch(lockSelection, () => {
+  // 每次变更都过一遍持久化（回填/回退的重入在执行时被"值与落盘值相等"拦下），
+  // 这样"关闭中又马上打开"也不会停在中间值。
+  lockSelectionTouched = true;
+  void persistLockSelection();
+});
 
 /**
  * 松开沿结束本次按压的闪烁反馈（与按下高亮、连线**同灭**）。
@@ -1680,10 +1720,20 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps] = await Promise.all([
+  const [loaded, snapshot, apps, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
+    getLockMappingSelection().catch(() => {
+      reportFrontendEvent({
+        event: "mapping_selection_lock",
+        phase: "completed",
+        result: "failed",
+        reason: "load_failed",
+      });
+      return true;
+    }),
   ]);
   if (unmounted) {
     return;
@@ -1693,6 +1743,12 @@ onMounted(async () => {
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
+  // 锁定当前按键：设置文件是权威值；用户在加载返回前已动过开关时以用户为准
+  // （迟到的读取结果不得覆盖更新的选择，见 lockSelectionTouched）。
+  if (!lockSelectionTouched) {
+    lockSelectionPersisted = persistedLockSelection;
+    lockSelection.value = persistedLockSelection;
+  }
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }

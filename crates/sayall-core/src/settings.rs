@@ -88,6 +88,13 @@ pub struct AppSettings {
     /// 是两回事：关闭开关只结束助手、任务保留（授权保留，避免重复 UAC），
     /// 所以不能拿任务的存在与否当这个开关的状态。
     pub rc003_capture_enabled: bool,
+    /// 「锁定当前按键」（按键页页脚开关）。开启时操作实体遥控器不会切换正在编辑的
+    /// 按键；默认 **开启**（对齐 Mac `MappingSelectionPolicy` 的默认值）。
+    ///
+    /// 2026-10-18 用户定稿：Windows 版持久化到设置文件（页面切换与重启都保持）；
+    /// Mac 版是设置窗口内的 @State、不持久化——此处有意不同。老配置没有这个
+    /// 字段时按容器级 `#[serde(default)]` 落回默认（开启）。
+    pub lock_mapping_selection: bool,
     pub theme_preference: ThemePreference,
     /// 应用图标；老配置没有这个字段时落回**当前默认**（几何鸭，2026-10-04 起）。
     #[serde(default, deserialize_with = "deserialize_app_icon")]
@@ -121,6 +128,7 @@ impl Default for AppSettings {
             open_window_at_launch: true,
             check_prerelease_updates: false,
             rc003_capture_enabled: false,
+            lock_mapping_selection: true,
             theme_preference: ThemePreference::System,
             app_icon: AppIconIdentifier::FacetedDuck,
             usage_statistics: UsageStatistics::default(),
@@ -307,5 +315,31 @@ mod tests {
         .unwrap();
         assert_eq!(settings.app_icon, AppIconIdentifier::Standard);
         assert_eq!(settings.gain_db, 12.0);
+    }
+
+    /// 「锁定当前按键」（按键页页脚开关，2026-10-18 用户定稿持久化）。
+    ///
+    /// 语义：新装 / 老配置（无此字段）默认**开启**（对齐 Mac `MappingSelectionPolicy`）；
+    /// 用户关掉后落盘，读回必须保持关闭。
+    #[test]
+    fn lock_mapping_selection_defaults_to_locked_and_round_trips() {
+        assert!(AppSettings::default().lock_mapping_selection);
+
+        // 老配置没有这个字段：容器级 `#[serde(default)]` 落回默认（开启）。
+        let older: AppSettings = serde_json::from_str(
+            r#"{"schema_version":4,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert!(older.lock_mapping_selection);
+
+        // 用户关闭后：原样写出，读回与 `normalized` 后都保持关闭。
+        let settings = AppSettings {
+            lock_mapping_selection: false,
+            ..AppSettings::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert!(encoded.contains("\"lock_mapping_selection\":false"));
+        let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+        assert!(!decoded.normalized().lock_mapping_selection);
     }
 }
