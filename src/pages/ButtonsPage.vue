@@ -2189,15 +2189,17 @@ onUnmounted(() => {
               @click="showCommonPhraseEditor = true"
             >
               <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M4 6.5h16M4 12h16M4 17.5h16"
-                  stroke="currentColor"
-                  stroke-width="1.7"
-                  stroke-linecap="round"
-                />
-                <circle cx="9" cy="6.5" r="2.3" fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.5" />
-                <circle cx="14.5" cy="12" r="2.3" fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.5" />
-                <circle cx="11" cy="17.5" r="2.3" fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.5" />
+                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+                  <line x1="21" y1="4" x2="14" y2="4" />
+                  <line x1="10" y1="4" x2="3" y2="4" />
+                  <line x1="21" y1="12" x2="12" y2="12" />
+                  <line x1="8" y1="12" x2="3" y2="12" />
+                  <line x1="21" y1="20" x2="16" y2="20" />
+                  <line x1="12" y1="20" x2="3" y2="20" />
+                  <line x1="14" y1="2" x2="14" y2="6" />
+                  <line x1="8" y1="10" x2="8" y2="14" />
+                  <line x1="16" y1="18" x2="16" y2="22" />
+                </g>
               </svg>
               调整常用语
             </button>
@@ -2208,14 +2210,10 @@ onUnmounted(() => {
               @click="openExample"
             >
               <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M10.2 6.6C6.9 7.3 4.9 9.6 4.9 12.9c0 2.3 1.5 3.9 3.6 3.9 1.8 0 3.1-1.3 3.1-3.1 0-1.7-1.2-2.9-2.9-2.9-.2 0-.5 0-.7.1.4-1.5 1.7-2.7 3.6-3.3l-.4-1.6z"
-                  fill="currentColor"
-                />
-                <path
-                  d="M19.2 6.6c-3.3.7-5.3 3-5.3 6.3 0 2.3 1.5 3.9 3.6 3.9 1.8 0 3.1-1.3 3.1-3.1 0-1.7-1.2-2.9-2.9-2.9-.2 0-.5 0-.7.1.4-1.5 1.7-2.7 3.6-3.3l-.4-1.6z"
-                  fill="currentColor"
-                />
+                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+                  <path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+                </g>
               </svg>
               常用语示例
             </button>
