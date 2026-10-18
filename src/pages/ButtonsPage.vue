@@ -2190,14 +2190,14 @@ onUnmounted(() => {
             >
               <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path
-                  d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h9M17 17h3"
+                  d="M4 6.5h16M4 12h16M4 17.5h16"
                   stroke="currentColor"
-                  stroke-width="1.9"
+                  stroke-width="1.7"
                   stroke-linecap="round"
                 />
-                <circle cx="15" cy="7" r="2" stroke="currentColor" stroke-width="1.9" />
-                <circle cx="9" cy="12" r="2" stroke="currentColor" stroke-width="1.9" />
-                <circle cx="15" cy="17" r="2" stroke="currentColor" stroke-width="1.9" />
+                <circle cx="9" cy="6.5" r="2.3" fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.5" />
+                <circle cx="14.5" cy="12" r="2.3" fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.5" />
+                <circle cx="11" cy="17.5" r="2.3" fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.5" />
               </svg>
               调整常用语
             </button>
@@ -2209,18 +2209,12 @@ onUnmounted(() => {
             >
               <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path
-                  d="M10 7H6.5A2.5 2.5 0 0 0 4 9.5v0A2.5 2.5 0 0 0 6.5 12H8a4 4 0 0 1-4 4"
-                  stroke="currentColor"
-                  stroke-width="1.9"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
+                  d="M10.2 6.6C6.9 7.3 4.9 9.6 4.9 12.9c0 2.3 1.5 3.9 3.6 3.9 1.8 0 3.1-1.3 3.1-3.1 0-1.7-1.2-2.9-2.9-2.9-.2 0-.5 0-.7.1.4-1.5 1.7-2.7 3.6-3.3l-.4-1.6z"
+                  fill="currentColor"
                 />
                 <path
-                  d="M20 7h-3.5A2.5 2.5 0 0 0 14 9.5v0A2.5 2.5 0 0 0 16.5 12H18a4 4 0 0 1-4 4"
-                  stroke="currentColor"
-                  stroke-width="1.9"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
+                  d="M19.2 6.6c-3.3.7-5.3 3-5.3 6.3 0 2.3 1.5 3.9 3.6 3.9 1.8 0 3.1-1.3 3.1-3.1 0-1.7-1.2-2.9-2.9-2.9-.2 0-.5 0-.7.1.4-1.5 1.7-2.7 3.6-3.3l-.4-1.6z"
+                  fill="currentColor"
                 />
               </svg>
               常用语示例
