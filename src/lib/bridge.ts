@@ -1278,6 +1278,27 @@ export async function setVoiceInputTool(tool: VoiceInputTool): Promise<VoiceInpu
 }
 
 /**
+ * 「锁定当前按键」（按键页页脚开关，2026-10-18 持久化到应用设置）。
+ *
+ * 开启时操作实体遥控器不会切换正在编辑的按键；默认开启（对齐 Mac
+ * `MappingSelectionPolicy` 的默认值）。设置文件是权威值：页面切换会重建
+ * 组件，挂载时必须从这里读回；浏览器预览回落"开启"且不落盘（设置类一致口径）。
+ */
+export async function getLockMappingSelection(): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return true;
+  }
+  return invoke<boolean>("get_lock_mapping_selection");
+}
+
+export async function saveLockMappingSelection(locked: boolean): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return locked;
+  }
+  return invoke<boolean>("set_lock_mapping_selection", { locked });
+}
+
+/**
  * 输入法状态（2026-10-13 现场）：诊断"语音没出字是不是因为没切输入法"。
  *
  * - `detected=false`：读不到输入法状态——界面**不提示**（fail-open，宁可不说也不能瞎说）；

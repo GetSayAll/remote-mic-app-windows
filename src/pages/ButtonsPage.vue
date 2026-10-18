@@ -25,6 +25,7 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
+  getLockMappingSelection,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   identityShortcutByButton,
@@ -38,6 +39,7 @@ import {
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
+  saveLockMappingSelection,
   scanPairedRemotes,
   shortcutCapability,
   startRawInput,
@@ -219,6 +221,8 @@ const VOICE_ICON_FILLED = "M12 2.8a3.4 3.4 0 0 1 3.4 3.4v5.6a3.4 3.4 0 0 1-6.8 0
 const VOICE_ICON_STROKES = ["M6.3 11.5a5.7 5.7 0 0 0 11.4 0", "M12 17.2v3.8"];
 
 const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
+/** 映射是否已从设置读回：「启用自定义按键功能」开关就绪前用占位符顶位（防滑入）。 */
+const mappingsLoaded = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
@@ -260,6 +264,49 @@ const FLASH_FALLBACK_MS = 600;
 let resizeObserver: ResizeObserver | null = null;
 let unmounted = false;
 let resourcesReady = false;
+
+/**
+ * 「锁定当前按键」持久化（2026-10-18，用户定稿：跨页面切换与跨重启保持）。
+ *
+ * 背景：本开关此前只是页面局部状态，切页重建组件后回到默认「开启」，用户侧表现
+ * 为"关不掉"。现在落进应用设置文件（`lock_mapping_selection`）：挂载时读回、
+ * 变更时保存；保存失败回退到最近落盘值并把错误显示在页脚提示里。
+ *
+ * 2026-10-18 追加（Andy 报"每次进页面开关都滑动"）：就绪前用同尺寸占位符顶位、
+ * 就绪后才创建开关本体——元素创建即带正确 checked，从不存在属性变更，因此不会
+ * 有关→开的滑动过渡（同设置页「登录时自动启动」与同页「全按键支持」，见
+ * SettingsPage.vue 2026-09-28 定稿注释：只禁用过渡不行，Vue 的 DOM 更新与
+ * nextTick 同批早于绘制，过渡照常触发）。
+ */
+let lockSelectionPersisted = true;
+/** 开关值是否已读回：false 期间渲染占位符，不渲染开关本体（防滑入动画）。 */
+const lockSelectionReady = ref(false);
+/** 保存串行队列：执行时取当前值，快速往返（关→开）收敛到最后一次选择。 */
+let lockSelectionSaveQueue: Promise<void> = Promise.resolve();
+
+async function persistLockSelection(): Promise<void> {
+  const task = lockSelectionSaveQueue.then(async () => {
+    const value = lockSelection.value;
+    if (value === lockSelectionPersisted) return; // 加载回填 / 失败回退的重入：无需落盘
+    try {
+      lockSelectionPersisted = await saveLockMappingSelection(value);
+    } catch (error) {
+      // 只有用户没有再改时才回退开关，避免覆盖更新的选择。
+      if (lockSelection.value === value) {
+        lockSelection.value = lockSelectionPersisted;
+        statusMessage.value = error instanceof Error ? error.message : String(error);
+      }
+    }
+  });
+  lockSelectionSaveQueue = task;
+  await task;
+}
+
+watch(lockSelection, () => {
+  // 每次变更都过一遍持久化（回填/回退的重入在执行时被"值与落盘值相等"拦下），
+  // 这样"关闭中又马上打开"也不会停在中间值。
+  void persistLockSelection();
+});
 
 /**
  * 松开沿结束本次按压的闪烁反馈（与按下高亮、连线**同灭**）。
@@ -1680,10 +1727,20 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps] = await Promise.all([
+  const [loaded, snapshot, apps, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
+    getLockMappingSelection().catch(() => {
+      reportFrontendEvent({
+        event: "mapping_selection_lock",
+        phase: "completed",
+        result: "failed",
+        reason: "load_failed",
+      });
+      return true;
+    }),
   ]);
   if (unmounted) {
     return;
@@ -1693,6 +1750,12 @@ onMounted(async () => {
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
+  // 两个开关的「就绪」与真值在同一渲染批次生效：本批次才创建开关本体，创建即带
+  // 正确 checked，不产生属性变更，因此没有"状态回来后开→关"的滑动过渡。
+  mappingsLoaded.value = true;
+  lockSelectionPersisted = persistedLockSelection;
+  lockSelection.value = persistedLockSelection;
+  lockSelectionReady.value = true;
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
@@ -1819,7 +1882,8 @@ onUnmounted(() => {
           <h1>按键映射</h1>
           <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
             <span>启用自定义按键功能</span>
-            <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
+            <input v-if="mappingsLoaded" v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
+            <span v-else class="toggle-placeholder" aria-hidden="true"></span>
           </label>
           <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
                选中某个按键的编辑面板，任何时刻都能开启/关闭。
@@ -2361,7 +2425,8 @@ onUnmounted(() => {
       </div>
       <label class="toggle-row" title="开启后，操作实体遥控器不会切换正在编辑的按键。">
         <span>锁定当前按键</span>
-        <input v-model="lockSelection" type="checkbox" class="toggle-input" />
+        <input v-if="lockSelectionReady" v-model="lockSelection" type="checkbox" class="toggle-input" />
+        <span v-else class="toggle-placeholder" aria-hidden="true"></span>
       </label>
       <span class="muted lock-hint">按遥控器时保持当前编辑项</span>
       <div class="button-row">
