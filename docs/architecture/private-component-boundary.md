@@ -20,10 +20,10 @@
 
 | 位置 | 作用 |
 | --- | --- |
-| `src-tauri/src/membership/runtime.rs` | `MembershipRuntime` 接口、`MembershipSnapshot`、`EmailCodeDelivery`、`MembershipError` 与公开空实现 `UnavailableMembershipRuntime` |
+| `src-tauri/src/membership/runtime.rs` | `MembershipRuntime` 接口、`MembershipSnapshot`、`EmailCodeDelivery`、`MembershipCatalog`、`MembershipPurchase`、`MembershipError` 与公开空实现 `UnavailableMembershipRuntime` |
 | `src-tauri/src/membership/hook.rs` | **注入点**。公开版本返回 `None`；私有构建用同名文件替换其内容 |
 | `src-tauri/src/membership/mod.rs` | `install()`：拿到 `hook` 的运行时，拿不到就用空实现 |
-| `src-tauri/src/lib.rs` | 把运行时放进 `AppState`；生命周期接线：`get_membership_snapshot`、`refresh_membership`、`start_membership_email_login`、`verify_membership_email_login`、`logout_membership`、窗口获得焦点、`RunEvent::ExitRequested` |
+| `src-tauri/src/lib.rs` | 把运行时放进 `AppState`；生命周期接线：`get_membership_snapshot`、`refresh_membership`、`start_membership_email_login`、`verify_membership_email_login`、`logout_membership`、`get_membership_catalog`、`purchase_membership`、`refresh_membership_purchase`、`clear_membership_purchase`、`open_membership_checkout`、窗口获得焦点、`RunEvent::ExitRequested` |
 
 接口契约：
 
@@ -33,6 +33,15 @@
 - `on_foreground()` / `shutdown()` 成对存在；公开实现是 no-op。
 - `MembershipSnapshot` 是隐私边界：只放展示所需的派生值（账号显示名、是否已开通、
   可用截止时刻）。**凭据、令牌、邮箱原文、安装标识、设备标识一律不越过 Rust 边界。**
+- `catalog()` / `purchase()` / `refresh_purchase()` 会走网络，宿主用
+  `spawn_blocking` 调用，不得占用窗口线程。
+- 商品与报价只用于展示；`purchase()` 只接受页面传来的 `product_id`，金额、币种与
+  销售修订号由私有实现从服务端方案回填。
+- 收银台 URL 只由私有实现保存，`open_membership_checkout` 只打开这个值；页面不能
+  传入任意 URL。打开前仍强制 `https://`。
+- 订单状态 `pending` / `paid` / `failed` / `refunded` /
+  `refund_pending_settlement` / `closed` 原样交给页面；只有 `paid` 伴随一次签名
+  权益刷新。
 
 私有构建要做的事：
 

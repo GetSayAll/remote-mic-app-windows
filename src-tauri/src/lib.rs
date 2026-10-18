@@ -29,7 +29,9 @@ mod startup;
 mod updater;
 
 use diagnostics::DiagnosticReport;
-use membership::{EmailCodeDelivery, MembershipRuntime, MembershipSnapshot};
+use membership::{
+    EmailCodeDelivery, MembershipCatalog, MembershipPurchase, MembershipRuntime, MembershipSnapshot,
+};
 use platform::PlatformRuntime;
 use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
@@ -475,6 +477,65 @@ async fn logout_membership(
 ) -> Result<MembershipSnapshot, String> {
     let membership = Arc::clone(&state.membership);
     run_membership(move || membership.logout()).await
+}
+
+/// 读取会员页的商品与购买方案（2026-10-15）。
+///
+/// 未登录时返回公开预览，只能展示；登录后返回账号授权方案。
+#[tauri::command]
+async fn get_membership_catalog(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipCatalog, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.catalog()).await
+}
+
+/// 创建当前方案的订单。返回的收银台地址只能由
+/// [`open_membership_checkout`] 打开，页面不接收也不传递 URL。
+#[tauri::command]
+async fn purchase_membership(
+    state: tauri::State<'_, AppState>,
+    product_id: String,
+) -> Result<MembershipPurchase, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.purchase(&product_id)).await
+}
+
+/// 查询当前订单；付款确认后会同时刷新签名权益。
+#[tauri::command]
+async fn refresh_membership_purchase(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipPurchase, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.refresh_purchase()).await
+}
+
+/// 关闭当前订单展示；服务端订单不受影响。
+#[tauri::command]
+fn clear_membership_purchase(state: tauri::State<'_, AppState>) {
+    state.membership.clear_purchase();
+}
+
+/// 打开当前订单的托管收银台。
+///
+/// URL 来自 Rust 侧保存的服务端返回值，页面无法注入。这里仍只放行 HTTPS，
+/// 拒绝 `file:`、`javascript:` 之类的协议。
+#[tauri::command]
+async fn open_membership_checkout(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = state
+        .membership
+        .checkout_url()
+        .ok_or_else(|| "no_active_order".to_string())?;
+    if !url.starts_with("https://") || url.len() > 2048 {
+        return Err("invalid_checkout_url".to_string());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "open_checkout_failed".to_string())
 }
 
 /// 在阻塞线程池上执行一次会员操作。
@@ -3800,6 +3861,11 @@ pub fn run() {
         start_membership_email_login,
         verify_membership_email_login,
         logout_membership,
+        get_membership_catalog,
+        purchase_membership,
+        refresh_membership_purchase,
+        clear_membership_purchase,
+        open_membership_checkout,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -3878,6 +3944,11 @@ pub fn run() {
         start_membership_email_login,
         verify_membership_email_login,
         logout_membership,
+        get_membership_catalog,
+        purchase_membership,
+        refresh_membership_purchase,
+        clear_membership_purchase,
+        open_membership_checkout,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
