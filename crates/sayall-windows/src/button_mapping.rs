@@ -1219,13 +1219,27 @@ fn fire_gesture(
         }
         ButtonAction::OpenCommonPhrases => {
             let host = injector.common_phrase_host();
-            let opened = host.open(crate::common_phrases::PHRASE_SOURCE_DEFAULT);
+            // 同一按键再按 = 收起面板（对齐 macOS：isVisible 且来源相同 → close(toggle_button)）。
+            // 面板打开时也消费这次按键（不重复触发打开动作）。
+            let toggled_closed = host.is_panel_open();
+            let opened = if toggled_closed {
+                host.close("toggle_button");
+                false
+            } else {
+                host.open(crate::common_phrases::PHRASE_SOURCE_DEFAULT)
+            };
             crate::ble::gatt_note(format!(
                 "map_fire button={button:?} trigger={trigger:?} action=open_common_phrases result={} access={:?}",
-                if opened { "opened" } else { "unavailable" },
+                if toggled_closed {
+                    "closed"
+                } else if opened {
+                    "opened"
+                } else {
+                    "unavailable"
+                },
                 host.access()
             ));
-            if !opened {
+            if !opened && !toggled_closed {
                 lock_state(state).last_error =
                     Some("常用语当前不可用（需要会员，或未接入常用语组件）".to_owned());
             }

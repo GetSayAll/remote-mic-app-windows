@@ -436,7 +436,7 @@ describe("settings page", () => {
     ).not.toContain("常用语");
   });
 
-  it("常用语设置区：私有组件注入后渲染区块", async () => {
+  it("设置页不再包含常用语区块（2026-10-17：编辑入口移到按键页二级视图）", async () => {
     const { h } = await import("vue");
     privateUi.settingsComponent.mockReturnValue({
       render: () => h("div", { "data-test": "phrase-settings" }, "常用语设置"),
@@ -444,9 +444,9 @@ describe("settings page", () => {
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
 
-    expect(wrapper.find('[data-test="phrase-settings"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="phrase-settings"]').exists()).toBe(false);
     expect(
       wrapper.findAll(".settings-section .section-title").map((item) => item.text()),
-    ).toContain("常用语");
+    ).not.toContain("常用语");
   });
 });

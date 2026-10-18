@@ -75,11 +75,16 @@ import {
   type ShortcutCaptureEdge,
   testAppFocus,
 } from "../lib/bridge";
+import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 
-/** 「调整常用语」入口：切到设置页的常用语区（App 层处理页面切换）。 */
-const emit = defineEmits<{ "open-common-phrases-editor": [] }>();
+/**
+ * 「调整常用语」二级视图（对齐 macOS：按键页 → 调整常用语 → 返回按键页）。
+ * 编辑器来自私有 UI（公开构建返回 null → 入口不渲染）。
+ */
+const commonPhraseEditor = commonPhraseSettingsComponent();
+const showCommonPhraseEditor = ref(false);
 
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
@@ -1831,7 +1836,17 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="buttons-page">
+  <!-- 「调整常用语」二级视图（对齐 macOS：从按键页进入，返回按键页）。 -->
+  <section v-if="showCommonPhraseEditor && commonPhraseEditor" class="buttons-page">
+    <header class="page-header">
+      <div class="mapping-title-row">
+        <button type="button" class="chip" @click="showCommonPhraseEditor = false">返回</button>
+        <h1>调整常用语</h1>
+      </div>
+    </header>
+    <component :is="commonPhraseEditor" />
+  </section>
+  <section v-else class="buttons-page">
     <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
          （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
@@ -2170,9 +2185,20 @@ onUnmounted(() => {
             <button
               class="chip"
               type="button"
-              title="编辑常用语内容与五键分配（在设置页）"
-              @click="emit('open-common-phrases-editor')"
+              title="编辑常用语内容与五键分配"
+              @click="showCommonPhraseEditor = true"
             >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h9M17 17h3"
+                  stroke="currentColor"
+                  stroke-width="1.9"
+                  stroke-linecap="round"
+                />
+                <circle cx="15" cy="7" r="2" stroke="currentColor" stroke-width="1.9" />
+                <circle cx="9" cy="12" r="2" stroke="currentColor" stroke-width="1.9" />
+                <circle cx="15" cy="17" r="2" stroke="currentColor" stroke-width="1.9" />
+              </svg>
               调整常用语
             </button>
             <button
@@ -2181,6 +2207,22 @@ onUnmounted(() => {
               title="预览常用语面板（未开通会员时为只读示例）"
               @click="openExample"
             >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M10 7H6.5A2.5 2.5 0 0 0 4 9.5v0A2.5 2.5 0 0 0 6.5 12H8a4 4 0 0 1-4 4"
+                  stroke="currentColor"
+                  stroke-width="1.9"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M20 7h-3.5A2.5 2.5 0 0 0 14 9.5v0A2.5 2.5 0 0 0 16.5 12H18a4 4 0 0 1-4 4"
+                  stroke="currentColor"
+                  stroke-width="1.9"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
               常用语示例
             </button>
           </div>
