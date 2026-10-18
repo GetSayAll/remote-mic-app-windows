@@ -1261,6 +1261,66 @@ describe("buttons mapping page", () => {
     return row.find("input");
   }
 
+  /** 页头开关行（按行内文字定位，供"就绪前占位符"用例共用）。 */
+  function toggleRowByText(wrapper: VueWrapper, text: string) {
+    const row = wrapper
+      .findAll(".toggle-row")
+      .find((candidate) => candidate.text().includes(text));
+    if (!row) throw new Error(`未找到开关行：${text}`);
+    return row;
+  }
+
+  it("creates the mapping master switch only once its value is final (no entry slide)", async () => {
+    // 真值（关）与初值（开）不同：旧实现加载完成后会产生一次属性变更，
+    // 开关会滑动；正确实现是「就绪前同尺寸占位符顶位、就绪后创建本体」——
+    // 元素创建即带正确 checked，不存在属性变更，无过渡可触发（设置页同法）。
+    let releaseMappings: (value: ButtonMappings) => void = () => {};
+    vi.mocked(getButtonMappings).mockImplementationOnce(
+      () => new Promise<ButtonMappings>((resolve) => { releaseMappings = resolve; }),
+    );
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    mountedPages.push(wrapper);
+    await flushPromises();
+
+    const row = () => toggleRowByText(wrapper, "启用自定义按键功能");
+    expect(row().find("input").exists()).toBe(false);
+    expect(row().find(".toggle-placeholder").exists()).toBe(true);
+
+    releaseMappings({ enabled: false, actions: {} });
+    await flushPromises();
+    await vi.waitFor(() => {
+      const input = row().find("input");
+      if (!input.exists()) throw new Error("就绪后开关未创建");
+      if ((input.element as HTMLInputElement).checked) {
+        throw new Error("开关不是创建即带真值（应为关）");
+      }
+    });
+  });
+
+  it("creates the lock switch only once the persisted value is loaded (no entry slide)", async () => {
+    let releaseLock: (value: boolean) => void = () => {};
+    vi.mocked(getLockMappingSelection).mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { releaseLock = resolve; }),
+    );
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    mountedPages.push(wrapper);
+    await flushPromises();
+
+    const row = () => toggleRowByText(wrapper, "锁定当前按键");
+    expect(row().find("input").exists()).toBe(false);
+    expect(row().find(".toggle-placeholder").exists()).toBe(true);
+
+    releaseLock(false);
+    await flushPromises();
+    await vi.waitFor(() => {
+      const input = row().find("input");
+      if (!input.exists()) throw new Error("就绪后开关未创建");
+      if ((input.element as HTMLInputElement).checked) {
+        throw new Error("开关不是创建即带真值（应为关）");
+      }
+    });
+  });
+
   it("applies the persisted lock selection when the page mounts", async () => {
     // 关过开关的用户再打开按键页：必须读回「关闭」，而不是回落默认「开启」。
     vi.mocked(getLockMappingSelection).mockResolvedValue(false);
