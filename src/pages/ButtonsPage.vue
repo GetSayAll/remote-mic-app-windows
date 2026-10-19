@@ -25,6 +25,7 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
+  getCommonPhrasePanelSnapshot,
   getLockMappingSelection,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
@@ -34,7 +35,9 @@ import {
   listPresetApps,
   mouseClickLabels,
   mouseMoveLabels,
+  openCommonPhraseExample,
   pickCustomApp,
+  registerCommonPhraseAvailability,
   registerPresetAppNames,
   remoteModelLabel,
   resetButtonMappings,
@@ -74,8 +77,16 @@ import {
   type ShortcutCaptureEdge,
   testAppFocus,
 } from "../lib/bridge";
+import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+
+/**
+ * 「调整常用语」二级视图（对齐 macOS：按键页 → 调整常用语 → 返回按键页）。
+ * 编辑器来自私有 UI（公开构建返回 null → 入口不渲染）。
+ */
+const commonPhraseEditor = commonPhraseSettingsComponent();
+const showCommonPhraseEditor = ref(false);
 
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
@@ -226,6 +237,8 @@ const mappingsLoaded = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
+/** 常用语组件是否可用（页面加载快照后更新；不可用时不显示动作入口）。 */
+const commonPhrasesAvailable = ref(false);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -586,6 +599,15 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
+}
+
+/** 「常用语示例」：打开常用语面板（会员=普通、非会员=只读预览；判定在宿主层）。 */
+async function openExample(): Promise<void> {
+  try {
+    await openCommonPhraseExample();
+  } catch {
+    // 未接通私有组件（公开构建）：入口不渲染，正常不会到这里；留静默兜底。
+  }
 }
 
 function applyAction(action: ButtonAction): void {
@@ -1727,10 +1749,11 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps, persistedLockSelection] = await Promise.all([
+  const [loaded, snapshot, apps, commonPhrases, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    getCommonPhrasePanelSnapshot(),
     // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
     getLockMappingSelection().catch(() => {
       reportFrontendEvent({
@@ -1747,6 +1770,9 @@ onMounted(async () => {
   }
   presetApps.value = apps.filter((app) => app.installed);
   registerPresetAppNames(presetApps.value);
+  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
+  commonPhrasesAvailable.value = commonPhrases.available;
+  registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -1873,7 +1899,17 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="buttons-page">
+  <!-- 「调整常用语」二级视图（对齐 macOS：从按键页进入，返回按键页）。 -->
+  <section v-if="showCommonPhraseEditor && commonPhraseEditor" class="buttons-page">
+    <header class="page-header">
+      <div class="mapping-title-row">
+        <button type="button" class="chip" @click="showCommonPhraseEditor = false">返回</button>
+        <h1>调整常用语</h1>
+      </div>
+    </header>
+    <component :is="commonPhraseEditor" />
+  </section>
+  <section v-else class="buttons-page">
     <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
          （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
@@ -2194,6 +2230,59 @@ onUnmounted(() => {
               @click="applyAction({ type: 'focus_input' })"
             >
               聚焦输入框
+            </button>
+          </div>
+        </section>
+
+        <section v-if="commonPhrasesAvailable" class="action-section">
+          <h4 class="action-section-title">常用语</h4>
+          <div class="preset-grid">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
+              type="button"
+              title="打开常用语面板，按方向键和 OK 键插入对应常用语"
+              @click="applyAction({ type: 'open_common_phrases' })"
+            >
+              打开常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="编辑常用语内容与五键分配"
+              @click="showCommonPhraseEditor = true"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+                  <path d="M4.5 6.5h15" />
+                  <path d="M4.5 12h15" />
+                  <path d="M4.5 17.5h15" />
+                </g>
+                <g fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.7">
+                  <circle cx="9.5" cy="6.5" r="1.9" />
+                  <circle cx="14.5" cy="12" r="1.9" />
+                  <circle cx="10.5" cy="17.5" r="1.9" />
+                </g>
+              </svg>
+              调整常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="预览常用语面板（未开通会员时为只读示例）"
+              @click="openExample"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g fill="currentColor">
+                  <path
+                    d="M4.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                  <path
+                    d="M14.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                </g>
+              </svg>
+              常用语示例
             </button>
           </div>
         </section>

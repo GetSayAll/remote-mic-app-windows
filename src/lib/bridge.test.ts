@@ -17,6 +17,7 @@ import {
   openOfficialWebsite,
   openRecommendationsWebsite,
   openVbCableDownloadPage,
+  registerCommonPhraseAvailability,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
   setOpenWindowAtLaunch,
@@ -43,6 +44,18 @@ describe("mouse actions", () => {
   it("summarizes the focus-input action", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
+  });
+});
+
+describe("common phrases action（公开构建兼容与可用性）", () => {
+  it("summarizes the open-common-phrases action with the component availability", () => {
+    // 缺私有组件（公开构建默认）：已保存的绑定不静默替换，标为「当前不可用」。
+    registerCommonPhraseAvailability(false);
+    expect(actionSummary({ type: "open_common_phrases" })).toBe("打开常用语（当前不可用）");
+    registerCommonPhraseAvailability(true);
+    expect(actionSummary({ type: "open_common_phrases" })).toBe("打开常用语");
+    // 复原全局状态，避免污染其他用例（注册是模块级缓存，同预设应用名）。
+    registerCommonPhraseAvailability(false);
   });
 });
 

@@ -29,6 +29,7 @@
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
+| 常用语（会员能力：按键动作 + 浮层面板） | 常用语；动作名「打开常用语」；缺私有组件时已保存的绑定显示「打开常用语（当前不可用）」；失败提示按原因分叉（见 §7 2026-10-15 条） | `src/lib/bridge.ts`（`actionSummary`）、`ButtonsPage.vue`、`SettingsPage.vue`；面板内文案在私有组件 |
 | 启动行为第二项（设置页「通用」） | 启动时自动打开主面板（对齐 Mac `about.preferences.open_main_window_at_launch`）；说明“关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。”；新装与老配置默认开启（2026-10-19 用户定稿「照 Mac 原样」） | `SettingsPage.vue`、`AppSettings.open_window_at_launch` |
 | 更新完成提示（启动时一次性） | 标题「无线麦已更新」、正文「已成功更新到版本 {版本号}。」、按钮「好」（对齐 Mac `update.completed.*`，原样移植）；只在“本次启动前刚完成更新”时出现一次 | `UpdateCompletedDialog.vue`、`launch_state.rs` |
 
@@ -486,6 +487,13 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   当前值可能不同，没有这行分不清“分流判错”还是“现场已变”）。文案表与分流函数移入
   `src/onboarding/voice-failure-text.ts`（单测 6 例）。
   记录：[Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md](../Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md)。
+- 2026-10-15：常用语文案定稿（会员能力，按键动作 + 浮层面板）。动作名「打开常用语」；
+  缺私有组件时动作摘要显示「打开常用语（当前不可用）」（不静默替换动作）；面板提示
+  「按方向键和 OK 键插入对应常用语 / 按返回键关闭面板」；插入失败提示按原因分叉——光标不在
+  输入框中（把光标放进输入框后再试）/ 输入目标已改变 / 这个位置还没有设置常用语 / 剪贴板暂时
+  不可用 / 剪贴板没能恢复原内容 / 没能完成粘贴 / 兜底「没能插入常用语，请重试」；输入框类
+  提示 5 秒、其余 3 秒后面板自动收起。实施记录 `docs/plan/2026-10-15-common-phrases-windows.md`、
+  验收 `Testing/WindowsCommonPhrases.md`、平台边界 `feature/common-phrases/platform-windows.md`。
 - 2026-10-19（「启动时自动打开主面板」，Andy 定稿「照 Mac 原样，默认开」）：设置页「通用 →
   启动行为」在「登录时自动启动」右侧并排第二项，文字在上、开关在下，两项之间一条 34px
   竖分隔线（与 Mac `SettingsView` 的 `HStack(spacing: 10)` 同构）；标签用 Mac 原词

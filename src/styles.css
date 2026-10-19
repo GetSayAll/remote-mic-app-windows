@@ -510,6 +510,8 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .chip:active { transform: translateY(0); }
 .chip.selected { border-color: var(--accent-border); background: var(--accent-surface); font-weight: 600; color: var(--accent-text); box-shadow: 0 1px 5px var(--accent-surface); }
 .chip.group-label { cursor: default; font-weight: 600; color: var(--muted); background: transparent; border-style: dashed; }
+/* 常用语分组按钮的内联图标（对齐 macOS：slider.horizontal.3 / text.quote）。 */
+.chip-icon { width: 15px; height: 15px; margin-right: 5px; vertical-align: -2px; flex: none; }
 .custom-shortcut-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .capture-display { font-size: 13px; font-weight: 600; color: var(--accent-muted-text); }
 .safe-capture-toggle { margin-top: 10px; white-space: normal; }

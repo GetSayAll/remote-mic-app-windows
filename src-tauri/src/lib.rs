@@ -18,6 +18,7 @@ use tauri::{Emitter, Manager};
 
 mod accent;
 mod app_icon;
+mod common_phrase_panel;
 mod diagnostics;
 mod launch_state;
 mod onboarding;
@@ -1961,6 +1962,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut shortcut_count = 0_usize;
     let mut open_app_count = 0_usize;
     let mut focus_input_count = 0_usize;
+    let mut common_phrases_count = 0_usize;
     let mut scroll_count = 0_usize;
     let mut mouse_count = 0_usize;
     let mut disabled_count = 0_usize;
@@ -1970,6 +1972,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
                 ButtonAction::FocusInput => focus_input_count += 1,
+                ButtonAction::OpenCommonPhrases => common_phrases_count += 1,
                 ButtonAction::Scroll { .. } => scroll_count += 1,
                 ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
                     mouse_count += 1
@@ -1979,7 +1982,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} scroll_count={scroll_count} mouse_count={mouse_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -2031,6 +2034,9 @@ async fn test_button_mapping(
         .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
         .map_err(|error| error.to_string()),
         ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
+        ButtonAction::OpenCommonPhrases => {
+            Err("「打开常用语」不在试一下范围内：请绑定按键后到目标应用里使用".to_owned())
+        }
     }
 }
 
@@ -3264,6 +3270,10 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     let started = std::time::Instant::now();
     // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
     sayall_windows::key_host::shutdown_global();
+    // 常用语收尾（幂等；未接入组件时空操作）：关面板并**等待**在途插入事务
+    // 完成（含剪贴板恢复窗口）。退出是 process::exit，不执行析构——必须在这里
+    // 显式等待，否则用户剪贴板可能停在常用语文本上。
+    sayall_windows::common_phrases::current_common_phrase_host().shutdown();
     let platform = app.state::<AppState>().platform.clone();
     match platform.shutdown_for_exit(GRACEFUL_EXIT_TIMEOUT) {
         Ok(()) => sayall_windows::gatt_note(format!(
@@ -3499,6 +3509,16 @@ pub fn run() {
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
             );
+            // 常用语浮层窗口（可选私有组件）：窗口先建好并隐藏；组件未注入时能力不可用。
+            let common_phrases_available = common_phrase_panel::install(app.handle());
+            sayall_windows::gatt_note(format!(
+                "COMMON_PHRASES COMPONENT phase=installed result={}",
+                if common_phrases_available {
+                    "available"
+                } else {
+                    "unavailable"
+                }
+            ));
             // 托盘图标：主窗口关闭后驻留；菜单 = 显示主界面 / 退出；
             // 左键点击托盘 = 显示并聚焦主窗口（Mac StatusIcon 同款行为）。
             #[cfg(all(windows, not(feature = "runtime-simulation")))]
@@ -4029,6 +4049,10 @@ pub fn run() {
         import_button_mapping_configuration,
         test_button_mapping,
         learn_focus_target,
+        common_phrase_panel::common_phrase_panel_snapshot,
+        common_phrase_panel::close_common_phrase_panel,
+        common_phrase_panel::select_common_phrase,
+        common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,
@@ -4110,6 +4134,10 @@ pub fn run() {
         import_button_mapping_configuration,
         test_button_mapping,
         learn_focus_target,
+        common_phrase_panel::common_phrase_panel_snapshot,
+        common_phrase_panel::close_common_phrase_panel,
+        common_phrase_panel::select_common_phrase,
+        common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,

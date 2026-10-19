@@ -206,7 +206,8 @@ export type ButtonAction =
   | { type: "mouse_click"; kind: MouseClickKind }
   | { type: "mouse_move"; direction: MoveDirection; distance: number }
   | { type: "open_app"; target: string }
-  | { type: "focus_input" };
+  | { type: "focus_input" }
+  | { type: "open_common_phrases" };
 
 /** 预设应用条目（list_preset_apps 返回；对齐 Mac PresetApplication）。 */
 export interface PresetAppInfo {
@@ -1715,9 +1716,26 @@ export function registerPresetAppNames(apps: Array<{ id: string; name: string }>
   }
 }
 
+/** 常用语组件是否可用（按键页加载快照后注册；测试可注入）。 */
+let commonPhrasesAvailable = false;
+
+/**
+ * 注册常用语组件可用性（按键页加载 `getCommonPhrasePanelSnapshot()` 后调用）。
+ *
+ * 为什么用模块级缓存而不是每次问 IPC：`actionSummary` 是同步的渲染路径函数，
+ * 不能等待异步快照——与预设应用名的处理方式一致。
+ */
+export function registerCommonPhraseAvailability(available: boolean): void {
+  commonPhrasesAvailable = available;
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
   if (action.type === "focus_input") return "聚焦输入框";
+  if (action.type === "open_common_phrases") {
+    // 缺私有组件（公开构建）时如实标注，不静默替换成含义不同的动作。
+    return commonPhrasesAvailable ? "打开常用语" : "打开常用语（当前不可用）";
+  }
   if (action.type === "scroll") {
     const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
     return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;
@@ -1759,4 +1777,189 @@ export async function pickCustomApp(): Promise<CustomAppPick | null> {
   } catch {
     return null;
   }
+}
+
+/** 常用语门禁状态（与 Rust 侧 CommonPhraseAccess 一一对应）。 */
+export type CommonPhraseAccess = "unavailable" | "denied" | "allowed";
+
+/** 浮层面板一个位置的数据：只含短显示，不含完整句。 */
+export interface CommonPhrasePanelEntry {
+  button: string;
+  label: string;
+}
+
+/** 浮层面板快照（渲染圆盘用）。 */
+export interface CommonPhrasePanelSnapshot {
+  /** 私有组件是否已注入（未注入时公开构建隐藏入口）。 */
+  available: boolean;
+  access: CommonPhraseAccess;
+  canUse: boolean;
+  /** 「常用语示例」只读预览模式（前端据此显示"登录会员后可使用"）。 */
+  previewMode: boolean;
+  /** 一次性失败提示的原因 key（**读取即消费**，Rust 侧读取后清空）；无提示为 null。 */
+  notice: string | null;
+  entries: CommonPhrasePanelEntry[];
+}
+
+/** 空快照：未注入私有组件或浏览器预览环境的回落值。 */
+export function emptyCommonPhrasePanelSnapshot(): CommonPhrasePanelSnapshot {
+  return {
+    available: false,
+    access: "unavailable",
+    canUse: false,
+    previewMode: false,
+    notice: null,
+    entries: [],
+  };
+}
+
+/** 读取浮层面板数据。未注入私有组件时 available=false、entries 为空。 */
+export async function getCommonPhrasePanelSnapshot(): Promise<CommonPhrasePanelSnapshot> {
+  if (!isTauriRuntime()) {
+    return emptyCommonPhrasePanelSnapshot();
+  }
+  try {
+    return await invoke<CommonPhrasePanelSnapshot>("common_phrase_panel_snapshot");
+  } catch {
+    return emptyCommonPhrasePanelSnapshot();
+  }
+}
+
+/** 关闭浮层面板（右上角关闭按钮；返回键由遥控器路径关闭）。 */
+export async function closeCommonPhrasePanel(reason?: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    await invoke("close_common_phrase_panel", { reason: reason ?? null });
+  } catch {
+    // 关闭失败不阻塞界面：面板会在下一次按键或收尾路径里被关掉。
+  }
+}
+
+/**
+ * 订阅「面板显示」事件（宿主每次 show 面板都会广播）。
+ *
+ * 存在的理由：面板窗口是 NOACTIVATE，focus/visibility 变化不保证触发，
+ * 仅靠前端事件会在"编辑常用语后再打开面板"时显示旧数据（2026-10-16 实测）。
+ * 返回取消订阅函数。
+ */
+export async function onCommonPhrasePanelShown(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen("common-phrases-panel-shown", () => handler());
+  return unlisten;
+}
+
+/** 鼠标点选圆盘某个位置（与遥控器按下等价）。返回是否已受理。 */
+export async function selectCommonPhrase(button: string): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    return await invoke<boolean>("select_common_phrase", { button });
+  } catch {
+    return false;
+  }
+}
+
+/** 下行命令的返回体（`{"ok":true,"value":...}` / `{"ok":false,"error":"..."}`）。 */
+interface CommonPhraseDispatchResult {
+  ok: boolean;
+  value?: string;
+  error?: string;
+}
+
+/**
+ * 下行命令通道（编辑器"调整常用语"、示例入口等）。未注入组件（公开构建）或
+ * 未知命令会抛错——调用方必须按错误处理，不得静默当成功。
+ */
+async function dispatchCommonPhrase(command: string, payload?: unknown): Promise<string> {
+  if (!isTauriRuntime()) {
+    throw new Error("unavailable");
+  }
+  const raw = await invoke<string>("common_phrase_dispatch", {
+    command,
+    payload: payload === undefined ? null : JSON.stringify(payload),
+  });
+  const result = JSON.parse(raw) as CommonPhraseDispatchResult;
+  if (!result.ok) {
+    throw new Error(result.error ?? "edit_failed");
+  }
+  return result.value ?? "";
+}
+
+/** 编辑器（“调整常用语”）条目。 */
+export interface CommonPhraseEditorEntry {
+  id: string;
+  chineseText: string;
+  chineseLabel: string;
+  englishText: string;
+  englishLabel: string;
+  /** 内置条目（编辑后自动落成用户副本）。 */
+  builtIn: boolean;
+}
+
+/** 编辑器快照（“调整常用语”页数据源）。 */
+export interface CommonPhraseEditorSnapshot {
+  storeAvailable: boolean;
+  loadFailed: boolean;
+  /** 会员门禁：false 时界面显示会员提示、禁用编辑。 */
+  allowed: boolean;
+  entries: CommonPhraseEditorEntry[];
+  /** 五个位置（ok/left/up/right/down）→ 条目 id；无分配的键位缺键。 */
+  assignments: Record<string, string>;
+}
+
+/** 读取编辑器快照。未接通时抛错（调用方按会员提示处理）。 */
+export async function getCommonPhraseEditorSnapshot(): Promise<CommonPhraseEditorSnapshot> {
+  return JSON.parse(await dispatchCommonPhrase("editor_snapshot")) as CommonPhraseEditorSnapshot;
+}
+
+/** 编辑器保存输入：不给 id = 新建；给 id = 替换该条目。 */
+export interface CommonPhraseEditInput {
+  id?: string | null;
+  chineseText: string;
+  chineseLabel: string;
+  englishText?: string;
+  englishLabel?: string;
+}
+
+/** 保存一条常用语；返回条目 id（新建时为新用户副本 id）。 */
+export async function saveCommonPhrase(input: CommonPhraseEditInput): Promise<string> {
+  return dispatchCommonPhrase("editor_save", {
+    id: input.id ?? null,
+    chineseText: input.chineseText,
+    chineseLabel: input.chineseLabel,
+    englishText: input.englishText ?? "",
+    englishLabel: input.englishLabel ?? "",
+  });
+}
+
+/** 把某个面板位置分配给指定条目（立即保存）。 */
+export async function assignCommonPhrase(button: string, id: string): Promise<void> {
+  await dispatchCommonPhrase("editor_assign", { button, id });
+}
+
+/** 删除一条常用语（同时清掉相关分配）。 */
+export async function deleteCommonPhrase(id: string): Promise<void> {
+  await dispatchCommonPhrase("editor_delete", { id });
+}
+
+/** 按偏移量调整顺序（越界不留痕）。 */
+export async function moveCommonPhrase(id: string, offset: number): Promise<void> {
+  await dispatchCommonPhrase("editor_move", { id, offset });
+}
+
+/** 导入备份（整份替换；被改动的内置项转用户副本保留）。 */
+export async function importCommonPhrases(json: string): Promise<void> {
+  await dispatchCommonPhrase("editor_import", { json });
+}
+
+/** 导出备份（JSON 文本）。 */
+export async function exportCommonPhrases(): Promise<string> {
+  return dispatchCommonPhrase("editor_export");
+}
+
+/** 打开「常用语示例」（会员=普通面板、非会员=只读预览）。 */
+export async function openCommonPhraseExample(): Promise<void> {
+  await dispatchCommonPhrase("open_example");
 }

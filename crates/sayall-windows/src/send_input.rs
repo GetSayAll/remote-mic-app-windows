@@ -484,6 +484,11 @@ pub enum ButtonAction {
         direction: MoveDirection,
         distance: u16,
     },
+    /// 打开常用语面板（对标 macOS 的 `openCommonPhrases`）。
+    ///
+    /// 面板是**短时窗口**：方向键与 OK 在面板打开期间由面板即时认领（按下即插入，
+    /// 不等手势判定），返回键关闭面板。未绑定该动作时不改变任何按键行为。
+    OpenCommonPhrases,
 }
 
 impl ButtonAction {
@@ -498,9 +503,11 @@ impl ButtonAction {
     /// `ButtonMappings::normalized` 在保存时整单拒绝）。
     pub fn allows_repeat(&self) -> bool {
         match self {
-            Self::Disabled | Self::OpenApp { .. } | Self::FocusInput | Self::MouseClick { .. } => {
-                false
-            }
+            Self::Disabled
+            | Self::OpenApp { .. }
+            | Self::FocusInput
+            | Self::MouseClick { .. }
+            | Self::OpenCommonPhrases => false,
             Self::Scroll { .. } | Self::MouseMove { .. } => true,
             Self::Shortcut { chord } => {
                 matches!(chord.keys.as_slice(), [key] if !key.is_modifier())
