@@ -867,6 +867,21 @@ fn refocus_main_window_soon(app: tauri::AppHandle) {
     });
 }
 
+/// 启动时是否显示主页面（纯判定，单测覆盖）。
+///
+/// 对齐 Mac `OnboardingLaunchPolicy.shouldShowMainWindow`：
+/// - 未完成首次设置必须显示，否则用户没有入口完成向导；
+/// - 其余情况由「启动时自动打开主页面」决定（默认开启）。
+///
+/// 关闭该开关后，普通启动（含手动双击快捷方式）只驻留托盘；托盘左键 /
+/// 托盘菜单「显示主界面」以及再次启动应用都会把主页面显示出来。
+fn should_show_main_window_on_startup(
+    onboarding_active: bool,
+    open_window_at_launch: bool,
+) -> bool {
+    onboarding_active || open_window_at_launch
+}
+
 /// 把主窗口从「最小化 / 收进托盘」恢复到可见并尝试置前（2026-10-03 用户报障：
 /// 「主窗口最小化到任务栏后，点击托盘图标或者双击快捷键（快捷方式）无法打开」）。
 /// 托盘点击 / 托盘菜单 / 第二个实例的显示请求共用这一个入口。
@@ -2798,6 +2813,65 @@ async fn set_theme_preference(
 }
 
 #[tauri::command]
+async fn get_open_window_at_launch(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings
+            .load()
+            .map(|settings| settings.open_window_at_launch)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取启动页面设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(enabled) => sayall_windows::gatt_note(format!(
+            "startup feature=open_window_at_launch action=load terminal_result=passed enabled={enabled} elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "startup feature=open_window_at_launch action=load terminal_result=failed error_domain=settings error_code=load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
+async fn set_open_window_at_launch(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(format!(
+        "startup feature=open_window_at_launch action=save phase=requested enabled={enabled}"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_open_window_at_launch(enabled)?;
+        Ok(enabled)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存启动页面设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(enabled) => format!(
+            "startup feature=open_window_at_launch action=save phase=completed terminal_result=passed enabled={enabled} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "startup feature=open_window_at_launch action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+#[tauri::command]
 fn get_launch_at_login(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let started = std::time::Instant::now();
     let result = startup::is_enabled();
@@ -3426,9 +3500,17 @@ pub fn run() {
             let settings = SettingsStore::new(settings_path);
             // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
             // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
-            if let Err(error) = settings.ensure_onboarding_state() {
-                eprintln!("{error}");
-            }
+            //
+            // 这里同时保留判定结果给「启动时是否显示主页面」用：未完成首次设置时
+            // 必须显示窗口，否则用户没有入口完成向导。读不到状态时按「显示」处理
+            // （fail-open：宁可多显示一次，也不能让应用启动后完全不可见）。
+            let onboarding_active = match settings.ensure_onboarding_state() {
+                Ok(state) => state.is_active(),
+                Err(error) => {
+                    eprintln!("{error}");
+                    true
+                }
+            };
             // 未完成向导里残留的 staged 语音绑定：启动时回滚正式配置（设计稿 §5.4：
             // 退出未完成流程必须恢复进入向导前的配置）。无事务时是空操作、不落日志。
             if let Err(error) = settings.restore_onboarding_staged_binding("startup_recovery") {
@@ -3453,6 +3535,51 @@ pub fn run() {
             // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
             #[cfg(windows)]
             app_icon::apply(app.handle(), saved_settings.app_icon);
+
+            // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
+            // 「启动时自动打开主页面」关闭后，普通启动只驻留托盘；未完成首次设置
+            // 时仍显示窗口（否则用户没有入口完成向导）。托盘左键 / 托盘菜单 /
+            // 再次启动应用都走 `show_main_window`，不受本设置影响。
+            //
+            // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
+            // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
+            let show_main_window_on_startup = should_show_main_window_on_startup(
+                onboarding_active,
+                saved_settings.open_window_at_launch,
+            );
+            #[cfg(feature = "runtime-simulation")]
+            let show_main_window_on_startup =
+                show_main_window_on_startup || runtime_simulation_requested();
+            if let Some(window) = app.get_webview_window("main") {
+                let visible_before = window.is_visible().unwrap_or(true);
+                if show_main_window_on_startup {
+                    // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
+                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
+                    let show_result = window.show();
+                    let _ = window.set_focus();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "passed" } else { "failed" },
+                        visible_after,
+                        if onboarding_active {
+                            "onboarding_active"
+                        } else {
+                            "open_window_at_launch"
+                        },
+                        saved_settings.open_window_at_launch
+                    ));
+                } else {
+                    let hide_result = window.hide();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason=open_window_at_launch_disabled onboarding_active={onboarding_active} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "failed" } else { "passed" },
+                        visible_after,
+                        saved_settings.open_window_at_launch
+                    ));
+                }
+            }
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
             // 「任务装没装」当状态。
@@ -3832,6 +3959,8 @@ pub fn run() {
         set_theme_preference,
         get_launch_at_login,
         set_launch_at_login,
+        get_open_window_at_launch,
+        set_open_window_at_launch,
         report_theme_result,
         get_app_icon,
         set_app_icon,
@@ -3907,6 +4036,8 @@ pub fn run() {
         set_theme_preference,
         get_launch_at_login,
         set_launch_at_login,
+        get_open_window_at_launch,
+        set_open_window_at_launch,
         report_theme_result,
         get_app_icon,
         set_app_icon,
@@ -4007,6 +4138,18 @@ mod tests {
     /// 静默失效必须自己恢复，且在日志判据之外真做了动作（2026-10-13 现场：宿主进程重建
     /// 后 agent 消失、助手进程还活着，「全按键支持」静默失效 2.5 天，用户手动关开一次
     /// 开关才恢复）。判据两段：先给足时间（助手可能正在注入 / 握手），再按尝试次数防抖。
+    /// 启动可见性（2026-10-19 用户定稿）：未完成向导必须显示；其余按设置。
+    ///
+    /// 阳性/阴性对照都钉住：关闭「启动时自动打开主页面」后，已完成向导的普通启动
+    /// 只驻留托盘；但向导进行中必须显示，否则用户没有入口完成设置。
+    #[test]
+    fn startup_visibility_follows_onboarding_and_preference() {
+        assert!(should_show_main_window_on_startup(true, true));
+        assert!(should_show_main_window_on_startup(true, false));
+        assert!(should_show_main_window_on_startup(false, true));
+        assert!(!should_show_main_window_on_startup(false, false));
+    }
+
     #[test]
     fn capture_restarts_helper_only_after_inactive_grace_and_throttled() {
         // 还没到阈值：不动。

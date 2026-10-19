@@ -477,6 +477,21 @@ export async function setLaunchAtLogin(enabled: boolean): Promise<boolean> {
   return invoke<boolean>("set_launch_at_login", { enabled });
 }
 
+/**
+ * 「启动时自动打开主页面」（设置页「启动行为」，对齐 Mac `openMainWindowAtLaunch`）。
+ *
+ * 浏览器预览按新装默认返回 `true`，与 Rust `AppSettings::default()` 同源。
+ */
+export async function getOpenWindowAtLaunch(): Promise<boolean> {
+  if (!isTauriRuntime()) return true;
+  return invoke<boolean>("get_open_window_at_launch");
+}
+
+export async function setOpenWindowAtLaunch(enabled: boolean): Promise<boolean> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法设置启动时打开主页面");
+  return invoke<boolean>("set_open_window_at_launch", { enabled });
+}
+
 export interface AppUpdateProgress {
   downloaded: number;
   contentLength: number | null;

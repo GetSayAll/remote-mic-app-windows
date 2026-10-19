@@ -6,6 +6,7 @@ import {
   getButtonMappings,
   getDiagnosticReport,
   getGainDb,
+  getOpenWindowAtLaunch,
   getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
@@ -13,6 +14,7 @@ import {
   saveButtonMappings,
   scanPairedRemotes,
   setAppIcon,
+  setOpenWindowAtLaunch,
   stopRawInput,
   testAppFocus,
   testButtonMapping,
@@ -458,6 +460,43 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   const restoredIcon = await setAppIcon("faceted-duck");
   assert(restoredIcon === "faceted-duck", `仿真还原应用图标没有生效：${restoredIcon}`);
   steps.push("设置页应用图标新装默认几何鸭，切换经真实 IPC 与设置持久化往返");
+
+  // 「启动时自动打开主页面」（2026-10-19）：仿真状态目录每次都是新装，这里证明
+  // 默认值经真实 IPC 读回，且开关写入 → 读回 → 复位走同一条持久化路径。
+  const openWindowToggle = await waitFor(
+    () => {
+      const toggle = document.querySelector<HTMLInputElement>(
+        'input[name="open-window-at-launch"]:not(:disabled)',
+      );
+      return toggle && toggle.checked ? toggle : null;
+    },
+    "启动时自动打开主页面默认开启",
+  );
+  openWindowToggle.click();
+  await waitFor(
+    () => {
+      const toggle = document.querySelector<HTMLInputElement>(
+        'input[name="open-window-at-launch"]',
+      );
+      // 等保存结束（busy 期间开关 disabled）再读回，避免读到旧值。
+      return toggle && !toggle.checked && !toggle.disabled ? true : null;
+    },
+    "启动时自动打开主页面关闭并保存完成",
+  );
+  assert(
+    (await getOpenWindowAtLaunch()) === false,
+    "关闭「启动时自动打开主页面」后读回仍是开启",
+  );
+  assert(
+    !document.querySelector('.settings-group [role="alert"]'),
+    "切换启动页面设置后显示错误",
+  );
+  await setOpenWindowAtLaunch(true);
+  assert(
+    (await getOpenWindowAtLaunch()) === true,
+    "还原「启动时自动打开主页面」后读回不是开启",
+  );
+  steps.push("设置页「启动时自动打开主页面」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，

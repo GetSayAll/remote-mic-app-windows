@@ -8,6 +8,7 @@ import {
   connectionPhaseLabel,
   formatDiagnosticReport,
   GITHUB_REPOSITORY_URL,
+  getOpenWindowAtLaunch,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
   OFFICIAL_WEBSITE_URL,
@@ -16,6 +17,7 @@ import {
   openOfficialWebsite,
   openVbCableDownloadPage,
   remoteModelLabel,
+  setOpenWindowAtLaunch,
   shortcutCapability,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
@@ -313,6 +315,40 @@ describe("诊断日志目录入口", () => {
 
   it("浏览器预览下明确不可用而不是静默失败", async () => {
     await expect(openLogDirectory()).rejects.toThrow("当前是浏览器预览，无法打开日志目录");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("启动时自动打开主页面（设置页「启动行为」）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("浏览器预览按新装默认返回开启，不调用 IPC", async () => {
+    await expect(getOpenWindowAtLaunch()).resolves.toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 运行时使用精确命令名与参数名", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValue(false);
+
+    await expect(getOpenWindowAtLaunch()).resolves.toBe(false);
+    expect(invoke).toHaveBeenCalledWith("get_open_window_at_launch");
+
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(false);
+    await expect(setOpenWindowAtLaunch(false)).resolves.toBe(false);
+    // 参数名必须与 Rust `set_open_window_at_launch(enabled: bool)` 一致；
+    // 不匹配时 Tauri 只会报缺参，界面只能看到一句 IPC 失败。
+    expect(invoke).toHaveBeenCalledWith("set_open_window_at_launch", { enabled: false });
+  });
+
+  it("浏览器预览下保存明确不可用", async () => {
+    await expect(setOpenWindowAtLaunch(false)).rejects.toThrow(
+      "当前是浏览器预览，无法设置启动时打开主页面",
+    );
     expect(invoke).not.toHaveBeenCalled();
   });
 });

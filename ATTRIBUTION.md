@@ -82,6 +82,19 @@
   `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，只写本应用值且不需管理员权限。
   设置默认关闭，应用启动时以持久化偏好同步系统状态，失败只记录结构化日志、不阻断启动。
 
+- **启动时自动打开主页面（2026-10-19，语义参考 Mac，未复制代码）**：产品行为参考 macOS 仓库
+  `HD838A/remote-mic-app` 提交 `a69fae76`（该功能由 `6c7d543e`「feat: improve launch and update
+  visibility」引入）的 `AppSettings.openMainWindowAtLaunch`（默认开启）与
+  `OnboardingLaunchPolicy.shouldShowMainWindow`（`!isComplete || completedUpdate ||
+  openMainWindowAtLaunch`）：设置页「启动行为」提供开关，关闭后启动只驻留托盘，托盘与再次启动
+  仍可打开主页面；向导未完成时必须显示窗口。
+  - **Windows 差异**：① 不移植 `completedUpdate`（“本次启动前刚完成更新”时强制显示一次）——
+    Windows 侧没有这套更新可见性状态，产品文案也不承诺；② 未完成向导的判据用本仓库
+    `OnboardingState::is_active()`（`completed_version < flow_version`），读取失败按“显示”处理
+    （fail-open）；③ 主窗口改为 `tauri.conf.json` 里 `visible: false` 创建、由 Rust 读取设置后
+    显式 `show()`/`hide()`，避免设置读回前先闪一帧（Mac 由 `NSWindow` 生命周期控制，无对应实现）。
+  - 验收见 `Testing/WindowsRC003Preview.md` 用例十六。
+
 - **LL 吞键对 Raw Input 交付影响的本机实证（2026-09-05，`docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md`）**：双线程探针（钩子线程 + Raw Input INPUTSINK 线程分离，key_suppressor 同构）两轮一致证实 **WH_KEYBOARD_LL 返回 1 吞掉的键盘事件不会再投递 WM_INPUT**——按键映射门控（`key_gate.rs`）据此采用"被吞键盘边沿由钩子线程直接喂引擎 + 监听器喂 HID 报文与透传键盘事件"双源合并架构；HID 报文归因武装 + 60ms 有界等待沿用 key_suppressor 实证参数。
 
 - `HD838A/remote-mic-app#249`，提交 `090a3cfc24f0e3e733b2347ee2daf87c60e10097`：Windows 独立实现、ATVV 测试夹具、语音边沿、安装升级、公开边界和 Mac 风格 UI 原型；Raw Input 参考了 `hid_identity.py` 与 `raw_input_windows.py`，SendInput 的批量提交、物理修饰键和失败回滚参考了 `win32_input.py` 与 `win32_keys.py`，均以 Rust/windows-rs 重新实现。

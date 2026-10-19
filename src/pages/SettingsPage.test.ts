@@ -27,6 +27,8 @@ const setThemePreference = vi.fn<(value: "system" | "light" | "dark") => Promise
 const bridge = vi.hoisted(() => ({
   getLaunchAtLogin: vi.fn<() => Promise<boolean>>(),
   setLaunchAtLogin: vi.fn<(enabled: boolean) => Promise<boolean>>(),
+  getOpenWindowAtLaunch: vi.fn<() => Promise<boolean>>(),
+  setOpenWindowAtLaunch: vi.fn<(enabled: boolean) => Promise<boolean>>(),
   getAppIcon: vi.fn<() => Promise<"standard" | "faceted-duck">>(),
   setAppIcon: vi.fn<(identifier: "standard" | "faceted-duck") => Promise<"standard" | "faceted-duck">>(),
   restartOnboarding: vi.fn<() => Promise<{ flowVersion: number; completedVersion: number; step: string; isActive: boolean }>>(),
@@ -141,6 +143,9 @@ describe("settings page", () => {
     setThemePreference.mockReset();
     bridge.getLaunchAtLogin.mockReset().mockResolvedValue(false);
     bridge.setLaunchAtLogin.mockReset();
+    // 「启动时自动打开主页面」新装默认开启（与 Rust `AppSettings::default()` 同源）。
+    bridge.getOpenWindowAtLaunch.mockReset().mockResolvedValue(true);
+    bridge.setOpenWindowAtLaunch.mockReset();
     // 后端默认值（2026-10-04 起 = 几何鸭）：mock 也按新装默认返回，与
     // `AppSettings::default()` 的用例语义对齐。
     bridge.getAppIcon.mockReset().mockResolvedValue("faceted-duck");
@@ -217,6 +222,46 @@ describe("settings page", () => {
     expect(launch.element.lastElementChild).toBe(
       launch.find('input[name="launch-at-login"]').element,
     );
+
+    // 通用「启动时自动打开主页面」：同样文字在前、开关在后。
+    const openWindow = wrapper.get('label[title*="启动只在通知区域驻留"]');
+    expect((openWindow.element.firstElementChild as HTMLElement).textContent).toContain(
+      "启动时自动打开主页面",
+    );
+    expect(openWindow.element.lastElementChild).toBe(
+      openWindow.find('input[name="open-window-at-launch"]').element,
+    );
+  });
+
+  it("启动时自动打开主页面默认开启，切换后保存并回显返回值", async () => {
+    bridge.setOpenWindowAtLaunch.mockResolvedValue(false);
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(bridge.getOpenWindowAtLaunch).toHaveBeenCalledTimes(1);
+    const toggle = wrapper.get<HTMLInputElement>('input[name="open-window-at-launch"]');
+    expect(toggle.element.checked).toBe(true);
+
+    await toggle.setValue(false);
+    expect(bridge.setOpenWindowAtLaunch).toHaveBeenCalledWith(false);
+    await flushPromises();
+    expect(toggle.element.checked).toBe(false);
+  });
+
+  it("启动时自动打开主页面保存失败时就地报错并保持原状态", async () => {
+    bridge.setOpenWindowAtLaunch.mockRejectedValue(new Error("保存启动页面设置失败"));
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    const toggle = wrapper.get<HTMLInputElement>('input[name="open-window-at-launch"]');
+    expect(toggle.element.checked).toBe(true);
+
+    await toggle.setValue(false);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("保存启动页面设置失败");
+    // 保存失败不回写本地状态：界面仍显示实际生效值（开启）。
+    expect(toggle.element.checked).toBe(true);
   });
 
   it("初始状态显示手动检查入口", () => {
