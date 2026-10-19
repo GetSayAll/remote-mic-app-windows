@@ -171,6 +171,7 @@ import {
   connectRemote,
   exportButtonMappingConfiguration,
   getButtonMappings,
+  getButtonMappingSnapshot,
   getCaptureSupport,
   getCombinedActions,
   enableRc003Capture,
@@ -1134,6 +1135,69 @@ describe("buttons mapping page", () => {
         throw new Error("选中目标后未写入映射");
       }
     });
+  });
+
+  it("只显示与当前策略相关的聚焦失败：记录点击位置下隐藏旧的聚焦服务结果", async () => {
+    const snapshotWithFailure = {
+      enabled: true,
+      gateActive: true,
+      listenerActive: true,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      lastFired: null,
+      lastError: null,
+      lastFocus: {
+        requestId: 1,
+        kind: "launch_then_focus",
+        focused: false,
+        reason: "timeout",
+        attempts: 1,
+        elapsedMs: 3000,
+      },
+    };
+    const mappingsFor = (strategy: "recorded_element" | "recorded_point") => ({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app" as const, target: "notepad" },
+          double: { type: "disabled" as const },
+          long: { type: "disabled" as const },
+        },
+      },
+      focusProfiles: {
+        notepad:
+          strategy === "recorded_element"
+            ? {
+                strategy,
+                recorded: {
+                  controlType: "Edit",
+                  automationId: "chat-input",
+                  className: "RichEdit",
+                },
+              }
+            : {
+                strategy,
+                point: { xRatio: 0.5, yRatio: 0.8, windowWidth: 1000, windowHeight: 800 },
+              },
+      },
+    });
+    const openEditor = async (strategy: "recorded_element" | "recorded_point") => {
+      vi.mocked(getButtonMappings).mockResolvedValueOnce(mappingsFor(strategy));
+      vi.mocked(getButtonMappingSnapshot).mockResolvedValueOnce(snapshotWithFailure);
+      const wrapper = await mountPage();
+      const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+      await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+      await flushPromises();
+      return wrapper;
+    };
+
+    // 聚焦服务确实失败过：记录点击位置策略下旧结果与当前配置无关，必须隐藏。
+    const elementWrapper = await openEditor("recorded_element");
+    expect(elementWrapper.find(".focus-result-message").text()).toContain("等待超时");
+
+    const pointWrapper = await openEditor("recorded_point");
+    expect(pointWrapper.find(".focus-result-message").exists()).toBe(false);
   });
 
   it("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {

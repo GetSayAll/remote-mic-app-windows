@@ -1,6 +1,6 @@
 # 记录位置随窗口变化失效、匿名输入框学不到、组合动作聚焦步骤超时
 
-- 状态：已修复；自动化 passed；真机（安装包）passed：嵌套聚焦、6 秒学习窗口、类名匹配均通过
+- 状态：已修复；自动化 passed；真机（安装包）passed：类名匹配、嵌套聚焦、6 秒学习窗口；点位居中轴/贴底轴换算已实测，等待用户复验右键打开 WorkBuddy
 - 影响范围：聚焦位置记录、输入框学习兜底、组合动作「聚焦学习过的输入框」步骤
 - 报告：2026-10-19 用户现场（WorkBuddy 位置变化后无法聚焦、WorkBuddy 输入框无法记录、
   DimAgent 已学习但组合动作执行失败）
@@ -30,6 +30,11 @@
    `attempt=NoCandidate { candidates: 1 }`。
 5. **嵌套动作的激活是异步的**：聚焦服务按「当前前台进程」执行，`launch_app` 后立即提交
    请求时前几次尝试打在上一个前台应用上（WeChat 等），3 秒预算被耗尽。
+6. **Electron 应用的 UIA 扫描要 2.5–3.3 秒**（WorkBuddy 实测），而聚焦预算只有 3 秒：
+   第一次扫描 `no_candidate` 就直接耗尽预算，连第二次机会都没有
+   （日志 `focus_attempt index=1 result=no_candidate` + `focus_result attempts=1 reason=timeout`）。
+7. **点位锚定把「最近边」同时用在两轴**：WorkBuddy 输入框水平居中（距左 37.8%、距右 62.2%），
+   窗口从 1636 加宽到 2063 后按左边缘平移，点击落到输入框左侧；纵向靠底（16.9%）仍应锚底。
 
 ## 修复
 
@@ -48,9 +53,16 @@
   组合动作页点「学习输入框」立即开始采样，不再先空等 10 秒。
 - 类名命中的分值 140 → 180：单独类名即可达到阈值；同名控件并列时分差仍为 0，
   继续拒绝，避免点错。
+- 聚焦服务预算 3s → 6s：Electron 单次扫描 2.5–3.3s，6s 内至少能重试一次；
+  `focus_input` 步骤超时 8s → 10s（等前台 2.5s + 预算 6s + 开销）。
+- 点位换算按轴独立判断：记录时距边 ≤20% 的轴锚定该边，否则保留比例
+  （居中控件不再随窗口加宽而横向漂移）；两轴都靠边时仍取更近的一条。
+- 按键页只在「聚焦已记录的输入框」策略下显示聚焦服务失败；「记录点击位置」不走
+  该服务，隐藏旧失败提示（2026-10-19 现场：旧提示让用户以为新配置仍失败）。
 - 诊断日志补齐：`focus_wait_foreground`（是否等到前台，含耗时）、
-  `focus_attempt index= pid= kind= result=`（每次尝试的前台 PID 与结果），
-  失败时不必再用探针复现。
+  `focus_attempt index= pid= kind= result=`（每次尝试的前台 PID 与结果）、
+  `focus_learn_cursor`（光标命中换算与候选数）、`mouse_click_at ... x= y=`
+  （记录位置点击的实际坐标），失败时不必再用探针复现。
 
 ## 验证
 
@@ -68,10 +80,17 @@
     `focus_attempt index=1 result=no_candidate`，`index=2 result=focused`；
     `focus_result terminal_result=passed attempts=2 elapsed_ms=4500`；
     `map_macro_terminal terminal_result=completed steps=2`，UI 显示「组合动作执行成功」。
-- 单测新增：边距锚定（贴底 60px 在窗口变高 200px 后仍贴底）、旧记录保持 25% 容差、
-  匿名 Edit 仅矩形匹配（距离 >5% 不认）、仅类名记录达到阈值且同名并列仍拒绝。
-  `cargo test --workspace` 全绿（core 56 / windows 389 / app 131）；
-  前端 422 passed（含「学习窗口 6 秒」用例）。
+- 真机（2026-10-19 第四轮，安装包 `2cf1dc1f…`，内嵌修订 `6e94cf81`）：
+  - WorkBuddy 现场日志：扫描 2.5–3.3 秒；`focus_result attempts=1 elapsed_ms=3264 reason=timeout`，
+    且 `focus_attempt index=1 result=no_candidate`（3 秒预算下没有第二次尝试）。
+  - 点位换算：WorkBuddy 窗口 1636×1281→2063×1701，旧逻辑按左边缘得到 x=696
+    （在输入框左侧，截图实测输入框左边缘约 770）；新逻辑 x=857、y=1693，
+    落在输入框内。日志 `mouse_click_at ... x=857 y=1693`。
+  - 学习窗口 6 秒与「未采到」失败路径同前一轮。
+- 单测新增：居中轴保持比例 + 贴底轴锚定（WorkBuddy 1636×1281→2063×1701 ⇒ (857,1693)）；
+  仅类名记录达到阈值且同名并列仍拒绝；`focus_input` 默认超时 10s。
+  `cargo test --workspace` 全绿（core 57 / windows 389 / app 131）；
+  前端 423 passed（含「记录点击位置下隐藏旧失败提示」用例）。
 
 ## 边界
 

@@ -83,7 +83,10 @@ impl Default for FocusRetryPolicy {
         Self {
             attempts: 8,
             gap: Duration::from_millis(200),
-            budget: Duration::from_millis(3000),
+            // 6 秒：单次 UIA 扫描在 Electron 大树上可能要 2.5–3.3 秒
+            // （2026-10-19 WorkBuddy 实测），3 秒预算会让第一次 no_candidate
+            // 直接耗尽预算、没有第二次机会。
+            budget: Duration::from_millis(6000),
         }
     }
 }

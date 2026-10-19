@@ -117,6 +117,22 @@ fn main() {
         );
     }
 
+    if let Some(pid) = arg_value("--learn-target").and_then(|value| value.parse::<u32>().ok()) {
+        // 只测「学习采样」本身（不依赖前台）：焦点元素不可用时走光标兜底。
+        match fw::capture_for_process(pid) {
+            Some(target) => println!(
+                "learned_for control_type={} id_chars={} class_chars={} name_chars={} rect={}",
+                target.control_type,
+                target.automation_id.chars().count(),
+                target.class_name.chars().count(),
+                target.name.chars().count(),
+                rect_text(&target.normalized_rect)
+            ),
+            None => println!("learn_for_failed=no_candidate"),
+        }
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--learn") {
         // 「学习输入框」生产组合：3 秒窗口内轮询采样，返回稳定命中的目标。
         use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner};

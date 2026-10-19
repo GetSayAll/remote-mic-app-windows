@@ -246,16 +246,41 @@ impl RecordedPoint {
             self.top_offset,
             self.bottom_offset,
         ) {
-            // 记录时哪条边更近就用哪条边（贴底输入框、贴顶搜索框都能跟上尺寸变化）。
-            let x = if left <= right {
+            // 每条轴独立判断：只有「记录时确实靠边」的轴才锚定该边，否则保留比例。
+            // 贴底输入框靠底边锚定；居中控件（左右都不靠边）保留比例，否则窗口
+            // 变宽后按左边缘平移会点到控件外面（2026-10-19 WorkBuddy 现场：
+            // 窗口 1636→2063，按左边缘锚定后点击落在输入框左侧）。
+            const EDGE_NEAR_RATIO: f64 = 0.2;
+            let left_ratio = f64::from(left) / recorded_w.max(1.0);
+            let right_ratio = f64::from(right) / recorded_w.max(1.0);
+            let top_ratio = f64::from(top) / recorded_h.max(1.0);
+            let bottom_ratio = f64::from(bottom) / recorded_h.max(1.0);
+            let x = if left_ratio <= EDGE_NEAR_RATIO && right_ratio > EDGE_NEAR_RATIO {
                 wx + f64::from(left)
-            } else {
+            } else if right_ratio <= EDGE_NEAR_RATIO && left_ratio > EDGE_NEAR_RATIO {
                 wx + ww - f64::from(right)
-            };
-            let y = if top <= bottom {
-                wy + f64::from(top)
+            } else if left_ratio <= EDGE_NEAR_RATIO && right_ratio <= EDGE_NEAR_RATIO {
+                // 两侧都靠边（控件几乎占满窗口宽度）：取更近的一条。
+                if left <= right {
+                    wx + f64::from(left)
+                } else {
+                    wx + ww - f64::from(right)
+                }
             } else {
+                wx + self.x_ratio * ww
+            };
+            let y = if top_ratio <= EDGE_NEAR_RATIO && bottom_ratio > EDGE_NEAR_RATIO {
+                wy + f64::from(top)
+            } else if bottom_ratio <= EDGE_NEAR_RATIO && top_ratio > EDGE_NEAR_RATIO {
                 wy + wh - f64::from(bottom)
+            } else if top_ratio <= EDGE_NEAR_RATIO && bottom_ratio <= EDGE_NEAR_RATIO {
+                if top <= bottom {
+                    wy + f64::from(top)
+                } else {
+                    wy + wh - f64::from(bottom)
+                }
+            } else {
+                wy + self.y_ratio * wh
             };
             let clamp = |value: f64, origin: f64, size: f64| {
                 value.max(origin + 1.0).min(origin + size - 1.0)
@@ -1167,10 +1192,10 @@ mod tests {
             Some((600, 400))
         );
 
-        // 窗口变大 10%：尺寸变化超出比例容差 ⇒ 按记录时最近的边对齐（居中点仍是 600,400）。
+        // 窗口变大 10%：居中点两侧都不靠边 ⇒ 保持比例（100px→110px）。
         assert_eq!(
             point.absolute_in((0.0, 0.0, 1320.0, 880.0)),
-            Some((600, 400))
+            Some((660, 440))
         );
 
         // 窗口尺寸变化很大：仍能按边距换算（不再直接拒绝；旧记录没有边距才会拒绝）。
@@ -1186,6 +1211,19 @@ mod tests {
             bottom.absolute_in((0.0, 0.0, 1200.0, 1000.0)),
             Some((600, 940)),
             "窗口变高 200px 后应保持距底 60px"
+        );
+
+        // WorkBuddy 2026-10-19：窗口 1636×1281、光标 (618,1064)（距左 37.8%，距底 16.9%）。
+        // 窗口放大到 2063×1701 后：x 居中不靠边 ⇒ 保持比例；y 靠底 ⇒ 锚定底边。
+        let workbuddy = RecordedPoint::from_cursor(
+            Some((1726.0 + 618.0, 665.0 + 1064.0)),
+            Some((1726.0, 665.0, 1636.0, 1281.0)),
+        )
+        .expect("窗口内光标应可记录");
+        assert_eq!(
+            workbuddy.absolute_in((78.0, 209.0, 2063.0, 1701.0)),
+            Some((857, 1693)),
+            "居中轴保持比例、贴底轴锚定底边"
         );
 
         // 旧版本记录（没有边距）仍按比例 + 25% 容差：超限拒绝。

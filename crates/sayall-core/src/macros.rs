@@ -67,7 +67,7 @@ impl MacroAction {
             // 聚焦要等目标应用完成激活 + 聚焦服务的重试预算（默认 3 秒）；
             // 早期默认 2 秒会在服务出结果前把请求打断（2026-10-19 现场：
             // DimAgent 反复 `attempts=3 reason=cancelled`，步骤报失败）。
-            Self::FocusInput => 8_000,
+            Self::FocusInput => 10_000,
             Self::OpenUrl => 5_000,
             Self::RunMacro => 60_000,
         }
@@ -1019,6 +1019,12 @@ mod tests {
             merge_library(&base, incoming).unwrap_err(),
             MacroIssue::ImmutableVersionConflict
         );
+    }
+
+    #[test]
+    fn focus_input_timeout_covers_foreground_wait_and_retry_budget() {
+        // 等目标成为前台（2.5s）+ 聚焦服务预算（6s）+ UIA 扫描开销。
+        assert_eq!(MacroAction::FocusInput.default_timeout_ms(), 10_000);
     }
 
     #[test]

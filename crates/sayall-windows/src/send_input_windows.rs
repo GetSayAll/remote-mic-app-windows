@@ -176,7 +176,7 @@ impl SendInputRuntime {
     ) -> Result<SendInputSnapshot, PlatformError> {
         let started = Instant::now();
         crate::ble::gatt_note(format!(
-            "mouse_click_at phase=requested method=physical_cursor"
+            "mouse_click_at phase=requested method=physical_cursor x={x} y={y}"
         ));
         let result = (|| {
             let previous = unsafe { GetThreadDpiAwarenessContext() };

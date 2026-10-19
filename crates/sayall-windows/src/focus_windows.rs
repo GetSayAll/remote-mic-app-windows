@@ -559,6 +559,10 @@ mod imp {
             .ok()
             .and_then(|rect| sane_rect(&rect))?;
         if cursor_x < wx || cursor_y < wy || cursor_x > wx + ww || cursor_y > wy + wh {
+            crate::ble::gatt_note(format!(
+                "focus_learn_cursor terminal_result=skipped reason=outside_window window={}x{}",
+                ww, wh
+            ));
             return None;
         }
         let x = (cursor_x - wx) / ww;
@@ -576,6 +580,16 @@ mod imp {
                 })
             })
             .collect();
+        crate::ble::gatt_note(format!(
+            "focus_learn_cursor phase=hit_test normalized_x={:.3} normalized_y={:.3} \
+             candidates={} hits={} window={}x{}",
+            x,
+            y,
+            scan.candidates.len(),
+            hits.len(),
+            ww,
+            wh
+        ));
         // 优先「本来就有焦点」的，其次面积最小的（更具体的输入框）。
         hits.sort_by(|a, b| {
             b.focused.cmp(&a.focused).then_with(|| {
