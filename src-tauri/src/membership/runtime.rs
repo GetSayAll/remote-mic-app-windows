@@ -47,6 +47,20 @@ pub struct MembershipSnapshot {
     /// 此时服务端会以 `anonymous_session_required` 拒绝邮箱登录。界面必须据此
     /// 显示「已登录但状态待同步」，而不是给一个注定失败的登录表单。
     pub account_signed_in: bool,
+    /// 权益答案的新鲜度。
+    ///
+    /// `current`：本次实时读取并验签成功。
+    /// `offline`：实时读取失败，但此前验签过的租约仍在有效期内，Plus 继续可用。
+    /// `unavailable`：读取失败且没有可用租约。
+    ///
+    /// 与 Mac 的 `MembershipSyncState` 同义；界面据它区分「离线使用中」与
+    /// 「暂时无法同步」，不能把离线用户显示成权益丢失。
+    pub sync_state: String,
+    /// 已验签租约覆盖的大版本。
+    ///
+    /// 买断覆盖一个或多个大版本；Mac 取最大值显示为「SayAll N」。`None` 表示
+    /// 租约没有声明。
+    pub major_versions: Option<Vec<i64>>,
 }
 
 impl MembershipSnapshot {
@@ -59,6 +73,8 @@ impl MembershipSnapshot {
             valid_until: None,
             membership_expires_at: None,
             account_signed_in: false,
+            sync_state: "current".to_string(),
+            major_versions: None,
         }
     }
 }
@@ -173,6 +189,11 @@ pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
         Err(MembershipError::new("membership_unavailable"))
     }
 
+    /// 兑换一枚兑换码；成功后重新读取签名权益。
+    fn redeem(&self, _code: &str) -> Result<MembershipSnapshot, MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
+
     /// 读取商品与购买方案。
     fn catalog(&self) -> Result<MembershipCatalog, MembershipError> {
         Err(MembershipError::new("membership_unavailable"))
@@ -235,6 +256,7 @@ mod tests {
                 .expect_err("verify")
                 .code,
             runtime.logout().expect_err("logout").code,
+            runtime.redeem("MXII23456789").expect_err("redeem").code,
             runtime.catalog().expect_err("catalog").code,
             runtime.purchase("plus-v2-cn").expect_err("purchase").code,
             runtime
@@ -290,5 +312,7 @@ mod tests {
         assert_eq!(json["validUntil"], serde_json::Value::Null);
         assert_eq!(json["membershipExpiresAt"], serde_json::Value::Null);
         assert_eq!(json["accountSignedIn"], false);
+        assert_eq!(json["syncState"], "current");
+        assert_eq!(json["majorVersions"], serde_json::Value::Null);
     }
 }

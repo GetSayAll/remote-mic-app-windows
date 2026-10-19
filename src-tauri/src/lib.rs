@@ -479,6 +479,19 @@ async fn logout_membership(
     run_membership(move || membership.logout()).await
 }
 
+/// 兑换一枚兑换码。成功后重新读取签名权益。
+///
+/// 兑换在服务端完成；本命令只把码原样交给会员服务，不在前端做格式校验，
+/// 以免客户端规则先于服务端拒绝一枚其实有效的码。
+#[tauri::command]
+async fn redeem_membership(
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.redeem(&code)).await
+}
+
 /// 读取会员页的商品与购买方案（2026-10-15）。
 ///
 /// 未登录时返回公开预览，只能展示；登录后返回账号授权方案。
@@ -536,6 +549,24 @@ async fn open_membership_checkout(
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| "open_checkout_failed".to_string())
+}
+
+/// 打开会员页底部的固定说明页（用户协议 / 隐私政策 / 退款政策）。
+///
+/// 与收银台同一条边界：页面只传一个枚举名，URL 由这里写死。这样既不用给
+/// WebView 开任意 URL 的 opener 权限，也不存在页面注入外链的可能。
+#[tauri::command]
+async fn open_membership_link(app: tauri::AppHandle, link: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = match link.as_str() {
+        "agreement" => "https://getsayall.com/terms/",
+        "privacy" => "https://getsayall.com/privacy/",
+        "refund" => "https://getsayall.com/refund/",
+        _ => return Err("unknown_membership_link".to_string()),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "open_membership_link_failed".to_string())
 }
 
 /// 在阻塞线程池上执行一次会员操作。
@@ -3921,11 +3952,13 @@ pub fn run() {
         start_membership_email_login,
         verify_membership_email_login,
         logout_membership,
+        redeem_membership,
         get_membership_catalog,
         purchase_membership,
         refresh_membership_purchase,
         clear_membership_purchase,
         open_membership_checkout,
+        open_membership_link,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -4006,11 +4039,13 @@ pub fn run() {
         start_membership_email_login,
         verify_membership_email_login,
         logout_membership,
+        redeem_membership,
         get_membership_catalog,
         purchase_membership,
         refresh_membership_purchase,
         clear_membership_purchase,
         open_membership_checkout,
+        open_membership_link,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
