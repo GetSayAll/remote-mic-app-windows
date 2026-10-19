@@ -33,7 +33,20 @@ pub struct MembershipSnapshot {
     /// 是否已开通 Plus。只来自已验签的权益，不采信未签名的服务端摘要。
     pub plus_active: bool,
     /// 权益可用的最晚时刻（Unix 秒）；`plus_active` 为假时为 `None`。
+    ///
+    /// 这是**租约**到期时刻（服务端最长 7 天），只说明「该刷新了」，不是会员到期日。
     pub valid_until: Option<i64>,
+    /// 会员本身到期时刻（Unix 秒）。
+    ///
+    /// 大版本买断会拿到服务端约定的远期哨兵值，界面应显示「当前版本长期有效」
+    /// 而不是具体日期。与 Mac 的 `MembershipAccountState.expiresAt` 同义。
+    pub membership_expires_at: Option<i64>,
+    /// 本机是否存着账号会话。
+    ///
+    /// 与「有没有显示名」分开：bootstrap 失败时显示名会缺席，但账号会话仍在，
+    /// 此时服务端会以 `anonymous_session_required` 拒绝邮箱登录。界面必须据此
+    /// 显示「已登录但状态待同步」，而不是给一个注定失败的登录表单。
+    pub account_signed_in: bool,
 }
 
 impl MembershipSnapshot {
@@ -44,6 +57,8 @@ impl MembershipSnapshot {
             account_display_name: None,
             plus_active: false,
             valid_until: None,
+            membership_expires_at: None,
+            account_signed_in: false,
         }
     }
 }
@@ -273,5 +288,7 @@ mod tests {
         assert_eq!(json["accountDisplayName"], serde_json::Value::Null);
         assert_eq!(json["plusActive"], false);
         assert_eq!(json["validUntil"], serde_json::Value::Null);
+        assert_eq!(json["membershipExpiresAt"], serde_json::Value::Null);
+        assert_eq!(json["accountSignedIn"], false);
     }
 }
