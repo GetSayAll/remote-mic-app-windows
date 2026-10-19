@@ -166,6 +166,7 @@ pub fn execute_macro(
     let deadline = started_ms.saturating_add(overall_timeout_ms);
     let mut steps: Vec<MacroStepReport> = Vec::new();
     let mut unknown_seen = false;
+    let mut nested_missing_dependency = false;
     let finish = |result: MacroTerminalResult, steps: Vec<MacroStepReport>| MacroRunReport {
         macro_id: definition.macro_id.clone(),
         result,
@@ -215,7 +216,15 @@ pub fn execute_macro(
             StepOutcome::Done => {}
             StepOutcome::Unknown => unknown_seen = true,
             StepOutcome::MissingDependency => {
-                return finish(MacroTerminalResult::MissingDependency, steps)
+                // 嵌套动作缺依赖**不阻断后续步骤**（2026-10-19 现场：父动作里两个
+                // 「执行已有组合动作」，第一个子动作的 focus_input 没有学习档案 ⇒
+                // 整个父动作停在第一步，用户看到"只执行了一个"）。终态仍如实报
+                // missing_dependency，但后面的步骤继续跑完，报告里逐步可见。
+                if step.action == MacroAction::RunMacro {
+                    nested_missing_dependency = true;
+                } else {
+                    return finish(MacroTerminalResult::MissingDependency, steps);
+                }
             }
             StepOutcome::PermissionDenied => {
                 return finish(MacroTerminalResult::PermissionDenied, steps)
@@ -224,7 +233,9 @@ pub fn execute_macro(
         }
     }
     finish(
-        if unknown_seen {
+        if nested_missing_dependency {
+            MacroTerminalResult::MissingDependency
+        } else if unknown_seen {
             MacroTerminalResult::CompletedWithUnknownResult
         } else {
             MacroTerminalResult::Completed
@@ -1481,6 +1492,44 @@ mod tests {
         let library = vec![parent.clone()];
         let (report, _) = run(&parent, &library, vec![], 60_000);
         assert_eq!(report.result, MacroTerminalResult::MissingDependency);
+    }
+
+    #[test]
+    fn nested_missing_dependency_does_not_skip_later_nested_steps() {
+        // 2026-10-19 现场：父动作里两个「执行已有组合动作」，第一个子动作的
+        // focus_input 没有学习档案 ⇒ 父动作停在第一步。现在缺依赖只记在该步，
+        // 后续步骤继续执行；终态仍如实报 missing_dependency。
+        let parent = make_definition(
+            "macro.parent1",
+            vec![
+                make_step(
+                    MacroAction::RunMacro,
+                    MacroParameters {
+                        nested_macro_id: Some("macro.missing".to_owned()),
+                        nested_macro_name: Some("缺失的子动作".to_owned()),
+                        ..MacroParameters::default()
+                    },
+                ),
+                make_step(
+                    MacroAction::RunMacro,
+                    MacroParameters {
+                        nested_macro_id: Some("macro.child01".to_owned()),
+                        nested_macro_name: Some("存在的子动作".to_owned()),
+                        ..MacroParameters::default()
+                    },
+                ),
+            ],
+        );
+        let child = make_definition("macro.child01", vec![open_app_step()]);
+        let library = vec![parent.clone(), child];
+
+        let (report, calls) = run(&parent, &library, vec![], 60_000);
+        assert_eq!(report.result, MacroTerminalResult::MissingDependency);
+        assert_eq!(report.steps.len(), 2, "两个嵌套步骤都必须出现在报告里");
+        assert_eq!(report.steps[0].outcome, StepOutcome::MissingDependency);
+        assert_eq!(report.steps[1].outcome, StepOutcome::Done);
+        assert_eq!(calls.len(), 1, "第二个子动作必须真的执行");
+        assert_eq!(calls[0].action, "open_application");
     }
 
     #[test]

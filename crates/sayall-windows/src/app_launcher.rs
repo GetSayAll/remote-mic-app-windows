@@ -1352,7 +1352,17 @@ impl WindowVisibility {
 pub(crate) fn target_window_visibility(target: &str) -> Option<WindowVisibility> {
     if crate::registered_apps::is_registered_target(target) {
         let aumid = target.strip_prefix(crate::registered_apps::REGISTERED_PREFIX)?;
-        return Some(window_visibility(WindowSelector::AppUserModelId(aumid)));
+        // AUMID 与 exe 路径两个口径都查（2026-10-19 现场：WorkBuddy 这类 Electron
+        // 应用由「扫描本机应用」登记为 `shell:AppsFolder\Vendor.App`，但它的窗口
+        // 没有 AUMID ⇒ 只按 AUMID 查会得到 0 个窗口，聚焦/记录位置报
+        // "目标应用没有可见窗口"）。shell 项里的 `System.Link.TargetParsingPath`
+        // 给出真实 exe，启动路径本来就用它，这里复用同一口径。
+        let by_identity = window_visibility(WindowSelector::AppUserModelId(aumid));
+        let by_path = crate::registered_apps::resolve_registered_executable_path(target)
+            .map_or(WindowVisibility::EMPTY, |path| {
+                window_visibility(WindowSelector::ExecutablePath(&path))
+            });
+        return Some(by_identity.merge(by_path));
     }
     if let Some(app) = preset_app(target) {
         let by_exe = window_visibility(WindowSelector::ExecutableNames(app.exe_names));
@@ -2505,10 +2515,19 @@ pub fn application_readiness(target: &str) -> ApplicationReadiness {
     };
     let (visibility, running_process) = if crate::registered_apps::is_registered_target(target) {
         match target.strip_prefix(crate::registered_apps::REGISTERED_PREFIX) {
-            Some(aumid) => (
-                window_visibility(WindowSelector::AppUserModelId(aumid)),
-                !pids_for_app_user_model_id(aumid).is_empty(),
-            ),
+            Some(aumid) => {
+                // 与聚焦/记录位置同一口径：AUMID + shell 解析出的 exe 路径。
+                // 只按 AUMID 查会漏掉 WorkBuddy 这类窗口没有 AUMID 的注册应用
+                // （2026-10-19 现场：应用明明开着，却报"没有可见窗口"）。
+                let visibility =
+                    target_window_visibility(target).unwrap_or(WindowVisibility::EMPTY);
+                let by_exe = crate::registered_apps::resolve_registered_executable_path(target)
+                    .is_some_and(|path| !pids_for_executable_path(&path).is_empty());
+                (
+                    visibility,
+                    !pids_for_app_user_model_id(aumid).is_empty() || by_exe,
+                )
+            }
             None => return unknown,
         }
     } else if let Some(app) = preset_app(target) {

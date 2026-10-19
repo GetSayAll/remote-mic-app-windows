@@ -41,5 +41,15 @@ fn main() {
             "{target}: known={} running_process={} visible_window={} window_presence={}",
             readiness.known, readiness.running_process, readiness.visible_window, readiness.running
         );
+        // 注册项（扫描本机应用）的窗口判定：AUMID + shell 解析出的 exe 路径双口径。
+        if target.starts_with("shell:AppsFolder\\") {
+            match sayall_windows::registered_apps::describe_registered_identity(&target) {
+                Some(identity) => println!(
+                    "  registered: exe={}",
+                    identity.unwrap_or_else(|| "<none>".to_owned())
+                ),
+                None => println!("  registered: invalid_target"),
+            }
+        }
     }
 }
