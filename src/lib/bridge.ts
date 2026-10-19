@@ -24,6 +24,21 @@ export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-ap
  */
 export const VOKIE_HOMEPAGE_URL = "https://vokie.com/";
 
+/**
+ * 推荐页只加载官网（2026-10-18 用户指定），不在 Windows 客户端复制推荐内容。
+ * 官网 `/recommendations/` 设置 `X-Frame-Options: DENY`，因此页面由 Tauri
+ * 子 WebView 承载；这里只保留「打开官网」兜底所用的公开地址。
+ */
+export const RECOMMENDATIONS_URL = "https://sayall.app/recommendations/";
+
+export type RecommendationsPageStatus = "loading" | "ready" | "failed";
+
+export interface RecommendationsPageEvent {
+  generation: number;
+  status: "ready" | "failed";
+  reason?: string | null;
+}
+
 export type ConnectionPhase =
   | "idle"
   | "connecting"
@@ -771,6 +786,37 @@ export async function openGitHubRepository(): Promise<void> {
 /** 连接页“Vokie 未安装”提示里的官网入口（2026-10-01）。 */
 export async function openVokieHomepage(): Promise<void> {
   await openExternalUrl(VOKIE_HOMEPAGE_URL);
+}
+
+/**
+ * 显示推荐页（实际内容是官网页面，由 Rust 侧子 WebView 承载）。
+ * 返回本次加载的 generation；迟到的 ready/failed 事件由页面按它丢弃。
+ */
+export async function showRecommendationsPage(
+  theme: "light" | "dark",
+): Promise<number> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法在应用内打开推荐页面");
+  }
+  return invoke<number>("show_recommendations", { theme });
+}
+
+/** 离开推荐页时隐藏子 WebView；页面本身保留，返回时可快速重载。 */
+export async function hideRecommendationsPage(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("hide_recommendations");
+}
+
+/**
+ * 加载失败时的「打开官网」：Rust 侧保留当前详情参数并去掉 `embed/theme`
+ * 等 App 专用参数，再交给系统浏览器。浏览器预览直接打开列表页。
+ */
+export async function openRecommendationsWebsite(): Promise<void> {
+  if (!isTauriRuntime()) {
+    window.open(RECOMMENDATIONS_URL, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await invoke("open_recommendations_website");
 }
 
 /** Vokie 检测结果：未安装时连接页显示官网入口；已安装但没运行时提示先启动它。 */

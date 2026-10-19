@@ -14,9 +14,13 @@ import {
   openGitHubRepository,
   openLogDirectory,
   openOfficialWebsite,
+  openRecommendationsWebsite,
   openVbCableDownloadPage,
+  RECOMMENDATIONS_URL,
   remoteModelLabel,
   shortcutCapability,
+  showRecommendationsPage,
+  hideRecommendationsPage,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
   type ConnectionPhase,
@@ -290,6 +294,53 @@ describe("设置页外部入口（官网 / GitHub）", () => {
     expect(vi.mocked(openUrl).mock.calls.map(([url]) => url)).toEqual([
       OFFICIAL_WEBSITE_URL,
       GITHUB_REPOSITORY_URL,
+    ]);
+  });
+});
+
+describe("推荐页入口（官网页面宿主）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+    vi.mocked(openUrl).mockReset();
+  });
+
+  it("只指向官网推荐页，不在客户端保存推荐内容", () => {
+    expect(RECOMMENDATIONS_URL).toBe("https://sayall.app/recommendations/");
+  });
+
+  it("浏览器预览下明确不可用，并可直接打开官网", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    await expect(showRecommendationsPage("light")).rejects.toThrow(
+      "当前是浏览器预览，无法在应用内打开推荐页面",
+    );
+    await openRecommendationsWebsite();
+
+    expect(open).toHaveBeenCalledWith(
+      RECOMMENDATIONS_URL,
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it("Tauri 运行时按精确命令名调用 Rust，并回传本次加载 generation", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(7)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    await expect(showRecommendationsPage("dark")).resolves.toBe(7);
+    await hideRecommendationsPage();
+    await openRecommendationsWebsite();
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["show_recommendations", { theme: "dark" }],
+      ["hide_recommendations"],
+      ["open_recommendations_website"],
     ]);
   });
 });
