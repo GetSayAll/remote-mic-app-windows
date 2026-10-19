@@ -493,7 +493,7 @@ export async function setLaunchAtLogin(enabled: boolean): Promise<boolean> {
 }
 
 /**
- * 「启动时自动打开主页面」（设置页「启动行为」，对齐 Mac `openMainWindowAtLaunch`）。
+ * 「启动时自动打开主面板」（设置页「启动行为」，对齐 Mac `openMainWindowAtLaunch`）。
  *
  * 浏览器预览按新装默认返回 `true`，与 Rust `AppSettings::default()` 同源。
  */
@@ -503,8 +503,19 @@ export async function getOpenWindowAtLaunch(): Promise<boolean> {
 }
 
 export async function setOpenWindowAtLaunch(enabled: boolean): Promise<boolean> {
-  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法设置启动时打开主页面");
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法设置启动时打开主面板");
   return invoke<boolean>("set_open_window_at_launch", { enabled });
+}
+
+/**
+ * 本次启动前刚完成更新时的版本号（对齐 Mac `update.completed.*`）。
+ *
+ * Rust 侧取走即清空：同一次运行里只提示一次，重新挂载页面不会重复弹。
+ * 浏览器预览没有更新机制，返回 `null`。
+ */
+export async function takeUpdateCompletedVersion(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>("take_update_completed_version");
 }
 
 export interface AppUpdateProgress {

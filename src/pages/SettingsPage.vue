@@ -97,7 +97,7 @@ const launchAtLoginBusy = ref(false);
 const launchAtLoginError = ref("");
 
 /**
- * 「启动时自动打开主页面」（2026-10-19，对齐 Mac `openMainWindowAtLaunch`）。
+ * 「启动时自动打开主面板」（2026-10-19，对齐 Mac `openMainWindowAtLaunch`）。
  * 与登录自启动同样等 IPC 读回后再创建开关本体，避免先闪一下关闭态。
  */
 const openWindowAtLaunch = ref(true);
@@ -463,10 +463,10 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           </span>
           <div class="settings-row-text">
             <strong>启动行为</strong>
-            <p class="muted">设置登录后自动启动，以及启动时是否打开主页面。</p>
+            <p class="muted">设置登录后自动启动和应用启动时是否打开主窗口。</p>
           </div>
           <div class="launch-behavior-toggles">
-            <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
+            <label class="toggle-row launch-toggle" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
               <span>登录时自动启动</span>
               <input
                 v-if="launchAtLoginReady"
@@ -479,11 +479,12 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
               />
               <span v-else class="toggle-placeholder" aria-hidden="true"></span>
             </label>
+            <span class="launch-toggle-divider" aria-hidden="true"></span>
             <label
-              class="toggle-row"
-              title="关闭后启动只在通知区域驻留，不打开主页面；从托盘图标或再次启动无线麦仍可打开。"
+              class="toggle-row launch-toggle"
+              title="关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。"
             >
-              <span>启动时自动打开主页面</span>
+              <span>启动时自动打开主面板</span>
               <input
                 v-if="openWindowAtLaunchReady"
                 type="checkbox"
@@ -694,12 +695,30 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 /* 行内错误与行内说明共用左缩进，读起来仍属于上一行。 */
 .settings-group > .error-text { margin: 0 0 8px 50px; }
 
-/* 启动行为：两个开关上下排列（对 Mac 同一行的两个开关；窗口窄时也不挤压文字）。 */
+/* 启动行为：对齐 Mac `settings.general.launch_behavior` 右侧两组「文字在上、开关在下」，
+   两组之间一条竖分隔线；窗口窄时允许折行，但不挤压左侧说明。 */
 .launch-behavior-toggles {
   display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.launch-toggle {
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: 4px;
+}
+.launch-toggle > span:first-child {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+.launch-toggle-divider {
+  width: 1px;
+  height: 34px;
+  background: var(--border);
+  align-self: center;
 }
 
 /* 应用图标：两个带预览图的选项（选中态用强调色描边，对齐 Mac appIconPreferenceRow）。 */

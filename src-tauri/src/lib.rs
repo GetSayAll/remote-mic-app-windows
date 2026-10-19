@@ -19,6 +19,7 @@ use tauri::{Emitter, Manager};
 mod accent;
 mod app_icon;
 mod diagnostics;
+mod launch_state;
 mod onboarding;
 mod platform;
 mod rc003_task;
@@ -395,6 +396,9 @@ struct AppState {
     /// check_app_update 暂存的待安装更新（install_app_update 取走）。
     /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
     pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
+    /// 本次启动前刚完成更新时的版本号；前端取走一次后清空（对齐 Mac
+    /// `showUpdateCompletedAlert`：只在更新后的第一次启动提示）。
+    update_completed_version: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -413,6 +417,19 @@ impl std::fmt::Debug for AppState {
                     .pending_update
                     .lock()
                     .map(|u| u.is_some())
+                    .unwrap_or(false)
+                {
+                    "Some"
+                } else {
+                    "None"
+                },
+            )
+            .field(
+                "update_completed_version",
+                &if self
+                    .update_completed_version
+                    .lock()
+                    .map(|v| v.is_some())
                     .unwrap_or(false)
                 {
                     "Some"
@@ -869,19 +886,22 @@ fn refocus_main_window_soon(app: tauri::AppHandle) {
     });
 }
 
-/// 启动时是否显示主页面（纯判定，单测覆盖）。
+/// 启动时是否显示主面板（纯判定，单测覆盖）。
 ///
 /// 对齐 Mac `OnboardingLaunchPolicy.shouldShowMainWindow`：
+/// `!isComplete || completedUpdate || openMainWindowAtLaunch`。
 /// - 未完成首次设置必须显示，否则用户没有入口完成向导；
-/// - 其余情况由「启动时自动打开主页面」决定（默认开启）。
+/// - 本次启动前刚完成更新必须显示（Mac：更新完成后仍会显示主面板）；
+/// - 其余情况由「启动时自动打开主面板」决定（默认开启）。
 ///
 /// 关闭该开关后，普通启动（含手动双击快捷方式）只驻留托盘；托盘左键 /
-/// 托盘菜单「显示主界面」以及再次启动应用都会把主页面显示出来。
+/// 托盘菜单「显示主界面」以及再次启动应用都会把主面板显示出来。
 fn should_show_main_window_on_startup(
     onboarding_active: bool,
+    completed_update: bool,
     open_window_at_launch: bool,
 ) -> bool {
-    onboarding_active || open_window_at_launch
+    onboarding_active || completed_update || open_window_at_launch
 }
 
 /// 把主窗口从「最小化 / 收进托盘」恢复到可见并尝试置前（2026-10-03 用户报障：
@@ -2873,6 +2893,32 @@ async fn set_open_window_at_launch(
     result
 }
 
+/// 本次启动前刚完成更新时的版本号；没有则返回 `null`。
+///
+/// 对齐 Mac `showUpdateCompletedAlert`：只在更新后的第一次启动提示一次。
+/// 前端取走后清空——同一次运行里再挂载页面不会重复弹。
+#[tauri::command]
+fn take_update_completed_version(state: tauri::State<'_, AppState>) -> Option<String> {
+    let version = take_pending_update_completed_version(&state.update_completed_version);
+    sayall_windows::gatt_note(format!(
+        "startup feature=update_completed action=take terminal_result=passed available={}",
+        version.is_some()
+    ));
+    version
+}
+
+/// 一次性取走待提示的版本号（纯逻辑，便于单测「只提示一次」）。
+///
+/// 锁中毒时按「没有待提示」处理：更新提示不是功能路径，不能因此阻塞前端。
+fn take_pending_update_completed_version(
+    pending: &std::sync::Mutex<Option<String>>,
+) -> Option<String> {
+    pending
+        .lock()
+        .ok()
+        .and_then(|mut pending_version| pending_version.take())
+}
+
 #[tauri::command]
 fn get_launch_at_login(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let started = std::time::Instant::now();
@@ -3504,11 +3550,12 @@ pub fn run() {
             };
             #[cfg(not(feature = "runtime-simulation"))]
             let settings_path = app.path().app_config_dir()?.join("settings.json");
+            let launch_settings_path = settings_path.clone();
             let settings = SettingsStore::new(settings_path);
             // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
             // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
             //
-            // 这里同时保留判定结果给「启动时是否显示主页面」用：未完成首次设置时
+            // 这里同时保留判定结果给「启动时是否显示主面板」用：未完成首次设置时
             // 必须显示窗口，否则用户没有入口完成向导。读不到状态时按「显示」处理
             // （fail-open：宁可多显示一次，也不能让应用启动后完全不可见）。
             let onboarding_active = match settings.ensure_onboarding_state() {
@@ -3543,15 +3590,43 @@ pub fn run() {
             #[cfg(windows)]
             app_icon::apply(app.handle(), saved_settings.app_icon);
 
+            // 「本次启动前刚完成更新」（2026-10-19，对齐 Mac
+            // `recordLaunchAndDetectCompletedUpdate`）：记录写在独立的
+            // `launch-state.json`（不碰 settings.json，安装生命周期测试对后者做逐字节
+            // 哈希断言）。读取/写入失败都只记日志、按「不算更新」继续，不阻断启动。
+            let completed_update = match launch_state::record_launch(
+                &launch_settings_path,
+                &app.package_info().version.to_string(),
+                onboarding::install_evidence_exists(&launch_settings_path),
+            ) {
+                Ok(outcome) => {
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=completed_update action=decide terminal_result=passed completed={} previous_version={} current_version={}",
+                        outcome.completed_update,
+                        outcome.previous_version.as_deref().unwrap_or("none"),
+                        outcome.current_version
+                    ));
+                    outcome.completed_update
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "startup feature=completed_update action=decide terminal_result=failed error_domain=settings error_code=launch_state_io reason=treated_as_regular_launch retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                    false
+                }
+            };
+
             // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
-            // 「启动时自动打开主页面」关闭后，普通启动只驻留托盘；未完成首次设置
-            // 时仍显示窗口（否则用户没有入口完成向导）。托盘左键 / 托盘菜单 /
-            // 再次启动应用都走 `show_main_window`，不受本设置影响。
+            // 「启动时自动打开主面板」关闭后，普通启动只驻留托盘；未完成首次设置
+            // 或本次启动前刚完成更新时仍显示窗口（Mac 同款：更新完成后仍会显示主面板）。
+            // 托盘左键 / 托盘菜单 / 再次启动应用都走 `show_main_window`，不受本设置影响。
             //
             // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
             // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
             let show_main_window_on_startup = should_show_main_window_on_startup(
                 onboarding_active,
+                completed_update,
                 saved_settings.open_window_at_launch,
             );
             #[cfg(feature = "runtime-simulation")]
@@ -3566,11 +3641,13 @@ pub fn run() {
                     let _ = window.set_focus();
                     let visible_after = window.is_visible().unwrap_or(true);
                     sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
                         if visible_after { "passed" } else { "failed" },
                         visible_after,
                         if onboarding_active {
                             "onboarding_active"
+                        } else if completed_update {
+                            "completed_update"
                         } else {
                             "open_window_at_launch"
                         },
@@ -3580,7 +3657,7 @@ pub fn run() {
                     let hide_result = window.hide();
                     let visible_after = window.is_visible().unwrap_or(true);
                     sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason=open_window_at_launch_disabled onboarding_active={onboarding_active} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason=open_window_at_launch_disabled onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
                         if visible_after { "failed" } else { "passed" },
                         visible_after,
                         saved_settings.open_window_at_launch
@@ -3838,6 +3915,9 @@ pub fn run() {
                 settings,
                 capture_health,
                 pending_update: std::sync::Mutex::new(None),
+                update_completed_version: std::sync::Mutex::new(
+                    completed_update.then(|| app.package_info().version.to_string()),
+                ),
             });
             app.manage(recommendations::RecommendationsState::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
@@ -3981,6 +4061,7 @@ pub fn run() {
         set_launch_at_login,
         get_open_window_at_launch,
         set_open_window_at_launch,
+        take_update_completed_version,
         report_theme_result,
         get_app_icon,
         set_app_icon,
@@ -4061,6 +4142,7 @@ pub fn run() {
         set_launch_at_login,
         get_open_window_at_launch,
         set_open_window_at_launch,
+        take_update_completed_version,
         report_theme_result,
         get_app_icon,
         set_app_icon,
@@ -4163,14 +4245,37 @@ mod tests {
     /// 开关才恢复）。判据两段：先给足时间（助手可能正在注入 / 握手），再按尝试次数防抖。
     /// 启动可见性（2026-10-19 用户定稿）：未完成向导必须显示；其余按设置。
     ///
-    /// 阳性/阴性对照都钉住：关闭「启动时自动打开主页面」后，已完成向导的普通启动
+    /// 阳性/阴性对照都钉住：关闭「启动时自动打开主面板」后，已完成向导的普通启动
     /// 只驻留托盘；但向导进行中必须显示，否则用户没有入口完成设置。
     #[test]
     fn startup_visibility_follows_onboarding_and_preference() {
-        assert!(should_show_main_window_on_startup(true, true));
-        assert!(should_show_main_window_on_startup(true, false));
-        assert!(should_show_main_window_on_startup(false, true));
-        assert!(!should_show_main_window_on_startup(false, false));
+        // 未完成向导：无论开关与更新状态都显示。
+        assert!(should_show_main_window_on_startup(true, false, true));
+        assert!(should_show_main_window_on_startup(true, false, false));
+        assert!(should_show_main_window_on_startup(true, true, false));
+        // 已完成向导 + 普通启动：只看开关。
+        assert!(should_show_main_window_on_startup(false, false, true));
+        assert!(!should_show_main_window_on_startup(false, false, false));
+        // 已完成向导 + 本次启动前刚完成更新：开关关着也必须显示（Mac 同款）。
+        assert!(should_show_main_window_on_startup(false, true, false));
+    }
+
+    #[test]
+    fn update_completed_version_is_taken_once() {
+        let pending = std::sync::Mutex::new(Some("1.0.0".to_owned()));
+
+        // 第一次取走：返回版本号并清空。
+        assert_eq!(
+            take_pending_update_completed_version(&pending),
+            Some("1.0.0".to_owned())
+        );
+        // 同一次运行里再挂载页面不会再弹（对齐 Mac 的「只提示一次」）。
+        assert_eq!(take_pending_update_completed_version(&pending), None);
+        // 普通启动（没有更新完成）永远是 None，不编造版本号。
+        assert_eq!(
+            take_pending_update_completed_version(&std::sync::Mutex::new(None)),
+            None
+        );
     }
 
     #[test]

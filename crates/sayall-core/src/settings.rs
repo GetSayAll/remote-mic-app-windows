@@ -81,11 +81,11 @@ pub struct AppSettings {
     /// 连接页选择的输入工具（微信输入法 / 豆包输入法 / 其他工具）。
     pub voice_input_tool: Option<VoiceInputTool>,
     pub launch_at_login: bool,
-    /// 启动时是否自动打开主页面（设置页「启动行为」第二项，默认 **开启**）。
+    /// 启动时是否自动打开主面板（设置页「启动行为」第二项，默认 **开启**）。
     ///
     /// 对齐 Mac `AppSettings.openMainWindowAtLaunch`：关闭后普通启动只驻留托盘，
-    /// 用户从托盘或再次双击快捷方式打开。未完成首次设置时仍会显示主页面，
-    /// 否则用户没有入口完成向导（判定见 `sayall_windows_app` 的启动可见性）。
+    /// 用户从托盘或再次双击快捷方式打开。未完成首次设置或本次启动前刚完成更新时
+    /// 仍会显示主面板（判定见 `sayall_windows_app` 的启动可见性）。
     pub open_window_at_launch: bool,
     pub check_prerelease_updates: bool,
     /// RC003 三键增强捕获的用户意图（按键页开关）。默认 **关闭**——
@@ -322,11 +322,11 @@ mod tests {
         assert_eq!(settings.gain_db, 12.0);
     }
 
-    /// 「启动时自动打开主页面」（设置页「启动行为」，2026-10-19 用户定稿）。
+    /// 「启动时自动打开主面板」（设置页「启动行为」，2026-10-19 用户定稿）。
     ///
     /// 语义对齐 Mac `openMainWindowAtLaunch`：新装 / 老配置（无此字段）默认**开启**；
     /// 用户关掉后落盘，读回保持关闭。关闭后启动只驻留托盘，托盘菜单、托盘左键
-    /// 或再次启动应用都会显示主页面。
+    /// 或再次启动应用都会显示主面板。
     #[test]
     fn open_window_at_launch_defaults_on_and_round_trips() {
         assert!(AppSettings::default().open_window_at_launch);

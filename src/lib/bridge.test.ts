@@ -23,6 +23,7 @@ import {
   shortcutCapability,
   showRecommendationsPage,
   hideRecommendationsPage,
+  takeUpdateCompletedVersion,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
   type ConnectionPhase,
@@ -370,7 +371,7 @@ describe("诊断日志目录入口", () => {
   });
 });
 
-describe("启动时自动打开主页面（设置页「启动行为」）", () => {
+describe("启动时自动打开主面板（设置页「启动行为」）", () => {
   afterEach(() => {
     delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     vi.mocked(invoke).mockReset();
@@ -398,8 +399,28 @@ describe("启动时自动打开主页面（设置页「启动行为」）", () =
 
   it("浏览器预览下保存明确不可用", async () => {
     await expect(setOpenWindowAtLaunch(false)).rejects.toThrow(
-      "当前是浏览器预览，无法设置启动时打开主页面",
+      "当前是浏览器预览，无法设置启动时打开主面板",
     );
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("更新完成提示（对齐 Mac `update.completed.*`）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("浏览器预览没有更新机制，返回 null 且不调 IPC", async () => {
+    await expect(takeUpdateCompletedVersion()).resolves.toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 运行时使用精确命令名", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValue("1.0.0");
+
+    await expect(takeUpdateCompletedVersion()).resolves.toBe("1.0.0");
+    expect(invoke).toHaveBeenCalledWith("take_update_completed_version");
   });
 });

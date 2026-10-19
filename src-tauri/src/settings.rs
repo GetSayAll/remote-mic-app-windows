@@ -79,13 +79,13 @@ impl SettingsStore {
         })
     }
 
-    /// 启动时是否自动打开主页面（设置页「启动行为」第二项，默认开启）。
+    /// 启动时是否自动打开主面板（设置页「启动行为」第二项，默认开启）。
     ///
     /// 对齐 Mac `openMainWindowAtLaunch`：关闭后普通启动只驻留托盘，托盘菜单、
-    /// 托盘左键或再次启动应用都会显示主页面；未完成首次设置时仍会显示主页面
+    /// 托盘左键或再次启动应用都会显示主面板；未完成首次设置时仍会显示主面板
     /// （判定在应用启动时）。
     pub fn save_open_window_at_launch(&self, enabled: bool) -> Result<(), String> {
-        self.update("保存启动时打开主页面设置", move |settings| {
+        self.update("保存启动时打开主面板设置", move |settings| {
             settings.open_window_at_launch = enabled;
         })
     }

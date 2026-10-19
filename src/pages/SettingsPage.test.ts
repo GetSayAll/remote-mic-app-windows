@@ -143,7 +143,7 @@ describe("settings page", () => {
     setThemePreference.mockReset();
     bridge.getLaunchAtLogin.mockReset().mockResolvedValue(false);
     bridge.setLaunchAtLogin.mockReset();
-    // 「启动时自动打开主页面」新装默认开启（与 Rust `AppSettings::default()` 同源）。
+    // 「启动时自动打开主面板」新装默认开启（与 Rust `AppSettings::default()` 同源）。
     bridge.getOpenWindowAtLaunch.mockReset().mockResolvedValue(true);
     bridge.setOpenWindowAtLaunch.mockReset();
     // 后端默认值（2026-10-04 起 = 几何鸭）：mock 也按新装默认返回，与
@@ -223,17 +223,47 @@ describe("settings page", () => {
       launch.find('input[name="launch-at-login"]').element,
     );
 
-    // 通用「启动时自动打开主页面」：同样文字在前、开关在后。
-    const openWindow = wrapper.get('label[title*="启动只在通知区域驻留"]');
+    // 通用「启动时自动打开主面板」：同样文字在前、开关在后。
+    const openWindow = wrapper.get('label[title*="更新完成后仍会显示主面板"]');
     expect((openWindow.element.firstElementChild as HTMLElement).textContent).toContain(
-      "启动时自动打开主页面",
+      "启动时自动打开主面板",
     );
     expect(openWindow.element.lastElementChild).toBe(
       openWindow.find('input[name="open-window-at-launch"]').element,
     );
   });
 
-  it("启动时自动打开主页面默认开启，切换后保存并回显返回值", async () => {
+  it("启动行为两项并排、文字在上开关在下，中间一条竖分隔线（对齐 Mac）", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    // Mac `SettingsView`：右侧 `HStack(spacing: 10)` 两组「标签在上、开关在下」，
+    // 中间 `Divider().frame(height: 34)`。Windows 用同样的 DOM 顺序 + flex 布局。
+    const toggles = wrapper.get(".launch-behavior-toggles");
+    const children = Array.from(toggles.element.children).map((child) =>
+      (child as HTMLElement).className,
+    );
+    expect(children).toEqual([
+      "toggle-row launch-toggle",
+      "launch-toggle-divider",
+      "toggle-row launch-toggle",
+    ]);
+    expect(toggles.findAll(".launch-toggle")).toHaveLength(2);
+    expect(toggles.get(".launch-toggle-divider").attributes("aria-hidden")).toBe("true");
+  });
+
+  it("启动行为说明句与悬停提示取 Mac 原文（托盘替换菜单栏）", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    const row = wrapper.get(".launch-behavior-toggles").element.closest(".settings-row");
+    expect(row?.textContent).toContain("设置登录后自动启动和应用启动时是否打开主窗口。");
+    expect(
+      wrapper.get('label[title*="更新完成后仍会显示主面板"]').attributes("title"),
+    ).toBe("关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。");
+  });
+
+  it("启动时自动打开主面板默认开启，切换后保存并回显返回值", async () => {
     bridge.setOpenWindowAtLaunch.mockResolvedValue(false);
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
@@ -248,7 +278,7 @@ describe("settings page", () => {
     expect(toggle.element.checked).toBe(false);
   });
 
-  it("启动时自动打开主页面保存失败时就地报错并保持原状态", async () => {
+  it("启动时自动打开主面板保存失败时就地报错并保持原状态", async () => {
     bridge.setOpenWindowAtLaunch.mockRejectedValue(new Error("保存启动页面设置失败"));
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
