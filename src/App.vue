@@ -19,6 +19,7 @@ import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
+import RecommendationsPage from "./pages/RecommendationsPage.vue";
 
 const activePage = ref<PageId>(loadPersistedPage() ?? "buttons");
 watch(activePage, (page) => persistActivePage(page));
@@ -76,14 +77,19 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 
 const activeComponent = computed(() => ({
   buttons: ButtonsPage,
+  recommendations: RecommendationsPage,
   connection: ConnectionPage,
   permissions: PermissionsPage,
   settings: SettingsPage,
 })[activePage.value]);
 
-// 横幅不在"设置"页重复显示（页面内已有完整更新面板）。
+// 横幅不在"设置"页重复显示（页面内已有完整更新面板）；推荐页由原生子 WebView
+// 覆盖内容区，横幅即使渲染也看不到，直接跳过。
 const updateBannerVisible = computed(
-  () => bannerVisible.value && activePage.value !== "settings",
+  () =>
+    bannerVisible.value &&
+    activePage.value !== "settings" &&
+    activePage.value !== "recommendations",
 );
 
 function showUpdatePage(): void {

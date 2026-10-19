@@ -8,6 +8,7 @@
 
 以下功能均以 Mac App 的产品流程、页面结构、状态反馈、文案语义和异常处理为实现参考；开发前先完成对照调研并记录结论。Windows 侧仍须遵守本仓库架构边界，只使用公开 API、公开协议、全局快捷键和用户可见的辅助功能界面；因平台能力产生的差异须在 `ATTRIBUTION.md`、路线图或对应调查文档中说明，不直接移植 macOS 平台代码。
 
+- [ ] 推荐页（2026-10-18，用户指定）：参考 Mac 设置侧栏「推荐」入口，Windows 侧直接加载官网 `https://sayall.app/recommendations/`，不复制推荐内容或自建推荐 UI。官网设置了 `X-Frame-Options: DENY`，因此使用 Tauri 主窗口内嵌子 WebView（`unstable` 多 WebView），固定右侧内容区、`embed=app&appPlatform=windows&theme=...`、加载/失败/重试/打开官网、站外链接交系统浏览器、迟到导航按 generation 丢弃、主文档 HTTP 状态单独判定。产品规范见 `docs/product/recommendations.md`。自动化：前端 378 passed | 11 skipped、构建通过；`cargo test --workspace` 全通过（推荐页 4 个单测）。**本地测试包 1.0.0 passed**：安装版进入推荐页 `http_status=200`、浅/深色、默认与放大窗口、离开隐藏均实测。2026-10-19 修复「按钮点了没反应」：opener 插件注入脚本在子 WebView 内被 ACL 拒绝（`Bugs/2026-10-19-recommendations-links-not-clickable.md`），改为关闭注入、由 `on_new_window` 交系统浏览器；CDP 与安装包双重复验 `external_link result=passed`。**deferred**：断网/5xx 失败页、网页内详情、跨屏 DPI、托盘恢复。
 - [ ] 增加首次使用 Onboarding 流程页面：参考 Mac App 的步骤顺序和完成条件，覆盖遥控器连接、语音输出设备、目标输入法选择、按住说话验证与失败恢复；支持中断后继续、完成后重新进入，并为关键状态、分支和外部调用补齐结构化日志。
   - ⏳ 2026-10-04 第⑤步「按住说话验证」根因定位并修复：主进程内的两个 LL 键盘钩子与前台窗口同进程时，豆包语音热键在本窗口失效；修复=两钩子迁至独立按键宿主进程（切片 1–3，`0cbb0e3`/`0cb4158`/`ae76177`）。**真机验收 deferred**：待用本分支验收包按 `Testing/WindowsOnboardingWizard.md` 用例三第 6/7 项执行（右 Alt 语音条 + 门控回归）；记录见 `Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md`。
   - ⏳ 2026-10-05 向导分步日志（每步可定位卡点）：`phase=action` begin/end 成对（外部调用）、`phase=heartbeat` 30s 心跳（step + 门禁码 + 等待摘要）、各步骤领域事件补齐；脱敏只落稳定 token 与计数（自动化断言遥控器/端点身份字段绝不出现）。速查表见 `Testing/WindowsOnboardingWizard.md`「分步日志」；`pnpm test` 245 passed。**真机日志抽查 deferred**（随验收包一次跑）。
