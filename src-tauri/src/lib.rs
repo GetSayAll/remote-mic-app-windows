@@ -1982,8 +1982,35 @@ async fn save_macro(
     result
 }
 
-/// 删除组合动作（该 ID 的全部版本）。引用它的按键/动作在执行期显示
-/// 「本机不可用」，不在这里连带改写（对齐 Mac「删除后引用方显示不可用」）。
+/// 删除前的引用清单：哪些按键绑定了它、哪些组合动作嵌套引用它。
+///
+/// 删除确认弹窗用它把影响说清楚（2026-10-15 用户要求：按键要改成未设置、
+/// 嵌套引用要提示）。
+#[tauri::command]
+async fn macro_references(
+    state: tauri::State<'_, AppState>,
+    macro_id: String,
+) -> Result<sayall_windows::send_input::MacroReferenceReport, String> {
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<sayall_windows::send_input::MacroReferenceReport, String> {
+            let library = settings.load_combined_actions()?;
+            let mappings = settings.load_button_mappings()?;
+            Ok(sayall_windows::send_input::collect_macro_references(
+                &macro_id,
+                &library.definitions,
+                &mappings,
+            ))
+        },
+    )
+    .await
+    .map_err(|error| format!("读取组合动作引用失败：{error}"))?
+}
+
+/// 删除组合动作（该 ID 的全部版本），并把绑定它的按键槽位改成「未设置」。
+///
+/// 嵌套引用不改写：执行期按 `missing_dependency` 报「本机不可用」（对齐 Mac），
+/// 删除前的确认弹窗已列出受影响的组合动作名称。
 #[tauri::command]
 async fn delete_macro(
     state: tauri::State<'_, AppState>,
@@ -1997,12 +2024,20 @@ async fn delete_macro(
     let platform = Arc::clone(&state.platform);
     let log_macro_id = macro_id.clone();
     let result = match tauri::async_runtime::spawn_blocking(
-        move || -> Result<MacroLibraryDocument, String> {
+        move || -> Result<(MacroLibraryDocument, usize), String> {
             let mut current = settings.load_combined_actions()?;
             current.definitions.retain(|item| item.macro_id != macro_id);
             let saved = settings.save_combined_actions(current)?;
             platform.set_macro_library(saved.clone());
-            Ok(saved)
+            // 按键绑定联动：引用被删动作的槽位一律改成「未设置」。
+            let mut mappings = settings.load_button_mappings()?;
+            let cleared =
+                sayall_windows::send_input::clear_macro_references(&mut mappings, &macro_id);
+            if cleared > 0 {
+                let saved_mappings = settings.save_button_mappings(mappings)?;
+                platform.set_button_mappings(saved_mappings);
+            }
+            Ok((saved, cleared))
         },
     )
     .await
@@ -2011,8 +2046,8 @@ async fn delete_macro(
         Err(error) => Err(format!("删除组合动作任务失败：{error}")),
     };
     sayall_windows::gatt_note(match &result {
-        Ok(document) => format!(
-            "shortcut_settings feature=combined_actions action=delete phase=completed terminal_result=passed macro_id={log_macro_id} definitions={} elapsed_ms={}",
+        Ok((document, cleared)) => format!(
+            "shortcut_settings feature=combined_actions action=delete phase=completed terminal_result=passed macro_id={log_macro_id} definitions={} cleared_button_slots={cleared} elapsed_ms={}",
             document.definitions.len(),
             started.elapsed().as_millis()
         ),
@@ -2021,7 +2056,7 @@ async fn delete_macro(
             started.elapsed().as_millis()
         ),
     });
-    result
+    result.map(|(document, _)| document)
 }
 
 /// 导出组合动作库（文件对话框取消返回 false）。
@@ -4082,6 +4117,7 @@ pub fn run() {
         test_button_mapping,
         learn_focus_target,
         learn_focus_point,
+        macro_references,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,
@@ -4166,6 +4202,7 @@ pub fn run() {
         test_button_mapping,
         learn_focus_target,
         learn_focus_point,
+        macro_references,
         test_app_focus,
         list_preset_apps,
         pick_custom_app,

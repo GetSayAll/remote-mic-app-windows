@@ -405,14 +405,20 @@ pub struct AppFocusProfile {
 }
 
 impl AppFocusProfile {
-    /// 规范化：字段与策略必须自洽，否则整条返回 `None`（调用方丢弃并记日志）。
-    pub fn normalized(mut self) -> Option<Self> {
+    /// 规范化：字段与策略保持自洽。
+    ///
+    /// **策略本身永远保留**，只清掉与策略不符或无效的载荷（2026-10-15 现场：
+    /// 用户点了「用应用快捷键聚焦 / 聚焦已记录的输入框 / 记录点击位置」但还没录入
+    /// 数据时，早前实现把整条档案丢弃，保存回读后选中态退回「只打开应用」、
+    /// 「测试打开与聚焦」一直禁用——表现就是"这几个按钮点不动"）。
+    /// 载荷缺失改由执行期给出明确原因（未录入快捷键 / 还没有学习过输入框 /
+    /// 还没有记录点击位置）。
+    pub fn normalized(mut self) -> Self {
         match self.strategy {
             FocusStrategy::OpenOnly => {
                 self.shortcut = None;
                 self.recorded = None;
                 self.point = None;
-                Some(self)
             }
             FocusStrategy::AppShortcut => {
                 self.recorded = None;
@@ -422,23 +428,21 @@ impl AppFocusProfile {
                     .as_ref()
                     .is_some_and(|chord| !chord.keys.is_empty());
                 if !has_keys {
-                    return None;
+                    self.shortcut = None;
                 }
-                Some(self)
             }
             FocusStrategy::RecordedElement => {
                 self.shortcut = None;
                 self.point = None;
-                self.recorded = Some(self.recorded.and_then(|target| target.normalized())?);
-                Some(self)
+                self.recorded = self.recorded.and_then(|target| target.normalized());
             }
             FocusStrategy::RecordedPoint => {
                 self.shortcut = None;
                 self.recorded = None;
-                self.point = Some(self.point.and_then(|point| point.normalized())?);
-                Some(self)
+                self.point = self.point.and_then(|point| point.normalized());
             }
         }
+        self
     }
 }
 
@@ -747,25 +751,16 @@ impl FocusRequestGate {
     }
 }
 
-/// 规范化整份聚焦档案表：丢弃非法条目，并把条数压到上限内。
+/// 规范化整份聚焦档案表：把每条档案清成自洽形态，并把条数压到上限内。
 ///
-/// 返回被丢弃的键（供调用方记日志，便于用户排查「为什么设置没保存」）。
+/// 返回被丢弃的键（只可能是超出条数上限的条目；策略本身永远保留，见
+/// [`AppFocusProfile::normalized`]）。
 pub fn normalize_focus_profiles(profiles: &mut BTreeMap<String, AppFocusProfile>) -> Vec<String> {
     let mut dropped = Vec::new();
     let keys: Vec<String> = profiles.keys().cloned().collect();
     for key in keys {
-        let normalized = profiles
-            .get(&key)
-            .cloned()
-            .and_then(AppFocusProfile::normalized);
-        match normalized {
-            Some(profile) => {
-                profiles.insert(key, profile);
-            }
-            None => {
-                profiles.remove(&key);
-                dropped.push(key);
-            }
+        if let Some(profile) = profiles.get(&key).cloned() {
+            profiles.insert(key, profile.normalized());
         }
     }
     while profiles.len() > MAX_FOCUS_PROFILES {
@@ -828,20 +823,24 @@ mod tests {
     }
 
     #[test]
-    fn profile_requires_fields_matching_its_strategy() {
-        // app_shortcut 没给快捷键 → 整条丢弃
+    fn profile_clears_payload_that_does_not_match_its_strategy() {
+        // app_shortcut 没给快捷键 → 策略保留，载荷清空（执行期报"未录入快捷键"）
         let invalid = AppFocusProfile {
             strategy: FocusStrategy::AppShortcut,
             ..Default::default()
-        };
-        assert!(invalid.normalized().is_none());
+        }
+        .normalized();
+        assert_eq!(invalid.strategy, FocusStrategy::AppShortcut);
+        assert!(invalid.shortcut.is_none());
 
-        // recorded_element 没给记录 → 整条丢弃
+        // recorded_element 没给记录 → 同样保留策略
         let invalid = AppFocusProfile {
             strategy: FocusStrategy::RecordedElement,
             ..Default::default()
-        };
-        assert!(invalid.normalized().is_none());
+        }
+        .normalized();
+        assert_eq!(invalid.strategy, FocusStrategy::RecordedElement);
+        assert!(invalid.recorded.is_none());
 
         // open_only 永远可用（忽略附带字段）
         let open = AppFocusProfile {
@@ -850,11 +849,11 @@ mod tests {
                 keys: vec![crate::send_input::KeyCode::RightAlt],
             }),
             ..Default::default()
-        };
-        let normalized = open.normalized().unwrap();
-        assert_eq!(normalized.strategy, FocusStrategy::OpenOnly);
-        assert!(normalized.shortcut.is_none());
-        assert!(normalized.recorded.is_none());
+        }
+        .normalized();
+        assert_eq!(open.strategy, FocusStrategy::OpenOnly);
+        assert!(open.shortcut.is_none());
+        assert!(open.recorded.is_none());
     }
 
     #[test]
@@ -877,10 +876,9 @@ mod tests {
             recorded: Some(target),
             point: None,
         }
-        .normalized()
-        .expect("合法记录必须保留");
+        .normalized();
 
-        let recorded = profile.recorded.unwrap();
+        let recorded = profile.recorded.expect("合法记录必须保留");
         assert!(recorded.automation_id.chars().count() <= MAX_SEMANTIC_LEN);
         assert!(recorded.class_name.chars().count() <= MAX_SEMANTIC_LEN);
         assert!(recorded.name.chars().count() <= MAX_SEMANTIC_LEN);
@@ -893,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_target_without_any_anchor_is_rejected() {
+    fn recorded_target_without_any_anchor_keeps_strategy_but_drops_payload() {
         let empty = RecordedFocusTarget {
             control_type: "Edit".to_owned(),
             ..Default::default()
@@ -903,8 +901,12 @@ mod tests {
             shortcut: None,
             recorded: Some(empty),
             point: None,
-        };
-        assert!(profile.normalized().is_none());
+        }
+        .normalized();
+        // 策略必须保留（否则 UI 选中态会被回读打回「只打开应用」），
+        // 无效载荷清空，执行期报「还没有学习过输入框」。
+        assert_eq!(profile.strategy, FocusStrategy::RecordedElement);
+        assert!(profile.recorded.is_none());
     }
 
     #[test]
@@ -921,10 +923,12 @@ mod tests {
                 shortcut: None,
                 recorded: Some(target),
                 point: None,
-            };
+            }
+            .normalized();
+            assert_eq!(profile.strategy, FocusStrategy::RecordedElement);
             assert!(
-                profile.normalized().is_none(),
-                "含「{semantic}」的记录必须被拒绝"
+                profile.recorded.is_none(),
+                "含「{semantic}」的记录必须被丢弃"
             );
         }
 
@@ -935,17 +939,38 @@ mod tests {
             name: "地址和搜索栏".to_owned(),
             ..Default::default()
         };
-        let profile = AppFocusProfile {
+        let normalized = AppFocusProfile {
             strategy: FocusStrategy::RecordedElement,
             shortcut: None,
             recorded: Some(address_bar),
             point: None,
-        };
-        let normalized = profile.normalized().expect("用户主动记录的地址栏应保留");
+        }
+        .normalized();
         assert_eq!(
             normalized.recorded.map(|target| target.name),
             Some("地址和搜索栏".to_owned())
         );
+    }
+
+    #[test]
+    fn selecting_a_strategy_without_payload_is_persisted() {
+        // 2026-10-15 现场（"这几个按钮点不动"）：选中策略但还没录数据时，
+        // 早前实现整条丢弃 ⇒ 保存回读后选中态退回「只打开应用」、测试按钮一直禁用。
+        for strategy in [
+            FocusStrategy::AppShortcut,
+            FocusStrategy::RecordedElement,
+            FocusStrategy::RecordedPoint,
+        ] {
+            let profile = AppFocusProfile {
+                strategy,
+                ..Default::default()
+            }
+            .normalized();
+            assert_eq!(profile.strategy, strategy, "策略必须原样保留");
+            assert!(profile.shortcut.is_none());
+            assert!(profile.recorded.is_none());
+            assert!(profile.point.is_none());
+        }
     }
 
     #[test]
@@ -1111,22 +1136,27 @@ mod tests {
             }),
             ..Default::default()
         };
-        let normalized = profile.clone().normalized().expect("位置记录可用");
+        let normalized = profile.clone().normalized();
         assert!(normalized.recorded.is_none(), "非当前策略的字段应被清空");
         assert!(normalized.shortcut.is_none());
+        assert!(normalized.point.is_some(), "当前策略的载荷必须保留");
 
-        // 缺 point：整条丢弃（与 recorded_element 缺 recorded 同口径）
+        // 缺 point：策略保留、载荷为空（执行期报"还没有记录点击位置"）
         profile.point = None;
-        assert!(profile.clone().normalized().is_none());
+        let normalized = profile.clone().normalized();
+        assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
+        assert!(normalized.point.is_none());
 
-        // 越界比例同样丢弃
+        // 越界比例同样清空载荷
         profile.point = Some(RecordedPoint {
             x_ratio: 1.5,
             y_ratio: 0.9,
             window_width: 1200,
             window_height: 800,
         });
-        assert!(profile.normalized().is_none());
+        let normalized = profile.normalized();
+        assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
+        assert!(normalized.point.is_none());
     }
 
     #[test]
@@ -1298,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_profile_map_drops_invalid_entries_and_caps_size() {
+    fn focus_profile_map_keeps_every_strategy_and_caps_size() {
         let mut profiles: BTreeMap<String, AppFocusProfile> = BTreeMap::new();
         profiles.insert(
             "wechat".to_owned(),
@@ -1309,10 +1339,14 @@ mod tests {
         );
         profiles.insert("notepad".to_owned(), AppFocusProfile::default());
 
+        // 策略已选但还没录数据：必须保留（否则保存回读会把 UI 选中态打回默认）。
         let dropped = normalize_focus_profiles(&mut profiles);
-        assert_eq!(dropped, vec!["wechat".to_owned()]);
-        assert_eq!(profiles.len(), 1);
-        assert!(profiles.contains_key("notepad"));
+        assert!(dropped.is_empty(), "不得按「载荷缺失」丢弃整条档案");
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles.get("wechat").map(|profile| profile.strategy),
+            Some(FocusStrategy::AppShortcut)
+        );
 
         let mut many: BTreeMap<String, AppFocusProfile> = BTreeMap::new();
         for index in 0..(MAX_FOCUS_PROFILES + 5) {

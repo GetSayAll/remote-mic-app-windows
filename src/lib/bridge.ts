@@ -1891,6 +1891,25 @@ export async function deleteMacro(macroId: string): Promise<MacroLibraryDocument
   return invoke<MacroLibraryDocument>("delete_macro", { macroId });
 }
 
+/** 删除前的引用清单（按键 + 嵌套引用）。 */
+export interface MacroButtonReference {
+  button: string;
+  trigger: string;
+}
+
+export interface MacroReferenceReport {
+  buttons: MacroButtonReference[];
+  nestedIn: string[];
+}
+
+/** 查询引用该组合动作的按键与组合动作（删除确认用）。 */
+export async function macroReferences(macroId: string): Promise<MacroReferenceReport> {
+  if (!isTauriRuntime()) {
+    return { buttons: [], nestedIn: [] };
+  }
+  return invoke<MacroReferenceReport>("macro_references", { macroId });
+}
+
 /** 导出组合动作库；用户取消返回 false。 */
 export async function exportCombinedActions(): Promise<boolean> {
   if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法导出组合动作");

@@ -764,6 +764,108 @@ fn default_enabled() -> bool {
     true
 }
 
+/// 删除前的引用清单（按键绑定 + 嵌套引用）。
+///
+/// 与执行期语义一致：按键绑定按 `macro_id` 匹配（编辑组合动作后所有引用自动生效），
+/// 嵌套引用看步骤参数 `nested_macro_id`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroReferenceReport {
+    /// 引用该动作的按键（按键与触发方式是稳定 token，由前端本地化）。
+    pub buttons: Vec<MacroButtonReference>,
+    /// 嵌套引用它的其它组合动作名称。
+    pub nested_in: Vec<String>,
+}
+
+/// 单个按键引用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroButtonReference {
+    pub button: String,
+    pub trigger: String,
+}
+
+/// 收集引用（纯函数，便于单测）。
+pub fn collect_macro_references(
+    macro_id: &str,
+    definitions: &[sayall_core::MacroDefinition],
+    mappings: &ButtonMappings,
+) -> MacroReferenceReport {
+    let mut buttons = Vec::new();
+    for (button, actions) in &mappings.actions {
+        for (trigger, action) in [
+            (ButtonTrigger::Single, &actions.single),
+            (ButtonTrigger::Double, &actions.double),
+            (ButtonTrigger::Long, &actions.long),
+        ] {
+            if let ButtonAction::RunMacro {
+                macro_id: referenced,
+                ..
+            } = action
+            {
+                if referenced == macro_id {
+                    buttons.push(MacroButtonReference {
+                        button: format!("{button:?}").to_lowercase(),
+                        trigger: format!("{trigger:?}").to_lowercase(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut nested_in: Vec<String> = Vec::new();
+    for definition in sayall_core::macros::latest_definitions(definitions) {
+        if definition.macro_id == macro_id {
+            continue;
+        }
+        let references = definition.steps.iter().any(|step| {
+            step.action == sayall_core::MacroAction::RunMacro
+                && step.parameters.nested_macro_id.as_deref() == Some(macro_id)
+        });
+        if references {
+            nested_in.push(definition.name);
+        }
+    }
+
+    MacroReferenceReport { buttons, nested_in }
+}
+
+/// 删除联动：把引用该动作的按键槽位改成「未设置」（Disabled）。
+///
+/// 返回被改写的槽位数（供日志）。嵌套引用**不改写**：其它组合动作的步骤保留，
+/// 执行期按 `missing_dependency` 报「本机不可用」，与 Mac 语义一致；界面在删除前
+/// 已把名称列出来提示。
+pub fn clear_macro_references(mappings: &mut ButtonMappings, macro_id: &str) -> usize {
+    let mut cleared = 0;
+    for actions in mappings.actions.values_mut() {
+        for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+            let matches = matches!(
+                action,
+                ButtonAction::RunMacro {
+                    macro_id: referenced,
+                    ..
+                } if referenced == macro_id
+            );
+            if matches {
+                *action = ButtonAction::Disabled;
+                cleared += 1;
+            }
+        }
+        // 「按住连续触发」指向的槽位若被清空，连同一并关掉（否则留下指向空槽的开关）。
+        if let Some(trigger) = actions.hold_repeat {
+            let slot_is_empty = match trigger {
+                ButtonTrigger::Single => actions.single == ButtonAction::Disabled,
+                ButtonTrigger::Double => actions.double == ButtonAction::Disabled,
+                ButtonTrigger::Long => actions.long == ButtonAction::Disabled,
+            };
+            if slot_is_empty {
+                actions.hold_repeat = None;
+            }
+        }
+    }
+    cleared
+}
+
 impl Default for ButtonMappings {
     fn default() -> Self {
         Self {
@@ -1869,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_drops_invalid_focus_profiles_and_keeps_valid_ones() {
+    fn normalized_keeps_focus_profiles_even_without_payload() {
         let mut mappings = ButtonMappings::default();
         mappings.focus_profiles.insert(
             "wechat".to_owned(),
@@ -1884,7 +1986,8 @@ mod tests {
                 point: None,
             },
         );
-        // 非法：app_shortcut 但没有快捷键 → 整条丢弃
+        // 选了策略但还没录快捷键：策略必须保留（2026-10-15 现场"按钮点不动"），
+        // 否则保存回读后选中态退回「只打开应用」。
         mappings.focus_profiles.insert(
             "bad-target".to_owned(),
             crate::focus::AppFocusProfile {
@@ -1899,9 +2002,20 @@ mod tests {
             "合法档案必须保留"
         );
         assert!(
-            !normalized.focus_profiles.contains_key("bad-target"),
-            "非法档案必须被丢弃"
+            normalized.focus_profiles.contains_key("bad-target"),
+            "已选策略必须保留，只有载荷为空"
         );
+        assert_eq!(
+            normalized
+                .focus_profiles
+                .get("bad-target")
+                .map(|profile| profile.strategy),
+            Some(crate::focus::FocusStrategy::AppShortcut)
+        );
+        assert!(normalized
+            .focus_profiles
+            .get("bad-target")
+            .is_some_and(|profile| profile.shortcut.is_none()));
     }
 
     fn shortcut(keys: &[KeyCode]) -> ButtonAction {
@@ -2130,6 +2244,118 @@ mod tests {
                 macro_version: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn deleting_a_macro_clears_only_its_button_bindings() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Home,
+            ButtonActions {
+                single: ButtonAction::RunMacro {
+                    macro_id: "macro.delete1".to_owned(),
+                    macro_version: "1.0.0".to_owned(),
+                },
+                long: ButtonAction::RunMacro {
+                    macro_id: "macro.keep001".to_owned(),
+                    macro_version: "1.0.0".to_owned(),
+                },
+                hold_repeat: Some(ButtonTrigger::Single),
+                ..ButtonActions::default()
+            },
+        );
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                double: ButtonAction::RunMacro {
+                    macro_id: "macro.delete1".to_owned(),
+                    macro_version: "1.0.0".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+
+        let cleared = clear_macro_references(&mut mappings, "macro.delete1");
+        assert_eq!(cleared, 2, "两个槽位引用同一动作");
+
+        let home = &mappings.actions[&RemoteButton::Home];
+        assert_eq!(
+            home.single,
+            ButtonAction::Disabled,
+            "被删动作的槽位改成未设置"
+        );
+        assert_eq!(
+            home.hold_repeat, None,
+            "连发开关指向的槽位被清空时必须一并关掉"
+        );
+        assert!(
+            matches!(home.long, ButtonAction::RunMacro { ref macro_id, .. } if macro_id == "macro.keep001"),
+            "其它动作不受影响"
+        );
+        assert_eq!(
+            mappings.actions[&RemoteButton::Ok].double,
+            ButtonAction::Disabled
+        );
+    }
+
+    #[test]
+    fn macro_reference_report_lists_buttons_and_nesting() {
+        use sayall_core::macros::{
+            MacroAction, MacroDefinition, MacroParameters, MacroStep, MACRO_SCHEMA_VERSION,
+        };
+        let step = |action: MacroAction, nested: Option<&str>| MacroStep {
+            step_id: "step.01".to_owned(),
+            action,
+            timeout_ms: None,
+            parameters: MacroParameters {
+                nested_macro_id: nested.map(str::to_owned),
+                ..Default::default()
+            },
+        };
+        let definitions = vec![
+            MacroDefinition {
+                schema_version: MACRO_SCHEMA_VERSION.to_owned(),
+                macro_id: "macro.delete1".to_owned(),
+                version: "1.0.0".to_owned(),
+                name: "被删的动作".to_owned(),
+                summary: None,
+                steps: vec![step(MacroAction::OpenUrl, None)],
+            },
+            MacroDefinition {
+                schema_version: MACRO_SCHEMA_VERSION.to_owned(),
+                macro_id: "macro.parent1".to_owned(),
+                version: "1.0.0".to_owned(),
+                name: "父动作".to_owned(),
+                summary: None,
+                steps: vec![step(MacroAction::RunMacro, Some("macro.delete1"))],
+            },
+        ];
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Home,
+            ButtonActions {
+                single: ButtonAction::RunMacro {
+                    macro_id: "macro.delete1".to_owned(),
+                    macro_version: "1.0.0".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+
+        let report = collect_macro_references("macro.delete1", &definitions, &mappings);
+        assert_eq!(
+            report.buttons,
+            vec![MacroButtonReference {
+                button: "home".to_owned(),
+                trigger: "single".to_owned(),
+            }]
+        );
+        assert_eq!(report.nested_in, vec!["父动作".to_owned()]);
+
+        // 没有引用的动作：两项都为空（确认弹窗不显示影响段落）。
+        let empty = collect_macro_references("macro.none999", &definitions, &mappings);
+        assert!(empty.buttons.is_empty());
+        assert!(empty.nested_in.is_empty());
     }
 
     #[test]

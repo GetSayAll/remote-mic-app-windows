@@ -9,6 +9,8 @@
  */
 import { computed, onMounted, ref } from "vue";
 import {
+  buttonLabel,
+  buttonTriggerLabel,
   cancelMacro,
   deleteMacro,
   exportCombinedActions,
@@ -24,6 +26,7 @@ import {
   listPresetApps,
   macroActionLabel,
   macroChordLabel,
+  macroReferences,
   macroStartErrorLabel,
   macroStepOutcomeLabel,
   macroStepSummary,
@@ -48,9 +51,12 @@ import {
   type MacroDefinition,
   type MacroLibraryDocument,
   type MacroModifier,
+  type MacroReferenceReport,
   type MacroRunReport,
   type MacroStep,
+  type ButtonTrigger,
   type PresetAppInfo,
+  type RemoteButton,
   type RuntimeSnapshot,
   type ShortcutCaptureEdge,
 } from "../lib/bridge";
@@ -77,6 +83,8 @@ const draft = ref<MacroDefinition | null>(null);
 const isNewMacro = ref(false);
 const selectedStepId = ref<string | null>(null);
 const pendingDeleteId = ref<string | null>(null);
+/** 删除确认里的引用清单（按键 + 嵌套引用；查询中为 null）。 */
+const deleteReferences = ref<MacroReferenceReport | null>(null);
 
 const presetApps = ref<PresetAppInfo[]>([]);
 const capturedChord = ref<KeyChord | null>(null);
@@ -212,8 +220,33 @@ function cancelEditing(): void {
 }
 
 function toggleDelete(macroId: string): void {
-  pendingDeleteId.value = pendingDeleteId.value === macroId ? null : macroId;
+  if (pendingDeleteId.value === macroId) {
+    pendingDeleteId.value = null;
+    deleteReferences.value = null;
+    return;
+  }
+  pendingDeleteId.value = macroId;
+  deleteReferences.value = null;
+  void macroReferences(macroId)
+    .then((report) => {
+      // 用户可能已取消或换了目标：只写当前目标的结果。
+      if (pendingDeleteId.value === macroId) deleteReferences.value = report;
+    })
+    .catch(() => {
+      if (pendingDeleteId.value === macroId) {
+        deleteReferences.value = { buttons: [], nestedIn: [] };
+      }
+    });
 }
+
+/** 引用清单的用户文案（"确定·单击、主页·长按"）。 */
+const deleteReferenceText = computed<string>(() => {
+  const report = deleteReferences.value;
+  if (!report || report.buttons.length === 0) return "";
+  return report.buttons
+    .map((item) => `${buttonLabel(item.button as RemoteButton)}·${buttonTriggerLabel(item.trigger as ButtonTrigger)}`)
+    .join("、");
+});
 
 async function confirmDelete(macroId: string): Promise<void> {
   try {
@@ -221,7 +254,9 @@ async function confirmDelete(macroId: string): Promise<void> {
     applyLibrary(library);
     selectedMacroId.value = definitions.value[0]?.macroId ?? null;
     pendingDeleteId.value = null;
-    setStatus("组合动作已删除", "success");
+    deleteReferences.value = null;
+    // 按键页每次进入都会重新读取映射；后端已把绑定该动作的槽位改成「未设置」。
+    setStatus("组合动作已删除，绑定它的按键已改为未设置", "success");
   } catch (error) {
     setStatus(`删除失败：${messageOf(error)}`, "error");
   }
@@ -859,9 +894,23 @@ onMounted(async () => {
             </button>
           </div>
           <div v-if="pendingDeleteId === selectedDefinition.macroId" class="delete-confirm">
-            删除后，引用此动作的按键和组合动作将显示不可用。
+            <p class="delete-confirm-lead">删除后不可恢复。</p>
+            <p v-if="deleteReferenceText" class="delete-confirm-impact">
+              这些按键会改为<strong>未设置</strong>：{{ deleteReferenceText }}
+            </p>
+            <p
+              v-if="deleteReferences && deleteReferences.nestedIn.length > 0"
+              class="delete-confirm-impact"
+            >
+              这些组合动作嵌套引用了它，删除后会显示<strong>不可用</strong>：{{
+                deleteReferences.nestedIn.join("、")
+              }}
+            </p>
+            <p v-if="deleteReferences && !deleteReferenceText && deleteReferences.nestedIn.length === 0" class="delete-confirm-impact">
+              没有按键或组合动作引用它。
+            </p>
             <div class="btn-row">
-              <button class="btn" type="button" @click="pendingDeleteId = null">取消</button>
+              <button class="btn" type="button" @click="toggleDelete(selectedDefinition.macroId)">取消</button>
               <button
                 class="btn danger"
                 type="button"
@@ -1513,6 +1562,14 @@ onMounted(async () => {
   border-radius: 10px;
   padding: 12px 14px;
   font-size: 13px;
+}
+.delete-confirm-lead {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.delete-confirm-impact {
+  margin: 0 0 6px;
+  line-height: 1.5;
 }
 .delete-confirm .btn-row {
   margin-top: 10px;

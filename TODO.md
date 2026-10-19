@@ -35,9 +35,10 @@
   - ⏳ 2026-10-15 现场修复三轮（`ce7a850` + `f4dc733` + `8a3157b`）：打包应用（计算器）按 **AUMID** 判定"是否已在运行/要不要前置"，不再每次新开实例、不再等满超时；启动成功后主动置前——修"第一按只打开、第二按才到前台"（真机：冷启动与后台两种场景，`ApplicationFrameHost` 置前、实例数恒为 1）。探针 `app_readiness_probe --activate` 支持真机激活取证。记录：`Bugs/2026-10-02-registered-apps-open-new-instance.md`。
   - ⏳ 2026-10-15 现场修复四轮（`1b8b029`）：聚焦步骤「学习输入框」结果**只显示成功却没落盘**（按键页写 `focusProfiles`，宏页面不写）⇒ 步骤永远缺档案；改为与按键页同一落盘口径，步骤卡显示前置状态（已学习 / 还没有）、失败文案由机器码（`SendInput failed: no_candidate`）改为中文原因。记录：`Bugs/2026-10-15-combo-focus-learn-not-persisted.md`。
   - ⏳ 2026-10-15 现场修复五轮（`fa23260`）：**地址栏可学习**（门槛分档：自动选择仍拒绝地址栏，用户主动点击允许记录；真机 Chrome omnibox 修复前 `NoCandidate` → 修复后 `learned id_chars=9`）；**新增「记录点击位置」策略**（微信 4.x 对 `OBJID_CLIENT`/`UiaRootObjectId` 都返回 0、UIA 树里没有任何输入框 ⇒ 按位置点击兜底：记录相对坐标 + 窗口尺寸校验 ±25%，真机记事本取证 `absolute=(2389,694)`、`click_submitted=ok`、焦点落回 `Document`）；按键页恢复「聚焦输入框」动作与「打开后聚焦方式」面板（2026-10-03 隐藏，本轮按 Mac 端恢复并多一档位置记录）。新探针 `Testing/probe-msaa-provider.ps1`。记录：`Bugs/2026-10-15-focus-address-bar-and-recorded-point.md`。
+  - ⏳ 2026-10-16 现场修复六轮：**聚焦方式按钮"点不动"**（选中策略但还没录数据时，`AppFocusProfile::normalized` 整条丢弃 ⇒ 保存回读把选中态打回「只打开应用」、测试按钮一直禁用；改为永远保留策略、只清空无效载荷）+ **删除组合动作联动**（引用它的按键槽位改成「未设置」、连发开关一并关闭；删除确认列出受影响的按键与嵌套引用它的组合动作名称）。记录：`Bugs/2026-10-16-focus-buttons-unclickable-and-macro-delete-cleanup.md`。
   - **已知边界（记入本条待办）**：「等待应用 → App 窗口已出现」对纯 UWP 目标不可判定（窗口不属于目标进程）——需按 AUMID 匹配窗口才能补强；当前会在超时后判失败。
   - **已知边界**：完全不暴露无障碍接口的应用（微信 4.x、WorkBuddy）只能走「记录点击位置」；窗口尺寸变化超过 25% 会拒绝点击并要求重新记录。
-  - 自动化 passed（五轮修复后重跑）：`cargo test --workspace`（core 54 / windows 382 / app 117）、`cargo fmt --all -- --check`、vitest 398 passed | 10 skipped、`vue-tsc` + `vite build`。
+  - 自动化 passed（六轮修复后重跑）：`cargo test --workspace`（core 54 / windows 385 / app 117）、`cargo fmt --all -- --check`、vitest 399 passed | 10 skipped、`vue-tsc` + `vite build`。
   - **待办**：真机复验（RC001/RC003 全矩阵、微信「记录点击位置」的目视确认）仍 deferred。
 - [ ] 增强捕获：换遥控器后**自动重选宿主**（2026-10-13 现场提出，助手侧已实现）：助手新增目标
   watchdog（每 2 秒复查 `rc003-target.ini`），目标地址变为另一支且宿主不同 ⇒ 记

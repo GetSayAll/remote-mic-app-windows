@@ -39,12 +39,14 @@ const stopShortcutCaptureSpy = vi.hoisted(() => vi.fn());
 const exportSpy = vi.hoisted(() => vi.fn());
 const importSpy = vi.hoisted(() => vi.fn());
 const getCombinedActionsSpy = vi.hoisted(() => vi.fn());
+const macroReferencesSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/bridge")>();
   return {
     ...actual,
     getCombinedActions: getCombinedActionsSpy,
+    macroReferences: macroReferencesSpy,
     saveMacro: saveMacroSpy,
     deleteMacro: deleteMacroSpy,
     exportCombinedActions: exportSpy,
@@ -93,6 +95,7 @@ beforeEach(() => {
     definitions: [definition],
   }));
   deleteMacroSpy.mockReset().mockResolvedValue({ formatVersion: 1, definitions: [] });
+  macroReferencesSpy.mockReset().mockResolvedValue({ buttons: [], nestedIn: [] });
   testMacroDefinitionSpy.mockReset().mockResolvedValue("test.00000000000000000000000000000001");
   testMacroStepSpy.mockReset().mockResolvedValue("test.00000000000000000000000000000002");
   testMacroSpy.mockReset().mockResolvedValue(undefined);
@@ -172,16 +175,38 @@ describe("组合动作页 · 库浏览", () => {
     expect(wrapper.findAll(".macro-item")).toHaveLength(1);
   });
 
-  it("删除是两段式确认；确认后调 delete_macro", async () => {
+  it("删除确认列出受影响的按键与嵌套引用；确认后调 delete_macro", async () => {
+    macroReferencesSpy.mockResolvedValue({
+      buttons: [
+        { button: "ok", trigger: "single" },
+        { button: "home", trigger: "long" },
+      ],
+      nestedIn: ["父动作"],
+    });
     const wrapper = await mountPage();
     await findButton(wrapper, "删除").trigger("click");
-    expect(wrapper.text()).toContain("删除后，引用此动作的按键和组合动作将显示不可用。");
+    await flushPromises();
+    expect(macroReferencesSpy).toHaveBeenCalledWith("macro.aaaaaaa1");
+    // 按键会改成未设置、嵌套引用会显示不可用——两者都要在确认前说清楚。
+    expect(wrapper.text()).toContain("这些按键会改为");
+    expect(wrapper.text()).toContain("确定·单击、主页·长按");
+    expect(wrapper.text()).toContain("这些组合动作嵌套引用了它");
+    expect(wrapper.text()).toContain("父动作");
     const confirm = wrapper
       .findAll(".delete-confirm button")
       .find((item) => item.text() === "删除")!;
     await confirm.trigger("click");
     await flushPromises();
     expect(deleteMacroSpy).toHaveBeenCalledWith("macro.aaaaaaa1");
+    expect(wrapper.text()).toContain("绑定它的按键已改为未设置");
+  });
+
+  it("没有引用时确认弹窗明说没有影响", async () => {
+    macroReferencesSpy.mockResolvedValue({ buttons: [], nestedIn: [] });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "删除").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("没有按键或组合动作引用它");
   });
 
   it("测试动作按最新版本执行并轮询终态文案", async () => {
