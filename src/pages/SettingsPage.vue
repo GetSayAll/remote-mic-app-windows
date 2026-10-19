@@ -4,11 +4,13 @@ import type { AppIconIdentifier, RuntimeSnapshot, ThemePreference } from "../lib
 import {
   getAppIcon,
   getLaunchAtLogin,
+  getOpenWindowAtLaunch,
   openGitHubRepository,
   openOfficialWebsite,
   restartOnboarding,
   setAppIcon,
   setLaunchAtLogin,
+  setOpenWindowAtLaunch,
 } from "../lib/bridge";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
@@ -93,6 +95,15 @@ const launchAtLogin = ref(false);
 const launchAtLoginReady = ref(false);
 const launchAtLoginBusy = ref(false);
 const launchAtLoginError = ref("");
+
+/**
+ * 「启动时自动打开主面板」（2026-10-19，对齐 Mac `openMainWindowAtLaunch`）。
+ * 与登录自启动同样等 IPC 读回后再创建开关本体，避免先闪一下关闭态。
+ */
+const openWindowAtLaunch = ref(true);
+const openWindowAtLaunchReady = ref(false);
+const openWindowAtLaunchBusy = ref(false);
+const openWindowAtLaunchError = ref("");
 
 /**
  * 应用图标（2026-10-02）：占位初值取当前默认（2026-10-04 起 = 几何鸭，与后端
@@ -198,6 +209,23 @@ async function onLaunchAtLoginChange(event: Event): Promise<void> {
   }
 }
 
+async function onOpenWindowAtLaunchChange(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const enabled = input.checked;
+  openWindowAtLaunchBusy.value = true;
+  openWindowAtLaunchError.value = "";
+  try {
+    openWindowAtLaunch.value = await setOpenWindowAtLaunch(enabled);
+  } catch (error) {
+    openWindowAtLaunchError.value = error instanceof Error ? error.message : String(error);
+    // 浏览器已经把复选框翻成用户点击的值；保存失败必须把可见状态拨回实际
+    // 生效值，否则界面会显示一个并没有保存的选择。
+    input.checked = openWindowAtLaunch.value;
+  } finally {
+    openWindowAtLaunchBusy.value = false;
+  }
+}
+
 async function onAppIconChange(event: Event): Promise<void> {
   const desired = (event.target as HTMLInputElement).value as AppIconIdentifier;
   const previous = appIcon.value;
@@ -229,6 +257,10 @@ onMounted(() => {
     // 就绪标志与初值在同一渲染批次生效：开关此时才被创建，创建即带正确
     // checked，不产生属性变更，故无过渡可触发（无需禁用过渡或等待绘制）。
     .finally(() => { launchAtLoginReady.value = true; });
+  void getOpenWindowAtLaunch()
+    .then((enabled) => { openWindowAtLaunch.value = enabled; })
+    .catch((error) => { openWindowAtLaunchError.value = error instanceof Error ? error.message : String(error); })
+    .finally(() => { openWindowAtLaunchReady.value = true; });
   void getAppIcon()
     .then((identifier) => { appIcon.value = identifier; })
     .catch((error) => { appIconError.value = error instanceof Error ? error.message : String(error); })
@@ -431,23 +463,45 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           </span>
           <div class="settings-row-text">
             <strong>启动行为</strong>
-            <p class="muted">登录 Windows 后自动启动无线麦 SayAll。</p>
+            <p class="muted">设置登录后自动启动和应用启动时是否打开主窗口。</p>
           </div>
-          <label class="toggle-row" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
-            <span>登录时自动启动</span>
-            <input
-              v-if="launchAtLoginReady"
-              type="checkbox"
-              class="toggle-input"
-              name="launch-at-login"
-              :checked="launchAtLogin"
-              :disabled="launchAtLoginBusy"
-              @change="onLaunchAtLoginChange"
-            />
-            <span v-else class="toggle-placeholder" aria-hidden="true"></span>
-          </label>
+          <div class="launch-behavior-toggles">
+            <label class="toggle-row launch-toggle" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
+              <span>登录时自动启动</span>
+              <input
+                v-if="launchAtLoginReady"
+                type="checkbox"
+                class="toggle-input"
+                name="launch-at-login"
+                :checked="launchAtLogin"
+                :disabled="launchAtLoginBusy"
+                @change="onLaunchAtLoginChange"
+              />
+              <span v-else class="toggle-placeholder" aria-hidden="true"></span>
+            </label>
+            <span class="launch-toggle-divider" aria-hidden="true"></span>
+            <label
+              class="toggle-row launch-toggle"
+              title="关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。"
+            >
+              <span>启动时自动打开主面板</span>
+              <input
+                v-if="openWindowAtLaunchReady"
+                type="checkbox"
+                class="toggle-input"
+                name="open-window-at-launch"
+                :checked="openWindowAtLaunch"
+                :disabled="openWindowAtLaunchBusy"
+                @change="onOpenWindowAtLaunchChange"
+              />
+              <span v-else class="toggle-placeholder" aria-hidden="true"></span>
+            </label>
+          </div>
         </div>
         <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
+        <p v-if="openWindowAtLaunchError" class="error-text" role="alert">
+          {{ openWindowAtLaunchError }}
+        </p>
 
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
@@ -640,6 +694,32 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 .settings-row-text p { margin: 3px 0 0; font-size: 13px; }
 /* 行内错误与行内说明共用左缩进，读起来仍属于上一行。 */
 .settings-group > .error-text { margin: 0 0 8px 50px; }
+
+/* 启动行为：对齐 Mac `settings.general.launch_behavior` 右侧两组「文字在上、开关在下」，
+   两组之间一条竖分隔线；窗口窄时允许折行，但不挤压左侧说明。 */
+.launch-behavior-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.launch-toggle {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.launch-toggle > span:first-child {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+.launch-toggle-divider {
+  width: 1px;
+  height: 34px;
+  background: var(--border);
+  align-self: center;
+}
 
 /* 应用图标：两个带预览图的选项（选中态用强调色描边，对齐 Mac appIconPreferenceRow）。 */
 .app-icon-selector { display: flex; gap: 8px; }

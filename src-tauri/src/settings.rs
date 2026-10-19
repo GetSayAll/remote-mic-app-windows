@@ -79,6 +79,17 @@ impl SettingsStore {
         })
     }
 
+    /// 启动时是否自动打开主面板（设置页「启动行为」第二项，默认开启）。
+    ///
+    /// 对齐 Mac `openMainWindowAtLaunch`：关闭后普通启动只驻留托盘，托盘菜单、
+    /// 托盘左键或再次启动应用都会显示主面板；未完成首次设置时仍会显示主面板
+    /// （判定在应用启动时）。
+    pub fn save_open_window_at_launch(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存启动时打开主面板设置", move |settings| {
+            settings.open_window_at_launch = enabled;
+        })
+    }
+
     /// RC003 三键增强捕获的用户意图（按键页开关，默认关闭）。
     pub fn save_rc003_capture_enabled(&self, enabled: bool) -> Result<(), String> {
         self.update("保存三键增强捕获开关", move |settings| {
@@ -858,6 +869,27 @@ mod tests {
         assert!(store.load().unwrap().launch_at_login);
         store.save_launch_at_login(false).unwrap();
         assert!(!store.load().unwrap().launch_at_login);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn open_window_at_launch_defaults_on_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-open-window-at-launch-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        // 新装 / 老配置：默认开启（对齐 Mac `openMainWindowAtLaunch`）。
+        assert!(store.load().unwrap().open_window_at_launch);
+
+        store.save_open_window_at_launch(false).unwrap();
+        assert!(!store.load().unwrap().open_window_at_launch);
+
+        store.save_open_window_at_launch(true).unwrap();
+        assert!(store.load().unwrap().open_window_at_launch);
 
         let _ = std::fs::remove_file(path);
     }

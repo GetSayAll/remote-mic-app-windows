@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
-import { getOnboardingState, getRuntimeSnapshot, hideMainWindow, type RuntimeSnapshot } from "./lib/bridge";
+import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
+import {
+  getOnboardingState,
+  getRuntimeSnapshot,
+  hideMainWindow,
+  takeUpdateCompletedVersion,
+  type RuntimeSnapshot,
+} from "./lib/bridge";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
@@ -32,6 +39,13 @@ let initialRuntimeReported = false;
 
 /** 未完成首次设置时进入向导（激活开关见 ONBOARDING_WIZARD_ENABLED）。 */
 const showOnboarding = ref(false);
+
+/**
+ * 「无线麦已更新」（2026-10-19，对齐 Mac `showUpdateCompletedAlert`）：
+ * 本次启动前刚完成更新时，版本号由 Rust 取走（取走即清空）并在这里提示一次。
+ * 读取失败不打扰用户——更新提示不是功能路径。
+ */
+const updateCompletedVersion = ref<string | null>(null);
 
 /**
  * 运行时仿真冒烟（构建期 `VITE_SAYALL_RUNTIME_SIMULATION=1`）跑的是**主界面**旅程
@@ -150,6 +164,16 @@ onMounted(async () => {
       });
     }
   }
+  // 更新完成提示（对齐 Mac `showUpdateCompletedAlert`）：只在「本次启动前刚完成更新」
+  // 时出现一次。Mac 在窗口显示后立即弹（向导未完成时同样弹），这里也照做；
+  // 版本号由 Rust 取走即清空，所以重载页面不会重复弹。
+  if (!runtimeSimulationBuild) {
+    void takeUpdateCompletedVersion()
+      .then((version) => {
+        if (version) updateCompletedVersion.value = version;
+      })
+      .catch(() => undefined);
+  }
   await refreshRuntime();
   runtimePollTimer = setInterval(() => {
     void refreshRuntime();
@@ -192,4 +216,9 @@ onUnmounted(() => {
       />
     </main>
   </div>
+  <UpdateCompletedDialog
+    v-if="updateCompletedVersion"
+    :version="updateCompletedVersion"
+    @close="updateCompletedVersion = null"
+  />
 </template>
