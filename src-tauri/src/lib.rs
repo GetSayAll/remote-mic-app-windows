@@ -20,9 +20,11 @@ mod accent;
 mod app_icon;
 mod common_phrase_panel;
 mod diagnostics;
+mod launch_state;
 mod onboarding;
 mod platform;
 mod rc003_task;
+mod recommendations;
 mod settings;
 mod shortcut_icons;
 mod startup;
@@ -30,6 +32,7 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
+use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
 use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
@@ -394,6 +397,9 @@ struct AppState {
     /// check_app_update 暂存的待安装更新（install_app_update 取走）。
     /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
     pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
+    /// 本次启动前刚完成更新时的版本号；前端取走一次后清空（对齐 Mac
+    /// `showUpdateCompletedAlert`：只在更新后的第一次启动提示）。
+    update_completed_version: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -412,6 +418,19 @@ impl std::fmt::Debug for AppState {
                     .pending_update
                     .lock()
                     .map(|u| u.is_some())
+                    .unwrap_or(false)
+                {
+                    "Some"
+                } else {
+                    "None"
+                },
+            )
+            .field(
+                "update_completed_version",
+                &if self
+                    .update_completed_version
+                    .lock()
+                    .map(|v| v.is_some())
                     .unwrap_or(false)
                 {
                     "Some"
@@ -866,6 +885,24 @@ fn refocus_main_window_soon(app: tauri::AppHandle) {
             let _ = window.set_focus();
         }
     });
+}
+
+/// 启动时是否显示主面板（纯判定，单测覆盖）。
+///
+/// 对齐 Mac `OnboardingLaunchPolicy.shouldShowMainWindow`：
+/// `!isComplete || completedUpdate || openMainWindowAtLaunch`。
+/// - 未完成首次设置必须显示，否则用户没有入口完成向导；
+/// - 本次启动前刚完成更新必须显示（Mac：更新完成后仍会显示主面板）；
+/// - 其余情况由「启动时自动打开主面板」决定（默认开启）。
+///
+/// 关闭该开关后，普通启动（含手动双击快捷方式）只驻留托盘；托盘左键 /
+/// 托盘菜单「显示主界面」以及再次启动应用都会把主面板显示出来。
+fn should_show_main_window_on_startup(
+    onboarding_active: bool,
+    completed_update: bool,
+    open_window_at_launch: bool,
+) -> bool {
+    onboarding_active || completed_update || open_window_at_launch
 }
 
 /// 把主窗口从「最小化 / 收进托盘」恢复到可见并尝试置前（2026-10-03 用户报障：
@@ -2277,6 +2314,66 @@ async fn set_voice_input_tool(
     result
 }
 
+/// 「锁定当前按键」偏好（按键页页脚开关，2026-10-18 持久化）。
+///
+/// 语义：开启时操作实体遥控器不会切换正在编辑的按键；默认开启。前端在页面挂载时
+/// 读取、开关变更时保存；设置文件是唯一权威值（页面切换会重建组件）。
+#[tauri::command]
+async fn get_lock_mapping_selection(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || settings.load_lock_mapping_selection())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("读取锁定当前按键设置任务失败：{error}")),
+        };
+    sayall_windows::gatt_note(match &result {
+        Ok(locked) => format!(
+            "mapping_settings feature=selection_lock action=load phase=completed terminal_result=passed locked={locked} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "mapping_settings feature=selection_lock action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_lock_mapping_selection(
+    locked: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(format!(
+        "mapping_settings feature=selection_lock action=save phase=requested locked={locked}"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_lock_mapping_selection(locked)?;
+        Ok(locked)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存锁定当前按键设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "mapping_settings feature=selection_lock action=save phase=completed terminal_result=passed locked={saved} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "mapping_settings feature=selection_lock action=save phase=completed terminal_result=failed locked={locked} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
 /// 「用户选的输入工具」的唯一来源（`settings.json`，与 `get_voice_input_tool` 同源）。
 ///
 /// 为什么不问平台：`PlatformRuntime` 只有 setter（`set_voice_input_tool`），没有
@@ -2741,6 +2838,91 @@ async fn set_theme_preference(
         )),
     }
     result
+}
+
+#[tauri::command]
+async fn get_open_window_at_launch(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings
+            .load()
+            .map(|settings| settings.open_window_at_launch)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取启动页面设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(enabled) => sayall_windows::gatt_note(format!(
+            "startup feature=open_window_at_launch action=load terminal_result=passed enabled={enabled} elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "startup feature=open_window_at_launch action=load terminal_result=failed error_domain=settings error_code=load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
+async fn set_open_window_at_launch(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(format!(
+        "startup feature=open_window_at_launch action=save phase=requested enabled={enabled}"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_open_window_at_launch(enabled)?;
+        Ok(enabled)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存启动页面设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(enabled) => format!(
+            "startup feature=open_window_at_launch action=save phase=completed terminal_result=passed enabled={enabled} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "startup feature=open_window_at_launch action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+/// 本次启动前刚完成更新时的版本号；没有则返回 `null`。
+///
+/// 对齐 Mac `showUpdateCompletedAlert`：只在更新后的第一次启动提示一次。
+/// 前端取走后清空——同一次运行里再挂载页面不会重复弹。
+#[tauri::command]
+fn take_update_completed_version(state: tauri::State<'_, AppState>) -> Option<String> {
+    let version = take_pending_update_completed_version(&state.update_completed_version);
+    sayall_windows::gatt_note(format!(
+        "startup feature=update_completed action=take terminal_result=passed available={}",
+        version.is_some()
+    ));
+    version
+}
+
+/// 一次性取走待提示的版本号（纯逻辑，便于单测「只提示一次」）。
+///
+/// 锁中毒时按「没有待提示」处理：更新提示不是功能路径，不能因此阻塞前端。
+fn take_pending_update_completed_version(
+    pending: &std::sync::Mutex<Option<String>>,
+) -> Option<String> {
+    pending
+        .lock()
+        .ok()
+        .and_then(|mut pending_version| pending_version.take())
 }
 
 #[tauri::command]
@@ -3305,7 +3487,12 @@ pub fn run() {
     }
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        // 主窗口前端用 `openUrl()` 走 opener；**关闭**插件的「自动接管 target=_blank」
+        // 注入脚本：该脚本在任意 WebView 内拦截链接并直接调 IPC，推荐页子 WebView
+        // 不在 ACL 范围内会抛 `Command plugin:opener|open_url not allowed by ACL`，
+        // 用户看到的就是「按钮点了没反应」（2026-10-19 实测）。站外链接改由推荐页
+        // 自己的 `on_new_window` / `on_navigation` 交给系统浏览器。
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         // 应用内更新（GitHub Releases 静态 latest.json + minisign 验签）。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_page_load(|webview, payload| {
@@ -3383,12 +3570,21 @@ pub fn run() {
             };
             #[cfg(not(feature = "runtime-simulation"))]
             let settings_path = app.path().app_config_dir()?.join("settings.json");
+            let launch_settings_path = settings_path.clone();
             let settings = SettingsStore::new(settings_path);
             // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
             // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
-            if let Err(error) = settings.ensure_onboarding_state() {
-                eprintln!("{error}");
-            }
+            //
+            // 这里同时保留判定结果给「启动时是否显示主面板」用：未完成首次设置时
+            // 必须显示窗口，否则用户没有入口完成向导。读不到状态时按「显示」处理
+            // （fail-open：宁可多显示一次，也不能让应用启动后完全不可见）。
+            let onboarding_active = match settings.ensure_onboarding_state() {
+                Ok(state) => state.is_active(),
+                Err(error) => {
+                    eprintln!("{error}");
+                    true
+                }
+            };
             // 未完成向导里残留的 staged 语音绑定：启动时回滚正式配置（设计稿 §5.4：
             // 退出未完成流程必须恢复进入向导前的配置）。无事务时是空操作、不落日志。
             if let Err(error) = settings.restore_onboarding_staged_binding("startup_recovery") {
@@ -3413,6 +3609,81 @@ pub fn run() {
             // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
             #[cfg(windows)]
             app_icon::apply(app.handle(), saved_settings.app_icon);
+
+            // 「本次启动前刚完成更新」（2026-10-19，对齐 Mac
+            // `recordLaunchAndDetectCompletedUpdate`）：记录写在独立的
+            // `launch-state.json`（不碰 settings.json，安装生命周期测试对后者做逐字节
+            // 哈希断言）。读取/写入失败都只记日志、按「不算更新」继续，不阻断启动。
+            let completed_update = match launch_state::record_launch(
+                &launch_settings_path,
+                &app.package_info().version.to_string(),
+                onboarding::install_evidence_exists(&launch_settings_path),
+            ) {
+                Ok(outcome) => {
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=completed_update action=decide terminal_result=passed completed={} previous_version={} current_version={}",
+                        outcome.completed_update,
+                        outcome.previous_version.as_deref().unwrap_or("none"),
+                        outcome.current_version
+                    ));
+                    outcome.completed_update
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "startup feature=completed_update action=decide terminal_result=failed error_domain=settings error_code=launch_state_io reason=treated_as_regular_launch retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                    false
+                }
+            };
+
+            // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
+            // 「启动时自动打开主面板」关闭后，普通启动只驻留托盘；未完成首次设置
+            // 或本次启动前刚完成更新时仍显示窗口（Mac 同款：更新完成后仍会显示主面板）。
+            // 托盘左键 / 托盘菜单 / 再次启动应用都走 `show_main_window`，不受本设置影响。
+            //
+            // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
+            // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
+            let show_main_window_on_startup = should_show_main_window_on_startup(
+                onboarding_active,
+                completed_update,
+                saved_settings.open_window_at_launch,
+            );
+            #[cfg(feature = "runtime-simulation")]
+            let show_main_window_on_startup =
+                show_main_window_on_startup || runtime_simulation_requested();
+            if let Some(window) = app.get_webview_window("main") {
+                let visible_before = window.is_visible().unwrap_or(true);
+                if show_main_window_on_startup {
+                    // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
+                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
+                    let show_result = window.show();
+                    let _ = window.set_focus();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "passed" } else { "failed" },
+                        visible_after,
+                        if onboarding_active {
+                            "onboarding_active"
+                        } else if completed_update {
+                            "completed_update"
+                        } else {
+                            "open_window_at_launch"
+                        },
+                        saved_settings.open_window_at_launch
+                    ));
+                } else {
+                    let hide_result = window.hide();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason=open_window_at_launch_disabled onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "failed" } else { "passed" },
+                        visible_after,
+                        saved_settings.open_window_at_launch
+                    ));
+                }
+            }
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
             // 「任务装没装」当状态。
@@ -3664,7 +3935,11 @@ pub fn run() {
                 settings,
                 capture_health,
                 pending_update: std::sync::Mutex::new(None),
+                update_completed_version: std::sync::Mutex::new(
+                    completed_update.then(|| app.package_info().version.to_string()),
+                ),
             });
+            app.manage(recommendations::RecommendationsState::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
@@ -3726,6 +4001,15 @@ pub fn run() {
                         state.platform.align_ime_after_tool_selection();
                     }
                 }
+            } else if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+                )
+            {
+                // 推荐页子 WebView 的位置/尺寸不是 CSS 布局的一部分；窗口缩放和
+                // 跨屏 DPI 变化后按固定侧栏宽度重新贴边（页面未显示时是 no-op）。
+                recommendations::relayout(window.app_handle());
             }
         });
 
@@ -3737,6 +4021,9 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        show_recommendations,
+        hide_recommendations,
+        open_recommendations_website,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -3778,6 +4065,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_lock_mapping_selection,
+        set_lock_mapping_selection,
         get_ime_status,
         get_gain_db,
         set_gain_db,
@@ -3794,6 +4083,9 @@ pub fn run() {
         set_theme_preference,
         get_launch_at_login,
         set_launch_at_login,
+        get_open_window_at_launch,
+        set_open_window_at_launch,
+        take_update_completed_version,
         report_theme_result,
         get_app_icon,
         set_app_icon,
@@ -3814,6 +4106,9 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        show_recommendations,
+        hide_recommendations,
+        open_recommendations_website,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -3855,6 +4150,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_lock_mapping_selection,
+        set_lock_mapping_selection,
         get_ime_status,
         get_gain_db,
         set_gain_db,
@@ -3871,6 +4168,9 @@ pub fn run() {
         set_theme_preference,
         get_launch_at_login,
         set_launch_at_login,
+        get_open_window_at_launch,
+        set_open_window_at_launch,
+        take_update_completed_version,
         report_theme_result,
         get_app_icon,
         set_app_icon,
@@ -3971,6 +4271,41 @@ mod tests {
     /// 静默失效必须自己恢复，且在日志判据之外真做了动作（2026-10-13 现场：宿主进程重建
     /// 后 agent 消失、助手进程还活着，「全按键支持」静默失效 2.5 天，用户手动关开一次
     /// 开关才恢复）。判据两段：先给足时间（助手可能正在注入 / 握手），再按尝试次数防抖。
+    /// 启动可见性（2026-10-19 用户定稿）：未完成向导必须显示；其余按设置。
+    ///
+    /// 阳性/阴性对照都钉住：关闭「启动时自动打开主面板」后，已完成向导的普通启动
+    /// 只驻留托盘；但向导进行中必须显示，否则用户没有入口完成设置。
+    #[test]
+    fn startup_visibility_follows_onboarding_and_preference() {
+        // 未完成向导：无论开关与更新状态都显示。
+        assert!(should_show_main_window_on_startup(true, false, true));
+        assert!(should_show_main_window_on_startup(true, false, false));
+        assert!(should_show_main_window_on_startup(true, true, false));
+        // 已完成向导 + 普通启动：只看开关。
+        assert!(should_show_main_window_on_startup(false, false, true));
+        assert!(!should_show_main_window_on_startup(false, false, false));
+        // 已完成向导 + 本次启动前刚完成更新：开关关着也必须显示（Mac 同款）。
+        assert!(should_show_main_window_on_startup(false, true, false));
+    }
+
+    #[test]
+    fn update_completed_version_is_taken_once() {
+        let pending = std::sync::Mutex::new(Some("1.0.0".to_owned()));
+
+        // 第一次取走：返回版本号并清空。
+        assert_eq!(
+            take_pending_update_completed_version(&pending),
+            Some("1.0.0".to_owned())
+        );
+        // 同一次运行里再挂载页面不会再弹（对齐 Mac 的「只提示一次」）。
+        assert_eq!(take_pending_update_completed_version(&pending), None);
+        // 普通启动（没有更新完成）永远是 None，不编造版本号。
+        assert_eq!(
+            take_pending_update_completed_version(&std::sync::Mutex::new(None)),
+            None
+        );
+    }
+
     #[test]
     fn capture_restarts_helper_only_after_inactive_grace_and_throttled() {
         // 还没到阈值：不动。

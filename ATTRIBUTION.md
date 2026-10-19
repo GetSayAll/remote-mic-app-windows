@@ -57,6 +57,7 @@
 ## 产品与 UI 基准
 
 - `HD838A/remote-mic-app`：无线麦 macOS 原版的信息架构、产品文案、RC003 图片、RC001/RC003 型号识别、ATVV 行为和测试边界；RC001 支持参考提交 `b233a88cc4457b00413dda6b37ec8b4af12c5121`。
+  - 2026-10-18 推荐页（语义参考，未复制代码）：产品规范来自私有平台仓库 `sayall-private-platform` 的 `docs/product/recommendations.md`（提交 `9845c01`）与 `docs/design/recommendations-20261013/implementation.md`；Mac 宿主实现参考同仓库 `packages/macos-membership/Sources/SayAllMembershipUI/RemoteWebPageView.swift`、`RecommendationsWebPage.swift`、`RemoteWebPageConfiguration.swift` 与 `SayAllMembershipHostAdapter/SupplementalSettingsPages.swift`（提交 `725061f`）。Windows 只复用产品行为：侧栏入口、`embed=app`、主题/语言、加载/失败/重试/打开官网、地址白名单与站外浏览器出口。与 Mac 的差异：按用户 2026-10-18 指定加载 `https://sayall.app/recommendations/`（Mac 使用 `getsayall.com`），平台参数为 `windows`，承载方式为 Tauri 子 WebView 而非 WKWebView；推荐内容与页面 UI 全部由官网提供，本仓库不复制。
   - 2026-09-05 按键映射功能移植补充（均为语义移植，非代码复制）：`RemoteButtonGestureRecognizer` + `HIDRemoteScheduler` 的手势参数（双击窗口 300ms、长按 550ms、连发起始 350ms、返回 50ms/方向与音量 100ms 连发）与"按配置动态启用双击/长按识别、未配置时单击零延迟"的语义；`KeyboardEventSuppressor` 的预测式武装 + 有限窗口匹配吞键模型；`RemoteMappingCanvas` 的按键卡片布局表（锚点/目标 Y 坐标逐键移植）与三态高亮（按下=橙、选中=强调、普通=中性）；`MappingSelectionPolicy` 的"锁定当前按键"默认值。Mac 版 `KeyboardEventSuppressor` 的 UP 沿无配对兜底（DOWN 泄漏+UP 吞下=粘键缺陷）未移植——Windows 版沿用本仓库 2026-09-05 规则（DOWN 漏进 OS 则 UP 必放行）。
   - 2026-10-05 按键「按住时连续执行」（Windows 扩展语义；参数与互斥理由参考 Mac `HIDRemoteScheduler.repeatIntervalMilliseconds`（返回 50ms、方向/音量 100ms）与 `HIDRemoteMonitor.startRepeatIfNeeded` 的「无次级手势才启动连发」互斥依据，未复制代码）：**与 Mac 的差异（Windows 自有语义）**——连发改为按键级显式开关（界面 2026-10-05 定稿为 radio 三选一：关闭 / 重复单击动作 / 重复长按动作；连发目标为单击或长按槽位，用户指定，双击不参与；见 `docs/plan/2026-10-05-button-hold-repeat-radio.md`）；长按动作触发后可继续按间隔续拍；双击共存时按住超过双击窗（0.3s）即确认为单击并起拍；可连续性按动作白名单判定（单键、滚动、鼠标移动；组合快捷键、打开应用、聚焦输入框、鼠标点击只执行一次）。旧配置按旧版自动连发行为迁移为显式开关；旧版对组合键（如 Ctrl+C）的连发在新模型中不再生效（有意修正）。
   - 2026-09-09 按键映射配置导入导出补充（本地 Mac 仓库 HEAD `feba1d6`，语义参考，未复制代码）：参考 `AppSettings.exportedConfigurationData/importConfiguration` 的版本化 JSON、导入前完整解码校验与一次性应用，以及 `SettingsView.exportConfiguration/importConfiguration` 的系统文件选择器、用户取消静默、成功/失败反馈。Windows 版仅迁移按键映射，不导入 Mac 专属设置或统计；格式使用独立 `formatVersion: 1` + `buttonMappings` 契约，不宣称与 Mac 配置文件互通。
@@ -81,6 +82,23 @@
   不移植 `SMAppService`，改用微软公开的当前用户登录启动项
   `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，只写本应用值且不需管理员权限。
   设置默认关闭，应用启动时以持久化偏好同步系统状态，失败只记录结构化日志、不阻断启动。
+
+- **启动时自动打开主面板（2026-10-19，语义与文案参考 Mac，未复制代码）**：产品行为参考 macOS 仓库
+  `HD838A/remote-mic-app` 提交 `a69fae76`（该功能由 `6c7d543e`「feat: improve launch and update
+  visibility」引入）的 `AppSettings.openMainWindowAtLaunch`（默认开启）与
+  `OnboardingLaunchPolicy.shouldShowMainWindow`（`!isComplete || completedUpdate ||
+  openMainWindowAtLaunch`）：设置页「启动行为」提供开关，关闭后普通启动只驻留托盘，托盘与再次启动
+  仍可打开主面板；向导未完成时必须显示窗口。
+  - **Windows 差异**：① `completedUpdate` 用本仓库 `launch-state.json` 记录“上次启动的
+    版本”（首次有安装证据但无记录视为更新完成，对齐 Mac 的 Sparkle 首启判定），更新后的
+    首次启动强制显示主面板并弹一次更新完成提示（`UpdateCompletedDialog.vue`，文案原样取
+    Mac `update.completed.*`）；同版本重启、降级不弹，也不会重复弹；② 未完成向导的判据用
+    本仓库 `OnboardingState::is_active()`（`completed_version < flow_version`），读取失败
+    按“显示”处理（fail-open）；③ 主窗口改为 `tauri.conf.json` 里 `visible: false` 创建、
+    由 Rust 读取设置后显式 `show()`/`hide()`，避免设置读回前先闪一帧（Mac 由 `NSWindow`
+    生命周期控制，无对应实现）；④ Mac 的 `showDockIcon` / `showStatusBarIcon` 与权限修复
+    分支在 Windows 没有对应物，未移植。
+  - 验收见 `Testing/WindowsRC003Preview.md` 用例十六。
 
 - **LL 吞键对 Raw Input 交付影响的本机实证（2026-09-05，`docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md`）**：双线程探针（钩子线程 + Raw Input INPUTSINK 线程分离，key_suppressor 同构）两轮一致证实 **WH_KEYBOARD_LL 返回 1 吞掉的键盘事件不会再投递 WM_INPUT**——按键映射门控（`key_gate.rs`）据此采用"被吞键盘边沿由钩子线程直接喂引擎 + 监听器喂 HID 报文与透传键盘事件"双源合并架构；HID 报文归因武装 + 60ms 有界等待沿用 key_suppressor 实证参数。
 

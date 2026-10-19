@@ -79,10 +79,35 @@ impl SettingsStore {
         })
     }
 
+    /// 启动时是否自动打开主面板（设置页「启动行为」第二项，默认开启）。
+    ///
+    /// 对齐 Mac `openMainWindowAtLaunch`：关闭后普通启动只驻留托盘，托盘菜单、
+    /// 托盘左键或再次启动应用都会显示主面板；未完成首次设置时仍会显示主面板
+    /// （判定在应用启动时）。
+    pub fn save_open_window_at_launch(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存启动时打开主面板设置", move |settings| {
+            settings.open_window_at_launch = enabled;
+        })
+    }
+
     /// RC003 三键增强捕获的用户意图（按键页开关，默认关闭）。
     pub fn save_rc003_capture_enabled(&self, enabled: bool) -> Result<(), String> {
         self.update("保存三键增强捕获开关", move |settings| {
             settings.rc003_capture_enabled = enabled;
+        })
+    }
+
+    /// 「锁定当前按键」界面偏好（按键页页脚开关，默认**开启**）。
+    ///
+    /// 2026-10-18 起持久化：页面挂载时读回、变更时保存，跨页面切换与跨重启
+    /// 都保持用户的选择（此前只是页面局部状态，切页即回默认，用户侧"关不掉"）。
+    pub fn load_lock_mapping_selection(&self) -> Result<bool, String> {
+        self.load().map(|settings| settings.lock_mapping_selection)
+    }
+
+    pub fn save_lock_mapping_selection(&self, locked: bool) -> Result<(), String> {
+        self.update("保存锁定当前按键设置", move |settings| {
+            settings.lock_mapping_selection = locked;
         })
     }
 
@@ -642,6 +667,29 @@ mod tests {
         let _ = std::fs::remove_file(store.path.with_file_name("other-voice-hotkey.json"));
     }
 
+    /// 「锁定当前按键」持久化（2026-10-18）：默认开启；关闭后写盘、读回保持关闭；
+    /// 老配置（无此字段）回落默认。
+    #[test]
+    fn lock_mapping_selection_defaults_on_and_round_trips() {
+        let path = std::env::temp_dir().join("sayall-lock-selection-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(store.load_lock_mapping_selection().unwrap());
+        store.save_lock_mapping_selection(false).unwrap();
+        assert!(!store.load_lock_mapping_selection().unwrap());
+
+        // 升级路径：不含该字段的老配置读回时回落默认（开启）。
+        std::fs::write(
+            &path,
+            r#"{"schema_version":4,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert!(store.load_lock_mapping_selection().unwrap());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn settings_round_trip_preserves_stable_endpoint_identity() {
         let mut usage_statistics = UsageStatistics::default();
@@ -821,6 +869,27 @@ mod tests {
         assert!(store.load().unwrap().launch_at_login);
         store.save_launch_at_login(false).unwrap();
         assert!(!store.load().unwrap().launch_at_login);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn open_window_at_launch_defaults_on_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-open-window-at-launch-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        // 新装 / 老配置：默认开启（对齐 Mac `openMainWindowAtLaunch`）。
+        assert!(store.load().unwrap().open_window_at_launch);
+
+        store.save_open_window_at_launch(false).unwrap();
+        assert!(!store.load().unwrap().open_window_at_launch);
+
+        store.save_open_window_at_launch(true).unwrap();
+        assert!(store.load().unwrap().open_window_at_launch);
 
         let _ = std::fs::remove_file(path);
     }

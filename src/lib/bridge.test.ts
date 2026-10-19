@@ -8,16 +8,23 @@ import {
   connectionPhaseLabel,
   formatDiagnosticReport,
   GITHUB_REPOSITORY_URL,
+  getOpenWindowAtLaunch,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
   OFFICIAL_WEBSITE_URL,
   openGitHubRepository,
   openLogDirectory,
   openOfficialWebsite,
+  openRecommendationsWebsite,
   openVbCableDownloadPage,
   registerCommonPhraseAvailability,
+  RECOMMENDATIONS_URL,
   remoteModelLabel,
+  setOpenWindowAtLaunch,
   shortcutCapability,
+  showRecommendationsPage,
+  hideRecommendationsPage,
+  takeUpdateCompletedVersion,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
   type ConnectionPhase,
@@ -307,6 +314,53 @@ describe("设置页外部入口（官网 / GitHub）", () => {
   });
 });
 
+describe("推荐页入口（官网页面宿主）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+    vi.mocked(openUrl).mockReset();
+  });
+
+  it("只指向官网推荐页，不在客户端保存推荐内容", () => {
+    expect(RECOMMENDATIONS_URL).toBe("https://sayall.app/recommendations/");
+  });
+
+  it("浏览器预览下明确不可用，并可直接打开官网", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    await expect(showRecommendationsPage("light")).rejects.toThrow(
+      "当前是浏览器预览，无法在应用内打开推荐页面",
+    );
+    await openRecommendationsWebsite();
+
+    expect(open).toHaveBeenCalledWith(
+      RECOMMENDATIONS_URL,
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it("Tauri 运行时按精确命令名调用 Rust，并回传本次加载 generation", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(7)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    await expect(showRecommendationsPage("dark")).resolves.toBe(7);
+    await hideRecommendationsPage();
+    await openRecommendationsWebsite();
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["show_recommendations", { theme: "dark" }],
+      ["hide_recommendations"],
+      ["open_recommendations_website"],
+    ]);
+  });
+});
+
 describe("诊断日志目录入口", () => {
   afterEach(() => {
     delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -327,5 +381,59 @@ describe("诊断日志目录入口", () => {
   it("浏览器预览下明确不可用而不是静默失败", async () => {
     await expect(openLogDirectory()).rejects.toThrow("当前是浏览器预览，无法打开日志目录");
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("启动时自动打开主面板（设置页「启动行为」）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("浏览器预览按新装默认返回开启，不调用 IPC", async () => {
+    await expect(getOpenWindowAtLaunch()).resolves.toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 运行时使用精确命令名与参数名", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValue(false);
+
+    await expect(getOpenWindowAtLaunch()).resolves.toBe(false);
+    expect(invoke).toHaveBeenCalledWith("get_open_window_at_launch");
+
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(false);
+    await expect(setOpenWindowAtLaunch(false)).resolves.toBe(false);
+    // 参数名必须与 Rust `set_open_window_at_launch(enabled: bool)` 一致；
+    // 不匹配时 Tauri 只会报缺参，界面只能看到一句 IPC 失败。
+    expect(invoke).toHaveBeenCalledWith("set_open_window_at_launch", { enabled: false });
+  });
+
+  it("浏览器预览下保存明确不可用", async () => {
+    await expect(setOpenWindowAtLaunch(false)).rejects.toThrow(
+      "当前是浏览器预览，无法设置启动时打开主面板",
+    );
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("更新完成提示（对齐 Mac `update.completed.*`）", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("浏览器预览没有更新机制，返回 null 且不调 IPC", async () => {
+    await expect(takeUpdateCompletedVersion()).resolves.toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 运行时使用精确命令名", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValue("1.0.0");
+
+    await expect(takeUpdateCompletedVersion()).resolves.toBe("1.0.0");
+    expect(invoke).toHaveBeenCalledWith("take_update_completed_version");
   });
 });

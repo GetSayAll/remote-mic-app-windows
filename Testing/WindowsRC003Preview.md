@@ -233,6 +233,25 @@
 
 失败判定：拖动过程中每个刻度都写一次设置文件；保存失败仍显示新值或静默失败；重启后回到 0 dB；增益未生效（回录电平两段比值 ≈1×、或转写结果与 0 dB 无差别且无其他解释）或整段音频被错误静音/清零；只验证了编译、单测或仿真就宣称真机通过。
 
+## 用例十六：启动时自动打开主面板
+
+1. 全新安装（或先退出应用并清空 `%APPDATA%\app.getsayall.remote-mic.windows`）后启动：主面板应自动打开；进入“设置 → 通用 → 启动行为”，确认“登录时自动启动”与“启动时自动打开主面板”**并排**（文字在上、开关在下，中间一条竖分隔线），第二项默认**开启**。
+2. 关闭该开关，确认开关保持在关闭状态、页面无错误提示；日志出现 `startup feature=open_window_at_launch action=save phase=completed terminal_result=passed enabled=false`。
+3. 从托盘菜单“退出”，再双击快捷方式启动：**不应**出现主窗口；托盘图标存在。日志出现 `startup feature=main_window_visibility action=decide terminal_result=passed visible=false reason=open_window_at_launch_disabled ...`。
+4. 单击托盘图标，主面板应打开；再关闭窗口（收进托盘），用托盘菜单“显示主界面”打开一次；再关闭窗口后**再次双击快捷方式**（第二实例）也应打开主面板。三条路径都不受该设置影响。
+5. 重新打开该开关，确认保存成功；退出后再次启动，主面板应自动打开。日志 `terminal_result=passed visible=true reason=open_window_at_launch`。
+6. 在“设置 → 通用”里点“重新运行设置向导”，随后退出并重新启动应用：即使开关处于关闭状态，主面板也必须显示（否则无法完成向导）。日志 `reason=onboarding_active`。
+7. 老配置升级：在已安装旧版本（`settings.json` 无 `open_window_at_launch` 字段）的机器上覆盖安装本版本，首次启动主面板应自动打开，设置页该开关显示开启。
+8. 更新完成路径（开关保持关闭）：用上一版本的安装包启动过一次，再用本版本覆盖安装并启动——主面板**必须**显示，且弹出“无线麦已更新 / 已成功更新到版本 X。/ 好”一次；点“好”关闭后刷新或重开主面板不再弹。日志依次出现 `startup feature=completed_update action=decide ... completed_update=true`、`reason=completed_update`、`startup feature=update_completed action=take terminal_result=passed available=true`。
+9. 同版本重启（第 8 步之后直接退出再启动）：**不应**再弹更新提示，主面板是否显示回到开关判定（开关关闭则只驻留托盘）；日志 `completed_update=false`、`update_completed action=take ... available=false`。
+10. 降级：安装更低版本并启动，同样**不应**弹更新提示。
+11. 全新安装（无 `launch-state.json` 且无安装证据）首次启动：**不应**弹更新提示（不能把新装误报成“已更新”）。
+12. 若开启了“登录时自动启动”，注销并重新登录（`Win+L` 锁屏不算）后按步骤 3 的判据检查一次。
+
+预期：新装与老配置默认开启；关闭后**普通**启动路径（含手动双击）都只驻留托盘；托盘左键、托盘菜单“显示主界面”和再次启动应用始终能打开主面板；未完成首次设置时无论开关如何都显示主面板；更新后的第一次启动强制显示主面板并提示一次，同版本重启、降级与新装都不提示。
+
+失败判定：关闭开关后普通启动仍弹出主窗口；关闭后完全找不到托盘图标或托盘无法打开主面板；未完成向导时启动不显示窗口；保存失败却显示新状态；老配置升级后默认关闭；更新后首启不显示主面板或不提示；同版本重启/降级/新装误弹“已更新”；更新提示重复弹或点“好”后不消失；只验证了单元测试或仿真就宣称真机通过。
+
 ## 日志收集
 
 日志不得包含语音内容、识别文字、真实蓝牙地址、完整 HID 路径、窗口标题或个人文档路径。报告应包含 Commit、版本、时间段、Windows 版本和失败步骤。

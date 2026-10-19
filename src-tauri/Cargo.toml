@@ -29,7 +29,8 @@ reqwest = { version = "0.13.4", default-features = false }
 quick-xml = { version = "0.41", features = ["serialize"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 semver = "1"
-tauri = { version = "2.8", features = ["tray-icon", "image-png"] }
+# `unstable` 提供主窗口内嵌子 WebView（推荐页直接加载官网；官网禁止 iframe）。
+tauri = { version = "2.8", features = ["tray-icon", "image-png", "unstable"] }
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-updater = "2.11.0"
 windows = { version = "0.62", features = [
@@ -43,6 +44,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "UI_ViewManagement",
 ] }
+# webview2-com 0.38 的绑定由 windows 0.61 生成；主工程其余代码用 0.62。
+# 推荐页的 NavigationCompleted 参数必须使用 0.61 的 BOOL/PWSTR 类型。
+windows-core-061 = { package = "windows-core", version = "0.61" }
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"

@@ -151,6 +151,9 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       notice: null,
       entries: [],
     })),
+    // 「锁定当前按键」偏好（2026-10-18 持久化）：默认开启；用例内按需覆盖。
+    getLockMappingSelection: vi.fn(async () => true),
+    saveLockMappingSelection: vi.fn(async (locked: boolean) => locked),
   };
 });
 
@@ -162,10 +165,12 @@ import {
   getCommonPhrasePanelSnapshot,
   enableRc003Capture,
   disableRc003Capture,
+  getLockMappingSelection,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   importButtonMappingConfiguration,
   learnFocusTarget,
+  saveLockMappingSelection,
   scanPairedRemotes,
   subscribeButtonEdges,
   subscribeButtonGestures,
@@ -339,6 +344,11 @@ beforeEach(() => {
     notice: null,
     entries: [],
   });
+  // 「锁定当前按键」偏好（2026-10-18）：同样显式重置实现（mockReset 清实现，再给默认值）。
+  vi.mocked(getLockMappingSelection).mockReset();
+  vi.mocked(getLockMappingSelection).mockResolvedValue(true);
+  vi.mocked(saveLockMappingSelection).mockReset();
+  vi.mocked(saveLockMappingSelection).mockImplementation(async (locked: boolean) => locked);
 });
 
 /** 构造一份指定相位的桥接快照（其余计数字段对 UI 无关，取零值）。 */
@@ -1321,6 +1331,158 @@ describe("buttons mapping page", () => {
     edgeHandler!({ button: "back", isPressed: true });
     await vi.waitFor(() => {
       if (!backCard()!.classes().includes("selected")) throw new Error("未跟随选中");
+    });
+  });
+
+  /** 页脚的「锁定当前按键」开关（每次重新查找元素：Vue 重渲染后旧引用会失效）。 */
+  function lockToggleInput(wrapper: VueWrapper) {
+    const row = wrapper
+      .findAll(".toggle-row")
+      .find((candidate) => candidate.text().includes("锁定当前按键"));
+    if (!row) throw new Error("未找到锁定当前按键开关");
+    return row.find("input");
+  }
+
+  /** 页头开关行（按行内文字定位，供"就绪前占位符"用例共用）。 */
+  function toggleRowByText(wrapper: VueWrapper, text: string) {
+    const row = wrapper
+      .findAll(".toggle-row")
+      .find((candidate) => candidate.text().includes(text));
+    if (!row) throw new Error(`未找到开关行：${text}`);
+    return row;
+  }
+
+  it("creates the mapping master switch only once its value is final (no entry slide)", async () => {
+    // 真值（关）与初值（开）不同：旧实现加载完成后会产生一次属性变更，
+    // 开关会滑动；正确实现是「就绪前同尺寸占位符顶位、就绪后创建本体」——
+    // 元素创建即带正确 checked，不存在属性变更，无过渡可触发（设置页同法）。
+    let releaseMappings: (value: ButtonMappings) => void = () => {};
+    vi.mocked(getButtonMappings).mockImplementationOnce(
+      () => new Promise<ButtonMappings>((resolve) => { releaseMappings = resolve; }),
+    );
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    mountedPages.push(wrapper);
+    await flushPromises();
+
+    const row = () => toggleRowByText(wrapper, "启用自定义按键功能");
+    expect(row().find("input").exists()).toBe(false);
+    expect(row().find(".toggle-placeholder").exists()).toBe(true);
+
+    releaseMappings({ enabled: false, actions: {} });
+    await flushPromises();
+    await vi.waitFor(() => {
+      const input = row().find("input");
+      if (!input.exists()) throw new Error("就绪后开关未创建");
+      if ((input.element as HTMLInputElement).checked) {
+        throw new Error("开关不是创建即带真值（应为关）");
+      }
+    });
+  });
+
+  it("creates the lock switch only once the persisted value is loaded (no entry slide)", async () => {
+    let releaseLock: (value: boolean) => void = () => {};
+    vi.mocked(getLockMappingSelection).mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { releaseLock = resolve; }),
+    );
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    mountedPages.push(wrapper);
+    await flushPromises();
+
+    const row = () => toggleRowByText(wrapper, "锁定当前按键");
+    expect(row().find("input").exists()).toBe(false);
+    expect(row().find(".toggle-placeholder").exists()).toBe(true);
+
+    releaseLock(false);
+    await flushPromises();
+    await vi.waitFor(() => {
+      const input = row().find("input");
+      if (!input.exists()) throw new Error("就绪后开关未创建");
+      if ((input.element as HTMLInputElement).checked) {
+        throw new Error("开关不是创建即带真值（应为关）");
+      }
+    });
+  });
+
+  it("applies the persisted lock selection when the page mounts", async () => {
+    // 关过开关的用户再打开按键页：必须读回「关闭」，而不是回落默认「开启」。
+    vi.mocked(getLockMappingSelection).mockResolvedValue(false);
+    const wrapper = await mountPage();
+    await vi.waitFor(() => {
+      if ((lockToggleInput(wrapper).element as HTMLInputElement).checked) {
+        throw new Error("未应用持久化的关闭状态");
+      }
+    });
+
+    // 关闭状态下：按下遥控器键即选中该键（锁定语义随持久化值生效）。
+    edgeHandler!({ button: "back", isPressed: true });
+    const backCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("返回"))!;
+    await vi.waitFor(() => {
+      if (!backCard.classes().includes("selected")) throw new Error("未跟随选中");
+    });
+  });
+
+  it("persists the lock toggle so it stays off across page switches", async () => {
+    // 内存值模拟设置文件：get 返回已落盘值，save 写入并返回。
+    let persisted = true;
+    vi.mocked(getLockMappingSelection).mockImplementation(async () => persisted);
+    vi.mocked(saveLockMappingSelection).mockImplementation(async (locked: boolean) => {
+      persisted = locked;
+      return locked;
+    });
+
+    const first = await mountPage();
+    await lockToggleInput(first).setValue(false);
+    await vi.waitFor(() => {
+      if (!vi.mocked(saveLockMappingSelection).mock.calls.some(([value]) => value === false)) {
+        throw new Error("关闭动作未落盘");
+      }
+    });
+    first.unmount();
+
+    // 切到其他页再回来 = 重新挂载组件（本 Bug 的原始复现路径），开关必须保持关闭。
+    const second = await mountPage();
+    await vi.waitFor(() => {
+      if ((lockToggleInput(second).element as HTMLInputElement).checked) {
+        throw new Error("切页回来后又被打开了");
+      }
+    });
+  });
+
+  it("reverts the lock toggle and reports when saving fails", async () => {
+    const wrapper = await mountPage();
+    vi.mocked(saveLockMappingSelection).mockRejectedValueOnce(
+      new Error("保存锁定当前按键设置失败，请稍后重试"),
+    );
+    await lockToggleInput(wrapper).setValue(false);
+    await vi.waitFor(() => {
+      if (!(lockToggleInput(wrapper).element as HTMLInputElement).checked) {
+        throw new Error("保存失败后未回退到原状态");
+      }
+    });
+    await vi.waitFor(() => {
+      if (!wrapper.text().includes("保存锁定当前按键设置失败")) throw new Error("未显示失败提示");
+    });
+  });
+
+  it("falls back to locked and reports when the preference read fails", async () => {
+    vi.mocked(getLockMappingSelection).mockRejectedValueOnce(new Error("ipc down"));
+    const wrapper = await mountPage();
+    await vi.waitFor(() => {
+      if (!(lockToggleInput(wrapper).element as HTMLInputElement).checked) {
+        throw new Error("读取失败应回落默认（开启）");
+      }
+    });
+    await vi.waitFor(() => {
+      const reported = reportFrontendEventSpy.mock.calls
+        .map(([event]) => event as Record<string, unknown>)
+        .find((event) => event.event === "mapping_selection_lock");
+      if (!reported) throw new Error("读取失败未落结构化日志");
+      expect(reported).toMatchObject({
+        event: "mapping_selection_lock",
+        phase: "completed",
+        result: "failed",
+        reason: "load_failed",
+      });
     });
   });
 

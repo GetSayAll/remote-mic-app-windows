@@ -24,6 +24,21 @@ export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-ap
  */
 export const VOKIE_HOMEPAGE_URL = "https://vokie.com/";
 
+/**
+ * 推荐页只加载官网（2026-10-18 用户指定），不在 Windows 客户端复制推荐内容。
+ * 官网 `/recommendations/` 设置 `X-Frame-Options: DENY`，因此页面由 Tauri
+ * 子 WebView 承载；这里只保留「打开官网」兜底所用的公开地址。
+ */
+export const RECOMMENDATIONS_URL = "https://sayall.app/recommendations/";
+
+export type RecommendationsPageStatus = "loading" | "ready" | "failed";
+
+export interface RecommendationsPageEvent {
+  generation: number;
+  status: "ready" | "failed";
+  reason?: string | null;
+}
+
 export type ConnectionPhase =
   | "idle"
   | "connecting"
@@ -478,6 +493,32 @@ export async function setLaunchAtLogin(enabled: boolean): Promise<boolean> {
   return invoke<boolean>("set_launch_at_login", { enabled });
 }
 
+/**
+ * 「启动时自动打开主面板」（设置页「启动行为」，对齐 Mac `openMainWindowAtLaunch`）。
+ *
+ * 浏览器预览按新装默认返回 `true`，与 Rust `AppSettings::default()` 同源。
+ */
+export async function getOpenWindowAtLaunch(): Promise<boolean> {
+  if (!isTauriRuntime()) return true;
+  return invoke<boolean>("get_open_window_at_launch");
+}
+
+export async function setOpenWindowAtLaunch(enabled: boolean): Promise<boolean> {
+  if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法设置启动时打开主面板");
+  return invoke<boolean>("set_open_window_at_launch", { enabled });
+}
+
+/**
+ * 本次启动前刚完成更新时的版本号（对齐 Mac `update.completed.*`）。
+ *
+ * Rust 侧取走即清空：同一次运行里只提示一次，重新挂载页面不会重复弹。
+ * 浏览器预览没有更新机制，返回 `null`。
+ */
+export async function takeUpdateCompletedVersion(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>("take_update_completed_version");
+}
+
 export interface AppUpdateProgress {
   downloaded: number;
   contentLength: number | null;
@@ -772,6 +813,37 @@ export async function openGitHubRepository(): Promise<void> {
 /** 连接页“Vokie 未安装”提示里的官网入口（2026-10-01）。 */
 export async function openVokieHomepage(): Promise<void> {
   await openExternalUrl(VOKIE_HOMEPAGE_URL);
+}
+
+/**
+ * 显示推荐页（实际内容是官网页面，由 Rust 侧子 WebView 承载）。
+ * 返回本次加载的 generation；迟到的 ready/failed 事件由页面按它丢弃。
+ */
+export async function showRecommendationsPage(
+  theme: "light" | "dark",
+): Promise<number> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法在应用内打开推荐页面");
+  }
+  return invoke<number>("show_recommendations", { theme });
+}
+
+/** 离开推荐页时隐藏子 WebView；页面本身保留，返回时可快速重载。 */
+export async function hideRecommendationsPage(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("hide_recommendations");
+}
+
+/**
+ * 加载失败时的「打开官网」：Rust 侧保留当前详情参数并去掉 `embed/theme`
+ * 等 App 专用参数，再交给系统浏览器。浏览器预览直接打开列表页。
+ */
+export async function openRecommendationsWebsite(): Promise<void> {
+  if (!isTauriRuntime()) {
+    window.open(RECOMMENDATIONS_URL, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await invoke("open_recommendations_website");
 }
 
 /** Vokie 检测结果：未安装时连接页显示官网入口；已安装但没运行时提示先启动它。 */
@@ -1276,6 +1348,27 @@ export async function setVoiceInputTool(tool: VoiceInputTool): Promise<VoiceInpu
   }
   const saved = await invoke<VoiceInputTool | null>("set_voice_input_tool", { tool });
   return saved ?? tool;
+}
+
+/**
+ * 「锁定当前按键」（按键页页脚开关，2026-10-18 持久化到应用设置）。
+ *
+ * 开启时操作实体遥控器不会切换正在编辑的按键；默认开启（对齐 Mac
+ * `MappingSelectionPolicy` 的默认值）。设置文件是权威值：页面切换会重建
+ * 组件，挂载时必须从这里读回；浏览器预览回落"开启"且不落盘（设置类一致口径）。
+ */
+export async function getLockMappingSelection(): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return true;
+  }
+  return invoke<boolean>("get_lock_mapping_selection");
+}
+
+export async function saveLockMappingSelection(locked: boolean): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return locked;
+  }
+  return invoke<boolean>("set_lock_mapping_selection", { locked });
 }
 
 /**
