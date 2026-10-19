@@ -14,7 +14,6 @@ import {
   saveButtonMappings,
   scanPairedRemotes,
   setAppIcon,
-  setOpenWindowAtLaunch,
   stopRawInput,
   testAppFocus,
   testButtonMapping,
@@ -491,7 +490,17 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     !document.querySelector('.settings-group [role="alert"]'),
     "切换启动页面设置后显示错误",
   );
-  await setOpenWindowAtLaunch(true);
+  // 再点一次开关恢复开启（走同一条界面 → IPC → 持久化路径，不用直达命令）。
+  openWindowToggle.click();
+  await waitFor(
+    () => {
+      const toggle = document.querySelector<HTMLInputElement>(
+        'input[name="open-window-at-launch"]',
+      );
+      return toggle && toggle.checked && !toggle.disabled ? true : null;
+    },
+    "启动时自动打开主页面恢复开启并保存完成",
+  );
   assert(
     (await getOpenWindowAtLaunch()) === true,
     "还原「启动时自动打开主页面」后读回不是开启",

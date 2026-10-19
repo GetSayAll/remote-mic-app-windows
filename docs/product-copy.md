@@ -25,6 +25,7 @@
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
 | 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
+| 推荐页（侧栏，2026-10-18） | 侧栏与页面标题统一为「推荐」；页面正文、筛选项、商品名与详情全部来自官网 `https://sayall.app/recommendations/`，不在本地维护推荐文案 | `src/navigation.ts`、`RecommendationsPage.vue`、`RECOMMENDATIONS_URL` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |

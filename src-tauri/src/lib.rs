@@ -22,6 +22,7 @@ mod diagnostics;
 mod onboarding;
 mod platform;
 mod rc003_task;
+mod recommendations;
 mod settings;
 mod shortcut_icons;
 mod startup;
@@ -29,6 +30,7 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use platform::PlatformRuntime;
+use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
 use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
@@ -3429,7 +3431,12 @@ pub fn run() {
     }
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        // 主窗口前端用 `openUrl()` 走 opener；**关闭**插件的「自动接管 target=_blank」
+        // 注入脚本：该脚本在任意 WebView 内拦截链接并直接调 IPC，推荐页子 WebView
+        // 不在 ACL 范围内会抛 `Command plugin:opener|open_url not allowed by ACL`，
+        // 用户看到的就是「按钮点了没反应」（2026-10-19 实测）。站外链接改由推荐页
+        // 自己的 `on_new_window` / `on_navigation` 交给系统浏览器。
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         // 应用内更新（GitHub Releases 静态 latest.json + minisign 验签）。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_page_load(|webview, payload| {
@@ -3832,6 +3839,7 @@ pub fn run() {
                 capture_health,
                 pending_update: std::sync::Mutex::new(None),
             });
+            app.manage(recommendations::RecommendationsState::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
@@ -3893,6 +3901,15 @@ pub fn run() {
                         state.platform.align_ime_after_tool_selection();
                     }
                 }
+            } else if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+                )
+            {
+                // 推荐页子 WebView 的位置/尺寸不是 CSS 布局的一部分；窗口缩放和
+                // 跨屏 DPI 变化后按固定侧栏宽度重新贴边（页面未显示时是 no-op）。
+                recommendations::relayout(window.app_handle());
             }
         });
 
@@ -3904,6 +3921,9 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        show_recommendations,
+        hide_recommendations,
+        open_recommendations_website,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -3981,6 +4001,9 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        show_recommendations,
+        hide_recommendations,
+        open_recommendations_website,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
