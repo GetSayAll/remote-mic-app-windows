@@ -222,7 +222,14 @@ fn main() {
         return;
     }
 
-    let choice = if let Some(index) = arg_value("--index").and_then(|value| value.parse().ok()) {
+    let choice = if let Some(class_name) = arg_value("--recorded-class") {
+        // 复现生产档案：按记录时的控件类型 + 类名匹配（用于核对「学习过却聚焦失败」）。
+        FocusChoice::Recorded(RecordedFocusTarget {
+            control_type: arg_value("--recorded-type").unwrap_or_else(|| "Group".to_owned()),
+            class_name,
+            ..Default::default()
+        })
+    } else if let Some(index) = arg_value("--index").and_then(|value| value.parse().ok()) {
         FocusChoice::Index(index)
     } else if std::env::args().any(|arg| arg == "--focus") {
         FocusChoice::BestComposer

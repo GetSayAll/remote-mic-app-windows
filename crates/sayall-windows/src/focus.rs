@@ -726,7 +726,10 @@ pub fn recorded_candidate_score(
         strong_matches += 1;
     }
     if semantic_values_match(&candidate.class_name, &target.class_name) {
-        score += 140;
+        // 类名单独命中就达到阈值：DimAgent 的 TipTap 编辑器只有这一条稳定特征
+        // （无 automationId / name / 矩形），140 分会被 180 门槛挡掉，
+        // 表现为"学习过却永远聚焦失败"（2026-10-19 现场）。
+        score += 180;
         strong_matches += 1;
     }
     if semantic_values_match(&candidate.window_title, &target.window_title) {
@@ -1290,6 +1293,34 @@ mod tests {
             ..candidate.clone()
         };
         assert!(recorded_candidate_score(&far, &target).is_none());
+    }
+
+    #[test]
+    fn recorded_class_name_alone_reaches_threshold() {
+        // 2026-10-19 现场：DimAgent 的聚焦档案只有 control_type=Group + class_name，
+        // 没有 automationId / name / 矩形。类名 140 分时永远低于 180 门槛，
+        // 「学习过」的输入框每次聚焦都报 no_candidate（表现为超时）。
+        let class_name = "tiptap ProseMirror outline-none ProseMirror-focused";
+        let editor = FocusCandidate {
+            class_name: class_name.to_owned(),
+            focused: true,
+            has_text_pattern: true,
+            keyboard_focusable: true,
+            ..candidate("Group", "")
+        };
+        let target = RecordedFocusTarget {
+            control_type: "Group".to_owned(),
+            class_name: class_name.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(recorded_candidate_score(&editor, &target), Some(180));
+        assert_eq!(best_recorded_index(&[editor.clone()], &target), Some(0));
+
+        // 同类名控件并列时分差为 0，仍然拒绝，避免点错。
+        assert_eq!(
+            best_recorded_index(&[editor.clone(), editor], &target),
+            None
+        );
     }
 
     #[test]

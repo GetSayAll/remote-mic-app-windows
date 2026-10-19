@@ -242,6 +242,23 @@ fn focus_note(note: String) {
 #[cfg(not(windows))]
 fn focus_note(_note: String) {}
 
+/// 尝试结果的稳定短标签（结构化日志用）。
+fn attempt_result_label(result: AttemptResult) -> &'static str {
+    match result {
+        AttemptResult::Focused => "focused",
+        AttemptResult::NoCandidate => "no_candidate",
+        AttemptResult::NotForeground => "not_foreground",
+        AttemptResult::Fatal(FocusFailure::SelfForeground) => "fatal_self_foreground",
+        AttemptResult::Fatal(FocusFailure::TargetExited) => "fatal_target_exited",
+        AttemptResult::Fatal(FocusFailure::NotAccessible) => "fatal_not_accessible",
+        AttemptResult::Fatal(FocusFailure::NotConfigured) => "fatal_not_configured",
+        AttemptResult::Fatal(FocusFailure::Cancelled) => "fatal_cancelled",
+        AttemptResult::Fatal(FocusFailure::NoCandidate) => "fatal_no_candidate",
+        AttemptResult::Fatal(FocusFailure::NotForeground) => "fatal_not_foreground",
+        AttemptResult::Fatal(FocusFailure::Timeout) => "fatal_timeout",
+    }
+}
+
 struct FocusShared {
     backend: Arc<dyn FocusBackend>,
     policy: FocusRetryPolicy,
@@ -407,11 +424,15 @@ fn run_task(shared: &FocusShared, request_id: u64, task: &FocusTask) -> FocusRep
     let started = backend.now_ms();
     let outcome = drive_attempts(
         shared.policy,
-        |_attempt| {
+        |attempt| {
             if shared.superseded(request_id) {
                 return AttemptResult::Fatal(FocusFailure::Cancelled);
             }
             let Some(pid) = backend.foreground_process_id() else {
+                focus_note(format!(
+                    "focus_attempt index={} pid=0 result=no_foreground",
+                    attempt + 1
+                ));
                 return AttemptResult::NotForeground;
             };
             if pid == backend.current_process_id() {
@@ -420,7 +441,17 @@ fn run_task(shared: &FocusShared, request_id: u64, task: &FocusTask) -> FocusRep
             if !backend.process_alive(pid) {
                 return AttemptResult::Fatal(FocusFailure::TargetExited);
             }
-            backend.attempt(pid, &choice)
+            let result = backend.attempt(pid, &choice);
+            // 每次尝试都落一条：前台 PID + 结果。失败时无需再靠探针复现
+            // （2026-10-19 现场：只有最终 timeout，看不出是打错前台还是匹配失败）。
+            focus_note(format!(
+                "focus_attempt index={} pid={} kind={} result={}",
+                attempt + 1,
+                pid,
+                task.kind(),
+                attempt_result_label(result)
+            ));
+            result
         },
         || Duration::from_millis(backend.now_ms().saturating_sub(started)),
         |duration| backend.sleep(duration),

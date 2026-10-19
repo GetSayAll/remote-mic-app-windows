@@ -1,6 +1,6 @@
 # 记录位置随窗口变化失效、匿名输入框学不到、组合动作聚焦步骤超时
 
-- 状态：已修复；自动化 passed；真机取证 passed（学习兜底 / 聚焦服务）；嵌套聚焦等待与 6 秒学习窗口待新包复验
+- 状态：已修复；自动化 passed；真机（安装包）passed：嵌套聚焦、6 秒学习窗口、类名匹配均通过
 - 影响范围：聚焦位置记录、输入框学习兜底、组合动作「聚焦学习过的输入框」步骤
 - 报告：2026-10-19 用户现场（WorkBuddy 位置变化后无法聚焦、WorkBuddy 输入框无法记录、
   DimAgent 已学习但组合动作执行失败）
@@ -22,6 +22,14 @@
    只靠矩形记录。
 3. **步骤超时 2 秒 < 聚焦服务预算 3 秒**：`launch_then_focus` 需要等目标应用激活 +
    UIA 重试（服务预算 3 秒），2 秒时步骤判失败并丢弃 runner，服务随即报 `cancelled`。
+4. **只有类名特征的记录永远达不到匹配门槛**：DimAgent 的档案是
+   `controlType=Group` + `className="tiptap ProseMirror outline-none ProseMirror-focused"`，
+   没有 automationId / name / 矩形。类名命中只加 140 分，而阈值是 180 ⇒
+   `best_recorded_index` 永远返回 `None`，日志只看到最终 `reason=timeout`。
+   探针现场取证：候选恰好 1 个（hash `bad23a84`，focused=true），
+   `attempt=NoCandidate { candidates: 1 }`。
+5. **嵌套动作的激活是异步的**：聚焦服务按「当前前台进程」执行，`launch_app` 后立即提交
+   请求时前几次尝试打在上一个前台应用上（WeChat 等），3 秒预算被耗尽。
 
 ## 修复
 
@@ -38,6 +46,11 @@
   打在旧前台应用上。单独执行时目标已在前台，所以只有嵌套场景暴露。
 - 学习窗口统一 6 秒（后端 `LEARN_WINDOW`，前端倒计时只做展示），
   组合动作页点「学习输入框」立即开始采样，不再先空等 10 秒。
+- 类名命中的分值 140 → 180：单独类名即可达到阈值；同名控件并列时分差仍为 0，
+  继续拒绝，避免点错。
+- 诊断日志补齐：`focus_wait_foreground`（是否等到前台，含耗时）、
+  `focus_attempt index= pid= kind= result=`（每次尝试的前台 PID 与结果），
+  失败时不必再用探针复现。
 
 ## 验证
 
@@ -45,11 +58,20 @@
   （修复前 `learn_failed=NoCandidate`）。
 - 真机：DimAgent 前台 → 聚焦服务 `focused=true attempts=1 elapsed_ms=1384`
   （服务本身可用；步骤超时是瓶颈，已提到 8s）。
-- 真机（2026-10-19 第二轮）：嵌套组合动作仍报 `attempts=3 elapsed_ms≈3400 reason=timeout`
-  （旧 6s 超时 + 未等前台）；本轮改为先等前台再提交，需装新包复验。
+- 真机（2026-10-19 第三轮，安装包 `57fa5a47…`，内嵌修订 `a40c918a`）：
+  - 探针：同一份 DimAgent 档案，修复前 `attempt=NoCandidate { candidates: 1 }`；
+    类名分值调整后 `attempt=Focused { candidates: 1 }`。
+  - 单步组合动作：学习窗口实测 6134 ms（目标未聚焦 → 6 秒后报"没有采到可用的输入框"）；
+    聚焦 DimAgent 输入框后 `focus_learn phase=completed terminal_result=passed`。
+  - 嵌套组合动作（WeChat 前台 → 打开微信 → 聚焦 DimAgent）：
+    `focus_wait_foreground passed elapsed_ms=14`；
+    `focus_attempt index=1 result=no_candidate`，`index=2 result=focused`；
+    `focus_result terminal_result=passed attempts=2 elapsed_ms=4500`；
+    `map_macro_terminal terminal_result=completed steps=2`，UI 显示「组合动作执行成功」。
 - 单测新增：边距锚定（贴底 60px 在窗口变高 200px 后仍贴底）、旧记录保持 25% 容差、
-  匿名 Edit 仅矩形匹配（距离 >5% 不认）。`cargo test --workspace` 全绿
-  （core 56 / windows 388 / app 131）；前端 422 passed（含「学习窗口 6 秒」用例）。
+  匿名 Edit 仅矩形匹配（距离 >5% 不认）、仅类名记录达到阈值且同名并列仍拒绝。
+  `cargo test --workspace` 全绿（core 56 / windows 389 / app 131）；
+  前端 422 passed（含「学习窗口 6 秒」用例）。
 
 ## 边界
 

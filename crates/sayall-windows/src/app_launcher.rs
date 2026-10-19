@@ -2221,19 +2221,28 @@ pub fn learn_focus_point(_target: &str) -> Result<crate::focus::RecordedPoint, S
 /// （2026-10-19 现场：嵌套组合动作里 `attempts=3 reason=timeout`，单独执行却成功）。
 #[cfg(windows)]
 pub(crate) fn wait_for_target_foreground(target: &str, timeout: std::time::Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
+    let mut observed = false;
     loop {
         let foreground = target_window_visibility(target)
             .and_then(|visibility| visibility.largest_visible)
             .is_some_and(win_impl::window_is_foreground);
         if foreground {
-            return true;
+            observed = true;
+            break;
         }
         if std::time::Instant::now() >= deadline {
-            return false;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(80));
     }
+    crate::ble::gatt_note(format!(
+        "focus_wait_foreground phase=completed terminal_result={} elapsed_ms={}",
+        if observed { "passed" } else { "timeout" },
+        started.elapsed().as_millis()
+    ));
+    observed
 }
 
 #[cfg(not(windows))]
