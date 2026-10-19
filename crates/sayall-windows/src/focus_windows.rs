@@ -1,4 +1,4 @@
-﻿//! Windows UI Automation 后端（仅 Windows）。
+//! Windows UI Automation 后端（仅 Windows）。
 //!
 //! 约束：UIA 客户端必须在**不拥有窗口的 MTA 线程**上调用（MS Learn
 //! `uiauto-threading`），因此本模块自己起一个专用工作线程，在其上
@@ -24,7 +24,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use windows::core::{Interface, BSTR, PCWSTR};
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_MULTITHREADED,
@@ -43,7 +43,8 @@ mod imp {
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        EnumWindows, GetForegroundWindow, GetPhysicalCursorPos, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible,
     };
 
     /// 单次遍历的元素上限（防止异常应用把树撑爆）。
@@ -504,36 +505,108 @@ mod imp {
 
     /// 采集当前系统焦点元素（「学习输入框」用）；要求属于指定进程、通过候选硬门槛
     /// 且能形成可比对的语义特征（否则返回 `None`，UI 报「没学到可用的输入框」）。
+    ///
+    /// 焦点元素不可用时（典型：Electron 应用把焦点报成顶层 `Window`，`focusable=false`），
+    /// 退回到「光标所在的输入框候选」——即用户点击的位置（2026-10-19 现场：
+    /// WorkBuddy 点击输入框后焦点仍是顶层窗口，学习一直 `no_candidate`）。
     pub fn capture_focused_target(pid: u32) -> Option<RecordedFocusTarget> {
         submit(move |session| {
-            let focused = unsafe { session.automation.GetFocusedElement() }.ok()?;
-            let element_pid = unsafe { focused.CurrentProcessId() }.ok()? as u32;
-            if element_pid != pid {
-                return None;
-            }
-            // 学习必须命中「能输入」的元素：只读网页根、按钮、密码框一律不记。
-            // 门槛用学习档：用户主动点击的元素就是目标（地址栏这类排除词只在自动
-            // 选择路径生效，见 `FocusCandidate::passes_learning_gate`）。
-            let focused_candidate = {
-                let mut candidate = snapshot_candidate(&focused, None);
-                candidate.control_type = control_type_name(&session.automation, &focused);
-                candidate
-            };
-            if !focused_candidate.passes_learning_gate() {
-                return None;
-            }
-            let target = RecordedFocusTarget {
-                control_type: focused_candidate.control_type,
-                automation_id: focused_candidate.automation_id,
-                class_name: focused_candidate.class_name,
-                name: focused_candidate.name,
-                window_title: String::new(),
-                normalized_rect: None,
-                context_tokens: Vec::new(),
-            };
-            target.normalized()
+            capture_focused_element(session, pid)
+                .or_else(|| capture_target_under_cursor(session, pid))
         })
         .flatten()
+    }
+
+    /// 系统焦点元素（严格：必须属于目标进程、可输入、有可比特征）。
+    fn capture_focused_element(session: &Session, pid: u32) -> Option<RecordedFocusTarget> {
+        let focused = unsafe { session.automation.GetFocusedElement() }.ok()?;
+        let element_pid = unsafe { focused.CurrentProcessId() }.ok()? as u32;
+        if element_pid != pid {
+            return None;
+        }
+        // 学习必须命中「能输入」的元素：只读网页根、按钮、密码框一律不记。
+        // 门槛用学习档：用户主动点击的元素就是目标（地址栏这类排除词只在自动
+        // 选择路径生效，见 `FocusCandidate::passes_learning_gate`）。
+        let focused_candidate = {
+            let mut candidate = snapshot_candidate(&focused, None);
+            candidate.control_type = control_type_name(&session.automation, &focused);
+            candidate
+        };
+        if !focused_candidate.passes_learning_gate() {
+            return None;
+        }
+        let target = RecordedFocusTarget {
+            control_type: focused_candidate.control_type,
+            automation_id: focused_candidate.automation_id,
+            class_name: focused_candidate.class_name,
+            name: focused_candidate.name,
+            window_title: String::new(),
+            normalized_rect: None,
+            context_tokens: Vec::new(),
+        };
+        target.normalized()
+    }
+
+    /// 光标命中兜底：扫目标窗口的输入候选，取「矩形包含光标」的那一个。
+    ///
+    /// 不依赖应用是否把键盘焦点暴露给 UIA，也不依赖 `ElementFromPoint`
+    /// （Chromium 的 `ElementFromPoint` 可能只返回 render host）。
+    fn capture_target_under_cursor(session: &Session, pid: u32) -> Option<RecordedFocusTarget> {
+        let (cursor_x, cursor_y) = physical_cursor()?;
+        let (hwnd, _) = target_window(pid)?;
+        let root = unsafe { session.automation.ElementFromHandle(hwnd) }.ok()?;
+        let (wx, wy, ww, wh) = unsafe { root.CurrentBoundingRectangle() }
+            .ok()
+            .and_then(|rect| sane_rect(&rect))?;
+        if cursor_x < wx || cursor_y < wy || cursor_x > wx + ww || cursor_y > wy + wh {
+            return None;
+        }
+        let x = (cursor_x - wx) / ww;
+        let y = (cursor_y - wy) / wh;
+        let scan = collect_candidates(session, hwnd, CandidateGate::Recorded).ok()?;
+        let mut hits: Vec<&FocusCandidate> = scan
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.normalized_rect.is_some_and(|rect| {
+                    x >= rect.x
+                        && x <= rect.x + rect.width
+                        && y >= rect.y
+                        && y <= rect.y + rect.height
+                })
+            })
+            .collect();
+        // 优先「本来就有焦点」的，其次面积最小的（更具体的输入框）。
+        hits.sort_by(|a, b| {
+            b.focused.cmp(&a.focused).then_with(|| {
+                let area = |candidate: &FocusCandidate| {
+                    candidate
+                        .normalized_rect
+                        .map(|rect| rect.width * rect.height)
+                        .unwrap_or(f64::MAX)
+                };
+                area(a).total_cmp(&area(b))
+            })
+        });
+        let chosen = hits.first().copied()?;
+        let normalized = RecordedFocusTarget {
+            control_type: chosen.control_type.clone(),
+            automation_id: chosen.automation_id.clone(),
+            class_name: chosen.class_name.clone(),
+            name: chosen.name.clone(),
+            window_title: String::new(),
+            normalized_rect: chosen.normalized_rect,
+            context_tokens: Vec::new(),
+        }
+        .normalized();
+        normalized
+    }
+
+    /// 物理光标位置（UIA 工作线程固定 Per-Monitor V2，与元素矩形同坐标系）。
+    fn physical_cursor() -> Option<(f64, f64)> {
+        let mut point = POINT::default();
+        unsafe { GetPhysicalCursorPos(&mut point) }.ok()?;
+        Some((f64::from(point.x), f64::from(point.y)))
     }
 
     /// 一次聚焦尝试的结果（对上层可映射为 `AttemptResult`）。

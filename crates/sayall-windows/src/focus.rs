@@ -148,21 +148,33 @@ impl FocusStrategy {
     }
 }
 
-/// 用户记录的「点击位置」：相对目标窗口的归一化坐标（0..1）。
+/// 用户记录的「点击位置」。
 ///
 /// 面向完全不暴露无障碍接口的应用（2026-10-15 实测：微信 4.x 的主窗口与其渲染
 /// 子窗口对 `OBJID_CLIENT` / `UiaRootObjectId` 都返回 0，整棵 UIA 树只有 2 个
 /// Pane）。这类应用只能按位置点击：用户把鼠标停在目标输入框上记录一次，聚焦时
-/// 点一下同一相对位置。
+/// 点一下同一位置。
 ///
-/// 记录同时保存窗口尺寸，用于在窗口尺寸变化后拒绝点击（避免点到别处）。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// 同时保存**归一化比例**与**到四边的物理像素距离**：
+/// - 窗口尺寸不变（±2%）时用比例，精确；
+/// - 尺寸变化时按「记录时最近的那条边」对齐（聊天输入框贴底、搜索框贴顶），
+///   而不是死守比例（2026-10-19 现场：WorkBuddy 窗口变高后比例点落到了消息区）；
+/// - 旧记录没有边距，只能按比例 + 25% 容差（超限报 `window_size_changed`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordedPoint {
     pub x_ratio: f64,
     pub y_ratio: f64,
     pub window_width: u32,
     pub window_height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom_offset: Option<u32>,
 }
 
 // 与 `NormalizedRect` 同理：唯一构造入口只接受有限值，因此可以满足 `Eq`。
@@ -187,6 +199,10 @@ impl RecordedPoint {
             y_ratio: (cy - wy) / wh,
             window_width: ww.round().max(1.0) as u32,
             window_height: wh.round().max(1.0) as u32,
+            left_offset: Some((cx - wx).round().max(0.0) as u32),
+            top_offset: Some((cy - wy).round().max(0.0) as u32),
+            right_offset: Some((wx + ww - cx).round().max(0.0) as u32),
+            bottom_offset: Some((wy + wh - cy).round().max(0.0) as u32),
         })
     }
 
@@ -202,8 +218,10 @@ impl RecordedPoint {
         Some(self)
     }
 
-    /// 按当前窗口矩形换算成绝对坐标（物理像素）；窗口尺寸变化超过 25% 时返回 `None`
-    /// （布局变化后位置不再可信，宁可失败也不要点错地方）。
+    /// 按当前窗口矩形换算成绝对坐标（物理像素）。
+    ///
+    /// - 有边距记录：尺寸变化时按记录时最近的边对齐（不拒绝）；同尺寸时用比例。
+    /// - 无边界记录（旧版本）：保持原来的 25% 容差，超限返回 `None`。
     pub fn absolute_in(&self, window: (f64, f64, f64, f64)) -> Option<(i32, i32)> {
         let (wx, wy, ww, wh) = window;
         if !all_finite(&[wx, wy]) || !all_finite_and_positive(&[(ww, wh)]) {
@@ -211,11 +229,43 @@ impl RecordedPoint {
         }
         let recorded_w = f64::from(self.window_width);
         let recorded_h = f64::from(self.window_height);
-        let tolerated = |current: f64, recorded: f64| {
-            let delta = (current - recorded).abs() / recorded.max(1.0);
-            delta <= 0.25
-        };
-        if !tolerated(ww, recorded_w) || !tolerated(wh, recorded_h) {
+        let relative_delta =
+            |current: f64, recorded: f64| (current - recorded).abs() / recorded.max(1.0);
+        let size_close =
+            relative_delta(ww, recorded_w) <= 0.02 && relative_delta(wh, recorded_h) <= 0.02;
+
+        if size_close {
+            let x = wx + self.x_ratio * ww;
+            let y = wy + self.y_ratio * wh;
+            return Some((x.round() as i32, y.round() as i32));
+        }
+
+        if let (Some(left), Some(right), Some(top), Some(bottom)) = (
+            self.left_offset,
+            self.right_offset,
+            self.top_offset,
+            self.bottom_offset,
+        ) {
+            // 记录时哪条边更近就用哪条边（贴底输入框、贴顶搜索框都能跟上尺寸变化）。
+            let x = if left <= right {
+                wx + f64::from(left)
+            } else {
+                wx + ww - f64::from(right)
+            };
+            let y = if top <= bottom {
+                wy + f64::from(top)
+            } else {
+                wy + wh - f64::from(bottom)
+            };
+            let clamp = |value: f64, origin: f64, size: f64| {
+                value.max(origin + 1.0).min(origin + size - 1.0)
+            };
+            let x = clamp(x, wx, ww);
+            let y = clamp(y, wy, wh);
+            return Some((x.round() as i32, y.round() as i32));
+        }
+
+        if relative_delta(ww, recorded_w) > 0.25 || relative_delta(wh, recorded_h) > 0.25 {
             return None;
         }
         let x = wx + self.x_ratio * ww;
@@ -360,10 +410,13 @@ impl RecordedFocusTarget {
             return None;
         }
         // 至少一个可比对特征，否则这份记录无法用于重新定位。
+        // 例外：匿名输入框（WorkBuddy 实测：Edit 没有 automationId / className / name）
+        // 允许用矩形作为唯一锚点——否则「点哪记哪」的字面兜底也记不下来。
         if self.automation_id.is_empty()
             && self.class_name.is_empty()
             && self.name.is_empty()
             && self.window_title.is_empty()
+            && self.normalized_rect.is_none()
         {
             return None;
         }
@@ -686,6 +739,7 @@ pub fn recorded_candidate_score(
         strong_matches += 1;
     }
 
+    let mut rect_close = false;
     if let (Some(candidate_rect), Some(target_rect)) =
         (candidate.normalized_rect, target.normalized_rect)
     {
@@ -694,9 +748,19 @@ pub fn recorded_candidate_score(
             + (candidate_rect.width - target_rect.width).abs()
             + (candidate_rect.height - target_rect.height).abs();
         score += (120.0 - distance * 120.0).max(0.0).round() as i32;
+        // 归一化坐标的曼哈顿距离 ≤ 0.05（约窗口的 5%）视为几何命中。
+        rect_close = distance <= 0.05;
     }
 
+    // 没有语义特征时（匿名 Edit），只有矩形几乎重合才认账。
+    let rect_only = target.automation_id.is_empty()
+        && target.class_name.is_empty()
+        && target.name.is_empty()
+        && target.window_title.is_empty();
     if strong_matches == 0 {
+        if rect_only && rect_close {
+            return Some(score);
+        }
         return None;
     }
     (score >= RECORDED_SCORE_THRESHOLD).then_some(score)
@@ -1083,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_point_normalizes_and_rejects_drifted_windows() {
+    fn recorded_point_normalizes_and_anchors_to_nearest_edge() {
         // 光标 (600, 400) 落在窗口 (0, 0, 1200, 800) 中央。
         let point =
             RecordedPoint::from_cursor(Some((600.0, 400.0)), Some((0.0, 0.0, 1200.0, 800.0)))
@@ -1091,6 +1155,8 @@ mod tests {
         assert!((point.x_ratio - 0.5).abs() < 1e-9);
         assert!((point.y_ratio - 0.5).abs() < 1e-9);
         assert_eq!(point.window_width, 1200);
+        assert_eq!(point.left_offset, Some(600));
+        assert_eq!(point.top_offset, Some(400));
 
         // 同一窗口尺寸下换算回原坐标
         assert_eq!(
@@ -1098,14 +1164,36 @@ mod tests {
             Some((600, 400))
         );
 
-        // 窗口变大 10%：比例仍然生效（不拒绝），坐标随比例移动
+        // 窗口变大 10%：尺寸变化超出比例容差 ⇒ 按记录时最近的边对齐（居中点仍是 600,400）。
         assert_eq!(
             point.absolute_in((0.0, 0.0, 1320.0, 880.0)),
-            Some((660, 440))
+            Some((600, 400))
         );
 
-        // 窗口尺寸变化超过 25%：拒绝，避免点到别处
-        assert_eq!(point.absolute_in((0.0, 0.0, 1600.0, 800.0)), None);
+        // 窗口尺寸变化很大：仍能按边距换算（不再直接拒绝；旧记录没有边距才会拒绝）。
+        let moved = point.absolute_in((0.0, 0.0, 1600.0, 800.0));
+        assert!(moved.is_some(), "有边距记录不再因尺寸变化整体拒绝");
+
+        // 贴底输入框（截图里 WorkBuddy 的场景）：窗口变高后仍贴底。
+        let bottom =
+            RecordedPoint::from_cursor(Some((600.0, 740.0)), Some((0.0, 0.0, 1200.0, 800.0)))
+                .expect("窗口内光标应可记录");
+        assert_eq!(bottom.bottom_offset, Some(60));
+        assert_eq!(
+            bottom.absolute_in((0.0, 0.0, 1200.0, 1000.0)),
+            Some((600, 940)),
+            "窗口变高 200px 后应保持距底 60px"
+        );
+
+        // 旧版本记录（没有边距）仍按比例 + 25% 容差：超限拒绝。
+        let legacy = RecordedPoint {
+            left_offset: None,
+            top_offset: None,
+            right_offset: None,
+            bottom_offset: None,
+            ..point
+        };
+        assert_eq!(legacy.absolute_in((0.0, 0.0, 1600.0, 800.0)), None);
 
         // 光标在窗口外 / 坐标为退化值：拒绝
         assert!(
@@ -1128,6 +1216,7 @@ mod tests {
                 y_ratio: 0.9,
                 window_width: 1200,
                 window_height: 800,
+                ..Default::default()
             }),
             recorded: Some(RecordedFocusTarget {
                 control_type: "Edit".to_owned(),
@@ -1153,10 +1242,54 @@ mod tests {
             y_ratio: 0.9,
             window_width: 1200,
             window_height: 800,
+            ..Default::default()
         });
         let normalized = profile.normalized();
         assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
         assert!(normalized.point.is_none());
+    }
+
+    #[test]
+    fn anonymous_edit_can_be_matched_by_rect_only() {
+        // WorkBuddy 实测（2026-10-19）：输入框是 Edit，没有 automationId / className / name，
+        // 只能靠矩形锚点；学习（光标兜底）与聚焦（recorded 匹配）都必须认这条记录。
+        let rect = NormalizedRect {
+            x: 0.314,
+            y: 0.817,
+            width: 0.541,
+            height: 0.075,
+        };
+        let target = RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            normalized_rect: Some(rect),
+            ..Default::default()
+        }
+        .normalized()
+        .expect("匿名 Edit 有矩形锚点即可记录");
+
+        let candidate = FocusCandidate {
+            normalized_rect: Some(rect),
+            enabled: true,
+            keyboard_focusable: true,
+            has_text_pattern: true,
+            ..candidate("Edit", "")
+        };
+        assert!(
+            recorded_candidate_score(&candidate, &target).is_some(),
+            "矩形重合必须能重新命中"
+        );
+
+        // 矩形明显不同（距离 > 5%）：不认，避免点错控件。
+        let far = FocusCandidate {
+            normalized_rect: Some(NormalizedRect {
+                x: 0.05,
+                y: 0.05,
+                width: 0.2,
+                height: 0.1,
+            }),
+            ..candidate.clone()
+        };
+        assert!(recorded_candidate_score(&far, &target).is_none());
     }
 
     #[test]

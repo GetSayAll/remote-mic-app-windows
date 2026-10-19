@@ -63,7 +63,11 @@ impl MacroAction {
         match self {
             Self::OpenApplication => 8_000,
             Self::WaitForApplication => 5_000,
-            Self::SendShortcut | Self::FocusInput => 2_000,
+            Self::SendShortcut => 2_000,
+            // 聚焦要等目标应用完成激活 + 聚焦服务的重试预算（默认 3 秒）；
+            // 早期默认 2 秒会在服务出结果前把请求打断（2026-10-19 现场：
+            // DimAgent 反复 `attempts=3 reason=cancelled`，步骤报失败）。
+            Self::FocusInput => 6_000,
             Self::OpenUrl => 5_000,
             Self::RunMacro => 60_000,
         }

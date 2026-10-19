@@ -174,6 +174,8 @@ fn main() {
             window_height: arg_value("--window-height")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(800),
+            // 探针只给比例 ⇒ 模拟旧版本记录（无边距），供对照。
+            ..Default::default()
         };
         match sayall_windows::app_launcher::recorded_point_absolute(&target, &point) {
             Ok((x, y)) => {

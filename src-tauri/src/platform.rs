@@ -990,6 +990,10 @@ mod simulation {
                 y_ratio: 0.82,
                 window_width: 1200,
                 window_height: 800,
+                left_offset: Some(600),
+                top_offset: Some(656),
+                right_offset: Some(600),
+                bottom_offset: Some(144),
             })
         }
 

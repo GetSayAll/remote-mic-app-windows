@@ -1597,6 +1597,10 @@ mod tests {
                     y_ratio: 0.5,
                     window_width: 1200,
                     window_height: 800,
+                    left_offset: Some(600),
+                    top_offset: Some(400),
+                    right_offset: Some(600),
+                    bottom_offset: Some(400),
                 })
             }
         }
