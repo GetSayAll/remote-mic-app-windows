@@ -1048,6 +1048,42 @@ mod tests {
     }
 
     #[test]
+    fn focus_strategy_survives_save_and_reload_without_payload() {
+        // 2026-10-16 现场：选了聚焦方式但还没录数据时，保存回读必须仍然保留该策略
+        // （否则 UI 选中态被覆盖回「只打开应用」，用户看到的是"按钮点不动"）。
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-focus-strategy-persist-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        let mut mappings = sayall_windows::send_input::ButtonMappings::default();
+        mappings.focus_profiles.insert(
+            "notepad".to_owned(),
+            sayall_windows::focus::AppFocusProfile {
+                strategy: sayall_windows::focus::FocusStrategy::RecordedPoint,
+                ..Default::default()
+            },
+        );
+        let saved = store.save_button_mappings(mappings).unwrap();
+        assert_eq!(
+            saved.focus_profiles["notepad"].strategy,
+            sayall_windows::focus::FocusStrategy::RecordedPoint,
+            "保存结果必须保留策略"
+        );
+        let reloaded = store.load_button_mappings().unwrap();
+        assert_eq!(
+            reloaded.focus_profiles["notepad"].strategy,
+            sayall_windows::focus::FocusStrategy::RecordedPoint,
+            "回读必须保留策略"
+        );
+        assert!(reloaded.focus_profiles["notepad"].point.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn theme_preference_defaults_to_system_and_persists() {
         let path = std::env::temp_dir().join(format!(
             "sayall-test-theme-preference-{}.json",
