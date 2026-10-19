@@ -609,6 +609,7 @@ function startPointRecording(): void {
   }
   learningStepId.value = stepId;
   pointCountdown.value = 6;
+  learningCountdown.value = 0;
   setStatus("6 秒后自动记录鼠标位置：请先把鼠标停在目标输入框上");
   learningTimer = setInterval(() => {
     pointCountdown.value -= 1;
@@ -619,9 +620,6 @@ function startPointRecording(): void {
 }
 
 async function finishPointRecording(target: string): Promise<void> {
-  if (learningTimer) clearInterval(learningTimer);
-  learningTimer = undefined;
-  learningStepId.value = null;
   try {
     const point = await learnFocusPoint(target);
     const mappings = await getButtonMappings();
@@ -634,6 +632,10 @@ async function finishPointRecording(target: string): Promise<void> {
     setStatus("点击位置记录成功", "success");
   } catch (error) {
     setStatus(`记录位置失败：${focusPointErrorLabel(messageOf(error))}`, "error");
+  } finally {
+    if (learningTimer) clearInterval(learningTimer);
+    learningTimer = undefined;
+    learningStepId.value = null;
   }
 }
 
@@ -645,20 +647,19 @@ function startLearning(): void {
     return;
   }
   learningStepId.value = stepId;
-  learningCountdown.value = 10;
-  setStatus("10 秒后自动记录，请切换并点击目标输入框");
+  learningCountdown.value = 6;
+  pointCountdown.value = 0;
+  setStatus("正在等待你点击目标输入框（最多 6 秒）");
+  if (learningTimer) clearInterval(learningTimer);
+  // 采样窗口由后端给（LEARN_WINDOW = 6 秒），这里只做倒计时展示；
+  // 点完按钮立即开始采样，用户有 6 秒时间切到目标 App 并点击输入框。
   learningTimer = setInterval(() => {
-    learningCountdown.value -= 1;
-    if (learningCountdown.value <= 0) {
-      void finishLearning(target);
-    }
+    if (learningCountdown.value > 1) learningCountdown.value -= 1;
   }, 1000);
+  void finishLearning(target);
 }
 
 async function finishLearning(target: string): Promise<void> {
-  if (learningTimer) clearInterval(learningTimer);
-  learningTimer = undefined;
-  learningStepId.value = null;
   try {
     const recorded = await learnFocusTarget();
     // 与按键页**同一落盘口径**：写入该目标的聚焦档案（策略=聚焦已记录的输入框）。
@@ -674,6 +675,10 @@ async function finishLearning(target: string): Promise<void> {
     setStatus("输入框学习成功", "success");
   } catch (error) {
     setStatus(`输入框学习失败：${focusLearnErrorLabel(messageOf(error))}`, "error");
+  } finally {
+    if (learningTimer) clearInterval(learningTimer);
+    learningTimer = undefined;
+    learningStepId.value = null;
   }
 }
 
@@ -1212,13 +1217,14 @@ onMounted(async () => {
                         {{ pointCountdown }} 秒后自动记录鼠标位置：请先把鼠标停在目标输入框上
                       </template>
                       <template v-else>
-                        {{ learningCountdown }} 秒后自动记录，请切换并点击目标输入框
+                        {{ learningCountdown }} 秒内点击目标输入框，保持光标在那里
                       </template>
                     </span>
                   </div>
                   <span class="field-hint">
-                    前置：① 目标 App 已经打开；② 倒计时结束前切到它、把光标点进要聚焦的输入框并保持在那里
-                    （密码框、只读区域不会被记录；地址栏可以，因为你是主动点的）；③ 倒计时结束时自动采样并记录。
+                    前置：① 目标 App 已经打开；② 学习窗口为 6 秒：切到目标 App、把光标点进要聚焦的输入框
+                    并保持在那里（密码框、只读区域不会被记录；地址栏可以，因为你是主动点的）；
+                    焦点被应用报成顶层窗口时（Electron 常见），按鼠标所在位置命中输入框。
                     目标应用完全没有向系统暴露输入框时（微信 4.x 实测），改用「记录点击位置」：
                     把鼠标停在要点击的输入框上，6 秒后记录该相对位置，之后按这个位置点击聚焦。
                     记录只属于这台电脑；也可以在按键页记录，两边共用同一份档案。

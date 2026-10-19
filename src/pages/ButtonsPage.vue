@@ -503,7 +503,8 @@ async function beginFocusShortcutCapture(): Promise<void> {
 }
 
 /**
- * 「学习输入框」：3 秒窗口内轮询系统焦点，用户需要在此期间点击目标应用的输入框。
+ * 「学习输入框」：6 秒窗口内轮询系统焦点（焦点不可用时取鼠标命中的输入候选），
+ * 用户需要在此期间点击目标应用的输入框。
  * 采集只读控件语义（不含输入内容），写入该目标的聚焦档案。
  */
 async function startFocusLearning(): Promise<void> {
@@ -511,7 +512,7 @@ async function startFocusLearning(): Promise<void> {
   const target = focusTarget.value;
   if (!target) return;
   focusLearnState.value = "learning";
-  focusLearnMessage.value = "请在 3 秒内点击目标应用的输入框（点到别处会记录成别的控件）";
+  focusLearnMessage.value = "请在 6 秒内点击目标应用的输入框（点到别处会记录成别的控件）";
   try {
     const recorded = await learnFocusTarget();
     const next = {

@@ -389,8 +389,13 @@ describe("组合动作页 · 编辑向导", () => {
     expect(select.text()).not.toContain("打开记事本并聚焦");
   });
 
-  it("学习输入框：倒计时结束后写入该 App 的聚焦档案（与按键页同一落盘口径）", async () => {
-    vi.useFakeTimers();
+  it("学习窗口为 6 秒：点按钮立即采样并显示倒计时", async () => {
+    let resolveLearn: (value: unknown) => void = () => {};
+    learnFocusTargetSpy.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveLearn = resolve;
+      }),
+    );
     const wrapper = await mountPage();
     await findButton(wrapper, "编辑").trigger("click");
     await flushPromises();
@@ -403,8 +408,26 @@ describe("组合动作页 · 编辑向导", () => {
     await flushPromises();
     await findButton(wrapper, "学习输入框").trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("秒后自动记录");
-    await vi.advanceTimersByTimeAsync(10_500);
+    expect(wrapper.text()).toContain("6 秒内点击目标输入框");
+    expect(learnFocusTargetSpy).toHaveBeenCalled();
+    resolveLearn({ controlType: "Edit", automationId: "chat-input", className: "RichEdit" });
+    await flushPromises();
+    expect(wrapper.text()).toContain("输入框学习成功");
+  });
+
+  it("学习输入框：写入该 App 的聚焦档案（与按键页同一落盘口径）", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const focusItem = wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!;
+    await focusItem.trigger("click");
+    await flushPromises();
+    // 学习窗口 6 秒由后端执行：点按钮立即开始采样（不再等 10 秒倒计时）。
+    await findButton(wrapper, "学习输入框").trigger("click");
     await flushPromises();
     expect(learnFocusTargetSpy).toHaveBeenCalled();
     // 关键回归（2026-10-15 现场）：学到的记录必须落进 focusProfiles，
@@ -431,7 +454,6 @@ describe("组合动作页 · 编辑向导", () => {
     await focusItem.trigger("click");
     await flushPromises();
     await findButton(wrapper, "学习输入框").trigger("click");
-    await vi.advanceTimersByTimeAsync(10_500);
     await flushPromises();
     expect(wrapper.text()).toContain("没有采到可用的输入框");
     expect(wrapper.text()).not.toContain("no_candidate");

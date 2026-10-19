@@ -2214,6 +2214,33 @@ pub fn learn_focus_point(_target: &str) -> Result<crate::focus::RecordedPoint, S
     Err("unsupported".to_owned())
 }
 
+/// 等待目标应用成为前台窗口（有界）。
+///
+/// 聚焦服务按「当前前台进程」执行；`activate_or_launch` 的激活是异步完成的，
+/// 提交聚焦请求前若不等一下，前几次尝试会打在旧前台应用上，重试预算被白白耗尽
+/// （2026-10-19 现场：嵌套组合动作里 `attempts=3 reason=timeout`，单独执行却成功）。
+#[cfg(windows)]
+pub(crate) fn wait_for_target_foreground(target: &str, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let foreground = target_window_visibility(target)
+            .and_then(|visibility| visibility.largest_visible)
+            .is_some_and(win_impl::window_is_foreground);
+        if foreground {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn wait_for_target_foreground(_target: &str, _timeout: std::time::Duration) -> bool {
+    false
+}
+
 /// 按记录的相对坐标聚焦：等到目标窗口出现且在前面，再换算绝对坐标。
 ///
 /// 目标窗口的当前尺寸必须与记录时相差不超过 25%，否则拒绝点击（布局变化后位置

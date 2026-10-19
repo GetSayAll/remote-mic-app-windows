@@ -67,7 +67,7 @@ impl MacroAction {
             // 聚焦要等目标应用完成激活 + 聚焦服务的重试预算（默认 3 秒）；
             // 早期默认 2 秒会在服务出结果前把请求打断（2026-10-19 现场：
             // DimAgent 反复 `attempts=3 reason=cancelled`，步骤报失败）。
-            Self::FocusInput => 6_000,
+            Self::FocusInput => 8_000,
             Self::OpenUrl => 5_000,
             Self::RunMacro => 60_000,
         }

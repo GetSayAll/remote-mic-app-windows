@@ -210,6 +210,12 @@ impl MappingInjector for SendInputInjector {
                 let recorded = profile
                     .and_then(|profile| profile.recorded.clone())
                     .ok_or_else(|| "该应用还没有学习过输入框".to_owned())?;
+                // 激活是异步完成的：先等目标成为前台，否则聚焦服务的前几次尝试
+                // 会打在上一个前台应用上（嵌套动作里尤其明显）。
+                let _ = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
                 self.with_focus_runner(|runner| {
                     runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
                         crate::focus::FocusChoice::Recorded(recorded),

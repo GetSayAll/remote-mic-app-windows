@@ -337,7 +337,7 @@ fn clamp_chars(value: &str, limit: usize) -> String {
 /// 用户点「开始学习输入框」后有 [`LEARN_WINDOW`] 的时间去点目标应用的输入框；
 /// 采样间隔 [`LEARN_POLL_INTERVAL`]，同一候选需连续 [`LEARN_STABLE_SAMPLES`] 次
 /// 采样一致才认账（避免把扫过或中途闪现的元素记下来）。
-pub const LEARN_WINDOW: std::time::Duration = std::time::Duration::from_millis(3000);
+pub const LEARN_WINDOW: std::time::Duration = std::time::Duration::from_millis(6000);
 pub const LEARN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 pub const LEARN_STABLE_SAMPLES: usize = 2;
 

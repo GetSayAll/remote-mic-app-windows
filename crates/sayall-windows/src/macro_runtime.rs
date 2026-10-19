@@ -1044,6 +1044,12 @@ impl MacroStepper for WindowsMacroStepper {
                 if self.injector.launch_app(target).is_err() {
                     return StepOutcome::Failed;
                 }
+                // 激活异步完成：等目标成为前台再提交聚焦请求（否则前几次尝试打在旧前台，
+                // 3 秒重试预算会在激活完成前耗尽 —— 2026-10-19 嵌套动作现场）。
+                let _ = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
                 let submitted = self.with_focus_runner(|runner| {
                     runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
                         crate::focus::FocusChoice::Recorded(recorded),

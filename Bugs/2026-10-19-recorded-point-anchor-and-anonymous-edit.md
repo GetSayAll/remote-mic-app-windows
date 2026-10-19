@@ -1,6 +1,6 @@
 # 记录位置随窗口变化失效、匿名输入框学不到、组合动作聚焦步骤超时
 
-- 状态：已修复；自动化 passed；真机取证 passed（学习兜底 / 聚焦服务），位置锚定与超时需装新包复验
+- 状态：已修复；自动化 passed；真机取证 passed（学习兜底 / 聚焦服务）；嵌套聚焦等待与 6 秒学习窗口待新包复验
 - 影响范围：聚焦位置记录、输入框学习兜底、组合动作「聚焦学习过的输入框」步骤
 - 报告：2026-10-19 用户现场（WorkBuddy 位置变化后无法聚焦、WorkBuddy 输入框无法记录、
   DimAgent 已学习但组合动作执行失败）
@@ -32,19 +32,27 @@
   （不依赖 `ElementFromPoint`，Chromium 可能只返回 render host）。
 - 匿名输入框：`RecordedFocusTarget::normalized` 允许「无任何语义特征、只有矩形」的记录；
   `recorded_candidate_score` 对这类记录要求矩形曼哈顿距离 ≤ 0.05 才认账。
-- 组合动作 `focus_input` 默认超时 2s → 6s（覆盖聚焦服务 3 秒重试预算 + 激活时间）。
+- 组合动作 `focus_input` 默认超时 2s → 8s（覆盖「等前台 2.5s + 聚焦服务 3s 重试预算」）。
+- 嵌套组合动作里 `launch_app` 的激活是异步的，聚焦服务按**当前前台进程**执行；
+  提交聚焦请求前新增有界等待 `wait_for_target_foreground(2.5s)`，避免前几次尝试
+  打在旧前台应用上。单独执行时目标已在前台，所以只有嵌套场景暴露。
+- 学习窗口统一 6 秒（后端 `LEARN_WINDOW`，前端倒计时只做展示），
+  组合动作页点「学习输入框」立即开始采样，不再先空等 10 秒。
 
 ## 验证
 
 - 真机：WorkBuddy 点击输入框 → `learned control_type=Edit id_chars=0 class_chars=0 name_chars=0`
   （修复前 `learn_failed=NoCandidate`）。
 - 真机：DimAgent 前台 → 聚焦服务 `focused=true attempts=1 elapsed_ms=1384`
-  （服务本身可用；步骤超时是瓶颈，已提到 6s）。
+  （服务本身可用；步骤超时是瓶颈，已提到 8s）。
+- 真机（2026-10-19 第二轮）：嵌套组合动作仍报 `attempts=3 elapsed_ms≈3400 reason=timeout`
+  （旧 6s 超时 + 未等前台）；本轮改为先等前台再提交，需装新包复验。
 - 单测新增：边距锚定（贴底 60px 在窗口变高 200px 后仍贴底）、旧记录保持 25% 容差、
   匿名 Edit 仅矩形匹配（距离 >5% 不认）。`cargo test --workspace` 全绿
-  （core 56 / windows 388 / app 131）。
+  （core 56 / windows 388 / app 131）；前端 422 passed（含「学习窗口 6 秒」用例）。
 
 ## 边界
 
 - 记录位置仍不感知**布局变化**（例如输入框从底部移到顶部）：只能保证窗口尺寸变化时按边对齐。
 - 匿名 Edit 只靠矩形：同窗口内若存在两个几乎重合的可输入控件，会因分差不足拒绝聚焦。
+- 嵌套动作的聚焦依赖「目标应用能否被激活到前台」；被系统拒绝前台切换时仍会超时报错。
