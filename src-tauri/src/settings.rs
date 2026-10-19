@@ -86,6 +86,20 @@ impl SettingsStore {
         })
     }
 
+    /// 「锁定当前按键」界面偏好（按键页页脚开关，默认**开启**）。
+    ///
+    /// 2026-10-18 起持久化：页面挂载时读回、变更时保存，跨页面切换与跨重启
+    /// 都保持用户的选择（此前只是页面局部状态，切页即回默认，用户侧"关不掉"）。
+    pub fn load_lock_mapping_selection(&self) -> Result<bool, String> {
+        self.load().map(|settings| settings.lock_mapping_selection)
+    }
+
+    pub fn save_lock_mapping_selection(&self, locked: bool) -> Result<(), String> {
+        self.update("保存锁定当前按键设置", move |settings| {
+            settings.lock_mapping_selection = locked;
+        })
+    }
+
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
@@ -640,6 +654,29 @@ mod tests {
         store.save_other_voice_hotkey(Some(keys.clone())).unwrap();
         assert_eq!(store.load_other_voice_hotkey().unwrap(), Some(keys));
         let _ = std::fs::remove_file(store.path.with_file_name("other-voice-hotkey.json"));
+    }
+
+    /// 「锁定当前按键」持久化（2026-10-18）：默认开启；关闭后写盘、读回保持关闭；
+    /// 老配置（无此字段）回落默认。
+    #[test]
+    fn lock_mapping_selection_defaults_on_and_round_trips() {
+        let path = std::env::temp_dir().join("sayall-lock-selection-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(store.load_lock_mapping_selection().unwrap());
+        store.save_lock_mapping_selection(false).unwrap();
+        assert!(!store.load_lock_mapping_selection().unwrap());
+
+        // 升级路径：不含该字段的老配置读回时回落默认（开启）。
+        std::fs::write(
+            &path,
+            r#"{"schema_version":4,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert!(store.load_lock_mapping_selection().unwrap());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

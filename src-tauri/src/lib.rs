@@ -2403,6 +2403,66 @@ async fn set_voice_input_tool(
     result
 }
 
+/// 「锁定当前按键」偏好（按键页页脚开关，2026-10-18 持久化）。
+///
+/// 语义：开启时操作实体遥控器不会切换正在编辑的按键；默认开启。前端在页面挂载时
+/// 读取、开关变更时保存；设置文件是唯一权威值（页面切换会重建组件）。
+#[tauri::command]
+async fn get_lock_mapping_selection(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || settings.load_lock_mapping_selection())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("读取锁定当前按键设置任务失败：{error}")),
+        };
+    sayall_windows::gatt_note(match &result {
+        Ok(locked) => format!(
+            "mapping_settings feature=selection_lock action=load phase=completed terminal_result=passed locked={locked} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "mapping_settings feature=selection_lock action=load phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
+#[tauri::command]
+async fn set_lock_mapping_selection(
+    locked: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note(format!(
+        "mapping_settings feature=selection_lock action=save phase=requested locked={locked}"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_lock_mapping_selection(locked)?;
+        Ok(locked)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存锁定当前按键设置任务失败：{error}")),
+    };
+    sayall_windows::gatt_note(match &result {
+        Ok(saved) => format!(
+            "mapping_settings feature=selection_lock action=save phase=completed terminal_result=passed locked={saved} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+        Err(_) => format!(
+            "mapping_settings feature=selection_lock action=save phase=completed terminal_result=failed locked={locked} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        ),
+    });
+    result
+}
+
 /// 「用户选的输入工具」的唯一来源（`settings.json`，与 `get_voice_input_tool` 同源）。
 ///
 /// 为什么不问平台：`PlatformRuntime` 只有 setter（`set_voice_input_tool`），没有
@@ -3908,6 +3968,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_lock_mapping_selection,
+        set_lock_mapping_selection,
         get_ime_status,
         get_gain_db,
         set_gain_db,
@@ -3991,6 +4053,8 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        get_lock_mapping_selection,
+        set_lock_mapping_selection,
         get_ime_status,
         get_gain_db,
         set_gain_db,
