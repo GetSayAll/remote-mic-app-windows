@@ -87,6 +87,8 @@ const pendingDeleteId = ref<string | null>(null);
 const deleteReferences = ref<MacroReferenceReport | null>(null);
 
 const presetApps = ref<PresetAppInfo[]>([]);
+/** 自定义应用（与按键页共用同一份 `applications`，只读展示）。 */
+const customApps = ref<Array<{ id: string; name: string }>>([]);
 const capturedChord = ref<KeyChord | null>(null);
 const captureActive = ref(false);
 const learningStepId = ref<string | null>(null);
@@ -121,6 +123,34 @@ const draftValid = computed(() => {
 const selectedStepIndex = computed(() =>
   draft.value?.steps.findIndex((step) => step.stepId === selectedStepId.value) ?? -1,
 );
+
+/** 打开/等待/聚焦应用的可选列表：与按键页一致，已安装预设 + 已添加的自定义应用。 */
+const appChoices = computed<Array<{ id: string; name: string }>>(() => {
+  const seen = new Map<string, string>();
+  for (const app of presetApps.value) {
+    if (app.installed) seen.set(app.id, app.name);
+  }
+  for (const app of customApps.value) {
+    if (!seen.has(app.id)) seen.set(app.id, app.name);
+  }
+  return [...seen.entries()].map(([id, name]) => ({ id, name }));
+});
+
+function appDisplayName(target: string | undefined): string {
+  if (!target) return "";
+  return appChoices.value.find((app) => app.id === target)?.name ?? target.split(/[\\/]/).pop() ?? target;
+}
+
+function reloadPresetApps(): void {
+  void listPresetApps()
+    .then((apps) => {
+      presetApps.value = apps;
+      registerPresetAppNames(apps);
+    })
+    .catch(() => {
+      // 扫描失败保持现有列表；用户仍可手动选择已列出的应用。
+    });
+}
 
 const ACTION_ORDER: MacroAction[] = [
   "open_application",
@@ -188,19 +218,30 @@ function cloneStep(step: MacroStep): MacroStep {
 
 // ===== 库浏览 =====
 
+function defaultMacroName(): string {
+  // 对齐 Mac 的「先有名字再编辑」：新建即给默认名，避免空名称卡在第①步。
+  const base = "组合动作";
+  let index = 1;
+  while (definitions.value.some((item) => item.name === `${base} ${index}`)) {
+    index += 1;
+  }
+  return `${base} ${index}`;
+}
+
 function startCreate(): void {
   draft.value = {
     schemaVersion: "0.1",
     macroId: newMacroId(),
     version: "1.0.0",
-    name: "",
+    name: defaultMacroName(),
     steps: [],
   };
   isNewMacro.value = true;
   wizardVisible.value = true;
   editorStep.value = "basic";
   selectedStepId.value = null;
-  setStatus("组合动作已创建，请添加步骤");
+  // 新建不是「已创建」：保存前不写库，也不提示成功（2026-10-19 现场）。
+  statusMessage.value = "";
 }
 
 function startEdit(definition: MacroDefinition): void {
@@ -812,6 +853,15 @@ onMounted(async () => {
   } catch {
     presetApps.value = [];
   }
+  try {
+    const mappings = await getButtonMappings();
+    customApps.value = (mappings.applications ?? []).map((app) => ({
+      id: app.path,
+      name: app.name,
+    }));
+  } catch {
+    customApps.value = [];
+  }
   await refreshFocusProfiles();
   await reloadLibrary();
 });
@@ -857,7 +907,7 @@ onMounted(async () => {
         </div>
         <div class="library-actions">
           <button class="btn primary block" type="button" @click="startCreate">＋ 新建</button>
-          <div class="btn-row">
+          <div class="btn-row library-io">
             <button class="btn" type="button" @click="onImport">导入</button>
             <button class="btn" type="button" :disabled="definitions.length === 0" @click="onExport">
               导出
@@ -985,20 +1035,30 @@ onMounted(async () => {
             />
             <span class="field-hint">最多 {{ MAX_NAME_CHARS }} 个字符。</span>
           </label>
-          <div v-if="draft.steps.length === 0" class="first-action">
+          <div v-if="isNewMacro" class="first-action">
             <p class="field-label">选择第一个动作</p>
             <div class="action-grid">
               <button
                 v-for="action in ACTION_ORDER"
                 :key="action"
                 class="action-card"
+                :class="{ selected: draft.steps[0]?.action === action }"
                 type="button"
                 @click="addStep(action)"
               >
-                {{ macroActionLabel(action) }}
+                <span>{{ macroActionLabel(action) }}</span>
+                <span v-if="draft.steps[0]?.action === action" class="action-check" aria-hidden="true">
+                  ✓
+                </span>
               </button>
             </div>
-            <p class="field-hint">选择动作后，点击“下一步”配置；名称和步骤在最后一起保存。</p>
+            <p v-if="draft.steps.length > 0" class="field-hint">
+              已添加：<strong>{{ macroActionLabel(draft.steps[0].action) }}</strong> · 已有
+              {{ draft.steps.length }} 个步骤，可在下一步修改顺序和参数。
+            </p>
+            <p v-else class="field-hint">
+              选择动作后，点击“下一步”配置；名称和步骤在最后一起保存。
+            </p>
           </div>
           <p v-else class="field-hint">
             已有 {{ draft.steps.length }} 个步骤，可在下一步修改顺序和参数。
@@ -1087,19 +1147,29 @@ onMounted(async () => {
                   v-if="draft.steps[selectedStepIndex].action === 'open_application'"
                   class="step-card-body"
                 >
-                  <label class="field">
+                  <div class="field">
                     <span class="field-label">要使用的 App</span>
-                    <select
-                      class="text-input"
-                      :value="draft.steps[selectedStepIndex].parameters.target ?? ''"
-                      @change="renameStepTarget(($event.target as HTMLSelectElement).value)"
-                    >
-                      <option v-for="app in presetApps" :key="app.id" :value="app.id">
+                    <!-- 与按键页同一套 chip 网格（2026-10-19 用户要求） -->
+                    <div class="preset-grid app-library">
+                      <button
+                        v-for="app in appChoices"
+                        :key="app.id"
+                        class="chip"
+                        :class="{ selected: draft.steps[selectedStepIndex].parameters.target === app.id }"
+                        type="button"
+                        @click="renameStepTarget(app.id)"
+                      >
                         {{ app.name }}
-                      </option>
-                    </select>
-                  </label>
-                  <span class="field-hint">未运行时会先启动；已运行时直接切换到前台。</span>
+                      </button>
+                      <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                    </div>
+                  </div>
+                  <span class="field-hint">
+                    未运行时会先启动；已运行时直接切换到前台。
+                    <template v-if="draft.steps[selectedStepIndex].parameters.target">
+                      当前：{{ appDisplayName(draft.steps[selectedStepIndex].parameters.target) }}
+                    </template>
+                  </span>
                 </div>
 
                 <!-- 等待应用 -->
@@ -1107,18 +1177,22 @@ onMounted(async () => {
                   v-else-if="draft.steps[selectedStepIndex].action === 'wait_for_application'"
                   class="step-card-body"
                 >
-                  <label class="field">
+                  <div class="field">
                     <span class="field-label">要等待的 App</span>
-                    <select
-                      class="text-input"
-                      :value="draft.steps[selectedStepIndex].parameters.target ?? ''"
-                      @change="renameStepTarget(($event.target as HTMLSelectElement).value)"
-                    >
-                      <option v-for="app in presetApps" :key="app.id" :value="app.id">
+                    <div class="preset-grid app-library">
+                      <button
+                        v-for="app in appChoices"
+                        :key="app.id"
+                        class="chip"
+                        :class="{ selected: draft.steps[selectedStepIndex].parameters.target === app.id }"
+                        type="button"
+                        @click="renameStepTarget(app.id)"
+                      >
                         {{ app.name }}
-                      </option>
-                    </select>
-                  </label>
+                      </button>
+                      <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                    </div>
+                  </div>
                   <div class="field">
                     <span class="field-label">等待到什么时候</span>
                     <div class="segmented">
@@ -1171,15 +1245,19 @@ onMounted(async () => {
                 >
                   <div class="field">
                     <span class="field-label">目标 App</span>
-                    <select
-                      class="text-input"
-                      :value="draft.steps[selectedStepIndex].parameters.target ?? ''"
-                      @change="renameStepTarget(($event.target as HTMLSelectElement).value)"
-                    >
-                      <option v-for="app in presetApps" :key="app.id" :value="app.id">
+                    <div class="preset-grid app-library">
+                      <button
+                        v-for="app in appChoices"
+                        :key="app.id"
+                        class="chip"
+                        :class="{ selected: draft.steps[selectedStepIndex].parameters.target === app.id }"
+                        type="button"
+                        @click="renameStepTarget(app.id)"
+                      >
                         {{ app.name }}
-                      </option>
-                    </select>
+                      </button>
+                      <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                    </div>
                     <span
                       class="focus-state"
                       :data-ready="
@@ -1341,10 +1419,7 @@ onMounted(async () => {
       </div>
     </template>
 
-    <p class="status-line" :data-kind="statusKind">{{ statusMessage }}</p>
-    <p class="info-line">
-      ⓘ “学习输入框”只负责把光标放到目标 App 的输入位置；组合动作里的快捷键只在这台电脑上生效，换电脑后需要重新录入。
-    </p>
+    <p v-if="statusMessage" class="status-line" :data-kind="statusKind">{{ statusMessage }}</p>
   </div>
 </template>
 
@@ -1354,6 +1429,8 @@ onMounted(async () => {
   flex-direction: column;
   min-height: 0;
   flex: 1;
+  /* 对齐 Mac：页脚（状态条 / 向导按钮）贴在窗口底部，内容不足时不再留一大片空白。 */
+  min-height: calc(100vh - 48px);
 }
 .page-header {
   padding: 16px 22px 14px;
@@ -1479,6 +1556,10 @@ onMounted(async () => {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+/* 导入 / 导出等宽铺满一行（对齐 Mac HStack + frame(maxWidth: .infinity)）。 */
+.library-io > .btn {
+  flex: 1 1 0;
 }
 .detail-pane {
   flex: 1;
@@ -1780,6 +1861,19 @@ onMounted(async () => {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-control);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.action-card.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  color: var(--accent-text);
+}
+.action-check {
+  color: var(--accent-text);
+  font-weight: 700;
 }
 .action-card:hover {
   border-color: var(--accent-border);
@@ -1911,6 +2005,7 @@ onMounted(async () => {
 }
 .status-line {
   margin: 0;
+  margin-top: auto;
   border-top: 1px solid var(--border);
   padding: 8px 22px;
   font-size: 12px;
@@ -1921,14 +2016,5 @@ onMounted(async () => {
 }
 .status-line[data-kind="error"] {
   color: var(--error-text);
-}
-.info-line {
-  margin: 0;
-  border-top: 1px solid var(--border);
-  background: var(--info-surface);
-  color: var(--info-text);
-  padding: 8px 22px;
-  font-size: 12px;
-  line-height: 1.5;
 }
 </style>

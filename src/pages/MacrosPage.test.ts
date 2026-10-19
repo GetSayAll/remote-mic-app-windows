@@ -236,8 +236,14 @@ describe("组合动作页 · 编辑向导", () => {
     await findButton(wrapper, "新建").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("新建组合动作");
+    // 新建不再先报“已创建”（保存前不写库），也不显示已删除的长提示。
+    expect(wrapper.text()).not.toContain("组合动作已创建");
+    expect(wrapper.text()).not.toContain("只负责把光标");
 
+    // 新建即带默认名称（对齐 Mac 的“先有名字再编辑”），不再卡在空名称。
     const nameInput = wrapper.get('.basic-body input[type="text"]');
+    expect((nameInput.element as HTMLInputElement).value).toBe("组合动作 1");
+
     await nameInput.setValue("一二三四五六七八九十一二三四五六七八九十二十一");
     expect((nameInput.element as HTMLInputElement).value).toHaveLength(20);
 
@@ -246,17 +252,42 @@ describe("组合动作页 · 编辑向导", () => {
     await flushPromises();
     expect(wrapper.find(".basic-body").exists()).toBe(true);
     expect(wrapper.text()).toContain("已有 1 个步骤");
+    // 选中反馈：动作卡高亮并带勾，避免“点了像没反应”（2026-10-19 现场）。
+    const selected = wrapper.find(".action-card.selected");
+    expect(selected.exists()).toBe(true);
+    expect(selected.text()).toContain("打开应用");
+    expect(selected.text()).toContain("✓");
 
     await findButton(wrapper, "下一步").trigger("click");
     await flushPromises();
     expect(wrapper.find(".steps-body").exists()).toBe(true);
   });
 
+  it("编排步骤的应用选择与按键页一致：chip 网格，点选立即写入步骤", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const body = wrapper.find(".step-card-body");
+    expect(body.find("select").exists()).toBe(false);
+    const chips = body.findAll(".preset-grid .chip");
+    expect(chips.map((chip) => chip.text())).toContain("记事本");
+    const sayallChip = chips.find((chip) => chip.text() === "无线麦");
+    expect(sayallChip, "已安装预设应用应出现在 chip 网格").toBeTruthy();
+    await sayallChip!.trigger("click");
+    await flushPromises();
+    expect(body.find(".chip.selected").text()).toBe("无线麦");
+    expect(body.text()).toContain("当前：无线麦");
+  });
+
   it("名称为空时不给进入下一步（点按钮与点步骤都拦下，2026-10-15 现场）", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "新建").trigger("click");
     await flushPromises();
-    // 先选一个动作（此时名称仍为空）。
+    // 新建默认带名称，这里手动清空以验证门禁。
+    await wrapper.get('.basic-body input[type="text"]').setValue("");
+    // 先选一个动作（此时名称为空）。
     await findButton(wrapper, "打开应用").trigger("click");
     await flushPromises();
     // 「下一步」禁用。
