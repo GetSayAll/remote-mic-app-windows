@@ -49,10 +49,14 @@ function mark(stage: string): void {
   });
 }
 
-async function waitFor<T>(read: () => T | null, description: string): Promise<T> {
+async function waitFor<T>(
+  read: () => T | null | Promise<T | null>,
+  description: string,
+): Promise<T> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const value = read();
+    // 允许异步读取（如经 IPC 读回持久化真值）；同步读取器行为不变。
+    const value = await read();
     if (value !== null) return value;
     await new Promise((resolve) => window.setTimeout(resolve, 50));
   }
@@ -462,6 +466,11 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
 
   // 「启动时自动打开主面板」（2026-10-19）：仿真状态目录每次都是新装，这里证明
   // 默认值经真实 IPC 读回，且开关写入 → 读回 → 复位走同一条持久化路径。
+  //
+  // 2026-10-19 CI 回归：`click()` 之后不能立刻等 DOM 上的 `disabled`/`checked`——
+  // Vue 的响应式刷新是微任务，`waitFor` 的第一次判断是同步执行的，会看到点击前
+  // 的 DOM 直接放行，随后的 IPC 读回就可能抢在保存落盘之前（实测 CI 报
+  // 「关闭后读回仍是开启」）。这里改为轮询**后端读回值**：它才是持久化的真值。
   const openWindowToggle = await waitFor(
     () => {
       const toggle = document.querySelector<HTMLInputElement>(
@@ -473,37 +482,26 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   openWindowToggle.click();
   await waitFor(
-    () => {
-      const toggle = document.querySelector<HTMLInputElement>(
-        'input[name="open-window-at-launch"]',
-      );
-      // 等保存结束（busy 期间开关 disabled）再读回，避免读到旧值。
-      return toggle && !toggle.checked && !toggle.disabled ? true : null;
-    },
-    "启动时自动打开主面板关闭并保存完成",
-  );
-  assert(
-    (await getOpenWindowAtLaunch()) === false,
-    "关闭「启动时自动打开主面板」后读回仍是开启",
+    async () => ((await getOpenWindowAtLaunch()) === false ? true : null),
+    "启动时自动打开主面板关闭并落盘",
   );
   assert(
     !document.querySelector('.settings-group [role="alert"]'),
     "切换启动页面设置后显示错误",
   );
   // 再点一次开关恢复开启（走同一条界面 → IPC → 持久化路径，不用直达命令）。
-  openWindowToggle.click();
-  await waitFor(
-    () => {
-      const toggle = document.querySelector<HTMLInputElement>(
-        'input[name="open-window-at-launch"]',
-      );
-      return toggle && toggle.checked && !toggle.disabled ? true : null;
-    },
-    "启动时自动打开主面板恢复开启并保存完成",
+  // 重新取元素：保存完成后的重渲染不保证还持有同一个 DOM 节点。
+  const reopenToggle = await waitFor(
+    () =>
+      document.querySelector<HTMLInputElement>(
+        'input[name="open-window-at-launch"]:not(:disabled)',
+      ),
+    "启动时自动打开主面板可再次切换",
   );
-  assert(
-    (await getOpenWindowAtLaunch()) === true,
-    "还原「启动时自动打开主面板」后读回不是开启",
+  reopenToggle.click();
+  await waitFor(
+    async () => ((await getOpenWindowAtLaunch()) === true ? true : null),
+    "启动时自动打开主面板恢复开启并落盘",
   );
   steps.push("设置页「启动时自动打开主面板」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
