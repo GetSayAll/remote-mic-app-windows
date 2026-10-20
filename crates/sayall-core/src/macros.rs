@@ -50,8 +50,12 @@ pub enum MacroAction {
     WaitForApplication,
     /// 注入单键或组合键（默认 2 秒）。
     SendShortcut,
-    /// 用学习记录聚焦目标应用的输入框（默认 2 秒）。
+    /// 用学习记录聚焦目标应用的输入框（默认 10 秒）。
     FocusInput,
+    /// 把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）。
+    FocusFrontmost,
+    /// 系统与媒体动作（音量、媒体键、窗口快捷键等；组合键存在 `chord`）。
+    SystemAction,
     /// 系统默认浏览器打开 http/https 网址（默认 5 秒）。
     OpenUrl,
     /// 执行已有组合动作（嵌套，默认 60 秒）。
@@ -68,6 +72,8 @@ impl MacroAction {
             // 早期默认 2 秒会在服务出结果前把请求打断（2026-10-19 现场：
             // DimAgent 反复 `attempts=3 reason=cancelled`，步骤报失败）。
             Self::FocusInput => 10_000,
+            Self::FocusFrontmost => 3_000,
+            Self::SystemAction => 2_000,
             Self::OpenUrl => 5_000,
             Self::RunMacro => 60_000,
         }
@@ -87,6 +93,8 @@ impl MacroAction {
             Self::WaitForApplication => "wait_for_application",
             Self::SendShortcut => "send_shortcut",
             Self::FocusInput => "focus_input",
+            Self::FocusFrontmost => "focus_frontmost",
+            Self::SystemAction => "system_action",
             Self::OpenUrl => "open_url",
             Self::RunMacro => "run_macro",
         }
@@ -404,6 +412,8 @@ fn allowed_parameters(action: MacroAction) -> &'static [&'static str] {
         MacroAction::WaitForApplication => &["target", "state"],
         MacroAction::SendShortcut => &["chord"],
         MacroAction::FocusInput => &["target"],
+        MacroAction::FocusFrontmost => &[],
+        MacroAction::SystemAction => &["chord"],
         MacroAction::OpenUrl => &["url"],
         MacroAction::RunMacro => &["nested_macro_id", "nested_macro_name"],
     }
@@ -447,7 +457,7 @@ fn validate_step(step: &MacroStep) -> Vec<MacroIssue> {
                 issues.push(MacroIssue::MissingParameter("state"));
             }
         }
-        MacroAction::SendShortcut => match &p.chord {
+        MacroAction::SendShortcut | MacroAction::SystemAction => match &p.chord {
             None => issues.push(MacroIssue::MissingParameter("chord")),
             Some(chord) => {
                 if let Err(issue) = validate_chord(chord) {
@@ -455,6 +465,7 @@ fn validate_step(step: &MacroStep) -> Vec<MacroIssue> {
                 }
             }
         },
+        MacroAction::FocusFrontmost => {}
         MacroAction::OpenUrl => match &p.url {
             None => issues.push(MacroIssue::MissingParameter("url")),
             Some(url) => {
@@ -631,6 +642,95 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     match (parse_semver(a), parse_semver(b)) {
         (Some(left), Some(right)) => left.cmp(&right),
         _ => a.cmp(b),
+    }
+}
+
+/// 删除组合动作并清理引用：移除所有引用它的嵌套步骤（只改最新版本），
+/// 引用者因此变成空动作时一并删除（级联）。返回删除与重写清单供 UI 提示。
+pub fn delete_macro_with_references(
+    document: &MacroLibraryDocument,
+    macro_id: &str,
+) -> MacroDeleteOutcome {
+    let mut result = document.clone();
+    let mut removed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    removed.insert(macro_id.to_owned());
+    let mut rewritten: Vec<String> = Vec::new();
+
+    loop {
+        let mut changed = false;
+        for definition in latest_definitions(&result.definitions) {
+            if removed.contains(&definition.macro_id) {
+                continue;
+            }
+            let remaining: Vec<MacroStep> = definition
+                .steps
+                .iter()
+                .filter(|step| {
+                    !(step.action == MacroAction::RunMacro
+                        && step
+                            .parameters
+                            .nested_macro_id
+                            .as_deref()
+                            .is_some_and(|id| removed.contains(id)))
+                })
+                .cloned()
+                .collect();
+            if remaining.len() == definition.steps.len() {
+                continue;
+            }
+            changed = true;
+            if remaining.is_empty() {
+                // 引用者只剩这一个嵌套步骤：整条动作一起删除，避免留下空动作。
+                removed.insert(definition.macro_id.clone());
+                continue;
+            }
+            let version = next_patch_version(&result.definitions, &definition);
+            let mut next = definition.clone();
+            next.version = version;
+            next.steps = remaining;
+            result.definitions.push(next);
+            if !rewritten.contains(&definition.macro_id) {
+                rewritten.push(definition.macro_id.clone());
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    result
+        .definitions
+        .retain(|definition| !removed.contains(&definition.macro_id));
+    let mut removed_ids: Vec<String> = removed.into_iter().collect();
+    removed_ids.sort();
+    rewritten.sort();
+    MacroDeleteOutcome {
+        document: result,
+        removed_macro_ids: removed_ids,
+        rewritten_macro_ids: rewritten,
+    }
+}
+
+/// 删除结果：新库 + 实际删除的动作（含级联）+ 因清理引用而生成新版本的动作。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroDeleteOutcome {
+    pub document: MacroLibraryDocument,
+    pub removed_macro_ids: Vec<String>,
+    pub rewritten_macro_ids: Vec<String>,
+}
+
+/// 为新版本挑一个未被占用的 patch 版本号（`1.0.0` → `1.0.1`）。
+fn next_patch_version(definitions: &[MacroDefinition], definition: &MacroDefinition) -> String {
+    let (major, minor, mut patch) = parse_semver(&definition.version).unwrap_or((1, 0, 0));
+    loop {
+        patch += 1;
+        let candidate = format!("{major}.{minor}.{patch}");
+        let taken = definitions
+            .iter()
+            .any(|item| item.macro_id == definition.macro_id && item.version == candidate);
+        if !taken {
+            return candidate;
+        }
     }
 }
 
@@ -866,6 +966,122 @@ mod tests {
         assert!(validate_definition(&def)
             .unwrap_err()
             .contains(&MacroIssue::NestedSelf));
+    }
+
+    #[test]
+    fn focus_frontmost_requires_no_parameters() {
+        let def = definition(vec![step(
+            MacroAction::FocusFrontmost,
+            MacroParameters::default(),
+        )]);
+        assert!(validate_definition(&def).is_ok());
+        assert_eq!(MacroAction::FocusFrontmost.as_str(), "focus_frontmost");
+
+        let mut with_target = def.clone();
+        with_target.steps[0].parameters.target = Some("vscode".to_owned());
+        assert!(validate_definition(&with_target)
+            .unwrap_err()
+            .contains(&MacroIssue::UnexpectedParameter("target")));
+    }
+
+    #[test]
+    fn system_action_requires_chord() {
+        let mut def = definition(vec![step(
+            MacroAction::SystemAction,
+            MacroParameters::default(),
+        )]);
+        assert!(validate_definition(&def)
+            .unwrap_err()
+            .contains(&MacroIssue::MissingParameter("chord")));
+        def.steps[0].parameters.chord = Some(MacroChord {
+            modifiers: vec![MacroModifier::Win],
+            key: "l".to_owned(),
+        });
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    #[test]
+    fn delete_macro_removes_nested_steps_and_bumps_version() {
+        let mut target = definition(open_app_steps());
+        target.macro_id = "macro.aaaaaa".to_owned();
+        let mut referrer = definition(vec![
+            step(
+                MacroAction::OpenApplication,
+                MacroParameters {
+                    target: Some("vscode".to_owned()),
+                    ..MacroParameters::default()
+                },
+            ),
+            step(
+                MacroAction::RunMacro,
+                MacroParameters {
+                    nested_macro_id: Some("macro.aaaaaa".to_owned()),
+                    nested_macro_name: Some("被删动作".to_owned()),
+                    ..MacroParameters::default()
+                },
+            ),
+        ]);
+        referrer.macro_id = "macro.bbbbbb".to_owned();
+        let document = MacroLibraryDocument {
+            format_version: MACRO_LIBRARY_FORMAT_VERSION,
+            definitions: vec![target, referrer],
+        };
+
+        let outcome = delete_macro_with_references(&document, "macro.aaaaaa");
+        assert_eq!(outcome.removed_macro_ids, vec!["macro.aaaaaa".to_owned()]);
+        assert_eq!(outcome.rewritten_macro_ids, vec!["macro.bbbbbb".to_owned()]);
+        let latest = latest_definitions(&outcome.document.definitions);
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].macro_id, "macro.bbbbbb");
+        assert_eq!(latest[0].version, "1.0.1");
+        assert_eq!(latest[0].steps.len(), 1);
+        assert_eq!(latest[0].steps[0].action, MacroAction::OpenApplication);
+        // 旧版本保留在库里（版本不可变），latest 解析只看新版本。
+        assert!(outcome
+            .document
+            .definitions
+            .iter()
+            .any(|item| item.macro_id == "macro.bbbbbb" && item.version == "1.0.0"));
+    }
+
+    #[test]
+    fn delete_macro_cascades_when_referrer_becomes_empty() {
+        let mut target = definition(open_app_steps());
+        target.macro_id = "macro.aaaaaa".to_owned();
+        let mut middle = definition(vec![step(
+            MacroAction::RunMacro,
+            MacroParameters {
+                nested_macro_id: Some("macro.aaaaaa".to_owned()),
+                nested_macro_name: Some("被删动作".to_owned()),
+                ..MacroParameters::default()
+            },
+        )]);
+        middle.macro_id = "macro.bbbbbb".to_owned();
+        let mut top = definition(vec![step(
+            MacroAction::RunMacro,
+            MacroParameters {
+                nested_macro_id: Some("macro.bbbbbb".to_owned()),
+                nested_macro_name: Some("中间动作".to_owned()),
+                ..MacroParameters::default()
+            },
+        )]);
+        top.macro_id = "macro.cccccc".to_owned();
+        let document = MacroLibraryDocument {
+            format_version: MACRO_LIBRARY_FORMAT_VERSION,
+            definitions: vec![target, middle, top],
+        };
+
+        let outcome = delete_macro_with_references(&document, "macro.aaaaaa");
+        assert_eq!(
+            outcome.removed_macro_ids,
+            vec![
+                "macro.aaaaaa".to_owned(),
+                "macro.bbbbbb".to_owned(),
+                "macro.cccccc".to_owned()
+            ]
+        );
+        assert!(outcome.rewritten_macro_ids.is_empty());
+        assert!(outcome.document.definitions.is_empty());
     }
 
     #[test]

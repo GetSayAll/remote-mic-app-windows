@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import MacrosPage from "./MacrosPage.vue";
+import { clearMacroEditorSession } from "./macro-editor-session";
 import type { MacroDefinition, MacroLibraryDocument } from "../lib/bridge";
 
 type CaptureHandler = (edge: { key: string; isPressed: boolean; source?: string }) => void;
@@ -33,6 +34,7 @@ const getMacroRunStatusSpy = vi.hoisted(() => vi.fn());
 const learnFocusTargetSpy = vi.hoisted(() => vi.fn());
 const learnFocusPointSpy = vi.hoisted(() => vi.fn());
 const getButtonMappingsSpy = vi.hoisted(() => vi.fn());
+const pickCustomAppSpy = vi.hoisted(() => vi.fn());
 const saveButtonMappingsSpy = vi.hoisted(() => vi.fn());
 const startShortcutCaptureSpy = vi.hoisted(() => vi.fn());
 const stopShortcutCaptureSpy = vi.hoisted(() => vi.fn());
@@ -59,6 +61,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     learnFocusTarget: learnFocusTargetSpy,
     learnFocusPoint: learnFocusPointSpy,
     getButtonMappings: getButtonMappingsSpy,
+    pickCustomApp: pickCustomAppSpy,
     saveButtonMappings: saveButtonMappingsSpy,
     startShortcutCapture: startShortcutCaptureSpy,
     stopShortcutCapture: stopShortcutCaptureSpy,
@@ -89,12 +92,18 @@ function findButton(wrapper: VueWrapper, text: string) {
 
 beforeEach(() => {
   shortcutCaptureHandler = null;
+  // 编辑会话是模块级的（跨页面切换保留进度）；用例之间必须清空，否则上一条的草稿会在下一条挂载时恢复。
+  clearMacroEditorSession();
   getCombinedActionsSpy.mockReset().mockResolvedValue(structuredClone(initialLibrary));
   saveMacroSpy.mockReset().mockImplementation(async (definition: MacroDefinition) => ({
     formatVersion: 1,
     definitions: [definition],
   }));
-  deleteMacroSpy.mockReset().mockResolvedValue({ formatVersion: 1, definitions: [] });
+  deleteMacroSpy.mockReset().mockResolvedValue({
+    library: { formatVersion: 1, definitions: [] },
+    removedMacroIds: ["macro.aaaaaaa1"],
+    rewrittenMacroIds: [],
+  });
   macroReferencesSpy.mockReset().mockResolvedValue({ buttons: [], nestedIn: [] });
   testMacroDefinitionSpy.mockReset().mockResolvedValue("test.00000000000000000000000000000001");
   testMacroStepSpy.mockReset().mockResolvedValue("test.00000000000000000000000000000002");
@@ -112,6 +121,7 @@ beforeEach(() => {
     windowHeight: 800,
   });
   getButtonMappingsSpy.mockReset().mockResolvedValue({ enabled: true, actions: {} });
+  pickCustomAppSpy.mockReset().mockResolvedValue(null);
   saveButtonMappingsSpy.mockReset().mockImplementation(async (mappings: unknown) => mappings);
   startShortcutCaptureSpy.mockReset().mockResolvedValue([]);
   stopShortcutCaptureSpy.mockReset().mockResolvedValue(null);
@@ -198,7 +208,7 @@ describe("组合动作页 · 库浏览", () => {
     await confirm.trigger("click");
     await flushPromises();
     expect(deleteMacroSpy).toHaveBeenCalledWith("macro.aaaaaaa1");
-    expect(wrapper.text()).toContain("绑定它的按键已改为未设置");
+    expect(wrapper.text()).toContain("2 个引用它的按键已改为未设置");
   });
 
   it("没有引用时确认弹窗明说没有影响", async () => {
@@ -583,5 +593,104 @@ describe("组合动作页 · 编辑向导", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("已取消导入");
     expect(wrapper.findAll(".macro-item")).toHaveLength(1);
+  });
+
+  it("切到其他页面再回来保留编辑进度（草稿跨挂载恢复）", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await wrapper.get('.basic-body input[type="text"]').setValue("未保存的名字");
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".steps-body").exists()).toBe(true);
+
+    // 模拟切页：组件卸载后重新挂载。
+    wrapper.unmount();
+    const restored = await mountPage();
+    expect(restored.find(".wizard").exists()).toBe(true);
+    expect(restored.find(".steps-body").exists()).toBe(true);
+    expect(restored.text()).toContain("未保存的名字");
+  });
+
+  it("右侧显示当前动作的使用位置（按键与嵌套引用）", async () => {
+    macroReferencesSpy.mockResolvedValue({
+      buttons: [{ button: "ok", trigger: "single" }],
+      nestedIn: ["父动作"],
+    });
+    const wrapper = await mountPage();
+    await flushPromises();
+    expect(wrapper.text()).toContain("使用位置");
+    expect(wrapper.text()).toContain("按键：确定 · 单击");
+    expect(wrapper.text()).toContain("嵌套于：父动作");
+  });
+
+  it("步骤未配置完整时不能进入下一步", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "新建").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "单键或快捷键").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "下一步").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".steps-body").exists()).toBe(true);
+    await findButton(wrapper, "下一步").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".steps-body").exists()).toBe(true);
+    expect(wrapper.text()).toContain("第 1 步还没设置完：还没有选择或录入按键");
+  });
+
+  it("系统与媒体动作提供与按键页一致的预设，选中即写入步骤", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "新建").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "系统与媒体动作").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "下一步").trigger("click");
+    await flushPromises();
+    const lock = findButton(wrapper, "锁定");
+    await lock.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".step-edit-item").text()).toContain("Win + L");
+    expect(wrapper.find(".chip.selected").text()).toBe("锁定");
+  });
+
+  it("单键或快捷键列出已保存与常用的快捷键，点选即写入", async () => {
+    getButtonMappingsSpy.mockResolvedValue({
+      enabled: true,
+      actions: {},
+      focusProfiles: {
+        notepad: { strategy: "app_shortcut", shortcut: { keys: ["control", "k"] } },
+      },
+    });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "新建").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "单键或快捷键").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "下一步").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("已保存的快捷键");
+    expect(wrapper.text()).toContain("记事本 · Ctrl + K");
+    const copy = wrapper.findAll(".chip").find((chip) => chip.text() === "复制")!;
+    await copy.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Ctrl + C");
+  });
+
+  it("「添加应用」写入共享自定义应用列表并选中", async () => {
+    pickCustomAppSpy.mockResolvedValue({ name: "自定义App", path: "C:\\Apps\\Custom.exe" });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const add = wrapper.findAll("button").find((item) => item.text().includes("添加应用"))!;
+    await add.trigger("click");
+    await flushPromises();
+    const saved = saveButtonMappingsSpy.mock.calls.at(-1)?.[0] as {
+      applications?: Array<{ name: string; path: string }>;
+    };
+    expect(saved.applications).toEqual([{ name: "自定义App", path: "C:\\Apps\\Custom.exe" }]);
+    expect(wrapper.find(".chip.selected").text()).toBe("自定义App");
   });
 });

@@ -109,6 +109,8 @@ pub trait MacroStepper: Send {
     ) -> StepOutcome;
     fn send_shortcut(&mut self, chord: &MacroChord) -> StepOutcome;
     fn focus_input(&mut self, target: &str, timeout_ms: u64) -> StepOutcome;
+    /// 聚焦当前前台应用的输入框（不切换应用）。
+    fn focus_frontmost(&mut self) -> StepOutcome;
     fn open_url(&mut self, url: &str) -> StepOutcome;
 }
 
@@ -284,6 +286,11 @@ fn run_step(
             parameters.target.as_deref().unwrap_or_default(),
             step_timeout_ms,
         )),
+        MacroAction::FocusFrontmost => StepRun::Outcome(stepper.focus_frontmost()),
+        MacroAction::SystemAction => StepRun::Outcome(match &parameters.chord {
+            Some(chord) => stepper.send_shortcut(chord),
+            None => StepOutcome::Failed,
+        }),
         MacroAction::OpenUrl => StepRun::Outcome(match parameters.url.as_deref() {
             Some(url) => stepper.open_url(url),
             None => StepOutcome::Failed,
@@ -994,6 +1001,14 @@ impl MacroStepper for WindowsMacroStepper {
         }
     }
 
+    fn focus_frontmost(&mut self) -> StepOutcome {
+        // 与按键页「聚焦输入框」同一实现：提交聚焦请求即算完成。
+        match self.injector.focus_frontmost() {
+            Ok(()) => StepOutcome::Done,
+            Err(_error) => StepOutcome::Failed,
+        }
+    }
+
     fn focus_input(&mut self, target: &str, timeout_ms: u64) -> StepOutcome {
         let profile = (self.focus_profiles)(target);
         let strategy = profile
@@ -1118,6 +1133,9 @@ impl MacroStepper for UnsupportedStepper {
     fn focus_input(&mut self, _target: &str, _timeout_ms: u64) -> StepOutcome {
         StepOutcome::Unknown
     }
+    fn focus_frontmost(&mut self) -> StepOutcome {
+        StepOutcome::Unknown
+    }
     fn open_url(&mut self, _url: &str) -> StepOutcome {
         StepOutcome::Unknown
     }
@@ -1159,6 +1177,9 @@ mod tests {
         }
         fn focus_input(&mut self, target: &str, timeout_ms: u64) -> StepOutcome {
             self.record("focus_input", target, timeout_ms)
+        }
+        fn focus_frontmost(&mut self) -> StepOutcome {
+            self.record("focus_frontmost", "", 0)
         }
         fn open_url(&mut self, url: &str) -> StepOutcome {
             self.record("open_url", url, 0)
@@ -1647,6 +1668,9 @@ mod tests {
             StepOutcome::Done
         }
         fn focus_input(&mut self, _target: &str, _timeout_ms: u64) -> StepOutcome {
+            StepOutcome::Done
+        }
+        fn focus_frontmost(&mut self) -> StepOutcome {
             StepOutcome::Done
         }
         fn open_url(&mut self, _url: &str) -> StepOutcome {

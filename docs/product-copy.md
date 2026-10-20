@@ -28,7 +28,9 @@
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
-| 组合动作（侧边栏页 + 按键页动作分组） | 组合动作；步骤类型写「打开应用」「等待应用」「单键或快捷键」「聚焦学习过的输入框」「打开网址」「执行已有组合动作」（对齐 Mac `macro.step.*`）；终态写「组合动作执行成功」「组合动作已执行，但无法确认第三方 App 的结果」「组合动作已取消」「组合动作执行超时」等（对齐 Mac `macro.status.execution.*`） | `MacrosPage.vue`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`macroActionLabel` / `macroTerminalLabel` / `macroStepSummary`） |
+| 启动行为第二项（设置页「通用」） | 启动时自动打开主面板（对齐 Mac `about.preferences.open_main_window_at_launch`）；说明“关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。”；新装与老配置默认开启（2026-10-19 用户定稿「照 Mac 原样」） | `SettingsPage.vue`、`AppSettings.open_window_at_launch` |
+| 更新完成提示（启动时一次性） | 标题「无线麦已更新」、正文「已成功更新到版本 {版本号}。」、按钮「好」（对齐 Mac `update.completed.*`，原样移植）；只在“本次启动前刚完成更新”时出现一次 | `UpdateCompletedDialog.vue`、`launch_state.rs` |
+| 组合动作（侧边栏页 + 按键页动作分组） | 组合动作；步骤类型写「打开应用」「等待应用」「单键或快捷键」「聚焦输入框」「聚焦学习过的输入框」「系统与媒体动作」「打开网址」「执行已有组合动作」（对齐 Mac `macro.step.*`）；终态写「组合动作执行成功」「组合动作已执行，但无法确认第三方 App 的结果」「组合动作已取消」「组合动作执行超时」等（对齐 Mac `macro.status.execution.*`） | `MacrosPage.vue`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`macroActionLabel` / `macroTerminalLabel` / `macroStepSummary`） |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页
@@ -494,3 +496,12 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   「要等待的 App」「目标 App」改为与按键页相同的 chip 网格，末项为「扫描本机应用」，
   选择后在说明句末尾显示「当前：<应用名>」；「导入」「导出」等宽铺满侧栏一行，
   状态条与向导按钮固定在窗口底部（对齐 Mac `macroSidebar` / `wizardFooter` / 状态栏）。
+- 2026-10-19（第二轮对齐 Mac + 动作能力补齐）：页面标题下加副标题「组合动作保存后，请到按键页面的按键操作中选择它。」；
+  库右侧新增「使用位置」——列出使用它的按键（「按键：确定 · 单击」）与嵌套引用（「嵌套于：X」），
+  无引用时写「还没有按键或组合动作使用它。」；编辑中的草稿跨页面切换保留（模块级会话，保存/取消时清空）。
+  首个动作增加「聚焦输入框」（当前前台应用，不切换 App）与「系统与媒体动作」（与按键页同一份
+  系统/媒体快捷键）；「单键或快捷键」提供「已保存的快捷键」与「常用快捷键」点选；
+  「打开应用 / 等待应用 / 聚焦学习过的输入框」的 chip 网格增加「＋ 添加应用」。
+  删除时同步清理引用：嵌套步骤一并移除（引用者因此变空则级联删除），按键改为未设置；
+  状态写「组合动作已删除；已从 N 个组合动作中移除它的嵌套步骤；…」。
+  任一步骤参数未设置完整时禁止进入「测试与保存」，提示「第 N 步还没设置完：<原因>」。

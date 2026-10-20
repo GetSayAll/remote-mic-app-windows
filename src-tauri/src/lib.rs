@@ -2015,7 +2015,7 @@ async fn macro_references(
 async fn delete_macro(
     state: tauri::State<'_, AppState>,
     macro_id: String,
-) -> Result<MacroLibraryDocument, String> {
+) -> Result<MacroDeleteResult, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(format!(
         "shortcut_settings feature=combined_actions action=delete phase=requested macro_id={macro_id}"
@@ -2024,20 +2024,29 @@ async fn delete_macro(
     let platform = Arc::clone(&state.platform);
     let log_macro_id = macro_id.clone();
     let result = match tauri::async_runtime::spawn_blocking(
-        move || -> Result<(MacroLibraryDocument, usize), String> {
+        move || -> Result<(MacroDeleteResult, usize), String> {
             let mut current = settings.load_combined_actions()?;
-            current.definitions.retain(|item| item.macro_id != macro_id);
+            let outcome = sayall_core::macros::delete_macro_with_references(&current, &macro_id);
+            current = outcome.document;
             let saved = settings.save_combined_actions(current)?;
             platform.set_macro_library(saved.clone());
-            // 按键绑定联动：引用被删动作的槽位一律改成「未设置」。
+            // 按键绑定联动：引用被删动作的槽位一律改成「未设置」（含级联删除的动作）。
             let mut mappings = settings.load_button_mappings()?;
-            let cleared =
-                sayall_windows::send_input::clear_macro_references(&mut mappings, &macro_id);
+            let mut cleared = 0usize;
+            for removed in &outcome.removed_macro_ids {
+                cleared +=
+                    sayall_windows::send_input::clear_macro_references(&mut mappings, removed);
+            }
             if cleared > 0 {
                 let saved_mappings = settings.save_button_mappings(mappings)?;
                 platform.set_button_mappings(saved_mappings);
             }
-            Ok((saved, cleared))
+            let report = MacroDeleteResult {
+                library: saved,
+                removed_macro_ids: outcome.removed_macro_ids,
+                rewritten_macro_ids: outcome.rewritten_macro_ids,
+            };
+            Ok((report, cleared))
         },
     )
     .await
@@ -2046,9 +2055,11 @@ async fn delete_macro(
         Err(error) => Err(format!("删除组合动作任务失败：{error}")),
     };
     sayall_windows::gatt_note(match &result {
-        Ok((document, cleared)) => format!(
-            "shortcut_settings feature=combined_actions action=delete phase=completed terminal_result=passed macro_id={log_macro_id} definitions={} cleared_button_slots={cleared} elapsed_ms={}",
-            document.definitions.len(),
+        Ok((report, cleared)) => format!(
+            "shortcut_settings feature=combined_actions action=delete phase=completed terminal_result=passed macro_id={log_macro_id} definitions={} removed={} rewritten={} cleared_button_slots={cleared} elapsed_ms={}",
+            report.library.definitions.len(),
+            report.removed_macro_ids.len(),
+            report.rewritten_macro_ids.len(),
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
@@ -2056,7 +2067,16 @@ async fn delete_macro(
             started.elapsed().as_millis()
         ),
     });
-    result.map(|(document, _)| document)
+    result.map(|(report, _)| report)
+}
+
+/// 删除组合动作的结果（含级联删除与因清理嵌套步骤而生成新版本的动作）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroDeleteResult {
+    pub library: MacroLibraryDocument,
+    pub removed_macro_ids: Vec<String>,
+    pub rewritten_macro_ids: Vec<String>,
 }
 
 /// 导出组合动作库（文件对话框取消返回 false）。

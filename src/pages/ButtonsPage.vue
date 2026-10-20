@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
+import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
 import {
@@ -632,61 +633,6 @@ function applyAction(action: ButtonAction): void {
   // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
   void persist(reconciled.notice ?? undefined);
 }
-
-/**
- * 预设快捷键分组（对齐 Mac `ButtonActionCategory` 的 basicKeys/systemAndMedia，
- * 并按 Windows 语义适配：Home/End/PageUp/PageDown 属低频导航键、Mac 端基础
- * 按键列表亦无此四键，故移除；复制族从系统组移入基础组，对齐 Mac basicKeys）。
- */
-const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: KeyCode[] }> }> = [
-  {
-    label: "基础按键",
-    items: [
-      { label: "Enter", keys: ["enter"] },
-      { label: "Esc", keys: ["escape"] },
-      { label: "空格", keys: ["space"] },
-      { label: "Tab", keys: ["tab"] },
-      { label: "退格", keys: ["backspace"] },
-      { label: "删除", keys: ["delete"] },
-      { label: "↑", keys: ["up"] },
-      { label: "↓", keys: ["down"] },
-      { label: "←", keys: ["left"] },
-      { label: "→", keys: ["right"] },
-      // Home 为"主页键同键映射"的必需预设（能力矩阵 identity 档的唯一
-      // 合法目标；Mac 端基础键列表无此键，Windows 端因泄漏对冲需要保留）。
-      { label: "Home", keys: ["home"] },
-      { label: "复制", keys: ["control", "c"] },
-      { label: "粘贴", keys: ["control", "v"] },
-      { label: "剪切", keys: ["control", "x"] },
-      { label: "全选", keys: ["control", "a"] },
-      { label: "撤销", keys: ["control", "z"] },
-      { label: "重做", keys: ["control", "y"] },
-      { label: "查找", keys: ["control", "f"] },
-      { label: "保存", keys: ["control", "s"] },
-      { label: "发送", keys: ["control", "enter"] },
-      { label: "换行", keys: ["shift", "enter"] },
-      { label: "右键菜单", keys: ["apps"] },
-      { label: "刷新", keys: ["f5"] },
-    ],
-  },
-  {
-    label: "系统与媒体",
-    items: [
-      { label: "切换窗口", keys: ["alt", "tab"] },
-      { label: "显示桌面", keys: ["left_windows", "d"] },
-      { label: "关闭窗口", keys: ["control", "w"] },
-      { label: "锁定", keys: ["left_windows", "l"] },
-      { label: "搜索", keys: ["left_windows", "s"] },
-      { label: "截图", keys: ["left_windows", "shift", "s"] },
-      { label: "静音", keys: ["volume_mute"] },
-      { label: "音量+", keys: ["volume_up"] },
-      { label: "音量−", keys: ["volume_down"] },
-      { label: "播放/暂停", keys: ["media_play_pause"] },
-      { label: "上一首", keys: ["media_prev"] },
-      { label: "下一首", keys: ["media_next"] },
-    ],
-  },
-];
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
 const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? 1 : 1);
@@ -2144,7 +2090,7 @@ onUnmounted(() => {
       </div>
       <div class="action-sections">
         <p v-if="capabilityNote" class="muted editor-note capability-note">{{ capabilityNote }}</p>
-        <section v-for="group in PRESET_GROUPS" :key="group.label" class="action-section">
+        <section v-for="group in SHORTCUT_PRESET_GROUPS" :key="group.label" class="action-section">
           <h4 class="action-section-title">{{ group.label }}</h4>
           <div class="preset-grid">
             <!-- 芯片显示实际按键组合（组合在不同 App 里语义不同，功能描述

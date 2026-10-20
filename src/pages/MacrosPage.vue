@@ -7,7 +7,13 @@
  * - 名称 20 字硬截；保存不是必须经过测试；删除为两段式内联确认；
  * - 浏览器预览下读演示库（bridge 里的 previewMacroLibrary），保存类操作报错。
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
+import {
+  clearMacroEditorSession,
+  readMacroEditorSession,
+  writeMacroEditorSession,
+} from "./macro-editor-session";
 import {
   buttonLabel,
   buttonTriggerLabel,
@@ -34,6 +40,7 @@ import {
   newMacroId,
   newStepId,
   nextMacroVersion,
+  pickCustomApp,
   registerMacroNames,
   registerPresetAppNames,
   saveButtonMappings,
@@ -46,6 +53,7 @@ import {
   testMacroStep,
   type KeyChord,
   type KeyCode,
+  type AppFocusProfile,
   type MacroAction,
   type MacroChord,
   type MacroDefinition,
@@ -117,7 +125,7 @@ const draftValid = computed(() => {
   if (!value) return false;
   if (!value.name.trim() || value.name.length > MAX_NAME_CHARS) return false;
   if (value.steps.length < 1 || value.steps.length > MAX_STEPS) return false;
-  return true;
+  return firstUnconfiguredStep.value === null;
 });
 
 const selectedStepIndex = computed(() =>
@@ -155,10 +163,12 @@ function reloadPresetApps(): void {
 const ACTION_ORDER: MacroAction[] = [
   "open_application",
   "send_shortcut",
+  "focus_frontmost",
   "focus_input",
   "wait_for_application",
   "open_url",
   "run_macro",
+  "system_action",
 ];
 
 function setStatus(message: string, kind: "info" | "success" | "error" = "info"): void {
@@ -200,7 +210,34 @@ function applyLibrary(library: MacroLibraryDocument): void {
   const latest = latestMacroDefinitions(library.definitions);
   definitions.value = latest;
   registerMacroNames(latest);
+  void loadReferences(selectedMacroId.value);
 }
+
+/** 当前动作被哪些按键 / 嵌套动作使用（右侧「使用位置」；删除确认也用它）。 */
+const references = ref<MacroReferenceReport | null>(null);
+let referencesRequest = 0;
+
+async function loadReferences(macroId: string | null): Promise<void> {
+  const request = ++referencesRequest;
+  if (!macroId) {
+    references.value = null;
+    return;
+  }
+  try {
+    const report = await macroReferences(macroId);
+    if (request === referencesRequest) references.value = report;
+  } catch {
+    if (request === referencesRequest) references.value = { buttons: [], nestedIn: [] };
+  }
+}
+
+watch(
+  selectedMacroId,
+  (macroId) => {
+    void loadReferences(macroId);
+  },
+  { immediate: true },
+);
 
 /**
  * 深拷贝一条定义。
@@ -257,6 +294,7 @@ function cancelEditing(): void {
   wizardVisible.value = false;
   draft.value = null;
   testReport.value = null;
+  clearMacroEditorSession();
   setStatus("已取消编辑");
 }
 
@@ -291,13 +329,20 @@ const deleteReferenceText = computed<string>(() => {
 
 async function confirmDelete(macroId: string): Promise<void> {
   try {
-    const library = await deleteMacro(macroId);
-    applyLibrary(library);
+    const result = await deleteMacro(macroId);
+    applyLibrary(result.library);
     selectedMacroId.value = definitions.value[0]?.macroId ?? null;
+    const affectedButtons = deleteReferences.value?.buttons.length ?? 0;
+    const rewritten = result.rewrittenMacroIds.length;
+    const cascaded = result.removedMacroIds.filter((id) => id !== macroId).length;
     pendingDeleteId.value = null;
     deleteReferences.value = null;
-    // 按键页每次进入都会重新读取映射；后端已把绑定该动作的槽位改成「未设置」。
-    setStatus("组合动作已删除，绑定它的按键已改为未设置", "success");
+    // 引用清理必须说清楚：嵌套步骤真的被移除，而不是留下"不可用"的悬空引用。
+    const parts = ["组合动作已删除"];
+    if (rewritten > 0) parts.push(`已从 ${rewritten} 个组合动作中移除它的嵌套步骤`);
+    if (cascaded > 0) parts.push(`一并删除了 ${cascaded} 个因此变空的组合动作`);
+    if (affectedButtons > 0) parts.push(`${affectedButtons} 个引用它的按键已改为未设置`);
+    setStatus(parts.join("；"), "success");
   } catch (error) {
     setStatus(`删除失败：${messageOf(error)}`, "error");
   }
@@ -391,6 +436,13 @@ function goToStep(step: EditorStep): void {
     setStatus("先添加第一个步骤", "error");
     return;
   }
+  if (step === "review" && firstUnconfiguredStep.value !== null) {
+    const index = firstUnconfiguredStep.value;
+    const issue = stepConfigurationIssue(draft.value!.steps[index]);
+    setStatus(`第 ${index + 1} 步还没设置完：${issue ?? "请补全参数"}`, "error");
+    selectedStepId.value = draft.value!.steps[index].stepId;
+    return;
+  }
   editorStep.value = step;
 }
 
@@ -407,6 +459,10 @@ function defaultParameters(action: MacroAction): MacroStep["parameters"] {
       return {};
     case "focus_input":
       return { target: lastTarget ?? presetApps.value[0]?.id ?? "notepad" };
+    case "focus_frontmost":
+      return {};
+    case "system_action":
+      return {};
     case "open_url":
       return { url: "https://" };
     case "run_macro":
@@ -610,16 +666,139 @@ function semanticKeyOf(code: KeyCode): string | null {
   return null;
 }
 
+/** 把按键页的 `KeyCode[]` 换算成组合动作的 `MacroChord`（无主键返回 null）。 */
+function macroChordFromKeys(keys: KeyCode[]): MacroChord | null {
+  const modifiers = MACRO_MODIFIER_ORDER.filter((modifier) =>
+    keys.some((code) => modifierOf(code) === modifier),
+  );
+  const key = keys.map(semanticKeyOf).find((value): value is string => Boolean(value));
+  return key ? { modifiers, key } : null;
+}
+
+/** 已保存的快捷键：App 聚焦快捷键 + 库中已有步骤用过的组合键。 */
+const savedShortcuts = computed<Array<{ label: string; chord: MacroChord }>>(() => {
+  const seen = new Map<string, { label: string; chord: MacroChord }>();
+  for (const [target, profile] of Object.entries(focusProfiles.value)) {
+    if (!profile.shortcut) continue;
+    const chord = macroChordFromKeys(profile.shortcut.keys);
+    if (!chord) continue;
+    const label = `${appDisplayName(target)} · ${macroChordLabel(chord)}`;
+    seen.set(label, { label, chord });
+  }
+  for (const definition of definitions.value) {
+    for (const step of definition.steps) {
+      if (step.parameters.chord) {
+        const label = macroChordLabel(step.parameters.chord);
+        if (!seen.has(label)) seen.set(label, { label, chord: step.parameters.chord });
+      }
+    }
+  }
+  return [...seen.values()];
+});
+
+/** 常用快捷键（与按键页同一份清单，只保留能换算成组合动作的条目）。 */
+const commonShortcutGroups = computed(() =>
+  SHORTCUT_PRESET_GROUPS.map((group) => ({
+    label: group.label,
+    items: group.items
+      .map((item) => ({ label: item.label, chord: macroChordFromKeys(item.keys) }))
+      .filter((item): item is { label: string; chord: MacroChord } => item.chord !== null),
+  })).filter((group) => group.items.length > 0),
+);
+
+/** 系统与媒体动作（复用按键页同一组系统/媒体快捷键）。 */
+const systemActionPresets = computed(
+  () => commonShortcutGroups.value.find((group) => group.label === "系统与媒体")?.items ?? [],
+);
+
+function sameChord(left: MacroChord | undefined, right: MacroChord): boolean {
+  return (
+    left !== undefined &&
+    left.key === right.key &&
+    left.modifiers.length === right.modifiers.length &&
+    left.modifiers.every((modifier) => right.modifiers.includes(modifier))
+  );
+}
+
+function applyChordToSelectedStep(chord: MacroChord): void {
+  const step = draft.value?.steps.find((item) => item.stepId === selectedStepId.value);
+  if (!step) return;
+  step.parameters.chord = { modifiers: [...chord.modifiers], key: chord.key };
+  setStatus(`已选择：${macroChordLabel(chord)}`, "success");
+}
+
+/** 「添加应用」：复用按键页的原生选择器，并把应用写入共享的自定义应用列表。 */
+async function addCustomAppToStep(): Promise<void> {
+  try {
+    const pick = await pickCustomApp();
+    if (!pick) return;
+    const mappings = await getButtonMappings();
+    const applications = [
+      ...(mappings.applications ?? []).filter((app) => app.path !== pick.path),
+      { name: pick.name, path: pick.path },
+    ];
+    const saved = await saveButtonMappings({ ...mappings, applications });
+    customApps.value = (saved.applications ?? []).map((app) => ({
+      id: app.path,
+      name: app.name,
+    }));
+    renameStepTarget(pick.path);
+    setStatus(`已添加应用：${pick.name}`, "success");
+  } catch (error) {
+    setStatus(`添加应用失败：${messageOf(error)}`, "error");
+  }
+}
+
+/** 单个步骤是否已经配置完整（未配置时禁止进入下一步 / 保存）。 */
+function stepConfigurationIssue(step: MacroStep): string | null {
+  const parameters = step.parameters;
+  switch (step.action) {
+    case "open_application":
+      return parameters.target?.trim() ? null : "还没有选择要打开的 App";
+    case "wait_for_application":
+      return parameters.target?.trim() ? null : "还没有选择要等待的 App";
+    case "send_shortcut":
+      return parameters.chord ? null : "还没有选择或录入按键";
+    case "system_action":
+      return parameters.chord ? null : "还没有选择系统动作";
+    case "focus_input": {
+      if (!parameters.target?.trim()) return "还没有选择目标 App";
+      // 是否已学习输入框属于执行期依赖（步骤运行会报 missing_dependency），
+      // 这里只要求本步骤自身的参数完整；学习入口就在同一步里。
+      return null;
+    }
+    case "focus_frontmost":
+      return null;
+    case "open_url":
+      return /^https?:\/\/\S+/i.test(parameters.url ?? "")
+        ? null
+        : "网址需要以 http:// 或 https:// 开头";
+    case "run_macro":
+      return parameters.nestedMacroId ? null : "还没有选择要执行的组合动作";
+    default:
+      return null;
+  }
+}
+
+const firstUnconfiguredStep = computed(() => {
+  const index = draft.value?.steps.findIndex((step) => stepConfigurationIssue(step) !== null) ?? -1;
+  return index >= 0 ? index : null;
+});
+
 // ===== 学习输入框（复用按键页的学习链路；必须把结果写进聚焦档案）=====
 
 /** 该 App 的聚焦档案策略（键 = 应用目标，与按键映射 `focusProfiles` 同源）。 */
 const focusProfileStrategies = ref<Record<string, string>>({});
+/** 完整聚焦档案（含快捷键），供「单键或快捷键」列出已保存的 App 聚焦快捷键。 */
+const focusProfiles = ref<Record<string, AppFocusProfile>>({});
 
 async function refreshFocusProfiles(): Promise<void> {
   try {
     const mappings = await getButtonMappings();
+    const profiles = mappings.focusProfiles ?? {};
+    focusProfiles.value = profiles;
     const strategies: Record<string, string> = {};
-    for (const [target, profile] of Object.entries(mappings.focusProfiles ?? {})) {
+    for (const [target, profile] of Object.entries(profiles)) {
       strategies[target] = profile.strategy;
     }
     focusProfileStrategies.value = strategies;
@@ -801,6 +980,12 @@ async function saveDraft(): Promise<void> {
     setStatus("至少添加一个步骤", "error");
     return;
   }
+  if (firstUnconfiguredStep.value !== null) {
+    const index = firstUnconfiguredStep.value;
+    const issue = stepConfigurationIssue(definition.steps[index]);
+    setStatus(`第 ${index + 1} 步还没设置完：${issue ?? "请补全参数"}`, "error");
+    return;
+  }
   if (isNewMacro.value) {
     definition.version = "1.0.0";
   } else {
@@ -813,6 +998,7 @@ async function saveDraft(): Promise<void> {
     wizardVisible.value = false;
     draft.value = null;
     testReport.value = null;
+    clearMacroEditorSession();
     setStatus("组合动作已保存", "success");
   } catch (error) {
     setStatus(`保存失败：${messageOf(error)}`, "error");
@@ -864,13 +1050,40 @@ onMounted(async () => {
   }
   await refreshFocusProfiles();
   await reloadLibrary();
+  restoreEditorSession();
 });
+
+/** 切走再切回来：恢复上次未保存的编辑进度（对齐 Mac 端的标签切换行为）。 */
+function restoreEditorSession(): void {
+  const saved = readMacroEditorSession();
+  if (!saved) return;
+  draft.value = saved.draft;
+  isNewMacro.value = saved.isNew;
+  editorStep.value = saved.editorStep;
+  selectedStepId.value = saved.selectedStepId;
+  wizardVisible.value = true;
+}
+
+watch(
+  [draft, isNewMacro, editorStep, selectedStepId, wizardVisible],
+  () => {
+    if (!wizardVisible.value || !draft.value) return;
+    writeMacroEditorSession({
+      draft: draft.value,
+      isNew: isNewMacro.value,
+      editorStep: editorStep.value,
+      selectedStepId: selectedStepId.value,
+    });
+  },
+  { deep: true },
+);
 </script>
 
 <template>
   <div class="macros-page">
     <div class="page-header">
       <h1>组合动作</h1>
+      <p class="page-subtitle">组合动作保存后，请到按键页面的按键操作中选择它。</p>
     </div>
 
     <!-- 库浏览 -->
@@ -948,6 +1161,22 @@ onMounted(async () => {
               删除
             </button>
           </div>
+          <section class="references">
+            <h3 class="references-title">使用位置</h3>
+            <p
+              v-if="!references || references.buttons.length + references.nestedIn.length === 0"
+              class="field-hint"
+            >
+              还没有按键或组合动作使用它。
+            </p>
+            <ul v-else class="reference-list">
+              <li v-for="item in references.buttons" :key="`b-${item.button}-${item.trigger}`">
+                按键：{{ buttonLabel(item.button as RemoteButton) }} ·
+                {{ buttonTriggerLabel(item.trigger as ButtonTrigger) }}
+              </li>
+              <li v-for="name in references.nestedIn" :key="`n-${name}`">嵌套于：{{ name }}</li>
+            </ul>
+          </section>
           <div v-if="pendingDeleteId === selectedDefinition.macroId" class="delete-confirm">
             <p class="delete-confirm-lead">删除后不可恢复。</p>
             <p v-if="deleteReferenceText" class="delete-confirm-impact">
@@ -957,7 +1186,7 @@ onMounted(async () => {
               v-if="deleteReferences && deleteReferences.nestedIn.length > 0"
               class="delete-confirm-impact"
             >
-              这些组合动作嵌套引用了它，删除后会显示<strong>不可用</strong>：{{
+              这些组合动作嵌套引用了它，删除后会把这些嵌套步骤一并移除：{{
                 deleteReferences.nestedIn.join("、")
               }}
             </p>
@@ -1162,6 +1391,9 @@ onMounted(async () => {
                         {{ app.name }}
                       </button>
                       <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                      <button class="chip add-app" type="button" @click="addCustomAppToStep">
+                        ＋ 添加应用
+                      </button>
                     </div>
                   </div>
                   <span class="field-hint">
@@ -1191,6 +1423,9 @@ onMounted(async () => {
                         {{ app.name }}
                       </button>
                       <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                      <button class="chip add-app" type="button" @click="addCustomAppToStep">
+                        ＋ 添加应用
+                      </button>
                     </div>
                   </div>
                   <div class="field">
@@ -1236,6 +1471,90 @@ onMounted(async () => {
                   <span class="field-hint">
                     点击“开始录入”后，只捕获下一次完整的单键或组合键，然后立即停止。
                   </span>
+                  <div v-if="savedShortcuts.length > 0" class="shortcut-group">
+                    <p class="field-label">已保存的快捷键</p>
+                    <div class="preset-grid">
+                      <button
+                        v-for="item in savedShortcuts"
+                        :key="item.label"
+                        class="chip"
+                        :class="{
+                          selected: sameChord(
+                            draft.steps[selectedStepIndex].parameters.chord,
+                            item.chord,
+                          ),
+                        }"
+                        type="button"
+                        @click="applyChordToSelectedStep(item.chord)"
+                      >
+                        {{ item.label }}
+                      </button>
+                    </div>
+                  </div>
+                  <div class="shortcut-group">
+                    <p class="field-label">常用快捷键</p>
+                    <template v-for="group in commonShortcutGroups" :key="group.label">
+                      <p class="field-hint">{{ group.label }}</p>
+                      <div class="preset-grid">
+                        <button
+                          v-for="item in group.items"
+                          :key="item.label"
+                          class="chip"
+                          :class="{
+                            selected: sameChord(
+                              draft.steps[selectedStepIndex].parameters.chord,
+                              item.chord,
+                            ),
+                          }"
+                          type="button"
+                          @click="applyChordToSelectedStep(item.chord)"
+                        >
+                          {{ item.label }}
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- 聚焦输入框（当前前台应用） -->
+                <div
+                  v-else-if="draft.steps[selectedStepIndex].action === 'focus_frontmost'"
+                  class="step-card-body"
+                >
+                  <p class="field-hint">
+                    把键盘焦点放到<strong>当前前台应用</strong>的输入框；不切换应用、不输入文字。
+                    需要指定某个 App 时请改用「聚焦学习过的输入框」。
+                  </p>
+                </div>
+
+                <!-- 系统与媒体动作 -->
+                <div
+                  v-else-if="draft.steps[selectedStepIndex].action === 'system_action'"
+                  class="step-card-body"
+                >
+                  <div class="field">
+                    <span class="field-label">系统与媒体动作</span>
+                    <div class="preset-grid">
+                      <button
+                        v-for="item in systemActionPresets"
+                        :key="item.label"
+                        class="chip"
+                        :class="{
+                          selected: sameChord(
+                            draft.steps[selectedStepIndex].parameters.chord,
+                            item.chord,
+                          ),
+                        }"
+                        type="button"
+                        @click="applyChordToSelectedStep(item.chord)"
+                      >
+                        {{ item.label }}
+                      </button>
+                    </div>
+                  </div>
+                  <span class="field-hint">
+                    执行时向当前前台应用发送该快捷键（与按键页「系统与媒体」同一份清单）。
+                  </span>
                 </div>
 
                 <!-- 聚焦输入框 -->
@@ -1257,6 +1576,9 @@ onMounted(async () => {
                         {{ app.name }}
                       </button>
                       <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                      <button class="chip add-app" type="button" @click="addCustomAppToStep">
+                        ＋ 添加应用
+                      </button>
                     </div>
                     <span
                       class="focus-state"
@@ -1433,6 +1755,10 @@ onMounted(async () => {
   min-height: calc(100vh - 48px);
 }
 .page-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   padding: 16px 22px 14px;
   border-bottom: 1px solid var(--border);
 }
@@ -1440,6 +1766,11 @@ onMounted(async () => {
   margin: 0;
   font-size: 24px;
   font-weight: 600;
+}
+.page-subtitle {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
 }
 .library-body {
   flex: 1;
@@ -1640,6 +1971,23 @@ onMounted(async () => {
   display: flex;
   gap: 8px;
   margin-top: 14px;
+}
+.references {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.references-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.reference-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.7;
 }
 .delete-confirm {
   margin-top: 14px;
@@ -1874,6 +2222,9 @@ onMounted(async () => {
 .action-check {
   color: var(--accent-text);
   font-weight: 700;
+}
+.shortcut-group {
+  margin-top: 12px;
 }
 .action-card:hover {
   border-color: var(--accent-border);

@@ -201,6 +201,8 @@ export type MacroAction =
   | "wait_for_application"
   | "send_shortcut"
   | "focus_input"
+  | "focus_frontmost"
+  | "system_action"
   | "open_url"
   | "run_macro";
 
@@ -1886,9 +1888,15 @@ export async function saveMacro(definition: MacroDefinition): Promise<MacroLibra
   return invoke<MacroLibraryDocument>("save_macro", { definition });
 }
 
-export async function deleteMacro(macroId: string): Promise<MacroLibraryDocument> {
+export interface MacroDeleteResult {
+  library: MacroLibraryDocument;
+  removedMacroIds: string[];
+  rewrittenMacroIds: string[];
+}
+
+export async function deleteMacro(macroId: string): Promise<MacroDeleteResult> {
   if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法删除组合动作");
-  return invoke<MacroLibraryDocument>("delete_macro", { macroId });
+  return invoke<MacroDeleteResult>("delete_macro", { macroId });
 }
 
 /** 删除前的引用清单（按键 + 嵌套引用）。 */
@@ -1961,6 +1969,8 @@ export const macroActionLabels: Record<MacroAction, string> = {
   wait_for_application: "等待应用",
   send_shortcut: "单键或快捷键",
   focus_input: "聚焦学习过的输入框",
+  focus_frontmost: "聚焦输入框",
+  system_action: "系统与媒体动作",
   open_url: "打开网址",
   run_macro: "执行已有组合动作",
 };
@@ -1992,6 +2002,10 @@ export function macroStepSummary(step: MacroStep): string {
       return parameters.chord ? macroChordLabel(parameters.chord) : "尚未录入按键";
     case "focus_input":
       return `${appTargetLabel(parameters.target)} · 聚焦学习过的输入框`;
+    case "focus_frontmost":
+      return "当前前台应用 · 聚焦输入框";
+    case "system_action":
+      return parameters.chord ? macroChordLabel(parameters.chord) : "尚未选择系统动作";
     case "open_url":
       return parameters.url ?? "尚未填写网址";
     case "run_macro":
