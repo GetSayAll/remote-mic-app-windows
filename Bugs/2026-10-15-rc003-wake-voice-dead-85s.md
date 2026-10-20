@@ -59,10 +59,14 @@
   `voice_synth_no_effect`（所有权还在、改写没发生）保持长阈值。
 - `crates/sayall-windows/src/wake_signal.rs`：电源回调收到 resume 即自增一代，
   常驻对账的睡眠比对代次后立刻醒来重查；失效期间观察周期 15s → 2s。
+- 唤醒造成的重连**不重发** 20 秒宽限锚点（`capture_grace_survives_resume`）：
+  否则"提前醒来"反而会踩进"桥在监听、助手没连上"的窗口，把 20 秒又塞回等待路径。
+  其余掉线（助手崩溃、`/end`+`/run` 之后）照旧重发，免得把正在注入的新实例判成失效。
 - 日志：`capture_recover … after_ms= ever_active=`、唤醒轮
   `auto_trigger phase=recheck reason=system_resume`。
 
-预期：同场景从 84 秒降到约 20 秒（8 秒阈值 + 约 14 秒重新注入/握手）。
+预期：同场景 84 秒 → **约 22–25 秒**（唤醒即判 + 8 秒阈值 + 约 14 秒重新注入/握手）。
+若唤醒后助手迟迟不重连（走到 Trigger 分支且未主动重启过），上限约 35 秒。
 
 ## 验证
 
@@ -72,6 +76,7 @@
   （旧实现"回执即置真"）。
 - `cargo test -p sayall-windows-app`：128 passed。新增
   `capture_recover_waits_long_only_when_it_never_worked`（修复前在 60000 vs 8000 处失败）、
+  `wake_reconnect_keeps_the_grace_clock_it_already_served`、
   `reconcile_wake_reason_prefers_user_command`、
   `interruptible_sleep_wakes_early_and_reports_why`（含 resume 路径）；
   电源回调用例断言唤醒代次 +1。

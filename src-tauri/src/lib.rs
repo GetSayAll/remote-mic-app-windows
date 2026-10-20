@@ -1189,6 +1189,31 @@ fn capture_recover_after_ms(ever_active: bool, owned_usages: usize) -> u64 {
     }
 }
 
+/// 助手重新连上时，是否**重发**「等它接管」的宽限锚点（纯函数，单测覆盖）。
+///
+/// 宽限是为"新助手要重新解析宿主 → 注入 → 握手"留的（`AUTO_TRIGGER_CAPTURE_GRACE_MS`）。
+/// 有两种情况它必须重新起算，否则会把"刚起来的实例"判成失效：
+/// * 本次开启还没生效过（`!ever_active`）：设备可能晚到、注入可能还没做完；
+/// * 我们刚主动重启过助手（`recover_attempts > 0`）：新实例正在注入。
+///
+/// 其余情况（**本次开启生效过、只是断了**）不得重发：唤醒时桥往往正好处在
+/// "掉线 → 重连"的窗口里，重发锚点等于把 20 秒宽限重新塞回用户等待路径上
+/// ——issue #264 的 84 秒里就有一部分来自这种"重新起算"。
+fn capture_grace_anchor_moves(ever_active: bool, recover_attempts: u32) -> bool {
+    !ever_active || recover_attempts > 0
+}
+
+/// 这一轮「助手掉线后重连」是否保留原宽限锚点（纯函数，单测覆盖）。
+///
+/// 只在**系统唤醒后的第一轮**放宽：睡眠前捕获是好的（`ever_active`）、我们也没
+/// 主动重启过助手（`attempts == 0`），此时的重连不是"新实例首次注入"，而是同一代
+/// 助手跟着系统一起醒过来——再等 20 秒宽限纯属浪费（issue #264）。
+/// 其他掉线（助手崩溃、`/end`+`/run` 之后）一律重发锚点，免得把正在注入的新实例
+/// 判成失效。
+fn capture_grace_survives_resume(resume_round: bool, ever_active: bool, attempts: u32) -> bool {
+    resume_round && ever_active && attempts == 0
+}
+
 /// 是否该「自动重来一次助手」（纯判定，单测覆盖）。
 ///
 /// `inactive_ms` = 捕获连续失效了多久；`since_last_attempt_ms` = 距上次自动重来多久
@@ -1490,6 +1515,8 @@ fn rc003_auto_trigger_reconcile(
     // enable 自己已经 task_trigger 过，立刻再触发会在 IgnoreNew 下被拒、留下误导性的
     // failed 行，还会让 consecutive 提前起算（2026-10-14 复核）。
     let mut last_sleep_woken = false;
+    // 上一轮睡眠是否由**系统唤醒**结束（issue #264）：唤醒造成的重连不该重发宽限。
+    let mut last_sleep_resume = false;
     // 以下标志只控制「状态刚变化时记一条」，避免空闲期重复刷屏。
     let mut bridge_unavailable_logged = false;
     let mut active_seen = false;
@@ -1504,6 +1531,7 @@ fn rc003_auto_trigger_reconcile(
     loop {
         // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
         let woken_early = std::mem::take(&mut last_sleep_woken);
+        let resume_round = std::mem::take(&mut last_sleep_resume);
         let enabled = settings
             .load()
             .map(|settings| settings.rc003_capture_enabled)
@@ -1530,11 +1558,13 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_attempts = 0;
                 CaptureHealth::Off.publish(&capture_health);
                 ever_active = false;
-                last_sleep_woken = interruptible_reconcile_sleep(
+                let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
                     &mut wake_seen,
                     &mut resume_seen,
-                ) == ReconcileWake::Command;
+                );
+                last_sleep_woken = wake == ReconcileWake::Command;
+                last_sleep_resume = wake == ReconcileWake::Resume;
             }
             ReconcileAction::WaitBridge => {
                 if !bridge_unavailable_logged {
@@ -1547,24 +1577,37 @@ fn rc003_auto_trigger_reconcile(
                 active_seen = true;
                 was_connected = false;
                 consecutive = 0;
-                connected_since = None;
+                // 桥自己不在监听（只会发生在我们刚 /end+/run 之后）：新实例要重新注入，
+                // 宽限必须重发。若本次开启生效过且没重启过助手，则保留原锚点
+                // （桥掉一下不代表捕获失效过）。
+                if capture_grace_anchor_moves(ever_active, capture_recover_attempts) {
+                    connected_since = None;
+                }
                 capture_inactive_logged = false;
                 capture_inactive_since = None;
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Starting.publish(&capture_health);
-                last_sleep_woken = interruptible_reconcile_sleep(
+                let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
                     &mut wake_seen,
                     &mut resume_seen,
-                ) == ReconcileWake::Command;
+                );
+                last_sleep_woken = wake == ReconcileWake::Command;
+                last_sleep_resume = wake == ReconcileWake::Resume;
             }
             ReconcileAction::Connected => {
                 if !was_connected {
                     sayall_windows::gatt_note(format!(
                         "rc003 feature=enhanced-capture action=auto_trigger phase=completed terminal_result=passed reason=helper_connected trigger_attempts={consecutive}"
                     ));
-                    connected_since = Some(std::time::Instant::now());
+                    // 锚点只在"首次启用"与"我们刚重启过助手"时重发（见
+                    // `capture_grace_anchor_moves`）：生效过又断开的情况不该再等一次宽限。
+                    if connected_since.is_none()
+                        || capture_grace_anchor_moves(ever_active, capture_recover_attempts)
+                    {
+                        connected_since = Some(std::time::Instant::now());
+                    }
                     capture_inactive_logged = false;
                     capture_inactive_since = None;
                 }
@@ -1703,6 +1746,7 @@ fn rc003_auto_trigger_reconcile(
                     );
                 }
                 last_sleep_woken = wake == ReconcileWake::Command;
+                last_sleep_resume = wake == ReconcileWake::Resume;
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
@@ -1716,7 +1760,15 @@ fn rc003_auto_trigger_reconcile(
                     );
                     was_connected = false;
                     consecutive = 0;
-                    connected_since = None;
+                    // 系统唤醒后的首轮重连保留原宽限锚点（睡眠前捕获是好的，这不是
+                    // "新实例首次注入"）；其余掉线照旧重发，等新实例注入完。
+                    if !capture_grace_survives_resume(
+                        resume_round,
+                        ever_active,
+                        capture_recover_attempts,
+                    ) {
+                        connected_since = None;
+                    }
                     capture_inactive_logged = false;
                     capture_inactive_since = None;
                     capture_recover_last_at = None;
@@ -1778,11 +1830,13 @@ fn rc003_auto_trigger_reconcile(
                         let _ = rc003_task::task_trigger();
                     }
                 }
-                last_sleep_woken = interruptible_reconcile_sleep(
+                let wake = interruptible_reconcile_sleep(
                     auto_trigger_retry_delay_ms(consecutive),
                     &mut wake_seen,
                     &mut resume_seen,
-                ) == ReconcileWake::Command;
+                );
+                last_sleep_woken = wake == ReconcileWake::Command;
+                last_sleep_resume = wake == ReconcileWake::Resume;
             }
         }
     }
@@ -4713,6 +4767,26 @@ mod tests {
         assert_eq!(capture_recover_after_ms(true, 4), CAPTURE_RECOVER_AFTER_MS);
         // 失效期间的观察节奏必须快于正常观察窗，否则"看到恢复"仍要等 15 秒。
         assert!(CAPTURE_WATCH_INACTIVE_MS < AUTO_TRIGGER_WATCH_MS);
+    }
+
+    /// 唤醒后的重连不该重发"等新实例注入"的宽限（issue #264）。
+    ///
+    /// 现场：唤醒后 0.4 秒助手就重连了，对账这一轮多半正好停在"桥在监听、助手没连上"
+    /// 的窗口里；若照旧把 20 秒宽限重新起算，用户等于又被关在门外 20 秒。
+    #[test]
+    fn wake_reconnect_keeps_the_grace_clock_it_already_served() {
+        // 唤醒轮 + 睡眠前生效过 + 没重启过助手 ⇒ 保留锚点（不重发宽限）。
+        assert!(capture_grace_survives_resume(true, true, 0));
+        // 不是唤醒轮（助手崩溃 / 被结束）⇒ 重发，等新实例注入。
+        assert!(!capture_grace_survives_resume(false, true, 0));
+        // 睡眠前也没生效过 ⇒ 重发（本来就没给出过宽限）。
+        assert!(!capture_grace_survives_resume(true, false, 0));
+        // 我们刚重启过助手 ⇒ 重发（新实例正在注入，不能立刻判失效）。
+        assert!(!capture_grace_survives_resume(true, true, 1));
+        // 锚点重发规则本身：首次启用 / 刚重启过才重发。
+        assert!(capture_grace_anchor_moves(false, 0));
+        assert!(capture_grace_anchor_moves(true, 1));
+        assert!(!capture_grace_anchor_moves(true, 0));
     }
 
     /// 版本号唯一来源（2026-09-30 收敛）：安装包名、exe 版本资源、关于页显示、
