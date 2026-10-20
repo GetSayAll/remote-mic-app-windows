@@ -1561,8 +1561,15 @@ fn handle_connection(
                         // 若配置回执仍是同一份（同一 agent 会话内幂等），报告层确实又会
                         // 改写，门禁可以复归；回执被作废过（超时 / S 行变更）则等下一次
                         // `A` 行，绝不凭"同一条旧回执"把门禁举起来。
+                        // 「回执已确认」不等于「报告层会改写」：off 的回执（`A -`）也
+                        // 置 synth_confirmed（用于停止重发），但当前期望目标是 None 时
+                        // 报告层不改写任何键——2026-10-20 现场（切微信后语音条不出现）
+                        // 就是所有权续约凭 off 回执把门禁重新举起、注入路径被整体跳过。
                         set_synth_gate(
-                            synth_gate_active(synth_confirmed, reported.len()),
+                            synth_gate_active(
+                                synth_confirmed && lock(voice_synth_to).is_some(),
+                                reported.len(),
+                            ),
                             "ownership",
                         );
                         if resumed {
@@ -3156,6 +3163,99 @@ mod tests {
                 Rc003Bridge::voice_synth_active()
             }),
             "重新接管 + 重新回执后门禁必须能复归（瞬时超时不得把它永久打死）"
+        );
+
+        drop(stream);
+        drop(reader);
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 关闭合成（`S -`）被回执后，后续所有权续约**不得**把门禁重新举起
+    /// （2026-10-20 现场：微信输入没有语音条）。
+    ///
+    /// 现场：用户把语音输入工具从豆包切到微信，app 下发 `S -` 且 agent 回执
+    /// `A -` —— 回执分支正确地把门禁落下；但 254ms 后一次所有权续约到达，
+    /// 旧实现用「回执已确认（true）∧ 有所有权」重新举起门禁，于是注入路径
+    /// 被整体跳过（chord_press skipped reason=report_layer_synth_active），
+    /// 而报告层此时没有任何合成目标 —— 语音键按下后微信侧什么都收不到。
+    ///
+    /// 语义边界：`synth_confirmed` 表示「当前期望值已被回执」（用于停止重发，
+    /// 对 off 同样成立）；门禁表示「报告层现在会改写」，还必须要求当前期望
+    /// 目标是 `Some`。本测试钉住：off 回执 + 所有权续约 ⇒ 门禁保持 false。
+    #[test]
+    fn synth_gate_stays_down_after_off_ack_and_ownership() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-bridge-synth-gate-off-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back]));
+        bridge.set_voice_synth(Some(0x00E6));
+
+        let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
+        let (port, token, _version) = parse_descriptor(&text).expect("可解析");
+        let mut stream =
+            TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).expect("连接");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(2_000)))
+            .ok();
+        stream
+            .write_all(format!("HELLO {BRIDGE_PROTOCOL_VERSION} {token} 2001\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut ok = String::new();
+        reader.read_line(&mut ok).unwrap();
+        assert!(ok.starts_with("OK "), "实际收到 {ok:?}");
+        let fields: Vec<&str> = ok.trim().split(' ').collect();
+        let (generation, usages) = (fields[2].to_string(), fields[3].to_string());
+
+        // 前置 sanity：合成开启时，回执 + 所有权 ⇒ 门禁举起（证明测试环境能举起）。
+        stream.write_all(b"A 0x00E6\n").unwrap();
+        stream
+            .write_all(format!("O {generation} {usages}\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                Rc003Bridge::voice_synth_active()
+            }),
+            "回执 + 所有权时门禁必须举起（前置 sanity，否则后面的负断言没有意义）"
+        );
+
+        // 现场动作：切到微信 ⇒ 期望目标变 None，桥发 `S -`，agent 回 `A -`。
+        bridge.set_voice_synth(None);
+        std::thread::sleep(Duration::from_millis(300)); // 等桥把 S - 发出去
+        stream.write_all(b"A -\n").unwrap();
+        stream.flush().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                !Rc003Bridge::voice_synth_active()
+            }),
+            "off 回执到达后门禁必须落下"
+        );
+
+        // 关键回归点：所有权续约照常到达（helper 每 500ms 续租），门禁不得复归。
+        stream
+            .write_all(format!("O {generation} {usages}\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        stream
+            .write_all(format!("O {generation} {usages}\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        // 负断言：观察窗 1 秒（桥线程处理 + 续约周期裕量）。
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            !Rc003Bridge::voice_synth_active(),
+            "合成已关闭（off 已回执）时，所有权续约不得把门禁重新举起——\
+             否则注入路径被跳过而报告层无人改写，微信等输入工具收不到快捷键"
         );
 
         drop(stream);
