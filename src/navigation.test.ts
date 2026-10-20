@@ -11,20 +11,27 @@ import {
 
 describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
+    // 2026-10-20 用户指定：按键、组合动作、连接、推荐、权限、设置。
     expect(navigationItems.map((item) => item.id)).toEqual([
       "buttons",
-      "recommendations",
+      "macros",
       "connection",
+      "recommendations",
       "permissions",
       "settings",
     ]);
-    // 2026-10-18：推荐页入口对齐 Mac 设置侧栏（buttons 之后、connection 之前）。
-    expect(navigationItems[1].label).toBe("推荐");
-    expect(navigationItems[1].icon).toBe("sparkles");
+    expect(navigationItems[3].label).toBe("推荐");
+    expect(navigationItems[3].icon).toBe("sparkles");
     // 2026-10-02 用户指定：末位页从「关于」改名「设置」，图标换成 Mac 同款齿轮。
-    expect(navigationItems[4].label).toBe("设置");
-    expect(navigationItems[4].icon).toBe("gear");
+    expect(navigationItems[5].label).toBe("设置");
+    expect(navigationItems[5].icon).toBe("gear");
     expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
+  });
+
+  it("shows the combination actions entry after the buttons page", () => {
+    const macros = navigationItems.find((item) => item.id === "macros");
+    expect(macros?.label).toBe("组合动作");
+    expect(macros?.icon).toBe("layers");
   });
 });
 

@@ -53,6 +53,12 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       automationId: "chat-input",
       className: "RichEdit",
     })),
+    learnFocusPoint: vi.fn(async () => ({
+      xRatio: 0.5,
+      yRatio: 0.82,
+      windowWidth: 1200,
+      windowHeight: 800,
+    })),
     testAppFocus: vi.fn(async () => undefined),
     exportButtonMappingConfiguration: vi.fn(async () => true),
     importButtonMappingConfiguration: vi.fn(async () => ({
@@ -66,6 +72,21 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       },
     })),
     resetButtonMappings: vi.fn(async () => ({ enabled: true, actions: {} })),
+    // 组合动作分组候选（2026-10-15）：默认给一条动作，个别用例覆盖为空库。
+    getCombinedActions: vi.fn(async () => ({
+      formatVersion: 1,
+      definitions: [
+        {
+          schemaVersion: "0.1",
+          macroId: "macro.aaaaaaa1",
+          version: "1.0.0",
+          name: "打开记事本并聚焦",
+          steps: [
+            { stepId: "step.01", action: "open_application", parameters: { target: "notepad" } },
+          ],
+        },
+      ],
+    })),
     scanRegisteredApps: vi.fn(async () => [
       { name: "Registered Example", path: "shell:AppsFolder\\Example!App" },
     ]),
@@ -161,7 +182,9 @@ import {
   connectRemote,
   exportButtonMappingConfiguration,
   getButtonMappings,
+  getButtonMappingSnapshot,
   getCaptureSupport,
+  getCombinedActions,
   getCommonPhrasePanelSnapshot,
   enableRc003Capture,
   disableRc003Capture,
@@ -169,6 +192,7 @@ import {
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   importButtonMappingConfiguration,
+  learnFocusPoint,
   learnFocusTarget,
   saveLockMappingSelection,
   scanPairedRemotes,
@@ -297,6 +321,13 @@ beforeEach(() => {
     controlType: "Edit",
     automationId: "chat-input",
     className: "RichEdit",
+  });
+  vi.mocked(learnFocusPoint).mockClear();
+  vi.mocked(learnFocusPoint).mockResolvedValue({
+    xRatio: 0.5,
+    yRatio: 0.82,
+    windowWidth: 1200,
+    windowHeight: 800,
   });
   vi.mocked(exportButtonMappingConfiguration).mockClear();
   vi.mocked(importButtonMappingConfiguration).mockClear();
@@ -498,7 +529,7 @@ describe("buttons mapping page", () => {
     wrapper.unmount();
   });
 
-  it("「设备操作 / 聚焦输入框」入口先隐藏（2026-10-03 用户要求）", async () => {
+  it("「设备操作 / 聚焦输入框」入口恢复暴露（2026-10-15 用户要求，参考 Mac 端）", async () => {
     const wrapper = await mountPage();
     await flushPromises();
     const powerCard = wrapper
@@ -508,13 +539,18 @@ describe("buttons mapping page", () => {
     await flushPromises();
 
     const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
-    expect(titles, `动作分组：${titles.join(" / ")}`).not.toContain("设备操作");
-    expect(
-      wrapper.findAll(".mapping-editor button").some((button) => button.text() === "聚焦输入框"),
-    ).toBe(false);
-    // 对照组：其他动作分组不受影响。
-    expect(titles).toContain("鼠标滚轮");
-    expect(titles).toContain("打开应用");
+    expect(titles, `动作分组：${titles.join(" / ")}`).toContain("设备操作");
+    const focusChip = wrapper
+      .findAll(".mapping-editor button")
+      .find((button) => button.text() === "聚焦输入框");
+    expect(focusChip, "「聚焦输入框」动作入口必须可见").toBeDefined();
+
+    // 选中后写入映射（不切换应用、不输入文字，只有动作类型）。
+    await focusChip!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({
+      type: "focus_input",
+    });
     wrapper.unmount();
   });
 
@@ -668,6 +704,73 @@ describe("buttons mapping page", () => {
     expect(singleCell.classes()).toContain("set");
     await singleCell.trigger("click");
     expect(wrapper.find(".mapping-editor").text()).toContain("确定 · 单击");
+  });
+
+  it("组合动作分组：选中即写入 run_macro 并即时保存（2026-10-15）", async () => {
+    const wrapper = await mountPage();
+    const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
+    await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+
+    const editor = wrapper.find(".mapping-editor");
+    expect(editor.text()).toContain("组合动作");
+    const macroChip = editor.findAll(".chip").find((chip) => chip.text() === "打开记事本并聚焦");
+    expect(macroChip).toBeTruthy();
+    await macroChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) {
+        throw new Error("自动保存未触发");
+      }
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<
+        string,
+        { single: { type: string; macroId?: string; macroVersion?: string } }
+      >;
+    };
+    expect(saved.actions.power!.single.type).toBe("run_macro");
+    expect(saved.actions.power!.single.macroId).toBe("macro.aaaaaaa1");
+    expect(saved.actions.power!.single.macroVersion).toBe("1.0.0");
+  });
+
+  it("组合动作分组：同一条动作多版本只显示一个芯片（2026-10-15 现场回归）", async () => {
+    vi.mocked(getCombinedActions).mockResolvedValueOnce({
+      formatVersion: 1,
+      definitions: [
+        {
+          schemaVersion: "0.1",
+          macroId: "macro.aaaaaaa1",
+          version: "1.0.0",
+          name: "旧名字",
+          steps: [{ stepId: "step.01", action: "open_application", parameters: { target: "notepad" } }],
+        },
+        {
+          schemaVersion: "0.1",
+          macroId: "macro.aaaaaaa1",
+          version: "1.0.1",
+          name: "新名字",
+          steps: [{ stepId: "step.01", action: "open_application", parameters: { target: "notepad" } }],
+        },
+      ],
+    });
+    const wrapper = await mountPage();
+    const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
+    await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    const macroSection = editor.findAll(".action-section").find((section) =>
+      section.text().includes("组合动作"),
+    )!;
+    const chips = macroSection.findAll(".chip");
+    expect(chips).toHaveLength(1);
+    expect(chips[0].text()).toBe("新名字");
+  });
+
+  it("组合动作分组：空库时只提示去组合动作页创建", async () => {
+    vi.mocked(getCombinedActions).mockResolvedValueOnce({ formatVersion: 1, definitions: [] });
+    const wrapper = await mountPage();
+    const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
+    await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    expect(editor.text()).toContain("还没有组合动作。先到“组合动作”页创建。");
   });
 
   it("applies a preset to the editing target and auto-persists (对齐 Mac 即时保存)", async () => {
@@ -1099,7 +1202,7 @@ describe("buttons mapping page", () => {
     });
   });
 
-  it("配置「打开应用」时聚焦方式面板暂时隐藏（2026-10-03 下线的回归守卫）", async () => {
+  it("配置「打开应用」时聚焦方式面板可见（2026-10-15 恢复）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
@@ -1109,8 +1212,13 @@ describe("buttons mapping page", () => {
     await notepadChip!.trigger("click");
     await flushPromises();
 
-    // 目标仍能正常选中并写入映射，但「打开后聚焦方式」面板不再暴露。
-    expect(editor.find(".focus-profile").exists()).toBe(false);
+    // 目标选中后「打开后聚焦方式」面板必须出现，并带四种策略。
+    const panel = editor.find(".focus-profile");
+    expect(panel.exists()).toBe(true);
+    const labels = panel.findAll(".chip").map((chip) => chip.text());
+    for (const label of ["只打开应用", "用应用快捷键聚焦", "聚焦已记录的输入框", "记录点击位置"]) {
+      expect(labels, `策略选项：${labels.join(" / ")}`).toContain(label);
+    }
     await vi.waitFor(() => {
       const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
         actions: Record<string, { single: { type: string; target?: string } }>;
@@ -1121,9 +1229,70 @@ describe("buttons mapping page", () => {
     });
   });
 
-  // 2026-10-03：UI 暂时隐藏（ButtonsPage.vue 的 showAppFocusStrategy=false），
-  // 恢复面板时把这个 skip 去掉即可继续覆盖策略切换与学习流程。
-  it.skip("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
+  it("只显示与当前策略相关的聚焦失败：记录点击位置下隐藏旧的聚焦服务结果", async () => {
+    const snapshotWithFailure = {
+      enabled: true,
+      gateActive: true,
+      listenerActive: true,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      lastFired: null,
+      lastError: null,
+      lastFocus: {
+        requestId: 1,
+        kind: "launch_then_focus",
+        focused: false,
+        reason: "timeout",
+        attempts: 1,
+        elapsedMs: 3000,
+      },
+    };
+    const mappingsFor = (strategy: "recorded_element" | "recorded_point") => ({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app" as const, target: "notepad" },
+          double: { type: "disabled" as const },
+          long: { type: "disabled" as const },
+        },
+      },
+      focusProfiles: {
+        notepad:
+          strategy === "recorded_element"
+            ? {
+                strategy,
+                recorded: {
+                  controlType: "Edit",
+                  automationId: "chat-input",
+                  className: "RichEdit",
+                },
+              }
+            : {
+                strategy,
+                point: { xRatio: 0.5, yRatio: 0.8, windowWidth: 1000, windowHeight: 800 },
+              },
+      },
+    });
+    const openEditor = async (strategy: "recorded_element" | "recorded_point") => {
+      vi.mocked(getButtonMappings).mockResolvedValueOnce(mappingsFor(strategy));
+      vi.mocked(getButtonMappingSnapshot).mockResolvedValueOnce(snapshotWithFailure);
+      const wrapper = await mountPage();
+      const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+      await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+      await flushPromises();
+      return wrapper;
+    };
+
+    // 聚焦服务确实失败过：记录点击位置策略下旧结果与当前配置无关，必须隐藏。
+    const elementWrapper = await openEditor("recorded_element");
+    expect(elementWrapper.find(".focus-result-message").text()).toContain("等待超时");
+
+    const pointWrapper = await openEditor("recorded_point");
+    expect(pointWrapper.find(".focus-result-message").exists()).toBe(false);
+  });
+
+  it("配置「打开应用」的聚焦方式并学习输入框（策略与字段自洽）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
@@ -1189,6 +1358,42 @@ describe("buttons mapping page", () => {
         throw new Error("学习失败文案未出现");
       }
     });
+
+    // 记录点击位置（面向微信 4.x 这类没有 UIA 树的应用）：6 秒后采集鼠标位置。
+    vi.useFakeTimers();
+    await panel.findAll(".chip").find((chip) => chip.text() === "记录点击位置")!.trigger("click");
+    await flushPromises();
+    await panel.findAll(".chip").find((chip) => chip.text() === "开始记录位置")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("正在记录鼠标位置");
+    await vi.advanceTimersByTimeAsync(6500);
+    await flushPromises();
+    vi.useRealTimers();
+    const recordedPoint = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      focusProfiles?: Record<string, { strategy: string; point?: { yRatio: number } }>;
+    };
+    expect(recordedPoint.focusProfiles?.notepad?.strategy).toBe("recorded_point");
+    expect(recordedPoint.focusProfiles?.notepad?.point?.yRatio).toBeCloseTo(0.82);
+    expect(wrapper.text()).toContain("已记录位置");
+  });
+
+  it("记录点击位置失败时提示中文原因（光标不在目标窗口内）", async () => {
+    vi.useFakeTimers();
+    vi.mocked(learnFocusPoint).mockRejectedValueOnce(new Error("cursor_outside_target"));
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const editor = wrapper.find(".mapping-editor");
+    await editor.findAll(".chip").find((chip) => chip.text() === "记事本")!.trigger("click");
+    await flushPromises();
+    const panel = editor.find(".focus-profile");
+    await panel.findAll(".chip").find((chip) => chip.text() === "记录点击位置")!.trigger("click");
+    await flushPromises();
+    await panel.findAll(".chip").find((chip) => chip.text() === "开始记录位置")!.trigger("click");
+    await vi.advanceTimersByTimeAsync(6500);
+    await flushPromises();
+    vi.useRealTimers();
+    expect(wrapper.text()).toContain("鼠标不在目标应用的窗口里");
   });
 
   it("configures mouse actions with independent validated amounts", async () => {    const wrapper = await mountPage();

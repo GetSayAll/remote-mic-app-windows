@@ -92,6 +92,13 @@ pub trait MappingInjector: Send + Sync {
     /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
     fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
 
+    /// 「记录点击位置」：读取当前物理光标并要求它落在目标应用窗口内。
+    ///
+    /// 面向完全不暴露无障碍接口的应用（微信 4.x）。同步、无阻塞。
+    fn learn_focus_point(&self, target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        crate::app_launcher::learn_focus_point(target)
+    }
+
     /// 可选常用语组件（私有实现，构建期由宿主安装到进程级槽位）。
     /// 未安装时返回空实现：常用语不可用，且不影响任何按键行为。
     fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
@@ -226,6 +233,12 @@ impl MappingInjector for SendInputInjector {
                 let recorded = profile
                     .and_then(|profile| profile.recorded.clone())
                     .ok_or_else(|| "该应用还没有学习过输入框".to_owned())?;
+                // 激活是异步完成的：先等目标成为前台，否则聚焦服务的前几次尝试
+                // 会打在上一个前台应用上（嵌套动作里尤其明显）。
+                let _ = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
                 self.with_focus_runner(|runner| {
                     runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
                         crate::focus::FocusChoice::Recorded(recorded),
@@ -234,6 +247,16 @@ impl MappingInjector for SendInputInjector {
                 .flatten()
                 .map(|_| ())
                 .ok_or_else(|| "聚焦服务不可用".to_owned())
+            }
+            crate::focus::FocusStrategy::RecordedPoint => {
+                let point = profile
+                    .and_then(|profile| profile.point)
+                    .ok_or_else(|| "该应用还没有记录点击位置".to_owned())?;
+                let (x, y) = crate::app_launcher::recorded_point_absolute(target, &point)?;
+                self.runtime
+                    .move_cursor_and_click(x, y)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }
         }
     }
@@ -327,6 +350,8 @@ pub struct ButtonMappingRuntime {
     gesture_callbacks: Arc<RwLock<Vec<ButtonGestureCallback>>>,
     /// 与引擎工作线程共享的注入器句柄（用于读取最近一次聚焦结果、触发测试聚焦）。
     injector: Arc<dyn MappingInjector>,
+    /// 组合动作运行时（RunMacro 手势分发与 UI 测试入口共用）。
+    macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -335,6 +360,7 @@ impl ButtonMappingRuntime {
         injector: Arc<dyn MappingInjector>,
         usage: Arc<UsageCounters>,
         snapshot: Arc<Mutex<RawInputSnapshot>>,
+        macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         // 门控把被吞键盘边沿直接投递到引擎通道（钩子线程闭包投递，无阻塞）。
@@ -357,6 +383,7 @@ impl ButtonMappingRuntime {
             edge_callbacks: Arc::clone(&edge_callbacks),
             gesture_callbacks: Arc::clone(&gesture_callbacks),
             injector: Arc::clone(&injector),
+            macro_runtime: Arc::clone(&macro_runtime),
             worker: None,
         };
 
@@ -384,6 +411,7 @@ impl ButtonMappingRuntime {
                         gesture_callbacks,
                         injector,
                         usage,
+                        macro_runtime,
                     )
                 }
             })
@@ -420,6 +448,11 @@ impl ButtonMappingRuntime {
         read_lock(&self.mappings).clone()
     }
 
+    /// 组合动作运行时句柄（平台层在加载/保存组合动作后经它同步库快照）。
+    pub fn macro_runtime(&self) -> Arc<crate::macro_runtime::MacroRuntime> {
+        Arc::clone(&self.macro_runtime)
+    }
+
     pub fn snapshot(&self) -> ButtonMappingSnapshot {
         let state = lock_state(&self.state);
         ButtonMappingSnapshot {
@@ -449,6 +482,11 @@ impl ButtonMappingRuntime {
     /// UI「开始学习输入框」：阻塞至多 3 秒，返回捕获到的输入框特征。
     pub fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
         self.injector.learn_focus_target()
+    }
+
+    /// UI「记录点击位置」：读取物理光标并要求其落在目标应用窗口内。
+    pub fn learn_focus_point(&self, target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        self.injector.learn_focus_point(target)
     }
 
     /// 订阅语义按键边沿（Tauri 层转发为前端事件；画布高亮数据源）。
@@ -602,6 +640,7 @@ fn engine_worker(
     gesture_callbacks: Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: Arc<dyn MappingInjector>,
     usage: Arc<UsageCounters>,
+    macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
 ) {
     let mut merger = ButtonStateMerger::default();
     let mut recognizer = GestureRecognizer::new();
@@ -643,6 +682,7 @@ fn engine_worker(
                             &injector,
                             &mut native_pending,
                             &mut last_remote_move_at,
+                            &macro_runtime,
                         ) {
                             reset_after_terminal_action(
                                 "lock_workstation",
@@ -700,6 +740,7 @@ fn engine_worker(
                     &mut repeat_runs,
                     &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -721,6 +762,7 @@ fn engine_worker(
                     &mut repeat_runs,
                     &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
             }
             EngineMessage::GateEdge(edge) => {
@@ -746,6 +788,7 @@ fn engine_worker(
                     &mut repeat_runs,
                     &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
@@ -779,6 +822,7 @@ fn engine_worker(
                     &mut repeat_runs,
                     &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
                 // 认领集合无需在此显式清理：被认领的按住都在上面 release_all
                 // 产生的释放边沿里配对消费并移出（见 handle_edges 释放分支）。
@@ -832,6 +876,7 @@ fn handle_edges(
     repeat_runs: &mut RepeatRuns,
     phrase_claimed: &mut BTreeSet<RemoteButton>,
     last_remote_move_at: &mut Option<Instant>,
+    macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
 ) {
     if edges.is_empty() {
         return;
@@ -942,6 +987,7 @@ fn handle_edges(
                 injector,
                 native_pending,
                 last_remote_move_at,
+                macro_runtime,
             ) {
                 reset_after_terminal_action(
                     "lock_workstation",
@@ -1009,6 +1055,7 @@ fn fire_gesture(
     injector: &Arc<dyn MappingInjector>,
     native_pending: &mut BTreeSet<RemoteButton>,
     last_remote_move_at: &mut Option<Instant>,
+    macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
 ) -> bool {
     let fired = FiredGesture { button, trigger };
     let suspended = {
@@ -1194,6 +1241,31 @@ fn fire_gesture(
                         target_kind, strategy
                     ));
                     lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
+                }
+            }
+        }
+        ButtonAction::RunMacro { macro_id, .. } => {
+            // 组合动作由运行时在独立线程异步执行（不阻塞引擎线程）；引用按
+            // **最新已保存版本**解析（Mac 语义：编辑后所有引用自动生效），
+            // 保存时所指的 macro_version 只作审计。
+            crate::ble::gatt_note(format!(
+                "map_fire button={:?} trigger={:?} action=run_macro macro_id={macro_id}",
+                button, trigger
+            ));
+            match macro_runtime.start(&macro_id) {
+                Ok(()) => crate::ble::gatt_note(format!(
+                    "map_macro macro_id={macro_id} phase=accepted terminal_result=deferred"
+                )),
+                Err(error) => {
+                    let reason = match error {
+                        crate::macro_runtime::MacroStartError::AlreadyRunning => "already_running",
+                        crate::macro_runtime::MacroStartError::NotFound => "not_found",
+                        crate::macro_runtime::MacroStartError::Invalid(_) => "invalid_macro",
+                    };
+                    crate::ble::gatt_note(format!(
+                        "map_macro macro_id={macro_id} phase=requested terminal_result=failed reason={reason}"
+                    ));
+                    lock_state(state).last_error = Some("组合动作未能开始执行".to_owned());
                 }
             }
         }
@@ -1557,6 +1629,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let single = |key: KeyCode| ButtonAction::Shortcut {
             chord: KeyChord { keys: vec![key] },
@@ -1834,6 +1909,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let long_scroll = || ButtonAction::Scroll {
             direction: ScrollDirection::Up,
@@ -1985,6 +2063,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::clone(&snapshot),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         // 注意：单元测试环境没有真实 key_gate 线程（is_gate_thread_alive=false），
         // 引擎按设计保持观察模式（不注入）。此处先验证边沿→手势→回调链路。
@@ -2037,6 +2118,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         runtime.set_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
         let fired = Arc::new(StdMutex::new(Vec::new()));
@@ -2090,6 +2174,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2134,6 +2221,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2175,6 +2265,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2196,6 +2289,7 @@ mod tests {
                     automation_id: "chat-input".to_owned(),
                     ..Default::default()
                 }),
+                point: None,
             },
         );
         runtime.set_mappings(mappings);
@@ -2232,6 +2326,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         runtime.set_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
 
@@ -2291,6 +2388,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::clone(&snapshot),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         // 双击配置：释放后进入双击窗口（悬而未决），监听器停止必须取消它。
         let mut mappings = ButtonMappings::default();
@@ -2346,6 +2446,9 @@ mod tests {
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::clone(&usage),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let sender = runtime.sender();
         // 双源同一次按下：语义按下只计一次。
@@ -2389,6 +2492,9 @@ mod tests {
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2493,6 +2599,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         // 长按=退格 + 开关=长按：550ms 触发后按 50ms 间隔连拍。
@@ -2655,6 +2764,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         // 上键单击 = 移动光标（移动注入成功会刷新 OK 点击窗口）。
@@ -2852,6 +2964,9 @@ mod tests {
             Arc::clone(injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         runtime.set_mappings(mappings);
         let fired = Arc::new(StdMutex::new(Vec::new()));

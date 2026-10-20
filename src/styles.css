@@ -213,7 +213,10 @@ nav { display: grid; gap: 4px; }
    窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
 .content { min-width: 0; padding: 22px 35.5px 26px 32px; overflow: auto; scrollbar-width: none; }
 .content::-webkit-scrollbar { display: none; }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-left: 14px; }
+/* 全应用隐藏滚动条（仍可滚动）：WebView2 的经典滚动条在卡片里很显眼。 */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); gap: 14px; align-items: start; }
 .card { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 30px var(--shadow-card); }
