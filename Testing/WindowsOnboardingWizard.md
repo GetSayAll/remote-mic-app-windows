@@ -37,7 +37,11 @@
 1. 任意步骤点左下「复制诊断信息」→ 应显示「已复制，可直接粘贴发给开发者」；粘贴到记事本检查内容。
    2026-10-13 现场：复制成功后**只留下方那条绿色提示**——按钮文字不再变成「已复制到剪贴板」。
 2. 文本为**英文**（`SayAll diagnostics` 开头），必须包含：App version、Build（40 位源码修订）、
-   Build channel、**Windows version（major.minor.build）**、Architecture、`Wizard step: <token> (n/7)`、
+   Build channel、**Windows version（major.minor.build）**、Architecture、**`Boot`**
+   （`type=` 引导类型 `full` / `hiberboot` / `hibernate_resume` / `unknown`、
+   `fast_startup=yes|no|unknown`；2026-10-20 快速启动断连取证——两项必须并列，
+   开关开着但这次点的是「重启」时 `type` 仍是 `full`；读不到写 `unknown`，不写 `no`）、
+   `Wizard step: <token> (n/7)`、
    Gate、Blocked，以及运行行：`Remote`（含 `error=` 与 **`button_observed=`**——②步是否已收到
    普通按键）、**`Raw input`**（phase / matched / raw_events / semantic_edges / stale_events）、
    `Audio`（含 `error=`）、`Input tool`（含 **`capture=`**——「全按键支持」的**真实捕获状态**

@@ -187,13 +187,15 @@ describe("connection phase presentation", () => {
 describe("diagnostic report presentation", () => {
   it("adds an explicit generation time without changing the captured report", () => {
     const report: DiagnosticReport = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       appVersion: "0.1.0",
       appBuild: "1001",
       sourceRevision: "0123456789012345678901234567890123456789",
       buildChannel: "local-test",
       windowsVersion: "10.0.26100",
       processArchitecture: "x86_64",
+      bootType: "full",
+      fastStartupEnabled: true,
       platform: "windows",
       verificationStatus: "待真机验证",
       capabilities: {

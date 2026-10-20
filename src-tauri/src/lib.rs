@@ -3779,12 +3779,21 @@ pub fn run() {
     #[cfg(not(windows))]
     let (windows_version, windows_build) = ("unknown".to_owned(), "unknown".to_owned());
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=2 process_architecture={} native_arch={} windows_version={} windows_build={}",
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema={} process_architecture={} native_arch={} windows_version={} windows_build={}",
         if log_ready { "passed" } else { "failed" },
+        diagnostics::DIAGNOSTIC_SCHEMA_VERSION,
         std::env::consts::ARCH,
         sayall_windows::os_arch::native_arch(),
         windows_version,
         windows_build
+    ));
+    // 引导类型取证（2026-10-20）：快速启动（hiberboot）开机后，部分蓝牙适配器
+    // 会带着快照里的旧固件状态，导致链路每几十秒断一次（现场反馈）。应用侧无法
+    // 修 OS/驱动层的问题，但必须能在一次日志拉取里认出"这次开机是不是 hiberboot"
+    // ——断连循环日志（ble_disconnect_loop）也会带同一组字段，两行可直接对齐。
+    sayall_windows::gatt_note(format!(
+        "app_lifecycle event=boot_context phase=observed {}",
+        sayall_windows::boot_type::boot_context_fields()
     ));
     #[cfg(windows)]
     if let Err(error) = sayall_windows::compatibility::check_current_windows() {
