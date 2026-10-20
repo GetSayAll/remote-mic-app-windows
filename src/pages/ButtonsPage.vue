@@ -2330,7 +2330,7 @@ onUnmounted(() => {
 
         <section v-if="commonPhrasesAvailable" class="action-section">
           <h4 class="action-section-title">常用语</h4>
-          <div class="preset-grid common-phrases-grid">
+          <div class="preset-grid">
             <button
               class="chip"
               :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
