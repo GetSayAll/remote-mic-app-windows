@@ -1576,8 +1576,9 @@ fn decide_reconcile_round(enabled: bool, check: AutoTriggerCheck) -> ReconcileAc
 /// * 桥 failed/stopped → 触发无意义，只重查（`WaitBridge`）；
 /// * 助手已连接 → 观察，掉线后重新进入恢复（重新来一轮快速期）；
 ///   助手活着但**捕获没生效**（agent 拿不到所有权）持续到阈值 → 自己
-///   `/end` + `/run` 重来一次助手（等价于用户手动关开一次开关，
-///   见 `CAPTURE_RECOVER_AFTER_MS`），仍无效则降速重试；
+///   `/end` + `/run` 重来一次助手（等价于用户手动关开一次开关）。阈值按"本次开启
+///   起来过没有"分叉：起来过又断了 8 秒就动手，从没起来过仍等 60 秒
+///   （见 `capture_recover_after_ms`），仍无效则降速重试；
 /// * 桥在监听、助手未连上 → 触发：前 4 轮每 5 秒，第 5 轮 `/end` + `/run`
 ///   兜底一次，此后每 30 秒稳态重试，稳态期每 10 轮再兜底一次。
 fn rc003_auto_trigger_reconcile(
