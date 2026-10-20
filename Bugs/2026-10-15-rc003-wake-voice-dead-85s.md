@@ -94,9 +94,30 @@
 - 助手侧"agent 丢失后自己 re-resolve/re-inject"仍是后续候选（可把 14 秒再压到秒级，
   并消掉 `/end` 后端口仍被旧实例占用导致的 `listen_retry address_in_use`）。
 
-## 同轮未处理（另开票）
+**提交 `550d82b`**（附加观察甲）：开关被应用关掉时必须说明原因
 
-- （甲）升级/覆盖后 `task_power_policy_mismatch` 静默回落开关（`src-tauri/src/lib.rs`
-  只写日志 + `save_rc003_capture_enabled(false)`），界面无任何提示。
-- （乙）`docs/release-notes-1.0.0.md:19`（"需要一次授权；升级保留"）与同文件 `:63`、
-  `docs/product-copy.md`、`DEVELOPMENT.md` 的"每次开启都弹"互相矛盾，纯文档错。
+- 后端新增 `CaptureRevoke`（六个稳定 token，`AtomicU8` 发布，与 `CaptureHealth` 同模式），
+  四个回落分支各自发布原因；重新开启成功后清回 `none` 并留
+  `action=revoke_notice terminal_result=cleared reason=re_enabled`。
+- 前端 `captureRevoked` + `captureRevokedText` / `shouldShowCaptureRevoked`：只在
+  **关闭态 + 确有原因**时显示「…因为系统授权需要重新确认，已经被关掉了；重新打开一次就能
+  继续使用。」；落点与失败句、「还没有生效」句同一位，优先级 操作失败 > 被关掉 > 未生效。
+- 文案决策入册：`docs/product-copy.md` §7（2026-10-15 条）。
+
+**提交 `3774997`**（附加观察乙）：`docs/release-notes-1.0.0.md` 第 19 行与「已知边界」、
+`docs/product-copy.md`、`DEVELOPMENT.md` 的授权口径统一为「升级/覆盖安装保留授权、不弹窗；
+之后每次开启都会再弹一次」，并补一条"升级后开关变关闭是在确认授权"的说明。
+
+**提交 `f869876`**（小项 3）：`/end` 之后按快照 `helper_pid` 等旧实例真正退出（上限 2 秒）
+再 `/run`，消掉现场那 5 次 `listen_retry reason=address_in_use`；
+日志 `action=capture_recover phase=previous_helper_wait terminal_result=passed|timeout`。
+
+## 仍未覆盖
+
+- **真机睡眠唤醒复测**（同上，需 RC003 + 宿主重建现场）与「宿主未重建 ⇒ 0 次 capture_recover」
+  的阴性对照。
+- **升级/覆盖安装后首屏目视**：开关被回落时那句说明是否出现、重新开启后是否收回。
+- 助手侧"agent 丢失后自己 re-resolve / re-inject"仍是后续候选：可把 `/end`+`/run` 的
+  ~14 秒再压到秒级（helper 已有 `[AGENT-REFRESH]` 与 `SERVED_HOST_PID` 跟随新宿主的雏形，
+  但不在 agent bye 后自己重来）。须真机实验，不能凭推理上线。
+- `复制诊断信息` 里暂未含 `capture_revoked=`（原因目前只在日志与桥快照里）。
