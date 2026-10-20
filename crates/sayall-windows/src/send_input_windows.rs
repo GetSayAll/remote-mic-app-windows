@@ -165,6 +165,67 @@ impl SendInputRuntime {
         self.record(result, "SetPhysicalCursorPos")
     }
 
+    /// 把物理光标移到指定点并左键单击一次（「按记录位置聚焦」用）。
+    ///
+    /// 坐标基于物理像素（Per-Monitor V2 下的窗口矩形口径），与本文件其它鼠标
+    /// 操作共用同一条 DPI 上下文切换路径。
+    pub fn move_cursor_and_click(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Result<SendInputSnapshot, PlatformError> {
+        let started = Instant::now();
+        crate::ble::gatt_note(format!(
+            "mouse_click_at phase=requested method=physical_cursor x={x} y={y}"
+        ));
+        let result = (|| {
+            let previous = unsafe { GetThreadDpiAwarenessContext() };
+            if previous.0.is_null() {
+                return Err(SendInputError::Backend(
+                    "cannot read thread DPI awareness context".into(),
+                ));
+            }
+            let switched =
+                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+            if switched.0.is_null() {
+                return Err(SendInputError::Backend(
+                    "cannot establish physical cursor coordinate context".into(),
+                ));
+            }
+            struct DpiGuard(DPI_AWARENESS_CONTEXT);
+            impl Drop for DpiGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        SetThreadDpiAwarenessContext(self.0);
+                    }
+                }
+            }
+            let _dpi = DpiGuard(previous);
+            unsafe { SetPhysicalCursorPos(x, y) }
+                .map_err(|e| SendInputError::Backend(e.to_string()))?;
+            // 悬停事件先行：部分应用（Qt/自绘 UI）只在收到鼠标移动后才更新命中测试。
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            send_click_with(MouseClickKind::Left, |edges| {
+                let inputs: Vec<_> = edges
+                    .iter()
+                    .map(|&up| build_mouse_button_input(MouseClickKind::Left, up))
+                    .collect();
+                let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize;
+                Ok(sent)
+            })
+        })();
+        crate::ble::gatt_note(format!(
+            "mouse_click_at phase=completed terminal_result={} target_result=unknown elapsed_ms={}",
+            if result.is_ok() {
+                "submitted"
+            } else {
+                "failed"
+            },
+            started.elapsed().as_millis()
+        ));
+        self.record(result, "SendInput mouse click at point")
+    }
+
     pub fn tap(&self, chord: KeyChord) -> Result<SendInputSnapshot, PlatformError> {
         if chord.is_lock_workstation() {
             let started = Instant::now();

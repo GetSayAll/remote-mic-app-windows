@@ -3,8 +3,9 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
+import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
-import { DEVICE_ACTION_SECTION_ENABLED } from "../lib/feature-flags";
+import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
 import {
   captureFailureText,
   captureInactiveText,
@@ -25,20 +26,28 @@ import {
   exportButtonMappingConfiguration,
   getButtonMappingSnapshot,
   getButtonMappings,
+  getCombinedActions,
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
+  getCommonPhrasePanelSnapshot,
   getLockMappingSelection,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   identityShortcutByButton,
   importButtonMappingConfiguration,
+  focusPointErrorLabel,
+  learnFocusPoint,
   learnFocusTarget,
   listPresetApps,
   mouseClickLabels,
   mouseMoveLabels,
+  openCommonPhraseExample,
   pickCustomApp,
+  registerCommonPhraseAvailability,
   registerPresetAppNames,
+  registerMacroNames,
+  latestMacroDefinitions,
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
@@ -64,6 +73,7 @@ import {
   type FiredGesture,
   type FocusStrategy,
   type KeyCode,
+  type MacroDefinition,
   type MoveDirection,
   type PairedRemote,
   type PresetAppInfo,
@@ -78,8 +88,16 @@ import {
   type ShortcutCaptureEdge,
   testAppFocus,
 } from "../lib/bridge";
+import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+
+/**
+ * 「调整常用语」二级视图（对齐 macOS：按键页 → 调整常用语 → 返回按键页）。
+ * 编辑器来自私有 UI（公开构建返回 null → 入口不渲染）。
+ */
+const commonPhraseEditor = commonPhraseSettingsComponent();
+const showCommonPhraseEditor = ref(false);
 
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
@@ -230,6 +248,10 @@ const mappingsLoaded = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
+/** 组合动作库（「组合动作」动作分组的候选；2026-10-15）。 */
+const macroDefinitions = ref<MacroDefinition[]>([]);
+/** 常用语组件是否可用（页面加载快照后更新；不可用时不显示动作入口）。 */
+const commonPhrasesAvailable = ref(false);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -268,6 +290,11 @@ const FLASH_FALLBACK_MS = 600;
 let resizeObserver: ResizeObserver | null = null;
 let unmounted = false;
 let resourcesReady = false;
+
+/** 「记录点击位置」的倒计时句柄与状态（6 秒后采集鼠标位置）。 */
+let pointLearnTimer: number | null = null;
+const pointLearnState = ref<"idle" | "recording" | "recorded" | "error">("idle");
+const pointLearnMessage = ref<string | null>(null);
 
 /**
  * 「锁定当前按键」持久化（2026-10-18，用户定稿：跨页面切换与跨重启保持）。
@@ -349,6 +376,8 @@ function releasePageResources(): void {
   unlistenShortcutCapture = null;
   if (captureTimeout !== null) window.clearTimeout(captureTimeout);
   captureTimeout = null;
+  if (pointLearnTimer !== null) window.clearTimeout(pointLearnTimer);
+  pointLearnTimer = null;
   void stopShortcutCapture();
   if (snapshotTimer !== null) window.clearInterval(snapshotTimer);
   snapshotTimer = null;
@@ -412,11 +441,15 @@ const focusStrategyOptions: Array<{ value: FocusStrategy; label: string }> = [
   { value: "open_only", label: "只打开应用" },
   { value: "app_shortcut", label: "用应用快捷键聚焦" },
   { value: "recorded_element", label: "聚焦已记录的输入框" },
+  { value: "recorded_point", label: "记录点击位置" },
 ];
 
 // 2026-10-03 Andy：先隐藏「打开后聚焦方式」面板（后端能力与已存配置保留，UI 暂不暴露）。
-// 需要恢复时把这个开关改回 true 即可；相关测试按同一开关跳过。
-const showAppFocusStrategy = false;
+// 2026-10-15 Andy：要求恢复，并参考 Mac 端补上「聚焦输入框」入口。
+const showAppFocusStrategy = true;
+
+// 「设备操作」区（含「聚焦输入框」动作）同样在 2026-10-03 隐藏、2026-10-15 恢复。
+const DEVICE_ACTION_SECTION_ENABLED = true;
 
 const focusFailureLabels: Record<string, string> = {
   self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
@@ -431,6 +464,9 @@ const focusFailureLabels: Record<string, string> = {
 
 /** 最近一次聚焦结果（失败时给用户可解释的原因）。 */
 const lastFocusNotice = computed<string | null>(() => {
+  // 聚焦服务只服务「聚焦已记录的输入框」；「记录点击位置」不走这个服务，
+  // 继续显示旧的失败会让用户以为新配置仍然失败（2026-10-19 现场）。
+  if (focusProfile.value?.strategy !== "recorded_element") return null;
   const report = mappingSnapshot.value?.lastFocus;
   if (!report || report.focused) return null;
   return `上次聚焦失败：${focusFailureLabels[report.reason ?? ""] ?? report.reason ?? "未知原因"}`;
@@ -444,11 +480,63 @@ function applyFocusStrategy(strategy: FocusStrategy): void {
   const profile: AppFocusProfile = { strategy };
   if (strategy === "app_shortcut" && previous?.shortcut) profile.shortcut = previous.shortcut;
   if (strategy === "recorded_element" && previous?.recorded) profile.recorded = previous.recorded;
+  if (strategy === "recorded_point" && previous?.point) profile.point = previous.point;
   const next = { ...(mappings.value.focusProfiles ?? {}), [target]: profile };
   mappings.value = { ...mappings.value, focusProfiles: next };
   focusLearnMessage.value = null;
   focusTestMessage.value = null;
   void persist("聚焦方式已更新");
+}
+
+/**
+ * 「记录点击位置」：把鼠标所在的相对位置记到目标应用上。
+ *
+ * 面向完全不暴露无障碍接口的应用（2026-10-15 实测：微信 4.x 的 UIA 树里没有任何
+ * 可聚焦元素），只能按位置点击。
+ */
+function recordFocusPoint(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  if (pointLearnState.value === "recording") return;
+  pointLearnState.value = "recording";
+  pointLearnMessage.value = "正在记录鼠标位置…请先把鼠标停在目标输入框上（6 秒后自动记录）";
+  if (pointLearnTimer) window.clearTimeout(pointLearnTimer);
+  pointLearnTimer = window.setTimeout(() => {
+    pointLearnTimer = null;
+    void finishPointRecording(target);
+  }, 6000);
+}
+
+async function finishPointRecording(target: string): Promise<void> {
+  try {
+    const point = await learnFocusPoint(target);
+    const next = {
+      ...(mappings.value.focusProfiles ?? {}),
+      [target]: { strategy: "recorded_point" as const, point },
+    };
+    mappings.value = { ...mappings.value, focusProfiles: next };
+    pointLearnState.value = "recorded";
+    pointLearnMessage.value = "已记录位置（窗口大小变化超过 25% 时会拒绝点击，需要重新记录）";
+    await persist();
+  } catch (error) {
+    pointLearnState.value = "error";
+    pointLearnMessage.value = `记录位置失败：${focusPointErrorLabel(
+      error instanceof Error ? error.message : String(error),
+    )}`;
+  }
+}
+
+function clearRecordedPoint(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const next = {
+    ...(mappings.value.focusProfiles ?? {}),
+    [target]: { strategy: "recorded_point" as const },
+  };
+  mappings.value = { ...mappings.value, focusProfiles: next };
+  pointLearnState.value = "idle";
+  pointLearnMessage.value = null;
+  void persist("已清除记录的位置");
 }
 
 /** 录入聚焦快捷键的落点（由 `capturePurpose` 分流）。 */
@@ -483,7 +571,8 @@ async function beginFocusShortcutCapture(): Promise<void> {
 }
 
 /**
- * 「学习输入框」：3 秒窗口内轮询系统焦点，用户需要在此期间点击目标应用的输入框。
+ * 「学习输入框」：6 秒窗口内轮询系统焦点（焦点不可用时取鼠标命中的输入候选），
+ * 用户需要在此期间点击目标应用的输入框。
  * 采集只读控件语义（不含输入内容），写入该目标的聚焦档案。
  */
 async function startFocusLearning(): Promise<void> {
@@ -491,7 +580,7 @@ async function startFocusLearning(): Promise<void> {
   const target = focusTarget.value;
   if (!target) return;
   focusLearnState.value = "learning";
-  focusLearnMessage.value = "请在 3 秒内点击目标应用的输入框（点到别处会记录成别的控件）";
+  focusLearnMessage.value = "请在 6 秒内点击目标应用的输入框（点到别处会记录成别的控件）";
   try {
     const recorded = await learnFocusTarget();
     const next = {
@@ -592,6 +681,15 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
   if (capturingShortcut.value) void finishShortcutCapture();
 }
 
+/** 「常用语示例」：打开常用语面板（会员=普通、非会员=只读预览；判定在宿主层）。 */
+async function openExample(): Promise<void> {
+  try {
+    await openCommonPhraseExample();
+  } catch {
+    // 未接通私有组件（公开构建）：入口不渲染，正常不会到这里；留静默兜底。
+  }
+}
+
 function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
   if (!target) return;
@@ -608,61 +706,6 @@ function applyAction(action: ButtonAction): void {
   // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
   void persist(reconciled.notice ?? undefined);
 }
-
-/**
- * 预设快捷键分组（对齐 Mac `ButtonActionCategory` 的 basicKeys/systemAndMedia，
- * 并按 Windows 语义适配：Home/End/PageUp/PageDown 属低频导航键、Mac 端基础
- * 按键列表亦无此四键，故移除；复制族从系统组移入基础组，对齐 Mac basicKeys）。
- */
-const PRESET_GROUPS: Array<{ label: string; items: Array<{ label: string; keys: KeyCode[] }> }> = [
-  {
-    label: "基础按键",
-    items: [
-      { label: "Enter", keys: ["enter"] },
-      { label: "Esc", keys: ["escape"] },
-      { label: "空格", keys: ["space"] },
-      { label: "Tab", keys: ["tab"] },
-      { label: "退格", keys: ["backspace"] },
-      { label: "删除", keys: ["delete"] },
-      { label: "↑", keys: ["up"] },
-      { label: "↓", keys: ["down"] },
-      { label: "←", keys: ["left"] },
-      { label: "→", keys: ["right"] },
-      // Home 为"主页键同键映射"的必需预设（能力矩阵 identity 档的唯一
-      // 合法目标；Mac 端基础键列表无此键，Windows 端因泄漏对冲需要保留）。
-      { label: "Home", keys: ["home"] },
-      { label: "复制", keys: ["control", "c"] },
-      { label: "粘贴", keys: ["control", "v"] },
-      { label: "剪切", keys: ["control", "x"] },
-      { label: "全选", keys: ["control", "a"] },
-      { label: "撤销", keys: ["control", "z"] },
-      { label: "重做", keys: ["control", "y"] },
-      { label: "查找", keys: ["control", "f"] },
-      { label: "保存", keys: ["control", "s"] },
-      { label: "发送", keys: ["control", "enter"] },
-      { label: "换行", keys: ["shift", "enter"] },
-      { label: "右键菜单", keys: ["apps"] },
-      { label: "刷新", keys: ["f5"] },
-    ],
-  },
-  {
-    label: "系统与媒体",
-    items: [
-      { label: "切换窗口", keys: ["alt", "tab"] },
-      { label: "显示桌面", keys: ["left_windows", "d"] },
-      { label: "关闭窗口", keys: ["control", "w"] },
-      { label: "锁定", keys: ["left_windows", "l"] },
-      { label: "搜索", keys: ["left_windows", "s"] },
-      { label: "截图", keys: ["left_windows", "shift", "s"] },
-      { label: "静音", keys: ["volume_mute"] },
-      { label: "音量+", keys: ["volume_up"] },
-      { label: "音量−", keys: ["volume_down"] },
-      { label: "播放/暂停", keys: ["media_play_pause"] },
-      { label: "上一首", keys: ["media_prev"] },
-      { label: "下一首", keys: ["media_next"] },
-    ],
-  },
-];
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
 const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? 1 : 1);
@@ -1747,10 +1790,11 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps, persistedLockSelection] = await Promise.all([
+  const [loaded, snapshot, apps, commonPhrases, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    getCommonPhrasePanelSnapshot(),
     // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
     getLockMappingSelection().catch(() => {
       reportFrontendEvent({
@@ -1767,6 +1811,17 @@ onMounted(async () => {
   }
   presetApps.value = apps.filter((app) => app.installed);
   registerPresetAppNames(presetApps.value);
+  // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
+  await getCombinedActions()
+    .then((library) => {
+      // 同 id 多版本只取最新（编辑一次 = 版本追加，直接铺开会多出芯片）。
+      macroDefinitions.value = latestMacroDefinitions(library.definitions);
+      registerMacroNames(macroDefinitions.value);
+    })
+    .catch(() => undefined);
+  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
+  commonPhrasesAvailable.value = commonPhrases.available;
+  registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -1893,7 +1948,17 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="buttons-page">
+  <!-- 「调整常用语」二级视图（对齐 macOS：从按键页进入，返回按键页）。 -->
+  <section v-if="showCommonPhraseEditor && commonPhraseEditor" class="buttons-page">
+    <header class="page-header">
+      <div class="mapping-title-row">
+        <button type="button" class="chip" @click="showCommonPhraseEditor = false">返回</button>
+        <h1>调整常用语</h1>
+      </div>
+    </header>
+    <component :is="commonPhraseEditor" />
+  </section>
+  <section v-else class="buttons-page">
     <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
          （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
@@ -2152,7 +2217,7 @@ onUnmounted(() => {
       </div>
       <div class="action-sections">
         <p v-if="capabilityNote" class="muted editor-note capability-note">{{ capabilityNote }}</p>
-        <section v-for="group in PRESET_GROUPS" :key="group.label" class="action-section">
+        <section v-for="group in SHORTCUT_PRESET_GROUPS" :key="group.label" class="action-section">
           <h4 class="action-section-title">{{ group.label }}</h4>
           <div class="preset-grid">
             <!-- 芯片显示实际按键组合（组合在不同 App 里语义不同，功能描述
@@ -2225,6 +2290,91 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <!-- 组合动作（自定义动作；2026-10-15）：把已有动作绑定到本按键。
+             入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。 -->
+        <section v-if="COMBINATION_ACTIONS_ENABLED" class="action-section">
+          <h4 class="action-section-title">组合动作</h4>
+          <p v-if="macroDefinitions.length === 0" class="muted">
+            还没有组合动作。先到“组合动作”页创建。
+          </p>
+          <div v-else class="preset-grid">
+            <button
+              v-for="macro in macroDefinitions"
+              :key="macro.macroId"
+              class="chip custom-app"
+              :class="{
+                selected:
+                  selectedAction?.type === 'run_macro' &&
+                  selectedAction.macroId === macro.macroId,
+              }"
+              type="button"
+              :title="`${macro.steps.length} 个步骤`"
+              @click="
+                applyAction({
+                  type: 'run_macro',
+                  macroId: macro.macroId,
+                  macroVersion: macro.version,
+                })
+              "
+            >
+              {{ macro.name }}
+            </button>
+          </div>
+        </section>
+
+        <section v-if="commonPhrasesAvailable" class="action-section">
+          <h4 class="action-section-title">常用语</h4>
+          <div class="preset-grid">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
+              type="button"
+              title="打开常用语面板，按方向键和 OK 键插入对应常用语"
+              @click="applyAction({ type: 'open_common_phrases' })"
+            >
+              打开常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="编辑常用语内容与五键分配"
+              @click="showCommonPhraseEditor = true"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+                  <path d="M4.5 6.5h15" />
+                  <path d="M4.5 12h15" />
+                  <path d="M4.5 17.5h15" />
+                </g>
+                <g fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.7">
+                  <circle cx="9.5" cy="6.5" r="1.9" />
+                  <circle cx="14.5" cy="12" r="1.9" />
+                  <circle cx="10.5" cy="17.5" r="1.9" />
+                </g>
+              </svg>
+              调整常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="预览常用语面板（未开通会员时为只读示例）"
+              @click="openExample"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g fill="currentColor">
+                  <path
+                    d="M4.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                  <path
+                    d="M14.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                </g>
+              </svg>
+              常用语示例
+            </button>
+          </div>
+        </section>
+
         <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
@@ -2245,10 +2395,7 @@ onUnmounted(() => {
             <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
-          </div>
-          <!-- 两个动作入口排在**所有**应用名称（预设 + 自定义）之后（2026-10-03 用户要求）：
-               用户挑应用时先扫完名字，再看到「扫描 / 添加」——不再插在名字中间。 -->
-          <div class="preset-grid app-library-actions">
+            <!-- 扫描 / 添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
             <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
               class="chip add-app"
@@ -2316,12 +2463,33 @@ onUnmounted(() => {
                 {{ focusProfile?.recorded ? "已记录输入框" : "尚未记录" }}
               </span>
             </div>
+            <div v-if="focusProfile?.strategy === 'recorded_point'" class="focus-learn-row">
+              <button
+                class="chip"
+                type="button"
+                :disabled="pointLearnState === 'recording'"
+                @click="recordFocusPoint"
+              >
+                {{ pointLearnState === "recording" ? "记录中…" : "开始记录位置" }}
+              </button>
+              <button v-if="focusProfile?.point" class="chip" type="button" @click="clearRecordedPoint">
+                清除记录
+              </button>
+              <span class="muted">
+                {{ focusProfile?.point ? "已记录位置" : "尚未记录" }}
+              </span>
+            </div>
+            <p class="muted focus-learn-hint">
+              目标应用在 UIA 里没有输入框时（例如微信 4.x），用「记录点击位置」：先把鼠标停在目标输入框上，
+              点按钮后 6 秒自动记录，之后按这个位置点击聚焦。
+            </p>
             <div class="focus-profile-actions">
               <button class="chip" type="button" :disabled="!focusProfile?.strategy || focusProfile.strategy === 'open_only'" @click="testSelectedAppFocus">
                 测试打开与聚焦
               </button>
             </div>
             <p v-if="focusLearnMessage" class="muted focus-learn-message">{{ focusLearnMessage }}</p>
+            <p v-if="pointLearnMessage" class="muted focus-learn-message">{{ pointLearnMessage }}</p>
             <p v-if="focusTestMessage" class="muted focus-test-message">{{ focusTestMessage }}</p>
             <p v-if="lastFocusNotice" class="muted focus-result-message">{{ lastFocusNotice }}</p>
           </div>
@@ -2501,9 +2669,15 @@ onUnmounted(() => {
 /* 打开应用：预设 + 已添加应用共用一个换行网格（2026-10-03 用户要求）。
    芯片内换行只给自定义应用名（预设名保持单行，避免撑高整行）。 */
 .app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-/* 「扫描本机应用 / ＋添加应用」排在所有应用名称之后（2026-10-03 用户要求）：
-   与上面的应用列表（含可滚动列表）之间留出分组间距；选择器要压过
-   `.action-section .preset-grid` 的 6px。 */
-.action-section .preset-grid.app-library-actions { margin-top: 9px; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
+/* 「打开后聚焦方式」面板（2026-10-15 恢复暴露）。 */
+.focus-profile { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.focus-profile-title { margin: 0; font-size: 13px; }
+.focus-learn-row,
+.focus-shortcut-row,
+.focus-profile-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.focus-learn-hint,
+.focus-learn-message,
+.focus-test-message,
+.focus-result-message { margin: 0; font-size: 12px; }
 </style>

@@ -177,6 +177,29 @@ fn classify_registered_launch(submitted: bool, foreground_observed: bool) -> Res
 }
 
 #[cfg(windows)]
+pub(crate) fn resolve_registered_executable_path(target: &str) -> Option<String> {
+    if !is_registered_target(target) {
+        return None;
+    }
+    resolve_registered_identity(target)
+        .ok()
+        .and_then(|identity| identity.executable_path)
+}
+
+/// 诊断用：返回注册项解析出的 exe 路径（`None` = 解析不到；外层 `None` = 目标非法）。
+#[cfg(windows)]
+pub fn describe_registered_identity(target: &str) -> Option<Option<String>> {
+    if !is_registered_target(target) {
+        return None;
+    }
+    Some(
+        resolve_registered_identity(target)
+            .ok()
+            .and_then(|identity| identity.executable_path),
+    )
+}
+
+#[cfg(windows)]
 fn resolve_registered_identity(target: &str) -> Result<RegisteredIdentity, String> {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::PROPERTYKEY;

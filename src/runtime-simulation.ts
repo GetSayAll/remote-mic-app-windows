@@ -283,9 +283,9 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「全按键支持」关闭时返回/音量± 整卡置灰禁用并给出开启指引");
 
-  // 「设备操作 / 聚焦输入框」芯片自 2026-10-03 起按用户要求隐藏（见
-  // src/lib/feature-flags.ts DEVICE_ACTION_SECTION_ENABLED=false），动作与平台受理路径
-  // 保留：这里钉住芯片缺席，映射改为经真实 IPC 直接写入，再验证平台受理。
+  // 「设备操作 / 聚焦输入框」入口于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
+  // src/pages/ButtonsPage.vue 的 DEVICE_ACTION_SECTION_ENABLED=true）。这里钉住芯片可见，
+  // 随后仍经真实 IPC 写入并验证平台受理路径（不依赖芯片的选中细节）。
   // 打开编辑器仍走「确定 · 单击」格子——关闭态下三键不可点击，上一步已钉住。
   const focusCell = await waitFor(() => {
     const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
@@ -299,8 +299,8 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     document.querySelectorAll<HTMLButtonElement>(".mapping-editor button"),
   );
   assert(
-    !editorButtons.some((button) => button.textContent?.trim() === "聚焦输入框"),
-    "「聚焦输入框」芯片应已隐藏",
+    editorButtons.some((button) => button.textContent?.trim() === "聚焦输入框"),
+    "「聚焦输入框」芯片应可见（2026-10-15 恢复入口）",
   );
   const currentMappings = await getButtonMappings();
   const currentOk = currentMappings.actions.ok;
@@ -317,15 +317,15 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     focusSnapshot.submittedBatches === 2,
     "「聚焦输入框」动作没有分发到平台的聚焦受理路径",
   );
-  steps.push("「聚焦输入框」动作经真实 IPC 写入并分发到平台聚焦受理（UI 芯片按用户要求隐藏）");
+  steps.push("「聚焦输入框」入口可见，动作经真实 IPC 写入并分发到平台聚焦受理");
 
-  // 「打开应用 + 聚焦方式」：UI 面板自 2026-10-03 起按用户要求隐藏（后端能力与已存配置
-  // 保留）。旅程改为：选中目标后断言面板不再出现，并直接经真实 IPC 覆盖学习与测试两条
-  // 后端受理路径——面板恢复时把这里改回点击「聚焦已记录的输入框 / 开始学习输入框」即可。
+  // 「打开应用 + 聚焦方式」：面板于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
+  // src/pages/ButtonsPage.vue 同款注释）。这里钉住面板可见；学习与测试两条路径仍经
+  // 真实 IPC 覆盖。
   await clickButton("记事本");
   await waitFor(
-    () => (document.body.textContent?.includes("打开后聚焦方式") ? null : true),
-    "聚焦方式面板保持隐藏",
+    () => (document.body.textContent?.includes("打开后聚焦方式") ? true : null),
+    "「打开后聚焦方式」面板可见",
   );
   const learned = await learnFocusTarget();
   assert(
@@ -333,7 +333,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "仿真学习样本不是预期的可编辑目标",
   );
   await testAppFocus("notepad");
-  steps.push("「打开后聚焦方式」面板按用户要求隐藏；学习与测试打开聚焦仍经真实 IPC 覆盖");
+  steps.push("「打开后聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
 
   mark("permissions_page");
   await openPage("权限");

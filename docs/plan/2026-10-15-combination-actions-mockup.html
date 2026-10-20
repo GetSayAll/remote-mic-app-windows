@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>无线麦 SayAll Windows 版 · 组合动作页面设计稿</title>
+<style>
+  /* ===== 设计 token：与 src/styles.css 对齐 ===== */
+  :root{
+    --accent:#5f62db; --accent-dark:#4e51c5; --accent-text:#3437a5;
+    --accent-surface:rgba(95,98,219,.10); --accent-surface-strong:rgba(95,98,219,.14);
+    --accent-border:rgba(95,98,219,.45); --accent-hover:rgba(95,98,219,.10);
+    --text-primary:#1f2430; --text-secondary:#697080; --text-nav:#5c6270;
+    --text-control:#444a58; --text-on-accent:#fff;
+    --surface-canvas:#f4f5f8; --sidebar:rgba(237,238,244,.94);
+    --card:rgba(255,255,255,.92); --surface-subtle:#f6f7fa; --surface-control:#f7f7fa;
+    --surface-hover:rgba(255,255,255,.78);
+    --border:rgba(31,36,48,.09); --border-strong:rgba(31,36,48,.13);
+    --warning:#b66d14; --warning-surface:#fff0d7;
+    --error-text:#9b312f; --error-surface:#ffe9e8;
+    --success-text:#267148; --success-surface:#e5f5eb;
+    --pending-text:#656b78; --pending-surface:#e9eaf0;
+    --pressed:#ef9420; --pressed-surface:rgba(239,148,32,.14);
+    --dot-warning:#e6a33e; --dot-success:#49a66f; --dot-error:#d35e5b;
+    --info-text:#555c6a; --info-surface:#f3f3ff;
+    --track:#eceef3; --toggle-off:#c9cdd8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:"Segoe UI Variable","Segoe UI","Microsoft YaHei UI",sans-serif;
+    background:#dfe1e8; color:var(--text-primary);
+    display:flex; align-items:center; justify-content:center; min-height:100vh;
+    padding:24px;
+  }
+  /* ===== 应用窗口 1100×688（实际 WebView 视口） ===== */
+  .window{
+    width:1100px; height:688px; background:var(--surface-canvas);
+    border-radius:10px; overflow:hidden; display:grid;
+    grid-template-columns:108px minmax(0,1fr);
+    box-shadow:0 18px 60px rgba(20,25,45,.28), 0 2px 8px rgba(20,25,45,.18);
+    flex:none;
+  }
+  /* ===== 侧栏 ===== */
+  .sidebar{
+    background:var(--sidebar); display:flex; flex-direction:column;
+    padding-top:18px; border-right:1px solid var(--border);
+  }
+  .sidebar nav{display:flex;flex-direction:column;gap:2px}
+  .nav-item{
+    display:flex;flex-direction:column;align-items:center;gap:5px;
+    padding:9px 4px;border:0;background:none;cursor:pointer;
+    color:var(--text-nav);font-size:13px;font-weight:600;
+  }
+  .nav-item svg{width:21px;height:21px}
+  .nav-item:hover{background:var(--nav-hover,rgba(120,126,150,.08))}
+  .nav-item.active{color:var(--accent-text);background:var(--accent-surface);font-weight:700}
+  .sidebar-footer{margin-top:auto;padding:14px;text-align:center;font-size:11px;color:var(--text-secondary)}
+  /* ===== 主区 ===== */
+  main{display:flex;flex-direction:column;min-width:0;min-height:0}
+  .page-head{
+    padding:16px 22px 14px; font-size:24px; font-weight:600;
+    border-bottom:1px solid var(--border); flex:none;
+  }
+  .page-body{flex:1;min-height:0;display:flex}
+  .page-scroll{flex:1;min-height:0;overflow-y:auto;padding:20px 22px}
+  /* ===== 库页：左右分栏 ===== */
+  .lib-pane{
+    width:264px;flex:none;border-right:1px solid var(--border);
+    display:flex;flex-direction:column;padding:14px;gap:10px;background:var(--surface-subtle);
+  }
+  .lib-title-row{display:flex;align-items:center;gap:8px}
+  .lib-title{font-size:16px;font-weight:600}
+  .count-badge{
+    margin-left:auto;font-size:12px;font-weight:600;color:var(--text-secondary);
+    background:var(--pending-surface);border-radius:99px;padding:1px 8px;
+  }
+  .search-input,.text-input{
+    width:100%;border:1px solid var(--border-strong);border-radius:6px;
+    padding:6px 10px;font-size:13px;background:#fff;color:var(--text-primary);outline:none;
+  }
+  .search-input:focus,.text-input:focus{border-color:var(--accent-border)}
+  .macro-list{display:flex;flex-direction:column;gap:4px;overflow-y:auto;flex:1}
+  .macro-item{
+    text-align:left;border:0;background:none;cursor:pointer;border-radius:9px;padding:9px 10px;
+    display:flex;flex-direction:column;gap:3px;
+  }
+  .macro-item:hover{background:var(--surface-hover)}
+  .macro-item.selected{background:var(--accent-surface)}
+  .macro-item .name{font-size:13px;font-weight:600;line-height:1.3}
+  .macro-item .meta{font-size:12px;color:var(--text-secondary)}
+  .btn{
+    border:1px solid var(--border-strong);background:var(--surface-control);
+    color:var(--text-control);border-radius:7px;padding:6px 12px;
+    font-size:13px;font-weight:600;cursor:pointer;
+  }
+  .btn:hover{background:var(--surface-hover)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--text-on-accent)}
+  .btn.primary:hover{background:var(--accent-dark)}
+  .btn.danger{color:var(--error-text)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn-block{width:100%}
+  .btn-row{display:flex;gap:8px}
+  .btn-row .btn{flex:1}
+  .lib-actions{display:flex;flex-direction:column;gap:8px}
+  .icon-btn{
+    border:1px solid var(--border-strong);background:var(--surface-control);color:var(--text-control);
+    width:26px;height:26px;border-radius:6px;cursor:pointer;font-size:13px;flex:none;
+  }
+  .icon-btn:hover{background:var(--surface-hover)}
+  /* ===== 详情区 ===== */
+  .detail-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .detail-head h2{font-size:20px;font-weight:600}
+  .detail-head .spacer{flex:1}
+  .step-readonly{
+    background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;display:flex;gap:12px;align-items:flex-start;margin-bottom:8px;
+  }
+  .step-num{
+    width:24px;height:24px;border-radius:7px;background:var(--accent-surface);color:var(--accent-text);
+    font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;
+  }
+  .step-body .t{font-size:13px;font-weight:600}
+  .step-body .d{font-size:12px;color:var(--text-secondary);margin-top:2px;line-height:1.45}
+  .section-title{font-size:14px;font-weight:600;margin:18px 0 8px}
+  .usage-row{
+    display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-control);
+    background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:6px;
+  }
+  .usage-row .tag{
+    font-size:12px;background:var(--pending-surface);color:var(--pending-text);
+    border-radius:99px;padding:1px 8px;flex:none;
+  }
+  .delete-confirm{
+    margin-top:14px;border:1px solid rgba(155,49,47,.35);background:var(--error-surface);
+    border-radius:10px;padding:12px 14px;font-size:13px;color:var(--error-text);
+  }
+  .delete-confirm .btn-row{margin-top:10px}
+  /* ===== 空态 ===== */
+  .empty{
+    height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:8px;text-align:center;
+  }
+  .empty .big{font-size:42px;color:var(--accent);margin-bottom:4px}
+  .empty h3{font-size:20px;font-weight:600}
+  .empty p{font-size:14px;color:var(--text-secondary);max-width:430px;line-height:1.6}
+  .empty .hint{font-size:12px}
+  /* ===== 向导 ===== */
+  .wizard-head{padding:14px 22px 12px;border-bottom:1px solid var(--border);flex:none}
+  .wizard-head h2{font-size:20px;font-weight:600;margin-bottom:12px}
+  .steps-indicator{display:flex;align-items:center;gap:8px}
+  .step-pill{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--text-secondary);cursor:pointer;white-space:nowrap}
+  .step-pill .dot{
+    width:22px;height:22px;border-radius:50%;background:var(--track);color:var(--text-secondary);
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  }
+  .step-pill.active{color:var(--accent-text)}
+  .step-pill.active .dot{background:var(--accent);color:#fff}
+  .step-pill.done{color:var(--success-text)}
+  .step-pill.done .dot{background:var(--success-surface);color:var(--success-text)}
+  .step-line{flex:1;height:1px;background:var(--border-strong);min-width:24px}
+  .wizard-body{flex:1;min-height:0;display:flex}
+  .wizard-foot{
+    flex:none;border-top:1px solid var(--border);padding:10px 22px;
+    display:flex;align-items:center;gap:10px;background:var(--surface-canvas);
+  }
+  .wizard-foot .spacer{flex:1}
+  /* 步骤工作区 */
+  .steps-col{
+    width:300px;flex:none;border-right:1px solid var(--border);padding:14px;
+    display:flex;flex-direction:column;gap:10px;background:var(--surface-subtle);
+  }
+  .steps-col h3{font-size:15px;font-weight:600}
+  .name-banner{
+    font-size:14px;font-weight:600;background:var(--card);border:1px solid var(--border);
+    border-radius:8px;padding:10px 12px;
+  }
+  .step-edit-item{
+    display:flex;gap:8px;align-items:flex-start;border-radius:9px;padding:8px;
+    cursor:pointer;border:1px solid transparent;
+  }
+  .step-edit-item:hover{background:var(--surface-hover)}
+  .step-edit-item.selected{background:var(--accent-surface);border-color:var(--accent-border)}
+  .step-edit-item .grow{flex:1;min-width:0}
+  .step-edit-item .t{font-size:13px;font-weight:600}
+  .step-edit-item .d{font-size:12px;color:var(--text-secondary);margin-top:2px;line-height:1.4}
+  .move-col{display:flex;flex-direction:column;gap:3px}
+  .move-col button{
+    border:0;background:none;color:var(--text-secondary);cursor:pointer;font-size:11px;
+    width:20px;height:16px;border-radius:4px;line-height:1;
+  }
+  .move-col button:hover{background:var(--accent-hover);color:var(--accent-text)}
+  .add-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .add-card{
+    border:1px solid var(--border-strong);background:var(--card);border-radius:9px;
+    padding:10px;cursor:pointer;text-align:left;font-size:12.5px;font-weight:600;color:var(--text-control);
+    display:flex;flex-direction:column;gap:5px;
+  }
+  .add-card:hover{border-color:var(--accent-border);background:var(--accent-hover)}
+  .add-card .ic{font-size:16px;color:var(--accent-text)}
+  /* 步骤卡片编辑区 */
+  .card-editor{flex:1;min-height:0;overflow-y:auto;padding:18px 22px}
+  .step-card{
+    background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;
+  }
+  .step-card-head{
+    display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);
+    background:var(--surface-subtle);
+  }
+  .step-card-head .label{font-size:12px;color:var(--text-secondary);font-weight:600}
+  .step-card-head .title{font-size:15px;font-weight:700;color:var(--accent-text)}
+  .step-card-head .spacer{flex:1}
+  .step-card-body{padding:16px;display:flex;flex-direction:column;gap:12px}
+  .field-label{font-size:13px;font-weight:600;margin-bottom:6px}
+  .field-hint{font-size:12px;color:var(--text-secondary);line-height:1.55}
+  .chord-display{
+    font-size:15px;font-weight:600;background:var(--surface-subtle);border:1px dashed var(--border-strong);
+    border-radius:8px;padding:8px 12px;display:inline-flex;align-items:center;gap:8px;
+  }
+  .app-pick{
+    display:flex;align-items:center;gap:10px;border:1px solid var(--border-strong);
+    border-radius:9px;padding:9px 12px;background:#fff;
+  }
+  .app-pick .app-ic{
+    width:30px;height:30px;border-radius:7px;background:var(--accent-surface);
+    display:flex;align-items:center;justify-content:center;font-size:15px;flex:none;
+  }
+  .app-pick .n{font-size:13px;font-weight:600}
+  .app-pick .s{font-size:12px;color:var(--success-text);display:flex;align-items:center;gap:4px;margin-top:1px}
+  .segmented{display:flex;background:var(--surface-subtle);border:1px solid var(--border);border-radius:8px;padding:3px;gap:3px}
+  .segmented button{
+    flex:1;border:0;background:none;padding:5px 10px;font-size:12.5px;font-weight:600;
+    color:var(--text-secondary);border-radius:6px;cursor:pointer;
+  }
+  .segmented button.on{background:#fff;color:var(--accent-text);box-shadow:0 1px 3px rgba(20,25,40,.12)}
+  .chip-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px}
+  .chip{
+    border:1px solid var(--border-strong);background:var(--surface-control);border-radius:7px;
+    padding:6px 8px;font-size:12px;font-weight:600;color:var(--text-control);cursor:pointer;text-align:center;
+  }
+  .chip:hover{background:var(--surface-hover)}
+  .chip.selected{background:var(--accent-surface);border-color:var(--accent-border);color:var(--accent-text)}
+  .countdown{
+    display:flex;align-items:center;gap:8px;background:var(--warning-surface);color:var(--warning);
+    border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;
+  }
+  .mini-status{font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:5px}
+  .mini-status.ok{color:var(--success-text)}
+  .mini-status.warn{color:var(--warning)}
+  .mini-status.err{color:var(--error-text)}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  .dot.ok{background:var(--dot-success)} .dot.warn{background:var(--dot-warning)} .dot.err{background:var(--dot-error)}
+  /* 测试与保存 */
+  .review-summary{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:6px 16px;margin-bottom:14px}
+  .test-result{font-size:12px;margin-left:auto;flex:none;display:flex;align-items:center;gap:5px;font-weight:600}
+  /* 状态行与说明行 */
+  .status-bar{
+    flex:none;border-top:1px solid var(--border);padding:8px 22px;font-size:12px;color:var(--text-secondary);
+    display:flex;align-items:center;gap:8px;
+  }
+  .info-line{
+    flex:none;border-top:1px solid var(--border);padding:8px 22px;font-size:12px;color:var(--info-text);
+    background:var(--info-surface);display:flex;gap:8px;align-items:flex-start;line-height:1.5;
+  }
+  /* 按键页绑定视图 */
+  .binding-wrap{display:flex;gap:18px}
+  .remote-css{
+    width:120px;height:400px;border-radius:28px;background:linear-gradient(160deg,#4a4d55,#33353b);
+    position:relative;flex:none;box-shadow:inset 0 2px 6px rgba(255,255,255,.25), 0 6px 18px rgba(20,25,40,.25);
+  }
+  .rbtn{position:absolute;border-radius:50%;background:#26272c;border:1px solid rgba(255,255,255,.16);color:#cfd2da;font-size:10px;display:flex;align-items:center;justify-content:center}
+  .rbtn.sel{background:var(--pressed);color:#fff;box-shadow:0 0 0 4px var(--pressed-surface)}
+  .mapping-panel{
+    flex:1;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;
+    max-width:560px;
+  }
+  .mapping-panel h3{font-size:15px;font-weight:700;margin-bottom:2px}
+  .mapping-panel .sub{font-size:12px;color:var(--text-secondary);margin-bottom:12px}
+  .action-group{border-top:1px solid var(--border);padding:10px 0}
+  .action-group h4{font-size:13px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .action-group h4 .new-tag{font-size:11px;background:var(--accent-surface);color:var(--accent-text);border-radius:99px;padding:1px 7px;font-weight:700}
+  .radio-row{display:flex;align-items:center;gap:8px;font-size:13px;padding:6px 8px;border-radius:7px;cursor:pointer}
+  .radio-row:hover{background:var(--surface-hover)}
+  .radio-row input{accent-color:var(--accent)}
+  .radio-row .meta{color:var(--text-secondary);font-size:12px}
+  /* toast */
+  .toast{
+    position:fixed;left:50%;bottom:40px;transform:translateX(-50%) translateY(20px);
+    background:#2a2c33;color:#fff;font-size:13px;padding:9px 16px;border-radius:8px;
+    opacity:0;pointer-events:none;transition:.25s;box-shadow:0 8px 24px rgba(0,0,0,.3);z-index:99;
+  }
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:rgba(120,126,150,.35);border-radius:4px}
+</style>
+</head>
+<body>
+<div class="window">
+  <!-- ============ 侧栏 ============ -->
+  <aside class="sidebar">
+    <nav>
+      <button class="nav-item" data-nav="buttons" onclick="showView('buttons')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="6.8" width="21" height="8.4" rx="1.7"/><path d="M7 10.2h.01M10.4 10.2h.01M13.8 10.2h.01M17.2 10.2h.01M7.6 13.6h8.8"/></svg>
+        <span>按键</span>
+      </button>
+      <button class="nav-item active" data-nav="macros" onclick="showView('library')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.2l9 4.6-9 4.6-9-4.6z"/><path d="M3.6 12.4l8.4 4.3 8.4-4.3"/><path d="M3.6 16.6l8.4 4.3 8.4-4.3"/></svg>
+        <span>组合动作</span>
+      </button>
+      <button class="nav-item" data-nav="connection" onclick="noopNav(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.4 13.2a4.6 4.6 0 0 0 7 .5l2.8-2.8a4.6 4.6 0 1 0-6.5-6.5l-1.6 1.6"/><path d="M13.6 10.8a4.6 4.6 0 0 0-7-.5l-2.8 2.8a4.6 4.6 0 1 0 6.5 6.5l1.6-1.6"/></svg>
+        <span>连接</span>
+      </button>
+      <button class="nav-item" data-nav="permissions" onclick="noopNav(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.8l7.2 2.9v5.4c0 4.7-3.1 7.8-7.2 9.4-4.1-1.6-7.2-4.7-7.2-9.4V5.7z"/></svg>
+        <span>权限</span>
+      </button>
+      <button class="nav-item" data-nav="settings" onclick="noopNav(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <span>设置</span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">1.9.0</div>
+  </aside>
+
+  <main>
+    <!-- ============ 视图 1：库浏览 ============ -->
+    <section id="view-library">
+      <div class="page-head">组合动作</div>
+      <div class="page-body">
+        <div class="lib-pane">
+          <div class="lib-title-row"><span class="lib-title">我的组合动作</span><span class="count-badge">3</span></div>
+          <input class="search-input" placeholder="搜索组合动作">
+          <div class="macro-list" id="macroList"></div>
+          <div class="lib-actions">
+            <button class="btn primary btn-block" onclick="showView('wizard-basic')">＋ 新建</button>
+            <div class="btn-row">
+              <button class="btn" onclick="toast('导入 .json 组合动作文件')">导入</button>
+              <button class="btn" onclick="toast('已导出所选组合动作')">导出</button>
+            </div>
+            <div class="btn-row">
+              <button class="btn" onclick="toast('已创建副本')">复制</button>
+              <button class="btn danger" onclick="toggleDelete()">删除</button>
+            </div>
+          </div>
+        </div>
+        <div class="page-scroll" style="display:flex;flex-direction:column">
+          <div id="detailArea" style="flex:1"></div>
+          <div class="delete-confirm" id="deleteConfirm" style="display:none">
+            删除后，引用此动作的按键和组合动作将显示不可用。
+            <div class="btn-row">
+              <button class="btn" onclick="toggleDelete()">取消</button>
+              <button class="btn danger" style="background:#fff" onclick="toast('组合动作已删除');toggleDelete()">删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="status-bar">●&nbsp;<span id="statusText">组合动作已保存</span></div>
+      <div class="info-line">ⓘ&nbsp;“学习输入框”只负责把光标放到目标 App 的输入位置；组合动作里的快捷键只在这台电脑上生效，换电脑后需要重新录入。</div>
+    </section>
+
+    <!-- ============ 视图 2：向导 · 基本设置 ============ -->
+    <section id="view-wizard-basic" style="display:none">
+      <div class="wizard-head">
+        <h2>新建组合动作</h2>
+        <div class="steps-indicator">
+          <span class="step-pill active" onclick="showView('wizard-basic')"><span class="dot">1</span>基本设置</span><span class="step-line"></span>
+          <span class="step-pill" onclick="showView('wizard-steps')"><span class="dot">2</span>编排步骤</span><span class="step-line"></span>
+          <span class="step-pill" onclick="showView('wizard-review')"><span class="dot">3</span>测试与保存</span>
+        </div>
+      </div>
+      <div class="page-scroll">
+        <div style="max-width:560px;display:flex;flex-direction:column;gap:20px">
+          <div>
+            <div class="field-label">组合动作名称</div>
+            <input class="text-input" placeholder="例如：打开 Codex 并聚焦输入框" value="打开 Codex 并聚焦输入框">
+            <div class="field-hint" style="margin-top:6px">最多 20 个字符。</div>
+          </div>
+          <div>
+            <div class="field-label" style="font-size:15px">选择第一个动作</div>
+            <div class="add-grid" style="margin-top:10px;grid-template-columns:repeat(3,1fr)">
+              <button class="add-card" onclick="pickFirst(this,'打开应用')"><span class="ic">▣</span>打开应用</button>
+              <button class="add-card" onclick="pickFirst(this,'单键或快捷键')"><span class="ic">⌨</span>单键或快捷键</button>
+              <button class="add-card" onclick="pickFirst(this,'聚焦学习过的输入框')"><span class="ic">◎</span>聚焦学习过的输入框</button>
+              <button class="add-card" onclick="pickFirst(this,'等待应用')"><span class="ic">⏳</span>等待应用</button>
+              <button class="add-card" onclick="pickFirst(this,'打开网址')"><span class="ic">🌐</span>打开网址</button>
+              <button class="add-card" onclick="pickFirst(this,'执行已有组合动作')"><span class="ic">▶</span>执行已有组合动作</button>
+            </div>
+            <div class="field-hint" style="margin-top:10px">选择动作后，点击“下一步”配置；名称和步骤在最后一起保存。</div>
+          </div>
+        </div>
+      </div>
+      <div class="wizard-foot">
+        <button class="btn" onclick="showView('library')">取消编辑</button>
+        <span class="spacer"></span>
+        <button class="btn primary" onclick="showView('wizard-steps')">下一步</button>
+      </div>
+    </section>
+
+    <!-- ============ 视图 3：向导 · 编排步骤 ============ -->
+    <section id="view-wizard-steps" style="display:none">
+      <div class="wizard-head">
+        <h2>编辑组合动作</h2>
+        <div class="steps-indicator">
+          <span class="step-pill done" onclick="showView('wizard-basic')"><span class="dot">✓</span>基本设置</span><span class="step-line"></span>
+          <span class="step-pill active" onclick="showView('wizard-steps')"><span class="dot">2</span>编排步骤</span><span class="step-line"></span>
+          <span class="step-pill" onclick="showView('wizard-review')"><span class="dot">3</span>测试与保存</span>
+        </div>
+      </div>
+      <div class="wizard-body">
+        <div class="steps-col">
+          <div class="name-banner">打开 Codex 并聚焦输入框</div>
+          <h3>动作步骤</h3>
+          <div id="stepEditList" style="display:flex;flex-direction:column;gap:4px"></div>
+          <div style="margin-top:auto">
+            <div class="field-label">添加步骤</div>
+            <div class="add-grid" id="addGrid"></div>
+          </div>
+        </div>
+        <div class="card-editor" id="stepCardHost"></div>
+      </div>
+      <div class="wizard-foot">
+        <button class="btn" onclick="showView('library')">取消编辑</button>
+        <span class="spacer"></span>
+        <button class="btn" onclick="showView('wizard-basic')">上一步</button>
+        <button class="btn primary" onclick="showView('wizard-review')">下一步</button>
+      </div>
+    </section>
+
+    <!-- ============ 视图 4：向导 · 测试与保存 ============ -->
+    <section id="view-wizard-review" style="display:none">
+      <div class="wizard-head">
+        <h2>测试与保存</h2>
+        <div class="steps-indicator">
+          <span class="step-pill done" onclick="showView('wizard-basic')"><span class="dot">✓</span>基本设置</span><span class="step-line"></span>
+          <span class="step-pill done" onclick="showView('wizard-steps')"><span class="dot">✓</span>编排步骤</span><span class="step-line"></span>
+          <span class="step-pill active"><span class="dot">3</span>测试与保存</span>
+        </div>
+      </div>
+      <div class="page-scroll">
+        <div class="review-summary" style="display:flex;align-items:center;gap:12px">
+          <div>
+            <div style="font-size:16px;font-weight:700">打开 Codex 并聚焦输入框</div>
+            <div class="field-hint">4 个步骤 · 可先测试，再保存。测试不是保存的必要条件。</div>
+          </div>
+          <span style="flex:1"></span>
+          <button class="btn" onclick="toast('已取消运行')">取消</button>
+          <button class="btn primary" onclick="runMacro(this)">▶ 测试动作</button>
+        </div>
+        <div id="reviewSteps"></div>
+      </div>
+      <div class="wizard-foot">
+        <button class="btn" onclick="showView('library')">取消编辑</button>
+        <span class="spacer"></span>
+        <button class="btn" onclick="showView('wizard-steps')">返回修改</button>
+        <button class="btn primary" onclick="saveMacro(this)">保存修改</button>
+      </div>
+    </section>
+
+    <!-- ============ 视图 5：按键页 · 组合动作绑定 ============ -->
+    <section id="view-buttons" style="display:none">
+      <div class="page-head">按键</div>
+      <div class="page-scroll">
+        <div class="binding-wrap">
+          <div class="remote-css">
+            <div class="rbtn" style="left:14px;top:12px;width:22px;height:22px" title="电源">⏻</div>
+            <div class="rbtn" style="left:84px;top:12px;width:22px;height:22px" title="语音">🎙</div>
+            <div class="rbtn" style="left:48px;top:44px;width:24px;height:24px" title="上">▲</div>
+            <div class="rbtn" style="left:20px;top:76px;width:24px;height:24px" title="左">◀</div>
+            <div class="rbtn" style="left:48px;top:76px;width:24px;height:24px;background:#3c3e45" title="确定">OK</div>
+            <div class="rbtn" style="left:76px;top:76px;width:24px;height:24px" title="右">▶</div>
+            <div class="rbtn" style="left:48px;top:108px;width:24px;height:24px" title="下">▼</div>
+            <div class="rbtn" style="left:20px;top:150px;width:26px;height:26px" title="返回">↩</div>
+            <div class="rbtn sel" style="left:74px;top:150px;width:26px;height:26px" title="主页 · 当前编辑">⌂</div>
+            <div class="rbtn" style="left:20px;top:196px;width:26px;height:26px" title="音量+">＋</div>
+            <div class="rbtn" style="left:74px;top:196px;width:26px;height:26px" title="音量−">－</div>
+            <div class="rbtn" style="left:20px;top:240px;width:26px;height:26px" title="菜单">☰</div>
+            <div class="rbtn" style="left:74px;top:240px;width:26px;height:26px" title="TV">TV</div>
+          </div>
+          <div class="mapping-panel">
+            <h3>主页 · 双击</h3>
+            <div class="sub">先选按键，再设置单击、双击或长按。点“保存”后立即生效。</div>
+            <div class="action-group">
+              <h4>快捷键预设</h4>
+              <div class="chip-grid">
+                <span class="chip">复制</span><span class="chip">粘贴</span><span class="chip">撤销</span><span class="chip">回车</span>
+              </div>
+            </div>
+            <div class="action-group" style="background:var(--accent-surface);border-radius:10px;padding:10px;margin:10px -10px">
+              <h4>组合动作 <span class="new-tag">本次新增</span></h4>
+              <label class="radio-row"><input type="radio" name="act" checked><span>打开 Codex 并聚焦输入框</span><span class="meta">4 个步骤</span></label>
+              <label class="radio-row"><input type="radio" name="act"><span>网页速查</span><span class="meta">2 个步骤</span></label>
+              <label class="radio-row"><input type="radio" name="act"><span>打开网易云并播放</span><span class="meta">3 个步骤 · 本机不可用</span></label>
+            </div>
+            <div class="action-group">
+              <h4>打开应用</h4>
+              <div class="chip-grid"><span class="chip">微信</span><span class="chip">Edge</span><span class="chip">记事本</span></div>
+            </div>
+            <div class="action-group">
+              <h4>自定义快捷键</h4>
+              <button class="btn" onclick="toast('进入快捷键录入')">录入自定义快捷键</button>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:14px">
+              <button class="btn primary" onclick="toast('按键设置已保存并立即生效')">保存</button>
+              <button class="btn" onclick="showView('library')">去“组合动作”页管理</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ===== 演示数据 ===== */
+const MACROS=[
+  {id:0,name:'打开 Codex 并聚焦输入框',steps:[
+    {a:'打开应用',d:'Codex（未运行时会先启动）'},
+    {a:'单键或快捷键',d:'Ctrl + Alt + N'},
+    {a:'聚焦学习过的输入框',d:'Codex · 输入区（已学习）'},
+    {a:'打开网址',d:'https://vokie.com'},
+  ]},
+  {id:1,name:'网页速查',steps:[
+    {a:'打开网址',d:'https://www.bing.com'},
+    {a:'执行已有组合动作',d:'打开 Codex 并聚焦输入框（最新保存版本）'},
+  ]},
+  {id:2,name:'打开网易云并播放',steps:[
+    {a:'打开应用',d:'网易云音乐'},
+    {a:'单键或快捷键',d:'空格（播放 / 暂停）'},
+  ],unavailable:true},
+];
+let selectedMacro=0, selectedStep=0, firstAction=null;
+
+function showView(id){
+  ['library','wizard-basic','wizard-steps','wizard-review','buttons'].forEach(v=>{
+    document.getElementById('view-'+v).style.display = v===id?'':'none';
+  });
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const nav = (id==='buttons')?'buttons':'macros';
+  document.querySelector(`.nav-item[data-nav="${nav}"]`).classList.add('active');
+  if(id==='library') renderLibrary();
+  if(id==='wizard-steps'){ renderStepWorkspace(); }
+  if(id==='wizard-review'){ renderReview(); }
+}
+function noopNav(el){ toast('设计稿仅演示「按键」与「组合动作」两个页面'); }
+function toast(msg){
+  const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),1800);
+}
+
+/* ===== 库视图 ===== */
+function renderLibrary(){
+  const list=document.getElementById('macroList');
+  list.innerHTML=MACROS.map(m=>`
+    <button class="macro-item ${m.id===selectedMacro?'selected':''}" onclick="selectedMacro=${m.id};renderLibrary()">
+      <span class="name">${m.name}</span>
+      <span class="meta">${m.steps.length} 个步骤${m.unavailable?' · <span style="color:var(--error-text)">本机不可用</span>':''}</span>
+    </button>`).join('');
+  const m=MACROS[selectedMacro];
+  document.getElementById('detailArea').innerHTML=`
+    <div class="detail-head">
+      <h2>${m.name}</h2><span class="spacer"></span>
+      <button class="btn" onclick="toast('开始测试运行（演示）')">测试动作</button>
+      <button class="btn primary" onclick="showView('wizard-steps')">编辑</button>
+    </div>
+    ${m.steps.map((s,i)=>`
+      <div class="step-readonly">
+        <div class="step-num">${i+1}</div>
+        <div class="step-body"><div class="t">${s.a}</div><div class="d">${s.d}</div></div>
+      </div>`).join('')}
+    <div class="section-title">使用此动作的位置</div>
+    <div class="usage-row"><span class="tag">按键</span> 主页 · 双击</div>
+    <div class="usage-row"><span class="tag">组合动作</span> 网页速查 · 第 2 步</div>`;
+  document.getElementById('statusText').textContent='组合动作已保存';
+  document.getElementById('deleteConfirm').style.display='none';
+}
+function toggleDelete(){
+  const el=document.getElementById('deleteConfirm');
+  el.style.display = el.style.display==='none'?'':'none';
+}
+
+/* ===== 基本设置视图 ===== */
+function pickFirst(el,name){
+  document.querySelectorAll('#view-wizard-basic .add-card').forEach(c=>c.style.borderColor='');
+  el.style.borderColor='var(--accent-border)';
+  firstAction=name; toast('已选择第一个动作：'+name);
+}
+
+/* ===== 编排步骤视图 ===== */
+const ADD_ACTIONS=['打开应用','单键或快捷键','聚焦学习过的输入框','等待应用','打开网址','执行已有组合动作'];
+function renderStepWorkspace(){
+  const m=MACROS[selectedMacro];
+  document.getElementById('stepEditList').innerHTML=m.steps.map((s,i)=>`
+    <div class="step-edit-item ${i===selectedStep?'selected':''}" onclick="selectedStep=${i};renderStepWorkspace()">
+      <div class="step-num">${i+1}</div>
+      <div class="grow"><div class="t">${s.a}</div><div class="d">${s.d}</div></div>
+      <div class="move-col">
+        <button onclick="event.stopPropagation();moveStep(${i},-1)" ${i===0?'disabled':''}>▲</button>
+        <button onclick="event.stopPropagation();moveStep(${i},1)" ${i===m.steps.length-1?'disabled':''}>▼</button>
+      </div>
+    </div>`).join('');
+  document.getElementById('addGrid').innerHTML=ADD_ACTIONS.map(a=>{
+    const icons={'打开应用':'▣','单键或快捷键':'⌨','聚焦学习过的输入框':'◎','等待应用':'⏳','打开网址':'🌐','执行已有组合动作':'▶'};
+    return `<button class="add-card" onclick="toast('已添加步骤：${a}')"><span class="ic">${icons[a]}</span>${a}</button>`;
+  }).join('');
+  renderStepCard(m.steps[selectedStep]||m.steps[0], selectedStep);
+}
+function moveStep(i,off){
+  const m=MACROS[selectedMacro]; const j=i+off;
+  [m.steps[i],m.steps[j]]=[m.steps[j],m.steps[i]];
+  selectedStep=j; renderStepWorkspace();
+}
+function renderStepCard(s,idx){
+  const host=document.getElementById('stepCardHost');
+  let body='';
+  if(s.a==='单键或快捷键'){
+    body=`
+      <div>
+        <div class="field-label">已录入</div>
+        <div class="chord-display" title="Control + Alt + N">Ctrl + Alt + N <span class="mini-status ok" style="margin-left:8px"><span class="dot ok"></span>已保存</span></div>
+      </div>
+      <div class="btn-row" style="max-width:340px">
+        <button class="btn primary" onclick="toast('请按下一次按键（演示）')">开始录入</button>
+      </div>
+      <div class="field-hint">点击“开始录入”后，只捕获下一次完整的单键或组合键，然后立即停止。如果快捷键已被系统或其他 App 占用，需要先允许无线麦控制键盘。</div>`;
+  }else if(s.a==='打开应用'){
+    body=`
+      <div class="field-label">要使用的 App</div>
+      <div class="app-pick">
+        <div class="app-ic">C</div>
+        <div><div class="n">Codex</div><div class="s"><span class="dot ok"></span>当前可用</div></div>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="toast('展开已安装 App 列表')">更换</button>
+      </div>
+      <div class="field-hint">未运行时会先启动；已运行时直接切换到前台。</div>`;
+  }else if(s.a==='聚焦学习过的输入框'){
+    body=`
+      <div class="field-label">输入框</div>
+      <div class="app-pick">
+        <div class="app-ic">◎</div>
+        <div><div class="n">Codex · 输入区</div><div class="s"><span class="dot ok"></span>已学习</div></div>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="toast('10 秒倒计时，请在目标 App 点击输入框')">重新学习</button>
+        <button class="btn" onclick="toast('测试聚焦（演示）')">测试聚焦</button>
+      </div>
+      <div class="field-hint">点击“重新学习”后倒计时 10 秒；请切换到目标 App 并点击输入框，倒计时结束时自动记录。</div>`;
+  }else if(s.a==='打开网址'){
+    body=`
+      <div class="field-label">网址</div>
+      <input class="text-input" value="https://vokie.com">
+      <div class="field-hint">会用默认浏览器打开。只能打开普通网页，不能打开电脑里的文件或 App 内的特殊页面。</div>`;
+  }else if(s.a==='等待应用'){
+    body=`
+      <div class="field-label">等待到什么时候</div>
+      <div class="segmented" style="max-width:420px">
+        <button class="on">App 已打开</button><button>App 已显示</button><button>App 窗口已出现</button>
+      </div>
+      <div class="field-hint" style="margin-top:8px">最多 5 秒；超时后停止执行并提示。</div>`;
+  }else if(s.a==='执行已有组合动作'){
+    body=`
+      <div class="field-label">选择组合动作</div>
+      <div class="app-pick">
+        <div class="app-ic">▶</div>
+        <div><div class="n">网页速查</div><div class="s"><span class="dot ok"></span>可用</div></div>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="toast('展开候选列表（排除当前动作）')">更换</button>
+      </div>
+      <div class="field-hint">这里会使用所选组合动作最后一次保存的内容。组合动作不能直接或间接执行自己，最多嵌套 8 层。</div>`;
+  }
+  host.innerHTML=`
+    <div class="step-card">
+      <div class="step-card-head">
+        <span class="label">步骤 ${idx+1}</span><span class="title">${s.a}</span><span class="spacer"></span>
+        <button class="btn" onclick="toast('只运行这一步（演示）')">测试这步</button>
+        <button class="icon-btn" title="删除步骤" onclick="toast('已删除步骤（演示）')">🗑</button>
+      </div>
+      <div class="step-card-body">${body}</div>
+    </div>`;
+}
+
+/* ===== 测试与保存视图 ===== */
+const TEST_RESULTS=[
+  {t:'ok',txt:'已完成'},{t:'ok',txt:'已完成'},
+  {t:'warn',txt:'请求已发送，请在目标 App 确认结果'},
+  {t:'',txt:''},
+];
+function renderReview(){
+  const m=MACROS[selectedMacro];
+  document.getElementById('reviewSteps').innerHTML=m.steps.map((s,i)=>{
+    const r=TEST_RESULTS[i]||{t:'',txt:''};
+    const badge=r.txt?`<span class="test-result ${r.t==='ok'?'ok':''}" style="color:${r.t==='ok'?'var(--success-text)':r.t==='warn'?'var(--warning)':'inherit'}"><span class="dot ${r.t}"></span>${r.txt}</span>`:'<span class="test-result" style="color:var(--text-secondary)">未测试</span>';
+    return `<div class="step-readonly">
+      <div class="step-num">${i+1}</div>
+      <div class="step-body" style="flex:1"><div class="t">${s.a}</div><div class="d">${s.d}</div></div>
+      ${badge}
+    </div>`;
+  }).join('');
+}
+function runMacro(btn){
+  btn.textContent='正在运行…'; btn.disabled=true;
+  setTimeout(()=>{btn.textContent='▶ 测试动作';btn.disabled=false;toast('组合动作已执行，但无法确认第三方 App 的结果');},1200);
+}
+function saveMacro(btn){
+  btn.textContent='已保存 ✓'; toast('组合动作已保存');
+  setTimeout(()=>{btn.textContent='保存修改';showView('library');},900);
+}
+
+renderLibrary();
+</script>
+</body>
+</html>

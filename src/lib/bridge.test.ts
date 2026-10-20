@@ -11,12 +11,14 @@ import {
   getOpenWindowAtLaunch,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
+  latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
   openGitHubRepository,
   openLogDirectory,
   openOfficialWebsite,
   openRecommendationsWebsite,
   openVbCableDownloadPage,
+  registerCommonPhraseAvailability,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
   setOpenWindowAtLaunch,
@@ -43,6 +45,18 @@ describe("mouse actions", () => {
   it("summarizes the focus-input action", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
+  });
+});
+
+describe("common phrases action（公开构建兼容与可用性）", () => {
+  it("summarizes the open-common-phrases action with the component availability", () => {
+    // 缺私有组件（公开构建默认）：已保存的绑定不静默替换，标为「当前不可用」。
+    registerCommonPhraseAvailability(false);
+    expect(actionSummary({ type: "open_common_phrases" })).toBe("打开常用语（当前不可用）");
+    registerCommonPhraseAvailability(true);
+    expect(actionSummary({ type: "open_common_phrases" })).toBe("打开常用语");
+    // 复原全局状态，避免污染其他用例（注册是模块级缓存，同预设应用名）。
+    registerCommonPhraseAvailability(false);
   });
 });
 
@@ -345,6 +359,49 @@ describe("推荐页入口（官网页面宿主）", () => {
       ["hide_recommendations"],
       ["open_recommendations_website"],
     ]);
+  });
+});
+
+describe("组合动作：同一条动作只保留最新版本（2026-10-15 现场回归）", () => {
+  const make = (macroId: string, version: string, name: string) => ({
+    schemaVersion: "0.1",
+    macroId,
+    version,
+    name,
+    steps: [
+      {
+        stepId: "step.01",
+        action: "open_application" as const,
+        parameters: { target: "notepad" },
+      },
+    ],
+  });
+
+  it("同 id 多版本只保留最新，顺序按首次出现（编辑后不跳位）", () => {
+    const grouped = latestMacroDefinitions([
+      make("macro.aaaaaaa1", "1.0.0", "旧名字"),
+      make("macro.aaaaaaa1", "1.0.1", "新名字"),
+      make("macro.bbbbbbb2", "1.0.0", "另一个"),
+    ]);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0].name).toBe("新名字");
+    expect(grouped[0].version).toBe("1.0.1");
+    expect(grouped[1].macroId).toBe("macro.bbbbbbb2");
+  });
+
+  it("新版本在前时同样只留最新", () => {
+    const grouped = latestMacroDefinitions([
+      make("macro.aaaaaaa1", "1.0.2", "最新"),
+      make("macro.aaaaaaa1", "1.0.0", "旧"),
+    ]);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0].version).toBe("1.0.2");
+  });
+
+  it("空库与单条原样返回", () => {
+    expect(latestMacroDefinitions([])).toEqual([]);
+    const single = [make("macro.aaaaaaa1", "1.0.0", "唯一")];
+    expect(latestMacroDefinitions(single)).toEqual(single);
   });
 });
 

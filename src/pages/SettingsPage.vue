@@ -550,6 +550,8 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
       </div>
     </section>
 
+    <!-- 「调整常用语」已移到按键页的二级视图（2026-10-17 用户反馈）。 -->
+
     <!-- 首次设置（向导重跑入口）：老用户机器已标记完成，需要入口才能重走一遍。 -->
     <section class="settings-section">
       <h2 class="section-title">首次设置</h2>

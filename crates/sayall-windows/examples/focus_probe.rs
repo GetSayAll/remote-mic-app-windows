@@ -117,6 +117,22 @@ fn main() {
         );
     }
 
+    if let Some(pid) = arg_value("--learn-target").and_then(|value| value.parse::<u32>().ok()) {
+        // 只测「学习采样」本身（不依赖前台）：焦点元素不可用时走光标兜底。
+        match fw::capture_for_process(pid) {
+            Some(target) => println!(
+                "learned_for control_type={} id_chars={} class_chars={} name_chars={} rect={}",
+                target.control_type,
+                target.automation_id.chars().count(),
+                target.class_name.chars().count(),
+                target.name.chars().count(),
+                rect_text(&target.normalized_rect)
+            ),
+            None => println!("learn_for_failed=no_candidate"),
+        }
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--learn") {
         // 「学习输入框」生产组合：3 秒窗口内轮询采样，返回稳定命中的目标。
         use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner};
@@ -139,6 +155,61 @@ fn main() {
                 "learn_failed={reason:?} elapsed_ms={}",
                 started.elapsed().as_millis()
             ),
+        }
+        return;
+    }
+
+    if std::env::args().any(|arg| arg == "--learn-point") {
+        // 「记录点击位置」生产函数：读取物理光标并要求它落在目标窗口内。
+        let target = arg_value("--learn-point").unwrap_or_default();
+        match sayall_windows::app_launcher::learn_focus_point(&target) {
+            Ok(point) => println!(
+                "learned_point x_ratio={:.4} y_ratio={:.4} window={}x{}",
+                point.x_ratio, point.y_ratio, point.window_width, point.window_height
+            ),
+            Err(reason) => println!("learn_point_failed={reason}"),
+        }
+        return;
+    }
+
+    if std::env::args().any(|arg| arg == "--point-click") {
+        // 「按记录位置点击」生产组合：解析坐标 → 移动光标 → 左键单击 → 读回焦点。
+        let target = arg_value("--point-click").unwrap_or_default();
+        let x_ratio: f64 = arg_value("--x-ratio")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.5);
+        let y_ratio: f64 = arg_value("--y-ratio")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.5);
+        let point = sayall_windows::focus::RecordedPoint {
+            x_ratio,
+            y_ratio,
+            window_width: arg_value("--window-width")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1200),
+            window_height: arg_value("--window-height")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(800),
+            // 探针只给比例 ⇒ 模拟旧版本记录（无边距），供对照。
+            ..Default::default()
+        };
+        match sayall_windows::app_launcher::recorded_point_absolute(&target, &point) {
+            Ok((x, y)) => {
+                println!("absolute=({x},{y})");
+                let runtime = sayall_windows::send_input_windows::SendInputRuntime::new();
+                match runtime.move_cursor_and_click(x, y) {
+                    Ok(_) => println!("click_submitted=ok"),
+                    Err(error) => println!("click_submitted=failed error={error}"),
+                }
+            }
+            Err(reason) => println!("point_dispatch_failed={reason}"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if let Some(pid) = fw::foreground_process_id() {
+            println!(
+                "focused_after={}",
+                describe(&fw::capture_focused_target(pid))
+            );
         }
         return;
     }
@@ -167,7 +238,14 @@ fn main() {
         return;
     }
 
-    let choice = if let Some(index) = arg_value("--index").and_then(|value| value.parse().ok()) {
+    let choice = if let Some(class_name) = arg_value("--recorded-class") {
+        // 复现生产档案：按记录时的控件类型 + 类名匹配（用于核对「学习过却聚焦失败」）。
+        FocusChoice::Recorded(RecordedFocusTarget {
+            control_type: arg_value("--recorded-type").unwrap_or_else(|| "Group".to_owned()),
+            class_name,
+            ..Default::default()
+        })
+    } else if let Some(index) = arg_value("--index").and_then(|value| value.parse().ok()) {
         FocusChoice::Index(index)
     } else if std::env::args().any(|arg| arg == "--focus") {
         FocusChoice::BestComposer

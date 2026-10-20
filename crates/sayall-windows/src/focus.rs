@@ -132,6 +132,8 @@ pub enum FocusStrategy {
     AppShortcut,
     /// 打开后聚焦用户记录的输入框。
     RecordedElement,
+    /// 打开后点击用户记录的位置（面向完全不暴露 UIA 的应用，如微信 4.x）。
+    RecordedPoint,
 }
 
 impl FocusStrategy {
@@ -141,7 +143,159 @@ impl FocusStrategy {
             Self::OpenOnly => "open_only",
             Self::AppShortcut => "app_shortcut",
             Self::RecordedElement => "recorded_element",
+            Self::RecordedPoint => "recorded_point",
         }
+    }
+}
+
+/// 用户记录的「点击位置」。
+///
+/// 面向完全不暴露无障碍接口的应用（2026-10-15 实测：微信 4.x 的主窗口与其渲染
+/// 子窗口对 `OBJID_CLIENT` / `UiaRootObjectId` 都返回 0，整棵 UIA 树只有 2 个
+/// Pane）。这类应用只能按位置点击：用户把鼠标停在目标输入框上记录一次，聚焦时
+/// 点一下同一位置。
+///
+/// 同时保存**归一化比例**与**到四边的物理像素距离**：
+/// - 窗口尺寸不变（±2%）时用比例，精确；
+/// - 尺寸变化时按「记录时最近的那条边」对齐（聊天输入框贴底、搜索框贴顶），
+///   而不是死守比例（2026-10-19 现场：WorkBuddy 窗口变高后比例点落到了消息区）；
+/// - 旧记录没有边距，只能按比例 + 25% 容差（超限报 `window_size_changed`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedPoint {
+    pub x_ratio: f64,
+    pub y_ratio: f64,
+    pub window_width: u32,
+    pub window_height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom_offset: Option<u32>,
+}
+
+// 与 `NormalizedRect` 同理：唯一构造入口只接受有限值，因此可以满足 `Eq`。
+impl Eq for RecordedPoint {}
+
+impl RecordedPoint {
+    /// 由窗口矩形与物理光标位置换算；越界或非有限值返回 `None`。
+    pub fn from_cursor(
+        cursor: Option<(f64, f64)>,
+        window: Option<(f64, f64, f64, f64)>,
+    ) -> Option<Self> {
+        let (cx, cy) = cursor?;
+        let (wx, wy, ww, wh) = window?;
+        if !all_finite(&[cx, cy, wx, wy]) || !all_finite_and_positive(&[(ww, wh)]) {
+            return None;
+        }
+        if cx < wx || cy < wy || cx > wx + ww || cy > wy + wh {
+            return None;
+        }
+        Some(Self {
+            x_ratio: (cx - wx) / ww,
+            y_ratio: (cy - wy) / wh,
+            window_width: ww.round().max(1.0) as u32,
+            window_height: wh.round().max(1.0) as u32,
+            left_offset: Some((cx - wx).round().max(0.0) as u32),
+            top_offset: Some((cy - wy).round().max(0.0) as u32),
+            right_offset: Some((wx + ww - cx).round().max(0.0) as u32),
+            bottom_offset: Some((wy + wh - cy).round().max(0.0) as u32),
+        })
+    }
+
+    /// 规范化：比例必须在 0..1 且窗口尺寸合理，否则整条丢弃。
+    pub fn normalized(self) -> Option<Self> {
+        let sane_ratio = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
+        if !sane_ratio(self.x_ratio) || !sane_ratio(self.y_ratio) {
+            return None;
+        }
+        if self.window_width == 0 || self.window_height == 0 {
+            return None;
+        }
+        Some(self)
+    }
+
+    /// 按当前窗口矩形换算成绝对坐标（物理像素）。
+    ///
+    /// - 有边距记录：尺寸变化时按记录时最近的边对齐（不拒绝）；同尺寸时用比例。
+    /// - 无边界记录（旧版本）：保持原来的 25% 容差，超限返回 `None`。
+    pub fn absolute_in(&self, window: (f64, f64, f64, f64)) -> Option<(i32, i32)> {
+        let (wx, wy, ww, wh) = window;
+        if !all_finite(&[wx, wy]) || !all_finite_and_positive(&[(ww, wh)]) {
+            return None;
+        }
+        let recorded_w = f64::from(self.window_width);
+        let recorded_h = f64::from(self.window_height);
+        let relative_delta =
+            |current: f64, recorded: f64| (current - recorded).abs() / recorded.max(1.0);
+        let size_close =
+            relative_delta(ww, recorded_w) <= 0.02 && relative_delta(wh, recorded_h) <= 0.02;
+
+        if size_close {
+            let x = wx + self.x_ratio * ww;
+            let y = wy + self.y_ratio * wh;
+            return Some((x.round() as i32, y.round() as i32));
+        }
+
+        if let (Some(left), Some(right), Some(top), Some(bottom)) = (
+            self.left_offset,
+            self.right_offset,
+            self.top_offset,
+            self.bottom_offset,
+        ) {
+            // 每条轴独立判断：只有「记录时确实靠边」的轴才锚定该边，否则保留比例。
+            // 贴底输入框靠底边锚定；居中控件（左右都不靠边）保留比例，否则窗口
+            // 变宽后按左边缘平移会点到控件外面（2026-10-19 WorkBuddy 现场：
+            // 窗口 1636→2063，按左边缘锚定后点击落在输入框左侧）。
+            const EDGE_NEAR_RATIO: f64 = 0.2;
+            let left_ratio = f64::from(left) / recorded_w.max(1.0);
+            let right_ratio = f64::from(right) / recorded_w.max(1.0);
+            let top_ratio = f64::from(top) / recorded_h.max(1.0);
+            let bottom_ratio = f64::from(bottom) / recorded_h.max(1.0);
+            let x = if left_ratio <= EDGE_NEAR_RATIO && right_ratio > EDGE_NEAR_RATIO {
+                wx + f64::from(left)
+            } else if right_ratio <= EDGE_NEAR_RATIO && left_ratio > EDGE_NEAR_RATIO {
+                wx + ww - f64::from(right)
+            } else if left_ratio <= EDGE_NEAR_RATIO && right_ratio <= EDGE_NEAR_RATIO {
+                // 两侧都靠边（控件几乎占满窗口宽度）：取更近的一条。
+                if left <= right {
+                    wx + f64::from(left)
+                } else {
+                    wx + ww - f64::from(right)
+                }
+            } else {
+                wx + self.x_ratio * ww
+            };
+            let y = if top_ratio <= EDGE_NEAR_RATIO && bottom_ratio > EDGE_NEAR_RATIO {
+                wy + f64::from(top)
+            } else if bottom_ratio <= EDGE_NEAR_RATIO && top_ratio > EDGE_NEAR_RATIO {
+                wy + wh - f64::from(bottom)
+            } else if top_ratio <= EDGE_NEAR_RATIO && bottom_ratio <= EDGE_NEAR_RATIO {
+                if top <= bottom {
+                    wy + f64::from(top)
+                } else {
+                    wy + wh - f64::from(bottom)
+                }
+            } else {
+                wy + self.y_ratio * wh
+            };
+            let clamp = |value: f64, origin: f64, size: f64| {
+                value.max(origin + 1.0).min(origin + size - 1.0)
+            };
+            let x = clamp(x, wx, ww);
+            let y = clamp(y, wy, wh);
+            return Some((x.round() as i32, y.round() as i32));
+        }
+
+        if relative_delta(ww, recorded_w) > 0.25 || relative_delta(wh, recorded_h) > 0.25 {
+            return None;
+        }
+        let x = wx + self.x_ratio * ww;
+        let y = wy + self.y_ratio * wh;
+        Some((x.round() as i32, y.round() as i32))
     }
 }
 
@@ -208,7 +362,7 @@ fn clamp_chars(value: &str, limit: usize) -> String {
 /// 用户点「开始学习输入框」后有 [`LEARN_WINDOW`] 的时间去点目标应用的输入框；
 /// 采样间隔 [`LEARN_POLL_INTERVAL`]，同一候选需连续 [`LEARN_STABLE_SAMPLES`] 次
 /// 采样一致才认账（避免把扫过或中途闪现的元素记下来）。
-pub const LEARN_WINDOW: std::time::Duration = std::time::Duration::from_millis(3000);
+pub const LEARN_WINDOW: std::time::Duration = std::time::Duration::from_millis(6000);
 pub const LEARN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 pub const LEARN_STABLE_SAMPLES: usize = 2;
 
@@ -281,17 +435,21 @@ impl RecordedFocusTarget {
             return None;
         }
         // 至少一个可比对特征，否则这份记录无法用于重新定位。
+        // 例外：匿名输入框（WorkBuddy 实测：Edit 没有 automationId / className / name）
+        // 允许用矩形作为唯一锚点——否则「点哪记哪」的字面兜底也记不下来。
         if self.automation_id.is_empty()
             && self.class_name.is_empty()
             && self.name.is_empty()
             && self.window_title.is_empty()
+            && self.normalized_rect.is_none()
         {
             return None;
         }
-        // 敏感与排除词只看控件语义（不含窗口标题——标题可能是用户文档名，
-        // 误判会把正常记录整条丢掉）。
+        // 敏感词只看控件语义（不含窗口标题——标题可能是用户文档名，误判会把正常记录
+        // 整条丢掉）。**排除词不在此列**：用户主动点击的元素就是他要的目标
+        // （例如 Chrome 地址栏），排除词只在自动选择路径（`passes_hard_gate`）生效。
         let semantic = self.semantic_text();
-        if contains_sensitive_term(&semantic) || contains_excluded_term(&semantic) {
+        if contains_sensitive_term(&semantic) {
             return None;
         }
         Some(self)
@@ -320,34 +478,49 @@ pub struct AppFocusProfile {
     pub shortcut: Option<KeyChord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded: Option<RecordedFocusTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<RecordedPoint>,
 }
 
 impl AppFocusProfile {
-    /// 规范化：字段与策略必须自洽，否则整条返回 `None`（调用方丢弃并记日志）。
-    pub fn normalized(mut self) -> Option<Self> {
+    /// 规范化：字段与策略保持自洽。
+    ///
+    /// **策略本身永远保留**，只清掉与策略不符或无效的载荷（2026-10-15 现场：
+    /// 用户点了「用应用快捷键聚焦 / 聚焦已记录的输入框 / 记录点击位置」但还没录入
+    /// 数据时，早前实现把整条档案丢弃，保存回读后选中态退回「只打开应用」、
+    /// 「测试打开与聚焦」一直禁用——表现就是"这几个按钮点不动"）。
+    /// 载荷缺失改由执行期给出明确原因（未录入快捷键 / 还没有学习过输入框 /
+    /// 还没有记录点击位置）。
+    pub fn normalized(mut self) -> Self {
         match self.strategy {
             FocusStrategy::OpenOnly => {
                 self.shortcut = None;
                 self.recorded = None;
-                Some(self)
+                self.point = None;
             }
             FocusStrategy::AppShortcut => {
                 self.recorded = None;
+                self.point = None;
                 let has_keys = self
                     .shortcut
                     .as_ref()
                     .is_some_and(|chord| !chord.keys.is_empty());
                 if !has_keys {
-                    return None;
+                    self.shortcut = None;
                 }
-                Some(self)
             }
             FocusStrategy::RecordedElement => {
                 self.shortcut = None;
-                self.recorded = Some(self.recorded.and_then(|target| target.normalized())?);
-                Some(self)
+                self.point = None;
+                self.recorded = self.recorded.and_then(|target| target.normalized());
+            }
+            FocusStrategy::RecordedPoint => {
+                self.shortcut = None;
+                self.recorded = None;
+                self.point = self.point.and_then(|point| point.normalized());
             }
         }
+        self
     }
 }
 
@@ -400,8 +573,28 @@ impl FocusCandidate {
             .any(|hint| semantic.contains(hint))
     }
 
-    /// 硬门槛：可用、可聚焦、非密码框、非只读、语义不含敏感/排除词，且属于文本输入类、
-    /// 带文本模式或带编辑器语义（三者之一）。
+    /// 学习门槛：**用户主动指定**的元素（「学习输入框」采到的焦点）要按这个判。
+    ///
+    /// 与 [`Self::passes_hard_gate`] 的差别只剩敏感词/排除词：密码、真实敏感控件
+    /// 仍被拒绝；但「地址栏、命令面板、代码编辑器」这类**排除词**不再参与判定——
+    /// 用户主动点在 Chrome 地址栏上就是明确意图（2026-10-15 现场：按地址栏学习
+    /// 报 no_candidate，用户以为功能坏了）。
+    pub fn passes_learning_gate(&self) -> bool {
+        if !self.enabled || !self.keyboard_focusable || self.is_password {
+            return false;
+        }
+        if self.read_only == Some(true) {
+            return false;
+        }
+        let semantic = self.semantic_text();
+        if contains_sensitive_term(&semantic) {
+            return false;
+        }
+        self.is_text_control() || self.has_text_pattern || self.has_editor_semantics()
+    }
+
+    /// 硬门槛（自动选择用）：可用、可聚焦、非密码框、非只读、语义不含敏感/排除词，
+    /// 且属于文本输入类、带文本模式或带编辑器语义（三者之一）。
     ///
     /// `read_only == Some(true)` 直接拒绝：Chromium 会把网页根节点暴露成
     /// `Document` 且标 `IsReadOnly=true`（实测），聚焦它既不能输入也会抢走真正的
@@ -536,11 +729,14 @@ fn tokenize(value: &str) -> Vec<String> {
 }
 
 /// 已记录目标的匹配打分；不合格返回 `None`。
+///
+/// 门槛用 [`FocusCandidate::passes_learning_gate`]：记录来自用户主动点击，
+/// 排除词（地址栏等）不参与判定——否则「按地址栏学习成功、聚焦时又被拒绝」。
 pub fn recorded_candidate_score(
     candidate: &FocusCandidate,
     target: &RecordedFocusTarget,
 ) -> Option<i32> {
-    if !candidate.passes_hard_gate() || candidate.control_type != target.control_type {
+    if !candidate.passes_learning_gate() || candidate.control_type != target.control_type {
         return None;
     }
 
@@ -555,7 +751,10 @@ pub fn recorded_candidate_score(
         strong_matches += 1;
     }
     if semantic_values_match(&candidate.class_name, &target.class_name) {
-        score += 140;
+        // 类名单独命中就达到阈值：DimAgent 的 TipTap 编辑器只有这一条稳定特征
+        // （无 automationId / name / 矩形），140 分会被 180 门槛挡掉，
+        // 表现为"学习过却永远聚焦失败"（2026-10-19 现场）。
+        score += 180;
         strong_matches += 1;
     }
     if semantic_values_match(&candidate.window_title, &target.window_title) {
@@ -568,6 +767,7 @@ pub fn recorded_candidate_score(
         strong_matches += 1;
     }
 
+    let mut rect_close = false;
     if let (Some(candidate_rect), Some(target_rect)) =
         (candidate.normalized_rect, target.normalized_rect)
     {
@@ -576,9 +776,19 @@ pub fn recorded_candidate_score(
             + (candidate_rect.width - target_rect.width).abs()
             + (candidate_rect.height - target_rect.height).abs();
         score += (120.0 - distance * 120.0).max(0.0).round() as i32;
+        // 归一化坐标的曼哈顿距离 ≤ 0.05（约窗口的 5%）视为几何命中。
+        rect_close = distance <= 0.05;
     }
 
+    // 没有语义特征时（匿名 Edit），只有矩形几乎重合才认账。
+    let rect_only = target.automation_id.is_empty()
+        && target.class_name.is_empty()
+        && target.name.is_empty()
+        && target.window_title.is_empty();
     if strong_matches == 0 {
+        if rect_only && rect_close {
+            return Some(score);
+        }
         return None;
     }
     (score >= RECORDED_SCORE_THRESHOLD).then_some(score)
@@ -633,25 +843,16 @@ impl FocusRequestGate {
     }
 }
 
-/// 规范化整份聚焦档案表：丢弃非法条目，并把条数压到上限内。
+/// 规范化整份聚焦档案表：把每条档案清成自洽形态，并把条数压到上限内。
 ///
-/// 返回被丢弃的键（供调用方记日志，便于用户排查「为什么设置没保存」）。
+/// 返回被丢弃的键（只可能是超出条数上限的条目；策略本身永远保留，见
+/// [`AppFocusProfile::normalized`]）。
 pub fn normalize_focus_profiles(profiles: &mut BTreeMap<String, AppFocusProfile>) -> Vec<String> {
     let mut dropped = Vec::new();
     let keys: Vec<String> = profiles.keys().cloned().collect();
     for key in keys {
-        let normalized = profiles
-            .get(&key)
-            .cloned()
-            .and_then(AppFocusProfile::normalized);
-        match normalized {
-            Some(profile) => {
-                profiles.insert(key, profile);
-            }
-            None => {
-                profiles.remove(&key);
-                dropped.push(key);
-            }
+        if let Some(profile) = profiles.get(&key).cloned() {
+            profiles.insert(key, profile.normalized());
         }
     }
     while profiles.len() > MAX_FOCUS_PROFILES {
@@ -714,20 +915,24 @@ mod tests {
     }
 
     #[test]
-    fn profile_requires_fields_matching_its_strategy() {
-        // app_shortcut 没给快捷键 → 整条丢弃
+    fn profile_clears_payload_that_does_not_match_its_strategy() {
+        // app_shortcut 没给快捷键 → 策略保留，载荷清空（执行期报"未录入快捷键"）
         let invalid = AppFocusProfile {
             strategy: FocusStrategy::AppShortcut,
             ..Default::default()
-        };
-        assert!(invalid.normalized().is_none());
+        }
+        .normalized();
+        assert_eq!(invalid.strategy, FocusStrategy::AppShortcut);
+        assert!(invalid.shortcut.is_none());
 
-        // recorded_element 没给记录 → 整条丢弃
+        // recorded_element 没给记录 → 同样保留策略
         let invalid = AppFocusProfile {
             strategy: FocusStrategy::RecordedElement,
             ..Default::default()
-        };
-        assert!(invalid.normalized().is_none());
+        }
+        .normalized();
+        assert_eq!(invalid.strategy, FocusStrategy::RecordedElement);
+        assert!(invalid.recorded.is_none());
 
         // open_only 永远可用（忽略附带字段）
         let open = AppFocusProfile {
@@ -736,11 +941,11 @@ mod tests {
                 keys: vec![crate::send_input::KeyCode::RightAlt],
             }),
             ..Default::default()
-        };
-        let normalized = open.normalized().unwrap();
-        assert_eq!(normalized.strategy, FocusStrategy::OpenOnly);
-        assert!(normalized.shortcut.is_none());
-        assert!(normalized.recorded.is_none());
+        }
+        .normalized();
+        assert_eq!(open.strategy, FocusStrategy::OpenOnly);
+        assert!(open.shortcut.is_none());
+        assert!(open.recorded.is_none());
     }
 
     #[test]
@@ -761,11 +966,11 @@ mod tests {
             strategy: FocusStrategy::RecordedElement,
             shortcut: None,
             recorded: Some(target),
+            point: None,
         }
-        .normalized()
-        .expect("合法记录必须保留");
+        .normalized();
 
-        let recorded = profile.recorded.unwrap();
+        let recorded = profile.recorded.expect("合法记录必须保留");
         assert!(recorded.automation_id.chars().count() <= MAX_SEMANTIC_LEN);
         assert!(recorded.class_name.chars().count() <= MAX_SEMANTIC_LEN);
         assert!(recorded.name.chars().count() <= MAX_SEMANTIC_LEN);
@@ -778,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_target_without_any_anchor_is_rejected() {
+    fn recorded_target_without_any_anchor_keeps_strategy_but_drops_payload() {
         let empty = RecordedFocusTarget {
             control_type: "Edit".to_owned(),
             ..Default::default()
@@ -787,13 +992,19 @@ mod tests {
             strategy: FocusStrategy::RecordedElement,
             shortcut: None,
             recorded: Some(empty),
-        };
-        assert!(profile.normalized().is_none());
+            point: None,
+        }
+        .normalized();
+        // 策略必须保留（否则 UI 选中态会被回读打回「只打开应用」），
+        // 无效载荷清空，执行期报「还没有学习过输入框」。
+        assert_eq!(profile.strategy, FocusStrategy::RecordedElement);
+        assert!(profile.recorded.is_none());
     }
 
     #[test]
-    fn recorded_target_rejects_sensitive_or_excluded_semantics() {
-        for semantic in ["Password", "密码输入框", "API Key", "地址栏"] {
+    fn recorded_target_rejects_sensitive_semantics_but_allows_excluded_ones() {
+        // 敏感语义仍然拒绝：密码框、令牌这类控件永远不能成为录制目标。
+        for semantic in ["Password", "密码输入框", "API Key"] {
             let target = RecordedFocusTarget {
                 control_type: "Edit".to_owned(),
                 automation_id: semantic.to_owned(),
@@ -803,11 +1014,54 @@ mod tests {
                 strategy: FocusStrategy::RecordedElement,
                 shortcut: None,
                 recorded: Some(target),
-            };
+                point: None,
+            }
+            .normalized();
+            assert_eq!(profile.strategy, FocusStrategy::RecordedElement);
             assert!(
-                profile.normalized().is_none(),
-                "含「{semantic}」的记录必须被拒绝"
+                profile.recorded.is_none(),
+                "含「{semantic}」的记录必须被丢弃"
             );
+        }
+
+        // 排除词不再拒绝（2026-10-15 用户现场：在 Chrome 地址栏上学习必须能记住）。
+        let address_bar = RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            automation_id: "view_1012".to_owned(),
+            name: "地址和搜索栏".to_owned(),
+            ..Default::default()
+        };
+        let normalized = AppFocusProfile {
+            strategy: FocusStrategy::RecordedElement,
+            shortcut: None,
+            recorded: Some(address_bar),
+            point: None,
+        }
+        .normalized();
+        assert_eq!(
+            normalized.recorded.map(|target| target.name),
+            Some("地址和搜索栏".to_owned())
+        );
+    }
+
+    #[test]
+    fn selecting_a_strategy_without_payload_is_persisted() {
+        // 2026-10-15 现场（"这几个按钮点不动"）：选中策略但还没录数据时，
+        // 早前实现整条丢弃 ⇒ 保存回读后选中态退回「只打开应用」、测试按钮一直禁用。
+        for strategy in [
+            FocusStrategy::AppShortcut,
+            FocusStrategy::RecordedElement,
+            FocusStrategy::RecordedPoint,
+        ] {
+            let profile = AppFocusProfile {
+                strategy,
+                ..Default::default()
+            }
+            .normalized();
+            assert_eq!(profile.strategy, strategy, "策略必须原样保留");
+            assert!(profile.shortcut.is_none());
+            assert!(profile.recorded.is_none());
+            assert!(profile.point.is_none());
         }
     }
 
@@ -881,6 +1135,230 @@ mod tests {
         let mut writable = candidate("Document", "RootWebArea");
         writable.read_only = Some(false);
         assert!(writable.passes_hard_gate());
+    }
+
+    #[test]
+    fn learning_gate_accepts_address_bar_that_hard_gate_excludes() {
+        // 真实样本（2026-10-15 Chrome 现场）：omnibox 的 name 是「地址和搜索栏」，
+        // 用户主动点击学习时必须可记录——否则用户看到的是"学不会"。
+        let omnibox = FocusCandidate {
+            name: "地址和搜索栏".to_owned(),
+            class_name: "OmniboxViewViews".to_owned(),
+            ..candidate("Edit", "view_1012")
+        };
+        assert!(!omnibox.passes_hard_gate(), "自动选择仍不得选地址栏");
+        assert!(omnibox.passes_learning_gate(), "用户主动点击时必须可记录");
+
+        // 敏感/不可用控件在学习路径同样拒绝
+        let mut secret = omnibox.clone();
+        secret.is_password = true;
+        assert!(!secret.passes_learning_gate());
+
+        let mut sensitive = omnibox.clone();
+        sensitive.name = "手机令牌".to_owned();
+        assert!(!sensitive.passes_learning_gate());
+
+        let mut read_only = omnibox.clone();
+        read_only.read_only = Some(true);
+        assert!(!read_only.passes_learning_gate());
+
+        // 记录的地址栏在聚焦时也必须能重新命中（否则记录成功、聚焦仍失败）
+        let target = RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            automation_id: "view_1012".to_owned(),
+            name: "地址和搜索栏".to_owned(),
+            ..Default::default()
+        }
+        .normalized()
+        .expect("排除词不再阻止记录");
+        assert!(recorded_candidate_score(&omnibox, &target).is_some());
+    }
+
+    #[test]
+    fn recorded_point_normalizes_and_anchors_to_nearest_edge() {
+        // 光标 (600, 400) 落在窗口 (0, 0, 1200, 800) 中央。
+        let point =
+            RecordedPoint::from_cursor(Some((600.0, 400.0)), Some((0.0, 0.0, 1200.0, 800.0)))
+                .expect("窗口内光标应可记录");
+        assert!((point.x_ratio - 0.5).abs() < 1e-9);
+        assert!((point.y_ratio - 0.5).abs() < 1e-9);
+        assert_eq!(point.window_width, 1200);
+        assert_eq!(point.left_offset, Some(600));
+        assert_eq!(point.top_offset, Some(400));
+
+        // 同一窗口尺寸下换算回原坐标
+        assert_eq!(
+            point.absolute_in((0.0, 0.0, 1200.0, 800.0)),
+            Some((600, 400))
+        );
+
+        // 窗口变大 10%：居中点两侧都不靠边 ⇒ 保持比例（100px→110px）。
+        assert_eq!(
+            point.absolute_in((0.0, 0.0, 1320.0, 880.0)),
+            Some((660, 440))
+        );
+
+        // 窗口尺寸变化很大：仍能按边距换算（不再直接拒绝；旧记录没有边距才会拒绝）。
+        let moved = point.absolute_in((0.0, 0.0, 1600.0, 800.0));
+        assert!(moved.is_some(), "有边距记录不再因尺寸变化整体拒绝");
+
+        // 贴底输入框（截图里 WorkBuddy 的场景）：窗口变高后仍贴底。
+        let bottom =
+            RecordedPoint::from_cursor(Some((600.0, 740.0)), Some((0.0, 0.0, 1200.0, 800.0)))
+                .expect("窗口内光标应可记录");
+        assert_eq!(bottom.bottom_offset, Some(60));
+        assert_eq!(
+            bottom.absolute_in((0.0, 0.0, 1200.0, 1000.0)),
+            Some((600, 940)),
+            "窗口变高 200px 后应保持距底 60px"
+        );
+
+        // WorkBuddy 2026-10-19：窗口 1636×1281、光标 (618,1064)（距左 37.8%，距底 16.9%）。
+        // 窗口放大到 2063×1701 后：x 居中不靠边 ⇒ 保持比例；y 靠底 ⇒ 锚定底边。
+        let workbuddy = RecordedPoint::from_cursor(
+            Some((1726.0 + 618.0, 665.0 + 1064.0)),
+            Some((1726.0, 665.0, 1636.0, 1281.0)),
+        )
+        .expect("窗口内光标应可记录");
+        assert_eq!(
+            workbuddy.absolute_in((78.0, 209.0, 2063.0, 1701.0)),
+            Some((857, 1693)),
+            "居中轴保持比例、贴底轴锚定底边"
+        );
+
+        // 旧版本记录（没有边距）仍按比例 + 25% 容差：超限拒绝。
+        let legacy = RecordedPoint {
+            left_offset: None,
+            top_offset: None,
+            right_offset: None,
+            bottom_offset: None,
+            ..point
+        };
+        assert_eq!(legacy.absolute_in((0.0, 0.0, 1600.0, 800.0)), None);
+
+        // 光标在窗口外 / 坐标为退化值：拒绝
+        assert!(
+            RecordedPoint::from_cursor(Some((1300.0, 400.0)), Some((0.0, 0.0, 1200.0, 800.0)))
+                .is_none()
+        );
+        assert!(
+            RecordedPoint::from_cursor(Some((100.0, 100.0)), Some((0.0, 0.0, 0.0, 800.0)))
+                .is_none()
+        );
+        assert!(RecordedPoint::from_cursor(None, Some((0.0, 0.0, 1200.0, 800.0))).is_none());
+    }
+
+    #[test]
+    fn recorded_point_profile_requires_point_and_clears_other_fields() {
+        let mut profile = AppFocusProfile {
+            strategy: FocusStrategy::RecordedPoint,
+            point: Some(RecordedPoint {
+                x_ratio: 0.5,
+                y_ratio: 0.9,
+                window_width: 1200,
+                window_height: 800,
+                ..Default::default()
+            }),
+            recorded: Some(RecordedFocusTarget {
+                control_type: "Edit".to_owned(),
+                automation_id: "stale".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let normalized = profile.clone().normalized();
+        assert!(normalized.recorded.is_none(), "非当前策略的字段应被清空");
+        assert!(normalized.shortcut.is_none());
+        assert!(normalized.point.is_some(), "当前策略的载荷必须保留");
+
+        // 缺 point：策略保留、载荷为空（执行期报"还没有记录点击位置"）
+        profile.point = None;
+        let normalized = profile.clone().normalized();
+        assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
+        assert!(normalized.point.is_none());
+
+        // 越界比例同样清空载荷
+        profile.point = Some(RecordedPoint {
+            x_ratio: 1.5,
+            y_ratio: 0.9,
+            window_width: 1200,
+            window_height: 800,
+            ..Default::default()
+        });
+        let normalized = profile.normalized();
+        assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
+        assert!(normalized.point.is_none());
+    }
+
+    #[test]
+    fn anonymous_edit_can_be_matched_by_rect_only() {
+        // WorkBuddy 实测（2026-10-19）：输入框是 Edit，没有 automationId / className / name，
+        // 只能靠矩形锚点；学习（光标兜底）与聚焦（recorded 匹配）都必须认这条记录。
+        let rect = NormalizedRect {
+            x: 0.314,
+            y: 0.817,
+            width: 0.541,
+            height: 0.075,
+        };
+        let target = RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            normalized_rect: Some(rect),
+            ..Default::default()
+        }
+        .normalized()
+        .expect("匿名 Edit 有矩形锚点即可记录");
+
+        let candidate = FocusCandidate {
+            normalized_rect: Some(rect),
+            enabled: true,
+            keyboard_focusable: true,
+            has_text_pattern: true,
+            ..candidate("Edit", "")
+        };
+        assert!(
+            recorded_candidate_score(&candidate, &target).is_some(),
+            "矩形重合必须能重新命中"
+        );
+
+        // 矩形明显不同（距离 > 5%）：不认，避免点错控件。
+        let far = FocusCandidate {
+            normalized_rect: Some(NormalizedRect {
+                x: 0.05,
+                y: 0.05,
+                width: 0.2,
+                height: 0.1,
+            }),
+            ..candidate.clone()
+        };
+        assert!(recorded_candidate_score(&far, &target).is_none());
+    }
+
+    #[test]
+    fn recorded_class_name_alone_reaches_threshold() {
+        // 2026-10-19 现场：DimAgent 的聚焦档案只有 control_type=Group + class_name，
+        // 没有 automationId / name / 矩形。类名 140 分时永远低于 180 门槛，
+        // 「学习过」的输入框每次聚焦都报 no_candidate（表现为超时）。
+        let class_name = "tiptap ProseMirror outline-none ProseMirror-focused";
+        let editor = FocusCandidate {
+            class_name: class_name.to_owned(),
+            focused: true,
+            has_text_pattern: true,
+            keyboard_focusable: true,
+            ..candidate("Group", "")
+        };
+        let target = RecordedFocusTarget {
+            control_type: "Group".to_owned(),
+            class_name: class_name.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(recorded_candidate_score(&editor, &target), Some(180));
+        assert_eq!(best_recorded_index(&[editor.clone()], &target), Some(0));
+
+        // 同类名控件并列时分差为 0，仍然拒绝，避免点错。
+        assert_eq!(
+            best_recorded_index(&[editor.clone(), editor], &target),
+            None
+        );
     }
 
     #[test]
@@ -1052,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_profile_map_drops_invalid_entries_and_caps_size() {
+    fn focus_profile_map_keeps_every_strategy_and_caps_size() {
         let mut profiles: BTreeMap<String, AppFocusProfile> = BTreeMap::new();
         profiles.insert(
             "wechat".to_owned(),
@@ -1063,10 +1541,14 @@ mod tests {
         );
         profiles.insert("notepad".to_owned(), AppFocusProfile::default());
 
+        // 策略已选但还没录数据：必须保留（否则保存回读会把 UI 选中态打回默认）。
         let dropped = normalize_focus_profiles(&mut profiles);
-        assert_eq!(dropped, vec!["wechat".to_owned()]);
-        assert_eq!(profiles.len(), 1);
-        assert!(profiles.contains_key("notepad"));
+        assert!(dropped.is_empty(), "不得按「载荷缺失」丢弃整条档案");
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles.get("wechat").map(|profile| profile.strategy),
+            Some(FocusStrategy::AppShortcut)
+        );
 
         let mut many: BTreeMap<String, AppFocusProfile> = BTreeMap::new();
         for index in 0..(MAX_FOCUS_PROFILES + 5) {
