@@ -495,6 +495,11 @@ pub enum ButtonAction {
         #[serde(default)]
         macro_version: String,
     },
+    /// 打开常用语面板（对标 macOS 的 `openCommonPhrases`）。
+    ///
+    /// 面板是**短时窗口**：方向键与 OK 在面板打开期间由面板即时认领（按下即插入，
+    /// 不等手势判定），返回键关闭面板。未绑定该动作时不改变任何按键行为。
+    OpenCommonPhrases,
 }
 
 impl ButtonAction {
@@ -513,8 +518,9 @@ impl ButtonAction {
             | Self::OpenApp { .. }
             | Self::FocusInput
             | Self::MouseClick { .. }
-            // 组合动作不可连发（对齐 Mac：绑定组合动作即禁用连发）。
-            | Self::RunMacro { .. } => false,
+            // 组合动作与常用语面板都不可连发。
+            | Self::RunMacro { .. }
+            | Self::OpenCommonPhrases => false,
             Self::Scroll { .. } | Self::MouseMove { .. } => true,
             Self::Shortcut { chord } => {
                 matches!(chord.keys.as_slice(), [key] if !key.is_modifier())

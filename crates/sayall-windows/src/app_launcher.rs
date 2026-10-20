@@ -30,6 +30,12 @@ pub struct PresetApp {
     /// 开始菜单快捷方式名（不含 .lnk）：覆盖自定义安装目录的兜底探测，
     /// 命中且解析出的目标 exe 属于 `exe_names` 才算已安装。
     pub shortcut_names: &'static [&'static str],
+    /// 托盘隐藏且托盘图标路线未生效时，是否按应用入口重新拉起（让单实例应用
+    /// 自己把已有窗口恢复出来）。微信 4.x 实测反例：已运行时再次启动**不会**
+    /// 恢复主窗口，而是新起第二个实例并弹出 295×387 的"进入微信"登录/入口
+    /// 小窗——用户看到的就是"又打开一个登录界面"（2026-10-03、2026-10-18
+    /// 两次真机实证）→ 置 `false` 跳过该步，直接定点显示已知主窗口。
+    pub relaunch_when_hidden: bool,
 }
 
 /// 预设应用表（对齐 Mac 预设 + Windows 常见项）。无线麦自身排首位
@@ -45,6 +51,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["sayall-windows-app.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "wechat",
@@ -55,6 +62,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%ProgramFiles(x86)%\\Tencent\\WeChat\\WeChat.exe",
         ],
         shortcut_names: &["微信", "WeChat"],
+        relaunch_when_hidden: false,
     },
     PresetApp {
         id: "edge",
@@ -62,6 +70,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["msedge.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "chrome",
@@ -69,6 +78,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["chrome.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "notepad",
@@ -76,6 +86,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["notepad.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "calc",
@@ -83,6 +94,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["calc.exe", "CalculatorApp.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "explorer",
@@ -90,6 +102,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["explorer.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "netease_music",
@@ -97,6 +110,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["cloudmusic.exe"],
         install_paths: &[],
         shortcut_names: &[],
+        relaunch_when_hidden: true,
     },
     // 2026-10-02 扩充：这些应用常装在自定义目录（如 D:\Apps\vokie），
     // App Paths 与 System32 探测覆盖不到，必须走候选路径/开始菜单兜底。
@@ -106,6 +120,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         exe_names: &["Vokie.exe"],
         install_paths: &["%LOCALAPPDATA%\\Programs\\Vokie\\Vokie.exe"],
         shortcut_names: &["Vokie"],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "vscode",
@@ -116,6 +131,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%ProgramFiles%\\Microsoft VS Code\\Code.exe",
         ],
         shortcut_names: &["Visual Studio Code", "VS Code"],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "cursor",
@@ -126,6 +142,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%ProgramFiles%\\cursor\\Cursor.exe",
         ],
         shortcut_names: &["Cursor"],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "dimagent",
@@ -136,6 +153,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%ProgramFiles%\\DimAgent\\DimAgent.exe",
         ],
         shortcut_names: &["DimAgent"],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "qq",
@@ -146,6 +164,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%ProgramFiles(x86)%\\Tencent\\QQ\\Bin\\QQ.exe",
         ],
         shortcut_names: &["QQ"],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "feishu",
@@ -157,6 +176,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%ProgramFiles%\\Lark\\Lark.exe",
         ],
         shortcut_names: &["飞书", "Lark"],
+        relaunch_when_hidden: true,
     },
     PresetApp {
         id: "hermes",
@@ -167,6 +187,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
             "%LOCALAPPDATA%\\hermes\\hermes-agent\\apps\\desktop\\release\\win-unpacked\\Hermes.exe",
         ],
         shortcut_names: &["Hermes"],
+        relaunch_when_hidden: true,
     },
 ];
 
@@ -482,7 +503,8 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 // 应用已运行，但窗口收在托盘里（如微信关闭到托盘）。**先走应用自己的托盘图标**
                 // ——这是用户平时"把应用叫回来"的方式，窗口由应用自己恢复，状态一致、可交互
                 // （2026-10-03 真机：直接 ShowWindow 出来的窗口点不动）。
-                // 托盘触发失败时，再按应用入口重新拉起。
+                // 托盘触发失败时，按应用入口重新拉起（`relaunch_when_hidden == false`
+                // 的应用除外，见下）。
                 let mut names: Vec<&str> = app.shortcut_names.to_vec();
                 names.extend(app.exe_names.iter().map(|name| {
                     name.strip_suffix(".exe")
@@ -523,68 +545,89 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 // 摆出来：应用内部仍认为自己是隐藏的，客户端区点击不进入应用
                 // （2026-10-03 真机"打开后点不动"）。改为按应用自己的入口重新拉起——
                 // 单实例应用会自己把已有窗口正确显示出来，与开始菜单/桌面快捷方式一致。
-                crate::ble::gatt_note(format!(
-                    "app_launcher action=activate_or_launch preset={} phase=relaunch_entry reason=window_hidden_by_app visible=0 hidden={}",
-                    app.id,
-                    visibility.hidden
-                ));
-                let relaunched = if let Some(target) = resolve_preset_launch_target(app) {
-                    crate::ble::gatt_note(format!(
-                        "app_launcher action=activate_or_launch preset={} phase=launch_target source={} arguments_present={} working_dir_present={}",
-                        app.id,
-                        target.source,
-                        target.arguments.is_some(),
-                        target.working_dir.is_some()
-                    ));
-                    launch_explicit(
-                        &target.exe_path,
-                        target.arguments.as_deref(),
-                        target.working_dir.as_deref(),
-                        true,
-                    )
-                    .is_ok()
-                } else {
-                    launch_new(app.exe_names).is_ok()
-                };
-                // 有界等待：必须观察到**原先那个隐藏窗口**自己变可见才算成功。
-                // 只数"有没有可见窗口"会被应用一闪而过的登录/提示窗口骗过（实测假阳性）。
+                //
+                // 例外（`relaunch_when_hidden == false`）：微信 4.x 重新拉起**不会**恢复
+                // 主窗口，只会新起第二个实例并弹出 295×387 的登录/入口小窗——用户看到的
+                // 就是"又打开一个登录界面"（2026-10-03、2026-10-18 真机实证）→ 跳过该步，
+                // 直接进入定点显示回落。
                 let known_hidden = visibility.largest_hidden;
-                let became_visible = readback_with_recheck(
-                    || match known_hidden {
-                        Some(hwnd) => unsafe {
-                            windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(
-                                windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void),
-                            )
-                        }
-                        .as_bool(),
-                        None => {
-                            window_visibility(WindowSelector::ExecutableNames(app.exe_names))
-                                .visible
-                                > 0
-                        }
-                    },
-                    || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
-                    RELAUNCH_VISIBLE_CHECKS,
-                );
-                crate::ble::gatt_note(format!(
-                    "app_launcher action=activate_or_launch preset={} phase=relaunch_entry terminal_result={} reason={} submitted={relaunched} known_hidden={}",
-                    app.id,
-                    if became_visible { "passed" } else { "failed" },
-                    if became_visible { "app_shown_known_window" } else { "app_window_not_observed" },
-                    known_hidden.is_some(),
-                ));
-                if became_visible {
-                    return Ok(());
+                if app.relaunch_when_hidden {
+                    crate::ble::gatt_note(format!(
+                        "app_launcher action=activate_or_launch preset={} phase=relaunch_entry reason=window_hidden_by_app visible=0 hidden={}",
+                        app.id,
+                        visibility.hidden
+                    ));
+                    let relaunched = if let Some(target) = resolve_preset_launch_target(app) {
+                        crate::ble::gatt_note(format!(
+                            "app_launcher action=activate_or_launch preset={} phase=launch_target source={} arguments_present={} working_dir_present={}",
+                            app.id,
+                            target.source,
+                            target.arguments.is_some(),
+                            target.working_dir.is_some()
+                        ));
+                        launch_explicit(
+                            &target.exe_path,
+                            target.arguments.as_deref(),
+                            target.working_dir.as_deref(),
+                            true,
+                        )
+                        .is_ok()
+                    } else {
+                        launch_new(app.exe_names).is_ok()
+                    };
+                    // 有界等待：必须观察到**原先那个隐藏窗口**自己变可见才算成功。
+                    // 只数"有没有可见窗口"会被应用一闪而过的登录/提示窗口骗过（实测假阳性）。
+                    let became_visible = readback_with_recheck(
+                        || match known_hidden {
+                            Some(hwnd) => unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(
+                                    windows::Win32::Foundation::HWND(
+                                        hwnd as *mut core::ffi::c_void,
+                                    ),
+                                )
+                            }
+                            .as_bool(),
+                            None => {
+                                window_visibility(WindowSelector::ExecutableNames(app.exe_names))
+                                    .visible
+                                    > 0
+                            }
+                        },
+                        || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
+                        RELAUNCH_VISIBLE_CHECKS,
+                    );
+                    crate::ble::gatt_note(format!(
+                        "app_launcher action=activate_or_launch preset={} phase=relaunch_entry terminal_result={} reason={} submitted={relaunched} known_hidden={}",
+                        app.id,
+                        if became_visible { "passed" } else { "failed" },
+                        if became_visible { "app_shown_known_window" } else { "app_window_not_observed" },
+                        known_hidden.is_some(),
+                    ));
+                    if became_visible {
+                        return Ok(());
+                    }
+                } else {
+                    crate::ble::gatt_note(format!(
+                        "app_launcher action=activate_or_launch preset={} phase=relaunch_skipped reason=relaunch_pops_login_window visible=0 hidden={}",
+                        app.id,
+                        visibility.hidden
+                    ));
                 }
                 // 回落：**定点**显示我们已知的那个隐藏主窗口（面积最大的隐藏候选）。
                 // 不能重新枚举再挑"第一个可见窗口"——应用被重新拉起后往往先弹一个
                 // 登录/入口小窗口（2026-10-03 实测：微信 295×387 的"进入微信"窗口
                 // 正好会抢走回落目标，用户看到的就是那个小窗口）。
                 if let Some(hwnd) = known_hidden {
+                    // 记下被显示窗口的类名与尺寸（只读、不含标题）：下一次用户日志才能断言
+                    // "显示的是主窗口还是登录/入口小窗"（2026-10-03 Bug 记录的遗留问题）。
+                    let (class_name, size) = unsafe { win_impl::window_identity(hwnd) };
                     let activated = unsafe { win_impl::activate_known_window(hwnd) };
                     crate::ble::gatt_note(format!(
-                        "app_launcher action=activate_or_launch preset={} phase=relaunch_fallback target=largest_hidden_window terminal_result={}",
+                        "app_launcher action=activate_or_launch preset={} phase=relaunch_fallback target=largest_hidden_window class={} size={} terminal_result={}",
                         app.id,
+                        class_name,
+                        size.map(|(width, height)| format!("{width}x{height}"))
+                            .unwrap_or_else(|| "unknown".to_owned()),
                         if activated { "passed" } else { "failed" },
                     ));
                     if activated {
@@ -806,8 +849,9 @@ struct ForegroundActivationOutcome {
 /// 2026-10-03 真机：把收在托盘里的窗口直接 `ShowWindow` 出来，操作系统层面窗口可见、
 /// 前台读回也通过，但**应用内部仍认为窗口是隐藏的**，客户端区点击不进入应用——
 /// 微信 / WorkBuddy「打开后点不动，双击标题栏才活」。因此只有"已经有可见窗口"时才
-/// 直接激活；只有隐藏窗口时交给应用自己的打开路径（预设置信入口重新拉起，注册应用
-/// 走激活契约），与开始菜单、桌面快捷方式、任务栏的打开方式一致。
+/// 直接激活；只有隐藏窗口时交给应用自己的打开路径（预设先走托盘图标，失败后按
+/// `relaunch_when_hidden` 决定是否重新拉起，注册应用走激活契约），与开始菜单、
+/// 桌面快捷方式、任务栏的打开方式一致。
 ///
 /// 比面积的原因（同日追加实测）：主窗口收在托盘、而应用还留着登录/入口小窗口时，
 /// 只看"有没有可见窗口"会把那个小窗口当目标（点出来的是它，不是用户要的主窗口）。
@@ -872,8 +916,9 @@ pub(crate) fn readback_hidden_window_shown(hwnd: Option<isize>) -> bool {
     hwnd.is_some_and(|hwnd| win_impl::known_window_shown(hwnd))
 }
 
-/// 重新拉起后等待应用自己显示窗口的复核：6 × 200 ms。冷启动到窗口出现通常在 1 s 内，
-/// 没有出现就按失败处理、回落到旧的显示隐藏窗口路径。
+/// 复核应用是否自己把已知隐藏窗口显示出来：6 × 200 ms（托盘图标路线与
+/// "重新拉起"共用）。冷启动到窗口出现通常在 1 s 内，没有出现就按失败处理、
+/// 回落到定点显示已知窗口的路径。
 const RELAUNCH_VISIBLE_CHECKS: u8 = 6;
 const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -1660,6 +1705,13 @@ mod win_impl {
     pub(super) unsafe fn activate_known_window(hwnd: isize) -> bool {
         let window = HWND(hwnd as *mut core::ffi::c_void);
         show_and_force_foreground(window).activated
+    }
+
+    /// 已知窗口的只读身份（窗口类名 + 布局尺寸），只用于日志辨别被显示的窗口
+    /// 是主窗口还是登录/入口小窗；不含窗口标题（可能含个人信息）。
+    pub(super) unsafe fn window_identity(hwnd: isize) -> (String, Option<(i32, i32)>) {
+        let window = HWND(hwnd as *mut core::ffi::c_void);
+        (window_class_name(window), layout_size(window))
     }
 
     /// 复核"已知的那个隐藏窗口"是否已经由应用自己显示出来（有界）。
@@ -2867,6 +2919,29 @@ pub(crate) mod tests {
         );
     }
 
+    /// "托盘图标路线失败后是否按应用入口重新拉起"的产品口径：
+    /// 微信 4.x 在已运行时再次启动不会恢复主窗口，而是**新起一个进程并弹出
+    /// 295×387 的"进入微信"登录/入口小窗**（2026-10-03 与 2026-10-18 两次真机
+    /// 实证：主窗口保持隐藏、新进程带可见小窗，用户看到的就是"又打开一个登录
+    /// 界面"）——必须跳过该步；其它预设未观察到同类副作用，保持既有兜底顺序。
+    #[test]
+    #[cfg(windows)]
+    fn hidden_relaunch_is_skipped_only_for_apps_with_known_login_window_side_effect() {
+        assert!(
+            !preset_app("wechat")
+                .expect("微信在预设表内")
+                .relaunch_when_hidden,
+            "微信：重新拉起会新起实例弹登录小窗，必须跳过"
+        );
+        for app in PRESET_APPS.iter().filter(|app| app.id != "wechat") {
+            assert!(
+                app.relaunch_when_hidden,
+                "{} 未观察到同类副作用，保持既有行为",
+                app.id
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn foreground_must_be_the_selected_window() {
@@ -3223,6 +3298,7 @@ pub(crate) mod tests {
             exe_names: &["probe.exe"],
             install_paths: &["%TEMP%\\sayall-preset-install-path-probe.exe"],
             shortcut_names: &[],
+            relaunch_when_hidden: true,
         };
         let target = preset_launch_target(&app, &[]).expect("候选路径应命中");
         assert_eq!(target.source, "install_path");
@@ -3255,6 +3331,7 @@ pub(crate) mod tests {
             exe_names: &["Hermes.exe"],
             install_paths: &[],
             shortcut_names: &["Hermes"],
+            relaunch_when_hidden: true,
         };
         let index = vec![("hermes".to_owned(), lnk.clone())];
         let target = preset_launch_target(&app, &index).expect("快捷方式应命中");

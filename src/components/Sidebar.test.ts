@@ -21,19 +21,25 @@ describe("sidebar", () => {
     expect(wrapper.get(".sidebar-footer").text()).toBe("");
   });
 
-  it("末位页是「设置」并带齿轮图标（不再是「关于」）", () => {
+  it("按键之后是「组合动作」，推荐在连接之后，末位页是「设置」并带齿轮图标", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings", version: "0.5.0" } });
     const items = wrapper.findAll(".nav-item");
 
-    // 2026-10-15：组合动作页插在「按键」之后（对齐 Mac 侧边栏次序）。
     expect(items.map((item) => item.text())).toEqual([
       "按键",
+      // 2026-10-20 用户指定：按键、组合动作、连接、推荐、权限、设置。
       "组合动作",
       "连接",
+      "推荐",
       "权限",
       "设置",
     ]);
-    const lastIcon = items[4].get("svg");
+    // 推荐入口使用 Mac 的 sparkles 语义图标（大四角星 + 两颗小星）。
+    const recommendationIcon = items[3].get("svg");
+    expect(recommendationIcon.findAll("path")).toHaveLength(3);
+    // 组合动作入口使用层叠方块图标（3 条描边）。
+    expect(items[1].get("svg").findAll("path")).toHaveLength(3);
+    const lastIcon = items[5].get("svg");
     // 齿轮形状：外圈齿形 + 中央圆孔（区别于旧「关于」的 info.circle 单圆）。
     const paths = lastIcon.findAll("path");
     expect(paths).toHaveLength(2);

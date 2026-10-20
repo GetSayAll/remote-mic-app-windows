@@ -25,9 +25,11 @@
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
 | 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
+| 推荐页（侧栏，2026-10-18） | 侧栏与页面标题统一为「推荐」；页面正文、筛选项、商品名与详情全部来自官网 `https://sayall.app/recommendations/`，不在本地维护推荐文案 | `src/navigation.ts`、`RecommendationsPage.vue`、`RECOMMENDATIONS_URL` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
+| 常用语（会员能力：按键动作 + 浮层面板） | 常用语；动作名「打开常用语」；缺私有组件时已保存的绑定显示「打开常用语（当前不可用）」；失败提示按原因分叉（见 §7 2026-10-15 条） | `src/lib/bridge.ts`（`actionSummary`）、`ButtonsPage.vue`、`SettingsPage.vue`；面板内文案在私有组件 |
 | 启动行为第二项（设置页「通用」） | 启动时自动打开主面板（对齐 Mac `about.preferences.open_main_window_at_launch`）；说明“关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。”；新装与老配置默认开启（2026-10-19 用户定稿「照 Mac 原样」） | `SettingsPage.vue`、`AppSettings.open_window_at_launch` |
 | 更新完成提示（启动时一次性） | 标题「无线麦已更新」、正文「已成功更新到版本 {版本号}。」、按钮「好」（对齐 Mac `update.completed.*`，原样移植）；只在“本次启动前刚完成更新”时出现一次 | `UpdateCompletedDialog.vue`、`launch_state.rs` |
 | 组合动作（侧边栏页 + 按键页动作分组） | 组合动作；步骤类型写「打开应用」「等待应用」「单键或快捷键」「聚焦输入框」「聚焦学习过的输入框」「打开网址」「执行已有组合动作」（对齐 Mac `macro.step.*`；「系统与媒体动作」不再作为新步骤提供，旧数据仍可显示与执行）；终态写「组合动作执行成功」「组合动作已执行，但无法确认第三方 App 的结果」「组合动作已取消」「组合动作执行超时」等（对齐 Mac `macro.status.execution.*`） | `MacrosPage.vue`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`macroActionLabel` / `macroTerminalLabel` / `macroStepSummary`） |
@@ -67,8 +69,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   = 按键页「全按键支持」）。
 - 卡片说明一句话（≤ 40 字）；更长的解释放进「常见问题」折叠，不铺在首屏。
 - **开关（Switch）一律放在对应文字右侧**：文字在前、开关在后，全应用一致
-  （设置页「检查预览版更新」「登录时自动启动」，按键页「启用自定义按键功能」
-  「全按键支持」「锁定当前按键」均为此写法）；不允许开关左置。
+  （设置页「检查预览版更新」「登录时自动启动」「启动时自动打开主面板」，按键页「启用自定义按键功能」
+  「全按键支持」「锁定当前按键」均为此写法）；不允许开关左置。2026-10-19 起「启动行为」
+  的两项按 Mac 排成并排两列，每列仍是文字在上、开关在下（DOM 顺序不变），中间一条竖分隔线。
 - **不可用项置灰必须给出原因与恢复方式**：功能未开启时，受它影响的控件整卡置灰、
   不可点击（含它的所有子操作），悬停提示说清「为什么不可用 ＋ 开启后恢复」；
   不允许只置灰不解释。当前唯一实例：「全按键支持」关闭时的返回 / 音量+ / 音量−
@@ -485,6 +488,26 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   当前值可能不同，没有这行分不清“分流判错”还是“现场已变”）。文案表与分流函数移入
   `src/onboarding/voice-failure-text.ts`（单测 6 例）。
   记录：[Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md](../Bugs/2026-10-14-rc003-stale-tap-blocks-first-enable.md)。
+- 2026-10-15：常用语文案定稿（会员能力，按键动作 + 浮层面板）。动作名「打开常用语」；
+  缺私有组件时动作摘要显示「打开常用语（当前不可用）」（不静默替换动作）；面板提示
+  「按方向键和 OK 键插入对应常用语 / 按返回键关闭面板」；插入失败提示按原因分叉——光标不在
+  输入框中（把光标放进输入框后再试）/ 输入目标已改变 / 这个位置还没有设置常用语 / 剪贴板暂时
+  不可用 / 剪贴板没能恢复原内容 / 没能完成粘贴 / 兜底「没能插入常用语，请重试」；输入框类
+  提示 5 秒、其余 3 秒后面板自动收起。实施记录 `docs/plan/2026-10-15-common-phrases-windows.md`、
+  验收 `Testing/WindowsCommonPhrases.md`、平台边界 `feature/common-phrases/platform-windows.md`。
+- 2026-10-19（「启动时自动打开主面板」，Andy 定稿「照 Mac 原样，默认开」）：设置页「通用 →
+  启动行为」在「登录时自动启动」右侧并排第二项，文字在上、开关在下，两项之间一条 34px
+  竖分隔线（与 Mac `SettingsView` 的 `HStack(spacing: 10)` 同构）；标签用 Mac 原词
+  「启动时自动打开主面板」，说明句「设置登录后自动启动和应用启动时是否打开主窗口。」，
+  悬停提示「关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。」（Mac 的“菜单栏”
+  在 Windows 写成“托盘”）。关闭后**普通启动路径**都只驻留托盘，包括手动双击快捷方式——
+  不区分“登录自启”与“手动启动”，与 Mac `openMainWindowAtLaunch` 同义。未完成首次设置时
+  无论开关如何都显示主面板（否则用户没有入口完成向导）。从托盘图标 / 托盘菜单「显示主界面」/
+  再次启动应用打开主面板，不受该设置影响。**已移植**：Mac 在“本次启动前刚完成更新”时
+  强制显示一次主面板，并弹「无线麦已更新 / 已成功更新到版本 X。/ 好」；Windows 用
+  `launch-state.json` 记录上次启动的版本（不写 `settings.json`，避免安装生命周期测试的
+  字节级哈希被打破），更新后的首次启动强制显示主面板并弹一次，同版本重启与降级不弹。
+  记录：`Testing/WindowsRC003Preview.md` 用例十六。
 - 2026-10-15（组合动作 P3 落地）：组合动作页与按键页「组合动作」分组文案定稿——页面名、步骤类型、
   终态句与 Mac macro.step.* / macro.status.execution.* 同义；绑定在按键页设置，组合动作页只管理
   动作库（对齐 Mac 最新设计）；失败/取消/超时各有独立句，不把"请求已发送"写成成功。

@@ -27,6 +27,8 @@ import {
   disableRc003Capture,
   enableRc003Capture,
   getCaptureSupport,
+  getCommonPhrasePanelSnapshot,
+  getLockMappingSelection,
   getRc003BridgeSnapshot,
   getRc003TaskStatus,
   identityShortcutByButton,
@@ -37,13 +39,16 @@ import {
   listPresetApps,
   mouseClickLabels,
   mouseMoveLabels,
+  openCommonPhraseExample,
   pickCustomApp,
+  registerCommonPhraseAvailability,
   registerPresetAppNames,
   registerMacroNames,
   latestMacroDefinitions,
   remoteModelLabel,
   resetButtonMappings,
   saveButtonMappings,
+  saveLockMappingSelection,
   scanPairedRemotes,
   shortcutCapability,
   startRawInput,
@@ -79,8 +84,16 @@ import {
   type ShortcutCaptureEdge,
   testAppFocus,
 } from "../lib/bridge";
+import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+
+/**
+ * 「调整常用语」二级视图（对齐 macOS：按键页 → 调整常用语 → 返回按键页）。
+ * 编辑器来自私有 UI（公开构建返回 null → 入口不渲染）。
+ */
+const commonPhraseEditor = commonPhraseSettingsComponent();
+const showCommonPhraseEditor = ref(false);
 
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
@@ -226,11 +239,15 @@ const VOICE_ICON_FILLED = "M12 2.8a3.4 3.4 0 0 1 3.4 3.4v5.6a3.4 3.4 0 0 1-6.8 0
 const VOICE_ICON_STROKES = ["M6.3 11.5a5.7 5.7 0 0 0 11.4 0", "M12 17.2v3.8"];
 
 const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
+/** 映射是否已从设置读回：「启用自定义按键功能」开关就绪前用占位符顶位（防滑入）。 */
+const mappingsLoaded = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
 /** 组合动作库（「组合动作」动作分组的候选；2026-10-15）。 */
 const macroDefinitions = ref<MacroDefinition[]>([]);
+/** 常用语组件是否可用（页面加载快照后更新；不可用时不显示动作入口）。 */
+const commonPhrasesAvailable = ref(false);
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -274,6 +291,49 @@ let resourcesReady = false;
 let pointLearnTimer: number | null = null;
 const pointLearnState = ref<"idle" | "recording" | "recorded" | "error">("idle");
 const pointLearnMessage = ref<string | null>(null);
+
+/**
+ * 「锁定当前按键」持久化（2026-10-18，用户定稿：跨页面切换与跨重启保持）。
+ *
+ * 背景：本开关此前只是页面局部状态，切页重建组件后回到默认「开启」，用户侧表现
+ * 为"关不掉"。现在落进应用设置文件（`lock_mapping_selection`）：挂载时读回、
+ * 变更时保存；保存失败回退到最近落盘值并把错误显示在页脚提示里。
+ *
+ * 2026-10-18 追加（Andy 报"每次进页面开关都滑动"）：就绪前用同尺寸占位符顶位、
+ * 就绪后才创建开关本体——元素创建即带正确 checked，从不存在属性变更，因此不会
+ * 有关→开的滑动过渡（同设置页「登录时自动启动」与同页「全按键支持」，见
+ * SettingsPage.vue 2026-09-28 定稿注释：只禁用过渡不行，Vue 的 DOM 更新与
+ * nextTick 同批早于绘制，过渡照常触发）。
+ */
+let lockSelectionPersisted = true;
+/** 开关值是否已读回：false 期间渲染占位符，不渲染开关本体（防滑入动画）。 */
+const lockSelectionReady = ref(false);
+/** 保存串行队列：执行时取当前值，快速往返（关→开）收敛到最后一次选择。 */
+let lockSelectionSaveQueue: Promise<void> = Promise.resolve();
+
+async function persistLockSelection(): Promise<void> {
+  const task = lockSelectionSaveQueue.then(async () => {
+    const value = lockSelection.value;
+    if (value === lockSelectionPersisted) return; // 加载回填 / 失败回退的重入：无需落盘
+    try {
+      lockSelectionPersisted = await saveLockMappingSelection(value);
+    } catch (error) {
+      // 只有用户没有再改时才回退开关，避免覆盖更新的选择。
+      if (lockSelection.value === value) {
+        lockSelection.value = lockSelectionPersisted;
+        statusMessage.value = error instanceof Error ? error.message : String(error);
+      }
+    }
+  });
+  lockSelectionSaveQueue = task;
+  await task;
+}
+
+watch(lockSelection, () => {
+  // 每次变更都过一遍持久化（回填/回退的重入在执行时被"值与落盘值相等"拦下），
+  // 这样"关闭中又马上打开"也不会停在中间值。
+  void persistLockSelection();
+});
 
 /**
  * 松开沿结束本次按压的闪烁反馈（与按下高亮、连线**同灭**）。
@@ -615,6 +675,15 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
+}
+
+/** 「常用语示例」：打开常用语面板（会员=普通、非会员=只读预览；判定在宿主层）。 */
+async function openExample(): Promise<void> {
+  try {
+    await openCommonPhraseExample();
+  } catch {
+    // 未接通私有组件（公开构建）：入口不渲染，正常不会到这里；留静默兜底。
+  }
 }
 
 function applyAction(action: ButtonAction): void {
@@ -1701,10 +1770,21 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps] = await Promise.all([
+  const [loaded, snapshot, apps, commonPhrases, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
     listPresetApps().catch(() => [] as PresetAppInfo[]),
+    getCommonPhrasePanelSnapshot(),
+    // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
+    getLockMappingSelection().catch(() => {
+      reportFrontendEvent({
+        event: "mapping_selection_lock",
+        phase: "completed",
+        result: "failed",
+        reason: "load_failed",
+      });
+      return true;
+    }),
   ]);
   if (unmounted) {
     return;
@@ -1719,9 +1799,18 @@ onMounted(async () => {
       registerMacroNames(macroDefinitions.value);
     })
     .catch(() => undefined);
+  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
+  commonPhrasesAvailable.value = commonPhrases.available;
+  registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
+  // 两个开关的「就绪」与真值在同一渲染批次生效：本批次才创建开关本体，创建即带
+  // 正确 checked，不产生属性变更，因此没有"状态回来后开→关"的滑动过渡。
+  mappingsLoaded.value = true;
+  lockSelectionPersisted = persistedLockSelection;
+  lockSelection.value = persistedLockSelection;
+  lockSelectionReady.value = true;
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
@@ -1839,7 +1928,17 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="buttons-page">
+  <!-- 「调整常用语」二级视图（对齐 macOS：从按键页进入，返回按键页）。 -->
+  <section v-if="showCommonPhraseEditor && commonPhraseEditor" class="buttons-page">
+    <header class="page-header">
+      <div class="mapping-title-row">
+        <button type="button" class="chip" @click="showCommonPhraseEditor = false">返回</button>
+        <h1>调整常用语</h1>
+      </div>
+    </header>
+    <component :is="commonPhraseEditor" />
+  </section>
+  <section v-else class="buttons-page">
     <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
          （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
@@ -1848,7 +1947,8 @@ onUnmounted(() => {
           <h1>按键映射</h1>
           <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
             <span>启用自定义按键功能</span>
-            <input v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
+            <input v-if="mappingsLoaded" v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
+            <span v-else class="toggle-placeholder" aria-hidden="true"></span>
           </label>
           <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
                选中某个按键的编辑面板，任何时刻都能开启/关闭。
@@ -2195,6 +2295,59 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <section v-if="commonPhrasesAvailable" class="action-section">
+          <h4 class="action-section-title">常用语</h4>
+          <div class="preset-grid">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
+              type="button"
+              title="打开常用语面板，按方向键和 OK 键插入对应常用语"
+              @click="applyAction({ type: 'open_common_phrases' })"
+            >
+              打开常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="编辑常用语内容与五键分配"
+              @click="showCommonPhraseEditor = true"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+                  <path d="M4.5 6.5h15" />
+                  <path d="M4.5 12h15" />
+                  <path d="M4.5 17.5h15" />
+                </g>
+                <g fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.7">
+                  <circle cx="9.5" cy="6.5" r="1.9" />
+                  <circle cx="14.5" cy="12" r="1.9" />
+                  <circle cx="10.5" cy="17.5" r="1.9" />
+                </g>
+              </svg>
+              调整常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="预览常用语面板（未开通会员时为只读示例）"
+              @click="openExample"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g fill="currentColor">
+                  <path
+                    d="M4.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                  <path
+                    d="M14.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                </g>
+              </svg>
+              常用语示例
+            </button>
+          </div>
+        </section>
+
         <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
@@ -2440,7 +2593,8 @@ onUnmounted(() => {
       </div>
       <label class="toggle-row" title="开启后，操作实体遥控器不会切换正在编辑的按键。">
         <span>锁定当前按键</span>
-        <input v-model="lockSelection" type="checkbox" class="toggle-input" />
+        <input v-if="lockSelectionReady" v-model="lockSelection" type="checkbox" class="toggle-input" />
+        <span v-else class="toggle-placeholder" aria-hidden="true"></span>
       </label>
       <span class="muted lock-hint">按遥控器时保持当前编辑项</span>
       <div class="button-row">

@@ -237,6 +237,16 @@ impl GestureRecognizer {
         }
     }
 
+    /// 取消该键当前一轮的手势状态（常用语面板认领其边沿时调用）：清空双击窗、
+    /// 长按与连发计时，**不触发任何动作**，也不影响下一轮按下/释放判定。
+    /// 与 [`Self::release_all`] 的区别：只作用于一个键，且不会被随后的释放沿
+    /// 或双击窗引爆（残留计时正是「幽灵手势」的来源）。
+    pub fn cancel_press(&mut self, button: RemoteButton) {
+        if let Some((_, state)) = self.buttons.get_mut(&button) {
+            *state = ButtonGestureState::default();
+        }
+    }
+
     /// 处理到期定时器（双击窗口超时/按住确认/长按/连续触发），返回触发的手势。
     pub fn advance(&mut self, now: Instant) -> Vec<(RemoteButton, ButtonTrigger)> {
         self.advance_with_ticks(now).0
