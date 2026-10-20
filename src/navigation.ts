@@ -1,8 +1,22 @@
+import { COMBINATION_ACTIONS_ENABLED } from "./lib/feature-flags";
 import { privateFeaturePages, type PrivateFeaturePage } from "./private/feature-pages";
 
-export type PageId = "buttons" | "connection" | "permissions" | "settings";
+export type PageId =
+  | "buttons"
+  | "recommendations"
+  | "macros"
+  | "connection"
+  | "permissions"
+  | "settings";
 
-export type NavIcon = "keyboard" | "link" | "shield" | "gear" | "member";
+export type NavIcon =
+  | "keyboard"
+  | "sparkles"
+  | "layers"
+  | "link"
+  | "shield"
+  | "gear"
+  | "member";
 
 export interface NavigationItem {
   id: string;
@@ -14,7 +28,14 @@ export interface NavigationItem {
 /** 公开页面表。公开构建的侧栏就是它与私有页面注册表（通常为空）的合并结果。 */
 export const publicNavigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
+  // 2026-10-15 组合动作（对齐 Mac 侧边栏「组合动作」条目与层叠方块图标）；
+  // 入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。
+  ...(COMBINATION_ACTIONS_ENABLED
+    ? [{ id: "macros", label: "组合动作", icon: "layers" } as NavigationItem]
+    : []),
   { id: "connection", label: "连接", icon: "link" },
+  // 2026-10-20 用户指定顺序：按键、组合动作、连接、推荐、权限、设置。
+  { id: "recommendations", label: "推荐", icon: "sparkles" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main
   // SettingsSection.about 的 "gearshape"。

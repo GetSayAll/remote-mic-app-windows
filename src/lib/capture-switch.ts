@@ -10,7 +10,7 @@
  * - 功能启动中（助手还在连）不显示文案——正在操作由开关态表达。
  */
 
-import type { Rc003CaptureHealth } from "./bridge";
+import type { Rc003CaptureHealth, Rc003CaptureRevoked } from "./bridge";
 
 /** 开关的可见状态：不可用 / 正在操作 / 开启 / 关闭。 */
 export type CaptureSwitchState = "unavailable" | "busy" | "on" | "off";
@@ -97,6 +97,54 @@ export function captureFailureText(
     return `关闭没有完成，${name}仍是开启状态。`;
   }
   return `开启没有成功，${name}保持关闭。`;
+}
+
+/**
+ * 「开关被应用自己关掉了」的一句解释（2026-10-15，issue #264 附加观察甲）。
+ *
+ * 启动对账会因授权/任务形态变化把开关回落（升级后最常见），但回落是静默的：
+ * 用户只看到开关自己关了、功能没了，然后得出结论"升级后更差"。这句话只说
+ * **为什么**与**怎么办**，不提任务、UAC、架构这些机制词（规范见
+ * `docs/product-copy.md` §3）。
+ */
+export function captureRevokedText(name: string): string {
+  return `${name}因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。`;
+}
+
+/**
+ * 是否显示上面那句「被关掉了」的解释：开关在**关闭**态、且后端确实报了回落原因。
+ *
+ * 开着的时候不显示（原因已被重新开启消解）；本机不可用（ARM64，switchState 为
+ * `unavailable`）也不显示——那不是"重新打开一次"能解决的，本机不可用自有一句
+ * （见 `captureFailureText`）。
+ */
+export function shouldShowCaptureRevoked(input: {
+  switchState: CaptureSwitchState;
+  revoked: Rc003CaptureRevoked | "unknown";
+}): boolean {
+  return (
+    input.switchState === "off" &&
+    input.revoked !== "none" &&
+    input.revoked !== "unknown"
+  );
+}
+
+/**
+ * 回落原因的载荷规范化（2026-10-15）：只认六个稳定 token（与 Rust
+ * `CaptureRevoke::as_str` 逐字对应）；缺失 / 未知值回落 `unknown`——界面按
+ * "读不到"处理，不猜测原因、不显示文案。
+ */
+export function normalizeCaptureRevoked(
+  raw: unknown,
+): Rc003CaptureRevoked | "unknown" {
+  return raw === "none" ||
+    raw === "task_missing" ||
+    raw === "reauth_marker_present" ||
+    raw === "task_target_mismatch" ||
+    raw === "task_power_policy_mismatch" ||
+    raw === "unsupported"
+    ? raw
+    : "unknown";
 }
 
 /**

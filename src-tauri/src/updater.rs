@@ -696,7 +696,22 @@ mod tests {
         // SAFETY: 测试进程内单线程操作该环境变量，其余测试不读取它。
         unsafe { std::env::set_var("SAYALL_GATT_LOG", &path) };
         note("check.fail stage=endpoint_override_parse error_domain=url error_code=parse_failed reason=invalid_override retryable=false".to_owned());
-        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        // sink 是**异步**写的（排队给写线程），写完立刻读会赌运气：2026-10-20 实测
+        // 全套并行跑约 1/3 概率读到"别的测试的行已经到了、本行还没落"，被误判成
+        // 未落盘。这里按"标记行出现"轮询（上限 2 秒），不再赌写入时机。
+        let mut contents = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            contents = std::fs::read_to_string(&path).unwrap_or_default();
+            if contents
+                .lines()
+                .any(|line| line.contains("updater.check.fail"))
+                || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         unsafe { std::env::remove_var("SAYALL_GATT_LOG") };
         let _ = std::fs::remove_file(&path);
         // 同一测试二进制里可能有其他测试并发写诊断日志（2026-10-05 评审）：

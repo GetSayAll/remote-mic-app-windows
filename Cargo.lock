@@ -3168,6 +3168,7 @@ dependencies = [
  "rustls",
  "sayall-core",
  "sayall-windows",
+ "sayall-windows-common-phrases",
  "semver",
  "serde",
  "serde_json",
@@ -3177,6 +3178,14 @@ dependencies = [
  "tauri-plugin-updater",
  "webview2-com",
  "windows 0.62.2",
+ "windows-core 0.61.2",
+]
+
+[[package]]
+name = "sayall-windows-common-phrases"
+version = "0.0.0"
+dependencies = [
+ "sayall-windows",
 ]
 
 [[package]]

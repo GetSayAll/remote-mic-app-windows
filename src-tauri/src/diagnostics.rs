@@ -4,6 +4,13 @@ use sayall_windows::send_input::SendInputSnapshot;
 use sayall_windows::{AudioPhase, ConnectionPhase, ImeStatus, PlatformSnapshot};
 use serde::Serialize;
 
+/// 诊断报告的 schema 版本（**唯一来源**）。
+///
+/// 启动日志里的 `diagnostic_schema=` 与报告体里的 `schemaVersion` 都取它：
+/// 2026-10-20 之前两处各写一份（日志恒为 2、报告已到 3），改一处就会漂。
+/// 加字段/改字段语义都必须 +1，前端 `DiagnosticReport` 同步改。
+pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticReport {
@@ -19,6 +26,12 @@ pub struct DiagnosticReport {
     pub windows_version: String,
     /// 进程架构（`x86_64` 等）。
     pub process_architecture: String,
+    /// 本次开机的引导类型（2026-10-20，快速启动断连取证）：`full` /
+    /// `hiberboot` / `hibernate_resume` / `unknown`。只给稳定 token。
+    pub boot_type: String,
+    /// 「快速启动」功能是否开启；读不到为 `null`（**不是** `false`——读不到
+    /// 不等于没开，前端必须能区分三态）。
+    pub fast_startup_enabled: Option<bool>,
     pub platform: String,
     pub verification_status: String,
     pub capabilities: DiagnosticCapabilities,
@@ -150,7 +163,7 @@ impl DiagnosticReport {
         // 上层把它放在阻塞线程池里执行，不占主线程。
         let ime = sayall_windows::ime_status_for(voice_input_tool);
         Self {
-            schema_version: 3,
+            schema_version: DIAGNOSTIC_SCHEMA_VERSION,
             app_version: app_version.to_owned(),
             app_build: option_env!("SAYALL_APP_BUILD")
                 .unwrap_or("unknown")
@@ -161,6 +174,12 @@ impl DiagnosticReport {
                 .to_owned(),
             windows_version,
             process_architecture: std::env::consts::ARCH.to_owned(),
+            // 引导类型（2026-10-20）：与启动日志 `app_lifecycle event=boot_context`
+            // 同一份读数（成功值进程内缓存；读不到时下次再查，见 boot_type 模块）。
+            // 报障时连日志都不用拉，就能判断"这次开机是不是 hiberboot"——快速启动
+            // 断连现场的第一个分流问题。
+            boot_type: sayall_windows::boot_type::boot_type().label().to_owned(),
+            fast_startup_enabled: sayall_windows::boot_type::fast_startup_enabled(),
             platform: platform.platform.clone(),
             verification_status: platform.verification_status.clone(),
             capabilities: DiagnosticCapabilities {
@@ -289,8 +308,22 @@ mod tests {
         );
         let json = serde_json::to_string(&report).unwrap();
 
-        assert_eq!(report.schema_version, 3);
+        assert_eq!(report.schema_version, DIAGNOSTIC_SCHEMA_VERSION);
+        assert_eq!(
+            report.schema_version, 4,
+            "新增 bootType/fastStartupEnabled 后为 v4"
+        );
         assert_eq!(report.app_version, "0.1.0");
+        // 引导类型（2026-10-20）：读的是本机真值（值因机器而异），这里断言的
+        // 是"稳定 token + camelCase 键存在"——复制块与前端类型都靠这两点。
+        assert!(
+            ["full", "hiberboot", "hibernate_resume", "unknown"]
+                .contains(&report.boot_type.as_str()),
+            "boot_type 必须是稳定 token，实际：{}",
+            report.boot_type
+        );
+        assert!(json.contains("\"bootType\""));
+        assert!(json.contains("\"fastStartupEnabled\""));
         // 环境字段必须真实可用（Build/Windows 版本是报障的定位前提）。
         assert!(!report.app_build.is_empty());
         assert!(!report.source_revision.is_empty());

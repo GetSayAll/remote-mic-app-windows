@@ -213,7 +213,10 @@ nav { display: grid; gap: 4px; }
    窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
 .content { min-width: 0; padding: 22px 35.5px 26px 32px; overflow: auto; scrollbar-width: none; }
 .content::-webkit-scrollbar { display: none; }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-left: 14px; }
+/* 全应用隐藏滚动条（仍可滚动）：WebView2 的经典滚动条在卡片里很显眼。 */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); gap: 14px; align-items: start; }
 .card { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 30px var(--shadow-card); }
@@ -509,7 +512,13 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .chip:hover { border-color: var(--accent-border); background: var(--accent-hover); box-shadow: 0 2px 8px var(--shadow-control); transform: translateY(-1px); }
 .chip:active { transform: translateY(0); }
 .chip.selected { border-color: var(--accent-border); background: var(--accent-surface); font-weight: 600; color: var(--accent-text); box-shadow: 0 1px 5px var(--accent-surface); }
+.chip:disabled, .chip:disabled:hover { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; border-color: var(--border-strong); background: var(--surface-chip); }
+/* 「打开常用语」的会员标识（对齐 macOS 常用语分组的粉色徽标）。 */
+.member-badge { display: inline-flex; align-items: center; margin-left: 6px; padding: 0 7px; border-radius: 999px; background: rgba(233, 30, 99, 0.14); color: #c2185b; font-size: 11px; font-weight: 700; line-height: 18px; }
+html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); color: #f9a8d4; }
 .chip.group-label { cursor: default; font-weight: 600; color: var(--muted); background: transparent; border-style: dashed; }
+/* 常用语分组按钮的内联图标（对齐 macOS：slider.horizontal.3 / text.quote）。 */
+.chip-icon { width: 15px; height: 15px; margin-right: 5px; vertical-align: -2px; flex: none; }
 .custom-shortcut-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .capture-display { font-size: 13px; font-weight: 600; color: var(--accent-muted-text); }
 .safe-capture-toggle { margin-top: 10px; white-space: normal; }

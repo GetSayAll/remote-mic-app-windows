@@ -6,6 +6,7 @@ import {
   getButtonMappings,
   getDiagnosticReport,
   getGainDb,
+  getOpenWindowAtLaunch,
   getRawInputSnapshot,
   getRuntimeSnapshot,
   listAudioEndpoints,
@@ -48,10 +49,14 @@ function mark(stage: string): void {
   });
 }
 
-async function waitFor<T>(read: () => T | null, description: string): Promise<T> {
+async function waitFor<T>(
+  read: () => T | null | Promise<T | null>,
+  description: string,
+): Promise<T> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const value = read();
+    // 允许异步读取（如经 IPC 读回持久化真值）；同步读取器行为不变。
+    const value = await read();
     if (value !== null) return value;
     await new Promise((resolve) => window.setTimeout(resolve, 50));
   }
@@ -278,9 +283,9 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「全按键支持」关闭时返回/音量± 整卡置灰禁用并给出开启指引");
 
-  // 「设备操作 / 聚焦输入框」芯片自 2026-10-03 起按用户要求隐藏（见
-  // src/lib/feature-flags.ts DEVICE_ACTION_SECTION_ENABLED=false），动作与平台受理路径
-  // 保留：这里钉住芯片缺席，映射改为经真实 IPC 直接写入，再验证平台受理。
+  // 「设备操作 / 聚焦输入框」入口于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
+  // src/pages/ButtonsPage.vue 的 DEVICE_ACTION_SECTION_ENABLED=true）。这里钉住芯片可见，
+  // 随后仍经真实 IPC 写入并验证平台受理路径（不依赖芯片的选中细节）。
   // 打开编辑器仍走「确定 · 单击」格子——关闭态下三键不可点击，上一步已钉住。
   const focusCell = await waitFor(() => {
     const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
@@ -294,8 +299,8 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     document.querySelectorAll<HTMLButtonElement>(".mapping-editor button"),
   );
   assert(
-    !editorButtons.some((button) => button.textContent?.trim() === "聚焦输入框"),
-    "「聚焦输入框」芯片应已隐藏",
+    editorButtons.some((button) => button.textContent?.trim() === "聚焦输入框"),
+    "「聚焦输入框」芯片应可见（2026-10-15 恢复入口）",
   );
   const currentMappings = await getButtonMappings();
   const currentOk = currentMappings.actions.ok;
@@ -312,15 +317,15 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     focusSnapshot.submittedBatches === 2,
     "「聚焦输入框」动作没有分发到平台的聚焦受理路径",
   );
-  steps.push("「聚焦输入框」动作经真实 IPC 写入并分发到平台聚焦受理（UI 芯片按用户要求隐藏）");
+  steps.push("「聚焦输入框」入口可见，动作经真实 IPC 写入并分发到平台聚焦受理");
 
-  // 「打开应用 + 聚焦方式」：UI 面板自 2026-10-03 起按用户要求隐藏（后端能力与已存配置
-  // 保留）。旅程改为：选中目标后断言面板不再出现，并直接经真实 IPC 覆盖学习与测试两条
-  // 后端受理路径——面板恢复时把这里改回点击「聚焦已记录的输入框 / 开始学习输入框」即可。
+  // 「打开应用 + 聚焦方式」：面板于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
+  // src/pages/ButtonsPage.vue 同款注释）。这里钉住面板可见；学习与测试两条路径仍经
+  // 真实 IPC 覆盖。
   await clickButton("记事本");
   await waitFor(
-    () => (document.body.textContent?.includes("打开后聚焦方式") ? null : true),
-    "聚焦方式面板保持隐藏",
+    () => (document.body.textContent?.includes("打开后聚焦方式") ? true : null),
+    "「打开后聚焦方式」面板可见",
   );
   const learned = await learnFocusTarget();
   assert(
@@ -328,7 +333,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "仿真学习样本不是预期的可编辑目标",
   );
   await testAppFocus("notepad");
-  steps.push("「打开后聚焦方式」面板按用户要求隐藏；学习与测试打开聚焦仍经真实 IPC 覆盖");
+  steps.push("「打开后聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
 
   mark("permissions_page");
   await openPage("权限");
@@ -458,6 +463,47 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   const restoredIcon = await setAppIcon("faceted-duck");
   assert(restoredIcon === "faceted-duck", `仿真还原应用图标没有生效：${restoredIcon}`);
   steps.push("设置页应用图标新装默认几何鸭，切换经真实 IPC 与设置持久化往返");
+
+  // 「启动时自动打开主面板」（2026-10-19）：仿真状态目录每次都是新装，这里证明
+  // 默认值经真实 IPC 读回，且开关写入 → 读回 → 复位走同一条持久化路径。
+  //
+  // 2026-10-19 CI 回归：`click()` 之后不能立刻等 DOM 上的 `disabled`/`checked`——
+  // Vue 的响应式刷新是微任务，`waitFor` 的第一次判断是同步执行的，会看到点击前
+  // 的 DOM 直接放行，随后的 IPC 读回就可能抢在保存落盘之前（实测 CI 报
+  // 「关闭后读回仍是开启」）。这里改为轮询**后端读回值**：它才是持久化的真值。
+  const openWindowToggle = await waitFor(
+    () => {
+      const toggle = document.querySelector<HTMLInputElement>(
+        'input[name="open-window-at-launch"]:not(:disabled)',
+      );
+      return toggle && toggle.checked ? toggle : null;
+    },
+    "启动时自动打开主面板默认开启",
+  );
+  openWindowToggle.click();
+  await waitFor(
+    async () => ((await getOpenWindowAtLaunch()) === false ? true : null),
+    "启动时自动打开主面板关闭并落盘",
+  );
+  assert(
+    !document.querySelector('.settings-group [role="alert"]'),
+    "切换启动页面设置后显示错误",
+  );
+  // 再点一次开关恢复开启（走同一条界面 → IPC → 持久化路径，不用直达命令）。
+  // 重新取元素：保存完成后的重渲染不保证还持有同一个 DOM 节点。
+  const reopenToggle = await waitFor(
+    () =>
+      document.querySelector<HTMLInputElement>(
+        'input[name="open-window-at-launch"]:not(:disabled)',
+      ),
+    "启动时自动打开主面板可再次切换",
+  );
+  reopenToggle.click();
+  await waitFor(
+    async () => ((await getOpenWindowAtLaunch()) === true ? true : null),
+    "启动时自动打开主面板恢复开启并落盘",
+  );
+  steps.push("设置页「启动时自动打开主面板」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，

@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   captureFailureText,
   captureInactiveText,
+  captureRevokedText,
   captureSwitchState,
   normalizeCaptureHealth,
+  normalizeCaptureRevoked,
   shouldShowCaptureInactive,
+  shouldShowCaptureRevoked,
 } from "./capture-switch";
 
 describe("captureSwitchState（2026-10-10 开关三态契约）", () => {
@@ -123,5 +126,63 @@ describe("normalizeCaptureHealth（2026-10-14：捕获状态载荷规范化）",
     expect(normalizeCaptureHealth("")).toBe("unknown");
     expect(normalizeCaptureHealth("Active")).toBe("unknown"); // 逐字比较，不做大小写宽松
     expect(normalizeCaptureHealth("nonsense")).toBe("unknown");
+  });
+});
+
+describe("「被应用自己关掉了」提示（2026-10-15，issue #264 附加观察甲）", () => {
+  const NAME = "全按键支持";
+
+  it("只在开关处于关闭态、且后端确实报了回落原因时出现", () => {
+    expect(
+      shouldShowCaptureRevoked({ switchState: "off", revoked: "task_power_policy_mismatch" }),
+    ).toBe(true);
+    expect(shouldShowCaptureRevoked({ switchState: "off", revoked: "task_missing" })).toBe(true);
+    // 开关已经开着：原因已被重新开启消解，不再讲历史。
+    expect(shouldShowCaptureRevoked({ switchState: "on", revoked: "task_missing" })).toBe(false);
+    // 正在操作 / 本机不可用：都不是"重新打开一次"能解决的。
+    expect(shouldShowCaptureRevoked({ switchState: "busy", revoked: "task_missing" })).toBe(false);
+    expect(
+      shouldShowCaptureRevoked({ switchState: "unavailable", revoked: "unsupported" }),
+    ).toBe(false);
+    // 没有原因、读不到原因：一个字都不显示。
+    expect(shouldShowCaptureRevoked({ switchState: "off", revoked: "none" })).toBe(false);
+    expect(shouldShowCaptureRevoked({ switchState: "off", revoked: "unknown" })).toBe(false);
+  });
+
+  it("文案说清「为什么」和「怎么办」，且不出现机制词", () => {
+    const text = captureRevokedText(NAME);
+    expect(text).toContain(NAME);
+    expect(text).toContain("系统授权");
+    expect(text).toContain("重新打开一次");
+    for (const bad of [
+      "UAC",
+      "提权",
+      "计划任务",
+      "task",
+      "Helper",
+      "助手",
+      "进程",
+      "端口",
+      "架构",
+    ]) {
+      expect(text).not.toContain(bad);
+    }
+  });
+
+  it("载荷规范化：只认六个稳定 token，其余一律 unknown（不猜原因）", () => {
+    for (const token of [
+      "none",
+      "task_missing",
+      "reauth_marker_present",
+      "task_target_mismatch",
+      "task_power_policy_mismatch",
+      "unsupported",
+    ] as const) {
+      expect(normalizeCaptureRevoked(token)).toBe(token);
+    }
+    expect(normalizeCaptureRevoked(undefined)).toBe("unknown");
+    expect(normalizeCaptureRevoked("")).toBe("unknown");
+    expect(normalizeCaptureRevoked("Task_Missing")).toBe("unknown");
+    expect(normalizeCaptureRevoked("task_power_policy_mismatch ")).toBe("unknown");
   });
 });

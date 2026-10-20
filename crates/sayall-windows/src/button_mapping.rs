@@ -91,6 +91,19 @@ pub trait MappingInjector: Send + Sync {
     ///
     /// 同步阻塞（窗口期内），调用方必须放在后台任务里。
     fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String>;
+
+    /// 「记录点击位置」：读取当前物理光标并要求它落在目标应用窗口内。
+    ///
+    /// 面向完全不暴露无障碍接口的应用（微信 4.x）。同步、无阻塞。
+    fn learn_focus_point(&self, target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        crate::app_launcher::learn_focus_point(target)
+    }
+
+    /// 可选常用语组件（私有实现，构建期由宿主安装到进程级槽位）。
+    /// 未安装时返回空实现：常用语不可用，且不影响任何按键行为。
+    fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
+        crate::common_phrases::current_common_phrase_host()
+    }
 }
 
 /// 生产注入器：批量 SendInput tap（DOWN+UP），部分交付时由 send_input 层回滚。
@@ -99,6 +112,8 @@ pub struct SendInputInjector {
     /// 聚焦服务：单线程串行执行 UIA 聚焦（不阻塞按键/手势线程）。
     focus: Mutex<Option<crate::focus_service::FocusRunner>>,
     focus_policy: crate::focus_service::FocusRetryPolicy,
+    /// 可选常用语组件（私有实现注入；默认不可用）。
+    common_phrase_host: RwLock<Arc<dyn crate::common_phrases::CommonPhraseHost>>,
 }
 
 impl SendInputInjector {
@@ -108,7 +123,22 @@ impl SendInputInjector {
             runtime,
             focus: Mutex::new(None),
             focus_policy: crate::focus_service::FocusRetryPolicy::default(),
+            common_phrase_host: RwLock::new(Arc::new(
+                crate::common_phrases::DisabledCommonPhraseHost,
+            )),
         }
+    }
+
+    /// 绑定可选常用语组件（私有实现，构建期注入；未绑定即不可用）。
+    ///
+    /// 绑定后：`OpenCommonPhrases` 动作可打开面板，面板打开期间六个按键边沿由
+    /// `CommonPhraseHost::handle` 在**手势识别之前**认领。
+    pub fn set_common_phrase_host(&self, host: Arc<dyn crate::common_phrases::CommonPhraseHost>) {
+        let mut slot = self
+            .common_phrase_host
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = host;
     }
 
     /// 惰性启动聚焦服务（首次用到时才创建线程）。
@@ -203,6 +233,12 @@ impl MappingInjector for SendInputInjector {
                 let recorded = profile
                     .and_then(|profile| profile.recorded.clone())
                     .ok_or_else(|| "该应用还没有学习过输入框".to_owned())?;
+                // 激活是异步完成的：先等目标成为前台，否则聚焦服务的前几次尝试
+                // 会打在上一个前台应用上（嵌套动作里尤其明显）。
+                let _ = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
                 self.with_focus_runner(|runner| {
                     runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
                         crate::focus::FocusChoice::Recorded(recorded),
@@ -211,6 +247,16 @@ impl MappingInjector for SendInputInjector {
                 .flatten()
                 .map(|_| ())
                 .ok_or_else(|| "聚焦服务不可用".to_owned())
+            }
+            crate::focus::FocusStrategy::RecordedPoint => {
+                let point = profile
+                    .and_then(|profile| profile.point)
+                    .ok_or_else(|| "该应用还没有记录点击位置".to_owned())?;
+                let (x, y) = crate::app_launcher::recorded_point_absolute(target, &point)?;
+                self.runtime
+                    .move_cursor_and_click(x, y)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }
         }
     }
@@ -227,6 +273,22 @@ impl MappingInjector for SendInputInjector {
         self.with_focus_runner(|runner| runner.learn_target())
             .unwrap_or(Err(crate::focus_service::FocusFailure::Cancelled))
             .map_err(|reason| reason.as_str().to_owned())
+    }
+
+    fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
+        let local = self
+            .common_phrase_host
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        // 组件通常由宿主启动时安装到进程级槽位；本地字段为空实现时读槽位。
+        if matches!(
+            local.access(),
+            crate::common_phrases::CommonPhraseAccess::Unavailable
+        ) {
+            return crate::common_phrases::current_common_phrase_host();
+        }
+        local
     }
 }
 
@@ -288,6 +350,8 @@ pub struct ButtonMappingRuntime {
     gesture_callbacks: Arc<RwLock<Vec<ButtonGestureCallback>>>,
     /// 与引擎工作线程共享的注入器句柄（用于读取最近一次聚焦结果、触发测试聚焦）。
     injector: Arc<dyn MappingInjector>,
+    /// 组合动作运行时（RunMacro 手势分发与 UI 测试入口共用）。
+    macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -296,6 +360,7 @@ impl ButtonMappingRuntime {
         injector: Arc<dyn MappingInjector>,
         usage: Arc<UsageCounters>,
         snapshot: Arc<Mutex<RawInputSnapshot>>,
+        macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         // 门控把被吞键盘边沿直接投递到引擎通道（钩子线程闭包投递，无阻塞）。
@@ -318,6 +383,7 @@ impl ButtonMappingRuntime {
             edge_callbacks: Arc::clone(&edge_callbacks),
             gesture_callbacks: Arc::clone(&gesture_callbacks),
             injector: Arc::clone(&injector),
+            macro_runtime: Arc::clone(&macro_runtime),
             worker: None,
         };
 
@@ -345,6 +411,7 @@ impl ButtonMappingRuntime {
                         gesture_callbacks,
                         injector,
                         usage,
+                        macro_runtime,
                     )
                 }
             })
@@ -381,6 +448,11 @@ impl ButtonMappingRuntime {
         read_lock(&self.mappings).clone()
     }
 
+    /// 组合动作运行时句柄（平台层在加载/保存组合动作后经它同步库快照）。
+    pub fn macro_runtime(&self) -> Arc<crate::macro_runtime::MacroRuntime> {
+        Arc::clone(&self.macro_runtime)
+    }
+
     pub fn snapshot(&self) -> ButtonMappingSnapshot {
         let state = lock_state(&self.state);
         ButtonMappingSnapshot {
@@ -410,6 +482,11 @@ impl ButtonMappingRuntime {
     /// UI「开始学习输入框」：阻塞至多 3 秒，返回捕获到的输入框特征。
     pub fn learn_focus_target(&self) -> Result<crate::focus::RecordedFocusTarget, String> {
         self.injector.learn_focus_target()
+    }
+
+    /// UI「记录点击位置」：读取物理光标并要求其落在目标应用窗口内。
+    pub fn learn_focus_point(&self, target: &str) -> Result<crate::focus::RecordedPoint, String> {
+        self.injector.learn_focus_point(target)
     }
 
     /// 订阅语义按键边沿（Tauri 层转发为前端事件；画布高亮数据源）。
@@ -563,6 +640,7 @@ fn engine_worker(
     gesture_callbacks: Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: Arc<dyn MappingInjector>,
     usage: Arc<UsageCounters>,
+    macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
 ) {
     let mut merger = ButtonStateMerger::default();
     let mut recognizer = GestureRecognizer::new();
@@ -574,6 +652,10 @@ fn engine_worker(
     let mut native_pending: BTreeSet<RemoteButton> = BTreeSet::new();
     // 「按住连续触发」统计：起拍建条目，释放/复位时聚合落一行。
     let mut repeat_runs: RepeatRuns = BTreeMap::new();
+    // 常用语面板认领的按下（公开侧自持配对，2026-10-15 评审 M2）：被认领的
+    // 按下不进手势识别，其释放沿也由引擎直接消费——不依赖组件在释放沿的
+    // 返回值（那一瞬面板可能已关闭）。见 `CommonPhraseHost::handle` 的配对约定。
+    let mut phrase_claimed: BTreeSet<RemoteButton> = BTreeSet::new();
     // OK 键上下文点击：最近一次由遥控器注入成功的鼠标移动时刻（5 秒窗口）。
     let mut last_remote_move_at: Option<Instant> = None;
 
@@ -600,6 +682,7 @@ fn engine_worker(
                             &injector,
                             &mut native_pending,
                             &mut last_remote_move_at,
+                            &macro_runtime,
                         ) {
                             reset_after_terminal_action(
                                 "lock_workstation",
@@ -655,7 +738,9 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -675,7 +760,9 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
             }
             EngineMessage::GateEdge(edge) => {
@@ -699,17 +786,20 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
-                crate::ble::gatt_note(format!(
-                    "map_reset source={}",
-                    match message {
-                        EngineMessage::ListenerStopped => "listener_stopped",
-                        _ => "device_removed",
-                    }
-                ));
+                let reason = match message {
+                    EngineMessage::ListenerStopped => "listener_stopped",
+                    _ => "device_removed",
+                };
+                crate::ble::gatt_note(format!("map_reset source={reason}"));
+                // 常用语面板（可选私有组件）：来源失效（断连、监听停止、睡眠
+                // 唤醒后的 HID 接口移除）时关闭面板并清认领状态；未接入时空操作。
+                injector.common_phrase_host().reset(reason);
                 // 释放全部按住状态：取消所有手势计时，不触发动作。
                 recognizer.release_all();
                 let edges = merger.release_all();
@@ -730,13 +820,18 @@ fn engine_worker(
                     &usage,
                     &mut native_pending,
                     &mut repeat_runs,
+                    &mut phrase_claimed,
                     &mut last_remote_move_at,
+                    &macro_runtime,
                 );
+                // 认领集合无需在此显式清理：被认领的按住都在上面 release_all
+                // 产生的释放边沿里配对消费并移出（见 handle_edges 释放分支）。
             }
             EngineMessage::MappingsChanged => {
                 let mappings = read_lock(&mappings).clone();
                 recognizer.configure(&mappings);
                 // 配置变化重置全部手势状态：挂起的泄漏对冲标记一并失效。
+                // 常用语认领集合保留：正被认领按住的键仍靠它的释放沿配对消费。
                 native_pending.clear();
                 finish_all_repeat_runs(&mut repeat_runs, "reconfigure");
                 let configured = crate::raw_input::ALL_BUTTONS
@@ -779,7 +874,9 @@ fn handle_edges(
     usage: &Arc<UsageCounters>,
     native_pending: &mut BTreeSet<RemoteButton>,
     repeat_runs: &mut RepeatRuns,
+    phrase_claimed: &mut BTreeSet<RemoteButton>,
     last_remote_move_at: &mut Option<Instant>,
+    macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
 ) {
     if edges.is_empty() {
         return;
@@ -826,15 +923,54 @@ fn handle_edges(
             ));
         }
         let fired = if edge.is_pressed {
-            // OK 上下文点击：命中窗口时立即点击光标位置，并吞掉本次按压
-            // （单击/双击/长按都不执行）；注入失败则回落到正常路径。
-            if ok_context_click_applies(&edge, &mappings, *last_remote_move_at, now, injector) {
-                recognizer.swallow_press(edge.button);
+            // 常用语面板（可选私有组件）：在手势识别之前认领本次边沿。
+            // 面板打开期间这六个键不区分单击/双击/长按，按下即响应；
+            // 命中即结束，不进入 recognizer，也不执行原映射。
+            if injector.common_phrase_host().handle(
+                edge.button,
+                true,
+                crate::common_phrases::PHRASE_SOURCE_DEFAULT,
+            ) {
+                // 公开侧自持配对（2026-10-15 评审 M2）：记下被认领的按下，
+                // 其释放沿由本引擎直接消费——组件在释放沿的返回值不作数
+                //（那一瞬面板可能已关闭，释放沿绝不能漏进手势识别）。
+                phrase_claimed.insert(edge.button);
+                // 认领的按压不继承旧手势状态：上一轮双击窗若挂起，残留会在
+                // 窗口超时后补发一次幽灵单击。
+                recognizer.cancel_press(edge.button);
                 Vec::new()
             } else {
-                recognizer.press(edge.button, now)
+                // 未认领的按下会进入手势识别：清掉该键可能残留的旧认领记录，
+                // 让其释放沿回到手势识别（与上面的配对消费互补）。
+                phrase_claimed.remove(&edge.button);
+                // OK 上下文点击：命中窗口时立即点击光标位置，并吞掉本次按压
+                //（单击/双击/长按都不执行）；注入失败则回落到正常路径。
+                if ok_context_click_applies(&edge, &mappings, *last_remote_move_at, now, injector) {
+                    recognizer.swallow_press(edge.button);
+                    Vec::new()
+                } else {
+                    recognizer.press(edge.button, now)
+                }
             }
         } else {
+            // 释放沿：先问面板（保持组件内部在按状态同步），再按公开侧记账
+            // 决定是否消费——被认领的按下，其释放沿必须配对吞下。
+            let claimed_press = phrase_claimed.remove(&edge.button);
+            let panel_handled = injector.common_phrase_host().handle(
+                edge.button,
+                false,
+                crate::common_phrases::PHRASE_SOURCE_DEFAULT,
+            );
+            if claimed_press || panel_handled {
+                if panel_handled && !claimed_press {
+                    // 面板认领了「没有认领记录」的释放沿：该键的按下沿当时
+                    // 进了手势识别（长按/双击计时在跑），先清掉残留状态再消费，
+                    // 否则计时到期会引爆幽灵手势。
+                    recognizer.cancel_press(edge.button);
+                }
+                finish_repeat_run(repeat_runs, edge.button, "phrase_panel");
+                continue;
+            }
             recognizer.release(edge.button, now)
         };
         if !edge.is_pressed {
@@ -851,6 +987,7 @@ fn handle_edges(
                 injector,
                 native_pending,
                 last_remote_move_at,
+                macro_runtime,
             ) {
                 reset_after_terminal_action(
                     "lock_workstation",
@@ -918,6 +1055,7 @@ fn fire_gesture(
     injector: &Arc<dyn MappingInjector>,
     native_pending: &mut BTreeSet<RemoteButton>,
     last_remote_move_at: &mut Option<Instant>,
+    macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
 ) -> bool {
     let fired = FiredGesture { button, trigger };
     let suspended = {
@@ -1106,6 +1244,31 @@ fn fire_gesture(
                 }
             }
         }
+        ButtonAction::RunMacro { macro_id, .. } => {
+            // 组合动作由运行时在独立线程异步执行（不阻塞引擎线程）；引用按
+            // **最新已保存版本**解析（Mac 语义：编辑后所有引用自动生效），
+            // 保存时所指的 macro_version 只作审计。
+            crate::ble::gatt_note(format!(
+                "map_fire button={:?} trigger={:?} action=run_macro macro_id={macro_id}",
+                button, trigger
+            ));
+            match macro_runtime.start(&macro_id) {
+                Ok(()) => crate::ble::gatt_note(format!(
+                    "map_macro macro_id={macro_id} phase=accepted terminal_result=deferred"
+                )),
+                Err(error) => {
+                    let reason = match error {
+                        crate::macro_runtime::MacroStartError::AlreadyRunning => "already_running",
+                        crate::macro_runtime::MacroStartError::NotFound => "not_found",
+                        crate::macro_runtime::MacroStartError::Invalid(_) => "invalid_macro",
+                    };
+                    crate::ble::gatt_note(format!(
+                        "map_macro macro_id={macro_id} phase=requested terminal_result=failed reason={reason}"
+                    ));
+                    lock_state(state).last_error = Some("组合动作未能开始执行".to_owned());
+                }
+            }
+        }
         ButtonAction::FocusInput => {
             crate::ble::gatt_note(format!(
                 "map_fire button={:?} trigger={:?} action=focus_input",
@@ -1124,6 +1287,33 @@ fn fire_gesture(
                     );
                     lock_state(state).last_error = Some(format!("聚焦输入框失败：{error}"));
                 }
+            }
+        }
+        ButtonAction::OpenCommonPhrases => {
+            let host = injector.common_phrase_host();
+            // 同一按键再按 = 收起面板（对齐 macOS：isVisible 且来源相同 → close(toggle_button)）。
+            // 面板打开时也消费这次按键（不重复触发打开动作）。
+            let toggled_closed = host.is_panel_open();
+            let opened = if toggled_closed {
+                host.close("toggle_button");
+                false
+            } else {
+                host.open(crate::common_phrases::PHRASE_SOURCE_DEFAULT)
+            };
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action=open_common_phrases result={} access={:?}",
+                if toggled_closed {
+                    "closed"
+                } else if opened {
+                    "opened"
+                } else {
+                    "unavailable"
+                },
+                host.access()
+            ));
+            if !opened && !toggled_closed {
+                lock_state(state).last_error =
+                    Some("常用语当前不可用（需要会员，或未接入常用语组件）".to_owned());
             }
         }
     }
@@ -1221,7 +1411,27 @@ mod tests {
         moves: StdMutex<Vec<(MoveDirection, u16)>>,
         focus_requests: StdMutex<Vec<FocusCall>>,
         learn_results: StdMutex<Vec<Result<crate::focus::RecordedFocusTarget, String>>>,
+        /// 常用语组件槽：测试独立注入，不碰进程级槽位（避免用例间互相污染）。
+        phrase_host: PhraseHostSlot,
         fail: bool,
+    }
+
+    /// 常用语组件槽（`Arc<dyn CommonPhraseHost>` 无 Debug 实现，包一层，
+    /// 免得为它手写整个 [`RecordingInjector`] 的 Debug）。
+    #[derive(Default)]
+    struct PhraseHostSlot(StdMutex<Option<Arc<dyn crate::common_phrases::CommonPhraseHost>>>);
+
+    impl std::fmt::Debug for PhraseHostSlot {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("PhraseHostSlot")
+        }
+    }
+
+    impl RecordingInjector {
+        /// 绑定本用例专用的常用语组件。
+        fn set_phrase_host(&self, host: Arc<dyn crate::common_phrases::CommonPhraseHost>) {
+            *self.phrase_host.0.lock().unwrap() = Some(host);
+        }
     }
 
     /// 测试注入器收到的聚焦类调用（区分「只聚焦」与「打开+聚焦」）。
@@ -1319,6 +1529,15 @@ mod tests {
                 })
             })
         }
+
+        fn common_phrase_host(&self) -> Arc<dyn crate::common_phrases::CommonPhraseHost> {
+            self.phrase_host
+                .0
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::common_phrases::DisabledCommonPhraseHost))
+        }
     }
 
     fn mappings_with_single(button: RemoteButton, key: KeyCode) -> ButtonMappings {
@@ -1410,6 +1629,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let single = |key: KeyCode| ButtonAction::Shortcut {
             chord: KeyChord { keys: vec![key] },
@@ -1687,6 +1909,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let long_scroll = || ButtonAction::Scroll {
             direction: ScrollDirection::Up,
@@ -1838,6 +2063,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::clone(&snapshot),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         // 注意：单元测试环境没有真实 key_gate 线程（is_gate_thread_alive=false），
         // 引擎按设计保持观察模式（不注入）。此处先验证边沿→手势→回调链路。
@@ -1890,6 +2118,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         runtime.set_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
         let fired = Arc::new(StdMutex::new(Vec::new()));
@@ -1943,6 +2174,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -1987,6 +2221,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2028,6 +2265,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2049,6 +2289,7 @@ mod tests {
                     automation_id: "chat-input".to_owned(),
                     ..Default::default()
                 }),
+                point: None,
             },
         );
         runtime.set_mappings(mappings);
@@ -2085,6 +2326,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         runtime.set_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
 
@@ -2144,6 +2388,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::clone(&snapshot),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         // 双击配置：释放后进入双击窗口（悬而未决），监听器停止必须取消它。
         let mut mappings = ButtonMappings::default();
@@ -2199,6 +2446,9 @@ mod tests {
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::clone(&usage),
             snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let sender = runtime.sender();
         // 双源同一次按下：语义按下只计一次。
@@ -2242,6 +2492,9 @@ mod tests {
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2346,6 +2599,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         // 长按=退格 + 开关=长按：550ms 触发后按 50ms 间隔连拍。
@@ -2508,6 +2764,9 @@ mod tests {
             Arc::clone(&injector) as Arc<dyn MappingInjector>,
             Arc::new(UsageCounters::default()),
             Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
         );
         let mut mappings = ButtonMappings::default();
         // 上键单击 = 移动光标（移动注入成功会刷新 OK 点击窗口）。
@@ -2624,5 +2883,352 @@ mod tests {
 
         drop(runtime);
         drop(gate);
+    }
+
+    /// 常用语面板桩（经 [`RecordingInjector`] 独立注入，不写进程级槽位，
+    /// 避免用例并行时互相污染）：只认领被显式指派的边沿，记录全部到达的调用。
+    #[derive(Debug, Default)]
+    struct MockPhraseHost {
+        /// 这些按键的按下沿返回「已消费」。
+        claim_presses: StdMutex<BTreeSet<RemoteButton>>,
+        /// 这些按键的释放沿返回「已消费」（模拟组件内部自持在按状态的实现形态）。
+        claim_releases: StdMutex<BTreeSet<RemoteButton>>,
+        /// 到达 `handle` 的全部边沿（顺序）。
+        edges: StdMutex<Vec<(RemoteButton, bool)>>,
+        /// `reset` 的原因记录。
+        resets: StdMutex<Vec<String>>,
+    }
+
+    impl crate::common_phrases::CommonPhraseHost for MockPhraseHost {
+        fn handle(&self, button: RemoteButton, is_pressed: bool, _source: &str) -> bool {
+            self.edges.lock().unwrap().push((button, is_pressed));
+            if is_pressed {
+                self.claim_presses.lock().unwrap().contains(&button)
+            } else {
+                self.claim_releases.lock().unwrap().contains(&button)
+            }
+        }
+
+        fn reset(&self, reason: &str) {
+            self.resets.lock().unwrap().push(reason.to_owned());
+        }
+    }
+
+    /// 双击共存的映射：释放沿才进入手势判定——认领漏出手势的回归会以
+    /// 「幽灵单击/幽灵双击」暴露。
+    fn mappings_with_double(
+        button: RemoteButton,
+        single: KeyCode,
+        double: KeyCode,
+    ) -> ButtonMappings {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            button,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord { keys: vec![single] },
+                },
+                double: ButtonAction::Shortcut {
+                    chord: KeyChord { keys: vec![double] },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings
+    }
+
+    /// 单击 + 长按共存的映射：按住超过阈值触发长按——残留的按压状态会以
+    /// 「幽灵长按」暴露。
+    fn mappings_with_long(button: RemoteButton, single: KeyCode, long: KeyCode) -> ButtonMappings {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            button,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord { keys: vec![single] },
+                },
+                long: ButtonAction::Shortcut {
+                    chord: KeyChord { keys: vec![long] },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings
+    }
+
+    fn spawn_phrase_engine(
+        injector: &Arc<RecordingInjector>,
+        mappings: ButtonMappings,
+    ) -> (ButtonMappingRuntime, Arc<StdMutex<Vec<FiredGesture>>>) {
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        runtime.set_mappings(mappings);
+        let fired = Arc::new(StdMutex::new(Vec::new()));
+        let fired_sink = Arc::clone(&fired);
+        runtime.subscribe_button_gestures(Arc::new(move |gesture| {
+            fired_sink.lock().unwrap().push(gesture);
+        }));
+        (runtime, fired)
+    }
+
+    /// 认领早于手势识别（评审 M2）：面板认领的按下沿不进入单击/双击/长按判定；
+    /// 未认领时照常触发（对照）。
+    #[test]
+    fn phrase_claim_precedes_gesture_recognition() {
+        let injector = Arc::new(RecordingInjector::default());
+        let host = Arc::new(MockPhraseHost::default());
+        injector
+            .set_phrase_host(Arc::clone(&host) as Arc<dyn crate::common_phrases::CommonPhraseHost>);
+        let (runtime, fired) = spawn_phrase_engine(
+            &injector,
+            mappings_with_single(RemoteButton::Ok, KeyCode::Enter),
+        );
+        let sender = runtime.sender();
+
+        // 对照：未认领的按下+释放照常进入手势识别。
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || host.edges.lock().unwrap().len() >= 2,
+                Duration::from_millis(1000)
+            ),
+            "未认领的边沿必须到达组件"
+        );
+        assert_eq!(fired.lock().unwrap().len(), 1, "未认领时手势照常触发");
+
+        // 认领：按下沿与释放沿都不进入手势识别。
+        host.claim_presses.lock().unwrap().insert(RemoteButton::Ok);
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || host.edges.lock().unwrap().len() >= 4,
+                Duration::from_millis(1000)
+            ),
+            "认领的按下与释放都必须到达组件"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            fired.lock().unwrap().len(),
+            1,
+            "被认领的按下不得触达手势识别"
+        );
+        drop(runtime);
+    }
+
+    /// 认领的 DOWN 不漏出手势（评审 M2）：释放沿即使不再被组件认领
+    /// （面板已关/组件只认按下），也必须由公开侧配对消费——否则该释放会对一个
+    /// 从未开始的按压做判定，污染下一轮为「幽灵双击」。
+    #[test]
+    fn phrase_claimed_press_release_is_consumed_without_ghost_gestures() {
+        let injector = Arc::new(RecordingInjector::default());
+        let host = Arc::new(MockPhraseHost::default());
+        injector
+            .set_phrase_host(Arc::clone(&host) as Arc<dyn crate::common_phrases::CommonPhraseHost>);
+        let (runtime, fired) = spawn_phrase_engine(
+            &injector,
+            mappings_with_double(RemoteButton::Ok, KeyCode::Enter, KeyCode::Space),
+        );
+        let sender = runtime.sender();
+
+        // 第一轮：按下被认领；释放不被认领 → 必须由公开侧配对消费。
+        host.claim_presses.lock().unwrap().insert(RemoteButton::Ok);
+        send_ok_press_and_release(&sender);
+        assert!(
+            wait_until(
+                || host.edges.lock().unwrap().len() >= 2,
+                Duration::from_millis(1000)
+            ),
+            "认领的按下与配对消费前的释放都必须到达组件"
+        );
+
+        // 第二轮：正常按压 → 必须得到一次单击（Enter），不得是双击（Space）。
+        host.claim_presses.lock().unwrap().clear();
+        send_ok_press_and_release(&sender);
+        assert!(
+            wait_until(
+                || !fired.lock().unwrap().is_empty(),
+                Duration::from_millis(1500)
+            ),
+            "第二轮必须触发一次手势"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            fired.lock().unwrap().as_slice(),
+            &[FiredGesture {
+                button: RemoteButton::Ok,
+                trigger: ButtonTrigger::Single
+            }],
+            "第一轮被认领的按压不得留下任何手势状态（否则第二轮会变成幽灵双击）"
+        );
+        drop(runtime);
+    }
+
+    /// 一次 OK 的 HID 按下 + 释放（顺序保证引擎按 FIFO 处理）。
+    fn send_ok_press_and_release(sender: &std::sync::mpsc::Sender<EngineMessage>) {
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+    }
+
+    /// handle 认领了「没有认领记录」的释放沿：先清该键残留手势状态再消费。
+    /// 反例（修复前）：按下未被认领（长按计时已启动）→ 释放被认领 → 残留的
+    /// 长按计时在 550ms 后引爆「幽灵长按」。
+    #[test]
+    fn panel_claimed_release_without_a_recorded_press_clears_stale_state() {
+        let injector = Arc::new(RecordingInjector::default());
+        let host = Arc::new(MockPhraseHost::default());
+        injector
+            .set_phrase_host(Arc::clone(&host) as Arc<dyn crate::common_phrases::CommonPhraseHost>);
+        let (runtime, fired) = spawn_phrase_engine(
+            &injector,
+            mappings_with_long(RemoteButton::Ok, KeyCode::Enter, KeyCode::Space),
+        );
+        let sender = runtime.sender();
+
+        // 按下未被认领（进入长按计时），释放沿被认领（面板在这一刻打开）。
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        assert!(
+            wait_until(
+                || host.edges.lock().unwrap().len() >= 1,
+                Duration::from_millis(1000)
+            ),
+            "按下必须到达组件"
+        );
+        host.claim_releases.lock().unwrap().insert(RemoteButton::Ok);
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || host.edges.lock().unwrap().len() >= 2,
+                Duration::from_millis(1000)
+            ),
+            "释放沿必须到达组件"
+        );
+
+        // 越过长按阈值：被消费的释放沿不得留下任何可引爆的计时。
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            fired.lock().unwrap().is_empty(),
+            "被认领的释放沿必须先清掉残留按压状态（不得有幽灵长按）：{:?}",
+            fired.lock().unwrap()
+        );
+        drop(runtime);
+    }
+
+    /// 来源失效（断连/监听停止/睡眠唤醒后的接口移除）必须通知组件收尾：
+    /// 关闭面板并清认领状态（评审 B2 的公开侧调用点，2026-10-15）。
+    #[test]
+    fn device_removed_and_listener_stopped_reset_the_phrase_host() {
+        let injector = Arc::new(RecordingInjector::default());
+        let host = Arc::new(MockPhraseHost::default());
+        injector
+            .set_phrase_host(Arc::clone(&host) as Arc<dyn crate::common_phrases::CommonPhraseHost>);
+        let (runtime, _fired) = spawn_phrase_engine(
+            &injector,
+            mappings_with_single(RemoteButton::Ok, KeyCode::Enter),
+        );
+        let sender = runtime.sender();
+
+        sender.send(EngineMessage::DeviceRemoved).unwrap();
+        assert!(
+            wait_until(
+                || host
+                    .resets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|reason| reason == "device_removed"),
+                Duration::from_millis(1000)
+            ),
+            "设备移除必须 reset 常用语宿主：{:?}",
+            host.resets.lock().unwrap()
+        );
+        sender.send(EngineMessage::ListenerStopped).unwrap();
+        assert!(
+            wait_until(
+                || host
+                    .resets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|reason| reason == "listener_stopped"),
+                Duration::from_millis(1000)
+            ),
+            "监听停止必须 reset 常用语宿主：{:?}",
+            host.resets.lock().unwrap()
+        );
+        drop(runtime);
+    }
+
+    /// 认领的按下遇到来源失效（DeviceRemoved）：release_all 的配对释放沿
+    /// 由公开侧消费——不得对它做释放判定（否则双击窗被开启，300ms 后
+    /// 补发一次幽灵单击）。
+    #[test]
+    fn phrase_claimed_press_survives_a_source_loss_without_ghost_gestures() {
+        let injector = Arc::new(RecordingInjector::default());
+        let host = Arc::new(MockPhraseHost::default());
+        injector
+            .set_phrase_host(Arc::clone(&host) as Arc<dyn crate::common_phrases::CommonPhraseHost>);
+        let (runtime, fired) = spawn_phrase_engine(
+            &injector,
+            mappings_with_double(RemoteButton::Ok, KeyCode::Enter, KeyCode::Space),
+        );
+        let sender = runtime.sender();
+
+        host.claim_presses.lock().unwrap().insert(RemoteButton::Ok);
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        assert!(
+            wait_until(
+                || host.edges.lock().unwrap().len() >= 1,
+                Duration::from_millis(1000)
+            ),
+            "认领的按下必须到达组件"
+        );
+
+        sender.send(EngineMessage::DeviceRemoved).unwrap();
+        assert!(
+            wait_until(
+                || host
+                    .resets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|reason| reason == "device_removed"),
+                Duration::from_millis(1000)
+            ),
+            "设备移除必须 reset 常用语宿主"
+        );
+        // 覆盖双击窗（300ms）之后仍不得出现任何补发手势。
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            fired.lock().unwrap().is_empty(),
+            "来源失效释放的按住不得触达手势识别（不得有幽灵单击/双击）：{:?}",
+            fired.lock().unwrap()
+        );
+        drop(runtime);
     }
 }

@@ -196,13 +196,15 @@ function onboardingEvents(phase: string): Array<Record<string, unknown>> {
 /** 诊断报告夹具：与 Rust `get_diagnostic_report`（schema v2）同形。 */
 function diagnosticReport(): DiagnosticReport {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     appVersion: "0.5.0",
     appBuild: "unknown",
     sourceRevision: "fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901",
     buildChannel: "local-test",
     windowsVersion: "10.0.26100",
     processArchitecture: "x86_64",
+    bootType: "full",
+    fastStartupEnabled: false,
     platform: "windows",
     verificationStatus: "真机验证中",
     capabilities: {
@@ -300,6 +302,7 @@ function rc003BridgeSnapshot(
     targetUsages: [],
     ownedUsages: [],
     captureHealth: "off",
+    captureRevoked: "none",
     ...overrides,
   };
 }

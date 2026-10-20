@@ -7,8 +7,11 @@ import { reasonToken, reportFrontendEvent } from "../lib/frontend-diagnostics";
 import {
   captureFailureText,
   captureInactiveText,
+  captureRevokedText,
   captureSwitchState as captureSwitchStateFn,
+  normalizeCaptureRevoked,
   shouldShowCaptureInactive,
+  shouldShowCaptureRevoked,
 } from "../lib/capture-switch";
 import type {
   AudioEndpoint,
@@ -18,6 +21,7 @@ import type {
   KeyChord,
   PairedRemote,
   Rc003CaptureHealth,
+  Rc003CaptureRevoked,
   Rc003TaskStatus,
   RuntimeSnapshot,
   VoiceInputTool,
@@ -460,6 +464,9 @@ const captureFailure = computed(() =>
  */
 const rc003CaptureHealth = ref<Rc003CaptureHealth>("off");
 
+/** 启动对账把开关关掉的原因（2026-10-15，issue #264 附加观察甲）：`none` = 没发生。 */
+const rc003CaptureRevoked = ref<Rc003CaptureRevoked | "unknown">("none");
+
 /**
  * 「开着但没生效」的提示（2026-10-13 Andy 定稿，文案见 captureInactiveText）：
  * 后端说 `inactive` 才出现，且只在**遥控器链路正常**时出现——链路本身断掉时
@@ -473,6 +480,20 @@ const captureInactiveNote = computed(() =>
     linkReady: atvvReady.value,
   })
     ? captureInactiveText(CAPTURE_FAILURE_NAME)
+    : null,
+);
+
+/**
+ * 「开关被应用自己关掉了」的解释（2026-10-15，issue #264 附加观察甲）：升级后对账会
+ * 因系统授权需要重新确认而回落开关，本页必须说明原因，否则用户只会觉得"升级后变差"。
+ * 与失败句、失效句同一位：操作失败优先，其次这句，再次「开着没生效」。
+ */
+const captureRevokedNote = computed(() =>
+  shouldShowCaptureRevoked({
+    switchState: captureSwitchState.value,
+    revoked: rc003CaptureRevoked.value,
+  })
+    ? captureRevokedText(CAPTURE_FAILURE_NAME)
     : null,
 );
 
@@ -512,6 +533,7 @@ async function reconcileRc003Capture(): Promise<void> {
   try {
     const bridge = await getRc003BridgeSnapshot();
     rc003CaptureHealth.value = bridge.captureHealth;
+    rc003CaptureRevoked.value = normalizeCaptureRevoked(bridge.captureRevoked);
   } catch {
     // 读不到保持上一次的值，最多晚一秒反映。
   }
@@ -1381,8 +1403,11 @@ onUnmounted(() => {
             <div v-if="vokieRunning === true" class="info-callout warning callout-small">
               检测到 Vokie 正在运行：它和豆包用的是同一个快捷键（右 Alt），按住遥控器语音键可能唤起 Vokie。要用豆包，请先退出 Vokie。
             </div>
-            <p v-if="captureFailure || captureInactiveNote" class="tiny capture-failure">
-              {{ captureFailure ?? captureInactiveNote }}
+            <p
+              v-if="captureFailure || captureRevokedNote || captureInactiveNote"
+              class="tiny capture-failure"
+            >
+              {{ captureFailure ?? captureRevokedNote ?? captureInactiveNote }}
             </p>
           </div>
 
@@ -1518,8 +1543,11 @@ onUnmounted(() => {
             </div>
             <!-- 本机不可用（ARM64，issue #206）：说明句与豆包面板逐字一致。 -->
             <p v-if="captureUnsupported" class="tiny muted">{{ CAPTURE_UNSUPPORTED_NOTE }}</p>
-            <p v-if="captureFailure || captureInactiveNote" class="tiny capture-failure">
-              {{ captureFailure ?? captureInactiveNote }}
+            <p
+              v-if="captureFailure || captureRevokedNote || captureInactiveNote"
+              class="tiny capture-failure"
+            >
+              {{ captureFailure ?? captureRevokedNote ?? captureInactiveNote }}
             </p>
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{
