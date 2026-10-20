@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
+import CrownIcon from "./CrownIcon.vue";
 
 defineProps<{ activePage: string; version?: string | null }>();
 const emit = defineEmits<{ select: [page: string] }>();
@@ -56,10 +57,8 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     ],
   },
   member: {
-    // 五角星：会员页侧栏图标（2026-10-15 私有会员页需要，公开页面不使用）。
-    strokes: [
-      "M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z",
-    ],
+    // 会员图标由 CrownIcon 组件绘制（SF Symbols crown.fill）；保留空组维持类型映射。
+    strokes: [],
   },
 };
 </script>
@@ -75,7 +74,8 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         type="button"
         @click="emit('select', item.id)"
       >
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <CrownIcon v-if="item.icon === 'member'" class="nav-icon" />
+        <svg v-else class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <template v-if="ICON_PATHS[item.icon].fills">
             <path
               v-for="(path, index) in ICON_PATHS[item.icon].fills"
