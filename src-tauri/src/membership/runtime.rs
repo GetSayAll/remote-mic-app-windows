@@ -142,6 +142,8 @@ pub struct MembershipCatalog {
     pub signed_in: bool,
     pub products: Vec<MembershipProduct>,
     pub offer: Option<MembershipOffer>,
+    /// 服务端授权方案全集（首个即 `offer`）；私有页按需展示切换。
+    pub options: Vec<MembershipOffer>,
 }
 
 /// 一次购买尝试。
