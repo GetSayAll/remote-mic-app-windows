@@ -1799,8 +1799,10 @@ watch(
   flex-direction: column;
   min-height: 0;
   flex: 1;
-  /* 对齐 Mac：页脚（状态条 / 向导按钮）贴在窗口底部，内容不足时不再留一大片空白。 */
-  min-height: calc(100vh - 48px);
+  /* 页面固定为可视区高度：步骤/动作库再多也只滚内部区域，
+     底部按钮（新建/导入/导出、取消编辑/上一步/下一步）始终贴在窗口底部。 */
+  height: calc(100vh - 48px);
+  overflow: hidden;
 }
 /* 标题与副标题的尺寸/位置对齐按键页：沿用全局 .page-header h1（22px）与
    .page-subtitle（13px、margin-top 6px），不再单独加内边距或分隔线。 */
