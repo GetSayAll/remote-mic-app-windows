@@ -615,6 +615,10 @@ async fn open_membership_link(app: tauri::AppHandle, link: String) -> Result<(),
         "agreement" => "https://getsayall.com/terms/",
         "privacy" => "https://getsayall.com/privacy/",
         "refund" => "https://getsayall.com/refund/",
+        // 大版本说明有独立页面（与 Mac 的「大版本说明」同源）。
+        "version" => "https://getsayall.com/plus-version/",
+        // 键位方案市场使用公开 GitHub 仓库，与 Mac 共用同一入口。
+        "market" => "https://github.com/GetSayAll/sayall-market",
         _ => return Err("unknown_membership_link".to_string()),
     };
     app.opener()
