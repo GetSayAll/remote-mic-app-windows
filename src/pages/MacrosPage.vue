@@ -1802,23 +1802,13 @@ watch(
   /* 对齐 Mac：页脚（状态条 / 向导按钮）贴在窗口底部，内容不足时不再留一大片空白。 */
   min-height: calc(100vh - 48px);
 }
+/* 标题与副标题的尺寸/位置对齐按键页：沿用全局 .page-header h1（22px）与
+   .page-subtitle（13px、margin-top 6px），不再单独加内边距或分隔线。 */
 .page-header {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
-  padding: 16px 22px 14px;
-  border-bottom: 1px solid var(--border);
-}
-.page-header h1 {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 600;
-}
-.page-subtitle {
-  margin: 4px 0 0;
-  font-size: 12.5px;
-  color: var(--text-secondary);
+  gap: 0;
 }
 .library-body {
   flex: 1;
