@@ -34,6 +34,35 @@ const SIDEBAR_WIDTH: f64 = 108.0;
 const OFFSCREEN_X: f64 = -20_000.0;
 const EVENT_NAME: &str = "recommendations-page-state";
 
+/// 推荐页是官网页面，样式不在本仓：用初始化脚本注入与本仓 `src/styles.css`
+/// 同款的滚动条隐藏规则（产品要求全应用统一不显示滚动条，只保留滚动能力）。
+///
+/// 用 `initialization_script`（WebView2 的 `AddScriptToExecuteOnDocumentCreated`）
+/// 而不是加载完成后再 `eval`：脚本在每次文档创建时执行，站内跳转、换主题重导航
+/// 都自动生效，也不会先闪一下滚动条。官网样式可能带更高特异性的
+/// `::-webkit-scrollbar` 规则，所以这里用 `!important` 压过它。
+const HIDE_SCROLLBARS_SCRIPT: &str = r#"
+(() => {
+  const CSS = [
+    "*, *::before, *::after { scrollbar-width: none !important; -ms-overflow-style: none !important; }",
+    "*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }",
+  ].join("\n");
+  const apply = () => {
+    const host = document.head || document.documentElement;
+    if (!host) return false;
+    if (document.getElementById("sayall-hide-scrollbars")) return true;
+    const style = document.createElement("style");
+    style.id = "sayall-hide-scrollbars";
+    style.textContent = CSS;
+    host.appendChild(style);
+    return true;
+  };
+  if (!apply()) {
+    document.addEventListener("DOMContentLoaded", apply, { once: true });
+  }
+})();
+"#;
+
 #[derive(Default)]
 pub struct RecommendationsState {
     /// 每次进入页面 / 重试 / 换主题都递增；前端用它丢弃迟到回调。
@@ -199,6 +228,7 @@ pub async fn show_recommendations(app: AppHandle, theme: Option<String>) -> Resu
     let navigation_app = app.clone();
     let new_window_app = app.clone();
     let builder = WebviewBuilder::new(LABEL, WebviewUrl::External(about_blank()))
+        .initialization_script(HIDE_SCROLLBARS_SCRIPT)
         .on_navigation(move |url| {
             if is_allowed_navigation(url) {
                 return true;
@@ -545,5 +575,58 @@ mod tests {
             browser_destination(Some(&blank)).as_str(),
             "https://sayall.app/recommendations/"
         );
+    }
+
+    /// 滚动条隐藏必须同时覆盖三点：通用属性、webkit 伪元素、以及官网可能存在的
+    /// 更高特异性规则（`!important`）。少了任何一条，推荐页会重新冒出滚动条。
+    #[test]
+    fn hide_scrollbars_script_covers_standard_and_webkit_rules() {
+        for fragment in [
+            "scrollbar-width: none !important",
+            "-ms-overflow-style: none !important",
+            "*::-webkit-scrollbar",
+            "width: 0 !important",
+            "display: none !important",
+        ] {
+            assert!(
+                HIDE_SCROLLBARS_SCRIPT.contains(fragment),
+                "注入脚本缺少「{fragment}」，推荐页滚动条会重新出现"
+            );
+        }
+        // 文档创建时 head 可能还没解析出来，必须留 DOMContentLoaded 兜底。
+        assert!(HIDE_SCROLLBARS_SCRIPT.contains("DOMContentLoaded"));
+        // 同一文档重复注入只应留下一个 style，避免站内跳转累积节点。
+        assert!(HIDE_SCROLLBARS_SCRIPT.contains("sayall-hide-scrollbars"));
+    }
+
+    /// 推荐页子 WebView 必须挂上这个脚本；漏挂的话整页滚动条直接回来。
+    ///
+    /// 拼字符串是为了让断言不在源码里留下完整字面量——否则测试能自己满足自己，
+    /// 删掉挂载点也不会变红（阳性对照实证）。
+    #[test]
+    fn recommendations_webview_injects_hide_scrollbars_script() {
+        let needle = concat!(".initialization_script(", "HIDE_SCROLLBARS_SCRIPT)");
+        assert!(
+            include_str!("recommendations.rs").contains(needle),
+            "推荐页子 WebView 没有注入滚动条隐藏脚本"
+        );
+    }
+
+    /// 本仓页面与官网页面的隐藏规则要同源：`src/styles.css` 一旦被改回可见滚动条，
+    /// 两个入口（主界面 / 推荐页）就只剩一半生效，这里钉住两边关键声明一致。
+    #[test]
+    fn stylesheet_keeps_matching_scrollbar_hiding_rules() {
+        let stylesheet = include_str!("../../src/styles.css");
+        for fragment in [
+            "scrollbar-width: none",
+            "-ms-overflow-style: none",
+            "::-webkit-scrollbar",
+            "display: none",
+        ] {
+            assert!(
+                stylesheet.contains(fragment),
+                "src/styles.css 缺少「{fragment}」，与推荐页注入规则不再同源"
+            );
+        }
     }
 }
