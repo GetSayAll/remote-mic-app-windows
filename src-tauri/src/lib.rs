@@ -1163,17 +1163,45 @@ fn capture_recover_interval_ms(attempts: u32) -> u64 {
     }
 }
 
+/// 「此前生效过、现在所有权空了」时的恢复阈值（2026-10-15 现场，issue #264）。
+///
+/// 现场：睡眠唤醒后宿主被系统重建，agent 随之退出、所有权立刻释放，而
+/// `capture_recover` 仍要等满 `CAPTURE_RECOVER_AFTER_MS`（60 秒）才动手；加上
+/// 重新注入与握手，用户从睡眠到语音键可用共等 **84 秒**。
+///
+/// 判据不是"多久没生效"，而是**"从来没起来"还是"起来过又断了"**：
+/// 前者可能是设备还没枚举完、助手正在注入/握手（值得等）；后者只可能是链路或
+/// 宿主断了（等没有收益，只会让用户以为坏了）。
+const CAPTURE_RECOVER_AFTER_RELAPSE_MS: u64 = 8_000;
+
+/// 失效期间的对账节奏：观察周期从 15 秒缩到 2 秒，让"看到恢复"与"动手重启"
+/// 都不必等满一个完整观察窗（界面提示与 `capture_resumed` 也随之变快）。
+const CAPTURE_WATCH_INACTIVE_MS: u64 = 2_000;
+
+/// 本轮该按哪个「失效多久才动手」的阈值（纯函数，单测覆盖）。
+///
+/// `ever_active` = 本次开启以来真的接管过（见 `CaptureHealth::Active`）。
+fn capture_recover_after_ms(ever_active: bool, owned_usages: usize) -> u64 {
+    if ever_active && owned_usages == 0 {
+        CAPTURE_RECOVER_AFTER_RELAPSE_MS
+    } else {
+        CAPTURE_RECOVER_AFTER_MS
+    }
+}
+
 /// 是否该「自动重来一次助手」（纯判定，单测覆盖）。
 ///
 /// `inactive_ms` = 捕获连续失效了多久；`since_last_attempt_ms` = 距上次自动重来多久
-/// （`None` = 还没试过）；`attempts` = 已经自动重来过几次。两个条件都满足才动作：
-/// 先给足时间（助手可能正在注入 / 握手），再按尝试次数做防抖。
+/// （`None` = 还没试过）；`attempts` = 已经自动重来过几次；`after_ms` = 本轮阈值
+/// （见 [`capture_recover_after_ms`]）。两个条件都满足才动作：先给足时间（助手可能
+/// 正在注入 / 握手），再按尝试次数做防抖。
 fn capture_should_restart_helper(
     inactive_ms: u64,
     since_last_attempt_ms: Option<u64>,
     attempts: u32,
+    after_ms: u64,
 ) -> bool {
-    inactive_ms >= CAPTURE_RECOVER_AFTER_MS
+    inactive_ms >= after_ms
         && since_last_attempt_ms.map_or(true, |age| age >= capture_recover_interval_ms(attempts))
 }
 
@@ -1333,19 +1361,54 @@ fn reconcile_sleep_step(now_gen: u64, seen_gen: u64, now_ms: u64, deadline_ms: u
     now_gen != seen_gen || now_ms >= deadline_ms
 }
 
-/// 可被 [`wake_capture_reconcile`] 打断的睡眠：语义与 `sleep(ms)` 相同，只是会提前返回。
-/// 返回值指出**为什么**结束：`true` = 被唤醒信号提前打断，`false` = 正常到点
-/// （Trigger 分支据此跳过"唤醒轮"的重复触发，见其注释）。
-/// `wake_seen` 由调用方跨轮持有，记录"已经消化到哪一代"信号——同一代不会被消费两次。
-fn interruptible_reconcile_sleep(ms: u64, wake_seen: &mut u64) -> bool {
+/// 睡眠为什么提前结束（`Timeout` = 正常到点）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileWake {
+    Timeout,
+    /// 开关动作（enable / disable）改了状态，等下一次轮询没有意义。
+    Command,
+    /// 系统刚从睡眠唤醒：宿主可能被重建，必须立刻重查（issue #264）。
+    Resume,
+}
+
+/// 两个唤醒信号 → 唤醒原因（纯函数，单测覆盖）。开关动作优先于唤醒：
+/// 它带着用户的明确意图，日志里应当报"用户动作"而不是"系统事件"。
+fn classify_reconcile_wake(command_changed: bool, resume_changed: bool) -> ReconcileWake {
+    if command_changed {
+        ReconcileWake::Command
+    } else if resume_changed {
+        ReconcileWake::Resume
+    } else {
+        ReconcileWake::Timeout
+    }
+}
+
+/// 可被 [`wake_capture_reconcile`] 或系统唤醒打断的睡眠：语义与 `sleep(ms)` 相同，
+/// 只是会提前返回，并指出**为什么**结束。
+///
+/// 开关动作（`Command`）与系统唤醒（`Resume`）分开上报：Trigger 分支只应跳过
+/// "开关动作唤醒轮"的重复 `/run`（那次 enable 自己已经触发过），系统唤醒不能
+/// 跳过——唤醒后助手多半已经不在，正是最该触发的时候。
+/// `wake_seen` / `resume_seen` 由调用方跨轮持有，记录"已经消化到哪一代"。
+fn interruptible_reconcile_sleep(
+    ms: u64,
+    wake_seen: &mut u64,
+    resume_seen: &mut u64,
+) -> ReconcileWake {
     let started = std::time::Instant::now();
     loop {
         let now_gen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
+        let resume_gen = sayall_windows::wake_signal::resume_generation();
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let woken = now_gen != *wake_seen;
-        if reconcile_sleep_step(now_gen, *wake_seen, elapsed_ms, ms) {
+        let command_changed = now_gen != *wake_seen;
+        let resume_changed = resume_gen != *resume_seen;
+        if command_changed
+            || resume_changed
+            || reconcile_sleep_step(now_gen, *wake_seen, elapsed_ms, ms)
+        {
             *wake_seen = now_gen;
-            return woken;
+            *resume_seen = resume_gen;
+            return classify_reconcile_wake(command_changed, resume_changed);
         }
         std::thread::sleep(std::time::Duration::from_millis(RECONCILE_WAKE_POLL_MS));
     }
@@ -1417,6 +1480,12 @@ fn rc003_auto_trigger_reconcile(
     let mut was_connected = false;
     // 已经"消化"过哪一代唤醒信号（2026-10-14）：开关命令唤醒后，下一轮重查立即发生。
     let mut wake_seen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
+    // 同理，已经消化过哪一代**系统唤醒**（issue #264）：睡眠唤醒后宿主可能已被
+    // 重建，必须立刻重查，而不是等满一个观察窗。
+    let mut resume_seen = sayall_windows::wake_signal::resume_generation();
+    // 本次开启以来是否**真的接管过**（`Active`）。恢复阈值据此区分"从来没起来"
+    // 与"起来过又断了"（见 `capture_recover_after_ms`）。
+    let mut ever_active = false;
     // 上一条睡眠是否**被唤醒提前结束**：Trigger 分支据此跳过"唤醒轮"的重复 /run——
     // enable 自己已经 task_trigger 过，立刻再触发会在 IgnoreNew 下被拒、留下误导性的
     // failed 行，还会让 consecutive 提前起算（2026-10-14 复核）。
@@ -1460,8 +1529,12 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Off.publish(&capture_health);
-                last_sleep_woken =
-                    interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
+                ever_active = false;
+                last_sleep_woken = interruptible_reconcile_sleep(
+                    AUTO_TRIGGER_IDLE_MS,
+                    &mut wake_seen,
+                    &mut resume_seen,
+                ) == ReconcileWake::Command;
             }
             ReconcileAction::WaitBridge => {
                 if !bridge_unavailable_logged {
@@ -1480,8 +1553,11 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 CaptureHealth::Starting.publish(&capture_health);
-                last_sleep_woken =
-                    interruptible_reconcile_sleep(AUTO_TRIGGER_IDLE_MS, &mut wake_seen);
+                last_sleep_woken = interruptible_reconcile_sleep(
+                    AUTO_TRIGGER_IDLE_MS,
+                    &mut wake_seen,
+                    &mut resume_seen,
+                ) == ReconcileWake::Command;
             }
             ReconcileAction::Connected => {
                 if !was_connected {
@@ -1511,6 +1587,12 @@ fn rc003_auto_trigger_reconcile(
                 ) || capture_inactive_due_to_missing_voice_effect(
                     snapshot.voice_frames_missing_streak,
                 );
+                // 真的接管过就把"起来过"记下来（关开关才清零）：它是"起来过又断了"与
+                // "从来没起来"的唯一区分依据（issue #264：唤醒后宿主重建属于前者）。
+                if !snapshot.owned_usages.is_empty() {
+                    ever_active = true;
+                }
+                let after_ms = capture_recover_after_ms(ever_active, snapshot.owned_usages.len());
                 // 失效原因只按事实分叉：所有权一个都没拿到 vs 拿得到、但按下的报告层
                 // 改写连续缺失（2026-10-14 现场形态）。
                 let inactive_reason = if snapshot.owned_usages.is_empty() {
@@ -1551,12 +1633,14 @@ fn rc003_auto_trigger_reconcile(
                         inactive_ms,
                         since_last_ms,
                         capture_recover_attempts,
+                        after_ms,
                     ) {
                         capture_recover_attempts += 1;
                         let attempt = capture_recover_attempts;
                         sayall_windows::gatt_note(format!(
                             "rc003 feature=enhanced-capture action=capture_recover phase=started \
                              reason={inactive_reason} attempt={attempt} inactive_ms={inactive_ms} \
+                             after_ms={after_ms} ever_active={ever_active} \
                              next_interval_ms={} {}",
                             capture_recover_interval_ms(attempt),
                             bridge_health_summary(&snapshot)
@@ -1601,8 +1685,24 @@ fn rc003_auto_trigger_reconcile(
                 was_connected = true;
                 consecutive = 0;
                 bridge_unavailable_logged = false;
-                last_sleep_woken =
-                    interruptible_reconcile_sleep(AUTO_TRIGGER_WATCH_MS, &mut wake_seen);
+                // 失效期间提速：15 秒观察窗会让"看到恢复"和"动手重启"都慢半拍。
+                let watch_ms = if inactive_by_grace {
+                    CAPTURE_WATCH_INACTIVE_MS
+                } else {
+                    AUTO_TRIGGER_WATCH_MS
+                };
+                let wake =
+                    interruptible_reconcile_sleep(watch_ms, &mut wake_seen, &mut resume_seen);
+                if wake == ReconcileWake::Resume {
+                    // 唤醒轮单独留一条：现场需要能一眼看出"是系统唤醒叫醒了它"，
+                    // 而不是又等满了一整个观察窗。
+                    sayall_windows::gatt_note(
+                        "rc003 feature=enhanced-capture action=auto_trigger phase=recheck \
+                         reason=system_resume"
+                            .to_owned(),
+                    );
+                }
+                last_sleep_woken = wake == ReconcileWake::Command;
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
@@ -1681,7 +1781,8 @@ fn rc003_auto_trigger_reconcile(
                 last_sleep_woken = interruptible_reconcile_sleep(
                     auto_trigger_retry_delay_ms(consecutive),
                     &mut wake_seen,
-                );
+                    &mut resume_seen,
+                ) == ReconcileWake::Command;
             }
         }
     }
@@ -4280,16 +4381,46 @@ mod tests {
 
     #[test]
     fn capture_restarts_helper_only_after_inactive_grace_and_throttled() {
+        let patient = CAPTURE_RECOVER_AFTER_MS;
         // 还没到阈值：不动。
-        assert!(!capture_should_restart_helper(59_999, None, 0));
+        assert!(!capture_should_restart_helper(59_999, None, 0, patient));
         // 到阈值且从未重来过：动。
-        assert!(capture_should_restart_helper(60_000, None, 0));
+        assert!(capture_should_restart_helper(60_000, None, 0, patient));
         // 距上次重来太近：不动（新助手要重新注入 / 握手）。
-        assert!(!capture_should_restart_helper(120_000, Some(59_999), 1));
-        assert!(capture_should_restart_helper(120_000, Some(60_000), 1));
+        assert!(!capture_should_restart_helper(
+            120_000,
+            Some(59_999),
+            1,
+            patient
+        ));
+        assert!(capture_should_restart_helper(
+            120_000,
+            Some(60_000),
+            1,
+            patient
+        ));
         // 连续多次无效后降速：同样的"失效很久"不再允许 60 秒一次的快速间隔。
-        assert!(!capture_should_restart_helper(400_000, Some(60_000), 3));
-        assert!(capture_should_restart_helper(400_000, Some(300_000), 3));
+        assert!(!capture_should_restart_helper(
+            400_000,
+            Some(60_000),
+            3,
+            patient
+        ));
+        assert!(capture_should_restart_helper(
+            400_000,
+            Some(300_000),
+            3,
+            patient
+        ));
+        // 快速档同样受"防抖间隔"约束：第一次动手后不会在 8 秒内再掀一次桌子。
+        let fast = CAPTURE_RECOVER_AFTER_RELAPSE_MS;
+        assert!(capture_should_restart_helper(fast, None, 0, fast));
+        assert!(!capture_should_restart_helper(
+            fast * 2,
+            Some(fast),
+            1,
+            fast
+        ));
         // 分档常量钉住（前几次快速、之后慢速）。
         assert_eq!(
             capture_recover_interval_ms(0),
@@ -4509,28 +4640,79 @@ mod tests {
         assert!(reconcile_sleep_step(6, 5, 2_000, 1_000));
     }
 
-    /// `interruptible_reconcile_sleep` 的运行时语义（2026-10-14 复核补充）：到点返回
-    /// `false`；被唤醒要**提前**返回且报告 `true`。用全局唤醒计数——仅本测试触碰它
-    /// （对账线程不在测试里跑）。
+    /// `interruptible_reconcile_sleep` 的运行时语义（2026-10-14 复核补充，2026-10-15
+    /// 增加唤醒原因）：到点 = `Timeout`；开关动作 = `Command`；系统唤醒 = `Resume`。
+    /// 用全局计数——仅本测试触碰它们（对账线程不在测试里跑）。
     #[test]
-    fn interruptible_sleep_wakes_early_and_reports_it() {
+    fn interruptible_sleep_wakes_early_and_reports_why() {
         let mut seen = CAPTURE_RECONCILE_WAKE.load(Ordering::Relaxed);
+        let mut resume = sayall_windows::wake_signal::resume_generation();
 
-        // 到点路径：没有任何唤醒信号 → 正常到点（false）。
+        // 到点路径：没有任何唤醒信号 → 正常到点。
         let started = std::time::Instant::now();
-        assert!(!interruptible_reconcile_sleep(50, &mut seen));
+        assert_eq!(
+            interruptible_reconcile_sleep(50, &mut seen, &mut resume),
+            ReconcileWake::Timeout
+        );
         assert!(started.elapsed() >= std::time::Duration::from_millis(50));
 
-        // 唤醒路径：10 秒的睡眠在 ~100ms 后被另一个唤醒信号打断（true）。
+        // 开关动作路径：10 秒的睡眠在 ~100ms 后被打断。
         let handle = std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(100));
             wake_capture_reconcile();
         });
         let started = std::time::Instant::now();
-        let woken = interruptible_reconcile_sleep(10_000, &mut seen);
-        assert!(woken);
+        assert_eq!(
+            interruptible_reconcile_sleep(10_000, &mut seen, &mut resume),
+            ReconcileWake::Command
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         handle.join().unwrap();
+
+        // 系统唤醒路径（issue #264）：短信标与开关动作同样能提前结束睡眠。
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            sayall_windows::wake_signal::note_system_resume();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            interruptible_reconcile_sleep(10_000, &mut seen, &mut resume),
+            ReconcileWake::Resume
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        handle.join().unwrap();
+    }
+
+    /// 唤醒原因的分类优先级（纯函数）：开关动作带用户意图，优先于系统事件。
+    #[test]
+    fn reconcile_wake_reason_prefers_user_command() {
+        assert_eq!(classify_reconcile_wake(true, true), ReconcileWake::Command);
+        assert_eq!(classify_reconcile_wake(false, true), ReconcileWake::Resume);
+        assert_eq!(
+            classify_reconcile_wake(false, false),
+            ReconcileWake::Timeout
+        );
+    }
+
+    /// 恢复阈值的分叉（纯函数，issue #264）：**"起来过又断了"不该等 60 秒**。
+    ///
+    /// 现场：睡眠唤醒后宿主被重建，agent 退出、所有权立刻释放；检测只花了 0.66 秒，
+    /// 却因为阈值是固定的 60 秒，用户从睡眠到语音键可用共等 84 秒。
+    #[test]
+    fn capture_recover_waits_long_only_when_it_never_worked() {
+        // 从来没接管过（设备还没枚举、助手正在注入/握手）：耐心等满 60 秒。
+        assert_eq!(capture_recover_after_ms(false, 0), CAPTURE_RECOVER_AFTER_MS);
+        // 接管过、现在所有权空了（宿主重建 / agent 退出）：快速动手。
+        assert_eq!(
+            capture_recover_after_ms(true, 0),
+            CAPTURE_RECOVER_AFTER_RELAPSE_MS
+        );
+        assert!(CAPTURE_RECOVER_AFTER_RELAPSE_MS < CAPTURE_RECOVER_AFTER_MS);
+        // 所有权还在（`voice_synth_no_effect` 形态：链路在、改写没发生）：仍按长阈值，
+        // 避免两次快速按下就掀桌子。
+        assert_eq!(capture_recover_after_ms(true, 4), CAPTURE_RECOVER_AFTER_MS);
+        // 失效期间的观察节奏必须快于正常观察窗，否则"看到恢复"仍要等 15 秒。
+        assert!(CAPTURE_WATCH_INACTIVE_MS < AUTO_TRIGGER_WATCH_MS);
     }
 
     /// 版本号唯一来源（2026-09-30 收敛）：安装包名、exe 版本资源、关于页显示、
