@@ -618,6 +618,30 @@ fn usage_mask(usages: &BTreeSet<u16>) -> u64 {
     })
 }
 
+/// 报告层合成门禁的派生判据（纯函数，单测覆盖）。
+///
+/// 门禁只回答一个问题：**这一瞬按下语音键，报告层真的会改写吗？** 需要两件事
+/// 同时成立——agent 回过 `A` 行（配置已被接受），且 agent 此刻仍握着所有权租约
+/// （证明它活着、报告层还归我们）。缺任一条都必须回落注入兜底。
+///
+/// 2026-10-15 现场（issue #264）：旧实现只看回执。宿主被重建后 agent 退出、
+/// 所有权超时释放，而 app↔助手的 socket 还活着，配置回执仍然"全绿"，于是三次
+/// 按下全部选了报告层路径 —— 三声全哑，日志却写着 `synth_confirmed=true`。
+fn synth_gate_active(confirmed: bool, owned_usages: usize) -> bool {
+    confirmed && owned_usages > 0
+}
+
+/// 改动合成门禁，并在**真正变化**时留一条日志（状态迁移可回溯，不做逐次刷屏）。
+fn set_synth_gate(active: bool, reason: &str) {
+    let before = crate::key_gate::voice_synth_active();
+    crate::key_gate::set_voice_synth_active(active);
+    if before != active {
+        note(format!(
+            "rc003_bridge event=voice_synth_gate active={active} reason={reason}"
+        ));
+    }
+}
+
 fn clear_ownership(shared: &Arc<Mutex<BridgeShared>>) {
     let had_ownership = {
         let mut state = lock(shared);
@@ -627,6 +651,10 @@ fn clear_ownership(shared: &Arc<Mutex<BridgeShared>>) {
         had
     };
     crate::key_gate::set_enhanced_owned_mask(0);
+    // 门禁必须跟所有权一起落下：所有权是"报告层还归我们"的唯一证据，租约一丢
+    // 报告层合成就不可能再生效。少这一行，按下的路径选择会继续指向已经死掉的
+    // 报告层（issue #264 现场形态）。
+    set_synth_gate(false, "ownership_lost");
     if had_ownership {
         // persistent_swallow= 是常驻抑制吞键累计快照：与 ownership_resumed
         // 的快照做差，即得本窗口内被吞的按压次数（含物理键盘同名键）。
@@ -1424,6 +1452,10 @@ fn handle_connection(
                             state.phase = BridgePhase::Connected;
                             state.helper_pid = helper_pid;
                         }
+                        // 上一代连接的租约不属于这一代助手：不清掉的话快照会对外
+                        // 谎报"已接管"（对账据此判 active，门禁也会被旧回执抬起），
+                        // 而新会话其实还没回执任何东西（issue #264 同型）。
+                        clear_ownership(shared);
                         note(format!(
                             "rc003_bridge event=helper_authenticated helper_pid={helper_pid} version={version} transport={} auth={}",
                             writer.transport(),
@@ -1468,6 +1500,10 @@ fn handle_connection(
                                 .unwrap_or_else(|| "off".to_owned()),
                             synth_sent_at.is_some()
                         ));
+                        note(
+                            "rc003_bridge event=voice_synth_gate active=false reason=hello"
+                                .to_owned(),
+                        );
                     }
                     _ => {
                         // 未鉴权前只接受 HELLO。这不是防攻击（同用户进程挡不住），
@@ -1521,6 +1557,14 @@ fn handle_connection(
                             state.ownership_last_rx = Some(Instant::now());
                         }
                         crate::key_gate::set_enhanced_owned_mask(new_mask);
+                        // 门禁与所有权**双向**绑定（issue #264）：所有权（重新）到手时，
+                        // 若配置回执仍是同一份（同一 agent 会话内幂等），报告层确实又会
+                        // 改写，门禁可以复归；回执被作废过（超时 / S 行变更）则等下一次
+                        // `A` 行，绝不凭"同一条旧回执"把门禁举起来。
+                        set_synth_gate(
+                            synth_gate_active(synth_confirmed, reported.len()),
+                            "ownership",
+                        );
                         if resumed {
                             // 恢复沿（此前静默——2026-09-28 TV 键偶发拦截调查：
                             // "fallback=legacy 窗口"只有起点没有终点，窗口时长
@@ -1544,15 +1588,17 @@ fn handle_connection(
                 BridgeLine::SynthAck { to } => {
                     let desired = *lock(voice_synth_to);
                     if to == desired {
-                        // 回执与当前期望值一致（绝对状态语义）⇒ 报告层确已生效。
-                        // `None` = 已关闭：确认收到，但门禁保持 false。
+                        // 回执与当前期望值一致（绝对状态语义）⇒ 配置确已被接受。
+                        // 但"配置被接受"≠"报告层现在会改写"：还要有所有权租约
+                        // （见 `synth_gate_active`）。`None` = 已关闭，门禁恒 false。
                         synth_confirmed = true;
-                        crate::key_gate::set_voice_synth_active(to.is_some());
+                        let owned = lock(shared).owned.len();
+                        set_synth_gate(synth_gate_active(to.is_some(), owned), "ack");
                         note(format!(
-                            "rc003_bridge event=voice_synth_ack to={} active={} confirm=agent",
+                            "rc003_bridge event=voice_synth_ack to={} active={} confirm=agent owned_usages={owned}",
                             to.map(|u| format!("0x{u:04X}"))
                                 .unwrap_or_else(|| "off".to_owned()),
-                            to.is_some()
+                            crate::key_gate::voice_synth_active()
                         ));
                     } else {
                         // 迟到/旧值回执：不改门禁、不当确认（期望值刚变更时的正常竞态）。
@@ -1673,6 +1719,9 @@ fn handle_connection(
                 .unwrap_or(false);
             if ownership_expired {
                 clear_ownership(shared);
+                // 租约没了 ⇒ 上一份 `A` 行不再代表"现在会改写"：作废回执，逼
+                // 重发 S 行重新确认（新 agent 会话只能靠新的 `A` 行证明）。
+                synth_confirmed = false;
                 note(format!(
                     "enhanced_capture event=ownership_timeout timeout_ms={} fallback=legacy \
                      persistent_swallow={}",
@@ -2341,12 +2390,14 @@ mod tests {
         }
     }
 
-    /// 2026-10-03 加固回归：语音合成门禁必须跟随 agent 回执（`A` 行），
-    /// 且未确认期间按节奏重发 S 行——旧实现"写出成功即置真"会让丢行变成
-    /// "应用以为合成生效、跳过注入，而报告层什么都没送"的静默黑洞。
+    /// 2026-10-03 加固回归 + 2026-10-15 加严（issue #264）：语音合成门禁必须
+    /// 同时跟随 **agent 回执（`A` 行）** 与 **所有权租约**，且未确认期间按节奏重发
+    /// S 行——旧实现"写出成功即置真"会让丢行变成"应用以为合成生效、跳过注入，
+    /// 而报告层什么都没送"的静默黑洞；只看回执不看所有权，则会在 agent 已经退出、
+    /// 报告层已经没人改写时继续"全绿"（现场三按全哑）。
     #[cfg(windows)]
     #[test]
-    fn voice_synth_gate_follows_agent_ack() {
+    fn voice_synth_gate_follows_agent_ack_and_ownership() {
         // 启停真实门控（桥的连接/收尾会改写它）：按 key_gate 的测试约定串行。
         let _gate = crate::key_gate::lock_gate_tests();
         let dir = std::env::temp_dir().join(format!(
@@ -2357,6 +2408,8 @@ mod tests {
         let (sender, _receiver) = channel();
         let bridge = Rc003Bridge::start_in(dir.clone(), sender);
         bridge.set_voice_synth(Some(0x00E6));
+        // 所有权只在目标集非空时成立：先给一个真实目标（三键恒在，见模块文档）。
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back]));
 
         let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
         let pipe = text
@@ -2420,8 +2473,25 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         assert!(!Rc003Bridge::voice_synth_active(), "旧值回执不得置门禁为真");
 
-        // 关键判据 ③：与期望一致的回执置门禁为真（报告层确已生效）。
+        // 关键判据 ③：与期望一致的回执**只说明配置被接受**，还没有所有权租约
+        // ⇒ 门禁仍为 false（旧实现会在这一行错误地置真）。
         stream.write_all(b"A 00E6\n").unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !Rc003Bridge::voice_synth_active(),
+            "只有配置回执、没有所有权时门禁必须保持 false（否则按下会走已经没人改写的报告层）"
+        );
+
+        // 关键判据 ④：所有权到手（agent 真的接管了报告层）⇒ 门禁置真。
+        let ok_line = String::from_utf8_lossy(&received)
+            .lines()
+            .find(|line| line.starts_with("OK "))
+            .map(|line| line.to_owned())
+            .expect("握手必须回 OK 行（含目标代次与 usage 集合）");
+        let fields: Vec<&str> = ok_line.split(' ').collect();
+        let ownership = format!("O {} {}\n", fields[2], fields[3]);
+        stream.write_all(ownership.as_bytes()).unwrap();
         stream.flush().unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while !Rc003Bridge::voice_synth_active() && Instant::now() < deadline {
@@ -2429,7 +2499,7 @@ mod tests {
         }
         assert!(
             Rc003Bridge::voice_synth_active(),
-            "收到与期望一致的回执后门禁必须置真"
+            "回执 + 所有权同时成立后门禁必须置真"
         );
 
         drop(bridge);
@@ -3002,5 +3072,107 @@ mod tests {
 
         drop(bridge);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 合成门禁必须跟**所有权**走，不能只跟配置回执走（issue #264 现场）。
+    ///
+    /// 现场（2026-10-15）：宿主被重建 ⇒ agent 退出、所有权超时释放，但 app↔助手
+    /// 的 socket 还活着（助手进程没死，agent 的 `bye` 也不外传），于是
+    /// `set_voice_synth_active(false)` 的三个清零点一个都没触发，门禁停在 true。
+    /// 结果三次按下全部选了"报告层"路径，而报告层已经没有人改写 —— 三声全哑。
+    ///
+    /// 判据（本测试钉住四分）：① 只有回执、没有所有权 ⇒ 门禁必须 false；
+    /// ② 回执 + 所有权 ⇒ 可以 true；③ 所有权超时 ⇒ 必须自己落下；
+    /// ④ 重新接管 + 重新回执 ⇒ 必须还能举起来（不能被瞬时超时永久打死）。
+    #[test]
+    fn synth_gate_follows_ownership_not_config_ack() {
+        // 桥的生命周期会改写全局门控：按 key_gate 的测试约定串行。
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-synth-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        bridge.set_capture_targets(true, mask(&[RemoteButton::Back]));
+        bridge.set_voice_synth(Some(0x00E6));
+
+        let text = std::fs::read_to_string(dir.join(BRIDGE_FILE_NAME)).expect("描述文件");
+        let (port, token, _version) = parse_descriptor(&text).expect("可解析");
+        let mut stream =
+            TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).expect("连接");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(2_000)))
+            .ok();
+        stream
+            .write_all(format!("HELLO {BRIDGE_PROTOCOL_VERSION} {token} 2001\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut ok = String::new();
+        reader.read_line(&mut ok).unwrap();
+        assert!(ok.starts_with("OK "), "实际收到 {ok:?}");
+        let fields: Vec<&str> = ok.trim().split(' ').collect();
+        let (generation, usages) = (fields[2].to_string(), fields[3].to_string());
+
+        // ① 只回配置回执：报告层配置被接受，但还没有任何所有权租约 ⇒ 按下必须
+        //    回落注入（旧实现只看回执，这里会错误地置 true）。
+        stream.write_all(b"A 0x00E6\n").unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !Rc003Bridge::voice_synth_active(),
+            "没有所有权租约时，门禁必须为 false（否则按下会走已不在的报告层）"
+        );
+
+        // ② 回执 + 所有权同时在 ⇒ 报告层确实会改写，门禁才能举起。
+        stream
+            .write_all(format!("O {generation} {usages}\n").as_bytes())
+            .unwrap();
+        stream.flush().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                Rc003Bridge::voice_synth_active()
+            }),
+            "配置回执 + 所有权同时成立时，门禁必须举起"
+        );
+
+        // ③ agent 消失（不再续租）：socket 不断、也不发 BYE —— 正是现场形态。
+        //    所有权超时后门禁必须自己落下，否则界面与路径选择继续"全绿"。
+        assert!(
+            wait_until(Duration::from_secs(6), || {
+                !Rc003Bridge::voice_synth_active()
+            }),
+            "所有权超时后门禁必须落下（旧实现只在 socket 断开时清，永远不会清）"
+        );
+
+        // ④ 重新接管：超时把回执作废了，助手会重发 S、由 agent 重新回执后才复归。
+        stream
+            .write_all(format!("O {generation} {usages}\n").as_bytes())
+            .unwrap();
+        stream.write_all(b"A 0x00E6\n").unwrap();
+        stream.flush().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                Rc003Bridge::voice_synth_active()
+            }),
+            "重新接管 + 重新回执后门禁必须能复归（瞬时超时不得把它永久打死）"
+        );
+
+        drop(stream);
+        drop(reader);
+        drop(bridge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 轮询等待（桥接线程是异步的，断言不能靠固定 sleep 压时序）。
+    fn wait_until(limit: Duration, mut probe: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if probe() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 }

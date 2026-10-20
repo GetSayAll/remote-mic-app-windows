@@ -302,6 +302,7 @@ function rc003BridgeSnapshot(
     targetUsages: [],
     ownedUsages: [],
     captureHealth: "off",
+    captureRevoked: "none",
     ...overrides,
   };
 }

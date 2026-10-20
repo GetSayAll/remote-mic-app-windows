@@ -1142,6 +1142,7 @@ describe("connection page rc003 capture switch", () => {
   const bridgeSnapshot = (
     phase: Rc003BridgeSnapshot["phase"],
     captureHealth: Rc003BridgeSnapshot["captureHealth"] = "off",
+    captureRevoked: Rc003BridgeSnapshot["captureRevoked"] = "none",
   ): Rc003BridgeSnapshot => ({
     phase,
     port: 0,
@@ -1159,6 +1160,7 @@ describe("connection page rc003 capture switch", () => {
     targetUsages: [],
     ownedUsages: [],
     captureHealth,
+    captureRevoked,
   });
 
   afterEach(() => {
@@ -1232,6 +1234,27 @@ describe("connection page rc003 capture switch", () => {
     wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
     expect(wrapper.text()).not.toContain("还没有生效");
+    wrapper.unmount();
+  });
+
+  it("启动对账把开关关掉时说明原因（2026-10-15，issue #264 附加观察甲）", async () => {
+    // 开关关闭态 + 后端报了回落原因 ⇒ 开关旁一句解释（本页名称是「支持更多输入工具」）。
+    mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: false }));
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      bridgeSnapshot("listening", "off", "task_power_policy_mismatch"),
+    );
+    let wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain(
+      "“支持更多输入工具”因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。",
+    );
+    wrapper.unmount();
+
+    // 没有原因（none）：一个字都不显示。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(bridgeSnapshot("stopped", "off"));
+    wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("重新打开一次");
     wrapper.unmount();
   });
 

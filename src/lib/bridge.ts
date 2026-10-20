@@ -180,10 +180,26 @@ export interface Rc003BridgeSnapshot {
    * 一句「还没有生效…」的用户语言（文案见 `captureInactiveText`）。
    */
   captureHealth: Rc003CaptureHealth;
+  /**
+   * 启动时被应用**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）：
+   * `none` = 没发生；其余取值表示开关是被回落拉低的，界面要让用户看懂"为什么
+   * 自己关了"（文案见 `captureRevokedText`）。token 与 Rust `CaptureRevoke::as_str`
+   * 逐字对应。
+   */
+  captureRevoked: Rc003CaptureRevoked;
 }
 
 /** `captureHealth` 的取值（与 Rust `CaptureHealth::as_str` 逐字对应）。 */
 export type Rc003CaptureHealth = "off" | "starting" | "active" | "inactive";
+
+/** `captureRevoked` 的取值（与 Rust `CaptureRevoke::as_str` 逐字对应）。 */
+export type Rc003CaptureRevoked =
+  | "none"
+  | "task_missing"
+  | "reauth_marker_present"
+  | "task_target_mismatch"
+  | "task_power_policy_mismatch"
+  | "unsupported";
 
 /** `stopped` = 该平台没有这个机制（非 Windows），或桥接未启用。 */
 export type Rc003BridgePhase = "stopped" | "listening" | "connected" | "failed";
@@ -1145,6 +1161,7 @@ const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   targetUsages: [],
   ownedUsages: [],
   captureHealth: "off",
+  captureRevoked: "none",
 };
 
 export async function getRc003BridgeSnapshot(): Promise<Rc003BridgeSnapshot> {

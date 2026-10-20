@@ -127,6 +127,8 @@ pub mod send_input_windows;
 pub mod tray_icons;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
 pub mod vokie;
+/// 系统唤醒的进程内代次：BLE 工作线程发布、应用侧常驻对账消费（issue #264）。
+pub mod wake_signal;
 #[cfg(windows)]
 mod wetype_revive;
 // 录入会话的微信输入法麦克风观测（模块本体私有，仅导出这两个读数入口）。

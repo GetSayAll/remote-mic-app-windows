@@ -9,8 +9,11 @@ import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
 import {
   captureFailureText,
   captureInactiveText,
+  captureRevokedText,
   captureSwitchState as captureSwitchStateFn,
+  normalizeCaptureRevoked,
   shouldShowCaptureInactive,
+  shouldShowCaptureRevoked,
 } from "../lib/capture-switch";
 import {
   actionSummary,
@@ -77,6 +80,7 @@ import {
   type RawInputPhase,
   type Rc003BridgePhase,
   type Rc003CaptureHealth,
+  type Rc003CaptureRevoked,
   type Rc003TaskStatus,
   type RemoteButton,
   type RemoteModel,
@@ -1505,6 +1509,8 @@ const rc003BridgeFailed = ref(false);
  * 开关开着 ≠ 生效——`inactive` 才显示提示（见 captureInactiveNote）。
  */
 const rc003CaptureHealth = ref<Rc003CaptureHealth>("off");
+/** 启动对账把开关关掉的原因（2026-10-15，issue #264 附加观察甲）：`none` = 没发生。 */
+const rc003CaptureRevoked = ref<Rc003CaptureRevoked | "unknown">("none");
 /** 上一次开关操作失败的**原文**：只进日志与映射，界面显示映射后的用户语言。 */
 const rc003CaptureFailureRaw = ref<string | null>(null);
 
@@ -1549,6 +1555,19 @@ const captureInactiveNote = computed(() =>
     linkReady: connectionReady.value,
   })
     ? captureInactiveText(CAPTURE_FAILURE_NAME)
+    : null,
+);
+/**
+ * 「开关被应用自己关掉了」的解释（2026-10-15，issue #264 附加观察甲）：升级后对账
+ * 会因系统授权需要重新确认而回落开关，界面必须说明原因，否则用户只看到"功能变差了"。
+ * 与失败句、失效句同一位，优先级：操作失败 > 被关掉 > 开着没生效。
+ */
+const captureRevokedNote = computed(() =>
+  shouldShowCaptureRevoked({
+    switchState: captureSwitchState.value,
+    revoked: rc003CaptureRevoked.value,
+  })
+    ? captureRevokedText(CAPTURE_FAILURE_NAME)
     : null,
 );
 /** 三键卡片/格子的置灰提示：本机开不了时不说「开启后恢复正常」。 */
@@ -1630,6 +1649,7 @@ const reconcileRc003Task = async (): Promise<void> => {
     if (bridge) {
       rc003BridgePhase.value = bridge.phase;
       rc003CaptureHealth.value = bridge.captureHealth;
+      rc003CaptureRevoked.value = normalizeCaptureRevoked(bridge.captureRevoked);
     }
   } catch {
     // 对账失败：状态保持当前值（缓存或 null），等下一秒轮询重试
@@ -2002,9 +2022,16 @@ onUnmounted(() => {
              其余情况不显示任何状态文案）。位置不动、不插行，沿用 2026-09-28 的防抖动约定。 -->
         <p
           class="page-subtitle"
-          :class="{ 'is-failure': captureFailure || captureInactiveNote }"
+          :class="{
+            'is-failure': captureFailure || captureRevokedNote || captureInactiveNote,
+          }"
         >
-          {{ captureFailure ?? captureInactiveNote ?? "点击按键进行自定义配置" }}
+          {{
+            captureFailure ??
+            captureRevokedNote ??
+            captureInactiveNote ??
+            "点击按键进行自定义配置"
+          }}
         </p>
       </div>
       <div class="mapping-header-controls">
