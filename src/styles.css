@@ -512,6 +512,10 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .chip:hover { border-color: var(--accent-border); background: var(--accent-hover); box-shadow: 0 2px 8px var(--shadow-control); transform: translateY(-1px); }
 .chip:active { transform: translateY(0); }
 .chip.selected { border-color: var(--accent-border); background: var(--accent-surface); font-weight: 600; color: var(--accent-text); box-shadow: 0 1px 5px var(--accent-surface); }
+.chip:disabled, .chip:disabled:hover { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; border-color: var(--border-strong); background: var(--surface-chip); }
+/* 「打开常用语」的会员标识（对齐 macOS 常用语分组的粉色徽标）。 */
+.member-badge { display: inline-flex; align-items: center; margin-left: 6px; padding: 0 7px; border-radius: 999px; background: rgba(233, 30, 99, 0.14); color: #c2185b; font-size: 11px; font-weight: 700; line-height: 18px; }
+html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); color: #f9a8d4; }
 .chip.group-label { cursor: default; font-weight: 600; color: var(--muted); background: transparent; border-style: dashed; }
 /* 常用语分组按钮的内联图标（对齐 macOS：slider.horizontal.3 / text.quote）。 */
 .chip-icon { width: 15px; height: 15px; margin-right: 5px; vertical-align: -2px; flex: none; }
