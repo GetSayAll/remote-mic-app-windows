@@ -1235,6 +1235,36 @@ fn capture_grace_survives_resume(resume_round: bool, ever_active: bool, attempts
     resume_round && ever_active && attempts == 0
 }
 
+/// `/end` 之后最多等旧助手这么久再 `/run`（issue #264 小项）。
+///
+/// `schtasks /end` 只表示"结束请求已被接受"，既不等进程退出，也不释放它监听的端口；
+/// 实测新实例要连撞 5 次 `listen_retry reason=address_in_use`（约 0.76 秒）才绑上。
+/// 有上限、读不到 pid 就直接放行——等待失败只影响速度，不影响正确性（新实例自己会重试）。
+const CAPTURE_RECOVER_EXIT_WAIT_MS: u64 = 2_000;
+
+/// 等指定进程退出（真 = 已退出 / 等到了上限）。非 Windows 恒真：那边没有这个机制。
+#[cfg(windows)]
+fn wait_helper_exit(pid: u32, limit: u64) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(limit);
+    loop {
+        if !sayall_windows::focus_windows::process_alive(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_helper_exit(_pid: u32, _limit: u64) -> bool {
+    true
+}
+
 /// 是否该「自动重来一次助手」（纯判定，单测覆盖）。
 ///
 /// `inactive_ms` = 捕获连续失效了多久；`since_last_attempt_ms` = 距上次自动重来多久
@@ -1764,8 +1794,23 @@ fn rc003_auto_trigger_reconcile(
                         // 此刻助手进程活着但拿不到所有权（在它手里这条链路已是死路），
                         // `/end` 清掉它不会误杀正在工作的助手；`/run` 起新实例，新实例
                         // 重新解析宿主 → 注入或接管 → 所有权回来即恢复。
-                        let restarted =
-                            rc003_task::task_stop().and_then(|()| rc003_task::task_trigger());
+                        //
+                        // `/end` 之后要等旧实例真的退出（issue #264：它退得慢，新实例
+                        // 会先撞几次端口占用）。拿不到 pid 就照旧直接 `/run`。
+                        let previous_helper_pid = snapshot.helper_pid;
+                        let restarted = rc003_task::task_stop().and_then(|()| {
+                            let exited = wait_helper_exit(
+                                previous_helper_pid,
+                                CAPTURE_RECOVER_EXIT_WAIT_MS,
+                            );
+                            sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=capture_recover \
+                                 phase=previous_helper_wait terminal_result={} attempt={attempt} \
+                                 previous_pid={previous_helper_pid} waited_ms={CAPTURE_RECOVER_EXIT_WAIT_MS}",
+                                if exited { "passed" } else { "timeout" }
+                            ));
+                            rc003_task::task_trigger()
+                        });
                         match restarted {
                             Ok(()) => sayall_windows::gatt_note(format!(
                                 "rc003 feature=enhanced-capture action=capture_recover \
@@ -4604,6 +4649,22 @@ mod tests {
         // 重新开启成功后回到 none（界面提示随之消失）。
         CaptureRevoke::None.publish(&slot);
         assert_eq!(CaptureRevoke::current(&slot).as_str(), "none");
+    }
+
+    /// `/end` 之后等旧助手退出：必须有上限，且读不到 pid 不白等（issue #264 小项）。
+    #[cfg(windows)]
+    #[test]
+    fn helper_exit_wait_is_bounded_and_reads_liveness() {
+        // 本进程一定活着：等不到，但必须在上限附近返回 false（不能挂住对账线程）。
+        let started = std::time::Instant::now();
+        assert!(!wait_helper_exit(std::process::id(), 120));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+        // 进程号 0 = 读不到 pid：直接放行，不白等。
+        let started = std::time::Instant::now();
+        assert!(wait_helper_exit(0, 5_000));
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        // 不存在的进程号：立刻判"已退出"。
+        assert!(wait_helper_exit(0xFFFF_FFFE, 500));
     }
 
     /// 界面读的「实际生效状态」按**所有权**判，不按开关位置（2026-10-13 现场：
