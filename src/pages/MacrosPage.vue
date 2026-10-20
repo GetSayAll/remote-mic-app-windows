@@ -1941,7 +1941,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 20px 22px;
+  padding: 20px 14px;
 }
 .detail-head {
   display: flex;
@@ -2093,7 +2093,7 @@ watch(
   flex-direction: column;
 }
 .wizard-head {
-  padding: 14px 22px 12px;
+  padding: 14px 14px 12px;
   border-bottom: 1px solid var(--border);
 }
 .wizard-head h2 {
@@ -2149,13 +2149,13 @@ watch(
 .basic-body {
   flex-direction: column;
   gap: 20px;
-  padding: 20px 22px;
+  padding: 20px 14px;
   overflow-y: auto;
 }
 .review-body {
   flex-direction: column;
   gap: 14px;
-  padding: 20px 22px;
+  padding: 20px 14px;
   overflow-y: auto;
 }
 .steps-body {
@@ -2171,6 +2171,8 @@ watch(
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+  /* 步骤列表与「添加步骤」作为整体一起滚动。 */
+  overflow-y: auto;
 }
 .name-banner {
   font-size: 14px;
@@ -2181,9 +2183,9 @@ watch(
   padding: 10px 12px;
 }
 .step-edit-list {
-  flex: 1;
+  flex: none;
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2273,7 +2275,7 @@ watch(
 }
 .wizard-block-hint {
   margin: 0;
-  padding: 8px 22px;
+  padding: 8px 14px;
   border-top: 1px solid var(--border);
   font-size: 12px;
   color: var(--error-text);
@@ -2287,7 +2289,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 22px;
+  padding: 18px 14px;
 }
 .step-card {
   background: var(--card);
@@ -2402,7 +2404,7 @@ watch(
 .wizard-foot {
   flex: none;
   border-top: 1px solid var(--border);
-  padding: 10px 22px;
+  padding: 10px 14px;
   display: flex;
   align-items: center;
   gap: 10px;
