@@ -516,6 +516,15 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 /* 「打开常用语」的会员标识（对齐 macOS 常用语分组的粉色徽标）。 */
 .member-badge { display: inline-flex; align-items: center; margin-left: 6px; padding: 0 7px; border-radius: 999px; background: rgba(233, 30, 99, 0.14); color: #c2185b; font-size: 11px; font-weight: 700; line-height: 18px; }
 html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); color: #f9a8d4; }
+/* 常用语分组：对齐 macOS 的卡片式按钮（打开 / 开通会员 / 调整 / 示例）。 */
+.common-phrases-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.common-phrases-grid > .chip,
+.common-phrases-grid > .common-phrases-cta { display: inline-flex; align-items: center; justify-content: flex-start; flex: 1 1 210px; max-width: 280px; min-height: 38px; padding: 8px 16px; border-radius: 8px; font-size: 13.5px; text-align: left; }
+.common-phrases-grid > .chip:disabled { color: var(--muted); }
+.common-phrases-cta { border: 0; background: #e11d63; color: #fff; font-weight: 600; cursor: pointer; }
+.common-phrases-cta:hover { background: #c2185b; }
+.common-phrases-cta .chip-icon { margin-right: 0; color: #fff; }
+.common-phrase-circle { opacity: 0.55; }
 .chip.group-label { cursor: default; font-weight: 600; color: var(--muted); background: transparent; border-style: dashed; }
 /* 常用语分组按钮的内联图标（对齐 macOS：slider.horizontal.3 / text.quote）。 */
 .chip-icon { width: 15px; height: 15px; margin-right: 5px; vertical-align: -2px; flex: none; }

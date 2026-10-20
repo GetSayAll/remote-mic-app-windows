@@ -92,6 +92,7 @@ import {
 import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+const emit = defineEmits<{ navigate: [page: string] }>();
 
 /**
  * 「调整常用语」二级视图（对齐 macOS：按键页 → 调整常用语 → 返回按键页）。
@@ -2329,7 +2330,7 @@ onUnmounted(() => {
 
         <section v-if="commonPhrasesAvailable" class="action-section">
           <h4 class="action-section-title">常用语</h4>
-          <div class="preset-grid">
+          <div class="preset-grid common-phrases-grid">
             <button
               class="chip"
               :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
@@ -2342,8 +2343,31 @@ onUnmounted(() => {
               "
               @click="applyAction({ type: 'open_common_phrases' })"
             >
+              <svg
+                v-if="!commonPhraseAllowed"
+                class="chip-icon common-phrase-circle"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" />
+              </svg>
               打开常用语
               <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
+            </button>
+            <button
+              v-if="!commonPhraseAllowed"
+              class="common-phrases-cta"
+              type="button"
+              title="打开会员页面开通 Plus"
+              @click="emit('navigate', 'membership')"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M4.2 7.4l4.1 3.5L12 5.6l3.7 5.3 4.1-3.5-1.6 9.5H5.8L4.2 7.4zm2.9 10.6h9.8v1.6H7.1V18z"
+                />
+              </svg>
+              点击开通会员功能
             </button>
             <button
               class="chip"

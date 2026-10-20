@@ -220,6 +220,7 @@ onUnmounted(() => {
         :is="activeComponent"
         :runtime="runtime"
         @restart-onboarding="onRestartOnboarding"
+        @navigate="activePage = $event"
       />
     </main>
   </div>
