@@ -4,6 +4,7 @@ use crate::wetype_revive::{
 };
 use crate::{
     audio::AudioRuntime,
+    disconnect_loop::{DisconnectCause, DisconnectLoopDetector, LoopReport},
     power::PowerNotifications,
     reconnect::ReconnectBackoff,
     remote_model_from_model_number, remote_model_from_name,
@@ -592,6 +593,10 @@ fn worker_loop(
     // 资源探针（2026-09-16）：判定 0x80070008 成因的必要证据，见
     // resource_probe 模块头部的判读方法。
     let mut resource_probe = crate::resource_probe::ResourceProbe::default();
+    // 断连循环检测（2026-10-20）：只识别并落日志，不做任何系统级恢复——
+    // 现场（Win10 + 快速启动 + Realtek 8852）的循环根因在 OS/驱动层，
+    // 应用侧重连改不了它，但需要能一次日志拉取就认出这个形状。
+    let mut disconnect_loop = DisconnectLoopDetector::new();
 
     loop {
         let deadline = nearest_deadline(
@@ -657,6 +662,7 @@ fn worker_loop(
                                 if result.is_ok() {
                                     // 连上了：抑制计数按 episode 收口（自审 2026-10-13）。
                                     suppressed_promotions = 0;
+                                    disconnect_loop.on_connected(Instant::now());
                                 }
                                 if let Some(note) =
                                     attempt_probe(&mut resource_probe, attempt, &result)
@@ -803,6 +809,7 @@ fn worker_loop(
                 if result.is_ok() {
                     // 连上了：抑制计数按 episode 收口（自审 2026-10-13）。
                     suppressed_promotions = 0;
+                    disconnect_loop.on_connected(Instant::now());
                 }
                 if let Some(note) = attempt_probe(&mut resource_probe, 0, &result) {
                     gatt_note(note);
@@ -831,6 +838,7 @@ fn worker_loop(
             WorkerMessage::Disconnect { reply } => {
                 preferred_device_id = None;
                 system_suspended = false;
+                let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Shutdown);
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
@@ -1086,6 +1094,13 @@ fn worker_loop(
                     && status == BluetoothConnectionStatus::Disconnected
                 {
                     capabilities_deadline = None;
+                    // 设备侧掉链才进入循环判定（睡眠/退出走各自分支清零）。
+                    // 这里只计数与落日志，不改变任何恢复行为。
+                    if let Some(report) =
+                        disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::LinkLost)
+                    {
+                        note_disconnect_loop(report);
+                    }
                     if let Err(error) = invalidate_connection(
                         &mut session,
                         &mut pipeline,
@@ -1136,6 +1151,15 @@ fn worker_loop(
             } => {
                 if message_generation == connection_generation {
                     capabilities_deadline = None;
+                    // 回调链读取失败同样意味着这一代会话结束（下面会 invalidate
+                    // 并重连），按设备侧掉链计入循环判据——否则"只以 GATT 回调
+                    // 失败形式表现的掉线"永远不进统计。`on_disconnected` 会取走
+                    // 连接起点，紧随其后的 `ConnectionStatusChanged` 不会重复计数。
+                    if let Some(report) =
+                        disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::LinkLost)
+                    {
+                        note_disconnect_loop(report);
+                    }
                     if let Err(cleanup_error) = invalidate_connection(
                         &mut session,
                         &mut pipeline,
@@ -1194,6 +1218,8 @@ fn worker_loop(
                     "action=entering_sleep",
                 ));
                 system_suspended = true;
+                // 睡眠是预期断开：清零循环计数（不能让"睡一晚"污染判据）。
+                let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Suspended);
                 capabilities_deadline = None;
                 reconnect_deadline = None;
                 if let Err(error) = invalidate_connection(
@@ -1255,6 +1281,7 @@ fn worker_loop(
                 }
             }
             WorkerMessage::Shutdown { ack } => {
+                let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Shutdown);
                 release_voice_hold_hotkey(&send_input, &mut held_hotkey);
                 let _ = audio.interrupt_session();
                 let _ = close_session(&mut session);
@@ -1267,6 +1294,21 @@ fn worker_loop(
             }
         }
     }
+}
+
+/// 断连循环的结构化取证行（2026-10-20）：同一轮循环只落一条。
+///
+/// 字段刻意带上同一次开机的 `boot_type` / `fast_startup_enabled`：现场故障只在
+/// hiberboot 开机出现，但"只在"这个结论必须靠完整启动的**对照样本**才能成立，
+/// 所以两类开机都要记录，而不是识别到 hiberboot 才记。
+fn note_disconnect_loop(report: LoopReport) {
+    gatt_note(format!(
+        "ble_disconnect_loop phase=detected short_sessions={} window_s={} session_max_s={} {} action=log_only",
+        report.short_sessions,
+        report.window.as_secs(),
+        crate::disconnect_loop::SHORT_SESSION_MAX.as_secs(),
+        crate::boot_type::boot_context_fields(),
+    ));
 }
 
 /// 连接相位 → 门控"遥控器在线"判定：常驻抑制键（Home/TV"遥控器优先"，

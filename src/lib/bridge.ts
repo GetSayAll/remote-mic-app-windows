@@ -483,6 +483,17 @@ export interface DiagnosticReport {
   windowsVersion: string;
   /** 进程架构（x86_64 等）。 */
   processArchitecture: string;
+  /**
+   * 本次开机的引导类型（2026-10-20）：`full` / `hiberboot` / `hibernate_resume` /
+   * `unknown`。快速启动（hiberboot）开机后部分蓝牙适配器会带旧固件状态、
+   * 造成链路反复断开——报障判读的第一个分流问题就是"这次开机是不是 hiberboot"。
+   */
+  bootType: string;
+  /**
+   * 「快速启动」功能是否开启；**读不到为 `null`**（不是 false——读不到不等于没开）。
+   * 与 `bootType` 并列：开关开着但用户点的是「重启」时，`bootType` 仍是 `full`。
+   */
+  fastStartupEnabled: boolean | null;
   platform: string;
   verificationStatus: string;
   capabilities: {
@@ -711,13 +722,16 @@ export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (!isTauriRuntime()) {
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       appVersion: browserSnapshot.appVersion,
       appBuild: "unknown",
       sourceRevision: "unknown",
       buildChannel: "unknown",
       windowsVersion: "unknown",
       processArchitecture: "browser-preview",
+      // 浏览器预览没有真实的开机上下文：一律 unknown / null（不是 false）。
+      bootType: "unknown",
+      fastStartupEnabled: null,
       platform: browserSnapshot.platform.platform,
       verificationStatus: browserSnapshot.platform.verificationStatus,
       capabilities: {

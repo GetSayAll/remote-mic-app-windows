@@ -89,9 +89,12 @@ describe("permissions page", () => {
     await flushPromises();
 
     const report = wrapper.get(".diagnostic-output").text();
-    expect(report).toContain('"schemaVersion": 3');
+    expect(report).toContain('"schemaVersion": 4');
     expect(report).toContain('"windowsVersion"');
     expect(report).toContain('"sourceRevision"');
+    // 开机上下文（2026-10-20）：设置页诊断摘要同样带出，报障时无需另拉日志。
+    expect(report).toContain('"bootType"');
+    expect(report).toContain('"fastStartupEnabled"');
     expect(report).not.toContain("remoteName");
     expect(report).not.toContain("selectedEndpointName");
     expect(report).not.toContain("lastError");

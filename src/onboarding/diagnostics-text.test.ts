@@ -7,13 +7,15 @@ import {
 } from "./diagnostics-text";
 
 const report: DiagnosticReport = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   appVersion: "0.5.0",
   appBuild: "1001",
   sourceRevision: "fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901",
   buildChannel: "local-test",
   windowsVersion: "10.0.26100",
   processArchitecture: "x86_64",
+  bootType: "hiberboot",
+  fastStartupEnabled: true,
   platform: "windows",
   verificationStatus: "真机验证中",
   capabilities: {
@@ -126,6 +128,22 @@ describe("formatOnboardingDiagnostics", () => {
     expect(text).toContain("Build channel: local-test");
     expect(text).toContain("Windows version: 10.0.26100");
     expect(text).toContain("Architecture: x86_64");
+    expect(text).toContain("Boot: type=hiberboot fast_startup=yes");
+  });
+
+  it("开机上下文：读不到开关时写 unknown，不伪装成 no（2026-10-20 快速启动断连）", () => {
+    const unknown = formatOnboardingDiagnostics(
+      { ...report, bootType: "unknown", fastStartupEnabled: null },
+      snapshot,
+    );
+    expect(unknown).toContain("Boot: type=unknown fast_startup=unknown");
+
+    // 两个字段互相独立：开关开着但这次点的是「重启」，类型仍是 full。
+    const restarted = formatOnboardingDiagnostics(
+      { ...report, bootType: "full", fastStartupEnabled: true },
+      snapshot,
+    );
+    expect(restarted).toContain("Boot: type=full fast_startup=yes");
   });
 
   it("带出当前步骤（token + 序号）、门禁码与阻断状态", () => {

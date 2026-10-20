@@ -37,6 +37,7 @@ windows = { version = "0.62", features = [
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_EventLog",
     "Win32_System_IO",
     "Win32_System_Ole",
     "Win32_System_Pipes",
