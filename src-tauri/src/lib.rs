@@ -393,6 +393,9 @@ struct AppState {
     settings: SettingsStore,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    /// 启动对账**主动关掉**开关的原因（2026-10-15，issue #264 附加观察甲）：只用于
+    /// 界面说明与诊断块，判据只此一处（见 `CaptureRevoke`）。
+    capture_revoked: Arc<std::sync::atomic::AtomicU8>,
     /// check_app_update 暂存的待安装更新（install_app_update 取走）。
     /// tauri_plugin_updater::Update 未实现 Debug，用手写 impl 只呈现存在性。
     pending_update: std::sync::Mutex<Option<tauri_plugin_updater::Update>>,
@@ -410,6 +413,10 @@ impl std::fmt::Debug for AppState {
             .field(
                 "capture_health",
                 &CaptureHealth::current(&self.capture_health).as_str(),
+            )
+            .field(
+                "capture_revoked",
+                &CaptureRevoke::current(&self.capture_revoked).as_str(),
             )
             .field(
                 "pending_update",
@@ -803,6 +810,8 @@ struct Rc003BridgeView {
     bridge: BridgeSnapshot,
     /// `off` / `starting` / `active` / `inactive`（前端 `Rc003CaptureHealth` 逐字对应）。
     capture_health: &'static str,
+    /// 启动对账主动关掉开关的原因（`none` = 没发生；前端 `Rc003CaptureRevoked` 逐字对应）。
+    capture_revoked: &'static str,
 }
 
 /// RC003 三键传输桥接状态（捕获链第 ② 段）。
@@ -815,12 +824,14 @@ async fn get_rc003_bridge_snapshot(
 ) -> Result<Rc003BridgeView, String> {
     let platform = Arc::clone(&state.platform);
     let capture_health = CaptureHealth::current(&state.capture_health).as_str();
+    let capture_revoked = CaptureRevoke::current(&state.capture_revoked).as_str();
     let bridge = tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
         .await
         .map_err(|error| format!("读取 RC003 桥接状态失败：{error}"))?;
     Ok(Rc003BridgeView {
         bridge,
         capture_health,
+        capture_revoked,
     })
 }
 
@@ -1050,6 +1061,16 @@ async fn enable_rc003_capture(
         .save_rc003_capture_enabled(true)
         .map_err(|error| format!("保存全按键支持开关失败：{error}"))?;
     state.platform.set_enhanced_capture_enabled(true);
+    // 重新开启成功 = 任务已重建、授权已重确认：启动对账留下的"为什么自己关了"
+    // 说明必须同时消失（否则界面会一边说"需要重新打开"，一边开关已经是开着的）。
+    if CaptureRevoke::current(&state.capture_revoked) != CaptureRevoke::None {
+        sayall_windows::gatt_note(format!(
+            "rc003 feature=enhanced-capture action=revoke_notice phase=completed \
+             terminal_result=cleared reason=re_enabled previous={}",
+            CaptureRevoke::current(&state.capture_revoked).as_str()
+        ));
+        CaptureRevoke::None.publish(&state.capture_revoked);
+    }
     sayall_windows::gatt_note(
         "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=passed"
             .to_owned(),
@@ -1298,6 +1319,58 @@ fn capture_health_for_round(
         return CaptureHealth::Active;
     }
     CaptureHealth::Starting
+}
+
+/// 「全按键支持」在启动对账里被**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）。
+///
+/// 这些回落不弹窗、不报错，只是把开关拉低；界面若不说明，用户看到的就是"升级后
+/// 功能自己变差了、重启也没用"。界面只按"有原因"显示一句用户语言（系统授权需要
+/// 重新确认），内部 token 只进日志与诊断串——两者都不许出现任务/UAC 这类机制词。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CaptureRevoke {
+    None = 0,
+    /// 计划任务不在系统里（卸载残留标记 / 被清理）。
+    TaskMissing = 1,
+    /// 卸载器留下的「需重新授权」标记。
+    ReauthMarker = 2,
+    /// 计划任务指向另一个架构的助手（覆盖安装保留了旧任务，issue #206）。
+    TaskTargetMismatch = 3,
+    /// 旧任务的电池策略会让调度器在电池供电时静默跳过（issue #206 第三轮）。
+    TaskPowerPolicyMismatch = 4,
+    /// 本机原生架构没有对应载荷（界面走"本机不可用"，不显示重新开启的提示）。
+    Unsupported = 5,
+}
+
+impl CaptureRevoke {
+    /// 发布给界面读的那份值（`AtomicU8`，不需要锁）。
+    fn publish(self, slot: &std::sync::atomic::AtomicU8) {
+        slot.store(self as u8, Ordering::Relaxed);
+    }
+
+    /// 读取当前发布值（未知编码按 `None` 处理：不显示任何文案）。
+    fn current(slot: &std::sync::atomic::AtomicU8) -> Self {
+        match slot.load(Ordering::Relaxed) {
+            1 => Self::TaskMissing,
+            2 => Self::ReauthMarker,
+            3 => Self::TaskTargetMismatch,
+            4 => Self::TaskPowerPolicyMismatch,
+            5 => Self::Unsupported,
+            _ => Self::None,
+        }
+    }
+
+    /// IPC token（前端 `Rc003CaptureRevoked` 逐字对应）。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::TaskMissing => "task_missing",
+            Self::ReauthMarker => "reauth_marker_present",
+            Self::TaskTargetMismatch => "task_target_mismatch",
+            Self::TaskPowerPolicyMismatch => "task_power_policy_mismatch",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 /// 常驻对账的节奏参数（纯常量，测试钉住）。
@@ -3559,8 +3632,9 @@ pub fn run() {
     #[cfg(not(windows))]
     let (windows_version, windows_build) = ("unknown".to_owned(), "unknown".to_owned());
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=process_start phase=started result={} diagnostic_schema=2 process_architecture={} native_arch={} windows_version={} windows_build={}",
+        "app_lifecycle event=process_start phase=started result={} diagnostic_schema={} process_architecture={} native_arch={} windows_version={} windows_build={}",
         if log_ready { "passed" } else { "failed" },
+        diagnostics::DIAGNOSTIC_SCHEMA_VERSION,
         std::env::consts::ARCH,
         sayall_windows::os_arch::native_arch(),
         windows_version,
@@ -3838,6 +3912,10 @@ pub fn run() {
             // 这里只做**授权对账**：卸载标记在 / 任务缺失 → 开关回落为关闭；
             // 是否触发不在这里定死——常驻对账每轮自己重读设置与桥接快照
             // （2026-10-04 起，见 rc003_auto_trigger_reconcile）。
+            // 「全按键支持」被主动关掉时的用户可见原因（2026-10-15，issue #264 附加观察甲）：
+            // 回落是静默的，界面必须能说出"为什么开关自己关了"，否则用户只会以为升级后变差。
+            let capture_revoked =
+                Arc::new(std::sync::atomic::AtomicU8::new(CaptureRevoke::None as u8));
             #[cfg(windows)]
             if saved_settings.rc003_capture_enabled {
                 let reauth_required = rc003_task::reauth_required();
@@ -3854,6 +3932,7 @@ pub fn run() {
                         support.helper_expected
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
+                    CaptureRevoke::Unsupported.publish(&capture_revoked);
                 } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
                     // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
                     // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
@@ -3864,6 +3943,7 @@ pub fn run() {
                         support.helper_expected
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
+                    CaptureRevoke::TaskTargetMismatch.publish(&capture_revoked);
                 } else if rc003_task::task_power_policy_matches() == Some(false) {
                     // 旧版任务带电池策略（`schtasks /create` 命令行形态固定写 true，
                     // 2026-10-13 issue #206 第三轮报障人对照实验定位）：电池供电时
@@ -3873,6 +3953,7 @@ pub fn run() {
                         "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason=task_power_policy_mismatch expected=battery_flags_off".to_owned(),
                     );
                     let _ = settings.save_rc003_capture_enabled(false);
+                    CaptureRevoke::TaskPowerPolicyMismatch.publish(&capture_revoked);
                 } else if reauth_required || !task_installed {
                     // 回落必须落诊断日志：开关在此被静默拉低，只打 stderr
                     // 意味着现场无法取证「回落有没有发生」（2026-09-28 复验
@@ -3886,6 +3967,14 @@ pub fn run() {
                         }
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
+                    CaptureRevoke::publish(
+                        if reauth_required {
+                            CaptureRevoke::ReauthMarker
+                        } else {
+                            CaptureRevoke::TaskMissing
+                        },
+                        &capture_revoked,
+                    );
                 }
             }
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
@@ -4069,6 +4158,7 @@ pub fn run() {
                 platform,
                 settings,
                 capture_health,
+                capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
                     completed_update.then(|| app.package_info().version.to_string()),
@@ -4488,6 +4578,32 @@ mod tests {
         // 阈值本身必须大于「宽限 + 观察间隔」，否则会在助手还在握手时就动手。
         assert!(CAPTURE_RECOVER_AFTER_MS > AUTO_TRIGGER_CAPTURE_GRACE_MS);
         assert!(CAPTURE_RECOVER_AFTER_MS >= AUTO_TRIGGER_WATCH_MS);
+    }
+
+    /// 启动对账"为什么把开关关掉"的发布通道（issue #264 附加观察甲）。
+    ///
+    /// 判据只此一处：界面只问"有没有原因"，原因 token 只进日志与诊断串。
+    #[test]
+    fn capture_revoke_round_trips_through_the_published_slot() {
+        let slot = std::sync::atomic::AtomicU8::new(0);
+        assert_eq!(CaptureRevoke::current(&slot), CaptureRevoke::None);
+        for revoke in [
+            CaptureRevoke::TaskMissing,
+            CaptureRevoke::ReauthMarker,
+            CaptureRevoke::TaskTargetMismatch,
+            CaptureRevoke::TaskPowerPolicyMismatch,
+            CaptureRevoke::Unsupported,
+        ] {
+            revoke.publish(&slot);
+            assert_eq!(CaptureRevoke::current(&slot), revoke);
+            assert_ne!(revoke.as_str(), "none", "有原因就必须给出 token");
+        }
+        // 未知编码按"没发生"处理：界面一个字都不显示，绝不猜原因。
+        slot.store(200, Ordering::Relaxed);
+        assert_eq!(CaptureRevoke::current(&slot), CaptureRevoke::None);
+        // 重新开启成功后回到 none（界面提示随之消失）。
+        CaptureRevoke::None.publish(&slot);
+        assert_eq!(CaptureRevoke::current(&slot).as_str(), "none");
     }
 
     /// 界面读的「实际生效状态」按**所有权**判，不按开关位置（2026-10-13 现场：

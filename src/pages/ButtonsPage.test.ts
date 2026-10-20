@@ -131,6 +131,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       targetUsages: [],
       ownedUsages: [],
       captureHealth: "off",
+      captureRevoked: "none",
     })),
     // 遥控器信息卡片上的「重新连接」：扫描已配对设备 + 连接（默认空列表，用例内按需覆盖）。
     scanPairedRemotes: vi.fn(async () => []),
@@ -336,6 +337,7 @@ beforeEach(() => {
 function bridgeSnapshot(
   phase: Rc003BridgeSnapshot["phase"],
   captureHealth: Rc003BridgeSnapshot["captureHealth"] = "off",
+  captureRevoked: Rc003BridgeSnapshot["captureRevoked"] = "none",
 ): Rc003BridgeSnapshot {
   return {
     phase,
@@ -354,6 +356,7 @@ function bridgeSnapshot(
     targetUsages: [],
     ownedUsages: [],
     captureHealth,
+    captureRevoked,
   };
 }
 
@@ -1852,6 +1855,56 @@ describe("buttons mapping page", () => {
       );
       expect(page.find(".page-subtitle").classes()).not.toContain("is-failure");
     }
+  });
+
+  it("启动对账把开关关掉时说明原因（2026-10-15，issue #264 附加观察甲）", async () => {
+    // 升级后最常见：旧任务的形态让对账把开关回落，用户看到的是"开关自己关了"。
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(
+      bridgeSnapshot("listening", "off", "task_power_policy_mismatch"),
+    );
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        expect(page.find(".page-subtitle").text()).toContain("重新打开一次");
+      },
+      { timeout: 3000 },
+    );
+    expect(page.find(".page-subtitle").text()).toBe(
+      "全按键支持因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。",
+    );
+    expect(page.find(".page-subtitle").classes()).toContain("is-failure");
+    // 不摊机制：任务、UAC、架构这些词一个都不许出现。
+    for (const bad of ["UAC", "任务", "架构", "提权"]) {
+      expect(page.find(".page-subtitle").text()).not.toContain(bad);
+    }
+  });
+
+  it("开关已经开着时，陈旧的原因不再显示（重新开启即消解）", async () => {
+    vi.mocked(getRc003TaskStatus).mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: true,
+      helperPath: null,
+      lastError: null,
+    });
+    vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(
+      bridgeSnapshot("connected", "active", "task_missing"),
+    );
+    const page = await mountPage("rc003");
+    await vi.waitFor(
+      () => {
+        expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+      },
+      { timeout: 3000 },
+    );
+    expect(page.find(".page-subtitle").classes()).not.toContain("is-failure");
   });
 
   it("状态未就绪时渲染同尺寸占位符、不渲染开关本体（与「启动行为」同法的无动画挂载，2026-09-28）", async () => {
