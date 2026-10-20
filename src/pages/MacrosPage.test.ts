@@ -62,6 +62,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     learnFocusPoint: learnFocusPointSpy,
     getButtonMappings: getButtonMappingsSpy,
     pickCustomApp: pickCustomAppSpy,
+    scanRegisteredApps: vi.fn(async () => []),
     saveButtonMappings: saveButtonMappingsSpy,
     startShortcutCapture: startShortcutCaptureSpy,
     stopShortcutCapture: stopShortcutCaptureSpy,
@@ -423,11 +424,10 @@ describe("组合动作页 · 编辑向导", () => {
       .find((item) => item.text().includes("执行已有组合动作"))!;
     await nestedCard.trigger("click");
     await flushPromises();
-    const select = wrapper
-      .findAll(".step-card-body select")
-      .find((item) => item.text().includes("尚未选择"))!;
-    expect(select.text()).toContain("另一个动作");
-    expect(select.text()).not.toContain("打开记事本并聚焦");
+    const chips = wrapper.findAll(".step-card-body .chip").map((item) => item.text());
+    expect(chips).toContain("另一个动作");
+    expect(chips).not.toContain("打开记事本并聚焦");
+    expect(wrapper.find(".step-card-body select").exists()).toBe(false);
   });
 
   it("学习窗口为 6 秒：点按钮立即采样并显示倒计时", async () => {
@@ -624,7 +624,7 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.text()).toContain("嵌套于：父动作");
   });
 
-  it("步骤未配置完整时不能进入下一步", async () => {
+  it("步骤未配置完整时「下一步」禁用并说明原因", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "新建").trigger("click");
     await flushPromises();
@@ -633,25 +633,38 @@ describe("组合动作页 · 编辑向导", () => {
     await findButton(wrapper, "下一步").trigger("click");
     await flushPromises();
     expect(wrapper.find(".steps-body").exists()).toBe(true);
-    await findButton(wrapper, "下一步").trigger("click");
-    await flushPromises();
-    expect(wrapper.find(".steps-body").exists()).toBe(true);
+    const next = findButton(wrapper, "下一步");
+    expect(next.attributes("disabled")).toBeDefined();
     expect(wrapper.text()).toContain("第 1 步还没设置完：还没有选择或录入按键");
+    expect(wrapper.find(".steps-body").exists()).toBe(true);
   });
 
-  it("系统与媒体动作提供与按键页一致的预设，选中即写入步骤", async () => {
+  it("「执行已有组合动作」用 chip 选择，不再使用下拉框", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "新建").trigger("click");
     await flushPromises();
-    await findButton(wrapper, "系统与媒体动作").trigger("click");
+    await findButton(wrapper, "执行已有组合动作").trigger("click");
     await flushPromises();
     await findButton(wrapper, "下一步").trigger("click");
     await flushPromises();
-    const lock = findButton(wrapper, "锁定");
-    await lock.trigger("click");
+    expect(wrapper.find(".step-card-body select").exists()).toBe(false);
+    const chip = wrapper.findAll(".step-card-body .chip").find((item) => item.text() === "打开记事本并聚焦");
+    expect(chip).toBeTruthy();
+    await chip!.trigger("click");
     await flushPromises();
-    expect(wrapper.find(".step-edit-item").text()).toContain("Win + L");
-    expect(wrapper.find(".chip.selected").text()).toBe("锁定");
+    expect(wrapper.find(".step-card-body .chip.selected").text()).toBe("打开记事本并聚焦");
+  });
+
+  it("「扫描本机应用」在组合动作页打开本机应用弹窗", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const scan = wrapper.findAll("button").find((item) => item.text() === "扫描本机应用")!;
+    await scan.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("本机应用");
   });
 
   it("单键或快捷键列出已保存与常用的快捷键，点选即写入", async () => {

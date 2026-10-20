@@ -8,6 +8,7 @@
  * - 浏览器预览下读演示库（bridge 里的 previewMacroLibrary），保存类操作报错。
  */
 import { computed, onMounted, ref, watch } from "vue";
+import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import {
   clearMacroEditorSession,
@@ -54,6 +55,7 @@ import {
   type KeyChord,
   type KeyCode,
   type AppFocusProfile,
+  type CustomAppPick,
   type MacroAction,
   type MacroChord,
   type MacroDefinition,
@@ -97,6 +99,12 @@ const deleteReferences = ref<MacroReferenceReport | null>(null);
 const presetApps = ref<PresetAppInfo[]>([]);
 /** 自定义应用（与按键页共用同一份 `applications`，只读展示）。 */
 const customApps = ref<Array<{ id: string; name: string }>>([]);
+const appPickerOpen = ref(false);
+const appPickerSaving = ref(false);
+const appPickerError = ref<string | null>(null);
+const knownCustomApps = computed<CustomAppPick[]>(() =>
+  customApps.value.map((app) => ({ name: app.name, path: app.id })),
+);
 const capturedChord = ref<KeyChord | null>(null);
 const captureActive = ref(false);
 const learningStepId = ref<string | null>(null);
@@ -168,7 +176,6 @@ const ACTION_ORDER: MacroAction[] = [
   "wait_for_application",
   "open_url",
   "run_macro",
-  "system_action",
 ];
 
 function setStatus(message: string, kind: "info" | "success" | "error" = "info"): void {
@@ -706,11 +713,6 @@ const commonShortcutGroups = computed(() =>
   })).filter((group) => group.items.length > 0),
 );
 
-/** 系统与媒体动作（复用按键页同一组系统/媒体快捷键）。 */
-const systemActionPresets = computed(
-  () => commonShortcutGroups.value.find((group) => group.label === "系统与媒体")?.items ?? [],
-);
-
 function sameChord(left: MacroChord | undefined, right: MacroChord): boolean {
   return (
     left !== undefined &&
@@ -746,6 +748,34 @@ async function addCustomAppToStep(): Promise<void> {
     setStatus(`已添加应用：${pick.name}`, "success");
   } catch (error) {
     setStatus(`添加应用失败：${messageOf(error)}`, "error");
+  }
+}
+
+/** 「扫描本机应用」弹窗确认：写入共享自定义应用列表，并选中第一个新增应用。 */
+async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
+  if (apps.length === 0) return;
+  appPickerSaving.value = true;
+  appPickerError.value = null;
+  try {
+    const mappings = await getButtonMappings();
+    const unique = new Map((mappings.applications ?? []).map((app) => [app.path.toLowerCase(), app]));
+    for (const app of apps) unique.set(app.path.toLowerCase(), app);
+    const saved = await saveButtonMappings({
+      ...mappings,
+      applications: [...unique.values()],
+    });
+    customApps.value = (saved.applications ?? []).map((app) => ({
+      id: app.path,
+      name: app.name,
+    }));
+    appPickerOpen.value = false;
+    void reloadPresetApps();
+    renameStepTarget(apps[0].path);
+    setStatus(`已添加 ${apps.length} 个应用`, "success");
+  } catch (error) {
+    appPickerError.value = messageOf(error);
+  } finally {
+    appPickerSaving.value = false;
   }
 }
 
@@ -1050,7 +1080,6 @@ onMounted(async () => {
   }
   await refreshFocusProfiles();
   await reloadLibrary();
-  restoreEditorSession();
 });
 
 /** 切走再切回来：恢复上次未保存的编辑进度（对齐 Mac 端的标签切换行为）。 */
@@ -1063,6 +1092,9 @@ function restoreEditorSession(): void {
   selectedStepId.value = saved.selectedStepId;
   wizardVisible.value = true;
 }
+
+// 同步恢复：必须在首次渲染前完成，否则会先显示一帧动作库再跳到向导（用户看到“闪一下”）。
+restoreEditorSession();
 
 watch(
   [draft, isNewMacro, editorStep, selectedStepId, wizardVisible],
@@ -1390,7 +1422,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                      <button class="chip" type="button" @click="appPickerOpen = true">扫描本机应用</button>
                       <button class="chip add-app" type="button" @click="addCustomAppToStep">
                         ＋ 添加应用
                       </button>
@@ -1422,7 +1454,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                      <button class="chip" type="button" @click="appPickerOpen = true">扫描本机应用</button>
                       <button class="chip add-app" type="button" @click="addCustomAppToStep">
                         ＋ 添加应用
                       </button>
@@ -1527,33 +1559,23 @@ watch(
                   </p>
                 </div>
 
-                <!-- 系统与媒体动作 -->
+                <!-- 系统与媒体动作（仅兼容旧数据，界面不再提供新增入口） -->
                 <div
                   v-else-if="draft.steps[selectedStepIndex].action === 'system_action'"
                   class="step-card-body"
                 >
                   <div class="field">
                     <span class="field-label">系统与媒体动作</span>
-                    <div class="preset-grid">
-                      <button
-                        v-for="item in systemActionPresets"
-                        :key="item.label"
-                        class="chip"
-                        :class="{
-                          selected: sameChord(
-                            draft.steps[selectedStepIndex].parameters.chord,
-                            item.chord,
-                          ),
-                        }"
-                        type="button"
-                        @click="applyChordToSelectedStep(item.chord)"
-                      >
-                        {{ item.label }}
-                      </button>
-                    </div>
+                    <span class="chord-display">
+                      {{
+                        draft.steps[selectedStepIndex].parameters.chord
+                          ? macroChordLabel(draft.steps[selectedStepIndex].parameters.chord!)
+                          : "尚未选择系统动作"
+                      }}
+                    </span>
                   </div>
                   <span class="field-hint">
-                    执行时向当前前台应用发送该快捷键（与按键页「系统与媒体」同一份清单）。
+                    该步骤来自旧版本，仍可执行或删除；新步骤请使用「单键或快捷键」。
                   </span>
                 </div>
 
@@ -1575,7 +1597,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="reloadPresetApps">扫描本机应用</button>
+                      <button class="chip" type="button" @click="appPickerOpen = true">扫描本机应用</button>
                       <button class="chip add-app" type="button" @click="addCustomAppToStep">
                         ＋ 添加应用
                       </button>
@@ -1656,26 +1678,32 @@ watch(
                   v-else-if="draft.steps[selectedStepIndex].action === 'run_macro'"
                   class="step-card-body"
                 >
-                  <label class="field">
+                  <div class="field">
                     <span class="field-label">选择组合动作</span>
-                    <select
-                      class="text-input"
-                      :value="draft.steps[selectedStepIndex].parameters.nestedMacroId ?? ''"
-                      @change="
-                        updateSelectedStep((step) => {
-                          const id = ($event.target as HTMLSelectElement).value;
-                          step.parameters.nestedMacroId = id || undefined;
-                          step.parameters.nestedMacroName =
-                            nestedCandidates.find((item) => item.macroId === id)?.name ?? undefined;
-                        })
-                      "
-                    >
-                      <option value="">尚未选择</option>
-                      <option v-for="item in nestedCandidates" :key="item.macroId" :value="item.macroId">
+                    <div class="preset-grid">
+                      <button
+                        v-for="item in nestedCandidates"
+                        :key="item.macroId"
+                        class="chip"
+                        :class="{
+                          selected:
+                            draft.steps[selectedStepIndex].parameters.nestedMacroId === item.macroId,
+                        }"
+                        type="button"
+                        @click="
+                          updateSelectedStep((step) => {
+                            step.parameters.nestedMacroId = item.macroId;
+                            step.parameters.nestedMacroName = item.name;
+                          })
+                        "
+                      >
                         {{ item.name }}
-                      </option>
-                    </select>
-                  </label>
+                      </button>
+                    </div>
+                    <p v-if="nestedCandidates.length === 0" class="field-hint">
+                      还没有可执行的组合动作；先创建并保存一个。
+                    </p>
+                  </div>
                   <span class="field-hint">
                     这里会使用所选组合动作最后一次保存的内容。组合动作不能直接或间接执行自己，最多嵌套 8 层。
                   </span>
@@ -1714,6 +1742,15 @@ watch(
           </ol>
         </div>
 
+        <p
+          v-if="editorStep === 'steps' && firstUnconfiguredStep !== null"
+          class="wizard-block-hint"
+          role="status"
+        >
+          第 {{ firstUnconfiguredStep + 1 }} 步还没设置完：{{
+            stepConfigurationIssue(draft.steps[firstUnconfiguredStep])
+          }}
+        </p>
         <footer class="wizard-foot">
           <button class="btn" type="button" @click="cancelEditing">取消编辑</button>
           <span class="spacer"></span>
@@ -1729,7 +1766,10 @@ watch(
             v-if="editorStep !== 'review'"
             class="btn primary"
             type="button"
-            :disabled="editorStep === 'basic' && (!draft.name.trim() || draft.steps.length === 0)"
+            :disabled="
+              (editorStep === 'basic' && (!draft.name.trim() || draft.steps.length === 0)) ||
+              (editorStep === 'steps' && firstUnconfiguredStep !== null)
+            "
             @click="goToStep(editorStep === 'basic' ? 'steps' : 'review')"
           >
             下一步
@@ -1742,6 +1782,14 @@ watch(
     </template>
 
     <p v-if="statusMessage" class="status-line" :data-kind="statusKind">{{ statusMessage }}</p>
+    <RegisteredAppsDialog
+      v-if="appPickerOpen"
+      :known-apps="knownCustomApps"
+      :saving="appPickerSaving"
+      :save-error="appPickerError"
+      @close="appPickerOpen = false"
+      @add="addScannedApps"
+    />
   </div>
 </template>
 
@@ -2225,6 +2273,14 @@ watch(
 }
 .shortcut-group {
   margin-top: 12px;
+}
+.wizard-block-hint {
+  margin: 0;
+  padding: 8px 22px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--error-text);
+  background: var(--error-surface);
 }
 .action-card:hover {
   border-color: var(--accent-border);

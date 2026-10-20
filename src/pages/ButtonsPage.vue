@@ -2215,10 +2215,7 @@ onUnmounted(() => {
             <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
-          </div>
-          <!-- 两个动作入口排在**所有**应用名称（预设 + 自定义）之后（2026-10-03 用户要求）：
-               用户挑应用时先扫完名字，再看到「扫描 / 添加」——不再插在名字中间。 -->
-          <div class="preset-grid app-library-actions">
+            <!-- 扫描 / 添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
             <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
               class="chip add-app"
@@ -2491,10 +2488,6 @@ onUnmounted(() => {
 /* 打开应用：预设 + 已添加应用共用一个换行网格（2026-10-03 用户要求）。
    芯片内换行只给自定义应用名（预设名保持单行，避免撑高整行）。 */
 .app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-/* 「扫描本机应用 / ＋添加应用」排在所有应用名称之后（2026-10-03 用户要求）：
-   与上面的应用列表（含可滚动列表）之间留出分组间距；选择器要压过
-   `.action-section .preset-grid` 的 6px。 */
-.action-section .preset-grid.app-library-actions { margin-top: 9px; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
 /* 「打开后聚焦方式」面板（2026-10-15 恢复暴露）。 */
 .focus-profile { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
