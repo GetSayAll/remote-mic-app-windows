@@ -1312,6 +1312,36 @@ mod tests {
     }
 
     #[test]
+    fn focus_frontmost_and_system_action_dispatch() {
+        let definition = make_definition(
+            "macro.aaaaaaa",
+            vec![
+                make_step(MacroAction::FocusFrontmost, MacroParameters::default()),
+                make_step(
+                    MacroAction::SystemAction,
+                    MacroParameters {
+                        chord: Some(MacroChord {
+                            modifiers: vec![MacroModifier::Control],
+                            key: "c".to_owned(),
+                        }),
+                        ..MacroParameters::default()
+                    },
+                ),
+            ],
+        );
+        let (report, calls) = run(
+            &definition,
+            std::slice::from_ref(&definition),
+            vec![],
+            60_000,
+        );
+        assert_eq!(report.result, MacroTerminalResult::Completed);
+        assert_eq!(calls[0].action, "focus_frontmost");
+        assert_eq!(calls[1].action, "send_shortcut");
+        assert_eq!(calls[1].arg, "c");
+    }
+
+    #[test]
     fn first_failure_stops_remaining_steps() {
         let definition = make_definition(
             "macro.aaaaaaa",
