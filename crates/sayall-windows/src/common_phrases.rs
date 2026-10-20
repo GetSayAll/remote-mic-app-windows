@@ -56,6 +56,9 @@ pub trait CommonPhraseHost: Send + Sync {
         CommonPhraseAccess::Unavailable
     }
 
+    /// 会员组件更新门禁（公开构建/未注入组件时 no-op）。
+    fn set_access(&self, _access: CommonPhraseAccess) {}
+
     /// 会员是否可用（`Allowed` 的便捷判据）。
     fn can_use(&self) -> bool {
         matches!(self.access(), CommonPhraseAccess::Allowed { .. })
@@ -179,6 +182,11 @@ pub fn current_common_phrase_host() -> Arc<dyn CommonPhraseHost> {
         Ok(guard) => Arc::clone(&guard),
         Err(poisoned) => Arc::clone(&poisoned.into_inner()),
     }
+}
+
+/// 会员组件更新常用语门禁（public 宿主统一入口；未注入组件时为 no-op）。
+pub fn set_common_phrase_access(access: CommonPhraseAccess) {
+    current_common_phrase_host().set_access(access);
 }
 
 #[cfg(test)]
