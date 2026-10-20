@@ -1810,6 +1810,11 @@ watch(
   align-items: flex-start;
   gap: 0;
 }
+/* 与按键页（.buttons-page .page-header h1）同字号；副标题沿用全局 .page-subtitle。 */
+.page-header h1 {
+  font-size: 24px;
+  margin: 0;
+}
 .library-body {
   flex: 1;
   min-height: 0;
