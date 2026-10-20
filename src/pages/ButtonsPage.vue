@@ -68,6 +68,7 @@ import {
   type ButtonMappings,
   type ButtonTrigger,
   type CaptureSupport,
+  type CommonPhraseAccess,
   type CustomAppPick,
   type AppFocusProfile,
   type FiredGesture,
@@ -252,6 +253,9 @@ const presetApps = ref<PresetAppInfo[]>([]);
 const macroDefinitions = ref<MacroDefinition[]>([]);
 /** 常用语组件是否可用（页面加载快照后更新；不可用时不显示动作入口）。 */
 const commonPhrasesAvailable = ref(false);
+/** 常用语会员门禁：只有 allowed 才允许选择「打开常用语」；denied/unavailable 显示禁用。 */
+const commonPhraseAccess = ref<CommonPhraseAccess>("unavailable");
+const commonPhraseAllowed = computed(() => commonPhraseAccess.value === "allowed");
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
@@ -1821,6 +1825,7 @@ onMounted(async () => {
     .catch(() => undefined);
   // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
   commonPhrasesAvailable.value = commonPhrases.available;
+  commonPhraseAccess.value = commonPhrases.access;
   registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
@@ -2329,10 +2334,16 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
               type="button"
-              title="打开常用语面板，按方向键和 OK 键插入对应常用语"
+              :disabled="!commonPhraseAllowed"
+              :title="
+                commonPhraseAllowed
+                  ? '打开常用语面板，按方向键和 OK 键插入对应常用语'
+                  : '登录会员后可使用常用语'
+              "
               @click="applyAction({ type: 'open_common_phrases' })"
             >
               打开常用语
+              <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
             </button>
             <button
               class="chip"

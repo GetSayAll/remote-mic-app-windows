@@ -607,8 +607,12 @@ describe("buttons mapping page", () => {
       .findAll(".action-section")
       .find((item) => item.find(".action-section-title").text() === "常用语")!;
     expect(section, "组件可用时必须出现「常用语」动作分组").toBeTruthy();
-    const chip = section.findAll("button.chip").find((button) => button.text() === "打开常用语")!;
+    const chip = section
+      .findAll("button.chip")
+      .find((button) => button.text().startsWith("打开常用语"))!;
     expect(chip).toBeTruthy();
+    expect(chip.find(".member-badge").text()).toBe("会员");
+    expect(chip.attributes("disabled")).toBeUndefined();
     await chip.trigger("click");
     await flushPromises();
 
@@ -617,6 +621,34 @@ describe("buttons mapping page", () => {
     // 选中后按键格摘要显示为可用态（不带「当前不可用」后缀）。
     expect(powerCard.text()).toContain("打开常用语");
     expect(powerCard.text()).not.toContain("当前不可用");
+    wrapper.unmount();
+  });
+
+  it("未登录会员时「打开常用语」禁用且不显示会员标识", async () => {
+    vi.mocked(getCommonPhrasePanelSnapshot).mockResolvedValue({
+      available: true,
+      access: "denied",
+      canUse: false,
+      previewMode: false,
+      notice: null,
+      entries: [],
+    });
+    const wrapper = await mountPage();
+    await flushPromises();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    const section = wrapper
+      .findAll(".action-section")
+      .find((item) => item.find(".action-section-title").text() === "常用语")!;
+    const chip = section
+      .findAll("button.chip")
+      .find((button) => button.text().startsWith("打开常用语"))!;
+    expect(chip.attributes("disabled")).toBeDefined();
+    expect(chip.find(".member-badge").exists()).toBe(false);
     wrapper.unmount();
   });
 
