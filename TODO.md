@@ -79,12 +79,13 @@
 - [ ] 增强捕获：共享宿主里的旧 tap 自动恢复（2026-10-21 现场）：旧宿主
   `members=3 rc003_members=1` 时既有 `inject_new_generation` 每 38 秒白注入；助手改为在
   `gadget_maps>0` 且拿得到 RC003 实例时，只做 `pnputil /remove-device` +
-  `/scan-devices`（不结束共享宿主），等**同一支** RC003 的新宿主 PID（按实例 ID 匹配）
-  后干净首注；没有新宿主时回退到
-  同宿主再注一代，已产生新宿主但首注失败时不再对旧 PID 注入。设备操作每轮一次、
-  跨进程 10 分钟冷却；助手经桥接 `R 1/0` 通知主程序，
+  `/scan-devices`（不结束共享宿主；remove 120 秒 / scan 30 秒有界，超时 kill），
+  等**同一支** RC003 的新宿主 PID（目标地址已知时按地址匹配）后干净首注；
+  没有新宿主时回退到同宿主再注一代，已产生新宿主但首注失败时不再对旧 PID 注入。
+  设备操作每轮一次、跨进程 10 分钟冷却；要求主程序桥接 10 秒内有成功心跳
+  （桥断则 `device_recovery=bridge_down` 回退）；助手经桥接 `R 1/0` 通知主程序，
   主程序在 180 秒恢复窗口 + 45 秒注入/握手尾巴内不按 `capture_recover` 重启助手。
-  自动化 passed：助手 75、`sayall-windows` 421、`sayall-windows-app` 147、
+  自动化 passed：助手 76、`sayall-windows` 421、`sayall-windows-app` 147、
   `cargo fmt --check`。**真机 deferred**：安装含本修复的本地包后制造共享宿主旧 tap，
   确认 `[HOST] action=recover_device_node` → `new_host_ready` → `[HELLO]
   auth=true`，鼠标保持可用；RC001 不涉及。记录：

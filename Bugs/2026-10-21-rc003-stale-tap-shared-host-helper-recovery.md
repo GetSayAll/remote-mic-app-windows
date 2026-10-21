@@ -41,6 +41,11 @@ pnputil /scan-devices
 4. 每次助手进程最多尝试一次；`device-recovery.stamp` 记录上次尝试时刻，
    **跨进程 10 分钟冷却**，避免跟随主程序 38 秒重启节奏反复 `remove/scan`。
 5. 恢复期间通过桥接发送 `R 1`，结束发送 `R 0`；断线重连后补发绝对状态。
+6. `pnputil` 有界运行：remove 120 秒 / scan 30 秒，超时 kill 并记录
+   `remove_result` / `scan_result`；总预算 120+30+12 秒仍在主程序 180 秒宽限内。
+7. 设备节点恢复要求主程序桥接在 10 秒内有成功心跳；桥接断开时
+   `device_recovery=bridge_down` 并回退，避免主程序自动拉起时 `/end` 打断一段
+   无人感知的设备操作。
 
 ### 主程序（`crates/sayall-windows/src/rc003_bridge.rs`、`src-tauri/src/lib.rs`）
 
@@ -68,7 +73,7 @@ pnputil /scan-devices
 - `cargo fmt --all -- --check` passed；
 - `cargo test -p sayall-windows --lib`：421 passed / 13 ignored；
 - `cargo test -p sayall-windows-app --lib`：147 passed / 1 ignored；
-- 助手 `cargo test`：75 passed；
+- 助手 `cargo test`：76 passed；
 - 新增单测覆盖：恢复闸门（无 gadget / 无实例 / 同轮已尝试 / 冷却）、冷却边界与
   时钟回拨、桥接 `R` 行解析、主程序恢复窗口与尾巴边界。
 

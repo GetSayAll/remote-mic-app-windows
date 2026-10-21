@@ -90,6 +90,10 @@ mod imp {
     const DEVICE_RECOVERY_COOLDOWN_SECS: u64 = 600;
     /// 设备节点恢复时间戳（放运行时目录，跨助手进程重启仍生效）。
     const DEVICE_RECOVERY_STAMP: &str = "device-recovery.stamp";
+    /// 设备节点恢复要求主程序桥接在这么久内有过成功心跳。桥接断开时主程序
+    /// 收不到 `R 1`，会在自动拉起第 5 轮 `/end` 掉助手；宁可不做无法被感知的
+    /// 60 秒设备操作，退回原保底路径。
+    const DEVICE_RECOVERY_BRIDGE_FRESH_MS: u64 = 10_000;
     /// 本轮准备好的 gadget DLL 路径：stale 分支自动刷新时用它重新注入。
     static PREPARED_GADGET_DLL: std::sync::OnceLock<std::path::PathBuf> =
         std::sync::OnceLock::new();
@@ -2278,14 +2282,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 蓝牙鼠标节点保持 OK。它不结束宿主，因此不会主动误杀同宿主其它设备。
     ///
     /// 只在**确有我们的 gadget**（`gadget_maps > 0`）、拿得到 RC003 完整实例 ID、
-    /// 且本轮尚未尝试过时执行；避免对无关宿主做 remove/scan，也避免同一轮循环。
+    /// 主程序桥接在 10 秒内有过心跳、且本轮尚未尝试过时执行；避免对无关宿主做
+    /// remove/scan，也避免桥接断开时做一段主程序收不到通知的 60 秒设备操作。
     fn should_recover_shared_host_device_node(
         gadget_maps: usize,
         rc003_instance_present: bool,
+        bridge_recent: bool,
         already_attempted: bool,
         cooldown_elapsed: bool,
     ) -> bool {
-        gadget_maps > 0 && rc003_instance_present && !already_attempted && cooldown_elapsed
+        gadget_maps > 0
+            && rc003_instance_present
+            && bridge_recent
+            && !already_attempted
+            && cooldown_elapsed
     }
 
     /// 设备节点恢复冷却判据（纯函数，单测覆盖）。空记录 = 允许；时钟回拨按冷却处理。
@@ -3691,34 +3701,78 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// `remove-device` + `scan-devices` 后恢复 0；之后宿主重新拉起且**不再有 gadget 映射**（锁保持释放）。
     /// 这一步放在删除运行时目录**之后**：删除只需要映射消失，不必等设备恢复。
     #[cfg(windows)]
-    fn recover_device_nodes(instance_id: &str, logger: &Logger) {
+    fn pnputil_result_label(result: &Result<bool, &'static str>) -> &'static str {
+        match result {
+            Ok(true) => "ok",
+            Ok(false) => "exit_failed",
+            Err(reason) => reason,
+        }
+    }
+
+    /// 有界运行 `pnputil`：超时就 kill，避免它脱离助手继续改设备节点。
+    ///
+    /// stdout/stderr 直接丢弃（只关心退出码），同时也避免 `pnputil` 回显的
+    /// 设备实例路径进入日志或管道缓冲。
+    #[cfg(windows)]
+    fn run_pnputil(args: &[&str], timeout_ms: u64) -> Result<bool, &'static str> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const POLL_MS: u64 = 100;
         use std::os::windows::process::CommandExt;
-        let removed = std::process::Command::new("pnputil")
-            .args(["/remove-device", instance_id])
+        use std::process::Stdio;
+        let mut child = std::process::Command::new("pnputil")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
-        let scanned = std::process::Command::new("pnputil")
-            .arg("/scan-devices")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
+            .spawn()
+            .map_err(|_| "spawn_failed")?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status.success()),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("timeout");
+                    }
+                    std::thread::sleep(Duration::from_millis(POLL_MS));
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("wait_failed");
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn recover_device_nodes(instance_id: &str, logger: &Logger) {
+        // 超时预算必须留在主程序的 180 秒恢复宽限内：120 + 30 + 12（等新宿主）
+        // 仍小于 180；超时就 kill，避免 pnputil 脱管后在后台改设备节点。
+        const REMOVE_TIMEOUT_MS: u64 = 120_000;
+        const SCAN_TIMEOUT_MS: u64 = 30_000;
+        let removed = run_pnputil(&["/remove-device", instance_id], REMOVE_TIMEOUT_MS);
+        let scanned = run_pnputil(&["/scan-devices"], SCAN_TIMEOUT_MS);
+        let removed_ok = matches!(&removed, Ok(true));
+        let scanned_ok = matches!(&scanned, Ok(true));
         logger.kv(
             "[CLEANUP]",
             &[
                 (
                     "device_recover",
-                    if removed && scanned {
+                    if removed_ok && scanned_ok {
                         "ok".into()
                     } else {
                         "partial".into()
                     },
                 ),
-                ("remove_ok", removed.to_string()),
-                ("scan_ok", scanned.to_string()),
+                ("remove_ok", removed_ok.to_string()),
+                ("scan_ok", scanned_ok.to_string()),
+                ("remove_result", pnputil_result_label(&removed).into()),
+                ("scan_result", pnputil_result_label(&scanned).into()),
             ],
         );
     }
@@ -6509,12 +6563,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         read_device_recovery_stamp(&args.runtime_dir),
                         recovery_now,
                     );
+                    let bridge_recent = app_bridge
+                        .as_ref()
+                        .map(|bridge| {
+                            let last = bridge.last_connected_ms();
+                            last != 0
+                                && now_ms_u64().saturating_sub(last)
+                                    <= DEVICE_RECOVERY_BRIDGE_FRESH_MS
+                        })
+                        .unwrap_or(false);
                     let device_recovery_state = if shared_device_recovery_attempted {
                         "already_attempted"
                     } else if gadget_maps == 0 {
                         "no_gadget"
                     } else if rc003_instance_id.is_none() {
                         "no_instance"
+                    } else if !bridge_recent {
+                        "bridge_down"
                     } else if !recovery_cooldown_elapsed {
                         "cooldown"
                     } else {
@@ -6523,6 +6588,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     if should_recover_shared_host_device_node(
                         gadget_maps,
                         rc003_instance_id.is_some(),
+                        bridge_recent,
                         shared_device_recovery_attempted,
                         recovery_cooldown_elapsed,
                     ) {
@@ -9809,27 +9875,37 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         #[test]
         fn recovers_only_with_our_tap_instance_and_one_attempt() {
-            // 共享宿主 + 确有我们的 gadget + 拿得到 RC003 实例 + 冷却已过
-            // ⇒ 允许一次设备节点恢复。
-            assert!(should_recover_shared_host_device_node(1, true, false, true));
-            assert!(should_recover_shared_host_device_node(2, true, false, true));
+            // 共享宿主 + 确有我们的 gadget + 拿得到 RC003 实例 + 桥接活着
+            // + 冷却已过 ⇒ 允许一次设备节点恢复。
+            assert!(should_recover_shared_host_device_node(
+                1, true, true, false, true
+            ));
+            assert!(should_recover_shared_host_device_node(
+                2, true, true, false, true
+            ));
         }
 
         #[test]
-        fn never_recovers_without_our_tap_or_instance_or_twice() {
+        fn never_recovers_without_our_tap_instance_bridge_or_twice() {
             // 没有我们的 gadget：可能是别人的 frida-gadget 或 pid 复用，不动设备节点。
             assert!(!should_recover_shared_host_device_node(
-                0, true, false, true
+                0, true, true, false, true
             ));
             // 拿不到 RC003 完整实例 ID：无法只针对该设备，保持原保底路径。
             assert!(!should_recover_shared_host_device_node(
-                1, false, false, true
+                1, false, true, false, true
+            ));
+            // 桥接断开：主程序收不到 `R 1`，会在自动拉起时打断恢复。
+            assert!(!should_recover_shared_host_device_node(
+                1, true, false, false, true
             ));
             // 同一轮只尝试一次；失败后回退到同宿主再注一代，不反复 remove/scan。
-            assert!(!should_recover_shared_host_device_node(1, true, true, true));
+            assert!(!should_recover_shared_host_device_node(
+                1, true, true, true, true
+            ));
             // 冷却未过：跨助手进程重启也不能再 remove/scan。
             assert!(!should_recover_shared_host_device_node(
-                1, true, false, false
+                1, true, true, false, false
             ));
         }
 
@@ -9847,6 +9923,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ));
             // 时钟回拨（记录在未来）按冷却处理，避免立刻重试。
             assert!(!device_recovery_cooldown_elapsed(Some(now + 1), now));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn pnputil_result_labels_are_stable() {
+            use super::pnputil_result_label;
+            assert_eq!(pnputil_result_label(&Ok(true)), "ok");
+            assert_eq!(pnputil_result_label(&Ok(false)), "exit_failed");
+            assert_eq!(pnputil_result_label(&Err("timeout")), "timeout");
+            assert_eq!(pnputil_result_label(&Err("spawn_failed")), "spawn_failed");
         }
     }
 
