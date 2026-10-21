@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
+import CrownIcon from "../components/CrownIcon.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
@@ -2362,11 +2363,7 @@ onUnmounted(() => {
               title="打开会员页面开通 Plus"
               @click="emit('navigate', 'membership')"
             >
-              <svg class="chip-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path
-                  d="M4.2 7.4l4.1 3.5L12 5.6l3.7 5.3 4.1-3.5-1.6 9.5H5.8L4.2 7.4zm2.9 10.6h9.8v1.6H7.1V18z"
-                />
-              </svg>
+              <CrownIcon class="chip-icon" />
               点击开通会员功能
             </button>
             <button
