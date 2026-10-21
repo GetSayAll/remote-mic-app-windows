@@ -144,6 +144,16 @@ pub struct MembershipCatalog {
     pub offer: Option<MembershipOffer>,
     /// 服务端授权方案全集（首个即 `offer`）；私有页按需展示切换。
     pub options: Vec<MembershipOffer>,
+    pub catalog_status: Option<MembershipCatalogStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipCatalogStatus {
+    pub status: String,
+    pub official_url: Option<String>,
+    pub github_url: Option<String>,
+    pub support_url: Option<String>,
 }
 
 /// 一次购买尝试。
@@ -255,6 +265,11 @@ pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// Expire the active handoff on the server and drop it locally.
+    fn expire_payment_handoff(&self) -> Result<(), MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
+
     /// 丢失当前支付交接（退出登录等）；服务端交接过期后自行清理。
     fn clear_payment_handoff(&self) {}
 
@@ -303,6 +318,10 @@ mod tests {
             runtime
                 .refresh_purchase()
                 .expect_err("refresh purchase")
+                .code,
+            runtime
+                .expire_payment_handoff()
+                .expect_err("expire handoff")
                 .code,
         ] {
             assert_eq!(code, "membership_unavailable");
