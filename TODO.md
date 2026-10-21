@@ -60,6 +60,22 @@
   （新实例 `[STOP] 绑定 47831 失败` ⇒ 换机后一个助手都不剩）；`bind_listener` 改有界重试
   （3 s / 150 ms，`[WAIT] listen_retry`）。**待真机复核**：往返换机（甲↔乙）、连续换机、
   只断开不换机不重启、交接期无 `[STOP]`。记录：`Bugs/2026-10-13-helper-does-not-follow-remote-switch.md`。
+- [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
+  `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
+  也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口
+  15–20s。修复：agent 用本次连接独立的 `everRenewed` 区分“从未续约”与“续约后停顿”，
+  后者走 `rx_silence`（1s）；鉴权失败退避改 2/4/8/15s 渐进；助手给 agent socket 设
+  500ms 写超时，写失败即结束 `serve_connection`，不再让阻塞写掐断读循环。探针：
+  agent `hb` 增加 `hb_gap_ms` / `pump_age_ms` / `ever_renewed` / `stat.stalls`，
+  助手 `[HB]` 增加 `hb_gap_ms` / `pump_age_ms` / `ever_renewed`，
+  `[RENEW]` 失败带 `kind` / `elapsed_ms`。
+  自动化 passed：`node hardware/RC003/helper/agent/agent_logic_test.mjs` 63/63
+  （旧判据阳性对照 60/63，3 条红在目标断言）；助手 `cargo test` 72 passed；
+  `--selftest` 全部通过（新增“对端不读时 500ms 写超时”，实测 ~500ms、
+  `kind=write_timeout`）；`scripts/ci-preflight.ps1` 7/7、`scripts/verify-rc003-helper.ps1 -Full`
+  passed（首跑一次瞬时失败已重跑全绿）。**真机 deferred**：RC003/RC001 冷态首用、
+  强杀助手、宿主重建、睡眠唤醒、连续/快速按；判据是恢复窗口 ≤3s、不再触发
+  8s `capture_recover`、且没有粘键/丢键。记录：`Bugs/2026-10-21-rc003-renew-stall.md`。
 - [ ] 向导⑤步的前置状态守卫（2026-10-13 现场：⑤步在"输入法还没选"时就进去了）：重启后落在⑤步
   先补读工具/快捷键配置（显示真实工具名，日志 `read_tool_state step=voice_test`）；从未选过工具时
   退回④步补选（日志 `tool_missing_fallback`）。前端 345 passed | 11 skipped、vue-tsc passed。
@@ -123,6 +139,7 @@
 - [ ] 使用真实 RC003 验证型号识别、BLE 配对、连接、断开、重连和首次语音。
 - [ ] 验证 `STREAM_START → AUDIO → STREAM_STOP` 首次会话完整可用。
 - [ ] 在 Windows 真机验证 WASAPI 端点初始化、VB-CABLE 回环、欠载恢复与完整尾音。
+- [ ] WASAPI 客户端在 WTS 会话断开/重连后自动释放并重开同一端点（issue #276）：自动化与本机 VB-CABLE 真实端点重开 passed；RDP 受控复现、RC003 首次按键与睡眠唤醒回归 deferred，见 `Bugs/2026-10-21-rdp-audio-session-invalidation-stuck.md`。
 - [x] CABLE Input 双层静音自愈：端点主静音使用 `IAudioEndpointVolume`；音量合成器里的 SayAll 应用会话静音使用 `ISimpleAudioVolume`，只匹配当前进程在已选 CABLE 端点上的会话。初始化、会话开始、流启动后检查，推流期间每 100ms 低频检查，必要时解除静音并读回；两层均不修改音量。2026-09-07 Windows 真实 CABLE Input 受控复现 passed：端点 open/begin 两检查点，以及应用会话 begin/after_start/stream_watch 三检查点均成功从 muted 恢复到 unmuted；随后真实 RC001 连续 9 次语音均复现“流启动约半秒后会话被外部重新静音”，监视路径 9/9 捕获并恢复为 unmuted（2765 个音频包），9 次开始/停止与快捷键按下/释放均成对；修复版 NSIS 本地包由用户复测确认 RC001 语音功能 passed。边界：完整 RC003 → CABLE → 输入法语音链仍按上一项真机验收。
 - [x] 生产诊断日志默认持久化到 LocalAppData：覆盖进程/Tauri/前端/Vue/首次 IPC 启动链，音频端点枚举与 `virtual_cable|bluetooth|other` 脱敏分类、WASAPI 打开/自动转换/推流/排空/中止/失败，以及按键映射和按住说话快捷键的加载、保存、重置；禁止原始音频包、端点名称/ID、自定义应用路径和异常正文进入生产日志。2026-09-08 自动化验证 passed；真实蓝牙耳机故障复现与安装包白屏现场日志验收 deferred。
 - [x] 在可见 NSIS 安装完成后检测 VB-CABLE 服务，未安装时说明第三方来源、管理员权限和重启要求并打开官方下载页；应用首次启动复检唯一 CABLE Input 并在无既有选择时自动配置。静默安装不打开网页，真实安装/重启仍待真机验收。

@@ -395,6 +395,63 @@ check('源码含 clearSetIn（清空集合视角）', src.includes('function cle
 check('onEnter 门禁调用 shouldTouchReport',
   src.includes('if (!shouldTouchReport(bytes)) return;'));
 
+/* --------- 11. 连接健康：租约过期必须走快速重连，不能误判成鉴权失败等 15s --------- */
+/* 2026-10-21 现场：连接已经收到过 renew，但租约过期时 lastRenewAt 被清零；旧判据
+   把这种普通停顿当成 auth_mismatch，于是一次抖动要等 4s + 15s。这里钉住分离判据：
+   - 本次连接**从未**收到 renew → auth_mismatch（渐进退避，首次 2s）；
+   - 本次连接**收到过** renew、之后静默 → rx_silence（1s）。
+   阳性对照：把 `!everRenewed` 去回 `lastRenewAt === 0`，第一条会红。 */
+
+async function freshStubConnection() {
+  ctx.connected = false;
+  ctx.sock = null;
+  ctx.connecting = false;
+  ctx.retryNotBefore = 0;
+  await ctx.connectOnce();
+}
+
+await freshStubConnection();
+check('新连接：everRenewed 初始为 false', ctx.everRenewed === false);
+ctx.handleCommand('{"type":"renew"}');
+check('收到续约：everRenewed=true', ctx.everRenewed === true);
+
+/* 场景 A：收到过续约，随后租约过期/下行静默。 */
+ctx.tConnect = Date.now() - 60000;
+ctx.lastRenewAt = 0;                    // heartbeat 的租约过期分支会这样清
+ctx.tLastRx = Date.now() - 4000;
+ctx.stat.auth_rejected = 0;
+ctx.stat.rx_timeouts = 0;
+ctx.retryNotBefore = 0;
+ctx.heartbeat();
+check('租约过期但收到过续约：走 rx_silence，不判 auth_mismatch',
+  ctx.stat.rx_timeouts === 1 && ctx.stat.auth_rejected === 0,
+  `rx=${ctx.stat.rx_timeouts} auth=${ctx.stat.auth_rejected}`);
+const fastDelay = ctx.retryNotBefore - Date.now();
+check('rx_silence 退避约 1s（不再固定 15s）',
+  fastDelay > 0 && fastDelay <= 1200, `delay_ms=${fastDelay}`);
+
+/* 场景 B：连上了但本次连接从未收到续约（令牌不符/换代）。 */
+await freshStubConnection();
+ctx.tConnect = Date.now() - 5000;
+ctx.lastRenewAt = 0;
+ctx.tLastRx = Date.now();
+ctx.stat.auth_rejected = 0;
+ctx.stat.rx_timeouts = 0;
+ctx.retryNotBefore = 0;
+ctx.heartbeat();
+check('从未收到续约：仍判 auth_mismatch',
+  ctx.stat.auth_rejected === 1 && ctx.stat.rx_timeouts === 0,
+  `rx=${ctx.stat.rx_timeouts} auth=${ctx.stat.auth_rejected}`);
+const slowDelay = ctx.retryNotBefore - Date.now();
+check('首次鉴权失败退避约 2s（渐进退避起点）',
+  slowDelay > 0 && slowDelay <= 2200, `delay_ms=${slowDelay}`);
+check('鉴权退避按失败次数渐进：2/4/8/15s 封顶',
+  ctx.authBackoffMs(1) === 2000 && ctx.authBackoffMs(2) === 4000
+    && ctx.authBackoffMs(3) === 8000 && ctx.authBackoffMs(9) === 15000,
+  `seq=${[1, 2, 3, 9].map((n) => ctx.authBackoffMs(n)).join(',')}`);
+check('新连接重置 everRenewed（不让上一代续约影响鉴权判定）',
+  ctx.everRenewed === false);
+
 const failed = results.filter((r) => !r.ok);
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '  -- ' + r.detail : ''}`);

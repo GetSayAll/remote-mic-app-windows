@@ -134,7 +134,15 @@ var RX_TIMEOUT_MS = 3000;
 /* 连上了、hello 也发了，却一直没有收到续约 ⇒ 对面的令牌与我不同（我们被换代了）。
    这时继续每秒重连只会刷爆日志、并跟"应该被接管的那一个实例"抢连接。 */
 var AUTH_TIMEOUT_MS = 4000;
-var RECONNECT_MS_SLOW = 15000;
+/* 鉴权失败后的渐进退避（2026-10-21）。原来的固定 15s 只在"对面不认我们"时需要；
+   但租约过期也会把 lastRenewAt 清零，旧判据于是把普通链路停顿误判成鉴权失败，
+   一次抖动就要等 15s。现在第一次 2s、其后 4/8/15s 封顶；真正的令牌不符仍会
+   逐步拉长，不会持续抢连接。 */
+var AUTH_BACKOFF_MS = [2000, 4000, 8000, 15000];
+function authBackoffMs(failures) {
+  if (failures <= 0) return AUTH_BACKOFF_MS[0];
+  return AUTH_BACKOFF_MS[Math.min(failures - 1, AUTH_BACKOFF_MS.length - 1)];
+}
 var MAX_CLEARS = 500000;
 var MAX_LINE = 8192;
 
@@ -167,6 +175,11 @@ var txSince = 0;              /* 当前这行开始写的时刻（挂起兜底�
 var lastRenewAt = 0;
 var tConnect = 0;
 var tLastRx = 0;              /* 最近一次收到下行数据的时刻（看门狗用） */
+var everRenewed = false;      /* 本次连接是否收到过有效续约：鉴权判定不能用 lastRenewAt 代替 */
+var authFailures = 0;         /* 连续鉴权失败次数（渐进退避） */
+var lastPumpAt = 0;           /* 最近一次读泵真正读到数据的时刻（停顿探针） */
+var lastHeartbeatAt = 0;      /* 上一次 heartbeat 执行的时刻（间隔探针） */
+var lastStallLogAt = 0;       /* stall 日志限流 */
 var retryNotBefore = 0;       /* 连接重试的最早时刻（鉴权失败后拉长退避） */
 var connecting = false;       /* 有 connect 尚在飞行中（并发守卫，见 connectOnce） */
 var attemptSeq = 0;           /* 尝试序号：只有最新一次尝试有权写 sock */
@@ -210,6 +223,7 @@ var stat = {
   rx_timeouts: 0,
   read_errors: 0,             /* 读失败导致的断线（此前这条路径不计数，见 pump） */
   auth_rejected: 0,
+  stalls: 0,                  /* 心跳/读泵停顿探针触发次数（2026-10-21） */
   errors: 0
 };
 
@@ -432,8 +446,10 @@ function handleCommand(line) {
   }
 
   if (cmd.type === 'renew') {
-    if (lastRenewAt === 0) logLine('renew:first');           /* 首次续约 = 武装时刻 */
+    if (!everRenewed) logLine('renew:first');                /* 本次连接首次续约 = 武装时刻 */
     lastRenewAt = Date.now();
+    everRenewed = true;
+    authFailures = 0;
     if (handshakeDone === false) handshakeDone = true;
     return;
   }
@@ -541,6 +557,7 @@ function pump() {
     if (len === 0) { setTimeout(pump, 200); return; }
     rxBuffer += decodeAscii(buf);
     tLastRx = Date.now();                                 /* 看门狗：任何下行字节都算活着 */
+    lastPumpAt = tLastRx;                                 /* 停顿探针：读泵真的处理了数据 */
     if (rxBuffer.length > MAX_LINE * 4) rxBuffer = '';   /* 异常保护 */
     var lines = rxBuffer.split('\n');
     rxBuffer = lines.pop();
@@ -592,6 +609,10 @@ function connectOnce() {
       sock = conn;
       connected = true;
       rxBuffer = '';
+      /* 新连接 = 新的鉴权判定代次：只有这条连接真的收到过 renew，才允许把
+         "租约过期"当成链路问题（rx_silence）而不是令牌问题（auth_mismatch）。 */
+      everRenewed = false;
+      lastPumpAt = Date.now();
       /* 新连接 = 出站的新一代：旧队列属于上一条连接（连不上的那些上行），
          作废并如实计数；代次推进让旧连接的迟到 settle 回调什么也不做。 */
       txDropAll();
@@ -638,11 +659,19 @@ function ensureConnected() {
 }
 
 /* 把当前连接判死：关闭 socket、进入退避、等下一轮重连。
-   `slow` = true 用于"连上了但对面不认我们"（鉴权失败），退避要长得多。 */
+   `slow` = true 用于"连上了但一直没收到续约"（鉴权/换代），退避按连续失败次数
+   逐步拉长；普通链路停顿（read_error / rx_silence）保持 1s，并清空鉴权失败计数。 */
 function dropConnection(reason, slow) {
   logLine('dropped:' + reason);          /* 必须在置 connected=false **之前**发 */
   connected = false;
-  retryNotBefore = Date.now() + (slow ? RECONNECT_MS_SLOW : RECONNECT_MS);
+  if (slow) {
+    authFailures++;
+    retryNotBefore = Date.now() + authBackoffMs(authFailures);
+  } else {
+    authFailures = 0;
+    retryNotBefore = Date.now() + RECONNECT_MS;
+  }
+  everRenewed = false;
   tConnect = 0;
   tLastRx = 0;
   pumpRunning = false;
@@ -909,9 +938,26 @@ function installHook() {
 
 function heartbeat() {
   var now = Date.now();
+  var hbGap = lastHeartbeatAt === 0 ? 0 : now - lastHeartbeatAt;
+  lastHeartbeatAt = now;
+  var pumpAge = lastPumpAt === 0 ? -1 : now - lastPumpAt;
+  /* 停顿探针（2026-10-21）：hb 间隔或读泵年龄超过 1.5s，说明 JS 线程/读路径
+     被卡住；限流落一条事件，并计入 stat.stalls 供 30s 心跳趋势判读。
+     这条日志本身也走队列，若上行同时堵住，它可能晚到——所以计数是主判据。 */
+  if (connected
+      && (hbGap > 1500 || (pumpAge >= 0 && pumpAge > 1500))
+      && (now - lastStallLogAt > 5000)) {
+    lastStallLogAt = now;
+    stat.stalls++;
+    logLine('stall hb_gap_ms=' + hbGap + ' pump_age_ms=' + pumpAge
+      + ' lease=' + (leaseOk() ? 1 : 0) + ' connected=' + (connected ? 1 : 0));
+  }
 
-  /* 连接健康判定（顺序有意义：先判"对面不认我们"，再判"对面不在了"）。 */
-  if (connected && tConnect !== 0 && lastRenewAt === 0 && (now - tConnect) > AUTH_TIMEOUT_MS) {
+  /* 连接健康判定（顺序有意义：先判"对面不认我们"，再判"对面不在了"）。
+     注意：不能用 `lastRenewAt === 0` 判断"从未收到续约"——租约过期时它也会被
+     清零，于是长连接上的普通停顿会被误判成鉴权失败并等 15s（2026-10-21 现场）。
+     只有本次连接**真的没收到过** renew，才走 slow 鉴权退避。 */
+  if (connected && tConnect !== 0 && !everRenewed && (now - tConnect) > AUTH_TIMEOUT_MS) {
     stat.auth_rejected++;
     dropConnection('auth_mismatch', true);
   } else if (connected && tLastRx !== 0 && (now - tLastRx) > RX_TIMEOUT_MS) {
@@ -950,6 +996,10 @@ function heartbeat() {
     disarmed: disarmed,
     lease_ok: leaseOk(),
     since_renew_ms: lastRenewAt === 0 ? -1 : (Date.now() - lastRenewAt),
+    /* 停顿探针（2026-10-21）：0/-1 = 尚无样本；>1500 表示对应路径被卡住。 */
+    hb_gap_ms: hbGap,
+    pump_age_ms: pumpAge,
+    ever_renewed: everRenewed,
     stat: {
       ioctl_calls: stat.ioctl_calls,
       target_hits: stat.target_hits,
@@ -983,6 +1033,7 @@ function heartbeat() {
       lease_expired: stat.lease_expired,
       rx_timeouts: stat.rx_timeouts,
       auth_rejected: stat.auth_rejected,
+      stalls: stat.stalls,
       errors: stat.errors
     }
   });
