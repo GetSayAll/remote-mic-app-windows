@@ -20,6 +20,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 const SESSION_MUTE_WATCH_INTERVAL: Duration = Duration::from_millis(100);
+const PUMP_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 static AUDIO_ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// 0x8889000A = AUDCLNT_E_DEVICE_IN_USE。
@@ -1185,6 +1186,10 @@ struct AudioSink {
     is_virtual_cable: bool,
     started: bool,
     last_session_mute_check: Instant,
+    /// `pump` 调用与“端点无可写空间”的次数；只在 1s 进度日志里聚合输出。
+    pump_calls: u64,
+    zero_space_polls: u64,
+    last_pump_progress: Instant,
     /// `OnSessionDisconnected` 写入的原因码；0 = 未断开。
     disconnected_reason: Arc<AtomicU8>,
     /// 持有订阅注册；drop 时自动 `UnregisterAudioSessionNotification`。
@@ -1352,6 +1357,9 @@ impl AudioSink {
             is_virtual_cable,
             started: false,
             last_session_mute_check: Instant::now(),
+            pump_calls: 0,
+            zero_space_polls: 0,
+            last_pump_progress: Instant::now(),
             disconnected_reason,
             _session_events: session_events,
         };
@@ -1439,6 +1447,17 @@ impl AudioSink {
     }
 
     fn pump(&mut self, queue: &mut VecDeque<i16>, draining: bool) -> Result<usize, PlatformError> {
+        // 事件回调已经知道客户端失效时，立即按真实原因收尾；不要等 PCM 队列涨到 2 秒
+        // 才以 queue_overflow 报错，否则日志会把“端点失效”误读成“队列太小”。
+        if let Some(reason) = self.invalidated_reason() {
+            crate::ble::gatt_note(format!(
+                "audio_pump event=invalidated reason={reason} queued_samples={} pump_calls={} zero_space_polls={}",
+                queue.len(),
+                self.pump_calls,
+                self.zero_space_polls
+            ));
+            return Err(PlatformError::AudioDeviceInvalidated);
+        }
         if self.started && self.last_session_mute_check.elapsed() >= SESSION_MUTE_WATCH_INTERVAL {
             self.ensure_session_unmuted("stream_watch", false)?;
         }
@@ -1450,6 +1469,20 @@ impl AudioSink {
             .get_available_space_in_frames()
             .map_err(|error| wasapi_audio_error("读取 WASAPI 可写空间", error))?
             as usize;
+        self.pump_calls = self.pump_calls.saturating_add(1);
+        if available == 0 {
+            self.zero_space_polls = self.zero_space_polls.saturating_add(1);
+        }
+        if self.last_pump_progress.elapsed() >= PUMP_PROGRESS_INTERVAL {
+            self.last_pump_progress = Instant::now();
+            crate::ble::gatt_note(format!(
+                "audio_pump phase=progress available_frames={available} queued_samples={} pump_calls={} zero_space_polls={} stream_started={} draining={draining}",
+                queue.len(),
+                self.pump_calls,
+                self.zero_space_polls,
+                self.started
+            ));
+        }
         let frames = available.min(queue.len());
         if frames == 0 {
             return Ok(0);
@@ -1494,6 +1527,9 @@ impl AudioSink {
         }
         self.client.reset_stream()?;
         self.started = false;
+        self.pump_calls = 0;
+        self.zero_space_polls = 0;
+        self.last_pump_progress = Instant::now();
         Ok(())
     }
 }
@@ -2208,6 +2244,42 @@ mod tests {
         assert_eq!(snapshot.phase, AudioPhase::Streaming);
         assert!(sink.is_some(), "recovery must leave a usable sink");
         let _ = interrupt(&mut sink, &mut queue, &state);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires SAYALL_TEST_CABLE_ENDPOINT_ID and mutates that endpoint's mute state"]
+    fn invalidated_sink_pump_fails_before_prebuffer() {
+        // 队列溢出前应先看到真实的 invalidated 原因，而不是等 PCM 队列涨到 2 秒。
+        // 旧的 pump 在 !started 且队列为空时直接返回 Ok(0)，会把这个原因拖到 overflow。
+        let _endpoint_guard = CABLE_ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let endpoint_id = std::env::var("SAYALL_TEST_CABLE_ENDPOINT_ID")
+            .expect("set SAYALL_TEST_CABLE_ENDPOINT_ID to the CABLE Input render endpoint");
+        wasapi::initialize_mta()
+            .ok()
+            .expect("initialize test COM apartment");
+        let _apartment = WasapiApartment;
+        let original_mute = endpoint_muted(&endpoint_id).expect("read initial endpoint mute");
+        let _restore = RestoreEndpointMute {
+            endpoint_id: endpoint_id.clone(),
+            muted: original_mute,
+        };
+
+        let mut sink = AudioSink::open(&endpoint_id, 0, &[0]).expect("open test endpoint");
+        sink.disconnected_reason.store(
+            disconnect_reason_code(wasapi::DisconnectReason::SessionDisconnected),
+            Ordering::SeqCst,
+        );
+        let mut queue = VecDeque::new();
+
+        let error = sink
+            .pump(&mut queue, false)
+            .expect_err("invalidated sink must fail before waiting for prebuffer");
+
+        assert_eq!(error, PlatformError::AudioDeviceInvalidated);
+        let _ = sink.reset();
     }
 
     #[cfg(windows)]
