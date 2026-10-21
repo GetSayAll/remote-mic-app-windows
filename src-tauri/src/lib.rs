@@ -34,7 +34,8 @@ mod updater;
 
 use diagnostics::DiagnosticReport;
 use membership::{
-    EmailCodeDelivery, MembershipCatalog, MembershipPurchase, MembershipRuntime, MembershipSnapshot,
+    EmailCodeDelivery, MembershipCatalog, MembershipPaymentHandoff, MembershipPurchase,
+    MembershipRuntime, MembershipSnapshot,
 };
 use platform::PlatformRuntime;
 use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
@@ -580,6 +581,39 @@ async fn refresh_membership_purchase(
 #[tauri::command]
 fn clear_membership_purchase(state: tauri::State<'_, AppState>) {
     state.membership.clear_purchase();
+}
+
+/// 创建（或复用）微信小程序支付交接；返回二维码与价格。
+#[tauri::command]
+async fn create_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+    product_id: String,
+) -> Result<MembershipPaymentHandoff, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.create_payment_handoff(&product_id)).await
+}
+
+/// 查询当前支付交接状态；成功后宿主已刷新签名权益。
+#[tauri::command]
+async fn refresh_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipPaymentHandoff, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.refresh_payment_handoff()).await
+}
+
+/// 当前支付交接；关闭弹窗后用来恢复「继续支付」。
+#[tauri::command]
+fn get_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+) -> Option<MembershipPaymentHandoff> {
+    state.membership.payment_handoff()
+}
+
+/// 丢弃当前支付交接（退出登录、切换方案等）。
+#[tauri::command]
+fn clear_membership_payment_handoff(state: tauri::State<'_, AppState>) {
+    state.membership.clear_payment_handoff();
 }
 
 /// 打开当前订单的托管收银台。
@@ -4914,6 +4948,10 @@ pub fn run() {
         refresh_membership_purchase,
         clear_membership_purchase,
         open_membership_checkout,
+        create_membership_payment_handoff,
+        refresh_membership_payment_handoff,
+        get_membership_payment_handoff,
+        clear_membership_payment_handoff,
         open_membership_link,
         get_system_accent_color,
         get_diagnostic_report,
@@ -5023,6 +5061,10 @@ pub fn run() {
         refresh_membership_purchase,
         clear_membership_purchase,
         open_membership_checkout,
+        create_membership_payment_handoff,
+        refresh_membership_payment_handoff,
+        get_membership_payment_handoff,
+        clear_membership_payment_handoff,
         open_membership_link,
         get_system_accent_color,
         get_diagnostic_report,

@@ -160,6 +160,24 @@ pub struct MembershipPurchase {
     pub checkout_url: Option<String>,
 }
 
+/// 微信小程序支付交接（与 Mac 的 handoff sheet 同款）。
+///
+/// `code_data_url` 是宿主取回并编码后的二维码图片；页面不接触 access token
+/// 或微信 code URL。`requested_product_id` 是页面选中的服务端方案 id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipPaymentHandoff {
+    pub id: String,
+    pub email: String,
+    pub product_id: String,
+    pub requested_product_id: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub status: String,
+    pub code_data_url: Option<String>,
+    pub open_scheme: Option<String>,
+}
+
 /// 宿主访问会员功能的唯一接口。
 ///
 /// 线程约定：`snapshot()` 会被主线程按秒调用，**必须立刻返回**；其余方法都会走
@@ -218,6 +236,27 @@ pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
     fn checkout_url(&self) -> Option<String> {
         None
     }
+
+    /// 为当前账号创建（或复用）微信小程序支付交接；返回二维码与价格。
+    fn create_payment_handoff(
+        &self,
+        _product_id: &str,
+    ) -> Result<MembershipPaymentHandoff, MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
+
+    /// 查询当前支付交接状态；成功后应已刷新签名权益。
+    fn refresh_payment_handoff(&self) -> Result<MembershipPaymentHandoff, MembershipError> {
+        Err(MembershipError::new("membership_unavailable"))
+    }
+
+    /// 当前支付交接；用于关闭弹窗后恢复“继续支付”。
+    fn payment_handoff(&self) -> Option<MembershipPaymentHandoff> {
+        None
+    }
+
+    /// 丢失当前支付交接（退出登录等）；服务端交接过期后自行清理。
+    fn clear_payment_handoff(&self) {}
 
     /// 主窗口重新获得焦点。默认不做事。
     fn on_foreground(&self) {}
