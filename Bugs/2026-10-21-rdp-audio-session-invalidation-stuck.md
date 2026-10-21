@@ -1,7 +1,7 @@
 # RDP 会话重连后 WASAPI 客户端失效，语音永久停在 endpoint_not_selected
 
 - 发现日期：2026-10-20（issue #276）
-- 状态：等待真机验证
+- 状态：已修复；安装版 live 失效恢复 passed，RDP/睡眠唤醒仍待真机
 - 影响范围：SayAll Windows 1.0.0（`a4c1311`）、RC003、VB-CABLE、Windows WTS 会话断开/重连；Win10/Win11 均可能受影响
 - 功能点：WASAPI 输出端点与会话生命周期（`crates/sayall-windows/src/audio.rs`）
 - 现象：会话重连后的第一次语音请求报 `0x88890004`；之后每次按键都在 0 ms 内返回 `endpoint_not_selected`，选择仍保存在配置里，只能手动重选设备或重启应用恢复
@@ -43,15 +43,33 @@ RDP 是强相关触发条件，但尚未受控复现；修复针对 `AUDCLNT_E_D
 
 - `cargo fmt --all -- --check`：passed。
 - `cargo test -p sayall-windows`：420 passed / 13 ignored / 0 failed。
-- `cargo test -p sayall-windows audio::tests -- --include-ignored`（本机 VB-CABLE 端点）：18 passed / 0 failed，包含：
+- `cargo test -p sayall-windows audio::tests -- --include-ignored`（本机 VB-CABLE 端点）：21 passed / 0 failed，包含：
   - `missing_sink_is_reopened_from_the_saved_selection`：模拟 `fail_audio` 后的 `sink=None`，`begin` 自动重开并进入 `Streaming`。
   - `invalidated_sink_is_replaced_before_begin`：模拟 `OnSessionDisconnected` 标记，`begin` 释放旧客户端并重开。
+  - 三个真实端点用例用静态锁串行执行，避免并行改写同一端点的静音状态。
 - 日志副作用（真实端点）：`disconnect_subscribe result=passed` → `audio_endpoint action=recover phase=requested trigger=begin_sink_missing|begin_device_invalidated` → `action=recover phase=completed terminal_result=passed`，随后 `begin_session` 完成。
 - `cargo check --workspace`：passed。
 - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
 - `cargo test --workspace`（rebase 到 `origin/main` `0b9194f` 后）：634 passed / 14 ignored / 0 failed。
 - `scripts/ci-preflight.ps1` 七步全部 `PASS`：前端 450 passed / 10 skipped，Rust workspace 测试、Tauri host 与 runtime simulation 编译检查均通过。
-- 真机 RDP 受控复现（连接/断开后首次按键、连续两次断连、睡眠唤醒回归）：**deferred**，本机无法受控制造 WTS 重连；需 Andy 在 RC003 + VB-CABLE 现场按复现条件验收。
+
+### 2026-10-21 安装版 live 验证（`server_shutdown`）
+
+安装包 SHA-256 `6e0d9020…`，内嵌 `source_revision=66b8821`；启动日志出现 `audio_session event=disconnect_subscribe result=passed`。
+
+- **方案 A（切走豆包麦克风）没有复现**：VB-CABLE 在没有消费端时仍会排空，11.5 秒会话提交 180480 个样本，`finish passed`，没有 `queue_overflow`。
+- **方案 B（禁用/启用端点）没有让旧客户端失效**：禁用窗口内的会话仍 `begin passed`、提交 95520 个样本。PnP 切换不足以让该驱动作废旧 `IAudioClient`。
+- **重启 Windows 音频服务**可靠触发：`13:33:18.726 audio_session attempt_id=1 event=disconnected reason=server_shutdown retryable=true`。
+- 下一次短按语音键：
+  - `13:34:48.958 audio_endpoint attempt_id=2 action=recover phase=requested trigger=begin_device_invalidated disconnect_reason=server_shutdown`
+  - `13:34:49.020 audio_endpoint attempt_id=2 action=open phase=client_initialized result=passed`
+  - `13:34:49.024 audio_endpoint attempt_id=2 action=recover phase=completed terminal_result=passed ... elapsed_ms=66`
+  - `13:34:49.025 audio_session generation=10 action=begin phase=completed terminal_result=passed elapsed_ms=68`
+  - `13:34:50.411 audio_session generation=10 action=finish phase=completed terminal_result=passed submitted_samples=21600`
+  - 全程没有 `endpoint_not_selected`，也没有 `queue_overflow`。
+- 这次触发原因是 `server_shutdown`，不是 RDP 的 `session_disconnected`；两者走同一条 invalid-device 释放与重开路径。
+
+真机 RDP 受控复现（连接/断开后首次按键、连续两次断连、睡眠唤醒回归）和 RC003 长时间实际语音：**deferred**，仍需 Andy 在 RC003 + VB-CABLE 现场验收。原现场截图里的 `queue_overflow` 是 CABLE 下游短暂停读的独立症状；本次修复保证任何 `fail_audio` 之后的下一次按键会重开同一端点，但不能保证下游永不停止读取。
 
 ## 隐私检查
 

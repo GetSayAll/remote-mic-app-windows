@@ -4,6 +4,7 @@ pub mod frame;
 pub mod macros;
 pub mod pcm;
 pub mod pipeline;
+pub mod portable_macros;
 pub mod settings;
 pub mod statistics;
 pub mod voice;
@@ -20,6 +21,9 @@ pub use macros::{
 };
 pub use pcm::{normalize_gain_db, process_pcm};
 pub use pipeline::{AtvvVoicePipeline, PipelineError, PipelineOutput};
+pub use portable_macros::{
+    export_portable_library, import_portable_library, PortableError, PORTABLE_MAX_BYTES,
+};
 pub use settings::{
     AppIconIdentifier, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
 };
