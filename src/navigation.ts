@@ -1,3 +1,6 @@
+import { COMBINATION_ACTIONS_ENABLED } from "./lib/feature-flags";
+import { privateFeaturePages, type PrivateFeaturePage } from "./private/feature-pages";
+
 export type PageId =
   | "buttons"
   | "recommendations"
@@ -6,18 +9,24 @@ export type PageId =
   | "permissions"
   | "settings";
 
-export type NavIcon = "keyboard" | "sparkles" | "layers" | "link" | "shield" | "gear";
+export type NavIcon =
+  | "keyboard"
+  | "sparkles"
+  | "layers"
+  | "link"
+  | "shield"
+  | "gear"
+  | "member";
 
 export interface NavigationItem {
-  id: PageId;
+  id: string;
   label: string;
   /** 侧栏图标（形状对齐 macOS SF Symbols：keyboard/link/shield.lefthalf.filled/gearshape）。 */
   icon: NavIcon;
 }
 
-import { COMBINATION_ACTIONS_ENABLED } from "./lib/feature-flags";
-
-export const navigationItems: NavigationItem[] = [
+/** 公开页面表。公开构建的侧栏就是它与私有页面注册表（通常为空）的合并结果。 */
+export const publicNavigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
   // 2026-10-15 组合动作（对齐 Mac 侧边栏「组合动作」条目与层叠方块图标）；
   // 入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。
@@ -33,6 +42,28 @@ export const navigationItems: NavigationItem[] = [
   { id: "settings", label: "设置", icon: "gear" },
 ];
 
+/**
+ * 合并公开页面与私有注册的页面（2026-10-15）。
+ *
+ * 抽成纯函数是为了能直接测「接入点真的接通了」——不必给整个应用打桩。
+ * 公开构建传入空数组，结果必须与 `publicNavigationItems` 逐项相同
+ * （仓库规则：未实现的页面不显示空入口）。
+ */
+export function mergeNavigationItems(
+  base: NavigationItem[],
+  extra: readonly PrivateFeaturePage[],
+): NavigationItem[] {
+  return [
+    ...base,
+    ...extra.map((page) => ({ id: page.id, label: page.label, icon: page.icon })),
+  ];
+}
+
+export const navigationItems: NavigationItem[] = mergeNavigationItems(
+  publicNavigationItems,
+  privateFeaturePages,
+);
+
 const ACTIVE_PAGE_STORAGE_KEY = "sayall.activePage";
 const LIVENESS_STORAGE_KEY = "sayall.livenessHeartbeat";
 /** 心跳由 1 秒运行快照轮询续写；5 秒内仍新鲜即视为重载而非冷启动，
@@ -42,18 +73,18 @@ const LIVENESS_FRESH_MS = 5_000;
 /** WebView 渲染进程崩溃重载会把整个应用重置回默认页（Bugs/2026-09-12），
  * 当前页持久化让恢复后停在用户离开时的页面。存储不可用时静默放弃：
  * 回到默认页不比重载前更差。 */
-export function loadPersistedPage(): PageId | null {
+export function loadPersistedPage(): string | null {
   try {
     const stored = localStorage.getItem(ACTIVE_PAGE_STORAGE_KEY);
     return navigationItems.some((item) => item.id === stored)
-      ? (stored as PageId)
+      ? stored
       : null;
   } catch {
     return null;
   }
 }
 
-export function persistActivePage(page: PageId): void {
+export function persistActivePage(page: string): void {
   try {
     localStorage.setItem(ACTIVE_PAGE_STORAGE_KEY, page);
   } catch {
