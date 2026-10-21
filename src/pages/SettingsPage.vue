@@ -4,6 +4,7 @@ import type { AppIconIdentifier, RuntimeSnapshot, ThemePreference } from "../lib
 import {
   getAppIcon,
   getLaunchAtLogin,
+  getMembershipAccountSummary,
   getOpenWindowAtLaunch,
   openGitHubRepository,
   openOfficialWebsite,
@@ -12,11 +13,15 @@ import {
   setLaunchAtLogin,
   setOpenWindowAtLaunch,
 } from "../lib/bridge";
+import type { MembershipAccountSummary } from "../lib/bridge";
+import CrownIcon from "../components/CrownIcon.vue";
+import MembershipLockBadge from "../components/MembershipLockBadge.vue";
+import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
-const emit = defineEmits<{ "restart-onboarding": [] }>();
+const emit = defineEmits<{ "restart-onboarding": []; navigate: [page: string] }>();
 
 const {
   phase,
@@ -51,6 +56,34 @@ const appIconOptions: Array<{ value: AppIconIdentifier; label: string; preview: 
 
 /** 版本号与安装包/更新器同源（package_info）；尚未读到时不编造版本。 */
 const version = computed(() => props.runtime?.appVersion ?? "—");
+
+const membershipSummary = ref<MembershipAccountSummary | null>(null);
+const membershipAvailable = computed(
+  () => membershipSummary.value?.availability === "available",
+);
+const membershipAccountText = computed(() => {
+  const summary = membershipSummary.value;
+  if (!summary) return "";
+  if (summary.accountDisplayName) return summary.accountDisplayName;
+  return summary.accountSignedIn ? "已登录账号" : "未登录";
+});
+const membershipStatusText = computed(() => {
+  const summary = membershipSummary.value;
+  if (!summary) return "";
+  if (summary.plusActive) {
+    return summary.syncState === "current"
+      ? "Plus 已开通，权益已同步。"
+      : "Plus 已开通，正在使用离线租约。";
+  }
+  return summary.accountSignedIn
+    ? "当前账号未开通 Plus；开通后可解锁会员功能。"
+    : "登录账号后可以开通或同步 Plus。";
+});
+const membershipActionLabel = computed(() => {
+  const summary = membershipSummary.value;
+  if (summary?.plusActive) return "管理会员";
+  return summary?.accountSignedIn ? "开通 Plus 会员" : "登录并开通 Plus";
+});
 
 const checking = computed(() => phase.value === "checking");
 const installing = computed(() => phase.value === "downloading" || phase.value === "installing");
@@ -251,6 +284,14 @@ async function onAppIconChange(event: Event): Promise<void> {
 
 onMounted(() => {
   void loadUpdatePreferences();
+  void getMembershipAccountSummary()
+    .then((summary) => {
+      membershipSummary.value = summary;
+    })
+    .catch(() => {
+      // 公开构建或服务不可用时，设置页不显示会员账号区。
+      membershipSummary.value = null;
+    });
   void getLaunchAtLogin()
     .then((enabled) => { launchAtLogin.value = enabled; })
     .catch((error) => { launchAtLoginError.value = error instanceof Error ? error.message : String(error); })
@@ -550,6 +591,41 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
       </div>
     </section>
 
+    <!-- 会员与账号（对齐 Mac 设置页的 membership section）。 -->
+    <section v-if="membershipAvailable" class="settings-section">
+      <h2 class="section-title">会员与账号</h2>
+      <div class="card settings-group">
+        <div class="settings-row settings-membership-row">
+          <span class="settings-row-icon membership-settings-icon" aria-hidden="true">
+            <CrownIcon />
+          </span>
+          <div class="settings-row-text">
+            <strong>{{ membershipAccountText }}</strong>
+            <p class="muted">{{ membershipStatusText }}</p>
+          </div>
+          <div class="settings-membership-actions">
+            <MembershipLockBadge
+              v-if="!membershipSummary?.plusActive"
+              label="需要 Plus 会员"
+            />
+            <MembershipRequiredButton
+              v-if="!membershipSummary?.plusActive"
+              :label="membershipActionLabel"
+              @open="emit('navigate', 'membership')"
+            />
+            <button
+              v-else
+              class="secondary-button"
+              type="button"
+              @click="emit('navigate', 'membership')"
+            >
+              {{ membershipActionLabel }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 「调整常用语」已移到按键页的二级视图（2026-10-17 用户反馈）。 -->
 
     <!-- 首次设置（向导重跑入口）：老用户机器已标记完成，需要入口才能重走一遍。 -->
@@ -694,6 +770,17 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 .settings-row-text { min-width: 0; }
 .settings-row-text strong { font-size: 14px; }
 .settings-row-text p { margin: 3px 0 0; font-size: 13px; }
+.settings-membership-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.membership-settings-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 /* 行内错误与行内说明共用左缩进，读起来仍属于上一行。 */
 .settings-group > .error-text { margin: 0 0 8px 50px; }
 

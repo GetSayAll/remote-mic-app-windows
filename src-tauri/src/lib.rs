@@ -610,6 +610,35 @@ fn get_membership_payment_handoff(
     state.membership.payment_handoff()
 }
 
+/// 当前构建是否连接 staging；页面据此显示「测试购买 · 不会扣款」。
+#[tauri::command]
+fn get_membership_environment(state: tauri::State<'_, AppState>) -> bool {
+    state.membership.is_test_environment()
+}
+
+/// 让系统打开当前交接里的 weixin:// scheme。
+///
+/// scheme 来自宿主保存的服务端 handoff，页面不能注入任意 URL；这里仍只放行
+/// `weixin://`，防止被篡改成文件或脚本协议。
+#[tauri::command]
+async fn open_membership_payment_scheme(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let scheme = state
+        .membership
+        .payment_handoff()
+        .and_then(|handoff| handoff.open_scheme)
+        .ok_or_else(|| "no_open_scheme".to_string())?;
+    if !scheme.starts_with("weixin://") || scheme.len() > 2048 {
+        return Err("invalid_handoff_scheme".to_string());
+    }
+    app.opener()
+        .open_url(scheme, None::<&str>)
+        .map_err(|_| "open_membership_scheme_failed".to_string())
+}
+
 /// 丢弃当前支付交接（退出登录、切换方案等）。
 #[tauri::command]
 fn clear_membership_payment_handoff(state: tauri::State<'_, AppState>) {
@@ -4975,6 +5004,8 @@ pub fn run() {
         create_membership_payment_handoff,
         refresh_membership_payment_handoff,
         get_membership_payment_handoff,
+        get_membership_environment,
+        open_membership_payment_scheme,
         clear_membership_payment_handoff,
         expire_membership_payment_handoff,
         open_membership_link,
@@ -5090,6 +5121,8 @@ pub fn run() {
         create_membership_payment_handoff,
         refresh_membership_payment_handoff,
         get_membership_payment_handoff,
+        get_membership_environment,
+        open_membership_payment_scheme,
         clear_membership_payment_handoff,
         expire_membership_payment_handoff,
         open_membership_link,

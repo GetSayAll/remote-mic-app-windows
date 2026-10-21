@@ -735,6 +735,28 @@ export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
   return invoke<RuntimeSnapshot>("get_runtime_snapshot");
 }
 
+/** 设置页账号区只需要的会员摘要；不携带令牌、租约或设备标识。 */
+export interface MembershipAccountSummary {
+  availability: "available" | "unavailable";
+  accountDisplayName: string | null;
+  plusActive: boolean;
+  accountSignedIn: boolean;
+  syncState: "current" | "offline" | "unavailable";
+}
+
+export async function getMembershipAccountSummary(): Promise<MembershipAccountSummary> {
+  if (!isTauriRuntime()) {
+    return {
+      availability: "unavailable",
+      accountDisplayName: null,
+      plusActive: false,
+      accountSignedIn: false,
+      syncState: "unavailable",
+    };
+  }
+  return invoke<MembershipAccountSummary>("get_membership_snapshot");
+}
+
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (!isTauriRuntime()) {
     return {

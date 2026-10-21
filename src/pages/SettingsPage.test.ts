@@ -32,6 +32,7 @@ const bridge = vi.hoisted(() => ({
   getAppIcon: vi.fn<() => Promise<"standard" | "faceted-duck">>(),
   setAppIcon: vi.fn<(identifier: "standard" | "faceted-duck") => Promise<"standard" | "faceted-duck">>(),
   restartOnboarding: vi.fn<() => Promise<{ flowVersion: number; completedVersion: number; step: string; isActive: boolean }>>(),
+  getMembershipAccountSummary: vi.fn<() => Promise<unknown>>(),
 }));
 
 vi.mock("../lib/app-update", async (importOriginal) => {
@@ -164,6 +165,13 @@ describe("settings page", () => {
     bridge.restartOnboarding
       .mockReset()
       .mockResolvedValue({ flowVersion: 1, completedVersion: 0, step: "welcome", isActive: true });
+    bridge.getMembershipAccountSummary.mockReset().mockResolvedValue({
+      availability: "unavailable",
+      accountDisplayName: null,
+      plusActive: false,
+      accountSignedIn: false,
+      syncState: "unavailable",
+    });
     // 常用语设置区默认按「公开空壳」口径（无私有组件 → 不显示区块）。
     privateUi.settingsComponent.mockReset();
     privateUi.settingsComponent.mockReturnValue(null);
@@ -523,5 +531,39 @@ describe("settings page", () => {
     expect(
       wrapper.findAll(".settings-section .section-title").map((item) => item.text()),
     ).not.toContain("常用语");
+  });
+
+  it("会员与账号：显示邮箱和 Plus 状态，并可从设置打开会员页", async () => {
+    bridge.getMembershipAccountSummary.mockResolvedValue({
+      availability: "available",
+      accountDisplayName: "user@example.com",
+      plusActive: false,
+      accountSignedIn: true,
+      syncState: "current",
+    });
+
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("会员与账号");
+    expect(wrapper.text()).toContain("user@example.com");
+    expect(wrapper.text()).toContain("需要 Plus 会员");
+    await wrapper.get(".membership-required-button").trigger("click");
+    expect(wrapper.emitted("navigate")).toEqual([["membership"]]);
+  });
+
+  it("会员与账号：公开构建（服务不可用）时不渲染账号区", async () => {
+    bridge.getMembershipAccountSummary.mockResolvedValue({
+      availability: "unavailable",
+      accountDisplayName: null,
+      plusActive: false,
+      accountSignedIn: false,
+      syncState: "unavailable",
+    });
+
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("会员与账号");
   });
 });

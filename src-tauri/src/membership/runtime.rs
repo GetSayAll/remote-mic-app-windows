@@ -265,6 +265,11 @@ pub trait MembershipRuntime: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// Whether this build talks to staging; drives the test-purchase badge.
+    fn is_test_environment(&self) -> bool {
+        false
+    }
+
     /// Expire the active handoff on the server and drop it locally.
     fn expire_payment_handoff(&self) -> Result<(), MembershipError> {
         Err(MembershipError::new("membership_unavailable"))
@@ -327,6 +332,7 @@ mod tests {
             assert_eq!(code, "membership_unavailable");
         }
         assert_eq!(runtime.checkout_url(), None);
+        assert!(!runtime.is_test_environment());
         runtime.clear_purchase();
     }
 
