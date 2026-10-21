@@ -31,7 +31,9 @@ defineEmits<{ open: [] }>();
   border: 0;
   border-radius: 999px;
   background: var(--accent, #e11d63);
-  color: var(--accent-text, #fff);
+  /* `--accent-text` is the accent colour used for text, not a foreground on
+     the accent fill. Using it here makes the label the same pink as the pill. */
+  color: #fff;
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;

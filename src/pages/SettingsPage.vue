@@ -15,7 +15,6 @@ import {
 } from "../lib/bridge";
 import type { MembershipAccountSummary } from "../lib/bridge";
 import CrownIcon from "../components/CrownIcon.vue";
-import MembershipLockBadge from "../components/MembershipLockBadge.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
@@ -604,10 +603,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             <p class="muted">{{ membershipStatusText }}</p>
           </div>
           <div class="settings-membership-actions">
-            <MembershipLockBadge
-              v-if="!membershipSummary?.plusActive"
-              label="需要 Plus 会员"
-            />
             <MembershipRequiredButton
               v-if="!membershipSummary?.plusActive"
               :label="membershipActionLabel"

@@ -547,7 +547,7 @@ describe("settings page", () => {
 
     expect(wrapper.text()).toContain("会员与账号");
     expect(wrapper.text()).toContain("user@example.com");
-    expect(wrapper.text()).toContain("需要 Plus 会员");
+    expect(wrapper.text()).toContain("开通 Plus 会员");
     await wrapper.get(".membership-required-button").trigger("click");
     expect(wrapper.emitted("navigate")).toEqual([["membership"]]);
   });
