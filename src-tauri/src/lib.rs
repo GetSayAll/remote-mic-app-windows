@@ -2622,7 +2622,7 @@ pub struct MacroDeleteResult {
 async fn export_combined_actions(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
-        "shortcut_settings feature=combined_actions action=export phase=requested".to_owned(),
+        "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=requested".to_owned(),
     );
     let settings = state.settings.clone();
     let result = match tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
@@ -2630,7 +2630,7 @@ async fn export_combined_actions(state: tauri::State<'_, AppState>) -> Result<bo
         let Some(path) = sayall_windows::file_dialog::pick_combined_actions_export_path()? else {
             return Ok(false);
         };
-        settings.export_combined_actions(&path, document)?;
+        settings.export_combined_actions_sayall(&path, document)?;
         Ok(true)
     })
     .await
@@ -2640,15 +2640,15 @@ async fn export_combined_actions(state: tauri::State<'_, AppState>) -> Result<bo
     };
     sayall_windows::gatt_note(match &result {
         Ok(true) => format!(
-            "shortcut_settings feature=combined_actions action=export phase=completed terminal_result=passed elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=completed terminal_result=passed elapsed_ms={}",
             started.elapsed().as_millis()
         ),
         Ok(false) => format!(
-            "shortcut_settings feature=combined_actions action=export phase=completed terminal_result=cancelled elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=completed terminal_result=cancelled elapsed_ms={}",
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=combined_actions action=export phase=completed terminal_result=failed error_domain=settings error_code=export_failed reason=dialog_or_write_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=completed terminal_result=failed error_domain=settings error_code=export_failed reason=dialog_or_write_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ),
     });
@@ -2662,7 +2662,7 @@ async fn import_combined_actions(
 ) -> Result<Option<MacroLibraryDocument>, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
-        "shortcut_settings feature=combined_actions action=import phase=requested".to_owned(),
+        "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=requested".to_owned(),
     );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
@@ -2672,7 +2672,7 @@ async fn import_combined_actions(
             else {
                 return Ok(None);
             };
-            let merged = settings.import_combined_actions(&path)?;
+            let merged = settings.import_combined_actions_sayall(&path)?;
             // 完整校验并持久化成功后才热加载。
             platform.set_macro_library(merged.clone());
             Ok(Some(merged))
@@ -2685,16 +2685,16 @@ async fn import_combined_actions(
     };
     sayall_windows::gatt_note(match &result {
         Ok(Some(document)) => format!(
-            "shortcut_settings feature=combined_actions action=import phase=completed terminal_result=passed definitions={} elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=completed terminal_result=passed definitions={} elapsed_ms={}",
             document.definitions.len(),
             started.elapsed().as_millis()
         ),
         Ok(None) => format!(
-            "shortcut_settings feature=combined_actions action=import phase=completed terminal_result=cancelled elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=completed terminal_result=cancelled elapsed_ms={}",
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=combined_actions action=import phase=completed terminal_result=failed error_domain=settings error_code=import_failed reason=dialog_read_parse_validation_or_persistence_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=completed terminal_result=failed error_domain=settings error_code=import_failed reason=dialog_read_parse_validation_or_persistence_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ),
     });
