@@ -85,6 +85,11 @@ mod imp {
     const AGENT_REFRESH_COOLDOWN_SECS: u64 = 3600;
     /// 冷却时间戳文件名（放运行时目录，跨助手进程重启仍生效）。
     const AGENT_REFRESH_STAMP: &str = "agent-refresh.stamp";
+    /// 共享宿主设备节点恢复的冷却时间：`remove-device` 可能耗时 60s 以上并短暂
+    /// 中断 RC003 的 HID/ATVV 链路，失败后不能跟着应用的 38 秒重启节奏反复做。
+    const DEVICE_RECOVERY_COOLDOWN_SECS: u64 = 600;
+    /// 设备节点恢复时间戳（放运行时目录，跨助手进程重启仍生效）。
+    const DEVICE_RECOVERY_STAMP: &str = "device-recovery.stamp";
     /// 本轮准备好的 gadget DLL 路径：stale 分支自动刷新时用它重新注入。
     static PREPARED_GADGET_DLL: std::sync::OnceLock<std::path::PathBuf> =
         std::sync::OnceLock::new();
@@ -2266,6 +2271,43 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             && !explicit_pinned_token
     }
 
+    /// 共享宿主里的旧 tap：只重建 RC003 设备节点（不结束宿主）的安全闸。
+    ///
+    /// 2026-10-21 真机验证：`pnputil /remove-device` + `/scan-devices` 只针对 RC003
+    /// 本体，旧共享宿主（`members=3 rc003_members=1`）随之被系统重建，旧 tap 消失；
+    /// 蓝牙鼠标节点保持 OK。它不结束宿主，因此不会主动误杀同宿主其它设备。
+    ///
+    /// 只在**确有我们的 gadget**（`gadget_maps > 0`）、拿得到 RC003 完整实例 ID、
+    /// 且本轮尚未尝试过时执行；避免对无关宿主做 remove/scan，也避免同一轮循环。
+    fn should_recover_shared_host_device_node(
+        gadget_maps: usize,
+        rc003_instance_present: bool,
+        already_attempted: bool,
+        cooldown_elapsed: bool,
+    ) -> bool {
+        gadget_maps > 0 && rc003_instance_present && !already_attempted && cooldown_elapsed
+    }
+
+    /// 设备节点恢复冷却判据（纯函数，单测覆盖）。空记录 = 允许；时钟回拨按冷却处理。
+    fn device_recovery_cooldown_elapsed(last_unix: Option<u64>, now_unix: u64) -> bool {
+        match last_unix {
+            None => true,
+            Some(last) => now_unix >= last && now_unix - last >= DEVICE_RECOVERY_COOLDOWN_SECS,
+        }
+    }
+
+    /// 读上次设备节点恢复时间；文件缺失/损坏都按"没有记录"处理。
+    fn read_device_recovery_stamp(dir: &std::path::Path) -> Option<u64> {
+        std::fs::read_to_string(dir.join(DEVICE_RECOVERY_STAMP))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+    }
+
+    /// 记录本次设备节点恢复时刻。写失败不影响恢复本身，只是下次可能更早重试。
+    fn write_device_recovery_stamp(dir: &std::path::Path, now_unix: u64) {
+        let _ = std::fs::write(dir.join(DEVICE_RECOVERY_STAMP), format!("{now_unix}\n"));
+    }
+
     /// 收尾 [SUMMARY] 的 `how=`（纯函数，单测覆盖）。
     ///
     /// 语义是"这一轮**最终**怎么拿到 tap"：升级段做过恢复动作（`recovered_via`）就写那个
@@ -2326,6 +2368,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if let Some(instance) = instance_id {
             recover_device_nodes(instance, logger);
         }
+        wait_for_new_rc003_host(old_pid, logger)
+    }
+
+    /// 轮询等待同一个 RC003 的**新宿主**（pid 与旧值不同）。
+    ///
+    /// 抽出来供两条恢复路径共用：
+    /// - 独占宿主：先 `terminate_process` 再 `recover_device_nodes`；
+    /// - 共享宿主：不结束宿主，只 `recover_device_nodes`，由系统决定是否重建宿主。
+    fn wait_for_new_rc003_host(old_pid: u32, logger: &Logger) -> Result<u32, String> {
         let deadline = Instant::now() + Duration::from_millis(HOST_RESTART_WAIT_MS);
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(HOST_RESTART_POLL_MS));
@@ -2349,6 +2400,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         Err(format!(
             "{HOST_RESTART_WAIT_MS} ms 内没有出现新的 RC003 宿主"
         ))
+    }
+
+    /// 共享宿主路径：只移除/重扫 RC003 设备节点，不结束宿主。
+    ///
+    /// 手动验证（2026-10-21）：`pnputil /remove-device` + `/scan-devices` 只针对
+    /// RC003 本体，系统重建了原本承载它的共享宿主；旧 tap 随旧宿主消失，新宿主
+    /// 可做干净首注，蓝牙鼠标保持可用。若系统没有重建宿主（pid 不变），返回 Err，
+    /// 调用方回退到既有的同宿主再注一代（不改变原有保底行为）。
+    fn recover_shared_host_device_node(
+        old_pid: u32,
+        instance_id: &str,
+        logger: &Logger,
+    ) -> Result<u32, String> {
+        logger.kv(
+            "[HOST]",
+            &[
+                ("action", "recover_device_node".into()),
+                ("pid", old_pid.to_string()),
+                (
+                    "note",
+                    "共享宿主：只移除/重扫 RC003 设备节点，不结束宿主；若系统重建宿主则对宿主干净首注"
+                        .into(),
+                ),
+            ],
+        );
+        recover_device_nodes(instance_id, logger);
+        wait_for_new_rc003_host(old_pid, logger)
     }
 
     /// 绑定回环端口。单独抽出来有两个目的：①让失败文案**可操作**；
@@ -3126,6 +3204,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             frame: AgentVoiceFrame,
             at: Instant,
         },
+        /// 助手正在做设备节点级恢复（绝对状态）。`true` 期间主程序不要按
+        /// 「捕获失效」重启助手：`pnputil remove-device` 可能耗时一分钟以上。
+        Recovering(bool),
     }
 
     /// 主程序桥接：把 agent 上报的动态目标按键边沿转发给主程序。
@@ -3192,6 +3273,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 frame,
                 at: Instant::now(),
             });
+        }
+
+        /// 设备节点恢复期间通知主程序"先别重启我"（绝对状态）。
+        fn push_recovering(&self, active: bool) {
+            let _ = self.tx.send(BridgeOutbound::Recovering(active));
         }
 
         fn capture_targets(&self) -> BridgeCaptureTargets {
@@ -4278,6 +4364,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ) {
         let mut conn: Option<AppBridgeStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
+        let mut last_recovering = false;
         let mut last_attempt: Option<Instant> = None;
         let mut last_ping = Instant::now();
         let mut resolved: Option<PathBuf> = Some(path);
@@ -4356,6 +4443,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             }
                         }
                     }
+                    BridgeOutbound::Recovering(active) => {
+                        // 绝对状态：断线期间的变化在重连时补发一次（见连接建立处）。
+                        last_recovering = active;
+                        if let Some(stream) = conn.as_mut() {
+                            let line = format!("R {}", if active { 1 } else { 0 });
+                            if bridge_write_line(stream, &line).is_err() {
+                                conn = None;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -4427,6 +4524,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             // 但一份绝对状态就能完全对齐（这是绝对语义的价值）。
                             if let Some(stream) = conn.as_mut() {
                                 let _ = bridge_send_edges(stream, &last_known);
+                                if last_recovering {
+                                    let _ = bridge_write_line(stream, "R 1");
+                                }
                             }
                         }
                         Err(reason) => {
@@ -6201,6 +6301,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 若仍按 plan 写 `attached_stale_existing_tap` 就是系统性错报（与 2026-09-23
         // "接管轮照搬另一条路径字段"同型）。
         let mut recovered_via: Option<&'static str> = None;
+        // 共享宿主路径只允许尝试一次「移除/重扫 RC003 设备节点」：pnputil 可能耗时
+        // 一分钟以上，失败后不能在同一轮里反复做设备级操作。
+        let mut shared_device_recovery_attempted = false;
 
         loop {
             if stop_requested(&stop) {
@@ -6323,7 +6426,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ),
                         ],
                     );
-                    match restart_rc003_host(target_pid, rc003_instance_id.as_deref(), &logger) {
+                    // 独占宿主路径同样可能走 `remove-device`（可能 60 秒以上）：
+                    // 主程序看到 `R 1` 会推迟「捕获失效 → 重启助手」。
+                    if let Some(bridge) = app_bridge.as_ref() {
+                        bridge.push_recovering(true);
+                    }
+                    let restart_result =
+                        restart_rc003_host(target_pid, rc003_instance_id.as_deref(), &logger);
+                    if let Some(bridge) = app_bridge.as_ref() {
+                        bridge.push_recovering(false);
+                    }
+                    match restart_result {
                         Ok(new_pid) => {
                             // 新宿主接管"当前服务的宿主"：宿主不变量必须跟着走，
                             // 否则干净首注后回来的新 agent 会被当成"外来宿主"拒掉。
@@ -6372,6 +6485,117 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 硬性安全闸：**绝不结束宿主**。共享宿主（误杀会波及用户其它 BLE 设备）或
                     // 宿主里没有我们的 gadget（可能是别人的 frida-gadget，或 pid 复用），
                     // 都退回原有的"另起一代"尝试（该路径真机未恢复，仅作为不改既有行为的保底）。
+                    //
+                    // 共享宿主 + 确有我们的旧 tap：先尝试只移除/重扫 RC003 设备节点
+                    // （2026-10-21 真机验证有效，鼠标不受影响），由系统决定是否重建宿主。
+                    // 若系统没有重建宿主，再回退到同宿主再注一代。
+                    let recovery_now = now_unix();
+                    let recovery_cooldown_elapsed = device_recovery_cooldown_elapsed(
+                        read_device_recovery_stamp(&args.runtime_dir),
+                        recovery_now,
+                    );
+                    let device_recovery_state = if shared_device_recovery_attempted {
+                        "already_attempted"
+                    } else if gadget_maps == 0 {
+                        "no_gadget"
+                    } else if rc003_instance_id.is_none() {
+                        "no_instance"
+                    } else if !recovery_cooldown_elapsed {
+                        "cooldown"
+                    } else {
+                        "attempt"
+                    };
+                    if should_recover_shared_host_device_node(
+                        gadget_maps,
+                        rc003_instance_id.is_some(),
+                        shared_device_recovery_attempted,
+                        recovery_cooldown_elapsed,
+                    ) {
+                        shared_device_recovery_attempted = true;
+                        write_device_recovery_stamp(&args.runtime_dir, recovery_now);
+                        logger.kv(
+                            "[ATTACH]",
+                            &[
+                                ("verify", "failed".into()),
+                                ("reason", "no_authenticated_agent".into()),
+                                ("action", "recover_device_node_clean_inject".into()),
+                                ("members", members.len().to_string()),
+                                ("rc003_members", rc003_members.to_string()),
+                                ("gadget_maps", gadget_maps.to_string()),
+                                (
+                                    "note",
+                                    "共享宿主不结束；只移除/重扫 RC003 设备节点，等系统重建宿主后干净首注"
+                                        .into(),
+                                ),
+                            ],
+                        );
+                        let instance = rc003_instance_id.as_deref().unwrap_or_default();
+                        // 主程序侧看到 `R 1` 会推迟「捕获失效 → 重启助手」，
+                        // 否则 60 秒的恢复窗口会被 `/end` 打断。
+                        if let Some(bridge) = app_bridge.as_ref() {
+                            bridge.push_recovering(true);
+                        }
+                        let recovery_result =
+                            recover_shared_host_device_node(target_pid, instance, &logger);
+                        match recovery_result {
+                            Ok(new_pid) => {
+                                SERVED_HOST_PID.store(new_pid, Ordering::Relaxed);
+                                let clean_plan = DllPlan::Canonical;
+                                match prepare_runtime(&args, &gadget_src, &logger, &clean_plan) {
+                                    Ok(prepared) => {
+                                        reap_generations(
+                                            &args.runtime_dir,
+                                            prepared.dll.parent(),
+                                            &logger,
+                                        );
+                                        let _ =
+                                            PREPARED_GADGET_DLL.set(prepared.dll.clone());
+                                        match inject_gadget(new_pid, &prepared.dll, &logger) {
+                                            Ok(injected) => {
+                                                logger.kv(
+                                                    "[DLL]",
+                                                    &dll_report_fields(&clean_plan, &prepared),
+                                                );
+                                                injection = Some(injected);
+                                                recovered_via = Some(
+                                                    "recover_device_node_clean_inject",
+                                                );
+                                                hello_deadline = if args.await_hello > 0 {
+                                                    Some(
+                                                        Instant::now()
+                                                            + Duration::from_secs(args.await_hello),
+                                                    )
+                                                } else {
+                                                    None
+                                                };
+                                                // 已拿到新宿主并完成干净首注：本轮不再走
+                                                // 同宿主再注一代；下一轮继续等 agent 握手。
+                                                if let Some(bridge) = app_bridge.as_ref() {
+                                                    bridge.push_recovering(false);
+                                                }
+                                                continue;
+                                            }
+                                            Err(error) => logger.line(&format!(
+                                                "[WARN] 设备节点恢复后干净首注失败：{error}；回退到同宿主再注一代。"
+                                            )),
+                                        }
+                                    }
+                                    Err(error) => logger.line(&format!(
+                                        "[WARN] 设备节点恢复后准备运行时目录失败：{error}；回退到同宿主再注一代。"
+                                    )),
+                                }
+                            }
+                            Err(error) => logger.line(&format!(
+                                "[WARN] 共享宿主设备节点恢复未产生新宿主：{error}；回退到同宿主再注一代。"
+                            )),
+                        }
+                    }
+                    // 只有真正发起过恢复才需要清通知；成功路径已在 `continue` 前清掉。
+                    if device_recovery_state == "attempt" {
+                        if let Some(bridge) = app_bridge.as_ref() {
+                            bridge.push_recovering(false);
+                        }
+                    }
                     logger.kv(
                         "[ATTACH]",
                         &[
@@ -6381,6 +6605,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ("members", members.len().to_string()),
                             ("rc003_members", rc003_members.to_string()),
                             ("gadget_maps", gadget_maps.to_string()),
+                            ("device_recovery", device_recovery_state.into()),
                             (
                                 "skip_host_restart",
                                 if members.len() != 1 || rc003_members != 1 {
@@ -9541,6 +9766,56 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn never_restarts_twice_in_one_run() {
             // "只升级一次"：同一轮里不允许反复结束宿主。
             assert!(!should_restart_host_for_clean_inject(true, 1, 1, 1));
+        }
+    }
+
+    #[cfg(test)]
+    mod shared_host_device_recovery_tests {
+        use super::{
+            device_recovery_cooldown_elapsed, should_recover_shared_host_device_node,
+            DEVICE_RECOVERY_COOLDOWN_SECS,
+        };
+
+        #[test]
+        fn recovers_only_with_our_tap_instance_and_one_attempt() {
+            // 共享宿主 + 确有我们的 gadget + 拿得到 RC003 实例 + 冷却已过
+            // ⇒ 允许一次设备节点恢复。
+            assert!(should_recover_shared_host_device_node(1, true, false, true));
+            assert!(should_recover_shared_host_device_node(2, true, false, true));
+        }
+
+        #[test]
+        fn never_recovers_without_our_tap_or_instance_or_twice() {
+            // 没有我们的 gadget：可能是别人的 frida-gadget 或 pid 复用，不动设备节点。
+            assert!(!should_recover_shared_host_device_node(
+                0, true, false, true
+            ));
+            // 拿不到 RC003 完整实例 ID：无法只针对该设备，保持原保底路径。
+            assert!(!should_recover_shared_host_device_node(
+                1, false, false, true
+            ));
+            // 同一轮只尝试一次；失败后回退到同宿主再注一代，不反复 remove/scan。
+            assert!(!should_recover_shared_host_device_node(1, true, true, true));
+            // 冷却未过：跨助手进程重启也不能再 remove/scan。
+            assert!(!should_recover_shared_host_device_node(
+                1, true, false, false
+            ));
+        }
+
+        #[test]
+        fn device_recovery_cooldown_is_bounded_and_clock_skew_is_conservative() {
+            let now = 1_000_000_u64;
+            assert!(device_recovery_cooldown_elapsed(None, now));
+            assert!(!device_recovery_cooldown_elapsed(
+                Some(now - (DEVICE_RECOVERY_COOLDOWN_SECS - 1)),
+                now
+            ));
+            assert!(device_recovery_cooldown_elapsed(
+                Some(now - DEVICE_RECOVERY_COOLDOWN_SECS),
+                now
+            ));
+            // 时钟回拨（记录在未来）按冷却处理，避免立刻重试。
+            assert!(!device_recovery_cooldown_elapsed(Some(now + 1), now));
         }
     }
 

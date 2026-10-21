@@ -1396,6 +1396,12 @@ fn capture_inactive_due_to_missing_voice_effect(missing_streak: u64) -> bool {
 /// 静默失效 2.5 天；用户把开关关开一次（= 起一个新助手实例）立刻恢复。本常量把
 /// 那次手动操作交给应用自己：持续这么久没有所有权就 `/end` + `/run` 换一个新实例。
 const CAPTURE_RECOVER_AFTER_MS: u64 = 60_000;
+/// 助手主动做**设备节点级**恢复（`pnputil remove-device` + `scan-devices`）时，
+/// 给它的最长免重启窗口。真机实测 `remove-device` 可能耗时 60 秒以上；这期间
+/// `/end` 会打断恢复，而且下一轮助手会因冷却跳过设备操作，反而永远恢复不了。
+const CAPTURE_RECOVER_RECOVERY_GRACE_MS: u64 = 180_000;
+/// 恢复结束后的尾巴：新宿主已就绪但 agent 还在注入/握手，这段时间同样不能重启。
+const CAPTURE_RECOVER_RECOVERY_TAIL_MS: u64 = 20_000;
 /// 前几次「自动重来」之间的最短间隔（防抖；新助手注入 + 握手本身也要时间）。
 const CAPTURE_RECOVER_MIN_INTERVAL_MS: u64 = 60_000;
 /// 连续多次「自动重来」仍无效后的间隔：不修链路，但也不每 60 秒反复重启。
@@ -1435,6 +1441,26 @@ fn capture_recover_after_ms(ever_active: bool, owned_usages: usize) -> u64 {
         CAPTURE_RECOVER_AFTER_RELAPSE_MS
     } else {
         CAPTURE_RECOVER_AFTER_MS
+    }
+}
+
+/// 助手正在设备节点恢复时，是否应暂缓「捕获失效 → 重启助手」（纯函数，单测覆盖）。
+///
+/// 恢复动作由助手主动上报（桥接 `R 1` / `R 0`）。超过上限仍没结束按"不再等"处理：
+/// 助手可能挂死，必须保留应用侧的最后兜底。
+fn capture_recovery_grace_active(
+    recovering: bool,
+    recovery_age_ms: Option<u64>,
+    recovery_ended_age_ms: Option<u64>,
+) -> bool {
+    if recovering {
+        recovery_age_ms
+            .map(|age| age < CAPTURE_RECOVER_RECOVERY_GRACE_MS)
+            .unwrap_or(true)
+    } else {
+        recovery_ended_age_ms
+            .map(|age| age < CAPTURE_RECOVER_RECOVERY_TAIL_MS)
+            .unwrap_or(false)
     }
 }
 
@@ -1860,6 +1886,8 @@ fn rc003_auto_trigger_reconcile(
     let mut capture_inactive_since: Option<std::time::Instant> = None;
     let mut capture_recover_last_at: Option<std::time::Instant> = None;
     let mut capture_recover_attempts: u32 = 0;
+    // 助手正在设备节点恢复时只记一条"暂缓重启"，避免每 2 秒刷屏。
+    let mut capture_recovery_wait_logged = false;
     loop {
         // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
         let woken_early = std::mem::take(&mut last_sleep_woken);
@@ -1919,6 +1947,7 @@ fn rc003_auto_trigger_reconcile(
                 capture_inactive_since = None;
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
+                capture_recovery_wait_logged = false;
                 CaptureHealth::Starting.publish(&capture_health);
                 let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
@@ -2004,7 +2033,32 @@ fn rc003_auto_trigger_reconcile(
                     let inactive_ms = inactive_since.elapsed().as_millis() as u64;
                     let since_last_ms =
                         capture_recover_last_at.map(|at| at.elapsed().as_millis() as u64);
-                    if capture_should_restart_helper(
+                    let recovery_grace = capture_recovery_grace_active(
+                        snapshot.recovering,
+                        snapshot.recovery_age_ms,
+                        snapshot.recovery_ended_age_ms,
+                    );
+                    if !recovery_grace {
+                        capture_recovery_wait_logged = false;
+                    }
+                    if recovery_grace {
+                        // 助手正在 `pnputil remove-device` / `scan-devices`，或刚结束、
+                        // agent 还在注入/握手：此时 `/end` 会打断恢复，冷却又会拦住下一轮。
+                        if !capture_recovery_wait_logged {
+                            sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=capture_recover phase=waiting \
+                                 reason=helper_device_recovery recovery_age_ms={} \
+                                 recovery_ended_age_ms={} grace_ms={} tail_ms={} \
+                                 inactive_ms={inactive_ms} {}",
+                                snapshot.recovery_age_ms.unwrap_or(0),
+                                snapshot.recovery_ended_age_ms.unwrap_or(0),
+                                CAPTURE_RECOVER_RECOVERY_GRACE_MS,
+                                CAPTURE_RECOVER_RECOVERY_TAIL_MS,
+                                bridge_health_summary(&snapshot)
+                            ));
+                            capture_recovery_wait_logged = true;
+                        }
+                    } else if capture_should_restart_helper(
                         inactive_ms,
                         since_last_ms,
                         capture_recover_attempts,
@@ -2054,6 +2108,7 @@ fn rc003_auto_trigger_reconcile(
                         capture_recover_last_at = Some(std::time::Instant::now());
                         // 新助手要重新注入 / 握手：从头计时，别连环干掉刚起来的实例。
                         capture_inactive_since = Some(std::time::Instant::now());
+                        capture_recovery_wait_logged = false;
                     }
                 } else if capture_inactive_logged && !snapshot.owned_usages.is_empty() {
                     // 只有真的拿回所有权才算恢复。若此时恰好是"用户把增强键全部取消映射"
@@ -2070,6 +2125,7 @@ fn rc003_auto_trigger_reconcile(
                     capture_inactive_since = None;
                     capture_recover_last_at = None;
                     capture_recover_attempts = 0;
+                    capture_recovery_wait_logged = false;
                 }
                 active_seen = true;
                 was_connected = true;
@@ -2120,6 +2176,7 @@ fn rc003_auto_trigger_reconcile(
                     capture_inactive_since = None;
                     capture_recover_last_at = None;
                     capture_recover_attempts = 0;
+                    capture_recovery_wait_logged = false;
                 }
                 active_seen = true;
                 if woken_early {
@@ -5659,6 +5716,32 @@ mod tests {
         assert_eq!(capture_recover_after_ms(true, 4), CAPTURE_RECOVER_AFTER_MS);
         // 失效期间的观察节奏必须快于正常观察窗，否则"看到恢复"仍要等 15 秒。
         assert!(CAPTURE_WATCH_INACTIVE_MS < AUTO_TRIGGER_WATCH_MS);
+    }
+
+    /// 助手设备节点恢复期间暂缓重启（2026-10-21）：`remove-device` 可能 60 秒以上，
+    /// 不能按 60 秒的捕获失效阈值把正在恢复的助手 `/end` 掉；但恢复挂死时必须保留兜底。
+    #[test]
+    fn helper_device_recovery_suspends_capture_restart_for_a_bounded_window() {
+        // 恢复进行中：年龄未到上限都等；没有年龄（旧助手没上报）也按"正在恢复"处理。
+        assert!(capture_recovery_grace_active(true, Some(0), None));
+        assert!(capture_recovery_grace_active(true, None, None));
+        assert!(!capture_recovery_grace_active(
+            true,
+            Some(CAPTURE_RECOVER_RECOVERY_GRACE_MS),
+            None
+        ));
+        // 恢复刚结束：留一段尾巴给注入/握手。
+        assert!(capture_recovery_grace_active(false, None, Some(0)));
+        assert!(!capture_recovery_grace_active(
+            false,
+            None,
+            Some(CAPTURE_RECOVER_RECOVERY_TAIL_MS)
+        ));
+        // 没恢复过：恢复正常判定。
+        assert!(!capture_recovery_grace_active(false, None, None));
+        // 两个窗口的量级关系：宽限必须覆盖 60 秒失效阈值，尾巴短于宽限。
+        assert!(CAPTURE_RECOVER_RECOVERY_GRACE_MS > CAPTURE_RECOVER_AFTER_MS);
+        assert!(CAPTURE_RECOVER_RECOVERY_TAIL_MS < CAPTURE_RECOVER_RECOVERY_GRACE_MS);
     }
 
     /// 唤醒后的重连不该重发"等新实例注入"的宽限（issue #264）。

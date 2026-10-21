@@ -76,6 +76,17 @@
   passed（首跑一次瞬时失败已重跑全绿）。**真机 deferred**：RC003/RC001 冷态首用、
   强杀助手、宿主重建、睡眠唤醒、连续/快速按；判据是恢复窗口 ≤3s、不再触发
   8s `capture_recover`、且没有粘键/丢键。记录：`Bugs/2026-10-21-rc003-renew-stall.md`。
+- [ ] 增强捕获：共享宿主里的旧 tap 自动恢复（2026-10-21 现场）：旧宿主
+  `members=3 rc003_members=1` 时既有 `inject_new_generation` 每 38 秒白注入；助手改为在
+  `gadget_maps>0` 且拿得到 RC003 实例时，只做 `pnputil /remove-device` +
+  `/scan-devices`（不结束共享宿主），等新宿主 PID 后干净首注；失败回退到同宿主再注
+  一代。设备操作每轮一次、跨进程 10 分钟冷却；助手经桥接 `R 1/0` 通知主程序，
+  主程序在 180 秒恢复窗口 + 20 秒注入尾巴内不按 `capture_recover` 重启助手。
+  自动化 passed：助手 75、`sayall-windows` 421、`sayall-windows-app` 147、
+  `cargo fmt --check`。**真机 deferred**：安装含本修复的本地包后制造共享宿主旧 tap，
+  确认 `[HOST] action=recover_device_node` → `new_host_ready` → `[HELLO]
+  auth=true`，鼠标保持可用；RC001 不涉及。记录：
+  `Bugs/2026-10-21-rc003-stale-tap-shared-host-helper-recovery.md`。
 - [ ] 向导⑤步的前置状态守卫（2026-10-13 现场：⑤步在"输入法还没选"时就进去了）：重启后落在⑤步
   先补读工具/快捷键配置（显示真实工具名，日志 `read_tool_state step=voice_test`）；从未选过工具时
   退回④步补选（日志 `tool_missing_fallback`）。前端 345 passed | 11 skipped、vue-tsc passed。
