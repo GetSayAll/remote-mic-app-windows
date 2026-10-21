@@ -66,7 +66,7 @@ mod imp {
     use std::collections::BTreeSet;
     use std::ffi::c_void;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
     use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
@@ -95,6 +95,13 @@ mod imp {
 
     const DEFAULT_PORT: u16 = 47831;
     const RENEW_MS: u64 = 500;
+    /// 发往 agent 的单次写入上界（2026-10-21）。`serve_connection` 是单线程
+    /// "读→写→读"循环；没有写超时时，对端一时不读就会把 `write_all` 卡住，
+    /// 同时它也不再读 agent 的 hb，形成双向停顿（现场 15–20 秒静默）。
+    /// 500ms 远小于 agent 的 2s 租约，超时即判连接失效、交回主循环 accept。
+    const WRITE_TIMEOUT_MS: u64 = 500;
+    /// 续约写入超过这个耗时只落一条慢写事件（不改变行为，用于定位卡点）。
+    const RENEW_SLOW_MS: u64 = 100;
     /// agent 侧租约（agent 在执行 `LEASE_MS` 后停止清键）。这里必须与 agent 的默认值一致。
     const LEASE_MS: u64 = 2000;
     /// 连上之后超过这么久没有心跳就告警（不是致命错误，只提示）。
@@ -5112,6 +5119,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 "renew_age_ms",
                                 extract_num(line, "since_renew_ms").unwrap_or(0).to_string(),
                             ),
+                            /* 2026-10-21 停顿探针：agent 侧 hb 间隔 / 读泵年龄；
+                            0/-1 = 尚无样本，>1500 = 对应路径被卡住。 */
+                            (
+                                "hb_gap_ms",
+                                extract_num(line, "hb_gap_ms").unwrap_or(0).to_string(),
+                            ),
+                            (
+                                "pump_age_ms",
+                                extract_num(line, "pump_age_ms").unwrap_or(0).to_string(),
+                            ),
+                            (
+                                "ever_renewed",
+                                extract_bool(line, "ever_renewed").to_string(),
+                            ),
+                            (
+                                "last_hb_age_ms",
+                                session.last_rx.elapsed().as_millis().to_string(),
+                            ),
                             ("stat", stat),
                         ],
                     );
@@ -6050,8 +6075,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 };
                 if let Some(stream) = guard.as_mut() {
                     let line = format!("{{\"type\":\"renew\",\"token\":\"{renew_token}\"}}\n");
-                    if stream.write_all(line.as_bytes()).is_err() {
-                        renew_logger.kv("[RENEW]", &[("state", "write_failed".into())]);
+                    let write_started = Instant::now();
+                    if let Err(error) = stream.write_all(line.as_bytes()) {
+                        renew_logger.kv(
+                            "[RENEW]",
+                            &[
+                                ("state", "write_failed".into()),
+                                ("kind", write_error_kind(&error).to_owned()),
+                                (
+                                    "elapsed_ms",
+                                    write_started.elapsed().as_millis().to_string(),
+                                ),
+                            ],
+                        );
                         *guard = None;
                         // **必须同时置位 `conn_stale`**，否则会进入死亡螺旋：
                         //
@@ -6069,6 +6105,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         renew_stale.store(true, Ordering::Relaxed);
                     } else {
                         renew_counter.fetch_add(1, Ordering::Relaxed);
+                        let elapsed_ms = write_started.elapsed().as_millis() as u64;
+                        if elapsed_ms >= RENEW_SLOW_MS {
+                            renew_logger.kv(
+                                "[RENEW]",
+                                &[
+                                    ("state", "slow".into()),
+                                    ("elapsed_ms", elapsed_ms.to_string()),
+                                ],
+                            );
+                        }
                         if tick % 10 == 0 {
                             renew_logger.kv(
                                 "[RENEW]",
@@ -6427,7 +6473,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         last_hb_log: None,
                     };
                     if let Ok(mut guard) = shared.lock() {
-                        *guard = Some(stream.try_clone().expect("clone stream"));
+                        // 续约线程用的是 clone。Windows 的 `TcpStream::try_clone`
+                        // 走 `WSADuplicateSocket`，`SO_SNDTIMEO` 不随克隆句柄共享
+                        // （2026-10-21 自检实测：只在原 stream 上设超时，clone 写入
+                        // 仍会无限阻塞）。因此 clone 必须单独设一次写超时。
+                        let renew_stream = stream.try_clone().expect("clone stream");
+                        let _ = renew_stream
+                            .set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+                        *guard = Some(renew_stream);
+                        // 新一代连接开始时清掉上一代遗留的 stale 标志。2026-10-21
+                        // 现场：04:52:56 新连接刚 accept 就被旧标志立刻打回，白绕
+                        // 一次 accept。清标志与换 `shared` 在同一把锁内完成，旧续约
+                        // 线程不可能在这之后再把旧连接的错误记到新连接上。
+                        conn_stale.store(false, Ordering::Relaxed);
                     }
                     serve_connection(
                         stream,
@@ -6620,7 +6678,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         canary: &[u16],
         targets: &BridgeCaptureTargets,
         synth: Option<(u16, u16)>,
-    ) {
+    ) -> io::Result<()> {
         // 清空集合 = 上报集合 ∪ 哨兵键。哨兵键把"清空到底有没有生效"变成外部可观测的实验
         // （详见 `--canary-usage` 的说明）。产品路径下目标来自主程序；无主程序时由
         // 调用方显式传入历史三键默认值，agent 自身默认保持空集合（fail-open）。
@@ -6660,15 +6718,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 于是接管轮出现过 `sent=false arm=true` 这种自相矛盾的一行；实际情况是
         // 那条连接的 arm 根本没送到（socket 已被对端重置）。
         let mut sent = vec![false; lines.len()];
-        let mut stopped = false;
+        let mut write_error: Option<io::Error> = None;
         for (i, l) in lines.iter().enumerate() {
-            if stopped || stream.write_all(l.as_bytes()).is_err() {
-                stopped = true;
+            if write_error.is_some() {
                 continue;
             }
-            sent[i] = true;
+            match write_socket_line(stream, l) {
+                Ok(()) => sent[i] = true,
+                Err(error) => write_error = Some(error),
+            }
         }
-        let flush_ok = stream.flush().is_ok();
+        let flush_ok = write_error.is_none() && stream.flush().is_ok();
         let mut config_fields: Vec<(&str, String)> = vec![
             ("arm_sent", sent[0].to_string()),
             ("mode_sent", sent[1].to_string()),
@@ -6704,20 +6764,53 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
         }
         logger.kv("[CONFIG]", &config_fields);
+        match write_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// 单次协议行写入。`serve_connection` 设置了写超时：对端不读时这里会在
+    /// `WRITE_TIMEOUT_MS` 内返回错误，调用方据此结束本条连接，绝不无限阻塞。
+    fn write_socket_line(stream: &mut TcpStream, line: &str) -> io::Result<()> {
+        stream.write_all(line.as_bytes())?;
+        stream.flush()
+    }
+
+    /// 写失败分类。只落稳定 token，不落端点/设备身份。
+    fn write_error_kind(error: &io::Error) -> &'static str {
+        match error.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => "write_timeout",
+            io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted => "peer_closed",
+            _ => "io_error",
+        }
+    }
+
+    fn log_write_failure(logger: &Logger, action: &str, error: &io::Error) {
+        logger.kv(
+            "[WRITE-FAIL]",
+            &[
+                ("action", action.to_owned()),
+                ("kind", write_error_kind(error).to_owned()),
+                ("error", error.to_string()),
+            ],
+        );
     }
 
     fn send_dynamic_targets(
         stream: &mut TcpStream,
         token: &str,
         targets: &BridgeCaptureTargets,
-    ) -> bool {
+    ) -> io::Result<()> {
         let line = format!(
             "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
             targets.generation,
             usages_json(&targets.usages),
             usages_json(&targets.usages)
         );
-        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+        write_socket_line(stream, &line)
     }
 
     /// 语音合成命令的行编码（纯函数，单测钉住格式）：
@@ -6733,9 +6826,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 给 agent 补发一条语音合成命令（与 send_session_config 里的 synth 行同格式）。
-    fn send_voice_synth(stream: &mut TcpStream, token: &str, to: Option<u16>) -> bool {
+    fn send_voice_synth(stream: &mut TcpStream, token: &str, to: Option<u16>) -> io::Result<()> {
         let line = voice_synth_command_line(token, to);
-        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+        write_socket_line(stream, &line)
     }
 
     /// 门内延迟开关命令（`gate`）的线格式。与 synth 命令同为 JSON 行、同样带令牌。
@@ -6747,9 +6840,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     }
 
     /// 给 agent 下发门内延迟开关（幂等；agent 侧只影响按下帧的呈现时机）。
-    fn send_voice_gate(stream: &mut TcpStream, token: &str, on: bool) -> bool {
+    fn send_voice_gate(stream: &mut TcpStream, token: &str, on: bool) -> io::Result<()> {
         let line = voice_gate_command_line(token, on);
-        stream.write_all(line.as_bytes()).is_ok() && stream.flush().is_ok()
+        write_socket_line(stream, &line)
     }
 
     /// targets 重发判据（纯函数，语义由单测钉住）。
@@ -6813,6 +6906,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         {
             logger.line("[WARN] 设置读超时失败；收尾检查可能不及时。");
         }
+        // 写也必须有界（2026-10-21 现场）：`serve_connection` 是单线程读→写→读，
+        // 对端一时不读时阻塞的 `write_all` 会同时掐断续约与 hb 读取，形成
+        // 15–20 秒的双向停顿。超时即返回，由主循环 accept 新连接。
+        if stream
+            .set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)))
+            .is_err()
+        {
+            logger.line("[WARN] 设置写超时失败；发送阻塞可能拖住读循环。");
+        }
 
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -6850,7 +6952,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if let Some(bridge) = bridge {
                     let current = bridge.capture_targets();
                     if sent_targets.as_ref() != Some(&current) {
-                        if !send_dynamic_targets(&mut stream, token, &current) {
+                        if let Err(error) = send_dynamic_targets(&mut stream, token, &current) {
+                            log_write_failure(logger, "dynamic_targets", &error);
                             return;
                         }
                         sent_targets = Some(current);
@@ -6864,7 +6967,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 下发同哲学）；agent 侧幂等，重复应用无害。
                     let (synth_current, synth_dirty) = bridge.voice_synth_state();
                     if synth_dirty || sent_synth.as_ref() != Some(&synth_current) {
-                        if !send_voice_synth(&mut stream, token, synth_current) {
+                        if let Err(error) = send_voice_synth(&mut stream, token, synth_current) {
+                            log_write_failure(logger, "voice_synth", &error);
                             return;
                         }
                         logger.kv(
@@ -6885,7 +6989,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     // 变更即单独补发一条 gate 命令；agent 侧幂等，仅影响按下帧的呈现时机。
                     let (gate_on, gate_dirty) = bridge.voice_gate_state();
                     if gate_dirty || sent_gate != Some(gate_on) {
-                        if !send_voice_gate(&mut stream, token, gate_on) {
+                        if let Err(error) = send_voice_gate(&mut stream, token, gate_on) {
+                            log_write_failure(logger, "voice_gate", &error);
                             return;
                         }
                         logger.kv(
@@ -6921,7 +7026,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     resend_attempts,
                     wait.as_millis()
                 ));
-                if !send_dynamic_targets(&mut stream, token, sent) {
+                if let Err(error) = send_dynamic_targets(&mut stream, token, sent) {
+                    log_write_failure(logger, "targets_resend", &error);
                     return;
                 }
                 sent_at = Some(Instant::now());
@@ -6969,7 +7075,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 Some(None) => None,
                                 None => synth,
                             };
-                            send_session_config(
+                            if let Err(error) = send_session_config(
                                 &mut stream,
                                 logger,
                                 token,
@@ -6978,7 +7084,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 canary,
                                 &targets,
                                 synth,
-                            );
+                            ) {
+                                log_write_failure(logger, "session_config", &error);
+                                return;
+                            }
                             sent_targets = Some(targets);
                             sent_at = Some(Instant::now());
                             sent_synth = Some(bridge_synth.unwrap_or(None));
@@ -8534,6 +8643,63 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
             Err(error) => check(
                 "续约写失败（conn_stale）能立刻打断当前连接",
+                false,
+                format!("无法绑定本地端口，本项无法执行：{error}"),
+            ),
+        }
+
+        // 29b) 写超时：对端不读时，`write_socket_line` 必须在有限时间内失败。
+        //      2026-10-21 现场：`serve_connection` 单线程读→写→读，阻塞的
+        //      `write_all` 会同时掐断 agent hb 与续约读取。这里用一个只连接、
+        //      不读取的客户端把发送缓冲填满，断言 500ms 档能返回 write_timeout。
+        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
+            Ok(timeout_listener) => {
+                let port = timeout_listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                let (done_tx, done_rx) = mpsc::channel::<(u64, &'static str)>();
+                std::thread::spawn(move || {
+                    if let Ok((stream, _)) = timeout_listener.accept() {
+                        // 与生产路径同形：`try_clone` 后**分别在两个句柄上**设写超时
+                        //（Windows 的 clone 不共享 SO_SNDTIMEO）。写入走 clone，正是
+                        // 续约线程的路径；只在原 stream 上设超时会在这里卡住并让
+                        // 3s 外层的 recv_timeout 失败。
+                        let mut writer = stream.try_clone().expect("clone write socket");
+                        let _ =
+                            writer.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+                        let _ =
+                            stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+                        let chunk = "x".repeat(64 * 1024);
+                        let t0 = Instant::now();
+                        let mut kind = "ok";
+                        for _ in 0..512 {
+                            match write_socket_line(&mut writer, &chunk) {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    kind = write_error_kind(&error);
+                                    break;
+                                }
+                            }
+                        }
+                        let _ = done_tx.send((t0.elapsed().as_millis() as u64, kind));
+                    }
+                });
+                // 只连接、不读取：接收缓冲很快被填满，服务端写入转入超时。
+                let _timeout_client =
+                    TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).ok();
+                match done_rx.recv_timeout(Duration::from_millis(3000)) {
+                    Ok((elapsed, kind)) => check(
+                        "写超时：对端不读时 write_socket_line 在 500ms 档内失败",
+                        kind == "write_timeout" && elapsed < 2000,
+                        format!("{elapsed} ms, kind={kind}"),
+                    ),
+                    Err(_) => check(
+                        "写超时：对端不读时 write_socket_line 在 500ms 档内失败",
+                        false,
+                        "3 秒内未返回 ⇒ 写路径仍可能无限阻塞读循环".to_string(),
+                    ),
+                }
+            }
+            Err(error) => check(
+                "写超时：对端不读时 write_socket_line 在 500ms 档内失败",
                 false,
                 format!("无法绑定本地端口，本项无法执行：{error}"),
             ),
