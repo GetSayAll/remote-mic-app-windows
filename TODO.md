@@ -44,6 +44,7 @@
   - ⏳ 2026-10-19 组合动作界面/流程对齐 Mac（用户逐项标注）：导入/导出等宽铺满侧栏、移除「学习输入框只负责…」长提示、状态条与向导按钮固定在窗口底部（不再悬在半空）；新建即填默认名称「组合动作 N」、基本设置选中动作高亮并带勾（不再“点了像没反应”）、去掉新建时的「组合动作已创建」提示；编排步骤的应用选择改为与按键页一致的 chip 网格（已安装预设 + 自定义应用 + 扫描）。前端 424 passed、`vue-tsc` 通过；安装包截图核对 passed。
   - ⏳ 2026-10-19 组合动作第二轮（Mac 对齐 + 能力补齐）：编辑草稿跨页面切换保留；右侧「使用位置」；标题副标题；动作清单补齐「聚焦输入框」「系统与媒体动作」，快捷键提供已保存/常用预设，应用选择加「＋ 添加应用」；删除时清理嵌套引用并按需级联删除，受影响按键改为未设置并给出数量提示；任一步骤未配置完整时禁止进入下一步（「第 N 步还没设置完：…」）。后端：`MacroAction::{FocusFrontmost,SystemAction}`、`MacroStepper::focus_frontmost`、`delete_macro_with_references`（含级联与版本自增）；`delete_macro` 返回 `{library, removedMacroIds, rewrittenMacroIds}`。自动化：core 61 / windows 389 / app 131、前端 30（MacrosPage）/ 26 文件、`vue-tsc` 通过。
   - ⏳ 2026-10-20 组合动作第三轮（用户逐项标注）：侧栏顺序「按键、组合动作、连接、推荐、权限、设置」；草稿恢复改同步（切页不再闪一帧动作库）；组合动作页「扫描本机应用」打开本机应用弹窗（多选写入共享自定义应用）；移除新步骤的「系统与媒体动作」；按键页扫描/添加应用并入 chip 网格末尾；「执行已有组合动作」改 chip；「下一步」在步骤未配置完整时禁用并显示原因。前端 125（三个测试文件）/ 全量通过、`vue-tsc` 通过。
+  - ⏳ 2026-10-21 组合动作导入/导出改为 macOS `.sayall`（`sayall-transfer 1.0`），本地 `combined-actions.json` 仍保留：支持 openApplication / waitForApplication / sendKeyboardShortcut / openURL / runMacro / builtInAction；focus、macOS 快捷指令/脚本、非 global scope 明确拒绝，不做静默转换。core 67 passed；app 147 passed（含跨端往返）。
   - **已知边界（记入本条待办）**：「等待应用 → App 窗口已出现」对纯 UWP 目标不可判定（窗口不属于目标进程）——需按 AUMID 匹配窗口才能补强；当前会在超时后判失败。
   - **已知边界**：完全不暴露无障碍接口的应用（微信 4.x）只能走「记录点击位置」；窗口尺寸变化超过 25%（旧记录）会拒绝点击并要求重新记录；记录位置不感知布局本身的变化。
   - 自动化 passed（八轮修复后重跑）：`cargo test --workspace`（core 56 / windows 388 / app 131）、`cargo fmt --all -- --check`、vitest 421 passed | 10 skipped、`vue-tsc` + `vite build`。
