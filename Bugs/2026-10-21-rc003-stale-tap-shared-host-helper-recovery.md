@@ -32,10 +32,12 @@ pnputil /scan-devices
 1. 共享宿主分支在 `gadget_maps > 0` 且拿得到 RC003 完整实例 ID 时，执行
    `recover_shared_host_device_node`：只 `recover_device_nodes`（`pnputil
    remove-device` + `scan-devices`），**不结束宿主**。
-2. `wait_for_new_rc003_host` 有界等待同一个 RC003 的新宿主 PID（`≤12 s`）；
+2. `wait_for_new_rc003_host` 有界等待**同一支** RC003 的新宿主 PID（`≤12 s`；
+   拿得到完整实例 ID 时按实例 ID 匹配，避免两支同时在线时误选另一支）；
    拿到后对**新宿主**做 `Canonical` 干净首注并重开握手窗口。
-3. 若系统没有重建宿主、或干净首注失败，回退到既有的
-   `inject_new_generation`（不改原有保底行为）。
+3. 若系统没有重建宿主，回退到既有的 `inject_new_generation`（不改原有保底行为）；
+   若**已产生新宿主**但干净首注失败，不再对旧 PID 注入（旧宿主已不承载 RC003），
+   等主程序按既有 `capture_recover` 重启助手后，由新助手对空宿主走正常首注。
 4. 每次助手进程最多尝试一次；`device-recovery.stamp` 记录上次尝试时刻，
    **跨进程 10 分钟冷却**，避免跟随主程序 38 秒重启节奏反复 `remove/scan`。
 5. 恢复期间通过桥接发送 `R 1`，结束发送 `R 0`；断线重连后补发绝对状态。
@@ -46,7 +48,7 @@ pnputil /scan-devices
    `recovery_ended_age_ms`；新助手握手或断线时清空。
 2. 捕获失效的自动重启在助手恢复期间暂缓：
    - 恢复进行中最多等 `180 s`（`remove-device` 实测可超过 60 s）；
-   - 恢复结束后再留 `20 s` 尾巴给注入/握手；
+   - 恢复结束后再留 `45 s` 尾巴给注入/握手（覆盖助手默认 30 秒 agent 握手窗口）；
    - 超过上限仍不恢复则照旧重启助手（保留应用侧兜底，防助手挂死）；
    - 只写一条 `capture_recover phase=waiting reason=helper_device_recovery`，
      不按 2 秒节奏刷屏。

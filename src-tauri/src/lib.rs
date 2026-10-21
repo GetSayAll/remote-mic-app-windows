@@ -1401,7 +1401,9 @@ const CAPTURE_RECOVER_AFTER_MS: u64 = 60_000;
 /// `/end` 会打断恢复，而且下一轮助手会因冷却跳过设备操作，反而永远恢复不了。
 const CAPTURE_RECOVER_RECOVERY_GRACE_MS: u64 = 180_000;
 /// 恢复结束后的尾巴：新宿主已就绪但 agent 还在注入/握手，这段时间同样不能重启。
-const CAPTURE_RECOVER_RECOVERY_TAIL_MS: u64 = 20_000;
+/// 助手默认给 agent 的握手窗口是 30 秒（`DEFAULT_AWAIT_HELLO_S`）；尾巴必须覆盖它，
+/// 否则刚注入完就会被 `capture_recover` 结束掉，10 分钟冷却又拦住下一次设备恢复。
+const CAPTURE_RECOVER_RECOVERY_TAIL_MS: u64 = 45_000;
 /// 前几次「自动重来」之间的最短间隔（防抖；新助手注入 + 握手本身也要时间）。
 const CAPTURE_RECOVER_MIN_INTERVAL_MS: u64 = 60_000;
 /// 连续多次「自动重来」仍无效后的间隔：不修链路，但也不每 60 秒反复重启。
@@ -5739,8 +5741,10 @@ mod tests {
         ));
         // 没恢复过：恢复正常判定。
         assert!(!capture_recovery_grace_active(false, None, None));
-        // 两个窗口的量级关系：宽限必须覆盖 60 秒失效阈值，尾巴短于宽限。
+        // 两个窗口的量级关系：宽限必须覆盖 60 秒失效阈值；尾巴必须覆盖助手
+        // 默认 30 秒 agent 握手窗口，且短于宽限。
         assert!(CAPTURE_RECOVER_RECOVERY_GRACE_MS > CAPTURE_RECOVER_AFTER_MS);
+        assert!(CAPTURE_RECOVER_RECOVERY_TAIL_MS >= 30_000);
         assert!(CAPTURE_RECOVER_RECOVERY_TAIL_MS < CAPTURE_RECOVER_RECOVERY_GRACE_MS);
     }
 

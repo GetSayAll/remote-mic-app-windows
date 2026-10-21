@@ -2334,8 +2334,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    Error，按键不可用）。复用卸载路径那套 `pnputil remove + scan`，不改其语义。
     ///    **实例 ID 绝不进日志**（`LOGGING.md` 隐私红线：含设备接口路径）。
     /// 3. 有界轮询：`≤ HOST_RESTART_WAIT_MS`、每 `HOST_RESTART_POLL_MS` 扫一次 `enum_hosts()`，
-    ///    找同一个 RC003 的**新 pid**（判据与 `refresh_agent_in_host` 一致：`is_rc003` 且
-    ///    pid 变了。RC003 在本产品里是单台设备，不做多实例区分——残留边界见函数尾注）。
+    ///    找**同一支** RC003 的**新 pid**：`is_rc003`、pid 变了，且在拿得到完整实例 ID 时
+    ///    实例 ID 必须相同（两支 RC003 同时在线时不会误选另一支）。
     ///
     /// 失败只返回 `Err`（调用方写日志并继续等握手），**不回退**到"同一宿主内再注一代"。
     fn restart_rc003_host(
@@ -2371,21 +2371,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         wait_for_new_rc003_host(old_pid, logger)
     }
 
-    /// 轮询等待同一个 RC003 的**新宿主**（pid 与旧值不同）。
+    /// 轮询等待同一支 RC003 的**新宿主**（pid 与旧值不同）。
     ///
     /// 抽出来供两条恢复路径共用：
     /// - 独占宿主：先 `terminate_process` 再 `recover_device_nodes`；
     /// - 共享宿主：不结束宿主，只 `recover_device_nodes`，由系统决定是否重建宿主。
+    ///
+    /// 选择判据复用 `refresh_host_candidate`：目标地址已知时必须落在目标地址上，
+    /// 避免两支 RC003 同时在线时误选另一支的新宿主；地址未知（手动调试 / 上一轮
+    /// 未发布）时退化为原行为（任意新 RC003）。
     fn wait_for_new_rc003_host(old_pid: u32, logger: &Logger) -> Result<u32, String> {
+        let target_address = read_target_address(logger);
+        let address_known = target_address.is_some();
         let deadline = Instant::now() + Duration::from_millis(HOST_RESTART_WAIT_MS);
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(HOST_RESTART_POLL_MS));
             if let Ok(scan) = enum_hosts() {
-                if let Some(entry) = scan
-                    .entries
-                    .iter()
-                    .find(|e| e.is_rc003 && e.pid != 0 && e.pid != old_pid)
-                {
+                if let Some(entry) = scan.entries.iter().find(|e| {
+                    refresh_host_candidate(
+                        e.pid,
+                        old_pid,
+                        e.is_rc003,
+                        address_known,
+                        target_address
+                            .map(|address| host_entry_matches_address(e, address))
+                            .unwrap_or(false),
+                    )
+                }) {
                     logger.kv(
                         "[HOST]",
                         &[
@@ -2398,7 +2410,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
         }
         Err(format!(
-            "{HOST_RESTART_WAIT_MS} ms 内没有出现新的 RC003 宿主"
+            "{HOST_RESTART_WAIT_MS} ms 内没有出现同一支 RC003 的新宿主"
         ))
     }
 
@@ -6304,6 +6316,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 共享宿主路径只允许尝试一次「移除/重扫 RC003 设备节点」：pnputil 可能耗时
         // 一分钟以上，失败后不能在同一轮里反复做设备级操作。
         let mut shared_device_recovery_attempted = false;
+        // 设备节点恢复是否已经产生新宿主：产生之后旧 `target_pid` 不再是承载
+        // RC003 的宿主，绝不能再对它走"同宿主再注一代"。
+        let mut shared_device_recovery_produced_host = false;
 
         loop {
             if stop_requested(&stop) {
@@ -6539,6 +6554,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             recover_shared_host_device_node(target_pid, instance, &logger);
                         match recovery_result {
                             Ok(new_pid) => {
+                                shared_device_recovery_produced_host = true;
                                 SERVED_HOST_PID.store(new_pid, Ordering::Relaxed);
                                 let clean_plan = DllPlan::Canonical;
                                 match prepare_runtime(&args, &gadget_src, &logger, &clean_plan) {
@@ -6576,12 +6592,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                                 continue;
                                             }
                                             Err(error) => logger.line(&format!(
-                                                "[WARN] 设备节点恢复后干净首注失败：{error}；回退到同宿主再注一代。"
+                                                "[WARN] 设备节点恢复后干净首注失败：{error}；不再对旧宿主走 inject_new_generation，等待主程序重启。"
                                             )),
                                         }
                                     }
                                     Err(error) => logger.line(&format!(
-                                        "[WARN] 设备节点恢复后准备运行时目录失败：{error}；回退到同宿主再注一代。"
+                                        "[WARN] 设备节点恢复后准备运行时目录失败：{error}；不再对旧宿主走 inject_new_generation，等待主程序重启。"
                                     )),
                                 }
                             }
@@ -6589,6 +6605,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 "[WARN] 共享宿主设备节点恢复未产生新宿主：{error}；回退到同宿主再注一代。"
                             )),
                         }
+                    }
+                    // 新宿主已经产生但干净首注失败：旧 target_pid 已不承载 RC003，
+                    // 再对它注入没有意义；让主程序按既有 capture_recover 重启助手，
+                    // 新助手会对这个空宿主走正常干净首注。
+                    if shared_device_recovery_produced_host {
+                        if recovered_via.is_none() {
+                            recovered_via = Some("recover_device_node_no_tap");
+                        }
+                        if let Some(bridge) = app_bridge.as_ref() {
+                            bridge.push_recovering(false);
+                        }
+                        logger.line(
+                            "[WARN] 新宿主已产生但未完成注入；跳过旧宿主 inject_new_generation，等待 agent 握手超时后由主程序重启。",
+                        );
+                        continue;
                     }
                     // 只有真正发起过恢复才需要清通知；成功路径已在 `continue` 前清掉。
                     if device_recovery_state == "attempt" {
