@@ -5133,10 +5133,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 "ever_renewed",
                                 extract_bool(line, "ever_renewed").to_string(),
                             ),
-                            (
-                                "last_hb_age_ms",
-                                session.last_rx.elapsed().as_millis().to_string(),
-                            ),
                             ("stat", stat),
                         ],
                     );

@@ -89,8 +89,9 @@ agent 已 `lease_ok=false`。因此本次把写超时作为防御性加固，不
     避免新连接刚被 accept 就被旧标志立刻打回（04:52:56 现场多绕了一次 accept）。
   - `[RENEW]` 失败带 `kind` / `elapsed_ms`；单次续约写 ≥100ms 落
     `state=slow`。
-  - `[HB]` 增加 `hb_gap_ms` / `pump_age_ms` / `ever_renewed` /
-    `last_hb_age_ms`，用于区分 agent 停顿与链路停顿。
+  - `[HB]` 增加 `hb_gap_ms` / `pump_age_ms` / `ever_renewed`（均来自 agent 的
+    当前 hb），用于区分 agent 停顿与链路停顿；不复用 `session.last_rx` 计算
+    “上一次 hb 年龄”（该值在 `handle_line` 前已被更新，恒为 0，会误导）。
 
 预期效果：以 `04:52` 那轮为例，agent 收到过 renew 后停顿，旧路径是
 `4s auth_mismatch + 15s 退避 + 约 1s 握手 ≈ 20s`；新路径走
@@ -117,12 +118,10 @@ agent 已 `lease_ok=false`。因此本次把写超时作为防御性加固，不
 - `scripts/verify-rc003-helper.ps1 -Full`：**passed**。首跑有一次瞬时
   `sayall-windows` 用例失败（输出被截断，未捕获用例名）；随即
   `cargo test -p sayall-windows` 全绿，整脚本重跑也 passed，按瞬时抖动处理并在此留痕。
-- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.0.0_x64-setup.exe`
-  （SHA-256 `b2fb14ee6e04eb65ec663bafa229ed4697392faebc6d9356ec8ba92df0af4229`）。
-  release 助手 `--selftest` 退出码 0；`target/release/sayall-helper.exe` 与
-  `src-tauri/sayall-helper.exe` 的 SHA-256 均为
-  `c2747c7333ba07d03ac8fc5844efcace77be09fc9f756f3a542e6e32b5b35caf`，确认包内
-  是本次构建的助手。**未安装**（会打断当前正在运行的 preview 实例），安装/启动
+- 本地测试包：由 `scripts/build-local-test-package.ps1` 生成；release 助手与
+  `src-tauri/sayall-helper.exe` 的 SHA-256 一致，确认包内是本次构建的助手。
+  具体安装包路径与 SHA-256 放在交付消息里（不写进仓库，避免提交后重建导致
+  元数据失效）。**未安装**（会打断当前正在运行的 preview 实例），安装/启动
   验证与实际按键效果归入真机 deferred。
 - 真机 RC003 复现/验收：**deferred**。需要：
   1. 强杀助手后重连；2. 宿主重建；3. 睡眠唤醒；4. 冷态首用、连续按、快速连按。
