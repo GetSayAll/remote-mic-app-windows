@@ -60,6 +60,22 @@
   （新实例 `[STOP] 绑定 47831 失败` ⇒ 换机后一个助手都不剩）；`bind_listener` 改有界重试
   （3 s / 150 ms，`[WAIT] listen_retry`）。**待真机复核**：往返换机（甲↔乙）、连续换机、
   只断开不换机不重启、交接期无 `[STOP]`。记录：`Bugs/2026-10-13-helper-does-not-follow-remote-switch.md`。
+- [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
+  `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
+  也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口
+  15–20s。修复：agent 用本次连接独立的 `everRenewed` 区分“从未续约”与“续约后停顿”，
+  后者走 `rx_silence`（1s）；鉴权失败退避改 2/4/8/15s 渐进；助手给 agent socket 设
+  500ms 写超时，写失败即结束 `serve_connection`，不再让阻塞写掐断读循环。探针：
+  agent `hb` 增加 `hb_gap_ms` / `pump_age_ms` / `ever_renewed` / `stat.stalls`，
+  助手 `[HB]` 增加 `hb_gap_ms` / `pump_age_ms` / `ever_renewed`，
+  `[RENEW]` 失败带 `kind` / `elapsed_ms`。
+  自动化 passed：`node hardware/RC003/helper/agent/agent_logic_test.mjs` 63/63
+  （旧判据阳性对照 60/63，3 条红在目标断言）；助手 `cargo test` 72 passed；
+  `--selftest` 全部通过（新增“对端不读时 500ms 写超时”，实测 ~500ms、
+  `kind=write_timeout`）；`scripts/ci-preflight.ps1` 7/7、`scripts/verify-rc003-helper.ps1 -Full`
+  passed（首跑一次瞬时失败已重跑全绿）。**真机 deferred**：RC003/RC001 冷态首用、
+  强杀助手、宿主重建、睡眠唤醒、连续/快速按；判据是恢复窗口 ≤3s、不再触发
+  8s `capture_recover`、且没有粘键/丢键。记录：`Bugs/2026-10-21-rc003-renew-stall.md`。
 - [ ] 向导⑤步的前置状态守卫（2026-10-13 现场：⑤步在"输入法还没选"时就进去了）：重启后落在⑤步
   先补读工具/快捷键配置（显示真实工具名，日志 `read_tool_state step=voice_test`）；从未选过工具时
   退回④步补选（日志 `tool_missing_fallback`）。前端 345 passed | 11 skipped、vue-tsc passed。
