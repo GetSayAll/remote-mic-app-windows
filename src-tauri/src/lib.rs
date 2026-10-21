@@ -22,6 +22,7 @@ mod app_icon;
 mod common_phrase_panel;
 mod diagnostics;
 mod launch_state;
+mod membership;
 mod onboarding;
 mod platform;
 mod rc003_task;
@@ -32,6 +33,10 @@ mod startup;
 mod updater;
 
 use diagnostics::DiagnosticReport;
+use membership::{
+    EmailCodeDelivery, MembershipCatalog, MembershipPaymentHandoff, MembershipPurchase,
+    MembershipRuntime, MembershipSnapshot,
+};
 use platform::PlatformRuntime;
 use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
 use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
@@ -420,6 +425,8 @@ struct AppState {
     settings: SettingsStore,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
+    membership: Arc<dyn MembershipRuntime>,
     /// 启动对账**主动关掉**开关的原因（2026-10-15，issue #264 附加观察甲）：只用于
     /// 界面说明与诊断块，判据只此一处（见 `CaptureRevoke`）。
     capture_revoked: Arc<std::sync::atomic::AtomicU8>,
@@ -437,6 +444,7 @@ impl std::fmt::Debug for AppState {
             .debug_struct("AppState")
             .field("platform", &self.platform)
             .field("settings", &self.settings)
+            .field("membership", &self.membership)
             .field(
                 "capture_health",
                 &CaptureHealth::current(&self.capture_health).as_str(),
@@ -472,6 +480,199 @@ impl std::fmt::Debug for AppState {
                 },
             )
             .finish()
+    }
+}
+
+/// 会员摘要（2026-10-15）：公开构建恒为「不可用」，私有构建返回账号与权益。
+/// 隐私红线同 [`MembershipSnapshot`]：不含凭据、令牌与邮箱原文。
+///
+/// 读的是内存快照，因此保持同步：它由界面按秒轮询，必须立刻返回。
+#[tauri::command]
+fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
+    state.membership.snapshot()
+}
+
+/// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
+///
+/// 会走网络，所以必须离开主线程：阻塞在窗口线程上会让界面白屏、拖动卡顿。
+#[tauri::command]
+async fn refresh_membership(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.refresh()).await
+}
+
+/// 给邮箱发一封登录验证码（2026-10-15）。
+#[tauri::command]
+async fn start_membership_email_login(
+    state: tauri::State<'_, AppState>,
+    email: String,
+) -> Result<EmailCodeDelivery, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.start_email_login(&email)).await
+}
+
+/// 提交验证码完成登录。
+#[tauri::command]
+async fn verify_membership_email_login(
+    state: tauri::State<'_, AppState>,
+    email: String,
+    code: String,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.verify_email_login(&email, &code)).await
+}
+
+/// 退出登录。只影响本机。
+#[tauri::command]
+async fn logout_membership(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.logout()).await
+}
+
+/// 兑换一枚兑换码。成功后重新读取签名权益。
+///
+/// 兑换在服务端完成；本命令只把码原样交给会员服务，不在前端做格式校验，
+/// 以免客户端规则先于服务端拒绝一枚其实有效的码。
+#[tauri::command]
+async fn redeem_membership(
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<MembershipSnapshot, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.redeem(&code)).await
+}
+
+/// 读取会员页的商品与购买方案（2026-10-15）。
+///
+/// 未登录时返回公开预览，只能展示；登录后返回账号授权方案。
+#[tauri::command]
+async fn get_membership_catalog(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipCatalog, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.catalog()).await
+}
+
+/// 创建当前方案的订单。返回的收银台地址只能由
+/// [`open_membership_checkout`] 打开，页面不接收也不传递 URL。
+#[tauri::command]
+async fn purchase_membership(
+    state: tauri::State<'_, AppState>,
+    product_id: String,
+) -> Result<MembershipPurchase, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.purchase(&product_id)).await
+}
+
+/// 查询当前订单；付款确认后会同时刷新签名权益。
+#[tauri::command]
+async fn refresh_membership_purchase(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipPurchase, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.refresh_purchase()).await
+}
+
+/// 关闭当前订单展示；服务端订单不受影响。
+#[tauri::command]
+fn clear_membership_purchase(state: tauri::State<'_, AppState>) {
+    state.membership.clear_purchase();
+}
+
+/// 创建（或复用）微信小程序支付交接；返回二维码与价格。
+#[tauri::command]
+async fn create_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+    product_id: String,
+) -> Result<MembershipPaymentHandoff, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.create_payment_handoff(&product_id)).await
+}
+
+/// 查询当前支付交接状态；成功后宿主已刷新签名权益。
+#[tauri::command]
+async fn refresh_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+) -> Result<MembershipPaymentHandoff, String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.refresh_payment_handoff()).await
+}
+
+/// 当前支付交接；关闭弹窗后用来恢复「继续支付」。
+#[tauri::command]
+fn get_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+) -> Option<MembershipPaymentHandoff> {
+    state.membership.payment_handoff()
+}
+
+/// 丢弃当前支付交接（退出登录、切换方案等）。
+#[tauri::command]
+fn clear_membership_payment_handoff(state: tauri::State<'_, AppState>) {
+    state.membership.clear_payment_handoff();
+}
+
+/// 打开当前订单的托管收银台。
+///
+/// URL 来自 Rust 侧保存的服务端返回值，页面无法注入。这里仍只放行 HTTPS，
+/// 拒绝 `file:`、`javascript:` 之类的协议。
+#[tauri::command]
+async fn open_membership_checkout(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = state
+        .membership
+        .checkout_url()
+        .ok_or_else(|| "no_active_order".to_string())?;
+    if !url.starts_with("https://") || url.len() > 2048 {
+        return Err("invalid_checkout_url".to_string());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "open_checkout_failed".to_string())
+}
+
+/// 打开会员页底部的固定说明页（用户协议 / 隐私政策 / 退款政策）。
+///
+/// 与收银台同一条边界：页面只传一个枚举名，URL 由这里写死。这样既不用给
+/// WebView 开任意 URL 的 opener 权限，也不存在页面注入外链的可能。
+#[tauri::command]
+async fn open_membership_link(app: tauri::AppHandle, link: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = match link.as_str() {
+        "agreement" => "https://getsayall.com/terms/",
+        "privacy" => "https://getsayall.com/privacy/",
+        "refund" => "https://getsayall.com/refund/",
+        // 大版本说明有独立页面（与 Mac 的「大版本说明」同源）。
+        "version" => "https://getsayall.com/plus-version/",
+        // 键位方案市场使用公开 GitHub 仓库，与 Mac 共用同一入口。
+        "market" => "https://github.com/GetSayAll/sayall-market",
+        _ => return Err("unknown_membership_link".to_string()),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "open_membership_link_failed".to_string())
+}
+
+/// 在阻塞线程池上执行一次会员操作。
+///
+/// 所有会走网络的操作都必须经这里：会员客户端是同步阻塞的，直接在命令线程
+/// （同步命令就是主线程）上调用会冻结窗口。失败只回稳定错误码。
+async fn run_membership<T, F>(operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, membership::MembershipError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(operation).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.code),
+        Err(_) => Err("membership_task_failed".to_string()),
     }
 }
 
@@ -3934,6 +4135,9 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     let started = std::time::Instant::now();
     // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
     sayall_windows::key_host::shutdown_global();
+    // 会员组件收尾（2026-10-15）：私有实现在这里释放网络与凭据刷新任务，
+    // 公开实现是 no-op。
+    app.state::<AppState>().membership.shutdown();
     // 常用语收尾（幂等；未接入组件时空操作）：关面板并**等待**在途插入事务
     // 完成（含剪贴板恢复窗口）。退出是 process::exit，不执行析构——必须在这里
     // 显式等待，否则用户剪贴板可能停在常用语文本上。
@@ -4641,6 +4845,7 @@ pub fn run() {
                 platform,
                 settings,
                 capture_health,
+                membership: membership::install(),
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
@@ -4699,6 +4904,14 @@ pub fn run() {
                     ));
                     api.prevent_close();
                 }
+            } else if let tauri::WindowEvent::Focused(true) = event {
+                // 会员组件回到前台时刷新（2026-10-15）：节流由私有实现负责，
+                // 公开实现是 no-op，不产生任何后台活动。
+                if window.label() == "main" {
+                    if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        state.membership.on_foreground();
+                    }
+                }
             } else if let tauri::WindowEvent::Focused(false) = event {
                 // 工具选择后的一次性输入法对齐（2026-10-03）：用户刚在连接页选过工具、
                 // 且当时前台是自身窗口（不能立即切——TSF 会话切换曾致 WebView 整页重载，
@@ -4724,6 +4937,22 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_membership_snapshot,
+        refresh_membership,
+        start_membership_email_login,
+        verify_membership_email_login,
+        logout_membership,
+        redeem_membership,
+        get_membership_catalog,
+        purchase_membership,
+        refresh_membership_purchase,
+        clear_membership_purchase,
+        open_membership_checkout,
+        create_membership_payment_handoff,
+        refresh_membership_payment_handoff,
+        get_membership_payment_handoff,
+        clear_membership_payment_handoff,
+        open_membership_link,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -4821,6 +5050,22 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_membership_snapshot,
+        refresh_membership,
+        start_membership_email_login,
+        verify_membership_email_login,
+        logout_membership,
+        redeem_membership,
+        get_membership_catalog,
+        purchase_membership,
+        refresh_membership_purchase,
+        clear_membership_purchase,
+        open_membership_checkout,
+        create_membership_payment_handoff,
+        refresh_membership_payment_handoff,
+        get_membership_payment_handoff,
+        clear_membership_payment_handoff,
+        open_membership_link,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,

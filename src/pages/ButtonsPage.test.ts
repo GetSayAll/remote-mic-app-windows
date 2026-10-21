@@ -613,6 +613,7 @@ describe("buttons mapping page", () => {
     expect(chip).toBeTruthy();
     expect(chip.find(".member-badge").text()).toBe("会员");
     expect(chip.attributes("disabled")).toBeUndefined();
+    expect(section.find(".common-phrases-cta").exists()).toBe(false);
     await chip.trigger("click");
     await flushPromises();
 
@@ -649,6 +650,10 @@ describe("buttons mapping page", () => {
       .find((button) => button.text().startsWith("打开常用语"))!;
     expect(chip.attributes("disabled")).toBeDefined();
     expect(chip.find(".member-badge").exists()).toBe(false);
+    const cta = section.find(".common-phrases-cta");
+    expect(cta.exists(), "未登录时必须显示「点击开通会员功能」").toBe(true);
+    await cta.trigger("click");
+    expect(wrapper.emitted("navigate")?.[0]).toEqual(["membership"]);
     wrapper.unmount();
   });
 

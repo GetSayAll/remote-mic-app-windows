@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Component } from "vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
@@ -12,6 +13,7 @@ import {
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
+import { privatePageComponents } from "./private/feature-pages";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
@@ -19,7 +21,6 @@ import {
   loadPersistedPage,
   persistActivePage,
   touchLiveness,
-  type PageId,
 } from "./navigation";
 import SettingsPage from "./pages/SettingsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
@@ -29,7 +30,7 @@ import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 import RecommendationsPage from "./pages/RecommendationsPage.vue";
 
-const activePage = ref<PageId>(loadPersistedPage() ?? "buttons");
+const activePage = ref<string>(loadPersistedPage() ?? "buttons");
 watch(activePage, (page) => persistActivePage(page));
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
@@ -90,14 +91,18 @@ function handleWindowKeydown(event: KeyboardEvent): void {
   }
 }
 
-const activeComponent = computed(() => ({
+/** 公开页面 + 私有页面（通常为空）的组件表。私有页面缺席时保持原行为。 */
+const pageComponents: Record<string, Component> = {
   buttons: ButtonsPage,
   recommendations: RecommendationsPage,
   macros: MacrosPage,
   connection: ConnectionPage,
   permissions: PermissionsPage,
   settings: SettingsPage,
-})[activePage.value]);
+  ...privatePageComponents(),
+};
+
+const activeComponent = computed(() => pageComponents[activePage.value] ?? ButtonsPage);
 
 // 横幅不在"设置"页重复显示（页面内已有完整更新面板）；推荐页由原生子 WebView
 // 覆盖内容区，横幅即使渲染也看不到，直接跳过。
@@ -215,6 +220,7 @@ onUnmounted(() => {
         :is="activeComponent"
         :runtime="runtime"
         @restart-onboarding="onRestartOnboarding"
+        @navigate="activePage = $event"
       />
     </main>
   </div>

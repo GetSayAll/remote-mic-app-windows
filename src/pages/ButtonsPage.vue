@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
+import CrownIcon from "../components/CrownIcon.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
@@ -92,6 +93,7 @@ import {
 import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+const emit = defineEmits<{ navigate: [page: string] }>();
 
 /**
  * 「调整常用语」二级视图（对齐 macOS：按键页 → 调整常用语 → 返回按键页）。
@@ -2342,8 +2344,27 @@ onUnmounted(() => {
               "
               @click="applyAction({ type: 'open_common_phrases' })"
             >
+              <svg
+                v-if="!commonPhraseAllowed"
+                class="chip-icon common-phrase-circle"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" />
+              </svg>
               打开常用语
               <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
+            </button>
+            <button
+              v-if="!commonPhraseAllowed"
+              class="common-phrases-cta"
+              type="button"
+              title="打开会员页面开通 Plus"
+              @click="emit('navigate', 'membership')"
+            >
+              <CrownIcon class="chip-icon" />
+              点击开通会员功能
             </button>
             <button
               class="chip"

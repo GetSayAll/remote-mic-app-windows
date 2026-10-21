@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { NavIcon, PageId } from "../navigation";
+import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
+import CrownIcon from "./CrownIcon.vue";
 
-defineProps<{ activePage: PageId; version?: string | null }>();
-const emit = defineEmits<{ select: [page: PageId] }>();
+defineProps<{ activePage: string; version?: string | null }>();
+const emit = defineEmits<{ select: [page: string] }>();
 
 /**
  * 侧栏图标：SVG path 组（24x24 视窗，描边风格），形状对齐
@@ -55,6 +56,10 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
       "M15.2 12a3.2 3.2 0 1 1-6.4 0 3.2 3.2 0 0 1 6.4 0z",
     ],
   },
+  member: {
+    // 会员图标由 CrownIcon 组件绘制（SF Symbols crown.fill）；保留空组维持类型映射。
+    strokes: [],
+  },
 };
 </script>
 
@@ -69,7 +74,8 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         type="button"
         @click="emit('select', item.id)"
       >
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <CrownIcon v-if="item.icon === 'member'" class="nav-icon" />
+        <svg v-else class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <template v-if="ICON_PATHS[item.icon].fills">
             <path
               v-for="(path, index) in ICON_PATHS[item.icon].fills"
