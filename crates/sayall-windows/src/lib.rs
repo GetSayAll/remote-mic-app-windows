@@ -1388,6 +1388,12 @@ pub enum PlatformError {
     AudioSessionInterrupted,
     #[error("WASAPI PCM queue exceeded its bounded capacity")]
     AudioQueueOverflow,
+    /// 已有音频客户端被 Windows/WTS 会话切换作废（`AUDCLNT_E_DEVICE_INVALIDATED`）。
+    ///
+    /// 这不是“设备不存在”：端点通常仍可被新客户端打开。调用方必须释放旧客户端，
+    /// 再在同一端点上重新 Activate（微软 Recovering from an Invalid-Device Error）。
+    #[error("语音设备连接已被系统重置，请再按一次语音键；如果仍不恢复，请重新选择语音设备")]
+    AudioDeviceInvalidated,
     #[error("WASAPI failed: {0}")]
     Audio(String),
     #[error("BLE cleanup failed: {0}")]
