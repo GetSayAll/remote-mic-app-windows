@@ -39,6 +39,30 @@ use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
 
+/// 主窗口标签（`tauri.conf.json` 里由配置创建的唯一窗口）。
+const MAIN_WINDOW_LABEL: &str = "main";
+
+/// 取主窗口（tao `Window`）。
+///
+/// **不要**用 `AppHandle::get_webview_window` 查主窗口。Tauri 2.11 的判定是
+/// `Window::is_webview_window`：窗口下**所有** webview 的 label 都必须等于窗口
+/// label，否则返回 `None`。推荐页一旦建了子 WebView（`recommendations`，
+/// `WebviewBuilder::add_child`），主窗口就不再满足这条判定，以 `main` 为参数的
+/// `get_webview_window` 从此恒为 `None`——「托盘点了没反应 / 双击图标没反应」
+/// 的实测根因（2026-10-20：日志 `show_main_window ... reason=window_missing`，
+/// 而 Win32 窗口句柄仍在、页面也还活着）。
+///
+/// 只做窗口级操作（显示/隐藏/置前/标题/图标/DPI）一律走本函数：它的查找与
+/// 窗口下挂了多少 webview 无关。
+fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
+    app.get_window(MAIN_WINDOW_LABEL)
+}
+
+/// 取主窗口的 webview（`with_webview` 这类 webview 级操作专用）。
+fn main_webview(app: &tauri::AppHandle) -> Option<tauri::Webview> {
+    app.get_webview(MAIN_WINDOW_LABEL)
+}
+
 #[derive(Default)]
 struct WebviewFailureState {
     reloaded: bool,
@@ -138,13 +162,14 @@ impl WebviewUiHintState {
 }
 
 #[cfg(windows)]
-fn observe_webview_failure(window: &tauri::WebviewWindow) {
+fn observe_webview_failure(webview: &tauri::Webview) {
     use webview2_com::{
         Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND,
         ProcessFailedEventHandler,
     };
     let role = "main";
-    let app = window.app_handle().clone();
+    let app = webview.app_handle().clone();
+    let window = webview.window();
     let closed = Arc::new(AtomicBool::new(false));
     let close_flag = Arc::clone(&closed);
     window.on_window_event(move |event| {
@@ -152,7 +177,7 @@ fn observe_webview_failure(window: &tauri::WebviewWindow) {
             close_flag.store(true, Ordering::Release);
         }
     });
-    let result = window.with_webview(move |webview| unsafe {
+    let result = webview.with_webview(move |webview| unsafe {
         let Ok(core) = webview.controller().CoreWebView2() else {
             sayall_windows::gatt_note(format!("webview event=failure_observer role={role} result=failed stage=controller"));
             return;
@@ -259,7 +284,7 @@ fn note_frontend_signal(app: &tauri::AppHandle) {
     };
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let Some(window) = handle.get_webview_window("main") else {
+        let Some(window) = main_window(&handle) else {
             sayall_windows::gatt_note(
                 "webview event=ui_hint phase=completed action=title result=restore_skipped reason=window_missing".to_owned(),
             );
@@ -345,7 +370,7 @@ fn resolve_ui_hint(app: &tauri::AppHandle, baseline: u64, reason: &'static str) 
                     ));
                     return;
                 }
-                let Some(window) = handle.get_webview_window("main") else {
+                let Some(window) = main_window(&handle) else {
                     with_ui_hint(WebviewUiHintState::take_for_restore);
                     sayall_windows::gatt_note(format!(
                         "webview event=ui_hint phase=completed action=title result=skipped reason=window_missing reason_detail={reason}"
@@ -656,7 +681,7 @@ mod windows_settings_tests {
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let started = std::time::Instant::now();
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = main_window(&app) else {
         sayall_windows::gatt_note(
             "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result=failed error_domain=window error_code=not_found retryable=true reason=main_window_missing"
                 .to_owned(),
@@ -893,7 +918,7 @@ fn get_capture_support() -> rc003_task::CaptureSupport {
 fn refocus_main_window_soon(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(900));
-        if let Some(window) = app.get_webview_window("main") {
+        if let Some(window) = main_window(&app) {
             let _ = window.set_focus();
         }
     });
@@ -943,7 +968,7 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
         GetForegroundWindow, IsIconic, IsWindowVisible, ShowWindow, SW_RESTORE,
     };
 
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = main_window(app) else {
         sayall_windows::gatt_note(format!(
             "app_lifecycle event=show_main_window trigger={trigger} phase=completed terminal_result=failed reason=window_missing retryable=false"
         ));
@@ -4300,7 +4325,7 @@ pub fn run() {
             #[cfg(feature = "runtime-simulation")]
             let show_main_window_on_startup =
                 show_main_window_on_startup || runtime_simulation_requested();
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = main_window(app.handle()) {
                 let visible_before = window.is_visible().unwrap_or(true);
                 if show_main_window_on_startup {
                     // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
@@ -4627,8 +4652,8 @@ pub fn run() {
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
             #[cfg(windows)]
-            if let Some(window) = app.get_webview_window("main") {
-                observe_webview_failure(&window);
+            if let Some(webview) = main_webview(app.handle()) {
+                observe_webview_failure(&webview);
             }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
@@ -4644,7 +4669,7 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 sayall_windows::app_launcher::set_self_show_sync(move || {
-                    if let Some(window) = handle.get_webview_window("main") {
+                    if let Some(window) = main_window(&handle) {
                         let _ = window.show();
                     }
                 });
@@ -5978,5 +6003,31 @@ mod ui_hint_tests {
             WEBVIEW_UNAVAILABLE_TITLE.contains("无线麦 SayAll"),
             "产品名必须用名称表写法（含空格）"
         );
+    }
+
+    /// 主窗口查找只能用 `get_window`（见 `main_window` 的说明）。
+    ///
+    /// Tauri 2.11 的 `get_webview_window` 依赖 `Window::is_webview_window`：窗口下
+    /// **所有** webview 的 label 都必须等于窗口 label。推荐页建了子 WebView
+    /// （`recommendations`）之后，以 `main` 查 webview 窗口恒为 `None`，而调用点
+    /// 只落一条 `reason=window_missing` 的日志、功能静默失效——2026-10-20
+    /// 「托盘点了没反应 / 双击图标没反应」的实测根因。
+    ///
+    /// 契约测试读源码：这两个文件里再出现 webview 窗口查找即红灯。若将来确有
+    /// 需要查**非主窗口**的 webview 窗口，请把断言收窄到只禁 `main` 参数，并在
+    /// 评审里说明理由。
+    #[test]
+    fn main_window_lookup_never_uses_the_webview_window_api() {
+        let api = concat!("get_webview_window", "(");
+        for (path, source) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("app_icon.rs", include_str!("app_icon.rs")),
+        ] {
+            assert!(
+                !source.contains(api),
+                "{path} 用 webview 窗口 API 查窗口：主窗口一旦挂上子 WebView 即恒为 None，\
+                 请改用 main_window(app) / main_webview(app)"
+            );
+        }
     }
 }

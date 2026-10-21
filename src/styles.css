@@ -133,6 +133,19 @@ html[data-theme="dark"] {
 }
 
 * { box-sizing: border-box; }
+/* 全局隐藏滚动条（2026-10-20 Andy：所有滚动条都要隐藏，以后新增页面同样适用）。
+   用通配选择器一次性覆盖所有滚动容器，而不是逐页添加——新页面、对话框、
+   内嵌列表（如 diagnostics 输出、应用选择列表）自动继承，不需要记得补样式。
+   只隐藏视觉，滚轮 / 键盘 / 触摸滚动行为保持不变。
+   Chromium/WebView2 认 ::-webkit-scrollbar；scrollbar-width 覆盖标准属性
+   （Chromium 121+、Firefox），-ms-overflow-style 兜旧引擎。
+   注意：组件内若显式写 display:block + 宽度的 ::-webkit-scrollbar 规则，
+   特异性更高会重新出现滚动条，新增样式时不要再写这类规则。 */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar { width: 0; height: 0; display: none; }
 html, body, #app { width: 100%; min-width: 940px; min-height: 100%; margin: 0; }
 /* 滚动发生在根元素（.content 随内容增高，自身不滚）。默认窗口下按键页
    （570px 画布 + 头部/底部）刚好略超一屏，连接/权限页不超——切换页面时
@@ -142,7 +155,9 @@ html, body, #app { width: 100%; min-width: 940px; min-height: 100%; margin: 0; }
    滚动器在 Chromium 不生效，已实测否证）。隐藏根滚动条（宽度归零、
    仍可滚轮/键盘滚动）后四页视口宽度恒定，切换不再回流；与 plan
    2026-09-05 T2 的"页面不显示滚动条、仍可滚动"决策一致。两条规则
-   分别覆盖标准属性（Chromium 121+）与 legacy webkit 伪元素。 */
+   分别覆盖标准属性（Chromium 121+）与 legacy webkit 伪元素。
+   2026-10-20 起该隐藏已由文件顶部全局规则覆盖，这里（含 .content 上的同名
+   规则）保留为显式兜底，不再需要逐处维护。 */
 html { scrollbar-width: none; }
 html::-webkit-scrollbar { display: none; }
 button, input { font: inherit; }

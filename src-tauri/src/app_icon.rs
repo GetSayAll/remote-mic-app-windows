@@ -258,8 +258,11 @@ fn icon_bitmap_from_image(image: &Image<'_>) -> window_icons::IconBitmap {
 ///
 /// 通知区域由系统按任务栏所在显示器绘制，这里用主窗口 DPI 近似；预生成的四档
 /// 尺寸覆盖 100%–200%，偏差最多一档，不影响可读性。
+///
+/// 用 `get_window` 而不是 webview 窗口查找：主窗口挂上子 WebView（推荐页）后，
+/// 后者恒为 `None`（见 `lib.rs::main_window` 的说明），图标会静默不更新。
 fn window_dpi(app: &AppHandle) -> u32 {
-    app.get_webview_window("main")
+    app.get_window("main")
         .and_then(|window| window.scale_factor().ok())
         .map(|scale| (scale * 96.0).round().max(96.0) as u32)
         .unwrap_or(96)
@@ -287,7 +290,7 @@ pub fn apply(app: &AppHandle, requested: AppIconIdentifier) -> AppIconIdentifier
         AppIconIdentifier::FacetedDuck => faceted_duck_tray_image(nearest_icon_size(dpi)).ok(),
     };
 
-    match (&window_icon, app.get_webview_window("main")) {
+    match (&window_icon, app.get_window("main")) {
         (Some(icon), Some(window)) => {
             // 跨平台路径（Windows 上只覆盖标题栏的 ICON_SMALL）。
             if let Err(error) = window.set_icon(icon.clone()) {
