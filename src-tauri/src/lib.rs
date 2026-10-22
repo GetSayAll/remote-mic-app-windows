@@ -610,10 +610,48 @@ fn get_membership_payment_handoff(
     state.membership.payment_handoff()
 }
 
+/// 当前构建是否连接 staging；页面据此显示「测试购买 · 不会扣款」。
+#[tauri::command]
+fn get_membership_environment(state: tauri::State<'_, AppState>) -> bool {
+    state.membership.is_test_environment()
+}
+
+/// 让系统打开当前交接里的 weixin:// scheme。
+///
+/// scheme 来自宿主保存的服务端 handoff，页面不能注入任意 URL；这里仍只放行
+/// `weixin://`，防止被篡改成文件或脚本协议。
+#[tauri::command]
+async fn open_membership_payment_scheme(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let scheme = state
+        .membership
+        .payment_handoff()
+        .and_then(|handoff| handoff.open_scheme)
+        .ok_or_else(|| "no_open_scheme".to_string())?;
+    if !scheme.starts_with("weixin://") || scheme.len() > 2048 {
+        return Err("invalid_handoff_scheme".to_string());
+    }
+    app.opener()
+        .open_url(scheme, None::<&str>)
+        .map_err(|_| "open_membership_scheme_failed".to_string())
+}
+
 /// 丢弃当前支付交接（退出登录、切换方案等）。
 #[tauri::command]
 fn clear_membership_payment_handoff(state: tauri::State<'_, AppState>) {
     state.membership.clear_payment_handoff();
+}
+
+/// 在服务端过期当前支付交接；重新生成或退出登录时使用。
+#[tauri::command]
+async fn expire_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.expire_payment_handoff()).await
 }
 
 /// 打开当前订单的托管收银台。
@@ -655,6 +693,21 @@ async fn open_membership_link(app: tauri::AppHandle, link: String) -> Result<(),
         "market" => "https://github.com/GetSayAll/sayall-market",
         _ => return Err("unknown_membership_link".to_string()),
     };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "open_membership_link_failed".to_string())
+}
+
+/// 打开服务端目录状态返回的停售/支持链接。
+///
+/// 只接受 HTTPS；页面不能传 `file:`、`javascript:` 等协议。长度上限与
+/// checkout URL 一致，防止异常超长链接。
+#[tauri::command]
+async fn open_membership_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !url.starts_with("https://") || url.len() > 2048 {
+        return Err("invalid_membership_url".to_string());
+    }
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| "open_membership_link_failed".to_string())
@@ -5010,8 +5063,12 @@ pub fn run() {
         create_membership_payment_handoff,
         refresh_membership_payment_handoff,
         get_membership_payment_handoff,
+        get_membership_environment,
+        open_membership_payment_scheme,
         clear_membership_payment_handoff,
+        expire_membership_payment_handoff,
         open_membership_link,
+        open_membership_external_url,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -5123,8 +5180,12 @@ pub fn run() {
         create_membership_payment_handoff,
         refresh_membership_payment_handoff,
         get_membership_payment_handoff,
+        get_membership_environment,
+        open_membership_payment_scheme,
         clear_membership_payment_handoff,
+        expire_membership_payment_handoff,
         open_membership_link,
+        open_membership_external_url,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,

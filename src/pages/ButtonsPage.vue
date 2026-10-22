@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
-import CrownIcon from "../components/CrownIcon.vue";
+import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
@@ -2356,16 +2356,11 @@ onUnmounted(() => {
               打开常用语
               <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
             </button>
-            <button
+            <MembershipRequiredButton
               v-if="!commonPhraseAllowed"
               class="common-phrases-cta"
-              type="button"
-              title="打开会员页面开通 Plus"
-              @click="emit('navigate', 'membership')"
-            >
-              <CrownIcon class="chip-icon" />
-              点击开通会员功能
-            </button>
+              @open="emit('navigate', 'membership')"
+            />
             <button
               class="chip"
               type="button"
