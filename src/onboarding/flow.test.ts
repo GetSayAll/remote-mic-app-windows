@@ -91,7 +91,11 @@ describe("onboarding step order", () => {
 describe("onboarding gates", () => {
   const allBlocks: Array<[OnboardingStep, Partial<Parameters<typeof makeContext>[0]>, string]> = [
     ["remote", { remote: { connectionPhase: "connecting" } }, "remote.not_connected"],
-    ["remote", { remote: { rawInputPhase: "starting" } }, "remote.listener_not_ready"],
+    [
+      "remote",
+      { remote: { rawInputPhase: "starting", remoteButtonObserved: false } },
+      "remote.listener_not_ready",
+    ],
     ["remote", { remote: { remoteButtonObserved: false } }, "remote.button_not_ready"],
     ["audio", { audio: { recommendedEndpointAvailable: false } }, "audio.install_required"],
     ["audio", { audio: { selectedEndpointRecommended: false } }, "audio.not_selected"],
@@ -137,6 +141,18 @@ describe("onboarding gates", () => {
       expect(code).toMatch(/^[a-z0-9_.-]+$/);
     }
   });
+
+  it.each(["starting", "awaiting", "failed"] as const)(
+    "treats an observed control button as sufficient while Raw Input is %s (RC003 helper path)",
+    (rawInputPhase) => {
+      expect(
+        evaluateGate(
+          "remote",
+          makeContext({ remote: { rawInputPhase, remoteButtonObserved: true } }),
+        ),
+      ).toEqual({ ok: true, code: null });
+    },
+  );
 
   it("passes welcome unconditionally and passes every step with a satisfied context", () => {
     expect(evaluateGate("welcome", makeContext())).toEqual({ ok: true, code: null });

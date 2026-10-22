@@ -164,13 +164,17 @@ function evaluateRemote(remote: OnboardingContext["remote"]): StepGate {
   if (!CONNECTED_PHASES.includes(remote.connectionPhase) || !remote.bleVoiceReady) {
     return block("remote.not_connected");
   }
+  // 已收到按键 = 输入链路事实上可用，这是最终判据。RC003「全按键支持」的边沿
+  // 由提权助手经桥接直接送入映射引擎，不依赖 Raw Input 绑定到 HID 接口；这类
+  // 机器上 Raw Input 可能长期停在 awaiting（现场：matched=0、semantic_edges=198）。
+  // 若先查监听器就绪，界面会一直写「按键监听正在启动」并把「继续」锁死。
+  if (remote.remoteButtonObserved) {
+    return pass();
+  }
   if (remote.rawInputPhase !== "ready") {
     return block("remote.listener_not_ready");
   }
-  if (!remote.remoteButtonObserved) {
-    return block("remote.button_not_ready");
-  }
-  return pass();
+  return block("remote.button_not_ready");
 }
 
 function evaluateAudio(audio: OnboardingContext["audio"]): StepGate {
