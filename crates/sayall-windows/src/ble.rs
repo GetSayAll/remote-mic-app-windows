@@ -14,7 +14,6 @@ use crate::{
 };
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
-use std::future::IntoFuture;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender},
@@ -35,6 +34,7 @@ use windows::Devices::Bluetooth::{
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+use windows_future::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
 
 const SERVICE_UUID: GUID = GUID::from_u128(0xab5e00015a214f05bc7daf01f617b664);
 const TRANSMIT_UUID: GUID = GUID::from_u128(0xab5e00025a214f05bc7daf01f617b664);
@@ -49,6 +49,12 @@ const BATTERY_SERVICE_UUID: GUID = GUID::from_u128(0x0000180f00001000800000805f9
 const BATTERY_LEVEL_UUID: GUID = GUID::from_u128(0x00002a1900001000800000805f9b34fb);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
+/// WinRT 异步操作的硬上限（2026-10-21 现场）：旧的半死链路上
+/// `BluetoothLEDevice` 已经拿到、`Name()` 也能读，但随后的 GATT 查询
+/// 永不返回，工作线程被 `block_on` 永久占住——UI 一直停在「正在连接遥控器」，
+/// 自愈逻辑也没有机会执行。所有连接关键路径的 WinRT 异步调用都必须有界。
+const DEVICE_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+const GATT_ASYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 /// 提前重连的安静窗下限（2026-10-13，issue #206 第三轮报障人真机实测）：
@@ -61,6 +67,14 @@ const PROMOTION_QUIET_WINDOW: Duration = RECONNECT_BASE_DELAY;
 /// 恰为免费窗口；RC001 短按从不触窗）。宿主须周期发送 MIC_EXTEND(0x0E)
 /// 续期，2.5s 间隔留足余量。
 const MICROPHONE_EXTEND_INTERVAL: Duration = Duration::from_millis(2500);
+/// 语音流静默上限（2026-10-21 真机卡死事故）：ATVV 在按住期间持续推流，
+/// 即使不说话也有编码帧；若超过该时长一帧都没有，说明松手通知（`00`）
+/// 丢失或链路已半死。此时必须主动收尾并释放「按住说话」快捷键，
+/// 否则 UI 会永久停在「正在接收语音」，修饰键也会一直粘住。
+///
+/// 取 8 秒而不是 5 秒：覆盖冷启动后首个音频帧到达较慢的现场，同时仍能在
+/// 用户明显感到“卡住”之前释放键盘。正常会话的首帧在 1 秒内到达。
+const VOICE_AUDIO_STALL_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// 微信输入法专属的会话激活/休眠恢复只能用于它自己的默认语音热键。
 ///
@@ -578,6 +592,9 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 最近一帧 ATVV 音频的到达时刻（2026-10-21）：STOP 丢失时用它判定
+    // 链路已静默，主动收尾并释放按住说话快捷键。只在 Streaming 期间有意义。
+    let mut last_voice_audio_at: Option<Instant> = None;
     // 提前重连的状态（2026-10-13，issue #206）：上次连接尝试结束的时刻，
     // 供安静窗判定；以及被安静窗抑制的触发累计数（折叠日志；成功提前或成功连上即清零，
     // 保证"首条"日志按 episode 计，不被上一轮的大数字吞掉）。
@@ -599,9 +616,14 @@ fn worker_loop(
     let mut disconnect_loop = DisconnectLoopDetector::new();
 
     loop {
+        let voice_stall_deadline = if pipeline.state() == VoiceSessionState::Streaming {
+            last_voice_audio_at.map(|last| last + VOICE_AUDIO_STALL_TIMEOUT)
+        } else {
+            None
+        };
         let deadline = nearest_deadline(
             nearest_deadline(capabilities_deadline, reconnect_deadline),
-            extend_deadline,
+            nearest_deadline(extend_deadline, voice_stall_deadline),
         );
         let message = match deadline {
             Some(deadline) => {
@@ -703,6 +725,36 @@ fn worker_loop(
                                     }
                                 }
                             }
+                        } else if voice_stream_stalled(
+                            pipeline.state(),
+                            last_voice_audio_at,
+                            now,
+                            VOICE_AUDIO_STALL_TIMEOUT,
+                        ) {
+                            // STOP 通知丢失/链路半死：主动收尾，先释放按住说话
+                            // 快捷键，绝不把 UI 和修饰键留给“下一次按下”去赌。
+                            let session_id = pipeline.session_id();
+                            let samples = active_voice_samples;
+                            let silent_ms = last_voice_audio_at
+                                .map_or(0, |last| now.saturating_duration_since(last).as_millis());
+                            gatt_note(format!(
+                                "voice_session action=abort phase=completed terminal_result=failed reason=audio_stall session={} samples={samples} silent_ms={silent_ms} note=stop_not_received",
+                                session_id
+                                    .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+                            ));
+                            abort_voice_session(
+                                &mut session,
+                                &mut pipeline,
+                                &state,
+                                &audio,
+                                &send_input,
+                                &mut held_hotkey,
+                                &mut active_voice_samples,
+                                session_id,
+                                "语音流已静默但未收到松开通知，已自动结束本次语音".to_owned(),
+                            );
+                            extend_deadline = None;
+                            last_voice_audio_at = None;
                         } else if extend_deadline.is_some_and(|deadline| deadline <= now) {
                             extend_deadline = None;
                             // MIC_EXTEND 续期：仅在流式会话进行中发送；编码失败
@@ -1018,6 +1070,7 @@ fn worker_loop(
                         &usage,
                         &mut active_voice_samples,
                         &mut extend_deadline,
+                        &mut last_voice_audio_at,
                         &sender,
                         &voice_session_epoch,
                         &bytes,
@@ -1078,6 +1131,7 @@ fn worker_loop(
                         &mut active_voice_samples,
                         &gain_db,
                         &mut voice_gain_log,
+                        &mut last_voice_audio_at,
                         &bytes,
                     );
                 }
@@ -1351,6 +1405,26 @@ fn nearest_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<Ins
         (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
         (None, None) => None,
     }
+}
+
+/// 语音流是否已静默到必须收尾（纯判定，供单测与超时分支共用）。
+///
+/// `last_audio_at == None` 仍判 true：进入 Streaming 后一帧音频都没到，
+/// 说明开麦/链路从未真正工作，继续等 STOP 只会让 UI 和修饰键永久卡住。
+fn voice_stream_stalled(
+    state: VoiceSessionState,
+    last_audio_at: Option<Instant>,
+    now: Instant,
+    timeout: Duration,
+) -> bool {
+    state == VoiceSessionState::Streaming
+        && last_audio_at.map_or(true, |last| now.saturating_duration_since(last) >= timeout)
+}
+
+/// ATVV 的流开始控制帧（`04 ...`）。用于在收到新的按下时识别
+/// “上一轮 STOP 已丢失、用户又按了一次”的场景。
+fn is_stream_start(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&0x04)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1929,12 +2003,36 @@ fn handle_control(
     usage: &UsageCounters,
     active_voice_samples: &mut u64,
     extend_deadline: &mut Option<Instant>,
+    last_voice_audio_at: &mut Option<Instant>,
     sender: &Sender<WorkerMessage>,
     voice_session_epoch: &Arc<AtomicU64>,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
         return;
+    }
+    // 上一轮 STOP 丢失后用户又按了一次：先收尾旧会话（释放旧和弦、音频与
+    // MIC_CLOSE），再让新会话走正常开始路径。否则 pipeline 会以 AlreadyActive
+    // 拒绝新开始，用户看到的就是“语音键彻底没反应”。
+    if is_stream_start(bytes) && pipeline.state() != VoiceSessionState::Idle {
+        let stale_session = pipeline.session_id();
+        let samples = *active_voice_samples;
+        gatt_note(format!(
+            "voice_session action=abort phase=completed terminal_result=failed reason=stream_replaced session={} samples={samples} note=previous_stop_missing",
+            stale_session.map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+        ));
+        abort_voice_session(
+            session,
+            pipeline,
+            state,
+            audio,
+            send_input,
+            held_hotkey,
+            active_voice_samples,
+            stale_session,
+            "上一轮语音未收到松开通知，已自动结束并接受新的按下".to_owned(),
+        );
+        *last_voice_audio_at = None;
     }
     let output = match pipeline.handle_control(bytes) {
         Ok(output) => output,
@@ -1994,6 +2092,8 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            // 流开始即视为有活动；若之后连一帧音频都收不到，看门狗会收尾。
+            *last_voice_audio_at = Some(Instant::now());
             // 语音会话纪元 +1：本轮 wetype_check 阶梯以此为 armed 纪元，
             // 后续新会话会使旧阶梯的核对失效（防跨会话误伤）。
             let epoch = voice_session_epoch.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2204,6 +2304,7 @@ fn handle_control(
             snapshot.last_error = None;
         }
         PipelineOutput::StreamStopped { generation, .. } => {
+            *last_voice_audio_at = None;
             if let Some(session) = session {
                 session.microphone_opened = false;
             }
@@ -2268,11 +2369,14 @@ fn handle_audio(
     active_voice_samples: &mut u64,
     gain_db: &Mutex<f32>,
     voice_gain_log: &mut Option<(u64, f32)>,
+    last_voice_audio_at: &mut Option<Instant>,
     bytes: &[u8],
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
         return;
     }
+    // 收到任何音频字节都算链路仍然活着（即使解码失败，也不该误判为静默）。
+    *last_voice_audio_at = Some(Instant::now());
     // 增益逐批刷新（对齐 Mac 每帧读 settings.gainDB 的语义）：用户在滑块上改动后，
     // 下一批音频立即按新值处理，不需要重开会话；重连后的新管道也因此拿到当前值。
     let effective_gain_db = *lock(gain_db);
@@ -2694,8 +2798,12 @@ impl BleSession {
             reconnect_attempt,
             "device_from_address",
             || {
-                block_on(
-                    BluetoothLEDevice::FromBluetoothAddressAsync(address).map_err(windows_error)?,
+                let operation =
+                    BluetoothLEDevice::FromBluetoothAddressAsync(address).map_err(windows_error)?;
+                wait_async(
+                    operation,
+                    DEVICE_CREATE_TIMEOUT,
+                    "bluetooth_device_from_address",
                 )
             },
         )?;
@@ -2925,7 +3033,10 @@ impl BleSession {
             self.transmit.WriteValueAsync(&buffer)
         }
         .map_err(windows_error)?;
-        require_success(block_on(operation)?, "写入 ATVV 控制命令")
+        require_success(
+            wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_write_control")?,
+            "写入 ATVV 控制命令",
+        )
     }
 
     /// 订阅 GATT Battery Service（0x180F/0x2A19）电量通知。可选增强、
@@ -3683,11 +3794,10 @@ fn subscribe(
                 "特征不支持 Notify 或 Indicate".to_owned(),
             ));
         };
-        let status = block_on(
-            characteristic
-                .WriteClientCharacteristicConfigurationDescriptorAsync(descriptor)
-                .map_err(windows_error)?,
-        )?;
+        let operation = characteristic
+            .WriteClientCharacteristicConfigurationDescriptorAsync(descriptor)
+            .map_err(windows_error)?;
+        let status = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_enable_notify")?;
         require_success(status, "订阅 GATT 通知")
     })();
     if let Err(error) = enable_result {
@@ -3706,13 +3816,12 @@ fn subscribe(
 }
 
 fn disable_notifications(characteristic: &GattCharacteristic) -> Result<(), PlatformError> {
-    let status = block_on(
-        characteristic
-            .WriteClientCharacteristicConfigurationDescriptorAsync(
-                GattClientCharacteristicConfigurationDescriptorValue::None,
-            )
-            .map_err(windows_error)?,
-    )?;
+    let operation = characteristic
+        .WriteClientCharacteristicConfigurationDescriptorAsync(
+            GattClientCharacteristicConfigurationDescriptorValue::None,
+        )
+        .map_err(windows_error)?;
+    let status = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_disable_notify")?;
     require_success(status, "取消 GATT 通知")
 }
 
@@ -3720,11 +3829,10 @@ fn find_service(
     device: &BluetoothLEDevice,
     uuid: GUID,
 ) -> Result<GattDeviceService, PlatformError> {
-    let result = block_on(
-        device
-            .GetGattServicesForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)
-            .map_err(windows_error)?,
-    )?;
+    let operation = device
+        .GetGattServicesForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)
+        .map_err(windows_error)?;
+    let result = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_find_atvv_service")?;
     require_success(result.Status().map_err(windows_error)?, "发现 ATVV 服务")?;
     let services = result.Services().map_err(windows_error)?;
     if services.Size().map_err(windows_error)? != 1 {
@@ -3736,15 +3844,13 @@ fn find_service(
 /// best-effort 定位标准 Battery Service（0x180F）。设备固件没有 BAS、
 /// 服务数量异常或查询失败都返回 None，由调用方回退缓存轮询。
 fn find_battery_service(device: &BluetoothLEDevice) -> Option<GattDeviceService> {
-    let result = block_on(
-        device
-            .GetGattServicesForUuidWithCacheModeAsync(
-                BATTERY_SERVICE_UUID,
-                BluetoothCacheMode::Uncached,
-            )
-            .ok()?,
-    )
-    .ok()?;
+    let operation = device
+        .GetGattServicesForUuidWithCacheModeAsync(
+            BATTERY_SERVICE_UUID,
+            BluetoothCacheMode::Uncached,
+        )
+        .ok()?;
+    let result = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_find_battery_service").ok()?;
     if result.Status().ok()? != GattCommunicationStatus::Success {
         return None;
     }
@@ -3763,7 +3869,8 @@ fn read_battery_level_initial(
 ) {
     let started = Instant::now();
     let outcome = (|| -> Option<crate::battery::BatteryReading> {
-        let result = block_on(characteristic.ReadValueAsync().ok()?).ok()?;
+        let operation = characteristic.ReadValueAsync().ok()?;
+        let result = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_read_battery").ok()?;
         if result.Status().ok()? != GattCommunicationStatus::Success {
             return None;
         }
@@ -3800,10 +3907,13 @@ fn find_characteristic(
     uuid: GUID,
     label: &'static str,
 ) -> Result<GattCharacteristic, PlatformError> {
-    let result = block_on(
-        service
-            .GetCharacteristicsForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)
-            .map_err(windows_error)?,
+    let operation = service
+        .GetCharacteristicsForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)
+        .map_err(windows_error)?;
+    let result = wait_async(
+        operation,
+        GATT_ASYNC_TIMEOUT,
+        "gatt_find_atvv_characteristic",
     )?;
     require_success(result.Status().map_err(windows_error)?, "发现 ATVV 特征")?;
     let characteristics = result.Characteristics().map_err(windows_error)?;
@@ -3814,15 +3924,17 @@ fn find_characteristic(
 }
 
 fn read_remote_model(device: &BluetoothLEDevice) -> Option<RemoteModel> {
-    let result = block_on(
-        device
-            .GetGattServicesForUuidWithCacheModeAsync(
-                DEVICE_INFORMATION_SERVICE_UUID,
-                BluetoothCacheMode::Uncached,
-            )
-            .ok()?,
-    )
-    .ok()?;
+    // 型号只用于界面显示，绝不能阻塞语音主路径（2026-10-21 现场：设备名是
+    // 通用“小米蓝牙语音遥控器”，这里在旧的半死链路上无限等待，工作线程
+    // 连 `service_discovery` 都没走到）。Device Information 是静态数据，
+    // 用缓存查询；缓存缺失就回退 Unknown。
+    let operation = device
+        .GetGattServicesForUuidWithCacheModeAsync(
+            DEVICE_INFORMATION_SERVICE_UUID,
+            BluetoothCacheMode::Cached,
+        )
+        .ok()?;
+    let result = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_remote_model_service").ok()?;
     if result.Status().ok()? != GattCommunicationStatus::Success {
         return None;
     }
@@ -3837,13 +3949,13 @@ fn read_remote_model(device: &BluetoothLEDevice) -> Option<RemoteModel> {
 }
 
 fn read_model_number(service: &GattDeviceService) -> Option<RemoteModel> {
-    let result = block_on(
-        service
-            .GetCharacteristicsForUuidWithCacheModeAsync(
-                MODEL_NUMBER_UUID,
-                BluetoothCacheMode::Uncached,
-            )
-            .ok()?,
+    let operation = service
+        .GetCharacteristicsForUuidWithCacheModeAsync(MODEL_NUMBER_UUID, BluetoothCacheMode::Cached)
+        .ok()?;
+    let result = wait_async(
+        operation,
+        GATT_ASYNC_TIMEOUT,
+        "gatt_remote_model_characteristic",
     )
     .ok()?;
     if result.Status().ok()? != GattCommunicationStatus::Success {
@@ -3854,12 +3966,10 @@ fn read_model_number(service: &GattDeviceService) -> Option<RemoteModel> {
         return None;
     }
     let characteristic = characteristics.GetAt(0).ok()?;
-    let value = block_on(
-        characteristic
-            .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)
-            .ok()?,
-    )
-    .ok()?;
+    let operation = characteristic
+        .ReadValueWithCacheModeAsync(BluetoothCacheMode::Cached)
+        .ok()?;
+    let value = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_remote_model_read").ok()?;
     if value.Status().ok()? != GattCommunicationStatus::Success {
         return None;
     }
@@ -3876,12 +3986,44 @@ fn buffer_to_vec(buffer: &IBuffer) -> windows::core::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn block_on<T, O>(operation: O) -> Result<T, PlatformError>
+/// 有界等待 WinRT `IAsyncOperation`。
+///
+/// 连接关键路径统一走本函数。超时后调用 `Cancel`，并把
+/// `PlatformError::OperationTimedOut` 交给上层——上层会释放本代会话、
+/// 进入重连退避，而不是让工作线程永久卡在一个 GATT 调用里。
+fn wait_async<T>(
+    operation: IAsyncOperation<T>,
+    timeout: Duration,
+    label: &'static str,
+) -> Result<T, PlatformError>
 where
-    O: IntoFuture<Output = windows::core::Result<T>>,
-    O::IntoFuture: std::future::Future<Output = windows::core::Result<T>>,
+    T: windows::core::RuntimeType + 'static,
 {
-    futures::executor::block_on(operation.into_future()).map_err(windows_error)
+    let (sender, receiver) = mpsc::channel();
+    let handler = AsyncOperationCompletedHandler::new(move |_, _| {
+        let _ = sender.send(());
+        Ok(())
+    });
+    operation.SetCompleted(&handler).map_err(windows_error)?;
+    match receiver.recv_timeout(timeout) {
+        Ok(()) => match operation.Status().map_err(windows_error)? {
+            AsyncStatus::Completed => operation.GetResults().map_err(windows_error),
+            status => Err(PlatformError::WindowsApi(format!(
+                "{label} 异步操作未完成：{status:?}"
+            ))),
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = operation.Cancel();
+            gatt_note(format!(
+                "async_wait label={label} phase=completed terminal_result=failed reason=timeout timeout_ms={} action=cancel",
+                timeout.as_millis()
+            ));
+            Err(PlatformError::OperationTimedOut)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(PlatformError::WindowsApi(format!(
+            "{label} 异步完成回调通道已关闭"
+        ))),
+    }
 }
 
 fn has_property(
@@ -4360,6 +4502,49 @@ mod tests {
         assert_eq!(nearest_deadline(Some(late), Some(early)), Some(early));
         assert_eq!(nearest_deadline(Some(late), None), Some(late));
         assert_eq!(nearest_deadline(None, None), None);
+    }
+
+    #[test]
+    fn voice_stall_requires_streaming_and_a_full_silent_window() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(8);
+
+        // 非流式状态永远不触发（Idle/Draining 不应误伤收尾阶段）。
+        for state in [VoiceSessionState::Idle, VoiceSessionState::Draining] {
+            assert!(!voice_stream_stalled(
+                state,
+                Some(now - Duration::from_secs(60)),
+                now,
+                timeout
+            ));
+        }
+
+        // 流式中：刚收到音频不触发；超过窗口触发；一帧都没收到也触发。
+        assert!(!voice_stream_stalled(
+            VoiceSessionState::Streaming,
+            Some(now - Duration::from_secs(7)),
+            now,
+            timeout
+        ));
+        assert!(voice_stream_stalled(
+            VoiceSessionState::Streaming,
+            Some(now - Duration::from_secs(8)),
+            now,
+            timeout
+        ));
+        assert!(voice_stream_stalled(
+            VoiceSessionState::Streaming,
+            None,
+            now,
+            timeout
+        ));
+    }
+
+    #[test]
+    fn stream_start_is_recognized_by_atvv_opcode() {
+        assert!(is_stream_start(&[0x04, 0x03, 0x02, 0x75]));
+        assert!(!is_stream_start(&[0x00, 0x02]));
+        assert!(!is_stream_start(&[]));
     }
 
     #[test]

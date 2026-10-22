@@ -1,7 +1,7 @@
 use sayall_core::{
-    merge_library, normalize_gain_db, validate_library, AppIconIdentifier, AppSettings,
-    MacroLibraryDocument, ThemePreference, UsageStatistics, VoiceInputTool,
-    MACRO_LIBRARY_FORMAT_VERSION,
+    export_portable_library, import_portable_library, merge_library, normalize_gain_db,
+    validate_library, AppIconIdentifier, AppSettings, MacroLibraryDocument, ThemePreference,
+    UsageStatistics, VoiceInputTool, MACRO_LIBRARY_FORMAT_VERSION, PORTABLE_MAX_BYTES,
 };
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
@@ -609,6 +609,48 @@ impl SettingsStore {
         self.save_combined_actions(merged)
     }
 
+    /// 导出 macOS 可导入的 `.sayall`（`sayall-transfer 1.0`）。
+    ///
+    /// 内部 `combined-actions.json` 保持不变；这里只做交换格式转换。
+    pub fn export_combined_actions_sayall(
+        &self,
+        path: &Path,
+        document: MacroLibraryDocument,
+    ) -> Result<(), String> {
+        let document = document.normalized();
+        validate_library(&document).map_err(|issues| {
+            format!(
+                "组合动作无效：{}",
+                issues
+                    .iter()
+                    .map(|issue| issue.code())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })?;
+        let text = export_portable_library(&document)
+            .map_err(|error| format!("导出组合动作失败：{error}"))?;
+        fs::write(path, text).map_err(|error| format!("写入组合动作文件失败：{error}"))
+    }
+
+    /// 导入 macOS `.sayall`，转换为内部库并按不可变版本规则合并。
+    pub fn import_combined_actions_sayall(
+        &self,
+        path: &Path,
+    ) -> Result<MacroLibraryDocument, String> {
+        let metadata =
+            fs::metadata(path).map_err(|error| format!("读取组合动作文件失败：{error}"))?;
+        if metadata.len() > PORTABLE_MAX_BYTES as u64 {
+            return Err("组合动作文件过大".to_owned());
+        }
+        let contents = fs::read(path).map_err(|error| format!("读取组合动作文件失败：{error}"))?;
+        let incoming = import_portable_library(&contents)
+            .map_err(|error| format!("解析组合动作文件失败：{error}"))?;
+        let current = self.load_combined_actions()?;
+        let merged = merge_library(&current, incoming).map_err(|issue| issue.code())?;
+        self.save_combined_actions(merged)
+    }
+
     pub fn load_voice_hold_hotkey(&self) -> Result<Option<KeyChord>, String> {
         let _guard = lock(&self.access);
         self.load_voice_hold_hotkey_unlocked()
@@ -1057,6 +1099,66 @@ mod tests {
         .unwrap();
         assert!(store.import_combined_actions(&import_path).is_err());
         assert_eq!(store.load_combined_actions().unwrap().definitions.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 组合动作用户导出/导入走 macOS `.sayall`；内部文件仍是本地库。
+    #[test]
+    fn portable_combined_actions_round_trip() {
+        use sayall_core::{
+            MacroAction, MacroParameters, MacroStep, MACRO_LIBRARY_FORMAT_VERSION,
+            MACRO_SCHEMA_VERSION,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-combined-sayall-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        let definition = sayall_core::MacroDefinition {
+            schema_version: MACRO_SCHEMA_VERSION.to_owned(),
+            macro_id: "macro.sayall1".to_owned(),
+            version: "1.0.0".to_owned(),
+            name: "跨端动作".to_owned(),
+            summary: None,
+            steps: vec![MacroStep {
+                step_id: "step.01".to_owned(),
+                action: MacroAction::OpenApplication,
+                timeout_ms: None,
+                parameters: MacroParameters {
+                    target: Some("chrome".to_owned()),
+                    ..MacroParameters::default()
+                },
+            }],
+        };
+        let library = sayall_core::MacroLibraryDocument {
+            format_version: MACRO_LIBRARY_FORMAT_VERSION,
+            definitions: vec![definition],
+        };
+        store.save_combined_actions(library.clone()).unwrap();
+        let path = dir.join("combined.sayall");
+        store
+            .export_combined_actions_sayall(&path, library)
+            .unwrap();
+        let exported = std::fs::read_to_string(&path).unwrap();
+        assert!(exported.contains("\"format\": \"sayall-transfer\""));
+        assert!(exported.contains("\"type\": \"personalBackup\""));
+        assert!(exported.contains("\"schemaVersion\": \"1.0\""));
+
+        store
+            .save_combined_actions(sayall_core::MacroLibraryDocument::default())
+            .unwrap();
+        let imported = store.import_combined_actions_sayall(&path).unwrap();
+        assert_eq!(imported.definitions.len(), 1);
+        assert_eq!(imported.definitions[0].macro_id, "macro.sayall1");
+        assert_eq!(
+            imported.definitions[0].steps[0]
+                .parameters
+                .target
+                .as_deref(),
+            Some("chrome")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

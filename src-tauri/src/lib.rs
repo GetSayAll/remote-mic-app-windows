@@ -613,10 +613,48 @@ fn get_membership_payment_handoff(
     state.membership.payment_handoff()
 }
 
+/// 当前构建是否连接 staging；页面据此显示「测试购买 · 不会扣款」。
+#[tauri::command]
+fn get_membership_environment(state: tauri::State<'_, AppState>) -> bool {
+    state.membership.is_test_environment()
+}
+
+/// 让系统打开当前交接里的 weixin:// scheme。
+///
+/// scheme 来自宿主保存的服务端 handoff，页面不能注入任意 URL；这里仍只放行
+/// `weixin://`，防止被篡改成文件或脚本协议。
+#[tauri::command]
+async fn open_membership_payment_scheme(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let scheme = state
+        .membership
+        .payment_handoff()
+        .and_then(|handoff| handoff.open_scheme)
+        .ok_or_else(|| "no_open_scheme".to_string())?;
+    if !scheme.starts_with("weixin://") || scheme.len() > 2048 {
+        return Err("invalid_handoff_scheme".to_string());
+    }
+    app.opener()
+        .open_url(scheme, None::<&str>)
+        .map_err(|_| "open_membership_scheme_failed".to_string())
+}
+
 /// 丢弃当前支付交接（退出登录、切换方案等）。
 #[tauri::command]
 fn clear_membership_payment_handoff(state: tauri::State<'_, AppState>) {
     state.membership.clear_payment_handoff();
+}
+
+/// 在服务端过期当前支付交接；重新生成或退出登录时使用。
+#[tauri::command]
+async fn expire_membership_payment_handoff(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let membership = Arc::clone(&state.membership);
+    run_membership(move || membership.expire_payment_handoff()).await
 }
 
 /// 打开当前订单的托管收银台。
@@ -658,6 +696,21 @@ async fn open_membership_link(app: tauri::AppHandle, link: String) -> Result<(),
         "market" => "https://github.com/GetSayAll/sayall-market",
         _ => return Err("unknown_membership_link".to_string()),
     };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "open_membership_link_failed".to_string())
+}
+
+/// 打开服务端目录状态返回的停售/支持链接。
+///
+/// 只接受 HTTPS；页面不能传 `file:`、`javascript:` 等协议。长度上限与
+/// checkout URL 一致，防止异常超长链接。
+#[tauri::command]
+async fn open_membership_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !url.starts_with("https://") || url.len() > 2048 {
+        return Err("invalid_membership_url".to_string());
+    }
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| "open_membership_link_failed".to_string())
@@ -1399,6 +1452,14 @@ fn capture_inactive_due_to_missing_voice_effect(missing_streak: u64) -> bool {
 /// 静默失效 2.5 天；用户把开关关开一次（= 起一个新助手实例）立刻恢复。本常量把
 /// 那次手动操作交给应用自己：持续这么久没有所有权就 `/end` + `/run` 换一个新实例。
 const CAPTURE_RECOVER_AFTER_MS: u64 = 60_000;
+/// 助手主动做**设备节点级**恢复（`pnputil remove-device` + `scan-devices`）时，
+/// 给它的最长免重启窗口。真机实测 `remove-device` 可能耗时 60 秒以上；这期间
+/// `/end` 会打断恢复，而且下一轮助手会因冷却跳过设备操作，反而永远恢复不了。
+const CAPTURE_RECOVER_RECOVERY_GRACE_MS: u64 = 180_000;
+/// 恢复结束后的尾巴：新宿主已就绪但 agent 还在注入/握手，这段时间同样不能重启。
+/// 助手默认给 agent 的握手窗口是 30 秒（`DEFAULT_AWAIT_HELLO_S`）；尾巴必须覆盖它，
+/// 否则刚注入完就会被 `capture_recover` 结束掉，10 分钟冷却又拦住下一次设备恢复。
+const CAPTURE_RECOVER_RECOVERY_TAIL_MS: u64 = 45_000;
 /// 前几次「自动重来」之间的最短间隔（防抖；新助手注入 + 握手本身也要时间）。
 const CAPTURE_RECOVER_MIN_INTERVAL_MS: u64 = 60_000;
 /// 连续多次「自动重来」仍无效后的间隔：不修链路，但也不每 60 秒反复重启。
@@ -1438,6 +1499,26 @@ fn capture_recover_after_ms(ever_active: bool, owned_usages: usize) -> u64 {
         CAPTURE_RECOVER_AFTER_RELAPSE_MS
     } else {
         CAPTURE_RECOVER_AFTER_MS
+    }
+}
+
+/// 助手正在设备节点恢复时，是否应暂缓「捕获失效 → 重启助手」（纯函数，单测覆盖）。
+///
+/// 恢复动作由助手主动上报（桥接 `R 1` / `R 0`）。超过上限仍没结束按"不再等"处理：
+/// 助手可能挂死，必须保留应用侧的最后兜底。
+fn capture_recovery_grace_active(
+    recovering: bool,
+    recovery_age_ms: Option<u64>,
+    recovery_ended_age_ms: Option<u64>,
+) -> bool {
+    if recovering {
+        recovery_age_ms
+            .map(|age| age < CAPTURE_RECOVER_RECOVERY_GRACE_MS)
+            .unwrap_or(true)
+    } else {
+        recovery_ended_age_ms
+            .map(|age| age < CAPTURE_RECOVER_RECOVERY_TAIL_MS)
+            .unwrap_or(false)
     }
 }
 
@@ -1863,6 +1944,8 @@ fn rc003_auto_trigger_reconcile(
     let mut capture_inactive_since: Option<std::time::Instant> = None;
     let mut capture_recover_last_at: Option<std::time::Instant> = None;
     let mut capture_recover_attempts: u32 = 0;
+    // 助手正在设备节点恢复时只记一条"暂缓重启"，避免每 2 秒刷屏。
+    let mut capture_recovery_wait_logged = false;
     loop {
         // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
         let woken_early = std::mem::take(&mut last_sleep_woken);
@@ -1922,6 +2005,7 @@ fn rc003_auto_trigger_reconcile(
                 capture_inactive_since = None;
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
+                capture_recovery_wait_logged = false;
                 CaptureHealth::Starting.publish(&capture_health);
                 let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
@@ -2007,7 +2091,32 @@ fn rc003_auto_trigger_reconcile(
                     let inactive_ms = inactive_since.elapsed().as_millis() as u64;
                     let since_last_ms =
                         capture_recover_last_at.map(|at| at.elapsed().as_millis() as u64);
-                    if capture_should_restart_helper(
+                    let recovery_grace = capture_recovery_grace_active(
+                        snapshot.recovering,
+                        snapshot.recovery_age_ms,
+                        snapshot.recovery_ended_age_ms,
+                    );
+                    if !recovery_grace {
+                        capture_recovery_wait_logged = false;
+                    }
+                    if recovery_grace {
+                        // 助手正在 `pnputil remove-device` / `scan-devices`，或刚结束、
+                        // agent 还在注入/握手：此时 `/end` 会打断恢复，冷却又会拦住下一轮。
+                        if !capture_recovery_wait_logged {
+                            sayall_windows::gatt_note(format!(
+                                "rc003 feature=enhanced-capture action=capture_recover phase=waiting \
+                                 reason=helper_device_recovery recovery_age_ms={} \
+                                 recovery_ended_age_ms={} grace_ms={} tail_ms={} \
+                                 inactive_ms={inactive_ms} {}",
+                                snapshot.recovery_age_ms.unwrap_or(0),
+                                snapshot.recovery_ended_age_ms.unwrap_or(0),
+                                CAPTURE_RECOVER_RECOVERY_GRACE_MS,
+                                CAPTURE_RECOVER_RECOVERY_TAIL_MS,
+                                bridge_health_summary(&snapshot)
+                            ));
+                            capture_recovery_wait_logged = true;
+                        }
+                    } else if capture_should_restart_helper(
                         inactive_ms,
                         since_last_ms,
                         capture_recover_attempts,
@@ -2057,6 +2166,7 @@ fn rc003_auto_trigger_reconcile(
                         capture_recover_last_at = Some(std::time::Instant::now());
                         // 新助手要重新注入 / 握手：从头计时，别连环干掉刚起来的实例。
                         capture_inactive_since = Some(std::time::Instant::now());
+                        capture_recovery_wait_logged = false;
                     }
                 } else if capture_inactive_logged && !snapshot.owned_usages.is_empty() {
                     // 只有真的拿回所有权才算恢复。若此时恰好是"用户把增强键全部取消映射"
@@ -2073,6 +2183,7 @@ fn rc003_auto_trigger_reconcile(
                     capture_inactive_since = None;
                     capture_recover_last_at = None;
                     capture_recover_attempts = 0;
+                    capture_recovery_wait_logged = false;
                 }
                 active_seen = true;
                 was_connected = true;
@@ -2123,6 +2234,7 @@ fn rc003_auto_trigger_reconcile(
                     capture_inactive_since = None;
                     capture_recover_last_at = None;
                     capture_recover_attempts = 0;
+                    capture_recovery_wait_logged = false;
                 }
                 active_seen = true;
                 if woken_early {
@@ -2625,7 +2737,7 @@ pub struct MacroDeleteResult {
 async fn export_combined_actions(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
-        "shortcut_settings feature=combined_actions action=export phase=requested".to_owned(),
+        "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=requested".to_owned(),
     );
     let settings = state.settings.clone();
     let result = match tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
@@ -2633,7 +2745,7 @@ async fn export_combined_actions(state: tauri::State<'_, AppState>) -> Result<bo
         let Some(path) = sayall_windows::file_dialog::pick_combined_actions_export_path()? else {
             return Ok(false);
         };
-        settings.export_combined_actions(&path, document)?;
+        settings.export_combined_actions_sayall(&path, document)?;
         Ok(true)
     })
     .await
@@ -2643,15 +2755,15 @@ async fn export_combined_actions(state: tauri::State<'_, AppState>) -> Result<bo
     };
     sayall_windows::gatt_note(match &result {
         Ok(true) => format!(
-            "shortcut_settings feature=combined_actions action=export phase=completed terminal_result=passed elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=completed terminal_result=passed elapsed_ms={}",
             started.elapsed().as_millis()
         ),
         Ok(false) => format!(
-            "shortcut_settings feature=combined_actions action=export phase=completed terminal_result=cancelled elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=completed terminal_result=cancelled elapsed_ms={}",
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=combined_actions action=export phase=completed terminal_result=failed error_domain=settings error_code=export_failed reason=dialog_or_write_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=export format=sayall-transfer phase=completed terminal_result=failed error_domain=settings error_code=export_failed reason=dialog_or_write_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ),
     });
@@ -2665,7 +2777,7 @@ async fn import_combined_actions(
 ) -> Result<Option<MacroLibraryDocument>, String> {
     let started = std::time::Instant::now();
     sayall_windows::gatt_note(
-        "shortcut_settings feature=combined_actions action=import phase=requested".to_owned(),
+        "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=requested".to_owned(),
     );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
@@ -2675,7 +2787,7 @@ async fn import_combined_actions(
             else {
                 return Ok(None);
             };
-            let merged = settings.import_combined_actions(&path)?;
+            let merged = settings.import_combined_actions_sayall(&path)?;
             // 完整校验并持久化成功后才热加载。
             platform.set_macro_library(merged.clone());
             Ok(Some(merged))
@@ -2688,16 +2800,16 @@ async fn import_combined_actions(
     };
     sayall_windows::gatt_note(match &result {
         Ok(Some(document)) => format!(
-            "shortcut_settings feature=combined_actions action=import phase=completed terminal_result=passed definitions={} elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=completed terminal_result=passed definitions={} elapsed_ms={}",
             document.definitions.len(),
             started.elapsed().as_millis()
         ),
         Ok(None) => format!(
-            "shortcut_settings feature=combined_actions action=import phase=completed terminal_result=cancelled elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=completed terminal_result=cancelled elapsed_ms={}",
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=combined_actions action=import phase=completed terminal_result=failed error_domain=settings error_code=import_failed reason=dialog_read_parse_validation_or_persistence_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=combined_actions action=import format=sayall-transfer phase=completed terminal_result=failed error_domain=settings error_code=import_failed reason=dialog_read_parse_validation_or_persistence_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ),
     });
@@ -4962,8 +5074,12 @@ pub fn run() {
         create_membership_payment_handoff,
         refresh_membership_payment_handoff,
         get_membership_payment_handoff,
+        get_membership_environment,
+        open_membership_payment_scheme,
         clear_membership_payment_handoff,
+        expire_membership_payment_handoff,
         open_membership_link,
+        open_membership_external_url,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -5079,8 +5195,12 @@ pub fn run() {
         create_membership_payment_handoff,
         refresh_membership_payment_handoff,
         get_membership_payment_handoff,
+        get_membership_environment,
+        open_membership_payment_scheme,
         clear_membership_payment_handoff,
+        expire_membership_payment_handoff,
         open_membership_link,
+        open_membership_external_url,
         get_system_accent_color,
         get_diagnostic_report,
         open_log_directory,
@@ -5678,6 +5798,34 @@ mod tests {
         assert_eq!(capture_recover_after_ms(true, 4), CAPTURE_RECOVER_AFTER_MS);
         // 失效期间的观察节奏必须快于正常观察窗，否则"看到恢复"仍要等 15 秒。
         assert!(CAPTURE_WATCH_INACTIVE_MS < AUTO_TRIGGER_WATCH_MS);
+    }
+
+    /// 助手设备节点恢复期间暂缓重启（2026-10-21）：`remove-device` 可能 60 秒以上，
+    /// 不能按 60 秒的捕获失效阈值把正在恢复的助手 `/end` 掉；但恢复挂死时必须保留兜底。
+    #[test]
+    fn helper_device_recovery_suspends_capture_restart_for_a_bounded_window() {
+        // 恢复进行中：年龄未到上限都等；没有年龄（旧助手没上报）也按"正在恢复"处理。
+        assert!(capture_recovery_grace_active(true, Some(0), None));
+        assert!(capture_recovery_grace_active(true, None, None));
+        assert!(!capture_recovery_grace_active(
+            true,
+            Some(CAPTURE_RECOVER_RECOVERY_GRACE_MS),
+            None
+        ));
+        // 恢复刚结束：留一段尾巴给注入/握手。
+        assert!(capture_recovery_grace_active(false, None, Some(0)));
+        assert!(!capture_recovery_grace_active(
+            false,
+            None,
+            Some(CAPTURE_RECOVER_RECOVERY_TAIL_MS)
+        ));
+        // 没恢复过：恢复正常判定。
+        assert!(!capture_recovery_grace_active(false, None, None));
+        // 两个窗口的量级关系：宽限必须覆盖 60 秒失效阈值；尾巴必须覆盖助手
+        // 默认 30 秒 agent 握手窗口，且短于宽限。
+        assert!(CAPTURE_RECOVER_RECOVERY_GRACE_MS > CAPTURE_RECOVER_AFTER_MS);
+        assert!(CAPTURE_RECOVER_RECOVERY_TAIL_MS >= 30_000);
+        assert!(CAPTURE_RECOVER_RECOVERY_TAIL_MS < CAPTURE_RECOVER_RECOVERY_GRACE_MS);
     }
 
     /// 唤醒后的重连不该重发"等新实例注入"的宽限（issue #264）。

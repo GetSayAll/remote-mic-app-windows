@@ -62,6 +62,7 @@
 //! | `E <t_ms> <u1,u2,...>` | 助手 → app | 边沿：当前按下的 usage 集合（十六进制） |
 //! | `E <t_ms> -` | 助手 → app | 边沿：集合为空 = 全部释放 |
 //! | `P <t_ms>` | 助手 → app | 心跳（每 1s） |
+//! | `R <1|0>` | 助手 → app | 设备节点恢复进行中/结束（绝对状态；期间暂缓 capture_recover） |
 //! | `BYE <reason>` | 助手 → app | 助手收尾，按键即将释放 |
 //!
 //! 边沿是**绝对状态**（与 agent 侧一致，只在变化时才发），主程序侧做差分转成
@@ -340,6 +341,12 @@ pub struct BridgeSnapshot {
     pub owned_usages: Vec<u16>,
     /// 「按下生效判定」连续缺失数（`replaced` 归零；连续 ≥2 会被对账判为没生效）。
     pub voice_frames_missing_streak: u64,
+    /// 助手正在做设备节点级恢复（不结束宿主、只 `pnputil remove/scan`）。
+    pub recovering: bool,
+    /// 本次恢复已持续的时间（`None` = 当前没有恢复）。
+    pub recovery_age_ms: Option<u64>,
+    /// 最近一次恢复结束距今多久（用于给注入/握手留一段尾巴）。
+    pub recovery_ended_age_ms: Option<u64>,
 }
 
 /// 默认桥接描述文件目录：`%LOCALAPPDATA%\SayAll`。
@@ -366,6 +373,11 @@ pub enum BridgeLine {
         usages: Vec<u16>,
     },
     Ping,
+    /// 助手正在做设备节点级恢复（绝对状态）：`true` 期间主程序不应按
+    /// 「捕获失效」重启助手，因为 `pnputil remove-device` 可能耗时一分钟以上。
+    Recovering {
+        active: bool,
+    },
     /// agent 已应用该代目标集合；后续心跳重复上报同一所有权。
     Ownership {
         generation: u64,
@@ -460,6 +472,15 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
             Ok(Some(BridgeLine::Edges { usages }))
         }
         "P" => Ok(Some(BridgeLine::Ping)),
+        "R" => {
+            let payload = parts.next().ok_or_else(|| "R 缺少恢复状态".to_string())?;
+            let active = match payload {
+                "1" | "on" => true,
+                "0" | "off" => false,
+                other => return Err(format!("未知的 R 恢复状态 {other:?}")),
+            };
+            Ok(Some(BridgeLine::Recovering { active }))
+        }
         "A" => {
             // agent 回执（助手转发）：绝对状态，`-` = 关闭。
             let payload = parts.next().unwrap_or("-");
@@ -561,6 +582,10 @@ struct BridgeShared {
     last_rx: Option<Instant>,
     owned: BTreeSet<u16>,
     ownership_last_rx: Option<Instant>,
+    /// 助手开始设备节点恢复的时刻；`None` = 不在恢复。
+    recovering_since: Option<Instant>,
+    /// 最近一次恢复结束的时刻（给注入/握手留尾巴）。
+    recovery_ended_at: Option<Instant>,
 }
 
 impl Default for BridgeShared {
@@ -579,6 +604,8 @@ impl Default for BridgeShared {
             last_rx: None,
             owned: BTreeSet::new(),
             ownership_last_rx: None,
+            recovering_since: None,
+            recovery_ended_at: None,
         }
     }
 }
@@ -941,6 +968,13 @@ impl Rc003Bridge {
             target_usages: targets.usages.iter().copied().collect(),
             owned_usages: state.owned.iter().copied().collect(),
             voice_frames_missing_streak: lock(&VOICE_FRAME_STATE).missing_streak,
+            recovering: state.recovering_since.is_some(),
+            recovery_age_ms: state
+                .recovering_since
+                .map(|since| since.elapsed().as_millis() as u64),
+            recovery_ended_age_ms: state
+                .recovery_ended_at
+                .map(|at| at.elapsed().as_millis() as u64),
         }
     }
 
@@ -1451,6 +1485,9 @@ fn handle_connection(
                             let mut state = lock(shared);
                             state.phase = BridgePhase::Connected;
                             state.helper_pid = helper_pid;
+                            // 新助手会话不继承上一实例的恢复窗口。
+                            state.recovering_since = None;
+                            state.recovery_ended_at = None;
                         }
                         // 上一代连接的租约不属于这一代助手：不清掉的话快照会对外
                         // 谎报"已接管"（对账据此判 active，门禁也会被旧回执抬起），
@@ -1545,6 +1582,33 @@ fn handle_connection(
                     }
                 }
                 BridgeLine::Ping => {}
+                BridgeLine::Recovering { active } => {
+                    let changed = {
+                        let mut state = lock(shared);
+                        let was = state.recovering_since.is_some();
+                        let now = Instant::now();
+                        if active {
+                            state.recovering_since.get_or_insert(now);
+                        } else {
+                            // 即使本连接没见过 `R 1`（断线重连窗口），`R 0` 也代表
+                            // "恢复动作刚结束"，照样留注入尾巴。
+                            state.recovery_ended_at = Some(now);
+                            state.recovering_since = None;
+                        }
+                        was != active
+                    };
+                    if changed {
+                        note(format!(
+                            "rc003_bridge event=helper_recovering active={active} \
+                             note={}",
+                            if active {
+                                "助手在做设备节点恢复，暂缓按捕获失效重启"
+                            } else {
+                                "设备节点恢复结束"
+                            }
+                        ));
+                    }
+                }
                 BridgeLine::Ownership { generation, usages } => {
                     let reported: BTreeSet<u16> = usages.into_iter().collect();
                     let target = lock(targets).clone();
@@ -1781,6 +1845,8 @@ fn handle_connection(
                 state.phase = BridgePhase::Listening;
             }
             state.helper_pid = 0;
+            state.recovering_since = None;
+            state.recovery_ended_at = None;
         }
         for edge in released {
             let _ = sender.send(EngineMessage::GateEdge(edge));
@@ -2110,6 +2176,29 @@ mod tests {
         // 空行与 CRLF 要被容忍（助手侧写的是 LF，但人工用脚本联调时会有 CRLF）。
         assert_eq!(parse_bridge_line("\r\n").unwrap(), None);
         assert_eq!(parse_bridge_line("P 1\r").unwrap(), Some(BridgeLine::Ping));
+    }
+
+    #[test]
+    fn parses_helper_recovering_absolute_state() {
+        assert_eq!(
+            parse_bridge_line("R 1").unwrap(),
+            Some(BridgeLine::Recovering { active: true })
+        );
+        assert_eq!(
+            parse_bridge_line("R 0\r").unwrap(),
+            Some(BridgeLine::Recovering { active: false })
+        );
+        // 文字形式也接受，方便人工联调。
+        assert_eq!(
+            parse_bridge_line("R on").unwrap(),
+            Some(BridgeLine::Recovering { active: true })
+        );
+        assert_eq!(
+            parse_bridge_line("R off").unwrap(),
+            Some(BridgeLine::Recovering { active: false })
+        );
+        assert!(parse_bridge_line("R").is_err());
+        assert!(parse_bridge_line("R maybe").is_err());
     }
 
     #[test]
