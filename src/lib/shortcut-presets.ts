@@ -10,7 +10,7 @@ import type { KeyCode } from "./bridge";
  */
 export interface ShortcutPresetGroup {
   label: string;
-  items: Array<{ label: string; keys: KeyCode[] }>;
+  items: Array<{ label: string; keys: KeyCode[]; display?: string }>;
 }
 
 export const SHORTCUT_PRESET_GROUPS: ShortcutPresetGroup[] = [
@@ -48,11 +48,11 @@ export const SHORTCUT_PRESET_GROUPS: ShortcutPresetGroup[] = [
     label: "系统与媒体",
     items: [
       { label: "切换窗口", keys: ["alt", "tab"] },
-      { label: "显示桌面", keys: ["left_windows", "d"] },
+      { label: "显示桌面", keys: ["left_windows", "d"], display: "Win + D" },
       { label: "关闭窗口", keys: ["control", "w"] },
-      { label: "锁定", keys: ["left_windows", "l"] },
-      { label: "搜索", keys: ["left_windows", "s"] },
-      { label: "截图", keys: ["left_windows", "shift", "s"] },
+      { label: "锁定", keys: ["left_windows", "l"], display: "Win + L" },
+      { label: "搜索", keys: ["left_windows", "s"], display: "Win + S" },
+      { label: "截图", keys: ["left_windows", "shift", "s"], display: "Win + Shift + S" },
       { label: "静音", keys: ["volume_mute"] },
       { label: "音量+", keys: ["volume_up"] },
       { label: "音量−", keys: ["volume_down"] },
