@@ -1708,6 +1708,34 @@ const voiceHotkeyKeyLabels: Record<string, string> = {
   space: "空格",
   tab: "Tab",
   apps: "右键菜单",
+  oem1: ";",
+  oem_plus: "=",
+  oem_comma: ",",
+  oem_minus: "-",
+  oem_period: ".",
+  oem2: "/",
+  oem3: "`",
+  oem4: "[",
+  oem5: "\\",
+  oem6: "]",
+  oem7: "'",
+  oem102: "\\",
+  numpad0: "小键盘 0",
+  numpad1: "小键盘 1",
+  numpad2: "小键盘 2",
+  numpad3: "小键盘 3",
+  numpad4: "小键盘 4",
+  numpad5: "小键盘 5",
+  numpad6: "小键盘 6",
+  numpad7: "小键盘 7",
+  numpad8: "小键盘 8",
+  numpad9: "小键盘 9",
+  numpad_multiply: "小键盘 ×",
+  numpad_add: "小键盘 +",
+  numpad_subtract: "小键盘 −",
+  numpad_decimal: "小键盘 .",
+  numpad_divide: "小键盘 ÷",
+  numlock: "Num Lock",
 };
 
 function voiceHotkeyKeyLabel(code: string): string {
@@ -1842,6 +1870,8 @@ export function shortcutCapability(
 
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
+  // 组合动作用 `return` 作为 Enter 的稳定存储名；界面统一显示键帽上的 "Enter"。
+  return: "Enter",
   // 用厂商印在键帽上的英文名，避免“退格/删除”在中文里被混为一谈。
   backspace: "Backspace",
   home: "Home",

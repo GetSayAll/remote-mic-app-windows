@@ -109,9 +109,50 @@ pub enum KeyCode {
     F10,
     F11,
     F12,
-    /// `~ 键（VK_OEM_3）。遥控器 TV 键的原生等价键：TV usage 0x0035 在
-    /// Windows 键盘映射里就是 OEM_3，被吞后必须能按原样回注。
+    /// OEM 标点键（VK_OEM_*）。组合动作/按键映射要能录入并回注 Ctrl+标点，
+    /// 不能只支持其中一两个键——缺一个就表现为“按键完全没反应”。
+    /// 语义键名使用键帽字符，与 `macro_runtime::key_code_to_macro_key` 一致。
+    Oem1,
+    /// `= +`
+    OemPlus,
+    /// `, <`
+    OemComma,
+    /// `- _`
+    OemMinus,
+    /// `. >`
+    OemPeriod,
+    /// `/ ?`
+    Oem2,
+    /// `` ` ~ ``（遥控器 TV 键的原生等价键）
     Oem3,
+    /// `[ {`
+    Oem4,
+    /// `\ |`
+    Oem5,
+    /// `] }`
+    Oem6,
+    /// `' "`
+    Oem7,
+    /// ISO 额外 `\ |` 键（VK_OEM_102）
+    Oem102,
+    /// 小键盘数字与运算符（VK_NUMPAD*）。带 NumLock 时与主键盘数字
+    /// 的 VK 不同，必须单独映射，否则 Ctrl+小键盘 +/−/0 会被静默吞掉。
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadMultiply,
+    NumpadAdd,
+    NumpadSubtract,
+    NumpadDecimal,
+    NumpadDivide,
+    NumLock,
 }
 
 impl KeyCode {
@@ -198,7 +239,34 @@ impl KeyCode {
             Self::MediaPrev => 0xB1,
             Self::MediaNext => 0xB0,
             Self::MediaPlayPause => 0xB3,
+            Self::Oem1 => 0xBA,
+            Self::OemPlus => 0xBB,
+            Self::OemComma => 0xBC,
+            Self::OemMinus => 0xBD,
+            Self::OemPeriod => 0xBE,
+            Self::Oem2 => 0xBF,
             Self::Oem3 => 0xC0,
+            Self::Oem4 => 0xDB,
+            Self::Oem5 => 0xDC,
+            Self::Oem6 => 0xDD,
+            Self::Oem7 => 0xDE,
+            Self::Oem102 => 0xE2,
+            Self::Numpad0 => 0x60,
+            Self::Numpad1 => 0x61,
+            Self::Numpad2 => 0x62,
+            Self::Numpad3 => 0x63,
+            Self::Numpad4 => 0x64,
+            Self::Numpad5 => 0x65,
+            Self::Numpad6 => 0x66,
+            Self::Numpad7 => 0x67,
+            Self::Numpad8 => 0x68,
+            Self::Numpad9 => 0x69,
+            Self::NumpadMultiply => 0x6A,
+            Self::NumpadAdd => 0x6B,
+            Self::NumpadSubtract => 0x6D,
+            Self::NumpadDecimal => 0x6E,
+            Self::NumpadDivide => 0x6F,
+            Self::NumLock => 0x90,
         }
     }
 
@@ -234,7 +302,35 @@ impl KeyCode {
             Self::Enter => (0x1C, false),
             Self::Escape => (0x01, false),
             Self::Space => (0x39, false),
+            Self::Oem1 => (0x27, false),
+            Self::OemPlus => (0x0D, false),
+            Self::OemComma => (0x33, false),
+            Self::OemMinus => (0x0C, false),
+            Self::OemPeriod => (0x34, false),
+            Self::Oem2 => (0x35, false),
             Self::Oem3 => (0x29, false),
+            Self::Oem4 => (0x1A, false),
+            Self::Oem5 => (0x2B, false),
+            Self::Oem6 => (0x1B, false),
+            Self::Oem7 => (0x28, false),
+            Self::Oem102 => (0x56, false),
+            // 小键盘：导航簇扫描码复用，NumLock 状态决定数字/导航。Divide 是 E0 35。
+            Self::Numpad0 => (0x52, false),
+            Self::Numpad1 => (0x4F, false),
+            Self::Numpad2 => (0x50, false),
+            Self::Numpad3 => (0x51, false),
+            Self::Numpad4 => (0x4B, false),
+            Self::Numpad5 => (0x4C, false),
+            Self::Numpad6 => (0x4D, false),
+            Self::Numpad7 => (0x47, false),
+            Self::Numpad8 => (0x48, false),
+            Self::Numpad9 => (0x49, false),
+            Self::NumpadMultiply => (0x37, false),
+            Self::NumpadAdd => (0x4E, false),
+            Self::NumpadSubtract => (0x4A, false),
+            Self::NumpadDecimal => (0x53, false),
+            Self::NumpadDivide => (0x35, true),
+            Self::NumLock => (0x45, false),
             // 导航簇与菜单键是扩展键：漏掉 E0 会退化成小键盘数字键。
             Self::Home => (0x47, true),
             Self::Up => (0x48, true),
@@ -328,6 +424,7 @@ impl KeyCode {
                 | Self::MediaPrev
                 | Self::MediaNext
                 | Self::MediaPlayPause
+                | Self::NumpadDivide
                 | Self::RightControl
                 | Self::RightAlt
                 | Self::LeftWindows
@@ -1633,6 +1730,42 @@ mod tests {
     }
 
     #[test]
+    fn oem_punctuation_uses_its_own_virtual_keys() {
+        for (key, vk) in [
+            (KeyCode::Oem1, 0xBA),
+            (KeyCode::OemPlus, 0xBB),
+            (KeyCode::OemComma, 0xBC),
+            (KeyCode::OemMinus, 0xBD),
+            (KeyCode::OemPeriod, 0xBE),
+            (KeyCode::Oem2, 0xBF),
+            (KeyCode::Oem3, 0xC0),
+            (KeyCode::Oem4, 0xDB),
+            (KeyCode::Oem5, 0xDC),
+            (KeyCode::Oem6, 0xDD),
+            (KeyCode::Oem7, 0xDE),
+            (KeyCode::Oem102, 0xE2),
+            (KeyCode::Numpad0, 0x60),
+            (KeyCode::Numpad1, 0x61),
+            (KeyCode::Numpad2, 0x62),
+            (KeyCode::Numpad3, 0x63),
+            (KeyCode::Numpad4, 0x64),
+            (KeyCode::Numpad5, 0x65),
+            (KeyCode::Numpad6, 0x66),
+            (KeyCode::Numpad7, 0x67),
+            (KeyCode::Numpad8, 0x68),
+            (KeyCode::Numpad9, 0x69),
+            (KeyCode::NumpadMultiply, 0x6A),
+            (KeyCode::NumpadAdd, 0x6B),
+            (KeyCode::NumpadSubtract, 0x6D),
+            (KeyCode::NumpadDecimal, 0x6E),
+            (KeyCode::NumpadDivide, 0x6F),
+            (KeyCode::NumLock, 0x90),
+        ] {
+            assert_eq!(key.virtual_key(), vk, "{key:?}");
+        }
+    }
+
+    #[test]
     fn standard_mapping_keys_carry_set1_scan_codes() {
         // 期望值取自本机 MapVirtualKeyW(VK, MAPVK_VK_TO_VSC_EX) 实测
         // （2026-10-08，见 Bugs/2026-10-08-issue-195-injected-keys-need-scan-code.md）。
@@ -1648,6 +1781,33 @@ mod tests {
             (KeyCode::Digit0, 0x0B),
             (KeyCode::Digit1, 0x02),
             (KeyCode::Digit9, 0x0A),
+            (KeyCode::Oem1, 0x27),
+            (KeyCode::OemPlus, 0x0D),
+            (KeyCode::OemComma, 0x33),
+            (KeyCode::OemMinus, 0x0C),
+            (KeyCode::OemPeriod, 0x34),
+            (KeyCode::Oem2, 0x35),
+            (KeyCode::Oem3, 0x29),
+            (KeyCode::Oem4, 0x1A),
+            (KeyCode::Oem5, 0x2B),
+            (KeyCode::Oem6, 0x1B),
+            (KeyCode::Oem7, 0x28),
+            (KeyCode::Oem102, 0x56),
+            (KeyCode::Numpad0, 0x52),
+            (KeyCode::Numpad1, 0x4F),
+            (KeyCode::Numpad2, 0x50),
+            (KeyCode::Numpad3, 0x51),
+            (KeyCode::Numpad4, 0x4B),
+            (KeyCode::Numpad5, 0x4C),
+            (KeyCode::Numpad6, 0x4D),
+            (KeyCode::Numpad7, 0x47),
+            (KeyCode::Numpad8, 0x48),
+            (KeyCode::Numpad9, 0x49),
+            (KeyCode::NumpadMultiply, 0x37),
+            (KeyCode::NumpadAdd, 0x4E),
+            (KeyCode::NumpadSubtract, 0x4A),
+            (KeyCode::NumpadDecimal, 0x53),
+            (KeyCode::NumLock, 0x45),
             (KeyCode::F1, 0x3B),
             (KeyCode::F10, 0x44),
             (KeyCode::F11, 0x57),
@@ -1671,6 +1831,7 @@ mod tests {
             (KeyCode::Insert, 0x52),
             (KeyCode::Delete, 0x53),
             (KeyCode::Apps, 0x5D),
+            (KeyCode::NumpadDivide, 0x35),
         ] {
             assert_eq!(key.physical_scan_code(), Some((scan, true)), "{key:?}");
             assert!(key.is_extended(), "{key:?}");
@@ -1713,7 +1874,34 @@ mod tests {
             KeyCode::Insert,
             KeyCode::Delete,
             KeyCode::Apps,
+            KeyCode::Oem1,
+            KeyCode::OemPlus,
+            KeyCode::OemComma,
+            KeyCode::OemMinus,
+            KeyCode::OemPeriod,
+            KeyCode::Oem2,
             KeyCode::Oem3,
+            KeyCode::Oem4,
+            KeyCode::Oem5,
+            KeyCode::Oem6,
+            KeyCode::Oem7,
+            KeyCode::Oem102,
+            KeyCode::Numpad0,
+            KeyCode::Numpad1,
+            KeyCode::Numpad2,
+            KeyCode::Numpad3,
+            KeyCode::Numpad4,
+            KeyCode::Numpad5,
+            KeyCode::Numpad6,
+            KeyCode::Numpad7,
+            KeyCode::Numpad8,
+            KeyCode::Numpad9,
+            KeyCode::NumpadMultiply,
+            KeyCode::NumpadAdd,
+            KeyCode::NumpadSubtract,
+            KeyCode::NumpadDecimal,
+            KeyCode::NumpadDivide,
+            KeyCode::NumLock,
             KeyCode::Control,
             KeyCode::RightControl,
             KeyCode::Shift,

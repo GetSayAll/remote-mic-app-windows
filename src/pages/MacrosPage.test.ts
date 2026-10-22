@@ -406,6 +406,159 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("尚未录入按键");
   });
 
+  it("录入按钮点击后立即显示录入态，再次点击可取消", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    await findButton(wrapper, "开始录入").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="combo-capture-button"]').text()).toContain("录入中");
+    expect(wrapper.get('[data-testid="combo-capture-hint"]').text()).toContain("请按一次单键或组合键");
+
+    await wrapper.get('[data-testid="combo-capture-button"]').trigger("click");
+    await flushPromises();
+    expect(stopShortcutCaptureSpy).toHaveBeenCalled();
+    expect(wrapper.text()).toContain("已取消录入");
+    expect(wrapper.get('[data-testid="combo-capture-button"]').text()).toContain("开始录入");
+  });
+
+  it("支持录入 Ctrl+[ 并保存为组合动作的按键", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    await findButton(wrapper, "开始录入").trigger("click");
+    await flushPromises();
+    shortcutCaptureHandler?.({ key: "left_control", isPressed: true });
+    shortcutCaptureHandler?.({ key: "oem4", isPressed: true });
+    shortcutCaptureHandler?.({ key: "oem4", isPressed: false });
+    shortcutCaptureHandler?.({ key: "left_control", isPressed: false });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Ctrl + [");
+  });
+
+  it("支持录入 Ctrl+] 并保存为组合动作的按键", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    await findButton(wrapper, "开始录入").trigger("click");
+    await flushPromises();
+    shortcutCaptureHandler?.({ key: "left_control", isPressed: true });
+    shortcutCaptureHandler?.({ key: "oem6", isPressed: true });
+    shortcutCaptureHandler?.({ key: "oem6", isPressed: false });
+    shortcutCaptureHandler?.({ key: "left_control", isPressed: false });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Ctrl + ]");
+  });
+
+  it("支持录入 Ctrl+小键盘 + 并显示为小键盘按键", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    await findButton(wrapper, "开始录入").trigger("click");
+    await flushPromises();
+    shortcutCaptureHandler?.({ key: "left_control", isPressed: true });
+    shortcutCaptureHandler?.({ key: "numpad_add", isPressed: true });
+    shortcutCaptureHandler?.({ key: "numpad_add", isPressed: false });
+    shortcutCaptureHandler?.({ key: "left_control", isPressed: false });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Ctrl + 小键盘 +");
+  });
+
+  it("只按修饰键时给出明确说明，而不是静默无反应", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    await findButton(wrapper, "开始录入").trigger("click");
+    await flushPromises();
+    shortcutCaptureHandler?.({ key: "left_alt", isPressed: true });
+    shortcutCaptureHandler?.({ key: "left_alt", isPressed: false });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("仅按住 Alt/Ctrl 等修饰键暂不支持");
+  });
+
+  it("常用快捷键里的 Enter 显示为 Enter，而不是 Return", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    const enterChip = wrapper.findAll(".chip").find((item) => item.text() === "Enter")!;
+    await enterChip.trigger("click");
+    await flushPromises();
+    const display = wrapper.get('[data-testid="chord-display"]').text();
+    expect(display).toContain("Enter");
+    expect(display).not.toMatch(/return/i);
+  });
+
+  it("离开组合动作页时停止仍在进行的录入", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "开始录入").trigger("click");
+    await flushPromises();
+
+    wrapper.unmount();
+    await flushPromises();
+    expect(stopShortcutCaptureSpy).toHaveBeenCalled();
+  });
+
   it("「执行已有组合动作」候选排除当前动作自身", async () => {
     getCombinedActionsSpy.mockResolvedValue({
       formatVersion: 1,

@@ -228,6 +228,38 @@ pub fn capture_key_code(vk_code: u32, make_code: u16, extended: bool) -> Option<
         0x5B => KeyCode::LeftWindows,
         0x5C => KeyCode::RightWindows,
         0x5D => KeyCode::Apps,
+        // 小键盘：NumLock 打开时数字键以 VK_NUMPAD0-9 到达，不是主键盘 VK_0-9。
+        0x60 => KeyCode::Numpad0,
+        0x61 => KeyCode::Numpad1,
+        0x62 => KeyCode::Numpad2,
+        0x63 => KeyCode::Numpad3,
+        0x64 => KeyCode::Numpad4,
+        0x65 => KeyCode::Numpad5,
+        0x66 => KeyCode::Numpad6,
+        0x67 => KeyCode::Numpad7,
+        0x68 => KeyCode::Numpad8,
+        0x69 => KeyCode::Numpad9,
+        0x6A => KeyCode::NumpadMultiply,
+        0x6B => KeyCode::NumpadAdd,
+        0x6D => KeyCode::NumpadSubtract,
+        0x6E => KeyCode::NumpadDecimal,
+        0x6F => KeyCode::NumpadDivide,
+        0x90 => KeyCode::NumLock,
+        // OEM 标点：Ctrl+标点等组合在录制时以 VK_OEM_* 到达；漏一个就会
+        // 被成对吞掉但不投递，表现为“按键完全没反应”（2026-10-22 实测
+        // unmapped_vk=0xDB/0xDD）。语义键名见 key_code_to_macro_key。
+        0xBA => KeyCode::Oem1,
+        0xBB => KeyCode::OemPlus,
+        0xBC => KeyCode::OemComma,
+        0xBD => KeyCode::OemMinus,
+        0xBE => KeyCode::OemPeriod,
+        0xBF => KeyCode::Oem2,
+        0xC0 => KeyCode::Oem3,
+        0xDB => KeyCode::Oem4,
+        0xDC => KeyCode::Oem5,
+        0xDD => KeyCode::Oem6,
+        0xDE => KeyCode::Oem7,
+        0xE2 => KeyCode::Oem102,
         0x70..=0x7B => [
             KeyCode::F1,
             KeyCode::F2,
@@ -1353,6 +1385,38 @@ mod tests {
             Some(KeyCode::LeftWindows)
         );
         assert_eq!(capture_key_code(0x4C, 0x26, false), Some(KeyCode::L));
+        for (vk, key) in [
+            (0x60, KeyCode::Numpad0),
+            (0x61, KeyCode::Numpad1),
+            (0x62, KeyCode::Numpad2),
+            (0x63, KeyCode::Numpad3),
+            (0x64, KeyCode::Numpad4),
+            (0x65, KeyCode::Numpad5),
+            (0x66, KeyCode::Numpad6),
+            (0x67, KeyCode::Numpad7),
+            (0x68, KeyCode::Numpad8),
+            (0x69, KeyCode::Numpad9),
+            (0x6A, KeyCode::NumpadMultiply),
+            (0x6B, KeyCode::NumpadAdd),
+            (0x6D, KeyCode::NumpadSubtract),
+            (0x6E, KeyCode::NumpadDecimal),
+            (0x6F, KeyCode::NumpadDivide),
+            (0x90, KeyCode::NumLock),
+            (0xBA, KeyCode::Oem1),
+            (0xBB, KeyCode::OemPlus),
+            (0xBC, KeyCode::OemComma),
+            (0xBD, KeyCode::OemMinus),
+            (0xBE, KeyCode::OemPeriod),
+            (0xBF, KeyCode::Oem2),
+            (0xC0, KeyCode::Oem3),
+            (0xDB, KeyCode::Oem4),
+            (0xDC, KeyCode::Oem5),
+            (0xDD, KeyCode::Oem6),
+            (0xDE, KeyCode::Oem7),
+            (0xE2, KeyCode::Oem102),
+        ] {
+            assert_eq!(capture_key_code(vk, 0, false), Some(key), "vk=0x{vk:02X}");
+        }
         assert_eq!(
             capture_key_code(0x11, 0x1D, true),
             Some(KeyCode::RightControl)
