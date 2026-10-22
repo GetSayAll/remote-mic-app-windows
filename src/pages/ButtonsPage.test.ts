@@ -588,7 +588,8 @@ describe("buttons mapping page", () => {
       "中键单击",
     ]);
     const lower = groups[1]!.findAll("button.chip");
-    expect(lower.slice(0, 4).map((button) => button.attributes("aria-label"))).toEqual([
+    // 2026-10-23 用户要求：四方向显示文字，不再用箭头。
+    expect(lower.slice(0, 4).map((button) => button.text())).toEqual([
       "鼠标向上",
       "鼠标向下",
       "鼠标向左",
@@ -1571,6 +1572,8 @@ describe("buttons mapping page", () => {
     // 普通文本框，不再带数字框的上下加减按钮；默认 20。
     expect(wheelInput.attributes("type")).toBe("text");
     expect((wheelInput.element as HTMLInputElement).value).toBe("20");
+    // 保存说明只跟在「每次移动…像素」后面；滚轮状态不显示。
+    expect(wrapper.find(".mouse-amount-hint").exists()).toBe(false);
 
     // 2026-10-22 现场回归：App 每秒刷新运行状态会触发重渲染，正在输入的值
     // 不得被配置值覆盖回默认 20。
@@ -1610,7 +1613,10 @@ describe("buttons mapping page", () => {
       await wheelInput.trigger("keydown", { key: "Enter" });
       await flushPromises();
       expect(vi.mocked(saveButtonMappings).mock.calls).toHaveLength(saveCount);
-      expect(wrapper.text()).toContain("请输入 1 到 100 之间的整数");
+      // 错误提示贴在输入框下方，不再出现在页面最下方。
+      expect(wrapper.get(".mouse-amount-error").text()).toBe("请输入 1 到 100 之间的整数");
+      const bottom = wrapper.find(".mapping-status");
+      expect(bottom.exists() ? bottom.text() : "").not.toContain("请输入 1 到 100 之间的整数");
     }
 
     // 鼠标移动沿用同一口径：1–100、默认 20，Enter/失焦都保存。
@@ -1621,6 +1627,9 @@ describe("buttons mapping page", () => {
     let moveInput = wrapper.get('input[aria-label="每次移动像素"]');
     expect(moveInput.attributes("type")).toBe("text");
     expect((moveInput.element as HTMLInputElement).value).toBe("20");
+    expect(wrapper.get(".mouse-amount-hint").text()).toBe(
+      "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。",
+    );
     await moveInput.setValue("77");
     await wrapper.setProps({ runtime: { ...runtime, appVersion: "0.1.2" } });
     await flushPromises();
@@ -1634,12 +1643,15 @@ describe("buttons mapping page", () => {
       direction: "right",
       distance: 100,
     });
+    expect(wrapper.find(".mouse-amount-error").exists()).toBe(false);
     const movesBeforeInvalid = vi.mocked(saveButtonMappings).mock.calls.length;
     await moveInput.setValue("101");
     await moveInput.trigger("keydown", { key: "Enter" });
     await flushPromises();
     expect(vi.mocked(saveButtonMappings).mock.calls).toHaveLength(movesBeforeInvalid);
-    expect(wrapper.text()).toContain("请输入 1 到 100 之间的整数");
+    expect(wrapper.get(".mouse-amount-error").text()).toBe("请输入 1 到 100 之间的整数");
+    const bottom = wrapper.find(".mapping-status");
+    expect(bottom.exists() ? bottom.text() : "").not.toContain("请输入 1 到 100 之间的整数");
 
     await choose("左键双击");
     expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({

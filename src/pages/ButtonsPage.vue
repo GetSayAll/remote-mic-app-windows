@@ -76,7 +76,6 @@ import {
   type FocusStrategy,
   type KeyCode,
   type MacroDefinition,
-  type MoveDirection,
   type PairedRemote,
   type PresetAppInfo,
   type RawInputPhase,
@@ -714,7 +713,6 @@ const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarg
 const MOUSE_AMOUNT_DEFAULT = 20;
 const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT);
 const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : MOUSE_AMOUNT_DEFAULT);
-const moveSymbols: Record<MoveDirection, string> = { up: "↑", down: "↓", left: "←", right: "→" };
 
 /**
  * 鼠标数量范围（2026-10-22 用户要求：滚轮格数与移动像素统一为 1–100，
@@ -729,6 +727,9 @@ const MAX_MOUSE_AMOUNT = 100;
  */
 const scrollDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const moveDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
+const mouseAmountError = ref<string | null>(null);
+const MOUSE_AMOUNT_HINT =
+  "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。";
 
 /** 鼠标动作大类的数量输入：只有滚轮/移动动作显示，按动作类型取对应草稿。 */
 const mouseAmountVisible = computed(
@@ -750,6 +751,7 @@ const mouseAmountDraft = computed({
 
 function syncMouseAmountDrafts(): void {
   const action = selectedAction.value;
+  mouseAmountError.value = null;
   scrollDraft.value = String(
     action?.type === "scroll" ? action.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT,
   );
@@ -785,10 +787,12 @@ function updateMouseAmount(): void {
   const kind = action.type === "mouse_move" ? "mouse_move" : "scroll";
   const value = Number(mouseAmountDraft.value.trim());
   if (!Number.isInteger(value) || value < 1 || value > MAX_MOUSE_AMOUNT) {
-    statusMessage.value = `请输入 1 到 ${MAX_MOUSE_AMOUNT} 之间的整数`;
+    // 2026-10-23 用户要求：错误提示贴在输入框旁，不再出现在页面最下方。
+    mouseAmountError.value = `请输入 1 到 ${MAX_MOUSE_AMOUNT} 之间的整数`;
     mouseAmountDraft.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
     return;
   }
+  mouseAmountError.value = null;
   if (action.type === "scroll") {
     // 显式输入默认值也要落盘（旧配置可能没有 steps 字段）。
     if (action.steps === value) return;
@@ -2687,9 +2691,9 @@ onUnmounted(() => {
                 title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
             </div>
             <div class="mouse-action-group">
-              <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip mouse-direction" type="button"
+              <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip" type="button"
                 :aria-label="label" :title="label" :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
-                @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ moveSymbols[direction] }}</button>
+                @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ label }}</button>
               <button v-for="direction in (['up', 'down'] as const)" :key="direction" class="chip"
                 :class="{ selected: isActiveScroll(direction) }" type="button" title="在鼠标当前位置滚动"
                 @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? "滚轮向上" : "滚轮向下" }}</button>
@@ -2703,6 +2707,8 @@ onUnmounted(() => {
               @keydown.enter="updateMouseAmount()"
               @blur="updateMouseAmount()" />
             <span>{{ mouseAmountKind === "mouse_move" ? "像素" : "格" }}</span>
+            <span v-if="mouseAmountError" class="mouse-amount-error">{{ mouseAmountError }}</span>
+            <span v-else-if="mouseAmountKind === 'mouse_move'" class="mouse-amount-hint">{{ MOUSE_AMOUNT_HINT }}</span>
           </label>
         </section>
       </div>
@@ -2782,7 +2788,8 @@ onUnmounted(() => {
 .mouse-action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
-.mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
+.mouse-amount-hint { color: var(--muted); }
+.mouse-amount-error { color: var(--error-text); }
 /* 滚动容器顶部会裁掉向上溢出（transform 不产生可滚动区域）：
    chip:hover 上浮 1px + 阴影会在容器顶边被切，故用内边距留出
    上浮空间，负外边距补偿保持原网格位置不变。 */
