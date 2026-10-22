@@ -603,6 +603,33 @@ pub fn macro_key_to_key_code(name: &str) -> Option<crate::send_input::KeyCode> {
         "media_prev" => K::MediaPrev,
         "media_next" => K::MediaNext,
         "media_play_pause" => K::MediaPlayPause,
+        ";" => K::Oem1,
+        "=" => K::OemPlus,
+        "," => K::OemComma,
+        "-" => K::OemMinus,
+        "." => K::OemPeriod,
+        "/" => K::Oem2,
+        "`" => K::Oem3,
+        "[" => K::Oem4,
+        "\\" => K::Oem5,
+        "]" => K::Oem6,
+        "'" => K::Oem7,
+        "numpad0" => K::Numpad0,
+        "numpad1" => K::Numpad1,
+        "numpad2" => K::Numpad2,
+        "numpad3" => K::Numpad3,
+        "numpad4" => K::Numpad4,
+        "numpad5" => K::Numpad5,
+        "numpad6" => K::Numpad6,
+        "numpad7" => K::Numpad7,
+        "numpad8" => K::Numpad8,
+        "numpad9" => K::Numpad9,
+        "numpad_multiply" => K::NumpadMultiply,
+        "numpad_add" => K::NumpadAdd,
+        "numpad_subtract" => K::NumpadSubtract,
+        "numpad_decimal" => K::NumpadDecimal,
+        "numpad_divide" => K::NumpadDivide,
+        "numlock" => K::NumLock,
         _ => {
             let mut chars = lower.chars();
             let first = chars.next()?;
@@ -711,6 +738,34 @@ pub fn key_code_to_macro_key(key: &crate::send_input::KeyCode) -> Option<String>
         K::MediaPrev => "media_prev",
         K::MediaNext => "media_next",
         K::MediaPlayPause => "media_play_pause",
+        K::Oem1 => ";",
+        K::OemPlus => "=",
+        K::OemComma => ",",
+        K::OemMinus => "-",
+        K::OemPeriod => ".",
+        K::Oem2 => "/",
+        K::Oem3 => "`",
+        K::Oem4 => "[",
+        K::Oem5 => "\\",
+        K::Oem6 => "]",
+        K::Oem7 => "'",
+        K::Numpad0 => "numpad0",
+        K::Numpad1 => "numpad1",
+        K::Numpad2 => "numpad2",
+        K::Numpad3 => "numpad3",
+        K::Numpad4 => "numpad4",
+        K::Numpad5 => "numpad5",
+        K::Numpad6 => "numpad6",
+        K::Numpad7 => "numpad7",
+        K::Numpad8 => "numpad8",
+        K::Numpad9 => "numpad9",
+        K::NumpadMultiply => "numpad_multiply",
+        K::NumpadAdd => "numpad_add",
+        K::NumpadSubtract => "numpad_subtract",
+        K::NumpadDecimal => "numpad_decimal",
+        K::NumpadDivide => "numpad_divide",
+        K::NumLock => "numlock",
+        K::Oem102 => "\\",
         K::A => "a",
         K::B => "b",
         K::C => "c",
@@ -1662,6 +1717,54 @@ mod tests {
         .is_none());
     }
 
+    /// 用户给出的常用快捷键清单（Codex/WorkBuddy 设置页）：每一条都必须能
+    /// 从语义键名回落到可注入的 KeyChord。修饰键顺序不影响结果。
+    #[test]
+    fn common_shortcut_list_is_fully_representable() {
+        let cases: &[(&[MacroModifier], &str)] = &[
+            (&[MacroModifier::Control], "k"),
+            (&[MacroModifier::Control], ","),
+            (&[MacroModifier::Control], "f"),
+            (&[], "return"),
+            (&[MacroModifier::Shift], "return"),
+            (&[MacroModifier::Control], "n"),
+            (&[], "escape"),
+            (&[MacroModifier::Control], "["),
+            (&[MacroModifier::Control], "]"),
+            (&[MacroModifier::Control, MacroModifier::Shift], "e"),
+            (&[MacroModifier::Control], "b"),
+            (&[MacroModifier::Control, MacroModifier::Shift], "b"),
+            (&[], "f11"),
+            (&[MacroModifier::Shift, MacroModifier::Alt], "w"),
+            // Ctrl+"+":主键盘是 Ctrl+Shift+=，小键盘是 Ctrl+NumpadAdd。
+            (&[MacroModifier::Control, MacroModifier::Shift], "="),
+            (&[MacroModifier::Control], "numpad_add"),
+            (&[MacroModifier::Control], "-"),
+            (&[MacroModifier::Control], "0"),
+            // "@" 在 Windows 上是 Shift+2。
+            (&[MacroModifier::Shift], "2"),
+            (&[], "/"),
+            (&[MacroModifier::Control], "t"),
+            (&[MacroModifier::Control], "w"),
+            // 第二张图里的补充项。
+            (&[MacroModifier::Control], "g"),
+            (&[MacroModifier::Control], "l"),
+            (&[MacroModifier::Control], "j"),
+            (&[MacroModifier::Control, MacroModifier::Shift], "return"),
+        ];
+
+        for (modifiers, key) in cases {
+            let chord = MacroChord {
+                modifiers: modifiers.to_vec(),
+                key: (*key).to_owned(),
+            };
+            assert!(
+                macro_chord_to_key_chord(&chord).is_some(),
+                "快捷键不可执行：{modifiers:?} + {key}"
+            );
+        }
+    }
+
     #[test]
     fn macro_key_table_covers_named_and_letters() {
         use crate::send_input::KeyCode;
@@ -1670,6 +1773,48 @@ mod tests {
         assert_eq!(macro_key_to_key_code("f12"), Some(KeyCode::F12));
         assert_eq!(macro_key_to_key_code("k"), Some(KeyCode::K));
         assert_eq!(macro_key_to_key_code("7"), Some(KeyCode::Digit7));
+        for (name, key) in [
+            (";", KeyCode::Oem1),
+            ("=", KeyCode::OemPlus),
+            (",", KeyCode::OemComma),
+            ("-", KeyCode::OemMinus),
+            (".", KeyCode::OemPeriod),
+            ("/", KeyCode::Oem2),
+            ("`", KeyCode::Oem3),
+            ("[", KeyCode::Oem4),
+            ("\\", KeyCode::Oem5),
+            ("]", KeyCode::Oem6),
+            ("'", KeyCode::Oem7),
+        ] {
+            assert_eq!(macro_key_to_key_code(name), Some(key), "{name}");
+            assert_eq!(key_code_to_macro_key(&key), Some(name.to_owned()), "{name}");
+        }
+        // ISO 额外键 VK_OEM_102 与主 `\` 键字符相同，执行侧统一走 Oem5。
+        assert_eq!(
+            key_code_to_macro_key(&KeyCode::Oem102),
+            Some("\\".to_owned())
+        );
+        for (name, key) in [
+            ("numpad0", KeyCode::Numpad0),
+            ("numpad1", KeyCode::Numpad1),
+            ("numpad2", KeyCode::Numpad2),
+            ("numpad3", KeyCode::Numpad3),
+            ("numpad4", KeyCode::Numpad4),
+            ("numpad5", KeyCode::Numpad5),
+            ("numpad6", KeyCode::Numpad6),
+            ("numpad7", KeyCode::Numpad7),
+            ("numpad8", KeyCode::Numpad8),
+            ("numpad9", KeyCode::Numpad9),
+            ("numpad_multiply", KeyCode::NumpadMultiply),
+            ("numpad_add", KeyCode::NumpadAdd),
+            ("numpad_subtract", KeyCode::NumpadSubtract),
+            ("numpad_decimal", KeyCode::NumpadDecimal),
+            ("numpad_divide", KeyCode::NumpadDivide),
+            ("numlock", KeyCode::NumLock),
+        ] {
+            assert_eq!(macro_key_to_key_code(name), Some(key), "{name}");
+            assert_eq!(key_code_to_macro_key(&key), Some(name.to_owned()), "{name}");
+        }
         assert_eq!(macro_key_to_key_code("unknown-key"), None);
     }
 

@@ -7,7 +7,7 @@
  * - 名称 20 字硬截；保存不是必须经过测试；删除为两段式内联确认；
  * - 浏览器预览下读演示库（bridge 里的 previewMacroLibrary），保存类操作报错。
  */
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import {
@@ -536,6 +536,17 @@ const MODIFIER_KEY_CODES = new Set<KeyCode>([
 let captureUnsubscribe: (() => void) | undefined;
 const capturePressedKeys = new Set<KeyCode>();
 let capturedKeys: KeyCode[] | null = null;
+/** 录入会话代数：取消/重启后，迟到的启动回调不得重新武装后端。 */
+let captureGeneration = 0;
+const CAPTURE_TIMEOUT_MS = 15_000;
+let captureTimeout: number | null = null;
+
+function clearCaptureTimeout(): void {
+  if (captureTimeout !== null) {
+    window.clearTimeout(captureTimeout);
+    captureTimeout = null;
+  }
+}
 
 function onCaptureEdge(edge: ShortcutCaptureEdge): void {
   if (!captureActive.value) return;
@@ -543,6 +554,15 @@ function onCaptureEdge(edge: ShortcutCaptureEdge): void {
     capturePressedKeys.delete(edge.key);
     if (capturedKeys && capturePressedKeys.size === 0) {
       finalizeCapture(capturedKeys);
+      return;
+    }
+    if (!capturedKeys && capturePressedKeys.size === 0) {
+      // 只按了修饰键（例如“长按 Alt”）：组合动作需要至少一个主键，
+      // 必须明确告知，否则用户会以为录入没反应。
+      setStatus(
+        "组合键需要至少一个非修饰键；仅按住 Alt/Ctrl 等修饰键暂不支持",
+        "error",
+      );
     }
     return;
   }
@@ -550,35 +570,75 @@ function onCaptureEdge(edge: ShortcutCaptureEdge): void {
   if (capturedKeys) return;
   if (MODIFIER_KEY_CODES.has(edge.key)) return;
   if (edge.key === "escape") {
-    void stopCapture();
-    setStatus("已取消录入");
+    void cancelCapture();
     return;
   }
   // 主键按下：固定「当前按住的修饰键 + 主键」；等全部松开后落盘。
   capturedKeys = [...capturePressedKeys];
 }
 
+/** 窗口失焦时取消录入：否则全局吞键会一直保持到用户再次进入本页。 */
+function handleCaptureBlur(): void {
+  if (!captureActive.value) return;
+  void cancelCapture("窗口失去焦点，已取消录入");
+}
+
 async function beginCapture(): Promise<void> {
-  if (!selectedStepId.value || captureActive.value) return;
+  if (!selectedStepId.value) {
+    setStatus("请先选择一个步骤", "error");
+    return;
+  }
+  if (captureActive.value) {
+    // 再次点击按钮等同取消；不能静默返回，否则界面看起来"点了没反应"。
+    await cancelCapture();
+    return;
+  }
+  const generation = ++captureGeneration;
   capturedChord.value = null;
   capturedKeys = null;
   capturePressedKeys.clear();
+  captureActive.value = true;
+  setStatus("正在录入：请按下一次按键（按 Esc 取消）");
+  clearCaptureTimeout();
+  captureTimeout = window.setTimeout(() => {
+    void cancelCapture("录入已超时，请重新录入", "error");
+  }, CAPTURE_TIMEOUT_MS);
   try {
     captureUnsubscribe?.();
     captureUnsubscribe = await subscribeShortcutCaptureEdges(onCaptureEdge);
+    if (generation !== captureGeneration) {
+      captureUnsubscribe?.();
+      captureUnsubscribe = undefined;
+      return;
+    }
     await startShortcutCapture();
-    captureActive.value = true;
-    setStatus("请按下一次按键");
+    if (generation !== captureGeneration) {
+      // 启动期间已被取消（Esc/失焦/离开页面）：补一次停止，避免后端留在录入态。
+      await stopShortcutCapture().catch(() => undefined);
+      return;
+    }
+    // 后端武装成功后才接失焦取消：避免启动期间的焦点抖动把一次正常点击立刻取消。
+    window.addEventListener("blur", handleCaptureBlur);
   } catch (error) {
-    captureActive.value = false;
-    captureUnsubscribe?.();
-    captureUnsubscribe = undefined;
+    await stopCapture();
     setStatus(`无法启动快捷键录入：${messageOf(error)}`, "error");
   }
 }
 
+/** 取消录入：唯一出口，保证后端、订阅、定时器和失焦监听成对释放。 */
+async function cancelCapture(
+  message = "已取消录入",
+  kind: "info" | "success" | "error" = "info",
+): Promise<void> {
+  await stopCapture();
+  setStatus(message, kind);
+}
+
 async function stopCapture(): Promise<void> {
+  captureGeneration += 1;
   captureActive.value = false;
+  clearCaptureTimeout();
+  window.removeEventListener("blur", handleCaptureBlur);
   capturePressedKeys.clear();
   capturedKeys = null;
   captureUnsubscribe?.();
@@ -589,6 +649,11 @@ async function stopCapture(): Promise<void> {
     // 录入停止失败不影响已保存的步骤配置。
   }
 }
+
+onUnmounted(() => {
+  // 页面切走时后端仍在录入态会全局吞键，必须在卸载时成对停止。
+  void stopCapture();
+});
 
 /** 录入完成：把捕获到的组合键转换成组合动作的 `MacroChord` 写进当前步骤。 */
 function finalizeCapture(keys: KeyCode[]): void {
@@ -664,6 +729,34 @@ function semanticKeyOf(code: KeyCode): string | null {
     media_prev: "media_prev",
     media_next: "media_next",
     media_play_pause: "media_play_pause",
+    oem1: ";",
+    oem_plus: "=",
+    oem_comma: ",",
+    oem_minus: "-",
+    oem_period: ".",
+    oem2: "/",
+    oem3: "`",
+    oem4: "[",
+    oem5: "\\",
+    oem6: "]",
+    oem7: "'",
+    oem102: "\\",
+    numpad0: "numpad0",
+    numpad1: "numpad1",
+    numpad2: "numpad2",
+    numpad3: "numpad3",
+    numpad4: "numpad4",
+    numpad5: "numpad5",
+    numpad6: "numpad6",
+    numpad7: "numpad7",
+    numpad8: "numpad8",
+    numpad9: "numpad9",
+    numpad_multiply: "numpad_multiply",
+    numpad_add: "numpad_add",
+    numpad_subtract: "numpad_subtract",
+    numpad_decimal: "numpad_decimal",
+    numpad_divide: "numpad_divide",
+    numlock: "numlock",
   };
   if (named[code]) return named[code];
   if (/^[a-z]$/.test(code)) return code;
@@ -1498,7 +1591,22 @@ watch(
                     </span>
                   </div>
                   <div class="btn-row">
-                    <button class="btn primary" type="button" @click="beginCapture">开始录入</button>
+                    <button
+                      class="btn primary"
+                      type="button"
+                      :class="{ capturing: captureActive }"
+                      data-testid="combo-capture-button"
+                      @click="captureActive ? cancelCapture() : beginCapture()"
+                    >
+                      {{ captureActive ? "录入中…（点击取消）" : "开始录入" }}
+                    </button>
+                    <span
+                      v-if="captureActive"
+                      class="capture-hint"
+                      data-testid="combo-capture-hint"
+                    >
+                      请按一次单键或组合键，按 Esc 取消；15 秒无操作会自动结束。
+                    </span>
                   </div>
                   <span class="field-hint">
                     点击“开始录入”后，只捕获下一次完整的单键或组合键，然后立即停止。
@@ -2344,6 +2452,16 @@ watch(
   padding: 8px 12px;
   display: inline-block;
   width: fit-content;
+}
+/* 录入中：按钮与提示同时给出可见状态，避免“点了没反应”的观感。 */
+.btn.capturing {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.capture-hint {
+  font-size: 12px;
+  color: var(--accent-text);
+  line-height: 1.5;
 }
 .segmented {
   display: flex;

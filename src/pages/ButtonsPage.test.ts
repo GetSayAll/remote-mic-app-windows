@@ -1541,6 +1541,57 @@ describe("buttons mapping page", () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain("快捷键已录入：左 Win + L"));
   });
 
+  it("records Ctrl+[ from the native capture edge", async () => {
+    const wrapper = await mountPage();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const captureButton = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((button) => button.text().includes("录入自定义快捷键"))!;
+    await captureButton.trigger("click");
+
+    shortcutCaptureHandler!({ key: "left_control", isPressed: true });
+    shortcutCaptureHandler!({ key: "oem4", isPressed: true });
+    shortcutCaptureHandler!({ key: "oem4", isPressed: false });
+    shortcutCaptureHandler!({ key: "left_control", isPressed: false });
+    await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as ButtonMappings;
+    expect(saved.actions.power?.single).toEqual({
+      type: "shortcut",
+      chord: { keys: ["left_control", "oem4"] },
+    });
+    expect(wrapper.text()).toContain("已录入 左 Ctrl + [，松开全部按键后完成");
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("快捷键已录入：左 Ctrl + ["),
+    );
+  });
+
+  it("records Ctrl+] from the native capture edge", async () => {
+    const wrapper = await mountPage();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const captureButton = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((button) => button.text().includes("录入自定义快捷键"))!;
+    await captureButton.trigger("click");
+
+    shortcutCaptureHandler!({ key: "left_control", isPressed: true });
+    shortcutCaptureHandler!({ key: "oem6", isPressed: true });
+    shortcutCaptureHandler!({ key: "oem6", isPressed: false });
+    shortcutCaptureHandler!({ key: "left_control", isPressed: false });
+    await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as ButtonMappings;
+    expect(saved.actions.power?.single).toEqual({
+      type: "shortcut",
+      chord: { keys: ["left_control", "oem6"] },
+    });
+    expect(wrapper.text()).toContain("已录入 左 Ctrl + ]，松开全部按键后完成");
+  });
+
   it("highlights the card for a pressed physical button and clears it on release", async () => {
     const wrapper = await mountPage();
     const upCard = () =>
