@@ -19,6 +19,7 @@ use tauri::{Emitter, Manager};
 
 mod accent;
 mod app_icon;
+mod button_profiles;
 mod common_phrase_panel;
 mod diagnostics;
 mod launch_state;
@@ -489,7 +490,9 @@ impl std::fmt::Debug for AppState {
 /// 读的是内存快照，因此保持同步：它由界面按秒轮询，必须立刻返回。
 #[tauri::command]
 fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
-    state.membership.snapshot()
+    let snapshot = state.membership.snapshot();
+    button_profiles::apply_membership(&snapshot);
+    snapshot
 }
 
 /// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
@@ -4841,11 +4844,19 @@ pub fn run() {
                     .start_hardware_script_replay(std::path::PathBuf::from(script_path));
             }
 
+            let membership_runtime = membership::install();
+            // 键位方案私有组件（可选）：未注入时空壳返回 false，入口不出现。
+            button_profiles::install(
+                app.handle(),
+                Arc::clone(&platform),
+                Arc::clone(&membership_runtime),
+            );
+
             app.manage(AppState {
                 platform,
                 settings,
                 capture_health,
-                membership: membership::install(),
+                membership: membership_runtime,
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
@@ -4984,6 +4995,10 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
@@ -5097,6 +5112,10 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,

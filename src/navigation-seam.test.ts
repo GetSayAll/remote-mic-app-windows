@@ -19,16 +19,18 @@ describe("私有功能页接入点", () => {
     },
   ];
 
-  it("公开构建不增加任何页面", () => {
-    expect(navigationItems).toEqual(publicNavigationItems);
-    expect(navigationItems.map((item) => item.id)).toEqual([
-      "buttons",
-      "macros",
-      "connection",
-      "recommendations",
-      "permissions",
-      "settings",
-    ]);
+  it("公开页面表不因接入点改变", () => {
+    expect(mergeNavigationItems(publicNavigationItems, [])).toEqual(
+      publicNavigationItems,
+    );
+  });
+
+  it("实际侧栏包含全部公开页面且 id 不重复", () => {
+    const ids = navigationItems.map((item) => item.id);
+    for (const item of publicNavigationItems) {
+      expect(ids).toContain(item.id);
+    }
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("空注册表是恒等变换", () => {
@@ -51,6 +53,21 @@ describe("私有功能页接入点", () => {
     // 合并函数必须是纯的：公开表不能被就地改写。
     expect(publicNavigationItems).toHaveLength(6);
     expect(publicNavigationItems.map((item) => item.id)).not.toContain("membership");
+  });
+
+  it("私有页面可指定插在某个公开页面之后", () => {
+    const merged = mergeNavigationItems(publicNavigationItems, [
+      { ...injected[0], after: "macros" },
+    ]);
+    expect(merged.map((item) => item.id)).toEqual([
+      "buttons",
+      "macros",
+      "membership",
+      "connection",
+      "recommendations",
+      "permissions",
+      "settings",
+    ]);
   });
 
   it("校验码：私有页面 id 不得与公开页面冲突", () => {

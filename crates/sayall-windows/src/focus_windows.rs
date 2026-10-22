@@ -162,6 +162,12 @@ mod imp {
         (pid != 0).then_some(pid)
     }
 
+    /// 当前前台进程的完整可执行文件路径（读不到为 `None`）。
+    pub fn foreground_executable_path() -> Option<String> {
+        let pid = foreground_process_id()?;
+        crate::app_launcher::process_image_path(pid)
+    }
+
     pub fn process_alive(pid: u32) -> bool {
         let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
         else {
@@ -765,8 +771,9 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     capture_focused_target, capture_for_process, current_process_id, focus_best, focus_target,
-    focused_input_available, foreground_process_id, foreground_title_len, process_alive,
-    scan_candidates, window_of_process, FocusAttempt, WindowsFocusBackend,
+    focused_input_available, foreground_executable_path, foreground_process_id,
+    foreground_title_len, process_alive, scan_candidates, window_of_process, FocusAttempt,
+    WindowsFocusBackend,
 };
 
 /// 复用共享 UIA 工作线程（Per-Monitor V2、MTA）执行只读 UIA 任务的入口。

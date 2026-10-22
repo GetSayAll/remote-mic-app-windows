@@ -53,10 +53,19 @@ export function mergeNavigationItems(
   base: NavigationItem[],
   extra: readonly PrivateFeaturePage[],
 ): NavigationItem[] {
-  return [
-    ...base,
-    ...extra.map((page) => ({ id: page.id, label: page.label, icon: page.icon })),
-  ];
+  const merged = [...base];
+  for (const page of extra) {
+    const item = { id: page.id, label: page.label, icon: page.icon };
+    const anchor = page.after
+      ? merged.findIndex((entry) => entry.id === page.after)
+      : -1;
+    if (anchor >= 0) {
+      merged.splice(anchor + 1, 0, item);
+    } else {
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 export const navigationItems: NavigationItem[] = mergeNavigationItems(

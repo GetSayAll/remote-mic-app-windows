@@ -6,13 +6,19 @@ use std::path::PathBuf;
 /// 初始化或调用失败会保留为错误，供上层写入去标识化日志。
 #[cfg(windows)]
 pub fn pick_button_mapping_import_path() -> Result<Option<PathBuf>, String> {
-    pick_json_path(DialogKind::Open)
+    pick_path(DialogKind::Open, DialogPurpose::ButtonMapping)
 }
 
 /// 选择按键映射 JSON 的导出位置。
 #[cfg(windows)]
 pub fn pick_button_mapping_export_path() -> Result<Option<PathBuf>, String> {
-    pick_json_path(DialogKind::Save)
+    pick_path(DialogKind::Save, DialogPurpose::ButtonMapping)
+}
+
+/// 选择 `.sayall` 键位方案的导入文件（私有组件使用；公开构建不调用）。
+#[cfg(windows)]
+pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
+    pick_path(DialogKind::Open, DialogPurpose::ButtonProfile)
 }
 
 #[cfg(not(windows))]
@@ -25,15 +31,20 @@ pub fn pick_button_mapping_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
+#[cfg(not(windows))]
+pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
 /// 选择组合动作 JSON 的导入文件（与按键映射同一对话框口径）。
 #[cfg(windows)]
 pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
-    pick_json_path(DialogKind::Open)
+    pick_path(DialogKind::Open, DialogPurpose::ButtonMapping)
 }
 
 #[cfg(windows)]
 pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
-    pick_json_path(DialogKind::Save)
+    pick_path(DialogKind::Save, DialogPurpose::ButtonMapping)
 }
 
 #[cfg(not(windows))]
@@ -54,17 +65,24 @@ enum DialogKind {
 }
 
 #[cfg(windows)]
-fn pick_json_path(kind: DialogKind) -> Result<Option<PathBuf>, String> {
+#[derive(Clone, Copy)]
+enum DialogPurpose {
+    ButtonMapping,
+    ButtonProfile,
+}
+
+#[cfg(windows)]
+fn pick_path(kind: DialogKind, purpose: DialogPurpose) -> Result<Option<PathBuf>, String> {
     std::thread::Builder::new()
         .name("sayall-mapping-file-dialog".to_owned())
-        .spawn(move || run_json_dialog(kind))
+        .spawn(move || run_dialog(kind, purpose))
         .map_err(|_| "启动文件选择器线程失败".to_owned())?
         .join()
         .map_err(|_| "文件选择器线程异常退出".to_owned())?
 }
 
 #[cfg(windows)]
-fn run_json_dialog(kind: DialogKind) -> Result<Option<PathBuf>, String> {
+fn run_dialog(kind: DialogKind, purpose: DialogPurpose) -> Result<Option<PathBuf>, String> {
     use windows::core::{Interface, HRESULT, PCWSTR};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -101,13 +119,29 @@ fn run_json_dialog(kind: DialogKind) -> Result<Option<PathBuf>, String> {
             }
         };
 
-        let title_text = match kind {
-            DialogKind::Open => "导入按键映射配置",
-            DialogKind::Save => "导出按键映射配置",
-        };
+        let (title_text, filter_name_text, filter_spec_text, default_name_text, extension_text) =
+            match purpose {
+                DialogPurpose::ButtonMapping => (
+                    match kind {
+                        DialogKind::Open => "导入按键映射配置",
+                        DialogKind::Save => "导出按键映射配置",
+                    },
+                    "SayAll 按键映射配置 (*.json)",
+                    "*.json",
+                    "SayAll-按键映射.json",
+                    "json",
+                ),
+                DialogPurpose::ButtonProfile => (
+                    "导入键位方案",
+                    "SayAll 键位方案 (*.sayall)",
+                    "*.sayall",
+                    "SayAll-键位方案.sayall",
+                    "sayall",
+                ),
+            };
         let title = wide(title_text);
-        let filter_name = wide("SayAll 按键映射配置 (*.json)");
-        let filter_spec = wide("*.json");
+        let filter_name = wide(filter_name_text);
+        let filter_spec = wide(filter_spec_text);
         let filters = [COMDLG_FILTERSPEC {
             pszName: PCWSTR(filter_name.as_ptr()),
             pszSpec: PCWSTR(filter_spec.as_ptr()),
@@ -127,11 +161,11 @@ fn run_json_dialog(kind: DialogKind) -> Result<Option<PathBuf>, String> {
                 | FOS_STRICTFILETYPES;
             if matches!(kind, DialogKind::Save) {
                 options |= FOS_OVERWRITEPROMPT;
-                let default_name = wide("SayAll-按键映射.json");
+                let default_name = wide(default_name_text);
                 dialog
                     .SetFileName(PCWSTR(default_name.as_ptr()))
                     .map_err(|_| "设置导出文件名失败".to_owned())?;
-                let extension = wide("json");
+                let extension = wide(extension_text);
                 dialog
                     .SetDefaultExtension(PCWSTR(extension.as_ptr()))
                     .map_err(|_| "设置导出文件扩展名失败".to_owned())?;
