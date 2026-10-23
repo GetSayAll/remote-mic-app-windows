@@ -11,17 +11,17 @@ import {
 
 describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
-    // 2026-10-20 用户指定：按键、组合动作、连接、推荐、权限、设置。
+    // 2026-10-23 用户指定：按键、组合动作、会员、推荐、连接、权限、设置。
     expect(navigationItems.map((item) => item.id)).toEqual([
       "buttons",
       "macros",
-      "connection",
       "recommendations",
+      "connection",
       "permissions",
       "settings",
     ]);
-    expect(navigationItems[3].label).toBe("推荐");
-    expect(navigationItems[3].icon).toBe("sparkles");
+    expect(navigationItems[2].label).toBe("推荐");
+    expect(navigationItems[2].icon).toBe("sparkles");
     // 2026-10-02 用户指定：末位页从「关于」改名「设置」，图标换成 Mac 同款齿轮。
     expect(navigationItems[5].label).toBe("设置");
     expect(navigationItems[5].icon).toBe("gear");

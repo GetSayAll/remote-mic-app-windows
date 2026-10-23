@@ -33,9 +33,10 @@ export const publicNavigationItems: NavigationItem[] = [
   ...(COMBINATION_ACTIONS_ENABLED
     ? [{ id: "macros", label: "组合动作", icon: "layers" } as NavigationItem]
     : []),
-  { id: "connection", label: "连接", icon: "link" },
-  // 2026-10-20 用户指定顺序：按键、组合动作、连接、推荐、权限、设置。
+  // 2026-10-23 用户指定顺序：按键、组合动作、会员、推荐、连接、权限、设置。
+  // 会员由私有页面注册表注入，插在组合动作之后。
   { id: "recommendations", label: "推荐", icon: "sparkles" },
+  { id: "connection", label: "连接", icon: "link" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main
   // SettingsSection.about 的 "gearshape"。
@@ -45,18 +46,19 @@ export const publicNavigationItems: NavigationItem[] = [
 /**
  * 合并公开页面与私有注册的页面（2026-10-15）。
  *
- * 抽成纯函数是为了能直接测「接入点真的接通了」——不必给整个应用打桩。
- * 公开构建传入空数组，结果必须与 `publicNavigationItems` 逐项相同
- * （仓库规则：未实现的页面不显示空入口）。
+ * 私有页面插在「组合动作」之后，使会员入口紧跟在组合动作后；公开构建传入空
+ * 数组时结果必须与 `publicNavigationItems` 逐项相同（仓库规则：未实现的页面
+ * 不显示空入口）。组合动作被特性开关隐藏时，私有页面退到「按键」之后。
  */
 export function mergeNavigationItems(
   base: NavigationItem[],
   extra: readonly PrivateFeaturePage[],
 ): NavigationItem[] {
-  return [
-    ...base,
-    ...extra.map((page) => ({ id: page.id, label: page.label, icon: page.icon })),
-  ];
+  const inserted = extra.map((page) => ({ id: page.id, label: page.label, icon: page.icon }));
+  if (inserted.length === 0) return [...base];
+  const macroIndex = base.findIndex((item) => item.id === "macros");
+  const insertAt = macroIndex >= 0 ? macroIndex + 1 : Math.min(1, base.length);
+  return [...base.slice(0, insertAt), ...inserted, ...base.slice(insertAt)];
 }
 
 export const navigationItems: NavigationItem[] = mergeNavigationItems(
