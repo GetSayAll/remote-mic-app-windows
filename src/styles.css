@@ -515,7 +515,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-editor .muted { font-size: 13px; margin: 0; }
 .preset-groups { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
 .preset-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-/* 动作分区（基础按键/系统与媒体/打开应用/自定义）：小节标题 + 芯片网格。 */
+/* 动作分区（基础按键 → 系统与媒体 → 自定义动作 + 按住时连续执行 → 打开应用 →
+   组合动作 → 常用语 → 鼠标动作）：小节标题 + 芯片网格；鼠标块由页面末尾的
+   第二个容器承载（点击 → 移动 → 滚轮 → 数量输入）。 */
 .action-sections { margin-top: 12px; display: grid; gap: 12px; }
 .action-section-title { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; }
 .action-section .preset-grid { margin-top: 6px; }

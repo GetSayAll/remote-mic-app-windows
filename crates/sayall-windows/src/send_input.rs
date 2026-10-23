@@ -627,8 +627,12 @@ impl ButtonAction {
 }
 
 pub fn default_scroll_steps() -> u16 {
-    1
+    20
 }
+
+/// 鼠标滚轮格数与指针移动像素的统一上限（2026-10-22 用户定稿：两者都是
+/// 1–100 的整数，默认 20；界面使用普通文本框，不再带数字框的上下加减按钮）。
+pub const MAX_MOUSE_AMOUNT: u16 = 100;
 
 pub fn validate_mouse_amount(value: u16, maximum: u16) -> Result<(), SendInputError> {
     if value == 0 || value > maximum {
@@ -669,7 +673,7 @@ pub enum MoveDirection {
 
 impl MoveDirection {
     pub fn offset(self, distance: u16) -> Result<(i32, i32), SendInputError> {
-        validate_mouse_amount(distance, 2000)?;
+        validate_mouse_amount(distance, MAX_MOUSE_AMOUNT)?;
         let distance = i32::from(distance);
         Ok(match self {
             Self::Up => (0, -distance),
@@ -725,7 +729,7 @@ pub fn send_wheel_with(
     steps: u16,
     mut sender: impl FnMut(i32) -> Result<usize, String>,
 ) -> Result<usize, SendInputError> {
-    validate_mouse_amount(steps, 100)?;
+    validate_mouse_amount(steps, MAX_MOUSE_AMOUNT)?;
     let sent =
         sender(direction.wheel_delta() * i32::from(steps)).map_err(SendInputError::Backend)?;
     if sent != 1 {
@@ -1032,7 +1036,7 @@ impl ButtonMappings {
         }
         for (button, actions) in self.actions.iter_mut() {
             if actions.hold_repeat.is_some()
-                || button.repeat_interval().is_none()
+                || !button.legacy_auto_repeat()
                 || actions.single == ButtonAction::Disabled
                 || actions.double != ButtonAction::Disabled
                 || actions.long != ButtonAction::Disabled
@@ -1074,9 +1078,11 @@ impl ButtonMappings {
                     ButtonAction::Shortcut { chord } => {
                         *chord = chord.clone().validated()?;
                     }
-                    ButtonAction::Scroll { steps, .. } => validate_mouse_amount(*steps, 100)?,
+                    ButtonAction::Scroll { steps, .. } => {
+                        validate_mouse_amount(*steps, MAX_MOUSE_AMOUNT)?
+                    }
                     ButtonAction::MouseMove { distance, .. } => {
-                        validate_mouse_amount(*distance, 2000)?
+                        validate_mouse_amount(*distance, MAX_MOUSE_AMOUNT)?
                     }
                     ButtonAction::RunMacro { macro_id, .. } => {
                         // 与组合动作库同一套 ID 规则（单一来源）；引用是否存在
@@ -1359,7 +1365,8 @@ mod tests {
 
     #[test]
     fn mouse_amounts_validate_and_actions_round_trip() {
-        for amount in [1, 5, 100] {
+        // 2026-10-22 用户定稿：滚轮与指针移动统一 1–100，默认 20。
+        for amount in [1, 5, 20, 100] {
             assert_eq!(
                 send_wheel_with(ScrollDirection::Down, amount, |delta| {
                     assert_eq!(delta, -120 * i32::from(amount));
@@ -1367,13 +1374,19 @@ mod tests {
                 }),
                 Ok(1)
             );
+            assert_eq!(
+                MoveDirection::Right.offset(amount),
+                Ok((i32::from(amount), 0))
+            );
         }
         for amount in [0, 101, u16::MAX] {
             assert!(send_wheel_with(ScrollDirection::Up, amount, |_| {
                 panic!("invalid amount must not inject")
             })
             .is_err());
+            assert!(MoveDirection::Left.offset(amount).is_err());
         }
+        assert_eq!(default_scroll_steps(), 20);
         for action in [
             ButtonAction::MouseClick {
                 kind: MouseClickKind::DoubleLeft,
@@ -1400,8 +1413,12 @@ mod tests {
                 distance: 0,
             },
             ButtonAction::MouseMove {
-                direction: MoveDirection::Left,
-                distance: 2001,
+                direction: MoveDirection::Up,
+                distance: 101,
+            },
+            ButtonAction::Scroll {
+                direction: ScrollDirection::Down,
+                steps: 0,
             },
             ButtonAction::Scroll {
                 direction: ScrollDirection::Down,
@@ -1418,6 +1435,50 @@ mod tests {
             );
             assert!(mappings.normalized().is_err());
         }
+    }
+
+    #[test]
+    fn mapping_normalization_accepts_mouse_amounts_at_the_limit() {
+        for action in [
+            ButtonAction::Scroll {
+                direction: ScrollDirection::Down,
+                steps: 100,
+            },
+            ButtonAction::MouseMove {
+                direction: MoveDirection::Left,
+                distance: 100,
+            },
+        ] {
+            let mut mappings = ButtonMappings::default();
+            mappings.actions.insert(
+                RemoteButton::Power,
+                ButtonActions {
+                    single: action.clone(),
+                    ..Default::default()
+                },
+            );
+            assert!(mappings.normalized().is_ok(), "{action:?} 应被接受");
+        }
+    }
+
+    #[test]
+    fn tv_can_hold_repeat_a_repeatable_action() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::MouseMove {
+                    direction: MoveDirection::Up,
+                    distance: 1,
+                },
+                hold_repeat: Some(ButtonTrigger::Single),
+                ..Default::default()
+            },
+        );
+        assert!(
+            mappings.normalized().is_ok(),
+            "TV 配置可连续执行的鼠标动作后，应允许开启按住连续执行"
+        );
     }
 
     #[test]
@@ -2356,7 +2417,7 @@ mod tests {
         assert_eq!(
             migrated.actions(RemoteButton::Ok).hold_repeat,
             None,
-            "OK 无连发区间"
+            "OK 不属于历史自动连发键，迁移不改变老行为"
         );
         assert_eq!(
             migrated.actions(RemoteButton::Left).hold_repeat,
@@ -2645,17 +2706,6 @@ mod tests {
                     RemoteButton::Back,
                     ButtonActions {
                         single: shortcut(&[KeyCode::Control, KeyCode::C]),
-                        hold_repeat: Some(ButtonTrigger::Single),
-                        ..ButtonActions::default()
-                    },
-                ),
-            ),
-            (
-                "无连发区间键",
-                with_actions(
-                    RemoteButton::Ok,
-                    ButtonActions {
-                        single: shortcut(&[KeyCode::Delete]),
                         hold_repeat: Some(ButtonTrigger::Single),
                         ..ButtonActions::default()
                     },

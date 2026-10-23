@@ -283,8 +283,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「全按键支持」关闭时返回/音量± 整卡置灰禁用并给出开启指引");
 
-  // 「设备操作 / 聚焦输入框」入口于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
-  // src/pages/ButtonsPage.vue 的 DEVICE_ACTION_SECTION_ENABLED=true）。这里钉住芯片可见，
+  // 「聚焦输入框」入口于 2026-10-22 并入「自定义动作」录制按钮右侧。这里钉住芯片可见，
   // 随后仍经真实 IPC 写入并验证平台受理路径（不依赖芯片的选中细节）。
   // 打开编辑器仍走「确定 · 单击」格子——关闭态下三键不可点击，上一步已钉住。
   const focusCell = await waitFor(() => {
@@ -300,7 +299,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   assert(
     editorButtons.some((button) => button.textContent?.trim() === "聚焦输入框"),
-    "「聚焦输入框」芯片应可见（2026-10-15 恢复入口）",
+    "「聚焦输入框」芯片应可见（2026-10-22 并入自定义动作）",
   );
   const currentMappings = await getButtonMappings();
   const currentOk = currentMappings.actions.ok;
