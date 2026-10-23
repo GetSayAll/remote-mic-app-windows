@@ -1036,7 +1036,7 @@ impl ButtonMappings {
         }
         for (button, actions) in self.actions.iter_mut() {
             if actions.hold_repeat.is_some()
-                || button.repeat_interval().is_none()
+                || !button.legacy_auto_repeat()
                 || actions.single == ButtonAction::Disabled
                 || actions.double != ButtonAction::Disabled
                 || actions.long != ButtonAction::Disabled
@@ -1459,6 +1459,26 @@ mod tests {
             );
             assert!(mappings.normalized().is_ok(), "{action:?} 应被接受");
         }
+    }
+
+    #[test]
+    fn tv_can_hold_repeat_a_repeatable_action() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::MouseMove {
+                    direction: MoveDirection::Up,
+                    distance: 1,
+                },
+                hold_repeat: Some(ButtonTrigger::Single),
+                ..Default::default()
+            },
+        );
+        assert!(
+            mappings.normalized().is_ok(),
+            "TV 配置可连续执行的鼠标动作后，应允许开启按住连续执行"
+        );
     }
 
     #[test]
@@ -2397,7 +2417,7 @@ mod tests {
         assert_eq!(
             migrated.actions(RemoteButton::Ok).hold_repeat,
             None,
-            "OK 无连发区间"
+            "OK 不属于历史自动连发键，迁移不改变老行为"
         );
         assert_eq!(
             migrated.actions(RemoteButton::Left).hold_repeat,
@@ -2686,17 +2706,6 @@ mod tests {
                     RemoteButton::Back,
                     ButtonActions {
                         single: shortcut(&[KeyCode::Control, KeyCode::C]),
-                        hold_repeat: Some(ButtonTrigger::Single),
-                        ..ButtonActions::default()
-                    },
-                ),
-            ),
-            (
-                "无连发区间键",
-                with_actions(
-                    RemoteButton::Ok,
-                    ButtonActions {
-                        single: shortcut(&[KeyCode::Delete]),
                         hold_repeat: Some(ButtonTrigger::Single),
                         ..ButtonActions::default()
                     },

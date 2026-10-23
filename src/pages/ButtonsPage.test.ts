@@ -1121,7 +1121,7 @@ describe("buttons mapping page", () => {
     });
   });
 
-  it("「按住时连续执行」：组合键置灰、非连发按键与双击页不显示", async () => {
+  it("「按住时连续执行」：所有按键单/长按页显示，组合键置灰，双击页不显示", async () => {
     vi.mocked(getButtonMappings).mockResolvedValueOnce({
       enabled: true,
       actions: {
@@ -1136,9 +1136,10 @@ describe("buttons mapping page", () => {
     const findCard = (label: string) =>
       wrapper.findAll(".mapping-card").find((card) => card.text().includes(label))!;
 
-    // 确定键：不在可连续按键范围内 → 不渲染选项组。
+    // 确定键：也显示「连续执行」，但未配置单击动作时选项置灰并说明原因。
     await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
-    expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(false);
+    expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).toContain("先给这个按键配置单击动作");
 
     // 方向键 + 组合键动作：“重复单击动作”置灰并说明原因。
     await findCard("上").findAll(".mapping-cell")[0]!.trigger("click");
@@ -1153,6 +1154,33 @@ describe("buttons mapping page", () => {
     // 双击页不提供该选项组。
     await findCard("上").findAll(".mapping-cell")[1]!.trigger("click");
     expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(false);
+  });
+
+  it("「按住时连续执行」：TV 配置可连续执行的鼠标动作后可以开启", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        tv: {
+          single: { type: "mouse_move", direction: "up", distance: 1 },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const tvCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("TV"))!;
+    await tvCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const group = wrapper.find(".mapping-editor .repeat-group");
+    expect(group.exists(), "TV 也应显示「连续执行」").toBe(true);
+    const chip = group
+      .findAll(".repeat-options .chip")
+      .find((item) => item.text() === "重复单击动作")!;
+    expect((chip.element as HTMLButtonElement).disabled).toBe(false);
+    await chip.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.tv!.holdRepeat).toBe("single");
   });
 
   it("「按住时连续执行」：单击与长按并存时“重复单击动作”置灰并指向“重复长按动作”", async () => {
@@ -1600,12 +1628,6 @@ describe("buttons mapping page", () => {
       direction: "down",
       steps: 5,
     });
-    // 保存成功后先显示“配置已保存”；再次点击输入框恢复输入提示。
-    expect(wrapper.get(".mouse-amount-saved").text()).toBe("配置已保存");
-    wheelInput = wrapper.get('input[aria-label="每次滚动格数"]');
-    await wheelInput.trigger("focus");
-    expect(wrapper.find(".mouse-amount-saved").exists()).toBe(false);
-
     // 2026-10-22 用户定稿：1–100，100 是上限；Enter 提交。
     const savesBeforeEnter = vi.mocked(saveButtonMappings).mock.calls.length;
     await wheelInput.setValue("100");
@@ -1616,11 +1638,10 @@ describe("buttons mapping page", () => {
       direction: "down",
       steps: 100,
     });
-    // Enter 已保存后再次失焦不应重复写盘，也不应把“配置已保存”收回。
+    // Enter 已保存后再次失焦不应重复写盘。
     await wheelInput.trigger("blur");
     await flushPromises();
     expect(vi.mocked(saveButtonMappings).mock.calls).toHaveLength(savesBeforeEnter + 1);
-    expect(wrapper.get(".mouse-amount-saved").text()).toBe("配置已保存");
 
     // 0 与 101 无效：不保存，并提示 1–100。
     const saveCount = vi.mocked(saveButtonMappings).mock.calls.length;
@@ -1660,14 +1681,6 @@ describe("buttons mapping page", () => {
       distance: 100,
     });
     expect(wrapper.find(".mouse-amount-error").exists()).toBe(false);
-    expect(wrapper.get(".mouse-amount-saved").text()).toBe("配置已保存");
-    // 点击输入框：已保存提示收回，重新显示输入提示。
-    moveInput = wrapper.get('input[aria-label="每次移动像素"]');
-    await moveInput.trigger("focus");
-    expect(wrapper.find(".mouse-amount-saved").exists()).toBe(false);
-    expect(wrapper.get(".mouse-amount-hint").text()).toBe(
-      "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。",
-    );
     const movesBeforeInvalid = vi.mocked(saveButtonMappings).mock.calls.length;
     await moveInput.setValue("101");
     await moveInput.trigger("keydown", { key: "Enter" });

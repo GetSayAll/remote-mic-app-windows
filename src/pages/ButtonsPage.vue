@@ -692,7 +692,7 @@ async function openExample(): Promise<void> {
   }
 }
 
-function applyAction(action: ButtonAction, onSaved?: () => void): void {
+function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
   if (!target) return;
   const next: ButtonMappings = {
@@ -701,14 +701,12 @@ function applyAction(action: ButtonAction, onSaved?: () => void): void {
   };
   const actions = { ...actionsOf(target.button) };
   actions[target.trigger] = action;
-  const reconciled = reconcileHoldRepeat(target.button, actions);
+  const reconciled = reconcileHoldRepeat(actions);
   next.actions[target.button] = reconciled.actions;
   mappings.value = next;
   // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
   // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
-  void persist(reconciled.notice ?? undefined).then((ok) => {
-    if (ok) onSaved?.();
-  });
+  void persist(reconciled.notice ?? undefined);
 }
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
@@ -730,14 +728,12 @@ const MAX_MOUSE_AMOUNT = 100;
 const scrollDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const moveDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const mouseAmountError = ref<string | null>(null);
-const mouseAmountSaved = ref(false);
 const MOUSE_AMOUNT_HINT =
   "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。";
 
-/** 点击/重新聚焦输入框时收回“配置已保存”与错误，恢复输入提示。 */
-function resetMouseAmountNotice(): void {
+/** 点击/重新聚焦输入框时收回错误，恢复输入提示。 */
+function clearMouseAmountError(): void {
   mouseAmountError.value = null;
-  mouseAmountSaved.value = false;
 }
 
 /** 鼠标动作大类的数量输入：只有滚轮/移动动作显示，按动作类型取对应草稿。 */
@@ -760,7 +756,7 @@ const mouseAmountDraft = computed({
 
 function syncMouseAmountDrafts(): void {
   const action = selectedAction.value;
-  resetMouseAmountNotice();
+  clearMouseAmountError();
   scrollDraft.value = String(
     action?.type === "scroll" ? action.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT,
   );
@@ -797,24 +793,18 @@ function updateMouseAmount(): void {
   const value = Number(mouseAmountDraft.value.trim());
   if (!Number.isInteger(value) || value < 1 || value > MAX_MOUSE_AMOUNT) {
     // 2026-10-23 用户要求：错误提示贴在输入框旁，不再出现在页面最下方。
-    mouseAmountSaved.value = false;
     mouseAmountError.value = `请输入 1 到 ${MAX_MOUSE_AMOUNT} 之间的整数`;
     mouseAmountDraft.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
     return;
   }
+  clearMouseAmountError();
   if (action.type === "scroll") {
     // 显式输入默认值也要落盘（旧配置可能没有 steps 字段）。
     if (action.steps === value) return;
-    resetMouseAmountNotice();
-    void applyAction({ ...action, steps: value }, () => {
-      mouseAmountSaved.value = true;
-    });
+    void applyAction({ ...action, steps: value });
   } else {
     if (action.distance === value) return;
-    resetMouseAmountNotice();
-    void applyAction({ ...action, distance: value }, () => {
-      mouseAmountSaved.value = true;
-    });
+    void applyAction({ ...action, distance: value });
   }
 }
 
@@ -836,22 +826,14 @@ function isActivePreset(keys: KeyCode[]): boolean {
 /**
  * 「按住时连续执行」的界面规则（2026-10-05 radio 三选一定稿）：
  * - 按键级三态：关闭 / 重复单击动作 / 重复长按动作（双击不参与），显示在
- *   编辑区底部的「连续执行」分组（鼠标动作之后），两页是同一个状态；
+ *   编辑区底部的「连续执行」分组（鼠标动作之后），所有按键的单击/长按页都显示，
+ *   两页是同一个状态；
  * - 选项可用性由配置决定：未配置动作 / 动作只执行一次 / 单击与长按并存
  *   （长按会接管按住，单击不能连续）；不可选时给「原因 + 恢复方式」；
  * - 已选目标不再可用（配置变化）时自动回到「关闭」并提示，不偷改选择。
  * 定稿依据：docs/plan/2026-10-05-button-hold-repeat-radio.md。
  * 口径与 Rust `ButtonAction::allows_repeat` / `ButtonMappings::normalized` 同源。
  */
-const REPEAT_CAPABLE_BUTTONS: RemoteButton[] = [
-  "back",
-  "up",
-  "down",
-  "left",
-  "right",
-  "volume_up",
-  "volume_down",
-];
 /** 单独修饰键：不可作为「可连续执行」的单键动作（与 Rust `KeyCode::is_modifier` 一致）。 */
 const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
   "control",
@@ -877,10 +859,7 @@ function actionAllowsRepeat(action: ButtonAction): boolean {
 const repeatGroupVisible = computed(() => {
   const target = editingTarget.value;
   if (!target) return false;
-  return (
-    REPEAT_CAPABLE_BUTTONS.includes(target.button) &&
-    (target.trigger === "single" || target.trigger === "long")
-  );
+  return target.trigger === "single" || target.trigger === "long";
 });
 
 type HoldRepeatChoice = "off" | "single" | "long";
@@ -994,15 +973,12 @@ function toggleOkContextClick(): void {
  * 提示经 `persist(message)` 展示，避免被 persist 的清理逻辑覆盖。
  */
 function reconcileHoldRepeat(
-  button: RemoteButton,
   actions: ButtonActions,
 ): { actions: ButtonActions; notice: string | null } {
   const hold = actions.holdRepeat;
   if (!hold) return { actions, notice: null };
   const slot = hold === "long" ? "long" : "single";
-  const valid =
-    REPEAT_CAPABLE_BUTTONS.includes(button) && holdRepeatBlockedReason(actions, slot) === null;
-  if (valid) return { actions, notice: null };
+  if (holdRepeatBlockedReason(actions, slot) === null) return { actions, notice: null };
   const next = { ...actions };
   delete next.holdRepeat;
   // 自动关闭的提示同样不得指向灰掉的选项（长按动作只执行一次时它不可选）。
@@ -1137,17 +1113,15 @@ const captureSwitchTitle = computed(() =>
 
 let saveQueue: Promise<void> = Promise.resolve();
 let saveRequest = 0;
-async function persist(message?: string): Promise<boolean> {
+async function persist(message?: string): Promise<void> {
   const request = ++saveRequest;
   const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
-  let savedOk = false;
   const task = saveQueue.then(async () => {
     try {
       const saved = await saveButtonMappings(payload);
       savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-      savedOk = true;
       if (request === saveRequest) {
         mappings.value = saved;
         if (message) statusMessage.value = message;
@@ -1159,8 +1133,6 @@ async function persist(message?: string): Promise<boolean> {
   saveQueue = task;
   await task;
   if (request === saveRequest) busy.value = false;
-  // 只有这次保存仍是最后一次请求时才算“刚保存”；被更新请求覆盖时不弹旧提示。
-  return savedOk && request === saveRequest;
 }
 
 async function restoreDefaults(): Promise<void> {
@@ -2686,14 +2658,13 @@ onUnmounted(() => {
             <input v-model="mouseAmountDraft"
               :aria-label="mouseAmountKind === 'mouse_move' ? '每次移动像素' : '每次滚动格数'"
               type="text" inputmode="numeric" autocomplete="off"
-              @focus="resetMouseAmountNotice"
-              @click="resetMouseAmountNotice"
-              @input="resetMouseAmountNotice"
+              @focus="clearMouseAmountError"
+              @click="clearMouseAmountError"
+              @input="clearMouseAmountError"
               @keydown.enter="updateMouseAmount()"
               @blur="updateMouseAmount()" />
             <span>{{ mouseAmountKind === "mouse_move" ? "像素" : "格" }}</span>
             <span v-if="mouseAmountError" class="mouse-amount-error">{{ mouseAmountError }}</span>
-            <span v-else-if="mouseAmountSaved" class="mouse-amount-saved">配置已保存</span>
             <span v-else-if="mouseAmountKind === 'mouse_move'" class="mouse-amount-hint">{{ MOUSE_AMOUNT_HINT }}</span>
           </label>
         </section>
@@ -2812,7 +2783,6 @@ onUnmounted(() => {
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-amount-hint { color: var(--muted); }
 .mouse-amount-error { color: var(--error-text); }
-.mouse-amount-saved { color: var(--success-text); }
 /* 滚动容器顶部会裁掉向上溢出（transform 不产生可滚动区域）：
    chip:hover 上浮 1px + 阴影会在容器顶边被切，故用内边距留出
    上浮空间，负外边距补偿保持原网格位置不变。 */
