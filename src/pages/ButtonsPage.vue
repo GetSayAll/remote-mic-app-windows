@@ -76,7 +76,6 @@ import {
   type FocusStrategy,
   type KeyCode,
   type MacroDefinition,
-  type MoveDirection,
   type PairedRemote,
   type PresetAppInfo,
   type RawInputPhase,
@@ -454,9 +453,6 @@ const focusStrategyOptions: Array<{ value: FocusStrategy; label: string }> = [
 // 2026-10-15 Andy：要求恢复，并参考 Mac 端补上「聚焦输入框」入口。
 const showAppFocusStrategy = true;
 
-// 「设备操作」区（含「聚焦输入框」动作）同样在 2026-10-03 隐藏、2026-10-15 恢复。
-const DEVICE_ACTION_SECTION_ENABLED = true;
-
 const focusFailureLabels: Record<string, string> = {
   self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
   no_candidate: "没有找到可用的输入框",
@@ -705,7 +701,7 @@ function applyAction(action: ButtonAction): void {
   };
   const actions = { ...actionsOf(target.button) };
   actions[target.trigger] = action;
-  const reconciled = reconcileHoldRepeat(target.button, actions);
+  const reconciled = reconcileHoldRepeat(actions);
   next.actions[target.button] = reconciled.actions;
   mappings.value = next;
   // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
@@ -714,22 +710,102 @@ function applyAction(action: ButtonAction): void {
 }
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
-const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? 1 : 1);
-const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : 30);
-const moveSymbols: Record<MoveDirection, string> = { up: "↑", down: "↓", left: "←", right: "→" };
+const MOUSE_AMOUNT_DEFAULT = 20;
+const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT);
+const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : MOUSE_AMOUNT_DEFAULT);
 
-function updateMouseAmount(event: Event, kind: "scroll" | "mouse_move"): void {
-  const input = event.target as HTMLInputElement;
-  const value = input.valueAsNumber;
-  const maximum = kind === "scroll" ? 100 : 2000;
-  if (!Number.isInteger(value) || value < 1 || value > maximum) {
-    statusMessage.value = `请输入 1 到 ${maximum} 之间的整数`;
-    input.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
+/**
+ * 鼠标数量范围（2026-10-22 用户要求：滚轮格数与移动像素统一为 1–100，
+ * 默认 20）。输入框是普通文本框，不再带数字框的上下加减按钮。
+ */
+const MAX_MOUSE_AMOUNT = 100;
+
+/**
+ * 输入中的草稿值。**不能**把输入框直接绑到 `scrollSteps` / `moveDistance`：
+ * App 每秒刷新运行状态会让页面重渲染，Vue 的 value patch 会把正在输入的内容
+ * 重置回配置值（2026-10-22 用户现场：“修改后变回默认值”）。
+ */
+const scrollDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
+const moveDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
+const mouseAmountError = ref<string | null>(null);
+const MOUSE_AMOUNT_HINT =
+  "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。";
+
+/** 点击/重新聚焦输入框时收回错误，恢复输入提示。 */
+function clearMouseAmountError(): void {
+  mouseAmountError.value = null;
+}
+
+/** 鼠标动作大类的数量输入：只有滚轮/移动动作显示，按动作类型取对应草稿。 */
+const mouseAmountVisible = computed(
+  () =>
+    selectedAction.value?.type === "scroll" ||
+    selectedAction.value?.type === "mouse_move",
+);
+const mouseAmountKind = computed<"scroll" | "mouse_move">(
+  () => (selectedAction.value?.type === "mouse_move" ? "mouse_move" : "scroll"),
+);
+const mouseAmountDraft = computed({
+  get: () =>
+    selectedAction.value?.type === "mouse_move" ? moveDraft.value : scrollDraft.value,
+  set: (value: string) => {
+    if (selectedAction.value?.type === "mouse_move") moveDraft.value = value;
+    else scrollDraft.value = value;
+  },
+});
+
+function syncMouseAmountDrafts(): void {
+  const action = selectedAction.value;
+  clearMouseAmountError();
+  scrollDraft.value = String(
+    action?.type === "scroll" ? action.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT,
+  );
+  moveDraft.value = String(
+    action?.type === "mouse_move" ? action.distance : MOUSE_AMOUNT_DEFAULT,
+  );
+}
+
+// 只在动作类型/方向/数值变化时同步草稿；运行状态轮询导致的重渲染不会触碰草稿。
+watch(
+  () => {
+    const action = selectedAction.value;
+    if (action?.type === "scroll") {
+      return `scroll:${action.direction}:${action.steps ?? MOUSE_AMOUNT_DEFAULT}`;
+    }
+    if (action?.type === "mouse_move") {
+      return `move:${action.direction}:${action.distance}`;
+    }
+    return "none";
+  },
+  syncMouseAmountDrafts,
+  { immediate: true },
+);
+
+/**
+ * 鼠标数量输入的提交入口：Enter（`keydown.enter`）与失焦共用。
+ * 滚轮与移动距离都只要求 1–100 的整数，且共用同一保存与校验口径。
+ * 值未变化时直接返回，避免 Enter 后再失焦重复触发一次保存。
+ */
+function updateMouseAmount(): void {
+  const action = selectedAction.value;
+  if (action?.type !== "scroll" && action?.type !== "mouse_move") return;
+  const kind = action.type === "mouse_move" ? "mouse_move" : "scroll";
+  const value = Number(mouseAmountDraft.value.trim());
+  if (!Number.isInteger(value) || value < 1 || value > MAX_MOUSE_AMOUNT) {
+    // 2026-10-23 用户要求：错误提示贴在输入框旁，不再出现在页面最下方。
+    mouseAmountError.value = `请输入 1 到 ${MAX_MOUSE_AMOUNT} 之间的整数`;
+    mouseAmountDraft.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
     return;
   }
-  const action = selectedAction.value;
-  if (action?.type === "scroll" && kind === "scroll") void applyAction({ ...action, steps: value });
-  if (action?.type === "mouse_move" && kind === "mouse_move") void applyAction({ ...action, distance: value });
+  clearMouseAmountError();
+  if (action.type === "scroll") {
+    // 显式输入默认值也要落盘（旧配置可能没有 steps 字段）。
+    if (action.steps === value) return;
+    void applyAction({ ...action, steps: value });
+  } else {
+    if (action.distance === value) return;
+    void applyAction({ ...action, distance: value });
+  }
 }
 
 function isActiveScroll(direction: "up" | "down"): boolean {
@@ -750,22 +826,14 @@ function isActivePreset(keys: KeyCode[]): boolean {
 /**
  * 「按住时连续执行」的界面规则（2026-10-05 radio 三选一定稿）：
  * - 按键级三态：关闭 / 重复单击动作 / 重复长按动作（双击不参与），显示在
- *   单击、长按两个编辑页底部，两页是同一个状态；
+ *   编辑区底部的「连续执行」分组（鼠标动作之后），所有按键的单击/长按页都显示，
+ *   两页是同一个状态；
  * - 选项可用性由配置决定：未配置动作 / 动作只执行一次 / 单击与长按并存
  *   （长按会接管按住，单击不能连续）；不可选时给「原因 + 恢复方式」；
  * - 已选目标不再可用（配置变化）时自动回到「关闭」并提示，不偷改选择。
  * 定稿依据：docs/plan/2026-10-05-button-hold-repeat-radio.md。
  * 口径与 Rust `ButtonAction::allows_repeat` / `ButtonMappings::normalized` 同源。
  */
-const REPEAT_CAPABLE_BUTTONS: RemoteButton[] = [
-  "back",
-  "up",
-  "down",
-  "left",
-  "right",
-  "volume_up",
-  "volume_down",
-];
 /** 单独修饰键：不可作为「可连续执行」的单键动作（与 Rust `KeyCode::is_modifier` 一致）。 */
 const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
   "control",
@@ -791,10 +859,7 @@ function actionAllowsRepeat(action: ButtonAction): boolean {
 const repeatGroupVisible = computed(() => {
   const target = editingTarget.value;
   if (!target) return false;
-  return (
-    REPEAT_CAPABLE_BUTTONS.includes(target.button) &&
-    (target.trigger === "single" || target.trigger === "long")
-  );
+  return target.trigger === "single" || target.trigger === "long";
 });
 
 type HoldRepeatChoice = "off" | "single" | "long";
@@ -851,7 +916,7 @@ const repeatPageReason = computed<string | null>(() => {
   return null;
 });
 
-/** 当前编辑按键是否配置了双击（单击页说明句与「重复单击动作」悬停据此切换口径）。 */
+/** 当前编辑按键是否配置了双击（「重复单击动作」悬停据此切换口径）。 */
 const doubleConfiguredOnEditingButton = computed(() => {
   const target = editingTarget.value;
   return !!target && actionsOf(target.button).double.type !== "disabled";
@@ -908,15 +973,12 @@ function toggleOkContextClick(): void {
  * 提示经 `persist(message)` 展示，避免被 persist 的清理逻辑覆盖。
  */
 function reconcileHoldRepeat(
-  button: RemoteButton,
   actions: ButtonActions,
 ): { actions: ButtonActions; notice: string | null } {
   const hold = actions.holdRepeat;
   if (!hold) return { actions, notice: null };
   const slot = hold === "long" ? "long" : "single";
-  const valid =
-    REPEAT_CAPABLE_BUTTONS.includes(button) && holdRepeatBlockedReason(actions, slot) === null;
-  if (valid) return { actions, notice: null };
+  if (holdRepeatBlockedReason(actions, slot) === null) return { actions, notice: null };
   const next = { ...actions };
   delete next.holdRepeat;
   // 自动关闭的提示同样不得指向灰掉的选项（长按动作只执行一次时它不可选）。
@@ -2266,53 +2328,25 @@ onUnmounted(() => {
               :title="preset.label"
               @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
             >
-              {{ chordLabel({ keys: preset.keys }) }}
+              {{ preset.display ?? chordLabel({ keys: preset.keys }) }}
             </button>
           </div>
         </section>
 
+        <!-- 自定义动作放在系统与媒体下方（2026-10-22 用户指定顺序）；
+             原「设备操作 / 聚焦输入框」并入本组的录制按钮右侧。 -->
         <section class="action-section">
-          <h4 class="action-section-title">鼠标滚轮</h4>
-          <div class="preset-grid">
-            <button v-for="direction in (['up', 'down'] as const)" :key="direction" class="chip"
-              :class="{ selected: isActiveScroll(direction) }" type="button" title="在鼠标当前位置滚动"
-              @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? "滚轮向上" : "滚轮向下" }}</button>
-          </div>
-          <label v-if="selectedAction?.type === 'scroll'" class="mouse-amount">
-            <span>每次滚动</span>
-            <input aria-label="每次滚动格数" type="number" min="1" max="100" step="1" :value="scrollSteps" @change="updateMouseAmount($event, 'scroll')" />
-            <span>格</span>
-          </label>
-        </section>
-
-        <section class="action-section">
-          <h4 class="action-section-title">鼠标点击</h4>
-          <div class="preset-grid">
-            <button v-for="(label, kind) in mouseClickLabels" :key="kind" class="chip" type="button"
-              :class="{ selected: selectedAction?.type === 'mouse_click' && selectedAction.kind === kind }"
-              title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
-          </div>
-        </section>
-
-        <section class="action-section">
-          <h4 class="action-section-title">鼠标移动</h4>
-          <div class="preset-grid">
-            <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip mouse-direction" type="button"
-              :aria-label="label" :title="label" :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
-              @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ moveSymbols[direction] }}</button>
-          </div>
-          <label v-if="selectedAction?.type === 'mouse_move'" class="mouse-amount">
-            <span>每次移动</span>
-            <input aria-label="每次移动像素" type="number" min="1" max="2000" step="1" :value="moveDistance" @change="updateMouseAmount($event, 'mouse_move')" />
-            <span>像素</span>
-          </label>
-        </section>
-
-        <!-- 「设备操作 / 聚焦输入框」入口先隐藏（2026-10-03 用户要求）：动作类型与平台
-             受理路径保留（已有映射照常生效），只是 UI 暂不暴露入口。 -->
-        <section v-if="DEVICE_ACTION_SECTION_ENABLED" class="action-section">
-          <h4 class="action-section-title">设备操作</h4>
-          <div class="preset-grid">
+          <h4 class="action-section-title">自定义动作</h4>
+          <div class="custom-shortcut-row">
+            <button
+              class="chip"
+              :class="{ selected: capturingShortcut }"
+              type="button"
+              :disabled="captureStarting"
+              @click="capturingShortcut ? finishShortcutCapture('已取消录入') : beginShortcutCapture()"
+            >
+              {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
+            </button>
             <button
               class="chip"
               :class="{ selected: selectedAction?.type === 'focus_input' }"
@@ -2322,112 +2356,43 @@ onUnmounted(() => {
             >
               聚焦输入框
             </button>
+            <span v-if="capturingShortcut" class="capture-display">
+              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? "先选择修饰键" : "请按下快捷键组合") }}
+            </span>
           </div>
-        </section>
-
-        <!-- 组合动作（自定义动作；2026-10-15）：把已有动作绑定到本按键。
-             入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。 -->
-        <section v-if="COMBINATION_ACTIONS_ENABLED" class="action-section">
-          <h4 class="action-section-title">组合动作</h4>
-          <p v-if="macroDefinitions.length === 0" class="muted">
-            还没有组合动作。先到“组合动作”页创建。
-          </p>
-          <div v-else class="preset-grid">
-            <button
-              v-for="macro in macroDefinitions"
-              :key="macro.macroId"
-              class="chip custom-app"
-              :class="{
-                selected:
-                  selectedAction?.type === 'run_macro' &&
-                  selectedAction.macroId === macro.macroId,
-              }"
-              type="button"
-              :title="`${macro.steps.length} 个步骤`"
-              @click="
-                applyAction({
-                  type: 'run_macro',
-                  macroId: macro.macroId,
-                  macroVersion: macro.version,
-                })
-              "
-            >
-              {{ macro.name }}
-            </button>
-          </div>
-        </section>
-
-        <section v-if="commonPhrasesAvailable" class="action-section">
-          <h4 class="action-section-title">常用语</h4>
-          <div class="preset-grid">
-            <button
-              class="chip"
-              :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
-              type="button"
-              :disabled="!commonPhraseAllowed"
-              :title="
-                commonPhraseAllowed
-                  ? '打开常用语面板，按方向键和 OK 键插入对应常用语'
-                  : '登录会员后可使用常用语'
-              "
-              @click="applyAction({ type: 'open_common_phrases' })"
-            >
-              <svg
-                v-if="!commonPhraseAllowed"
-                class="chip-icon common-phrase-circle"
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" />
-              </svg>
-              打开常用语
-              <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
-            </button>
-            <MembershipRequiredButton
-              v-if="!commonPhraseAllowed"
-              class="common-phrases-cta"
-              @open="emit('navigate', 'membership')"
+          <label
+            class="toggle-row safe-capture-toggle"
+            title="开启后，通过界面选择修饰键，键盘只需按主键。"
+          >
+            <span>安全录入模式</span>
+            <input
+              v-model="safeCaptureMode"
+              type="checkbox"
+              class="toggle-input"
+              :disabled="capturingShortcut || captureStarting"
             />
-            <button
-              class="chip"
-              type="button"
-              title="编辑常用语内容与五键分配"
-              @click="showCommonPhraseEditor = true"
-            >
-              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
-                  <path d="M4.5 6.5h15" />
-                  <path d="M4.5 12h15" />
-                  <path d="M4.5 17.5h15" />
-                </g>
-                <g fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.7">
-                  <circle cx="9.5" cy="6.5" r="1.9" />
-                  <circle cx="14.5" cy="12" r="1.9" />
-                  <circle cx="10.5" cy="17.5" r="1.9" />
-                </g>
-              </svg>
-              调整常用语
-            </button>
-            <button
-              class="chip"
-              type="button"
-              title="预览常用语面板（未开通会员时为只读示例）"
-              @click="openExample"
-            >
-              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <g fill="currentColor">
-                  <path
-                    d="M4.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
-                  />
-                  <path
-                    d="M14.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
-                  />
-                </g>
-              </svg>
-              常用语示例
-            </button>
-          </div>
+            <small class="muted safe-capture-hint">
+              直接录入无法完成或会触发系统动作时再开启。
+            </small>
+          </label>
+          <template v-if="capturingShortcut && safeCaptureMode">
+            <p class="muted editor-note capture-guide">
+              请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
+            </p>
+            <div class="preset-grid capture-modifiers">
+              <button
+                v-for="modifier in CAPTURE_MODIFIER_OPTIONS"
+                :key="modifier.key"
+                class="chip"
+                :class="{ selected: selectedCaptureModifiers.has(modifier.key) }"
+                type="button"
+                @click="toggleCaptureModifier(modifier.key)"
+              >
+                {{ modifier.label }}
+              </button>
+            </div>
+            <p class="capture-display">然后单独按主键（例如选择“左 Win”后，只按 L）</p>
+          </template>
         </section>
 
         <section class="action-section">
@@ -2550,92 +2515,197 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section class="action-section">
-          <h4 class="action-section-title">自定义</h4>
-          <div class="custom-shortcut-row">
+        <!-- 组合动作（自定义动作；2026-10-15）：把已有动作绑定到本按键。
+             入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。 -->
+        <section v-if="COMBINATION_ACTIONS_ENABLED" class="action-section">
+          <h4 class="action-section-title">组合动作</h4>
+          <p v-if="macroDefinitions.length === 0" class="muted">
+            还没有组合动作。先到“组合动作”页创建。
+          </p>
+          <div class="preset-grid">
+            <button
+              v-for="macro in macroDefinitions"
+              :key="macro.macroId"
+              class="chip custom-app"
+              :class="{
+                selected:
+                  selectedAction?.type === 'run_macro' &&
+                  selectedAction.macroId === macro.macroId,
+              }"
+              type="button"
+              :title="`${macro.steps.length} 个步骤`"
+              @click="
+                applyAction({
+                  type: 'run_macro',
+                  macroId: macro.macroId,
+                  macroVersion: macro.version,
+                })
+              "
+            >
+              {{ macro.name }}
+            </button>
+            <!-- 与「扫描本机应用」同款 chip（2026-10-22 用户要求）：跳到组合动作页管理。 -->
             <button
               class="chip"
-              :class="{ selected: capturingShortcut }"
               type="button"
-              :disabled="captureStarting"
-              @click="capturingShortcut ? finishShortcutCapture('已取消录入') : beginShortcutCapture()"
+              title="打开组合动作页，创建、编辑或删除组合动作"
+              @click="emit('navigate', 'macros')"
             >
-              {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
+              管理组合动作
             </button>
-            <span v-if="capturingShortcut" class="capture-display">
-              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? "先选择修饰键" : "请按下快捷键组合") }}
-            </span>
           </div>
-          <label
-            class="toggle-row safe-capture-toggle"
-            title="开启后，通过界面选择修饰键，键盘只需按主键。"
-          >
-            <span>安全录入模式</span>
-            <input
-              v-model="safeCaptureMode"
-              type="checkbox"
-              class="toggle-input"
-              :disabled="capturingShortcut || captureStarting"
-            />
-            <small class="muted safe-capture-hint">
-              直接录入无法完成或会触发系统动作时再开启。
-            </small>
-          </label>
-          <template v-if="capturingShortcut && safeCaptureMode">
-            <p class="muted editor-note capture-guide">
-              请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
-            </p>
-            <div class="preset-grid capture-modifiers">
-              <button
-                v-for="modifier in CAPTURE_MODIFIER_OPTIONS"
-                :key="modifier.key"
-                class="chip"
-                :class="{ selected: selectedCaptureModifiers.has(modifier.key) }"
-                type="button"
-                @click="toggleCaptureModifier(modifier.key)"
+        </section>
+
+        <section v-if="commonPhrasesAvailable" class="action-section">
+          <h4 class="action-section-title">常用语</h4>
+          <div class="preset-grid">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'open_common_phrases' }"
+              type="button"
+              :disabled="!commonPhraseAllowed"
+              :title="
+                commonPhraseAllowed
+                  ? '打开常用语面板，按方向键和 OK 键插入对应常用语'
+                  : '登录会员后可使用常用语'
+              "
+              @click="applyAction({ type: 'open_common_phrases' })"
+            >
+              <svg
+                v-if="!commonPhraseAllowed"
+                class="chip-icon common-phrase-circle"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
               >
-                {{ modifier.label }}
-              </button>
+                <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" />
+              </svg>
+              打开常用语
+              <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
+            </button>
+            <MembershipRequiredButton
+              v-if="!commonPhraseAllowed"
+              class="common-phrases-cta"
+              @open="emit('navigate', 'membership')"
+            />
+            <button
+              class="chip"
+              type="button"
+              title="编辑常用语内容与五键分配"
+              @click="showCommonPhraseEditor = true"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+                  <path d="M4.5 6.5h15" />
+                  <path d="M4.5 12h15" />
+                  <path d="M4.5 17.5h15" />
+                </g>
+                <g fill="var(--surface-chip, #fff)" stroke="currentColor" stroke-width="1.7">
+                  <circle cx="9.5" cy="6.5" r="1.9" />
+                  <circle cx="14.5" cy="12" r="1.9" />
+                  <circle cx="10.5" cy="17.5" r="1.9" />
+                </g>
+              </svg>
+              调整常用语
+            </button>
+            <button
+              class="chip"
+              type="button"
+              title="预览常用语面板（未开通会员时为只读示例）"
+              @click="openExample"
+            >
+              <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <g fill="currentColor">
+                  <path
+                    d="M4.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                  <path
+                    d="M14.4 6.2h3.4l-1.5 4.3c2 .5 3.2 2 3.2 4 0 2.4-1.7 4-4.1 4s-4-1.6-4-4c0-.5.1-1 .3-1.6l2.7-6.7z"
+                  />
+                </g>
+              </svg>
+              常用语示例
+            </button>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- 鼠标动作固定为编辑区最后一块（2026-10-22 用户指定顺序）：
+           单击 → 四方向移动 → 滚轮上下 → 数量输入框。 -->
+      <div class="action-sections mouse-action-sections">
+        <section class="action-section">
+          <h4 class="action-section-title">鼠标动作</h4>
+          <!-- 两个可换行的组：空间够时并排成一行；不够时整组换行，
+               正好是“点击一行、移动与滚轮合并为下一行”。 -->
+          <div class="mouse-action-row">
+            <div class="mouse-action-group">
+              <button v-for="(label, kind) in mouseClickLabels" :key="kind" class="chip" type="button"
+                :class="{ selected: selectedAction?.type === 'mouse_click' && selectedAction.kind === kind }"
+                title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
             </div>
-            <p class="capture-display">然后单独按主键（例如选择“左 Win”后，只按 L）</p>
-          </template>
+            <div class="mouse-action-group">
+              <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip" type="button"
+                :aria-label="label" :title="label" :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
+                @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ label }}</button>
+              <button v-for="direction in (['up', 'down'] as const)" :key="direction" class="chip"
+                :class="{ selected: isActiveScroll(direction) }" type="button" title="在鼠标当前位置滚动"
+                @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? "滚轮向上" : "滚轮向下" }}</button>
+            </div>
+          </div>
+          <label v-if="mouseAmountVisible" class="mouse-amount">
+            <span>{{ mouseAmountKind === "mouse_move" ? "每次移动" : "每次滚动" }}</span>
+            <input v-model="mouseAmountDraft"
+              :aria-label="mouseAmountKind === 'mouse_move' ? '每次移动像素' : '每次滚动格数'"
+              type="text" inputmode="numeric" autocomplete="off"
+              @focus="clearMouseAmountError"
+              @click="clearMouseAmountError"
+              @input="clearMouseAmountError"
+              @keydown.enter="updateMouseAmount()"
+              @blur="updateMouseAmount()" />
+            <span>{{ mouseAmountKind === "mouse_move" ? "像素" : "格" }}</span>
+            <span v-if="mouseAmountError" class="mouse-amount-error">{{ mouseAmountError }}</span>
+            <span v-else-if="mouseAmountKind === 'mouse_move'" class="mouse-amount-hint">{{ MOUSE_AMOUNT_HINT }}</span>
+          </label>
         </section>
       </div>
-      <div v-if="repeatGroupVisible" class="repeat-group">
-        <span class="repeat-label">按住时连续执行</span>
-        <div class="repeat-options">
-          <button
-            class="chip"
-            :class="{ selected: repeatChoice === 'off' }"
-            type="button"
-            title="按住不放只执行一次"
-            :disabled="busy"
-            @click="selectHoldRepeat('off')"
-          >
-            关闭
-          </button>
-          <button
-            class="chip"
-            :class="{ selected: repeatChoice === 'single' }"
-            type="button"
-            :title="repeatSingleTitle"
-            :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
-            @click="selectHoldRepeat('single')"
-          >
-            重复单击动作
-          </button>
-          <button
-            class="chip"
-            :class="{ selected: repeatChoice === 'long' }"
-            type="button"
-            :title="repeatLongTitle"
-            :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
-            @click="selectHoldRepeat('long')"
-          >
-            重复长按动作
-          </button>
-        </div>
-        <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
+      <div v-if="repeatGroupVisible" class="action-sections repeat-action-sections">
+        <section class="action-section repeat-group">
+          <h4 class="action-section-title">连续执行</h4>
+          <div class="repeat-options">
+            <button
+              class="chip"
+              :class="{ selected: repeatChoice === 'off' }"
+              type="button"
+              title="按住不放只执行一次"
+              :disabled="busy"
+              @click="selectHoldRepeat('off')"
+            >
+              关闭
+            </button>
+            <button
+              class="chip"
+              :class="{ selected: repeatChoice === 'single' }"
+              type="button"
+              :title="repeatSingleTitle"
+              :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
+              @click="selectHoldRepeat('single')"
+            >
+              重复单击动作
+            </button>
+            <button
+              class="chip"
+              :class="{ selected: repeatChoice === 'long' }"
+              type="button"
+              :title="repeatLongTitle"
+              :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
+              @click="selectHoldRepeat('long')"
+            >
+              重复长按动作
+            </button>
+          </div>
+          <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
+        </section>
       </div>
       <label v-if="okClickVisible" class="toggle-row ok-click-toggle" title="刚用遥控器移动过光标时，按 OK 会点击光标位置">
         <span>移动光标后按 OK 点击</span>
@@ -2649,12 +2719,6 @@ onUnmounted(() => {
       </label>
       <p v-if="okClickVisible" class="muted ok-click-hint">
         刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。
-      </p>
-      <p v-if="editingTarget.trigger === 'single'" class="muted editor-note">
-        {{ doubleConfiguredOnEditingButton ? "配置了双击：单击会稍等片刻（约 0.3 秒）以区分双击。" : "单击在按下瞬间执行。" }}
-      </p>
-      <p v-else class="muted editor-note">
-        {{ editingTarget.trigger === "double" ? "配置后单击会稍等片刻（约 0.3 秒）以区分双击。双击不会连续执行。" : "长按约 0.55 秒后执行。" }}
       </p>
     </article>
 
@@ -2706,18 +2770,19 @@ onUnmounted(() => {
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
-/* 「按住时连续执行」：编辑面板内的按键级 radio 三选一（2026-10-05），
-   与动作分组留出间距。 */
-.repeat-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.repeat-label { font-size: 13px; }
-.repeat-options { display: flex; flex-wrap: wrap; gap: 8px; }
-.repeat-hint { flex-basis: 100%; margin: 0; font-size: 12px; }
+/* 「连续执行」：编辑面板内的按键级 radio 三选一（2026-10-05），
+   2026-10-23 起独立成组、放在鼠标动作下面。 */
+.repeat-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.repeat-hint { margin: 6px 0 0; font-size: 12px; }
 /* OK 键「移动光标后按 OK 点击」：按键级开关 + 常驻说明句（2026-10-06）。 */
 .ok-click-toggle { margin-top: 12px; }
 .ok-click-hint { margin: 6px 0 0; font-size: 12px; }
+.mouse-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.mouse-action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
-.mouse-direction { width: 40px; height: 30px; padding: 0; font-size: 17px; }
+.mouse-amount-hint { color: var(--muted); }
+.mouse-amount-error { color: var(--error-text); }
 /* 滚动容器顶部会裁掉向上溢出（transform 不产生可滚动区域）：
    chip:hover 上浮 1px + 阴影会在容器顶边被切，故用内边距留出
    上浮空间，负外边距补偿保持原网格位置不变。 */

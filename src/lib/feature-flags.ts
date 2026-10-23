@@ -14,14 +14,6 @@
 export const VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED = false;
 
 /**
- * 按键编辑器「设备操作 / 聚焦输入框」入口。
- *
- * 2026-10-03 用户要求：先隐藏入口。动作类型与平台受理路径保留（已有映射照常生效，
- * runtime simulation 改为经 IPC 直接写入并验证受理），只是 UI 暂不暴露入口。
- */
-export const DEVICE_ACTION_SECTION_ENABLED = false;
-
-/**
  * 首次使用向导（Onboarding）激活开关。
  *
  * 2026-10-04：步骤①–⑦、staged 事务、attempt 唯一终态与「重新运行向导」入口
@@ -35,6 +27,6 @@ export const ONBOARDING_WIZARD_ENABLED = true;
  *
  * 2026-10-15：数据层（P1）、执行器与按键绑定（P2）已落地；页面随 P3 一并
  * 开发完成后打开。此开关只控制入口显隐，已绑定的组合动作照常执行
- * （与 `DEVICE_ACTION_SECTION_ENABLED` 同款"隐藏入口、保留路径"语义）。
+ * （"隐藏入口、保留路径"语义）。
  */
 export const COMBINATION_ACTIONS_ENABLED = true;

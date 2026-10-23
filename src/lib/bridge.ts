@@ -1351,7 +1351,8 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
     return [
       { id: "sayall", name: "无线麦", installed: true },
       { id: "wechat", name: "微信", installed: true },
-      { id: "edge", name: "Edge 浏览器", installed: true },
+      { id: "workbuddy", name: "WorkBuddy", installed: true },
+      { id: "chatgpt", name: "ChatGPT", installed: true },
       { id: "chrome", name: "Chrome 浏览器", installed: true },
       { id: "notepad", name: "记事本", installed: true },
       { id: "calc", name: "计算器", installed: true },
