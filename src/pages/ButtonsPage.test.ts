@@ -546,22 +546,32 @@ describe("buttons mapping page", () => {
     expect(titles.indexOf("自定义动作")).toBeLessThan(titles.indexOf("打开应用"));
     expect(titles.indexOf("打开应用")).toBeLessThan(titles.indexOf("组合动作"));
     expect(titles).not.toContain("设备操作");
-    expect(titles.slice(-1)).toEqual(["鼠标动作"]);
+    expect(titles.slice(-2)).toEqual(["鼠标动作", "连续执行"]);
     expect(titles).not.toContain("鼠标滚轮");
     expect(titles).not.toContain("鼠标点击");
     expect(titles).not.toContain("鼠标移动");
 
-    // 「自定义动作」后紧跟「按住时连续执行」，再往下才是打开应用。
+    // 主分组顺序：自定义动作 → 打开应用 → 组合动作。
     const customSection = wrapper
       .findAll(".mapping-editor .action-section")
       .find((item) => item.find(".action-section-title").text() === "自定义动作")!;
-    const repeatGroup = wrapper.find(".mapping-editor .repeat-group");
-    expect(repeatGroup.exists(), "方向键应显示「按住时连续执行」").toBe(true);
-    expect(customSection.element.nextElementSibling).toBe(repeatGroup.element);
     const appSection = wrapper
       .findAll(".mapping-editor .action-section")
       .find((item) => item.find(".action-section-title").text() === "打开应用")!;
-    expect(repeatGroup.element.nextElementSibling).toBe(appSection.element);
+    expect(customSection.element.nextElementSibling).toBe(appSection.element);
+
+    // 「连续执行」独立成组，放在鼠标动作下面。
+    const mouseContainer = wrapper.find(".mapping-editor .mouse-action-sections");
+    const repeatContainer = wrapper.find(".mapping-editor .repeat-action-sections");
+    expect(mouseContainer.exists()).toBe(true);
+    expect(repeatContainer.exists(), "方向键应显示「连续执行」").toBe(true);
+    expect(mouseContainer.element.nextElementSibling).toBe(repeatContainer.element);
+    expect(repeatContainer.find(".action-section-title").text()).toBe("连续执行");
+    expect(repeatContainer.findAll(".repeat-options .chip").map((chip) => chip.text())).toEqual([
+      "关闭",
+      "重复单击动作",
+      "重复长按动作",
+    ]);
     wrapper.unmount();
   });
 
@@ -1590,6 +1600,11 @@ describe("buttons mapping page", () => {
       direction: "down",
       steps: 5,
     });
+    // 保存成功后先显示“配置已保存”；再次点击输入框恢复输入提示。
+    expect(wrapper.get(".mouse-amount-saved").text()).toBe("配置已保存");
+    wheelInput = wrapper.get('input[aria-label="每次滚动格数"]');
+    await wheelInput.trigger("focus");
+    expect(wrapper.find(".mouse-amount-saved").exists()).toBe(false);
 
     // 2026-10-22 用户定稿：1–100，100 是上限；Enter 提交。
     const savesBeforeEnter = vi.mocked(saveButtonMappings).mock.calls.length;
@@ -1601,10 +1616,11 @@ describe("buttons mapping page", () => {
       direction: "down",
       steps: 100,
     });
-    // Enter 已保存后再次失焦不应重复写盘。
+    // Enter 已保存后再次失焦不应重复写盘，也不应把“配置已保存”收回。
     await wheelInput.trigger("blur");
     await flushPromises();
     expect(vi.mocked(saveButtonMappings).mock.calls).toHaveLength(savesBeforeEnter + 1);
+    expect(wrapper.get(".mouse-amount-saved").text()).toBe("配置已保存");
 
     // 0 与 101 无效：不保存，并提示 1–100。
     const saveCount = vi.mocked(saveButtonMappings).mock.calls.length;
@@ -1644,6 +1660,14 @@ describe("buttons mapping page", () => {
       distance: 100,
     });
     expect(wrapper.find(".mouse-amount-error").exists()).toBe(false);
+    expect(wrapper.get(".mouse-amount-saved").text()).toBe("配置已保存");
+    // 点击输入框：已保存提示收回，重新显示输入提示。
+    moveInput = wrapper.get('input[aria-label="每次移动像素"]');
+    await moveInput.trigger("focus");
+    expect(wrapper.find(".mouse-amount-saved").exists()).toBe(false);
+    expect(wrapper.get(".mouse-amount-hint").text()).toBe(
+      "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。",
+    );
     const movesBeforeInvalid = vi.mocked(saveButtonMappings).mock.calls.length;
     await moveInput.setValue("101");
     await moveInput.trigger("keydown", { key: "Enter" });
@@ -1652,6 +1676,13 @@ describe("buttons mapping page", () => {
     expect(wrapper.get(".mouse-amount-error").text()).toBe("请输入 1 到 100 之间的整数");
     const bottom = wrapper.find(".mapping-status");
     expect(bottom.exists() ? bottom.text() : "").not.toContain("请输入 1 到 100 之间的整数");
+    // 再次点击输入框：错误提示收回，恢复输入提示。
+    moveInput = wrapper.get('input[aria-label="每次移动像素"]');
+    await moveInput.trigger("focus");
+    expect(wrapper.find(".mouse-amount-error").exists()).toBe(false);
+    expect(wrapper.get(".mouse-amount-hint").text()).toBe(
+      "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。",
+    );
 
     await choose("左键双击");
     expect(vi.mocked(saveButtonMappings).mock.lastCall![0].actions.power!.single).toEqual({

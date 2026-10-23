@@ -692,7 +692,7 @@ async function openExample(): Promise<void> {
   }
 }
 
-function applyAction(action: ButtonAction): void {
+function applyAction(action: ButtonAction, onSaved?: () => void): void {
   const target = editingTarget.value;
   if (!target) return;
   const next: ButtonMappings = {
@@ -706,7 +706,9 @@ function applyAction(action: ButtonAction): void {
   mappings.value = next;
   // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
   // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
-  void persist(reconciled.notice ?? undefined);
+  void persist(reconciled.notice ?? undefined).then((ok) => {
+    if (ok) onSaved?.();
+  });
 }
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
@@ -728,8 +730,15 @@ const MAX_MOUSE_AMOUNT = 100;
 const scrollDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const moveDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const mouseAmountError = ref<string | null>(null);
+const mouseAmountSaved = ref(false);
 const MOUSE_AMOUNT_HINT =
   "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。";
+
+/** 点击/重新聚焦输入框时收回“配置已保存”与错误，恢复输入提示。 */
+function resetMouseAmountNotice(): void {
+  mouseAmountError.value = null;
+  mouseAmountSaved.value = false;
+}
 
 /** 鼠标动作大类的数量输入：只有滚轮/移动动作显示，按动作类型取对应草稿。 */
 const mouseAmountVisible = computed(
@@ -751,7 +760,7 @@ const mouseAmountDraft = computed({
 
 function syncMouseAmountDrafts(): void {
   const action = selectedAction.value;
-  mouseAmountError.value = null;
+  resetMouseAmountNotice();
   scrollDraft.value = String(
     action?.type === "scroll" ? action.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT,
   );
@@ -788,18 +797,24 @@ function updateMouseAmount(): void {
   const value = Number(mouseAmountDraft.value.trim());
   if (!Number.isInteger(value) || value < 1 || value > MAX_MOUSE_AMOUNT) {
     // 2026-10-23 用户要求：错误提示贴在输入框旁，不再出现在页面最下方。
+    mouseAmountSaved.value = false;
     mouseAmountError.value = `请输入 1 到 ${MAX_MOUSE_AMOUNT} 之间的整数`;
     mouseAmountDraft.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
     return;
   }
-  mouseAmountError.value = null;
   if (action.type === "scroll") {
     // 显式输入默认值也要落盘（旧配置可能没有 steps 字段）。
     if (action.steps === value) return;
-    void applyAction({ ...action, steps: value });
+    resetMouseAmountNotice();
+    void applyAction({ ...action, steps: value }, () => {
+      mouseAmountSaved.value = true;
+    });
   } else {
     if (action.distance === value) return;
-    void applyAction({ ...action, distance: value });
+    resetMouseAmountNotice();
+    void applyAction({ ...action, distance: value }, () => {
+      mouseAmountSaved.value = true;
+    });
   }
 }
 
@@ -821,7 +836,7 @@ function isActivePreset(keys: KeyCode[]): boolean {
 /**
  * 「按住时连续执行」的界面规则（2026-10-05 radio 三选一定稿）：
  * - 按键级三态：关闭 / 重复单击动作 / 重复长按动作（双击不参与），显示在
- *   单击、长按两个编辑页底部，两页是同一个状态；
+ *   编辑区底部的「连续执行」分组（鼠标动作之后），两页是同一个状态；
  * - 选项可用性由配置决定：未配置动作 / 动作只执行一次 / 单击与长按并存
  *   （长按会接管按住，单击不能连续）；不可选时给「原因 + 恢复方式」；
  * - 已选目标不再可用（配置变化）时自动回到「关闭」并提示，不偷改选择。
@@ -1122,15 +1137,17 @@ const captureSwitchTitle = computed(() =>
 
 let saveQueue: Promise<void> = Promise.resolve();
 let saveRequest = 0;
-async function persist(message?: string): Promise<void> {
+async function persist(message?: string): Promise<boolean> {
   const request = ++saveRequest;
   const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
+  let savedOk = false;
   const task = saveQueue.then(async () => {
     try {
       const saved = await saveButtonMappings(payload);
       savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+      savedOk = true;
       if (request === saveRequest) {
         mappings.value = saved;
         if (message) statusMessage.value = message;
@@ -1142,6 +1159,8 @@ async function persist(message?: string): Promise<void> {
   saveQueue = task;
   await task;
   if (request === saveRequest) busy.value = false;
+  // 只有这次保存仍是最后一次请求时才算“刚保存”；被更新请求覆盖时不弹旧提示。
+  return savedOk && request === saveRequest;
 }
 
 async function restoreDefaults(): Promise<void> {
@@ -2404,43 +2423,6 @@ onUnmounted(() => {
           </template>
         </section>
 
-        <div v-if="repeatGroupVisible" class="repeat-group">
-          <span class="repeat-label">按住时连续执行</span>
-          <div class="repeat-options">
-            <button
-              class="chip"
-              :class="{ selected: repeatChoice === 'off' }"
-              type="button"
-              title="按住不放只执行一次"
-              :disabled="busy"
-              @click="selectHoldRepeat('off')"
-            >
-              关闭
-            </button>
-            <button
-              class="chip"
-              :class="{ selected: repeatChoice === 'single' }"
-              type="button"
-              :title="repeatSingleTitle"
-              :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
-              @click="selectHoldRepeat('single')"
-            >
-              重复单击动作
-            </button>
-            <button
-              class="chip"
-              :class="{ selected: repeatChoice === 'long' }"
-              type="button"
-              :title="repeatLongTitle"
-              :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
-              @click="selectHoldRepeat('long')"
-            >
-              重复长按动作
-            </button>
-          </div>
-          <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
-        </div>
-
         <section class="action-section">
           <h4 class="action-section-title">打开应用</h4>
           <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
@@ -2704,12 +2686,54 @@ onUnmounted(() => {
             <input v-model="mouseAmountDraft"
               :aria-label="mouseAmountKind === 'mouse_move' ? '每次移动像素' : '每次滚动格数'"
               type="text" inputmode="numeric" autocomplete="off"
+              @focus="resetMouseAmountNotice"
+              @click="resetMouseAmountNotice"
+              @input="resetMouseAmountNotice"
               @keydown.enter="updateMouseAmount()"
               @blur="updateMouseAmount()" />
             <span>{{ mouseAmountKind === "mouse_move" ? "像素" : "格" }}</span>
             <span v-if="mouseAmountError" class="mouse-amount-error">{{ mouseAmountError }}</span>
+            <span v-else-if="mouseAmountSaved" class="mouse-amount-saved">配置已保存</span>
             <span v-else-if="mouseAmountKind === 'mouse_move'" class="mouse-amount-hint">{{ MOUSE_AMOUNT_HINT }}</span>
           </label>
+        </section>
+      </div>
+      <div v-if="repeatGroupVisible" class="action-sections repeat-action-sections">
+        <section class="action-section repeat-group">
+          <h4 class="action-section-title">连续执行</h4>
+          <div class="repeat-options">
+            <button
+              class="chip"
+              :class="{ selected: repeatChoice === 'off' }"
+              type="button"
+              title="按住不放只执行一次"
+              :disabled="busy"
+              @click="selectHoldRepeat('off')"
+            >
+              关闭
+            </button>
+            <button
+              class="chip"
+              :class="{ selected: repeatChoice === 'single' }"
+              type="button"
+              :title="repeatSingleTitle"
+              :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
+              @click="selectHoldRepeat('single')"
+            >
+              重复单击动作
+            </button>
+            <button
+              class="chip"
+              :class="{ selected: repeatChoice === 'long' }"
+              type="button"
+              :title="repeatLongTitle"
+              :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
+              @click="selectHoldRepeat('long')"
+            >
+              重复长按动作
+            </button>
+          </div>
+          <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
         </section>
       </div>
       <label v-if="okClickVisible" class="toggle-row ok-click-toggle" title="刚用遥控器移动过光标时，按 OK 会点击光标位置">
@@ -2775,12 +2799,10 @@ onUnmounted(() => {
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }
-/* 「按住时连续执行」：编辑面板内的按键级 radio 三选一（2026-10-05），
-   与动作分组留出间距。 */
-.repeat-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 0; }
-.repeat-label { font-size: 13px; }
-.repeat-options { display: flex; flex-wrap: wrap; gap: 8px; }
-.repeat-hint { flex-basis: 100%; margin: 0; font-size: 12px; }
+/* 「连续执行」：编辑面板内的按键级 radio 三选一（2026-10-05），
+   2026-10-23 起独立成组、放在鼠标动作下面。 */
+.repeat-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.repeat-hint { margin: 6px 0 0; font-size: 12px; }
 /* OK 键「移动光标后按 OK 点击」：按键级开关 + 常驻说明句（2026-10-06）。 */
 .ok-click-toggle { margin-top: 12px; }
 .ok-click-hint { margin: 6px 0 0; font-size: 12px; }
@@ -2790,6 +2812,7 @@ onUnmounted(() => {
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-amount-hint { color: var(--muted); }
 .mouse-amount-error { color: var(--error-text); }
+.mouse-amount-saved { color: var(--success-text); }
 /* 滚动容器顶部会裁掉向上溢出（transform 不产生可滚动区域）：
    chip:hover 上浮 1px + 阴影会在容器顶边被切，故用内边距留出
    上浮空间，负外边距补偿保持原网格位置不变。 */
