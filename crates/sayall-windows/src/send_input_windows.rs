@@ -1,7 +1,7 @@
 use crate::send_input::{
     plan_key_down, plan_key_up, send_click_with, send_key_edges_spaced_with, send_key_tap_with,
-    send_wheel_with, KeyChord, MouseClickKind, MoveDirection, PlannedKeyEvent, ScrollDirection,
-    SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
+    send_wheel_with, KeyChord, KeyCode, MouseClickKind, MoveDirection, PlannedKeyEvent,
+    ScrollDirection, SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
 };
 use crate::PlatformError;
 use std::mem::size_of;
@@ -25,6 +25,14 @@ use windows::Win32::UI::WindowsAndMessaging::{GetPhysicalCursorPos, SetPhysicalC
 #[derive(Debug)]
 pub struct SendInputRuntime {
     snapshot: Mutex<SendInputSnapshot>,
+}
+
+/// 报告层合成的右 Alt 是否仍在 OS 中保持按下（2026-10-23 语音条卡住现场）。
+///
+/// 只读 `GetAsyncKeyState`，不改变键态。语音会话结束后用它判定遥控器的 HID
+/// 释放报告是否丢失；调用方只在报告层合成门禁为真时使用，避免误伤物理按键。
+pub fn right_alt_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(KeyCode::RightAlt.virtual_key())) < 0 }
 }
 
 impl SendInputRuntime {
