@@ -362,9 +362,14 @@ for (const { name, command, seconds } of [
 {
   const before = sleeps.length;
   const { ptr } = press();
-  check('gate 开：释放帧不延迟（成对性不变）',
-    sleeps.length === before && ptr.buf[3] === 0,
-    `sleeps=${sleeps.length - before}`);
+  check('释放帧先保持 200ms 再回零（尾音排空）',
+    sleeps.length === before + 1 && sleeps[sleeps.length - 1] === 0.2 && ptr.buf[3] === 0,
+    `sleep_seconds=${JSON.stringify(sleeps.slice(before))} buf3=0x${ptr.buf[3].toString(16)}`);
+  const before2 = sleeps.length;
+  const { ptr: ptr2 } = press();
+  check('释放保持只做一次：没有新的语音键按下时不重复延迟',
+    sleeps.length === before2 && ptr2.buf[3] === 0,
+    `sleeps=${sleeps.length - before2}`);
 }
 
 {

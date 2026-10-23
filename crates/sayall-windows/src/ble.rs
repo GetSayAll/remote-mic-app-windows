@@ -75,6 +75,13 @@ const MICROPHONE_EXTEND_INTERVAL: Duration = Duration::from_millis(2500);
 /// 取 8 秒而不是 5 秒：覆盖冷启动后首个音频帧到达较慢的现场，同时仍能在
 /// 用户明显感到“卡住”之前释放键盘。正常会话的首帧在 1 秒内到达。
 const VOICE_AUDIO_STALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// 报告层合成释放保险的宽限期（2026-10-23 尾字丢失现场调整）。
+///
+/// helper 在语音键释放帧上会先保持 200ms（`RELEASE_HOLD_MS`），让应用把
+/// 最后一段音频排空到虚拟声卡、豆包继续收音；应用侧必须晚于这个保持窗
+/// 再检查键态，否则会在 helper 放行前抢先把合成的右 Alt 抬起，尾音仍会被
+/// 截断。300ms = helper 200ms + 音频排空/调度余量。
+const VOICE_SYNTH_RELEASE_GRACE_MS: u64 = 300;
 
 /// 微信输入法专属的会话激活/休眠恢复只能用于它自己的默认语音热键。
 ///
@@ -288,6 +295,54 @@ mod voice_effect_verdict_tests {
             voice_effect_verdict(Some(before.clone()), Some(before), press, slack),
             VoiceEffectVerdict::Missing
         );
+    }
+}
+
+/// 语音会话结束后是否应该补发右 Alt 抬起（2026-10-23）。
+///
+/// 只在三条同时成立时补发：报告层合成生效、目标是豆包、OS 仍认为右 Alt
+/// 按下。纯判定便于单测；真实键态读取与 SendInput 由调度线程执行。
+fn should_release_stuck_voice_synth(
+    report_layer_active: bool,
+    tool: Option<VoiceInputTool>,
+    right_alt_down: bool,
+) -> bool {
+    report_layer_active && tool == Some(VoiceInputTool::Doubao) && right_alt_down
+}
+
+#[cfg(test)]
+mod stuck_voice_synth_tests {
+    use super::should_release_stuck_voice_synth;
+    use sayall_core::settings::VoiceInputTool;
+
+    #[test]
+    fn releases_only_when_report_layer_doubao_and_key_is_down() {
+        assert!(should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Doubao),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(
+            false,
+            Some(VoiceInputTool::Doubao),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Wechat),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Vokie),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(true, None, true));
+        assert!(!should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Doubao),
+            false
+        ));
     }
 }
 
@@ -1996,7 +2051,7 @@ fn handle_control(
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
-    send_input: &SendInputRuntime,
+    send_input: &Arc<SendInputRuntime>,
     voice_hold_hotkey: &Mutex<Option<KeyChord>>,
     voice_input_tool: &Mutex<Option<VoiceInputTool>>,
     held_hotkey: &mut Option<KeyChord>,
@@ -2339,15 +2394,79 @@ fn handle_control(
             }
             usage.record_voice_session(*active_voice_samples);
             *active_voice_samples = 0;
-            let mut snapshot = lock(state);
-            snapshot.phase = ConnectionPhase::Ready;
-            apply_input_connection_phase(snapshot.phase);
-            snapshot.voice_state = VoiceSessionState::Idle;
+            {
+                let mut snapshot = lock(state);
+                snapshot.phase = ConnectionPhase::Ready;
+                apply_input_connection_phase(snapshot.phase);
+                snapshot.voice_state = VoiceSessionState::Idle;
+            }
+            // 报告层合成的右 Alt 保险（2026-10-23）：遥控器偶发不发/丢失
+            // 语音键的 HID 释放报告，合成键会一直处于按下（豆包语音条不消失）。
+            // 给真实报告一个宽限期后检查 OS 键态，确认仍按下才补发抬起。
+            spawn_voice_synth_guard(
+                Arc::clone(send_input),
+                Arc::clone(voice_session_epoch),
+                generation,
+                *lock(voice_input_tool),
+            );
         }
         PipelineOutput::DecoderSynchronized { .. }
         | PipelineOutput::UnknownControl { .. }
         | PipelineOutput::Samples { .. } => {}
     }
+}
+
+/// 报告层合成键的松手保险（2026-10-23 现场）。
+///
+/// 背景：报告层把遥控器语音键（0x003E）槽内替换成右 Alt（0x00E6），OS 的
+/// 键态完全由 HID 报告驱动。实测偶发松手后没有收到 HID 释放报告，右 Alt
+/// 在 OS 里持续按下 60 多秒，豆包语音条跟着不消失；而 ATVV STOP 正常到达。
+/// 这里在会话结束后给真实报告 250ms 宽限期，再读 `GetAsyncKeyState`；
+/// 若仍按下，就用 SendInput 补一次右 Alt UP。2026-10-23 真机验证：语音条
+/// 会立即消失，且注入的 UP 不会让豆包重新开麦。
+///
+/// 纪元检查防止迟到补发打断 250ms 内重新开始的新会话（AGENTS.md 的
+/// "迟到回调不得覆盖新一代会话"）。
+fn spawn_voice_synth_guard(
+    send_input: Arc<SendInputRuntime>,
+    voice_session_epoch: Arc<AtomicU64>,
+    generation: u64,
+    tool: Option<VoiceInputTool>,
+) {
+    if tool != Some(VoiceInputTool::Doubao) || !crate::key_gate::voice_synth_active() {
+        return;
+    }
+    let epoch = voice_session_epoch.load(Ordering::SeqCst);
+    let _ = thread::Builder::new()
+        .name("sayall-voice-synth-guard".to_owned())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(VOICE_SYNTH_RELEASE_GRACE_MS));
+            if voice_session_epoch.load(Ordering::SeqCst) != epoch {
+                gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} action=skipped reason=session_replaced"
+                ));
+                return;
+            }
+            let report_layer_active = crate::key_gate::voice_synth_active();
+            let key_down = crate::send_input_windows::right_alt_down();
+            if !should_release_stuck_voice_synth(report_layer_active, tool, key_down) {
+                gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer={report_layer_active} key_down={key_down} action=none"
+                ));
+                return;
+            }
+            let chord = KeyChord {
+                keys: vec![KeyCode::RightAlt],
+            };
+            match send_input.release(&chord) {
+                Ok(_) => gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer=true key_down=true action=release terminal_result=passed"
+                )),
+                Err(_) => gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer=true key_down=true action=release terminal_result=failed error_domain=send_input error_code=release_failed retryable=true"
+                )),
+            }
+        });
 }
 
 /// 每会话生效增益的日志去重（2026-10-04）：返回 true 表示这一批音频的
