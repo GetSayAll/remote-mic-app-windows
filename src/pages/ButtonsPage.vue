@@ -6,6 +6,8 @@ import BatteryIndicator from "../components/BatteryIndicator.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
+import { t } from "../lib/i18n";
+import { effectiveLanguage } from "../lib/language-state";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
 import {
   FOCUS_STRATEGY_OPTIONS,
@@ -171,8 +173,24 @@ const remoteModel = computed<RemoteModel>(
  */
 const deviceLabel = computed(() => {
   if (remoteModel.value !== "unknown") return remoteModelLabel(remoteModel.value);
-  return connectionInfo.value?.remoteName ?? "未连接遥控器";
+  return connectionInfo.value?.remoteName ?? t("未连接遥控器");
 });
+
+/**
+ * 操作失败文案：中文界面保留既有原始错误（既有行为与测试口径）；英文界面只给
+ * 一句短的用户语言，原始错误写进控制台/诊断，不把中文原文摊到英文 UI 上。
+ */
+function operationErrorText(
+  context: string,
+  error: unknown,
+  englishFallback: string,
+): string {
+  console.warn(context, error);
+  if (effectiveLanguage.value === "zh-Hans") {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return t(englishFallback);
+}
 
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
@@ -339,7 +357,11 @@ async function persistLockSelection(): Promise<void> {
       // 只有用户没有再改时才回退开关，避免覆盖更新的选择。
       if (lockSelection.value === value) {
         lockSelection.value = lockSelectionPersisted;
-        statusMessage.value = error instanceof Error ? error.message : String(error);
+        statusMessage.value = operationErrorText(
+          "lock mapping selection save failed",
+          error,
+          "保存锁定当前按键设置失败，请重试。",
+        );
       }
     }
   });
@@ -401,6 +423,11 @@ function releasePageResources(): void {
   resizeObserver = null;
 }
 
+/** 连续执行分组的「关闭」选项：同一中文原文在编辑面板里是 Close，这里需要 Off。 */
+const repeatOffLabel = computed(() =>
+  effectiveLanguage.value === "zh-Hans" ? "关闭" : "Off",
+);
+
 const dirty = computed(
   () => JSON.stringify(mappings.value) !== JSON.stringify(savedSnapshot.value),
 );
@@ -409,7 +436,7 @@ const enabled = computed({
   get: () => mappings.value.enabled,
   set: (value: boolean) => {
     mappings.value = { ...mappings.value, enabled: value };
-    void persist("总开关已更新");
+    void persist(t("总开关已更新"));
   },
 });
 
@@ -429,6 +456,15 @@ function actionsOf(button: RemoteButton): ButtonActions {
 
 function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
   return actionsOf(button)[trigger];
+}
+
+/** 卡片格子的悬停标题：随界面语言实时生成（含全角冒号的原文作为字典 key）。 */
+function actionCellTitle(button: RemoteButton, trigger: ButtonTrigger): string {
+  return t("{button} · {trigger}：{summary}", {
+    button: buttonLabels[button],
+    trigger: buttonTriggerLabel(trigger),
+    summary: actionSummary(actionOf(button, trigger)),
+  });
 }
 
 /** 当前编辑格的打开应用目标（非 open_app 动作返回 null，模板类型收窄用）。 */
@@ -470,7 +506,9 @@ const hasPresetFocusOverride = computed(() => {
   );
 });
 
-const focusStrategyOptions = FOCUS_STRATEGY_OPTIONS;
+const focusStrategyOptions = computed(() =>
+  FOCUS_STRATEGY_OPTIONS.map((option) => ({ ...option, label: t(option.label) })),
+);
 
 /** 录入 / 学习 / 记录位置期间，切换策略会干扰当前会话。 */
 const focusBusy = computed(
@@ -486,16 +524,31 @@ const focusBusy = computed(
 // 2026-10-23 Andy：预设应用也显示聚焦方式，并默认选中其实际使用的策略。
 const showAppFocusStrategy = computed(() => Boolean(focusTarget.value));
 
-const focusFailureLabels: Record<string, string> = {
-  self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
-  no_candidate: "没有找到可用的输入框",
-  not_foreground: "目标应用不在前台",
-  target_exited: "目标应用已退出",
-  not_accessible: "读不到该应用的界面（对方可能以管理员身份运行）",
-  timeout: "等待超时",
-  not_configured: "还没有配置聚焦方式",
-  cancelled: "已取消",
-};
+/** 聚焦失败原因的用户文案（按当前语言实时求值，不在 setup 阶段缓存）。 */
+function focusFailureLabel(reason: string): string {
+  switch (reason) {
+    case "self_foreground":
+      return t("当前就是无线麦自己的窗口，无需聚焦");
+    case "no_candidate":
+      return t("没有找到可用的输入框");
+    case "not_foreground":
+      return t("目标应用不在前台");
+    case "target_exited":
+      return t("目标应用已退出");
+    case "not_accessible":
+      return t("读不到该应用的界面（对方可能以管理员身份运行）");
+    case "timeout":
+      return t("等待超时");
+    case "not_configured":
+      return t("还没有配置聚焦方式");
+    case "cancelled":
+      return t("已取消");
+    default:
+      // 未知 token 只在中文界面回显原文；英文界面不暴露内部 token。
+      if (!reason) return t("未知原因");
+      return effectiveLanguage.value === "zh-Hans" ? reason : t("未知原因");
+  }
+}
 
 /** 最近一次聚焦结果（失败时给用户可解释的原因）。 */
 const lastFocusNotice = computed<string | null>(() => {
@@ -504,7 +557,9 @@ const lastFocusNotice = computed<string | null>(() => {
   if (focusProfile.value?.strategy !== "recorded_element") return null;
   const report = mappingSnapshot.value?.lastFocus;
   if (!report || report.focused) return null;
-  return `上次聚焦失败：${focusFailureLabels[report.reason ?? ""] ?? report.reason ?? "未知原因"}`;
+  return t("上次聚焦失败：{reason}", {
+    reason: focusFailureLabel(report.reason ?? ""),
+  });
 });
 
 /** 聚焦档案写回：策略与字段保持自洽（对齐 Rust `AppFocusProfile::normalized`）。 */
@@ -533,7 +588,7 @@ function applyFocusStrategy(strategy: FocusStrategy): void {
     pointLearnState.value = "idle";
     pointLearnMessage.value = null;
   }
-  void persist("聚焦方式已更新");
+  void persist(t("聚焦方式已更新"));
 }
 
 /** 预设应用恢复产品默认聚焦方式（删除显式档案）。 */
@@ -547,7 +602,7 @@ function resetPresetFocus(): void {
   focusLearnMessage.value = null;
   pointLearnState.value = "idle";
   pointLearnMessage.value = null;
-  void persist("已恢复默认聚焦方式");
+  void persist(t("已恢复默认聚焦方式"));
 }
 
 /**
@@ -566,17 +621,16 @@ function recordFocusPoint(): void {
 /** 对齐 Mac 的学习流程：先打开/切到目标应用，再开始记录。 */
 async function openAppThenRecordPoint(target: string): Promise<void> {
   pointLearnState.value = "opening";
-  pointLearnMessage.value = "正在打开目标应用…";
+  pointLearnMessage.value = t("正在打开目标应用…");
   try {
     await activateAppForLearning(target);
   } catch {
     pointLearnState.value = "error";
-    pointLearnMessage.value = "没能打开目标应用，请确认它已安装后再试。";
+    pointLearnMessage.value = t("没能打开目标应用，请确认它已安装后再试。");
     return;
   }
   pointLearnState.value = "recording";
-  pointLearnMessage.value =
-    "正在等待你把鼠标停在目标输入框上……（6 秒后自动记录）";
+  pointLearnMessage.value = t("正在等待你把鼠标停在目标输入框上……（6 秒后自动记录）");
   if (pointLearnTimer) window.clearTimeout(pointLearnTimer);
   pointLearnTimer = window.setTimeout(() => {
     pointLearnTimer = null;
@@ -593,13 +647,16 @@ async function finishPointRecording(target: string): Promise<void> {
     };
     mappings.value = { ...mappings.value, focusProfiles: next };
     pointLearnState.value = "recorded";
-    pointLearnMessage.value = "已记录位置（窗口大小变化超过 25% 时会拒绝点击，需要重新记录）";
+    pointLearnMessage.value = t("已记录位置（窗口大小变化超过 25% 时会拒绝点击，需要重新记录）");
     await persist();
   } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    console.warn("learn focus point failed", raw);
     pointLearnState.value = "error";
-    pointLearnMessage.value = `记录位置失败：${focusPointErrorLabel(
-      error instanceof Error ? error.message : String(error),
-    )}`;
+    pointLearnMessage.value =
+      effectiveLanguage.value === "zh-Hans"
+        ? `记录位置失败：${focusPointErrorLabel(raw)}`
+        : t("记录位置失败，请重新记录。");
   }
 }
 
@@ -613,7 +670,7 @@ function clearRecordedPoint(): void {
   mappings.value = { ...mappings.value, focusProfiles: next };
   pointLearnState.value = "idle";
   pointLearnMessage.value = null;
-  void persist("已清除记录的位置");
+  void persist(t("已清除记录的位置"));
 }
 
 /** 录入聚焦快捷键的落点（由 `capturePurpose` 分流）。 */
@@ -625,7 +682,7 @@ function applyFocusShortcut(keys: KeyCode[]): void {
     [target]: { strategy: "app_shortcut" as const, shortcut: { keys } },
   };
   mappings.value = { ...mappings.value, focusProfiles: next };
-  void persist("聚焦快捷键已录入");
+  void persist(t("聚焦快捷键已录入"));
 }
 
 function clearFocusShortcut(): void {
@@ -640,7 +697,7 @@ function clearFocusShortcut(): void {
     [target]: { strategy: "app_shortcut" as const },
   };
   mappings.value = { ...mappings.value, focusProfiles: next };
-  void persist("已清除聚焦快捷键");
+  void persist(t("已清除聚焦快捷键"));
 }
 
 function clearRecordedFocus(): void {
@@ -653,7 +710,7 @@ function clearRecordedFocus(): void {
   mappings.value = { ...mappings.value, focusProfiles: next };
   focusLearnState.value = "idle";
   focusLearnMessage.value = null;
-  void persist("已清除记录的输入框");
+  void persist(t("已清除记录的输入框"));
 }
 
 async function beginFocusShortcutCapture(): Promise<void> {
@@ -672,17 +729,17 @@ async function startFocusLearning(): Promise<void> {
   const target = focusTarget.value;
   if (!target) return;
   focusLearnState.value = "opening";
-  focusLearnMessage.value = "正在打开目标应用…";
+  focusLearnMessage.value = t("正在打开目标应用…");
   try {
     await activateAppForLearning(target);
   } catch {
     focusLearnState.value = "error";
-    focusLearnMessage.value = "没能打开目标应用，请确认它已安装后再试。";
+    focusLearnMessage.value = t("没能打开目标应用，请确认它已安装后再试。");
     return;
   }
 
   focusLearnState.value = "learning";
-  focusLearnMessage.value = "正在等待你点击目标输入框……";
+  focusLearnMessage.value = t("正在等待你点击目标输入框……");
   try {
     const recorded = await learnFocusTarget();
     const next = {
@@ -692,12 +749,15 @@ async function startFocusLearning(): Promise<void> {
     mappings.value = { ...mappings.value, focusProfiles: next };
     await persist();
     focusLearnState.value = "captured";
-    focusLearnMessage.value = "输入框学习成功。";
+    focusLearnMessage.value = t("输入框学习成功。");
   } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    console.warn("learn focus target failed", raw);
     focusLearnState.value = "error";
-    focusLearnMessage.value = focusLearnErrorLabel(
-      error instanceof Error ? error.message : String(error),
-    );
+    focusLearnMessage.value =
+      effectiveLanguage.value === "zh-Hans"
+        ? focusLearnErrorLabel(raw)
+        : t("输入框学习失败，请重试。");
   }
 }
 
@@ -744,9 +804,13 @@ async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     appPickerOpen.value = false;
-    statusMessage.value = `已添加 ${apps.length} 个应用，按键绑定未改变`;
+    statusMessage.value = t("已添加 {count} 个应用，按键绑定未改变", { count: apps.length });
   } catch (cause) {
-    appPickerError.value = cause instanceof Error ? cause.message : String(cause);
+    appPickerError.value = operationErrorText(
+      "add scanned apps failed",
+      cause,
+      "没能添加应用，请重试。",
+    );
   } finally {
     busy.value = false;
   }
@@ -817,8 +881,9 @@ const MAX_MOUSE_AMOUNT = 100;
 const scrollDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const moveDraft = ref(String(MOUSE_AMOUNT_DEFAULT));
 const mouseAmountError = ref<string | null>(null);
-const MOUSE_AMOUNT_HINT =
-  "请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。";
+const MOUSE_AMOUNT_HINT = computed(() =>
+  t("请输入 1 到 100 之间的整数，并按Enter或鼠标点击空白处保存配置。"),
+);
 
 /** 点击/重新聚焦输入框时收回错误，恢复输入提示。 */
 function clearMouseAmountError(): void {
@@ -882,7 +947,7 @@ function updateMouseAmount(): void {
   const value = Number(mouseAmountDraft.value.trim());
   if (!Number.isInteger(value) || value < 1 || value > MAX_MOUSE_AMOUNT) {
     // 2026-10-23 用户要求：错误提示贴在输入框旁，不再出现在页面最下方。
-    mouseAmountError.value = `请输入 1 到 ${MAX_MOUSE_AMOUNT} 之间的整数`;
+    mouseAmountError.value = t("请输入 1 到 {max} 之间的整数", { max: MAX_MOUSE_AMOUNT });
     mouseAmountDraft.value = String(kind === "scroll" ? scrollSteps.value : moveDistance.value);
     return;
   }
@@ -959,22 +1024,22 @@ function holdRepeatBlockedReason(
   slot: "single" | "long",
 ): string | null {
   if (slot === "long") {
-    if (actions.long.type === "disabled") return "先给这个按键配置长按动作";
+    if (actions.long.type === "disabled") return t("先给这个按键配置长按动作");
     if (!actionAllowsRepeat(actions.long)) {
-      return "“长按”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；把它改成单个按键后可选";
+      return t("“长按”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；把它改成单个按键后可选");
     }
     return null;
   }
-  if (actions.single.type === "disabled") return "先给这个按键配置单击动作";
+  if (actions.single.type === "disabled") return t("先给这个按键配置单击动作");
   if (!actionAllowsRepeat(actions.single)) {
-    return "“单击”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；改成单个按键后可选";
+    return t("“单击”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；改成单个按键后可选");
   }
   if (actions.long.type !== "disabled") {
     // 指路前先确认「重复长按动作」真的可选：长按动作只执行一次时它同样是
     // 灰的，原句会指向一个点不到的选项（2026-10-05 用户反馈）。
     return holdRepeatBlockedReason(actions, "long") === null
-      ? "这个按键已有长按动作，按住会先执行长按；要连续执行，请选“重复长按动作”"
-      : "这个按键已有长按动作：按住会执行长按。要连续执行单击动作，请先清除长按动作";
+      ? t("这个按键已有长按动作，按住会先执行长按；要连续执行，请选“重复长按动作”")
+      : t("这个按键已有长按动作：按住会执行长按。要连续执行单击动作，请先清除长按动作");
   }
   return null;
 }
@@ -1015,13 +1080,13 @@ const doubleConfiguredOnEditingButton = computed(() => {
 const repeatSingleTitle = computed(() => {
   if (repeatSingleReason.value) return repeatSingleReason.value;
   return doubleConfiguredOnEditingButton.value
-    ? "按住超过约 0.3 秒开始，单击动作会不断重复，直到松手"
-    : "按住不放，单击动作会不断重复，直到松手";
+    ? t("按住超过约 0.3 秒开始，单击动作会不断重复，直到松手")
+    : t("按住不放，单击动作会不断重复，直到松手");
 });
 
 /** 「重复长按动作」的悬停说明（不可选时为原因）。 */
 const repeatLongTitle = computed(
-  () => repeatLongReason.value ?? "按住约 0.55 秒后，长按动作会不断重复，直到松手",
+  () => repeatLongReason.value ?? t("按住约 0.55 秒后，长按动作会不断重复，直到松手"),
 );
 
 /**
@@ -1051,8 +1116,8 @@ function toggleOkContextClick(): void {
   };
   void persist(
     actions.okContextClick
-      ? "已开启：用遥控器移动光标后，按 OK 会点击光标位置"
-      : "已关闭：移动光标后按 OK 点击",
+      ? t("已开启：用遥控器移动光标后，按 OK 会点击光标位置")
+      : t("已关闭：移动光标后按 OK 点击"),
   );
 }
 
@@ -1074,9 +1139,9 @@ function reconcileHoldRepeat(
   const notice =
     slot === "single" && actions.long.type !== "disabled"
       ? holdRepeatBlockedReason(actions, "long") === null
-        ? "这个按键已配置长按动作：按住会先执行长按，“按住时连续执行”已关闭（要连续执行，请选“重复长按动作”）"
-        : "这个按键已配置长按动作：按住会执行长按，而它只执行一次，“按住时连续执行”已关闭"
-      : "动作已变更，“按住时连续执行”已关闭";
+        ? t("这个按键已配置长按动作：按住会先执行长按，“按住时连续执行”已关闭（要连续执行，请选“重复长按动作”）")
+        : t("这个按键已配置长按动作：按住会执行长按，而它只执行一次，“按住时连续执行”已关闭")
+      : t("动作已变更，“按住时连续执行”已关闭");
   return { actions: next, notice };
 }
 
@@ -1106,10 +1171,10 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
   };
   void persist(
     choice === "off"
-      ? "已关闭“按住时连续执行”"
+      ? t("已关闭“按住时连续执行”")
       : choice === "long"
-        ? "已开启：长按后不松手会继续连续执行"
-        : "已开启：按住不放会连续执行",
+        ? t("已开启：长按后不松手会继续连续执行")
+        : t("已开启：按住不放会连续执行"),
   );
 }
 
@@ -1118,27 +1183,35 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
  * 编辑器能力说明与卡片置灰禁用悬停提示共用，悬停提示在句尾补「开启后恢复正常」
  * （2026-10-03 Andy 定稿）。
  */
-const TRI_KEY_CAPTURE_HINT = "返回 / 音量+ / 音量−需要开启全按键支持才能使用";
-const TRI_KEY_GATED_TITLE = `${TRI_KEY_CAPTURE_HINT}，开启后恢复正常`;
+const triKeyCaptureHint = computed(() =>
+  t("返回 / 音量+ / 音量−需要开启全按键支持才能使用"),
+);
+const triKeyGatedTitle = computed(() =>
+  captureUnsupported.value
+    ? t("返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。")
+    : t("{hint}，开启后恢复正常", { hint: triKeyCaptureHint.value }),
+);
 
 /**
  * 本机不可用（ARM64，2026-10-07 issue #206）时说不得「开启后恢复正常」——
  * 这台电脑根本开不了。三句都只讲用户能懂的事：哪个开关、为什么、怎么办。
  * 用户可见文案的规范来源是 docs/product-copy.md（§2 名称表 / §7 决定索引）。
  */
-const CAPTURE_UNSUPPORTED_TITLE =
-  "全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。";
-const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持全按键支持，其他按键不受影响。";
+const captureUnsupportedTitle = computed(() =>
+  t("全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。"),
+);
+const captureUnsupportedNote = computed(() =>
+  t("这台电脑暂不支持全按键支持，其他按键不受影响。"),
+);
 /**
  * 失败文案（2026-10-10 Andy 定稿）：只有失败才显示；其余情况一个字都不显示。
  * 本页名称不带引号，与既有短说明同口径（见 docs/product-copy.md §7 2026-10-07 与
  * 2026-10-10 两条）。
  */
 const CAPTURE_FAILURE_NAME = "全按键支持";
-const CAPTURE_BRIDGE_FAILED_TEXT =
-  "全按键支持没有启动成功。请关闭后重新开启；仍不行就先断开遥控器再重新配对。";
-const TRI_KEY_UNSUPPORTED_TITLE =
-  "返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。";
+const captureBridgeFailedText = computed(() =>
+  t("全按键支持没有启动成功。请关闭后重新开启；仍不行就先断开遥控器再重新配对。"),
+);
 
 /**
  * 编辑器提示（信息性）：Home/TV 已落地"遥控器优先"（2026-09-07 方案 C）——
@@ -1161,25 +1234,25 @@ const capabilityNote = computed<string | null>(() => {
     const isThreeKey =
       button === "back" || button === "volume_up" || button === "volume_down";
     return isThreeKey
-      ? "全按键支持已启用，此按键的映射现在生效"
-      : "全按键支持已启用，此按键的映射已优化";
+      ? t("全按键支持已启用，此按键的映射现在生效")
+      : t("全按键支持已启用，此按键的映射已优化");
   }
   if (button === "back" || button === "volume_up" || button === "volume_down") {
     // 三键的映射路径对两个型号一致（下游同为映射引擎），界面不做型号区分：
     // 文案只随开关状态走。RC001 的三键同样依赖增强捕获（2026-09-25 真机：
     // 开=可映射、关=不映射），不再按"RC001 免助手"设计。
     if (rc003CaptureEnabled.value === false) {
-      return TRI_KEY_CAPTURE_HINT;
+      return triKeyCaptureHint.value;
     }
-    return "提示：正在确认按键状态…";
+    return t("提示：正在确认按键状态…");
   }
   if (button === "home" || button === "tv") {
-    return "提示：保存后，遥控器连接期间这个键只执行你配置的动作；同时物理键盘上的对应按键（Home / `）也会执行同样的动作。断开遥控器或删除本键映射即恢复原样。";
+    return t("提示：保存后，遥控器连接期间这个键只执行你配置的动作；同时物理键盘上的对应按键（Home / `）也会执行同样的动作。断开遥控器或删除本键映射即恢复原样。");
   }
   if (shortcutCapability(button, "single", remoteModel.value) === "identity") {
     const identity = identityShortcutByButton[button];
     const label = identity ? chordLabel({ keys: [identity] }) : "";
-    return `提示：闲置约 4 秒后第一次按这个键，可能同时出现一次它原本的按键效果；这段时间内连按不受影响。单击动作若就是该键本身（${label}），多出的那一次会被自动合并。`;
+    return t("提示：闲置约 4 秒后第一次按这个键，可能同时出现一次它原本的按键效果；这段时间内连按不受影响。单击动作若就是该键本身（{label}），多出的那一次会被自动合并。", { label });
   }
   return null;
 });
@@ -1194,10 +1267,10 @@ const capabilityNote = computed<string | null>(() => {
  */
 const captureSwitchTitle = computed(() =>
   captureUnsupported.value
-    ? CAPTURE_UNSUPPORTED_TITLE
+    ? captureUnsupportedTitle.value
     : rc003CaptureEnabled.value === true
-      ? "关闭后返回 / 音量+ / 音量−将不可映射"
-      : "开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化",
+      ? t("关闭后返回 / 音量+ / 音量−将不可映射")
+      : t("开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化"),
 );
 
 let saveQueue: Promise<void> = Promise.resolve();
@@ -1216,13 +1289,27 @@ async function persist(message?: string): Promise<void> {
         if (message) statusMessage.value = message;
       }
     } catch (error) {
-      if (request === saveRequest) statusMessage.value = error instanceof Error ? error.message : String(error);
+      if (request === saveRequest) {
+        statusMessage.value = operationErrorText(
+          "save button mappings failed",
+          error,
+          "没能保存按键映射，请重试。",
+        );
+      }
     }
   });
   saveQueue = task;
   await task;
   if (request === saveRequest) busy.value = false;
 }
+
+// 页面底部的快照错误只显示固定一句用户语言；原始错误留在控制台/后端日志。
+watch(
+  () => mappingSnapshot.value?.lastError,
+  (raw) => {
+    if (raw) console.warn("button mapping snapshot error", raw);
+  },
+);
 
 async function restoreDefaults(): Promise<void> {
   busy.value = true;
@@ -1231,16 +1318,20 @@ async function restoreDefaults(): Promise<void> {
     const saved = await resetButtonMappings();
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-    statusMessage.value = "已恢复默认（全部按键保持原始行为）";
+    statusMessage.value = t("已恢复默认（全部按键保持原始行为）");
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    statusMessage.value = operationErrorText(
+      "restore default button mappings failed",
+      error,
+      "没能恢复默认设置，请重试。",
+    );
   } finally {
     busy.value = false;
   }
 }
 
 async function saveConfiguration(): Promise<void> {
-  await persist("配置已保存并生效");
+  await persist(t("配置已保存并生效"));
 }
 
 async function exportConfiguration(): Promise<void> {
@@ -1248,9 +1339,13 @@ async function exportConfiguration(): Promise<void> {
   statusMessage.value = null;
   try {
     const exported = await exportButtonMappingConfiguration();
-    if (exported) statusMessage.value = "按键映射配置已导出";
+    if (exported) statusMessage.value = t("按键映射配置已导出");
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    statusMessage.value = operationErrorText(
+      "export button mappings failed",
+      error,
+      "没能导出配置，请重试。",
+    );
   } finally {
     busy.value = false;
   }
@@ -1266,9 +1361,13 @@ async function importConfiguration(): Promise<void> {
     savedSnapshot.value = JSON.parse(JSON.stringify(imported)) as ButtonMappings;
     editingTarget.value = null;
     mappingSnapshot.value = await getButtonMappingSnapshot();
-    statusMessage.value = "按键映射配置已导入并生效";
+    statusMessage.value = t("按键映射配置已导入并生效");
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    statusMessage.value = operationErrorText(
+      "import button mappings failed",
+      error,
+      "没能导入配置，请重试。",
+    );
   } finally {
     busy.value = false;
   }
@@ -1358,7 +1457,7 @@ const MODIFIER_KEYS = new Set<KeyCode>([
   "left_windows",
   "right_windows",
 ]);
-const CAPTURE_MODIFIER_OPTIONS: Array<{ key: KeyCode; label: string }> = [
+const CAPTURE_MODIFIER_SOURCES: Array<{ key: KeyCode; label: string }> = [
   { key: "left_control", label: "左 Ctrl" },
   { key: "left_shift", label: "左 Shift" },
   { key: "left_alt", label: "左 Alt" },
@@ -1368,6 +1467,12 @@ const CAPTURE_MODIFIER_OPTIONS: Array<{ key: KeyCode; label: string }> = [
   { key: "right_alt", label: "右 Alt" },
   { key: "right_windows", label: "右 Win" },
 ];
+const captureModifierOptions = computed(() =>
+  CAPTURE_MODIFIER_SOURCES.map((option) => ({
+    key: option.key,
+    label: t(option.label),
+  })),
+);
 
 function toggleCaptureModifier(key: KeyCode): void {
   if (!capturingShortcut.value || capturedChord) return;
@@ -1395,10 +1500,14 @@ async function beginShortcutCapture(): Promise<void> {
     capturingShortcut.value = true;
     if (captureTimeout !== null) window.clearTimeout(captureTimeout);
     captureTimeout = window.setTimeout(() => {
-      void finishShortcutCapture("录入已超时，请重新录入");
+      void finishShortcutCapture(t("录入已超时，请重新录入"));
     }, 15_000);
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    statusMessage.value = operationErrorText(
+      "start shortcut capture failed",
+      error,
+      "没能开始录入快捷键，请重试。",
+    );
   } finally {
     if (requestId === captureRequestId) captureStarting.value = false;
   }
@@ -1419,7 +1528,7 @@ async function finishShortcutCapture(message?: string): Promise<void> {
 
 function handleCaptureBlur(): void {
   if (capturingShortcut.value || captureStarting.value) {
-    void finishShortcutCapture("窗口失去焦点，已取消录入");
+    void finishShortcutCapture(t("窗口失去焦点，已取消录入"));
   }
 }
 
@@ -1432,7 +1541,7 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
       captureDisplay.value = capturedChord;
       if (capturePressedKeys.size === 0) {
         const label = chordLabel({ keys: capturedChord });
-        void finishShortcutCapture(`快捷键已录入：${label}`);
+        void finishShortcutCapture(t("快捷键已录入：{label}", { label }));
       }
     } else {
       captureDisplay.value = safeCaptureMode.value
@@ -1448,21 +1557,21 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
   if (MODIFIER_KEYS.has(code)) {
     if (!repeat) pressedCaptureModifiers.add(code);
     if (safeCaptureMode.value) {
-      statusMessage.value = "安全录入中：请松开键盘修饰键，并在界面中点击选择";
+      statusMessage.value = t("安全录入中：请松开键盘修饰键，并在界面中点击选择");
     } else {
       captureDisplay.value = [...pressedCaptureModifiers];
     }
     return;
   }
   if (safeCaptureMode.value && pressedCaptureModifiers.size > 0) {
-    statusMessage.value = "未录入：请不要按住键盘修饰键；先在界面选择修饰键，再单独按主键";
+    statusMessage.value = t("未录入：请不要按住键盘修饰键；先在界面选择修饰键，再单独按主键");
     return;
   }
   const modifiers = safeCaptureMode.value
     ? [...selectedCaptureModifiers]
     : [...pressedCaptureModifiers];
   if (code === "escape" && modifiers.length === 0) {
-    void finishShortcutCapture("已取消录入");
+    void finishShortcutCapture(t("已取消录入"));
     return;
   }
   const keys = [...modifiers, code];
@@ -1473,7 +1582,7 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): v
   } else {
     applyAction({ type: "shortcut", chord: { keys } });
   }
-  statusMessage.value = `已录入 ${chordLabel({ keys })}，松开全部按键后完成`;
+  statusMessage.value = t("已录入 {label}，松开全部按键后完成", { label: chordLabel({ keys }) });
 }
 
 function handleCaptureKeydown(event: KeyboardEvent): void {
@@ -1509,19 +1618,19 @@ watch(editingTarget, async (target) => {
 function phaseLabel(phase: RawInputPhase | undefined): string {
   switch (phase) {
     case "ready":
-      return "按键监听已就绪";
+      return t("按键监听已就绪");
     case "starting":
-      return "正在启动监听";
+      return t("正在启动监听");
     case "failed":
-      return "监听启动失败（自动重试中）";
+      return t("监听启动失败（自动重试中）");
     case "stopped":
-      return "监听已停止";
+      return t("监听已停止");
     case "awaiting":
-      return "等待遥控器连接";
+      return t("等待遥控器连接");
     case "unsupported":
-      return "当前环境暂不支持";
+      return t("当前环境暂不支持");
     default:
-      return "正在读取状态";
+      return t("正在读取状态");
   }
 }
 
@@ -1532,13 +1641,17 @@ async function toggleListener(): Promise<void> {
   try {
     if (rawInput.value?.phase === "ready") {
       await stopRawInput();
-      statusMessage.value = "监听已停止；映射与高亮暂停（按住说话不受影响）";
+      statusMessage.value = t("监听已停止；映射与高亮暂停（按住说话不受影响）");
     } else {
       await startRawInput();
-      statusMessage.value = "监听已启动";
+      statusMessage.value = t("监听已启动");
     }
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    statusMessage.value = operationErrorText(
+      "toggle raw input listener failed",
+      error,
+      "没能切换按键监听状态，请重试。",
+    );
   } finally {
     busy.value = false;
   }
@@ -1562,17 +1675,23 @@ const connectionTone = computed(() =>
 );
 const reconnectBusy = ref(false);
 const reconnectLabel = computed(() =>
-  reconnectBusy.value ? "连接中…" : connectionReady.value ? "重新连接" : "立即连接",
+  reconnectBusy.value
+    ? t("连接中…")
+    : connectionReady.value
+      ? t("重新连接")
+      : t("立即连接"),
 );
 const reconnectDisabled = computed(
   () => reconnectBusy.value || props.runtime?.platform.bleScanAvailable === false,
 );
 const reconnectTitle = computed(() => {
-  if (reconnectBusy.value) return "正在连接遥控器…";
+  if (reconnectBusy.value) return t("正在连接遥控器…");
   if (props.runtime?.platform.bleScanAvailable === false) {
-    return "蓝牙不可用：先在连接页确认蓝牙已打开，再回来重试";
+    return t("蓝牙不可用：先在连接页确认蓝牙已打开，再回来重试");
   }
-  return connectionReady.value ? "断开后连回当前这支遥控器" : "连接已配对的遥控器";
+  return connectionReady.value
+    ? t("断开后连回当前这支遥控器")
+    : t("连接已配对的遥控器");
 });
 
 /**
@@ -1608,12 +1727,16 @@ async function reconnectRemote(): Promise<void> {
       name: connectionInfo.value?.remoteName ?? null,
     });
     if (!target) {
-      statusMessage.value = "没有找到已配对的遥控器；到连接页扫描后再试。";
+      statusMessage.value = t("没有找到已配对的遥控器；到连接页扫描后再试。");
       return;
     }
     await connectRemote(target.id);
   } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : String(error);
+    statusMessage.value = operationErrorText(
+      "reconnect remote failed",
+      error,
+      "没能连接遥控器，请重试。",
+    );
   } finally {
     reconnectBusy.value = false;
   }
@@ -1725,8 +1848,19 @@ const captureSwitchState = computed(() =>
  * 失败（开启后助手没起来）显示固定一句。其余情况为 null —— 一个字都不显示。
  */
 const captureFailure = computed(() => {
-  if (rc003BridgeFailed.value) return CAPTURE_BRIDGE_FAILED_TEXT;
-  return captureFailureText(rc003CaptureFailureRaw.value, CAPTURE_FAILURE_NAME);
+  if (rc003BridgeFailed.value) return captureBridgeFailedText.value;
+  const raw = rc003CaptureFailureRaw.value;
+  if (!raw) return null;
+  if (effectiveLanguage.value === "zh-Hans") {
+    return captureFailureText(raw, CAPTURE_FAILURE_NAME);
+  }
+  // 英文界面只给固定一句，原始错误留在诊断日志里。
+  return t("全按键支持没有切换成功。请关闭后重新开启；仍不行就先断开遥控器再重新配对。");
+});
+
+// 开关操作的原始错误只进日志/诊断，不直接显示（中文界面由 captureFailureText 映射）。
+watch(rc003CaptureFailureRaw, (raw) => {
+  if (raw) console.warn("rc003 capture toggle failed", raw);
 });
 /**
  * 「开着但没生效」的提示（2026-10-13 定稿）：后端说 `inactive` 才出现，且**只在
@@ -1739,7 +1873,9 @@ const captureInactiveNote = computed(() =>
     health: rc003CaptureHealth.value,
     linkReady: connectionReady.value,
   })
-    ? captureInactiveText(CAPTURE_FAILURE_NAME)
+    ? effectiveLanguage.value === "zh-Hans"
+      ? captureInactiveText(CAPTURE_FAILURE_NAME)
+      : t("全按键支持还没有生效，正在自动重试。如果一直不恢复，请把开关关掉再打开。")
     : null,
 );
 /**
@@ -1752,13 +1888,12 @@ const captureRevokedNote = computed(() =>
     switchState: captureSwitchState.value,
     revoked: rc003CaptureRevoked.value,
   })
-    ? captureRevokedText(CAPTURE_FAILURE_NAME)
+    ? effectiveLanguage.value === "zh-Hans"
+      ? captureRevokedText(CAPTURE_FAILURE_NAME)
+      : t("全按键支持因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。")
     : null,
 );
 /** 三键卡片/格子的置灰提示：本机开不了时不说「开启后恢复正常」。 */
-const triKeyGatedTitle = computed(() =>
-  captureUnsupported.value ? TRI_KEY_UNSUPPORTED_TITLE : TRI_KEY_GATED_TITLE,
-);
 
 /**
  * 返回/音量± 在「全按键支持」关闭时不可用：卡片置灰禁用并给悬停提示
@@ -2138,8 +2273,8 @@ onUnmounted(() => {
   <section v-if="showCommonPhraseEditor && commonPhraseEditor" class="buttons-page">
     <header class="page-header">
       <div class="mapping-title-row">
-        <button type="button" class="chip" @click="showCommonPhraseEditor = false">返回</button>
-        <h1>调整常用语</h1>
+        <button type="button" class="chip" @click="showCommonPhraseEditor = false">{{ t("返回") }}</button>
+        <h1>{{ t("调整常用语") }}</h1>
       </div>
     </header>
     <component :is="commonPhraseEditor" />
@@ -2150,9 +2285,9 @@ onUnmounted(() => {
     <header class="page-header mapping-header">
       <div>
         <div class="mapping-title-row">
-          <h1>按键映射</h1>
-          <label class="toggle-row" title="开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。">
-            <span>启用自定义按键功能</span>
+          <h1>{{ t("按键映射") }}</h1>
+          <label class="toggle-row" :title="t('开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。')">
+            <span>{{ t("启用自定义按键功能") }}</span>
             <input v-if="mappingsLoaded" v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
             <span v-else class="toggle-placeholder" aria-hidden="true"></span>
           </label>
@@ -2169,7 +2304,7 @@ onUnmounted(() => {
             class="toggle-row"
             :title="captureSwitchTitle"
           >
-            <span>全按键支持</span>
+            <span>{{ t("全按键支持") }}</span>
             <!-- 开关 + 状态提示合并成一个开关（2026-10-10 Andy 定稿，见
                  docs/product-copy.md §4）：只有关闭 / 开启 / 正在操作三态，
                  进行中=置灰 + 转圈且不配文字；只有失败才在标题下方显示一句原因。
@@ -2200,7 +2335,7 @@ onUnmounted(() => {
           </label>
           <!-- 本机不可用（ARM64，issue #206）：开关旁一句短说明，说结果不说机制。 -->
           <span v-if="captureUnsupported" class="capture-unavailable-note">
-            {{ CAPTURE_UNSUPPORTED_NOTE }}
+            {{ captureUnsupportedNote }}
           </span>
         </div>
         <!-- 标题下方一行：平时是页面副标题；只有开关操作失败/启动失败、或
@@ -2216,7 +2351,7 @@ onUnmounted(() => {
             captureFailure ??
             captureRevokedNote ??
             captureInactiveNote ??
-            "点击按键进行自定义配置"
+            t("点击按键进行自定义配置")
           }}
         </p>
       </div>
@@ -2276,7 +2411,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${REMOTE_TOP}px` }">
-        <img src="/RC003-remote-photo@2x.png" alt="小米蓝牙语音遥控器 2 Pro 示意图" draggable="false" />
+        <img src="/RC003-remote-photo@2x.png" :alt="t('小米蓝牙语音遥控器 2 Pro 示意图')" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"
@@ -2344,7 +2479,7 @@ onUnmounted(() => {
             :title="
               captureGated(placement.button)
                 ? triKeyGatedTitle
-                : `${buttonLabels[placement.button]} · ${buttonTriggerLabel(trigger)}：${actionSummary(actionOf(placement.button, trigger))}`
+                : actionCellTitle(placement.button, trigger)
             "
             @click.stop="openEditor(placement.button, trigger)"
           >
@@ -2372,10 +2507,10 @@ onUnmounted(() => {
               stroke-linejoin="round"
             />
           </svg>
-          <strong>语音键</strong>
-          <span class="badge pending voice-badge" :class="{ active: voiceActive }">按住说话</span>
+          <strong>{{ t("语音键") }}</strong>
+          <span class="badge pending voice-badge" :class="{ active: voiceActive }">{{ t("按住说话") }}</span>
         </div>
-        <p class="voice-note">按下开始、松开结束；不参与自定义映射，不加双击/长按延迟。</p>
+        <p class="voice-note">{{ t("按下开始、松开结束；不参与自定义映射，不加双击/长按延迟。") }}</p>
       </article>
     </div>
 
@@ -2383,7 +2518,7 @@ onUnmounted(() => {
       <div class="card-title-row">
         <div>
           <h2>{{ buttonLabel(editingTarget.button) }} · {{ buttonTriggerLabel(editingTarget.trigger) }}</h2>
-          <p class="muted">当前：{{ actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }}</p>
+          <p class="muted">{{ t("当前：{summary}", { summary: actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }) }}</p>
         </div>
         <div class="button-row">
           <!-- 全按键支持开关已移至页面头部（与「启用自定义按键功能」并排，
@@ -2393,12 +2528,12 @@ onUnmounted(() => {
             :class="{ 'is-active': actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"
             type="button"
             :disabled="busy"
-            title="只禁用当前格子的映射，此按键恢复原始行为"
+            :title="t('只禁用当前格子的映射，此按键恢复原始行为')"
             @click="applyAction({ type: 'disabled' })"
           >
-            禁用按键
+            {{ t("禁用按键") }}
           </button>
-          <button class="secondary-button" type="button" @click="editingTarget = null">关闭</button>
+          <button class="secondary-button" type="button" @click="editingTarget = null">{{ t("关闭") }}</button>
         </div>
       </div>
       <div class="action-sections">
@@ -2425,35 +2560,35 @@ onUnmounted(() => {
         <!-- 自定义动作放在系统与媒体下方（2026-10-22 用户指定顺序）；
              原「设备操作 / 聚焦输入框」并入本组的录制按钮右侧。 -->
         <section class="action-section">
-          <h4 class="action-section-title">自定义动作</h4>
+          <h4 class="action-section-title">{{ t("自定义动作") }}</h4>
           <div class="custom-shortcut-row">
             <button
               class="chip"
               :class="{ selected: capturingShortcut }"
               type="button"
               :disabled="captureStarting"
-              @click="capturingShortcut ? finishShortcutCapture('已取消录入') : beginShortcutCapture()"
+              @click="capturingShortcut ? finishShortcutCapture(t('已取消录入')) : beginShortcutCapture()"
             >
-              {{ capturingShortcut ? "录入中…（按 Esc 取消）" : "录入自定义快捷键" }}
+              {{ capturingShortcut ? t("录入中…（按 Esc 取消）") : t("录入自定义快捷键") }}
             </button>
             <button
               class="chip"
               :class="{ selected: selectedAction?.type === 'focus_input' }"
               type="button"
-              title="把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）"
+              :title="t('把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）')"
               @click="applyAction({ type: 'focus_input' })"
             >
-              聚焦输入框
+              {{ t("聚焦输入框") }}
             </button>
             <span v-if="capturingShortcut" class="capture-display">
-              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? "先选择修饰键" : "请按下快捷键组合") }}
+              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? t("先选择修饰键") : t("请按下快捷键组合")) }}
             </span>
           </div>
           <label
             class="toggle-row safe-capture-toggle"
-            title="开启后，通过界面选择修饰键，键盘只需按主键。"
+            :title="t('开启后，通过界面选择修饰键，键盘只需按主键。')"
           >
-            <span>安全录入模式</span>
+            <span>{{ t("安全录入模式") }}</span>
             <input
               v-model="safeCaptureMode"
               type="checkbox"
@@ -2461,16 +2596,16 @@ onUnmounted(() => {
               :disabled="capturingShortcut || captureStarting"
             />
             <small class="muted safe-capture-hint">
-              直接录入无法完成或会触发系统动作时再开启。
+              {{ t("直接录入无法完成或会触发系统动作时再开启。") }}
             </small>
           </label>
           <template v-if="capturingShortcut && safeCaptureMode">
             <p class="muted editor-note capture-guide">
-              请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。
+              {{ t("请用鼠标选择修饰键，再只按一次主键。不要在键盘上按完整组合，系统快捷键不会被执行。") }}
             </p>
             <div class="preset-grid capture-modifiers">
               <button
-                v-for="modifier in CAPTURE_MODIFIER_OPTIONS"
+                v-for="modifier in captureModifierOptions"
                 :key="modifier.key"
                 class="chip"
                 :class="{ selected: selectedCaptureModifiers.has(modifier.key) }"
@@ -2480,13 +2615,13 @@ onUnmounted(() => {
                 {{ modifier.label }}
               </button>
             </div>
-            <p class="capture-display">然后单独按主键（例如选择“左 Win”后，只按 L）</p>
+            <p class="capture-display">{{ t("然后单独按主键（例如选择“左 Win”后，只按 L）") }}</p>
           </template>
         </section>
 
         <section class="action-section">
-          <h4 class="action-section-title">打开应用</h4>
-          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" aria-label="筛选已添加应用" placeholder="筛选已添加应用" />
+          <h4 class="action-section-title">{{ t("打开应用") }}</h4>
+          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" :aria-label="t('筛选已添加应用')" :placeholder="t('筛选已添加应用')" />
           <!-- 预设应用与已添加应用共用一个换行网格（2026-10-03 用户要求）：
                两组名字连续排布，不再在中间强制换行；长名字的换行规则见 .chip.custom-app。 -->
           <div class="preset-grid app-library">
@@ -2496,7 +2631,7 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.id }"
               type="button"
-              title="已运行则切到该应用窗口，未运行则启动"
+              :title="t('已运行则切到该应用窗口，未运行则启动')"
               @click="applyAction({ type: 'open_app', target: app.id })"
             >
               {{ openAppLabel(app.name) }}
@@ -2505,18 +2640,18 @@ onUnmounted(() => {
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ openAppLabel(app.name) }}</button>
             <!-- 扫描 / 添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
-            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
+            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">{{ t("扫描本机应用") }}</button>
             <button
               class="chip add-app"
               type="button"
-              title="从本机选择任意程序或快捷方式"
+              :title="t('从本机选择任意程序或快捷方式')"
               @click="addCustomApp"
             >
-              ＋ 添加应用
+              {{ t("＋ 添加应用") }}
             </button>
           </div>
           <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile">
-            <p class="action-section-title focus-profile-title">聚焦方式</p>
+            <p class="action-section-title focus-profile-title">{{ t("聚焦方式") }}</p>
             <div class="preset-grid">
               <button
                 v-for="option in focusStrategyOptions"
@@ -2540,12 +2675,12 @@ onUnmounted(() => {
                 :disabled="focusBusy"
                 @click="resetPresetFocus"
               >
-                恢复默认
+                {{ t("恢复默认") }}
               </button>
             </div>
             <template v-if="focusProfile?.strategy === 'app_shortcut'">
               <p class="muted focus-learn-hint">
-                先点击“录入快捷键”，再按下该 APP 用于聚焦输入框的单个按键或组合键。执行时会先激活 APP，再发送此按键。
+                {{ t("先点击“录入快捷键”，再按下该 APP 用于聚焦输入框的单个按键或组合键。执行时会先激活 APP，再发送此按键。") }}
               </p>
               <div class="focus-shortcut-row">
                 <span class="focus-shortcut-value" :class="{ empty: !focusProfile?.shortcut?.keys?.length }">
@@ -2556,7 +2691,7 @@ onUnmounted(() => {
                   {{
                     focusProfile?.shortcut?.keys?.length
                       ? chordLabel(focusProfile.shortcut)
-                      : "尚未录入"
+                      : t("尚未录入")
                   }}
                 </span>
                 <button
@@ -2565,14 +2700,14 @@ onUnmounted(() => {
                   :disabled="captureStarting"
                   @click="
                     capturingShortcut && capturePurpose === 'focus_shortcut'
-                      ? finishShortcutCapture('已取消录入')
+                      ? finishShortcutCapture(t('已取消录入'))
                       : beginFocusShortcutCapture()
                   "
                 >
                   {{
                     capturingShortcut && capturePurpose === "focus_shortcut"
-                      ? "录入中…（按 Esc 取消）"
-                      : "点击录入快捷键"
+                      ? t("录入中…（按 Esc 取消）")
+                      : t("点击录入快捷键")
                   }}
                 </button>
                 <button
@@ -2581,14 +2716,13 @@ onUnmounted(() => {
                   :disabled="!focusProfile?.shortcut?.keys?.length || capturingShortcut"
                   @click="clearFocusShortcut"
                 >
-                  清除
+                  {{ t("清除") }}
                 </button>
               </div>
             </template>
             <template v-if="focusProfile?.strategy === 'recorded_element'">
               <p class="muted focus-learn-hint">
-                点击后会立即打开目标 APP。请在 6 秒内点击需要聚焦的输入框；无线麦 SayAll
-                只记录辅助功能特征，不读取输入内容。
+                {{ t("点击后会立即打开目标 APP。请在 6 秒内点击需要聚焦的输入框；无线麦 SayAll 只记录辅助功能特征，不读取输入内容。") }}
               </p>
               <div class="focus-learn-row">
                 <button
@@ -2599,17 +2733,17 @@ onUnmounted(() => {
                 >
                   {{
                     focusLearnState === "opening"
-                      ? "正在打开应用…"
+                      ? t("正在打开应用…")
                       : focusLearnState === "learning"
-                        ? "等待点击输入框…"
-                        : "开始学习输入框"
+                        ? t("等待点击输入框…")
+                        : t("开始学习输入框")
                   }}
                 </button>
                 <span
                   class="focus-record-status"
                   :class="focusProfile?.recorded ? 'is-done' : 'is-pending'"
                 >
-                  {{ focusProfile?.recorded ? "已记录目标输入框" : "尚未记录目标输入框" }}
+                  {{ focusProfile?.recorded ? t("已记录目标输入框") : t("尚未记录目标输入框") }}
                 </span>
                 <button
                   v-if="focusProfile?.recorded"
@@ -2618,7 +2752,7 @@ onUnmounted(() => {
                   :disabled="focusLearnBusy"
                   @click="clearRecordedFocus"
                 >
-                  清除
+                  {{ t("清除") }}
                 </button>
               </div>
               <p v-if="focusLearnMessage" class="focus-learn-message" :class="`is-${focusLearnState}`">
@@ -2627,8 +2761,7 @@ onUnmounted(() => {
             </template>
             <template v-if="focusProfile?.strategy === 'recorded_point'">
               <p class="muted focus-learn-hint">
-                「记录点击位置」会先打开目标应用；把鼠标停在要点击的位置上，6 秒后自动记录，
-                之后按这个位置点击聚焦。
+                {{ t("「记录点击位置」会先打开目标应用；把鼠标停在要点击的位置上，6 秒后自动记录，之后按这个位置点击聚焦。") }}
               </p>
               <div class="focus-learn-row">
                 <button
@@ -2639,10 +2772,10 @@ onUnmounted(() => {
                 >
                   {{
                     pointLearnState === "opening"
-                      ? "正在打开应用…"
+                      ? t("正在打开应用…")
                       : pointLearnState === "recording"
-                        ? "等待鼠标停留…"
-                        : "开始记录位置"
+                        ? t("等待鼠标停留…")
+                        : t("开始记录位置")
                   }}
                 </button>
                 <button
@@ -2652,13 +2785,13 @@ onUnmounted(() => {
                   :disabled="pointLearnState === 'opening' || pointLearnState === 'recording'"
                   @click="clearRecordedPoint"
                 >
-                  清除记录
+                  {{ t("清除记录") }}
                 </button>
                 <span
                   class="focus-record-status"
                   :class="focusProfile?.point ? 'is-done' : 'is-pending'"
                 >
-                  {{ focusProfile?.point ? "已记录点击位置" : "尚未记录点击位置" }}
+                  {{ focusProfile?.point ? t("已记录点击位置") : t("尚未记录点击位置") }}
                 </span>
               </div>
               <p v-if="pointLearnMessage" class="focus-learn-message" :class="`is-${pointLearnState}`">
@@ -2672,9 +2805,9 @@ onUnmounted(() => {
         <!-- 组合动作（自定义动作；2026-10-15）：把已有动作绑定到本按键。
              入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。 -->
         <section v-if="COMBINATION_ACTIONS_ENABLED" class="action-section">
-          <h4 class="action-section-title">组合动作</h4>
+          <h4 class="action-section-title">{{ t("组合动作") }}</h4>
           <p v-if="macroDefinitions.length === 0" class="muted">
-            还没有组合动作。先到“组合动作”页创建。
+            {{ t("还没有组合动作。先到“组合动作”页创建。") }}
           </p>
           <div class="preset-grid">
             <button
@@ -2687,7 +2820,7 @@ onUnmounted(() => {
                   selectedAction.macroId === macro.macroId,
               }"
               type="button"
-              :title="`${macro.steps.length} 个步骤`"
+              :title="t('{count} 个步骤', { count: macro.steps.length })"
               @click="
                 applyAction({
                   type: 'run_macro',
@@ -2702,16 +2835,16 @@ onUnmounted(() => {
             <button
               class="chip"
               type="button"
-              title="打开组合动作页，创建、编辑或删除组合动作"
+              :title="t('打开组合动作页，创建、编辑或删除组合动作')"
               @click="emit('navigate', 'macros')"
             >
-              管理组合动作
+              {{ t("管理组合动作") }}
             </button>
           </div>
         </section>
 
         <section v-if="commonPhrasesAvailable" class="action-section">
-          <h4 class="action-section-title">常用语</h4>
+          <h4 class="action-section-title">{{ t("常用语") }}</h4>
           <div class="preset-grid">
             <button
               class="chip"
@@ -2720,8 +2853,8 @@ onUnmounted(() => {
               :disabled="!commonPhraseAllowed"
               :title="
                 commonPhraseAllowed
-                  ? '打开常用语面板，按方向键和 OK 键插入对应常用语'
-                  : '登录会员后可使用常用语'
+                  ? t('打开常用语面板，按方向键和 OK 键插入对应常用语')
+                  : t('登录会员后可使用常用语')
               "
               @click="applyAction({ type: 'open_common_phrases' })"
             >
@@ -2734,8 +2867,8 @@ onUnmounted(() => {
               >
                 <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" />
               </svg>
-              打开常用语
-              <span v-if="commonPhraseAllowed" class="member-badge">会员</span>
+              {{ t("打开常用语") }}
+              <span v-if="commonPhraseAllowed" class="member-badge">{{ t("会员") }}</span>
             </button>
             <MembershipRequiredButton
               v-if="!commonPhraseAllowed"
@@ -2745,7 +2878,7 @@ onUnmounted(() => {
             <button
               class="chip"
               type="button"
-              title="编辑常用语内容与五键分配"
+              :title="t('编辑常用语内容与五键分配')"
               @click="showCommonPhraseEditor = true"
             >
               <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -2760,12 +2893,12 @@ onUnmounted(() => {
                   <circle cx="10.5" cy="17.5" r="1.9" />
                 </g>
               </svg>
-              调整常用语
+              {{ t("调整常用语") }}
             </button>
             <button
               class="chip"
               type="button"
-              title="预览常用语面板（未开通会员时为只读示例）"
+              :title="t('预览常用语面板（未开通会员时为只读示例）')"
               @click="openExample"
             >
               <svg class="chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -2778,7 +2911,7 @@ onUnmounted(() => {
                   />
                 </g>
               </svg>
-              常用语示例
+              {{ t("常用语示例") }}
             </button>
           </div>
         </section>
@@ -2789,35 +2922,35 @@ onUnmounted(() => {
            单击 → 四方向移动 → 滚轮上下 → 数量输入框。 -->
       <div class="action-sections mouse-action-sections">
         <section class="action-section">
-          <h4 class="action-section-title">鼠标动作</h4>
+          <h4 class="action-section-title">{{ t("鼠标动作") }}</h4>
           <!-- 两个可换行的组：空间够时并排成一行；不够时整组换行，
                正好是“点击一行、移动与滚轮合并为下一行”。 -->
           <div class="mouse-action-row">
             <div class="mouse-action-group">
               <button v-for="(label, kind) in mouseClickLabels" :key="kind" class="chip" type="button"
                 :class="{ selected: selectedAction?.type === 'mouse_click' && selectedAction.kind === kind }"
-                title="点击鼠标当前位置" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
+                :title="t('点击鼠标当前位置')" @click="applyAction({ type: 'mouse_click', kind })">{{ label }}</button>
             </div>
             <div class="mouse-action-group">
               <button v-for="(label, direction) in mouseMoveLabels" :key="direction" class="chip" type="button"
                 :aria-label="label" :title="label" :class="{ selected: selectedAction?.type === 'mouse_move' && selectedAction.direction === direction }"
                 @click="applyAction({ type: 'mouse_move', direction, distance: moveDistance })">{{ label }}</button>
               <button v-for="direction in (['up', 'down'] as const)" :key="direction" class="chip"
-                :class="{ selected: isActiveScroll(direction) }" type="button" title="在鼠标当前位置滚动"
-                @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? "滚轮向上" : "滚轮向下" }}</button>
+                :class="{ selected: isActiveScroll(direction) }" type="button" :title="t('在鼠标当前位置滚动')"
+                @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? t("滚轮向上") : t("滚轮向下") }}</button>
             </div>
           </div>
           <label v-if="mouseAmountVisible" class="mouse-amount">
-            <span>{{ mouseAmountKind === "mouse_move" ? "每次移动" : "每次滚动" }}</span>
+            <span>{{ mouseAmountKind === "mouse_move" ? t("每次移动") : t("每次滚动") }}</span>
             <input v-model="mouseAmountDraft"
-              :aria-label="mouseAmountKind === 'mouse_move' ? '每次移动像素' : '每次滚动格数'"
+              :aria-label="mouseAmountKind === 'mouse_move' ? t('每次移动像素') : t('每次滚动格数')"
               type="text" inputmode="numeric" autocomplete="off"
               @focus="clearMouseAmountError"
               @click="clearMouseAmountError"
               @input="clearMouseAmountError"
               @keydown.enter="updateMouseAmount()"
               @blur="updateMouseAmount()" />
-            <span>{{ mouseAmountKind === "mouse_move" ? "像素" : "格" }}</span>
+            <span>{{ mouseAmountKind === "mouse_move" ? t("像素") : t("格") }}</span>
             <span v-if="mouseAmountError" class="mouse-amount-error">{{ mouseAmountError }}</span>
             <span v-else-if="mouseAmountKind === 'mouse_move'" class="mouse-amount-hint">{{ MOUSE_AMOUNT_HINT }}</span>
           </label>
@@ -2825,17 +2958,17 @@ onUnmounted(() => {
       </div>
       <div v-if="repeatGroupVisible" class="action-sections repeat-action-sections">
         <section class="action-section repeat-group">
-          <h4 class="action-section-title">连续执行</h4>
+          <h4 class="action-section-title">{{ t("连续执行") }}</h4>
           <div class="repeat-options">
             <button
               class="chip"
               :class="{ selected: repeatChoice === 'off' }"
               type="button"
-              title="按住不放只执行一次"
+              :title="t('按住不放只执行一次')"
               :disabled="busy"
               @click="selectHoldRepeat('off')"
             >
-              关闭
+              {{ repeatOffLabel }}
             </button>
             <button
               class="chip"
@@ -2845,7 +2978,7 @@ onUnmounted(() => {
               :disabled="busy || (!!repeatSingleReason && repeatChoice !== 'single')"
               @click="selectHoldRepeat('single')"
             >
-              重复单击动作
+              {{ t("重复单击动作") }}
             </button>
             <button
               class="chip"
@@ -2855,14 +2988,14 @@ onUnmounted(() => {
               :disabled="busy || (!!repeatLongReason && repeatChoice !== 'long')"
               @click="selectHoldRepeat('long')"
             >
-              重复长按动作
+              {{ t("重复长按动作") }}
             </button>
           </div>
           <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
         </section>
       </div>
-      <label v-if="okClickVisible" class="toggle-row ok-click-toggle" title="刚用遥控器移动过光标时，按 OK 会点击光标位置">
-        <span>移动光标后按 OK 点击</span>
+      <label v-if="okClickVisible" class="toggle-row ok-click-toggle" :title="t('刚用遥控器移动过光标时，按 OK 会点击光标位置')">
+        <span>{{ t("移动光标后按 OK 点击") }}</span>
         <input
           class="toggle-input"
           type="checkbox"
@@ -2872,7 +3005,7 @@ onUnmounted(() => {
         />
       </label>
       <p v-if="okClickVisible" class="muted ok-click-hint">
-        刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。
+        {{ t("刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。") }}
       </p>
     </article>
 
@@ -2887,34 +3020,34 @@ onUnmounted(() => {
           :disabled="busy"
           @click="toggleListener"
         >
-          {{ rawInput?.phase === "ready" ? "停止监听" : "启动监听" }}
+          {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
         </button>
-        <small v-if="mappingSnapshot && !mappings.enabled" class="muted"> · 总开关关闭（按键保持原样）</small>
+        <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
       </div>
-      <label class="toggle-row" title="开启后，操作实体遥控器不会切换正在编辑的按键。">
-        <span>锁定当前按键</span>
+      <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
+        <span>{{ t("锁定当前按键") }}</span>
         <input v-if="lockSelectionReady" v-model="lockSelection" type="checkbox" class="toggle-input" />
         <span v-else class="toggle-placeholder" aria-hidden="true"></span>
       </label>
-      <span class="muted lock-hint">按遥控器时保持当前编辑项</span>
+      <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
       <div class="button-row">
         <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
-          保存配置
+          {{ t("保存配置") }}
         </button>
         <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
-          导入配置…
+          {{ t("导入配置…") }}
         </button>
         <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
-          导出配置…
+          {{ t("导出配置…") }}
         </button>
         <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
-          恢复默认
+          {{ t("恢复默认") }}
         </button>
       </div>
     </footer>
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
-    <p v-if="mappingSnapshot?.lastError" class="error-text">{{ mappingSnapshot.lastError }}</p>
+    <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>

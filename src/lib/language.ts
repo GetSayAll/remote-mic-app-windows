@@ -3,12 +3,14 @@ import {
   getApplicationLanguage,
   saveApplicationLanguage,
   type AppLanguagePreference,
-  type EffectiveLanguage,
 } from "./bridge";
+import {
+  effectiveLanguage,
+  type EffectiveLanguage,
+} from "./language-state";
 import { reasonToken, reportFrontendEvent } from "./frontend-diagnostics";
 
 const preference = ref<AppLanguagePreference>("system");
-const effectiveLanguage = ref<EffectiveLanguage>("zh-Hans");
 const busy = ref(false);
 const errorMessage = ref("");
 

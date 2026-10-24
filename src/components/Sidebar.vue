@@ -2,6 +2,17 @@
 import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
 import CrownIcon from "./CrownIcon.vue";
+import { t, tNav } from "../lib/i18n";
+import { effectiveLanguage } from "../lib/language-state";
+
+/**
+ * 侧栏文案：中文模式直接用原文；英文模式走导航专用词表（`nav.*`），避免与
+ * 页面内同形文案（设备徽标「推荐」= Recommended、向导阶段「设置」= Set Up）
+ * 争用同一个 key。
+ */
+function navLabel(item: { label: string }): string {
+  return effectiveLanguage.value === "en" ? tNav(item.label) : item.label;
+}
 
 defineProps<{ activePage: string; version?: string | null }>();
 const emit = defineEmits<{ select: [page: string] }>();
@@ -65,7 +76,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 
 <template>
   <aside class="sidebar">
-    <nav aria-label="设置页面">
+    <nav :aria-label="t('设置页面')">
       <button
         v-for="item in navigationItems"
         :key="item.id"
@@ -94,7 +105,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
             stroke-linejoin="round"
           />
         </svg>
-        <span>{{ item.label }}</span>
+        <span>{{ navLabel(item) }}</span>
       </button>
     </nav>
 

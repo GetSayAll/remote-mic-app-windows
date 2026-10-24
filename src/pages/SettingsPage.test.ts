@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Ref } from "vue";
 import { ref } from "vue";
 import type { RuntimeSnapshot } from "../lib/bridge";
+import { effectiveLanguage } from "../lib/language-state";
 import { useAppUpdate, type AppUpdatePhase } from "../lib/app-update";
 import SettingsPage from "./SettingsPage.vue";
 
@@ -153,6 +154,7 @@ const runtime: RuntimeSnapshot = {
 
 describe("settings page", () => {
   beforeEach(() => {
+    effectiveLanguage.value = "zh-Hans";
     phase.value = "idle";
     info.value = null;
     errorMessage.value = "";
@@ -350,7 +352,7 @@ describe("settings page", () => {
     await toggle.setValue(false);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("保存启动页面设置失败");
+    expect(wrapper.text()).toContain("无法保存启动页面设置");
     // 保存失败不回写本地状态：界面仍显示实际生效值（开启）。
     expect(toggle.element.checked).toBe(true);
   });
@@ -441,7 +443,7 @@ describe("settings page", () => {
     await radios[1].setValue(true);
     await flushPromises();
 
-    expect(wrapper.get('[role="alert"]').text()).toContain("保存应用图标设置失败");
+    expect(wrapper.get('[role="alert"]').text()).toContain("无法保存应用图标设置");
     expect(radios[0].element.checked).toBe(true);
   });
 
@@ -494,7 +496,9 @@ describe("settings page", () => {
     errorMessage.value = "网络连接失败，请稍后重试";
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.text()).toContain("网络连接失败，请稍后重试");
+    // Rust/插件原始错误只进控制台，界面统一给可翻译的固定文案。
+    expect(wrapper.text()).toContain("检查更新失败，请稍后重试。");
+    expect(wrapper.text()).not.toContain("网络连接失败，请稍后重试");
     const retry = wrapper.findAll("button").find((b) => b.text().includes("重试检查"));
     expect(retry).toBeDefined();
     await retry!.trigger("click");
@@ -604,5 +608,46 @@ describe("settings page", () => {
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("会员与账号");
+  });
+
+  it("英文模式下设置页全部文案切换为英文，语言选项保留原语言名", async () => {
+    effectiveLanguage.value = "en";
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.get("h1").text()).toBe("Settings");
+    expect(wrapper.text()).toContain("Voice within reach");
+    expect(wrapper.text()).toContain("Current Version");
+    expect(wrapper.text()).toContain("General");
+    expect(wrapper.text()).toContain("Appearance");
+    expect(wrapper.text()).toContain("Launch Behavior");
+    expect(wrapper.text()).toContain("App Language");
+    expect(wrapper.text()).toContain("App Icon");
+    expect(wrapper.text()).toContain("First-Time Setup");
+    expect(wrapper.text()).toContain("Feedback");
+    expect(wrapper.text()).not.toContain("让语音触手可及");
+    expect(wrapper.text()).not.toContain("通用");
+
+    // 外观三档与语言三档：语言选项按用户要求保留「简体中文」原语言名。
+    const themeGroup = wrapper.get('[role="radiogroup"][aria-label="Display mode"]');
+    expect(themeGroup.findAll(".theme-option span").map((item) => item.text())).toEqual([
+      "System",
+      "Light",
+      "Dark",
+    ]);
+    const languageGroup = wrapper.get('[role="radiogroup"][aria-label="App Language"]');
+    expect(languageGroup.findAll(".theme-option span").map((item) => item.text())).toEqual([
+      "System Default",
+      "简体中文",
+      "English",
+    ]);
+
+    // 悬停提示与启动行为标题同步翻译；通用各行的副标题仍然不显示。
+    expect(
+      wrapper.get('label[title*="ordinary launches"]').attributes("title"),
+    ).toBe(
+      "When off, ordinary launches only keep the tray entry; the main window still appears after an update.",
+    );
+    expect(wrapper.findAll(".settings-group")[0].findAll(".settings-row .muted")).toHaveLength(0);
   });
 });

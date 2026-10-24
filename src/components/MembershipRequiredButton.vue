@@ -6,6 +6,7 @@
  * 组件只负责在未开通时显示统一的皇冠 CTA，事件交给宿主决定去哪开通。
  */
 import CrownIcon from "./CrownIcon.vue";
+import { t } from "../lib/i18n";
 
 withDefaults(defineProps<{ label?: string }>(), {
   label: "点击开通会员功能",
@@ -17,7 +18,7 @@ defineEmits<{ open: [] }>();
 <template>
   <button class="membership-required-button" type="button" @click="$emit('open')">
     <CrownIcon class="membership-required-icon" />
-    <span>{{ label }}</span>
+    <span>{{ t(label) }}</span>
   </button>
 </template>
 

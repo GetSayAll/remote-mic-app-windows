@@ -5,6 +5,7 @@
  * 窄栏/矮窗时由页面样式把本组件收进内容列（见 OnboardingPage.vue 的媒体查询）。
  */
 import type { SidePanel, StatusRowState } from "../../onboarding/panel";
+import { t } from "../../lib/i18n";
 
 const props = defineProps<{ panel: SidePanel }>();
 
@@ -26,7 +27,7 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
         v-if="props.panel.visual === 'remote'"
         class="side-photo"
         src="/RC003-remote-photo@2x.png"
-        alt="小米蓝牙语音遥控器示意图"
+        :alt="t('小米蓝牙语音遥控器示意图')"
         draggable="false"
       />
       <template v-else-if="props.panel.visual === 'app'">

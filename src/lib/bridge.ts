@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { t } from "./i18n";
+import { effectiveLanguage, type EffectiveLanguage } from "./language-state";
 
 export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 
@@ -214,8 +216,36 @@ export interface KeyChord {
 
 export type MouseClickKind = "left" | "right" | "double_left" | "middle";
 export type MoveDirection = "up" | "down" | "left" | "right";
-export const mouseClickLabels: Record<MouseClickKind, string> = { left: "左键单击", right: "右键单击", double_left: "左键双击", middle: "中键单击" };
-export const mouseMoveLabels: Record<MoveDirection, string> = { up: "鼠标向上", down: "鼠标向下", left: "鼠标向左", right: "鼠标向右" };
+
+/** 读取时翻译：常量对象也要跟随语言切换，不能在校验/加载时冻结文案。 */
+export const mouseClickLabels: Record<MouseClickKind, string> = {
+  get left() {
+    return t("左键单击");
+  },
+  get right() {
+    return t("右键单击");
+  },
+  get double_left() {
+    return t("左键双击");
+  },
+  get middle() {
+    return t("中键单击");
+  },
+};
+export const mouseMoveLabels: Record<MoveDirection, string> = {
+  get up() {
+    return t("鼠标向上");
+  },
+  get down() {
+    return t("鼠标向下");
+  },
+  get left() {
+    return t("鼠标向左");
+  },
+  get right() {
+    return t("鼠标向右");
+  },
+};
 
 export type ButtonAction =
   | { type: "disabled" }
@@ -603,7 +633,7 @@ export type ThemePreference = "system" | "light" | "dark";
 /** 应用语言偏好；与 Rust `AppLanguage` / Mac `AppLanguage` 的持久化值一致。 */
 export type AppLanguagePreference = "system" | "zh-Hans" | "en";
 /** 推荐页实际使用的语言；`system` 已在语言模块里解析成这两个之一。 */
-export type EffectiveLanguage = "zh-Hans" | "en";
+export type { EffectiveLanguage } from "./language-state";
 
 /** Windows 系统强调色（设置 > 个性化 > 颜色），Rust accent 命令契约。 */
 export interface AccentRgb {
@@ -1754,6 +1784,11 @@ export async function subscribeAppUpdateProgress(
   };
 }
 
+/** 纯英文/符号的键名不查字典，避免每次渲染都产生无意义缺失告警。 */
+function localized(source: string): string {
+  return /[\u4e00-\u9fff]/.test(source) ? t(source) : source;
+}
+
 const voiceHotkeyKeyLabels: Record<string, string> = {
   control: "Ctrl",
   left_control: "左 Ctrl",
@@ -1803,66 +1838,102 @@ const voiceHotkeyKeyLabels: Record<string, string> = {
 
 function voiceHotkeyKeyLabel(code: string): string {
   const known = voiceHotkeyKeyLabels[code];
-  if (known) return known;
+  if (known) return localized(known);
   const digit = /^digit([0-9])$/.exec(code);
   if (digit) return digit[1];
   return code.toUpperCase();
 }
 
 export function voiceHoldHotkeyLabel(hotkey: KeyChord | null): string {
-  if (!hotkey || hotkey.keys.length === 0) return "关闭";
+  // "关闭" 不能进总字典：同一个中文原文在弹窗按钮里是 "Close"，全局按原文
+  // 查表会产生歧义；这里按调用时语言直接给出快捷键关闭态。
+  if (!hotkey || hotkey.keys.length === 0) {
+    return effectiveLanguage.value === "en" ? "Off" : "关闭";
+  }
   return hotkey.keys.map(voiceHotkeyKeyLabel).join(" + ");
 }
 
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
-  return {
-    idle: "尚未连接",
-    connecting: "正在连接遥控器",
-    discovering: "正在连接遥控器",
-    awaiting_capabilities: "正在确认语音功能",
-    ready: "已连接",
-    streaming: "正在接收语音",
-    draining: "正在结束本次语音",
-    reconnecting: "正在等待遥控器重连",
-    suspended: "电脑已进入睡眠",
-    disconnected: "遥控器已断开",
-    failed: "连接失败",
-  }[phase];
+  return t(
+    {
+      idle: "尚未连接",
+      connecting: "正在连接遥控器",
+      discovering: "正在连接遥控器",
+      awaiting_capabilities: "正在确认语音功能",
+      ready: "已连接",
+      streaming: "正在接收语音",
+      draining: "正在结束本次语音",
+      reconnecting: "正在等待遥控器重连",
+      suspended: "电脑已进入睡眠",
+      disconnected: "遥控器已断开",
+      failed: "连接失败",
+    }[phase],
+  );
 }
 
 export function remoteModelLabel(model: RemoteModel): string {
-  return {
-    rc001: "小米蓝牙语音遥控器 2",
-    rc003: "小米蓝牙语音遥控器 2 Pro",
-    unknown: "连接后显示",
-  }[model];
+  return t(
+    {
+      rc001: "小米蓝牙语音遥控器 2",
+      rc003: "小米蓝牙语音遥控器 2 Pro",
+      unknown: "连接后显示",
+    }[model],
+  );
 }
 
 export function audioPhaseLabel(phase: AudioPhase): string {
-  return {
-    unconfigured: "尚未选择设备",
-    ready: "已就绪",
-    streaming: "正在写入语音",
-    draining: "正在结束",
-    failed: "语音设备出错",
-    unsupported: "当前环境不支持语音设备",
-  }[phase];
+  return t(
+    {
+      unconfigured: "尚未选择设备",
+      ready: "已就绪",
+      streaming: "正在写入语音",
+      draining: "正在结束",
+      failed: "语音设备出错",
+      unsupported: "当前环境不支持语音设备",
+    }[phase],
+  );
 }
 
 export const buttonLabels: Record<RemoteButton, string> = {
-  back: "返回",
-  ok: "确定",
-  tv: "TV",
-  home: "主页",
-  right: "右",
-  left: "左",
-  down: "下",
-  up: "上",
-  menu: "菜单",
-  power: "电源",
-  volume_mute: "静音",
-  volume_up: "音量+",
-  volume_down: "音量−",
+  get back() {
+    return t("返回");
+  },
+  get ok() {
+    return t("确定");
+  },
+  get tv() {
+    return "TV";
+  },
+  get home() {
+    return t("主页");
+  },
+  get right() {
+    return t("右");
+  },
+  get left() {
+    return t("左");
+  },
+  get down() {
+    return t("下");
+  },
+  get up() {
+    return t("上");
+  },
+  get menu() {
+    return t("菜单");
+  },
+  get power() {
+    return t("电源");
+  },
+  get volume_mute() {
+    return t("静音");
+  },
+  get volume_up() {
+    return t("音量+");
+  },
+  get volume_down() {
+    return t("音量−");
+  },
 };
 
 export function buttonLabel(button: RemoteButton): string {
@@ -1870,11 +1941,13 @@ export function buttonLabel(button: RemoteButton): string {
 }
 
 export function buttonTriggerLabel(trigger: ButtonTrigger): string {
-  return {
-    single: "单击",
-    double: "双击",
-    long: "长按",
-  }[trigger];
+  return t(
+    {
+      single: "单击",
+      double: "双击",
+      long: "长按",
+    }[trigger],
+  );
 }
 
 /**
@@ -1969,7 +2042,7 @@ const keyLabels: Record<string, string> = {
 
 export function keyLabel(code: KeyCode): string {
   const known = keyLabels[code];
-  if (known) return known;
+  if (known) return localized(known);
   const digit = /^digit([0-9])$/.exec(code);
   if (digit) return digit[1];
   return code.toUpperCase();
@@ -2060,20 +2133,23 @@ export function registerCommonPhraseAvailability(available: boolean): void {
  */
 export function openAppLabel(name: string): string {
   const trimmed = name.trim();
-  if (!trimmed) return "打开应用";
-  return /^[0-9A-Za-z]/.test(trimmed) ? `打开 ${trimmed}` : `打开${trimmed}`;
+  if (!trimmed) return t("打开应用");
+  return /^[0-9A-Za-z]/.test(trimmed)
+    ? t("打开 {name}", { name: trimmed })
+    : t("打开{name}", { name: trimmed });
 }
 
 export function actionSummary(action: ButtonAction | undefined): string {
-  if (!action || action.type === "disabled") return "未设置";
-  if (action.type === "focus_input") return "聚焦输入框";
+  if (!action || action.type === "disabled") return t("未设置");
+  if (action.type === "focus_input") return t("聚焦输入框");
   if (action.type === "open_common_phrases") {
     // 缺私有组件（公开构建）时如实标注，不静默替换成含义不同的动作。
-    return commonPhrasesAvailable ? "打开常用语" : "打开常用语（当前不可用）";
+    return commonPhrasesAvailable ? t("打开常用语") : t("打开常用语（当前不可用）");
   }
   if (action.type === "scroll") {
-    const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
-    return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;
+    const label = action.direction === "up" ? t("滚轮向上") : t("滚轮向下");
+    const steps = action.steps ?? 1;
+    return steps === 1 ? label : t("{label} {steps} 格", { label, steps });
   }
   if (action.type === "mouse_click") return mouseClickLabels[action.kind];
   if (action.type === "mouse_move") return `${mouseMoveLabels[action.direction]} ${action.distance} px`;
@@ -2087,7 +2163,7 @@ export function actionSummary(action: ButtonAction | undefined): string {
   }
   if (action.type === "run_macro") {
     const known = macroNameById(action.macroId);
-    return known ? `执行${known}` : "执行组合动作";
+    return known ? t("执行{name}", { name: known }) : t("执行组合动作");
   }
   return chordLabel(action.chord);
 }
@@ -2234,14 +2310,30 @@ export async function getMacroRunStatus(macroId: string): Promise<MacroRunStatus
 
 /** 组合动作步骤类型的中文名（对齐 Mac `macro.step.*` 文案）。 */
 export const macroActionLabels: Record<MacroAction, string> = {
-  open_application: "打开应用",
-  wait_for_application: "等待应用",
-  send_shortcut: "单键或快捷键",
-  focus_input: "聚焦学习过的输入框",
-  focus_frontmost: "聚焦输入框",
-  system_action: "系统与媒体动作",
-  open_url: "打开网址",
-  run_macro: "执行已有组合动作",
+  get open_application() {
+    return t("打开应用");
+  },
+  get wait_for_application() {
+    return t("等待应用");
+  },
+  get send_shortcut() {
+    return t("单键或快捷键");
+  },
+  get focus_input() {
+    return t("聚焦学习过的输入框");
+  },
+  get focus_frontmost() {
+    return t("聚焦输入框");
+  },
+  get system_action() {
+    return t("系统与媒体动作");
+  },
+  get open_url() {
+    return t("打开网址");
+  },
+  get run_macro() {
+    return t("执行已有组合动作");
+  },
 };
 
 export function macroActionLabel(action: MacroAction): string {
@@ -2263,27 +2355,31 @@ export function macroStepSummary(step: MacroStep): string {
   switch (step.action) {
     case "open_application":
       return appTargetLabel(parameters.target);
-    case "wait_for_application":
-      return `${appTargetLabel(parameters.target)} · ${
-        parameters.state === "running" ? "App 已打开" : "App 窗口已出现"
-      }`;
+    case "wait_for_application": {
+      const app = appTargetLabel(parameters.target);
+      return parameters.state === "running"
+        ? t("{app} · App 已打开", { app })
+        : t("{app} · App 窗口已出现", { app });
+    }
     case "send_shortcut":
-      return parameters.chord ? macroChordLabel(parameters.chord) : "尚未录入按键";
-    case "focus_input":
-      return `${appTargetLabel(parameters.target)} · 聚焦学习过的输入框`;
+      return parameters.chord ? macroChordLabel(parameters.chord) : t("尚未录入按键");
+    case "focus_input": {
+      const app = appTargetLabel(parameters.target);
+      return t("{app} · 聚焦学习过的输入框", { app });
+    }
     case "focus_frontmost":
-      return "当前前台应用 · 聚焦输入框";
+      return t("当前前台应用 · 聚焦输入框");
     case "system_action":
-      return parameters.chord ? macroChordLabel(parameters.chord) : "尚未选择系统动作";
+      return parameters.chord ? macroChordLabel(parameters.chord) : t("尚未选择系统动作");
     case "open_url":
-      return parameters.url ?? "尚未填写网址";
+      return parameters.url ?? t("尚未填写网址");
     case "run_macro":
-      return parameters.nestedMacroName ?? "尚未选择组合动作";
+      return parameters.nestedMacroName ?? t("尚未选择组合动作");
   }
 }
 
 function appTargetLabel(target: string | undefined): string {
-  if (!target) return "尚未选择 App";
+  if (!target) return t("尚未选择 App");
   const known = presetAppNames.get(target);
   if (known) return known;
   if (!target.includes("\\") && !target.includes("/")) return target;
@@ -2297,19 +2393,19 @@ export function focusLearnErrorLabel(message: string): string {
   const code = message.replace(/^SendInput failed:\s*/i, "").trim();
   switch (code) {
     case "no_candidate":
-      return "没有学习成功，请确认目标应用已经打开，再点击它的输入框试一次";
+      return t("没有学习成功，请确认目标应用已经打开，再点击它的输入框试一次");
     case "self_foreground":
-      return "学习期间无线麦在窗口最前面：请等目标应用打开后，再点击它的输入框试一次";
+      return t("学习期间无线麦在窗口最前面：请等目标应用打开后，再点击它的输入框试一次");
     case "not_foreground":
-      return "目标应用没有在最前面：请点击它的输入框后再试一次";
+      return t("目标应用没有在最前面：请点击它的输入框后再试一次");
     case "target_exited":
-      return "目标应用已经退出：请重试，应用会重新打开";
+      return t("目标应用已经退出：请重试，应用会重新打开");
     case "not_accessible":
-      return "这个输入框暂时读不到，请换一个输入框再试";
+      return t("这个输入框暂时读不到，请换一个输入框再试");
     case "timeout":
-      return "等待输入框超时，请重试";
+      return t("等待输入框超时，请重试");
     case "cancelled":
-      return "学习已取消";
+      return t("学习已取消");
     default:
       return message;
   }
@@ -2320,15 +2416,15 @@ export function focusPointErrorLabel(message: string): string {
   const code = message.replace(/^SendInput failed:\s*/i, "").trim();
   switch (code) {
     case "cursor_outside_target":
-      return "鼠标不在目标应用的窗口里：把鼠标停在要点击的位置（例如输入框）上再试";
+      return t("鼠标不在目标应用的窗口里：把鼠标停在要点击的位置（例如输入框）上再试");
     case "target_window_missing":
-      return "目标应用没有可见窗口：先打开它再试";
+      return t("目标应用没有可见窗口：先打开它再试");
     case "not_foreground":
-      return "目标应用没有在最前面：先切到它再试";
+      return t("目标应用没有在最前面：先切到它再试");
     case "window_size_changed":
-      return "目标窗口的大小和记录时相差太大：请重新记录一次位置";
+      return t("目标窗口的大小和记录时相差太大：请重新记录一次位置");
     case "cursor_unavailable":
-      return "读不到鼠标位置：请重试";
+      return t("读不到鼠标位置：请重试");
     default:
       return message;
   }
@@ -2336,19 +2432,19 @@ export function focusPointErrorLabel(message: string): string {
 
 /** 组合动作启动失败的机器码 → 用户文案（Rust 侧只给稳定 token）。 */
 export function macroStartErrorLabel(code: string): string | null {
-  if (code === "already_running") return "这个组合动作正在执行，请稍后再试";
-  if (code === "not_found") return "找不到这个组合动作，请重新打开页面";
+  if (code === "already_running") return t("这个组合动作正在执行，请稍后再试");
+  if (code === "not_found") return t("找不到这个组合动作，请重新打开页面");
   if (code.startsWith("invalid:")) {
     const issues = code.slice("invalid:".length).split(",");
-    if (issues.includes("name_empty")) return "请先填写组合动作名称";
-    if (issues.includes("name_too_long")) return "组合动作名称太长，最多 20 个字符";
+    if (issues.includes("name_empty")) return t("请先填写组合动作名称");
+    if (issues.includes("name_too_long")) return t("组合动作名称太长，最多 20 个字符");
     if (issues.includes("too_few_steps") || issues.includes("too_many_steps")) {
-      return "步骤数量不对，请检查后重试";
+      return t("步骤数量不对，请检查后重试");
     }
     if (issues.some((issue) => issue.startsWith("missing_parameter"))) {
-      return "有步骤还没填写完整，请检查每一步的参数";
+      return t("有步骤还没填写完整，请检查每一步的参数");
     }
-    return "这条组合动作的设置不完整，请检查名称与步骤";
+    return t("这条组合动作的设置不完整，请检查名称与步骤");
   }
   return null;
 }
@@ -2357,25 +2453,25 @@ export function macroStartErrorLabel(code: string): string | null {
 export function macroTerminalLabel(result: MacroTerminalResult): string {
   switch (result) {
     case "completed":
-      return "组合动作执行成功";
+      return t("组合动作执行成功");
     case "completed_with_unknown_result":
-      return "组合动作已执行，但无法确认第三方 App 的结果";
+      return t("组合动作已执行，但无法确认第三方 App 的结果");
     case "cancelled":
-      return "组合动作已取消";
+      return t("组合动作已取消");
     case "timed_out":
-      return "组合动作执行超时";
+      return t("组合动作执行超时");
     case "invalid_macro":
-      return "这条组合动作的设置有问题";
+      return t("这条组合动作的设置有问题");
     case "missing_dependency":
-      return "需要使用的 App 或输入框记录不在这台电脑上";
+      return t("需要使用的 App 或输入框记录不在这台电脑上");
     case "permission_denied":
-      return "组合动作缺少系统权限";
+      return t("组合动作缺少系统权限");
     case "nested_too_deep":
-      return "组合动作嵌套超过 8 层";
+      return t("组合动作嵌套超过 8 层");
     case "cycle_detected":
-      return "组合动作不能直接或间接执行自己";
+      return t("组合动作不能直接或间接执行自己");
     case "step_failed":
-      return "组合动作中的步骤执行失败";
+      return t("组合动作中的步骤执行失败");
   }
 }
 
@@ -2383,15 +2479,15 @@ export function macroTerminalLabel(result: MacroTerminalResult): string {
 export function macroStepOutcomeLabel(outcome: MacroStepOutcome): string {
   switch (outcome) {
     case "done":
-      return "步骤已完成";
+      return t("步骤已完成");
     case "unknown":
-      return "请求已发送，请在目标 App 确认结果";
+      return t("请求已发送，请在目标 App 确认结果");
     case "missing_dependency":
-      return "所需动作或设置不可用";
+      return t("所需动作或设置不可用");
     case "permission_denied":
-      return "权限未授权";
+      return t("权限未授权");
     case "failed":
-      return "执行失败，后续步骤已停止";
+      return t("执行失败，后续步骤已停止");
   }
 }
 
