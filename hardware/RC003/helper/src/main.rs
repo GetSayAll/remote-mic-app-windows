@@ -126,6 +126,9 @@ mod imp {
     /// watchdog 的分片睡眠：既让"主程序请求"能在 100 ms 内被响应，也用于凑出轮询间隔。
     const RETARGET_WAKE_MS: u64 = 100;
     /// 单实例端口的有界等待预算与步长（交接期重叠；见 [`bind_listener_with_retry`]）。
+    /// 预算耗尽且仍是 `WSAEADDRINUSE` 时回退系统自动分配端口（port 0，见主流程
+    /// `listen_fallback_ephemeral`）——覆盖固定端口被系统级保留的机器（WSL2
+    /// mirrored 把 Linux 临时端口区间镜像成宿主内核保留区，绑定恒失败且不可见）。
     const LISTEN_RETRY_BUDGET_MS: u64 = 3000;
     const LISTEN_RETRY_STEP_MS: u64 = 150;
     /// 注入/接管后等待**已鉴权** hello 的默认上限（秒）。
@@ -2524,6 +2527,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 }
             }
         }
+    }
+
+    /// 绑定失败的错误串是否为 `WSAEADDRINUSE`(10048)。纯函数供非 Windows CI 验证。
+    ///
+    /// 只有它值得触发"回退系统自动分配端口"——其余错误(权限、参数等)换端口
+    /// 也绑不上,按原样失败。
+    fn is_addr_in_use_error(err: &str) -> bool {
+        err.contains("10048") || err.to_lowercase().contains("address in use")
     }
 
     /// 读取（或创建）跨运行稳定的令牌。
@@ -6147,6 +6158,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 2026-10-13：换机重启时新旧实例会短暂重叠（新实例先起、旧实例随后收尾），
         // 这里改成**有界重试**（3 s / 150 ms），把交接期的端口竞争让过去；真正的
         // "另一个实例在跑"仍会在预算耗尽后按原样 `[STOP]` 退出。
+        //
+        // 2026-10-24：预算耗尽且错误是 `WSAEADDRINUSE` 时**回退系统自动分配端口**
+        // （port 0）。现场实证：WSL2 `networkingMode=mirrored` 会把 Linux 侧
+        // `ip_local_port_range`（如 44620-48715）整个镜像成宿主内核保留区——bind
+        // 恒得 10048，而 netstat/-q、Get-NetTCPConnection（含管理员）、TCP connect
+        // 全部不可见，固定端口在该类机器上永远绑不上，报告层永不生效（用户症状：
+        // 语音键的原生 F5 泄漏 + SendInput 注入被豆包丢弃，键盘上出现 F5 KeyUp）。
+        // 回退代价：port 0 无法充当单实例锁，极端情况下允许两个实例并存——由
+        // APP-BRIDGE 握手与令牌核验兜底一致性；比"报告层整层失效"好得多。
         let listener = match bind_listener_with_retry(
             args.port,
             LISTEN_RETRY_BUDGET_MS,
@@ -6154,6 +6174,37 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             Some(&logger),
         ) {
             Ok(l) => l,
+            Err(e) if is_addr_in_use_error(&e) => {
+                match bind_listener_with_retry(
+                    0,
+                    LISTEN_RETRY_BUDGET_MS,
+                    LISTEN_RETRY_STEP_MS,
+                    Some(&logger),
+                ) {
+                    Ok(l) => {
+                        let bound = l.local_addr().map(|a| a.port()).unwrap_or(args.port);
+                        logger.kv(
+                            "[WAIT]",
+                            &[
+                                ("event", "listen_fallback_ephemeral".into()),
+                                ("fixed_port", args.port.to_string()),
+                                ("bound_port", bound.to_string()),
+                                (
+                                    "note",
+                                    "固定端口被系统级保留(如 WSL2 mirrored 镜像区间),改用自动分配端口"
+                                        .into(),
+                                ),
+                            ],
+                        );
+                        args.port = bound;
+                        l
+                    }
+                    Err(e2) => {
+                        logger.line(&format!("[STOP] {e2}"));
+                        std::process::exit(8);
+                    }
+                }
+            }
             Err(e) => {
                 logger.line(&format!("[STOP] {e}"));
                 std::process::exit(8);
@@ -9413,6 +9464,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    /// 绑定失败回退判据的真值表（纯函数，非 Windows CI 也可验证）。
+    #[cfg(test)]
+    mod listen_fallback_tests {
+        use super::*;
+
+        #[test]
+        fn only_addr_in_use_triggers_the_ephemeral_fallback() {
+            // 真机错误串形态（bind_listener_with_retry 的失败文案）。io::Error 的
+            // Display 在任何语言区域都带 `(os error 10048)` 后缀，主判据是错误码。
+            assert!(is_addr_in_use_error(
+                "绑定 127.0.0.1:47831 失败：通常每个套接字地址(协议/网络地址/端口)只允许使用一次。 (os error 10048)"
+            ));
+            assert!(is_addr_in_use_error(
+                "bind failed: Only one usage of each socket address is normally permitted. (os error 10048)"
+            ));
+            // 非 OS 构造的错误串：ErrorKind 形态的兜底。
+            assert!(is_addr_in_use_error(
+                &std::io::Error::from(std::io::ErrorKind::AddrInUse).to_string()
+            ));
+            // 其他错误不回退：权限（10013）/参数等换端口也绑不上，按原样失败。
+            assert!(!is_addr_in_use_error(
+                "绑定 127.0.0.1:47831 失败：以一种访问权限不允许的方式做了一个访问套接字的尝试。 (os error 10013)"
+            ));
+            assert!(!is_addr_in_use_error(""));
+        }
+    }
 
     #[cfg(test)]
     mod target_address_tests {
