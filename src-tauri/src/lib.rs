@@ -3009,18 +3009,38 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
-/// 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+/// 「学习输入框」第一步：先打开/激活目标应用，不改变它的输入焦点。
+///
+/// 对齐 Mac `recordCustomApplicationInput`：打开完成后才开始学习窗口，
+/// 用户不需要自己切到目标应用。
+#[tauri::command]
+async fn activate_app_for_learning(
+    target: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.launch_app(&target))
+        .await
+        .map_err(|error| format!("打开目标应用任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// 「学习输入框」：最多 6 秒内轮询系统焦点，返回捕获到的可编辑目标特征。
+/// 调用前由 [`activate_app_for_learning`] 先打开/激活目标应用。
 ///
 /// 阻塞式（窗口期内），放在阻塞线程池执行；UI 负责把它写进对应目标的聚焦档案。
+/// 结束后把主窗口还给用户，便于立刻看到成功/失败提示（对齐 Mac `NSApp.activate`）。
 #[tauri::command]
 async fn learn_focus_target(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<sayall_windows::focus::RecordedFocusTarget, String> {
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_target())
+    let result = tauri::async_runtime::spawn_blocking(move || platform.learn_focus_target())
         .await
-        .map_err(|error| format!("学习输入框任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("学习输入框任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
 }
 
 /// 「记录点击位置」：读取物理光标并要求它落在目标应用窗口内。
@@ -3028,14 +3048,16 @@ async fn learn_focus_target(
 /// 面向完全不暴露无障碍接口的应用（微信 4.x）。UI 负责把它写进对应目标的聚焦档案。
 #[tauri::command]
 async fn learn_focus_point(
+    app: tauri::AppHandle,
     target: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<sayall_windows::focus::RecordedPoint, String> {
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_point(target))
+    let result = tauri::async_runtime::spawn_blocking(move || platform.learn_focus_point(target))
         .await
-        .map_err(|error| format!("记录点击位置任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("记录点击位置任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
 }
 
 /// 「测试打开与聚焦」：按目标与其聚焦档案走一次生产路径（异步受理）。
@@ -5119,6 +5141,7 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        activate_app_for_learning,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,
@@ -5236,6 +5259,7 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        activate_app_for_learning,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,

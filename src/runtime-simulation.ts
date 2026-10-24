@@ -321,10 +321,10 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   // 「打开应用 + 聚焦方式」：面板于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
   // src/pages/ButtonsPage.vue 同款注释）。这里钉住面板可见；学习与测试两条路径仍经
   // 真实 IPC 覆盖。
-  await clickButton("记事本");
+  await clickButton("打开记事本");
   await waitFor(
-    () => (document.body.textContent?.includes("打开后聚焦方式") ? true : null),
-    "「打开后聚焦方式」面板可见",
+    () => (document.querySelector(".focus-profile") ? true : null),
+    "「聚焦方式」面板可见",
   );
   const learned = await learnFocusTarget();
   assert(
@@ -332,7 +332,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "仿真学习样本不是预期的可编辑目标",
   );
   await testAppFocus("notepad");
-  steps.push("「打开后聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
+  steps.push("「聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
 
   mark("permissions_page");
   await openPage("权限");

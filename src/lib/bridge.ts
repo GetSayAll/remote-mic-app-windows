@@ -336,6 +336,7 @@ export interface PresetAppInfo {
 /** 打开应用后的聚焦方式（对齐 Rust `FocusStrategy`）。 */
 export type FocusStrategy =
   | "open_only"
+  | "auto_composer"
   | "app_shortcut"
   | "recorded_element"
   | "recorded_point";
@@ -1349,32 +1350,37 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
   if (!isTauriRuntime()) {
     // 浏览器预览：展示完整预设表（仅渲染验证）。
     return [
-      { id: "sayall", name: "无线麦", installed: true },
+      { id: "sayall", name: "无线麦 SayAll", installed: true },
       { id: "wechat", name: "微信", installed: true },
-      { id: "workbuddy", name: "WorkBuddy", installed: true },
-      { id: "chatgpt", name: "ChatGPT", installed: true },
-      { id: "chrome", name: "Chrome 浏览器", installed: true },
-      { id: "notepad", name: "记事本", installed: true },
-      { id: "calc", name: "计算器", installed: true },
-      { id: "explorer", name: "文件资源管理器", installed: true },
       { id: "netease_music", name: "网易云音乐", installed: true },
-      // 2026-10-02 扩充的预设（与 Rust PRESET_APPS 同步，仅浏览器预览用）。
-      { id: "vokie", name: "Vokie", installed: true },
-      { id: "vscode", name: "Visual Studio Code", installed: true },
-      { id: "cursor", name: "Cursor", installed: true },
+      { id: "chrome", name: "Chrome 浏览器", installed: true },
+      { id: "chatgpt", name: "ChatGPT", installed: true },
+      { id: "workbuddy", name: "WorkBuddy", installed: true },
       { id: "dimagent", name: "DimAgent", installed: true },
+      { id: "vokie", name: "Vokie", installed: true },
+      { id: "notepad", name: "记事本", installed: true },
       { id: "qq", name: "QQ", installed: true },
-      { id: "feishu", name: "飞书", installed: true },
-      { id: "hermes", name: "Hermes", installed: true },
     ];
   }
   return invoke<PresetAppInfo[]>("list_preset_apps");
 }
 
 /**
- * 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+ * 「学习输入框」第一步：打开或切换到目标应用，不改变它的输入焦点。
  *
- * 调用方需先让目标应用成为前台（本命令不会切换窗口）。
+ * 对齐 Mac `recordCustomApplicationInput`：先打开目标 App，再进入学习窗口。
+ */
+export async function activateAppForLearning(target: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法打开应用");
+  }
+  return invoke<void>("activate_app_for_learning", { target });
+}
+
+/**
+ * 「学习输入框」：最多 6 秒内轮询系统焦点，返回捕获到的可编辑目标特征。
+ *
+ * 调用方应先通过 [`activateAppForLearning`] 打开目标应用；本命令不会再切换窗口。
  */
 export async function learnFocusTarget(): Promise<RecordedFocusTarget> {
   if (!isTauriRuntime()) {
@@ -1990,6 +1996,18 @@ export function registerCommonPhraseAvailability(available: boolean): void {
   commonPhrasesAvailable = available;
 }
 
+/**
+ * 「打开应用」的显示名：动作在前、应用名在后（对齐 Mac `action.open_*`）。
+ *
+ * 中文名直接相连（“打开微信”）；以拉丁字母或数字开头的名字按写法约定补一个
+ * 空格（“打开 WorkBuddy”），避免中英文粘连。
+ */
+export function openAppLabel(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "打开应用";
+  return /^[0-9A-Za-z]/.test(trimmed) ? `打开 ${trimmed}` : `打开${trimmed}`;
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return "未设置";
   if (action.type === "focus_input") return "聚焦输入框";
@@ -2005,11 +2023,11 @@ export function actionSummary(action: ButtonAction | undefined): string {
   if (action.type === "mouse_move") return `${mouseMoveLabels[action.direction]} ${action.distance} px`;
   if (action.type === "open_app") {
     const known = presetAppNames.get(action.target);
-    if (known) return `打开${known}`;
+    if (known) return openAppLabel(known);
     // 自定义应用：target 为路径，取文件名去扩展名作展示名。
     const base = action.target.split(/[\\/]/).pop() ?? action.target;
     const stem = base.replace(/\.(exe|lnk)$/i, "");
-    return `打开${stem || action.target}`;
+    return openAppLabel(stem || action.target);
   }
   if (action.type === "run_macro") {
     const known = macroNameById(action.macroId);
@@ -2223,17 +2241,17 @@ export function focusLearnErrorLabel(message: string): string {
   const code = message.replace(/^SendInput failed:\s*/i, "").trim();
   switch (code) {
     case "no_candidate":
-      return "没有采到可用的输入框：请在倒计时里切到目标 App 并点击它的输入框，然后重试";
+      return "没有学习成功，请确认目标应用已经打开，再点击它的输入框试一次";
     case "self_foreground":
-      return "学习期间无线麦在窗口最前面：请先切到目标 App 再重试";
+      return "学习期间无线麦在窗口最前面：请等目标应用打开后，再点击它的输入框试一次";
     case "not_foreground":
-      return "目标 App 不在最前面：请先切到它再重试";
+      return "目标应用没有在最前面：请点击它的输入框后再试一次";
     case "target_exited":
-      return "目标 App 已经退出：请先打开它再学习";
+      return "目标应用已经退出：请重试，应用会重新打开";
     case "not_accessible":
-      return "这个输入框读不到（可能是管理员权限窗口或受限应用）";
+      return "这个输入框暂时读不到，请换一个输入框再试";
     case "timeout":
-      return "学习超时，请重试";
+      return "等待输入框超时，请重试";
     case "cancelled":
       return "学习已取消";
     default:

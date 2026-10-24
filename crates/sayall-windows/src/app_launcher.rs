@@ -38,6 +38,23 @@ pub struct PresetApp {
     pub relaunch_when_hidden: bool,
 }
 
+/// 「打开应用」分组实际展示的预设（顺序即界面顺序，2026-10-23 用户定稿）。
+///
+/// 表内其余条目是旧版本用过的目标，只为已有按键映射 / 组合动作保留可执行解析，
+/// 不再出现在选择列表里。
+pub const DEFAULT_PRESET_IDS: &[&str] = &[
+    "sayall",
+    "wechat",
+    "netease_music",
+    "chrome",
+    "chatgpt",
+    "workbuddy",
+    "dimagent",
+    "vokie",
+    "notepad",
+    "qq",
+];
+
 /// 预设应用表（对齐 Mac 预设 + Windows 常见项）。无线麦自身排首位
 /// （对齐 Mac `PresetApplication.remoteMic`，恒为已安装）。
 ///
@@ -48,7 +65,7 @@ pub struct PresetApp {
 pub const PRESET_APPS: &[PresetApp] = &[
     PresetApp {
         id: "sayall",
-        name: "无线麦",
+        name: "无线麦 SayAll",
         exe_names: &["sayall-windows-app.exe"],
         install_paths: &[],
         shortcut_names: &[],
@@ -360,8 +377,9 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     let started = std::time::Instant::now();
     // 开始菜单索引只扫一次，供全部条目复用（每页加载调用一次，不能按条目重复遍历）。
     let shortcuts = start_menu_shortcuts();
-    let apps: Vec<PresetAppInfo> = PRESET_APPS
+    let apps: Vec<PresetAppInfo> = DEFAULT_PRESET_IDS
         .iter()
+        .filter_map(|id| preset_app(id))
         .map(|app| PresetAppInfo {
             id: app.id.to_owned(),
             name: app.name.to_owned(),
@@ -384,6 +402,41 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
 #[cfg(not(windows))]
 pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     Vec::new()
+}
+
+/// 预设应用在聚焦快捷键之后仍需点击的控件（96 DPI 下的窗口内偏移）。
+///
+/// 网易云音乐的 `Ctrl+F` 只负责打开搜索页，不会把键盘焦点放进搜索框
+/// （2026-10-23 现场实测：随后输入的字符不会进入搜索框）。这里记录搜索框中心，
+/// 调用方在快捷键之后点击并全选已有文字。
+fn preset_focus_click_design(target: &str) -> Option<(f64, f64)> {
+    match target {
+        "netease_music" => Some((410.0, 37.0)),
+        _ => None,
+    }
+}
+
+/// 预设应用聚焦后的点击点（物理屏幕像素）。
+#[cfg(windows)]
+pub(crate) fn preset_focus_click_point(target: &str) -> Option<(i32, i32)> {
+    let (design_x, design_y) = preset_focus_click_design(target)?;
+    let hwnd = target_window_visibility(target)?.largest_visible?;
+    let (wx, wy, _, _) = win_impl::window_rect_physical(hwnd)?;
+    let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) };
+    if dpi == 0 {
+        return None;
+    }
+    let scale = f64::from(dpi) / 96.0;
+    Some((
+        (wx + design_x * scale).round() as i32,
+        (wy + design_y * scale).round() as i32,
+    ))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn preset_focus_click_point(_target: &str) -> Option<(i32, i32)> {
+    None
 }
 
 /// 自定义应用选择结果（`pick_custom_app` 命令返回）。
@@ -3256,28 +3309,53 @@ pub(crate) mod tests {
         assert!(preset_app("edge").is_none());
     }
 
-    /// 2026-10-02 扩充的预设应用（Vokie / Visual Studio Code / Cursor / DimAgent /
-    /// QQ / 飞书 / Hermes）：必须带开始菜单快捷方式探测名——这些应用常装在
-    /// 自定义目录（如 D:\Apps），App Paths 与 System32 探测覆盖不到。
+    /// 2026-10-23 用户定稿的 10 个默认预设：顺序与展示名必须一致。
+    #[test]
+    fn preset_focus_click_design_covers_netease_only() {
+        assert_eq!(
+            preset_focus_click_design("netease_music"),
+            Some((410.0, 37.0))
+        );
+        assert_eq!(preset_focus_click_design("chrome"), None);
+        assert_eq!(preset_focus_click_design("notepad"), None);
+    }
+
     #[test]
     fn preset_table_includes_requested_apps() {
-        for (id, name) in [
-            ("workbuddy", "WorkBuddy"),
+        let expected = [
+            ("sayall", "无线麦 SayAll"),
+            ("wechat", "微信"),
+            ("netease_music", "网易云音乐"),
+            ("chrome", "Chrome 浏览器"),
             ("chatgpt", "ChatGPT"),
-            ("vokie", "Vokie"),
-            ("vscode", "Visual Studio Code"),
-            ("cursor", "Cursor"),
+            ("workbuddy", "WorkBuddy"),
             ("dimagent", "DimAgent"),
+            ("vokie", "Vokie"),
+            ("notepad", "记事本"),
             ("qq", "QQ"),
-            ("feishu", "飞书"),
-            ("hermes", "Hermes"),
-        ] {
+        ];
+        assert_eq!(DEFAULT_PRESET_IDS.len(), expected.len());
+        for (index, (id, name)) in expected.iter().enumerate() {
+            assert_eq!(DEFAULT_PRESET_IDS[index], *id, "默认预设顺序");
             let app = preset_app(id).unwrap_or_else(|| panic!("预设表缺少 {id}"));
-            assert_eq!(app.name, name, "{id} 的展示名");
+            assert_eq!(app.name, *name, "{id} 的展示名");
+        }
+        // 常装在自定义目录的应用仍须有开始菜单兜底探测。
+        for id in ["chatgpt", "workbuddy", "dimagent", "vokie", "qq"] {
+            let app = preset_app(id).expect("预设");
             assert!(
                 !app.shortcut_names.is_empty(),
                 "{id} 需要开始菜单快捷方式兜底探测"
             );
+        }
+    }
+
+    /// 旧版本的预设保留可执行解析，但不进入默认列表（已有映射不失效）。
+    #[test]
+    fn legacy_presets_stay_resolvable_but_hidden() {
+        for id in ["calc", "explorer", "vscode", "cursor", "feishu", "hermes"] {
+            assert!(preset_app(id).is_some(), "{id} 旧目标应仍可解析");
+            assert!(!DEFAULT_PRESET_IDS.contains(&id), "{id} 不应出现在默认列表");
         }
     }
 
@@ -3593,10 +3671,14 @@ pub(crate) mod tests {
         let installed = |id: &str| apps.iter().any(|app| app.id == id && app.installed);
         assert!(installed("workbuddy"), "WorkBuddy 应按已安装展示");
         assert!(installed("chatgpt"), "ChatGPT 应按已安装展示");
-        assert!(
-            !apps.iter().any(|app| app.id == "edge"),
-            "Edge 不应再出现在默认预设列表"
-        );
+        for hidden in [
+            "calc", "explorer", "vscode", "cursor", "feishu", "hermes", "edge",
+        ] {
+            assert!(
+                !apps.iter().any(|app| app.id == hidden),
+                "{hidden} 不应出现在默认预设列表"
+            );
+        }
     }
 
     #[test]

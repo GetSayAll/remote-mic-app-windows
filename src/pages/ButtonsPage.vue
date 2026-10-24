@@ -8,6 +8,11 @@ import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
 import {
+  FOCUS_STRATEGY_OPTIONS,
+  effectiveFocusProfile,
+  presetFocusDefault,
+} from "../lib/focus-defaults";
+import {
   captureFailureText,
   captureInactiveText,
   captureRevokedText,
@@ -18,6 +23,7 @@ import {
 } from "../lib/capture-switch";
 import {
   actionSummary,
+  activateAppForLearning,
   buttonLabel,
   buttonLabels,
   buttonTriggerLabel,
@@ -37,12 +43,14 @@ import {
   getRc003TaskStatus,
   identityShortcutByButton,
   importButtonMappingConfiguration,
+  focusLearnErrorLabel,
   focusPointErrorLabel,
   learnFocusPoint,
   learnFocusTarget,
   listPresetApps,
   mouseClickLabels,
   mouseMoveLabels,
+  openAppLabel,
   openCommonPhraseExample,
   pickCustomApp,
   registerCommonPhraseAvailability,
@@ -87,7 +95,6 @@ import {
   type RemoteModel,
   type RuntimeSnapshot,
   type ShortcutCaptureEdge,
-  testAppFocus,
 } from "../lib/bridge";
 import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
@@ -273,10 +280,12 @@ const captureDisplay = ref<string[]>([]);
 const safeCaptureMode = ref(false);
 /** 录入快捷键的用途：动作本身，还是「打开应用」的聚焦快捷键。 */
 const capturePurpose = ref<"action" | "focus_shortcut">("action");
-/** 「学习输入框」状态机。 */
-const focusLearnState = ref<"idle" | "learning" | "captured" | "error">("idle");
+/** 「学习输入框」状态机：opening = 正在打开目标应用；learning = 已进入学习窗口。 */
+const focusLearnState = ref<"idle" | "opening" | "learning" | "captured" | "error">("idle");
+const focusLearnBusy = computed(
+  () => focusLearnState.value === "opening" || focusLearnState.value === "learning",
+);
 const focusLearnMessage = ref<string | null>(null);
-const focusTestMessage = ref<string | null>(null);
 const capturePressedKeys = new Set<KeyCode>();
 let capturedChord: KeyCode[] | null = null;
 let unlistenEdges: (() => void) | null = null;
@@ -298,7 +307,7 @@ let resourcesReady = false;
 
 /** 「记录点击位置」的倒计时句柄与状态（6 秒后采集鼠标位置）。 */
 let pointLearnTimer: number | null = null;
-const pointLearnState = ref<"idle" | "recording" | "recorded" | "error">("idle");
+const pointLearnState = ref<"idle" | "opening" | "recording" | "recorded" | "error">("idle");
 const pointLearnMessage = ref<string | null>(null);
 
 /**
@@ -435,23 +444,47 @@ const focusTarget = computed(() =>
     : null,
 );
 
-/** 该目标的聚焦档案（未配置时 null ＝ 只打开应用）。 */
+function isPresetTarget(target: string): boolean {
+  return presetApps.value.some((app) => app.id === target);
+}
+
+/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
 const focusProfile = computed<AppFocusProfile | null>(() => {
   const target = focusTarget.value;
   if (!target) return null;
-  return mappings.value.focusProfiles?.[target] ?? null;
+  return effectiveFocusProfile(target, mappings.value.focusProfiles, isPresetTarget);
 });
 
-const focusStrategyOptions: Array<{ value: FocusStrategy; label: string }> = [
-  { value: "open_only", label: "只打开应用" },
-  { value: "app_shortcut", label: "用应用快捷键聚焦" },
-  { value: "recorded_element", label: "聚焦已记录的输入框" },
-  { value: "recorded_point", label: "记录点击位置" },
-];
+/** 预设默认档案（只用于「恢复默认」入口与默认选中）。 */
+const presetFocusDefaultProfile = computed<AppFocusProfile | null>(() => {
+  const target = focusTarget.value;
+  if (!target || !isPresetTarget(target)) return null;
+  return presetFocusDefault(target, true);
+});
+
+/** 预设应用是否已有用户显式档案（与默认值区分）。 */
+const hasPresetFocusOverride = computed(() => {
+  const target = focusTarget.value;
+  return Boolean(
+    target && isPresetTarget(target) && mappings.value.focusProfiles?.[target],
+  );
+});
+
+const focusStrategyOptions = FOCUS_STRATEGY_OPTIONS;
+
+/** 录入 / 学习 / 记录位置期间，切换策略会干扰当前会话。 */
+const focusBusy = computed(
+  () =>
+    focusLearnBusy.value ||
+    capturingShortcut.value ||
+    pointLearnState.value === "opening" ||
+    pointLearnState.value === "recording",
+);
 
 // 2026-10-03 Andy：先隐藏「打开后聚焦方式」面板（后端能力与已存配置保留，UI 暂不暴露）。
 // 2026-10-15 Andy：要求恢复，并参考 Mac 端补上「聚焦输入框」入口。
-const showAppFocusStrategy = true;
+// 2026-10-23 Andy：预设应用也显示聚焦方式，并默认选中其实际使用的策略。
+const showAppFocusStrategy = computed(() => Boolean(focusTarget.value));
 
 const focusFailureLabels: Record<string, string> = {
   self_foreground: "当前就是无线麦自己的窗口，无需聚焦",
@@ -478,16 +511,43 @@ const lastFocusNotice = computed<string | null>(() => {
 function applyFocusStrategy(strategy: FocusStrategy): void {
   const target = focusTarget.value;
   if (!target) return;
-  const previous = mappings.value.focusProfiles?.[target];
+  const explicit = mappings.value.focusProfiles?.[target];
+  const fallback = presetFocusDefaultProfile.value ?? undefined;
+  const previous = explicit ?? fallback;
   const profile: AppFocusProfile = { strategy };
-  if (strategy === "app_shortcut" && previous?.shortcut) profile.shortcut = previous.shortcut;
+  if (strategy === "app_shortcut") {
+    // 预设应用首次切到快捷键档时带上产品默认组合键（Chrome Ctrl+L / 网易云 Ctrl+F）。
+    const shortcut = previous?.shortcut ?? fallback?.shortcut;
+    if (shortcut) profile.shortcut = shortcut;
+  }
   if (strategy === "recorded_element" && previous?.recorded) profile.recorded = previous.recorded;
   if (strategy === "recorded_point" && previous?.point) profile.point = previous.point;
   const next = { ...(mappings.value.focusProfiles ?? {}), [target]: profile };
   mappings.value = { ...mappings.value, focusProfiles: next };
-  focusLearnMessage.value = null;
-  focusTestMessage.value = null;
+  // 切走策略时清掉上一策略的提示，避免“已记录点击位置”出现在学习输入框下面。
+  if (!focusLearnBusy.value) {
+    focusLearnState.value = "idle";
+    focusLearnMessage.value = null;
+  }
+  if (pointLearnState.value !== "opening" && pointLearnState.value !== "recording") {
+    pointLearnState.value = "idle";
+    pointLearnMessage.value = null;
+  }
   void persist("聚焦方式已更新");
+}
+
+/** 预设应用恢复产品默认聚焦方式（删除显式档案）。 */
+function resetPresetFocus(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const next = { ...(mappings.value.focusProfiles ?? {}) };
+  delete next[target];
+  mappings.value = { ...mappings.value, focusProfiles: next };
+  focusLearnState.value = "idle";
+  focusLearnMessage.value = null;
+  pointLearnState.value = "idle";
+  pointLearnMessage.value = null;
+  void persist("已恢复默认聚焦方式");
 }
 
 /**
@@ -499,9 +559,24 @@ function applyFocusStrategy(strategy: FocusStrategy): void {
 function recordFocusPoint(): void {
   const target = focusTarget.value;
   if (!target) return;
-  if (pointLearnState.value === "recording") return;
+  if (pointLearnState.value === "recording" || pointLearnState.value === "opening") return;
+  void openAppThenRecordPoint(target);
+}
+
+/** 对齐 Mac 的学习流程：先打开/切到目标应用，再开始记录。 */
+async function openAppThenRecordPoint(target: string): Promise<void> {
+  pointLearnState.value = "opening";
+  pointLearnMessage.value = "正在打开目标应用…";
+  try {
+    await activateAppForLearning(target);
+  } catch {
+    pointLearnState.value = "error";
+    pointLearnMessage.value = "没能打开目标应用，请确认它已安装后再试。";
+    return;
+  }
   pointLearnState.value = "recording";
-  pointLearnMessage.value = "正在记录鼠标位置…请先把鼠标停在目标输入框上（6 秒后自动记录）";
+  pointLearnMessage.value =
+    "正在等待你把鼠标停在目标输入框上……（6 秒后自动记录）";
   if (pointLearnTimer) window.clearTimeout(pointLearnTimer);
   pointLearnTimer = window.setTimeout(() => {
     pointLearnTimer = null;
@@ -553,6 +628,21 @@ function applyFocusShortcut(keys: KeyCode[]): void {
   void persist("聚焦快捷键已录入");
 }
 
+function clearFocusShortcut(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  // 预设应用的快捷键可能来自产品默认值（还没有显式档案），清除时也要落一条
+  // 显式“快捷键档但未录入”的档案，否则按钮看起来可点却没有任何效果。
+  const profile = mappings.value.focusProfiles?.[target] ?? focusProfile.value;
+  if (profile?.strategy !== "app_shortcut") return;
+  const next = {
+    ...(mappings.value.focusProfiles ?? {}),
+    [target]: { strategy: "app_shortcut" as const },
+  };
+  mappings.value = { ...mappings.value, focusProfiles: next };
+  void persist("已清除聚焦快捷键");
+}
+
 function clearRecordedFocus(): void {
   const target = focusTarget.value;
   if (!target) return;
@@ -567,22 +657,32 @@ function clearRecordedFocus(): void {
 }
 
 async function beginFocusShortcutCapture(): Promise<void> {
-  if (focusLearnState.value === "learning") return;
+  if (focusLearnBusy.value) return;
   capturePurpose.value = "focus_shortcut";
   await beginShortcutCapture();
 }
 
 /**
- * 「学习输入框」：6 秒窗口内轮询系统焦点（焦点不可用时取鼠标命中的输入候选），
- * 用户需要在此期间点击目标应用的输入框。
+ * 「学习输入框」：先打开/切到目标应用，再在最多 6 秒的窗口内轮询系统焦点
+ * （焦点不可用时取鼠标命中的输入候选）。用户在此期间点击目标输入框。
  * 采集只读控件语义（不含输入内容），写入该目标的聚焦档案。
  */
 async function startFocusLearning(): Promise<void> {
-  if (focusLearnState.value === "learning") return;
+  if (focusLearnBusy.value) return;
   const target = focusTarget.value;
   if (!target) return;
+  focusLearnState.value = "opening";
+  focusLearnMessage.value = "正在打开目标应用…";
+  try {
+    await activateAppForLearning(target);
+  } catch {
+    focusLearnState.value = "error";
+    focusLearnMessage.value = "没能打开目标应用，请确认它已安装后再试。";
+    return;
+  }
+
   focusLearnState.value = "learning";
-  focusLearnMessage.value = "请在 6 秒内点击目标应用的输入框（点到别处会记录成别的控件）";
+  focusLearnMessage.value = "正在等待你点击目标输入框……";
   try {
     const recorded = await learnFocusTarget();
     const next = {
@@ -592,23 +692,12 @@ async function startFocusLearning(): Promise<void> {
     mappings.value = { ...mappings.value, focusProfiles: next };
     await persist();
     focusLearnState.value = "captured";
-    focusLearnMessage.value = "已记录该输入框（只记录控件特征，不含输入内容）";
+    focusLearnMessage.value = "输入框学习成功。";
   } catch (error) {
     focusLearnState.value = "error";
-    focusLearnMessage.value =
-      error instanceof Error ? error.message : String(error);
-  }
-}
-
-/** 「测试打开与聚焦」：走生产路径（异步受理，结果稍后体现在聚焦结果提示里）。 */
-async function testSelectedAppFocus(): Promise<void> {
-  const target = focusTarget.value;
-  if (!target) return;
-  focusTestMessage.value = "已受理：正在打开/切换到该应用并执行聚焦…";
-  try {
-    await testAppFocus(target);
-  } catch (error) {
-    focusTestMessage.value = error instanceof Error ? error.message : String(error);
+    focusLearnMessage.value = focusLearnErrorLabel(
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }
 
@@ -2410,11 +2499,11 @@ onUnmounted(() => {
               title="已运行则切到该应用窗口，未运行则启动"
               @click="applyAction({ type: 'open_app', target: app.id })"
             >
-              {{ app.name }}
+              {{ openAppLabel(app.name) }}
             </button>
             <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
-              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ app.name }}</button>
+              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ openAppLabel(app.name) }}</button>
             <!-- 扫描 / 添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
             <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">扫描本机应用</button>
             <button
@@ -2427,90 +2516,155 @@ onUnmounted(() => {
             </button>
           </div>
           <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile">
-            <p class="muted focus-profile-title">打开后聚焦方式</p>
+            <p class="action-section-title focus-profile-title">聚焦方式</p>
             <div class="preset-grid">
               <button
                 v-for="option in focusStrategyOptions"
                 :key="option.value"
-                class="chip"
-                :class="{ selected: (focusProfile?.strategy ?? 'open_only') === option.value }"
+                class="chip focus-strategy-option"
+                :class="{
+                  selected: (focusProfile?.strategy ?? 'open_only') === option.value,
+                  'focus-point-chip': option.value === 'recorded_point',
+                }"
                 type="button"
+                :aria-pressed="(focusProfile?.strategy ?? 'open_only') === option.value"
+                :disabled="focusBusy"
                 @click="applyFocusStrategy(option.value)"
               >
                 {{ option.label }}
               </button>
-            </div>
-            <div v-if="focusProfile?.strategy === 'app_shortcut'" class="focus-shortcut-row">
               <button
-                class="chip"
-                :class="{ selected: capturingShortcut && capturePurpose === 'focus_shortcut' }"
+                v-if="hasPresetFocusOverride"
+                class="focus-reset-link"
                 type="button"
-                :disabled="captureStarting"
-                @click="
-                  capturingShortcut && capturePurpose === 'focus_shortcut'
-                    ? finishShortcutCapture('已取消录入')
-                    : beginFocusShortcutCapture()
-                "
+                :disabled="focusBusy"
+                @click="resetPresetFocus"
               >
-                {{ capturingShortcut && capturePurpose === "focus_shortcut" ? "录入中…（按 Esc 取消）" : "录入聚焦快捷键" }}
-              </button>
-              <span class="muted">
-                {{
-                  focusProfile?.shortcut?.keys?.length
-                    ? `当前：${chordLabel(focusProfile.shortcut)}`
-                    : "尚未录入"
-                }}
-              </span>
-            </div>
-            <div v-if="focusProfile?.strategy === 'recorded_element'" class="focus-learn-row">
-              <button
-                class="chip"
-                type="button"
-                :disabled="focusLearnState === 'learning'"
-                @click="startFocusLearning"
-              >
-                {{ focusLearnState === "learning" ? "学习中…" : "开始学习输入框" }}
-              </button>
-              <button
-                v-if="focusProfile?.recorded"
-                class="chip"
-                type="button"
-                @click="clearRecordedFocus"
-              >
-                清除记录
-              </button>
-              <span class="muted">
-                {{ focusProfile?.recorded ? "已记录输入框" : "尚未记录" }}
-              </span>
-            </div>
-            <div v-if="focusProfile?.strategy === 'recorded_point'" class="focus-learn-row">
-              <button
-                class="chip"
-                type="button"
-                :disabled="pointLearnState === 'recording'"
-                @click="recordFocusPoint"
-              >
-                {{ pointLearnState === "recording" ? "记录中…" : "开始记录位置" }}
-              </button>
-              <button v-if="focusProfile?.point" class="chip" type="button" @click="clearRecordedPoint">
-                清除记录
-              </button>
-              <span class="muted">
-                {{ focusProfile?.point ? "已记录位置" : "尚未记录" }}
-              </span>
-            </div>
-            <p class="muted focus-learn-hint">
-              目标应用在 UIA 里没有输入框时（例如微信 4.x），用「记录点击位置」：先把鼠标停在目标输入框上，
-              点按钮后 6 秒自动记录，之后按这个位置点击聚焦。
-            </p>
-            <div class="focus-profile-actions">
-              <button class="chip" type="button" :disabled="!focusProfile?.strategy || focusProfile.strategy === 'open_only'" @click="testSelectedAppFocus">
-                测试打开与聚焦
+                恢复默认
               </button>
             </div>
-            <p v-if="focusLearnMessage" class="muted focus-learn-message">{{ focusLearnMessage }}</p>
-            <p v-if="pointLearnMessage" class="muted focus-learn-message">{{ pointLearnMessage }}</p>
-            <p v-if="focusTestMessage" class="muted focus-test-message">{{ focusTestMessage }}</p>
+            <template v-if="focusProfile?.strategy === 'app_shortcut'">
+              <p class="muted focus-learn-hint">
+                先点击“录入快捷键”，再按下该 APP 用于聚焦输入框的单个按键或组合键。执行时会先激活 APP，再发送此按键。
+              </p>
+              <div class="focus-shortcut-row">
+                <span class="focus-shortcut-value" :class="{ empty: !focusProfile?.shortcut?.keys?.length }">
+                  <svg class="focus-shortcut-keyboard" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <rect x="2.5" y="6" width="19" height="12" rx="2.5" />
+                    <path d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M6 13h.01M9 13h.01M12 13h.01M15 13h.01M18 13h.01M7 16h10" />
+                  </svg>
+                  {{
+                    focusProfile?.shortcut?.keys?.length
+                      ? chordLabel(focusProfile.shortcut)
+                      : "尚未录入"
+                  }}
+                </span>
+                <button
+                  class="chip"
+                  type="button"
+                  :disabled="captureStarting"
+                  @click="
+                    capturingShortcut && capturePurpose === 'focus_shortcut'
+                      ? finishShortcutCapture('已取消录入')
+                      : beginFocusShortcutCapture()
+                  "
+                >
+                  {{
+                    capturingShortcut && capturePurpose === "focus_shortcut"
+                      ? "录入中…（按 Esc 取消）"
+                      : "点击录入快捷键"
+                  }}
+                </button>
+                <button
+                  class="chip"
+                  type="button"
+                  :disabled="!focusProfile?.shortcut?.keys?.length || capturingShortcut"
+                  @click="clearFocusShortcut"
+                >
+                  清除
+                </button>
+              </div>
+            </template>
+            <template v-if="focusProfile?.strategy === 'recorded_element'">
+              <p class="muted focus-learn-hint">
+                点击后会立即打开目标 APP。请在 6 秒内点击需要聚焦的输入框；无线麦 SayAll
+                只记录辅助功能特征，不读取输入内容。
+              </p>
+              <div class="focus-learn-row">
+                <button
+                  class="chip"
+                  type="button"
+                  :disabled="focusLearnBusy"
+                  @click="startFocusLearning"
+                >
+                  {{
+                    focusLearnState === "opening"
+                      ? "正在打开应用…"
+                      : focusLearnState === "learning"
+                        ? "等待点击输入框…"
+                        : "开始学习输入框"
+                  }}
+                </button>
+                <span
+                  class="focus-record-status"
+                  :class="focusProfile?.recorded ? 'is-done' : 'is-pending'"
+                >
+                  {{ focusProfile?.recorded ? "已记录目标输入框" : "尚未记录目标输入框" }}
+                </span>
+                <button
+                  v-if="focusProfile?.recorded"
+                  class="focus-link-button"
+                  type="button"
+                  :disabled="focusLearnBusy"
+                  @click="clearRecordedFocus"
+                >
+                  清除
+                </button>
+              </div>
+              <p v-if="focusLearnMessage" class="focus-learn-message" :class="`is-${focusLearnState}`">
+                {{ focusLearnMessage }}
+              </p>
+            </template>
+            <template v-if="focusProfile?.strategy === 'recorded_point'">
+              <p class="muted focus-learn-hint">
+                「记录点击位置」会先打开目标应用；把鼠标停在要点击的位置上，6 秒后自动记录，
+                之后按这个位置点击聚焦。
+              </p>
+              <div class="focus-learn-row">
+                <button
+                  class="chip"
+                  type="button"
+                  :disabled="pointLearnState === 'opening' || pointLearnState === 'recording'"
+                  @click="recordFocusPoint"
+                >
+                  {{
+                    pointLearnState === "opening"
+                      ? "正在打开应用…"
+                      : pointLearnState === "recording"
+                        ? "等待鼠标停留…"
+                        : "开始记录位置"
+                  }}
+                </button>
+                <button
+                  v-if="focusProfile?.point"
+                  class="chip"
+                  type="button"
+                  :disabled="pointLearnState === 'opening' || pointLearnState === 'recording'"
+                  @click="clearRecordedPoint"
+                >
+                  清除记录
+                </button>
+                <span
+                  class="focus-record-status"
+                  :class="focusProfile?.point ? 'is-done' : 'is-pending'"
+                >
+                  {{ focusProfile?.point ? "已记录点击位置" : "尚未记录点击位置" }}
+                </span>
+              </div>
+              <p v-if="pointLearnMessage" class="focus-learn-message" :class="`is-${pointLearnState}`">
+                {{ pointLearnMessage }}
+              </p>
+            </template>
             <p v-if="lastFocusNotice" class="muted focus-result-message">{{ lastFocusNotice }}</p>
           </div>
         </section>
@@ -2790,14 +2944,65 @@ onUnmounted(() => {
    芯片内换行只给自定义应用名（预设名保持单行，避免撑高整行）。 */
 .app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
-/* 「打开后聚焦方式」面板（2026-10-15 恢复暴露）。 */
-.focus-profile { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.focus-profile-title { margin: 0; font-size: 13px; }
+/* 「聚焦方式」面板：沿用基础按键 / 打开应用的 chip 风格，不另起大卡片。 */
+.focus-profile { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.focus-profile-title { margin: 0; }
 .focus-learn-row,
-.focus-shortcut-row,
-.focus-profile-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.focus-shortcut-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.focus-shortcut-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-chip);
+  font-size: 13px;
+  font-weight: 600;
+}
+.focus-shortcut-value.empty { color: var(--muted); font-weight: 400; }
+.focus-shortcut-keyboard {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .focus-learn-hint,
 .focus-learn-message,
-.focus-test-message,
 .focus-result-message { margin: 0; font-size: 12px; }
+.focus-learn-message.is-opening,
+.focus-learn-message.is-learning,
+.focus-learn-message.is-recording { color: var(--warning-text); font-weight: 600; }
+.focus-learn-message.is-captured,
+.focus-learn-message.is-recorded { color: var(--success-text); font-weight: 600; }
+.focus-learn-message.is-error { color: var(--error-text); font-weight: 600; }
+.focus-record-status { font-size: 12px; font-weight: 600; }
+.focus-record-status.is-pending { color: var(--warning-text); }
+.focus-record-status.is-done { color: var(--success-text); }
+.focus-link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.focus-link-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.focus-reset-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.focus-reset-link:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
