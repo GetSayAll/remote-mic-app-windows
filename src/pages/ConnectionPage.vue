@@ -13,6 +13,11 @@ import {
   shouldShowCaptureInactive,
   shouldShowCaptureRevoked,
 } from "../lib/capture-switch";
+import {
+  normalizeVoiceAudioHealth,
+  shouldShowVoiceAudioDegraded,
+  voiceAudioDegradedText,
+} from "../lib/voice-audio-health";
 import type {
   AudioEndpoint,
   AudioSnapshot,
@@ -73,6 +78,8 @@ const emptyConnection = (): ConnectionSnapshot => ({
   capabilities: null,
   voiceState: "idle",
   decodedSamples: 0,
+  voiceAudioHealth: "unknown",
+  voiceAudioRateHz: null,
   generation: 0,
   reconnectAttempt: 0,
   powerNotificationsAvailable: false,
@@ -882,6 +889,18 @@ const virtualCableEndpoints = computed(() =>
 
 const virtualCableInstalled = computed(() => virtualCableEndpoints.value.length > 0);
 
+/**
+ * 蓝牙音频不完整提示（2026-10-24 现场）：只在**后端判定为 degraded** 时出现。
+ * 满速、未判定、老快照都不提示（`normalizeVoiceAudioHealth` 回落 unknown）。
+ */
+const voiceAudioDegradedNote = computed(() =>
+  shouldShowVoiceAudioDegraded(
+    normalizeVoiceAudioHealth(connection.value.voiceAudioHealth),
+  )
+    ? voiceAudioDegradedText()
+    : null,
+);
+
 const phaseTone = computed(() => {
   if (connection.value.phase === "failed") return "error";
   if (connection.value.phase === "streaming") return "active";
@@ -1318,6 +1337,15 @@ onUnmounted(() => {
           <h2>语音输入设置</h2>
           <p class="muted">设置一次，之后按住遥控器语音键说话，松开就出字。</p>
         </div>
+      </div>
+
+      <div
+        v-if="voiceAudioDegradedNote"
+        class="info-callout warning callout-small voice-audio-callout"
+        role="status"
+      >
+        <strong>蓝牙音频不完整</strong>
+        <p>{{ voiceAudioDegradedNote }}</p>
       </div>
 
       <div class="setup-columns">

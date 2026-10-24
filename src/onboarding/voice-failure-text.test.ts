@@ -5,6 +5,7 @@
  * 捕获状态分流；`active` / `unknown` 时不改原行为（三件套排查仍然适用）。
  */
 import { describe, expect, it } from "vitest";
+import { voiceAudioDegradedText } from "../lib/voice-audio-health";
 import { VOICE_FAILURE_COPY, voiceFailureText } from "./voice-failure-text";
 
 describe("voiceFailureText（失败解释按捕获状态分流）", () => {
@@ -32,6 +33,31 @@ describe("voiceFailureText（失败解释按捕获状态分流）", () => {
   it("no_transcript + active/unknown：保留原有排查文案", () => {
     for (const health of ["active", "unknown"] as const) {
       expect(voiceFailureText("voice.no_transcript", health)).toBe(
+        VOICE_FAILURE_COPY["voice.no_transcript"],
+      );
+    }
+  });
+
+  // 2026-10-24 现场：语音条出现、音频只剩约 1/3（蓝牙与另一支 BLE 键盘共存）。
+  // 这时说「语音链路正常」是误导，应给蓝牙共存提示。
+  it("no_transcript + 音频降级：给蓝牙共存提示，不再说语音链路正常", () => {
+    for (const captureHealth of ["active", "unknown"] as const) {
+      const text = voiceFailureText("voice.no_transcript", captureHealth, "degraded");
+      expect(text).toBe(voiceAudioDegradedText());
+      expect(text).toContain("关闭或移开");
+      expect(text).not.toContain("语音链路正常");
+    }
+  });
+
+  it("捕获状态未生效优先于音频降级（先修更直接的根因）", () => {
+    const text = voiceFailureText("voice.no_transcript", "inactive", "degraded");
+    expect(text).toContain("还没有生效");
+    expect(text).not.toContain("关闭或移开");
+  });
+
+  it("音频满速/未判定保持原有排查文案", () => {
+    for (const audioHealth of ["full", "unknown"] as const) {
+      expect(voiceFailureText("voice.no_transcript", "active", audioHealth)).toBe(
         VOICE_FAILURE_COPY["voice.no_transcript"],
       );
     }
