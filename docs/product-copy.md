@@ -15,7 +15,7 @@
 
 | 对象 | 用户可见名称 | 代码来源 |
 | --- | --- | --- |
-| 产品 | 无线麦 SayAll Windows 版；简称 无线麦 / SayAll | 安装包与窗口标题 |
+| 产品 | 无线麦 SayAll Windows 版；简称 无线麦 / SayAll | 安装包与托盘用产品名；窗口标题为 `SayAll {版本号}`（2026-10-24 用户指定，如 `SayAll 1.0.0`） |
 | 「打开应用」里的无线麦预设 | 无线麦 SayAll；卡片文字写“打开无线麦 SayAll” | `PRESET_APPS`（`app_launcher.rs`）、`listPresetApps` 的浏览器回退 |
 | 遥控器 RC001 | 小米蓝牙语音遥控器 2 | `remoteModelLabel`（`src/lib/bridge.ts`） |
 | 遥控器 RC003 | 小米蓝牙语音遥控器 2 Pro | 同上 |
