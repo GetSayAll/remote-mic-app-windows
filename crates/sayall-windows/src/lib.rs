@@ -391,8 +391,46 @@ impl UsageCounters {
     #[cfg(any(windows, test))]
     pub(crate) fn begin_voice_session(&self, application_name: Option<String>) {
         self.finish_voice_session();
+        self.start_voice_session(application_name, "mic_open");
+    }
+
+    /// `STREAM_START` 到达时补记语音会话。
+    ///
+    /// RC003 的报告层语音路径实测会直接发 `0x04 STREAM_START`，不经过
+    /// `MIC_OPEN`；因此不能只依赖 [`Self::begin_voice_session`]。若 `MIC_OPEN`
+    /// 已经先到，这里保持幂等，避免同一次按键记两次、时长从半途重新计时。
+    #[cfg(any(windows, test))]
+    pub(crate) fn ensure_voice_session_started(&self, application_name: Option<String>) {
+        let mut active = lock(&self.active_voice);
+        if active.is_some() {
+            return;
+        }
+        self.start_voice_session_locked(&mut active, application_name);
+        drop(active);
+        gatt_note(
+            "usage_stats action=voice_begin phase=completed terminal_result=passed source=stream_start"
+                .to_owned(),
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_voice_session(&self, application_name: Option<String>, source: &str) {
+        let mut active = lock(&self.active_voice);
+        self.start_voice_session_locked(&mut active, application_name);
+        drop(active);
+        gatt_note(format!(
+            "usage_stats action=voice_begin phase=completed terminal_result=passed source={source}"
+        ));
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_voice_session_locked(
+        &self,
+        active: &mut Option<ActiveVoiceUsage>,
+        application_name: Option<String>,
+    ) {
         self.record_button_press_key("voice");
-        *lock(&self.active_voice) = Some(ActiveVoiceUsage {
+        *active = Some(ActiveVoiceUsage {
             started_at: Instant::now(),
             application_name,
         });
@@ -407,11 +445,20 @@ impl UsageCounters {
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return;
         }
+        let application = if active.application_name.is_some() {
+            "present"
+        } else {
+            "unknown"
+        };
+        let duration_ms = (duration_seconds * 1_000.0).round() as u64;
         self.push_event(UsageEvent::VoiceSession {
             ended_at_unix_ms: unix_ms_now(),
             duration_seconds,
             application_name: active.application_name,
         });
+        gatt_note(format!(
+            "usage_stats action=voice_finish phase=completed terminal_result=passed duration_ms={duration_ms} application={application}"
+        ));
     }
 
     fn push_event(&self, event: UsageEvent) {
@@ -1699,6 +1746,46 @@ mod tests {
             } if *duration_seconds > 0.0 && application_name.as_deref() == Some("微信")
         ));
         assert!(counters.drain_usage_events().is_empty());
+    }
+
+    #[test]
+    fn stream_start_fallback_records_voice_usage_once_without_mic_open() {
+        let counters = UsageCounters::default();
+        // RC003 实测只发 0x04 STREAM_START；重复到达（或 MIC_OPEN 已先到）
+        // 不能重复计一次按键。
+        counters.ensure_voice_session_started(Some("微信".to_owned()));
+        counters.ensure_voice_session_started(Some("不应覆盖".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 1);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            UsageEvent::ButtonPress { control, .. } if control == "voice"
+        ));
+        assert!(matches!(
+            &events[1],
+            UsageEvent::VoiceSession {
+                duration_seconds,
+                application_name,
+                ..
+            } if *duration_seconds > 0.0 && application_name.as_deref() == Some("微信")
+        ));
+    }
+
+    #[test]
+    fn mic_open_then_stream_start_does_not_duplicate_voice_usage() {
+        let counters = UsageCounters::default();
+        counters.begin_voice_session(Some("微信".to_owned()));
+        counters.ensure_voice_session_started(Some("微信".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 1);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

@@ -2167,6 +2167,9 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            // RC003 的报告层语音路径实测直接发 0x04 STREAM_START，不经过
+            // MIC_OPEN；这里兜底开始统计。若 MIC_OPEN 已先记过，方法幂等。
+            usage.ensure_voice_session_started(crate::foreground::foreground_application_name());
             // 流开始即视为有活动；若之后连一帧音频都收不到，看门狗会收尾。
             *last_voice_audio_at = Some(Instant::now());
             // 语音会话纪元 +1：本轮 wetype_check 阶梯以此为 armed 纪元，
