@@ -1351,7 +1351,7 @@ pub(crate) fn activate_install_directory_family(
 }
 
 #[cfg(windows)]
-fn process_image_path(pid: u32) -> Option<String> {
+pub(crate) fn process_image_path(pid: u32) -> Option<String> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{

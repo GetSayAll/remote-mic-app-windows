@@ -2,6 +2,7 @@
 members = [
     "crates/sayall-core",
     "crates/sayall-windows",
+    "crates/sayall-windows-button-profiles",
     "crates/sayall-windows-common-phrases",
     "src-tauri",
 ]

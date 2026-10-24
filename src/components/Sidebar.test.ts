@@ -2,6 +2,7 @@
 
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
+import { publicNavigationItems } from "../navigation";
 import Sidebar from "./Sidebar.vue";
 
 describe("sidebar", () => {
@@ -23,7 +24,10 @@ describe("sidebar", () => {
 
   it("按键之后是「组合动作」，推荐在连接之后，末位页是「设置」并带齿轮图标", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings", version: "0.5.0" } });
-    const items = wrapper.findAll(".nav-item");
+    const publicLabels = new Set(publicNavigationItems.map((item) => item.label));
+    const items = wrapper
+      .findAll(".nav-item")
+      .filter((item) => publicLabels.has(item.text()));
 
     expect(items.map((item) => item.text())).toEqual([
       "按键",
