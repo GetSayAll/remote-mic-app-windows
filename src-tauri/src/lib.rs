@@ -47,7 +47,7 @@ use sayall_core::{AppIconIdentifier, AppLanguage, ThemePreference, VoiceInputToo
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
-use usage::{build_usage_profile, UsageProfile, UsageSync};
+use usage::{build_usage_profile, UsageProfile, UsageStore, UsageSync};
 
 /// 主窗口标签（`tauri.conf.json` 里由配置创建的唯一窗口）。
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -501,17 +501,12 @@ impl std::fmt::Debug for AppState {
 #[tauri::command]
 async fn get_usage_profile(state: tauri::State<'_, AppState>) -> Result<UsageProfile, String> {
     let usage = Arc::clone(&state.usage);
-    let settings = state.settings.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 先做一次有界 flush，让刚结束的按键/语音进入内存统计；读模型用内存快照，
+        // 不再依赖 settings.json（统计已迁移到独立文件）。
         let _ = usage.flush();
-        let settings = settings.load().map_err(|error| {
-            sayall_windows::gatt_note(
-                "usage_stats action=read phase=completed terminal_result=failed error_domain=settings error_code=read_failed reason=profile_unavailable retryable=true".to_owned(),
-            );
-            error
-        })?;
         Ok(build_usage_profile(
-            &settings.usage_statistics,
+            &usage.snapshot(),
             chrono::Local::now().date_naive(),
         ))
     })
@@ -4791,6 +4786,8 @@ pub fn run() {
             #[cfg(not(feature = "runtime-simulation"))]
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             let launch_settings_path = settings_path.clone();
+            // 统计独立于 settings.json：其它构建/版本写设置时不会覆盖统计字段。
+            let usage_statistics_path = settings_path.with_file_name(usage::USAGE_FILE_NAME);
             let settings = SettingsStore::new(settings_path);
             // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
             // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
@@ -5010,7 +5007,23 @@ pub fn run() {
             let platform = create_platform();
             // 个人中心统计：平台层只排队，应用层每秒批量落盘；启动即开始消费，
             // 用户即使从不打开个人中心，按键与语音统计也会保留。
-            let usage = UsageSync::new(platform.usage_counters(), settings.clone());
+            // 旧版把统计写在 settings.json，首次启动迁移到独立文件后不再写回。
+            let usage_store = UsageStore::new(usage_statistics_path);
+            match settings.usage_statistics() {
+                Ok(legacy) => {
+                    if let Err(error) = usage_store.migrate_from_settings(legacy) {
+                        sayall_windows::gatt_note(format!(
+                            "usage_stats action=migrate phase=completed terminal_result=failed error_domain=stats error_code=write_failed reason=legacy_settings_unreadable retryable=true detail={error}"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(format!(
+                        "usage_stats action=migrate phase=completed terminal_result=failed error_domain=settings error_code=read_failed reason=migration_source_unavailable retryable=true detail={error}"
+                    ));
+                }
+            }
+            let usage = UsageSync::new(platform.usage_counters(), usage_store);
             let usage_worker_started = usage.spawn_worker();
             sayall_windows::gatt_note(format!(
                 "usage_stats action=worker_start phase=completed terminal_result={} reason={}",

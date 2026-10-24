@@ -7,7 +7,6 @@ use sayall_core::{
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
 };
-use sayall_windows::UsageEvent;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -379,64 +378,6 @@ impl SettingsStore {
         state.staged = None;
         self.write_onboarding_state(&state)?;
         Ok(true)
-    }
-
-    pub fn record_usage(
-        &self,
-        local_date: String,
-        button_presses: u64,
-        voice_sessions: u64,
-        voice_seconds: f64,
-    ) -> Result<(), String> {
-        if button_presses == 0 && voice_sessions == 0 && voice_seconds <= 0.0 {
-            return Ok(());
-        }
-        self.update("保存本机使用统计", move |settings| {
-            settings
-                .usage_statistics
-                .record_button_presses(&local_date, button_presses);
-            settings.usage_statistics.record_voice_sessions(
-                &local_date,
-                voice_sessions,
-                voice_seconds,
-            );
-        })
-    }
-
-    /// 批量写入个人中心使用事件。
-    ///
-    /// 一次 `update` 只读写一遍设置文件；事件里的 Unix 毫秒按本机时区换算成
-    /// `YYYY-MM-DD`，与 Mac 的本地日期口径一致。空批次不触碰磁盘。
-    pub fn record_usage_events(&self, events: &[UsageEvent]) -> Result<(), String> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        self.update("保存本机使用统计", |settings| {
-            for event in events {
-                match event {
-                    UsageEvent::ButtonPress {
-                        control,
-                        at_unix_ms,
-                    } => {
-                        settings
-                            .usage_statistics
-                            .record_button_press_for_control(&local_date_key(*at_unix_ms), control);
-                    }
-                    UsageEvent::VoiceSession {
-                        ended_at_unix_ms,
-                        duration_seconds,
-                        application_name,
-                    } => {
-                        settings.usage_statistics.record_voice_session_with_details(
-                            &local_date_key(*ended_at_unix_ms),
-                            *duration_seconds,
-                            *ended_at_unix_ms,
-                            application_name.as_deref(),
-                        );
-                    }
-                }
-            }
-        })
     }
 
     pub fn load_button_mappings(&self) -> Result<ButtonMappings, String> {
@@ -856,17 +797,6 @@ fn parse_settings(contents: &str) -> Result<AppSettings, String> {
 
 fn serialize_settings(settings: &AppSettings) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化应用设置失败：{error}"))
-}
-
-/// Unix 毫秒 → 本机时区的 `YYYY-MM-DD`（与 Mac 的本地日期统计口径一致）。
-fn local_date_key(unix_ms: i64) -> String {
-    use chrono::{Local, TimeZone};
-    Local
-        .timestamp_millis_opt(unix_ms)
-        .single()
-        .unwrap_or_else(Local::now)
-        .format("%Y-%m-%d")
-        .to_string()
 }
 
 /// 按键映射文件里的结构版本号（缺省或非法均为 None）。
