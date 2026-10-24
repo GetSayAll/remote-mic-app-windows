@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { scanRegisteredApps, type CustomAppPick } from "../lib/bridge";
+import { t } from "../lib/i18n";
 const props = defineProps<{ knownApps: CustomAppPick[]; saving: boolean; saveError: string | null }>();
 const emit = defineEmits<{ close: []; add: [apps: CustomAppPick[]] }>();
 const dialog = ref<HTMLDialogElement | null>(null);
@@ -29,7 +30,11 @@ async function scan(): Promise<void> {
   if (scanning.value) return;
   scanning.value = true; error.value = null;
   try { apps.value = await scanRegisteredApps(); selected.value = new Set(); }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
+  catch (cause) {
+    // 原始错误只进控制台；界面给固定文案，英文模式也能翻译。
+    console.warn(`scan registered apps failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    error.value = t("无法读取本机应用列表，请稍后重试。");
+  }
   finally { scanning.value = false; }
 }
 onMounted(() => {
@@ -41,31 +46,31 @@ onMounted(() => {
 <template>
   <dialog ref="dialog" class="registered-apps-dialog" aria-labelledby="registered-apps-title" @cancel.prevent="!saving && emit('close')">
     <header class="picker-header">
-      <h3 id="registered-apps-title">本机应用</h3>
-      <button type="button" class="secondary-button picker-close" aria-label="关闭应用选择" title="关闭" :disabled="saving" @click="emit('close')">×</button>
+      <h3 id="registered-apps-title">{{ t("本机应用") }}</h3>
+      <button type="button" class="secondary-button picker-close" :aria-label="t('关闭应用选择')" :title="t('关闭')" :disabled="saving" @click="emit('close')">×</button>
     </header>
     <div class="picker-toolbar">
-      <input v-model="query" type="search" aria-label="搜索本机应用" placeholder="搜索应用" />
-      <button type="button" class="secondary-button" :disabled="scanning || saving" @click="scan">重新扫描</button>
+      <input v-model="query" type="search" :aria-label="t('搜索本机应用')" :placeholder="t('搜索应用')" />
+      <button type="button" class="secondary-button" :disabled="scanning || saving" @click="scan">{{ t("重新扫描") }}</button>
     </div>
     <div class="picker-select-row">
-      <label><input type="checkbox" aria-label="全选当前结果" :checked="allSelected" :disabled="scanning || saving || !candidates.length" @change="toggleAll" />全选当前结果</label>
-      <span>{{ filtered.length }} 个应用 · 已选 {{ selectedApps.length }}</span>
+      <label><input type="checkbox" :aria-label="t('全选当前结果')" :checked="allSelected" :disabled="scanning || saving || !candidates.length" @change="toggleAll" />{{ t("全选当前结果") }}</label>
+      <span>{{ t("{count} 个应用 · 已选 {selected}", { count: filtered.length, selected: selectedApps.length }) }}</span>
     </div>
     <div class="picker-list" :aria-busy="scanning">
-      <p v-if="scanning" role="status">正在扫描…</p>
-      <p v-else-if="!filtered.length && !error">未找到匹配的应用</p>
+      <p v-if="scanning" role="status">{{ t("正在扫描…") }}</p>
+      <p v-else-if="!filtered.length && !error">{{ t("未找到匹配的应用") }}</p>
       <template v-else>
         <label v-for="app in filtered" :key="app.path" class="picker-app" :title="app.path">
           <input type="checkbox" :aria-label="app.name" :checked="known.has(app.path.toLowerCase()) || selected.has(app.path)" :disabled="saving || known.has(app.path.toLowerCase())" @change="toggle(app.path, ($event.target as HTMLInputElement).checked)" />
-          <span>{{ app.name }}</span><small v-if="known.has(app.path.toLowerCase())">已添加</small>
+          <span>{{ app.name }}</span><small v-if="known.has(app.path.toLowerCase())">{{ t("已添加") }}</small>
         </label>
       </template>
     </div>
-    <p v-if="error || saveError" class="error-text" role="alert">{{ error || saveError }}</p>
+    <p v-if="error || saveError" class="error-text" role="alert">{{ error ? t(error) : saveError }}</p>
     <footer class="picker-footer">
-      <button type="button" class="secondary-button" :disabled="saving" @click="emit('close')">取消</button>
-      <button type="button" class="primary-button" :disabled="scanning || saving || !selectedApps.length" @click="emit('add', selectedApps)">{{ saving ? '正在添加…' : '添加所选' }}（{{ selectedApps.length }}）</button>
+      <button type="button" class="secondary-button" :disabled="saving" @click="emit('close')">{{ t("取消") }}</button>
+      <button type="button" class="primary-button" :disabled="scanning || saving || !selectedApps.length" @click="emit('add', selectedApps)">{{ saving ? t('正在添加…') : t('添加所选') }}{{ t("（{count}）", { count: selectedApps.length }) }}</button>
     </footer>
   </dialog>
 </template>

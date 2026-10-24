@@ -3,18 +3,27 @@ import {
   getApplicationLanguage,
   saveApplicationLanguage,
   type AppLanguagePreference,
-  type EffectiveLanguage,
 } from "./bridge";
+import {
+  effectiveLanguage,
+  type EffectiveLanguage,
+} from "./language-state";
 import { reasonToken, reportFrontendEvent } from "./frontend-diagnostics";
 
 const preference = ref<AppLanguagePreference>("system");
-const effectiveLanguage = ref<EffectiveLanguage>("zh-Hans");
 const busy = ref(false);
 const errorMessage = ref("");
 
 let initialization: Promise<void> | null = null;
 const preferenceCacheKey = "sayall-language-preference";
 let operationSequence = 0;
+/**
+ * CI 的 runtime simulation 用中文选择器驱动真实 WebView；runner 的 Windows 显示语言
+ * 可能是英文。仿真构建固定用中文，避免系统语言让整套旅程选择器失效。
+ * 生产构建不受影响（`system` 仍按系统语言解析）。
+ */
+const runtimeSimulationBuild =
+  import.meta.env.VITE_SAYALL_RUNTIME_SIMULATION === "1";
 
 function nextOperationId(): string {
   operationSequence += 1;
@@ -64,6 +73,10 @@ function applyLanguage(language: EffectiveLanguage): void {
   }
 }
 
+function effectiveLanguageFor(preference: AppLanguagePreference): EffectiveLanguage {
+  return runtimeSimulationBuild ? "zh-Hans" : resolveLanguage(preference);
+}
+
 export function initializeLanguage(): Promise<void> {
   if (!initialization) {
     initialization = initializeLanguageOnce().catch(() => undefined);
@@ -77,7 +90,7 @@ async function initializeLanguageOnce(): Promise<void> {
   busy.value = true;
   const cached = cachedPreference();
   if (cached) preference.value = cached;
-  applyLanguage(resolveLanguage(preference.value));
+  applyLanguage(effectiveLanguageFor(preference.value));
 
   let loadFailed = false;
   try {
@@ -87,7 +100,7 @@ async function initializeLanguageOnce(): Promise<void> {
     loadFailed = true;
     errorMessage.value = "无法读取应用语言设置，已暂时使用上次的选择。";
   }
-  applyLanguage(resolveLanguage(preference.value));
+  applyLanguage(effectiveLanguageFor(preference.value));
   reportFrontendEvent({
     event: "language",
     phase: "initialize",
@@ -112,7 +125,7 @@ export async function setLanguagePreference(value: AppLanguagePreference): Promi
     await saveApplicationLanguage(value, operationId);
     preference.value = value;
     cachePreference(value);
-    applyLanguage(resolveLanguage(value));
+    applyLanguage(effectiveLanguageFor(value));
     reportFrontendEvent({
       event: "language",
       phase: "change",

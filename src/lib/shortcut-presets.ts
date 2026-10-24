@@ -1,4 +1,5 @@
 import type { KeyCode } from "./bridge";
+import { t } from "./i18n";
 
 /**
  * 预设快捷键分组（对齐 Mac `ButtonActionCategory` 的 basicKeys/systemAndMedia，
@@ -13,52 +14,70 @@ export interface ShortcutPresetGroup {
   items: Array<{ label: string; keys: KeyCode[]; display?: string }>;
 }
 
+/** label 用 getter：常量表也要在语言切换后按当前语言重新取值。 */
+function localize(label: string): string {
+  return /[\u4e00-\u9fff]/.test(label) ? t(label) : label;
+}
+
+function preset(label: string, keys: KeyCode[], display?: string) {
+  return {
+    get label() {
+      return localize(label);
+    },
+    keys,
+    display,
+  };
+}
+
+function group(label: string, items: ShortcutPresetGroup["items"]) {
+  return {
+    get label() {
+      return localize(label);
+    },
+    items,
+  };
+}
+
 export const SHORTCUT_PRESET_GROUPS: ShortcutPresetGroup[] = [
-  {
-    label: "基础按键",
-    items: [
-      { label: "Enter", keys: ["enter"] },
-      { label: "Esc", keys: ["escape"] },
-      { label: "空格", keys: ["space"] },
-      { label: "Tab", keys: ["tab"] },
-      { label: "退格", keys: ["backspace"] },
-      { label: "删除", keys: ["delete"] },
-      { label: "↑", keys: ["up"] },
-      { label: "↓", keys: ["down"] },
-      { label: "←", keys: ["left"] },
-      { label: "→", keys: ["right"] },
-      // Home 为"主页键同键映射"的必需预设（能力矩阵 identity 档的唯一
-      // 合法目标；Mac 端基础键列表无此键，Windows 端因泄漏对冲需要保留）。
-      { label: "Home", keys: ["home"] },
-      { label: "复制", keys: ["control", "c"] },
-      { label: "粘贴", keys: ["control", "v"] },
-      { label: "剪切", keys: ["control", "x"] },
-      { label: "全选", keys: ["control", "a"] },
-      { label: "撤销", keys: ["control", "z"] },
-      { label: "重做", keys: ["control", "y"] },
-      { label: "查找", keys: ["control", "f"] },
-      { label: "保存", keys: ["control", "s"] },
-      { label: "发送", keys: ["control", "enter"] },
-      { label: "换行", keys: ["shift", "enter"] },
-      { label: "右键菜单", keys: ["apps"] },
-      { label: "刷新", keys: ["f5"] },
-    ],
-  },
-  {
-    label: "系统与媒体",
-    items: [
-      { label: "切换窗口", keys: ["alt", "tab"] },
-      { label: "显示桌面", keys: ["left_windows", "d"], display: "Win + D" },
-      { label: "关闭窗口", keys: ["control", "w"] },
-      { label: "锁定", keys: ["left_windows", "l"], display: "Win + L" },
-      { label: "搜索", keys: ["left_windows", "s"], display: "Win + S" },
-      { label: "截图", keys: ["left_windows", "shift", "s"], display: "Win + Shift + S" },
-      { label: "静音", keys: ["volume_mute"] },
-      { label: "音量+", keys: ["volume_up"] },
-      { label: "音量−", keys: ["volume_down"] },
-      { label: "播放/暂停", keys: ["media_play_pause"] },
-      { label: "上一首", keys: ["media_prev"] },
-      { label: "下一首", keys: ["media_next"] },
-    ],
-  },
+  group("基础按键", [
+    preset("Enter", ["enter"]),
+    preset("Esc", ["escape"]),
+    preset("空格", ["space"]),
+    preset("Tab", ["tab"]),
+    preset("退格", ["backspace"]),
+    preset("删除", ["delete"]),
+    preset("↑", ["up"]),
+    preset("↓", ["down"]),
+    preset("←", ["left"]),
+    preset("→", ["right"]),
+    // Home 为"主页键同键映射"的必需预设（能力矩阵 identity 档的唯一
+    // 合法目标；Mac 端基础键列表无此键，Windows 端因泄漏对冲需要保留）。
+    preset("Home", ["home"]),
+    preset("复制", ["control", "c"]),
+    preset("粘贴", ["control", "v"]),
+    preset("剪切", ["control", "x"]),
+    preset("全选", ["control", "a"]),
+    preset("撤销", ["control", "z"]),
+    preset("重做", ["control", "y"]),
+    preset("查找", ["control", "f"]),
+    preset("保存", ["control", "s"]),
+    preset("发送", ["control", "enter"]),
+    preset("换行", ["shift", "enter"]),
+    preset("右键菜单", ["apps"]),
+    preset("刷新", ["f5"]),
+  ]),
+  group("系统与媒体", [
+    preset("切换窗口", ["alt", "tab"]),
+    preset("显示桌面", ["left_windows", "d"], "Win + D"),
+    preset("关闭窗口", ["control", "w"]),
+    preset("锁定", ["left_windows", "l"], "Win + L"),
+    preset("搜索", ["left_windows", "s"], "Win + S"),
+    preset("截图", ["left_windows", "shift", "s"], "Win + Shift + S"),
+    preset("静音", ["volume_mute"]),
+    preset("音量+", ["volume_up"]),
+    preset("音量−", ["volume_down"]),
+    preset("播放/暂停", ["media_play_pause"]),
+    preset("上一首", ["media_prev"]),
+    preset("下一首", ["media_next"]),
+  ]),
 ];

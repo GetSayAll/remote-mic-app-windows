@@ -1,4 +1,5 @@
 import { computed, ref } from "vue";
+import { t } from "./i18n";
 import {
   checkAppUpdate,
   getAppUpdatePreferences,
@@ -26,6 +27,31 @@ export type AppUpdatePhase =
   | "downloading"
   | "installing"
   | "failed";
+
+/**
+ * Rust 更新命令返回的用户可见中文文案（`src-tauri/src/updater.rs`）。
+ * 未知错误按原文显示：技术细节可能来自 IPC，不能擅自改写或吞掉。
+ */
+const LOCALIZED_UPDATE_ERRORS = new Set([
+  "网络连接失败，请稍后重试",
+  "检查暂时不可用，请稍后重试",
+  "更新包校验失败，已停止安装",
+  "下载更新失败，请检查网络后重试",
+  "下载或安装暂时失败，请稍后重试",
+  "更新配置异常，请联系开发者",
+  "预览版更新暂时不可用，请稍后重试",
+  "更新功能暂时不可用，请稍后重试",
+  "读取更新设置失败，请稍后重试",
+  "更新状态异常，请重启应用后重试",
+  "读取预览版更新设置失败，请稍后重试",
+  "保存预览版更新设置失败，请稍后重试",
+  "请先检查更新，再下载安装",
+]);
+
+function updateErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return LOCALIZED_UPDATE_ERRORS.has(message) ? t(message) : message;
+}
 
 const phase = ref<AppUpdatePhase>("idle");
 const info = ref<AppUpdateInfo | null>(null);
@@ -64,7 +90,7 @@ async function check(manual: boolean): Promise<void> {
     // 静默检查失败完全无声（回落 idle）；手动检查展示错误供重试。
     if (manual) {
       phase.value = "failed";
-      errorMessage.value = error instanceof Error ? error.message : String(error);
+      errorMessage.value = updateErrorText(error);
     } else {
       phase.value = "idle";
     }
@@ -93,7 +119,7 @@ async function install(): Promise<void> {
     phase.value = "installing";
   } catch (error) {
     phase.value = "failed";
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = updateErrorText(error);
   }
 }
 
@@ -111,7 +137,7 @@ async function loadUpdatePreferences(): Promise<void> {
     includePrereleases.value = saved.includePrereleases;
   } catch (error) {
     preferenceLoaded = false;
-    preferenceError.value = error instanceof Error ? error.message : String(error);
+    preferenceError.value = updateErrorText(error);
   } finally {
     preferenceBusy.value = false;
   }
@@ -132,7 +158,7 @@ async function setIncludePrereleases(enabled: boolean): Promise<void> {
     }
   } catch (error) {
     includePrereleases.value = previous;
-    preferenceError.value = error instanceof Error ? error.message : String(error);
+    preferenceError.value = updateErrorText(error);
   } finally {
     preferenceBusy.value = false;
   }

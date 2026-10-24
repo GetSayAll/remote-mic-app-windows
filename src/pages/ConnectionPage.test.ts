@@ -9,6 +9,7 @@ import type {
   RuntimeSnapshot,
 } from "../lib/bridge";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
+import { effectiveLanguage } from "../lib/language-state";
 import ConnectionPage from "./ConnectionPage.vue";
 
 type ShortcutCaptureHandler = (edge: {
@@ -804,7 +805,9 @@ describe("VB-CABLE first-launch guidance", () => {
     await flushPromises();
 
     expect(selectedToolCard(wrapper)).toBe("微信输入法");
-    expect(wrapper.text()).toContain("磁盘写入失败");
+    // 原始 IPC 错误只进控制台：界面显示与语言一致的短句（英文界面不夹带后端原文）。
+    expect(wrapper.text()).toContain("操作没有完成，请稍后重试。");
+    expect(wrapper.text()).not.toContain("磁盘写入失败");
     expect(mocks.setVoiceHoldHotkey).not.toHaveBeenCalled();
     wrapper.unmount();
   });
@@ -1503,7 +1506,8 @@ describe("connection page audio gain", () => {
     await slider.setValue("18");
     await flushPromises();
 
-    expect(wrapper.find('[role="alert"]').text()).toContain("磁盘只读");
+    expect(wrapper.find('[role="alert"]').text()).toContain("增益没有保存");
+    expect(wrapper.find('[role="alert"]').text()).not.toContain("磁盘只读");
     expect(slider.element.value).toBe("6");
     expect(wrapper.text()).toContain("6 dB");
     wrapper.unmount();
@@ -1659,6 +1663,100 @@ describe("connection page capture support unavailable (issue #206)", () => {
     expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(false);
     expect(wrapper.find(".switch-state").exists()).toBe(false);
     expect(wrapper.find(".capture-failure").exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
+/**
+ * 界面语言（2026-10-24 全界面 i18n）：t() 读取全局有效语言，模板中的调用
+ * 会随语言变化重渲染；默认 zh-Hans 下既有中文断言不受影响。
+ */
+describe("connection page interface language", () => {
+  beforeEach(() => {
+    mocks.getConnectionSnapshot.mockResolvedValue(emptyConnection);
+    mocks.getAudioSnapshot.mockResolvedValue(emptyAudio);
+    mocks.listAudioEndpoints.mockResolvedValue([]);
+    mocks.getGainDb.mockResolvedValue(0);
+    mocks.setGainDb.mockImplementation(async (gainDb: number) => gainDb);
+    mocks.getVoiceHoldHotkey.mockResolvedValue({
+      keys: ["left_control", "left_windows"],
+    });
+    mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
+    mocks.getVoiceInputTool.mockResolvedValue("wechat");
+    mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
+    mocks.getOtherVoiceHotkey.mockResolvedValue(null);
+    mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
+    mocks.openVokieHomepage.mockResolvedValue(undefined);
+    mocks.getRc003TaskStatus.mockResolvedValue({
+      installed: true,
+      authorizationRequired: false,
+      enabled: false,
+      helperPath: null,
+      lastError: null,
+    });
+    mocks.startShortcutCapture.mockResolvedValue([]);
+    mocks.getCaptureSupport.mockResolvedValue(supportedCaptureSupport());
+    mocks.stopShortcutCapture.mockResolvedValue(undefined);
+    mocks.subscribeShortcutCaptureEdges.mockImplementation(
+      async (handler: ShortcutCaptureHandler) => {
+        mocks.captureEdgeHandler = handler;
+        return () => {};
+      },
+    );
+    effectiveLanguage.value = "zh-Hans";
+  });
+
+  afterEach(() => {
+    effectiveLanguage.value = "zh-Hans";
+    vi.clearAllMocks();
+  });
+
+  it("英文模式渲染英文，切回中文立即恢复（无需重新挂载）", async () => {
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    effectiveLanguage.value = "en";
+    await flushPromises();
+
+    // 静态区块随语言重渲染；逐块断言，避免依赖某个中文 key 最终由哪个
+    // fragment 提供（共享字典按中文原文去重，个别 key 由其他页面提供）。
+    const han = /[\u4e00-\u9fff]/;
+    expect(wrapper.find("h1").text()).not.toMatch(han);
+    expect(wrapper.find(".setup-card h2").text()).not.toMatch(han);
+    expect(wrapper.find(".gain-label").text()).not.toMatch(han);
+    expect(wrapper.find(".gain-help").text()).not.toMatch(han);
+    expect(wrapper.find(".usage-hint-details summary").text()).not.toMatch(han);
+    for (const card of wrapper.findAll(".tool-card")) {
+      expect(card.text()).not.toMatch(han);
+    }
+    for (const item of wrapper.findAll(".checklist li")) {
+      expect(item.text()).not.toMatch(han);
+    }
+
+    effectiveLanguage.value = "zh-Hans";
+    await flushPromises();
+
+    expect(wrapper.find(".setup-card h2").text()).toBe("语音输入设置");
+    expect(wrapper.find(".gain-label").text()).toBe("增益");
+    expect(wrapper.find(".usage-hint-details summary").text()).toBe("常见问题（点开查看）");
+    wrapper.unmount();
+  });
+
+  it("动态文案用占位符插值，设备名与数量来自运行时数据", async () => {
+    effectiveLanguage.value = "en";
+    mocks.listAudioEndpoints.mockResolvedValue([
+      cableEndpoint,
+      { ...cableEndpoint, id: "cable-input-2" },
+    ]);
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const summary = wrapper.find(".scan-summary").text();
+    expect(summary).toContain("2");
+    expect(summary).not.toMatch(/[\u4e00-\u9fff]/);
+    // 整页在英文模式下不得残留中文（设备名、型号等数据本身是英文/数字）。
+    expect(wrapper.text()).not.toMatch(/[\u4e00-\u9fff]/);
     wrapper.unmount();
   });
 });

@@ -910,12 +910,12 @@ describe("Onboarding wizard shell", () => {
       .find((button) => button.text().includes("小米蓝牙语音遥控器 2 Pro"))!
       .trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("遥控器没有响应，请重试。");
+    expect(wrapper.text()).toContain("连接遥控器失败，请重试。");
 
     // 之后连接就绪（例如用户在系统里或应用里让它连上）：残留消息随之消失。
     await wrapper.setProps({ runtime: connectedRuntime() });
     await flushPromises();
-    expect(wrapper.text()).not.toContain("遥控器没有响应，请重试。");
+    expect(wrapper.text()).not.toContain("连接遥控器失败，请重试。");
   });
 
   it("corrects a mistaken voice-key press while waiting for a control button", async () => {

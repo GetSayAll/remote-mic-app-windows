@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { t } from "../lib/i18n";
+
 /**
  * 会员锁标：任何需要 Plus 的功能都可以复用。
  * 只负责展示，不读取会员状态、不发起命令。
@@ -14,7 +16,7 @@ withDefaults(defineProps<{ label?: string }>(), {
       <rect x="5" y="10.5" width="14" height="9.5" rx="2" stroke="currentColor" stroke-width="1.8" />
       <path d="M8.2 10.5V8a3.8 3.8 0 1 1 7.6 0v2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
     </svg>
-    <span>{{ label }}</span>
+    <span>{{ t(label) }}</span>
   </span>
 </template>
 

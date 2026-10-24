@@ -4,6 +4,7 @@
  * 状态同时用图形与文字表达，不依赖颜色单独传达（高对比度可用）。
  */
 import type { StatusRowState } from "../../onboarding/panel";
+import { t } from "../../lib/i18n";
 
 const props = defineProps<{
   state: StatusRowState;
@@ -28,6 +29,10 @@ const STATE_TEXT: Record<StatusRowState, string> = {
   ok: "已就绪",
   warn: "需处理",
 };
+
+function stateText(state: StatusRowState): string {
+  return t(STATE_TEXT[state]);
+}
 </script>
 
 <template>
@@ -38,6 +43,6 @@ const STATE_TEXT: Record<StatusRowState, string> = {
       <small v-if="props.desc">{{ props.desc }}</small>
     </span>
     <span v-if="props.value" class="status-value">{{ props.value }}</span>
-    <span v-else-if="!props.hideState" class="status-state">{{ STATE_TEXT[props.state] }}</span>
+    <span v-else-if="!props.hideState" class="status-state">{{ stateText(props.state) }}</span>
   </div>
 </template>

@@ -42,7 +42,11 @@ try {
     reason: "root_component_mount_failed",
   });
   const root = document.querySelector<HTMLElement>("#app");
-  if (root) root.textContent = "无线麦启动失败。请将诊断日志发送给技术支持。";
+  if (root) {
+    root.textContent = navigator.language.toLowerCase().startsWith("zh")
+      ? "无线麦启动失败。请将诊断日志发送给技术支持。"
+      : "SayAll failed to start. Send the diagnostic log to technical support.";
+  }
 }
 
 // 桌面应用内禁用 WebView 默认右键菜单（浏览器预览保留原生菜单，便于调试）。

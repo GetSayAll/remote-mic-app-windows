@@ -5,6 +5,7 @@
  * 「继续」的唯一裁决者，这里只是把同一批事实画出来。
  */
 import type { VoiceInputTool } from "../lib/bridge";
+import { t } from "../lib/i18n";
 import { CONNECTED_PHASES, type OnboardingStep } from "./flow";
 import type { ConnectionPhase } from "../lib/bridge";
 import type { VoiceAttemptState } from "./voice-attempt";
@@ -55,7 +56,7 @@ export interface SidePanelContext {
 export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): SidePanel {
   switch (step) {
     case "welcome":
-      return { visual: "app", caption: "无线说话，也能随手控制" };
+      return { visual: "app", caption: t("无线说话，也能随手控制") };
 
     case "remote": {
       const connected =
@@ -65,11 +66,14 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
         (ctx.connectionPhase === "connecting" || ctx.connectionPhase === "reconnecting");
       return {
         visual: "remote",
-        cardTitle: "连接检查",
+        cardTitle: t("连接检查"),
         rows: [
-          { label: "遥控器已连接", state: connected ? "ok" : connecting ? "busy" : "pending" },
           {
-            label: "控制按键已收到",
+            label: t("遥控器已连接"),
+            state: connected ? "ok" : connecting ? "busy" : "pending",
+          },
+          {
+            label: t("控制按键已收到"),
             state: ctx.remoteButtonObserved ? "ok" : "pending",
           },
         ],
@@ -79,10 +83,10 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
     case "audio":
       return {
         visual: "remote",
-        cardTitle: "音频检查",
+        cardTitle: t("音频检查"),
         rows: [
           {
-            label: "已检测到带「推荐」标记的 CABLE 设备",
+            label: t("已检测到带「推荐」标记的 CABLE 设备"),
             state:
               ctx.recommendedEndpointCount > 0
                 ? "ok"
@@ -91,11 +95,11 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
                   : "warn",
           },
           {
-            label: "已选中推荐设备",
+            label: t("已选中推荐设备"),
             state: ctx.selectedRecommended ? "ok" : "pending",
           },
           {
-            label: "音频输出正常",
+            label: t("音频输出正常"),
             state: ctx.audioLastError
               ? "warn"
               : ctx.wasapiReady
@@ -109,35 +113,35 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
 
     case "voice_tool": {
       const rows: SideCheckRow[] = [
-        { label: "已选择输入工具", state: ctx.tool ? "ok" : "pending" },
-        { label: "语音键已适配", state: ctx.hotkeyReady ? "ok" : "pending" },
+        { label: t("已选择输入工具"), state: ctx.tool ? "ok" : "pending" },
+        { label: t("语音键已适配"), state: ctx.hotkeyReady ? "ok" : "pending" },
       ];
       switch (ctx.tool) {
         case "doubao":
           rows.push({
-            label: "「支持更多输入工具」已开启",
+            label: t("「支持更多输入工具」已开启"),
             state: ctx.captureEnabled ? "ok" : "warn",
           });
           break;
         case "vokie":
           rows.push({
-            label: "Vokie 已运行",
+            label: t("Vokie 已运行"),
             state: ctx.vokieRunning ? "ok" : "warn",
           });
           break;
         case "wechat":
-          rows.push({ label: "无需额外设置", state: "ok" });
+          rows.push({ label: t("无需额外设置"), state: "ok" });
           break;
         case "other":
           rows.push({
-            label: "已选择语音键",
+            label: t("已选择语音键"),
             state: ctx.hotkeyReady ? "ok" : "pending",
           });
           break;
         default:
-          rows.push({ label: "等待选择输入工具", state: "pending" });
+          rows.push({ label: t("等待选择输入工具"), state: "pending" });
       }
-      return { visual: "remote", cardTitle: "工具检查", rows };
+      return { visual: "remote", cardTitle: t("工具检查"), rows };
     }
 
     case "voice_test": {
@@ -178,12 +182,12 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
             : "pending";
       return {
         visual: "remote",
-        cardTitle: "实时检查",
+        cardTitle: t("实时检查"),
         rows: [
-          { label: "语音键已按下并松开", state: sessionState },
-          { label: "语音声音已收到", state: samplesState },
-          { label: "音频输出正常", state: deliveryState },
-          { label: "文字已经出现", state: transcriptState },
+          { label: t("语音键已按下并松开"), state: sessionState },
+          { label: t("语音声音已收到"), state: samplesState },
+          { label: t("音频输出正常"), state: deliveryState },
+          { label: t("文字已经出现"), state: transcriptState },
         ],
       };
     }
@@ -192,15 +196,15 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
       const n = ctx.distinctButtons;
       return {
         visual: "remote",
-        cardTitle: "按键检查",
+        cardTitle: t("按键检查"),
         rows: [
           {
-            label: "已按 3 个不同的普通按键",
+            label: t("已按 3 个不同的普通按键"),
             state: n >= 3 ? "ok" : n > 0 ? "busy" : "pending",
             value: `${n} / 3`,
           },
           {
-            label: "按键映射暂时暂停，完成后恢复",
+            label: t("按键映射暂时暂停，完成后恢复"),
             state: ctx.mappingSuspended ? "ok" : "pending",
           },
         ],
@@ -208,6 +212,6 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
     }
 
     case "complete":
-      return { visual: "done", caption: "开始使用无线麦" };
+      return { visual: "done", caption: t("开始使用无线麦") };
   }
 }

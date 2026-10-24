@@ -7,6 +7,7 @@
  * docs/product-copy.md：说清发生了什么 + 用户该做什么，不贴内部错误）。
  */
 import type { VoiceAudioHealth } from "./bridge";
+import { t } from "./i18n";
 
 /** 载荷规范化：缺失/未知值按"读不到"处理，不提示。 */
 export function normalizeVoiceAudioHealth(raw: unknown): VoiceAudioHealth {
@@ -25,5 +26,7 @@ export function shouldShowVoiceAudioDegraded(health: VoiceAudioHealth): boolean 
  * 连接页与向导第⑤步共用，保证同一事实同一说法。
  */
 export function voiceAudioDegradedText(): string {
-  return "最近一次语音的声音没有完整送到输入工具，文字可能没有出现。请关闭或移开同时连接的其他蓝牙设备（键盘、鼠标、耳机等），再试一次。";
+  return t(
+    "最近一次语音的声音没有完整送到输入工具，文字可能没有出现。请关闭或移开同时连接的其他蓝牙设备（键盘、鼠标、耳机等），再试一次。",
+  );
 }

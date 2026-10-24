@@ -10,6 +10,7 @@
  * - 功能启动中（助手还在连）不显示文案——正在操作由开关态表达。
  */
 
+import { t } from "./i18n";
 import type { Rc003CaptureHealth, Rc003CaptureRevoked } from "./bridge";
 
 /** 开关的可见状态：不可用 / 正在操作 / 开启 / 关闭。 */
@@ -35,6 +36,11 @@ export function captureSwitchState(input: {
   return input.enabled === true ? "on" : "off";
 }
 
+/** 两个入口传本页/本开关名称：已本地化的英文名原样使用，中文名按当前语言翻译。 */
+function localizedName(name: string): string {
+  return /[\u4e00-\u9fff]/.test(name) ? t(name) : name;
+}
+
 /**
  * 「开关开着、但功能还没真的生效」的一句提示（2026-10-13 Andy 定稿，
  * 见 docs/product-copy.md §7 的同日决定）。
@@ -48,7 +54,9 @@ export function captureSwitchState(input: {
  * （那是用户刚做的动作），其次才是这一句。
  */
 export function captureInactiveText(name: string): string {
-  return `${name}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。`;
+  return t("{name}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。", {
+    name: localizedName(name),
+  });
 }
 
 /**
@@ -84,19 +92,20 @@ export function captureFailureText(
 ): string | null {
   const text = (raw ?? "").trim();
   if (!text) return null;
+  const subject = localizedName(name);
   if (text.includes("授权") || text.includes("UAC") || text.includes("提权")) {
-    return `没有完成系统授权，${name}保持关闭。`;
+    return t("没有完成系统授权，{name}保持关闭。", { name: subject });
   }
   if (text.includes("暂不支持")) {
-    return `这台电脑暂不支持${name}。`;
+    return t("这台电脑暂不支持{name}。", { name: subject });
   }
   if (text.includes("缺少") && text.includes("组件")) {
-    return `安装包缺少本机需要的组件，${name}暂不可用；请重新安装本版本。`;
+    return t("安装包缺少本机需要的组件，{name}暂不可用；请重新安装本版本。", { name: subject });
   }
   if (text.includes("停用") || text.includes("关闭")) {
-    return `关闭没有完成，${name}仍是开启状态。`;
+    return t("关闭没有完成，{name}仍是开启状态。", { name: subject });
   }
-  return `开启没有成功，${name}保持关闭。`;
+  return t("开启没有成功，{name}保持关闭。", { name: subject });
 }
 
 /**
@@ -108,7 +117,9 @@ export function captureFailureText(
  * `docs/product-copy.md` §3）。
  */
 export function captureRevokedText(name: string): string {
-  return `${name}因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。`;
+  return t("{name}因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。", {
+    name: localizedName(name),
+  });
 }
 
 /**

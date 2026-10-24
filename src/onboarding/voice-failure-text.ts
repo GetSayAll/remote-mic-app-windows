@@ -8,6 +8,7 @@
  * `active` / `unknown` / `off` 时保持原排查文案（麦克风 / 语音键 / 工具三件套仍适用）。
  */
 import type { Rc003CaptureHealth, VoiceAudioHealth } from "../lib/bridge";
+import { t } from "../lib/i18n";
 import { voiceAudioDegradedText } from "../lib/voice-audio-health";
 import type { VoiceAttemptFailureCode } from "./voice-attempt";
 
@@ -41,15 +42,21 @@ export function voiceFailureText(
 ): string {
   if (code === "voice.no_transcript") {
     if (captureHealth === "starting") {
-      return "“支持更多输入工具”还在准备中（刚开启时通常几秒）。等几秒后点“重新测试”再试一次。";
+      return t(
+        "“支持更多输入工具”还在准备中（刚开启时通常几秒）。等几秒后点“重新测试”再试一次。",
+      );
     }
     if (captureHealth === "inactive") {
-      return "“支持更多输入工具”还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开，然后重新测试。";
+      return t(
+        "“支持更多输入工具”还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开，然后重新测试。",
+      );
     }
     if (captureHealth === "off") {
       // 豆包 + 报告层关闭 = 必然收不到文字（语音键走了它按设计忽略的注入回退）。
       // 常规向导路径到不了这里（步骤④会拦），但用户中途去别的页面关掉开关是可达路径。
-      return "“支持更多输入工具”现在是关闭的，请先打开它，再点“重新测试”。";
+      return t(
+        "“支持更多输入工具”现在是关闭的，请先打开它，再点“重新测试”。",
+      );
     }
     if (voiceAudioHealth === "degraded") {
       // 2026-10-24 现场：语音条出现、音频只剩 1/3，豆包自然写不出字。
@@ -57,5 +64,5 @@ export function voiceFailureText(
       return voiceAudioDegradedText();
     }
   }
-  return code ? VOICE_FAILURE_COPY[code] : "这次测试没有通过，再试一次。";
+  return code ? t(VOICE_FAILURE_COPY[code]) : t("这次测试没有通过，再试一次。");
 }
