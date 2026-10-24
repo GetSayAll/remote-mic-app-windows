@@ -78,11 +78,14 @@
 2. 正常退出应用并重新启动。
 3. 打开个人中心。
 4. 用旧版本写下的 `settings.json`（含 `usage_statistics.days`、无新字段）启动一次，再打开个人中心。
+5. 检查配置目录：统计应在独立的 `usage-statistics.json`，`settings.json` 不再写统计字段。
 
 预期：
 
 - 重启后 KPI 与排行保留。
 - 旧配置升级后旧累计统计保留；按控件计数与语音排行从新版本开始积累，不出现读取失败。
+- 首次启动日志出现 `usage_stats action=migrate ... terminal_result=passed source=settings`；再次启动不再迁移。
+- 安装其它分支/旧版本构建并触发设置写入后，再回到本版本，`usage-statistics.json` 中的统计不受影响。
 - 不出现数据重复累加（同一次操作只增加一次）。
 
 ## 用例六：断连、睡眠与异常收尾
