@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
+  activateAppForLearning,
   audioPhaseLabel,
   chordLabel,
   connectionPhaseLabel,
@@ -13,12 +14,14 @@ import {
   isRecommendedVoiceEndpoint,
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
+  openAppLabel,
   openGitHubRepository,
   openLogDirectory,
   openOfficialWebsite,
   openRecommendationsWebsite,
   openVbCableDownloadPage,
   registerCommonPhraseAvailability,
+  registerPresetAppNames,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
   setOpenWindowAtLaunch,
@@ -45,6 +48,40 @@ describe("mouse actions", () => {
   it("summarizes the focus-input action", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
+  });
+});
+
+describe("open application labels", () => {
+  it("prefixes 打开 with the product naming and keeps Latin spacing", () => {
+    expect(openAppLabel("微信")).toBe("打开微信");
+    expect(openAppLabel("WorkBuddy")).toBe("打开 WorkBuddy");
+    expect(openAppLabel("无线麦 SayAll")).toBe("打开无线麦 SayAll");
+    expect(openAppLabel("")).toBe("打开应用");
+  });
+
+  it("summarizes preset and custom open-app actions with the same label", () => {
+    registerPresetAppNames([{ id: "sayall", name: "无线麦 SayAll" }]);
+    expect(actionSummary({ type: "open_app", target: "sayall" })).toBe("打开无线麦 SayAll");
+    expect(actionSummary({ type: "open_app", target: "C:\\Apps\\Example.exe" })).toBe(
+      "打开 Example",
+    );
+    registerPresetAppNames([]);
+  });
+});
+
+describe("learning input bridge", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("opens the target app before starting the learning window", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await activateAppForLearning("notepad");
+
+    expect(invoke).toHaveBeenCalledWith("activate_app_for_learning", { target: "notepad" });
   });
 });
 

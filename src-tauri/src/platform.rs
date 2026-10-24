@@ -46,7 +46,7 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn test_focus_input(&self) -> Result<(), PlatformError>;
     /// 打开/激活目标应用并按聚焦档案聚焦（UI「测试打开与聚焦」）。
     fn test_app_focus(&self, target: String) -> Result<(), PlatformError>;
-    /// 「学习输入框」：阻塞至多 3 秒，返回捕获到的可编辑目标特征。
+    /// 「学习输入框」：阻塞至多 6 秒，返回捕获到的可编辑目标特征。
     fn learn_focus_target(
         &self,
     ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError>;

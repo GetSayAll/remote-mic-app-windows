@@ -427,6 +427,7 @@ impl SettingsStore {
             // 旧文件（结构版本 < 1）按旧版自动连发行为迁移为显式开关，
             // 再统一校验并盖章为当前版本。
             .migrate_legacy_hold_repeat()
+            .migrate_preset_focus_profiles()
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))
     }
@@ -455,6 +456,7 @@ impl SettingsStore {
         // v1 却丢掉「旧版自动连发」语义（2026-10-05 评审发现 4）。
         let mappings = mappings
             .migrate_legacy_hold_repeat()
+            .migrate_preset_focus_profiles()
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))?;
         let configuration = ButtonMappingConfiguration {
@@ -486,7 +488,12 @@ impl SettingsStore {
         }
         // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
         // 旧导出（无显式开关）走与本地加载相同的迁移。
-        self.save_button_mappings(configuration.button_mappings.migrate_legacy_hold_repeat())
+        self.save_button_mappings(
+            configuration
+                .button_mappings
+                .migrate_legacy_hold_repeat()
+                .migrate_preset_focus_profiles(),
+        )
     }
 
     pub fn load_combined_actions(&self) -> Result<MacroLibraryDocument, String> {

@@ -846,7 +846,10 @@ impl From<ButtonActionsWire> for ButtonActions {
 /// 1 = 含显式「按住连续触发」（`holdRepeat`），
 /// 2 = 新增组合动作绑定（`runMacro`；旧版本应用读到此动作类型会整体拒载，
 ///     靠版本护栏备份原文件，不静默丢配置）。
-pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 2;
+/// 3 = 预设应用的聚焦档案改为可覆盖默认值：旧版本留下的预设「自动选择 / 只打开」
+///     档案在加载时清除，让 Chrome / 网易云先落到产品默认聚焦方式；用户学习过的
+///     输入框、点击位置和显式快捷键保留。
+pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1045,6 +1048,26 @@ impl ButtonMappings {
                 continue;
             }
             actions.hold_repeat = Some(ButtonTrigger::Single);
+        }
+        self
+    }
+
+    /// 结构版本 0–2 的旧预设「自动选择 / 只打开」档案是旧 UI 留下的默认值；新版
+    /// 预设应用要显示产品默认聚焦方式（Chrome/网易云快捷键、其余自动选择），因此
+    /// 一次性清掉这两类。学习过的输入框、点击位置和显式快捷键是用户资产，必须保留。
+    /// 版本 3 起用户重新选择的预设档案也会保留。
+    pub fn migrate_preset_focus_profiles(mut self) -> Self {
+        if self.schema_version < 3 {
+            self.focus_profiles.retain(|target, profile| {
+                if crate::app_launcher::preset_app(target).is_none() {
+                    return true;
+                }
+                !matches!(
+                    profile.strategy,
+                    crate::focus::FocusStrategy::AutoComposer
+                        | crate::focus::FocusStrategy::OpenOnly
+                )
+            });
         }
         self
     }
@@ -2472,6 +2495,46 @@ mod tests {
             mappings.actions(RemoteButton::Back).hold_repeat,
             Some(ButtonTrigger::Single)
         );
+    }
+
+    #[test]
+    fn legacy_preset_focus_profiles_clear_defaults_but_keep_learned_assets() {
+        let json = serde_json::json!({
+            "schemaVersion": 2,
+            "focusProfiles": {
+                "chrome": { "strategy": "auto_composer" },
+                "notepad": { "strategy": "recorded_element", "recorded": { "controlType": "Edit", "automationId": "editor", "className": "RichEdit" } },
+                "qq": { "strategy": "app_shortcut", "shortcut": { "keys": ["left_control", "q"] } },
+                "C:\\Tools\\Example.exe": { "strategy": "app_shortcut", "shortcut": { "keys": ["left_control", "k"] } }
+            }
+        });
+        let migrated = serde_json::from_value::<ButtonMappings>(json)
+            .unwrap()
+            .migrate_preset_focus_profiles()
+            .normalized()
+            .unwrap();
+        assert_eq!(migrated.schema_version, BUTTON_MAPPINGS_SCHEMA_VERSION);
+        assert!(!migrated.focus_profiles.contains_key("chrome"));
+        assert_eq!(
+            migrated.focus_profiles["notepad"].strategy,
+            crate::focus::FocusStrategy::RecordedElement
+        );
+        assert!(migrated.focus_profiles["notepad"].recorded.is_some());
+        assert_eq!(
+            migrated.focus_profiles["qq"].strategy,
+            crate::focus::FocusStrategy::AppShortcut
+        );
+        assert!(migrated
+            .focus_profiles
+            .contains_key("C:\\Tools\\Example.exe"));
+
+        // 迁移只做一次：已盖章为 v3 的档案再次经过迁移不会清掉学习记录。
+        let again = migrated
+            .clone()
+            .migrate_preset_focus_profiles()
+            .normalized()
+            .unwrap();
+        assert!(again.focus_profiles.contains_key("notepad"));
     }
 
     #[test]

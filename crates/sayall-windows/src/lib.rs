@@ -897,11 +897,21 @@ impl WindowsPlatform {
         #[cfg(windows)]
         {
             // 组合动作执行器读的聚焦档案镜像：与映射同一次热加载更新。
-            let mut profiles = self
+            // 预设应用没有显式档案时补产品默认值，使组合动作与按键页复用同一聚焦方式。
+            let mut profiles = mappings.focus_profiles.clone();
+            for id in crate::app_launcher::DEFAULT_PRESET_IDS {
+                if !profiles.contains_key(*id) {
+                    profiles.insert(
+                        (*id).to_owned(),
+                        crate::button_mapping::preset_focus_profile(id),
+                    );
+                }
+            }
+            let mut mirror = self
                 .macro_focus_profiles
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *profiles = mappings.focus_profiles.clone();
+            *mirror = profiles;
         }
         self.button_mapping.set_mappings(mappings);
         #[cfg(windows)]
