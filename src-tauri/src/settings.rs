@@ -380,28 +380,6 @@ impl SettingsStore {
         Ok(true)
     }
 
-    pub fn record_usage(
-        &self,
-        local_date: String,
-        button_presses: u64,
-        voice_sessions: u64,
-        voice_seconds: f64,
-    ) -> Result<(), String> {
-        if button_presses == 0 && voice_sessions == 0 && voice_seconds <= 0.0 {
-            return Ok(());
-        }
-        self.update("保存本机使用统计", move |settings| {
-            settings
-                .usage_statistics
-                .record_button_presses(&local_date, button_presses);
-            settings.usage_statistics.record_voice_sessions(
-                &local_date,
-                voice_sessions,
-                voice_seconds,
-            );
-        })
-    }
-
     pub fn load_button_mappings(&self) -> Result<ButtonMappings, String> {
         let _guard = lock(&self.access);
         let path = self.button_mappings_path();
@@ -1205,7 +1183,10 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         // 配置文件是 pretty JSON（键冒号后有空格），用解析而不是子串比对。
         let persisted: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(persisted["schema_version"], serde_json::json!(4));
+        assert_eq!(
+            persisted["schema_version"],
+            serde_json::json!(AppSettings::default().schema_version)
+        );
         assert_eq!(persisted["app_icon"], serde_json::json!("standard"));
         assert_eq!(store.load().unwrap().app_icon, AppIconIdentifier::Standard);
 

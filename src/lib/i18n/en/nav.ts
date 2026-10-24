@@ -9,4 +9,5 @@ export default {
   "nav.权限": "Permissions",
   "nav.设置": "Settings",
   "nav.会员": "Membership",
+  "nav.个人中心": "Profile",
 };

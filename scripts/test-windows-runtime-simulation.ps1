@@ -96,7 +96,7 @@ try {
 - RC001/RC003 scan and RC001 16 kHz connection state: passed
 - explicit simulated audio endpoint and Raw Input state: passed
 - mapping persistence and non-injecting SendInput recorder: passed
-- four sidebar pages and diagnostics rendering: passed
+- five sidebar pages including profile and diagnostics rendering: passed
 - first `STREAM_START → 40+80 AUDIO → STREAM_STOP → DRAIN`: 240 samples passed
 - disconnect and stop cleanup state: passed
 

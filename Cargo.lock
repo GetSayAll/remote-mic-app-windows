@@ -3164,6 +3164,7 @@ dependencies = [
 name = "sayall-windows-app"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "quick-xml",
  "reqwest",
  "rustls",

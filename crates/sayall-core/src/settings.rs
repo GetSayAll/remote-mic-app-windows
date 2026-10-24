@@ -83,7 +83,8 @@ impl AppIconIdentifier {
 }
 
 /// 当前配置代次。4 = 2026-10-04 引入 `app_icon` 选择迁移（见 `AppSettings::normalized`）。
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+/// 5 = 2026-10-24 使用统计加入按控件计数与单次语音排行（字段向后兼容，不需要数据迁移）。
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 /// `app_icon` 被视为"用户真实选择"的最低代次（2026-10-04）。
 ///

@@ -1030,8 +1030,9 @@ fn handle_edges(
         key_gate::swallowed_edge_count(),
         key_gate::leaked_down_count()
     ));
-    let press_count = edges.iter().filter(|edge| edge.is_pressed).count() as u64;
-    usage.record_button_presses(press_count);
+    for edge in edges.iter().filter(|edge| edge.is_pressed) {
+        usage.record_button_press(edge.button);
+    }
     {
         let mut snapshot = lock_snapshot(snapshot);
         snapshot.semantic_edge_count = snapshot

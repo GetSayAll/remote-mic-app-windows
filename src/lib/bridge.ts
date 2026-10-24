@@ -19,6 +19,14 @@ export const OFFICIAL_WEBSITE_URL = "https://sayall.app/?from=win";
 export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-app-windows";
 
 /**
+ * 分享面板的官网链接（对齐 Mac `AppSharing` 的 `from=mac_share`，Windows 用
+ * `from=win_share`）。二维码是同一链接在本机生成的静态资产，不请求二维码服务。
+ * 修改此值必须重新生成 `public/app-share-qr.png`：
+ * `corepack pnpm dlx qrcode -o public/app-share-qr.png -w 288 -q 2 -e M "<URL>"`
+ */
+export const SHARE_WEBSITE_URL = "https://sayall.app/?from=win_share";
+
+/**
  * Vokie 官网（2026-10-01 Andy 提供）。
  *
  * 同样是 opener 白名单的键：新增 URL 必须同步
@@ -806,6 +814,101 @@ export async function getMembershipAccountSummary(): Promise<MembershipAccountSu
     };
   }
   return invoke<MembershipAccountSummary>("get_membership_snapshot");
+}
+
+/** 个人中心日历的一天（本地日期 `YYYY-MM-DD`）。 */
+export interface UsageProfileDay {
+  date: string;
+  buttonPresses: number;
+  voiceSeconds: number;
+}
+
+/** 单次语音排行的一条；应用名只来自本机保存的显示名。 */
+export interface UsageVoiceSession {
+  endedAtMs: number;
+  durationSeconds: number;
+  applicationName: string | null;
+}
+
+/** 个人中心读模型（`get_usage_profile`）。 */
+export interface UsageProfile {
+  totalButtonPresses: number;
+  totalVoiceSeconds: number;
+  weekButtonPresses: number;
+  longestVoiceSeconds: number;
+  buttonPressesByControl: Record<string, number>;
+  voiceSessions: UsageVoiceSession[];
+  recentDays: UsageProfileDay[];
+}
+
+function browserDateKey(offsetFromToday: number): string {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + offsetFromToday);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** 浏览器预览用的固定样例（不进入 Tauri 路径，只用于布局走查）。 */
+function browserUsageProfile(): UsageProfile {
+  const recentDays: UsageProfileDay[] = Array.from({ length: 26 * 7 }, (_, index) => {
+    const offset = index - 26 * 7 + 1;
+    const active = (index * 7 + 3) % 5 !== 0;
+    return {
+      date: browserDateKey(offset),
+      buttonPresses: active ? (index * 13) % 48 : 0,
+      voiceSeconds: active && index % 4 === 0 ? (index * 17) % 301 : 0,
+    };
+  });
+  return {
+    totalButtonPresses: 561,
+    totalVoiceSeconds: 33 * 60 + 12,
+    weekButtonPresses: 9,
+    longestVoiceSeconds: 85,
+    buttonPressesByControl: {
+      "button.back": 47,
+      "button.ok": 42,
+      "button.home": 45,
+      "button.down": 45,
+      "button.up": 41,
+      "button.left": 40,
+      "button.right": 45,
+      "button.menu": 23,
+      "button.tv": 12,
+      "button.power": 8,
+      "button.volume_up": 22,
+      "button.volume_down": 19,
+      "button.volume_mute": 11,
+      voice: 132,
+    },
+    voiceSessions: [
+      {
+        endedAtMs: Date.now() - 3 * 60 * 60 * 1000,
+        durationSeconds: 85,
+        applicationName: "微信",
+      },
+      {
+        endedAtMs: Date.now() - 26 * 60 * 60 * 1000,
+        durationSeconds: 82,
+        applicationName: "Chrome 浏览器",
+      },
+      {
+        endedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000,
+        durationSeconds: 61,
+        applicationName: null,
+      },
+    ],
+    recentDays,
+  };
+}
+
+export async function getUsageProfile(): Promise<UsageProfile> {
+  if (!isTauriRuntime()) {
+    return browserUsageProfile();
+  }
+  return invoke<UsageProfile>("get_usage_profile");
 }
 
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
@@ -1763,14 +1866,24 @@ export async function reportThemeResult(report: ThemeResultReport): Promise<void
  */
 export type AppIconIdentifier = "standard" | "faceted-duck";
 
+/** 应用图标切换后通知壳层（侧栏 logo）立即同步，不必等轮询。 */
+export const APP_ICON_CHANGED_EVENT = "sayall:app-icon-changed";
+
 export async function getAppIcon(): Promise<AppIconIdentifier> {
   if (!isTauriRuntime()) return "standard";
   return invoke<AppIconIdentifier>("get_app_icon");
 }
 
 export async function setAppIcon(identifier: AppIconIdentifier): Promise<AppIconIdentifier> {
-  if (!isTauriRuntime()) return identifier;
-  return invoke<AppIconIdentifier>("set_app_icon", { identifier });
+  const applied = isTauriRuntime()
+    ? await invoke<AppIconIdentifier>("set_app_icon", { identifier })
+    : identifier;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent<AppIconIdentifier>(APP_ICON_CHANGED_EVENT, { detail: applied }),
+    );
+  }
+  return applied;
 }
 
 /** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */

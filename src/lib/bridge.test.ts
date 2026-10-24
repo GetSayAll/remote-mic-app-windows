@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
   activateAppForLearning,
+  APP_ICON_CHANGED_EVENT,
   audioPhaseLabel,
   chordLabel,
   connectionPhaseLabel,
@@ -26,7 +27,9 @@ import {
   RECOMMENDATIONS_URL,
   remoteModelLabel,
   saveApplicationLanguage,
+  setAppIcon,
   setOpenWindowAtLaunch,
+  SHARE_WEBSITE_URL,
   shortcutCapability,
   showRecommendationsPage,
   hideRecommendationsPage,
@@ -41,6 +44,31 @@ import {
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+
+describe("sharing and app icon sync", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("uses the same fixed share URL encoded in the QR asset", () => {
+    expect(SHARE_WEBSITE_URL).toBe("https://sayall.app/?from=win_share");
+  });
+
+  it("notifies the shell immediately after the app icon is applied", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValueOnce("standard");
+    const listener = vi.fn<(event: Event) => void>();
+    window.addEventListener(APP_ICON_CHANGED_EVENT, listener);
+
+    await expect(setAppIcon("standard")).resolves.toBe("standard");
+
+    expect(invoke).toHaveBeenCalledWith("set_app_icon", { identifier: "standard" });
+    expect(listener).toHaveBeenCalledOnce();
+    expect((listener.mock.calls[0][0] as CustomEvent).detail).toBe("standard");
+    window.removeEventListener(APP_ICON_CHANGED_EVENT, listener);
+  });
+});
 
 describe("mouse actions", () => {
   it("summarizes clicks, movement, and wheel amounts", () => {

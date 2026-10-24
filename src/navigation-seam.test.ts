@@ -28,6 +28,7 @@ describe("私有功能页接入点", () => {
       "recommendations",
       "permissions",
       "settings",
+      "profile",
     ]);
   });
 
@@ -45,11 +46,12 @@ describe("私有功能页接入点", () => {
       "recommendations",
       "permissions",
       "settings",
+      "profile",
       "membership",
     ]);
     expect(merged.at(-1)?.label).toBe("会员");
     // 合并函数必须是纯的：公开表不能被就地改写。
-    expect(publicNavigationItems).toHaveLength(6);
+    expect(publicNavigationItems).toHaveLength(7);
     expect(publicNavigationItems.map((item) => item.id)).not.toContain("membership");
   });
 

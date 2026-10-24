@@ -1,13 +1,15 @@
 use button_mapping::{ButtonMappingRuntime, ButtonMappingSnapshot, MappingInjector};
 use focus::RecordedFocusTarget;
-use raw_input::{RawInputPhase, RawInputSnapshot};
+use raw_input::{RawInputPhase, RawInputSnapshot, RemoteButton};
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub mod app_launcher;
@@ -319,9 +321,42 @@ pub struct UsageCounterSnapshot {
     pub voice_samples: u64,
 }
 
+/// 一条待落盘的本机使用事件。
+///
+/// 平台层只负责采集与排队；本地日期转换、统计聚合和设置文件写入由应用层完成。
+/// 事件只含计数、时长和应用显示名，不含路径、窗口标题或用户内容。
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsageEvent {
+    ButtonPress {
+        control: String,
+        at_unix_ms: i64,
+    },
+    VoiceSession {
+        ended_at_unix_ms: i64,
+        duration_seconds: f64,
+        application_name: Option<String>,
+    },
+}
+
+const MAX_PENDING_USAGE_EVENTS: usize = 4096;
+
+#[derive(Debug, Default)]
+struct UsageEventQueue {
+    events: VecDeque<UsageEvent>,
+    dropped: u64,
+}
+
+#[derive(Debug)]
+struct ActiveVoiceUsage {
+    started_at: Instant,
+    application_name: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct UsageCounters {
     state: Mutex<UsageCounterSnapshot>,
+    events: Mutex<UsageEventQueue>,
+    active_voice: Mutex<Option<ActiveVoiceUsage>>,
 }
 
 impl UsageCounters {
@@ -329,10 +364,42 @@ impl UsageCounters {
         lock(&self.state).to_owned()
     }
 
-    #[cfg(any(windows, test))]
+    /// 取出自上次调用以来积累的事件。调用方只有在成功落盘后才能丢弃返回值。
+    pub fn drain_usage_events(&self) -> Vec<UsageEvent> {
+        std::mem::take(&mut lock(&self.events).events)
+            .into_iter()
+            .collect()
+    }
+
+    /// 取出并清零队列溢出丢弃数（用于节流诊断日志）。
+    pub fn take_dropped_usage_events(&self) -> u64 {
+        let mut queue = lock(&self.events);
+        std::mem::take(&mut queue.dropped)
+    }
+
+    #[cfg(test)]
     pub(crate) fn record_button_presses(&self, count: u64) {
         let mut state = lock(&self.state);
         state.button_presses = state.button_presses.saturating_add(count);
+    }
+
+    /// 记录一次实体按键，并写入待落盘事件。
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_button_press(&self, button: RemoteButton) {
+        self.record_button_press_key(button.storage_key());
+    }
+
+    /// 记录一次使用统计按键；`control` 必须是稳定键（`button.*` / `voice`）。
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_button_press_key(&self, control: &str) {
+        {
+            let mut state = lock(&self.state);
+            state.button_presses = state.button_presses.saturating_add(1);
+        }
+        self.push_event(UsageEvent::ButtonPress {
+            control: control.to_owned(),
+            at_unix_ms: unix_ms_now(),
+        });
     }
 
     #[cfg(any(windows, test))]
@@ -341,6 +408,97 @@ impl UsageCounters {
         state.voice_sessions = state.voice_sessions.saturating_add(1);
         state.voice_samples = state.voice_samples.saturating_add(samples);
     }
+
+    /// 语音键对应的 `MIC_OPEN` 请求到达：先结束上一轮未收尾的会话，再记一次
+    /// `voice` 按键并开始计时。重复调用不会丢上一轮时长。
+    #[cfg(any(windows, test))]
+    pub(crate) fn begin_voice_session(&self, application_name: Option<String>) {
+        self.finish_voice_session();
+        self.start_voice_session(application_name, "mic_open");
+    }
+
+    /// `STREAM_START` 到达时补记语音会话。
+    ///
+    /// RC003 的报告层语音路径实测会直接发 `0x04 STREAM_START`，不经过
+    /// `MIC_OPEN`；因此不能只依赖 [`Self::begin_voice_session`]。若 `MIC_OPEN`
+    /// 已经先到，这里保持幂等，避免同一次按键记两次、时长从半途重新计时。
+    #[cfg(any(windows, test))]
+    pub(crate) fn ensure_voice_session_started(&self, application_name: Option<String>) {
+        let mut active = lock(&self.active_voice);
+        if active.is_some() {
+            return;
+        }
+        self.start_voice_session_locked(&mut active, application_name);
+        drop(active);
+        gatt_note(
+            "usage_stats action=voice_begin phase=completed terminal_result=passed source=stream_start"
+                .to_owned(),
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_voice_session(&self, application_name: Option<String>, source: &str) {
+        let mut active = lock(&self.active_voice);
+        self.start_voice_session_locked(&mut active, application_name);
+        drop(active);
+        gatt_note(format!(
+            "usage_stats action=voice_begin phase=completed terminal_result=passed source={source}"
+        ));
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_voice_session_locked(
+        &self,
+        active: &mut Option<ActiveVoiceUsage>,
+        application_name: Option<String>,
+    ) {
+        self.record_button_press_key("voice");
+        *active = Some(ActiveVoiceUsage {
+            started_at: Instant::now(),
+            application_name,
+        });
+    }
+
+    /// 结束当前语音会话并写入一条排行事件；没有活动会话时是幂等的空操作。
+    pub(crate) fn finish_voice_session(&self) {
+        let Some(active) = lock(&self.active_voice).take() else {
+            return;
+        };
+        let duration_seconds = active.started_at.elapsed().as_secs_f64();
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return;
+        }
+        let application = if active.application_name.is_some() {
+            "present"
+        } else {
+            "unknown"
+        };
+        let duration_ms = (duration_seconds * 1_000.0).round() as u64;
+        self.push_event(UsageEvent::VoiceSession {
+            ended_at_unix_ms: unix_ms_now(),
+            duration_seconds,
+            application_name: active.application_name,
+        });
+        gatt_note(format!(
+            "usage_stats action=voice_finish phase=completed terminal_result=passed duration_ms={duration_ms} application={application}"
+        ));
+    }
+
+    fn push_event(&self, event: UsageEvent) {
+        let mut queue = lock(&self.events);
+        if queue.events.len() >= MAX_PENDING_USAGE_EVENTS {
+            queue.events.pop_front();
+            queue.dropped = queue.dropped.saturating_add(1);
+        }
+        queue.events.push_back(event);
+    }
+}
+
+fn unix_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 impl Default for ConnectionSnapshot {
@@ -1601,6 +1759,93 @@ mod tests {
                 voice_sessions: 2,
                 voice_samples: 24_000,
             }
+        );
+    }
+
+    #[test]
+    fn usage_events_capture_physical_voice_press_and_session() {
+        let counters = UsageCounters::default();
+        counters.record_button_press(RemoteButton::Back);
+        counters.begin_voice_session(Some("微信".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 2);
+        assert_eq!(counters.snapshot().voice_sessions, 0);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            UsageEvent::ButtonPress { control, .. } if control == "button.back"
+        ));
+        assert!(matches!(
+            &events[1],
+            UsageEvent::ButtonPress { control, .. } if control == "voice"
+        ));
+        assert!(matches!(
+            &events[2],
+            UsageEvent::VoiceSession {
+                duration_seconds,
+                application_name,
+                ..
+            } if *duration_seconds > 0.0 && application_name.as_deref() == Some("微信")
+        ));
+        assert!(counters.drain_usage_events().is_empty());
+    }
+
+    #[test]
+    fn stream_start_fallback_records_voice_usage_once_without_mic_open() {
+        let counters = UsageCounters::default();
+        // RC003 实测只发 0x04 STREAM_START；重复到达（或 MIC_OPEN 已先到）
+        // 不能重复计一次按键。
+        counters.ensure_voice_session_started(Some("微信".to_owned()));
+        counters.ensure_voice_session_started(Some("不应覆盖".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 1);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            UsageEvent::ButtonPress { control, .. } if control == "voice"
+        ));
+        assert!(matches!(
+            &events[1],
+            UsageEvent::VoiceSession {
+                duration_seconds,
+                application_name,
+                ..
+            } if *duration_seconds > 0.0 && application_name.as_deref() == Some("微信")
+        ));
+    }
+
+    #[test]
+    fn mic_open_then_stream_start_does_not_duplicate_voice_usage() {
+        let counters = UsageCounters::default();
+        counters.begin_voice_session(Some("微信".to_owned()));
+        counters.ensure_voice_session_started(Some("微信".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 1);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn usage_queue_drops_oldest_and_reports_overflow() {
+        let counters = UsageCounters::default();
+        for _ in 0..=MAX_PENDING_USAGE_EVENTS {
+            counters.record_button_press_key("button.back");
+        }
+
+        assert_eq!(counters.take_dropped_usage_events(), 1);
+        assert_eq!(counters.take_dropped_usage_events(), 0);
+        assert_eq!(
+            counters.drain_usage_events().len(),
+            MAX_PENDING_USAGE_EVENTS
         );
     }
 
