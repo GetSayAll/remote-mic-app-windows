@@ -61,10 +61,9 @@ pub fn foreground_application_name() -> Option<String> {
         let mut process_id = 0_u32;
         GetWindowThreadProcessId(foreground, Some(&mut process_id));
         if foreground_pid_is_ours(process_id, std::process::id()) {
-            // Mac `FrontmostApplicationMetadata.current(excludingBundleIdentifier:)`
-            // 同样排除本应用，因此这里保持「未知应用」，只把原因写进诊断日志。
-            note_application_unavailable("self_foreground");
-            return None;
+            // 前台就是本应用（例如用户在个人中心里测试语音）：用产品简称，而不是
+            // 归入「未知应用」（2026-10-25 用户要求）。
+            return Some("SayAll".to_owned());
         }
         let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) {
             Ok(handle) => handle,
@@ -130,7 +129,9 @@ pub fn application_display_name(executable: &str) -> Option<String> {
         .filter(|value| !value.is_empty())?;
     let lower = stem.to_ascii_lowercase();
     if lower == "sayall-windows-app" {
-        return None;
+        // 语音开始时前台就是本应用（例如用户在个人中心测试）：直接显示产品简称，
+        // 不再归入「未知应用」（2026-10-25 用户要求，与窗口标题口径一致）。
+        return Some("SayAll".to_owned());
     }
     let exe_name = format!("{lower}.exe");
     if let Some(app) = crate::app_launcher::PRESET_APPS.iter().find(|app| {
@@ -216,6 +217,18 @@ mod tests {
             Some("SomeTool")
         );
         assert_eq!(application_display_name("   ").as_deref(), None);
-        assert_eq!(application_display_name("sayall-windows-app.exe"), None);
+    }
+
+    #[test]
+    fn own_process_uses_the_product_name_instead_of_unknown() {
+        // 前台是本应用时也要有名字：个人中心里测试语音不会显示「未知应用」。
+        assert_eq!(
+            application_display_name("sayall-windows-app.exe").as_deref(),
+            Some("SayAll")
+        );
+        assert_eq!(
+            application_display_name(r"C:\Apps\SayAll\sayall-windows-app.exe").as_deref(),
+            Some("SayAll")
+        );
     }
 }

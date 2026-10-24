@@ -2970,10 +2970,18 @@ mod tests {
         // 热更新为主页键：主程序先撤销旧所有权，再下发新一代目标；主页边沿
         // 此后应走同一条 GateEdge 通道，而不是全局物理键盘钩子。
         bridge.set_capture_targets(true, mask(&[RemoteButton::Home]));
+        // 所有权租约到期时桥接会先写一行 `S -` 之类的通知；热更新行 `T ...` 可能排在
+        // 它后面。读到 `T ` 为止，不要把通知误判成热更新失败（2026-10-25 全量测试偶发）。
         let mut target_line = String::new();
-        reader
-            .read_line(&mut target_line)
-            .expect("必须收到 T 热更新");
+        for _ in 0..8 {
+            target_line.clear();
+            reader
+                .read_line(&mut target_line)
+                .expect("必须收到 T 热更新");
+            if target_line.starts_with("T ") {
+                break;
+            }
+        }
         assert!(target_line.starts_with("T "), "实际收到 {target_line:?}");
         assert!(
             target_line.trim().ends_with("4a,80,81,f1"),

@@ -305,6 +305,29 @@ mod tests {
     }
 
     #[test]
+    fn voice_key_counts_toward_total_and_week_buttons() {
+        let mut statistics = UsageStatistics::default();
+        // Mac 在语音开始时同样调 `recordButtonPress(control: .voice)`：累计与本周
+        // 按键都包含语音键，但「实体按键排行」只列实体键（见 ProfilePage 的前端过滤）。
+        statistics.record_button_press_for_control("2026-10-20", "voice");
+        statistics.record_button_press_for_control("2026-10-20", "button.back");
+        statistics.record_voice_session_with_details(
+            "2026-10-20",
+            3.0,
+            1_760_000_000_000,
+            Some("SayAll"),
+        );
+
+        let profile =
+            build_usage_profile(&statistics, NaiveDate::from_ymd_opt(2026, 10, 21).unwrap());
+
+        assert_eq!(profile.total_button_presses, 2);
+        assert_eq!(profile.week_button_presses, 2);
+        assert_eq!(profile.button_presses_by_control.get("voice"), Some(&1));
+        assert_eq!(profile.voice_sessions.len(), 1);
+    }
+
+    #[test]
     fn profile_includes_all_time_totals_outside_the_26_week_window() {
         let mut statistics = UsageStatistics::default();
         statistics.record_button_press_for_control("2025-01-01", "button.ok");
