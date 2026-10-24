@@ -1,11 +1,15 @@
 // @vitest-environment jsdom
 
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { effectiveLanguage } from "../lib/language-state";
 import Sidebar from "./Sidebar.vue";
 
 describe("sidebar", () => {
-  it("不显示版本号", () => {
+  beforeEach(() => {
+    effectiveLanguage.value = "zh-Hans";
+  });
+  it("不显示版本号（版本号在窗口标题）", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
 
     expect(wrapper.find(".sidebar-footer").exists()).toBe(false);
@@ -73,5 +77,21 @@ describe("sidebar", () => {
     // 三层描边：顶层方块 + 两条底边（与键盘图标的两段明显不同）。
     expect(paths).toHaveLength(3);
     expect(paths[0].attributes("d")).toContain("l9 4.6");
+  });
+
+  it("英文模式下侧栏条目、导航标签切换为英文", () => {
+    effectiveLanguage.value = "en";
+    const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
+
+    expect(wrapper.findAll(".nav-item").map((item) => item.text())).toEqual([
+      "Buttons",
+      "Routines",
+      "Connection",
+      "Recommendations",
+      "Permissions",
+      "Settings",
+      "Profile",
+    ]);
+    expect(wrapper.get("nav").attributes("aria-label")).toBe("Page navigation");
   });
 });

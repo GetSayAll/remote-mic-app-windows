@@ -11,6 +11,7 @@ use crate::{
     send_input::{KeyChord, KeyCode},
     send_input_windows::SendInputRuntime,
     ConnectionPhase, ConnectionSnapshot, PlatformError, RemoteModel, UsageCounters,
+    VoiceAudioHealth,
 };
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
@@ -118,6 +119,98 @@ fn synth_label(target: Option<u16>) -> String {
 ///
 /// 证据在本地环路即时产生：这个延迟只留足"应用先看到按下、帧结果随后到"的
 /// 竞态余量；再长只会推迟判据可见性。
+/// ATVV 满速音频的样本率（与 `AtvvCapabilities` 的 codec 0x02 一致）。
+const VOICE_EXPECTED_SAMPLE_RATE_HZ: u32 = 16_000;
+/// 低于该样本率即视为音频不完整（约为满速的 3/4）。
+///
+/// 2026-10-24 现场：正常会话 14,900–15,800 /s，蓝牙共存时 4,600–5,500 /s；
+/// 阈值取 12,000 留出短会话的抖动余量，又不放过 1/3 速率的明显降级。
+const VOICE_DEGRADED_SAMPLE_RATE_HZ: u32 = 12_000;
+/// 太短的会话不判定：起停抖动会把 0.2–0.5 秒的会话算成异常。
+const VOICE_RATE_MIN_DURATION_MS: u64 = 800;
+
+/// 语音会话音频完整度判定（纯函数，单测覆盖）。
+///
+/// 输入是**已解码并送入音频队列**的样本数与 `StreamStarted → StreamStopped`
+/// 的时长。返回 `None` = 不判定（太短或没有样本），界面与日志都不得据此提示。
+fn classify_voice_audio_rate(samples: u64, duration_ms: u64) -> Option<(u32, VoiceAudioHealth)> {
+    if samples == 0 || duration_ms < VOICE_RATE_MIN_DURATION_MS {
+        return None;
+    }
+    let rate_hz = (samples.saturating_mul(1_000) / duration_ms).min(u32::MAX as u64) as u32;
+    let health = if rate_hz >= VOICE_DEGRADED_SAMPLE_RATE_HZ {
+        VoiceAudioHealth::Full
+    } else {
+        VoiceAudioHealth::Degraded
+    };
+    Some((rate_hz, health))
+}
+
+fn voice_audio_health_token(health: VoiceAudioHealth) -> &'static str {
+    match health {
+        VoiceAudioHealth::Unknown => "unknown",
+        VoiceAudioHealth::Full => "full",
+        VoiceAudioHealth::Degraded => "degraded",
+    }
+}
+
+#[cfg(test)]
+mod voice_audio_rate_tests {
+    use super::{
+        classify_voice_audio_rate, voice_audio_health_token, VoiceAudioHealth,
+        VOICE_DEGRADED_SAMPLE_RATE_HZ,
+    };
+
+    #[test]
+    fn full_rate_sessions_are_full() {
+        // 2026-10-24 19:49 真机会话：2.32 s / 35,040 samples。
+        assert_eq!(
+            classify_voice_audio_rate(35_040, 2_320),
+            Some((15_103, VoiceAudioHealth::Full))
+        );
+        assert_eq!(
+            classify_voice_audio_rate(24_000, 1_610),
+            Some((14_906, VoiceAudioHealth::Full))
+        );
+    }
+
+    #[test]
+    fn one_third_rate_sessions_are_degraded() {
+        // 2026-10-24 19:30 真机会话：2.426 s / 13,200 samples。
+        assert_eq!(
+            classify_voice_audio_rate(13_200, 2_426),
+            Some((5_441, VoiceAudioHealth::Degraded))
+        );
+    }
+
+    #[test]
+    fn threshold_is_inclusive_and_short_or_empty_sessions_are_not_judged() {
+        assert_eq!(
+            classify_voice_audio_rate(u64::from(VOICE_DEGRADED_SAMPLE_RATE_HZ), 1_000),
+            Some((12_000, VoiceAudioHealth::Full))
+        );
+        assert_eq!(
+            classify_voice_audio_rate(u64::from(VOICE_DEGRADED_SAMPLE_RATE_HZ) - 1, 1_000),
+            Some((11_999, VoiceAudioHealth::Degraded))
+        );
+        assert_eq!(classify_voice_audio_rate(20_000, 799), None);
+        assert_eq!(classify_voice_audio_rate(0, 2_000), None);
+    }
+
+    #[test]
+    fn health_tokens_are_stable_for_logs_and_ui() {
+        assert_eq!(
+            voice_audio_health_token(VoiceAudioHealth::Unknown),
+            "unknown"
+        );
+        assert_eq!(voice_audio_health_token(VoiceAudioHealth::Full), "full");
+        assert_eq!(
+            voice_audio_health_token(VoiceAudioHealth::Degraded),
+            "degraded"
+        );
+    }
+}
+
 const VOICE_EFFECT_CHECK_MS: u64 = 500;
 /// 允许"证据先于按下被应用看到"的容差（毫秒）。
 ///
@@ -638,6 +731,9 @@ fn worker_loop(
     let mut session: Option<BleSession> = None;
     let mut pipeline = AtvvVoicePipeline::default();
     let mut active_voice_samples = 0_u64;
+    // 音频完整度判定的会话起点（2026-10-24）：只在 StreamStarted → StreamStopped
+    // 之间有效；太短的会话在判据里直接跳过。
+    let mut voice_stream_started_at: Option<Instant> = None;
     let mut voice_gain_log: Option<(u64, f32)> = None;
     let mut connection_generation = 0_u64;
     let mut capabilities_deadline: Option<Instant> = None;
@@ -1132,6 +1228,7 @@ fn worker_loop(
                         &mut active_voice_samples,
                         &mut extend_deadline,
                         &mut last_voice_audio_at,
+                        &mut voice_stream_started_at,
                         &sender,
                         &voice_session_epoch,
                         &bytes,
@@ -2075,6 +2172,7 @@ fn handle_control(
     active_voice_samples: &mut u64,
     extend_deadline: &mut Option<Instant>,
     last_voice_audio_at: &mut Option<Instant>,
+    voice_stream_started_at: &mut Option<Instant>,
     sender: &Sender<WorkerMessage>,
     voice_session_epoch: &Arc<AtomicU64>,
     bytes: &[u8],
@@ -2176,6 +2274,7 @@ fn handle_control(
             // 后续新会话会使旧阶梯的核对失效（防跨会话误伤）。
             let epoch = voice_session_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             *active_voice_samples = 0;
+            *voice_stream_started_at = Some(Instant::now());
             if let Some(session) = session {
                 session.microphone_opened = true;
             }
@@ -2417,6 +2516,20 @@ fn handle_control(
             if let Err(error) = pipeline.complete_drain(generation) {
                 lock(state).last_error = Some(error.to_string());
                 return;
+            }
+            let duration_ms = voice_stream_started_at
+                .take()
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let samples = *active_voice_samples;
+            if let Some((rate_hz, health)) = classify_voice_audio_rate(samples, duration_ms) {
+                gatt_note(format!(
+                    "voice_audio_rate result={} rate_hz={rate_hz} samples={samples} duration_ms={duration_ms} expected_hz={VOICE_EXPECTED_SAMPLE_RATE_HZ}",
+                    voice_audio_health_token(health)
+                ));
+                let mut snapshot = lock(state);
+                snapshot.voice_audio_health = health;
+                snapshot.voice_audio_rate_hz = Some(rate_hz);
             }
             usage.record_voice_session(*active_voice_samples);
             usage.finish_voice_session();

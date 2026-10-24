@@ -4,6 +4,17 @@ import type { AppIconIdentifier } from "../lib/bridge";
 import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
 import CrownIcon from "./CrownIcon.vue";
+import { t, tNav } from "../lib/i18n";
+import { effectiveLanguage } from "../lib/language-state";
+
+/**
+ * 侧栏文案：中文模式直接用原文；英文模式走导航专用词表（`nav.*`），避免与
+ * 页面内同形文案（设备徽标「推荐」= Recommended、向导阶段「设置」= Set Up）
+ * 争用同一个 key。
+ */
+function navLabel(item: { label: string }): string {
+  return effectiveLanguage.value === "en" ? tNav(item.label) : item.label;
+}
 
 const props = withDefaults(
   defineProps<{
@@ -90,7 +101,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 
 <template>
   <aside class="sidebar">
-    <nav class="sidebar-nav" aria-label="设置页面">
+    <nav class="sidebar-nav" :aria-label="t('设置页面')">
       <button
         v-for="item in topNavigationItems"
         :key="item.id"
@@ -119,7 +130,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
             stroke-linejoin="round"
           />
         </svg>
-        <span>{{ item.label }}</span>
+        <span>{{ navLabel(item) }}</span>
       </button>
 
       <!-- 个人中心固定在最底部（对齐 Mac statistics）。 -->
@@ -129,11 +140,11 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         class="nav-item profile-nav-item"
         :class="{ active: activePage === profileItem.id }"
         type="button"
-        aria-label="个人中心"
+        :aria-label="tNav('个人中心')"
         @click="emit('select', profileItem.id)"
       >
         <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
-        <span>{{ props.profileLabel || "个人中心" }}</span>
+        <span>{{ props.profileLabel || tNav("个人中心") }}</span>
       </button>
     </nav>
   </aside>

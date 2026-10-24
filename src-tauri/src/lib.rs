@@ -39,8 +39,11 @@ use membership::{
     MembershipRuntime, MembershipSnapshot,
 };
 use platform::PlatformRuntime;
-use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
-use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
+use recommendations::{
+    go_back_recommendations, hide_recommendations, open_recommendations_website,
+    retry_recommendations, show_recommendations,
+};
+use sayall_core::{AppIconIdentifier, AppLanguage, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
@@ -239,6 +242,9 @@ fn observe_webview_failure(webview: &tauri::Webview) {
 /// 放在 Rust 是因为界面已经不工作时它也必须能显示，与托盘菜单文案同理。
 #[cfg(windows)]
 const WEBVIEW_UNAVAILABLE_TITLE: &str = "无线麦 SayAll 界面未能正常显示，请从托盘退出后重开";
+#[cfg(windows)]
+const WEBVIEW_UNAVAILABLE_TITLE_EN: &str =
+    "SayAll could not display its interface. Quit from the tray and reopen it.";
 
 /// 判定宽限期：前端每秒报到一次，连续 5 秒没有信号才认定界面没有回来。
 /// 窗口收进托盘时 WebView 会把定时器节流，可能误判为"没回来"；页面一旦恢复
@@ -397,7 +403,7 @@ fn resolve_ui_hint(app: &tauri::AppHandle, baseline: u64, reason: &'static str) 
                 if !with_ui_hint(|state| state.mark_showing(previous_title)) {
                     return;
                 }
-                match window.set_title(WEBVIEW_UNAVAILABLE_TITLE) {
+                match window.set_title(webview_unavailable_title(&handle)) {
                     Ok(()) => sayall_windows::gatt_note(format!(
                         "webview event=ui_hint phase=completed action=title result=written reason={reason} window_visible={window_visible} signal_age_ms={}",
                         signal_age_field(baseline)
@@ -3870,6 +3876,83 @@ async fn set_theme_preference(
 }
 
 #[tauri::command]
+async fn get_application_language(
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppLanguage, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "application_language operation_id={operation_id} action=load phase=requested"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings
+            .load()
+            .map(|settings| settings.application_language)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取应用语言设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(language) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=load phase=persisted result=passed preference={} elapsed_ms={}",
+            app_language_name(*language),
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=load phase=persisted result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
+async fn set_application_language(
+    app: tauri::AppHandle,
+    language: AppLanguage,
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppLanguage, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "application_language operation_id={operation_id} action=save phase=requested preference={}",
+        app_language_name(language)
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_application_language(language)?;
+        Ok(language)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存应用语言设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(saved) => {
+            #[cfg(windows)]
+            apply_native_language(&app, *saved);
+            sayall_windows::gatt_note(format!(
+                "application_language operation_id={operation_id} action=save phase=persisted result=passed preference={} elapsed_ms={}",
+                app_language_name(*saved),
+                started.elapsed().as_millis()
+            ));
+        }
+        Err(_) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=save phase=persisted result=failed preference={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            app_language_name(language),
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
 async fn get_open_window_at_launch(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let settings = state.settings.clone();
     let started = std::time::Instant::now();
@@ -4109,6 +4192,98 @@ fn theme_preference_name(preference: ThemePreference) -> &'static str {
         ThemePreference::Light => "light",
         ThemePreference::Dark => "dark",
     }
+}
+
+fn app_language_name(language: AppLanguage) -> &'static str {
+    match language {
+        AppLanguage::System => "system",
+        AppLanguage::SimplifiedChinese => "zh-Hans",
+        AppLanguage::English => "en",
+    }
+}
+
+#[cfg(windows)]
+fn app_language_from_ui_language(language_id: u16) -> AppLanguage {
+    if language_id & 0x03ff == 0x04 {
+        AppLanguage::SimplifiedChinese
+    } else {
+        AppLanguage::English
+    }
+}
+
+#[cfg(windows)]
+fn effective_app_language(preference: AppLanguage) -> AppLanguage {
+    match preference {
+        AppLanguage::System => {
+            let language_id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+            app_language_from_ui_language(language_id)
+        }
+        explicit => explicit,
+    }
+}
+
+/// WebView 崩溃提示同样跟随应用语言；设置读不到时按系统语言。
+#[cfg(windows)]
+fn webview_unavailable_title(app: &tauri::AppHandle) -> &'static str {
+    let preference = app
+        .state::<AppState>()
+        .settings
+        .load()
+        .map(|settings| settings.application_language)
+        .unwrap_or(AppLanguage::System);
+    match effective_app_language(preference) {
+        AppLanguage::SimplifiedChinese => WEBVIEW_UNAVAILABLE_TITLE,
+        _ => WEBVIEW_UNAVAILABLE_TITLE_EN,
+    }
+}
+
+/// 应用语言变化时同步原生外壳：主窗口标题、托盘菜单与 tooltip。
+///
+/// 每次都用**新的** Menu/MenuItem 调 `set_menu`，不复用旧菜单项——这是 Mac
+/// 2026-08-01 语言切换菜单重复挂载异常的 Windows 对应规避点。
+#[cfg(windows)]
+fn apply_native_language(app: &tauri::AppHandle, preference: AppLanguage) {
+    let language = effective_app_language(preference);
+    let (show_label, quit_label, tooltip, title) = match language {
+        AppLanguage::SimplifiedChinese => ("显示主界面", "退出", "无线麦 SayAll", "无线麦 SayAll"),
+        _ => ("Show Main Window", "Quit", "SayAll", "SayAll"),
+    };
+    let title_result = match main_window(app) {
+        Some(window) => window.set_title(title).is_ok(),
+        None => false,
+    };
+    let mut tray_applied = false;
+    #[cfg(not(feature = "runtime-simulation"))]
+    if let Some(tray) = app.tray_by_id(app_icon::TRAY_ID) {
+        use tauri::menu::{Menu, MenuItem};
+        let build = (|| -> tauri::Result<()> {
+            let show = MenuItem::with_id(app, "tray-show", show_label, true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "tray-quit", quit_label, true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            tray.set_menu(Some(menu))?;
+            tray.set_tooltip(Some(tooltip))?;
+            Ok(())
+        })();
+        tray_applied = build.is_ok();
+        if let Err(error) = build {
+            sayall_windows::gatt_note(format!(
+                "app_lifecycle event=native_language action=apply phase=completed terminal_result=failed language={} reason=tray_menu_apply_failed detail={error}",
+                app_language_name(language)
+            ));
+        }
+    }
+    let tray_expected = !cfg!(feature = "runtime-simulation");
+    let terminal_result = if title_result && (!tray_expected || tray_applied) {
+        "passed"
+    } else {
+        "failed"
+    };
+    sayall_windows::gatt_note(format!(
+        "app_lifecycle event=native_language action=apply phase=completed terminal_result={terminal_result} language={} title={} tray_menu={}",
+        app_language_name(language),
+        if title_result { "passed" } else { "failed" },
+        if tray_applied { "passed" } else { "absent_or_failed" }
+    ));
 }
 
 #[cfg(feature = "runtime-simulation")]
@@ -4652,6 +4827,8 @@ pub fn run() {
             // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
             #[cfg(windows)]
             app_icon::apply(app.handle(), saved_settings.app_icon);
+            #[cfg(windows)]
+            apply_native_language(app.handle(), saved_settings.application_language);
 
             // 「本次启动前刚完成更新」（2026-10-19，对齐 Mac
             // `recordLaunchAndDetectCompletedUpdate`）：记录写在独立的
@@ -5148,8 +5325,10 @@ pub fn run() {
         open_windows_settings,
         hide_main_window,
         show_recommendations,
+        retry_recommendations,
         hide_recommendations,
         open_recommendations_website,
+        go_back_recommendations,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -5220,6 +5399,8 @@ pub fn run() {
         stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
+        get_application_language,
+        set_application_language,
         get_launch_at_login,
         set_launch_at_login,
         get_open_window_at_launch,
@@ -5267,8 +5448,10 @@ pub fn run() {
         open_windows_settings,
         hide_main_window,
         show_recommendations,
+        retry_recommendations,
         hide_recommendations,
         open_recommendations_website,
+        go_back_recommendations,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -5339,6 +5522,8 @@ pub fn run() {
         stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
+        get_application_language,
+        set_application_language,
         get_launch_at_login,
         set_launch_at_login,
         get_open_window_at_launch,
@@ -6472,6 +6657,17 @@ mod ui_hint_tests {
             WEBVIEW_UNAVAILABLE_TITLE.contains("无线麦 SayAll"),
             "产品名必须用名称表写法（含空格）"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_ui_language_maps_to_supported_app_languages() {
+        assert_eq!(
+            app_language_from_ui_language(0x0804),
+            AppLanguage::SimplifiedChinese
+        );
+        assert_eq!(app_language_from_ui_language(0x0409), AppLanguage::English);
+        assert_eq!(app_language_from_ui_language(0x0411), AppLanguage::English);
     }
 
     /// 主窗口查找只能用 `get_window`（见 `main_window` 的说明）。

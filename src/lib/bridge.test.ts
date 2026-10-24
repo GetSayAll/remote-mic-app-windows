@@ -10,6 +10,7 @@ import {
   connectionPhaseLabel,
   formatDiagnosticReport,
   GITHUB_REPOSITORY_URL,
+  getApplicationLanguage,
   getOpenWindowAtLaunch,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
@@ -25,12 +26,15 @@ import {
   registerPresetAppNames,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
+  saveApplicationLanguage,
   setAppIcon,
   setOpenWindowAtLaunch,
   SHARE_WEBSITE_URL,
   shortcutCapability,
   showRecommendationsPage,
   hideRecommendationsPage,
+  retryRecommendationsPage,
+  goBackRecommendationsPage,
   takeUpdateCompletedVersion,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
@@ -414,18 +418,52 @@ describe("推荐页入口（官网页面宿主）", () => {
     (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     vi.mocked(invoke)
       .mockResolvedValueOnce(7)
+      .mockResolvedValueOnce(8)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
 
-    await expect(showRecommendationsPage("dark")).resolves.toBe(7);
+    await expect(showRecommendationsPage("dark", "en")).resolves.toBe(7);
+    await expect(retryRecommendationsPage("light", "zh-Hans")).resolves.toBe(8);
     await hideRecommendationsPage();
     await openRecommendationsWebsite();
+    await goBackRecommendationsPage();
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
-      ["show_recommendations", { theme: "dark" }],
+      ["show_recommendations", { theme: "dark", language: "en" }],
+      ["retry_recommendations", { theme: "light", language: "zh-Hans" }],
       ["hide_recommendations"],
       ["open_recommendations_website"],
+      ["go_back_recommendations"],
     ]);
+  });
+
+  it("应用语言按 system / zh-Hans / en 原样走 Rust", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke)
+      .mockResolvedValueOnce("en")
+      .mockResolvedValueOnce("zh-Hans");
+
+    await expect(getApplicationLanguage("language-1")).resolves.toBe("en");
+    await expect(
+      saveApplicationLanguage("zh-Hans", "language-1"),
+    ).resolves.toBe("zh-Hans");
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["get_application_language", { operationId: "language-1" }],
+      ["set_application_language", { language: "zh-Hans", operationId: "language-1" }],
+    ]);
+  });
+
+  it("英文浏览器预览打开英文推荐页", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    await openRecommendationsWebsite("en");
+    expect(open).toHaveBeenCalledWith(
+      "https://sayall.app/en/recommendations/",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    open.mockRestore();
   });
 });
 

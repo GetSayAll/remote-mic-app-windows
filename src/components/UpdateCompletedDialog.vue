@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { t } from "../lib/i18n";
 
 /**
  * 「无线麦已更新」提示（2026-10-19，对齐 Mac `showUpdateCompletedAlert`）。
@@ -26,10 +27,10 @@ onMounted(() => {
     aria-labelledby="update-completed-title"
     @cancel.prevent="emit('close')"
   >
-    <h3 id="update-completed-title">无线麦已更新</h3>
-    <p class="update-completed-message">已成功更新到版本 {{ props.version }}。</p>
+    <h3 id="update-completed-title">{{ t("无线麦已更新") }}</h3>
+    <p class="update-completed-message">{{ t("已成功更新到版本 {version}。", { version: props.version }) }}</p>
     <footer class="update-completed-footer">
-      <button type="button" class="primary-button" @click="emit('close')">好</button>
+      <button type="button" class="primary-button" @click="emit('close')">{{ t("好") }}</button>
     </footer>
   </dialog>
 </template>

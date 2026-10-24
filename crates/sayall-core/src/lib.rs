@@ -25,7 +25,7 @@ pub use portable_macros::{
     export_portable_library, import_portable_library, PortableError, PORTABLE_MAX_BYTES,
 };
 pub use settings::{
-    AppIconIdentifier, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
+    AppIconIdentifier, AppLanguage, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
 };
 pub use statistics::{
     DailyUsage, UsageStatistics, VoiceSessionUsageRecord, MAX_APPLICATION_NAME_CHARS,

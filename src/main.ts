@@ -3,6 +3,7 @@ import App from "./App.vue";
 import { isTauriRuntime } from "./lib/bridge";
 import { initializeAccentColor } from "./lib/accent";
 import { initializeTheme } from "./lib/theme";
+import { initializeLanguage } from "./lib/language";
 import { installFrontendDiagnostics, reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { installFocusModalityTracking } from "./lib/focus-modality";
 import "./styles.css";
@@ -10,6 +11,7 @@ import "./styles.css";
 installFrontendDiagnostics();
 // 初始化调用在 Vue 挂载前同步应用首帧主题；异步读取设置不阻塞主界面。
 void initializeTheme();
+void initializeLanguage();
 // 系统强调色：拉取一次并注入 --accent* 变量；后续系统侧变化由
 // "system-accent-changed" 事件实时推送（Rust WM_SETTINGCHANGE 监听），
 // 用户在系统设置里换强调色无需重启应用。读取失败时保留 styles.css
@@ -40,7 +42,11 @@ try {
     reason: "root_component_mount_failed",
   });
   const root = document.querySelector<HTMLElement>("#app");
-  if (root) root.textContent = "无线麦启动失败。请将诊断日志发送给技术支持。";
+  if (root) {
+    root.textContent = navigator.language.toLowerCase().startsWith("zh")
+      ? "无线麦启动失败。请将诊断日志发送给技术支持。"
+      : "SayAll failed to start. Send the diagnostic log to technical support.";
+  }
 }
 
 // 桌面应用内禁用 WebView 默认右键菜单（浏览器预览保留原生菜单，便于调试）。

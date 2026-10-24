@@ -18,6 +18,7 @@ import { profileAccountLabel } from "./lib/profile";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
+import { t } from "./lib/i18n";
 import { privatePageComponents } from "./private/feature-pages";
 import {
   detectReloadRecovery,
@@ -177,7 +178,11 @@ onMounted(async () => {
         initialRuntimeReported = true;
       }
     } catch (error) {
-      loadError.value = error instanceof Error ? error.message : String(error);
+      // 原始 IPC/Rust 错误只进控制台；界面给固定文案（英文模式可翻译）。
+      console.error(
+        `runtime snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      loadError.value = "无法读取运行状态，请稍后重试。";
       if (!initialRuntimeReported) {
         reportFrontendEvent({
           event: "runtime_snapshot",
@@ -266,11 +271,11 @@ onUnmounted(() => {
       @select="activePage = $event"
     />
     <main class="content">
-      <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>
+      <div v-if="loadError" class="error-banner">{{ t(loadError) }}</div>
       <div v-if="updateBannerVisible" class="update-banner">
-        <span>发现新版本 {{ updateInfo?.version }}</span>
-        <button type="button" class="link-button" @click="showUpdatePage">查看</button>
-        <button type="button" class="link-button" aria-label="忽略此提醒" @click="dismissBanner">
+        <span>{{ t("发现新版本 {version}", { version: updateInfo?.version ?? "" }) }}</span>
+        <button type="button" class="link-button" @click="showUpdatePage">{{ t("查看") }}</button>
+        <button type="button" class="link-button" :aria-label="t('忽略此提醒')" @click="dismissBanner">
           ×
         </button>
       </div>

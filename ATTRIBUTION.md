@@ -425,3 +425,8 @@
 - 主窗口有界恢复与相关策略测试改编自本仓库提交 `c89b587bfef1947a7bbde76c353632fa27ca3af0`，作者 **GuoHowe**；上游移植只涉及 `src-tauri/src/lib.rs` 的 WebView2 故障处理，按上游已有退出标记适配，不改 IME、语音或安装器流程。同一作者在其 fork 提交 `adddb0cc210885aff4ba19dec6684d199aa8e31e`（PR #202）中另带一次性原生提示（窗口标题改写、托盘 tooltip、`MessageBoxW`）：该实现未采纳（写标题的判据是 `Reload` 的返回值而非界面是否真的没回来，且写出后没有恢复路径）；本仓库改用心跳判据的标题提示（页面恢复报到即还原），设计见 Bug 记录的 2026-10-07 节。
 - 官方行为参考：[Microsoft WebView2 process-related events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events)。使用公开 `ProcessFailed`/`Reload` API；浏览器进程退出只能重建控件，本实现只落结构化日志，不伪造恢复；控件重建、托盘 tooltip 与系统对话框未实现；真实故障恢复验收不在已验证范围。
 - 直接依赖复用 Tauri/Wry 已锁定的 `webview2-com 0.38.2`，来源 [wravery/webview2-rs](https://github.com/wravery/webview2-rs)，许可 MIT；没有复制其示例实现。验证边界见 [2026-09-12 Bug 记录的增量节](Bugs/2026-09-12-voice-chord-focused-webview-reload.md#2026-10-05独立的-webview2-故障恢复贡献候选)。
+
+## 2026-10-24 英文界面词条来源
+
+- 语义与文案参考（未复制代码）：`HD838A/remote-mic-app` 的 `Resources/en.lproj/Localizable.strings`（提交 `c1840de92be4e74dd4404d6592e8e72b7b9278ff`）与 `sayall-private-platform` 组合动作包 `packages/macos-button-profiles/Sources/SayAllButtonProfiles/Resources/en.lproj/Localizable.strings`（提交 `e5f6cf23fd8f41eec4df7825bbe7715d29650eb5`）。
+- Windows 端以中文原文为 key 自建 `src/lib/i18n/en/*.ts`，沿用 Mac 术语（Routines、Doubao、WeType、App Language、System Default 等）；未复制 Swift/SwiftUI 代码或资源文件，平台差异（托盘、Win32 语言解析、Full-key support）由本仓库实现。

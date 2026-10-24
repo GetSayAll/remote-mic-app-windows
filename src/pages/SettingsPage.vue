@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
-import type { AppIconIdentifier, RuntimeSnapshot, ThemePreference } from "../lib/bridge";
+import { computed, onMounted, ref, watch } from "vue";
+import type {
+  AppIconIdentifier,
+  AppLanguagePreference,
+  RuntimeSnapshot,
+  ThemePreference,
+} from "../lib/bridge";
 import {
   getAppIcon,
   getLaunchAtLogin,
@@ -18,6 +23,9 @@ import CrownIcon from "../components/CrownIcon.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
+import { useLanguage } from "../lib/language";
+import { effectiveLanguage } from "../lib/language-state";
+import { t, tNav } from "../lib/i18n";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ "restart-onboarding": []; navigate: [page: string] }>();
@@ -41,11 +49,23 @@ const {
   errorMessage: themeError,
   setThemePreference,
 } = useTheme();
+const {
+  preference: applicationLanguage,
+  busy: languageBusy,
+  errorMessage: languageError,
+  setLanguagePreference,
+} = useLanguage();
 
 const themeOptions: Array<{ value: ThemePreference; label: string }> = [
   { value: "system", label: "系统" },
   { value: "light", label: "浅色" },
   { value: "dark", label: "深色" },
+];
+
+const languageOptions: Array<{ value: AppLanguagePreference; label: string }> = [
+  { value: "system", label: "跟随系统" },
+  { value: "zh-Hans", label: "简体中文" },
+  { value: "en", label: "English" },
 ];
 
 const appIconOptions: Array<{ value: AppIconIdentifier; label: string; preview: string }> = [
@@ -64,25 +84,34 @@ const membershipAccountText = computed(() => {
   const summary = membershipSummary.value;
   if (!summary) return "";
   if (summary.accountDisplayName) return summary.accountDisplayName;
-  return summary.accountSignedIn ? "已登录账号" : "未登录";
+  return t(summary.accountSignedIn ? "已登录账号" : "未登录");
 });
 const membershipStatusText = computed(() => {
   const summary = membershipSummary.value;
   if (!summary) return "";
   if (summary.plusActive) {
     return summary.syncState === "current"
-      ? "Plus 已开通，权益已同步。"
-      : "Plus 已开通，正在使用离线租约。";
+      ? t("Plus 已开通，权益已同步。")
+      : t("Plus 已开通，正在使用离线租约。");
   }
   return summary.accountSignedIn
-    ? "当前账号未开通 Plus；开通后可解锁会员功能。"
-    : "登录账号后可以开通或同步 Plus。";
+    ? t("当前账号未开通 Plus；开通后可解锁会员功能。")
+    : t("登录账号后可以开通或同步 Plus。");
 });
 const membershipActionLabel = computed(() => {
   const summary = membershipSummary.value;
   if (summary?.plusActive) return "管理会员";
   return summary?.accountSignedIn ? "开通 Plus 会员" : "登录并开通 Plus";
 });
+
+/**
+ * 页面标题按页面语境取词：中文原文「设置」同时是首次向导的阶段名（onboarding
+ * 片段译作 Set Up），i18n 以中文原文为 key，无法区分同形不同义。侧栏与
+ * 本页标题属于导航语义，英文走 `nav.*` 词表。
+ */
+const pageTitle = computed(() =>
+  effectiveLanguage.value === "en" ? tNav("设置") : "设置",
+);
 
 const checking = computed(() => phase.value === "checking");
 const installing = computed(() => phase.value === "downloading" || phase.value === "installing");
@@ -92,6 +121,15 @@ const upToDate = computed(() => phase.value === "up-to-date");
 const failed = computed(() => phase.value === "failed");
 const notes = computed(() => info.value?.notes?.trim() || null);
 
+// 更新/偏好读取失败的原始错误只进控制台：界面用固定文案，避免把 Rust/插件
+// 原始错误直接暴露给用户（诊断日志仍可在 Rust 侧查到）。
+watch(errorMessage, (message) => {
+  if (message) console.warn(`update check failed: ${message}`);
+});
+watch(preferenceError, (message) => {
+  if (message) console.warn(`update preferences failed: ${message}`);
+});
+
 /**
  * 更新状态行（对齐 Mac 设置页的“已是最新版本 / 正在检查”一行）：语气由状态
  * 决定，成功给绿色，失败给错误色，进行中给中性文案。
@@ -99,20 +137,22 @@ const notes = computed(() => info.value?.notes?.trim() || null);
 const updateStatus = computed<{ tone: "success" | "error" | "pending" | "idle"; text: string }>(
   () => {
     if (phase.value === "installing") {
-      return { tone: "pending", text: "正在安装更新，应用将自动重启…" };
+      return { tone: "pending", text: t("正在安装更新，应用将自动重启…") };
     }
     if (phase.value === "downloading") {
       return {
         tone: "pending",
-        text: `正在下载更新… ${appUpdateProgressText(progress.value)}`,
+        text: t("正在下载更新… {progress}", {
+          progress: appUpdateProgressText(progress.value),
+        }),
       };
     }
-    if (checking.value) return { tone: "pending", text: "正在检查更新…" };
-    if (upToDate.value) return { tone: "success", text: "已经是最新版本。" };
+    if (checking.value) return { tone: "pending", text: t("正在检查更新…") };
+    if (upToDate.value) return { tone: "success", text: t("已经是最新版本。") };
     if (failed.value) {
-      return { tone: "error", text: errorMessage.value || "检查更新失败，请稍后重试。" };
+      return { tone: "error", text: t("检查更新失败，请稍后重试。") };
     }
-    return { tone: "idle", text: "手动检查是否有新版本。" };
+    return { tone: "idle", text: t("手动检查是否有新版本。") };
   },
 );
 
@@ -168,7 +208,8 @@ async function runOnboardingWizard(): Promise<void> {
       return;
     }
     emit("restart-onboarding");
-  } catch {
+  } catch (error) {
+    console.warn(`restart onboarding failed: ${error instanceof Error ? error.message : String(error)}`);
     onboardingError.value = "无法开始设置向导，请稍后重试。";
   } finally {
     onboardingBusy.value = false;
@@ -228,6 +269,12 @@ async function onThemeChange(event: Event): Promise<void> {
   await setThemePreference((event.target as HTMLInputElement).value as ThemePreference);
 }
 
+async function onLanguageChange(event: Event): Promise<void> {
+  await setLanguagePreference(
+    (event.target as HTMLInputElement).value as AppLanguagePreference,
+  );
+}
+
 async function onLaunchAtLoginChange(event: Event): Promise<void> {
   const enabled = (event.target as HTMLInputElement).checked;
   launchAtLoginBusy.value = true;
@@ -235,7 +282,9 @@ async function onLaunchAtLoginChange(event: Event): Promise<void> {
   try {
     launchAtLogin.value = await setLaunchAtLogin(enabled);
   } catch (error) {
-    launchAtLoginError.value = error instanceof Error ? error.message : String(error);
+    // 原始错误只进控制台；界面给固定文案，英文模式也能翻译。
+    console.warn(`launch at login update failed: ${error instanceof Error ? error.message : String(error)}`);
+    launchAtLoginError.value = "无法保存登录启动设置，请稍后重试。";
   } finally {
     launchAtLoginBusy.value = false;
   }
@@ -249,7 +298,8 @@ async function onOpenWindowAtLaunchChange(event: Event): Promise<void> {
   try {
     openWindowAtLaunch.value = await setOpenWindowAtLaunch(enabled);
   } catch (error) {
-    openWindowAtLaunchError.value = error instanceof Error ? error.message : String(error);
+    console.warn(`open window at launch update failed: ${error instanceof Error ? error.message : String(error)}`);
+    openWindowAtLaunchError.value = "无法保存启动页面设置，请稍后重试。";
     // 浏览器已经把复选框翻成用户点击的值；保存失败必须把可见状态拨回实际
     // 生效值，否则界面会显示一个并没有保存的选择。
     input.checked = openWindowAtLaunch.value;
@@ -269,7 +319,8 @@ async function onAppIconChange(event: Event): Promise<void> {
   try {
     appIcon.value = await setAppIcon(desired);
   } catch (error) {
-    appIconError.value = error instanceof Error ? error.message : String(error);
+    console.warn(`app icon update failed: ${error instanceof Error ? error.message : String(error)}`);
+    appIconError.value = "无法保存应用图标设置，请稍后重试。";
     try {
       appIcon.value = await getAppIcon();
     } catch {
@@ -293,17 +344,26 @@ onMounted(() => {
     });
   void getLaunchAtLogin()
     .then((enabled) => { launchAtLogin.value = enabled; })
-    .catch((error) => { launchAtLoginError.value = error instanceof Error ? error.message : String(error); })
+    .catch((error) => {
+      console.warn(`read launch at login failed: ${error instanceof Error ? error.message : String(error)}`);
+      launchAtLoginError.value = "无法读取登录启动设置，请稍后重试。";
+    })
     // 就绪标志与初值在同一渲染批次生效：开关此时才被创建，创建即带正确
     // checked，不产生属性变更，故无过渡可触发（无需禁用过渡或等待绘制）。
     .finally(() => { launchAtLoginReady.value = true; });
   void getOpenWindowAtLaunch()
     .then((enabled) => { openWindowAtLaunch.value = enabled; })
-    .catch((error) => { openWindowAtLaunchError.value = error instanceof Error ? error.message : String(error); })
+    .catch((error) => {
+      console.warn(`read open window at launch failed: ${error instanceof Error ? error.message : String(error)}`);
+      openWindowAtLaunchError.value = "无法读取启动页面设置，请稍后重试。";
+    })
     .finally(() => { openWindowAtLaunchReady.value = true; });
   void getAppIcon()
     .then((identifier) => { appIcon.value = identifier; })
-    .catch((error) => { appIconError.value = error instanceof Error ? error.message : String(error); })
+    .catch((error) => {
+      console.warn(`read app icon failed: ${error instanceof Error ? error.message : String(error)}`);
+      appIconError.value = "无法读取应用图标设置，请稍后重试。";
+    })
     .finally(() => { appIconReady.value = true; });
 });
 
@@ -317,6 +377,14 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
   power: {
     // SF "power"：电源圆环 + 竖线
     strokes: ["M12 3.6v7.4", "M7.3 6.4a7 7 0 1 0 9.4 0"],
+  },
+  language: {
+    // SF "globe"：圆 + 赤道 + 经线
+    strokes: [
+      "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
+      "M3.4 12h17.2",
+      "M12 3.2c2.4 2.5 3.6 5.5 3.6 8.8s-1.2 6.3-3.6 8.8c-2.4-2.5-3.6-5.5-3.6-8.8S9.6 5.7 12 3.2z",
+    ],
   },
   app_icon: {
     // SF "app.badge" 近似：应用方块 + 右下角标
@@ -343,28 +411,28 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
   <section class="settings-page">
     <header class="page-header">
       <div>
-        <h1>设置</h1>
+        <h1>{{ pageTitle }}</h1>
       </div>
     </header>
 
     <!-- 顶部模块（对齐 Mac 设置页：左边应用标识，右边版本与检查更新）。 -->
     <article class="card settings-overview">
       <div class="overview-identity">
-        <img class="app-logo" :src="appIconPreview" alt="无线麦 SayAll 应用图标" />
-        <h2>无线麦 SayAll</h2>
-        <p class="muted">让语音触手可及</p>
+        <img class="app-logo" :src="appIconPreview" :alt="t('无线麦 SayAll 应用图标')" />
+        <h2>{{ t("无线麦 SayAll") }}</h2>
+        <p class="muted">{{ t("让语音触手可及") }}</p>
       </div>
 
       <div class="overview-update">
         <div class="version-row">
-          <span class="muted">当前版本</span>
+          <span class="muted">{{ t("当前版本") }}</span>
           <strong class="version-value">{{ version }}</strong>
-          <span v-if="updateAvailable" class="badge success">可更新</span>
+          <span v-if="updateAvailable" class="badge success">{{ t("可更新") }}</span>
           <label
             class="toggle-row prerelease-toggle"
-            title="开启后，检查更新时也会包含尚在测试中的预览版本。"
+            :title="t('开启后，检查更新时也会包含尚在测试中的预览版本。')"
           >
-            <span>检查预览版更新</span>
+            <span>{{ t("检查预览版更新") }}</span>
             <input
               type="checkbox"
               class="toggle-input"
@@ -398,22 +466,24 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
                 stroke-linejoin="round"
               />
             </svg>
-            {{ failed ? "重试检查" : "检查更新…" }}
+            {{ failed ? t("重试检查") : t("检查更新…") }}
           </button>
         </div>
-        <p v-if="preferenceError" class="update-error">{{ preferenceError }}</p>
+        <p v-if="preferenceError" class="update-error">
+          {{ t("无法读取或保存更新设置，请稍后重试。") }}
+        </p>
 
         <hr class="settings-divider" />
 
         <div class="update-panel" aria-live="polite">
           <template v-if="updateAvailable">
             <p class="update-status success">
-              发现新版本 <strong>{{ info?.version }}</strong>（当前 {{ info?.currentVersion }}）
+              {{ t("发现新版本") }} <strong>{{ info?.version }}</strong>{{ t("（当前 {current}）", { current: info?.currentVersion ?? "" }) }}
             </p>
             <p v-if="notes" class="muted update-notes">{{ notes }}</p>
             <div class="update-actions">
               <button class="primary-button" type="button" :disabled="installing" @click="onInstall">
-                下载并安装
+                {{ t("下载并安装") }}
               </button>
             </div>
           </template>
@@ -440,7 +510,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 
     <!-- 通用（对齐 Mac 设置页的 settings.general 分组：标题 + 一张卡内多行 + 细分隔线）。 -->
     <section class="settings-section">
-      <h2 class="section-title">通用</h2>
+      <h2 class="section-title">{{ t("通用") }}</h2>
       <div class="card settings-group">
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
@@ -463,10 +533,9 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
           </span>
           <div class="settings-row-text">
-            <strong>外观</strong>
-            <p class="muted">选择应用的显示模式。</p>
+            <strong>{{ t("外观") }}</strong>
           </div>
-          <div class="theme-selector" role="radiogroup" aria-label="显示模式">
+          <div class="theme-selector" role="radiogroup" :aria-label="t('显示模式')">
             <label
               v-for="option in themeOptions"
               :key="option.value"
@@ -481,11 +550,11 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
                 :disabled="themeBusy"
                 @change="onThemeChange"
               />
-              <span>{{ option.label }}</span>
+              <span>{{ t(option.label) }}</span>
             </label>
           </div>
         </div>
-        <p v-if="themeError" class="error-text" role="alert">{{ themeError }}</p>
+        <p v-if="themeError" class="error-text" role="alert">{{ t(themeError) }}</p>
 
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
@@ -502,12 +571,11 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
           </span>
           <div class="settings-row-text">
-            <strong>启动行为</strong>
-            <p class="muted">设置登录后自动启动和应用启动时是否打开主窗口。</p>
+            <strong>{{ t("启动行为") }}</strong>
           </div>
           <div class="launch-behavior-toggles">
-            <label class="toggle-row launch-toggle" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
-              <span>登录时自动启动</span>
+            <label class="toggle-row launch-toggle" :title="t('使用当前用户的 Windows 登录启动项，不需要管理员权限。')">
+              <span>{{ t("登录时自动启动") }}</span>
               <input
                 v-if="launchAtLoginReady"
                 type="checkbox"
@@ -522,9 +590,9 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             <span class="launch-toggle-divider" aria-hidden="true"></span>
             <label
               class="toggle-row launch-toggle"
-              title="关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。"
+              :title="t('关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。')"
             >
-              <span>启动时自动打开主面板</span>
+              <span>{{ t("启动时自动打开主面板") }}</span>
               <input
                 v-if="openWindowAtLaunchReady"
                 type="checkbox"
@@ -538,10 +606,50 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </label>
           </div>
         </div>
-        <p v-if="launchAtLoginError" class="error-text" role="alert">{{ launchAtLoginError }}</p>
-        <p v-if="openWindowAtLaunchError" class="error-text" role="alert">
-          {{ openWindowAtLaunchError }}
+        <p v-if="launchAtLoginError" class="error-text" role="alert">
+          {{ t(launchAtLoginError) }}
         </p>
+        <p v-if="openWindowAtLaunchError" class="error-text" role="alert">
+          {{ t(openWindowAtLaunchError) }}
+        </p>
+
+        <div class="settings-row">
+          <span class="settings-row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path
+                v-for="(path, index) in ROW_ICONS.language.strokes"
+                :key="`ls${index}`"
+                :d="path"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <div class="settings-row-text">
+            <strong>{{ t("应用语言") }}</strong>
+          </div>
+          <div class="theme-selector" role="radiogroup" :aria-label="t('应用语言')">
+            <label
+              v-for="option in languageOptions"
+              :key="option.value"
+              class="theme-option"
+              :class="{ selected: applicationLanguage === option.value }"
+            >
+              <input
+                type="radio"
+                name="application-language"
+                :value="option.value"
+                :checked="applicationLanguage === option.value"
+                :disabled="languageBusy"
+                @change="onLanguageChange"
+              />
+              <span>{{ t(option.label) }}</span>
+            </label>
+          </div>
+        </div>
+        <p v-if="languageError" class="error-text" role="alert">{{ t(languageError) }}</p>
 
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
@@ -564,9 +672,9 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
           </span>
           <div class="settings-row-text">
-            <strong>应用图标</strong>
+            <strong>{{ t("应用图标") }}</strong>
           </div>
-          <div class="app-icon-selector" role="radiogroup" aria-label="应用图标">
+          <div class="app-icon-selector" role="radiogroup" :aria-label="t('应用图标')">
             <label
               v-for="option in appIconOptions"
               :key="option.value"
@@ -582,17 +690,17 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
                 @change="onAppIconChange"
               />
               <img :src="option.preview" alt="" aria-hidden="true" />
-              <span>{{ option.label }}</span>
+              <span>{{ t(option.label) }}</span>
             </label>
           </div>
         </div>
-        <p v-if="appIconError" class="error-text" role="alert">{{ appIconError }}</p>
+        <p v-if="appIconError" class="error-text" role="alert">{{ t(appIconError) }}</p>
       </div>
     </section>
 
     <!-- 会员与账号（对齐 Mac 设置页的 membership section）。 -->
     <section v-if="membershipAvailable" class="settings-section">
-      <h2 class="section-title">会员与账号</h2>
+      <h2 class="section-title">{{ t("会员与账号") }}</h2>
       <div class="card settings-group">
         <div class="settings-row settings-membership-row">
           <span class="settings-row-icon membership-settings-icon" aria-hidden="true">
@@ -614,7 +722,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
               type="button"
               @click="emit('navigate', 'membership')"
             >
-              {{ membershipActionLabel }}
+              {{ t(membershipActionLabel) }}
             </button>
           </div>
         </div>
@@ -625,7 +733,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 
     <!-- 首次设置（向导重跑入口）：老用户机器已标记完成，需要入口才能重走一遍。 -->
     <section class="settings-section">
-      <h2 class="section-title">首次设置</h2>
+      <h2 class="section-title">{{ t("首次设置") }}</h2>
       <div class="card settings-group">
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
@@ -642,8 +750,8 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
           </span>
           <div class="settings-row-text">
-            <strong>重新运行设置向导</strong>
-            <p class="muted">重新走一遍首次设置；不会清除按键映射、设备与语音设置。</p>
+            <strong>{{ t("重新运行设置向导") }}</strong>
+            <p class="muted">{{ t("重新走一遍首次设置；不会清除按键映射、设备与语音设置。") }}</p>
           </div>
           <button
             class="secondary-button"
@@ -651,16 +759,16 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             :disabled="onboardingBusy"
             @click="runOnboardingWizard"
           >
-            重新运行向导
+            {{ t("重新运行向导") }}
           </button>
         </div>
-        <p v-if="onboardingError" class="error-text" role="alert">{{ onboardingError }}</p>
+        <p v-if="onboardingError" class="error-text" role="alert">{{ t(onboardingError) }}</p>
       </div>
     </section>
 
     <!-- 问题反馈（对齐 Mac 设置页的 settingsSupportSection）。 -->
     <section class="settings-section">
-      <h2 class="section-title">问题反馈</h2>
+      <h2 class="section-title">{{ t("问题反馈") }}</h2>
       <div class="card settings-group">
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
@@ -677,8 +785,8 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
             </svg>
           </span>
           <div class="settings-row-text">
-            <strong>问题反馈</strong>
-            <p class="muted">反馈无线麦 SayAll 的问题，或提出改进建议。</p>
+            <strong>{{ t("问题反馈") }}</strong>
+            <p class="muted">{{ t("反馈无线麦 SayAll 的问题，或提出改进建议。") }}</p>
           </div>
           <div class="button-row">
             <button
@@ -687,7 +795,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
               :disabled="linkBusy"
               @click="onOpenOfficialWebsite"
             >
-              官网
+              {{ t("官网") }}
             </button>
             <button
               class="secondary-button"
