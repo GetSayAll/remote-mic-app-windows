@@ -47,13 +47,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1
 
 ## 结果记录
 
-- 自动化：`corepack pnpm test` — 31 files / 505 passed, 10 skipped（2026-10-24）；
+- 自动化：`corepack pnpm test` — 31 files / 506 passed, 10 skipped（2026-10-24）；
   `vue-tsc --noEmit`、`vite build`、`cargo fmt --check`、语言映射单测通过。
 - `ci-preflight`：7/7 通过（含 `cargo test --workspace`、`cargo check --workspace`、
   `cargo check -p sayall-windows-app --features runtime-simulation`）。
 - 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.0.0_x64-setup.exe`，
-  13,051,463 字节，SHA-256 `5DDC84CDB2D5EF7C6805C9B216AA2243366CF5F4849FC6F6A2FE52AA496DE982`
-  （构建于合并 `origin/main` 的提交 `353043b`，安装版日志读回同一源修订号）。
+  13,049,280 字节，SHA-256 `9A67503E42CEA8E7EFEE07415AC61958FA3993D15F92381A3536316A1F89B6CC`
+  （构建于 Mac 英文词条对齐提交 `d199a61`，安装版日志读回同一源修订号）。
 - 前端英文渲染：浏览器预览逐页扫描 按键 / 组合动作 / 连接 / 推荐 / 权限 / 设置 的
   可见文本与 `title` / `aria-label` / `placeholder` / `alt`，除「简体中文」选项与
   用户数据（演示组合动作名「打开记事本并聚焦」、应用名「记事本」）外无汉字残留。
