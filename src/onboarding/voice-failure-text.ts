@@ -7,8 +7,9 @@
  * 原文案「语音链路正常…」在此场景**不成立且误导**。按失败瞬间的捕获状态给专门解释；
  * `active` / `unknown` / `off` 时保持原排查文案（麦克风 / 语音键 / 工具三件套仍适用）。
  */
-import type { Rc003CaptureHealth } from "../lib/bridge";
+import type { Rc003CaptureHealth, VoiceAudioHealth } from "../lib/bridge";
 import { t } from "../lib/i18n";
+import { voiceAudioDegradedText } from "../lib/voice-audio-health";
 import type { VoiceAttemptFailureCode } from "./voice-attempt";
 
 /** 失败码 → 「发生了什么 + 你该怎么办」（设计稿 §7；不贴内部错误原文）。 */
@@ -27,12 +28,17 @@ export const VOICE_FAILURE_COPY: Record<VoiceAttemptFailureCode, string> = {
 };
 
 /**
- * 生成失败卡文案。`captureHealth` 只在 `voice.no_transcript` 上生效——取**失败瞬间**
- * 现读的捕获状态（读不到传 `"unknown"`，不猜测、不加解释句）。
+ * 生成失败卡文案。`captureHealth` 与 `voiceAudioHealth` 只在 `voice.no_transcript`
+ * 上生效——都取**失败瞬间**的事实（读不到传 `"unknown"`，不猜测、不加解释句）。
+ *
+ * 分流顺序：报告层没生效（starting / inactive / off）优先——那是豆包直接收不到
+ * 语音键，比音频完整度更接近根因；其次是 2026-10-24 的蓝牙共存降级；最后才是
+ * 原有的输入工具三件套排查句。
  */
 export function voiceFailureText(
   code: VoiceAttemptFailureCode | null,
   captureHealth: Rc003CaptureHealth | "unknown",
+  voiceAudioHealth: VoiceAudioHealth = "unknown",
 ): string {
   if (code === "voice.no_transcript") {
     if (captureHealth === "starting") {
@@ -51,6 +57,11 @@ export function voiceFailureText(
       return t(
         "“支持更多输入工具”现在是关闭的，请先打开它，再点“重新测试”。",
       );
+    }
+    if (voiceAudioHealth === "degraded") {
+      // 2026-10-24 现场：语音条出现、音频只剩 1/3，豆包自然写不出字。
+      // 不再说“语音链路正常”——那是误导。
+      return voiceAudioDegradedText();
     }
   }
   return code ? t(VOICE_FAILURE_COPY[code]) : t("这次测试没有通过，再试一次。");

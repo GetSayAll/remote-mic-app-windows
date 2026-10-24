@@ -43,6 +43,7 @@ import {
   type Rc003TaskStatus,
   type RemoteButton,
   type RuntimeSnapshot,
+  type VoiceAudioHealth,
   type VoiceInputTool,
   type VokieInstallation,
 } from "../lib/bridge";
@@ -50,6 +51,7 @@ import { normalizeCaptureHealth } from "../lib/capture-switch";
 import { t } from "../lib/i18n";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
 import { voiceFailureText } from "../onboarding/voice-failure-text";
+import { normalizeVoiceAudioHealth } from "../lib/voice-audio-health";
 import {
   CONNECTED_PHASES,
   evaluateGate,
@@ -1943,6 +1945,29 @@ async function readCaptureHealthForVoiceFailure(): Promise<Rc003CaptureHealth | 
   }
 }
 
+/**
+ * 失败瞬间现读失败解释所需的全部事实（2026-10-24）：捕获状态只对豆包有意义，
+ * 音频完整度对所有输入工具都适用。runtime 读失败按 unknown（不提示），
+ * 不阻塞失败卡的基线文案。
+ */
+async function readVoiceFailureEvidence(): Promise<{
+  captureHealth: Rc003CaptureHealth | "unknown";
+  audioHealth: VoiceAudioHealth;
+}> {
+  const [runtime, captureHealth] = await Promise.all([
+    getRuntimeSnapshot().catch(() => null),
+    stagedTool.value === "doubao"
+      ? readCaptureHealthForVoiceFailure()
+      : Promise.resolve("unknown" as const),
+  ]);
+  return {
+    captureHealth,
+    audioHealth: normalizeVoiceAudioHealth(
+      runtime?.platform.connection.voiceAudioHealth,
+    ),
+  };
+}
+
 function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
   voiceResult.value = terminal;
   voicePhase.value = "terminal";
@@ -1951,26 +1976,35 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
     voiceVerified.value = true;
   } else {
     const code = terminal.code ?? null;
+    // 音频完整度取失败瞬间的运行时快照（2026-10-24）：蓝牙共存降级时，
+    // 向导第⑤步也要给出与连接页同一句解释，不能再说“语音链路正常”。
+    const voiceAudioHealth = normalizeVoiceAudioHealth(
+      props.runtime?.platform.connection.voiceAudioHealth,
+    );
     // 先落基线文案（同步、不留空窗）；「支持更多输入工具」未生效时的专门解释再异步细化
     // （判据在**失败瞬间**现读，见 readCaptureHealthForVoiceFailure）。
-    voiceFailureMessage.value = voiceFailureText(code, "unknown");
-    if (code === "voice.no_transcript" && stagedTool.value === "doubao") {
+    voiceFailureMessage.value = voiceFailureText(code, "unknown", voiceAudioHealth);
+    if (code === "voice.no_transcript") {
       // 陈旧保护用**会话世代**（voiceAttemptSerial）而不是对象引用：`voiceResult` 是
       // `ref`，Vue 会把赋进去的对象深包装成独立 proxy——"原对象 === proxy" 恒为 false
       // （2026-10-14 测试实证：首版实现因此被静默拦成"永远只显示基线文案"）。
       const attemptSerial = voiceAttemptSerial;
-      void readCaptureHealthForVoiceFailure().then((captureHealth) => {
+      void readVoiceFailureEvidence().then(({ captureHealth, audioHealth }) => {
         if (
           attemptSerial === voiceAttemptSerial &&
           voiceResult.value?.result === "failed" &&
           !voiceLateAccepted.value
         ) {
-          voiceFailureMessage.value = voiceFailureText(code, captureHealth);
+          voiceFailureMessage.value = voiceFailureText(
+            code,
+            captureHealth,
+            audioHealth,
+          );
           // 分流采用了哪一支要留痕（2026-10-14 / LOGGING.md 的"一次报障一次日志"：
           // 失败瞬间的 capture 值与几十秒后复制诊断时的当前值可能不同，没有这行
           // 就分不清"分流判错"还是"现场已变"）。
           reportStepAction("voice_test", "failure_text_branch", "passed", {
-            detail: `capture_${captureHealth}`,
+            detail: `capture_${captureHealth}_audio_${audioHealth}`,
           });
         }
       });

@@ -64,6 +64,7 @@ export default {
   "检测中…": "Checking…",
 
   // 遥控器连接
+  "蓝牙音频不完整": "Bluetooth audio is incomplete",
   "连接": "Connect",
   "遥控器连接": "Remote connection",
   "扫描中…": "Scanning…",

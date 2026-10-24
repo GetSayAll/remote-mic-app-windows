@@ -288,6 +288,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .vb-cable-callout { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; }
 .vb-cable-callout strong { color: var(--warning-strong); }
 .vb-cable-callout p { margin: 3px 0 0; }
+.voice-audio-callout strong { color: var(--warning-strong); }
+.voice-audio-callout p { margin: 3px 0 0; }
 .vb-cable-callout .button-row { flex: 0 0 auto; justify-content: flex-start; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 18px; }
 .metric-card span { display: block; color: var(--muted); font-size: 13px; }

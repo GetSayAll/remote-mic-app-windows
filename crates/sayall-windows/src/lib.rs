@@ -267,6 +267,23 @@ pub enum ConnectionPhase {
     Failed,
 }
 
+/// 最近一次语音会话的音频完整度（2026-10-24 现场）。
+///
+/// 遥控器与另一支 BLE 设备同时连接时，适配器调度会让 ATVV 音频通知只剩约 1/3，
+/// 豆包能出语音条却转写不出文字。这里只发布观测结果，不据此自动断开任何设备；
+/// 判据与阈值在 `ble::classify_voice_audio_rate`，界面只显示用户语言。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VoiceAudioHealth {
+    /// 还没测过，或这次会话太短/没有样本——不据此提示。
+    #[default]
+    Unknown,
+    /// 样本率接近 16 kHz 满速。
+    Full,
+    /// 样本率明显低于满速：声音没有完整送到输入法。
+    Degraded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
@@ -282,6 +299,12 @@ pub struct ConnectionSnapshot {
     pub capabilities: Option<AtvvCapabilities>,
     pub voice_state: VoiceSessionState,
     pub decoded_samples: u64,
+    /// 最近一次足够长的语音会话的音频完整度（只读观测，不改变语音行为）。
+    #[serde(default)]
+    pub voice_audio_health: VoiceAudioHealth,
+    /// 最近一次判定的实际样本率（Hz）；`None` = 尚未判定。
+    #[serde(default)]
+    pub voice_audio_rate_hz: Option<u32>,
     pub generation: u64,
     pub reconnect_attempt: u32,
     pub power_notifications_available: bool,
@@ -331,6 +354,8 @@ impl Default for ConnectionSnapshot {
             capabilities: None,
             voice_state: VoiceSessionState::Idle,
             decoded_samples: 0,
+            voice_audio_health: VoiceAudioHealth::Unknown,
+            voice_audio_rate_hz: None,
             generation: 0,
             reconnect_attempt: 0,
             power_notifications_available: false,
@@ -1433,6 +1458,27 @@ impl PlatformError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_audio_health_serializes_to_stable_snapshot_tokens() {
+        // 与 `src/lib/voice-audio-health.ts` 的白名单逐字对应；改 token 会静默
+        // 让界面不提示（或误提示），必须在这里钉住。
+        assert_eq!(
+            serde_json::to_string(&VoiceAudioHealth::Unknown).unwrap(),
+            "\"unknown\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VoiceAudioHealth::Full).unwrap(),
+            "\"full\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VoiceAudioHealth::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        let snapshot = serde_json::to_value(ConnectionSnapshot::default()).unwrap();
+        assert_eq!(snapshot["voiceAudioHealth"], "unknown");
+        assert!(snapshot["voiceAudioRateHz"].is_null());
+    }
 
     #[test]
     fn accepts_only_approved_remote_names() {

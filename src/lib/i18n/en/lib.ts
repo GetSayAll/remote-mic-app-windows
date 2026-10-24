@@ -1,5 +1,7 @@
 // English strings for lib. Key = exact Chinese source passed to t().
 export default {
+  "最近一次语音的声音没有完整送到输入工具，文字可能没有出现。请关闭或移开同时连接的其他蓝牙设备（键盘、鼠标、耳机等），再试一次。":
+    "Audio from the last voice session did not reach the input tool completely, so text may not appear. Turn off or move away other connected Bluetooth devices (keyboard, mouse, headphones, and so on), then try again.",
   // 鼠标动作 / 动作摘要
   "左键单击": "Left click",
   "右键单击": "Right click",
