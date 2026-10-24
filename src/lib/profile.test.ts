@@ -8,6 +8,7 @@ import {
   calendarIntensity,
   formatDuration,
   formatVoiceSessionDate,
+  formatVoiceTotal,
   profileAccountLabel,
 } from "./profile";
 
@@ -51,17 +52,31 @@ describe("formatDuration", () => {
   });
 });
 
+describe("formatVoiceTotal", () => {
+  it("uses Mac's Chinese duration units", () => {
+    expect(formatVoiceTotal(0)).toBe("0 秒");
+    expect(formatVoiceTotal(32)).toBe("32 秒");
+    expect(formatVoiceTotal(1_992)).toBe("33 分钟 12 秒");
+    expect(formatVoiceTotal(3_723)).toBe("1 小时 2 分钟");
+  });
+
+  it("treats invalid and negative durations as zero", () => {
+    expect(formatVoiceTotal(Number.NaN)).toBe("0 秒");
+    expect(formatVoiceTotal(-1)).toBe("0 秒");
+  });
+});
+
 describe("profileAccountLabel", () => {
-  it("keeps only the first six characters before the @", () => {
-    expect(profileAccountLabel("abcdefg@example.com")).toBe("abcdef");
+  it("keeps only the first ten characters before the @", () => {
+    expect(profileAccountLabel("abcdefghijk@example.com")).toBe("abcdefghij");
     expect(profileAccountLabel("abc@example.com")).toBe("abc");
     expect(profileAccountLabel("i***@example.com")).toBe("i***");
   });
 
-  it("falls back to 我的 when no display name is available", () => {
-    expect(profileAccountLabel(null)).toBe("我的");
-    expect(profileAccountLabel("   ")).toBe("我的");
-    expect(profileAccountLabel(undefined)).toBe("我的");
+  it("falls back to 个人中心 when no display name is available", () => {
+    expect(profileAccountLabel(null)).toBe("个人中心");
+    expect(profileAccountLabel("   ")).toBe("个人中心");
+    expect(profileAccountLabel(undefined)).toBe("个人中心");
   });
 });
 

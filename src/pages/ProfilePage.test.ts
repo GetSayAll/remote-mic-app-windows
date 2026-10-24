@@ -108,7 +108,7 @@ describe("个人中心页", () => {
     expect(text).toContain("累计按键次数");
     expect(text).toContain("561");
     expect(text).toContain("累计语音时长");
-    expect(text).toContain("33:12");
+    expect(text).toContain("33 分钟 12 秒");
     expect(text).toContain("Esc");
     expect(text).toContain("返回");
     expect(text).toContain("1:25");

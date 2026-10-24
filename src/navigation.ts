@@ -43,8 +43,8 @@ export const publicNavigationItems: NavigationItem[] = [
   // SettingsSection.about 的 "gearshape"。
   { id: "settings", label: "设置", icon: "gear" },
   // 2026-10-24 个人中心（对齐 Mac statistics）：固定渲染在侧栏最底部；
-  // 未登录文案是「我的」，已登录由 App 传入邮箱前缀。
-  { id: "profile", label: "我的", icon: "person" },
+  // 未登录文案是「个人中心」，已登录由 App 传入邮箱前缀。
+  { id: "profile", label: "个人中心", icon: "person" },
 ];
 
 /**

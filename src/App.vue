@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import type { Component } from "vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import ShareDialog from "./components/ShareDialog.vue";
 import Sidebar from "./components/Sidebar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
 import {
+  APP_ICON_CHANGED_EVENT,
+  getAppIcon,
   getMembershipAccountSummary,
   getOnboardingState,
   getRuntimeSnapshot,
   hideMainWindow,
   takeUpdateCompletedVersion,
+  type AppIconIdentifier,
   type RuntimeSnapshot,
 } from "./lib/bridge";
 import { profileAccountLabel } from "./lib/profile";
@@ -36,6 +40,7 @@ import ProfilePage from "./pages/ProfilePage.vue";
 const activePage = ref<string>(loadPersistedPage() ?? "buttons");
 watch(activePage, (page) => {
   persistActivePage(page);
+  void refreshAppIcon();
   if (page === "profile") void refreshProfileLabel();
 });
 const runtime = ref<RuntimeSnapshot | null>(null);
@@ -46,8 +51,11 @@ let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
 let profileLabelTimer: ReturnType<typeof setInterval> | undefined;
 let initialRuntimeReported = false;
 
-/** 侧栏个人入口：未登录「我的」，已登录只显示邮箱 @ 前最多 6 个字符。 */
-const profileLabel = ref("我的");
+/** 侧栏个人入口：未登录「个人中心」，已登录只显示邮箱 @ 前最多 10 个字符。 */
+const profileLabel = ref("个人中心");
+/** 与托盘图标同源；设置页切换后由 5 秒轮询同步到侧栏。 */
+const appIcon = ref<AppIconIdentifier>("faceted-duck");
+const showShareDialog = ref(false);
 
 async function refreshProfileLabel(): Promise<void> {
   try {
@@ -55,9 +63,24 @@ async function refreshProfileLabel(): Promise<void> {
     profileLabel.value =
       summary.availability === "available"
         ? profileAccountLabel(summary.accountDisplayName)
-        : "我的";
+        : "个人中心";
   } catch {
     // 会员摘要读取失败不打扰主界面；保持上一次文案。
+  }
+}
+
+async function refreshAppIcon(): Promise<void> {
+  try {
+    appIcon.value = await getAppIcon();
+  } catch {
+    // 读取失败保持上一次图标；托盘侧不受影响。
+  }
+}
+
+function onAppIconChanged(event: Event): void {
+  const identifier = (event as CustomEvent<AppIconIdentifier>).detail;
+  if (identifier === "standard" || identifier === "faceted-duck") {
+    appIcon.value = identifier;
   }
 }
 
@@ -179,6 +202,7 @@ onMounted(async () => {
     });
   }
   window.addEventListener("keydown", handleWindowKeydown, true);
+  window.addEventListener(APP_ICON_CHANGED_EVENT, onAppIconChanged);
   // 首次使用向导：读取向导状态决定是否进入向导模式；读取失败不阻断启动
   // （Rust 侧已记录失败原因，用户仍可用主界面）。仿真冒烟构建跳过（见上方说明）。
   if (ONBOARDING_WIZARD_ENABLED && !runtimeSimulationBuild) {
@@ -206,11 +230,13 @@ onMounted(async () => {
   }
   await refreshRuntime();
   void refreshProfileLabel();
+  void refreshAppIcon();
   runtimePollTimer = setInterval(() => {
     void refreshRuntime();
   }, 1_000);
   profileLabelTimer = setInterval(() => {
     void refreshProfileLabel();
+    void refreshAppIcon();
   }, 5_000);
   // 启动静默检查更新：延迟 3 秒避开 BLE 恢复/设置加载的启动高峰；
   // 失败完全无声（app-update.ts 内回落 idle，不打扰主功能）。
@@ -224,6 +250,7 @@ onUnmounted(() => {
   if (updateCheckTimer) clearTimeout(updateCheckTimer);
   if (profileLabelTimer) clearInterval(profileLabelTimer);
   window.removeEventListener("keydown", handleWindowKeydown, true);
+  window.removeEventListener(APP_ICON_CHANGED_EVENT, onAppIconChanged);
 });
 </script>
 
@@ -236,9 +263,10 @@ onUnmounted(() => {
   <div v-else class="app-shell">
     <Sidebar
       :active-page="activePage"
-      :version="runtime?.appVersion"
       :profile-label="profileLabel"
+      :app-icon="appIcon"
       @select="activePage = $event"
+      @share="showShareDialog = true"
     />
     <main class="content">
       <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>
@@ -262,4 +290,5 @@ onUnmounted(() => {
     :version="updateCompletedVersion"
     @close="updateCompletedVersion = null"
   />
+  <ShareDialog v-if="showShareDialog" @close="showShareDialog = false" />
 </template>

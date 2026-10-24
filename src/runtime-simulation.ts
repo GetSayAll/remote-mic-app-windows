@@ -4,6 +4,7 @@ import {
   disconnectRemote,
   getAudioSnapshot,
   getButtonMappings,
+  getAppIcon,
   getDiagnosticReport,
   getGainDb,
   getOpenWindowAtLaunch,
@@ -504,8 +505,9 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("设置页「启动时自动打开主面板」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
-  await openPage("我的", "个人中心");
+  await openPage("个人中心");
   mark("profile_page");
+  assert(document.querySelector(".sidebar-footer") === null, "侧栏不应再显示版本号");
   assert(document.querySelector(".profile-page") !== null, "个人中心页没有渲染");
   assert(
     document.querySelector(".profile-header h1")?.textContent?.trim() === "个人中心",
@@ -514,6 +516,20 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(
     document.querySelector(".profile-header .badge")?.textContent?.trim() === "数据仅存本机",
     "个人中心缺少本机隐私胶囊",
+  );
+  assert(
+    document.querySelector(".profile-header .badge")?.tagName === "SPAN",
+    "数据仅存本机必须是文字，不能是可点击按钮",
+  );
+  const currentAppIcon = await getAppIcon();
+  const expectedLogo =
+    currentAppIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png";
+  await waitFor(
+    () =>
+      document.querySelector(".profile-nav-item img")?.getAttribute("src") === expectedLogo
+        ? true
+        : null,
+    "个人中心侧栏入口使用当前应用 logo",
   );
   assert(document.querySelectorAll(".profile-kpi").length === 4, "个人中心 KPI 不是 4 项");
   assert(
@@ -525,6 +541,40 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "个人中心不应出现本期未提供的回眸入口",
   );
   steps.push("个人中心经真实 IPC 渲染 4 项 KPI、排行榜与 26 周日历，未出现回眸入口");
+
+  mark("share_dialog");
+  await clickButton("分享");
+  await waitFor(
+    () => (document.querySelector(".share-dialog") ? true : null),
+    "分享无线麦面板",
+  );
+  assert(
+    document.querySelector("#share-dialog-title")?.textContent?.trim() === "分享无线麦 SayAll",
+    "分享面板标题异常",
+  );
+  const shareQr = await waitFor(() => {
+    const image = document.querySelector<HTMLImageElement>(".share-qr img");
+    return image && image.complete && image.naturalWidth > 0 ? image : null;
+  }, "分享二维码资源");
+  assert(
+    shareQr.getAttribute("src") === "/app-share-qr.png",
+    "分享面板没有使用本机二维码资源",
+  );
+  const shareLink = document.querySelector(".share-copy code")?.textContent?.trim();
+  assert(
+    shareLink === "https://sayall.app/?from=win_share",
+    `分享链接异常：${shareLink ?? "missing"}`,
+  );
+  assert(
+    document.querySelector(".share-copy-button")?.textContent?.includes("复制链接") === true,
+    "分享面板缺少复制链接按钮",
+  );
+  document.querySelector<HTMLButtonElement>(".share-close")?.click();
+  await waitFor(
+    () => (document.querySelector(".share-dialog") ? null : true),
+    "分享面板关闭",
+  );
+  steps.push("分享面板经真实 WebView 渲染本机二维码、固定链接与复制入口，并可关闭");
 
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，

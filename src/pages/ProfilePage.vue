@@ -20,6 +20,7 @@ import {
   formatCalendarDate,
   formatDuration,
   formatVoiceSessionDate,
+  formatVoiceTotal,
   WEEKDAY_LABELS,
 } from "../lib/profile";
 
@@ -53,7 +54,7 @@ const metrics = computed(() => {
     {
       id: "total-voice",
       title: "累计语音时长",
-      value: data ? formatDuration(data.totalVoiceSeconds) : "—",
+      value: data ? formatVoiceTotal(data.totalVoiceSeconds) : "—",
       unit: null,
       icon: "waveform",
     },
@@ -448,6 +449,22 @@ onUnmounted(() => {
   letter-spacing: -0.5px;
 }
 
+/* Mac StatusPill：12 semibold、胶囊 tint；它是状态文字，不是按钮。 */
+.profile-header .badge {
+  min-height: 0;
+  padding: 5px 9px;
+  color: #34c759;
+  background: color-mix(in srgb, #34c759 14%, transparent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: default;
+}
+
+:global(html[data-theme="dark"] .profile-header .badge) {
+  color: #30d158;
+}
+
 .profile-error {
   display: flex;
   align-items: center;
@@ -560,7 +577,7 @@ onUnmounted(() => {
 
 .profile-panel h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.25;
 }
@@ -571,21 +588,21 @@ onUnmounted(() => {
 }
 
 .ranking-section {
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .ranking-section h3 {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: 0 0 5px;
-  font-size: 13px;
+  margin: 0 0 7px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .ranking-section h3 svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
   color: var(--text-control);
 }
@@ -602,9 +619,9 @@ onUnmounted(() => {
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: 29px;
   border-bottom: 1px solid var(--border);
-  font-size: 13.5px;
+  font-size: 13px;
 }
 
 .ranking-row:last-child {
@@ -766,16 +783,19 @@ onUnmounted(() => {
   align-items: center;
   gap: 7px;
   color: var(--pressed-text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
 }
 
 .profile-voice-title svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   flex: 0 0 auto;
 }
 
 .voice-list {
-  margin-top: 6px;
+  margin-top: 7px;
 }
 
 .voice-row {
@@ -783,9 +803,9 @@ onUnmounted(() => {
   grid-template-columns: 18px auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
-  min-height: 38px;
+  min-height: 30px;
   border-bottom: 1px solid var(--border);
-  font-size: 13.5px;
+  font-size: 13px;
 }
 
 .voice-row:last-child {
@@ -824,6 +844,10 @@ onUnmounted(() => {
 @media (max-width: 980px) {
   .profile-kpis {
     grid-template-columns: repeat(2, minmax(170px, 1fr));
+  }
+
+  .profile-columns {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

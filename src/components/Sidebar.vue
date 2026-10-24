@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import type { AppIconIdentifier } from "../lib/bridge";
 import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
 import CrownIcon from "./CrownIcon.vue";
@@ -7,16 +8,20 @@ import CrownIcon from "./CrownIcon.vue";
 const props = withDefaults(
   defineProps<{
     activePage: string;
-    version?: string | null;
-    /** 个人中心入口文案：未登录「我的」，已登录为脱敏后的邮箱前缀。 */
+    /** 个人中心入口文案：未登录「个人中心」，已登录为邮箱前缀。 */
     profileLabel?: string;
+    /** 与托盘/窗口图标同源的当前应用图标。 */
+    appIcon?: AppIconIdentifier;
   }>(),
-  { version: null, profileLabel: "我的" },
+  { profileLabel: "个人中心", appIcon: "faceted-duck" },
 );
-const emit = defineEmits<{ select: [page: string] }>();
+const emit = defineEmits<{ select: [page: string]; share: [] }>();
 
 const topNavigationItems = computed(() => navigationItems.filter((item) => item.id !== "profile"));
 const profileItem = computed(() => navigationItems.find((item) => item.id === "profile"));
+const appIconPreview = computed(() =>
+  props.appIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png",
+);
 
 /**
  * 侧栏图标：SVG path 组（24x24 视窗，描边风格），形状对齐
@@ -117,8 +122,25 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         <span>{{ item.label }}</span>
       </button>
 
-      <!-- 个人中心固定在最底部（对齐 Mac statistics），与顶部页面区分开。 -->
+      <!-- 底部区域对齐 Mac：分享入口在个人中心上方；个人中心固定在最底部。 -->
       <div class="sidebar-spacer"></div>
+      <button
+        class="nav-item share-nav-item"
+        type="button"
+        aria-label="分享无线麦 SayAll"
+        @click="emit('share')"
+      >
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M12 15V3M8 7l4-4 4 4M5 11v7.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V11"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>分享</span>
+      </button>
       <button
         v-if="profileItem"
         class="nav-item profile-nav-item"
@@ -127,26 +149,10 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         aria-label="个人中心"
         @click="emit('select', profileItem.id)"
       >
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path
-            v-for="(path, index) in ICON_PATHS.person.strokes"
-            :key="index"
-            :d="path"
-            stroke="currentColor"
-            stroke-width="1.9"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-        <span>{{ props.profileLabel || "我的" }}</span>
+        <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
+        <span>{{ props.profileLabel || "个人中心" }}</span>
       </button>
     </nav>
-
-    <!-- 底部显示应用版本号（2026-10-02 用户指定：不再显示“预览版”）。版本来自
-         运行快照的 package_info，与安装包/更新器同源；尚未读到时不显示占位。 -->
-    <div class="sidebar-footer">
-      <span v-if="version" class="sidebar-version">{{ version }}</span>
-    </div>
   </aside>
 </template>
 
@@ -164,10 +170,24 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   min-height: 12px;
 }
 
+.share-nav-item {
+  color: var(--muted);
+}
+
 .profile-nav-item {
   margin-top: 4px;
 }
 
-/* 版本号用等宽数字，避免运行中的宽度抖动。 */
-.sidebar-version { font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
+/* 邮箱前缀最多 10 个字符；极窄侧栏仍保持单行省略，避免撑宽或换行。 */
+.nav-item > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-app-icon {
+  border-radius: 5px;
+  object-fit: cover;
+}
 </style>

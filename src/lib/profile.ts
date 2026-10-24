@@ -38,6 +38,8 @@ export interface CalendarWeek {
   days: CalendarDay[];
 }
 
+const countFormatter = new Intl.NumberFormat("zh-CN");
+
 /** Mac `chartDurationText` 同款：`m:ss`，超过 1 小时用 `h:mm:ss`。 */
 export function formatDuration(seconds: number): string {
   const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
@@ -51,18 +53,36 @@ export function formatDuration(seconds: number): string {
 }
 
 /**
- * 侧栏个人入口的账号名：与 Mac 一致，只取邮箱 `@` 前最多 6 个字符。
+ * Mac `voiceDurationText` 同款：累计语音 KPI 使用中文单位，不与单次排行的
+ * `m:ss` 混用；超过 1 小时按 Mac 口径省略秒。
+ */
+export function formatVoiceTotal(seconds: number): string {
+  const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
+  const hours = Math.floor(total / 3_600);
+  const minutes = Math.floor((total % 3_600) / 60);
+  const remainder = total % 60;
+  if (hours > 0) {
+    return `${countFormatter.format(hours)} 小时 ${countFormatter.format(minutes)} 分钟`;
+  }
+  if (minutes > 0) {
+    return `${countFormatter.format(minutes)} 分钟 ${countFormatter.format(remainder)} 秒`;
+  }
+  return `${countFormatter.format(remainder)} 秒`;
+}
+
+/**
+ * 侧栏个人入口的账号名：与 Mac 一致，只取邮箱 `@` 前最多 10 个字符。
  *
  * 完整邮箱仍只在会员页显示；侧栏和无障碍名称都不应出现完整地址。
  */
 export function profileAccountLabel(
   displayName: string | null | undefined,
-  fallback = "我的",
+  fallback = "个人中心",
 ): string {
   const trimmed = displayName?.trim();
   if (!trimmed) return fallback;
   const localPart = trimmed.includes("@") ? trimmed.split("@")[0] : trimmed;
-  return Array.from(localPart).slice(0, 6).join("") || fallback;
+  return Array.from(localPart).slice(0, 10).join("") || fallback;
 }
 
 /** Mac 的日历强度口径：按键 40 次或语音 300 秒记满分。 */

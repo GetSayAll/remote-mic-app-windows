@@ -26,7 +26,7 @@ describe("Windows navigation", () => {
     // 2026-10-02 用户指定：原「关于」页改名「设置」，图标换成 Mac 同款齿轮。
     expect(navigationItems[5].label).toBe("设置");
     expect(navigationItems[5].icon).toBe("gear");
-    expect(navigationItems[6].label).toBe("我的");
+    expect(navigationItems[6].label).toBe("个人中心");
     expect(navigationItems[6].icon).toBe("person");
     expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
   });
