@@ -45,7 +45,7 @@ export default {
   "找到 1 个已配对的小米遥控器": "Found 1 paired Xiaomi remote",
   "找到 {count} 个已配对的小米遥控器": "Paired Xiaomi remotes found: {count}",
   "按一下遥控器上的普通按键（比如主页键），不要按语音键。":
-    "Press a regular button on the remote, such as Home. Do not press the voice key.",
+    "Press a regular button on the remote, such as Home. Do not press the voice button.",
   "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。":
     "Button received. One more step: select Scan for Paired Devices and choose the remote to connect.",
   "按键已收到。还差一步：点遥控器一行右侧的“连接”。":
@@ -57,9 +57,9 @@ export default {
     "Select Connect on the row for the remote in your hand.",
   "正在自动恢复连接（第 {attempt} 次尝试），最多等约 60 秒，不需要重新配对。":
     "Reconnecting automatically (attempt {attempt}). This can take up to 60 seconds; you do not need to pair again.",
-  "刚才按的是语音键": "That was the voice key",
+  "刚才按的是语音键": "That was the voice button",
   "请按遥控器上除语音键以外的普通按键（比如主页键）。":
-    "Press a regular button on the remote, such as Home. Do not press the voice key.",
+    "Press a regular button on the remote, such as Home. Do not press the voice button.",
   "重新扫描": "Scan Again",
   "蓝牙当前不可用": "Bluetooth is unavailable",
   "还没有已配对的遥控器": "No paired remote yet",
@@ -92,7 +92,7 @@ export default {
   "推荐": "Recommended",
   "这一步只需要这一个播放端。": "This step needs this playback device only.",
   "已就绪": "Ready",
-  "选择": "Select",
+  "选择": "Choose",
   "重新检测设备": "Check for Devices Again",
   "装了 VB-CABLE，但还没有检测到设备": "VB-CABLE is installed, but no device was detected",
   "语音设备还没有准备好": "The audio device is not ready yet",
@@ -120,20 +120,20 @@ export default {
   // ---- Step 4: voice app ----
   "选择你要用的输入工具": "Choose your voice app",
   "无线麦会替你按住它的语音键；选好后，下面显示这个工具还需要怎么设置。":
-    "SayAll holds the voice key for you. Once you choose an app, the steps below show what else it needs.",
+    "SayAll holds the voice button for you. Once you choose an app, the steps below show what else it needs.",
   "检测到 Vokie 正在运行": "Vokie is running",
   "它会抢先响应右 Alt，豆包收不到语音键。请先退出 Vokie，再点「重新检测」。":
-    "Vokie will capture Right Alt first, so Doubao will not receive the voice key. Quit Vokie, then select Check Again.",
+    "Vokie will capture Right Alt first, so Doubao will not receive the voice shortcut. Quit Vokie, then select Check Again.",
   "豆包输入法": "Doubao",
   "微信输入法": "WeType",
   "其他工具": "Other App",
-  "自己选一个语音键": "Choose your own voice key",
-  "按住遥控器语音键 = 右 Alt": "Remote voice key = Right Alt",
-  "按住遥控器语音键 = 左 Ctrl + 左 Win": "Remote voice key = Left Ctrl + Left Win",
-  "按住遥控器语音键 = {hotkey}": "Remote voice key = {hotkey}",
+  "自己选一个语音键": "Choose your own voice trigger key",
+  "按住遥控器语音键 = 右 Alt": "Remote voice button = Right Alt",
+  "按住遥控器语音键 = 左 Ctrl + 左 Win": "Remote voice button = Left Ctrl + Left Win",
+  "按住遥控器语音键 = {hotkey}": "Remote voice button = {hotkey}",
   "本次设置": "This setup",
   "在豆包里把麦克风选为 CABLE Output；长按语音键保持右 Alt（出厂默认就是它）。":
-    "In Doubao, set the microphone to CABLE Output. Keep the voice key on Right Alt, which is the default.",
+    "In Doubao, set the microphone to CABLE Output. Keep the voice shortcut on Right Alt, which is the default.",
   "支持更多输入工具": "More Input Tools",
   "每次开启都会弹出 Windows 授权窗口，请选择“是”。":
     "Each time you turn it on, Windows asks for authorization. Select Yes.",
@@ -150,24 +150,24 @@ export default {
   "在 Vokie 里把麦克风选为 CABLE Output，快捷键保持右 Alt。":
     "In Vokie, set the microphone to CABLE Output and keep the shortcut on Right Alt.",
   "选与该工具里一致的语音键；选「不按键」只把声音送到 CABLE，不替它按键：":
-    "Choose the same voice key as in the app. “No key” sends audio to CABLE without pressing anything:",
+    "Choose the same voice trigger key as in the app. “No key” sends audio to CABLE without pressing anything:",
   "工具里把麦克风选为 CABLE Output。": "In the app, set the microphone to CABLE Output.",
-  "先为「其他工具」选一个语音键。": "Choose a voice key for Other App first.",
+  "先为「其他工具」选一个语音键。": "Choose a voice trigger key for Other App first.",
   "右 Alt": "Right Alt",
   "左 Alt": "Left Alt",
   "不按键": "No key",
   "“支持更多输入工具”": "“More Input Tools”",
   "「支持更多输入工具」已开启": "“More Input Tools” is on",
   "已选择输入工具": "Voice app selected",
-  "语音键已适配": "Voice key configured",
+  "语音键已适配": "Voice trigger key configured",
   "Vokie 已运行": "Vokie is running",
   "无需额外设置": "No extra setup needed",
-  "已选择语音键": "Voice key selected",
+  "已选择语音键": "Voice trigger key selected",
   "等待选择输入工具": "Waiting for a voice app",
   "工具检查": "Voice App Check",
   "读取语音工具设置失败，请重试。": "Could not read voice app settings. Try again.",
   "保存语音工具设置失败，请重试。": "Could not save the voice app settings. Try again.",
-  "保存语音键失败，请重试。": "Could not save the voice key. Try again.",
+  "保存语音键失败，请重试。": "Could not save the voice trigger key. Try again.",
   "读取 Vokie 状态失败，请重试。": "Could not check Vokie. Try again.",
   "无法读取当前状态，请重试。": "Could not read the current state. Try again.",
   "已打开 Vokie 官网；安装后回来点「重新检测」。":
@@ -184,28 +184,28 @@ export default {
   "没有检测到 Vokie；从官网安装后回来重新检测。":
     "Vokie was not found. Install it from the official website, then check again.",
   "Vokie 没有运行；打开它再重新检测。": "Vokie is not running. Open it, then check again.",
-  "为「其他工具」选择语音键，再继续。": "Choose a voice key for Other App to continue.",
+  "为「其他工具」选择语音键，再继续。": "Choose a voice trigger key for Other App to continue.",
 
   // ---- Step 5: voice test ----
-  "按住遥控器语音键，试一句话": "Press and hold the remote's voice key and say a few words",
+  "按住遥控器语音键，试一句话": "Press and hold the remote's voice button and say a few words",
   "点一下下面的输入框，按住遥控器上的语音键说一句话，然后松开。文字应该会出现在输入框里。":
-    "Select the field below, press and hold the remote's voice key, say a few words, then release. The text should appear in the field.",
+    "Select the field below, press and hold the remote's voice button, say a few words, then release. The text should appear in the field.",
   "开始之前，按你选的工具核对三件事": "Before you start, check three things for your voice app",
   "开始之前，按你选的工具核对两件事": "Before you start, check two things for your voice app",
   "输入法切到“{tool}”。": "Switch the input method to “{tool}”.",
   "麦克风选 CABLE Output（在“{tool}”的语音输入设置里）。":
     "Set the microphone to CABLE Output in {tool}'s voice input settings.",
   "工具里的语音键和这次设置一致（{hotkey}）。":
-    "Match the app's voice key to this setup ({hotkey}).",
+    "Match the app's voice trigger key to this setup ({hotkey}).",
   "本次设置快捷键：{hotkey}（“本次设置”）；语音设备：{audio}。":
     "Shortcut for this setup: {hotkey}. Audio device: {audio}.",
   "你说的话会出现在这里": "Your words will appear here",
   "正在接收你说的话…": "Listening to you…",
   "正在收尾…": "Finishing up…",
   "正在等文字出现…": "Waiting for text…",
-  "等待你按住遥控器语音键。": "Press and hold the remote's voice key.",
+  "等待你按住遥控器语音键。": "Press and hold the remote's voice button.",
   "先点一下输入框，再按住遥控器语音键。":
-    "Select the field first, then press and hold the remote's voice key.",
+    "Select the field first, then press and hold the remote's voice button.",
   "成功：文字已经出现在输入框里，这一步通过了。":
     "Success: the text appeared in the field, so this step is complete.",
   "重新测试": "Test Again",
@@ -214,7 +214,7 @@ export default {
   "输入法还没切到“{expected}”。请在桌面右下角把输入法切成“{expected}”，或者回到上一步改选你的工具。":
     "The input method is not set to “{expected}”. Switch to “{expected}” from the taskbar, or go back and choose a different app.",
   "没有检测到语音会话。确认遥控器已就绪，按住语音键不要放，再试一次。":
-    "No voice session was detected. Make sure the remote is ready, then press and hold the voice key and try again.",
+    "No voice session was detected. Make sure the remote is ready, then press and hold the voice button and try again.",
   "收到了语音会话，但没有声音数据。对着遥控器正常说话，再试一次。":
     "The voice session started, but no audio arrived. Speak normally into the remote and try again.",
   "声音没有完整送达语音设备。检查设备是否被其他程序占用，再试一次。":
@@ -222,11 +222,11 @@ export default {
   "松开后这次语音没有正常结束。稍等一下或断开重连遥控器，再试一次。":
     "The voice session did not end normally after you released the key. Wait a moment, or reconnect the remote and try again.",
   "语音链路正常，但输入工具没有写出文字。检查工具麦克风是否选 CABLE Output、工具里的语音键是否和本次设置一致、工具是否在运行。":
-    "The voice path worked, but your voice app did not enter text. Check that its microphone is set to CABLE Output, its voice key matches this setup, and the app is running.",
+    "The voice path worked, but your voice app did not enter text. Check that its microphone is set to CABLE Output, its voice trigger key matches this setup, and the app is running.",
   "检测到键盘输入。这一步请只用遥控器语音键，不要用键盘打字。":
-    "Keyboard input was detected. Use only the remote's voice key for this step; do not type on the keyboard.",
+    "Keyboard input was detected. Use only the remote's voice button for this step; do not type on the keyboard.",
   "输入框没有聚焦。先点一下输入框，再按住遥控器语音键。":
-    "The input field was not focused. Select the field, then press and hold the remote's voice key.",
+    "The input field was not focused. Select the field, then press and hold the remote's voice button.",
   "测试过程中输入框失去了焦点。点回输入框，再试一次。":
     "The input field lost focus during the test. Select it again and retry.",
   "“支持更多输入工具”现在是关闭的，请先打开它，再点“重新测试”。":
@@ -240,12 +240,12 @@ export default {
   // ---- Step 6: control buttons ----
   "按一下遥控器的普通按键": "Press a regular button on the remote",
   "请用遥控器上除语音键以外的按键，按 3 个不同的键（比如 主页 / OK / 方向键）。这一步只看按键能不能用，不会执行你以前配置的动作。":
-    "Press three different buttons other than the voice key, such as Home, OK, or an arrow key. This step only checks that the buttons work; it does not run your configured actions.",
+    "Press three different buttons other than the voice button, such as Home, OK, or an arrow key. This step only checks that the buttons work; it does not run your configured actions.",
   "再按 {count} 个不同的普通按键。": "More different regular buttons needed: {count}.",
   "三个按键都收到了，这一项可以继续了。": "All three buttons received. You can continue.",
   "还没有收到按键；按一下遥控器上的任意普通按键开始。":
     "No button received yet. Press any regular button on the remote to begin.",
-  "这是语音键": "That is the voice key",
+  "这是语音键": "That is the voice button",
   "请按普通按键（比如主页键或方向键）。":
     "Press a regular button, such as Home or an arrow key.",
   "已按 3 个不同的普通按键": "Three different regular buttons pressed",
@@ -261,7 +261,7 @@ export default {
   "去修复": "Fix It",
   "完成后随时可以在「设置」里重新运行设置向导。":
     "You can rerun the setup wizard from Settings at any time.",
-  "遥控器已连接，语音按键可用": "Remote connected, voice key available",
+  "遥控器已连接，语音按键可用": "Remote connected, voice button available",
   "语音设备已就绪": "Audio device ready",
   "输入工具已就绪": "Voice app ready",
   "按住说话验证已通过": "Press-and-hold voice test passed",
@@ -274,13 +274,13 @@ export default {
   "连接检查": "Connection Check",
   "小米蓝牙语音遥控器示意图": "Xiaomi Bluetooth Voice Remote",
   "遥控器已连接": "Remote connected",
-  "控制按键已收到": "Control button received",
+  "控制按键已收到": "Button Press Detected",
   "音频检查": "Audio Check",
   "已检测到带「推荐」标记的 CABLE 设备": "Recommended CABLE device detected",
   "已选中推荐设备": "Recommended device selected",
   "音频输出正常": "Audio output ready",
-  "实时检查": "Live Check",
-  "语音键已按下并松开": "Voice key pressed and released",
+  "实时检查": "Voice Typing Check",
+  "语音键已按下并松开": "Voice session started and ended",
   "语音声音已收到": "Voice audio received",
   "文字已经出现": "Text appeared",
   "按键检查": "Button Check",
@@ -289,7 +289,7 @@ export default {
   "先连接遥控器，再继续。": "Connect the remote to continue.",
   "按键监听正在启动，请稍等一下。": "Button detection is starting. Wait a moment.",
   "连接已就绪。按一下遥控器上的普通按键（比如主页键），不要按语音键。":
-    "The connection is ready. Press a regular button on the remote, such as Home, not the voice key.",
+    "The connection is ready. Press a regular button on the remote, such as Home, not the voice button.",
   "完成一次真实的语音上屏测试，再继续。":
     "Complete one real voice-to-text test to continue.",
   "按 3 个不同的普通按键（推荐主页 / OK / 方向键），再继续。":
@@ -303,7 +303,7 @@ export default {
   "正在整理…": "Preparing…",
   "复制诊断信息": "Copy Setup Diagnostics",
   "已复制，可直接粘贴发给开发者": "Copied. Paste it to the developer.",
-  "复制失败，请重试。": "Copy failed. Try again.",
+  "复制失败，请重试。": "Copy failed; try again",
 
   // ---- Voice test helpers ----
   "你选的输入工具": "your voice app",

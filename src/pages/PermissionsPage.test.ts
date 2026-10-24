@@ -131,7 +131,7 @@ describe("permissions page", () => {
     effectiveLanguage.value = "en";
     const wrapper = mount(PermissionsPage, { props: { runtime } });
 
-    expect(wrapper.get("h1").text()).toBe("Permissions");
+    expect(wrapper.get("h1").text()).toBe("Permissions & Privacy");
     expect(wrapper.text()).toContain("Bluetooth");
     expect(wrapper.text()).toContain("Button Listening & Mapping");
     expect(wrapper.text()).toContain("Audio Device");

@@ -11,7 +11,7 @@ export default {
   "鼠标向下": "Mouse down",
   "鼠标向左": "Mouse left",
   "鼠标向右": "Mouse right",
-  "未设置": "No action",
+  "未设置": "Not Set",
   "聚焦输入框": "Focus Input Field",
   "打开常用语": "Open Common Phrases",
   "打开常用语（当前不可用）": "Open Common Phrases (Unavailable)",
@@ -58,8 +58,8 @@ export default {
   "音量+": "Volume Up",
   "音量−": "Volume Down",
   "播放/暂停": "Play/Pause",
-  "上一首": "Previous Track",
-  "下一首": "Next Track",
+  "上一首": "Previous track",
+  "下一首": "Next track",
 
   // 连接 / 音频 / 遥控器状态
   "尚未连接": "Not connected",
@@ -92,13 +92,13 @@ export default {
   "上": "Up",
   "菜单": "Menu",
   "电源": "Power",
-  "单击": "Single Click",
-  "双击": "Double Click",
+  "单击": "Single Press",
+  "双击": "Double Press",
   "长按": "Long Press",
 
   // 快捷键预设
   "基础按键": "Basic Keys",
-  "系统与媒体": "System and Media",
+  "系统与媒体": "System & Media",
   "复制": "Copy",
   "粘贴": "Paste",
   "剪切": "Cut",
@@ -132,7 +132,7 @@ export default {
   "尚未选择系统动作": "No system action selected",
   "尚未填写网址": "No URL entered",
   "尚未选择组合动作": "No routine selected",
-  "尚未选择 App": "No target app selected",
+  "尚未选择 App": "No app selected",
 
   // 聚焦学习 / 记录点击位置失败
   "没有学习成功，请确认目标应用已经打开，再点击它的输入框试一次":

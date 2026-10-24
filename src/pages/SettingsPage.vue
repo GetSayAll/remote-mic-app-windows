@@ -25,7 +25,7 @@ import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
 import { useLanguage } from "../lib/language";
 import { effectiveLanguage } from "../lib/language-state";
-import { t, tNav } from "../lib/i18n";
+import { t, tPage } from "../lib/i18n";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ "restart-onboarding": []; navigate: [page: string] }>();
@@ -107,11 +107,9 @@ const membershipActionLabel = computed(() => {
 /**
  * 页面标题按页面语境取词：中文原文「设置」同时是首次向导的阶段名（onboarding
  * 片段译作 Set Up），i18n 以中文原文为 key，无法区分同形不同义。侧栏与
- * 本页标题属于导航语义，英文走 `nav.*` 词表。
+ * 本页标题分别走 `nav.*` / `page.*` 词表。
  */
-const pageTitle = computed(() =>
-  effectiveLanguage.value === "en" ? tNav("设置") : "设置",
-);
+const pageTitle = computed(() => tPage("设置"));
 
 const checking = computed(() => phase.value === "checking");
 const installing = computed(() => phase.value === "downloading" || phase.value === "installing");

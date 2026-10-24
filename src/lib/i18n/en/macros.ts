@@ -28,7 +28,7 @@ export default {
   "嵌套于：{name}": "Nested in: {name}",
   "删除后不可恢复。": "This cannot be undone.",
   "这些按键会改为": "These buttons will be changed to ",
-  "未设置": "No action",
+  "未设置": "Not Set",
   "：{buttons}": ": {buttons}",
   "这些组合动作嵌套引用了它，删除后会把这些嵌套步骤一并移除：{routines}":
     "These routines nest it, so their nested steps will be removed as well: {routines}",
@@ -124,7 +124,7 @@ export default {
   // ===== 编辑向导 =====
   "新建组合动作": "New Routine",
   "编辑组合动作": "Edit Routine",
-  "基本设置": "Basic settings",
+  "基本设置": "Setup",
   "编排步骤": "Arrange steps",
   "测试与保存": "Test and save",
   "组合动作名称": "Routine Name",
@@ -164,7 +164,7 @@ export default {
     "Press one key or shortcut; press Esc to cancel. Recording ends automatically after 15 seconds of inactivity.",
   "点击“开始录入”后，只捕获下一次完整的单键或组合键，然后立即停止。":
     "After starting, only the next complete key or shortcut is captured, then recording stops.",
-  "已保存的快捷键": "Saved Shortcuts",
+  "已保存的快捷键": "Saved Keyboard Shortcuts",
   "常用快捷键": "Common Shortcuts",
   "把键盘焦点放到": "Move keyboard focus to the ",
   "当前前台应用": "frontmost app",
@@ -176,10 +176,10 @@ export default {
     'This step comes from an older version. It can still run or be deleted; use "Key or Shortcut" for new steps.',
   "打开应用": "Open App",
   "聚焦方式": "Focus method",
-  "恢复默认": "Restore Default",
+  "恢复默认": "Restore Defaults",
   "先点击“录入快捷键”，再按下该 APP 用于聚焦输入框的单个按键或组合键。执行时会先激活 APP，再发送此按键。":
     "Click Record Focus Shortcut first, then press the single key or key combination this app uses to focus its input field. SayAll activates the app before sending it.",
-  "尚未录入": "Not recorded yet",
+  "尚未录入": "Not Recorded",
   "录入中…（按 Esc 取消）": "Recording… (Esc to cancel)",
   "点击录入快捷键": "Record Focus Shortcut",
   "清除": "Clear",
@@ -212,8 +212,8 @@ export default {
     "{count} steps · You can test before saving. Testing is optional.",
   "未测试": "Not tested",
   "取消编辑": "Cancel editing",
-  "上一步": "Previous",
-  "下一步": "Next",
+  "上一步": "Back",
+  "下一步": "Continue",
   "保存修改": "Save Changes",
 
 } as Record<string, string>;

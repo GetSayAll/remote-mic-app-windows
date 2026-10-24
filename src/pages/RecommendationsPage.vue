@@ -52,7 +52,7 @@ const COPY = {
     openFailed: "无法打开浏览器，请手动访问 sayall.app/recommendations/。",
   },
   en: {
-    title: "Recommendations",
+    title: "Picks",
     loading: "Loading page…",
     failure:
       "This page is temporarily unavailable. Open the website or try again later.",
