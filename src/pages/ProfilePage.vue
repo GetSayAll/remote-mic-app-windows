@@ -416,7 +416,7 @@ onUnmounted(() => {
             >
               <span class="voice-rank">{{ index + 1 }}</span>
               <span class="voice-duration">{{ formatDuration(session.durationSeconds) }}</span>
-              <span class="voice-dot">·</span>
+              <span class="voice-separator">·</span>
               <span class="voice-app">{{ session.applicationName ?? "未知应用" }}</span>
               <span class="voice-date">{{ formatVoiceSessionDate(session.endedAtMs) }}</span>
             </li>
@@ -823,7 +823,7 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.voice-dot {
+.voice-separator {
   color: var(--muted);
 }
 

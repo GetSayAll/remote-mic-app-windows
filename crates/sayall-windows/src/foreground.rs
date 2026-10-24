@@ -40,7 +40,8 @@ pub fn own_process_is_foreground() -> bool {
 /// 前台应用的用户可读显示名（个人中心语音排行用）。
 ///
 /// 只读取进程可执行文件名；不读窗口标题、命令行或完整路径。前台是本进程、
-/// 查询失败或文件名无法识别时返回 `None`，界面显示「未知应用」。
+/// 查询失败或文件名无法识别时返回 `None`，界面显示「未知应用」，并记一条
+/// `usage_stats action=application_name ... reason=...` 诊断（Mac 同样排除本应用）。
 #[cfg(windows)]
 pub fn foreground_application_name() -> Option<String> {
     use windows::core::PWSTR;
@@ -54,14 +55,24 @@ pub fn foreground_application_name() -> Option<String> {
     unsafe {
         let foreground = GetForegroundWindow();
         if foreground.0.is_null() {
+            note_application_unavailable("no_foreground_window");
             return None;
         }
         let mut process_id = 0_u32;
         GetWindowThreadProcessId(foreground, Some(&mut process_id));
         if foreground_pid_is_ours(process_id, std::process::id()) {
+            // Mac `FrontmostApplicationMetadata.current(excludingBundleIdentifier:)`
+            // 同样排除本应用，因此这里保持「未知应用」，只把原因写进诊断日志。
+            note_application_unavailable("self_foreground");
             return None;
         }
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) {
+            Ok(handle) => handle,
+            Err(_) => {
+                note_application_unavailable("open_process_failed");
+                return None;
+            }
+        };
         let mut buffer = [0_u16; 512];
         let mut size = buffer.len() as u32;
         let queried = QueryFullProcessImageNameW(
@@ -73,12 +84,32 @@ pub fn foreground_application_name() -> Option<String> {
         .is_ok();
         let _ = CloseHandle(handle);
         if !queried {
+            note_application_unavailable("query_image_name_failed");
             return None;
         }
         let full_path = String::from_utf16_lossy(&buffer[..size as usize]);
-        let executable = full_path.rsplit(['\\', '/']).next()?;
-        application_display_name(executable)
+        let executable = match full_path.rsplit(['\\', '/']).next() {
+            Some(name) if !name.trim().is_empty() => name,
+            _ => {
+                note_application_unavailable("empty_executable_name");
+                return None;
+            }
+        };
+        match application_display_name(executable) {
+            Some(name) => Some(name),
+            None => {
+                note_application_unavailable("unmapped_executable");
+                None
+            }
+        }
     }
+}
+
+#[cfg(windows)]
+fn note_application_unavailable(reason: &str) {
+    crate::ble::gatt_note(format!(
+        "usage_stats action=application_name phase=completed terminal_result=failed reason={reason}"
+    ));
 }
 
 #[cfg(not(windows))]

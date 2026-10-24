@@ -120,6 +120,10 @@ describe("个人中心页", () => {
     expect(wrapper.findAll(".voice-row")).toHaveLength(2);
     expect(wrapper.text()).toContain("微信");
     expect(wrapper.text()).toContain("未知应用");
+    // 分隔点必须用自己的类名：全局 `.voice-dot` 是连接页的绿色状态点样式。
+    const firstVoiceRow = wrapper.findAll(".voice-row")[0];
+    expect(firstVoiceRow.get(".voice-separator").text()).toBe("·");
+    expect(firstVoiceRow.find(".voice-dot").exists()).toBe(false);
     expect(wrapper.findAll(".calendar-grid button.calendar-day")).toHaveLength(26 * 7);
     expect(wrapper.text()).not.toContain("回眸");
     wrapper.unmount();
