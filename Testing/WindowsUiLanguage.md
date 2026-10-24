@@ -52,8 +52,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1
 - `ci-preflight`：7/7 通过（含 `cargo test --workspace`、`cargo check --workspace`、
   `cargo check -p sayall-windows-app --features runtime-simulation`）。
 - 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.0.0_x64-setup.exe`，
-  13,049,959 字节，SHA-256 `1B1F9A0BEE558A35DBE8D6F29F621AA78A60777FFE85B6D46FCCB0FD4C041F2C`
-  （构建于提交前工作区，源修订号仍为 `46f74c1`；行为验证用此包）。
+  13,044,961 字节，SHA-256 `4490241AD0D17CBCDAC73AE6F063F668575ED5AB407D152C2949E9DE6A6B939E`
+  （构建于功能提交 `c4f05bc`，安装版日志读回同一源修订号）。
 - 前端英文渲染：浏览器预览逐页扫描 按键 / 组合动作 / 连接 / 推荐 / 权限 / 设置 的
   可见文本与 `title` / `aria-label` / `placeholder` / `alt`，除「简体中文」选项与
   用户数据（演示组合动作名「打开记事本并聚焦」、应用名「记事本」）外无汉字残留。
