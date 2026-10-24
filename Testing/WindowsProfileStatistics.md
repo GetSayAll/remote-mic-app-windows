@@ -59,9 +59,11 @@
 1. 记录初始「累计语音时长」「最长单次语音」「单次语音时长排行」。
 2. 面向目标应用完成一次 2 秒以上语音输入，并确认文字进入目标应用。
 3. 返回个人中心。
+4. 若数字没有增长，查 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log` 里的 `usage_stats action=voice_begin` / `voice_finish`。
 
 预期：
 
+- 日志出现成对的 `usage_stats action=voice_begin ... source=mic_open|stream_start` 与 `usage_stats action=voice_finish ... duration_ms=...`；RC003 报告层路径只发 `0x04 STREAM_START`，`source=stream_start` 属正常，`MIC_OPEN` 先到时不会重复计按键。
 - 累计语音时长增加；最长单次语音按需更新。
 - 语音排行出现一条：时长、应用名、结束时间。
 - 微信应显示「微信」，不显示 `WeChat` / `Weixin`；其他预设使用产品名；未知程序显示去掉 `.exe` 的文件名，拿不到应用名时显示「未知应用」。
