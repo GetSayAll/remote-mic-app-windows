@@ -17,6 +17,28 @@ pub enum ThemePreference {
     Dark,
 }
 
+/// 应用语言（设置页「通用 > 应用语言」），与 Mac `AppLanguage` 的持久化值一致。
+///
+/// `system` 表示跟随系统；其余两个是用户显式选择。当前推荐页消费它来决定
+/// `/en/recommendations/` 与固定文案；其余界面暂保持中文（后续再逐页翻译）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AppLanguage {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "zh-Hans")]
+    SimplifiedChinese,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl AppLanguage {
+    /// 推荐页只看「是否英文」：与 Mac `language.hasPrefix("en")` 同语义。
+    pub fn is_english(self) -> bool {
+        matches!(self, AppLanguage::English)
+    }
+}
+
 /// 用户在连接页选择的输入工具（决定"按住说话快捷键"的默认组合与引导步骤）。
 ///
 /// `None` = 用户从未选择过（老配置）：前端按当前快捷键推断一次后落存，
@@ -101,6 +123,10 @@ pub struct AppSettings {
     /// 字段时按容器级 `#[serde(default)]` 落回默认（开启）。
     pub lock_mapping_selection: bool,
     pub theme_preference: ThemePreference,
+    /// 应用语言：`system` / `zh-Hans` / `en`。无法识别的老值回落 `system`，
+    /// 不让一个语言名把整份设置打成解析失败。
+    #[serde(default, deserialize_with = "deserialize_app_language")]
+    pub application_language: AppLanguage,
     /// 应用图标；老配置没有这个字段时落回**当前默认**（几何鸭，2026-10-04 起）。
     #[serde(default, deserialize_with = "deserialize_app_icon")]
     pub app_icon: AppIconIdentifier,
@@ -119,6 +145,13 @@ where
     Ok(AppIconIdentifier::deserialize(deserializer).unwrap_or(AppIconIdentifier::Standard))
 }
 
+fn deserialize_app_language<'de, D>(deserializer: D) -> Result<AppLanguage, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(AppLanguage::deserialize(deserializer).unwrap_or(AppLanguage::System))
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -135,6 +168,7 @@ impl Default for AppSettings {
             rc003_capture_enabled: false,
             lock_mapping_selection: true,
             theme_preference: ThemePreference::System,
+            application_language: AppLanguage::System,
             app_icon: AppIconIdentifier::FacetedDuck,
             usage_statistics: UsageStatistics::default(),
         }
@@ -169,6 +203,27 @@ mod tests {
         .normalized();
         assert_eq!(settings.gain_db, 24.0);
         assert_eq!(settings.voice_trigger_mode, VoiceTriggerMode::Hold);
+    }
+
+    #[test]
+    fn application_language_defaults_to_system_and_uses_mac_values() {
+        let settings: AppSettings = serde_json::from_str(r#"{"schema_version":4}"#).unwrap();
+        assert_eq!(settings.application_language, AppLanguage::System);
+
+        for (raw, expected) in [
+            ("system", AppLanguage::System),
+            ("zh-Hans", AppLanguage::SimplifiedChinese),
+            ("en", AppLanguage::English),
+        ] {
+            let json = format!(r#"{{"schema_version":4,"application_language":"{raw}"}}"#);
+            let settings: AppSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(settings.application_language, expected, "{raw}");
+        }
+
+        // 认不出的值回落 system，避免一个语言名让整份设置解析失败。
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"schema_version":4,"application_language":"fr-FR"}"#).unwrap();
+        assert_eq!(settings.application_language, AppLanguage::System);
     }
 
     #[test]

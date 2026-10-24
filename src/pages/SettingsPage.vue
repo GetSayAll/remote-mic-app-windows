@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import type { AppIconIdentifier, RuntimeSnapshot, ThemePreference } from "../lib/bridge";
+import type {
+  AppIconIdentifier,
+  AppLanguagePreference,
+  RuntimeSnapshot,
+  ThemePreference,
+} from "../lib/bridge";
 import {
   getAppIcon,
   getLaunchAtLogin,
@@ -18,6 +23,7 @@ import CrownIcon from "../components/CrownIcon.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
+import { useLanguage } from "../lib/language";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 const emit = defineEmits<{ "restart-onboarding": []; navigate: [page: string] }>();
@@ -41,11 +47,23 @@ const {
   errorMessage: themeError,
   setThemePreference,
 } = useTheme();
+const {
+  preference: applicationLanguage,
+  busy: languageBusy,
+  errorMessage: languageError,
+  setLanguagePreference,
+} = useLanguage();
 
 const themeOptions: Array<{ value: ThemePreference; label: string }> = [
   { value: "system", label: "系统" },
   { value: "light", label: "浅色" },
   { value: "dark", label: "深色" },
+];
+
+const languageOptions: Array<{ value: AppLanguagePreference; label: string }> = [
+  { value: "system", label: "跟随系统" },
+  { value: "zh-Hans", label: "简体中文" },
+  { value: "en", label: "English" },
 ];
 
 const appIconOptions: Array<{ value: AppIconIdentifier; label: string; preview: string }> = [
@@ -228,6 +246,12 @@ async function onThemeChange(event: Event): Promise<void> {
   await setThemePreference((event.target as HTMLInputElement).value as ThemePreference);
 }
 
+async function onLanguageChange(event: Event): Promise<void> {
+  await setLanguagePreference(
+    (event.target as HTMLInputElement).value as AppLanguagePreference,
+  );
+}
+
 async function onLaunchAtLoginChange(event: Event): Promise<void> {
   const enabled = (event.target as HTMLInputElement).checked;
   launchAtLoginBusy.value = true;
@@ -317,6 +341,14 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
   power: {
     // SF "power"：电源圆环 + 竖线
     strokes: ["M12 3.6v7.4", "M7.3 6.4a7 7 0 1 0 9.4 0"],
+  },
+  language: {
+    // SF "globe"：圆 + 赤道 + 经线
+    strokes: [
+      "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
+      "M3.4 12h17.2",
+      "M12 3.2c2.4 2.5 3.6 5.5 3.6 8.8s-1.2 6.3-3.6 8.8c-2.4-2.5-3.6-5.5-3.6-8.8S9.6 5.7 12 3.2z",
+    ],
   },
   app_icon: {
     // SF "app.badge" 近似：应用方块 + 右下角标
@@ -464,7 +496,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           </span>
           <div class="settings-row-text">
             <strong>外观</strong>
-            <p class="muted">选择应用的显示模式。</p>
           </div>
           <div class="theme-selector" role="radiogroup" aria-label="显示模式">
             <label
@@ -503,7 +534,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           </span>
           <div class="settings-row-text">
             <strong>启动行为</strong>
-            <p class="muted">设置登录后自动启动和应用启动时是否打开主窗口。</p>
           </div>
           <div class="launch-behavior-toggles">
             <label class="toggle-row launch-toggle" title="使用当前用户的 Windows 登录启动项，不需要管理员权限。">
@@ -542,6 +572,44 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
         <p v-if="openWindowAtLaunchError" class="error-text" role="alert">
           {{ openWindowAtLaunchError }}
         </p>
+
+        <div class="settings-row">
+          <span class="settings-row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path
+                v-for="(path, index) in ROW_ICONS.language.strokes"
+                :key="`ls${index}`"
+                :d="path"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <div class="settings-row-text">
+            <strong>应用语言</strong>
+          </div>
+          <div class="theme-selector" role="radiogroup" aria-label="应用语言">
+            <label
+              v-for="option in languageOptions"
+              :key="option.value"
+              class="theme-option"
+              :class="{ selected: applicationLanguage === option.value }"
+            >
+              <input
+                type="radio"
+                name="application-language"
+                :value="option.value"
+                :checked="applicationLanguage === option.value"
+                :disabled="languageBusy"
+                @change="onLanguageChange"
+              />
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
+        </div>
+        <p v-if="languageError" class="error-text" role="alert">{{ languageError }}</p>
 
         <div class="settings-row">
           <span class="settings-row-icon" aria-hidden="true">
