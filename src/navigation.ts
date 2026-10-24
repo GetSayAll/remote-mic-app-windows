@@ -7,7 +7,8 @@ export type PageId =
   | "macros"
   | "connection"
   | "permissions"
-  | "settings";
+  | "settings"
+  | "profile";
 
 export type NavIcon =
   | "keyboard"
@@ -16,7 +17,8 @@ export type NavIcon =
   | "link"
   | "shield"
   | "gear"
-  | "member";
+  | "member"
+  | "person";
 
 export interface NavigationItem {
   id: string;
@@ -40,6 +42,9 @@ export const publicNavigationItems: NavigationItem[] = [
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main
   // SettingsSection.about 的 "gearshape"。
   { id: "settings", label: "设置", icon: "gear" },
+  // 2026-10-24 个人中心（对齐 Mac statistics）：固定渲染在侧栏最底部；
+  // 未登录文案是「我的」，已登录由 App 传入邮箱前缀。
+  { id: "profile", label: "我的", icon: "person" },
 ];
 
 /**

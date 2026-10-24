@@ -27,5 +27,8 @@ pub use portable_macros::{
 pub use settings::{
     AppIconIdentifier, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
 };
-pub use statistics::{DailyUsage, UsageStatistics};
+pub use statistics::{
+    DailyUsage, UsageStatistics, VoiceSessionUsageRecord, MAX_APPLICATION_NAME_CHARS,
+    MAX_STAT_KEY_CHARS, MAX_VOICE_SESSION_RANKING,
+};
 pub use voice::{VoiceSession, VoiceSessionError, VoiceSessionEvent, VoiceSessionState};

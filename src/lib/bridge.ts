@@ -758,6 +758,101 @@ export async function getMembershipAccountSummary(): Promise<MembershipAccountSu
   return invoke<MembershipAccountSummary>("get_membership_snapshot");
 }
 
+/** 个人中心日历的一天（本地日期 `YYYY-MM-DD`）。 */
+export interface UsageProfileDay {
+  date: string;
+  buttonPresses: number;
+  voiceSeconds: number;
+}
+
+/** 单次语音排行的一条；应用名只来自本机保存的显示名。 */
+export interface UsageVoiceSession {
+  endedAtMs: number;
+  durationSeconds: number;
+  applicationName: string | null;
+}
+
+/** 个人中心读模型（`get_usage_profile`）。 */
+export interface UsageProfile {
+  totalButtonPresses: number;
+  totalVoiceSeconds: number;
+  weekButtonPresses: number;
+  longestVoiceSeconds: number;
+  buttonPressesByControl: Record<string, number>;
+  voiceSessions: UsageVoiceSession[];
+  recentDays: UsageProfileDay[];
+}
+
+function browserDateKey(offsetFromToday: number): string {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + offsetFromToday);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** 浏览器预览用的固定样例（不进入 Tauri 路径，只用于布局走查）。 */
+function browserUsageProfile(): UsageProfile {
+  const recentDays: UsageProfileDay[] = Array.from({ length: 26 * 7 }, (_, index) => {
+    const offset = index - 26 * 7 + 1;
+    const active = (index * 7 + 3) % 5 !== 0;
+    return {
+      date: browserDateKey(offset),
+      buttonPresses: active ? (index * 13) % 48 : 0,
+      voiceSeconds: active && index % 4 === 0 ? (index * 17) % 301 : 0,
+    };
+  });
+  return {
+    totalButtonPresses: 561,
+    totalVoiceSeconds: 33 * 60 + 12,
+    weekButtonPresses: 9,
+    longestVoiceSeconds: 85,
+    buttonPressesByControl: {
+      "button.back": 47,
+      "button.ok": 42,
+      "button.home": 45,
+      "button.down": 45,
+      "button.up": 41,
+      "button.left": 40,
+      "button.right": 45,
+      "button.menu": 23,
+      "button.tv": 12,
+      "button.power": 8,
+      "button.volume_up": 22,
+      "button.volume_down": 19,
+      "button.volume_mute": 11,
+      voice: 132,
+    },
+    voiceSessions: [
+      {
+        endedAtMs: Date.now() - 3 * 60 * 60 * 1000,
+        durationSeconds: 85,
+        applicationName: "微信",
+      },
+      {
+        endedAtMs: Date.now() - 26 * 60 * 60 * 1000,
+        durationSeconds: 82,
+        applicationName: "Chrome 浏览器",
+      },
+      {
+        endedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000,
+        durationSeconds: 61,
+        applicationName: null,
+      },
+    ],
+    recentDays,
+  };
+}
+
+export async function getUsageProfile(): Promise<UsageProfile> {
+  if (!isTauriRuntime()) {
+    return browserUsageProfile();
+  }
+  return invoke<UsageProfile>("get_usage_profile");
+}
+
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (!isTauriRuntime()) {
     return {

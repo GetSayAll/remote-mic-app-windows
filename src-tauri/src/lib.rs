@@ -31,6 +31,7 @@ mod settings;
 mod shortcut_icons;
 mod startup;
 mod updater;
+mod usage;
 
 use diagnostics::DiagnosticReport;
 use membership::{
@@ -43,6 +44,7 @@ use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
+use usage::{build_usage_profile, UsageProfile, UsageSync};
 
 /// 主窗口标签（`tauri.conf.json` 里由配置创建的唯一窗口）。
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -423,6 +425,8 @@ struct RuntimeSnapshot {
 struct AppState {
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
+    /// 本机使用统计的批量落盘器（个人中心）。
+    usage: Arc<UsageSync>,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
     /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
@@ -444,6 +448,7 @@ impl std::fmt::Debug for AppState {
             .debug_struct("AppState")
             .field("platform", &self.platform)
             .field("settings", &self.settings)
+            .field("usage", &self.usage)
             .field("membership", &self.membership)
             .field(
                 "capture_health",
@@ -481,6 +486,31 @@ impl std::fmt::Debug for AppState {
             )
             .finish()
     }
+}
+
+/// 个人中心读模型（2026-10-24）。
+///
+/// 先做一次有界 flush（失败只保留待写事件并记日志，不阻断读取），再把统计
+/// 整理成界面直接消费的 KPI、按控件计数、语音排行和最近 182 天日历。
+#[tauri::command]
+async fn get_usage_profile(state: tauri::State<'_, AppState>) -> Result<UsageProfile, String> {
+    let usage = Arc::clone(&state.usage);
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = usage.flush();
+        let settings = settings.load().map_err(|error| {
+            sayall_windows::gatt_note(
+                "usage_stats action=read phase=completed terminal_result=failed error_domain=settings error_code=read_failed reason=profile_unavailable retryable=true".to_owned(),
+            );
+            error
+        })?;
+        Ok(build_usage_profile(
+            &settings.usage_statistics,
+            chrono::Local::now().date_naive(),
+        ))
+    })
+    .await
+    .map_err(|_| "usage_profile_unavailable".to_owned())?
 }
 
 /// 会员摘要（2026-10-15）：公开构建恒为「不可用」，私有构建返回账号与权益。
@@ -4287,6 +4317,8 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
             started.elapsed().as_millis()
         )),
     }
+    // 统计的终态写入放在平台收尾之后：BLE 收尾可能补上最后一条语音会话事件。
+    app.state::<AppState>().usage.shutdown();
 }
 
 /// 监听安装器发出的"请优雅退出"信号（2026-09-16）。
@@ -4797,6 +4829,23 @@ pub fn run() {
             // 恢复使用）。该机制已按产品决策移除（会断开全部蓝牙设备），
             // 不再预热、不再请求无线电控制权限。
             let platform = create_platform();
+            // 个人中心统计：平台层只排队，应用层每秒批量落盘；启动即开始消费，
+            // 用户即使从不打开个人中心，按键与语音统计也会保留。
+            let usage = UsageSync::new(platform.usage_counters(), settings.clone());
+            let usage_worker_started = usage.spawn_worker();
+            sayall_windows::gatt_note(format!(
+                "usage_stats action=worker_start phase=completed terminal_result={} reason={}",
+                if usage_worker_started {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                if usage_worker_started {
+                    "started"
+                } else {
+                    "thread_spawn_failed"
+                }
+            ));
             let button_mappings = match settings.load_button_mappings() {
                 Ok(mappings) => {
                     sayall_windows::gatt_note(format!(
@@ -4978,6 +5027,7 @@ pub fn run() {
             app.manage(AppState {
                 platform,
                 settings,
+                usage,
                 capture_health,
                 membership: membership::install(),
                 capture_revoked,
@@ -5071,6 +5121,7 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
         start_membership_email_login,
@@ -5189,6 +5240,7 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
         start_membership_email_login,

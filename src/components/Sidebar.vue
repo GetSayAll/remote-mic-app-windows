@@ -1,10 +1,22 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
 import CrownIcon from "./CrownIcon.vue";
 
-defineProps<{ activePage: string; version?: string | null }>();
+const props = withDefaults(
+  defineProps<{
+    activePage: string;
+    version?: string | null;
+    /** 个人中心入口文案：未登录「我的」，已登录为脱敏后的邮箱前缀。 */
+    profileLabel?: string;
+  }>(),
+  { version: null, profileLabel: "我的" },
+);
 const emit = defineEmits<{ select: [page: string] }>();
+
+const topNavigationItems = computed(() => navigationItems.filter((item) => item.id !== "profile"));
+const profileItem = computed(() => navigationItems.find((item) => item.id === "profile"));
 
 /**
  * 侧栏图标：SVG path 组（24x24 视窗，描边风格），形状对齐
@@ -60,14 +72,22 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     // 会员图标由 CrownIcon 组件绘制（SF Symbols crown.fill）；保留空组维持类型映射。
     strokes: [],
   },
+  person: {
+    // SF "person.crop.circle"：圆形轮廓 + 头肩剪影。
+    strokes: [
+      "M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 0 0 0-19z",
+      "M12 7.2a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z",
+      "M5.8 19.2c1.1-2.8 3.2-4.3 6.2-4.3s5.1 1.5 6.2 4.3",
+    ],
+  },
 };
 </script>
 
 <template>
   <aside class="sidebar">
-    <nav aria-label="设置页面">
+    <nav class="sidebar-nav" aria-label="设置页面">
       <button
-        v-for="item in navigationItems"
+        v-for="item in topNavigationItems"
         :key="item.id"
         class="nav-item"
         :class="{ active: activePage === item.id }"
@@ -96,6 +116,30 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         </svg>
         <span>{{ item.label }}</span>
       </button>
+
+      <!-- 个人中心固定在最底部（对齐 Mac statistics），与顶部页面区分开。 -->
+      <div class="sidebar-spacer"></div>
+      <button
+        v-if="profileItem"
+        class="nav-item profile-nav-item"
+        :class="{ active: activePage === profileItem.id }"
+        type="button"
+        aria-label="个人中心"
+        @click="emit('select', profileItem.id)"
+      >
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            v-for="(path, index) in ICON_PATHS.person.strokes"
+            :key="index"
+            :d="path"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>{{ props.profileLabel || "我的" }}</span>
+      </button>
     </nav>
 
     <!-- 底部显示应用版本号（2026-10-02 用户指定：不再显示“预览版”）。版本来自
@@ -107,6 +151,23 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 </template>
 
 <style scoped>
+.sidebar-nav {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-spacer {
+  flex: 1 1 auto;
+  min-height: 12px;
+}
+
+.profile-nav-item {
+  margin-top: 4px;
+}
+
 /* 版本号用等宽数字，避免运行中的宽度抖动。 */
 .sidebar-version { font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
 </style>

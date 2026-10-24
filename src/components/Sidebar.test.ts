@@ -21,7 +21,7 @@ describe("sidebar", () => {
     expect(wrapper.get(".sidebar-footer").text()).toBe("");
   });
 
-  it("按键之后是「组合动作」，推荐在连接之后，末位页是「设置」并带齿轮图标", () => {
+  it("顶部页面顺序不变，个人中心固定在最后并带人像图标", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings", version: "0.5.0" } });
     const items = wrapper.findAll(".nav-item");
 
@@ -33,17 +33,34 @@ describe("sidebar", () => {
       "推荐",
       "权限",
       "设置",
+      // 2026-10-24：未登录显示「我的」。
+      "我的",
     ]);
     // 推荐入口使用 Mac 的 sparkles 语义图标（大四角星 + 两颗小星）。
     const recommendationIcon = items[3].get("svg");
     expect(recommendationIcon.findAll("path")).toHaveLength(3);
     // 组合动作入口使用层叠方块图标（3 条描边）。
     expect(items[1].get("svg").findAll("path")).toHaveLength(3);
-    const lastIcon = items[5].get("svg");
+    const settingsIcon = items[5].get("svg");
     // 齿轮形状：外圈齿形 + 中央圆孔（区别于旧「关于」的 info.circle 单圆）。
-    const paths = lastIcon.findAll("path");
+    const paths = settingsIcon.findAll("path");
     expect(paths).toHaveLength(2);
     expect(paths[1].attributes("d")).toContain("a3.2 3.2");
+    // 个人中心在底部区域，图标是圆形人像。
+    const profile = wrapper.get(".profile-nav-item");
+    expect(profile.findAll("path")).toHaveLength(3);
+    expect(profile.attributes("aria-label")).toBe("个人中心");
+  });
+
+  it("已登录时个人入口只显示调用方传入的账号前缀", () => {
+    const wrapper = mount(Sidebar, {
+      props: { activePage: "profile", version: "0.5.0", profileLabel: "abcdef" },
+    });
+
+    const profile = wrapper.get(".profile-nav-item");
+    expect(profile.text()).toBe("abcdef");
+    expect(profile.classes()).toContain("active");
+    expect(profile.text()).not.toContain("@");
   });
 
   it("组合动作页用层叠方块图标（对齐 Mac square.stack.3d.up）", () => {

@@ -6,6 +6,7 @@ use sayall_core::{
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
 };
+use sayall_windows::UsageEvent;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -391,6 +392,42 @@ impl SettingsStore {
                 voice_sessions,
                 voice_seconds,
             );
+        })
+    }
+
+    /// 批量写入个人中心使用事件。
+    ///
+    /// 一次 `update` 只读写一遍设置文件；事件里的 Unix 毫秒按本机时区换算成
+    /// `YYYY-MM-DD`，与 Mac 的本地日期口径一致。空批次不触碰磁盘。
+    pub fn record_usage_events(&self, events: &[UsageEvent]) -> Result<(), String> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        self.update("保存本机使用统计", |settings| {
+            for event in events {
+                match event {
+                    UsageEvent::ButtonPress {
+                        control,
+                        at_unix_ms,
+                    } => {
+                        settings
+                            .usage_statistics
+                            .record_button_press_for_control(&local_date_key(*at_unix_ms), control);
+                    }
+                    UsageEvent::VoiceSession {
+                        ended_at_unix_ms,
+                        duration_seconds,
+                        application_name,
+                    } => {
+                        settings.usage_statistics.record_voice_session_with_details(
+                            &local_date_key(*ended_at_unix_ms),
+                            *duration_seconds,
+                            *ended_at_unix_ms,
+                            application_name.as_deref(),
+                        );
+                    }
+                }
+            }
         })
     }
 
@@ -813,6 +850,17 @@ fn serialize_settings(settings: &AppSettings) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化应用设置失败：{error}"))
 }
 
+/// Unix 毫秒 → 本机时区的 `YYYY-MM-DD`（与 Mac 的本地日期统计口径一致）。
+fn local_date_key(unix_ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_millis_opt(unix_ms)
+        .single()
+        .unwrap_or_else(Local::now)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 /// 按键映射文件里的结构版本号（缺省或非法均为 None）。
 fn button_mappings_schema_version(contents: &str) -> Option<u64> {
     serde_json::from_str::<serde_json::Value>(contents)
@@ -1197,7 +1245,10 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         // 配置文件是 pretty JSON（键冒号后有空格），用解析而不是子串比对。
         let persisted: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(persisted["schema_version"], serde_json::json!(4));
+        assert_eq!(
+            persisted["schema_version"],
+            serde_json::json!(AppSettings::default().schema_version)
+        );
         assert_eq!(persisted["app_icon"], serde_json::json!("standard"));
         assert_eq!(store.load().unwrap().app_icon, AppIconIdentifier::Standard);
 

@@ -11,7 +11,7 @@ import {
 
 describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
-    // 2026-10-20 用户指定：按键、组合动作、连接、推荐、权限、设置。
+    // 2026-10-20 用户指定顶部顺序；2026-10-24 个人中心固定在最后。
     expect(navigationItems.map((item) => item.id)).toEqual([
       "buttons",
       "macros",
@@ -19,12 +19,15 @@ describe("Windows navigation", () => {
       "recommendations",
       "permissions",
       "settings",
+      "profile",
     ]);
     expect(navigationItems[3].label).toBe("推荐");
     expect(navigationItems[3].icon).toBe("sparkles");
-    // 2026-10-02 用户指定：末位页从「关于」改名「设置」，图标换成 Mac 同款齿轮。
+    // 2026-10-02 用户指定：原「关于」页改名「设置」，图标换成 Mac 同款齿轮。
     expect(navigationItems[5].label).toBe("设置");
     expect(navigationItems[5].icon).toBe("gear");
+    expect(navigationItems[6].label).toBe("我的");
+    expect(navigationItems[6].icon).toBe("person");
     expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
   });
 
@@ -46,6 +49,8 @@ describe("active page persistence (webview reload recovery)", () => {
     expect(loadPersistedPage()).toBe("connection");
     persistActivePage("settings");
     expect(loadPersistedPage()).toBe("settings");
+    persistActivePage("profile");
+    expect(loadPersistedPage()).toBe("profile");
   });
 
   it("ignores stored values that are no longer valid page ids", () => {

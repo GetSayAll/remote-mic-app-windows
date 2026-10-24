@@ -4,12 +4,14 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
 import {
+  getMembershipAccountSummary,
   getOnboardingState,
   getRuntimeSnapshot,
   hideMainWindow,
   takeUpdateCompletedVersion,
   type RuntimeSnapshot,
 } from "./lib/bridge";
+import { profileAccountLabel } from "./lib/profile";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
@@ -29,15 +31,35 @@ import MacrosPage from "./pages/MacrosPage.vue";
 import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 import RecommendationsPage from "./pages/RecommendationsPage.vue";
+import ProfilePage from "./pages/ProfilePage.vue";
 
 const activePage = ref<string>(loadPersistedPage() ?? "buttons");
-watch(activePage, (page) => persistActivePage(page));
+watch(activePage, (page) => {
+  persistActivePage(page);
+  if (page === "profile") void refreshProfileLabel();
+});
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
 const { bannerVisible, info: updateInfo, dismissBanner, runStartupSilentCheck } = useAppUpdate();
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
+let profileLabelTimer: ReturnType<typeof setInterval> | undefined;
 let initialRuntimeReported = false;
+
+/** 侧栏个人入口：未登录「我的」，已登录只显示邮箱 @ 前最多 6 个字符。 */
+const profileLabel = ref("我的");
+
+async function refreshProfileLabel(): Promise<void> {
+  try {
+    const summary = await getMembershipAccountSummary();
+    profileLabel.value =
+      summary.availability === "available"
+        ? profileAccountLabel(summary.accountDisplayName)
+        : "我的";
+  } catch {
+    // 会员摘要读取失败不打扰主界面；保持上一次文案。
+  }
+}
 
 /** 未完成首次设置时进入向导（激活开关见 ONBOARDING_WIZARD_ENABLED）。 */
 const showOnboarding = ref(false);
@@ -99,6 +121,7 @@ const pageComponents: Record<string, Component> = {
   connection: ConnectionPage,
   permissions: PermissionsPage,
   settings: SettingsPage,
+  profile: ProfilePage,
   ...privatePageComponents(),
 };
 
@@ -182,9 +205,13 @@ onMounted(async () => {
       .catch(() => undefined);
   }
   await refreshRuntime();
+  void refreshProfileLabel();
   runtimePollTimer = setInterval(() => {
     void refreshRuntime();
   }, 1_000);
+  profileLabelTimer = setInterval(() => {
+    void refreshProfileLabel();
+  }, 5_000);
   // 启动静默检查更新：延迟 3 秒避开 BLE 恢复/设置加载的启动高峰；
   // 失败完全无声（app-update.ts 内回落 idle，不打扰主功能）。
   updateCheckTimer = setTimeout(() => {
@@ -195,6 +222,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (runtimePollTimer) clearInterval(runtimePollTimer);
   if (updateCheckTimer) clearTimeout(updateCheckTimer);
+  if (profileLabelTimer) clearInterval(profileLabelTimer);
   window.removeEventListener("keydown", handleWindowKeydown, true);
 });
 </script>
@@ -206,7 +234,12 @@ onUnmounted(() => {
     @completed="onOnboardingCompleted"
   />
   <div v-else class="app-shell">
-    <Sidebar :active-page="activePage" :version="runtime?.appVersion" @select="activePage = $event" />
+    <Sidebar
+      :active-page="activePage"
+      :version="runtime?.appVersion"
+      :profile-label="profileLabel"
+      @select="activePage = $event"
+    />
     <main class="content">
       <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>
       <div v-if="updateBannerVisible" class="update-banner">

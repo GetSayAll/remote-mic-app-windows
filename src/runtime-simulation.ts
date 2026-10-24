@@ -504,6 +504,28 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("设置页「启动时自动打开主面板」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
+  await openPage("我的", "个人中心");
+  mark("profile_page");
+  assert(document.querySelector(".profile-page") !== null, "个人中心页没有渲染");
+  assert(
+    document.querySelector(".profile-header h1")?.textContent?.trim() === "个人中心",
+    "个人中心页标题异常",
+  );
+  assert(
+    document.querySelector(".profile-header .badge")?.textContent?.trim() === "数据仅存本机",
+    "个人中心缺少本机隐私胶囊",
+  );
+  assert(document.querySelectorAll(".profile-kpi").length === 4, "个人中心 KPI 不是 4 项");
+  assert(
+    document.querySelectorAll(".calendar-grid .calendar-day").length >= 7,
+    "个人中心日历没有渲染完整星期行",
+  );
+  assert(
+    document.querySelector(".profile-page")?.textContent?.includes("回眸") === false,
+    "个人中心不应出现本期未提供的回眸入口",
+  );
+  steps.push("个人中心经真实 IPC 渲染 4 项 KPI、排行榜与 26 周日历，未出现回眸入口");
+
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，
   // 而不是界面硬编码 0）——上一步已把 12 dB 写入仿真设置目录。
@@ -516,7 +538,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   assert(restoredGainSlider.value === "12", "增益没有从持久化设置恢复");
   steps.push("重新进入连接页后增益从持久化设置恢复为 12 dB");
-  steps.push("四个侧栏页面均在 Windows WebView 中完成导航和渲染");
+  steps.push("五个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
   mark("voice_session");
   const voice = await invoke<PlatformSnapshot>("run_runtime_simulation_voice_session");

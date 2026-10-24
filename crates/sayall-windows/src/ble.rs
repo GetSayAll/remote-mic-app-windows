@@ -695,6 +695,7 @@ fn worker_loop(
                                 &send_input,
                                 &mut held_hotkey,
                                 &mut connection_generation,
+                                &usage,
                             ) {
                                 keep_reconnecting_after_cleanup_failure(
                                     &state,
@@ -734,6 +735,7 @@ fn worker_loop(
                                     &mut pipeline,
                                     &mut connection_generation,
                                     &mut capabilities_deadline,
+                                    &usage,
                                 );
                                 last_attempt_finished = Some(Instant::now());
                                 if result.is_ok() {
@@ -807,6 +809,7 @@ fn worker_loop(
                                 &mut active_voice_samples,
                                 session_id,
                                 "语音流已静默但未收到松开通知，已自动结束本次语音".to_owned(),
+                                &usage,
                             );
                             extend_deadline = None;
                             last_voice_audio_at = None;
@@ -870,6 +873,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut connection_generation,
+                        &usage,
                     ) {
                         Ok(()) => {
                             let snapshot = ConnectionSnapshot::default();
@@ -911,6 +915,7 @@ fn worker_loop(
                     &mut pipeline,
                     &mut connection_generation,
                     &mut capabilities_deadline,
+                    &usage,
                 );
                 last_attempt_finished = Some(Instant::now());
                 if result.is_ok() {
@@ -956,6 +961,7 @@ fn worker_loop(
                     &send_input,
                     &mut held_hotkey,
                     &mut connection_generation,
+                    &usage,
                 );
                 match result {
                     Ok(()) => {
@@ -1150,6 +1156,7 @@ fn worker_loop(
                             &send_input,
                             &mut held_hotkey,
                             &mut connection_generation,
+                            &usage,
                         ) {
                             keep_reconnecting_after_cleanup_failure(
                                 &state,
@@ -1188,6 +1195,7 @@ fn worker_loop(
                         &mut voice_gain_log,
                         &mut last_voice_audio_at,
                         &bytes,
+                        &usage,
                     );
                 }
             }
@@ -1217,6 +1225,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut connection_generation,
+                        &usage,
                     ) {
                         keep_reconnecting_after_cleanup_failure(
                             &state,
@@ -1276,6 +1285,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut connection_generation,
+                        &usage,
                     ) {
                         keep_reconnecting_after_cleanup_failure(
                             &state,
@@ -1338,6 +1348,7 @@ fn worker_loop(
                     &send_input,
                     &mut held_hotkey,
                     &mut connection_generation,
+                    &usage,
                 ) {
                     keep_reconnecting_after_cleanup_failure(
                         &state,
@@ -1392,6 +1403,7 @@ fn worker_loop(
             WorkerMessage::Shutdown { ack } => {
                 let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Shutdown);
                 release_voice_hold_hotkey(&send_input, &mut held_hotkey);
+                usage.finish_voice_session();
                 let _ = audio.interrupt_session();
                 let _ = close_session(&mut session);
                 pipeline.interrupt();
@@ -1496,6 +1508,7 @@ fn attempt_connection(
     pipeline: &mut AtvvVoicePipeline,
     connection_generation: &mut u64,
     capabilities_deadline: &mut Option<Instant>,
+    usage: &Arc<UsageCounters>,
 ) -> Result<ConnectionSnapshot, PlatformError> {
     let attempt_started = Instant::now();
     gatt_note(format!(
@@ -1508,6 +1521,7 @@ fn attempt_connection(
         send_input,
         held_hotkey,
         connection_generation,
+        usage,
     )?;
     let previous = reconnecting.then(|| lock(state).clone());
     *lock(state) = ConnectionSnapshot {
@@ -1671,9 +1685,11 @@ fn invalidate_connection(
     send_input: &SendInputRuntime,
     held_hotkey: &mut Option<KeyChord>,
     connection_generation: &mut u64,
+    usage: &UsageCounters,
 ) -> Result<(), PlatformError> {
     *connection_generation = connection_generation.wrapping_add(1);
     release_voice_hold_hotkey(send_input, held_hotkey);
+    usage.finish_voice_session();
     let mut cleanup_errors = Vec::new();
     if let Err(error) = audio.interrupt_session() {
         cleanup_errors.push(format!("音频中断：{error}"));
@@ -2086,6 +2102,7 @@ fn handle_control(
             active_voice_samples,
             stale_session,
             "上一轮语音未收到松开通知，已自动结束并接受新的按下".to_owned(),
+            usage,
         );
         *last_voice_audio_at = None;
     }
@@ -2133,6 +2150,9 @@ fn handle_control(
             let Some(capabilities) = pipeline.capabilities() else {
                 return;
             };
+            // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
+            // HID F5 代替——普通键盘 F5 也会被误计。
+            usage.begin_voice_session(crate::foreground::foreground_application_name());
             if let Some(session) = session {
                 if let Err(error) = session
                     .request_microphone_open(capabilities.version, capabilities.selected_codec)
@@ -2282,6 +2302,7 @@ fn handle_control(
                         active_voice_samples,
                         Some(session_id),
                         format!("按住说话快捷键注入失败：{error}"),
+                        usage,
                     );
                     return;
                 }
@@ -2348,6 +2369,7 @@ fn handle_control(
                     active_voice_samples,
                     Some(session_id),
                     error.to_string(),
+                    usage,
                 );
                 return;
             }
@@ -2385,6 +2407,7 @@ fn handle_control(
                     active_voice_samples,
                     None,
                     error.to_string(),
+                    usage,
                 );
                 return;
             }
@@ -2393,6 +2416,7 @@ fn handle_control(
                 return;
             }
             usage.record_voice_session(*active_voice_samples);
+            usage.finish_voice_session();
             *active_voice_samples = 0;
             {
                 let mut snapshot = lock(state);
@@ -2490,6 +2514,7 @@ fn handle_audio(
     voice_gain_log: &mut Option<(u64, f32)>,
     last_voice_audio_at: &mut Option<Instant>,
     bytes: &[u8],
+    usage: &UsageCounters,
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
         return;
@@ -2518,6 +2543,7 @@ fn handle_audio(
             active_voice_samples,
             pipeline.session_id(),
             error,
+            usage,
         );
         return;
     }
@@ -2538,6 +2564,7 @@ fn handle_audio(
                     active_voice_samples,
                     pipeline.session_id(),
                     error.to_string(),
+                    usage,
                 );
                 return;
             }
@@ -2563,8 +2590,10 @@ fn abort_voice_session(
     active_voice_samples: &mut u64,
     session_id: Option<u8>,
     error: String,
+    usage: &UsageCounters,
 ) {
     release_voice_hold_hotkey(send_input, held_hotkey);
+    usage.finish_voice_session();
     if let (Some(connected), Some(capabilities), Some(session_id)) =
         (session.as_mut(), pipeline.capabilities(), session_id)
     {
