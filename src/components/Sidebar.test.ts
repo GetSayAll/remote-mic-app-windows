@@ -12,7 +12,7 @@ describe("sidebar", () => {
     expect(wrapper.text()).not.toContain("0.5.0");
   });
 
-  it("顶部页面顺序不变，分享和个人中心固定在底部", () => {
+  it("顶部页面顺序不变，个人中心固定在最后", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
     const items = wrapper.findAll(".nav-item");
 
@@ -24,8 +24,6 @@ describe("sidebar", () => {
       "推荐",
       "权限",
       "设置",
-      // 2026-10-24 对齐 Mac：分享在个人中心上方。
-      "分享",
       "个人中心",
     ]);
     // 推荐入口使用 Mac 的 sparkles 语义图标（大四角星 + 两颗小星）。
@@ -38,18 +36,8 @@ describe("sidebar", () => {
     const paths = settingsIcon.findAll("path");
     expect(paths).toHaveLength(2);
     expect(paths[1].attributes("d")).toContain("a3.2 3.2");
-    expect(wrapper.get(".share-nav-item").attributes("aria-label")).toBe(
-      "分享无线麦 SayAll",
-    );
+    expect(wrapper.find(".share-nav-item").exists()).toBe(false);
     expect(wrapper.get(".profile-nav-item").attributes("aria-label")).toBe("个人中心");
-  });
-
-  it("分享按钮发出 share 事件", async () => {
-    const wrapper = mount(Sidebar, { props: { activePage: "profile" } });
-
-    await wrapper.get(".share-nav-item").trigger("click");
-
-    expect(wrapper.emitted("share")).toHaveLength(1);
   });
 
   it("个人中心图标使用与托盘同源的应用 logo", async () => {

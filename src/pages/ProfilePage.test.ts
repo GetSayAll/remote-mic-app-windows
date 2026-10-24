@@ -103,6 +103,11 @@ describe("个人中心页", () => {
 
     expect(wrapper.get("h1").text()).toBe("个人中心");
     expect(wrapper.get(".profile-header .badge").text()).toBe("数据仅存本机");
+    const share = wrapper.get(".share-panel");
+    const kpis = wrapper.get(".profile-kpis");
+    expect(
+      share.element.compareDocumentPosition(kpis.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(wrapper.findAll(".profile-kpi")).toHaveLength(4);
     const text = wrapper.text();
     expect(text).toContain("累计按键次数");

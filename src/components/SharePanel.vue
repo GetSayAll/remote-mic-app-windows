@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
+import { ref } from "vue";
 import { SHARE_WEBSITE_URL } from "../lib/bridge";
 
-const emit = defineEmits<{ close: [] }>();
-const closeButton = ref<HTMLButtonElement | null>(null);
+const expanded = ref(false);
 const copyState = ref<"idle" | "success" | "failure">("idle");
-let previousFocus: HTMLElement | null = null;
-let previousOverflow = "";
+
+function toggleExpanded(): void {
+  expanded.value = !expanded.value;
+  if (!expanded.value) copyState.value = "idle";
+}
 
 async function copyLink(): Promise<void> {
   try {
@@ -17,71 +19,57 @@ async function copyLink(): Promise<void> {
     copyState.value = "failure";
   }
 }
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key !== "Escape") return;
-  event.preventDefault();
-  event.stopPropagation();
-  emit("close");
-}
-
-onMounted(() => {
-  previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  previousOverflow = document.body.style.overflow;
-  document.body.style.overflow = "hidden";
-  window.addEventListener("keydown", onKeydown, true);
-  void nextTick(() => closeButton.value?.focus());
-});
-
-onUnmounted(() => {
-  window.removeEventListener("keydown", onKeydown, true);
-  document.body.style.overflow = previousOverflow;
-  previousFocus?.focus();
-});
 </script>
 
 <template>
-  <div class="share-overlay" @click.self="emit('close')">
-    <section
-      class="share-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="share-dialog-title"
-    >
-      <header class="share-header">
-        <span class="share-header-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path
-              d="M12 15V3M8 7l4-4 4 4M5 11v7.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V11"
-              stroke="currentColor"
-              stroke-width="1.9"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </span>
-        <div class="share-heading">
-          <h2 id="share-dialog-title">分享无线麦 SayAll</h2>
-          <p>邀请朋友发现用遥控器或手机在 Windows 上进行语音输入的便捷方式。</p>
-        </div>
-        <button
-          ref="closeButton"
-          type="button"
-          class="share-close"
-          aria-label="关闭分享"
-          @click="emit('close')"
-        >
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path
-              d="M6 6l12 12M18 6L6 18"
-              stroke="currentColor"
-              stroke-width="1.9"
-              stroke-linecap="round"
-            />
-          </svg>
-        </button>
-      </header>
+  <section class="share-panel" aria-labelledby="profile-share-title">
+    <header class="share-panel-header">
+      <span class="share-panel-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path
+            d="M12 15V3M8 7l4-4 4 4M5 11v7.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V11"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </span>
+      <div class="share-panel-heading">
+        <h2 id="profile-share-title">分享无线麦 SayAll</h2>
+        <p>邀请朋友发现用遥控器或手机在 Windows 上进行语音输入的便捷方式。</p>
+      </div>
+      <button
+        type="button"
+        class="share-toggle"
+        :aria-expanded="expanded"
+        aria-controls="profile-share-content"
+        @click="toggleExpanded"
+      >
+        <svg v-if="!expanded" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2M20 14v2M14 20h6v-2M18 18h2"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M6 15l6-6 6 6"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>{{ expanded ? "收起" : "显示二维码" }}</span>
+      </button>
+    </header>
 
+    <div v-if="expanded" id="profile-share-content" class="share-panel-content">
+      <div class="share-divider"></div>
       <div class="share-card">
         <div class="share-qr">
           <img src="/app-share-qr.png" alt="无线麦 SayAll 官网二维码" />
@@ -113,39 +101,26 @@ onUnmounted(() => {
           </p>
         </div>
       </div>
-    </section>
-  </div>
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.share-overlay {
-  position: fixed;
-  z-index: 1000;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(16, 19, 28, 0.34);
-  backdrop-filter: blur(5px);
-}
-
-.share-dialog {
-  width: min(560px, calc(100vw - 48px));
-  padding: 20px;
+.share-panel {
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: 20px;
   background: var(--card);
-  box-shadow: 0 24px 80px rgba(17, 20, 32, 0.28);
+  box-shadow: 0 8px 30px var(--shadow-card);
 }
 
-.share-header {
+.share-panel-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 14px;
 }
 
-.share-header-icon {
+.share-panel-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -155,62 +130,70 @@ onUnmounted(() => {
   color: var(--accent);
 }
 
-.share-header-icon svg {
+.share-panel-icon svg {
   width: 24px;
   height: 24px;
 }
 
-.share-heading {
+.share-panel-heading {
   min-width: 0;
   flex: 1 1 auto;
 }
 
-.share-heading h2 {
+.share-panel-heading h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.3;
 }
 
-.share-heading p {
+.share-panel-heading p {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
-.share-close {
+.share-toggle {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
+  gap: 5px;
+  min-height: 30px;
   flex: 0 0 auto;
-  padding: 0;
-  border: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: var(--muted);
-  background: transparent;
+  color: var(--text-control);
+  background: var(--surface-control);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
 }
 
-.share-close:hover {
-  color: var(--text-primary);
+.share-toggle:hover {
+  border-color: var(--accent-border);
   background: var(--surface-hover);
 }
 
-.share-close svg {
-  width: 16px;
-  height: 16px;
+.share-toggle svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.share-panel-content {
+  margin-top: 14px;
+}
+
+.share-divider {
+  margin-bottom: 14px;
+  border-top: 1px solid var(--border);
 }
 
 .share-card {
   display: flex;
   align-items: center;
   gap: 20px;
-  margin-top: 18px;
-  padding-top: 18px;
-  border-top: 1px solid var(--border);
 }
 
 .share-qr {
@@ -287,6 +270,15 @@ onUnmounted(() => {
 }
 
 @media (max-width: 620px) {
+  .share-panel-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .share-toggle {
+    margin-left: 48px;
+  }
+
   .share-card {
     align-items: flex-start;
     flex-direction: column;

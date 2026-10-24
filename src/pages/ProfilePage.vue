@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { CSSProperties } from "vue";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import SharePanel from "../components/SharePanel.vue";
 import type { ButtonMappings, RuntimeSnapshot, UsageProfile } from "../lib/bridge";
 import {
   getButtonMappings,
@@ -263,6 +264,8 @@ onUnmounted(() => {
       <span>{{ error }}</span>
       <button type="button" class="secondary-button" @click="retry">重试</button>
     </div>
+
+    <SharePanel />
 
     <div class="profile-kpis">
       <article v-for="metric in metrics" :key="metric.id" class="profile-kpi">

@@ -15,7 +15,7 @@ const props = withDefaults(
   }>(),
   { profileLabel: "个人中心", appIcon: "faceted-duck" },
 );
-const emit = defineEmits<{ select: [page: string]; share: [] }>();
+const emit = defineEmits<{ select: [page: string] }>();
 
 const topNavigationItems = computed(() => navigationItems.filter((item) => item.id !== "profile"));
 const profileItem = computed(() => navigationItems.find((item) => item.id === "profile"));
@@ -122,25 +122,8 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         <span>{{ item.label }}</span>
       </button>
 
-      <!-- 底部区域对齐 Mac：分享入口在个人中心上方；个人中心固定在最底部。 -->
+      <!-- 个人中心固定在最底部（对齐 Mac statistics）。 -->
       <div class="sidebar-spacer"></div>
-      <button
-        class="nav-item share-nav-item"
-        type="button"
-        aria-label="分享无线麦 SayAll"
-        @click="emit('share')"
-      >
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path
-            d="M12 15V3M8 7l4-4 4 4M5 11v7.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V11"
-            stroke="currentColor"
-            stroke-width="1.9"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-        <span>分享</span>
-      </button>
       <button
         v-if="profileItem"
         class="nav-item profile-nav-item"
@@ -168,10 +151,6 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 .sidebar-spacer {
   flex: 1 1 auto;
   min-height: 12px;
-}
-
-.share-nav-item {
-  color: var(--muted);
 }
 
 .profile-nav-item {

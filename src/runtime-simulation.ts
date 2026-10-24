@@ -508,6 +508,10 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   await openPage("个人中心");
   mark("profile_page");
   assert(document.querySelector(".sidebar-footer") === null, "侧栏不应再显示版本号");
+  assert(
+    document.querySelector(".share-nav-item") === null,
+    "分享入口应在个人中心页内，不应出现在侧栏",
+  );
   assert(document.querySelector(".profile-page") !== null, "个人中心页没有渲染");
   assert(
     document.querySelector(".profile-header h1")?.textContent?.trim() === "个人中心",
@@ -532,6 +536,22 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "个人中心侧栏入口使用当前应用 logo",
   );
   assert(document.querySelectorAll(".profile-kpi").length === 4, "个人中心 KPI 不是 4 项");
+  const sharePanel = document.querySelector(".share-panel");
+  assert(sharePanel !== null, "个人中心缺少分享无线麦面板");
+  assert(
+    sharePanel.compareDocumentPosition(document.querySelector(".profile-kpis")!) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    "分享无线麦面板必须在累计按键上方",
+  );
+  assert(
+    document.querySelector(".share-panel-content") === null,
+    "分享二维码应默认收起",
+  );
+  assert(
+    document.querySelector("#profile-share-title")?.textContent?.trim() ===
+      "分享无线麦 SayAll",
+    "分享面板标题异常",
+  );
   assert(
     document.querySelectorAll(".calendar-grid .calendar-day").length >= 7,
     "个人中心日历没有渲染完整星期行",
@@ -542,15 +562,11 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("个人中心经真实 IPC 渲染 4 项 KPI、排行榜与 26 周日历，未出现回眸入口");
 
-  mark("share_dialog");
-  await clickButton("分享");
+  mark("share_panel");
+  await clickButton("显示二维码");
   await waitFor(
-    () => (document.querySelector(".share-dialog") ? true : null),
-    "分享无线麦面板",
-  );
-  assert(
-    document.querySelector("#share-dialog-title")?.textContent?.trim() === "分享无线麦 SayAll",
-    "分享面板标题异常",
+    () => (document.querySelector(".share-panel-content") ? true : null),
+    "分享二维码展开",
   );
   const shareQr = await waitFor(() => {
     const image = document.querySelector<HTMLImageElement>(".share-qr img");
@@ -569,12 +585,12 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     document.querySelector(".share-copy-button")?.textContent?.includes("复制链接") === true,
     "分享面板缺少复制链接按钮",
   );
-  document.querySelector<HTMLButtonElement>(".share-close")?.click();
+  await clickButton("收起");
   await waitFor(
-    () => (document.querySelector(".share-dialog") ? null : true),
-    "分享面板关闭",
+    () => (document.querySelector(".share-panel-content") ? null : true),
+    "分享二维码收起",
   );
-  steps.push("分享面板经真实 WebView 渲染本机二维码、固定链接与复制入口，并可关闭");
+  steps.push("个人中心在累计按键上方内联展开/收起本机二维码、固定链接与复制入口");
 
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，

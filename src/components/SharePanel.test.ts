@@ -3,7 +3,7 @@
 import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SHARE_WEBSITE_URL } from "../lib/bridge";
-import ShareDialog from "./ShareDialog.vue";
+import SharePanel from "./SharePanel.vue";
 
 function stubClipboard(): ReturnType<typeof vi.fn> {
   const writeText = vi.fn<(text: string) => Promise<void>>();
@@ -21,20 +21,27 @@ afterEach(() => {
 });
 
 describe("分享无线麦面板", () => {
-  it("显示本机二维码、固定官网链接和复制入口", () => {
+  it("默认收起，点击后才在原页面展开二维码", async () => {
     stubClipboard();
-    const wrapper = mount(ShareDialog);
+    const wrapper = mount(SharePanel);
 
-    expect(wrapper.get("#share-dialog-title").text()).toBe("分享无线麦 SayAll");
+    expect(wrapper.get("#profile-share-title").text()).toBe("分享无线麦 SayAll");
+    expect(wrapper.get(".share-toggle").text()).toContain("显示二维码");
+    expect(wrapper.find(".share-qr").exists()).toBe(false);
+
+    await wrapper.get(".share-toggle").trigger("click");
+
+    expect(wrapper.get(".share-toggle").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.get(".share-toggle").text()).toContain("收起");
     expect(wrapper.get(".share-qr img").attributes("src")).toBe("/app-share-qr.png");
     expect(wrapper.get(".share-copy code").text()).toBe(SHARE_WEBSITE_URL);
-    expect(wrapper.get(".share-copy-button").text()).toContain("复制链接");
     wrapper.unmount();
   });
 
   it("复制链接使用二维码中的同一个地址并显示成功", async () => {
     const writeText = stubClipboard();
-    const wrapper = mount(ShareDialog);
+    const wrapper = mount(SharePanel);
+    await wrapper.get(".share-toggle").trigger("click");
 
     await wrapper.get(".share-copy-button").trigger("click");
     await wrapper.vm.$nextTick();
@@ -48,7 +55,8 @@ describe("分享无线麦面板", () => {
   it("剪贴板失败时显示明确失败，不假装复制成功", async () => {
     const writeText = stubClipboard();
     writeText.mockRejectedValueOnce(new Error("denied"));
-    const wrapper = mount(ShareDialog);
+    const wrapper = mount(SharePanel);
+    await wrapper.get(".share-toggle").trigger("click");
 
     await wrapper.get(".share-copy-button").trigger("click");
     await wrapper.vm.$nextTick();
@@ -58,15 +66,16 @@ describe("分享无线麦面板", () => {
     wrapper.unmount();
   });
 
-  it("支持 Esc 和关闭按钮退出", async () => {
+  it("再次点击收起后二维码从原页面移除", async () => {
     stubClipboard();
-    const wrapper = mount(ShareDialog);
+    const wrapper = mount(SharePanel);
 
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    expect(wrapper.emitted("close")).toHaveLength(1);
+    await wrapper.get(".share-toggle").trigger("click");
+    expect(wrapper.find(".share-panel-content").exists()).toBe(true);
+    await wrapper.get(".share-toggle").trigger("click");
 
-    await wrapper.get(".share-close").trigger("click");
-    expect(wrapper.emitted("close")).toHaveLength(2);
+    expect(wrapper.get(".share-toggle").attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find(".share-panel-content").exists()).toBe(false);
     wrapper.unmount();
   });
 });

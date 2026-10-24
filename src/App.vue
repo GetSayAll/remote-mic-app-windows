@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { Component } from "vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import ShareDialog from "./components/ShareDialog.vue";
 import Sidebar from "./components/Sidebar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
 import {
@@ -53,9 +52,8 @@ let initialRuntimeReported = false;
 
 /** 侧栏个人入口：未登录「个人中心」，已登录只显示邮箱 @ 前最多 10 个字符。 */
 const profileLabel = ref("个人中心");
-/** 与托盘图标同源；设置页切换后由 5 秒轮询同步到侧栏。 */
+/** 与托盘图标同源；设置页切换后由事件和 5 秒轮询同步到侧栏。 */
 const appIcon = ref<AppIconIdentifier>("faceted-duck");
-const showShareDialog = ref(false);
 
 async function refreshProfileLabel(): Promise<void> {
   try {
@@ -266,7 +264,6 @@ onUnmounted(() => {
       :profile-label="profileLabel"
       :app-icon="appIcon"
       @select="activePage = $event"
-      @share="showShareDialog = true"
     />
     <main class="content">
       <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>
@@ -290,5 +287,4 @@ onUnmounted(() => {
     :version="updateCompletedVersion"
     @close="updateCompletedVersion = null"
   />
-  <ShareDialog v-if="showShareDialog" @close="showShareDialog = false" />
 </template>
