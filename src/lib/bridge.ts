@@ -461,11 +461,24 @@ export interface ConnectionSnapshot {
   capabilities: AtvvCapabilities | null;
   voiceState: VoiceSessionState;
   decodedSamples: number;
+  /**
+   * 最近一次足够长的语音会话的音频完整度（2026-10-24 现场）。
+   *
+   * `degraded` = 遥控器音频只到了满速的约 1/3（常见于蓝牙适配器同时连接了
+   * 另一支 BLE 键盘/鼠标/耳机），输入法可能转写不出文字。老快照没有此字段，
+   * 一律按 `unknown` 处理（不提示）。
+   */
+  voiceAudioHealth?: VoiceAudioHealth;
+  /** 最近一次判定的实际样本率（Hz）；`null`/缺失 = 尚未判定。 */
+  voiceAudioRateHz?: number | null;
   generation: number;
   reconnectAttempt: number;
   powerNotificationsAvailable: boolean;
   lastError: string | null;
 }
+
+/** 与 Rust `VoiceAudioHealth` 逐字对应。 */
+export type VoiceAudioHealth = "unknown" | "full" | "degraded";
 
 export interface PlatformSnapshot {
   platform: string;
