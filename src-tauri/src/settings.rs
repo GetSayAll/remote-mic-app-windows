@@ -1,7 +1,8 @@
 use sayall_core::{
     export_portable_library, import_portable_library, merge_library, normalize_gain_db,
-    validate_library, AppIconIdentifier, AppSettings, MacroLibraryDocument, ThemePreference,
-    UsageStatistics, VoiceInputTool, MACRO_LIBRARY_FORMAT_VERSION, PORTABLE_MAX_BYTES,
+    validate_library, AppIconIdentifier, AppLanguage, AppSettings, MacroLibraryDocument,
+    ThemePreference, UsageStatistics, VoiceInputTool, MACRO_LIBRARY_FORMAT_VERSION,
+    PORTABLE_MAX_BYTES,
 };
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
@@ -115,6 +116,13 @@ impl SettingsStore {
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
+        })
+    }
+
+    /// 应用语言（设置页「通用 > 应用语言」）。与 Mac `ApplicationLanguage` 同值域。
+    pub fn save_application_language(&self, language: AppLanguage) -> Result<(), String> {
+        self.update("保存应用语言设置", move |settings| {
+            settings.application_language = language;
         })
     }
 
@@ -1257,6 +1265,30 @@ mod tests {
         assert_eq!(
             store.load().unwrap().theme_preference,
             ThemePreference::Dark
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn application_language_defaults_to_system_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-language-preference-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert_eq!(
+            store.load().unwrap().application_language,
+            AppLanguage::System
+        );
+        store
+            .save_application_language(AppLanguage::English)
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().application_language,
+            AppLanguage::English
         );
 
         let _ = std::fs::remove_file(path);

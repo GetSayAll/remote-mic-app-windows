@@ -37,6 +37,8 @@ export interface RecommendationsPageEvent {
   generation: number;
   status: "ready" | "failed";
   reason?: string | null;
+  /** 仅 ready 事件携带：当前网页能否后退（决定顶部返回条）。 */
+  canGoBack?: boolean | null;
 }
 
 export type ConnectionPhase =
@@ -598,6 +600,11 @@ export interface AppUpdatePreferences {
 
 export type ThemePreference = "system" | "light" | "dark";
 
+/** 应用语言偏好；与 Rust `AppLanguage` / Mac `AppLanguage` 的持久化值一致。 */
+export type AppLanguagePreference = "system" | "zh-Hans" | "en";
+/** 推荐页实际使用的语言；`system` 已在语言模块里解析成这两个之一。 */
+export type EffectiveLanguage = "zh-Hans" | "en";
+
 /** Windows 系统强调色（设置 > 个性化 > 颜色），Rust accent 命令契约。 */
 export interface AccentRgb {
   r: number;
@@ -988,26 +995,53 @@ export async function openVokieHomepage(): Promise<void> {
  */
 export async function showRecommendationsPage(
   theme: "light" | "dark",
+  language: EffectiveLanguage = "zh-Hans",
 ): Promise<number> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法在应用内打开推荐页面");
   }
-  return invoke<number>("show_recommendations", { theme });
+  return invoke<number>("show_recommendations", { theme, language });
 }
 
-/** 离开推荐页时隐藏子 WebView；页面本身保留，返回时可快速重载。 */
+/** 离开推荐页时隐藏子 WebView；已就绪文档保留，返回时直接显示（与 Mac 一致）。 */
 export async function hideRecommendationsPage(): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("hide_recommendations");
 }
 
 /**
+ * 失败后重试：重新加载**当前**推荐页（保留 `?item=` 详情参数），
+ * 而不是回到列表；generation 语义与 `showRecommendationsPage` 相同。
+ */
+export async function retryRecommendationsPage(
+  theme: "light" | "dark",
+  language: EffectiveLanguage = "zh-Hans",
+): Promise<number> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法在应用内打开推荐页面");
+  }
+  return invoke<number>("retry_recommendations", { theme, language });
+}
+
+/** 网页内后退（顶部「返回上一页」）；仅 ready 且 canGoBack 时可用。 */
+export async function goBackRecommendationsPage(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("go_back_recommendations");
+}
+
+/**
  * 加载失败时的「打开官网」：Rust 侧保留当前详情参数并去掉 `embed/theme`
  * 等 App 专用参数，再交给系统浏览器。浏览器预览直接打开列表页。
  */
-export async function openRecommendationsWebsite(): Promise<void> {
+export async function openRecommendationsWebsite(
+  language: EffectiveLanguage = "zh-Hans",
+): Promise<void> {
   if (!isTauriRuntime()) {
-    window.open(RECOMMENDATIONS_URL, "_blank", "noopener,noreferrer");
+    const url =
+      language === "en"
+        ? "https://sayall.app/en/recommendations/"
+        : RECOMMENDATIONS_URL;
+    window.open(url, "_blank", "noopener,noreferrer");
     return;
   }
   await invoke("open_recommendations_website");
@@ -1630,6 +1664,28 @@ export async function saveThemePreference(
     return preference;
   }
   return invoke<ThemePreference>("set_theme_preference", { preference, operationId });
+}
+
+export async function getApplicationLanguage(
+  operationId: string,
+): Promise<AppLanguagePreference> {
+  if (!isTauriRuntime()) {
+    return "system";
+  }
+  return invoke<AppLanguagePreference>("get_application_language", { operationId });
+}
+
+export async function saveApplicationLanguage(
+  language: AppLanguagePreference,
+  operationId: string,
+): Promise<AppLanguagePreference> {
+  if (!isTauriRuntime()) {
+    return language;
+  }
+  return invoke<AppLanguagePreference>("set_application_language", {
+    language,
+    operationId,
+  });
 }
 
 export interface ThemeResultReport {

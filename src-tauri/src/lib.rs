@@ -38,8 +38,11 @@ use membership::{
     MembershipRuntime, MembershipSnapshot,
 };
 use platform::PlatformRuntime;
-use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
-use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
+use recommendations::{
+    go_back_recommendations, hide_recommendations, open_recommendations_website,
+    retry_recommendations, show_recommendations,
+};
+use sayall_core::{AppIconIdentifier, AppLanguage, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
@@ -3840,6 +3843,78 @@ async fn set_theme_preference(
 }
 
 #[tauri::command]
+async fn get_application_language(
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppLanguage, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "application_language operation_id={operation_id} action=load phase=requested"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings
+            .load()
+            .map(|settings| settings.application_language)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取应用语言设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(language) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=load phase=persisted result=passed preference={} elapsed_ms={}",
+            app_language_name(*language),
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=load phase=persisted result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
+async fn set_application_language(
+    language: AppLanguage,
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppLanguage, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "application_language operation_id={operation_id} action=save phase=requested preference={}",
+        app_language_name(language)
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_application_language(language)?;
+        Ok(language)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存应用语言设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(saved) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=save phase=persisted result=passed preference={} elapsed_ms={}",
+            app_language_name(*saved),
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=save phase=persisted result=failed preference={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            app_language_name(language),
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
 async fn get_open_window_at_launch(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let settings = state.settings.clone();
     let started = std::time::Instant::now();
@@ -4078,6 +4153,14 @@ fn theme_preference_name(preference: ThemePreference) -> &'static str {
         ThemePreference::System => "system",
         ThemePreference::Light => "light",
         ThemePreference::Dark => "dark",
+    }
+}
+
+fn app_language_name(language: AppLanguage) -> &'static str {
+    match language {
+        AppLanguage::System => "system",
+        AppLanguage::SimplifiedChinese => "zh-Hans",
+        AppLanguage::English => "en",
     }
 }
 
@@ -5097,8 +5180,10 @@ pub fn run() {
         open_windows_settings,
         hide_main_window,
         show_recommendations,
+        retry_recommendations,
         hide_recommendations,
         open_recommendations_website,
+        go_back_recommendations,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -5169,6 +5254,8 @@ pub fn run() {
         stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
+        get_application_language,
+        set_application_language,
         get_launch_at_login,
         set_launch_at_login,
         get_open_window_at_launch,
@@ -5215,8 +5302,10 @@ pub fn run() {
         open_windows_settings,
         hide_main_window,
         show_recommendations,
+        retry_recommendations,
         hide_recommendations,
         open_recommendations_website,
+        go_back_recommendations,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -5287,6 +5376,8 @@ pub fn run() {
         stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
+        get_application_language,
+        set_application_language,
         get_launch_at_login,
         set_launch_at_login,
         get_open_window_at_launch,

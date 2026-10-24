@@ -16,7 +16,7 @@ const busy = ref(false);
 const errorMessage = ref("");
 
 let systemTheme: EffectiveTheme = "light";
-let initialized = false;
+let initialization: Promise<void> | null = null;
 let mediaQuery: MediaQueryList | null = null;
 let removeMediaListener: (() => void) | null = null;
 let removeTauriListener: (() => void) | null = null;
@@ -130,11 +130,16 @@ async function subscribeToSystemTheme(): Promise<void> {
   }
 }
 
-export async function initializeTheme(): Promise<void> {
-  if (initialized) return;
+export function initializeTheme(): Promise<void> {
+  if (!initialization) {
+    initialization = initializeThemeOnce().catch(() => undefined);
+  }
+  return initialization;
+}
+
+async function initializeThemeOnce(): Promise<void> {
   const operationId = nextOperationId();
   const startedAt = performance.now();
-  initialized = true;
   busy.value = true;
   systemTheme = mediaTheme();
   preference.value = cachedPreference() ?? "system";
@@ -249,5 +254,5 @@ export function disposeTheme(): void {
   removeMediaListener = null;
   removeTauriListener = null;
   mediaQuery = null;
-  initialized = false;
+  initialization = null;
 }
