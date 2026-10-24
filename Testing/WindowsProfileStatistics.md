@@ -68,8 +68,8 @@
 - 累计语音时长增加；最长单次语音按需更新。
 - 语音排行出现一条：时长、应用名、结束时间；时长与应用名之间是灰色「·」，不是绿色竖条（旧的 `.voice-dot` 与连接页状态点撞名，已改 `.voice-separator`）。
 - 排行标题与序号为 Mac 系统橙（浅色 `#ff9500` / 深色 `#ff9f0a`），时长为加粗等宽数字。
-- 微信应显示「微信」，不显示 `WeChat` / `Weixin`；其他预设使用产品名；未知程序显示去掉 `.exe` 的文件名，拿不到应用名时显示「未知应用」；前台就是 SayAll 自己时同样显示「未知应用」（Mac 也排除自身），诊断日志会给出 `usage_stats action=application_name ... reason=self_foreground|no_foreground_window|...`。
-- 语音键本身计入累计按键次数，但不出现在「实体按键排行」。
+- 微信应显示「微信」，不显示 `WeChat` / `Weixin`；其他预设使用产品名；未知程序显示去掉 `.exe` 的文件名，拿不到应用名时显示「未知应用」；前台就是 SayAll 自己时显示「SayAll」（其余取不到名字的原因见诊断日志 `usage_stats action=application_name ... reason=no_foreground_window|open_process_failed|query_image_name_failed|empty_executable_name|unmapped_executable`）。
+- 语音键本身计入「累计按键次数」和「本周按键」（与 Mac 一致：语音开始时按一次 `.voice` 按键计数），但不出现在「实体按键排行」。
 - 排行最多 10 条；超出后只保留时长最长的 10 条。
 
 ## 用例五：重启与升级兼容
