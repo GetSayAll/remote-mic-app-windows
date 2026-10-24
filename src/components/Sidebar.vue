@@ -30,6 +30,10 @@ const emit = defineEmits<{ select: [page: string] }>();
 
 const topNavigationItems = computed(() => navigationItems.filter((item) => item.id !== "profile"));
 const profileItem = computed(() => navigationItems.find((item) => item.id === "profile"));
+/** 未登录时 App 传「个人中心」；英文模式换成 Profile，登录后的邮箱前缀原样显示。 */
+const profileLabelText = computed(() =>
+  props.profileLabel === "个人中心" ? tNav("个人中心") : props.profileLabel,
+);
 const appIconPreview = computed(() =>
   props.appIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png",
 );
@@ -144,7 +148,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         @click="emit('select', profileItem.id)"
       >
         <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
-        <span>{{ props.profileLabel || tNav("个人中心") }}</span>
+        <span>{{ profileLabelText }}</span>
       </button>
     </nav>
   </aside>

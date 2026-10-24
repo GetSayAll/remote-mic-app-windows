@@ -4244,12 +4244,14 @@ fn webview_unavailable_title(app: &tauri::AppHandle) -> &'static str {
 #[cfg(windows)]
 fn apply_native_language(app: &tauri::AppHandle, preference: AppLanguage) {
     let language = effective_app_language(preference);
-    let (show_label, quit_label, tooltip, title) = match language {
-        AppLanguage::SimplifiedChinese => ("显示主界面", "退出", "无线麦 SayAll", "无线麦 SayAll"),
-        _ => ("Show Main Window", "Quit", "SayAll", "SayAll"),
+    // 窗口标题统一为「SayAll 版本号」：去掉「无线麦」前缀，版本号紧随其后（2026-10-24 用户要求）。
+    let title = format!("SayAll {}", app.package_info().version);
+    let (show_label, quit_label, tooltip) = match language {
+        AppLanguage::SimplifiedChinese => ("显示主界面", "退出", "无线麦 SayAll"),
+        _ => ("Show Main Window", "Quit", "SayAll"),
     };
     let title_result = match main_window(app) {
-        Some(window) => window.set_title(title).is_ok(),
+        Some(window) => window.set_title(&title).is_ok(),
         None => false,
     };
     let mut tray_applied = false;

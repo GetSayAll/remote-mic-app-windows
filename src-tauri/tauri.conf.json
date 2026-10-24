@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "无线麦 SayAll",
+        "title": "SayAll 1.0.0",
         "width": 1066.67,
         "height": 800,
         "minWidth": 1066.67,

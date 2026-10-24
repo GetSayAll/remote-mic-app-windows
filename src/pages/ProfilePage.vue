@@ -781,7 +781,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--pressed-text);
+  color: var(--ranking-accent);
   font-size: 15px;
   font-weight: 600;
   line-height: 1.25;
@@ -812,13 +812,14 @@ onUnmounted(() => {
 }
 
 .voice-rank {
-  color: var(--pressed-text);
+  color: var(--ranking-accent);
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .voice-duration {
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
