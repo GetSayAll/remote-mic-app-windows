@@ -1,5 +1,6 @@
 import common from "./en/common";
 import nav from "./en/nav";
+import page from "./en/page";
 import settings from "./en/settings";
 import buttons from "./en/buttons";
 import macros from "./en/macros";
@@ -15,6 +16,7 @@ import lib from "./en/lib";
 export const en: Record<string, string> = {
   ...common,
   ...nav,
+  ...page,
   ...settings,
   ...buttons,
   ...macros,

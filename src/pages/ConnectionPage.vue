@@ -4,7 +4,7 @@ import BatteryIndicator from "../components/BatteryIndicator.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import { reasonToken, reportFrontendEvent } from "../lib/frontend-diagnostics";
-import { t, tNav } from "../lib/i18n";
+import { t, tPage } from "../lib/i18n";
 import {
   captureFailureText,
   captureInactiveText,
@@ -1189,7 +1189,7 @@ onUnmounted(() => {
   <section>
     <header class="page-header">
       <div>
-        <h1>{{ tNav("连接") }}</h1>
+        <h1>{{ tPage("连接") }}</h1>
       </div>
       <span class="badge" :class="phaseTone">{{ connectionPhaseLabel(connection.phase) }}</span>
     </header>

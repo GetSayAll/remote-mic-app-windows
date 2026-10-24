@@ -69,7 +69,7 @@ export default {
   // 问题反馈
   "问题反馈": "Feedback",
   "反馈无线麦 SayAll 的问题，或提出改进建议。":
-    "Report a problem with SayAll or suggest an improvement.",
+    "Report a problem or suggest an improvement for SayAll.",
   "官网": "Website",
 
   // 设置保存失败（IPC 原始错误只进日志）
@@ -97,5 +97,5 @@ export default {
   "应用语言保存失败，请稍后重试。": "Couldn't save the app language setting. Please try again later.",
 
   // 会员入口按钮默认文案
-  "点击开通会员功能": "Subscribe to Membership",
+  "点击开通会员功能": "Unlock membership feature",
 } as Record<string, string>;

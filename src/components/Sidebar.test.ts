@@ -70,7 +70,7 @@ describe("sidebar", () => {
       "Buttons",
       "Routines",
       "Connection",
-      "Recommendations",
+      "Picks",
       "Permissions",
       "Settings",
     ]);
