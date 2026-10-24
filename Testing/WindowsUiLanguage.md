@@ -36,7 +36,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1
 | --- | --- | --- |
 | 1 | 中文模式启动 | 侧栏、六个页面、设置页、向导、弹窗、错误提示全中文；「通用」各行**没有副标题** |
 | 2 | 设置 → 应用语言 → English | 立即切英文，不重挂载：当前页/滚动位置/编辑状态保留；窗口标题变 `SayAll`；托盘 tooltip 变 `SayAll`；托盘菜单为 `Show Main Window` / `Quit` |
-| 3 | 英文模式逐页检查 按键 / 组合动作 / 连接 / 推荐 / 权限 / 设置 | 页面文本、按钮、tooltip、aria-label、错误文案无中文残留；`简体中文` 语言选项除外；推荐页加载 `/en/recommendations/` |
+| 3 | 英文模式逐页检查 按键 / 组合动作 / 连接 / 推荐 / 权限 / 设置 | 侧栏为 Buttons / Routines / Connection / Picks / Permissions / Settings；页面标题为 Button Mapping / Routines / Connection & Voice / Picks / Permissions & Privacy / Settings；页面文本、按钮、tooltip、aria-label、错误文案无中文残留；`简体中文` 语言选项除外；推荐页加载 `/en/recommendations/` |
 | 4 | 英文模式检查按键页全按键支持确认弹窗、连接页输入工具、权限页诊断、设置页会员/更新/问题反馈 | 弹窗与固定文案全英文；用户数据/外部错误原文不算残留 |
 | 5 | 英文模式向导 ①–⑦（重新运行向导） | 阶段条 Prepare › Set Up › Try It；步骤标题、检查卡、门禁提示、失败文案全英文；切回中文立即恢复 |
 | 6 | 中文 ↔ English 连续切换 10 次 | 无异常、无重复/叠加托盘菜单项；每次菜单仍只有两项；切回中文后标题/托盘/页面全部恢复 |
@@ -47,16 +47,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1
 
 ## 结果记录
 
-- 自动化：`corepack pnpm test` — 31 files / 505 passed, 10 skipped（2026-10-24）；
+- 自动化：`corepack pnpm test` — 31 files / 506 passed, 10 skipped（2026-10-24）；
   `vue-tsc --noEmit`、`vite build`、`cargo fmt --check`、语言映射单测通过。
 - `ci-preflight`：7/7 通过（含 `cargo test --workspace`、`cargo check --workspace`、
   `cargo check -p sayall-windows-app --features runtime-simulation`）。
 - 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.0.0_x64-setup.exe`，
-  13,051,463 字节，SHA-256 `5DDC84CDB2D5EF7C6805C9B216AA2243366CF5F4849FC6F6A2FE52AA496DE982`
-  （构建于合并 `origin/main` 的提交 `353043b`，安装版日志读回同一源修订号）。
+  13,049,280 字节，SHA-256 `9A67503E42CEA8E7EFEE07415AC61958FA3993D15F92381A3536316A1F89B6CC`
+  （构建于 Mac 英文词条对齐提交 `d199a61`，安装版日志读回同一源修订号）。
 - 前端英文渲染：浏览器预览逐页扫描 按键 / 组合动作 / 连接 / 推荐 / 权限 / 设置 的
   可见文本与 `title` / `aria-label` / `placeholder` / `alt`，除「简体中文」选项与
   用户数据（演示组合动作名「打开记事本并聚焦」、应用名「记事本」）外无汉字残留。
+- 英文词条按 Mac 最新代码再校对（2026-10-24）：侧栏 Picks；页面标题 Connection & Voice / Permissions & Privacy；公共词条统一 Voice Button、Voice Typing Check、Single Press / Double Press、Choose、Not Set、Back / Continue、Restore Defaults、Voice devices；组合动作仍按组合动作包用 Routines。
 - 安装包真机（Windows，系统显示语言中文）：
   - 中文启动：窗口标题「无线麦 SayAll」；日志
     `native_language ... language=zh-Hans title=passed tray_menu=passed`；托盘菜单

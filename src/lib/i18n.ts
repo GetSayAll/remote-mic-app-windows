@@ -49,4 +49,10 @@ export function tNav(source: string): string {
   return t(`nav.${source}`);
 }
 
+/** 页面标题按 Mac page.title 的语境取词（可与侧栏短标签不同）。 */
+export function tPage(source: string): string {
+  if (effectiveLanguage.value === "zh-Hans") return source;
+  return t(`page.${source}`);
+}
+
 export { en as ENGLISH_TRANSLATIONS };

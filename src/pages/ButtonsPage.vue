@@ -6,7 +6,7 @@ import BatteryIndicator from "../components/BatteryIndicator.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
-import { t } from "../lib/i18n";
+import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
 import {
@@ -2285,7 +2285,7 @@ onUnmounted(() => {
     <header class="page-header mapping-header">
       <div>
         <div class="mapping-title-row">
-          <h1>{{ t("按键映射") }}</h1>
+          <h1>{{ tPage("按键映射") }}</h1>
           <label class="toggle-row" :title="t('开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。')">
             <span>{{ t("启用自定义按键功能") }}</span>
             <input v-if="mappingsLoaded" v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />

@@ -9,7 +9,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
-import { t, tNav } from "../lib/i18n";
+import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
 import {
@@ -1483,7 +1483,7 @@ watch(
 <template>
   <div class="macros-page">
     <div class="page-header">
-      <h1>{{ tNav("组合动作") }}</h1>
+      <h1>{{ tPage("组合动作") }}</h1>
       <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>
 

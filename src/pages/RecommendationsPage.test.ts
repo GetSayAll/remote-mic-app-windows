@@ -265,7 +265,7 @@ describe("推荐页状态壳", () => {
 
     expect(bridge.showRecommendationsPage).toHaveBeenCalledWith("light", "en");
     expect(wrapper.get(".recommendations-page").attributes("aria-label")).toBe(
-      "Recommendations",
+      "Picks",
     );
     expect(wrapper.text()).toContain("Loading page…");
 

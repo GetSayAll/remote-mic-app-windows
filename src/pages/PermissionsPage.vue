@@ -6,7 +6,7 @@ import {
   getDiagnosticReport,
   openLogDirectory,
 } from "../lib/bridge";
-import { t, tNav } from "../lib/i18n";
+import { t, tPage } from "../lib/i18n";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
 
@@ -102,7 +102,7 @@ async function onOpenLogDirectory(): Promise<void> {
   <section>
     <header class="page-header">
       <div>
-        <h1>{{ tNav("权限") }}</h1>
+        <h1>{{ tPage("权限") }}</h1>
       </div>
     </header>
 

@@ -300,7 +300,7 @@ deferred：跨屏 DPI（本机只有一块 3840×2160 / 150% 显示器，`ScaleF
 
 - 推荐页按有效语言选择 `/recommendations/` 或 `/en/recommendations/`；首次加载
   等待主题与语言初始化完成，避免先中文后英文双载。
-- 英文固定文案对齐 Mac `RecommendationsView`：Recommendations / Loading page… /
+- 英文固定文案对齐 Mac：Picks / Loading page… /
   This page is temporarily unavailable. Open the website or try again later. /
   Open website / Retry / Back。
 - 主题/语言切换对已就绪文档用 `location.replace` 保留当前详情（`?item=`）且

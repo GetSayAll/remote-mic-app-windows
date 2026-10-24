@@ -26,7 +26,7 @@
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
 | 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
-| 推荐页（侧栏，2026-10-18） | 侧栏与页面标题统一为「推荐」；页面正文、筛选项、商品名与详情全部来自官网 `https://sayall.app/recommendations/`，不在本地维护推荐文案。英文设置下使用 `/en/recommendations/` 与 Mac 同款英文固定文案（Recommendations / Loading page… / This page is temporarily unavailable. Open the website or try again later. / Open website / Retry / Back） | `src/navigation.ts`、`RecommendationsPage.vue`、`RECOMMENDATIONS_URL` |
+| 推荐页（侧栏，2026-10-18） | 侧栏与页面标题统一为「推荐」；英文为 Picks（对齐 Mac 补充页标题）。页面正文、筛选项、商品名与详情全部来自官网 `https://sayall.app/recommendations/`，不在本地维护推荐文案。英文设置下使用 `/en/recommendations/` 与 Mac 同款英文固定文案（Picks / Loading page… / This page is temporarily unavailable. Open the website or try again later. / Open website / Retry / Back） | `src/navigation.ts`、`RecommendationsPage.vue`、`RECOMMENDATIONS_URL` |
 | 侧栏末位页（原「关于」） | 设置 | `src/navigation.ts`、`SettingsPage.vue` |
 | 应用图标（设置页可切换） | 应用图标；两个选项写“默认”“几何鸭”（对齐 Mac `about.preferences.app_icon*`）；新装默认选中「几何鸭」（2026-10-04 用户定稿） | `SettingsPage.vue`、`AppSettings.app_icon` |
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
@@ -50,11 +50,16 @@
 | 无线麦 SayAll / 无线麦 | SayAll | 不使用 Wireless Mic |
 | 按键 | Buttons | 页面与侧栏 |
 | 组合动作 | Routine / Routines | 内容与动作单数；侧栏、页面标题、库标题用 Routines |
-| 连接 | Connection / Connect | 页面标题用 Connection；按钮动作「连接」用 Connect |
-| 推荐 | Recommendations / Recommended | 页面/侧栏用 Recommendations；设备徽标用 Recommended |
-| 权限 | Permissions | 页面与侧栏 |
+| 连接 | Connection / Connect | 侧栏用 Connection；页面标题按 Mac `connection.page.title` 用 Connection & Voice；按钮动作「连接」用 Connect |
+| 推荐 | Picks / Recommended | 页面/侧栏用 Picks；设备徽标用 Recommended |
+| 权限 | Permissions | 侧栏用 Permissions；页面标题按 Mac `permissions.page.title` 用 Permissions & Privacy |
+| 按键映射页标题 | Button Mapping | 对齐 Mac `button_mapping.page.title` |
 | 设置 | Settings / Set Up | 页面/侧栏用 Settings；向导阶段用 Set Up |
 | 全按键支持 | Full-key support | 句首大写，其余小写 |
+| 遥控器语音键 | Voice Button | 遥控器上的语音键；相关句子用 voice button |
+| 按住说话快捷键（输入工具触发键） | Voice Trigger Key / voice shortcut | 对齐 Mac `connection.voice_key_mode.title` / `onboarding.voice_tool.*` |
+| 单击 / 双击 | Single Press / Double Press | 遥控器按键触发方式；鼠标单击仍用 click |
+| 上一曲 / 下一曲 | Previous track / Next track | 对齐 Mac |
 | 小米蓝牙语音遥控器 2 / 2 Pro | Xiaomi Bluetooth Voice Remote 2 / 2 Pro | 包含「语音」与版本后缀 |
 | 豆包输入法 / 微信输入法 | Doubao / WeType | 对齐 Mac |
 | 应用语言 / 跟随系统 | App Language / System Default | 「简体中文」保持中文原生写法 |
