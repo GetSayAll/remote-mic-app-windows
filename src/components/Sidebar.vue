@@ -145,16 +145,13 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
-  gap: 4px;
+  /* Mac 侧栏没有项间留白；选中背景是整块页面单元。 */
+  gap: 0;
 }
 
 .sidebar-spacer {
   flex: 1 1 auto;
   min-height: 12px;
-}
-
-.profile-nav-item {
-  margin-top: 4px;
 }
 
 /* 邮箱前缀最多 10 个字符；极窄侧栏仍保持单行省略，避免撑宽或换行。 */

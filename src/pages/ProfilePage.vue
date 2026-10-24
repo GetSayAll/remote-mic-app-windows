@@ -18,6 +18,7 @@ import {
   buildActionRanking,
   buildButtonRanking,
   buildCalendarWeeks,
+  calendarCellSize as fitCalendarCellSize,
   formatCalendarDate,
   formatDuration,
   formatVoiceSessionDate,
@@ -211,15 +212,10 @@ function retry(): void {
 }
 
 function updateCalendarSize(): void {
-  const width = calendarScroll.value?.clientWidth ?? 0;
-  const columns = Math.max(1, calendarWeeks.value.length);
-  if (width <= 0) {
-    calendarCellSize.value = 20;
-    return;
-  }
-  const available = width - 30 - 8;
-  const raw = (available - (columns - 1) * 3) / columns;
-  calendarCellSize.value = Math.min(28, Math.max(14, Math.round(raw * 10) / 10));
+  calendarCellSize.value = fitCalendarCellSize(
+    calendarScroll.value?.clientWidth ?? 0,
+    calendarWeeks.value.length,
+  );
 }
 
 watch(calendarWeeks, () => {

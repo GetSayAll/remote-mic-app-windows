@@ -5,6 +5,7 @@ import {
   buildActionRanking,
   buildButtonRanking,
   buildCalendarWeeks,
+  calendarCellSize,
   calendarIntensity,
   formatDuration,
   formatVoiceSessionDate,
@@ -150,6 +151,18 @@ describe("calendar", () => {
     expect(weeks[0].days[1].date).toBeNull();
     expect(weeks[0].days[2].date).toBe("2026-10-21");
     expect(weeks[0].days[6].date).toBe("2026-10-25");
+  });
+
+  it("sizes cells so the last week is not clipped in half", () => {
+    const width = 469;
+    const columns = 27;
+    const cell = calendarCellSize(width, columns);
+    const bodyWidth = 30 + 8 + columns * cell + (columns - 1) * 3;
+
+    expect(cell).toBe(13);
+    expect(bodyWidth).toBeLessThanOrEqual(width);
+    expect(calendarCellSize(0, columns)).toBe(20);
+    expect(calendarCellSize(2_000, columns)).toBe(28);
   });
 
   it("uses column * 7 + row for a full 26-week window", () => {

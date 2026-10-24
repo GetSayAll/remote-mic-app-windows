@@ -193,7 +193,8 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 10px 4px;
+  /* 对齐 Mac：选中态铺满侧栏宽度；底部不留白，个人中心选中时贴到窗口底边。 */
+  padding: 10px 0 0;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
   backdrop-filter: blur(24px);

@@ -85,6 +85,21 @@ export function profileAccountLabel(
   return Array.from(localPart).slice(0, 10).join("") || fallback;
 }
 
+/**
+ * 日历方格边长：在可用宽度内完整放下所有周列。
+ *
+ * 向下取整到 0.1px，避免四舍五入后整行比容器宽几像素，把最后一列切成半格。
+ * 下限 12px；更窄时宁可横向滚动，也不把方格压到看不清。
+ */
+export function calendarCellSize(availableWidth: number, columns: number): number {
+  if (!Number.isFinite(availableWidth) || availableWidth <= 0) return 20;
+  const count = Math.max(1, Math.floor(columns));
+  const available = availableWidth - 30 - 8;
+  const raw = (available - (count - 1) * 3) / count;
+  const fitted = Math.floor(raw * 10) / 10;
+  return Math.min(28, Math.max(12, fitted));
+}
+
 /** Mac 的日历强度口径：按键 40 次或语音 300 秒记满分。 */
 export function calendarIntensity(buttonPresses: number, voiceSeconds: number): number {
   const buttons = Number.isFinite(buttonPresses) ? Math.max(0, buttonPresses) : 0;
