@@ -63,6 +63,18 @@
   （新实例 `[STOP] 绑定 47831 失败` ⇒ 换机后一个助手都不剩）；`bind_listener` 改有界重试
   （3 s / 150 ms，`[WAIT] listen_retry`）。**待真机复核**：往返换机（甲↔乙）、连续换机、
   只断开不换机不重启、交接期无 `[STOP]`。记录：`Bugs/2026-10-13-helper-does-not-follow-remote-switch.md`。
+- [ ] 增强捕获：固定端口被系统级保留时回退自动分配（2026-10-25，issue #296）。WSL2
+  `networkingMode=mirrored` 把 Linux 侧 `ip_local_port_range` 整段镜像成宿主内核保留区 ⇒ 47831 恒
+  `WSAEADDRINUSE(10048)`，而占用者在 `netstat -anoq`、`Get-NetTCPConnection`（含管理员）、TCP connect、
+  `show excludedportrange` 中**全部不可见** ⇒ 助手 20 s 崩循环 ⇒ 报告层永不生效（语音键原生 F5 泄漏 +
+  注入右 Alt 被豆包按 `LLKHF_INJECTED` 丢弃）。实现：① 单实例改由互斥体
+  `SayAll.RC003Helper.SingleInstance` 判定，端口不再兼锁（显式 `--port` 时跳过锁，留给自检/并行探针）；
+  ② 端口占用先 `[PORT] event=probe`，只有 `result=refused` 才回退（`listening` 说明别人真占着）；
+  ③ 回退端口写进运行时目录 `session.port` 并在下次重启复用——agent 的端口在注入时写死，端口一变
+  接管核验必空等 8 s 后结束宿主；④ 绑定成功后端口一律以 listener 为准（顺带修好 `--port 0` 把 0
+  写进 gadget 配置的老问题）。自动化 passed：助手 `cargo test` 79 passed（含 3 项新增）。**真机 deferred**：
+  mirrored 机器上首次回退 + **第二次启动**（判据见 `Testing/WindowsRC003EnhancedCapture.md`
+  「2026-10-25 增量」），以及安装版重出包后的回归。
 - [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
   `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
   也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口

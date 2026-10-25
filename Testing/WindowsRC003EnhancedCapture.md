@@ -20,9 +20,12 @@
    `[RETARGET] event=request source=app_bridge` 并**立即**复查——重启行带 `trigger=app`
    （轮询兜底为 `trigger=poll`）。预期：换机后 1 秒内完成重定位，随后的第一次按下即
    `path=report_layer`。
-6. 交接期端口竞争（2026-10-13 真机回归后加固）：换机重启时新旧实例短暂重叠，接班人可能
-   撞上单实例端口——应看到接班人记 `[WAIT] event=listen_retry … outcome=bound` 并在旧实例
-   退出后接管；**不得**出现 `[STOP] 绑定 127.0.0.1:47831 失败`（出现即回归）。
+6. 交接期端口竞争（2026-10-13 真机回归后加固，2026-10-25 修订）：换机重启时新旧实例短暂重叠，
+   接班人可能撞上**旧实例还没释放的端口**——应看到 `[WAIT] event=listen_retry … outcome=bound`
+   并在旧实例退出后接管。单实例自 2026-10-25 起由**互斥体**判定
+   （`[LOCK] event=single_instance_acquired`，名字 `SayAll.RC003Helper.SingleInstance`），
+   端口只负责传输：真正的重复启动会出现 `[STOP] 已有另一个 sayall-helper 在运行`；
+   而端口被占用不再等于"上一轮在跑"，此时先看 `[PORT] event=probe` 的结论（见 §10）。
 7. （2026-10-14 追加）单实例连接位只接受**目标宿主**的 agent：另一支同型号遥控器宿主里的
    残留 agent 再重连也会被 `[REJECT] reason=host_pid_mismatch` 拒绝（折叠日志），不会占位——
    修复前它会静默占住连接位（界面全绿、报告层合成与语音键全失效，见
@@ -33,6 +36,20 @@
    `[AGENT] msg=synth:frame replace ok`）；连续 ≥2 次 `result=missing reason=no_frame`
    会让健康面降为 inactive（界面出提示，60 s 后 `capture_recover` 自动重来一次）。
    配置级回执（`synth_confirmed=true`）不再单独算生效，判据与处置见 §9 表与 §10 表。
+
+### 2026-10-25 增量：固定端口被系统级保留（#296）
+
+- 触发条件：WSL2 `.wslconfig` 里 `networkingMode=mirrored`，且 Linux 侧 `ip_local_port_range` 覆盖 47831。该区间每次启动随机，所以冲突表现为"时好时坏"。这类机器上 `netstat -anoq`、`Get-NetTCPConnection`（含管理员）、TCP connect、`show excludedportrange` **全部看不到占用者**。
+- 修复后的判定顺序（按日志逐条看）：
+  1. `[LOCK] event=single_instance_acquired` —— 单实例由互斥体保证，与端口无关。
+  2. 固定端口绑不上 → `[PORT] event=probe result=refused`（**不是** `listening` / `inconclusive`）。
+  3. `[FALLBACK] event=listen_fallback_ephemeral fixed_port=47831 reused_remembered=false|true`，随后 `[LISTEN] addr=… requested_port=47831`。
+  4. 首轮应看到 `[PREP] port=<回退端口>` → `[HELLO] auth=true` → 语音键走 `path=report_layer`（豆包出字）。
+- **真机必须覆盖"第二次启动"（当前 `deferred`）**：这是回退路径的关键差异点——agent 的端口在注入时写死，只有复用 `session.port` 才能让接管握手成立。判据：
+  - 重启助手后 `[FALLBACK] … reused_remembered=true`，且 `[HELLO] auth=true` 在数秒内出现；
+  - **不得**出现 `[ATTACH] verify=failed`（出现即说明端口变了、宿主里的 agent 回不来，随后会结束宿主重建）；
+  - 若出现 `[PORT] event=remembered_port_unavailable`，允许**一次** `[ATTACH] verify=failed` + 宿主重建，之后必须恢复正常。
+- 反例（不允许发生）：`result=listening` 时仍然回退——那说明判据退化成"端口被占就换端口"，会顶掉别人的端口。
 
 ## 2026-09-27 全按键动态目标增量验收
 
@@ -519,10 +536,12 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 
 | 现象 | 含义 | 处置 |
 | --- | --- | --- |
-| `[STOP] 绑定 127.0.0.1:47831 失败` + 退出码 8 | 上一轮还在运行（单实例锁） | 先结束上一个助手窗口；或等 `--duration` 到期 |
+| `[STOP] 已有另一个 sayall-helper 在运行` + 退出码 8 | 同会话里已有一支助手（互斥体 `SayAll.RC003Helper.SingleInstance` 已存在） | 先结束上一个助手窗口；或等 `--duration` 到期。**别靠换端口绕过**：`--port` 会跳过单实例锁，只留给自检与并行探针 |
+| `[STOP] 绑定 127.0.0.1:47831 失败 … 该端口被占用` + 退出码 8 | 端口被**别的进程**占着（`[PORT] event=probe result=listening` 或 `inconclusive`），不再是"上一轮在跑" | 按 `netstat -ano \| findstr :47831` 找占用者后释放；只有 `result=refused`（无人应答）才会自动回退 |
+| `[FALLBACK] event=listen_fallback_ephemeral` | 固定端口被系统级保留（典型：WSL2 `networkingMode=mirrored` 把 Linux 临时端口区间镜像成宿主内核保留区，#296），且探头明确被拒 | 无需处置：已改用系统分配端口并写进 `session.port`，下次重启复用同一个端口。**若改了端口**（首次回退、或记忆端口被别人占走），宿主里的 agent 连不回来，会出现 `[ATTACH] verify=failed` 后结束宿主重建——判据见「2026-10-25 增量」 |
 | `[STOP] 复制 Gadget 失败 … os error 32` | 宿主仍映射着运行时目录那份 DLL | 更新版已不会这样：会走 `[ATTACH]` 接管或 `[STALE-TAP]` 提示 |
 | `[STALE-TAP]` + 退出码 13 | 宿主里的 tap 是**旧世代**（令牌已换，接不上），且自动恢复的安全闸不满足（宿主非独占 / 显式钉了 `--token` 等） | 按提示清一次：断开重配对 RC003（最干净）/ 设备管理器禁用再启用 / 重启。安全闸满足时不会到这步：助手会 `action=auto_recover_stale_tap` 自动结束宿主 + 干净首注（2026-10-14 起） |
-| `[NO-HELLO]` + 退出码 12 | 注入了但 30 s 内没有**已鉴权**会话 | 看 `[VERIFY-MODULE] gadget_modules_in_host`；确认没有第二个助手在抢端口 |
+| `[NO-HELLO]` + 退出码 12 | 注入了但 30 s 内没有**已鉴权**会话 | 看 `[VERIFY-MODULE] gadget_modules_in_host`；确认宿主里没有上一代残留 tap（`[ATTACH]` 行）；单实例已由互斥体挡住并存，不必再怀疑"第二个助手抢端口" |
 | `[REJECT] reason=host_pid_mismatch`（折叠） | 另一支同型号遥控器宿主里的残留 agent 在抢连接位；含宿主 pid 不变量的版本会拒绝它，功能不受影响 | 无需处置。修复前（≤ 0.8.6）它会**静默占位**——配置回执与心跳全绿、`synth:frame` 零条，按键/语音全失效；升级即可。记录见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md` |
 | `voice_effect … result=missing reason=no_frame` 连发（≥2 次）+ `capture_inactive reason=voice_synth_no_effect` | 按下没有**生效证据**（本支遥控器对应的报告层改写没发生）：典型是宿主里跑着不产生帧结果的 agent；健康面会降级并在界面提示，60 s 后自动重来一次 | 无需手动处置（自动重来 + 界面提示）；若长时间不恢复，查同段 `helper_pid` 与 `[REJECT]` 行、确认包内含 `F` 行转发（helper 标记 `synth:frame replace ok`）。判据本体见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`「跟进」 |
 | 按了键但一条 `[EDGE]` 都没有 | 可能是设备没上报，也可能是探针/链路坏了 | **先做阳性对照**：用哨兵键或 `observe` 模式确认同一设备上已知可用的键（确定/主页）能出来 |
