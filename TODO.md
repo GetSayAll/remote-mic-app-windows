@@ -63,7 +63,8 @@
   （新实例 `[STOP] 绑定 47831 失败` ⇒ 换机后一个助手都不剩）；`bind_listener` 改有界重试
   （3 s / 150 ms，`[WAIT] listen_retry`）。**待真机复核**：往返换机（甲↔乙）、连续换机、
   只断开不换机不重启、交接期无 `[STOP]`。记录：`Bugs/2026-10-13-helper-does-not-follow-remote-switch.md`。
-- [ ] 增强捕获：固定端口被系统级保留时回退自动分配（2026-10-25，issue #296）。WSL2
+- [ ] 增强捕获：固定端口被系统级保留时回退自动分配（issue #296；根因定位与首版修复 @jihtsan，
+  PR #297 / 提交 `668e5a5`；收口 PR #304）。WSL2
   `networkingMode=mirrored` 把 Linux 侧 `ip_local_port_range` 整段镜像成宿主内核保留区 ⇒ 47831 恒
   `WSAEADDRINUSE(10048)`，而占用者在 `netstat -anoq`、`Get-NetTCPConnection`（含管理员）、TCP connect、
   `show excludedportrange` 中**全部不可见** ⇒ 助手 20 s 崩循环 ⇒ 报告层永不生效（语音键原生 F5 泄漏 +
