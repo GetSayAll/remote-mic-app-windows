@@ -152,6 +152,26 @@ mod imp {
         submit(move |session| task(&session.automation))
     }
 
+    /// 与 [`with_automation`] 相同，但最多等待 `timeout`。回眸捕获是后台尽力而为：
+    /// 目标 UIA provider 卡住时必须尽快放弃，不能让语音线程或捕获线程无限等待。
+    pub(crate) fn with_automation_timeout<T, F>(timeout: Duration, task: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&IUIAutomation) -> T + Send + 'static,
+    {
+        let (reply_sender, reply_receiver) = channel::<T>();
+        {
+            let guard = worker().lock().ok()?;
+            let job: Job = Box::new(move |session| {
+                let _ = reply_sender.send(task(&session.automation));
+            });
+            if guard.sender.send(job).is_err() {
+                return None;
+            }
+        }
+        reply_receiver.recv_timeout(timeout).ok()
+    }
+
     // ---------- Win32（不需要 UIA，可在任意线程调用） ----------
 
     pub fn current_process_id() -> u32 {
@@ -1053,7 +1073,7 @@ pub use imp::{
 
 /// 复用共享 UIA 工作线程（Per-Monitor V2、MTA）执行只读 UIA 任务的入口。
 #[cfg(windows)]
-pub(crate) use imp::with_automation;
+pub(crate) use imp::{with_automation, with_automation_timeout};
 
 /// 非 Windows 平台不提供 UIA 后端；保持模块可编译以便纯逻辑单测。
 #[cfg(not(windows))]

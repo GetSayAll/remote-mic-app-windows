@@ -125,7 +125,8 @@ describe("个人中心页", () => {
     expect(firstVoiceRow.get(".voice-separator").text()).toBe("·");
     expect(firstVoiceRow.find(".voice-dot").exists()).toBe(false);
     expect(wrapper.findAll(".calendar-grid button.calendar-day")).toHaveLength(26 * 7);
-    expect(wrapper.text()).not.toContain("回眸");
+    expect(wrapper.findAll(".voice-row-button")).toHaveLength(2);
+    expect(wrapper.get(".profile-reflections-link").text()).toContain("查看全部回眸");
     wrapper.unmount();
   });
 
@@ -139,7 +140,31 @@ describe("个人中心页", () => {
     expect(day).toBeDefined();
     await day!.trigger("click");
     expect(wrapper.get(".calendar-detail").text()).toContain("按键 4 次");
-    expect(wrapper.get(".calendar-detail").text()).not.toContain("回眸");
+    expect(wrapper.get(".calendar-detail").text()).toContain("在回眸中查看");
+    wrapper.unmount();
+  });
+
+  it("从日历与语音排行跳转到回眸", async () => {
+    stubBridge();
+    const wrapper = mount(ProfilePage);
+    await flushPromises();
+    await flushPromises();
+
+    const day = wrapper
+      .findAll(".calendar-day")
+      .find((cell) => cell.attributes("aria-label")?.includes("按键 4 次"));
+    expect(day).toBeDefined();
+    await day!.trigger("click");
+
+    await wrapper.get(".calendar-reflections-link").trigger("click");
+    await wrapper.get(".voice-row-button").trigger("click");
+    await wrapper.get(".profile-reflections-link").trigger("click");
+
+    expect(wrapper.emitted("navigate")).toEqual([
+      ["reflections"],
+      ["reflections"],
+      ["reflections"],
+    ]);
     wrapper.unmount();
   });
 

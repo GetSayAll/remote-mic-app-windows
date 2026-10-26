@@ -6,6 +6,7 @@ export type PageId =
   | "recommendations"
   | "macros"
   | "connection"
+  | "reflections"
   | "permissions"
   | "settings"
   | "profile";
@@ -18,6 +19,7 @@ export type NavIcon =
   | "shield"
   | "gear"
   | "member"
+  | "textbubble"
   | "person";
 
 export interface NavigationItem {
@@ -35,9 +37,11 @@ export const publicNavigationItems: NavigationItem[] = [
   ...(COMBINATION_ACTIONS_ENABLED
     ? [{ id: "macros", label: "组合动作", icon: "layers" } as NavigationItem]
     : []),
-  { id: "connection", label: "连接", icon: "link" },
-  // 2026-10-20 用户指定顺序：按键、组合动作、连接、推荐、权限、设置。
+  // 2026-10-25 用户指定：推荐放在连接上方（对齐 Mac）。
   { id: "recommendations", label: "推荐", icon: "sparkles" },
+  { id: "connection", label: "连接", icon: "link" },
+  // 2026-10-25 用户指定：回眸紧挨权限上方。
+  { id: "reflections", label: "回眸", icon: "textbubble" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main
   // SettingsSection.about 的 "gearshape"。

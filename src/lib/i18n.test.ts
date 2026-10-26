@@ -14,6 +14,7 @@ import macros from "./i18n/en/macros";
 import connection from "./i18n/en/connection";
 import onboarding from "./i18n/en/onboarding";
 import permissions from "./i18n/en/permissions";
+import reflections from "./i18n/en/reflections";
 import lib from "./i18n/en/lib";
 
 const sourceRoot = join(process.cwd(), "src");
@@ -127,6 +128,7 @@ describe("全 UI i18n 完整性", () => {
       connection,
       onboarding,
       permissions,
+      reflections,
       lib,
     };
     const seen = new Map<string, { value: string; fragment: string }>();

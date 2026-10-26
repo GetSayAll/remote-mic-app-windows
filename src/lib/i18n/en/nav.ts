@@ -6,6 +6,7 @@ export default {
   "nav.组合动作": "Routines",
   "nav.连接": "Connection",
   "nav.推荐": "Picks",
+  "nav.回眸": "Reflections",
   "nav.权限": "Permissions",
   "nav.设置": "Settings",
   "nav.会员": "Membership",

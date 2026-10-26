@@ -28,6 +28,8 @@ import {
 
 defineProps<{ runtime?: RuntimeSnapshot | null }>();
 
+const emit = defineEmits<{ navigate: [page: string] }>();
+
 const profile = ref<UsageProfile | null>(null);
 const mappings = ref<ButtonMappings | null>(null);
 const loading = ref(true);
@@ -161,6 +163,10 @@ function calendarDayLabel(day: {
 
 function selectDay(day: { date: string | null }): void {
   if (day.date) selectedDate.value = day.date;
+}
+
+function openReflections(): void {
+  emit("navigate", "reflections");
 }
 
 async function primeActionCaches(): Promise<void> {
@@ -389,6 +395,22 @@ onUnmounted(() => {
             <strong>{{ selectedDayLabel }}</strong>
             <span>按键 {{ numberFormatter.format(selectedDay.buttonPresses) }} 次</span>
             <span>语音 {{ formatDuration(selectedDay.voiceSeconds) }}</span>
+            <button
+              type="button"
+              class="profile-link-button calendar-reflections-link"
+              @click="openReflections"
+            >
+              <span>在回眸中查看</span>
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M7 17 17 7M9 7h8v8"
+                  stroke="currentColor"
+                  stroke-width="1.9"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
           </div>
         </section>
 
@@ -414,14 +436,41 @@ onUnmounted(() => {
               :key="`${session.endedAtMs}-${index}`"
               class="voice-row"
             >
-              <span class="voice-rank">{{ index + 1 }}</span>
-              <span class="voice-duration">{{ formatDuration(session.durationSeconds) }}</span>
-              <span class="voice-separator">·</span>
-              <span class="voice-app">{{ session.applicationName ?? "未知应用" }}</span>
-              <span class="voice-date">{{ formatVoiceSessionDate(session.endedAtMs) }}</span>
+              <button type="button" class="voice-row-button" @click="openReflections">
+                <span class="voice-rank">{{ index + 1 }}</span>
+                <span class="voice-duration">{{ formatDuration(session.durationSeconds) }}</span>
+                <span class="voice-separator">·</span>
+                <span class="voice-app">{{ session.applicationName ?? "未知应用" }}</span>
+                <span class="voice-date">{{ formatVoiceSessionDate(session.endedAtMs) }}</span>
+                <svg class="voice-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path
+                    d="m9 6 6 6-6 6"
+                    stroke="currentColor"
+                    stroke-width="1.9"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
             </li>
           </ol>
           <p v-else class="profile-empty">完成一次语音输入后，这里会显示本机排行。</p>
+          <button
+            type="button"
+            class="profile-link-button profile-reflections-link"
+            @click="openReflections"
+          >
+            <span>查看全部回眸</span>
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="m9 6 6 6-6 6"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
         </section>
       </div>
     </div>
@@ -764,6 +813,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 10px;
   padding: 9px 10px;
@@ -771,6 +821,44 @@ onUnmounted(() => {
   color: var(--text-control);
   background: var(--surface-subtle);
   font-size: 12px;
+}
+
+.profile-link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.profile-link-button:hover {
+  text-decoration: underline;
+}
+
+.profile-link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.profile-link-button svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.profile-reflections-link {
+  display: flex;
+  width: max-content;
+  margin-top: 7px;
 }
 
 .calendar-detail strong {
@@ -798,17 +886,44 @@ onUnmounted(() => {
 }
 
 .voice-row {
-  display: grid;
-  grid-template-columns: 18px auto auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-  min-height: 30px;
   border-bottom: 1px solid var(--border);
-  font-size: 13px;
 }
 
 .voice-row:last-child {
   border-bottom: 0;
+}
+
+.voice-row-button {
+  display: grid;
+  grid-template-columns: 18px auto auto minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.voice-row-button:hover .voice-app {
+  color: var(--accent);
+}
+
+.voice-row-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.voice-chevron {
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
 }
 
 .voice-rank {

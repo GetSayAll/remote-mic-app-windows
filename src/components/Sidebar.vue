@@ -92,6 +92,13 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     // 会员图标由 CrownIcon 组件绘制（SF Symbols crown.fill）；保留空组维持类型映射。
     strokes: [],
   },
+  textbubble: {
+    // SF "text.bubble.fill"：圆角对话气泡 + 两行文字（对齐 Mac 回眸入口）。
+    strokes: [
+      "M4.2 3.6h15.6a2.2 2.2 0 0 1 2.2 2.2v9.1a2.2 2.2 0 0 1-2.2 2.2h-7.1L8.1 21v-3.9H4.2A2.2 2.2 0 0 1 2 14.9V5.8a2.2 2.2 0 0 1 2.2-2.2z",
+      "M6.4 8.2h11.2M6.4 11.8h7.4",
+    ],
+  },
   person: {
     // SF "person.crop.circle"：圆形轮廓 + 头肩剪影。
     strokes: [

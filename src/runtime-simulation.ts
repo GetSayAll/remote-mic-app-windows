@@ -557,10 +557,11 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "个人中心日历没有渲染完整星期行",
   );
   assert(
-    document.querySelector(".profile-page")?.textContent?.includes("回眸") === false,
-    "个人中心不应出现本期未提供的回眸入口",
+    document.querySelector(".profile-reflections-link")?.textContent?.includes("查看全部回眸") ===
+      true,
+    "个人中心缺少「查看全部回眸」入口",
   );
-  steps.push("个人中心经真实 IPC 渲染 4 项 KPI、排行榜与 26 周日历，未出现回眸入口");
+  steps.push("个人中心经真实 IPC 渲染 4 项 KPI、排行榜与 26 周日历，含回眸入口");
 
   mark("share_panel");
   await clickButton("显示二维码");
@@ -591,6 +592,14 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "分享二维码收起",
   );
   steps.push("个人中心在累计按键上方内联展开/收起本机二维码、固定链接与复制入口");
+
+  mark("profile_reflections");
+  await clickButton("查看全部回眸");
+  await waitFor(
+    () => (document.querySelector(".reflections-page") ? true : null),
+    "个人中心「查看全部回眸」跳转到回眸页",
+  );
+  steps.push("个人中心「查看全部回眸」跳转到回眸页");
 
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，

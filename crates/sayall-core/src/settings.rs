@@ -84,7 +84,9 @@ impl AppIconIdentifier {
 
 /// 当前配置代次。4 = 2026-10-04 引入 `app_icon` 选择迁移（见 `AppSettings::normalized`）。
 /// 5 = 2026-10-24 使用统计加入按控件计数与单次语音排行（字段向后兼容，不需要数据迁移）。
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+/// 6 = 2026-10-25 回眸开关（默认关闭，字段向后兼容）。
+/// 7 = 2026-10-25 回眸原始录音开关（默认关闭，只有回眸开启时生效）。
+const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 /// `app_icon` 被视为"用户真实选择"的最低代次（2026-10-04）。
 ///
@@ -123,6 +125,11 @@ pub struct AppSettings {
     /// Mac 版是设置窗口内的 @State、不持久化——此处有意不同。老配置没有这个
     /// 字段时按容器级 `#[serde(default)]` 落回默认（开启）。
     pub lock_mapping_selection: bool,
+    /// 「回眸」是否记录新的语音文字。默认 **关闭**；关闭只停止新增，不删除已有记录。
+    pub local_transcript_history_enabled: bool,
+    /// 是否在本机保存每次回眸语音会话的原始 WAV。默认 **关闭**；
+    /// 只有 `local_transcript_history_enabled` 开启时才生效，关闭不会删除已有录音。
+    pub local_original_audio_recording_enabled: bool,
     pub theme_preference: ThemePreference,
     /// 应用语言：`system` / `zh-Hans` / `en`。无法识别的老值回落 `system`，
     /// 不让一个语言名把整份设置打成解析失败。
@@ -168,6 +175,8 @@ impl Default for AppSettings {
             check_prerelease_updates: false,
             rc003_capture_enabled: false,
             lock_mapping_selection: true,
+            local_transcript_history_enabled: false,
+            local_original_audio_recording_enabled: false,
             theme_preference: ThemePreference::System,
             application_language: AppLanguage::System,
             app_icon: AppIconIdentifier::FacetedDuck,
@@ -239,8 +248,43 @@ mod tests {
         assert_eq!(settings.audio_endpoint_name, None);
         assert_eq!(settings.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(!settings.check_prerelease_updates);
+        assert!(!settings.local_transcript_history_enabled);
         assert_eq!(settings.theme_preference, ThemePreference::System);
         assert_eq!(settings.usage_statistics, UsageStatistics::default());
+    }
+
+    #[test]
+    fn transcript_history_is_off_by_default_and_round_trips() {
+        assert!(!AppSettings::default().local_transcript_history_enabled);
+
+        let enabled = AppSettings {
+            local_transcript_history_enabled: true,
+            ..AppSettings::default()
+        };
+        let encoded = serde_json::to_string(&enabled).unwrap();
+        let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.local_transcript_history_enabled);
+
+        // 旧配置没有这个字段时不得被迁移成开启。
+        let old: AppSettings = serde_json::from_str(r#"{"schema_version":5}"#).unwrap();
+        assert!(!old.normalized().local_transcript_history_enabled);
+    }
+
+    #[test]
+    fn original_audio_recording_is_off_by_default_and_round_trips() {
+        assert!(!AppSettings::default().local_original_audio_recording_enabled);
+
+        let enabled = AppSettings {
+            local_transcript_history_enabled: true,
+            local_original_audio_recording_enabled: true,
+            ..AppSettings::default()
+        };
+        let encoded = serde_json::to_string(&enabled).unwrap();
+        let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.local_original_audio_recording_enabled);
+
+        let old: AppSettings = serde_json::from_str(r#"{"schema_version":6}"#).unwrap();
+        assert!(!old.normalized().local_original_audio_recording_enabled);
     }
 
     #[test]
