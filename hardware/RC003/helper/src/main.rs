@@ -6292,48 +6292,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             );
         }
 
-        // ---- 主程序桥接（捕获链第 ② 段）----
-        // 刻意放在端口绑定之前：它只决定"边沿能不能送到主程序"，与"能不能捕获、
-        // 能不能清键"完全解耦。主程序没运行时它会安静地每 2 秒重试（日志折叠成
-        // 前 3 次 + 每 30 次一条），**不得**因此影响捕获链路。
-        let app_bridge = match spawn_app_bridge(
-            args.app_bridge.clone(),
-            args.runtime_dir.clone(),
-            &logger,
-            args.follow_app,
-        ) {
-            Some(bridge) => {
-                logger.kv(
-                    "[APP-BRIDGE]",
-                    &[
-                        ("event", "enabled".into()),
-                        (
-                            "descriptor",
-                            args.app_bridge
-                                .as_ref()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_default(),
-                        ),
-                    ],
-                );
-                Some(bridge)
-            }
-            None => {
-                logger.kv(
-                    "[APP-BRIDGE]",
-                    &[
-                        ("event", "disabled".into()),
-                        (
-                            "note",
-                            "未启用：三键仍会被清空，但边沿不会转发，主程序侧映射不会触发".into(),
-                        ),
-                    ],
-                );
-                None
-            }
-        };
-
-        // ---- 顺序：取单实例锁 → 绑定端口 → 准备运行时目录 → 注入 ----
+        // ---- 顺序：取单实例锁 → 绑定端口 → 主程序桥接 → 准备运行时目录 → 注入 ----
         // 锁与绑定都放在准备阶段之前：它们检查的是**外部状态**，越早失败越好；
         // 而准备阶段会改写运行时目录里的 config/token/agent，失败的一轮不该动磁盘状态
         // （2026-09-23 真机实测：第二轮撞端口 10048 时已经写完了配置）。
@@ -6474,6 +6433,52 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             listen_fields.push(("requested_port", requested_port.to_string()));
         }
         logger.kv("[LISTEN]", &listen_fields);
+
+        // ---- 主程序桥接（捕获链第 ② 段）----
+        // **必须晚于端口绑定**（2026-10-26 修正，issue #291）：桥接走命名管道，主程序
+        // 一握手就判 `helper_connected` 并报 `terminal_result=passed`；若桥在 bind 之前
+        // 就起来，助手随后因端口绑不上而 `[STOP]` 退出时，主程序已经看到"连上了"——
+        // 现场（#291）于是每轮都留一条成功行，而功能一次都没生效。放在 bind 之后，
+        // "握手成功"才隐含"传输端口已就绪"，两者不再互相掩盖。
+        //
+        // 解耦性质不变：桥只决定"边沿能不能送到主程序"，主程序没运行时它会安静地
+        // 每 2 秒重试（日志折叠成前 3 次 + 每 30 次一条），不影响捕获链路。
+        let app_bridge = match spawn_app_bridge(
+            args.app_bridge.clone(),
+            args.runtime_dir.clone(),
+            &logger,
+            args.follow_app,
+        ) {
+            Some(bridge) => {
+                logger.kv(
+                    "[APP-BRIDGE]",
+                    &[
+                        ("event", "enabled".into()),
+                        (
+                            "descriptor",
+                            args.app_bridge
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    ],
+                );
+                Some(bridge)
+            }
+            None => {
+                logger.kv(
+                    "[APP-BRIDGE]",
+                    &[
+                        ("event", "disabled".into()),
+                        (
+                            "note",
+                            "未启用：三键仍会被清空，但边沿不会转发，主程序侧映射不会触发".into(),
+                        ),
+                    ],
+                );
+                None
+            }
+        };
 
         let prepared = match prepare_runtime(&args, &gadget_src, &logger, &plan) {
             Ok(f) => f,
