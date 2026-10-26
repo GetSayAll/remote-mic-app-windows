@@ -454,6 +454,7 @@ impl BleRuntime {
         voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
         voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
         gain_db: Arc<Mutex<f32>>,
+        transcript_capture: Arc<crate::transcript_capture::TranscriptCaptureRuntime>,
     ) -> Self {
         // 进程启动先清「正在用的遥控器」：地址只在会话真的建立后才有意义，
         // 上一轮的残留会把 Raw Input 绑定与助手选宿主的过滤条件带偏（2026-10-13）。
@@ -462,6 +463,7 @@ impl BleRuntime {
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let worker_state = Arc::clone(&state);
         let worker_sender = sender.clone();
+        let worker_capture = Arc::clone(&transcript_capture);
         let worker = thread::Builder::new()
             .name("sayall-ble".to_owned())
             .spawn(move || {
@@ -475,6 +477,7 @@ impl BleRuntime {
                     voice_hold_hotkey,
                     voice_input_tool,
                     gain_db,
+                    worker_capture,
                 )
             });
 
@@ -715,6 +718,7 @@ fn worker_loop(
     voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
     gain_db: Arc<Mutex<f32>>,
+    transcript_capture: Arc<crate::transcript_capture::TranscriptCaptureRuntime>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -743,6 +747,8 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 回眸：MIC_OPEN 先到就提前取基线；RC003 直接 0x04 时在 StreamStarted 兜底。
+    let mut transcript_pending_started = false;
     // 最近一帧 ATVV 音频的到达时刻（2026-10-21）：STOP 丢失时用它判定
     // 链路已静默，主动收尾并释放按住说话快捷键。只在 Streaming 期间有意义。
     let mut last_voice_audio_at: Option<Instant> = None;
@@ -895,6 +901,7 @@ fn worker_loop(
                                 session_id
                                     .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
                             ));
+                            transcript_capture.cancel_audio();
                             abort_voice_session(
                                 &mut session,
                                 &mut pipeline,
@@ -1050,6 +1057,8 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
+                transcript_capture.cancel("disconnected");
+                transcript_pending_started = false;
                 let result = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -1231,6 +1240,8 @@ fn worker_loop(
                         &mut voice_stream_started_at,
                         &sender,
                         &voice_session_epoch,
+                        &transcript_capture,
+                        &mut transcript_pending_started,
                         &bytes,
                     );
                     let phase = lock(&state).phase;
@@ -1293,6 +1304,7 @@ fn worker_loop(
                         &mut last_voice_audio_at,
                         &bytes,
                         &usage,
+                        &transcript_capture,
                     );
                 }
             }
@@ -1438,6 +1450,8 @@ fn worker_loop(
                 let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Suspended);
                 capabilities_deadline = None;
                 reconnect_deadline = None;
+                transcript_capture.cancel("system_suspended");
+                transcript_pending_started = false;
                 if let Err(error) = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -2159,6 +2173,11 @@ fn conn_params_failure_note(failure: ConnParamsFailure) -> String {
     }
 }
 
+/// 回眸记录时间：本机墙上时间（毫秒）。会话计时仍用 `Instant`，两者用途不同。
+fn voice_timestamp_ms() -> i64 {
+    chrono::Local::now().timestamp_millis()
+}
+
 fn handle_control(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
@@ -2175,6 +2194,8 @@ fn handle_control(
     voice_stream_started_at: &mut Option<Instant>,
     sender: &Sender<WorkerMessage>,
     voice_session_epoch: &Arc<AtomicU64>,
+    transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
+    transcript_pending_started: &mut bool,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -2190,6 +2211,7 @@ fn handle_control(
             "voice_session action=abort phase=completed terminal_result=failed reason=stream_replaced session={} samples={samples} note=previous_stop_missing",
             stale_session.map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
         ));
+        transcript_capture.cancel_audio();
         abort_voice_session(
             session,
             pipeline,
@@ -2251,6 +2273,12 @@ fn handle_control(
             // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
             // HID F5 代替——普通键盘 F5 也会被误计。
             usage.begin_voice_session(crate::foreground::foreground_application_name());
+            // 回眸基线：MIC_OPEN 比 StreamStarted 早，趁注入前先把目标输入框文字取下来。
+            // 同一次会话重复收到 MIC_OPEN 时不要重置刚取到的基线。
+            if !*transcript_pending_started {
+                transcript_capture.begin_pending(voice_timestamp_ms());
+                *transcript_pending_started = true;
+            }
             if let Some(session) = session {
                 if let Err(error) = session
                     .request_microphone_open(capabilities.version, capabilities.selected_codec)
@@ -2258,6 +2286,10 @@ fn handle_control(
                     // MIC_OPEN 写入走 GATT，可能返回 Unreachable/AccessDenied 等
                     // 状态码；用户文案同样按语义分流（P0-2）。
                     lock(state).last_error = Some(user_facing_connection_error(&error, true));
+                    // 收不到 STREAM_START 就不会有 STREAM_STOP；这里清掉本轮
+                    // pending 标记，否则下一次按键会误以为基线已经取过。
+                    transcript_capture.cancel("microphone_open_failed");
+                    *transcript_pending_started = false;
                 }
             }
         }
@@ -2268,6 +2300,25 @@ fn handle_control(
             // RC003 的报告层语音路径实测直接发 0x04 STREAM_START，不经过
             // MIC_OPEN；这里兜底开始统计。若 MIC_OPEN 已先记过，方法幂等。
             usage.ensure_voice_session_started(crate::foreground::foreground_application_name());
+            // 回眸：直接 0x04 的路径没有 MIC_OPEN 提前量，这里补一次基线；
+            // 已有 pending 时不重复 begin（否则会把刚取到的基线丢掉）。
+            if !*transcript_pending_started {
+                transcript_capture.begin_pending(voice_timestamp_ms());
+            }
+            let transcript_session_id = crate::transcript_capture::new_session_id();
+            transcript_capture.bind_session(transcript_session_id.clone());
+            // 录音关闭时不要为 manifest 白白读取前台应用身份。
+            let recording_application = if transcript_capture.is_audio_recording_enabled() {
+                crate::transcript_capture_windows::foreground_application_identity()
+            } else {
+                None
+            };
+            transcript_capture.start_audio_recording(
+                &transcript_session_id,
+                voice_timestamp_ms(),
+                recording_application,
+            );
+            *transcript_pending_started = false;
             // 流开始即视为有活动；若之后连一帧音频都收不到，看门狗会收尾。
             *last_voice_audio_at = Some(Instant::now());
             // 语音会话纪元 +1：本轮 wetype_check 阶梯以此为 armed 纪元，
@@ -2394,6 +2445,7 @@ fn handle_control(
                     gatt_note(format!(
                         "chord_press result=err session={session_id} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true"
                     ));
+                    transcript_capture.cancel_audio();
                     abort_voice_session(
                         session,
                         pipeline,
@@ -2461,6 +2513,7 @@ fn handle_control(
                 gatt_note(format!(
                     "audio_begin result=err session={session_id} error_domain=audio error_code=begin_failed reason=wasapi_rejected retryable=true"
                 ));
+                transcript_capture.cancel_audio();
                 abort_voice_session(
                     session,
                     pipeline,
@@ -2484,6 +2537,11 @@ fn handle_control(
         }
         PipelineOutput::StreamStopped { generation, .. } => {
             *last_voice_audio_at = None;
+            // 回眸：先记结束时刻，文字稳定等待与音频排空互不影响。
+            let transcript_ended_at = voice_timestamp_ms();
+            transcript_capture.finish_session(transcript_ended_at);
+            transcript_capture.finish_audio(transcript_ended_at);
+            *transcript_pending_started = false;
             if let Some(session) = session {
                 session.microphone_opened = false;
             }
@@ -2631,6 +2689,7 @@ fn handle_audio(
     last_voice_audio_at: &mut Option<Instant>,
     bytes: &[u8],
     usage: &UsageCounters,
+    transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
         return;
@@ -2649,6 +2708,7 @@ fn handle_audio(
         ));
     }
     if let Some(error) = audio.failure() {
+        transcript_capture.cancel_audio();
         abort_voice_session(
             session,
             pipeline,
@@ -2669,7 +2729,9 @@ fn handle_audio(
             samples,
         }) => {
             let sample_count = samples.len();
+            transcript_capture.append_audio(&samples);
             if let Err(error) = audio.enqueue_samples(generation, samples) {
+                transcript_capture.cancel_audio();
                 abort_voice_session(
                     session,
                     pipeline,

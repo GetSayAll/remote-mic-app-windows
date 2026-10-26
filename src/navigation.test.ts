@@ -11,23 +11,28 @@ import {
 
 describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
-    // 2026-10-20 用户指定顶部顺序；2026-10-24 个人中心固定在最后。
+    // 2026-10-25 用户指定：推荐放在连接上方；2026-10-24 个人中心固定在最后。
     expect(navigationItems.map((item) => item.id)).toEqual([
       "buttons",
       "macros",
-      "connection",
       "recommendations",
+      "connection",
+      "reflections",
       "permissions",
       "settings",
       "profile",
     ]);
-    expect(navigationItems[3].label).toBe("推荐");
-    expect(navigationItems[3].icon).toBe("sparkles");
+    expect(navigationItems[2].label).toBe("推荐");
+    expect(navigationItems[2].icon).toBe("sparkles");
+    expect(navigationItems[3].label).toBe("连接");
+    // 2026-10-25 用户指定：回眸紧挨权限上方。
+    expect(navigationItems[4].label).toBe("回眸");
+    expect(navigationItems[4].icon).toBe("textbubble");
     // 2026-10-02 用户指定：原「关于」页改名「设置」，图标换成 Mac 同款齿轮。
-    expect(navigationItems[5].label).toBe("设置");
-    expect(navigationItems[5].icon).toBe("gear");
-    expect(navigationItems[6].label).toBe("个人中心");
-    expect(navigationItems[6].icon).toBe("person");
+    expect(navigationItems[6].label).toBe("设置");
+    expect(navigationItems[6].icon).toBe("gear");
+    expect(navigationItems[7].label).toBe("个人中心");
+    expect(navigationItems[7].icon).toBe("person");
     expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
   });
 

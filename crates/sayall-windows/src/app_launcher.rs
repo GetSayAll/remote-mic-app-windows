@@ -1378,7 +1378,7 @@ fn process_image_path(pid: u32) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn process_app_user_model_id(pid: u32) -> Option<String> {
+pub(crate) fn process_app_user_model_id(pid: u32) -> Option<String> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
     use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;

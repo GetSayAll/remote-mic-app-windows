@@ -7,6 +7,7 @@ import macros from "./en/macros";
 import connection from "./en/connection";
 import onboarding from "./en/onboarding";
 import permissions from "./en/permissions";
+import reflections from "./en/reflections";
 import lib from "./en/lib";
 
 /**
@@ -23,5 +24,6 @@ export const en: Record<string, string> = {
   ...connection,
   ...onboarding,
   ...permissions,
+  ...reflections,
   ...lib,
 };
