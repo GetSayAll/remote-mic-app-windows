@@ -1691,6 +1691,57 @@ fn capture_health_for_round(
     CaptureHealth::Starting
 }
 
+/// 「助手反复连上就断」的计数推进（纯函数，单测覆盖）。
+///
+/// 输入是桥接快照里**累计**的接受次数，所以只看增量：应用启动前（上一次安装/上次运行）
+/// 的接受不该算进本次开启。桥重启会让累计值回退，此时只把基线跟上去，不清计数——
+/// 计数表达的是"本次开启以来失败了几次"。
+///
+/// 拿到所有权就清零：那是"助手真的起来了"的唯一证据（配置回执不算，见 #264）。
+fn advance_helper_accept_streak(
+    streak: u32,
+    last_seen: u64,
+    total: u64,
+    owned_usages: usize,
+) -> (u32, u64) {
+    if total < last_seen {
+        return (streak, total);
+    }
+    if owned_usages > 0 {
+        return (0, total);
+    }
+    let delta = (total - last_seen).min(u32::MAX as u64) as u32;
+    (streak.saturating_add(delta), total)
+}
+
+/// 接受次数是否已达「助手根本没起来」的阈值（纯函数，单测覆盖）。
+fn helper_startup_failing(streak: u32) -> bool {
+    streak >= HELPER_STARTUP_FAILURE_ACCEPTS
+}
+
+/// 把"助手反复启动失败"叠到本轮生效状态上（纯函数，单测覆盖）。
+///
+/// 只在**没有所有权**时生效：一旦真的接管，界面必须立刻回到 `active`——
+/// 否则一次偶发误判会把提示挂到功能恢复之后（0.8.1 的老毛病：判据只看失败条件
+/// 消失与否）。`Inactive` 的语义因此扩成两条来源：过了宽限仍无所有权，
+/// 或本次开启以来助手反复被接受却一次都没接管——两者的用户含义相同（开着没生效）。
+fn capture_health_with_startup_failure(
+    base: CaptureHealth,
+    startup_failing: bool,
+    owned_usages: usize,
+) -> CaptureHealth {
+    // 开关关着就没有"是不是启动失败"可言：这条判定只属于开启态
+    // （关着还发布 Inactive 会让界面在开关关闭时显示提示）。
+    if matches!(base, CaptureHealth::Off) {
+        return base;
+    }
+    if startup_failing && owned_usages == 0 {
+        CaptureHealth::Inactive
+    } else {
+        base
+    }
+}
+
 /// 「全按键支持」在启动对账里被**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）。
 ///
 /// 这些回落不弹窗、不报错，只是把开关拉低；界面若不说明，用户看到的就是"升级后
@@ -1776,6 +1827,15 @@ const AUTO_TRIGGER_ESCALATE_ATTEMPT: u32 = 5;
 const AUTO_TRIGGER_REESCALATE_EVERY: u32 = 10;
 /// 连续失败时的日志折叠：前 3 轮与每 10 轮各留一条。
 const AUTO_TRIGGER_LOG_EVERY: u32 = 10;
+
+/// 同一次开启期间，助手被接受多少次而**一次都没拿到所有权** ⇒ 判定"助手根本没起来"。
+///
+/// 为什么要这条判据（issue #291）：助手因外部环境（端口被系统保留 / 被别的进程占住）
+/// 每轮启动即退出时，桥接握手仍会成功一瞬，于是对账在 `Connected → Trigger` 之间
+/// 反复横跳、`consecutive` 每次都被清零，**既到不了第 5 轮兜底，也永远过不了 20 s
+/// 生效宽限**——界面停在 `starting`（不显示任何文案），用户看到的就是"开关开着、
+/// 按键没反应、也没有任何提示"。接受的次数只增不减，正好能穿过这个抖动。
+const HELPER_STARTUP_FAILURE_ACCEPTS: u32 = 3;
 
 /// 第 `consecutive` 轮失败后的等待时长（纯函数）。
 ///
@@ -1974,6 +2034,11 @@ fn rc003_auto_trigger_reconcile(
     let mut capture_recover_attempts: u32 = 0;
     // 助手正在设备节点恢复时只记一条"暂缓重启"，避免每 2 秒刷屏。
     let mut capture_recovery_wait_logged = false;
+    // 本次开启以来「助手被接受」的累计判断（issue #291）。基线取当前累计值：
+    // 计数只算本次开启之后的增量，不把上次运行的接受算进来。
+    let mut helper_accepts_seen: u64 = platform.rc003_bridge_snapshot().accepted_total;
+    let mut helper_accept_streak: u32 = 0;
+    let mut startup_failing_logged = false;
     loop {
         // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
         let woken_early = std::mem::take(&mut last_sleep_woken);
@@ -1983,6 +2048,48 @@ fn rc003_auto_trigger_reconcile(
             .map(|settings| settings.rc003_capture_enabled)
             .unwrap_or(false);
         let snapshot = platform.rc003_bridge_snapshot();
+        // 「助手反复被接受却一次没接管」要在这里推进，而不是放在 Connected 分支：
+        // 助手每轮活不过几秒时，对账多数轮次根本观察不到 Connected（快照从
+        // Listening 直接变 Failed），只有累计接受次数能穿过这个抖动（issue #291）。
+        let startup_failing = if !enabled {
+            // 关闭即重置"本次开启"的计数：下一次开启是一次全新的尝试。
+            helper_accept_streak = 0;
+            helper_accepts_seen = snapshot.accepted_total;
+            if startup_failing_logged {
+                startup_failing_logged = false;
+            }
+            false
+        } else {
+            let (next_streak, next_seen) = advance_helper_accept_streak(
+                helper_accept_streak,
+                helper_accepts_seen,
+                snapshot.accepted_total,
+                snapshot.owned_usages.len(),
+            );
+            helper_accept_streak = next_streak;
+            helper_accepts_seen = next_seen;
+            let failing = helper_startup_failing(helper_accept_streak);
+            if failing && !startup_failing_logged {
+                // hint 说**下一步动作**：这条断在 PC 内部的环境冲突上（端口被系统保留 /
+                // 被别的进程占住），继续按遥控器或重开开关都可能无效，先看环境。
+                sayall_windows::gatt_note(format!(
+                    "rc003 feature=enhanced-capture action=capture_unavailable phase=completed \
+                     terminal_result=failed reason=helper_startup_failing accepts={helper_accept_streak} \
+                     owned_usages=0 retryable=true hint=check_environment_conflict {}",
+                    bridge_health_summary(&snapshot)
+                ));
+                startup_failing_logged = true;
+            } else if !failing && startup_failing_logged {
+                // 只有真的拿到所有权才会走到这里（计数在 owned>0 时清零）。
+                sayall_windows::gatt_note(
+                    "rc003 feature=enhanced-capture action=capture_unavailable phase=cleared \
+                     terminal_result=passed reason=ownership_acquired"
+                        .to_owned(),
+                );
+                startup_failing_logged = false;
+            }
+            failing
+        };
         match decide_reconcile_round(enabled, classify_auto_trigger(&snapshot)) {
             ReconcileAction::Standby => {
                 if active_seen {
@@ -2034,7 +2141,12 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 capture_recovery_wait_logged = false;
-                CaptureHealth::Starting.publish(&capture_health);
+                capture_health_with_startup_failure(
+                    CaptureHealth::Starting,
+                    startup_failing,
+                    snapshot.owned_usages.len(),
+                )
+                .publish(&capture_health);
                 let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
                     &mut wake_seen,
@@ -2092,11 +2204,15 @@ fn rc003_auto_trigger_reconcile(
                 };
                 // 界面读的就是这一份：`Active` = 真的接管了，`Inactive` = 开着却没生效
                 // （界面据此显示一句用户语言的提示，2026-10-13）。
-                capture_health_for_round(
-                    true,
-                    true,
+                capture_health_with_startup_failure(
+                    capture_health_for_round(
+                        true,
+                        true,
+                        snapshot.owned_usages.len(),
+                        inactive_by_grace,
+                    ),
+                    startup_failing,
                     snapshot.owned_usages.len(),
-                    inactive_by_grace,
                 )
                 .publish(&capture_health);
                 if inactive_by_grace {
@@ -2239,7 +2355,12 @@ fn rc003_auto_trigger_reconcile(
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
-                CaptureHealth::Starting.publish(&capture_health);
+                capture_health_with_startup_failure(
+                    CaptureHealth::Starting,
+                    startup_failing,
+                    snapshot.owned_usages.len(),
+                )
+                .publish(&capture_health);
                 if was_connected {
                     // 助手掉线（崩溃 / 宿主重启 / 被系统回收）：重新进入恢复，
                     // 先来一轮快速期。
@@ -5822,6 +5943,63 @@ mod tests {
         assert_eq!(CaptureHealth::Off.as_str(), "off");
         assert_eq!(CaptureHealth::Starting.as_str(), "starting");
         assert_eq!(CaptureHealth::Active.as_str(), "active");
+    }
+
+    /// 助手反复「连上就走」必须能被累计接受次数识别（issue #291）。
+    ///
+    /// 现场形态：助手每轮启动 → 握手成功 → 因端口绑不上退出，对账在
+    /// `Connected → Trigger` 之间横跳，`consecutive` 每次归零（既到不了兜底轮，
+    /// 也永远过不了 20 s 生效宽限），界面于是长期停在"不显示文案"的 `starting`。
+    #[test]
+    fn helper_accept_streak_detects_startup_that_never_takes_ownership() {
+        // 正常启动：第一次被接受就拿到所有权 → 计数必须归零。这也是阳性对照：
+        // 若这里不为 0，说明判据只看"有没有增长"，会把健康启动报成失败。
+        assert_eq!(advance_helper_accept_streak(0, 0, 1, 3), (0, 1));
+        // 反复失败：每轮增长一次，所有权始终为空。
+        let (streak, seen) = advance_helper_accept_streak(0, 0, 1, 0);
+        assert_eq!((streak, seen), (1, 1));
+        let (streak, seen) = advance_helper_accept_streak(streak, seen, 2, 0);
+        assert_eq!((streak, seen), (2, 2));
+        // 两轮还不够：这是"助手慢启动中"与"根本没起来"的边界。
+        assert!(!helper_startup_failing(2));
+        let (streak, seen) = advance_helper_accept_streak(streak, seen, 3, 0);
+        assert_eq!((streak, seen), (3, 3));
+        assert!(helper_startup_failing(streak));
+        // 一旦接管过（任何所有权），失败史必须清零：否则提示会挂在恢复之后。
+        assert_eq!(advance_helper_accept_streak(streak, seen, 4, 3), (0, 4));
+        // 桥重启让累计值回退：只跟基线、不清计数，否则永远攒不到阈值。
+        assert_eq!(advance_helper_accept_streak(2, 9, 4, 0), (2, 4));
+        // 同一个累计值重复观察不重复计数（对账每轮都会读同一个快照）。
+        assert_eq!(advance_helper_accept_streak(1, 5, 5, 0), (1, 5));
+    }
+
+    /// 启动失败只压「没有所有权」的轮次（issue #291）。
+    ///
+    /// 界面只在 `inactive` 时出文案，所以这条边界必须钉死：把助手反复启动失败
+    /// 变成 `inactive` 才能让用户看到提示，而接管成功后必须立刻回 `active`。
+    #[test]
+    fn startup_failure_only_overrides_health_without_ownership() {
+        // 开着、桥没连上：正常是 starting（无文案）→ 反复失败后必须是 inactive。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Starting, true, 0),
+            CaptureHealth::Inactive
+        );
+        // 已经接管：保持 active，不能被失败史压住。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Active, true, 3),
+            CaptureHealth::Active
+        );
+        // 开关关着：保持 off（关着不显示提示）。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Off, true, 0),
+            CaptureHealth::Off
+        );
+        // 没有失败史：原样返回（不会把正常启动误报成 inactive）。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Starting, false, 0),
+            CaptureHealth::Starting
+        );
+        assert_eq!(HELPER_STARTUP_FAILURE_ACCEPTS, 3);
     }
 
     /// 「按下后报告层没有真的改写」也算"没生效"（2026-10-14）：连续缺失达到阈值时，
