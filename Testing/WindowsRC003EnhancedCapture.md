@@ -51,6 +51,19 @@
   - 若出现 `[PORT] event=remembered_port_unavailable`，允许**一次** `[ATTACH] verify=failed` + 宿主重建，之后必须恢复正常。
 - 反例（不允许发生）：`result=listening` 时仍然回退——那说明判据退化成"端口被占就换端口"，会顶掉别人的端口。
 
+### 2026-10-26 增量：助手启动失败必须对用户可见（#291 判定层）
+
+- 背景：助手每次启动都在端口阶段退出时，桥接握手仍会成功一瞬（旧实现里 `spawn_app_bridge` 在端口绑定之前）。主程序于是每轮都记 `terminal_result=passed reason=helper_connected`，而界面停在 `starting`（**不显示任何文案**），用户看到的是"开关开着、按键没反应、也没有任何提示"（issue #291）。
+- 修复后的判定顺序（按日志逐条看）：
+  1. `[LOCK] event=single_instance_acquired` → `[LISTEN] addr=…` → **之后**才出现 `[APP-BRIDGE] event=enabled`。**`[APP-BRIDGE] enabled` 早于 `[LISTEN]` 就是旧构建**（说明助手会在端口失败前先让主程序看到"连上了"）。
+  2. 助手仍失败时，应用每 15 s 观察一次累计接受数；累计被接受 ≥3 次且一次都没拿到所有权 ⇒ 落
+     `rc003 feature=enhanced-capture action=capture_unavailable phase=completed terminal_result=failed reason=helper_startup_failing accepts=3 owned_usages=0 retryable=true hint=check_environment_conflict`。
+  3. 同一时刻界面出现「{名称}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。」（`CaptureHealth=inactive`）。
+  4. 原因消除、agent 真的接管后：`action=capture_unavailable phase=cleared terminal_result=passed reason=ownership_acquired`，提示消失、状态回 `active`。
+- 反例（不允许发生）：`accepts` 已 ≥3、`owned_usages=0`，而界面仍无提示——那说明 `inactive` 又被 `starting` 覆盖了（`capture_health_with_startup_failure` 的边界被改坏）。
+- 阴性对照（不允许误报）：正常慢启动（agent 注入需要 8 s）期间不得出现 `helper_startup_failing`；一旦接管，计数必须清零。
+- **真机 `deferred`**：需要一台"助手必然启动失败"的机器（如 Docker/WSL2 保留 47831），验证上述 1–4 全链路；本机（47831 被自身助手正常持有）只能验证阳性路径。
+
 ## 2026-09-27 全按键动态目标增量验收
 
 - 捕获集合 = “全按键支持已开启”时**恒含三键**（返回 / 音量+ / 音量−；清空它们零副作用——这三个 usage 对 Windows 本就不可见）∪ 当前至少配置一个动作的按键；其余未映射键不清空，保留 Windows 原始行为（2026-10-13 修订，见下节）。

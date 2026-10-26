@@ -93,6 +93,16 @@
   写进 gadget 配置的老问题）。自动化 passed：助手 `cargo test` 79 passed（含 3 项新增）。**真机 deferred**：
   mirrored 机器上首次回退 + **第二次启动**（判据见 `Testing/WindowsRC003EnhancedCapture.md`
   「2026-10-25 增量」），以及安装版重出包后的回归。
+  **2026-10-26 判定层收口（issue #291）**：① 助手桥接（命名管道）移到端口绑定成功之后——
+  `[APP-BRIDGE] event=enabled` 必须晚于 `[LISTEN]`，让"握手成功"隐含"传输端口已就绪"，
+  不再出现"助手注定要退出、主程序却已报 helper_connected"；② 应用新增累计判据：本次开启
+  被接受 ≥3 次且`owned_usages` 始终为空 ⇒ 落
+  `action=capture_unavailable reason=helper_startup_failing hint=check_environment_conflict`
+  并发布 `CaptureHealth=inactive`（界面出既有"还没有生效，正在自动重试"文案），拿到所有权
+  或关闭开关立即清除。自动化 passed：`cargo test -p sayall-windows-app --lib` **163 passed**
+  （含 2 项新增，带阳性对照）；助手 `cargo check`、`cargo fmt --all -- --check` passed。
+  **真机 deferred**：需一台"助手必然启动失败"的机器验证 1–4 全链路（判据见 Testing 文档
+  「2026-10-26 增量」）。
 - [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
   `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
   也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口
