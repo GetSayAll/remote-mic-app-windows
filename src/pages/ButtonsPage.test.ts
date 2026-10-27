@@ -153,6 +153,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       targetUsages: [],
       ownedUsages: [],
       captureHealth: "off",
+      captureUnavailable: "none",
       captureRevoked: "none",
     })),
     // 遥控器信息卡片上的「重新连接」：扫描已配对设备 + 连接（默认空列表，用例内按需覆盖）。
@@ -404,6 +405,7 @@ function bridgeSnapshot(
   phase: Rc003BridgeSnapshot["phase"],
   captureHealth: Rc003BridgeSnapshot["captureHealth"] = "off",
   captureRevoked: Rc003BridgeSnapshot["captureRevoked"] = "none",
+  captureUnavailable: Rc003BridgeSnapshot["captureUnavailable"] = "none",
 ): Rc003BridgeSnapshot {
   return {
     phase,
@@ -422,6 +424,7 @@ function bridgeSnapshot(
     targetUsages: [],
     ownedUsages: [],
     captureHealth,
+    captureUnavailable,
     captureRevoked,
   };
 }

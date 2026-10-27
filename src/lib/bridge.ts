@@ -193,6 +193,15 @@ export interface Rc003BridgeSnapshot {
    */
   captureHealth: Rc003CaptureHealth;
   /**
+   * 「开着但没生效」的**原因**（2026-10-27，issue #291）：只在 `captureHealth` 为
+   * `inactive` 时有意义，界面据此选哪一句话。
+   *
+   * `startup_failing` = 助手反复启动不起来（典型原因：这台电脑上别的程序占着它需要
+   * 的东西）。对这类原因「关掉再打开」是无效建议，必须换文案——见
+   * `captureInactiveText` 的第二个参数。
+   */
+  captureUnavailable: Rc003CaptureUnavailable;
+  /**
    * 启动时被应用**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）：
    * `none` = 没发生；其余取值表示开关是被回落拉低的，界面要让用户看懂"为什么
    * 自己关了"（文案见 `captureRevokedText`）。token 与 Rust `CaptureRevoke::as_str`
@@ -203,6 +212,9 @@ export interface Rc003BridgeSnapshot {
 
 /** `captureHealth` 的取值（与 Rust `CaptureHealth::as_str` 逐字对应）。 */
 export type Rc003CaptureHealth = "off" | "starting" | "active" | "inactive";
+
+/** `captureUnavailable` 的取值（与 Rust `CaptureUnavailable::as_str` 逐字对应）。 */
+export type Rc003CaptureUnavailable = "none" | "startup_failing";
 
 /** `captureRevoked` 的取值（与 Rust `CaptureRevoke::as_str` 逐字对应）。 */
 export type Rc003CaptureRevoked =
@@ -1364,6 +1376,7 @@ const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   targetUsages: [],
   ownedUsages: [],
   captureHealth: "off",
+  captureUnavailable: "none",
   captureRevoked: "none",
 };
 

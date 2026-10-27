@@ -6,6 +6,7 @@ import {
   captureSwitchState,
   normalizeCaptureHealth,
   normalizeCaptureRevoked,
+  normalizeCaptureUnavailable,
   shouldShowCaptureInactive,
   shouldShowCaptureRevoked,
 } from "./capture-switch";
@@ -114,6 +115,33 @@ describe("「开着但没生效」提示（2026-10-13 定稿）", () => {
       expect(text).not.toContain(bad);
     }
   });
+
+  it("启动失败时换文案：只给用户做得到的两步（issue #291 / 2026-10-27 定稿）", () => {
+    const text = captureInactiveText("全按键支持", "startup_failing");
+    // 首句必须说"没能启动"，而不是"还没有生效"——后者会让用户以为再等等就好。
+    expect(text).toContain("暂时没能启动");
+    // 两步必须是用户能执行的：关开一次 → 重启电脑。
+    expect(text).toContain("请把开关关掉再打开一次");
+    expect(text).toContain("重启这台电脑");
+    // 阳性否决：不再要求用户"去找哪个程序"（2026-10-27 用户指出无从定位）。
+    expect(text).not.toContain("其他程序");
+    expect(text).not.toContain("退出");
+    // 名称随入口变化。
+    expect(captureInactiveText("“支持更多输入工具”", "startup_failing")).toContain(
+      "“支持更多输入工具”暂时没能启动",
+    );
+    // 术语红线同样适用（不得出现端口/进程/助手这类机制词）。
+    for (const bad of ["端口", "进程", "助手", "驱动", "注入", "UAC"]) {
+      expect(text).not.toContain(bad);
+    }
+    // 阳性对照：没有原因（或读不到）时必须退回通用文案，不能把用户引向这条流程。
+    expect(captureInactiveText("全按键支持")).toBe(
+      "全按键支持还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
+    );
+    expect(captureInactiveText("全按键支持", "unknown")).toBe(
+      "全按键支持还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
+    );
+  });
 });
 
 describe("normalizeCaptureHealth（2026-10-14：捕获状态载荷规范化）", () => {
@@ -126,6 +154,17 @@ describe("normalizeCaptureHealth（2026-10-14：捕获状态载荷规范化）",
     expect(normalizeCaptureHealth("")).toBe("unknown");
     expect(normalizeCaptureHealth("Active")).toBe("unknown"); // 逐字比较，不做大小写宽松
     expect(normalizeCaptureHealth("nonsense")).toBe("unknown");
+  });
+});
+
+describe("normalizeCaptureUnavailable（2026-10-27：没生效原因载荷规范化）", () => {
+  it("只接受两个稳定 token；缺失 / 未知值一律 unknown（退回通用文案）", () => {
+    expect(normalizeCaptureUnavailable("none")).toBe("none");
+    expect(normalizeCaptureUnavailable("startup_failing")).toBe("startup_failing");
+    expect(normalizeCaptureUnavailable(undefined)).toBe("unknown");
+    expect(normalizeCaptureUnavailable("")).toBe("unknown");
+    expect(normalizeCaptureUnavailable("Startup_Failing")).toBe("unknown");
+    expect(normalizeCaptureUnavailable("task_missing")).toBe("unknown");
   });
 });
 

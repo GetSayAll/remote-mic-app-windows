@@ -20,6 +20,7 @@ import {
   captureRevokedText,
   captureSwitchState as captureSwitchStateFn,
   normalizeCaptureRevoked,
+  normalizeCaptureUnavailable,
   shouldShowCaptureInactive,
   shouldShowCaptureRevoked,
 } from "../lib/capture-switch";
@@ -92,6 +93,7 @@ import {
   type Rc003BridgePhase,
   type Rc003CaptureHealth,
   type Rc003CaptureRevoked,
+  type Rc003CaptureUnavailable,
   type Rc003TaskStatus,
   type RemoteButton,
   type RemoteModel,
@@ -1817,6 +1819,8 @@ const rc003BridgeFailed = ref(false);
  * 开关开着 ≠ 生效——`inactive` 才显示提示（见 captureInactiveNote）。
  */
 const rc003CaptureHealth = ref<Rc003CaptureHealth>("off");
+/** 开着没生效的原因（2026-10-27，issue #291）：决定提示说"关掉再打开"还是"别的程序占着"。 */
+const rc003CaptureUnavailable = ref<Rc003CaptureUnavailable | "unknown">("none");
 /** 启动对账把开关关掉的原因（2026-10-15，issue #264 附加观察甲）：`none` = 没发生。 */
 const rc003CaptureRevoked = ref<Rc003CaptureRevoked | "unknown">("none");
 /** 上一次开关操作失败的**原文**：只进日志与映射，界面显示映射后的用户语言。 */
@@ -1873,9 +1877,7 @@ const captureInactiveNote = computed(() =>
     health: rc003CaptureHealth.value,
     linkReady: connectionReady.value,
   })
-    ? effectiveLanguage.value === "zh-Hans"
-      ? captureInactiveText(CAPTURE_FAILURE_NAME)
-      : t("全按键支持还没有生效，正在自动重试。如果一直不恢复，请把开关关掉再打开。")
+    ? captureInactiveText(CAPTURE_FAILURE_NAME, rc003CaptureUnavailable.value)
     : null,
 );
 /**
@@ -1969,6 +1971,9 @@ const reconcileRc003Task = async (): Promise<void> => {
     if (bridge) {
       rc003BridgePhase.value = bridge.phase;
       rc003CaptureHealth.value = bridge.captureHealth;
+      rc003CaptureUnavailable.value = normalizeCaptureUnavailable(
+        bridge.captureUnavailable,
+      );
       rc003CaptureRevoked.value = normalizeCaptureRevoked(bridge.captureRevoked);
     }
   } catch {
