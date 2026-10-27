@@ -11,7 +11,11 @@
  */
 
 import { t } from "./i18n";
-import type { Rc003CaptureHealth, Rc003CaptureRevoked } from "./bridge";
+import type {
+  Rc003CaptureHealth,
+  Rc003CaptureRevoked,
+  Rc003CaptureUnavailable,
+} from "./bridge";
 
 /** 开关的可见状态：不可用 / 正在操作 / 开启 / 关闭。 */
 export type CaptureSwitchState = "unavailable" | "busy" | "on" | "off";
@@ -52,8 +56,24 @@ function localizedName(name: string): string {
  *
  * 与失败句同一位（开关旁唯一允许有文字的地方）：一次只显示一句，操作失败优先
  * （那是用户刚做的动作），其次才是这一句。
+ *
+ * `unavailable` 决定说哪一句（2026-10-27，issue #291）：
+ * - `none`：过了宽限仍没接管，最常见的原因是慢启动 / 旧状态，**关掉再打开**确实
+ *   是最有效的一招；
+ * - `startup_failing`：助手反复启动不起来，典型原因是这台电脑上别的程序占着它需要
+ *   的东西。这种场景下关掉再打开**没有用**（现场已试过），照旧给那句话等于把用户
+ *   引向一次无效操作，所以换成"退出那个程序会自动恢复"。
  */
-export function captureInactiveText(name: string): string {
+export function captureInactiveText(
+  name: string,
+  unavailable: Rc003CaptureUnavailable | "unknown" = "none",
+): string {
+  if (unavailable === "startup_failing") {
+    return t(
+      "{name}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，不需要把开关关掉再打开。",
+      { name: localizedName(name) },
+    );
+  }
   return t("{name}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。", {
     name: localizedName(name),
   });
@@ -156,6 +176,17 @@ export function normalizeCaptureRevoked(
     raw === "unsupported"
     ? raw
     : "unknown";
+}
+
+/**
+ * 「没生效的原因」载荷规范化（2026-10-27，issue #291）：只认两个稳定 token（与 Rust
+ * `CaptureUnavailable::as_str` 逐字对应）；缺失 / 未知值回落 `unknown`——界面按
+ * "读不到"处理，退回通用文案（不能因为字段缺失就把用户引向"别的程序占着"）。
+ */
+export function normalizeCaptureUnavailable(
+  raw: unknown,
+): Rc003CaptureUnavailable | "unknown" {
+  return raw === "none" || raw === "startup_failing" ? raw : "unknown";
 }
 
 /**

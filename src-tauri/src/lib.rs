@@ -435,6 +435,8 @@ struct AppState {
     usage: Arc<UsageSync>,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    /// 「开着但没生效」的用户可见原因（2026-10-27，issue #291）：界面据此选文案。
+    capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
     /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
     membership: Arc<dyn MembershipRuntime>,
     /// 启动对账**主动关掉**开关的原因（2026-10-15，issue #264 附加观察甲）：只用于
@@ -459,6 +461,10 @@ impl std::fmt::Debug for AppState {
             .field(
                 "capture_health",
                 &CaptureHealth::current(&self.capture_health).as_str(),
+            )
+            .field(
+                "capture_unavailable",
+                &CaptureUnavailable::current(&self.capture_unavailable).as_str(),
             )
             .field(
                 "capture_revoked",
@@ -1122,6 +1128,9 @@ struct Rc003BridgeView {
     bridge: BridgeSnapshot,
     /// `off` / `starting` / `active` / `inactive`（前端 `Rc003CaptureHealth` 逐字对应）。
     capture_health: &'static str,
+    /// 「开着但没生效」的原因：`none` / `startup_failing`（前端 `Rc003CaptureUnavailable`
+    /// 逐字对应）。只在 `capture_health = inactive` 时有意义，界面据此选文案。
+    capture_unavailable: &'static str,
     /// 启动对账主动关掉开关的原因（`none` = 没发生；前端 `Rc003CaptureRevoked` 逐字对应）。
     capture_revoked: &'static str,
 }
@@ -1136,6 +1145,7 @@ async fn get_rc003_bridge_snapshot(
 ) -> Result<Rc003BridgeView, String> {
     let platform = Arc::clone(&state.platform);
     let capture_health = CaptureHealth::current(&state.capture_health).as_str();
+    let capture_unavailable = CaptureUnavailable::current(&state.capture_unavailable).as_str();
     let capture_revoked = CaptureRevoke::current(&state.capture_revoked).as_str();
     let bridge = tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
         .await
@@ -1143,6 +1153,7 @@ async fn get_rc003_bridge_snapshot(
     Ok(Rc003BridgeView {
         bridge,
         capture_health,
+        capture_unavailable,
         capture_revoked,
     })
 }
@@ -1742,6 +1753,56 @@ fn capture_health_with_startup_failure(
     }
 }
 
+/// 「开着但没生效」的**用户可见原因**（2026-10-27，issue #291）。
+///
+/// `CaptureHealth` 只回答"生效了吗"，界面据此决定显不显示提示；这一层回答
+/// "为什么没生效"，界面据此选哪一句话。两者刻意分开：health 是四态枚举、被多处
+/// 复用，往里加值等于改前端契约；原因只在 `inactive` 时有意义，单开一条通道不会
+/// 把状态机搅乱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CaptureUnavailable {
+    None = 0,
+    /// 助手反复启动失败：通常是这台电脑上别的程序占着它需要的东西（#291 的端口被
+    /// 系统保留就属于这一类）。对这类原因，"关掉再打开开关"是**无效建议**（现场已试过），
+    /// 必须换一句话，否则提示本身就在误导用户。
+    StartupFailing = 1,
+}
+
+impl CaptureUnavailable {
+    fn publish(self, slot: &std::sync::atomic::AtomicU8) {
+        slot.store(self as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn current(slot: &std::sync::atomic::AtomicU8) -> Self {
+        match slot.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => Self::StartupFailing,
+            _ => Self::None,
+        }
+    }
+
+    /// IPC token（前端 `Rc003CaptureUnavailable` 逐字对应）。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::StartupFailing => "startup_failing",
+        }
+    }
+
+    /// 本轮是否处于"助手反复启动失败"（纯函数，单测覆盖）。
+    ///
+    /// 与 `CaptureHealth::Inactive` 同进同出，但两者发布时机不同：health 每轮都会被
+    /// 覆盖（`starting` / `active` / `inactive`），原因必须能跨轮保持，否则提示会
+    /// 在"失败一轮、抖动一轮"之间闪。
+    fn from_startup_failing(startup_failing: bool) -> Self {
+        if startup_failing {
+            Self::StartupFailing
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// 「全按键支持」在启动对账里被**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）。
 ///
 /// 这些回落不弹窗、不报错，只是把开关拉低；界面若不说明，用户看到的就是"升级后
@@ -1985,6 +2046,7 @@ fn rc003_auto_trigger_reconcile(
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
 ) {
     // 本机没有对应架构的载荷时，重试多少次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
     // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会空转——
@@ -2058,6 +2120,7 @@ fn rc003_auto_trigger_reconcile(
             if startup_failing_logged {
                 startup_failing_logged = false;
             }
+            CaptureUnavailable::None.publish(&capture_unavailable);
             false
         } else {
             let (next_streak, next_seen) = advance_helper_accept_streak(
@@ -2069,6 +2132,9 @@ fn rc003_auto_trigger_reconcile(
             helper_accept_streak = next_streak;
             helper_accepts_seen = next_seen;
             let failing = helper_startup_failing(helper_accept_streak);
+            // 原因与 health 同轮发布：界面只在 `inactive` 时读它，但两者必须一致，
+            // 否则会出现"提示说启动失败、状态却是 active"的错位。
+            CaptureUnavailable::from_startup_failing(failing).publish(&capture_unavailable);
             if failing && !startup_failing_logged {
                 // hint 说**下一步动作**：这条断在 PC 内部的环境冲突上（端口被系统保留 /
                 // 被别的进程占住），继续按遥控器或重开开关都可能无效，先看环境。
@@ -5213,16 +5279,22 @@ pub fn run() {
             // 常驻对账线程是唯一的判据来源，它发布、界面只读。
             let capture_health =
                 Arc::new(std::sync::atomic::AtomicU8::new(CaptureHealth::Off as u8));
+            // 「开着但没生效」的原因（2026-10-27）：只在 inactive 时被界面读取，
+            // 用来决定说"关掉再打开"还是"别的程序占着它的东西"。
+            let capture_unavailable =
+                Arc::new(std::sync::atomic::AtomicU8::new(CaptureUnavailable::None as u8));
             #[cfg(windows)]
             {
                 let platform_for_trigger = Arc::clone(&platform);
                 let settings_for_trigger = settings.clone();
                 let health_for_trigger = Arc::clone(&capture_health);
+                let unavailable_for_trigger = Arc::clone(&capture_unavailable);
                 std::thread::spawn(move || {
                     rc003_auto_trigger_reconcile(
                         platform_for_trigger,
                         settings_for_trigger,
                         health_for_trigger,
+                        unavailable_for_trigger,
                     );
                 });
             }
@@ -5342,6 +5414,7 @@ pub fn run() {
                 settings,
                 usage,
                 capture_health,
+                capture_unavailable,
                 membership: membership::install(),
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
@@ -6000,6 +6073,37 @@ mod tests {
             CaptureHealth::Starting
         );
         assert_eq!(HELPER_STARTUP_FAILURE_ACCEPTS, 3);
+    }
+
+    /// 「没生效的原因」必须与前端类型逐字对应，且只在助手反复启动失败时为真（#291）。
+    ///
+    /// 这条通道决定界面说"关掉再打开"还是"别的程序占用了它需要的东西"——两者对
+    /// 端口被系统保留的机器是完全不同的建议，token 写错会让提示重新变成误导。
+    #[test]
+    fn capture_unavailable_token_matches_frontend_contract() {
+        assert_eq!(
+            CaptureUnavailable::from_startup_failing(false),
+            CaptureUnavailable::None
+        );
+        assert_eq!(
+            CaptureUnavailable::from_startup_failing(true),
+            CaptureUnavailable::StartupFailing
+        );
+        // 与前端 `Rc003CaptureUnavailable` 逐字对应。
+        assert_eq!(CaptureUnavailable::None.as_str(), "none");
+        assert_eq!(
+            CaptureUnavailable::StartupFailing.as_str(),
+            "startup_failing"
+        );
+        // 发布 → 读取往返（界面读的就是这条通道）。
+        let slot = std::sync::atomic::AtomicU8::new(CaptureUnavailable::None as u8);
+        CaptureUnavailable::StartupFailing.publish(&slot);
+        assert_eq!(
+            CaptureUnavailable::current(&slot),
+            CaptureUnavailable::StartupFailing
+        );
+        CaptureUnavailable::None.publish(&slot);
+        assert_eq!(CaptureUnavailable::current(&slot), CaptureUnavailable::None);
     }
 
     /// 「按下后报告层没有真的改写」也算"没生效"（2026-10-14）：连续缺失达到阈值时，

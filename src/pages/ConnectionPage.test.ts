@@ -1146,6 +1146,7 @@ describe("connection page rc003 capture switch", () => {
     phase: Rc003BridgeSnapshot["phase"],
     captureHealth: Rc003BridgeSnapshot["captureHealth"] = "off",
     captureRevoked: Rc003BridgeSnapshot["captureRevoked"] = "none",
+    captureUnavailable: Rc003BridgeSnapshot["captureUnavailable"] = "none",
   ): Rc003BridgeSnapshot => ({
     phase,
     port: 0,
@@ -1163,6 +1164,7 @@ describe("connection page rc003 capture switch", () => {
     targetUsages: [],
     ownedUsages: [],
     captureHealth,
+    captureUnavailable,
     captureRevoked,
   });
 
@@ -1205,6 +1207,21 @@ describe("connection page rc003 capture switch", () => {
     mocks.disableRc003Capture.mockResolvedValue(taskStatus({ enabled: false }));
     // 生效状态默认"没开"（关闭态）：开着却没生效的分支由 2026-10-13 的用例覆盖。
     mocks.getRc003BridgeSnapshot.mockResolvedValue(bridgeSnapshot("stopped", "off"));
+  });
+
+  it("助手反复启动失败时换文案：不再让用户做无效的「关掉再打开」（#291）", async () => {
+    mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: true }));
+    mocks.getConnectionSnapshot.mockResolvedValue({ ...emptyConnection, phase: "ready" });
+    // 桥在监听（助手每次起来就退出）→ 后端报 inactive + startup_failing。
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      bridgeSnapshot("listening", "inactive", "none", "startup_failing"),
+    );
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("“支持更多输入工具”启动没有成功");
+    // 关键断言：这条路径下绝不能再说"把开关关掉再打开"（现场已证伪）。
+    expect(wrapper.text()).not.toContain("请把开关关掉再打开");
+    wrapper.unmount();
   });
 
   it("「开着但没生效」给一句用户语言（2026-10-13）：只在后端说没生效时出现", async () => {

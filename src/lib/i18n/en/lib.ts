@@ -228,4 +228,9 @@ export default {
   "保存预览版更新设置失败，请稍后重试":
     "Could not save preview update settings. Try again later.",
   "请先检查更新，再下载安装": "Check for updates before downloading and installing.",
+  // 「助手反复启动失败」的专用句（2026-10-27，issue #291）：{name} 由
+  // captureInactiveText 传入已本地化的开关名（Full-key support / More Input Tools）。
+  // 通用那句（"{name}还没有生效…"）在本文件上方已有，勿重复添加。
+  "{name}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，不需要把开关关掉再打开。":
+    "{name} could not start. Another app on this PC may be using something it needs. It should recover once that app is closed, and you do not need to turn the switch off and on again.",
 } as Record<string, string>;
