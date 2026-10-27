@@ -713,6 +713,51 @@ fn list_endpoints() -> Result<Vec<AudioEndpoint>, PlatformError> {
     Ok(endpoints)
 }
 
+/// 默认录音设备的探测结果缓存（2026-10-27）。
+///
+/// 为什么缓存：探测要 CoCreateInstance + 打开端点属性，毫秒级；它挂在**语音键按下**
+/// 这条延迟敏感的路径上，不能每次按键都跑一遍。30 s 足够——用户在设置里换设备之后，
+/// 最多隔一次按键就能在日志里看到变化。
+static CAPTURE_PROBE_CACHE: std::sync::Mutex<Option<(Instant, String, bool)>> =
+    std::sync::Mutex::new(None);
+
+/// 系统默认**录音**设备的名字，以及它是不是 CABLE Output（2026-10-27）。
+///
+/// 为什么需要：用户把输入法的麦克风从「自动检测」改成 `CABLE Output` 之后准确率
+/// 立刻正常——「自动检测」跟的是系统默认录音设备，而默认设备可能还是内置麦克风阵列
+/// 或「立体声混音」。那种情况下按键链路、报告层合成、录音时长全都正常，
+/// 只有识别结果不对（录到的是环境声/系统声），日志里此前**没有任何证据**。
+///
+/// 返回 `None` 表示枚举失败（不改任何行为，只少一行日志）。
+pub fn capture_input_diagnosis() -> Option<(String, bool)> {
+    const CACHE_TTL: Duration = Duration::from_secs(30);
+    let mut cache = CAPTURE_PROBE_CACHE.lock().ok()?;
+    if let Some((probed_at, name, is_cable)) = cache.as_ref() {
+        if probed_at.elapsed() < CACHE_TTL {
+            return Some((name.clone(), *is_cable));
+        }
+    }
+    let probe = probe_default_capture();
+    *cache = probe
+        .as_ref()
+        .map(|(name, is_cable)| (Instant::now(), name.clone(), *is_cable));
+    probe
+}
+
+fn probe_default_capture() -> Option<(String, bool)> {
+    let enumerator = DeviceEnumerator::new().ok()?;
+    let device = enumerator.get_default_device(&Direction::Capture).ok()?;
+    let name = device.get_friendlyname().ok()?;
+    let is_cable_output = is_cable_capture_name(&name);
+    Some((name, is_cable_output))
+}
+
+/// 录音端点名是否就是虚拟线的输出端（`CABLE Output`，16 通道驱动同名前缀）。
+fn is_cable_capture_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("cable") && lower.contains("output")
+}
+
 fn render_endpoint_inactive_counts() -> windows::core::Result<(u32, u32, u32)> {
     use windows::Win32::Media::Audio::{
         eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_DISABLED,
@@ -1689,6 +1734,28 @@ impl Drop for WasapiApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 录音端点名的判定（2026-10-27）：`voice_capture_input` 靠它区分"默认设备是不是
+    /// 虚拟线的输出端"。判错方向都会误导——把内置麦克风当成 CABLE Output 就永远不会
+    /// 报警，反过来会把正常的 CABLE 端点报成异常。
+    #[test]
+    fn cable_capture_name_recognises_only_the_virtual_output() {
+        assert!(is_cable_capture_name(
+            "CABLE Output (VB-Audio Virtual Cable)"
+        ));
+        assert!(is_cable_capture_name("CABLE Output"));
+        // 16 通道驱动在录音端的名字仍是 CABLE Output，但大小写/后缀可能变。
+        assert!(is_cable_capture_name(
+            "cable output (2- vb-audio virtual cable)"
+        ));
+        // 阳性对照：内置麦克风、立体声混音、以及"只有 cable 没有 output"的渲染端都不是。
+        assert!(!is_cable_capture_name("麦克风阵列 (Realtek(R) Audio)"));
+        assert!(!is_cable_capture_name("立体声混音 (Realtek(R) Audio)"));
+        assert!(!is_cable_capture_name(
+            "CABLE In 16 Ch (VB-Audio Virtual Cable)"
+        ));
+        assert!(!is_cable_capture_name(""));
+    }
 
     /// 同一 CABLE 端点的硬件用例互斥：它们会临时改写端点/会话静音并在 Drop 中恢复。
     #[cfg(windows)]
