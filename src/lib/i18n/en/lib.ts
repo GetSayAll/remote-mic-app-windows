@@ -230,7 +230,8 @@ export default {
   "请先检查更新，再下载安装": "Check for updates before downloading and installing.",
   // 「助手反复启动失败」的专用句（2026-10-27，issue #291）：{name} 由
   // captureInactiveText 传入已本地化的开关名（Full-key support / More Input Tools）。
+  // 只给可执行的两步（关开一次 → 重启电脑），不要求用户去找"是哪个程序"。
   // 通用那句（"{name}还没有生效…"）在本文件上方已有，勿重复添加。
-  "{name}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，不需要把开关关掉再打开。":
-    "{name} could not start. Another app on this PC may be using something it needs. It should recover once that app is closed, and you do not need to turn the switch off and on again.",
+  "{name}暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；还是不行就重启这台电脑。":
+    "{name} could not start for now and is retrying automatically. If it does not recover, turn the switch off and on again; if that does not help either, restart this PC.",
 } as Record<string, string>;

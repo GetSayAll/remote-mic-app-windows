@@ -60,9 +60,9 @@ function localizedName(name: string): string {
  * `unavailable` 决定说哪一句（2026-10-27，issue #291）：
  * - `none`：过了宽限仍没接管，最常见的原因是慢启动 / 旧状态，**关掉再打开**确实
  *   是最有效的一招；
- * - `startup_failing`：助手反复启动不起来，典型原因是这台电脑上别的程序占着它需要
- *   的东西。这种场景下关掉再打开**没有用**（现场已试过），照旧给那句话等于把用户
- *   引向一次无效操作，所以换成"退出那个程序会自动恢复"。
+ * - `startup_failing`：助手反复启动不起来。这一档**不给"去找哪个程序"这种做不了的建议**
+ *   （2026-10-27 Andy：用户无从定位是哪个程序）——端口这类外部占用现在由助手自己换端口
+ *   解决，剩下能让用户做的是"关掉再打开一次"和"重启电脑"，两句都可执行。
  */
 export function captureInactiveText(
   name: string,
@@ -70,7 +70,7 @@ export function captureInactiveText(
 ): string {
   if (unavailable === "startup_failing") {
     return t(
-      "{name}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，不需要把开关关掉再打开。",
+      "{name}暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；还是不行就重启这台电脑。",
       { name: localizedName(name) },
     );
   }

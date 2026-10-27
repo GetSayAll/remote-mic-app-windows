@@ -1209,7 +1209,7 @@ describe("connection page rc003 capture switch", () => {
     mocks.getRc003BridgeSnapshot.mockResolvedValue(bridgeSnapshot("stopped", "off"));
   });
 
-  it("助手反复启动失败时换文案：不再让用户做无效的「关掉再打开」（#291）", async () => {
+  it("助手反复启动失败时换文案：只给做得到的两步（#291）", async () => {
     mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: true }));
     mocks.getConnectionSnapshot.mockResolvedValue({ ...emptyConnection, phase: "ready" });
     // 桥在监听（助手每次起来就退出）→ 后端报 inactive + startup_failing。
@@ -1218,9 +1218,10 @@ describe("connection page rc003 capture switch", () => {
     );
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.text()).toContain("“支持更多输入工具”启动没有成功");
-    // 关键断言：这条路径下绝不能再说"把开关关掉再打开"（现场已证伪）。
-    expect(wrapper.text()).not.toContain("请把开关关掉再打开");
+    expect(wrapper.text()).toContain("“支持更多输入工具”暂时没能启动");
+    expect(wrapper.text()).toContain("重启这台电脑");
+    // 关键断言：不能让用户去找"是哪个程序"（他无从定位，2026-10-27 反馈）。
+    expect(wrapper.text()).not.toContain("其他程序");
     wrapper.unmount();
   });
 

@@ -116,22 +116,25 @@ describe("「开着但没生效」提示（2026-10-13 定稿）", () => {
     }
   });
 
-  it("启动失败时换文案：不再让用户做无效的「关掉再打开」（issue #291）", () => {
+  it("启动失败时换文案：只给用户做得到的两步（issue #291 / 2026-10-27 定稿）", () => {
     const text = captureInactiveText("全按键支持", "startup_failing");
-    // 首句必须说"启动没有成功"，而不是"还没有生效"——后者会让用户以为再等等就好。
-    expect(text).toContain("启动没有成功");
-    // 必须给一个和"关掉再打开"不同的动作，且明确否掉关开。
-    expect(text).toContain("其他程序");
-    expect(text).toContain("不需要把开关关掉再打开");
+    // 首句必须说"没能启动"，而不是"还没有生效"——后者会让用户以为再等等就好。
+    expect(text).toContain("暂时没能启动");
+    // 两步必须是用户能执行的：关开一次 → 重启电脑。
+    expect(text).toContain("请把开关关掉再打开一次");
+    expect(text).toContain("重启这台电脑");
+    // 阳性否决：不再要求用户"去找哪个程序"（2026-10-27 用户指出无从定位）。
+    expect(text).not.toContain("其他程序");
+    expect(text).not.toContain("退出");
     // 名称随入口变化。
     expect(captureInactiveText("“支持更多输入工具”", "startup_failing")).toContain(
-      "“支持更多输入工具”启动没有成功",
+      "“支持更多输入工具”暂时没能启动",
     );
     // 术语红线同样适用（不得出现端口/进程/助手这类机制词）。
     for (const bad of ["端口", "进程", "助手", "驱动", "注入", "UAC"]) {
       expect(text).not.toContain(bad);
     }
-    // 阳性对照：没有原因（或读不到）时必须退回通用文案，不能把用户引向"别的程序占着"。
+    // 阳性对照：没有原因（或读不到）时必须退回通用文案，不能把用户引向这条流程。
     expect(captureInactiveText("全按键支持")).toBe(
       "全按键支持还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。",
     );
