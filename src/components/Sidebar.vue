@@ -1,10 +1,42 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import type { AppIconIdentifier } from "../lib/bridge";
 import type { NavIcon } from "../navigation";
 import { navigationItems } from "../navigation";
 import CrownIcon from "./CrownIcon.vue";
+import { t, tNav } from "../lib/i18n";
+import { effectiveLanguage } from "../lib/language-state";
 
-defineProps<{ activePage: string; version?: string | null }>();
+/**
+ * 侧栏文案：中文模式直接用原文；英文模式走导航专用词表（`nav.*`），避免与
+ * 页面内同形文案（设备徽标「推荐」= Recommended、向导阶段「设置」= Set Up）
+ * 争用同一个 key。
+ */
+function navLabel(item: { label: string }): string {
+  return effectiveLanguage.value === "en" ? tNav(item.label) : item.label;
+}
+
+const props = withDefaults(
+  defineProps<{
+    activePage: string;
+    /** 个人中心入口文案：未登录「个人中心」，已登录为邮箱前缀。 */
+    profileLabel?: string;
+    /** 与托盘/窗口图标同源的当前应用图标。 */
+    appIcon?: AppIconIdentifier;
+  }>(),
+  { profileLabel: "个人中心", appIcon: "faceted-duck" },
+);
 const emit = defineEmits<{ select: [page: string] }>();
+
+const topNavigationItems = computed(() => navigationItems.filter((item) => item.id !== "profile"));
+const profileItem = computed(() => navigationItems.find((item) => item.id === "profile"));
+/** 未登录时 App 传「个人中心」；英文模式换成 Profile，登录后的邮箱前缀原样显示。 */
+const profileLabelText = computed(() =>
+  props.profileLabel === "个人中心" ? tNav("个人中心") : props.profileLabel,
+);
+const appIconPreview = computed(() =>
+  props.appIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png",
+);
 
 /**
  * 侧栏图标：SVG path 组（24x24 视窗，描边风格），形状对齐
@@ -60,14 +92,29 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     // 会员图标由 CrownIcon 组件绘制（SF Symbols crown.fill）；保留空组维持类型映射。
     strokes: [],
   },
+  textbubble: {
+    // SF "text.bubble.fill"：圆角对话气泡 + 两行文字（对齐 Mac 回眸入口）。
+    strokes: [
+      "M4.2 3.6h15.6a2.2 2.2 0 0 1 2.2 2.2v9.1a2.2 2.2 0 0 1-2.2 2.2h-7.1L8.1 21v-3.9H4.2A2.2 2.2 0 0 1 2 14.9V5.8a2.2 2.2 0 0 1 2.2-2.2z",
+      "M6.4 8.2h11.2M6.4 11.8h7.4",
+    ],
+  },
+  person: {
+    // SF "person.crop.circle"：圆形轮廓 + 头肩剪影。
+    strokes: [
+      "M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 0 0 0-19z",
+      "M12 7.2a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z",
+      "M5.8 19.2c1.1-2.8 3.2-4.3 6.2-4.3s5.1 1.5 6.2 4.3",
+    ],
+  },
 };
 </script>
 
 <template>
   <aside class="sidebar">
-    <nav aria-label="设置页面">
+    <nav class="sidebar-nav" :aria-label="t('设置页面')">
       <button
-        v-for="item in navigationItems"
+        v-for="item in topNavigationItems"
         :key="item.id"
         class="nav-item"
         :class="{ active: activePage === item.id }"
@@ -94,19 +141,51 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
             stroke-linejoin="round"
           />
         </svg>
-        <span>{{ item.label }}</span>
+        <span>{{ navLabel(item) }}</span>
+      </button>
+
+      <!-- 个人中心固定在最底部（对齐 Mac statistics）。 -->
+      <div class="sidebar-spacer"></div>
+      <button
+        v-if="profileItem"
+        class="nav-item profile-nav-item"
+        :class="{ active: activePage === profileItem.id }"
+        type="button"
+        :aria-label="tNav('个人中心')"
+        @click="emit('select', profileItem.id)"
+      >
+        <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
+        <span>{{ profileLabelText }}</span>
       </button>
     </nav>
-
-    <!-- 底部显示应用版本号（2026-10-02 用户指定：不再显示“预览版”）。版本来自
-         运行快照的 package_info，与安装包/更新器同源；尚未读到时不显示占位。 -->
-    <div class="sidebar-footer">
-      <span v-if="version" class="sidebar-version">{{ version }}</span>
-    </div>
   </aside>
 </template>
 
 <style scoped>
-/* 版本号用等宽数字，避免运行中的宽度抖动。 */
-.sidebar-version { font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
+.sidebar-nav {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  /* Mac 侧栏没有项间留白；选中背景是整块页面单元。 */
+  gap: 0;
+}
+
+.sidebar-spacer {
+  flex: 1 1 auto;
+  min-height: 12px;
+}
+
+/* 邮箱前缀最多 10 个字符；极窄侧栏仍保持单行省略，避免撑宽或换行。 */
+.nav-item > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-app-icon {
+  border-radius: 5px;
+  object-fit: cover;
+}
 </style>

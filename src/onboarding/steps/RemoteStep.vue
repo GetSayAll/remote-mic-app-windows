@@ -8,6 +8,7 @@ import {
 } from "../../lib/bridge";
 import OptionCard from "../../components/onboarding/OptionCard.vue";
 import StatusRow from "../../components/onboarding/StatusRow.vue";
+import { t } from "../../lib/i18n";
 
 const props = defineProps<{
   runtime: RuntimeSnapshot | null;
@@ -89,14 +90,14 @@ function isConnectedDevice(device: PairedRemote): boolean {
  */
 const buttonRowDesc = computed(() => {
   if (!props.buttonObserved) {
-    return "按一下遥控器上的普通按键（比如主页键），不要按语音键。";
+    return t("按一下遥控器上的普通按键（比如主页键），不要按语音键。");
   }
   if (connected.value) return "";
   // 说明句跟着用户当下能看到的下一步走：还没扫到设备 → 先扫；
   // 设备已列出（候选不唯一 / 自动连接没触发）→ 直接点设备行右侧的按钮。
   return props.devices.length === 0
-    ? "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。"
-    : "按键已收到。还差一步：点遥控器一行右侧的“连接”。";
+    ? t("按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。")
+    : t("按键已收到。还差一步：点遥控器一行右侧的“连接”。");
 });
 
 /** 扫描状态行：只在"扫描过 / 正在扫描"时出现，不新增空状态文案。 */
@@ -105,14 +106,17 @@ const scanRow = computed(() => {
     // 2026-10-13 现场：去掉"保持遥控器在旁边…"那句（点击后不再出提示词）。
     return {
       state: "busy" as const,
-      title: "正在寻找小米遥控器…",
+      title: t("正在寻找小米遥控器…"),
       desc: "",
     };
   }
   if (props.devices.length > 0) {
     return {
       state: "ok" as const,
-      title: `找到 ${props.devices.length} 个已配对的小米遥控器`,
+      title:
+        props.devices.length === 1
+          ? t("找到 1 个已配对的小米遥控器")
+          : t("找到 {count} 个已配对的小米遥控器", { count: props.devices.length }),
       desc: "",
     };
   }
@@ -130,9 +134,10 @@ const FIX_TITLES: Record<string, string> = {
   "remote.connect_failed": "连接没有成功",
 };
 
-const fixTitle = computed(() =>
-  props.gateCode ? (FIX_TITLES[props.gateCode] ?? null) : null,
-);
+const fixTitle = computed(() => {
+  const source = props.gateCode ? FIX_TITLES[props.gateCode] : null;
+  return source ? t(source) : null;
+});
 const fixPrefersSettings = computed(
   () =>
     props.gateCode === "bluetooth.unavailable" ||
@@ -143,9 +148,9 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
 
 <template>
   <section class="onboarding-step">
-    <h1>连接遥控器</h1>
+    <h1>{{ t("连接遥控器") }}</h1>
     <p class="onboarding-lede">
-      无线麦只支持小米蓝牙语音遥控器 2 和小米蓝牙语音遥控器 2 Pro（RC001 / RC003）。
+      {{ t("无线麦只支持小米蓝牙语音遥控器 2 和小米蓝牙语音遥控器 2 Pro（RC001 / RC003）。") }}
     </p>
 
     <!-- 「扫描已配对设备」保持常显（2026-10-13 现场），下方留出间距；
@@ -157,7 +162,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
         :disabled="scanning"
         @click="$emit('scan')"
       >
-        {{ scanning ? "正在扫描…" : "扫描已配对设备" }}
+        {{ scanning ? t("正在扫描…") : t("扫描已配对设备") }}
       </button>
     </div>
 
@@ -183,7 +188,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
             ? connectedModelLabel
             : device.name
         }}</strong>
-        <small>已配对的小米蓝牙语音遥控器</small>
+        <small>{{ t("已配对的小米蓝牙语音遥控器") }}</small>
         <template #trailing>
           <span
             class="option-action"
@@ -194,10 +199,10 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
           >
             {{
               connectingDeviceId === device.id
-                ? "正在连接…"
+                ? t("正在连接…")
                 : isConnectedDevice(device)
-                  ? "已连接"
-                  : "连接"
+                  ? t("已连接")
+                  : t("连接")
             }}
           </span>
         </template>
@@ -205,7 +210,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
 
       <StatusRow
         :state="buttonObserved ? 'ok' : 'pending'"
-        :title="buttonObserved ? '已收到遥控器按键' : '等待控制按键'"
+        :title="buttonObserved ? t('已收到遥控器按键') : t('等待控制按键')"
         :desc="buttonRowDesc"
       />
     </div>
@@ -217,22 +222,21 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
     <!-- 按错了遥控器：明确说是"另一支"在发按键（2026-10-13 现场），
          不然界面看起来就是"按了没反应"。 -->
     <div v-if="otherRemoteActivity && !buttonObserved" class="onboarding-card warn">
-      <h4>刚收到的是另一支遥控器的按键</h4>
+      <h4>{{ t("刚收到的是另一支遥控器的按键") }}</h4>
       <p v-if="connected">
-        当前连接的是「{{ connectedModelLabel || connectedName }}」。请按这一支的普通按键；
-        要用另一支，就点它那一行的「连接」。
+        {{ t("当前连接的是「{name}」。请按这一支的普通按键；要用另一支，就点它那一行的「连接」。", { name: connectedModelLabel || connectedName }) }}
       </p>
       <p v-else>
-        请先在上面点一行「连接」，选中你手上正在按的这一支。
+        {{ t("请先在上面点一行「连接」，选中你手上正在按的这一支。") }}
       </p>
     </div>
     <p v-if="reconnecting" class="onboarding-muted">
-      正在自动恢复连接（第 {{ reconnectAttempt }} 次尝试），最多等约 60 秒，不需要重新配对。
+      {{ t("正在自动恢复连接（第 {attempt} 次尝试），最多等约 60 秒，不需要重新配对。", { attempt: reconnectAttempt }) }}
     </p>
 
     <div v-if="voiceKeyMistake && !buttonObserved" class="onboarding-card warn">
-      <h4>刚才按的是语音键</h4>
-      <p>请按遥控器上除语音键以外的普通按键（比如主页键）。</p>
+      <h4>{{ t("刚才按的是语音键") }}</h4>
+      <p>{{ t("请按遥控器上除语音键以外的普通按键（比如主页键）。") }}</p>
     </div>
 
     <div v-if="fixTitle" class="onboarding-card warn">
@@ -245,7 +249,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
           type="button"
           @click="$emit('openBluetoothSettings')"
         >
-          打开蓝牙设置
+          {{ t("打开蓝牙设置") }}
         </button>
         <button
           class="onboarding-chip"
@@ -254,7 +258,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
           :disabled="scanning"
           @click="$emit('scan')"
         >
-          {{ scanning ? "正在扫描…" : "重新扫描" }}
+          {{ scanning ? t("正在扫描…") : t("重新扫描") }}
         </button>
       </div>
     </div>

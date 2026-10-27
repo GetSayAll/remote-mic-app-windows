@@ -90,6 +90,13 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace
 
+      # 助手 crate 不在 workspace 里（`hardware/RC003/helper` 自带 Cargo.toml），上面那条
+      # `cargo test --workspace` **覆盖不到它**：此前它的 70+ 项单测只有人手跑过，
+      # 等于没有门禁（2026-10-25 补）。这些测试不需要设备、不需要提权；
+      # 需要设备/提权的判据走 `--selftest` 与真机验收。
+      - name: Test RC003 helper
+        run: cargo test --manifest-path hardware/RC003/helper/Cargo.toml
+
       # arm64 助手的编译路径必须被真实覆盖：本机与部分环境没有 VS ARM64 工具集，
       # 那条路径平时永远不会被执行到（issue206 的根因之一）。
       # `cargo check` 只做类型检查并产出元数据，**不调用链接器**，因此不依赖

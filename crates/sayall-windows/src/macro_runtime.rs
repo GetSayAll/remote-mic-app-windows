@@ -603,6 +603,33 @@ pub fn macro_key_to_key_code(name: &str) -> Option<crate::send_input::KeyCode> {
         "media_prev" => K::MediaPrev,
         "media_next" => K::MediaNext,
         "media_play_pause" => K::MediaPlayPause,
+        ";" => K::Oem1,
+        "=" => K::OemPlus,
+        "," => K::OemComma,
+        "-" => K::OemMinus,
+        "." => K::OemPeriod,
+        "/" => K::Oem2,
+        "`" => K::Oem3,
+        "[" => K::Oem4,
+        "\\" => K::Oem5,
+        "]" => K::Oem6,
+        "'" => K::Oem7,
+        "numpad0" => K::Numpad0,
+        "numpad1" => K::Numpad1,
+        "numpad2" => K::Numpad2,
+        "numpad3" => K::Numpad3,
+        "numpad4" => K::Numpad4,
+        "numpad5" => K::Numpad5,
+        "numpad6" => K::Numpad6,
+        "numpad7" => K::Numpad7,
+        "numpad8" => K::Numpad8,
+        "numpad9" => K::Numpad9,
+        "numpad_multiply" => K::NumpadMultiply,
+        "numpad_add" => K::NumpadAdd,
+        "numpad_subtract" => K::NumpadSubtract,
+        "numpad_decimal" => K::NumpadDecimal,
+        "numpad_divide" => K::NumpadDivide,
+        "numlock" => K::NumLock,
         _ => {
             let mut chars = lower.chars();
             let first = chars.next()?;
@@ -711,6 +738,34 @@ pub fn key_code_to_macro_key(key: &crate::send_input::KeyCode) -> Option<String>
         K::MediaPrev => "media_prev",
         K::MediaNext => "media_next",
         K::MediaPlayPause => "media_play_pause",
+        K::Oem1 => ";",
+        K::OemPlus => "=",
+        K::OemComma => ",",
+        K::OemMinus => "-",
+        K::OemPeriod => ".",
+        K::Oem2 => "/",
+        K::Oem3 => "`",
+        K::Oem4 => "[",
+        K::Oem5 => "\\",
+        K::Oem6 => "]",
+        K::Oem7 => "'",
+        K::Numpad0 => "numpad0",
+        K::Numpad1 => "numpad1",
+        K::Numpad2 => "numpad2",
+        K::Numpad3 => "numpad3",
+        K::Numpad4 => "numpad4",
+        K::Numpad5 => "numpad5",
+        K::Numpad6 => "numpad6",
+        K::Numpad7 => "numpad7",
+        K::Numpad8 => "numpad8",
+        K::Numpad9 => "numpad9",
+        K::NumpadMultiply => "numpad_multiply",
+        K::NumpadAdd => "numpad_add",
+        K::NumpadSubtract => "numpad_subtract",
+        K::NumpadDecimal => "numpad_decimal",
+        K::NumpadDivide => "numpad_divide",
+        K::NumLock => "numlock",
+        K::Oem102 => "\\",
         K::A => "a",
         K::B => "b",
         K::C => "c",
@@ -854,8 +909,6 @@ impl MacroStepperSource for WindowsMacroStepperSource {
         Box::new(WindowsMacroStepper {
             injector: Arc::clone(&self.injector),
             focus_profiles: Arc::clone(&self.focus_profiles),
-            focus: None,
-            focus_policy: crate::focus_service::FocusRetryPolicy::default(),
         })
     }
 }
@@ -865,8 +918,6 @@ impl MacroStepperSource for WindowsMacroStepperSource {
 pub struct WindowsMacroStepper {
     injector: Arc<dyn crate::button_mapping::MappingInjector>,
     focus_profiles: Arc<dyn Fn(&str) -> Option<crate::focus::AppFocusProfile> + Send + Sync>,
-    focus: Option<crate::focus_service::FocusRunner>,
-    focus_policy: crate::focus_service::FocusRetryPolicy,
 }
 
 /// 就绪轮询间隔（与 Mac 的 45×100ms 同款节奏）。
@@ -899,21 +950,6 @@ impl WindowsMacroStepper {
             }
             std::thread::sleep(std::time::Duration::from_millis(READINESS_POLL_INTERVAL_MS));
         }
-    }
-
-    fn with_focus_runner<T>(
-        &mut self,
-        task: impl FnOnce(&crate::focus_service::FocusRunner) -> T,
-    ) -> Option<T> {
-        if self.focus.is_none() {
-            let backend: Arc<dyn crate::focus_service::FocusBackend> =
-                Arc::new(crate::focus_windows::WindowsFocusBackend::new());
-            self.focus = Some(crate::focus_service::FocusRunner::spawn(
-                backend,
-                self.focus_policy,
-            ));
-        }
-        self.focus.as_ref().map(task)
     }
 }
 
@@ -1009,89 +1045,22 @@ impl MacroStepper for WindowsMacroStepper {
         }
     }
 
-    fn focus_input(&mut self, target: &str, timeout_ms: u64) -> StepOutcome {
+    fn focus_input(&mut self, target: &str, _timeout_ms: u64) -> StepOutcome {
         let profile = (self.focus_profiles)(target);
         let strategy = profile
             .as_ref()
             .map(|profile| profile.strategy)
             .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
-        match strategy {
-            // 没有学习记录 / 只打开：依赖缺失（对齐 Mac「未找到输入框学习记录」）。
-            crate::focus::FocusStrategy::OpenOnly => StepOutcome::MissingDependency,
-            crate::focus::FocusStrategy::AppShortcut => {
-                let Some(chord) = profile.and_then(|profile| profile.shortcut) else {
-                    return StepOutcome::MissingDependency;
-                };
-                if self.injector.launch_app(target).is_err() {
-                    return StepOutcome::Failed;
-                }
-                if self.injector.tap(&chord).is_err() {
-                    return StepOutcome::Failed;
-                }
-                // 注入已发；目标 App 内是否真的聚焦无法确认。
-                StepOutcome::Unknown
-            }
-            crate::focus::FocusStrategy::RecordedPoint => {
-                let Some(point) = profile.and_then(|profile| profile.point) else {
-                    return StepOutcome::MissingDependency;
-                };
-                if self.injector.launch_app(target).is_err() {
-                    return StepOutcome::Failed;
-                }
-                // 生产路径由注入器换算绝对坐标并点击；失败原因（窗口未出现 / 不在前台 /
-                // 窗口尺寸变化）在注入器日志里，这里只汇报步骤失败。
-                match self.injector.launch_app_and_focus(
-                    target,
-                    Some(&crate::focus::AppFocusProfile {
-                        strategy: crate::focus::FocusStrategy::RecordedPoint,
-                        point: Some(point),
-                        ..Default::default()
-                    }),
-                ) {
-                    Ok(()) => StepOutcome::Unknown,
-                    Err(_) => StepOutcome::Failed,
-                }
-            }
-            crate::focus::FocusStrategy::RecordedElement => {
-                let Some(recorded) = profile.and_then(|profile| profile.recorded) else {
-                    return StepOutcome::MissingDependency;
-                };
-                if self.injector.launch_app(target).is_err() {
-                    return StepOutcome::Failed;
-                }
-                // 激活异步完成：等目标成为前台再提交聚焦请求（否则前几次尝试打在旧前台，
-                // 3 秒重试预算会在激活完成前耗尽 —— 2026-10-19 嵌套动作现场）。
-                let _ = crate::app_launcher::wait_for_target_foreground(
-                    target,
-                    std::time::Duration::from_millis(2500),
-                );
-                let submitted = self.with_focus_runner(|runner| {
-                    runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
-                        crate::focus::FocusChoice::Recorded(recorded),
-                    ))
-                });
-                let Some(Some(request_id)) = submitted else {
-                    return StepOutcome::Failed;
-                };
-                let mut focused = false;
-                let completed = Self::wait_until(timeout_ms, || {
-                    let report = self
-                        .with_focus_runner(|runner| runner.last_report())
-                        .flatten();
-                    match report {
-                        Some(report) if report.request_id == request_id => {
-                            focused = report.focused;
-                            true
-                        }
-                        _ => false,
-                    }
-                });
-                if completed && focused {
-                    StepOutcome::Done
-                } else {
-                    StepOutcome::Failed
-                }
-            }
+        if strategy == crate::focus::FocusStrategy::OpenOnly {
+            // 「只打开 APP」没有聚焦动作，按缺少聚焦配置处理。
+            return StepOutcome::MissingDependency;
+        }
+        // 与按键页「打开应用 + 聚焦方式」走同一条生产实现：
+        // 预设默认（Chrome/网易云快捷键、其余自动选择）和自定义档案都在这里生效。
+        // 注入/聚焦是否真的落在目标控件只能由目标 App 确认，故终态为 Unknown。
+        match self.injector.launch_app_and_focus(target, profile.as_ref()) {
+            Ok(()) => StepOutcome::Unknown,
+            Err(_) => StepOutcome::Failed,
         }
     }
 
@@ -1662,6 +1631,54 @@ mod tests {
         .is_none());
     }
 
+    /// 用户给出的常用快捷键清单（Codex/WorkBuddy 设置页）：每一条都必须能
+    /// 从语义键名回落到可注入的 KeyChord。修饰键顺序不影响结果。
+    #[test]
+    fn common_shortcut_list_is_fully_representable() {
+        let cases: &[(&[MacroModifier], &str)] = &[
+            (&[MacroModifier::Control], "k"),
+            (&[MacroModifier::Control], ","),
+            (&[MacroModifier::Control], "f"),
+            (&[], "return"),
+            (&[MacroModifier::Shift], "return"),
+            (&[MacroModifier::Control], "n"),
+            (&[], "escape"),
+            (&[MacroModifier::Control], "["),
+            (&[MacroModifier::Control], "]"),
+            (&[MacroModifier::Control, MacroModifier::Shift], "e"),
+            (&[MacroModifier::Control], "b"),
+            (&[MacroModifier::Control, MacroModifier::Shift], "b"),
+            (&[], "f11"),
+            (&[MacroModifier::Shift, MacroModifier::Alt], "w"),
+            // Ctrl+"+":主键盘是 Ctrl+Shift+=，小键盘是 Ctrl+NumpadAdd。
+            (&[MacroModifier::Control, MacroModifier::Shift], "="),
+            (&[MacroModifier::Control], "numpad_add"),
+            (&[MacroModifier::Control], "-"),
+            (&[MacroModifier::Control], "0"),
+            // "@" 在 Windows 上是 Shift+2。
+            (&[MacroModifier::Shift], "2"),
+            (&[], "/"),
+            (&[MacroModifier::Control], "t"),
+            (&[MacroModifier::Control], "w"),
+            // 第二张图里的补充项。
+            (&[MacroModifier::Control], "g"),
+            (&[MacroModifier::Control], "l"),
+            (&[MacroModifier::Control], "j"),
+            (&[MacroModifier::Control, MacroModifier::Shift], "return"),
+        ];
+
+        for (modifiers, key) in cases {
+            let chord = MacroChord {
+                modifiers: modifiers.to_vec(),
+                key: (*key).to_owned(),
+            };
+            assert!(
+                macro_chord_to_key_chord(&chord).is_some(),
+                "快捷键不可执行：{modifiers:?} + {key}"
+            );
+        }
+    }
+
     #[test]
     fn macro_key_table_covers_named_and_letters() {
         use crate::send_input::KeyCode;
@@ -1670,6 +1687,48 @@ mod tests {
         assert_eq!(macro_key_to_key_code("f12"), Some(KeyCode::F12));
         assert_eq!(macro_key_to_key_code("k"), Some(KeyCode::K));
         assert_eq!(macro_key_to_key_code("7"), Some(KeyCode::Digit7));
+        for (name, key) in [
+            (";", KeyCode::Oem1),
+            ("=", KeyCode::OemPlus),
+            (",", KeyCode::OemComma),
+            ("-", KeyCode::OemMinus),
+            (".", KeyCode::OemPeriod),
+            ("/", KeyCode::Oem2),
+            ("`", KeyCode::Oem3),
+            ("[", KeyCode::Oem4),
+            ("\\", KeyCode::Oem5),
+            ("]", KeyCode::Oem6),
+            ("'", KeyCode::Oem7),
+        ] {
+            assert_eq!(macro_key_to_key_code(name), Some(key), "{name}");
+            assert_eq!(key_code_to_macro_key(&key), Some(name.to_owned()), "{name}");
+        }
+        // ISO 额外键 VK_OEM_102 与主 `\` 键字符相同，执行侧统一走 Oem5。
+        assert_eq!(
+            key_code_to_macro_key(&KeyCode::Oem102),
+            Some("\\".to_owned())
+        );
+        for (name, key) in [
+            ("numpad0", KeyCode::Numpad0),
+            ("numpad1", KeyCode::Numpad1),
+            ("numpad2", KeyCode::Numpad2),
+            ("numpad3", KeyCode::Numpad3),
+            ("numpad4", KeyCode::Numpad4),
+            ("numpad5", KeyCode::Numpad5),
+            ("numpad6", KeyCode::Numpad6),
+            ("numpad7", KeyCode::Numpad7),
+            ("numpad8", KeyCode::Numpad8),
+            ("numpad9", KeyCode::Numpad9),
+            ("numpad_multiply", KeyCode::NumpadMultiply),
+            ("numpad_add", KeyCode::NumpadAdd),
+            ("numpad_subtract", KeyCode::NumpadSubtract),
+            ("numpad_decimal", KeyCode::NumpadDecimal),
+            ("numpad_divide", KeyCode::NumpadDivide),
+            ("numlock", KeyCode::NumLock),
+        ] {
+            assert_eq!(macro_key_to_key_code(name), Some(key), "{name}");
+            assert_eq!(key_code_to_macro_key(&key), Some(name.to_owned()), "{name}");
+        }
         assert_eq!(macro_key_to_key_code("unknown-key"), None);
     }
 

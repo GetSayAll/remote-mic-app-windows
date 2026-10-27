@@ -53,6 +53,8 @@
   --mapping-line: rgba(105, 112, 128, 0.4);
   --pressed: #ef9420;
   --pressed-text: #b4611a;
+  /* Mac 个人中心「单次语音时长排行」用系统橙（SwiftUI .orange），与品牌粉分开。 */
+  --ranking-accent: #ff9500;
   --pressed-surface: rgba(239, 148, 32, 0.14);
   --pressed-border: rgba(239, 148, 32, 0.65);
   --info-text: #555c6a;
@@ -116,6 +118,7 @@ html[data-theme="dark"] {
   --mapping-line: rgba(190, 194, 207, 0.48);
   --pressed: #ffab4f;
   --pressed-text: #ffc27d;
+  --ranking-accent: #ff9f0a;
   --pressed-surface: rgba(255, 171, 79, 0.16);
   --pressed-border: rgba(255, 171, 79, 0.72);
   --info-text: #c7c9d2;
@@ -193,7 +196,8 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 10px 4px;
+  /* 对齐 Mac：选中态铺满侧栏宽度；首项贴顶、个人中心贴底，不留空白带。 */
+  padding: 0;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
   backdrop-filter: blur(24px);
@@ -288,6 +292,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .vb-cable-callout { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; }
 .vb-cable-callout strong { color: var(--warning-strong); }
 .vb-cable-callout p { margin: 3px 0 0; }
+.voice-audio-callout strong { color: var(--warning-strong); }
+.voice-audio-callout p { margin: 3px 0 0; }
 .vb-cable-callout .button-row { flex: 0 0 auto; justify-content: flex-start; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 18px; }
 .metric-card span { display: block; color: var(--muted); font-size: 13px; }
@@ -515,7 +521,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-editor .muted { font-size: 13px; margin: 0; }
 .preset-groups { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
 .preset-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-/* 动作分区（基础按键/系统与媒体/打开应用/自定义）：小节标题 + 芯片网格。 */
+/* 动作分区（基础按键 → 系统与媒体 → 自定义动作 + 按住时连续执行 → 打开应用 →
+   组合动作 → 常用语 → 鼠标动作）：小节标题 + 芯片网格；鼠标块由页面末尾的
+   第二个容器承载（点击 → 移动 → 滚轮 → 数量输入）。 */
 .action-sections { margin-top: 12px; display: grid; gap: 12px; }
 .action-section-title { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; }
 .action-section .preset-grid { margin-top: 6px; }

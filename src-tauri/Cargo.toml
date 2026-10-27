@@ -27,6 +27,8 @@ sayall-core = { path = "../crates/sayall-core" }
 sayall-windows = { path = "../crates/sayall-windows" }
 sayall-windows-button-profiles = { path = "../crates/sayall-windows-button-profiles" }
 sayall-windows-common-phrases = { path = "../crates/sayall-windows-common-phrases" }
+base64 = "0.22"
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.13.4", default-features = false }
@@ -39,10 +41,12 @@ tauri-plugin-opener = "2.5.5"
 tauri-plugin-updater = "2.11.0"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

@@ -38,16 +38,34 @@ pub struct PresetApp {
     pub relaunch_when_hidden: bool,
 }
 
+/// 「打开应用」分组实际展示的预设（顺序即界面顺序，2026-10-23 用户定稿）。
+///
+/// 表内其余条目是旧版本用过的目标，只为已有按键映射 / 组合动作保留可执行解析，
+/// 不再出现在选择列表里。
+pub const DEFAULT_PRESET_IDS: &[&str] = &[
+    "sayall",
+    "wechat",
+    "netease_music",
+    "chrome",
+    "chatgpt",
+    "workbuddy",
+    "dimagent",
+    "vokie",
+    "notepad",
+    "qq",
+];
+
 /// 预设应用表（对齐 Mac 预设 + Windows 常见项）。无线麦自身排首位
 /// （对齐 Mac `PresetApplication.remoteMic`，恒为已安装）。
 ///
-/// 安装探测三级（任一命中即视为已安装）：System32 直存或 App Paths 注册表 →
+/// 安装探测（任一命中即视为已安装）：System32 直存或 App Paths 注册表 →
 /// `install_paths` 候选路径 → 开始菜单快捷方式（解析目标 exe 与 `exe_names`
-/// 比对）。未安装的条目由 UI 过滤，不在"打开应用"列表展示。
+/// 比对）→ 已登记的 AppsFolder AUMID（Microsoft Store 包，如 ChatGPT）。
+/// 未安装的条目由 UI 过滤，不在"打开应用"列表展示。
 pub const PRESET_APPS: &[PresetApp] = &[
     PresetApp {
         id: "sayall",
-        name: "无线麦",
+        name: "无线麦 SayAll",
         exe_names: &["sayall-windows-app.exe"],
         install_paths: &[],
         shortcut_names: &[],
@@ -65,11 +83,25 @@ pub const PRESET_APPS: &[PresetApp] = &[
         relaunch_when_hidden: false,
     },
     PresetApp {
-        id: "edge",
-        name: "Edge 浏览器",
-        exe_names: &["msedge.exe"],
-        install_paths: &[],
-        shortcut_names: &[],
+        id: "workbuddy",
+        name: "WorkBuddy",
+        exe_names: &["WorkBuddy.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Programs\\WorkBuddy\\WorkBuddy.exe",
+            "%LOCALAPPDATA%\\WorkBuddy\\WorkBuddy.exe",
+        ],
+        shortcut_names: &["WorkBuddy"],
+        relaunch_when_hidden: true,
+    },
+    PresetApp {
+        id: "chatgpt",
+        name: "ChatGPT",
+        exe_names: &["ChatGPT.exe"],
+        install_paths: &[
+            "%LOCALAPPDATA%\\Programs\\ChatGPT\\ChatGPT.exe",
+            "%LOCALAPPDATA%\\ChatGPT\\ChatGPT.exe",
+        ],
+        shortcut_names: &["ChatGPT"],
         relaunch_when_hidden: true,
     },
     PresetApp {
@@ -345,14 +377,17 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     let started = std::time::Instant::now();
     // 开始菜单索引只扫一次，供全部条目复用（每页加载调用一次，不能按条目重复遍历）。
     let shortcuts = start_menu_shortcuts();
-    let apps: Vec<PresetAppInfo> = PRESET_APPS
+    let apps: Vec<PresetAppInfo> = DEFAULT_PRESET_IDS
         .iter()
+        .filter_map(|id| preset_app(id))
         .map(|app| PresetAppInfo {
             id: app.id.to_owned(),
             name: app.name.to_owned(),
             installed: app.id == "sayall"
                 || app.exe_names.iter().any(|exe| exe_resolvable(exe))
-                || preset_launch_target(app, &shortcuts).is_some(),
+                || preset_launch_target(app, &shortcuts).is_some()
+                || preset_aumid(app.id)
+                    .is_some_and(crate::registered_apps::registered_target_is_installed),
         })
         .collect();
     crate::ble::gatt_note(format!(
@@ -367,6 +402,41 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
 #[cfg(not(windows))]
 pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     Vec::new()
+}
+
+/// 预设应用在聚焦快捷键之后仍需点击的控件（96 DPI 下的窗口内偏移）。
+///
+/// 网易云音乐的 `Ctrl+F` 只负责打开搜索页，不会把键盘焦点放进搜索框
+/// （2026-10-23 现场实测：随后输入的字符不会进入搜索框）。这里记录搜索框中心，
+/// 调用方在快捷键之后点击并全选已有文字。
+fn preset_focus_click_design(target: &str) -> Option<(f64, f64)> {
+    match target {
+        "netease_music" => Some((410.0, 37.0)),
+        _ => None,
+    }
+}
+
+/// 预设应用聚焦后的点击点（物理屏幕像素）。
+#[cfg(windows)]
+pub(crate) fn preset_focus_click_point(target: &str) -> Option<(i32, i32)> {
+    let (design_x, design_y) = preset_focus_click_design(target)?;
+    let hwnd = target_window_visibility(target)?.largest_visible?;
+    let (wx, wy, _, _) = win_impl::window_rect_physical(hwnd)?;
+    let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) };
+    if dpi == 0 {
+        return None;
+    }
+    let scale = f64::from(dpi) / 96.0;
+    Some((
+        (wx + design_x * scale).round() as i32,
+        (wy + design_y * scale).round() as i32,
+    ))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn preset_focus_click_point(_target: &str) -> Option<(i32, i32)> {
+    None
 }
 
 /// 自定义应用选择结果（`pick_custom_app` 命令返回）。
@@ -393,6 +463,10 @@ pub fn preset_aumid(id: &str) -> Option<&'static str> {
     match id {
         // 本机实测（Windows 11，2026-10-15）：按 exe 名看不到窗口，按 AUMID 可见。
         "calc" => Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+        // 2026-10-22 本机实测（安装包显示名 ChatGPT）：Microsoft Store 包为
+        // `OpenAI.Codex`，清单 `Application Id="App"`、`Executable="app/ChatGPT.exe"`。
+        // 这类包没有 App Paths / 开始菜单 .lnk，安装探测与启动都走 AppsFolder。
+        "chatgpt" => Some("OpenAI.Codex_2p2nqsd0c76g0!App"),
         _ => None,
     }
 }
@@ -572,6 +646,10 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                             true,
                         )
                         .is_ok()
+                    } else if let Some(aumid) = preset_aumid(app.id) {
+                        let target =
+                            format!("{}{aumid}", crate::registered_apps::REGISTERED_PREFIX);
+                        crate::registered_apps::launch_registered_app(&target).is_ok()
                     } else {
                         launch_new(app.exe_names).is_ok()
                     };
@@ -664,6 +742,16 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
             );
             launched?;
             return foreground_after_launch(app);
+        }
+        // Microsoft Store 包（如 ChatGPT）没有可执行路径/开始菜单 .lnk：
+        // 用 AppsFolder 的 AUMID 启动，而不是对 WindowsApps 里的 exe 名做 ShellExecute。
+        if let Some(aumid) = preset_aumid(app.id) {
+            let target = format!("{}{aumid}", crate::registered_apps::REGISTERED_PREFIX);
+            crate::ble::gatt_note(format!(
+                "app_launcher action=activate_or_launch preset={} phase=launch_aumid",
+                app.id
+            ));
+            return crate::registered_apps::launch_registered_app(&target);
         }
         launch_new(app.exe_names)?;
         return foreground_after_launch(app);
@@ -1290,7 +1378,7 @@ pub(crate) fn process_image_path(pid: u32) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn process_app_user_model_id(pid: u32) -> Option<String> {
+pub(crate) fn process_app_user_model_id(pid: u32) -> Option<String> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
     use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
@@ -2682,6 +2770,10 @@ mod application_readiness_tests {
             preset_aumid("calc"),
             Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App")
         );
+        assert_eq!(
+            preset_aumid("chatgpt"),
+            Some("OpenAI.Codex_2p2nqsd0c76g0!App")
+        );
         assert_eq!(preset_aumid("notepad"), None);
         assert_eq!(preset_aumid("unknown-app"), None);
     }
@@ -3213,28 +3305,57 @@ pub(crate) mod tests {
     fn preset_app_lookup_rejects_unknown() {
         assert!(preset_app("wechat").is_some());
         assert!(preset_app("nonexistent-app").is_none());
+        // 2026-10-22 用户要求：Edge 不再作为默认预设展示。
+        assert!(preset_app("edge").is_none());
     }
 
-    /// 2026-10-02 扩充的预设应用（Vokie / Visual Studio Code / Cursor / DimAgent /
-    /// QQ / 飞书 / Hermes）：必须带开始菜单快捷方式探测名——这些应用常装在
-    /// 自定义目录（如 D:\Apps），App Paths 与 System32 探测覆盖不到。
+    /// 2026-10-23 用户定稿的 10 个默认预设：顺序与展示名必须一致。
+    #[test]
+    fn preset_focus_click_design_covers_netease_only() {
+        assert_eq!(
+            preset_focus_click_design("netease_music"),
+            Some((410.0, 37.0))
+        );
+        assert_eq!(preset_focus_click_design("chrome"), None);
+        assert_eq!(preset_focus_click_design("notepad"), None);
+    }
+
     #[test]
     fn preset_table_includes_requested_apps() {
-        for (id, name) in [
-            ("vokie", "Vokie"),
-            ("vscode", "Visual Studio Code"),
-            ("cursor", "Cursor"),
+        let expected = [
+            ("sayall", "无线麦 SayAll"),
+            ("wechat", "微信"),
+            ("netease_music", "网易云音乐"),
+            ("chrome", "Chrome 浏览器"),
+            ("chatgpt", "ChatGPT"),
+            ("workbuddy", "WorkBuddy"),
             ("dimagent", "DimAgent"),
+            ("vokie", "Vokie"),
+            ("notepad", "记事本"),
             ("qq", "QQ"),
-            ("feishu", "飞书"),
-            ("hermes", "Hermes"),
-        ] {
+        ];
+        assert_eq!(DEFAULT_PRESET_IDS.len(), expected.len());
+        for (index, (id, name)) in expected.iter().enumerate() {
+            assert_eq!(DEFAULT_PRESET_IDS[index], *id, "默认预设顺序");
             let app = preset_app(id).unwrap_or_else(|| panic!("预设表缺少 {id}"));
-            assert_eq!(app.name, name, "{id} 的展示名");
+            assert_eq!(app.name, *name, "{id} 的展示名");
+        }
+        // 常装在自定义目录的应用仍须有开始菜单兜底探测。
+        for id in ["chatgpt", "workbuddy", "dimagent", "vokie", "qq"] {
+            let app = preset_app(id).expect("预设");
             assert!(
                 !app.shortcut_names.is_empty(),
                 "{id} 需要开始菜单快捷方式兜底探测"
             );
+        }
+    }
+
+    /// 旧版本的预设保留可执行解析，但不进入默认列表（已有映射不失效）。
+    #[test]
+    fn legacy_presets_stay_resolvable_but_hidden() {
+        for id in ["calc", "explorer", "vscode", "cursor", "feishu", "hermes"] {
+            assert!(preset_app(id).is_some(), "{id} 旧目标应仍可解析");
+            assert!(!DEFAULT_PRESET_IDS.contains(&id), "{id} 不应出现在默认列表");
         }
     }
 
@@ -3359,8 +3480,8 @@ pub(crate) mod tests {
     }
 
     /// 探测结果一致性：probe 判定已安装的预设（自身除外）必须能给出
-    /// System32/App Paths 或候选路径/开始菜单启动位置——否则 UI 会展示
-    /// 一个点了打不开的芯片。
+    /// System32/App Paths、候选路径/开始菜单，或 AppsFolder AUMID 启动位置——
+    /// 否则 UI 会展示一个点了打不开的芯片。
     #[test]
     #[cfg(windows)]
     fn installed_preset_apps_expose_launch_targets() {
@@ -3372,7 +3493,9 @@ pub(crate) mod tests {
             let app = preset_app(&info.id).expect("probe 只返回预设表内的条目");
             assert!(
                 app.exe_names.iter().any(|exe| exe_resolvable(exe))
-                    || preset_launch_target(app, &shortcuts).is_some(),
+                    || preset_launch_target(app, &shortcuts).is_some()
+                    || preset_aumid(app.id)
+                        .is_some_and(crate::registered_apps::registered_target_is_installed),
                 "{} 判定已安装却没有可用的启动位置",
                 info.id
             );
@@ -3536,6 +3659,26 @@ pub(crate) mod tests {
             "解析出的工作目录应包含 Windows，实际：{}",
             resolved.working_dir
         );
+    }
+
+    /// 本机现场核对（2026-10-22）：WorkBuddy / ChatGPT 已安装时应出现在列表，
+    /// Edge 已从默认预设移除。依赖本机安装状态，不参与 CI。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "depends on this machine's installed WorkBuddy and ChatGPT"]
+    fn local_preset_probe_matches_requested_apps() {
+        let apps = probe_preset_apps();
+        let installed = |id: &str| apps.iter().any(|app| app.id == id && app.installed);
+        assert!(installed("workbuddy"), "WorkBuddy 应按已安装展示");
+        assert!(installed("chatgpt"), "ChatGPT 应按已安装展示");
+        for hidden in [
+            "calc", "explorer", "vscode", "cursor", "feishu", "hermes", "edge",
+        ] {
+            assert!(
+                !apps.iter().any(|app| app.id == hidden),
+                "{hidden} 不应出现在默认预设列表"
+            );
+        }
     }
 
     #[test]

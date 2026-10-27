@@ -11,6 +11,7 @@ use crate::{
     send_input::{KeyChord, KeyCode},
     send_input_windows::SendInputRuntime,
     ConnectionPhase, ConnectionSnapshot, PlatformError, RemoteModel, UsageCounters,
+    VoiceAudioHealth,
 };
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
@@ -75,6 +76,13 @@ const MICROPHONE_EXTEND_INTERVAL: Duration = Duration::from_millis(2500);
 /// 取 8 秒而不是 5 秒：覆盖冷启动后首个音频帧到达较慢的现场，同时仍能在
 /// 用户明显感到“卡住”之前释放键盘。正常会话的首帧在 1 秒内到达。
 const VOICE_AUDIO_STALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// 报告层合成释放保险的宽限期（2026-10-23 尾字丢失现场调整）。
+///
+/// helper 在语音键释放帧上会先保持 200ms（`RELEASE_HOLD_MS`），让应用把
+/// 最后一段音频排空到虚拟声卡、豆包继续收音；应用侧必须晚于这个保持窗
+/// 再检查键态，否则会在 helper 放行前抢先把合成的右 Alt 抬起，尾音仍会被
+/// 截断。300ms = helper 200ms + 音频排空/调度余量。
+const VOICE_SYNTH_RELEASE_GRACE_MS: u64 = 300;
 
 /// 微信输入法专属的会话激活/休眠恢复只能用于它自己的默认语音热键。
 ///
@@ -111,6 +119,98 @@ fn synth_label(target: Option<u16>) -> String {
 ///
 /// 证据在本地环路即时产生：这个延迟只留足"应用先看到按下、帧结果随后到"的
 /// 竞态余量；再长只会推迟判据可见性。
+/// ATVV 满速音频的样本率（与 `AtvvCapabilities` 的 codec 0x02 一致）。
+const VOICE_EXPECTED_SAMPLE_RATE_HZ: u32 = 16_000;
+/// 低于该样本率即视为音频不完整（约为满速的 3/4）。
+///
+/// 2026-10-24 现场：正常会话 14,900–15,800 /s，蓝牙共存时 4,600–5,500 /s；
+/// 阈值取 12,000 留出短会话的抖动余量，又不放过 1/3 速率的明显降级。
+const VOICE_DEGRADED_SAMPLE_RATE_HZ: u32 = 12_000;
+/// 太短的会话不判定：起停抖动会把 0.2–0.5 秒的会话算成异常。
+const VOICE_RATE_MIN_DURATION_MS: u64 = 800;
+
+/// 语音会话音频完整度判定（纯函数，单测覆盖）。
+///
+/// 输入是**已解码并送入音频队列**的样本数与 `StreamStarted → StreamStopped`
+/// 的时长。返回 `None` = 不判定（太短或没有样本），界面与日志都不得据此提示。
+fn classify_voice_audio_rate(samples: u64, duration_ms: u64) -> Option<(u32, VoiceAudioHealth)> {
+    if samples == 0 || duration_ms < VOICE_RATE_MIN_DURATION_MS {
+        return None;
+    }
+    let rate_hz = (samples.saturating_mul(1_000) / duration_ms).min(u32::MAX as u64) as u32;
+    let health = if rate_hz >= VOICE_DEGRADED_SAMPLE_RATE_HZ {
+        VoiceAudioHealth::Full
+    } else {
+        VoiceAudioHealth::Degraded
+    };
+    Some((rate_hz, health))
+}
+
+fn voice_audio_health_token(health: VoiceAudioHealth) -> &'static str {
+    match health {
+        VoiceAudioHealth::Unknown => "unknown",
+        VoiceAudioHealth::Full => "full",
+        VoiceAudioHealth::Degraded => "degraded",
+    }
+}
+
+#[cfg(test)]
+mod voice_audio_rate_tests {
+    use super::{
+        classify_voice_audio_rate, voice_audio_health_token, VoiceAudioHealth,
+        VOICE_DEGRADED_SAMPLE_RATE_HZ,
+    };
+
+    #[test]
+    fn full_rate_sessions_are_full() {
+        // 2026-10-24 19:49 真机会话：2.32 s / 35,040 samples。
+        assert_eq!(
+            classify_voice_audio_rate(35_040, 2_320),
+            Some((15_103, VoiceAudioHealth::Full))
+        );
+        assert_eq!(
+            classify_voice_audio_rate(24_000, 1_610),
+            Some((14_906, VoiceAudioHealth::Full))
+        );
+    }
+
+    #[test]
+    fn one_third_rate_sessions_are_degraded() {
+        // 2026-10-24 19:30 真机会话：2.426 s / 13,200 samples。
+        assert_eq!(
+            classify_voice_audio_rate(13_200, 2_426),
+            Some((5_441, VoiceAudioHealth::Degraded))
+        );
+    }
+
+    #[test]
+    fn threshold_is_inclusive_and_short_or_empty_sessions_are_not_judged() {
+        assert_eq!(
+            classify_voice_audio_rate(u64::from(VOICE_DEGRADED_SAMPLE_RATE_HZ), 1_000),
+            Some((12_000, VoiceAudioHealth::Full))
+        );
+        assert_eq!(
+            classify_voice_audio_rate(u64::from(VOICE_DEGRADED_SAMPLE_RATE_HZ) - 1, 1_000),
+            Some((11_999, VoiceAudioHealth::Degraded))
+        );
+        assert_eq!(classify_voice_audio_rate(20_000, 799), None);
+        assert_eq!(classify_voice_audio_rate(0, 2_000), None);
+    }
+
+    #[test]
+    fn health_tokens_are_stable_for_logs_and_ui() {
+        assert_eq!(
+            voice_audio_health_token(VoiceAudioHealth::Unknown),
+            "unknown"
+        );
+        assert_eq!(voice_audio_health_token(VoiceAudioHealth::Full), "full");
+        assert_eq!(
+            voice_audio_health_token(VoiceAudioHealth::Degraded),
+            "degraded"
+        );
+    }
+}
+
 const VOICE_EFFECT_CHECK_MS: u64 = 500;
 /// 允许"证据先于按下被应用看到"的容差（毫秒）。
 ///
@@ -131,6 +231,104 @@ enum VoiceEffectVerdict {
     Replaced,
     Skipped(String),
     Missing,
+}
+
+/// 每次语音会话的音频电平统计（2026-10-27）。
+///
+/// 为什么需要：用户报"识别不准"时，日志里只有按键链路、时长与泵指标，**没有任何音频
+/// 质量证据**；而 `mic=` 读的是 Windows 麦克风隐私记录，在豆包上恒 `not_observed`
+/// （历史所有日志都是 0 次 observed），所以那条判据说明不了"有没有开麦"。
+/// 没有电平数字，就只能让用户用耳朵判断"声音够不够大"。
+///
+/// 只记数字，不碰音频内容：峰值 / 均方根 / 削波样本数。
+#[derive(Default)]
+struct VoiceLevelMeter {
+    frames: u64,
+    samples: u64,
+    /// 绝对值峰值（最小 0，最大 32768——`i16::MIN` 的绝对值）。
+    peak: i32,
+    /// 落在满幅上的样本数（>= 32767）：持续非零说明增益过大或离麦克风太近。
+    clipped: u64,
+    /// 平方和，用于算 RMS。
+    sum_squares: u64,
+}
+
+impl VoiceLevelMeter {
+    fn observe(&mut self, samples: &[i16]) {
+        if samples.is_empty() {
+            return;
+        }
+        self.frames += 1;
+        self.samples += samples.len() as u64;
+        for &sample in samples {
+            let value = sample as i32;
+            let magnitude = value.unsigned_abs() as i32;
+            if magnitude > self.peak {
+                self.peak = magnitude;
+            }
+            if magnitude >= 32767 {
+                self.clipped += 1;
+            }
+            let widened = value as i64;
+            self.sum_squares = self.sum_squares.saturating_add((widened * widened) as u64);
+        }
+    }
+
+    /// 取走本轮统计并清空（会话结束即复位，下一轮从零开始）。
+    fn take(&mut self) -> VoiceLevelSummary {
+        let summary = VoiceLevelSummary {
+            frames: self.frames,
+            samples: self.samples,
+            peak_dbfs: dbfs_from_magnitude(self.peak as f64),
+            rms_dbfs: if self.samples == 0 {
+                None
+            } else {
+                let mean = self.sum_squares as f64 / self.samples as f64;
+                Some(dbfs_from_magnitude(mean.sqrt()))
+            },
+            clipped: self.clipped,
+        };
+        *self = Self::default();
+        summary
+    }
+
+    /// 会话收尾时落一行（`reason` 区分正常结束与异常中止）。
+    ///
+    /// 会话里一帧音频都没到时不写：那种情况时长/`samples=0` 已经能说明问题，
+    /// 再写一行 `peak=-120` 只会把日志搅浑。
+    fn log_and_reset(&mut self, session: &str, reason: &str) {
+        let summary = self.take();
+        if summary.frames == 0 {
+            return;
+        }
+        gatt_note(format!(
+            "voice_level session={session} reason={reason} frames={} samples={} peak_dbfs={:.1} rms_dbfs={} clipped={}",
+            summary.frames,
+            summary.samples,
+            summary.peak_dbfs,
+            summary
+                .rms_dbfs
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "none".to_owned()),
+            summary.clipped,
+        ));
+    }
+}
+
+struct VoiceLevelSummary {
+    frames: u64,
+    samples: u64,
+    peak_dbfs: f32,
+    rms_dbfs: Option<f32>,
+    clipped: u64,
+}
+
+/// 幅度（以 32768 为满幅）换算 dBFS；0 幅度落到 -120 表示"静音"，不返回 -inf。
+fn dbfs_from_magnitude(magnitude: f64) -> f32 {
+    if magnitude < 1.0 {
+        return -120.0;
+    }
+    (20.0 * (magnitude / 32768.0).log10()) as f32
 }
 
 fn voice_effect_verdict(
@@ -174,6 +372,77 @@ mod voice_attempt_tests {
         assert_eq!(synth_label(None), "off");
         assert_eq!(synth_label(Some(0x00E6)), "0x00E6");
         assert_eq!(synth_label(Some(0x00E2)), "0x00E2");
+    }
+}
+
+/// 电平统计的边界（2026-10-27）：静音不能被记成"有信号"，满幅必须计入削波。
+///
+/// 这几条决定 `voice_level` 行能不能用来判断"是声音太小、太大、还是根本没进来"，
+/// 判错的代价就是下次照样只能靠耳朵猜。
+#[cfg(test)]
+mod voice_level_tests {
+    use super::VoiceLevelMeter;
+
+    #[test]
+    fn empty_and_silent_frames_are_distinguishable() {
+        let mut meter = VoiceLevelMeter::default();
+        // 没有音频帧 → 完全无记录（`log_and_reset` 会跳过这一行）。
+        meter.observe(&[]);
+        let summary = meter.take();
+        assert_eq!(summary.frames, 0);
+        assert_eq!(summary.samples, 0);
+        assert!(summary.rms_dbfs.is_none());
+
+        // 有帧但全是 0 → 有记录、读数是静音（-120），不是"没有数据"。
+        meter.observe(&[0, 0, 0, 0]);
+        let summary = meter.take();
+        assert_eq!(summary.frames, 1);
+        assert_eq!(summary.samples, 4);
+        assert_eq!(summary.peak_dbfs, -120.0);
+        assert_eq!(summary.rms_dbfs, Some(-120.0));
+        assert_eq!(summary.clipped, 0);
+    }
+
+    #[test]
+    fn full_scale_reads_zero_dbfs_and_counts_clipping() {
+        let mut meter = VoiceLevelMeter::default();
+        // 32767 与 i16::MIN 都是满幅；后者只能通过 `unsigned_abs` 正确处理。
+        meter.observe(&[32767, i16::MIN, 32767, i16::MIN]);
+        let summary = meter.take();
+        assert!(
+            summary.peak_dbfs.abs() < 0.01,
+            "满幅应读 0 dBFS，实际 {}",
+            summary.peak_dbfs
+        );
+        assert_eq!(summary.clipped, 4);
+        // 方波：RMS 峰值相同。
+        assert!(summary.rms_dbfs.expect("有样本").abs() < 0.01);
+    }
+
+    #[test]
+    fn half_scale_reads_minus_six_db() {
+        let mut meter = VoiceLevelMeter::default();
+        meter.observe(&[16384, 16384, 16384, 16384]);
+        let summary = meter.take();
+        assert!(
+            (summary.peak_dbfs + 6.02).abs() < 0.05,
+            "半幅应读 -6.02 dBFS，实际 {}",
+            summary.peak_dbfs
+        );
+        assert_eq!(summary.clipped, 0);
+    }
+
+    #[test]
+    fn take_clears_state_for_the_next_session() {
+        let mut meter = VoiceLevelMeter::default();
+        meter.observe(&[1000, -2000]);
+        let first = meter.take();
+        assert_eq!(first.samples, 2);
+        assert!(first.peak_dbfs > -120.0);
+
+        let second = meter.take();
+        assert_eq!(second.frames, 0);
+        assert_eq!(second.samples, 0);
     }
 }
 
@@ -291,6 +560,54 @@ mod voice_effect_verdict_tests {
     }
 }
 
+/// 语音会话结束后是否应该补发右 Alt 抬起（2026-10-23）。
+///
+/// 只在三条同时成立时补发：报告层合成生效、目标是豆包、OS 仍认为右 Alt
+/// 按下。纯判定便于单测；真实键态读取与 SendInput 由调度线程执行。
+fn should_release_stuck_voice_synth(
+    report_layer_active: bool,
+    tool: Option<VoiceInputTool>,
+    right_alt_down: bool,
+) -> bool {
+    report_layer_active && tool == Some(VoiceInputTool::Doubao) && right_alt_down
+}
+
+#[cfg(test)]
+mod stuck_voice_synth_tests {
+    use super::should_release_stuck_voice_synth;
+    use sayall_core::settings::VoiceInputTool;
+
+    #[test]
+    fn releases_only_when_report_layer_doubao_and_key_is_down() {
+        assert!(should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Doubao),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(
+            false,
+            Some(VoiceInputTool::Doubao),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Wechat),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Vokie),
+            true
+        ));
+        assert!(!should_release_stuck_voice_synth(true, None, true));
+        assert!(!should_release_stuck_voice_synth(
+            true,
+            Some(VoiceInputTool::Doubao),
+            false
+        ));
+    }
+}
+
 pub struct BleRuntime {
     sender: Sender<WorkerMessage>,
     state: Arc<Mutex<ConnectionSnapshot>>,
@@ -306,6 +623,7 @@ impl BleRuntime {
         voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
         voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
         gain_db: Arc<Mutex<f32>>,
+        transcript_capture: Arc<crate::transcript_capture::TranscriptCaptureRuntime>,
     ) -> Self {
         // 进程启动先清「正在用的遥控器」：地址只在会话真的建立后才有意义，
         // 上一轮的残留会把 Raw Input 绑定与助手选宿主的过滤条件带偏（2026-10-13）。
@@ -314,6 +632,7 @@ impl BleRuntime {
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
         let worker_state = Arc::clone(&state);
         let worker_sender = sender.clone();
+        let worker_capture = Arc::clone(&transcript_capture);
         let worker = thread::Builder::new()
             .name("sayall-ble".to_owned())
             .spawn(move || {
@@ -327,6 +646,7 @@ impl BleRuntime {
                     voice_hold_hotkey,
                     voice_input_tool,
                     gain_db,
+                    worker_capture,
                 )
             });
 
@@ -567,6 +887,7 @@ fn worker_loop(
     voice_hold_hotkey: Arc<Mutex<Option<KeyChord>>>,
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
     gain_db: Arc<Mutex<f32>>,
+    transcript_capture: Arc<crate::transcript_capture::TranscriptCaptureRuntime>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -583,6 +904,11 @@ fn worker_loop(
     let mut session: Option<BleSession> = None;
     let mut pipeline = AtvvVoicePipeline::default();
     let mut active_voice_samples = 0_u64;
+    // 本轮语音会话的音频电平（2026-10-27）：会话结束时落一行 `voice_level`。
+    let mut voice_level = VoiceLevelMeter::default();
+    // 音频完整度判定的会话起点（2026-10-24）：只在 StreamStarted → StreamStopped
+    // 之间有效；太短的会话在判据里直接跳过。
+    let mut voice_stream_started_at: Option<Instant> = None;
     let mut voice_gain_log: Option<(u64, f32)> = None;
     let mut connection_generation = 0_u64;
     let mut capabilities_deadline: Option<Instant> = None;
@@ -592,6 +918,8 @@ fn worker_loop(
     let mut backoff = ReconnectBackoff::new(RECONNECT_BASE_DELAY, RECONNECT_MAX_DELAY);
     let mut held_hotkey: Option<KeyChord> = None;
     let mut extend_deadline: Option<Instant> = None;
+    // 回眸：MIC_OPEN 先到就提前取基线；RC003 直接 0x04 时在 StreamStarted 兜底。
+    let mut transcript_pending_started = false;
     // 最近一帧 ATVV 音频的到达时刻（2026-10-21）：STOP 丢失时用它判定
     // 链路已静默，主动收尾并释放按住说话快捷键。只在 Streaming 期间有意义。
     let mut last_voice_audio_at: Option<Instant> = None;
@@ -640,6 +968,7 @@ fn worker_loop(
                                 &send_input,
                                 &mut held_hotkey,
                                 &mut connection_generation,
+                                &usage,
                             ) {
                                 keep_reconnecting_after_cleanup_failure(
                                     &state,
@@ -679,6 +1008,7 @@ fn worker_loop(
                                     &mut pipeline,
                                     &mut connection_generation,
                                     &mut capabilities_deadline,
+                                    &usage,
                                 );
                                 last_attempt_finished = Some(Instant::now());
                                 if result.is_ok() {
@@ -742,6 +1072,7 @@ fn worker_loop(
                                 session_id
                                     .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
                             ));
+                            transcript_capture.cancel_audio();
                             abort_voice_session(
                                 &mut session,
                                 &mut pipeline,
@@ -752,6 +1083,7 @@ fn worker_loop(
                                 &mut active_voice_samples,
                                 session_id,
                                 "语音流已静默但未收到松开通知，已自动结束本次语音".to_owned(),
+                                &usage,
                             );
                             extend_deadline = None;
                             last_voice_audio_at = None;
@@ -815,6 +1147,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut connection_generation,
+                        &usage,
                     ) {
                         Ok(()) => {
                             let snapshot = ConnectionSnapshot::default();
@@ -856,6 +1189,7 @@ fn worker_loop(
                     &mut pipeline,
                     &mut connection_generation,
                     &mut capabilities_deadline,
+                    &usage,
                 );
                 last_attempt_finished = Some(Instant::now());
                 if result.is_ok() {
@@ -894,6 +1228,8 @@ fn worker_loop(
                 reconnect_deadline = None;
                 capabilities_deadline = None;
                 backoff.reset();
+                transcript_capture.cancel("disconnected");
+                transcript_pending_started = false;
                 let result = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -901,6 +1237,7 @@ fn worker_loop(
                     &send_input,
                     &mut held_hotkey,
                     &mut connection_generation,
+                    &usage,
                 );
                 match result {
                     Ok(()) => {
@@ -1058,6 +1395,11 @@ fn worker_loop(
                 bytes,
             } => {
                 if message_generation == connection_generation {
+                    let was_streaming = pipeline.state() == VoiceSessionState::Streaming;
+                    // 会话号要在处理 STOP 之前取：收尾会把它清掉。
+                    let level_session = pipeline
+                        .session_id()
+                        .map_or_else(|| "unknown".to_owned(), |id| id.to_string());
                     handle_control(
                         &mut session,
                         &mut pipeline,
@@ -1071,10 +1413,18 @@ fn worker_loop(
                         &mut active_voice_samples,
                         &mut extend_deadline,
                         &mut last_voice_audio_at,
+                        &mut voice_stream_started_at,
                         &sender,
                         &voice_session_epoch,
+                        &transcript_capture,
+                        &mut transcript_pending_started,
+                        &mut voice_level,
                         &bytes,
                     );
+                    // 正常收尾（StreamStopped 等）：本轮电平在此落盘。
+                    if was_streaming && pipeline.state() != VoiceSessionState::Streaming {
+                        voice_level.log_and_reset(&level_session, "stopped");
+                    }
                     let phase = lock(&state).phase;
                     if phase != ConnectionPhase::AwaitingCapabilities {
                         capabilities_deadline = None;
@@ -1095,6 +1445,7 @@ fn worker_loop(
                             &send_input,
                             &mut held_hotkey,
                             &mut connection_generation,
+                            &usage,
                         ) {
                             keep_reconnecting_after_cleanup_failure(
                                 &state,
@@ -1133,6 +1484,9 @@ fn worker_loop(
                         &mut voice_gain_log,
                         &mut last_voice_audio_at,
                         &bytes,
+                        &usage,
+                        &transcript_capture,
+                        &mut voice_level,
                     );
                 }
             }
@@ -1162,6 +1516,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut connection_generation,
+                        &usage,
                     ) {
                         keep_reconnecting_after_cleanup_failure(
                             &state,
@@ -1221,6 +1576,7 @@ fn worker_loop(
                         &send_input,
                         &mut held_hotkey,
                         &mut connection_generation,
+                        &usage,
                     ) {
                         keep_reconnecting_after_cleanup_failure(
                             &state,
@@ -1276,6 +1632,8 @@ fn worker_loop(
                 let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Suspended);
                 capabilities_deadline = None;
                 reconnect_deadline = None;
+                transcript_capture.cancel("system_suspended");
+                transcript_pending_started = false;
                 if let Err(error) = invalidate_connection(
                     &mut session,
                     &mut pipeline,
@@ -1283,6 +1641,7 @@ fn worker_loop(
                     &send_input,
                     &mut held_hotkey,
                     &mut connection_generation,
+                    &usage,
                 ) {
                     keep_reconnecting_after_cleanup_failure(
                         &state,
@@ -1337,6 +1696,7 @@ fn worker_loop(
             WorkerMessage::Shutdown { ack } => {
                 let _ = disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::Shutdown);
                 release_voice_hold_hotkey(&send_input, &mut held_hotkey);
+                usage.finish_voice_session();
                 let _ = audio.interrupt_session();
                 let _ = close_session(&mut session);
                 pipeline.interrupt();
@@ -1441,6 +1801,7 @@ fn attempt_connection(
     pipeline: &mut AtvvVoicePipeline,
     connection_generation: &mut u64,
     capabilities_deadline: &mut Option<Instant>,
+    usage: &Arc<UsageCounters>,
 ) -> Result<ConnectionSnapshot, PlatformError> {
     let attempt_started = Instant::now();
     gatt_note(format!(
@@ -1453,6 +1814,7 @@ fn attempt_connection(
         send_input,
         held_hotkey,
         connection_generation,
+        usage,
     )?;
     let previous = reconnecting.then(|| lock(state).clone());
     *lock(state) = ConnectionSnapshot {
@@ -1616,9 +1978,11 @@ fn invalidate_connection(
     send_input: &SendInputRuntime,
     held_hotkey: &mut Option<KeyChord>,
     connection_generation: &mut u64,
+    usage: &UsageCounters,
 ) -> Result<(), PlatformError> {
     *connection_generation = connection_generation.wrapping_add(1);
     release_voice_hold_hotkey(send_input, held_hotkey);
+    usage.finish_voice_session();
     let mut cleanup_errors = Vec::new();
     if let Err(error) = audio.interrupt_session() {
         cleanup_errors.push(format!("音频中断：{error}"));
@@ -1991,12 +2355,17 @@ fn conn_params_failure_note(failure: ConnParamsFailure) -> String {
     }
 }
 
+/// 回眸记录时间：本机墙上时间（毫秒）。会话计时仍用 `Instant`，两者用途不同。
+fn voice_timestamp_ms() -> i64 {
+    chrono::Local::now().timestamp_millis()
+}
+
 fn handle_control(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
     state: &Arc<Mutex<ConnectionSnapshot>>,
     audio: &AudioRuntime,
-    send_input: &SendInputRuntime,
+    send_input: &Arc<SendInputRuntime>,
     voice_hold_hotkey: &Mutex<Option<KeyChord>>,
     voice_input_tool: &Mutex<Option<VoiceInputTool>>,
     held_hotkey: &mut Option<KeyChord>,
@@ -2004,8 +2373,12 @@ fn handle_control(
     active_voice_samples: &mut u64,
     extend_deadline: &mut Option<Instant>,
     last_voice_audio_at: &mut Option<Instant>,
+    voice_stream_started_at: &mut Option<Instant>,
     sender: &Sender<WorkerMessage>,
     voice_session_epoch: &Arc<AtomicU64>,
+    transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
+    transcript_pending_started: &mut bool,
+    voice_level: &mut VoiceLevelMeter,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -2021,6 +2394,7 @@ fn handle_control(
             "voice_session action=abort phase=completed terminal_result=failed reason=stream_replaced session={} samples={samples} note=previous_stop_missing",
             stale_session.map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
         ));
+        transcript_capture.cancel_audio();
         abort_voice_session(
             session,
             pipeline,
@@ -2031,6 +2405,7 @@ fn handle_control(
             active_voice_samples,
             stale_session,
             "上一轮语音未收到松开通知，已自动结束并接受新的按下".to_owned(),
+            usage,
         );
         *last_voice_audio_at = None;
     }
@@ -2078,6 +2453,15 @@ fn handle_control(
             let Some(capabilities) = pipeline.capabilities() else {
                 return;
             };
+            // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
+            // HID F5 代替——普通键盘 F5 也会被误计。
+            usage.begin_voice_session(crate::foreground::foreground_application_name());
+            // 回眸基线：MIC_OPEN 比 StreamStarted 早，趁注入前先把目标输入框文字取下来。
+            // 同一次会话重复收到 MIC_OPEN 时不要重置刚取到的基线。
+            if !*transcript_pending_started {
+                transcript_capture.begin_pending(voice_timestamp_ms());
+                *transcript_pending_started = true;
+            }
             if let Some(session) = session {
                 if let Err(error) = session
                     .request_microphone_open(capabilities.version, capabilities.selected_codec)
@@ -2085,6 +2469,10 @@ fn handle_control(
                     // MIC_OPEN 写入走 GATT，可能返回 Unreachable/AccessDenied 等
                     // 状态码；用户文案同样按语义分流（P0-2）。
                     lock(state).last_error = Some(user_facing_connection_error(&error, true));
+                    // 收不到 STREAM_START 就不会有 STREAM_STOP；这里清掉本轮
+                    // pending 标记，否则下一次按键会误以为基线已经取过。
+                    transcript_capture.cancel("microphone_open_failed");
+                    *transcript_pending_started = false;
                 }
             }
         }
@@ -2092,12 +2480,35 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            // RC003 的报告层语音路径实测直接发 0x04 STREAM_START，不经过
+            // MIC_OPEN；这里兜底开始统计。若 MIC_OPEN 已先记过，方法幂等。
+            usage.ensure_voice_session_started(crate::foreground::foreground_application_name());
+            // 回眸：直接 0x04 的路径没有 MIC_OPEN 提前量，这里补一次基线；
+            // 已有 pending 时不重复 begin（否则会把刚取到的基线丢掉）。
+            if !*transcript_pending_started {
+                transcript_capture.begin_pending(voice_timestamp_ms());
+            }
+            let transcript_session_id = crate::transcript_capture::new_session_id();
+            transcript_capture.bind_session(transcript_session_id.clone());
+            // 录音关闭时不要为 manifest 白白读取前台应用身份。
+            let recording_application = if transcript_capture.is_audio_recording_enabled() {
+                crate::transcript_capture_windows::foreground_application_identity()
+            } else {
+                None
+            };
+            transcript_capture.start_audio_recording(
+                &transcript_session_id,
+                voice_timestamp_ms(),
+                recording_application,
+            );
+            *transcript_pending_started = false;
             // 流开始即视为有活动；若之后连一帧音频都收不到，看门狗会收尾。
             *last_voice_audio_at = Some(Instant::now());
             // 语音会话纪元 +1：本轮 wetype_check 阶梯以此为 armed 纪元，
             // 后续新会话会使旧阶梯的核对失效（防跨会话误伤）。
             let epoch = voice_session_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             *active_voice_samples = 0;
+            *voice_stream_started_at = Some(Instant::now());
             if let Some(session) = session {
                 session.microphone_opened = true;
             }
@@ -2155,6 +2566,17 @@ fn handle_control(
                 crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
                 crate::ime::age_label(crate::ime::last_switch_age_ms()),
             ));
+            // 输入法的「自动检测」跟的是**系统默认录音设备**；它若不是 CABLE Output，
+            // 识别就会落到内置麦克风阵列或「立体声混音」上——按键链路、报告层合成、
+            // 录音时长全都正常，只有识别结果对不上（2026-10-27 现场，用户改设备后
+            // 立刻恢复）。这行日志就是"下次一眼定位"的那条证据。
+            if let Some((default_capture, is_cable_output)) =
+                crate::audio::capture_input_diagnosis()
+            {
+                gatt_note(format!(
+                    "voice_capture_input default=\"{default_capture}\" is_cable_output={is_cable_output}"
+                ));
+            }
 
             // 2026-10-13 现场：报告层没生效时走 SendInput 注入——**豆包按设计丢弃注入键**
             // （LLKHF_INJECTED，见 docs/investigations/2026-09-04-avoid-driver-signing-input-paths.md），
@@ -2217,6 +2639,10 @@ fn handle_control(
                     gatt_note(format!(
                         "chord_press result=err session={session_id} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true"
                     ));
+                    transcript_capture.cancel_audio();
+                    // 注入失败会中止会话：本轮电平同样要落一行，否则"连音频都没进来"
+                    // 与"音频正常但键没注入"在日志里长得一样。
+                    voice_level.log_and_reset(&session_id.to_string(), "aborted_press_failed");
                     abort_voice_session(
                         session,
                         pipeline,
@@ -2227,6 +2653,7 @@ fn handle_control(
                         active_voice_samples,
                         Some(session_id),
                         format!("按住说话快捷键注入失败：{error}"),
+                        usage,
                     );
                     return;
                 }
@@ -2283,6 +2710,7 @@ fn handle_control(
                 gatt_note(format!(
                     "audio_begin result=err session={session_id} error_domain=audio error_code=begin_failed reason=wasapi_rejected retryable=true"
                 ));
+                transcript_capture.cancel_audio();
                 abort_voice_session(
                     session,
                     pipeline,
@@ -2293,6 +2721,7 @@ fn handle_control(
                     active_voice_samples,
                     Some(session_id),
                     error.to_string(),
+                    usage,
                 );
                 return;
             }
@@ -2305,6 +2734,11 @@ fn handle_control(
         }
         PipelineOutput::StreamStopped { generation, .. } => {
             *last_voice_audio_at = None;
+            // 回眸：先记结束时刻，文字稳定等待与音频排空互不影响。
+            let transcript_ended_at = voice_timestamp_ms();
+            transcript_capture.finish_session(transcript_ended_at);
+            transcript_capture.finish_audio(transcript_ended_at);
+            *transcript_pending_started = false;
             if let Some(session) = session {
                 session.microphone_opened = false;
             }
@@ -2330,6 +2764,7 @@ fn handle_control(
                     active_voice_samples,
                     None,
                     error.to_string(),
+                    usage,
                 );
                 return;
             }
@@ -2337,17 +2772,96 @@ fn handle_control(
                 lock(state).last_error = Some(error.to_string());
                 return;
             }
+            let duration_ms = voice_stream_started_at
+                .take()
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let samples = *active_voice_samples;
+            if let Some((rate_hz, health)) = classify_voice_audio_rate(samples, duration_ms) {
+                gatt_note(format!(
+                    "voice_audio_rate result={} rate_hz={rate_hz} samples={samples} duration_ms={duration_ms} expected_hz={VOICE_EXPECTED_SAMPLE_RATE_HZ}",
+                    voice_audio_health_token(health)
+                ));
+                let mut snapshot = lock(state);
+                snapshot.voice_audio_health = health;
+                snapshot.voice_audio_rate_hz = Some(rate_hz);
+            }
             usage.record_voice_session(*active_voice_samples);
+            usage.finish_voice_session();
             *active_voice_samples = 0;
-            let mut snapshot = lock(state);
-            snapshot.phase = ConnectionPhase::Ready;
-            apply_input_connection_phase(snapshot.phase);
-            snapshot.voice_state = VoiceSessionState::Idle;
+            {
+                let mut snapshot = lock(state);
+                snapshot.phase = ConnectionPhase::Ready;
+                apply_input_connection_phase(snapshot.phase);
+                snapshot.voice_state = VoiceSessionState::Idle;
+            }
+            // 报告层合成的右 Alt 保险（2026-10-23）：遥控器偶发不发/丢失
+            // 语音键的 HID 释放报告，合成键会一直处于按下（豆包语音条不消失）。
+            // 给真实报告一个宽限期后检查 OS 键态，确认仍按下才补发抬起。
+            spawn_voice_synth_guard(
+                Arc::clone(send_input),
+                Arc::clone(voice_session_epoch),
+                generation,
+                *lock(voice_input_tool),
+            );
         }
         PipelineOutput::DecoderSynchronized { .. }
         | PipelineOutput::UnknownControl { .. }
         | PipelineOutput::Samples { .. } => {}
     }
+}
+
+/// 报告层合成键的松手保险（2026-10-23 现场）。
+///
+/// 背景：报告层把遥控器语音键（0x003E）槽内替换成右 Alt（0x00E6），OS 的
+/// 键态完全由 HID 报告驱动。实测偶发松手后没有收到 HID 释放报告，右 Alt
+/// 在 OS 里持续按下 60 多秒，豆包语音条跟着不消失；而 ATVV STOP 正常到达。
+/// 这里在会话结束后给真实报告 250ms 宽限期，再读 `GetAsyncKeyState`；
+/// 若仍按下，就用 SendInput 补一次右 Alt UP。2026-10-23 真机验证：语音条
+/// 会立即消失，且注入的 UP 不会让豆包重新开麦。
+///
+/// 纪元检查防止迟到补发打断 250ms 内重新开始的新会话（AGENTS.md 的
+/// "迟到回调不得覆盖新一代会话"）。
+fn spawn_voice_synth_guard(
+    send_input: Arc<SendInputRuntime>,
+    voice_session_epoch: Arc<AtomicU64>,
+    generation: u64,
+    tool: Option<VoiceInputTool>,
+) {
+    if tool != Some(VoiceInputTool::Doubao) || !crate::key_gate::voice_synth_active() {
+        return;
+    }
+    let epoch = voice_session_epoch.load(Ordering::SeqCst);
+    let _ = thread::Builder::new()
+        .name("sayall-voice-synth-guard".to_owned())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(VOICE_SYNTH_RELEASE_GRACE_MS));
+            if voice_session_epoch.load(Ordering::SeqCst) != epoch {
+                gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} action=skipped reason=session_replaced"
+                ));
+                return;
+            }
+            let report_layer_active = crate::key_gate::voice_synth_active();
+            let key_down = crate::send_input_windows::right_alt_down();
+            if !should_release_stuck_voice_synth(report_layer_active, tool, key_down) {
+                gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer={report_layer_active} key_down={key_down} action=none"
+                ));
+                return;
+            }
+            let chord = KeyChord {
+                keys: vec![KeyCode::RightAlt],
+            };
+            match send_input.release(&chord) {
+                Ok(_) => gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer=true key_down=true action=release terminal_result=passed"
+                )),
+                Err(_) => gatt_note(format!(
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer=true key_down=true action=release terminal_result=failed error_domain=send_input error_code=release_failed retryable=true"
+                )),
+            }
+        });
 }
 
 /// 每会话生效增益的日志去重（2026-10-04）：返回 true 表示这一批音频的
@@ -2371,6 +2885,9 @@ fn handle_audio(
     voice_gain_log: &mut Option<(u64, f32)>,
     last_voice_audio_at: &mut Option<Instant>,
     bytes: &[u8],
+    usage: &UsageCounters,
+    transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
+    voice_level: &mut VoiceLevelMeter,
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
         return;
@@ -2389,6 +2906,11 @@ fn handle_audio(
         ));
     }
     if let Some(error) = audio.failure() {
+        transcript_capture.cancel_audio();
+        let level_session = pipeline
+            .session_id()
+            .map_or_else(|| "unknown".to_owned(), |id| id.to_string());
+        voice_level.log_and_reset(&level_session, "aborted_audio_failure");
         abort_voice_session(
             session,
             pipeline,
@@ -2399,6 +2921,7 @@ fn handle_audio(
             active_voice_samples,
             pipeline.session_id(),
             error,
+            usage,
         );
         return;
     }
@@ -2408,7 +2931,15 @@ fn handle_audio(
             samples,
         }) => {
             let sample_count = samples.len();
+            transcript_capture.append_audio(&samples);
+            // 电平统计在增益之后：它反映的是真正送进虚拟线的信号。
+            voice_level.observe(&samples);
             if let Err(error) = audio.enqueue_samples(generation, samples) {
+                transcript_capture.cancel_audio();
+                let level_session = pipeline
+                    .session_id()
+                    .map_or_else(|| "unknown".to_owned(), |id| id.to_string());
+                voice_level.log_and_reset(&level_session, "aborted_enqueue_rejected");
                 abort_voice_session(
                     session,
                     pipeline,
@@ -2419,6 +2950,7 @@ fn handle_audio(
                     active_voice_samples,
                     pipeline.session_id(),
                     error.to_string(),
+                    usage,
                 );
                 return;
             }
@@ -2444,8 +2976,10 @@ fn abort_voice_session(
     active_voice_samples: &mut u64,
     session_id: Option<u8>,
     error: String,
+    usage: &UsageCounters,
 ) {
     release_voice_hold_hotkey(send_input, held_hotkey);
+    usage.finish_voice_session();
     if let (Some(connected), Some(capabilities), Some(session_id)) =
         (session.as_mut(), pipeline.capabilities(), session_id)
     {

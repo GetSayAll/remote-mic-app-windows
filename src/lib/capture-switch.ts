@@ -10,7 +10,12 @@
  * - 功能启动中（助手还在连）不显示文案——正在操作由开关态表达。
  */
 
-import type { Rc003CaptureHealth, Rc003CaptureRevoked } from "./bridge";
+import { t } from "./i18n";
+import type {
+  Rc003CaptureHealth,
+  Rc003CaptureRevoked,
+  Rc003CaptureUnavailable,
+} from "./bridge";
 
 /** 开关的可见状态：不可用 / 正在操作 / 开启 / 关闭。 */
 export type CaptureSwitchState = "unavailable" | "busy" | "on" | "off";
@@ -35,6 +40,11 @@ export function captureSwitchState(input: {
   return input.enabled === true ? "on" : "off";
 }
 
+/** 两个入口传本页/本开关名称：已本地化的英文名原样使用，中文名按当前语言翻译。 */
+function localizedName(name: string): string {
+  return /[\u4e00-\u9fff]/.test(name) ? t(name) : name;
+}
+
 /**
  * 「开关开着、但功能还没真的生效」的一句提示（2026-10-13 Andy 定稿，
  * 见 docs/product-copy.md §7 的同日决定）。
@@ -46,9 +56,27 @@ export function captureSwitchState(input: {
  *
  * 与失败句同一位（开关旁唯一允许有文字的地方）：一次只显示一句，操作失败优先
  * （那是用户刚做的动作），其次才是这一句。
+ *
+ * `unavailable` 决定说哪一句（2026-10-27，issue #291）：
+ * - `none`：过了宽限仍没接管，最常见的原因是慢启动 / 旧状态，**关掉再打开**确实
+ *   是最有效的一招；
+ * - `startup_failing`：助手反复启动不起来。这一档**不给"去找哪个程序"这种做不了的建议**
+ *   （2026-10-27 Andy：用户无从定位是哪个程序）——端口这类外部占用现在由助手自己换端口
+ *   解决，剩下能让用户做的是"关掉再打开一次"和"重启电脑"，两句都可执行。
  */
-export function captureInactiveText(name: string): string {
-  return `${name}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。`;
+export function captureInactiveText(
+  name: string,
+  unavailable: Rc003CaptureUnavailable | "unknown" = "none",
+): string {
+  if (unavailable === "startup_failing") {
+    return t(
+      "{name}暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；还是不行就重启这台电脑。",
+      { name: localizedName(name) },
+    );
+  }
+  return t("{name}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。", {
+    name: localizedName(name),
+  });
 }
 
 /**
@@ -84,19 +112,20 @@ export function captureFailureText(
 ): string | null {
   const text = (raw ?? "").trim();
   if (!text) return null;
+  const subject = localizedName(name);
   if (text.includes("授权") || text.includes("UAC") || text.includes("提权")) {
-    return `没有完成系统授权，${name}保持关闭。`;
+    return t("没有完成系统授权，{name}保持关闭。", { name: subject });
   }
   if (text.includes("暂不支持")) {
-    return `这台电脑暂不支持${name}。`;
+    return t("这台电脑暂不支持{name}。", { name: subject });
   }
   if (text.includes("缺少") && text.includes("组件")) {
-    return `安装包缺少本机需要的组件，${name}暂不可用；请重新安装本版本。`;
+    return t("安装包缺少本机需要的组件，{name}暂不可用；请重新安装本版本。", { name: subject });
   }
   if (text.includes("停用") || text.includes("关闭")) {
-    return `关闭没有完成，${name}仍是开启状态。`;
+    return t("关闭没有完成，{name}仍是开启状态。", { name: subject });
   }
-  return `开启没有成功，${name}保持关闭。`;
+  return t("开启没有成功，{name}保持关闭。", { name: subject });
 }
 
 /**
@@ -108,7 +137,9 @@ export function captureFailureText(
  * `docs/product-copy.md` §3）。
  */
 export function captureRevokedText(name: string): string {
-  return `${name}因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。`;
+  return t("{name}因为系统授权需要重新确认，已经被关掉了；重新打开一次就能继续使用。", {
+    name: localizedName(name),
+  });
 }
 
 /**
@@ -145,6 +176,17 @@ export function normalizeCaptureRevoked(
     raw === "unsupported"
     ? raw
     : "unknown";
+}
+
+/**
+ * 「没生效的原因」载荷规范化（2026-10-27，issue #291）：只认两个稳定 token（与 Rust
+ * `CaptureUnavailable::as_str` 逐字对应）；缺失 / 未知值回落 `unknown`——界面按
+ * "读不到"处理，退回通用文案（不能因为字段缺失就把用户引向"别的程序占着"）。
+ */
+export function normalizeCaptureUnavailable(
+  raw: unknown,
+): Rc003CaptureUnavailable | "unknown" {
+  return raw === "none" || raw === "startup_failing" ? raw : "unknown";
 }
 
 /**

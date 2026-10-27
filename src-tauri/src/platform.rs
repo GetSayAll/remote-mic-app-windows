@@ -2,6 +2,7 @@ use sayall_core::VoiceInputTool;
 use sayall_windows::raw_input::RawInputSnapshot;
 use sayall_windows::rc003_bridge::BridgeSnapshot;
 use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
+use sayall_windows::transcript_capture::CapturedTranscript;
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
     PlatformSnapshot, UsageCounters, WindowsPlatform,
@@ -46,7 +47,7 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn test_focus_input(&self) -> Result<(), PlatformError>;
     /// 打开/激活目标应用并按聚焦档案聚焦（UI「测试打开与聚焦」）。
     fn test_app_focus(&self, target: String) -> Result<(), PlatformError>;
-    /// 「学习输入框」：阻塞至多 3 秒，返回捕获到的可编辑目标特征。
+    /// 「学习输入框」：阻塞至多 6 秒，返回捕获到的可编辑目标特征。
     fn learn_focus_target(
         &self,
     ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError>;
@@ -81,6 +82,18 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// 语音增益（dB，0–24）：推给平台侧解码管道。默认实现为空——
     /// 仿真与不支持增益的平台保持 0 dB（原始音量）。
     fn set_gain_db(&self, _gain_db: f32) {}
+    /// 回眸开关。关闭时平台侧取消正在进行的捕获；已有记录不删除。
+    fn set_transcript_capture_enabled(&self, _enabled: bool) {}
+    /// 回眸原始录音开关。关闭时取消当前录音；已有录音不删除。
+    fn set_transcript_audio_recording_enabled(&self, _enabled: bool) {}
+    /// 回眸捕获完成后的落盘回调。app host 只在这里把记录投递到归档线程。
+    fn set_transcript_capture_sink(&self, _sink: Arc<dyn Fn(CapturedTranscript) + Send + Sync>) {}
+    /// 原始录音成功落盘后的回调；只带会话号，用于页面静默刷新。
+    fn set_transcript_audio_recording_finished_sink(
+        &self,
+        _sink: Arc<dyn Fn(String) + Send + Sync>,
+    ) {
+    }
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
     /// 键位方案覆盖层（私有组件注入后调用；公开构建永不调用）。
@@ -300,6 +313,25 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_gain_db(&self, gain_db: f32) {
         WindowsPlatform::set_gain_db(self, gain_db)
+    }
+
+    fn set_transcript_capture_enabled(&self, enabled: bool) {
+        WindowsPlatform::set_transcript_capture_enabled(self, enabled)
+    }
+
+    fn set_transcript_audio_recording_enabled(&self, enabled: bool) {
+        WindowsPlatform::set_transcript_audio_recording_enabled(self, enabled)
+    }
+
+    fn set_transcript_capture_sink(&self, sink: Arc<dyn Fn(CapturedTranscript) + Send + Sync>) {
+        WindowsPlatform::set_transcript_capture_sink(self, sink)
+    }
+
+    fn set_transcript_audio_recording_finished_sink(
+        &self,
+        sink: Arc<dyn Fn(String) + Send + Sync>,
+    ) {
+        WindowsPlatform::set_transcript_audio_recording_finished_sink(self, sink)
     }
 
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {

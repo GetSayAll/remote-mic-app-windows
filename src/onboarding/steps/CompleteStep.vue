@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import StatusRow from "../../components/onboarding/StatusRow.vue";
+import { t } from "../../lib/i18n";
 
 const props = defineProps<{
   checks: Array<{ label: string; ok: boolean }>;
@@ -16,8 +17,8 @@ const failingLabel = computed(
 
 <template>
   <section class="onboarding-step">
-    <h1>设置完成</h1>
-    <p class="onboarding-lede">开始使用前，再确认一次关键条件都还在。</p>
+    <h1>{{ t("设置完成") }}</h1>
+    <p class="onboarding-lede">{{ t("开始使用前，再确认一次关键条件都还在。") }}</p>
 
     <div class="onboarding-rows">
       <StatusRow
@@ -30,15 +31,15 @@ const failingLabel = computed(
     </div>
 
     <div v-if="!allOk" class="onboarding-card warn">
-      <h4>有设置不再可用，修好后再点「开始使用」</h4>
-      <p>需要先处理：{{ failingLabel }}。</p>
+      <h4>{{ t("有设置不再可用，修好后再点「开始使用」") }}</h4>
+      <p>{{ t("需要先处理：{label}。", { label: failingLabel }) }}</p>
       <div class="onboarding-chips">
         <button class="onboarding-chip strong" type="button" @click="$emit('fix')">
-          去修复
+          {{ t("去修复") }}
         </button>
       </div>
     </div>
 
-    <p class="onboarding-muted">完成后随时可以在「设置」里重新运行设置向导。</p>
+    <p class="onboarding-muted">{{ t("完成后随时可以在「设置」里重新运行设置向导。") }}</p>
   </section>
 </template>

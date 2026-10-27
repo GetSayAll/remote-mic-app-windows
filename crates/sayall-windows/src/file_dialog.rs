@@ -21,6 +21,12 @@ pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
     pick_dialog(DialogKind::Open, DialogFlavor::ButtonProfile)
 }
 
+/// 选择 Windows 键位方案备份的导出位置（私有组件使用；公开构建不调用）。
+#[cfg(windows)]
+pub fn pick_button_profile_export_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Save, DialogFlavor::ButtonProfileExport)
+}
+
 /// 选择组合动作 `.sayall` 的导入文件（macOS `sayall-transfer 1.0`）。
 #[cfg(windows)]
 pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
@@ -49,12 +55,28 @@ pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
 }
 
 #[cfg(not(windows))]
+pub fn pick_button_profile_export_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
+#[cfg(not(windows))]
 pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
 #[cfg(not(windows))]
 pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
+/// 选择回眸原始录音的导出位置。
+#[cfg(windows)]
+pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Save, DialogFlavor::Audio)
+}
+
+#[cfg(not(windows))]
+pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
@@ -71,6 +93,8 @@ enum DialogFlavor {
     Mapping,
     Sayall,
     ButtonProfile,
+    ButtonProfileExport,
+    Audio,
 }
 
 #[cfg(windows)]
@@ -145,10 +169,24 @@ fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>,
                 ),
                 DialogFlavor::ButtonProfile => (
                     "导入键位方案",
-                    "SayAll 键位方案 (*.sayall)",
-                    "*.sayall",
+                    "SayAll 键位方案 (*.sayall;*.json)",
+                    "*.sayall;*.json",
                     "SayAll-键位方案.sayall",
                     "sayall",
+                ),
+                DialogFlavor::ButtonProfileExport => (
+                    "导出键位方案备份",
+                    "SayAll 键位方案备份 (*.json)",
+                    "*.json",
+                    "SayAll-键位方案备份.json",
+                    "json",
+                ),
+                DialogFlavor::Audio => (
+                    "导出原始录音",
+                    "WAV 录音 (*.wav)",
+                    "*.wav",
+                    "SayAll-原始录音.wav",
+                    "wav",
                 ),
             };
         let title = wide(title_text);

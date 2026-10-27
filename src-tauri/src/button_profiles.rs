@@ -77,7 +77,9 @@ pub fn apply_membership(snapshot: &MembershipSnapshot) {
     if !current_button_profile_host().is_available() {
         return;
     }
-    let access = if snapshot.plus_active {
+    // 走查包（`runtime-simulation`）直接按 Plus 运行；正式 release 构建不会命中。
+    let assume_member = cfg!(feature = "runtime-simulation");
+    let access = if snapshot.plus_active || assume_member {
         ProfileAccess::Allowed {
             valid_until: snapshot.valid_until.map(|value| value.to_string()),
         }
@@ -103,6 +105,13 @@ pub fn button_profiles_access() -> ProfileAccess {
 #[tauri::command]
 pub fn button_profiles_pick_import_file() -> Result<Option<String>, String> {
     sayall_windows::file_dialog::pick_button_profile_import_path()
+        .map(|path| path.map(|path| path.to_string_lossy().into_owned()))
+}
+
+/// 选择键位方案备份的导出位置（取消返回 `null`）。
+#[tauri::command]
+pub fn button_profiles_pick_export_file() -> Result<Option<String>, String> {
+    sayall_windows::file_dialog::pick_button_profile_export_path()
         .map(|path| path.map(|path| path.to_string_lossy().into_owned()))
 }
 

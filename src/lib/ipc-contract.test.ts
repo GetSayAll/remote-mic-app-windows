@@ -9,6 +9,7 @@ import type {
   RawInputPhase,
   RemoteButton,
   RemoteModel,
+  VoiceAudioHealth,
   VoiceSessionState,
 } from "./bridge";
 
@@ -26,6 +27,11 @@ const connectionPhases = [
   "failed",
 ] as const satisfies readonly ConnectionPhase[];
 const voiceStates = ["idle", "streaming", "draining"] as const satisfies readonly VoiceSessionState[];
+const voiceAudioHealths = [
+  "unknown",
+  "full",
+  "degraded",
+] as const satisfies readonly VoiceAudioHealth[];
 const remoteModels = ["rc001", "rc003", "unknown"] as const satisfies readonly RemoteModel[];
 const audioPhases = [
   "unconfigured",
@@ -71,6 +77,10 @@ describe("Rust and TypeScript IPC contract", () => {
         phase: memberOf(fixture.connection.phase, connectionPhases),
         remoteModel: memberOf(fixture.connection.remoteModel, remoteModels),
         voiceState: memberOf(fixture.connection.voiceState, voiceStates),
+        voiceAudioHealth: memberOf(
+          fixture.connection.voiceAudioHealth,
+          voiceAudioHealths,
+        ),
       },
       audio: {
         ...fixture.audio,
@@ -126,6 +136,8 @@ describe("Rust and TypeScript IPC contract", () => {
       "capabilities",
       "voiceState",
       "decodedSamples",
+      "voiceAudioHealth",
+      "voiceAudioRateHz",
       "generation",
       "reconnectAttempt",
       "powerNotificationsAvailable",

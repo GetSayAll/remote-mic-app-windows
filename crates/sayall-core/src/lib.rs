@@ -7,6 +7,7 @@ pub mod pipeline;
 pub mod portable_macros;
 pub mod settings;
 pub mod statistics;
+pub mod transcripts;
 pub mod voice;
 
 pub use adpcm::{ImaAdpcmDecoder, NibbleOrder};
@@ -25,7 +26,16 @@ pub use portable_macros::{
     export_portable_library, import_portable_library, PortableError, PORTABLE_MAX_BYTES,
 };
 pub use settings::{
-    AppIconIdentifier, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
+    AppIconIdentifier, AppLanguage, AppSettings, ThemePreference, VoiceInputTool, VoiceTriggerMode,
 };
-pub use statistics::{DailyUsage, UsageStatistics};
+pub use statistics::{
+    DailyUsage, UsageStatistics, VoiceSessionUsageRecord, MAX_APPLICATION_NAME_CHARS,
+    MAX_STAT_KEY_CHARS, MAX_VOICE_SESSION_RANKING,
+};
+pub use transcripts::{
+    application_key, continuous_insertion, is_local_date_key, is_safe_application_key,
+    visible_records, TranscriptDayFile, TranscriptRecord, TranscriptSource, TranscriptTextChange,
+    CAPTURE_METHOD_VERSION, MAX_RECORDS_PER_DAY, MAX_RECORDS_TOTAL, MAX_TRANSCRIPT_CHARS,
+    RECENT_WINDOW_MS, TRANSCRIPT_FORMAT_VERSION, TRANSCRIPT_SCHEMA_VERSION,
+};
 pub use voice::{VoiceSession, VoiceSessionError, VoiceSessionEvent, VoiceSessionState};

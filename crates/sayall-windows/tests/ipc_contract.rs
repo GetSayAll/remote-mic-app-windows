@@ -36,6 +36,8 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 }),
                 voice_state: VoiceSessionState::Idle,
                 decoded_samples: 240,
+                voice_audio_health: sayall_windows::VoiceAudioHealth::Unknown,
+                voice_audio_rate_hz: None,
                 generation: 7,
                 reconnect_attempt: 2,
                 power_notifications_available: true,

@@ -125,9 +125,21 @@ mod imp {
     const RETARGET_POLL_MS: u64 = 2000;
     /// watchdog 的分片睡眠：既让"主程序请求"能在 100 ms 内被响应，也用于凑出轮询间隔。
     const RETARGET_WAKE_MS: u64 = 100;
-    /// 单实例端口的有界等待预算与步长（交接期重叠；见 [`bind_listener_with_retry`]）。
+    /// 固定端口的**有界等待**预算与步长（交接期重叠；见 [`bind_listener_with_retry`]）。
+    /// 预算耗尽且仍是 `WSAEADDRINUSE` 时，回头探一次占用者（[`resolve_port_holder`]）：
+    /// 只要不是另一支 sayall-helper 就回退系统自动分配端口——覆盖"固定端口被系统级保留"
+    /// （WSL2 mirrored 把 Linux 临时端口区间镜像成宿主内核保留区，绑定恒失败且不可见）
+    /// 与"被别的程序占着"两种机器。2026-10-27 起第二类也回退（#291：用户没法自己去
+    /// 找是哪个程序，让它换端口比让他关程序现实）。
     const LISTEN_RETRY_BUDGET_MS: u64 = 3000;
     const LISTEN_RETRY_STEP_MS: u64 = 150;
+    /// 探固定端口是否有人监听时的连接超时。回环上"有监听"是亚毫秒级；
+    /// 超时说明状态怪（丢弃/防火墙），此时按"查不出占用者"处理，仍然回退换端口。
+    const PORT_PROBE_TIMEOUT_MS: u64 = 500;
+    /// 结束遗留助手后，等它真正释放固定端口的预算与步长。
+    /// `TerminateProcess` 返回只代表"已请求终止"，监听套接字要等进程收尾才关。
+    const STALE_HELPER_RELEASE_RETRY_MS: u64 = 2000;
+    const STALE_HELPER_RELEASE_RETRY_STEP_MS: u64 = 50;
     /// 注入/接管后等待**已鉴权** hello 的默认上限（秒）。
     /// 为什么设默认：2026-09-23 之前，"注入返回非 0 但 agent 从未连上"这种现象
     /// 只会表现为日志一片安静、程序一直等下去——把"失败"伪装成"正在工作"。
@@ -249,6 +261,9 @@ mod imp {
         fn Module32FirstW(snapshot: Handle, entry: *mut ModuleEntry32W) -> i32;
         fn Module32NextW(snapshot: Handle, entry: *mut ModuleEntry32W) -> i32;
         fn GetLocalTime(out: *mut LocalTime);
+        /// 单实例锁：创建具名互斥体。存在的**对象**即"已有实例在跑"，
+        /// 不需要 WaitForSingleObject 抢所有权（进程退出时最后一个句柄关闭，对象自动销毁）。
+        fn CreateMutexW(attr: *mut c_void, initial_owner: i32, name: *const u16) -> Handle;
         /// 注册控制台事件处理器。第二参数非零 = 追加到链尾。
         /// 返回非零表示注册成功。
         fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
@@ -314,8 +329,20 @@ mod imp {
     /// `ERROR_SHARING_VIOLATION`：文件被别的进程占用（典型：DLL 已 LoadLibrary 进某进程，
     /// 该 image section 会一直锁着文件，直到那个进程退出）。
     const ERROR_SHARING_VIOLATION: i32 = 32;
-    /// `WSAEADDRINUSE`：端口已被占用。本程序用它当**单实例锁**（同一时刻只允许一次运行）。
+    /// `WSAEADDRINUSE`：端口已被占用。**它已不是单实例锁**（2026-10-25 起改用互斥体，
+    /// 见 [`SINGLE_INSTANCE_MUTEX`]）；这里只用于识别"这个固定端口被人占了"。
     const WSAEADDRINUSE: i32 = 10048;
+
+    /// 单实例互斥体名（内核对象，进程退出即释放）。
+    ///
+    /// 为什么不能继续拿端口当锁：固定端口可能被**系统级保留**（WSL2 mirrored 把
+    /// Linux 临时端口区间镜像成宿主内核保留区，见 #296），那种机器上永远绑不上，
+    /// 锁也就永远"已被占用"——把可用性问题和互斥问题绑在一个判据上，两边都会失效。
+    /// 名字不加 `Global\` 前缀 = **会话内**命名空间：每个登录会话各允许一支助手，
+    /// 与 WUDFHost 的会话维度一致；跨会话互斥会误挡另一个用户的桌面。
+    const SINGLE_INSTANCE_MUTEX: &str = "SayAll.RC003Helper.SingleInstance";
+    /// `CreateMutexW` 的返回值非空且 last error 为它 ⇒ 同名对象已存在（已有实例在跑）。
+    const ERROR_ALREADY_EXISTS: u32 = 183;
     const MAX_PATH_W: usize = 260;
     const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
@@ -1318,6 +1345,88 @@ mod imp {
         }
     }
 
+    /// 能不能回收占着固定端口的那支遗留助手（纯判定，单测覆盖）。
+    ///
+    /// 四条同时成立才动手：
+    /// 1. 不是显式 `--port`（那是自检/并行探针，互斥体锁根本没取）；
+    /// 2. PID 有效且不是自己；
+    /// 3. **同一登录会话**——互斥体是会话命名空间的，端口是全局的：多用户快速切换时
+    ///    另一个会话的助手也会绑 47831，此时我们拿得到锁却会把它误判成"旧版本残留"，
+    ///    结束它等于杀别人正在用的助手（查不到会话号按"不同会话"处理）。
+    fn should_reclaim_stale_helper(
+        pid: u32,
+        self_pid: u32,
+        port_explicit: bool,
+        same_session: bool,
+    ) -> bool {
+        !port_explicit && pid != 0 && pid != self_pid && same_session
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ProcessIdToSessionId(pid: u32, session_id: *mut u32) -> i32;
+    }
+
+    /// 进程所在登录会话号（查不到返回 `None`）。
+    fn process_session_id(pid: u32) -> Option<u32> {
+        let mut session_id: u32 = 0;
+        let ok = unsafe { ProcessIdToSessionId(pid, &mut session_id) };
+        if ok == 0 {
+            None
+        } else {
+            Some(session_id)
+        }
+    }
+
+    /// 目标进程与本进程是否在同一登录会话（查不到一律按"不是"）。
+    ///
+    /// 这道闸只服务回收逻辑：互斥体是**会话命名空间**的，固定端口却是**全局**的，
+    /// 所以"拿到锁"证明不了"这个端口的监听者归我管"。
+    fn is_same_session_as_self(pid: u32) -> bool {
+        match (
+            process_session_id(pid),
+            process_session_id(std::process::id()),
+        ) {
+            (Some(theirs), Some(ours)) => theirs == ours,
+            _ => false,
+        }
+    }
+
+    /// 结束占着固定端口的遗留助手，成功返回 true。
+    ///
+    /// 安全前提（调用方保证）：① 已持有单实例互斥体——同会话没有第二支**新版**助手，
+    /// 所以同名的监听者必然是旧版本残留或孤儿；② 占用者映像名就是 `sayall-helper.exe`
+    /// （`resolve_port_holder` 判过）；③ PID 有效且不是自己。缺一不可，见
+    /// [`should_reclaim_stale_helper`]。
+    ///
+    /// 为什么值得动手：它不退，新版就永远起不来，主程序每 20 s 拉一次、每次 exit 8
+    /// （issue #291 的 109 次崩溃循环），而用户没有定位手段（2026-10-27 原话）。
+    fn reclaim_stale_helper(pid: u32, logger: &Logger) -> bool {
+        match terminate_process(pid) {
+            Ok(()) => {
+                logger.kv(
+                    "[RECLAIM]",
+                    &[
+                        ("event", "stale_helper_terminated".into()),
+                        ("pid", pid.to_string()),
+                    ],
+                );
+                true
+            }
+            Err(error) => {
+                logger.kv(
+                    "[RECLAIM]",
+                    &[
+                        ("event", "stale_helper_terminate_failed".into()),
+                        ("pid", pid.to_string()),
+                        ("detail", error),
+                    ],
+                );
+                false
+            }
+        }
+    }
+
     fn enum_hosts() -> Result<HostScan, String> {
         let root = reg_open(HKEY_LOCAL_MACHINE, ENUM_ROOT)
             .ok_or_else(|| format!("无法打开注册表 {ENUM_ROOT}"))?;
@@ -1789,6 +1898,11 @@ mod imp {
     struct Args {
         target_pid: Option<u32>,
         port: u16,
+        /// 调用方是否**显式**指定了 `--port`。
+        ///
+        /// 它只决定一件事：要不要取单实例锁（显式换端口 = 有意并行跑第二支，
+        /// 用于自检与并行探针；产品路径永远不带 `--port`）。
+        port_explicit: bool,
         token: String,
         /// 令牌是否来自运行时目录里**此前就存在**的 `session.token`
         /// （决定宿主里那代 tap 有没有可能被我们接管）。
@@ -1858,6 +1972,7 @@ mod imp {
         let mut args = Args {
             target_pid: None,
             port: DEFAULT_PORT,
+            port_explicit: false,
             token: String::new(),
             token_from_file: false,
             gadget: None,
@@ -1899,7 +2014,8 @@ mod imp {
                 "--port" => {
                     args.port = value()?
                         .parse::<u16>()
-                        .map_err(|_| "--port 需要 1-65535".to_string())?
+                        .map_err(|_| "--port 需要 1-65535".to_string())?;
+                    args.port_explicit = true;
                 }
                 "--token" => args.token = value()?,
                 "--gadget" => args.gadget = Some(PathBuf::from(value()?)),
@@ -2063,7 +2179,8 @@ mod imp {
 用法：sayall-helper [选项]\n\
   --selftest            内置自检：需无提权、无设备、不注入；全通过退出码 0，否则 1\n\
   --target-pid <PID>    直接指定宿主 PID（自检用，跳过注册表定位）\n\
-  --port <PORT>         监听端口（默认 47831；自检时可用 0 自动分配）\n\
+  --port <PORT>         监听端口（默认 47831；0 = 让系统自动分配）。显式指定即**不取**\n\
+                        单实例锁 —— 留给自检与并行探针，产品路径不要用它\n\
   --token <TOKEN>       握手令牌（默认读取/创建运行时目录里的 session.token，跨运行稳定）\n\
   --new-token           强制换一个新令牌（**会让常驻 tap 无法接管**，见下）\n\
   --gadget <PATH>       Gadget 路径（默认与可执行文件同目录；文件名随架构：\n\
@@ -2454,26 +2571,44 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 绑定回环端口。单独抽出来有两个目的：①让失败文案**可操作**；
     /// ②可被自检直接调用（不需要设备、不需要提权）。
     ///
-    /// `10048` / `WSAEADDRINUSE` 在本程序里几乎只有一个含义：**已经有另一次运行在跑**
-    /// ——端口就是单实例锁。2026-09-23 真机实测撞到过一次：上一轮还在 `--duration`
-    /// 窗口内，第二轮双击就得到了 `os error 10048`，而当时那条消息只说了"失败"。
-    fn bind_listener(port: u16) -> Result<TcpListener, String> {
+    /// 失败用 [`BindError`] 返回，**不再靠匹配文案判断错误类型**：`io::Error` 的
+    /// `raw_os_error()` 本来就带着 `10048`，把它降级成字符串再 `contains` 一遍，
+    /// 等于把结构化判据换成对本地化文案的依赖（2026-10-25 修正）。
+    fn bind_listener(port: u16) -> Result<TcpListener, BindError> {
         bind_listener_with_retry(port, LISTEN_RETRY_BUDGET_MS, LISTEN_RETRY_STEP_MS, None)
     }
 
-    /// 单实例端口的**有界重试**版本（2026-10-13 现场）。
+    /// 绑定失败的结构化结果。
+    struct BindError {
+        /// 给日志与用户看的完整文案（含可操作提示）。
+        message: String,
+        /// 错误本身是 `WSAEADDRINUSE`（端口被占）。只有它为真才可能走回退。
+        addr_in_use: bool,
+    }
+
+    /// 这个 `io::Error` 是不是"端口被占用"。
+    ///
+    /// 主判据是 `raw_os_error() == WSAEADDRINUSE`（错误码与系统语言无关）；
+    /// `ErrorKind::AddrInUse` 作兜底（非 OS 构造的错误仍然判得对）。
+    fn bind_error_is_addr_in_use(error: &io::Error) -> bool {
+        error.raw_os_error() == Some(WSAEADDRINUSE) || error.kind() == io::ErrorKind::AddrInUse
+    }
+
+    /// 固定端口的**有界重试**版本（2026-10-13 现场）。
     ///
     /// 背景：换遥控器后助手会"重启自己"（先起新实例、旧实例随后收尾），两者短暂重叠时
-    /// 新实例会撞上端口锁 —— 没有重试就直接 `[STOP]` 退出，**换机后一个助手都不剩**
-    /// （现场实证：新实例 15:10:45.72 起、15:10:45.85 退出，旧实例 15:10:46.12 才释放）。
-    /// 因此给一小段有界等待：让旧实例把端口让出来。真正的"另一个实例在跑"仍然会在
-    /// 预算耗尽后按原样退出——单实例语义不变，只是不再在交接瞬间误杀接班人。
+    /// 新实例会撞上**旧实例还没释放**的端口——没有重试就直接 `[STOP]` 退出，
+    /// **换机后一个助手都不剩**（现场实证：新实例 15:10:45.72 起、15:10:45.85 退出，
+    /// 旧实例 15:10:46.12 才释放）。因此给一小段有界等待，让旧实例把端口让出来。
+    ///
+    /// 单实例语义自 2026-10-25 起由 [`acquire_single_instance`] 的互斥体承担，
+    /// 端口只管传输；所以预算耗尽**不再**等于"另一个实例在跑"。
     fn bind_listener_with_retry(
         port: u16,
         budget_ms: u64,
         step_ms: u64,
         logger: Option<&Logger>,
-    ) -> Result<TcpListener, String> {
+    ) -> Result<TcpListener, BindError> {
         let started = std::time::Instant::now();
         let mut attempt: u32 = 0;
         loop {
@@ -2495,8 +2630,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     return Ok(l);
                 }
                 Err(e) => {
-                    let retryable = e.raw_os_error() == Some(WSAEADDRINUSE);
-                    if retryable && (started.elapsed().as_millis() as u64) + step_ms <= budget_ms {
+                    let addr_in_use = bind_error_is_addr_in_use(&e);
+                    if addr_in_use && (started.elapsed().as_millis() as u64) + step_ms <= budget_ms
+                    {
                         attempt += 1;
                         if let Some(logger) = logger {
                             logger.kv(
@@ -2512,18 +2648,325 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         std::thread::sleep(Duration::from_millis(step_ms));
                         continue;
                     }
-                    let mut s = format!("绑定 127.0.0.1:{port} 失败：{e}");
-                    if retryable {
-                        s.push_str(&format!(
-                            "。这通常意味着**已经有另一次 sayall-helper 在跑**（端口 {port} 即单实例锁）：\
-                             先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉），或用 --port 换端口。\
-                             谁在占：netstat -ano | findstr :{port}"
+                    let mut message = format!("绑定 127.0.0.1:{port} 失败：{e}");
+                    if addr_in_use {
+                        message.push_str(&format!(
+                            "。该端口被占用（不是助手单实例锁，单实例由互斥体判定）：\
+                             占用者可能不可见（如 WSL2 mirrored 的内核保留区）；\
+                             先用 netstat -ano | findstr :{port} 核对，或用 --port 换端口。"
                         ));
                     }
-                    return Err(s);
+                    return Err(BindError {
+                        message,
+                        addr_in_use,
+                    });
                 }
             }
         }
+    }
+
+    /// 固定端口上**有没有活的监听者**。
+    ///
+    /// 2026-10-27 修订（#291 追问"为什么不换个端口"）：这个探头**不再单独充当回退门禁**，
+    /// 只用来给日志分类，并决定要不要进一步查占用者是谁。真正的门禁见
+    /// [`should_fall_back_to_ephemeral`]。
+    enum PortProbe {
+        /// 连上了：有进程在监听。
+        Listening,
+        /// 被拒：明确没有监听者（幻影保留就长这样）。
+        Refused,
+        /// 超时/其它错误：判不清。
+        Inconclusive,
+    }
+
+    /// 固定端口的占用者分类。
+    ///
+    /// 上一版只在"没人应答"时回退，理由是"有人应答说明别人真占着，换端口会把它顶掉"。
+    /// 单实例改由互斥体判定（2026-10-25，#304）之后这个理由已经不成立：回退是让系统
+    /// **另给**一个端口，不会碰占用者的套接字。唯一还要防的是"两支 sayall-helper 同时活"
+    /// ——那会让两支 tap 同时注入宿主，hook 堆叠、agent 静默（run6 实证）。
+    enum PortHolder {
+        /// 没人应答：系统级保留（#296 的幻影锁）。
+        Nobody,
+        /// 占着的是另一支 sayall-helper（旧版本残留 / 互斥体失效）：不能回退。
+        OwnHelper { pid: u32 },
+        /// 占着的是别的程序：可以回退。
+        OtherProgram { pid: u32, image: String },
+        /// 有人应答但查不出是谁：仍然回退——宁可换端口，也不进每 20 s 一轮的崩溃循环。
+        Unknown,
+    }
+
+    /// 用一次短超时 TCP 连接探固定端口。
+    ///
+    /// 为什么不是"看 socket 表"：幻影保留在 `netstat`、`Get-NetTCPConnection`、
+    /// `excludedportrange` 里全都查不到（#296 实证），只有 bind/connect 的行为能区分。
+    fn probe_fixed_port(port: u16, timeout_ms: u64) -> PortProbe {
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+        match TcpStream::connect_timeout(
+            &std::net::SocketAddr::V4(addr),
+            Duration::from_millis(timeout_ms),
+        ) {
+            Ok(_) => PortProbe::Listening,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => PortProbe::Refused,
+            Err(_) => PortProbe::Inconclusive,
+        }
+    }
+
+    /// 占用者 token（日志字段；与自检/文档判据逐字对应）。
+    fn port_holder_token(holder: &PortHolder) -> &'static str {
+        match holder {
+            PortHolder::Nobody => "nobody",
+            PortHolder::OwnHelper { .. } => "own_helper",
+            PortHolder::OtherProgram { .. } => "other_program",
+            PortHolder::Unknown => "unknown",
+        }
+    }
+
+    /// `MIB_TCPROW_OWNER_PID.local_port` 的低 16 位是端口，且在网络字节序里。
+    fn port_from_mib_local_port(raw: u32) -> u16 {
+        u16::from_be((raw & 0xFFFF) as u16)
+    }
+
+    /// 进程映像是不是本助手（只看文件名、大小写不敏感）。
+    ///
+    /// 用文件名而不是完整路径：安装版与被测开发版可能跑在不同目录，但 bin 名固定为
+    /// `sayall-helper.exe`（见 Cargo.toml 的 `[[bin]]`）。判错方向的代价不对称——
+    /// 把别人误判成自己是"多等一轮"，把自己误判成别人是"双实例"。
+    fn is_own_helper_image(image_path: &str) -> bool {
+        image_path
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(image_path)
+            .eq_ignore_ascii_case("sayall-helper.exe")
+    }
+
+    #[repr(C)]
+    struct MibTcpRowOwnerPid {
+        state: u32,
+        local_addr: u32,
+        local_port: u32,
+        remote_addr: u32,
+        remote_port: u32,
+        owning_pid: u32,
+    }
+
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetExtendedTcpTable(
+            table: *mut c_void,
+            size: *mut u32,
+            sorted: i32,
+            af: u32,
+            table_class: u32,
+            reserved: u32,
+        ) -> u32;
+    }
+
+    /// 监听该端口的进程号（查不到返回 `None`）。
+    ///
+    /// 不用 `netstat -ano`：那是外部进程 + 解析本地化输出；这里只需要一个 PID，
+    /// 系统 API 一步到位，也不依赖 PATH 里有什么。
+    fn tcp_listener_owner_pid(port: u16) -> Option<u32> {
+        const AF_INET: u32 = 2;
+        const TCP_TABLE_OWNER_PID_LISTENER: u32 = 3;
+        const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+        const NO_ERROR: u32 = 0;
+        let mut size: u32 = 0;
+        // 第一次调用只问"要多大"。
+        let first = unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if first != ERROR_INSUFFICIENT_BUFFER && first != NO_ERROR {
+            return None;
+        }
+        if size == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; size as usize];
+        let status = unsafe {
+            GetExtendedTcpTable(
+                buffer.as_mut_ptr() as *mut c_void,
+                &mut size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if status != NO_ERROR || buffer.len() < 4 {
+            return None;
+        }
+        // 头部是 DWORD 条目数，其后紧接条目数组（全部 4 字节对齐，故偏移固定为 4）。
+        let entries = u32::from_ne_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+        let row_size = std::mem::size_of::<MibTcpRowOwnerPid>();
+        let entries = entries.min((buffer.len() - 4) / row_size);
+        let table = unsafe { buffer.as_ptr().add(4) as *const MibTcpRowOwnerPid };
+        for index in 0..entries {
+            let row = unsafe { &*table.add(index) };
+            if port_from_mib_local_port(row.local_port) == port {
+                return Some(row.owning_pid);
+            }
+        }
+        None
+    }
+
+    /// 进程映像的完整路径（权限不足 / 进程已退出时返回 `None`）。
+    fn process_image_file_name(pid: u32) -> Option<String> {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) };
+        unsafe { CloseHandle(handle) };
+        if ok == 0 || size == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..size as usize]))
+    }
+
+    /// 探头 + 占用者查询合成一次判定（日志与决策共用同一份事实，不各查一遍）。
+    fn resolve_port_holder(port: u16, probe: &PortProbe) -> PortHolder {
+        match probe {
+            PortProbe::Refused => PortHolder::Nobody,
+            PortProbe::Inconclusive => PortHolder::Unknown,
+            PortProbe::Listening => match tcp_listener_owner_pid(port) {
+                Some(pid) => match process_image_file_name(pid) {
+                    Some(image) if is_own_helper_image(&image) => PortHolder::OwnHelper { pid },
+                    Some(image) => PortHolder::OtherProgram { pid, image },
+                    None => PortHolder::Unknown,
+                },
+                None => PortHolder::Unknown,
+            },
+        }
+    }
+
+    /// 是否该回退到系统自动分配端口（纯决策，自检与单测共用）。
+    ///
+    /// 两个条件：错误确实是 `WSAEADDRINUSE`、且确实绑在固定端口上（`--port 0` 本来就
+    /// 要系统分配，不走这条路径）。**占用者是另一支 sayall-helper 时不回退**：两支 tap
+    /// 同时注入宿主会造成 hook 堆叠、agent 静默，那种情况必须让它退出并报错。其他
+    /// 占用者（含"查不出是谁"）一律回退——换端口不会顶掉任何人，而绑不上会让报告层
+    /// 整层失效（#291 的 109 次崩溃循环）。
+    fn should_fall_back_to_ephemeral(
+        requested_port: u16,
+        bind: &BindError,
+        holder: &PortHolder,
+    ) -> bool {
+        requested_port != 0 && bind.addr_in_use && !matches!(holder, PortHolder::OwnHelper { .. })
+    }
+
+    /// 取单实例锁（具名互斥体），成功时返回的句柄**不关闭**。
+    ///
+    /// 为什么不用端口当锁：固定端口在部分机器上被系统永久保留（#296），那台机器上
+    /// "端口被占"永远为真，锁就永久失效——把可用性和互斥绑在同一个判据上，
+    /// 两种失效会互相掩盖。互斥体只回答一个问题：是否已有实例。
+    ///
+    /// 句柄刻意泄漏到进程退出：内核在最后一个句柄关闭时销毁对象，
+    /// 因此被强杀（TerminateProcess）也不会留下"僵尸锁"。
+    fn acquire_single_instance() -> Result<Handle, String> {
+        let name: Vec<u16> = SINGLE_INSTANCE_MUTEX
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // `bInitialOwner = 0`：只要对象存在即可，不抢所有权（不需要 WaitForSingleObject）。
+        let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(format!("创建单实例互斥体失败 error={}", unsafe {
+                GetLastError()
+            }));
+        }
+        // 必须紧接着读 last error：任何其它调用都可能把它覆盖掉。
+        let last_error = unsafe { GetLastError() };
+        if last_error == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            return Err(format!(
+                "已有另一个 sayall-helper 在运行（互斥体 {SINGLE_INSTANCE_MUTEX} 已存在）：\
+                 先结束上一次运行（它那个窗口里 Ctrl+C 或直接关掉）。"
+            ));
+        }
+        Ok(handle)
+    }
+
+    /// 回退端口的记忆文件（运行时目录内）。
+    ///
+    /// 为什么需要它：agent 的连接端口是**注入时**写死进 gadget `parameters` 的
+    /// （`rc003_agent.js` 只在 `init` 里取一次），助手重启后端口一变，宿主里那份
+    /// tap 就再也连不回来——接管核验（`ATTACH_VERIFY_MS`）必然空等 8 s，随后升级为
+    /// "结束宿主 + 干净首注"（独占宿主会真的重建 WUDFHost）。端口稳定时，重启退化
+    /// 成正常的 `[HELLO]` 接管。
+    const REMEMBERED_PORT_FILE: &str = "session.port";
+    /// 复用记住的端口时的绑定等待：它可能刚被上一个实例释放，给一小段让位时间。
+    const PORT_REUSE_RETRY_MS: u64 = 300;
+
+    fn read_remembered_port(dir: &Path) -> Option<u16> {
+        let text = fs::read_to_string(dir.join(REMEMBERED_PORT_FILE)).ok()?;
+        match text.trim().parse::<u16>() {
+            Ok(port) if port != 0 => Some(port),
+            _ => None,
+        }
+    }
+
+    fn write_remembered_port(dir: &Path, port: u16, logger: &Logger) {
+        if port == 0 {
+            return;
+        }
+        if let Err(error) = fs::create_dir_all(dir) {
+            logger.line(&format!("[WARN] 创建运行时目录失败：{error}"));
+            return;
+        }
+        let path = dir.join(REMEMBERED_PORT_FILE);
+        match fs::write(&path, format!("{port}")) {
+            Ok(()) => logger.kv(
+                "[PORT]",
+                &[
+                    ("event", "remembered_port_written".into()),
+                    ("port", port.to_string()),
+                ],
+            ),
+            Err(error) => logger.line(&format!(
+                "[WARN] 写入 {} 失败：{error}（下次重启会重新挑端口，接管要多等一个核验窗口）",
+                normalize_display(&path)
+            )),
+        }
+    }
+
+    /// 回退取端口：先复用上次的自动分配端口，没有再让系统分配并记住。
+    ///
+    /// 返回值第二项 = 是否复用了记忆端口（日志据此区分两条路径）。
+    fn bind_fallback_port(dir: &Path, logger: &Logger) -> Result<(TcpListener, bool), String> {
+        if let Some(remembered) = read_remembered_port(dir) {
+            match bind_listener_with_retry(remembered, PORT_REUSE_RETRY_MS, 50, None) {
+                Ok(listener) => return Ok((listener, true)),
+                Err(_) => logger.kv(
+                    "[PORT]",
+                    &[
+                        ("event", "remembered_port_unavailable".into()),
+                        ("port", remembered.to_string()),
+                        (
+                            "note",
+                            "上次的自动分配端口已被别人占用，本轮重新分配；宿主里的 agent 会失联，接管核验后重建".into(),
+                        ),
+                    ],
+                ),
+            }
+        }
+        let listener = bind_listener_with_retry(0, 0, 0, None).map_err(|e| e.message)?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| format!("读取监听端口失败：{error}"))?
+            .port();
+        write_remembered_port(dir, port, logger);
+        Ok((listener, false))
     }
 
     /// 读取（或创建）跨运行稳定的令牌。
@@ -6096,10 +6539,227 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             );
         }
 
+        // ---- 顺序：取单实例锁 → 绑定端口 → 主程序桥接 → 准备运行时目录 → 注入 ----
+        // 锁与绑定都放在准备阶段之前：它们检查的是**外部状态**，越早失败越好；
+        // 而准备阶段会改写运行时目录里的 config/token/agent，失败的一轮不该动磁盘状态
+        // （2026-09-23 真机实测：第二轮撞端口 10048 时已经写完了配置）。
+        // 仍然保持"先监听、后注入"：让 agent 的 init() 一连就能连上，不白等 3 秒。
+        //
+        // 2026-10-25 重构（配合 #296 的端口回退）：
+        // * 单实例改由互斥体判定（见 [`acquire_single_instance`]）。固定端口可能被
+        //   系统**永久**保留（WSL2 mirrored 把 Linux 临时端口区间镜像成宿主内核保留区，
+        //   bind 恒 10048 且占用者在 netstat / Get-NetTCPConnection / TCP connect 中
+        //   全部不可见）；拿它当锁，等于让"另一次在跑"与"这台机器永远绑不上"共用
+        //   同一个判据，两种失效互相掩盖。
+        // * 端口只在**明确没人应答**时才回退自动分配（见 [`probe_fixed_port`]）：
+        //   有人应答说明是别的进程真占着，换端口等于把它顶掉。
+        // * 绑定成功后一律从 listener 取实际端口写回 `args.port`——顺带修好 `--port 0`：
+        //   否则 gadget 配置里写的是 0，agent 永远连不上（help 却写着"可用 0 自动分配"）。
+        //
+        // `--port` 是显式的开发逃生口（自检 / 并行探针）：此时不取锁，否则按文档用
+        // `--port` 换端口就没法再起第二支，验收流程会被自己的锁挡住。
+        if args.port_explicit {
+            logger.kv(
+                "[LOCK]",
+                &[
+                    ("event", "skipped".into()),
+                    ("reason", "port_explicit".into()),
+                    (
+                        "note",
+                        "调用方显式指定 --port（自检/并行探针）：不取单实例锁".into(),
+                    ),
+                ],
+            );
+        } else {
+            match acquire_single_instance() {
+                Ok(_handle) => logger.kv(
+                    "[LOCK]",
+                    &[
+                        ("event", "single_instance_acquired".into()),
+                        ("mutex", SINGLE_INSTANCE_MUTEX.to_string()),
+                    ],
+                ),
+                Err(e) => {
+                    logger.line(&format!("[STOP] {e}"));
+                    std::process::exit(8);
+                }
+            }
+        }
+
+        let requested_port = args.port;
+        let listener = match bind_listener_with_retry(
+            requested_port,
+            LISTEN_RETRY_BUDGET_MS,
+            LISTEN_RETRY_STEP_MS,
+            Some(&logger),
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                let probe = if e.addr_in_use {
+                    let probe = probe_fixed_port(requested_port, PORT_PROBE_TIMEOUT_MS);
+                    logger.kv(
+                        "[PORT]",
+                        &[
+                            ("event", "probe".into()),
+                            ("port", requested_port.to_string()),
+                            (
+                                "result",
+                                match probe {
+                                    PortProbe::Listening => "listening",
+                                    PortProbe::Refused => "refused",
+                                    PortProbe::Inconclusive => "inconclusive",
+                                }
+                                .into(),
+                            ),
+                            (
+                                "note",
+                                "探头只用于分类占用者；回退门禁见 holder 行的 decision".into(),
+                            ),
+                        ],
+                    );
+                    probe
+                } else {
+                    PortProbe::Inconclusive
+                };
+                // 有人应答时查清是谁：只有"另一支 sayall-helper"才不允许回退（双实例会
+                // hook 堆叠）。别的程序占着、或查不出来，都直接换端口——#291 的机器
+                // 就是被这条门禁关在"每 20 s 崩溃一轮"里（2026-10-27）。
+                let holder = resolve_port_holder(requested_port, &probe);
+                let fallback = should_fall_back_to_ephemeral(requested_port, &e, &holder);
+                let (holder_pid, holder_image) = match &holder {
+                    PortHolder::OwnHelper { pid } => (pid.to_string(), "sayall-helper.exe".into()),
+                    PortHolder::OtherProgram { pid, image } => (pid.to_string(), image.clone()),
+                    _ => ("0".into(), String::new()),
+                };
+                logger.kv(
+                    "[PORT]",
+                    &[
+                        ("event", "holder".into()),
+                        ("port", requested_port.to_string()),
+                        ("holder", port_holder_token(&holder).into()),
+                        ("pid", holder_pid),
+                        ("image", holder_image),
+                        (
+                            "decision",
+                            if fallback { "fallback" } else { "stop" }.into(),
+                        ),
+                    ],
+                );
+                if !fallback {
+                    // `holder=own_helper` 且已持有单实例互斥体 ⇒ 同会话里没有第二支**新版**
+                    // 助手，占着固定端口的只可能是旧版本残留 / 脱离任务的孤儿。它不退，
+                    // 新版就永远起不来（#291 现场：主程序每 20 s 拉一次、每次 exit 8）。
+                    // 回收它比让用户去开任务管理器现实——2026-10-27 用户原话"我怎么去关掉它"。
+                    let reclaimed = match &holder {
+                        PortHolder::OwnHelper { pid }
+                            if should_reclaim_stale_helper(
+                                *pid,
+                                std::process::id(),
+                                args.port_explicit,
+                                is_same_session_as_self(*pid),
+                            ) =>
+                        {
+                            reclaim_stale_helper(*pid, &logger)
+                        }
+                        _ => false,
+                    };
+                    if !reclaimed {
+                        logger.line(&format!(
+                            "[STOP] {} 端口由另一支 sayall-helper 持有（多半是旧版本没退干净，\
+                             且本次没能结束它）：先手动结束那一支再重试，或用 --port 换一个端口。",
+                            e.message
+                        ));
+                        std::process::exit(8);
+                    }
+                    // 它退出后端口才会释放：给一小段有界等待再绑一次。
+                    match bind_listener_with_retry(
+                        requested_port,
+                        STALE_HELPER_RELEASE_RETRY_MS,
+                        STALE_HELPER_RELEASE_RETRY_STEP_MS,
+                        Some(&logger),
+                    ) {
+                        Ok(l) => {
+                            logger.kv(
+                                "[RECLAIM]",
+                                &[
+                                    ("event", "fixed_port_reclaimed".into()),
+                                    ("port", requested_port.to_string()),
+                                ],
+                            );
+                            l
+                        }
+                        Err(retry_error) => {
+                            logger.line(&format!("[STOP] {}", retry_error.message));
+                            std::process::exit(8);
+                        }
+                    }
+                } else {
+                    match bind_fallback_port(&args.runtime_dir, &logger) {
+                        Ok((l, reused_remembered)) => {
+                            logger.kv(
+                                "[FALLBACK]",
+                                &[
+                                    ("event", "listen_fallback_ephemeral".into()),
+                                    ("fixed_port", requested_port.to_string()),
+                                    ("reused_remembered", reused_remembered.to_string()),
+                                    (
+                                        "note",
+                                        "固定端口绑不上、且占用者不是本助手（系统级保留/别的程序/\
+                                         查不出是谁），改用系统自动分配端口；单实例仍由互斥体保证；\
+                                         端口写进 session.port 供下次重启复用（agent 的端口是注入时写死的）"
+                                            .into(),
+                                    ),
+                                ],
+                            );
+                            l
+                        }
+                        Err(message) => {
+                            logger.line(&format!("[STOP] {message}"));
+                            std::process::exit(8);
+                        }
+                    }
+                }
+            }
+        };
+        // 端口以 listener 为准，而不是以参数为准：`--port 0` 与回退两条路径都靠它。
+        let bound_port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(error) => {
+                logger.line(&format!("[STOP] 读取监听端口失败：{error}"));
+                std::process::exit(8);
+            }
+        };
+        args.port = bound_port;
+        // 固定端口到手 ⇒ 上次回退记住的那个端口已经失效（本次注入后 agent 会改指固定
+        // 端口）；留着它只会在下次回退时挑错端口，白付一个核验窗口。
+        if bound_port == requested_port {
+            let remembered = args.runtime_dir.join(REMEMBERED_PORT_FILE);
+            if remembered.exists() && fs::remove_file(&remembered).is_ok() {
+                logger.kv(
+                    "[PORT]",
+                    &[
+                        ("event", "remembered_port_cleared".into()),
+                        ("reason", "fixed_port_bound".into()),
+                    ],
+                );
+            }
+        }
+        let mut listen_fields: Vec<(&str, String)> =
+            vec![("addr", format!("127.0.0.1:{bound_port}"))];
+        if bound_port != requested_port {
+            listen_fields.push(("requested_port", requested_port.to_string()));
+        }
+        logger.kv("[LISTEN]", &listen_fields);
+
         // ---- 主程序桥接（捕获链第 ② 段）----
-        // 刻意放在端口绑定之前：它只决定"边沿能不能送到主程序"，与"能不能捕获、
-        // 能不能清键"完全解耦。主程序没运行时它会安静地每 2 秒重试（日志折叠成
-        // 前 3 次 + 每 30 次一条），**不得**因此影响捕获链路。
+        // **必须晚于端口绑定**（2026-10-26 修正，issue #291）：桥接走命名管道，主程序
+        // 一握手就判 `helper_connected` 并报 `terminal_result=passed`；若桥在 bind 之前
+        // 就起来，助手随后因端口绑不上而 `[STOP]` 退出时，主程序已经看到"连上了"——
+        // 现场（#291）于是每轮都留一条成功行，而功能一次都没生效。放在 bind 之后，
+        // "握手成功"才隐含"传输端口已就绪"，两者不再互相掩盖。
+        //
+        // 解耦性质不变：桥只决定"边沿能不能送到主程序"，主程序没运行时它会安静地
+        // 每 2 秒重试（日志折叠成前 3 次 + 每 30 次一条），不影响捕获链路。
         let app_bridge = match spawn_app_bridge(
             args.app_bridge.clone(),
             args.runtime_dir.clone(),
@@ -6136,30 +6796,6 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 None
             }
         };
-
-        // ---- 顺序：绑定端口 → 准备运行时目录 → 注入 ----
-        // 绑定放最前有两条理由：①它是对**外部状态**的检查（端口可能被上一轮占着），
-        // 越早失败越好；②准备阶段会**改写**运行时目录里的 config/token/agent，
-        // 若先准备再发现端口被占，就等于"失败的一次运行也动了磁盘状态"
-        // （2026-09-23 真机实测：第二轮撞端口 10048 时已经写完了配置）。
-        // 仍然保持"先监听、后注入"：让 agent 的 init() 一连就能连上，不白等 3 秒。
-        //
-        // 2026-10-13：换机重启时新旧实例会短暂重叠（新实例先起、旧实例随后收尾），
-        // 这里改成**有界重试**（3 s / 150 ms），把交接期的端口竞争让过去；真正的
-        // "另一个实例在跑"仍会在预算耗尽后按原样 `[STOP]` 退出。
-        let listener = match bind_listener_with_retry(
-            args.port,
-            LISTEN_RETRY_BUDGET_MS,
-            LISTEN_RETRY_STEP_MS,
-            Some(&logger),
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                logger.line(&format!("[STOP] {e}"));
-                std::process::exit(8);
-            }
-        };
-        logger.kv("[LISTEN]", &[("addr", format!("127.0.0.1:{}", args.port))]);
 
         let prepared = match prepare_runtime(&args, &gadget_src, &logger, &plan) {
             Ok(f) => f,
@@ -7849,6 +8485,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         let args = Args {
             target_pid: None,
             port: 47831,
+            port_explicit: true,
             token: "deadbeef".to_string(),
             token_from_file: false,
             gadget: None,
@@ -8589,20 +9226,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("同一轮内计数={n_same_round}（应为 0）开新轮后={n_new_round}（应为 1）"),
         );
 
-        // 19) 端口占用（10048）必须给出**可操作**文案。2026-09-23 真机撞到过，
-        //     当时只说"失败"。用 0 让系统分配一个空闲端口，再绑同一端口必然失败。
+        // 19) 端口占用（10048）必须给出**可操作**文案，且判据是结构化的错误类型。
+        //     2026-09-23 真机撞到过：当时那条消息只说"失败"。用 0 让系统分配一个空闲端口，
+        //     再绑同一端口必然失败。
         let port_case = match bind_listener(0) {
             Ok(held) => {
                 let p = held.local_addr().map(|a| a.port()).unwrap_or(0);
                 match bind_listener(p) {
                     Ok(_) => (false, format!("第二次绑定 {p} 竟然成功了（本机应失败）")),
-                    Err(e) => (e.contains("已经有另一次"), e),
+                    Err(e) => (e.addr_in_use && e.message.contains("占用"), e.message),
                 }
             }
-            Err(e) => (false, format!("首次绑定端口 0 失败：{e}")),
+            Err(e) => (false, format!("首次绑定端口 0 失败：{}", e.message)),
         };
         check(
-            "端口占用（10048）：第二次绑定必须失败且提示已有另一次运行在跑",
+            "端口占用（10048）：第二次绑定必须失败，判据是 addr_in_use 而非文案匹配",
             port_case.0,
             port_case.1,
         );
@@ -9404,7 +10042,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-10-05.gate-delay-units";
+    const AGENT_BUILD: &str = "2026-10-23.release-hold";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -9413,6 +10051,218 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///    且该断言不再依赖运行时 CWD（此前用相对路径读盘，取不到即误报 FAIL）；
     /// 3) 产品运行时不携带锁定文件，自检依然能验证完整性登记。
     const GADGET_LOCK_JSON: &str = include_str!("../vendor/frida-gadget.lock.json");
+
+    /// 端口回退与单实例的真值表。
+    ///
+    /// 为什么要把判据拆成纯函数：2026-10-24 那版靠匹配错误**文案**
+    /// （`contains("10048")`）；2026-10-25 那版又收得太紧（只有"探头被拒"才回退），
+    /// 结果是端口被真实进程占着的机器永远起不来（#291 的崩溃循环）。现在的判据是
+    /// 「结构化错误码 + 占用者是不是本助手」，两者都能在无设备的机器上断言。
+    #[cfg(test)]
+    mod listen_fallback_tests {
+        use super::*;
+
+        fn in_use() -> BindError {
+            BindError {
+                message: "绑定 127.0.0.1:47831 失败 (os error 10048)".to_string(),
+                addr_in_use: true,
+            }
+        }
+
+        fn not_in_use() -> BindError {
+            BindError {
+                message: "绑定 127.0.0.1:47831 失败 (os error 10013)".to_string(),
+                addr_in_use: false,
+            }
+        }
+
+        #[test]
+        fn addr_in_use_is_decided_by_the_os_code_not_by_the_message() {
+            // Linux 上 10048 不是 EADDRINUSE，但判据只比数字，测试在任何平台成立。
+            assert!(bind_error_is_addr_in_use(&io::Error::from_raw_os_error(
+                WSAEADDRINUSE
+            )));
+            assert!(bind_error_is_addr_in_use(&io::Error::from(
+                io::ErrorKind::AddrInUse
+            )));
+            // 权限错误（10013）换端口也绑不上，按原样失败。
+            assert!(!bind_error_is_addr_in_use(&io::Error::from_raw_os_error(
+                10013
+            )));
+            // 阳性对照：文案里出现 10048、但错误码不是它 ⇒ 不判为占用
+            // （旧实现的字符串匹配会在这里答"是"）。
+            assert!(!bind_error_is_addr_in_use(&io::Error::new(
+                io::ErrorKind::Other,
+                "bind failed: 10048 mentioned only in the text",
+            )));
+        }
+
+        /// 回退门禁的真值表（2026-10-27 修订，issue #291 追问"为什么不换端口"）。
+        ///
+        /// 核心变化：**"有人应答"不再是否决条件**。上一版理由是"换端口会把别人顶掉"，
+        /// 但回退是让系统另给一个端口，根本不碰占用者；单实例也已由互斥体保证。
+        /// 唯一仍然不许回退的是"占着的是另一支 sayall-helper"——那会变成双实例、
+        /// 两支 tap 同时注入宿主。
+        #[test]
+        fn fallback_is_blocked_only_by_another_sayall_helper() {
+            let nobody = PortHolder::Nobody;
+            let other = PortHolder::OtherProgram {
+                pid: 4242,
+                image: "C:\\Program Files\\Docker\\Docker Desktop.exe".to_string(),
+            };
+            let unknown = PortHolder::Unknown;
+            let own = PortHolder::OwnHelper { pid: 99 };
+
+            // 幻影保留（#296）：回退。
+            assert!(should_fall_back_to_ephemeral(47831, &in_use(), &nobody));
+            // 别的程序真占着：也回退（换端口不会顶掉它，且绑不上会让报告层整层失效）。
+            assert!(should_fall_back_to_ephemeral(47831, &in_use(), &other));
+            // 查不出是谁：仍然回退——宁可换端口，也不进每 20 s 一轮的崩溃循环。
+            assert!(should_fall_back_to_ephemeral(47831, &in_use(), &unknown));
+            // 阳性别否：另一支 sayall-helper 占着 ⇒ 必须退出（双实例会 hook 堆叠）。
+            assert!(!should_fall_back_to_ephemeral(47831, &in_use(), &own));
+            // 不是端口占用错误 ⇒ 回退也没用（权限等问题换端口一样失败）。
+            assert!(!should_fall_back_to_ephemeral(
+                47831,
+                &not_in_use(),
+                &nobody
+            ));
+            // 本来就是自动分配（--port 0）⇒ 不走"回退"这条路径。
+            assert!(!should_fall_back_to_ephemeral(0, &in_use(), &nobody));
+        }
+
+        /// 占用者分类的边角：只按文件名认自己人，且不回退时日志能说清是谁。
+        #[test]
+        fn holder_identity_and_tokens_survive_path_and_case_differences() {
+            // 安装版与被测开发版目录不同，文件名一致即为"自己人"。
+            assert!(is_own_helper_image(
+                "C:\\Program Files\\SayAll\\sayall-helper.exe"
+            ));
+            assert!(is_own_helper_image("D:\\build\\SAYALL-HELPER.EXE"));
+            assert!(is_own_helper_image("sayall-helper.exe"));
+            // 阳性对照：别的程序（含名字相近的）不能误判成自己人。
+            assert!(!is_own_helper_image("C:\\x\\sayall-helper-old.exe"));
+            assert!(!is_own_helper_image("C:\\x\\notsayall-helper.exe"));
+            assert!(!is_own_helper_image("C:\\x\\sayall.exe"));
+            // token 与文档/自检判据逐字对应。
+            assert_eq!(port_holder_token(&PortHolder::Nobody), "nobody");
+            assert_eq!(
+                port_holder_token(&PortHolder::OwnHelper { pid: 1 }),
+                "own_helper"
+            );
+            assert_eq!(port_holder_token(&PortHolder::Unknown), "unknown");
+            assert_eq!(
+                port_holder_token(&PortHolder::OtherProgram {
+                    pid: 2,
+                    image: "x.exe".into()
+                }),
+                "other_program"
+            );
+            // 幻影保留是"没人应答"，不能被当成查询失败。
+            assert!(matches!(
+                resolve_port_holder(47831, &PortProbe::Refused),
+                PortHolder::Nobody
+            ));
+            assert!(matches!(
+                resolve_port_holder(47831, &PortProbe::Inconclusive),
+                PortHolder::Unknown
+            ));
+        }
+
+        /// socket 表里的本地端口是网络字节序的低 16 位——读错会让"占用者"永远查不到，
+        /// 于是把"另一支助手"误判成"查不出"，反而放开双实例。
+        #[test]
+        fn mib_local_port_is_decoded_as_network_byte_order() {
+            // 47831 = 0xBAC7 ⇒ 内存字节序 0xC7BA0000 放在 u32 里（小端机器读成 0x0000BAC7 的反面）。
+            let raw = (47831u16).to_be() as u32;
+            assert_eq!(port_from_mib_local_port(raw), 47831);
+            assert_eq!(port_from_mib_local_port(0), 0);
+        }
+
+        /// 回收遗留助手的四道安全闸（2026-10-27）。
+        ///
+        /// 这条逻辑会**结束一个提权进程**，所以每一条否决都要有测试钉住：
+        /// 缺了"不是显式 --port"就会杀掉并行探针的实例；缺了"不是自己"就可能自杀；
+        /// 缺了"同一会话"会在多用户切换时杀掉别的用户正在用的助手（互斥体是会话级的，
+        /// 端口是全局的）。
+        #[test]
+        fn stale_helper_reclaim_is_gated_by_lock_session_pid_and_self() {
+            let self_pid = 4242;
+            // 正常形态：走了锁、同会话、占位者不是自己 → 允许回收。
+            assert!(should_reclaim_stale_helper(99, self_pid, false, true));
+            // 显式 --port = 自检/并行探针（根本没取互斥体锁）⇒ 不许动别人。
+            assert!(!should_reclaim_stale_helper(99, self_pid, true, true));
+            // 别的登录会话（互斥体各管各的，端口却全局唯一）⇒ 不许动。
+            assert!(!should_reclaim_stale_helper(99, self_pid, false, false));
+            // 自己占着端口（理论上不可能，但绝不能自杀）。
+            assert!(!should_reclaim_stale_helper(
+                self_pid, self_pid, false, true
+            ));
+            // PID 0 = 未知，不猜。
+            assert!(!should_reclaim_stale_helper(0, self_pid, false, true));
+            // 真调用 Win32：自己的会话号必须查得到，且与自身一致。
+            assert!(
+                is_same_session_as_self(std::process::id()),
+                "本进程必须被判成同一会话（拿不到会话号会让回收永远不生效）"
+            );
+        }
+
+        /// **真调用** Win32：自己监听一个随机端口，确认能查到占用者就是本进程、
+        /// 且能读到它的映像路径。
+        ///
+        /// 这条覆盖的是纯函数测不到的部分（表结构偏移、字节序、权限）。没有它，
+        /// "另一支助手占着端口"这个否决条件只会在真机上第一次触发时才知道对不对。
+        #[test]
+        fn real_listener_owner_is_resolved_to_this_process() {
+            let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
+                Ok(l) => l,
+                Err(error) => panic!("测试自身需要先监听一个端口：{error}"),
+            };
+            let port = listener.local_addr().expect("读取监听端口").port();
+            let owner = tcp_listener_owner_pid(port);
+            assert_eq!(
+                owner,
+                Some(std::process::id()),
+                "socket 表里该端口的 owning pid 必须是本测试进程（实际 {owner:?}）"
+            );
+            let image = process_image_file_name(std::process::id()).expect("读取自身映像路径");
+            // 阳性对照：测试二进制不是助手，不能被判成"自己人"（否则门禁永远不放行回退）。
+            assert!(
+                !is_own_helper_image(&image),
+                "测试二进制被误判成助手：{image}"
+            );
+            assert!(image.to_ascii_lowercase().ends_with(".exe"));
+            // 没有监听者的端口必须查不到（否则"幻影保留"会被误判成"有人在占"）。
+            drop(listener);
+            assert_eq!(tcp_listener_owner_pid(port), None);
+        }
+
+        /// 单实例互斥体真的能挡住第二支。这是**真调用** Win32，不是纯函数。
+        ///
+        /// 若本机已有产品助手在跑（开发机上常见），第一个 `acquire` 就会失败；
+        /// 那种情况下只断言错误文案可分级（说清是"已有实例"），不误报红灯。
+        #[test]
+        fn the_single_instance_mutex_rejects_a_second_holder() {
+            match acquire_single_instance() {
+                Ok(_held) => {
+                    let second = acquire_single_instance();
+                    assert!(
+                        second.is_err(),
+                        "第二次取锁必须失败：端口不再是单实例判据，互斥体必须挡住并存"
+                    );
+                    let message = second.unwrap_err();
+                    assert!(
+                        message.contains("已有另一个 sayall-helper"),
+                        "错误文案要能让人判断'已有实例'，实际：{message}"
+                    );
+                }
+                Err(error) => assert!(
+                    error.contains("已有另一个 sayall-helper"),
+                    "取锁失败的文案必须可分级，实际：{error}"
+                ),
+            }
+        }
+    }
 
     #[cfg(test)]
     mod target_address_tests {

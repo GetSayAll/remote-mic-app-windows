@@ -6,8 +6,10 @@ export type PageId =
   | "recommendations"
   | "macros"
   | "connection"
+  | "reflections"
   | "permissions"
-  | "settings";
+  | "settings"
+  | "profile";
 
 export type NavIcon =
   | "keyboard"
@@ -16,7 +18,9 @@ export type NavIcon =
   | "link"
   | "shield"
   | "gear"
-  | "member";
+  | "member"
+  | "textbubble"
+  | "person";
 
 export interface NavigationItem {
   id: string;
@@ -33,13 +37,18 @@ export const publicNavigationItems: NavigationItem[] = [
   ...(COMBINATION_ACTIONS_ENABLED
     ? [{ id: "macros", label: "组合动作", icon: "layers" } as NavigationItem]
     : []),
-  { id: "connection", label: "连接", icon: "link" },
-  // 2026-10-20 用户指定顺序：按键、组合动作、连接、推荐、权限、设置。
+  // 2026-10-25 用户指定：推荐放在连接上方（对齐 Mac）。
   { id: "recommendations", label: "推荐", icon: "sparkles" },
+  { id: "connection", label: "连接", icon: "link" },
+  // 2026-10-25 用户指定：回眸紧挨权限上方。
+  { id: "reflections", label: "回眸", icon: "textbubble" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main
   // SettingsSection.about 的 "gearshape"。
   { id: "settings", label: "设置", icon: "gear" },
+  // 2026-10-24 个人中心（对齐 Mac statistics）：固定渲染在侧栏最底部；
+  // 未登录文案是「个人中心」，已登录由 App 传入邮箱前缀。
+  { id: "profile", label: "个人中心", icon: "person" },
 ];
 
 /**

@@ -9,6 +9,7 @@ import type {
   RawInputPhase,
   Rc003BridgeSnapshot,
   RuntimeSnapshot,
+  VoiceAudioHealth,
   VoiceSessionState,
 } from "../lib/bridge";
 import { readFileSync } from "node:fs";
@@ -119,6 +120,7 @@ function runtimeWith(
     connectionGeneration?: number;
     remoteModel?: "rc001" | "rc003" | "unknown";
     staleRemoteEventCount?: number;
+    voiceAudioHealth?: VoiceAudioHealth;
   } = {},
 ): RuntimeSnapshot {
   return {
@@ -139,6 +141,8 @@ function runtimeWith(
         capabilities: null,
         voiceState: patch.voiceState ?? "idle",
         decodedSamples: patch.decodedSamples ?? 0,
+        voiceAudioHealth: patch.voiceAudioHealth ?? "unknown",
+        voiceAudioRateHz: null,
         generation: patch.connectionGeneration ?? 0,
         reconnectAttempt: patch.reconnectAttempt ?? 0,
         powerNotificationsAvailable: false,
@@ -302,6 +306,7 @@ function rc003BridgeSnapshot(
     targetUsages: [],
     ownedUsages: [],
     captureHealth: "off",
+    captureUnavailable: "none",
     captureRevoked: "none",
     ...overrides,
   };
@@ -906,12 +911,12 @@ describe("Onboarding wizard shell", () => {
       .find((button) => button.text().includes("小米蓝牙语音遥控器 2 Pro"))!
       .trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("遥控器没有响应，请重试。");
+    expect(wrapper.text()).toContain("连接遥控器失败，请重试。");
 
     // 之后连接就绪（例如用户在系统里或应用里让它连上）：残留消息随之消失。
     await wrapper.setProps({ runtime: connectedRuntime() });
     await flushPromises();
-    expect(wrapper.text()).not.toContain("遥控器没有响应，请重试。");
+    expect(wrapper.text()).not.toContain("连接遥控器失败，请重试。");
   });
 
   it("corrects a mistaken voice-key press while waiting for a control button", async () => {
@@ -1663,6 +1668,42 @@ describe("Onboarding voice test step", () => {
 
     expect(wrapper.text()).toContain("还在准备中");
     expect(wrapper.text()).toContain("“支持更多输入工具”");
+    expect(wrapper.text()).not.toContain("语音链路正常");
+    wrapper.unmount();
+  });
+
+  // 2026-10-24 现场：语音条出现、音频只剩约 1/3。向导第⑤步也要说明真实原因，
+  // 不能再说「语音链路正常，但输入工具没有写出文字」。
+  it("no_transcript 失败 + 音频降级：给蓝牙共存提示", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "active" }),
+    );
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(),
+      streamingFrame({ decodedSamples: 120, submittedSamples: 320 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        audioPhase: "ready",
+        decodedSamples: 160,
+        submittedSamples: 640,
+        queuedSamples: 0,
+        voiceAudioHealth: "degraded",
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(3_200);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("声音没有完整送到输入工具");
+    expect(wrapper.text()).toContain("关闭或移开同时连接的其他蓝牙设备");
     expect(wrapper.text()).not.toContain("语音链路正常");
     wrapper.unmount();
   });

@@ -38,10 +38,59 @@ use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
 use crate::send_input::{
-    native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, MouseClickKind,
+    native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, KeyCode, MouseClickKind,
     MoveDirection, ScrollDirection,
 };
 use crate::UsageCounters;
+
+/// 「打开应用」实际使用的聚焦档案。
+///
+/// 预设应用（「打开应用」分组的默认列表）在用户没有显式选择时使用产品默认聚焦
+/// 方式（Chrome / 网易云用快捷键，其余自动选择输入框）；用户显式保存的档案优先。
+/// 自定义应用仍按用户保存的档案执行，没有档案时只打开。
+fn open_app_effective_profile(
+    mappings: &ButtonMappings,
+    target: &str,
+) -> Option<crate::focus::AppFocusProfile> {
+    // 用户显式选过的档案优先；没有档案时预设应用使用产品默认聚焦方式。
+    if let Some(profile) = mappings.focus_profiles.get(target) {
+        return Some(profile.clone());
+    }
+    if crate::app_launcher::preset_app(target).is_some() {
+        return Some(preset_focus_profile(target));
+    }
+    None
+}
+
+/// 预设应用的默认聚焦入口。
+///
+/// 有稳定公开快捷键的应用优先用快捷键（不依赖无障碍树）：
+/// - Chrome：`Ctrl+L` 聚焦地址栏；
+/// - 网易云音乐：`Ctrl+F` 打开搜索页并聚焦搜索框。
+///
+/// 其余预设仍走通用输入框选择。快捷键在目标应用成为前台后才发送。
+pub(crate) fn preset_focus_profile(target: &str) -> crate::focus::AppFocusProfile {
+    let shortcut = match target {
+        "chrome" => Some(KeyChord {
+            keys: vec![KeyCode::LeftControl, KeyCode::L],
+        }),
+        "netease_music" => Some(KeyChord {
+            keys: vec![KeyCode::LeftControl, KeyCode::F],
+        }),
+        _ => None,
+    };
+    match shortcut {
+        Some(shortcut) => crate::focus::AppFocusProfile {
+            strategy: crate::focus::FocusStrategy::AppShortcut,
+            shortcut: Some(shortcut),
+            ..Default::default()
+        },
+        None => crate::focus::AppFocusProfile {
+            strategy: crate::focus::FocusStrategy::AutoComposer,
+            ..Default::default()
+        },
+    }
+}
 
 /// 引擎消息（监听器/门控/宿主 → 引擎线程）。
 #[derive(Debug)]
@@ -225,11 +274,99 @@ impl MappingInjector for SendInputInjector {
             .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
         match strategy {
             crate::focus::FocusStrategy::OpenOnly => Ok(()),
+            crate::focus::FocusStrategy::AutoComposer => {
+                // 激活是异步完成的：先等目标成为前台，否则前几次尝试会打在旧前台
+                // 应用上（与「聚焦已记录的输入框」同一理由）。
+                let foreground = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
+                if !foreground {
+                    // 打开本身已经成功。窗口迟迟没到前台时放弃自动聚焦，
+                    // 不把焦点抢到用户当前正在用的另一个应用上。
+                    return Ok(());
+                }
+                self.with_focus_runner(|runner| {
+                    runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
+                        crate::focus::FocusChoice::BestComposer,
+                    ))
+                })
+                .flatten()
+                .map(|_| ())
+                .ok_or_else(|| "聚焦服务不可用".to_owned())
+            }
             crate::focus::FocusStrategy::AppShortcut => {
                 let chord = profile
                     .and_then(|profile| profile.shortcut.clone())
                     .ok_or_else(|| "该应用未录入聚焦快捷键".to_owned())?;
-                self.tap(&chord)
+                // 快捷键必须落在目标应用上：激活是异步的，先等目标成为前台，
+                // 否则 Ctrl+L / Ctrl+F 会发给用户当前正在用的另一个应用。
+                let mut foreground = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
+                if !foreground {
+                    // 冷启动可能超过 activate_or_launch 的 1.5 秒前台预算：窗口在主窗口
+                    // 出现后仍留在后台。再走一次“已运行→前置”，避免冷启动首按丢焦点
+                    // （2026-10-23 网易云音乐冷启动实测：4.2 秒才出现主窗口）。
+                    crate::ble::gatt_note(
+                        "open_app_focus_retry phase=started reason=target_not_foreground"
+                            .to_owned(),
+                    );
+                    let _ = self.launch_app(target);
+                    foreground = crate::app_launcher::wait_for_target_foreground(
+                        target,
+                        std::time::Duration::from_millis(2500),
+                    );
+                    crate::ble::gatt_note(format!(
+                        "open_app_focus_retry phase=completed terminal_result={}",
+                        if foreground { "passed" } else { "failed" }
+                    ));
+                }
+                if !foreground {
+                    crate::ble::gatt_note(
+                        "open_app_focus_shortcut phase=skipped reason=target_not_foreground"
+                            .to_owned(),
+                    );
+                    return Ok(());
+                }
+                self.tap(&chord)?;
+                crate::ble::gatt_note("open_app_focus_shortcut phase=completed".to_owned());
+                // 网易云音乐的 Ctrl+F 只打开搜索页，不把焦点放进搜索框；
+                // 点击搜索框并全选旧查询，后续语音输入才会替换而不是追加。
+                if let Some((x, y)) = crate::app_launcher::preset_focus_click_point(target) {
+                    std::thread::sleep(std::time::Duration::from_millis(450));
+                    if !crate::app_launcher::wait_for_target_foreground(
+                        target,
+                        std::time::Duration::from_millis(500),
+                    ) {
+                        crate::ble::gatt_note(
+                            "open_app_focus_click phase=skipped reason=target_not_foreground"
+                                .to_owned(),
+                        );
+                        return Ok(());
+                    }
+                    if self.runtime.move_cursor_and_click(x, y).is_err() {
+                        crate::ble::gatt_note(
+                            "open_app_focus_click phase=failed error_domain=send_input error_code=click_failed retryable=true"
+                                .to_owned(),
+                        );
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    let select_all = KeyChord {
+                        keys: vec![KeyCode::LeftControl, KeyCode::A],
+                    };
+                    if self.tap(&select_all).is_err() {
+                        crate::ble::gatt_note(
+                            "open_app_focus_click phase=failed error_domain=send_input error_code=select_all_failed retryable=true"
+                                .to_owned(),
+                        );
+                        return Ok(());
+                    }
+                    crate::ble::gatt_note("open_app_focus_click phase=completed".to_owned());
+                }
+                Ok(())
             }
             crate::focus::FocusStrategy::RecordedElement => {
                 let recorded = profile
@@ -565,7 +702,8 @@ impl ButtonMappingRuntime {
 
     /// UI「测试打开与聚焦」：先打开/激活目标应用，再按其聚焦档案聚焦。
     pub fn launch_app_and_focus_now(&self, target: &str) -> Result<(), String> {
-        let profile = self.mappings().focus_profiles.get(target).cloned();
+        let mappings = self.mappings();
+        let profile = open_app_effective_profile(&mappings, target);
         self.injector.launch_app_and_focus(target, profile.as_ref())
     }
 
@@ -1005,8 +1143,9 @@ fn handle_edges(
         key_gate::swallowed_edge_count(),
         key_gate::leaked_down_count()
     ));
-    let press_count = edges.iter().filter(|edge| edge.is_pressed).count() as u64;
-    usage.record_button_presses(press_count);
+    for edge in edges.iter().filter(|edge| edge.is_pressed) {
+        usage.record_button_press(edge.button);
+    }
     {
         let mut snapshot = lock_snapshot(snapshot);
         snapshot.semantic_edge_count = snapshot
@@ -1355,7 +1494,7 @@ fn fire_gesture(
             } else {
                 "preset"
             };
-            let profile = mappings.focus_profiles.get(&target).cloned();
+            let profile = open_app_effective_profile(&mappings, &target);
             let strategy = profile
                 .as_ref()
                 .map(|profile| profile.strategy.as_str())
@@ -2388,7 +2527,7 @@ mod tests {
         drop(gate);
     }
 
-    /// 打开应用带聚焦档案：分发侧必须把档案一起交给注入器（策略在档案里）。
+    /// 自定义应用带聚焦档案：分发侧必须把档案一起交给注入器（策略在档案里）。
     #[test]
     fn open_app_with_focus_profile_forwards_strategy() {
         let _gate_lock = crate::key_gate::lock_gate_tests();
@@ -2403,18 +2542,19 @@ mod tests {
                 crate::macro_runtime::UnsupportedStepperSource,
             ))),
         );
+        let target = r"C:\Tools\notepad.exe";
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
             RemoteButton::Ok,
             ButtonActions {
                 single: ButtonAction::OpenApp {
-                    target: "notepad".to_owned(),
+                    target: target.to_owned(),
                 },
                 ..ButtonActions::default()
             },
         );
         mappings.focus_profiles.insert(
-            "notepad".to_owned(),
+            target.to_owned(),
             crate::focus::AppFocusProfile {
                 strategy: crate::focus::FocusStrategy::RecordedElement,
                 shortcut: None,
@@ -2440,14 +2580,162 @@ mod tests {
         assert_eq!(
             injector.focus_requests.lock().unwrap().as_slice(),
             &[FocusCall::LaunchThenFocus {
-                target: "notepad".to_owned(),
+                target: target.to_owned(),
                 strategy: "recorded_element",
             }],
-            "带档案的打开应用必须把策略交给注入器"
+            "自定义应用的聚焦档案必须原样交给注入器"
+        );
+        assert_eq!(
+            injector.launches.lock().unwrap().as_slice(),
+            &[target.to_owned()]
+        );
+        drop(gate);
+    }
+
+    /// Chrome 聚焦地址栏、网易云音乐聚焦搜索框：使用公开快捷键，
+    /// 不依赖无障碍树（2026-10-23 现场实测 Ctrl+L / Ctrl+F 均生效）。
+    #[test]
+    fn preset_focus_profiles_use_known_shortcuts() {
+        let chrome = preset_focus_profile("chrome");
+        assert_eq!(chrome.strategy, crate::focus::FocusStrategy::AppShortcut);
+        assert_eq!(
+            chrome.shortcut.expect("Chrome 快捷键").keys,
+            vec![KeyCode::LeftControl, KeyCode::L]
+        );
+
+        let netease = preset_focus_profile("netease_music");
+        assert_eq!(netease.strategy, crate::focus::FocusStrategy::AppShortcut);
+        assert_eq!(
+            netease.shortcut.expect("网易云音乐快捷键").keys,
+            vec![KeyCode::LeftControl, KeyCode::F]
+        );
+
+        // 其余预设继续走通用输入框选择。
+        assert_eq!(
+            preset_focus_profile("notepad").strategy,
+            crate::focus::FocusStrategy::AutoComposer
+        );
+    }
+
+    #[test]
+    fn open_app_effective_profile_prefers_explicit_preset_override() {
+        let mut mappings = ButtonMappings::default();
+        assert_eq!(
+            open_app_effective_profile(&mappings, "notepad")
+                .expect("预设默认档案")
+                .strategy,
+            crate::focus::FocusStrategy::AutoComposer
+        );
+        mappings.focus_profiles.insert(
+            "chrome".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::RecordedElement,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            open_app_effective_profile(&mappings, "chrome")
+                .expect("显式档案优先")
+                .strategy,
+            crate::focus::FocusStrategy::RecordedElement
+        );
+    }
+
+    /// 预设应用没有显式档案时使用产品默认自动聚焦。
+    #[test]
+    fn open_app_preset_requests_auto_composer() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::OpenApp {
+                    target: "notepad".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.focus_requests.lock().unwrap().as_slice(),
+            &[FocusCall::LaunchThenFocus {
+                target: "notepad".to_owned(),
+                strategy: "auto_composer",
+            }],
+            "预设应用无显式档案时必须自动聚焦"
         );
         assert_eq!(
             injector.launches.lock().unwrap().as_slice(),
             &["notepad".to_owned()]
+        );
+        drop(gate);
+    }
+
+    /// 自定义应用没有聚焦档案时保持「只打开」，不擅自抢焦点。
+    #[test]
+    fn open_app_custom_without_profile_stays_open_only() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let target = r"C:\Tools\custom.exe";
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::OpenApp {
+                    target: target.to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.focus_requests.lock().unwrap().as_slice(),
+            &[FocusCall::LaunchThenFocus {
+                target: target.to_owned(),
+                strategy: "none",
+            }],
+            "自定义应用没有档案时只打开"
         );
         drop(gate);
     }

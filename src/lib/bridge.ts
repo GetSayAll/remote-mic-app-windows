@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { t } from "./i18n";
+import { effectiveLanguage, type EffectiveLanguage } from "./language-state";
 
 export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 
@@ -15,6 +17,14 @@ export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
  */
 export const OFFICIAL_WEBSITE_URL = "https://sayall.app/?from=win";
 export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-app-windows";
+
+/**
+ * 分享面板的官网链接（对齐 Mac `AppSharing` 的 `from=mac_share`，Windows 用
+ * `from=win_share`）。二维码是同一链接在本机生成的静态资产，不请求二维码服务。
+ * 修改此值必须重新生成 `public/app-share-qr.png`：
+ * `corepack pnpm dlx qrcode -o public/app-share-qr.png -w 288 -q 2 -e M "<URL>"`
+ */
+export const SHARE_WEBSITE_URL = "https://sayall.app/?from=win_share";
 
 /**
  * Vokie 官网（2026-10-01 Andy 提供）。
@@ -37,6 +47,8 @@ export interface RecommendationsPageEvent {
   generation: number;
   status: "ready" | "failed";
   reason?: string | null;
+  /** 仅 ready 事件携带：当前网页能否后退（决定顶部返回条）。 */
+  canGoBack?: boolean | null;
 }
 
 export type ConnectionPhase =
@@ -181,6 +193,15 @@ export interface Rc003BridgeSnapshot {
    */
   captureHealth: Rc003CaptureHealth;
   /**
+   * 「开着但没生效」的**原因**（2026-10-27，issue #291）：只在 `captureHealth` 为
+   * `inactive` 时有意义，界面据此选哪一句话。
+   *
+   * `startup_failing` = 助手反复启动不起来（典型原因：这台电脑上别的程序占着它需要
+   * 的东西）。对这类原因「关掉再打开」是无效建议，必须换文案——见
+   * `captureInactiveText` 的第二个参数。
+   */
+  captureUnavailable: Rc003CaptureUnavailable;
+  /**
    * 启动时被应用**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）：
    * `none` = 没发生；其余取值表示开关是被回落拉低的，界面要让用户看懂"为什么
    * 自己关了"（文案见 `captureRevokedText`）。token 与 Rust `CaptureRevoke::as_str`
@@ -191,6 +212,9 @@ export interface Rc003BridgeSnapshot {
 
 /** `captureHealth` 的取值（与 Rust `CaptureHealth::as_str` 逐字对应）。 */
 export type Rc003CaptureHealth = "off" | "starting" | "active" | "inactive";
+
+/** `captureUnavailable` 的取值（与 Rust `CaptureUnavailable::as_str` 逐字对应）。 */
+export type Rc003CaptureUnavailable = "none" | "startup_failing";
 
 /** `captureRevoked` 的取值（与 Rust `CaptureRevoke::as_str` 逐字对应）。 */
 export type Rc003CaptureRevoked =
@@ -212,8 +236,36 @@ export interface KeyChord {
 
 export type MouseClickKind = "left" | "right" | "double_left" | "middle";
 export type MoveDirection = "up" | "down" | "left" | "right";
-export const mouseClickLabels: Record<MouseClickKind, string> = { left: "左键单击", right: "右键单击", double_left: "左键双击", middle: "中键单击" };
-export const mouseMoveLabels: Record<MoveDirection, string> = { up: "鼠标向上", down: "鼠标向下", left: "鼠标向左", right: "鼠标向右" };
+
+/** 读取时翻译：常量对象也要跟随语言切换，不能在校验/加载时冻结文案。 */
+export const mouseClickLabels: Record<MouseClickKind, string> = {
+  get left() {
+    return t("左键单击");
+  },
+  get right() {
+    return t("右键单击");
+  },
+  get double_left() {
+    return t("左键双击");
+  },
+  get middle() {
+    return t("中键单击");
+  },
+};
+export const mouseMoveLabels: Record<MoveDirection, string> = {
+  get up() {
+    return t("鼠标向上");
+  },
+  get down() {
+    return t("鼠标向下");
+  },
+  get left() {
+    return t("鼠标向左");
+  },
+  get right() {
+    return t("鼠标向右");
+  },
+};
 
 export type ButtonAction =
   | { type: "disabled" }
@@ -336,6 +388,7 @@ export interface PresetAppInfo {
 /** 打开应用后的聚焦方式（对齐 Rust `FocusStrategy`）。 */
 export type FocusStrategy =
   | "open_only"
+  | "auto_composer"
   | "app_shortcut"
   | "recorded_element"
   | "recorded_point";
@@ -460,11 +513,24 @@ export interface ConnectionSnapshot {
   capabilities: AtvvCapabilities | null;
   voiceState: VoiceSessionState;
   decodedSamples: number;
+  /**
+   * 最近一次足够长的语音会话的音频完整度（2026-10-24 现场）。
+   *
+   * `degraded` = 遥控器音频只到了满速的约 1/3（常见于蓝牙适配器同时连接了
+   * 另一支 BLE 键盘/鼠标/耳机），输入法可能转写不出文字。老快照没有此字段，
+   * 一律按 `unknown` 处理（不提示）。
+   */
+  voiceAudioHealth?: VoiceAudioHealth;
+  /** 最近一次判定的实际样本率（Hz）；`null`/缺失 = 尚未判定。 */
+  voiceAudioRateHz?: number | null;
   generation: number;
   reconnectAttempt: number;
   powerNotificationsAvailable: boolean;
   lastError: string | null;
 }
+
+/** 与 Rust `VoiceAudioHealth` 逐字对应。 */
+export type VoiceAudioHealth = "unknown" | "full" | "degraded";
 
 export interface PlatformSnapshot {
   platform: string;
@@ -596,6 +662,11 @@ export interface AppUpdatePreferences {
 }
 
 export type ThemePreference = "system" | "light" | "dark";
+
+/** 应用语言偏好；与 Rust `AppLanguage` / Mac `AppLanguage` 的持久化值一致。 */
+export type AppLanguagePreference = "system" | "zh-Hans" | "en";
+/** 推荐页实际使用的语言；`system` 已在语言模块里解析成这两个之一。 */
+export type { EffectiveLanguage } from "./language-state";
 
 /** Windows 系统强调色（设置 > 个性化 > 颜色），Rust accent 命令契约。 */
 export interface AccentRgb {
@@ -755,6 +826,101 @@ export async function getMembershipAccountSummary(): Promise<MembershipAccountSu
     };
   }
   return invoke<MembershipAccountSummary>("get_membership_snapshot");
+}
+
+/** 个人中心日历的一天（本地日期 `YYYY-MM-DD`）。 */
+export interface UsageProfileDay {
+  date: string;
+  buttonPresses: number;
+  voiceSeconds: number;
+}
+
+/** 单次语音排行的一条；应用名只来自本机保存的显示名。 */
+export interface UsageVoiceSession {
+  endedAtMs: number;
+  durationSeconds: number;
+  applicationName: string | null;
+}
+
+/** 个人中心读模型（`get_usage_profile`）。 */
+export interface UsageProfile {
+  totalButtonPresses: number;
+  totalVoiceSeconds: number;
+  weekButtonPresses: number;
+  longestVoiceSeconds: number;
+  buttonPressesByControl: Record<string, number>;
+  voiceSessions: UsageVoiceSession[];
+  recentDays: UsageProfileDay[];
+}
+
+function browserDateKey(offsetFromToday: number): string {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + offsetFromToday);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** 浏览器预览用的固定样例（不进入 Tauri 路径，只用于布局走查）。 */
+function browserUsageProfile(): UsageProfile {
+  const recentDays: UsageProfileDay[] = Array.from({ length: 26 * 7 }, (_, index) => {
+    const offset = index - 26 * 7 + 1;
+    const active = (index * 7 + 3) % 5 !== 0;
+    return {
+      date: browserDateKey(offset),
+      buttonPresses: active ? (index * 13) % 48 : 0,
+      voiceSeconds: active && index % 4 === 0 ? (index * 17) % 301 : 0,
+    };
+  });
+  return {
+    totalButtonPresses: 561,
+    totalVoiceSeconds: 33 * 60 + 12,
+    weekButtonPresses: 9,
+    longestVoiceSeconds: 85,
+    buttonPressesByControl: {
+      "button.back": 47,
+      "button.ok": 42,
+      "button.home": 45,
+      "button.down": 45,
+      "button.up": 41,
+      "button.left": 40,
+      "button.right": 45,
+      "button.menu": 23,
+      "button.tv": 12,
+      "button.power": 8,
+      "button.volume_up": 22,
+      "button.volume_down": 19,
+      "button.volume_mute": 11,
+      voice: 132,
+    },
+    voiceSessions: [
+      {
+        endedAtMs: Date.now() - 3 * 60 * 60 * 1000,
+        durationSeconds: 85,
+        applicationName: "微信",
+      },
+      {
+        endedAtMs: Date.now() - 26 * 60 * 60 * 1000,
+        durationSeconds: 82,
+        applicationName: "Chrome 浏览器",
+      },
+      {
+        endedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000,
+        durationSeconds: 61,
+        applicationName: null,
+      },
+    ],
+    recentDays,
+  };
+}
+
+export async function getUsageProfile(): Promise<UsageProfile> {
+  if (!isTauriRuntime()) {
+    return browserUsageProfile();
+  }
+  return invoke<UsageProfile>("get_usage_profile");
 }
 
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
@@ -987,26 +1153,53 @@ export async function openVokieHomepage(): Promise<void> {
  */
 export async function showRecommendationsPage(
   theme: "light" | "dark",
+  language: EffectiveLanguage = "zh-Hans",
 ): Promise<number> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法在应用内打开推荐页面");
   }
-  return invoke<number>("show_recommendations", { theme });
+  return invoke<number>("show_recommendations", { theme, language });
 }
 
-/** 离开推荐页时隐藏子 WebView；页面本身保留，返回时可快速重载。 */
+/** 离开推荐页时隐藏子 WebView；已就绪文档保留，返回时直接显示（与 Mac 一致）。 */
 export async function hideRecommendationsPage(): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("hide_recommendations");
 }
 
 /**
+ * 失败后重试：重新加载**当前**推荐页（保留 `?item=` 详情参数），
+ * 而不是回到列表；generation 语义与 `showRecommendationsPage` 相同。
+ */
+export async function retryRecommendationsPage(
+  theme: "light" | "dark",
+  language: EffectiveLanguage = "zh-Hans",
+): Promise<number> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法在应用内打开推荐页面");
+  }
+  return invoke<number>("retry_recommendations", { theme, language });
+}
+
+/** 网页内后退（顶部「返回上一页」）；仅 ready 且 canGoBack 时可用。 */
+export async function goBackRecommendationsPage(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("go_back_recommendations");
+}
+
+/**
  * 加载失败时的「打开官网」：Rust 侧保留当前详情参数并去掉 `embed/theme`
  * 等 App 专用参数，再交给系统浏览器。浏览器预览直接打开列表页。
  */
-export async function openRecommendationsWebsite(): Promise<void> {
+export async function openRecommendationsWebsite(
+  language: EffectiveLanguage = "zh-Hans",
+): Promise<void> {
   if (!isTauriRuntime()) {
-    window.open(RECOMMENDATIONS_URL, "_blank", "noopener,noreferrer");
+    const url =
+      language === "en"
+        ? "https://sayall.app/en/recommendations/"
+        : RECOMMENDATIONS_URL;
+    window.open(url, "_blank", "noopener,noreferrer");
     return;
   }
   await invoke("open_recommendations_website");
@@ -1183,6 +1376,7 @@ const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   targetUsages: [],
   ownedUsages: [],
   captureHealth: "off",
+  captureUnavailable: "none",
   captureRevoked: "none",
 };
 
@@ -1368,6 +1562,14 @@ export async function pickButtonProfilesImportFile(): Promise<string | null> {
   return invoke<string | null>("button_profiles_pick_import_file");
 }
 
+/** 选择键位方案备份的导出位置；取消返回 null。 */
+export async function pickButtonProfilesExportFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_pick_export_file");
+}
+
 /** 键位方案页面命令（命令名与 payload 由私有组件定义）。 */
 export async function dispatchButtonProfilesCommand(
   command: string,
@@ -1393,31 +1595,37 @@ export async function listPresetApps(): Promise<PresetAppInfo[]> {
   if (!isTauriRuntime()) {
     // 浏览器预览：展示完整预设表（仅渲染验证）。
     return [
-      { id: "sayall", name: "无线麦", installed: true },
+      { id: "sayall", name: "无线麦 SayAll", installed: true },
       { id: "wechat", name: "微信", installed: true },
-      { id: "edge", name: "Edge 浏览器", installed: true },
-      { id: "chrome", name: "Chrome 浏览器", installed: true },
-      { id: "notepad", name: "记事本", installed: true },
-      { id: "calc", name: "计算器", installed: true },
-      { id: "explorer", name: "文件资源管理器", installed: true },
       { id: "netease_music", name: "网易云音乐", installed: true },
-      // 2026-10-02 扩充的预设（与 Rust PRESET_APPS 同步，仅浏览器预览用）。
-      { id: "vokie", name: "Vokie", installed: true },
-      { id: "vscode", name: "Visual Studio Code", installed: true },
-      { id: "cursor", name: "Cursor", installed: true },
+      { id: "chrome", name: "Chrome 浏览器", installed: true },
+      { id: "chatgpt", name: "ChatGPT", installed: true },
+      { id: "workbuddy", name: "WorkBuddy", installed: true },
       { id: "dimagent", name: "DimAgent", installed: true },
+      { id: "vokie", name: "Vokie", installed: true },
+      { id: "notepad", name: "记事本", installed: true },
       { id: "qq", name: "QQ", installed: true },
-      { id: "feishu", name: "飞书", installed: true },
-      { id: "hermes", name: "Hermes", installed: true },
     ];
   }
   return invoke<PresetAppInfo[]>("list_preset_apps");
 }
 
 /**
- * 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+ * 「学习输入框」第一步：打开或切换到目标应用，不改变它的输入焦点。
  *
- * 调用方需先让目标应用成为前台（本命令不会切换窗口）。
+ * 对齐 Mac `recordCustomApplicationInput`：先打开目标 App，再进入学习窗口。
+ */
+export async function activateAppForLearning(target: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法打开应用");
+  }
+  return invoke<void>("activate_app_for_learning", { target });
+}
+
+/**
+ * 「学习输入框」：最多 6 秒内轮询系统焦点，返回捕获到的可编辑目标特征。
+ *
+ * 调用方应先通过 [`activateAppForLearning`] 打开目标应用；本命令不会再切换窗口。
  */
 export async function learnFocusTarget(): Promise<RecordedFocusTarget> {
   if (!isTauriRuntime()) {
@@ -1669,6 +1877,28 @@ export async function saveThemePreference(
   return invoke<ThemePreference>("set_theme_preference", { preference, operationId });
 }
 
+export async function getApplicationLanguage(
+  operationId: string,
+): Promise<AppLanguagePreference> {
+  if (!isTauriRuntime()) {
+    return "system";
+  }
+  return invoke<AppLanguagePreference>("get_application_language", { operationId });
+}
+
+export async function saveApplicationLanguage(
+  language: AppLanguagePreference,
+  operationId: string,
+): Promise<AppLanguagePreference> {
+  if (!isTauriRuntime()) {
+    return language;
+  }
+  return invoke<AppLanguagePreference>("set_application_language", {
+    language,
+    operationId,
+  });
+}
+
 export interface ThemeResultReport {
   operationId: string;
   action: "initialize" | "change";
@@ -1701,14 +1931,24 @@ export async function reportThemeResult(report: ThemeResultReport): Promise<void
  */
 export type AppIconIdentifier = "standard" | "faceted-duck";
 
+/** 应用图标切换后通知壳层（侧栏 logo）立即同步，不必等轮询。 */
+export const APP_ICON_CHANGED_EVENT = "sayall:app-icon-changed";
+
 export async function getAppIcon(): Promise<AppIconIdentifier> {
   if (!isTauriRuntime()) return "standard";
   return invoke<AppIconIdentifier>("get_app_icon");
 }
 
 export async function setAppIcon(identifier: AppIconIdentifier): Promise<AppIconIdentifier> {
-  if (!isTauriRuntime()) return identifier;
-  return invoke<AppIconIdentifier>("set_app_icon", { identifier });
+  const applied = isTauriRuntime()
+    ? await invoke<AppIconIdentifier>("set_app_icon", { identifier })
+    : identifier;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent<AppIconIdentifier>(APP_ICON_CHANGED_EVENT, { detail: applied }),
+    );
+  }
+  return applied;
 }
 
 /** 下载并安装已检查到的更新（Windows 上安装成功时应用会退出并由安装器重启）。 */
@@ -1735,6 +1975,11 @@ export async function subscribeAppUpdateProgress(
   };
 }
 
+/** 纯英文/符号的键名不查字典，避免每次渲染都产生无意义缺失告警。 */
+function localized(source: string): string {
+  return /[\u4e00-\u9fff]/.test(source) ? t(source) : source;
+}
+
 const voiceHotkeyKeyLabels: Record<string, string> = {
   control: "Ctrl",
   left_control: "左 Ctrl",
@@ -1752,70 +1997,134 @@ const voiceHotkeyKeyLabels: Record<string, string> = {
   space: "空格",
   tab: "Tab",
   apps: "右键菜单",
+  oem1: ";",
+  oem_plus: "=",
+  oem_comma: ",",
+  oem_minus: "-",
+  oem_period: ".",
+  oem2: "/",
+  oem3: "`",
+  oem4: "[",
+  oem5: "\\",
+  oem6: "]",
+  oem7: "'",
+  oem102: "\\",
+  numpad0: "小键盘 0",
+  numpad1: "小键盘 1",
+  numpad2: "小键盘 2",
+  numpad3: "小键盘 3",
+  numpad4: "小键盘 4",
+  numpad5: "小键盘 5",
+  numpad6: "小键盘 6",
+  numpad7: "小键盘 7",
+  numpad8: "小键盘 8",
+  numpad9: "小键盘 9",
+  numpad_multiply: "小键盘 ×",
+  numpad_add: "小键盘 +",
+  numpad_subtract: "小键盘 −",
+  numpad_decimal: "小键盘 .",
+  numpad_divide: "小键盘 ÷",
+  numlock: "Num Lock",
 };
 
 function voiceHotkeyKeyLabel(code: string): string {
   const known = voiceHotkeyKeyLabels[code];
-  if (known) return known;
+  if (known) return localized(known);
   const digit = /^digit([0-9])$/.exec(code);
   if (digit) return digit[1];
   return code.toUpperCase();
 }
 
 export function voiceHoldHotkeyLabel(hotkey: KeyChord | null): string {
-  if (!hotkey || hotkey.keys.length === 0) return "关闭";
+  // "关闭" 不能进总字典：同一个中文原文在弹窗按钮里是 "Close"，全局按原文
+  // 查表会产生歧义；这里按调用时语言直接给出快捷键关闭态。
+  if (!hotkey || hotkey.keys.length === 0) {
+    return effectiveLanguage.value === "en" ? "Off" : "关闭";
+  }
   return hotkey.keys.map(voiceHotkeyKeyLabel).join(" + ");
 }
 
 export function connectionPhaseLabel(phase: ConnectionPhase): string {
-  return {
-    idle: "尚未连接",
-    connecting: "正在连接遥控器",
-    discovering: "正在连接遥控器",
-    awaiting_capabilities: "正在确认语音功能",
-    ready: "已连接",
-    streaming: "正在接收语音",
-    draining: "正在结束本次语音",
-    reconnecting: "正在等待遥控器重连",
-    suspended: "电脑已进入睡眠",
-    disconnected: "遥控器已断开",
-    failed: "连接失败",
-  }[phase];
+  return t(
+    {
+      idle: "尚未连接",
+      connecting: "正在连接遥控器",
+      discovering: "正在连接遥控器",
+      awaiting_capabilities: "正在确认语音功能",
+      ready: "已连接",
+      streaming: "正在接收语音",
+      draining: "正在结束本次语音",
+      reconnecting: "正在等待遥控器重连",
+      suspended: "电脑已进入睡眠",
+      disconnected: "遥控器已断开",
+      failed: "连接失败",
+    }[phase],
+  );
 }
 
 export function remoteModelLabel(model: RemoteModel): string {
-  return {
-    rc001: "小米蓝牙语音遥控器 2",
-    rc003: "小米蓝牙语音遥控器 2 Pro",
-    unknown: "连接后显示",
-  }[model];
+  return t(
+    {
+      rc001: "小米蓝牙语音遥控器 2",
+      rc003: "小米蓝牙语音遥控器 2 Pro",
+      unknown: "连接后显示",
+    }[model],
+  );
 }
 
 export function audioPhaseLabel(phase: AudioPhase): string {
-  return {
-    unconfigured: "尚未选择设备",
-    ready: "已就绪",
-    streaming: "正在写入语音",
-    draining: "正在结束",
-    failed: "语音设备出错",
-    unsupported: "当前环境不支持语音设备",
-  }[phase];
+  return t(
+    {
+      unconfigured: "尚未选择设备",
+      ready: "已就绪",
+      streaming: "正在写入语音",
+      draining: "正在结束",
+      failed: "语音设备出错",
+      unsupported: "当前环境不支持语音设备",
+    }[phase],
+  );
 }
 
 export const buttonLabels: Record<RemoteButton, string> = {
-  back: "返回",
-  ok: "确定",
-  tv: "TV",
-  home: "主页",
-  right: "右",
-  left: "左",
-  down: "下",
-  up: "上",
-  menu: "菜单",
-  power: "电源",
-  volume_mute: "静音",
-  volume_up: "音量+",
-  volume_down: "音量−",
+  get back() {
+    return t("返回");
+  },
+  get ok() {
+    return t("确定");
+  },
+  get tv() {
+    return "TV";
+  },
+  get home() {
+    return t("主页");
+  },
+  get right() {
+    return t("右");
+  },
+  get left() {
+    return t("左");
+  },
+  get down() {
+    return t("下");
+  },
+  get up() {
+    return t("上");
+  },
+  get menu() {
+    return t("菜单");
+  },
+  get power() {
+    return t("电源");
+  },
+  get volume_mute() {
+    return t("静音");
+  },
+  get volume_up() {
+    return t("音量+");
+  },
+  get volume_down() {
+    return t("音量−");
+  },
 };
 
 export function buttonLabel(button: RemoteButton): string {
@@ -1823,11 +2132,13 @@ export function buttonLabel(button: RemoteButton): string {
 }
 
 export function buttonTriggerLabel(trigger: ButtonTrigger): string {
-  return {
-    single: "单击",
-    double: "双击",
-    long: "长按",
-  }[trigger];
+  return t(
+    {
+      single: "单击",
+      double: "双击",
+      long: "长按",
+    }[trigger],
+  );
 }
 
 /**
@@ -1886,6 +2197,8 @@ export function shortcutCapability(
 
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
+  // 组合动作用 `return` 作为 Enter 的稳定存储名；界面统一显示键帽上的 "Enter"。
+  return: "Enter",
   // 用厂商印在键帽上的英文名，避免“退格/删除”在中文里被混为一谈。
   backspace: "Backspace",
   home: "Home",
@@ -1920,7 +2233,7 @@ const keyLabels: Record<string, string> = {
 
 export function keyLabel(code: KeyCode): string {
   const known = keyLabels[code];
-  if (known) return known;
+  if (known) return localized(known);
   const digit = /^digit([0-9])$/.exec(code);
   if (digit) return digit[1];
   return code.toUpperCase();
@@ -2003,30 +2316,45 @@ export function registerCommonPhraseAvailability(available: boolean): void {
   commonPhrasesAvailable = available;
 }
 
+/**
+ * 「打开应用」的显示名：动作在前、应用名在后（对齐 Mac `action.open_*`）。
+ *
+ * 中文名直接相连（“打开微信”）；以拉丁字母或数字开头的名字按写法约定补一个
+ * 空格（“打开 WorkBuddy”），避免中英文粘连。
+ */
+export function openAppLabel(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return t("打开应用");
+  return /^[0-9A-Za-z]/.test(trimmed)
+    ? t("打开 {name}", { name: trimmed })
+    : t("打开{name}", { name: trimmed });
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
-  if (!action || action.type === "disabled") return "未设置";
-  if (action.type === "focus_input") return "聚焦输入框";
+  if (!action || action.type === "disabled") return t("未设置");
+  if (action.type === "focus_input") return t("聚焦输入框");
   if (action.type === "open_common_phrases") {
     // 缺私有组件（公开构建）时如实标注，不静默替换成含义不同的动作。
-    return commonPhrasesAvailable ? "打开常用语" : "打开常用语（当前不可用）";
+    return commonPhrasesAvailable ? t("打开常用语") : t("打开常用语（当前不可用）");
   }
   if (action.type === "scroll") {
-    const label = action.direction === "up" ? "滚轮向上" : "滚轮向下";
-    return (action.steps ?? 1) === 1 ? label : `${label} ${action.steps} 格`;
+    const label = action.direction === "up" ? t("滚轮向上") : t("滚轮向下");
+    const steps = action.steps ?? 1;
+    return steps === 1 ? label : t("{label} {steps} 格", { label, steps });
   }
   if (action.type === "mouse_click") return mouseClickLabels[action.kind];
   if (action.type === "mouse_move") return `${mouseMoveLabels[action.direction]} ${action.distance} px`;
   if (action.type === "open_app") {
     const known = presetAppNames.get(action.target);
-    if (known) return `打开${known}`;
+    if (known) return openAppLabel(known);
     // 自定义应用：target 为路径，取文件名去扩展名作展示名。
     const base = action.target.split(/[\\/]/).pop() ?? action.target;
     const stem = base.replace(/\.(exe|lnk)$/i, "");
-    return `打开${stem || action.target}`;
+    return openAppLabel(stem || action.target);
   }
   if (action.type === "run_macro") {
     const known = macroNameById(action.macroId);
-    return known ? `执行${known}` : "执行组合动作";
+    return known ? t("执行{name}", { name: known }) : t("执行组合动作");
   }
   return chordLabel(action.chord);
 }
@@ -2173,14 +2501,30 @@ export async function getMacroRunStatus(macroId: string): Promise<MacroRunStatus
 
 /** 组合动作步骤类型的中文名（对齐 Mac `macro.step.*` 文案）。 */
 export const macroActionLabels: Record<MacroAction, string> = {
-  open_application: "打开应用",
-  wait_for_application: "等待应用",
-  send_shortcut: "单键或快捷键",
-  focus_input: "聚焦学习过的输入框",
-  focus_frontmost: "聚焦输入框",
-  system_action: "系统与媒体动作",
-  open_url: "打开网址",
-  run_macro: "执行已有组合动作",
+  get open_application() {
+    return t("打开应用");
+  },
+  get wait_for_application() {
+    return t("等待应用");
+  },
+  get send_shortcut() {
+    return t("单键或快捷键");
+  },
+  get focus_input() {
+    return t("聚焦学习过的输入框");
+  },
+  get focus_frontmost() {
+    return t("聚焦输入框");
+  },
+  get system_action() {
+    return t("系统与媒体动作");
+  },
+  get open_url() {
+    return t("打开网址");
+  },
+  get run_macro() {
+    return t("执行已有组合动作");
+  },
 };
 
 export function macroActionLabel(action: MacroAction): string {
@@ -2202,27 +2546,31 @@ export function macroStepSummary(step: MacroStep): string {
   switch (step.action) {
     case "open_application":
       return appTargetLabel(parameters.target);
-    case "wait_for_application":
-      return `${appTargetLabel(parameters.target)} · ${
-        parameters.state === "running" ? "App 已打开" : "App 窗口已出现"
-      }`;
+    case "wait_for_application": {
+      const app = appTargetLabel(parameters.target);
+      return parameters.state === "running"
+        ? t("{app} · App 已打开", { app })
+        : t("{app} · App 窗口已出现", { app });
+    }
     case "send_shortcut":
-      return parameters.chord ? macroChordLabel(parameters.chord) : "尚未录入按键";
-    case "focus_input":
-      return `${appTargetLabel(parameters.target)} · 聚焦学习过的输入框`;
+      return parameters.chord ? macroChordLabel(parameters.chord) : t("尚未录入按键");
+    case "focus_input": {
+      const app = appTargetLabel(parameters.target);
+      return t("{app} · 聚焦学习过的输入框", { app });
+    }
     case "focus_frontmost":
-      return "当前前台应用 · 聚焦输入框";
+      return t("当前前台应用 · 聚焦输入框");
     case "system_action":
-      return parameters.chord ? macroChordLabel(parameters.chord) : "尚未选择系统动作";
+      return parameters.chord ? macroChordLabel(parameters.chord) : t("尚未选择系统动作");
     case "open_url":
-      return parameters.url ?? "尚未填写网址";
+      return parameters.url ?? t("尚未填写网址");
     case "run_macro":
-      return parameters.nestedMacroName ?? "尚未选择组合动作";
+      return parameters.nestedMacroName ?? t("尚未选择组合动作");
   }
 }
 
 function appTargetLabel(target: string | undefined): string {
-  if (!target) return "尚未选择 App";
+  if (!target) return t("尚未选择 App");
   const known = presetAppNames.get(target);
   if (known) return known;
   if (!target.includes("\\") && !target.includes("/")) return target;
@@ -2236,19 +2584,19 @@ export function focusLearnErrorLabel(message: string): string {
   const code = message.replace(/^SendInput failed:\s*/i, "").trim();
   switch (code) {
     case "no_candidate":
-      return "没有采到可用的输入框：请在倒计时里切到目标 App 并点击它的输入框，然后重试";
+      return t("没有学习成功，请确认目标应用已经打开，再点击它的输入框试一次");
     case "self_foreground":
-      return "学习期间无线麦在窗口最前面：请先切到目标 App 再重试";
+      return t("学习期间无线麦在窗口最前面：请等目标应用打开后，再点击它的输入框试一次");
     case "not_foreground":
-      return "目标 App 不在最前面：请先切到它再重试";
+      return t("目标应用没有在最前面：请点击它的输入框后再试一次");
     case "target_exited":
-      return "目标 App 已经退出：请先打开它再学习";
+      return t("目标应用已经退出：请重试，应用会重新打开");
     case "not_accessible":
-      return "这个输入框读不到（可能是管理员权限窗口或受限应用）";
+      return t("这个输入框暂时读不到，请换一个输入框再试");
     case "timeout":
-      return "学习超时，请重试";
+      return t("等待输入框超时，请重试");
     case "cancelled":
-      return "学习已取消";
+      return t("学习已取消");
     default:
       return message;
   }
@@ -2259,15 +2607,15 @@ export function focusPointErrorLabel(message: string): string {
   const code = message.replace(/^SendInput failed:\s*/i, "").trim();
   switch (code) {
     case "cursor_outside_target":
-      return "鼠标不在目标应用的窗口里：把鼠标停在要点击的位置（例如输入框）上再试";
+      return t("鼠标不在目标应用的窗口里：把鼠标停在要点击的位置（例如输入框）上再试");
     case "target_window_missing":
-      return "目标应用没有可见窗口：先打开它再试";
+      return t("目标应用没有可见窗口：先打开它再试");
     case "not_foreground":
-      return "目标应用没有在最前面：先切到它再试";
+      return t("目标应用没有在最前面：先切到它再试");
     case "window_size_changed":
-      return "目标窗口的大小和记录时相差太大：请重新记录一次位置";
+      return t("目标窗口的大小和记录时相差太大：请重新记录一次位置");
     case "cursor_unavailable":
-      return "读不到鼠标位置：请重试";
+      return t("读不到鼠标位置：请重试");
     default:
       return message;
   }
@@ -2275,19 +2623,19 @@ export function focusPointErrorLabel(message: string): string {
 
 /** 组合动作启动失败的机器码 → 用户文案（Rust 侧只给稳定 token）。 */
 export function macroStartErrorLabel(code: string): string | null {
-  if (code === "already_running") return "这个组合动作正在执行，请稍后再试";
-  if (code === "not_found") return "找不到这个组合动作，请重新打开页面";
+  if (code === "already_running") return t("这个组合动作正在执行，请稍后再试");
+  if (code === "not_found") return t("找不到这个组合动作，请重新打开页面");
   if (code.startsWith("invalid:")) {
     const issues = code.slice("invalid:".length).split(",");
-    if (issues.includes("name_empty")) return "请先填写组合动作名称";
-    if (issues.includes("name_too_long")) return "组合动作名称太长，最多 20 个字符";
+    if (issues.includes("name_empty")) return t("请先填写组合动作名称");
+    if (issues.includes("name_too_long")) return t("组合动作名称太长，最多 20 个字符");
     if (issues.includes("too_few_steps") || issues.includes("too_many_steps")) {
-      return "步骤数量不对，请检查后重试";
+      return t("步骤数量不对，请检查后重试");
     }
     if (issues.some((issue) => issue.startsWith("missing_parameter"))) {
-      return "有步骤还没填写完整，请检查每一步的参数";
+      return t("有步骤还没填写完整，请检查每一步的参数");
     }
-    return "这条组合动作的设置不完整，请检查名称与步骤";
+    return t("这条组合动作的设置不完整，请检查名称与步骤");
   }
   return null;
 }
@@ -2296,25 +2644,25 @@ export function macroStartErrorLabel(code: string): string | null {
 export function macroTerminalLabel(result: MacroTerminalResult): string {
   switch (result) {
     case "completed":
-      return "组合动作执行成功";
+      return t("组合动作执行成功");
     case "completed_with_unknown_result":
-      return "组合动作已执行，但无法确认第三方 App 的结果";
+      return t("组合动作已执行，但无法确认第三方 App 的结果");
     case "cancelled":
-      return "组合动作已取消";
+      return t("组合动作已取消");
     case "timed_out":
-      return "组合动作执行超时";
+      return t("组合动作执行超时");
     case "invalid_macro":
-      return "这条组合动作的设置有问题";
+      return t("这条组合动作的设置有问题");
     case "missing_dependency":
-      return "需要使用的 App 或输入框记录不在这台电脑上";
+      return t("需要使用的 App 或输入框记录不在这台电脑上");
     case "permission_denied":
-      return "组合动作缺少系统权限";
+      return t("组合动作缺少系统权限");
     case "nested_too_deep":
-      return "组合动作嵌套超过 8 层";
+      return t("组合动作嵌套超过 8 层");
     case "cycle_detected":
-      return "组合动作不能直接或间接执行自己";
+      return t("组合动作不能直接或间接执行自己");
     case "step_failed":
-      return "组合动作中的步骤执行失败";
+      return t("组合动作中的步骤执行失败");
   }
 }
 
@@ -2322,15 +2670,15 @@ export function macroTerminalLabel(result: MacroTerminalResult): string {
 export function macroStepOutcomeLabel(outcome: MacroStepOutcome): string {
   switch (outcome) {
     case "done":
-      return "步骤已完成";
+      return t("步骤已完成");
     case "unknown":
-      return "请求已发送，请在目标 App 确认结果";
+      return t("请求已发送，请在目标 App 确认结果");
     case "missing_dependency":
-      return "所需动作或设置不可用";
+      return t("所需动作或设置不可用");
     case "permission_denied":
-      return "权限未授权";
+      return t("权限未授权");
     case "failed":
-      return "执行失败，后续步骤已停止";
+      return t("执行失败，后续步骤已停止");
   }
 }
 
@@ -2551,4 +2899,117 @@ export async function exportCommonPhrases(): Promise<string> {
 /** 打开「常用语示例」（会员=普通面板、非会员=只读预览）。 */
 export async function openCommonPhraseExample(): Promise<void> {
   await dispatchCommonPhrase("open_example");
+}
+
+/** 回眸：一个目标应用的汇总。 */
+export interface TranscriptApplicationSummary {
+  key: string;
+  name: string;
+  count: number;
+  latestEndedAtMs: number;
+  iconDataUrl: string | null;
+}
+
+/** 回眸：一条记录（不含输入框全文、窗口标题、路径等内部字段）。 */
+export interface TranscriptRecordView {
+  id: string;
+  sessionId: string;
+  endedAtMs: number;
+  localDateKey: string;
+  utcOffsetMinutes: number;
+  applicationKey: string;
+  applicationName: string;
+  text: string;
+}
+
+/** 回眸：一条记录关联的原始录音摘要（不暴露文件路径）。 */
+export interface TranscriptRecordingView {
+  sessionId: string;
+  endedAtMs: number;
+  localDateKey: string;
+  utcOffsetMinutes: number;
+  applicationKey: string | null;
+  applicationName: string | null;
+  durationMs: number;
+  byteCount: number;
+}
+
+/** 回眸页面快照。`recentCount` 只算最近 7 天，`totalCount` 是全部。 */
+export interface TranscriptHistorySnapshot {
+  enabled: boolean;
+  audioEnabled: boolean;
+  applications: TranscriptApplicationSummary[];
+  records: TranscriptRecordView[];
+  recordings: TranscriptRecordingView[];
+  totalCount: number;
+  recentCount: number;
+  archiveError: string | null;
+}
+
+export async function getTranscriptHistory(): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("get_transcript_history");
+}
+
+export async function setTranscriptHistoryEnabled(
+  enabled: boolean,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("set_transcript_history_enabled", { enabled });
+}
+
+export async function setTranscriptAudioRecordingEnabled(
+  enabled: boolean,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("set_transcript_audio_recording_enabled", { enabled });
+}
+
+export async function getTranscriptAudio(sessionId: string): Promise<string> {
+  return invoke<string>("get_transcript_audio", { sessionId });
+}
+
+export async function exportTranscriptAudio(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("export_transcript_audio", { sessionId });
+}
+
+export async function deleteTranscriptRecording(
+  sessionId: string,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_transcript_recording", { sessionId });
+}
+
+export async function deleteTranscript(
+  recordId: string,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_transcript", { recordId });
+}
+
+export async function deleteTranscriptApplication(
+  applicationKey: string,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_transcript_application", { applicationKey });
+}
+
+export async function deleteAllTranscripts(): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_all_transcripts");
+}
+
+/** 捕获成功后只广播一个轻量刷新信号，不带文字。 */
+export async function subscribeTranscriptCaptured(
+  handler: () => void,
+): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen("transcript-captured", () => handler());
+  return () => {
+    void unlisten();
+  };
+}
+
+/** 录音落盘后广播刷新信号；没有文字记录时也能让「仅录音」条目及时出现。 */
+export async function subscribeTranscriptRecordingFinished(
+  handler: () => void,
+): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen("transcript-recording-finished", () => handler());
+  return () => {
+    void unlisten();
+  };
 }

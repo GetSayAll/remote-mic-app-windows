@@ -24,7 +24,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use windows::core::{Interface, BSTR, PCWSTR};
-    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, VARIANT_FALSE, VARIANT_TRUE};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_MULTITHREADED,
@@ -33,10 +33,16 @@ mod imp {
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_I4};
     use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationElementArray,
-        IUIAutomationValuePattern, TreeScope_Descendants, UIA_DocumentControlTypeId,
-        UIA_EditControlTypeId, UIA_GroupControlTypeId, UIA_TextPatternId, UIA_ValuePatternId,
+        CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationCondition,
+        IUIAutomationElement, IUIAutomationElementArray, IUIAutomationValuePattern,
+        TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
+        UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_DocumentControlTypeId,
+        UIA_EditControlTypeId, UIA_GroupControlTypeId, UIA_HasKeyboardFocusPropertyId,
+        UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsPasswordPropertyId,
+        UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_TextPatternId,
+        UIA_ValuePatternId, UIA_CONTROLTYPE_ID, UIA_PATTERN_ID,
     };
     use windows::Win32::UI::HiDpi::{
         GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
@@ -146,6 +152,26 @@ mod imp {
         submit(move |session| task(&session.automation))
     }
 
+    /// 与 [`with_automation`] 相同，但最多等待 `timeout`。回眸捕获是后台尽力而为：
+    /// 目标 UIA provider 卡住时必须尽快放弃，不能让语音线程或捕获线程无限等待。
+    pub(crate) fn with_automation_timeout<T, F>(timeout: Duration, task: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&IUIAutomation) -> T + Send + 'static,
+    {
+        let (reply_sender, reply_receiver) = channel::<T>();
+        {
+            let guard = worker().lock().ok()?;
+            let job: Job = Box::new(move |session| {
+                let _ = reply_sender.send(task(&session.automation));
+            });
+            if guard.sender.send(job).is_err() {
+                return None;
+            }
+        }
+        reply_receiver.recv_timeout(timeout).ok()
+    }
+
     // ---------- Win32（不需要 UIA，可在任意线程调用） ----------
 
     pub fn current_process_id() -> u32 {
@@ -233,40 +259,156 @@ mod imp {
 
     // ---------- UIA ----------
 
-    fn control_type_name(automation: &IUIAutomation, element: &IUIAutomationElement) -> String {
-        // 只区分我们关心的四类；其余统一为 "Other"（不参与候选判定）。
-        let Ok(control_type) = (unsafe { element.CurrentControlType() }) else {
-            return "Other".to_owned();
-        };
-        let _ = automation;
-        if control_type == UIA_EditControlTypeId {
-            "Edit".to_owned()
-        } else if control_type == UIA_DocumentControlTypeId {
-            "Document".to_owned()
-        } else if control_type == UIA_GroupControlTypeId {
-            "Group".to_owned()
-        } else {
-            "Other".to_owned()
-        }
-    }
-
     fn bstr_string(value: windows::core::Result<BSTR>) -> String {
         value.map(|text| text.to_string()).unwrap_or_default()
     }
 
-    fn has_pattern(
-        element: &IUIAutomationElement,
-        pattern: windows::Win32::UI::Accessibility::UIA_PATTERN_ID,
-    ) -> bool {
-        unsafe { element.GetCurrentPattern(pattern) }.is_ok()
+    /// 元素属性读取器：`cached == true` 时全部走 `FindAllBuildCache` 的批量缓存，
+    /// 否则逐属性跨进程调用。
+    ///
+    /// 为什么要有两档：缓存把「每个元素 11 次 IPC」压成一次批量返回——2026-10-22
+    /// 实测 WorkBuddy（Electron，约 700 个元素）整条扫描 1.6–2.2 s 全部消耗在这些
+    /// 往返上。但部分 UIA provider 会忽略缓存请求（缓存属性成批为空），因此调用方
+    /// 必须在缓存结果「关键属性全空」时整批回退到非缓存路径。
+    struct ElementProbe<'a> {
+        element: &'a IUIAutomationElement,
+        cached: bool,
     }
 
-    fn read_only(element: &IUIAutomationElement) -> Option<bool> {
-        let pattern = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }.ok()?;
-        let value: IUIAutomationValuePattern = pattern.cast().ok()?;
-        unsafe { value.CurrentIsReadOnly() }
-            .ok()
-            .map(|flag| flag.as_bool())
+    impl<'a> ElementProbe<'a> {
+        fn new(element: &'a IUIAutomationElement, cached: bool) -> Self {
+            Self { element, cached }
+        }
+
+        fn rect(&self) -> windows::core::Result<RECT> {
+            unsafe {
+                if self.cached {
+                    self.element.CachedBoundingRectangle()
+                } else {
+                    self.element.CurrentBoundingRectangle()
+                }
+            }
+        }
+
+        fn automation_id(&self) -> String {
+            bstr_string(unsafe {
+                if self.cached {
+                    self.element.CachedAutomationId()
+                } else {
+                    self.element.CurrentAutomationId()
+                }
+            })
+        }
+
+        fn class_name(&self) -> String {
+            bstr_string(unsafe {
+                if self.cached {
+                    self.element.CachedClassName()
+                } else {
+                    self.element.CurrentClassName()
+                }
+            })
+        }
+
+        fn name(&self) -> String {
+            bstr_string(unsafe {
+                if self.cached {
+                    self.element.CachedName()
+                } else {
+                    self.element.CurrentName()
+                }
+            })
+        }
+
+        fn enabled(&self) -> Option<bool> {
+            let result = unsafe {
+                if self.cached {
+                    self.element.CachedIsEnabled()
+                } else {
+                    self.element.CurrentIsEnabled()
+                }
+            };
+            result.ok().map(|flag| flag.as_bool())
+        }
+
+        fn keyboard_focusable(&self) -> Option<bool> {
+            let result = unsafe {
+                if self.cached {
+                    self.element.CachedIsKeyboardFocusable()
+                } else {
+                    self.element.CurrentIsKeyboardFocusable()
+                }
+            };
+            result.ok().map(|flag| flag.as_bool())
+        }
+
+        fn is_password(&self) -> Option<bool> {
+            let result = unsafe {
+                if self.cached {
+                    self.element.CachedIsPassword()
+                } else {
+                    self.element.CurrentIsPassword()
+                }
+            };
+            result.ok().map(|flag| flag.as_bool())
+        }
+
+        fn has_keyboard_focus(&self) -> Option<bool> {
+            let result = unsafe {
+                if self.cached {
+                    self.element.CachedHasKeyboardFocus()
+                } else {
+                    self.element.CurrentHasKeyboardFocus()
+                }
+            };
+            result.ok().map(|flag| flag.as_bool())
+        }
+
+        fn control_type(&self) -> Option<UIA_CONTROLTYPE_ID> {
+            let result = unsafe {
+                if self.cached {
+                    self.element.CachedControlType()
+                } else {
+                    self.element.CurrentControlType()
+                }
+            };
+            result.ok()
+        }
+
+        /// 只区分我们关心的四类；其余统一为 "Other"（不参与候选判定）。
+        fn control_type_name(&self) -> String {
+            match self.control_type() {
+                Some(id) if id == UIA_EditControlTypeId => "Edit".to_owned(),
+                Some(id) if id == UIA_DocumentControlTypeId => "Document".to_owned(),
+                Some(id) if id == UIA_GroupControlTypeId => "Group".to_owned(),
+                _ => "Other".to_owned(),
+            }
+        }
+
+        fn has_pattern(&self, pattern: UIA_PATTERN_ID) -> bool {
+            unsafe {
+                if self.cached {
+                    self.element.GetCachedPattern(pattern).is_ok()
+                } else {
+                    self.element.GetCurrentPattern(pattern).is_ok()
+                }
+            }
+        }
+
+        fn read_only(&self) -> Option<bool> {
+            let pattern = unsafe {
+                if self.cached {
+                    self.element.GetCachedPattern(UIA_ValuePatternId)
+                } else {
+                    self.element.GetCurrentPattern(UIA_ValuePatternId)
+                }
+            }
+            .ok()?;
+            let value: IUIAutomationValuePattern = pattern.cast().ok()?;
+            unsafe { value.CurrentIsReadOnly() }
+                .ok()
+                .map(|flag| flag.as_bool())
+        }
     }
 
     /// 合法矩形：坐标在 ±1e6 内且右下大于左上（饱和值/离屏空矩形会被拒绝）。
@@ -286,8 +428,90 @@ mod imp {
         ))
     }
 
+    /// 批量缓存请求：一次往返取回候选判定需要的全部属性。
+    fn build_cache_request(automation: &IUIAutomation) -> Option<IUIAutomationCacheRequest> {
+        let cache = unsafe { automation.CreateCacheRequest() }.ok()?;
+        let properties = [
+            UIA_BoundingRectanglePropertyId,
+            UIA_AutomationIdPropertyId,
+            UIA_ClassNamePropertyId,
+            UIA_NamePropertyId,
+            UIA_ControlTypePropertyId,
+            UIA_IsEnabledPropertyId,
+            UIA_IsKeyboardFocusablePropertyId,
+            UIA_IsPasswordPropertyId,
+            UIA_HasKeyboardFocusPropertyId,
+        ];
+        for property in properties {
+            unsafe { cache.AddProperty(property) }.ok()?;
+        }
+        unsafe { cache.AddPattern(UIA_ValuePatternId) }.ok()?;
+        unsafe { cache.AddPattern(UIA_TextPatternId) }.ok()?;
+        Some(cache)
+    }
+
+    /// `VT_I4` 变体（UIA 的属性条件用整型枚举值）。
+    fn variant_i4(value: i32) -> VARIANT {
+        let mut variant = VARIANT::default();
+        unsafe {
+            let inner = &mut *variant.Anonymous.Anonymous;
+            inner.vt = VT_I4;
+            inner.Anonymous.lVal = value;
+        }
+        variant
+    }
+
+    /// `VT_BOOL` 变体（UIA 的布尔属性条件）。
+    fn variant_bool(value: bool) -> VARIANT {
+        let mut variant = VARIANT::default();
+        unsafe {
+            let inner = &mut *variant.Anonymous.Anonymous;
+            inner.vt = VT_BOOL;
+            inner.Anonymous.boolVal = if value { VARIANT_TRUE } else { VARIANT_FALSE };
+        }
+        variant
+    }
+
+    /// 候选类型条件：让 provider 只返回「可能是文本输入」的元素。
+    ///
+    /// 为什么需要：`TrueCondition` 会让 Chromium/Electron 的 UIA provider 把整棵树
+    /// 都序列化过来（2026-10-22 实测 WorkBuddy 464 个元素、单次 `FindAll` 约 1.4 s）。
+    ///
+    /// 条件必须**覆盖候选判定的全部分支**，否则会悄悄缩小候选集：
+    /// `passes_hard_gate` 接受 `is_text_control()`（Edit/Document）、
+    /// `has_text_pattern`（**任意类型**，Chrome 里就有 `ControlType=Other` 的输入框）
+    /// 或 `has_editor_semantics`（class/name 命中编辑器词）。因此这里取
+    /// 「带 TextPattern」∪「Edit/Document/Group」，前两项已覆盖实测全部正例；
+    /// 纯语义命中的元素交给调用方的 0 候选回退（全树）兜底。
+    fn candidate_condition(automation: &IUIAutomation) -> Option<IUIAutomationCondition> {
+        let mut conditions = Vec::with_capacity(4);
+        let text_value = variant_bool(true);
+        conditions.push(Some(
+            unsafe {
+                automation
+                    .CreatePropertyCondition(UIA_IsTextPatternAvailablePropertyId, &text_value)
+            }
+            .ok()?,
+        ));
+        for control_type in [
+            UIA_EditControlTypeId,
+            UIA_DocumentControlTypeId,
+            UIA_GroupControlTypeId,
+        ] {
+            let value = variant_i4(control_type.0);
+            conditions.push(Some(
+                unsafe { automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &value) }
+                    .ok()?,
+            ));
+        }
+        unsafe { automation.CreateOrConditionFromNativeArray(&conditions) }.ok()
+    }
+
     struct ScanResult {
         candidates: Vec<FocusCandidate>,
+        /// 与 `candidates` 同序的元素引用：`focus_target` 直接用它 `SetFocus`，
+        /// 不再第二次全树扫描（原先这条重复扫描让一次尝试翻倍）。
+        elements: Vec<IUIAutomationElement>,
     }
 
     /// 候选门槛档位：自动选择用硬门槛（排除地址栏等），
@@ -308,35 +532,119 @@ mod imp {
     }
 
     fn snapshot_candidate(
-        element: &IUIAutomationElement,
+        probe: &ElementProbe<'_>,
         window_frame: Option<(f64, f64, f64, f64)>,
     ) -> FocusCandidate {
-        let rect = unsafe { element.CurrentBoundingRectangle() }.ok();
+        let rect = probe.rect().ok();
         let bounds = rect.as_ref().and_then(sane_rect);
         let normalized_rect = crate::focus::NormalizedRect::from_bounds(bounds, window_frame);
         FocusCandidate {
-            control_type: String::new(), // 由调用方填充（需要 automation 判断常量）
-            automation_id: bstr_string(unsafe { element.CurrentAutomationId() }),
-            class_name: bstr_string(unsafe { element.CurrentClassName() }),
-            name: bstr_string(unsafe { element.CurrentName() }),
+            control_type: probe.control_type_name(),
+            automation_id: probe.automation_id(),
+            class_name: probe.class_name(),
+            name: probe.name(),
             window_title: String::new(),
             context_tokens: Vec::new(),
             normalized_rect,
-            enabled: unsafe { element.CurrentIsEnabled() }
-                .map(|flag| flag.as_bool())
-                .unwrap_or(true),
-            keyboard_focusable: unsafe { element.CurrentIsKeyboardFocusable() }
-                .map(|flag| flag.as_bool())
-                .unwrap_or(false),
-            is_password: unsafe { element.CurrentIsPassword() }
-                .map(|flag| flag.as_bool())
-                .unwrap_or(false),
-            read_only: read_only(element),
-            has_text_pattern: has_pattern(element, UIA_TextPatternId),
-            focused: unsafe { element.CurrentHasKeyboardFocus() }
-                .map(|flag| flag.as_bool())
-                .unwrap_or(false),
+            enabled: probe.enabled().unwrap_or(true),
+            keyboard_focusable: probe.keyboard_focusable().unwrap_or(false),
+            is_password: probe.is_password().unwrap_or(false),
+            read_only: probe.read_only(),
+            has_text_pattern: probe.has_pattern(UIA_TextPatternId),
+            focused: probe.has_keyboard_focus().unwrap_or(false),
         }
+    }
+
+    /// 一次元素枚举的结果（含「缓存是否被 provider 忽略」的判据）。
+    struct ScanBatch {
+        candidates: Vec<FocusCandidate>,
+        elements: Vec<IUIAutomationElement>,
+        /// 关键属性（矩形/ID/类名/名称）全空的元素数。
+        blank: usize,
+        total: usize,
+    }
+
+    fn collect_from(
+        elements: &IUIAutomationElementArray,
+        window_frame: Option<(f64, f64, f64, f64)>,
+        gate: CandidateGate,
+        cached: bool,
+    ) -> ScanBatch {
+        let count = unsafe { elements.Length() }.unwrap_or(0).max(0) as usize;
+        let mut candidates = Vec::new();
+        let mut kept = Vec::new();
+        let mut blank = 0usize;
+        for index in 0..count.min(MAX_TRAVERSAL_ELEMENTS) {
+            let Ok(element) = (unsafe { elements.GetElement(index as i32) }) else {
+                continue;
+            };
+            let probe = ElementProbe::new(&element, cached);
+            let candidate = snapshot_candidate(&probe, window_frame);
+            if candidate.automation_id.is_empty()
+                && candidate.class_name.is_empty()
+                && candidate.name.is_empty()
+                && candidate.normalized_rect.is_none()
+            {
+                blank += 1;
+            }
+            if gate.accepts(&candidate) {
+                candidates.push(candidate);
+                kept.push(element);
+            }
+        }
+        ScanBatch {
+            candidates,
+            elements: kept,
+            blank,
+            total: count,
+        }
+    }
+
+    /// 一次枚举：优先用批量缓存；provider 忽略缓存时整批回退非缓存。
+    fn find_all(
+        automation: &IUIAutomation,
+        root: &IUIAutomationElement,
+        condition: &IUIAutomationCondition,
+        window_frame: Option<(f64, f64, f64, f64)>,
+        gate: CandidateGate,
+        level: &'static str,
+        started: Instant,
+    ) -> Option<ScanBatch> {
+        if let Some(cache) = build_cache_request(automation) {
+            if let Ok(array) =
+                unsafe { root.FindAllBuildCache(TreeScope_Descendants, condition, &cache) }
+            {
+                let batch = collect_from(&array, window_frame, gate, true);
+                // provider 忽略缓存请求时，缓存属性会成批为空：整批作废、回退非缓存。
+                if batch.total == 0 || batch.blank < batch.total {
+                    crate::ble::gatt_note(format!(
+                        "focus_scan level={level} path=cache elements={} candidates={} \
+                         blank={} elapsed_ms={}",
+                        batch.total,
+                        batch.candidates.len(),
+                        batch.blank,
+                        started.elapsed().as_millis()
+                    ));
+                    return Some(batch);
+                }
+                crate::ble::gatt_note(format!(
+                    "focus_scan level={level} path=cache terminal_result=fallback \
+                     reason=cache_ignored elements={} elapsed_ms={}",
+                    batch.total,
+                    started.elapsed().as_millis()
+                ));
+            }
+        }
+        let elements = unsafe { root.FindAll(TreeScope_Descendants, condition) }.ok()?;
+        let batch = collect_from(&elements, window_frame, gate, false);
+        crate::ble::gatt_note(format!(
+            "focus_scan level={level} path=plain elements={} candidates={} blank={} elapsed_ms={}",
+            batch.total,
+            batch.candidates.len(),
+            batch.blank,
+            started.elapsed().as_millis()
+        ));
+        Some(batch)
     }
 
     fn collect_candidates(
@@ -344,31 +652,51 @@ mod imp {
         hwnd: HWND,
         gate: CandidateGate,
     ) -> Result<ScanResult, FocusFailure> {
+        let started = Instant::now();
         let automation = &session.automation;
         let root = unsafe { automation.ElementFromHandle(hwnd) }
             .map_err(|_| FocusFailure::NotAccessible)?;
-        let condition =
-            unsafe { automation.CreateTrueCondition() }.map_err(|_| FocusFailure::NotAccessible)?;
-        let elements: IUIAutomationElementArray =
-            unsafe { root.FindAll(TreeScope_Descendants, &condition) }
-                .map_err(|_| FocusFailure::NotAccessible)?;
-        let count = unsafe { elements.Length() }.unwrap_or(0).max(0) as usize;
-
         let window_frame = unsafe { root.CurrentBoundingRectangle() }
             .ok()
             .and_then(|rect| sane_rect(&rect));
-        let mut candidates = Vec::new();
-        for index in 0..count.min(MAX_TRAVERSAL_ELEMENTS) {
-            let Ok(element) = (unsafe { elements.GetElement(index as i32) }) else {
-                continue;
-            };
-            let mut candidate = snapshot_candidate(&element, window_frame);
-            candidate.control_type = control_type_name(automation, &element);
-            if gate.accepts(&candidate) {
-                candidates.push(candidate);
+
+        // 第一档：类型条件（provider 侧过滤）。已实测的全部正例都落在
+        // Edit/Document/Group 里，所以正常情况在这一档就结束。
+        if let Some(narrow) = candidate_condition(automation) {
+            if let Some(batch) = find_all(
+                automation,
+                &root,
+                &narrow,
+                window_frame,
+                gate,
+                "narrow",
+                started,
+            ) {
+                if !batch.candidates.is_empty() {
+                    return Ok(ScanResult {
+                        candidates: batch.candidates,
+                        elements: batch.elements,
+                    });
+                }
             }
         }
-        Ok(ScanResult { candidates })
+        // 第二档：全树。自定义控件可能不落在上面三种类型里，这里只兜正确性。
+        let wide =
+            unsafe { automation.CreateTrueCondition() }.map_err(|_| FocusFailure::NotAccessible)?;
+        let batch = find_all(
+            automation,
+            &root,
+            &wide,
+            window_frame,
+            gate,
+            "wide",
+            started,
+        )
+        .ok_or(FocusFailure::NotAccessible)?;
+        Ok(ScanResult {
+            candidates: batch.candidates,
+            elements: batch.elements,
+        })
     }
 
     /// 扫描目标进程当前窗口的可编辑候选（语义快照，不含输入内容）。
@@ -426,8 +754,7 @@ mod imp {
                 // 焦点在别的应用（例如用户已经切走）：不得把文本插到别处。
                 return Ok(false);
             }
-            let mut candidate = snapshot_candidate(&focused, window_frame);
-            candidate.control_type = control_type_name(&session.automation, &focused);
+            let candidate = snapshot_candidate(&ElementProbe::new(&focused, false), window_frame);
             Ok(candidate.passes_hard_gate())
         })
         .unwrap_or(Err(FocusFailure::NotAccessible))
@@ -468,8 +795,8 @@ mod imp {
         let Some((hwnd, _)) = target_window(pid) else {
             return FocusAttempt::TargetExited;
         };
-        // 「按记录聚焦」的候选与自动选择用不同门槛（记录来自用户主动点击），
-        // 两次枚举必须用同一档，否则序号对不上。
+        // 「按记录聚焦」的候选与自动选择用不同门槛（记录来自用户主动点击）：
+        // 检索与写入共用同一档，否则选中的序号与要聚焦的元素对不上。
         let gate = match &choice {
             FocusChoice::Recorded(_) => CandidateGate::Recorded,
             _ => CandidateGate::Auto,
@@ -494,48 +821,27 @@ mod imp {
                     candidates: candidate_count,
                 };
             };
-            let automation = &session.automation;
-            let Ok(root) = (unsafe { automation.ElementFromHandle(hwnd) }) else {
-                return FocusAttempt::Failed(FocusFailure::NotAccessible);
-            };
-            let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
-                return FocusAttempt::Failed(FocusFailure::NotAccessible);
-            };
-            let Ok(elements) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
-                return FocusAttempt::Failed(FocusFailure::NotAccessible);
-            };
-            // 与 collect_candidates 相同顺序地重取第 index 个合格候选。
-            let mut seen = 0usize;
-            for element_index in 0..unsafe { elements.Length() }.unwrap_or(0) {
-                let Ok(element) = (unsafe { elements.GetElement(element_index) }) else {
-                    continue;
+            // 直接用扫描阶段拿到的元素引用聚焦：不再二次 `FindAll` + 逐元素重取属性
+            // （2026-10-22 实测，那次重复扫描让一次尝试的成本翻倍）。
+            let Some(element) = scan.elements.get(index).cloned() else {
+                return FocusAttempt::NoCandidate {
+                    candidates: candidate_count,
                 };
-                let mut candidate = snapshot_candidate(&element, None);
-                candidate.control_type = control_type_name(automation, &element);
-                if !gate.accepts(&candidate) {
-                    continue;
-                }
-                if seen == index {
-                    if unsafe { element.SetFocus() }.is_err() {
-                        return FocusAttempt::NoCandidate {
-                            candidates: candidate_count,
-                        };
-                    }
-                    let focused = element_has_focus(session, &element);
-                    return if focused {
-                        FocusAttempt::Focused {
-                            candidates: candidate_count,
-                        }
-                    } else {
-                        FocusAttempt::NoCandidate {
-                            candidates: candidate_count,
-                        }
-                    };
-                }
-                seen += 1;
+            };
+            if unsafe { element.SetFocus() }.is_err() {
+                return FocusAttempt::NoCandidate {
+                    candidates: candidate_count,
+                };
             }
-            FocusAttempt::NoCandidate {
-                candidates: candidate_count,
+            let focused = element_has_focus(session, &element);
+            if focused {
+                FocusAttempt::Focused {
+                    candidates: candidate_count,
+                }
+            } else {
+                FocusAttempt::NoCandidate {
+                    candidates: candidate_count,
+                }
             }
         });
         result.unwrap_or(FocusAttempt::Failed(FocusFailure::NotAccessible))
@@ -574,11 +880,7 @@ mod imp {
         // 学习必须命中「能输入」的元素：只读网页根、按钮、密码框一律不记。
         // 门槛用学习档：用户主动点击的元素就是目标（地址栏这类排除词只在自动
         // 选择路径生效，见 `FocusCandidate::passes_learning_gate`）。
-        let focused_candidate = {
-            let mut candidate = snapshot_candidate(&focused, None);
-            candidate.control_type = control_type_name(&session.automation, &focused);
-            candidate
-        };
+        let focused_candidate = snapshot_candidate(&ElementProbe::new(&focused, false), None);
         if !focused_candidate.passes_learning_gate() {
             return None;
         }
@@ -778,7 +1080,7 @@ pub use imp::{
 
 /// 复用共享 UIA 工作线程（Per-Monitor V2、MTA）执行只读 UIA 任务的入口。
 #[cfg(windows)]
-pub(crate) use imp::with_automation;
+pub(crate) use imp::{with_automation, with_automation_timeout};
 
 /// 非 Windows 平台不提供 UIA 后端；保持模块可编译以便纯逻辑单测。
 #[cfg(not(windows))]
