@@ -78,8 +78,25 @@
   `set_voice_synth_active(false)`（`rc003_bridge.rs:1532`），语音键在这段时间里走注入回落。
   修复减少重启次数 ⇒ 门禁不再被反复重置 ⇒ 语音路径更稳定。
 
-遗留的**文案准确性**问题（不影响识别，需产品决定，本次未改）：`inactive` 目前复用既有
-「还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开」。对"端口被外部保留/占用"
-这一类原因，关开是无效建议；精确指引只写进了诊断日志
-（`hint=check_environment_conflict`），没有进用户文案（`docs/product-copy.md` 禁止机制词）。
+## 文案：不再给无效建议（2026-10-27 补完）
+
+原先的遗留问题：`inactive` 复用既有「还没有生效，正在自动重试；如果一直不恢复，请把开关关掉
+再打开」。对"端口被外部保留/占用"这一类原因，关开是无效操作（#291 现场已试过），
+精确指引只写进诊断日志（`hint=check_environment_conflict`）。
+
+现在补一条独立的"原因"通道：
+
+- Rust：新增 `CaptureUnavailable`（`none` / `startup_failing`），由常驻对账在
+  `startup_failing` 变化时发布，经 `Rc003BridgeView.captureUnavailable` 给界面；
+  与 `CaptureHealth` 分开（health 回答"生效了吗"，原因回答"为什么没生效"）。
+- 前端：`captureInactiveText(name, unavailable)` 据此选句。`startup_failing` 时改为
+  「{名称}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，
+  不需要把开关关掉再打开。」；读不到原因（`unknown`）一律退回通用句，不做猜测。
+- 术语边界：只说"其他程序 / 需要的资源"，不出现端口、进程、助手、驱动
+  （`docs/product-copy.md` §3 红线）；决定已记入同文件 §7（2026-10-27 条）。
+- 测试：Rust `capture_unavailable_token_matches_frontend_contract`（token 与前端类型逐字对应 +
+  发布/读取往返）；前端 `captureInactiveText` 的 startup_failing 分支（含"不得出现
+  关掉再打开"与术语红线断言）、`normalizeCaptureUnavailable` 未知值回落、
+  连接页渲染断言（显示新句且不含"请把开关关掉再打开"）。
+
 

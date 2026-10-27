@@ -103,6 +103,12 @@
   （含 2 项新增，带阳性对照）；助手 `cargo check`、`cargo fmt --all -- --check` passed。
   **真机 deferred**：需一台"助手必然启动失败"的机器验证 1–4 全链路（判据见 Testing 文档
   「2026-10-26 增量」）。
+  **2026-10-27 文案补完**：`inactive` 拆两句——助手反复启动失败时不再说"关掉再打开"（该场景
+  无效），改为「启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动
+  恢复」。新增 `CaptureUnavailable`（`none` / `startup_failing`）经 `Rc003BridgeView.captureUnavailable`
+  下发，前端 `captureInactiveText(name, unavailable)` 选句，读不到原因退回通用句。自动化 passed：
+  Rust **164 passed**（含 token 契约用例）、前端 `capture-switch` / `ConnectionPage` 与全量 vitest
+  通过、`vue-tsc --noEmit` 通过。文案决定记入 `docs/product-copy.md` §7（2026-10-27）。
 - [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
   `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
   也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口

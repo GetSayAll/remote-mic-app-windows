@@ -58,7 +58,7 @@
   1. `[LOCK] event=single_instance_acquired` → `[LISTEN] addr=…` → **之后**才出现 `[APP-BRIDGE] event=enabled`。**`[APP-BRIDGE] enabled` 早于 `[LISTEN]` 就是旧构建**（说明助手会在端口失败前先让主程序看到"连上了"）。
   2. 助手仍失败时，应用每 15 s 观察一次累计接受数；累计被接受 ≥3 次且一次都没拿到所有权 ⇒ 落
      `rc003 feature=enhanced-capture action=capture_unavailable phase=completed terminal_result=failed reason=helper_startup_failing accepts=3 owned_usages=0 retryable=true hint=check_environment_conflict`。
-  3. 同一时刻界面出现「{名称}还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开。」（`CaptureHealth=inactive`）。
+  3. 同一时刻界面出现「{名称}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，不需要把开关关掉再打开。」（`CaptureHealth=inactive` + `captureUnavailable=startup_failing`，2026-10-27）。若出现的仍是「还没有生效…请把开关关掉再打开」，说明 `captureUnavailable` 没到界面（IPC 字段缺失或 normalize 回落 `unknown`），按缺陷处理——那句话在这个场景是无效建议。
   4. 原因消除、agent 真的接管后：`action=capture_unavailable phase=cleared terminal_result=passed reason=ownership_acquired`，提示消失、状态回 `active`。
 - 反例（不允许发生）：`accepts` 已 ≥3、`owned_usages=0`，而界面仍无提示——那说明 `inactive` 又被 `starting` 覆盖了（`capture_health_with_startup_failure` 的边界被改坏）。
 - 阴性对照（不允许误报）：正常慢启动（agent 注入需要 8 s）期间不得出现 `helper_startup_failing`；一旦接管，计数必须清零。
