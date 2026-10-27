@@ -103,12 +103,17 @@
   （含 2 项新增，带阳性对照）；助手 `cargo check`、`cargo fmt --all -- --check` passed。
   **真机 deferred**：需一台"助手必然启动失败"的机器验证 1–4 全链路（判据见 Testing 文档
   「2026-10-26 增量」）。
-  **2026-10-27 文案补完**：`inactive` 拆两句——助手反复启动失败时不再说"关掉再打开"（该场景
-  无效），改为「启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动
-  恢复」。新增 `CaptureUnavailable`（`none` / `startup_failing`）经 `Rc003BridgeView.captureUnavailable`
-  下发，前端 `captureInactiveText(name, unavailable)` 选句，读不到原因退回通用句。自动化 passed：
-  Rust **164 passed**（含 token 契约用例）、前端 `capture-switch` / `ConnectionPage` 与全量 vitest
-  通过、`vue-tsc --noEmit` 通过。文案决定记入 `docs/product-copy.md` §7（2026-10-27）。
+  **2026-10-27 文案补完 + 端口回退放宽**：① `inactive` 拆两句——助手反复启动失败时不再说
+  "关掉再打开"，定稿「暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；
+  还是不行就重启这台电脑。」（第一版"退出那个程序"被用户否掉：他无从定位是哪个程序）。
+  新增 `CaptureUnavailable`（`none` / `startup_failing`）经 `Rc003BridgeView.captureUnavailable`
+  下发，前端 `captureInactiveText(name, unavailable)` 选句，读不到原因退回通用句。
+  ② 回退门禁放宽：查占用者（`GetExtendedTcpTable` + `QueryFullProcessImageNameW`）后分类，
+  只有 `holder=own_helper` 才 `[STOP]`，`other_program` / `unknown` / `nobody` 一律换端口——
+  #304 的"只有 refused 才回退"会把"端口被真实进程占着"的机器锁在崩溃循环里。
+  自动化 passed：助手 **82 passed**（含真调用 Win32 的自监听→查 PID→读映像用例）、
+  Rust **164 passed**（token 契约）、前端全量 vitest 通过、`vue-tsc --noEmit` 通过。
+  文案决定记入 `docs/product-copy.md` §7（2026-10-27）；真机仍 deferred。
 - [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
   `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
   也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口

@@ -40,16 +40,18 @@
 ### 2026-10-25 增量：固定端口被系统级保留（#296）
 
 - 触发条件：WSL2 `.wslconfig` 里 `networkingMode=mirrored`，且 Linux 侧 `ip_local_port_range` 覆盖 47831。该区间每次启动随机，所以冲突表现为"时好时坏"。这类机器上 `netstat -anoq`、`Get-NetTCPConnection`（含管理员）、TCP connect、`show excludedportrange` **全部看不到占用者**。
-- 修复后的判定顺序（按日志逐条看）：
+- 修复后的判定顺序（按日志逐条看，**2026-10-27 修订**）：
   1. `[LOCK] event=single_instance_acquired` —— 单实例由互斥体保证，与端口无关。
-  2. 固定端口绑不上 → `[PORT] event=probe result=refused`（**不是** `listening` / `inconclusive`）。
-  3. `[FALLBACK] event=listen_fallback_ephemeral fixed_port=47831 reused_remembered=false|true`，随后 `[LISTEN] addr=… requested_port=47831`。
-  4. 首轮应看到 `[PREP] port=<回退端口>` → `[HELLO] auth=true` → 语音键走 `path=report_layer`（豆包出字）。
+  2. 固定端口绑不上 → `[PORT] event=probe result=…`（`refused` 幻影保留 / `listening` 有人应答 / `inconclusive` 判不清）。
+  3. `[PORT] event=holder port=47831 holder=nobody|other_program|unknown|own_helper pid=… image=… decision=fallback|stop` —— **决策在这一行**：只有 `holder=own_helper`（另一支 sayall-helper 占着）才 `stop`，其余一律 `fallback`。
+  4. `[FALLBACK] event=listen_fallback_ephemeral fixed_port=47831 reused_remembered=false|true`，随后 `[LISTEN] addr=… requested_port=47831`。
+  5. 首轮应看到 `[PREP] port=<回退端口>` → `[HELLO] auth=true` → 语音键走 `path=report_layer`（豆包出字）。
 - **真机必须覆盖"第二次启动"（当前 `deferred`）**：这是回退路径的关键差异点——agent 的端口在注入时写死，只有复用 `session.port` 才能让接管握手成立。判据：
   - 重启助手后 `[FALLBACK] … reused_remembered=true`，且 `[HELLO] auth=true` 在数秒内出现；
   - **不得**出现 `[ATTACH] verify=failed`（出现即说明端口变了、宿主里的 agent 回不来，随后会结束宿主重建）；
   - 若出现 `[PORT] event=remembered_port_unavailable`，允许**一次** `[ATTACH] verify=failed` + 宿主重建，之后必须恢复正常。
-- 反例（不允许发生）：`result=listening` 时仍然回退——那说明判据退化成"端口被占就换端口"，会顶掉别人的端口。
+- 反例（不允许发生）：`holder=own_helper` 时仍然 `fallback`——两支助手同时注入会 hook 堆叠、agent 静默。
+- 另一条反例：`holder=other_program` 却 `stop`（退出码 8）——那会回到 #291 的崩溃循环；2026-10-27 起这类占用也换端口。
 
 ### 2026-10-26 增量：助手启动失败必须对用户可见（#291 判定层）
 
@@ -58,7 +60,7 @@
   1. `[LOCK] event=single_instance_acquired` → `[LISTEN] addr=…` → **之后**才出现 `[APP-BRIDGE] event=enabled`。**`[APP-BRIDGE] enabled` 早于 `[LISTEN]` 就是旧构建**（说明助手会在端口失败前先让主程序看到"连上了"）。
   2. 助手仍失败时，应用每 15 s 观察一次累计接受数；累计被接受 ≥3 次且一次都没拿到所有权 ⇒ 落
      `rc003 feature=enhanced-capture action=capture_unavailable phase=completed terminal_result=failed reason=helper_startup_failing accepts=3 owned_usages=0 retryable=true hint=check_environment_conflict`。
-  3. 同一时刻界面出现「{名称}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，不需要把开关关掉再打开。」（`CaptureHealth=inactive` + `captureUnavailable=startup_failing`，2026-10-27）。若出现的仍是「还没有生效…请把开关关掉再打开」，说明 `captureUnavailable` 没到界面（IPC 字段缺失或 normalize 回落 `unknown`），按缺陷处理——那句话在这个场景是无效建议。
+  3. 同一时刻界面出现「{名称}暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；还是不行就重启这台电脑。」（`CaptureHealth=inactive` + `captureUnavailable=startup_failing`，2026-10-27 二次定稿）。若出现的仍是「还没有生效…请把开关关掉再打开」，说明 `captureUnavailable` 没到界面（IPC 字段缺失或 normalize 回落 `unknown`），按缺陷处理。文案里**不得**要求用户去"找是哪个程序"——他无从定位（2026-10-27 用户反馈）；端口类占用已由助手自己换端口解决，见上一节。
   4. 原因消除、agent 真的接管后：`action=capture_unavailable phase=cleared terminal_result=passed reason=ownership_acquired`，提示消失、状态回 `active`。
 - 反例（不允许发生）：`accepts` 已 ≥3、`owned_usages=0`，而界面仍无提示——那说明 `inactive` 又被 `starting` 覆盖了（`capture_health_with_startup_failure` 的边界被改坏）。
 - 阴性对照（不允许误报）：正常慢启动（agent 注入需要 8 s）期间不得出现 `helper_startup_failing`；一旦接管，计数必须清零。
@@ -550,7 +552,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | 现象 | 含义 | 处置 |
 | --- | --- | --- |
 | `[STOP] 已有另一个 sayall-helper 在运行` + 退出码 8 | 同会话里已有一支助手（互斥体 `SayAll.RC003Helper.SingleInstance` 已存在） | 先结束上一个助手窗口；或等 `--duration` 到期。**别靠换端口绕过**：`--port` 会跳过单实例锁，只留给自检与并行探针 |
-| `[STOP] 绑定 127.0.0.1:47831 失败 … 该端口被占用` + 退出码 8 | 端口被**别的进程**占着（`[PORT] event=probe result=listening` 或 `inconclusive`），不再是"上一轮在跑" | 按 `netstat -ano \| findstr :47831` 找占用者后释放；只有 `result=refused`（无人应答）才会自动回退 |
+| `[STOP] 绑定 127.0.0.1:47831 失败 … 该端口被占用` + 退出码 8 | 2026-10-27 起**只在** `[PORT] event=holder holder=own_helper` 时出现：另一支 sayall-helper（多为旧版本没退干净）占着端口 | 结束那一支；或给它 `--port` 换个端口。别的程序占着（`holder=other_program`）已不再报这个错，会自动换端口 |
 | `[FALLBACK] event=listen_fallback_ephemeral` | 固定端口被系统级保留（典型：WSL2 `networkingMode=mirrored` 把 Linux 临时端口区间镜像成宿主内核保留区，#296），且探头明确被拒 | 无需处置：已改用系统分配端口并写进 `session.port`，下次重启复用同一个端口。**若改了端口**（首次回退、或记忆端口被别人占走），宿主里的 agent 连不回来，会出现 `[ATTACH] verify=failed` 后结束宿主重建——判据见「2026-10-25 增量」 |
 | `[STOP] 复制 Gadget 失败 … os error 32` | 宿主仍映射着运行时目录那份 DLL | 更新版已不会这样：会走 `[ATTACH]` 接管或 `[STALE-TAP]` 提示 |
 | `[STALE-TAP]` + 退出码 13 | 宿主里的 tap 是**旧世代**（令牌已换，接不上），且自动恢复的安全闸不满足（宿主非独占 / 显式钉了 `--token` 等） | 按提示清一次：断开重配对 RC003（最干净）/ 设备管理器禁用再启用 / 重启。安全闸满足时不会到这步：助手会 `action=auto_recover_stale_tap` 自动结束宿主 + 干净首注（2026-10-14 起） |

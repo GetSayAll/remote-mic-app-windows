@@ -90,13 +90,17 @@
   `startup_failing` 变化时发布，经 `Rc003BridgeView.captureUnavailable` 给界面；
   与 `CaptureHealth` 分开（health 回答"生效了吗"，原因回答"为什么没生效"）。
 - 前端：`captureInactiveText(name, unavailable)` 据此选句。`startup_failing` 时改为
-  「{名称}启动没有成功，可能被这台电脑上的其他程序占用了需要的资源；退出那个程序后会自动恢复，
-  不需要把开关关掉再打开。」；读不到原因（`unknown`）一律退回通用句，不做猜测。
-- 术语边界：只说"其他程序 / 需要的资源"，不出现端口、进程、助手、驱动
-  （`docs/product-copy.md` §3 红线）；决定已记入同文件 §7（2026-10-27 条）。
+  「{名称}暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；还是不行就重启这台电脑。」
+  （**2026-10-27 二次定稿**：第一版写"退出那个程序后会自动恢复"，用户当场指出他无从定位
+  是哪个程序——那等于没给操作。定稿只给两步做得到的事）；读不到原因（`unknown`）一律退回
+  通用句，不做猜测。
+- 同时（同日）：端口被**真实进程**占着也不再算"启动失败"——助手查清占用者后一律换端口，
+  只有"另一支 sayall-helper 占着"才退出。见
+  `Bugs/2026-10-24-rc003-helper-port-phantom-reservation.md` 的"第三段"。
+- 术语边界：不出现端口、进程、助手、驱动（`docs/product-copy.md` §3 红线）；
+  决定已记入同文件 §7（2026-10-27 条）。
 - 测试：Rust `capture_unavailable_token_matches_frontend_contract`（token 与前端类型逐字对应 +
-  发布/读取往返）；前端 `captureInactiveText` 的 startup_failing 分支（含"不得出现
-  关掉再打开"与术语红线断言）、`normalizeCaptureUnavailable` 未知值回落、
-  连接页渲染断言（显示新句且不含"请把开关关掉再打开"）。
+  发布/读取往返）；前端 `captureInactiveText` 的 startup_failing 分支（含"不得出现其他程序"
+  与术语红线断言）、`normalizeCaptureUnavailable` 未知值回落、连接页渲染断言。
 
 
