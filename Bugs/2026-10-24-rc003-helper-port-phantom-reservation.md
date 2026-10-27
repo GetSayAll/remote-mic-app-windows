@@ -33,8 +33,9 @@
     同时 `startup_failing` 的用户文案不再要求用户"去找是哪个程序"（他无从定位）
   - **收尾（同日）**：`holder=own_helper` 不再直接退——既然互斥体已经证明同会话没有第二支
     **新版**助手，那个同名监听者必然是旧版本残留/孤儿，于是 `[RECLAIM] stale_helper_terminated`
-    结束它、2 s 内重绑，成功则继续（`fixed_port_reclaimed`），失败才 `exit 8`。三道安全闸：
-    已持有互斥体（显式 `--port` 不回收）、映像名是 `sayall-helper.exe`、PID 有效且不是自己。
+    结束它、2 s 内重绑，成功则继续（`fixed_port_reclaimed`），失败才 `exit 8`。四道安全闸：
+    已持有互斥体（显式 `--port` 不回收）、**同一登录会话**（互斥体是会话级、端口是全局的，
+    多用户切换时另一个会话的助手不能被当成残留）、映像名是 `sayall-helper.exe`、PID 有效且不是自己。
 - 验证：自动化 `passed`（助手 `cargo test` **83 passed**，含本轮新增 4 项——回退真值表、
   占用者分类与 token、回收的三道安全闸、以及**真调用 Win32** 的自监听→查 PID→读映像路径用例；
   `cargo fmt --check` 通过）；**真机 `deferred`**——mirrored 机器上的首次回退与"第二次启动"

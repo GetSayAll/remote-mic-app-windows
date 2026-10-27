@@ -43,7 +43,7 @@
 - 修复后的判定顺序（按日志逐条看，**2026-10-27 修订**）：
   1. `[LOCK] event=single_instance_acquired` —— 单实例由互斥体保证，与端口无关。
   2. 固定端口绑不上 → `[PORT] event=probe result=…`（`refused` 幻影保留 / `listening` 有人应答 / `inconclusive` 判不清）。
-  3. `[PORT] event=holder port=47831 holder=nobody|other_program|unknown|own_helper pid=… image=… decision=fallback|stop` —— **决策在这一行**：`nobody` / `other_program` / `unknown` 一律 `fallback`；`own_helper`（另一支 sayall-helper，多为旧版本残留）走 `stop` 分支，但**先尝试回收它**：`[RECLAIM] event=stale_helper_terminated pid=…` → 2 s 内 `[WAIT] … outcome=bound` + `[RECLAIM] event=fixed_port_reclaimed`，然后正常继续；只有回收失败（`stale_helper_terminate_failed`，权限/已退出竞态之外）才 `[STOP]` 退出码 8。回收只在**已持有单实例互斥体**时发生——显式 `--port`（自检/并行探针）永不结束别的实例。
+  3. `[PORT] event=holder port=47831 holder=nobody|other_program|unknown|own_helper pid=… image=… decision=fallback|stop` —— **决策在这一行**：`nobody` / `other_program` / `unknown` 一律 `fallback`；`own_helper`（另一支 sayall-helper，多为旧版本残留）走 `stop` 分支，但**先尝试回收它**：`[RECLAIM] event=stale_helper_terminated pid=…` → 2 s 内 `[WAIT] … outcome=bound` + `[RECLAIM] event=fixed_port_reclaimed`，然后正常继续；只有回收失败（`stale_helper_terminate_failed`，权限/已退出竞态之外）才 `[STOP]` 退出码 8。回收只在**已持有单实例互斥体**时发生——显式 `--port`（自检/并行探针）永不结束别的实例；另外还要求**同一登录会话**（互斥体是会话级的、端口是全局的，多用户切换时另一个会话的助手不能被当成残留）。
   4. `[FALLBACK] event=listen_fallback_ephemeral fixed_port=47831 reused_remembered=false|true`，随后 `[LISTEN] addr=… requested_port=47831`。
   5. 首轮应看到 `[PREP] port=<回退端口>` → `[HELLO] auth=true` → 语音键走 `path=report_layer`（豆包出字）。
 - **真机必须覆盖"第二次启动"（当前 `deferred`）**：这是回退路径的关键差异点——agent 的端口在注入时写死，只有复用 `session.port` 才能让接管握手成立。判据：
