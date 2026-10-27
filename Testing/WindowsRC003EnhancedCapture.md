@@ -15,6 +15,9 @@
    若仍是 `path=send_input`，应用会额外记一行
    `voice_path fallback … tool=doubao reason=report_layer_inactive note=tool_ignores_injected_keys`
    ——豆包在这条路径上必然不出字（它按设计丢弃注入键）；
+   **同段还应各有一次 `voice_capture_input default=… is_cable_output=true` 与（会话收尾时的）
+   `voice_level … peak_dbfs=… rms_dbfs=… clipped=…`**：前者为 `false` 说明输入法录的不是
+   `CABLE Output`（识别会"能出字但对不上"），后者用来看声音是否够大/削波（2026-10-27）；
 4. 反向用例：只断开不换机（目标被清空）**不应**触发重启；连续换机应每次各触发一次。
 5. 即时路径（2026-10-13 晚起）：主程序发布新目标时同步发一行裸 `R`，助手记
    `[RETARGET] event=request source=app_bridge` 并**立即**复查——重启行带 `trigger=app`
@@ -562,4 +565,5 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `voice_effect … result=missing reason=no_frame` 连发（≥2 次）+ `capture_inactive reason=voice_synth_no_effect` | 按下没有**生效证据**（本支遥控器对应的报告层改写没发生）：典型是宿主里跑着不产生帧结果的 agent；健康面会降级并在界面提示，60 s 后自动重来一次 | 无需手动处置（自动重来 + 界面提示）；若长时间不恢复，查同段 `helper_pid` 与 `[REJECT]` 行、确认包内含 `F` 行转发（helper 标记 `synth:frame replace ok`）。判据本体见 `Bugs/2026-10-14-foreign-host-agent-takes-slot.md`「跟进」 |
 | 按了键但一条 `[EDGE]` 都没有 | 可能是设备没上报，也可能是探针/链路坏了 | **先做阳性对照**：用哨兵键或 `observe` 模式确认同一设备上已知可用的键（确定/主页）能出来 |
 | `[EDGE]` 有、但主程序里三键映射不触发 | 清空与转发是两件事：第 ② 段（桥接）没通 | 看 `[SUMMARY] app_bridge=`：`connects=0` → 启动主程序并确认 `%LOCALAPPDATA%\SayAll\rc003-bridge.ini` 存在；据 `app_bridge_last_error` 定位（`descriptor_missing` / `rejected(DENY…)` / `version_mismatch`）。判据见 §7.5 |
+| 语音能出字但**内容对不上**（`voice_attempt` / `voice_effect` 全绿） | 输入法的麦克风选了「自动检测」，跟随系统默认录音设备——本机默认可能落到内置麦克风阵列或「立体声混音」，录到的不是 `CABLE Output` 这一路 | 看同一段的 `voice_capture_input default=<名> is_cable_output=false`；把输入法麦克风改成 `CABLE Output` 即可（2026-10-27 现场验证，改完立刻恢复）。再用 `voice_level peak_dbfs=… rms_dbfs=… clipped=…` 区分"声音太小 / 削波 / 音频没进来"。记录见 `Bugs/2026-10-27-voice-accuracy-input-device-auto-detect.md` |
 | 哨兵键不恢复 | fail-open 失效——**这是真问题** | 立刻按 Ctrl+C / 关窗；仍不恢复就断开重配对 RC003；把日志留档 |
