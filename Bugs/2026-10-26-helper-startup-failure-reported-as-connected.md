@@ -49,3 +49,37 @@
     `[APP-BRIDGE] enabled` 必须晚于 `[LISTEN]`、`capture_unavailable` 出现、界面出现提示，
     以及原因消除后提示消失
 - 隐私检查：只引用端口号、退出码、日志字段与 usage，未包含设备身份、个人路径、语音内容或令牌
+
+## 对语音链路（识别）的影响评估（2026-10-27 审查）
+
+结论：**本修复不改变任何音频采集、报告层合成与注入路径**，因此不影响语音识别精度；净效果是
+让更容易被这条缺陷拖成"报告层永不生效"的机器恢复走报告层。逐条依据：
+
+- **助手不碰音频**：`hardware/RC003/helper/src/main.rs` 里 `WASAPI` / `IMMDevice` /
+  `IAudioClient` 出现 **0 次**。音频采集与 ASR 都在应用侧（VB-Cable + 豆包/微信输入法），
+  与本提交改动无交集。
+- **语音键的 DOWN/UP 不依赖主程序桥接**：合成发生在宿主内的 agent（报告层单槽替换），
+  按下沿与释放沿成对来自同一份物理报告，经 HID 栈直接进 OS。`APP-BRIDGE` 只负责把**边沿通知**
+  送给应用做映射动作/界面高亮，缺席不会造成粘键或丢音频。
+- **合成门禁只看 agent 回执**：`crates/sayall-windows/src/key_gate.rs` 的
+  `VOICE_SYNTH_ACTIVE` 由 `set_voice_synth_active` 写入，唯一来源是 `rc003_bridge.rs`
+  的 `synth_confirmed && voice_synth_to.is_some()`（配置回执 ∧ 当前目标存在）。
+  它**不读** `CaptureHealth`，因此本提交新增的 `inactive` 发布不会让语音键改走
+  `SendInput` 回落（那条回落才会被豆包按 `LLKHF_INJECTED` 丢弃）。
+- **`CaptureHealth` 的消费面只有文案与诊断**：Rust 侧只在 `Rc003BridgeView` 里作为
+  IPC 字符串返回（`get_rc003_bridge_snapshot`）；前端消费点为开关旁提示
+  （`shouldShowCaptureInactive`）、语音**失败卡**文案（`voiceFailureText`）、诊断串。
+  没有任何采集/注入/门禁分支读它。
+- **顺序改动的时序差可忽略**：`spawn_app_bridge` 是 `std::thread::Builder::spawn`（非阻塞，
+  毫秒级）。移动后从启动到 `[LISTEN]` 的耗时不变；固定端口重试期间（最多 3 s）桥接不起，
+  但 agent 连的正是这个端口——端口就绪前 agent 不可能产生边沿，因此不存在"边沿被桥接缺席吞掉"
+  的窗口。
+- **净收益方向相反**：旧行为下助手反复重启会让每次鉴权都
+  `set_voice_synth_active(false)`（`rc003_bridge.rs:1532`），语音键在这段时间里走注入回落。
+  修复减少重启次数 ⇒ 门禁不再被反复重置 ⇒ 语音路径更稳定。
+
+遗留的**文案准确性**问题（不影响识别，需产品决定，本次未改）：`inactive` 目前复用既有
+「还没有生效，正在自动重试；如果一直不恢复，请把开关关掉再打开」。对"端口被外部保留/占用"
+这一类原因，关开是无效建议；精确指引只写进了诊断日志
+（`hint=check_environment_conflict`），没有进用户文案（`docs/product-copy.md` 禁止机制词）。
+
