@@ -109,9 +109,12 @@
   新增 `CaptureUnavailable`（`none` / `startup_failing`）经 `Rc003BridgeView.captureUnavailable`
   下发，前端 `captureInactiveText(name, unavailable)` 选句，读不到原因退回通用句。
   ② 回退门禁放宽：查占用者（`GetExtendedTcpTable` + `QueryFullProcessImageNameW`）后分类，
-  只有 `holder=own_helper` 才 `[STOP]`，`other_program` / `unknown` / `nobody` 一律换端口——
+  只有 `holder=own_helper` 才走退出分支，`other_program` / `unknown` / `nobody` 一律换端口——
   #304 的"只有 refused 才回退"会把"端口被真实进程占着"的机器锁在崩溃循环里。
-  自动化 passed：助手 **82 passed**（含真调用 Win32 的自监听→查 PID→读映像用例）、
+  ③ `holder=own_helper` 先回收：互斥体已证明同会话没有第二支新版助手 ⇒ 那个同名监听者必然是
+  旧版本残留/孤儿，`[RECLAIM] stale_helper_terminated` 结束它、2 s 内重绑；三道安全闸
+  （已持锁 / 映像名是 sayall-helper.exe / PID 不是自己），显式 `--port` 永不回收。
+  自动化 passed：助手 **83 passed**（含真调用 Win32 的自监听→查 PID→读映像用例）、
   Rust **164 passed**（token 契约）、前端全量 vitest 通过、`vue-tsc --noEmit` 通过。
   文案决定记入 `docs/product-copy.md` §7（2026-10-27）；真机仍 deferred。
 - [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
