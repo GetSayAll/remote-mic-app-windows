@@ -1347,10 +1347,49 @@ mod imp {
 
     /// 能不能回收占着固定端口的那支遗留助手（纯判定，单测覆盖）。
     ///
-    /// 三条同时成立才动手：不是显式 `--port`（那是自检/并行探针，互斥体锁根本没取，
-    /// 结束别人会打断正在工作的实例）、PID 有效、且不是自己。
-    fn should_reclaim_stale_helper(pid: u32, self_pid: u32, port_explicit: bool) -> bool {
-        !port_explicit && pid != 0 && pid != self_pid
+    /// 四条同时成立才动手：
+    /// 1. 不是显式 `--port`（那是自检/并行探针，互斥体锁根本没取）；
+    /// 2. PID 有效且不是自己；
+    /// 3. **同一登录会话**——互斥体是会话命名空间的，端口是全局的：多用户快速切换时
+    ///    另一个会话的助手也会绑 47831，此时我们拿得到锁却会把它误判成"旧版本残留"，
+    ///    结束它等于杀别人正在用的助手（查不到会话号按"不同会话"处理）。
+    fn should_reclaim_stale_helper(
+        pid: u32,
+        self_pid: u32,
+        port_explicit: bool,
+        same_session: bool,
+    ) -> bool {
+        !port_explicit && pid != 0 && pid != self_pid && same_session
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ProcessIdToSessionId(pid: u32, session_id: *mut u32) -> i32;
+    }
+
+    /// 进程所在登录会话号（查不到返回 `None`）。
+    fn process_session_id(pid: u32) -> Option<u32> {
+        let mut session_id: u32 = 0;
+        let ok = unsafe { ProcessIdToSessionId(pid, &mut session_id) };
+        if ok == 0 {
+            None
+        } else {
+            Some(session_id)
+        }
+    }
+
+    /// 目标进程与本进程是否在同一登录会话（查不到一律按"不是"）。
+    ///
+    /// 这道闸只服务回收逻辑：互斥体是**会话命名空间**的，固定端口却是**全局**的，
+    /// 所以"拿到锁"证明不了"这个端口的监听者归我管"。
+    fn is_same_session_as_self(pid: u32) -> bool {
+        match (
+            process_session_id(pid),
+            process_session_id(std::process::id()),
+        ) {
+            (Some(theirs), Some(ours)) => theirs == ours,
+            _ => false,
+        }
     }
 
     /// 结束占着固定端口的遗留助手，成功返回 true。
@@ -6617,6 +6656,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 *pid,
                                 std::process::id(),
                                 args.port_explicit,
+                                is_same_session_as_self(*pid),
                             ) =>
                         {
                             reclaim_stale_helper(*pid, &logger)
@@ -10139,21 +10179,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert_eq!(port_from_mib_local_port(0), 0);
         }
 
-        /// 回收遗留助手的三道安全闸（2026-10-27）。
+        /// 回收遗留助手的四道安全闸（2026-10-27）。
         ///
         /// 这条逻辑会**结束一个提权进程**，所以每一条否决都要有测试钉住：
-        /// 缺了"不是显式 --port"就会杀掉并行探针的实例；缺了"不是自己"就可能自杀。
+        /// 缺了"不是显式 --port"就会杀掉并行探针的实例；缺了"不是自己"就可能自杀；
+        /// 缺了"同一会话"会在多用户切换时杀掉别的用户正在用的助手（互斥体是会话级的，
+        /// 端口是全局的）。
         #[test]
-        fn stale_helper_reclaim_is_gated_by_lock_pid_and_self() {
+        fn stale_helper_reclaim_is_gated_by_lock_session_pid_and_self() {
             let self_pid = 4242;
-            // 正常形态：走了锁、占位者不是自己 → 允许回收。
-            assert!(should_reclaim_stale_helper(99, self_pid, false));
+            // 正常形态：走了锁、同会话、占位者不是自己 → 允许回收。
+            assert!(should_reclaim_stale_helper(99, self_pid, false, true));
             // 显式 --port = 自检/并行探针（根本没取互斥体锁）⇒ 不许动别人。
-            assert!(!should_reclaim_stale_helper(99, self_pid, true));
+            assert!(!should_reclaim_stale_helper(99, self_pid, true, true));
+            // 别的登录会话（互斥体各管各的，端口却全局唯一）⇒ 不许动。
+            assert!(!should_reclaim_stale_helper(99, self_pid, false, false));
             // 自己占着端口（理论上不可能，但绝不能自杀）。
-            assert!(!should_reclaim_stale_helper(self_pid, self_pid, false));
+            assert!(!should_reclaim_stale_helper(
+                self_pid, self_pid, false, true
+            ));
             // PID 0 = 未知，不猜。
-            assert!(!should_reclaim_stale_helper(0, self_pid, false));
+            assert!(!should_reclaim_stale_helper(0, self_pid, false, true));
+            // 真调用 Win32：自己的会话号必须查得到，且与自身一致。
+            assert!(
+                is_same_session_as_self(std::process::id()),
+                "本进程必须被判成同一会话（拿不到会话号会让回收永远不生效）"
+            );
         }
 
         /// **真调用** Win32：自己监听一个随机端口，确认能查到占用者就是本进程、
