@@ -136,6 +136,10 @@ mod imp {
     /// 探固定端口是否有人监听时的连接超时。回环上"有监听"是亚毫秒级；
     /// 超时说明状态怪（丢弃/防火墙），此时按"查不出占用者"处理，仍然回退换端口。
     const PORT_PROBE_TIMEOUT_MS: u64 = 500;
+    /// 结束遗留助手后，等它真正释放固定端口的预算与步长。
+    /// `TerminateProcess` 返回只代表"已请求终止"，监听套接字要等进程收尾才关。
+    const STALE_HELPER_RELEASE_RETRY_MS: u64 = 2000;
+    const STALE_HELPER_RELEASE_RETRY_STEP_MS: u64 = 50;
     /// 注入/接管后等待**已鉴权** hello 的默认上限（秒）。
     /// 为什么设默认：2026-09-23 之前，"注入返回非 0 但 agent 从未连上"这种现象
     /// 只会表现为日志一片安静、程序一直等下去——把"失败"伪装成"正在工作"。
@@ -1338,6 +1342,49 @@ mod imp {
                 "TerminateProcess({pid}) 失败，GetLastError={}",
                 unsafe { GetLastError() }
             ))
+        }
+    }
+
+    /// 能不能回收占着固定端口的那支遗留助手（纯判定，单测覆盖）。
+    ///
+    /// 三条同时成立才动手：不是显式 `--port`（那是自检/并行探针，互斥体锁根本没取，
+    /// 结束别人会打断正在工作的实例）、PID 有效、且不是自己。
+    fn should_reclaim_stale_helper(pid: u32, self_pid: u32, port_explicit: bool) -> bool {
+        !port_explicit && pid != 0 && pid != self_pid
+    }
+
+    /// 结束占着固定端口的遗留助手，成功返回 true。
+    ///
+    /// 安全前提（调用方保证）：① 已持有单实例互斥体——同会话没有第二支**新版**助手，
+    /// 所以同名的监听者必然是旧版本残留或孤儿；② 占用者映像名就是 `sayall-helper.exe`
+    /// （`resolve_port_holder` 判过）；③ PID 有效且不是自己。缺一不可，见
+    /// [`should_reclaim_stale_helper`]。
+    ///
+    /// 为什么值得动手：它不退，新版就永远起不来，主程序每 20 s 拉一次、每次 exit 8
+    /// （issue #291 的 109 次崩溃循环），而用户没有定位手段（2026-10-27 原话）。
+    fn reclaim_stale_helper(pid: u32, logger: &Logger) -> bool {
+        match terminate_process(pid) {
+            Ok(()) => {
+                logger.kv(
+                    "[RECLAIM]",
+                    &[
+                        ("event", "stale_helper_terminated".into()),
+                        ("pid", pid.to_string()),
+                    ],
+                );
+                true
+            }
+            Err(error) => {
+                logger.kv(
+                    "[RECLAIM]",
+                    &[
+                        ("event", "stale_helper_terminate_failed".into()),
+                        ("pid", pid.to_string()),
+                        ("detail", error),
+                    ],
+                );
+                false
+            }
         }
     }
 
@@ -6560,35 +6607,76 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ],
                 );
                 if !fallback {
-                    logger.line(&format!(
-                        "[STOP] {} 端口由另一支 sayall-helper 持有（多半是旧版本没退干净）：\
-                         先结束那一支再重试，或用 --port 换一个端口。",
-                        e.message
-                    ));
-                    std::process::exit(8);
-                }
-                match bind_fallback_port(&args.runtime_dir, &logger) {
-                    Ok((l, reused_remembered)) => {
-                        logger.kv(
-                            "[FALLBACK]",
-                            &[
-                                ("event", "listen_fallback_ephemeral".into()),
-                                ("fixed_port", requested_port.to_string()),
-                                ("reused_remembered", reused_remembered.to_string()),
-                                (
-                                    "note",
-                                    "固定端口绑不上、且占用者不是本助手（系统级保留/别的程序/\
-                                     查不出是谁），改用系统自动分配端口；单实例仍由互斥体保证；\
-                                     端口写进 session.port 供下次重启复用（agent 的端口是注入时写死的）"
-                                        .into(),
-                                ),
-                            ],
-                        );
-                        l
-                    }
-                    Err(message) => {
-                        logger.line(&format!("[STOP] {message}"));
+                    // `holder=own_helper` 且已持有单实例互斥体 ⇒ 同会话里没有第二支**新版**
+                    // 助手，占着固定端口的只可能是旧版本残留 / 脱离任务的孤儿。它不退，
+                    // 新版就永远起不来（#291 现场：主程序每 20 s 拉一次、每次 exit 8）。
+                    // 回收它比让用户去开任务管理器现实——2026-10-27 用户原话"我怎么去关掉它"。
+                    let reclaimed = match &holder {
+                        PortHolder::OwnHelper { pid }
+                            if should_reclaim_stale_helper(
+                                *pid,
+                                std::process::id(),
+                                args.port_explicit,
+                            ) =>
+                        {
+                            reclaim_stale_helper(*pid, &logger)
+                        }
+                        _ => false,
+                    };
+                    if !reclaimed {
+                        logger.line(&format!(
+                            "[STOP] {} 端口由另一支 sayall-helper 持有（多半是旧版本没退干净，\
+                             且本次没能结束它）：先手动结束那一支再重试，或用 --port 换一个端口。",
+                            e.message
+                        ));
                         std::process::exit(8);
+                    }
+                    // 它退出后端口才会释放：给一小段有界等待再绑一次。
+                    match bind_listener_with_retry(
+                        requested_port,
+                        STALE_HELPER_RELEASE_RETRY_MS,
+                        STALE_HELPER_RELEASE_RETRY_STEP_MS,
+                        Some(&logger),
+                    ) {
+                        Ok(l) => {
+                            logger.kv(
+                                "[RECLAIM]",
+                                &[
+                                    ("event", "fixed_port_reclaimed".into()),
+                                    ("port", requested_port.to_string()),
+                                ],
+                            );
+                            l
+                        }
+                        Err(retry_error) => {
+                            logger.line(&format!("[STOP] {}", retry_error.message));
+                            std::process::exit(8);
+                        }
+                    }
+                } else {
+                    match bind_fallback_port(&args.runtime_dir, &logger) {
+                        Ok((l, reused_remembered)) => {
+                            logger.kv(
+                                "[FALLBACK]",
+                                &[
+                                    ("event", "listen_fallback_ephemeral".into()),
+                                    ("fixed_port", requested_port.to_string()),
+                                    ("reused_remembered", reused_remembered.to_string()),
+                                    (
+                                        "note",
+                                        "固定端口绑不上、且占用者不是本助手（系统级保留/别的程序/\
+                                         查不出是谁），改用系统自动分配端口；单实例仍由互斥体保证；\
+                                         端口写进 session.port 供下次重启复用（agent 的端口是注入时写死的）"
+                                            .into(),
+                                    ),
+                                ],
+                            );
+                            l
+                        }
+                        Err(message) => {
+                            logger.line(&format!("[STOP] {message}"));
+                            std::process::exit(8);
+                        }
                     }
                 }
             }
@@ -10049,6 +10137,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             let raw = (47831u16).to_be() as u32;
             assert_eq!(port_from_mib_local_port(raw), 47831);
             assert_eq!(port_from_mib_local_port(0), 0);
+        }
+
+        /// 回收遗留助手的三道安全闸（2026-10-27）。
+        ///
+        /// 这条逻辑会**结束一个提权进程**，所以每一条否决都要有测试钉住：
+        /// 缺了"不是显式 --port"就会杀掉并行探针的实例；缺了"不是自己"就可能自杀。
+        #[test]
+        fn stale_helper_reclaim_is_gated_by_lock_pid_and_self() {
+            let self_pid = 4242;
+            // 正常形态：走了锁、占位者不是自己 → 允许回收。
+            assert!(should_reclaim_stale_helper(99, self_pid, false));
+            // 显式 --port = 自检/并行探针（根本没取互斥体锁）⇒ 不许动别人。
+            assert!(!should_reclaim_stale_helper(99, self_pid, true));
+            // 自己占着端口（理论上不可能，但绝不能自杀）。
+            assert!(!should_reclaim_stale_helper(self_pid, self_pid, false));
+            // PID 0 = 未知，不猜。
+            assert!(!should_reclaim_stale_helper(0, self_pid, false));
         }
 
         /// **真调用** Win32：自己监听一个随机端口，确认能查到占用者就是本进程、
