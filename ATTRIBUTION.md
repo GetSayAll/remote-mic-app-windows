@@ -430,3 +430,10 @@
 
 - 语义与文案参考（未复制代码）：`HD838A/remote-mic-app` 的 `Resources/en.lproj/Localizable.strings`（提交 `c1840de92be4e74dd4404d6592e8e72b7b9278ff`）与 `sayall-private-platform` 组合动作包 `packages/macos-button-profiles/Sources/SayAllButtonProfiles/Resources/en.lproj/Localizable.strings`（提交 `e5f6cf23fd8f41eec4df7825bbe7715d29650eb5`）。
 - Windows 端以中文原文为 key 自建 `src/lib/i18n/en/*.ts`，沿用 Mac 术语（Routines、Doubao、WeType、App Language、System Default 等）；未复制 Swift/SwiftUI 代码或资源文件，平台差异（托盘、Win32 语言解析、Full-key support）由本仓库实现。
+
+## 2026-10-25「回眸」文字版来源
+
+- 语义与产品行为参考（未复制 Swift/SwiftUI 代码或资源）：`HD838A/remote-mic-app` 的 `Sources/RemoteMic/TranscriptHistorySection.swift`、`TranscriptArchiveStore.swift`、`TranscriptCaptureCoordinator.swift`、`BridgeAppModel.swift`，以及 `Tests/RemoteMicTests/TranscriptCaptureCoordinatorTests.swift`、`TranscriptArchiveStoreTests.swift`、`feature/local-transcript-history/README.md`（参考时 HEAD `c1840de92be4e74dd4404d6592e8e72b7b9278ff`）。
+- 复用的产品语义：默认关闭；只记录语音新增文字；按应用与日期组织；全部应用最近 7 天、单应用全部历史；删除单条/应用/全部；单条上限 8000 字符；捕获失败静默跳过。
+- Windows 实现差异：文本读取使用 UI Automation（`ValuePattern` / `TextPattern`）而非 macOS Accessibility；图标使用 `PrivateExtractIconsW` 提取 64×64 PNG 并按应用键缓存；删除使用 Windows 回收站；入口为侧栏独立页面；存储根为 `%LOCALAPPDATA%\SayAll\transcripts\v1`，不承诺与 Mac 历史互通。
+- 不采用 Mac 的原始录音、本机 Agent/MCP 访问与跨端迁移能力；这些能力不在本次范围内。

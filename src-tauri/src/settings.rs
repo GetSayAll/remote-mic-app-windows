@@ -113,6 +113,30 @@ impl SettingsStore {
         })
     }
 
+    /// 「回眸」文字记录开关（默认关闭）。关闭只停止新增，不删除已有记录。
+    pub fn load_local_transcript_history_enabled(&self) -> Result<bool, String> {
+        self.load()
+            .map(|settings| settings.local_transcript_history_enabled)
+    }
+
+    pub fn save_local_transcript_history_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存回眸记录设置", move |settings| {
+            settings.local_transcript_history_enabled = enabled;
+        })
+    }
+
+    /// 「回眸」原始录音开关（默认关闭；只在回眸文字开关开启时生效）。
+    pub fn load_local_original_audio_recording_enabled(&self) -> Result<bool, String> {
+        self.load()
+            .map(|settings| settings.local_original_audio_recording_enabled)
+    }
+
+    pub fn save_local_original_audio_recording_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存回眸原始录音设置", move |settings| {
+            settings.local_original_audio_recording_enabled = enabled;
+        })
+    }
+
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
@@ -833,6 +857,26 @@ mod tests {
         store.save_other_voice_hotkey(Some(keys.clone())).unwrap();
         assert_eq!(store.load_other_voice_hotkey().unwrap(), Some(keys));
         let _ = std::fs::remove_file(store.path.with_file_name("other-voice-hotkey.json"));
+    }
+
+    #[test]
+    fn transcript_history_defaults_off_and_round_trips() {
+        let path = std::env::temp_dir().join("sayall-transcript-history-toggle-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(!store.load_local_transcript_history_enabled().unwrap());
+        store.save_local_transcript_history_enabled(true).unwrap();
+        assert!(store.load_local_transcript_history_enabled().unwrap());
+
+        // 老配置没有该字段时保持关闭，不被迁移成开启。
+        std::fs::write(
+            &path,
+            r#"{"schema_version":5,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert!(!store.load_local_transcript_history_enabled().unwrap());
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 「锁定当前按键」持久化（2026-10-18）：默认开启；关闭后写盘、读回保持关闭；

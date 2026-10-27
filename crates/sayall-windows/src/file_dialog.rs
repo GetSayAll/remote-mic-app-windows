@@ -47,6 +47,17 @@ pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
+/// 选择回眸原始录音的导出位置。
+#[cfg(windows)]
+pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Save, DialogFlavor::Audio)
+}
+
+#[cfg(not(windows))]
+pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 enum DialogKind {
@@ -59,6 +70,7 @@ enum DialogKind {
 enum DialogFlavor {
     Mapping,
     Sayall,
+    Audio,
 }
 
 #[cfg(windows)]
@@ -140,6 +152,13 @@ fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>,
                     "*.sayall",
                     "SayAll-组合动作.sayall",
                     "sayall",
+                ),
+                DialogFlavor::Audio => (
+                    "导出原始录音",
+                    "WAV 录音 (*.wav)",
+                    "*.wav",
+                    "SayAll-原始录音.wav",
+                    "wav",
                 ),
             };
         let title = wide(title_text);

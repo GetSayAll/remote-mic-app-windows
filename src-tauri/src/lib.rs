@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use sayall_core::{MacroDefinition, MacroLibraryDocument};
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
@@ -30,6 +31,7 @@ mod recommendations;
 mod settings;
 mod shortcut_icons;
 mod startup;
+mod transcripts;
 mod updater;
 mod usage;
 
@@ -448,6 +450,8 @@ struct AppState {
     /// 本次启动前刚完成更新时的版本号；前端取走一次后清空（对齐 Mac
     /// `showUpdateCompletedAlert`：只在更新后的第一次启动提示）。
     update_completed_version: std::sync::Mutex<Option<String>>,
+    /// 回眸本地归档（`%LOCALAPPDATA%\SayAll\transcripts\v1`）。
+    transcripts: Arc<transcripts::TranscriptStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -3779,6 +3783,221 @@ async fn get_gain_db(state: tauri::State<'_, AppState>) -> Result<f32, String> {
     result
 }
 
+fn transcript_enabled(state: &AppState) -> bool {
+    match state.settings.load_local_transcript_history_enabled() {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            sayall_windows::gatt_note(
+                "transcript_settings action=load phase=completed result=failed error_domain=settings error_code=load_failed reason=default_off retryable=true".to_owned(),
+            );
+            false
+        }
+    }
+}
+
+fn transcript_audio_enabled(state: &AppState) -> bool {
+    match state.settings.load_local_original_audio_recording_enabled() {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            sayall_windows::gatt_note(
+                "transcript_settings action=load_audio phase=completed result=failed error_domain=settings error_code=load_failed reason=default_off retryable=true".to_owned(),
+            );
+            false
+        }
+    }
+}
+
+#[tauri::command]
+fn get_transcript_history(
+    state: tauri::State<'_, AppState>,
+) -> transcripts::TranscriptHistorySnapshot {
+    state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state))
+}
+
+#[tauri::command]
+fn set_transcript_history_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .settings
+        .save_local_transcript_history_enabled(enabled)
+        .map_err(|_| "保存回眸设置失败，请稍后重试".to_owned())?;
+    state.platform.set_transcript_capture_enabled(enabled);
+    sayall_windows::gatt_note(format!(
+        "transcript_settings action=save phase=completed result=passed enabled={enabled}"
+    ));
+    Ok(state
+        .transcripts
+        .snapshot(enabled, transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn set_transcript_audio_recording_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    if state
+        .settings
+        .save_local_original_audio_recording_enabled(enabled)
+        .is_err()
+    {
+        sayall_windows::gatt_note(format!(
+            "transcript_settings action=save_audio phase=completed result=failed enabled={enabled} reason=settings_save_failed"
+        ));
+        return Err("保存原始录音设置失败，请稍后重试".to_owned());
+    }
+    state
+        .platform
+        .set_transcript_audio_recording_enabled(enabled);
+    sayall_windows::gatt_note(format!(
+        "transcript_settings action=save_audio phase=completed result=passed enabled={enabled}"
+    ));
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), enabled))
+}
+
+#[tauri::command]
+fn get_transcript_audio(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    match state.transcripts.read_recording(&session_id) {
+        Ok(bytes) => {
+            let bytes_len = bytes.len();
+            sayall_windows::gatt_note(format!(
+                "transcript_archive action=read_audio phase=completed result=passed bytes={bytes_len} elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Ok(format!(
+                "data:audio/wav;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ))
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(format!(
+                "transcript_archive action=read_audio phase=completed result=failed reason=read_failed elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn export_transcript_audio(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let path = match sayall_windows::file_dialog::pick_audio_export_path() {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            sayall_windows::gatt_note(
+                "transcript_archive action=export_audio phase=completed result=cancelled"
+                    .to_owned(),
+            );
+            return Ok(false);
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(
+                "transcript_archive action=export_audio phase=completed result=failed reason=dialog_failed"
+                    .to_owned(),
+            );
+            return Err(error);
+        }
+    };
+    if state
+        .transcripts
+        .export_recording(&session_id, &path)
+        .is_err()
+    {
+        sayall_windows::gatt_note(
+            "transcript_archive action=export_audio phase=completed result=failed reason=copy_failed"
+                .to_owned(),
+        );
+        return Err("导出原始录音失败，请稍后重试".to_owned());
+    }
+    sayall_windows::gatt_note(
+        "transcript_archive action=export_audio phase=completed result=passed".to_owned(),
+    );
+    Ok(true)
+}
+
+#[tauri::command]
+fn delete_transcript_recording(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    let removed = state.transcripts.delete_recording(&session_id).map_err(|_| {
+        sayall_windows::gatt_note(
+            "transcript_archive action=delete_recording phase=completed result=failed reason=trash_failed"
+                .to_owned(),
+        );
+        "删除原始录音失败，请稍后重试".to_owned()
+    })?;
+    sayall_windows::gatt_note(format!(
+        "transcript_archive action=delete_recording phase=completed result={} removed={removed}",
+        if removed { "passed" } else { "skipped" }
+    ));
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn delete_transcript(
+    record_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .transcripts
+        .delete_record(&record_id)
+        .map_err(|_| "删除回眸记录失败，请稍后重试".to_owned())?;
+    sayall_windows::gatt_note(
+        "transcript_archive action=delete_record phase=completed result=passed".to_owned(),
+    );
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn delete_transcript_application(
+    application_key: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .transcripts
+        .delete_application(&application_key)
+        .map_err(|_| "删除这个应用的回眸记录失败，请稍后重试".to_owned())?;
+    sayall_windows::gatt_note(
+        "transcript_archive action=delete_application phase=completed result=passed".to_owned(),
+    );
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn delete_all_transcripts(
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .transcripts
+        .delete_all()
+        .map_err(|_| "删除全部回眸记录失败，请稍后重试".to_owned())?;
+    sayall_windows::gatt_note(
+        "transcript_archive action=delete_all phase=completed result=passed".to_owned(),
+    );
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
 #[tauri::command]
 async fn set_gain_db(gain_db: f32, state: tauri::State<'_, AppState>) -> Result<f32, String> {
     let started = std::time::Instant::now();
@@ -5409,6 +5628,87 @@ pub fn run() {
                     .start_hardware_script_replay(std::path::PathBuf::from(script_path));
             }
 
+            // 回眸：归档目录只用本机 LOCALAPPDATA；取不到时退回 Tauri 的本地数据目录。
+            let transcript_root = transcripts::TranscriptStore::default_root().unwrap_or_else(|_| {
+                sayall_windows::gatt_note(
+                    "transcript_archive action=resolve_root phase=completed result=fallback reason=localappdata_unavailable"
+                        .to_owned(),
+                );
+                app.path()
+                    .app_local_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join("SayAll")
+                    .join("transcripts")
+                    .join("v1")
+            });
+            let transcript_store = Arc::new(transcripts::TranscriptStore::new(transcript_root));
+            let capture_store = Arc::clone(&transcript_store);
+            let capture_app = app.handle().clone();
+            platform.set_transcript_capture_sink(Arc::new(
+                move |capture: sayall_windows::transcript_capture::CapturedTranscript| {
+                    let store = Arc::clone(&capture_store);
+                    let app = capture_app.clone();
+                    std::thread::spawn(move || {
+                        let record = sayall_core::transcripts::TranscriptRecord {
+                            schema_version: sayall_core::TRANSCRIPT_SCHEMA_VERSION,
+                            id: capture.session_id.clone(),
+                            session_id: capture.session_id.clone(),
+                            started_at_ms: capture.started_at_ms,
+                            ended_at_ms: capture.ended_at_ms,
+                            local_date_key: capture.local_date_key,
+                            utc_offset_minutes: capture.utc_offset_minutes,
+                            application_key: capture.application_key.clone(),
+                            application_name: capture.application_name,
+                            source: capture.source,
+                            original_transcript: capture.text,
+                            capture_method_version: sayall_core::CAPTURE_METHOD_VERSION,
+                        };
+                        if let Some(icon) = capture.icon_png.as_deref() {
+                            if store.write_icon(&capture.application_key, icon).is_err() {
+                                sayall_windows::gatt_note(
+                                    "transcript_archive action=write_icon phase=completed result=failed reason=icon_cache_failed"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                        match store.append(record) {
+                            Ok(_) => {
+                                sayall_windows::gatt_note(format!(
+                                    "transcript_archive action=append phase=completed result=passed application_key={}",
+                                    capture.application_key
+                                ));
+                                let _ = app.emit(
+                                    "transcript-captured",
+                                    transcripts::TranscriptCapturedEvent {
+                                        application_key: capture.application_key,
+                                        session_id: capture.session_id,
+                                    },
+                                );
+                            }
+                            Err(_) => {
+                                sayall_windows::gatt_note(
+                                    "transcript_archive action=append phase=completed result=failed error_domain=archive error_code=append_failed retryable=true"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    });
+                },
+            ));
+            let recording_app = app.handle().clone();
+            platform.set_transcript_audio_recording_finished_sink(Arc::new(move |session_id| {
+                let _ = recording_app.emit(
+                    "transcript-recording-finished",
+                    transcripts::TranscriptRecordingFinishedEvent { session_id },
+                );
+            }));
+            platform.set_transcript_capture_enabled(
+                saved_settings.local_transcript_history_enabled,
+            );
+            platform.set_transcript_audio_recording_enabled(
+                saved_settings.local_original_audio_recording_enabled,
+            );
+
             app.manage(AppState {
                 platform,
                 settings,
@@ -5421,6 +5721,7 @@ pub fn run() {
                 update_completed_version: std::sync::Mutex::new(
                     completed_update.then(|| app.package_info().version.to_string()),
                 ),
+                transcripts: transcript_store,
             });
             app.manage(recommendations::RecommendationsState::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
@@ -5597,6 +5898,15 @@ pub fn run() {
         get_ime_status,
         get_gain_db,
         set_gain_db,
+        get_transcript_history,
+        set_transcript_history_enabled,
+        set_transcript_audio_recording_enabled,
+        get_transcript_audio,
+        export_transcript_audio,
+        delete_transcript_recording,
+        delete_transcript,
+        delete_transcript_application,
+        delete_all_transcripts,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,
@@ -5720,6 +6030,15 @@ pub fn run() {
         get_ime_status,
         get_gain_db,
         set_gain_db,
+        get_transcript_history,
+        set_transcript_history_enabled,
+        set_transcript_audio_recording_enabled,
+        get_transcript_audio,
+        export_transcript_audio,
+        delete_transcript_recording,
+        delete_transcript,
+        delete_transcript_application,
+        delete_all_transcripts,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,

@@ -2848,3 +2848,116 @@ export async function exportCommonPhrases(): Promise<string> {
 export async function openCommonPhraseExample(): Promise<void> {
   await dispatchCommonPhrase("open_example");
 }
+
+/** 回眸：一个目标应用的汇总。 */
+export interface TranscriptApplicationSummary {
+  key: string;
+  name: string;
+  count: number;
+  latestEndedAtMs: number;
+  iconDataUrl: string | null;
+}
+
+/** 回眸：一条记录（不含输入框全文、窗口标题、路径等内部字段）。 */
+export interface TranscriptRecordView {
+  id: string;
+  sessionId: string;
+  endedAtMs: number;
+  localDateKey: string;
+  utcOffsetMinutes: number;
+  applicationKey: string;
+  applicationName: string;
+  text: string;
+}
+
+/** 回眸：一条记录关联的原始录音摘要（不暴露文件路径）。 */
+export interface TranscriptRecordingView {
+  sessionId: string;
+  endedAtMs: number;
+  localDateKey: string;
+  utcOffsetMinutes: number;
+  applicationKey: string | null;
+  applicationName: string | null;
+  durationMs: number;
+  byteCount: number;
+}
+
+/** 回眸页面快照。`recentCount` 只算最近 7 天，`totalCount` 是全部。 */
+export interface TranscriptHistorySnapshot {
+  enabled: boolean;
+  audioEnabled: boolean;
+  applications: TranscriptApplicationSummary[];
+  records: TranscriptRecordView[];
+  recordings: TranscriptRecordingView[];
+  totalCount: number;
+  recentCount: number;
+  archiveError: string | null;
+}
+
+export async function getTranscriptHistory(): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("get_transcript_history");
+}
+
+export async function setTranscriptHistoryEnabled(
+  enabled: boolean,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("set_transcript_history_enabled", { enabled });
+}
+
+export async function setTranscriptAudioRecordingEnabled(
+  enabled: boolean,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("set_transcript_audio_recording_enabled", { enabled });
+}
+
+export async function getTranscriptAudio(sessionId: string): Promise<string> {
+  return invoke<string>("get_transcript_audio", { sessionId });
+}
+
+export async function exportTranscriptAudio(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("export_transcript_audio", { sessionId });
+}
+
+export async function deleteTranscriptRecording(
+  sessionId: string,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_transcript_recording", { sessionId });
+}
+
+export async function deleteTranscript(
+  recordId: string,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_transcript", { recordId });
+}
+
+export async function deleteTranscriptApplication(
+  applicationKey: string,
+): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_transcript_application", { applicationKey });
+}
+
+export async function deleteAllTranscripts(): Promise<TranscriptHistorySnapshot> {
+  return invoke<TranscriptHistorySnapshot>("delete_all_transcripts");
+}
+
+/** 捕获成功后只广播一个轻量刷新信号，不带文字。 */
+export async function subscribeTranscriptCaptured(
+  handler: () => void,
+): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen("transcript-captured", () => handler());
+  return () => {
+    void unlisten();
+  };
+}
+
+/** 录音落盘后广播刷新信号；没有文字记录时也能让「仅录音」条目及时出现。 */
+export async function subscribeTranscriptRecordingFinished(
+  handler: () => void,
+): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen("transcript-recording-finished", () => handler());
+  return () => {
+    void unlisten();
+  };
+}

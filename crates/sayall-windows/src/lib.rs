@@ -44,6 +44,8 @@ pub mod graceful_exit;
 pub mod instance_signal;
 /// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
 pub mod key_host;
+/// 回眸原始录音：WAV 写入、终态清理与 manifest。跨平台可单测，写入只在启用时发生。
+pub mod voice_recording;
 // 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
 // 无副作用、不进入基础路径，仅仿真平台消费。
 pub mod hardware_script;
@@ -62,6 +64,11 @@ mod ime;
 pub use ime::{
     describe_active_ime_name, ime_status_for, ime_status_log_line, list_installed_ime_names,
     ImeStatus, MAX_INSTALLED_IME_NAMES,
+};
+
+pub use transcript_capture::{
+    new_session_id, CaptureSnapshot, CaptureText, CaptureTimings, CapturedTranscript,
+    SnapshotError, SnapshotProvider, TranscriptCaptureRuntime, UnsupportedSnapshotProvider,
 };
 
 /// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
@@ -126,6 +133,10 @@ pub mod send_input;
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
 #[cfg(windows)]
 pub mod send_input_windows;
+/// 回眸文字捕获状态机（跨平台可单测；UIA 实现见 `transcript_capture_windows`）。
+pub mod transcript_capture;
+#[cfg(windows)]
+pub mod transcript_capture_windows;
 pub mod tray_icons;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
 pub mod vokie;
@@ -571,6 +582,8 @@ pub struct WindowsPlatform {
     enhanced_capture_enabled: Arc<AtomicBool>,
     #[cfg(windows)]
     send_input: Arc<send_input_windows::SendInputRuntime>,
+    /// 回眸文字捕获（默认关闭；状态机跨平台可单测，UIA 后端仅 Windows）。
+    transcript_capture: Arc<transcript_capture::TranscriptCaptureRuntime>,
 }
 
 impl fmt::Debug for WindowsPlatform {
@@ -663,6 +676,10 @@ impl Default for WindowsPlatform {
             let voice_key_suppressor = Arc::new(key_suppressor::VoiceKeySuppressor::start());
             // 按键映射门控钩子：随平台启动常驻，未配置映射时对所有键透传。
             let key_gate = Arc::new(key_gate::KeyGate::start());
+            let transcript_capture = Arc::new(transcript_capture::TranscriptCaptureRuntime::new(
+                Arc::new(transcript_capture_windows::WindowsSnapshotProvider::default()),
+                transcript_capture::CaptureTimings::default(),
+            ));
             let runtime = Arc::new(ble::BleRuntime::new(
                 Arc::clone(&audio),
                 Arc::clone(&usage),
@@ -670,6 +687,7 @@ impl Default for WindowsPlatform {
                 Arc::clone(&voice_hold_hotkey),
                 Arc::clone(&voice_input_tool),
                 Arc::clone(&gain_db),
+                Arc::clone(&transcript_capture),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
@@ -709,6 +727,7 @@ impl Default for WindowsPlatform {
                 rc003_bridge,
                 enhanced_capture_enabled: Arc::new(AtomicBool::new(false)),
                 send_input,
+                transcript_capture,
             }
         }
 
@@ -726,6 +745,10 @@ impl Default for WindowsPlatform {
                 Arc::clone(&raw_input_snapshot),
                 Arc::clone(&macro_runtime),
             ));
+            let transcript_capture = Arc::new(transcript_capture::TranscriptCaptureRuntime::new(
+                Arc::new(transcript_capture::UnsupportedSnapshotProvider),
+                transcript_capture::CaptureTimings::default(),
+            ));
             Self {
                 usage,
                 voice_hold_hotkey,
@@ -735,6 +758,7 @@ impl Default for WindowsPlatform {
                 button_mapping,
                 macro_runtime,
                 raw_input_snapshot,
+                transcript_capture,
             }
         }
     }
@@ -998,6 +1022,34 @@ impl WindowsPlatform {
     /// 这里再钳一次是为了让"从任何入口进来"的平台状态都落在同一区间。
     pub fn set_gain_db(&self, gain_db: f32) {
         *lock(&self.gain_db) = sayall_core::normalize_gain_db(gain_db);
+    }
+
+    /// 「回眸」开关：关闭时取消正在进行的捕获，不删除已有记录。
+    pub fn set_transcript_capture_enabled(&self, enabled: bool) {
+        self.transcript_capture.set_enabled(enabled);
+    }
+
+    /// 「回眸」原始录音开关：关闭时取消当前录音，不删除已有录音。
+    pub fn set_transcript_audio_recording_enabled(&self, enabled: bool) {
+        self.transcript_capture.set_audio_recording_enabled(enabled);
+    }
+
+    /// 录音成功落盘后只通知会话号；app host 用它触发页面静默刷新。
+    pub fn set_transcript_audio_recording_finished_sink(
+        &self,
+        sink: Arc<dyn Fn(String) + Send + Sync>,
+    ) {
+        self.transcript_capture
+            .set_audio_recording_finished_sink(sink);
+    }
+
+    /// 捕获完成后的落盘回调。app host 只把记录投递到自己的归档线程，
+    /// 不让 UIA/捕获线程直接做磁盘 IO。
+    pub fn set_transcript_capture_sink(
+        &self,
+        sink: Arc<dyn Fn(transcript_capture::CapturedTranscript) + Send + Sync>,
+    ) {
+        self.transcript_capture.set_sink(sink);
     }
 
     pub fn snapshot(&self) -> PlatformSnapshot {
