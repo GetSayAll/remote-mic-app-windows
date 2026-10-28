@@ -1,7 +1,8 @@
 use sayall_core::{
     export_portable_library, import_portable_library, merge_library, normalize_gain_db,
-    validate_library, AppIconIdentifier, AppSettings, MacroLibraryDocument, ThemePreference,
-    UsageStatistics, VoiceInputTool, MACRO_LIBRARY_FORMAT_VERSION, PORTABLE_MAX_BYTES,
+    validate_library, AppIconIdentifier, AppLanguage, AppSettings, MacroLibraryDocument,
+    ThemePreference, UsageStatistics, VoiceInputTool, MACRO_LIBRARY_FORMAT_VERSION,
+    PORTABLE_MAX_BYTES,
 };
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
@@ -112,9 +113,40 @@ impl SettingsStore {
         })
     }
 
+    /// 「回眸」文字记录开关（默认关闭）。关闭只停止新增，不删除已有记录。
+    pub fn load_local_transcript_history_enabled(&self) -> Result<bool, String> {
+        self.load()
+            .map(|settings| settings.local_transcript_history_enabled)
+    }
+
+    pub fn save_local_transcript_history_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存回眸记录设置", move |settings| {
+            settings.local_transcript_history_enabled = enabled;
+        })
+    }
+
+    /// 「回眸」原始录音开关（默认关闭；只在回眸文字开关开启时生效）。
+    pub fn load_local_original_audio_recording_enabled(&self) -> Result<bool, String> {
+        self.load()
+            .map(|settings| settings.local_original_audio_recording_enabled)
+    }
+
+    pub fn save_local_original_audio_recording_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.update("保存回眸原始录音设置", move |settings| {
+            settings.local_original_audio_recording_enabled = enabled;
+        })
+    }
+
     pub fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), String> {
         self.update("保存外观设置", move |settings| {
             settings.theme_preference = preference;
+        })
+    }
+
+    /// 应用语言（设置页「通用 > 应用语言」）。与 Mac `ApplicationLanguage` 同值域。
+    pub fn save_application_language(&self, language: AppLanguage) -> Result<(), String> {
+        self.update("保存应用语言设置", move |settings| {
+            settings.application_language = language;
         })
     }
 
@@ -372,28 +404,6 @@ impl SettingsStore {
         Ok(true)
     }
 
-    pub fn record_usage(
-        &self,
-        local_date: String,
-        button_presses: u64,
-        voice_sessions: u64,
-        voice_seconds: f64,
-    ) -> Result<(), String> {
-        if button_presses == 0 && voice_sessions == 0 && voice_seconds <= 0.0 {
-            return Ok(());
-        }
-        self.update("保存本机使用统计", move |settings| {
-            settings
-                .usage_statistics
-                .record_button_presses(&local_date, button_presses);
-            settings.usage_statistics.record_voice_sessions(
-                &local_date,
-                voice_sessions,
-                voice_seconds,
-            );
-        })
-    }
-
     pub fn load_button_mappings(&self) -> Result<ButtonMappings, String> {
         let _guard = lock(&self.access);
         let path = self.button_mappings_path();
@@ -427,6 +437,7 @@ impl SettingsStore {
             // 旧文件（结构版本 < 1）按旧版自动连发行为迁移为显式开关，
             // 再统一校验并盖章为当前版本。
             .migrate_legacy_hold_repeat()
+            .migrate_preset_focus_profiles()
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))
     }
@@ -455,6 +466,7 @@ impl SettingsStore {
         // v1 却丢掉「旧版自动连发」语义（2026-10-05 评审发现 4）。
         let mappings = mappings
             .migrate_legacy_hold_repeat()
+            .migrate_preset_focus_profiles()
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))?;
         let configuration = ButtonMappingConfiguration {
@@ -486,7 +498,12 @@ impl SettingsStore {
         }
         // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
         // 旧导出（无显式开关）走与本地加载相同的迁移。
-        self.save_button_mappings(configuration.button_mappings.migrate_legacy_hold_repeat())
+        self.save_button_mappings(
+            configuration
+                .button_mappings
+                .migrate_legacy_hold_repeat()
+                .migrate_preset_focus_profiles(),
+        )
     }
 
     pub fn load_combined_actions(&self) -> Result<MacroLibraryDocument, String> {
@@ -842,6 +859,26 @@ mod tests {
         let _ = std::fs::remove_file(store.path.with_file_name("other-voice-hotkey.json"));
     }
 
+    #[test]
+    fn transcript_history_defaults_off_and_round_trips() {
+        let path = std::env::temp_dir().join("sayall-transcript-history-toggle-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert!(!store.load_local_transcript_history_enabled().unwrap());
+        store.save_local_transcript_history_enabled(true).unwrap();
+        assert!(store.load_local_transcript_history_enabled().unwrap());
+
+        // 老配置没有该字段时保持关闭，不被迁移成开启。
+        std::fs::write(
+            &path,
+            r#"{"schema_version":5,"gain_db":0.0,"voice_trigger_mode":"hold"}"#,
+        )
+        .unwrap();
+        assert!(!store.load_local_transcript_history_enabled().unwrap());
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// 「锁定当前按键」持久化（2026-10-18）：默认开启；关闭后写盘、读回保持关闭；
     /// 老配置（无此字段）回落默认。
     #[test]
@@ -1190,7 +1227,10 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         // 配置文件是 pretty JSON（键冒号后有空格），用解析而不是子串比对。
         let persisted: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(persisted["schema_version"], serde_json::json!(4));
+        assert_eq!(
+            persisted["schema_version"],
+            serde_json::json!(AppSettings::default().schema_version)
+        );
         assert_eq!(persisted["app_icon"], serde_json::json!("standard"));
         assert_eq!(store.load().unwrap().app_icon, AppIconIdentifier::Standard);
 
@@ -1250,6 +1290,30 @@ mod tests {
         assert_eq!(
             store.load().unwrap().theme_preference,
             ThemePreference::Dark
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn application_language_defaults_to_system_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-test-language-preference-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = SettingsStore::new(path.clone());
+
+        assert_eq!(
+            store.load().unwrap().application_language,
+            AppLanguage::System
+        );
+        store
+            .save_application_language(AppLanguage::English)
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().application_language,
+            AppLanguage::English
         );
 
         let _ = std::fs::remove_file(path);

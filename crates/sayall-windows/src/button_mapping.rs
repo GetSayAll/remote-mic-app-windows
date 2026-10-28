@@ -38,10 +38,59 @@ use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
 use crate::send_input::{
-    native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, MouseClickKind,
+    native_key, ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, KeyCode, MouseClickKind,
     MoveDirection, ScrollDirection,
 };
 use crate::UsageCounters;
+
+/// 「打开应用」实际使用的聚焦档案。
+///
+/// 预设应用（「打开应用」分组的默认列表）在用户没有显式选择时使用产品默认聚焦
+/// 方式（Chrome / 网易云用快捷键，其余自动选择输入框）；用户显式保存的档案优先。
+/// 自定义应用仍按用户保存的档案执行，没有档案时只打开。
+fn open_app_effective_profile(
+    mappings: &ButtonMappings,
+    target: &str,
+) -> Option<crate::focus::AppFocusProfile> {
+    // 用户显式选过的档案优先；没有档案时预设应用使用产品默认聚焦方式。
+    if let Some(profile) = mappings.focus_profiles.get(target) {
+        return Some(profile.clone());
+    }
+    if crate::app_launcher::preset_app(target).is_some() {
+        return Some(preset_focus_profile(target));
+    }
+    None
+}
+
+/// 预设应用的默认聚焦入口。
+///
+/// 有稳定公开快捷键的应用优先用快捷键（不依赖无障碍树）：
+/// - Chrome：`Ctrl+L` 聚焦地址栏；
+/// - 网易云音乐：`Ctrl+F` 打开搜索页并聚焦搜索框。
+///
+/// 其余预设仍走通用输入框选择。快捷键在目标应用成为前台后才发送。
+pub(crate) fn preset_focus_profile(target: &str) -> crate::focus::AppFocusProfile {
+    let shortcut = match target {
+        "chrome" => Some(KeyChord {
+            keys: vec![KeyCode::LeftControl, KeyCode::L],
+        }),
+        "netease_music" => Some(KeyChord {
+            keys: vec![KeyCode::LeftControl, KeyCode::F],
+        }),
+        _ => None,
+    };
+    match shortcut {
+        Some(shortcut) => crate::focus::AppFocusProfile {
+            strategy: crate::focus::FocusStrategy::AppShortcut,
+            shortcut: Some(shortcut),
+            ..Default::default()
+        },
+        None => crate::focus::AppFocusProfile {
+            strategy: crate::focus::FocusStrategy::AutoComposer,
+            ..Default::default()
+        },
+    }
+}
 
 /// 引擎消息（监听器/门控/宿主 → 引擎线程）。
 #[derive(Debug)]
@@ -58,6 +107,8 @@ pub enum EngineMessage {
     DeviceRemoved,
     /// 按键映射已更新：重建手势配置。
     MappingsChanged,
+    /// 键位方案覆盖层已更新：重建手势配置。
+    ProfileOverlayChanged,
     /// 临时暂挂（向导第⑥步"只看不动"）：仍观察边沿与手势，但不执行任何动作。
     /// 内存态、不落盘；进程结束自然消失。
     SetSuspended(bool),
@@ -223,11 +274,99 @@ impl MappingInjector for SendInputInjector {
             .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
         match strategy {
             crate::focus::FocusStrategy::OpenOnly => Ok(()),
+            crate::focus::FocusStrategy::AutoComposer => {
+                // 激活是异步完成的：先等目标成为前台，否则前几次尝试会打在旧前台
+                // 应用上（与「聚焦已记录的输入框」同一理由）。
+                let foreground = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
+                if !foreground {
+                    // 打开本身已经成功。窗口迟迟没到前台时放弃自动聚焦，
+                    // 不把焦点抢到用户当前正在用的另一个应用上。
+                    return Ok(());
+                }
+                self.with_focus_runner(|runner| {
+                    runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
+                        crate::focus::FocusChoice::BestComposer,
+                    ))
+                })
+                .flatten()
+                .map(|_| ())
+                .ok_or_else(|| "聚焦服务不可用".to_owned())
+            }
             crate::focus::FocusStrategy::AppShortcut => {
                 let chord = profile
                     .and_then(|profile| profile.shortcut.clone())
                     .ok_or_else(|| "该应用未录入聚焦快捷键".to_owned())?;
-                self.tap(&chord)
+                // 快捷键必须落在目标应用上：激活是异步的，先等目标成为前台，
+                // 否则 Ctrl+L / Ctrl+F 会发给用户当前正在用的另一个应用。
+                let mut foreground = crate::app_launcher::wait_for_target_foreground(
+                    target,
+                    std::time::Duration::from_millis(2500),
+                );
+                if !foreground {
+                    // 冷启动可能超过 activate_or_launch 的 1.5 秒前台预算：窗口在主窗口
+                    // 出现后仍留在后台。再走一次“已运行→前置”，避免冷启动首按丢焦点
+                    // （2026-10-23 网易云音乐冷启动实测：4.2 秒才出现主窗口）。
+                    crate::ble::gatt_note(
+                        "open_app_focus_retry phase=started reason=target_not_foreground"
+                            .to_owned(),
+                    );
+                    let _ = self.launch_app(target);
+                    foreground = crate::app_launcher::wait_for_target_foreground(
+                        target,
+                        std::time::Duration::from_millis(2500),
+                    );
+                    crate::ble::gatt_note(format!(
+                        "open_app_focus_retry phase=completed terminal_result={}",
+                        if foreground { "passed" } else { "failed" }
+                    ));
+                }
+                if !foreground {
+                    crate::ble::gatt_note(
+                        "open_app_focus_shortcut phase=skipped reason=target_not_foreground"
+                            .to_owned(),
+                    );
+                    return Ok(());
+                }
+                self.tap(&chord)?;
+                crate::ble::gatt_note("open_app_focus_shortcut phase=completed".to_owned());
+                // 网易云音乐的 Ctrl+F 只打开搜索页，不把焦点放进搜索框；
+                // 点击搜索框并全选旧查询，后续语音输入才会替换而不是追加。
+                if let Some((x, y)) = crate::app_launcher::preset_focus_click_point(target) {
+                    std::thread::sleep(std::time::Duration::from_millis(450));
+                    if !crate::app_launcher::wait_for_target_foreground(
+                        target,
+                        std::time::Duration::from_millis(500),
+                    ) {
+                        crate::ble::gatt_note(
+                            "open_app_focus_click phase=skipped reason=target_not_foreground"
+                                .to_owned(),
+                        );
+                        return Ok(());
+                    }
+                    if self.runtime.move_cursor_and_click(x, y).is_err() {
+                        crate::ble::gatt_note(
+                            "open_app_focus_click phase=failed error_domain=send_input error_code=click_failed retryable=true"
+                                .to_owned(),
+                        );
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    let select_all = KeyChord {
+                        keys: vec![KeyCode::LeftControl, KeyCode::A],
+                    };
+                    if self.tap(&select_all).is_err() {
+                        crate::ble::gatt_note(
+                            "open_app_focus_click phase=failed error_domain=send_input error_code=select_all_failed retryable=true"
+                                .to_owned(),
+                        );
+                        return Ok(());
+                    }
+                    crate::ble::gatt_note("open_app_focus_click phase=completed".to_owned());
+                }
+                Ok(())
             }
             crate::focus::FocusStrategy::RecordedElement => {
                 let recorded = profile
@@ -340,9 +479,68 @@ pub(crate) fn persistent_suppress_mask(mapped_mask: u64) -> u64 {
     mapped_mask & ((1u64 << RemoteButton::Home.ordinal()) | (1u64 << RemoteButton::Tv.ordinal()))
 }
 
+/// 基础映射 + 键位方案覆盖层。
+///
+/// 覆盖层赢过同键基础动作；未出现在覆盖层的键继续走基础映射。
+/// 基础总开关关闭时覆盖层不生效。
+fn merged_mappings(base: &ButtonMappings, overlay: Option<&ButtonMappings>) -> ButtonMappings {
+    let mut merged = base.clone();
+    if !merged.enabled {
+        return merged;
+    }
+    if let Some(overlay) = overlay {
+        for (button, actions) in &overlay.actions {
+            merged.actions.insert(*button, actions.clone());
+        }
+        for (target, profile) in &overlay.focus_profiles {
+            merged
+                .focus_profiles
+                .insert(target.clone(), profile.clone());
+        }
+    }
+    merged
+}
+
+/// key_gate 需要吞掉的按键集合。
+///
+/// 覆盖层里的 `Disabled` 是「消费本次按键」而不是「回落到基础映射」：
+/// 即使 `any_configured()` 为假，也必须把该键并入吞键掩码，否则原始键会
+/// 漏进前台应用。
+fn effective_button_mask(base: &ButtonMappings, overlay: Option<&ButtonMappings>) -> u64 {
+    let mut mask = merged_mappings(base, overlay).mapped_mask();
+    if base.enabled {
+        if let Some(overlay) = overlay {
+            for button in overlay.actions.keys() {
+                mask |= 1u64 << button.ordinal();
+            }
+        }
+    }
+    mask
+}
+
+/// 单个手势的有效动作：覆盖层优先，否则基础映射。
+fn effective_action(
+    base: &ButtonMappings,
+    overlay: Option<&ButtonMappings>,
+    button: RemoteButton,
+    trigger: ButtonTrigger,
+) -> ButtonAction {
+    if base.enabled {
+        if let Some(overlay) = overlay {
+            if let Some(actions) = overlay.actions.get(&button) {
+                return actions.trigger(trigger).clone();
+            }
+        }
+    }
+    base.action_for(button, trigger)
+}
+
 /// 按键映射引擎运行时。持有句柄即运行；线程在 `Shutdown` 或通道关闭时退出。
 pub struct ButtonMappingRuntime {
     mappings: Arc<RwLock<ButtonMappings>>,
+    /// 键位方案覆盖层：`None` = 无方案生效，完全走基础映射。
+    /// 私有组件在前后台切换时更新；公开引擎只负责合并与执行。
+    profile_overlay: Arc<RwLock<Option<ButtonMappings>>>,
     sender: Sender<EngineMessage>,
     receiver: Mutex<Option<Receiver<EngineMessage>>>,
     state: Arc<Mutex<EngineState>>,
@@ -371,12 +569,14 @@ impl ButtonMappingRuntime {
             }
         }));
         let mappings = Arc::new(RwLock::new(ButtonMappings::default()));
+        let profile_overlay = Arc::new(RwLock::new(None));
         let state = Arc::new(Mutex::new(EngineState::default()));
         let edge_callbacks = Arc::new(RwLock::new(Vec::new()));
         let gesture_callbacks = Arc::new(RwLock::new(Vec::new()));
 
         let runtime = Self {
             mappings: Arc::clone(&mappings),
+            profile_overlay: Arc::clone(&profile_overlay),
             sender,
             receiver: Mutex::new(Some(receiver)),
             state: Arc::clone(&state),
@@ -391,6 +591,7 @@ impl ButtonMappingRuntime {
             .name("sayall-button-mapping".to_owned())
             .spawn({
                 let mappings = Arc::clone(&mappings);
+                let profile_overlay = Arc::clone(&profile_overlay);
                 let state = Arc::clone(&state);
                 let snapshot = Arc::clone(&snapshot);
                 let edge_callbacks = Arc::clone(&edge_callbacks);
@@ -405,6 +606,7 @@ impl ButtonMappingRuntime {
                     engine_worker(
                         receiver,
                         mappings,
+                        profile_overlay,
                         state,
                         snapshot,
                         edge_callbacks,
@@ -432,10 +634,35 @@ impl ButtonMappingRuntime {
             .mappings
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = mappings.clone();
-        let mapped_mask = mappings.mapped_mask();
-        key_gate::configure(mappings.enabled, mapped_mask);
-        key_gate::set_persistent_mask(persistent_suppress_mask(mapped_mask));
+        let overlay = read_lock(&self.profile_overlay).clone();
+        let merged = merged_mappings(&mappings, overlay.as_ref());
+        let mask = effective_button_mask(&mappings, overlay.as_ref());
+        key_gate::configure(merged.enabled, mask);
+        key_gate::set_persistent_mask(persistent_suppress_mask(mask));
         let _ = self.sender.send(EngineMessage::MappingsChanged);
+    }
+
+    /// 更新键位方案覆盖层。
+    ///
+    /// 私有组件只在前后台切换/方案保存时调用；公开构建没有私有组件，永远不会调用。
+    /// `None` 表示没有方案生效，引擎完全走基础映射。
+    pub fn set_profile_overlay(&self, overlay: Option<ButtonMappings>) {
+        *self
+            .profile_overlay
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = overlay;
+        let base = self.mappings();
+        let overlay = read_lock(&self.profile_overlay).clone();
+        let merged = merged_mappings(&base, overlay.as_ref());
+        let mask = effective_button_mask(&base, overlay.as_ref());
+        key_gate::configure(merged.enabled, mask);
+        key_gate::set_persistent_mask(persistent_suppress_mask(mask));
+        let _ = self.sender.send(EngineMessage::ProfileOverlayChanged);
+    }
+
+    /// 当前覆盖层（测试/诊断用）。
+    pub fn profile_overlay(&self) -> Option<ButtonMappings> {
+        read_lock(&self.profile_overlay).clone()
     }
 
     /// 临时暂挂：观察照旧（边沿与手势回调不受影响），动作不执行。
@@ -475,7 +702,8 @@ impl ButtonMappingRuntime {
 
     /// UI「测试打开与聚焦」：先打开/激活目标应用，再按其聚焦档案聚焦。
     pub fn launch_app_and_focus_now(&self, target: &str) -> Result<(), String> {
-        let profile = self.mappings().focus_profiles.get(target).cloned();
+        let mappings = self.mappings();
+        let profile = open_app_effective_profile(&mappings, target);
         self.injector.launch_app_and_focus(target, profile.as_ref())
     }
 
@@ -536,6 +764,7 @@ fn ok_context_click_window_hit(enabled: bool, last_move: Option<Instant>, now: I
 fn ok_context_click_applies(
     edge: &ButtonEdge,
     mappings: &Arc<RwLock<ButtonMappings>>,
+    profile_overlay: &Arc<RwLock<Option<ButtonMappings>>>,
     last_remote_move_at: Option<Instant>,
     now: Instant,
     injector: &Arc<dyn MappingInjector>,
@@ -545,9 +774,16 @@ fn ok_context_click_applies(
     }
     let (mappings_enabled, switch_on) = {
         let mappings = read_lock(mappings);
+        let overlay = read_lock(profile_overlay);
+        let actions = overlay
+            .as_ref()
+            .and_then(|overlay| overlay.actions.get(&RemoteButton::Ok))
+            .or_else(|| mappings.actions.get(&RemoteButton::Ok));
         (
             mappings.enabled,
-            mappings.actions(RemoteButton::Ok).ok_context_click,
+            actions
+                .map(|actions| actions.ok_context_click)
+                .unwrap_or(false),
         )
     };
     if !mappings_enabled || !switch_on {
@@ -634,6 +870,7 @@ fn note_advance_ticks(repeat_runs: &mut RepeatRuns, ticks: Vec<(RemoteButton, Bu
 fn engine_worker(
     receiver: Receiver<EngineMessage>,
     mappings: Arc<RwLock<ButtonMappings>>,
+    profile_overlay: Arc<RwLock<Option<ButtonMappings>>>,
     state: Arc<Mutex<EngineState>>,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
     edge_callbacks: Arc<RwLock<Vec<ButtonEdgeCallback>>>,
@@ -644,7 +881,11 @@ fn engine_worker(
 ) {
     let mut merger = ButtonStateMerger::default();
     let mut recognizer = GestureRecognizer::new();
-    recognizer.configure(&read_lock(&mappings).clone());
+    let initial_overlay = read_lock(&profile_overlay).clone();
+    recognizer.configure(&merged_mappings(
+        &read_lock(&mappings).clone(),
+        initial_overlay.as_ref(),
+    ));
     // 泄漏对冲标记：本次按住的原始键已泄漏进 OS（原生动作已交付）的按键。
     // 由 [`EngineMessage::Keyboard`]（泄漏路径）的按压边沿置位，Single 同键
     // 映射触发时消费并跳过注入；门控吞下的按压（[`EngineMessage::GateEdge`]）
@@ -677,6 +918,7 @@ fn engine_worker(
                             button,
                             trigger,
                             &mappings,
+                            &profile_overlay,
                             &state,
                             &gesture_callbacks,
                             &injector,
@@ -730,6 +972,7 @@ fn engine_worker(
                     &mut merger,
                     &mut recognizer,
                     &mappings,
+                    &profile_overlay,
                     &state,
                     &snapshot,
                     &edge_callbacks,
@@ -752,6 +995,7 @@ fn engine_worker(
                     &mut merger,
                     &mut recognizer,
                     &mappings,
+                    &profile_overlay,
                     &state,
                     &snapshot,
                     &edge_callbacks,
@@ -778,6 +1022,7 @@ fn engine_worker(
                     &mut merger,
                     &mut recognizer,
                     &mappings,
+                    &profile_overlay,
                     &state,
                     &snapshot,
                     &edge_callbacks,
@@ -812,6 +1057,7 @@ fn engine_worker(
                     &mut merger,
                     &mut recognizer,
                     &mappings,
+                    &profile_overlay,
                     &state,
                     &snapshot,
                     &edge_callbacks,
@@ -827,9 +1073,11 @@ fn engine_worker(
                 // 认领集合无需在此显式清理：被认领的按住都在上面 release_all
                 // 产生的释放边沿里配对消费并移出（见 handle_edges 释放分支）。
             }
-            EngineMessage::MappingsChanged => {
-                let mappings = read_lock(&mappings).clone();
-                recognizer.configure(&mappings);
+            EngineMessage::MappingsChanged | EngineMessage::ProfileOverlayChanged => {
+                let base = read_lock(&mappings).clone();
+                let overlay = read_lock(&profile_overlay).clone();
+                let merged = merged_mappings(&base, overlay.as_ref());
+                recognizer.configure(&merged);
                 // 配置变化重置全部手势状态：挂起的泄漏对冲标记一并失效。
                 // 常用语认领集合保留：正被认领按住的键仍靠它的释放沿配对消费。
                 native_pending.clear();
@@ -837,13 +1085,15 @@ fn engine_worker(
                 let configured = crate::raw_input::ALL_BUTTONS
                     .iter()
                     .filter(|button| {
-                        crate::button_gestures::GestureConfig::for_button(&mappings, **button)
+                        crate::button_gestures::GestureConfig::for_button(&merged, **button)
                             .is_some()
                     })
                     .count();
                 crate::ble::gatt_note(format!(
-                    "map_reconfig enabled={} buttons_configured={}",
-                    mappings.enabled, configured
+                    "map_reconfig enabled={} buttons_configured={} profile_overlay={}",
+                    merged.enabled,
+                    configured,
+                    overlay.is_some()
                 ));
             }
             EngineMessage::SetSuspended(suspended) => {
@@ -866,6 +1116,7 @@ fn handle_edges(
     merger: &mut ButtonStateMerger,
     recognizer: &mut GestureRecognizer,
     mappings: &Arc<RwLock<ButtonMappings>>,
+    profile_overlay: &Arc<RwLock<Option<ButtonMappings>>>,
     state: &Arc<Mutex<EngineState>>,
     snapshot: &Arc<Mutex<RawInputSnapshot>>,
     edge_callbacks: &Arc<RwLock<Vec<ButtonEdgeCallback>>>,
@@ -892,8 +1143,9 @@ fn handle_edges(
         key_gate::swallowed_edge_count(),
         key_gate::leaked_down_count()
     ));
-    let press_count = edges.iter().filter(|edge| edge.is_pressed).count() as u64;
-    usage.record_button_presses(press_count);
+    for edge in edges.iter().filter(|edge| edge.is_pressed) {
+        usage.record_button_press(edge.button);
+    }
     {
         let mut snapshot = lock_snapshot(snapshot);
         snapshot.semantic_edge_count = snapshot
@@ -945,7 +1197,14 @@ fn handle_edges(
                 phrase_claimed.remove(&edge.button);
                 // OK 上下文点击：命中窗口时立即点击光标位置，并吞掉本次按压
                 //（单击/双击/长按都不执行）；注入失败则回落到正常路径。
-                if ok_context_click_applies(&edge, &mappings, *last_remote_move_at, now, injector) {
+                if ok_context_click_applies(
+                    &edge,
+                    &mappings,
+                    &profile_overlay,
+                    *last_remote_move_at,
+                    now,
+                    injector,
+                ) {
                     recognizer.swallow_press(edge.button);
                     Vec::new()
                 } else {
@@ -982,6 +1241,7 @@ fn handle_edges(
                 edge.button,
                 trigger,
                 mappings,
+                profile_overlay,
                 state,
                 gesture_callbacks,
                 injector,
@@ -1050,6 +1310,7 @@ fn fire_gesture(
     button: RemoteButton,
     trigger: ButtonTrigger,
     mappings: &Arc<RwLock<ButtonMappings>>,
+    profile_overlay: &Arc<RwLock<Option<ButtonMappings>>>,
     state: &Arc<Mutex<EngineState>>,
     gesture_callbacks: &Arc<RwLock<Vec<ButtonGestureCallback>>>,
     injector: &Arc<dyn MappingInjector>,
@@ -1086,7 +1347,20 @@ fn fire_gesture(
         }
         return false;
     }
-    let action = mappings.action_for(button, trigger);
+    crate::button_profiles::current_button_profile_host().sync_foreground();
+    let overlay = read_lock(profile_overlay).clone();
+    let overlay_actions = overlay
+        .as_ref()
+        .and_then(|overlay| overlay.actions.get(&button));
+    let action = effective_action(&mappings, overlay.as_ref(), button, trigger);
+    if overlay_actions.is_some() && action == ButtonAction::Disabled {
+        // 方案显式设为「不执行操作」：消费本次手势，不回注原生键。
+        // 与基础映射的 Disabled 不同——后者需要回注原生键避免吞键。
+        crate::ble::gatt_note(format!(
+            "map_skip_inject reason=profile_disabled button={button:?} trigger={trigger:?}"
+        ));
+        return false;
+    }
     if action == ButtonAction::Disabled {
         // 吞键缝隙（2026-09-27 真机，见 Bugs/2026-09-27-fullkey-swallowed-keys.md）：
         // 整键因任一触发列有动作而进 mapped_mask，门控/报告层按整键吞原始键；
@@ -1221,7 +1495,7 @@ fn fire_gesture(
             } else {
                 "preset"
             };
-            let profile = mappings.focus_profiles.get(&target).cloned();
+            let profile = open_app_effective_profile(&mappings, &target);
             let strategy = profile
                 .as_ref()
                 .map(|profile| profile.strategy.as_str())
@@ -1243,6 +1517,7 @@ fn fire_gesture(
                     lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
                 }
             }
+            crate::button_profiles::current_button_profile_host().sync_foreground();
         }
         ButtonAction::RunMacro { macro_id, .. } => {
             // 组合动作由运行时在独立线程异步执行（不阻塞引擎线程）；引用按
@@ -2254,7 +2529,7 @@ mod tests {
         drop(gate);
     }
 
-    /// 打开应用带聚焦档案：分发侧必须把档案一起交给注入器（策略在档案里）。
+    /// 自定义应用带聚焦档案：分发侧必须把档案一起交给注入器（策略在档案里）。
     #[test]
     fn open_app_with_focus_profile_forwards_strategy() {
         let _gate_lock = crate::key_gate::lock_gate_tests();
@@ -2269,18 +2544,19 @@ mod tests {
                 crate::macro_runtime::UnsupportedStepperSource,
             ))),
         );
+        let target = r"C:\Tools\notepad.exe";
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
             RemoteButton::Ok,
             ButtonActions {
                 single: ButtonAction::OpenApp {
-                    target: "notepad".to_owned(),
+                    target: target.to_owned(),
                 },
                 ..ButtonActions::default()
             },
         );
         mappings.focus_profiles.insert(
-            "notepad".to_owned(),
+            target.to_owned(),
             crate::focus::AppFocusProfile {
                 strategy: crate::focus::FocusStrategy::RecordedElement,
                 shortcut: None,
@@ -2306,14 +2582,162 @@ mod tests {
         assert_eq!(
             injector.focus_requests.lock().unwrap().as_slice(),
             &[FocusCall::LaunchThenFocus {
-                target: "notepad".to_owned(),
+                target: target.to_owned(),
                 strategy: "recorded_element",
             }],
-            "带档案的打开应用必须把策略交给注入器"
+            "自定义应用的聚焦档案必须原样交给注入器"
+        );
+        assert_eq!(
+            injector.launches.lock().unwrap().as_slice(),
+            &[target.to_owned()]
+        );
+        drop(gate);
+    }
+
+    /// Chrome 聚焦地址栏、网易云音乐聚焦搜索框：使用公开快捷键，
+    /// 不依赖无障碍树（2026-10-23 现场实测 Ctrl+L / Ctrl+F 均生效）。
+    #[test]
+    fn preset_focus_profiles_use_known_shortcuts() {
+        let chrome = preset_focus_profile("chrome");
+        assert_eq!(chrome.strategy, crate::focus::FocusStrategy::AppShortcut);
+        assert_eq!(
+            chrome.shortcut.expect("Chrome 快捷键").keys,
+            vec![KeyCode::LeftControl, KeyCode::L]
+        );
+
+        let netease = preset_focus_profile("netease_music");
+        assert_eq!(netease.strategy, crate::focus::FocusStrategy::AppShortcut);
+        assert_eq!(
+            netease.shortcut.expect("网易云音乐快捷键").keys,
+            vec![KeyCode::LeftControl, KeyCode::F]
+        );
+
+        // 其余预设继续走通用输入框选择。
+        assert_eq!(
+            preset_focus_profile("notepad").strategy,
+            crate::focus::FocusStrategy::AutoComposer
+        );
+    }
+
+    #[test]
+    fn open_app_effective_profile_prefers_explicit_preset_override() {
+        let mut mappings = ButtonMappings::default();
+        assert_eq!(
+            open_app_effective_profile(&mappings, "notepad")
+                .expect("预设默认档案")
+                .strategy,
+            crate::focus::FocusStrategy::AutoComposer
+        );
+        mappings.focus_profiles.insert(
+            "chrome".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::RecordedElement,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            open_app_effective_profile(&mappings, "chrome")
+                .expect("显式档案优先")
+                .strategy,
+            crate::focus::FocusStrategy::RecordedElement
+        );
+    }
+
+    /// 预设应用没有显式档案时使用产品默认自动聚焦。
+    #[test]
+    fn open_app_preset_requests_auto_composer() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::OpenApp {
+                    target: "notepad".to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.focus_requests.lock().unwrap().as_slice(),
+            &[FocusCall::LaunchThenFocus {
+                target: "notepad".to_owned(),
+                strategy: "auto_composer",
+            }],
+            "预设应用无显式档案时必须自动聚焦"
         );
         assert_eq!(
             injector.launches.lock().unwrap().as_slice(),
             &["notepad".to_owned()]
+        );
+        drop(gate);
+    }
+
+    /// 自定义应用没有聚焦档案时保持「只打开」，不擅自抢焦点。
+    #[test]
+    fn open_app_custom_without_profile_stays_open_only() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            snapshot,
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let target = r"C:\Tools\custom.exe";
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::OpenApp {
+                    target: target.to_owned(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert_eq!(
+            injector.focus_requests.lock().unwrap().as_slice(),
+            &[FocusCall::LaunchThenFocus {
+                target: target.to_owned(),
+                strategy: "none",
+            }],
+            "自定义应用没有档案时只打开"
         );
         drop(gate);
     }
@@ -3230,5 +3654,191 @@ mod tests {
             fired.lock().unwrap()
         );
         drop(runtime);
+    }
+
+    fn single_actions(key: KeyCode) -> ButtonActions {
+        ButtonActions {
+            single: ButtonAction::Shortcut {
+                chord: KeyChord { keys: vec![key] },
+            },
+            ..ButtonActions::default()
+        }
+    }
+
+    fn overlay_with(button: RemoteButton, key: KeyCode) -> ButtonMappings {
+        let mut overlay = ButtonMappings::default();
+        overlay.actions.insert(button, single_actions(key));
+        overlay
+    }
+
+    #[test]
+    fn overlay_replaces_single_click_and_disables_secondary_gestures() {
+        let base = mappings_with_single(RemoteButton::Ok, KeyCode::Enter);
+        let overlay = overlay_with(RemoteButton::Ok, KeyCode::Space);
+
+        assert_eq!(
+            effective_action(
+                &base,
+                Some(&overlay),
+                RemoteButton::Ok,
+                ButtonTrigger::Single
+            ),
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Space]
+                }
+            }
+        );
+        assert_eq!(
+            effective_action(
+                &base,
+                Some(&overlay),
+                RemoteButton::Ok,
+                ButtonTrigger::Double
+            ),
+            ButtonAction::Disabled,
+            "方案只支持单击：双击必须被覆盖层显式关闭"
+        );
+        assert_eq!(
+            effective_action(&base, Some(&overlay), RemoteButton::Ok, ButtonTrigger::Long),
+            ButtonAction::Disabled,
+            "方案只支持单击：长按必须被覆盖层显式关闭"
+        );
+    }
+
+    #[test]
+    fn overlay_disabled_still_swallows_the_key() {
+        let base = ButtonMappings::default();
+        let mut overlay = ButtonMappings::default();
+        overlay
+            .actions
+            .insert(RemoteButton::Ok, ButtonActions::default());
+        let bit = 1u64 << RemoteButton::Ok.ordinal();
+        assert_eq!(
+            effective_button_mask(&base, Some(&overlay)) & bit,
+            bit,
+            "方案里的不执行操作必须消费原始按键，而不是让原生键漏过去"
+        );
+
+        let mut disabled_base = base;
+        disabled_base.enabled = false;
+        assert_eq!(
+            effective_button_mask(&disabled_base, Some(&overlay)) & bit,
+            0,
+            "基础总开关关闭时覆盖层不得单独吞键"
+        );
+    }
+
+    #[test]
+    fn overlay_keeps_buttons_not_listed_in_the_profile() {
+        let mut base = mappings_with_single(RemoteButton::Ok, KeyCode::Enter);
+        base.actions
+            .insert(RemoteButton::Back, single_actions(KeyCode::Escape));
+        let overlay = overlay_with(RemoteButton::Ok, KeyCode::Space);
+
+        assert_eq!(
+            effective_action(
+                &base,
+                Some(&overlay),
+                RemoteButton::Back,
+                ButtonTrigger::Single
+            ),
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Escape]
+                }
+            },
+            "方案未列出的键继续走基础映射"
+        );
+        let merged = merged_mappings(&base, Some(&overlay));
+        assert_eq!(merged.actions.len(), 2);
+        assert_eq!(
+            merged.action_for(RemoteButton::Ok, ButtonTrigger::Single),
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Space]
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn overlay_is_ignored_when_base_mappings_are_disabled() {
+        let mut base = mappings_with_single(RemoteButton::Ok, KeyCode::Enter);
+        base.enabled = false;
+        let overlay = overlay_with(RemoteButton::Ok, KeyCode::Space);
+
+        assert_eq!(
+            effective_action(
+                &base,
+                Some(&overlay),
+                RemoteButton::Ok,
+                ButtonTrigger::Single
+            ),
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Enter]
+                }
+            },
+            "基础映射总开关关闭时覆盖层不得单独生效"
+        );
+        let merged = merged_mappings(&base, Some(&overlay));
+        assert!(!merged.enabled);
+        assert_eq!(
+            merged.action_for(RemoteButton::Ok, ButtonTrigger::Single),
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Enter]
+                }
+            },
+            "合并结果必须保留基础映射，供总开关恢复后继续使用"
+        );
+    }
+
+    #[test]
+    fn profile_overlay_replaces_runtime_shortcut() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        std::thread::sleep(Duration::from_millis(50));
+        let injector = Arc::new(RecordingInjector::default());
+        let (runtime, _fired) = spawn_phrase_engine(
+            &injector,
+            mappings_with_single(RemoteButton::Ok, KeyCode::Enter),
+        );
+        runtime.set_profile_overlay(Some(overlay_with(RemoteButton::Ok, KeyCode::Space)));
+        let sender = runtime.sender();
+        // 覆盖层消息与测试发送使用不同 Sender 克隆；等引擎先完成重配置，
+        // 否则首个边沿可能仍按基础映射（Enter 被原生覆盖）执行。
+        std::thread::sleep(Duration::from_millis(100));
+
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: true,
+            }))
+            .unwrap();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: false,
+            }))
+            .unwrap();
+
+        assert!(
+            wait_until(
+                || !injector.taps.lock().unwrap().is_empty(),
+                Duration::from_millis(1000)
+            ),
+            "覆盖层单击必须在 1s 内注入"
+        );
+        assert_eq!(
+            injector.taps.lock().unwrap().clone(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Space]
+            }],
+            "运行时必须执行覆盖层动作，而不是基础映射"
+        );
+        drop(runtime);
+        drop(gate);
     }
 }

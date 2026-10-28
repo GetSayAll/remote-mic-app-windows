@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeSnapshot } from "../lib/bridge";
+import { effectiveLanguage } from "../lib/language-state";
 import PermissionsPage from "./PermissionsPage.vue";
 
 const runtime: RuntimeSnapshot = {
@@ -62,6 +63,10 @@ const runtime: RuntimeSnapshot = {
 };
 
 describe("permissions page", () => {
+  beforeEach(() => {
+    effectiveLanguage.value = "zh-Hans";
+  });
+
   it("shows truthful unsupported states", () => {
     const wrapper = mount(PermissionsPage, { props: { runtime } });
     expect(wrapper.text()).not.toContain("尚未实现");
@@ -118,6 +123,22 @@ describe("permissions page", () => {
     await button!.trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("当前是浏览器预览，无法打开日志目录");
+    // 原始 IPC 错误只进控制台，界面给固定文案（英文模式同样可翻译）。
+    expect(wrapper.text()).toContain("无法打开日志目录，请稍后重试。");
+  });
+
+  it("英文模式下页面标题、权限条目与诊断按钮使用英文", async () => {
+    effectiveLanguage.value = "en";
+    const wrapper = mount(PermissionsPage, { props: { runtime } });
+
+    expect(wrapper.get("h1").text()).toBe("Permissions & Privacy");
+    expect(wrapper.text()).toContain("Bluetooth");
+    expect(wrapper.text()).toContain("Button Listening & Mapping");
+    expect(wrapper.text()).toContain("Audio Device");
+    expect(wrapper.text()).toContain("Not supported on this PC");
+    expect(wrapper.text()).toContain("Diagnostic Summary");
+    expect(
+      wrapper.findAll(".diagnostics-card button").map((button) => button.text()),
+    ).toEqual(["Generate Summary", "Copy Summary", "Open Log Folder"]);
   });
 });

@@ -152,6 +152,26 @@ mod imp {
         submit(move |session| task(&session.automation))
     }
 
+    /// 与 [`with_automation`] 相同，但最多等待 `timeout`。回眸捕获是后台尽力而为：
+    /// 目标 UIA provider 卡住时必须尽快放弃，不能让语音线程或捕获线程无限等待。
+    pub(crate) fn with_automation_timeout<T, F>(timeout: Duration, task: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&IUIAutomation) -> T + Send + 'static,
+    {
+        let (reply_sender, reply_receiver) = channel::<T>();
+        {
+            let guard = worker().lock().ok()?;
+            let job: Job = Box::new(move |session| {
+                let _ = reply_sender.send(task(&session.automation));
+            });
+            if guard.sender.send(job).is_err() {
+                return None;
+            }
+        }
+        reply_receiver.recv_timeout(timeout).ok()
+    }
+
     // ---------- Win32（不需要 UIA，可在任意线程调用） ----------
 
     pub fn current_process_id() -> u32 {
@@ -166,6 +186,12 @@ mod imp {
         let mut pid = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         (pid != 0).then_some(pid)
+    }
+
+    /// 当前前台进程的完整可执行文件路径（读不到为 `None`）。
+    pub fn foreground_executable_path() -> Option<String> {
+        let pid = foreground_process_id()?;
+        crate::app_launcher::process_image_path(pid)
     }
 
     pub fn process_alive(pid: u32) -> bool {
@@ -1047,13 +1073,14 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     capture_focused_target, capture_for_process, current_process_id, focus_best, focus_target,
-    focused_input_available, foreground_process_id, foreground_title_len, process_alive,
-    scan_candidates, window_of_process, FocusAttempt, WindowsFocusBackend,
+    focused_input_available, foreground_executable_path, foreground_process_id,
+    foreground_title_len, process_alive, scan_candidates, window_of_process, FocusAttempt,
+    WindowsFocusBackend,
 };
 
 /// 复用共享 UIA 工作线程（Per-Monitor V2、MTA）执行只读 UIA 任务的入口。
 #[cfg(windows)]
-pub(crate) use imp::with_automation;
+pub(crate) use imp::{with_automation, with_automation_timeout};
 
 /// 非 Windows 平台不提供 UIA 后端；保持模块可编译以便纯逻辑单测。
 #[cfg(not(windows))]

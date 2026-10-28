@@ -909,8 +909,6 @@ impl MacroStepperSource for WindowsMacroStepperSource {
         Box::new(WindowsMacroStepper {
             injector: Arc::clone(&self.injector),
             focus_profiles: Arc::clone(&self.focus_profiles),
-            focus: None,
-            focus_policy: crate::focus_service::FocusRetryPolicy::default(),
         })
     }
 }
@@ -920,8 +918,6 @@ impl MacroStepperSource for WindowsMacroStepperSource {
 pub struct WindowsMacroStepper {
     injector: Arc<dyn crate::button_mapping::MappingInjector>,
     focus_profiles: Arc<dyn Fn(&str) -> Option<crate::focus::AppFocusProfile> + Send + Sync>,
-    focus: Option<crate::focus_service::FocusRunner>,
-    focus_policy: crate::focus_service::FocusRetryPolicy,
 }
 
 /// 就绪轮询间隔（与 Mac 的 45×100ms 同款节奏）。
@@ -954,21 +950,6 @@ impl WindowsMacroStepper {
             }
             std::thread::sleep(std::time::Duration::from_millis(READINESS_POLL_INTERVAL_MS));
         }
-    }
-
-    fn with_focus_runner<T>(
-        &mut self,
-        task: impl FnOnce(&crate::focus_service::FocusRunner) -> T,
-    ) -> Option<T> {
-        if self.focus.is_none() {
-            let backend: Arc<dyn crate::focus_service::FocusBackend> =
-                Arc::new(crate::focus_windows::WindowsFocusBackend::new());
-            self.focus = Some(crate::focus_service::FocusRunner::spawn(
-                backend,
-                self.focus_policy,
-            ));
-        }
-        self.focus.as_ref().map(task)
     }
 }
 
@@ -1064,89 +1045,22 @@ impl MacroStepper for WindowsMacroStepper {
         }
     }
 
-    fn focus_input(&mut self, target: &str, timeout_ms: u64) -> StepOutcome {
+    fn focus_input(&mut self, target: &str, _timeout_ms: u64) -> StepOutcome {
         let profile = (self.focus_profiles)(target);
         let strategy = profile
             .as_ref()
             .map(|profile| profile.strategy)
             .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
-        match strategy {
-            // 没有学习记录 / 只打开：依赖缺失（对齐 Mac「未找到输入框学习记录」）。
-            crate::focus::FocusStrategy::OpenOnly => StepOutcome::MissingDependency,
-            crate::focus::FocusStrategy::AppShortcut => {
-                let Some(chord) = profile.and_then(|profile| profile.shortcut) else {
-                    return StepOutcome::MissingDependency;
-                };
-                if self.injector.launch_app(target).is_err() {
-                    return StepOutcome::Failed;
-                }
-                if self.injector.tap(&chord).is_err() {
-                    return StepOutcome::Failed;
-                }
-                // 注入已发；目标 App 内是否真的聚焦无法确认。
-                StepOutcome::Unknown
-            }
-            crate::focus::FocusStrategy::RecordedPoint => {
-                let Some(point) = profile.and_then(|profile| profile.point) else {
-                    return StepOutcome::MissingDependency;
-                };
-                if self.injector.launch_app(target).is_err() {
-                    return StepOutcome::Failed;
-                }
-                // 生产路径由注入器换算绝对坐标并点击；失败原因（窗口未出现 / 不在前台 /
-                // 窗口尺寸变化）在注入器日志里，这里只汇报步骤失败。
-                match self.injector.launch_app_and_focus(
-                    target,
-                    Some(&crate::focus::AppFocusProfile {
-                        strategy: crate::focus::FocusStrategy::RecordedPoint,
-                        point: Some(point),
-                        ..Default::default()
-                    }),
-                ) {
-                    Ok(()) => StepOutcome::Unknown,
-                    Err(_) => StepOutcome::Failed,
-                }
-            }
-            crate::focus::FocusStrategy::RecordedElement => {
-                let Some(recorded) = profile.and_then(|profile| profile.recorded) else {
-                    return StepOutcome::MissingDependency;
-                };
-                if self.injector.launch_app(target).is_err() {
-                    return StepOutcome::Failed;
-                }
-                // 激活异步完成：等目标成为前台再提交聚焦请求（否则前几次尝试打在旧前台，
-                // 3 秒重试预算会在激活完成前耗尽 —— 2026-10-19 嵌套动作现场）。
-                let _ = crate::app_launcher::wait_for_target_foreground(
-                    target,
-                    std::time::Duration::from_millis(2500),
-                );
-                let submitted = self.with_focus_runner(|runner| {
-                    runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
-                        crate::focus::FocusChoice::Recorded(recorded),
-                    ))
-                });
-                let Some(Some(request_id)) = submitted else {
-                    return StepOutcome::Failed;
-                };
-                let mut focused = false;
-                let completed = Self::wait_until(timeout_ms, || {
-                    let report = self
-                        .with_focus_runner(|runner| runner.last_report())
-                        .flatten();
-                    match report {
-                        Some(report) if report.request_id == request_id => {
-                            focused = report.focused;
-                            true
-                        }
-                        _ => false,
-                    }
-                });
-                if completed && focused {
-                    StepOutcome::Done
-                } else {
-                    StepOutcome::Failed
-                }
-            }
+        if strategy == crate::focus::FocusStrategy::OpenOnly {
+            // 「只打开 APP」没有聚焦动作，按缺少聚焦配置处理。
+            return StepOutcome::MissingDependency;
+        }
+        // 与按键页「打开应用 + 聚焦方式」走同一条生产实现：
+        // 预设默认（Chrome/网易云快捷键、其余自动选择）和自定义档案都在这里生效。
+        // 注入/聚焦是否真的落在目标控件只能由目标 App 确认，故终态为 Unknown。
+        match self.injector.launch_app_and_focus(target, profile.as_ref()) {
+            Ok(()) => StepOutcome::Unknown,
+            Err(_) => StepOutcome::Failed,
         }
     }
 

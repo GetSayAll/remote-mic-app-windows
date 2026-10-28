@@ -12,7 +12,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 # 走查/仿真构建：转发给常用语组件，让「会员走查开关」
 # （SAYALL_COMMON_PHRASES_ASSUME_MEMBER=1）在该构建上生效（评审 M1 的走查通道）。
-runtime-simulation = ["sayall-windows-common-phrases/runtime-simulation"]
+runtime-simulation = [
+    "sayall-windows-button-profiles/runtime-simulation",
+    "sayall-windows-common-phrases/runtime-simulation",
+]
 # 验证用 debug 包也隐藏控制台窗口（打包时启用；dev 流程不受影响）。
 hide-console = []
 
@@ -22,7 +25,10 @@ tauri-build = { version = "2.4", features = [] }
 [dependencies]
 sayall-core = { path = "../crates/sayall-core" }
 sayall-windows = { path = "../crates/sayall-windows" }
+sayall-windows-button-profiles = { path = "../crates/sayall-windows-button-profiles" }
 sayall-windows-common-phrases = { path = "../crates/sayall-windows-common-phrases" }
+base64 = "0.22"
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.13.4", default-features = false }
@@ -35,11 +41,14 @@ tauri-plugin-opener = "2.5.5"
 tauri-plugin-updater = "2.11.0"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "UI_ViewManagement",

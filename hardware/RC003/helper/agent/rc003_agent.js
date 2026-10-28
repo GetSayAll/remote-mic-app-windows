@@ -87,7 +87,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-10-05.gate-delay-units';
+var AGENT_BUILD = '2026-10-23.release-hold';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
@@ -119,6 +119,10 @@ var HB_MS = 500;              /* 所有权心跳周期；须显著短于 2s 租�
    能力（W 1）后由助手下发 gate 命令开启；初值 150ms（~2.8x 余量，真机数据后定稿）。
    释放帧不延迟；未开启或 sleep 不可用时行为不变（fail-open）。 */
 var GATE_DELAY_MS = 150;
+/* 语音键释放保持（2026-10-23 尾字丢失现场）：物理释放帧先保留这么久不放行，
+   让应用把最后一段音频排空到虚拟声卡、豆包继续收音。释放帧本身不延迟应用
+   的 ATVV 停止；只是让 OS 晚一点看到合成键的 UP。失败 fail-open。 */
+var RELEASE_HOLD_MS = 200;
 var CONNECT_TIMEOUT_MS = 3000;/* init() 最多阻塞宿主这么久 */
 var RECONNECT_MS = 1000;
 /*
@@ -155,9 +159,14 @@ var disarmed = false;
 
 /* 语音键热键合成状态。槽内替换的电平语义：物理报告含 synthFrom → 槽位呈现
  * synthTo；物理释放 → 槽位自然回零。HID 报告是状态语义，usage 从报告中消失
- * 即 OS 收到该键的 UP——粘键在结构上不可能，无需补帧或状态跟踪。 */
+ * 即 OS 收到该键的 UP。
+ *
+ * 2026-10-23 尾字丢失修正：释放帧不再立即放行。synthHeld 记住上一帧真的
+ * 替换过合成键；下一帧不含语音键时先睡 RELEASE_HOLD_MS，让应用排空尾音，
+ * 再让零报告通过。期间 OS 仍认为合成键按下，豆包继续收音。 */
 var synthFrom = 0;
 var synthTo = 0;
+var synthHeld = false;        /* 上一次实际替换后，OS 仍认为合成键按下 */
 var gateDelayMs = 0;          /* 0 = 门未开启；>0 = 按下帧改写前先睡这么久 */
 
 var sock = null;
@@ -511,6 +520,7 @@ function handleCommand(line) {
   if (cmd.type === 'synth') {
     if (cmd.off === true) {
       synthFrom = 0; synthTo = 0;
+      synthHeld = false;
       stat.synth_applied++;
       sendLine({ type: 'synth_ack', t: Date.now(), off: true });
       logLine('synth:off');
@@ -829,6 +839,21 @@ function installHook() {
         /* 边沿上报必须早于/独立于清键：即使租约过期不上报也要如实反映状态 */
         emitEdgesIfChanged(found);
 
+        var synthSeen = synthSetIn(bytes);
+        /* 语音键释放保持（2026-10-23 尾字丢失）：上一帧真的替换过合成键，
+           这一帧不含语音键 = 物理释放。先睡 RELEASE_HOLD_MS 再让零报告通过；
+           期间 OS 仍认为合成键按下，豆包继续收音，应用把尾音排空到声卡。
+           释放帧可能不含任何目标键，所以这段必须在 shouldTouchReport 早退之前。 */
+        if (!synthSeen && synthHeld && leaseOk() && mode === 'clear') {
+          try {
+            Thread.sleep(RELEASE_HOLD_MS / 1000);
+            synthTrace('release hold_ms=' + RELEASE_HOLD_MS);
+          } catch (e) {
+            logLine('synth:release hold fail=' + String(e).slice(0, 80));
+          }
+          synthHeld = false;
+        }
+
         /* 门禁走 `shouldTouchReport`（= 上报 ∪ 清空），**不能**只走 found：
            只含哨兵键的报告会被漏掉，哨兵键就永远清不掉（2026-09-26 真机）。 */
         if (!shouldTouchReport(bytes)) return;
@@ -840,7 +865,6 @@ function installHook() {
           if (reportUsages.indexOf(toClear[ci]) < 0) { stat.canary_hits++; break; }
         }
 
-        var synthSeen = synthSetIn(bytes);
         if (synthSeen) {
           synthTrace('seen mode=' + mode + ' lease=' + (leaseOk() ? 1 : 0)
             + ' disarmed=' + (disarmed ? 1 : 0) + ' connected=' + (connected ? 1 : 0)
@@ -900,8 +924,11 @@ function installHook() {
             back[6] === patched[6] && back[7] === patched[7] &&
             back[8] === patched[8]) {
           stat.clears_ok++;
-          if (synthChanged) stat.synth_hits++;
-          if (synthChanged) synthTrace('replace ok to=0x' + synthTo.toString(16));
+          if (synthChanged) {
+            stat.synth_hits++;
+            synthTrace('replace ok to=0x' + synthTo.toString(16));
+            synthHeld = true;
+          }
           this.cleared = true;
         } else {
           stat.clears_fail++;

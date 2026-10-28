@@ -9,16 +9,25 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
+import { t, tPage } from "../lib/i18n";
+import { effectiveLanguage } from "../lib/language-state";
 import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
+import {
+  FOCUS_STRATEGY_OPTIONS,
+  effectiveFocusProfile,
+  presetFocusDefault,
+} from "../lib/focus-defaults";
 import {
   clearMacroEditorSession,
   readMacroEditorSession,
   writeMacroEditorSession,
 } from "./macro-editor-session";
 import {
+  activateAppForLearning,
   buttonLabel,
   buttonTriggerLabel,
   cancelMacro,
+  chordLabel,
   deleteMacro,
   exportCombinedActions,
   focusLearnErrorLabel,
@@ -27,9 +36,9 @@ import {
   getCombinedActions,
   getMacroRunStatus,
   importCombinedActions,
+  latestMacroDefinitions,
   learnFocusPoint,
   learnFocusTarget,
-  latestMacroDefinitions,
   listPresetApps,
   macroActionLabel,
   macroChordLabel,
@@ -41,6 +50,7 @@ import {
   newMacroId,
   newStepId,
   nextMacroVersion,
+  openAppLabel,
   pickCustomApp,
   registerMacroNames,
   registerPresetAppNames,
@@ -55,7 +65,9 @@ import {
   type KeyChord,
   type KeyCode,
   type AppFocusProfile,
+  type ButtonMappings,
   type CustomAppPick,
+  type FocusStrategy,
   type MacroAction,
   type MacroChord,
   type MacroDefinition,
@@ -79,6 +91,16 @@ type WizardStepCard = "library" | "editor";
 
 const MAX_NAME_CHARS = 20;
 const MAX_STEPS = 20;
+
+/**
+ * 共享模块（bridge 的动作/按键文案、预设清单标签）返回的显示文案。
+ *
+ * 这些文案可能在共享模块里已按当前语言生成，也可能仍是中文原文；只在仍是
+ * 中文时查字典，避免对已翻译文案二次翻译并产生缺键告警。
+ */
+function tr(text: string): string {
+  return /[\u4e00-\u9fff]/.test(text) ? t(text) : text;
+}
 
 const loading = ref(true);
 const definitions = ref<MacroDefinition[]>([]);
@@ -107,16 +129,13 @@ const knownCustomApps = computed<CustomAppPick[]>(() =>
 );
 const capturedChord = ref<KeyChord | null>(null);
 const captureActive = ref(false);
-const learningStepId = ref<string | null>(null);
-const learningCountdown = ref(0);
-/** 「记录点击位置」的倒计时（与学习输入框共用 `learningStepId`/`learningTimer`）。 */
-const pointCountdown = ref(0);
+/** 录入用途：组合动作的单键/快捷键步骤，或聚焦方式的应用快捷键。 */
+const capturePurpose = ref<"step" | "focus_shortcut">("step");
 
 const testRunId = ref<string | null>(null);
 const testReport = ref<MacroRunReport | null>(null);
 const testRunning = ref(false);
 let testPollTimer: ReturnType<typeof setInterval> | undefined;
-let learningTimer: ReturnType<typeof setInterval> | undefined;
 
 const selectedDefinition = computed(
   () => definitions.value.find((item) => item.macroId === selectedMacroId.value) ?? null,
@@ -197,14 +216,18 @@ async function reloadLibrary(): Promise<void> {
       selectedMacroId.value = definitions.value[0]?.macroId ?? null;
     }
   } catch (error) {
-    setStatus(`组合动作读取失败：${messageOf(error)}`, "error");
+    setStatus(t("组合动作读取失败：{error}", { error: messageOf(error) }), "error");
   } finally {
     loading.value = false;
   }
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  // 底层错误原文同时写 console：英文界面只显示本地化固定文案（见 i18n 规则），
+  // 排障仍可从日志拿到机器原文。
+  console.warn("macros: operation error", message);
+  return message;
 }
 
 /**
@@ -264,7 +287,7 @@ function cloneStep(step: MacroStep): MacroStep {
 
 function defaultMacroName(): string {
   // 对齐 Mac 的「先有名字再编辑」：新建即给默认名，避免空名称卡在第①步。
-  const base = "组合动作";
+  const base = t("组合动作");
   let index = 1;
   while (definitions.value.some((item) => item.name === `${base} ${index}`)) {
     index += 1;
@@ -302,7 +325,7 @@ function cancelEditing(): void {
   draft.value = null;
   testReport.value = null;
   clearMacroEditorSession();
-  setStatus("已取消编辑");
+  setStatus(t("已取消编辑"));
 }
 
 function toggleDelete(macroId: string): void {
@@ -330,8 +353,13 @@ const deleteReferenceText = computed<string>(() => {
   const report = deleteReferences.value;
   if (!report || report.buttons.length === 0) return "";
   return report.buttons
-    .map((item) => `${buttonLabel(item.button as RemoteButton)}·${buttonTriggerLabel(item.trigger as ButtonTrigger)}`)
-    .join("、");
+    .map((item) =>
+      t("{button}·{trigger}", {
+        button: tr(buttonLabel(item.button as RemoteButton)),
+        trigger: tr(buttonTriggerLabel(item.trigger as ButtonTrigger)),
+      }),
+    )
+    .join(t("、"));
 });
 
 async function confirmDelete(macroId: string): Promise<void> {
@@ -345,13 +373,19 @@ async function confirmDelete(macroId: string): Promise<void> {
     pendingDeleteId.value = null;
     deleteReferences.value = null;
     // 引用清理必须说清楚：嵌套步骤真的被移除，而不是留下"不可用"的悬空引用。
-    const parts = ["组合动作已删除"];
-    if (rewritten > 0) parts.push(`已从 ${rewritten} 个组合动作中移除它的嵌套步骤`);
-    if (cascaded > 0) parts.push(`一并删除了 ${cascaded} 个因此变空的组合动作`);
-    if (affectedButtons > 0) parts.push(`${affectedButtons} 个引用它的按键已改为未设置`);
-    setStatus(parts.join("；"), "success");
+    const parts = [t("组合动作已删除")];
+    if (rewritten > 0) {
+      parts.push(t("已从 {count} 个组合动作中移除它的嵌套步骤", { count: rewritten }));
+    }
+    if (cascaded > 0) {
+      parts.push(t("一并删除了 {count} 个因此变空的组合动作", { count: cascaded }));
+    }
+    if (affectedButtons > 0) {
+      parts.push(t("{count} 个引用它的按键已改为未设置", { count: affectedButtons }));
+    }
+    setStatus(parts.join(t("；")), "success");
   } catch (error) {
-    setStatus(`删除失败：${messageOf(error)}`, "error");
+    setStatus(t("删除失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
@@ -360,7 +394,7 @@ async function duplicateMacro(definition: MacroDefinition): Promise<void> {
     ...cloneDefinition(definition),
     macroId: newMacroId(),
     version: "1.0.0",
-    name: `${definition.name.slice(0, MAX_NAME_CHARS - 4)}（副本）`,
+    name: t("{name}（副本）", { name: definition.name.slice(0, MAX_NAME_CHARS - 4) }),
     steps: definition.steps.map((step, index) => ({
       ...cloneStep(step),
       stepId: `step.copy${index.toString().padStart(2, "0")}`,
@@ -370,18 +404,18 @@ async function duplicateMacro(definition: MacroDefinition): Promise<void> {
     const library = await saveMacro(copy);
     applyLibrary(library);
     selectedMacroId.value = copy.macroId;
-    setStatus("组合动作副本已创建", "success");
+    setStatus(t("组合动作副本已创建"), "success");
   } catch (error) {
-    setStatus(`复制失败：${messageOf(error)}`, "error");
+    setStatus(t("复制失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
 async function onExport(): Promise<void> {
   try {
     const exported = await exportCombinedActions();
-    setStatus(exported ? "组合动作已导出" : "已取消导出", exported ? "success" : "info");
+    setStatus(exported ? t("组合动作已导出") : t("已取消导出"), exported ? "success" : "info");
   } catch (error) {
-    setStatus(`导出失败：${messageOf(error)}`, "error");
+    setStatus(t("导出失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
@@ -389,13 +423,13 @@ async function onImport(): Promise<void> {
   try {
     const library = await importCombinedActions();
     if (!library) {
-      setStatus("已取消导入");
+      setStatus(t("已取消导入"));
       return;
     }
     applyLibrary(library);
-    setStatus("组合动作已导入", "success");
+    setStatus(t("组合动作已导入"), "success");
   } catch (error) {
-    setStatus(`导入失败：${messageOf(error)}`, "error");
+    setStatus(t("导入失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
@@ -409,7 +443,7 @@ function renameDraft(value: string): void {
 function addStep(action: MacroAction): void {
   if (!draft.value) return;
   if (draft.value.steps.length >= MAX_STEPS) {
-    setStatus(`最多 ${MAX_STEPS} 个步骤`, "error");
+    setStatus(t("最多 {count} 个步骤", { count: MAX_STEPS }), "error");
     return;
   }
   const step: MacroStep = {
@@ -436,17 +470,23 @@ function goToStep(step: EditorStep): void {
     return;
   }
   if (!draft.value?.name.trim()) {
-    setStatus("先填写组合动作名称", "error");
+    setStatus(t("先填写组合动作名称"), "error");
     return;
   }
   if (step === "review" && (draft.value?.steps.length ?? 0) === 0) {
-    setStatus("先添加第一个步骤", "error");
+    setStatus(t("先添加第一个步骤"), "error");
     return;
   }
   if (step === "review" && firstUnconfiguredStep.value !== null) {
     const index = firstUnconfiguredStep.value;
     const issue = stepConfigurationIssue(draft.value!.steps[index]);
-    setStatus(`第 ${index + 1} 步还没设置完：${issue ?? "请补全参数"}`, "error");
+    setStatus(
+      t("第 {step} 步还没设置完：{issue}", {
+        step: index + 1,
+        issue: issue ?? t("请补全参数"),
+      }),
+      "error",
+    );
     selectedStepId.value = draft.value!.steps[index].stepId;
     return;
   }
@@ -483,7 +523,7 @@ function removeStep(stepId: string): void {
   if (selectedStepId.value === stepId) {
     selectedStepId.value = draft.value.steps[0]?.stepId ?? null;
   }
-  setStatus("已删除步骤");
+  setStatus(t("已删除步骤"));
 }
 
 function moveStep(index: number, offset: number): void {
@@ -560,7 +600,7 @@ function onCaptureEdge(edge: ShortcutCaptureEdge): void {
       // 只按了修饰键（例如“长按 Alt”）：组合动作需要至少一个主键，
       // 必须明确告知，否则用户会以为录入没反应。
       setStatus(
-        "组合键需要至少一个非修饰键；仅按住 Alt/Ctrl 等修饰键暂不支持",
+        t("组合键需要至少一个非修饰键；仅按住 Alt/Ctrl 等修饰键暂不支持"),
         "error",
       );
     }
@@ -580,12 +620,12 @@ function onCaptureEdge(edge: ShortcutCaptureEdge): void {
 /** 窗口失焦时取消录入：否则全局吞键会一直保持到用户再次进入本页。 */
 function handleCaptureBlur(): void {
   if (!captureActive.value) return;
-  void cancelCapture("窗口失去焦点，已取消录入");
+  void cancelCapture(t("窗口失去焦点，已取消录入"));
 }
 
-async function beginCapture(): Promise<void> {
+async function beginCapture(purpose: "step" | "focus_shortcut" = "step"): Promise<void> {
   if (!selectedStepId.value) {
-    setStatus("请先选择一个步骤", "error");
+    setStatus(t("请先选择一个步骤"), "error");
     return;
   }
   if (captureActive.value) {
@@ -593,15 +633,16 @@ async function beginCapture(): Promise<void> {
     await cancelCapture();
     return;
   }
+  capturePurpose.value = purpose;
   const generation = ++captureGeneration;
   capturedChord.value = null;
   capturedKeys = null;
   capturePressedKeys.clear();
   captureActive.value = true;
-  setStatus("正在录入：请按下一次按键（按 Esc 取消）");
+  setStatus(t("正在录入：请按下一次按键（按 Esc 取消）"));
   clearCaptureTimeout();
   captureTimeout = window.setTimeout(() => {
-    void cancelCapture("录入已超时，请重新录入", "error");
+    void cancelCapture(t("录入已超时，请重新录入"), "error");
   }, CAPTURE_TIMEOUT_MS);
   try {
     captureUnsubscribe?.();
@@ -621,13 +662,13 @@ async function beginCapture(): Promise<void> {
     window.addEventListener("blur", handleCaptureBlur);
   } catch (error) {
     await stopCapture();
-    setStatus(`无法启动快捷键录入：${messageOf(error)}`, "error");
+    setStatus(t("无法启动快捷键录入：{error}", { error: messageOf(error) }), "error");
   }
 }
 
 /** 取消录入：唯一出口，保证后端、订阅、定时器和失焦监听成对释放。 */
 async function cancelCapture(
-  message = "已取消录入",
+  message = t("已取消录入"),
   kind: "info" | "success" | "error" = "info",
 ): Promise<void> {
   await stopCapture();
@@ -653,10 +694,20 @@ async function stopCapture(): Promise<void> {
 onUnmounted(() => {
   // 页面切走时后端仍在录入态会全局吞键，必须在卸载时成对停止。
   void stopCapture();
+  if (pointLearnTimer) {
+    window.clearTimeout(pointLearnTimer);
+    pointLearnTimer = null;
+  }
 });
 
 /** 录入完成：把捕获到的组合键转换成组合动作的 `MacroChord` 写进当前步骤。 */
 function finalizeCapture(keys: KeyCode[]): void {
+  if (capturePurpose.value === "focus_shortcut") {
+    applyFocusShortcut(keys);
+    setStatus(t("聚焦快捷键已录入：{chord}", { chord: chordLabel({ keys }) }), "success");
+    void stopCapture();
+    return;
+  }
   const step = draft.value?.steps.find((item) => item.stepId === selectedStepId.value);
   if (!step) {
     return;
@@ -668,14 +719,14 @@ function finalizeCapture(keys: KeyCode[]): void {
   const keyCode = keys.find((code) => modifierOf(code) === null);
   const key = keyCode ? semanticKeyOf(keyCode) : null;
   if (!key) {
-    setStatus("这个按键暂不支持写入组合动作", "error");
+    setStatus(t("这个按键暂不支持写入组合动作"), "error");
     void stopCapture();
     return;
   }
   const chord: MacroChord = { modifiers: ordered, key };
   step.parameters.chord = chord;
   capturedChord.value = { keys };
-  setStatus(`快捷键录入成功：${macroChordLabel(chord)}`, "success");
+  setStatus(t("快捷键录入成功：{chord}", { chord: macroChordLabel(chord) }), "success");
   void stopCapture();
 }
 
@@ -819,7 +870,7 @@ function applyChordToSelectedStep(chord: MacroChord): void {
   const step = draft.value?.steps.find((item) => item.stepId === selectedStepId.value);
   if (!step) return;
   step.parameters.chord = { modifiers: [...chord.modifiers], key: chord.key };
-  setStatus(`已选择：${macroChordLabel(chord)}`, "success");
+  setStatus(t("已选择：{chord}", { chord: macroChordLabel(chord) }), "success");
 }
 
 /** 「添加应用」：复用按键页的原生选择器，并把应用写入共享的自定义应用列表。 */
@@ -838,9 +889,9 @@ async function addCustomAppToStep(): Promise<void> {
       name: app.name,
     }));
     renameStepTarget(pick.path);
-    setStatus(`已添加应用：${pick.name}`, "success");
+    setStatus(t("已添加应用：{name}", { name: pick.name }), "success");
   } catch (error) {
-    setStatus(`添加应用失败：${messageOf(error)}`, "error");
+    setStatus(t("添加应用失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
@@ -864,7 +915,7 @@ async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
     appPickerOpen.value = false;
     void reloadPresetApps();
     renameStepTarget(apps[0].path);
-    setStatus(`已添加 ${apps.length} 个应用`, "success");
+    setStatus(t("已添加 {count} 个应用", { count: apps.length }), "success");
   } catch (error) {
     appPickerError.value = messageOf(error);
   } finally {
@@ -877,27 +928,34 @@ function stepConfigurationIssue(step: MacroStep): string | null {
   const parameters = step.parameters;
   switch (step.action) {
     case "open_application":
-      return parameters.target?.trim() ? null : "还没有选择要打开的 App";
+      return parameters.target?.trim() ? null : t("还没有选择要打开的 App");
     case "wait_for_application":
-      return parameters.target?.trim() ? null : "还没有选择要等待的 App";
+      return parameters.target?.trim() ? null : t("还没有选择要等待的 App");
     case "send_shortcut":
-      return parameters.chord ? null : "还没有选择或录入按键";
+      return parameters.chord ? null : t("还没有选择或录入按键");
     case "system_action":
-      return parameters.chord ? null : "还没有选择系统动作";
+      return parameters.chord ? null : t("还没有选择系统动作");
     case "focus_input": {
-      if (!parameters.target?.trim()) return "还没有选择目标 App";
-      // 是否已学习输入框属于执行期依赖（步骤运行会报 missing_dependency），
-      // 这里只要求本步骤自身的参数完整；学习入口就在同一步里。
-      return null;
+      if (!parameters.target?.trim()) return t("还没有选择目标 App");
+      // 组合动作不再单独学习：必须复用按键页共用的聚焦档案。
+      if (!focusProfiles.value[parameters.target]) {
+        return t("这个 App 还没有聚焦方式，请选择一个");
+      }
+      if (selectedFocusStrategy(parameters.target) === "open_only") {
+        return t("这个 App 的聚焦方式是「只打开 APP」，请选择其他聚焦方式");
+      }
+      return focusReady(parameters.target)
+        ? null
+        : t("这个 App 的聚焦方式还没配置完成（缺少快捷键或输入框记录）");
     }
     case "focus_frontmost":
       return null;
     case "open_url":
       return /^https?:\/\/\S+/i.test(parameters.url ?? "")
         ? null
-        : "网址需要以 http:// 或 https:// 开头";
+        : t("网址需要以 http:// 或 https:// 开头");
     case "run_macro":
-      return parameters.nestedMacroId ? null : "还没有选择要执行的组合动作";
+      return parameters.nestedMacroId ? null : t("还没有选择要执行的组合动作");
     default:
       return null;
   }
@@ -908,122 +966,327 @@ const firstUnconfiguredStep = computed(() => {
   return index >= 0 ? index : null;
 });
 
-// ===== 学习输入框（复用按键页的学习链路；必须把结果写进聚焦档案）=====
+// ===== 聚焦步骤：与按键页共用同一份目标与聚焦档案 =====
 
-/** 该 App 的聚焦档案策略（键 = 应用目标，与按键映射 `focusProfiles` 同源）。 */
-const focusProfileStrategies = ref<Record<string, string>>({});
 /** 完整聚焦档案（含快捷键），供「单键或快捷键」列出已保存的 App 聚焦快捷键。 */
 const focusProfiles = ref<Record<string, AppFocusProfile>>({});
+/** 按键页动作里用到、但不在应用库里的旧自定义目标（与按键页的自定义应用兜底一致）。 */
+const actionApps = ref<Array<{ id: string; name: string }>>([]);
+const focusSaving = ref(false);
+const focusStrategyOptions = FOCUS_STRATEGY_OPTIONS;
+
+/** 当前聚焦步骤的目标（和按键页一样，聚焦档案按 target 键控）。 */
+const focusTarget = computed(() => {
+  const step = draft.value?.steps.find((item) => item.stepId === selectedStepId.value);
+  return step?.action === "focus_input" ? (step.parameters.target ?? null) : null;
+});
+
+function isPresetTarget(target: string): boolean {
+  return presetApps.value.some((app) => app.id === target);
+}
+
+/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
+const focusProfile = computed<AppFocusProfile | null>(() => {
+  const target = focusTarget.value;
+  if (!target) return null;
+  return effectiveFocusProfile(target, focusProfiles.value, isPresetTarget);
+});
+
+const presetFocusDefaultProfile = computed<AppFocusProfile | null>(() => {
+  const target = focusTarget.value;
+  if (!target || !isPresetTarget(target)) return null;
+  return presetFocusDefault(target, true);
+});
+
+const hasPresetFocusOverride = computed(() => {
+  const target = focusTarget.value;
+  return Boolean(target && isPresetTarget(target) && focusProfiles.value[target]);
+});
+
+/** 「学习输入框」与「记录点击位置」的状态（与按键页同一套流程）。 */
+const focusLearnState = ref<"idle" | "opening" | "learning" | "captured" | "error">("idle");
+const focusLearnBusy = computed(
+  () => focusLearnState.value === "opening" || focusLearnState.value === "learning",
+);
+const focusLearnMessage = ref<string | null>(null);
+let pointLearnTimer: number | null = null;
+const pointLearnState = ref<"idle" | "opening" | "recording" | "recorded" | "error">("idle");
+const pointLearnMessage = ref<string | null>(null);
+
+const focusBusy = computed(
+  () =>
+    focusLearnBusy.value ||
+    captureActive.value ||
+    pointLearnState.value === "opening" ||
+    pointLearnState.value === "recording" ||
+    focusSaving.value,
+);
+
+watch(focusTarget, () => {
+  if (!focusLearnBusy.value) {
+    focusLearnState.value = "idle";
+    focusLearnMessage.value = null;
+  }
+  if (pointLearnState.value !== "opening" && pointLearnState.value !== "recording") {
+    pointLearnState.value = "idle";
+    pointLearnMessage.value = null;
+  }
+});
+
+/** 把按键页返回的映射同步成组合动作页的只读目标与聚焦档案视图。 */
+function applyFocusMappings(mappings: ButtonMappings): void {
+  // 与按键页同一口径：显式档案优先；预设应用没有档案时补产品默认值。
+  const profiles: Record<string, AppFocusProfile> = { ...(mappings.focusProfiles ?? {}) };
+  for (const app of presetApps.value) {
+    if (profiles[app.id]) continue;
+    const fallback = presetFocusDefault(app.id, true);
+    if (fallback) profiles[app.id] = fallback;
+  }
+  focusProfiles.value = profiles;
+
+  const targets = new Set<string>();
+  for (const actions of Object.values(mappings.actions ?? {})) {
+    for (const action of [actions.single, actions.double, actions.long]) {
+      if (action.type === "open_app" && action.target) targets.add(action.target);
+    }
+  }
+  actionApps.value = [...targets].map((id) => ({ id, name: appDisplayName(id) }));
+}
 
 async function refreshFocusProfiles(): Promise<void> {
   try {
-    const mappings = await getButtonMappings();
-    const profiles = mappings.focusProfiles ?? {};
-    focusProfiles.value = profiles;
-    const strategies: Record<string, string> = {};
-    for (const [target, profile] of Object.entries(profiles)) {
-      strategies[target] = profile.strategy;
-    }
-    focusProfileStrategies.value = strategies;
+    applyFocusMappings(await getButtonMappings());
   } catch {
     // 读取失败：状态显示为"未知"，不阻断页面其余功能。
   }
 }
 
-/** 该目标是否已学习过输入框（策略 = 聚焦已记录的输入框才可执行本步骤）。 */
+/** 该目标是否有可执行的聚焦动作（只打开 / 缺快捷键或记录都不可执行）。 */
 function focusReady(target: string | undefined): boolean {
-  if (!target) return false;
-  return focusProfileStrategies.value[target] === "recorded_element";
+  const profile = target ? focusProfiles.value[target] : undefined;
+  if (!profile) return false;
+  switch (profile.strategy) {
+    case "auto_composer":
+      return true;
+    case "app_shortcut":
+      return (profile.shortcut?.keys?.length ?? 0) > 0;
+    case "recorded_element":
+      return Boolean(profile.recorded);
+    case "recorded_point":
+      return Boolean(profile.point);
+    default:
+      return false;
+  }
 }
 
-/** 该目标是否已记录点击位置（策略 = 记录点击位置；面向没有 UIA 树的应用）。 */
-function focusPointReady(target: string | undefined): boolean {
-  if (!target) return false;
-  return focusProfileStrategies.value[target] === "recorded_point";
+function selectedFocusStrategy(target: string | undefined): FocusStrategy {
+  return target ? (focusProfiles.value[target]?.strategy ?? "open_only") : "open_only";
 }
 
-/** 「记录点击位置」：6 秒后采集鼠标位置，写入该目标的 recorded_point 档案。 */
-function startPointRecording(): void {
-  const stepId = selectedStepId.value;
-  const target = draft.value?.steps.find((item) => item.stepId === stepId)?.parameters.target;
-  if (!stepId || !target) {
-    setStatus("先给这一步选择目标 App", "error");
+/** 写回按键页共用的聚焦档案；null 表示删除显式档案（恢复预设默认）。 */
+async function saveFocusProfile(
+  target: string,
+  profile: AppFocusProfile | null,
+): Promise<boolean> {
+  if (focusSaving.value) return false;
+  focusSaving.value = true;
+  try {
+    const mappings = await getButtonMappings();
+    const focusProfilesNext = { ...(mappings.focusProfiles ?? {}) };
+    if (profile) focusProfilesNext[target] = profile;
+    else delete focusProfilesNext[target];
+    const saved = await saveButtonMappings({ ...mappings, focusProfiles: focusProfilesNext });
+    applyFocusMappings(saved);
+    return true;
+  } catch (error) {
+    setStatus(t("更新聚焦方式失败：{error}", { error: messageOf(error) }), "error");
+    return false;
+  } finally {
+    focusSaving.value = false;
+  }
+}
+
+/** 改选聚焦方式：与按键页相同的策略与字段保留规则。 */
+async function applyFocusStrategy(strategy: FocusStrategy): Promise<void> {
+  const target = focusTarget.value;
+  if (!target || focusSaving.value) return;
+  const previous = focusProfile.value ?? undefined;
+  const fallback = presetFocusDefaultProfile.value ?? undefined;
+  const profile: AppFocusProfile = { strategy };
+  if (strategy === "app_shortcut") {
+    const shortcut = previous?.shortcut ?? fallback?.shortcut;
+    if (shortcut) profile.shortcut = shortcut;
+  }
+  if (strategy === "recorded_element" && previous?.recorded) profile.recorded = previous.recorded;
+  if (strategy === "recorded_point" && previous?.point) profile.point = previous.point;
+  focusProfiles.value = { ...focusProfiles.value, [target]: profile };
+  if (!focusLearnBusy.value) {
+    focusLearnState.value = "idle";
+    focusLearnMessage.value = null;
+  }
+  if (pointLearnState.value !== "opening" && pointLearnState.value !== "recording") {
+    pointLearnState.value = "idle";
+    pointLearnMessage.value = null;
+  }
+  if (await saveFocusProfile(target, profile)) setStatus(t("聚焦方式已更新"));
+  else await refreshFocusProfiles();
+}
+
+/** 预设应用恢复产品默认聚焦方式。 */
+async function resetPresetFocus(): Promise<void> {
+  const target = focusTarget.value;
+  if (!target) return;
+  const next = { ...focusProfiles.value };
+  delete next[target];
+  focusProfiles.value = next;
+  focusLearnState.value = "idle";
+  focusLearnMessage.value = null;
+  pointLearnState.value = "idle";
+  pointLearnMessage.value = null;
+  if (await saveFocusProfile(target, null)) setStatus(t("已恢复默认聚焦方式"));
+  else await refreshFocusProfiles();
+}
+
+/** 「记录点击位置」：先打开/切到目标应用，再等 6 秒采集鼠标位置。 */
+function recordFocusPoint(): void {
+  const target = focusTarget.value;
+  if (!target || pointLearnState.value === "opening" || pointLearnState.value === "recording") {
     return;
   }
-  learningStepId.value = stepId;
-  pointCountdown.value = 6;
-  learningCountdown.value = 0;
-  setStatus("6 秒后自动记录鼠标位置：请先把鼠标停在目标输入框上");
-  learningTimer = setInterval(() => {
-    pointCountdown.value -= 1;
-    if (pointCountdown.value <= 0) {
-      void finishPointRecording(target);
-    }
-  }, 1000);
+  void openAppThenRecordPoint(target);
+}
+
+async function openAppThenRecordPoint(target: string): Promise<void> {
+  pointLearnState.value = "opening";
+  pointLearnMessage.value = t("正在打开目标应用…");
+  try {
+    await activateAppForLearning(target);
+  } catch {
+    pointLearnState.value = "error";
+    pointLearnMessage.value = t("没能打开目标应用，请确认它已安装后再试。");
+    return;
+  }
+  pointLearnState.value = "recording";
+  pointLearnMessage.value = t("正在等待你把鼠标停在目标输入框上……（6 秒后自动记录）");
+  if (pointLearnTimer) window.clearTimeout(pointLearnTimer);
+  pointLearnTimer = window.setTimeout(() => {
+    pointLearnTimer = null;
+    void finishPointRecording(target);
+  }, 6000);
 }
 
 async function finishPointRecording(target: string): Promise<void> {
   try {
     const point = await learnFocusPoint(target);
-    const mappings = await getButtonMappings();
-    const nextProfiles = {
-      ...(mappings.focusProfiles ?? {}),
-      [target]: { strategy: "recorded_point" as const, point },
-    };
-    await saveButtonMappings({ ...mappings, focusProfiles: nextProfiles });
-    await refreshFocusProfiles();
-    setStatus("点击位置记录成功", "success");
+    const profile: AppFocusProfile = { strategy: "recorded_point", point };
+    focusProfiles.value = { ...focusProfiles.value, [target]: profile };
+    pointLearnState.value = "recorded";
+    pointLearnMessage.value = t("已记录位置（窗口大小变化超过 25% 时会拒绝点击，需要重新记录）");
+    if (!(await saveFocusProfile(target, profile))) await refreshFocusProfiles();
   } catch (error) {
-    setStatus(`记录位置失败：${focusPointErrorLabel(messageOf(error))}`, "error");
-  } finally {
-    if (learningTimer) clearInterval(learningTimer);
-    learningTimer = undefined;
-    learningStepId.value = null;
+    pointLearnState.value = "error";
+    pointLearnMessage.value = t("记录位置失败：{reason}", {
+      reason: tr(
+        focusPointErrorLabel(error instanceof Error ? error.message : String(error)),
+      ),
+    });
   }
 }
 
-function startLearning(): void {
-  const stepId = selectedStepId.value;
-  const target = draft.value?.steps.find((item) => item.stepId === stepId)?.parameters.target;
-  if (!stepId || !target) {
-    setStatus("先给这一步选择目标 App", "error");
+function clearRecordedPoint(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const profile: AppFocusProfile = { strategy: "recorded_point" };
+  focusProfiles.value = { ...focusProfiles.value, [target]: profile };
+  pointLearnState.value = "idle";
+  pointLearnMessage.value = null;
+  void saveFocusProfile(target, profile).then((ok) => {
+    if (!ok) void refreshFocusProfiles();
+  });
+}
+
+/** 录入聚焦快捷键的落点（由 capturePurpose 分流）。 */
+function applyFocusShortcut(keys: KeyCode[]): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const profile: AppFocusProfile = { strategy: "app_shortcut", shortcut: { keys } };
+  focusProfiles.value = { ...focusProfiles.value, [target]: profile };
+  void saveFocusProfile(target, profile).then((ok) => {
+    if (ok) setStatus(t("聚焦快捷键已录入"));
+    else void refreshFocusProfiles();
+  });
+}
+
+function clearFocusShortcut(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const profile = focusProfile.value;
+  if (profile?.strategy !== "app_shortcut") return;
+  const next: AppFocusProfile = { strategy: "app_shortcut" };
+  focusProfiles.value = { ...focusProfiles.value, [target]: next };
+  void saveFocusProfile(target, next).then((ok) => {
+    if (!ok) void refreshFocusProfiles();
+  });
+}
+
+function clearRecordedFocus(): void {
+  const target = focusTarget.value;
+  if (!target) return;
+  const profile: AppFocusProfile = { strategy: "recorded_element" };
+  focusProfiles.value = { ...focusProfiles.value, [target]: profile };
+  focusLearnState.value = "idle";
+  focusLearnMessage.value = null;
+  void saveFocusProfile(target, profile).then((ok) => {
+    if (!ok) void refreshFocusProfiles();
+  });
+}
+
+/** 「学习输入框」：先打开目标应用，再在 6 秒窗口内采集并写回共用档案。 */
+async function startFocusLearning(): Promise<void> {
+  if (focusLearnBusy.value) return;
+  const target = focusTarget.value;
+  if (!target) return;
+  focusLearnState.value = "opening";
+  focusLearnMessage.value = t("正在打开目标应用…");
+  try {
+    await activateAppForLearning(target);
+  } catch {
+    focusLearnState.value = "error";
+    focusLearnMessage.value = t("没能打开目标应用，请确认它已安装后再试。");
     return;
   }
-  learningStepId.value = stepId;
-  learningCountdown.value = 6;
-  pointCountdown.value = 0;
-  setStatus("正在等待你点击目标输入框（最多 6 秒）");
-  if (learningTimer) clearInterval(learningTimer);
-  // 采样窗口由后端给（LEARN_WINDOW = 6 秒），这里只做倒计时展示；
-  // 点完按钮立即开始采样，用户有 6 秒时间切到目标 App 并点击输入框。
-  learningTimer = setInterval(() => {
-    if (learningCountdown.value > 1) learningCountdown.value -= 1;
-  }, 1000);
-  void finishLearning(target);
-}
 
-async function finishLearning(target: string): Promise<void> {
+  focusLearnState.value = "learning";
+  focusLearnMessage.value = t("正在等待你点击目标输入框……");
   try {
     const recorded = await learnFocusTarget();
-    // 与按键页**同一落盘口径**：写入该目标的聚焦档案（策略=聚焦已记录的输入框）。
-    // 早前版本只显示"成功"却不写档案，导致这一步永远找不到输入框记录
-    // （2026-10-15 现场：组合动作页学习"成功"、步骤仍报不可用）。
-    const mappings = await getButtonMappings();
-    const nextProfiles = {
-      ...(mappings.focusProfiles ?? {}),
-      [target]: { strategy: "recorded_element" as const, recorded },
-    };
-    await saveButtonMappings({ ...mappings, focusProfiles: nextProfiles });
-    await refreshFocusProfiles();
-    setStatus("输入框学习成功", "success");
+    const profile: AppFocusProfile = { strategy: "recorded_element", recorded };
+    focusProfiles.value = { ...focusProfiles.value, [target]: profile };
+    focusLearnState.value = "captured";
+    focusLearnMessage.value = t("输入框学习成功。");
+    if (!(await saveFocusProfile(target, profile))) await refreshFocusProfiles();
   } catch (error) {
-    setStatus(`输入框学习失败：${focusLearnErrorLabel(messageOf(error))}`, "error");
-  } finally {
-    if (learningTimer) clearInterval(learningTimer);
-    learningTimer = undefined;
-    learningStepId.value = null;
+    focusLearnState.value = "error";
+    focusLearnMessage.value = tr(
+      focusLearnErrorLabel(error instanceof Error ? error.message : String(error)),
+    );
   }
 }
+
+/** 当前步骤可选的目标：与按键页同一份应用列表（预设 + 自定义），并保留旧目标。 */
+const focusTargetChoices = computed<Array<{ id: string; name: string }>>(() => {
+  const choices = new Map(appChoices.value.map((app) => [app.id, app]));
+  for (const app of actionApps.value) {
+    if (!choices.has(app.id)) choices.set(app.id, app);
+  }
+  const current = draft.value?.steps.find(
+    (step) => step.stepId === selectedStepId.value,
+  )?.parameters.target;
+  if (current && !choices.has(current)) {
+    choices.set(current, { id: current, name: appDisplayName(current) });
+  }
+  return [...choices.values()];
+});
 
 // ===== 测试与保存 =====
 
@@ -1038,7 +1301,7 @@ async function runDraftTest(): Promise<void> {
   try {
     testRunId.value = await testMacroDefinition(definition);
     testRunning.value = true;
-    setStatus("组合动作已开始执行");
+    setStatus(t("组合动作已开始执行"));
     startPollingRun(testRunId.value);
   } catch (error) {
     setStatus(testFailureText(error), "error");
@@ -1069,7 +1332,10 @@ function startPollingRun(runId: string): void {
         if (!status.running) {
           if (testPollTimer) clearInterval(testPollTimer);
           testPollTimer = undefined;
-          setStatus(macroTerminalLabel(status.report.result), status.report.result.startsWith("completed") ? "success" : "error");
+          setStatus(
+            tr(macroTerminalLabel(status.report.result)),
+            status.report.result.startsWith("completed") ? "success" : "error",
+          );
         }
       } else {
         testRunning.value = status.running;
@@ -1086,9 +1352,9 @@ async function cancelTest(): Promise<void> {
   if (!testRunId.value) return;
   try {
     await cancelMacro(testRunId.value);
-    setStatus("已取消运行");
+    setStatus(t("已取消运行"));
   } catch (error) {
-    setStatus(`取消失败：${messageOf(error)}`, "error");
+    setStatus(t("取消失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
@@ -1096,17 +1362,23 @@ async function saveDraft(): Promise<void> {
   const definition = currentDraft();
   if (!definition) return;
   if (!definition.name.trim()) {
-    setStatus("请先填写组合动作名称", "error");
+    setStatus(t("请先填写组合动作名称"), "error");
     return;
   }
   if (definition.steps.length === 0) {
-    setStatus("至少添加一个步骤", "error");
+    setStatus(t("至少添加一个步骤"), "error");
     return;
   }
   if (firstUnconfiguredStep.value !== null) {
     const index = firstUnconfiguredStep.value;
     const issue = stepConfigurationIssue(definition.steps[index]);
-    setStatus(`第 ${index + 1} 步还没设置完：${issue ?? "请补全参数"}`, "error");
+    setStatus(
+      t("第 {step} 步还没设置完：{issue}", {
+        step: index + 1,
+        issue: issue ?? t("请补全参数"),
+      }),
+      "error",
+    );
     return;
   }
   if (isNewMacro.value) {
@@ -1122,9 +1394,9 @@ async function saveDraft(): Promise<void> {
     draft.value = null;
     testReport.value = null;
     clearMacroEditorSession();
-    setStatus("组合动作已保存", "success");
+    setStatus(t("组合动作已保存"), "success");
   } catch (error) {
-    setStatus(`保存失败：${messageOf(error)}`, "error");
+    setStatus(t("保存失败：{error}", { error: messageOf(error) }), "error");
   }
 }
 
@@ -1134,7 +1406,7 @@ async function testSavedMacro(macroId: string): Promise<void> {
     await testMacro(macroId);
     testRunId.value = macroId;
     testRunning.value = true;
-    setStatus("组合动作已开始执行");
+    setStatus(t("组合动作已开始执行"));
     startPollingRun(macroId);
   } catch (error) {
     setStatus(testFailureText(error), "error");
@@ -1143,12 +1415,16 @@ async function testSavedMacro(macroId: string): Promise<void> {
 
 /**
  * 测试启动失败的文案：Rust 返回稳定 token（`invalid:name_empty` 等），
- * 映射成用户语言；无法识别的（传输层错误）保留原文。
+ * 映射成用户语言；无法识别的（传输层原文）只在中文界面显示原文，英文界面
+ * 给一句固定文案——原文已由 `messageOf` 写入 console。
  */
 function testFailureText(error: unknown): string {
   const raw = messageOf(error);
   const mapped = macroStartErrorLabel(raw);
-  return mapped ? `测试失败：${mapped}` : `测试失败：${raw}`;
+  if (mapped) return t("测试失败：{reason}", { reason: tr(mapped) });
+  return effectiveLanguage.value === "zh-Hans"
+    ? t("测试失败：{reason}", { reason: raw })
+    : t("测试失败");
 }
 
 function stepReportFor(stepId: string) {
@@ -1207,25 +1483,25 @@ watch(
 <template>
   <div class="macros-page">
     <div class="page-header">
-      <h1>组合动作</h1>
-      <p class="page-subtitle">组合动作保存后，请到按键页面的按键操作中选择它。</p>
+      <h1>{{ tPage("组合动作") }}</h1>
+      <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>
 
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
       <aside class="library-pane">
         <div class="library-title-row">
-          <span class="library-title">我的组合动作</span>
+          <span class="library-title">{{ t("我的组合动作") }}</span>
           <span class="count-badge">{{ definitions.length }}</span>
         </div>
         <input
           v-model="search"
           class="search-input"
           type="search"
-          placeholder="搜索组合动作"
-          aria-label="搜索组合动作"
+          :placeholder="t('搜索组合动作')"
+          :aria-label="t('搜索组合动作')"
         />
-        <div class="macro-list" role="listbox" aria-label="组合动作列表">
+        <div class="macro-list" role="listbox" :aria-label="t('组合动作列表')">
           <button
             v-for="definition in filteredDefinitions"
             :key="definition.macroId"
@@ -1237,18 +1513,18 @@ watch(
             @click="selectedMacroId = definition.macroId"
           >
             <span class="name">{{ definition.name }}</span>
-            <span class="meta">{{ definition.steps.length }} 个步骤</span>
+            <span class="meta">{{ t("{count} 个步骤", { count: definition.steps.length }) }}</span>
           </button>
           <p v-if="!loading && definitions.length === 0" class="empty-hint">
-            还没有组合动作。创建一个，把多个操作合并成一次执行。
+            {{ t("还没有组合动作。创建一个，把多个操作合并成一次执行。") }}
           </p>
         </div>
         <div class="library-actions">
-          <button class="btn primary block" type="button" @click="startCreate">＋ 新建</button>
+          <button class="btn primary block" type="button" @click="startCreate">{{"＋ "}}{{ t("新建") }}</button>
           <div class="btn-row library-io">
-            <button class="btn" type="button" @click="onImport">导入</button>
+            <button class="btn" type="button" @click="onImport">{{ t("导入") }}</button>
             <button class="btn" type="button" :disabled="definitions.length === 0" @click="onExport">
-              导出
+              {{ t("导出") }}
             </button>
           </div>
         </div>
@@ -1260,82 +1536,90 @@ watch(
             <h2>{{ selectedDefinition.name }}</h2>
             <span class="spacer"></span>
             <button class="btn" type="button" @click="testSavedMacro(selectedDefinition.macroId)">
-              测试动作
+              {{ t("测试动作") }}
             </button>
             <button class="btn primary" type="button" @click="startEdit(selectedDefinition)">
-              编辑
+              {{ t("编辑") }}
             </button>
           </div>
           <ol class="step-list">
             <li v-for="step in selectedDefinition.steps" :key="step.stepId" class="step-item">
               <span class="step-number">{{ selectedDefinition.steps.indexOf(step) + 1 }}</span>
               <span class="step-text">
-                <span class="step-title">{{ macroActionLabel(step.action) }}</span>
+                <span class="step-title">{{ tr(macroActionLabel(step.action)) }}</span>
                 <span class="step-summary">{{ macroStepSummary(step) }}</span>
               </span>
               <span v-if="stepReportFor(step.stepId)" class="step-outcome">
-                {{ macroStepOutcomeLabel(stepReportFor(step.stepId)!.outcome) }}
+                {{ tr(macroStepOutcomeLabel(stepReportFor(step.stepId)!.outcome)) }}
               </span>
             </li>
           </ol>
           <div class="detail-actions">
             <button class="btn" type="button" @click="duplicateMacro(selectedDefinition)">
-              复制
+              {{ t("复制") }}
             </button>
             <button class="btn danger" type="button" @click="toggleDelete(selectedDefinition.macroId)">
-              删除
+              {{ t("删除") }}
             </button>
           </div>
           <section class="references">
-            <h3 class="references-title">使用位置</h3>
+            <h3 class="references-title">{{ t("使用位置") }}</h3>
             <p
               v-if="!references || references.buttons.length + references.nestedIn.length === 0"
               class="field-hint"
             >
-              还没有按键或组合动作使用它。
+              {{ t("还没有按键或组合动作使用它。") }}
             </p>
             <ul v-else class="reference-list">
               <li v-for="item in references.buttons" :key="`b-${item.button}-${item.trigger}`">
-                按键：{{ buttonLabel(item.button as RemoteButton) }} ·
-                {{ buttonTriggerLabel(item.trigger as ButtonTrigger) }}
+                {{
+                  t("按键：{button} · {trigger}", {
+                    button: tr(buttonLabel(item.button as RemoteButton)),
+                    trigger: tr(buttonTriggerLabel(item.trigger as ButtonTrigger)),
+                  })
+                }}
               </li>
-              <li v-for="name in references.nestedIn" :key="`n-${name}`">嵌套于：{{ name }}</li>
+              <li v-for="name in references.nestedIn" :key="`n-${name}`">
+                {{ t("嵌套于：{name}", { name }) }}
+              </li>
             </ul>
           </section>
           <div v-if="pendingDeleteId === selectedDefinition.macroId" class="delete-confirm">
-            <p class="delete-confirm-lead">删除后不可恢复。</p>
+            <p class="delete-confirm-lead">{{ t("删除后不可恢复。") }}</p>
             <p v-if="deleteReferenceText" class="delete-confirm-impact">
-              这些按键会改为<strong>未设置</strong>：{{ deleteReferenceText }}
+              {{ t("这些按键会改为") }}<strong>{{ t("未设置") }}</strong>{{ t("：{buttons}", { buttons: deleteReferenceText }) }}
             </p>
             <p
               v-if="deleteReferences && deleteReferences.nestedIn.length > 0"
               class="delete-confirm-impact"
             >
-              这些组合动作嵌套引用了它，删除后会把这些嵌套步骤一并移除：{{
-                deleteReferences.nestedIn.join("、")
+              {{
+                t("这些组合动作嵌套引用了它，删除后会把这些嵌套步骤一并移除：{routines}", {
+                  routines: deleteReferences.nestedIn.join(t("、")),
+                })
               }}
             </p>
             <p v-if="deleteReferences && !deleteReferenceText && deleteReferences.nestedIn.length === 0" class="delete-confirm-impact">
-              没有按键或组合动作引用它。
+              {{ t("没有按键或组合动作引用它。") }}
             </p>
             <div class="btn-row">
-              <button class="btn" type="button" @click="toggleDelete(selectedDefinition.macroId)">取消</button>
+              <button class="btn" type="button" @click="toggleDelete(selectedDefinition.macroId)">{{ t("取消") }}</button>
               <button
                 class="btn danger"
                 type="button"
                 @click="confirmDelete(selectedDefinition.macroId)"
               >
-                删除
+                {{ t("删除") }}
               </button>
             </div>
           </div>
         </template>
         <div v-else class="empty-state">
           <span class="empty-icon" aria-hidden="true">▤</span>
-          <h3>创建第一个组合动作</h3>
-          <p>把打开 App、按键或输入框聚焦组合起来，再设到遥控器按键上。</p>
-          <button class="btn primary" type="button" @click="startCreate">创建组合动作</button>
-          <p class="hint">创建后可继续添加步骤并测试执行。</p>
+          <h3>{{ t("创建第一个组合动作") }}</h3>
+          <p>{{ t("把打开 App、按键或输入框聚焦组合起来，再设到遥控器按键上。") }}</p>
+          <button class="btn primary" type="button" @click="startCreate">{{ t("创建组合动作") }}</button>
+          <p class="hint">{{ t("创建后可继续添加步骤并测试执行。") }}</p>
         </div>
       </section>
     </div>
@@ -1344,7 +1628,7 @@ watch(
     <template v-else>
       <div v-if="draft" class="wizard">
         <header class="wizard-head">
-          <h2>{{ isNewMacro ? "新建组合动作" : "编辑组合动作" }}</h2>
+          <h2>{{ isNewMacro ? t("新建组合动作") : t("编辑组合动作") }}</h2>
           <div class="steps-indicator">
             <button
               class="step-pill"
@@ -1352,7 +1636,7 @@ watch(
               type="button"
               @click="goToStep('basic')"
             >
-              <span class="dot">1</span>基本设置
+              <span class="dot">1</span>{{ t("基本设置") }}
             </button>
             <span class="line"></span>
             <button
@@ -1361,7 +1645,7 @@ watch(
               type="button"
               @click="goToStep('steps')"
             >
-              <span class="dot">2</span>编排步骤
+              <span class="dot">2</span>{{ t("编排步骤") }}
             </button>
             <span class="line"></span>
             <button
@@ -1370,7 +1654,7 @@ watch(
               type="button"
               @click="goToStep('review')"
             >
-              <span class="dot">3</span>测试与保存
+              <span class="dot">3</span>{{ t("测试与保存") }}
             </button>
           </div>
         </header>
@@ -1378,19 +1662,19 @@ watch(
         <!-- ① 基本设置 -->
         <div v-if="editorStep === 'basic'" class="wizard-body basic-body">
           <label class="field">
-            <span class="field-label">组合动作名称</span>
+            <span class="field-label">{{ t("组合动作名称") }}</span>
             <input
               class="text-input"
               type="text"
               :value="draft.name"
               :maxlength="MAX_NAME_CHARS"
-              placeholder="例如：打开 Codex 并聚焦输入框"
+              :placeholder="t('例如：打开 Codex 并聚焦输入框')"
               @input="renameDraft(($event.target as HTMLInputElement).value)"
             />
-            <span class="field-hint">最多 {{ MAX_NAME_CHARS }} 个字符。</span>
+            <span class="field-hint">{{ t("最多 {count} 个字符。", { count: MAX_NAME_CHARS }) }}</span>
           </label>
           <div v-if="isNewMacro" class="first-action">
-            <p class="field-label">选择第一个动作</p>
+            <p class="field-label">{{ t("选择第一个动作") }}</p>
             <div class="action-grid">
               <button
                 v-for="action in ACTION_ORDER"
@@ -1400,29 +1684,29 @@ watch(
                 type="button"
                 @click="addStep(action)"
               >
-                <span>{{ macroActionLabel(action) }}</span>
+                <span>{{ tr(macroActionLabel(action)) }}</span>
                 <span v-if="draft.steps[0]?.action === action" class="action-check" aria-hidden="true">
                   ✓
                 </span>
               </button>
             </div>
             <p v-if="draft.steps.length > 0" class="field-hint">
-              已添加：<strong>{{ macroActionLabel(draft.steps[0].action) }}</strong> · 已有
-              {{ draft.steps.length }} 个步骤，可在下一步修改顺序和参数。
+              {{ t("已添加：") }}<strong>{{ tr(macroActionLabel(draft.steps[0].action)) }}</strong> ·
+              {{ t("已有 {count} 个步骤，可在下一步修改顺序和参数。", { count: draft.steps.length }) }}
             </p>
             <p v-else class="field-hint">
-              选择动作后，点击“下一步”配置；名称和步骤在最后一起保存。
+              {{ t("选择动作后，点击“下一步”配置；名称和步骤在最后一起保存。") }}
             </p>
           </div>
           <p v-else class="field-hint">
-            已有 {{ draft.steps.length }} 个步骤，可在下一步修改顺序和参数。
+            {{ t("已有 {count} 个步骤，可在下一步修改顺序和参数。", { count: draft.steps.length }) }}
           </p>
         </div>
 
         <!-- ② 编排步骤 -->
         <div v-else-if="editorStep === 'steps'" class="wizard-body steps-body">
           <aside class="steps-pane">
-            <div class="name-banner">{{ draft.name || "未命名" }}</div>
+            <div class="name-banner">{{ draft.name || t("未命名") }}</div>
             <div class="step-edit-list">
               <div
                 v-for="(step, index) in draft.steps"
@@ -1433,14 +1717,14 @@ watch(
               >
                 <span class="step-number">{{ index + 1 }}</span>
                 <span class="grow">
-                  <span class="step-title">{{ macroActionLabel(step.action) }}</span>
+                  <span class="step-title">{{ tr(macroActionLabel(step.action)) }}</span>
                   <span class="step-summary">{{ macroStepSummary(step) }}</span>
                 </span>
                 <span class="move-col">
                   <button
                     type="button"
                     :disabled="index === 0"
-                    aria-label="上移步骤"
+                    :aria-label="t('上移步骤')"
                     @click.stop="moveStep(index, -1)"
                   >
                     ▲
@@ -1448,17 +1732,17 @@ watch(
                   <button
                     type="button"
                     :disabled="index === draft.steps.length - 1"
-                    aria-label="下移步骤"
+                    :aria-label="t('下移步骤')"
                     @click.stop="moveStep(index, 1)"
                   >
                     ▼
                   </button>
                 </span>
               </div>
-              <p v-if="draft.steps.length === 0" class="empty-hint">请从下方添加第一个步骤。</p>
+              <p v-if="draft.steps.length === 0" class="empty-hint">{{ t("请从下方添加第一个步骤。") }}</p>
             </div>
             <div class="add-steps">
-              <p class="field-label">添加步骤</p>
+              <p class="field-label">{{ t("添加步骤") }}</p>
               <div class="action-grid">
                 <button
                   v-for="action in ACTION_ORDER"
@@ -1467,7 +1751,7 @@ watch(
                   type="button"
                   @click="addStep(action)"
                 >
-                  {{ macroActionLabel(action) }}
+                  {{ tr(macroActionLabel(action)) }}
                 </button>
               </div>
             </div>
@@ -1477,22 +1761,22 @@ watch(
             <template v-if="selectedStepIndex >= 0">
               <article class="step-card">
                 <header class="step-card-head">
-                  <span class="label">步骤 {{ selectedStepIndex + 1 }}</span>
-                  <span class="title">{{ macroActionLabel(draft.steps[selectedStepIndex].action) }}</span>
+                  <span class="label">{{ t("步骤 {step}", { step: selectedStepIndex + 1 }) }}</span>
+                  <span class="title">{{ tr(macroActionLabel(draft.steps[selectedStepIndex].action)) }}</span>
                   <span class="spacer"></span>
                   <button
                     class="btn"
                     type="button"
                     @click="runStepTest(draft.steps[selectedStepIndex].stepId)"
                   >
-                    测试这步
+                    {{ t("测试这步") }}
                   </button>
                   <button
                     class="btn danger"
                     type="button"
                     @click="removeStep(draft.steps[selectedStepIndex].stepId)"
                   >
-                    删除
+                    {{ t("删除") }}
                   </button>
                 </header>
 
@@ -1502,7 +1786,7 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <span class="field-label">要使用的 App</span>
+                    <span class="field-label">{{ t("要使用的 App") }}</span>
                     <!-- 与按键页同一套 chip 网格（2026-10-19 用户要求） -->
                     <div class="preset-grid app-library">
                       <button
@@ -1515,16 +1799,16 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="appPickerOpen = true">扫描本机应用</button>
+                      <button class="chip" type="button" @click="appPickerOpen = true">{{ t("扫描本机应用") }}</button>
                       <button class="chip add-app" type="button" @click="addCustomAppToStep">
-                        ＋ 添加应用
+                        {{"＋ "}}{{ t("添加应用") }}
                       </button>
                     </div>
                   </div>
                   <span class="field-hint">
-                    未运行时会先启动；已运行时直接切换到前台。
+                    {{ t("未运行时会先启动；已运行时直接切换到前台。") }}
                     <template v-if="draft.steps[selectedStepIndex].parameters.target">
-                      当前：{{ appDisplayName(draft.steps[selectedStepIndex].parameters.target) }}
+                      {{ t("当前：{name}", { name: appDisplayName(draft.steps[selectedStepIndex].parameters.target) }) }}
                     </template>
                   </span>
                 </div>
@@ -1535,7 +1819,7 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <span class="field-label">要等待的 App</span>
+                    <span class="field-label">{{ t("要等待的 App") }}</span>
                     <div class="preset-grid app-library">
                       <button
                         v-for="app in appChoices"
@@ -1547,32 +1831,32 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="appPickerOpen = true">扫描本机应用</button>
+                      <button class="chip" type="button" @click="appPickerOpen = true">{{ t("扫描本机应用") }}</button>
                       <button class="chip add-app" type="button" @click="addCustomAppToStep">
-                        ＋ 添加应用
+                        {{"＋ "}}{{ t("添加应用") }}
                       </button>
                     </div>
                   </div>
                   <div class="field">
-                    <span class="field-label">等待到什么时候</span>
+                    <span class="field-label">{{ t("等待到什么时候") }}</span>
                     <div class="segmented">
                       <button
                         type="button"
                         :class="{ on: draft.steps[selectedStepIndex].parameters.state === 'running' }"
                         @click="updateSelectedStep((step) => { step.parameters.state = 'running'; })"
                       >
-                        App 已打开
+                        {{ t("App 已打开") }}
                       </button>
                       <button
                         type="button"
                         :class="{ on: draft.steps[selectedStepIndex].parameters.state !== 'running' }"
                         @click="updateSelectedStep((step) => { step.parameters.state = 'visible_window'; })"
                       >
-                        App 窗口已出现
+                        {{ t("App 窗口已出现") }}
                       </button>
                     </div>
                   </div>
-                  <span class="field-hint">最多 5 秒；超时后停止执行并提示。</span>
+                  <span class="field-hint">{{ t("最多 5 秒；超时后停止执行并提示。") }}</span>
                 </div>
 
                 <!-- 单键或快捷键 -->
@@ -1581,12 +1865,12 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <span class="field-label">已录入</span>
+                    <span class="field-label">{{ t("已录入") }}</span>
                     <span class="chord-display" data-testid="chord-display">
                       {{
                         draft.steps[selectedStepIndex].parameters.chord
                           ? macroChordLabel(draft.steps[selectedStepIndex].parameters.chord!)
-                          : "尚未录入按键"
+                          : t("尚未录入按键")
                       }}
                     </span>
                   </div>
@@ -1598,21 +1882,21 @@ watch(
                       data-testid="combo-capture-button"
                       @click="captureActive ? cancelCapture() : beginCapture()"
                     >
-                      {{ captureActive ? "录入中…（点击取消）" : "开始录入" }}
+                      {{ captureActive ? t("录入中…（点击取消）") : t("开始录入") }}
                     </button>
                     <span
                       v-if="captureActive"
                       class="capture-hint"
                       data-testid="combo-capture-hint"
                     >
-                      请按一次单键或组合键，按 Esc 取消；15 秒无操作会自动结束。
+                      {{ t("请按一次单键或组合键，按 Esc 取消；15 秒无操作会自动结束。") }}
                     </span>
                   </div>
                   <span class="field-hint">
-                    点击“开始录入”后，只捕获下一次完整的单键或组合键，然后立即停止。
+                    {{ t("点击“开始录入”后，只捕获下一次完整的单键或组合键，然后立即停止。") }}
                   </span>
                   <div v-if="savedShortcuts.length > 0" class="shortcut-group">
-                    <p class="field-label">已保存的快捷键</p>
+                    <p class="field-label">{{ t("已保存的快捷键") }}</p>
                     <div class="preset-grid">
                       <button
                         v-for="item in savedShortcuts"
@@ -1632,9 +1916,9 @@ watch(
                     </div>
                   </div>
                   <div class="shortcut-group">
-                    <p class="field-label">常用快捷键</p>
+                    <p class="field-label">{{ t("常用快捷键") }}</p>
                     <template v-for="group in commonShortcutGroups" :key="group.label">
-                      <p class="field-hint">{{ group.label }}</p>
+                      <p class="field-hint">{{ tr(group.label) }}</p>
                       <div class="preset-grid">
                         <button
                           v-for="item in group.items"
@@ -1649,7 +1933,7 @@ watch(
                           type="button"
                           @click="applyChordToSelectedStep(item.chord)"
                         >
-                          {{ item.label }}
+                          {{ tr(item.label) }}
                         </button>
                       </div>
                     </template>
@@ -1662,8 +1946,7 @@ watch(
                   class="step-card-body"
                 >
                   <p class="field-hint">
-                    把键盘焦点放到<strong>当前前台应用</strong>的输入框；不切换应用、不输入文字。
-                    需要指定某个 App 时请改用「聚焦学习过的输入框」。
+                    {{ t("把键盘焦点放到") }}<strong>{{ t("当前前台应用") }}</strong>{{ t("的输入框；不切换应用、不输入文字。需要指定某个 App 时请改用「聚焦学习过的输入框」。") }}
                   </p>
                 </div>
 
@@ -1673,17 +1956,17 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <span class="field-label">系统与媒体动作</span>
+                    <span class="field-label">{{ t("系统与媒体动作") }}</span>
                     <span class="chord-display">
                       {{
                         draft.steps[selectedStepIndex].parameters.chord
                           ? macroChordLabel(draft.steps[selectedStepIndex].parameters.chord!)
-                          : "尚未选择系统动作"
+                          : t("尚未选择系统动作")
                       }}
                     </span>
                   </div>
                   <span class="field-hint">
-                    该步骤来自旧版本，仍可执行或删除；新步骤请使用「单键或快捷键」。
+                    {{ t("该步骤来自旧版本，仍可执行或删除；新步骤请使用「单键或快捷键」。") }}
                   </span>
                 </div>
 
@@ -1693,72 +1976,191 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <span class="field-label">目标 App</span>
+                    <h4 class="action-section-title">{{ t("打开应用") }}</h4>
                     <div class="preset-grid app-library">
                       <button
-                        v-for="app in appChoices"
+                        v-for="app in focusTargetChoices"
                         :key="app.id"
                         class="chip"
-                        :class="{ selected: draft.steps[selectedStepIndex].parameters.target === app.id }"
+                        :class="{
+                          selected: focusTarget === app.id,
+                          'custom-app': !isPresetTarget(app.id),
+                        }"
                         type="button"
+                        :title="app.name"
+                        :disabled="focusBusy"
                         @click="renameStepTarget(app.id)"
                       >
-                        {{ app.name }}
+                        {{ tr(openAppLabel(app.name)) }}
                       </button>
-                      <button class="chip" type="button" @click="appPickerOpen = true">扫描本机应用</button>
+                      <button class="chip" type="button" @click="appPickerOpen = true">
+                        {{ t("扫描本机应用") }}
+                      </button>
                       <button class="chip add-app" type="button" @click="addCustomAppToStep">
-                        ＋ 添加应用
+                        {{"＋ "}}{{ t("添加应用") }}
                       </button>
                     </div>
-                    <span
-                      class="focus-state"
-                      :data-ready="
-                        focusReady(draft.steps[selectedStepIndex].parameters.target) ||
-                          focusPointReady(draft.steps[selectedStepIndex].parameters.target)
-                      "
-                      data-testid="focus-state"
-                    >
-                      {{
-                        focusReady(draft.steps[selectedStepIndex].parameters.target)
-                          ? "已学习这个 App 的输入框"
-                          : focusPointReady(draft.steps[selectedStepIndex].parameters.target)
-                            ? "已记录这个 App 的点击位置"
-                            : "还没有学习过这个 App 的输入框"
-                      }}
-                    </span>
                   </div>
-                  <div class="btn-row">
-                    <button class="btn primary" type="button" @click="startLearning">
-                      {{ focusReady(draft.steps[selectedStepIndex].parameters.target) ? "重新学习" : "学习输入框" }}
-                    </button>
-                    <button
-                      class="btn"
-                      type="button"
-                      @click="startPointRecording"
-                      title="目标应用在 UIA 里没有输入框时（例如微信 4.x）：把鼠标停在目标输入框上，按这个按钮记录位置"
-                    >
-                      {{ focusPointReady(draft.steps[selectedStepIndex].parameters.target) ? "重新记录位置" : "记录点击位置" }}
-                    </button>
-                    <span
-                      v-if="learningStepId === draft.steps[selectedStepIndex].stepId"
-                      class="countdown"
-                    >
-                      <template v-if="pointCountdown > 0">
-                        {{ pointCountdown }} 秒后自动记录鼠标位置：请先把鼠标停在目标输入框上
-                      </template>
-                      <template v-else>
-                        {{ learningCountdown }} 秒内点击目标输入框，保持光标在那里
-                      </template>
-                    </span>
+                  <div v-if="focusTarget" class="focus-profile">
+                    <p class="action-section-title focus-profile-title">{{ t("聚焦方式") }}</p>
+                    <div class="preset-grid">
+                      <button
+                        v-for="option in focusStrategyOptions"
+                        :key="option.value"
+                        class="chip focus-strategy-option"
+                        :class="{
+                          selected: (focusProfile?.strategy ?? 'open_only') === option.value,
+                          'focus-point-chip': option.value === 'recorded_point',
+                        }"
+                        type="button"
+                        :aria-pressed="(focusProfile?.strategy ?? 'open_only') === option.value"
+                        :disabled="focusBusy"
+                        @click="applyFocusStrategy(option.value)"
+                      >
+                        {{ tr(option.label) }}
+                      </button>
+                      <button
+                        v-if="hasPresetFocusOverride"
+                        class="focus-reset-link"
+                        type="button"
+                        :disabled="focusBusy"
+                        @click="resetPresetFocus"
+                      >
+                        {{ t("恢复默认") }}
+                      </button>
+                    </div>
+                    <template v-if="focusProfile?.strategy === 'app_shortcut'">
+                      <p class="muted focus-learn-hint">
+                        {{ t("先点击“录入快捷键”，再按下该 APP 用于聚焦输入框的单个按键或组合键。执行时会先激活 APP，再发送此按键。") }}
+                      </p>
+                      <div class="focus-shortcut-row">
+                        <span
+                          class="focus-shortcut-value"
+                          :class="{ empty: !focusProfile?.shortcut?.keys?.length }"
+                        >
+                          <svg class="focus-shortcut-keyboard" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <rect x="2.5" y="6" width="19" height="12" rx="2.5" />
+                            <path d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M6 13h.01M9 13h.01M12 13h.01M15 13h.01M18 13h.01M7 16h10" />
+                          </svg>
+                          {{
+                            focusProfile?.shortcut?.keys?.length
+                              ? chordLabel(focusProfile.shortcut)
+                              : t("尚未录入")
+                          }}
+                        </span>
+                        <button
+                          class="chip"
+                          type="button"
+                          :disabled="focusBusy && !(captureActive && capturePurpose === 'focus_shortcut')"
+                          @click="
+                            captureActive && capturePurpose === 'focus_shortcut'
+                              ? cancelCapture(t('已取消录入'))
+                              : beginCapture('focus_shortcut')
+                          "
+                        >
+                          {{
+                            captureActive && capturePurpose === "focus_shortcut"
+                              ? t("录入中…（按 Esc 取消）")
+                              : t("点击录入快捷键")
+                          }}
+                        </button>
+                        <button
+                          class="chip"
+                          type="button"
+                          :disabled="!focusProfile?.shortcut?.keys?.length || focusBusy"
+                          @click="clearFocusShortcut"
+                        >
+                          {{ t("清除") }}
+                        </button>
+                      </div>
+                    </template>
+                    <template v-if="focusProfile?.strategy === 'recorded_element'">
+                      <p class="muted focus-learn-hint">
+                        {{ t("点击后会立即打开目标 APP。请在 6 秒内点击需要聚焦的输入框；无线麦 SayAll 只记录辅助功能特征，不读取输入内容。") }}
+                      </p>
+                      <div class="focus-learn-row">
+                        <button
+                          class="chip"
+                          type="button"
+                          :disabled="focusLearnBusy"
+                          @click="startFocusLearning"
+                        >
+                          {{
+                            focusLearnState === "opening"
+                              ? t("正在打开应用…")
+                              : focusLearnState === "learning"
+                                ? t("等待点击输入框…")
+                                : t("开始学习输入框")
+                          }}
+                        </button>
+                        <span
+                          class="focus-record-status"
+                          :class="focusProfile?.recorded ? 'is-done' : 'is-pending'"
+                        >
+                          {{ focusProfile?.recorded ? t("已记录目标输入框") : t("尚未记录目标输入框") }}
+                        </span>
+                        <button
+                          v-if="focusProfile?.recorded"
+                          class="focus-link-button"
+                          type="button"
+                          :disabled="focusLearnBusy"
+                          @click="clearRecordedFocus"
+                        >
+                          {{ t("清除") }}
+                        </button>
+                      </div>
+                      <p
+                        v-if="focusLearnMessage"
+                        class="focus-learn-message"
+                        :class="`is-${focusLearnState}`"
+                      >
+                        {{ focusLearnMessage }}
+                      </p>
+                    </template>
+                    <template v-if="focusProfile?.strategy === 'recorded_point'">
+                      <p class="muted focus-learn-hint">
+                        {{ t("「记录点击位置」会先打开目标应用；把鼠标停在要点击的位置上，6 秒后自动记录，之后按这个位置点击聚焦。") }}
+                      </p>
+                      <div class="focus-learn-row">
+                        <button
+                          class="chip"
+                          type="button"
+                          :disabled="pointLearnState === 'opening' || pointLearnState === 'recording'"
+                          @click="recordFocusPoint"
+                        >
+                          {{
+                            pointLearnState === "opening"
+                              ? t("正在打开应用…")
+                              : pointLearnState === "recording"
+                                ? t("等待鼠标停留…")
+                                : t("开始记录位置")
+                          }}
+                        </button>
+                        <button
+                          v-if="focusProfile?.point"
+                          class="chip"
+                          type="button"
+                          :disabled="pointLearnState === 'opening' || pointLearnState === 'recording'"
+                          @click="clearRecordedPoint"
+                        >
+                          {{ t("清除记录") }}
+                        </button>
+                        <span
+                          class="focus-record-status"
+                          :class="focusProfile?.point ? 'is-done' : 'is-pending'"
+                        >
+                          {{ focusProfile?.point ? t("已记录点击位置") : t("尚未记录点击位置") }}
+                        </span>
+                      </div>
+                      <p
+                        v-if="pointLearnMessage"
+                        class="focus-learn-message"
+                        :class="`is-${pointLearnState}`"
+                      >
+                        {{ pointLearnMessage }}
+                      </p>
+                    </template>
                   </div>
-                  <span class="field-hint">
-                    前置：① 目标 App 已经打开；② 学习窗口为 6 秒：切到目标 App、把光标点进要聚焦的输入框
-                    并保持在那里（密码框、只读区域不会被记录；地址栏可以，因为你是主动点的）；
-                    焦点被应用报成顶层窗口时（Electron 常见），按鼠标所在位置命中输入框。
-                    目标应用完全没有向系统暴露输入框时（微信 4.x 实测），改用「记录点击位置」：
-                    把鼠标停在要点击的输入框上，6 秒后记录该相对位置，之后按这个位置点击聚焦。
-                    记录只属于这台电脑；也可以在按键页记录，两边共用同一份档案。
-                  </span>
                 </div>
 
                 <!-- 打开网址 -->
@@ -1767,17 +2169,17 @@ watch(
                   class="step-card-body"
                 >
                   <label class="field">
-                    <span class="field-label">网址</span>
+                    <span class="field-label">{{ t("网址") }}</span>
                     <input
                       class="text-input"
                       type="url"
                       :value="draft.steps[selectedStepIndex].parameters.url ?? ''"
-                      placeholder="输入完整网址，例如 https://www.example.com"
+                      :placeholder="t('输入完整网址，例如 https://www.example.com')"
                       @input="updateSelectedStep((step) => { step.parameters.url = ($event.target as HTMLInputElement).value; })"
                     />
                   </label>
                   <span class="field-hint">
-                    会用默认浏览器打开。只能打开普通网页，不能打开电脑里的文件或 App 内的特殊页面。
+                    {{ t("会用默认浏览器打开。只能打开普通网页，不能打开电脑里的文件或 App 内的特殊页面。") }}
                   </span>
                 </div>
 
@@ -1787,7 +2189,7 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <span class="field-label">选择组合动作</span>
+                    <span class="field-label">{{ t("选择组合动作") }}</span>
                     <div class="preset-grid">
                       <button
                         v-for="item in nestedCandidates"
@@ -1809,16 +2211,16 @@ watch(
                       </button>
                     </div>
                     <p v-if="nestedCandidates.length === 0" class="field-hint">
-                      还没有可执行的组合动作；先创建并保存一个。
+                      {{ t("还没有可执行的组合动作；先创建并保存一个。") }}
                     </p>
                   </div>
                   <span class="field-hint">
-                    这里会使用所选组合动作最后一次保存的内容。组合动作不能直接或间接执行自己，最多嵌套 8 层。
+                    {{ t("这里会使用所选组合动作最后一次保存的内容。组合动作不能直接或间接执行自己，最多嵌套 8 层。") }}
                   </span>
                 </div>
               </article>
             </template>
-            <p v-else class="empty-hint">请从左侧添加第一个步骤。</p>
+            <p v-else class="empty-hint">{{ t("请从左侧添加第一个步骤。") }}</p>
           </section>
         </div>
 
@@ -1826,26 +2228,26 @@ watch(
         <div v-else class="wizard-body review-body">
           <div class="review-summary">
             <div>
-              <p class="review-name">{{ draft.name || "未命名" }}</p>
+              <p class="review-name">{{ draft.name || t("未命名") }}</p>
               <p class="field-hint">
-                {{ draft.steps.length }} 个步骤 · 可先测试，再保存。测试不是保存的必要条件。
+                {{ t("{count} 个步骤 · 可先测试，再保存。测试不是保存的必要条件。", { count: draft.steps.length }) }}
               </p>
             </div>
             <span class="spacer"></span>
-            <button v-if="testRunning" class="btn" type="button" @click="cancelTest">取消</button>
-            <button v-else class="btn primary" type="button" @click="runDraftTest">▶ 测试动作</button>
+            <button v-if="testRunning" class="btn" type="button" @click="cancelTest">{{ t("取消") }}</button>
+            <button v-else class="btn primary" type="button" @click="runDraftTest">{{"▶ "}}{{ t("测试动作") }}</button>
           </div>
           <ol class="step-list">
             <li v-for="(step, index) in draft.steps" :key="step.stepId" class="step-item">
               <span class="step-number">{{ index + 1 }}</span>
               <span class="step-text">
-                <span class="step-title">{{ macroActionLabel(step.action) }}</span>
+                <span class="step-title">{{ tr(macroActionLabel(step.action)) }}</span>
                 <span class="step-summary">{{ macroStepSummary(step) }}</span>
               </span>
               <span v-if="stepReportFor(step.stepId)" class="step-outcome">
-                {{ macroStepOutcomeLabel(stepReportFor(step.stepId)!.outcome) }}
+                {{ tr(macroStepOutcomeLabel(stepReportFor(step.stepId)!.outcome)) }}
               </span>
-              <span v-else class="step-outcome muted">未测试</span>
+              <span v-else class="step-outcome muted">{{ t("未测试") }}</span>
             </li>
           </ol>
         </div>
@@ -1855,12 +2257,15 @@ watch(
           class="wizard-block-hint"
           role="status"
         >
-          第 {{ firstUnconfiguredStep + 1 }} 步还没设置完：{{
-            stepConfigurationIssue(draft.steps[firstUnconfiguredStep])
+          {{
+            t("第 {step} 步还没设置完：{issue}", {
+              step: firstUnconfiguredStep + 1,
+              issue: stepConfigurationIssue(draft.steps[firstUnconfiguredStep]) ?? "",
+            })
           }}
         </p>
         <footer class="wizard-foot">
-          <button class="btn" type="button" @click="cancelEditing">取消编辑</button>
+          <button class="btn" type="button" @click="cancelEditing">{{ t("取消编辑") }}</button>
           <span class="spacer"></span>
           <button
             v-if="editorStep !== 'basic'"
@@ -1868,7 +2273,7 @@ watch(
             type="button"
             @click="goToStep(editorStep === 'review' ? 'steps' : 'basic')"
           >
-            上一步
+            {{ t("上一步") }}
           </button>
           <button
             v-if="editorStep !== 'review'"
@@ -1880,10 +2285,10 @@ watch(
             "
             @click="goToStep(editorStep === 'basic' ? 'steps' : 'review')"
           >
-            下一步
+            {{ t("下一步") }}
           </button>
           <button v-else class="btn primary" type="button" :disabled="!draftValid" @click="saveDraft">
-            保存修改
+            {{ t("保存修改") }}
           </button>
         </footer>
       </div>
@@ -2497,14 +2902,68 @@ watch(
   font-size: 12px;
   font-weight: 600;
 }
-.focus-state {
-  font-size: 12px;
+/* 「聚焦方式」面板：与按键页完全同一套 chip 样式与操作。 */
+.focus-profile { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.focus-profile-title { margin: 0; }
+.focus-learn-row,
+.focus-shortcut-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.focus-shortcut-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-chip);
+  font-size: 13px;
   font-weight: 600;
-  color: var(--warning);
 }
-.focus-state[data-ready="true"] {
-  color: var(--success-text);
+.focus-shortcut-value.empty { color: var(--muted); font-weight: 400; }
+.focus-shortcut-keyboard {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
+.focus-learn-hint,
+.focus-learn-message,
+.focus-result-message { margin: 0; font-size: 12px; }
+.focus-learn-message.is-opening,
+.focus-learn-message.is-learning,
+.focus-learn-message.is-recording { color: var(--warning-text); font-weight: 600; }
+.focus-learn-message.is-captured,
+.focus-learn-message.is-recorded { color: var(--success-text); font-weight: 600; }
+.focus-learn-message.is-error { color: var(--error-text); font-weight: 600; }
+.focus-record-status { font-size: 12px; font-weight: 600; }
+.focus-record-status.is-pending { color: var(--warning-text); }
+.focus-record-status.is-done { color: var(--success-text); }
+.focus-link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.focus-link-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.focus-reset-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.focus-reset-link:disabled { opacity: 0.5; cursor: not-allowed; }
+.app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .review-summary {
   display: flex;
   align-items: center;

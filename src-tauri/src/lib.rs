@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use sayall_core::{MacroDefinition, MacroLibraryDocument};
 use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
@@ -14,11 +15,14 @@ use settings::SettingsStore;
 #[cfg(windows)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
 mod accent;
 mod app_icon;
+mod button_profiles;
 mod common_phrase_panel;
 mod diagnostics;
 mod launch_state;
@@ -30,7 +34,9 @@ mod recommendations;
 mod settings;
 mod shortcut_icons;
 mod startup;
+mod transcripts;
 mod updater;
+mod usage;
 
 use diagnostics::DiagnosticReport;
 use membership::{
@@ -38,11 +44,15 @@ use membership::{
     MembershipRuntime, MembershipSnapshot,
 };
 use platform::PlatformRuntime;
-use recommendations::{hide_recommendations, open_recommendations_website, show_recommendations};
-use sayall_core::{AppIconIdentifier, ThemePreference, VoiceInputTool};
+use recommendations::{
+    go_back_recommendations, hide_recommendations, open_recommendations_website,
+    retry_recommendations, show_recommendations,
+};
+use sayall_core::{AppIconIdentifier, AppLanguage, ThemePreference, VoiceInputTool};
 use updater::{
     check_app_update, get_app_update_preferences, install_app_update, set_app_update_preferences,
 };
+use usage::{build_usage_profile, UsageProfile, UsageStore, UsageSync};
 
 /// 主窗口标签（`tauri.conf.json` 里由配置创建的唯一窗口）。
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -233,10 +243,158 @@ fn observe_webview_failure(webview: &tauri::Webview) {
     }
 }
 
+/// Ctrl+W 的原生兜底：WebView2 会把部分浏览器加速键在页面之前处理，页面层的
+/// `keydown` 收不到物理 Ctrl+W（注入的 Ctrl+W 仍可能到达页面，表现为“遥控器能关、
+/// 键盘不能关”）。这里在 WebView2 的 AcceleratorKeyPressed 阶段拦截，命中后直接
+/// 复用与“X”相同的隐藏动作，并标记已处理，避免浏览器继续处理该组合键。
+#[cfg(windows)]
+fn install_ctrl_w_accelerator(webview: &tauri::Webview) {
+    use webview2_com::{
+        AcceleratorKeyPressedEventHandler,
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+            COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+        },
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let app = webview.app_handle().clone();
+    let result = webview.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_sender, args| {
+            let Some(args) = args.as_ref() else {
+                return Ok(());
+            };
+            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND(0);
+            if args.KeyEventKind(&mut kind).is_err()
+                || (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                    && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+            {
+                return Ok(());
+            }
+            let mut virtual_key = 0u32;
+            if args.VirtualKey(&mut virtual_key).is_err() || virtual_key != 'W' as u32 {
+                return Ok(());
+            }
+            let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+            if !down(VK_CONTROL)
+                || down(VK_MENU)
+                || down(VK_SHIFT)
+                || down(VK_LWIN)
+                || down(VK_RWIN)
+            {
+                return Ok(());
+            }
+            let _ = args.SetHandled(true);
+            sayall_windows::gatt_note(
+                "window_close action=hide_to_tray source=ctrl_w_accelerator phase=submitted"
+                    .to_owned(),
+            );
+            let app_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = hide_main_window(app_main);
+            });
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let result = controller.add_AcceleratorKeyPressed(&handler, &mut token);
+        sayall_windows::gatt_note(format!(
+            "window_close action=install_accelerator source=ctrl_w terminal_result={}",
+            if result.is_ok() { "passed" } else { "failed" }
+        ));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(
+            "window_close action=install_accelerator source=ctrl_w terminal_result=failed stage=dispatch"
+                .to_owned(),
+        );
+    }
+}
+
+/// 主窗口 HWND 的子类化实例 ID（同一窗口只注册一次）。
+#[cfg(windows)]
+const WINDOW_KEY_SUBCLASS_ID: usize = 0x5A12;
+/// 子类化回调需要的 AppHandle；单实例应用只有主窗口，进程内取一次即可。
+#[cfg(windows)]
+static WINDOW_KEY_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// 标题栏/非客户区获得键盘焦点时，WebView2 收不到按键，页面层 handler 和
+/// AcceleratorKeyPressed 都不会触发；此时 Ctrl+W 会落到顶层窗口的 WM_KEYDOWN。
+/// 子类化主窗口补齐这条路径，命中后仍走 hide_main_window（与 X 同一动作）。
+#[cfg(windows)]
+fn install_window_key_subclass(window: &tauri::Window) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+
+    let Ok(raw) = window.hwnd() else {
+        sayall_windows::gatt_note(
+            "window_close action=install_window_subclass source=ctrl_w terminal_result=failed reason=hwnd_missing"
+                .to_owned(),
+        );
+        return;
+    };
+    let _ = WINDOW_KEY_APP.set(window.app_handle().clone());
+    let installed = unsafe {
+        SetWindowSubclass(
+            HWND(raw.0),
+            Some(window_key_subclass),
+            WINDOW_KEY_SUBCLASS_ID,
+            0,
+        )
+        .as_bool()
+    };
+    sayall_windows::gatt_note(format!(
+        "window_close action=install_window_subclass source=ctrl_w terminal_result={}",
+        if installed { "passed" } else { "failed" }
+    ));
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn window_key_subclass(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_NCDESTROY};
+
+    if message == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(hwnd, Some(window_key_subclass), WINDOW_KEY_SUBCLASS_ID);
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+    if message == WM_KEYDOWN && wparam.0 == 'W' as usize {
+        let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+        if down(VK_CONTROL) && !down(VK_MENU) && !down(VK_SHIFT) && !down(VK_LWIN) && !down(VK_RWIN)
+        {
+            if let Some(app) = WINDOW_KEY_APP.get() {
+                sayall_windows::gatt_note(
+                    "window_close action=hide_to_tray source=ctrl_w_window phase=submitted"
+                        .to_owned(),
+                );
+                let _ = hide_main_window(app.clone());
+            }
+            return LRESULT(0);
+        }
+    }
+    DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
 /// 界面未能正常显示时写进窗口标题的文案（2026-10-07 定稿，见 docs/product-copy.md）。
 /// 放在 Rust 是因为界面已经不工作时它也必须能显示，与托盘菜单文案同理。
 #[cfg(windows)]
 const WEBVIEW_UNAVAILABLE_TITLE: &str = "无线麦 SayAll 界面未能正常显示，请从托盘退出后重开";
+#[cfg(windows)]
+const WEBVIEW_UNAVAILABLE_TITLE_EN: &str =
+    "SayAll could not display its interface. Quit from the tray and reopen it.";
 
 /// 判定宽限期：前端每秒报到一次，连续 5 秒没有信号才认定界面没有回来。
 /// 窗口收进托盘时 WebView 会把定时器节流，可能误判为"没回来"；页面一旦恢复
@@ -395,7 +553,7 @@ fn resolve_ui_hint(app: &tauri::AppHandle, baseline: u64, reason: &'static str) 
                 if !with_ui_hint(|state| state.mark_showing(previous_title)) {
                     return;
                 }
-                match window.set_title(WEBVIEW_UNAVAILABLE_TITLE) {
+                match window.set_title(webview_unavailable_title(&handle)) {
                     Ok(()) => sayall_windows::gatt_note(format!(
                         "webview event=ui_hint phase=completed action=title result=written reason={reason} window_visible={window_visible} signal_age_ms={}",
                         signal_age_field(baseline)
@@ -423,8 +581,12 @@ struct RuntimeSnapshot {
 struct AppState {
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
+    /// 本机使用统计的批量落盘器（个人中心）。
+    usage: Arc<UsageSync>,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    /// 「开着但没生效」的用户可见原因（2026-10-27，issue #291）：界面据此选文案。
+    capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
     /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
     membership: Arc<dyn MembershipRuntime>,
     /// 启动对账**主动关掉**开关的原因（2026-10-15，issue #264 附加观察甲）：只用于
@@ -436,6 +598,8 @@ struct AppState {
     /// 本次启动前刚完成更新时的版本号；前端取走一次后清空（对齐 Mac
     /// `showUpdateCompletedAlert`：只在更新后的第一次启动提示）。
     update_completed_version: std::sync::Mutex<Option<String>>,
+    /// 回眸本地归档（`%LOCALAPPDATA%\SayAll\transcripts\v1`）。
+    transcripts: Arc<transcripts::TranscriptStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -444,10 +608,15 @@ impl std::fmt::Debug for AppState {
             .debug_struct("AppState")
             .field("platform", &self.platform)
             .field("settings", &self.settings)
+            .field("usage", &self.usage)
             .field("membership", &self.membership)
             .field(
                 "capture_health",
                 &CaptureHealth::current(&self.capture_health).as_str(),
+            )
+            .field(
+                "capture_unavailable",
+                &CaptureUnavailable::current(&self.capture_unavailable).as_str(),
             )
             .field(
                 "capture_revoked",
@@ -483,13 +652,35 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+/// 个人中心读模型（2026-10-24）。
+///
+/// 先做一次有界 flush（失败只保留待写事件并记日志，不阻断读取），再把统计
+/// 整理成界面直接消费的 KPI、按控件计数、语音排行和最近 182 天日历。
+#[tauri::command]
+async fn get_usage_profile(state: tauri::State<'_, AppState>) -> Result<UsageProfile, String> {
+    let usage = Arc::clone(&state.usage);
+    tauri::async_runtime::spawn_blocking(move || {
+        // 先做一次有界 flush，让刚结束的按键/语音进入内存统计；读模型用内存快照，
+        // 不再依赖 settings.json（统计已迁移到独立文件）。
+        let _ = usage.flush();
+        Ok(build_usage_profile(
+            &usage.snapshot(),
+            chrono::Local::now().date_naive(),
+        ))
+    })
+    .await
+    .map_err(|_| "usage_profile_unavailable".to_owned())?
+}
+
 /// 会员摘要（2026-10-15）：公开构建恒为「不可用」，私有构建返回账号与权益。
 /// 隐私红线同 [`MembershipSnapshot`]：不含凭据、令牌与邮箱原文。
 ///
 /// 读的是内存快照，因此保持同步：它由界面按秒轮询，必须立刻返回。
 #[tauri::command]
 fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
-    state.membership.snapshot()
+    let snapshot = state.membership.snapshot();
+    button_profiles::apply_membership(&snapshot);
+    snapshot
 }
 
 /// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
@@ -1091,6 +1282,9 @@ struct Rc003BridgeView {
     bridge: BridgeSnapshot,
     /// `off` / `starting` / `active` / `inactive`（前端 `Rc003CaptureHealth` 逐字对应）。
     capture_health: &'static str,
+    /// 「开着但没生效」的原因：`none` / `startup_failing`（前端 `Rc003CaptureUnavailable`
+    /// 逐字对应）。只在 `capture_health = inactive` 时有意义，界面据此选文案。
+    capture_unavailable: &'static str,
     /// 启动对账主动关掉开关的原因（`none` = 没发生；前端 `Rc003CaptureRevoked` 逐字对应）。
     capture_revoked: &'static str,
 }
@@ -1105,6 +1299,7 @@ async fn get_rc003_bridge_snapshot(
 ) -> Result<Rc003BridgeView, String> {
     let platform = Arc::clone(&state.platform);
     let capture_health = CaptureHealth::current(&state.capture_health).as_str();
+    let capture_unavailable = CaptureUnavailable::current(&state.capture_unavailable).as_str();
     let capture_revoked = CaptureRevoke::current(&state.capture_revoked).as_str();
     let bridge = tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
         .await
@@ -1112,6 +1307,7 @@ async fn get_rc003_bridge_snapshot(
     Ok(Rc003BridgeView {
         bridge,
         capture_health,
+        capture_unavailable,
         capture_revoked,
     })
 }
@@ -1660,6 +1856,107 @@ fn capture_health_for_round(
     CaptureHealth::Starting
 }
 
+/// 「助手反复连上就断」的计数推进（纯函数，单测覆盖）。
+///
+/// 输入是桥接快照里**累计**的接受次数，所以只看增量：应用启动前（上一次安装/上次运行）
+/// 的接受不该算进本次开启。桥重启会让累计值回退，此时只把基线跟上去，不清计数——
+/// 计数表达的是"本次开启以来失败了几次"。
+///
+/// 拿到所有权就清零：那是"助手真的起来了"的唯一证据（配置回执不算，见 #264）。
+fn advance_helper_accept_streak(
+    streak: u32,
+    last_seen: u64,
+    total: u64,
+    owned_usages: usize,
+) -> (u32, u64) {
+    if total < last_seen {
+        return (streak, total);
+    }
+    if owned_usages > 0 {
+        return (0, total);
+    }
+    let delta = (total - last_seen).min(u32::MAX as u64) as u32;
+    (streak.saturating_add(delta), total)
+}
+
+/// 接受次数是否已达「助手根本没起来」的阈值（纯函数，单测覆盖）。
+fn helper_startup_failing(streak: u32) -> bool {
+    streak >= HELPER_STARTUP_FAILURE_ACCEPTS
+}
+
+/// 把"助手反复启动失败"叠到本轮生效状态上（纯函数，单测覆盖）。
+///
+/// 只在**没有所有权**时生效：一旦真的接管，界面必须立刻回到 `active`——
+/// 否则一次偶发误判会把提示挂到功能恢复之后（0.8.1 的老毛病：判据只看失败条件
+/// 消失与否）。`Inactive` 的语义因此扩成两条来源：过了宽限仍无所有权，
+/// 或本次开启以来助手反复被接受却一次都没接管——两者的用户含义相同（开着没生效）。
+fn capture_health_with_startup_failure(
+    base: CaptureHealth,
+    startup_failing: bool,
+    owned_usages: usize,
+) -> CaptureHealth {
+    // 开关关着就没有"是不是启动失败"可言：这条判定只属于开启态
+    // （关着还发布 Inactive 会让界面在开关关闭时显示提示）。
+    if matches!(base, CaptureHealth::Off) {
+        return base;
+    }
+    if startup_failing && owned_usages == 0 {
+        CaptureHealth::Inactive
+    } else {
+        base
+    }
+}
+
+/// 「开着但没生效」的**用户可见原因**（2026-10-27，issue #291）。
+///
+/// `CaptureHealth` 只回答"生效了吗"，界面据此决定显不显示提示；这一层回答
+/// "为什么没生效"，界面据此选哪一句话。两者刻意分开：health 是四态枚举、被多处
+/// 复用，往里加值等于改前端契约；原因只在 `inactive` 时有意义，单开一条通道不会
+/// 把状态机搅乱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CaptureUnavailable {
+    None = 0,
+    /// 助手反复启动失败：通常是这台电脑上别的程序占着它需要的东西（#291 的端口被
+    /// 系统保留就属于这一类）。对这类原因，"关掉再打开开关"是**无效建议**（现场已试过），
+    /// 必须换一句话，否则提示本身就在误导用户。
+    StartupFailing = 1,
+}
+
+impl CaptureUnavailable {
+    fn publish(self, slot: &std::sync::atomic::AtomicU8) {
+        slot.store(self as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn current(slot: &std::sync::atomic::AtomicU8) -> Self {
+        match slot.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => Self::StartupFailing,
+            _ => Self::None,
+        }
+    }
+
+    /// IPC token（前端 `Rc003CaptureUnavailable` 逐字对应）。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::StartupFailing => "startup_failing",
+        }
+    }
+
+    /// 本轮是否处于"助手反复启动失败"（纯函数，单测覆盖）。
+    ///
+    /// 与 `CaptureHealth::Inactive` 同进同出，但两者发布时机不同：health 每轮都会被
+    /// 覆盖（`starting` / `active` / `inactive`），原因必须能跨轮保持，否则提示会
+    /// 在"失败一轮、抖动一轮"之间闪。
+    fn from_startup_failing(startup_failing: bool) -> Self {
+        if startup_failing {
+            Self::StartupFailing
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// 「全按键支持」在启动对账里被**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）。
 ///
 /// 这些回落不弹窗、不报错，只是把开关拉低；界面若不说明，用户看到的就是"升级后
@@ -1745,6 +2042,15 @@ const AUTO_TRIGGER_ESCALATE_ATTEMPT: u32 = 5;
 const AUTO_TRIGGER_REESCALATE_EVERY: u32 = 10;
 /// 连续失败时的日志折叠：前 3 轮与每 10 轮各留一条。
 const AUTO_TRIGGER_LOG_EVERY: u32 = 10;
+
+/// 同一次开启期间，助手被接受多少次而**一次都没拿到所有权** ⇒ 判定"助手根本没起来"。
+///
+/// 为什么要这条判据（issue #291）：助手因外部环境（端口被系统保留 / 被别的进程占住）
+/// 每轮启动即退出时，桥接握手仍会成功一瞬，于是对账在 `Connected → Trigger` 之间
+/// 反复横跳、`consecutive` 每次都被清零，**既到不了第 5 轮兜底，也永远过不了 20 s
+/// 生效宽限**——界面停在 `starting`（不显示任何文案），用户看到的就是"开关开着、
+/// 按键没反应、也没有任何提示"。接受的次数只增不减，正好能穿过这个抖动。
+const HELPER_STARTUP_FAILURE_ACCEPTS: u32 = 3;
 
 /// 第 `consecutive` 轮失败后的等待时长（纯函数）。
 ///
@@ -1894,6 +2200,7 @@ fn rc003_auto_trigger_reconcile(
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
 ) {
     // 本机没有对应架构的载荷时，重试多少次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
     // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会空转——
@@ -1943,6 +2250,11 @@ fn rc003_auto_trigger_reconcile(
     let mut capture_recover_attempts: u32 = 0;
     // 助手正在设备节点恢复时只记一条"暂缓重启"，避免每 2 秒刷屏。
     let mut capture_recovery_wait_logged = false;
+    // 本次开启以来「助手被接受」的累计判断（issue #291）。基线取当前累计值：
+    // 计数只算本次开启之后的增量，不把上次运行的接受算进来。
+    let mut helper_accepts_seen: u64 = platform.rc003_bridge_snapshot().accepted_total;
+    let mut helper_accept_streak: u32 = 0;
+    let mut startup_failing_logged = false;
     loop {
         // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
         let woken_early = std::mem::take(&mut last_sleep_woken);
@@ -1952,6 +2264,52 @@ fn rc003_auto_trigger_reconcile(
             .map(|settings| settings.rc003_capture_enabled)
             .unwrap_or(false);
         let snapshot = platform.rc003_bridge_snapshot();
+        // 「助手反复被接受却一次没接管」要在这里推进，而不是放在 Connected 分支：
+        // 助手每轮活不过几秒时，对账多数轮次根本观察不到 Connected（快照从
+        // Listening 直接变 Failed），只有累计接受次数能穿过这个抖动（issue #291）。
+        let startup_failing = if !enabled {
+            // 关闭即重置"本次开启"的计数：下一次开启是一次全新的尝试。
+            helper_accept_streak = 0;
+            helper_accepts_seen = snapshot.accepted_total;
+            if startup_failing_logged {
+                startup_failing_logged = false;
+            }
+            CaptureUnavailable::None.publish(&capture_unavailable);
+            false
+        } else {
+            let (next_streak, next_seen) = advance_helper_accept_streak(
+                helper_accept_streak,
+                helper_accepts_seen,
+                snapshot.accepted_total,
+                snapshot.owned_usages.len(),
+            );
+            helper_accept_streak = next_streak;
+            helper_accepts_seen = next_seen;
+            let failing = helper_startup_failing(helper_accept_streak);
+            // 原因与 health 同轮发布：界面只在 `inactive` 时读它，但两者必须一致，
+            // 否则会出现"提示说启动失败、状态却是 active"的错位。
+            CaptureUnavailable::from_startup_failing(failing).publish(&capture_unavailable);
+            if failing && !startup_failing_logged {
+                // hint 说**下一步动作**：这条断在 PC 内部的环境冲突上（端口被系统保留 /
+                // 被别的进程占住），继续按遥控器或重开开关都可能无效，先看环境。
+                sayall_windows::gatt_note(format!(
+                    "rc003 feature=enhanced-capture action=capture_unavailable phase=completed \
+                     terminal_result=failed reason=helper_startup_failing accepts={helper_accept_streak} \
+                     owned_usages=0 retryable=true hint=check_environment_conflict {}",
+                    bridge_health_summary(&snapshot)
+                ));
+                startup_failing_logged = true;
+            } else if !failing && startup_failing_logged {
+                // 只有真的拿到所有权才会走到这里（计数在 owned>0 时清零）。
+                sayall_windows::gatt_note(
+                    "rc003 feature=enhanced-capture action=capture_unavailable phase=cleared \
+                     terminal_result=passed reason=ownership_acquired"
+                        .to_owned(),
+                );
+                startup_failing_logged = false;
+            }
+            failing
+        };
         match decide_reconcile_round(enabled, classify_auto_trigger(&snapshot)) {
             ReconcileAction::Standby => {
                 if active_seen {
@@ -2003,7 +2361,12 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 capture_recovery_wait_logged = false;
-                CaptureHealth::Starting.publish(&capture_health);
+                capture_health_with_startup_failure(
+                    CaptureHealth::Starting,
+                    startup_failing,
+                    snapshot.owned_usages.len(),
+                )
+                .publish(&capture_health);
                 let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
                     &mut wake_seen,
@@ -2061,11 +2424,15 @@ fn rc003_auto_trigger_reconcile(
                 };
                 // 界面读的就是这一份：`Active` = 真的接管了，`Inactive` = 开着却没生效
                 // （界面据此显示一句用户语言的提示，2026-10-13）。
-                capture_health_for_round(
-                    true,
-                    true,
+                capture_health_with_startup_failure(
+                    capture_health_for_round(
+                        true,
+                        true,
+                        snapshot.owned_usages.len(),
+                        inactive_by_grace,
+                    ),
+                    startup_failing,
                     snapshot.owned_usages.len(),
-                    inactive_by_grace,
                 )
                 .publish(&capture_health);
                 if inactive_by_grace {
@@ -2208,7 +2575,12 @@ fn rc003_auto_trigger_reconcile(
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
-                CaptureHealth::Starting.publish(&capture_health);
+                capture_health_with_startup_failure(
+                    CaptureHealth::Starting,
+                    startup_failing,
+                    snapshot.owned_usages.len(),
+                )
+                .publish(&capture_health);
                 if was_connected {
                     // 助手掉线（崩溃 / 宿主重启 / 被系统回收）：重新进入恢复，
                     // 先来一轮快速期。
@@ -3009,18 +3381,38 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
-/// 「学习输入框」：3 秒窗口内轮询系统焦点，返回捕获到的可编辑目标特征。
+/// 「学习输入框」第一步：先打开/激活目标应用，不改变它的输入焦点。
+///
+/// 对齐 Mac `recordCustomApplicationInput`：打开完成后才开始学习窗口，
+/// 用户不需要自己切到目标应用。
+#[tauri::command]
+async fn activate_app_for_learning(
+    target: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let platform = Arc::clone(&state.platform);
+    tauri::async_runtime::spawn_blocking(move || platform.launch_app(&target))
+        .await
+        .map_err(|error| format!("打开目标应用任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// 「学习输入框」：最多 6 秒内轮询系统焦点，返回捕获到的可编辑目标特征。
+/// 调用前由 [`activate_app_for_learning`] 先打开/激活目标应用。
 ///
 /// 阻塞式（窗口期内），放在阻塞线程池执行；UI 负责把它写进对应目标的聚焦档案。
+/// 结束后把主窗口还给用户，便于立刻看到成功/失败提示（对齐 Mac `NSApp.activate`）。
 #[tauri::command]
 async fn learn_focus_target(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<sayall_windows::focus::RecordedFocusTarget, String> {
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_target())
+    let result = tauri::async_runtime::spawn_blocking(move || platform.learn_focus_target())
         .await
-        .map_err(|error| format!("学习输入框任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("学习输入框任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
 }
 
 /// 「记录点击位置」：读取物理光标并要求它落在目标应用窗口内。
@@ -3028,14 +3420,16 @@ async fn learn_focus_target(
 /// 面向完全不暴露无障碍接口的应用（微信 4.x）。UI 负责把它写进对应目标的聚焦档案。
 #[tauri::command]
 async fn learn_focus_point(
+    app: tauri::AppHandle,
     target: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<sayall_windows::focus::RecordedPoint, String> {
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.learn_focus_point(target))
+    let result = tauri::async_runtime::spawn_blocking(move || platform.learn_focus_point(target))
         .await
-        .map_err(|error| format!("记录点击位置任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("记录点击位置任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
 }
 
 /// 「测试打开与聚焦」：按目标与其聚焦档案走一次生产路径（异步受理）。
@@ -3539,6 +3933,221 @@ async fn get_gain_db(state: tauri::State<'_, AppState>) -> Result<f32, String> {
     result
 }
 
+fn transcript_enabled(state: &AppState) -> bool {
+    match state.settings.load_local_transcript_history_enabled() {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            sayall_windows::gatt_note(
+                "transcript_settings action=load phase=completed result=failed error_domain=settings error_code=load_failed reason=default_off retryable=true".to_owned(),
+            );
+            false
+        }
+    }
+}
+
+fn transcript_audio_enabled(state: &AppState) -> bool {
+    match state.settings.load_local_original_audio_recording_enabled() {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            sayall_windows::gatt_note(
+                "transcript_settings action=load_audio phase=completed result=failed error_domain=settings error_code=load_failed reason=default_off retryable=true".to_owned(),
+            );
+            false
+        }
+    }
+}
+
+#[tauri::command]
+fn get_transcript_history(
+    state: tauri::State<'_, AppState>,
+) -> transcripts::TranscriptHistorySnapshot {
+    state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state))
+}
+
+#[tauri::command]
+fn set_transcript_history_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .settings
+        .save_local_transcript_history_enabled(enabled)
+        .map_err(|_| "保存回眸设置失败，请稍后重试".to_owned())?;
+    state.platform.set_transcript_capture_enabled(enabled);
+    sayall_windows::gatt_note(format!(
+        "transcript_settings action=save phase=completed result=passed enabled={enabled}"
+    ));
+    Ok(state
+        .transcripts
+        .snapshot(enabled, transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn set_transcript_audio_recording_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    if state
+        .settings
+        .save_local_original_audio_recording_enabled(enabled)
+        .is_err()
+    {
+        sayall_windows::gatt_note(format!(
+            "transcript_settings action=save_audio phase=completed result=failed enabled={enabled} reason=settings_save_failed"
+        ));
+        return Err("保存原始录音设置失败，请稍后重试".to_owned());
+    }
+    state
+        .platform
+        .set_transcript_audio_recording_enabled(enabled);
+    sayall_windows::gatt_note(format!(
+        "transcript_settings action=save_audio phase=completed result=passed enabled={enabled}"
+    ));
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), enabled))
+}
+
+#[tauri::command]
+fn get_transcript_audio(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    match state.transcripts.read_recording(&session_id) {
+        Ok(bytes) => {
+            let bytes_len = bytes.len();
+            sayall_windows::gatt_note(format!(
+                "transcript_archive action=read_audio phase=completed result=passed bytes={bytes_len} elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Ok(format!(
+                "data:audio/wav;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ))
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(format!(
+                "transcript_archive action=read_audio phase=completed result=failed reason=read_failed elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn export_transcript_audio(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let path = match sayall_windows::file_dialog::pick_audio_export_path() {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            sayall_windows::gatt_note(
+                "transcript_archive action=export_audio phase=completed result=cancelled"
+                    .to_owned(),
+            );
+            return Ok(false);
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(
+                "transcript_archive action=export_audio phase=completed result=failed reason=dialog_failed"
+                    .to_owned(),
+            );
+            return Err(error);
+        }
+    };
+    if state
+        .transcripts
+        .export_recording(&session_id, &path)
+        .is_err()
+    {
+        sayall_windows::gatt_note(
+            "transcript_archive action=export_audio phase=completed result=failed reason=copy_failed"
+                .to_owned(),
+        );
+        return Err("导出原始录音失败，请稍后重试".to_owned());
+    }
+    sayall_windows::gatt_note(
+        "transcript_archive action=export_audio phase=completed result=passed".to_owned(),
+    );
+    Ok(true)
+}
+
+#[tauri::command]
+fn delete_transcript_recording(
+    session_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    let removed = state.transcripts.delete_recording(&session_id).map_err(|_| {
+        sayall_windows::gatt_note(
+            "transcript_archive action=delete_recording phase=completed result=failed reason=trash_failed"
+                .to_owned(),
+        );
+        "删除原始录音失败，请稍后重试".to_owned()
+    })?;
+    sayall_windows::gatt_note(format!(
+        "transcript_archive action=delete_recording phase=completed result={} removed={removed}",
+        if removed { "passed" } else { "skipped" }
+    ));
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn delete_transcript(
+    record_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .transcripts
+        .delete_record(&record_id)
+        .map_err(|_| "删除回眸记录失败，请稍后重试".to_owned())?;
+    sayall_windows::gatt_note(
+        "transcript_archive action=delete_record phase=completed result=passed".to_owned(),
+    );
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn delete_transcript_application(
+    application_key: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .transcripts
+        .delete_application(&application_key)
+        .map_err(|_| "删除这个应用的回眸记录失败，请稍后重试".to_owned())?;
+    sayall_windows::gatt_note(
+        "transcript_archive action=delete_application phase=completed result=passed".to_owned(),
+    );
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
+#[tauri::command]
+fn delete_all_transcripts(
+    state: tauri::State<'_, AppState>,
+) -> Result<transcripts::TranscriptHistorySnapshot, String> {
+    state
+        .transcripts
+        .delete_all()
+        .map_err(|_| "删除全部回眸记录失败，请稍后重试".to_owned())?;
+    sayall_windows::gatt_note(
+        "transcript_archive action=delete_all phase=completed result=passed".to_owned(),
+    );
+    Ok(state
+        .transcripts
+        .snapshot(transcript_enabled(&state), transcript_audio_enabled(&state)))
+}
+
 #[tauri::command]
 async fn set_gain_db(gain_db: f32, state: tauri::State<'_, AppState>) -> Result<f32, String> {
     let started = std::time::Instant::now();
@@ -3818,6 +4427,83 @@ async fn set_theme_preference(
 }
 
 #[tauri::command]
+async fn get_application_language(
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppLanguage, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "application_language operation_id={operation_id} action=load phase=requested"
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings
+            .load()
+            .map(|settings| settings.application_language)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("读取应用语言设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(language) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=load phase=persisted result=passed preference={} elapsed_ms={}",
+            app_language_name(*language),
+            started.elapsed().as_millis()
+        )),
+        Err(_) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=load phase=persisted result=failed error_domain=settings error_code=load_failed reason=settings_load_failed retryable=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
+async fn set_application_language(
+    app: tauri::AppHandle,
+    language: AppLanguage,
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppLanguage, String> {
+    let settings = state.settings.clone();
+    let started = std::time::Instant::now();
+    let operation_id = sanitized_theme_operation_id(&operation_id);
+    sayall_windows::gatt_note(format!(
+        "application_language operation_id={operation_id} action=save phase=requested preference={}",
+        app_language_name(language)
+    ));
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        settings.save_application_language(language)?;
+        Ok(language)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("保存应用语言设置任务失败：{error}")),
+    };
+    match &result {
+        Ok(saved) => {
+            #[cfg(windows)]
+            apply_native_language(&app, *saved);
+            sayall_windows::gatt_note(format!(
+                "application_language operation_id={operation_id} action=save phase=persisted result=passed preference={} elapsed_ms={}",
+                app_language_name(*saved),
+                started.elapsed().as_millis()
+            ));
+        }
+        Err(_) => sayall_windows::gatt_note(format!(
+            "application_language operation_id={operation_id} action=save phase=persisted result=failed preference={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            app_language_name(language),
+            started.elapsed().as_millis()
+        )),
+    }
+    result
+}
+
+#[tauri::command]
 async fn get_open_window_at_launch(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let settings = state.settings.clone();
     let started = std::time::Instant::now();
@@ -4059,6 +4745,100 @@ fn theme_preference_name(preference: ThemePreference) -> &'static str {
     }
 }
 
+fn app_language_name(language: AppLanguage) -> &'static str {
+    match language {
+        AppLanguage::System => "system",
+        AppLanguage::SimplifiedChinese => "zh-Hans",
+        AppLanguage::English => "en",
+    }
+}
+
+#[cfg(windows)]
+fn app_language_from_ui_language(language_id: u16) -> AppLanguage {
+    if language_id & 0x03ff == 0x04 {
+        AppLanguage::SimplifiedChinese
+    } else {
+        AppLanguage::English
+    }
+}
+
+#[cfg(windows)]
+fn effective_app_language(preference: AppLanguage) -> AppLanguage {
+    match preference {
+        AppLanguage::System => {
+            let language_id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+            app_language_from_ui_language(language_id)
+        }
+        explicit => explicit,
+    }
+}
+
+/// WebView 崩溃提示同样跟随应用语言；设置读不到时按系统语言。
+#[cfg(windows)]
+fn webview_unavailable_title(app: &tauri::AppHandle) -> &'static str {
+    let preference = app
+        .state::<AppState>()
+        .settings
+        .load()
+        .map(|settings| settings.application_language)
+        .unwrap_or(AppLanguage::System);
+    match effective_app_language(preference) {
+        AppLanguage::SimplifiedChinese => WEBVIEW_UNAVAILABLE_TITLE,
+        _ => WEBVIEW_UNAVAILABLE_TITLE_EN,
+    }
+}
+
+/// 应用语言变化时同步原生外壳：主窗口标题、托盘菜单与 tooltip。
+///
+/// 每次都用**新的** Menu/MenuItem 调 `set_menu`，不复用旧菜单项——这是 Mac
+/// 2026-08-01 语言切换菜单重复挂载异常的 Windows 对应规避点。
+#[cfg(windows)]
+fn apply_native_language(app: &tauri::AppHandle, preference: AppLanguage) {
+    let language = effective_app_language(preference);
+    // 窗口标题统一为「SayAll 版本号」：去掉「无线麦」前缀，版本号紧随其后（2026-10-24 用户要求）。
+    let title = format!("SayAll {}", app.package_info().version);
+    let (show_label, quit_label, tooltip) = match language {
+        AppLanguage::SimplifiedChinese => ("显示主界面", "退出", "无线麦 SayAll"),
+        _ => ("Show Main Window", "Quit", "SayAll"),
+    };
+    let title_result = match main_window(app) {
+        Some(window) => window.set_title(&title).is_ok(),
+        None => false,
+    };
+    let mut tray_applied = false;
+    #[cfg(not(feature = "runtime-simulation"))]
+    if let Some(tray) = app.tray_by_id(app_icon::TRAY_ID) {
+        use tauri::menu::{Menu, MenuItem};
+        let build = (|| -> tauri::Result<()> {
+            let show = MenuItem::with_id(app, "tray-show", show_label, true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "tray-quit", quit_label, true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            tray.set_menu(Some(menu))?;
+            tray.set_tooltip(Some(tooltip))?;
+            Ok(())
+        })();
+        tray_applied = build.is_ok();
+        if let Err(error) = build {
+            sayall_windows::gatt_note(format!(
+                "app_lifecycle event=native_language action=apply phase=completed terminal_result=failed language={} reason=tray_menu_apply_failed detail={error}",
+                app_language_name(language)
+            ));
+        }
+    }
+    let tray_expected = !cfg!(feature = "runtime-simulation");
+    let terminal_result = if title_result && (!tray_expected || tray_applied) {
+        "passed"
+    } else {
+        "failed"
+    };
+    sayall_windows::gatt_note(format!(
+        "app_lifecycle event=native_language action=apply phase=completed terminal_result={terminal_result} language={} title={} tray_menu={}",
+        app_language_name(language),
+        if title_result { "passed" } else { "failed" },
+        if tray_applied { "passed" } else { "absent_or_failed" }
+    ));
+}
+
 #[cfg(feature = "runtime-simulation")]
 #[tauri::command]
 fn run_runtime_simulation_voice_session(
@@ -4265,6 +5045,8 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
             started.elapsed().as_millis()
         )),
     }
+    // 统计的终态写入放在平台收尾之后：BLE 收尾可能补上最后一条语音会话事件。
+    app.state::<AppState>().usage.shutdown();
 }
 
 /// 监听安装器发出的"请优雅退出"信号（2026-09-16）。
@@ -4560,6 +5342,8 @@ pub fn run() {
             #[cfg(not(feature = "runtime-simulation"))]
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             let launch_settings_path = settings_path.clone();
+            // 统计独立于 settings.json：其它构建/版本写设置时不会覆盖统计字段。
+            let usage_statistics_path = settings_path.with_file_name(usage::USAGE_FILE_NAME);
             let settings = SettingsStore::new(settings_path);
             // 向导迁移判定：必须在任何设置写入之前执行（首次引入时的老用户直接标记
             // 完成，全新安装从欢迎开始；设计稿 §6.2）。失败不阻断启动，命令层会重试。
@@ -4598,6 +5382,8 @@ pub fn run() {
             // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
             #[cfg(windows)]
             app_icon::apply(app.handle(), saved_settings.app_icon);
+            #[cfg(windows)]
+            apply_native_language(app.handle(), saved_settings.application_language);
 
             // 「本次启动前刚完成更新」（2026-10-19，对齐 Mac
             // `recordLaunchAndDetectCompletedUpdate`）：记录写在独立的
@@ -4775,6 +5561,39 @@ pub fn run() {
             // 恢复使用）。该机制已按产品决策移除（会断开全部蓝牙设备），
             // 不再预热、不再请求无线电控制权限。
             let platform = create_platform();
+            // 个人中心统计：平台层只排队，应用层每秒批量落盘；启动即开始消费，
+            // 用户即使从不打开个人中心，按键与语音统计也会保留。
+            // 旧版把统计写在 settings.json，首次启动迁移到独立文件后不再写回。
+            let usage_store = UsageStore::new(usage_statistics_path);
+            match settings.usage_statistics() {
+                Ok(legacy) => {
+                    if let Err(error) = usage_store.migrate_from_settings(legacy) {
+                        sayall_windows::gatt_note(format!(
+                            "usage_stats action=migrate phase=completed terminal_result=failed error_domain=stats error_code=write_failed reason=legacy_settings_unreadable retryable=true detail={error}"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(format!(
+                        "usage_stats action=migrate phase=completed terminal_result=failed error_domain=settings error_code=read_failed reason=migration_source_unavailable retryable=true detail={error}"
+                    ));
+                }
+            }
+            let usage = UsageSync::new(platform.usage_counters(), usage_store);
+            let usage_worker_started = usage.spawn_worker();
+            sayall_windows::gatt_note(format!(
+                "usage_stats action=worker_start phase=completed terminal_result={} reason={}",
+                if usage_worker_started {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                if usage_worker_started {
+                    "started"
+                } else {
+                    "thread_spawn_failed"
+                }
+            ));
             let button_mappings = match settings.load_button_mappings() {
                 Ok(mappings) => {
                     sayall_windows::gatt_note(format!(
@@ -4829,16 +5648,22 @@ pub fn run() {
             // 常驻对账线程是唯一的判据来源，它发布、界面只读。
             let capture_health =
                 Arc::new(std::sync::atomic::AtomicU8::new(CaptureHealth::Off as u8));
+            // 「开着但没生效」的原因（2026-10-27）：只在 inactive 时被界面读取，
+            // 用来决定说"关掉再打开"还是"别的程序占着它的东西"。
+            let capture_unavailable =
+                Arc::new(std::sync::atomic::AtomicU8::new(CaptureUnavailable::None as u8));
             #[cfg(windows)]
             {
                 let platform_for_trigger = Arc::clone(&platform);
                 let settings_for_trigger = settings.clone();
                 let health_for_trigger = Arc::clone(&capture_health);
+                let unavailable_for_trigger = Arc::clone(&capture_unavailable);
                 std::thread::spawn(move || {
                     rc003_auto_trigger_reconcile(
                         platform_for_trigger,
                         settings_for_trigger,
                         health_for_trigger,
+                        unavailable_for_trigger,
                     );
                 });
             }
@@ -4953,24 +5778,121 @@ pub fn run() {
                     .start_hardware_script_replay(std::path::PathBuf::from(script_path));
             }
 
+            // 回眸：归档目录只用本机 LOCALAPPDATA；取不到时退回 Tauri 的本地数据目录。
+            let transcript_root = transcripts::TranscriptStore::default_root().unwrap_or_else(|_| {
+                sayall_windows::gatt_note(
+                    "transcript_archive action=resolve_root phase=completed result=fallback reason=localappdata_unavailable"
+                        .to_owned(),
+                );
+                app.path()
+                    .app_local_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join("SayAll")
+                    .join("transcripts")
+                    .join("v1")
+            });
+            let transcript_store = Arc::new(transcripts::TranscriptStore::new(transcript_root));
+            let capture_store = Arc::clone(&transcript_store);
+            let capture_app = app.handle().clone();
+            platform.set_transcript_capture_sink(Arc::new(
+                move |capture: sayall_windows::transcript_capture::CapturedTranscript| {
+                    let store = Arc::clone(&capture_store);
+                    let app = capture_app.clone();
+                    std::thread::spawn(move || {
+                        let record = sayall_core::transcripts::TranscriptRecord {
+                            schema_version: sayall_core::TRANSCRIPT_SCHEMA_VERSION,
+                            id: capture.session_id.clone(),
+                            session_id: capture.session_id.clone(),
+                            started_at_ms: capture.started_at_ms,
+                            ended_at_ms: capture.ended_at_ms,
+                            local_date_key: capture.local_date_key,
+                            utc_offset_minutes: capture.utc_offset_minutes,
+                            application_key: capture.application_key.clone(),
+                            application_name: capture.application_name,
+                            source: capture.source,
+                            original_transcript: capture.text,
+                            capture_method_version: sayall_core::CAPTURE_METHOD_VERSION,
+                        };
+                        if let Some(icon) = capture.icon_png.as_deref() {
+                            if store.write_icon(&capture.application_key, icon).is_err() {
+                                sayall_windows::gatt_note(
+                                    "transcript_archive action=write_icon phase=completed result=failed reason=icon_cache_failed"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                        match store.append(record) {
+                            Ok(_) => {
+                                sayall_windows::gatt_note(format!(
+                                    "transcript_archive action=append phase=completed result=passed application_key={}",
+                                    capture.application_key
+                                ));
+                                let _ = app.emit(
+                                    "transcript-captured",
+                                    transcripts::TranscriptCapturedEvent {
+                                        application_key: capture.application_key,
+                                        session_id: capture.session_id,
+                                    },
+                                );
+                            }
+                            Err(_) => {
+                                sayall_windows::gatt_note(
+                                    "transcript_archive action=append phase=completed result=failed error_domain=archive error_code=append_failed retryable=true"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    });
+                },
+            ));
+            let recording_app = app.handle().clone();
+            platform.set_transcript_audio_recording_finished_sink(Arc::new(move |session_id| {
+                let _ = recording_app.emit(
+                    "transcript-recording-finished",
+                    transcripts::TranscriptRecordingFinishedEvent { session_id },
+                );
+            }));
+            platform.set_transcript_capture_enabled(
+                saved_settings.local_transcript_history_enabled,
+            );
+            platform.set_transcript_audio_recording_enabled(
+                saved_settings.local_original_audio_recording_enabled,
+            );
+
+            let membership_runtime = membership::install();
+            // 键位方案私有组件（可选）：未注入时空壳返回 false，入口不出现。
+            button_profiles::install(
+                app.handle(),
+                Arc::clone(&platform),
+                Arc::clone(&membership_runtime),
+            );
+
             app.manage(AppState {
                 platform,
                 settings,
+                usage,
                 capture_health,
-                membership: membership::install(),
+                capture_unavailable,
+                membership: membership_runtime,
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
                     completed_update.then(|| app.package_info().version.to_string()),
                 ),
+                transcripts: transcript_store,
             });
             app.manage(recommendations::RecommendationsState::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
             #[cfg(windows)]
+            if let Some(window) = main_window(app.handle()) {
+                install_window_key_subclass(&window);
+            }
+            #[cfg(windows)]
             if let Some(webview) = main_webview(app.handle()) {
                 observe_webview_failure(&webview);
+                install_ctrl_w_accelerator(&webview);
             }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
@@ -5049,6 +5971,7 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
         start_membership_email_login,
@@ -5075,8 +5998,10 @@ pub fn run() {
         open_windows_settings,
         hide_main_window,
         show_recommendations,
+        retry_recommendations,
         hide_recommendations,
         open_recommendations_website,
+        go_back_recommendations,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -5100,6 +6025,11 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
@@ -5119,6 +6049,7 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        activate_app_for_learning,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,
@@ -5135,6 +6066,15 @@ pub fn run() {
         get_ime_status,
         get_gain_db,
         set_gain_db,
+        get_transcript_history,
+        set_transcript_history_enabled,
+        set_transcript_audio_recording_enabled,
+        get_transcript_audio,
+        export_transcript_audio,
+        delete_transcript_recording,
+        delete_transcript,
+        delete_transcript_application,
+        delete_all_transcripts,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,
@@ -5146,6 +6086,8 @@ pub fn run() {
         stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
+        get_application_language,
+        set_application_language,
         get_launch_at_login,
         set_launch_at_login,
         get_open_window_at_launch,
@@ -5166,6 +6108,7 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
         start_membership_email_login,
@@ -5192,8 +6135,10 @@ pub fn run() {
         open_windows_settings,
         hide_main_window,
         show_recommendations,
+        retry_recommendations,
         hide_recommendations,
         open_recommendations_website,
+        go_back_recommendations,
         scan_paired_remotes,
         get_connection_snapshot,
         connect_remote,
@@ -5217,6 +6162,11 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
@@ -5236,6 +6186,7 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        activate_app_for_learning,
         list_preset_apps,
         pick_custom_app,
         scan_registered_apps,
@@ -5252,6 +6203,15 @@ pub fn run() {
         get_ime_status,
         get_gain_db,
         set_gain_db,
+        get_transcript_history,
+        set_transcript_history_enabled,
+        set_transcript_audio_recording_enabled,
+        get_transcript_audio,
+        export_transcript_audio,
+        delete_transcript_recording,
+        delete_transcript,
+        delete_transcript_application,
+        delete_all_transcripts,
         get_vokie_installation,
         launch_vokie,
         get_other_voice_hotkey,
@@ -5263,6 +6223,8 @@ pub fn run() {
         stage_onboarding_voice_binding,
         get_theme_preference,
         set_theme_preference,
+        get_application_language,
+        set_application_language,
         get_launch_at_login,
         set_launch_at_login,
         get_open_window_at_launch,
@@ -5546,6 +6508,94 @@ mod tests {
         assert_eq!(CaptureHealth::Off.as_str(), "off");
         assert_eq!(CaptureHealth::Starting.as_str(), "starting");
         assert_eq!(CaptureHealth::Active.as_str(), "active");
+    }
+
+    /// 助手反复「连上就走」必须能被累计接受次数识别（issue #291）。
+    ///
+    /// 现场形态：助手每轮启动 → 握手成功 → 因端口绑不上退出，对账在
+    /// `Connected → Trigger` 之间横跳，`consecutive` 每次归零（既到不了兜底轮，
+    /// 也永远过不了 20 s 生效宽限），界面于是长期停在"不显示文案"的 `starting`。
+    #[test]
+    fn helper_accept_streak_detects_startup_that_never_takes_ownership() {
+        // 正常启动：第一次被接受就拿到所有权 → 计数必须归零。这也是阳性对照：
+        // 若这里不为 0，说明判据只看"有没有增长"，会把健康启动报成失败。
+        assert_eq!(advance_helper_accept_streak(0, 0, 1, 3), (0, 1));
+        // 反复失败：每轮增长一次，所有权始终为空。
+        let (streak, seen) = advance_helper_accept_streak(0, 0, 1, 0);
+        assert_eq!((streak, seen), (1, 1));
+        let (streak, seen) = advance_helper_accept_streak(streak, seen, 2, 0);
+        assert_eq!((streak, seen), (2, 2));
+        // 两轮还不够：这是"助手慢启动中"与"根本没起来"的边界。
+        assert!(!helper_startup_failing(2));
+        let (streak, seen) = advance_helper_accept_streak(streak, seen, 3, 0);
+        assert_eq!((streak, seen), (3, 3));
+        assert!(helper_startup_failing(streak));
+        // 一旦接管过（任何所有权），失败史必须清零：否则提示会挂在恢复之后。
+        assert_eq!(advance_helper_accept_streak(streak, seen, 4, 3), (0, 4));
+        // 桥重启让累计值回退：只跟基线、不清计数，否则永远攒不到阈值。
+        assert_eq!(advance_helper_accept_streak(2, 9, 4, 0), (2, 4));
+        // 同一个累计值重复观察不重复计数（对账每轮都会读同一个快照）。
+        assert_eq!(advance_helper_accept_streak(1, 5, 5, 0), (1, 5));
+    }
+
+    /// 启动失败只压「没有所有权」的轮次（issue #291）。
+    ///
+    /// 界面只在 `inactive` 时出文案，所以这条边界必须钉死：把助手反复启动失败
+    /// 变成 `inactive` 才能让用户看到提示，而接管成功后必须立刻回 `active`。
+    #[test]
+    fn startup_failure_only_overrides_health_without_ownership() {
+        // 开着、桥没连上：正常是 starting（无文案）→ 反复失败后必须是 inactive。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Starting, true, 0),
+            CaptureHealth::Inactive
+        );
+        // 已经接管：保持 active，不能被失败史压住。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Active, true, 3),
+            CaptureHealth::Active
+        );
+        // 开关关着：保持 off（关着不显示提示）。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Off, true, 0),
+            CaptureHealth::Off
+        );
+        // 没有失败史：原样返回（不会把正常启动误报成 inactive）。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Starting, false, 0),
+            CaptureHealth::Starting
+        );
+        assert_eq!(HELPER_STARTUP_FAILURE_ACCEPTS, 3);
+    }
+
+    /// 「没生效的原因」必须与前端类型逐字对应，且只在助手反复启动失败时为真（#291）。
+    ///
+    /// 这条通道决定界面说"关掉再打开"还是"别的程序占用了它需要的东西"——两者对
+    /// 端口被系统保留的机器是完全不同的建议，token 写错会让提示重新变成误导。
+    #[test]
+    fn capture_unavailable_token_matches_frontend_contract() {
+        assert_eq!(
+            CaptureUnavailable::from_startup_failing(false),
+            CaptureUnavailable::None
+        );
+        assert_eq!(
+            CaptureUnavailable::from_startup_failing(true),
+            CaptureUnavailable::StartupFailing
+        );
+        // 与前端 `Rc003CaptureUnavailable` 逐字对应。
+        assert_eq!(CaptureUnavailable::None.as_str(), "none");
+        assert_eq!(
+            CaptureUnavailable::StartupFailing.as_str(),
+            "startup_failing"
+        );
+        // 发布 → 读取往返（界面读的就是这条通道）。
+        let slot = std::sync::atomic::AtomicU8::new(CaptureUnavailable::None as u8);
+        CaptureUnavailable::StartupFailing.publish(&slot);
+        assert_eq!(
+            CaptureUnavailable::current(&slot),
+            CaptureUnavailable::StartupFailing
+        );
+        CaptureUnavailable::None.publish(&slot);
+        assert_eq!(CaptureUnavailable::current(&slot), CaptureUnavailable::None);
     }
 
     /// 「按下后报告层没有真的改写」也算"没生效"（2026-10-14）：连续缺失达到阈值时，
@@ -6396,6 +7446,17 @@ mod ui_hint_tests {
             WEBVIEW_UNAVAILABLE_TITLE.contains("无线麦 SayAll"),
             "产品名必须用名称表写法（含空格）"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_ui_language_maps_to_supported_app_languages() {
+        assert_eq!(
+            app_language_from_ui_language(0x0804),
+            AppLanguage::SimplifiedChinese
+        );
+        assert_eq!(app_language_from_ui_language(0x0409), AppLanguage::English);
+        assert_eq!(app_language_from_ui_language(0x0411), AppLanguage::English);
     }
 
     /// 主窗口查找只能用 `get_window`（见 `main_window` 的说明）。

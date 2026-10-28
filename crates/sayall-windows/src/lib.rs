@@ -1,13 +1,15 @@
 use button_mapping::{ButtonMappingRuntime, ButtonMappingSnapshot, MappingInjector};
 use focus::RecordedFocusTarget;
-use raw_input::{RawInputPhase, RawInputSnapshot};
+use raw_input::{RawInputPhase, RawInputSnapshot, RemoteButton};
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCapabilities, VoiceSessionState};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub mod app_launcher;
@@ -21,6 +23,8 @@ mod ble;
 mod bluetooth_radio;
 mod button_gestures;
 pub mod button_mapping;
+/// 键位方案可选组件的公开接缝（私有实现由构建期注入）。
+pub mod button_profiles;
 /// 常用语（内置内容、用户副本、五键分配、面板期认领与插入事务；纯逻辑，跨平台可单测）：
 /// 平台实现见 `clipboard_windows` 与 `phrase_insert_windows`。
 pub mod common_phrases;
@@ -42,6 +46,8 @@ pub mod graceful_exit;
 pub mod instance_signal;
 /// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
 pub mod key_host;
+/// 回眸原始录音：WAV 写入、终态清理与 manifest。跨平台可单测，写入只在启用时发生。
+pub mod voice_recording;
 // 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
 // 无副作用、不进入基础路径，仅仿真平台消费。
 pub mod hardware_script;
@@ -60,6 +66,11 @@ mod ime;
 pub use ime::{
     describe_active_ime_name, ime_status_for, ime_status_log_line, list_installed_ime_names,
     ImeStatus, MAX_INSTALLED_IME_NAMES,
+};
+
+pub use transcript_capture::{
+    new_session_id, CaptureSnapshot, CaptureText, CaptureTimings, CapturedTranscript,
+    SnapshotError, SnapshotProvider, TranscriptCaptureRuntime, UnsupportedSnapshotProvider,
 };
 
 /// 录入期让位：把录入窗口线程的输入区域临时切到非 IME 布局，使输入法的
@@ -124,6 +135,10 @@ pub mod send_input;
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
 #[cfg(windows)]
 pub mod send_input_windows;
+/// 回眸文字捕获状态机（跨平台可单测；UIA 实现见 `transcript_capture_windows`）。
+pub mod transcript_capture;
+#[cfg(windows)]
+pub mod transcript_capture_windows;
 pub mod tray_icons;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
 pub mod vokie;
@@ -267,6 +282,23 @@ pub enum ConnectionPhase {
     Failed,
 }
 
+/// 最近一次语音会话的音频完整度（2026-10-24 现场）。
+///
+/// 遥控器与另一支 BLE 设备同时连接时，适配器调度会让 ATVV 音频通知只剩约 1/3，
+/// 豆包能出语音条却转写不出文字。这里只发布观测结果，不据此自动断开任何设备；
+/// 判据与阈值在 `ble::classify_voice_audio_rate`，界面只显示用户语言。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VoiceAudioHealth {
+    /// 还没测过，或这次会话太短/没有样本——不据此提示。
+    #[default]
+    Unknown,
+    /// 样本率接近 16 kHz 满速。
+    Full,
+    /// 样本率明显低于满速：声音没有完整送到输入法。
+    Degraded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
@@ -282,6 +314,12 @@ pub struct ConnectionSnapshot {
     pub capabilities: Option<AtvvCapabilities>,
     pub voice_state: VoiceSessionState,
     pub decoded_samples: u64,
+    /// 最近一次足够长的语音会话的音频完整度（只读观测，不改变语音行为）。
+    #[serde(default)]
+    pub voice_audio_health: VoiceAudioHealth,
+    /// 最近一次判定的实际样本率（Hz）；`None` = 尚未判定。
+    #[serde(default)]
+    pub voice_audio_rate_hz: Option<u32>,
     pub generation: u64,
     pub reconnect_attempt: u32,
     pub power_notifications_available: bool,
@@ -296,9 +334,42 @@ pub struct UsageCounterSnapshot {
     pub voice_samples: u64,
 }
 
+/// 一条待落盘的本机使用事件。
+///
+/// 平台层只负责采集与排队；本地日期转换、统计聚合和设置文件写入由应用层完成。
+/// 事件只含计数、时长和应用显示名，不含路径、窗口标题或用户内容。
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsageEvent {
+    ButtonPress {
+        control: String,
+        at_unix_ms: i64,
+    },
+    VoiceSession {
+        ended_at_unix_ms: i64,
+        duration_seconds: f64,
+        application_name: Option<String>,
+    },
+}
+
+const MAX_PENDING_USAGE_EVENTS: usize = 4096;
+
+#[derive(Debug, Default)]
+struct UsageEventQueue {
+    events: VecDeque<UsageEvent>,
+    dropped: u64,
+}
+
+#[derive(Debug)]
+struct ActiveVoiceUsage {
+    started_at: Instant,
+    application_name: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct UsageCounters {
     state: Mutex<UsageCounterSnapshot>,
+    events: Mutex<UsageEventQueue>,
+    active_voice: Mutex<Option<ActiveVoiceUsage>>,
 }
 
 impl UsageCounters {
@@ -306,10 +377,42 @@ impl UsageCounters {
         lock(&self.state).to_owned()
     }
 
-    #[cfg(any(windows, test))]
+    /// 取出自上次调用以来积累的事件。调用方只有在成功落盘后才能丢弃返回值。
+    pub fn drain_usage_events(&self) -> Vec<UsageEvent> {
+        std::mem::take(&mut lock(&self.events).events)
+            .into_iter()
+            .collect()
+    }
+
+    /// 取出并清零队列溢出丢弃数（用于节流诊断日志）。
+    pub fn take_dropped_usage_events(&self) -> u64 {
+        let mut queue = lock(&self.events);
+        std::mem::take(&mut queue.dropped)
+    }
+
+    #[cfg(test)]
     pub(crate) fn record_button_presses(&self, count: u64) {
         let mut state = lock(&self.state);
         state.button_presses = state.button_presses.saturating_add(count);
+    }
+
+    /// 记录一次实体按键，并写入待落盘事件。
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_button_press(&self, button: RemoteButton) {
+        self.record_button_press_key(button.storage_key());
+    }
+
+    /// 记录一次使用统计按键；`control` 必须是稳定键（`button.*` / `voice`）。
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_button_press_key(&self, control: &str) {
+        {
+            let mut state = lock(&self.state);
+            state.button_presses = state.button_presses.saturating_add(1);
+        }
+        self.push_event(UsageEvent::ButtonPress {
+            control: control.to_owned(),
+            at_unix_ms: unix_ms_now(),
+        });
     }
 
     #[cfg(any(windows, test))]
@@ -318,6 +421,97 @@ impl UsageCounters {
         state.voice_sessions = state.voice_sessions.saturating_add(1);
         state.voice_samples = state.voice_samples.saturating_add(samples);
     }
+
+    /// 语音键对应的 `MIC_OPEN` 请求到达：先结束上一轮未收尾的会话，再记一次
+    /// `voice` 按键并开始计时。重复调用不会丢上一轮时长。
+    #[cfg(any(windows, test))]
+    pub(crate) fn begin_voice_session(&self, application_name: Option<String>) {
+        self.finish_voice_session();
+        self.start_voice_session(application_name, "mic_open");
+    }
+
+    /// `STREAM_START` 到达时补记语音会话。
+    ///
+    /// RC003 的报告层语音路径实测会直接发 `0x04 STREAM_START`，不经过
+    /// `MIC_OPEN`；因此不能只依赖 [`Self::begin_voice_session`]。若 `MIC_OPEN`
+    /// 已经先到，这里保持幂等，避免同一次按键记两次、时长从半途重新计时。
+    #[cfg(any(windows, test))]
+    pub(crate) fn ensure_voice_session_started(&self, application_name: Option<String>) {
+        let mut active = lock(&self.active_voice);
+        if active.is_some() {
+            return;
+        }
+        self.start_voice_session_locked(&mut active, application_name);
+        drop(active);
+        gatt_note(
+            "usage_stats action=voice_begin phase=completed terminal_result=passed source=stream_start"
+                .to_owned(),
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_voice_session(&self, application_name: Option<String>, source: &str) {
+        let mut active = lock(&self.active_voice);
+        self.start_voice_session_locked(&mut active, application_name);
+        drop(active);
+        gatt_note(format!(
+            "usage_stats action=voice_begin phase=completed terminal_result=passed source={source}"
+        ));
+    }
+
+    #[cfg(any(windows, test))]
+    fn start_voice_session_locked(
+        &self,
+        active: &mut Option<ActiveVoiceUsage>,
+        application_name: Option<String>,
+    ) {
+        self.record_button_press_key("voice");
+        *active = Some(ActiveVoiceUsage {
+            started_at: Instant::now(),
+            application_name,
+        });
+    }
+
+    /// 结束当前语音会话并写入一条排行事件；没有活动会话时是幂等的空操作。
+    pub(crate) fn finish_voice_session(&self) {
+        let Some(active) = lock(&self.active_voice).take() else {
+            return;
+        };
+        let duration_seconds = active.started_at.elapsed().as_secs_f64();
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return;
+        }
+        let application = if active.application_name.is_some() {
+            "present"
+        } else {
+            "unknown"
+        };
+        let duration_ms = (duration_seconds * 1_000.0).round() as u64;
+        self.push_event(UsageEvent::VoiceSession {
+            ended_at_unix_ms: unix_ms_now(),
+            duration_seconds,
+            application_name: active.application_name,
+        });
+        gatt_note(format!(
+            "usage_stats action=voice_finish phase=completed terminal_result=passed duration_ms={duration_ms} application={application}"
+        ));
+    }
+
+    fn push_event(&self, event: UsageEvent) {
+        let mut queue = lock(&self.events);
+        if queue.events.len() >= MAX_PENDING_USAGE_EVENTS {
+            queue.events.pop_front();
+            queue.dropped = queue.dropped.saturating_add(1);
+        }
+        queue.events.push_back(event);
+    }
+}
+
+fn unix_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 impl Default for ConnectionSnapshot {
@@ -331,6 +525,8 @@ impl Default for ConnectionSnapshot {
             capabilities: None,
             voice_state: VoiceSessionState::Idle,
             decoded_samples: 0,
+            voice_audio_health: VoiceAudioHealth::Unknown,
+            voice_audio_rate_hz: None,
             generation: 0,
             reconnect_attempt: 0,
             power_notifications_available: false,
@@ -388,6 +584,8 @@ pub struct WindowsPlatform {
     enhanced_capture_enabled: Arc<AtomicBool>,
     #[cfg(windows)]
     send_input: Arc<send_input_windows::SendInputRuntime>,
+    /// 回眸文字捕获（默认关闭；状态机跨平台可单测，UIA 后端仅 Windows）。
+    transcript_capture: Arc<transcript_capture::TranscriptCaptureRuntime>,
 }
 
 impl fmt::Debug for WindowsPlatform {
@@ -480,6 +678,10 @@ impl Default for WindowsPlatform {
             let voice_key_suppressor = Arc::new(key_suppressor::VoiceKeySuppressor::start());
             // 按键映射门控钩子：随平台启动常驻，未配置映射时对所有键透传。
             let key_gate = Arc::new(key_gate::KeyGate::start());
+            let transcript_capture = Arc::new(transcript_capture::TranscriptCaptureRuntime::new(
+                Arc::new(transcript_capture_windows::WindowsSnapshotProvider::default()),
+                transcript_capture::CaptureTimings::default(),
+            ));
             let runtime = Arc::new(ble::BleRuntime::new(
                 Arc::clone(&audio),
                 Arc::clone(&usage),
@@ -487,6 +689,7 @@ impl Default for WindowsPlatform {
                 Arc::clone(&voice_hold_hotkey),
                 Arc::clone(&voice_input_tool),
                 Arc::clone(&gain_db),
+                Arc::clone(&transcript_capture),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
@@ -526,6 +729,7 @@ impl Default for WindowsPlatform {
                 rc003_bridge,
                 enhanced_capture_enabled: Arc::new(AtomicBool::new(false)),
                 send_input,
+                transcript_capture,
             }
         }
 
@@ -543,6 +747,10 @@ impl Default for WindowsPlatform {
                 Arc::clone(&raw_input_snapshot),
                 Arc::clone(&macro_runtime),
             ));
+            let transcript_capture = Arc::new(transcript_capture::TranscriptCaptureRuntime::new(
+                Arc::new(transcript_capture::UnsupportedSnapshotProvider),
+                transcript_capture::CaptureTimings::default(),
+            ));
             Self {
                 usage,
                 voice_hold_hotkey,
@@ -552,6 +760,7 @@ impl Default for WindowsPlatform {
                 button_mapping,
                 macro_runtime,
                 raw_input_snapshot,
+                transcript_capture,
             }
         }
     }
@@ -817,6 +1026,34 @@ impl WindowsPlatform {
         *lock(&self.gain_db) = sayall_core::normalize_gain_db(gain_db);
     }
 
+    /// 「回眸」开关：关闭时取消正在进行的捕获，不删除已有记录。
+    pub fn set_transcript_capture_enabled(&self, enabled: bool) {
+        self.transcript_capture.set_enabled(enabled);
+    }
+
+    /// 「回眸」原始录音开关：关闭时取消当前录音，不删除已有录音。
+    pub fn set_transcript_audio_recording_enabled(&self, enabled: bool) {
+        self.transcript_capture.set_audio_recording_enabled(enabled);
+    }
+
+    /// 录音成功落盘后只通知会话号；app host 用它触发页面静默刷新。
+    pub fn set_transcript_audio_recording_finished_sink(
+        &self,
+        sink: Arc<dyn Fn(String) + Send + Sync>,
+    ) {
+        self.transcript_capture
+            .set_audio_recording_finished_sink(sink);
+    }
+
+    /// 捕获完成后的落盘回调。app host 只把记录投递到自己的归档线程，
+    /// 不让 UIA/捕获线程直接做磁盘 IO。
+    pub fn set_transcript_capture_sink(
+        &self,
+        sink: Arc<dyn Fn(transcript_capture::CapturedTranscript) + Send + Sync>,
+    ) {
+        self.transcript_capture.set_sink(sink);
+    }
+
     pub fn snapshot(&self) -> PlatformSnapshot {
         #[cfg(windows)]
         {
@@ -897,11 +1134,21 @@ impl WindowsPlatform {
         #[cfg(windows)]
         {
             // 组合动作执行器读的聚焦档案镜像：与映射同一次热加载更新。
-            let mut profiles = self
+            // 预设应用没有显式档案时补产品默认值，使组合动作与按键页复用同一聚焦方式。
+            let mut profiles = mappings.focus_profiles.clone();
+            for id in crate::app_launcher::DEFAULT_PRESET_IDS {
+                if !profiles.contains_key(*id) {
+                    profiles.insert(
+                        (*id).to_owned(),
+                        crate::button_mapping::preset_focus_profile(id),
+                    );
+                }
+            }
+            let mut mirror = self
                 .macro_focus_profiles
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *profiles = mappings.focus_profiles.clone();
+            *mirror = profiles;
         }
         self.button_mapping.set_mappings(mappings);
         #[cfg(windows)]
@@ -909,6 +1156,12 @@ impl WindowsPlatform {
             self.enhanced_capture_enabled.load(Ordering::Relaxed),
             mapped_mask,
         );
+    }
+
+    /// 安装/清除键位方案覆盖层（私有组件经公开宿主调用）。
+    #[cfg(windows)]
+    pub fn set_button_profile_overlay(&self, overlay: Option<send_input::ButtonMappings>) {
+        self.button_mapping.set_profile_overlay(overlay);
     }
 
     /// 同步组合动作库快照（Tauri 层在加载/保存后调用；引擎与执行器共用）。
@@ -950,6 +1203,12 @@ impl WindowsPlatform {
 
     pub fn button_mapping_snapshot(&self) -> ButtonMappingSnapshot {
         self.button_mapping.snapshot()
+    }
+
+    /// 按键引擎句柄：键位方案私有组件用它安装/清除覆盖层。
+    #[cfg(windows)]
+    pub fn button_mapping_runtime(&self) -> Arc<ButtonMappingRuntime> {
+        Arc::clone(&self.button_mapping)
     }
 
     /// UI「测试」按钮：聚焦当前前台应用输入框（异步受理，结果在快照的 `last_focus`）。
@@ -1425,6 +1684,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn voice_audio_health_serializes_to_stable_snapshot_tokens() {
+        // 与 `src/lib/voice-audio-health.ts` 的白名单逐字对应；改 token 会静默
+        // 让界面不提示（或误提示），必须在这里钉住。
+        assert_eq!(
+            serde_json::to_string(&VoiceAudioHealth::Unknown).unwrap(),
+            "\"unknown\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VoiceAudioHealth::Full).unwrap(),
+            "\"full\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VoiceAudioHealth::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        let snapshot = serde_json::to_value(ConnectionSnapshot::default()).unwrap();
+        assert_eq!(snapshot["voiceAudioHealth"], "unknown");
+        assert!(snapshot["voiceAudioRateHz"].is_null());
+    }
+
+    #[test]
     fn accepts_only_approved_remote_names() {
         for name in [
             "MI RC",
@@ -1545,6 +1825,93 @@ mod tests {
                 voice_sessions: 2,
                 voice_samples: 24_000,
             }
+        );
+    }
+
+    #[test]
+    fn usage_events_capture_physical_voice_press_and_session() {
+        let counters = UsageCounters::default();
+        counters.record_button_press(RemoteButton::Back);
+        counters.begin_voice_session(Some("微信".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 2);
+        assert_eq!(counters.snapshot().voice_sessions, 0);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            UsageEvent::ButtonPress { control, .. } if control == "button.back"
+        ));
+        assert!(matches!(
+            &events[1],
+            UsageEvent::ButtonPress { control, .. } if control == "voice"
+        ));
+        assert!(matches!(
+            &events[2],
+            UsageEvent::VoiceSession {
+                duration_seconds,
+                application_name,
+                ..
+            } if *duration_seconds > 0.0 && application_name.as_deref() == Some("微信")
+        ));
+        assert!(counters.drain_usage_events().is_empty());
+    }
+
+    #[test]
+    fn stream_start_fallback_records_voice_usage_once_without_mic_open() {
+        let counters = UsageCounters::default();
+        // RC003 实测只发 0x04 STREAM_START；重复到达（或 MIC_OPEN 已先到）
+        // 不能重复计一次按键。
+        counters.ensure_voice_session_started(Some("微信".to_owned()));
+        counters.ensure_voice_session_started(Some("不应覆盖".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 1);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            UsageEvent::ButtonPress { control, .. } if control == "voice"
+        ));
+        assert!(matches!(
+            &events[1],
+            UsageEvent::VoiceSession {
+                duration_seconds,
+                application_name,
+                ..
+            } if *duration_seconds > 0.0 && application_name.as_deref() == Some("微信")
+        ));
+    }
+
+    #[test]
+    fn mic_open_then_stream_start_does_not_duplicate_voice_usage() {
+        let counters = UsageCounters::default();
+        counters.begin_voice_session(Some("微信".to_owned()));
+        counters.ensure_voice_session_started(Some("微信".to_owned()));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        counters.finish_voice_session();
+
+        assert_eq!(counters.snapshot().button_presses, 1);
+        let events = counters.drain_usage_events();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn usage_queue_drops_oldest_and_reports_overflow() {
+        let counters = UsageCounters::default();
+        for _ in 0..=MAX_PENDING_USAGE_EVENTS {
+            counters.record_button_press_key("button.back");
+        }
+
+        assert_eq!(counters.take_dropped_usage_events(), 1);
+        assert_eq!(counters.take_dropped_usage_events(), 0);
+        assert_eq!(
+            counters.drain_usage_events().len(),
+            MAX_PENDING_USAGE_EVENTS
         );
     }
 

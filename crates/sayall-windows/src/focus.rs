@@ -128,6 +128,10 @@ pub enum FocusStrategy {
     /// 只打开应用（默认）。
     #[default]
     OpenOnly,
+    /// 打开后自动聚焦目标窗口里最合适的输入框。
+    ///
+    /// 预设应用默认使用；自定义应用也可以显式选择。
+    AutoComposer,
     /// 打开后发送该应用自己的聚焦快捷键。
     AppShortcut,
     /// 打开后聚焦用户记录的输入框。
@@ -141,6 +145,7 @@ impl FocusStrategy {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenOnly => "open_only",
+            Self::AutoComposer => "auto_composer",
             Self::AppShortcut => "app_shortcut",
             Self::RecordedElement => "recorded_element",
             Self::RecordedPoint => "recorded_point",
@@ -493,7 +498,7 @@ impl AppFocusProfile {
     /// 还没有记录点击位置）。
     pub fn normalized(mut self) -> Self {
         match self.strategy {
-            FocusStrategy::OpenOnly => {
+            FocusStrategy::OpenOnly | FocusStrategy::AutoComposer => {
                 self.shortcut = None;
                 self.recorded = None;
                 self.point = None;
@@ -946,6 +951,20 @@ mod tests {
         assert_eq!(open.strategy, FocusStrategy::OpenOnly);
         assert!(open.shortcut.is_none());
         assert!(open.recorded.is_none());
+
+        // auto_composer 同样忽略附带字段（预设应用的隐式策略）。
+        let auto = AppFocusProfile {
+            strategy: FocusStrategy::AutoComposer,
+            shortcut: Some(KeyChord {
+                keys: vec![crate::send_input::KeyCode::RightAlt],
+            }),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(auto.strategy, FocusStrategy::AutoComposer);
+        assert!(auto.shortcut.is_none());
+        assert!(auto.recorded.is_none());
+        assert!(auto.point.is_none());
     }
 
     #[test]

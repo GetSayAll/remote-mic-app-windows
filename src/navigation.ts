@@ -6,8 +6,10 @@ export type PageId =
   | "recommendations"
   | "macros"
   | "connection"
+  | "reflections"
   | "permissions"
-  | "settings";
+  | "settings"
+  | "profile";
 
 export type NavIcon =
   | "keyboard"
@@ -16,7 +18,9 @@ export type NavIcon =
   | "link"
   | "shield"
   | "gear"
-  | "member";
+  | "member"
+  | "textbubble"
+  | "person";
 
 export interface NavigationItem {
   id: string;
@@ -33,32 +37,44 @@ export const publicNavigationItems: NavigationItem[] = [
   ...(COMBINATION_ACTIONS_ENABLED
     ? [{ id: "macros", label: "组合动作", icon: "layers" } as NavigationItem]
     : []),
-  // 2026-10-23 用户指定顺序：按键、组合动作、会员、推荐、连接、权限、设置。
-  // 会员由私有页面注册表注入，插在组合动作之后。
+  // 2026-10-25 用户指定：推荐放在连接上方（对齐 Mac）。
   { id: "recommendations", label: "推荐", icon: "sparkles" },
   { id: "connection", label: "连接", icon: "link" },
+  // 2026-10-25 用户指定：回眸紧挨权限上方。
+  { id: "reflections", label: "回眸", icon: "textbubble" },
   { id: "permissions", label: "权限", icon: "shield" },
   // 2026-10-02 用户指定：原「关于」页改名「设置」，图标对齐 Mac main
   // SettingsSection.about 的 "gearshape"。
   { id: "settings", label: "设置", icon: "gear" },
+  // 2026-10-24 个人中心（对齐 Mac statistics）：固定渲染在侧栏最底部；
+  // 未登录文案是「个人中心」，已登录由 App 传入邮箱前缀。
+  { id: "profile", label: "个人中心", icon: "person" },
 ];
 
 /**
  * 合并公开页面与私有注册的页面（2026-10-15）。
  *
- * 私有页面插在「组合动作」之后，使会员入口紧跟在组合动作后；公开构建传入空
- * 数组时结果必须与 `publicNavigationItems` 逐项相同（仓库规则：未实现的页面
- * 不显示空入口）。组合动作被特性开关隐藏时，私有页面退到「按键」之后。
+ * 抽成纯函数是为了能直接测「接入点真的接通了」——不必给整个应用打桩。
+ * 公开构建传入空数组，结果必须与 `publicNavigationItems` 逐项相同
+ * （仓库规则：未实现的页面不显示空入口）。
  */
 export function mergeNavigationItems(
   base: NavigationItem[],
   extra: readonly PrivateFeaturePage[],
 ): NavigationItem[] {
-  const inserted = extra.map((page) => ({ id: page.id, label: page.label, icon: page.icon }));
-  if (inserted.length === 0) return [...base];
-  const macroIndex = base.findIndex((item) => item.id === "macros");
-  const insertAt = macroIndex >= 0 ? macroIndex + 1 : Math.min(1, base.length);
-  return [...base.slice(0, insertAt), ...inserted, ...base.slice(insertAt)];
+  const merged = [...base];
+  for (const page of extra) {
+    const item = { id: page.id, label: page.label, icon: page.icon };
+    const anchor = page.after
+      ? merged.findIndex((entry) => entry.id === page.after)
+      : -1;
+    if (anchor >= 0) {
+      merged.splice(anchor + 1, 0, item);
+    } else {
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 export const navigationItems: NavigationItem[] = mergeNavigationItems(

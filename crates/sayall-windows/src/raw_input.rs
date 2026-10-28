@@ -82,6 +82,28 @@ impl RemoteButton {
         })
     }
 
+    /// 使用统计里的稳定控件键（与 Mac `button.<rawValue>` 同源）。
+    ///
+    /// 只用于本机统计文件，不进入日志；键名变化会让旧统计的排行榜失效，因此
+    /// 必须保持稳定。
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            Self::Back => "button.back",
+            Self::Ok => "button.ok",
+            Self::Tv => "button.tv",
+            Self::Home => "button.home",
+            Self::Right => "button.right",
+            Self::Left => "button.left",
+            Self::Down => "button.down",
+            Self::Up => "button.up",
+            Self::Menu => "button.menu",
+            Self::Power => "button.power",
+            Self::VolumeMute => "button.volume_mute",
+            Self::VolumeUp => "button.volume_up",
+            Self::VolumeDown => "button.volume_down",
+        }
+    }
+
     /// 历史自动连发键（Mac 原版 HIDRemoteScheduler 口径）：返回、方向、音量±。
     /// 旧配置迁移只对这些键补显式 `holdRepeat`，不因新增的可配置范围改变老行为。
     pub fn legacy_auto_repeat(self) -> bool {

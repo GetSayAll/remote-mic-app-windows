@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { ConnectionSnapshot } from "../lib/bridge";
+import { t } from "../lib/i18n";
 
 const props = defineProps<{ connection?: ConnectionSnapshot | null }>();
 const connected = computed(() => ["awaiting_capabilities", "ready", "streaming", "draining"]
@@ -10,10 +11,10 @@ const level = computed(() => {
   return connected.value && typeof value === "number" && Number.isInteger(value)
     && value >= 0 && value <= 100 ? value : null;
 });
-const label = computed(() => level.value === null ? "电量未知" : `${level.value}%`);
-const title = computed(() => !connected.value ? "遥控器未连接"
-  : level.value === null ? "暂时读不到遥控器电量"
-  : `遥控器电量 ${level.value}%`);
+const label = computed(() => level.value === null ? t("电量未知") : `${level.value}%`);
+const title = computed(() => !connected.value ? t("遥控器未连接")
+  : level.value === null ? t("暂时读不到遥控器电量")
+  : t("遥控器电量 {level}%", { level: level.value }));
 </script>
 
 <template>

@@ -3,28 +3,38 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   actionSummary,
+  activateAppForLearning,
+  APP_ICON_CHANGED_EVENT,
   audioPhaseLabel,
   chordLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
   GITHUB_REPOSITORY_URL,
+  getApplicationLanguage,
   getOpenWindowAtLaunch,
   identityShortcutByButton,
   isRecommendedVoiceEndpoint,
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
+  openAppLabel,
   openGitHubRepository,
   openLogDirectory,
   openOfficialWebsite,
   openRecommendationsWebsite,
   openVbCableDownloadPage,
   registerCommonPhraseAvailability,
+  registerPresetAppNames,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
+  saveApplicationLanguage,
+  setAppIcon,
   setOpenWindowAtLaunch,
+  SHARE_WEBSITE_URL,
   shortcutCapability,
   showRecommendationsPage,
   hideRecommendationsPage,
+  retryRecommendationsPage,
+  goBackRecommendationsPage,
   takeUpdateCompletedVersion,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
@@ -34,6 +44,31 @@ import {
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+
+describe("sharing and app icon sync", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("uses the same fixed share URL encoded in the QR asset", () => {
+    expect(SHARE_WEBSITE_URL).toBe("https://sayall.app/?from=win_share");
+  });
+
+  it("notifies the shell immediately after the app icon is applied", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValueOnce("standard");
+    const listener = vi.fn<(event: Event) => void>();
+    window.addEventListener(APP_ICON_CHANGED_EVENT, listener);
+
+    await expect(setAppIcon("standard")).resolves.toBe("standard");
+
+    expect(invoke).toHaveBeenCalledWith("set_app_icon", { identifier: "standard" });
+    expect(listener).toHaveBeenCalledOnce();
+    expect((listener.mock.calls[0][0] as CustomEvent).detail).toBe("standard");
+    window.removeEventListener(APP_ICON_CHANGED_EVENT, listener);
+  });
+});
 
 describe("mouse actions", () => {
   it("summarizes clicks, movement, and wheel amounts", () => {
@@ -45,6 +80,40 @@ describe("mouse actions", () => {
   it("summarizes the focus-input action", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
+  });
+});
+
+describe("open application labels", () => {
+  it("prefixes 打开 with the product naming and keeps Latin spacing", () => {
+    expect(openAppLabel("微信")).toBe("打开微信");
+    expect(openAppLabel("WorkBuddy")).toBe("打开 WorkBuddy");
+    expect(openAppLabel("无线麦 SayAll")).toBe("打开无线麦 SayAll");
+    expect(openAppLabel("")).toBe("打开应用");
+  });
+
+  it("summarizes preset and custom open-app actions with the same label", () => {
+    registerPresetAppNames([{ id: "sayall", name: "无线麦 SayAll" }]);
+    expect(actionSummary({ type: "open_app", target: "sayall" })).toBe("打开无线麦 SayAll");
+    expect(actionSummary({ type: "open_app", target: "C:\\Apps\\Example.exe" })).toBe(
+      "打开 Example",
+    );
+    registerPresetAppNames([]);
+  });
+});
+
+describe("learning input bridge", () => {
+  afterEach(() => {
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("opens the target app before starting the learning window", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await activateAppForLearning("notepad");
+
+    expect(invoke).toHaveBeenCalledWith("activate_app_for_learning", { target: "notepad" });
   });
 });
 
@@ -349,18 +418,52 @@ describe("推荐页入口（官网页面宿主）", () => {
     (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     vi.mocked(invoke)
       .mockResolvedValueOnce(7)
+      .mockResolvedValueOnce(8)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
 
-    await expect(showRecommendationsPage("dark")).resolves.toBe(7);
+    await expect(showRecommendationsPage("dark", "en")).resolves.toBe(7);
+    await expect(retryRecommendationsPage("light", "zh-Hans")).resolves.toBe(8);
     await hideRecommendationsPage();
     await openRecommendationsWebsite();
+    await goBackRecommendationsPage();
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
-      ["show_recommendations", { theme: "dark" }],
+      ["show_recommendations", { theme: "dark", language: "en" }],
+      ["retry_recommendations", { theme: "light", language: "zh-Hans" }],
       ["hide_recommendations"],
       ["open_recommendations_website"],
+      ["go_back_recommendations"],
     ]);
+  });
+
+  it("应用语言按 system / zh-Hans / en 原样走 Rust", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke)
+      .mockResolvedValueOnce("en")
+      .mockResolvedValueOnce("zh-Hans");
+
+    await expect(getApplicationLanguage("language-1")).resolves.toBe("en");
+    await expect(
+      saveApplicationLanguage("zh-Hans", "language-1"),
+    ).resolves.toBe("zh-Hans");
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["get_application_language", { operationId: "language-1" }],
+      ["set_application_language", { language: "zh-Hans", operationId: "language-1" }],
+    ]);
+  });
+
+  it("英文浏览器预览打开英文推荐页", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    await openRecommendationsWebsite("en");
+    expect(open).toHaveBeenCalledWith(
+      "https://sayall.app/en/recommendations/",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    open.mockRestore();
   });
 });
 

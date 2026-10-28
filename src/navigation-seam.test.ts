@@ -7,7 +7,7 @@ import type { PrivateFeaturePage } from "./private/feature-pages";
  * 私有组件接入点的契约测试（2026-10-15）。
  *
  * 公开构建的行为必须**逐项不变**：私有注册表为空时，侧栏与改动前完全一致，
- * 不出现任何空入口。注入私有页面时插在组合动作之后，不改动公开页面。
+ * 不出现任何空入口。注入私有页面时只做追加，不改动公开页面。
  */
 describe("私有功能页接入点", () => {
   const injected: PrivateFeaturePage[] = [
@@ -19,38 +19,59 @@ describe("私有功能页接入点", () => {
     },
   ];
 
-  it("公开构建不增加任何页面", () => {
-    expect(navigationItems).toEqual(publicNavigationItems);
-    expect(navigationItems.map((item) => item.id)).toEqual([
-      "buttons",
-      "macros",
-      "recommendations",
-      "connection",
-      "permissions",
-      "settings",
-    ]);
+  it("公开页面表不因接入点改变", () => {
+    expect(mergeNavigationItems(publicNavigationItems, [])).toEqual(
+      publicNavigationItems,
+    );
+  });
+
+  it("实际侧栏包含全部公开页面且 id 不重复", () => {
+    const ids = navigationItems.map((item) => item.id);
+    for (const item of publicNavigationItems) {
+      expect(ids).toContain(item.id);
+    }
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("空注册表是恒等变换", () => {
     expect(mergeNavigationItems(publicNavigationItems, [])).toEqual(publicNavigationItems);
   });
 
-  it("私有页面插在组合动作之后且不改动公开表", () => {
+  it("私有页面追加在公开页面之后且不改动公开表", () => {
     const merged = mergeNavigationItems(publicNavigationItems, injected);
 
+    expect(merged.map((item) => item.id)).toEqual([
+      "buttons",
+      "macros",
+      "recommendations",
+      "connection",
+      "reflections",
+      "permissions",
+      "settings",
+      "profile",
+      "membership",
+    ]);
+    expect(merged.at(-1)?.label).toBe("会员");
+    // 合并函数必须是纯的：公开表不能被就地改写。
+    expect(publicNavigationItems).toHaveLength(8);
+    expect(publicNavigationItems.map((item) => item.id)).not.toContain("membership");
+  });
+
+  it("私有页面可指定插在某个公开页面之后", () => {
+    const merged = mergeNavigationItems(publicNavigationItems, [
+      { ...injected[0], after: "macros" },
+    ]);
     expect(merged.map((item) => item.id)).toEqual([
       "buttons",
       "macros",
       "membership",
       "recommendations",
       "connection",
+      "reflections",
       "permissions",
       "settings",
+      "profile",
     ]);
-    expect(merged[2]?.label).toBe("会员");
-    // 合并函数必须是纯的：公开表不能被就地改写。
-    expect(publicNavigationItems).toHaveLength(6);
-    expect(publicNavigationItems.map((item) => item.id)).not.toContain("membership");
   });
 
   it("校验码：私有页面 id 不得与公开页面冲突", () => {

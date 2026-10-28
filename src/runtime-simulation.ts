@@ -4,6 +4,7 @@ import {
   disconnectRemote,
   getAudioSnapshot,
   getButtonMappings,
+  getAppIcon,
   getDiagnosticReport,
   getGainDb,
   getOpenWindowAtLaunch,
@@ -321,10 +322,10 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   // 「打开应用 + 聚焦方式」：面板于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
   // src/pages/ButtonsPage.vue 同款注释）。这里钉住面板可见；学习与测试两条路径仍经
   // 真实 IPC 覆盖。
-  await clickButton("记事本");
+  await clickButton("打开记事本");
   await waitFor(
-    () => (document.body.textContent?.includes("打开后聚焦方式") ? true : null),
-    "「打开后聚焦方式」面板可见",
+    () => (document.querySelector(".focus-profile") ? true : null),
+    "「聚焦方式」面板可见",
   );
   const learned = await learnFocusTarget();
   assert(
@@ -332,7 +333,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "仿真学习样本不是预期的可编辑目标",
   );
   await testAppFocus("notepad");
-  steps.push("「打开后聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
+  steps.push("「聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
 
   mark("permissions_page");
   await openPage("权限");
@@ -504,6 +505,102 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("设置页「启动时自动打开主面板」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
+  await openPage("个人中心");
+  mark("profile_page");
+  assert(document.querySelector(".sidebar-footer") === null, "侧栏不应再显示版本号");
+  assert(
+    document.querySelector(".share-nav-item") === null,
+    "分享入口应在个人中心页内，不应出现在侧栏",
+  );
+  assert(document.querySelector(".profile-page") !== null, "个人中心页没有渲染");
+  assert(
+    document.querySelector(".profile-header h1")?.textContent?.trim() === "个人中心",
+    "个人中心页标题异常",
+  );
+  assert(
+    document.querySelector(".profile-header .badge")?.textContent?.trim() === "数据仅存本机",
+    "个人中心缺少本机隐私胶囊",
+  );
+  assert(
+    document.querySelector(".profile-header .badge")?.tagName === "SPAN",
+    "数据仅存本机必须是文字，不能是可点击按钮",
+  );
+  const currentAppIcon = await getAppIcon();
+  const expectedLogo =
+    currentAppIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png";
+  await waitFor(
+    () =>
+      document.querySelector(".profile-nav-item img")?.getAttribute("src") === expectedLogo
+        ? true
+        : null,
+    "个人中心侧栏入口使用当前应用 logo",
+  );
+  assert(document.querySelectorAll(".profile-kpi").length === 4, "个人中心 KPI 不是 4 项");
+  const sharePanel = document.querySelector(".share-panel");
+  assert(sharePanel !== null, "个人中心缺少分享无线麦面板");
+  assert(
+    sharePanel.compareDocumentPosition(document.querySelector(".profile-kpis")!) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    "分享无线麦面板必须在累计按键上方",
+  );
+  assert(
+    document.querySelector(".share-panel-content") === null,
+    "分享二维码应默认收起",
+  );
+  assert(
+    document.querySelector("#profile-share-title")?.textContent?.trim() ===
+      "分享无线麦 SayAll",
+    "分享面板标题异常",
+  );
+  assert(
+    document.querySelectorAll(".calendar-grid .calendar-day").length >= 7,
+    "个人中心日历没有渲染完整星期行",
+  );
+  assert(
+    document.querySelector(".profile-reflections-link")?.textContent?.includes("查看全部回眸") ===
+      true,
+    "个人中心缺少「查看全部回眸」入口",
+  );
+  steps.push("个人中心经真实 IPC 渲染 4 项 KPI、排行榜与 26 周日历，含回眸入口");
+
+  mark("share_panel");
+  await clickButton("显示二维码");
+  await waitFor(
+    () => (document.querySelector(".share-panel-content") ? true : null),
+    "分享二维码展开",
+  );
+  const shareQr = await waitFor(() => {
+    const image = document.querySelector<HTMLImageElement>(".share-qr img");
+    return image && image.complete && image.naturalWidth > 0 ? image : null;
+  }, "分享二维码资源");
+  assert(
+    shareQr.getAttribute("src") === "/app-share-qr.png",
+    "分享面板没有使用本机二维码资源",
+  );
+  const shareLink = document.querySelector(".share-copy code")?.textContent?.trim();
+  assert(
+    shareLink === "https://sayall.app/?from=win_share",
+    `分享链接异常：${shareLink ?? "missing"}`,
+  );
+  assert(
+    document.querySelector(".share-copy-button")?.textContent?.includes("复制链接") === true,
+    "分享面板缺少复制链接按钮",
+  );
+  await clickButton("收起");
+  await waitFor(
+    () => (document.querySelector(".share-panel-content") ? null : true),
+    "分享二维码收起",
+  );
+  steps.push("个人中心在累计按键上方内联展开/收起本机二维码、固定链接与复制入口");
+
+  mark("profile_reflections");
+  await clickButton("查看全部回眸");
+  await waitFor(
+    () => (document.querySelector(".reflections-page") ? true : null),
+    "个人中心「查看全部回眸」跳转到回眸页",
+  );
+  steps.push("个人中心「查看全部回眸」跳转到回眸页");
+
   await openPage("连接");
   // 重新挂载连接页：增益必须从持久化设置恢复（证明读取路径真的从 IPC 取值，
   // 而不是界面硬编码 0）——上一步已把 12 dB 写入仿真设置目录。
@@ -516,7 +613,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   assert(restoredGainSlider.value === "12", "增益没有从持久化设置恢复");
   steps.push("重新进入连接页后增益从持久化设置恢复为 12 dB");
-  steps.push("四个侧栏页面均在 Windows WebView 中完成导航和渲染");
+  steps.push("五个侧栏页面均在 Windows WebView 中完成导航和渲染");
 
   mark("voice_session");
   const voice = await invoke<PlatformSnapshot>("run_runtime_simulation_voice_session");

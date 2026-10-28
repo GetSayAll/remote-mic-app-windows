@@ -4,15 +4,21 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
 import {
+  APP_ICON_CHANGED_EVENT,
+  getAppIcon,
+  getMembershipAccountSummary,
   getOnboardingState,
   getRuntimeSnapshot,
   hideMainWindow,
   takeUpdateCompletedVersion,
+  type AppIconIdentifier,
   type RuntimeSnapshot,
 } from "./lib/bridge";
+import { profileAccountLabel } from "./lib/profile";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
+import { t } from "./lib/i18n";
 import { privatePageComponents } from "./private/feature-pages";
 import {
   detectReloadRecovery,
@@ -29,15 +35,54 @@ import MacrosPage from "./pages/MacrosPage.vue";
 import OnboardingPage from "./pages/OnboardingPage.vue";
 import PermissionsPage from "./pages/PermissionsPage.vue";
 import RecommendationsPage from "./pages/RecommendationsPage.vue";
+import ReflectionsPage from "./pages/ReflectionsPage.vue";
+import ProfilePage from "./pages/ProfilePage.vue";
 
 const activePage = ref<string>(loadPersistedPage() ?? "buttons");
-watch(activePage, (page) => persistActivePage(page));
+watch(activePage, (page) => {
+  persistActivePage(page);
+  void refreshAppIcon();
+  if (page === "profile") void refreshProfileLabel();
+});
 const runtime = ref<RuntimeSnapshot | null>(null);
 const loadError = ref("");
 const { bannerVisible, info: updateInfo, dismissBanner, runStartupSilentCheck } = useAppUpdate();
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
 let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
+let profileLabelTimer: ReturnType<typeof setInterval> | undefined;
 let initialRuntimeReported = false;
+
+/** 侧栏个人入口：未登录「个人中心」，已登录只显示邮箱 @ 前最多 10 个字符。 */
+const profileLabel = ref("个人中心");
+/** 与托盘图标同源；设置页切换后由事件和 5 秒轮询同步到侧栏。 */
+const appIcon = ref<AppIconIdentifier>("faceted-duck");
+
+async function refreshProfileLabel(): Promise<void> {
+  try {
+    const summary = await getMembershipAccountSummary();
+    profileLabel.value =
+      summary.availability === "available"
+        ? profileAccountLabel(summary.accountDisplayName)
+        : "个人中心";
+  } catch {
+    // 会员摘要读取失败不打扰主界面；保持上一次文案。
+  }
+}
+
+async function refreshAppIcon(): Promise<void> {
+  try {
+    appIcon.value = await getAppIcon();
+  } catch {
+    // 读取失败保持上一次图标；托盘侧不受影响。
+  }
+}
+
+function onAppIconChanged(event: Event): void {
+  const identifier = (event as CustomEvent<AppIconIdentifier>).detail;
+  if (identifier === "standard" || identifier === "faceted-duck") {
+    appIcon.value = identifier;
+  }
+}
 
 /** 未完成首次设置时进入向导（激活开关见 ONBOARDING_WIZARD_ENABLED）。 */
 const showOnboarding = ref(false);
@@ -97,8 +142,10 @@ const pageComponents: Record<string, Component> = {
   recommendations: RecommendationsPage,
   macros: MacrosPage,
   connection: ConnectionPage,
+  reflections: ReflectionsPage,
   permissions: PermissionsPage,
   settings: SettingsPage,
+  profile: ProfilePage,
   ...privatePageComponents(),
 };
 
@@ -133,7 +180,11 @@ onMounted(async () => {
         initialRuntimeReported = true;
       }
     } catch (error) {
-      loadError.value = error instanceof Error ? error.message : String(error);
+      // 原始 IPC/Rust 错误只进控制台；界面给固定文案（英文模式可翻译）。
+      console.error(
+        `runtime snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      loadError.value = "无法读取运行状态，请稍后重试。";
       if (!initialRuntimeReported) {
         reportFrontendEvent({
           event: "runtime_snapshot",
@@ -156,6 +207,7 @@ onMounted(async () => {
     });
   }
   window.addEventListener("keydown", handleWindowKeydown, true);
+  window.addEventListener(APP_ICON_CHANGED_EVENT, onAppIconChanged);
   // 首次使用向导：读取向导状态决定是否进入向导模式；读取失败不阻断启动
   // （Rust 侧已记录失败原因，用户仍可用主界面）。仿真冒烟构建跳过（见上方说明）。
   if (ONBOARDING_WIZARD_ENABLED && !runtimeSimulationBuild) {
@@ -182,9 +234,15 @@ onMounted(async () => {
       .catch(() => undefined);
   }
   await refreshRuntime();
+  void refreshProfileLabel();
+  void refreshAppIcon();
   runtimePollTimer = setInterval(() => {
     void refreshRuntime();
   }, 1_000);
+  profileLabelTimer = setInterval(() => {
+    void refreshProfileLabel();
+    void refreshAppIcon();
+  }, 5_000);
   // 启动静默检查更新：延迟 3 秒避开 BLE 恢复/设置加载的启动高峰；
   // 失败完全无声（app-update.ts 内回落 idle，不打扰主功能）。
   updateCheckTimer = setTimeout(() => {
@@ -195,7 +253,9 @@ onMounted(async () => {
 onUnmounted(() => {
   if (runtimePollTimer) clearInterval(runtimePollTimer);
   if (updateCheckTimer) clearTimeout(updateCheckTimer);
+  if (profileLabelTimer) clearInterval(profileLabelTimer);
   window.removeEventListener("keydown", handleWindowKeydown, true);
+  window.removeEventListener(APP_ICON_CHANGED_EVENT, onAppIconChanged);
 });
 </script>
 
@@ -206,13 +266,18 @@ onUnmounted(() => {
     @completed="onOnboardingCompleted"
   />
   <div v-else class="app-shell">
-    <Sidebar :active-page="activePage" :version="runtime?.appVersion" @select="activePage = $event" />
+    <Sidebar
+      :active-page="activePage"
+      :profile-label="profileLabel"
+      :app-icon="appIcon"
+      @select="activePage = $event"
+    />
     <main class="content">
-      <div v-if="loadError" class="error-banner">无法读取运行状态：{{ loadError }}</div>
+      <div v-if="loadError" class="error-banner">{{ t(loadError) }}</div>
       <div v-if="updateBannerVisible" class="update-banner">
-        <span>发现新版本 {{ updateInfo?.version }}</span>
-        <button type="button" class="link-button" @click="showUpdatePage">查看</button>
-        <button type="button" class="link-button" aria-label="忽略此提醒" @click="dismissBanner">
+        <span>{{ t("发现新版本 {version}", { version: updateInfo?.version ?? "" }) }}</span>
+        <button type="button" class="link-button" @click="showUpdatePage">{{ t("查看") }}</button>
+        <button type="button" class="link-button" :aria-label="t('忽略此提醒')" @click="dismissBanner">
           ×
         </button>
       </div>

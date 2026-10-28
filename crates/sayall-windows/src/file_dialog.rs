@@ -6,13 +6,37 @@ use std::path::PathBuf;
 /// 初始化或调用失败会保留为错误，供上层写入去标识化日志。
 #[cfg(windows)]
 pub fn pick_button_mapping_import_path() -> Result<Option<PathBuf>, String> {
-    pick_json_path(DialogKind::Open)
+    pick_dialog(DialogKind::Open, DialogFlavor::Mapping)
 }
 
 /// 选择按键映射 JSON 的导出位置。
 #[cfg(windows)]
 pub fn pick_button_mapping_export_path() -> Result<Option<PathBuf>, String> {
-    pick_json_path(DialogKind::Save)
+    pick_dialog(DialogKind::Save, DialogFlavor::Mapping)
+}
+
+/// 选择 `.sayall` 键位方案的导入文件（私有组件使用；公开构建不调用）。
+#[cfg(windows)]
+pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Open, DialogFlavor::ButtonProfile)
+}
+
+/// 选择 Windows 键位方案备份的导出位置（私有组件使用；公开构建不调用）。
+#[cfg(windows)]
+pub fn pick_button_profile_export_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Save, DialogFlavor::ButtonProfileExport)
+}
+
+/// 选择组合动作 `.sayall` 的导入文件（macOS `sayall-transfer 1.0`）。
+#[cfg(windows)]
+pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Open, DialogFlavor::Sayall)
+}
+
+/// 选择组合动作 `.sayall` 的导出位置。
+#[cfg(windows)]
+pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Save, DialogFlavor::Sayall)
 }
 
 #[cfg(not(windows))]
@@ -25,16 +49,14 @@ pub fn pick_button_mapping_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
-/// 选择组合动作 `.sayall` 的导入文件（macOS `sayall-transfer 1.0`）。
-#[cfg(windows)]
-pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
-    pick_sayall_path(DialogKind::Open)
+#[cfg(not(windows))]
+pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
-/// 选择组合动作 `.sayall` 的导出位置。
-#[cfg(windows)]
-pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
-    pick_sayall_path(DialogKind::Save)
+#[cfg(not(windows))]
+pub fn pick_button_profile_export_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
 #[cfg(not(windows))]
@@ -44,6 +66,17 @@ pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
 
 #[cfg(not(windows))]
 pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
+/// 选择回眸原始录音的导出位置。
+#[cfg(windows)]
+pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Save, DialogFlavor::Audio)
+}
+
+#[cfg(not(windows))]
+pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
@@ -59,16 +92,9 @@ enum DialogKind {
 enum DialogFlavor {
     Mapping,
     Sayall,
-}
-
-#[cfg(windows)]
-fn pick_json_path(kind: DialogKind) -> Result<Option<PathBuf>, String> {
-    pick_dialog(kind, DialogFlavor::Mapping)
-}
-
-#[cfg(windows)]
-fn pick_sayall_path(kind: DialogKind) -> Result<Option<PathBuf>, String> {
-    pick_dialog(kind, DialogFlavor::Sayall)
+    ButtonProfile,
+    ButtonProfileExport,
+    Audio,
 }
 
 #[cfg(windows)]
@@ -140,6 +166,27 @@ fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>,
                     "*.sayall",
                     "SayAll-组合动作.sayall",
                     "sayall",
+                ),
+                DialogFlavor::ButtonProfile => (
+                    "导入键位方案",
+                    "SayAll 键位方案 (*.sayall;*.json)",
+                    "*.sayall;*.json",
+                    "SayAll-键位方案.sayall",
+                    "sayall",
+                ),
+                DialogFlavor::ButtonProfileExport => (
+                    "导出键位方案备份",
+                    "SayAll 键位方案备份 (*.json)",
+                    "*.json",
+                    "SayAll-键位方案备份.json",
+                    "json",
+                ),
+                DialogFlavor::Audio => (
+                    "导出原始录音",
+                    "WAV 录音 (*.wav)",
+                    "*.wav",
+                    "SayAll-原始录音.wav",
+                    "wav",
                 ),
             };
         let title = wide(title_text);

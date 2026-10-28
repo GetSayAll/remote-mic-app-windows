@@ -24,6 +24,8 @@
       },
       "voiceState": "idle",
       "decodedSamples": 240,
+      "voiceAudioHealth": "unknown",
+      "voiceAudioRateHz": null,
       "generation": 7,
       "reconnectAttempt": 2,
       "powerNotificationsAvailable": true,

@@ -3149,11 +3149,14 @@ dependencies = [
 name = "sayall-windows"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "futures",
+ "png 0.17.16",
  "sayall-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "uuid",
  "wasapi",
  "windows 0.62.2",
  "windows-future 0.3.2",
@@ -3164,11 +3167,14 @@ dependencies = [
 name = "sayall-windows-app"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "quick-xml",
  "reqwest",
  "rustls",
  "sayall-core",
  "sayall-windows",
+ "sayall-windows-button-profiles",
  "sayall-windows-common-phrases",
  "semver",
  "serde",
@@ -3180,6 +3186,13 @@ dependencies = [
  "webview2-com",
  "windows 0.62.2",
  "windows-core 0.61.2",
+]
+
+[[package]]
+name = "sayall-windows-button-profiles"
+version = "0.0.0"
+dependencies = [
+ "sayall-windows",
 ]
 
 [[package]]
