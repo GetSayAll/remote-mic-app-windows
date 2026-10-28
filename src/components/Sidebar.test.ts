@@ -3,12 +3,14 @@
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it } from "vitest";
 import { effectiveLanguage } from "../lib/language-state";
+import { publicNavigationItems } from "../navigation";
 import Sidebar from "./Sidebar.vue";
 
 describe("sidebar", () => {
   beforeEach(() => {
     effectiveLanguage.value = "zh-Hans";
   });
+
   it("不显示版本号（版本号在窗口标题）", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
 
@@ -17,8 +19,14 @@ describe("sidebar", () => {
   });
 
   it("顶部页面顺序不变，个人中心固定在最后", () => {
-    const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
-    const items = wrapper.findAll(".nav-item");
+    const wrapper = mount(Sidebar, {
+      props: { activePage: "settings" },
+    });
+    // 私有构建可能追加自己的页面；这里只核对公开页面的相对顺序。
+    const publicLabels = new Set(publicNavigationItems.map((item) => item.label));
+    const items = wrapper
+      .findAll(".nav-item")
+      .filter((item) => publicLabels.has(item.text()));
 
     expect(items.map((item) => item.text())).toEqual([
       "按键",
@@ -53,10 +61,10 @@ describe("sidebar", () => {
       props: { activePage: "profile", appIcon: "standard" },
     });
 
-    expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe("/app-logo.png");
+    expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe("/app-logo.webp");
     await wrapper.setProps({ appIcon: "faceted-duck" });
     expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe(
-      "/app-icon-faceted-duck.png",
+      "/app-icon-faceted-duck.webp",
     );
   });
 
@@ -73,11 +81,12 @@ describe("sidebar", () => {
 
   it("组合动作页用层叠方块图标（对齐 Mac square.stack.3d.up）", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "macros" } });
-    const items = wrapper.findAll(".nav-item");
+    const macrosItem = wrapper
+      .findAll(".nav-item")
+      .find((item) => item.text() === "组合动作");
 
-    const macrosItem = items[1];
-    expect(macrosItem.text()).toBe("组合动作");
-    const paths = macrosItem.get("svg").findAll("path");
+    expect(macrosItem).toBeTruthy();
+    const paths = macrosItem!.get("svg").findAll("path");
     // 三层描边：顶层方块 + 两条底边（与键盘图标的两段明显不同）。
     expect(paths).toHaveLength(3);
     expect(paths[0].attributes("d")).toContain("l9 4.6");
@@ -86,8 +95,21 @@ describe("sidebar", () => {
   it("英文模式下侧栏条目、导航标签切换为英文", () => {
     effectiveLanguage.value = "en";
     const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
+    const publicEnglishLabels = new Set([
+      "Buttons",
+      "Routines",
+      "Picks",
+      "Connection",
+      "Reflections",
+      "Permissions",
+      "Settings",
+      "Profile",
+    ]);
+    const items = wrapper
+      .findAll(".nav-item")
+      .filter((item) => publicEnglishLabels.has(item.text()));
 
-    expect(wrapper.findAll(".nav-item").map((item) => item.text())).toEqual([
+    expect(items.map((item) => item.text())).toEqual([
       "Buttons",
       "Routines",
       "Picks",

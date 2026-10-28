@@ -1,5 +1,23 @@
 # TODO
 
+## 语音识别"能出字但对不上"的定位链（2026-10-27 用户报障，已定位为配置问题）
+
+- [ ] 现象：遥控器语音键正常、豆包能出字，但识别内容与实际说的出入较大；链路日志全绿
+  （`path=report_layer` + `result=replaced` + 录音时长正常）。
+- 根因：输入法麦克风选的是「自动检测」，跟随**系统默认录音设备**；本机默认不是 `CABLE Output`，
+  而系统里还活跃着「立体声混音」与「麦克风阵列」，于是录到的是环境声/系统声。用户把输入法麦克风
+  改成 `CABLE Output` 后准确率立刻恢复。
+- 本次只补证据（不改行为）：`voice_capture_input default="<默认录音设备>" is_cable_output=<bool>`
+  （每次语音键按下，结果缓存 30 s）与 `voice_level session=… reason=… frames=… samples=…
+  peak_dbfs=… rms_dbfs=… clipped=…`（每次会话收尾，只记数字不碰音频内容）。
+  自动化：`cargo test -p sayall-windows --lib` **475 passed / 16 ignored**（新增 5 条：
+  电平的空帧/静音区分、满幅削波、半幅 -6 dBFS、取走后复位、端点名判定）。
+- **待产品决定**：v1 决策写的是"应用不修改系统默认录音设备，由用户设置"，但目前界面与向导
+  没有任何地方提示这件事（onboarding 的「音频检查」只验端点存在性）。建议在连接页「语音设备」
+  卡片或向导第 ② 步加一句「把系统默认录音设备或输入法的麦克风设为 CABLE Output，不要用自动检测」。
+- 真机 `deferred`：需一次真实语音会话确认两行日志都出现、`is_cable_output=true`。
+  记录见 `Bugs/2026-10-27-voice-accuracy-input-device-auto-detect.md`。
+
 ## v1 决策（2026-09-04）
 
 - 第一版只做微信输入法听写：按住说话快捷键默认 左Ctrl+左Win（适配微信输入法默认语音热键）；语音可用 = 按住语音键 → 注入快捷键 → ATVV 音频经 CABLE Input → 微信输入法麦克风（CABLE Output）→ 云端识别 → 文字上屏。端到端链路音频段已本机实证（调查报告 evidence/n）；注入段配方约束已本机实证（evidence/p：WeType 拒绝单批零间隔和弦，须逐事件注入；间隔 20/40/60ms 均 4/4 触发、零间隔 0/2，~~默认取 20ms 压低按键延迟~~（2026-09-05 更正：20ms 为热态验证结论，冷/节流态必失败已实证并回退 80ms，见下方"性能已知项"与提交 86e5314——延迟优化必须以成功率保证为前提），Bugs\2026-09-04-wetype-zero-gap-injection.md）；**延迟账目已量化（2026-09-05，evidence/p 端点预热对照实验）**：注入→WeType 开麦固定 ~163ms（冷/热端点中位数差 0.3ms，预热无效；WeType 内部处理，第三方边界不可干预），两型号实际均直接 0x04 推流（无开麦往返可并行），0x04 早于 HID F5 60-90ms（触发点已最早），全链 ≈215-245ms 其中应用侧仅和弦 20ms 可控——**应用侧延迟优化到此收敛**；RC001 遥控器端到端真机 passed（2026-09-04，用户确认文字上屏；用户侧前提=输出端点选 CABLE Input + 系统默认录音设备切 CABLE Output，应用不修改系统默认设备）；RC003 真机待验。豆包（注入判死四层闭环）与 WinUHid 增强轨延后，见 ADR 0002 与 docs/investigations/2026-09-04-avoid-driver-signing-input-paths-final.md。
@@ -106,6 +124,30 @@
   写进 gadget 配置的老问题）。自动化 passed：助手 `cargo test` 79 passed（含 3 项新增）。**真机 deferred**：
   mirrored 机器上首次回退 + **第二次启动**（判据见 `Testing/WindowsRC003EnhancedCapture.md`
   「2026-10-25 增量」），以及安装版重出包后的回归。
+  **2026-10-26 判定层收口（issue #291）**：① 助手桥接（命名管道）移到端口绑定成功之后——
+  `[APP-BRIDGE] event=enabled` 必须晚于 `[LISTEN]`，让"握手成功"隐含"传输端口已就绪"，
+  不再出现"助手注定要退出、主程序却已报 helper_connected"；② 应用新增累计判据：本次开启
+  被接受 ≥3 次且`owned_usages` 始终为空 ⇒ 落
+  `action=capture_unavailable reason=helper_startup_failing hint=check_environment_conflict`
+  并发布 `CaptureHealth=inactive`（界面出既有"还没有生效，正在自动重试"文案），拿到所有权
+  或关闭开关立即清除。自动化 passed：`cargo test -p sayall-windows-app --lib` **163 passed**
+  （含 2 项新增，带阳性对照）；助手 `cargo check`、`cargo fmt --all -- --check` passed。
+  **真机 deferred**：需一台"助手必然启动失败"的机器验证 1–4 全链路（判据见 Testing 文档
+  「2026-10-26 增量」）。
+  **2026-10-27 文案补完 + 端口回退放宽**：① `inactive` 拆两句——助手反复启动失败时不再说
+  "关掉再打开"，定稿「暂时没能启动，正在自动重试。如果一直不恢复，请把开关关掉再打开一次；
+  还是不行就重启这台电脑。」（第一版"退出那个程序"被用户否掉：他无从定位是哪个程序）。
+  新增 `CaptureUnavailable`（`none` / `startup_failing`）经 `Rc003BridgeView.captureUnavailable`
+  下发，前端 `captureInactiveText(name, unavailable)` 选句，读不到原因退回通用句。
+  ② 回退门禁放宽：查占用者（`GetExtendedTcpTable` + `QueryFullProcessImageNameW`）后分类，
+  只有 `holder=own_helper` 才走退出分支，`other_program` / `unknown` / `nobody` 一律换端口——
+  #304 的"只有 refused 才回退"会把"端口被真实进程占着"的机器锁在崩溃循环里。
+  ③ `holder=own_helper` 先回收：互斥体已证明同会话没有第二支新版助手 ⇒ 那个同名监听者必然是
+  旧版本残留/孤儿，`[RECLAIM] stale_helper_terminated` 结束它、2 s 内重绑；三道安全闸
+  （已持锁 / 映像名是 sayall-helper.exe / PID 不是自己），显式 `--port` 永不回收。
+  自动化 passed：助手 **83 passed**（含真调用 Win32 的自监听→查 PID→读映像用例）、
+  Rust **164 passed**（token 契约）、前端全量 vitest 通过、`vue-tsc --noEmit` 通过。
+  文案决定记入 `docs/product-copy.md` §7（2026-10-27）；真机仍 deferred。
 - [ ] 增强捕获：renew 写失败 / agent 心跳停顿的快速自愈（2026-10-21 现场，日志
   `03:49–04:19Z`）：agent 的 `auth_mismatch` 判据误用了 `lastRenewAt === 0`（租约过期
   也会清零），把普通停顿判成鉴权失败 → 4s + 固定 15s，应用 8s 后重启助手，窗口

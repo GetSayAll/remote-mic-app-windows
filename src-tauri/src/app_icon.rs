@@ -373,19 +373,27 @@ pub fn apply(app: &AppHandle, requested: AppIconIdentifier) -> AppIconIdentifier
 
     // 快捷方式（开始菜单 / 桌面 / 固定到任务栏）的图标不来自窗口句柄，单独同步
     // （2026-10-03：切换后开始菜单磁贴与固定项不变，就是缺这一步）。
-    match crate::shortcut_icons::sync(applied) {
-        Ok(report) => sayall_windows::gatt_note(format!(
-            "app_icon action=sync_shortcuts phase=completed terminal_result=passed style={} considered={} updated={} failed={}",
-            style_label(applied),
-            report.considered,
-            report.updated,
-            report.failed
-        )),
-        Err(_) => sayall_windows::gatt_note(format!(
-            "app_icon action=sync_shortcuts phase=completed terminal_result=failed style={} error_domain=shell error_code=sync_failed retryable=true",
-            style_label(applied)
-        )),
-    }
+    //
+    // 2026-10-28：这一步要逐个改写 .lnk，实测 350 ms（每个写入都会被安全软件扫一遍），
+    // 而它同步跑在启动 setup 里，把窗口首个 IPC 一起推后。窗口/托盘图标在上面已经设好，
+    // 快捷方式晚几百毫秒没有任何可感知差异，因此挪到独立线程；日志字段保持不变。
+    let sync_style = applied;
+    std::thread::spawn(move || {
+        let outcome = crate::shortcut_icons::sync(sync_style);
+        match outcome {
+            Ok(report) => sayall_windows::gatt_note(format!(
+                "app_icon action=sync_shortcuts phase=completed terminal_result=passed style={} considered={} updated={} failed={}",
+                style_label(sync_style),
+                report.considered,
+                report.updated,
+                report.failed
+            )),
+            Err(_) => sayall_windows::gatt_note(format!(
+                "app_icon action=sync_shortcuts phase=completed terminal_result=failed style={} error_domain=shell error_code=sync_failed retryable=true",
+                style_label(sync_style)
+            )),
+        }
+    });
 
     if applied == requested {
         sayall_windows::gatt_note(format!(

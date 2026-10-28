@@ -1,0 +1,14 @@
+[package]
+name = "sayall-windows-button-profiles"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "键位方案可选组件的公开空壳（私有实现在构建期注入本目录）"
+
+[dependencies]
+sayall-windows = { path = "../sayall-windows" }
+
+[features]
+# 与私有实现同名：私有构建会转发启用它。空壳声明保证公开构建同样可编译（无行为）。
+runtime-simulation = []

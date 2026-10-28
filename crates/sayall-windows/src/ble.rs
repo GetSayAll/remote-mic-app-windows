@@ -233,6 +233,104 @@ enum VoiceEffectVerdict {
     Missing,
 }
 
+/// 每次语音会话的音频电平统计（2026-10-27）。
+///
+/// 为什么需要：用户报"识别不准"时，日志里只有按键链路、时长与泵指标，**没有任何音频
+/// 质量证据**；而 `mic=` 读的是 Windows 麦克风隐私记录，在豆包上恒 `not_observed`
+/// （历史所有日志都是 0 次 observed），所以那条判据说明不了"有没有开麦"。
+/// 没有电平数字，就只能让用户用耳朵判断"声音够不够大"。
+///
+/// 只记数字，不碰音频内容：峰值 / 均方根 / 削波样本数。
+#[derive(Default)]
+struct VoiceLevelMeter {
+    frames: u64,
+    samples: u64,
+    /// 绝对值峰值（最小 0，最大 32768——`i16::MIN` 的绝对值）。
+    peak: i32,
+    /// 落在满幅上的样本数（>= 32767）：持续非零说明增益过大或离麦克风太近。
+    clipped: u64,
+    /// 平方和，用于算 RMS。
+    sum_squares: u64,
+}
+
+impl VoiceLevelMeter {
+    fn observe(&mut self, samples: &[i16]) {
+        if samples.is_empty() {
+            return;
+        }
+        self.frames += 1;
+        self.samples += samples.len() as u64;
+        for &sample in samples {
+            let value = sample as i32;
+            let magnitude = value.unsigned_abs() as i32;
+            if magnitude > self.peak {
+                self.peak = magnitude;
+            }
+            if magnitude >= 32767 {
+                self.clipped += 1;
+            }
+            let widened = value as i64;
+            self.sum_squares = self.sum_squares.saturating_add((widened * widened) as u64);
+        }
+    }
+
+    /// 取走本轮统计并清空（会话结束即复位，下一轮从零开始）。
+    fn take(&mut self) -> VoiceLevelSummary {
+        let summary = VoiceLevelSummary {
+            frames: self.frames,
+            samples: self.samples,
+            peak_dbfs: dbfs_from_magnitude(self.peak as f64),
+            rms_dbfs: if self.samples == 0 {
+                None
+            } else {
+                let mean = self.sum_squares as f64 / self.samples as f64;
+                Some(dbfs_from_magnitude(mean.sqrt()))
+            },
+            clipped: self.clipped,
+        };
+        *self = Self::default();
+        summary
+    }
+
+    /// 会话收尾时落一行（`reason` 区分正常结束与异常中止）。
+    ///
+    /// 会话里一帧音频都没到时不写：那种情况时长/`samples=0` 已经能说明问题，
+    /// 再写一行 `peak=-120` 只会把日志搅浑。
+    fn log_and_reset(&mut self, session: &str, reason: &str) {
+        let summary = self.take();
+        if summary.frames == 0 {
+            return;
+        }
+        gatt_note(format!(
+            "voice_level session={session} reason={reason} frames={} samples={} peak_dbfs={:.1} rms_dbfs={} clipped={}",
+            summary.frames,
+            summary.samples,
+            summary.peak_dbfs,
+            summary
+                .rms_dbfs
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "none".to_owned()),
+            summary.clipped,
+        ));
+    }
+}
+
+struct VoiceLevelSummary {
+    frames: u64,
+    samples: u64,
+    peak_dbfs: f32,
+    rms_dbfs: Option<f32>,
+    clipped: u64,
+}
+
+/// 幅度（以 32768 为满幅）换算 dBFS；0 幅度落到 -120 表示"静音"，不返回 -inf。
+fn dbfs_from_magnitude(magnitude: f64) -> f32 {
+    if magnitude < 1.0 {
+        return -120.0;
+    }
+    (20.0 * (magnitude / 32768.0).log10()) as f32
+}
+
 fn voice_effect_verdict(
     before: Option<crate::rc003_bridge::VoiceFrameStamp>,
     latest: Option<crate::rc003_bridge::VoiceFrameStamp>,
@@ -274,6 +372,77 @@ mod voice_attempt_tests {
         assert_eq!(synth_label(None), "off");
         assert_eq!(synth_label(Some(0x00E6)), "0x00E6");
         assert_eq!(synth_label(Some(0x00E2)), "0x00E2");
+    }
+}
+
+/// 电平统计的边界（2026-10-27）：静音不能被记成"有信号"，满幅必须计入削波。
+///
+/// 这几条决定 `voice_level` 行能不能用来判断"是声音太小、太大、还是根本没进来"，
+/// 判错的代价就是下次照样只能靠耳朵猜。
+#[cfg(test)]
+mod voice_level_tests {
+    use super::VoiceLevelMeter;
+
+    #[test]
+    fn empty_and_silent_frames_are_distinguishable() {
+        let mut meter = VoiceLevelMeter::default();
+        // 没有音频帧 → 完全无记录（`log_and_reset` 会跳过这一行）。
+        meter.observe(&[]);
+        let summary = meter.take();
+        assert_eq!(summary.frames, 0);
+        assert_eq!(summary.samples, 0);
+        assert!(summary.rms_dbfs.is_none());
+
+        // 有帧但全是 0 → 有记录、读数是静音（-120），不是"没有数据"。
+        meter.observe(&[0, 0, 0, 0]);
+        let summary = meter.take();
+        assert_eq!(summary.frames, 1);
+        assert_eq!(summary.samples, 4);
+        assert_eq!(summary.peak_dbfs, -120.0);
+        assert_eq!(summary.rms_dbfs, Some(-120.0));
+        assert_eq!(summary.clipped, 0);
+    }
+
+    #[test]
+    fn full_scale_reads_zero_dbfs_and_counts_clipping() {
+        let mut meter = VoiceLevelMeter::default();
+        // 32767 与 i16::MIN 都是满幅；后者只能通过 `unsigned_abs` 正确处理。
+        meter.observe(&[32767, i16::MIN, 32767, i16::MIN]);
+        let summary = meter.take();
+        assert!(
+            summary.peak_dbfs.abs() < 0.01,
+            "满幅应读 0 dBFS，实际 {}",
+            summary.peak_dbfs
+        );
+        assert_eq!(summary.clipped, 4);
+        // 方波：RMS 峰值相同。
+        assert!(summary.rms_dbfs.expect("有样本").abs() < 0.01);
+    }
+
+    #[test]
+    fn half_scale_reads_minus_six_db() {
+        let mut meter = VoiceLevelMeter::default();
+        meter.observe(&[16384, 16384, 16384, 16384]);
+        let summary = meter.take();
+        assert!(
+            (summary.peak_dbfs + 6.02).abs() < 0.05,
+            "半幅应读 -6.02 dBFS，实际 {}",
+            summary.peak_dbfs
+        );
+        assert_eq!(summary.clipped, 0);
+    }
+
+    #[test]
+    fn take_clears_state_for_the_next_session() {
+        let mut meter = VoiceLevelMeter::default();
+        meter.observe(&[1000, -2000]);
+        let first = meter.take();
+        assert_eq!(first.samples, 2);
+        assert!(first.peak_dbfs > -120.0);
+
+        let second = meter.take();
+        assert_eq!(second.frames, 0);
+        assert_eq!(second.samples, 0);
     }
 }
 
@@ -735,6 +904,8 @@ fn worker_loop(
     let mut session: Option<BleSession> = None;
     let mut pipeline = AtvvVoicePipeline::default();
     let mut active_voice_samples = 0_u64;
+    // 本轮语音会话的音频电平（2026-10-27）：会话结束时落一行 `voice_level`。
+    let mut voice_level = VoiceLevelMeter::default();
     // 音频完整度判定的会话起点（2026-10-24）：只在 StreamStarted → StreamStopped
     // 之间有效；太短的会话在判据里直接跳过。
     let mut voice_stream_started_at: Option<Instant> = None;
@@ -1224,6 +1395,11 @@ fn worker_loop(
                 bytes,
             } => {
                 if message_generation == connection_generation {
+                    let was_streaming = pipeline.state() == VoiceSessionState::Streaming;
+                    // 会话号要在处理 STOP 之前取：收尾会把它清掉。
+                    let level_session = pipeline
+                        .session_id()
+                        .map_or_else(|| "unknown".to_owned(), |id| id.to_string());
                     handle_control(
                         &mut session,
                         &mut pipeline,
@@ -1242,8 +1418,13 @@ fn worker_loop(
                         &voice_session_epoch,
                         &transcript_capture,
                         &mut transcript_pending_started,
+                        &mut voice_level,
                         &bytes,
                     );
+                    // 正常收尾（StreamStopped 等）：本轮电平在此落盘。
+                    if was_streaming && pipeline.state() != VoiceSessionState::Streaming {
+                        voice_level.log_and_reset(&level_session, "stopped");
+                    }
                     let phase = lock(&state).phase;
                     if phase != ConnectionPhase::AwaitingCapabilities {
                         capabilities_deadline = None;
@@ -1305,6 +1486,7 @@ fn worker_loop(
                         &bytes,
                         &usage,
                         &transcript_capture,
+                        &mut voice_level,
                     );
                 }
             }
@@ -2196,6 +2378,7 @@ fn handle_control(
     voice_session_epoch: &Arc<AtomicU64>,
     transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
     transcript_pending_started: &mut bool,
+    voice_level: &mut VoiceLevelMeter,
     bytes: &[u8],
 ) {
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
@@ -2392,6 +2575,17 @@ fn handle_control(
                 crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
                 crate::ime::age_label(crate::ime::last_switch_age_ms()),
             ));
+            // 输入法的「自动检测」跟的是**系统默认录音设备**；它若不是 CABLE Output，
+            // 识别就会落到内置麦克风阵列或「立体声混音」上——按键链路、报告层合成、
+            // 录音时长全都正常，只有识别结果对不上（2026-10-27 现场，用户改设备后
+            // 立刻恢复）。这行日志就是"下次一眼定位"的那条证据。
+            if let Some((default_capture, is_cable_output)) =
+                crate::audio::capture_input_diagnosis()
+            {
+                gatt_note(format!(
+                    "voice_capture_input default=\"{default_capture}\" is_cable_output={is_cable_output}"
+                ));
+            }
 
             // 2026-10-13 现场：报告层没生效时走 SendInput 注入——**豆包按设计丢弃注入键**
             // （LLKHF_INJECTED，见 docs/investigations/2026-09-04-avoid-driver-signing-input-paths.md），
@@ -2453,6 +2647,9 @@ fn handle_control(
                         "chord_press result=err session={session_id} error_domain=send_input error_code=press_failed reason=injection_failed retryable=true"
                     ));
                     transcript_capture.cancel_audio();
+                    // 注入失败会中止会话：本轮电平同样要落一行，否则"连音频都没进来"
+                    // 与"音频正常但键没注入"在日志里长得一样。
+                    voice_level.log_and_reset(&session_id.to_string(), "aborted_press_failed");
                     abort_voice_session(
                         session,
                         pipeline,
@@ -2699,6 +2896,7 @@ fn handle_audio(
     bytes: &[u8],
     usage: &UsageCounters,
     transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
+    voice_level: &mut VoiceLevelMeter,
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
         return;
@@ -2718,6 +2916,10 @@ fn handle_audio(
     }
     if let Some(error) = audio.failure() {
         transcript_capture.cancel_audio();
+        let level_session = pipeline
+            .session_id()
+            .map_or_else(|| "unknown".to_owned(), |id| id.to_string());
+        voice_level.log_and_reset(&level_session, "aborted_audio_failure");
         abort_voice_session(
             session,
             pipeline,
@@ -2739,8 +2941,14 @@ fn handle_audio(
         }) => {
             let sample_count = samples.len();
             transcript_capture.append_audio(&samples);
+            // 电平统计在增益之后：它反映的是真正送进虚拟线的信号。
+            voice_level.observe(&samples);
             if let Err(error) = audio.enqueue_samples(generation, samples) {
                 transcript_capture.cancel_audio();
+                let level_session = pipeline
+                    .session_id()
+                    .map_or_else(|| "unknown".to_owned(), |id| id.to_string());
+                voice_level.log_and_reset(&level_session, "aborted_enqueue_rejected");
                 abort_voice_session(
                     session,
                     pipeline,

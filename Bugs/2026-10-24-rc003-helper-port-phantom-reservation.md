@@ -24,10 +24,23 @@
     回退前先做 `connect` 探针（只有 `refused` 才回退）；回退端口写 `session.port` 跨重启复用
     （agent 端口在注入时写死，端口一变接管核验必空等 8 s 后重建宿主）；`BindError` 结构化；
     `args.port` 一律取 `listener.local_addr()`（顺带修好 `--port 0` 把 0 写进配置）
-- 验证：自动化 `passed`（助手 `cargo test` 79 passed，含 3 项新增；`cargo fmt --check` 通过）；
-  **真机 `deferred`**——mirrored 机器上的首次回退与"第二次启动"回归，判据见 Testing 文档
-  「2026-10-25 增量」（重启后应见 `[FALLBACK] … reused_remembered=true` 且数秒内 `[HELLO] auth=true`，
-  不得出现 `[ATTACH] verify=failed`）
+  - **第三段（2026-10-27，issue #291 用户追问"能不能换个端口"）**：#304 的"只有 `refused` 才回退"
+    把"端口被**真实进程**占着"的机器仍然锁在崩溃循环里——而单实例早已由互斥体保证，
+    `refused` 这个门禁失去依据（回退是让系统另给一个端口，并不会顶掉占用者）。改为查占用者
+    （`GetExtendedTcpTable` + `QueryFullProcessImageNameW`）后分类：`holder=own_helper`
+    （另一支 sayall-helper，多为旧版本没退干净）才 `[STOP]` 退出码 8，`other_program` /
+    `unknown` / `nobody` 一律回退。日志新增 `[PORT] event=holder … decision=fallback|stop`。
+    同时 `startup_failing` 的用户文案不再要求用户"去找是哪个程序"（他无从定位）
+  - **收尾（同日）**：`holder=own_helper` 不再直接退——既然互斥体已经证明同会话没有第二支
+    **新版**助手，那个同名监听者必然是旧版本残留/孤儿，于是 `[RECLAIM] stale_helper_terminated`
+    结束它、2 s 内重绑，成功则继续（`fixed_port_reclaimed`），失败才 `exit 8`。四道安全闸：
+    已持有互斥体（显式 `--port` 不回收）、**同一登录会话**（互斥体是会话级、端口是全局的，
+    多用户切换时另一个会话的助手不能被当成残留）、映像名是 `sayall-helper.exe`、PID 有效且不是自己。
+- 验证：自动化 `passed`（助手 `cargo test` **83 passed**，含本轮新增 4 项——回退真值表、
+  占用者分类与 token、回收的三道安全闸、以及**真调用 Win32** 的自监听→查 PID→读映像路径用例；
+  `cargo fmt --check` 通过）；**真机 `deferred`**——mirrored 机器上的首次回退与"第二次启动"
+  回归，判据见 Testing 文档「2026-10-25 增量」（重启后应见 `[FALLBACK] … reused_remembered=true`
+  且数秒内 `[HELLO] auth=true`，不得出现 `[ATTACH] verify=failed`）
 - 隐私检查：本文只引用 usage、端口号与错误码，未包含设备身份、个人路径、语音内容或令牌
 
 ## 归因

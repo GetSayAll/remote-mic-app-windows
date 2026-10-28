@@ -11,6 +11,7 @@ import {
   captureRevokedText,
   captureSwitchState as captureSwitchStateFn,
   normalizeCaptureRevoked,
+  normalizeCaptureUnavailable,
   shouldShowCaptureInactive,
   shouldShowCaptureRevoked,
 } from "../lib/capture-switch";
@@ -28,6 +29,7 @@ import type {
   PairedRemote,
   Rc003CaptureHealth,
   Rc003CaptureRevoked,
+  Rc003CaptureUnavailable,
   Rc003TaskStatus,
   RuntimeSnapshot,
   VoiceInputTool,
@@ -483,6 +485,9 @@ const captureFailure = computed(() =>
  */
 const rc003CaptureHealth = ref<Rc003CaptureHealth>("off");
 
+/** 开着没生效的原因（2026-10-27，issue #291）：决定提示说"关掉再打开"还是"别的程序占着"。 */
+const rc003CaptureUnavailable = ref<Rc003CaptureUnavailable | "unknown">("none");
+
 /** 启动对账把开关关掉的原因（2026-10-15，issue #264 附加观察甲）：`none` = 没发生。 */
 const rc003CaptureRevoked = ref<Rc003CaptureRevoked | "unknown">("none");
 
@@ -498,7 +503,7 @@ const captureInactiveNote = computed(() =>
     health: rc003CaptureHealth.value,
     linkReady: atvvReady.value,
   })
-    ? captureInactiveText(t(CAPTURE_FAILURE_NAME))
+    ? captureInactiveText(t(CAPTURE_FAILURE_NAME), rc003CaptureUnavailable.value)
     : null,
 );
 
@@ -552,6 +557,9 @@ async function reconcileRc003Capture(): Promise<void> {
   try {
     const bridge = await getRc003BridgeSnapshot();
     rc003CaptureHealth.value = bridge.captureHealth;
+    rc003CaptureUnavailable.value = normalizeCaptureUnavailable(
+      bridge.captureUnavailable,
+    );
     rc003CaptureRevoked.value = normalizeCaptureRevoked(bridge.captureRevoked);
   } catch {
     // 读不到保持上一次的值，最多晚一秒反映。

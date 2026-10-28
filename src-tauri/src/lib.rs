@@ -15,11 +15,14 @@ use settings::SettingsStore;
 #[cfg(windows)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
 mod accent;
 mod app_icon;
+mod button_profiles;
 mod common_phrase_panel;
 mod diagnostics;
 mod launch_state;
@@ -240,6 +243,151 @@ fn observe_webview_failure(webview: &tauri::Webview) {
     }
 }
 
+/// Ctrl+W 的原生兜底：WebView2 会把部分浏览器加速键在页面之前处理，页面层的
+/// `keydown` 收不到物理 Ctrl+W（注入的 Ctrl+W 仍可能到达页面，表现为“遥控器能关、
+/// 键盘不能关”）。这里在 WebView2 的 AcceleratorKeyPressed 阶段拦截，命中后直接
+/// 复用与“X”相同的隐藏动作，并标记已处理，避免浏览器继续处理该组合键。
+#[cfg(windows)]
+fn install_ctrl_w_accelerator(webview: &tauri::Webview) {
+    use webview2_com::{
+        AcceleratorKeyPressedEventHandler,
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+            COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+        },
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let app = webview.app_handle().clone();
+    let result = webview.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_sender, args| {
+            let Some(args) = args.as_ref() else {
+                return Ok(());
+            };
+            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND(0);
+            if args.KeyEventKind(&mut kind).is_err()
+                || (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                    && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+            {
+                return Ok(());
+            }
+            let mut virtual_key = 0u32;
+            if args.VirtualKey(&mut virtual_key).is_err() || virtual_key != 'W' as u32 {
+                return Ok(());
+            }
+            let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+            if !down(VK_CONTROL)
+                || down(VK_MENU)
+                || down(VK_SHIFT)
+                || down(VK_LWIN)
+                || down(VK_RWIN)
+            {
+                return Ok(());
+            }
+            let _ = args.SetHandled(true);
+            sayall_windows::gatt_note(
+                "window_close action=hide_to_tray source=ctrl_w_accelerator phase=submitted"
+                    .to_owned(),
+            );
+            let app_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = hide_main_window(app_main);
+            });
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let result = controller.add_AcceleratorKeyPressed(&handler, &mut token);
+        sayall_windows::gatt_note(format!(
+            "window_close action=install_accelerator source=ctrl_w terminal_result={}",
+            if result.is_ok() { "passed" } else { "failed" }
+        ));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(
+            "window_close action=install_accelerator source=ctrl_w terminal_result=failed stage=dispatch"
+                .to_owned(),
+        );
+    }
+}
+
+/// 主窗口 HWND 的子类化实例 ID（同一窗口只注册一次）。
+#[cfg(windows)]
+const WINDOW_KEY_SUBCLASS_ID: usize = 0x5A12;
+/// 子类化回调需要的 AppHandle；单实例应用只有主窗口，进程内取一次即可。
+#[cfg(windows)]
+static WINDOW_KEY_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// 标题栏/非客户区获得键盘焦点时，WebView2 收不到按键，页面层 handler 和
+/// AcceleratorKeyPressed 都不会触发；此时 Ctrl+W 会落到顶层窗口的 WM_KEYDOWN。
+/// 子类化主窗口补齐这条路径，命中后仍走 hide_main_window（与 X 同一动作）。
+#[cfg(windows)]
+fn install_window_key_subclass(window: &tauri::Window) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+
+    let Ok(raw) = window.hwnd() else {
+        sayall_windows::gatt_note(
+            "window_close action=install_window_subclass source=ctrl_w terminal_result=failed reason=hwnd_missing"
+                .to_owned(),
+        );
+        return;
+    };
+    let _ = WINDOW_KEY_APP.set(window.app_handle().clone());
+    let installed = unsafe {
+        SetWindowSubclass(
+            HWND(raw.0),
+            Some(window_key_subclass),
+            WINDOW_KEY_SUBCLASS_ID,
+            0,
+        )
+        .as_bool()
+    };
+    sayall_windows::gatt_note(format!(
+        "window_close action=install_window_subclass source=ctrl_w terminal_result={}",
+        if installed { "passed" } else { "failed" }
+    ));
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn window_key_subclass(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_NCDESTROY};
+
+    if message == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(hwnd, Some(window_key_subclass), WINDOW_KEY_SUBCLASS_ID);
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+    if message == WM_KEYDOWN && wparam.0 == 'W' as usize {
+        let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+        if down(VK_CONTROL) && !down(VK_MENU) && !down(VK_SHIFT) && !down(VK_LWIN) && !down(VK_RWIN)
+        {
+            if let Some(app) = WINDOW_KEY_APP.get() {
+                sayall_windows::gatt_note(
+                    "window_close action=hide_to_tray source=ctrl_w_window phase=submitted"
+                        .to_owned(),
+                );
+                let _ = hide_main_window(app.clone());
+            }
+            return LRESULT(0);
+        }
+    }
+    DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
 /// 界面未能正常显示时写进窗口标题的文案（2026-10-07 定稿，见 docs/product-copy.md）。
 /// 放在 Rust 是因为界面已经不工作时它也必须能显示，与托盘菜单文案同理。
 #[cfg(windows)]
@@ -437,6 +585,8 @@ struct AppState {
     usage: Arc<UsageSync>,
     /// 「全按键支持」实际生效状态（2026-10-13）：常驻对账线程发布，界面只读。
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    /// 「开着但没生效」的用户可见原因（2026-10-27，issue #291）：界面据此选文案。
+    capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
     /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
     membership: Arc<dyn MembershipRuntime>,
     /// 启动对账**主动关掉**开关的原因（2026-10-15，issue #264 附加观察甲）：只用于
@@ -463,6 +613,10 @@ impl std::fmt::Debug for AppState {
             .field(
                 "capture_health",
                 &CaptureHealth::current(&self.capture_health).as_str(),
+            )
+            .field(
+                "capture_unavailable",
+                &CaptureUnavailable::current(&self.capture_unavailable).as_str(),
             )
             .field(
                 "capture_revoked",
@@ -524,7 +678,9 @@ async fn get_usage_profile(state: tauri::State<'_, AppState>) -> Result<UsagePro
 /// 读的是内存快照，因此保持同步：它由界面按秒轮询，必须立刻返回。
 #[tauri::command]
 fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
-    state.membership.snapshot()
+    let snapshot = state.membership.snapshot();
+    button_profiles::apply_membership(&snapshot);
+    snapshot
 }
 
 /// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
@@ -1126,6 +1282,9 @@ struct Rc003BridgeView {
     bridge: BridgeSnapshot,
     /// `off` / `starting` / `active` / `inactive`（前端 `Rc003CaptureHealth` 逐字对应）。
     capture_health: &'static str,
+    /// 「开着但没生效」的原因：`none` / `startup_failing`（前端 `Rc003CaptureUnavailable`
+    /// 逐字对应）。只在 `capture_health = inactive` 时有意义，界面据此选文案。
+    capture_unavailable: &'static str,
     /// 启动对账主动关掉开关的原因（`none` = 没发生；前端 `Rc003CaptureRevoked` 逐字对应）。
     capture_revoked: &'static str,
 }
@@ -1140,6 +1299,7 @@ async fn get_rc003_bridge_snapshot(
 ) -> Result<Rc003BridgeView, String> {
     let platform = Arc::clone(&state.platform);
     let capture_health = CaptureHealth::current(&state.capture_health).as_str();
+    let capture_unavailable = CaptureUnavailable::current(&state.capture_unavailable).as_str();
     let capture_revoked = CaptureRevoke::current(&state.capture_revoked).as_str();
     let bridge = tauri::async_runtime::spawn_blocking(move || platform.rc003_bridge_snapshot())
         .await
@@ -1147,6 +1307,7 @@ async fn get_rc003_bridge_snapshot(
     Ok(Rc003BridgeView {
         bridge,
         capture_health,
+        capture_unavailable,
         capture_revoked,
     })
 }
@@ -1695,6 +1856,107 @@ fn capture_health_for_round(
     CaptureHealth::Starting
 }
 
+/// 「助手反复连上就断」的计数推进（纯函数，单测覆盖）。
+///
+/// 输入是桥接快照里**累计**的接受次数，所以只看增量：应用启动前（上一次安装/上次运行）
+/// 的接受不该算进本次开启。桥重启会让累计值回退，此时只把基线跟上去，不清计数——
+/// 计数表达的是"本次开启以来失败了几次"。
+///
+/// 拿到所有权就清零：那是"助手真的起来了"的唯一证据（配置回执不算，见 #264）。
+fn advance_helper_accept_streak(
+    streak: u32,
+    last_seen: u64,
+    total: u64,
+    owned_usages: usize,
+) -> (u32, u64) {
+    if total < last_seen {
+        return (streak, total);
+    }
+    if owned_usages > 0 {
+        return (0, total);
+    }
+    let delta = (total - last_seen).min(u32::MAX as u64) as u32;
+    (streak.saturating_add(delta), total)
+}
+
+/// 接受次数是否已达「助手根本没起来」的阈值（纯函数，单测覆盖）。
+fn helper_startup_failing(streak: u32) -> bool {
+    streak >= HELPER_STARTUP_FAILURE_ACCEPTS
+}
+
+/// 把"助手反复启动失败"叠到本轮生效状态上（纯函数，单测覆盖）。
+///
+/// 只在**没有所有权**时生效：一旦真的接管，界面必须立刻回到 `active`——
+/// 否则一次偶发误判会把提示挂到功能恢复之后（0.8.1 的老毛病：判据只看失败条件
+/// 消失与否）。`Inactive` 的语义因此扩成两条来源：过了宽限仍无所有权，
+/// 或本次开启以来助手反复被接受却一次都没接管——两者的用户含义相同（开着没生效）。
+fn capture_health_with_startup_failure(
+    base: CaptureHealth,
+    startup_failing: bool,
+    owned_usages: usize,
+) -> CaptureHealth {
+    // 开关关着就没有"是不是启动失败"可言：这条判定只属于开启态
+    // （关着还发布 Inactive 会让界面在开关关闭时显示提示）。
+    if matches!(base, CaptureHealth::Off) {
+        return base;
+    }
+    if startup_failing && owned_usages == 0 {
+        CaptureHealth::Inactive
+    } else {
+        base
+    }
+}
+
+/// 「开着但没生效」的**用户可见原因**（2026-10-27，issue #291）。
+///
+/// `CaptureHealth` 只回答"生效了吗"，界面据此决定显不显示提示；这一层回答
+/// "为什么没生效"，界面据此选哪一句话。两者刻意分开：health 是四态枚举、被多处
+/// 复用，往里加值等于改前端契约；原因只在 `inactive` 时有意义，单开一条通道不会
+/// 把状态机搅乱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CaptureUnavailable {
+    None = 0,
+    /// 助手反复启动失败：通常是这台电脑上别的程序占着它需要的东西（#291 的端口被
+    /// 系统保留就属于这一类）。对这类原因，"关掉再打开开关"是**无效建议**（现场已试过），
+    /// 必须换一句话，否则提示本身就在误导用户。
+    StartupFailing = 1,
+}
+
+impl CaptureUnavailable {
+    fn publish(self, slot: &std::sync::atomic::AtomicU8) {
+        slot.store(self as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn current(slot: &std::sync::atomic::AtomicU8) -> Self {
+        match slot.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => Self::StartupFailing,
+            _ => Self::None,
+        }
+    }
+
+    /// IPC token（前端 `Rc003CaptureUnavailable` 逐字对应）。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::StartupFailing => "startup_failing",
+        }
+    }
+
+    /// 本轮是否处于"助手反复启动失败"（纯函数，单测覆盖）。
+    ///
+    /// 与 `CaptureHealth::Inactive` 同进同出，但两者发布时机不同：health 每轮都会被
+    /// 覆盖（`starting` / `active` / `inactive`），原因必须能跨轮保持，否则提示会
+    /// 在"失败一轮、抖动一轮"之间闪。
+    fn from_startup_failing(startup_failing: bool) -> Self {
+        if startup_failing {
+            Self::StartupFailing
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// 「全按键支持」在启动对账里被**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）。
 ///
 /// 这些回落不弹窗、不报错，只是把开关拉低；界面若不说明，用户看到的就是"升级后
@@ -1780,6 +2042,15 @@ const AUTO_TRIGGER_ESCALATE_ATTEMPT: u32 = 5;
 const AUTO_TRIGGER_REESCALATE_EVERY: u32 = 10;
 /// 连续失败时的日志折叠：前 3 轮与每 10 轮各留一条。
 const AUTO_TRIGGER_LOG_EVERY: u32 = 10;
+
+/// 同一次开启期间，助手被接受多少次而**一次都没拿到所有权** ⇒ 判定"助手根本没起来"。
+///
+/// 为什么要这条判据（issue #291）：助手因外部环境（端口被系统保留 / 被别的进程占住）
+/// 每轮启动即退出时，桥接握手仍会成功一瞬，于是对账在 `Connected → Trigger` 之间
+/// 反复横跳、`consecutive` 每次都被清零，**既到不了第 5 轮兜底，也永远过不了 20 s
+/// 生效宽限**——界面停在 `starting`（不显示任何文案），用户看到的就是"开关开着、
+/// 按键没反应、也没有任何提示"。接受的次数只增不减，正好能穿过这个抖动。
+const HELPER_STARTUP_FAILURE_ACCEPTS: u32 = 3;
 
 /// 第 `consecutive` 轮失败后的等待时长（纯函数）。
 ///
@@ -1929,6 +2200,7 @@ fn rc003_auto_trigger_reconcile(
     platform: Arc<dyn PlatformRuntime>,
     settings: SettingsStore,
     capture_health: Arc<std::sync::atomic::AtomicU8>,
+    capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
 ) {
     // 本机没有对应架构的载荷时，重试多少次也连不上（Issue #206：x64 助手对 ARM64 宿主）。
     // 启动对账已把开关回落，这里再兜一次：将来若有人从别处调用本函数，也不会空转——
@@ -1978,6 +2250,11 @@ fn rc003_auto_trigger_reconcile(
     let mut capture_recover_attempts: u32 = 0;
     // 助手正在设备节点恢复时只记一条"暂缓重启"，避免每 2 秒刷屏。
     let mut capture_recovery_wait_logged = false;
+    // 本次开启以来「助手被接受」的累计判断（issue #291）。基线取当前累计值：
+    // 计数只算本次开启之后的增量，不把上次运行的接受算进来。
+    let mut helper_accepts_seen: u64 = platform.rc003_bridge_snapshot().accepted_total;
+    let mut helper_accept_streak: u32 = 0;
+    let mut startup_failing_logged = false;
     loop {
         // 消费上一条睡眠的唤醒标记（每个分支只在本轮判一次，防陈旧）。
         let woken_early = std::mem::take(&mut last_sleep_woken);
@@ -1987,6 +2264,52 @@ fn rc003_auto_trigger_reconcile(
             .map(|settings| settings.rc003_capture_enabled)
             .unwrap_or(false);
         let snapshot = platform.rc003_bridge_snapshot();
+        // 「助手反复被接受却一次没接管」要在这里推进，而不是放在 Connected 分支：
+        // 助手每轮活不过几秒时，对账多数轮次根本观察不到 Connected（快照从
+        // Listening 直接变 Failed），只有累计接受次数能穿过这个抖动（issue #291）。
+        let startup_failing = if !enabled {
+            // 关闭即重置"本次开启"的计数：下一次开启是一次全新的尝试。
+            helper_accept_streak = 0;
+            helper_accepts_seen = snapshot.accepted_total;
+            if startup_failing_logged {
+                startup_failing_logged = false;
+            }
+            CaptureUnavailable::None.publish(&capture_unavailable);
+            false
+        } else {
+            let (next_streak, next_seen) = advance_helper_accept_streak(
+                helper_accept_streak,
+                helper_accepts_seen,
+                snapshot.accepted_total,
+                snapshot.owned_usages.len(),
+            );
+            helper_accept_streak = next_streak;
+            helper_accepts_seen = next_seen;
+            let failing = helper_startup_failing(helper_accept_streak);
+            // 原因与 health 同轮发布：界面只在 `inactive` 时读它，但两者必须一致，
+            // 否则会出现"提示说启动失败、状态却是 active"的错位。
+            CaptureUnavailable::from_startup_failing(failing).publish(&capture_unavailable);
+            if failing && !startup_failing_logged {
+                // hint 说**下一步动作**：这条断在 PC 内部的环境冲突上（端口被系统保留 /
+                // 被别的进程占住），继续按遥控器或重开开关都可能无效，先看环境。
+                sayall_windows::gatt_note(format!(
+                    "rc003 feature=enhanced-capture action=capture_unavailable phase=completed \
+                     terminal_result=failed reason=helper_startup_failing accepts={helper_accept_streak} \
+                     owned_usages=0 retryable=true hint=check_environment_conflict {}",
+                    bridge_health_summary(&snapshot)
+                ));
+                startup_failing_logged = true;
+            } else if !failing && startup_failing_logged {
+                // 只有真的拿到所有权才会走到这里（计数在 owned>0 时清零）。
+                sayall_windows::gatt_note(
+                    "rc003 feature=enhanced-capture action=capture_unavailable phase=cleared \
+                     terminal_result=passed reason=ownership_acquired"
+                        .to_owned(),
+                );
+                startup_failing_logged = false;
+            }
+            failing
+        };
         match decide_reconcile_round(enabled, classify_auto_trigger(&snapshot)) {
             ReconcileAction::Standby => {
                 if active_seen {
@@ -2038,7 +2361,12 @@ fn rc003_auto_trigger_reconcile(
                 capture_recover_last_at = None;
                 capture_recover_attempts = 0;
                 capture_recovery_wait_logged = false;
-                CaptureHealth::Starting.publish(&capture_health);
+                capture_health_with_startup_failure(
+                    CaptureHealth::Starting,
+                    startup_failing,
+                    snapshot.owned_usages.len(),
+                )
+                .publish(&capture_health);
                 let wake = interruptible_reconcile_sleep(
                     AUTO_TRIGGER_IDLE_MS,
                     &mut wake_seen,
@@ -2096,11 +2424,15 @@ fn rc003_auto_trigger_reconcile(
                 };
                 // 界面读的就是这一份：`Active` = 真的接管了，`Inactive` = 开着却没生效
                 // （界面据此显示一句用户语言的提示，2026-10-13）。
-                capture_health_for_round(
-                    true,
-                    true,
+                capture_health_with_startup_failure(
+                    capture_health_for_round(
+                        true,
+                        true,
+                        snapshot.owned_usages.len(),
+                        inactive_by_grace,
+                    ),
+                    startup_failing,
                     snapshot.owned_usages.len(),
-                    inactive_by_grace,
                 )
                 .publish(&capture_health);
                 if inactive_by_grace {
@@ -2243,7 +2575,12 @@ fn rc003_auto_trigger_reconcile(
             }
             ReconcileAction::Trigger => {
                 bridge_unavailable_logged = false;
-                CaptureHealth::Starting.publish(&capture_health);
+                capture_health_with_startup_failure(
+                    CaptureHealth::Starting,
+                    startup_failing,
+                    snapshot.owned_usages.len(),
+                )
+                .publish(&capture_health);
                 if was_connected {
                     // 助手掉线（崩溃 / 宿主重启 / 被系统回收）：重新进入恢复，
                     // 先来一轮快速期。
@@ -5208,17 +5545,25 @@ pub fn run() {
             }
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
             // 不阻断主程序启动，用户可在“关于”页重试。
+            //
+            // 2026-10-28：`RegSetValueExW` 写的是**自启动项**，安全软件会拦下来做检查，
+            // 实测这一次写入要 348 ms，而它同步跑在 setup 里，直接推迟窗口首个 IPC。
+            // 同步这件事与界面无关，放到独立线程（日志字段与失败处理保持不变）。
             #[cfg(windows)]
-            if let Err(error) = startup::set_enabled(saved_settings.launch_at_login) {
-                sayall_windows::gatt_note(
-                    "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
-                );
-                eprintln!("同步开机自启动设置失败：{error}");
-            } else {
-                sayall_windows::gatt_note(format!(
-                    "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={}",
-                    saved_settings.launch_at_login
-                ));
+            {
+                let launch_at_login = saved_settings.launch_at_login;
+                std::thread::spawn(move || {
+                    if let Err(error) = startup::set_enabled(launch_at_login) {
+                        sayall_windows::gatt_note(
+                            "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
+                        );
+                        eprintln!("同步开机自启动设置失败：{error}");
+                    } else {
+                        sayall_windows::gatt_note(format!(
+                            "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={launch_at_login}"
+                        ));
+                    }
+                });
             }
             // 2026-10-14：原先在此预热并缓存 Radio 对象（供自动关开无线电
             // 恢复使用）。该机制已按产品决策移除（会断开全部蓝牙设备），
@@ -5311,31 +5656,55 @@ pub fn run() {
             // 常驻对账线程是唯一的判据来源，它发布、界面只读。
             let capture_health =
                 Arc::new(std::sync::atomic::AtomicU8::new(CaptureHealth::Off as u8));
+            // 「开着但没生效」的原因（2026-10-27）：只在 inactive 时被界面读取，
+            // 用来决定说"关掉再打开"还是"别的程序占着它的东西"。
+            let capture_unavailable =
+                Arc::new(std::sync::atomic::AtomicU8::new(CaptureUnavailable::None as u8));
             #[cfg(windows)]
             {
                 let platform_for_trigger = Arc::clone(&platform);
                 let settings_for_trigger = settings.clone();
                 let health_for_trigger = Arc::clone(&capture_health);
+                let unavailable_for_trigger = Arc::clone(&capture_unavailable);
                 std::thread::spawn(move || {
                     rc003_auto_trigger_reconcile(
                         platform_for_trigger,
                         settings_for_trigger,
                         health_for_trigger,
+                        unavailable_for_trigger,
                     );
                 });
             }
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (
-                saved_settings.audio_endpoint_id,
-                saved_settings.audio_endpoint_name,
+                saved_settings.audio_endpoint_id.clone(),
+                saved_settings.audio_endpoint_name.clone(),
             ) {
-                if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
-                    sayall_windows::gatt_note(
-                        "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
-                    );
-                    eprintln!("恢复已保存的音频端点失败：{error}");
-                }
+                // 恢复音频端点要等它真的能打开，而 CABLE 端点被别的程序占着的机器上
+                // 这一步最坏要 3.5 s（内置退避 0/150/400/900/1600 ms，每次都
+                // `AUDCLNT_E_DEVICE_IN_USE`）。2026-10-28 现场：输入法常驻占用
+                // CABLE Output 之后，它同步跑在 setup 里，把窗口首个 IPC 一起拖住——
+                // `tauri_setup` 6.2 s、`runtime_snapshot` 6.4 s、按键页 6.9 s，
+                // 用户看到的是"界面骨架先出来，开关和按键配置几秒后才到"。
+                // 它只影响"下一次语音"，没有任何理由挡住窗口，因此移到独立线程；
+                // 恢复本身照做，失败仍然只记日志、不阻断启动。
+                let platform_for_audio = Arc::clone(&platform);
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    if let Err(error) =
+                        platform_for_audio.restore_audio_endpoint(endpoint_id, endpoint_name)
+                    {
+                        sayall_windows::gatt_note(
+                            "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
+                        );
+                        eprintln!("恢复已保存的音频端点失败：{error}");
+                    }
+                    sayall_windows::gatt_note(format!(
+                        "audio_endpoint action=restore phase=background_completed elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    ));
+                });
             }
 
             #[cfg(windows)]
@@ -5516,12 +5885,21 @@ pub fn run() {
                 saved_settings.local_original_audio_recording_enabled,
             );
 
+            let membership_runtime = membership::install();
+            // 键位方案私有组件（可选）：未注入时空壳返回 false，入口不出现。
+            button_profiles::install(
+                app.handle(),
+                Arc::clone(&platform),
+                Arc::clone(&membership_runtime),
+            );
+
             app.manage(AppState {
                 platform,
                 settings,
                 usage,
                 capture_health,
-                membership: membership::install(),
+                capture_unavailable,
+                membership: membership_runtime,
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
@@ -5534,8 +5912,13 @@ pub fn run() {
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
             #[cfg(windows)]
+            if let Some(window) = main_window(app.handle()) {
+                install_window_key_subclass(&window);
+            }
+            #[cfg(windows)]
             if let Some(webview) = main_webview(app.handle()) {
                 observe_webview_failure(&webview);
+                install_ctrl_w_accelerator(&webview);
             }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
@@ -5668,6 +6051,11 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
@@ -5800,6 +6188,11 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
@@ -6141,6 +6534,94 @@ mod tests {
         assert_eq!(CaptureHealth::Off.as_str(), "off");
         assert_eq!(CaptureHealth::Starting.as_str(), "starting");
         assert_eq!(CaptureHealth::Active.as_str(), "active");
+    }
+
+    /// 助手反复「连上就走」必须能被累计接受次数识别（issue #291）。
+    ///
+    /// 现场形态：助手每轮启动 → 握手成功 → 因端口绑不上退出，对账在
+    /// `Connected → Trigger` 之间横跳，`consecutive` 每次归零（既到不了兜底轮，
+    /// 也永远过不了 20 s 生效宽限），界面于是长期停在"不显示文案"的 `starting`。
+    #[test]
+    fn helper_accept_streak_detects_startup_that_never_takes_ownership() {
+        // 正常启动：第一次被接受就拿到所有权 → 计数必须归零。这也是阳性对照：
+        // 若这里不为 0，说明判据只看"有没有增长"，会把健康启动报成失败。
+        assert_eq!(advance_helper_accept_streak(0, 0, 1, 3), (0, 1));
+        // 反复失败：每轮增长一次，所有权始终为空。
+        let (streak, seen) = advance_helper_accept_streak(0, 0, 1, 0);
+        assert_eq!((streak, seen), (1, 1));
+        let (streak, seen) = advance_helper_accept_streak(streak, seen, 2, 0);
+        assert_eq!((streak, seen), (2, 2));
+        // 两轮还不够：这是"助手慢启动中"与"根本没起来"的边界。
+        assert!(!helper_startup_failing(2));
+        let (streak, seen) = advance_helper_accept_streak(streak, seen, 3, 0);
+        assert_eq!((streak, seen), (3, 3));
+        assert!(helper_startup_failing(streak));
+        // 一旦接管过（任何所有权），失败史必须清零：否则提示会挂在恢复之后。
+        assert_eq!(advance_helper_accept_streak(streak, seen, 4, 3), (0, 4));
+        // 桥重启让累计值回退：只跟基线、不清计数，否则永远攒不到阈值。
+        assert_eq!(advance_helper_accept_streak(2, 9, 4, 0), (2, 4));
+        // 同一个累计值重复观察不重复计数（对账每轮都会读同一个快照）。
+        assert_eq!(advance_helper_accept_streak(1, 5, 5, 0), (1, 5));
+    }
+
+    /// 启动失败只压「没有所有权」的轮次（issue #291）。
+    ///
+    /// 界面只在 `inactive` 时出文案，所以这条边界必须钉死：把助手反复启动失败
+    /// 变成 `inactive` 才能让用户看到提示，而接管成功后必须立刻回 `active`。
+    #[test]
+    fn startup_failure_only_overrides_health_without_ownership() {
+        // 开着、桥没连上：正常是 starting（无文案）→ 反复失败后必须是 inactive。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Starting, true, 0),
+            CaptureHealth::Inactive
+        );
+        // 已经接管：保持 active，不能被失败史压住。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Active, true, 3),
+            CaptureHealth::Active
+        );
+        // 开关关着：保持 off（关着不显示提示）。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Off, true, 0),
+            CaptureHealth::Off
+        );
+        // 没有失败史：原样返回（不会把正常启动误报成 inactive）。
+        assert_eq!(
+            capture_health_with_startup_failure(CaptureHealth::Starting, false, 0),
+            CaptureHealth::Starting
+        );
+        assert_eq!(HELPER_STARTUP_FAILURE_ACCEPTS, 3);
+    }
+
+    /// 「没生效的原因」必须与前端类型逐字对应，且只在助手反复启动失败时为真（#291）。
+    ///
+    /// 这条通道决定界面说"关掉再打开"还是"别的程序占用了它需要的东西"——两者对
+    /// 端口被系统保留的机器是完全不同的建议，token 写错会让提示重新变成误导。
+    #[test]
+    fn capture_unavailable_token_matches_frontend_contract() {
+        assert_eq!(
+            CaptureUnavailable::from_startup_failing(false),
+            CaptureUnavailable::None
+        );
+        assert_eq!(
+            CaptureUnavailable::from_startup_failing(true),
+            CaptureUnavailable::StartupFailing
+        );
+        // 与前端 `Rc003CaptureUnavailable` 逐字对应。
+        assert_eq!(CaptureUnavailable::None.as_str(), "none");
+        assert_eq!(
+            CaptureUnavailable::StartupFailing.as_str(),
+            "startup_failing"
+        );
+        // 发布 → 读取往返（界面读的就是这条通道）。
+        let slot = std::sync::atomic::AtomicU8::new(CaptureUnavailable::None as u8);
+        CaptureUnavailable::StartupFailing.publish(&slot);
+        assert_eq!(
+            CaptureUnavailable::current(&slot),
+            CaptureUnavailable::StartupFailing
+        );
+        CaptureUnavailable::None.publish(&slot);
+        assert_eq!(CaptureUnavailable::current(&slot), CaptureUnavailable::None);
     }
 
     /// 「按下后报告层没有真的改写」也算"没生效"（2026-10-14）：连续缺失达到阈值时，

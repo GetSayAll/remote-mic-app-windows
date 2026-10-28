@@ -193,6 +193,15 @@ export interface Rc003BridgeSnapshot {
    */
   captureHealth: Rc003CaptureHealth;
   /**
+   * 「开着但没生效」的**原因**（2026-10-27，issue #291）：只在 `captureHealth` 为
+   * `inactive` 时有意义，界面据此选哪一句话。
+   *
+   * `startup_failing` = 助手反复启动不起来（典型原因：这台电脑上别的程序占着它需要
+   * 的东西）。对这类原因「关掉再打开」是无效建议，必须换文案——见
+   * `captureInactiveText` 的第二个参数。
+   */
+  captureUnavailable: Rc003CaptureUnavailable;
+  /**
    * 启动时被应用**主动关掉**的原因（2026-10-15，issue #264 附加观察甲）：
    * `none` = 没发生；其余取值表示开关是被回落拉低的，界面要让用户看懂"为什么
    * 自己关了"（文案见 `captureRevokedText`）。token 与 Rust `CaptureRevoke::as_str`
@@ -203,6 +212,9 @@ export interface Rc003BridgeSnapshot {
 
 /** `captureHealth` 的取值（与 Rust `CaptureHealth::as_str` 逐字对应）。 */
 export type Rc003CaptureHealth = "off" | "starting" | "active" | "inactive";
+
+/** `captureUnavailable` 的取值（与 Rust `CaptureUnavailable::as_str` 逐字对应）。 */
+export type Rc003CaptureUnavailable = "none" | "startup_failing";
 
 /** `captureRevoked` 的取值（与 Rust `CaptureRevoke::as_str` 逐字对应）。 */
 export type Rc003CaptureRevoked =
@@ -1364,6 +1376,7 @@ const BROWSER_RC003_BRIDGE: Rc003BridgeSnapshot = {
   targetUsages: [],
   ownedUsages: [],
   captureHealth: "off",
+  captureUnavailable: "none",
   captureRevoked: "none",
 };
 
@@ -1514,6 +1527,58 @@ export async function importButtonMappingConfiguration(): Promise<ButtonMappings
     throw new Error("当前是浏览器预览，无法导入按键映射配置");
   }
   return invoke<ButtonMappings | null>("import_button_mapping_configuration");
+}
+
+/**
+ * 键位方案访问状态（私有组件给出；公开构建恒为 unavailable）。
+ *
+ * 公开桥只保留稳定形状，不解析会员 token、不读取方案文件。
+ */
+export type ButtonProfilesAccess =
+  | { status: "unavailable" }
+  | { status: "requiresPlus" }
+  | { status: "allowed"; validUntil?: string | null };
+
+export async function getButtonProfilesAccess(): Promise<ButtonProfilesAccess> {
+  if (!isTauriRuntime()) {
+    return { status: "unavailable" };
+  }
+  return invoke<ButtonProfilesAccess>("button_profiles_access");
+}
+
+/** 键位方案页面快照（私有 JSON）；公开构建返回 null。 */
+export async function getButtonProfilesSnapshot(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_snapshot");
+}
+
+/** 选择 `.sayall` 导入文件；取消返回 null。 */
+export async function pickButtonProfilesImportFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_pick_import_file");
+}
+
+/** 选择键位方案备份的导出位置；取消返回 null。 */
+export async function pickButtonProfilesExportFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_pick_export_file");
+}
+
+/** 键位方案页面命令（命令名与 payload 由私有组件定义）。 */
+export async function dispatchButtonProfilesCommand(
+  command: string,
+  payload?: string,
+): Promise<string> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法执行键位方案命令");
+  }
+  return invoke<string>("button_profiles_dispatch", { command, payload });
 }
 
 export async function testButtonMapping(

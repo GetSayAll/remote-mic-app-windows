@@ -26,18 +26,18 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
       <img
         v-if="props.panel.visual === 'remote'"
         class="side-photo"
-        src="/RC003-remote-photo@2x.png"
+        src="/RC003-remote-photo@2x.webp"
         :alt="t('小米蓝牙语音遥控器示意图')"
         draggable="false"
       />
       <template v-else-if="props.panel.visual === 'app'">
-        <img class="side-appicon" src="/app-logo.png" alt="" />
+        <img class="side-appicon" src="/app-logo.webp" alt="" />
         <span class="side-wave" aria-hidden="true">
           <i v-for="(height, index) in WAVE" :key="index" :style="{ height: `${height}px` }"></i>
         </span>
       </template>
       <span v-else class="side-logo-done">
-        <img class="side-appicon" src="/app-logo.png" alt="" />
+        <img class="side-appicon" src="/app-logo.webp" alt="" />
         <span class="side-done-badge" aria-hidden="true">✓</span>
       </span>
       <span v-if="props.panel.caption" class="side-caption">{{ props.panel.caption }}</span>
