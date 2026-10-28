@@ -121,6 +121,50 @@ mod windows_impl {
         WETYPE_MARKER_LAST_EXTRA.load(Ordering::Relaxed)
     }
 
+    /// F5 边沿判据的一次快照（2026-10-28 现场：`mic=not_observed` 的按下里
+    /// 抑制器一条 F5 边沿都收不到，而宿主当时是活的）。
+    ///
+    /// 用途：按下前取基线、验证点取当前值，`edges` 增量即"本次按住期间遥控器
+    /// 语音键的键盘报告有没有进 OS"，`leaked` 增量即"进去的那几条有没有被漏放"
+    /// （漏放会让微信输入法按"额外按键"拒绝和弦）。
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub(crate) struct F5Snapshot {
+        pub edges: u64,
+        pub leaked: u64,
+    }
+
+    impl F5Snapshot {
+        /// 两次快照之间的增量；计数器只增不减，回归时按 0 处理（不得输出负数）。
+        pub(crate) fn delta_since(self, baseline: Self) -> Self {
+            Self {
+                edges: self.edges.saturating_sub(baseline.edges),
+                leaked: self.leaked.saturating_sub(baseline.leaked),
+            }
+        }
+    }
+
+    /// 抑制器当前的 F5 累计计数（边沿总数与其中泄漏数）。
+    pub(crate) fn f5_snapshot() -> F5Snapshot {
+        F5Snapshot {
+            edges: F5_DOWN_SEEN.load(Ordering::Relaxed),
+            leaked: F5_DOWN_LEAKED.load(Ordering::Relaxed),
+        }
+    }
+
+    /// `GetAsyncKeyState` 返回值 → "OS 认为该键当前是按下的"（纯判定，单测覆盖）。
+    /// 高字节最高位为 1 表示键按下；低字节的"上次查询后按过"标志必须忽略，
+    /// 否则松开后仍会被判成按下。
+    pub fn key_down_from_async_state(state: i16) -> bool {
+        (state as u16) & 0x8000 != 0
+    }
+
+    /// OS 层键态：不受本进程钩子影响，用来区分"F5 根本没进 OS"与
+    /// "进了 OS 但我们的钩子没看到"（判据见 `voice_verify` 的 `f5_key_down=`）。
+    pub fn f5_key_down_in_os() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        key_down_from_async_state(unsafe { GetAsyncKeyState(VK_F5 as i32) })
+    }
+
     /// 纯决策函数：给定状态与按键，是否吞键（单元测试覆盖）。
     /// UP 沿只按配对状态裁决（会话/武装不参与）：本次按住的 DOWN 沿全部被
     /// 吞下（hold==HOLD_SWALLOWED_ALL）才吞 UP，防"DOWN 泄漏 + UP 吞下"粘键；
@@ -343,12 +387,20 @@ pub use windows_impl::{
 pub use windows_impl::{wetype_marker_count, wetype_marker_last_extra};
 
 #[cfg(windows)]
+pub use windows_impl::f5_key_down_in_os;
+
+#[cfg(windows)]
+pub(crate) use windows_impl::{f5_snapshot, F5Snapshot};
+
+#[cfg(windows)]
 pub(crate) use windows_impl::{
     handle_host_message, is_wetype_marker, HostSuppressorMessage, VK_F5,
 };
 
 #[cfg(all(windows, test))]
-pub use windows_impl::{decide, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL};
+pub use windows_impl::{
+    decide, key_down_from_async_state, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+};
 
 #[cfg(test)]
 mod tests {
@@ -442,6 +494,55 @@ mod tests {
             true,
             super::HOLD_SWALLOWED_ALL
         ));
+    }
+
+    /// 2026-10-28：`voice_verify` 的 `f5_edges=`/`f5_leaked=` 判据自身。
+    /// 非回归：计数器只增不减，基线大于当前值时增量必须是 0 而不是负数
+    /// （否则日志里会出现「按住期间 -3 条边沿」这种自相矛盾的读数）。
+    #[test]
+    fn f5_snapshot_delta_is_monotonic_and_zero_on_regression() {
+        let base = super::F5Snapshot {
+            edges: 40,
+            leaked: 2,
+        };
+        let now = super::F5Snapshot {
+            edges: 75,
+            leaked: 5,
+        };
+        assert_eq!(
+            now.delta_since(base),
+            super::F5Snapshot {
+                edges: 35,
+                leaked: 3
+            }
+        );
+        assert_eq!(
+            base.delta_since(now),
+            super::F5Snapshot {
+                edges: 0,
+                leaked: 0
+            },
+            "基线晚于当前值时必须退化为 0，不得输出负数"
+        );
+        assert_eq!(
+            base.delta_since(base),
+            super::F5Snapshot {
+                edges: 0,
+                leaked: 0
+            }
+        );
+    }
+
+    /// 2026-10-28：`f5_key_down=` 判据走 `GetAsyncKeyState` 的**高字节最高位**。
+    /// 低字节是"上次查询后按过"的历史标志，必须忽略——松开后它仍可能为 1，
+    /// 把它算进按键状态会把"已经松开"误判成"OS 里 F5 还按着"。
+    #[test]
+    fn async_key_state_only_reads_the_down_bit() {
+        assert!(super::key_down_from_async_state(0x8000u16 as i16));
+        assert!(super::key_down_from_async_state(0x8001u16 as i16));
+        assert!(!super::key_down_from_async_state(0x0001));
+        assert!(!super::key_down_from_async_state(0x0000));
+        assert!(!super::key_down_from_async_state(0x00FF));
     }
 
     #[test]

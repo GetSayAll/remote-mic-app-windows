@@ -118,6 +118,15 @@ pub(crate) enum WetypeReaction {
     Unknown,
 }
 
+/// 合并裁决的日志标记（`voice_verify ... verdict=`，与 `wetype_check` 同词表）。
+fn reaction_log_str(reaction: WetypeReaction) -> &'static str {
+    match reaction {
+        WetypeReaction::Reacted => "reacted",
+        WetypeReaction::NotReacted => "not_reacted",
+        WetypeReaction::Unknown => "unknown",
+    }
+}
+
 /// 合并裁决：标记证据优先于开麦观测（正面证据否决误判）。
 pub(crate) fn reaction_verdict(
     mic: MicResponse,
@@ -317,14 +326,42 @@ pub(crate) fn focus_bounce_foreground() -> String {
     }
 }
 
-/// 自动救回的上下文：仅当按下目标工具有可切换的输入法目标时携带。
+/// 自动救回的上下文：按下目标工具有可切换的输入法目标时携带。
 pub(crate) struct ImeHealContext {
     pub state: Arc<Mutex<ConnectionSnapshot>>,
+    /// 用户选的输入工具（救回第 2 档要对齐它对应的输入法）。
+    pub tool: sayall_core::settings::VoiceInputTool,
 }
 
-/// 是否执行自动救回（纯函数，单测覆盖）：仅在"确认未响应"且具备条件时动作。
-fn should_heal(verdict: MicResponse, eligible: bool) -> bool {
-    eligible && verdict == MicResponse::NotObserved
+/// 救回动作档位（2026-10-28，逐级升级）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealAction {
+    /// 第 1 档：只做焦点往返（不切输入法、不改前台窗口，零副作用）。
+    Bounce,
+    /// 第 2 档起：先对齐目标输入法（强制切一次），再做焦点往返。
+    AlignThenBounce,
+    /// 到上限：停手，等用户下一次按下。
+    Stop,
+}
+
+/// 档位选择（纯函数，单测覆盖）：首次最轻，之后升级，到 `IME_HEAL_STEP_CAP` 停。
+fn heal_action_for_step(step: u32) -> HealAction {
+    if step >= IME_HEAL_STEP_CAP {
+        HealAction::Stop
+    } else if step == 0 {
+        HealAction::Bounce
+    } else {
+        HealAction::AlignThenBounce
+    }
+}
+
+/// 是否执行自动救回（纯函数，单测覆盖）：**按合并裁决判**，且必须"确认未响应"。
+///
+/// 为什么不是按开麦观测（2026-10-28 本机实测）：10/10 会话 `mic=not_observed`
+/// 而 marker 命中（WeType 不写 ConsentStore，issue #118）。按 mic 判会让健康机器
+/// 每按一次都触发一次对齐动作——把诊断手段变成新的故障源。
+fn should_heal(verdict: WetypeReaction, eligible: bool) -> bool {
+    eligible && verdict == WetypeReaction::NotReacted
 }
 
 /// 有界等待语音会话结束（结束才注入，避免与按住中的和弦叠加）。
@@ -358,11 +395,27 @@ fn wait_session_end(state: &Arc<Mutex<ConnectionSnapshot>>, budget_ms: u64) -> b
 /// 等会话结束后对前台窗口做一次程序化"焦点往返"（`focus_bounce_foreground`，
 /// 不切换输入法、不改前台窗口）。恢复（observed）即计数归零；连续未恢复
 /// 达到 cap 上限后停止继续动作（防循环）。
+///
+/// 2026-10-28 追加 F5 三判据（现场：`mic=not_observed` 的按下里抑制器一条
+/// F5 边沿都收不到，而宿主当时是活的；日志无法区分"语音键的键盘报告没进
+/// OS"与"进了 OS 但被我们的钩子绕过"）：
+/// - `f5_edges`：本次按住期间抑制器收到的 DOWN 边沿数（相对按下前基线）；
+/// - `f5_leaked`：其中被放行进 OS 的条数（>0 即和弦会被目标按"额外按键"拒绝）；
+/// - `f5_key_down`：`GetAsyncKeyState(F5)` 的 OS 侧键态（不受本进程钩子影响）。
+/// 三者组合的读法见 `Testing/WindowsVoiceF5Probe.md`。
+///
+/// 2026-10-28 同轮修正两处语义：
+/// - 行里加 `verdict=`（合并裁决，marker 优先），与 `wetype_check` 同源——
+///   `mic=` 单独在本机会全程 `not_observed`（issue #118），不能当判据；
+/// - 救回判据从"开麦未观测"改为"合并裁决确认未响应"，并按 `HealAction`
+///   逐级升级（第 1 档只焦点往返，第 2 档起强制对齐目标输入法）。
 pub(crate) fn spawn_mic_verify(
     session: u64,
     tool: &'static str,
     marker: &'static str,
     baseline: Option<MicObservation>,
+    f5_baseline: crate::key_suppressor::F5Snapshot,
+    marker_baseline: u64,
     heal: Option<ImeHealContext>,
 ) {
     const SAMPLES_MS: [u64; 2] = [800, 2500];
@@ -370,25 +423,39 @@ pub(crate) fn spawn_mic_verify(
         .name("sayall-mic-verify".to_owned())
         .spawn(move || {
             let started = std::time::Instant::now();
-            let mut verdict = MicResponse::Unknown;
+            let mut reaction = WetypeReaction::Unknown;
             for delay in SAMPLES_MS {
                 let elapsed = started.elapsed().as_millis() as u64;
                 if elapsed < delay {
                     std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
                 }
-                verdict = response_since(baseline, mic_observation_for(marker));
+                let mic = response_since(baseline, mic_observation_for(marker));
+                reaction = reaction_verdict(
+                    mic,
+                    marker_baseline,
+                    crate::key_suppressor::wetype_marker_count(),
+                );
+                let f5 = crate::key_suppressor::f5_snapshot().delta_since(f5_baseline);
                 crate::ble::gatt_note(format!(
-                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={}",
+                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={} verdict={} f5_edges={} f5_leaked={} f5_key_down={}",
                     started.elapsed().as_millis(),
-                    verdict.as_log_str(),
+                    mic.as_log_str(),
+                    reaction_log_str(reaction),
+                    f5.edges,
+                    f5.leaked,
+                    if crate::key_suppressor::f5_key_down_in_os() {
+                        "true"
+                    } else {
+                        "false"
+                    },
                 ));
             }
-            if verdict == MicResponse::Observed {
-                // 真正被唤起过一次：整套状态健康，救回计数归零。
+            if reaction != WetypeReaction::NotReacted {
+                // 被唤起过（或观测不足以下结论）：救回计数归零，且绝不动作。
                 IME_HEAL_STEPS.store(0, Ordering::Relaxed);
             }
             let eligible = heal.is_some();
-            if !should_heal(verdict, eligible) {
+            if !should_heal(reaction, eligible) {
                 return;
             }
             let Some(heal) = heal else { return };
@@ -399,8 +466,24 @@ pub(crate) fn spawn_mic_verify(
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(350));
+            // 动作前再裁决一次：等会话结束的这段时间里恢复阶梯可能已经重放和弦
+            // 把语音拉起来了（用户一直按着）。迟到的正面证据必须否决动作，
+            // 否则会把刚起来的会话拆掉（10-20 教训）。
+            let recheck = reaction_verdict(
+                response_since(baseline, mic_observation_for(marker)),
+                marker_baseline,
+                crate::key_suppressor::wetype_marker_count(),
+            );
+            if recheck == WetypeReaction::Reacted {
+                IME_HEAL_STEPS.store(0, Ordering::Relaxed);
+                crate::ble::gatt_note(format!(
+                    "voice_heal session={session} tool={tool} action=focus_bounce skipped=reacted_late"
+                ));
+                return;
+            }
             let steps = IME_HEAL_STEPS.load(Ordering::Relaxed);
-            if steps >= IME_HEAL_STEP_CAP {
+            let action = heal_action_for_step(steps);
+            if action == HealAction::Stop {
                 crate::ble::gatt_note(format!(
                     "voice_heal session={session} tool={tool} action=focus_bounce skipped=cap steps={steps} cap={IME_HEAL_STEP_CAP}"
                 ));
@@ -411,6 +494,20 @@ pub(crate) fn spawn_mic_verify(
                     "voice_heal session={session} tool={tool} action=focus_bounce skipped=self_foreground"
                 ));
                 return;
+            }
+            // 第 2 档起先对齐目标输入法：应用侧 `already_active` 读的是本进程会话，
+            // 看不见目标窗口（2026-10-28 现场：`last_switch_age_ms=never` 全程没切过），
+            // 所以这里强制切一次，让目标窗口的会话绑回用户选的输入法。
+            if action == HealAction::AlignThenBounce {
+                let aligned = crate::ime::heal_target_ime(heal.tool);
+                crate::ble::gatt_note(format!(
+                    "voice_heal session={session} tool={tool} action=ime_align step={} outcome={}",
+                    steps + 1,
+                    match &aligned {
+                        Ok(activation) => activation.log_token(),
+                        Err(_) => "failed",
+                    },
+                ));
             }
             let outcome = focus_bounce_foreground();
             IME_HEAL_STEPS.fetch_add(1, Ordering::Relaxed);
@@ -443,12 +540,48 @@ mod tests {
         result
     }
 
+    /// 2026-10-28：救回判据必须用**合并裁决**，不能用开麦观测。
+    /// 本机实测 10/10 会话 `mic=not_observed` 而 marker 命中（issue #118 盲判形态）；
+    /// 若按 mic 判，健康机器上每按一次都会触发一次对齐动作（无谓打扰）。
     #[test]
-    fn should_heal_only_on_confirmed_not_observed_and_eligible() {
-        assert!(should_heal(MicResponse::NotObserved, true));
-        assert!(!should_heal(MicResponse::NotObserved, false));
-        assert!(!should_heal(MicResponse::Observed, true));
-        assert!(!should_heal(MicResponse::Unknown, true));
+    fn should_heal_uses_merged_verdict_not_mic() {
+        assert!(!should_heal(WetypeReaction::Reacted, true));
+        assert!(should_heal(WetypeReaction::NotReacted, true));
+        assert!(!should_heal(WetypeReaction::NotReacted, false));
+        assert!(!should_heal(WetypeReaction::Unknown, true));
+    }
+
+    /// 2026-10-28：救回动作必须逐级升级——首次只做零副作用的焦点往返，
+    /// 同一目标再次失败才动输入法（切换 + 焦点往返），到上限停手。
+    /// 理由：切换会让目标窗口重绑输入法上下文（Chromium 系可能整页重绘），
+    /// 不能作为每次失败的第一反应。
+    #[test]
+    fn heal_action_escalates_from_bounce_to_align_then_stops() {
+        assert_eq!(heal_action_for_step(0), HealAction::Bounce);
+        assert_eq!(heal_action_for_step(1), HealAction::AlignThenBounce);
+        assert_eq!(heal_action_for_step(2), HealAction::AlignThenBounce);
+        assert_eq!(heal_action_for_step(IME_HEAL_STEP_CAP), HealAction::Stop);
+        assert_eq!(
+            heal_action_for_step(IME_HEAL_STEP_CAP + 1),
+            HealAction::Stop
+        );
+    }
+
+    /// 2026-10-28：救回动作执行前必须**再裁决一次**——按下后 2.5 秒判"未响应"、
+    /// 用户又一直按着时，恢复阶梯可能已经重放和弦并把语音拉起来了；此时再做
+    /// 焦点往返/切换会把它拆掉（10-20 教训）。迟到的正面证据必须否决动作。
+    #[test]
+    fn late_positive_evidence_cancels_a_pending_heal() {
+        // 采样时未响应（marker 未前进）→ 可以救。
+        assert!(should_heal(
+            reaction_verdict(MicResponse::NotObserved, 7, 7),
+            true
+        ));
+        // 动作前再裁决：marker 前进 → 放弃动作。
+        assert!(!should_heal(
+            reaction_verdict(MicResponse::NotObserved, 7, 9),
+            true
+        ));
     }
 
     #[test]

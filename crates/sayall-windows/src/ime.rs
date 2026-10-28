@@ -111,6 +111,27 @@ pub enum ImeActivation {
     NotRequired,
 }
 
+impl ImeActivation {
+    /// 诊断日志用的稳定标记（与 `ime_activation outcome=` 同词表）。
+    pub(crate) fn log_token(&self) -> &'static str {
+        match self {
+            ImeActivation::AlreadyActive => "already_active",
+            ImeActivation::Switched => "switched",
+            ImeActivation::SkippedSelfForeground => "skipped_self_foreground",
+            ImeActivation::NotRequired => "not_required",
+        }
+    }
+}
+
+/// 是否需要真的调用 `ActivateProfile`（纯判定，单测覆盖）。
+///
+/// `force = true` 用于救回路径（2026-10-28）：`GetActiveProfile` 在新 STA 线程上
+/// 读到的是**本进程**会话，看不见目标窗口（Windows 按应用记忆输入法），
+/// `active_is_target` 是假阳性；此时必须无视它强制切一次。
+fn should_activate(active_is_target: bool, force: bool) -> bool {
+    force || !active_is_target
+}
+
 /// 前台窗口是否属于 SayAll 自身进程。
 ///
 /// 会话级 TSF 激活作用于焦点窗口——焦点落在自己的 WebView 时，把微信
@@ -135,14 +156,37 @@ pub(crate) fn foreground_is_self() -> bool {
 /// 类名哈希用于跨日志回答"失败与成功的那几按是不是打在同一个窗口类型上"
 /// （如 Chromium 类窗口 vs 记事本），不落盘明文类名；FNV-1a 64 位取高 32 位、
 /// 输出 8 位十六进制，跨进程与版本稳定（类名先转小写再哈希）。
+///
+/// 2026-10-28 扩两个字段（现场：微信在前台时按下不触发微信输入法，而应用
+/// 侧 `ime_query` 全程 `already_active`，日志无法回答"目标窗口到底认哪个输入法、
+/// 焦点在不在可输入控件上"）：
+/// - `hkl`：前台线程的键盘布局（`GetKeyboardLayout`，**按应用记忆输入法**时
+///   不同窗口会给出不同值）——非零且与微信输入法一致才说明目标窗口真的在用她；
+/// - `focus_class`：`GetGUIThreadInfo` 给出的焦点控件类名哈希——区分
+///   "焦点在输入框" 与 "焦点在列表/工具栏"（后者任何输入法都不会开麦）。
+///
+/// 两者都只落哈希/十六进制，不含明文类名与用户数据。
 pub(crate) struct ForegroundProbe {
     pub pid: u32,
     pub class_token: String,
+    pub hkl: u32,
+    pub focus_class: String,
+}
+
+/// 焦点控件类名 → 诊断标记（纯函数，单测覆盖）：
+/// 空串（拿不到 / 前台没有焦点控件）落 `none`，非空落稳定哈希。
+fn focus_token(class: Option<&str>) -> String {
+    match class {
+        Some(name) if !name.is_empty() => class_token(name),
+        _ => "none".to_owned(),
+    }
 }
 
 pub(crate) fn foreground_probe() -> ForegroundProbe {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+        GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
+        GUITHREADINFO,
     };
     unsafe {
         let foreground = GetForegroundWindow();
@@ -150,16 +194,42 @@ pub(crate) fn foreground_probe() -> ForegroundProbe {
             return ForegroundProbe {
                 pid: 0,
                 class_token: "none".to_owned(),
+                hkl: 0,
+                focus_class: "none".to_owned(),
             };
         }
         let mut process_id: u32 = 0;
-        GetWindowThreadProcessId(foreground, Some(&mut process_id));
+        let thread_id = GetWindowThreadProcessId(foreground, Some(&mut process_id));
         let mut buffer = [0u16; 256];
         let len = GetClassNameW(foreground, &mut buffer);
         let class = if len > 0 {
             String::from_utf16_lossy(&buffer[..len as usize])
         } else {
             String::new()
+        };
+        // 键盘布局按**线程**取：Windows 的"为每个应用窗口记住输入法"就体现在
+        // 这里，取本进程的会永远是自己的值（假阳性来源）。
+        let hkl = if thread_id != 0 {
+            GetKeyboardLayout(thread_id).0 as u32
+        } else {
+            0
+        };
+        // 焦点控件：拿不到 GUITHREADINFO（前台线程无消息队列等）按 none 处理。
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let focus = if thread_id != 0 && GetGUIThreadInfo(thread_id, &mut info).is_ok() {
+            let hwnd = info.hwndFocus;
+            if hwnd.0.is_null() {
+                None
+            } else {
+                let mut name = [0u16; 256];
+                let name_len = GetClassNameW(hwnd, &mut name);
+                (name_len > 0).then(|| String::from_utf16_lossy(&name[..name_len as usize]))
+            }
+        } else {
+            None
         };
         ForegroundProbe {
             pid: process_id,
@@ -168,6 +238,8 @@ pub(crate) fn foreground_probe() -> ForegroundProbe {
             } else {
                 class_token(&class)
             },
+            hkl,
+            focus_class: focus_token(focus.as_deref()),
         }
     }
 }
@@ -278,6 +350,8 @@ pub(crate) enum ImeSwitchScope {
     VoicePress,
     /// 用户刚在连接页选中输入工具后的一次性对齐（2026-10-03，离开自身窗口焦点后执行）。
     ToolSelect,
+    /// 按下确认未响应后的救回对齐（2026-10-28，强制切一次）。
+    VoiceHeal,
 }
 
 impl ImeSwitchScope {
@@ -285,6 +359,7 @@ impl ImeSwitchScope {
         match self {
             ImeSwitchScope::VoicePress => "voice_press",
             ImeSwitchScope::ToolSelect => "tool_select",
+            ImeSwitchScope::VoiceHeal => "voice_heal",
         }
     }
 }
@@ -302,13 +377,24 @@ pub fn ensure_session_ime(
     tool: VoiceInputTool,
     scope: ImeSwitchScope,
 ) -> Result<ImeActivation, String> {
-    ensure_session_ime_inner(tool, scope, false)
+    ensure_session_ime_inner(tool, scope, false, false)
+}
+
+/// 救回路径的对齐（2026-10-28）：按下已确认"目标输入法没被触发"后，
+/// **无视** `already_active` 强制切一次。
+///
+/// 为什么必须强制：`GetActiveProfile` 在新建 STA 线程上读到的是本进程会话，
+/// 看不到目标窗口（Windows 按应用记忆输入法）；现场日志里 `ime_activation`
+/// 全程 `already_active`、`last_switch_age_ms=never`，说明这条兜底从未真正执行。
+pub(crate) fn heal_target_ime(tool: VoiceInputTool) -> Result<ImeActivation, String> {
+    ensure_session_ime_inner(tool, ImeSwitchScope::VoiceHeal, false, true)
 }
 
 fn ensure_session_ime_inner(
     tool: VoiceInputTool,
     scope: ImeSwitchScope,
     allow_self_foreground: bool,
+    force: bool,
 ) -> Result<ImeActivation, String> {
     let started = std::time::Instant::now();
     let Some(target) = ime_target_for(tool) else {
@@ -334,7 +420,7 @@ fn ensure_session_ime_inner(
     std::thread::Builder::new()
         .name("sayall-ime-activate".to_owned())
         .spawn(move || {
-            let outcome = sta_ensure_ime(target, scope);
+            let outcome = sta_ensure_ime(target, scope, force);
             let _ = sender.send(outcome);
         })
         .map_err(|error| format!("创建激活线程失败：{error}"))?;
@@ -355,7 +441,7 @@ fn ensure_session_ime_inner(
     };
     let probe = foreground_probe();
     crate::ble::gatt_note(format!(
-        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} fg_pid={} fg_class={} error_domain={} error_code={} retryable={}",
+        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} fg_pid={} fg_class={} fg_hkl={:#010X} fg_focus={} error_domain={} error_code={} retryable={}",
         target.label,
         scope.label(),
         started.elapsed().as_millis(),
@@ -363,6 +449,8 @@ fn ensure_session_ime_inner(
         foreground_process_name().is_some(),
         probe.pid,
         probe.class_token,
+        probe.hkl,
+        probe.focus_class,
         if result.is_ok() { "none" } else { "tsf" },
         if result.is_ok() { "none" } else { "activation_failed" },
         result.is_err(),
@@ -634,6 +722,30 @@ mod press_context_tests {
         assert_ne!(notepad, class_token("Chrome_WidgetWin_1"));
     }
 
+    /// 2026-10-28：救回路径必须能强制切换。`GetActiveProfile` 在本线程会话上
+    /// 报"已是目标"（假阳性），若不许强制，这条兜底永远不执行——现场
+    /// `last_switch_age_ms=never` 就是这个形状。
+    #[test]
+    fn forced_align_ignores_a_false_positive_active_query() {
+        assert!(!super::should_activate(true, false));
+        assert!(super::should_activate(true, true));
+        assert!(super::should_activate(false, false));
+        assert!(super::should_activate(false, true));
+    }
+
+    /// 2026-10-28：`fg_focus=` 的取值规则。拿不到焦点控件（前台线程无消息
+    /// 队列 / 焦点在桌面）必须落 `none`，而不是哈希空串——否则日志里
+    /// "没有焦点控件"和"有个叫空的控件"无法区分。
+    #[test]
+    fn focus_token_maps_missing_focus_to_none() {
+        assert_eq!(super::focus_token(None), "none");
+        assert_eq!(super::focus_token(Some("")), "none");
+        let edit = super::focus_token(Some("Edit"));
+        assert_eq!(edit, class_token("Edit"));
+        assert_ne!(edit, "none");
+        assert_ne!(edit, class_token("RichEditD2DPT"));
+    }
+
     /// 诊断：枚举 TSF 键盘配置（clsid/guid/hkl/flags）并读当前活动配置，
     /// 用于"直达切换"方案选型（2026-10-10）：
     /// `cargo test -p sayall-windows --lib -- --ignored --nocapture dump_tsf_profiles`
@@ -710,7 +822,11 @@ mod press_context_tests {
 /// 临时 STA 线程体：CoInitializeEx(STA) → 查询活动输入法 →
 /// （需要时）ActivateProfile + 重绑等待 → CoUninitialize。
 /// 全部调用在本线程内完成（无跨套间封送，无需消息泵）。
-fn sta_ensure_ime(target: ImeProfile, scope: ImeSwitchScope) -> Result<ImeActivation, String> {
+fn sta_ensure_ime(
+    target: ImeProfile,
+    scope: ImeSwitchScope,
+    force: bool,
+) -> Result<ImeActivation, String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
@@ -738,12 +854,12 @@ fn sta_ensure_ime(target: ImeProfile, scope: ImeSwitchScope) -> Result<ImeActiva
             };
             // 功能点日志：只记录冷/热判定，不落盘输入法 GUID 或前台应用身份。
             crate::ble::gatt_note(format!(
-                "ime_query tool={} ok={} active_is_target={active_is_target} active_profile_present={}",
+                "ime_query tool={} ok={} active_is_target={active_is_target} active_profile_present={} forced={force}",
                 target.label,
                 query.is_ok(),
                 profile.clsid != GUID::from_u128(0),
             ));
-            if active_is_target {
+            if !should_activate(active_is_target, force) {
                 return Ok(ImeActivation::AlreadyActive);
             }
             manager
