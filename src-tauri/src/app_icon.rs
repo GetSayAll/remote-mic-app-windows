@@ -378,18 +378,21 @@ pub fn apply(app: &AppHandle, requested: AppIconIdentifier) -> AppIconIdentifier
     // 而它同步跑在启动 setup 里，把窗口首个 IPC 一起推后。窗口/托盘图标在上面已经设好，
     // 快捷方式晚几百毫秒没有任何可感知差异，因此挪到独立线程；日志字段保持不变。
     let sync_style = applied;
-    std::thread::spawn(move || match crate::shortcut_icons::sync(sync_style) {
-        Ok(report) => sayall_windows::gatt_note(format!(
-            "app_icon action=sync_shortcuts phase=completed terminal_result=passed style={} considered={} updated={} failed={}",
-            style_label(sync_style),
-            report.considered,
-            report.updated,
-            report.failed
-        )),
-        Err(_) => sayall_windows::gatt_note(format!(
-            "app_icon action=sync_shortcuts phase=completed terminal_result=failed style={} error_domain=shell error_code=sync_failed retryable=true",
-            style_label(sync_style)
-        )),
+    std::thread::spawn(move || {
+        let outcome = crate::shortcut_icons::sync(sync_style);
+        match outcome {
+            Ok(report) => sayall_windows::gatt_note(format!(
+                "app_icon action=sync_shortcuts phase=completed terminal_result=passed style={} considered={} updated={} failed={}",
+                style_label(sync_style),
+                report.considered,
+                report.updated,
+                report.failed
+            )),
+            Err(_) => sayall_windows::gatt_note(format!(
+                "app_icon action=sync_shortcuts phase=completed terminal_result=failed style={} error_domain=shell error_code=sync_failed retryable=true",
+                style_label(sync_style)
+            )),
+        }
     });
 
     if applied == requested {
