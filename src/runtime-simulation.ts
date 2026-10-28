@@ -446,7 +446,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(facetedDuckOption.checked, "新装默认没有选中几何鸭");
   assert(
     document.querySelector<HTMLImageElement>("img.app-logo")?.getAttribute("src") ===
-      "/app-icon-faceted-duck.png",
+      "/app-icon-faceted-duck.webp",
     "顶部标识没有按新装默认（几何鸭）渲染",
   );
   const standardOption = document.querySelector<HTMLInputElement>(
@@ -527,7 +527,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   const currentAppIcon = await getAppIcon();
   const expectedLogo =
-    currentAppIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png";
+    currentAppIcon === "standard" ? "/app-logo.webp" : "/app-icon-faceted-duck.webp";
   await waitFor(
     () =>
       document.querySelector(".profile-nav-item img")?.getAttribute("src") === expectedLogo
