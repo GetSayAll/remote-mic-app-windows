@@ -833,6 +833,20 @@ describe("buttons mapping page", () => {
     intervalSpy.mockRestore();
   });
 
+  it("keeps the switches rendered while combined actions are still loading", async () => {
+    // 2026-10-28：`getCombinedActions` 曾在映射赋值之前被 `await`，`listPresetApps`
+    // 也挤在同一条 Promise.all 里（实测 379 ms 探测已安装应用）——两者一起把开关与
+    // 配置内容推迟到一两秒之后。这条用例把它挂在"永不返回"：开关仍必须已经渲染出来，
+    // 否则就是把非首帧数据又塞回首帧链上了。
+    vi.mocked(getCombinedActions).mockReturnValueOnce(new Promise(() => {}) as never);
+
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(wrapper.findAll('input[type="checkbox"]').length).toBeGreaterThan(0);
+    wrapper.unmount();
+  });
+
   it("immediately releases a listener that resolves after the page is unmounted", async () => {
     let resolveUnlisten!: (unlisten: () => void) => void;
     const pendingUnlisten = new Promise<() => void>((resolve) => {

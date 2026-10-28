@@ -2115,11 +2115,14 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps, commonPhrases, persistedLockSelection] = await Promise.all([
+  // 首帧只等三项**必需**数据：映射、快照、锁定偏好——它们决定那两个开关的初值与
+  // 配置内容的首次渲染。其余三项（应用候选、常用语入口、组合动作芯片）不影响首帧
+  // 布局，之前却挤在同一条链上：`listPresetApps` 实测 379 ms（要探测已安装应用），
+  // 而 `getCombinedActions` 还额外 `await` 在映射赋值之前——于是"开关和配置内容都要
+  // 等上一两秒"（2026-10-28 用户反馈）。现在它们就绪后各自补齐。
+  const [loaded, snapshot, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
-    listPresetApps().catch(() => [] as PresetAppInfo[]),
-    getCommonPhrasePanelSnapshot(),
     // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
     getLockMappingSelection().catch(() => {
       reportFrontendEvent({
@@ -2134,20 +2137,6 @@ onMounted(async () => {
   if (unmounted) {
     return;
   }
-  presetApps.value = apps.filter((app) => app.installed);
-  registerPresetAppNames(presetApps.value);
-  // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
-  await getCombinedActions()
-    .then((library) => {
-      // 同 id 多版本只取最新（编辑一次 = 版本追加，直接铺开会多出芯片）。
-      macroDefinitions.value = latestMacroDefinitions(library.definitions);
-      registerMacroNames(macroDefinitions.value);
-    })
-    .catch(() => undefined);
-  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
-  commonPhrasesAvailable.value = commonPhrases.available;
-  commonPhraseAccess.value = commonPhrases.access;
-  registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -2157,6 +2146,34 @@ onMounted(async () => {
   lockSelectionPersisted = persistedLockSelection;
   lockSelection.value = persistedLockSelection;
   lockSelectionReady.value = true;
+
+  // 以下三项都不阻塞首帧，就绪后各自补齐（页面已卸载则丢弃）。
+  void listPresetApps()
+    .then((apps) => {
+      if (unmounted) return;
+      presetApps.value = apps.filter((app) => app.installed);
+      registerPresetAppNames(presetApps.value);
+    })
+    .catch(() => undefined);
+  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
+  void getCommonPhrasePanelSnapshot()
+    .then((commonPhrases) => {
+      if (unmounted) return;
+      commonPhrasesAvailable.value = commonPhrases.available;
+      commonPhraseAccess.value = commonPhrases.access;
+      registerCommonPhraseAvailability(commonPhrases.available);
+    })
+    .catch(() => undefined);
+  // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
+  void getCombinedActions()
+    .then((library) => {
+      if (unmounted) return;
+      // 同 id 多版本只取最新（编辑一次 = 版本追加，直接铺开会多出芯片）。
+      macroDefinitions.value = latestMacroDefinitions(library.definitions);
+      registerMacroNames(macroDefinitions.value);
+    })
+    .catch(() => undefined);
+
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
