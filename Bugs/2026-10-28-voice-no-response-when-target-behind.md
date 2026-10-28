@@ -1,7 +1,8 @@
 # 2026-10-28 目标窗口不在前台时遥控语音键无反应（取证中）
 
 - 发现日期：2026-10-28（用户现场日志，覆盖 10-27 01:15 ~ 10-28 05:53）
-- 状态：**调查中**——已排除版本回归，已加取证探针，待真机复现定性
+- 状态：**调查中**——已排除版本回归、已加取证探针；本机（Windows 11 26200 / 微信 4.0 / RC003）
+  **未复现**，等客户机同构建取数定性
 - 影响范围：`1.8.0` 预览包（`f3f5212`）**与** `0.8.6`（`3ec6656`）**同时**出现；
   Windows 10.0.26300 x64；RC003；微信输入法 + 语音工具=微信（左 Ctrl + 左 Win）
 - 功能点：语音键按下 → 注入"按住说话快捷键" → 目标窗口的输入法开麦
@@ -63,7 +64,24 @@
 
 - `passed`：`cargo fmt --all -- --check`；`cargo test -p sayall-windows --lib`
   **473 passed / 0 failed / 16 ignored**（含新增 3 个用例）。
-- `deferred`：真机复现与新字段取数——按 `Testing/WindowsVoiceF5Probe.md` 执行 A/B/C 三组。
+- **本机复现：未复现**（2026-10-28 14:35–14:40，调试版 `8c878b67`，RC003，
+  微信 4.0 `Weixin.exe` pid 29276 在前台）。A 组 4 次（微信前台）+ B 组 6 次（SayAll 前台）
+  共 10 次按下，**10/10 `wetype_check reacted=true evidence=marker`**：
+  - `f5_edges` 13（800ms）/ 46–64（2500ms），`f5_leaked=0`，`f5_key_down=false`
+    ⇒ 遥控器键盘报告在流、全部被吞、OS 侧无残留键态，抑制链健康；
+  - `suppressor_ask dir=down swallow=1` 每次按住都有；
+  - C 组手按 F5（06:37:54 / 06:37:58 / 06:38:24 / 06:38:28 / 06:38:47）都落在
+    `suppressor_ask dir=up swallow=0 hold=2` = 非会话期放行，符合设计 ⇒ 钩子活着。
+- **判据修正（本次新发现）**：同一批 10 次按下 `mic=` **全程 `not_observed`**，而 marker 命中
+  ⇒ 本机 WeType 不写 ConsentStore（issue #118 形态）。`mic=` 单独不得判失败，
+  唯一判据是 `wetype_check reacted=`；`Testing/WindowsVoiceF5Probe.md` 已按此改写。
+- **探针分辨率（本次新发现）**：`fg_hkl` 在本机微信 4.0 与 SayAll 上同为 `0x08040804`
+  （zh-CN 语言 HKL 不区分 TSF 输入法），`fg_focus` 对 Chromium 系应用恒等于顶层窗口类名。
+  因此"目标窗口用的是不是微信输入法"**不能**靠这两个字段，而要靠 `reacted` 是否命中。
+- **环境差异（待现场确认）**：客户机前台窗口类 `dc007969` = `Chrome_WidgetWin_1`（微信 3.x），
+  本机微信 4.0 = `493dd032`。若现场故障与"按应用记忆输入法"有关，微信大版本本身就可能是变量。
+- `deferred`：客户机上用同一构建再跑一轮（`f5_edges` / `f5_key_down` / `reacted` 三处即可定性），
+  以及 RC001 同矩阵。
 
 ## 隐私检查
 

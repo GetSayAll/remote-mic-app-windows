@@ -63,33 +63,63 @@ Get-Content $log -Tail 4000 |
   ForEach-Object { $_.Line -replace '^.*?(build_channel=unknown release_tag=unknown )','' }
 ```
 
-## 字段判读（按 `mic=` 分两支）
+## 判据口径（2026-10-28 14:36 本机实测后修正，**先读这一节**）
 
-| `mic` | `f5_edges` | `f5_leaked` | `f5_key_down` | 读法 |
-|---|---|---|---|---|
-| observed | >0 | 0 | false（松开后）| 正常：键盘报告进了 OS 且全被吞，和弦干净 |
-| observed | 0 | 0 | false | 正常（遥控器只发 ATVV、没发键盘报告）|
-| not_observed | 0 | 0 | **false** | **语音键的键盘报告根本没进 OS** ⇒ 查报告层/助手侧（agent 是否在改写该 usage），不是注入问题 |
-| not_observed | 0 | 0 | **true** | **F5 在 OS 里是按下的，但本进程钩子没看到** ⇒ 钩子/按键宿主链路被绕过（查 `key_host`、钩子链位） |
-| not_observed | >0 | **>0** | true | F5 泄漏进系统 ⇒ 微信输入法按"额外按键"拒绝和弦（`Bugs/2026-09-04-wetype-zero-gap-injection.md`）|
-| not_observed | >0 | 0 | false | 键盘报告与抑制都正常，和弦仍被拒 ⇒ 断点在**目标窗口的输入法**，看 `fg_hkl`/`fg_focus` |
+`mic=` **不能单独当失败判据**。本机 10/10 会话出现
+`wetype_check reacted=true evidence=marker mic=not_observed`：微信输入法的钩子层存活标记
+（0xFC + extra="WTYP"）命中，而 ConsentStore 开麦观测全程失明——这正是 issue #118 的形态
+（WeType 2.1.4.6 起录音不再写 ConsentStore）。
 
-输入法一支的读法：
+因此**唯一的通过判据是合并裁决**，与 `wetype_revive::reaction_verdict` 同源（marker 为正面证据，
+先于 mic 否决）：
 
-- 同一前台应用、`mic` 在 observed / not_observed 之间翻转时，比较两次的 `fg_hkl`。
-  **不同** ⇒ 目标窗口的键盘布局确实换了（"按应用记忆输入法"），应用侧 `already_active`
-  就是假阳性，修复方向是"对齐目标窗口"而不是"再注入一次"。
-- `fg_focus` 相同（同一控件类）而结果不同 ⇒ 不是焦点控件的问题。
-- `fg_focus=none` 或焦点落在列表/工具栏 ⇒ 该窗口本来就不会开麦，属于用户操作场景而非缺陷。
-- `ime_activation outcome=switched` 之后的下一次按下若恢复 `mic=observed` ⇒ 确认"切一次就好"，
+| 读数 | 含义 |
+|---|---|
+| `wetype_check reacted=true evidence=marker` | **通过**：目标输入法确实消费了本次和弦（mic 说什么都不重要）|
+| `wetype_check reacted=true evidence=mic` | 通过：目标输入法在开麦（marker 通道未命中，但有开麦证据）|
+| `wetype_check reacted=false evidence=none` | **失败**：两个独立证据源都确认没被触发 |
+| `wetype_check skipped reason=observation_unavailable` | 无法判定，不得据此下结论 |
+
+`voice_verify` 的 `mic=` 只作为**辅助**：它 `observed` 时可以佐证；它 `not_observed`
+而 `reacted=true` 时，说明这台机器的 WeType 不写 ConsentStore，不是功能失败。
+
+## 字段判读（F5 一支；下表以"目标输入法没被触发"为前提）
+
+| `f5_edges` | `f5_leaked` | `f5_key_down` | 读法 |
+|---|---|---|---|
+| 0 | 0 | **false** | **语音键的键盘报告根本没进 OS** ⇒ 查报告层/助手侧（agent 是否在改写该 usage），不是注入问题 |
+| 0 | 0 | **true** | **F5 在 OS 里是按下的，但本进程钩子没看到** ⇒ 钩子/按键宿主链路被绕过（查 `key_host`、钩子链位） |
+| >0 | **>0** | true | F5 泄漏进系统 ⇒ 微信输入法按"额外按键"拒绝和弦（`Bugs/2026-09-04-wetype-zero-gap-injection.md`）|
+| >0 | 0 | false | 键盘报告与抑制都正常 ⇒ 断点在**目标窗口的输入法**（这支见下）|
+
+健康基线的读数（2026-10-28 本机，RC003，微信 4.0 在前台）：
+`at_ms=800 f5_edges=13 f5_leaked=0 f5_key_down=false`、
+`at_ms=2500 f5_edges=46..64 f5_leaked=0 f5_key_down=false`。
+`f5_key_down=false` 是**正常**的：F5 的按下沿被抑制器吞掉，OS 侧本来就不该有它的键态；
+边沿数只增不减说明遥控器的键盘报告确实在流。
+
+输入法一支的读法（注意 2026-10-28 实测的分辨率限制）：
+
+- `ime_activation outcome=switched` 之后的下一次按下若 `reacted=true` ⇒ 确认"切一次就好"，
   自愈阶梯可以扩到"按下失败后对齐目标输入法"。
+- `ime_activation` 全是 `already_active` 且 `last_switch_age_ms=never` ⇒ "该切却没切"成立
+  （判据 `sta_ensure_ime` 在新建 STA 线程上读的是本进程会话，看不见目标窗口）。
+- **`fg_hkl` 对"同语言的两个 TSF 输入法"没有分辨率**：本机微信 4.0 与 SayAll 都报
+  `0x08040804`（= zh-CN 语言 HKL），微软拼音与微信输入法都是这个值。它只在跨语言
+  （如中/英切换）或 IMM 型输入法时才可能不同。
+- **`fg_focus` 对 Chromium 系应用没有分辨率**：微信（Weixin.exe，类名 `493dd032`）与旧版微信
+  （`dc007969` = `Chrome_WidgetWin_1`）都会让 `hwndFocus` 等于顶层窗口本身，
+  所以"焦点在输入框 / 在列表"区分不出来。它对 Win32 控件（Edit / RichEditD2DPT 等）有效。
+- 结论：判"目标窗口输入法"不要指望这两个字段，**看 `reacted`** —— 它才是目标窗口消费了和弦
+  的正面证据；不命中就是没消费。
 
 ## 通过 / 失败判据
 
-- **passed**：A 组 5/5 `mic=observed`，且 `f5_edges` 与 C 组阳性对照都按预期出现
-  （C 组手按 F5 必须能在 `suppressor_ask dir=down` 里看到至少一条）。
-- **failed**：A 组出现 `mic=not_observed`，并且上表能落到唯一一行（即断点被判据唯一确定）。
-  这种情况下把该行连同 5 行上下文一起归档。
+- **passed**：A 组 5/5 `wetype_check reacted=true`（marker 或 mic 任一），`f5_edges` 随按住
+  递增且 `f5_leaked=0`，C 组手按 F5 能在 `suppressor_ask dir=down` 里看到（非会话期应为
+  `swallow=0 hold=2`，即放行进 OS——这是正确行为，不是缺陷）。
+- **failed**：A 组出现 `reacted=false evidence=none`，并且 F5 一支能落到唯一一行
+  （即断点被判据唯一确定）。这种情况下把该行连同 5 行上下文一起归档。
 - **deferred**：C 组手按 F5 在抑制器里也看不到任何边沿 ⇒ 说明"钩子死了"，A 组结果不具
   诊断意义，先修链路再重测。
 
