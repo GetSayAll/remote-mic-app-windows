@@ -61,10 +61,10 @@ describe("sidebar", () => {
       props: { activePage: "profile", appIcon: "standard" },
     });
 
-    expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe("/app-logo.png");
+    expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe("/app-logo.webp");
     await wrapper.setProps({ appIcon: "faceted-duck" });
     expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe(
-      "/app-icon-faceted-duck.png",
+      "/app-icon-faceted-duck.webp",
     );
   });
 

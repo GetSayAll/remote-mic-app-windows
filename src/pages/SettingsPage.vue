@@ -65,8 +65,8 @@ const languageOptions: Array<{ value: AppLanguagePreference; label: string }> = 
 ];
 
 const appIconOptions: Array<{ value: AppIconIdentifier; label: string; preview: string }> = [
-  { value: "standard", label: "默认", preview: "/app-logo.png" },
-  { value: "faceted-duck", label: "几何鸭", preview: "/app-icon-faceted-duck.png" },
+  { value: "standard", label: "默认", preview: "/app-logo.webp" },
+  { value: "faceted-duck", label: "几何鸭", preview: "/app-icon-faceted-duck.webp" },
 ];
 
 /** 版本号与安装包/更新器同源（package_info）；尚未读到时不编造版本。 */
@@ -155,7 +155,7 @@ const appIconError = ref("");
 
 /** 顶部标识跟随选择实时换图，与窗口/托盘用同一个 ID。 */
 const appIconPreview = computed(
-  () => appIconOptions.find((option) => option.value === appIcon.value)?.preview ?? "/app-logo.png",
+  () => appIconOptions.find((option) => option.value === appIcon.value)?.preview ?? "/app-logo.webp",
 );
 
 /** 首次设置：重新运行向导（只重置向导进度，不清除设备/映射/音频/其他设置）。 */

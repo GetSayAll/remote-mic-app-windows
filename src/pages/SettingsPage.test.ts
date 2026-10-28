@@ -423,14 +423,14 @@ describe("settings page", () => {
     expect(wrapper.text()).toContain("默认");
     expect(wrapper.text()).toContain("几何鸭");
     expect(wrapper.get("img.app-logo").attributes("src")).toBe(
-      "/app-icon-faceted-duck.png",
+      "/app-icon-faceted-duck.webp",
     );
 
     await radios[0].setValue(true);
     expect(bridge.setAppIcon).toHaveBeenCalledWith("standard");
     expect(radios[0].element.checked).toBe(true);
     // 顶部标识与窗口/托盘用同一个选择：切回「默认」即换回水彩鸭。
-    expect(wrapper.get("img.app-logo").attributes("src")).toBe("/app-logo.png");
+    expect(wrapper.get("img.app-logo").attributes("src")).toBe("/app-logo.webp");
   });
 
   it("应用图标保存失败时就地报错并回到实际生效的图标", async () => {

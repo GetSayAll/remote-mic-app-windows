@@ -2553,8 +2553,15 @@ fn handle_control(
             let verify_marker = crate::ime::mic_marker_for(attempt_tool);
             let verify_baseline = verify_marker.and_then(crate::wetype_revive::mic_observation_for);
             let fg_probe = crate::ime::foreground_probe();
+            // 2026-10-28：按住期间"遥控器语音键的键盘报告有没有进 OS"的基线。
+            // 与开麦/存活标记同在注入前取样（之后取会把本次按住自己的边沿吃掉）。
+            let f5_baseline = crate::key_suppressor::f5_snapshot();
+            // 存活标记基线同样在这里取：`voice_verify` 的合并裁决要用它区分
+            // "开麦盲判"与"真的没被触发"（marker_baseline 提前到两条注入路径之前，
+            // 只会让基线更早、更不会把本次自己的标记算进去）。
+            let marker_baseline = crate::key_suppressor::wetype_marker_count();
             gatt_note(format!(
-                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} fg_pid={} fg_class={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
+                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} fg_pid={} fg_class={} fg_hkl={:#010X} fg_focus={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
                 crate::ime::tool_label(attempt_tool),
                 press_path(synth_gate, attempt_hotkey.is_some()),
                 synth_label(synth_target),
@@ -2562,6 +2569,8 @@ fn handle_control(
                 crate::ime::foreground_is_self(),
                 fg_probe.pid,
                 fg_probe.class_token,
+                fg_probe.hkl,
+                fg_probe.focus_class,
                 crate::ime::age_label(crate::ime::tool_select_age_ms()),
                 crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
                 crate::ime::age_label(crate::ime::last_switch_age_ms()),
@@ -2618,10 +2627,8 @@ fn handle_control(
             } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
                 let wetype_hotkey = is_wetype_voice_hotkey(&chord);
                 let mic_baseline = wetype_hotkey.then(wetype_mic_observation).flatten();
-                // 存活标记基线必须与开麦基线同在注入之前取样，否则本次和弦
-                // 自己的标记会被算成“基线内”而漏掉否决。非微信快捷键不会
-                // 启动恢复阶梯，但统一取样可保持该临界区没有额外分支时序。
-                let marker_baseline = crate::key_suppressor::wetype_marker_count();
+                // 存活标记基线已在两条注入路径之前统一取样（见上方 marker_baseline，
+                // 只会更早、更不会把本次自己的标记算成"基线内"）。
                 // 会话级激活目标输入法：语音热键只在自身为当前会话活动输入法
                 // 时生效（2026-09-05 持锁实验，evidence/p）；激活后零延迟注入
                 // 3/3 触发，不增加按键延迟。目标按**用户选的工具**决定
@@ -2684,25 +2691,27 @@ fn handle_control(
                 ));
             }
             if let Some(marker) = verify_marker {
-                // 自动救回条件（2026-10-10）：工具有可切换的输入法目标，且本次不是
-                // 微信默认和弦（那条路径由既有 wetype_check 阶梯负责恢复，避免双重动作）。
-                let heal = if attempt_tool.and_then(crate::ime::ime_target_for).is_some()
-                    && !attempt_hotkey
-                        .as_ref()
-                        .map(is_wetype_voice_hotkey)
-                        .unwrap_or(false)
-                {
-                    Some(crate::wetype_revive::ImeHealContext {
-                        state: std::sync::Arc::clone(state),
-                    })
-                } else {
-                    None
-                };
+                // 自动救回条件（2026-10-10 起，2026-10-28 放宽）：工具有可切换的输入法目标
+                // 即可。原先微信默认和弦被排除（那条路径由 wetype_check 阶梯负责，避免双重
+                // 动作），但现场证据显示失败恰恰集中在这条路径，且阶梯只 cycle 配置、够不到
+                // "目标窗口的输入法会话"。现在的分工：阶梯负责按住期间的紧急重放；救回负责
+                // 会话结束后的对齐（第 1 档只焦点往返，第 2 档才强制切一次），两者由合并裁决
+                // 与"动作前再裁决"隔离，不会互相拆台。
+                let heal =
+                    match attempt_tool.filter(|tool| crate::ime::ime_target_for(*tool).is_some()) {
+                        Some(tool) => Some(crate::wetype_revive::ImeHealContext {
+                            state: std::sync::Arc::clone(state),
+                            tool,
+                        }),
+                        None => None,
+                    };
                 crate::wetype_revive::spawn_mic_verify(
                     u64::from(session_id),
                     crate::ime::tool_label(attempt_tool),
                     marker,
                     verify_baseline,
+                    f5_baseline,
+                    marker_baseline,
                     heal,
                 );
             }
