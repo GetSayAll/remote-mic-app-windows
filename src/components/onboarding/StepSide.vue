@@ -26,7 +26,7 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
       <img
         v-if="props.panel.visual === 'remote'"
         class="side-photo"
-        src="/RC003-remote-photo@2x.png"
+        src="/RC003-remote-photo@2x.webp"
         :alt="t('小米蓝牙语音遥控器示意图')"
         draggable="false"
       />

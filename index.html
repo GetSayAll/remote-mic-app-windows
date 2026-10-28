@@ -16,6 +16,9 @@
       }
     </script>
     <link rel="icon" type="image/png" href="/favicon.png" />
+    <!-- 遥控器实物图只有 40 KB（WebP），在启动时就预取：切到按键页/首次设置时
+         图片已在缓存里，不会出现"热点锚点都排好了、照片还没到"（2026-10-28）。 -->
+    <link rel="preload" as="image" href="/RC003-remote-photo@2x.webp" type="image/webp" />
     <title>SayAll</title>
   </head>
   <body>
