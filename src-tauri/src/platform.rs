@@ -96,6 +96,13 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     }
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
+    /// 键位方案覆盖层（私有组件注入后调用；公开构建永不调用）。
+    /// 默认 no-op：仿真与不支持方案覆盖的平台保持基础映射。
+    fn set_button_profile_overlay(
+        &self,
+        _overlay: Option<sayall_windows::send_input::ButtonMappings>,
+    ) {
+    }
     /// 同步组合动作库快照（加载/保存后调用；引擎的 RunMacro 手势与 UI
     /// 测试入口都读这份内存快照）。默认 no-op：不支持组合动作的平台保持空库。
     fn set_macro_library(&self, _document: sayall_core::MacroLibraryDocument) {}
@@ -333,6 +340,13 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
         WindowsPlatform::set_button_mappings(self, mappings)
+    }
+
+    fn set_button_profile_overlay(
+        &self,
+        overlay: Option<sayall_windows::send_input::ButtonMappings>,
+    ) {
+        WindowsPlatform::set_button_profile_overlay(self, overlay);
     }
 
     fn set_macro_library(&self, document: sayall_core::MacroLibraryDocument) {

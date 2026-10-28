@@ -3174,6 +3174,7 @@ dependencies = [
  "rustls",
  "sayall-core",
  "sayall-windows",
+ "sayall-windows-button-profiles",
  "sayall-windows-common-phrases",
  "semver",
  "serde",
@@ -3185,6 +3186,13 @@ dependencies = [
  "webview2-com",
  "windows 0.62.2",
  "windows-core 0.61.2",
+]
+
+[[package]]
+name = "sayall-windows-button-profiles"
+version = "0.0.0"
+dependencies = [
+ "sayall-windows",
 ]
 
 [[package]]

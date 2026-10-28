@@ -21,6 +21,8 @@ export interface PrivateFeaturePage {
   label: string;
   icon: NavIcon;
   component: Component;
+  /** 插入到该公开页面之后；缺省/未命中时追加到末尾。 */
+  after?: string;
 }
 
 export const privateFeaturePages: readonly PrivateFeaturePage[] = [];

@@ -6,13 +6,17 @@ import {
   loadPersistedPage,
   navigationItems,
   persistActivePage,
+  publicNavigationItems,
   touchLiveness,
 } from "./navigation";
 
 describe("Windows navigation", () => {
   it("keeps the approved Mac-derived page order without empty entries", () => {
     // 2026-10-25 用户指定：推荐放在连接上方；2026-10-24 个人中心固定在最后。
-    expect(navigationItems.map((item) => item.id)).toEqual([
+    // 私有构建可能追加自己的页面；这里只核对公开页面的相对顺序。
+    const publicIds = new Set(publicNavigationItems.map((item) => item.id));
+    const items = navigationItems.filter((item) => publicIds.has(item.id));
+    expect(items.map((item) => item.id)).toEqual([
       "buttons",
       "macros",
       "recommendations",
@@ -22,18 +26,18 @@ describe("Windows navigation", () => {
       "settings",
       "profile",
     ]);
-    expect(navigationItems[2].label).toBe("推荐");
-    expect(navigationItems[2].icon).toBe("sparkles");
-    expect(navigationItems[3].label).toBe("连接");
+    expect(items[2].label).toBe("推荐");
+    expect(items[2].icon).toBe("sparkles");
+    expect(items[3].label).toBe("连接");
     // 2026-10-25 用户指定：回眸紧挨权限上方。
-    expect(navigationItems[4].label).toBe("回眸");
-    expect(navigationItems[4].icon).toBe("textbubble");
+    expect(items[4].label).toBe("回眸");
+    expect(items[4].icon).toBe("textbubble");
     // 2026-10-02 用户指定：原「关于」页改名「设置」，图标换成 Mac 同款齿轮。
-    expect(navigationItems[6].label).toBe("设置");
-    expect(navigationItems[6].icon).toBe("gear");
-    expect(navigationItems[7].label).toBe("个人中心");
-    expect(navigationItems[7].icon).toBe("person");
-    expect(navigationItems.every((item) => item.label.length > 0)).toBe(true);
+    expect(items[6].label).toBe("设置");
+    expect(items[6].icon).toBe("gear");
+    expect(items[7].label).toBe("个人中心");
+    expect(items[7].icon).toBe("person");
+    expect(items.every((item) => item.label.length > 0)).toBe(true);
   });
 
   it("shows the combination actions entry after the buttons page", () => {

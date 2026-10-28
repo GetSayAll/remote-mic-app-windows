@@ -15,11 +15,14 @@ use settings::SettingsStore;
 #[cfg(windows)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
 mod accent;
 mod app_icon;
+mod button_profiles;
 mod common_phrase_panel;
 mod diagnostics;
 mod launch_state;
@@ -238,6 +241,151 @@ fn observe_webview_failure(webview: &tauri::Webview) {
             "webview event=failure_observer role={role} result=failed stage=dispatch"
         ));
     }
+}
+
+/// Ctrl+W 的原生兜底：WebView2 会把部分浏览器加速键在页面之前处理，页面层的
+/// `keydown` 收不到物理 Ctrl+W（注入的 Ctrl+W 仍可能到达页面，表现为“遥控器能关、
+/// 键盘不能关”）。这里在 WebView2 的 AcceleratorKeyPressed 阶段拦截，命中后直接
+/// 复用与“X”相同的隐藏动作，并标记已处理，避免浏览器继续处理该组合键。
+#[cfg(windows)]
+fn install_ctrl_w_accelerator(webview: &tauri::Webview) {
+    use webview2_com::{
+        AcceleratorKeyPressedEventHandler,
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+            COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+        },
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let app = webview.app_handle().clone();
+    let result = webview.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_sender, args| {
+            let Some(args) = args.as_ref() else {
+                return Ok(());
+            };
+            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND(0);
+            if args.KeyEventKind(&mut kind).is_err()
+                || (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                    && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+            {
+                return Ok(());
+            }
+            let mut virtual_key = 0u32;
+            if args.VirtualKey(&mut virtual_key).is_err() || virtual_key != 'W' as u32 {
+                return Ok(());
+            }
+            let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+            if !down(VK_CONTROL)
+                || down(VK_MENU)
+                || down(VK_SHIFT)
+                || down(VK_LWIN)
+                || down(VK_RWIN)
+            {
+                return Ok(());
+            }
+            let _ = args.SetHandled(true);
+            sayall_windows::gatt_note(
+                "window_close action=hide_to_tray source=ctrl_w_accelerator phase=submitted"
+                    .to_owned(),
+            );
+            let app_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = hide_main_window(app_main);
+            });
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let result = controller.add_AcceleratorKeyPressed(&handler, &mut token);
+        sayall_windows::gatt_note(format!(
+            "window_close action=install_accelerator source=ctrl_w terminal_result={}",
+            if result.is_ok() { "passed" } else { "failed" }
+        ));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(
+            "window_close action=install_accelerator source=ctrl_w terminal_result=failed stage=dispatch"
+                .to_owned(),
+        );
+    }
+}
+
+/// 主窗口 HWND 的子类化实例 ID（同一窗口只注册一次）。
+#[cfg(windows)]
+const WINDOW_KEY_SUBCLASS_ID: usize = 0x5A12;
+/// 子类化回调需要的 AppHandle；单实例应用只有主窗口，进程内取一次即可。
+#[cfg(windows)]
+static WINDOW_KEY_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// 标题栏/非客户区获得键盘焦点时，WebView2 收不到按键，页面层 handler 和
+/// AcceleratorKeyPressed 都不会触发；此时 Ctrl+W 会落到顶层窗口的 WM_KEYDOWN。
+/// 子类化主窗口补齐这条路径，命中后仍走 hide_main_window（与 X 同一动作）。
+#[cfg(windows)]
+fn install_window_key_subclass(window: &tauri::Window) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+
+    let Ok(raw) = window.hwnd() else {
+        sayall_windows::gatt_note(
+            "window_close action=install_window_subclass source=ctrl_w terminal_result=failed reason=hwnd_missing"
+                .to_owned(),
+        );
+        return;
+    };
+    let _ = WINDOW_KEY_APP.set(window.app_handle().clone());
+    let installed = unsafe {
+        SetWindowSubclass(
+            HWND(raw.0),
+            Some(window_key_subclass),
+            WINDOW_KEY_SUBCLASS_ID,
+            0,
+        )
+        .as_bool()
+    };
+    sayall_windows::gatt_note(format!(
+        "window_close action=install_window_subclass source=ctrl_w terminal_result={}",
+        if installed { "passed" } else { "failed" }
+    ));
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn window_key_subclass(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_NCDESTROY};
+
+    if message == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(hwnd, Some(window_key_subclass), WINDOW_KEY_SUBCLASS_ID);
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+    if message == WM_KEYDOWN && wparam.0 == 'W' as usize {
+        let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+        if down(VK_CONTROL) && !down(VK_MENU) && !down(VK_SHIFT) && !down(VK_LWIN) && !down(VK_RWIN)
+        {
+            if let Some(app) = WINDOW_KEY_APP.get() {
+                sayall_windows::gatt_note(
+                    "window_close action=hide_to_tray source=ctrl_w_window phase=submitted"
+                        .to_owned(),
+                );
+                let _ = hide_main_window(app.clone());
+            }
+            return LRESULT(0);
+        }
+    }
+    DefSubclassProc(hwnd, message, wparam, lparam)
 }
 
 /// 界面未能正常显示时写进窗口标题的文案（2026-10-07 定稿，见 docs/product-copy.md）。
@@ -530,7 +678,9 @@ async fn get_usage_profile(state: tauri::State<'_, AppState>) -> Result<UsagePro
 /// 读的是内存快照，因此保持同步：它由界面按秒轮询，必须立刻返回。
 #[tauri::command]
 fn get_membership_snapshot(state: tauri::State<'_, AppState>) -> MembershipSnapshot {
-    state.membership.snapshot()
+    let snapshot = state.membership.snapshot();
+    button_profiles::apply_membership(&snapshot);
+    snapshot
 }
 
 /// 主动刷新会员状态。失败只回稳定错误码，前端按码给文案。
@@ -5735,13 +5885,21 @@ pub fn run() {
                 saved_settings.local_original_audio_recording_enabled,
             );
 
+            let membership_runtime = membership::install();
+            // 键位方案私有组件（可选）：未注入时空壳返回 false，入口不出现。
+            button_profiles::install(
+                app.handle(),
+                Arc::clone(&platform),
+                Arc::clone(&membership_runtime),
+            );
+
             app.manage(AppState {
                 platform,
                 settings,
                 usage,
                 capture_health,
                 capture_unavailable,
-                membership: membership::install(),
+                membership: membership_runtime,
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
@@ -5754,8 +5912,13 @@ pub fn run() {
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
             #[cfg(windows)]
+            if let Some(window) = main_window(app.handle()) {
+                install_window_key_subclass(&window);
+            }
+            #[cfg(windows)]
             if let Some(webview) = main_webview(app.handle()) {
                 observe_webview_failure(&webview);
+                install_ctrl_w_accelerator(&webview);
             }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
@@ -5888,6 +6051,11 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
@@ -6020,6 +6188,11 @@ pub fn run() {
         reset_button_mappings,
         export_button_mapping_configuration,
         import_button_mapping_configuration,
+        button_profiles::button_profiles_snapshot,
+        button_profiles::button_profiles_access,
+        button_profiles::button_profiles_pick_import_file,
+        button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
         delete_macro,
