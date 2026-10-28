@@ -5395,17 +5395,25 @@ pub fn run() {
             }
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
             // 不阻断主程序启动，用户可在“关于”页重试。
+            //
+            // 2026-10-28：`RegSetValueExW` 写的是**自启动项**，安全软件会拦下来做检查，
+            // 实测这一次写入要 348 ms，而它同步跑在 setup 里，直接推迟窗口首个 IPC。
+            // 同步这件事与界面无关，放到独立线程（日志字段与失败处理保持不变）。
             #[cfg(windows)]
-            if let Err(error) = startup::set_enabled(saved_settings.launch_at_login) {
-                sayall_windows::gatt_note(
-                    "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
-                );
-                eprintln!("同步开机自启动设置失败：{error}");
-            } else {
-                sayall_windows::gatt_note(format!(
-                    "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={}",
-                    saved_settings.launch_at_login
-                ));
+            {
+                let launch_at_login = saved_settings.launch_at_login;
+                std::thread::spawn(move || {
+                    if let Err(error) = startup::set_enabled(launch_at_login) {
+                        sayall_windows::gatt_note(
+                            "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
+                        );
+                        eprintln!("同步开机自启动设置失败：{error}");
+                    } else {
+                        sayall_windows::gatt_note(format!(
+                            "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={launch_at_login}"
+                        ));
+                    }
+                });
             }
             // 2026-10-14：原先在此预热并缓存 Radio 对象（供自动关开无线电
             // 恢复使用）。该机制已按产品决策移除（会断开全部蓝牙设备），
