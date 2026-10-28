@@ -75,6 +75,9 @@ pub trait ButtonProfileHost: Send + Sync {
 
     /// 前台应用变化（可执行文件名；`None` = 无前台应用）。
     fn foreground_changed(&self, _executable: Option<&str>) {}
+
+    /// 按键动作执行前同步当前前台应用，确保覆盖层与刚刚切换的 App 一致。
+    fn sync_foreground(&self) {}
 }
 
 /// 未注入私有组件时的宿主。

@@ -1347,6 +1347,7 @@ fn fire_gesture(
         }
         return false;
     }
+    crate::button_profiles::current_button_profile_host().sync_foreground();
     let overlay = read_lock(profile_overlay).clone();
     let overlay_actions = overlay
         .as_ref()
@@ -1516,6 +1517,7 @@ fn fire_gesture(
                     lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
                 }
             }
+            crate::button_profiles::current_button_profile_host().sync_foreground();
         }
         ButtonAction::RunMacro { macro_id, .. } => {
             // 组合动作由运行时在独立线程异步执行（不阻塞引擎线程）；引用按
