@@ -576,38 +576,13 @@ describe("settings page", () => {
     ).not.toContain("常用语");
   });
 
-  it("会员与账号：显示邮箱和 Plus 状态，并可从设置打开会员页", async () => {
-    bridge.getMembershipAccountSummary.mockResolvedValue({
-      availability: "available",
-      accountDisplayName: "user@example.com",
-      plusActive: false,
-      accountSignedIn: true,
-      syncState: "current",
-    });
-
-    const wrapper = mount(SettingsPage, { props: { runtime } });
-    await flushPromises();
-
-    expect(wrapper.text()).toContain("会员与账号");
-    expect(wrapper.text()).toContain("user@example.com");
-    expect(wrapper.text()).toContain("开通 Plus 会员");
-    await wrapper.get(".membership-required-button").trigger("click");
-    expect(wrapper.emitted("navigate")).toEqual([["membership"]]);
-  });
-
-  it("会员与账号：公开构建（服务不可用）时不渲染账号区", async () => {
-    bridge.getMembershipAccountSummary.mockResolvedValue({
-      availability: "unavailable",
-      accountDisplayName: null,
-      plusActive: false,
-      accountSignedIn: false,
-      syncState: "unavailable",
-    });
-
+  it("设置页不再显示会员与账号（2026-10-28：会员入口移到键位方案页右上角）", async () => {
     const wrapper = mount(SettingsPage, { props: { runtime } });
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("会员与账号");
+    expect(wrapper.find(".membership-required-button").exists()).toBe(false);
+    expect(bridge.getMembershipAccountSummary).not.toHaveBeenCalled();
   });
 
   it("英文模式下设置页全部文案切换为英文，语言选项保留原语言名", async () => {
