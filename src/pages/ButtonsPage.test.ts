@@ -379,6 +379,9 @@ beforeEach(() => {
   vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("stopped"));
   // 「全按键支持」的支持情况同样要重置（默认可用，回归基线）。
   vi.mocked(getCaptureSupport).mockResolvedValue(SUPPORTED_CAPTURE);
+  // 首帧开关缓存（2026-10-28）：每个用例都从"没有缓存"开始，
+  // 否则上一个用例保存时写进去的值会改变下一个用例首帧的开关状态。
+  localStorage.removeItem("sayall.buttons.switches.v1");
   // 「重新连接」用的扫描/连接：同样重置实现，避免 mockRejectedValue / 空实现渗进后续用例。
   vi.mocked(scanPairedRemotes).mockReset();
   vi.mocked(scanPairedRemotes).mockResolvedValue([]);
@@ -2109,10 +2112,31 @@ describe("buttons mapping page", () => {
     return row;
   }
 
-  it("creates the mapping master switch only once its value is final (no entry slide)", async () => {
-    // 真值（关）与初值（开）不同：旧实现加载完成后会产生一次属性变更，
-    // 开关会滑动；正确实现是「就绪前同尺寸占位符顶位、就绪后创建本体」——
-    // 元素创建即带正确 checked，不存在属性变更，无过渡可触发（设置页同法）。
+  it("uses the cached switch values on the very first frame", async () => {
+    // 2026-10-28：值来自 IPC，首帧拿不到，只能先占位再跳出来。缓存让开关第一帧
+    // 就是上次的状态；这里两个 IPC 永不返回，页面仍应显示缓存里的"关闭"。
+    localStorage.setItem(
+      "sayall.buttons.switches.v1",
+      JSON.stringify({ enabled: false, lockSelection: false }),
+    );
+    vi.mocked(getButtonMappings).mockImplementationOnce(() => new Promise<ButtonMappings>(() => {}));
+    vi.mocked(getLockMappingSelection).mockImplementationOnce(() => new Promise<boolean>(() => {}));
+
+    const wrapper = mount(ButtonsPage, { props: { runtime } });
+    mountedPages.push(wrapper);
+    await flushPromises();
+
+    const master = toggleRowByText(wrapper, "启用自定义按键功能").find("input");
+    const lock = toggleRowByText(wrapper, "锁定当前按键").find("input");
+    expect((master.element as HTMLInputElement).checked).toBe(false);
+    expect((lock.element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("renders the mapping master switch immediately but keeps it disabled until the value is final", async () => {
+    // 2026-10-28：旧实现"就绪前用占位符顶位、就绪后创建本体"虽然没有滑入动画，
+    // 但用户看到的是"先空白、再跳出来"（反馈原话）。现在改成：开关始终渲染
+    // （初值取上次已知值），数据未到时先 **disabled** —— 既不会空白，也不会让用户
+    // 用默认值误触发一次保存把真实设置覆盖掉。就绪后按持久化值生效。
     let releaseMappings: (value: ButtonMappings) => void = () => {};
     vi.mocked(getButtonMappings).mockImplementationOnce(
       () => new Promise<ButtonMappings>((resolve) => { releaseMappings = resolve; }),
@@ -2122,21 +2146,23 @@ describe("buttons mapping page", () => {
     await flushPromises();
 
     const row = () => toggleRowByText(wrapper, "启用自定义按键功能");
-    expect(row().find("input").exists()).toBe(false);
-    expect(row().find(".toggle-placeholder").exists()).toBe(true);
+    const pending = row().find("input");
+    expect(pending.exists()).toBe(true);
+    expect((pending.element as HTMLInputElement).disabled).toBe(true);
 
     releaseMappings({ enabled: false, actions: {} });
     await flushPromises();
     await vi.waitFor(() => {
       const input = row().find("input");
-      if (!input.exists()) throw new Error("就绪后开关未创建");
+      if (!input.exists()) throw new Error("就绪后开关不存在");
+      if ((input.element as HTMLInputElement).disabled) throw new Error("就绪后开关仍被禁用");
       if ((input.element as HTMLInputElement).checked) {
-        throw new Error("开关不是创建即带真值（应为关）");
+        throw new Error("开关没有采用持久化的真值（应为关）");
       }
     });
   });
 
-  it("creates the lock switch only once the persisted value is loaded (no entry slide)", async () => {
+  it("renders the lock switch immediately but keeps it disabled until the persisted value is loaded", async () => {
     let releaseLock: (value: boolean) => void = () => {};
     vi.mocked(getLockMappingSelection).mockImplementationOnce(
       () => new Promise<boolean>((resolve) => { releaseLock = resolve; }),
@@ -2146,16 +2172,18 @@ describe("buttons mapping page", () => {
     await flushPromises();
 
     const row = () => toggleRowByText(wrapper, "锁定当前按键");
-    expect(row().find("input").exists()).toBe(false);
-    expect(row().find(".toggle-placeholder").exists()).toBe(true);
+    const pending = row().find("input");
+    expect(pending.exists()).toBe(true);
+    expect((pending.element as HTMLInputElement).disabled).toBe(true);
 
     releaseLock(false);
     await flushPromises();
     await vi.waitFor(() => {
       const input = row().find("input");
-      if (!input.exists()) throw new Error("就绪后开关未创建");
+      if (!input.exists()) throw new Error("就绪后开关不存在");
+      if ((input.element as HTMLInputElement).disabled) throw new Error("就绪后开关仍被禁用");
       if ((input.element as HTMLInputElement).checked) {
-        throw new Error("开关不是创建即带真值（应为关）");
+        throw new Error("开关没有采用持久化的真值（应为关）");
       }
     });
   });
