@@ -5545,17 +5545,25 @@ pub fn run() {
             }
             // 启动时把持久化偏好同步到 Windows 当前用户登录启动项；失败只记录，
             // 不阻断主程序启动，用户可在“关于”页重试。
+            //
+            // 2026-10-28：`RegSetValueExW` 写的是**自启动项**，安全软件会拦下来做检查，
+            // 实测这一次写入要 348 ms，而它同步跑在 setup 里，直接推迟窗口首个 IPC。
+            // 同步这件事与界面无关，放到独立线程（日志字段与失败处理保持不变）。
             #[cfg(windows)]
-            if let Err(error) = startup::set_enabled(saved_settings.launch_at_login) {
-                sayall_windows::gatt_note(
-                    "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
-                );
-                eprintln!("同步开机自启动设置失败：{error}");
-            } else {
-                sayall_windows::gatt_note(format!(
-                    "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={}",
-                    saved_settings.launch_at_login
-                ));
+            {
+                let launch_at_login = saved_settings.launch_at_login;
+                std::thread::spawn(move || {
+                    if let Err(error) = startup::set_enabled(launch_at_login) {
+                        sayall_windows::gatt_note(
+                            "startup feature=launch_at_login action=sync phase=completed terminal_result=failed error_domain=windows_registry error_code=sync_failed reason=startup_preference_not_applied retryable=true".to_owned(),
+                        );
+                        eprintln!("同步开机自启动设置失败：{error}");
+                    } else {
+                        sayall_windows::gatt_note(format!(
+                            "startup feature=launch_at_login action=sync phase=completed terminal_result=passed enabled={launch_at_login}"
+                        ));
+                    }
+                });
             }
             // 2026-10-14：原先在此预热并缓存 Radio 对象（供自动关开无线电
             // 恢复使用）。该机制已按产品决策移除（会断开全部蓝牙设备），
@@ -5670,15 +5678,33 @@ pub fn run() {
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (
-                saved_settings.audio_endpoint_id,
-                saved_settings.audio_endpoint_name,
+                saved_settings.audio_endpoint_id.clone(),
+                saved_settings.audio_endpoint_name.clone(),
             ) {
-                if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
-                    sayall_windows::gatt_note(
-                        "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
-                    );
-                    eprintln!("恢复已保存的音频端点失败：{error}");
-                }
+                // 恢复音频端点要等它真的能打开，而 CABLE 端点被别的程序占着的机器上
+                // 这一步最坏要 3.5 s（内置退避 0/150/400/900/1600 ms，每次都
+                // `AUDCLNT_E_DEVICE_IN_USE`）。2026-10-28 现场：输入法常驻占用
+                // CABLE Output 之后，它同步跑在 setup 里，把窗口首个 IPC 一起拖住——
+                // `tauri_setup` 6.2 s、`runtime_snapshot` 6.4 s、按键页 6.9 s，
+                // 用户看到的是"界面骨架先出来，开关和按键配置几秒后才到"。
+                // 它只影响"下一次语音"，没有任何理由挡住窗口，因此移到独立线程；
+                // 恢复本身照做，失败仍然只记日志、不阻断启动。
+                let platform_for_audio = Arc::clone(&platform);
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    if let Err(error) =
+                        platform_for_audio.restore_audio_endpoint(endpoint_id, endpoint_name)
+                    {
+                        sayall_windows::gatt_note(
+                            "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
+                        );
+                        eprintln!("恢复已保存的音频端点失败：{error}");
+                    }
+                    sayall_windows::gatt_note(format!(
+                        "audio_endpoint action=restore phase=background_completed elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    ));
+                });
             }
 
             #[cfg(windows)]

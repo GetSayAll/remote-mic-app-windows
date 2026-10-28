@@ -271,7 +271,43 @@ const buttonIcons: Record<RemoteButton, string[]> = {
 const VOICE_ICON_FILLED = "M12 2.8a3.4 3.4 0 0 1 3.4 3.4v5.6a3.4 3.4 0 0 1-6.8 0V6.2A3.4 3.4 0 0 1 12 2.8z";
 const VOICE_ICON_STROKES = ["M6.3 11.5a5.7 5.7 0 0 0 11.4 0", "M12 17.2v3.8"];
 
-const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
+/**
+ * 两个总开关的上次已知值（2026-10-28）。
+ *
+ * 为什么要单独缓存：这两只开关的值来自 IPC，而 IPC 必然异步——首帧只能先渲染占位，
+ * 等数据回来再挂开关本体，用户看到的就是"先空白、再跳出来"（2026-10-28 反馈）。
+ * 把上次的值同步写进 localStorage，首帧就能直接渲染成正确状态；IPC 返回的权威值
+ * 通常与缓存一致，于是没有可见跳变。首次安装没有缓存时开关仍会从默认值改成真实值，
+ * 那一次跳变无法避免。
+ *
+ * 只存两个布尔值，不含任何用户数据。
+ */
+const SWITCH_CACHE_KEY = "sayall.buttons.switches.v1";
+
+function readSwitchCache(): { enabled: boolean; lockSelection: boolean } | null {
+  try {
+    const raw = localStorage.getItem(SWITCH_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { enabled?: unknown; lockSelection?: unknown };
+    if (typeof parsed.enabled !== "boolean" || typeof parsed.lockSelection !== "boolean") {
+      return null;
+    }
+    return { enabled: parsed.enabled, lockSelection: parsed.lockSelection };
+  } catch {
+    return null;
+  }
+}
+
+function writeSwitchCache(enabled: boolean, lockSelection: boolean): void {
+  try {
+    localStorage.setItem(SWITCH_CACHE_KEY, JSON.stringify({ enabled, lockSelection }));
+  } catch {
+    // 存储不可用时只是少一次首帧加速，不影响功能与保存。
+  }
+}
+
+const switchCache = readSwitchCache();
+const mappings = ref<ButtonMappings>({ enabled: switchCache?.enabled ?? true, actions: {} });
 /** 映射是否已从设置读回：「启用自定义按键功能」开关就绪前用占位符顶位（防滑入）。 */
 const mappingsLoaded = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
@@ -287,7 +323,7 @@ const commonPhraseAllowed = computed(() => commonPhraseAccess.value === "allowed
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
-const lockSelection = ref(true);
+const lockSelection = ref(switchCache?.lockSelection ?? true);
 const activeButtons = ref<Set<RemoteButton>>(new Set());
 const lastFired = ref<FiredGesture | null>(null);
 const firedFlash = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
@@ -355,6 +391,7 @@ async function persistLockSelection(): Promise<void> {
     if (value === lockSelectionPersisted) return; // 加载回填 / 失败回退的重入：无需落盘
     try {
       lockSelectionPersisted = await saveLockMappingSelection(value);
+      writeSwitchCache(mappings.value.enabled, lockSelectionPersisted);
     } catch (error) {
       // 只有用户没有再改时才回退开关，避免覆盖更新的选择。
       if (lockSelection.value === value) {
@@ -1286,6 +1323,7 @@ async function persist(message?: string): Promise<void> {
     try {
       const saved = await saveButtonMappings(payload);
       savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+      writeSwitchCache(saved.enabled, lockSelection.value);
       if (request === saveRequest) {
         mappings.value = saved;
         if (message) statusMessage.value = message;
@@ -2115,11 +2153,14 @@ onMounted(async () => {
   // 授权/桥接对账**尽早启动**（与映射加载并行）：缓存只负责首帧渲染，
   // 权威纠正（卸载后重装回落、授权变化）越早落地越好。
   const rc003ReconcileStarted = reconcileRc003Task();
-  const [loaded, snapshot, apps, commonPhrases, persistedLockSelection] = await Promise.all([
+  // 首帧只等三项**必需**数据：映射、快照、锁定偏好——它们决定那两个开关的初值与
+  // 配置内容的首次渲染。其余三项（应用候选、常用语入口、组合动作芯片）不影响首帧
+  // 布局，之前却挤在同一条链上：`listPresetApps` 实测 379 ms（要探测已安装应用），
+  // 而 `getCombinedActions` 还额外 `await` 在映射赋值之前——于是"开关和配置内容都要
+  // 等上一两秒"（2026-10-28 用户反馈）。现在它们就绪后各自补齐。
+  const [loaded, snapshot, persistedLockSelection] = await Promise.all([
     getButtonMappings(),
     getButtonMappingSnapshot(),
-    listPresetApps().catch(() => [] as PresetAppInfo[]),
-    getCommonPhrasePanelSnapshot(),
     // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
     getLockMappingSelection().catch(() => {
       reportFrontendEvent({
@@ -2134,20 +2175,6 @@ onMounted(async () => {
   if (unmounted) {
     return;
   }
-  presetApps.value = apps.filter((app) => app.installed);
-  registerPresetAppNames(presetApps.value);
-  // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
-  await getCombinedActions()
-    .then((library) => {
-      // 同 id 多版本只取最新（编辑一次 = 版本追加，直接铺开会多出芯片）。
-      macroDefinitions.value = latestMacroDefinitions(library.definitions);
-      registerMacroNames(macroDefinitions.value);
-    })
-    .catch(() => undefined);
-  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
-  commonPhrasesAvailable.value = commonPhrases.available;
-  commonPhraseAccess.value = commonPhrases.access;
-  registerCommonPhraseAvailability(commonPhrases.available);
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
@@ -2157,6 +2184,36 @@ onMounted(async () => {
   lockSelectionPersisted = persistedLockSelection;
   lockSelection.value = persistedLockSelection;
   lockSelectionReady.value = true;
+  // 权威值回写缓存：下次首帧直接用它渲染，不必再等 IPC。
+  writeSwitchCache(loaded.enabled, persistedLockSelection);
+
+  // 以下三项都不阻塞首帧，就绪后各自补齐（页面已卸载则丢弃）。
+  void listPresetApps()
+    .then((apps) => {
+      if (unmounted) return;
+      presetApps.value = apps.filter((app) => app.installed);
+      registerPresetAppNames(presetApps.value);
+    })
+    .catch(() => undefined);
+  // 常用语组件可用性：隐藏入口与动作摘要（「当前不可用」标注）共用同一判据。
+  void getCommonPhrasePanelSnapshot()
+    .then((commonPhrases) => {
+      if (unmounted) return;
+      commonPhrasesAvailable.value = commonPhrases.available;
+      commonPhraseAccess.value = commonPhrases.access;
+      registerCommonPhraseAvailability(commonPhrases.available);
+    })
+    .catch(() => undefined);
+  // 组合动作候选：失败不影响按键页其余功能（入口显示"还没有组合动作"）。
+  void getCombinedActions()
+    .then((library) => {
+      if (unmounted) return;
+      // 同 id 多版本只取最新（编辑一次 = 版本追加，直接铺开会多出芯片）。
+      macroDefinitions.value = latestMacroDefinitions(library.definitions);
+      registerMacroNames(macroDefinitions.value);
+    })
+    .catch(() => undefined);
+
   if (rawInput.value?.activeButtons) {
     activeButtons.value = new Set(rawInput.value.activeButtons);
   }
@@ -2293,8 +2350,14 @@ onUnmounted(() => {
           <h1>{{ tPage("按键映射") }}</h1>
           <label class="toggle-row" :title="t('开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。')">
             <span>{{ t("启用自定义按键功能") }}</span>
-            <input v-if="mappingsLoaded" v-model="enabled" type="checkbox" class="toggle-input" :disabled="busy" />
-            <span v-else class="toggle-placeholder" aria-hidden="true"></span>
+            <!-- 始终渲染：值先取上次已知值（localStorage），IPC 回来后以权威值覆盖。
+                 数据未到之前禁用，避免用户用默认值触发一次保存、把真实设置覆盖掉。 -->
+            <input
+              v-model="enabled"
+              type="checkbox"
+              class="toggle-input"
+              :disabled="busy || !mappingsLoaded"
+            />
           </label>
           <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
                选中某个按键的编辑面板，任何时刻都能开启/关闭。
@@ -2416,7 +2479,7 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${REMOTE_TOP}px` }">
-        <img src="/RC003-remote-photo@2x.png" :alt="t('小米蓝牙语音遥控器 2 Pro 示意图')" draggable="false" />
+        <img src="/RC003-remote-photo@2x.webp" :alt="t('小米蓝牙语音遥控器 2 Pro 示意图')" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"
@@ -3031,8 +3094,13 @@ onUnmounted(() => {
       </div>
       <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
         <span>{{ t("锁定当前按键") }}</span>
-        <input v-if="lockSelectionReady" v-model="lockSelection" type="checkbox" class="toggle-input" />
-        <span v-else class="toggle-placeholder" aria-hidden="true"></span>
+        <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
+        <input
+          v-model="lockSelection"
+          type="checkbox"
+          class="toggle-input"
+          :disabled="!lockSelectionReady"
+        />
       </label>
       <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
       <div class="button-row">

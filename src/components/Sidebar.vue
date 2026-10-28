@@ -35,7 +35,7 @@ const profileLabelText = computed(() =>
   props.profileLabel === "个人中心" ? tNav("个人中心") : props.profileLabel,
 );
 const appIconPreview = computed(() =>
-  props.appIcon === "standard" ? "/app-logo.png" : "/app-icon-faceted-duck.png",
+  props.appIcon === "standard" ? "/app-logo.webp" : "/app-icon-faceted-duck.webp",
 );
 
 /**
