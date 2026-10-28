@@ -51,7 +51,7 @@
 
 ## 修复
 
-本次只加**取证**，不改语音路径（最小改动、无决策影响）：
+**第一段（取证，提交 `8c878b6`）**，不改语音路径：
 
 - `key_suppressor.rs`：新增 `F5Snapshot` / `f5_snapshot()` / `f5_key_down_in_os()`
   （`GetAsyncKeyState` 高字节最高位），含 2 个单测。
@@ -60,10 +60,28 @@
 - `ble.rs`：`voice_attempt` 增 `fg_hkl=`、`fg_focus=`；按下前取 F5 基线。
 - `wetype_revive.rs`：`voice_verify` 增 `f5_edges=`、`f5_leaked=`、`f5_key_down=`。
 
+**第二段（处置，本提交）**——在不增加按键延迟、不动主语音路径的前提下补两处：
+
+1. **救回判据改用合并裁决**（`wetype_revive::should_heal` 收 `WetypeReaction`）。
+   原先按开麦观测判；本机实测证明这会误判（10/10 `mic=not_observed` 而 marker 命中），
+   若照旧放宽救回条件，健康机器上每按一次都会触发一次对齐动作——把诊断手段变成新故障源。
+2. **救回动作逐级升级**（`HealAction` / `heal_action_for_step`）：第 1 档只做程序化焦点往返
+   （不切输入法、不改前台窗口）；第 2 档起先 `ime::heal_target_ime` **强制**对齐目标输入法
+   （`should_activate` 忽略 `GetActiveProfile` 的假阳性，`scope=voice_heal`），再做焦点往返；
+   到 `IME_HEAL_STEP_CAP` 停手。微信默认和弦（Ctrl+Win）此前被排除在救回之外——现场证据
+   恰恰集中在这条路径，现在纳入，与 `wetype_check` 阶梯的分工是"阶梯管按住期间的重放，
+   救回管会话结束后的对齐"。
+3. **动作前再裁决一次**：等会话结束期间阶梯可能已重放和弦把语音拉起来，此时
+   `skipped=reacted_late` 直接放弃动作（否则会拆掉刚起来的会话，10-20 教训）。
+4. `voice_verify` 直接落 `verdict=`（合并裁决），避免下次又拿 `mic=` 当判据。
+
 ## 验证
 
 - `passed`：`cargo fmt --all -- --check`；`cargo test -p sayall-windows --lib`
-  **473 passed / 0 failed / 16 ignored**（含新增 3 个用例）。
+  **476 passed / 0 failed / 16 ignored**（新增 4 个用例：合并裁决救回、档位升级、
+  迟到证据否决、强制对齐无视假阳性）；`cargo check -p sayall-windows-app
+  --features runtime-simulation` 通过；调试版已重建（二进制含 `verdict=` /
+  `action=ime_align` / `forced=` / `skipped=reacted_late` 四个字面量）。
 - **本机复现：未复现**（2026-10-28 14:35–14:40，调试版 `8c878b67`，RC003，
   微信 4.0 `Weixin.exe` pid 29276 在前台）。A 组 4 次（微信前台）+ B 组 6 次（SayAll 前台）
   共 10 次按下，**10/10 `wetype_check reacted=true evidence=marker`**：
@@ -74,14 +92,14 @@
     `suppressor_ask dir=up swallow=0 hold=2` = 非会话期放行，符合设计 ⇒ 钩子活着。
 - **判据修正（本次新发现）**：同一批 10 次按下 `mic=` **全程 `not_observed`**，而 marker 命中
   ⇒ 本机 WeType 不写 ConsentStore（issue #118 形态）。`mic=` 单独不得判失败，
-  唯一判据是 `wetype_check reacted=`；`Testing/WindowsVoiceF5Probe.md` 已按此改写。
+  唯一判据是合并裁决；`Testing/WindowsVoiceF5Probe.md` 已按此改写。
 - **探针分辨率（本次新发现）**：`fg_hkl` 在本机微信 4.0 与 SayAll 上同为 `0x08040804`
   （zh-CN 语言 HKL 不区分 TSF 输入法），`fg_focus` 对 Chromium 系应用恒等于顶层窗口类名。
   因此"目标窗口用的是不是微信输入法"**不能**靠这两个字段，而要靠 `reacted` 是否命中。
 - **环境差异（待现场确认）**：客户机前台窗口类 `dc007969` = `Chrome_WidgetWin_1`（微信 3.x），
   本机微信 4.0 = `493dd032`。若现场故障与"按应用记忆输入法"有关，微信大版本本身就可能是变量。
-- `deferred`：客户机上用同一构建再跑一轮（`f5_edges` / `f5_key_down` / `reacted` 三处即可定性），
-  以及 RC001 同矩阵。
+- `deferred`：客户机上用同一构建复测（看失败后是否出现 `voice_heal ... action=ime_align`
+  以及下一次按下是否 `verdict=reacted`），以及 RC001 同矩阵。
 
 ## 隐私检查
 

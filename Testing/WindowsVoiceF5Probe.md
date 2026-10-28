@@ -49,10 +49,23 @@ ime_activation tool=wechat scope=voice_press outcome=<already_active|switched|..
   ... fg_pid=<n> fg_class=<hash> fg_hkl=<0x........> fg_focus=<hash|none> ...
 chord_press result=ok session=<n> gap_ms=80
 wetype_check armed attempt=0 epoch=<n> baseline_available=true marker_baseline=<n>
-voice_verify session=<n> tool=wechat marker=wetype at_ms=800 mic=<observed|not_observed|unknown>
+voice_verify session=<n> tool=wechat marker=wetype at_ms=800
+  mic=<observed|not_observed|unknown> verdict=<reacted|not_reacted|unknown>
   f5_edges=<n> f5_leaked=<n> f5_key_down=<true|false>
-voice_verify session=<n> ... at_ms=2500 mic=... f5_edges=<n> f5_leaked=<n> f5_key_down=<...>
+voice_verify session=<n> ... at_ms=2500 ...
 ```
+
+失败后（`verdict=not_reacted`）会在会话结束时看到救回动作，逐级升级：
+
+```text
+voice_heal session=<n> tool=wechat action=focus_bounce step=1 cap=4 target=0x... attached=true ...
+voice_heal session=<n> tool=wechat action=ime_align   step=2 outcome=<switched|already_active|failed>
+voice_heal session=<n> tool=wechat action=focus_bounce step=2 cap=4 ...
+```
+
+第 1 档只做焦点往返（零副作用）；第 2 档起先 `ime_align` 强制对齐目标输入法再往返；
+到 `cap` 停手。动作前会再裁决一次，`voice_heal ... skipped=reacted_late` 表示
+"等会话结束期间阶梯已经把它救回来了"，因此什么都没做（正确行为）。
 
 一次采样命令（PowerShell，取最近 15 分钟）：
 
@@ -71,14 +84,15 @@ Get-Content $log -Tail 4000 |
 （WeType 2.1.4.6 起录音不再写 ConsentStore）。
 
 因此**唯一的通过判据是合并裁决**，与 `wetype_revive::reaction_verdict` 同源（marker 为正面证据，
-先于 mic 否决）：
+先于 mic 否决）。2026-10-28 起这条裁决也直接落在 `voice_verify ... verdict=` 上，不必再去
+和 `wetype_check` 那行配对：
 
 | 读数 | 含义 |
 |---|---|
-| `wetype_check reacted=true evidence=marker` | **通过**：目标输入法确实消费了本次和弦（mic 说什么都不重要）|
+| `voice_verify verdict=reacted` / `wetype_check reacted=true evidence=marker` | **通过**：目标输入法确实消费了本次和弦（mic 说什么都不重要）|
 | `wetype_check reacted=true evidence=mic` | 通过：目标输入法在开麦（marker 通道未命中，但有开麦证据）|
-| `wetype_check reacted=false evidence=none` | **失败**：两个独立证据源都确认没被触发 |
-| `wetype_check skipped reason=observation_unavailable` | 无法判定，不得据此下结论 |
+| `verdict=not_reacted` | **失败**：两个独立证据源都确认没被触发（此后会触发救回）|
+| `verdict=unknown` | 无法判定，不得据此下结论（也不会触发救回）|
 
 `voice_verify` 的 `mic=` 只作为**辅助**：它 `observed` 时可以佐证；它 `not_observed`
 而 `reacted=true` 时，说明这台机器的 WeType 不写 ConsentStore，不是功能失败。
@@ -115,10 +129,12 @@ Get-Content $log -Tail 4000 |
 
 ## 通过 / 失败判据
 
-- **passed**：A 组 5/5 `wetype_check reacted=true`（marker 或 mic 任一），`f5_edges` 随按住
+- **passed**：A 组 5/5 `reacted=true`（`verdict=reacted`），`f5_edges` 随按住
   递增且 `f5_leaked=0`，C 组手按 F5 能在 `suppressor_ask dir=down` 里看到（非会话期应为
   `swallow=0 hold=2`，即放行进 OS——这是正确行为，不是缺陷）。
-- **failed**：A 组出现 `reacted=false evidence=none`，并且 F5 一支能落到唯一一行
+  **健康机器上 `voice_heal` 必须零出现**（一条救回动作都不该触发）；出现即说明判据
+  又跑去读 `mic` 了，是回归。
+- **failed**：A 组出现 `verdict=not_reacted`，并且 F5 一支能落到唯一一行
   （即断点被判据唯一确定）。这种情况下把该行连同 5 行上下文一起归档。
 - **deferred**：C 组手按 F5 在抑制器里也看不到任何边沿 ⇒ 说明"钩子死了"，A 组结果不具
   诊断意义，先修链路再重测。
