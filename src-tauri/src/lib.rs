@@ -5520,15 +5520,33 @@ pub fn run() {
 
             #[cfg(windows)]
             if let (Some(endpoint_id), Some(endpoint_name)) = (
-                saved_settings.audio_endpoint_id,
-                saved_settings.audio_endpoint_name,
+                saved_settings.audio_endpoint_id.clone(),
+                saved_settings.audio_endpoint_name.clone(),
             ) {
-                if let Err(error) = platform.restore_audio_endpoint(endpoint_id, endpoint_name) {
-                    sayall_windows::gatt_note(
-                        "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
-                    );
-                    eprintln!("恢复已保存的音频端点失败：{error}");
-                }
+                // 恢复音频端点要等它真的能打开，而 CABLE 端点被别的程序占着的机器上
+                // 这一步最坏要 3.5 s（内置退避 0/150/400/900/1600 ms，每次都
+                // `AUDCLNT_E_DEVICE_IN_USE`）。2026-10-28 现场：输入法常驻占用
+                // CABLE Output 之后，它同步跑在 setup 里，把窗口首个 IPC 一起拖住——
+                // `tauri_setup` 6.2 s、`runtime_snapshot` 6.4 s、按键页 6.9 s，
+                // 用户看到的是"界面骨架先出来，开关和按键配置几秒后才到"。
+                // 它只影响"下一次语音"，没有任何理由挡住窗口，因此移到独立线程；
+                // 恢复本身照做，失败仍然只记日志、不阻断启动。
+                let platform_for_audio = Arc::clone(&platform);
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    if let Err(error) =
+                        platform_for_audio.restore_audio_endpoint(endpoint_id, endpoint_name)
+                    {
+                        sayall_windows::gatt_note(
+                            "audio_endpoint action=restore phase=ipc_completed terminal_result=failed error_domain=platform error_code=restore_request_failed reason=platform_rejected retryable=true".to_owned(),
+                        );
+                        eprintln!("恢复已保存的音频端点失败：{error}");
+                    }
+                    sayall_windows::gatt_note(format!(
+                        "audio_endpoint action=restore phase=background_completed elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    ));
+                });
             }
 
             #[cfg(windows)]
