@@ -241,6 +241,76 @@ fn observe_webview_failure(webview: &tauri::Webview) {
     }
 }
 
+/// Ctrl+W 的原生兜底：WebView2 会把部分浏览器加速键在页面之前处理，页面层的
+/// `keydown` 收不到物理 Ctrl+W（注入的 Ctrl+W 仍可能到达页面，表现为“遥控器能关、
+/// 键盘不能关”）。这里在 WebView2 的 AcceleratorKeyPressed 阶段拦截，命中后直接
+/// 复用与“X”相同的隐藏动作，并标记已处理，避免浏览器继续处理该组合键。
+#[cfg(windows)]
+fn install_ctrl_w_accelerator(webview: &tauri::Webview) {
+    use webview2_com::{
+        AcceleratorKeyPressedEventHandler,
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+            COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+        },
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    let app = webview.app_handle().clone();
+    let result = webview.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_sender, args| {
+            let Some(args) = args.as_ref() else {
+                return Ok(());
+            };
+            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND(0);
+            if args.KeyEventKind(&mut kind).is_err()
+                || (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                    && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+            {
+                return Ok(());
+            }
+            let mut virtual_key = 0u32;
+            if args.VirtualKey(&mut virtual_key).is_err() || virtual_key != 'W' as u32 {
+                return Ok(());
+            }
+            let down = |key: VIRTUAL_KEY| (GetKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+            if !down(VK_CONTROL)
+                || down(VK_MENU)
+                || down(VK_SHIFT)
+                || down(VK_LWIN)
+                || down(VK_RWIN)
+            {
+                return Ok(());
+            }
+            let _ = args.SetHandled(true);
+            sayall_windows::gatt_note(
+                "window_close action=hide_to_tray source=ctrl_w_accelerator phase=submitted"
+                    .to_owned(),
+            );
+            let app_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = hide_main_window(app_main);
+            });
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let result = controller.add_AcceleratorKeyPressed(&handler, &mut token);
+        sayall_windows::gatt_note(format!(
+            "window_close action=install_accelerator source=ctrl_w terminal_result={}",
+            if result.is_ok() { "passed" } else { "failed" }
+        ));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(
+            "window_close action=install_accelerator source=ctrl_w terminal_result=failed stage=dispatch"
+                .to_owned(),
+        );
+    }
+}
+
 /// 界面未能正常显示时写进窗口标题的文案（2026-10-07 定稿，见 docs/product-copy.md）。
 /// 放在 Rust 是因为界面已经不工作时它也必须能显示，与托盘菜单文案同理。
 #[cfg(windows)]
@@ -5741,6 +5811,7 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(webview) = main_webview(app.handle()) {
                 observe_webview_failure(&webview);
+                install_ctrl_w_accelerator(&webview);
             }
             // 安装/升级前的优雅退出监听（2026-09-16）：安装器会先请求退出、
             // 再考虑强杀（详见函数注释）。
