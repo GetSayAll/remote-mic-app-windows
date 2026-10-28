@@ -9,7 +9,7 @@ import CrownIcon from "./CrownIcon.vue";
 import { t } from "../lib/i18n";
 
 withDefaults(defineProps<{ label?: string }>(), {
-  label: "点击开通会员功能",
+  label: "开通 Plus 会员",
 });
 
 defineEmits<{ open: [] }>();
@@ -27,13 +27,12 @@ defineEmits<{ open: [] }>();
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 30px;
-  padding: 4px 11px;
+  min-height: 32px;
+  padding: 5px 14px;
   border: 0;
   border-radius: 999px;
-  background: var(--accent, #e11d63);
-  /* `--accent-text` is the accent colour used for text, not a foreground on
-     the accent fill. Using it here makes the label the same pink as the pill. */
+  background: var(--membership-pink, #f53f8f);
+  /* Keep the label white on the brand pink pill. */
   color: #fff;
   font-size: 13px;
   font-weight: 600;
@@ -46,7 +45,7 @@ defineEmits<{ open: [] }>();
 }
 
 .membership-required-icon {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
 }
 </style>

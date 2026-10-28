@@ -799,7 +799,7 @@ describe("buttons mapping page", () => {
     expect(chip.attributes("disabled")).toBeDefined();
     expect(chip.find(".member-badge").exists()).toBe(false);
     const cta = section.find(".common-phrases-cta");
-    expect(cta.exists(), "未登录时必须显示「点击开通会员功能」").toBe(true);
+    expect(cta.exists(), "未登录时必须显示「开通 Plus 会员」").toBe(true);
     await cta.trigger("click");
     expect(wrapper.emitted("navigate")?.[0]).toEqual(["membership"]);
     wrapper.unmount();

@@ -78,6 +78,10 @@ pub trait ButtonProfileHost: Send + Sync {
 
     /// 按键动作执行前同步当前前台应用，确保覆盖层与刚刚切换的 App 一致。
     fn sync_foreground(&self) {}
+
+    /// 按键动作刚刚打开了某个应用：在真实前台窗口就绪前，先按目标应用
+    /// 预备覆盖层，避免紧随其后的按键仍落在上一个应用的方案上。
+    fn target_opened(&self, _target: &str) {}
 }
 
 /// 未注入私有组件时的宿主。

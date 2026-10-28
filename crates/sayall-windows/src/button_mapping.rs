@@ -273,7 +273,38 @@ impl MappingInjector for SendInputInjector {
             .map(|profile| profile.strategy)
             .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
         match strategy {
-            crate::focus::FocusStrategy::OpenOnly => Ok(()),
+            crate::focus::FocusStrategy::OpenOnly => {
+                // 冷启动窗口常晚于 activate_or_launch 的内建 1.5 秒预算
+                // （2026-10-23 网易云音乐实测 4.2 秒）。按键方案要在下一按前
+                // 命中目标 App，这里再有界等一次；只等前台，不抢焦点。
+                //
+                // 2026-10-28 真机回归：无线麦自己在前台时，Windows 的前台锁
+                // 会让新窗口停在后面，单靠等待永远等不到；已运行应用的第二次
+                // activate_or_launch 会走「恢复已有窗口并置前」，与 AppShortcut
+                // 分支同一路径，能把目标真正拿到前台。
+                if crate::button_profiles::is_button_profile_host_available() {
+                    let mut foreground = crate::app_launcher::wait_for_target_foreground(
+                        target,
+                        std::time::Duration::from_millis(3000),
+                    );
+                    if !foreground {
+                        crate::ble::gatt_note(
+                            "open_app_profile_foreground phase=retry reason=target_not_foreground"
+                                .to_owned(),
+                        );
+                        let _ = self.launch_app(target);
+                        foreground = crate::app_launcher::wait_for_target_foreground(
+                            target,
+                            std::time::Duration::from_millis(2500),
+                        );
+                    }
+                    crate::ble::gatt_note(format!(
+                        "open_app_profile_foreground phase=completed target_result={}",
+                        if foreground { "passed" } else { "skipped" }
+                    ));
+                }
+                Ok(())
+            }
             crate::focus::FocusStrategy::AutoComposer => {
                 // 激活是异步完成的：先等目标成为前台，否则前几次尝试会打在旧前台
                 // 应用上（与「聚焦已记录的输入框」同一理由）。
@@ -1504,20 +1535,31 @@ fn fire_gesture(
                 "map_fire button={:?} trigger={:?} action=open_app target_kind={target_kind} focus_strategy={strategy}",
                 button, trigger,
             ));
-            match injector.launch_app_and_focus(&target, profile.as_ref()) {
-                Ok(()) => crate::ble::gatt_note(format!(
-                    "map_launch result=ok target_kind={} focus_strategy={}",
-                    target_kind, strategy
-                )),
+            let launched = match injector.launch_app_and_focus(&target, profile.as_ref()) {
+                Ok(()) => {
+                    crate::ble::gatt_note(format!(
+                        "map_launch result=ok target_kind={} focus_strategy={}",
+                        target_kind, strategy
+                    ));
+                    true
+                }
                 Err(error) => {
                     crate::ble::gatt_note(format!(
                         "map_launch result=err target_kind={} focus_strategy={} error_domain=shell error_code=launch_failed reason=target_unavailable retryable=true",
                         target_kind, strategy
                     ));
                     lock_state(state).last_error = Some(format!("打开应用失败：{error}"));
+                    false
                 }
+            };
+            // 前台切换是异步的：先按实际前台同步一次，再按刚打开的目标应用
+            // 预备覆盖层。否则用户在窗口还没拿到前台时按下第一个键，仍会
+            // 落回上一个应用的基础/专用方案（2026-10-28 网易云音乐冷启动）。
+            let host = crate::button_profiles::current_button_profile_host();
+            host.sync_foreground();
+            if launched {
+                host.target_opened(&target);
             }
-            crate::button_profiles::current_button_profile_host().sync_foreground();
         }
         ButtonAction::RunMacro { macro_id, .. } => {
             // 组合动作由运行时在独立线程异步执行（不阻塞引擎线程）；引用按

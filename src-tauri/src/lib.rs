@@ -691,7 +691,10 @@ async fn refresh_membership(
     state: tauri::State<'_, AppState>,
 ) -> Result<MembershipSnapshot, String> {
     let membership = Arc::clone(&state.membership);
-    run_membership(move || membership.refresh()).await
+    let snapshot = run_membership(move || membership.refresh()).await?;
+    // 刷新完成就同步键位方案门禁，不必等页面下一次轮询快照。
+    button_profiles::apply_membership(&snapshot);
+    Ok(snapshot)
 }
 
 /// 给邮箱发一封登录验证码（2026-10-15）。

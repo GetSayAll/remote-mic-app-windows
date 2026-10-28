@@ -246,6 +246,29 @@ pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
     PRESET_APPS.iter().find(|app| app.id == id)
 }
 
+/// 按键动作 target 对应的前台可执行文件名。
+///
+/// 打开应用后真实前台窗口可能要几百毫秒才就绪；键位方案需要先用这个
+/// 名字预备目标应用的覆盖层，避免下一次按键仍打到旧方案。
+pub fn target_executable_name(target: &str) -> Option<String> {
+    if let Some(app) = preset_app(target) {
+        return app.exe_names.first().map(|name| (*name).to_owned());
+    }
+    #[cfg(windows)]
+    if target.to_ascii_lowercase().ends_with(".lnk") {
+        if let Some(resolved) = resolve_lnk(target) {
+            return std::path::Path::new(&resolved.exe_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+        }
+    }
+    std::path::Path::new(target)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
 /// 预设应用解析出的启动位置（候选路径或开始菜单快捷方式）。
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +492,106 @@ pub fn preset_aumid(id: &str) -> Option<&'static str> {
         "chatgpt" => Some("OpenAI.Codex_2p2nqsd0c76g0!App"),
         _ => None,
     }
+}
+
+/// 当前前台进程的 AppsFolder AUMID（打包应用才有）。
+///
+/// 键位方案可能用 `shell:AppsFolder\...` 关联 WPS 这类打包应用；只比较
+/// 可执行文件名会漏掉它们。
+#[cfg(windows)]
+pub fn foreground_app_user_model_id() -> Option<String> {
+    let pid = crate::focus_windows::foreground_process_id()?;
+    process_app_user_model_id(pid)
+}
+
+#[cfg(not(windows))]
+pub fn foreground_app_user_model_id() -> Option<String> {
+    None
+}
+
+/// 当前前台窗口的窗口类名（WPS 等桌面进程没有 AUMID，只能按窗口类识别）。
+#[cfg(windows)]
+pub fn foreground_window_class() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 512];
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+#[cfg(not(windows))]
+pub fn foreground_window_class() -> Option<String> {
+    None
+}
+
+/// 当前前台窗口标题。WPS 的普通演示文稿窗口与文字窗口共用 `OpusApp`
+/// 顶层类，但标题保留 `.pptx` / 「演示」等模块特征，作为窗口树判断的补充。
+#[cfg(windows)]
+pub fn foreground_window_title() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetForegroundWindow, GetWindowTextW, GA_ROOT,
+    };
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let target = if root.0.is_null() { hwnd } else { root };
+    let mut buffer = [0u16; 1024];
+    let length = unsafe { GetWindowTextW(target, &mut buffer) };
+    (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+#[cfg(not(windows))]
+pub fn foreground_window_title() -> Option<String> {
+    None
+}
+
+/// 当前前台窗口及其全部后代窗口中，是否存在指定类名前缀的窗口。
+///
+/// WPS 演示打开已有 `.pptx` 时，顶层窗口类为 `OpusApp`，与 WPS 文字相同；
+/// 但演示窗口内部有 `PPTFrameClass` 子窗口，文字窗口内部是 `_WwB`/`_WwG`。
+/// 只比较顶层类名会把两者混为一谈，因此需要检查窗口树。
+#[cfg(windows)]
+pub fn foreground_window_has_descendant_class(prefix: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindow, GW_CHILD, GW_HWNDNEXT,
+    };
+
+    fn class_name(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
+        let mut buffer = [0u16; 512];
+        let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+        (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+    }
+
+    fn contains(hwnd: windows::Win32::Foundation::HWND, prefix: &str) -> bool {
+        if class_name(hwnd).is_some_and(|class| {
+            class
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
+        }) {
+            return true;
+        }
+        let mut child = unsafe { GetWindow(hwnd, GW_CHILD) }.unwrap_or_default();
+        while !child.0.is_null() {
+            if contains(child, prefix) {
+                return true;
+            }
+            child = unsafe { GetWindow(child, GW_HWNDNEXT) }.unwrap_or_default();
+        }
+        false
+    }
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    !hwnd.0.is_null() && contains(hwnd, prefix)
+}
+
+#[cfg(not(windows))]
+pub fn foreground_window_has_descendant_class(_prefix: &str) -> bool {
+    false
 }
 
 /// 判断 OpenApp 目标是否为自定义路径（非预设 id）。
@@ -3439,6 +3562,18 @@ pub(crate) mod tests {
         );
         assert_eq!(out.len(), 2, "非 .lnk 文件不应入索引");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn target_executable_name_resolves_preset_and_custom_path() {
+        assert_eq!(
+            target_executable_name("netease_music").as_deref(),
+            Some("cloudmusic.exe")
+        );
+        assert_eq!(
+            target_executable_name(r"C:\Apps\Vokie\Vokie.exe").as_deref(),
+            Some("Vokie.exe")
+        );
     }
 
     /// 候选路径存在时启动目标直接取完整路径（自定义安装目录的关键路径）。

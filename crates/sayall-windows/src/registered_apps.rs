@@ -18,6 +18,29 @@ pub fn is_registered_target(target: &str) -> bool {
     })
 }
 
+/// Known AppsFolder entries whose process has no AUMID.
+///
+/// WPS Office launches a shared `wps.exe` host and distinguishes modules by
+/// window contents; matching only the executable would give the WPP profile to
+/// Writer as well. A blank WPP window is `PP12FrameClass`; an opened `.pptx`
+/// keeps the generic `OpusApp` top-level class but contains `PPTFrameClass`.
+pub fn known_window_class_prefix(app_user_model_id: &str) -> Option<&'static str> {
+    match app_user_model_id.to_ascii_lowercase().as_str() {
+        "kingsoft.office.wpp" => Some("PP12"),
+        _ => None,
+    }
+}
+
+/// Descendant window class that identifies a WPS module whose top-level class
+/// is shared with another module (WPP editor vs Writer both use `OpusApp`).
+pub fn known_descendant_window_class_prefix(app_user_model_id: &str) -> Option<&'static str> {
+    match app_user_model_id.to_ascii_lowercase().as_str() {
+        "kingsoft.office.wpp" => Some("PPT"),
+        "kingsoft.office.wps" => Some("_Ww"),
+        _ => None,
+    }
+}
+
 /// 只读判断某个 AppsFolder AUMID 是否已安装（2026-10-22：ChatGPT 等
 /// Microsoft Store 包没有 App Paths / 开始菜单 .lnk，必须走 AppsFolder）。
 #[cfg(windows)]
@@ -196,7 +219,7 @@ fn classify_registered_launch(submitted: bool, foreground_observed: bool) -> Res
 }
 
 #[cfg(windows)]
-pub(crate) fn resolve_registered_executable_path(target: &str) -> Option<String> {
+pub fn resolve_registered_executable_path(target: &str) -> Option<String> {
     if !is_registered_target(target) {
         return None;
     }
