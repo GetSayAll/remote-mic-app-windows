@@ -358,11 +358,20 @@ fn wait_session_end(state: &Arc<Mutex<ConnectionSnapshot>>, budget_ms: u64) -> b
 /// 等会话结束后对前台窗口做一次程序化"焦点往返"（`focus_bounce_foreground`，
 /// 不切换输入法、不改前台窗口）。恢复（observed）即计数归零；连续未恢复
 /// 达到 cap 上限后停止继续动作（防循环）。
+///
+/// 2026-10-28 追加 F5 三判据（现场：`mic=not_observed` 的按下里抑制器一条
+/// F5 边沿都收不到，而宿主当时是活的；日志无法区分"语音键的键盘报告没进
+/// OS"与"进了 OS 但被我们的钩子绕过"）：
+/// - `f5_edges`：本次按住期间抑制器收到的 DOWN 边沿数（相对按下前基线）；
+/// - `f5_leaked`：其中被放行进 OS 的条数（>0 即和弦会被目标按"额外按键"拒绝）；
+/// - `f5_key_down`：`GetAsyncKeyState(F5)` 的 OS 侧键态（不受本进程钩子影响）。
+/// 三者组合的读法见 `Testing/WindowsVoiceF5Probe.md`。
 pub(crate) fn spawn_mic_verify(
     session: u64,
     tool: &'static str,
     marker: &'static str,
     baseline: Option<MicObservation>,
+    f5_baseline: crate::key_suppressor::F5Snapshot,
     heal: Option<ImeHealContext>,
 ) {
     const SAMPLES_MS: [u64; 2] = [800, 2500];
@@ -377,10 +386,18 @@ pub(crate) fn spawn_mic_verify(
                     std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
                 }
                 verdict = response_since(baseline, mic_observation_for(marker));
+                let f5 = crate::key_suppressor::f5_snapshot().delta_since(f5_baseline);
                 crate::ble::gatt_note(format!(
-                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={}",
+                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={} f5_edges={} f5_leaked={} f5_key_down={}",
                     started.elapsed().as_millis(),
                     verdict.as_log_str(),
+                    f5.edges,
+                    f5.leaked,
+                    if crate::key_suppressor::f5_key_down_in_os() {
+                        "true"
+                    } else {
+                        "false"
+                    },
                 ));
             }
             if verdict == MicResponse::Observed {

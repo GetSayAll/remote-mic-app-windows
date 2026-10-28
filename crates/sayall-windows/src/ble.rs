@@ -2370,8 +2370,11 @@ fn handle_control(
             let verify_marker = crate::ime::mic_marker_for(attempt_tool);
             let verify_baseline = verify_marker.and_then(crate::wetype_revive::mic_observation_for);
             let fg_probe = crate::ime::foreground_probe();
+            // 2026-10-28：按住期间"遥控器语音键的键盘报告有没有进 OS"的基线。
+            // 与开麦/存活标记同在注入前取样（之后取会把本次按住自己的边沿吃掉）。
+            let f5_baseline = crate::key_suppressor::f5_snapshot();
             gatt_note(format!(
-                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} fg_pid={} fg_class={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
+                "voice_attempt session={session_id} tool={} path={} synth={} synth_confirmed={} fg_self={} fg_pid={} fg_class={} fg_hkl={:#010X} fg_focus={} since_tool_select_ms={} since_hotkey_change_ms={} since_ime_switch_ms={}",
                 crate::ime::tool_label(attempt_tool),
                 press_path(synth_gate, attempt_hotkey.is_some()),
                 synth_label(synth_target),
@@ -2379,6 +2382,8 @@ fn handle_control(
                 crate::ime::foreground_is_self(),
                 fg_probe.pid,
                 fg_probe.class_token,
+                fg_probe.hkl,
+                fg_probe.focus_class,
                 crate::ime::age_label(crate::ime::tool_select_age_ms()),
                 crate::ime::age_label(crate::ime::hotkey_change_age_ms()),
                 crate::ime::age_label(crate::ime::last_switch_age_ms()),
@@ -2506,6 +2511,7 @@ fn handle_control(
                     crate::ime::tool_label(attempt_tool),
                     marker,
                     verify_baseline,
+                    f5_baseline,
                     heal,
                 );
             }
