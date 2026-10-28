@@ -23,6 +23,8 @@ mod ble;
 mod bluetooth_radio;
 mod button_gestures;
 pub mod button_mapping;
+/// 键位方案可选组件的公开接缝（私有实现由构建期注入）。
+pub mod button_profiles;
 /// 常用语（内置内容、用户副本、五键分配、面板期认领与插入事务；纯逻辑，跨平台可单测）：
 /// 平台实现见 `clipboard_windows` 与 `phrase_insert_windows`。
 pub mod common_phrases;
@@ -1156,6 +1158,12 @@ impl WindowsPlatform {
         );
     }
 
+    /// 安装/清除键位方案覆盖层（私有组件经公开宿主调用）。
+    #[cfg(windows)]
+    pub fn set_button_profile_overlay(&self, overlay: Option<send_input::ButtonMappings>) {
+        self.button_mapping.set_profile_overlay(overlay);
+    }
+
     /// 同步组合动作库快照（Tauri 层在加载/保存后调用；引擎与执行器共用）。
     pub fn set_macro_library(&self, document: sayall_core::MacroLibraryDocument) {
         self.macro_runtime.set_library(document);
@@ -1195,6 +1203,12 @@ impl WindowsPlatform {
 
     pub fn button_mapping_snapshot(&self) -> ButtonMappingSnapshot {
         self.button_mapping.snapshot()
+    }
+
+    /// 按键引擎句柄：键位方案私有组件用它安装/清除覆盖层。
+    #[cfg(windows)]
+    pub fn button_mapping_runtime(&self) -> Arc<ButtonMappingRuntime> {
+        Arc::clone(&self.button_mapping)
     }
 
     /// UI「测试」按钮：聚焦当前前台应用输入框（异步受理，结果在快照的 `last_focus`）。

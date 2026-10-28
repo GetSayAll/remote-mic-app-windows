@@ -613,6 +613,23 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                     if tray_visible { "passed" } else { "failed" },
                 ));
                 if tray_visible {
+                    // 托盘回调只保证窗口可见，不保证它成为前台；方案按前台应用匹配，
+                    // 不补置前时用户下一次按键仍走默认方案（2026-10-28 真机）。
+                    let focused = match visibility.largest_hidden {
+                        Some(hwnd) => unsafe { win_impl::activate_known_window(hwnd) },
+                        None => matches!(
+                            activate_running(app.exe_names),
+                            RunningActivation::Activated(_)
+                        ),
+                    } || wait_for_target_foreground(
+                        app.id,
+                        std::time::Duration::from_millis(400),
+                    );
+                    crate::ble::gatt_note(format!(
+                        "app_launcher action=activate_or_launch preset={} phase=tray_foreground terminal_result={}",
+                        app.id,
+                        if focused { "passed" } else { "failed" }
+                    ));
                     return Ok(());
                 }
                 // 应用已运行，但窗口收在托盘里（如微信关闭到托盘）。不要直接把隐藏窗口
@@ -682,6 +699,23 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                         known_hidden.is_some(),
                     ));
                     if became_visible {
+                        // 同上：窗口被应用自己显示出来 ≠ 已成为前台。网易云音乐收进托盘后
+                        // 没有托盘图标可点，只能走重新拉起；这里不置前则首按落回默认方案。
+                        let focused = match known_hidden {
+                            Some(hwnd) => unsafe { win_impl::activate_known_window(hwnd) },
+                            None => matches!(
+                                activate_running(app.exe_names),
+                                RunningActivation::Activated(_)
+                            ),
+                        } || wait_for_target_foreground(
+                            app.id,
+                            std::time::Duration::from_millis(400),
+                        );
+                        crate::ble::gatt_note(format!(
+                            "app_launcher action=activate_or_launch preset={} phase=relaunch_foreground terminal_result={}",
+                            app.id,
+                            if focused { "passed" } else { "failed" }
+                        ));
                         return Ok(());
                     }
                 } else {
@@ -1351,7 +1385,7 @@ pub(crate) fn activate_install_directory_family(
 }
 
 #[cfg(windows)]
-fn process_image_path(pid: u32) -> Option<String> {
+pub(crate) fn process_image_path(pid: u32) -> Option<String> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{

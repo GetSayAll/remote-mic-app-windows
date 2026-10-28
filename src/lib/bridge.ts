@@ -1529,6 +1529,58 @@ export async function importButtonMappingConfiguration(): Promise<ButtonMappings
   return invoke<ButtonMappings | null>("import_button_mapping_configuration");
 }
 
+/**
+ * 键位方案访问状态（私有组件给出；公开构建恒为 unavailable）。
+ *
+ * 公开桥只保留稳定形状，不解析会员 token、不读取方案文件。
+ */
+export type ButtonProfilesAccess =
+  | { status: "unavailable" }
+  | { status: "requiresPlus" }
+  | { status: "allowed"; validUntil?: string | null };
+
+export async function getButtonProfilesAccess(): Promise<ButtonProfilesAccess> {
+  if (!isTauriRuntime()) {
+    return { status: "unavailable" };
+  }
+  return invoke<ButtonProfilesAccess>("button_profiles_access");
+}
+
+/** 键位方案页面快照（私有 JSON）；公开构建返回 null。 */
+export async function getButtonProfilesSnapshot(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_snapshot");
+}
+
+/** 选择 `.sayall` 导入文件；取消返回 null。 */
+export async function pickButtonProfilesImportFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_pick_import_file");
+}
+
+/** 选择键位方案备份的导出位置；取消返回 null。 */
+export async function pickButtonProfilesExportFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_pick_export_file");
+}
+
+/** 键位方案页面命令（命令名与 payload 由私有组件定义）。 */
+export async function dispatchButtonProfilesCommand(
+  command: string,
+  payload?: string,
+): Promise<string> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法执行键位方案命令");
+  }
+  return invoke<string>("button_profiles_dispatch", { command, payload });
+}
+
 export async function testButtonMapping(
   button: RemoteButton,
   trigger: ButtonTrigger,
