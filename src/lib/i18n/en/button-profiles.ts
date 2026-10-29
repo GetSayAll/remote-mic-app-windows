@@ -63,6 +63,8 @@ export default {
   "键位方案 {index}": "Button profile {index}",
   "{name} 副本": "{name} copy",
   "WPS 演示": "WPS Presentation",
+  "计算器": "Calculator",
+  "文件资源管理器": "File Explorer",
 
   // 新建 / 编辑向导
   "编辑「{name}」": 'Edit "{name}"',
