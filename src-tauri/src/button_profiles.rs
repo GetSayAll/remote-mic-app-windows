@@ -14,7 +14,7 @@ use sayall_windows::button_profiles::{
 };
 use sayall_windows::send_input::ButtonMappings;
 
-use crate::membership::{MembershipRuntime, MembershipSnapshot};
+use crate::membership::{MembershipAvailability, MembershipRuntime, MembershipSnapshot};
 use crate::platform::PlatformRuntime;
 
 struct PlatformProfileContext {
@@ -79,9 +79,21 @@ pub fn apply_membership(snapshot: &MembershipSnapshot) {
     }
     // 走查包（`runtime-simulation`）直接按 Plus 运行；正式 release 构建不会命中。
     let assume_member = cfg!(feature = "runtime-simulation");
-    let access = if snapshot.plus_active || assume_member {
-        ProfileAccess::Allowed {
-            valid_until: snapshot.valid_until.map(|value| value.to_string()),
+    let valid_until = snapshot.valid_until.map(|value| value.to_string());
+    let access = if assume_member {
+        ProfileAccess::Allowed { valid_until }
+    } else if snapshot.availability == MembershipAvailability::Unavailable
+        || snapshot.sync_state == "unavailable"
+    {
+        // 会员组件没有安装、初始化失败，或没有可用于判断的租约：
+        // 这不是“需要 Plus”，而是能力暂时不可用。
+        ProfileAccess::Unavailable
+    } else if snapshot.plus_active {
+        if snapshot.sync_state == "offline" {
+            // 上次验签的租约仍允许使用；界面应提示离线，而不是卖会员。
+            ProfileAccess::TemporarilyOffline { valid_until }
+        } else {
+            ProfileAccess::Allowed { valid_until }
         }
     } else {
         ProfileAccess::RequiresPlus

@@ -14,8 +14,8 @@ mod runtime;
 /// rustc 判为 unused import。私有实现需要其余类型时，走 `super::runtime::{...}`
 /// （见 `hook.rs`）。
 pub use runtime::{
-    EmailCodeDelivery, MembershipCatalog, MembershipError, MembershipPaymentHandoff,
-    MembershipPurchase, MembershipRuntime, MembershipSnapshot,
+    EmailCodeDelivery, MembershipAvailability, MembershipCatalog, MembershipError,
+    MembershipPaymentHandoff, MembershipPurchase, MembershipRuntime, MembershipSnapshot,
 };
 
 pub fn install() -> std::sync::Arc<dyn MembershipRuntime> {
