@@ -5572,7 +5572,7 @@ pub fn run() {
             // 个人中心统计：平台层只排队，应用层每秒批量落盘；启动即开始消费，
             // 用户即使从不打开个人中心，按键与语音统计也会保留。
             // 旧版把统计写在 settings.json，首次启动迁移到独立文件后不再写回。
-            let usage_store = UsageStore::new(usage_statistics_path);
+            let usage_store = UsageStore::new(usage_statistics_path.clone());
             match settings.usage_statistics() {
                 Ok(legacy) => {
                     if let Err(error) = usage_store.migrate_from_settings(legacy) {
@@ -5885,7 +5885,7 @@ pub fn run() {
                 saved_settings.local_original_audio_recording_enabled,
             );
 
-            let membership_runtime = membership::install();
+            let membership_runtime = membership::install(usage_statistics_path.clone());
             // 键位方案私有组件（可选）：未注入时空壳返回 false，入口不出现。
             button_profiles::install(
                 app.handle(),

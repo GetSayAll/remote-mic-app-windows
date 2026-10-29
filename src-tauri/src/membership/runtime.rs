@@ -363,7 +363,8 @@ mod tests {
 
     #[test]
     fn the_public_build_installs_an_unavailable_runtime() {
-        let runtime = super::super::install();
+        let runtime =
+            super::super::install(std::path::PathBuf::from("unused-usage-statistics.json"));
         assert_eq!(
             runtime.snapshot().availability,
             MembershipAvailability::Unavailable

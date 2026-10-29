@@ -18,6 +18,7 @@ pub use runtime::{
     MembershipPaymentHandoff, MembershipPurchase, MembershipRuntime, MembershipSnapshot,
 };
 
-pub fn install() -> std::sync::Arc<dyn MembershipRuntime> {
-    hook::install().unwrap_or_else(|| std::sync::Arc::new(runtime::UnavailableMembershipRuntime))
+pub fn install(usage_statistics_path: std::path::PathBuf) -> std::sync::Arc<dyn MembershipRuntime> {
+    hook::install(usage_statistics_path)
+        .unwrap_or_else(|| std::sync::Arc::new(runtime::UnavailableMembershipRuntime))
 }

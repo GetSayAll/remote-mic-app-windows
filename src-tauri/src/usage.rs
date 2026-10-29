@@ -137,7 +137,14 @@ impl UsageStore {
         }
         let contents = serde_json::to_vec_pretty(statistics)
             .map_err(|error| format!("序列化使用统计失败：{error}"))?;
-        fs::write(&self.path, contents).map_err(|error| format!("保存本机使用统计失败：{error}"))
+        // 上传器可能在同一秒读取该文件；先写临时文件再替换，避免读到半截 JSON。
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, contents)
+            .map_err(|error| format!("保存本机使用统计失败：{error}"))?;
+        fs::rename(&temporary, &self.path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("保存本机使用统计失败：{error}")
+        })
     }
 }
 
@@ -401,6 +408,31 @@ mod tests {
         // 统计只写独立文件，不再进入 settings.json。
         assert!(base.join(USAGE_FILE_NAME).exists());
         assert!(!base.join("settings.json").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn repeated_flushes_replace_the_usage_file_atomically() {
+        let (store, base) = temp_usage_store("replace");
+        let counters = Arc::new(UsageCounters::default());
+        let sync = UsageSync::new(counters, store.clone());
+        sync.enqueue_for_test(UsageEvent::ButtonPress {
+            control: "button.ok".to_owned(),
+            at_unix_ms: 1_760_000_000_000,
+        });
+        sync.flush().unwrap();
+        sync.enqueue_for_test(UsageEvent::ButtonPress {
+            control: "button.ok".to_owned(),
+            at_unix_ms: 1_760_000_001_000,
+        });
+        sync.flush().unwrap();
+        assert_eq!(
+            UsageStore::new(base.join(USAGE_FILE_NAME))
+                .snapshot()
+                .total()
+                .button_presses,
+            2
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 

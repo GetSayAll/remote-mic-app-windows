@@ -22,7 +22,7 @@
 | --- | --- |
 | `src-tauri/src/membership/runtime.rs` | `MembershipRuntime` 接口、`MembershipSnapshot`、`EmailCodeDelivery`、`MembershipCatalog`、`MembershipPurchase`、`MembershipError` 与公开空实现 `UnavailableMembershipRuntime` |
 | `src-tauri/src/membership/hook.rs` | **注入点**。公开版本返回 `None`；私有构建用同名文件替换其内容 |
-| `src-tauri/src/membership/mod.rs` | `install()`：拿到 `hook` 的运行时，拿不到就用空实现 |
+| `src-tauri/src/membership/mod.rs` | `install(usage_statistics_path)`：拿到 `hook` 的运行时，拿不到就用空实现；路径是公开宿主的 `usage-statistics.json`，仅供私有上传器读取 |
 | `src-tauri/src/lib.rs` | 把运行时放进 `AppState`；生命周期接线：`get_membership_snapshot`、`refresh_membership`、`start_membership_email_login`、`verify_membership_email_login`、`logout_membership`、`get_membership_catalog`、`purchase_membership`、`refresh_membership_purchase`、`clear_membership_purchase`、`open_membership_checkout`、窗口获得焦点、`RunEvent::ExitRequested` |
 
 接口契约：
@@ -49,6 +49,8 @@
 2. 把私有 Rust 代码与依赖以私有构建自己的方式装配（例如在私有构建脚本里补依赖条目），
    不修改公开清单；
 3. 私有实现自行负责：网络、凭据加密存储（DPAPI）、权益验签、刷新串行化与代次丢弃。
+4. 匿名用量上传也只存在于私有 `hook.rs`：公开宿主只传本地统计文件路径，不新增
+   上传接口、域名、协议或权限。
 
 ## 前端接入点
 

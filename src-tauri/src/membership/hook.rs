@@ -14,6 +14,6 @@
 use super::MembershipRuntime;
 use std::sync::Arc;
 
-pub fn install() -> Option<Arc<dyn MembershipRuntime>> {
+pub fn install(_usage_statistics_path: std::path::PathBuf) -> Option<Arc<dyn MembershipRuntime>> {
     None
 }
