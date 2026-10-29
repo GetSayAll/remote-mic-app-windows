@@ -1,6 +1,7 @@
 // English strings for the private membership page. Key = exact Chinese source
 // passed to t() in MembershipPage.vue.
 export default {
+  "Free 与 Plus 包含的功能": "What Free and Plus include",
   "Plus 与 {product}": "Plus with {product}",
   "Plus 会员功能": "Plus features",
   "Plus 已停止销售": "Plus is no longer for sale",
@@ -193,4 +194,11 @@ export default {
   "验证码已发送至 {email}，10 分钟内有效。":
     "Code sent to {email}. Valid for 10 minutes.",
   "验证码第 {index} 位": "Verification code digit {index}",
+  "基础语音输入": "Built-in voice input",
+  "按键自定义": "Custom button mapping",
+  "组合动作": "Routine",
+  "推荐与回眸": "Picks and Reflections",
+  "键位方案": "Button profiles",
+  "查看权益详情": "View benefits",
+  "权益详情": "Benefits",
 } as Record<string, string>;

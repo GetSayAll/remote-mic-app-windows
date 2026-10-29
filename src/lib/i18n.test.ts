@@ -16,6 +16,9 @@ import onboarding from "./i18n/en/onboarding";
 import permissions from "./i18n/en/permissions";
 import reflections from "./i18n/en/reflections";
 import lib from "./i18n/en/lib";
+import membership from "./i18n/en/membership";
+import commonPhrases from "./i18n/en/common-phrases";
+import buttonProfiles from "./i18n/en/button-profiles";
 
 const sourceRoot = join(process.cwd(), "src");
 const han = /\p{Script=Han}/u;
@@ -108,6 +111,7 @@ describe("全 UI i18n 完整性", () => {
     expect(t("应用语言")).toBe("App Language");
     expect(tNav("设置")).toBe("Settings");
     expect(tNav("推荐")).toBe("Picks");
+    expect(tNav("键位方案")).toBe("Button Profiles");
     expect(tPage("连接")).toBe("Connection & Voice");
     expect(tPage("权限")).toBe("Permissions & Privacy");
     expect(t("推荐")).toBe("Recommended");
@@ -130,6 +134,9 @@ describe("全 UI i18n 完整性", () => {
       permissions,
       reflections,
       lib,
+      membership,
+      commonPhrases,
+      buttonProfiles,
     };
     const seen = new Map<string, { value: string; fragment: string }>();
     const conflicts: string[] = [];
