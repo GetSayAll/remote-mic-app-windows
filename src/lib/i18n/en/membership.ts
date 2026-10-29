@@ -47,6 +47,7 @@ export default {
   "发送验证码": "Send code",
   "取消": "Cancel",
   "同一账号，多端使用": "One account, across devices",
+  "切换账号": "Switch account",
   "在微信中支付": "Pay in WeChat",
   "在微信中继续使用无线麦 SayAll App": "Keep using SayAll App in WeChat",
   "大版本说明": "About major versions",
