@@ -665,7 +665,7 @@ async fn get_usage_profile(state: tauri::State<'_, AppState>) -> Result<UsagePro
         let _ = usage.flush();
         Ok(build_usage_profile(
             &usage.snapshot(),
-            chrono::Local::now().date_naive(),
+            usage::statistics_today(),
         ))
     })
     .await

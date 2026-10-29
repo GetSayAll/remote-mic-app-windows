@@ -7,8 +7,9 @@
 //! 启动时迁移过来，之后不再写回设置。
 //!
 //! 隐私：只保存计数、时长和应用显示名；不保存窗口标题、路径、语音内容或音频。
+//! 统计日固定为 Asia/Shanghai，与匿名上报的 `stat_day` 一致，避免跨时区错日。
 
-use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
+use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, TimeZone, Utc};
 use sayall_core::UsageStatistics;
 use sayall_windows::{UsageCounters, UsageEvent};
 use serde::Serialize;
@@ -21,6 +22,13 @@ use std::time::Duration;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_PENDING_EVENTS: usize = 8192;
 const RECENT_DAYS: usize = 26 * 7;
+/// Statistics and anonymous reports use the report contract's fixed
+/// Asia/Shanghai day. The uploader builds report days in this timezone, so the
+/// local counter keys must use the same day or a night event is attributed to
+/// the wrong report. Mac's uploader uses the same day rule; its local
+/// `AppSettings` still uses `Calendar.current`, so that side is a separate
+/// cross-platform follow-up.
+const STATISTICS_UTC_OFFSET_SECONDS: i32 = 8 * 3_600;
 /// 与 `settings.json` 同目录的统计文件；独立于设置 schema，跨版本不会互相覆盖。
 pub const USAGE_FILE_NAME: &str = "usage-statistics.json";
 
@@ -110,13 +118,13 @@ impl UsageStore {
                     at_unix_ms,
                 } => state
                     .statistics
-                    .record_button_press_for_control(&local_date_key(*at_unix_ms), control),
+                    .record_button_press_for_control(&statistics_date_key(*at_unix_ms), control),
                 UsageEvent::VoiceSession {
                     ended_at_unix_ms,
                     duration_seconds,
                     application_name,
                 } => state.statistics.record_voice_session_with_details(
-                    &local_date_key(*ended_at_unix_ms),
+                    &statistics_date_key(*ended_at_unix_ms),
                     *duration_seconds,
                     *ended_at_unix_ms,
                     application_name.as_deref(),
@@ -148,13 +156,28 @@ impl UsageStore {
     }
 }
 
-fn local_date_key(unix_ms: i64) -> String {
-    Local
+fn statistics_offset() -> FixedOffset {
+    FixedOffset::east_opt(STATISTICS_UTC_OFFSET_SECONDS).expect("fixed Asia/Shanghai offset")
+}
+
+/// The day a local statistic belongs to, in the same timezone the uploader
+/// uses for report days.
+fn statistics_date(unix_ms: i64) -> NaiveDate {
+    statistics_offset()
         .timestamp_millis_opt(unix_ms)
         .single()
-        .unwrap_or_else(Local::now)
-        .format("%Y-%m-%d")
-        .to_string()
+        .unwrap_or_else(|| Utc::now().with_timezone(&statistics_offset()))
+        .date_naive()
+}
+
+fn statistics_date_key(unix_ms: i64) -> String {
+    statistics_date(unix_ms).format("%Y-%m-%d").to_string()
+}
+
+/// Today's statistics day. The profile page uses the same day as the local
+/// counters and reports.
+pub fn statistics_today() -> NaiveDate {
+    Utc::now().with_timezone(&statistics_offset()).date_naive()
 }
 
 #[derive(Debug)]
@@ -377,6 +400,23 @@ mod tests {
     fn temp_usage_store(name: &str) -> (UsageStore, PathBuf) {
         let base = temp_dir(name);
         (UsageStore::new(base.join(USAGE_FILE_NAME)), base)
+    }
+
+    #[test]
+    fn statistics_days_use_shanghai_midnight() {
+        let before = Utc
+            .with_ymd_and_hms(2026, 10, 20, 15, 59, 59)
+            .single()
+            .expect("before midnight")
+            .timestamp_millis();
+        let after = Utc
+            .with_ymd_and_hms(2026, 10, 20, 16, 0, 0)
+            .single()
+            .expect("at midnight")
+            .timestamp_millis();
+
+        assert_eq!(statistics_date_key(before), "2026-10-20");
+        assert_eq!(statistics_date_key(after), "2026-10-21");
     }
 
     #[test]
