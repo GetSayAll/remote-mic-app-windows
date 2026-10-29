@@ -79,15 +79,40 @@ impl MembershipSnapshot {
     }
 }
 
-/// 会员组件的失败。只带稳定错误码，不带服务端文案或用户内容。
+/// 会员组件的失败。只带稳定错误码和数字支持码，不带服务端文案或用户内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipError {
     pub code: String,
+    /// 与 Mac 共用的数字支持码；旧调用点没有时保持 `None`。
+    pub support_code: Option<i32>,
 }
 
 impl MembershipError {
     pub fn new(code: impl Into<String>) -> Self {
-        Self { code: code.into() }
+        Self {
+            code: code.into(),
+            support_code: None,
+        }
+    }
+
+    /// Used by the private hook; the public build has no caller.
+    #[allow(dead_code)]
+    pub fn with_support(code: impl Into<String>, support_code: Option<i32>) -> Self {
+        Self {
+            code: code.into(),
+            support_code,
+        }
+    }
+
+    /// 前端拿到的字符串：`code` 或 `code|-1204`。
+    ///
+    /// IPC 错误保持字符串形态，避免把现有页面的 `String(error)` 改成对象解析；
+    /// 页面按第一个 `|` 拆分稳定码与支持码。
+    pub fn encode(&self) -> String {
+        match self.support_code {
+            Some(support_code) => format!("{}|{support_code}", self.code),
+            None => self.code.clone(),
+        }
     }
 }
 
@@ -350,6 +375,15 @@ mod tests {
         let runtime = UnavailableMembershipRuntime;
         let error = runtime.refresh().expect_err("must not succeed");
         assert_eq!(error.code, "membership_unavailable");
+    }
+
+    #[test]
+    fn the_error_wire_format_keeps_the_support_code_separate() {
+        assert_eq!(MembershipError::new("no_session").encode(), "no_session");
+        assert_eq!(
+            MembershipError::with_support("no_session", Some(-1971)).encode(),
+            "no_session|-1971"
+        );
     }
 
     #[test]

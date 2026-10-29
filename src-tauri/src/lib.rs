@@ -915,7 +915,7 @@ where
 {
     match tauri::async_runtime::spawn_blocking(operation).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(error.code),
+        Ok(Err(error)) => Err(error.encode()),
         Err(_) => Err("membership_task_failed".to_string()),
     }
 }
