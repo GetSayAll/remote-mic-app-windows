@@ -16,6 +16,8 @@ pub struct DailyUsage {
     pub button_presses_by_control: BTreeMap<String, u64>,
     pub voice_sessions: u64,
     pub voice_seconds: f64,
+    /// 当天最长的一次语音会话。旧版文件没有该字段，反序列化为 0。
+    pub longest_voice_seconds: f64,
 }
 
 /// 一次已完成语音会话的排行记录。
@@ -69,6 +71,8 @@ impl UsageStatistics {
         usage.voice_sessions = usage.voice_sessions.saturating_add(count);
         if duration_seconds.is_finite() && duration_seconds > 0.0 {
             usage.voice_seconds = add_duration(usage.voice_seconds, duration_seconds);
+            usage.longest_voice_seconds =
+                sanitize_duration(usage.longest_voice_seconds.max(duration_seconds));
         }
     }
 
@@ -124,6 +128,8 @@ impl UsageStatistics {
     pub fn normalized(mut self) -> Self {
         for usage in self.days.values_mut() {
             usage.voice_seconds = sanitize_duration(usage.voice_seconds);
+            usage.longest_voice_seconds =
+                sanitize_duration(usage.longest_voice_seconds).min(usage.voice_seconds);
             let controls = std::mem::take(&mut usage.button_presses_by_control);
             usage.button_presses_by_control = normalize_control_counts(controls);
         }
@@ -145,6 +151,7 @@ impl DailyUsage {
             button_presses_by_control,
             voice_sessions: self.voice_sessions.saturating_add(other.voice_sessions),
             voice_seconds: add_duration(self.voice_seconds, other.voice_seconds),
+            longest_voice_seconds: self.longest_voice_seconds.max(other.longest_voice_seconds),
         }
     }
 }
@@ -259,6 +266,7 @@ mod tests {
                 button_presses_by_control: BTreeMap::new(),
                 voice_sessions: 3,
                 voice_seconds: 5.0,
+                longest_voice_seconds: 3.25,
             }
         );
         assert_eq!(statistics.total().button_presses, u64::MAX);
@@ -348,6 +356,29 @@ mod tests {
         assert_eq!(three_second_positions, vec![2_000, 1_002]);
         assert!(!ranking.iter().any(|record| record.duration_seconds == 1.0));
         assert_eq!(statistics.longest_voice_session_seconds(), 12.0);
+    }
+
+    #[test]
+    fn tracks_the_longest_voice_session_per_day() {
+        let mut statistics = UsageStatistics::default();
+        statistics.record_voice_session_with_details("2026-09-01", 3.0, 1_000, None);
+        statistics.record_voice_session_with_details("2026-09-01", 9.0, 2_000, None);
+        statistics.record_voice_session_with_details("2026-09-01", 4.0, 3_000, None);
+        statistics.record_voice_session_with_details("2026-09-02", 2.0, 4_000, None);
+
+        assert_eq!(statistics.days["2026-09-01"].longest_voice_seconds, 9.0);
+        assert_eq!(statistics.days["2026-09-02"].longest_voice_seconds, 2.0);
+        assert_eq!(statistics.total().longest_voice_seconds, 9.0);
+    }
+
+    #[test]
+    fn reads_old_statistics_files_without_the_daily_longest_field() {
+        let statistics: UsageStatistics = serde_json::from_str(
+            r#"{"days":{"2026-09-01":{"button_presses":2,"voice_sessions":1,"voice_seconds":3.5}}}"#,
+        )
+        .expect("old file");
+
+        assert_eq!(statistics.days["2026-09-01"].longest_voice_seconds, 0.0);
     }
 
     #[test]

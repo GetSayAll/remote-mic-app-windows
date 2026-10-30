@@ -2,6 +2,7 @@
 // 内容文案（如设备徽标「推荐」= Recommended）分开，避免一个中文 key 被迫
 // 同时对应两种英文语义。
 export default {
+  "nav.键位方案": "Button Profiles",
   "nav.按键": "Buttons",
   "nav.组合动作": "Routines",
   "nav.连接": "Connection",

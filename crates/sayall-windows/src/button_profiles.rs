@@ -38,6 +38,15 @@ pub enum ProfileAccess {
     Unavailable,
     /// 已保存方案可见，但编辑/自动应用需要 Plus。
     RequiresPlus,
+    /// 会员状态暂时离线，但上次验签的权益仍允许使用。
+    TemporarilyOffline {
+        #[serde(
+            rename = "validUntil",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        valid_until: Option<String>,
+    },
     /// 可使用；`valid_until` 只用于界面提示，不参与公开层判断。
     Allowed {
         #[serde(
@@ -162,5 +171,11 @@ mod tests {
             .unwrap()["validUntil"],
             "2026-11-01T00:00:00Z"
         );
+        let offline = serde_json::to_value(ProfileAccess::TemporarilyOffline {
+            valid_until: Some("2026-11-01T00:00:00Z".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(offline["status"], "temporarilyOffline");
+        assert_eq!(offline["validUntil"], "2026-11-01T00:00:00Z");
     }
 }
