@@ -33,7 +33,6 @@ import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import MacrosPage from "./pages/MacrosPage.vue";
 import OnboardingPage from "./pages/OnboardingPage.vue";
-import PermissionsPage from "./pages/PermissionsPage.vue";
 import RecommendationsPage from "./pages/RecommendationsPage.vue";
 import ReflectionsPage from "./pages/ReflectionsPage.vue";
 import ProfilePage from "./pages/ProfilePage.vue";
@@ -143,7 +142,6 @@ const pageComponents: Record<string, Component> = {
   macros: MacrosPage,
   connection: ConnectionPage,
   reflections: ReflectionsPage,
-  permissions: PermissionsPage,
   settings: SettingsPage,
   profile: ProfilePage,
   ...privatePageComponents(),
@@ -270,6 +268,7 @@ onUnmounted(() => {
       :active-page="activePage"
       :profile-label="profileLabel"
       :app-icon="appIcon"
+      :app-version="runtime?.appVersion ?? ''"
       @select="activePage = $event"
     />
     <main class="content">

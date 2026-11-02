@@ -11,11 +11,17 @@ describe("sidebar", () => {
     effectiveLanguage.value = "zh-Hans";
   });
 
-  it("不显示版本号（版本号在窗口标题）", () => {
-    const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
+  it("品牌区显示应用名与版本（对齐 Mac PR 803 的紧凑侧栏）", () => {
+    const wrapper = mount(Sidebar, {
+      props: { activePage: "settings", appVersion: "0.5.0" },
+    });
 
     expect(wrapper.find(".sidebar-footer").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("0.5.0");
+    expect(wrapper.get(".sidebar-brand").text()).toContain("SayAll");
+    expect(wrapper.get(".brand-version").text()).toBe("0.5.0");
+    expect(wrapper.get(".sidebar-brand img").attributes("src")).toBe(
+      "/app-icon-faceted-duck.webp",
+    );
   });
 
   it("顶部页面顺序不变，个人中心固定在最后", () => {
@@ -35,25 +41,37 @@ describe("sidebar", () => {
       "推荐",
       "连接",
       "回眸",
-      "权限",
       "设置",
       "个人中心",
     ]);
     // 推荐入口使用 Mac 的 sparkles 语义图标（大四角星 + 两颗小星）。
     const recommendationIcon = items[2].get("svg");
     expect(recommendationIcon.findAll("path")).toHaveLength(3);
-    // 回眸入口使用文本气泡图标；紧挨权限上方。
+    // 回眸入口使用文本气泡图标；紧挨设置上方。
     expect(items[4].text()).toBe("回眸");
     expect(items[4].get("svg").findAll("path")).toHaveLength(2);
     // 组合动作入口使用层叠方块图标（3 条描边）。
     expect(items[1].get("svg").findAll("path")).toHaveLength(3);
-    const settingsIcon = items[6].get("svg");
+    const settingsIcon = items[5].get("svg");
     // 齿轮形状：外圈齿形 + 中央圆孔（区别于旧「关于」的 info.circle 单圆）。
     const paths = settingsIcon.findAll("path");
     expect(paths).toHaveLength(2);
     expect(paths[1].attributes("d")).toContain("a3.2 3.2");
     expect(wrapper.find(".share-nav-item").exists()).toBe(false);
     expect(wrapper.get(".profile-nav-item").attributes("aria-label")).toBe("个人中心");
+    // 2026-10-31 权限页并入设置：侧栏不再有「权限」入口。
+    expect(wrapper.text()).not.toContain("权限");
+  });
+
+  it("导航与账号入口采用图标在左、文字在右的紧凑横排", () => {
+    const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
+    const item = wrapper.get(".nav-item");
+    const children = Array.from(item.element.children);
+    expect(children[0].tagName.toLowerCase()).toBe("svg");
+    expect(children[1].classList.contains("nav-label")).toBe(true);
+    const profile = wrapper.get(".profile-nav-item");
+    expect(profile.element.firstElementChild?.tagName.toLowerCase()).toBe("img");
+    expect(profile.find(".nav-label").exists()).toBe(true);
   });
 
   it("个人中心图标使用与托盘同源的应用 logo", async () => {
@@ -101,7 +119,6 @@ describe("sidebar", () => {
       "Picks",
       "Connection",
       "Reflections",
-      "Permissions",
       "Settings",
       "Profile",
     ]);
@@ -115,7 +132,6 @@ describe("sidebar", () => {
       "Picks",
       "Connection",
       "Reflections",
-      "Permissions",
       "Settings",
       "Profile",
     ]);

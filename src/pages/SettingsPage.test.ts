@@ -366,6 +366,86 @@ describe("settings page", () => {
     expect(button).toBeDefined();
   });
 
+  it("权限页并入设置：权限三项与诊断/日志/问题反馈按分组呈现", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    expect(
+      wrapper.findAll(".settings-section .section-title").map((item) => item.text()),
+    ).toEqual(["权限", "通用", "首次设置", "诊断与日志"]);
+
+    const sections = wrapper.findAll(".settings-section");
+    const permissionSection = sections[0];
+    expect(permissionSection.text()).toContain("蓝牙");
+    expect(permissionSection.text()).toContain("按键监听与映射");
+    expect(permissionSection.text()).toContain("音频设备");
+    expect(permissionSection.findAll(".permission-row")).toHaveLength(3);
+    expect(permissionSection.text()).toContain("当前电脑不支持");
+
+    // 问题反馈与诊断摘要、日志目录同属「诊断与日志」分类。
+    const diagnosticsSection = sections[3];
+    expect(diagnosticsSection.find(".diagnostics-card").exists()).toBe(true);
+    expect(diagnosticsSection.find(".feedback-card").exists()).toBe(true);
+    expect(diagnosticsSection.text()).toContain("问题反馈");
+  });
+
+  it("诊断与日志：生成摘要、复制摘要，且摘要不含隐私字段", async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>();
+    writeText.mockResolvedValue();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    const buttons = wrapper.findAll<HTMLButtonElement>(".diagnostics-card button");
+    expect(buttons.map((button) => button.text())).toEqual([
+      "生成摘要",
+      "复制摘要",
+      "打开日志目录",
+    ]);
+
+    await buttons[0].trigger("click");
+    await flushPromises();
+
+    const report = wrapper.get(".diagnostic-output").text();
+    expect(report).toContain('"schemaVersion": 4');
+    expect(report).toContain('"windowsVersion"');
+    expect(report).toContain('"sourceRevision"');
+    // 开机上下文（2026-10-20）：报障时无需另拉日志。
+    expect(report).toContain('"bootType"');
+    expect(report).toContain('"fastStartupEnabled"');
+    expect(report).not.toContain("remoteName");
+    expect(report).not.toContain("selectedEndpointName");
+    expect(report).not.toContain("lastError");
+    expect(wrapper.text()).toContain("诊断摘要已生成");
+
+    await buttons[1].trigger("click");
+    await flushPromises();
+
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(writeText).toHaveBeenCalledWith(report);
+    expect(wrapper.text()).toContain("诊断摘要已复制到剪贴板");
+  });
+
+  it("诊断与日志：浏览器预览下打开日志目录给出明确不可用提示", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime } });
+    await flushPromises();
+
+    const button = wrapper
+      .findAll("button")
+      .find((candidate) => candidate.text().includes("打开日志目录"));
+    expect(button).toBeDefined();
+
+    await button!.trigger("click");
+    await flushPromises();
+
+    // 原始 IPC 错误只进控制台，界面给固定文案（英文模式同样可翻译）。
+    expect(wrapper.text()).toContain("无法打开日志目录，请稍后重试。");
+  });
+
   it("问题反馈模块提供官网与 GitHub 入口，官网带 Windows 来源标记", async () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     const wrapper = mount(SettingsPage, { props: { runtime } });
@@ -593,15 +673,23 @@ describe("settings page", () => {
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.text()).toContain("Voice within reach");
     expect(wrapper.text()).toContain("Current Version");
+    expect(wrapper.text()).toContain("Permissions");
+    expect(wrapper.text()).toContain("Diagnostics & Logs");
     expect(wrapper.text()).toContain("General");
     expect(wrapper.text()).toContain("Appearance");
     expect(wrapper.text()).toContain("Launch Behavior");
     expect(wrapper.text()).toContain("App Language");
     expect(wrapper.text()).toContain("App Icon");
     expect(wrapper.text()).toContain("First-Time Setup");
+    expect(wrapper.text()).toContain("Bluetooth");
+    expect(wrapper.text()).toContain("Button Listening & Mapping");
+    expect(wrapper.text()).toContain("Audio Device");
+    expect(wrapper.text()).toContain("Diagnostic Summary");
+    expect(wrapper.text()).toContain("Open Log Folder");
     expect(wrapper.text()).toContain("Feedback");
     expect(wrapper.text()).not.toContain("让语音触手可及");
-    expect(wrapper.text()).not.toContain("通用");
+    expect(wrapper.text()).not.toContain("诊断与日志");
+    expect(wrapper.text()).not.toContain("权限");
 
     // 外观三档与语言三档：语言选项按用户要求保留「简体中文」原语言名。
     const themeGroup = wrapper.get('[role="radiogroup"][aria-label="Display mode"]');

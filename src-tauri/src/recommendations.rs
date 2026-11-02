@@ -4,7 +4,7 @@
 //! 这里在 Tauri 主窗口上挂一个子 WebView（Windows 上即 WebView2 子视图），直接加载
 //! 官网页面。布局、排序、筛选、详情和内容更新全部由官网负责，Windows 客户端只提供：
 //!
-//! - 与设置侧栏一致的固定内容区边界（侧栏 108px，其余全部给网页）；
+//! - 与设置侧栏一致的固定内容区边界（侧栏 136px，其余全部给网页）；
 //! - `embed=app` 嵌入模式、浅/深色主题和 Windows 平台标记；
 //! - 加载完成前隐藏子 WebView；加载失败显示原生错误状态（重试 / 打开官网）；
 //! - 官网内的推荐详情仍由网页自己的 `?item=` 路由处理；
@@ -30,8 +30,8 @@ pub const LABEL: &str = "recommendations";
 /// 用户指定：直接使用官网中文推荐页（英文页留作后续语言切换）。
 const PAGE_URL: &str = "https://sayall.app/recommendations/";
 const ENGLISH_PAGE_URL: &str = "https://sayall.app/en/recommendations/";
-/// 与 `src/styles.css` 的 `.app-shell` 第一列保持一致。
-const SIDEBAR_WIDTH: f64 = 108.0;
+/// 与 `src/styles.css` 的 `.app-shell` 第一列保持一致（2026-10-31 起为 136）。
+const SIDEBAR_WIDTH: f64 = 136.0;
 /// 首次创建时先放到窗口外，避免 about:blank 或加载中的页面闪一下。
 const OFFSCREEN_X: f64 = -20_000.0;
 const EVENT_NAME: &str = "recommendations-page-state";
