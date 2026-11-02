@@ -335,10 +335,35 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   await testAppFocus("notepad");
   steps.push("「聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
 
-  mark("permissions_page");
-  await openPage("权限");
-  // 诊断摘要 2026-10-01 从关于页迁回权限页（用户指定）：状态与取证入口同页，
-  // 用户看到某一项不对时不必跳页。
+  await openPage("设置");
+  mark("settings_page");
+  // 2026-10-02 设置页改版（对齐 Mac 新设置页）：顶部模块 = 应用标识 + 版本 +
+  // 检查更新；各分组在卡外有分组标题。2026-10-08 起多一个「首次设置」分组
+  // （向导重跑入口，随首次设置向导一起交付）。2026-10-31 权限页并入设置：
+  // 权限、诊断摘要、日志目录与问题反馈都在本页，侧栏不再有独立「权限」入口。
+  const settingsOverview = document.querySelector<HTMLElement>("article.settings-overview");
+  assert(settingsOverview !== null, "设置页缺少顶部标识与检查更新模块");
+  assert(
+    settingsOverview.textContent?.includes("当前版本") === true,
+    "设置页顶部没有显示当前版本",
+  );
+  assert(
+    document.querySelector("article.settings-overview .check-button") !== null,
+    "设置页顶部没有检查更新入口",
+  );
+  const sectionTitles = Array.from(
+    document.querySelectorAll<HTMLElement>(".settings-section .section-title"),
+  ).map((element) => element.textContent?.trim());
+  assert(
+    sectionTitles.join(" / ") === "权限 / 通用 / 首次设置 / 诊断与日志",
+    `设置页分组标题异常：${sectionTitles.join(" / ")}`,
+  );
+  const permissionRows = document.querySelectorAll(".permission-row");
+  assert(permissionRows.length === 3, "设置页权限分组没有蓝牙/按键/音频三项状态");
+  steps.push("设置页按「权限 / 通用 / 首次设置 / 诊断与日志」分组呈现");
+
+  // 诊断摘要 2026-10-31 从侧栏「权限」页并入设置页「诊断与日志」分组：
+  // 状态与取证入口同页，用户看到某一项不对时不必跳页。
   await clickButton("生成摘要");
   await waitFor(
     () =>
@@ -352,7 +377,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   assert(diagnostic.capabilities.bleVoiceReady, "诊断摘要没有反映 ATVV 就绪");
   assert(diagnostic.capabilities.wasapiReady, "诊断摘要没有反映 WASAPI 就绪");
   assert(diagnostic.capabilities.rawInputReady, "诊断摘要没有反映 Raw Input 就绪");
-  steps.push("权限页呈现蓝牙/按键/音频三项状态并生成去标识化运行诊断摘要");
+  steps.push("设置页权限分组呈现三项状态，诊断与日志分组生成去标识化运行诊断摘要");
 
   // "打开日志目录"刻意**不作成败断言**：它经 ShellExecuteW 交给资源管理器，
   // CI runner 是否有可用的 shell 桌面不在本仓库控制范围内，拿它当门禁只会
@@ -368,44 +393,22 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push(
     logDirectoryMessage.startsWith("已打开日志目录")
-      ? "权限页“打开日志目录”经真实 IPC 交由资源管理器打开"
-      : `权限页“打开日志目录”返回不可用（deferred）：${logDirectoryMessage}`,
+      ? "设置页“打开日志目录”经真实 IPC 交由资源管理器打开"
+      : `设置页“打开日志目录”返回不可用（deferred）：${logDirectoryMessage}`,
   );
 
-  await openPage("设置");
-  mark("settings_page");
-  // 2026-10-02 设置页改版（对齐 Mac 新设置页）：顶部模块 = 应用标识 + 版本 +
-  // 检查更新；各分组在卡外有分组标题。2026-10-08 起多一个「首次设置」分组
-  // （向导重跑入口，随首次设置向导一起交付）。
-  const settingsOverview = document.querySelector<HTMLElement>("article.settings-overview");
-  assert(settingsOverview !== null, "设置页缺少顶部标识与检查更新模块");
-  assert(
-    settingsOverview.textContent?.includes("当前版本") === true,
-    "设置页顶部没有显示当前版本",
-  );
-  assert(
-    document.querySelector("article.settings-overview .check-button") !== null,
-    "设置页顶部没有检查更新入口",
-  );
-  const sectionTitles = Array.from(
-    document.querySelectorAll<HTMLElement>(".settings-section .section-title"),
-  ).map((element) => element.textContent?.trim());
-  assert(
-    sectionTitles.join(" / ") === "通用 / 首次设置 / 问题反馈",
-    `设置页分组标题异常：${sectionTitles.join(" / ")}`,
-  );
   const wizardEntry = Array.from(
     document.querySelectorAll<HTMLButtonElement>(".settings-section .settings-row button"),
   ).find((button) => button.textContent?.trim() === "重新运行向导");
   assert(wizardEntry !== null, "设置页缺少「重新运行向导」入口");
   const entryLabels = Array.from(
-    document.querySelectorAll<HTMLButtonElement>(".settings-section .button-row button"),
+    document.querySelectorAll<HTMLButtonElement>(".feedback-card .button-row button"),
   ).map((button) => button.textContent?.trim());
   assert(
     entryLabels.length === 2 && entryLabels[0] === "官网" && entryLabels[1] === "GitHub",
     `设置页问题反馈入口异常：${entryLabels.join(" / ")}`,
   );
-  steps.push("设置页顶部为应用标识/版本/检查更新，含「重新运行向导」入口与问题反馈（官网/GitHub）");
+  steps.push("设置页含「重新运行向导」入口，问题反馈与诊断摘要同属「诊断与日志」分组");
   await recordExternalEntry("官网", steps, simulationOptions.skipExternalEntries);
   await recordExternalEntry("GitHub", steps, simulationOptions.skipExternalEntries);
 
@@ -507,7 +510,11 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
 
   await openPage("个人中心");
   mark("profile_page");
-  assert(document.querySelector(".sidebar-footer") === null, "侧栏不应再显示版本号");
+  assert(
+    document.querySelector(".brand-version")?.textContent?.trim(),
+    "侧栏品牌区应显示版本号（对齐 Mac PR 803）",
+  );
+  assert(document.querySelector(".sidebar-footer") === null, "侧栏不应再有底部版本区");
   assert(
     document.querySelector(".share-nav-item") === null,
     "分享入口应在个人中心页内，不应出现在侧栏",

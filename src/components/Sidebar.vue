@@ -23,8 +23,10 @@ const props = withDefaults(
     profileLabel?: string;
     /** 与托盘/窗口图标同源的当前应用图标。 */
     appIcon?: AppIconIdentifier;
+    /** 侧栏品牌区版本行（对齐 Mac PR 803）；读不到时留空。 */
+    appVersion?: string;
   }>(),
-  { profileLabel: "个人中心", appIcon: "faceted-duck" },
+  { profileLabel: "个人中心", appIcon: "faceted-duck", appVersion: "" },
 );
 const emit = defineEmits<{ select: [page: string] }>();
 
@@ -112,6 +114,14 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 
 <template>
   <aside class="sidebar">
+    <!-- 品牌区（对齐 Mac PR 803）：44px 应用图标 + SayAll + 版本行。 -->
+    <div class="sidebar-brand">
+      <img class="brand-logo" :src="appIconPreview" alt="" aria-hidden="true" />
+      <div class="brand-text">
+        <span class="brand-name">SayAll</span>
+        <span v-if="appVersion" class="brand-version">{{ appVersion }}</span>
+      </div>
+    </div>
     <nav class="sidebar-nav" :aria-label="t('设置页面')">
       <button
         v-for="item in topNavigationItems"
@@ -141,27 +151,71 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
             stroke-linejoin="round"
           />
         </svg>
-        <span>{{ navLabel(item) }}</span>
+        <span class="nav-label">{{ navLabel(item) }}</span>
       </button>
 
       <!-- 个人中心固定在最底部（对齐 Mac statistics）。 -->
       <div class="sidebar-spacer"></div>
-      <button
-        v-if="profileItem"
-        class="nav-item profile-nav-item"
-        :class="{ active: activePage === profileItem.id }"
-        type="button"
-        :aria-label="tNav('个人中心')"
-        @click="emit('select', profileItem.id)"
-      >
-        <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
-        <span>{{ profileLabelText }}</span>
-      </button>
+      <div class="sidebar-account">
+        <button
+          v-if="profileItem"
+          class="nav-item profile-nav-item"
+          :class="{ active: activePage === profileItem.id }"
+          type="button"
+          :aria-label="tNav('个人中心')"
+          @click="emit('select', profileItem.id)"
+        >
+          <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
+          <span class="nav-label">{{ profileLabelText }}</span>
+        </button>
+      </div>
     </nav>
   </aside>
 </template>
 
 <style scoped>
+/* 品牌区：对齐 Mac PR 803（44pt logo、16pt SayAll、12pt 版本行）。 */
+.sidebar-brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 75px;
+  padding: 11px 12px 10px;
+  box-sizing: border-box;
+}
+
+.brand-logo {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-top: 6px;
+}
+
+.brand-name {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.brand-version {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-nav {
   display: flex;
   flex: 1 1 auto;
@@ -176,16 +230,25 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   min-height: 12px;
 }
 
-/* 邮箱前缀最多 10 个字符；极窄侧栏仍保持单行省略，避免撑宽或换行。 */
-.nav-item > span {
-  max-width: 100%;
+/* 账号入口与上方导航之间一条细线（对齐 Mac statistics 上方的 separators）。 */
+.sidebar-account {
+  margin-top: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+/* 图标在左、文字在右的紧凑横排；文字占满剩余宽度并保持左对齐。 */
+.nav-label {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .nav-app-icon {
-  border-radius: 5px;
+  border-radius: 4px;
   object-fit: cover;
 }
 </style>

@@ -191,18 +191,19 @@ body {
   font-size: 16px;
 }
 
-/* 侧栏对齐 macOS SettingsView：宽 108px、图标 21 semibold、文字 13 semibold、
-   选中 = 强调色 + 10% 背景（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
+/* 侧栏对齐 macOS SettingsView（2026-10-31 起对齐 PR 803 紧凑布局）：
+   宽 136px、图标 18、文字 13 semibold、图标在左文字在右、行高 40；
+   选中 = 强调色 + 10% 背景 + 7px 圆角（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
 /* 外壳固定为视口高度（不再 min-height 随内容增高）：超出部分交给 .content
    在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
-.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); height: 100vh; }
+.app-shell { display: grid; grid-template-columns: 136px minmax(0, 1fr); height: 100vh; }
 .sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* 对齐 Mac：选中态铺满侧栏宽度；首项贴顶、个人中心贴底，不留空白带。 */
+  /* 对齐 Mac：品牌区贴顶、个人中心贴底，不留空白带。 */
   padding: 0;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
@@ -210,25 +211,29 @@ body {
 }
 nav { display: grid; gap: 4px; }
 .nav-item {
-  width: 100%;
+  width: calc(100% - 12px);
+  min-height: 40px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 7px;
-  padding: 12px 2px;
+  justify-content: flex-start;
+  gap: 8px;
+  margin: 0 6px;
+  padding: 4px 9px;
   border: 0;
-  border-radius: 0;
+  border-radius: 7px;
   color: var(--text-nav);
   background: transparent;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.2;
+  box-sizing: border-box;
 }
 .nav-item:hover { background: var(--nav-hover); }
 .nav-item.active { color: var(--accent); background: var(--accent-surface); }
-.nav-icon { width: 21px; height: 21px; display: block; }
+.nav-icon { width: 18px; height: 18px; flex: 0 0 auto; display: block; }
 .sidebar-footer { margin-top: auto; padding: 10px 4px; color: var(--muted); font-size: 12px; text-align: center; }
 
 /* 2026-10-04 Andy：左右留白定为 物理 48 / 52。左侧逻辑 32（@150% = 48 物理）实测吻合。
@@ -243,6 +248,12 @@ nav { display: grid; gap: 4px; }
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
+/* 设置页分组：标题在卡外，字号与「通用」一致。必须放全局样式，因为设置页的
+   子组件（权限 / 诊断与日志）也会输出 `.settings-section` / `.section-title`；
+   放在 SettingsPage 的 scoped 样式里时，子组件标题会回落成浏览器默认 24px
+   （2026-10-31 实测）。 */
+.settings-section { margin-bottom: 18px; }
+.section-title { margin: 0 0 8px; font-size: 16px; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); gap: 14px; align-items: start; }
 .card { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 30px var(--shadow-card); }
 .card h2 { margin: 0 0 5px; font-size: 16px; }

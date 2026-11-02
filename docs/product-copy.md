@@ -52,7 +52,8 @@
 | 组合动作 | Routine / Routines | 内容与动作单数；侧栏、页面标题、库标题用 Routines |
 | 连接 | Connection / Connect | 侧栏用 Connection；页面标题按 Mac `connection.page.title` 用 Connection & Voice；按钮动作「连接」用 Connect |
 | 推荐 | Picks / Recommended | 页面/侧栏用 Picks；设备徽标用 Recommended |
-| 权限 | Permissions | 侧栏用 Permissions；页面标题按 Mac `permissions.page.title` 用 Permissions & Privacy |
+| 权限 | Permissions | 设置页分组标题用 Permissions（2026-10-31 起不再是独立侧栏页） |
+| 诊断与日志 | Diagnostics & Logs | 设置页分组标题；诊断摘要、日志目录与问题反馈都在此分组 |
 | 按键映射页标题 | Button Mapping | 对齐 Mac `button_mapping.page.title` |
 | 设置 | Settings / Set Up | 页面/侧栏用 Settings；向导阶段用 Set Up |
 | 全按键支持 | Full-key support | 句首大写，其余小写 |
@@ -631,7 +632,8 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   记录，不需要重复学习。执行时走同一条“打开应用 + 聚焦”实现；两边都不提供
   “测试输入框 / 测试打开与聚焦”入口。
 - 2026-10-24（个人中心，对齐 Mac `statisticsPage`，用户要求；同日二次修正）：
-  侧栏不显示版本号。最底部入口未登录显示「个人中心」，已登录只显示邮箱 `@` 前最多 10 个字符
+  侧栏不显示版本号（2026-10-31 起改为品牌区显示版本号，见该日条目）。
+  最底部入口未登录显示「个人中心」，已登录只显示邮箱 `@` 前最多 10 个字符
   （不足 10 个完整显示），完整邮箱仍只在会员页显示；图标使用与托盘、窗口同源的应用 logo
   （默认水彩鸭 / 几何鸭，随设置切换）。
   页面标题「个人中心」，右上为绿色状态文字「数据仅存本机」（非按钮，12 semibold 胶囊，
@@ -689,6 +691,13 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   改由助手自己换端口解决（`holder=other_program` 也回退），不再作为提示内容。
   写法边界：不出现端口、进程、助手、驱动（术语红线照旧）；读不到原因时退回通用句，不做猜测。
   落点：`captureInactiveText`（`src/lib/capture-switch.ts`）、英译 `src/lib/i18n/en/lib.ts`。
+- 2026-10-31（设置页吸收权限页 + 侧栏紧凑化；对照 Mac PR #803）：
+  侧栏不再有「权限」入口，顺序为「按键、组合动作、推荐、连接、回眸、设置」，个人中心固定在底部；
+  侧栏宽 136px，导航为图标在左、文字在右的紧凑横排，顶部品牌区为 44px 应用图标 +
+  「SayAll」+ 版本号，底部账号入口上方一条分隔线。
+  权限状态、诊断摘要、日志目录与问题反馈统一放在「设置」页，分组标题为「权限」「诊断与日志」；
+  问题反馈位于「诊断与日志」下。英文为 `Permissions` / `Diagnostics & Logs`。
+  旧版本持久化的 `sayall.activePage = permissions` 升级后落到「设置」，不落回默认页。
 - 2026-11-05：首次设置向导新增第④步「全按键支持」说明与开启引导（用户要求；位置在语音设备
   之后、输入工具之前）。文案：标题「开启全按键支持」；说明「开启后，遥控器上的所有按键都能
   设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。」；页首有一条明显的
@@ -713,3 +722,4 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. If it is not listed,
   open Advanced settings or select Show all devices.`；真机验收手册同句同步。落点：
   `src/onboarding/steps/WelcomeStep.vue`、`src/lib/i18n/en/onboarding.ts`。
+

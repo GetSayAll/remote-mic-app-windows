@@ -10,13 +10,13 @@ import {
   getAppIcon,
   getLaunchAtLogin,
   getOpenWindowAtLaunch,
-  openGitHubRepository,
-  openOfficialWebsite,
   restartOnboarding,
   setAppIcon,
   setLaunchAtLogin,
   setOpenWindowAtLaunch,
 } from "../lib/bridge";
+import DiagnosticsSection from "./settings/DiagnosticsSection.vue";
+import PermissionsSection from "./settings/PermissionsSection.vue";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
 import { useLanguage } from "../lib/language";
@@ -182,43 +182,6 @@ async function runOnboardingWizard(): Promise<void> {
   }
 }
 
-/**
- * “问题反馈”的外部入口（2026-10-01 用户指定：官网与 GitHub 入口；2026-10-02
- * 官网地址带 `?from=win` 来源标记）。打开动作一律走 bridge：浏览器预览开新标签，
- * Tauri 运行时的 URL 白名单在 capabilities/default.json。
- */
-/**
- * 外部入口（2026-10-01 用户指定：官网与 GitHub 入口；2026-10-02 官网地址带
- * `?from=win` 来源标记）。打开动作一律走 bridge：浏览器预览开新标签，Tauri
- * 运行时的 URL 白名单在 capabilities/default.json。
- *
- * 2026-10-02 用户指定：成功不再显示任何提示（“已在系统默认浏览器打开…”已去掉），
- * 只有失败就地给原因——失败文案不能省：capability 拒绝（Not allowed to open url）
- * 与系统没有默认浏览器是两类不同问题，压成"打开失败"会让现场无法归因。
- */
-const linkBusy = ref(false);
-const linkMessage = ref("");
-
-async function openEntry(open: () => Promise<void>): Promise<void> {
-  linkBusy.value = true;
-  linkMessage.value = "";
-  try {
-    await open();
-  } catch (error) {
-    linkMessage.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    linkBusy.value = false;
-  }
-}
-
-async function onOpenOfficialWebsite(): Promise<void> {
-  await openEntry(openOfficialWebsite);
-}
-
-async function onOpenGitHubRepository(): Promise<void> {
-  await openEntry(openGitHubRepository);
-}
-
 async function onCheck(): Promise<void> {
   await check(true);
 }
@@ -352,12 +315,6 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
     ],
     fills: ["M17.6 15.9a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"],
   },
-  feedback: {
-    // SF "bubble.left.and.bubble.right" 近似：单个圆角对话气泡
-    strokes: [
-      "M12 3.8c-4.8 0-8.7 3.1-8.7 7 0 2.3 1.3 4.3 3.3 5.6l-1 3.5 4-2.2c.8.2 1.6.3 2.4.3 4.8 0 8.7-3.1 8.7-7S16.8 3.8 12 3.8z",
-    ],
-  },
   onboarding: {
     // SF "arrow.triangle.2.circlepath" 近似：环形箭头（重新走一遍）
     strokes: ["M19.6 12a7.6 7.6 0 1 1-2.3-5.4", "M17.6 2.8v4h-4"],
@@ -465,6 +422,9 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
         </div>
       </div>
     </article>
+
+    <!-- 权限（2026-10-31 从侧栏「权限」页并入；对齐 Mac `inlinePermissionsSection`）。 -->
+    <PermissionsSection :runtime="runtime" />
 
     <!-- 通用（对齐 Mac 设置页的 settings.general 分组：标题 + 一张卡内多行 + 细分隔线）。 -->
     <section class="settings-section">
@@ -693,52 +653,8 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
       </div>
     </section>
 
-    <!-- 问题反馈（对齐 Mac 设置页的 settingsSupportSection）。 -->
-    <section class="settings-section">
-      <h2 class="section-title">{{ t("问题反馈") }}</h2>
-      <div class="card settings-group">
-        <div class="settings-row">
-          <span class="settings-row-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none">
-              <path
-                v-for="(path, index) in ROW_ICONS.feedback.strokes"
-                :key="`fs${index}`"
-                :d="path"
-                stroke="currentColor"
-                stroke-width="1.9"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-          </span>
-          <div class="settings-row-text">
-            <strong>{{ t("问题反馈") }}</strong>
-            <p class="muted">{{ t("反馈无线麦 SayAll 的问题，或提出改进建议。") }}</p>
-          </div>
-          <div class="button-row">
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="linkBusy"
-              @click="onOpenOfficialWebsite"
-            >
-              {{ t("官网") }}
-            </button>
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="linkBusy"
-              @click="onOpenGitHubRepository"
-            >
-              GitHub
-            </button>
-          </div>
-        </div>
-        <p v-if="linkMessage" class="operation-message link-message" aria-live="polite">
-          {{ linkMessage }}
-        </p>
-      </div>
-    </section>
+    <!-- 诊断与日志（2026-10-31 从侧栏「权限」页并入；问题反馈同属这个分类）。 -->
+    <DiagnosticsSection />
   </section>
 </template>
 
@@ -774,9 +690,9 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 .update-status.pending { color: var(--muted); }
 .update-status.idle { color: var(--muted); }
 
-/* 分组：标题在卡外（Mac settings.general.title），卡内每行左侧图标、右侧操作。 */
-.settings-section { margin-bottom: 18px; }
-.section-title { margin: 0 0 8px; font-size: 16px; }
+/* 分组：标题在卡外（Mac settings.general.title），卡内每行左侧图标、右侧操作。
+   `.settings-section` / `.section-title` 放在全局 styles.css：子组件也会输出
+   这两个类，scoped 样式不会作用到子组件内部的标题。 */
 .settings-group { padding: 4px 16px; }
 .settings-row {
   display: grid;
