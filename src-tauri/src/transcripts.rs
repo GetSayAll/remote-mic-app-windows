@@ -61,6 +61,10 @@ pub struct TranscriptRecordingView {
 pub const UNKNOWN_APPLICATION_KEY: &str = "__unknown__";
 pub const UNKNOWN_APPLICATION_NAME: &str = "未知应用";
 
+/// 图标缓存格式版本。图标提取逻辑修复后必须递增，否则旧版本写坏的 PNG 会一直
+/// 命中缓存，用户升级后仍看到错误的图标。
+const ICON_CACHE_VERSION: &str = "v2";
+
 /// 捕获成功后发给前端的轻量事件。**不带文字**，页面收到后重新拉快照。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -384,7 +388,7 @@ impl TranscriptStore {
         }
         let directory = self.root.join("icons");
         fs::create_dir_all(&directory).map_err(|error| format!("创建图标缓存失败：{error}"))?;
-        let target = directory.join(format!("{application_key}.png"));
+        let target = self.icon_path(application_key);
         if fs::metadata(&target)
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false)
@@ -396,15 +400,20 @@ impl TranscriptStore {
         replace_file(&temporary, &target).map_err(|error| format!("替换图标缓存失败：{error}"))
     }
 
+    /// 图标缓存文件路径。文件名带格式版本：提取逻辑修好后旧版本写坏的图标
+    /// 不会再被 `attach_icons` 当成命中而绕过重新提取（2026-11-03 教训）。
+    fn icon_path(&self, application_key: &str) -> PathBuf {
+        self.root
+            .join("icons")
+            .join(format!("{application_key}.{ICON_CACHE_VERSION}.png"))
+    }
+
     fn attach_icons(&self, snapshot: &mut TranscriptHistorySnapshot) {
         for application in &mut snapshot.applications {
             if !is_safe_application_key(&application.key) {
                 continue;
             }
-            let path = self
-                .root
-                .join("icons")
-                .join(format!("{}.png", application.key));
+            let path = self.icon_path(&application.key);
             let cached = fs::read(&path).ok().filter(|bytes| !bytes.is_empty());
             let bytes = cached.or_else(|| {
                 #[cfg(windows)]
@@ -940,12 +949,33 @@ mod tests {
             .append(record("id-1", "第一条", &chrome, "2026-10-25"))
             .unwrap();
         store.write_icon(&chrome, b"fake-png").unwrap();
+        assert!(store.icon_path(&chrome).is_file());
 
         let snapshot = store.snapshot(true, false);
         assert_eq!(
             snapshot.applications[0].icon_data_url.as_deref(),
             Some("data:image/png;base64,ZmFrZS1wbmc=")
         );
+    }
+
+    /// 回归：旧版本把坏图标写进 `{key}.png` 后永不复检，修好提取逻辑也没用。
+    /// 缓存文件名带版本号后，旧文件不再命中，会重新提取。
+    #[test]
+    fn icon_cache_ignores_files_written_by_older_versions() {
+        let root = TempRoot::new("icons-legacy");
+        let trash = root.path.join("trash");
+        let store = store(&root, &trash);
+        let key = application_key("legacy-icon-test.exe", "LegacyIconTest");
+        let mut entry = record("id-1", "第一条", &key, "2026-10-25");
+        // 用不会命中任何运行中进程的名字，避免回退提取给出真实图标。
+        entry.application_name = "LegacyIconTest".to_owned();
+        store.append(entry).unwrap();
+        let directory = root.path.join("icons");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(format!("{key}.png")), b"legacy-broken-icon").unwrap();
+
+        let snapshot = store.snapshot(true, false);
+        assert_eq!(snapshot.applications[0].icon_data_url, None);
     }
 
     #[test]
