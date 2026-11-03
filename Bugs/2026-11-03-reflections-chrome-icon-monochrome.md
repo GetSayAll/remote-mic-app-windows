@@ -1,7 +1,7 @@
 # 回眸：Chrome 图标变成黑白块（应用图标一律单色）
 
 - 发现日期：2026-11-03
-- 状态：已修复（提取函数与缓存版本已改；安装版页面复核 deferred）
+- 状态：已修复（提取函数、缓存迁移、应用名均改；本地测试包安装版页面复核 passed）
 - 影响范围：Windows 回眸「仅录音」与文字记录的应用图标；所有以经典位图（非 PNG 帧）
   存放 64px 图标的 exe，实测 Chrome 156.0.8078.74、系统记事本、cmd
 - 功能点：`sayall-windows::transcript_capture_windows`（图标提取）、
@@ -76,16 +76,36 @@
 ## 验证
 
 - `cargo fmt --all -- --check` passed。
-- `cargo test --workspace` passed；新增：
+- `cargo test --workspace` passed（sayall-windows 497 passed / 16 ignored、
+  sayall-windows-app 185 passed / 1 ignored）；新增：
   - `extracted_icons_keep_their_color_and_alpha`：解码 64px 图标，要求颜色数 > 16
     且存在透明像素。正向对照：把 `flags` 改回 `1` 时该断言失败（实测「3 种颜色」）。
   - `composes_alpha_from_a_one_bit_mask`、`mask_alpha_tolerates_short_rows`。
-  - `icon_cache_ignores_files_written_by_older_versions`：旧 `{key}.png` 不再被复用。
-- `npx vitest run`、`vue-tsc --noEmit` passed；新增历史应用名映射用例。
+  - `cached_icons_are_reused_only_when_they_can_still_be_real_icons`。
+  - `icon_cache_ignores_files_written_by_older_versions`：坏旧缓存被忽略。
+    正向对照：把可用性判定强制成 `true` 时该用例失败。
+  - `usable_legacy_icon_is_reused_and_migrated`：可用旧缓存被沿用并写成 `v2`。
+- `npx vitest run`（564 passed / 10 skipped）、`vue-tsc --noEmit` passed；
+  新增历史应用名映射用例。
 - 提取结果复核：Chrome 由 650 字节 / 2 色变成 6846 字节 / 1511 色，画面为正常彩色
   圆环；微信 2770 字节、WorkBuddy 5320 字节与修复前逐字节一致（无回归）；
   无 alpha 的 `imageres.dll` 掩码路径可正常出图且不崩溃。
-- **deferred**：在安装版回眸页用真实记录确认 Chrome 行显示彩色图标（需要重新出包安装）。
+- 本地测试包（2026-11-04）：`target/release/bundle/nsis/无线麦 SayAll_1.8.3_x64-setup.exe`，
+  SHA-256 `af175313b799ef80e19191bced8fc41359912dbe862ba28128a1a30d67b84f21`，
+  内嵌修订号 `ef79e05d`；`.sig` 用本机测试密钥签名，**不可发布**。
+  - `verify-frontend-embedded.ps1`：18/18 前端资源全部嵌入（阳性对照：换旧 dist 目录
+    后报「缺失 9/15」）。
+  - `verify-local-test-install.ps1 -ExpectRevision`：helper / gadget 哈希对齐、
+    app exe 差 3 字节（UNK→NSS）、修订号命中，**PASS**；旧实例走
+    `key_host action=exit reason=shutdown_requested` 正常退出，未强杀。
+  - 安装版**页面 passed**：启动后停在回眸页，应用栏 chrome 芯片显示彩色 Chrome 圆环，
+    截图 `artifacts/ui-selftest/reflections-apps-wide-20261104.png`。
+  - 图标缓存 passed：`chrome-da76bff1b19fb376.v2.png` 6846 B（旧 650 B / 2 色）；
+    `Notepad-c73816817bc021f7.v2.png` 4043 B 由旧缓存迁移 —— 应用没在运行时图标不会丢。
+- 验证环境坑（供下次复用）：从沙箱 shell 启动安装版时，WebView2 浏览器进程会随任务树
+  结束而退出，应用把标题改成「界面未能正常显示，请从托盘退出后重开」并显示空白页；
+  这**不是包的问题**，用 `explorer.exe <exe>` 启动即可正常渲染。另外 `PrintWindow`
+  抓不到 WebView2 内容（返回空白），要判定界面必须用 `CopyFromScreen`。
 
 ## 隐私检查
 
