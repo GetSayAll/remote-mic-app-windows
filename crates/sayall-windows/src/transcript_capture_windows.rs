@@ -341,6 +341,33 @@ fn localized_application_name(raw: &str) -> String {
     }
 }
 
+/// 判断缓存里的图标 PNG 是否还值得用。
+///
+/// 用于升级迁移：旧版本（`LR_MONOCHROME`）写下的坏图是「2 种颜色 + 全不透明」的
+/// 黑白块，不能直接沿用；同时也不能把缓存一律作废——应用没在运行时就提取不到
+/// 图标，那样会让没开着的应用全部退回通用图标（2026-11-04 实测）。
+pub fn icon_png_is_usable(bytes: &[u8]) -> bool {
+    let decoder = png::Decoder::new(bytes);
+    let Ok(mut reader) = decoder.read_info() else {
+        return false;
+    };
+    let mut pixels = vec![0u8; reader.output_buffer_size()];
+    let Ok(info) = reader.next_frame(&mut pixels) else {
+        return false;
+    };
+    let pixels = &pixels[..info.buffer_size()];
+    let mut colors = std::collections::HashSet::new();
+    let mut transparent = false;
+    for pixel in pixels.chunks_exact(4) {
+        colors.insert([pixel[0], pixel[1], pixel[2], pixel[3]]);
+        transparent |= pixel[3] != 255;
+        if colors.len() > 2 && transparent {
+            return true;
+        }
+    }
+    colors.len() > 2 || transparent
+}
+
 /// 从可执行文件提取 64×64 图标并编码为 PNG。失败只返回 `None`，由前端使用通用图标。
 ///
 /// 捕获轮询会反复读同一应用，按可执行路径缓存，避免每轮都做 Shell 提取与 PNG 编码。
@@ -766,6 +793,37 @@ mod tests {
         assert_eq!(alpha[0], 0);
         assert_eq!(alpha[7], 0);
         assert_eq!(alpha[8], 255);
+    }
+
+    /// 4×4 RGBA，16 种颜色、带透明 —— 一张能用的图标缓存。
+    const COLORFUL_ICON: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 4, 8, 6,
+        0, 0, 0, 169, 241, 158, 126, 0, 0, 0, 44, 73, 68, 65, 84, 120, 218, 109, 202, 177, 9, 0,
+        64, 12, 195, 64, 25, 50, 135, 39, 241, 254, 107, 57, 197, 23, 223, 164, 18, 7, 18, 208, 96,
+        5, 55, 88, 67, 44, 112, 225, 117, 200, 7, 215, 177, 125, 93, 11, 56, 16, 21, 52, 176, 0, 0,
+        0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    /// 4×4 RGBA，只有黑/白且全不透明 —— `LR_MONOCHROME` 时期写坏的缓存形状。
+    const MONOCHROME_ICON: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 4, 8, 6,
+        0, 0, 0, 169, 241, 158, 126, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 96, 96, 248,
+        255, 255, 255, 255, 255, 112, 26, 133, 195, 192, 240, 159, 129, 160, 10, 0, 63, 75, 39,
+        217, 8, 22, 13, 44, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    #[test]
+    fn cached_icons_are_reused_only_when_they_can_still_be_real_icons() {
+        assert!(icon_png_is_usable(COLORFUL_ICON));
+        assert!(!icon_png_is_usable(MONOCHROME_ICON));
+        assert!(!icon_png_is_usable(b"not-a-png"));
+        assert!(!icon_png_is_usable(&[]));
+    }
+
+    #[test]
+    fn extracted_icons_pass_the_cache_check() {
+        let png = application_icon_png(r"C:\Windows\System32\notepad.exe").expect("notepad icon");
+        assert!(icon_png_is_usable(&png));
     }
 
     #[test]

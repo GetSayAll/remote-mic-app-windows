@@ -65,8 +65,11 @@
     取不到掩码才退回整块不透明，避免「无 alpha 图标一律变不透明色块」。
   - 应用显示名改走 `foreground::application_display_name`（产品名），稳定键仍用原始
     文件名去扩展名，已有记录不会被拆成新应用。
-- `transcripts.rs`：图标缓存文件名带 `ICON_CACHE_VERSION`（当前 `v2`），旧版本写坏的
-  PNG 不再命中，升级后会重新提取。
+  - 新增 `icon_png_is_usable`：判断缓存 PNG 还值不值得用（2 色且全不透明 = 坏图）。
+- `transcripts.rs`：图标缓存文件名带 `ICON_CACHE_VERSION`（当前 `v2`）。读缓存时按
+  `v2 → 旧 {key}.png（仅当可用）→ 现场提取` 回退：坏图会被重新提取；应用没在运行时
+  仍沿用旧图（否则升级后所有没开着的应用会整列退回通用图标，实测 14 条记事本记录
+  就是这种情况）。
 - `reflections-view.ts`：`chrome` / `notepad` 等历史原始名统一显示为产品名
   （`Chrome 浏览器` / `记事本`），英文界面用 `Chrome` / `Notepad`。
 
