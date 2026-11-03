@@ -72,6 +72,23 @@
 
 开发环境、构建与本地检查流程见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
+## 特别致谢
+
+无线麦 SayAll App 由 DimAgent 与 Vokie 友情赞助，感谢两位朋友，让好工具被更多人用上。
+
+无线麦 SayAll Windows 版本通过 DimAgent 完成开发。
+
+- **DimAgent**：调度多模型团队，构建你想要的一切 → [dimagent.cn](https://dimagent.cn/?utm_source=sayall.app)
+- **Vokie**：首选语音助理，语音输入、闪记、旁听，直接给你可用结果 → [vokie.com](https://vokie.com/?utm_source=sayall.app)
+
+## 赞赏
+
+<p align="center">
+  <img src="Screenshots/donation-wechat.jpg" alt="微信赞赏码" width="280">
+</p>
+
+<p align="center">微信赞赏码</p>
+
 ## 开源协议
 
 程序代码使用 GPL-3.0-only。App Logo 和 App Icon 是保留版权的专有品牌资产，不属于 GPL-3.0-only 授权范围；详见 [LOGO-LICENSE.md](LOGO-LICENSE.md)。第三方来源与素材边界见 [ATTRIBUTION.md](ATTRIBUTION.md) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
