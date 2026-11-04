@@ -5942,6 +5942,37 @@ pub fn run() {
                     }
                 });
             }
+            // "打开别的应用"前把自身主窗口退出置顶。自身若带 `WS_EX_TOPMOST`，
+            // 前台焦点虽然切给了目标，Z 序上却永远压着它——日志 `foreground_observed`
+            // 全绿、用户只看到无线麦（2026-11-05 现场）。产品从未主动置顶主窗口，
+            // 该样式来自外部工具或历史状态，所以这里不追来源，直接按结果兜底。
+            {
+                let handle = app.handle().clone();
+                sayall_windows::app_launcher::set_self_drop_topmost(move || {
+                    let Some(window) = main_window(&handle) else {
+                        return false;
+                    };
+                    let Ok(hwnd) = window.hwnd() else {
+                        return false;
+                    };
+                    // 先读 Win32 样式：绝大多数按键窗口本来就没置顶，这里零开销地
+                    // 返回 false，不产生任何跨线程 dispatch（本回调在引擎线程上、
+                    // 且一次按键可能被多个候选窗口各调一次）。
+                    let dropped =
+                        sayall_windows::app_launcher::drop_window_topmost(hwnd.0 as isize);
+                    if dropped {
+                        // 样式已清，同步让 tao 的 `ALWAYS_ON_TOP` flag 归零：否则它
+                        // 下一次 `set_window_flags`（show/hide/聚焦都会走）会按旧 flag
+                        // 把 `WS_EX_TOPMOST` 再 OR 回来，撤顶变成一次性的。
+                        let _ = window.set_always_on_top(false);
+                        sayall_windows::gatt_note(
+                            "app_launcher action=drop_self_topmost terminal_result=passed"
+                                .to_owned(),
+                        );
+                    }
+                    dropped
+                });
+            }
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
