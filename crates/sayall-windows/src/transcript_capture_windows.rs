@@ -15,7 +15,7 @@ use windows::core::{Interface, BSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -38,6 +38,9 @@ use crate::transcript_capture::{CaptureSnapshot, CaptureText, SnapshotError, Sna
 
 const MAX_TEXT_CHARS: usize = 1_000_000;
 const MAX_FOCUS_ID_CHARS: usize = 256;
+
+/// 图标缓存与回眸界面统一使用的像素边长。
+const APPLICATION_ICON_PIXELS: i32 = 64;
 
 /// 不应记录文字的语义词。比「聚焦输入框」的排除词更严格：搜索框、地址栏、
 /// 设置类输入区域一律不记录，避免把用户搜索词/密码/配置写进回眸。
@@ -315,12 +318,17 @@ fn application_identity_parts(pid: u32) -> (String, String, Option<String>) {
         .filter(|id| !id.trim().is_empty())
         .or_else(|| executable.clone())
         .unwrap_or_else(|| display_name.clone());
-    // 稳定键继续用原始显示名，避免已有 Weixin/WeChat 记录被拆成新应用；
-    // 只有界面名称本地化（Weixin/WeChat → 微信）。
+    // 稳定键继续用原始文件名（去扩展名），避免已有 Weixin/WeChat 记录被拆成新应用；
+    // 界面名走产品名映射：chrome → Chrome 浏览器、notepad → 记事本、Weixin → 微信。
     let key_name = display_name.clone();
+    let localized_name = executable
+        .as_deref()
+        .and_then(crate::foreground::application_display_name)
+        .map(|value| localized_application_name(&value))
+        .unwrap_or_else(|| localized_application_name(&display_name));
     (
         application_key(&identity, &key_name),
-        localized_application_name(&display_name),
+        localized_name,
         executable,
     )
 }
@@ -331,6 +339,33 @@ fn localized_application_name(raw: &str) -> String {
     } else {
         raw.to_owned()
     }
+}
+
+/// 判断缓存里的图标 PNG 是否还值得用。
+///
+/// 用于升级迁移：旧版本（`LR_MONOCHROME`）写下的坏图是「2 种颜色 + 全不透明」的
+/// 黑白块，不能直接沿用；同时也不能把缓存一律作废——应用没在运行时就提取不到
+/// 图标，那样会让没开着的应用全部退回通用图标（2026-11-04 实测）。
+pub fn icon_png_is_usable(bytes: &[u8]) -> bool {
+    let decoder = png::Decoder::new(bytes);
+    let Ok(mut reader) = decoder.read_info() else {
+        return false;
+    };
+    let mut pixels = vec![0u8; reader.output_buffer_size()];
+    let Ok(info) = reader.next_frame(&mut pixels) else {
+        return false;
+    };
+    let pixels = &pixels[..info.buffer_size()];
+    let mut colors = std::collections::HashSet::new();
+    let mut transparent = false;
+    for pixel in pixels.chunks_exact(4) {
+        colors.insert([pixel[0], pixel[1], pixel[2], pixel[3]]);
+        transparent |= pixel[3] != 255;
+        if colors.len() > 2 && transparent {
+            return true;
+        }
+    }
+    colors.len() > 2 || transparent
 }
 
 /// 从可执行文件提取 64×64 图标并编码为 PNG。失败只返回 `None`，由前端使用通用图标。
@@ -423,7 +458,22 @@ fn extract_icon_png(path: &str) -> Option<Vec<u8>> {
         file[index] = value;
     }
     let mut icons = [HICON::default()];
-    let count = unsafe { PrivateExtractIconsW(&file, 0, 64, 64, Some(&mut icons), None, 1) };
+    // `windows` crate 的 `PrivateExtractIconsW` 把第 7 个参数暴露成 `flags`
+    // （`nicons` 由 `phicon` 切片长度推出，这里恒为 1）。必须传 `LR_DEFAULTCOLOR`
+    // 即 0：传 1 等于 `LR_MONOCHROME`，Windows 会把经典位图帧转成单色位图
+    // （黑/白、alpha 全 0），Chrome 这类只用位图存小尺寸帧的应用会变成灰度块
+    // （2026-11-03 实测：flags=1 时 64px 只剩 2 种颜色）。
+    let count = unsafe {
+        PrivateExtractIconsW(
+            &file,
+            0,
+            APPLICATION_ICON_PIXELS,
+            APPLICATION_ICON_PIXELS,
+            Some(&mut icons),
+            None,
+            0,
+        )
+    };
     if count == 0 || icons[0].is_invalid() {
         return None;
     }
@@ -484,21 +534,39 @@ fn icon_to_png(icon: HICON) -> Option<Vec<u8>> {
                 DIB_RGB_COLORS,
             )
         };
+        if lines == 0 {
+            unsafe {
+                let _ = DeleteDC(dc);
+            }
+            return None;
+        }
+        let any_alpha = pixels.chunks_exact(4).any(|pixel| pixel[3] != 0);
+        // 没有 alpha 通道的旧式图标：透明区域只体现在 AND 掩码里。此时把 alpha
+        // 一律补 255 会把图标背景画成不透明色块，必须改用掩码。
+        let mask_alpha = if any_alpha {
+            None
+        } else {
+            mask_alpha_bits(dc, mask, width, height)
+        };
         unsafe {
             let _ = DeleteDC(dc);
         }
-        if lines == 0 {
-            return None;
-        }
         let mut rgba = Vec::with_capacity(pixels.len());
-        let mut any_alpha = false;
         for pixel in pixels.chunks_exact(4) {
-            any_alpha |= pixel[3] != 0;
             rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
         }
         if !any_alpha {
-            for pixel in rgba.chunks_exact_mut(4) {
-                pixel[3] = 255;
+            match mask_alpha {
+                Some(alpha) => {
+                    for (pixel, value) in rgba.chunks_exact_mut(4).zip(alpha) {
+                        pixel[3] = value;
+                    }
+                }
+                None => {
+                    for pixel in rgba.chunks_exact_mut(4) {
+                        pixel[3] = 255;
+                    }
+                }
             }
         }
         let mut png = Vec::new();
@@ -524,6 +592,91 @@ fn icon_to_png(icon: HICON) -> Option<Vec<u8>> {
 
 fn bstr(value: windows::core::Result<BSTR>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+/// 1bpp 掩码的 `GetDIBits` 输出需要 2 个调色板项，比 `BITMAPINFO` 自带的多一项，
+/// 单独定义避免 GDI 写出结构体边界。
+#[repr(C)]
+struct MaskBitmapInfo {
+    header: BITMAPINFOHEADER,
+    colors: [u32; 2],
+}
+
+/// 从 AND 掩码取每像素透明度：位为 1 表示该像素透明（0），否则不透明（255）。
+///
+/// 掩码是 1bpp 位图，行宽按 DWORD 对齐，不能按宽度直接推。取不到或形状不符时
+/// 返回 `None`，由调用方退回「整块不透明」。
+fn mask_alpha_bits(dc: HDC, mask: HBITMAP, width: i32, height: i32) -> Option<Vec<u8>> {
+    if mask.is_invalid() {
+        return None;
+    }
+    let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+    let copied = unsafe {
+        GetObjectW(
+            mask.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bitmap as *mut BITMAP as *mut c_void),
+        )
+    };
+    // 单色图标里掩码可能是双倍高度（AND + OR），这里只处理与彩色位图同高的情况。
+    if copied == 0 || bitmap.bmBitsPixel != 1 || bitmap.bmHeight != height || width <= 0 {
+        return None;
+    }
+    let stride = ((width as usize) + 31) / 32 * 4;
+    if stride * height as usize > 1 << 20 {
+        return None;
+    }
+    let mut bits = vec![0u8; stride * height as usize];
+    let mut info: MaskBitmapInfo = unsafe { std::mem::zeroed() };
+    info.header = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width,
+        biHeight: -height,
+        biPlanes: 1,
+        biBitCount: 1,
+        biCompression: BI_RGB.0,
+        biClrUsed: 2,
+        ..Default::default()
+    };
+    let lines = unsafe {
+        GetDIBits(
+            dc,
+            mask,
+            0,
+            height as u32,
+            Some(bits.as_mut_ptr() as *mut c_void),
+            &mut info as *mut MaskBitmapInfo as *mut BITMAPINFO,
+            DIB_RGB_COLORS,
+        )
+    };
+    if lines != height {
+        return None;
+    }
+    Some(compose_mask_alpha(
+        &bits,
+        stride,
+        width as usize,
+        height as usize,
+    ))
+}
+
+/// 把自上而下的 1bpp 掩码行转成每像素 alpha（1 = 透明）。
+fn compose_mask_alpha(bits: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+    let mut alpha = vec![255u8; width * height];
+    for y in 0..height {
+        let row = match bits.get(y * stride..(y + 1) * stride) {
+            Some(row) => row,
+            None => break,
+        };
+        for (x, slot) in alpha[y * width..(y + 1) * width].iter_mut().enumerate() {
+            match row.get(x / 8) {
+                Some(byte) if byte & (0x80 >> (x % 8)) != 0 => *slot = 0,
+                Some(_) => {}
+                None => break,
+            }
+        }
+    }
+    alpha
 }
 
 fn process_executable_path(pid: u32) -> Option<String> {
@@ -592,6 +745,85 @@ mod tests {
         let icon = application_icon_png(r"C:\Windows\System32\notepad.exe").expect("notepad icon");
         assert!(icon.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(icon.len() > 64);
+    }
+
+    /// 回归：`PrivateExtractIconsW` 的最后一个参数是 `flags`，传 1 等于
+    /// `LR_MONOCHROME`，图标会被转成只有黑白的单色位图。系统记事本的 64px 帧
+    /// 在修复前只有 2 种颜色且 alpha 全 0，修复后是多彩且带透明。
+    #[test]
+    fn extracted_icons_keep_their_color_and_alpha() {
+        let png = application_icon_png(r"C:\Windows\System32\notepad.exe").expect("notepad icon");
+        let decoder = png::Decoder::new(png.as_slice());
+        let mut reader = decoder.read_info().expect("png info");
+        let mut pixels = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).expect("png frame");
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        let pixels = &pixels[..info.buffer_size()];
+        let colors = pixels
+            .chunks_exact(4)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            colors.len() > 16,
+            "单色图标说明 LR_MONOCHROME 又被传进来了：{} 种颜色",
+            colors.len()
+        );
+        assert!(
+            pixels.chunks_exact(4).any(|pixel| pixel[3] == 0),
+            "图标缺少透明像素，掩码或 alpha 处理可能退化"
+        );
+    }
+
+    #[test]
+    fn composes_alpha_from_a_one_bit_mask() {
+        // 8×2，行宽 4 字节（DWORD 对齐）：第 0 行最左像素透明位为 1。
+        let bits = [0b1000_0000u8, 0, 0, 0, 0, 0, 0, 0];
+        let alpha = compose_mask_alpha(&bits, 4, 8, 2);
+        assert_eq!(alpha[0], 0);
+        assert_eq!(alpha[1], 255);
+        assert_eq!(alpha[8], 255);
+        assert_eq!(alpha.len(), 16);
+    }
+
+    #[test]
+    fn mask_alpha_tolerates_short_rows() {
+        // 只读到第一行时，后续行保持不透明而不是越界或 panic。
+        let alpha = compose_mask_alpha(&[0xff], 1, 8, 2);
+        assert_eq!(alpha.len(), 16);
+        assert_eq!(alpha[0], 0);
+        assert_eq!(alpha[7], 0);
+        assert_eq!(alpha[8], 255);
+    }
+
+    /// 4×4 RGBA，16 种颜色、带透明 —— 一张能用的图标缓存。
+    const COLORFUL_ICON: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 4, 8, 6,
+        0, 0, 0, 169, 241, 158, 126, 0, 0, 0, 44, 73, 68, 65, 84, 120, 218, 109, 202, 177, 9, 0,
+        64, 12, 195, 64, 25, 50, 135, 39, 241, 254, 107, 57, 197, 23, 223, 164, 18, 7, 18, 208, 96,
+        5, 55, 88, 67, 44, 112, 225, 117, 200, 7, 215, 177, 125, 93, 11, 56, 16, 21, 52, 176, 0, 0,
+        0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    /// 4×4 RGBA，只有黑/白且全不透明 —— `LR_MONOCHROME` 时期写坏的缓存形状。
+    const MONOCHROME_ICON: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 4, 8, 6,
+        0, 0, 0, 169, 241, 158, 126, 0, 0, 0, 27, 73, 68, 65, 84, 120, 218, 99, 96, 96, 96, 248,
+        255, 255, 255, 255, 255, 112, 26, 133, 195, 192, 240, 159, 129, 160, 10, 0, 63, 75, 39,
+        217, 8, 22, 13, 44, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    #[test]
+    fn cached_icons_are_reused_only_when_they_can_still_be_real_icons() {
+        assert!(icon_png_is_usable(COLORFUL_ICON));
+        assert!(!icon_png_is_usable(MONOCHROME_ICON));
+        assert!(!icon_png_is_usable(b"not-a-png"));
+        assert!(!icon_png_is_usable(&[]));
+    }
+
+    #[test]
+    fn extracted_icons_pass_the_cache_check() {
+        let png = application_icon_png(r"C:\Windows\System32\notepad.exe").expect("notepad icon");
+        assert!(icon_png_is_usable(&png));
     }
 
     #[test]

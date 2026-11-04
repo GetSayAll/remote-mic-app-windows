@@ -80,12 +80,24 @@ export function formatRecordTime(record: TranscriptRecordView): string {
   return formatTimestamp(record.endedAtMs, record.utcOffsetMinutes);
 }
 
-/** 旧 manifest 可能把微信写成 Weixin/WeChat；界面统一按当前语言显示。 */
+/** 旧 manifest 可能把应用写成文件名，新记录写产品名；界面统一按产品名与当前语言显示。
+ *
+ * 键是记录里出现过的原始名（历史记录用 `SHGetFileInfoW` 取到的文件名，去扩展名），
+ * 值是对齐 `PRESET_APPS` / `docs/product-copy.md` 的产品名。
+ */
+const APPLICATION_NAME_ALIASES: Record<string, string> = {
+  微信: "微信",
+  weixin: "微信",
+  wechat: "微信",
+  "chrome 浏览器": "Chrome 浏览器",
+  chrome: "Chrome 浏览器",
+  记事本: "记事本",
+  notepad: "记事本",
+};
+
 export function displayApplicationName(name: string): string {
-  if (name === "微信" || name === "Weixin" || name === "WeChat") {
-    return t("微信");
-  }
-  return name;
+  const product = APPLICATION_NAME_ALIASES[name.trim().toLowerCase()];
+  return product ? t(product) : name;
 }
 
 export function formatRecordingCount(count: number): string {
