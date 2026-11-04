@@ -2308,7 +2308,11 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-shell {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  /* 固定为视口高度而不是 min-height：根元素自 2026-11-05 起不可滚（见
+     styles.css 的 html/body 规则），向导壳若随内容增高，超出部分会被直接
+     裁掉。固定高度后 .onboarding-body / .onboarding-content 的内部滚动
+     才能真正生效。 */
+  height: 100vh;
   box-sizing: border-box;
   background: var(--surface-canvas);
   color: var(--text-primary);

@@ -150,17 +150,21 @@ html[data-theme="dark"] {
 }
 *::-webkit-scrollbar { width: 0; height: 0; display: none; }
 html, body, #app { width: 100%; min-width: 940px; min-height: 100%; margin: 0; }
-/* 滚动发生在根元素（.content 随内容增高，自身不滚）。默认窗口下按键页
-   （570px 画布 + 头部/底部）刚好略超一屏，连接/权限页不超——切换页面时
-   正文滚动条出现/消失会让视口宽度瞬间变化（1029→1014），整窗水平回流，
-   用户看到"点按键页面整个页面抖一下"（2026-09-27 实测：clientWidth
-   1029→1014，右对齐内容整体左移 15px；scrollbar-gutter: stable 对根
-   滚动器在 Chromium 不生效，已实测否证）。隐藏根滚动条（宽度归零、
-   仍可滚轮/键盘滚动）后四页视口宽度恒定，切换不再回流；与 plan
-   2026-09-05 T2 的"页面不显示滚动条、仍可滚动"决策一致。两条规则
-   分别覆盖标准属性（Chromium 121+）与 legacy webkit 伪元素。
-   2026-10-20 起该隐藏已由文件顶部全局规则覆盖，这里（含 .content 上的同名
-   规则）保留为显式兜底，不再需要逐处维护。 */
+/* 2026-11-05 Andy：触摸板双指上下拖动会把整个页面拖出视口，顶部/底部露出
+   空白。根因是 html 作为唯一滚动层——手势一旦越过内容的上下沿，overscroll
+   就把画布背景拖进可视区，看起来像页面被"拉走"一截。
+   改为「根不可滚 + 内容区单层滚动」：
+   - html/body 固定满高并 overflow: hidden，双指拖动不再产生整页位移；
+   - overscroll-behavior: none 关掉 WebView2 的 overscroll（链式滚动与回弹），
+     这一条同时兜住"内容不足一屏也能被拖出空白"的情形；
+   - .content 成为唯一滚动容器（见下方 .content 规则），并用
+     overscroll-behavior: contain 阻止滚动溢出继续传给根。
+   历史：2026-09-27 曾用「滚动发生在根元素 + 隐藏根滚动条」消除切页时
+   视口宽度 1029→1014 的水平回流（scrollbar-gutter: stable 对根滚动器在
+   Chromium 不生效，已实测否证）。滚动条自 2026-10-20 起由文件顶部全局规则
+   隐藏（宽度归零），宽度回流的前提已不存在，因此可以把滚动收敛到 .content，
+   而不必继续让整页参与滚动。下面两条根滚动条规则保留为显式兜底。 */
+html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
 html { scrollbar-width: none; }
 html::-webkit-scrollbar { display: none; }
 button, input { font: inherit; }
@@ -189,7 +193,9 @@ body {
 
 /* 侧栏对齐 macOS SettingsView：宽 108px、图标 21 semibold、文字 13 semibold、
    选中 = 强调色 + 10% 背景（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
-.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); min-height: 100vh; }
+/* 外壳固定为视口高度（不再 min-height 随内容增高）：超出部分交给 .content
+   在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
+.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); height: 100vh; }
 .sidebar {
   position: sticky;
   top: 0;
@@ -230,7 +236,7 @@ nav { display: grid; gap: 4px; }
    吸附到整数设备像素（取整），34.67 实测只画出 51 物理；取 35.5 时右边缘落在
    1546.75 → 取整 1547，右边可见画布正好 52 物理（48/52 目标达成，且缩窗口时稳定）。
    窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
-.content { min-width: 0; padding: 22px 35.5px 26px 32px; overflow: auto; scrollbar-width: none; }
+.content { min-width: 0; height: 100%; padding: 22px 35.5px 26px 32px; overflow: auto; overscroll-behavior: contain; scrollbar-width: none; }
 .content::-webkit-scrollbar { display: none; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-left: 14px; }
 /* 全应用隐藏滚动条（仍可滚动）：WebView2 的经典滚动条在卡片里很显眼。 */

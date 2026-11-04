@@ -41,3 +41,28 @@ describe("全局滚动条隐藏", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// 2026-11-05 Andy：触摸板双指上下拖动会把整页拖出视口，顶部/底部露出空白。
+// 修法是把滚动收敛到内容区：根元素不可滚，内容区内部滚，并关掉 overscroll。
+// 这里把三件事钉住——任何一件被改回去，双指拖动都会重新拖出空白：
+// ① html/body 满高 + overflow:hidden（根滚动器没有可滚距离）；
+// ② html/body 上 overscroll-behavior:none（内容不足一屏时也拖不动）；
+// ③ .content 是唯一滚动容器，且用 contain 拦住滚动溢出往根传。
+describe("根元素不参与滚动（触摸板拖出空白）", () => {
+  it("html/body 固定满高、禁止溢出并关闭 overscroll", () => {
+    expect(css).toMatch(/html,\s*body\s*\{[^}]*[;\s{]height:\s*100%/);
+    expect(css).toMatch(/html,\s*body\s*\{[^}]*overflow:\s*hidden/);
+    expect(css).toMatch(/html,\s*body\s*\{[^}]*overscroll-behavior:\s*none/);
+  });
+
+  it("内容区是唯一滚动容器，滚动溢出不传给根", () => {
+    expect(css).toMatch(/\.content\s*\{[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.content\s*\{[^}]*overscroll-behavior:\s*contain/);
+  });
+
+  it("外壳用固定视口高度，不随内容增高撑开根元素", () => {
+    // 用 [{;] 前缀避免把 min-height: 100vh 误判成 height: 100vh。
+    expect(css).toMatch(/\.app-shell\s*\{[^}]*[{;]\s*height:\s*100vh/);
+    expect(css).not.toMatch(/\.app-shell\s*\{[^}]*min-height:\s*100vh/);
+  });
+});
