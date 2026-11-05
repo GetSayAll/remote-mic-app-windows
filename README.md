@@ -79,13 +79,13 @@
 - 如果 GitHub 打不开，停下来告诉我，我会按项目 README（https://github.com/GetSayAll/remote-mic-app-windows）里的百度网盘备份下载。
 - 官方安装指南：https://github.com/GetSayAll/remote-mic-app-windows/blob/main/docs/installation-and-configuration.md
 - 这份提示词和官方安装指南冲突时，以官方安装指南为准。
-- 下载后以官方 Releases 页的 SHA256SUMS.txt 为准核对 SHA-256：在安装包所在文件夹打开 PowerShell，运行 Get-FileHash -Algorithm SHA256 .\SayAll-Windows-*-x64-setup.exe，再和文件里的值对比。对不上就停止安装。
-- 如果 Windows 提示“Windows 已保护你的电脑”，只有在确认安装包来自上面的官方 Releases、并且 SHA-256 一致时，才让我点“更多信息 → 仍要运行”。不要让我关闭 SmartScreen、杀毒软件或任何安全设置。
+- 不需要为了安装额外下载 SHA256SUMS.txt，也不需要让我手动运行 PowerShell。从官方 Releases 直接下载的安装包可以直接安装；从项目 README 的百度网盘备份下载时，能核对 SHA-256 就核对，不能核对也可以继续。只有发现哈希不一致时才停止安装。
+- 如果 Windows 提示“Windows 已保护你的电脑”，确认安装包来自上面的官方 Releases（或项目 README 里的百度网盘备份）后，才让我点“更多信息 → 仍要运行”。不要让我关闭 SmartScreen、杀毒软件或任何安全设置。
 - SayAll 按当前用户安装，日常不要用管理员身份运行。只有安装 VB-CABLE 时需要管理员权限。
 
 请按这个顺序做。每一步先告诉我目的和怎样算完成，再给操作；我确认后再进入下一步：
 1. 检查系统：Windows 版本、是否 64 位、蓝牙是否已打开、网络是否可用、遥控器是否在身边且电池有电。
-2. 下载安装包，并从官方 Releases 页取得 SHA256SUMS.txt，核对 SHA-256，然后安装 SayAll。
+2. 下载安装包并安装 SayAll。不需要额外下载校验文件，也不需要手动运行 PowerShell；能顺手核对 SHA-256 就核对，不能核对就直接安装。
 3. 配对遥控器：打开 Windows“设置 → 蓝牙和设备 → 添加设备 → 蓝牙”，同时长按遥控器的“菜单 + 主页”键，直到它出现在列表里；没反应就按遥控器说明书进入配对模式，不要反复快速按键。遥控器如果还连着电视或盒子，先关掉那台设备的蓝牙。配对由我本人操作。
 4. 如果要用遥控器说话：从 https://vb-audio.com/Cable/ 下载 VB-CABLE，解压后右键 VBCABLE_Setup_x64.exe，选择“以管理员身份运行”，再选择 Install Driver；完成后重启电脑。Windows 弹出的询问和重启由我本人确认。
 5. 打开 SayAll，跟随首次设置向导；如果没有向导，打开“连接”页，扫描并连接遥控器，确认显示 RC001 或 RC003；语音设备选择带“推荐”标记的 CABLE 播放端（CABLE Input 或 CABLE In 16 Ch）。
