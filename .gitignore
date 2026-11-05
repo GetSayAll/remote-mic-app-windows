@@ -94,6 +94,7 @@ hardware/RC003/evidence/helper-run.log
 # 出包暂存产物（beforeBundleCommand 复制）
 /src-tauri/sayall-helper.exe
 /src-tauri/frida-gadget.dll
+/src-tauri/sayall-mcp.exe
 # arm64 双载荷（2026-10-07 issue206）：同上，只有本机具备 VS ARM64 工具集
 # （VC.Tools.ARM64 + rustup 的 aarch64 目标）时才暂存得到，因此不可入库。
 # Gadget 的 arm64 源由上面 vendor/*.dll 与 vendor/*.dll.xz 两条规则覆盖。

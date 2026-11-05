@@ -63,11 +63,13 @@ $instHelper = Join-Path $appDir.FullName "sayall-helper.exe"
 $instGadget = Join-Path $appDir.FullName "frida-gadget.dll"
 $instHelperArm64 = Join-Path $appDir.FullName "sayall-helper-arm64.exe"
 $instGadgetArm64 = Join-Path $appDir.FullName "frida-gadget-arm64.dll"
+$instMcp = Join-Path $appDir.FullName "sayall-mcp.exe"
 $srcExe = Join-Path $repo "target\release\sayall-windows-app.exe"
 $srcHelper = Join-Path $repo "src-tauri\sayall-helper.exe"
 $srcGadget = Join-Path $repo "hardware\RC003\helper\vendor\frida-gadget.dll"
 $srcHelperArm64 = Join-Path $repo "src-tauri\sayall-helper-arm64.exe"
 $srcGadgetArm64 = Join-Path $repo "src-tauri\frida-gadget-arm64.dll"
+$srcMcp = Join-Path $repo "target\release\sayall-mcp.exe"
 
 # ---- 3. 二进制对齐（含被占用文件的重试安装） ----
 Write-Host "二进制对齐："
@@ -85,6 +87,14 @@ Check "helper 哈希对齐" ($h1 -eq $h2)
 $g1 = & python $py sha $instGadget
 $g2 = & python $py sha $srcGadget
 Check "gadget 哈希对齐" ($g1 -eq $g2)
+# 只读 MCP 服务（回眸「本地 Agent 访问」）：与主程序同目录，配置里写绝对路径。
+if (Test-Path $srcMcp) {
+    $m1 = & python $py sha $instMcp
+    $m2 = & python $py sha $srcMcp
+    Check "sayall-mcp 哈希对齐" ($m1 -eq $m2) ("installed=" + $m1 + " staged=" + $m2)
+} else {
+    Check "sayall-mcp 已随包安装" (-not (Test-Path $instMcp)) "出包未构建 sayall-mcp.exe（target\release 缺失），安装目录也不应有残留"
+}
 $diff = (& python $py diff $instExe $srcExe) | Out-String
 $diffOk = $diff -match "differing_bytes=3"
 Check "app exe 差 3 字节（UNK→NSS）" $diffOk ($diff.Trim())

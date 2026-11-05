@@ -22,6 +22,8 @@ execFileSync(process.execPath, [path.join(root, "node_modules", "vite", "bin", "
 const pairs = [
   ["hardware/RC003/helper/target/release/sayall-helper.exe", "sayall-helper.exe"],
   ["hardware/RC003/helper/vendor/frida-gadget.dll", "frida-gadget.dll"],
+  // 回眸「本地 Agent 访问」的只读 MCP 服务：与主程序同目录，配置里写它的绝对路径。
+  ["target/release/sayall-mcp.exe", "sayall-mcp.exe"],
 ];
 
 // ── arm64 双载荷（可选，2026-10-07 issue206）────────────────────────────
