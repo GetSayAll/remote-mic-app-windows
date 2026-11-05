@@ -2199,6 +2199,10 @@ export function shortcutCapability(
 
 const keyLabels: Record<string, string> = {
   ...voiceHotkeyKeyLabels,
+  // 普通快捷键的显示与预设芯片一致：Win 不区分左右（`Win + D`，不写「左 Win」）。
+  // 语音键需要保留左右，走 `voiceHoldHotkeyLabel`（它直接读 voiceHotkeyKeyLabels）。
+  left_windows: "Win",
+  right_windows: "Win",
   // 组合动作用 `return` 作为 Enter 的稳定存储名；界面统一显示键帽上的 "Enter"。
   return: "Enter",
   // 用厂商印在键帽上的英文名，避免“退格/删除”在中文里被混为一谈。
@@ -2335,7 +2339,9 @@ export function openAppLabel(name: string): string {
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return t("未设置");
   if (action.type === "focus_input") return t("聚焦输入框");
-  if (action.type === "app_switcher") return t("切换应用");
+  // 与预设芯片、按键格保持一致：只显示实际组合键；动作名「切换应用」
+  // 只保留在悬停提示和文档里。
+  if (action.type === "app_switcher") return "Alt + Tab";
   if (action.type === "open_common_phrases") {
     // 缺私有组件（公开构建）时如实标注，不静默替换成含义不同的动作。
     return commonPhrasesAvailable ? t("打开常用语") : t("打开常用语（当前不可用）");

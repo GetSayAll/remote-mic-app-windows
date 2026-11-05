@@ -847,14 +847,19 @@ const savedShortcuts = computed<Array<{ label: string; chord: MacroChord }>>(() 
   return [...seen.values()];
 });
 
-/** 常用快捷键（与按键页同一份清单，只保留能换算成组合动作的条目）。 */
+/**
+ * 常用快捷键（与按键页同一份清单，只保留能换算成组合动作的条目）。
+ *
+ * chips 一律显示实际按键组合（`display` 优先），功能描述只作悬停提示，
+ * 与按键页一致；`app_switcher` 在这里按一次性 Alt+Tab 组合执行。
+ */
 const commonShortcutGroups = computed(() =>
   SHORTCUT_PRESET_GROUPS.map((group) => ({
     label: group.label,
-    items: group.items
-      .filter((item) => !item.action)
-      .map((item) => ({ label: item.label, chord: macroChordFromKeys(item.keys) }))
-      .filter((item): item is { label: string; chord: MacroChord } => item.chord !== null),
+    items: group.items.flatMap((item) => {
+      const chord = macroChordFromKeys(item.keys);
+      return chord ? [{ label: item.label, display: item.display, chord }] : [];
+    }),
   })).filter((group) => group.items.length > 0),
 );
 
@@ -1932,9 +1937,10 @@ watch(
                             ),
                           }"
                           type="button"
+                          :title="tr(item.label)"
                           @click="applyChordToSelectedStep(item.chord)"
                         >
-                          {{ tr(item.label) }}
+                          {{ item.display ?? macroChordLabel(item.chord) }}
                         </button>
                       </div>
                     </template>

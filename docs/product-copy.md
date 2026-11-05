@@ -24,7 +24,7 @@
 | 增强按键能力（按键页） | 全按键支持 | `ButtonsPage.vue` |
 | 同一设置在连接页的入口 | 支持更多输入工具 | `ConnectionPage.vue` |
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
-| Windows 应用切换器（按键页「系统与媒体」） | 「切换应用」；卡片显示 `Alt + Tab`；悬停提示「切换应用：用左、右键选择，按“确定”确认，返回取消」。会话内方向键 / 确定 / 返回只操作系统切换器，15 秒无操作自动取消（对齐 Mac `Command+Tab` 临时会话，平台动作换成 Alt+Tab）；旧的一次性 `Alt+Tab` 绑定保留可执行 | `src/lib/shortcut-presets.ts`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`actionSummary`）、`sayall-windows::app_switcher` |
+| Windows 应用切换器（按键页「系统与媒体」） | 「切换应用」；卡片显示 `Alt + Tab`；悬停提示「切换应用：用左、右键选择，按“确定”确认，返回取消」。会话内方向键 / 确定 / 返回只操作系统切换器，15 秒无操作自动取消（对齐 Mac `Command+Tab` 临时会话，平台动作换成 Alt+Tab）；旧的一次性 `Alt+Tab` 绑定保留可执行。按键页、组合动作页与键位方案的预设芯片统一只显示按键组合，功能描述只作悬停提示；`Win + D`/`Win + L`/`Win + S`/`Win + Shift + S` 保存后摘要也显示 `Win`，不显示「左 Win」或「右 Win」。组合动作与键位方案无法表达会话，其中的 `Alt + Tab` 按一次性快捷键执行 | `src/lib/shortcut-presets.ts`、`ButtonsPage.vue`、`MacrosPage.vue`、`src/lib/bridge.ts`（`actionSummary`）、`sayall-windows::app_switcher` |
 | 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 | 推荐页（侧栏，2026-10-18） | 侧栏与页面标题统一为「推荐」；英文为 Picks（对齐 Mac 补充页标题）。页面正文、筛选项、商品名与详情全部来自官网 `https://sayall.app/recommendations/`，不在本地维护推荐文案。英文设置下使用 `/en/recommendations/` 与 Mac 同款英文固定文案（Picks / Loading page… / This page is temporarily unavailable. Open the website or try again later. / Open website / Retry / Back） | `src/navigation.ts`、`RecommendationsPage.vue`、`RECOMMENDATIONS_URL` |

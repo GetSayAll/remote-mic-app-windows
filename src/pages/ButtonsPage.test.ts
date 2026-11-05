@@ -1998,11 +1998,11 @@ describe("buttons mapping page", () => {
       }
     });
     await vi.waitFor(() =>
-      expect(wrapper.text()).toContain("已录入 左 Win + L，松开全部按键后完成"),
+      expect(wrapper.text()).toContain("已录入 Win + L，松开全部按键后完成"),
     );
     shortcutCaptureHandler!({ key: "l", isPressed: false });
     await vi.waitFor(() => expect(stopShortcutCapture).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(wrapper.text()).toContain("快捷键已录入：左 Win + L"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("快捷键已录入：Win + L"));
   });
 
   it("records Ctrl+[ from the native capture edge", async () => {
@@ -2389,6 +2389,28 @@ describe("buttons mapping page", () => {
     );
   });
 
+  it("选中 Win 组合后摘要与卡片显示 Win，而不是左 Win", async () => {
+    const wrapper = await mountPage();
+    await openCell(wrapper, "电源", 0);
+    const chip = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((element) => element.text() === "Win + D");
+    expect(chip).toBeDefined();
+    await chip!.trigger("click");
+    await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    await flushPromises();
+
+    const editorText = wrapper.find(".mapping-editor").text();
+    expect(editorText).toContain("当前：Win + D");
+    expect(editorText).not.toContain("左 Win");
+
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    expect(powerCard.text()).toContain("Win + D");
+    expect(powerCard.text()).not.toContain("左 Win");
+  });
+
   it("切换应用芯片写入 app_switcher 会话动作而不是一次性快捷键", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "电源", 0);
@@ -2402,7 +2424,9 @@ describe("buttons mapping page", () => {
       actions: Record<string, { single: unknown }>;
     };
     expect(saved.actions.power!.single).toEqual({ type: "app_switcher" });
-    expect(wrapper.find(".mapping-editor").text()).toContain("切换应用");
+    const summary = wrapper.find(".mapping-editor .card-title-row p").text();
+    expect(summary).toContain("Alt + Tab");
+    expect(summary).not.toContain("切换应用");
   });
 
   it("全开放：确定·双击与 TV 所有操作可配 + 各自的单响应提示", async () => {
