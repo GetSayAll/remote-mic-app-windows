@@ -1,3 +1,4 @@
+import type { AgentAccessSnapshot } from "../lib/agent-access";
 import type { TranscriptHistorySnapshot } from "../lib/bridge";
 import { reactive } from "vue";
 
@@ -22,6 +23,16 @@ export interface ReflectionsViewSession {
    * 刷新——否则每次切回都从空白加载态开始，看起来像整页刷新、开关也会滑一下。
    */
   historySnapshot: TranscriptHistorySnapshot | null;
+  /**
+   * 最近一次读到的「本地 Agent 访问」快照（仅内存，不落盘）。
+   *
+   * 与 historySnapshot 同理：卡片每次挂载仍会现读，缓存只负责第一帧——否则
+   * 重挂载先按空快照渲染（区块收起、授权列表空态），读回后整卡撑开，看起来
+   * 闪一下、页面高度跳变。
+   */
+  agentAccessSnapshot: AgentAccessSnapshot | null;
+  /** 离开页面时 `.content` 的滚动位置；重挂载后恢复。 */
+  scrollTop: number;
 }
 
 function emptySession(): ReflectionsViewSession {
@@ -31,6 +42,8 @@ function emptySession(): ReflectionsViewSession {
     expandedDayKeys: new Set<string>(),
     dayExpansionSettled: false,
     historySnapshot: null,
+    agentAccessSnapshot: null,
+    scrollTop: 0,
   };
 }
 
@@ -39,8 +52,8 @@ function emptySession(): ReflectionsViewSession {
  *
  * 放在模块级而不是组件内：`App.vue` 用 `<component :is>` 渲染页面，切走会卸载
  * `ReflectionsPage`，组件内 `ref` 随之销毁——选中的应用、折叠的日期、展开的应用栏
- * 都会在切回时回到默认值。这里保留"看哪儿"与最近一次快照；不缓存本地 Agent 访问
- * 的授权状态——那个开关必须每次现读，保证与 Rust 侧一致。
+ * 都会在切回时回到默认值。这里保留"看哪儿"、最近一次快照与滚动位置；快照
+ * 只是第一帧的缓存，每次挂载都会重新读取，保证与 Rust 侧一致。
  */
 export const reflectionsViewSession = reactive<ReflectionsViewSession>(emptySession());
 

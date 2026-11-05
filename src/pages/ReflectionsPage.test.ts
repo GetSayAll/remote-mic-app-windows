@@ -9,7 +9,7 @@ import type {
 } from "../lib/bridge";
 import { effectiveLanguage } from "../lib/language-state";
 import ReflectionsPage from "./ReflectionsPage.vue";
-import { resetReflectionsViewSessionForTests } from "./reflections-view-session";
+import { reflectionsViewSession, resetReflectionsViewSessionForTests } from "./reflections-view-session";
 
 const bridge = vi.hoisted(() => ({
   getTranscriptHistory: vi.fn(),
@@ -618,6 +618,26 @@ describe("reflections page", () => {
     const toggles = reopened.findAll('.record-toggles input[type="checkbox"]');
     expect((toggles[0].element as HTMLInputElement).checked).toBe(true);
     reopened.unmount();
+  });
+
+  it("restores the content scroll position after switching away and back", async () => {
+    const container = document.createElement("div");
+    container.className = "content";
+    document.body.appendChild(container);
+
+    const first = mount(ReflectionsPage, { attachTo: container });
+    await flushPromises();
+    // 模拟用户把页面拉到底部后切走：卸载前读取容器 scrollTop 存进会话。
+    container.scrollTop = 800;
+    first.unmount();
+    expect(reflectionsViewSession.scrollTop).toBe(800);
+
+    // 重进后恢复到离开时的位置（切走期间 .content 被卸空，scrollTop 会被钳回 0）。
+    const reopened = mount(ReflectionsPage, { attachTo: container });
+    await flushPromises();
+    expect(container.scrollTop).toBe(800);
+    reopened.unmount();
+    container.remove();
   });
 
   it("always renders the local agent access card, including the empty state", async () => {

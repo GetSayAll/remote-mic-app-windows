@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, toRef, watch } from "vue";
 import {
   deleteAllTranscripts,
   deleteTranscript,
@@ -58,6 +58,7 @@ const deleting = ref(false);
 // 浏览状态放在模块级：切换侧边栏会卸载本页，组件内 ref 会连同用户的选择一起销毁。
 const selectedApplicationKey = toRef(reflectionsViewSession, "selectedApplicationKey");
 const applicationSwitcherExpanded = toRef(reflectionsViewSession, "applicationSwitcherExpanded");
+const pageRoot = ref<HTMLElement | null>(null);
 const expandedDayKeys = toRef(reflectionsViewSession, "expandedDayKeys");
 const dayExpansionSettled = toRef(reflectionsViewSession, "dayExpansionSettled");
 const copiedRecordId = ref<string | null>(null);
@@ -511,6 +512,14 @@ watch(recordingDayGroups, () => {
 });
 
 onMounted(() => {
+  void nextTick().then(() => {
+    // 切走时页面被卸载，.content 的高度塌下去、scrollTop 被钳回 0；重挂载后
+    // 恢复到离开时的位置。快照缓存让首帧就有完整高度，恢复的落点是准的。
+    const container = scrollContainer();
+    if (container && reflectionsViewSession.scrollTop > 0) {
+      container.scrollTop = reflectionsViewSession.scrollTop;
+    }
+  });
   void loadHistory();
   void subscribeTranscriptCaptured(() => {
     if (!disposed) void loadHistory();
@@ -533,6 +542,23 @@ onMounted(() => {
   }, 60_000);
 });
 
+/** 页面挂在 App 的 `<main class="content">` 里，滚动发生在容器上而不是页面内。 */
+function scrollContainer(): HTMLElement | null {
+  return (
+    (pageRoot.value?.closest(".content") as HTMLElement | null) ??
+    document.querySelector<HTMLElement>(".content")
+  );
+}
+
+onBeforeUnmount(() => {
+  // onUnmounted 时子树已被移除，.content 高度塌陷、scrollTop 被钳回 0——
+  // 必须在卸载前读。
+  const container = scrollContainer();
+  if (container) {
+    reflectionsViewSession.scrollTop = container.scrollTop;
+  }
+});
+
 onUnmounted(() => {
   disposed = true;
   stopPlayback();
@@ -546,7 +572,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="reflections-page">
+  <section ref="pageRoot" class="reflections-page">
     <header class="page-header reflections-header">
       <div class="reflections-title">
         <h1>{{ t("回眸") }}</h1>

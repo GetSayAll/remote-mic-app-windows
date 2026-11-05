@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   agentAccessErrorPayload,
   connectAgentClient,
@@ -14,16 +14,22 @@ import {
   type CreatedAgentAuthorization,
 } from "../lib/agent-access";
 import { t } from "../lib/i18n";
+import { reflectionsViewSession } from "./reflections-view-session";
 import { agentAccessErrorText, agentClientStatusText } from "./reflections-agent-access-view";
 
 /**
  * 回眸页底部「本地 Agent 访问」（对齐 Mac `TranscriptAgentAccessSection`）。
  *
- * 状态全部来自 Rust 侧快照，前端不缓存授权：切页、重开都会重新读，
- * 这样「关掉开关 / 撤销」在界面与 MCP 侧永远一致。
+ * 状态以 Rust 侧快照为准：每次挂载都现读，读回后写回模块级会话。会话里的缓存
+ * 只负责「切回时的第一帧」——重挂载先按上次的内容完整渲染，再在后台静默刷新，
+ * 否则卡片先按空快照收起、读回后撑开，看起来闪一下、页面高度跳变。
  */
-const snapshot = ref<AgentAccessSnapshot | null>(null);
-const loading = ref(true);
+const snapshot = ref<AgentAccessSnapshot | null>(reflectionsViewSession.agentAccessSnapshot);
+const loading = ref(snapshot.value === null);
+
+watch(snapshot, (value) => {
+  if (value) reflectionsViewSession.agentAccessSnapshot = value;
+});
 const toggling = ref(false);
 const working = ref<AgentClientId | null>(null);
 const clientName = ref("");

@@ -4,6 +4,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAccessSnapshot } from "../lib/agent-access";
 import ReflectionsAgentAccess from "./ReflectionsAgentAccess.vue";
+import { resetReflectionsViewSessionForTests } from "./reflections-view-session";
 import { agentAccessErrorText, agentClientStatusText } from "./reflections-agent-access-view";
 
 const api = vi.hoisted(() => ({
@@ -62,6 +63,7 @@ function snapshot(overrides: Partial<AgentAccessSnapshot> = {}): AgentAccessSnap
 describe("reflections agent access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetReflectionsViewSessionForTests();
     api.getAgentAccessSnapshot.mockResolvedValue(snapshot());
     api.setAgentAccessEnabled.mockImplementation(async (enabled: boolean) =>
       snapshot({ enabled }),
@@ -95,6 +97,37 @@ describe("reflections agent access", () => {
     expect(wrapper.text()).toContain("还没有客户端获得访问权限。");
     expect(wrapper.text()).not.toContain("连接 AI 工具");
     expect((wrapper.get("input[type=checkbox]").element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("renders the cached snapshot synchronously on remount, without a loading placeholder", async () => {
+    api.getAgentAccessSnapshot.mockResolvedValue(
+      snapshot({
+        enabled: true,
+        authorizations: [
+          {
+            clientId: "5f0e4c2a-1111-4111-8111-111111111111",
+            displayName: "Codex",
+            integration: "codex",
+            createdAtMs: 1_760_000_000_000,
+            needsReconnect: false,
+          },
+        ],
+      }),
+    );
+    const first = mount(ReflectionsAgentAccess);
+    await flushPromises();
+    expect((first.get("input[type=checkbox]").element as HTMLInputElement).checked).toBe(true);
+    first.unmount();
+
+    // 第二次挂载：IPC 挂起不返回，也必须先按会话缓存完整渲染——不出现占位符，
+    // 区块不先收起再撑开（那就是用户看到的「闪一下」）。
+    api.getAgentAccessSnapshot.mockReturnValue(new Promise(() => undefined));
+    const second = mount(ReflectionsAgentAccess);
+    expect(second.find(".toggle-placeholder").exists()).toBe(false);
+    expect((second.get("input[type=checkbox]").element as HTMLInputElement).checked).toBe(true);
+    expect(second.text()).toContain("连接 AI 工具");
+    expect(second.text()).toContain("Codex");
+    second.unmount();
   });
 
   it("shows the four clients with their own status when enabled", async () => {
