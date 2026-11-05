@@ -4,6 +4,7 @@ import type {
   AudioEndpoint,
   AudioPhase,
   AudioSnapshot,
+  CaptureSupport,
   ConnectionPhase,
   DiagnosticReport,
   RawInputPhase,
@@ -35,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   setOtherVoiceHotkey: vi.fn(),
   getRc003TaskStatus: vi.fn(),
   getRc003BridgeSnapshot: vi.fn(),
+  getCaptureSupport: vi.fn(),
   enableRc003Capture: vi.fn(),
   disableRc003Capture: vi.fn(),
   getVokieInstallation: vi.fn(),
@@ -83,6 +85,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setOtherVoiceHotkey: mocks.setOtherVoiceHotkey,
     getRc003TaskStatus: mocks.getRc003TaskStatus,
     getRc003BridgeSnapshot: mocks.getRc003BridgeSnapshot,
+    getCaptureSupport: mocks.getCaptureSupport,
     enableRc003Capture: mocks.enableRc003Capture,
     disableRc003Capture: mocks.disableRc003Capture,
     getVokieInstallation: mocks.getVokieInstallation,
@@ -312,6 +315,20 @@ function rc003BridgeSnapshot(
   };
 }
 
+const CAPTURE_SUPPORTED: CaptureSupport = {
+  nativeArch: "x64",
+  helperExpected: "sayall-helper.exe",
+  available: true,
+  reason: null,
+};
+
+const CAPTURE_UNSUPPORTED: CaptureSupport = {
+  nativeArch: "arm64",
+  helperExpected: "sayall-helper.exe",
+  available: false,
+  reason: "arch_unsupported",
+};
+
 function resetWizardMocks(): void {
   mocks.reportFrontendEvent.mockReset();
     mocks.getOnboardingState.mockReset();
@@ -330,6 +347,7 @@ function resetWizardMocks(): void {
     mocks.setOtherVoiceHotkey.mockReset();
     mocks.getRc003TaskStatus.mockReset();
     mocks.getRc003BridgeSnapshot.mockReset();
+    mocks.getCaptureSupport.mockReset();
     mocks.enableRc003Capture.mockReset();
     mocks.disableRc003Capture.mockReset();
     mocks.getVokieInstallation.mockReset();
@@ -384,6 +402,7 @@ function resetWizardMocks(): void {
     };
     mocks.getRc003TaskStatus.mockImplementation(async () => mocks.rc003Disabled);
     mocks.getRc003BridgeSnapshot.mockResolvedValue(rc003BridgeSnapshot());
+    mocks.getCaptureSupport.mockResolvedValue(CAPTURE_SUPPORTED);
     mocks.enableRc003Capture.mockImplementation(async () => ({
       ...mocks.rc003Disabled,
       enabled: true,
@@ -461,6 +480,134 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.find(".onboarding-back--placeholder").exists()).toBe(false);
     const passed = onboardingEvents("step_passed");
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
+  });
+
+  it("第②步通过后进入全按键支持说明页：默认可继续", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(connectedRuntime());
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    await flushPromises();
+
+    await wrapper.find(".onboarding-actions .primary-button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
+    expect(wrapper.text()).toContain("开启全按键支持");
+    expect(wrapper.text()).toContain(
+      "开启后，遥控器上的所有按键都能设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。",
+    );
+    expect(wrapper.text()).toContain("现在不开启也可以继续；以后可以在“按键”页随时打开。");
+    expect(wrapper.text()).toContain("开启时 Windows 会弹出授权窗口，请选择“是”。");
+    // 可选增强：不开启也能继续；本机支持时开关可点。
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
+    expect(continueButton.attributes("disabled")).toBeUndefined();
+    const input = wrapper.find(".onboarding-switch input");
+    expect(input.attributes("disabled")).toBeUndefined();
+    expect((input.element as HTMLInputElement).checked).toBe(false);
+    // 右栏检查卡展示同一事实。
+    expect(wrapper.text()).toContain("全按键支持已开启");
+    // 读取状态是一次可诊断动作（begin → end）。
+    const reads = onboardingEvents("action").filter(
+      (p) => p.step === "full_key" && p.reason === "read_capture_state",
+    );
+    expect(reads.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    wrapper.unmount();
+  });
+
+  it("在全按键支持步骤打开开关：先弹确认，确认后才写状态", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    const wrapper = await mountWizard(connectedRuntime());
+
+    await wrapper.find(".onboarding-switch input").trigger("change");
+    await flushPromises();
+
+    // 每次开启都先确认（2026-10-03 定稿）：确认前不调用 IPC。
+    expect(wrapper.text()).toContain("开启“全按键支持”？");
+    expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
+    const confirm = wrapper.findAll("button").find((button) => button.text() === "开启");
+    expect(confirm).toBeDefined();
+    await confirm!.trigger("click");
+    await flushPromises();
+
+    expect(mocks.enableRc003Capture).toHaveBeenCalledTimes(1);
+    expect((wrapper.find(".onboarding-switch input").element as HTMLInputElement).checked).toBe(
+      true,
+    );
+    expect(wrapper.text()).toContain("已开启。返回 / 音量+ / 音量− 现在也能自定义。");
+    expect(wrapper.text()).not.toContain("现在不开启也可以继续");
+    // 授权日志按第③步记录，不得沿用第④步的 doubao 标记。
+    const auth = onboardingEvents("authorization");
+    expect(auth.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    expect(auth.every((p) => p.step === "full_key" && p.detail === "full_key")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("开关操作进行中只显示置灰与转圈，不显示状态文案", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    let resolveEnable!: (value: typeof mocks.rc003Disabled) => void;
+    mocks.enableRc003Capture.mockImplementation(
+      () =>
+        new Promise<typeof mocks.rc003Disabled>((resolve) => {
+          resolveEnable = resolve;
+        }),
+    );
+    const wrapper = await mountWizard(connectedRuntime());
+
+    await wrapper.find(".onboarding-switch input").trigger("change");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "开启")!.trigger("click");
+    await flushPromises();
+
+    const input = wrapper.find(".onboarding-switch input");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(wrapper.find(".toggle-spinner").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("现在不开启也可以继续");
+    expect(wrapper.text()).not.toContain("已开启。返回");
+
+    resolveEnable({ ...mocks.rc003Disabled, enabled: true });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已开启。返回 / 音量+ / 音量− 现在也能自定义。");
+    wrapper.unmount();
+  });
+
+  it("本机不支持全按键支持时：开关置灰、说明原因，仍可继续", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    mocks.getCaptureSupport.mockResolvedValue(CAPTURE_UNSUPPORTED);
+    const wrapper = await mountWizard(connectedRuntime());
+
+    const input = wrapper.find(".onboarding-switch input");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("这台电脑暂不支持全按键支持，其他按键不受影响。");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).toContain("这台电脑暂不支持全按键支持");
+
+    // 合成事件也绕不过守卫：不弹确认、不动 IPC。
+    await input.trigger("change");
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("开启“全按键支持”？");
+    expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("开启失败时显示用户可读原因，且不阻断继续", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    mocks.enableRc003Capture.mockResolvedValue({
+      ...mocks.rc003Disabled,
+      enabled: false,
+      lastError: "启用全按键支持失败：授权未完成（UAC 被取消）。",
+    });
+    const wrapper = await mountWizard(connectedRuntime());
+
+    await wrapper.find(".onboarding-switch input").trigger("change");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "开启")!.trigger("click");
+    await flushPromises();
+
+    // 原文只进日志；界面只显示映射后的用户语言。
+    expect(wrapper.text()).toContain("没有完成系统授权，全按键支持保持关闭。");
+    expect(wrapper.text()).not.toContain("UAC");
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
   });
 
   it("第①步给完整配对流程（含步骤2下方的打开蓝牙设置），且点击不写提示", async () => {
@@ -1068,7 +1215,7 @@ describe("Onboarding diagnostics copy", () => {
     expect(text).toContain("App version: 0.5.0");
     expect(text).toContain("Build: fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901");
     expect(text).toContain("Windows version: 10.0.26100");
-    expect(text).toContain("Wizard step: remote (2/7)");
+    expect(text).toContain("Wizard step: remote (2/8)");
     expect(text).toContain("Gate: remote.not_connected");
     expect(text).toContain("Blocked: yes");
     expect(text).toContain("Audio: phase=ready recommended=1 selected=yes");

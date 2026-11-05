@@ -32,7 +32,7 @@
 | 语音音量（连接页「语音设备」卡） | 增益；读数写“12 dB”；说明“0 dB 保持原始音量；数值越大声音越响，也会放大环境噪声。建议先从 6–12 dB 开始。”（对齐 Mac `audio.gain.*`） | `ConnectionPage.vue`、`AppSettings.gain_db` |
 | 常用语（会员能力：按键动作 + 浮层面板） | 常用语；动作名「打开常用语」；缺私有组件时已保存的绑定显示「打开常用语（当前不可用）」；失败提示按原因分叉（见 §7 2026-10-15 条） | `src/lib/bridge.ts`（`actionSummary`）、`ButtonsPage.vue`、`SettingsPage.vue`；面板内文案在私有组件 |
 | 启动行为第二项（设置页「通用」） | 启动时自动打开主面板（对齐 Mac `about.preferences.open_main_window_at_launch`）；悬停提示“关闭后普通启动仅保留托盘入口；更新完成后仍会显示主面板。”；新装与老配置默认开启（2026-10-19 用户定稿「照 Mac 原样」）；通用模块不显示行副标题 | `SettingsPage.vue`、`AppSettings.open_window_at_launch` |
-| 应用语言（设置页「通用」，2026-10-24） | 应用语言；三档「跟随系统」「简体中文」「English」；通用模块不显示行副标题；持久化 `application_language`（`system` / `zh-Hans` / `en`，对齐 Mac `AppLanguage`）；**全界面**跟随语言即时切换：侧栏、六个页面、向导 ①–⑦、弹窗、错误文案、托盘菜单与窗口标题；英文术语对齐 Mac（Routines / Full-key support / Doubao / WeType / App Language / System Default） | `SettingsPage.vue`、`AppSettings.application_language`、`src/lib/language.ts`、`src/lib/i18n.ts`、`src-tauri/src/lib.rs`（`apply_native_language`） |
+| 应用语言（设置页「通用」，2026-10-24） | 应用语言；三档「跟随系统」「简体中文」「English」；通用模块不显示行副标题；持久化 `application_language`（`system` / `zh-Hans` / `en`，对齐 Mac `AppLanguage`）；**全界面**跟随语言即时切换：侧栏、六个页面、向导 ①–⑧、弹窗、错误文案、托盘菜单与窗口标题；英文术语对齐 Mac（Routines / Full-key support / Doubao / WeType / App Language / System Default） | `SettingsPage.vue`、`AppSettings.application_language`、`src/lib/language.ts`、`src/lib/i18n.ts`、`src-tauri/src/lib.rs`（`apply_native_language`） |
 | 更新完成提示（启动时一次性） | 标题「无线麦已更新」、正文「已成功更新到版本 {版本号}。」、按钮「好」（对齐 Mac `update.completed.*`，原样移植）；只在“本次启动前刚完成更新”时出现一次 | `UpdateCompletedDialog.vue`、`launch_state.rs` |
 | 组合动作（侧边栏页 + 按键页动作分组） | 组合动作；步骤类型写「打开应用」「等待应用」「单键或快捷键」「聚焦输入框」「聚焦学习过的输入框」「打开网址」「执行已有组合动作」（对齐 Mac `macro.step.*`；「系统与媒体动作」不再作为新步骤提供，旧数据仍可显示与执行）；终态写「组合动作执行成功」「组合动作已执行，但无法确认第三方 App 的结果」「组合动作已取消」「组合动作执行超时」等（对齐 Mac `macro.status.execution.*`） | `MacrosPage.vue`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`macroActionLabel` / `macroTerminalLabel` / `macroStepSummary`） |
 
@@ -684,3 +684,17 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   改由助手自己换端口解决（`holder=other_program` 也回退），不再作为提示内容。
   写法边界：不出现端口、进程、助手、驱动（术语红线照旧）；读不到原因时退回通用句，不做猜测。
   落点：`captureInactiveText`（`src/lib/capture-switch.ts`）、英译 `src/lib/i18n/en/lib.ts`。
+- 2026-11-05：首次设置向导新增第③步「全按键支持」说明与开启引导（用户要求；位置在遥控器连接
+  通过之后、语音设备之前）。文案：标题「开启全按键支持」；说明「开启后，遥控器上的所有按键都能
+  设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。」；开关标签「全按键支持」
+  （文字在左、开关在右，沿用 §4）；关闭态「现在不开启也可以继续；以后可以在“按键”页随时打开。」；
+  开启态「已开启。返回 / 音量+ / 音量− 现在也能自定义。」；三条须知「开启时 Windows 会弹出授权
+  窗口，请选择“是”。」「只读取这支遥控器的按键，不收集其他内容。」「个别游戏带有防作弊保护，
+  玩这类游戏前建议先关闭全按键支持。」；读取失败「读取全按键支持状态失败；可以重新进入这一步，
+  或先继续。」。**这一步不参与门禁**：全按键支持是可选增强，基础语音与普通按键不依赖系统授权；
+  拒绝授权或 ARM64 不可用时必须能继续。不可用时开关置灰并写「这台电脑暂不支持全按键支持，
+  其他按键不受影响。」。开关仍遵守 2026-10-10 的三态与失败文案规则（失败句名称用「全按键支持」）。
+  落点：`src/onboarding/steps/FullKeyStep.vue`、`src/pages/OnboardingPage.vue`、
+  `src/onboarding/flow.ts`、`src/onboarding/panel.ts`、`src-tauri/src/onboarding.rs`。
+  诊断块的步骤顺序随之变为八步（`n/8`）；`Testing/WindowsOnboardingWizard.md` 中的原第③–⑦步
+  依次后移为第④–⑧步，2026-10-05 等历史条目里的步骤号保持当时含义。

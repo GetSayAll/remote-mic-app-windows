@@ -74,7 +74,26 @@ export default {
     "Bluetooth settings opened. After pairing, come back and select Scan for Paired Devices.",
   "无法打开蓝牙设置，请重试。": "Could not open Bluetooth settings. Try again.",
 
-  // ---- Step 3: audio device ----
+  // ---- Step 3: full-key support (optional) ----
+  "开启全按键支持": "Turn on Full-key support",
+  "开启后，遥控器上的所有按键都能设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。":
+    "When it is on, every button on the remote can have its own action, including Back, Volume+, and Volume−, which Windows does not normally receive.",
+  "已开启。返回 / 音量+ / 音量− 现在也能自定义。":
+    "On. Back, Volume+, and Volume− can now be customized too.",
+  "现在不开启也可以继续；以后可以在“按键”页随时打开。":
+    "You can continue without turning it on and enable it later on the Buttons page.",
+  "开启时 Windows 会弹出授权窗口，请选择“是”。":
+    "When you turn it on, Windows asks for authorization. Select Yes.",
+  "只读取这支遥控器的按键，不收集其他内容。":
+    "SayAll reads only this remote's buttons and collects nothing else.",
+  "个别游戏带有防作弊保护，玩这类游戏前建议先关闭全按键支持。":
+    "Some games use anti-cheat protection. Turn off Full-key support before playing them.",
+  "读取全按键支持状态失败；可以重新进入这一步，或先继续。":
+    "Could not read the Full-key support status. Re-enter this step or continue for now.",
+  "全按键支持已开启": "Full-key support is on",
+  "这台电脑暂不支持全按键支持": "Full-key support is not available on this PC",
+
+  // ---- Step 4: audio device ----
   "选择语音设备": "Choose an audio device",
   "无线麦把遥控器的声音送到播放端（CABLE Input）；语音工具再从录音端（CABLE Output）读取声音。":
     "SayAll sends the remote's audio to CABLE Input; your voice app reads it from CABLE Output.",
@@ -117,7 +136,7 @@ export default {
   "语音设备没准备好；重新选择或刷新设备列表后再试。":
     "The audio device is not ready. Choose it again or refresh the device list, then retry.",
 
-  // ---- Step 4: voice app ----
+  // ---- Step 5: voice app ----
   "选择你要用的输入工具": "Choose your voice app",
   "无线麦会替你按住它的语音键；选好后，下面显示这个工具还需要怎么设置。":
     "SayAll holds the voice button for you. Once you choose an app, the steps below show what else it needs.",
@@ -186,7 +205,7 @@ export default {
   "Vokie 没有运行；打开它再重新检测。": "Vokie is not running. Open it, then check again.",
   "为「其他工具」选择语音键，再继续。": "Choose a voice trigger key for Other App to continue.",
 
-  // ---- Step 5: voice test ----
+  // ---- Step 6: voice test ----
   "按住遥控器语音键，试一句话": "Press and hold the remote's voice button and say a few words",
   "点一下下面的输入框，按住遥控器上的语音键说一句话，然后松开。文字应该会出现在输入框里。":
     "Select the field below, press and hold the remote's voice button, say a few words, then release. The text should appear in the field.",
@@ -237,7 +256,7 @@ export default {
     "“More Input Tools” is not active yet, and SayAll is retrying automatically. If it does not recover, turn the switch off and on again, then test again.",
   "这次测试没有通过，再试一次。": "This test did not pass. Try again.",
 
-  // ---- Step 6: control buttons ----
+  // ---- Step 7: control buttons ----
   "按一下遥控器的普通按键": "Press a regular button on the remote",
   "请用遥控器上除语音键以外的按键，按 3 个不同的键（比如 主页 / OK / 方向键）。这一步只看按键能不能用，不会执行你以前配置的动作。":
     "Press three different buttons other than the voice button, such as Home, OK, or an arrow key. This step only checks that the buttons work; it does not run your configured actions.",
@@ -251,7 +270,7 @@ export default {
   "已按 3 个不同的普通按键": "Three different regular buttons pressed",
   "按键映射暂时暂停，完成后恢复": "Button mapping paused; restored when done",
 
-  // ---- Step 7: complete ----
+  // ---- Step 8: complete ----
   "设置完成": "Setup Complete",
   "开始使用前，再确认一次关键条件都还在。":
     "One last check that the key requirements are still in place.",

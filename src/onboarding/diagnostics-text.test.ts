@@ -149,11 +149,11 @@ describe("formatOnboardingDiagnostics", () => {
   it("带出当前步骤（token + 序号）、门禁码与阻断状态", () => {
     const text = formatOnboardingDiagnostics(report, snapshot);
 
-    expect(text).toContain("Wizard step: voice_test (5/7)");
+    expect(text).toContain("Wizard step: voice_test (6/8)");
     expect(text).toContain("Gate: voice_test.not_verified");
     expect(text).toContain("Blocked: yes");
-    // 步骤顺序表覆盖全部七步（新增步骤时这里会红）。
-    expect(ONBOARDING_STEP_ORDER).toHaveLength(7);
+    // 步骤顺序表覆盖全部八步（新增步骤时这里会红）。
+    expect(ONBOARDING_STEP_ORDER).toHaveLength(8);
   });
 
   it("带出与 onboarding 相关的运行状态字段（全部为稳定 token）", () => {
@@ -248,7 +248,7 @@ describe("formatOnboardingDiagnostics", () => {
       voiceTerminalCode: null,
     });
 
-    expect(text).toContain("Wizard step: remote (2/7)");
+    expect(text).toContain("Wizard step: remote (2/8)");
     expect(text).toContain("phase=idle model=unknown voice_ready=no");
     expect(text).toContain("button_observed=yes");
     expect(text).toContain("Raw input: phase=ready matched=1");

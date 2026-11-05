@@ -4,7 +4,8 @@
  * 规范来源：Mac 仓 origin/main `feature/first-run-onboarding/PRODUCT_SPEC.md`
  * 与 Windows 设计稿 `artifacts/design/2026-10-04-onboarding-design.html`：
  * - 步骤顺序按 D1 确认的 Mac 可见顺序（欢迎 → 遥控器 → 语音设备 → 输入工具
- *   → 按住说话验证 → 普通按键体验 → 完成）；
+ *   → 按住说话验证 → 普通按键体验 → 完成）；2026-11-05 在遥控器之后加入
+ *   「全按键支持」说明页（可选增强，不阻断继续）；
  * - 每一步「能否继续」都由实时能力状态决定（页面访问与点击不是通过条件）；
  * - 阻断一律返回稳定失败码（小写 token），供页面显示与结构化日志使用。
  */
@@ -13,6 +14,7 @@ import type { ConnectionPhase, RawInputPhase, VoiceInputTool } from "../lib/brid
 export type OnboardingStep =
   | "welcome"
   | "remote"
+  | "full_key"
   | "audio"
   | "voice_tool"
   | "voice_test"
@@ -25,6 +27,7 @@ export type OnboardingPhase = "prepare" | "setup" | "try_it";
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   "welcome",
   "remote",
+  "full_key",
   "audio",
   "voice_tool",
   "voice_test",
@@ -35,6 +38,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
 const PHASES: Record<OnboardingStep, OnboardingPhase> = {
   welcome: "prepare",
   remote: "setup",
+  full_key: "setup",
   audio: "setup",
   voice_tool: "setup",
   voice_test: "try_it",
@@ -145,6 +149,10 @@ export function evaluateGate(step: OnboardingStep, context: OnboardingContext): 
       return pass();
     case "remote":
       return evaluateRemote(context.remote);
+    case "full_key":
+      // 全按键支持是可选增强：基础语音与普通按键不依赖系统授权。这里只做说明与
+      // 引导，开关状态不参与「继续」判定（ARM64 等不可用场景也必须能走完向导）。
+      return pass();
     case "audio":
       return evaluateAudio(context.audio);
     case "voice_tool":

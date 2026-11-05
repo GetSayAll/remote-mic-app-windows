@@ -10,7 +10,7 @@
  * - 向导：当前步骤（英文 token + 序号）、门禁码、是否被阻断；
  * - 链路：连接（是否有错误记录、②步是否已收到按键）、输入通道计数、音频
  *   （是否有错误记录）、输入工具、Vokie、语音测试；
- * - 会话内计数：普通按键观察数（⑥步 3 键门禁）、按键映射是否被暂挂。
+ * - 会话内计数：普通按键观察数（⑦步 3 键门禁）、按键映射是否被暂挂。
  *
  * 2026-10-10 增补（现场"按键已收到，但遥控器已连接没选上"）：
  * - `button_observed`：②步是否已观察到普通按键（原来只在界面与日志里，块里没有，
@@ -19,11 +19,11 @@
  *   被丢弃报文）——"按键收不到"与"绑定失效"的分界靠这几个数；
  * - `error=`（连接、音频各一处）：只给布尔，区分"从未尝试"与"试过且失败"，
  *   错误原文一律不进（脱敏红线）；
- * - `Voice test:` 行：第⑤步 attempt 的当前阶段与终态码（无终态时写 `none`；
+ * - `Voice test:` 行：第⑥步 attempt 的当前阶段与终态码（无终态时写 `none`；
  *   迟到接受后终态码写 `late_transcript`）与 `late=` 布尔。
  *
  * 2026-10-14 增补（现场"全按键支持开着却没生效"）：
- * - `capture=`：`full_key_support=` 是开关**设置**（向导只在④/⑤/⑦步读过它）；
+ * - `capture=`：`full_key_support=` 是开关**设置**（向导只在⑤/⑥/⑧步读过它）；
  *   这里并列写实际捕获状态（读回 `CaptureHealth`：off / starting / active /
  *   inactive；读不到写 unknown）。`active` 才算生效；`inactive`（过宽限仍无
  *   所有权）与可能长期停留的 `starting`（助手/桥未就绪）都是没生效——用户
@@ -37,10 +37,11 @@
 import type { DiagnosticReport, Rc003CaptureHealth } from "../lib/bridge";
 import type { OnboardingStep } from "./flow";
 
-/** 步骤固定顺序（诊断里的 "n/7" 由它推导）。 */
+/** 步骤固定顺序（诊断里的 "n/8" 由它推导）。 */
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStep[] = [
   "welcome",
   "remote",
+  "full_key",
   "audio",
   "voice_tool",
   "voice_test",
@@ -94,11 +95,11 @@ export interface OnboardingDiagnosticsSnapshot {
   captureHealth: Rc003CaptureHealth | "unknown";
   vokieInstalled: boolean;
   vokieRunning: boolean;
-  /** 第⑤步 attempt 的当前阶段（VoiceAttemptState token）。 */
+  /** 第⑥步 attempt 的当前阶段（VoiceAttemptState token）。 */
   voiceTestPhase: string;
-  /** 第⑤步 attempt 的终态码（如 voice.no_transcript；无终态时 null；迟到接受后为 late_transcript）。 */
+  /** 第⑥步 attempt 的终态码（如 voice.no_transcript；无终态时 null；迟到接受后为 late_transcript）。 */
   voiceTerminalCode: string | null;
-  /** 第⑤步是否走了「迟到接受」（3 秒窗口失败后文字仍出现；对齐 Mac 现值门禁）。 */
+  /** 第⑥步是否走了「迟到接受」（3 秒窗口失败后文字仍出现；对齐 Mac 现值门禁）。 */
   voiceLateAccepted: boolean;
   distinctButtonCount: number;
   mappingSuspended: boolean;
@@ -142,7 +143,7 @@ export function formatOnboardingDiagnostics(
     // ——只记其中一项会把两种情形成因混在一起。三态用 yes/no/unknown，读不到时
     // 不写成 no（那会把"读不到"伪装成"没开"）。
     `Boot: type=${report.bootType} fast_startup=${threeState(report.fastStartupEnabled)}`,
-    `Wizard step: ${snapshot.step} (${stepIndex}/7)`,
+    `Wizard step: ${snapshot.step} (${stepIndex}/${ONBOARDING_STEP_ORDER.length})`,
   ];
   if (snapshot.gateCode) {
     lines.push(`Gate: ${snapshot.gateCode}`);

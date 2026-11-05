@@ -36,12 +36,13 @@ pub const INSTALL_EVIDENCE_FILES: [&str; 4] = [
     "other-voice-hotkey.json",
 ];
 
-/// 向导步骤（顺序即导航顺序，设计稿 §3 的 7 步）。
+/// 向导步骤（顺序即导航顺序；2026-11-05 在遥控器之后加「全按键支持」说明页）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnboardingStep {
     Welcome,
     Remote,
+    FullKey,
     Audio,
     VoiceTool,
     VoiceTest,
@@ -54,6 +55,7 @@ impl OnboardingStep {
         match self {
             Self::Welcome => "welcome",
             Self::Remote => "remote",
+            Self::FullKey => "full_key",
             Self::Audio => "audio",
             Self::VoiceTool => "voice_tool",
             Self::VoiceTest => "voice_test",
@@ -74,6 +76,7 @@ impl<'de> Deserialize<'de> for OnboardingStep {
         Ok(match value.as_str() {
             "welcome" => Self::Welcome,
             "remote" => Self::Remote,
+            "full_key" => Self::FullKey,
             "audio" => Self::Audio,
             "voice_tool" => Self::VoiceTool,
             "voice_test" => Self::VoiceTest,
@@ -89,6 +92,7 @@ pub fn parse_step(value: &str) -> Option<OnboardingStep> {
     Some(match value {
         "welcome" => OnboardingStep::Welcome,
         "remote" => OnboardingStep::Remote,
+        "full_key" => OnboardingStep::FullKey,
         "audio" => OnboardingStep::Audio,
         "voice_tool" => OnboardingStep::VoiceTool,
         "voice_test" => OnboardingStep::VoiceTest,
@@ -251,6 +255,13 @@ mod tests {
         let decoded: OnboardingState = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, state);
 
+        // 新步骤（2026-11-05）必须能持久化与恢复，不能回落成 Welcome。
+        state.step = OnboardingStep::FullKey;
+        let encoded = serde_json::to_string(&state).unwrap();
+        assert!(encoded.contains("\"step\":\"full_key\""));
+        let decoded: OnboardingState = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.step, OnboardingStep::FullKey);
+
         // 陌生步骤名不允许把整份状态打成解析失败：归一化为 Welcome，其余字段保留。
         let decoded: OnboardingState = serde_json::from_str(
             r#"{"flow_version":1,"completed_version":0,"step":"legacy_step","migration_version":1}"#,
@@ -295,6 +306,7 @@ mod tests {
     #[test]
     fn parse_step_rejects_unknown_values_for_ipc() {
         assert_eq!(parse_step("voice_tool"), Some(OnboardingStep::VoiceTool));
+        assert_eq!(parse_step("full_key"), Some(OnboardingStep::FullKey));
         assert_eq!(parse_step("complete"), Some(OnboardingStep::Complete));
         assert_eq!(parse_step("legacy_step"), None);
         assert_eq!(parse_step(""), None);
