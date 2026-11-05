@@ -23,7 +23,7 @@ export function shouldShowVoiceAudioDegraded(health: VoiceAudioHealth): boolean 
 
 /**
  * 一句用户语言：不出现样本率、MTU、BLE 调度等内部词。
- * 连接页与向导第⑤步共用，保证同一事实同一说法。
+ * 连接页与向导第⑥步共用，保证同一事实同一说法。
  */
 export function voiceAudioDegradedText(): string {
   return t(

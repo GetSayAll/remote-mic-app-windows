@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { CAPTURE_MORE_INPUT_TOOLS_NOTE } from "../lib/capture-switch";
 import { t } from "../lib/i18n";
 
 /**
@@ -40,6 +41,9 @@ onMounted(() => {
     <h3 id="capture-confirm-title">{{ t("开启“全按键支持”？") }}</h3>
     <p class="capture-confirm-intro">
       {{ t("开启后，无线麦会直接读取遥控器上已配置的按键，避免影响物理键盘上的同名按键；返回 / 音量+ / 音量−也需要开启后才能使用。每次开启都会弹出 Windows 授权窗口，请选择“是”；关闭开关即停。") }}
+    </p>
+    <p class="capture-confirm-note">
+      {{ t(CAPTURE_MORE_INPUT_TOOLS_NOTE) }}
     </p>
     <p class="capture-confirm-note">
       {{ t("个别杀毒软件可能把这个功能当成风险，拦截或关闭它，导致按键失灵、开启失败。") }}

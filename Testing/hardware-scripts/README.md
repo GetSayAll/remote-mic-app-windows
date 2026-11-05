@@ -4,7 +4,7 @@
 本仓库自带、可直接手写，**不依赖任何私有仓库**。
 
 - `hid-buttons-smoke.json`：最小冒烟（连接 → HID 挂载 → 3 个按键的按下/释放）。
-- `rc003-onboarding-walkthrough.json`：走查首次设置向导 ①–⑦ 用（周期按键 + 一次 ATVV 语音会话）。
+- `rc003-onboarding-walkthrough.json`：走查首次设置向导 ①–⑧ 用（周期按键 + 一次 ATVV 语音会话；2026-11-05 起在语音设备之后新增第④步「全按键支持」，原④–⑦ 后移为⑤–⑧）。
 - `hid-button-app-script.json` / `rc001-short-voice-app-script.json`：两份**样例导出**（数据契约样本，
   用于 `crates/sayall-windows/src/hardware_script.rs` 的契约测试）。它们与私有模拟器
   `GetSayAll/hardware-simulation` 的 `hardware-sim export-app-script` 输出同格式；需要别的场景时，

@@ -14,6 +14,7 @@ function context(patch: Partial<SidePanelContext> = {}): SidePanelContext {
     tool: null,
     hotkeyReady: false,
     captureEnabled: false,
+    captureAvailable: true,
     vokieRunning: false,
     voicePhase: "waiting_start",
     voiceTerminalCode: null,
@@ -59,6 +60,20 @@ describe("onboarding side panel", () => {
       context({ connectionPhase: "ready", bleVoiceReady: true, remoteButtonObserved: true }),
     );
     expect(observed.rows?.map((row) => row.state)).toEqual(["ok", "ok"]);
+  });
+
+  it("full-key rows show the optional switch and the unsupported boundary", () => {
+    const off = buildSidePanel("full_key", context());
+    expect(off.cardTitle).toBe("全按键支持");
+    expect(off.rows).toEqual([{ label: "全按键支持已开启", state: "pending" }]);
+
+    const on = buildSidePanel("full_key", context({ captureEnabled: true }));
+    expect(on.rows).toEqual([{ label: "全按键支持已开启", state: "ok" }]);
+
+    const unavailable = buildSidePanel("full_key", context({ captureAvailable: false }));
+    expect(unavailable.rows).toEqual([
+      { label: "这台电脑暂不支持全按键支持", state: "warn" },
+    ]);
   });
 
   it("audio rows layer detection, selection and readiness", () => {

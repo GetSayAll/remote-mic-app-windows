@@ -1,6 +1,7 @@
 /**
  * 向导右栏「检查卡」的状态推导（设计稿 2026-10-05：右栏每一行 = 当前步骤的一条
- * 「继续」条件）。纯函数：输入全部来自页面既有状态（运行快照、门禁上下文、
+ * 「继续」条件；可选步骤——如第④步全按键支持——的行只展示当前状态，不参与门禁）。
+ * 纯函数：输入全部来自页面既有状态（运行快照、门禁上下文、
  * attempt 终态），输出可直接渲染的行；不改任何判据——`flow.evaluateGate` 仍是
  * 「继续」的唯一裁决者，这里只是把同一批事实画出来。
  */
@@ -40,6 +41,8 @@ export interface SidePanelContext {
   tool: VoiceInputTool | null;
   hotkeyReady: boolean;
   captureEnabled: boolean;
+  /** 本机能否使用「全按键支持」（ARM64 等不可用时置灰开关）。 */
+  captureAvailable: boolean;
   vokieRunning: boolean;
   voicePhase: VoiceAttemptState;
   voiceTerminalCode: string | null;
@@ -79,6 +82,20 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
         ],
       };
     }
+
+    case "full_key":
+      return {
+        visual: "remote",
+        cardTitle: t("全按键支持"),
+        rows: ctx.captureAvailable
+          ? [
+              {
+                label: t("全按键支持已开启"),
+                state: ctx.captureEnabled ? "ok" : "pending",
+              },
+            ]
+          : [{ label: t("这台电脑暂不支持全按键支持"), state: "warn" }],
+      };
 
     case "audio":
       return {

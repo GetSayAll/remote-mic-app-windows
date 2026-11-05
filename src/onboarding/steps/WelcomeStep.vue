@@ -49,7 +49,7 @@ defineEmits<{ openBluetoothSettings: [] }>();
         <li>
           <span class="onboarding-num">5</span>
           <span>
-            {{ t("选中「小米蓝牙语音遥控器」，等待配对完成，列表里找不到设备时，先点开「显示所有设备」。") }}
+            {{ t("选中「小米蓝牙语音遥控器」，等待配对完成，列表里找不到设备时，打开高级设置或者点开「显示所有设备」。") }}
           </span>
         </li>
       </ul>

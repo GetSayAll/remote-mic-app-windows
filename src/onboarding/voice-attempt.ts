@@ -1,5 +1,5 @@
 /**
- * 向导第⑤步「按住说话验证」的一次 attempt 控制器（纯逻辑，设计稿 §5.5 / §8）。
+ * 向导第⑥步「按住说话验证」的一次 attempt 控制器（纯逻辑，设计稿 §5.5 / §8）。
  *
  * 证据来源：运行快照轮询（消费方约 150ms 喂一帧）。为什么不是 BLE 推送事件：
  * 探针记录 `docs/investigations/2026-10-04-windows-onboarding-feasibility.md` 允许

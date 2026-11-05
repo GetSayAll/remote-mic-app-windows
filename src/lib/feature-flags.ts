@@ -17,8 +17,9 @@ export const VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED = false;
  * 首次使用向导（Onboarding）激活开关。
  *
  * 2026-10-04：步骤①–⑦、staged 事务、attempt 唯一终态与「重新运行向导」入口
- * 已全部实现；打开开关，供现场验收（遥控器实时语音 + 三种输入工具 + 键盘
- * 阴性对照）使用。验收通过前本分支不合入 main（main 保持关闭）。
+ * 已全部实现；2026-11-05 新增第④步「全按键支持」后为①–⑧。打开开关，供现场
+ * 验收（遥控器实时语音 + 三种输入工具 + 键盘阴性对照）使用。验收通过前本分支
+ * 不合入 main（main 保持关闭）。
  */
 export const ONBOARDING_WIZARD_ENABLED = true;
 

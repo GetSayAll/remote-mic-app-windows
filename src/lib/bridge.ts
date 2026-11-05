@@ -1301,7 +1301,7 @@ export async function completeOnboarding(): Promise<OnboardingState> {
 }
 
 /**
- * 第④步暂存语音绑定：落回滚快照 + 应用正式配置与运行时（设计稿 §5.4）。
+ * 第⑤步暂存语音绑定：落回滚快照 + 应用正式配置与运行时（设计稿 §5.4）。
  * 只有向导进行中可调用；退出未完成流程/重跑向导会回滚到进入向导前的配置。
  */
 export async function stageOnboardingVoiceBinding(
@@ -1322,7 +1322,7 @@ export async function getRawInputSnapshot(): Promise<RawInputSnapshot> {
 }
 
 /**
- * 向导第⑥步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
+ * 向导第⑦步：按键映射临时暂挂（只观察、不注入；内存态、不改用户配置）。
  * 进入「普通按键体验」时暂挂，离开时恢复；进程退出后自然复位。
  */
 export async function setMappingSuspension(suspended: boolean): Promise<boolean> {
@@ -1333,7 +1333,7 @@ export async function setMappingSuspension(suspended: boolean): Promise<boolean>
 }
 
 /**
- * 向导第⑤步前置（探针④）：打开物理键观察窗口。
+ * 向导第⑥步前置（探针④）：打开物理键观察窗口。
  * 返回窗口 id；0 = 当前环境不可用（仿真/钩子未运行），调用方按未知处理。
  * excludeVks：不计入的虚拟键码——「按住说话」和弦由报告层以非注入形态
  * 送进 OS（必须到达输入法），不属于手动输入。
@@ -1346,7 +1346,7 @@ export async function beginKeyObservation(excludeVks: number[]): Promise<number>
 }
 
 /**
- * 向导第⑤步前置（探针④）：关闭物理键观察窗口并取回计数。
+ * 向导第⑥步前置（探针④）：关闭物理键观察窗口并取回计数。
  * 计数 = 窗口内「可能进入 OS 的物理按下沿」（非注入、未被门控吞下、不在
  * 排除集内）。返回 null = 计量不可靠（窗口过期/钩子停止）——fail-open，
  * 不得据此判定手动输入。

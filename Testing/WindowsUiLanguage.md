@@ -38,7 +38,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1
 | 2 | 设置 → 应用语言 → English | 立即切英文，不重挂载：当前页/滚动位置/编辑状态保留；窗口标题变 `SayAll`；托盘 tooltip 变 `SayAll`；托盘菜单为 `Show Main Window` / `Quit` |
 | 3 | 英文模式逐页检查 按键 / 组合动作 / 推荐 / 连接 / 回眸 / 权限 / 设置 / 个人中心 | 侧栏为 Buttons / Routines / Picks / Connection / Reflections / Permissions / Settings / Profile；页面标题为 Button Mapping / Routines / Picks / Connection & Voice / Reflections / Permissions & Privacy / Settings；页面文本、按钮、tooltip、aria-label、错误文案无中文残留；`简体中文` 语言选项除外；推荐页加载 `/en/recommendations/` |
 | 4 | 英文模式检查按键页全按键支持确认弹窗、连接页输入工具、权限页诊断、设置页会员/更新/问题反馈 | 弹窗与固定文案全英文；用户数据/外部错误原文不算残留 |
-| 5 | 英文模式向导 ①–⑦（重新运行向导） | 阶段条 Prepare › Set Up › Try It；步骤标题、检查卡、门禁提示、失败文案全英文；切回中文立即恢复 |
+| 5 | 英文模式向导 ①–⑧（重新运行向导） | 阶段条 Prepare › Set Up › Try It；步骤标题、检查卡、门禁提示、失败文案全英文；切回中文立即恢复 |
 | 6 | 中文 ↔ English 连续切换 10 次 | 无异常、无重复/叠加托盘菜单项；每次菜单仍只有两项；切回中文后标题/托盘/页面全部恢复 |
 | 7 | 关闭应用后重启（English 持久化） | 首帧即英文；窗口标题与托盘菜单英文；设置页选中 English |
 | 8 | 选择「跟随系统」，在 Windows 中文与英文显示语言下各重启一次 | 分别得到 `zh-Hans` / `en`；托盘与页面一致 |
@@ -72,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-preflight.ps1
   - English 持久化重启：首帧标题 `SayAll`，日志加载 `preference=en`、原生 language=en。
   - 选回 System Default：立即回到中文标题与中文导航；重启后仍 `preference=system`、
     language=zh-Hans。
-- **deferred**：真机向导 ①–⑦逐页英文视检（为不破坏用户已完成的向导状态，只跑了
+- **deferred**：真机向导 ①–⑧逐页英文视检（为不破坏用户已完成的向导状态，只跑了
   140 个向导组件测试与英文无汉字临时验证）；把 Windows 显示语言改为英文后的
   `system` 模式（会改动系统语言并需重启，仅用 Rust 语言映射单测覆盖 `0x0409 → en`）。
 - 已知**不在本功能范围**：用户数据/第三方应用名不翻译；Windows 系统级错误原文可能随系统语言。
