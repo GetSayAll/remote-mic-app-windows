@@ -667,7 +667,7 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
   margin-bottom: 18px;
 }
 .overview-identity { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-.overview-identity h2 { margin: 0; font-size: 16px; }
+.overview-identity h2 { margin: 0; font-family: var(--font-brand); font-size: 18px; font-weight: 600; }
 .overview-identity p { margin: 0; font-size: 13px; }
 .overview-update {
   min-width: 0;

@@ -722,4 +722,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. If it is not listed,
   open Advanced settings or select Show all devices.`；真机验收手册同句同步。落点：
   `src/onboarding/steps/WelcomeStep.vue`、`src/lib/i18n/en/onboarding.ts`。
+- 2026-11-06（品牌字体对齐 Mac，Andy 指定）：侧栏左上角 SayAll 使用 Oxanium SemiBold 16px；
+  设置页左上角「无线麦 SayAll」使用 Oxanium SemiBold 18px（中文按 Segoe UI / 微软雅黑回退）。
+  侧栏宽度按 Mac origin/main 的内容测量口径取 130px（129 内容 + 1px 边框），不再固定 136px。
+  字体文件 `public/fonts/oxanium-semibold.ttf`，OFL 1.1 许可随包（`public/fonts/OFL.txt`），
+  第三方声明见 `THIRD_PARTY_NOTICES.md`。
 

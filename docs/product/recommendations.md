@@ -17,8 +17,9 @@
 ## 页面承载
 
 - 官网返回 `X-Frame-Options: DENY`，不能用 `<iframe>`；Windows 使用 Tauri 主窗口
-  内的子 WebView（WebView2）。子 WebView 的边界固定为侧栏 136px 之外的整个客户区，
-  窗口缩放与跨屏 DPI 变化时重新贴边（2026-10-31 侧栏紧凑化后由 108px 改为 136px）。
+  内的子 WebView（WebView2）。子 WebView 的边界固定为侧栏 130px 之外的整个客户区，
+  窗口缩放与跨屏 DPI 变化时重新贴边（2026-10-31 侧栏紧凑化后由 108px 改为 136px，
+  2026-11-06 按 Mac 内容测量口径调为 130px）。
 - 加载地址：`https://sayall.app/recommendations/?embed=app&appPlatform=windows&theme=light|dark`。
   - `embed=app` 让官网隐藏自身导航和页脚，只保留推荐内容；
   - `appPlatform=windows` 是平台标记；当前官网按 `website` 内容面渲染；
@@ -103,7 +104,7 @@
   （推荐 / 遥控器推荐 / 搭配软件 / vokie / 豆包输入法 / 微信输入法）。
 - 窗口从 1081×837 调整到 1400×900（150% DPI，物理 2100×1350）：
   `WRY_WEBVIEW` 子视图重贴到侧栏右侧（物理 113→2087，窗口右缘 2096；该次取证
-  使用旧版 108px 侧栏，136px 布局需在下次真机走查时复测），
+  使用旧版 108px 侧栏，当前 130px 布局需在下次真机走查时复测），
   无重叠、无空白条，网页按两列重新排版。
 - 离开推荐页切到「按键」：日志 `event=hide generation=2`，网页层完全消失。
 - 深色外观下重新进入：日志 `event=show mode=reuse generation=3 theme=dark` →

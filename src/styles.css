@@ -1,8 +1,20 @@
+/* 品牌字：与 Mac `BrandFont` 同源（Oxanium SemiBold）。中文按后两级回退到
+   Segoe UI / 微软雅黑，拉丁字（SayAll）使用 Oxanium。字体文件与 OFL 许可见
+   `public/fonts/`，第三方声明见 THIRD_PARTY_NOTICES.md。 */
+@font-face {
+  font-family: "Oxanium";
+  src: url("/fonts/oxanium-semibold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
 /* --accent 族：默认值是历史紫色品牌色，仅作为"系统强调色读取失败"的回退。
    正常路径由 src/lib/accent.ts 读取 Windows 系统主题色并按深浅色主题
    动态注入同名变量（内联样式优先级更高），选中态自动跟随系统强调色。 */
 :root {
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --font-brand: "Oxanium", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   color: var(--text-primary);
   background: var(--surface-canvas);
   color-scheme: light;
@@ -191,12 +203,14 @@ body {
   font-size: 16px;
 }
 
-/* 侧栏对齐 macOS SettingsView（2026-10-31 起对齐 PR 803 紧凑布局）：
-   宽 136px、图标 18、文字 13 semibold、图标在左文字在右、行高 40；
-   选中 = 强调色 + 10% 背景 + 7px 圆角（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
+/* 侧栏宽度按 Mac origin/main 的内容测量口径取当前自然宽度：
+   15×2 边距 + 44 图标 + 8 间距 + max(SayAll 16 / 版本 12) ≈ 128.27 → 129 内容宽，
+   加 1px 右边框为 130。Mac 的 bounds 是 104...136；当前品牌字决定 129，
+   不再沿用过宽的固定 136。将来若出现更长的私有页标签，需要同步宽度 IPC。
+   其余仍对齐 PR 803：图标 18、文字 13 semibold、行高 40、选中 7px 圆角。 */
 /* 外壳固定为视口高度（不再 min-height 随内容增高）：超出部分交给 .content
    在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
-.app-shell { display: grid; grid-template-columns: 136px minmax(0, 1fr); height: 100vh; }
+.app-shell { display: grid; grid-template-columns: 130px minmax(0, 1fr); height: 100vh; }
 .sidebar {
   position: sticky;
   top: 0;

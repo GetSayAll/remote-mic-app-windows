@@ -66,3 +66,48 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
     expect(css).not.toMatch(/\.app-shell\s*\{[^}]*min-height:\s*100vh/);
   });
 });
+
+// 2026-11-06 Andy：侧栏左上角 SayAll 与设置页左上角「无线麦 SayAll」要和 Mac
+// 用同一套品牌字（Oxanium SemiBold 16 / 18）。字体文件缺失或选择器回退时这里会红。
+describe("品牌字体（Oxanium SemiBold）", () => {
+  it("@font-face 指向随包字体，并暴露品牌字体变量", () => {
+    expect(css).toMatch(/@font-face\s*\{[^}]*font-family:\s*"Oxanium"/);
+    expect(css).toMatch(/@font-face\s*\{[^}]*url\("\/fonts\/oxanium-semibold\.ttf"\)/);
+    expect(css).toMatch(/--font-brand:\s*"Oxanium"/);
+  });
+
+  it("侧栏 SayAll 与设置页应用名使用品牌字体", () => {
+    const sidebar = readFileSync(join(srcDir, "components", "Sidebar.vue"), "utf8");
+    const settings = readFileSync(join(srcDir, "pages", "SettingsPage.vue"), "utf8");
+    expect(sidebar).toMatch(/\.brand-name\s*\{[^}]*font-family:\s*var\(--font-brand\)/);
+    expect(settings).toMatch(
+      /\.overview-identity h2\s*\{[^}]*font-family:\s*var\(--font-brand\)[^}]*font-size:\s*18px/,
+    );
+  });
+
+  it("字体文件与 OFL 许可随包存在", () => {
+    const font = readFileSync(join(process.cwd(), "public", "fonts", "oxanium-semibold.ttf"));
+    // TrueType 文件头；只校验类型和最低体量，避免把损坏/占位文件当字体。
+    expect([...font.subarray(0, 4)]).toEqual([0, 1, 0, 0]);
+    expect(font.length).toBeGreaterThan(20_000);
+    const license = readFileSync(join(process.cwd(), "public", "fonts", "OFL.txt"), "utf8");
+    expect(license).toContain("SIL OPEN FONT LICENSE Version 1.1");
+  });
+});
+
+// 2026-11-06：Mac origin/main 的侧栏宽度按内容测量（104...136），当前品牌区
+// 自然宽度为 129 内容 + 1px 边框 = 130。CSS 与推荐页子 WebView 的偏移必须同源，
+// 否则推荐页会盖住侧栏或留下空隙。
+describe("侧栏宽度与推荐页偏移同步", () => {
+  it("CSS 侧栏列宽为 130px", () => {
+    expect(css).toMatch(/\.app-shell\s*\{[^}]*grid-template-columns:\s*130px/);
+  });
+
+  it("推荐页子 WebView 使用同一个 130px 偏移", () => {
+    const rust = readFileSync(
+      join(process.cwd(), "src-tauri", "src", "recommendations.rs"),
+      "utf8",
+    );
+    expect(rust).toMatch(/const SIDEBAR_WIDTH:\s*f64\s*=\s*130\.0;/);
+  });
+});

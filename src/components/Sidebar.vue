@@ -180,7 +180,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   align-items: flex-start;
   gap: 8px;
   min-height: 75px;
-  padding: 11px 12px 10px;
+  padding: 11px 15px 10px;
   box-sizing: border-box;
 }
 
@@ -200,6 +200,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 }
 
 .brand-name {
+  font-family: var(--font-brand);
   font-size: 16px;
   font-weight: 600;
   line-height: 1.2;
