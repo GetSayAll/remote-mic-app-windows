@@ -238,6 +238,88 @@ describe("reflections agent access", () => {
     );
   });
 
+  it("uses the installed client's real icon and distinct glyphs otherwise", async () => {
+    api.getAgentAccessSnapshot.mockResolvedValue(
+      snapshot({
+        enabled: true,
+        clients: [
+          {
+            id: "codex",
+            displayName: "Codex",
+            available: true,
+            connected: false,
+            needsReconnect: false,
+            iconDataUrl: "data:image/png;base64,AAAA",
+          },
+          {
+            id: "claude-code",
+            displayName: "Claude Code",
+            available: true,
+            connected: false,
+            needsReconnect: false,
+            iconDataUrl: null,
+          },
+          {
+            id: "cursor",
+            displayName: "Cursor",
+            available: false,
+            connected: false,
+            needsReconnect: false,
+          },
+          {
+            id: "opencode",
+            displayName: "OpenCode",
+            available: false,
+            connected: false,
+            needsReconnect: false,
+          },
+        ],
+      }),
+    );
+    const wrapper = mount(ReflectionsAgentAccess);
+    await flushPromises();
+
+    const cardFor = (name: string) =>
+      wrapper.findAll(".agent-client").find((card) => card.text().includes(name))!;
+    expect(cardFor("Codex").find("img").exists()).toBe(true);
+    expect(cardFor("Claude Code").find("img").exists()).toBe(false);
+
+    // 未安装的三个客户端不能共用同一张图形。
+    const glyphOf = (name: string) =>
+      cardFor(name)
+        .findAll("path")
+        .map((path) => path.attributes("d"))
+        .join("|");
+    const glyphs = new Set(
+      ["Claude Code", "Cursor", "OpenCode"].map((name) => glyphOf(name)),
+    );
+    expect(glyphs.size).toBe(3);
+  });
+
+  it("renders the revoke action as a destructive text button", async () => {
+    api.getAgentAccessSnapshot.mockResolvedValue(
+      snapshot({
+        enabled: true,
+        authorizations: [
+          {
+            clientId: "5f0e4c2a-1111-4111-8111-111111111111",
+            displayName: "Codex",
+            integration: "codex",
+            createdAtMs: 1_760_000_000_000,
+            needsReconnect: false,
+          },
+        ],
+      }),
+    );
+    const wrapper = mount(ReflectionsAgentAccess);
+    await flushPromises();
+
+    const revoke = wrapper.get(".agent-revoke");
+    expect(revoke.text()).toBe("撤销");
+    // Mac 的 destructive 是无边框红字，不是主按钮也不是链接色。
+    expect(revoke.classes()).not.toContain("primary-button");
+  });
+
   it("revokes an authorization", async () => {
     api.getAgentAccessSnapshot.mockResolvedValue(
       snapshot({

@@ -124,6 +124,9 @@ pub struct AgentClientView {
     pub available: bool,
     pub connected: bool,
     pub needs_reconnect: bool,
+    /// 已安装客户端的真实图标（PNG data URL）。取不到时前端用各自的中性图形兜底，
+    /// 与 Mac 的 SF Symbol 回退一致。
+    pub icon_data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -250,6 +253,7 @@ impl AgentAccessStore {
                     needs_reconnect: authorization
                         .map(|item| item.needs_reconnect)
                         .unwrap_or(false),
+                    icon_data_url: self.client_icon_data_url(client),
                 }
             })
             .collect();
@@ -434,6 +438,19 @@ impl AgentAccessStore {
             }
             Ok(queue.remove(0))
         }));
+    }
+
+    /// 客户端真实图标 → `data:image/png;base64,...`。只读公开的 Shell 图标。
+    fn client_icon_data_url(&self, client: AgentClientId) -> Option<String> {
+        use base64::Engine as _;
+        let path = self.client_executable(client)?;
+        let png = sayall_windows::transcript_capture_windows::icon_png_for_executable(
+            &path.display().to_string(),
+        )?;
+        Some(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        ))
     }
 
     fn available(&self, client: AgentClientId) -> bool {

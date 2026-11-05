@@ -11,6 +11,8 @@ export interface AgentClientView {
   available: boolean;
   connected: boolean;
   needsReconnect: boolean;
+  /** 已安装客户端的真实图标（PNG data URL）；取不到用各自的中性图形兜底。 */
+  iconDataUrl?: string | null;
 }
 
 export interface AgentAuthorizationView {

@@ -144,6 +144,21 @@ async function copy(kind: "json" | "toml"): Promise<void> {
   }
 }
 
+/**
+ * 未安装客户端的兜底图形：与 Mac 的 SF Symbol 一一对应（代码括号 / 终端 / 指针 / 花括号），
+ * 四个客户端彼此可区分，不用同一张通用图标。
+ */
+const CLIENT_GLYPHS: Record<AgentClientId, string[]> = {
+  codex: ["M9.5 8 6 12l3.5 4", "M14.5 8 18 12l-3.5 4", "M13.2 6.6 10.8 17.4"],
+  "claude-code": ["M4 6.5h16v11H4z", "M7.8 10.6 10 12.8l-2.2 2.2", "M12.8 15h3.4"],
+  cursor: ["M6.2 4.6 18 11.4l-4.7 1.1-1.2 4.9L6.2 4.6z", "M13.3 12.5 17.4 17"],
+  opencode: ["M5 4.8h14v14.4H5z", "M11 8.6c-1.7 0-1.7 6.8 0 6.8", "M13.6 8.6c1.7 0 1.7 6.8 0 6.8"],
+};
+
+function clientGlyph(client: AgentClientId): string[] {
+  return CLIENT_GLYPHS[client];
+}
+
 function formatCreatedAt(millis: number): string {
   return new Date(millis).toLocaleString();
 }
@@ -183,9 +198,17 @@ function formatCreatedAt(millis: number): string {
         <div class="agent-clients">
           <div v-for="client in clients" :key="client.id" class="agent-client">
             <span class="agent-client-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <rect x="6.5" y="6.5" width="11" height="11" rx="2.6" stroke="currentColor" stroke-width="1.6"/>
-                <path d="M9.8 3.4v3.1M14.2 3.4v3.1M9.8 17.5v3.1M14.2 17.5v3.1M3.4 9.8h3.1M3.4 14.2h3.1M17.5 9.8h3.1M17.5 14.2h3.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              <img v-if="client.iconDataUrl" :src="client.iconDataUrl" alt="" />
+              <svg v-else viewBox="0 0 24 24" fill="none">
+                <path
+                  v-for="(path, index) in clientGlyph(client.id)"
+                  :key="index"
+                  :d="path"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
               </svg>
             </span>
             <div class="agent-client-meta">
@@ -283,7 +306,7 @@ function formatCreatedAt(millis: number): string {
             </span>
           </span>
           <button
-            class="link-button danger"
+            class="agent-revoke"
             type="button"
             @click="revoke(authorization.clientId)"
           >
@@ -303,6 +326,31 @@ function formatCreatedAt(millis: number): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* 对齐 Mac 的 GlassPanel：半透明材质、20 圆角、顶边一道内高光。
+     纯白卡片在浅灰画布上会显得比 Mac 更“平、更白”，所以用极浅的蓝紫渐变
+     （顶 246,248,255 → 底 249,249,249）加上边框，撑出层次。 */
+  border-radius: 20px;
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(
+    180deg,
+    rgba(246, 248, 255, 0.97) 0%,
+    rgba(249, 250, 251, 0.98) 38%,
+    rgba(249, 249, 249, 0.98) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 10px 26px var(--shadow-card);
+}
+:global(html[data-theme="dark"]) .agent-access {
+  background: linear-gradient(
+    180deg,
+    rgba(58, 61, 78, 0.92) 0%,
+    rgba(45, 47, 58, 0.94) 45%,
+    rgba(40, 42, 52, 0.94) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 10px 26px rgba(0, 0, 0, 0.3);
 }
 .agent-access-header {
   display: flex;
@@ -348,18 +396,27 @@ function formatCreatedAt(millis: number): string {
   gap: 10px;
   padding: 10px;
   border-radius: 10px;
-  background: var(--surface-subtle);
+  /* Mac 用 Color.primary.opacity(0.035)，在浅色下是 #F3F3F2 一类的轻灰。 */
+  background: rgba(17, 20, 35, 0.03);
+}
+:global(html[data-theme="dark"]) .agent-client {
+  background: rgba(255, 255, 255, 0.06);
 }
 .agent-client-icon {
   display: inline-flex;
   width: 30px;
   height: 30px;
   flex: none;
-  color: var(--text-secondary);
+  color: var(--text-control);
 }
-.agent-client-icon svg {
+.agent-client-icon svg,
+.agent-client-icon img {
   width: 100%;
   height: 100%;
+}
+.agent-client-icon img {
+  object-fit: contain;
+  border-radius: 7px;
 }
 .agent-client-meta {
   display: flex;
@@ -457,6 +514,20 @@ function formatCreatedAt(millis: number): string {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
+}
+/* Mac 的「撤销」是 destructive 的无边框按钮：红色文字，不加底色。 */
+.agent-revoke {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--error-text);
+}
+.agent-revoke:hover {
+  color: #b3261e;
+  text-decoration: underline;
 }
 .agent-access-error {
   margin: 0;
