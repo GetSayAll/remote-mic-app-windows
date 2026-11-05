@@ -1,7 +1,9 @@
 pub mod adpcm;
+pub mod agent_access;
 pub mod atvv;
 pub mod frame;
 pub mod macros;
+pub mod mcp_config;
 pub mod pcm;
 pub mod pipeline;
 pub mod portable_macros;
@@ -11,6 +13,15 @@ pub mod transcripts;
 pub mod voice;
 
 pub use adpcm::{ImaAdpcmDecoder, NibbleOrder};
+pub use agent_access::{
+    create_agent_authorization, discard_agent_authorization, generate_agent_client_id,
+    generate_agent_token, hash_agent_executable_path, hash_agent_token, is_valid_agent_client_id,
+    is_valid_agent_integration_identifier, normalize_agent_client_name,
+    require_agent_authorization, revoke_agent_authorization, token_hash_matches,
+    validate_agent_access_state, AgentAccessError, AgentAccessState, AgentAuthorization,
+    CreatedAgentAuthorization, AGENT_ACCESS_SCHEMA_VERSION, AGENT_SCOPE_TRANSCRIPTS_READ_ALL,
+    AGENT_TOKEN_BYTES, MAX_AGENT_CLIENT_NAME_CHARS, MAX_AGENT_INTEGRATION_ID_CHARS,
+};
 pub use atvv::{AtvvCapabilities, AtvvCommand, AtvvControlEvent, AtvvError, AtvvUuids};
 pub use frame::FrameAccumulator;
 pub use macros::{
@@ -34,8 +45,9 @@ pub use statistics::{
 };
 pub use transcripts::{
     application_key, continuous_insertion, is_local_date_key, is_safe_application_key,
-    visible_records, TranscriptDayFile, TranscriptRecord, TranscriptSource, TranscriptTextChange,
-    CAPTURE_METHOD_VERSION, MAX_RECORDS_PER_DAY, MAX_RECORDS_TOTAL, MAX_TRANSCRIPT_CHARS,
-    RECENT_WINDOW_MS, TRANSCRIPT_FORMAT_VERSION, TRANSCRIPT_SCHEMA_VERSION,
+    read_archive, visible_records, TranscriptArchive, TranscriptDayFile, TranscriptRecord,
+    TranscriptSource, TranscriptTextChange, CAPTURE_METHOD_VERSION, MAX_DAY_FILE_BYTES,
+    MAX_RECORDS_PER_DAY, MAX_RECORDS_TOTAL, MAX_TRANSCRIPT_CHARS, RECENT_WINDOW_MS,
+    TRANSCRIPT_FORMAT_VERSION, TRANSCRIPT_SCHEMA_VERSION,
 };
 pub use voice::{VoiceSession, VoiceSessionError, VoiceSessionEvent, VoiceSessionState};

@@ -9,6 +9,7 @@ import type {
 } from "../lib/bridge";
 import { effectiveLanguage } from "../lib/language-state";
 import ReflectionsPage from "./ReflectionsPage.vue";
+import { reflectionsViewSession, resetReflectionsViewSessionForTests } from "./reflections-view-session";
 
 const bridge = vi.hoisted(() => ({
   getTranscriptHistory: vi.fn(),
@@ -25,6 +26,20 @@ const bridge = vi.hoisted(() => ({
 }));
 
 vi.mock("../lib/bridge", () => bridge);
+
+// 底部「本地 Agent 访问」卡片自己读一次快照；本文件只关心回眸记录本身。
+vi.mock("../lib/agent-access", async () => {
+  const actual =
+    await vi.importActual<typeof import("../lib/agent-access")>("../lib/agent-access");
+  return {
+    ...actual,
+    getAgentAccessSnapshot: vi.fn().mockResolvedValue({
+      enabled: false,
+      clients: [],
+      authorizations: [],
+    }),
+  };
+});
 
 function record(
   id: string,
@@ -101,6 +116,8 @@ function snapshot(
 describe("reflections page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 浏览状态是模块级的（跨页面切换保留），用例之间必须清回默认值。
+    resetReflectionsViewSessionForTests();
     bridge.getTranscriptHistory.mockResolvedValue(snapshot());
     bridge.setTranscriptHistoryEnabled.mockResolvedValue(snapshot({ enabled: false }));
     bridge.setTranscriptAudioRecordingEnabled.mockResolvedValue(snapshot({ audioEnabled: true }));
@@ -175,6 +192,62 @@ describe("reflections page", () => {
     expect(wrapper.text()).not.toContain("今晚七点老地方见。");
   });
 
+  it("keeps the selected application after leaving and re-entering the page", async () => {
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+
+    const chromeChip = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Chrome"));
+    await chromeChip!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("删除当前应用");
+
+    // 切换侧边栏会卸载本页（App.vue 用 <component :is> 渲染）；重进必须沿用上次选择。
+    wrapper.unmount();
+    const reopened = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(reopened.text()).toContain("删除当前应用");
+    expect(reopened.text()).toContain("2 条记录");
+    expect(reopened.text()).not.toContain("今晚七点老地方见。");
+  });
+
+  it("keeps the collapsed day after leaving and re-entering the page", async () => {
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+    expect(wrapper.text()).toContain("帮我把发布说明压缩成三条。");
+
+    await wrapper.get(".day-header").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("帮我把发布说明压缩成三条。");
+
+    wrapper.unmount();
+    const reopened = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(reopened.text()).toContain("3 条记录");
+    expect(reopened.text()).not.toContain("帮我把发布说明压缩成三条。");
+  });
+
+  it("keeps the expanded application switcher after leaving and re-entering the page", async () => {
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+
+    const expandButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "展开");
+    await expandButton!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("收起");
+
+    wrapper.unmount();
+    const reopened = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(reopened.text()).toContain("收起");
+  });
+
   it("persists the switch change", async () => {
     const wrapper = mount(ReflectionsPage);
     await flushPromises();
@@ -203,7 +276,8 @@ describe("reflections page", () => {
     const wrapper = mount(ReflectionsPage);
     await flushPromises();
 
-    const toggles = wrapper.findAll('input[type="checkbox"]');
+    // 只看页头这两个开关；底部「本地 Agent 访问」卡片有自己的开关。
+    const toggles = wrapper.findAll('.record-toggles input[type="checkbox"]');
     expect(toggles).toHaveLength(2);
     expect((toggles[1].element as HTMLInputElement).checked).toBe(true);
     await toggles[1].setValue(false);
@@ -528,6 +602,66 @@ describe("reflections page", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("按应用查看更多记录");
+  });
+
+  it("keeps the loaded history across page switches without a loading flash", async () => {
+    const first = mount(ReflectionsPage);
+    await flushPromises();
+    first.unmount();
+
+    // 重进必须同步渲染上一次的内容：没有加载占位、没有加载卡、记录直接可见，
+    // 开关也不需要从关滑到开。
+    const reopened = mount(ReflectionsPage);
+    expect(reopened.find(".reflections-loading-placeholder").exists()).toBe(false);
+    expect(reopened.find(".reflections-loading").exists()).toBe(false);
+    expect(reopened.text()).toContain("帮我把发布说明压缩成三条。");
+    const toggles = reopened.findAll('.record-toggles input[type="checkbox"]');
+    expect((toggles[0].element as HTMLInputElement).checked).toBe(true);
+    reopened.unmount();
+  });
+
+  it("restores the content scroll position after switching away and back", async () => {
+    const container = document.createElement("div");
+    container.className = "content";
+    document.body.appendChild(container);
+
+    const first = mount(ReflectionsPage, { attachTo: container });
+    await flushPromises();
+    // 模拟用户把页面拉到底部后切走：卸载前读取容器 scrollTop 存进会话。
+    container.scrollTop = 800;
+    first.unmount();
+    expect(reflectionsViewSession.scrollTop).toBe(800);
+
+    // 重进后恢复到离开时的位置（切走期间 .content 被卸空，scrollTop 会被钳回 0）。
+    const reopened = mount(ReflectionsPage, { attachTo: container });
+    await flushPromises();
+    expect(container.scrollTop).toBe(800);
+    reopened.unmount();
+    container.remove();
+  });
+
+  it("always renders the local agent access card, including the empty state", async () => {
+    bridge.getTranscriptHistory.mockResolvedValue(
+      snapshot({ records: [], applications: [], totalCount: 0, recentCount: 0 }),
+    );
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("本地 Agent 访问");
+    expect(wrapper.text()).toContain("还没有客户端获得访问权限。");
+    wrapper.unmount();
+
+    bridge.getTranscriptHistory.mockResolvedValue(snapshot());
+    const withRecords = mount(ReflectionsPage);
+    await flushPromises();
+    expect(withRecords.text()).toContain("本地 Agent 访问");
+    // 卡片在「全部删除」之上。
+    const footer = withRecords.get(".history-footer");
+    const card = withRecords.get(".agent-access");
+    expect(
+      card.element.compareDocumentPosition(footer.element) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("renders the page in English", async () => {

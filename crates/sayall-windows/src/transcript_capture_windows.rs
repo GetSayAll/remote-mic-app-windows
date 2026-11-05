@@ -386,6 +386,15 @@ fn application_icon_png(path: &str) -> Option<Vec<u8>> {
     icon
 }
 
+/// 从可执行文件路径提取图标（PNG 字节）。给「回眸 → 本地 Agent 访问」用：
+/// 卡片要显示用户已安装的 AI 工具的真实图标，与「回眸」记录的应用图标同一条链路。
+pub fn icon_png_for_executable(path: &str) -> Option<Vec<u8>> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    application_icon_png(path)
+}
+
 /// 只读扫描当前进程，按显示名找到应用并提取图标。
 ///
 /// 用于「只有录音、没有文字记录」的应用：文字捕获失败时不会走 `write_icon`，
