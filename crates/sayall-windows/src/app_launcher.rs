@@ -550,6 +550,23 @@ pub fn foreground_window_title() -> Option<String> {
     None
 }
 
+/// 清掉窗口的 `WS_EX_TOPMOST`（置顶位），返回本次是否真的清掉了。
+///
+/// 只用于**本进程**窗口：不移动、不改大小、不激活、不改可见性。
+/// 为什么不能只依赖 tao 的 `set_always_on_top(false)`：tao 的
+/// `set_window_flags` 只应用新旧 flag 的**差异**，而外部工具（或历史状态）
+/// 设的 `WS_EX_TOPMOST` 不在 tao 的 `ALWAYS_ON_TOP` flag 里——diff 为空，
+/// 调用会整个跳过，窗口继续置顶。所以必须直接读 Win32 样式再清。
+#[cfg(windows)]
+pub fn drop_window_topmost(raw: isize) -> bool {
+    unsafe { win_impl::drop_topmost(windows::Win32::Foundation::HWND(raw as _)) }
+}
+
+#[cfg(not(windows))]
+pub fn drop_window_topmost(_raw: isize) -> bool {
+    false
+}
+
 /// 当前前台窗口及其全部后代窗口中，是否存在指定类名前缀的窗口。
 ///
 /// WPS 演示打开已有 `.pptx` 时，顶层窗口类为 `OpusApp`，与 WPS 文字相同；
@@ -624,6 +641,42 @@ pub fn set_self_show_sync(sync: impl Fn() + Send + Sync + 'static) {
     let _ = SELF_SHOW_SYNC.set(Box::new(sync));
 }
 
+/// 宿主注册的"把自身主窗口退出置顶"回调（Tauri 层在启动时注入一次）。
+///
+/// 为什么必须有它：`show_and_force_foreground` 的成功判据是
+/// `GetForegroundWindow()` 读到目标——那证明的是**焦点归属**，不是**用户看得见**。
+/// 若自身主窗口带 `WS_EX_TOPMOST`，它在 Z 序上永远压住非 topmost 的目标窗口，
+/// 于是日志全绿而用户只看到无线麦（2026-11-05 现场：主窗口 exstyle 含 0x8，
+/// 连续 37 次 TV 键全部 `foreground_observed`，目标 WorkBuddy 始终不可见）。
+///
+/// 产品从未主动置顶主窗口（全仓唯一的 `always_on_top(true)` 是常用语浮层），
+/// 该样式来自外部工具或历史状态。因此这里**不追查写入者**，而是在"叫别人到
+/// 前台之前先把自己让开"——与置顶来自哪里无关的结果层兜底。
+///
+/// 回调返回"本次是否真的清掉了置顶位"，供日志区分"本来就没置顶"和"撤掉了"。
+static SELF_DROP_TOPMOST: std::sync::OnceLock<Box<dyn Fn() -> bool + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// 注册自身主窗口"退出置顶"回调（宿主在启动时调用一次）。
+pub fn set_self_drop_topmost(drop: impl Fn() -> bool + Send + Sync + 'static) {
+    let _ = SELF_DROP_TOPMOST.set(Box::new(drop));
+}
+
+/// 请求宿主把自身主窗口退出置顶。未注册回调（探针/非 Tauri 宿主）时返回 false。
+pub fn request_self_drop_topmost() -> bool {
+    SELF_DROP_TOPMOST.get().is_some_and(|drop| drop())
+}
+
+/// 打开该目标前，是否要先撤掉自身主窗口的置顶位。
+///
+/// 只有"打开无线麦自己"（`sayall` 预设）不需要撤——用户按这一下就是要把它
+/// 叫到最前面。其余目标（预设应用、注册应用、自定义 exe/lnk）一律先让开，
+/// 否则自身主窗口的 `WS_EX_TOPMOST` 会在 Z 序上压住它。
+#[cfg(windows)]
+fn should_drop_self_topmost(target: &str) -> bool {
+    target != "sayall"
+}
+
 /// 激活已运行的应用窗口；未运行则启动。支持预设 id 与自定义路径。
 /// 自定义 .exe：按文件名探测已运行实例后直接启动；
 /// 自定义 .lnk：先解析快捷方式（目标 exe/参数/工作目录），按解析结果
@@ -632,6 +685,18 @@ pub fn set_self_show_sync(sync: impl Fn() + Send + Sync + 'static) {
 /// 解析失败退回原路径 ShellExecuteW。
 #[cfg(windows)]
 pub fn activate_or_launch(id: &str) -> Result<(), String> {
+    // 打开**别人的**窗口前，先把自己从置顶层撤下来。
+    //
+    // 为什么放在入口而不是 `show_and_force_foreground`：后者只覆盖"已运行、要走
+    // 窗口置前"的路径；目标未运行时走 `launch_explicit` / 注册应用激活，有几条
+    // 分支直接 return，根本不经过它。而冷启动时新进程自己抢前台，自身主窗口的
+    // `WS_EX_TOPMOST` 一样会在 Z 序上压住它。入口是唯一汇合点。
+    //
+    // "打开无线麦自己"（`sayall` 预设）不撤：用户要的就是把自己叫到前面。
+    // 撤顶是幂等的，未注册回调（探针）时返回 false，不产生任何副作用。
+    if should_drop_self_topmost(id) {
+        request_self_drop_topmost();
+    }
     if crate::registered_apps::is_registered_target(id) {
         return crate::registered_apps::launch_registered_app(id);
     }
@@ -1871,8 +1936,9 @@ mod win_impl {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClassNameW, GetForegroundWindow, GetPhysicalCursorPos, GetWindow, GetWindowLongW,
         GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId,
-        IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GW_OWNER, SW_HIDE,
-        SW_RESTORE, SW_SHOW, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        IsIconic, IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+        GW_OWNER, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_RESTORE,
+        SW_SHOW, WINDOWPLACEMENT, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     };
 
     /// 隐藏候选最多记录/尝试的个数：覆盖"消息窗口 + 主窗口 + 辅助窗口"这类组合即可，
@@ -2211,6 +2277,38 @@ mod win_impl {
         String::from_utf16(&buffer[..used]).ok()
     }
 
+    /// 清掉窗口的 `WS_EX_TOPMOST`。返回本次是否真的清掉了（本来就非置顶返回 false）。
+    ///
+    /// 为什么必须直接改 Win32 样式：tao 的 `set_always_on_top(false)` 只在它自己的
+    /// `ALWAYS_ON_TOP` flag 为真时才下发 `SetWindowPos(HWND_NOTOPMOST)`；外部工具
+    /// （或历史状态）设的置顶位不在那个 flag 里，diff 为空 → 调用整个跳过。
+    /// 这里先读样式确认，再清，再读回确认，三段都可失败可观测。
+    pub(super) unsafe fn drop_topmost(hwnd: HWND) -> bool {
+        let before = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if before & WS_EX_TOPMOST.0 == 0 {
+            return false;
+        }
+        let submitted = SetWindowPos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+        .is_ok();
+        let remained = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
+        if !submitted || remained {
+            // 置顶位还在：目标依然会被自己挡住，不能当成功静默吞掉。
+            crate::ble::gatt_note(format!(
+                "app_launcher action=drop_self_topmost terminal_result=failed submitted={submitted} remained={remained}"
+            ));
+            return false;
+        }
+        true
+    }
+
     /// 显示（若隐藏）/还原（若最小化）目标窗口并强制置前。
     /// 绕过 Windows 前台锁定（foreground lock）：菜单键的"打开应用"事件来自后台
     /// 进程的引擎线程，直接 `SetForegroundWindow` 会静默失败（仅任务栏闪烁、不置前）。
@@ -2250,10 +2348,11 @@ mod win_impl {
             outcome.activated = true;
         }
         crate::ble::gatt_note(format!(
-            "app_launcher action=show_and_force_foreground terminal_result={} target_result={} class={} self_window={self_window} visible_before={visible_before} took_show_path={took_show_path} attempt_count={} alt_unlock_submitted={} set_foreground_ok={} verified_by_recheck={verified_by_recheck}",
+            "app_launcher action=show_and_force_foreground terminal_result={} target_result={} class={} self_window={self_window} target_topmost={} visible_before={visible_before} took_show_path={took_show_path} attempt_count={} alt_unlock_submitted={} set_foreground_ok={} verified_by_recheck={verified_by_recheck}",
             if outcome.activated { "passed" } else { "failed" },
             if outcome.activated { "foreground_observed" } else { "foreground_denied" },
             window_class_name(hwnd),
+            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0,
             outcome.attempt_count,
             outcome.alt_unlock_submitted,
             outcome.last_set_foreground_ok,
@@ -3196,6 +3295,71 @@ pub(crate) mod tests {
     fn foreground_must_be_the_selected_window() {
         assert!(super::win_impl::foreground_matches_window(42, 42));
         assert!(!super::win_impl::foreground_matches_window(42, 43));
+    }
+
+    /// 「打开无线麦自己」不能撤顶——用户按这一下就是要把它叫到前面；
+    /// 其余目标（预设/注册/自定义路径）必须先让开，否则自身置顶位会压住它们。
+    #[cfg(windows)]
+    #[test]
+    fn only_foreign_targets_drop_own_topmost() {
+        assert!(!should_drop_self_topmost("sayall"));
+        assert!(should_drop_self_topmost("notepad"));
+        assert!(should_drop_self_topmost(r"C:\Apps\Example.exe"));
+        assert!(should_drop_self_topmost(
+            r"shell:AppsFolder\Vendor.App_123!App"
+        ));
+    }
+
+    /// 置顶位必须能被**直接**清掉，而不是依赖 tao 的 `set_always_on_top(false)`。
+    ///
+    /// 2026-11-05 现场根因：主窗口带 `WS_EX_TOPMOST`（来自外部或历史状态，
+    /// 不在 tao 的 `ALWAYS_ON_TOP` flag 里），`GetForegroundWindow()` 读回目标是
+    /// 成功，但 Z 序上主窗口永远压住目标——日志全绿、用户只看到无线麦。
+    /// tao 的 `set_window_flags` 只应用 flag 差异，这种情况 diff 为空、整个跳过，
+    /// 所以必须读 Win32 样式再清。本测试用一个自建的 `WS_EX_TOPMOST` 窗口验证
+    /// 样式真的变了（可观察副作用），不触碰任何用户窗口。
+    #[cfg(windows)]
+    #[test]
+    fn drop_topmost_clears_externally_set_style() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetWindowLongW, GWL_EXSTYLE, WS_EX_TOPMOST, WS_POPUP,
+        };
+
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_TOPMOST,
+                w!("STATIC"),
+                w!("sayall-topmost-test"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("创建测试窗口");
+            assert!(
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0,
+                "前提：测试窗口必须带上置顶位"
+            );
+            assert!(
+                super::win_impl::drop_topmost(hwnd),
+                "首次调用必须真的清掉置顶位"
+            );
+            assert!(
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 == 0,
+                "清掉后不得再带置顶位"
+            );
+            assert!(
+                !super::win_impl::drop_topmost(hwnd),
+                "本来就非置顶时返回 false（幂等，可每次按键无条件调用）"
+            );
+            let _ = DestroyWindow(hwnd);
+        }
     }
 
     #[test]
