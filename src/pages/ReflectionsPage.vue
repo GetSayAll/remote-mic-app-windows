@@ -13,7 +13,6 @@ import {
   subscribeTranscriptCaptured,
   subscribeTranscriptRecordingFinished,
   type TranscriptApplicationSummary,
-  type TranscriptHistorySnapshot,
   type TranscriptRecordView,
   type TranscriptRecordingView,
 } from "../lib/bridge";
@@ -47,8 +46,10 @@ interface RecordingDayGroup {
   recordings: TranscriptRecordingView[];
 }
 
-const snapshot = ref<TranscriptHistorySnapshot | null>(null);
-const loading = ref(true);
+// 快照挂在模块级会话上：切走再回来时先用上一次的内容同步渲染（不闪加载态），
+// loadHistory 仍然照常执行，新记录在后台静默刷新进来。
+const snapshot = toRef(reflectionsViewSession, "historySnapshot");
+const loading = ref(reflectionsViewSession.historySnapshot === null);
 const loadingCardVisible = ref(false);
 const loadError = ref("");
 const operationError = ref("");
@@ -239,6 +240,12 @@ function normalizeExpandedDays(): void {
     ...dayGroups.value.map((group) => group.key),
     ...recordingDayGroups.value.map((group) => group.key),
   ]);
+  // 没有任何分组（还没读到数据 / 记录为空）时不做任何事，尤其不能把 settled
+  // 置真：空数据时的空集合是「还没展开过」，不是「用户折叠了全部」——把它标成
+  // 已定过，第一批记录到来就不会自动展开，页面看起来像一直在刷新。
+  if (valid.size === 0) {
+    return;
+  }
   const hadExpanded = expandedDayKeys.value.size > 0;
   const next = new Set([...expandedDayKeys.value].filter((key) => valid.has(key)));
   // 只有「还没定过」（首次进入、刚切换应用）才默认展开最新一天。否则用户折叠全部

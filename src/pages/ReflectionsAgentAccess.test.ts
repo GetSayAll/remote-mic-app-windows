@@ -238,6 +238,26 @@ describe("reflections agent access", () => {
     );
   });
 
+  it("keeps the switch off the DOM until the snapshot arrives, so it never slides", async () => {
+    let resolveSnapshot: (value: AgentAccessSnapshot) => void = () => undefined;
+    api.getAgentAccessSnapshot.mockReturnValue(
+      new Promise<AgentAccessSnapshot>((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
+    const wrapper = mount(ReflectionsAgentAccess);
+
+    // 快照没回来：不渲染关着的开关，用同尺寸占位符顶住，避免读回后从关滑到开。
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(wrapper.find(".toggle-placeholder").exists()).toBe(true);
+
+    resolveSnapshot(snapshot({ enabled: true }));
+    await flushPromises();
+    expect(wrapper.find(".toggle-placeholder").exists()).toBe(false);
+    const toggle = wrapper.get('input[type="checkbox"]');
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+  });
+
   it("uses the installed client's real icon and distinct glyphs otherwise", async () => {
     api.getAgentAccessSnapshot.mockResolvedValue(
       snapshot({

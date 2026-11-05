@@ -200,11 +200,15 @@ function formatCreatedAt(millis: number): string {
       </div>
       <label class="toggle-row">
         <span>{{ t("允许访问") }}</span>
+        <!-- 快照没回来前先用占位符顶住尺寸：如果直接渲染关着的开关，读回后会
+             从关滑到开，用户会看到开关自己动（切侧边栏回来的每次都这样）。 -->
+        <span v-if="loading" class="toggle-placeholder" aria-hidden="true"></span>
         <input
+          v-else
           class="toggle-input"
           type="checkbox"
           :checked="enabled"
-          :disabled="toggling || loading"
+          :disabled="toggling"
           @change="toggleEnabled"
         />
       </label>

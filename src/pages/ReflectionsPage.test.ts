@@ -604,6 +604,22 @@ describe("reflections page", () => {
     expect(wrapper.text()).toContain("按应用查看更多记录");
   });
 
+  it("keeps the loaded history across page switches without a loading flash", async () => {
+    const first = mount(ReflectionsPage);
+    await flushPromises();
+    first.unmount();
+
+    // 重进必须同步渲染上一次的内容：没有加载占位、没有加载卡、记录直接可见，
+    // 开关也不需要从关滑到开。
+    const reopened = mount(ReflectionsPage);
+    expect(reopened.find(".reflections-loading-placeholder").exists()).toBe(false);
+    expect(reopened.find(".reflections-loading").exists()).toBe(false);
+    expect(reopened.text()).toContain("帮我把发布说明压缩成三条。");
+    const toggles = reopened.findAll('.record-toggles input[type="checkbox"]');
+    expect((toggles[0].element as HTMLInputElement).checked).toBe(true);
+    reopened.unmount();
+  });
+
   it("always renders the local agent access card, including the empty state", async () => {
     bridge.getTranscriptHistory.mockResolvedValue(
       snapshot({ records: [], applications: [], totalCount: 0, recentCount: 0 }),
