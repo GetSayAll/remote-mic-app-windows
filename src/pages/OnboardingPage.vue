@@ -3114,6 +3114,31 @@ async function retryVoiceTest(): Promise<void> {
 }
 
 /* ---- 全按键支持页（第④步）---- */
+/* 「建议开启」强调条（2026-11-05）：可选步骤也要让用户一眼看到收益；
+   使用强调色底 + 实心标签，但不做成警告样式（不阻断继续）。 */
+.onboarding-recommend {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  background: var(--accent-surface);
+  color: var(--text-control);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.onboarding-recommend-tag {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.5;
+}
 /* 开关旁只允许一句状态文案（与 2026-10-10 定稿一致）：失败原因用告警色，
    已开启用成功色，其余沿用正文的次要色。 */
 .onboarding-card .onboarding-capture-note,

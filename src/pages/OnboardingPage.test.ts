@@ -495,6 +495,11 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.text()).toContain(
       "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。",
     );
+    // 可选但建议开启：强调条必须直接可见。
+    expect(wrapper.text()).toContain("建议开启");
+    expect(wrapper.text()).toContain(
+      "开启后，返回 / 音量+ / 音量− 才能自定义；豆包语音输入也需要它。",
+    );
     expect(wrapper.text()).toContain("现在不开启也可以继续；以后可以在“按键”页随时打开。");
     expect(wrapper.text()).toContain("开启时 Windows 会弹出授权窗口，请选择“是”。");
     // 可选增强：不开启也能继续；本机支持时开关可点。

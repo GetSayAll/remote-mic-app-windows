@@ -58,6 +58,13 @@ watch(
       }}
     </p>
 
+    <!-- 建议开启的强调提示（2026-11-05 用户要求）：让用户在可选步骤里也能一眼看到
+         为什么值得开启；开关本身仍可跳过。 -->
+    <div class="onboarding-recommend" role="note">
+      <span class="onboarding-recommend-tag">{{ t("建议开启") }}</span>
+      <span>{{ t("开启后，返回 / 音量+ / 音量− 才能自定义；豆包语音输入也需要它。") }}</span>
+    </div>
+
     <div class="onboarding-card">
       <div class="onboarding-switch-row onboarding-switch-row--first">
         <label class="onboarding-switch">

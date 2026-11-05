@@ -76,6 +76,9 @@ export default {
 
   // ---- Step 3: full-key support (optional) ----
   "开启全按键支持": "Turn on Full-key support",
+  "建议开启": "Recommended",
+  "开启后，返回 / 音量+ / 音量− 才能自定义；豆包语音输入也需要它。":
+    "When on, Back, Volume+, and Volume− can be customized, and Doubao voice input needs it too.",
   "开启后，遥控器上的所有按键都能设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。":
     "When it is on, every button on the remote can have its own action, including Back, Volume+, and Volume−, which Windows does not normally receive.",
   "已开启。返回 / 音量+ / 音量− 现在也能自定义。":
