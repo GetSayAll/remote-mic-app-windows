@@ -360,6 +360,7 @@ interface CreatedAgentAuthorization { snapshot: AgentAccessSnapshot;
 每个里程碑一个 commit，`main` 只经 PR 合入；本地测试包按 `RELEASING.md` 出，不发布。
 
 ## 11. 风险与未决问题
+> 2026-11-05 用户在安装版实测整链通过：连接 → 重开 Codex 读取 → 撤销立即失效（无需重启）→ 重连成功；关闭开关立即不可读、重开即恢复。关闭开关不清授权与列表常驻两点与 Mac 逐条核对一致，不改。
 
 已确认（2026-11-05）：标题用「本地 Agent 访问」、路径写安装目录绝对路径、令牌措辞取 Mac 原文、手动配置与快速连接都做、Codex 不改名 ChatGPT。
 
