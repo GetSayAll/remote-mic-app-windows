@@ -276,7 +276,8 @@ export type ButtonAction =
   | { type: "open_app"; target: string }
   | { type: "focus_input" }
   | { type: "run_macro"; macroId: string; macroVersion: string }
-  | { type: "open_common_phrases" };
+  | { type: "open_common_phrases" }
+  | { type: "app_switcher" };
 
 // ===== 组合动作（Rust `sayall_core::macros` 的 camelCase 镜像）=====
 
@@ -2334,6 +2335,7 @@ export function openAppLabel(name: string): string {
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return t("未设置");
   if (action.type === "focus_input") return t("聚焦输入框");
+  if (action.type === "app_switcher") return t("切换应用");
   if (action.type === "open_common_phrases") {
     // 缺私有组件（公开构建）时如实标注，不静默替换成含义不同的动作。
     return commonPhrasesAvailable ? t("打开常用语") : t("打开常用语（当前不可用）");

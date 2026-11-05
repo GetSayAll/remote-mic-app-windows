@@ -37,6 +37,100 @@ pub fn own_process_is_foreground() -> bool {
     false
 }
 
+/// Windows 原生 Alt+Tab 切换器的窗口类名。
+///
+/// Windows 10 是 `MultitaskingViewFrame`；Windows 11 是
+/// `XamlExplorerHostIslandWindow`（2026-11-05 本机 Windows 11 26200 实测）。
+/// 类名只是**可观察的**平台事实，不是微软承诺的稳定契约；识别不到时应用切换器
+/// 会话会在启动宽限期后安全释放 Alt（见 `app_switcher` 模块）。
+pub fn is_alt_tab_switcher_class(class: &str) -> bool {
+    matches!(
+        class,
+        "MultitaskingViewFrame" | "XamlExplorerHostIslandWindow"
+    )
+}
+
+/// 原生 Alt+Tab 切换器当前是否存在。
+///
+/// 判据分两层：
+/// 1. 前台窗口是切换器类（Windows 11 实测切换器会拿到前台）；
+/// 2. Windows 10 兜底：枚举可见顶层窗口，找 `explorer.exe` 的
+///    `MultitaskingViewFrame`（切换器不抢前台时仍能识别）。
+///
+/// 只读窗口类名与进程号，不读窗口标题、不记录窗口身份。第三方 Alt+Tab 替换器
+/// 可能完全不可识别；此时会话按“未观察到切换器”安全收尾，不会把 Alt 留在系统里。
+#[cfg(windows)]
+pub fn alt_tab_switcher_present() -> bool {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetForegroundWindow, GetShellWindow, GetWindowThreadProcessId,
+        IsWindowVisible,
+    };
+
+    fn class_of(hwnd: HWND) -> Option<String> {
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut buffer = [0u16; 256];
+        let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+        (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+    }
+
+    fn pid_of(hwnd: HWND) -> u32 {
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
+        pid
+    }
+
+    struct Scan {
+        explorer_pid: u32,
+        found: bool,
+    }
+
+    unsafe extern "system" fn scan_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let scan = &mut *(lparam.0 as *mut Scan);
+        if scan.found || !IsWindowVisible(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        // 只认 Windows 10 的专用切换器类；Windows 11 的 XAML 宿主类被开始菜单等
+        // 复用，非前台时不能据此判定（避免把开始菜单当成切换器）。
+        if class_of(hwnd).as_deref() == Some("MultitaskingViewFrame")
+            && (scan.explorer_pid == 0 || pid_of(hwnd) == scan.explorer_pid)
+        {
+            scan.found = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+
+    let shell = unsafe { GetShellWindow() };
+    let explorer_pid = pid_of(shell);
+    let foreground = unsafe { GetForegroundWindow() };
+    if let Some(class) = class_of(foreground) {
+        if is_alt_tab_switcher_class(&class)
+            && (explorer_pid == 0 || pid_of(foreground) == explorer_pid)
+        {
+            return true;
+        }
+    }
+
+    let mut scan = Scan {
+        explorer_pid,
+        found: false,
+    };
+    let _ = unsafe { EnumWindows(Some(scan_window), LPARAM(&mut scan as *mut _ as isize)) };
+    scan.found
+}
+
+/// 非 Windows 平台没有原生 Alt+Tab 切换器识别。
+#[cfg(not(windows))]
+pub fn alt_tab_switcher_present() -> bool {
+    false
+}
+
 /// 前台应用的用户可读显示名（个人中心语音排行用）。
 ///
 /// 只读取进程可执行文件名；不读窗口标题、命令行或完整路径。前台是本进程、
@@ -165,6 +259,15 @@ pub fn application_display_name(executable: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alt_tab_switcher_classes_are_recognized_and_other_explorer_classes_are_not() {
+        assert!(is_alt_tab_switcher_class("MultitaskingViewFrame"));
+        assert!(is_alt_tab_switcher_class("XamlExplorerHostIslandWindow"));
+        assert!(!is_alt_tab_switcher_class("CabinetWClass"));
+        assert!(!is_alt_tab_switcher_class("Progman"));
+        assert!(!is_alt_tab_switcher_class(""));
+    }
 
     #[test]
     fn our_pid_matches_and_others_do_not() {

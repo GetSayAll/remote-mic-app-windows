@@ -81,6 +81,10 @@ describe("mouse actions", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
   });
+
+  it("summarizes the app switcher session", () => {
+    expect(actionSummary({ type: "app_switcher" })).toBe("切换应用");
+  });
 });
 
 describe("open application labels", () => {

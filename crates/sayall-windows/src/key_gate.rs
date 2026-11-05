@@ -347,6 +347,10 @@ mod windows_impl {
     /// 常用语面板遮蔽掩码（见 `set_phrase_panel_mask`）：面板打开期间命中的按键
     /// 无论是否映射都直接吞掉。
     static PHRASE_PANEL_MASK: AtomicU64 = AtomicU64::new(0);
+    /// 应用切换器（Alt+Tab）会话遮蔽掩码（见 `set_app_switcher_mask`）。
+    /// 会话期间 OK/返回/方向/TV 无论是否映射都直接吞掉，防止原生键漏进
+    /// 系统切换器或目标应用；会话结束清零即恢复原映射（fail-open）。
+    static APP_SWITCHER_MASK: AtomicU64 = AtomicU64::new(0);
     /// 遥控器在线状态（BLE 连接相位推导，ble.rs 在相位提交点同步）。
     /// 常驻抑制键仅在线时接管；离线恢复物理键盘原生透传（不劫持）。
     static REMOTE_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -665,9 +669,10 @@ mod windows_impl {
     /// 宿主连接断开（退出/被杀/链路故障）：门控失能，全部按键透传（fail-open）。
     pub(crate) fn report_host_disconnected() {
         GATE_ACTIVE.store(false, Ordering::Relaxed);
-        // 宿主断连即 fail-open：常用语面板遮蔽一起清零，否则六个键会被永久吞掉
-        // 而面板已不可操作（断连/退出必须成对清理）。
+        // 宿主断连即 fail-open：常用语面板与应用切换器遮蔽一起清零，否则这些键
+        // 会被永久吞掉而对应界面已不可操作（断连/退出必须成对清理）。
         PHRASE_PANEL_MASK.store(0, Ordering::Relaxed);
+        APP_SWITCHER_MASK.store(0, Ordering::Relaxed);
     }
 
     fn handle_shortcut_capture(
@@ -796,10 +801,11 @@ mod windows_impl {
             }
             return false;
         };
-        if phrase_panel_owned(button) {
-            // 常用语面板打开期间：这六个键无论是否映射都在边沿处直接吞，
-            // 且跳过武装与门控总开关（未映射键的原生动作会漏进前台应用）。
-            // 释放沿沿用既有配对裁决：DOWN 全被吞才吞 UP（防粘键，2026-09-05 规则）。
+        if phrase_panel_owned(button) || app_switcher_owned(button) {
+            // 常用语面板 / 应用切换器会话打开期间：这些键无论是否映射都在边沿处
+            // 直接吞，且跳过武装与门控总开关（未映射键的原生动作会漏进前台应用
+            // 或系统切换器）。释放沿沿用既有配对裁决：DOWN 全被吞才吞 UP
+            //（防粘键，2026-09-05 规则）。
             let key_id = (vk_code as u16, make_code);
             if is_key_up {
                 let swallow =
@@ -913,6 +919,7 @@ mod windows_impl {
             // 常用语面板遮蔽同样清零：门控重启（宿主重装钩子）后不得残留"六个键被吞"，
             // 清零是 fail-open，与 `set_phrase_panel_mask` 的文档承诺一致。
             PHRASE_PANEL_MASK.store(0, Ordering::Relaxed);
+            APP_SWITCHER_MASK.store(0, Ordering::Relaxed);
             REMOTE_CONNECTED.store(false, Ordering::Relaxed);
             LISTENER_ACTIVE.store(false, Ordering::Relaxed);
             for slot in &ARMED_UNTIL_MS {
@@ -966,6 +973,19 @@ mod windows_impl {
         PHRASE_PANEL_MASK.store(mask, Ordering::Relaxed);
     }
 
+    /// 应用切换器会话的按键遮蔽掩码（`app_switcher::control_mask()`）。
+    ///
+    /// 与常用语面板同一口径：命中键不看映射与武装状态，直接吞；遥控器离线时
+    /// 自动失效，避免永久劫持物理键盘。会话收尾必须清零。
+    pub fn set_app_switcher_mask(mask: u64) {
+        APP_SWITCHER_MASK.store(mask, Ordering::Relaxed);
+    }
+
+    /// 当前应用切换器遮蔽掩码（测试/诊断只读）。
+    pub fn app_switcher_mask() -> u64 {
+        APP_SWITCHER_MASK.load(Ordering::Relaxed)
+    }
+
     /// 面板六个按键（OK/左/上/右/下/返回）的遮蔽掩码。
     pub fn phrase_panel_mask() -> u64 {
         [
@@ -991,6 +1011,14 @@ mod windows_impl {
         (PHRASE_PANEL_MASK.load(Ordering::Relaxed) >> button.ordinal()) & 1 == 1
     }
 
+    fn app_switcher_owned(button: RemoteButton) -> bool {
+        // 与常用语面板同一 fail-open 兜底：遥控器离线后不得继续劫持物理键盘。
+        if !remote_connected() {
+            return false;
+        }
+        (APP_SWITCHER_MASK.load(Ordering::Relaxed) >> button.ordinal()) & 1 == 1
+    }
+
     pub fn enhanced_owned_mask() -> u64 {
         ENHANCED_OWNED_MASK.load(Ordering::Relaxed)
     }
@@ -1010,6 +1038,11 @@ mod windows_impl {
     /// 原生透传（物理键盘 Home/` 不被劫持）。
     pub fn set_remote_connected(connected: bool) {
         REMOTE_CONNECTED.store(connected, Ordering::Relaxed);
+        if !connected {
+            // 遥控器离线即 fail-open：应用切换器会话已不可继续，清掉遮蔽，
+            // 避免物理键盘的 OK/方向/返回被继续吞掉。
+            APP_SWITCHER_MASK.store(0, Ordering::Relaxed);
+        }
     }
 
     /// Raw Input 监听器起止：监听器停止时门控不吞任何键（无归因来源）。
@@ -1019,6 +1052,8 @@ mod windows_impl {
             for slot in &ARMED_UNTIL_MS {
                 slot.store(0, Ordering::Relaxed);
             }
+            // 监听停止后没有归因来源：应用切换器会话无法继续，遮蔽 fail-open。
+            APP_SWITCHER_MASK.store(0, Ordering::Relaxed);
         }
     }
 
@@ -1238,13 +1273,14 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_button, begin_key_observation, capture_diagnostics_summary, configure, decide,
-    end_key_observation, enhanced_owned_mask, injected_echo_since, injected_event_count,
+    app_switcher_mask, arm_button, begin_key_observation, capture_diagnostics_summary, configure,
+    decide, end_key_observation, enhanced_owned_mask, injected_echo_since, injected_event_count,
     is_gate_thread_alive, leaked_down_count, listener_active, observed_keys, observed_last_vk,
-    persistent_swallow_total, phrase_panel_mask, set_edge_sink, set_enhanced_owned_mask,
-    set_listener_active, set_persistent_mask, set_phrase_panel_mask, set_remote_connected,
-    set_shortcut_capture_active, set_shortcut_capture_sink, set_voice_synth_active,
-    swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    persistent_swallow_total, phrase_panel_mask, set_app_switcher_mask, set_edge_sink,
+    set_enhanced_owned_mask, set_listener_active, set_persistent_mask, set_phrase_panel_mask,
+    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
+    set_voice_synth_active, swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED,
+    HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 /// 宿主消息路径（key_host 读线程调用；仅 crate 内可见）。
@@ -1276,6 +1312,10 @@ mod fallback {
     pub fn configure(_enabled: bool, _mapped_mask: u64) {}
     pub fn set_persistent_mask(_mask: u64) {}
     pub fn set_phrase_panel_mask(_mask: u64) {}
+    pub fn set_app_switcher_mask(_mask: u64) {}
+    pub fn app_switcher_mask() -> u64 {
+        0
+    }
     pub fn phrase_panel_mask() -> u64 {
         0
     }

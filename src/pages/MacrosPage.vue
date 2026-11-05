@@ -852,6 +852,7 @@ const commonShortcutGroups = computed(() =>
   SHORTCUT_PRESET_GROUPS.map((group) => ({
     label: group.label,
     items: group.items
+      .filter((item) => !item.action)
       .map((item) => ({ label: item.label, chord: macroChordFromKeys(item.keys) }))
       .filter((item): item is { label: string; chord: MacroChord } => item.chord !== null),
   })).filter((group) => group.items.length > 0),

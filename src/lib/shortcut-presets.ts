@@ -9,9 +9,21 @@ import { t } from "./i18n";
  * 按键页「按键选择」与组合动作「单键或快捷键 / 系统与媒体动作」共用同一份清单，
  * 避免两个入口出现不同的“常用快捷键”（2026-10-19 用户要求）。
  */
+export interface ShortcutPresetItem {
+  label: string;
+  keys: KeyCode[];
+  display?: string;
+  /**
+   * 非快捷键动作（目前只有应用切换器）。设置后按键页点击该 chip 写入
+   * `app_switcher` 动作，而不是 `Alt+Tab` 一次性组合；组合动作页会过滤掉
+   * 这类条目（组合动作无法表达“保持 Alt 的临时会话”）。
+   */
+  action?: "app_switcher";
+}
+
 export interface ShortcutPresetGroup {
   label: string;
-  items: Array<{ label: string; keys: KeyCode[]; display?: string }>;
+  items: ShortcutPresetItem[];
 }
 
 /** label 用 getter：常量表也要在语言切换后按当前语言重新取值。 */
@@ -19,13 +31,19 @@ function localize(label: string): string {
   return /[\u4e00-\u9fff]/.test(label) ? t(label) : label;
 }
 
-function preset(label: string, keys: KeyCode[], display?: string) {
+function preset(
+  label: string,
+  keys: KeyCode[],
+  display?: string,
+  action?: ShortcutPresetItem["action"],
+) {
   return {
     get label() {
       return localize(label);
     },
     keys,
     display,
+    action,
   };
 }
 
@@ -67,7 +85,9 @@ export const SHORTCUT_PRESET_GROUPS: ShortcutPresetGroup[] = [
     preset("刷新", ["f5"]),
   ]),
   group("系统与媒体", [
-    preset("切换窗口", ["alt", "tab"]),
+    // 对齐 Mac 的 Command+Tab 临时会话：点击后打开系统切换器，方向键选择、
+    // OK 确认、返回取消；不是一次性 Alt+Tab 组合。
+    preset("切换应用", ["alt", "tab"], "Alt + Tab", "app_switcher"),
     preset("显示桌面", ["left_windows", "d"], "Win + D"),
     preset("关闭窗口", ["control", "w"]),
     preset("锁定", ["left_windows", "l"], "Win + L"),
