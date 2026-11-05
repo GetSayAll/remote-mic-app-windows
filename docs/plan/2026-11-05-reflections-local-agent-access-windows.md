@@ -1,7 +1,7 @@
 # Windows「回眸 · 本地 Agent 访问」实施计划（对齐 Mac）
 
 - 日期：2026-11-05
-- 状态：**待确认设计后再实现**（本文只给方案与判据，未改代码）
+- 状态：**方案已确认，按 M1 → M4 实施中**（M1 已落地：core + `sayall-mcp` + 打包暂存）
 - 参考实现：Mac 仓库 `D:\SayAll\src\GetSayAll\remote-mic-app`（只参考行为与数据边界，不复制 Swift 源码）
   - 界面：`Sources/RemoteMic/TranscriptAgentAccessSection.swift`（358 行）
   - 状态：`Sources/RemoteMic/TranscriptAgentAccessModel.swift`（364 行）
@@ -15,6 +15,17 @@
 ## 0. 一句话方案
 
 在回眸页底部（「全部删除」之上）复刻 Mac 的「本地 Agent 访问」卡片：一个默认关闭的总开关；开启后可以给 Codex / Claude Code / Cursor / OpenCode 四条 Quick Connect 或手动创建只读授权，授权以「本机只读 MCP」形态让 AI 工具读取回眸记录；Windows 侧用**独立进程 `sayall-mcp.exe`（stdio MCP）**+ `%LOCALAPPDATA%\SayAll\mcp\v1\access.json`（只存令牌哈希）实现，令牌只在生成配置的那一次显示。
+
+## 0.1 已确认的决策（2026-11-05 用户）
+
+| 项 | 决定 | 说明 |
+| --- | --- | --- |
+| 标题 | **与 Mac 一致**：本地 Agent 访问（英文 Local Agent Access） | 不做去术语化改写 |
+| 配置里的可执行路径 | **与 Mac 一致**：直接写安装目录里的绝对路径（`%LOCALAPPDATA%\无线麦 SayAll\sayall-mcp.exe`） | 不做 ASCII 副本；Windows 特有的只是路径本身（中文 + 空格），TOML 转义必须正确 |
+| 「令牌」措辞 | **与 Mac 一致**：用户可见文案使用「访问令牌」 | `docs/product-copy.md` §3 的禁用词表要为这张卡片加一条例外说明（用户必须知道这个字符串要保管、只显示一次） |
+| 本期范围 | 手动配置 **与** 四客户端快速连接**都做** | 不拆期 |
+| Codex 是否改名 ChatGPT | **不改**：Windows 上就叫 Codex | 本机实测：OpenAI 的本机工具装在 `%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe`，配置在 `%USERPROFILE%\.codex\config.toml`（已存在）。ChatGPT 桌面版是另一个应用，Windows 侧本地 MCP 配置没有稳定的公开口径（第三方文档给出 `%APPDATA%\OpenAI\ChatGPT\…` 与 `%APPDATA%\ChatGPT\mcp.json` 两种互斥说法），因此不纳入本期；需要时再单独调研 |
+
 
 ## 1. 目标（逐条复刻 Mac 行为）
 
@@ -103,13 +114,13 @@ Mac `Bugs/mcp-quick-connect-failure-duplicates.md` 的结论必须原样继承�
 - 理由：主 exe 是 GUI 子系统 + 单实例互斥体 + 托盘 + BLE，`--mcp` 子命令必须先于 Tauri 初始化分流，且升级时被客户端占用会锁住主程序。独立 exe 与 Mac 的 `Contents/Helpers/SayAllMCP` 同构。
 - 控制台子系统（`#![windows_subsystem]` 不设），但**不创建窗口**；stdout 只写 JSON-RPC（诊断走 stderr），与 Mac 一致。
 
-### D2：配置里写哪个路径 —— 推荐「复制到 ASCII 稳定路径」
+### D2：配置里写安装目录的绝对路径（与 Mac 同构）
 
-- NSIS `currentUser` 安装目录含中文与空格：`%LOCALAPPDATA%\无线麦 SayAll\sayall-mcp.exe`。
-- 推荐：首次开启（或版本变化）时把随包 `sayall-mcp.exe` 复制到 `%LOCALAPPDATA%\SayAll\mcp\v1\bin\sayall-mcp.exe`，配置里写这条纯 ASCII、跨升级稳定的路径。
-  - 好处：避免第三方 CLI 处理中文路径的兼容风险；重装到别的目录也不会让旧配置失效（Mac 的 `path_changed` 问题在 Windows 上直接消失）；升级时数据目录不被安装器清理。
-  - 复制失败（客户端正在跑、文件被占用）：沿用已有旧副本继续工作，只记日志、不阻塞界面，下次开启再试。
-- 备选：直接写安装目录路径 + 保留 `helperExecutablePathHash` → 升级/重装后要求重新连接（用户会看到「位置已变化」）。若选备选，`access.json` 仍需存路径哈希以支持该提示。
+- NSIS `currentUser` 安装目录：`%LOCALAPPDATA%\无线麦 SayAll\`，`sayall-mcp.exe` 与主程序、助手同目录。
+- 配置里直接写 `<安装目录>\sayall-mcp.exe`，与 Mac 写 `Contents/Helpers/SayAllMCP` 的绝对路径是同一种做法。
+- 因此 `access.json` 仍保留 `executablePathHash`：安装目录变了（换用户、装到别处）时卡片提示「位置已变化，请先移除这个连接，再重新连接」。
+- 已确认不采用「复制到 ASCII 数据目录」的方案：多一份副本就多一处不同步，且与 Mac 行为不一致。
+- 必须配套：TOML 里反斜杠要转义成两个反斜杠（见 D5 与 `mcp_config` 的测试），否则含中文/空格的 Windows 路径会让 Codex 拒绝整个配置。
 
 ### D3：认证状态文件（Windows 版 `access.json`）
 
@@ -131,43 +142,20 @@ Mac `Bugs/mcp-quick-connect-failure-duplicates.md` 的结论必须原样继承�
 - 每条都要「检测不到 → 卡片显示未检测到安装、按钮置灰」；检测结果缓存 30 秒，切进页面刷新一次。
 - 图标：Cursor 走既有 `shortcut_icons` / Shell 提取；Codex / Claude Code / OpenCode 多为 CLI，无图标时用中性占位图标（不复刻 Mac 的 SF Symbol）。
 
-### D5：文案必须重写（Windows 术语红线）
+### D5：文案以 Mac 原文为准，只有 Windows 说不通的地方才改
 
-`docs/product-copy.md` §3 明确禁止用户可见文案出现：令牌、进程、端口、助手 / Helper、注入、HID、提权、状态机、白名单等。Mac 文案有「访问令牌」「本地 MCP Helper」，Windows 侧必须换词，并保持「说结果、不说机制」。
+已确认：标题、状态句、按钮、错误句都取 Mac 中文原文（含「访问令牌」）。`docs/product-copy.md` §3 的禁用词表要为这张卡片加一条例外：**「令牌」在本卡片里必须出现**（用户要保管一个只显示一次的字符串），但仍不得出现端口、进程、助手 / Helper、注入、提权等机制词。
 
-拟定文案（英文同步进 `src/lib/i18n/en/reflections.ts`）：
+Mac 原文里有两处 Windows 说不通，必须改：
 
-| 位置 | Windows 文案 |
-| --- | --- |
-| 标题 | 本地 AI 工具访问（备选：与 Mac 一致的「本地 Agent 访问」，待确认） |
-| 说明 | 允许你授权的 AI 工具通过本机只读连接查看回眸记录。 |
-| 开关 | 允许访问 |
-| 隐私 | 回眸记录不会上传。被授权的 AI 工具可能把读到的文字发给它自己的服务商。开关默认关闭，关闭后所有工具立即无法读取。 |
-| 连接段 | 连接 AI 工具 / 无线麦会为所选工具单独创建只读授权，并写入它的本机配置。连接后请关闭并重新打开这个工具；不需要重启无线麦。 |
-| 卡片状态 | 可连接 / 已连接 · 请重新打开 {名称} / 未检测到安装 / 位置已变化，请先移除连接再重新连接 |
-| 按钮 | 连接 / 移除 / 撤销 / 创建只读授权 / 复制标准配置 / 复制 Codex 配置 / 已复制 |
-| 手动配置 | 其他工具或手动配置 / 自动连接不可用时，创建一份授权并复制对应格式。配置里的授权信息只显示这一次。 |
-| 生成区 | 已为“{名称}”生成配置 / 配置里的授权信息只在这次显示。现在就粘贴到对应工具，不要保存到公开文件或聊天里。 |
-| 列表 | 已授权工具 / 还没有工具获得访问权限。 |
+| Mac 原文 | Windows 写法 | 为什么 |
+| --- | --- | --- |
+| 当前 App 中缺少本地 MCP Helper，请重新安装完整测试包。 | 当前安装缺少本地读取组件，请重新安装完整安装包。 | 「Helper / 助手」在 Windows 文案红线里禁用 |
+| 无线麦SayAll.app 不会上传记录… | 无线麦不会上传记录… | 应用名以 Windows 版为准（`docs/product-copy.md` 名称表） |
 
-错误句（每句 = 发生了什么 + 怎么办，不贴内部错误）：
+其余照抄 Mac（标题「本地 Agent 访问」、开关「允许访问」、连接段、状态「已连接 · 请重新打开 {名称}」「未检测到安装」「位置已变化，请先移除这个连接，再重新连接。」、按钮「连接 / 移除 / 撤销 / 创建只读授权 / 复制标准 MCP JSON / 复制 Codex TOML / 已复制」、列表「已授权客户端 / 还没有客户端获得访问权限。」、16 条错误句）。
 
-- 读不到状态：无法读取本地访问设置。
-- 开关保存失败：无法更新本地访问设置。
-- 名称长度：工具名称需要 1–100 个字符。
-- 创建失败：无法创建授权。
-- 撤销失败：无法撤销这个工具。
-- 缺组件：这个安装包缺少本地读取组件，请重新安装完整安装包。
-- 未安装：没有检测到 {名称}，先安装再连接。
-- 入口不可用：{名称} 的命令行入口无法启动，修复或重新安装后再试。
-- 同名冲突：{名称} 里已经有名为 sayall_history 的连接，无线麦没有覆盖它，先检查或移除冲突项。
-- 不是合法 JSON：{名称} 的配置文件不是合法 JSON，无线麦没有改动它。
-- 路径不安全：{名称} 的配置路径不安全，无线麦没有写入。
-- 写配置失败：无法写入 {名称} 的配置，检查文件权限后再试。
-- 客户端拒绝：{名称} 拒绝了连接命令，检查工具状态后再试。
-- 自动连接失败：{名称} 自动连接失败，这次授权没有保留。
-- 撤销后没删掉配置：{名称} 的授权已撤销，但配置没能自动移除，请手动删除 sayall_history。
-- 重复授权：这个工具已经有有效授权，先用现有的或先撤销。
+英文同步取 Mac `Resources/en.lproj/Localizable.strings` 的同名条目（`statistics.transcripts.agent_access.*`），只替换应用名。
 
 ### D6：与既有回眸开关的关系
 
@@ -371,17 +359,15 @@ interface CreatedAgentAuthorization { snapshot: AgentAccessSnapshot;
 
 每个里程碑一个 commit，`main` 只经 PR 合入；本地测试包按 `RELEASING.md` 出，不发布。
 
-## 11. 风险与未决问题（需确认）
+## 11. 风险与未决问题
 
-1. **标题**：用「本地 AI 工具访问」（贴合 Windows 去术语化写法），还是与 Mac 完全一致的「本地 Agent 访问」？
-2. **范围**：本期是否包含 4 个客户端的「快速连接」（会自动改写 `~/.codex/config.toml` 等第三方文件）？若想更保守，可先做 M1+M2（手动配置），快速连接放下一期。
-3. **可执行路径**：采用 D2 的「复制到 `%LOCALAPPDATA%\SayAll\mcp\v1\bin\sayall-mcp.exe`」（推荐），还是直接写安装目录里的中文路径？
-4. **「令牌」的替代词**：Windows 文案红线禁用「令牌」。候选取「授权码」「访问密钥」「授权信息」——请指定一个，我按它写全部中英文案。
+已确认（2026-11-05）：标题用「本地 Agent 访问」、路径写安装目录绝对路径、令牌措辞取 Mac 原文、手动配置与快速连接都做、Codex 不改名 ChatGPT。
 
-另有两处待实测后再定稿（写进 `docs/investigations/`）：
+仍需实测后定稿（写进 `docs/investigations/`）：
 
-- OpenCode / Claude Code 在 Windows 上的真实配置位置与启动方式（含 `.cmd` 与 `cmd /c`）。
+- OpenCode / Claude Code 在 Windows 上的真实配置位置与启动方式（含 `.cmd` 包装脚本的调用方式）。本机只有 Codex（`%LOCALAPPDATA%\OpenAI\Codex`），其余三条只能做「写入 + 回滚」验证，客户端侧连接标 `deferred`。
 - `%LOCALAPPDATA%` 的实际 ACL 是否符合「仅当前用户可读」。
+- 安装目录含中文时，Codex 能否正确加载托管 TOML 区块（用它自己的读回命令验证）。
 
 ## 12. 文档同步清单（实现时同批提交）
 
