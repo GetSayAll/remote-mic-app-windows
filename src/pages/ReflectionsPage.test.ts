@@ -9,6 +9,7 @@ import type {
 } from "../lib/bridge";
 import { effectiveLanguage } from "../lib/language-state";
 import ReflectionsPage from "./ReflectionsPage.vue";
+import { resetReflectionsViewSessionForTests } from "./reflections-view-session";
 
 const bridge = vi.hoisted(() => ({
   getTranscriptHistory: vi.fn(),
@@ -101,6 +102,8 @@ function snapshot(
 describe("reflections page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 浏览状态是模块级的（跨页面切换保留），用例之间必须清回默认值。
+    resetReflectionsViewSessionForTests();
     bridge.getTranscriptHistory.mockResolvedValue(snapshot());
     bridge.setTranscriptHistoryEnabled.mockResolvedValue(snapshot({ enabled: false }));
     bridge.setTranscriptAudioRecordingEnabled.mockResolvedValue(snapshot({ audioEnabled: true }));
@@ -173,6 +176,62 @@ describe("reflections page", () => {
     expect(wrapper.text()).toContain("2 条记录");
     expect(wrapper.text()).toContain("第二条 Chrome 记录。");
     expect(wrapper.text()).not.toContain("今晚七点老地方见。");
+  });
+
+  it("keeps the selected application after leaving and re-entering the page", async () => {
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+
+    const chromeChip = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Chrome"));
+    await chromeChip!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("删除当前应用");
+
+    // 切换侧边栏会卸载本页（App.vue 用 <component :is> 渲染）；重进必须沿用上次选择。
+    wrapper.unmount();
+    const reopened = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(reopened.text()).toContain("删除当前应用");
+    expect(reopened.text()).toContain("2 条记录");
+    expect(reopened.text()).not.toContain("今晚七点老地方见。");
+  });
+
+  it("keeps the collapsed day after leaving and re-entering the page", async () => {
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+    expect(wrapper.text()).toContain("帮我把发布说明压缩成三条。");
+
+    await wrapper.get(".day-header").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("帮我把发布说明压缩成三条。");
+
+    wrapper.unmount();
+    const reopened = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(reopened.text()).toContain("3 条记录");
+    expect(reopened.text()).not.toContain("帮我把发布说明压缩成三条。");
+  });
+
+  it("keeps the expanded application switcher after leaving and re-entering the page", async () => {
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+
+    const expandButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "展开");
+    await expandButton!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("收起");
+
+    wrapper.unmount();
+    const reopened = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(reopened.text()).toContain("收起");
   });
 
   it("persists the switch change", async () => {

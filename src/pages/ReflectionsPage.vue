@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, toRef, watch } from "vue";
 import {
   deleteAllTranscripts,
   deleteTranscript,
@@ -30,6 +30,7 @@ import {
   visibleTranscripts,
 } from "./reflections-view";
 import { t } from "../lib/i18n";
+import { reflectionsViewSession } from "./reflections-view-session";
 
 const UNKNOWN_APPLICATION_KEY = "__unknown__";
 
@@ -52,9 +53,11 @@ const loadError = ref("");
 const operationError = ref("");
 const busy = ref(false);
 const deleting = ref(false);
-const selectedApplicationKey = ref<string | null>(null);
-const applicationSwitcherExpanded = ref(false);
-const expandedDayKeys = ref<Set<string>>(new Set());
+// 浏览状态放在模块级：切换侧边栏会卸载本页，组件内 ref 会连同用户的选择一起销毁。
+const selectedApplicationKey = toRef(reflectionsViewSession, "selectedApplicationKey");
+const applicationSwitcherExpanded = toRef(reflectionsViewSession, "applicationSwitcherExpanded");
+const expandedDayKeys = toRef(reflectionsViewSession, "expandedDayKeys");
+const dayExpansionSettled = toRef(reflectionsViewSession, "dayExpansionSettled");
 const copiedRecordId = ref<string | null>(null);
 const deleteRequest = ref<DeleteRequest | null>(null);
 const deleteDialog = ref<HTMLDialogElement | null>(null);
@@ -235,11 +238,21 @@ function normalizeExpandedDays(): void {
     ...dayGroups.value.map((group) => group.key),
     ...recordingDayGroups.value.map((group) => group.key),
   ]);
+  const hadExpanded = expandedDayKeys.value.size > 0;
   const next = new Set([...expandedDayKeys.value].filter((key) => valid.has(key)));
-  if (next.size === 0) {
+  // 只有「还没定过」（首次进入、刚切换应用）才默认展开最新一天。否则用户折叠全部
+  // 日期后留下的空集合会被当成"还没展开过"而重新展开，跨页面切换就丢状态。
+  // 已展开的那天因记录被删掉而消失（hadExpanded 但过滤后为空）时仍回落到最新一天。
+  if (!dayExpansionSettled.value || (hadExpanded && next.size === 0)) {
     for (const key of newestExpandableDayKeys()) next.add(key);
   }
   expandedDayKeys.value = next;
+  dayExpansionSettled.value = true;
+}
+
+function resetDayExpansion(): void {
+  expandedDayKeys.value = new Set();
+  dayExpansionSettled.value = false;
 }
 
 async function loadHistory(): Promise<void> {
@@ -398,7 +411,7 @@ function exportRecordingAsset(recording: TranscriptRecordingView): Promise<void>
 
 function selectApplication(key: string | null): void {
   selectedApplicationKey.value = key;
-  expandedDayKeys.value = new Set();
+  resetDayExpansion();
   normalizeExpandedDays();
 }
 
@@ -478,7 +491,7 @@ async function confirmDelete(): Promise<void> {
 }
 
 watch(selectedApplicationKey, () => {
-  expandedDayKeys.value = new Set();
+  resetDayExpansion();
 });
 
 watch(dayGroups, () => {
