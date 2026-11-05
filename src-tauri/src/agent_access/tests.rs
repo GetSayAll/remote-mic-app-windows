@@ -109,7 +109,9 @@ fn manual_authorization_returns_configs_and_stores_only_the_hash() {
     assert_eq!(created.snapshot.authorizations.len(), 1);
     assert!(created.standard_json.contains("sayall-mcp.exe"));
     assert!(created.standard_json.contains("sayall_history"));
-    assert!(created.codex_toml.starts_with("[mcp_servers.sayall_history]"));
+    assert!(created
+        .codex_toml
+        .starts_with("[mcp_servers.sayall_history]"));
     assert!(!created.codex_toml.contains("\\/"));
 
     // 从生成的配置里取回明文令牌，确认磁盘上只有哈希。
@@ -151,7 +153,10 @@ fn codex_connect_appends_managed_block_and_disconnect_removes_it() {
     // Windows 路径的转义必须成对，否则 Codex 会拒绝整个文件。
     assert!(text.contains("\\\\sayall-mcp.exe") || text.contains("\\\\bin\\\\sayall-mcp.exe"));
 
-    let snapshot = env.store.disconnect(AgentClientId::Codex).expect("disconnect");
+    let snapshot = env
+        .store
+        .disconnect(AgentClientId::Codex)
+        .expect("disconnect");
     assert!(snapshot.authorizations.is_empty());
     let text = std::fs::read_to_string(env.codex_config()).expect("read");
     assert!(!text.contains(CODEX_BLOCK_BEGIN));
@@ -209,7 +214,9 @@ fn cursor_merge_preserves_other_servers_and_removal_only_drops_ours() {
     assert_eq!(merged["mcpServers"]["sayall_history"]["type"], "stdio");
     assert_eq!(merged["unrelated"], Value::Bool(true));
 
-    env.store.disconnect(AgentClientId::Cursor).expect("disconnect");
+    env.store
+        .disconnect(AgentClientId::Cursor)
+        .expect("disconnect");
     let after: Value =
         serde_json::from_str(&std::fs::read_to_string(env.cursor_config()).expect("read"))
             .expect("json");
@@ -248,7 +255,9 @@ fn claude_code_rejection_rolls_the_authorization_back() {
 #[test]
 fn claude_code_success_keeps_the_authorization() {
     let env = Env::new();
-    env.store.connect(AgentClientId::ClaudeCode).expect("connect");
+    env.store
+        .connect(AgentClientId::ClaudeCode)
+        .expect("connect");
     let snapshot = env.store.snapshot();
     assert_eq!(snapshot.authorizations.len(), 1);
     assert_eq!(
@@ -285,8 +294,7 @@ fn stale_authorization_reports_needs_reconnect() {
     let moved = env.base.join("bin2");
     std::fs::create_dir_all(&moved).expect("bin2");
     std::fs::write(moved.join("sayall-mcp.exe"), b"MZ").expect("binary");
-    let reopened =
-        AgentAccessStore::for_tests(env.base.join("mcp"), env.home.clone(), moved);
+    let reopened = AgentAccessStore::for_tests(env.base.join("mcp"), env.home.clone(), moved);
     let snapshot = reopened.snapshot();
     assert!(snapshot.authorizations[0].needs_reconnect);
 }
@@ -295,6 +303,9 @@ fn stale_authorization_reports_needs_reconnect() {
 fn managed_codex_range_matches_exactly_one_block() {
     let text = format!("a\n{CODEX_BLOCK_BEGIN}\nbody\n{CODEX_BLOCK_END}\nz\n");
     let (start, end) = managed_codex_range(&text).expect("range");
-    assert_eq!(&text[start..end], format!("{CODEX_BLOCK_BEGIN}\nbody\n{CODEX_BLOCK_END}\n"));
+    assert_eq!(
+        &text[start..end],
+        format!("{CODEX_BLOCK_BEGIN}\nbody\n{CODEX_BLOCK_END}\n")
+    );
     assert!(managed_codex_range("no block here").is_none());
 }

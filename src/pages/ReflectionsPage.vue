@@ -31,6 +31,7 @@ import {
 } from "./reflections-view";
 import { t } from "../lib/i18n";
 import { reflectionsViewSession } from "./reflections-view-session";
+import ReflectionsAgentAccess from "./ReflectionsAgentAccess.vue";
 
 const UNKNOWN_APPLICATION_KEY = "__unknown__";
 
@@ -940,13 +941,16 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <footer class="history-footer">
-        <p>{{ t("把语音实际写入目标输入框的文字和原始录音保存在本机，并按应用和日期整理。") }}</p>
-        <button class="danger-link" type="button" @click="openDelete({ kind: 'all' })">
-          {{ t("全部删除") }}
-        </button>
-      </footer>
     </template>
+
+    <ReflectionsAgentAccess />
+
+    <footer v-if="hasRecords" class="history-footer">
+      <p>{{ t("把语音实际写入目标输入框的文字和原始录音保存在本机，并按应用和日期整理。") }}</p>
+      <button class="danger-link" type="button" @click="openDelete({ kind: 'all' })">
+        {{ t("全部删除") }}
+      </button>
+    </footer>
 
     <dialog
       ref="deleteDialog"

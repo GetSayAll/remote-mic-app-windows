@@ -27,6 +27,20 @@ const bridge = vi.hoisted(() => ({
 
 vi.mock("../lib/bridge", () => bridge);
 
+// 底部「本地 Agent 访问」卡片自己读一次快照；本文件只关心回眸记录本身。
+vi.mock("../lib/agent-access", async () => {
+  const actual =
+    await vi.importActual<typeof import("../lib/agent-access")>("../lib/agent-access");
+  return {
+    ...actual,
+    getAgentAccessSnapshot: vi.fn().mockResolvedValue({
+      enabled: false,
+      clients: [],
+      authorizations: [],
+    }),
+  };
+});
+
 function record(
   id: string,
   applicationKey: string,
@@ -262,7 +276,8 @@ describe("reflections page", () => {
     const wrapper = mount(ReflectionsPage);
     await flushPromises();
 
-    const toggles = wrapper.findAll('input[type="checkbox"]');
+    // 只看页头这两个开关；底部「本地 Agent 访问」卡片有自己的开关。
+    const toggles = wrapper.findAll('.record-toggles input[type="checkbox"]');
     expect(toggles).toHaveLength(2);
     expect((toggles[1].element as HTMLInputElement).checked).toBe(true);
     await toggles[1].setValue(false);
@@ -587,6 +602,30 @@ describe("reflections page", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("按应用查看更多记录");
+  });
+
+  it("always renders the local agent access card, including the empty state", async () => {
+    bridge.getTranscriptHistory.mockResolvedValue(
+      snapshot({ records: [], applications: [], totalCount: 0, recentCount: 0 }),
+    );
+    const wrapper = mount(ReflectionsPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("本地 Agent 访问");
+    expect(wrapper.text()).toContain("还没有客户端获得访问权限。");
+    wrapper.unmount();
+
+    bridge.getTranscriptHistory.mockResolvedValue(snapshot());
+    const withRecords = mount(ReflectionsPage);
+    await flushPromises();
+    expect(withRecords.text()).toContain("本地 Agent 访问");
+    // 卡片在「全部删除」之上。
+    const footer = withRecords.get(".history-footer");
+    const card = withRecords.get(".agent-access");
+    expect(
+      card.element.compareDocumentPosition(footer.element) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("renders the page in English", async () => {

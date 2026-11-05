@@ -214,7 +214,9 @@ impl AgentAccessStore {
 
     pub fn snapshot(&self) -> AgentAccessSnapshot {
         let state = self.read_state().unwrap_or_default();
-        let current_hash = self.executable_path().map(|path| hash_agent_executable_path(&path));
+        let current_hash = self
+            .executable_path()
+            .map(|path| hash_agent_executable_path(&path));
         let authorizations: Vec<AgentAuthorizationView> = state
             .active()
             .map(|authorization| AgentAuthorizationView {
@@ -605,9 +607,7 @@ impl AgentAccessStore {
                 Ok(())
             }
             AgentClientId::ClaudeCode => {
-                let executable = self
-                    .client_executable(client)
-                    .ok_or("client_unavailable")?;
+                let executable = self.client_executable(client).ok_or("client_unavailable")?;
                 let status = self
                     .run_command(&executable, &["--version".to_owned()])
                     .map_err(|_| "client_command_unavailable")?;
@@ -650,7 +650,9 @@ impl AgentAccessStore {
         match client {
             AgentClientId::Codex => self.remove_codex(),
             AgentClientId::ClaudeCode => self.remove_claude_code(),
-            AgentClientId::Cursor => self.remove_json_entry(&self.cursor_config_path(), "mcpServers"),
+            AgentClientId::Cursor => {
+                self.remove_json_entry(&self.cursor_config_path(), "mcpServers")
+            }
             AgentClientId::OpenCode => self.remove_json_entry(&self.open_code_config_path(), "mcp"),
         }
     }
@@ -843,8 +845,7 @@ impl AgentAccessStore {
             std::fs::copy(file, backup).map_err(|_| "configuration_write_failed")?;
         }
         let temporary = file.with_extension("sayall.tmp");
-        std::fs::write(&temporary, text.as_bytes())
-            .map_err(|_| "configuration_write_failed")?;
+        std::fs::write(&temporary, text.as_bytes()).map_err(|_| "configuration_write_failed")?;
         replace_file(&temporary, file).map_err(|_| "configuration_write_failed")?;
         Ok(())
     }

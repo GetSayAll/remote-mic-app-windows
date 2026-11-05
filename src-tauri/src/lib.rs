@@ -3966,7 +3966,9 @@ fn transcript_audio_enabled(state: &AppState) -> bool {
 // ---- 回眸「本地 Agent 访问」 ----
 
 #[tauri::command]
-fn get_agent_access_snapshot(state: tauri::State<'_, AppState>) -> agent_access::AgentAccessSnapshot {
+fn get_agent_access_snapshot(
+    state: tauri::State<'_, AppState>,
+) -> agent_access::AgentAccessSnapshot {
     state.agent_access.snapshot()
 }
 
@@ -4011,7 +4013,9 @@ async fn connect_agent_client(
     let store = Arc::clone(&state.agent_access);
     tauri::async_runtime::spawn_blocking(move || store.connect(client))
         .await
-        .map_err(|_| agent_access::AgentAccessCommandError::for_client("integration_failed", client))?
+        .map_err(|_| {
+            agent_access::AgentAccessCommandError::for_client("integration_failed", client)
+        })?
 }
 
 #[tauri::command]
@@ -4023,7 +4027,10 @@ async fn remove_agent_client(
     tauri::async_runtime::spawn_blocking(move || store.disconnect(client))
         .await
         .map_err(|_| {
-            agent_access::AgentAccessCommandError::for_client("configuration_removal_failed", client)
+            agent_access::AgentAccessCommandError::for_client(
+                "configuration_removal_failed",
+                client,
+            )
         })?
 }
 

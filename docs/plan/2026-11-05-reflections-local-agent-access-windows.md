@@ -1,7 +1,7 @@
 # Windows「回眸 · 本地 Agent 访问」实施计划（对齐 Mac）
 
 - 日期：2026-11-05
-- 状态：**方案已确认，按 M1 → M4 实施中**（M1 已落地：core + `sayall-mcp` + 打包暂存）
+- 状态：**M1 / M2 已实现并验证；M3 只差三个客户端的真机连接；M4 未出包**。证据见文末「实施记录」。
 - 参考实现：Mac 仓库 `D:\SayAll\src\GetSayAll\remote-mic-app`（只参考行为与数据边界，不复制 Swift 源码）
   - 界面：`Sources/RemoteMic/TranscriptAgentAccessSection.swift`（358 行）
   - 状态：`Sources/RemoteMic/TranscriptAgentAccessModel.swift`（364 行）
@@ -377,3 +377,28 @@ interface CreatedAgentAuthorization { snapshot: AgentAccessSnapshot;
 - `Testing/WindowsReflections.md`：新增用例十（开关、手动授权、快速连接、撤销、升级保留、关闭即失效）。
 - `ATTRIBUTION.md`：记录参考的 Mac 模块与提交（仅行为参考）。
 - `docs/decisions/0004-local-agent-access.md`（可选）：把 D1–D3 固化成 ADR（独立进程、只读、默认关闭、状态文件不进 settings）。
+
+
+## 13. 实施记录（2026-11-05）
+
+| 里程碑 | 结果 | 证据 |
+| --- | --- | --- |
+| M1 只读通道 | **passed** | `crates/sayall-mcp`（11 单测 + 10 真实子进程 stdio）；`sayall-core::agent_access` / `mcp_config` / `read_archive`（core 106 项全绿）；打包资源与出包脚本已接 |
+| M2 页面与授权 | **passed** | `src-tauri::agent_access` 15 项（含 Codex 冲突/JSON 非法/客户端拒绝三条事务回滚）；`ReflectionsAgentAccess` 9 项组件测试；回眸页空态与位置断言；Chromium 1100×688 真实点击 13/13 |
+| M3 快速连接 | **部分 passed** | Codex：用 `CODEX_HOME` 指向临时目录跑 `codex mcp list`，生成的 TOML 正确解析出 `sayall_history`（含中文安装路径）；阳性对照（JSON 风格 `\/`）报 `missing escaped value`。Claude Code / Cursor / OpenCode **deferred**（本机未安装，只做了写入与回滚自动化） |
+| M4 交付 | **未开始** | 未出本地测试包；`verify-local-test-install.ps1` 已加 `sayall-mcp.exe` 哈希检查，但还没在实际安装包上跑过 |
+
+已确认并落实的取舍：
+
+- `access.json` 与 `settings.json` 分开；安装生命周期对设置文件的字节哈希断言不受影响。
+- 快速连接失败时**丢弃**临时授权（不是撤销），已授权列表不会出现「连了又撤」的重复行。
+- 每个客户端最多一条有效授权；同名有效授权拒绝。
+- Codex 托管区块用 `# BEGIN/END SAYALL MANAGED MCP sayall_history` 包裹，移除时只删自己那一段。
+- 写客户端配置前留 `.sayall-backup-<毫秒>` 私有备份；写后读回校验托管标记/条目是否存在。
+- 拒绝 reparse point（符号链接与联接）；Windows 安装目录含中文时 TOML 反斜杠成对转义。
+
+仍未覆盖：
+
+- Claude Code / Cursor / OpenCode 的客户端侧连接（本机未安装）。
+- 安装版上的完整旅程（出包后：开关 → 连接 Codex → 客户端读回记录 → 撤销后立即失败）。
+- `%LOCALAPPDATA%` 的实际 ACL 记录。
