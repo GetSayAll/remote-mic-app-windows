@@ -1510,6 +1510,13 @@ async fn enable_rc003_capture(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<rc003_task::TaskStatus, String> {
+    if state.platform.connection_snapshot().remote_model == sayall_windows::RemoteModel::Chromecast
+    {
+        sayall_windows::gatt_note(
+            "enhanced_capture phase=rejected reason=chromecast_not_supported".to_owned(),
+        );
+        return Err("谷歌遥控器暂不支持全按键支持".to_owned());
+    }
     // 尝试与结局都落诊断日志：「UAC 选了否，开关却变成开」这类争议
     // 只能靠这里的记录裁决（2026-09-24 真机争议：日志证明当时 UAC 是
     // 被允许的——任务重建于同一秒，没有日志就只能各说各话）。
@@ -2268,7 +2275,9 @@ fn rc003_auto_trigger_reconcile(
         let enabled = settings
             .load()
             .map(|settings| settings.rc003_capture_enabled)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && platform.connection_snapshot().remote_model
+                != sayall_windows::RemoteModel::Chromecast;
         let snapshot = platform.rc003_bridge_snapshot();
         // 「助手反复被接受却一次没接管」要在这里推进，而不是放在 Connected 分支：
         // 助手每轮活不过几秒时，对账多数轮次根本观察不到 Connected（快照从

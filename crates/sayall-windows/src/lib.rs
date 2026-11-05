@@ -215,6 +215,7 @@ pub fn device_token(raw: &str) -> String {
 pub enum RemoteModel {
     Rc001,
     Rc003,
+    Chromecast,
     #[default]
     Unknown,
 }
@@ -1498,6 +1499,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
+    if remote_model_from_name(raw_name) == RemoteModel::Chromecast {
+        return true;
+    }
     matches!(
         raw_name.trim().to_lowercase().as_str(),
         "mi rc"
@@ -1523,6 +1527,7 @@ pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
         .filter(|ch| !ch.is_whitespace())
         .collect();
     match compact.as_str() {
+        "chromecastremote" => RemoteModel::Chromecast,
         "xiaomibluetoothremote2" | "小米蓝牙遥控器2" | "小米蓝牙语音遥控器2" => {
             RemoteModel::Rc001
         }
@@ -1800,6 +1805,20 @@ mod tests {
             Some(RemoteModel::Rc003)
         );
         assert_eq!(remote_model_from_model_number("RC002"), None);
+    }
+
+    #[test]
+    fn identifies_chromecast_without_claiming_other_google_remotes() {
+        assert!(is_supported_remote_name("Chromecast Remote"));
+        assert_eq!(
+            remote_model_from_name(" Chromecast Remote "),
+            RemoteModel::Chromecast
+        );
+        assert_eq!(
+            remote_model_from_name("Google TV Remote"),
+            RemoteModel::Unknown
+        );
+        assert!(!is_supported_remote_name("Google TV Remote"));
     }
 
     #[test]

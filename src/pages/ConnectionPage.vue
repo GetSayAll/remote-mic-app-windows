@@ -449,7 +449,7 @@ const rc003CaptureHint = ref("");
  * issue #206）：`null` = 尚未读到，按可用处理，不因一次 IPC 失败把功能锁死。
  */
 const captureSupport = ref<CaptureSupport | null>(null);
-const captureUnsupported = computed(() => captureSupport.value?.available === false);
+const captureUnsupported = computed(() => connection.value.remoteModel === "chromecast" || captureSupport.value?.available === false);
 
 /**
  * 本机不可用时的文案（与按键页同一句，名称随本页入口）：
@@ -1008,12 +1008,12 @@ async function refreshAudio() {
 async function scan() {
   scanning.value = true;
   operationMessage.value = "";
-  scanMessage.value = t("正在寻找小米遥控器…");
+  scanMessage.value = t("正在寻找遥控器…");
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
-      ? t("找到 {count} 个已配对的小米遥控器", { count: devices.value.length })
-      : t("没有找到已配对的小米遥控器");
+      ? t("找到 {count} 个已配对的遥控器", { count: devices.value.length })
+      : t("没有找到已配对的遥控器");
   } catch (error) {
     devices.value = [];
     scanMessage.value = actionErrorText("scan_paired_remotes", error);

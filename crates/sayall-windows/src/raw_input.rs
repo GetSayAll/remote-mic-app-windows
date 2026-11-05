@@ -22,10 +22,13 @@ pub enum RemoteButton {
     VolumeMute,
     VolumeUp,
     VolumeDown,
+    Youtube,
+    Netflix,
+    Input,
 }
 
 /// 语义按键的稳定顺序：key_gate 的映射位掩码、UI 画布布局都依赖该表。
-pub const ALL_BUTTONS: [RemoteButton; 13] = [
+pub const ALL_BUTTONS: [RemoteButton; 16] = [
     RemoteButton::Back,
     RemoteButton::Ok,
     RemoteButton::Tv,
@@ -39,6 +42,9 @@ pub const ALL_BUTTONS: [RemoteButton; 13] = [
     RemoteButton::VolumeMute,
     RemoteButton::VolumeUp,
     RemoteButton::VolumeDown,
+    RemoteButton::Youtube,
+    RemoteButton::Netflix,
+    RemoteButton::Input,
 ];
 
 /// Report ID 1 中可由增强捕获链路接管的全部语义按键。
@@ -101,6 +107,9 @@ impl RemoteButton {
             Self::VolumeMute => "button.volume_mute",
             Self::VolumeUp => "button.volume_up",
             Self::VolumeDown => "button.volume_down",
+            Self::Youtube => "button.youtube",
+            Self::Netflix => "button.netflix",
+            Self::Input => "button.input",
         }
     }
 
@@ -209,6 +218,74 @@ pub fn device_path_matches_xiaomi_remote(path: &str) -> bool {
     classic || ble
 }
 
+pub fn device_path_matches_chromecast_remote(path: &str) -> bool {
+    let normalized = normalize_device_path(path);
+    (normalized.contains("vid_18d1") && normalized.contains("pid_9450"))
+        || ((normalized.contains("dev_vid&0018d1")
+            || normalized.contains("dev_vid&0118d1")
+            || normalized.contains("dev_vid&0218d1"))
+            && normalized.contains("pid&9450"))
+}
+
+pub fn device_path_matches_supported_remote(path: &str) -> bool {
+    device_path_matches_xiaomi_remote(path) || device_path_matches_chromecast_remote(path)
+}
+
+/// Ported from vRemoter's Chromecast report ID 1 table (MIT; see ATTRIBUTION.md).
+/// Windows RAWHID includes the report ID. Never interpret these bytes as Xiaomi usages.
+pub fn decode_chromecast_report(
+    report: &[u8],
+) -> Result<BTreeSet<RemoteButton>, RawInputDecodeError> {
+    // Firmware using standard Consumer Control (Windows observation in VibeMote).
+    if report.len() == 3 && report[0] == 2 {
+        let usage = u16::from_le_bytes([report[1], report[2]]);
+        let button = match usage {
+            0 => return Ok(BTreeSet::new()),
+            0x019E => RemoteButton::Power,
+            0x0189 => RemoteButton::Input,
+            0x0042 => RemoteButton::Up,
+            0x0043 => RemoteButton::Down,
+            0x0044 => RemoteButton::Left,
+            0x0045 => RemoteButton::Right,
+            0x0041 => RemoteButton::Ok,
+            0x0224 => RemoteButton::Back,
+            0x0223 => RemoteButton::Home,
+            0x00E9 => RemoteButton::VolumeUp,
+            0x00EA => RemoteButton::VolumeDown,
+            0x00E2 => RemoteButton::VolumeMute,
+            0x0077 => RemoteButton::Youtube,
+            0x0078 => RemoteButton::Netflix,
+            _ => return Err(RawInputDecodeError::InvalidReportPrefix),
+        };
+        return Ok(BTreeSet::from([button]));
+    }
+    if report.len() != 2 {
+        return Err(RawInputDecodeError::UnsupportedReportShape(report.len()));
+    }
+    if report[0] != 1 {
+        return Err(RawInputDecodeError::InvalidReportPrefix);
+    }
+    let button = match report[1] {
+        0 => return Ok(BTreeSet::new()),
+        1 => RemoteButton::Power,
+        3 => RemoteButton::Up,
+        4 => RemoteButton::Down,
+        5 => RemoteButton::Left,
+        6 => RemoteButton::Right,
+        7 => RemoteButton::Ok,
+        8 => RemoteButton::VolumeMute,
+        10 => RemoteButton::Home,
+        11 => RemoteButton::Back,
+        12 => RemoteButton::VolumeUp,
+        13 => RemoteButton::VolumeDown,
+        14 => RemoteButton::Youtube,
+        15 => RemoteButton::Netflix,
+        17 => RemoteButton::Input,
+        _ => return Err(RawInputDecodeError::InvalidReportPrefix),
+    };
+    Ok(BTreeSet::from([button]))
+}
+
 pub fn normalize_device_path(path: &str) -> String {
     path.trim().to_ascii_lowercase()
 }
@@ -264,7 +341,7 @@ pub fn select_single_device_path_preferring(
 ) -> Result<String, DevicePathError> {
     let matches: Vec<_> = paths
         .iter()
-        .filter(|path| device_path_matches_xiaomi_remote(path))
+        .filter(|path| device_path_matches_supported_remote(path))
         .collect();
     match matches.as_slice() {
         [] => Err(DevicePathError::Missing),
@@ -429,8 +506,12 @@ impl ButtonStateMerger {
 
     /// 应用一份 HID 报文的 usage 集合（绝对状态），返回语义边沿。
     pub fn update_hid_usages(&mut self, usages: BTreeSet<u16>) -> Vec<ButtonEdge> {
+        self.update_hid_buttons(usages.into_iter().filter_map(button_for_usage).collect())
+    }
+
+    pub fn update_hid_buttons(&mut self, buttons: BTreeSet<RemoteButton>) -> Vec<ButtonEdge> {
         let before = self.active_buttons();
-        self.hid = usages.into_iter().filter_map(button_for_usage).collect();
+        self.hid = buttons;
         edges_between(&before, &self.active_buttons())
     }
 
@@ -471,6 +552,54 @@ fn edges_between(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromecast_identity_and_reports_are_separate_from_xiaomi() {
+        let path = r"\\?\hid#vid_18d1&pid_9450#fixture";
+        assert!(device_path_matches_supported_remote(path));
+        assert!(!device_path_matches_xiaomi_remote(path));
+        assert!(!device_path_matches_supported_remote(
+            r"\\?\hid#vid_18d1&pid_9999#fixture"
+        ));
+        assert!(device_path_matches_supported_remote(
+            r"BTHLE#DEV_VID&0218D1_PID&9450#fixture"
+        ));
+        assert_eq!(select_single_device_path(&[path.to_owned()]).unwrap(), path);
+        for (usage, button) in [
+            (3, RemoteButton::Up),
+            (4, RemoteButton::Down),
+            (5, RemoteButton::Left),
+            (6, RemoteButton::Right),
+            (7, RemoteButton::Ok),
+            (8, RemoteButton::VolumeMute),
+            (10, RemoteButton::Home),
+            (11, RemoteButton::Back),
+            (12, RemoteButton::VolumeUp),
+            (13, RemoteButton::VolumeDown),
+            (14, RemoteButton::Youtube),
+            (15, RemoteButton::Netflix),
+            (1, RemoteButton::Power),
+            (17, RemoteButton::Input),
+        ] {
+            assert_eq!(
+                decode_chromecast_report(&[1, usage]).unwrap(),
+                BTreeSet::from([button])
+            );
+        }
+        assert!(decode_chromecast_report(&[1, 0]).unwrap().is_empty());
+        assert!(decode_chromecast_report(&[2, 3]).is_err());
+        assert!(decode_chromecast_report(&[1]).is_err());
+        assert!(decode_chromecast_report(&[1, 0xFF]).is_err());
+        assert_eq!(
+            decode_chromecast_report(&[2, 0x42, 0]).unwrap(),
+            BTreeSet::from([RemoteButton::Up])
+        );
+        assert_eq!(
+            decode_chromecast_report(&[2, 0x77, 0]).unwrap(),
+            BTreeSet::from([RemoteButton::Youtube])
+        );
+        assert!(decode_chromecast_report(&[2, 0, 0]).unwrap().is_empty());
+    }
 
     #[test]
     fn report_path_accepted_follows_the_current_target() {
@@ -606,13 +735,12 @@ mod tests {
 
     #[test]
     fn enhanced_capture_usage_table_is_a_complete_bijection() {
-        assert_eq!(ENHANCED_CAPTURE_BUTTON_USAGES.len(), ALL_BUTTONS.len());
         let usages: BTreeSet<_> = ENHANCED_CAPTURE_BUTTON_USAGES
             .iter()
             .map(|(_, usage)| *usage)
             .collect();
-        assert_eq!(usages.len(), ALL_BUTTONS.len());
-        for button in ALL_BUTTONS {
+        assert_eq!(usages.len(), ENHANCED_CAPTURE_BUTTON_USAGES.len());
+        for (button, _) in ENHANCED_CAPTURE_BUTTON_USAGES {
             let usage = usage_for_button(button);
             assert_eq!(button_for_usage(usage), Some(button));
         }

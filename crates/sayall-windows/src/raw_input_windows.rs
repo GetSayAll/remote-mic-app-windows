@@ -1,7 +1,8 @@
 use crate::button_mapping::EngineMessage;
 use crate::key_gate;
 use crate::raw_input::{
-    button_for_usage, decode_report_usages, normalize_device_path, parse_raw_hid_body,
+    button_for_usage, decode_chromecast_report, decode_report_usages,
+    device_path_matches_chromecast_remote, normalize_device_path, parse_raw_hid_body,
     select_single_device_path, DevicePathError, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
 };
 use crate::PlatformError;
@@ -137,7 +138,8 @@ impl RawInputRuntime {
                 // 门控只有在真正绑定到唯一遥控器 HID 设备时才具备归因来源（HID 报文
                 // 武装）。Awaiting 期间设备不在位，必须保持关闭——否则钩子会在没有
                 // 归因来源时仍按“监听器运行中”判定；接口恢复重绑时再打开。
-                key_gate::set_listener_active(snapshot.phase == RawInputPhase::Ready);
+                // The listener thread publishes whether the bound model supports the gate.
+                // Chromecast must never enable Xiaomi's keyboard suppression rules.
                 let awaiting = snapshot.phase == RawInputPhase::Awaiting;
                 crate::ble::gatt_note(format!(
                     "raw_input_listener action=start phase=completed terminal_result=passed matched_device_count={} awaiting_remote_hid_interface={}",
@@ -413,6 +415,9 @@ fn run_listener(
             first
         }
     };
+    key_gate::set_listener_active(
+        !selected_path.is_empty() && !device_path_matches_chromecast_remote(&selected_path),
+    );
     THREAD_CONTEXT.with(|slot| {
         *slot.borrow_mut() = Some(ListenerContext {
             selected_path: selected_path.clone(),
@@ -614,7 +619,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
         Ok(path) => normalize_device_path(&path),
         Err(_) => return,
     };
-    let is_remote = crate::raw_input::device_path_matches_xiaomi_remote(&device_path);
+    let is_remote = crate::raw_input::device_path_matches_supported_remote(&device_path);
     THREAD_CONTEXT.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let context = match borrowed.as_mut() {
@@ -643,7 +648,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                         paths.len()
                     ));
                     // 重新绑定到唯一设备后，门控重新具备归因来源。
-                    key_gate::set_listener_active(true);
+                    key_gate::set_listener_active(!device_path_matches_chromecast_remote(&context.selected_path));
                     // 遥控器 HID 接口已回到无线电上：通知 ble 立即重试，
                     // 不必等退避到期（只提前，不延后/不门控）。
                     // 只在确实绑定到遥控器时发出——`paths` 已由
@@ -749,7 +754,7 @@ fn audit_binding() {
                     state.stale_remote_event_count
                 };
                 // 重新绑定后门控才重新具备归因来源。
-                key_gate::set_listener_active(true);
+                key_gate::set_listener_active(!device_path_matches_chromecast_remote(&context.selected_path));
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=rebound kept_previous={kept_previous} \
                      matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count} \
@@ -850,7 +855,7 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             // 遥控器的 HID 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
             // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
             // 区分开的唯一线索（2026-09-18 现场正是无法区分这两者才迟迟定不了位）。
-            if crate::raw_input::device_path_matches_xiaomi_remote(&normalized) {
+            if crate::raw_input::device_path_matches_supported_remote(&normalized) {
                 let (count, first) = {
                     let mut state = context.snapshot.lock().unwrap();
                     state.stale_remote_event_count += 1;
@@ -889,6 +894,9 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         context.snapshot.lock().unwrap().raw_event_count += 1;
 
         if header.dwType == RIM_TYPEKEYBOARD.0 {
+            if device_path_matches_chromecast_remote(&normalized) {
+                return Ok(()); // Its semantic reports use the separate consumer-control path.
+            }
             if body.len() < size_of::<RAWKEYBOARD>() {
                 return Err("RAWKEYBOARD packet is truncated".to_owned());
             }
@@ -916,6 +924,13 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             let _ = context.engine.send(EngineMessage::Keyboard(event));
         } else if header.dwType == RIM_TYPEHID.0 {
             for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
+                if device_path_matches_chromecast_remote(&normalized) {
+                    let buttons =
+                        decode_chromecast_report(report).map_err(|error| error.to_string())?;
+                    // Observe this device's own edges; Xiaomi's helper and usage table do not apply.
+                    let _ = context.engine.send(EngineMessage::HidButtons(buttons));
+                    continue;
+                }
                 let usages = decode_report_usages(report).map_err(|error| error.to_string())?;
                 // HID 报文（独立管线，不受键盘 LL 钩子影响）到达即武装
                 // 对应按键：其键盘孪生事件在钩子里据此归因吞键。
@@ -954,7 +969,7 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
             continue;
         }
         if let Ok(path) = get_device_name(device.hDevice) {
-            if crate::raw_input::device_path_matches_xiaomi_remote(&path) {
+            if crate::raw_input::device_path_matches_supported_remote(&path) {
                 paths.push(path);
             }
         }

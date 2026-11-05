@@ -142,7 +142,7 @@ interface Placement {
 }
 
 /** 按键卡片布局表：对齐 Mac RemoteMappingLayout.buttonPlacements。 */
-const PLACEMENTS: Placement[] = [
+const XIAOMI_PLACEMENTS: Placement[] = [
   { button: "power", side: "left", anchor: [0.386, 0.099], targetY: 0.08 },
   { button: "up", side: "left", anchor: [0.502, 0.179], targetY: 0.23 },
   { button: "left", side: "left", anchor: [0.362, 0.246], targetY: 0.38 },
@@ -156,7 +156,7 @@ const PLACEMENTS: Placement[] = [
   { button: "volume_down", side: "right", anchor: [0.604, 0.48], targetY: 0.795 },
   { button: "tv", side: "right", anchor: [0.604, 0.569], targetY: 0.94 },
 ];
-const VOICE_PLACEMENT: Placement = {
+const XIAOMI_VOICE_PLACEMENT: Placement = {
   button: "ok", // 语音卡不对应 RemoteButton；占位仅用于定位。
   side: "right",
   anchor: [0.63, 0.099],
@@ -168,6 +168,26 @@ const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
 const remoteModel = computed<RemoteModel>(
   () => props.runtime?.platform.connection.remoteModel ?? "unknown",
 );
+const isChromecast = computed(() => remoteModel.value === "chromecast");
+const PLACEMENTS = computed<Placement[]>(() => isChromecast.value ? [
+  { button: "up", side: "left", anchor: [0.5, 0.12], targetY: 0.07 },
+  { button: "left", side: "left", anchor: [0.37, 0.18], targetY: 0.205 },
+  { button: "back", side: "left", anchor: [0.4, 0.34], targetY: 0.34 },
+  { button: "home", side: "left", anchor: [0.4, 0.46], targetY: 0.475 },
+  { button: "youtube", side: "left", anchor: [0.4, 0.59], targetY: 0.61 },
+  { button: "power", side: "left", anchor: [0.4, 0.75], targetY: 0.745 },
+  { button: "volume_mute", side: "left", anchor: [0.6, 0.46], targetY: 0.88 },
+  { button: "right", side: "right", anchor: [0.63, 0.18], targetY: 0.19 },
+  { button: "ok", side: "right", anchor: [0.5, 0.18], targetY: 0.325 },
+  { button: "down", side: "right", anchor: [0.5, 0.25], targetY: 0.46 },
+  { button: "netflix", side: "right", anchor: [0.6, 0.59], targetY: 0.595 },
+  { button: "volume_up", side: "right", anchor: [0.72, 0.36], targetY: 0.73 },
+  { button: "volume_down", side: "right", anchor: [0.72, 0.43], targetY: 0.865 },
+  { button: "input", side: "right", anchor: [0.6, 0.75], targetY: 1.0 },
+] : XIAOMI_PLACEMENTS);
+const VOICE_PLACEMENT = computed<Placement>(() => isChromecast.value
+  ? { button: "ok", side: "right", anchor: [0.6, 0.34], targetY: 0.055 }
+  : XIAOMI_VOICE_PLACEMENT);
 
 /**
  * 头部设备胶囊（2026-10-01）：优先显示已识别的型号（RC001 = 小米蓝牙语音遥控器 2、
@@ -253,6 +273,9 @@ function arrowPolygon(placement: Placement): string {
 /** 按键图标：SVG path 组（24x24 视窗），形状对齐 Mac RemoteMappingCanvas
  * 的 SF Symbols（power/chevron/circle.circle/uturn/speaker/house/line.3/tv）。 */
 const buttonIcons: Record<RemoteButton, string[]> = {
+  youtube: ["M5 5h14v14H5z", "M10 8l6 4-6 4z"],
+  netflix: ["M6 20V4l12 16V4"],
+  input: ["M3 5h18v14H3z", "M7 12h10", "M13 8l4 4-4 4"],
   power: ["M12 3v8", "M7.2 6.4a7 7 0 1 0 9.6 0"],
   up: ["M6 14.5l6-6 6 6"],
   down: ["M6 9.5l6 6 6-6"],
@@ -1872,7 +1895,7 @@ const rc003CaptureFailureRaw = ref<string | null>(null);
  * 开关也不会显示成开启。
  */
 const captureSupport = ref<CaptureSupport | null>(null);
-const captureUnsupported = computed(() => captureSupport.value?.available === false);
+const captureUnsupported = computed(() => isChromecast.value || captureSupport.value?.available === false);
 
 /**
  * 开关三态（2026-10-10 Andy 定稿）：关闭 / 开启 / 正在操作；本机不可用时置灰。
@@ -1947,6 +1970,7 @@ const captureRevokedNote = computed(() =>
  * 「开启后恢复正常」不成立（issue #206）。
  */
 function captureGated(button: RemoteButton): boolean {
+  if (isChromecast.value) return false;
   const isThreeKey =
     button === "back" || button === "volume_up" || button === "volume_down";
   if (!isThreeKey) return false;
@@ -2452,6 +2476,7 @@ onUnmounted(() => {
          （title 悬停看文案），开启失败走底部提示条——独立行的 v-if 插入 /
          移除会引起整页回流（抖动），胶囊底色与状态光晕还会染到标题区。 -->
 
+    <p v-if="isChromecast" class="tiny muted">{{ t("谷歌遥控器为实验支持；基础按键可能同时触发原生动作，全按键支持暂不可用。") }}</p>
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
         class="mapping-connections"
@@ -2479,7 +2504,8 @@ onUnmounted(() => {
       </svg>
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${REMOTE_TOP}px` }">
-        <img src="/RC003-remote-photo@2x.webp" :alt="t('小米蓝牙语音遥控器 2 Pro 示意图')" draggable="false" />
+        <img :src="isChromecast ? '/chromecast-remote.svg' : '/RC003-remote-photo@2x.webp'"
+          :alt="isChromecast ? remoteModelLabel('chromecast') : t('小米蓝牙语音遥控器 2 Pro 示意图')" draggable="false" />
         <span
           v-for="placement in PLACEMENTS"
           :key="placement.button"

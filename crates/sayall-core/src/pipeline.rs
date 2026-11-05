@@ -39,6 +39,7 @@ pub struct AtvvVoicePipeline {
     accumulator: FrameAccumulator,
     decoder: ImaAdpcmDecoder,
     pending_sync: Option<(i16, u8)>,
+    streaming_packets: bool,
     gain_db: f32,
 }
 
@@ -50,6 +51,7 @@ impl Default for AtvvVoicePipeline {
             accumulator: FrameAccumulator::default(),
             decoder: ImaAdpcmDecoder::default(),
             pending_sync: None,
+            streaming_packets: false,
             gain_db: 0.0,
         }
     }
@@ -76,10 +78,18 @@ impl AtvvVoicePipeline {
         self.gain_db = normalize_gain_db(gain_db);
     }
 
+    /// Chromecast ATVV v1 notifications are continuous ADPCM, not fixed-size frames.
+    /// Keep Xiaomi's existing frame/sync rules as the default.
+    pub fn set_streaming_packets(&mut self, enabled: bool) {
+        self.streaming_packets = enabled;
+    }
+
     pub fn handle_control(&mut self, bytes: &[u8]) -> Result<PipelineOutput, PipelineError> {
         match AtvvControlEvent::parse(bytes)? {
             AtvvControlEvent::Capabilities(capabilities) => {
-                if !capabilities.supports_sayall_audio() {
+                if !capabilities.supports_sayall_audio()
+                    && !(self.streaming_packets && capabilities.selected_codec == 1)
+                {
                     return Err(PipelineError::UnsupportedSampleRate(
                         capabilities.sample_rate,
                     ));
@@ -89,6 +99,10 @@ impl AtvvVoicePipeline {
             }
             AtvvControlEvent::MicrophoneOpenRequested => {
                 self.require_capabilities()?;
+                if self.streaming_packets && self.session.state() == VoiceSessionState::Idle {
+                    self.pending_sync = None;
+                    self.decoder.reset(0, 0);
+                }
                 Ok(PipelineOutput::MicrophoneOpenRequested)
             }
             AtvvControlEvent::StreamStarted {
@@ -96,6 +110,7 @@ impl AtvvVoicePipeline {
                 codec,
                 session_id,
             } => {
+                let streaming_packets = self.streaming_packets;
                 let capabilities = self.require_capabilities_mut()?;
                 if let Some(interaction) = interaction {
                     capabilities.interaction = interaction;
@@ -104,13 +119,17 @@ impl AtvvVoicePipeline {
                     capabilities.selected_codec = codec;
                     capabilities.sample_rate = if codec == 0x02 { 16_000 } else { 8_000 };
                 }
-                if !capabilities.supports_sayall_audio() {
+                if !capabilities.supports_sayall_audio()
+                    && !(streaming_packets && capabilities.selected_codec == 1)
+                {
                     return Err(PipelineError::UnsupportedSampleRate(
                         capabilities.sample_rate,
                     ));
                 }
                 self.accumulator.reset();
-                self.pending_sync = None;
+                if !self.streaming_packets {
+                    self.pending_sync = None;
+                }
                 self.decoder.reset(0, 0);
                 self.session
                     .apply(VoiceSessionEvent::StreamStarted { session_id })?;
@@ -139,7 +158,10 @@ impl AtvvVoicePipeline {
                 predictor,
                 step_index,
             } => {
-                if self.session.state() != VoiceSessionState::Streaming {
+                self.require_capabilities()?;
+                if self.session.state() != VoiceSessionState::Streaming
+                    && !(self.streaming_packets && self.session.state() == VoiceSessionState::Idle)
+                {
                     return Err(PipelineError::SyncOutsideStream);
                 }
                 let discarded_partial_bytes = self.accumulator.pending().len();
@@ -159,8 +181,43 @@ impl AtvvVoicePipeline {
         if self.session.state() != VoiceSessionState::Streaming {
             return Err(PipelineError::AudioOutsideStream);
         }
-        let frame_size = self.require_capabilities()?.frame_size;
-        let frames = self.accumulator.append(bytes, frame_size);
+        let capabilities = self.require_capabilities()?.clone();
+        let frame_size = capabilities.frame_size;
+        if self.streaming_packets && capabilities.version < 0x0100 {
+            if bytes.len() != frame_size || bytes.len() < 6 || bytes[5] > 88 {
+                return Err(PipelineError::InvalidAudioPacket);
+            }
+            let predictor = i16::from_be_bytes([bytes[3], bytes[4]]);
+            self.decoder
+                .reset(i32::from(predictor), i32::from(bytes[5]));
+            let mut decoded = vec![predictor];
+            decoded.extend(self.decoder.decode(&bytes[6..]));
+            let samples = process_pcm(&decoded, self.gain_db);
+            let samples = if capabilities.sample_rate == 8_000 {
+                samples
+                    .into_iter()
+                    .flat_map(|sample| [sample, sample])
+                    .collect()
+            } else {
+                samples
+            };
+            self.session.apply(VoiceSessionEvent::AudioAccepted {
+                sample_count: samples.len(),
+            })?;
+            return Ok(PipelineOutput::Samples {
+                generation: self.session.generation(),
+                samples,
+            });
+        }
+        let frames = if self.streaming_packets {
+            if bytes.is_empty() {
+                Vec::new()
+            } else {
+                vec![bytes.to_vec()]
+            }
+        } else {
+            self.accumulator.append(bytes, frame_size)
+        };
         let mut samples = Vec::with_capacity(frames.len() * frame_size * 2);
         for frame in frames {
             if let Some((predictor, step_index)) = self.pending_sync.take() {
@@ -169,6 +226,12 @@ impl AtvvVoicePipeline {
             }
             let decoded = self.decoder.decode(&frame);
             samples.extend(process_pcm(&decoded, self.gain_db));
+        }
+        if self.streaming_packets && capabilities.sample_rate == 8_000 {
+            samples = samples
+                .into_iter()
+                .flat_map(|sample| [sample, sample])
+                .collect();
         }
         self.session.apply(VoiceSessionEvent::AudioAccepted {
             sample_count: samples.len(),
@@ -208,6 +271,8 @@ impl AtvvVoicePipeline {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PipelineError {
+    #[error("invalid ATVV audio packet")]
+    InvalidAudioPacket,
     #[error(transparent)]
     Protocol(#[from] AtvvError),
     #[error(transparent)]
@@ -227,6 +292,66 @@ pub enum PipelineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromecast_v04_decodes_packet_headers_and_converts_8k_to_output_16k() {
+        let mut pipeline = AtvvVoicePipeline::default();
+        pipeline.set_streaming_packets(true);
+        pipeline
+            .handle_control(&[0x0B, 0, 4, 0, 1, 0, 8, 0, 0])
+            .unwrap();
+        pipeline.handle_control(&[4]).unwrap();
+        let PipelineOutput::Samples { samples, .. } =
+            pipeline.handle_audio(&[0, 1, 0, 3, 0xE8, 0, 0, 0]).unwrap()
+        else {
+            panic!("expected v0.4 audio");
+        };
+        assert_eq!(samples, vec![1000; 10]);
+        assert!(pipeline.handle_audio(&[0, 1]).is_err());
+        pipeline.interrupt();
+        assert!(pipeline.handle_audio(&[0; 8]).is_err());
+    }
+
+    #[test]
+    fn chromecast_v1_decodes_notifications_without_waiting_for_fixed_frames() {
+        let mut pipeline = AtvvVoicePipeline::default();
+        pipeline.set_streaming_packets(true);
+        pipeline.handle_control(&CAPS).unwrap();
+        pipeline.handle_control(&[4, 3, 2, 1]).unwrap();
+        let PipelineOutput::Samples { samples, .. } = pipeline.handle_audio(&[0x11]).unwrap()
+        else {
+            panic!("expected partial notification");
+        };
+        assert_eq!(samples.len(), 2);
+    }
+
+    #[test]
+    fn chromecast_sync_before_start_survives_until_first_audio() {
+        let mut pipeline = AtvvVoicePipeline::default();
+        pipeline.set_streaming_packets(true);
+        pipeline.handle_control(&CAPS).unwrap();
+        pipeline.handle_control(&[0x08]).unwrap();
+        pipeline
+            .handle_control(&[0x0A, 2, 0, 0, 0x03, 0xE8, 10])
+            .unwrap();
+        pipeline.handle_control(&[0x04, 3, 2, 1]).unwrap();
+        let PipelineOutput::Samples { samples, .. } = pipeline.handle_audio(&[0; 4]).unwrap()
+        else {
+            panic!("expected decoded audio");
+        };
+        assert!(samples.iter().all(|sample| *sample >= 1000));
+        pipeline.handle_control(&[0]).unwrap();
+        pipeline.complete_drain(pipeline.generation()).unwrap();
+        pipeline.handle_control(&[0x04, 3, 2, 2]).unwrap();
+        let PipelineOutput::Samples { samples, .. } = pipeline.handle_audio(&[0; 4]).unwrap()
+        else {
+            panic!("expected next stream");
+        };
+        assert!(
+            samples.iter().all(|sample| *sample == 0),
+            "sync cannot leak to next stream"
+        );
+    }
 
     const CAPS: [u8; 7] = [0x0B, 0x01, 0x00, 0x02, 0x03, 0, 4];
 

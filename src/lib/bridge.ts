@@ -66,7 +66,7 @@ export type ConnectionPhase =
 
 export type VoiceSessionState = "idle" | "streaming" | "draining";
 
-export type RemoteModel = "rc001" | "rc003" | "unknown";
+export type RemoteModel = "rc001" | "rc003" | "chromecast" | "unknown";
 
 export type AudioPhase =
   | "unconfigured"
@@ -130,7 +130,10 @@ export type RemoteButton =
   | "power"
   | "volume_mute"
   | "volume_up"
-  | "volume_down";
+  | "volume_down"
+  | "youtube"
+  | "netflix"
+  | "input";
 
 export type ButtonTrigger = "single" | "double" | "long";
 
@@ -2068,6 +2071,7 @@ export function remoteModelLabel(model: RemoteModel): string {
     {
       rc001: "小米蓝牙语音遥控器 2",
       rc003: "小米蓝牙语音遥控器 2 Pro",
+      chromecast: "Google Chromecast 语音遥控器",
       unknown: "连接后显示",
     }[model],
   );
@@ -2087,6 +2091,9 @@ export function audioPhaseLabel(phase: AudioPhase): string {
 }
 
 export const buttonLabels: Record<RemoteButton, string> = {
+  youtube: "YouTube",
+  netflix: "Netflix",
+  get input() { return t("信源"); },
   get back() {
     return t("返回");
   },

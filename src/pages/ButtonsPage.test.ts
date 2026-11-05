@@ -270,7 +270,7 @@ const runtime: RuntimeSnapshot = {
   },
 };
 
-async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promise<VueWrapper> {
+async function mountPage(model: "rc001" | "rc003" | "chromecast" | "unknown" = "rc003"): Promise<VueWrapper> {
   const snapshot =
     model === "rc003"
       ? runtime
@@ -483,6 +483,17 @@ function confirmDialog(page: VueWrapper) {
 }
 
 describe("buttons mapping page", () => {
+  it("shows the Chromecast keys and keeps Xiaomi enhanced capture unavailable", async () => {
+    const page = await mountPage("chromecast");
+    await flushPromises();
+    expect(page.text()).toContain("Google Chromecast 语音遥控器");
+    expect(page.findAll(".mapping-card").map((card) => card.text()).join(" ")).toContain("YouTube");
+    expect(page.findAll(".mapping-card").map((card) => card.text()).join(" ")).toContain("Netflix");
+    expect(page.text()).toContain("信源");
+    expect(page.text()).toContain("实验支持");
+    expect(page.find('.remote-photo img').attributes('src')).toBe('/chromecast-remote.svg');
+    expect(page.find('.remote-photo img').attributes('alt')).not.toContain('小米');
+  });
   it("adds scanned apps to the library without changing button bindings", async () => {
     const wrapper = await mountPage();
     await flushPromises();

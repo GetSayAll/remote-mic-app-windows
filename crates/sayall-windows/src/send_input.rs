@@ -1203,7 +1203,11 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
         RemoteButton::VolumeUp => KeyCode::VolumeUp,
         RemoteButton::VolumeDown => KeyCode::VolumeDown,
         RemoteButton::Tv => KeyCode::Oem3,
-        RemoteButton::Back | RemoteButton::Power => return None,
+        RemoteButton::Back
+        | RemoteButton::Power
+        | RemoteButton::Youtube
+        | RemoteButton::Netflix
+        | RemoteButton::Input => return None,
     })
 }
 

@@ -206,7 +206,7 @@ const captureLoadFailed = ref(false);
 /** 迟到回调保护：每次进入第④步都换一代，旧读取结果不得覆盖新状态。 */
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
-const captureUnavailable = computed(() => captureSupport.value?.available === false);
+const captureUnavailable = computed(() => props.runtime?.platform.connection.remoteModel === "chromecast" || captureSupport.value?.available === false);
 /** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
   if (captureLoadFailed.value) {
@@ -254,6 +254,7 @@ const gateContext = computed<OnboardingContext>(() => {
     voiceTool: {
       tool: stagedTool.value ?? configuredTool.value,
       doubaoCaptureEnabled: rc003Status.value?.enabled === true,
+      doubaoCaptureRequired: platform?.connection.remoteModel !== "chromecast",
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
       otherHotkeyChosen: otherKeys.value !== null,
@@ -640,7 +641,7 @@ function stopButtonObservation(): void {
 async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promise<void> {
   if (scanning.value) return;
   scanning.value = true;
-  scanMessage.value = t("正在寻找小米遥控器…");
+  scanMessage.value = t("正在寻找遥控器…");
   const started = performance.now();
   // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ②步自动连接触发）。
   reportStepAction("remote", "scan_requested", "unknown", { detail: mode });
@@ -650,8 +651,8 @@ async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promis
       devices.value.length === 0
         ? t("当前没有已配对设备，请先按照上一步完成设备配对。")
         : devices.value.length === 1
-          ? t("找到 1 个已配对的小米遥控器")
-          : t("找到 {count} 个已配对的小米遥控器", { count: devices.value.length });
+          ? t("找到 1 个已配对的遥控器")
+          : t("找到 {count} 个已配对的遥控器", { count: devices.value.length });
     reportStepAction("remote", "scan_requested", "passed", {
       detail: `${mode}_found_${devices.value.length}`,
       elapsedMs: actionElapsed(started),
@@ -2306,6 +2307,7 @@ async function retryVoiceTest(): Promise<void> {
             :tool="stagedTool"
             :hotkey-label="hotkeyLabel"
             :capture-enabled="rc003Status?.enabled === true"
+            :capture-required="runtime?.platform.connection.remoteModel !== 'chromecast'"
             :capture-busy="captureBusy"
             :capture-hint="captureHint"
             :conflict="stagedTool === 'doubao' && vokie?.running === true"

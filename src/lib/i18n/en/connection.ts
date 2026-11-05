@@ -78,10 +78,10 @@ export default {
   "语音功能已就绪，按住遥控器语音键就能说话":
     "Voice is ready. Hold the remote's voice button and speak.",
   "连接后即可使用遥控器语音键": "Connect the remote to use its voice button.",
-  "正在寻找小米遥控器…": "Looking for Xiaomi remotes…",
-  "找到 {count} 个已配对的小米遥控器":
-    "Paired Xiaomi remotes found: {count}",
-  "没有找到已配对的小米遥控器": "No paired Xiaomi remote found",
+  "正在寻找遥控器…": "Looking for remotes…",
+  "找到 {count} 个已配对的遥控器":
+    "Paired remotes found: {count}",
+  "没有找到已配对的遥控器": "No paired remote found",
   "已连接，正在确认语音功能": "Connected. Confirming voice support…",
   "遥控器连接已释放，本次运行已停止自动重连":
     "Remote connection released. Automatic reconnection is off for this session.",

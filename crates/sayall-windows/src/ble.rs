@@ -2417,6 +2417,7 @@ fn handle_control(
         );
         *last_voice_audio_at = None;
     }
+    pipeline.set_streaming_packets(lock(state).remote_model == RemoteModel::Chromecast);
     let output = match pipeline.handle_control(bytes) {
         Ok(output) => output,
         Err(error) => {
@@ -2433,6 +2434,11 @@ fn handle_control(
 
     match output {
         PipelineOutput::Ready(capabilities) => {
+            if lock(state).remote_model == RemoteModel::Chromecast {
+                // A model switch must disable Xiaomi keyboard suppression immediately,
+                // before the Raw Input binding audit catches up with the BLE target.
+                crate::key_gate::set_listener_active(false);
+            }
             // 会话真的建立了：把「应用正在用的那支遥控器」发布出去（2026-10-13）。
             // 两台同型号遥控器同时在线时，Raw Input 绑定与增强捕获助手都靠它消歧；
             // 发布在 Ready 而不是连接握手更早的时刻——此时的地址确实已经在用。
@@ -2528,14 +2534,17 @@ fn handle_control(
             // 注意：必须武装 key_suppressor（lib.rs 实际启动的抑制器）；
             // 2026-09-04 曾因误接未启动的 voice_key_suppressor 模块导致 F5
             // 泄漏进和弦、微信输入法拒绝触发（evidence/p 复盘）。
-            crate::key_suppressor::set_session_active(true);
+            let is_chromecast = lock(state).remote_model == RemoteModel::Chromecast;
+            crate::key_suppressor::set_session_active(!is_chromecast);
             // F5 解粘保险（2026-09-05 21:08 实证链路）：断连重连场景下
             // 首个 F5 D 在 0x04 之前泄漏进 OS（重连需 ~3s，武装不可能
             // 提前），其 UP 沿若丢失则 OS 键态 F5 永久按下——后续和弦
             // 全部变成 F5+Ctrl+Win 三键被拒。注入一个 F5 UP 清理：
             // 干净场景（本抑制器全吞）下该 UP 也会被吞（配对规则），
             // 仅在确有泄漏时放行到 OS——恰好只在需要时生效。
-            send_input.release_stuck_f5();
+            if !is_chromecast {
+                send_input.release_stuck_f5();
+            }
             std::thread::sleep(Duration::from_millis(20));
             // 按住说话快捷键：两条互斥路径，由报告层合成门禁二选一（判据显式，
             // 不允许叠加——双写互扰 2026-09-29 run8 真机实证）：

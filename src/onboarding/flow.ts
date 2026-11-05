@@ -117,6 +117,8 @@ export interface OnboardingContext {
     tool: VoiceInputTool | null;
     /** 豆包路径必需：「支持更多输入工具」（全按键支持）已开启且授权完成。 */
     doubaoCaptureEnabled: boolean;
+    /** Xiaomi needs its F5 capture path; Chromecast has no Xiaomi F5 twin. */
+    doubaoCaptureRequired?: boolean;
     vokieInstalled: boolean;
     vokieRunning: boolean;
     /** 「其他工具」的按键已选定（含明确的「不按键」）。 */
@@ -208,7 +210,7 @@ function evaluateVoiceTool(voiceTool: OnboardingContext["voiceTool"]): StepGate 
     if (voiceTool.vokieRunning) {
       return block("tool.conflict.vokie_running");
     }
-    if (!voiceTool.doubaoCaptureEnabled) {
+    if (voiceTool.doubaoCaptureRequired !== false && !voiceTool.doubaoCaptureEnabled) {
       return block("tool.doubao.authorization_required");
     }
     return pass();

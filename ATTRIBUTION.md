@@ -437,3 +437,11 @@
 - 复用的产品语义：默认关闭；只记录语音新增文字；按应用与日期组织；全部应用最近 7 天、单应用全部历史；删除单条/应用/全部；单条上限 8000 字符；捕获失败静默跳过。
 - Windows 实现差异：文本读取使用 UI Automation（`ValuePattern` / `TextPattern`）而非 macOS Accessibility；图标使用 `PrivateExtractIconsW` 提取 64×64 PNG 并按应用键缓存；删除使用 Windows 回收站；入口为侧栏独立页面；存储根为 `%LOCALAPPDATA%\SayAll\transcripts\v1`，不承诺与 Mac 历史互通。
 - 不采用 Mac 的原始录音、本机 Agent/MCP 访问与跨端迁移能力；这些能力不在本次范围内。
+
+
+## Google Chromecast Windows adapter (2026-11-05, experimental)
+
+- vRemoter: https://github.com/VincentKingHsu/vRemoter ; inspected local community revision f3e310f73361b81cc67280a47a2435b8069ddf08. MIT, Copyright (c) 2026 Sima Qingfeng. Protocol references: Sources/vRemote/ATVV/ATVVProtocol.swift (copyright FanXeon@Poemcoder with Codex), BLEBridge.swift, ChromecastRemoteHIDBridge.swift, RemoteMappingSupport.swift. Adapted the report-1 semantic table and ATVV stream/sync behavior into Rust; no AppKit/CoreAudio/IOKit code, driver, artwork or brand assets were copied. The existing SayAll Windows platform APIs are retained.
+- VibeMote: https://github.com/Tilkmilk/vibe-mote ; revision fb30e479694524962512b5bba6afc76cd0a04778. MIT, Copyright (c) 2026 VibeMote contributors. keys.py and tap.js provide the Windows report-2 consumer usage table and observed three-byte shape. Only the semantic table is adapted; no Frida code, injection, helper service or scheduler implementation is imported. Its hardware claims do not constitute this branch's acceptance.
+- Source license texts are preserved in THIRD_PARTY_NOTICES.md. The protocol and diagnostic examples are synthetic. The original schematic in public/chromecast-remote.svg does not reuse upstream visual assets.
+- Roadmap, automated evidence and unverified native boundaries: Testing/WindowsChromecast.md. Basic mappings can coexist with native actions. Google enhanced capture is not implemented or claimed.

@@ -99,6 +99,7 @@ pub enum EngineMessage {
     Keyboard(RawKeyboardEvent),
     /// 监听器观察到的一份 HID 报文 usage 集合（绝对状态）。
     HidUsages(BTreeSet<u16>),
+    HidButtons(BTreeSet<RemoteButton>),
     /// 门控吞下的键盘边沿（已归因到遥控器）。
     GateEdge(ButtonEdge),
     /// Raw Input 监听器已停止：释放全部按住状态。
@@ -1017,9 +1018,23 @@ fn engine_worker(
                     &macro_runtime,
                 );
             }
-            EngineMessage::HidUsages(usages) => {
+            message @ (EngineMessage::HidUsages(_) | EngineMessage::HidButtons(_)) => {
                 let now = Instant::now();
-                let edges = merger.update_hid_usages(usages);
+                let edges = match message {
+                    EngineMessage::HidUsages(usages) => merger.update_hid_usages(usages),
+                    EngineMessage::HidButtons(buttons) => {
+                        let edges = merger.update_hid_buttons(buttons);
+                        // This public Raw Input route observes the native report without
+                        // suppressing it. Disabled bindings must not replay native actions.
+                        for edge in &edges {
+                            if edge.is_pressed {
+                                native_pending.insert(edge.button);
+                            }
+                        }
+                        edges
+                    }
+                    _ => unreachable!(),
+                };
                 handle_edges(
                     edges,
                     now,

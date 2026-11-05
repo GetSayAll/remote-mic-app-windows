@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="508" viewBox="0 0 250 508">
+  <!-- Original schematic for the experimental Windows adapter; no upstream artwork. -->
+  <rect x="77" y="8" width="96" height="490" rx="48" fill="#edece8" stroke="#c8c7c2" stroke-width="2"/>
+  <circle cx="125" cy="92" r="40" fill="#d6d5d0"/><circle cx="125" cy="92" r="23" fill="#f7f6f1"/>
+  <g fill="#dddcd6" stroke="#c5c4bd">
+    <circle cx="100" cy="173" r="17"/><circle cx="150" cy="173" r="17"/>
+    <circle cx="100" cy="234" r="17"/><circle cx="150" cy="234" r="17"/>
+    <rect x="82" y="282" width="36" height="35" rx="12"/><rect x="132" y="282" width="36" height="35" rx="12"/>
+    <circle cx="100" cy="381" r="17"/><circle cx="150" cy="381" r="17"/>
+    <rect x="176" y="169" width="7" height="62" rx="3"/>
+  </g>
+  <g fill="none" stroke="#66655e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m103 166-7 7 7 7m-7-7h12M150 164v9m-5-5v5a5 5 0 0 0 10 0v-5m-5 10v4"/>
+    <path d="m93 234 7-7 7 7v8H93zM145 229l10 10m0-10-10 10M100 373v8m-5-5a8 8 0 1 0 10 0"/>
+    <path d="M143 375h14v12h-14zM146 381h8m-3-3 3 3-3 3"/>
+  </g>
+  <g fill="#66655e" font-family="sans-serif" font-size="9" text-anchor="middle"><text x="100" y="304">YT</text><text x="150" y="304">N</text></g>
+</svg>

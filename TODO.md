@@ -1,5 +1,7 @@
 # TODO
 
+- [ ] Google Chromecast Windows 实验适配（2026-11-05）：识别、ATVV 两种格式与基础 Raw Input 路径开发中；原生语音/按键、增强捕获及安装验收尚未通过。见 [Testing/WindowsChromecast.md](Testing/WindowsChromecast.md)。
+
 ## 语音识别"能出字但对不上"的定位链（2026-10-27 用户报障，已定位为配置问题）
 
 - [ ] 现象：遥控器语音键正常、豆包能出字，但识别内容与实际说的出入较大；链路日志全绿

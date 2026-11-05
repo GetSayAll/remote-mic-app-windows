@@ -48,6 +48,12 @@ function makeContext(
 }
 
 describe("onboarding step order", () => {
+  it("does not require the Xiaomi F5 helper for Chromecast voice", () => {
+    const context = makeContext({ voiceTool: { tool: "doubao", doubaoCaptureRequired: false } });
+    expect(evaluateGate("voice_tool", context).ok).toBe(true);
+    context.voiceTool.doubaoCaptureRequired = true;
+    expect(evaluateGate("voice_tool", context).code).toBe("tool.doubao.authorization_required");
+  });
   it("keeps the confirmed order plus the optional full-key step after the audio device", () => {
     expect(ONBOARDING_STEPS).toEqual([
       "welcome",

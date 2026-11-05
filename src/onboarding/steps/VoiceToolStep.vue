@@ -9,6 +9,7 @@ const props = defineProps<{
   tool: VoiceInputTool | null;
   hotkeyLabel: string;
   captureEnabled: boolean;
+  captureRequired?: boolean;
   captureBusy: boolean;
   captureHint: string;
   conflict: boolean;
@@ -119,7 +120,7 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
     <div v-if="tool === 'doubao'" class="onboarding-card">
       <h4>{{ t("按住遥控器语音键 = {hotkey}", { hotkey: hotkeyLabel }) }}<span class="onboarding-tag">{{ t("本次设置") }}</span></h4>
       <p>{{ t("在豆包里把麦克风选为 CABLE Output；长按语音键保持右 Alt（出厂默认就是它）。") }}</p>
-      <div class="onboarding-switch-row">
+      <div v-if="captureRequired !== false" class="onboarding-switch-row">
         <label class="onboarding-switch">
           <span>{{ t("支持更多输入工具") }}</span>
           <span class="toggle-switch-slot">
@@ -136,8 +137,8 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
         </label>
       </div>
       <!-- 失败文案是开关旁唯一的文字（2026-10-10）：普通用户语言，其余情况不显示。 -->
-      <p v-if="captureFailure" class="onboarding-error">{{ captureFailure }}</p>
-      <p class="onboarding-muted">{{ t("每次开启都会弹出 Windows 授权窗口，请选择“是”。") }}</p>
+      <p v-if="captureRequired !== false && captureFailure" class="onboarding-error">{{ captureFailure }}</p>
+      <p v-if="captureRequired !== false" class="onboarding-muted">{{ t("每次开启都会弹出 Windows 授权窗口，请选择“是”。") }}</p>
     </div>
 
     <div v-else-if="tool === 'wechat'" class="onboarding-card">
