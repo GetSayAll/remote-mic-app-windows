@@ -4,7 +4,8 @@
       "sayall-helper.exe",
       "frida-gadget.dll",
       "sayall-helper-arm64.exe",
-      "frida-gadget-arm64.dll"
+      "frida-gadget-arm64.dll",
+      "sayall-mcp.exe"
     ]
   }
 }

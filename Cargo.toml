@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/sayall-core",
+    "crates/sayall-mcp",
     "crates/sayall-windows",
     "crates/sayall-windows-button-profiles",
     "crates/sayall-windows-common-phrases",

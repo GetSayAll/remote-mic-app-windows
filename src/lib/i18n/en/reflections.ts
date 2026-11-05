@@ -77,4 +77,63 @@ export default {
     "Could not copy. Check clipboard permission and try again.",
   "删除失败，记录仍保留。请稍后重试。":
     "Could not delete. The entry is still here. Try again later.",
+  // ---- 本地 Agent 访问（对齐 Mac statistics.transcripts.agent_access.*） ----
+  "本地 Agent 访问": "Local Agent Access",
+  "允许你授权的 Agent 通过本机 MCP 只读访问回眸记录。":
+    "Let clients you authorize read Reflections through a local MCP connection.",
+  "允许访问": "Allow Access",
+  "无线麦不会上传记录；被授权的 AI 客户端可能把读取的文字发送给自己的服务商。开关默认关闭，关闭后所有客户端立即无法读取。":
+    "无线麦 does not upload history. An authorized AI client may send returned text to its own provider. Access is off by default, and turning it off blocks every client immediately.",
+  "连接 AI 工具": "Connect AI Tools",
+  "无线麦会为所选工具创建独立只读授权并写入本机配置；连接后请关闭并重新打开对应 AI 工具，无需重启无线麦。":
+    "无线麦 creates a separate read-only authorization and updates local configuration for the selected tool. Quit and reopen that AI tool after connecting; 无线麦 does not need to restart.",
+  "移除": "Remove",
+  "其他客户端或手动配置": "Other Clients or Manual Setup",
+  "自动连接不可用时，创建一个授权并复制对应格式。配置中的访问令牌只会显示一次。":
+    "If quick connection is unavailable, create an authorization and copy the matching format. Its access token is shown only once.",
+  "例如 Codex 或 Claude Desktop": "For example, Codex or Claude Desktop",
+  "客户端名称": "Client name",
+  "创建只读授权": "Create Read-Only Access",
+  "已为“{name}”生成配置": "Configuration created for “{name}”",
+  "访问令牌只在这次生成的配置中提供。复制后请立即粘贴到对应客户端，不要保存到公开文件或聊天中。":
+    "The access token is available only in this generated configuration. Paste it into the intended client now, and do not save it in public files or chats.",
+  "复制标准 MCP JSON": "Copy Standard MCP JSON",
+  "复制 Codex TOML": "Copy Codex TOML",
+  "已授权客户端": "Authorized Clients",
+  "还没有客户端获得访问权限。": "No client has access yet.",
+  "位置已变化，请先移除这个连接，再重新连接。":
+    "The app location changed. Remove this connection, then connect it again.",
+  "已连接 · 请重新打开 {name}": "Connected · Reopen {name}",
+  "可连接": "Ready to connect",
+  "未检测到安装": "Not detected",
+  "本地 Agent 访问已关闭。": "Local Agent access is off.",
+  "无法读取本地 Agent 访问状态。": "Local Agent access status could not be loaded.",
+  "无法更新本地 Agent 访问开关。": "Local Agent access could not be updated.",
+  "客户端名称需要包含 1–100 个字符。": "The client name must contain 1–100 characters.",
+  "无法创建客户端授权。": "Client access could not be created.",
+  "这个授权已经不可用，请刷新页面后再试。":
+    "This authorization is no longer available. Refresh the page and try again.",
+  "无法撤销这个客户端。": "This client could not be revoked.",
+  "当前安装缺少本地读取组件，请重新安装完整安装包。":
+    "This installation is missing the local reader component. Reinstall the complete installer.",
+  "没有检测到 {name}，请先安装后再连接。": "{name} was not detected. Install it before connecting.",
+  "{name} 的命令行入口无法正常启动，请修复或重新安装客户端后再试。":
+    "{name}'s command-line entry cannot start correctly. Repair or reinstall the client, then try again.",
+  "{name} 已存在名为 sayall_history 的 MCP；无线麦没有覆盖它，请先检查或移除冲突配置。":
+    "{name} already contains an MCP named sayall_history. 无线麦 did not overwrite it; review or remove the conflicting entry first.",
+  "{name} 的 MCP 配置不是合法 JSON；无线麦没有修改原文件，请修复配置后再试。":
+    "{name}'s MCP configuration is not valid JSON. 无线麦 did not change the file; repair it and try again.",
+  "{name} 的配置路径不安全或是符号链接；无线麦拒绝写入。":
+    "{name}'s configuration path is unsafe or link-like, so 无线麦 refused to write to it.",
+  "无法安全写入 {name} 的 MCP 配置，请检查文件权限后再试。":
+    "{name}'s MCP configuration could not be written safely. Check its file permissions and try again.",
+  "{name} 拒绝了 MCP 安装命令，请检查客户端状态后再试。":
+    "{name} rejected the MCP installation command. Check the client and try again.",
+  "{name} 自动连接失败，本次临时授权没有保留。请修复客户端后重试或使用手动配置。":
+    "{name} quick connection failed. The temporary authorization was not kept; repair the client or use manual setup.",
+  "{name} 的访问授权已撤销，但无法自动移除客户端配置。请手动删除 sayall_history。":
+    "{name} access was revoked, but its client configuration could not be removed automatically. Remove sayall_history manually.",
+  "这个客户端已经有一份有效授权，请先使用现有授权或撤销后再创建。":
+    "This client already has an active authorization. Use it or revoke it before creating another.",
+  "本地 Agent 访问操作失败，请稍后重试。": "Local Agent access failed. Try again later.",
 };

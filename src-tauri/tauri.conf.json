@@ -63,7 +63,8 @@
     },
     "resources": [
       "sayall-helper.exe",
-      "frida-gadget.dll"
+      "frida-gadget.dll",
+      "sayall-mcp.exe"
     ]
   },
   "plugins": {

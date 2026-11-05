@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use sayall_core::transcripts::{
     is_local_date_key, is_safe_application_key, TranscriptDayFile, TranscriptRecord,
-    MAX_RECORDS_TOTAL,
 };
 use sayall_windows::voice_recording::{is_safe_session_id, RecordingManifest};
 
@@ -469,41 +468,25 @@ impl TranscriptStore {
     }
 
     fn load_all_unlocked(&self) -> Result<Vec<TranscriptRecord>, String> {
-        let mut records = Vec::new();
-        let mut total = 0usize;
-        for (_, file) in self.day_files()? {
-            let mut day = match self.read_day_file(&file) {
-                Ok(day) => day,
-                Err(error) => {
-                    sayall_windows::gatt_note(format!(
-                        "transcript_archive action=read phase=completed result=skipped reason=invalid_file name={}",
-                        file.file_name().and_then(|name| name.to_str()).unwrap_or("unknown")
-                    ));
-                    let _ = error;
-                    continue;
-                }
-            };
-            day.records.retain(|record| record.validate().is_ok());
-            day.sort_newest_first();
-            for record in day.records {
-                if total >= MAX_RECORDS_TOTAL {
-                    sayall_windows::gatt_note(
-                        "transcript_archive action=read phase=completed result=truncated reason=total_limit"
-                            .to_owned(),
-                    );
-                    return Ok(records);
-                }
-                total += 1;
-                records.push(record);
-            }
+        // 目录本身读不了仍要报错（页面会显示读取失败）；单个坏文件/坏子目录由
+        // 共享读取器跳过并计数——那是 2026-11-05 起与 sayall-mcp 共用的同一份实现。
+        if self.root.exists() && fs::read_dir(&self.root).is_err() {
+            return Err("读取回眸目录失败".to_owned());
         }
-        records.sort_by(|left, right| {
-            right
-                .ended_at_ms
-                .cmp(&left.ended_at_ms)
-                .then_with(|| right.id.cmp(&left.id))
-        });
-        Ok(records)
+        let archive = sayall_core::transcripts::read_archive(&self.root);
+        if archive.skipped_files > 0 {
+            sayall_windows::gatt_note(format!(
+                "transcript_archive action=read phase=completed result=skipped reason=invalid_file count={}",
+                archive.skipped_files
+            ));
+        }
+        if archive.truncated {
+            sayall_windows::gatt_note(
+                "transcript_archive action=read phase=completed result=truncated reason=total_limit"
+                    .to_owned(),
+            );
+        }
+        Ok(archive.records)
     }
 
     fn day_files(&self) -> Result<Vec<(String, PathBuf)>, String> {

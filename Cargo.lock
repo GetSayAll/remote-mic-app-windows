@@ -3140,9 +3140,21 @@ dependencies = [
 name = "sayall-core"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "sayall-mcp"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "sayall-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

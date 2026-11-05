@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, toRef, watch } from "vue";
 import {
   deleteAllTranscripts,
   deleteTranscript,
@@ -13,7 +13,6 @@ import {
   subscribeTranscriptCaptured,
   subscribeTranscriptRecordingFinished,
   type TranscriptApplicationSummary,
-  type TranscriptHistorySnapshot,
   type TranscriptRecordView,
   type TranscriptRecordingView,
 } from "../lib/bridge";
@@ -30,6 +29,8 @@ import {
   visibleTranscripts,
 } from "./reflections-view";
 import { t } from "../lib/i18n";
+import { reflectionsViewSession } from "./reflections-view-session";
+import ReflectionsAgentAccess from "./ReflectionsAgentAccess.vue";
 
 const UNKNOWN_APPLICATION_KEY = "__unknown__";
 
@@ -45,16 +46,21 @@ interface RecordingDayGroup {
   recordings: TranscriptRecordingView[];
 }
 
-const snapshot = ref<TranscriptHistorySnapshot | null>(null);
-const loading = ref(true);
+// 快照挂在模块级会话上：切走再回来时先用上一次的内容同步渲染（不闪加载态），
+// loadHistory 仍然照常执行，新记录在后台静默刷新进来。
+const snapshot = toRef(reflectionsViewSession, "historySnapshot");
+const loading = ref(reflectionsViewSession.historySnapshot === null);
 const loadingCardVisible = ref(false);
 const loadError = ref("");
 const operationError = ref("");
 const busy = ref(false);
 const deleting = ref(false);
-const selectedApplicationKey = ref<string | null>(null);
-const applicationSwitcherExpanded = ref(false);
-const expandedDayKeys = ref<Set<string>>(new Set());
+// 浏览状态放在模块级：切换侧边栏会卸载本页，组件内 ref 会连同用户的选择一起销毁。
+const selectedApplicationKey = toRef(reflectionsViewSession, "selectedApplicationKey");
+const applicationSwitcherExpanded = toRef(reflectionsViewSession, "applicationSwitcherExpanded");
+const pageRoot = ref<HTMLElement | null>(null);
+const expandedDayKeys = toRef(reflectionsViewSession, "expandedDayKeys");
+const dayExpansionSettled = toRef(reflectionsViewSession, "dayExpansionSettled");
 const copiedRecordId = ref<string | null>(null);
 const deleteRequest = ref<DeleteRequest | null>(null);
 const deleteDialog = ref<HTMLDialogElement | null>(null);
@@ -235,11 +241,27 @@ function normalizeExpandedDays(): void {
     ...dayGroups.value.map((group) => group.key),
     ...recordingDayGroups.value.map((group) => group.key),
   ]);
+  // 没有任何分组（还没读到数据 / 记录为空）时不做任何事，尤其不能把 settled
+  // 置真：空数据时的空集合是「还没展开过」，不是「用户折叠了全部」——把它标成
+  // 已定过，第一批记录到来就不会自动展开，页面看起来像一直在刷新。
+  if (valid.size === 0) {
+    return;
+  }
+  const hadExpanded = expandedDayKeys.value.size > 0;
   const next = new Set([...expandedDayKeys.value].filter((key) => valid.has(key)));
-  if (next.size === 0) {
+  // 只有「还没定过」（首次进入、刚切换应用）才默认展开最新一天。否则用户折叠全部
+  // 日期后留下的空集合会被当成"还没展开过"而重新展开，跨页面切换就丢状态。
+  // 已展开的那天因记录被删掉而消失（hadExpanded 但过滤后为空）时仍回落到最新一天。
+  if (!dayExpansionSettled.value || (hadExpanded && next.size === 0)) {
     for (const key of newestExpandableDayKeys()) next.add(key);
   }
   expandedDayKeys.value = next;
+  dayExpansionSettled.value = true;
+}
+
+function resetDayExpansion(): void {
+  expandedDayKeys.value = new Set();
+  dayExpansionSettled.value = false;
 }
 
 async function loadHistory(): Promise<void> {
@@ -398,7 +420,7 @@ function exportRecordingAsset(recording: TranscriptRecordingView): Promise<void>
 
 function selectApplication(key: string | null): void {
   selectedApplicationKey.value = key;
-  expandedDayKeys.value = new Set();
+  resetDayExpansion();
   normalizeExpandedDays();
 }
 
@@ -478,7 +500,7 @@ async function confirmDelete(): Promise<void> {
 }
 
 watch(selectedApplicationKey, () => {
-  expandedDayKeys.value = new Set();
+  resetDayExpansion();
 });
 
 watch(dayGroups, () => {
@@ -490,6 +512,14 @@ watch(recordingDayGroups, () => {
 });
 
 onMounted(() => {
+  void nextTick().then(() => {
+    // 切走时页面被卸载，.content 的高度塌下去、scrollTop 被钳回 0；重挂载后
+    // 恢复到离开时的位置。快照缓存让首帧就有完整高度，恢复的落点是准的。
+    const container = scrollContainer();
+    if (container && reflectionsViewSession.scrollTop > 0) {
+      container.scrollTop = reflectionsViewSession.scrollTop;
+    }
+  });
   void loadHistory();
   void subscribeTranscriptCaptured(() => {
     if (!disposed) void loadHistory();
@@ -512,6 +542,23 @@ onMounted(() => {
   }, 60_000);
 });
 
+/** 页面挂在 App 的 `<main class="content">` 里，滚动发生在容器上而不是页面内。 */
+function scrollContainer(): HTMLElement | null {
+  return (
+    (pageRoot.value?.closest(".content") as HTMLElement | null) ??
+    document.querySelector<HTMLElement>(".content")
+  );
+}
+
+onBeforeUnmount(() => {
+  // onUnmounted 时子树已被移除，.content 高度塌陷、scrollTop 被钳回 0——
+  // 必须在卸载前读。
+  const container = scrollContainer();
+  if (container) {
+    reflectionsViewSession.scrollTop = container.scrollTop;
+  }
+});
+
 onUnmounted(() => {
   disposed = true;
   stopPlayback();
@@ -525,7 +572,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="reflections-page">
+  <section ref="pageRoot" class="reflections-page">
     <header class="page-header reflections-header">
       <div class="reflections-title">
         <h1>{{ t("回眸") }}</h1>
@@ -927,13 +974,16 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <footer class="history-footer">
-        <p>{{ t("把语音实际写入目标输入框的文字和原始录音保存在本机，并按应用和日期整理。") }}</p>
-        <button class="danger-link" type="button" @click="openDelete({ kind: 'all' })">
-          {{ t("全部删除") }}
-        </button>
-      </footer>
     </template>
+
+    <ReflectionsAgentAccess />
+
+    <footer v-if="hasRecords" class="history-footer">
+      <p>{{ t("把语音实际写入目标输入框的文字和原始录音保存在本机，并按应用和日期整理。") }}</p>
+      <button class="danger-link" type="button" @click="openDelete({ kind: 'all' })">
+        {{ t("全部删除") }}
+      </button>
+    </footer>
 
     <dialog
       ref="deleteDialog"
@@ -1095,6 +1145,24 @@ onUnmounted(() => {
 }
 .chevron.up {
   transform: rotate(180deg);
+}
+/* 回眸页的卡片统一用 Mac GlassPanel 同款轻渐变底，与底部「本地 Agent 访问」
+   卡片保持一致；暗色主题回退到原有的卡片底色。 */
+.card {
+  background: linear-gradient(
+    180deg,
+    rgba(246, 247, 251, 0.98) 0%,
+    rgba(250, 250, 250, 0.98) 100%
+  );
+  border-color: var(--border-strong);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 8px 30px var(--shadow-card);
+}
+:global(html[data-theme="dark"]) .card {
+  background: var(--card);
+  border-color: var(--border);
+  box-shadow: 0 8px 30px var(--shadow-card);
 }
 .app-switcher {
   padding: 12px 14px;
