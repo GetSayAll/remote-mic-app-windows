@@ -14,9 +14,9 @@ export interface ShortcutPresetItem {
   keys: KeyCode[];
   display?: string;
   /**
-   * 非快捷键动作（目前只有应用切换器）。设置后按键页点击该 chip 写入
-   * `app_switcher` 动作，而不是 `Alt+Tab` 一次性组合；组合动作页会过滤掉
-   * 这类条目（组合动作无法表达“保持 Alt 的临时会话”）。
+   * 非快捷键动作（目前只有应用切换器）。按键页点击该 chip 写入
+   * `app_switcher` 动作；组合动作与键位方案按 `Alt + Tab` 组合识别为
+   * 同一会话，不再退化成一次性快捷键。
    */
   action?: "app_switcher";
 }
@@ -24,6 +24,18 @@ export interface ShortcutPresetItem {
 export interface ShortcutPresetGroup {
   label: string;
   items: ShortcutPresetItem[];
+}
+
+/** 切换应用芯片的统一悬停提示；按键页、组合动作页与键位方案共用。 */
+export function appSwitcherHint(): string {
+  return t("切换应用：用左、右键选择，按“确定”确认，返回取消");
+}
+
+/** 预设芯片的悬停提示：切换应用使用会话说明，其余使用功能名。 */
+export function shortcutPresetHint(
+  item: Pick<ShortcutPresetItem, "label" | "action">,
+): string {
+  return item.action === "app_switcher" ? appSwitcherHint() : item.label;
 }
 
 /** label 用 getter：常量表也要在语言切换后按当前语言重新取值。 */

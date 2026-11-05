@@ -6,6 +6,7 @@ import BatteryIndicator from "../components/BatteryIndicator.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
 import {
   SHORTCUT_PRESET_GROUPS,
+  shortcutPresetHint,
   type ShortcutPresetItem,
 } from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
@@ -2639,11 +2640,7 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: isActivePresetItem(preset) }"
               type="button"
-              :title="
-                preset.action === 'app_switcher'
-                  ? t('切换应用：用左、右键选择，按“确定”确认，返回取消')
-                  : preset.label
-              "
+              :title="shortcutPresetHint(preset)"
               @click="applyPresetItem(preset)"
             >
               {{ preset.display ?? chordLabel({ keys: preset.keys }) }}

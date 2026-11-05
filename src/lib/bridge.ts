@@ -2549,6 +2549,19 @@ export function macroChordLabel(chord: MacroChord): string {
   return [...modifiers, key].join(" + ");
 }
 
+/**
+ * 组合动作里的 Alt + Tab 不是一次性按键：执行时启动应用切换器会话。
+ * 组合动作与键位方案共用这一判定；左右 Alt 在 MacroModifier 里都归为 alt。
+ */
+export function isAppSwitcherMacroChord(chord: MacroChord | undefined): boolean {
+  return Boolean(
+    chord &&
+      chord.modifiers.length === 1 &&
+      chord.modifiers[0] === "alt" &&
+      chord.key.toLowerCase() === "tab",
+  );
+}
+
 /** 步骤摘要（列表与详情共用一行说明）。 */
 export function macroStepSummary(step: MacroStep): string {
   const parameters = step.parameters;

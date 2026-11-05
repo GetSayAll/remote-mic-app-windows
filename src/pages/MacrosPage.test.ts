@@ -582,8 +582,14 @@ describe("组合动作页 · 编辑向导", () => {
     expect(texts).not.toContain("关闭窗口");
 
     const chip = (text: string) => chips.find((item) => item.text() === text)!;
-    expect(chip("Alt + Tab").attributes("title")).toBe("切换应用");
+    expect(chip("Alt + Tab").attributes("title")).toBe(
+      "切换应用：用左、右键选择，按“确定”确认，返回取消",
+    );
     expect(chip("Win + D").attributes("title")).toBe("显示桌面");
+
+    await chip("Alt + Tab").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Alt + Tab");
 
     await chip("Win + D").trigger("click");
     await flushPromises();

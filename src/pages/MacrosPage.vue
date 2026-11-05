@@ -11,7 +11,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
-import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
+import { SHORTCUT_PRESET_GROUPS, shortcutPresetHint } from "../lib/shortcut-presets";
 import {
   FOCUS_STRATEGY_OPTIONS,
   effectiveFocusProfile,
@@ -851,14 +851,16 @@ const savedShortcuts = computed<Array<{ label: string; chord: MacroChord }>>(() 
  * 常用快捷键（与按键页同一份清单，只保留能换算成组合动作的条目）。
  *
  * chips 一律显示实际按键组合（`display` 优先），功能描述只作悬停提示，
- * 与按键页一致；`app_switcher` 在这里按一次性 Alt+Tab 组合执行。
+ * 与按键页一致；`app_switcher` 由运行时识别 Alt+Tab 后启动会话。
  */
 const commonShortcutGroups = computed(() =>
   SHORTCUT_PRESET_GROUPS.map((group) => ({
     label: group.label,
     items: group.items.flatMap((item) => {
       const chord = macroChordFromKeys(item.keys);
-      return chord ? [{ label: item.label, display: item.display, chord }] : [];
+      return chord
+        ? [{ label: item.label, display: item.display, action: item.action, chord }]
+        : [];
     }),
   })).filter((group) => group.items.length > 0),
 );
@@ -1937,7 +1939,7 @@ watch(
                             ),
                           }"
                           type="button"
-                          :title="tr(item.label)"
+                          :title="shortcutPresetHint(item)"
                           @click="applyChordToSelectedStep(item.chord)"
                         >
                           {{ item.display ?? macroChordLabel(item.chord) }}

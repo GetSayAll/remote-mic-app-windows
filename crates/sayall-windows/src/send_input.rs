@@ -1034,6 +1034,22 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
+    /// 键位方案的私有页可能仍把预设写成一次性 Alt+Tab；覆盖层加载时把它升级为
+    /// `app_switcher` 会话动作。基础映射不调用本方法，旧的一次性 Alt+Tab 绑定
+    /// 继续按字面快捷键执行。
+    pub fn promote_app_switcher_shortcuts(mut self) -> Self {
+        for actions in self.actions.values_mut() {
+            for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+                if let ButtonAction::Shortcut { chord } = action {
+                    if chord.is_alt_tab() {
+                        *action = ButtonAction::AppSwitcher;
+                    }
+                }
+            }
+        }
+        self
+    }
+
     /// 旧文件（结构版本 0，本功能之前保存）迁移：为「旧版自动连发成立」的
     /// 按键补上显式 `holdRepeat = 单击`，让升级用户的按住行为保持不变。
     ///
@@ -1218,6 +1234,16 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
 }
 
 impl KeyChord {
+    /// 是否为单独的 Alt + Tab（左右 Alt 都算；不含 Ctrl/Shift 等附加修饰键）。
+    pub fn is_alt_tab(&self) -> bool {
+        self.keys.len() == 2
+            && self.keys[1] == KeyCode::Tab
+            && matches!(
+                self.keys[0],
+                KeyCode::Alt | KeyCode::LeftAlt | KeyCode::RightAlt
+            )
+    }
+
     /// Windows 的锁屏是系统动作，不依赖当前前台窗口或键盘注入链路。
     pub fn is_lock_workstation(&self) -> bool {
         self.keys.len() == 2
@@ -2392,6 +2418,46 @@ mod tests {
             ButtonAction::AppSwitcher
         );
         assert_eq!(BUTTON_MAPPINGS_SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn profile_overlay_promotes_only_alt_tab_shortcuts() {
+        assert!(chord(&[KeyCode::Alt, KeyCode::Tab]).is_alt_tab());
+        assert!(chord(&[KeyCode::LeftAlt, KeyCode::Tab]).is_alt_tab());
+        assert!(chord(&[KeyCode::RightAlt, KeyCode::Tab]).is_alt_tab());
+        assert!(!chord(&[KeyCode::Control, KeyCode::Tab]).is_alt_tab());
+        assert!(!chord(&[KeyCode::Alt, KeyCode::Shift, KeyCode::Tab]).is_alt_tab());
+
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Alt, KeyCode::Tab]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Control, KeyCode::Tab]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let promoted = mappings.promote_app_switcher_shortcuts();
+        assert_eq!(
+            promoted.action_for(RemoteButton::Tv, ButtonTrigger::Single),
+            ButtonAction::AppSwitcher
+        );
+        assert_eq!(
+            promoted.action_for(RemoteButton::Back, ButtonTrigger::Single),
+            ButtonAction::Shortcut {
+                chord: chord(&[KeyCode::Control, KeyCode::Tab]),
+            }
+        );
     }
 
     #[test]

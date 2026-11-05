@@ -116,6 +116,8 @@ pub enum EngineMessage {
     /// 语音键开始（MIC_OPEN / STREAM_START）：应用切换器会话必须释放 Alt，
     /// 否则按住说话快捷键会带着按住的 Alt 进入输入法。
     VoiceSessionStarted,
+    /// 组合动作步骤请求启动应用切换器会话（Alt+Tab）。
+    StartAppSwitcher,
     /// 退出前同步收尾应用切换器（带 ack：宿主必须等到 Alt 真的释放）。
     ReleaseAppSwitcherForExit(Sender<()>),
     Shutdown,
@@ -175,6 +177,13 @@ pub trait MappingInjector: Send + Sync {
     /// 左 Alt 是否仍在系统键态（释放后的读回判据）。
     fn app_switcher_alt_down(&self) -> bool {
         false
+    }
+
+    /// 组合动作里的 Alt+Tab：请求映射引擎启动应用切换器会话。
+    ///
+    /// 目标会话在引擎线程中执行；该方法只保证启动请求已送达。
+    fn start_app_switcher(&self) -> Result<(), String> {
+        Err("当前平台不支持组合动作里的应用切换".to_owned())
     }
 }
 
@@ -539,6 +548,10 @@ impl MappingInjector for SendInputInjector {
     fn app_switcher_alt_down(&self) -> bool {
         crate::send_input_windows::left_alt_down()
     }
+
+    fn start_app_switcher(&self) -> Result<(), String> {
+        request_app_switcher_start()
+    }
 }
 
 pub type ButtonEdgeCallback = Arc<dyn Fn(ButtonEdge) + Send + Sync>;
@@ -714,6 +727,10 @@ impl ButtonMappingRuntime {
         if let Ok(mut slot) = voice_session_sender_slot().lock() {
             *slot = Some(sender.clone());
         }
+        // 组合动作里的 Alt+Tab 经同一引擎通道启动应用切换器会话。
+        if let Ok(mut slot) = app_switcher_sender_slot().lock() {
+            *slot = Some(sender.clone());
+        }
 
         let runtime = Self {
             mappings: Arc::clone(&mappings),
@@ -804,6 +821,9 @@ impl ButtonMappingRuntime {
     /// 私有组件只在前后台切换/方案保存时调用；公开构建没有私有组件，永远不会调用。
     /// `None` 表示没有方案生效，引擎完全走基础映射。
     pub fn set_profile_overlay(&self, overlay: Option<ButtonMappings>) {
+        // 键位方案私有页可能仍把预设写成一次性 Alt+Tab；只升级覆盖层，
+        // 基础映射里旧的一次性绑定保持字面语义。
+        let overlay = overlay.map(ButtonMappings::promote_app_switcher_shortcuts);
         *self
             .profile_overlay
             .write()
@@ -1063,6 +1083,29 @@ static VOICE_SESSION_SENDER: std::sync::OnceLock<Mutex<Option<Sender<EngineMessa
 
 fn voice_session_sender_slot() -> &'static Mutex<Option<Sender<EngineMessage>>> {
     VOICE_SESSION_SENDER.get_or_init(|| Mutex::new(None))
+}
+
+/// 组合动作（宏）启动应用切换器的引擎通道。
+///
+/// 进程内只有一个映射引擎；测试并行创建时后创建的会覆盖，发送失败是
+/// 安全的空操作（组合动作步骤报失败，不影响按键与语音）。
+static APP_SWITCHER_SENDER: std::sync::OnceLock<Mutex<Option<Sender<EngineMessage>>>> =
+    std::sync::OnceLock::new();
+
+fn app_switcher_sender_slot() -> &'static Mutex<Option<Sender<EngineMessage>>> {
+    APP_SWITCHER_SENDER.get_or_init(|| Mutex::new(None))
+}
+
+fn request_app_switcher_start() -> Result<(), String> {
+    let slot = app_switcher_sender_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(sender) = slot.as_ref() else {
+        return Err("app_switcher_engine_unavailable".to_owned());
+    };
+    sender
+        .send(EngineMessage::StartAppSwitcher)
+        .map_err(|_| "app_switcher_engine_disconnected".to_owned())
 }
 
 /// 把定时器到期的**连续拍**并入聚合；`advance_with_ticks` 的第二返回值以外
@@ -1383,6 +1426,48 @@ fn engine_worker(
                 let io = InjectorAppSwitcherIo(injector.as_ref());
                 if app_switcher.cancel(EndReason::VoiceStarted, Instant::now(), &io) {
                     drain_app_switcher_end(&mut app_switcher, &state);
+                }
+            }
+            EngineMessage::StartAppSwitcher => {
+                if lock_state(&state).suspended {
+                    crate::ble::gatt_note(
+                        "map_app_switcher phase=start result=ignored reason=suspended source=macro"
+                            .to_owned(),
+                    );
+                } else {
+                    let now = Instant::now();
+                    let io = InjectorAppSwitcherIo(injector.as_ref());
+                    let was_active = app_switcher.is_active();
+                    if !was_active {
+                        key_gate::set_app_switcher_mask(app_switcher::control_mask());
+                        injector.common_phrase_host().close("app_switcher");
+                    }
+                    let result = if was_active {
+                        app_switcher.advance(now, &io)
+                    } else {
+                        // 组合动作没有物理触发键；用 TV 作为会话来源占位，
+                        // 日志用 source=macro 区分真实按键触发。
+                        app_switcher.start(RemoteButton::Tv, now, &io)
+                    };
+                    match result {
+                        Ok(operation) => crate::ble::gatt_note(format!(
+                            "map_app_switcher phase={} operation={operation} result=submitted source=macro",
+                            if was_active { "tab" } else { "start" }
+                        )),
+                        Err(error) => {
+                            crate::ble::gatt_note(format!(
+                                "map_app_switcher phase={} result=failed source=macro error_domain=send_input retryable=true error={error}",
+                                if was_active { "tab" } else { "start" }
+                            ));
+                            lock_state(&state).last_error =
+                                Some("打开应用切换器失败，请重试".to_owned());
+                        }
+                    }
+                    drain_app_switcher_end(&mut app_switcher, &state);
+                    if !app_switcher.is_active() {
+                        // AltDown/Tab 注入失败或会话立即收尾：遮蔽必须 fail-open。
+                        key_gate::set_app_switcher_mask(0);
+                    }
                 }
             }
             EngineMessage::ReleaseAppSwitcherForExit(ack) => {
@@ -3008,6 +3093,138 @@ mod tests {
             0,
             "语音开始取消后遮蔽必须清零"
         );
+
+        drop(runtime);
+        drop(gate);
+    }
+
+    /// 组合动作里的 Alt+Tab：宏步骤只负责请求引擎启动会话；会话仍由
+    /// 方向/OK/返回控制，确认后释放 Alt 并清门控遮蔽。
+    #[test]
+    fn app_switcher_macro_start_opens_the_session() {
+        use std::sync::atomic::Ordering;
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        injector.app_switcher_present.store(true, Ordering::SeqCst);
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let sender = runtime.sender();
+        let commands = || injector.app_switcher_commands.lock().unwrap().clone();
+
+        sender.send(EngineMessage::StartAppSwitcher).unwrap();
+        assert!(
+            wait_until(
+                || commands() == vec![AppSwitcherCommand::AltDown, AppSwitcherCommand::Tab],
+                Duration::from_millis(500)
+            ),
+            "宏启动应让引擎按 Alt 并发送第一次 Tab：{:?}",
+            commands()
+        );
+        assert_ne!(
+            crate::key_gate::app_switcher_mask(),
+            0,
+            "宏启动的会话也必须遮蔽控制键"
+        );
+
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || commands().last() == Some(&AppSwitcherCommand::AltUp),
+                Duration::from_millis(500)
+            ),
+            "OK 应确认并释放 Alt：{:?}",
+            commands()
+        );
+        assert_eq!(
+            crate::key_gate::app_switcher_mask(),
+            0,
+            "确认收尾后遮蔽必须清零"
+        );
+
+        drop(runtime);
+        drop(gate);
+    }
+
+    /// 键位方案覆盖层里的 Alt+Tab：即使私有页仍写成一次性快捷键，覆盖层
+    /// 加载时也应升级为 app_switcher 会话；基础映射不受影响。
+    #[test]
+    fn profile_overlay_alt_tab_shortcut_opens_the_app_switcher_session() {
+        use std::sync::atomic::Ordering;
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        injector.app_switcher_present.store(true, Ordering::SeqCst);
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let mut overlay = ButtonMappings::default();
+        overlay.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Alt, KeyCode::Tab],
+                    },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_profile_overlay(Some(overlay));
+        let sender = runtime.sender();
+        let commands = || injector.app_switcher_commands.lock().unwrap().clone();
+
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Tv)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || commands() == vec![AppSwitcherCommand::AltDown, AppSwitcherCommand::Tab],
+                Duration::from_millis(500)
+            ),
+            "键位方案的 Alt+Tab 应启动会话：{:?}",
+            commands()
+        );
+        assert_ne!(
+            crate::key_gate::app_switcher_mask(),
+            0,
+            "会话期间控制键必须遮蔽"
+        );
+
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || commands().last() == Some(&AppSwitcherCommand::AltUp),
+                Duration::from_millis(500)
+            ),
+            "OK 应确认并释放 Alt：{:?}",
+            commands()
+        );
+        assert_eq!(crate::key_gate::app_switcher_mask(), 0);
 
         drop(runtime);
         drop(gate);

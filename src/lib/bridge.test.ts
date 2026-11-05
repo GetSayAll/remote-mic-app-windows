@@ -13,6 +13,7 @@ import {
   getApplicationLanguage,
   getOpenWindowAtLaunch,
   identityShortcutByButton,
+  isAppSwitcherMacroChord,
   isRecommendedVoiceEndpoint,
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
@@ -84,6 +85,14 @@ describe("mouse actions", () => {
 
   it("summarizes the app switcher session by its key chord", () => {
     expect(actionSummary({ type: "app_switcher" })).toBe("Alt + Tab");
+  });
+
+  it("recognizes only the Alt + Tab macro chord as the switcher session", () => {
+    expect(isAppSwitcherMacroChord({ modifiers: ["alt"], key: "tab" })).toBe(true);
+    expect(isAppSwitcherMacroChord({ modifiers: ["control", "alt"], key: "tab" })).toBe(false);
+    expect(isAppSwitcherMacroChord({ modifiers: ["alt"], key: "escape" })).toBe(false);
+    expect(isAppSwitcherMacroChord({ modifiers: [], key: "tab" })).toBe(false);
+    expect(isAppSwitcherMacroChord(undefined)).toBe(false);
   });
 });
 
