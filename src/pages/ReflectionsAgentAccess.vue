@@ -150,13 +150,38 @@ async function copy(kind: "json" | "toml"): Promise<void> {
  */
 const CLIENT_GLYPHS: Record<AgentClientId, string[]> = {
   codex: ["M9.5 8 6 12l3.5 4", "M14.5 8 18 12l-3.5 4", "M13.2 6.6 10.8 17.4"],
-  "claude-code": ["M4 6.5h16v11H4z", "M7.8 10.6 10 12.8l-2.2 2.2", "M12.8 15h3.4"],
+  "claude-code": ["M7.8 10.6 10 12.8l-2.2 2.2", "M12.8 15h3.4", "M4.8 6.8h14.4v10.4H4.8z"],
   cursor: ["M6.2 4.6 18 11.4l-4.7 1.1-1.2 4.9L6.2 4.6z", "M13.3 12.5 17.4 17"],
-  opencode: ["M5 4.8h14v14.4H5z", "M11 8.6c-1.7 0-1.7 6.8 0 6.8", "M13.6 8.6c1.7 0 1.7 6.8 0 6.8"],
+  opencode: ["M11 8.6c-1.7 0-1.7 6.8 0 6.8", "M13.6 8.6c1.7 0 1.7 6.8 0 6.8"],
+};
+
+/** 兜底「logo 瓦片」的底色：按各家工具的品牌色取近似值（Codex 黑、Claude 陶土橙、
+ *  Cursor 深灰、OpenCode 蓝）。Windows 的 Codex / Claude Code 是命令行程序，exe
+ *  里没有图标资源（实测 Shell 提取返回 S_FALSE），所以用色标瓦片而不是空图标。 */
+const CLIENT_TILE: Record<AgentClientId, string> = {
+  codex: "#1E2330",
+  "claude-code": "#D97757",
+  cursor: "#2D2D33",
+  opencode: "#3B82F6",
 };
 
 function clientGlyph(client: AgentClientId): string[] {
   return CLIENT_GLYPHS[client];
+}
+
+function clientTile(client: AgentClientId): string {
+  return CLIENT_TILE[client];
+}
+
+/** 已授权行的图标：有集成身份的沿用客户端 logo（真实图标或瓦片）。 */
+function clientIconFor(
+  authorization: { integration: AgentClientId | null },
+): { iconDataUrl?: string } {
+  if (!authorization.integration) {
+    return {};
+  }
+  const client = clients.value.find((item) => item.id === authorization.integration);
+  return client && client.iconDataUrl ? { iconDataUrl: client.iconDataUrl } : {};
 }
 
 function formatCreatedAt(millis: number): string {
@@ -200,11 +225,12 @@ function formatCreatedAt(millis: number): string {
             <span class="agent-client-icon" aria-hidden="true">
               <img v-if="client.iconDataUrl" :src="client.iconDataUrl" alt="" />
               <svg v-else viewBox="0 0 24 24" fill="none">
+                <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="6" :fill="clientTile(client.id)" />
                 <path
                   v-for="(path, index) in clientGlyph(client.id)"
                   :key="index"
                   :d="path"
-                  stroke="currentColor"
+                  stroke="#ffffff"
                   stroke-width="1.7"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -294,8 +320,23 @@ function formatCreatedAt(millis: number): string {
       <ul v-else class="agent-authorizations">
         <li v-for="authorization in authorizations" :key="authorization.clientId">
           <span class="agent-client-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none">
-              <path d="M5 19V9.5M5 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0 0h14M19 19V9.5m0 0a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            <img v-if="clientIconFor(authorization).iconDataUrl" :src="clientIconFor(authorization).iconDataUrl" alt="" />
+            <svg v-else viewBox="0 0 24 24" fill="none">
+              <template v-if="authorization.integration">
+                <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="6" :fill="clientTile(authorization.integration)" />
+                <path
+                  v-for="(path, index) in clientGlyph(authorization.integration)"
+                  :key="index"
+                  :d="path"
+                  stroke="#ffffff"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </template>
+              <template v-else>
+                <path d="M5 19V9.5M5 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm0 0h14M19 19V9.5m0 0a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </template>
             </svg>
           </span>
           <span class="agent-authorization-meta">
