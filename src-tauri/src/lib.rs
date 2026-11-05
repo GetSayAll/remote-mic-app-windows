@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
 
 mod accent;
+mod agent_access;
 mod app_icon;
 mod button_profiles;
 mod common_phrase_panel;
@@ -600,6 +601,8 @@ struct AppState {
     update_completed_version: std::sync::Mutex<Option<String>>,
     /// 回眸本地归档（`%LOCALAPPDATA%\SayAll\transcripts\v1`）。
     transcripts: Arc<transcripts::TranscriptStore>,
+    /// 回眸「本地 Agent 访问」的授权状态（`%LOCALAPPDATA%\SayAll\mcp\v1`）。
+    agent_access: Arc<agent_access::AgentAccessStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -3960,6 +3963,70 @@ fn transcript_audio_enabled(state: &AppState) -> bool {
     }
 }
 
+// ---- 回眸「本地 Agent 访问」 ----
+
+#[tauri::command]
+fn get_agent_access_snapshot(state: tauri::State<'_, AppState>) -> agent_access::AgentAccessSnapshot {
+    state.agent_access.snapshot()
+}
+
+#[tauri::command]
+async fn set_agent_access_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<agent_access::AgentAccessSnapshot, agent_access::AgentAccessCommandError> {
+    let store = Arc::clone(&state.agent_access);
+    tauri::async_runtime::spawn_blocking(move || store.set_enabled(enabled))
+        .await
+        .map_err(|_| agent_access::AgentAccessCommandError::new("access_update_failed"))?
+}
+
+#[tauri::command]
+async fn create_agent_authorization(
+    display_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<agent_access::CreatedAgentAuthorization, agent_access::AgentAccessCommandError> {
+    let store = Arc::clone(&state.agent_access);
+    tauri::async_runtime::spawn_blocking(move || store.create_manual(&display_name))
+        .await
+        .map_err(|_| agent_access::AgentAccessCommandError::new("authorization_failed"))?
+}
+
+#[tauri::command]
+async fn revoke_agent_authorization(
+    client_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<agent_access::AgentAccessSnapshot, agent_access::AgentAccessCommandError> {
+    let store = Arc::clone(&state.agent_access);
+    tauri::async_runtime::spawn_blocking(move || store.revoke(&client_id))
+        .await
+        .map_err(|_| agent_access::AgentAccessCommandError::new("revoke_failed"))?
+}
+
+#[tauri::command]
+async fn connect_agent_client(
+    client: agent_access::AgentClientId,
+    state: tauri::State<'_, AppState>,
+) -> Result<agent_access::AgentAccessSnapshot, agent_access::AgentAccessCommandError> {
+    let store = Arc::clone(&state.agent_access);
+    tauri::async_runtime::spawn_blocking(move || store.connect(client))
+        .await
+        .map_err(|_| agent_access::AgentAccessCommandError::for_client("integration_failed", client))?
+}
+
+#[tauri::command]
+async fn remove_agent_client(
+    client: agent_access::AgentClientId,
+    state: tauri::State<'_, AppState>,
+) -> Result<agent_access::AgentAccessSnapshot, agent_access::AgentAccessCommandError> {
+    let store = Arc::clone(&state.agent_access);
+    tauri::async_runtime::spawn_blocking(move || store.disconnect(client))
+        .await
+        .map_err(|_| {
+            agent_access::AgentAccessCommandError::for_client("configuration_removal_failed", client)
+        })?
+}
+
 #[tauri::command]
 fn get_transcript_history(
     state: tauri::State<'_, AppState>,
@@ -5821,6 +5888,22 @@ pub fn run() {
                     .join("v1")
             });
             let transcript_store = Arc::new(transcripts::TranscriptStore::new(transcript_root));
+            // 本地 Agent 访问：授权状态独立于 settings.json（安装生命周期会哈希断言设置文件）。
+            let agent_access_root =
+                agent_access::AgentAccessStore::default_root().unwrap_or_else(|_| {
+                    sayall_windows::gatt_note(
+                        "agent_access action=resolve_root phase=completed result=fallback reason=localappdata_unavailable"
+                            .to_owned(),
+                    );
+                    app.path()
+                        .app_local_data_dir()
+                        .unwrap_or_else(|_| std::env::temp_dir())
+                        .join("SayAll")
+                        .join("mcp")
+                        .join("v1")
+                });
+            let agent_access_store =
+                Arc::new(agent_access::AgentAccessStore::new(agent_access_root));
             let capture_store = Arc::clone(&transcript_store);
             let capture_app = app.handle().clone();
             platform.set_transcript_capture_sink(Arc::new(
@@ -5909,6 +5992,7 @@ pub fn run() {
                     completed_update.then(|| app.package_info().version.to_string()),
                 ),
                 transcripts: transcript_store,
+                agent_access: agent_access_store,
             });
             app.manage(recommendations::RecommendationsState::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
@@ -6095,6 +6179,12 @@ pub fn run() {
         get_ime_status,
         get_gain_db,
         set_gain_db,
+        get_agent_access_snapshot,
+        set_agent_access_enabled,
+        create_agent_authorization,
+        revoke_agent_authorization,
+        connect_agent_client,
+        remove_agent_client,
         get_transcript_history,
         set_transcript_history_enabled,
         set_transcript_audio_recording_enabled,
@@ -6232,6 +6322,12 @@ pub fn run() {
         get_ime_status,
         get_gain_db,
         set_gain_db,
+        get_agent_access_snapshot,
+        set_agent_access_enabled,
+        create_agent_authorization,
+        revoke_agent_authorization,
+        connect_agent_client,
+        remove_agent_client,
         get_transcript_history,
         set_transcript_history_enabled,
         set_transcript_audio_recording_enabled,
