@@ -369,16 +369,15 @@ function formatCreatedAt(millis: number): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  /* 对齐 Mac 的 GlassPanel：半透明材质、20 圆角、顶边一道内高光。
-     纯白卡片在浅灰画布上会显得比 Mac 更“平、更白”，所以用极浅的蓝紫渐变
-     （顶 246,248,255 → 底 249,249,249）加上边框，撑出层次。 */
-  border-radius: 20px;
+  /* 与上方记录卡片同一种材料底（Mac GlassPanel 的轻渐变 + 顶边内高光），
+     圆角对齐 App 切换卡的 13。 */
+  margin-top: 14px;
+  border-radius: 13px;
   border: 1px solid var(--border-strong);
   background: linear-gradient(
     180deg,
-    rgba(246, 248, 255, 0.97) 0%,
-    rgba(249, 250, 251, 0.98) 38%,
-    rgba(249, 249, 249, 0.98) 100%
+    rgba(246, 247, 251, 0.98) 0%,
+    rgba(250, 250, 250, 0.98) 100%
   );
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
