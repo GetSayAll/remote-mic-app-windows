@@ -1,0 +1,17 @@
+[package]
+name = "sayall-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "只读的本机回眸记录 MCP 服务（stdio），供用户授权的 AI 工具读取"
+
+[[bin]]
+name = "sayall-mcp"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+sayall-core = { path = "../sayall-core" }
+serde.workspace = true
+serde_json.workspace = true

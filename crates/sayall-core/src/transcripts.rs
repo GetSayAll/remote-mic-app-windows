@@ -4,6 +4,7 @@
 //! 7 天窗口和日文件排序都在这里，平台层只负责读取目标输入框和落盘。
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// 单条记录 schema 版本。
 pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
@@ -413,6 +414,112 @@ pub fn visible_records<'a>(
     visible
 }
 
+/// 单个日文件读取上限。正常上限约 `MAX_RECORDS_PER_DAY × MAX_TRANSCRIPT_CHARS`
+/// （≈48 MB），留余量取 64 MB；超过即跳过，避免异常文件把读取端内存打满。
+pub const MAX_DAY_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 一次归档读取的结果。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TranscriptArchive {
+    /// 全部可展示记录，按结束时间倒序（同一时刻按 id 倒序）。
+    pub records: Vec<TranscriptRecord>,
+    /// 被跳过的日文件数（读不了 / 解析失败 / 头不匹配 / 过大）。
+    pub skipped_files: usize,
+    /// 是否因为 `MAX_RECORDS_TOTAL` 截断。
+    pub truncated: bool,
+}
+
+/// 只读地遍历归档目录：`<root>/<applicationKey>/<YYYY-MM-DD>.json`。
+///
+/// 与 `src-tauri::transcripts` 的读取规则完全一致（跳过规则、身份校验、排序、
+/// 总量上限）。故意不写日志、不删文件：调用方自己决定怎么记。
+pub fn read_archive(root: &Path) -> TranscriptArchive {
+    let mut archive = TranscriptArchive::default();
+    let Ok(directories) = std::fs::read_dir(root) else {
+        return archive;
+    };
+    for directory in directories.flatten() {
+        let application_key = directory.file_name().to_string_lossy().to_string();
+        if !is_safe_application_key(&application_key)
+            || !directory
+                .file_type()
+                .map(|kind| kind.is_dir())
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(directory.path()) else {
+            archive.skipped_files += 1;
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(local_date_key) = path.file_stem().and_then(|value| value.to_str()) else {
+                archive.skipped_files += 1;
+                continue;
+            };
+            if !is_local_date_key(local_date_key) {
+                continue;
+            }
+            if !file.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+                archive.skipped_files += 1;
+                continue;
+            }
+            if std::fs::metadata(&path)
+                .map(|metadata| metadata.len() > MAX_DAY_FILE_BYTES)
+                .unwrap_or(true)
+            {
+                archive.skipped_files += 1;
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                archive.skipped_files += 1;
+                continue;
+            };
+            let Ok(day) = serde_json::from_str::<TranscriptDayFile>(&contents) else {
+                archive.skipped_files += 1;
+                continue;
+            };
+            if day.validate_header().is_err()
+                || day.application_key != application_key
+                || day.local_date_key != local_date_key
+            {
+                archive.skipped_files += 1;
+                continue;
+            }
+            for record in day.records {
+                if record.validate().is_err()
+                    || record.application_key != application_key
+                    || record.local_date_key != local_date_key
+                {
+                    continue;
+                }
+                if archive.records.len() >= MAX_RECORDS_TOTAL {
+                    archive.truncated = true;
+                    break;
+                }
+                archive.records.push(record);
+            }
+            if archive.truncated {
+                break;
+            }
+        }
+        if archive.truncated {
+            break;
+        }
+    }
+    archive.records.sort_by(|left, right| {
+        right
+            .ended_at_ms
+            .cmp(&left.ended_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    archive
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,5 +730,115 @@ mod tests {
         assert!(!is_local_date_key("2026-2-25"));
         assert!(!is_local_date_key("2026/10/25"));
         assert!(!is_local_date_key("2026-13-01"));
+    }
+
+    fn archive_record(
+        id: &str,
+        application: &str,
+        date: &str,
+        ended_at_ms: i64,
+        text: &str,
+    ) -> TranscriptRecord {
+        TranscriptRecord {
+            schema_version: TRANSCRIPT_SCHEMA_VERSION,
+            id: id.to_owned(),
+            session_id: format!("session-{id}"),
+            started_at_ms: ended_at_ms - 1_000,
+            ended_at_ms,
+            local_date_key: date.to_owned(),
+            utc_offset_minutes: 480,
+            application_key: application.to_owned(),
+            application_name: application.to_owned(),
+            source: TranscriptSource::BluetoothRemote,
+            original_transcript: text.to_owned(),
+            capture_method_version: CAPTURE_METHOD_VERSION,
+        }
+    }
+
+    fn scratch_archive_root() -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!(
+            "sayall-core-archive-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create root");
+        root
+    }
+
+    fn write_day(root: &Path, application: &str, date: &str, records: Vec<TranscriptRecord>) {
+        let directory = root.join(application);
+        std::fs::create_dir_all(&directory).expect("create app dir");
+        let mut day = TranscriptDayFile::new(
+            application.to_owned(),
+            application.to_owned(),
+            date.to_owned(),
+        );
+        day.records = records;
+        std::fs::write(
+            directory.join(format!("{date}.json")),
+            serde_json::to_string(&day).expect("serialize day"),
+        )
+        .expect("write day");
+    }
+
+    #[test]
+    fn read_archive_skips_broken_files_and_sorts_newest_first() {
+        let root = scratch_archive_root();
+        write_day(
+            &root,
+            "chrome",
+            "2026-10-25",
+            vec![
+                archive_record("a", "chrome", "2026-10-25", 1_000, "第一条"),
+                archive_record("b", "chrome", "2026-10-25", 3_000, "第二条"),
+            ],
+        );
+        write_day(
+            &root,
+            "wechat",
+            "2026-10-26",
+            vec![archive_record("c", "wechat", "2026-10-26", 2_000, "微信")],
+        );
+        // 坏 JSON：跳过并计数。
+        std::fs::create_dir_all(root.join("chrome")).expect("dir");
+        std::fs::write(root.join("chrome/2026-10-27.json"), "{not json").expect("write");
+        // 日文件头与目录/文件名不匹配：跳过并计数。
+        let mut mismatched = TranscriptDayFile::new(
+            "chrome".to_owned(),
+            "Chrome".to_owned(),
+            "2026-10-27".to_owned(),
+        );
+        mismatched.records = vec![archive_record("d", "chrome", "2026-10-27", 4_000, "错位")];
+        std::fs::write(
+            root.join("wechat/2026-10-27.json"),
+            serde_json::to_string(&mismatched).expect("serialize"),
+        )
+        .expect("write mismatched");
+        // 非日期文件名：既不算记录也不算跳过。
+        std::fs::write(root.join("chrome/notes.json"), "{}").expect("write");
+
+        let archive = read_archive(&root);
+        assert_eq!(
+            archive
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c", "a"]
+        );
+        assert_eq!(archive.skipped_files, 2);
+        assert!(!archive.truncated);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_archive_of_missing_root_is_empty() {
+        let archive = read_archive(Path::new("definitely-not-a-sayall-archive"));
+        assert!(archive.records.is_empty());
+        assert_eq!(archive.skipped_files, 0);
     }
 }
