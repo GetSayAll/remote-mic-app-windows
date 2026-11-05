@@ -17,6 +17,14 @@ import type {
   Rc003CaptureUnavailable,
 } from "./bridge";
 
+/**
+ * 开启「全按键支持」时会同步打开同一个设置的另一个入口「支持更多输入工具」，
+ * 而豆包输入法的语音键依赖后者。向导第④步与开启确认弹窗必须显示**同一句**，
+ * 两边都从这里取文案，避免只改一处造成口径漂移（2026-11-05 用户明确要求）。
+ */
+export const CAPTURE_MORE_INPUT_TOOLS_NOTE =
+  "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。";
+
 /** 开关的可见状态：不可用 / 正在操作 / 开启 / 关闭。 */
 export type CaptureSwitchState = "unavailable" | "busy" | "on" | "off";
 

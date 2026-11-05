@@ -41,8 +41,8 @@ import type { OnboardingStep } from "./flow";
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStep[] = [
   "welcome",
   "remote",
-  "full_key",
   "audio",
+  "full_key",
   "voice_tool",
   "voice_test",
   "controls",

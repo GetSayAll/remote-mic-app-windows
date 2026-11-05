@@ -203,11 +203,11 @@ const captureHint = ref("");
 const captureSupport = ref<CaptureSupport | null>(null);
 const captureStatusLoading = ref(false);
 const captureLoadFailed = ref(false);
-/** 迟到回调保护：每次进入第③步都换一代，旧读取结果不得覆盖新状态。 */
+/** 迟到回调保护：每次进入第④步都换一代，旧读取结果不得覆盖新状态。 */
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
 const captureUnavailable = computed(() => captureSupport.value?.available === false);
-/** 第③步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
+/** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
   if (captureLoadFailed.value) {
     return t("读取全按键支持状态失败；可以重新进入这一步，或先继续。");
@@ -277,8 +277,8 @@ const currentPhase = computed(() => phaseOf(step.value));
 const PROGRESS_PERCENT: Record<OnboardingStep, number> = {
   welcome: 4,
   remote: 16,
-  full_key: 30,
-  audio: 44,
+  audio: 30,
+  full_key: 44,
   voice_tool: 58,
   voice_test: 72,
   controls: 87,
@@ -987,7 +987,7 @@ async function openDownloadPage(): Promise<void> {
 // ---- 全按键支持步骤（可选增强）----
 
 /**
- * 进入第③步时读取开关与本机支持情况。读取失败不阻断继续（这一步是可选增强），
+ * 进入第④步时读取开关与本机支持情况。读取失败不阻断继续（这一步是可选增强），
  * 但要在开关旁说明；迟到结果按代数丢弃，不得覆盖重新进入后的新状态。
  */
 async function prepareFullKeyStep(): Promise<void> {
@@ -1184,8 +1184,8 @@ async function chooseOtherKeys(keys: KeyCode[]): Promise<void> {
 }
 
 /**
- * 开关操作日志的目标（2026-11-05）：同一个开关现在有两个入口——第③步说明页
- * 与第⑤步豆包卡片。按发起时所在步骤记录，别把第③步的操作记成 doubao。
+ * 开关操作日志的目标（2026-11-05）：同一个开关现在有两个入口——第④步说明页
+ * 与第⑤步豆包卡片。按发起时所在步骤记录，别把第④步的操作记成 doubao。
  */
 function captureLogTarget(): { step: OnboardingStep; detail: string } {
   return step.value === "full_key"
@@ -1475,8 +1475,8 @@ async function copyDiagnostics(): Promise<void> {
   try {
     const report = await getDiagnosticReport();
     const platform = props.runtime?.platform;
-    // 音频端点先做一次**只读**刷新（不触发自动选中）：向导只在进入第④步时
-    // 加载过列表，沿用页面状态会让第①/②/③步复制出的「推荐设备」恒为 0，误导
+    // 音频端点先做一次**只读**刷新（不触发自动选中）：向导只在进入第③步时
+    // 加载过列表，沿用页面状态会让第①/②步复制出的「推荐设备」恒为 0，误导
     // 支持判断。读取失败退回页面在用状态——复制本身不因此失败。
     let endpoints = audioEndpoints.value;
     let audio = audioSnapshot.value;
@@ -1488,7 +1488,7 @@ async function copyDiagnostics(): Promise<void> {
     const recommended = endpoints.filter(isRecommendedVoiceEndpoint);
     const selectedId = audio?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
     // 输入工具与按住说话快捷键同理做一次**只读**读取（2026-10-13 现场）：向导只在
-    // ⑤/⑥步加载过它们，①/②/③步复制出的「unset」会把已配置豆包的机器误导成未配置。
+    // ⑤/⑥步加载过它们，①–④步复制出的「unset」会把已配置豆包的机器误导成未配置。
     // 读取失败退回页面状态——复制本身不因此失败。
     let toolFromDisk: VoiceInputTool | null = null;
     let hotkeyFromDisk: KeyChord | null = null;
@@ -1510,7 +1510,7 @@ async function copyDiagnostics(): Promise<void> {
       ime = null;
     }
     // 「全按键支持」的两层事实各做一次**只读**读取（2026-10-14 现场）：
-    // ① `full_key_support=` 是开关设置——向导只在⑤/⑥/⑧步读过它，①–④步复制出的
+    // ① `full_key_support=` 是开关设置——向导只在④/⑤/⑧步读过它，①–③步复制出的
     //    `off` 会把开着开关的机器误导成未开启；
     // ② 开关开着 ≠ 生效：真实捕获状态读回 `CaptureHealth`——只有 `active` 才算
     //    生效；`inactive`（过宽限仍无所有权）与可能长期停留的 `starting`（助手/
@@ -3113,7 +3113,7 @@ async function retryVoiceTest(): Promise<void> {
   outline: none;
 }
 
-/* ---- 全按键支持页（第③步）---- */
+/* ---- 全按键支持页（第④步）---- */
 /* 开关旁只允许一句状态文案（与 2026-10-10 定稿一致）：失败原因用告警色，
    已开启用成功色，其余沿用正文的次要色。 */
 .onboarding-card .onboarding-capture-note,
@@ -3137,7 +3137,7 @@ async function retryVoiceTest(): Promise<void> {
   padding-top: 16px;
   border-top: 1px solid var(--border);
 }
-/* 第③步的开关是卡片第一项：不画上方分隔线，也不留额外上边距。 */
+/* 第④步的开关是卡片第一项：不画上方分隔线，也不留额外上边距。 */
 .onboarding-switch-row--first {
   margin-top: 0;
   padding-top: 0;

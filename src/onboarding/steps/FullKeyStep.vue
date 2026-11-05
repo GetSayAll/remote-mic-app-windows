@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { CAPTURE_MORE_INPUT_TOOLS_NOTE } from "../../lib/capture-switch";
 import { t } from "../../lib/i18n";
 
 /**
- * 第③步「全按键支持」说明与引导（2026-11-05 用户要求）。
+ * 第④步「全按键支持」说明与引导（2026-11-05 用户要求；位于语音设备之后）。
  *
  * 这一步只做两件事：说清开关的作用与代价，并给出开启入口。全按键支持是可选增强
  * ——基础语音与普通按键不依赖系统授权，所以开关状态不参与「继续」判定（ARM64 等
@@ -89,6 +90,7 @@ watch(
     </div>
 
     <ul class="onboarding-list">
+      <li>{{ t(CAPTURE_MORE_INPUT_TOOLS_NOTE) }}</li>
       <li>{{ t("开启时 Windows 会弹出授权窗口，请选择“是”。") }}</li>
       <li>{{ t("只读取这支遥控器的按键，不收集其他内容。") }}</li>
       <li>

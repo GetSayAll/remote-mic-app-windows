@@ -48,12 +48,12 @@ function makeContext(
 }
 
 describe("onboarding step order", () => {
-  it("keeps the confirmed order plus the optional full-key step after the remote", () => {
+  it("keeps the confirmed order plus the optional full-key step after the audio device", () => {
     expect(ONBOARDING_STEPS).toEqual([
       "welcome",
       "remote",
-      "full_key",
       "audio",
+      "full_key",
       "voice_tool",
       "voice_test",
       "controls",
@@ -64,8 +64,8 @@ describe("onboarding step order", () => {
   it("maps phases: prepare for welcome, setup for the config steps, try_it for the rest", () => {
     expect(phaseOf("welcome")).toBe("prepare");
     expect(phaseOf("remote")).toBe("setup");
-    expect(phaseOf("full_key")).toBe("setup");
     expect(phaseOf("audio")).toBe("setup");
+    expect(phaseOf("full_key")).toBe("setup");
     expect(phaseOf("voice_tool")).toBe("setup");
     expect(phaseOf("voice_test")).toBe("try_it");
     expect(phaseOf("controls")).toBe("try_it");
@@ -75,9 +75,11 @@ describe("onboarding step order", () => {
   it("navigates forward and backward without auto-skipping", () => {
     expect(previousStep("welcome")).toBeNull();
     expect(nextStep("welcome")).toBe("remote");
-    expect(nextStep("remote")).toBe("full_key");
-    expect(previousStep("full_key")).toBe("remote");
-    expect(previousStep("audio")).toBe("full_key");
+    expect(nextStep("remote")).toBe("audio");
+    expect(nextStep("audio")).toBe("full_key");
+    expect(previousStep("full_key")).toBe("audio");
+    expect(previousStep("voice_tool")).toBe("full_key");
+    expect(previousStep("audio")).toBe("remote");
     expect(nextStep("controls")).toBe("complete");
     expect(nextStep("complete")).toBeNull();
     expect(previousStep("remote")).toBe("welcome");

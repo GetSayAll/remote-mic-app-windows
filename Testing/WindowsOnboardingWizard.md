@@ -27,7 +27,7 @@
   卡片（1–5 条：准备 / 打开蓝牙设置与添加设备 / 长按 TV 配对 / 主页+菜单 重置 / 选中设备；
   第 2 条下方有一个「打开蓝牙设置」按钮行，2026-10-13 现场指定位置）。
 - 第⑥步通过提示为绿色成功卡 + 对勾；最后一步右栏显示应用 logo + 对勾徽标。
-- 右栏 = 插图 + 检查卡（按步骤换标题：连接检查 / 全按键支持 / 音频检查 / 工具检查 / 实时检查 / 按键检查）；
+- 右栏 = 插图 + 检查卡（按步骤换标题：连接检查 / 音频检查 / 全按键支持 / 工具检查 / 实时检查 / 按键检查）；
   窗口过矮（高度 ≤ 660）或过窄（宽度 ≤ 1024）时检查卡折到内容下方。
 - 按键检测步骤（②遥控器 / ⑦普通按键）期间会**暂挂用户已配置的自定义按键**：只收集
   边沿，不触发任何映射动作；离开这两步立即恢复（日志 `mapping_suspend` / `mapping_resume`）。
@@ -93,7 +93,7 @@
 - **从未选过工具**：应**自动退回⑤步**（标题「选择你要用的输入工具」），
   日志 `tool_missing_fallback detail=to_tool_step`；不允许在缺前置状态的⑥步上做验证。
 
-## 用例二：步骤①–④（欢迎 / 遥控器 / 全按键支持 / 语音设备）
+## 用例二：步骤①–④（欢迎 / 遥控器 / 语音设备 / 全按键支持）
 
 1. 第①步应给出完整首次配对流程（2026-10-13 第五轮现场定稿文案）：
    ① 准备好：小米蓝牙语音遥控器 2 或 2 Pro（目前只支持这两种型号），并确保它有电 →
@@ -154,11 +154,15 @@
    连接就绪时残留的过程消息随即消失。
 7. 门禁提示行（2026-10-13）：底部「先连接遥控器，再继续。」一类提示句应始终保持**一行**不换行，
    提示出现/消失时上方按钮行不上下跳位。
-8. 第③步「全按键支持」说明与开启引导（2026-11-05 新增）：
-   - 遥控器连接通过后进入；标题「开启全按键支持」，说明句提到「包括 Windows 默认收不到的
-     返回 / 音量+ / 音量−」；开关在文字右侧，关闭态写「现在不开启也可以继续；以后可以在
-     「按键」页随时打开。」；下方三条须知（授权窗口 / 只读取这支遥控器 / 防作弊游戏）。
-   - **不开启直接点「继续」应能进入第④步**（这一步不是门禁；拒绝授权也必须能走完向导）。
+8. 第③步：检测到带「推荐」标记的 CABLE 设备并自动选中；没有时给出安装与重启说明。
+9. 第④步「全按键支持」说明与开启引导（2026-11-05 新增；语音设备之后进入）：
+   - 标题「开启全按键支持」，说明句提到「包括 Windows 默认收不到的返回 / 音量+ / 音量−」；
+     开关在文字右侧，关闭态写「现在不开启也可以继续；以后可以在“按键”页随时打开。」；
+     下方四条须知（同步打开支持更多输入工具 / 授权窗口 / 只读取这支遥控器 / 防作弊游戏）。
+   - **说明页与开启确认弹窗必须出现同一句**：「开启后会同时打开“支持更多输入工具”；只有打开它，
+     才能用豆包输入法进行语音输入。」两处文本必须逐字一致（共用
+     `src/lib/capture-switch.ts` 的常量），不允许只改一处。
+   - **不开启直接点「继续」应能进入第⑤步**（这一步不是门禁；拒绝授权也必须能走完向导）。
    - 打开开关 → 弹「开启“全按键支持”？」，点「开启」→ Windows 授权窗口选「是」→ 开关变为开启、
      文案变「已开启。返回 / 音量+ / 音量− 现在也能自定义。」。关闭开关直接生效、不再弹确认。
      取消授权时开关保持关闭并显示「没有完成系统授权，全按键支持保持关闭。」。
@@ -167,7 +171,6 @@
    - 日志：`action reason=read_capture_state` 成对（`detail=enabled_0_available_1`）；
      开关操作 `authorization` 的 `step=full_key detail=full_key`，不得记成 `voice_tool/doubao`。
    - 右栏检查卡标题「全按键支持」；关闭态 ○、开启态 ✓、不可用 !。
-9. 第④步：检测到带「推荐」标记的 CABLE 设备并自动选中；没有时给出安装与重启说明。
 
 ## 用例三（核心）：第⑥步「按住说话验证」，三种工具各跑一遍
 
@@ -242,11 +245,11 @@
     2026-10-10 起）、`open_bluetooth_settings`、`mapping_suspend` / `mapping_resume`
     （检测期间暂挂自定义按键）；**停在②步且没有 `scan_requested` = 自动连接未触发**
     （输入通道不在位 / 应用已连接 / 用户已手动断开）；
-  - ③ 全按键支持：`read_capture_state`（进入步骤时读取，`detail=enabled_0|1_available_0|1`）；
-    开关操作另落 `phase=authorization`（`step=full_key detail=full_key`，失败原文只进日志）；
-  - ④ 语音设备：`refresh_endpoints`（`detail=auto|manual_total_N_rec_M`）、`select_endpoint`
+  - ③ 语音设备：`refresh_endpoints`（`detail=auto|manual_total_N_rec_M`）、`select_endpoint`
     （`detail=auto|manual|fallback`）、`open_download_page`；另有 `phase=audio_route`
     （`reason=missing|not_selected|selected|ready`，状态去重）；
+  - ④ 全按键支持：`read_capture_state`（进入步骤时读取，`detail=enabled_0|1_available_0|1`）；
+    开关操作另落 `phase=authorization`（`step=full_key detail=full_key`，失败原文只进日志）；
   - ⑤ 输入工具：`read_tool_state`、`stage_binding`（`detail=<工具>`）、`save_other_keys`、
     `vokie_detect`（`detail=installed_0|1_running_0|1`）、`open_vokie_site`、`vokie_launch`；
   - ⑥ 按住说话：`armed` / 终态 / `session_stopped` / `observation_begin_failed` /
@@ -320,14 +323,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Testing\run-hardware-signal-
 ```
 
 - 状态隔离：`SAYALL_RUNTIME_SIMULATION_STATE_DIR` 下生成独立的 `settings.json` / `onboarding.json`，**不动**用户的真实向导状态；向导每次从第①步开始。
-- 覆盖：② 的按键门禁、③ 的全按键支持说明与「不开启也能继续」（开关与授权属真机路径，仿真不覆盖）、
-  ④ 的端点推荐与自动选择、⑤ 的工具选择、⑥ 的会话与解码采样（`voice_attempt` 终端码）、
+- 覆盖：② 的按键门禁、③ 的端点推荐与自动选择、④ 的全按键支持说明与「不开启也能继续」
+  （开关与授权属真机路径，仿真不覆盖）、⑤ 的工具选择、⑥ 的会话与解码采样（`voice_attempt` 终端码）、
   ⑦ 的 3 个不同按键、⑧ 的提交与收尾；日志含 `hardware_script action=apply ... terminal_result=` 逐条记录。
 - 转写文字：模拟轨道没有输入法注入，第⑥步的转写由驱动写入输入框并派发 `input` 事件（真机仍必须真人说话）。
 - 已跑通记录（2026-10-05，RC003 scenario，**当时为七步流程**）：①②③④⑥⑦ 全绿，
   ⑤ `voice_attempt result=passed detail=d240_s240_q0_drain1`，收尾 `wizard_finished elapsed_ms=71920`；
-  截图与日志摘录见 `artifacts/local-test/2026-10-05-onboarding-simulation/`。2026-11-05 插入新第③步后，
-  原③–⑦ 依次后移为④–⑧；旧记录不重跑。
+  截图与日志摘录见 `artifacts/local-test/2026-10-05-onboarding-simulation/`。2026-11-05 在语音设备之后
+  插入新第④步后，原④–⑦ 依次后移为⑤–⑧；旧记录不重跑。
 - 边界：模拟 ≠ 真机——配对、射频、权限、驱动、真实音质与安装包行为仍按本手册真机执行；两种型号仍要分别做真机用例一~四。
 
 ## 验证边界

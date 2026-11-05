@@ -13,6 +13,8 @@ export default {
   "开启“全按键支持”？": "Enable Full-key support?",
   "开启后，无线麦会直接读取遥控器上已配置的按键，避免影响物理键盘上的同名按键；返回 / 音量+ / 音量−也需要开启后才能使用。每次开启都会弹出 Windows 授权窗口，请选择“是”；关闭开关即停。":
     "When on, SayAll reads this remote's configured keys directly, so they do not affect same-named keys on a physical keyboard. Back, Volume +, and Volume − also require this setting. Every time you turn it on, Windows asks for authorization—choose Yes. Turn the switch off to stop.",
+  "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。":
+    "Turning this on also turns on “More Input Tools”. Doubao can only take voice input while it is on.",
   "个别杀毒软件可能把这个功能当成风险，拦截或关闭它，导致按键失灵、开启失败。":
     "Some antivirus apps may treat this feature as a risk and block or turn it off, which can make the keys stop working or prevent it from turning on.",
   "个别游戏带有防作弊保护，可能和这个功能合不来：表现为按键失灵、游戏打不开等。玩这类游戏前，建议先把全按键支持关掉。":

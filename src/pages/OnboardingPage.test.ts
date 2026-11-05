@@ -482,19 +482,18 @@ describe("Onboarding wizard shell", () => {
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
   });
 
-  it("第②步通过后进入全按键支持说明页：默认可继续", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+  it("全按键支持说明页：默认可继续，并说明会同时打开支持更多输入工具", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
     const wrapper = await mountWizard(connectedRuntime());
-    mocks.buttonHandler?.({ button: "home", isPressed: true });
-    await flushPromises();
-
-    await wrapper.find(".onboarding-actions .primary-button").trigger("click");
-    await flushPromises();
 
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
     expect(wrapper.text()).toContain("开启全按键支持");
     expect(wrapper.text()).toContain(
       "开启后，遥控器上的所有按键都能设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。",
+    );
+    // 与开启确认弹窗共用同一句（同一个常量），必须保证豆包依赖可见。
+    expect(wrapper.text()).toContain(
+      "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。",
     );
     expect(wrapper.text()).toContain("现在不开启也可以继续；以后可以在“按键”页随时打开。");
     expect(wrapper.text()).toContain("开启时 Windows 会弹出授权窗口，请选择“是”。");
@@ -523,6 +522,10 @@ describe("Onboarding wizard shell", () => {
 
     // 每次开启都先确认（2026-10-03 定稿）：确认前不调用 IPC。
     expect(wrapper.text()).toContain("开启“全按键支持”？");
+    // 弹窗与说明页共用同一句：开启会同步打开“支持更多输入工具”，豆包语音依赖它。
+    expect(wrapper.text()).toContain(
+      "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。",
+    );
     expect(mocks.enableRc003Capture).not.toHaveBeenCalled();
     const confirm = wrapper.findAll("button").find((button) => button.text() === "开启");
     expect(confirm).toBeDefined();
@@ -535,7 +538,7 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("已开启。返回 / 音量+ / 音量− 现在也能自定义。");
     expect(wrapper.text()).not.toContain("现在不开启也可以继续");
-    // 授权日志按第③步记录，不得沿用第④步的 doubao 标记。
+    // 授权日志按第④步记录，不得沿用第⑤步的 doubao 标记。
     const auth = onboardingEvents("authorization");
     expect(auth.map((p) => p.result)).toEqual(["unknown", "passed"]);
     expect(auth.every((p) => p.step === "full_key" && p.detail === "full_key")).toBe(true);
@@ -1148,10 +1151,14 @@ describe("Onboarding wizard shell", () => {
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(continueButton.attributes("disabled")).toBeUndefined();
 
-    // 继续 → 步骤④（输入工具）。
+    // 继续 → 第④步（全按键支持说明）；再继续才进入第⑤步输入工具。
     await continueButton.trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("选择你要用的输入工具");
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
+    expect(wrapper.text()).toContain("开启全按键支持");
+    expect(wrapper.text()).toContain(
+      "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。",
+    );
   });
 
   it("keeps a recoverable state-read error with a retry entry", async () => {
@@ -1245,7 +1252,7 @@ describe("Onboarding diagnostics copy", () => {
 
   it("①/②步复制时只读刷新输入工具与快捷键，不沿用页面未加载的 unset", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 页面在②步还没读过这两项（④/⑤步才加载）：复制时应直接读磁盘真值。
+    // 页面在②步还没读过这两项（⑤/⑥步才加载）：复制时应直接读磁盘真值。
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
     const wrapper = await mountWizard(runtimeWith());
@@ -1328,7 +1335,7 @@ describe("Onboarding diagnostics copy", () => {
 
   it("复制时开关读失败退回页面状态、捕获读失败写 unknown，都不影响复制", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_tool"));
-    // ④步加载时读到「开启」；复制时的只读刷新失败 → 退回页面状态（on）。
+    // ⑤步加载时读到「开启」；复制时的只读刷新失败 → 退回页面状态（on）。
     mocks.getRc003TaskStatus.mockResolvedValueOnce({
       installed: true,
       authorizationRequired: false,
@@ -1348,8 +1355,8 @@ describe("Onboarding diagnostics copy", () => {
 
     const text = clipboard.writeText.mock.calls[0][0];
     expect(text).toContain("full_key_support=on capture=unknown");
-    // 恰好两次：④步加载一次 + 复制时刷新一次——第二次失败被独立留痕，
-    // 断言调用次数可防「④步不再读」时该用例退化成假绿。
+    // 恰好两次：⑤步加载一次 + 复制时刷新一次——第二次失败被独立留痕，
+    // 断言调用次数可防「⑤步不再读」时该用例退化成假绿。
     expect(mocks.getRc003TaskStatus).toHaveBeenCalledTimes(2);
     expect(
       onboardingEvents("action").some(
@@ -1544,7 +1551,7 @@ describe("Onboarding input tool step", () => {
     });
     const continueButton = wrapper.find(".onboarding-actions .primary-button");
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
-    // 门禁已满足：继续可进入第⑤步（按住说话验证）。
+    // 门禁已满足：继续可进入第⑥步（按住说话验证）。
     expect(continueButton.attributes("disabled")).toBeUndefined();
     await continueButton.trigger("click");
     await flushPromises();
@@ -1626,7 +1633,7 @@ describe("Onboarding controls & completion steps", () => {
 
   it("navigates back from controls to the voice test step and releases the suspension", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
-    // 真实用户能到⑥步，说明④步已经选过工具；补上这个前置（2026-10-13 起⑤步缺工具会退回④步）。
+    // 真实用户能到⑦步，说明⑤步已经选过工具；补上这个前置（2026-10-13 起⑥步缺工具会退回⑤步）。
     mocks.getVoiceInputTool.mockResolvedValue("doubao");
     const wrapper = await mountWizard(connectedRuntime());
 
@@ -1672,7 +1679,7 @@ describe("Onboarding controls & completion steps", () => {
     expect(continueButton.attributes("data-gate-code")).toBe("voice_test.not_verified");
     expect(wrapper.text()).toContain("完成一次真实的语音上屏测试");
 
-    // 「去修复」跳回第⑤步重新验证。
+    // 「去修复」跳回第⑥步重新验证。
     await wrapper
       .findAll("button")
       .find((button) => button.text() === "去修复")!
@@ -1819,7 +1826,7 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
-  // 2026-10-24 现场：语音条出现、音频只剩约 1/3。向导第⑤步也要说明真实原因，
+  // 2026-10-24 现场：语音条出现、音频只剩约 1/3。向导第⑥步也要说明真实原因，
   // 不能再说「语音链路正常，但输入工具没有写出文字」。
   it("no_transcript 失败 + 音频降级：给蓝牙共存提示", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
@@ -2102,7 +2109,7 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
-  it("重启后直接落在⑤步：按磁盘配置补读工具与快捷键（不再显示“你选的输入工具”）", async () => {
+  it("重启后直接落在⑥步：按磁盘配置补读工具与快捷键（不再显示“你选的输入工具”）", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
@@ -2116,7 +2123,7 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
-  it("重启后落在⑤步但从未选过工具：退回④步补选（不给缺前置状态的一页做验证）", async () => {
+  it("重启后落在⑥步但从未选过工具：退回⑤步补选（不给缺前置状态的一页做验证）", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
     mocks.getVoiceInputTool.mockResolvedValue(null);
     const wrapper = await mountWizard(connectedRuntime(), { attach: true });
@@ -2369,7 +2376,7 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
-  it("⑤步输入框聚焦时不显示焦点环（统一为细边框）", () => {
+  it("⑥步输入框聚焦时不显示焦点环（统一为细边框）", () => {
     // 2026-10-14 现场定稿：聚焦时只保留细边框——此前"第一次进来"（未用鼠标）显示焦点环、
     // "从上一页进来"被 body.pointer-nav 抑制，同一个聚焦状态两种外观；
     // 这里锁样式源码防回改（像素证据见 Bugs 记录）。

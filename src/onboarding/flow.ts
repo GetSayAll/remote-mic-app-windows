@@ -5,7 +5,7 @@
  * 与 Windows 设计稿 `artifacts/design/2026-10-04-onboarding-design.html`：
  * - 步骤顺序按 D1 确认的 Mac 可见顺序（欢迎 → 遥控器 → 语音设备 → 输入工具
  *   → 按住说话验证 → 普通按键体验 → 完成）；2026-11-05 在遥控器之后加入
- *   「全按键支持」说明页（可选增强，不阻断继续）；
+ *   「全按键支持」说明页（可选增强，不阻断继续；放在语音设备之后、输入工具之前）；
  * - 每一步「能否继续」都由实时能力状态决定（页面访问与点击不是通过条件）；
  * - 阻断一律返回稳定失败码（小写 token），供页面显示与结构化日志使用。
  */
@@ -14,8 +14,8 @@ import type { ConnectionPhase, RawInputPhase, VoiceInputTool } from "../lib/brid
 export type OnboardingStep =
   | "welcome"
   | "remote"
-  | "full_key"
   | "audio"
+  | "full_key"
   | "voice_tool"
   | "voice_test"
   | "controls"
@@ -27,8 +27,8 @@ export type OnboardingPhase = "prepare" | "setup" | "try_it";
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   "welcome",
   "remote",
-  "full_key",
   "audio",
+  "full_key",
   "voice_tool",
   "voice_test",
   "controls",
@@ -38,8 +38,8 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
 const PHASES: Record<OnboardingStep, OnboardingPhase> = {
   welcome: "prepare",
   remote: "setup",
-  full_key: "setup",
   audio: "setup",
+  full_key: "setup",
   voice_tool: "setup",
   voice_test: "try_it",
   controls: "try_it",
