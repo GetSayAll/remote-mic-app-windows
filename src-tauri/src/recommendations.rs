@@ -750,7 +750,7 @@ fn attach_navigation_observers(webview: &Webview, app: AppHandle) -> Result<(), 
         },
         NavigationCompletedEventHandler, NavigationStartingEventHandler, ProcessFailedEventHandler,
     };
-    use windows_core_061::{BOOL, PCWSTR, PWSTR};
+    use windows_core::{BOOL, PCWSTR, PWSTR};
 
     webview
         .with_webview(move |platform| unsafe {
@@ -917,7 +917,7 @@ fn attach_navigation_observers(webview: &Webview, app: AppHandle) -> Result<(), 
                     state.can_go_back.store(false, Ordering::Release);
                 } else {
                     let mut can_go_back = BOOL(0);
-                    if completed_core.CanGoBack(&mut can_go_back).is_ok() {
+                    if completed_core.CanGoBack(&mut can_go_back as *mut _).is_ok() {
                         state
                             .can_go_back
                             .store(can_go_back.as_bool(), Ordering::Release);
@@ -932,7 +932,7 @@ fn attach_navigation_observers(webview: &Webview, app: AppHandle) -> Result<(), 
                             let state = reset_app.state::<RecommendationsState>();
                             state.history_reset_pending.store(false, Ordering::Release);
                             let mut can_go_back = BOOL(0);
-                            let can = reset_core.CanGoBack(&mut can_go_back).is_ok()
+                            let can = reset_core.CanGoBack(&mut can_go_back as *mut _).is_ok()
                                 && can_go_back.as_bool();
                             state.can_go_back.store(can, Ordering::Release);
                             log(format!(
@@ -1099,7 +1099,7 @@ fn attach_navigation_observers(webview: &Webview, app: AppHandle) -> Result<(), 
             let mut response_token = 0;
             let response_result = {
                 // `ICoreWebView2_2` 才提供该事件；旧运行时没有时跳过（不影响加载判定）。
-                use windows_core_061::Interface as _;
+                use windows_core::Interface as _;
                 match core.cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_2>()
                 {
                     Ok(core2) => core2.add_WebResourceResponseReceived(&response, &mut response_token),
@@ -1150,7 +1150,7 @@ fn attach_navigation_observers(webview: &Webview, app: AppHandle) -> Result<(), 
             let history = HistoryChangedEventHandler::create(Box::new(move |_sender, _args| {
                 let mut can_go_back = BOOL(0);
                 let actual =
-                    history_core.CanGoBack(&mut can_go_back).is_ok() && can_go_back.as_bool();
+                    history_core.CanGoBack(&mut can_go_back as *mut _).is_ok() && can_go_back.as_bool();
                 let state = history_app.state::<RecommendationsState>();
                 let reset_pending = state.history_reset_pending.load(Ordering::Acquire);
                 let can = actual && !reset_pending;

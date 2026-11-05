@@ -53,9 +53,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "UI_ViewManagement",
 ] }
-# webview2-com 0.38 的绑定由 windows 0.61 生成；主工程其余代码用 0.62。
-# 推荐页的 NavigationCompleted 参数必须使用 0.61 的 BOOL/PWSTR 类型。
-windows-core-061 = { package = "windows-core", version = "0.61" }
+# Tauri 2.12 / wry 0.57 使用 webview2-com 0.39 + windows-core 0.62，
+# 与主工程的 windows 0.62 类型一致（不再需要 0.61 别名）。
+windows-core = "0.62"
 
 [target.'cfg(windows)'.dependencies]
-webview2-com = "0.38"
+webview2-com = "0.39"
