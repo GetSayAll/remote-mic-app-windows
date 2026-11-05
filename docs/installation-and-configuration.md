@@ -17,20 +17,20 @@
 
 1. 打开仓库的 [GitHub Releases](https://github.com/GetSayAll/remote-mic-app-windows/releases)，选择标记为“Pre-release”的目标预览版；稳定版上线后，也可选择标记为“Latest”的版本。
 2. 下载 `SayAll-Windows-<版本号>-x64-setup.exe`。不要下载 `latest.json` 或 `.sig` 文件来手动安装。
-3. 建议同时下载 `SHA256SUMS.txt`，在安装包所在目录打开 PowerShell，执行：
+3. 可选：下载 `SHA256SUMS.txt` 核对安装包完整性。在安装包所在目录打开 PowerShell，执行：
 
    ```powershell
    Get-FileHash -Algorithm SHA256 .\SayAll-Windows-*-x64-setup.exe
    Get-Content .\SHA256SUMS.txt
    ```
 
-   两处安装包哈希值应完全相同。若不同，删除安装包并停止安装。
+   两处安装包哈希值应完全相同。若不同，删除安装包并停止安装；不核对也可以继续安装。
 4. 双击安装包，选择语言并按提示完成安装。安装位置由安装器管理，不需要手动选择。
 5. 从开始菜单的“无线麦 SayAll”文件夹启动“无线麦 SayAll”。
 
 ### Windows 安全提示
 
-首版安装包可能还没有 Authenticode 代码签名，因此 Windows SmartScreen 可能显示“Windows 已保护你的电脑”。只有在安装包来自上述官方 Release、文件名正确且 SHA-256 校验一致时，才可选择“更多信息”并继续运行；来源或校验不明时不要绕过提示。
+首版安装包可能还没有 Authenticode 代码签名，因此 Windows SmartScreen 可能显示“Windows 已保护你的电脑”。只有在安装包来自上述官方 Release、文件名正确时，才可选择“更多信息”并继续运行；如果做过 SHA-256 校验，确认结果一致。来源不明时不要绕过提示。SHA-256 是可选的完整性检查，不是安装前提。
 
 ## 3. 在 Windows 中配对遥控器
 
