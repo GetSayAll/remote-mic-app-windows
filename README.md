@@ -131,7 +131,15 @@
 - **DimAgent**：调度多模型团队，构建你想要的一切 → [dimagent.cn](https://dimagent.cn/?utm_source=sayall.app)
 - **Vokie**：首选语音助理，语音输入、闪记、旁听，直接给你可用结果 → [vokie.com](https://vokie.com/?utm_source=sayall.app)
 
-## 赞赏
+## ☕️ 请我买 Token
+
+如果「无线麦 SayAll」对你有帮助，欢迎自愿请我买一点 Token。
+
+这些支持会用于支付 AI 开发工具的 Token 费用，帮助我继续为大家开发新功能、优化已有功能、修复问题，让这个项目能够持续迭代。
+
+赞赏完全自愿，不影响软件使用，也不构成任何服务承诺。金额随意，量力而行；无论是否赞赏，都感谢你的使用、反馈和分享。
+
+谢谢你支持「无线麦 SayAll」继续变得更好。
 
 <p align="center">
   <img src="Screenshots/donation-wechat.jpg" alt="微信赞赏码" width="280">
