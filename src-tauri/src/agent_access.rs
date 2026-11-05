@@ -315,6 +315,31 @@ impl AgentAccessStore {
 
     pub fn revoke(&self, client_id: &str) -> Result<AgentAccessSnapshot, AgentAccessCommandError> {
         let _guard = self.lock();
+        let state = self
+            .read_state()
+            .map_err(AgentAccessCommandError::from_state)?;
+        let Some(authorization) = state
+            .authorizations
+            .iter()
+            .find(|item| item.client_id == client_id)
+        else {
+            return Err(AgentAccessCommandError::new("authorization_not_found"));
+        };
+        let integration = authorization
+            .integration_identifier
+            .as_deref()
+            .and_then(AgentClientId::parse);
+        // 撤销带集成身份的有效授权时，必须连客户端配置一起清掉（对齐 Mac 的
+        // `revoke`：`integrationService.remove(client)` 之后才 `revokeAuthorization`）。
+        // 否则用户撤销后再点「连接」，预检会撞上自己留下的托管块报冲突。
+        let mut removal_failed = false;
+        let mut removal_client = None;
+        if authorization.is_active() {
+            if let Some(client) = integration {
+                removal_client = Some(client);
+                removal_failed = self.remove_client_config(client).is_err();
+            }
+        }
         let mut state = self
             .read_state()
             .map_err(AgentAccessCommandError::from_state)?;
@@ -322,6 +347,12 @@ impl AgentAccessStore {
             .map_err(AgentAccessCommandError::from_state)?;
         self.write_state(&state)
             .map_err(|_| AgentAccessCommandError::new("revoke_failed"))?;
+        if removal_failed {
+            return Err(AgentAccessCommandError::for_client(
+                "configuration_removal_failed",
+                removal_client.expect("removal_failed 必然伴随集成客户端"),
+            ));
+        }
         Ok(self.snapshot())
     }
 
@@ -340,14 +371,14 @@ impl AgentAccessStore {
         let executable = self
             .executable_path()
             .ok_or_else(|| AgentAccessCommandError::new("local_component_missing"))?;
-        self.preflight(client)
-            .map_err(|code| AgentAccessCommandError::for_client(code, client))?;
         if state.active_for_integration(client.as_str()).is_some() {
             return Err(AgentAccessCommandError::for_client(
                 "duplicate_client",
                 client,
             ));
         }
+        self.preflight(client)
+            .map_err(|code| AgentAccessCommandError::for_client(code, client))?;
         let created = create_agent_authorization(
             &mut state,
             client.display_name(),
@@ -420,11 +451,6 @@ impl AgentAccessStore {
     #[cfg(test)]
     fn set_available(&mut self, clients: Vec<AgentClientId>) {
         self.available_override = Some(clients);
-    }
-
-    #[cfg(test)]
-    fn set_command_result(&mut self, code: i32) {
-        self.command_override = Some(std::sync::Arc::new(move |_, _| Ok(code)));
     }
 
     /// 按调用顺序依次返回退出码；用尽后一律 0。用来区分「预检通过、安装被拒」。
@@ -616,9 +642,13 @@ impl AgentAccessStore {
         match client {
             AgentClientId::Codex => {
                 let existing = self.read_text_optional(&self.codex_config_path())?;
-                if managed_codex_range(&existing).is_some()
-                    || existing.contains("[mcp_servers.sayall_history]")
-                {
+                if managed_codex_range(&existing).is_some() {
+                    // 带我们标记的托管块只会由无线麦写入。走到这里说明该集成没有
+                    // 有效授权（重复检查在上面已经挡掉）——多半是历史版本撤销时
+                    // 没清理成功的孤儿块，连接会整体替换它，不算冲突。
+                    return Ok(());
+                }
+                if existing.contains("[mcp_servers.sayall_history]") {
                     return Err("configuration_conflict");
                 }
                 Ok(())

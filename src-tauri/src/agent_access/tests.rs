@@ -164,6 +164,69 @@ fn codex_connect_appends_managed_block_and_disconnect_removes_it() {
 }
 
 #[test]
+fn revoke_removes_the_client_configuration_and_reconnect_succeeds() {
+    let env = Env::new();
+    let snapshot = env.store.connect(AgentClientId::Codex).expect("connect");
+    let client_id = snapshot.authorizations[0].client_id.clone();
+    assert!(
+        std::fs::read_to_string(env.codex_config())
+            .expect("read")
+            .contains(CODEX_BLOCK_BEGIN),
+        "连接后应有托管块"
+    );
+
+    // 用户点「撤销」：必须连配置一起清掉，否则重连必然撞冲突。
+    let revoked = env.store.revoke(&client_id).expect("revoke");
+    assert!(revoked.authorizations.is_empty());
+    let text = std::fs::read_to_string(env.codex_config()).expect("read");
+    assert!(!text.contains(CODEX_BLOCK_BEGIN), "撤销后托管块应被移除");
+
+    let reconnected = env.store.connect(AgentClientId::Codex).expect("reconnect");
+    assert_eq!(reconnected.authorizations.len(), 1);
+    let text = std::fs::read_to_string(env.codex_config()).expect("read");
+    assert_eq!(
+        text.matches(CODEX_BLOCK_BEGIN).count(),
+        1,
+        "重连后恰好一个托管块：{text}"
+    );
+}
+
+#[test]
+fn connect_replaces_an_orphaned_managed_block_left_by_older_revoke() {
+    let env = Env::new();
+    // 旧版本撤销时没清理配置，留下带标记的孤儿块（用户实际撞到的现场）。
+    let orphan = format!(
+        "{begin}\n[mcp_servers.sayall_history]\ncommand = \"old\\\\path.exe\"\nargs = [\"serve\"]\n{end}\n",
+        begin = CODEX_BLOCK_BEGIN,
+        end = CODEX_BLOCK_END
+    );
+    std::fs::write(env.codex_config(), &orphan).expect("seed");
+
+    let snapshot = env.store.connect(AgentClientId::Codex).expect("connect");
+    assert_eq!(snapshot.authorizations.len(), 1);
+    let text = std::fs::read_to_string(env.codex_config()).expect("read");
+    assert_eq!(
+        text.matches(CODEX_BLOCK_BEGIN).count(),
+        1,
+        "孤儿块应被整体替换：{text}"
+    );
+    assert!(text.contains("sayall-mcp.exe"), "应写入当前可执行文件路径");
+}
+
+#[test]
+fn codex_conflict_still_fires_for_a_foreign_entry_without_markers() {
+    let env = Env::new();
+    std::fs::write(
+        env.codex_config(),
+        "[mcp_servers.sayall_history]\ncommand = \"someone-else.exe\"\n",
+    )
+    .expect("seed");
+    let error = env.store.connect(AgentClientId::Codex).unwrap_err();
+    assert_eq!(error.code, "configuration_conflict");
+    assert!(env.store.snapshot().authorizations.is_empty());
+}
+
+#[test]
 fn codex_conflict_leaves_no_authorization_behind() {
     let env = Env::new();
     std::fs::write(

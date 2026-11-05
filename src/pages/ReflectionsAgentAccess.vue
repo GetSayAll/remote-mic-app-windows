@@ -125,6 +125,8 @@ async function revoke(clientId: string): Promise<void> {
       generated.value = null;
     }
   } catch (error) {
+    // 「授权已撤销但配置没删掉」也走这里：先刷新快照，让列表与实际一致。
+    await refresh();
     applyError(error);
   }
 }
