@@ -386,7 +386,11 @@ interface CreatedAgentAuthorization { snapshot: AgentAccessSnapshot;
 | M1 只读通道 | **passed** | `crates/sayall-mcp`（11 单测 + 10 真实子进程 stdio）；`sayall-core::agent_access` / `mcp_config` / `read_archive`（core 106 项全绿）；打包资源与出包脚本已接 |
 | M2 页面与授权 | **passed** | `src-tauri::agent_access` 15 项（含 Codex 冲突/JSON 非法/客户端拒绝三条事务回滚）；`ReflectionsAgentAccess` 9 项组件测试；回眸页空态与位置断言；Chromium 1100×688 真实点击 13/13 |
 | M3 快速连接 | **部分 passed** | Codex：用 `CODEX_HOME` 指向临时目录跑 `codex mcp list`，生成的 TOML 正确解析出 `sayall_history`（含中文安装路径）；阳性对照（JSON 风格 `\/`）报 `missing escaped value`。Claude Code / Cursor / OpenCode **deferred**（本机未安装，只做了写入与回滚自动化） |
-| M4 交付 | **未开始** | 未出本地测试包；`verify-local-test-install.ps1` 已加 `sayall-mcp.exe` 哈希检查，但还没在实际安装包上跑过 |
+| M4 交付 | **passed（本机包）** | `无线麦 SayAll_1.8.3_x64-setup.exe`（SHA-256 `32458af4…75a3`，本机测试密钥，不可发布）；`verify-local-test-install.ps1 -NoLaunch` 全部 PASS（含 `sayall-mcp.exe` 哈希）；安装版二进制跑通 `initialize` + `query_transcripts` |
+
+出包踩坑（本机）：`pnpm` 不在 PATH 时 `beforeBuildCommand` 必失败；WorkBuddy 的 safe-delete
+拦截 `vite` 清空 `dist`（>50 文件/次）。做法：`npx vite build --outDir dist-build` 后
+`tauri build --config src-tauri/tauri.local-build.conf.json`（该配置已把两个钩子置空）。
 
 已确认并落实的取舍：
 
