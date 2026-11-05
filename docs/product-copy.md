@@ -698,3 +698,8 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `src/onboarding/flow.ts`、`src/onboarding/panel.ts`、`src-tauri/src/onboarding.rs`。
   诊断块的步骤顺序随之变为八步（`n/8`）；`Testing/WindowsOnboardingWizard.md` 中的原第③–⑦步
   依次后移为第④–⑧步，2026-10-05 等历史条目里的步骤号保持当时含义。
+- 2026-11-05（向导第①步第 5 条文案，Andy 指定）：改为「选中「小米蓝牙语音遥控器」，等待配对
+  完成，列表里找不到设备时，打开高级设置或者点开「显示所有设备」。」。英文同步为
+  `Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. If it is not listed,
+  open Advanced settings or select Show all devices.`；真机验收手册同句同步。落点：
+  `src/onboarding/steps/WelcomeStep.vue`、`src/lib/i18n/en/onboarding.ts`。

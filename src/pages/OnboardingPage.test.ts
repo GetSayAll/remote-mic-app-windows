@@ -623,7 +623,7 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("长按「TV」键约 3 秒");
     expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
-    expect(wrapper.text()).toContain("先点开「显示所有设备」");
+    expect(wrapper.text()).toContain("打开高级设置或者点开「显示所有设备」");
     expect(wrapper.text()).toContain("回到第 4 步重置蓝牙后重新配对");
     // 底部那段提示按现场要求删掉。
     expect(wrapper.text()).not.toContain("设置中途可以随时退出");
