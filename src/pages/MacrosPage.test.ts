@@ -560,6 +560,42 @@ describe("组合动作页 · 编辑向导", () => {
     expect(display).not.toMatch(/return/i);
   });
 
+  it("系统与媒体预设只显示按键组合，功能描述退为悬停提示", async () => {
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    const shortcutCard = wrapper
+      .findAll(".action-card")
+      .find((item) => item.text().includes("单键或快捷键"))!;
+    await shortcutCard.trigger("click");
+    await flushPromises();
+
+    const chips = wrapper.findAll(".preset-grid .chip");
+    const texts = chips.map((chip) => chip.text());
+    expect(texts).toContain("Alt + Tab");
+    expect(texts).toContain("Win + D");
+    expect(texts).toContain("Ctrl + W");
+    expect(texts).not.toContain("切换应用");
+    expect(texts).not.toContain("显示桌面");
+    expect(texts).not.toContain("关闭窗口");
+
+    const chip = (text: string) => chips.find((item) => item.text() === text)!;
+    expect(chip("Alt + Tab").attributes("title")).toBe(
+      "切换应用：用左、右键选择，按“确定”确认，返回取消",
+    );
+    expect(chip("Win + D").attributes("title")).toBe("显示桌面");
+
+    await chip("Alt + Tab").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Alt + Tab");
+
+    await chip("Win + D").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Win + D");
+  });
+
   it("离开组合动作页时停止仍在进行的录入", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "编辑").trigger("click");
@@ -968,7 +1004,8 @@ describe("组合动作页 · 编辑向导", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("已保存的快捷键");
     expect(wrapper.text()).toContain("记事本 · Ctrl + K");
-    const copy = wrapper.findAll(".chip").find((chip) => chip.text() === "复制")!;
+    const copy = wrapper.findAll(".chip").find((chip) => chip.text() === "Ctrl + C")!;
+    expect(copy.attributes("title")).toBe("复制");
     await copy.trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Ctrl + C");

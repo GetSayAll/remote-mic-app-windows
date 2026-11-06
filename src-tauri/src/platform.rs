@@ -422,6 +422,8 @@ impl PlatformRuntime for WindowsPlatform {
     }
 
     fn shutdown_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {
+        // 先释放应用切换器会话的 Alt（进程结束前必须同步完成），再收尾 BLE。
+        let _ = self.release_app_switcher_for_exit(std::time::Duration::from_millis(800));
         self.shutdown_ble_for_exit(timeout)
     }
 }

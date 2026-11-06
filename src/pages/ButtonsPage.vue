@@ -4,7 +4,11 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
 import MembershipRequiredButton from "../components/MembershipRequiredButton.vue";
-import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
+import {
+  SHORTCUT_PRESET_GROUPS,
+  shortcutPresetHint,
+  type ShortcutPresetItem,
+} from "../lib/shortcut-presets";
 import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
@@ -1016,6 +1020,23 @@ function isActivePreset(keys: KeyCode[]): boolean {
   return action.chord.keys.join("+") === keys.join("+");
 }
 
+/** 预设 chip 是否是当前格子的动作（快捷键按组合键，切换应用按动作类型）。 */
+function isActivePresetItem(preset: ShortcutPresetItem): boolean {
+  if (preset.action === "app_switcher") {
+    return selectedAction.value?.type === "app_switcher";
+  }
+  return isActivePreset(preset.keys);
+}
+
+/** 点击预设 chip：切换应用写入会话动作，其余写入普通快捷键组合。 */
+function applyPresetItem(preset: ShortcutPresetItem): void {
+  if (preset.action === "app_switcher") {
+    applyAction({ type: "app_switcher" });
+    return;
+  }
+  applyAction({ type: "shortcut", chord: { keys: [...preset.keys] } });
+}
+
 /**
  * 「按住时连续执行」的界面规则（2026-10-05 radio 三选一定稿）：
  * - 按键级三态：关闭 / 重复单击动作 / 重复长按动作（双击不参与），显示在
@@ -1044,6 +1065,8 @@ const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
 
 /** 动作是否可连续执行（与 Rust `ButtonAction::allows_repeat` 同源口径）。 */
 function actionAllowsRepeat(action: ButtonAction): boolean {
+  // 切换应用会话内每次触发只前进一项；按住连发等价于系统 Alt+Tab 连续 Tab。
+  if (action.type === "app_switcher") return true;
   if (action.type === "scroll" || action.type === "mouse_move") return true;
   if (action.type !== "shortcut") return false;
   return action.chord.keys.length === 1 && !REPEAT_MODIFIER_KEYS.has(action.chord.keys[0]);
@@ -2615,10 +2638,10 @@ onUnmounted(() => {
               v-for="preset in group.items"
               :key="preset.label"
               class="chip"
-              :class="{ selected: isActivePreset(preset.keys) }"
+              :class="{ selected: isActivePresetItem(preset) }"
               type="button"
-              :title="preset.label"
-              @click="applyAction({ type: 'shortcut', chord: { keys: [...preset.keys] } })"
+              :title="shortcutPresetHint(preset)"
+              @click="applyPresetItem(preset)"
             >
               {{ preset.display ?? chordLabel({ keys: preset.keys }) }}
             </button>

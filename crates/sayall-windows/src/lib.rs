@@ -13,6 +13,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub mod app_launcher;
+/// Windows 应用切换器（Alt+Tab）临时会话：状态机、I/O 接缝与结束报告。
+/// 产品行为对齐 macOS Command+Tab 会话，平台差异见模块文档。
+pub mod app_switcher;
 #[cfg(windows)]
 mod audio;
 #[cfg(windows)]
@@ -839,6 +842,20 @@ impl WindowsPlatform {
         _timeout: std::time::Duration,
     ) -> Result<(), PlatformError> {
         Ok(())
+    }
+
+    /// 退出前同步释放应用切换器（Alt+Tab）会话，等引擎确认 Alt 已释放。
+    ///
+    /// 必须排在 BLE 收尾之前：`std::process::exit` 不执行析构，只有显式调用
+    /// 才能保证不把按住的 Alt 留在系统键态。无活动会话时立即返回 true。
+    #[cfg(windows)]
+    pub fn release_app_switcher_for_exit(&self, timeout: std::time::Duration) -> bool {
+        self.button_mapping.release_app_switcher_for_exit(timeout)
+    }
+
+    #[cfg(not(windows))]
+    pub fn release_app_switcher_for_exit(&self, _timeout: std::time::Duration) -> bool {
+        true
     }
 
     pub fn test_scroll(

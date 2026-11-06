@@ -24,6 +24,7 @@
 | 增强按键能力（按键页） | 全按键支持 | `ButtonsPage.vue` |
 | 同一设置在连接页的入口 | 支持更多输入工具 | `ConnectionPage.vue` |
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
+| Windows 应用切换器（按键页「系统与媒体」） | 「切换应用」；卡片显示 `Alt + Tab`；悬停提示「切换应用：用左、右键选择，按“确定”确认，返回取消」。会话内方向键 / 确定 / 返回只操作系统切换器，15 秒无操作自动取消（对齐 Mac `Command+Tab` 临时会话，平台动作换成 Alt+Tab）；旧的一次性 `Alt+Tab` 绑定保留可执行。按键页、组合动作页与键位方案的预设芯片统一只显示按键组合，功能描述只作悬停提示；`Win + D`/`Win + L`/`Win + S`/`Win + Shift + S` 保存后摘要也显示 `Win`，不显示「左 Win」或「右 Win」。组合动作里的 `Alt + Tab` 也启动应用切换器会话（运行时按 Alt+Tab 识别）；键位方案复用共享清单的 `app_switcher` 动作。组合动作步骤在会话启动后立即完成，建议把 `Alt + Tab` 放在最后一步，避免后续步骤在切换器打开时继续发送按键 | `src/lib/shortcut-presets.ts`、`ButtonsPage.vue`、`MacrosPage.vue`、`src/lib/bridge.ts`（`actionSummary`）、`sayall-windows::app_switcher` |
 | 虚拟声卡端点 | CABLE Input / CABLE Output（经典 2 通道驱动）；CABLE In 16 Ch（3.3.1.7 起的新版 16 通道驱动，渲染端） | VB-Audio 官方名称；界面文案只说“选择带『推荐』标记的 CABLE 设备”，不硬编码单独一个名字（2026-10-02 现场教训） |
 | 第三方语音工具 Vokie | Vokie；官网 vokie.com；说明文案“流式显示，智能整理，不占用输入法”（Vokie 官方口径，原样引用） | `VOKIE_HOMEPAGE_URL`（`src/lib/bridge.ts`）、`ConnectionPage.vue` |
 | 推荐页（侧栏，2026-10-18） | 侧栏与页面标题统一为「推荐」；英文为 Picks（对齐 Mac 补充页标题）。页面正文、筛选项、商品名与详情全部来自官网 `https://sayall.app/recommendations/`，不在本地维护推荐文案。英文设置下使用 `/en/recommendations/` 与 Mac 同款英文固定文案（Picks / Loading page… / This page is temporarily unavailable. Open the website or try again later. / Open website / Retry / Back） | `src/navigation.ts`、`RecommendationsPage.vue`、`RECOMMENDATIONS_URL` |
@@ -59,6 +60,7 @@
 | 全按键支持 | Full-key support | 句首大写，其余小写 |
 | 遥控器语音键 | Voice Button | 遥控器上的语音键；相关句子用 voice button |
 | 按住说话快捷键（输入工具触发键） | Voice Trigger Key / voice shortcut | 对齐 Mac `connection.voice_key_mode.title` / `onboarding.voice_tool.*` |
+| 切换应用（按键动作） | Switch Apps | 对齐 Mac `shortcut.preset.app_switcher`；卡片显示 `Alt + Tab` |
 | 单击 / 双击 | Single Press / Double Press | 遥控器按键触发方式；鼠标单击仍用 click |
 | 上一曲 / 下一曲 | Previous track / Next track | 对齐 Mac |
 | 小米蓝牙语音遥控器 2 / 2 Pro | Xiaomi Bluetooth Voice Remote 2 / 2 Pro | 包含「语音」与版本后缀 |
@@ -722,9 +724,15 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. If it is not listed,
   open Advanced settings or select Show all devices.`；真机验收手册同句同步。落点：
   `src/onboarding/steps/WelcomeStep.vue`、`src/lib/i18n/en/onboarding.ts`。
+- 2026-11-05（按键页「切换应用」，对齐 Mac `Command+Tab` 会话）：原「系统与媒体」中的一次性
+  `Alt+Tab` 预设改为动作「切换应用」（卡片仍显示 `Alt + Tab`）。触发后打开系统切换器，
+  左/右选择、OK 确认、返回取消；再次触发或 TV 前进一项；15 秒无操作自动取消。悬停提示写
+  「切换应用：用左、右键选择，按“确定”确认，返回取消」；英文 `Switch Apps`。旧的一次性
+  `Alt+Tab` 绑定不受影响，重新选择预设即升级为会话。落点：`src/lib/shortcut-presets.ts`、
+  `ButtonsPage.vue`、`src/lib/bridge.ts`、`src/lib/i18n/en/lib.ts`；平台实现见
+  `crates/sayall-windows/src/app_switcher.rs`。
 - 2026-11-06（品牌字体对齐 Mac，Andy 指定）：侧栏左上角 SayAll 使用 Oxanium SemiBold 16px；
   设置页左上角「无线麦 SayAll」使用 Oxanium SemiBold 18px（中文按 Segoe UI / 微软雅黑回退）。
   侧栏宽度按 Mac origin/main 的内容测量口径取 130px（129 内容 + 1px 边框），不再固定 136px。
   字体文件 `public/fonts/oxanium-semibold.ttf`，OFL 1.1 许可随包（`public/fonts/OFL.txt`），
   第三方声明见 `THIRD_PARTY_NOTICES.md`。
-

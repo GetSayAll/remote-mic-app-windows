@@ -9,6 +9,11 @@
 - 滚轮动作参考 AutoHotkey v2 的 WheelUp/WheelDown 动作粒度，仅参考行为，不复制实现或依赖 AutoHotkey。来源：`https://github.com/AutoHotkey/AutoHotkeyDocs/blob/v2/docs/lib/Send.htm`。
 - 滚轮使用 Microsoft 公开 SendInput / MOUSEINPUT API：INPUT_MOUSE + MOUSEEVENTF_WHEEL，mouseData 是带符号的滚轮位移；一个刻度为 WHEEL_DELTA（120）。来源：`https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput`。动作是用户可选配置，不绑定固定遥控器按键、不修改默认配置。测试和首按边界见 `Testing/WindowsMouseActions.md`。
 
+## 应用切换器（Alt+Tab）会话
+
+- `HD838A/remote-mic-app`（macOS），提交 `c1840de9`，`Sources/RemoteMic/KeyboardInjector.swift`（`AppSwitcherSession`）、`Sources/RemoteMic/BridgeAppModel.swift`（会话生命周期、15 秒超时、前台变化处理）与 `Testing/AppSwitcherRemoteControl.md`：参考其“保持 Command + Tab、方向选择、确认 / 取消 / 超时”的产品时序与失败边界；Windows 端按平台差异改写为 Alt 保持 + Tab/Shift+Tab + Esc 取消，未复制 Swift/AppKit 代码，无运行时依赖。差异：Windows 原生切换器窗口类（Windows 10 `MultitaskingViewFrame` / Windows 11 `XamlExplorerHostIslandWindow`）用于存在性判定，1.5 秒观察不到即释放 Alt；用户鼠标切换后静默释放；15 秒应用侧超时。实现与验收见 `crates/sayall-windows/src/app_switcher.rs`、`Testing/WindowsAppSwitcher.md`。
+- Windows 公开 API：`SendInput`、`GetAsyncKeyState`、`GetForegroundWindow`、`GetClassNameW`、`GetShellWindow`、`EnumWindows`。只读窗口类名与进程号做布尔判定，不读取窗口标题，不注入第三方进程，不修改第三方配置。
+
 ## Windows 注册应用扩展
 
 - 应用发现使用 Microsoft AppsFolder / IShellItem / BHID_EnumItems，启动使用 ShellExecuteExW + SEE_MASK_NOASYNC；只读取系统公开注册的可启动项，不扫描第三方私有文件或修改 Windows 注册。按本机缓存的 Microsoft windows-rs 0.62.2 API 签名核对实现；没有复制外部算法。参考： https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid 、https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow 。

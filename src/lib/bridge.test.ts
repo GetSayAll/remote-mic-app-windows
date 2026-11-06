@@ -13,6 +13,7 @@ import {
   getApplicationLanguage,
   getOpenWindowAtLaunch,
   identityShortcutByButton,
+  isAppSwitcherMacroChord,
   isRecommendedVoiceEndpoint,
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
@@ -80,6 +81,18 @@ describe("mouse actions", () => {
   it("summarizes the focus-input action", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
+  });
+
+  it("summarizes the app switcher session by its key chord", () => {
+    expect(actionSummary({ type: "app_switcher" })).toBe("Alt + Tab");
+  });
+
+  it("recognizes only the Alt + Tab macro chord as the switcher session", () => {
+    expect(isAppSwitcherMacroChord({ modifiers: ["alt"], key: "tab" })).toBe(true);
+    expect(isAppSwitcherMacroChord({ modifiers: ["control", "alt"], key: "tab" })).toBe(false);
+    expect(isAppSwitcherMacroChord({ modifiers: ["alt"], key: "escape" })).toBe(false);
+    expect(isAppSwitcherMacroChord({ modifiers: [], key: "tab" })).toBe(false);
+    expect(isAppSwitcherMacroChord(undefined)).toBe(false);
   });
 });
 
@@ -191,7 +204,10 @@ describe("voice endpoint recommendation", () => {
     expect(chordLabel({ keys: ["backspace"] })).toBe("Backspace");
     expect(chordLabel({ keys: ["delete"] })).toBe("Delete");
     expect(chordLabel({ keys: ["control", "c"] })).toBe("Ctrl + C");
-    expect(chordLabel({ keys: ["left_windows", "shift", "s"] })).toBe("左 Win + Shift + S");
+    // 普通快捷键显示不区分左右 Win，与预设芯片的 "Win + Shift + S" 一致；
+    // 语音键仍用 voiceHoldHotkeyLabel 保留左右。
+    expect(chordLabel({ keys: ["left_windows", "shift", "s"] })).toBe("Win + Shift + S");
+    expect(chordLabel({ keys: ["right_windows", "d"] })).toBe("Win + D");
   });
 });
 
