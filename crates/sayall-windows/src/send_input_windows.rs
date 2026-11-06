@@ -35,6 +35,14 @@ pub fn right_alt_down() -> bool {
     unsafe { GetAsyncKeyState(i32::from(KeyCode::RightAlt.virtual_key())) < 0 }
 }
 
+/// 左 Alt 是否仍在系统键态里（应用切换器会话释放后的读回判据）。
+///
+/// 只读 `GetAsyncKeyState`，不改变键态。用 `VK_LMENU` 而不是通用 `VK_MENU`：
+/// 语音键可能按住右 Alt，不能把两者混在一起判断。
+pub fn left_alt_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(KeyCode::LeftAlt.virtual_key())) < 0 }
+}
+
 impl SendInputRuntime {
     pub fn new() -> Self {
         Self {
