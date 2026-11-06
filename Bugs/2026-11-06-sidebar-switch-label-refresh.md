@@ -74,8 +74,12 @@
   - 组合动作页二次进入：`.count-badge` 首帧直接是 `8`；搜索框输入「聚焦」后切到「连接」
     再回来，值与过滤结果保留 ⇒ KeepAlive 生效；
   - 清缓存重载 200–500ms 显示内部 id、保留缓存重载 200ms 即产品名（正/负对照）。
-- runtime simulation（真实 Tauri IPC 旅程）：见本次交付报告；本机是否通过以报告为准。
-- 安装包复验：本机测试包安装后同样采样，详见交付报告。
+- runtime simulation（真实 Tauri IPC 旅程，`-features runtime-simulation` 构建）：
+  `scripts/test-windows-runtime-simulation.ps1` **27 steps passed**（含「五个侧栏页面均在
+  Windows WebView 中完成导航和渲染」）。
+- 安装包复验（`3ea535a`，SHA-256 `470d3068…`）：`verify-local-test-install.ps1 -ExpectRevision`
+  全部 PASS（内嵌修订号 `3ea535a5`）；安装版 CDP 采样与上面一致：按键页 0 / 30 / 80 / 200 /
+  600ms 全为产品名，组合动作页二次进入首帧即 `8`，整页重载后 200ms 起即为产品名。
 
 ## 未覆盖
 
