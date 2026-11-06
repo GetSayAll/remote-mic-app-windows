@@ -285,13 +285,31 @@ pub fn foreground_application_identity() -> Option<(String, String)> {
             Some(&mut pid),
         )
     };
-    if pid == 0 || pid == std::process::id() {
+    application_identity_for_pid(pid)
+}
+
+/// 录音 manifest 的应用身份。
+///
+/// 前台是本应用时也要给出身份，不能返回 `None`：首次设置向导的语音测试与
+/// 设置页试音都发生在无线麦自己的窗口里，缺身份会让 manifest 没有应用名，
+/// 回眸只能显示「未知应用」（2026-11-06 用户报告）。个人中心统计已按
+/// 2026-10-25 的产品规则把「前台是本应用」显示为 `SayAll`，这里保持一致。
+fn application_identity_for_pid(pid: u32) -> Option<(String, String)> {
+    if pid == 0 {
         return None;
+    }
+    if pid == std::process::id() {
+        return Some((
+            SELF_APPLICATION_NAME.to_owned(),
+            SELF_APPLICATION_NAME.to_owned(),
+        ));
     }
     // 录音只需要应用键与显示名；不要在 BLE 线程上顺带提取图标。
     let (key, name, _) = application_identity_parts(pid);
     Some((key, name))
 }
+
+const SELF_APPLICATION_NAME: &str = "SayAll";
 
 fn application_identity(pid: u32) -> (String, String, Option<Vec<u8>>) {
     let (key, name, executable) = application_identity_parts(pid);
@@ -833,6 +851,24 @@ mod tests {
     fn extracted_icons_pass_the_cache_check() {
         let png = application_icon_png(r"C:\Windows\System32\notepad.exe").expect("notepad icon");
         assert!(icon_png_is_usable(&png));
+    }
+
+    #[test]
+    fn self_foreground_recordings_are_labelled_sayall() {
+        // 首次设置向导的语音测试前台是无线麦自己；必须显示 SayAll，
+        // 而不是因为缺身份落到「未知应用」（2026-11-06 用户报告）。
+        assert_eq!(
+            application_identity_for_pid(std::process::id()),
+            Some((
+                SELF_APPLICATION_NAME.to_owned(),
+                SELF_APPLICATION_NAME.to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn missing_foreground_pid_has_no_identity() {
+        assert_eq!(application_identity_for_pid(0), None);
     }
 
     #[test]

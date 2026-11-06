@@ -1187,11 +1187,13 @@ onUnmounted(() => {
 }
 .app-chip {
   min-width: 0;
-  height: 48px;
+  min-height: 48px;
+  height: auto;
   display: flex;
   align-items: center;
   gap: 9px;
-  flex: 0 0 auto;
+  /* 名称过长时让 chip 收缩并换行，而不是把文字裁成省略号（2026-11-06 用户报告）。 */
+  flex: 0 1 auto;
   padding: 7px 9px;
   border: 0;
   border-radius: 10px;
@@ -1208,10 +1210,14 @@ onUnmounted(() => {
   background: var(--accent-surface);
 }
 .app-chip-all {
-  width: 156px;
+  width: auto;
+  min-width: 156px;
 }
 .app-chip-app {
-  width: 148px;
+  width: auto;
+  min-width: 120px;
+  /* 足够容纳「腾讯电脑管家截图工具」这类长产品名；窗口变窄时由 flex 收缩并换行。 */
+  max-width: 190px;
 }
 .app-switcher-grid .app-chip {
   width: auto;
@@ -1273,9 +1279,9 @@ onUnmounted(() => {
   gap: 2px;
 }
 .app-chip-label strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 应用名必须完整显示：允许换行，不做省略号截断（2026-11-06 用户截图报告）。 */
+  white-space: normal;
+  overflow-wrap: anywhere;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.15;
@@ -1406,7 +1412,7 @@ onUnmounted(() => {
 .transcript-row {
   position: relative;
   display: grid;
-  grid-template-columns: 54px 126px minmax(0, 1fr) auto;
+  grid-template-columns: 54px 164px minmax(0, 1fr) auto;
   align-items: start;
   gap: 12px;
   padding: 9px 0;
@@ -1442,9 +1448,8 @@ onUnmounted(() => {
 }
 .row-app-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   font-size: 12.5px;
   font-weight: 600;
   line-height: 1.35;
