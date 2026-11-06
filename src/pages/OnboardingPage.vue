@@ -326,6 +326,8 @@ const sidePanel = computed(() => {
 const BLOCK_COPY: Record<OnboardingBlockCode, string> = {
   "remote.not_connected": "先连接遥控器，再继续。",
   "remote.listener_not_ready": "按键监听正在启动，请稍等一下。",
+  "remote.hid_interface_missing":
+    "Windows 还没有识别到这支遥控器的按键通道。打开蓝牙设置重新配对。",
   "remote.button_not_ready": "连接已就绪。按一下遥控器上的普通按键（比如主页键），不要按语音键。",
   "audio.install_required": "这台电脑还没有 VB-CABLE 语音设备，先安装再继续。",
   "audio.not_selected": "选择带「推荐」标记的语音设备，再继续。",
