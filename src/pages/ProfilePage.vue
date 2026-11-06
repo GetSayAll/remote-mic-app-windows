@@ -301,11 +301,12 @@ onUnmounted(() => {
         <div class="profile-kpi-text">
           <span class="profile-kpi-label">{{ metric.title }}</span>
           <div class="profile-kpi-value">
-            <strong v-if="metric.parts" class="profile-kpi-duration">
+            <template v-if="metric.parts">
               <template v-for="(part, index) in metric.parts" :key="index">
-                <span class="profile-kpi-number">{{ part.value }}</span><small>{{ part.unit }}</small>
+                <strong class="profile-kpi-number">{{ part.value }}</strong>
+                <small>{{ part.unit }}</small>
               </template>
-            </strong>
+            </template>
             <template v-else>
               <strong>{{ metric.value }}</strong>
               <small v-if="metric.unit">{{ metric.unit }}</small>
