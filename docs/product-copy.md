@@ -767,3 +767,7 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   最小窗口下内容区可能只露出卡片上半部分，按钮必须先可见、不需要先滚动。落点：
   `src/onboarding/flow.ts`、`src/onboarding/steps/RemoteStep.vue`、
   `src/pages/OnboardingPage.vue`、`src/lib/i18n/en/onboarding.ts`。
+- 2026-11-06（回眸应用名完整显示，用户截图报告）：应用栏 chip 与记录行的应用名不再用省略号截断。
+  chip 按名称自适应宽度（最小 120px、最大 190px），窗口变窄时由 flex 收缩并换行；记录行应用列由
+  126px 调整为 164px，仍超出时换行，不裁字。「全部应用」保持 156px 最小宽度。落点：
+  `src/pages/ReflectionsPage.vue`；回归 `src/pages/reflections-app-name-layout.test.ts`。
