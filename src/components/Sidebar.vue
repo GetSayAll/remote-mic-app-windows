@@ -19,22 +19,24 @@ function navLabel(item: { label: string }): string {
 const props = withDefaults(
   defineProps<{
     activePage: string;
-    /** 个人中心入口文案：未登录「个人中心」，已登录为邮箱前缀。 */
+    /** 账号入口文案：未登录「我的」，已登录为账号显示名（对齐 Mac statistics）。 */
     profileLabel?: string;
-    /** 与托盘/窗口图标同源的当前应用图标。 */
+    /** 顶部品牌区与字标使用当前应用图标。 */
     appIcon?: AppIconIdentifier;
     /** 侧栏品牌区版本行（对齐 Mac PR 803）；读不到时留空。 */
     appVersion?: string;
   }>(),
-  { profileLabel: "个人中心", appIcon: "faceted-duck", appVersion: "" },
+  { profileLabel: "我的", appIcon: "faceted-duck", appVersion: "" },
 );
 const emit = defineEmits<{ select: [page: string] }>();
 
 const topNavigationItems = computed(() => navigationItems.filter((item) => item.id !== "profile"));
 const profileItem = computed(() => navigationItems.find((item) => item.id === "profile"));
-/** 未登录时 App 传「个人中心」；英文模式换成 Profile，登录后的邮箱前缀原样显示。 */
+/** 未登录时 App 传「我的」；英文模式换成 Me，登录后的完整账号名原样显示。 */
 const profileLabelText = computed(() =>
-  props.profileLabel === "个人中心" ? tNav("个人中心") : props.profileLabel,
+  props.profileLabel === "我的" || props.profileLabel === "个人中心"
+    ? tNav("我的")
+    : props.profileLabel,
 );
 const appIconPreview = computed(() =>
   props.appIcon === "standard" ? "/app-logo.webp" : "/app-icon-faceted-duck.webp",
@@ -162,10 +164,20 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
           class="nav-item profile-nav-item"
           :class="{ active: activePage === profileItem.id }"
           type="button"
-          :aria-label="tNav('个人中心')"
+          :aria-label="profileLabelText"
           @click="emit('select', profileItem.id)"
         >
-          <img class="nav-icon nav-app-icon" :src="appIconPreview" alt="" aria-hidden="true" />
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              v-for="(path, index) in ICON_PATHS.person.strokes"
+              :key="index"
+              :d="path"
+              stroke="currentColor"
+              stroke-width="1.9"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
           <span class="nav-label">{{ profileLabelText }}</span>
         </button>
       </div>
@@ -179,7 +191,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  min-height: 75px;
+  height: 75px;
   padding: 11px 15px 10px;
   box-sizing: border-box;
 }
@@ -188,7 +200,6 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   width: 44px;
   height: 44px;
   flex: 0 0 auto;
-  border-radius: 10px;
   object-fit: cover;
 }
 
@@ -207,11 +218,11 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
 }
 
 .brand-version {
-  margin-top: 1px;
+  margin-top: -2px;
   overflow: hidden;
   color: var(--muted);
-  font-family: "Cascadia Mono", "Consolas", monospace;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -248,8 +259,11 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   white-space: nowrap;
 }
 
-.nav-app-icon {
-  border-radius: 4px;
-  object-fit: cover;
+/* 账号名按 Mac 允许换行；普通导航项仍保持单行省略。 */
+.profile-nav-item .nav-label {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 </style>

@@ -731,8 +731,12 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `Alt+Tab` 绑定不受影响，重新选择预设即升级为会话。落点：`src/lib/shortcut-presets.ts`、
   `ButtonsPage.vue`、`src/lib/bridge.ts`、`src/lib/i18n/en/lib.ts`；平台实现见
   `crates/sayall-windows/src/app_switcher.rs`。
-- 2026-11-06（品牌字体对齐 Mac，Andy 指定）：侧栏左上角 SayAll 使用 Oxanium SemiBold 16px；
+- 2026-11-06（品牌字体/标题栏/侧栏对齐 Mac，Andy 指定）：侧栏左上角 SayAll 使用 Oxanium SemiBold 16px；
   设置页左上角「无线麦 SayAll」使用 Oxanium SemiBold 18px（中文按 Segoe UI / 微软雅黑回退）。
   侧栏宽度按 Mac origin/main 的内容测量口径取 130px（129 内容 + 1px 边框），不再固定 136px。
+  窗口去掉原生标题栏的 logo 与文字，改为 32px 自定义标题栏；颜色始终使用侧栏的 `--sidebar`，
+  右侧保留最小化/最大化/关闭（关闭仍收进托盘）。侧栏行高 40、图标 18、文字 13 semibold、
+  leading 15 / trailing 11；底部账号入口使用 `person.crop.circle`，未登录显示「我的」，
+  已登录显示完整账号本地名并允许换行（对齐 Mac `sidebarAccountTitle` / `SettingsSidebarRow`）。
   字体文件 `public/fonts/oxanium-semibold.ttf`，OFL 1.1 许可随包（`public/fonts/OFL.txt`），
   第三方声明见 `THIRD_PARTY_NOTICES.md`。

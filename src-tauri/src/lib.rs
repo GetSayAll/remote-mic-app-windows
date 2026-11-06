@@ -1131,12 +1131,21 @@ mod windows_settings_tests {
 /// 日志只落结果、可见性与耗时，不含窗口标题或任何用户信息。
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    hide_main_window_with_source(app, "ctrl_w")
+}
+
+/// 自定义标题栏关闭按钮：与 Ctrl+W 同一隐藏动作，仅日志来源不同。
+#[tauri::command]
+fn hide_main_window_from_title_bar(app: tauri::AppHandle) -> Result<(), String> {
+    hide_main_window_with_source(app, "titlebar")
+}
+
+fn hide_main_window_with_source(app: tauri::AppHandle, source: &str) -> Result<(), String> {
     let started = std::time::Instant::now();
     let Some(window) = main_window(&app) else {
-        sayall_windows::gatt_note(
-            "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result=failed error_domain=window error_code=not_found retryable=true reason=main_window_missing"
-                .to_owned(),
-        );
+        sayall_windows::gatt_note(format!(
+            "window_close action=hide_to_tray source={source} phase=completed terminal_result=failed error_domain=window error_code=not_found retryable=true reason=main_window_missing"
+        ));
         return Err("主窗口不存在".to_owned());
     };
     // `hide()` 的返回值只说明"消息已投递"，不代表窗口真的隐藏了（见
@@ -1146,7 +1155,7 @@ fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let result = window.hide().map_err(|error| error.to_string());
     let visible_after = window.is_visible().unwrap_or(true);
     sayall_windows::gatt_note(format!(
-        "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result={} visible_before={visible_before} visible_after={visible_after} elapsed_ms={}",
+        "window_close action=hide_to_tray source={source} phase=completed terminal_result={} visible_before={visible_before} visible_after={visible_after} elapsed_ms={}",
         if result.is_ok() { "passed" } else { "failed" },
         started.elapsed().as_millis()
     ));
@@ -6154,6 +6163,7 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        hide_main_window_from_title_bar,
         show_recommendations,
         retry_recommendations,
         hide_recommendations,
@@ -6297,6 +6307,7 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        hide_main_window_from_title_bar,
         show_recommendations,
         retry_recommendations,
         hide_recommendations,

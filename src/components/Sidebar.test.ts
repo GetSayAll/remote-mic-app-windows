@@ -24,12 +24,12 @@ describe("sidebar", () => {
     );
   });
 
-  it("顶部页面顺序不变，个人中心固定在最后", () => {
+  it("顶部页面顺序不变，账号入口固定在最后", () => {
     const wrapper = mount(Sidebar, {
       props: { activePage: "settings" },
     });
     // 私有构建可能追加自己的页面；这里只核对公开页面的相对顺序。
-    const publicLabels = new Set(publicNavigationItems.map((item) => item.label));
+    const publicLabels = new Set([...publicNavigationItems.map((item) => item.label), "我的"]);
     const items = wrapper
       .findAll(".nav-item")
       .filter((item) => publicLabels.has(item.text()));
@@ -42,7 +42,7 @@ describe("sidebar", () => {
       "连接",
       "回眸",
       "设置",
-      "个人中心",
+      "我的",
     ]);
     // 推荐入口使用 Mac 的 sparkles 语义图标（大四角星 + 两颗小星）。
     const recommendationIcon = items[2].get("svg");
@@ -58,7 +58,7 @@ describe("sidebar", () => {
     expect(paths).toHaveLength(2);
     expect(paths[1].attributes("d")).toContain("a3.2 3.2");
     expect(wrapper.find(".share-nav-item").exists()).toBe(false);
-    expect(wrapper.get(".profile-nav-item").attributes("aria-label")).toBe("个人中心");
+    expect(wrapper.get(".profile-nav-item").attributes("aria-label")).toBe("我的");
     // 2026-10-31 权限页并入设置：侧栏不再有「权限」入口。
     expect(wrapper.text()).not.toContain("权限");
   });
@@ -70,30 +70,32 @@ describe("sidebar", () => {
     expect(children[0].tagName.toLowerCase()).toBe("svg");
     expect(children[1].classList.contains("nav-label")).toBe(true);
     const profile = wrapper.get(".profile-nav-item");
-    expect(profile.element.firstElementChild?.tagName.toLowerCase()).toBe("img");
+    expect(profile.element.firstElementChild?.tagName.toLowerCase()).toBe("svg");
     expect(profile.find(".nav-label").exists()).toBe(true);
   });
 
-  it("个人中心图标使用与托盘同源的应用 logo", async () => {
+  it("底部账号入口使用 person.crop.circle，而不是应用 logo", () => {
     const wrapper = mount(Sidebar, {
       props: { activePage: "profile", appIcon: "standard" },
     });
 
-    expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe("/app-logo.webp");
-    await wrapper.setProps({ appIcon: "faceted-duck" });
-    expect(wrapper.get(".profile-nav-item img").attributes("src")).toBe(
-      "/app-icon-faceted-duck.webp",
-    );
+    expect(wrapper.find(".profile-nav-item img").exists()).toBe(false);
+    const paths = wrapper.get(".profile-nav-item svg").findAll("path");
+    expect(paths).toHaveLength(3);
+    expect(paths[0].attributes("d")).toContain("M12 2.5a9.5");
+    // 顶部品牌区仍跟随应用图标设置。
+    expect(wrapper.get(".sidebar-brand img").attributes("src")).toBe("/app-logo.webp");
   });
 
-  it("已登录时个人入口只显示调用方传入的账号前缀", () => {
+  it("已登录时账号入口完整显示调用方传入的名字并允许换行", () => {
     const wrapper = mount(Sidebar, {
-      props: { activePage: "profile", profileLabel: "abcdefghij" },
+      props: { activePage: "profile", profileLabel: "Christopher Anderson" },
     });
 
     const profile = wrapper.get(".profile-nav-item");
-    expect(profile.text()).toBe("abcdefghij");
+    expect(profile.text()).toBe("Christopher Anderson");
     expect(profile.classes()).toContain("active");
+    expect(profile.find(".nav-label").classes()).toContain("nav-label");
     expect(profile.text()).not.toContain("@");
   });
 
@@ -120,7 +122,7 @@ describe("sidebar", () => {
       "Connection",
       "Reflections",
       "Settings",
-      "Profile",
+      "Me",
     ]);
     const items = wrapper
       .findAll(".nav-item")
@@ -133,7 +135,7 @@ describe("sidebar", () => {
       "Connection",
       "Reflections",
       "Settings",
-      "Profile",
+      "Me",
     ]);
     expect(wrapper.get("nav").attributes("aria-label")).toBe("Page navigation");
   });

@@ -4,7 +4,6 @@ import {
   disconnectRemote,
   getAudioSnapshot,
   getButtonMappings,
-  getAppIcon,
   getDiagnosticReport,
   getGainDb,
   getOpenWindowAtLaunch,
@@ -508,8 +507,19 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("设置页「启动时自动打开主面板」新装默认开启，切换经真实 IPC 与设置持久化往返");
 
-  await openPage("个人中心");
+  await openPage("我的", "个人中心");
   mark("profile_page");
+  const titleBar = document.querySelector(".window-titlebar");
+  assert(titleBar !== null, "缺少自定义标题栏");
+  assert((titleBar.textContent ?? "").trim() === "", "标题栏不应显示 logo 或文字");
+  assert(
+    titleBar.querySelector("[data-tauri-drag-region]") !== null,
+    "标题栏缺少拖拽区",
+  );
+  assert(
+    document.querySelectorAll(".window-control").length === 3,
+    "标题栏窗口按钮不是 3 枚",
+  );
   assert(
     document.querySelector(".brand-version")?.textContent?.trim(),
     "侧栏品牌区应显示版本号（对齐 Mac PR 803）",
@@ -532,15 +542,10 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     document.querySelector(".profile-header .badge")?.tagName === "SPAN",
     "数据仅存本机必须是文字，不能是可点击按钮",
   );
-  const currentAppIcon = await getAppIcon();
-  const expectedLogo =
-    currentAppIcon === "standard" ? "/app-logo.webp" : "/app-icon-faceted-duck.webp";
-  await waitFor(
-    () =>
-      document.querySelector(".profile-nav-item img")?.getAttribute("src") === expectedLogo
-        ? true
-        : null,
-    "个人中心侧栏入口使用当前应用 logo",
+  const profileIconPaths = document.querySelectorAll(".profile-nav-item svg path");
+  assert(
+    profileIconPaths.length === 3,
+    "账号入口应使用 person.crop.circle 图标，而不是应用 logo",
   );
   assert(document.querySelectorAll(".profile-kpi").length === 4, "个人中心 KPI 不是 4 项");
   const sharePanel = document.querySelector(".share-panel");

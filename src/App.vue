@@ -2,6 +2,7 @@
 import type { Component } from "vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
+import WindowTitleBar from "./components/WindowTitleBar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
 import {
   APP_ICON_CHANGED_EVENT,
@@ -51,8 +52,8 @@ let updateCheckTimer: ReturnType<typeof setTimeout> | undefined;
 let profileLabelTimer: ReturnType<typeof setInterval> | undefined;
 let initialRuntimeReported = false;
 
-/** 侧栏个人入口：未登录「个人中心」，已登录只显示邮箱 @ 前最多 10 个字符。 */
-const profileLabel = ref("个人中心");
+/** 账号入口（对齐 Mac statistics）：未登录显示「我的」，已登录显示账号完整本地名。 */
+const profileLabel = ref("我的");
 /** 与托盘图标同源；设置页切换后由事件和 5 秒轮询同步到侧栏。 */
 const appIcon = ref<AppIconIdentifier>("faceted-duck");
 
@@ -62,7 +63,7 @@ async function refreshProfileLabel(): Promise<void> {
     profileLabel.value =
       summary.availability === "available"
         ? profileAccountLabel(summary.accountDisplayName)
-        : "个人中心";
+        : "我的";
   } catch {
     // 会员摘要读取失败不打扰主界面；保持上一次文案。
   }
@@ -258,39 +259,43 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <OnboardingPage
-    v-if="showOnboarding"
-    :runtime="runtime"
-    @completed="onOnboardingCompleted"
-  />
-  <div v-else class="app-shell">
-    <Sidebar
-      :active-page="activePage"
-      :profile-label="profileLabel"
-      :app-icon="appIcon"
-      :app-version="runtime?.appVersion ?? ''"
-      @select="activePage = $event"
+  <div class="window-frame">
+    <WindowTitleBar />
+    <OnboardingPage
+      v-if="showOnboarding"
+      class="window-body"
+      :runtime="runtime"
+      @completed="onOnboardingCompleted"
     />
-    <main class="content">
-      <div v-if="loadError" class="error-banner">{{ t(loadError) }}</div>
-      <div v-if="updateBannerVisible" class="update-banner">
-        <span>{{ t("发现新版本 {version}", { version: updateInfo?.version ?? "" }) }}</span>
-        <button type="button" class="link-button" @click="showUpdatePage">{{ t("查看") }}</button>
-        <button type="button" class="link-button" :aria-label="t('忽略此提醒')" @click="dismissBanner">
-          ×
-        </button>
-      </div>
-      <component
-        :is="activeComponent"
-        :runtime="runtime"
-        @restart-onboarding="onRestartOnboarding"
-        @navigate="activePage = $event"
+    <div v-else class="app-shell window-body">
+      <Sidebar
+        :active-page="activePage"
+        :profile-label="profileLabel"
+        :app-icon="appIcon"
+        :app-version="runtime?.appVersion ?? ''"
+        @select="activePage = $event"
       />
-    </main>
+      <main class="content">
+        <div v-if="loadError" class="error-banner">{{ t(loadError) }}</div>
+        <div v-if="updateBannerVisible" class="update-banner">
+          <span>{{ t("发现新版本 {version}", { version: updateInfo?.version ?? "" }) }}</span>
+          <button type="button" class="link-button" @click="showUpdatePage">{{ t("查看") }}</button>
+          <button type="button" class="link-button" :aria-label="t('忽略此提醒')" @click="dismissBanner">
+            ×
+          </button>
+        </div>
+        <component
+          :is="activeComponent"
+          :runtime="runtime"
+          @restart-onboarding="onRestartOnboarding"
+          @navigate="activePage = $event"
+        />
+      </main>
+    </div>
+    <UpdateCompletedDialog
+      v-if="updateCompletedVersion"
+      :version="updateCompletedVersion"
+      @close="updateCompletedVersion = null"
+    />
   </div>
-  <UpdateCompletedDialog
-    v-if="updateCompletedVersion"
-    :version="updateCompletedVersion"
-    @close="updateCompletedVersion = null"
-  />
 </template>

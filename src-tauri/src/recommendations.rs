@@ -35,6 +35,9 @@ const ENGLISH_PAGE_URL: &str = "https://sayall.app/en/recommendations/";
 /// 129 内容 px（15×2 + 44 + 8 + SayAll 16 宽约 46.27，向上取整），加 1px 边框 = 130。
 /// 若侧栏改为真正的自适应宽度，需要由前端把实测宽度传进来，不能只改常量。
 const SIDEBAR_WIDTH: f64 = 130.0;
+/// 自定义标题栏高度；与 `src/styles.css` 的 `--titlebar-height` 同步。
+/// 推荐页子 WebView 覆盖主窗口内容区，必须让出这条标题栏，否则会盖住窗口按钮。
+const TITLEBAR_HEIGHT: f64 = 32.0;
 /// 首次创建时先放到窗口外，避免 about:blank 或加载中的页面闪一下。
 const OFFSCREEN_X: f64 = -20_000.0;
 const EVENT_NAME: &str = "recommendations-page-state";
@@ -389,16 +392,17 @@ fn back_bar_offset(state: &RecommendationsState) -> f64 {
     }
 }
 
-/// 子 WebView 的边界：固定侧栏之外、顶部返回条之下的整个客户区。
+/// 子 WebView 的边界：标题栏与固定侧栏之外、顶部返回条之下的整个客户区。
 fn layout_with_top(app: &AppHandle, top: f64) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
     let window = app.get_window("main")?;
     let scale = window.scale_factor().ok()?;
     let size = window.inner_size().ok()?.to_logical::<f64>(scale);
+    let content_top = TITLEBAR_HEIGHT + top;
     Some((
-        LogicalPosition::new(SIDEBAR_WIDTH, top),
+        LogicalPosition::new(SIDEBAR_WIDTH, content_top),
         LogicalSize::new(
             (size.width - SIDEBAR_WIDTH).max(1.0),
-            (size.height - top).max(1.0),
+            (size.height - content_top).max(1.0),
         ),
     ))
 }

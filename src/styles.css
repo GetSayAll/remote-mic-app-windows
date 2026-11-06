@@ -15,6 +15,8 @@
 :root {
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   --font-brand: "Oxanium", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  /* 自定义标题栏高度；与 src-tauri/src/recommendations.rs 的 TITLEBAR_HEIGHT 同步。 */
+  --titlebar-height: 32px;
   color: var(--text-primary);
   background: var(--surface-canvas);
   color-scheme: light;
@@ -208,13 +210,21 @@ body {
    加 1px 右边框为 130。Mac 的 bounds 是 104...136；当前品牌字决定 129，
    不再沿用过宽的固定 136。将来若出现更长的私有页标签，需要同步宽度 IPC。
    其余仍对齐 PR 803：图标 18、文字 13 semibold、行高 40、选中 7px 圆角。 */
-/* 外壳固定为视口高度（不再 min-height 随内容增高）：超出部分交给 .content
-   在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
-.app-shell { display: grid; grid-template-columns: 130px minmax(0, 1fr); height: 100vh; }
+/* 外壳固定为视口高度（不再 min-height 随内容增高）：标题栏占顶部一行，余下交给
+   .content 在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
+.window-frame {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface-canvas);
+}
+.window-body { flex: 1 1 auto; min-height: 0; }
+.app-shell { display: grid; grid-template-columns: 130px minmax(0, 1fr); min-height: 0; }
 .sidebar {
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: 100%;
   display: flex;
   flex-direction: column;
   /* 对齐 Mac：品牌区贴顶、个人中心贴底，不留空白带。 */
@@ -233,7 +243,8 @@ nav { display: grid; gap: 4px; }
   justify-content: flex-start;
   gap: 8px;
   margin: 0 6px;
-  padding: 4px 9px;
+  /* Mac SettingsSidebarRow：leading 9 + 按钮 6 = 15，trailing 5 + 按钮 6 = 11。 */
+  padding: 4px 5px 4px 9px;
   border: 0;
   border-radius: 7px;
   color: var(--text-nav);

@@ -60,10 +60,11 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
     expect(css).toMatch(/\.content\s*\{[^}]*overscroll-behavior:\s*contain/);
   });
 
-  it("外壳用固定视口高度，不随内容增高撑开根元素", () => {
-    // 用 [{;] 前缀避免把 min-height: 100vh 误判成 height: 100vh。
-    expect(css).toMatch(/\.app-shell\s*\{[^}]*[{;]\s*height:\s*100vh/);
-    expect(css).not.toMatch(/\.app-shell\s*\{[^}]*min-height:\s*100vh/);
+  it("窗口壳用固定视口高度，内容区不撑开根元素", () => {
+    // 标题栏占顶部一行，余下高度由 .window-body 分配；用 [{;] 前缀避免把
+    // min-height: 100vh 误判成 height: 100vh。
+    expect(css).toMatch(/\.window-frame\s*\{[^}]*\n\s*height:\s*100vh/);
+    expect(css).not.toMatch(/\.app-shell\s*\{[^}]*[{;]\s*height:\s*100vh/);
   });
 });
 
@@ -109,5 +110,56 @@ describe("侧栏宽度与推荐页偏移同步", () => {
       "utf8",
     );
     expect(rust).toMatch(/const SIDEBAR_WIDTH:\s*f64\s*=\s*130\.0;/);
+  });
+});
+
+// 2026-11-06 Andy：标题栏颜色与侧栏始终一致，去掉标题栏 logo/文字；侧栏高度、
+// logo、字号和间距按 Mac SettingsSidebarRow / PR 803 的常量锁住。
+describe("自定义标题栏与 Mac 侧栏尺寸", () => {
+  it("标题栏与侧栏共用 --sidebar，且高度变量为 32px", () => {
+    const titleBar = readFileSync(
+      join(srcDir, "components", "WindowTitleBar.vue"),
+      "utf8",
+    );
+    expect(css).toMatch(/:root\s*\{[^}]*--titlebar-height:\s*32px/);
+    expect(titleBar).toMatch(/\.window-titlebar\s*\{[^}]*height:\s*var\(--titlebar-height\)/);
+    expect(titleBar).toMatch(/\.window-titlebar\s*\{[^}]*background:\s*var\(--sidebar\)/);
+    expect(css).toMatch(/\.sidebar\s*\{[^}]*background:\s*var\(--sidebar\)/);
+  });
+
+  it("侧栏行与 Mac 一致：40 高、18 图标、13 semibold、8 间距、leading 15/trailing 11", () => {
+    expect(css).toMatch(/\.nav-item\s*\{[^}]*min-height:\s*40px/);
+    expect(css).toMatch(/\.nav-item\s*\{[^}]*gap:\s*8px/);
+    expect(css).toMatch(/\.nav-item\s*\{[^}]*padding:\s*4px 5px 4px 9px/);
+    expect(css).toMatch(/\.nav-item\s*\{[^}]*font-size:\s*13px/);
+    expect(css).toMatch(/\.nav-icon\s*\{[^}]*width:\s*18px/);
+  });
+
+  it("品牌区与 Mac 一致：75 高、44 logo、16 字标、12 版本、15 边距", () => {
+    const sidebar = readFileSync(join(srcDir, "components", "Sidebar.vue"), "utf8");
+    expect(sidebar).toMatch(/\.sidebar-brand\s*\{[^}]*height:\s*75px/);
+    expect(sidebar).toMatch(/\.sidebar-brand\s*\{[^}]*padding:\s*11px 15px 10px/);
+    expect(sidebar).toMatch(/\.brand-logo\s*\{[^}]*width:\s*44px/);
+    expect(sidebar).toMatch(/\.brand-name\s*\{[^}]*font-size:\s*16px/);
+    expect(sidebar).toMatch(/\.brand-version\s*\{[^}]*font-size:\s*12px/);
+    expect(sidebar).toMatch(/\.brand-version\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+  });
+
+  it("账号入口使用 person 图标并允许文字换行", () => {
+    const sidebar = readFileSync(join(srcDir, "components", "Sidebar.vue"), "utf8");
+    expect(sidebar).toMatch(/ICON_PATHS\.person\.strokes/);
+    expect(sidebar).toMatch(
+      /\.profile-nav-item \.nav-label\s*\{[^}]*white-space:\s*normal/,
+    );
+  });
+
+  it("推荐页子 WebView 让出标题栏高度", () => {
+    const rust = readFileSync(
+      join(process.cwd(), "src-tauri", "src", "recommendations.rs"),
+      "utf8",
+    );
+    expect(rust).toMatch(/const TITLEBAR_HEIGHT:\s*f64\s*=\s*32\.0;/);
+    expect(rust).toMatch(/let content_top = TITLEBAR_HEIGHT \+ top;/);
+    expect(rust).toMatch(/LogicalPosition::new\(SIDEBAR_WIDTH, content_top\)/);
   });
 });
