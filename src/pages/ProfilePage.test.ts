@@ -2,6 +2,7 @@
 
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { KeepAlive, defineComponent, nextTick, ref } from "vue";
 import type { ButtonMappings, UsageProfile } from "../lib/bridge";
 import ProfilePage from "./ProfilePage.vue";
 
@@ -189,5 +190,51 @@ describe("个人中心页", () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("561");
     wrapper.unmount();
+  });
+
+  // 2026-11-06：个人中心是唯一常驻页面（无录入/捕获流程）。切走暂停轮询、切回立即
+  // 刷新一次，但组件实例不重建（数据与滚动状态保留）。
+  it("KeepAlive 下切页暂停轮询、切回立即刷新且不重建", async () => {
+    stubBridge();
+    vi.useFakeTimers();
+    try {
+      const Host = defineComponent({
+        components: { ProfilePage, KeepAlive },
+        setup() {
+          const show = ref(true);
+          return { show };
+        },
+        template: `<KeepAlive :include="['ProfilePage']"><ProfilePage v-if="show" /></KeepAlive>`,
+      });
+      const wrapper = mount(Host);
+      await flushPromises();
+      await flushPromises();
+      const initialCalls = bridge.getUsageProfile.mock.calls.length;
+      expect(initialCalls).toBeGreaterThan(0);
+
+      // 选中一个日期（本地状态）作为"未重建"的判据。
+      const day = wrapper
+        .findAll(".calendar-day")
+        .find((cell) => cell.attributes("aria-label")?.includes("按键 4 次"));
+      expect(day).toBeDefined();
+      await day!.trigger("click");
+      expect(wrapper.find(".calendar-detail").exists()).toBe(true);
+
+      (wrapper.vm as unknown as { show: boolean }).show = false;
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(bridge.getUsageProfile.mock.calls.length).toBe(initialCalls);
+
+      (wrapper.vm as unknown as { show: boolean }).show = true;
+      await nextTick();
+      await flushPromises();
+      expect(bridge.getUsageProfile.mock.calls.length).toBe(initialCalls + 1);
+      // 日历选中项仍在 ⇒ 组件实例被 KeepAlive 保留，没有重建。
+      expect(wrapper.find(".calendar-detail").exists()).toBe(true);
+
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -150,6 +150,17 @@ const pageComponents: Record<string, Component> = {
 
 const activeComponent = computed(() => pageComponents[activePage.value] ?? ButtonsPage);
 
+/**
+ * 只有「我的（个人中心）」常驻（2026-11-06）：它是侧栏里唯一没有录入 / 捕获流程的
+ * 页面，切页保留滚动位置与日历选中项不会带入后台吞键风险；轮询与 ResizeObserver
+ * 由 ProfilePage 自己用 onDeactivated 暂停、onActivated 恢复。
+ *
+ * 按键 / 组合动作 / 连接三页**不能**直接常驻：它们的 onUnmounted 负责
+ * `stopShortcutCapture()`（页面切走时后端仍在录入态会全局吞键，见 MacrosPage 注释），
+ * 要常驻必须先逐页补 onDeactivated 清理（Bugs/2026-11-06-sidebar-switch-label-refresh.md）。
+ */
+const cachedPageNames = ["ProfilePage"];
+
 // 横幅不在"设置"页重复显示（页面内已有完整更新面板）；推荐页由原生子 WebView
 // 覆盖内容区，横幅即使渲染也看不到，直接跳过。
 const updateBannerVisible = computed(
@@ -284,12 +295,14 @@ onUnmounted(() => {
             ×
           </button>
         </div>
-        <component
-          :is="activeComponent"
-          :runtime="runtime"
-          @restart-onboarding="onRestartOnboarding"
-          @navigate="activePage = $event"
-        />
+        <KeepAlive :include="cachedPageNames">
+          <component
+            :is="activeComponent"
+            :runtime="runtime"
+            @restart-onboarding="onRestartOnboarding"
+            @navigate="activePage = $event"
+          />
+        </KeepAlive>
       </main>
     </div>
     <UpdateCompletedDialog

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { CSSProperties } from "vue";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import SharePanel from "../components/SharePanel.vue";
 import type { ButtonMappings, RuntimeSnapshot, UsageProfile } from "../lib/bridge";
 import {
@@ -248,24 +248,55 @@ watch(profile, () => {
   nextTick(updateCalendarSize);
 });
 
-onMounted(() => {
-  void primeActionCaches();
-  void refresh();
-  pollTimer = setInterval(() => {
-    void refresh();
-  }, 1_000);
-  if (typeof ResizeObserver !== "undefined" && calendarScroll.value) {
+/**
+ * 个人中心是侧栏里唯一没有录入 / 捕获流程的页面，因此单独用 KeepAlive 常驻
+ * （2026-11-06）：切走不再卸载重建，滚动位置与日历选中项保留；但轮询和
+ * ResizeObserver 在隐藏期间必须停掉，切回时立即刷新一次再恢复，避免后台空转。
+ */
+let liveUpdatesStarted = false;
+
+function startLiveUpdates(): void {
+  if (!pollTimer) {
+    pollTimer = setInterval(() => {
+      void refresh();
+    }, 1_000);
+  }
+  if (typeof ResizeObserver !== "undefined" && calendarScroll.value && !resizeObserver) {
     resizeObserver = new ResizeObserver(updateCalendarSize);
     resizeObserver.observe(calendarScroll.value);
   }
+}
+
+function stopLiveUpdates(): void {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = undefined;
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+}
+
+onMounted(() => {
+  void primeActionCaches();
+  void refresh();
+  startLiveUpdates();
   nextTick(updateCalendarSize);
 });
 
+onActivated(() => {
+  // 首次挂载时 onActivated 紧跟 onMounted 触发，不要重复取数。
+  if (!liveUpdatesStarted) {
+    liveUpdatesStarted = true;
+    return;
+  }
+  void refresh();
+  startLiveUpdates();
+  nextTick(updateCalendarSize);
+});
+
+onDeactivated(stopLiveUpdates);
+
 onUnmounted(() => {
   requestGeneration += 1;
-  if (pollTimer) clearInterval(pollTimer);
-  resizeObserver?.disconnect();
-  resizeObserver = null;
+  stopLiveUpdates();
 });
 </script>
 
