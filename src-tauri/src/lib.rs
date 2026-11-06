@@ -60,35 +60,21 @@ const MAIN_WINDOW_LABEL: &str = "main";
 
 /// 主窗口最小尺寸（逻辑像素），与 `tauri.conf.json` 的
 /// `width` / `height` / `minWidth` / `minHeight` 保持一致。
-///
-/// 无边框窗口在 Windows 上通过自定义缩放手柄拖动时，Tauri 配置的
-/// `minHeight` 可能被绕过（`SetWindowPos` 路径不走 `WM_GETMINMAXINFO`），
-/// 因此在 `Resized` 事件里再做一次兜底。
 const MAIN_WINDOW_MIN_WIDTH: f64 = 1066.67;
 const MAIN_WINDOW_MIN_HEIGHT: f64 = 800.0;
-/// 逻辑像素容差：高 DPI 下物理像素取整后可能比最小逻辑尺寸少零点几，
-/// 没有容差会在 `Resized` 里反复 `set_size`。
-const MAIN_WINDOW_MIN_TOLERANCE: f64 = 0.5;
 
-fn clamp_main_window_size(
-    width: u32,
-    height: u32,
-    scale_factor: f64,
-) -> Option<tauri::LogicalSize<f64>> {
-    if width == 0 || height == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return None;
-    }
-    let logical_width = f64::from(width) / scale_factor;
-    let logical_height = f64::from(height) / scale_factor;
-    if logical_width >= MAIN_WINDOW_MIN_WIDTH - MAIN_WINDOW_MIN_TOLERANCE
-        && logical_height >= MAIN_WINDOW_MIN_HEIGHT - MAIN_WINDOW_MIN_TOLERANCE
-    {
-        return None;
-    }
-    Some(tauri::LogicalSize::new(
-        logical_width.max(MAIN_WINDOW_MIN_WIDTH),
-        logical_height.max(MAIN_WINDOW_MIN_HEIGHT),
-    ))
+/// 内容区最小尺寸换算到物理像素。`WM_GETMINMAXINFO` / `WM_WINDOWPOSCHANGING`
+/// 使用窗口外框尺寸，调用方再补上非客户区边框。
+fn min_window_inner_size(scale_factor: f64) -> (i32, i32) {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    (
+        (MAIN_WINDOW_MIN_WIDTH * scale).round() as i32,
+        (MAIN_WINDOW_MIN_HEIGHT * scale).round() as i32,
+    )
 }
 
 #[cfg(test)]
@@ -96,30 +82,16 @@ mod main_window_size_tests {
     use super::*;
 
     #[test]
-    fn clamps_height_but_preserves_larger_width() {
-        let clamped = clamp_main_window_size(2400, 1400, 2.0).expect("should clamp");
-        assert!((clamped.width - 1200.0).abs() < 0.01);
-        assert!((clamped.height - MAIN_WINDOW_MIN_HEIGHT).abs() < 0.01);
+    fn converts_minimum_to_physical_pixels() {
+        assert_eq!(min_window_inner_size(1.0), (1067, 800));
+        assert_eq!(min_window_inner_size(2.0), (2133, 1600));
+        assert_eq!(min_window_inner_size(1.5), (1600, 1200));
     }
 
     #[test]
-    fn clamps_width_at_one_x() {
-        let clamped = clamp_main_window_size(900, 700, 1.0).expect("should clamp");
-        assert!((clamped.width - MAIN_WINDOW_MIN_WIDTH).abs() < 0.01);
-        assert!((clamped.height - MAIN_WINDOW_MIN_HEIGHT).abs() < 0.01);
-    }
-
-    #[test]
-    fn leaves_size_at_or_above_minimum_alone() {
-        assert!(clamp_main_window_size(2134, 1600, 2.0).is_none());
-        assert!(clamp_main_window_size(1067, 800, 1.0).is_none());
-    }
-
-    #[test]
-    fn ignores_minimized_and_invalid_samples() {
-        assert!(clamp_main_window_size(0, 0, 2.0).is_none());
-        assert!(clamp_main_window_size(1200, 700, 0.0).is_none());
-        assert!(clamp_main_window_size(1200, 700, f64::NAN).is_none());
+    fn invalid_scale_falls_back_to_one_x() {
+        assert_eq!(min_window_inner_size(0.0), (1067, 800));
+        assert_eq!(min_window_inner_size(f64::NAN), (1067, 800));
     }
 }
 
@@ -451,6 +423,115 @@ unsafe extern "system" fn window_key_subclass(
             return LRESULT(0);
         }
     }
+    DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+/// 主窗口最小尺寸的子类化实例 ID。
+#[cfg(windows)]
+const WINDOW_MIN_SIZE_SUBCLASS_ID: usize = 0x5A13;
+
+/// 在原生窗口消息层限制主窗口最小尺寸。
+///
+/// 仅在 Tauri `Resized` 回调里调用 `set_size` 会在拖动过程中反复改尺寸，
+/// 底部会闪。这里在窗口真正改变位置/大小之前修改 `WINDOWPOS`，并补齐
+/// `WM_GETMINMAXINFO`，拖动时窗口不会先缩小再弹回。
+#[cfg(windows)]
+fn install_window_min_size_subclass(window: &tauri::Window) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+
+    let Ok(raw) = window.hwnd() else {
+        sayall_windows::gatt_note(
+            "window_resize action=install_min_size_subclass terminal_result=failed reason=hwnd_missing"
+                .to_owned(),
+        );
+        return;
+    };
+    let installed = unsafe {
+        SetWindowSubclass(
+            HWND(raw.0),
+            Some(window_min_size_subclass),
+            WINDOW_MIN_SIZE_SUBCLASS_ID,
+            0,
+        )
+        .as_bool()
+    };
+    sayall_windows::gatt_note(format!(
+        "window_resize action=install_min_size_subclass terminal_result={}",
+        if installed { "passed" } else { "failed" }
+    ));
+}
+
+/// 主窗口最小外框尺寸（物理像素）。
+///
+/// `tauri.conf.json` 的 `minHeight` 是内容区高度；Windows 的
+/// `WINDOWPOS` / `MINMAXINFO` 使用窗口外框，所以要补上非客户区边框。
+#[cfg(windows)]
+fn min_window_outer_size(hwnd: windows::Win32::Foundation::HWND) -> (i32, i32) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
+    let (minimum_width, minimum_height) = min_window_inner_size(scale);
+
+    let mut window_rect = RECT::default();
+    let mut client_rect = RECT::default();
+    let window_ok = unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_ok();
+    let client_ok = unsafe { GetClientRect(hwnd, &mut client_rect) }.is_ok();
+    let frame_width = if window_ok && client_ok {
+        ((window_rect.right - window_rect.left) - (client_rect.right - client_rect.left)).max(0)
+    } else {
+        0
+    };
+    let frame_height = if window_ok && client_ok {
+        ((window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top)).max(0)
+    } else {
+        0
+    };
+
+    (minimum_width + frame_width, minimum_height + frame_height)
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn window_min_size_subclass(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MINMAXINFO, SWP_NOSIZE, WINDOWPOS, WM_GETMINMAXINFO, WM_NCDESTROY, WM_WINDOWPOSCHANGING,
+    };
+
+    if message == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(
+            hwnd,
+            Some(window_min_size_subclass),
+            WINDOW_MIN_SIZE_SUBCLASS_ID,
+        );
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+
+    if message == WM_GETMINMAXINFO && lparam.0 != 0 {
+        let (minimum_width, minimum_height) = min_window_outer_size(hwnd);
+        let info = &mut *(lparam.0 as *mut MINMAXINFO);
+        info.ptMinTrackSize.x = minimum_width;
+        info.ptMinTrackSize.y = minimum_height;
+    } else if message == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
+        let (minimum_width, minimum_height) = min_window_outer_size(hwnd);
+        let position = &mut *(lparam.0 as *mut WINDOWPOS);
+        if position.flags.0 & SWP_NOSIZE.0 == 0 && position.cx > 0 && position.cy > 0 {
+            position.cx = position.cx.max(minimum_width);
+            position.cy = position.cy.max(minimum_height);
+        }
+    }
+
     DefSubclassProc(hwnd, message, wparam, lparam)
 }
 
@@ -6088,6 +6169,7 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = main_window(app.handle()) {
                 install_window_key_subclass(&window);
+                install_window_min_size_subclass(&window);
             }
             #[cfg(windows)]
             if let Some(webview) = main_webview(app.handle()) {
@@ -6193,17 +6275,6 @@ pub fn run() {
                     tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
                 )
             {
-                if let tauri::WindowEvent::Resized(size) = event {
-                    // 自定义无边框窗口的缩放手柄可能绕过配置里的 minWidth/minHeight，
-                    // 这里按逻辑尺寸兜底，保证高度不会低于当前默认展示高度。
-                    if let Ok(scale_factor) = window.scale_factor() {
-                        if let Some(clamped) =
-                            clamp_main_window_size(size.width, size.height, scale_factor)
-                        {
-                            let _ = window.set_size(tauri::Size::Logical(clamped));
-                        }
-                    }
-                }
                 // 推荐页子 WebView 的位置/尺寸不是 CSS 布局的一部分；窗口缩放和
                 // 跨屏 DPI 变化后按固定侧栏宽度重新贴边（页面未显示时是 no-op）。
                 recommendations::relayout(window.app_handle());
