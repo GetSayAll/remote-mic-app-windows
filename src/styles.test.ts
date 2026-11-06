@@ -97,7 +97,7 @@ describe("品牌字体（Oxanium SemiBold）", () => {
 });
 
 // 2026-11-06：Mac origin/main 的侧栏宽度按内容测量（104...136），当前品牌区
-// 自然宽度为 129 内容 + 1px 边框 = 130。CSS 与推荐页子 WebView 的偏移必须同源，
+// 自然宽度为 130，且不再画右边框。CSS 与推荐页子 WebView 的偏移必须同源，
 // 否则推荐页会盖住侧栏或留下空隙。
 describe("侧栏宽度与推荐页偏移同步", () => {
   it("CSS 侧栏列宽为 130px", () => {
@@ -127,12 +127,15 @@ describe("自定义标题栏与 Mac 侧栏尺寸", () => {
     expect(css).toMatch(/\.sidebar\s*\{[^}]*background:\s*var\(--sidebar\)/);
   });
 
-  it("侧栏行与 Mac 一致：40 高、18 图标、13 semibold、8 间距、leading 15/trailing 11", () => {
+  it("侧栏行与 Mac 一致：40 高、44 行距、18 图标、13 semibold、8 间距", () => {
     expect(css).toMatch(/\.nav-item\s*\{[^}]*min-height:\s*40px/);
+    expect(css).toMatch(/\.nav-item\s*\{[^}]*margin:\s*2px 6px/);
     expect(css).toMatch(/\.nav-item\s*\{[^}]*gap:\s*8px/);
     expect(css).toMatch(/\.nav-item\s*\{[^}]*padding:\s*4px 5px 4px 9px/);
     expect(css).toMatch(/\.nav-item\s*\{[^}]*font-size:\s*13px/);
     expect(css).toMatch(/\.nav-icon\s*\{[^}]*width:\s*18px/);
+    // 2026-11-06 Andy：主页面与侧栏之间不要竖线。
+    expect(css).not.toMatch(/\.sidebar\s*\{[^}]*border-right/);
   });
 
   it("品牌区与 Mac 一致：75 高、44 logo、16 字标、12 版本、15 边距", () => {
@@ -145,9 +148,11 @@ describe("自定义标题栏与 Mac 侧栏尺寸", () => {
     expect(sidebar).toMatch(/\.brand-version\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
   });
 
-  it("账号入口使用 person 图标并允许文字换行", () => {
+  it("账号入口使用实心头肩的 person 图标，账号区至少 56 高并允许文字换行", () => {
     const sidebar = readFileSync(join(srcDir, "components", "Sidebar.vue"), "utf8");
     expect(sidebar).toMatch(/ICON_PATHS\.person\.strokes/);
+    expect(sidebar).toMatch(/ICON_PATHS\.person\.fills/);
+    expect(sidebar).toMatch(/\.sidebar-account\s*\{[^}]*padding:\s*6px 0/);
     expect(sidebar).toMatch(
       /\.profile-nav-item \.nav-label\s*\{[^}]*white-space:\s*normal/,
     );

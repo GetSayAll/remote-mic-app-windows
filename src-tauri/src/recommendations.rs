@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder,
-    WebviewUrl,
+    webview::Color, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webview,
+    WebviewBuilder, WebviewUrl,
 };
 use tauri_plugin_opener::OpenerExt;
 
@@ -32,7 +32,7 @@ const PAGE_URL: &str = "https://sayall.app/recommendations/";
 const ENGLISH_PAGE_URL: &str = "https://sayall.app/en/recommendations/";
 /// 与 `src/styles.css` 的 `.app-shell` 第一列保持一致。
 /// 2026-11-06：按 Mac origin/main 的内容测量口径，当前品牌区自然宽度为
-/// 129 内容 px（15×2 + 44 + 8 + SayAll 16 宽约 46.27，向上取整），加 1px 边框 = 130。
+/// 129 内容 px（15×2 + 44 + 8 + SayAll 16 宽约 46.27，向上取整），侧栏取 130 且不再画右边框。
 /// 若侧栏改为真正的自适应宽度，需要由前端把实测宽度传进来，不能只改常量。
 const SIDEBAR_WIDTH: f64 = 130.0;
 /// 自定义标题栏高度；与 `src/styles.css` 的 `--titlebar-height` 同步。
@@ -42,22 +42,43 @@ const TITLEBAR_HEIGHT: f64 = 32.0;
 const OFFSCREEN_X: f64 = -20_000.0;
 const EVENT_NAME: &str = "recommendations-page-state";
 
+/// 推荐页占满右侧内容区；网页自己的 `html/body` 背景会盖住应用画布。
+/// 初始化脚本把网页背景设为透明，WebView 自身背景取这里的画布色，视觉上与
+/// 其他页面一致。颜色必须和 `src/styles.css` 的 `--surface-canvas` 同步：
+/// 浅色 `#f4f5f8` / 深色 `#15161a`。
+fn canvas_color(theme: &str) -> Color {
+    if theme == "dark" {
+        Color(21, 22, 26, 255)
+    } else {
+        Color(244, 245, 248, 255)
+    }
+}
+
 /// 推荐页是官网页面，样式不在本仓：用初始化脚本注入与本仓 `src/styles.css`
 /// 同款的滚动条隐藏规则（产品要求全应用统一不显示滚动条，只保留滚动能力）。
+/// 同时把网页根背景设成 App 画布色，与设置页等内容区保持一致；否则官网固定的
+/// 白/深灰背景会在右侧形成色块。
 ///
 /// 用 `initialization_script`（WebView2 的 `AddScriptToExecuteOnDocumentCreated`）
 /// 而不是加载完成后再 `eval`：脚本在每次文档创建时执行，站内跳转、换主题重导航
 /// 都自动生效，也不会先闪一下滚动条。官网样式可能带更高特异性的
 /// `::-webkit-scrollbar` 规则，所以这里用 `!important` 压过它。
-const HIDE_SCROLLBARS_SCRIPT: &str = r#"
+const HIDE_SCROLLBARS_SCRIPT: &str = r##"
 (() => {
+  const theme = new URLSearchParams(location.search).get("theme");
+  const canvas = theme === "dark" ? "#15161a" : "#f4f5f8";
   const CSS = [
     "*, *::before, *::after { scrollbar-width: none !important; -ms-overflow-style: none !important; }",
     "*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }",
+    `html, body { background-color: ${canvas} !important; }`,
   ].join("\n");
   const apply = () => {
     const host = document.head || document.documentElement;
     if (!host) return false;
+    document.documentElement.style.setProperty("background-color", canvas, "important");
+    if (document.body) {
+      document.body.style.setProperty("background-color", canvas, "important");
+    }
     if (document.getElementById("sayall-hide-scrollbars")) return true;
     const style = document.createElement("style");
     style.id = "sayall-hide-scrollbars";
@@ -69,7 +90,7 @@ const HIDE_SCROLLBARS_SCRIPT: &str = r#"
     document.addEventListener("DOMContentLoaded", apply, { once: true });
   }
 })();
-"#;
+"##;
 
 /// 页面阶段：与 Mac 的 `RemoteWebPagePhase` 对齐。
 const PHASE_IDLE: u8 = 0;
@@ -484,6 +505,9 @@ async fn present(app: AppHandle, theme: &str, language: &str, retry: bool) -> Re
         webview
             .set_size(size)
             .map_err(|error| format!("无法调整推荐页面大小: {error}"))?;
+        // 网页背景在初始化脚本里设为透明；这里让 WebView 自身画布跟随 App 主题，
+        // 这样推荐页的空白区域与设置页等内容区同色。
+        let _ = webview.set_background_color(Some(canvas_color(theme)));
 
         let same_theme = state
             .theme
@@ -590,6 +614,7 @@ async fn present(app: AppHandle, theme: &str, language: &str, retry: bool) -> Re
         .ok_or_else(|| "找不到主窗口".to_owned())?;
     let new_window_app = app.clone();
     let builder = WebviewBuilder::new(LABEL, WebviewUrl::External(about_blank()))
+        .background_color(canvas_color(theme))
         .initialization_script(HIDE_SCROLLBARS_SCRIPT)
         // 主视图只允许推荐页；站外链接由 NavigationStarting 里的用户手势判定
         // 交给系统浏览器（见 attach_navigation_observers），这里不再自动开浏览器。
@@ -1406,6 +1431,24 @@ mod tests {
         assert!(HIDE_SCROLLBARS_SCRIPT.contains("DOMContentLoaded"));
         // 同一文档重复注入只应留下一个 style，避免站内跳转累积节点。
         assert!(HIDE_SCROLLBARS_SCRIPT.contains("sayall-hide-scrollbars"));
+    }
+
+    /// 推荐页的空白背景必须由 WebView 画布提供，网页自身只留透明背景；
+    /// 否则官网的固定白/深灰会与设置页的 `--surface-canvas` 不一致。
+    #[test]
+    fn recommendations_page_background_uses_the_app_canvas() {
+        assert!(HIDE_SCROLLBARS_SCRIPT
+            .contains(r##"const canvas = theme === "dark" ? "#15161a" : "#f4f5f8";"##));
+        assert!(HIDE_SCROLLBARS_SCRIPT.contains("background-color: ${canvas} !important"));
+        assert!(HIDE_SCROLLBARS_SCRIPT
+            .contains(r#"setProperty("background-color", canvas, "important")"#));
+        let light = canvas_color("light");
+        let dark = canvas_color("dark");
+        assert_eq!((light.0, light.1, light.2, light.3), (244, 245, 248, 255));
+        assert_eq!((dark.0, dark.1, dark.2, dark.3), (21, 22, 26, 255));
+        let source = include_str!("recommendations.rs");
+        assert!(source.contains(".background_color(canvas_color(theme))"));
+        assert!(source.contains("set_background_color(Some(canvas_color(theme)))"));
     }
 
     /// 推荐页子 WebView 必须挂上这个脚本；漏挂的话整页滚动条直接回来。

@@ -227,22 +227,22 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
-  /* 对齐 Mac：品牌区贴顶、个人中心贴底，不留空白带。 */
+  /* 对齐 Mac：品牌区贴顶、个人中心贴底，不留空白带；内容区与侧栏之间不加分隔线。 */
   padding: 0;
-  border-right: 1px solid var(--border);
   background: var(--sidebar);
   backdrop-filter: blur(24px);
 }
 nav { display: grid; gap: 4px; }
 .nav-item {
   width: calc(100% - 12px);
+  /* Mac SettingsSidebarRow：最小 40（含上下 4 内边距）；按钮外再留 2，行距 44。 */
   min-height: 40px;
   display: flex;
   flex-direction: row;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
-  margin: 0 6px;
+  margin: 2px 6px;
   /* Mac SettingsSidebarRow：leading 9 + 按钮 6 = 15，trailing 5 + 按钮 6 = 11。 */
   padding: 4px 5px 4px 9px;
   border: 0;

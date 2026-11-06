@@ -49,11 +49,15 @@ const appIconPreview = computed(() =>
  */
 const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   keyboard: {
-    // SF "keyboard"：圆角键盘轮廓 + 功能行点阵 + 底部长条
+    // SF "keyboard"：圆角键盘轮廓 + 三行点阵 + 底部长条。
+    // 旧轮廓只有 10.4 高、宽高比接近 2:1，放在 18px 槽位里比 Mac 的 SF Symbol 扁；
+    // 这里把轮廓抬到 14.4 高、宽度保持 20.4，接近 SF keyboard 的视觉比例。
     strokes: [
-      "M3.2 6.8h17.6a1.7 1.7 0 0 1 1.7 1.7v7a1.7 1.7 0 0 1-1.7 1.7H3.2a1.7 1.7 0 0 1-1.7-1.7v-7a1.7 1.7 0 0 1 1.7-1.7z",
-      "M7 10.2h.01M10.4 10.2h.01M13.8 10.2h.01M17.2 10.2h.01",
-      "M7.6 13.6h8.8",
+      "M3.2 4.8h17.6a1.7 1.7 0 0 1 1.7 1.7v10.9a1.7 1.7 0 0 1-1.7 1.7H3.2a1.7 1.7 0 0 1-1.7-1.7V6.5a1.7 1.7 0 0 1 1.7-1.7z",
+      "M5.7 8.4h.01M8.4 8.4h.01M11.1 8.4h.01M13.8 8.4h.01M16.5 8.4h.01M19.2 8.4h.01",
+      "M5.7 11.2h.01M8.4 11.2h.01M11.1 11.2h.01M13.8 11.2h.01M16.5 11.2h.01M19.2 11.2h.01",
+      "M5.7 14h.01M8.4 14h.01M11.1 14h.01M13.8 14h.01M16.5 14h.01M19.2 14h.01",
+      "M6.6 16.8h10.8",
     ],
   },
   sparkles: {
@@ -104,11 +108,12 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     ],
   },
   person: {
-    // SF "person.crop.circle"：圆形轮廓 + 头肩剪影。
-    strokes: [
-      "M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 0 0 0-19z",
-      "M12 7.2a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z",
-      "M5.8 19.2c1.1-2.8 3.2-4.3 6.2-4.3s5.1 1.5 6.2 4.3",
+    // SF "person.crop.circle"：圆环 + 实心头肩。Mac 的 SF Symbol 内部是填充剪影，
+    // 旧实现把头和肩也画成描边，账号入口看起来与 Mac 的图标不一致。
+    strokes: ["M12 2.5a9.5 9.5 0 1 0 0 19 9.5 9.5 0 0 0 0-19z"],
+    fills: [
+      "M12 7.4a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z",
+      "M6.2 19.1c1.1-2.5 3.2-3.9 5.8-3.9s4.7 1.4 5.8 3.9c-1.5 1.1-3.6 1.8-5.8 1.8s-4.3-.7-5.8-1.8z",
     ],
   },
 };
@@ -168,6 +173,14 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
           @click="emit('select', profileItem.id)"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <template v-if="ICON_PATHS.person.fills">
+              <path
+                v-for="(path, index) in ICON_PATHS.person.fills"
+                :key="`pf${index}`"
+                :d="path"
+                fill="currentColor"
+              />
+            </template>
             <path
               v-for="(path, index) in ICON_PATHS.person.strokes"
               :key="index"
@@ -258,6 +271,8 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 账号区由 40 行 + 上下 6 内边距组成（Mac 设计稿最小 56），长账号名换行时不显拥挤。 */
 
 /* 账号名按 Mac 允许换行；普通导航项仍保持单行省略。 */
 .profile-nav-item .nav-label {

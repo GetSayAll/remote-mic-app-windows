@@ -74,7 +74,7 @@ describe("sidebar", () => {
     expect(profile.find(".nav-label").exists()).toBe(true);
   });
 
-  it("底部账号入口使用 person.crop.circle，而不是应用 logo", () => {
+  it("底部账号入口使用 person.crop.circle，实心头肩与 Mac 一致", () => {
     const wrapper = mount(Sidebar, {
       props: { activePage: "profile", appIcon: "standard" },
     });
@@ -82,7 +82,9 @@ describe("sidebar", () => {
     expect(wrapper.find(".profile-nav-item img").exists()).toBe(false);
     const paths = wrapper.get(".profile-nav-item svg").findAll("path");
     expect(paths).toHaveLength(3);
-    expect(paths[0].attributes("d")).toContain("M12 2.5a9.5");
+    expect(paths.some((path) => path.attributes("d")?.includes("M12 2.5a9.5"))).toBe(true);
+    // SF person.crop.circle 的头肩是实心剪影，只有外圈是描边。
+    expect(paths.filter((path) => path.attributes("fill") === "currentColor")).toHaveLength(2);
     // 顶部品牌区仍跟随应用图标设置。
     expect(wrapper.get(".sidebar-brand img").attributes("src")).toBe("/app-logo.webp");
   });
@@ -97,6 +99,21 @@ describe("sidebar", () => {
     expect(profile.classes()).toContain("active");
     expect(profile.find(".nav-label").classes()).toContain("nav-label");
     expect(profile.text()).not.toContain("@");
+  });
+
+  it("按键图标使用接近 Mac keyboard 的宽高比，并保留两行键位", () => {
+    const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
+    const buttonsItem = wrapper
+      .findAll(".nav-item")
+      .find((item) => item.text() === "按键");
+
+    expect(buttonsItem).toBeTruthy();
+    const paths = buttonsItem!.get("svg").findAll("path");
+    expect(paths).toHaveLength(5);
+    expect(paths[0].attributes("d")).toContain("v10.9");
+    expect(paths[1].attributes("d")).toContain("8.4");
+    expect(paths[3].attributes("d")).toContain("14");
+    expect(paths[4].attributes("d")).toBe("M6.6 16.8h10.8");
   });
 
   it("组合动作页用层叠方块图标（对齐 Mac square.stack.3d.up）", () => {

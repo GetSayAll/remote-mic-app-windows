@@ -733,10 +733,13 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `crates/sayall-windows/src/app_switcher.rs`。
 - 2026-11-06（品牌字体/标题栏/侧栏对齐 Mac，Andy 指定）：侧栏左上角 SayAll 使用 Oxanium SemiBold 16px；
   设置页左上角「无线麦 SayAll」使用 Oxanium SemiBold 18px（中文按 Segoe UI / 微软雅黑回退）。
-  侧栏宽度按 Mac origin/main 的内容测量口径取 130px（129 内容 + 1px 边框），不再固定 136px。
+  侧栏宽度按 Mac origin/main 的内容测量口径取 130px，不再固定 136px；主页面与侧栏之间不画竖向分隔线。
   窗口去掉原生标题栏的 logo 与文字，改为 32px 自定义标题栏；颜色始终使用侧栏的 `--sidebar`，
-  右侧保留最小化/最大化/关闭（关闭仍收进托盘）。侧栏行高 40、图标 18、文字 13 semibold、
-  leading 15 / trailing 11；底部账号入口使用 `person.crop.circle`，未登录显示「我的」，
+  右侧保留最小化/最大化/关闭（关闭仍收进托盘）。侧栏行高 40（上下再留 2px，行距 44）、图标 18、
+  文字 13 semibold、leading 15 / trailing 11；键盘图标按 SF keyboard 的比例保留三行键位，不再压扁。
+  底部账号入口使用 `person.crop.circle` 的圆环 + 实心头肩，最小高度 56，未登录显示「我的」，
   已登录显示完整账号本地名并允许换行（对齐 Mac `sidebarAccountTitle` / `SettingsSidebarRow`）。
+  推荐页子 WebView 的 `html/body` 背景透明，WebView 画布色与 `--surface-canvas` 同步
+  （浅色 `#f4f5f8` / 深色 `#15161a`），避免官网白/深灰背景在右侧形成色块。
   字体文件 `public/fonts/oxanium-semibold.ttf`，OFL 1.1 许可随包（`public/fonts/OFL.txt`），
   第三方声明见 `THIRD_PARTY_NOTICES.md`。
