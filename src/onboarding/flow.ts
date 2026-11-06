@@ -50,6 +50,7 @@ const PHASES: Record<OnboardingStep, OnboardingPhase> = {
 export type OnboardingBlockCode =
   | "remote.not_connected"
   | "remote.listener_not_ready"
+  | "remote.hid_interface_missing"
   | "remote.button_not_ready"
   | "audio.install_required"
   | "audio.not_selected"
@@ -178,6 +179,13 @@ function evaluateRemote(remote: OnboardingContext["remote"]): StepGate {
   // 若先查监听器就绪，界面会一直写「按键监听正在启动」并把「继续」锁死。
   if (remote.remoteButtonObserved) {
     return pass();
+  }
+  // 「监听器还在启动」与「监听器在跑、但系统里没有匹配这支遥控器的 HID 接口」
+  // 是两种不同的阻断：前者等一下就好，后者按多少次都不会有按键。2026-11-06 现场
+  // （1.8.0、RC003 已连接、`Raw input: phase=awaiting matched=0 raw_events=0`）
+  // 界面一直写「按键监听正在启动，请稍等一下」，用户没有任何可执行动作。
+  if (remote.rawInputPhase === "awaiting") {
+    return block("remote.hid_interface_missing");
   }
   if (remote.rawInputPhase !== "ready") {
     return block("remote.listener_not_ready");

@@ -756,3 +756,14 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   同为 12px、600 字重、主题强调色，数字与单位间留 5px 间距（与「次」一致），数字仍为 22px。超过 1 小时显示「1小时2分3秒」，
   不足 1 分钟显示「0分32秒」。落点：`src/lib/profile.ts` 的 `formatVoiceTotalParts`、
   `src/pages/ProfilePage.vue`。
+
+- 2026-11-06（向导②步「按键通道未就绪」，用户截图报告）：遥控器已连接、语音链路就绪，
+  但系统没有匹配的 HID 按键接口（诊断块 `Raw input: phase=awaiting matched=0`）时，
+  ②步不再写「按键监听正在启动，请稍等一下。」。页脚改为「Windows 还没有识别到这支
+  遥控器的按键通道。打开蓝牙设置重新配对。」；按键行写「先按一下普通按键；仍无反应时，
+  按下面的步骤重新配对。」；下方修复卡标题「没有识别到遥控器的按键通道」，正文给
+  完整步骤：在蓝牙设置里删除这支遥控器 → 按「TV」键 3 秒重新配对 → 仍不行就重启这台
+  电脑（用「重启」，不要用「关机」再开机）。动作按钮放在步骤说明**之前**：1066×800
+  最小窗口下内容区可能只露出卡片上半部分，按钮必须先可见、不需要先滚动。落点：
+  `src/onboarding/flow.ts`、`src/onboarding/steps/RemoteStep.vue`、
+  `src/pages/OnboardingPage.vue`、`src/lib/i18n/en/onboarding.ts`。

@@ -90,6 +90,15 @@ function isConnectedDevice(device: PairedRemote): boolean {
  */
 const buttonRowDesc = computed(() => {
   if (!props.buttonObserved) {
+    // 监听器在跑、但系统里没有匹配这支遥控器的按键接口时，再按也不会到达；
+    // 这里只给动作，具体原因由下方修复卡说明（2026-11-06 现场：这句话此前一直写
+    // "按一下"，用户按了很多次都没有反馈）。
+    if (
+      connected.value &&
+      (props.runtime?.platform.rawInput.phase ?? "stopped") === "awaiting"
+    ) {
+      return t("先按一下普通按键；仍无反应时，按下面的步骤重新配对。");
+    }
     return t("按一下遥控器上的普通按键（比如主页键），不要按语音键。");
   }
   if (connected.value) return "";
@@ -132,6 +141,7 @@ const FIX_TITLES: Record<string, string> = {
   "remote.pairing_required": "还没有已配对的遥控器",
   "remote.not_found": "没有找到遥控器",
   "remote.connect_failed": "连接没有成功",
+  "remote.hid_interface_missing": "没有识别到遥控器的按键通道",
 };
 
 const fixTitle = computed(() => {
@@ -141,7 +151,8 @@ const fixTitle = computed(() => {
 const fixPrefersSettings = computed(
   () =>
     props.gateCode === "bluetooth.unavailable" ||
-    props.gateCode === "remote.pairing_required",
+    props.gateCode === "remote.pairing_required" ||
+    props.gateCode === "remote.hid_interface_missing",
 );
 const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_failed");
 </script>
@@ -241,6 +252,8 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
 
     <div v-if="fixTitle" class="onboarding-card warn">
       <h4>{{ fixTitle }}</h4>
+      <!-- 动作先于长说明：1066×800 最小窗口下内容区可能只露出卡片上半部分；
+           把「打开蓝牙设置」放在步骤说明之前，用户不用先滚动才能操作。 -->
       <div class="onboarding-chips">
         <button
           v-if="fixShowsSettings"
@@ -261,6 +274,13 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
           {{ scanning ? t("正在扫描…") : t("重新扫描") }}
         </button>
       </div>
+      <p v-if="gateCode === 'remote.hid_interface_missing'">
+        {{
+          t(
+            "应用已经连上遥控器，但 Windows 还没有提供它的按键通道。先按一下普通按键；仍无反应时，在蓝牙设置里删除这支遥控器，再按「TV」键 3 秒重新配对；还是不行就重启这台电脑（用「重启」，不要用「关机」再开机）。",
+          )
+        }}
+      </p>
     </div>
 
     <p v-if="operationMessage" class="onboarding-muted">{{ operationMessage }}</p>

@@ -46,6 +46,8 @@ export default {
   "找到 {count} 个已配对的小米遥控器": "Paired Xiaomi remotes found: {count}",
   "按一下遥控器上的普通按键（比如主页键），不要按语音键。":
     "Press a regular button on the remote, such as Home. Do not press the voice button.",
+  "先按一下普通按键；仍无反应时，按下面的步骤重新配对。":
+    "Press a regular button first. If nothing happens, follow the steps below to pair the remote again.",
   "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。":
     "Button received. One more step: select Scan for Paired Devices and choose the remote to connect.",
   "按键已收到。还差一步：点遥控器一行右侧的“连接”。":
@@ -65,6 +67,9 @@ export default {
   "还没有已配对的遥控器": "No paired remote yet",
   "没有找到遥控器": "Remote not found",
   "连接没有成功": "Connection failed",
+  "没有识别到遥控器的按键通道": "Remote button channel not detected",
+  "应用已经连上遥控器，但 Windows 还没有提供它的按键通道。先按一下普通按键；仍无反应时，在蓝牙设置里删除这支遥控器，再按「TV」键 3 秒重新配对；还是不行就重启这台电脑（用「重启」，不要用「关机」再开机）。":
+    "The app is connected to the remote, but Windows is not providing its button channel yet. Press a regular button first. If nothing happens, remove this remote in Bluetooth settings, then hold the TV button for 3 seconds to pair it again. If that does not help, restart the computer (use Restart, not Shut down and turn it back on).",
   "当前没有已配对设备，请先按照上一步完成设备配对。":
     "No paired devices found. Complete the pairing step first.",
   "读取已配对设备失败，请重试。": "Could not read paired devices. Try again.",
@@ -310,6 +315,8 @@ export default {
   // ---- Gate hints ----
   "先连接遥控器，再继续。": "Connect the remote to continue.",
   "按键监听正在启动，请稍等一下。": "Button detection is starting. Wait a moment.",
+  "Windows 还没有识别到这支遥控器的按键通道。打开蓝牙设置重新配对。":
+    "Windows has not detected this remote's button channel. Open Bluetooth settings and pair the remote again.",
   "连接已就绪。按一下遥控器上的普通按键（比如主页键），不要按语音键。":
     "The connection is ready. Press a regular button on the remote, such as Home, not the voice button.",
   "完成一次真实的语音上屏测试，再继续。":
