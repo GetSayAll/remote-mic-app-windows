@@ -22,6 +22,7 @@ import {
   readMacroEditorSession,
   writeMacroEditorSession,
 } from "./macro-editor-session";
+import { macrosViewSession } from "./macros-view-session";
 import {
   activateAppForLearning,
   buttonLabel,
@@ -102,9 +103,13 @@ function tr(text: string): string {
   return /[\u4e00-\u9fff]/.test(text) ? t(text) : text;
 }
 
-const loading = ref(true);
-const definitions = ref<MacroDefinition[]>([]);
-const selectedMacroId = ref<string | null>(null);
+// 首帧用上次读取到的库快照（2026-11-06）：切页重建时不再显示「0 → 真实条数」。
+// `reloadLibrary()` 仍然照常异步刷新，数据以新响应为准。
+const cachedDefinitions = macrosViewSession.definitions;
+const loading = ref(cachedDefinitions === null);
+const definitions = ref<MacroDefinition[]>(cachedDefinitions ?? []);
+const selectedMacroId = ref<string | null>(cachedDefinitions?.[0]?.macroId ?? null);
+if (cachedDefinitions) registerMacroNames(cachedDefinitions);
 const search = ref("");
 const statusMessage = ref("");
 const statusKind = ref<"info" | "success" | "error">("info");
@@ -239,6 +244,7 @@ function messageOf(error: unknown): string {
 function applyLibrary(library: MacroLibraryDocument): void {
   const latest = latestMacroDefinitions(library.definitions);
   definitions.value = latest;
+  macrosViewSession.definitions = latest;
   registerMacroNames(latest);
   void loadReferences(selectedMacroId.value);
 }
