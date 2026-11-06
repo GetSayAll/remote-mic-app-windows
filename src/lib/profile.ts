@@ -52,22 +52,30 @@ export function formatDuration(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
+export interface DurationPart {
+  value: string;
+  unit: string;
+}
+
 /**
- * Mac `voiceDurationText` 同款：累计语音 KPI 使用中文单位，不与单次排行的
- * `m:ss` 混用；超过 1 小时按 Mac 口径省略秒。
+ * 累计语音 KPI：`32分18秒`（1 小时以上为 `1小时2分3秒`）。
+ *
+ * 数字与单位分开返回，KPI 才能把「分」「秒」渲染成与「次」一致的小号强调色；
+ * 同时用紧凑单位替代 `33 分钟 12 秒`，避免数值增长后被省略号截断。
+ * 不与单次排行的 `m:ss` 混用。
  */
-export function formatVoiceTotal(seconds: number): string {
+export function formatVoiceTotalParts(seconds: number): DurationPart[] {
   const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
   const hours = Math.floor(total / 3_600);
   const minutes = Math.floor((total % 3_600) / 60);
   const remainder = total % 60;
+  const parts: DurationPart[] = [];
   if (hours > 0) {
-    return `${countFormatter.format(hours)} 小时 ${countFormatter.format(minutes)} 分钟`;
+    parts.push({ value: countFormatter.format(hours), unit: "小时" });
   }
-  if (minutes > 0) {
-    return `${countFormatter.format(minutes)} 分钟 ${countFormatter.format(remainder)} 秒`;
-  }
-  return `${countFormatter.format(remainder)} 秒`;
+  parts.push({ value: countFormatter.format(minutes), unit: "分" });
+  parts.push({ value: countFormatter.format(remainder), unit: "秒" });
+  return parts;
 }
 
 /**

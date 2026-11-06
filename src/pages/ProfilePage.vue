@@ -22,8 +22,9 @@ import {
   formatCalendarDate,
   formatDuration,
   formatVoiceSessionDate,
-  formatVoiceTotal,
+  formatVoiceTotalParts,
   WEEKDAY_LABELS,
+  type DurationPart,
 } from "../lib/profile";
 
 defineProps<{ runtime?: RuntimeSnapshot | null }>();
@@ -45,7 +46,16 @@ let requestGeneration = 0;
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
 
-const metrics = computed(() => {
+interface ProfileMetric {
+  id: string;
+  title: string;
+  value: string | null;
+  unit: string | null;
+  parts: DurationPart[] | null;
+  icon: string;
+}
+
+const metrics = computed<ProfileMetric[]>(() => {
   const data = profile.value;
   return [
     {
@@ -53,13 +63,15 @@ const metrics = computed(() => {
       title: "累计按键次数",
       value: data ? numberFormatter.format(data.totalButtonPresses) : "—",
       unit: "次",
+      parts: null,
       icon: "keyboard",
     },
     {
       id: "total-voice",
       title: "累计语音时长",
-      value: data ? formatVoiceTotal(data.totalVoiceSeconds) : "—",
+      value: data ? null : "—",
       unit: null,
+      parts: data ? formatVoiceTotalParts(data.totalVoiceSeconds) : null,
       icon: "waveform",
     },
     {
@@ -67,6 +79,7 @@ const metrics = computed(() => {
       title: "本周按键",
       value: data ? numberFormatter.format(data.weekButtonPresses) : "—",
       unit: "次",
+      parts: null,
       icon: "trend",
     },
     {
@@ -74,6 +87,7 @@ const metrics = computed(() => {
       title: "最长单次语音",
       value: data ? formatDuration(data.longestVoiceSeconds) : "—",
       unit: null,
+      parts: null,
       icon: "clock",
     },
   ];
@@ -287,8 +301,16 @@ onUnmounted(() => {
         <div class="profile-kpi-text">
           <span class="profile-kpi-label">{{ metric.title }}</span>
           <div class="profile-kpi-value">
-            <strong>{{ metric.value }}</strong>
-            <small v-if="metric.unit">{{ metric.unit }}</small>
+            <template v-if="metric.parts">
+              <template v-for="(part, index) in metric.parts" :key="index">
+                <strong class="profile-kpi-number">{{ part.value }}</strong>
+                <small>{{ part.unit }}</small>
+              </template>
+            </template>
+            <template v-else>
+              <strong>{{ metric.value }}</strong>
+              <small v-if="metric.unit">{{ metric.unit }}</small>
+            </template>
           </div>
         </div>
       </article>

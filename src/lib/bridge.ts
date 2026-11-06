@@ -2271,13 +2271,70 @@ export function chordLabel(chord: KeyChord): string {
   return chord.keys.map(keyLabel).join(" + ");
 }
 
-/** 预设应用显示名（页面加载 listPresetApps 后更新；测试可注入）。 */
-const presetAppNames: Map<string, string> = new Map();
+/**
+ * 预设应用显示名（页面加载 `listPresetApps` 后更新；测试可注入）。
+ *
+ * 两条 2026-11-06 现场反馈的约束（Bugs/2026-11-06-sidebar-switch-label-refresh.md）：
+ * 1. **合并而不是清空**：按键页 / 组合动作页 / 我的页各自带着不同的列表调用这里
+ *    （按键页只有「已安装 + 自定义」，另外两页是全量预设），先到的名字不能被后到的
+ *    部分列表清掉——否则回到按键页会先显示 `netease_music` 这类内部 id，等 IPC 回来
+ *    才跳成「网易云音乐」。
+ * 2. **本地缓存 + 同步恢复**：页面每次切换都会重建，首帧必须能直接拿到上次已知的名字，
+ *    不必等 1 秒级的 `listPresetApps` 扫描。缓存只是首帧优化，localStorage 不可用时
+ *    静默降级（与按键开关缓存同款处理）。
+ */
+const PRESET_APP_NAMES_CACHE_KEY = "sayall.preset-app-names.v1";
+
+function readPresetAppNamesCache(): Array<[string, string]> {
+  try {
+    const raw = localStorage.getItem(PRESET_APP_NAMES_CACHE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const pairs: Array<[string, string]> = [];
+    for (const entry of parsed) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [id, name] = entry;
+      if (typeof id !== "string" || typeof name !== "string" || !id || !name) continue;
+      pairs.push([id, name]);
+    }
+    return pairs;
+  } catch {
+    return [];
+  }
+}
+
+const presetAppNames: Map<string, string> = new Map(readPresetAppNamesCache());
+
+function writePresetAppNamesCache(): void {
+  try {
+    localStorage.setItem(PRESET_APP_NAMES_CACHE_KEY, JSON.stringify([...presetAppNames]));
+  } catch {
+    // 缓存只影响首帧文案；写入失败（隐私模式/配额）时下次仍走 IPC 刷新。
+  }
+}
 
 export function registerPresetAppNames(apps: Array<{ id: string; name: string }>): void {
-  presetAppNames.clear();
+  let changed = false;
   for (const app of apps) {
-    presetAppNames.set(app.id, app.name);
+    const id = typeof app?.id === "string" ? app.id.trim() : "";
+    const name = typeof app?.name === "string" ? app.name.trim() : "";
+    if (!id || !name) continue;
+    if (presetAppNames.get(id) !== name) {
+      presetAppNames.set(id, name);
+      changed = true;
+    }
+  }
+  if (changed) writePresetAppNamesCache();
+}
+
+/** 清空名称表（测试重置模块级缓存用；运行时不需要）。 */
+export function clearPresetAppNames(): void {
+  presetAppNames.clear();
+  try {
+    localStorage.removeItem(PRESET_APP_NAMES_CACHE_KEY);
+  } catch {
+    // 忽略：缓存清理失败不影响内存表。
   }
 }
 
