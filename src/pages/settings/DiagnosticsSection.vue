@@ -1,41 +1,21 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import type { RuntimeSnapshot } from "../lib/bridge";
+import { ref } from "vue";
 import {
   formatDiagnosticReport,
   getDiagnosticReport,
+  openGitHubRepository,
   openLogDirectory,
-} from "../lib/bridge";
-import { t, tPage } from "../lib/i18n";
-
-const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
-
-const bluetoothStatus = computed(() => {
-  if (props.runtime?.platform.bleVoiceReady) return { tone: "success", label: t("语音链路已就绪") };
-  if (props.runtime?.platform.bleScanAvailable) return { tone: "warning", label: t("待验证") };
-  return { tone: "pending", label: t("当前电脑不支持") };
-});
-
-const inputStatus = computed(() => {
-  if (props.runtime?.platform.rawInputReady) return { tone: "success", label: t("已运行") };
-  if (props.runtime?.platform.windowsApiAvailable) return { tone: "warning", label: t("待验证") };
-  return { tone: "pending", label: t("当前电脑不支持") };
-});
-
-const audioStatus = computed(() => {
-  if (props.runtime?.platform.wasapiReady) return { tone: "success", label: t("已就绪") };
-  if (props.runtime?.platform.windowsApiAvailable) return { tone: "warning", label: t("待选择设备") };
-  return { tone: "pending", label: t("当前电脑不支持") };
-});
+  openOfficialWebsite,
+} from "../../lib/bridge";
+import { t } from "../../lib/i18n";
 
 /**
- * 诊断摘要与日志目录（2026-10-01 用户指定：从关于页迁回权限页）。
+ * 诊断与日志（2026-10-31 从侧栏「权限」页并入设置页，对齐用户标注：
+ * 诊断摘要、日志目录与问题反馈同一分类）。
  *
- * 摘要是"本机运行状态 + 本机权限范围"的取证入口，与蓝牙/按键/音频三项状态
- * 同页：用户看到某一项不对时的第一个动作就是生成摘要，跳页会打断这条路径。
- *
- * 状态文案存 key（而不是已翻译的字符串），由模板调用 `t()`：切换语言时
- * 页面上已有的提示会一起更新。原始错误只进控制台，界面给固定文案。
+ * 摘要 = "本机运行状态 + 本机权限范围"的取证入口，状态文案存 key（而不是
+ * 已翻译的字符串），由模板调用 `t()`：切换语言时页面上已有的提示会一起更新。
+ * 原始错误只进控制台，界面给固定文案。
  */
 type LocalizedMessage = { key: string; params?: Record<string, string> };
 
@@ -44,6 +24,9 @@ const diagnosticMessage = ref<LocalizedMessage | null>({ key: "尚未生成诊�
 const generatingDiagnostic = ref(false);
 const logDirectoryBusy = ref(false);
 const logDirectoryMessage = ref<LocalizedMessage | null>(null);
+
+const linkBusy = ref(false);
+const linkMessage = ref("");
 
 function logError(scope: string, error: unknown): void {
   console.warn(`${scope}: ${error instanceof Error ? error.message : String(error)}`);
@@ -96,36 +79,36 @@ async function onOpenLogDirectory(): Promise<void> {
     logDirectoryBusy.value = false;
   }
 }
+
+/**
+ * 外部入口失败时不静默：capability 拒绝（Not allowed to open url）与系统
+ * 没有默认浏览器是两类不同问题，压成"打开失败"会让现场无法归因。
+ * 成功不显示任何提示。
+ */
+async function openEntry(open: () => Promise<void>): Promise<void> {
+  linkBusy.value = true;
+  linkMessage.value = "";
+  try {
+    await open();
+  } catch (error) {
+    linkMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    linkBusy.value = false;
+  }
+}
+
+async function onOpenOfficialWebsite(): Promise<void> {
+  await openEntry(openOfficialWebsite);
+}
+
+async function onOpenGitHubRepository(): Promise<void> {
+  await openEntry(openGitHubRepository);
+}
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>{{ tPage("权限") }}</h1>
-      </div>
-    </header>
-
-    <article class="card permission-list">
-      <div class="permission-row">
-        <div class="permission-icon">BT</div>
-        <div><strong>{{ t("蓝牙") }}</strong><p>{{ t("读取已配对的遥控器并建立连接。") }}</p></div>
-        <span class="badge" :class="bluetoothStatus.tone">
-          {{ bluetoothStatus.label }}
-        </span>
-      </div>
-      <div class="permission-row">
-        <div class="permission-icon">IN</div>
-        <div><strong>{{ t("按键监听与映射") }}</strong><p>{{ t("只监听小米遥控器的按键；只有你为按键配置了动作时，才会向电脑发送按键。") }}</p></div>
-        <span class="badge" :class="inputStatus.tone">{{ inputStatus.label }}</span>
-      </div>
-      <div class="permission-row">
-        <div class="permission-icon">AU</div>
-        <div><strong>{{ t("音频设备") }}</strong><p>{{ t("语音设备由你明确选择，不改动系统默认设备。") }}</p></div>
-        <span class="badge" :class="audioStatus.tone">{{ audioStatus.label }}</span>
-      </div>
-    </article>
-
+  <section class="settings-section">
+    <h2 class="section-title">{{ t("诊断与日志") }}</h2>
     <article class="card diagnostics-card">
       <div class="card-title-row">
         <div>
@@ -171,10 +154,80 @@ async function onOpenLogDirectory(): Promise<void> {
         {{ logDirectoryMessage ? t(logDirectoryMessage.key, logDirectoryMessage.params) : "" }}
       </p>
     </article>
+
+    <!-- 问题反馈与诊断摘要同属「诊断与日志」分类（2026-10-31 用户标注）。 -->
+    <article class="card feedback-card">
+      <div class="card-title-row">
+        <div class="feedback-heading">
+          <span class="settings-row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path
+                d="M12 3.8c-4.8 0-8.7 3.1-8.7 7 0 2.3 1.3 4.3 3.3 5.6l-1 3.5 4-2.2c.8.2 1.6.3 2.4.3 4.8 0 8.7-3.1 8.7-7S16.8 3.8 12 3.8z"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <div>
+            <h2>{{ t("问题反馈") }}</h2>
+            <p class="muted">{{ t("反馈无线麦 SayAll 的问题，或提出改进建议。") }}</p>
+          </div>
+        </div>
+        <div class="button-row">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="linkBusy"
+            @click="onOpenOfficialWebsite"
+          >
+            {{ t("官网") }}
+          </button>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="linkBusy"
+            @click="onOpenGitHubRepository"
+          >
+            GitHub
+          </button>
+        </div>
+      </div>
+      <p v-if="linkMessage" class="operation-message link-message" aria-live="polite">
+        {{ linkMessage }}
+      </p>
+    </article>
   </section>
 </template>
 
 <style scoped>
+/* 分组标题与第一张卡对齐其他设置分组（全局 .diagnostics-card 自带 14px 上边距）。 */
+.settings-section > .diagnostics-card {
+  margin-top: 0;
+}
+
+/* 反馈卡与上面的诊断卡同属一组：沿用设置页行内图标 + 标题的节奏。 */
+.feedback-card {
+  margin-top: 14px;
+}
+
+.feedback-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.feedback-heading h2 {
+  margin-bottom: 5px;
+}
+
+.feedback-heading .muted {
+  margin: 0;
+  font-size: 13px;
+}
+
 /* 日志目录入口与上面的摘要动作分组：摘要随时可生成，日志目录是"已经出问题、
    要取证"时才走的路，靠分隔线和一行说明避免被当成同一组按钮。 */
 .log-directory-block {
@@ -186,5 +239,8 @@ async function onOpenLogDirectory(): Promise<void> {
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
-.log-directory-block .muted { margin: 0; }
+
+.log-directory-block .muted {
+  margin: 0;
+}
 </style>

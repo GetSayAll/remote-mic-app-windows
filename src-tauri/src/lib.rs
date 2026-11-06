@@ -58,6 +58,43 @@ use usage::{build_usage_profile, UsageProfile, UsageStore, UsageSync};
 /// 主窗口标签（`tauri.conf.json` 里由配置创建的唯一窗口）。
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// 主窗口最小尺寸（逻辑像素），与 `tauri.conf.json` 的
+/// `width` / `height` / `minWidth` / `minHeight` 保持一致。
+const MAIN_WINDOW_MIN_WIDTH: f64 = 1066.67;
+const MAIN_WINDOW_MIN_HEIGHT: f64 = 800.0;
+
+/// 内容区最小尺寸换算到物理像素。`WM_GETMINMAXINFO` / `WM_WINDOWPOSCHANGING`
+/// 使用窗口外框尺寸，调用方再补上非客户区边框。
+fn min_window_inner_size(scale_factor: f64) -> (i32, i32) {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    (
+        (MAIN_WINDOW_MIN_WIDTH * scale).round() as i32,
+        (MAIN_WINDOW_MIN_HEIGHT * scale).round() as i32,
+    )
+}
+
+#[cfg(test)]
+mod main_window_size_tests {
+    use super::*;
+
+    #[test]
+    fn converts_minimum_to_physical_pixels() {
+        assert_eq!(min_window_inner_size(1.0), (1067, 800));
+        assert_eq!(min_window_inner_size(2.0), (2133, 1600));
+        assert_eq!(min_window_inner_size(1.5), (1600, 1200));
+    }
+
+    #[test]
+    fn invalid_scale_falls_back_to_one_x() {
+        assert_eq!(min_window_inner_size(0.0), (1067, 800));
+        assert_eq!(min_window_inner_size(f64::NAN), (1067, 800));
+    }
+}
+
 /// 取主窗口（tao `Window`）。
 ///
 /// **不要**用 `AppHandle::get_webview_window` 查主窗口。Tauri 2.11 的判定是
@@ -386,6 +423,115 @@ unsafe extern "system" fn window_key_subclass(
             return LRESULT(0);
         }
     }
+    DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+/// 主窗口最小尺寸的子类化实例 ID。
+#[cfg(windows)]
+const WINDOW_MIN_SIZE_SUBCLASS_ID: usize = 0x5A13;
+
+/// 在原生窗口消息层限制主窗口最小尺寸。
+///
+/// 仅在 Tauri `Resized` 回调里调用 `set_size` 会在拖动过程中反复改尺寸，
+/// 底部会闪。这里在窗口真正改变位置/大小之前修改 `WINDOWPOS`，并补齐
+/// `WM_GETMINMAXINFO`，拖动时窗口不会先缩小再弹回。
+#[cfg(windows)]
+fn install_window_min_size_subclass(window: &tauri::Window) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::SetWindowSubclass;
+
+    let Ok(raw) = window.hwnd() else {
+        sayall_windows::gatt_note(
+            "window_resize action=install_min_size_subclass terminal_result=failed reason=hwnd_missing"
+                .to_owned(),
+        );
+        return;
+    };
+    let installed = unsafe {
+        SetWindowSubclass(
+            HWND(raw.0),
+            Some(window_min_size_subclass),
+            WINDOW_MIN_SIZE_SUBCLASS_ID,
+            0,
+        )
+        .as_bool()
+    };
+    sayall_windows::gatt_note(format!(
+        "window_resize action=install_min_size_subclass terminal_result={}",
+        if installed { "passed" } else { "failed" }
+    ));
+}
+
+/// 主窗口最小外框尺寸（物理像素）。
+///
+/// `tauri.conf.json` 的 `minHeight` 是内容区高度；Windows 的
+/// `WINDOWPOS` / `MINMAXINFO` 使用窗口外框，所以要补上非客户区边框。
+#[cfg(windows)]
+fn min_window_outer_size(hwnd: windows::Win32::Foundation::HWND) -> (i32, i32) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
+    let (minimum_width, minimum_height) = min_window_inner_size(scale);
+
+    let mut window_rect = RECT::default();
+    let mut client_rect = RECT::default();
+    let window_ok = unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_ok();
+    let client_ok = unsafe { GetClientRect(hwnd, &mut client_rect) }.is_ok();
+    let frame_width = if window_ok && client_ok {
+        ((window_rect.right - window_rect.left) - (client_rect.right - client_rect.left)).max(0)
+    } else {
+        0
+    };
+    let frame_height = if window_ok && client_ok {
+        ((window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top)).max(0)
+    } else {
+        0
+    };
+
+    (minimum_width + frame_width, minimum_height + frame_height)
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn window_min_size_subclass(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MINMAXINFO, SWP_NOSIZE, WINDOWPOS, WM_GETMINMAXINFO, WM_NCDESTROY, WM_WINDOWPOSCHANGING,
+    };
+
+    if message == WM_NCDESTROY {
+        let _ = RemoveWindowSubclass(
+            hwnd,
+            Some(window_min_size_subclass),
+            WINDOW_MIN_SIZE_SUBCLASS_ID,
+        );
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+
+    if message == WM_GETMINMAXINFO && lparam.0 != 0 {
+        let (minimum_width, minimum_height) = min_window_outer_size(hwnd);
+        let info = &mut *(lparam.0 as *mut MINMAXINFO);
+        info.ptMinTrackSize.x = minimum_width;
+        info.ptMinTrackSize.y = minimum_height;
+    } else if message == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
+        let (minimum_width, minimum_height) = min_window_outer_size(hwnd);
+        let position = &mut *(lparam.0 as *mut WINDOWPOS);
+        if position.flags.0 & SWP_NOSIZE.0 == 0 && position.cx > 0 && position.cy > 0 {
+            position.cx = position.cx.max(minimum_width);
+            position.cy = position.cy.max(minimum_height);
+        }
+    }
+
     DefSubclassProc(hwnd, message, wparam, lparam)
 }
 
@@ -1131,12 +1277,21 @@ mod windows_settings_tests {
 /// 日志只落结果、可见性与耗时，不含窗口标题或任何用户信息。
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    hide_main_window_with_source(app, "ctrl_w")
+}
+
+/// 自定义标题栏关闭按钮：与 Ctrl+W 同一隐藏动作，仅日志来源不同。
+#[tauri::command]
+fn hide_main_window_from_title_bar(app: tauri::AppHandle) -> Result<(), String> {
+    hide_main_window_with_source(app, "titlebar")
+}
+
+fn hide_main_window_with_source(app: tauri::AppHandle, source: &str) -> Result<(), String> {
     let started = std::time::Instant::now();
     let Some(window) = main_window(&app) else {
-        sayall_windows::gatt_note(
-            "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result=failed error_domain=window error_code=not_found retryable=true reason=main_window_missing"
-                .to_owned(),
-        );
+        sayall_windows::gatt_note(format!(
+            "window_close action=hide_to_tray source={source} phase=completed terminal_result=failed error_domain=window error_code=not_found retryable=true reason=main_window_missing"
+        ));
         return Err("主窗口不存在".to_owned());
     };
     // `hide()` 的返回值只说明"消息已投递"，不代表窗口真的隐藏了（见
@@ -1146,7 +1301,7 @@ fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let result = window.hide().map_err(|error| error.to_string());
     let visible_after = window.is_visible().unwrap_or(true);
     sayall_windows::gatt_note(format!(
-        "window_close action=hide_to_tray source=ctrl_w phase=completed terminal_result={} visible_before={visible_before} visible_after={visible_after} elapsed_ms={}",
+        "window_close action=hide_to_tray source={source} phase=completed terminal_result={} visible_before={visible_before} visible_after={visible_after} elapsed_ms={}",
         if result.is_ok() { "passed" } else { "failed" },
         started.elapsed().as_millis()
     ));
@@ -6014,6 +6169,7 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = main_window(app.handle()) {
                 install_window_key_subclass(&window);
+                install_window_min_size_subclass(&window);
             }
             #[cfg(windows)]
             if let Some(webview) = main_webview(app.handle()) {
@@ -6154,6 +6310,7 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        hide_main_window_from_title_bar,
         show_recommendations,
         retry_recommendations,
         hide_recommendations,
@@ -6297,6 +6454,7 @@ pub fn run() {
         open_log_directory,
         open_windows_settings,
         hide_main_window,
+        hide_main_window_from_title_bar,
         show_recommendations,
         retry_recommendations,
         hide_recommendations,

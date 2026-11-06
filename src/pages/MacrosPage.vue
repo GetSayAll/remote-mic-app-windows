@@ -1402,7 +1402,8 @@ async function saveDraft(): Promise<void> {
     draft.value = null;
     testReport.value = null;
     clearMacroEditorSession();
-    setStatus(t("组合动作已保存"), "success");
+    statusMessage.value = "";
+    statusKind.value = "info";
   } catch (error) {
     setStatus(t("保存失败：{error}", { error: messageOf(error) }), "error");
   }
@@ -1494,6 +1495,15 @@ watch(
       <h1>{{ tPage("组合动作") }}</h1>
       <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>
+
+    <p
+      v-if="statusMessage"
+      class="macros-inline-status"
+      :data-kind="statusKind"
+      role="status"
+    >
+      {{ statusMessage }}
+    </p>
 
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
@@ -2303,7 +2313,6 @@ watch(
       </div>
     </template>
 
-    <p v-if="statusMessage" class="status-line" :data-kind="statusKind">{{ statusMessage }}</p>
     <RegisteredAppsDialog
       v-if="appPickerOpen"
       :known-apps="knownCustomApps"
@@ -2321,9 +2330,9 @@ watch(
   flex-direction: column;
   min-height: 0;
   flex: 1;
-  /* 页面固定为可视区高度：步骤/动作库再多也只滚内部区域，
-     底部按钮（新建/导入/导出、取消编辑/上一步/下一步）始终贴在窗口底部。 */
-  height: calc(100vh - 48px);
+  /* 页面高度跟随 .content 内容盒，而不是 100vh；内容能放下时页面本身不滚，
+     只让步骤/动作库内部按需滚动，底部按钮始终贴在内容区底部。 */
+  height: 100%;
   overflow: hidden;
 }
 /* 标题与副标题的尺寸/位置对齐按键页：沿用全局 .page-header h1（22px）与
@@ -2343,12 +2352,17 @@ watch(
   flex: 1;
   min-height: 0;
   display: flex;
+  align-items: stretch;
+  gap: 14px;
 }
 .library-pane {
   width: 264px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface-subtle);
+  align-self: stretch;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2461,6 +2475,7 @@ watch(
 }
 .detail-pane {
   flex: 1;
+  align-self: stretch;
   min-height: 0;
   overflow-y: auto;
   padding: 20px 14px;
@@ -2615,7 +2630,8 @@ watch(
   flex-direction: column;
 }
 .wizard-head {
-  padding: 14px 14px 12px;
+  /* 标题、步骤指示器与下方的蓝色分隔线左对齐。 */
+  padding: 14px 0 12px;
   border-bottom: 1px solid var(--border);
 }
 .wizard-head h2 {
@@ -2671,13 +2687,13 @@ watch(
 .basic-body {
   flex-direction: column;
   gap: 20px;
-  padding: 20px 14px;
+  padding: 20px 0;
   overflow-y: auto;
 }
 .review-body {
   flex-direction: column;
   gap: 14px;
-  padding: 20px 14px;
+  padding: 20px 0;
   overflow-y: auto;
 }
 .steps-body {
@@ -2686,8 +2702,11 @@ watch(
 .steps-pane {
   width: 300px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface-subtle);
+  /* 与上方步骤指示线、下方底部按钮线都留 14px，并使用设置页卡片的圆角/底色。 */
+  margin: 14px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2995,18 +3014,15 @@ watch(
   align-items: center;
   gap: 10px;
 }
-.status-line {
-  margin: 0;
-  margin-top: auto;
-  border-top: 1px solid var(--border);
-  padding: 8px 22px;
+.macros-inline-status {
+  margin: 0 0 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }
-.status-line[data-kind="success"] {
+.macros-inline-status[data-kind="success"] {
   color: var(--success-text);
 }
-.status-line[data-kind="error"] {
+.macros-inline-status[data-kind="error"] {
   color: var(--error-text);
 }
 </style>

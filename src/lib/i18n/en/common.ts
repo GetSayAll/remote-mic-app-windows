@@ -9,6 +9,9 @@ export default {
   "好": "OK",
   "查看": "View",
   "忽略此提醒": "Dismiss this notice",
+  // 自定义标题栏
+  "最小化": "Minimize",
+  "最大化/还原": "Maximize / Restore",
   // 全按键支持确认弹窗
   "开启“全按键支持”？": "Enable Full-key support?",
   "开启后，无线麦会直接读取遥控器上已配置的按键，避免影响物理键盘上的同名按键；返回 / 音量+ / 音量−也需要开启后才能使用。每次开启都会弹出 Windows 授权窗口，请选择“是”；关闭开关即停。":

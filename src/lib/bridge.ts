@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t } from "./i18n";
 import { effectiveLanguage, type EffectiveLanguage } from "./language-state";
@@ -1032,6 +1033,27 @@ export async function openLogDirectory(): Promise<string> {
 export async function hideMainWindow(): Promise<void> {
   if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法关闭窗口");
   await invoke("hide_main_window");
+}
+
+/**
+ * 自定义标题栏的三枚窗口按钮。最小化/最大化走 Tauri 窗口 API；关闭走与
+ * Ctrl+W / 原生 X 相同的 Rust hide 命令，保持“收进托盘”而不是退出进程。
+ *
+ * 浏览器预览下静默 no-op，便于页面本身继续逐屏检查。
+ */
+export async function minimizeMainWindow(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await getCurrentWindow().minimize();
+}
+
+export async function toggleMaximizeMainWindow(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await getCurrentWindow().toggleMaximize();
+}
+
+export async function hideMainWindowFromTitleBar(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("hide_main_window_from_title_bar");
 }
 
 export async function scanPairedRemotes(): Promise<PairedRemote[]> {

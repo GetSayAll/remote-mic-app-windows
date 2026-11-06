@@ -68,16 +68,16 @@ describe("formatVoiceTotal", () => {
 });
 
 describe("profileAccountLabel", () => {
-  it("keeps only the first ten characters before the @", () => {
-    expect(profileAccountLabel("abcdefghijk@example.com")).toBe("abcdefghij");
+  it("keeps the full local part before the @ (Mac full-name logic)", () => {
+    expect(profileAccountLabel("abcdefghijk@example.com")).toBe("abcdefghijk");
     expect(profileAccountLabel("abc@example.com")).toBe("abc");
     expect(profileAccountLabel("i***@example.com")).toBe("i***");
   });
 
-  it("falls back to 个人中心 when no display name is available", () => {
-    expect(profileAccountLabel(null)).toBe("个人中心");
-    expect(profileAccountLabel("   ")).toBe("个人中心");
-    expect(profileAccountLabel(undefined)).toBe("个人中心");
+  it("falls back to 我的 when no display name is available", () => {
+    expect(profileAccountLabel(null)).toBe("我的");
+    expect(profileAccountLabel("   ")).toBe("我的");
+    expect(profileAccountLabel(undefined)).toBe("我的");
   });
 });
 

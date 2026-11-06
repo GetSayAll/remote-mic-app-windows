@@ -1,7 +1,8 @@
 // English strings for permissions. Key = exact Chinese source passed to t().
 export default {
-  // 页面标题
+  // 页面标题 / 设置分组
   "权限": "Permissions",
+  "诊断与日志": "Diagnostics & Logs",
 
   // 权限状态
   "语音链路已就绪": "Voice ready",

@@ -29,6 +29,7 @@ import {
   visibleTranscripts,
 } from "./reflections-view";
 import { t } from "../lib/i18n";
+import { effectiveLanguage } from "../lib/language-state";
 import { reflectionsViewSession } from "./reflections-view-session";
 import ReflectionsAgentAccess from "./ReflectionsAgentAccess.vue";
 
@@ -157,7 +158,7 @@ const selectedCountLabel = computed(() =>
 );
 const privacyText = computed(
   () =>
-    `${t("文字和原始录音仅在对应开关开启时保存在本机；不保存输入框全文、窗口标题、文档名或网址。")}\n${t("删除内容会移到回收站，可手动恢复。")}`,
+    `${t("文字和原始录音仅在对应开关开启时保存在本机；不保存输入框全文、窗口标题、文档名或网址。")}${t("删除内容会移到回收站，可手动恢复。")}`,
 );
 const dialogTitle = computed(() => {
   switch (deleteRequest.value?.kind) {
@@ -574,11 +575,11 @@ onUnmounted(() => {
 <template>
   <section ref="pageRoot" class="reflections-page">
     <header class="page-header reflections-header">
-      <div class="reflections-title">
-        <h1>{{ t("回眸") }}</h1>
-        <p class="privacy-note">{{ privacyText }}</p>
-      </div>
-      <div class="record-toggles" :class="{ settled: togglesSettled }">
+      <div class="reflections-heading">
+        <div class="reflections-title">
+          <h1>{{ t("回眸") }}</h1>
+        </div>
+        <div class="record-toggles" :class="{ settled: togglesSettled }">
         <label class="toggle-row record-toggle">
           <span>{{ t("记录回眸") }}</span>
           <input
@@ -603,7 +604,12 @@ onUnmounted(() => {
             @change="toggleAudioEnabled"
           />
         </label>
+        </div>
       </div>
+      <p
+        class="privacy-note"
+        :class="{ 'privacy-note-nowrap': effectiveLanguage === 'zh-Hans' }"
+      >{{ privacyText }}</p>
     </header>
 
     <p v-if="loadError" class="page-error" role="alert">
@@ -1007,13 +1013,20 @@ onUnmounted(() => {
 
 <style scoped>
 .reflections-page {
-  min-height: calc(100vh - 48px);
+  min-height: 100%;
   display: flex;
   flex-direction: column;
 }
 .reflections-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.reflections-heading {
+  display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
 }
 .reflections-title {
   display: flex;
@@ -1027,13 +1040,16 @@ onUnmounted(() => {
   margin: 0;
 }
 .privacy-note {
-  max-width: 566px;
+  max-width: none;
   margin: 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 11.5px;
   line-height: 1.4;
   letter-spacing: 0.01em;
-  white-space: pre-line;
+  white-space: normal;
+}
+.privacy-note-nowrap {
+  white-space: nowrap;
 }
 .record-toggles {
   display: flex;
@@ -1090,8 +1106,8 @@ onUnmounted(() => {
   padding: 2px 4px 0;
 }
 .history-summary-copy {
-  /* 页头 h1 有全局 14px 左内边距；这里补上父级 4px 之外的 10px，保持「回眸」与「全部记录」左对齐。 */
-  padding-left: 10px;
+  /* 页头已去掉额外左内边距；这里不再补偏移，保持「回眸」与「全部记录」左对齐。 */
+  padding-left: 0;
 }
 .history-summary-copy h2 {
   margin: 0;
@@ -1146,20 +1162,9 @@ onUnmounted(() => {
 .chevron.up {
   transform: rotate(180deg);
 }
-/* 回眸页的卡片统一用 Mac GlassPanel 同款轻渐变底，与底部「本地 Agent 访问」
-   卡片保持一致；暗色主题回退到原有的卡片底色。 */
+/* 回眸页卡片与设置页共用同一层材料：浅/深色都直接使用主题 --card，
+   不再在深色下保留浅色渐变或硬编码白底。 */
 .card {
-  background: linear-gradient(
-    180deg,
-    rgba(246, 247, 251, 0.98) 0%,
-    rgba(250, 250, 250, 0.98) 100%
-  );
-  border-color: var(--border-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 8px 30px var(--shadow-card);
-}
-:global(html[data-theme="dark"]) .card {
   background: var(--card);
   border-color: var(--border);
   box-shadow: 0 8px 30px var(--shadow-card);
@@ -1577,9 +1582,6 @@ onUnmounted(() => {
   background: var(--danger-hover, #8c1d18);
 }
 @media (max-width: 1000px) {
-  .privacy-note {
-    max-width: 430px;
-  }
   .app-switcher-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

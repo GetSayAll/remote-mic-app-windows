@@ -71,18 +71,20 @@ export function formatVoiceTotal(seconds: number): string {
 }
 
 /**
- * 侧栏个人入口的账号名：与 Mac 一致，只取邮箱 `@` 前最多 10 个字符。
+ * 侧栏账号入口文案，对齐 Mac `SettingsPageBehavior.sidebarAccountTitle`：
+ * 有账号显示名就完整显示，没有就回退到「我的」；不按固定字符数截断。
  *
- * 完整邮箱仍只在会员页显示；侧栏和无障碍名称都不应出现完整地址。
+ * Windows 的会员摘要可能直接携带邮箱，因此仍去掉 `@` 后的域名，避免在侧栏
+ * 暴露完整地址；`@` 前的完整本地部分保留，长名字按 Mac 的规则换行。
  */
 export function profileAccountLabel(
   displayName: string | null | undefined,
-  fallback = "个人中心",
+  fallback = "我的",
 ): string {
   const trimmed = displayName?.trim();
   if (!trimmed) return fallback;
   const localPart = trimmed.includes("@") ? trimmed.split("@")[0] : trimmed;
-  return Array.from(localPart).slice(0, 10).join("") || fallback;
+  return localPart.trim() || fallback;
 }
 
 /**

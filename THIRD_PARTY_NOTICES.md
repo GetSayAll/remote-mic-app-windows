@@ -8,6 +8,14 @@
 
 The RC003 product photo bundled as `public/RC003-remote-photo.png` was supplied by the user on 2026-07-17 for the physical-button mapping interface. Copyright and trademark rights in the photo and depicted products remain with their respective owners. GPL-3.0-only does not grant additional rights to this image or the Xiaomi marks.
 
+## Oxanium
+
+- Project: Oxanium (<https://github.com/sevmeyer/oxanium>)
+- Source: copied from the SayAll macOS repository `Resources/Fonts/oxanium-semibold.ttf` at commit `efa09bc3`; upstream project is Oxanium.
+- License: SIL Open Font License 1.1 (`OFL-1.1`)
+
+The sidebar and Settings brand names use the bundled Oxanium SemiBold font (weight 600). The font file is `public/fonts/oxanium-semibold.ttf`; the license text is included in `public/fonts/OFL.txt`. No modifications were made to the font file.
+
 ## Tauri, Vue and Rust dependencies
 
 Tauri, Vue, windows-rs and other package dependencies remain under their respective upstream licenses. The lockfiles and generated release inventory are the authoritative list for a particular build.

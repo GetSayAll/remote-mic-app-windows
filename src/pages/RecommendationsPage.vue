@@ -271,7 +271,7 @@ onUnmounted(() => {
 
 <style scoped>
 .recommendations-page {
-  min-height: calc(100vh - 48px);
+  min-height: 100%;
   display: flex;
   flex-direction: column;
 }

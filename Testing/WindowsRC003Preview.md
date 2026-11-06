@@ -180,7 +180,7 @@
 1. 以 `runtime-simulation` Cargo feature 和 `VITE_SAYALL_RUNTIME_SIMULATION=1` 构建专用测试程序；普通构建不得包含仿真前端入口或仿真专用 Tauri command。
 2. 在 `windows-latest` 启动该程序，并设置唯一的运行报告路径；不得向真实桌面发送 SendInput，也不得尝试扫描真实 BLE、音频或 HID 设备。
 3. 由实际 Windows WebView JavaScript 依次通过 Tauri IPC 读取运行快照、首次检测并自动选择唯一仿真 CABLE Input、渲染 RC001/RC003 扫描结果、连接 RC001、启动 Raw Input、保存并显式测试 Ctrl+C 映射。
-4. 依次打开按键、权限、设置和连接页面；在权限页生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`；在设置页确认顶部（应用标识 / 当前版本 / 检查更新）与“通用”“问题反馈”分组标题，切换“应用图标”并确认 IPC 与持久化往返，再点击“官网”“GitHub”两个入口——成功不显示提示、静默即通过，被 opener capability 拒绝（`Not allowed to open url`）判失败，runner 上没有可用默认浏览器则如实记为 deferred。
+4. 依次打开按键、设置和连接页面；在设置页的「诊断与日志」分组生成诊断摘要，确认平台明确标记为 `windows-ci-simulation`；确认顶部（应用标识 / 当前版本 / 检查更新）与“权限”“通用”“首次设置”“诊断与日志”分组标题，切换“应用图标”并确认 IPC 与持久化往返，再点击“诊断与日志”下“问题反馈”的“官网”“GitHub”两个入口——成功不显示提示、静默即通过，被 opener capability 拒绝（`Not allowed to open url`）判失败，runner 上没有可用默认浏览器则如实记为 deferred。
 5. 通过测试专用 command 驱动纯 Rust ATVV 管线完成首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN`，确认得到 240 个采样、generation 为 1、连接和音频均回到 ready。
 6. 停止 Raw Input 并断开，确认最终快照为 `rawInput.phase = stopped` 和 `connection.phase = disconnected`；程序写入报告并自行以成功退出码结束。
 
@@ -277,7 +277,7 @@
 
 - Windows CI Run [`33611750471`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33611750471) 使用 Tauri CLI 构建仅测试 feature 程序，并在真实 Windows WebView 中完成 11 个结构化步骤；
 - WebView JavaScript 通过真实 Tauri IPC 读取仿真快照，渲染 RC001/RC003 扫描结果，连接 RC001、选择仿真 CABLE Input、启动 Raw Input、保存映射并由非注入式 SendInput 记录器验证 Ctrl+C 四事件；
-- 五个侧栏页面均完成导航和挂载，权限页生成平台标记为 `windows-ci-simulation` 的去标识化诊断摘要，统计 IPC 返回最近七天结构；
+- 五个侧栏页面均完成导航和挂载（该次 CI 针对旧版结构；2026-10-31 起权限并入设置页，侧栏条目已变化，新结构的 CI 复跑 deferred），权限页生成平台标记为 `windows-ci-simulation` 的去标识化诊断摘要，统计 IPC 返回最近七天结构；
 - 首次 `STREAM_START → 40 + 80 AUDIO → STREAM_STOP → DRAIN` 通过纯 Rust ATVV 管线得到 240 个采样和 generation 1，随后 Raw Input 与连接状态均完成释放；
 - 同一 Run 重新构建普通 NSIS，二进制和前端资源均确认不含仿真平台名或仿真 command，并继续通过静默安装/卸载回归；
 - Run [`33610428178`](https://github.com/GetSayAll/remote-mic-app-windows/actions/runs/33610428178) 首次暴露直接 `cargo build` 生成开发协议程序会等待 Vite dev server；改为 `tauri build --no-bundle --features runtime-simulation` 后修复；
@@ -316,8 +316,8 @@
 
 2026-09-01 在 Apple Silicon Mac 上完成：
 
-- Vue 导航、连接阶段映射、诊断格式和权限页复制组件测试、类型检查和 Vite 生产构建；
-- 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开；权限页无横向溢出，诊断摘要可在页面内生成和滚动；
+- Vue 导航、连接阶段映射、诊断格式和诊断/权限分组组件测试、类型检查和 Vite 生产构建；
+- 900 × 620 与 1080 × 720 浏览器界面检查，全部五个侧栏入口可打开（旧版结构；2026-10-31 后的侧栏条目与设置页分组需重新走查）；权限页无横向溢出，诊断摘要可在页面内生成和滚动；
 - 浏览器控制台零错误；
 - `sayall-core` 22 项测试；macOS `sayall-windows` 20 项平台边界、退避、Raw Input 和 SendInput 纯逻辑测试；Tauri 设置与诊断 4 项测试；Windows CI 额外运行 WASAPI generation、有界队列、持久端点身份、重连调度、电源回调转发、Raw Input 纯逻辑测试和完整 Tauri Host 编译；
 - 诊断隐私测试使用设备名称、蓝牙地址、端点身份、用户路径、HID 路径和后端错误作为敏感夹具，序列化摘要均未包含这些值；浏览器生成摘要也未出现 `remoteName`、`selectedEndpointId`、`selectedEndpointName` 或 `lastError` 字段；
