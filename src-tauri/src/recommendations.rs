@@ -69,18 +69,23 @@ fn canvas_color(theme: &str) -> Color {
 const HIDE_SCROLLBARS_SCRIPT: &str = r##"
 (() => {
   const theme = new URLSearchParams(location.search).get("theme");
+  // html 露出的圆角/间隙用侧栏色，body 本身是主内容画布色。
+  const sidebar = theme === "dark" ? "#1b1d23" : "#edeef4";
   const canvas = theme === "dark" ? "#15161a" : "#f4f5f8";
   const CSS = [
     "*, *::before, *::after { scrollbar-width: none !important; -ms-overflow-style: none !important; }",
     "*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }",
-    `html, body { background-color: ${canvas} !important; }`,
+    `html { background-color: ${sidebar} !important; }`,
+    `body { background-color: ${canvas} !important; border-radius: 10px !important; clip-path: inset(0 round 10px) !important; }`,
   ].join("\n");
   const apply = () => {
     const host = document.head || document.documentElement;
     if (!host) return false;
-    document.documentElement.style.setProperty("background-color", canvas, "important");
+    document.documentElement.style.setProperty("background-color", sidebar, "important");
     if (document.body) {
       document.body.style.setProperty("background-color", canvas, "important");
+      document.body.style.setProperty("border-radius", "10px", "important");
+      document.body.style.setProperty("clip-path", "inset(0 round 10px)", "important");
     }
     if (document.getElementById("sayall-hide-scrollbars")) return true;
     const style = document.createElement("style");
@@ -1441,10 +1446,15 @@ mod tests {
     #[test]
     fn recommendations_page_background_uses_the_app_canvas() {
         assert!(HIDE_SCROLLBARS_SCRIPT
+            .contains(r##"const sidebar = theme === "dark" ? "#1b1d23" : "#edeef4";"##));
+        assert!(HIDE_SCROLLBARS_SCRIPT
             .contains(r##"const canvas = theme === "dark" ? "#15161a" : "#f4f5f8";"##));
         assert!(HIDE_SCROLLBARS_SCRIPT.contains("background-color: ${canvas} !important"));
+        assert!(HIDE_SCROLLBARS_SCRIPT.contains("clip-path: inset(0 round 10px) !important"));
         assert!(HIDE_SCROLLBARS_SCRIPT
             .contains(r#"setProperty("background-color", canvas, "important")"#));
+        assert!(HIDE_SCROLLBARS_SCRIPT
+            .contains(r#"setProperty("clip-path", "inset(0 round 10px)", "important")"#));
         let light = canvas_color("light");
         let dark = canvas_color("dark");
         assert_eq!((light.0, light.1, light.2, light.3), (244, 245, 248, 255));
