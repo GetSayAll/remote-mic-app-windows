@@ -58,6 +58,71 @@ use usage::{build_usage_profile, UsageProfile, UsageStore, UsageSync};
 /// 主窗口标签（`tauri.conf.json` 里由配置创建的唯一窗口）。
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// 主窗口最小尺寸（逻辑像素），与 `tauri.conf.json` 的
+/// `width` / `height` / `minWidth` / `minHeight` 保持一致。
+///
+/// 无边框窗口在 Windows 上通过自定义缩放手柄拖动时，Tauri 配置的
+/// `minHeight` 可能被绕过（`SetWindowPos` 路径不走 `WM_GETMINMAXINFO`），
+/// 因此在 `Resized` 事件里再做一次兜底。
+const MAIN_WINDOW_MIN_WIDTH: f64 = 1066.67;
+const MAIN_WINDOW_MIN_HEIGHT: f64 = 800.0;
+/// 逻辑像素容差：高 DPI 下物理像素取整后可能比最小逻辑尺寸少零点几，
+/// 没有容差会在 `Resized` 里反复 `set_size`。
+const MAIN_WINDOW_MIN_TOLERANCE: f64 = 0.5;
+
+fn clamp_main_window_size(
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+) -> Option<tauri::LogicalSize<f64>> {
+    if width == 0 || height == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return None;
+    }
+    let logical_width = f64::from(width) / scale_factor;
+    let logical_height = f64::from(height) / scale_factor;
+    if logical_width >= MAIN_WINDOW_MIN_WIDTH - MAIN_WINDOW_MIN_TOLERANCE
+        && logical_height >= MAIN_WINDOW_MIN_HEIGHT - MAIN_WINDOW_MIN_TOLERANCE
+    {
+        return None;
+    }
+    Some(tauri::LogicalSize::new(
+        logical_width.max(MAIN_WINDOW_MIN_WIDTH),
+        logical_height.max(MAIN_WINDOW_MIN_HEIGHT),
+    ))
+}
+
+#[cfg(test)]
+mod main_window_size_tests {
+    use super::*;
+
+    #[test]
+    fn clamps_height_but_preserves_larger_width() {
+        let clamped = clamp_main_window_size(2400, 1400, 2.0).expect("should clamp");
+        assert!((clamped.width - 1200.0).abs() < 0.01);
+        assert!((clamped.height - MAIN_WINDOW_MIN_HEIGHT).abs() < 0.01);
+    }
+
+    #[test]
+    fn clamps_width_at_one_x() {
+        let clamped = clamp_main_window_size(900, 700, 1.0).expect("should clamp");
+        assert!((clamped.width - MAIN_WINDOW_MIN_WIDTH).abs() < 0.01);
+        assert!((clamped.height - MAIN_WINDOW_MIN_HEIGHT).abs() < 0.01);
+    }
+
+    #[test]
+    fn leaves_size_at_or_above_minimum_alone() {
+        assert!(clamp_main_window_size(2134, 1600, 2.0).is_none());
+        assert!(clamp_main_window_size(1067, 800, 1.0).is_none());
+    }
+
+    #[test]
+    fn ignores_minimized_and_invalid_samples() {
+        assert!(clamp_main_window_size(0, 0, 2.0).is_none());
+        assert!(clamp_main_window_size(1200, 700, 0.0).is_none());
+        assert!(clamp_main_window_size(1200, 700, f64::NAN).is_none());
+    }
+}
+
 /// 取主窗口（tao `Window`）。
 ///
 /// **不要**用 `AppHandle::get_webview_window` 查主窗口。Tauri 2.11 的判定是
@@ -6128,6 +6193,17 @@ pub fn run() {
                     tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
                 )
             {
+                if let tauri::WindowEvent::Resized(size) = event {
+                    // 自定义无边框窗口的缩放手柄可能绕过配置里的 minWidth/minHeight，
+                    // 这里按逻辑尺寸兜底，保证高度不会低于当前默认展示高度。
+                    if let Ok(scale_factor) = window.scale_factor() {
+                        if let Some(clamped) =
+                            clamp_main_window_size(size.width, size.height, scale_factor)
+                        {
+                            let _ = window.set_size(tauri::Size::Logical(clamped));
+                        }
+                    }
+                }
                 // 推荐页子 WebView 的位置/尺寸不是 CSS 布局的一部分；窗口缩放和
                 // 跨屏 DPI 变化后按固定侧栏宽度重新贴边（页面未显示时是 no-op）。
                 recommendations::relayout(window.app_handle());
