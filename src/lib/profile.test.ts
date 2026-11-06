@@ -9,7 +9,7 @@ import {
   calendarIntensity,
   formatDuration,
   formatVoiceSessionDate,
-  formatVoiceTotal,
+  formatVoiceTotalParts,
   profileAccountLabel,
 } from "./profile";
 
@@ -53,17 +53,34 @@ describe("formatDuration", () => {
   });
 });
 
-describe("formatVoiceTotal", () => {
-  it("uses Mac's Chinese duration units", () => {
-    expect(formatVoiceTotal(0)).toBe("0 秒");
-    expect(formatVoiceTotal(32)).toBe("32 秒");
-    expect(formatVoiceTotal(1_992)).toBe("33 分钟 12 秒");
-    expect(formatVoiceTotal(3_723)).toBe("1 小时 2 分钟");
+describe("formatVoiceTotalParts", () => {
+  it("uses compact Chinese units and splits numbers from units", () => {
+    expect(formatVoiceTotalParts(0)).toEqual([
+      { value: "0", unit: "分" },
+      { value: "0", unit: "秒" },
+    ]);
+    expect(formatVoiceTotalParts(32)).toEqual([
+      { value: "0", unit: "分" },
+      { value: "32", unit: "秒" },
+    ]);
+    expect(formatVoiceTotalParts(1_992)).toEqual([
+      { value: "33", unit: "分" },
+      { value: "12", unit: "秒" },
+    ]);
+    expect(formatVoiceTotalParts(3_723)).toEqual([
+      { value: "1", unit: "小时" },
+      { value: "2", unit: "分" },
+      { value: "3", unit: "秒" },
+    ]);
   });
 
   it("treats invalid and negative durations as zero", () => {
-    expect(formatVoiceTotal(Number.NaN)).toBe("0 秒");
-    expect(formatVoiceTotal(-1)).toBe("0 秒");
+    const zero = [
+      { value: "0", unit: "分" },
+      { value: "0", unit: "秒" },
+    ];
+    expect(formatVoiceTotalParts(Number.NaN)).toEqual(zero);
+    expect(formatVoiceTotalParts(-1)).toEqual(zero);
   });
 });
 
