@@ -564,6 +564,12 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
       "分享无线麦 SayAll",
     "分享面板标题异常",
   );
+  // 个人中心页外壳先挂载，日历数据要等 IPC 快照回来才出现；直接断言会把
+  // 「数据还没到」误判成「日历没渲染」。
+  await waitFor(() => {
+    const days = document.querySelectorAll(".calendar-grid .calendar-day").length;
+    return days >= 7 ? days : null;
+  }, "个人中心日历渲染");
   assert(
     document.querySelectorAll(".calendar-grid .calendar-day").length >= 7,
     "个人中心日历没有渲染完整星期行",
