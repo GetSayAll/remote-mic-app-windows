@@ -25,6 +25,7 @@ import {
   openVbCableDownloadPage,
   registerCommonPhraseAvailability,
   registerPresetAppNames,
+  clearPresetAppNames,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
   saveApplicationLanguage,
@@ -110,7 +111,46 @@ describe("open application labels", () => {
     expect(actionSummary({ type: "open_app", target: "C:\\Apps\\Example.exe" })).toBe(
       "打开 Example",
     );
-    registerPresetAppNames([]);
+    clearPresetAppNames();
+  });
+
+  // 2026-11-06 现场：切到「组合动作 / 连接 / 我的」再回「按键」，格子先显示
+  // `netease_music` 这类内部 id，约 1.5 秒后才跳成「网易云音乐」。根因是
+  // `registerPresetAppNames` 每次 clear 整张表，而按键页挂载早期只拿得到
+  // 「自定义应用」这一部分列表。
+  it("keeps known preset names when a later registration carries only a partial list", () => {
+    registerPresetAppNames([
+      { id: "sayall", name: "无线麦 SayAll" },
+      { id: "netease_music", name: "网易云音乐" },
+    ]);
+    registerPresetAppNames([{ id: "C:\\Apps\\WPS.exe", name: "WPS演示" }]);
+    expect(actionSummary({ type: "open_app", target: "netease_music" })).toBe("打开网易云音乐");
+    expect(actionSummary({ type: "open_app", target: "C:\\Apps\\WPS.exe" })).toBe("打开 WPS演示");
+    clearPresetAppNames();
+  });
+
+  it("ignores blank entries without dropping names already known", () => {
+    registerPresetAppNames([{ id: "netease_music", name: "网易云音乐" }]);
+    registerPresetAppNames([
+      { id: "", name: "空 id" },
+      { id: "empty_name", name: "   " },
+    ]);
+    expect(actionSummary({ type: "open_app", target: "netease_music" })).toBe("打开网易云音乐");
+    clearPresetAppNames();
+  });
+
+  it("restores preset names from the local first-frame cache on module load", async () => {
+    localStorage.setItem(
+      "sayall.preset-app-names.v1",
+      JSON.stringify([["netease_music", "网易云音乐"]]),
+    );
+    vi.resetModules();
+    const fresh = await import("./bridge");
+    expect(fresh.actionSummary({ type: "open_app", target: "netease_music" })).toBe(
+      "打开网易云音乐",
+    );
+    localStorage.clear();
+    clearPresetAppNames();
   });
 });
 
