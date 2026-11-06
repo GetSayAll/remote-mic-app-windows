@@ -51,13 +51,13 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   keyboard: {
     // SF "keyboard"：圆角键盘轮廓 + 三行点阵 + 底部长条。
     // 旧轮廓只有 10.4 高、宽高比接近 2:1，放在 18px 槽位里比 Mac 的 SF Symbol 扁；
-    // 这里把轮廓抬到 14.4 高、宽度保持 20.4，接近 SF keyboard 的视觉比例。
+    // 这里把轮廓抬到 16.4 高、宽度保持 20.4，接近 SF keyboard 的视觉比例。
     strokes: [
-      "M3.2 4.8h17.6a1.7 1.7 0 0 1 1.7 1.7v10.9a1.7 1.7 0 0 1-1.7 1.7H3.2a1.7 1.7 0 0 1-1.7-1.7V6.5a1.7 1.7 0 0 1 1.7-1.7z",
-      "M5.7 8.4h.01M8.4 8.4h.01M11.1 8.4h.01M13.8 8.4h.01M16.5 8.4h.01M19.2 8.4h.01",
-      "M5.7 11.2h.01M8.4 11.2h.01M11.1 11.2h.01M13.8 11.2h.01M16.5 11.2h.01M19.2 11.2h.01",
-      "M5.7 14h.01M8.4 14h.01M11.1 14h.01M13.8 14h.01M16.5 14h.01M19.2 14h.01",
-      "M6.6 16.8h10.8",
+      "M3.2 3.8h17.6a1.7 1.7 0 0 1 1.7 1.7v12.9a1.7 1.7 0 0 1-1.7 1.7H3.2a1.7 1.7 0 0 1-1.7-1.7V5.5a1.7 1.7 0 0 1 1.7-1.7z",
+      "M5.7 7.7h.01M8.4 7.7h.01M11.1 7.7h.01M13.8 7.7h.01M16.5 7.7h.01M19.2 7.7h.01",
+      "M5.7 10.8h.01M8.4 10.8h.01M11.1 10.8h.01M13.8 10.8h.01M16.5 10.8h.01M19.2 10.8h.01",
+      "M5.7 13.9h.01M8.4 13.9h.01M11.1 13.9h.01M13.8 13.9h.01M16.5 13.9h.01M19.2 13.9h.01",
+      "M6.6 17.2h10.8",
     ],
   },
   sparkles: {
@@ -101,11 +101,12 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
     strokes: [],
   },
   textbubble: {
-    // SF "text.bubble.fill"：圆角对话气泡 + 两行文字（对齐 Mac 回眸入口）。
-    strokes: [
-      "M4.2 3.6h15.6a2.2 2.2 0 0 1 2.2 2.2v9.1a2.2 2.2 0 0 1-2.2 2.2h-7.1L8.1 21v-3.9H4.2A2.2 2.2 0 0 1 2 14.9V5.8a2.2 2.2 0 0 1 2.2-2.2z",
-      "M6.4 8.2h11.2M6.4 11.8h7.4",
+    // SF "text.bubble.fill"：实心圆角气泡 + 两行镂空文字（对齐 Mac 回眸入口）。
+    // 两行文字用 evenodd 子路径挖空，避免固定写死侧栏/选中态的背景色。
+    fills: [
+      "M4.2 3.6h15.6a2.2 2.2 0 0 1 2.2 2.2v9.1a2.2 2.2 0 0 1-2.2 2.2h-7.1L8.1 21v-3.9H4.2A2.2 2.2 0 0 1 2 14.9V5.8a2.2 2.2 0 0 1 2.2-2.2zM6.4 7.8h11.2v1.6H6.4zM6.4 11.4h7.4v1.6H6.4z",
     ],
+    strokes: [],
   },
   person: {
     // SF "person.crop.circle"：圆环 + 实心头肩。Mac 的 SF Symbol 内部是填充剪影，
@@ -146,6 +147,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
               :key="`f${index}`"
               :d="path"
               fill="currentColor"
+              fill-rule="evenodd"
             />
           </template>
           <path
@@ -179,6 +181,7 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
                 :key="`pf${index}`"
                 :d="path"
                 fill="currentColor"
+                fill-rule="evenodd"
               />
             </template>
             <path
@@ -255,11 +258,10 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   min-height: 12px;
 }
 
-/* 账号入口与上方导航之间一条细线（对齐 Mac statistics 上方的 separators）。 */
+/* 账号区与导航之间只留呼吸空间，不再画短横线；总高 56（40 行 + 上下 6 + 行外距 4）。 */
 .sidebar-account {
   margin-top: 6px;
   padding: 6px 0;
-  border-top: 1px solid var(--border);
 }
 
 /* 图标在左、文字在右的紧凑横排；文字占满剩余宽度并保持左对齐。 */
@@ -270,6 +272,9 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 与 Mac SettingsSidebarRow 的 13pt semibold 对齐。 */
+  font-size: 13px;
+  font-weight: 600;
 }
 
 /* 账号区由 40 行 + 上下 6 内边距组成（Mac 设计稿最小 56），长账号名换行时不显拥挤。 */

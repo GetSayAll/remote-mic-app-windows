@@ -2343,12 +2343,18 @@ watch(
   flex: 1;
   min-height: 0;
   display: flex;
+  align-items: flex-start;
+  gap: 14px;
 }
 .library-pane {
   width: 264px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface-subtle);
+  align-self: flex-start;
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2461,6 +2467,7 @@ watch(
 }
 .detail-pane {
   flex: 1;
+  align-self: stretch;
   min-height: 0;
   overflow-y: auto;
   padding: 20px 14px;

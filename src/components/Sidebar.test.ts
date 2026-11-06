@@ -47,9 +47,12 @@ describe("sidebar", () => {
     // 推荐入口使用 Mac 的 sparkles 语义图标（大四角星 + 两颗小星）。
     const recommendationIcon = items[2].get("svg");
     expect(recommendationIcon.findAll("path")).toHaveLength(3);
-    // 回眸入口使用文本气泡图标；紧挨设置上方。
+    // 回眸入口使用 SF text.bubble.fill 的实心气泡 + 镂空文字；紧挨设置上方。
     expect(items[4].text()).toBe("回眸");
-    expect(items[4].get("svg").findAll("path")).toHaveLength(2);
+    const bubblePaths = items[4].get("svg").findAll("path");
+    expect(bubblePaths).toHaveLength(1);
+    expect(bubblePaths[0].attributes("fill")).toBe("currentColor");
+    expect(bubblePaths[0].attributes("fill-rule")).toBe("evenodd");
     // 组合动作入口使用层叠方块图标（3 条描边）。
     expect(items[1].get("svg").findAll("path")).toHaveLength(3);
     const settingsIcon = items[5].get("svg");
@@ -110,10 +113,10 @@ describe("sidebar", () => {
     expect(buttonsItem).toBeTruthy();
     const paths = buttonsItem!.get("svg").findAll("path");
     expect(paths).toHaveLength(5);
-    expect(paths[0].attributes("d")).toContain("v10.9");
-    expect(paths[1].attributes("d")).toContain("8.4");
-    expect(paths[3].attributes("d")).toContain("14");
-    expect(paths[4].attributes("d")).toBe("M6.6 16.8h10.8");
+    expect(paths[0].attributes("d")).toContain("v12.9");
+    expect(paths[1].attributes("d")).toContain("7.7");
+    expect(paths[3].attributes("d")).toContain("13.9");
+    expect(paths[4].attributes("d")).toBe("M6.6 17.2h10.8");
   });
 
   it("组合动作页用层叠方块图标（对齐 Mac square.stack.3d.up）", () => {

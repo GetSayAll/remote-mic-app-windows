@@ -17,9 +17,10 @@
 ## 页面承载
 
 - 官网返回 `X-Frame-Options: DENY`，不能用 `<iframe>`；Windows 使用 Tauri 主窗口
-  内的子 WebView（WebView2）。子 WebView 的边界固定为侧栏 130px 之外的整个客户区，
-  窗口缩放与跨屏 DPI 变化时重新贴边（2026-10-31 侧栏紧凑化后由 108px 改为 136px，
-  2026-11-06 按 Mac 内容测量口径调为 130px）。
+  内的子 WebView（WebView2）。子 WebView 的边界固定为侧栏 130px 之外、标题栏 32px 之下，
+  右侧与底部再让出主内容的 8px 圆角留白；窗口缩放与跨屏 DPI 变化时重新贴边
+  （2026-10-31 侧栏紧凑化后由 108px 改为 136px，2026-11-06 按 Mac 内容测量口径调为 130px，
+  同日加入主内容圆角面板的 8px 留白）。
 - 加载地址：`https://sayall.app/recommendations/?embed=app&appPlatform=windows&theme=light|dark`。
   - `embed=app` 让官网隐藏自身导航和页脚，只保留推荐内容；
   - `appPlatform=windows` 是平台标记；当前官网按 `website` 内容面渲染；

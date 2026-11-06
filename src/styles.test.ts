@@ -66,6 +66,15 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
     expect(css).toMatch(/\.window-frame\s*\{[^}]*\n\s*height:\s*100vh/);
     expect(css).not.toMatch(/\.app-shell\s*\{[^}]*[{;]\s*height:\s*100vh/);
   });
+
+  it("主内容为浮在侧栏底色上的圆角面板，底部/右侧留 8px", () => {
+    expect(css).toMatch(/\.app-shell\s*\{[^}]*background:\s*var\(--sidebar\)/);
+    expect(css).toMatch(
+      /\.content\s*\{[^}]*height:\s*calc\(100%\s*-\s*8px\)[^}]*margin:\s*0 8px 8px 0/,
+    );
+    expect(css).toMatch(/\.content\s*\{[^}]*border-radius:\s*10px/);
+    expect(css).toMatch(/\.content\s*\{[^}]*background:\s*var\(--surface-canvas\)/);
+  });
 });
 
 // 2026-11-06 Andy：侧栏左上角 SayAll 与设置页左上角「无线麦 SayAll」要和 Mac
@@ -153,6 +162,7 @@ describe("自定义标题栏与 Mac 侧栏尺寸", () => {
     expect(sidebar).toMatch(/ICON_PATHS\.person\.strokes/);
     expect(sidebar).toMatch(/ICON_PATHS\.person\.fills/);
     expect(sidebar).toMatch(/\.sidebar-account\s*\{[^}]*padding:\s*6px 0/);
+    expect(sidebar).not.toMatch(/\.sidebar-account\s*\{[^}]*border-top/);
     expect(sidebar).toMatch(
       /\.profile-nav-item \.nav-label\s*\{[^}]*white-space:\s*normal/,
     );
@@ -164,7 +174,39 @@ describe("自定义标题栏与 Mac 侧栏尺寸", () => {
       "utf8",
     );
     expect(rust).toMatch(/const TITLEBAR_HEIGHT:\s*f64\s*=\s*32\.0;/);
+    expect(rust).toMatch(/const CONTENT_GAP:\s*f64\s*=\s*8\.0;/);
     expect(rust).toMatch(/let content_top = TITLEBAR_HEIGHT \+ top;/);
     expect(rust).toMatch(/LogicalPosition::new\(SIDEBAR_WIDTH, content_top\)/);
+    expect(rust).toMatch(/size\.width - SIDEBAR_WIDTH - CONTENT_GAP/);
+    expect(rust).toMatch(/size\.height - content_top - CONTENT_GAP/);
+  });
+});
+
+describe("回眸与组合动作卡片跟随设置页材质", () => {
+  it("回眸记录卡和 Agent 面板深浅色都使用 --card", () => {
+    const reflections = readFileSync(
+      join(srcDir, "pages", "ReflectionsPage.vue"),
+      "utf8",
+    );
+    const agent = readFileSync(
+      join(srcDir, "pages", "ReflectionsAgentAccess.vue"),
+      "utf8",
+    );
+    expect(reflections).toMatch(/\.card\s*\{[^}]*background:\s*var\(--card\)/);
+    expect(reflections).not.toMatch(/rgba\(246, 247, 251, 0\.98\)/);
+    expect(agent).toMatch(/\.agent-access\s*\{[^}]*background:\s*var\(--card\)/);
+    expect(agent).not.toMatch(/rgba\(58, 61, 78/);
+    expect(agent).toMatch(
+      /\.agent-client\s*\{[^}]*background:\s*var\(--surface-subtle\)/,
+    );
+  });
+
+  it("组合动作左栏是内容高度的设置页样式卡片", () => {
+    const macros = readFileSync(join(srcDir, "pages", "MacrosPage.vue"), "utf8");
+    expect(macros).toMatch(/\.library-body\s*\{[^}]*align-items:\s*flex-start/);
+    expect(macros).toMatch(/\.library-pane\s*\{[^}]*align-self:\s*flex-start/);
+    expect(macros).toMatch(/\.library-pane\s*\{[^}]*background:\s*var\(--card\)/);
+    expect(macros).toMatch(/\.library-pane\s*\{[^}]*border-radius:\s*12px/);
+    expect(macros).not.toMatch(/\.library-pane\s*\{[^}]*border-right/);
   });
 });

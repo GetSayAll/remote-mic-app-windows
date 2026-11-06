@@ -1146,20 +1146,9 @@ onUnmounted(() => {
 .chevron.up {
   transform: rotate(180deg);
 }
-/* 回眸页的卡片统一用 Mac GlassPanel 同款轻渐变底，与底部「本地 Agent 访问」
-   卡片保持一致；暗色主题回退到原有的卡片底色。 */
+/* 回眸页卡片与设置页共用同一层材料：浅/深色都直接使用主题 --card，
+   不再在深色下保留浅色渐变或硬编码白底。 */
 .card {
-  background: linear-gradient(
-    180deg,
-    rgba(246, 247, 251, 0.98) 0%,
-    rgba(250, 250, 250, 0.98) 100%
-  );
-  border-color: var(--border-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 8px 30px var(--shadow-card);
-}
-:global(html[data-theme="dark"]) .card {
   background: var(--card);
   border-color: var(--border);
   box-shadow: 0 8px 30px var(--shadow-card);

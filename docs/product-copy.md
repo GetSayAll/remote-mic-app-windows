@@ -736,10 +736,14 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   侧栏宽度按 Mac origin/main 的内容测量口径取 130px，不再固定 136px；主页面与侧栏之间不画竖向分隔线。
   窗口去掉原生标题栏的 logo 与文字，改为 32px 自定义标题栏；颜色始终使用侧栏的 `--sidebar`，
   右侧保留最小化/最大化/关闭（关闭仍收进托盘）。侧栏行高 40（上下再留 2px，行距 44）、图标 18、
-  文字 13 semibold、leading 15 / trailing 11；键盘图标按 SF keyboard 的比例保留三行键位，不再压扁。
-  底部账号入口使用 `person.crop.circle` 的圆环 + 实心头肩，最小高度 56，未登录显示「我的」，
+  文字 13 semibold、leading 15 / trailing 11；键盘图标按 SF keyboard 的比例保留三行键位，不再压扁；
+  「回眸」使用实心 `text.bubble.fill` 气泡 + 镂空文字，不再画成描边气泡。
+  底部账号入口使用 `person.crop.circle` 的圆环 + 实心头肩，账号区 56 高，上方不画短横线，未登录显示「我的」，
   已登录显示完整账号本地名并允许换行（对齐 Mac `sidebarAccountTitle` / `SettingsSidebarRow`）。
-  推荐页子 WebView 的 `html/body` 背景透明，WebView 画布色与 `--surface-canvas` 同步
-  （浅色 `#f4f5f8` / 深色 `#15161a`），避免官网白/深灰背景在右侧形成色块。
+  主内容改为浮在侧栏 `--sidebar` 底色上的 10px 圆角面板，右侧/底部各留 8px 露出侧栏色；
+  推荐页子 WebView 的边界同步内缩 8px，并把 `html/body` 背景设为与 `--surface-canvas` 一致的
+  浅色 `#f4f5f8` / 深色 `#15161a`，避免官网白/深灰背景形成色块。
+  回眸的记录/全部应用卡、Agent 授权面板与组合动作左栏卡统一使用设置页的 `--card` 材质；
+  组合动作左栏改为内容高度卡片，四条记录无需滚动即可看全。
   字体文件 `public/fonts/oxanium-semibold.ttf`，OFL 1.1 许可随包（`public/fonts/OFL.txt`），
   第三方声明见 `THIRD_PARTY_NOTICES.md`。

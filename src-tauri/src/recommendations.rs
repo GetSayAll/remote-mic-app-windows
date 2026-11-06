@@ -38,6 +38,9 @@ const SIDEBAR_WIDTH: f64 = 130.0;
 /// 自定义标题栏高度；与 `src/styles.css` 的 `--titlebar-height` 同步。
 /// 推荐页子 WebView 覆盖主窗口内容区，必须让出这条标题栏，否则会盖住窗口按钮。
 const TITLEBAR_HEIGHT: f64 = 32.0;
+/// 主内容圆角面板右侧/底部留白；与 `src/styles.css` 的 `.content` 同步。
+/// 推荐页子 WebView 也要让出这一圈，否则会盖住侧栏色和圆角。
+const CONTENT_GAP: f64 = 8.0;
 /// 首次创建时先放到窗口外，避免 about:blank 或加载中的页面闪一下。
 const OFFSCREEN_X: f64 = -20_000.0;
 const EVENT_NAME: &str = "recommendations-page-state";
@@ -422,8 +425,8 @@ fn layout_with_top(app: &AppHandle, top: f64) -> Option<(LogicalPosition<f64>, L
     Some((
         LogicalPosition::new(SIDEBAR_WIDTH, content_top),
         LogicalSize::new(
-            (size.width - SIDEBAR_WIDTH).max(1.0),
-            (size.height - content_top).max(1.0),
+            (size.width - SIDEBAR_WIDTH - CONTENT_GAP).max(1.0),
+            (size.height - content_top - CONTENT_GAP).max(1.0),
         ),
     ))
 }

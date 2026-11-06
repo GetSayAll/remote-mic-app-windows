@@ -379,30 +379,12 @@ function formatCreatedAt(millis: number): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  /* 与上方记录卡片同一种材料底（Mac GlassPanel 的轻渐变 + 顶边内高光），
-     圆角对齐 App 切换卡的 13。 */
+  /* 与设置页卡片共用 --card；浅/深色都不再写死浅色渐变。 */
   margin-top: 14px;
   border-radius: 13px;
-  border: 1px solid var(--border-strong);
-  background: linear-gradient(
-    180deg,
-    rgba(246, 247, 251, 0.98) 0%,
-    rgba(250, 250, 250, 0.98) 100%
-  );
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 10px 26px var(--shadow-card);
-}
-:global(html[data-theme="dark"]) .agent-access {
-  background: linear-gradient(
-    180deg,
-    rgba(58, 61, 78, 0.92) 0%,
-    rgba(45, 47, 58, 0.94) 45%,
-    rgba(40, 42, 52, 0.94) 100%
-  );
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    0 10px 26px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: 0 10px 26px var(--shadow-card);
 }
 .agent-access-header {
   display: flex;
@@ -448,11 +430,8 @@ function formatCreatedAt(millis: number): string {
   gap: 10px;
   padding: 10px;
   border-radius: 10px;
-  /* Mac 用 Color.primary.opacity(0.035)，在浅色下是 #F3F3F2 一类的轻灰。 */
-  background: rgba(17, 20, 35, 0.03);
-}
-:global(html[data-theme="dark"]) .agent-client {
-  background: rgba(255, 255, 255, 0.06);
+  /* 与设置页的行内浅底一致，深色主题由 --surface-subtle 自动切换。 */
+  background: var(--surface-subtle);
 }
 .agent-client-icon {
   display: inline-flex;
