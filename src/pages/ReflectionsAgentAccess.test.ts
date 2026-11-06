@@ -325,6 +325,8 @@ describe("reflections agent access", () => {
             available: false,
             connected: false,
             needsReconnect: false,
+            // Windows Shell 提取到的 OpenCode 是一张透明空图。
+            iconDataUrl: "data:image/png;base64,AAAA",
           },
         ],
       }),
@@ -336,6 +338,11 @@ describe("reflections agent access", () => {
       wrapper.findAll(".agent-client").find((card) => card.text().includes(name))!;
     expect(cardFor("Codex").find("img").exists()).toBe(true);
     expect(cardFor("Claude Code").find("img").exists()).toBe(false);
+    // 透明空图不能吃掉兜底图形；品牌瓦片同时给透明底真彩图标提供底色。
+    expect(cardFor("OpenCode").find("img").exists()).toBe(false);
+    expect(cardFor("OpenCode").get(".agent-client-icon").attributes("style")).toContain(
+      "background",
+    );
 
     // 未安装的三个客户端不能共用同一张图形。
     const glyphOf = (name: string) =>

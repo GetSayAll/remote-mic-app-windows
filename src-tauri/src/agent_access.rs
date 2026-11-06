@@ -34,6 +34,9 @@ pub enum AgentClientId {
     Codex,
     ClaudeCode,
     Cursor,
+    // 前端、授权状态和配置文件统一使用 `opencode`；`open-code` 只兼容旧版
+    // serde kebab-case 已经写进 access.json 的值。
+    #[serde(rename = "opencode", alias = "open-code")]
     OpenCode,
 }
 

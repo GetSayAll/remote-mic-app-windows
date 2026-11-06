@@ -167,9 +167,11 @@ const CLIENT_GLYPHS: Record<AgentClientId, string[]> = {
  *  Cursor 深灰、OpenCode 蓝）。Windows 的 Codex / Claude Code 是命令行程序，exe
  *  里没有图标资源（实测 Shell 提取返回 S_FALSE），所以用色标瓦片而不是空图标。 */
 const CLIENT_TILE: Record<AgentClientId, string> = {
-  codex: "#1E2330",
+  // Codex / Cursor 都是近黑品牌色；深色卡片上需要比卡片明显更深，否则条目
+  // 看起来像只有一个白色字形、没有 logo 瓦片。
+  codex: "#111318",
   "claude-code": "#D97757",
-  cursor: "#2D2D33",
+  cursor: "#15161B",
   opencode: "#3B82F6",
 };
 
@@ -181,6 +183,20 @@ function clientTile(client: AgentClientId): string {
   return CLIENT_TILE[client];
 }
 
+/**
+ * 图标瓦片始终使用品牌底色，真彩图标（例如 Cursor 的白箭头透明底）在浅色
+ * 卡片上才不会消失；与 Mac 端 30×30 的图标槽位保持同一视觉权重。
+ *
+ * OpenCode 的 Windows shell 图标提取结果是一张透明空图，不能直接显示；
+ * 统一走蓝色瓦片 + `{}` 兜底图形。
+ */
+function clientIconDataUrl(client: AgentClientView): string | undefined {
+  if (client.id === "opencode") {
+    return undefined;
+  }
+  return client.iconDataUrl ?? undefined;
+}
+
 /** 已授权行的图标：有集成身份的沿用客户端 logo（真实图标或瓦片）。 */
 function clientIconFor(
   authorization: { integration: AgentClientId | null },
@@ -189,7 +205,7 @@ function clientIconFor(
     return {};
   }
   const client = clients.value.find((item) => item.id === authorization.integration);
-  return client && client.iconDataUrl ? { iconDataUrl: client.iconDataUrl } : {};
+  return client ? { iconDataUrl: clientIconDataUrl(client) } : {};
 }
 
 function formatCreatedAt(millis: number): string {
@@ -234,8 +250,12 @@ function formatCreatedAt(millis: number): string {
         </p>
         <div class="agent-clients">
           <div v-for="client in clients" :key="client.id" class="agent-client">
-            <span class="agent-client-icon" aria-hidden="true">
-              <img v-if="client.iconDataUrl" :src="client.iconDataUrl" alt="" />
+            <span
+              class="agent-client-icon"
+              :style="{ background: clientTile(client.id) }"
+              aria-hidden="true"
+            >
+              <img v-if="clientIconDataUrl(client)" :src="clientIconDataUrl(client)" alt="" />
               <svg v-else viewBox="0 0 24 24" fill="none">
                 <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="6" :fill="clientTile(client.id)" />
                 <path
@@ -331,7 +351,11 @@ function formatCreatedAt(millis: number): string {
       <p v-if="authorizations.length === 0">{{ t("还没有客户端获得访问权限。") }}</p>
       <ul v-else class="agent-authorizations">
         <li v-for="authorization in authorizations" :key="authorization.clientId">
-          <span class="agent-client-icon" aria-hidden="true">
+          <span
+            class="agent-client-icon"
+            :style="authorization.integration ? { background: clientTile(authorization.integration) } : undefined"
+            aria-hidden="true"
+          >
             <img v-if="clientIconFor(authorization).iconDataUrl" :src="clientIconFor(authorization).iconDataUrl" alt="" />
             <svg v-else viewBox="0 0 24 24" fill="none">
               <template v-if="authorization.integration">
@@ -438,6 +462,10 @@ function formatCreatedAt(millis: number): string {
   width: 30px;
   height: 30px;
   flex: none;
+  overflow: hidden;
+  /* 与 Mac 端 30×30 App 图标一致：透明底真彩图标也有稳定的品牌瓦片。 */
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 1px rgba(120, 126, 140, 0.24);
   color: var(--text-control);
 }
 .agent-client-icon svg,
