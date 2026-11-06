@@ -21,8 +21,9 @@
 
 ## 正常预期
 
-- 切页不重建页面，保留滚动位置、选中项与未保存草稿；
-- 文案从第一帧起就是产品名，任何时刻都不出现 `netease_music` 这类内部 id。
+- 文案从第一帧起就是产品名，任何时刻都不出现 `netease_music` 这类内部 id；
+- 页面重建可以有，但不能让用户看到内部值或空值（本次修的是文案；页面级的"不重建"见
+  修复里撤回 KeepAlive 的说明）。
 
 ## 证据（2026-11-06，WebView2 CDP，安装版 1.8.3 / 本机调试构建）
 
@@ -55,10 +56,16 @@
 - `src/lib/bridge.ts`：`registerPresetAppNames` 改为**合并**（空 id / 空名跳过），不再清空；
   名称表写入 `localStorage`（`sayall.preset-app-names.v1`）并在模块加载时同步恢复，
   保证页面首帧就能拿到上次已知的产品名（localStorage 不可用时静默降级，行为同修复前）。
-- `src/App.vue`：`<component>` 外包 `<KeepAlive :include="…">`，缓存
-  `ButtonsPage` / `MacrosPage` / `ConnectionPage` / `ProfilePage`；
-  推荐页是原生子 WebView 覆盖层，离开必须卸载，保持不缓存。
 - 新增 `clearPresetAppNames()` 仅用于测试重置模块级缓存。
+- **KeepAlive 方案已评估但撤回（同日）**：把 `ButtonsPage` / `MacrosPage` /
+  `ConnectionPage` / `ProfilePage` 常驻确实能消掉重建，但这三页的 `onUnmounted` 承担
+  安全职责——`MacrosPage.onUnmounted` 明确写着「页面切走时后端仍在录入态会全局吞键，
+  必须在卸载时成对停止」，`ButtonsPage.releasePageResources()` 与
+  `ConnectionPage.onUnmounted` 也都会 `stopShortcutCapture()`。改成常驻后，录快捷键
+  中途切页会让后端留在全局吞键态，而 `releasePageResources()` 又不重置
+  `capturingShortcut`，返回页面还会显示"录入中"。在补齐 `onDeactivated` 停止捕获 +
+  `onActivated` 恢复订阅/轮询之前，不引入 KeepAlive；本次保持原有"每次进入重建"生命周期。
+  该后续项需要逐页补生命周期钩子与回归测试，单独评审。
 
 ## 验证
 
@@ -70,22 +77,24 @@
     `Expected "打开网易云音乐" / Received "打开 netease_music"` 失败；恢复修复后通过。
 - 前端全量：`vitest run` **622 passed | 10 skipped**；`pnpm build`（`vue-tsc --noEmit && vite build`）passed。
 - CDP 实测（本机调试构建，真实 WebView + 真实 IPC）：
-  - 切回按键页：0 / 30 / 80 / 200 / 600ms 五个采样点全部为产品名，不再出现内部 id；
-  - 组合动作页二次进入：`.count-badge` 首帧直接是 `8`；搜索框输入「聚焦」后切到「连接」
-    再回来，值与过滤结果保留 ⇒ KeepAlive 生效；
-  - 清缓存重载 200–500ms 显示内部 id、保留缓存重载 200ms 即产品名（正/负对照）。
+  - 切回按键页：0 / 30 / 80 / 200 / 600ms 五个采样点全部为产品名，不再出现内部 id
+    （页面仍按原生命周期重建，但名称表已在内存/缓存里，首帧即可用）；
+  - 整页重载：清缓存时 200–500ms 显示内部 id、保留缓存时 200ms 即产品名（正/负对照）；
+  - 「组合动作」页首帧仍会经过 `0 → 真实条数`（页面重建 + 异步读取，页面原有行为，
+    本次未改；改造成本见「修复」里的 KeepAlive 撤回说明）。
 - runtime simulation（真实 Tauri IPC 旅程，`-features runtime-simulation` 构建）：
   `scripts/test-windows-runtime-simulation.ps1` **27 steps passed**（含「五个侧栏页面均在
   Windows WebView 中完成导航和渲染」）。
-- 安装包复验（`3ea535a`，SHA-256 `470d3068…`）：`verify-local-test-install.ps1 -ExpectRevision`
-  全部 PASS（内嵌修订号 `3ea535a5`）；安装版 CDP 采样与上面一致：按键页 0 / 30 / 80 / 200 /
-  600ms 全为产品名，组合动作页二次进入首帧即 `8`，整页重载后 200ms 起即为产品名。
+- 安装包复验：`verify-local-test-install.ps1 -ExpectRevision` 全部 PASS（内嵌修订号与包
+  SHA-256 以当次交付报告为准）；安装版 CDP 采样：按键页 0 / 30 / 80 / 200 / 600ms 全为
+  产品名，整页重载后 200ms 起即为产品名。
 
 ## 未覆盖
 
-- 真实 RC001 / RC003 按键链路未在本次改动中回归（改动只涉及前端页面生命周期与文案缓存，
-  不触碰 BLE / HID / 注入路径）；按惯例仍需真机确认切页时按键高亮不中断。
-- 推荐页、回眸页、设置页仍按原样每次进入重建（本次未纳入缓存）。
+- 「切页重新读取」本身未改：页面仍按原生命周期重建（见「修复」的 KeepAlive 撤回说明），
+  组合动作 / 连接 / 我的首次渲染仍有一次异步填充；本次只消除按键格内部 id 闪烁。
+- 真实 RC001 / RC003 按键链路未在本次改动中回归（改动只涉及前端文案缓存，不触碰
+  BLE / HID / 注入路径）；按惯例仍需真机确认切页时按键高亮不中断。
 - ARM64 未覆盖（本机无 ARM64 工具链与硬件）。
 
 ## 隐私检查

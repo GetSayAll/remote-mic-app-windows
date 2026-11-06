@@ -150,16 +150,6 @@ const pageComponents: Record<string, Component> = {
 
 const activeComponent = computed(() => pageComponents[activePage.value] ?? ButtonsPage);
 
-/**
- * 侧栏切换不重建页面（2026-11-06 现场反馈：切到「我的 / 组合动作 / 连接」再回
- * 「按键」时整页重新取数，按键格先显示 `netease_music` 再跳成「网易云音乐」）。
- *
- * 只缓存保留本地交互状态的主页面；推荐页是原生子 WebView 覆盖层，离开时必须卸载
- * （否则会继续盖住别的页面），设置 / 回眸保持原有每次进入即刷新。
- * KeepAlive 按组件名匹配：`<script setup>` 的 SFC 会以文件名作为组件名。
- */
-const cachedPageNames = ["ButtonsPage", "MacrosPage", "ConnectionPage", "ProfilePage"];
-
 // 横幅不在"设置"页重复显示（页面内已有完整更新面板）；推荐页由原生子 WebView
 // 覆盖内容区，横幅即使渲染也看不到，直接跳过。
 const updateBannerVisible = computed(
@@ -294,14 +284,12 @@ onUnmounted(() => {
             ×
           </button>
         </div>
-        <KeepAlive :include="cachedPageNames">
-          <component
-            :is="activeComponent"
-            :runtime="runtime"
-            @restart-onboarding="onRestartOnboarding"
-            @navigate="activePage = $event"
-          />
-        </KeepAlive>
+        <component
+          :is="activeComponent"
+          :runtime="runtime"
+          @restart-onboarding="onRestartOnboarding"
+          @navigate="activePage = $event"
+        />
       </main>
     </div>
     <UpdateCompletedDialog
