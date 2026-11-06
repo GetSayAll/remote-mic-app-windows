@@ -771,3 +771,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   chip 按名称自适应宽度（最小 120px、最大 190px），窗口变窄时由 flex 收缩并换行；记录行应用列由
   126px 调整为 164px，仍超出时换行，不裁字。「全部应用」保持 156px 最小宽度。落点：
   `src/pages/ReflectionsPage.vue`；回归 `src/pages/reflections-app-name-layout.test.ts`。
+
+- 2026-11-06（回眸录音应用名，用户查问「未知应用」）：语音开始时前台就是无线麦自己
+  （首次设置向导的语音测试、设置页试音）时，录音 manifest 记录应用键与显示名「SayAll」，
+  回眸按「SayAll」分组，不再落到「未知应用」；与个人中心统计的既有口径一致。旧录音
+  manifest 缺应用身份时仍显示「未知应用」，不改写磁盘。落点：
+  `crates/sayall-windows/src/transcript_capture_windows.rs`。
