@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { effectiveLanguage } from "../lib/language-state";
@@ -61,5 +63,19 @@ describe("window title bar", () => {
     expect(
       wrapper.findAll(".window-control").map((button) => button.attributes("aria-label")),
     ).toEqual(["Minimize", "Maximize / Restore", "Close Window"]);
+  });
+
+  it("Tauri 能力文件授予标题栏所需的窗口操作权限", () => {
+    const capabilities = JSON.parse(
+      readFileSync(join(process.cwd(), "src-tauri/capabilities/default.json"), "utf8"),
+    ) as { permissions: string[] };
+
+    expect(capabilities.permissions).toEqual(
+      expect.arrayContaining([
+        "core:window:allow-start-dragging",
+        "core:window:allow-minimize",
+        "core:window:allow-toggle-maximize",
+      ]),
+    );
   });
 });
