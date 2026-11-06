@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import MacrosPage from "./MacrosPage.vue";
 import { clearMacroEditorSession } from "./macro-editor-session";
+import { macrosViewSession } from "./macros-view-session";
 import type { MacroDefinition, MacroLibraryDocument } from "../lib/bridge";
 
 type CaptureHandler = (edge: { key: string; isPressed: boolean; source?: string }) => void;
@@ -105,6 +106,8 @@ beforeEach(() => {
   shortcutCaptureHandler = null;
   // 编辑会话是模块级的（跨页面切换保留进度）；用例之间必须清空，否则上一条的草稿会在下一条挂载时恢复。
   clearMacroEditorSession();
+  // 库首帧快照同样是模块级的；不重置会让后续用例从上一轮的列表开始。
+  macrosViewSession.definitions = null;
   getCombinedActionsSpy.mockReset().mockResolvedValue(structuredClone(initialLibrary));
   saveMacroSpy.mockReset().mockImplementation(async (definition: MacroDefinition) => ({
     formatVersion: 1,
@@ -163,6 +166,19 @@ describe("组合动作页 · 库浏览", () => {
     expect(items[0].text()).toContain("2 个步骤");
     expect(wrapper.findAll(".step-item")).toHaveLength(2);
     expect(wrapper.text()).toContain("聚焦学习过的输入框");
+  });
+
+  it("切页重建时首帧直接渲染上次的库（不闪 0）", async () => {
+    const first = await mountPage();
+    expect(first.findAll(".macro-item")).toHaveLength(1);
+    first.unmount();
+
+    // 第二次挂载：库读取故意挂起，验证首帧用的是模块级快照而不是空列表。
+    getCombinedActionsSpy.mockReset().mockImplementation(() => new Promise(() => undefined));
+    const wrapper = mount(MacrosPage, { props: { runtime: null } });
+    expect(wrapper.find(".count-badge").text()).toBe("1");
+    expect(wrapper.findAll(".macro-item")[0]?.text()).toContain("打开记事本并聚焦");
+    wrapper.unmount();
   });
 
   it("空库显示空态与创建引导（对齐 Mac 文案）", async () => {

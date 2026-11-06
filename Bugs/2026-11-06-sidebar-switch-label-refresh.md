@@ -62,6 +62,9 @@
   `onDeactivated` 停掉 1s 轮询与 ResizeObserver、`onActivated` 立即刷新一次再恢复，
   首次激活（紧跟 `onMounted`）用标志位跳过重复取数。切页后滚动位置与日历选中项保留。
 - **其余三页仍保持原生命周期**（撤回 KeepAlive 的原因见下）。
+- **组合动作首帧快照**（2026-11-06 第三轮）：新增 `src/pages/macros-view-session.ts`，
+  把上次读取并去重后的库列表保存在模块级；页面重建首帧直接渲染，随后
+  `reloadLibrary()` 仍照常静默刷新。只缓存展示数据，不改变生命周期与录入清理。
 - **KeepAlive 方案已评估但撤回（同日）**：把 `ButtonsPage` / `MacrosPage` /
   `ConnectionPage` / `ProfilePage` 常驻确实能消掉重建，但这三页的 `onUnmounted` 承担
   安全职责——`MacrosPage.onUnmounted` 明确写着「页面切走时后端仍在录入态会全局吞键，
@@ -82,6 +85,8 @@
     `Expected "打开网易云音乐" / Received "打开 netease_music"` 失败；恢复修复后通过。
   - `KeepAlive 下切页暂停轮询、切回立即刷新且不重建`（ProfilePage）；阳性对照把
     `include` 改成不匹配的名字后，日历选中项丢失、用例按预期失败。
+  - `切页重建时首帧直接渲染上次的库（不闪 0）`（MacrosPage）；阳性对照清空模块级快照后，
+    断言以 `expected '0' to be '1'` 失败。
 - 前端全量：`vitest run` **622 passed | 10 skipped**；`pnpm build`（`vue-tsc --noEmit && vite build`）passed。
 - CDP 实测（本机调试构建，真实 WebView + 真实 IPC）：
   - 切回按键页：0 / 30 / 80 / 200 / 600ms 五个采样点全部为产品名，不再出现内部 id
@@ -98,9 +103,9 @@
 
 ## 未覆盖
 
-- 「切页重新读取」只解决了个人中心：其余三页仍按原生命周期重建（见「修复」的
-  KeepAlive 撤回说明），组合动作 / 连接首次渲染仍有一次异步填充；按键格只剩挂载空窗，
-  不再出现内部 id。
+- 「切页重新读取」已处理个人中心（常驻）与组合动作（首帧快照）；按键 / 连接仍按原生命
+  周期重建（见「修复」的 KeepAlive 撤回说明），连接首次渲染仍有一次约 30ms 的异步填充；
+  按键格只剩挂载空窗，不再出现内部 id。
 - 真实 RC001 / RC003 按键链路未在本次改动中回归（改动只涉及前端文案缓存与个人中心
   轮询生命周期，不触碰 BLE / HID / 注入路径）；按惯例仍需真机确认切页时按键高亮不中断。
 - ARM64 未覆盖（本机无 ARM64 工具链与硬件）。
