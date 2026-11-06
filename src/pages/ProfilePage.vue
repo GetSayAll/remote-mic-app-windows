@@ -29,6 +29,10 @@ import {
 
 defineProps<{ runtime?: RuntimeSnapshot | null }>();
 
+// App.vue 的 KeepAlive 用组件名匹配（`include="ProfilePage"`）；显式声明，避免
+// 依赖「文件名推导组件名」在重命名/包装后静默失效。
+defineOptions({ name: "ProfilePage" });
+
 const emit = defineEmits<{ navigate: [page: string] }>();
 
 const profile = ref<UsageProfile | null>(null);
@@ -199,14 +203,16 @@ async function primeActionCaches(): Promise<void> {
   actionCacheVersion.value += 1;
 }
 
-async function refresh(): Promise<void> {
+async function refresh(options: { reloadMappings?: boolean } = {}): Promise<void> {
   if (refreshing) return;
   refreshing = true;
   const generation = ++requestGeneration;
   try {
+    // 常驻后 mappings 只读一次会过期：切回页面时强制重读（旧值继续渲染，不闪空白）。
+    const needsMappings = options.reloadMappings === true || !mappings.value;
     const [nextProfile, nextMappings] = await Promise.all([
       getUsageProfile(),
-      mappings.value ? Promise.resolve(mappings.value) : getButtonMappings().catch(() => null),
+      needsMappings ? getButtonMappings().catch(() => null) : Promise.resolve(mappings.value),
     ]);
     if (generation !== requestGeneration) return;
     profile.value = nextProfile;
@@ -287,7 +293,10 @@ onActivated(() => {
     liveUpdatesStarted = true;
     return;
   }
-  void refresh();
+  // 常驻期间别的页面可能改过按键映射 / 应用名：切回时重读并刷新动作名缓存，
+  // 旧数据继续渲染，新数据到了再替换（不闪空白）。
+  void primeActionCaches();
+  void refresh({ reloadMappings: true });
   startLiveUpdates();
   nextTick(updateCalendarSize);
 });

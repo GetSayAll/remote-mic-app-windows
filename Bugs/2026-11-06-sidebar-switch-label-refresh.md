@@ -61,6 +61,9 @@
   流程的页面，单独用 `<KeepAlive :include="['ProfilePage']">` 缓存；组件内新增
   `onDeactivated` 停掉 1s 轮询与 ResizeObserver、`onActivated` 立即刷新一次再恢复，
   首次激活（紧跟 `onMounted`）用标志位跳过重复取数。切页后滚动位置与日历选中项保留。
+  评审补充：`onActivated` 还要重读按键映射并重跑 `primeActionCaches()`，否则常驻期间
+  在按键页改过的映射/应用名会让「动作排行」停留在旧文案；组件显式 `defineOptions({ name })`，
+  避免 KeepAlive 依赖文件名推导而静默失效。
 - **其余三页仍保持原生命周期**（撤回 KeepAlive 的原因见下）。
 - **组合动作首帧快照**（2026-11-06 第三轮）：新增 `src/pages/macros-view-session.ts`，
   把上次读取并去重后的库列表保存在模块级；页面重建首帧直接渲染，随后
@@ -84,7 +87,9 @@
   - 阳性对照：临时恢复「先 clear」的旧实现，前两条用例以
     `Expected "打开网易云音乐" / Received "打开 netease_music"` 失败；恢复修复后通过。
   - `KeepAlive 下切页暂停轮询、切回立即刷新且不重建`（ProfilePage）；阳性对照把
-    `include` 改成不匹配的名字后，日历选中项丢失、用例按预期失败。
+    `include` 改成不匹配的名字后，日历选中项丢失、用例按预期失败；另断言切回时
+    重读按键映射（去掉 `reloadMappings` 后以 `expected 1 to be greater than 1` 失败）。
+  - `组件名与 App.vue 的 KeepAlive include 匹配`（ProfilePage）。
   - `切页重建时首帧直接渲染上次的库（不闪 0）`（MacrosPage）；阳性对照清空模块级快照后，
     断言以 `expected '0' to be '1'` 失败。
 - 前端全量：`vitest run` **622 passed | 10 skipped**；`pnpm build`（`vue-tsc --noEmit && vite build`）passed。

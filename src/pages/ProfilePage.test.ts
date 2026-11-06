@@ -194,6 +194,11 @@ describe("个人中心页", () => {
 
   // 2026-11-06：个人中心是唯一常驻页面（无录入/捕获流程）。切走暂停轮询、切回立即
   // 刷新一次，但组件实例不重建（数据与滚动状态保留）。
+  it("组件名与 App.vue 的 KeepAlive include 匹配", () => {
+    // App.vue 用 `include="['ProfilePage']"` 做字符串匹配；显式 name 避免重命名后静默失效。
+    expect((ProfilePage as { name?: string }).name).toBe("ProfilePage");
+  });
+
   it("KeepAlive 下切页暂停轮询、切回立即刷新且不重建", async () => {
     stubBridge();
     vi.useFakeTimers();
@@ -211,6 +216,7 @@ describe("个人中心页", () => {
       await flushPromises();
       const initialCalls = bridge.getUsageProfile.mock.calls.length;
       expect(initialCalls).toBeGreaterThan(0);
+      const initialMappingCalls = bridge.getButtonMappings.mock.calls.length;
 
       // 选中一个日期（本地状态）作为"未重建"的判据。
       const day = wrapper
@@ -229,6 +235,8 @@ describe("个人中心页", () => {
       await nextTick();
       await flushPromises();
       expect(bridge.getUsageProfile.mock.calls.length).toBe(initialCalls + 1);
+      // 常驻期间按键页可能改过映射：切回必须重读，旧值只用于继续渲染。
+      expect(bridge.getButtonMappings.mock.calls.length).toBeGreaterThan(initialMappingCalls);
       // 日历选中项仍在 ⇒ 组件实例被 KeepAlive 保留，没有重建。
       expect(wrapper.find(".calendar-detail").exists()).toBe(true);
 
