@@ -93,6 +93,8 @@ const APPLICATION_NAME_ALIASES: Record<string, string> = {
   chrome: "Chrome 浏览器",
   记事本: "记事本",
   notepad: "记事本",
+  qmcapture64: "腾讯电脑管家截图工具",
+  腾讯电脑管家截图工具: "腾讯电脑管家截图工具",
 };
 
 export function displayApplicationName(name: string): string {

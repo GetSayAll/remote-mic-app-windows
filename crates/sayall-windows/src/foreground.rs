@@ -251,6 +251,9 @@ pub fn application_display_name(executable: &str) -> Option<String> {
         "obs64" => "OBS Studio",
         "vlc" => "VLC",
         "spotify" => "Spotify",
+        // 腾讯电脑管家截图工具：版本资源里的 FileDescription 是「腾讯电脑管家截图工具」，
+        // 但 Shell 显示名/文件名只有 QMCapture64（2026-11-06 用户报告）。
+        "qmcapture64" => "腾讯电脑管家截图工具",
         _ => return Some(stem.to_owned()),
     };
     Some(known.to_owned())
@@ -310,6 +313,12 @@ mod tests {
         assert_eq!(
             application_display_name("msedge.exe").as_deref(),
             Some("Microsoft Edge")
+        );
+        // 腾讯电脑管家截图工具：exe 版本信息的 FileDescription 是
+        // 「腾讯电脑管家截图工具」，但 Shell 显示名只有 QMCapture64。
+        assert_eq!(
+            application_display_name("QMCapture64.exe").as_deref(),
+            Some("腾讯电脑管家截图工具")
         );
     }
 
