@@ -201,12 +201,15 @@ describe("回眸与组合动作卡片跟随设置页材质", () => {
     );
   });
 
-  it("组合动作左栏是内容高度的设置页样式卡片", () => {
+  it("组合动作左栏拉到底，页面高度跟随内容区且不显示底部状态条", () => {
     const macros = readFileSync(join(srcDir, "pages", "MacrosPage.vue"), "utf8");
-    expect(macros).toMatch(/\.library-body\s*\{[^}]*align-items:\s*flex-start/);
-    expect(macros).toMatch(/\.library-pane\s*\{[^}]*align-self:\s*flex-start/);
+    expect(macros).toMatch(/\.library-body\s*\{[^}]*align-items:\s*stretch/);
+    expect(macros).toMatch(/\.library-pane\s*\{[^}]*align-self:\s*stretch/);
     expect(macros).toMatch(/\.library-pane\s*\{[^}]*background:\s*var\(--card\)/);
     expect(macros).toMatch(/\.library-pane\s*\{[^}]*border-radius:\s*12px/);
     expect(macros).not.toMatch(/\.library-pane\s*\{[^}]*border-right/);
+    expect(macros).toMatch(/\.macros-page\s*\{[^}]*height:\s*100%/);
+    expect(macros).not.toMatch(/\.macros-page\s*\{[^}]*height:\s*calc\(100vh/);
+    expect(macros).not.toMatch(/class="status-line"/);
   });
 });

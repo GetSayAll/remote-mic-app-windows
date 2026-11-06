@@ -272,7 +272,9 @@ nav { display: grid; gap: 4px; }
      露出侧栏色，窗口看起来是一个整体。 */
   height: calc(100% - 8px);
   margin: 0 8px 8px 0;
-  padding: 22px 35.5px 26px 32px;
+  /* 内容本身能在 800px 内放下时不再让 .content 产生页面滚动；
+     底部/右侧的 8px 面板留白仍由外边距保留。 */
+  padding: 10px 35.5px 0 32px;
   border-radius: 10px;
   background: var(--surface-canvas);
   overflow: auto;

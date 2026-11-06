@@ -24,7 +24,9 @@
 - 加载地址：`https://sayall.app/recommendations/?embed=app&appPlatform=windows&theme=light|dark`。
   - `embed=app` 让官网隐藏自身导航和页脚，只保留推荐内容；
   - `appPlatform=windows` 是平台标记；当前官网按 `website` 内容面渲染；
-  - `theme` 跟随 App 当前浅色/深色外观；切换外观时重新加载同一页面。
+  - `theme` 跟随 App 当前浅色/深色外观；切换外观时重新加载同一页面；
+  - 注入 `html` 侧栏色和 `body` 的 `--surface-canvas` 色，`body` 最小高度为视口高度，
+    圆角外露侧栏色，页面空白区域也填到内容区底部。
 - 页面内部的列表/详情导航由官网自己的 `?item=<slug>` 与浏览器历史处理；
   容器不重复实现推荐详情。
 - 子 WebView 不向官网暴露 Tauri 原生调用或文件访问能力。

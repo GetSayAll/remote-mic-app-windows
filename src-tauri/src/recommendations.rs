@@ -76,13 +76,14 @@ const HIDE_SCROLLBARS_SCRIPT: &str = r##"
     "*, *::before, *::after { scrollbar-width: none !important; -ms-overflow-style: none !important; }",
     "*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }",
     `html { background-color: ${sidebar} !important; }`,
-    `body { background-color: ${canvas} !important; border-radius: 10px !important; clip-path: inset(0 round 10px) !important; }`,
+    `body { min-height: 100vh !important; background-color: ${canvas} !important; border-radius: 10px !important; clip-path: inset(0 round 10px) !important; }`,
   ].join("\n");
   const apply = () => {
     const host = document.head || document.documentElement;
     if (!host) return false;
     document.documentElement.style.setProperty("background-color", sidebar, "important");
     if (document.body) {
+      document.body.style.setProperty("min-height", "100vh", "important");
       document.body.style.setProperty("background-color", canvas, "important");
       document.body.style.setProperty("border-radius", "10px", "important");
       document.body.style.setProperty("clip-path", "inset(0 round 10px)", "important");
@@ -1449,6 +1450,7 @@ mod tests {
             .contains(r##"const sidebar = theme === "dark" ? "#1b1d23" : "#edeef4";"##));
         assert!(HIDE_SCROLLBARS_SCRIPT
             .contains(r##"const canvas = theme === "dark" ? "#15161a" : "#f4f5f8";"##));
+        assert!(HIDE_SCROLLBARS_SCRIPT.contains("min-height: 100vh !important"));
         assert!(HIDE_SCROLLBARS_SCRIPT.contains("background-color: ${canvas} !important"));
         assert!(HIDE_SCROLLBARS_SCRIPT.contains("clip-path: inset(0 round 10px) !important"));
         assert!(HIDE_SCROLLBARS_SCRIPT
