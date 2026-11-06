@@ -143,8 +143,15 @@ describe("自定义标题栏与 Mac 侧栏尺寸", () => {
     expect(css).toMatch(/\.nav-item\s*\{[^}]*padding:\s*4px 5px 4px 9px/);
     expect(css).toMatch(/\.nav-item\s*\{[^}]*font-size:\s*13px/);
     expect(css).toMatch(/\.nav-icon\s*\{[^}]*width:\s*18px/);
+    const sidebar = readFileSync(join(srcDir, "components", "Sidebar.vue"), "utf8");
+    expect(sidebar).toMatch(/\.nav-icon-keyboard\s*\{[^}]*transform:\s*scale\(0\.9\)/);
     // 2026-11-06 Andy：主页面与侧栏之间不要竖线。
     expect(css).not.toMatch(/\.sidebar\s*\{[^}]*border-right/);
+  });
+
+  it("主标题和副标题与内容左缘对齐，不再额外右缩 14px", () => {
+    expect(css).toMatch(/\.page-header\s*\{[^}]*margin-bottom:\s*12px;\s*\}/);
+    expect(css).not.toMatch(/\.page-header\s*\{[^}]*padding-left/);
   });
 
   it("品牌区与 Mac 一致：75 高、44 logo、16 字标、12 版本、15 边距", () => {
@@ -211,5 +218,11 @@ describe("回眸与组合动作卡片跟随设置页材质", () => {
     expect(macros).toMatch(/\.macros-page\s*\{[^}]*height:\s*100%/);
     expect(macros).not.toMatch(/\.macros-page\s*\{[^}]*height:\s*calc\(100vh/);
     expect(macros).not.toMatch(/class="status-line"/);
+    // 编辑页：标题/步骤条与分隔线左对齐，左侧步骤卡与上下横线留 14px 并带圆角。
+    expect(macros).toMatch(/\.wizard-head\s*\{[^}]*padding:\s*14px 0 12px/);
+    expect(macros).toMatch(/\.basic-body\s*\{[^}]*padding:\s*20px 0/);
+    expect(macros).toMatch(/\.steps-pane\s*\{[^}]*margin:\s*14px 0/);
+    expect(macros).toMatch(/\.steps-pane\s*\{[^}]*border-radius:\s*12px/);
+    expect(macros).not.toMatch(/\.steps-pane\s*\{[^}]*border-right/);
   });
 });

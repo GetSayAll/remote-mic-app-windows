@@ -2630,7 +2630,8 @@ watch(
   flex-direction: column;
 }
 .wizard-head {
-  padding: 14px 14px 12px;
+  /* 标题、步骤指示器与下方的蓝色分隔线左对齐。 */
+  padding: 14px 0 12px;
   border-bottom: 1px solid var(--border);
 }
 .wizard-head h2 {
@@ -2686,13 +2687,13 @@ watch(
 .basic-body {
   flex-direction: column;
   gap: 20px;
-  padding: 20px 14px;
+  padding: 20px 0;
   overflow-y: auto;
 }
 .review-body {
   flex-direction: column;
   gap: 14px;
-  padding: 20px 14px;
+  padding: 20px 0;
   overflow-y: auto;
 }
 .steps-body {
@@ -2701,8 +2702,11 @@ watch(
 .steps-pane {
   width: 300px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface-subtle);
+  /* 与上方步骤指示线、下方底部按钮线都留 14px，并使用设置页卡片的圆角/底色。 */
+  margin: 14px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;

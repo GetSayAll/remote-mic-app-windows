@@ -282,7 +282,7 @@ nav { display: grid; gap: 4px; }
   scrollbar-width: none;
 }
 .content::-webkit-scrollbar { display: none; }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-left: 14px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 /* 全应用隐藏滚动条（仍可滚动）：WebView2 的经典滚动条在卡片里很显眼。 */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; }

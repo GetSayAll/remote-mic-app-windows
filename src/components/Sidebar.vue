@@ -140,7 +140,14 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
         @click="emit('select', item.id)"
       >
         <CrownIcon v-if="item.icon === 'member'" class="nav-icon" />
-        <svg v-else class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <svg
+          v-else
+          class="nav-icon"
+          :class="`nav-icon-${item.icon}`"
+          viewBox="0 0 24 24"
+          fill="none"
+          aria-hidden="true"
+        >
           <template v-if="ICON_PATHS[item.icon].fills">
             <path
               v-for="(path, index) in ICON_PATHS[item.icon].fills"
@@ -275,6 +282,11 @@ const ICON_PATHS: Record<NavIcon, { strokes: string[]; fills?: string[] }> = {
   /* 与 Mac SettingsSidebarRow 的 13pt semibold 对齐。 */
   font-size: 13px;
   font-weight: 600;
+}
+
+/* SF keyboard 是横向符号，18px 槽位里仍显得比其余图标大；缩 10% 做光学配重。 */
+.nav-icon-keyboard {
+  transform: scale(0.9);
 }
 
 /* 账号区由 40 行 + 上下 6 内边距组成（Mac 设计稿最小 56），长账号名换行时不显拥挤。 */

@@ -1106,8 +1106,8 @@ onUnmounted(() => {
   padding: 2px 4px 0;
 }
 .history-summary-copy {
-  /* 页头 h1 有全局 14px 左内边距；这里补上父级 4px 之外的 10px，保持「回眸」与「全部记录」左对齐。 */
-  padding-left: 10px;
+  /* 页头已去掉额外左内边距；这里不再补偏移，保持「回眸」与「全部记录」左对齐。 */
+  padding-left: 0;
 }
 .history-summary-copy h2 {
   margin: 0;
