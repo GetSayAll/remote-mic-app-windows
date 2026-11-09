@@ -1942,6 +1942,7 @@ watch(
   /* 页面高度跟随 .content 内容盒，而不是 100vh；内容能放下时页面本身不滚，
      只让步骤/动作库内部按需滚动，底部按钮始终贴在内容区底部。 */
   height: 100%;
+  padding-bottom: 8px;
   overflow: hidden;
 }
 /* 标题与副标题的尺寸/位置对齐按键页：沿用全局 .page-header h1（22px）与
