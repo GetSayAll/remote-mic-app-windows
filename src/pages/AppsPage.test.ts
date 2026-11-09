@@ -344,7 +344,7 @@ describe("APP adaptation page", () => {
     expect(saved.focusProfiles).toEqual({
       "C:\\Apps\\Weixin.exe": { strategy: "open_only" },
     });
-    expect(wrapper.text()).toContain("已删除这个 APP 的适配");
+    expect(wrapper.find(".page-notice").exists()).toBe(false);
   });
 
   it("shows an installed preset at its real path and deletes only its profile", async () => {
