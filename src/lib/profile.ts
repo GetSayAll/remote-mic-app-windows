@@ -52,37 +52,47 @@ export function formatDuration(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
+export interface DurationPart {
+  value: string;
+  unit: string;
+}
+
 /**
- * Mac `voiceDurationText` 同款：累计语音 KPI 使用中文单位，不与单次排行的
- * `m:ss` 混用；超过 1 小时按 Mac 口径省略秒。
+ * 累计语音 KPI：`32分18秒`（1 小时以上为 `1小时2分3秒`）。
+ *
+ * 数字与单位分开返回，KPI 才能把「分」「秒」渲染成与「次」一致的小号强调色；
+ * 同时用紧凑单位替代 `33 分钟 12 秒`，避免数值增长后被省略号截断。
+ * 不与单次排行的 `m:ss` 混用。
  */
-export function formatVoiceTotal(seconds: number): string {
+export function formatVoiceTotalParts(seconds: number): DurationPart[] {
   const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
   const hours = Math.floor(total / 3_600);
   const minutes = Math.floor((total % 3_600) / 60);
   const remainder = total % 60;
+  const parts: DurationPart[] = [];
   if (hours > 0) {
-    return `${countFormatter.format(hours)} 小时 ${countFormatter.format(minutes)} 分钟`;
+    parts.push({ value: countFormatter.format(hours), unit: "小时" });
   }
-  if (minutes > 0) {
-    return `${countFormatter.format(minutes)} 分钟 ${countFormatter.format(remainder)} 秒`;
-  }
-  return `${countFormatter.format(remainder)} 秒`;
+  parts.push({ value: countFormatter.format(minutes), unit: "分" });
+  parts.push({ value: countFormatter.format(remainder), unit: "秒" });
+  return parts;
 }
 
 /**
- * 侧栏个人入口的账号名：与 Mac 一致，只取邮箱 `@` 前最多 10 个字符。
+ * 侧栏账号入口文案，对齐 Mac `SettingsPageBehavior.sidebarAccountTitle`：
+ * 有账号显示名就完整显示，没有就回退到「我的」；不按固定字符数截断。
  *
- * 完整邮箱仍只在会员页显示；侧栏和无障碍名称都不应出现完整地址。
+ * Windows 的会员摘要可能直接携带邮箱，因此仍去掉 `@` 后的域名，避免在侧栏
+ * 暴露完整地址；`@` 前的完整本地部分保留，长名字按 Mac 的规则换行。
  */
 export function profileAccountLabel(
   displayName: string | null | undefined,
-  fallback = "个人中心",
+  fallback = "我的",
 ): string {
   const trimmed = displayName?.trim();
   if (!trimmed) return fallback;
   const localPart = trimmed.includes("@") ? trimmed.split("@")[0] : trimmed;
-  return Array.from(localPart).slice(0, 10).join("") || fallback;
+  return localPart.trim() || fallback;
 }
 
 /**

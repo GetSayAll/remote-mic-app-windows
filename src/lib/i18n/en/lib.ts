@@ -110,7 +110,9 @@ export default {
   "发送": "Send",
   "换行": "Line Break",
   "刷新": "Refresh",
-  "切换窗口": "Switch Windows",
+  "切换应用": "Switch Apps",
+  "切换应用：用左、右键选择，按“确定”确认，返回取消":
+    "Switch Apps: use Left/Right to choose, OK to confirm, Back to cancel",
   "显示桌面": "Show Desktop",
   "关闭窗口": "Close Window",
   "锁定": "Lock",

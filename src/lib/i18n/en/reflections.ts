@@ -52,6 +52,7 @@ export default {
   "微信": "WeChat",
   "Chrome 浏览器": "Chrome",
   "记事本": "Notepad",
+  "腾讯电脑管家截图工具": "Tencent PC Manager Screenshot",
   "录音将移到回收站，不会影响其他记录。":
     "The recording will be moved to the Recycle Bin. Other entries are not affected.",
   "全部删除": "Delete All",

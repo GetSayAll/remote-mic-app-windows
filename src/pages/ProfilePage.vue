@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { CSSProperties } from "vue";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import SharePanel from "../components/SharePanel.vue";
 import type { ButtonMappings, RuntimeSnapshot, UsageProfile } from "../lib/bridge";
 import {
@@ -22,11 +22,16 @@ import {
   formatCalendarDate,
   formatDuration,
   formatVoiceSessionDate,
-  formatVoiceTotal,
+  formatVoiceTotalParts,
   WEEKDAY_LABELS,
+  type DurationPart,
 } from "../lib/profile";
 
 defineProps<{ runtime?: RuntimeSnapshot | null }>();
+
+// App.vue 的 KeepAlive 用组件名匹配（`include="ProfilePage"`）；显式声明，避免
+// 依赖「文件名推导组件名」在重命名/包装后静默失效。
+defineOptions({ name: "ProfilePage" });
 
 const emit = defineEmits<{ navigate: [page: string] }>();
 
@@ -45,7 +50,16 @@ let requestGeneration = 0;
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
 
-const metrics = computed(() => {
+interface ProfileMetric {
+  id: string;
+  title: string;
+  value: string | null;
+  unit: string | null;
+  parts: DurationPart[] | null;
+  icon: string;
+}
+
+const metrics = computed<ProfileMetric[]>(() => {
   const data = profile.value;
   return [
     {
@@ -53,13 +67,15 @@ const metrics = computed(() => {
       title: "累计按键次数",
       value: data ? numberFormatter.format(data.totalButtonPresses) : "—",
       unit: "次",
+      parts: null,
       icon: "keyboard",
     },
     {
       id: "total-voice",
       title: "累计语音时长",
-      value: data ? formatVoiceTotal(data.totalVoiceSeconds) : "—",
+      value: data ? null : "—",
       unit: null,
+      parts: data ? formatVoiceTotalParts(data.totalVoiceSeconds) : null,
       icon: "waveform",
     },
     {
@@ -67,6 +83,7 @@ const metrics = computed(() => {
       title: "本周按键",
       value: data ? numberFormatter.format(data.weekButtonPresses) : "—",
       unit: "次",
+      parts: null,
       icon: "trend",
     },
     {
@@ -74,6 +91,7 @@ const metrics = computed(() => {
       title: "最长单次语音",
       value: data ? formatDuration(data.longestVoiceSeconds) : "—",
       unit: null,
+      parts: null,
       icon: "clock",
     },
   ];
@@ -185,14 +203,16 @@ async function primeActionCaches(): Promise<void> {
   actionCacheVersion.value += 1;
 }
 
-async function refresh(): Promise<void> {
+async function refresh(options: { reloadMappings?: boolean } = {}): Promise<void> {
   if (refreshing) return;
   refreshing = true;
   const generation = ++requestGeneration;
   try {
+    // 常驻后 mappings 只读一次会过期：切回页面时强制重读（旧值继续渲染，不闪空白）。
+    const needsMappings = options.reloadMappings === true || !mappings.value;
     const [nextProfile, nextMappings] = await Promise.all([
       getUsageProfile(),
-      mappings.value ? Promise.resolve(mappings.value) : getButtonMappings().catch(() => null),
+      needsMappings ? getButtonMappings().catch(() => null) : Promise.resolve(mappings.value),
     ]);
     if (generation !== requestGeneration) return;
     profile.value = nextProfile;
@@ -234,24 +254,58 @@ watch(profile, () => {
   nextTick(updateCalendarSize);
 });
 
-onMounted(() => {
-  void primeActionCaches();
-  void refresh();
-  pollTimer = setInterval(() => {
-    void refresh();
-  }, 1_000);
-  if (typeof ResizeObserver !== "undefined" && calendarScroll.value) {
+/**
+ * 个人中心是侧栏里唯一没有录入 / 捕获流程的页面，因此单独用 KeepAlive 常驻
+ * （2026-11-06）：切走不再卸载重建，滚动位置与日历选中项保留；但轮询和
+ * ResizeObserver 在隐藏期间必须停掉，切回时立即刷新一次再恢复，避免后台空转。
+ */
+let liveUpdatesStarted = false;
+
+function startLiveUpdates(): void {
+  if (!pollTimer) {
+    pollTimer = setInterval(() => {
+      void refresh();
+    }, 1_000);
+  }
+  if (typeof ResizeObserver !== "undefined" && calendarScroll.value && !resizeObserver) {
     resizeObserver = new ResizeObserver(updateCalendarSize);
     resizeObserver.observe(calendarScroll.value);
   }
+}
+
+function stopLiveUpdates(): void {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = undefined;
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+}
+
+onMounted(() => {
+  void primeActionCaches();
+  void refresh();
+  startLiveUpdates();
   nextTick(updateCalendarSize);
 });
 
+onActivated(() => {
+  // 首次挂载时 onActivated 紧跟 onMounted 触发，不要重复取数。
+  if (!liveUpdatesStarted) {
+    liveUpdatesStarted = true;
+    return;
+  }
+  // 常驻期间别的页面可能改过按键映射 / 应用名：切回时重读并刷新动作名缓存，
+  // 旧数据继续渲染，新数据到了再替换（不闪空白）。
+  void primeActionCaches();
+  void refresh({ reloadMappings: true });
+  startLiveUpdates();
+  nextTick(updateCalendarSize);
+});
+
+onDeactivated(stopLiveUpdates);
+
 onUnmounted(() => {
   requestGeneration += 1;
-  if (pollTimer) clearInterval(pollTimer);
-  resizeObserver?.disconnect();
-  resizeObserver = null;
+  stopLiveUpdates();
 });
 </script>
 
@@ -287,8 +341,16 @@ onUnmounted(() => {
         <div class="profile-kpi-text">
           <span class="profile-kpi-label">{{ metric.title }}</span>
           <div class="profile-kpi-value">
-            <strong>{{ metric.value }}</strong>
-            <small v-if="metric.unit">{{ metric.unit }}</small>
+            <template v-if="metric.parts">
+              <template v-for="(part, index) in metric.parts" :key="index">
+                <strong class="profile-kpi-number">{{ part.value }}</strong>
+                <small>{{ part.unit }}</small>
+              </template>
+            </template>
+            <template v-else>
+              <strong>{{ metric.value }}</strong>
+              <small v-if="metric.unit">{{ metric.unit }}</small>
+            </template>
           </div>
         </div>
       </article>

@@ -334,6 +334,8 @@ const sidePanel = computed(() => {
 const BLOCK_COPY: Record<OnboardingBlockCode, string> = {
   "remote.not_connected": "先连接遥控器，再继续。",
   "remote.listener_not_ready": "按键监听正在启动，请稍等一下。",
+  "remote.hid_interface_missing":
+    "Windows 还没有识别到这支遥控器的按键通道。打开蓝牙设置重新配对。",
   "remote.button_not_ready": "连接已就绪。按一下遥控器上的普通按键（比如主页键），不要按语音键。",
   "audio.install_required": "这台电脑还没有 VB-CABLE 语音设备，先安装再继续。",
   "audio.not_selected": "选择带「推荐」标记的语音设备，再继续。",
@@ -2426,11 +2428,12 @@ async function retryVoiceTest(): Promise<void> {
 .onboarding-shell {
   display: flex;
   flex-direction: column;
-  /* 固定为视口高度而不是 min-height：根元素自 2026-11-05 起不可滚（见
-     styles.css 的 html/body 规则），向导壳若随内容增高，超出部分会被直接
-     裁掉。固定高度后 .onboarding-body / .onboarding-content 的内部滚动
-     才能真正生效。 */
-  height: 100vh;
+  /* 高度由窗口壳的 .window-body 分配（顶部还有 32px 自定义标题栏）；
+     根元素自 2026-11-05 起不可滚（见 styles.css 的 html/body 规则），
+     所以向导壳必须撑满剩余高度，让 .onboarding-body / .onboarding-content
+     的内部滚动生效。 */
+  flex: 1 1 auto;
+  min-height: 0;
   box-sizing: border-box;
   background: var(--surface-canvas);
   color: var(--text-primary);

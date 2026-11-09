@@ -85,6 +85,22 @@ fn empty_snapshot_is_disabled_with_four_clients() {
 }
 
 #[test]
+fn opencode_uses_frontend_id_and_accepts_legacy_serde_id() {
+    assert_eq!(
+        serde_json::to_string(&AgentClientId::OpenCode).unwrap(),
+        "\"opencode\""
+    );
+    assert_eq!(
+        serde_json::from_str::<AgentClientId>("\"opencode\"").unwrap(),
+        AgentClientId::OpenCode
+    );
+    assert_eq!(
+        serde_json::from_str::<AgentClientId>("\"open-code\"").unwrap(),
+        AgentClientId::OpenCode
+    );
+}
+
+#[test]
 fn enabling_persists_and_is_visible_to_a_fresh_store() {
     let env = Env::new();
     env.store.set_enabled(false).expect("disable");

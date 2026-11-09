@@ -696,6 +696,43 @@ describe("Onboarding wizard shell", () => {
     expect(wrapper.find(".onboarding-actions .primary-button").attributes("data-gate-ready")).toBe("true");
   });
 
+  it("已连接但 Windows 没有按键接口时，给重新配对的下一步，而不是一直等监听器启动", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(
+      runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, rawInputPhase: "awaiting" }),
+    );
+    await flushPromises();
+
+    // 现场（2026-11-06）：遥控器语音已就绪，但 Raw Input 停在 awaiting / matched=0。
+    // 这时监听器并没有在启动，按多少次都不会有按键；界面必须说清下一步。
+    const blocked = onboardingEvents("step_blocked").filter(
+      (p) => p.code === "remote.hid_interface_missing",
+    );
+    expect(blocked).toHaveLength(1);
+    expect(wrapper.text()).toContain("没有识别到遥控器的按键通道");
+    expect(wrapper.text()).toContain("重新配对");
+    expect(wrapper.text()).not.toContain("按键监听正在启动");
+    const fixCard = wrapper
+      .findAll(".onboarding-card.warn")
+      .find((card) => card.text().includes("没有识别到遥控器的按键通道"));
+    expect(fixCard).toBeTruthy();
+    expect(fixCard!.text()).toContain("重启");
+    expect(fixCard!.findAll("button").map((node) => node.text())).toContain("打开蓝牙设置");
+    wrapper.unmount();
+  });
+
+  it("监听器只是启动中时不提前给重新配对卡", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(
+      runtimeWith({ connectionPhase: "ready", bleVoiceReady: true, rawInputPhase: "starting" }),
+    );
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("按键监听正在启动");
+    expect(wrapper.text()).not.toContain("没有识别到遥控器的按键通道");
+    wrapper.unmount();
+  });
+
   it("按键已收到但还没找到遥控器时，说明句指向扫描", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     // 系统里没有已配对遥控器：自动连接不介入（扫描 0 台），保留"按键已收到、未连接"现场

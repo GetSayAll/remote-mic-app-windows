@@ -70,6 +70,20 @@ describe("reflections view helpers", () => {
     expect(displayApplicationName("Weixin")).toBe("WeChat");
   });
 
+  it("shows the Tencent PC Manager screenshot tool by its product name", () => {
+    expect(displayApplicationName("QMCapture64")).toBe("腾讯电脑管家截图工具");
+    expect(displayApplicationName("腾讯电脑管家截图工具")).toBe(
+      "腾讯电脑管家截图工具",
+    );
+    effectiveLanguage.value = "en";
+    expect(displayApplicationName("QMCapture64")).toBe(
+      "Tencent PC Manager Screenshot",
+    );
+    expect(displayApplicationName("腾讯电脑管家截图工具")).toBe(
+      "Tencent PC Manager Screenshot",
+    );
+  });
+
   it("shows legacy file names as product names", () => {
     expect(displayApplicationName("chrome")).toBe("Chrome 浏览器");
     expect(displayApplicationName("Chrome")).toBe("Chrome 浏览器");

@@ -2735,6 +2735,9 @@ fn handle_control(
                 );
                 return;
             }
+            // 语音键开始：应用切换器（Alt+Tab）会话必须释放 Alt，否则按住说话
+            // 快捷键会带着按住的 Alt 进入输入法（对齐 Mac：语音开始取消切换器）。
+            crate::button_mapping::note_voice_session_started();
             // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
             // HID F5 代替——普通键盘 F5 也会被误计。
             usage.begin_voice_session(crate::foreground::foreground_application_name());
@@ -2814,6 +2817,8 @@ fn handle_control(
                 );
                 return;
             }
+            // 报告层语音路径可能不经过 MIC_OPEN：这里再发一次取消（幂等）。
+            crate::button_mapping::note_voice_session_started();
             // RC003 的报告层语音路径实测直接发 0x04 STREAM_START，不经过
             // MIC_OPEN；这里兜底开始统计。若 MIC_OPEN 已先记过，方法幂等。
             usage.ensure_voice_session_started(crate::foreground::foreground_application_name());

@@ -1,8 +1,22 @@
+/* 品牌字：与 Mac `BrandFont` 同源（Oxanium SemiBold）。中文按后两级回退到
+   Segoe UI / 微软雅黑，拉丁字（SayAll）使用 Oxanium。字体文件与 OFL 许可见
+   `public/fonts/`，第三方声明见 THIRD_PARTY_NOTICES.md。 */
+@font-face {
+  font-family: "Oxanium";
+  src: url("/fonts/oxanium-semibold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
 /* --accent 族：默认值是历史紫色品牌色，仅作为"系统强调色读取失败"的回退。
    正常路径由 src/lib/accent.ts 读取 Windows 系统主题色并按深浅色主题
    动态注入同名变量（内联样式优先级更高），选中态自动跟随系统强调色。 */
 :root {
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --font-brand: "Oxanium", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  /* 自定义标题栏高度；与 src-tauri/src/recommendations.rs 的 TITLEBAR_HEIGHT 同步。 */
+  --titlebar-height: 32px;
   color: var(--text-primary);
   background: var(--surface-canvas);
   color-scheme: light;
@@ -191,44 +205,60 @@ body {
   font-size: 16px;
 }
 
-/* 侧栏对齐 macOS SettingsView：宽 108px、图标 21 semibold、文字 13 semibold、
-   选中 = 强调色 + 10% 背景（无白卡/阴影/hover 白底，Mac plain 按钮样式）。 */
-/* 外壳固定为视口高度（不再 min-height 随内容增高）：超出部分交给 .content
-   在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
-.app-shell { display: grid; grid-template-columns: 108px minmax(0, 1fr); height: 100vh; }
-.sidebar {
-  position: sticky;
-  top: 0;
+/* 侧栏宽度按 Mac origin/main 的内容测量口径取当前自然宽度：
+   15×2 边距 + 44 图标 + 8 间距 + max(SayAll 16 / 版本 12) ≈ 128.27 → 129 内容宽，
+   加 1px 右边框为 130。Mac 的 bounds 是 104...136；当前品牌字决定 129，
+   不再沿用过宽的固定 136。将来若出现更长的私有页标签，需要同步宽度 IPC。
+   其余仍对齐 PR 803：图标 18、文字 13 semibold、行高 40、选中 7px 圆角。 */
+/* 外壳固定为视口高度（不再 min-height 随内容增高）：标题栏占顶部一行，余下交给
+   .content 在内部滚动，根元素保持不可滚，见上方 html/body 规则。 */
+.window-frame {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* 对齐 Mac：选中态铺满侧栏宽度；首项贴顶、个人中心贴底，不留空白带。 */
+  overflow: hidden;
+  background: var(--surface-canvas);
+}
+.window-body { flex: 1 1 auto; min-height: 0; }
+.app-shell { display: grid; grid-template-columns: 130px minmax(0, 1fr); min-height: 0; background: var(--sidebar); }
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* 对齐 Mac：品牌区贴顶、个人中心贴底，不留空白带；内容区与侧栏之间不加分隔线。 */
   padding: 0;
-  border-right: 1px solid var(--border);
   background: var(--sidebar);
   backdrop-filter: blur(24px);
 }
 nav { display: grid; gap: 4px; }
 .nav-item {
-  width: 100%;
+  width: calc(100% - 12px);
+  /* Mac SettingsSidebarRow：最小 40（含上下 4 内边距）；按钮外再留 2，行距 44。 */
+  min-height: 40px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 7px;
-  padding: 12px 2px;
+  justify-content: flex-start;
+  gap: 8px;
+  margin: 2px 6px;
+  /* Mac SettingsSidebarRow：leading 9 + 按钮 6 = 15，trailing 5 + 按钮 6 = 11。 */
+  padding: 4px 5px 4px 9px;
   border: 0;
-  border-radius: 0;
+  border-radius: 7px;
   color: var(--text-nav);
   background: transparent;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.2;
+  box-sizing: border-box;
 }
 .nav-item:hover { background: var(--nav-hover); }
 .nav-item.active { color: var(--accent); background: var(--accent-surface); }
-.nav-icon { width: 21px; height: 21px; display: block; }
+.nav-icon { width: 18px; height: 18px; flex: 0 0 auto; display: block; }
 .sidebar-footer { margin-top: auto; padding: 10px 4px; color: var(--muted); font-size: 12px; text-align: center; }
 
 /* 2026-10-04 Andy：左右留白定为 物理 48 / 52。左侧逻辑 32（@150% = 48 物理）实测吻合。
@@ -236,13 +266,33 @@ nav { display: grid; gap: 4px; }
    吸附到整数设备像素（取整），34.67 实测只画出 51 物理；取 35.5 时右边缘落在
    1546.75 → 取整 1547，右边可见画布正好 52 物理（48/52 目标达成，且缩窗口时稳定）。
    窗口最小宽度 1066.67 逻辑（= 物理 1600），内容列不会被压窄，所以用固定值。 */
-.content { min-width: 0; height: 100%; padding: 22px 35.5px 26px 32px; overflow: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.content {
+  min-width: 0;
+  /* 与微信一致：主内容是一块浮在侧栏底色上的圆角面板，底部/右侧留 8px
+     露出侧栏色，窗口看起来是一个整体。 */
+  height: calc(100% - 8px);
+  margin: 0 8px 8px 0;
+  /* 内容本身能在 800px 内放下时不再让 .content 产生页面滚动；
+     底部/右侧的 8px 面板留白仍由外边距保留。 */
+  padding: 10px 35.5px 0 32px;
+  border-radius: 10px;
+  background: var(--surface-canvas);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
 .content::-webkit-scrollbar { display: none; }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-left: 14px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 /* 全应用隐藏滚动条（仍可滚动）：WebView2 的经典滚动条在卡片里很显眼。 */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; }
 .page-header h1 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -0.4px; }
+/* 设置页分组：标题在卡外，字号与「通用」一致。必须放全局样式，因为设置页的
+   子组件（权限 / 诊断与日志）也会输出 `.settings-section` / `.section-title`；
+   放在 SettingsPage 的 scoped 样式里时，子组件标题会回落成浏览器默认 24px
+   （2026-10-31 实测）。 */
+.settings-section { margin-bottom: 18px; }
+.section-title { margin: 0 0 8px; font-size: 16px; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); gap: 14px; align-items: start; }
 .card { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 30px var(--shadow-card); }
 .card h2 { margin: 0 0 5px; font-size: 16px; }

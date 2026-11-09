@@ -6,7 +6,7 @@
 
 ## 目标与范围
 
-- 设置侧栏新增「推荐」入口，位置对齐 Mac：`按键 → 推荐 → 连接 → 权限 → 设置`。
+- 设置侧栏新增「推荐」入口（2026-10-31 起的当前顺序：`按键 → 组合动作 → 推荐 → 连接 → 回眸 → 设置`）。
 - 页面内容、分类、筛选、商品顺序、详情与运营更新全部来自官网
   `https://sayall.app/recommendations/`。客户端不保存推荐目录，不内嵌 HTML/脚本，
   不读取会员、支付、录音或遥控器数据。
@@ -17,12 +17,16 @@
 ## 页面承载
 
 - 官网返回 `X-Frame-Options: DENY`，不能用 `<iframe>`；Windows 使用 Tauri 主窗口
-  内的子 WebView（WebView2）。子 WebView 的边界固定为侧栏 108px 之外的整个客户区，
-  窗口缩放与跨屏 DPI 变化时重新贴边。
+  内的子 WebView（WebView2）。子 WebView 的边界固定为侧栏 130px 之外、标题栏 32px 之下，
+  右侧与底部再让出主内容的 8px 圆角留白；窗口缩放与跨屏 DPI 变化时重新贴边
+  （2026-10-31 侧栏紧凑化后由 108px 改为 136px，2026-11-06 按 Mac 内容测量口径调为 130px，
+  同日加入主内容圆角面板的 8px 留白）。
 - 加载地址：`https://sayall.app/recommendations/?embed=app&appPlatform=windows&theme=light|dark`。
   - `embed=app` 让官网隐藏自身导航和页脚，只保留推荐内容；
   - `appPlatform=windows` 是平台标记；当前官网按 `website` 内容面渲染；
-  - `theme` 跟随 App 当前浅色/深色外观；切换外观时重新加载同一页面。
+  - `theme` 跟随 App 当前浅色/深色外观；切换外观时重新加载同一页面；
+  - 注入 `html` 侧栏色和 `body` 的 `--surface-canvas` 色，`body` 最小高度为视口高度，
+    圆角外露侧栏色，页面空白区域也填到内容区底部。
 - 页面内部的列表/详情导航由官网自己的 `?item=<slug>` 与浏览器历史处理；
   容器不重复实现推荐详情。
 - 子 WebView 不向官网暴露 Tauri 原生调用或文件访问能力。
@@ -102,7 +106,8 @@
   `event=navigation result=passed http_status=200`；页面显示官网内容
   （推荐 / 遥控器推荐 / 搭配软件 / vokie / 豆包输入法 / 微信输入法）。
 - 窗口从 1081×837 调整到 1400×900（150% DPI，物理 2100×1350）：
-  `WRY_WEBVIEW` 子视图重贴到侧栏右侧（物理 113→2087，窗口右缘 2096），
+  `WRY_WEBVIEW` 子视图重贴到侧栏右侧（物理 113→2087，窗口右缘 2096；该次取证
+  使用旧版 108px 侧栏，当前 130px 布局需在下次真机走查时复测），
   无重叠、无空白条，网页按两列重新排版。
 - 离开推荐页切到「按键」：日志 `event=hide generation=2`，网页层完全消失。
 - 深色外观下重新进入：日志 `event=show mode=reuse generation=3 theme=dark` →

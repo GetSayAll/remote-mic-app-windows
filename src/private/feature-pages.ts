@@ -11,7 +11,8 @@ import type { NavIcon } from "../navigation";
  * 契约：
  *
  * 1. 只依赖本文件与 `../navigation` 的公开类型；
- * 2. `id` 不得与公开页面冲突（`buttons` / `connection` / `permissions` / `settings`）；
+ * 2. `id` 不得与公开页面冲突（`buttons` / `recommendations` / `macros` /
+ *    `connection` / `reflections` / `settings` / `profile`）；
  * 3. 页面组件自行负责 IPC、文案与失败态，公开代码不感知其存在。
  *
  * 见 `docs/architecture/private-component-boundary.md`。

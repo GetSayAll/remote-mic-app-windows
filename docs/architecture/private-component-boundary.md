@@ -62,7 +62,8 @@
 
 约束：
 
-- 私有页面的 `id` 不得与公开页面（`buttons` / `connection` / `permissions` / `settings`）冲突。
+- 私有页面的 `id` 不得与公开页面（`buttons` / `recommendations` / `macros` / `connection` /
+  `reflections` / `settings` / `profile`）冲突。
 - 公开构建空注册表时，侧栏与页面表**逐项不变**（仓库规则：未实现的页面不显示空入口）。
   `src/navigation-seam.test.ts` 钉住这条。
 - 私有页面自己负责 IPC、文案、加载态与失败态；公开代码不感知其存在。

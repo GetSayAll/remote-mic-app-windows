@@ -126,6 +126,11 @@ describe("onboarding gates", () => {
       { remote: { rawInputPhase: "starting", remoteButtonObserved: false } },
       "remote.listener_not_ready",
     ],
+    [
+      "remote",
+      { remote: { rawInputPhase: "awaiting", remoteButtonObserved: false } },
+      "remote.hid_interface_missing",
+    ],
     ["remote", { remote: { remoteButtonObserved: false } }, "remote.button_not_ready"],
     ["audio", { audio: { recommendedEndpointAvailable: false } }, "audio.install_required"],
     ["audio", { audio: { selectedEndpointRecommended: false } }, "audio.not_selected"],

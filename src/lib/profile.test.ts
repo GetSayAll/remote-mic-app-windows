@@ -9,7 +9,7 @@ import {
   calendarIntensity,
   formatDuration,
   formatVoiceSessionDate,
-  formatVoiceTotal,
+  formatVoiceTotalParts,
   profileAccountLabel,
 } from "./profile";
 
@@ -53,31 +53,48 @@ describe("formatDuration", () => {
   });
 });
 
-describe("formatVoiceTotal", () => {
-  it("uses Mac's Chinese duration units", () => {
-    expect(formatVoiceTotal(0)).toBe("0 秒");
-    expect(formatVoiceTotal(32)).toBe("32 秒");
-    expect(formatVoiceTotal(1_992)).toBe("33 分钟 12 秒");
-    expect(formatVoiceTotal(3_723)).toBe("1 小时 2 分钟");
+describe("formatVoiceTotalParts", () => {
+  it("uses compact Chinese units and splits numbers from units", () => {
+    expect(formatVoiceTotalParts(0)).toEqual([
+      { value: "0", unit: "分" },
+      { value: "0", unit: "秒" },
+    ]);
+    expect(formatVoiceTotalParts(32)).toEqual([
+      { value: "0", unit: "分" },
+      { value: "32", unit: "秒" },
+    ]);
+    expect(formatVoiceTotalParts(1_992)).toEqual([
+      { value: "33", unit: "分" },
+      { value: "12", unit: "秒" },
+    ]);
+    expect(formatVoiceTotalParts(3_723)).toEqual([
+      { value: "1", unit: "小时" },
+      { value: "2", unit: "分" },
+      { value: "3", unit: "秒" },
+    ]);
   });
 
   it("treats invalid and negative durations as zero", () => {
-    expect(formatVoiceTotal(Number.NaN)).toBe("0 秒");
-    expect(formatVoiceTotal(-1)).toBe("0 秒");
+    const zero = [
+      { value: "0", unit: "分" },
+      { value: "0", unit: "秒" },
+    ];
+    expect(formatVoiceTotalParts(Number.NaN)).toEqual(zero);
+    expect(formatVoiceTotalParts(-1)).toEqual(zero);
   });
 });
 
 describe("profileAccountLabel", () => {
-  it("keeps only the first ten characters before the @", () => {
-    expect(profileAccountLabel("abcdefghijk@example.com")).toBe("abcdefghij");
+  it("keeps the full local part before the @ (Mac full-name logic)", () => {
+    expect(profileAccountLabel("abcdefghijk@example.com")).toBe("abcdefghijk");
     expect(profileAccountLabel("abc@example.com")).toBe("abc");
     expect(profileAccountLabel("i***@example.com")).toBe("i***");
   });
 
-  it("falls back to 个人中心 when no display name is available", () => {
-    expect(profileAccountLabel(null)).toBe("个人中心");
-    expect(profileAccountLabel("   ")).toBe("个人中心");
-    expect(profileAccountLabel(undefined)).toBe("个人中心");
+  it("falls back to 我的 when no display name is available", () => {
+    expect(profileAccountLabel(null)).toBe("我的");
+    expect(profileAccountLabel("   ")).toBe("我的");
+    expect(profileAccountLabel(undefined)).toBe("我的");
   });
 });
 

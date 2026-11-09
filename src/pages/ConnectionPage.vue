@@ -37,7 +37,6 @@ import type {
 } from "../lib/bridge";
 import {
   audioPhaseLabel,
-  chordLabel,
   connectRemote,
   connectionPhaseLabel,
   disableRc003Capture,
@@ -1639,7 +1638,7 @@ onUnmounted(() => {
             <p v-if="capturingVoiceHotkey" class="capture-display voice-hotkey-capture">
               {{
                 voiceCaptureDisplay.length
-                  ? chordLabel({ keys: voiceCaptureDisplay })
+                  ? voiceHoldHotkeyLabel({ keys: voiceCaptureDisplay })
                   : waitingPreheldRelease
                     ? t("检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始")
                     : t("请按下你输入工具当前设置的语音键（也可单独按一个修饰键）；按 Esc 取消")

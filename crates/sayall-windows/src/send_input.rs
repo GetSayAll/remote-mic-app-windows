@@ -597,6 +597,11 @@ pub enum ButtonAction {
     /// 面板是**短时窗口**：方向键与 OK 在面板打开期间由面板即时认领（按下即插入，
     /// 不等手势判定），返回键关闭面板。未绑定该动作时不改变任何按键行为。
     OpenCommonPhrases,
+    /// Windows 应用切换器（Alt+Tab）临时会话（对标 macOS `appSwitcher`）。
+    ///
+    /// 触发后保持 Alt 并打开系统切换器；方向键 / OK / 返回由
+    /// [`crate::app_switcher::AppSwitcherSession`] 在按下沿即时认领。
+    AppSwitcher,
 }
 
 impl ButtonAction {
@@ -618,6 +623,9 @@ impl ButtonAction {
             // 组合动作与常用语面板都不可连发。
             | Self::RunMacro { .. }
             | Self::OpenCommonPhrases => false,
+            // 应用切换器会话内每次触发只前进一项；按住连发即连续 Tab，
+            // 与系统 Alt+Tab 的按住循环语义一致（对齐 Mac `appSwitcher`）。
+            Self::AppSwitcher => true,
             Self::Scroll { .. } | Self::MouseMove { .. } => true,
             Self::Shortcut { chord } => {
                 matches!(chord.keys.as_slice(), [key] if !key.is_modifier())
@@ -849,7 +857,9 @@ impl From<ButtonActionsWire> for ButtonActions {
 /// 3 = 预设应用的聚焦档案改为可覆盖默认值：旧版本留下的预设「自动选择 / 只打开」
 ///     档案在加载时清除，让 Chrome / 网易云先落到产品默认聚焦方式；用户学习过的
 ///     输入框、点击位置和显式快捷键保留。
-pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 3;
+/// 4 = 新增「切换应用」（`app_switcher`，Alt+Tab 会话）。旧版本读到该动作类型会
+///     整体拒载，靠版本护栏备份原文件，不静默丢配置（同 2 的约定）。
+pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1024,6 +1034,22 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
+    /// 键位方案的私有页可能仍把预设写成一次性 Alt+Tab；覆盖层加载时把它升级为
+    /// `app_switcher` 会话动作。基础映射不调用本方法，旧的一次性 Alt+Tab 绑定
+    /// 继续按字面快捷键执行。
+    pub fn promote_app_switcher_shortcuts(mut self) -> Self {
+        for actions in self.actions.values_mut() {
+            for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+                if let ButtonAction::Shortcut { chord } = action {
+                    if chord.is_alt_tab() {
+                        *action = ButtonAction::AppSwitcher;
+                    }
+                }
+            }
+        }
+        self
+    }
+
     /// 旧文件（结构版本 0，本功能之前保存）迁移：为「旧版自动连发成立」的
     /// 按键补上显式 `holdRepeat = 单击`，让升级用户的按住行为保持不变。
     ///
@@ -1212,6 +1238,16 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
 }
 
 impl KeyChord {
+    /// 是否为单独的 Alt + Tab（左右 Alt 都算；不含 Ctrl/Shift 等附加修饰键）。
+    pub fn is_alt_tab(&self) -> bool {
+        self.keys.len() == 2
+            && self.keys[1] == KeyCode::Tab
+            && matches!(
+                self.keys[0],
+                KeyCode::Alt | KeyCode::LeftAlt | KeyCode::RightAlt
+            )
+    }
+
     /// Windows 的锁屏是系统动作，不依赖当前前台窗口或键盘注入链路。
     pub fn is_lock_workstation(&self) -> bool {
         self.keys.len() == 2
@@ -2356,6 +2392,76 @@ mod tests {
         .allows_repeat());
         assert!(!ButtonAction::FocusInput.allows_repeat());
         assert!(!ButtonAction::Disabled.allows_repeat());
+        // 应用切换器会话内每次触发只前进一项；按住连发等价于连续 Tab。
+        assert!(ButtonAction::AppSwitcher.allows_repeat());
+    }
+
+    #[test]
+    fn app_switcher_action_round_trips_with_schema_four() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            actions_with(ButtonAction::AppSwitcher, None),
+        );
+        let json = serde_json::to_string(&mappings).unwrap();
+        assert!(json.contains("\"type\":\"app_switcher\""), "{json}");
+        assert!(
+            json.contains(&format!(
+                "\"schemaVersion\":{BUTTON_MAPPINGS_SCHEMA_VERSION}"
+            )),
+            "{json}"
+        );
+        let decoded: ButtonMappings = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.action_for(RemoteButton::Tv, ButtonTrigger::Single),
+            ButtonAction::AppSwitcher
+        );
+        let normalized = decoded.normalized().unwrap();
+        assert_eq!(
+            normalized.action_for(RemoteButton::Tv, ButtonTrigger::Single),
+            ButtonAction::AppSwitcher
+        );
+        assert_eq!(BUTTON_MAPPINGS_SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn profile_overlay_promotes_only_alt_tab_shortcuts() {
+        assert!(chord(&[KeyCode::Alt, KeyCode::Tab]).is_alt_tab());
+        assert!(chord(&[KeyCode::LeftAlt, KeyCode::Tab]).is_alt_tab());
+        assert!(chord(&[KeyCode::RightAlt, KeyCode::Tab]).is_alt_tab());
+        assert!(!chord(&[KeyCode::Control, KeyCode::Tab]).is_alt_tab());
+        assert!(!chord(&[KeyCode::Alt, KeyCode::Shift, KeyCode::Tab]).is_alt_tab());
+
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Tv,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Alt, KeyCode::Tab]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        mappings.actions.insert(
+            RemoteButton::Back,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord(&[KeyCode::Control, KeyCode::Tab]),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let promoted = mappings.promote_app_switcher_shortcuts();
+        assert_eq!(
+            promoted.action_for(RemoteButton::Tv, ButtonTrigger::Single),
+            ButtonAction::AppSwitcher
+        );
+        assert_eq!(
+            promoted.action_for(RemoteButton::Back, ButtonTrigger::Single),
+            ButtonAction::Shortcut {
+                chord: chord(&[KeyCode::Control, KeyCode::Tab]),
+            }
+        );
     }
 
     #[test]

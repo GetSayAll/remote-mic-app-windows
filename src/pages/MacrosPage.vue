@@ -11,7 +11,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
-import { SHORTCUT_PRESET_GROUPS } from "../lib/shortcut-presets";
+import { SHORTCUT_PRESET_GROUPS, shortcutPresetHint } from "../lib/shortcut-presets";
 import {
   FOCUS_STRATEGY_OPTIONS,
   effectiveFocusProfile,
@@ -22,6 +22,7 @@ import {
   readMacroEditorSession,
   writeMacroEditorSession,
 } from "./macro-editor-session";
+import { macrosViewSession } from "./macros-view-session";
 import {
   activateAppForLearning,
   buttonLabel,
@@ -102,9 +103,13 @@ function tr(text: string): string {
   return /[\u4e00-\u9fff]/.test(text) ? t(text) : text;
 }
 
-const loading = ref(true);
-const definitions = ref<MacroDefinition[]>([]);
-const selectedMacroId = ref<string | null>(null);
+// 首帧用上次读取到的库快照（2026-11-06）：切页重建时不再显示「0 → 真实条数」。
+// `reloadLibrary()` 仍然照常异步刷新，数据以新响应为准。
+const cachedDefinitions = macrosViewSession.definitions;
+const loading = ref(cachedDefinitions === null);
+const definitions = ref<MacroDefinition[]>(cachedDefinitions ?? []);
+const selectedMacroId = ref<string | null>(cachedDefinitions?.[0]?.macroId ?? null);
+if (cachedDefinitions) registerMacroNames(cachedDefinitions);
 const search = ref("");
 const statusMessage = ref("");
 const statusKind = ref<"info" | "success" | "error">("info");
@@ -239,6 +244,7 @@ function messageOf(error: unknown): string {
 function applyLibrary(library: MacroLibraryDocument): void {
   const latest = latestMacroDefinitions(library.definitions);
   definitions.value = latest;
+  macrosViewSession.definitions = latest;
   registerMacroNames(latest);
   void loadReferences(selectedMacroId.value);
 }
@@ -847,13 +853,21 @@ const savedShortcuts = computed<Array<{ label: string; chord: MacroChord }>>(() 
   return [...seen.values()];
 });
 
-/** 常用快捷键（与按键页同一份清单，只保留能换算成组合动作的条目）。 */
+/**
+ * 常用快捷键（与按键页同一份清单，只保留能换算成组合动作的条目）。
+ *
+ * chips 一律显示实际按键组合（`display` 优先），功能描述只作悬停提示，
+ * 与按键页一致；`app_switcher` 由运行时识别 Alt+Tab 后启动会话。
+ */
 const commonShortcutGroups = computed(() =>
   SHORTCUT_PRESET_GROUPS.map((group) => ({
     label: group.label,
-    items: group.items
-      .map((item) => ({ label: item.label, chord: macroChordFromKeys(item.keys) }))
-      .filter((item): item is { label: string; chord: MacroChord } => item.chord !== null),
+    items: group.items.flatMap((item) => {
+      const chord = macroChordFromKeys(item.keys);
+      return chord
+        ? [{ label: item.label, display: item.display, action: item.action, chord }]
+        : [];
+    }),
   })).filter((group) => group.items.length > 0),
 );
 
@@ -1394,7 +1408,8 @@ async function saveDraft(): Promise<void> {
     draft.value = null;
     testReport.value = null;
     clearMacroEditorSession();
-    setStatus(t("组合动作已保存"), "success");
+    statusMessage.value = "";
+    statusKind.value = "info";
   } catch (error) {
     setStatus(t("保存失败：{error}", { error: messageOf(error) }), "error");
   }
@@ -1486,6 +1501,15 @@ watch(
       <h1>{{ tPage("组合动作") }}</h1>
       <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>
+
+    <p
+      v-if="statusMessage"
+      class="macros-inline-status"
+      :data-kind="statusKind"
+      role="status"
+    >
+      {{ statusMessage }}
+    </p>
 
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
@@ -1931,9 +1955,10 @@ watch(
                             ),
                           }"
                           type="button"
+                          :title="shortcutPresetHint(item)"
                           @click="applyChordToSelectedStep(item.chord)"
                         >
-                          {{ tr(item.label) }}
+                          {{ item.display ?? macroChordLabel(item.chord) }}
                         </button>
                       </div>
                     </template>
@@ -2294,7 +2319,6 @@ watch(
       </div>
     </template>
 
-    <p v-if="statusMessage" class="status-line" :data-kind="statusKind">{{ statusMessage }}</p>
     <RegisteredAppsDialog
       v-if="appPickerOpen"
       :known-apps="knownCustomApps"
@@ -2312,9 +2336,9 @@ watch(
   flex-direction: column;
   min-height: 0;
   flex: 1;
-  /* 页面固定为可视区高度：步骤/动作库再多也只滚内部区域，
-     底部按钮（新建/导入/导出、取消编辑/上一步/下一步）始终贴在窗口底部。 */
-  height: calc(100vh - 48px);
+  /* 页面高度跟随 .content 内容盒，而不是 100vh；内容能放下时页面本身不滚，
+     只让步骤/动作库内部按需滚动，底部按钮始终贴在内容区底部。 */
+  height: 100%;
   overflow: hidden;
 }
 /* 标题与副标题的尺寸/位置对齐按键页：沿用全局 .page-header h1（22px）与
@@ -2334,12 +2358,17 @@ watch(
   flex: 1;
   min-height: 0;
   display: flex;
+  align-items: stretch;
+  gap: 14px;
 }
 .library-pane {
   width: 264px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface-subtle);
+  align-self: stretch;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2452,6 +2481,7 @@ watch(
 }
 .detail-pane {
   flex: 1;
+  align-self: stretch;
   min-height: 0;
   overflow-y: auto;
   padding: 20px 14px;
@@ -2606,7 +2636,8 @@ watch(
   flex-direction: column;
 }
 .wizard-head {
-  padding: 14px 14px 12px;
+  /* 标题、步骤指示器与下方的蓝色分隔线左对齐。 */
+  padding: 14px 0 12px;
   border-bottom: 1px solid var(--border);
 }
 .wizard-head h2 {
@@ -2662,13 +2693,13 @@ watch(
 .basic-body {
   flex-direction: column;
   gap: 20px;
-  padding: 20px 14px;
+  padding: 20px 0;
   overflow-y: auto;
 }
 .review-body {
   flex-direction: column;
   gap: 14px;
-  padding: 20px 14px;
+  padding: 20px 0;
   overflow-y: auto;
 }
 .steps-body {
@@ -2677,8 +2708,11 @@ watch(
 .steps-pane {
   width: 300px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface-subtle);
+  /* 与上方步骤指示线、下方底部按钮线都留 14px，并使用设置页卡片的圆角/底色。 */
+  margin: 14px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2986,18 +3020,15 @@ watch(
   align-items: center;
   gap: 10px;
 }
-.status-line {
-  margin: 0;
-  margin-top: auto;
-  border-top: 1px solid var(--border);
-  padding: 8px 22px;
+.macros-inline-status {
+  margin: 0 0 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }
-.status-line[data-kind="success"] {
+.macros-inline-status[data-kind="success"] {
   color: var(--success-text);
 }
-.status-line[data-kind="error"] {
+.macros-inline-status[data-kind="error"] {
   color: var(--error-text);
 }
 </style>

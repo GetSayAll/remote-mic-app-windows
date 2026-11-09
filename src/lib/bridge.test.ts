@@ -13,6 +13,7 @@ import {
   getApplicationLanguage,
   getOpenWindowAtLaunch,
   identityShortcutByButton,
+  isAppSwitcherMacroChord,
   isRecommendedVoiceEndpoint,
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
@@ -24,6 +25,7 @@ import {
   openVbCableDownloadPage,
   registerCommonPhraseAvailability,
   registerPresetAppNames,
+  clearPresetAppNames,
   RECOMMENDATIONS_URL,
   remoteModelLabel,
   saveApplicationLanguage,
@@ -81,6 +83,18 @@ describe("mouse actions", () => {
     // 动作摘要会显示在按键格子上，文案即用户可见串（product-copy 口径）。
     expect(actionSummary({ type: "focus_input" })).toBe("聚焦输入框");
   });
+
+  it("summarizes the app switcher session by its key chord", () => {
+    expect(actionSummary({ type: "app_switcher" })).toBe("Alt + Tab");
+  });
+
+  it("recognizes only the Alt + Tab macro chord as the switcher session", () => {
+    expect(isAppSwitcherMacroChord({ modifiers: ["alt"], key: "tab" })).toBe(true);
+    expect(isAppSwitcherMacroChord({ modifiers: ["control", "alt"], key: "tab" })).toBe(false);
+    expect(isAppSwitcherMacroChord({ modifiers: ["alt"], key: "escape" })).toBe(false);
+    expect(isAppSwitcherMacroChord({ modifiers: [], key: "tab" })).toBe(false);
+    expect(isAppSwitcherMacroChord(undefined)).toBe(false);
+  });
 });
 
 describe("open application labels", () => {
@@ -97,7 +111,46 @@ describe("open application labels", () => {
     expect(actionSummary({ type: "open_app", target: "C:\\Apps\\Example.exe" })).toBe(
       "打开 Example",
     );
-    registerPresetAppNames([]);
+    clearPresetAppNames();
+  });
+
+  // 2026-11-06 现场：切到「组合动作 / 连接 / 我的」再回「按键」，格子先显示
+  // `netease_music` 这类内部 id，约 1.5 秒后才跳成「网易云音乐」。根因是
+  // `registerPresetAppNames` 每次 clear 整张表，而按键页挂载早期只拿得到
+  // 「自定义应用」这一部分列表。
+  it("keeps known preset names when a later registration carries only a partial list", () => {
+    registerPresetAppNames([
+      { id: "sayall", name: "无线麦 SayAll" },
+      { id: "netease_music", name: "网易云音乐" },
+    ]);
+    registerPresetAppNames([{ id: "C:\\Apps\\WPS.exe", name: "WPS演示" }]);
+    expect(actionSummary({ type: "open_app", target: "netease_music" })).toBe("打开网易云音乐");
+    expect(actionSummary({ type: "open_app", target: "C:\\Apps\\WPS.exe" })).toBe("打开 WPS演示");
+    clearPresetAppNames();
+  });
+
+  it("ignores blank entries without dropping names already known", () => {
+    registerPresetAppNames([{ id: "netease_music", name: "网易云音乐" }]);
+    registerPresetAppNames([
+      { id: "", name: "空 id" },
+      { id: "empty_name", name: "   " },
+    ]);
+    expect(actionSummary({ type: "open_app", target: "netease_music" })).toBe("打开网易云音乐");
+    clearPresetAppNames();
+  });
+
+  it("restores preset names from the local first-frame cache on module load", async () => {
+    localStorage.setItem(
+      "sayall.preset-app-names.v1",
+      JSON.stringify([["netease_music", "网易云音乐"]]),
+    );
+    vi.resetModules();
+    const fresh = await import("./bridge");
+    expect(fresh.actionSummary({ type: "open_app", target: "netease_music" })).toBe(
+      "打开网易云音乐",
+    );
+    localStorage.clear();
+    clearPresetAppNames();
   });
 });
 
@@ -191,7 +244,10 @@ describe("voice endpoint recommendation", () => {
     expect(chordLabel({ keys: ["backspace"] })).toBe("Backspace");
     expect(chordLabel({ keys: ["delete"] })).toBe("Delete");
     expect(chordLabel({ keys: ["control", "c"] })).toBe("Ctrl + C");
-    expect(chordLabel({ keys: ["left_windows", "shift", "s"] })).toBe("左 Win + Shift + S");
+    // 普通快捷键显示不区分左右 Win，与预设芯片的 "Win + Shift + S" 一致；
+    // 语音键仍用 voiceHoldHotkeyLabel 保留左右。
+    expect(chordLabel({ keys: ["left_windows", "shift", "s"] })).toBe("Win + Shift + S");
+    expect(chordLabel({ keys: ["right_windows", "d"] })).toBe("Win + D");
   });
 });
 
