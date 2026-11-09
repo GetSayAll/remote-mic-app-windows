@@ -8,6 +8,7 @@ import {
   type MacroDefinition,
   type PresetAppInfo,
   type RemoteButton,
+  type ScrollRegionTarget,
 } from "./bridge";
 import { presetFocusDefault } from "./focus-defaults";
 
@@ -239,9 +240,14 @@ export function removeAppAdaptation(
   for (const [key, profile] of Object.entries(mappings.focusProfiles ?? {})) {
     if (keyOf(key) !== expected) focusProfiles[key] = profile;
   }
+  const scrollRegions: Record<string, ScrollRegionTarget> = {};
+  for (const [key, region] of Object.entries(mappings.scrollRegions ?? {})) {
+    if (keyOf(key) !== expected) scrollRegions[key] = region;
+  }
   const next: ButtonMappings = {
     ...mappings,
     focusProfiles: Object.keys(focusProfiles).length ? focusProfiles : undefined,
+    scrollRegions: Object.keys(scrollRegions).length ? scrollRegions : undefined,
   };
   if (!preset) {
     next.applications = (mappings.applications ?? []).filter(
@@ -249,6 +255,19 @@ export function removeAppAdaptation(
     );
   }
   return next;
+}
+
+/** 读取某个 target 的滚动区域档案（键比较不区分大小写，与聚焦档案一致）。 */
+export function scrollRegionForTarget(
+  regions: Record<string, ScrollRegionTarget> | undefined,
+  target: string | null,
+): ScrollRegionTarget | null {
+  if (!regions || !target) return null;
+  const expected = keyOf(target);
+  for (const [key, region] of Object.entries(regions)) {
+    if (keyOf(key) === expected) return region;
+  }
+  return null;
 }
 
 /** 选中项失效（被删 / 被移除）时回退到第一项。 */

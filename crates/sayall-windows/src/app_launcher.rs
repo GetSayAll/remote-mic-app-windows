@@ -252,6 +252,36 @@ pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
 ///
 /// 打开应用后真实前台窗口可能要几百毫秒才就绪；键位方案需要先用这个
 /// 名字预备目标应用的覆盖层，避免下一次按键仍打到旧方案。
+/// 前台可执行文件是否属于该 APP 适配 target（预设 id / 自定义路径 / 注册应用）。
+///
+/// 只比较路径或文件名，不读取窗口标题；用于把「当前前台 APP」映射到它的
+/// 滚动区域档案。`.lnk` 按记录时的解析规则处理。
+#[cfg(windows)]
+pub(crate) fn target_matches_executable(target: &str, executable: &str) -> bool {
+    let executable = executable.trim();
+    if executable.is_empty() {
+        return false;
+    }
+    if let Some(app) = preset_app(target) {
+        let foreground_name = std::path::Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(executable);
+        return app
+            .exe_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(foreground_name));
+    }
+    let resolved = if crate::registered_apps::is_registered_target(target) {
+        crate::registered_apps::resolve_registered_executable_path(target)
+    } else if target.to_ascii_lowercase().ends_with(".lnk") {
+        resolve_lnk(target).map(|shortcut| shortcut.exe_path)
+    } else {
+        Some(target.to_owned())
+    };
+    resolved.is_some_and(|path| path.eq_ignore_ascii_case(executable))
+}
+
 pub fn target_executable_name(target: &str) -> Option<String> {
     if let Some(app) = preset_app(target) {
         return app.exe_names.first().map(|name| (*name).to_owned());
@@ -3705,6 +3735,24 @@ pub(crate) mod tests {
             assert!(!app.name.is_empty());
             assert!(!app.exe_names.is_empty());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_matches_foreground_executable_by_preset_name_or_path() {
+        assert!(target_matches_executable(
+            "notepad",
+            "C:\\Windows\\System32\\notepad.exe"
+        ));
+        assert!(target_matches_executable(
+            "C:\\Apps\\Cursor.exe",
+            "c:\\apps\\cursor.exe"
+        ));
+        assert!(!target_matches_executable(
+            "C:\\Apps\\Cursor.exe",
+            "C:\\Apps\\Other.exe"
+        ));
+        assert!(!target_matches_executable("notepad", ""));
     }
 
     #[test]

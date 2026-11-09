@@ -3447,6 +3447,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut common_phrases_count = 0_usize;
     let mut app_switcher_count = 0_usize;
     let mut scroll_count = 0_usize;
+    let mut page_scroll_count = 0_usize;
     let mut mouse_count = 0_usize;
     let mut macro_count = 0_usize;
     let mut disabled_count = 0_usize;
@@ -3459,6 +3460,10 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
                 ButtonAction::OpenCommonPhrases => common_phrases_count += 1,
                 ButtonAction::AppSwitcher => app_switcher_count += 1,
                 ButtonAction::Scroll { .. } => scroll_count += 1,
+                ButtonAction::PageUp
+                | ButtonAction::PageDown
+                | ButtonAction::ScrollToTop
+                | ButtonAction::ScrollToBottom => page_scroll_count += 1,
                 ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
                     mouse_count += 1
                 }
@@ -3468,7 +3473,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} app_switcher_count={app_switcher_count} scroll_count={scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} app_switcher_count={app_switcher_count} scroll_count={scroll_count} page_scroll_count={page_scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -3537,6 +3542,13 @@ async fn test_button_mapping(
         }
         ButtonAction::AppSwitcher => Err(
             "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
+                .to_owned(),
+        ),
+        ButtonAction::PageUp
+        | ButtonAction::PageDown
+        | ButtonAction::ScrollToTop
+        | ButtonAction::ScrollToBottom => Err(
+            "翻页测试请在 APP 适配页点击“测试向上翻页/测试向下翻页”；试一下无法确定目标 APP"
                 .to_owned(),
         ),
     }
@@ -3629,6 +3641,37 @@ async fn test_app_focus(target: String, state: tauri::State<'_, AppState>) -> Re
         .await
         .map_err(|error| format!("测试打开与聚焦任务失败：{error}"))?
         .map_err(|error| error.to_string())
+}
+
+/// 「学习滚动区域」：阻塞至多 3 秒等待用户点击目标窗口的可滚动内容区。
+#[tauri::command]
+async fn learn_scroll_region(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::scroll_region::ScrollRegionTarget, String> {
+    let platform = Arc::clone(&state.platform);
+    let result = tauri::async_runtime::spawn_blocking(move || platform.learn_scroll_region())
+        .await
+        .map_err(|error| format!("学习滚动区域任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
+}
+
+/// 「测试滚动」：打开/激活目标应用后执行一次翻页并读回结果。
+#[tauri::command]
+async fn test_scroll_region(
+    app: tauri::AppHandle,
+    target: String,
+    command: sayall_windows::scroll_region::ScrollCommand,
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::scroll_region::ScrollOutcome, String> {
+    let platform = Arc::clone(&state.platform);
+    let result =
+        tauri::async_runtime::spawn_blocking(move || platform.test_scroll_region(target, command))
+            .await
+            .map_err(|error| format!("测试滚动任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
 }
 
 /// 原生文件选择器：选择自定义应用（.exe/.lnk）。用户取消返回 null。
@@ -6399,6 +6442,8 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        learn_scroll_region,
+        test_scroll_region,
         activate_app_for_learning,
         list_preset_apps,
         get_application_icon,
@@ -6544,6 +6589,8 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        learn_scroll_region,
+        test_scroll_region,
         activate_app_for_learning,
         list_preset_apps,
         get_application_icon,

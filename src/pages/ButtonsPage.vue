@@ -840,6 +840,7 @@ const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
 function actionAllowsRepeat(action: ButtonAction): boolean {
   // 切换应用会话内每次触发只前进一项；按住连发等价于系统 Alt+Tab 连续 Tab。
   if (action.type === "app_switcher") return true;
+  if (action.type === "page_up" || action.type === "page_down") return true;
   if (action.type === "scroll" || action.type === "mouse_move") return true;
   if (action.type !== "shortcut") return false;
   return action.chord.keys.length === 1 && !REPEAT_MODIFIER_KEYS.has(action.chord.keys[0]);
@@ -2570,6 +2571,24 @@ onUnmounted(() => {
                 @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? t("滚轮向上") : t("滚轮向下") }}</button>
             </div>
           </div>
+          <div class="page-action-row">
+            <button
+              v-for="item in [
+                { type: 'page_up' as const, label: '向上翻页' },
+                { type: 'page_down' as const, label: '向下翻页' },
+                { type: 'scroll_to_top' as const, label: '滚到顶部' },
+                { type: 'scroll_to_bottom' as const, label: '滚到底部' },
+              ]"
+              :key="item.type"
+              class="chip"
+              :class="{ selected: selectedAction?.type === item.type }"
+              type="button"
+              :title="t('使用 APP 适配里学习的滚动区域；没有记录时自动寻找可滚动容器')"
+              @click="applyAction({ type: item.type })"
+            >
+              {{ t(item.label) }}
+            </button>
+          </div>
           <label v-if="mouseAmountVisible" class="mouse-amount">
             <span>{{ mouseAmountKind === "mouse_move" ? t("每次移动") : t("每次滚动") }}</span>
             <input v-model="mouseAmountDraft"
@@ -2701,6 +2720,7 @@ onUnmounted(() => {
 .ok-click-hint { margin: 6px 0 0; font-size: 12px; }
 .mouse-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .mouse-action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.page-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-amount-hint { color: var(--muted); }

@@ -5,11 +5,14 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import {
   buttonLabel,
   buttonTriggerLabel,
+  activateAppForLearning,
   getApplicationIcon,
   getButtonMappings,
   getCombinedActions,
+  learnScrollRegion,
   listPresetApps,
   saveButtonMappings,
+  testScrollRegion,
   type AppFocusProfile,
   type ButtonMappings,
   type ButtonTrigger,
@@ -17,6 +20,8 @@ import {
   type PresetAppInfo,
   type RemoteButton,
   type RuntimeSnapshot,
+  type ScrollCommand,
+  type ScrollRegionTarget,
 } from "../lib/bridge";
 import {
   buildAppRows,
@@ -28,6 +33,7 @@ import {
   nextSelectedTarget,
   profileForTarget,
   removeAppAdaptation,
+  scrollRegionForTarget,
   type AppAdaptationRow,
 } from "../lib/app-adaptation";
 import { presetFocusDefault } from "../lib/focus-defaults";
@@ -54,6 +60,12 @@ const confirmDelete = ref(false);
 const notice = ref<{ text: string; tone: "success" | "error" } | null>(null);
 const appIcons = ref<Record<string, string>>({});
 const iconRequests = new Set<string>();
+const scrollLearning = ref(false);
+const scrollTesting = ref<ScrollCommand | null>(null);
+const scrollMessage = ref<{
+  text: string;
+  tone: "success" | "error" | "info";
+} | null>(null);
 let noticeTimer: number | null = null;
 
 const rows = computed(() =>
@@ -71,6 +83,12 @@ const selectedProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
   return row ? profileForTarget(mappings.value.focusProfiles, row.target) : null;
 });
+const selectedScrollRegion = computed<ScrollRegionTarget | null>(() =>
+  selectedRow.value
+    ? scrollRegionForTarget(mappings.value.scrollRegions, selectedRow.value.target)
+    : null,
+);
+const scrollBusy = computed(() => scrollLearning.value || scrollTesting.value !== null || saving.value);
 const fallbackProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
   return row?.preset ? presetFocusDefault(row.target, true) : null;
@@ -116,10 +134,45 @@ function selectRow(target: string): void {
   selectedTarget.value = target;
 }
 
-/** 列表摘要对齐 Mac：短聚焦名 + 翻页状态；Windows 尚无滚动引擎，统一显示需学习。 */
+/** 列表摘要对齐 Mac：短聚焦名 + 翻页状态。 */
 function rowStatus(row: AppAdaptationRow): string {
   const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
-  return `${focus} · ${t("需学习")}`;
+  const scroll = scrollRegionForTarget(mappings.value.scrollRegions, row.target)
+    ? t("已学习")
+    : t("需学习");
+  return `${focus} · ${scroll}`;
+}
+
+function scrollRegionErrorLabel(error: unknown, context: "learn" | "test"): string {
+  // Tauri invoke 的拒绝值可能是字符串，也可能是 { message } 对象；统一按包含匹配，
+  // 避免后端稳定 token 被错误归到通用失败文案。
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : JSON.stringify(error);
+  const code = raw.toLowerCase();
+  if (code.includes("target_exited")) return t("目标应用已关闭，请重试。");
+  if (code.includes("own_process")) return t("请先切到目标 APP 再测试滚动。");
+  if (code.includes("not_accessible")) return t("这个 APP 没有暴露可读取的滚动区域。");
+  if (code.includes("no_candidate") || code.includes("outside_window")) {
+    return t("没有识别到滚动区域，请点一下内容区后重试。");
+  }
+  if (code.includes("pattern_unavailable")) {
+    return t("这个 APP 不支持结构翻页，已尝试滚轮回退。");
+  }
+  if (code.includes("not_moved")) return t("滚动区域没有移动，请重新学习。");
+  return context === "learn"
+    ? t("没有识别到滚动区域，请点一下内容区后重试。")
+    : t("滚动请求失败，请重试。");
+}
+
+function scrollRegionMessage(
+  text: string,
+  tone: "success" | "error" | "info" = "success",
+): void {
+  scrollMessage.value = { text, tone };
 }
 
 async function loadIcons(): Promise<void> {
@@ -171,6 +224,10 @@ function mappingPayload(next: ButtonMappings): ButtonMappings {
       next.focusProfiles && Object.keys(next.focusProfiles).length
         ? next.focusProfiles
         : undefined,
+    scrollRegions:
+      next.scrollRegions && Object.keys(next.scrollRegions).length
+        ? next.scrollRegions
+        : undefined,
   };
 }
 
@@ -198,6 +255,75 @@ async function saveProfile(target: string, profile: AppFocusProfile | null): Pro
   }
   if (profile) focusProfiles[target] = profile;
   return persist({ ...mappings.value, focusProfiles });
+}
+
+async function saveScrollRegion(
+  target: string,
+  region: ScrollRegionTarget | null,
+): Promise<boolean> {
+  const scrollRegions = { ...(mappings.value.scrollRegions ?? {}) };
+  const expected = target.toLocaleLowerCase();
+  for (const key of Object.keys(scrollRegions)) {
+    if (key.toLocaleLowerCase() === expected) delete scrollRegions[key];
+  }
+  if (region) scrollRegions[target] = region;
+  return persist({ ...mappings.value, scrollRegions });
+}
+
+async function learnScrollRegionForSelected(): Promise<void> {
+  const row = selectedRow.value;
+  if (!row || !row.installed || scrollBusy.value) return;
+  scrollLearning.value = true;
+  scrollMessage.value = null;
+  try {
+    await activateAppForLearning(row.target);
+    const region = await learnScrollRegion();
+    if (await saveScrollRegion(row.target, region)) {
+      scrollRegionMessage(t("滚动区域已记录。"));
+    } else {
+      scrollRegionMessage(t("保存滚动区域失败，请重试。"), "error");
+    }
+  } catch (error) {
+    scrollRegionMessage(scrollRegionErrorLabel(error, "learn"), "error");
+  } finally {
+    scrollLearning.value = false;
+  }
+}
+
+async function clearScrollRegion(): Promise<void> {
+  const row = selectedRow.value;
+  if (!row || scrollBusy.value) return;
+  scrollMessage.value = null;
+  if (await saveScrollRegion(row.target, null)) {
+    scrollRegionMessage(t("已清除滚动区域记录。"));
+  } else {
+    scrollRegionMessage(t("清除滚动区域失败，请重试。"), "error");
+  }
+}
+
+async function testScroll(command: ScrollCommand): Promise<void> {
+  const row = selectedRow.value;
+  if (!row || !row.installed || !selectedScrollRegion.value || scrollBusy.value) return;
+  scrollTesting.value = command;
+  scrollMessage.value = null;
+  try {
+    const outcome = await testScrollRegion(row.target, command);
+    if (outcome.moved && outcome.atEdge) {
+      scrollRegionMessage(t("已翻页，并到达滚动区域的这一端。"), "info");
+    } else if (outcome.atEdge) {
+      scrollRegionMessage(t("已经到达滚动区域的这一端。"), "info");
+    } else if (outcome.moved) {
+      scrollRegionMessage(t("滚动区域已移动。"));
+    } else if (outcome.method === "wheel") {
+      scrollRegionMessage(t("已发送滚动请求，但无法读回是否移动。"), "info");
+    } else {
+      scrollRegionMessage(t("没有检测到滚动，请重新学习。"), "error");
+    }
+  } catch (error) {
+    scrollRegionMessage(scrollRegionErrorLabel(error, "test"), "error");
+  } finally {
+    scrollTesting.value = null;
+  }
 }
 
 async function addApps(apps: Array<{ name: string; path: string }>): Promise<void> {
@@ -237,6 +363,7 @@ function goToBinding(button: RemoteButton, trigger: ButtonTrigger): void {
 watch(selectedTarget, (target) => {
   appsViewSession.selectedTarget = target;
   confirmDelete.value = false;
+  scrollMessage.value = null;
 });
 
 watch(
@@ -343,6 +470,58 @@ onUnmounted(() => {
           :save="(profile) => saveProfile(selectedRow!.target, profile)"
           @notice="showNotice"
         />
+
+        <section class="section-card scroll-card">
+          <div class="section-head">
+            <h3>{{ t("滚动区域") }}</h3>
+            <span class="scroll-status" :class="{ learned: selectedScrollRegion }">
+              {{ selectedScrollRegion ? t("已学习") : t("需学习") }}
+            </span>
+            <span class="spacer"></span>
+          </div>
+          <p class="hint">
+            {{ t("翻页键会滚动这个 APP 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。") }}
+          </p>
+          <div class="scroll-actions">
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="!selectedRow.installed || scrollBusy"
+              @click="learnScrollRegionForSelected"
+            >
+              {{ scrollLearning ? t("正在等待你点击滚动区域…") : t("学习滚动区域") }}
+            </button>
+            <button
+              v-if="selectedScrollRegion"
+              class="quiet-button"
+              type="button"
+              :disabled="scrollBusy"
+              @click="clearScrollRegion"
+            >
+              {{ t("清除滚动区域") }}
+            </button>
+          </div>
+          <div class="scroll-test-row">
+            <button
+              v-for="item in [
+                { command: 'page_up' as ScrollCommand, label: '测试向上翻页' },
+                { command: 'page_down' as ScrollCommand, label: '测试向下翻页' },
+                { command: 'to_top' as ScrollCommand, label: '滚到顶部' },
+                { command: 'to_bottom' as ScrollCommand, label: '滚到底部' },
+              ]"
+              :key="item.command"
+              class="quiet-button"
+              type="button"
+              :disabled="!selectedRow.installed || !selectedScrollRegion || scrollBusy"
+              @click="testScroll(item.command)"
+            >
+              {{ scrollTesting === item.command ? t("执行中…") : t(item.label) }}
+            </button>
+          </div>
+          <p v-if="scrollMessage" class="scroll-message" :class="scrollMessage.tone">
+            {{ scrollMessage.text }}
+          </p>
+        </section>
 
         <section class="section-card binding-card">
           <div class="section-head">
@@ -700,6 +879,62 @@ onUnmounted(() => {
   font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
+}
+.scroll-card {
+  display: grid;
+  gap: 8px;
+}
+.scroll-status {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--warning-text);
+}
+.scroll-status.learned {
+  color: var(--success-text);
+}
+.scroll-actions,
+.scroll-test-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.scroll-actions .secondary-button {
+  min-height: 26px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.quiet-button {
+  min-height: 24px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.quiet-button:hover:not(:disabled) {
+  color: var(--accent-dark);
+  text-decoration: underline;
+}
+.quiet-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.scroll-message {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.scroll-message.success {
+  color: var(--success-text);
+}
+.scroll-message.error {
+  color: var(--error-text);
+}
+.scroll-message.info {
+  color: var(--text-secondary);
 }
 .binding-card {
   padding-bottom: 8px;

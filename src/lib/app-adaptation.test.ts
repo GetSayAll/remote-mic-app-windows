@@ -14,6 +14,7 @@ import {
   mergeApplications,
   nextSelectedTarget,
   removeAppAdaptation,
+  scrollRegionForTarget,
 } from "./app-adaptation";
 
 const PRESETS: PresetAppInfo[] = [
@@ -213,6 +214,10 @@ describe("deleting an adaptation", () => {
           "C:\\Apps\\Cursor.exe": { strategy: "recorded_element" },
           "C:\\WeChat\\Weixin.exe": { strategy: "open_only" },
         },
+        scrollRegions: {
+          "C:\\Apps\\Cursor.exe": { controlType: "Document", automationId: "RootWebArea" },
+          "C:\\WeChat\\Weixin.exe": { controlType: "Window" },
+        },
       }),
       "c:\\apps\\cursor.exe",
       false,
@@ -223,6 +228,9 @@ describe("deleting an adaptation", () => {
     ]);
     expect(result.focusProfiles).toEqual({
       "C:\\WeChat\\Weixin.exe": { strategy: "open_only" },
+    });
+    expect(result.scrollRegions).toEqual({
+      "C:\\WeChat\\Weixin.exe": { controlType: "Window" },
     });
   });
 
@@ -242,6 +250,16 @@ describe("deleting an adaptation", () => {
       wechat: { strategy: "recorded_element" },
     });
     expect(result.applications).toBeUndefined();
+  });
+
+  it("reads scroll regions with case-insensitive keys", () => {
+    expect(
+      scrollRegionForTarget(
+        { "C:\\Apps\\Cursor.exe": { controlType: "Document" } },
+        "c:\\apps\\cursor.exe",
+      ),
+    ).toEqual({ controlType: "Document" });
+    expect(scrollRegionForTarget(undefined, "chrome")).toBeNull();
   });
 });
 

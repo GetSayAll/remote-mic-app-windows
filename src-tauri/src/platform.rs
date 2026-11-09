@@ -56,6 +56,16 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         &self,
         target: String,
     ) -> Result<sayall_windows::focus::RecordedPoint, PlatformError>;
+    /// 「学习滚动区域」：等待用户点击目标应用的可滚动内容区。
+    fn learn_scroll_region(
+        &self,
+    ) -> Result<sayall_windows::scroll_region::ScrollRegionTarget, PlatformError>;
+    /// 「测试滚动」：激活目标应用后执行一次翻页并读回结果。
+    fn test_scroll_region(
+        &self,
+        target: String,
+        command: sayall_windows::scroll_region::ScrollCommand,
+    ) -> Result<sayall_windows::scroll_region::ScrollOutcome, PlatformError>;
     /// 预设应用清单（含安装状态）。
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo>;
     /// 仿真旅程是否跳过「外部入口（官网 / GitHub）」这两步。
@@ -284,6 +294,20 @@ impl PlatformRuntime for WindowsPlatform {
         target: String,
     ) -> Result<sayall_windows::focus::RecordedPoint, PlatformError> {
         WindowsPlatform::learn_focus_point(self, &target)
+    }
+
+    fn learn_scroll_region(
+        &self,
+    ) -> Result<sayall_windows::scroll_region::ScrollRegionTarget, PlatformError> {
+        WindowsPlatform::learn_scroll_region(self)
+    }
+
+    fn test_scroll_region(
+        &self,
+        target: String,
+        command: sayall_windows::scroll_region::ScrollCommand,
+    ) -> Result<sayall_windows::scroll_region::ScrollOutcome, PlatformError> {
+        WindowsPlatform::test_scroll_region(self, &target, command)
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
@@ -1043,6 +1067,37 @@ mod simulation {
                 top_offset: Some(656),
                 right_offset: Some(600),
                 bottom_offset: Some(144),
+            })
+        }
+
+        fn learn_scroll_region(
+            &self,
+        ) -> Result<sayall_windows::scroll_region::ScrollRegionTarget, PlatformError> {
+            // 固定样本：runtime-simulation 断言卡片状态机能落到「已学习」。
+            Ok(sayall_windows::scroll_region::ScrollRegionTarget {
+                control_type: "Document".to_owned(),
+                automation_id: "ci-simulation-scroll".to_owned(),
+                class_name: String::new(),
+                normalized_rect: Some(sayall_windows::focus::NormalizedRect {
+                    x: 0.0,
+                    y: 0.1,
+                    width: 1.0,
+                    height: 0.8,
+                }),
+            })
+        }
+
+        fn test_scroll_region(
+            &self,
+            _target: String,
+            _command: sayall_windows::scroll_region::ScrollCommand,
+        ) -> Result<sayall_windows::scroll_region::ScrollOutcome, PlatformError> {
+            Ok(sayall_windows::scroll_region::ScrollOutcome {
+                method: sayall_windows::scroll_region::ScrollMethod::ScrollPattern,
+                before_percent: Some(10.0),
+                after_percent: Some(90.0),
+                moved: true,
+                at_edge: false,
             })
         }
 
