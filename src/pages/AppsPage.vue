@@ -33,6 +33,7 @@ import {
 import { presetFocusDefault } from "../lib/focus-defaults";
 import { t, tPage } from "../lib/i18n";
 import type { NavigationRequest } from "../navigation";
+import { appsViewSession } from "./apps-view-session";
 
 const props = withDefaults(
   defineProps<{ runtime: RuntimeSnapshot | null; initialTarget?: string | null }>(),
@@ -40,13 +41,10 @@ const props = withDefaults(
 );
 const emit = defineEmits<{ navigate: [request: string | NavigationRequest] }>();
 
-/** 选中项在页面卸载后仍保留到本次窗口关闭（对齐 Mac 的窗口内会话选择）。 */
-let lastSelectedTarget: string | null = null;
-
 const mappings = ref<ButtonMappings>({ enabled: true, actions: {} });
 const presetApps = ref<PresetAppInfo[]>([]);
 const macroDefinitions = ref<MacroDefinition[]>([]);
-const selectedTarget = ref<string | null>(null);
+const selectedTarget = ref<string | null>(appsViewSession.selectedTarget);
 const loading = ref(true);
 const saving = ref(false);
 const loadError = ref<string | null>(null);
@@ -155,7 +153,7 @@ async function load(): Promise<void> {
     macroDefinitions.value = macros;
     selectedTarget.value = nextSelectedTarget(
       rows.value,
-      props.initialTarget ?? lastSelectedTarget,
+      props.initialTarget ?? appsViewSession.selectedTarget,
     );
     void loadIcons();
   } catch (error) {
@@ -237,7 +235,7 @@ function goToBinding(button: RemoteButton, trigger: ButtonTrigger): void {
 }
 
 watch(selectedTarget, (target) => {
-  lastSelectedTarget = target;
+  appsViewSession.selectedTarget = target;
   confirmDelete.value = false;
 });
 
@@ -349,7 +347,7 @@ onUnmounted(() => {
           :target="selectedRow.target"
           :profile="selectedProfile"
           :fallback="fallbackProfile"
-          :disabled="!selectedRow.installed || saving"
+          :disabled="!selectedRow.installed"
           :save="(profile) => saveProfile(selectedRow!.target, profile)"
           @notice="showNotice"
         />
@@ -377,19 +375,20 @@ onUnmounted(() => {
               <span class="binding-go">{{ t("去按键页") }}</span>
             </button>
           </div>
-        </section>
 
-        <div class="delete-row">
-          <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
-          <template v-else>
-            <button class="danger-button" type="button" :disabled="saving" @click="confirmDelete = true">
-              {{ isPresetPlaceholder(selectedRow) ? t("恢复默认聚焦方式") : t("删除这个 APP 的适配") }}
-            </button>
-            <span class="hint">
-              {{ isPresetPlaceholder(selectedRow) ? t("只清除 SayAll 保存的显式聚焦设置，不会修改 APP。") : t("只删除 SayAll 保存的适配，不会卸载 APP。") }}
-            </span>
-          </template>
-        </div>
+          <div class="section-divider" aria-hidden="true"></div>
+          <div class="delete-row">
+            <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
+            <template v-else>
+              <button class="danger-button" type="button" :disabled="saving" @click="confirmDelete = true">
+                {{ isPresetPlaceholder(selectedRow) ? t("恢复默认聚焦方式") : t("删除这个 APP 的适配") }}
+              </button>
+              <span class="hint">
+                {{ isPresetPlaceholder(selectedRow) ? t("只清除 SayAll 保存的显式聚焦设置，不会修改 APP。") : t("只删除 SayAll 保存的适配，不会卸载 APP。") }}
+              </span>
+            </template>
+          </div>
+        </section>
       </section>
     </div>
 
@@ -730,6 +729,11 @@ onUnmounted(() => {
   font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
+}
+.section-divider {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border);
 }
 .delete-row {
   display: flex;

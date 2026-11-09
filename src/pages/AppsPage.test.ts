@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import AppsPage from "./AppsPage.vue";
+import { appsViewSession } from "./apps-view-session";
 import {
   activateAppForLearning,
   getApplicationIcon,
@@ -84,6 +85,7 @@ async function mountPage(props: Record<string, unknown> = {}) {
 describe("APP adaptation page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    appsViewSession.selectedTarget = null;
     configureMappings({});
   });
 
@@ -399,6 +401,25 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage({ initialTarget: "C:\\Apps\\Cursor.exe" });
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
+  });
+
+  it("remembers the selected app after leaving and returning", async () => {
+    configureMappings({
+      applications: [
+        { name: "Cursor", path: "C:\\Apps\\Cursor.exe" },
+        { name: "微信", path: "C:\\Apps\\Weixin.exe" },
+      ],
+    });
+    const first = await mountPage();
+    const secondRow = first.findAll(".app-row").find((row) => row.text().includes("微信"))!;
+    await secondRow.trigger("click");
+    await flushPromises();
+    expect(secondRow.classes()).toContain("selected");
+    first.unmount();
+
+    const second = await mountPage();
+    const selected = second.findAll(".app-row").find((row) => row.classes().includes("selected"));
+    expect(selected?.text()).toContain("微信");
   });
 
   it("can expose a preset target passed from the buttons page", async () => {

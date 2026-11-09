@@ -60,34 +60,6 @@ const learnBusy = computed(
   () => learnState.value === "opening" || learnState.value === "learning",
 );
 const controlsDisabled = computed(() => props.disabled || busy.value);
-const statusTone = computed(() => {
-  switch (strategy.value) {
-    case "recorded_element":
-      return effective.value.recorded ? "success" : "pending";
-    case "recorded_point":
-      return effective.value.point ? "success" : "pending";
-    case "app_shortcut":
-      return effective.value.shortcut?.keys?.length ? "success" : "pending";
-    case "auto_composer":
-      return "success";
-    default:
-      return "neutral";
-  }
-});
-const statusLabel = computed(() => {
-  switch (strategy.value) {
-    case "recorded_element":
-      return effective.value.recorded ? t("已记录输入框") : t("尚未记录输入框");
-    case "recorded_point":
-      return effective.value.point ? t("已记录点击位置") : t("尚未记录点击位置");
-    case "app_shortcut":
-      return effective.value.shortcut?.keys?.length ? t("已录入快捷键") : t("尚未录入快捷键");
-    case "auto_composer":
-      return t("自动选择");
-    default:
-      return t("只打开");
-  }
-});
 // 对齐 Mac：只保留「只打开 APP / 打开后自动聚焦」两个主选项；
 // 旧版 auto_composer / recorded_point 档案仍可执行，但不再提供入口。
 const primaryOptions = computed(() =>
@@ -352,7 +324,6 @@ onUnmounted(() => {
   <section class="section-card focus-editor" :aria-busy="busy || learnBusy">
     <div class="section-head">
       <h3>{{ t("聚焦方式") }}</h3>
-      <span class="badge" :class="statusTone">{{ statusLabel }}</span>
       <span class="spacer"></span>
     </div>
 
@@ -364,7 +335,7 @@ onUnmounted(() => {
         :class="{ selected: strategy === option.value }"
         type="button"
         :aria-pressed="strategy === option.value"
-        :disabled="controlsDisabled"
+        :disabled="props.disabled"
         @click="selectStrategy(option.value)"
       >
         <span class="radio" aria-hidden="true"></span>
@@ -427,9 +398,6 @@ onUnmounted(() => {
         <button class="secondary" type="button" :disabled="controlsDisabled || !shortcut?.keys?.length" @click="clearShortcut">
           {{ t("清除") }}
         </button>
-        <button class="secondary" type="button" :disabled="controlsDisabled || !shortcut?.keys?.length" @click="testFocus">
-          {{ t("测试打开与聚焦") }}
-        </button>
       </div>
       <div v-if="capturing" class="capture-display">
         {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : t("请按下快捷键组合") }}
@@ -453,25 +421,16 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <template v-else>
-      <p class="hint">
-        {{
-          strategy === "auto_composer"
-            ? t("打开 APP 后由 Windows 自动寻找可编辑的输入框；找不到时再改用学习或点击位置。")
-            : t("只打开 APP，不移动输入焦点。")
-        }}
-      </p>
-      <div class="actions">
-        <button class="secondary" type="button" :disabled="controlsDisabled" @click="testFocus">
-          {{ t("测试打开与聚焦") }}
-        </button>
-      </div>
-    </template>
-
     <div v-if="strategy !== 'app_shortcut'" class="fallback-row">
       <span>{{ t("这个 APP 有自带的聚焦快捷键？也可以用它代替学习。") }}</span>
       <button class="quiet" type="button" :disabled="controlsDisabled" @click="selectStrategy('app_shortcut')">
         {{ t("改用 APP 快捷键聚焦") }}
+      </button>
+    </div>
+
+    <div class="focus-footer">
+      <button class="primary" type="button" :disabled="props.disabled" @click="testFocus">
+        {{ t("测试打开与聚焦") }}
       </button>
     </div>
   </section>
@@ -498,28 +457,6 @@ onUnmounted(() => {
 .section-head .spacer {
   flex: 1 1 auto;
 }
-.badge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 20px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.badge.success {
-  color: var(--success-text);
-  background: var(--success-surface);
-}
-.badge.pending {
-  color: var(--warning-text);
-  background: var(--warning-surface);
-}
-.badge.neutral {
-  color: var(--text-secondary);
-  background: rgba(31, 36, 48, 0.06);
-}
 .option-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -530,13 +467,14 @@ onUnmounted(() => {
   min-height: 36px;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   padding: 6px 9px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface-raised);
   color: var(--text-primary);
-  text-align: left;
+  text-align: center;
   font-size: 12.5px;
 }
 .focus-option:hover:not(:disabled) {
@@ -547,14 +485,6 @@ onUnmounted(() => {
   background: var(--accent-surface);
   color: var(--accent-text);
   font-weight: 600;
-}
-.focus-option small {
-  display: block;
-  margin-top: 1px;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 1.25;
 }
 .radio {
   width: 15px;
@@ -717,12 +647,21 @@ button:disabled {
 }
 .fallback-row {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
   margin-top: 7px;
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.35;
+}
+.fallback-row .quiet {
+  white-space: normal;
+  text-align: left;
+}
+.focus-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 </style>

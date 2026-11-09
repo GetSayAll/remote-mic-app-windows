@@ -169,8 +169,8 @@ Windows 的 `focusProfiles` 和 `applications` 是两张表：
 2. **作用域说明**
    - 「输入框聚焦和上下翻页按 APP 单独设置：只要该 APP 在前台就能用，与“打开 App”动作无关。」
 3. **聚焦方式卡**
-   - 标题「聚焦方式」+ 状态 badge。
-   - 主选项只有两个（对齐 Mac）：
+   - 标题「聚焦方式」，不再显示状态 badge（2026-11-09 用户反馈）。
+   - 主选项只有两个（对齐 Mac），选项中的图标与文字整体居中：
      - 只打开 APP
      - 打开后自动聚焦
    - 选中「打开后自动聚焦」时显示学习与测试（对齐 Mac）：
@@ -183,9 +183,10 @@ Windows 的 `focusProfiles` 和 `applications` 是两张表：
    - 旧版 auto_composer / recorded_point 档案保留执行，但界面不再提供入口；选中时显示一行旧版策略说明，选择上方任一方式后覆盖。
    - 快捷键兜底行：
      - 「这个 APP 有自带的聚焦快捷键？也可以用它代替学习。」
-     - 文字按钮「改用 APP 快捷键聚焦」
+     - 文字按钮「改用 APP 快捷键聚焦」独占下一行并允许换行。
      - 只有进入该策略后才显示快捷键编辑器；提供「改回打开后自动聚焦」。
    - 不把「使用 APP 快捷键聚焦」做成与主选项并列的第三个主卡片。
+   - 「测试打开与聚焦」固定在聚焦方式卡片右下角；学习区的「测试输入框」是另一个按钮。
 4. **滚动区域卡（目标态）**
    - 标题「滚动区域」+ `预置可用 / 已学习 / 需学习`。
    - 说明「翻页键会滚动这个 APP 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。」
@@ -197,6 +198,7 @@ Windows 的 `focusProfiles` 和 `applications` 是两张表：
    - 每行：`上键 · 长按` + `打开应用` + `去按键页`。
    - 只读；点击行跳到按键页并打开对应按键编辑卡。
    - 空态：「还没有按键绑定这个 APP，可在按键页的“打开应用”里选择它。」
+   - 绑定列表与删除适配放在同一张卡片内，中间用一条横线分隔（对齐 Mac）。
 6. **删除适配**
    - 无绑定时显示红色文字按钮「删除这个 APP 的适配」。
    - 有绑定时改为说明：「还有 N 处绑定在使用它，先解绑才能删除适配。」
@@ -449,7 +451,7 @@ cargo check --workspace
 cargo check -p sayall-windows-app --features runtime-simulation
 ```
 
-本轮已执行（2026-11-09）：前端 664 passed / 10 skipped、`pnpm build` 与 `vue-tsc --noEmit` 通过；`cargo test --workspace -j 1` 全通过（`sayall-windows` 525 passed / 16 ignored，`sayall-windows-app` 207 passed / 1 ignored）。默认并行的 `cargo test --workspace` 曾在本地因内存耗尽失败（`STATUS_STACK_BUFFER_OVERRUN` / `LNK1102`），串行运行即为上述通过结果，未发现代码失败。
+本轮已执行（2026-11-09）：前端 665 passed / 10 skipped、`pnpm build` 与 `vue-tsc --noEmit` 通过；`cargo test --workspace -j 1` 全通过（`sayall-windows` 525 passed / 16 ignored，`sayall-windows-app` 207 passed / 1 ignored）。默认并行的 `cargo test --workspace` 曾在本地因内存耗尽失败（`STATUS_STACK_BUFFER_OVERRUN` / `LNK1102`），串行运行即为上述通过结果，未发现代码失败。
 
 新增/更新的前端测试：
 
