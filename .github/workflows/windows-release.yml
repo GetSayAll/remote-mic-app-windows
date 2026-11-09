@@ -102,9 +102,18 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE: ${{ vars.SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE }}
         run: |
           $tag = $env:GITHUB_REF_NAME
           $assets = Get-ChildItem -LiteralPath "artifacts/windows-release" -File | ForEach-Object { $_.FullName }
+          # 签名门禁成功后才走到本步。按同一仓库变量记录核验结果，避免误标预览包。
+          # This step follows the gate. Use the same repository variable to report
+          # the observed verification mode accurately in the draft notes.
+          $codeSigningNote = if ($env:SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE -eq '1') {
+            '主程序与安装器已通过 Windows 代码签名校验，更新签名与最终安装器匹配。'
+          } else {
+            '本次预览未执行 Windows 代码签名门禁，首次运行可能出现 SmartScreen 提示。'
+          }
           # Release Notes 正文（按 docs/release-notes-spec.md 撰写；聚合口径 = 相对上一个
           # 已发布版本 v1.8.0）。内容变化要回到普通 PR 改这里，再打新 tag，不覆盖旧正文。
           $notes = @"
@@ -135,7 +144,7 @@ jobs:
 
           ## 已知边界
 
-          - 安装器尚未配置 Windows 代码签名，首次运行可能出现 SmartScreen 提示。
+          - $codeSigningNote
           - 「全按键支持」属于系统级按键接管，需要系统授权（每次开启都会弹出 Windows 授权窗口）；个别带防作弊保护的游戏可能按键失灵或游戏打不开，建议玩这类游戏前关闭该开关。
           - 语音输入工具的麦克风要选 **CABLE Output**，不要用「自动检测」：自动检测跟随系统默认录音设备，若默认设备是内置麦克风或「立体声混音」，识别结果会与你说的话出入较大。
           - 已经用过的电脑升级后不会自动进入首次设置向导，可在设置页点「重新运行向导」。
