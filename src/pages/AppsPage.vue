@@ -322,13 +322,6 @@ onUnmounted(() => {
 
       <section v-if="selectedRow" class="panel detail-panel" :aria-label="t('{name} 的适配设置', { name: selectedRow.name })">
         <div class="app-head">
-          <span class="app-tile large" aria-hidden="true">
-            <img v-if="appIcons[selectedRow.target]" :src="appIcons[selectedRow.target]" alt="" />
-            <svg v-else viewBox="0 0 24 24" fill="none">
-              <rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="1.6" />
-              <path d="M4 9h16" stroke="currentColor" stroke-width="1.6" />
-            </svg>
-          </span>
           <div class="app-head-text">
             <h2>{{ selectedRow.name }}</h2>
             <span v-if="selectedRow.path" class="app-path">{{ selectedRow.path }}</span>
@@ -355,7 +348,6 @@ onUnmounted(() => {
         <section class="section-card binding-card">
           <div class="section-head">
             <h3>{{ t("绑定到它的按键") }}</h3>
-            <span class="badge neutral">{{ t("{count} 处", { count: bindings.length }) }}</span>
             <span class="spacer"></span>
           </div>
           <p v-if="!bindings.length" class="hint">
@@ -380,12 +372,9 @@ onUnmounted(() => {
           <div class="delete-row">
             <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
             <template v-else>
-              <button class="danger-button" type="button" :disabled="saving" @click="confirmDelete = true">
+              <button class="danger-link" type="button" :disabled="saving" @click="confirmDelete = true">
                 {{ isPresetPlaceholder(selectedRow) ? t("恢复默认聚焦方式") : t("删除这个 APP 的适配") }}
               </button>
-              <span class="hint">
-                {{ isPresetPlaceholder(selectedRow) ? t("只清除 SayAll 保存的显式聚焦设置，不会修改 APP。") : t("只删除 SayAll 保存的适配，不会卸载 APP。") }}
-              </span>
             </template>
           </div>
         </section>
@@ -547,15 +536,6 @@ onUnmounted(() => {
 .app-tile svg {
   width: 17px;
   height: 17px;
-}
-.app-tile.large {
-  width: 36px;
-  height: 36px;
-  flex-basis: 36px;
-}
-.app-tile.large svg {
-  width: 22px;
-  height: 22px;
 }
 .app-row-text {
   min-width: 0;
@@ -732,7 +712,7 @@ onUnmounted(() => {
 }
 .section-divider {
   height: 1px;
-  margin: 2px 0;
+  margin: 12px 0 14px;
   background: var(--border);
 }
 .delete-row {
@@ -747,6 +727,25 @@ onUnmounted(() => {
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.4;
+}
+.danger-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--danger-text, var(--error-text));
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.danger-link:hover:not(:disabled) {
+  color: var(--danger-hover, var(--error-text));
+}
+.danger-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .danger-button {
   min-height: 28px;

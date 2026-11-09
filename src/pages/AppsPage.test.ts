@@ -321,6 +321,11 @@ describe("APP adaptation page", () => {
       },
     });
     const wrapper = await mountPage();
+    expect(wrapper.find(".app-tile.large").exists()).toBe(false);
+    expect(wrapper.find(".binding-card .section-divider").exists()).toBe(true);
+    expect(wrapper.find(".binding-card .danger-link").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("0 处");
+    expect(wrapper.text()).not.toContain("只删除 SayAll 保存的适配");
     await wrapper.findAll("button").find((button) => button.text() === "删除这个 APP 的适配")!.trigger("click");
     await flushPromises();
     expect(wrapper.find(".confirm-dialog").exists()).toBe(true);
@@ -461,9 +466,35 @@ describe("APP adaptation page", () => {
       "left_control",
       "k",
     ]);
+    expect(wrapper.find(".modifier-grid").exists()).toBe(false);
+    expect(wrapper.find(".shortcut-message").text()).toContain("聚焦快捷键已录入");
+    expect(wrapper.find(".page-notice").exists()).toBe(false);
 
     wrapper.unmount();
     expect(stopShortcutCapture).toHaveBeenCalled();
+  });
+
+  it("keeps shortcut cancellation feedback inline instead of the page notice", async () => {
+    vi.mocked(subscribeShortcutCaptureEdges).mockImplementationOnce(async () => () => {});
+    configureMappings({
+      applications: [{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }],
+    });
+    const wrapper = await mountPage();
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "改用 APP 快捷键聚焦")!
+      .trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "录入快捷键")!.trigger("click");
+    await flushPromises();
+
+    window.dispatchEvent(new Event("blur"));
+    await flushPromises();
+
+    expect(wrapper.find(".shortcut-message").text()).toContain("窗口失去焦点，已取消录入");
+    expect(wrapper.find(".page-notice").exists()).toBe(false);
+    expect(wrapper.find(".modifier-grid").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("sends a focus test request", async () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   activateAppForLearning,
   chordLabel,
@@ -16,11 +16,7 @@ import {
 import { FOCUS_STRATEGY_OPTIONS } from "../lib/focus-defaults";
 import { focusStrategyLabel } from "../lib/app-adaptation";
 import { t } from "../lib/i18n";
-import {
-  CAPTURE_MODIFIER_SOURCES,
-  MODIFIER_KEYS,
-  codeToKeyCode,
-} from "../lib/key-codes";
+import { MODIFIER_KEYS, codeToKeyCode } from "../lib/key-codes";
 
 const props = withDefaults(
   defineProps<{
@@ -48,7 +44,8 @@ const capturing = ref(false);
 const captureStarting = ref(false);
 const captureDisplay = ref<KeyCode[]>([]);
 const capturedChord = ref<KeyCode[] | null>(null);
-const selectedModifiers = reactive(new Set<KeyCode>());
+const shortcutMessage = ref<string | null>(null);
+const shortcutTone = ref<"success" | "error" | "info">("info");
 const pressedModifiers = new Set<KeyCode>();
 const pressedKeys = new Set<KeyCode>();
 let captureTimeout: number | null = null;
@@ -79,6 +76,14 @@ function notice(message: string, tone: "success" | "error" = "success"): void {
   emit("notice", message, tone);
 }
 
+function setShortcutMessage(
+  message: string | null,
+  tone: "success" | "error" | "info" = "info",
+): void {
+  shortcutMessage.value = message;
+  shortcutTone.value = tone;
+}
+
 function clearLearnState(): void {
   // 改选策略/切换目标都会作废进行中的学习，迟到结果不得覆盖新状态。
   generation += 1;
@@ -99,6 +104,7 @@ function profileForStrategy(next: FocusStrategy): AppFocusProfile {
 async function selectStrategy(next: FocusStrategy): Promise<void> {
   if (controlsDisabled.value || strategy.value === next) return;
   clearLearnState();
+  setShortcutMessage(null);
   busy.value = true;
   try {
     if (!(await props.save(profileForStrategy(next)))) {
@@ -156,6 +162,7 @@ async function testFocus(): Promise<void> {
 async function beginShortcutCapture(): Promise<void> {
   if (controlsDisabled.value || capturing.value || captureStarting.value) return;
   captureStarting.value = true;
+  setShortcutMessage(null);
   const requestGeneration = captureGeneration;
   try {
     await startShortcutCapture();
@@ -165,23 +172,25 @@ async function beginShortcutCapture(): Promise<void> {
     }
     pressedKeys.clear();
     capturedChord.value = null;
-    selectedModifiers.clear();
     pressedModifiers.clear();
     captureDisplay.value = [];
     capturing.value = true;
     if (captureTimeout !== null) window.clearTimeout(captureTimeout);
     captureTimeout = window.setTimeout(() => {
-      void finishShortcutCapture(t("录入已超时，请重新录入"));
+      void finishShortcutCapture(t("录入已超时，请重新录入"), "error");
     }, 15_000);
   } catch (error) {
     console.warn("start app focus shortcut capture failed", error);
-    notice(t("没能开始录入快捷键，请重试。"), "error");
+    setShortcutMessage(t("没能开始录入快捷键，请重试。"), "error");
   } finally {
     captureStarting.value = false;
   }
 }
 
-async function finishShortcutCapture(message?: string): Promise<void> {
+async function finishShortcutCapture(
+  message?: string,
+  tone: "success" | "error" | "info" = "info",
+): Promise<void> {
   captureGeneration += 1;
   capturing.value = false;
   if (captureTimeout !== null) window.clearTimeout(captureTimeout);
@@ -191,8 +200,7 @@ async function finishShortcutCapture(message?: string): Promise<void> {
   capturedChord.value = null;
   pressedModifiers.clear();
   captureDisplay.value = [];
-  selectedModifiers.clear();
-  if (message) notice(message, "error");
+  if (message) setShortcutMessage(message, tone);
 }
 
 function acceptCapturedKey(code: KeyCode, isPressed: boolean): void {
@@ -220,39 +228,34 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean): void {
     captureDisplay.value = [...pressedModifiers];
     return;
   }
-  if (code === "escape" && pressedModifiers.size === 0 && selectedModifiers.size === 0) {
+  if (code === "escape" && pressedModifiers.size === 0) {
     void finishShortcutCapture(t("已取消录入"));
     return;
   }
-  const keys = [...new Set([...selectedModifiers, ...pressedModifiers, code])];
+  const keys = [...new Set([...pressedModifiers, code])];
   capturedChord.value = keys;
   captureDisplay.value = keys;
 }
 
 async function saveShortcut(keys: KeyCode[]): Promise<void> {
   const profile: AppFocusProfile = { strategy: "app_shortcut", shortcut: { keys } };
-  if (!(await props.save(profile))) notice(t("保存聚焦快捷键失败，请重试。"), "error");
+  if (await props.save(profile)) setShortcutMessage(t("聚焦快捷键已录入"), "success");
+  else setShortcutMessage(t("保存聚焦快捷键失败，请重试。"), "error");
 }
 
 async function clearShortcut(): Promise<void> {
   if (controlsDisabled.value) return;
-  if (!(await props.save({ strategy: "app_shortcut" }))) {
-    notice(t("清除聚焦快捷键失败，请重试。"), "error");
+  if (await props.save({ strategy: "app_shortcut" })) {
+    setShortcutMessage(t("已清除聚焦快捷键"), "success");
+  } else {
+    setShortcutMessage(t("清除聚焦快捷键失败，请重试。"), "error");
   }
-}
-
-function toggleModifier(key: KeyCode): void {
-  if (!capturing.value || capturedChord.value) return;
-  if (selectedModifiers.has(key)) selectedModifiers.delete(key);
-  else selectedModifiers.add(key);
-  captureDisplay.value = [...selectedModifiers];
 }
 
 async function backToPrimary(): Promise<void> {
   if (controlsDisabled.value) return;
-  if (!(await props.save(profileForStrategy("recorded_element")))) {
-    notice(t("更新聚焦方式失败，请重试。"), "error");
-  }
+  if (await props.save(profileForStrategy("recorded_element"))) setShortcutMessage(null);
+  else setShortcutMessage(t("更新聚焦方式失败，请重试。"), "error");
 }
 
 function handleKeydown(event: KeyboardEvent): void {
@@ -280,6 +283,7 @@ watch(
   () => {
     generation += 1;
     clearLearnState();
+    setShortcutMessage(null);
     void finishShortcutCapture();
   },
 );
@@ -288,7 +292,6 @@ watch(capturing, (active) => {
   if (!active) {
     pressedKeys.clear();
     pressedModifiers.clear();
-    selectedModifiers.clear();
     captureDisplay.value = [];
   }
 });
@@ -402,19 +405,11 @@ onUnmounted(() => {
       <div v-if="capturing" class="capture-display">
         {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : t("请按下快捷键组合") }}
       </div>
-      <div v-if="capturing" class="modifier-grid">
-        <button
-          v-for="modifier in CAPTURE_MODIFIER_SOURCES"
-          :key="modifier.key"
-          class="chip"
-          :class="{ selected: selectedModifiers.has(modifier.key) }"
-          type="button"
-          @click="toggleModifier(modifier.key)"
-        >
-          {{ t(modifier.label) }}
-        </button>
-      </div>
-      <div class="fallback-row">
+      <div class="shortcut-footer">
+        <span v-if="shortcutMessage" class="shortcut-message" :class="shortcutTone">
+          {{ shortcutMessage }}
+        </span>
+        <span class="spacer"></span>
         <button class="quiet" type="button" :disabled="controlsDisabled" @click="backToPrimary">
           {{ t("改回打开后自动聚焦") }}
         </button>
@@ -625,25 +620,26 @@ button:disabled {
   font-family: Consolas, monospace;
   font-size: 12px;
 }
-.modifier-grid {
+.shortcut-footer {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 7px;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  margin-top: 8px;
 }
-.chip {
-  min-height: 26px;
-  padding: 3px 9px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--surface-chip);
-  color: var(--text-primary);
-  font-size: 11.5px;
+.shortcut-footer .spacer {
+  flex: 1 1 auto;
 }
-.chip.selected {
-  border-color: var(--accent-border);
-  background: var(--accent-surface);
-  color: var(--accent-text);
+.shortcut-message {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.shortcut-message.success {
+  color: var(--success-text);
+}
+.shortcut-message.error {
+  color: var(--error-text);
 }
 .fallback-row {
   display: flex;
