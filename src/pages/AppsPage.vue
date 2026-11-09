@@ -324,7 +324,6 @@ onUnmounted(() => {
         <div class="app-head">
           <div class="app-head-text">
             <h2>{{ selectedRow.name }}</h2>
-            <span v-if="selectedRow.path" class="app-path">{{ selectedRow.path }}</span>
           </div>
         </div>
 
@@ -607,14 +606,6 @@ onUnmounted(() => {
   font-size: 19px;
   line-height: 1.2;
 }
-.app-path {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .missing-note {
   margin: 0;
   padding: 7px 10px;
@@ -710,9 +701,12 @@ onUnmounted(() => {
   font-weight: 600;
   white-space: nowrap;
 }
+.binding-card {
+  padding-bottom: 8px;
+}
 .section-divider {
   height: 1px;
-  margin: 12px 0 14px;
+  margin: 8px 0 6px;
   background: var(--border);
 }
 .delete-row {
@@ -720,7 +714,7 @@ onUnmounted(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  min-height: 30px;
+  min-height: 22px;
 }
 .danger-line {
   margin: 0;
@@ -731,17 +725,17 @@ onUnmounted(() => {
 .danger-link {
   display: inline-flex;
   align-items: center;
-  min-height: 26px;
+  min-height: 22px;
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--danger-text, var(--error-text));
+  color: var(--delete-text);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
 .danger-link:hover:not(:disabled) {
-  color: var(--danger-hover, var(--error-text));
+  color: var(--delete-text-hover);
 }
 .danger-link:disabled {
   cursor: not-allowed;
@@ -752,14 +746,15 @@ onUnmounted(() => {
   padding: 4px 10px;
   border: 0;
   border-radius: 7px;
-  color: var(--error-text);
-  background: var(--error-surface);
+  color: var(--delete-text);
+  background: var(--delete-surface);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 .danger-button:hover:not(:disabled) {
-  filter: brightness(0.97);
+  color: var(--delete-text-hover);
+  background: color-mix(in srgb, var(--delete-text) 16%, transparent);
 }
 .danger-button:disabled {
   cursor: not-allowed;

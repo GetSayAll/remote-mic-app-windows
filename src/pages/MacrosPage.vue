@@ -2068,7 +2068,10 @@ watch(
   color: var(--text-on-accent);
 }
 .btn.danger {
-  color: var(--error-text);
+  color: var(--delete-text);
+}
+.btn.danger:hover {
+  color: var(--delete-text-hover);
 }
 .btn.block {
   width: 100%;

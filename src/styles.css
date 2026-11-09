@@ -57,6 +57,11 @@
   --warning-surface-soft: #fff8eb;
   --error-text: #9b312f;
   --error-surface: #ffe9e8;
+  /* 删除/撤销按钮统一使用 macOS SwiftUI Color.red（系统红）。
+     改这一组变量即可同步回眸、组合动作和 APP 适配的全部删除文字颜色。 */
+  --delete-text: #ff3b30;
+  --delete-text-hover: #d70015;
+  --delete-surface: rgba(255, 59, 48, 0.10);
   --success-text: #267148;
   --success-surface: #e5f5eb;
   --pending-text: #656b78;
@@ -122,6 +127,9 @@ html[data-theme="dark"] {
   --warning-surface-soft: #3c3020;
   --error-text: #ffb4ad;
   --error-surface: #4b2929;
+  --delete-text: #ff453a;
+  --delete-text-hover: #ff6961;
+  --delete-surface: rgba(255, 69, 58, 0.16);
   --success-text: #9de0b7;
   --success-surface: #203b2c;
   --pending-text: #c3c6cf;

@@ -159,7 +159,8 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
     await rows[2].trigger("click");
     await flushPromises();
-    expect(wrapper.find(".detail-panel").text()).toContain(
+    expect(wrapper.find(".app-path").exists()).toBe(false);
+    expect(wrapper.find(".detail-panel").text()).not.toContain(
       "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
     );
     expect(wrapper.find(".detail-panel").text()).toContain("只打开 APP");
@@ -175,7 +176,7 @@ describe("APP adaptation page", () => {
     await flushPromises();
 
     const detail = wrapper.find(".detail-panel").text();
-    expect(detail).toContain("C:\\Program Files\\Chrome\\chrome.exe");
+    expect(detail).not.toContain("C:\\Program Files\\Chrome\\chrome.exe");
     expect(detail).not.toContain("内置预设");
     expect(detail).toContain("只打开 APP");
     // 显式档案覆盖内置快捷键默认值。
@@ -351,7 +352,7 @@ describe("APP adaptation page", () => {
       focusProfiles: { chrome: { strategy: "open_only" } },
     });
     const wrapper = await mountPage();
-    expect(wrapper.find(".detail-panel").text()).toContain(
+    expect(wrapper.find(".detail-panel").text()).not.toContain(
       "C:\\Program Files\\Chrome\\chrome.exe",
     );
     expect(wrapper.find(".detail-panel").text()).not.toContain("内置预设");
