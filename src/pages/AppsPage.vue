@@ -336,7 +336,6 @@ async function addApps(apps: Array<{ name: string; path: string }>): Promise<voi
   if (await persist({ ...mappings.value, applications })) {
     addOpen.value = false;
     selectedTarget.value = apps[0].path;
-    showNotice(t("已添加 {count} 个应用，按键绑定未改变。", { count: apps.length }));
   } else {
     addError.value = t("保存应用列表失败，请重试。");
   }
@@ -349,7 +348,6 @@ async function deleteAdaptation(): Promise<void> {
   if (await persist(next)) {
     selectedTarget.value = nextSelectedTarget(rows.value, null);
     confirmDelete.value = false;
-    showNotice(row.preset ? t("已恢复默认聚焦方式") : t("已删除这个 APP 的适配"));
   }
 }
 
