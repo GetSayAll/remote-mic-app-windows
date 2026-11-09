@@ -1,6 +1,14 @@
 # TODO
 
-- [ ] Google Chromecast Windows 实验适配（2026-11-05）：识别、ATVV 两种格式与基础 Raw Input 路径开发中；原生语音/按键、增强捕获及安装验收尚未通过。见 [Testing/WindowsChromecast.md](Testing/WindowsChromecast.md)。
+- [ ] Google Chromecast Voice Remote（18D1:9450）Windows x64 · Chrome 听写。验证记录和人工验收入口见 [Testing/WindowsChromecast.md](Testing/WindowsChromecast.md)。
+  - [x] CAST-01 · P0 代码 · 开麦到串流、串流到首个有效音频分别设 3 秒和 2 秒期限。超时或短按取消轮换连接代次，清理热键和会话，不自动重开麦克风。
+  - [x] CAST-02 · P0 代码 · 明确允许 ATVV 0.4/1.0 的编码能力，拒绝不支持的组合。保留小米协议行为。
+  - [x] CAST-03 · P0 代码 · 按已选 BLE 地址和 Google VID/PID 关联 HID。Google 独立于小米 F5 抑制，普通键只观测，诊断不落原始 HID 路径。
+  - [x] CAST-04 · P0 代码 · 向导、连接页及 IPC 限定微信输入法预设和 VB-CABLE 路径，Chrome 手动聚焦草稿并手动发送。
+  - [x] CAST-05 · P0 出包 · 提供可重建的隔离预览包、哈希和启动冲突说明。蓝牙和音频由单一应用实例使用。
+  - [ ] CAST-06 · P0 真机 · 固定一支遥控器、Windows x64、微信输入法、Chrome。30 次进正确草稿，零误发、串会话、粘键。覆盖失焦、快按、ATVV 0.4 长按、断连、睡眠、两支遥控器及 RC001/RC003 冷启动 F5 回归。用 PCM 阶段、输入法开麦和草稿出字分别取证。
+  - [ ] CAST-07 · 生产 · 在当前上游主线复核并执行签名候选的验证门禁、干净安装、升级、回退与设置保留。核对诊断脱敏和语音数据流。
+  - [ ] CAST-08 · 后续 · 根据实体按键验收开放无原生冲突的动作。取消未上屏听写、跨标签页草稿绑定、停止生成和切会话需支持目标应用协议，通用 Chrome 听写先由用户管理草稿和网页动作。
 
 ## 语音识别"能出字但对不上"的定位链（2026-10-27 用户报障，已定位为配置问题）
 

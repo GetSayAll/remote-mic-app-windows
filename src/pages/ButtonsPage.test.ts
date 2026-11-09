@@ -491,6 +491,8 @@ describe("buttons mapping page", () => {
     expect(page.findAll(".mapping-card").map((card) => card.text()).join(" ")).toContain("Netflix");
     expect(page.text()).toContain("信源");
     expect(page.text()).toContain("实验支持");
+    expect(page.findAll(".mapping-cell")).toHaveLength(0);
+    expect(page.text()).not.toContain("启用自定义按键功能");
     expect(page.find('.remote-photo img').attributes('src')).toBe('/chromecast-remote.svg');
     expect(page.find('.remote-photo img').attributes('alt')).not.toContain('小米');
   });

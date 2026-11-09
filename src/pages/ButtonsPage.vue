@@ -887,12 +887,12 @@ async function addCustomApp(): Promise<void> {
 
 function selectButton(button: RemoteButton): void {
   // 三键在「全按键支持」关闭时置灰禁用：合成事件绕过原生 disabled，这里再守一道。
-  if (captureGated(button)) return;
+  if (isChromecast.value || captureGated(button)) return;
   selectedButton.value = button;
 }
 
 function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
-  if (captureGated(button)) return;
+  if (isChromecast.value || captureGated(button)) return;
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
@@ -2372,7 +2372,7 @@ onUnmounted(() => {
       <div>
         <div class="mapping-title-row">
           <h1>{{ tPage("按键映射") }}</h1>
-          <label class="toggle-row" :title="t('开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。')">
+          <label v-if="!isChromecast" class="toggle-row" :title="t('开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。')">
             <span>{{ t("启用自定义按键功能") }}</span>
             <!-- 始终渲染：值先取上次已知值（localStorage），IPC 回来后以权威值覆盖。
                  数据未到之前禁用，避免用户用默认值触发一次保存、把真实设置覆盖掉。 -->
@@ -2393,6 +2393,7 @@ onUnmounted(() => {
                「开启后支持使用…」，开启态指向「关闭后…将不可映射」；本机不可用
                （ARM64，issue #206）时固定为不可用口径。 -->
           <label
+            v-if="!isChromecast"
             class="toggle-row"
             :title="captureSwitchTitle"
           >
@@ -2426,7 +2427,7 @@ onUnmounted(() => {
             </span>
           </label>
           <!-- 本机不可用（ARM64，issue #206）：开关旁一句短说明，说结果不说机制。 -->
-          <span v-if="captureUnsupported" class="capture-unavailable-note">
+          <span v-if="captureUnsupported && !isChromecast" class="capture-unavailable-note">
             {{ captureUnsupportedNote }}
           </span>
         </div>
@@ -2440,6 +2441,7 @@ onUnmounted(() => {
           }"
         >
           {{
+            isChromecast ? t("谷歌遥控器为实验支持。普通按键仅供查看，可能仍会触发 Windows 的原有操作。") :
             captureFailure ??
             captureRevokedNote ??
             captureInactiveNote ??
@@ -2476,7 +2478,6 @@ onUnmounted(() => {
          （title 悬停看文案），开启失败走底部提示条——独立行的 v-if 插入 /
          移除会引起整页回流（抖动），胶囊底色与状态光晕还会染到标题区。 -->
 
-    <p v-if="isChromecast" class="tiny muted">{{ t("谷歌遥控器为实验支持；基础按键可能同时触发原生动作，全按键支持暂不可用。") }}</p>
     <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
       <svg
         class="mapping-connections"
@@ -2533,7 +2534,7 @@ onUnmounted(() => {
         :class="{
           left: placement.side === 'left',
           right: placement.side === 'right',
-          selected: selectedButton === placement.button,
+          selected: !isChromecast && selectedButton === placement.button,
           active: activeButtons.has(placement.button),
           flashed: firedFlash?.button === placement.button,
           'is-locked': captureGated(placement.button),
@@ -2557,7 +2558,7 @@ onUnmounted(() => {
           </svg>
           <strong>{{ buttonLabels[placement.button] }}</strong>
         </div>
-        <div class="mapping-cells">
+        <div v-if="!isChromecast" class="mapping-cells">
           <button
             v-for="trigger in TRIGGERS"
             :key="trigger"
@@ -2608,7 +2609,7 @@ onUnmounted(() => {
       </article>
     </div>
 
-    <article v-if="editingTarget" ref="editorPanel" class="card mapping-editor">
+    <article v-if="editingTarget && !isChromecast" ref="editorPanel" class="card mapping-editor">
       <div class="card-title-row">
         <div>
           <h2>{{ buttonLabel(editingTarget.button) }} · {{ buttonTriggerLabel(editingTarget.trigger) }}</h2>
@@ -3118,7 +3119,7 @@ onUnmounted(() => {
         </button>
         <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
       </div>
-      <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
+      <label v-if="!isChromecast" class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
         <span>{{ t("锁定当前按键") }}</span>
         <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
         <input
@@ -3128,8 +3129,8 @@ onUnmounted(() => {
           :disabled="!lockSelectionReady"
         />
       </label>
-      <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
-      <div class="button-row">
+      <span v-if="!isChromecast" class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
+      <div v-if="!isChromecast" class="button-row">
         <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
           {{ t("保存配置") }}
         </button>

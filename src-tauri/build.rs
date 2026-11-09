@@ -25,5 +25,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SAYALL_SOURCE_REVISION");
     println!("cargo:rerun-if-env-changed=SAYALL_BUILD_CHANNEL");
     println!("cargo:rerun-if-env-changed=SAYALL_RELEASE_TAG");
+    // The Tauri CLI passes the merged configuration through this environment
+    // variable. Rebuild when switching between standard and Cast preview.
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
     tauri_build::build()
 }

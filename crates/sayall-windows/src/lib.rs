@@ -1305,17 +1305,14 @@ impl WindowsPlatform {
         {
             // 用户在应用里选/换遥控器的**那一刻**就发布「正在用的那支」的地址
             // （2026-10-13 现场补充）：会话要等能力协商完才 Ready，而 Raw Input
-            // 绑定与助手选宿主都需要这个地址——只等 Ready 的话，应用刚启动、或
+            // 绑定提前需要这个地址——只等 Ready 的话，应用刚启动、或
             // 刚点连接而能力协商还没回来的那段时间里，两支遥控器同时在线就又会
             // 歧义失败（现场：`raw_input_listener` 每 10 秒失败一次，向导卡在
             // `remote.listener_not_ready`）。
-            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
-            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
+            // 此时型号尚未确认，只在内存里发布候选。BLE 识别为小米后才写助手
+            // 目标文件，避免把 Chromecast 地址提供给小米助手。
             let address = crate::bluetooth_address_from_device_id(&device_id);
-            crate::remote_target::set(address);
-            if address.is_some() {
-                self.rc003_bridge.request_retarget();
-            }
+            crate::remote_target::set_candidate(address);
             self.runtime.connect(device_id)
         }
 
@@ -1343,13 +1340,8 @@ impl WindowsPlatform {
         {
             // 启动时按已保存的选择立刻发布（同 `connect_remote` 的理由）：
             // 不等会话 Ready，Raw Input 就能在"两支同型号同时在位"时绑对那一支。
-            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
-            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
             let address = crate::bluetooth_address_from_device_id(&device_id);
-            crate::remote_target::set(address);
-            if address.is_some() {
-                self.rc003_bridge.request_retarget();
-            }
+            crate::remote_target::set_candidate(address);
             self.runtime.restore(device_id)
         }
 

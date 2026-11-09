@@ -1,5 +1,8 @@
 // English strings for onboarding. Key = exact Chinese source passed to t().
 export default {
+  "查看遥控器按键": "Observe remote buttons",
+  "当前遥控器的普通按键仅供查看。你可以继续设置听写。": "You can observe this remote's button presses. Continue to set up dictation.",
+  "普通按键仅供查看，可能仍会触发 Windows 的原有操作。你可以直接继续。": "You can observe button presses. Windows may still perform its usual button actions. You can continue now.",
   // ---- Shell / navigation ----
   "设置阶段": "Setup stage",
   "准备": "Prepare",

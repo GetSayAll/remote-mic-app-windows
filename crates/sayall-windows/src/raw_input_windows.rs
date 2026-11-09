@@ -1,10 +1,12 @@
 use crate::button_mapping::EngineMessage;
 use crate::key_gate;
 use crate::raw_input::{
-    button_for_usage, decode_chromecast_report, decode_report_usages,
-    device_path_matches_chromecast_remote, normalize_device_path, parse_raw_hid_body,
-    select_single_device_path, DevicePathError, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
+    button_for_usage, chromecast_path_matches_target, decode_chromecast_report,
+    decode_report_usages, device_path_matches_chromecast_remote, normalize_device_path,
+    parse_raw_hid_body, report_route, select_single_device_path, DevicePathError, RawInputPhase,
+    RawInputSnapshot, RawKeyboardEvent, ReportRoute,
 };
+use crate::remote_target::Target;
 use crate::PlatformError;
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -52,7 +54,7 @@ const BINDING_AUDIT_INTERVAL_MS: u32 = 10_000;
 /// 遥控器 HID 接口缺失时给用户看的说明（启动路径与审计路径共用同一份文案，
 /// 避免两处各写一份而逐渐不一致）。
 const AWAITING_DEVICE_MESSAGE: &str =
-    "未找到小米遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
+    "未找到遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
      睡眠唤醒或蓝牙栈僵死）。监听已就位，系统恢复该接口后会自动重新绑定，\
      无需手动重连或重启应用。";
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -409,7 +411,7 @@ fn run_listener(
             let first =
                 normalize_device_path(paths.first().map(String::as_str).unwrap_or_default());
             crate::ble::gatt_note(format!(
-                "raw_input binding_initial action=ambiguous_pick selected_path={first} \
+                "raw_input binding_initial action=ambiguous_pick \
                  matched_device_count={count}"
             ));
             first
@@ -444,8 +446,7 @@ fn run_listener(
     // 启动时的绑定结论要留痕：后续所有 binding_audit 记录都以此为基准，
     // 没有这一条就无法判断"是从未绑上"还是"绑上后掉了"（2026-09-18）。
     crate::ble::gatt_note(format!(
-        "raw_input binding_initial selected_path={selected_path} matched_device_count={} \
-         phase={}",
+        "raw_input binding_initial matched_device_count={} phase={}",
         paths.len(),
         if selected_path.is_empty() {
             "awaiting"
@@ -477,7 +478,7 @@ fn run_listener(
         _ => {
             crate::ble::gatt_note(format!(
                 "raw_input binding_audit action=timer_armed interval_ms={BINDING_AUDIT_INTERVAL_MS} \
-                 selected_path={selected_path} binding_present={}",
+                 binding_present={}",
                 !selected_path.is_empty()
             ));
         }
@@ -667,7 +668,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                 let mut state = context.snapshot.lock().unwrap();
                 state.phase = RawInputPhase::Awaiting;
                 state.last_error = Some(
-                    "小米遥控器 HID 接口已移除（断连/睡眠），等待重新连接后自动恢复".to_owned(),
+                    "遥控器 HID 接口已移除（断连/睡眠），等待重新连接后自动恢复".to_owned(),
                 );
                 drop(state);
                 let _ = context.engine.send(EngineMessage::DeviceRemoved);
@@ -743,7 +744,6 @@ fn audit_binding() {
                 // 换了还是没换？前者说明设备/实例真的变了，后者说明多候选里沿用了
                 // 旧绑定。两者的诊断含义完全不同，所以分开记（2026-09-18）。
                 let kept_previous = rebound_path == context.selected_path;
-                let previous_path = context.selected_path.clone();
                 context.selected_path = rebound_path;
                 context.binding_present = true;
                 let stale_remote_event_count = {
@@ -757,9 +757,7 @@ fn audit_binding() {
                 key_gate::set_listener_active(!device_path_matches_chromecast_remote(&context.selected_path));
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=rebound kept_previous={kept_previous} \
-                     matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count} \
-                     previous_path={previous_path} rebound_path={}",
-                    context.selected_path
+                     matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count}"
                 ));
             }
             Err(crate::raw_input::DevicePathError::Missing) => {
@@ -768,7 +766,6 @@ fn audit_binding() {
                     return;
                 }
                 context.binding_present = false;
-                let previous_path = context.selected_path.clone();
                 context.selected_path.clear();
                 let stale_remote_event_count = {
                     let mut state = context.snapshot.lock().unwrap();
@@ -780,11 +777,11 @@ fn audit_binding() {
                 // 接口消失：让引擎释放按住状态，避免留下永远等不到配对的按下边沿。
                 let _ = context.engine.send(EngineMessage::DeviceRemoved);
                 key_gate::set_listener_active(false);
-                // 带上丢失的路径与陈旧报文计数：这是判断"按键失效是接口消失还是
+                // 记下解绑原因与陈旧报文计数：这是判断"按键失效是接口消失还是
                 // 报文被路径过滤丢弃"的关键一组数字（2026-09-18）。
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=unbound reason=device_missing \
-                     stale_remote_event_count={stale_remote_event_count} lost_path={previous_path}"
+                     stale_remote_event_count={stale_remote_event_count}"
                 ));
             }
             Err(crate::raw_input::DevicePathError::Ambiguous(count)) => {
@@ -796,8 +793,7 @@ fn audit_binding() {
                         context.snapshot.lock().unwrap().stale_remote_event_count;
                     crate::ble::gatt_note(format!(
                         "raw_input binding_audit action=ambiguous candidate_count={count} \
-                         stale_remote_event_count={stale_remote_event_count} kept_path={}",
-                        context.selected_path
+                         stale_remote_event_count={stale_remote_event_count}"
                     ));
                 }
             }
@@ -845,43 +841,32 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         // 那一支的报文一律按"另一支"处理；还没有目标时沿用旧行为（只认绑定路径）。
         // 现场教训：只看"报文路径 == 绑定路径"，会在启动抢绑或换机时把**另一支遥控器**的
         // 按键当成本机按键（用户连的是 2 Pro、按 2 却让②步通过了）。
-        let accepted = crate::raw_input::report_path_accepted(
-            &context.selected_path,
-            crate::remote_target::get(),
-            &normalized,
-        );
-        if !accepted {
+        let (target, target_generation) = crate::remote_target::current();
+        let Some(route) = report_route(&context.selected_path, target, &normalized) else {
             // 绑定失配或"不是当前那一支"：报文可能来自别的设备（物理键盘等），也可能是
             // 遥控器的 HID 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
             // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
             // 区分开的唯一线索（2026-09-18 现场正是无法区分这两者才迟迟定不了位）。
             if crate::raw_input::device_path_matches_supported_remote(&normalized) {
-                let (count, first) = {
+                let first = {
                     let mut state = context.snapshot.lock().unwrap();
                     state.stale_remote_event_count += 1;
-                    (
-                        state.stale_remote_event_count,
-                        state.stale_remote_event_count == 1,
-                    )
+                    state.stale_remote_event_count == 1
                 };
                 // 只在第一次失配时写日志（计数的**开始时刻**才是定位线索；
                 // 后续每条都写会把诊断日志刷满，而这批报文的真实来源靠计数即可）。
                 if first {
-                    let bound_path = context.selected_path.clone();
                     let binding_present = context.binding_present;
                     let phase = context.snapshot.lock().unwrap().phase;
                     crate::ble::gatt_note(format!(
-                        "raw_input stale_remote_event first_seen bound_path={bound_path} \
-                         binding_present={binding_present} phase={phase:?} \
-                         event_path={normalized} \
-                         hint=遥控器仍在发报文但路径与绑定不符（多候选时期最可能），\
-                         或绑定被审计清空后报文仍到达"
+                        "raw_input stale_remote_event first_seen binding_present={binding_present} \
+                         phase={phase:?} target_kind={}",
+                        if matches!(target, Target::Chromecast(_)) { "chromecast" } else { "xiaomi_or_unselected" }
                     ));
                 }
-                let _ = count;
             }
             return Ok(());
-        }
+        };
         if normalized != context.selected_path {
             // 走的是新增的"目标地址"兜底路径：旧绑定没跟上实例变化，但输入没受影响。
             // 只记第一次（无设备身份、无路径），下一次现场看这条就知道兜底在工作。
@@ -893,10 +878,23 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         }
         context.snapshot.lock().unwrap().raw_event_count += 1;
 
-        if header.dwType == RIM_TYPEKEYBOARD.0 {
-            if device_path_matches_chromecast_remote(&normalized) {
-                return Ok(()); // Its semantic reports use the separate consumer-control path.
+        if let ReportRoute::ObserveChromecast(address) = route {
+            if header.dwType == RIM_TYPEHID.0 {
+                for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
+                    let buttons = decode_chromecast_report(report).map_err(|error| error.to_string())?;
+                    let _ = context.engine.send(EngineMessage::ObserveChromecastButtons {
+                        address,
+                        target_generation,
+                        buttons,
+                    });
+                }
             }
+            // Cast reports only update diagnostic/preview button state. They never
+            // enter the shortcut, macro, key gate, or F5 paths below.
+            return Ok(());
+        }
+
+        if header.dwType == RIM_TYPEKEYBOARD.0 {
             if body.len() < size_of::<RAWKEYBOARD>() {
                 return Err("RAWKEYBOARD packet is truncated".to_owned());
             }
@@ -924,13 +922,6 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             let _ = context.engine.send(EngineMessage::Keyboard(event));
         } else if header.dwType == RIM_TYPEHID.0 {
             for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
-                if device_path_matches_chromecast_remote(&normalized) {
-                    let buttons =
-                        decode_chromecast_report(report).map_err(|error| error.to_string())?;
-                    // Observe this device's own edges; Xiaomi's helper and usage table do not apply.
-                    let _ = context.engine.send(EngineMessage::HidButtons(buttons));
-                    continue;
-                }
                 let usages = decode_report_usages(report).map_err(|error| error.to_string())?;
                 // HID 报文（独立管线，不受键盘 LL 钩子影响）到达即武装
                 // 对应按键：其键盘孪生事件在钩子里据此归因吞键。
@@ -963,23 +954,33 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
         return Err("GetRawInputDeviceList enumeration failed".to_owned());
     }
 
+    let (target, _) = crate::remote_target::current();
     let mut paths = Vec::new();
     for device in devices.into_iter().take(written as usize) {
         if device.dwType != RIM_TYPEKEYBOARD && device.dwType != RIM_TYPEHID {
             continue;
         }
         if let Ok(path) = get_device_name(device.hDevice) {
-            if crate::raw_input::device_path_matches_supported_remote(&path) {
+            let matches = match target {
+                Target::XiaomiOrUnselected(_) => {
+                    crate::raw_input::device_path_matches_xiaomi_remote(&path)
+                }
+                Target::Chromecast(Some(address)) => chromecast_path_matches_target(&path, address),
+                Target::Chromecast(None) => false,
+            };
+            if matches {
                 paths.push(path);
             }
         }
     }
     // 两台同型号遥控器同时在线时按「应用正在用的那支」收窄候选（2026-10-13）：
     // 地址未知时这一行是恒等变换（行为与过去完全一致）。
-    Ok(crate::raw_input::filter_paths_for_target(
-        &paths,
-        crate::remote_target::get(),
-    ))
+    match target {
+        Target::XiaomiOrUnselected(address) => {
+            Ok(crate::raw_input::filter_paths_for_target(&paths, address))
+        }
+        Target::Chromecast(_) => Ok(paths),
+    }
 }
 
 fn get_device_name(device: windows::Win32::Foundation::HANDLE) -> Result<String, String> {

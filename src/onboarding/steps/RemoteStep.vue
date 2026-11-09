@@ -39,6 +39,7 @@ defineEmits<{
 const CONNECTED_PHASES = ["ready", "streaming", "draining"] as const;
 
 const connectionPhase = computed(() => props.runtime?.platform.connection.phase ?? "idle");
+const observeOnly = computed(() => props.runtime?.platform.connection.remoteModel === "chromecast");
 const connected = computed(() =>
   (CONNECTED_PHASES as readonly string[]).includes(connectionPhase.value),
 );
@@ -209,6 +210,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       </OptionCard>
 
       <StatusRow
+        v-if="!observeOnly"
         :state="buttonObserved ? 'ok' : 'pending'"
         :title="buttonObserved ? t('已收到遥控器按键') : t('等待控制按键')"
         :desc="buttonRowDesc"
@@ -221,7 +223,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
 
     <!-- 按错了遥控器：明确说是"另一支"在发按键（2026-10-13 现场），
          不然界面看起来就是"按了没反应"。 -->
-    <div v-if="otherRemoteActivity && !buttonObserved" class="onboarding-card warn">
+    <div v-if="!observeOnly && otherRemoteActivity && !buttonObserved" class="onboarding-card warn">
       <h4>{{ t("刚收到的是另一支遥控器的按键") }}</h4>
       <p v-if="connected">
         {{ t("当前连接的是「{name}」。请按这一支的普通按键；要用另一支，就点它那一行的「连接」。", { name: connectedModelLabel || connectedName }) }}

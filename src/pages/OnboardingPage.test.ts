@@ -518,6 +518,19 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
+  it("Chromecast 全按键支持说明页只展示观察模式，允许继续设置听写", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    const snapshot = connectedRuntime();
+    snapshot.platform.connection.remoteModel = "chromecast";
+    const wrapper = await mountWizard(snapshot);
+
+    expect(wrapper.text()).toContain("当前遥控器的普通按键仅供查看。你可以继续设置听写。");
+    expect(wrapper.text()).not.toContain("建议开启");
+    expect(wrapper.find(".onboarding-switch").exists()).toBe(false);
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("在全按键支持步骤打开开关：先弹确认，确认后才写状态", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
     const wrapper = await mountWizard(connectedRuntime());

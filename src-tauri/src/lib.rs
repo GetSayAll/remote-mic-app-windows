@@ -4,7 +4,7 @@ use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
 use sayall_windows::rc003_bridge::{BridgePhase, BridgeSnapshot};
 use sayall_windows::send_input::{
-    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
+    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, KeyCode, SendInputSnapshot,
 };
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, ImeStatus, PairedRemote, PlatformSnapshot,
@@ -994,7 +994,9 @@ async fn get_diagnostic_report(app: tauri::AppHandle) -> DiagnosticReport {
     let send_input_for_task = send_input.clone();
     let app_version_for_task = app_version.clone();
     match tauri::async_runtime::spawn_blocking(move || {
-        let tool = load_voice_input_tool(&settings);
+        let tool = load_voice_input_tool(&settings).filter(|tool| {
+            voice_input_tool_supported(Some(*tool), platform_for_task.connection.remote_model)
+        });
         DiagnosticReport::capture(
             &app_version_for_task,
             &platform_for_task,
@@ -3331,6 +3333,13 @@ async fn test_button_mapping(
     trigger: ButtonTrigger,
     state: tauri::State<'_, AppState>,
 ) -> Result<SendInputSnapshot, String> {
+    if state.platform.connection_snapshot().remote_model == sayall_windows::RemoteModel::Chromecast
+    {
+        sayall_windows::gatt_note(
+            "mapping_settings action=test phase=completed terminal_result=failed error_domain=compatibility error_code=chromecast_observe_only reason=mapping_unavailable retryable=false".to_owned(),
+        );
+        return Err("当前遥控器的普通按键仅供查看。".to_owned());
+    }
     let action = state.platform.button_mappings().action_for(button, trigger);
     let platform = Arc::clone(&state.platform);
     match action {
@@ -3601,6 +3610,11 @@ async fn set_voice_hold_hotkey(
     hotkey: Option<KeyChord>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<KeyChord>, String> {
+    ensure_voice_hotkey_supported(
+        hotkey.as_ref(),
+        state.platform.connection_snapshot().remote_model,
+        "save",
+    )?;
     let started = std::time::Instant::now();
     let enabled = hotkey.is_some();
     let key_count = hotkey.as_ref().map(|chord| chord.keys.len()).unwrap_or(0);
@@ -3665,6 +3679,11 @@ async fn set_voice_input_tool(
     tool: Option<VoiceInputTool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<VoiceInputTool>, String> {
+    ensure_voice_input_tool_supported(
+        tool,
+        state.platform.connection_snapshot().remote_model,
+        "save",
+    )?;
     let started = std::time::Instant::now();
     let settings = state.settings.clone();
     let platform = state.platform.clone();
@@ -3772,6 +3791,51 @@ fn load_voice_input_tool(settings: &SettingsStore) -> Option<VoiceInputTool> {
         .and_then(|settings| settings.voice_input_tool)
 }
 
+fn voice_input_tool_supported(
+    tool: Option<VoiceInputTool>,
+    model: sayall_windows::RemoteModel,
+) -> bool {
+    model != sayall_windows::RemoteModel::Chromecast
+        || matches!(tool, None | Some(VoiceInputTool::Wechat))
+}
+
+fn voice_hotkey_supported(hotkey: Option<&KeyChord>, model: sayall_windows::RemoteModel) -> bool {
+    model != sayall_windows::RemoteModel::Chromecast
+        || hotkey.is_some_and(|chord| {
+            chord.keys.len() == 2
+                && chord.keys.contains(&KeyCode::LeftControl)
+                && chord.keys.contains(&KeyCode::LeftWindows)
+        })
+}
+
+fn ensure_voice_hotkey_supported(
+    hotkey: Option<&KeyChord>,
+    model: sayall_windows::RemoteModel,
+    action: &'static str,
+) -> Result<(), String> {
+    if voice_hotkey_supported(hotkey, model) {
+        return Ok(());
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_hold action={action} phase=completed terminal_result=failed error_domain=compatibility error_code=chromecast_wetype_hotkey_required reason=voice_hotkey_unavailable retryable=false"
+    ));
+    Err("当前遥控器请使用微信输入法和默认语音键。".to_owned())
+}
+
+fn ensure_voice_input_tool_supported(
+    tool: Option<VoiceInputTool>,
+    model: sayall_windows::RemoteModel,
+    action: &'static str,
+) -> Result<(), String> {
+    if voice_input_tool_supported(tool, model) {
+        return Ok(());
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_input_tool action={action} phase=completed terminal_result=failed error_domain=compatibility error_code=chromecast_wetype_required reason=input_tool_unavailable retryable=false"
+    ));
+    Err("当前遥控器请使用微信输入法和默认语音键。".to_owned())
+}
+
 /// 输入法状态日志（`ime_status`，AGENTS.md「功能点自带日志」口径）：格式与字段
 /// 由 `sayall_windows::ime_status_log_line` 单一来源（含单测），这里只负责落盘。
 fn log_ime_status(
@@ -3795,12 +3859,14 @@ fn log_ime_status(
 /// 任何失败都降级成 `ImeStatus::unavailable()`，命令不报错（界面 fail-open）。
 async fn ime_status_command(
     settings: SettingsStore,
+    model: sayall_windows::RemoteModel,
     action: &'static str,
     query: fn(Option<VoiceInputTool>) -> ImeStatus,
 ) -> ImeStatus {
     let started = std::time::Instant::now();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let tool = load_voice_input_tool(&settings);
+        let tool = load_voice_input_tool(&settings)
+            .filter(|tool| voice_input_tool_supported(Some(*tool), model));
         (tool, query(tool))
     })
     .await;
@@ -3828,6 +3894,7 @@ async fn ime_status_command(
 async fn get_ime_status(state: tauri::State<'_, AppState>) -> Result<ImeStatus, String> {
     Ok(ime_status_command(
         state.settings.clone(),
+        state.platform.connection_snapshot().remote_model,
         "queried",
         sayall_windows::ime_status_for,
     )
@@ -3905,6 +3972,9 @@ async fn stage_onboarding_voice_binding(
     let settings = state.settings.clone();
     let platform = state.platform.clone();
     match tauri::async_runtime::spawn_blocking(move || {
+        let model = platform.connection_snapshot().remote_model;
+        ensure_voice_input_tool_supported(Some(tool), model, "stage_binding")?;
+        ensure_voice_hotkey_supported(hotkey.as_ref(), model, "stage_binding")?;
         let staged = settings.stage_onboarding_voice_binding(tool, hotkey.clone())?;
         platform.set_voice_input_tool(Some(tool));
         platform.set_voice_hold_hotkey(hotkey);
@@ -5226,18 +5296,25 @@ fn spawn_second_instance_listener(app: tauri::AppHandle) {
     }
 }
 
+const CHROMECAST_PREVIEW_IDENTIFIER: &str = "app.getsayall.remote-mic.windows.chromecast-test";
+
 pub fn run() {
+    let context = tauri::generate_context!();
+    let chromecast_preview = context.config().identifier == CHROMECAST_PREVIEW_IDENTIFIER;
     let log_path = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("SayAll")
+        .join(if chromecast_preview {
+            "SayAllChromecastPreview"
+        } else {
+            "SayAll"
+        })
         .join("Logs")
         .join("sayall-diagnostic.log");
     // 版本号唯一来源是 tauri.conf.json 的 `version`（安装包名、exe 版本资源、关于页
     // 显示都取自它）。这里提前构建 context 并读同一个 package_info，日志里的
     // app_version 才与用户安装的版本严格一致（此前用编译期 CARGO_PKG_VERSION，
     // Cargo crate 版本是占位值 0.0.0，会写出与实际安装版本无关的版本号）。
-    let context = tauri::generate_context!();
     let log_ready = sayall_windows::initialize_diagnostic_log(
         log_path,
         sayall_windows::DiagnosticLogMetadata {
@@ -5307,6 +5384,24 @@ pub fn run() {
                 // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=
                 // ERROR_ALREADY_EXISTS（不是失败）；其余残留错误值无意义。
                 if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                    if chromecast_preview {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            MessageBoxW, MB_ICONINFORMATION, MB_OK,
+                        };
+                        sayall_windows::gatt_note(
+                            "app_lifecycle event=single_instance phase=completed terminal_result=failed error_domain=process error_code=already_running reason=existing_instance retryable=true show_request_result=skipped_preview".to_owned(),
+                        );
+                        unsafe {
+                            let _ = CloseHandle(handle);
+                            let _ = MessageBoxW(
+                                None,
+                                w!("请从托盘正常退出正在运行的 SayAll，然后重新打开预览版。\nQuit the running SayAll from the tray, then open this preview again."),
+                                w!("SayAll Chromecast Preview"),
+                                MB_OK | MB_ICONINFORMATION,
+                            );
+                        }
+                        return;
+                    }
                     // 请求已运行实例把主窗口显示出来（命名事件由对端的
                     // `spawn_second_instance_listener` 等待；对端是未带此功能的
                     // 旧版本时请求失败，如实记录但按原样退出）。
@@ -6441,6 +6536,42 @@ mod tests {
     /// "有人改了一侧、忘了另一侧"（2026-09-16 的僵死 Bug 正是文档写了规则、
     /// 安装器从未实现）。
     const INSTALLER_HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
+
+    #[test]
+    fn chromecast_ipc_only_accepts_the_wetype_tool_and_default_hotkey() {
+        use sayall_windows::RemoteModel::{Chromecast, Rc003};
+
+        let enter = KeyChord {
+            keys: vec![KeyCode::Enter],
+        };
+        let wetype = KeyChord {
+            keys: vec![KeyCode::LeftWindows, KeyCode::LeftControl],
+        };
+        assert!(voice_input_tool_supported(
+            Some(VoiceInputTool::Wechat),
+            Chromecast
+        ));
+        assert!(!voice_input_tool_supported(
+            Some(VoiceInputTool::Other),
+            Chromecast
+        ));
+        assert!(!voice_input_tool_supported(
+            Some(VoiceInputTool::Doubao),
+            Chromecast
+        ));
+        assert!(!voice_input_tool_supported(
+            Some(VoiceInputTool::Vokie),
+            Chromecast
+        ));
+        assert!(voice_input_tool_supported(
+            Some(VoiceInputTool::Doubao),
+            Rc003
+        ));
+        assert!(voice_hotkey_supported(Some(&wetype), Chromecast));
+        assert!(!voice_hotkey_supported(Some(&enter), Chromecast));
+        assert!(!voice_hotkey_supported(None, Chromecast));
+        assert!(voice_hotkey_supported(Some(&enter), Rc003));
+    }
 
     fn snapshot_with_phase(phase: BridgePhase) -> BridgeSnapshot {
         BridgeSnapshot {

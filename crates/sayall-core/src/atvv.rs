@@ -98,6 +98,14 @@ pub struct AtvvCapabilities {
 
 impl AtvvCapabilities {
     pub fn parse(bytes: &[u8]) -> Result<Self, AtvvError> {
+        Self::parse_for_remote(bytes, false)
+    }
+
+    pub(crate) fn parse_chromecast(bytes: &[u8]) -> Result<Self, AtvvError> {
+        Self::parse_for_remote(bytes, true)
+    }
+
+    fn parse_for_remote(bytes: &[u8], chromecast: bool) -> Result<Self, AtvvError> {
         if bytes.len() < 7 {
             return Err(AtvvError::PacketTooShort);
         }
@@ -106,6 +114,9 @@ impl AtvvCapabilities {
         }
 
         let version = u16::from_be_bytes([bytes[1], bytes[2]]);
+        if chromecast && !matches!(version, 0x0004 | 0x0100) {
+            return Err(AtvvError::UnsupportedVersion(version));
+        }
         let (mut codecs, mut interaction) = if version >= 0x0100 {
             (bytes[3], bytes[4])
         } else {
@@ -115,9 +126,17 @@ impl AtvvCapabilities {
             (bytes[4], 0)
         };
 
-        if version >= 0x0100 && codecs == 0 && bytes.len() >= 9 && bytes[4] & 0x03 != 0 {
+        if !chromecast
+            && version >= 0x0100
+            && codecs == 0
+            && bytes.len() >= 9
+            && bytes[4] & 0x03 != 0
+        {
             codecs = bytes[4];
             interaction = 0x03;
+        }
+        if chromecast && codecs & 0x03 == 0 {
+            return Err(AtvvError::UnsupportedCodecMask(codecs));
         }
 
         let selected_codec = if codecs & 0x02 != 0 { 0x02 } else { 0x01 };
@@ -127,6 +146,9 @@ impl AtvvCapabilities {
             8_000
         };
         let advertised_frame_size = u16::from_be_bytes([bytes[5], bytes[6]]) as usize;
+        if chromecast && version == 0x0004 && advertised_frame_size < 6 {
+            return Err(AtvvError::InvalidChromecastFrameSize(advertised_frame_size));
+        }
 
         Ok(Self {
             version,
@@ -145,6 +167,10 @@ impl AtvvCapabilities {
     pub fn supports_sayall_audio(&self) -> bool {
         self.sample_rate == 16_000
     }
+
+    pub(crate) fn supports_chromecast_codec(&self, codec: u8) -> bool {
+        matches!(codec, 0x01 | 0x02) && self.codecs & codec != 0
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -153,6 +179,12 @@ pub enum AtvvError {
     PacketTooShort,
     #[error("unexpected ATVV message 0x{0:02X}")]
     UnexpectedMessage(u8),
+    #[error("unsupported Chromecast ATVV version 0x{0:04X}")]
+    UnsupportedVersion(u16),
+    #[error("no supported Chromecast audio codec in mask 0x{0:02X}")]
+    UnsupportedCodecMask(u8),
+    #[error("Chromecast ATVV v0.4 frame size {0} cannot hold the audio header")]
+    InvalidChromecastFrameSize(usize),
 }
 
 #[cfg(test)]

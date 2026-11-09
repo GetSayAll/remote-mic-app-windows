@@ -220,11 +220,31 @@ pub fn device_path_matches_xiaomi_remote(path: &str) -> bool {
 
 pub fn device_path_matches_chromecast_remote(path: &str) -> bool {
     let normalized = normalize_device_path(path);
-    (normalized.contains("vid_18d1") && normalized.contains("pid_9450"))
-        || ((normalized.contains("dev_vid&0018d1")
-            || normalized.contains("dev_vid&0118d1")
-            || normalized.contains("dev_vid&0218d1"))
-            && normalized.contains("pid&9450"))
+    (contains_device_path_field(&normalized, "vid_18d1")
+        && contains_device_path_field(&normalized, "pid_9450"))
+        || (["dev_vid&0018d1", "dev_vid&0118d1", "dev_vid&0218d1"]
+            .iter()
+            .any(|field| contains_device_path_field(&normalized, field))
+            && contains_device_path_field(&normalized, "pid&9450"))
+}
+
+fn contains_device_path_field(path: &str, field: &str) -> bool {
+    let boundary = |byte: u8| matches!(byte, b'_' | b'&' | b'#' | b'\\');
+    path.match_indices(field).any(|(start, _)| {
+        let bytes = path.as_bytes();
+        (start == 0 || boundary(bytes[start - 1]))
+            && bytes
+                .get(start + field.len())
+                .map_or(true, |byte| boundary(*byte))
+    })
+}
+
+pub(crate) fn chromecast_path_matches_target(path: &str, address: u64) -> bool {
+    let token = crate::remote_target::address_token(address);
+    device_path_matches_chromecast_remote(path)
+        && path
+            .split(|character: char| !character.is_ascii_hexdigit())
+            .any(|field| field.eq_ignore_ascii_case(&token))
 }
 
 pub fn device_path_matches_supported_remote(path: &str) -> bool {
@@ -301,6 +321,33 @@ pub fn report_path_accepted(bound_path: &str, target: Option<u64>, report_path: 
     match target {
         Some(address) => crate::remote_target::matches_address(report_path, address),
         None => normalize_device_path(report_path) == normalize_device_path(bound_path),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReportRoute {
+    Xiaomi,
+    ObserveChromecast(u64),
+}
+
+pub(crate) fn report_route(
+    bound_path: &str,
+    target: crate::remote_target::Target,
+    path: &str,
+) -> Option<ReportRoute> {
+    match target {
+        crate::remote_target::Target::XiaomiOrUnselected(address)
+            if device_path_matches_xiaomi_remote(path)
+                && report_path_accepted(bound_path, address, path) =>
+        {
+            Some(ReportRoute::Xiaomi)
+        }
+        crate::remote_target::Target::Chromecast(Some(address))
+            if chromecast_path_matches_target(path, address) =>
+        {
+            Some(ReportRoute::ObserveChromecast(address))
+        }
+        _ => None,
     }
 }
 
@@ -622,6 +669,35 @@ mod tests {
         assert!(report_path_accepted(bound, None, &bound.to_uppercase()));
         assert!(!report_path_accepted(bound, None, sibling));
         assert!(!report_path_accepted(bound, None, other));
+    }
+
+    #[test]
+    fn chromecast_report_route_requires_confirmed_address_and_pinned_hid_ids() {
+        use crate::remote_target::Target;
+        let address = 0x1122_3344_5566;
+        let cast = r"\\?\hid#profile_dev_vid&0118D1_pid&9450_rev&0000_112233445566#slot";
+        let other_cast = r"\\?\hid#profile_dev_vid&0118d1_pid&9450_rev&0000_a112233445566#slot";
+        let other_pid = r"\\?\hid#profile_dev_vid&0118d1_pid&9450a_rev&0000_112233445566#slot";
+        let xiaomi = r"\\?\hid#profile_dev_vid&012717_pid&32b8_rev&0000_112233445566#slot";
+        assert_eq!(
+            report_route(xiaomi, Target::Chromecast(Some(address)), cast),
+            Some(ReportRoute::ObserveChromecast(address))
+        );
+        assert_eq!(report_route(cast, Target::Chromecast(None), cast), None);
+        assert_eq!(
+            report_route(cast, Target::XiaomiOrUnselected(Some(address)), cast),
+            None
+        );
+        for unrelated in [other_cast, other_pid, xiaomi] {
+            assert_eq!(
+                report_route(unrelated, Target::Chromecast(Some(address)), unrelated),
+                None
+            );
+        }
+        assert_eq!(
+            report_route(xiaomi, Target::XiaomiOrUnselected(Some(address)), xiaomi),
+            Some(ReportRoute::Xiaomi)
+        );
     }
 
     fn report(usages: &[u16]) -> Vec<u8> {

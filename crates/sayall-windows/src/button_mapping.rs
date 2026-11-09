@@ -99,7 +99,11 @@ pub enum EngineMessage {
     Keyboard(RawKeyboardEvent),
     /// 监听器观察到的一份 HID 报文 usage 集合（绝对状态）。
     HidUsages(BTreeSet<u16>),
-    HidButtons(BTreeSet<RemoteButton>),
+    ObserveChromecastButtons {
+        address: u64,
+        target_generation: u64,
+        buttons: BTreeSet<RemoteButton>,
+    },
     /// 门控吞下的键盘边沿（已归因到遥控器）。
     GateEdge(ButtonEdge),
     /// Raw Input 监听器已停止：释放全部按住状态。
@@ -912,6 +916,8 @@ fn engine_worker(
     macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
 ) {
     let mut merger = ButtonStateMerger::default();
+    let mut chromecast_observer = ButtonStateMerger::default();
+    let mut chromecast_key_held = false;
     let mut recognizer = GestureRecognizer::new();
     let initial_overlay = read_lock(&profile_overlay).clone();
     recognizer.configure(&merged_mappings(
@@ -931,47 +937,24 @@ fn engine_worker(
     let mut phrase_claimed: BTreeSet<RemoteButton> = BTreeSet::new();
     // OK 键上下文点击：最近一次由遥控器注入成功的鼠标移动时刻（5 秒窗口）。
     let mut last_remote_move_at: Option<Instant> = None;
+    let mut last_target_generation = crate::remote_target::current().1;
 
     loop {
-        let timeout = recognizer
+        let gesture_timeout = recognizer
             .next_deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        // While a Cast key is held, release its observation promptly if the BLE
+        // target is revoked, even if Windows sends no HID removal or key-up event.
+        let timeout = if chromecast_key_held {
+            let observation_poll = Duration::from_millis(100);
+            Some(gesture_timeout.map_or(observation_poll, |timeout| timeout.min(observation_poll)))
+        } else {
+            gesture_timeout
+        };
         let message = match timeout {
             Some(timeout) => match receiver.recv_timeout(timeout) {
-                Ok(message) => message,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let now = Instant::now();
-                    // 只有连续触发计时器产生的拍才计入 map_repeat 聚合；
-                    // 双击窗补发的单击与首次长按是一次性手势（2026-10-05 评审发现 1）。
-                    let (fired, ticks) = recognizer.advance_with_ticks(now);
-                    note_advance_ticks(&mut repeat_runs, ticks);
-                    for (button, trigger) in fired {
-                        if fire_gesture(
-                            button,
-                            trigger,
-                            &mappings,
-                            &profile_overlay,
-                            &state,
-                            &gesture_callbacks,
-                            &injector,
-                            &mut native_pending,
-                            &mut last_remote_move_at,
-                            &macro_runtime,
-                        ) {
-                            reset_after_terminal_action(
-                                "lock_workstation",
-                                &mut merger,
-                                &mut recognizer,
-                                &mut repeat_runs,
-                                &snapshot,
-                                &edge_callbacks,
-                                &mut native_pending,
-                            );
-                            break;
-                        }
-                    }
-                    continue;
-                }
+                Ok(message) => Some(message),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     // 引擎线程收尾：把仍在进行中的连续触发聚合日志补齐
                     // （2026-10-05 评审发现 2）。
@@ -980,7 +963,7 @@ fn engine_worker(
                 }
             },
             None => match receiver.recv() {
-                Ok(message) => message,
+                Ok(message) => Some(message),
                 Err(_) => {
                     finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                     break;
@@ -988,7 +971,70 @@ fn engine_worker(
             },
         };
 
+        let (target, target_generation) = crate::remote_target::current();
+        if target_generation != last_target_generation {
+            // Cancel pending Xiaomi gestures and release Cast observations
+            // before either a gesture timer or the next HID report can run.
+            let releases = chromecast_observer.release_all();
+            publish_button_edges(&releases, &chromecast_observer, &snapshot, &edge_callbacks);
+            chromecast_key_held = false;
+            reset_after_terminal_action(
+                "remote_target_changed",
+                &mut merger,
+                &mut recognizer,
+                &mut repeat_runs,
+                &snapshot,
+                &edge_callbacks,
+                &mut native_pending,
+            );
+            injector.common_phrase_host().reset("remote_target_changed");
+            phrase_claimed.clear();
+            last_remote_move_at = None;
+            last_target_generation = target_generation;
+        }
+
+        let Some(message) = message else {
+            let now = Instant::now();
+            // 只有连续触发计时器产生的拍才计入 map_repeat 聚合；
+            // 双击窗补发的单击与首次长按是一次性手势（2026-10-05 评审发现 1）。
+            let (fired, ticks) = recognizer.advance_with_ticks(now);
+            note_advance_ticks(&mut repeat_runs, ticks);
+            for (button, trigger) in fired {
+                if fire_gesture(
+                    button,
+                    trigger,
+                    &mappings,
+                    &profile_overlay,
+                    &state,
+                    &gesture_callbacks,
+                    &injector,
+                    &mut native_pending,
+                    &mut last_remote_move_at,
+                    &macro_runtime,
+                ) {
+                    reset_after_terminal_action(
+                        "lock_workstation",
+                        &mut merger,
+                        &mut recognizer,
+                        &mut repeat_runs,
+                        &snapshot,
+                        &edge_callbacks,
+                        &mut native_pending,
+                    );
+                    break;
+                }
+            }
+            continue;
+        };
+
         match message {
+            EngineMessage::Keyboard(_)
+            | EngineMessage::HidUsages(_)
+            | EngineMessage::GateEdge(_)
+                if matches!(target, crate::remote_target::Target::Chromecast(_)) =>
+            {
+                // Ignore queued Xiaomi inputs after switching to the Cast target.
+            }
             EngineMessage::Keyboard(event) => {
                 let now = Instant::now();
                 let edges = merger.update_keyboard(event);
@@ -1018,23 +1064,9 @@ fn engine_worker(
                     &macro_runtime,
                 );
             }
-            message @ (EngineMessage::HidUsages(_) | EngineMessage::HidButtons(_)) => {
+            EngineMessage::HidUsages(usages) => {
                 let now = Instant::now();
-                let edges = match message {
-                    EngineMessage::HidUsages(usages) => merger.update_hid_usages(usages),
-                    EngineMessage::HidButtons(buttons) => {
-                        let edges = merger.update_hid_buttons(buttons);
-                        // This public Raw Input route observes the native report without
-                        // suppressing it. Disabled bindings must not replay native actions.
-                        for edge in &edges {
-                            if edge.is_pressed {
-                                native_pending.insert(edge.button);
-                            }
-                        }
-                        edges
-                    }
-                    _ => unreachable!(),
-                };
+                let edges = merger.update_hid_usages(usages);
                 handle_edges(
                     edges,
                     now,
@@ -1054,6 +1086,24 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                 );
+            }
+            EngineMessage::ObserveChromecastButtons {
+                address,
+                target_generation,
+                buttons,
+            } => {
+                if crate::remote_target::current()
+                    != (
+                        crate::remote_target::Target::Chromecast(Some(address)),
+                        target_generation,
+                    )
+                {
+                    continue;
+                }
+                chromecast_key_held = !buttons.is_empty();
+                let edges = chromecast_observer.update_hid_buttons(buttons);
+                // The observation path cannot fire gestures or replay native keys.
+                publish_button_edges(&edges, &chromecast_observer, &snapshot, &edge_callbacks);
             }
             EngineMessage::GateEdge(edge) => {
                 let now = Instant::now();
@@ -1083,6 +1133,14 @@ fn engine_worker(
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
+                let cast_releases = chromecast_observer.release_all();
+                publish_button_edges(
+                    &cast_releases,
+                    &chromecast_observer,
+                    &snapshot,
+                    &edge_callbacks,
+                );
+                chromecast_key_held = false;
                 let reason = match message {
                     EngineMessage::ListenerStopped => "listener_stopped",
                     _ => "device_removed",
@@ -1192,22 +1250,7 @@ fn handle_edges(
     for edge in edges.iter().filter(|edge| edge.is_pressed) {
         usage.record_button_press(edge.button);
     }
-    {
-        let mut snapshot = lock_snapshot(snapshot);
-        snapshot.semantic_edge_count = snapshot
-            .semantic_edge_count
-            .saturating_add(edges.len() as u64);
-        snapshot.active_buttons = merger.active_button_set().into_iter().collect();
-        if let Some(last) = edges.last() {
-            snapshot.last_button = Some(last.button);
-            snapshot.last_is_pressed = Some(last.is_pressed);
-        }
-    }
-    for callback in read_callbacks(edge_callbacks).iter() {
-        for edge in &edges {
-            callback(*edge);
-        }
-    }
+    publish_button_edges(&edges, merger, snapshot, edge_callbacks);
 
     for edge in edges {
         #[cfg(windows)]
@@ -1310,6 +1353,31 @@ fn handle_edges(
     }
 }
 
+fn publish_button_edges(
+    edges: &[ButtonEdge],
+    merger: &ButtonStateMerger,
+    snapshot: &Arc<Mutex<RawInputSnapshot>>,
+    edge_callbacks: &Arc<RwLock<Vec<ButtonEdgeCallback>>>,
+) {
+    let Some(last) = edges.last() else {
+        return;
+    };
+    {
+        let mut snapshot = lock_snapshot(snapshot);
+        snapshot.semantic_edge_count = snapshot
+            .semantic_edge_count
+            .saturating_add(edges.len() as u64);
+        snapshot.active_buttons = merger.active_button_set().into_iter().collect();
+        snapshot.last_button = Some(last.button);
+        snapshot.last_is_pressed = Some(last.is_pressed);
+    }
+    for callback in read_callbacks(edge_callbacks).iter() {
+        for edge in edges {
+            callback(*edge);
+        }
+    }
+}
+
 /// 会切换 Windows 会话的动作可能让遥控器释放沿延迟到解锁之后。动作已被系统
 /// 接受时立即结束本轮按住状态；迟到的 UP 随后只会成为幂等输入，下一次真实 DOWN
 /// 可立刻开始新一轮手势。
@@ -1364,6 +1432,12 @@ fn fire_gesture(
     last_remote_move_at: &mut Option<Instant>,
     macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
 ) -> bool {
+    if matches!(
+        crate::remote_target::current().0,
+        crate::remote_target::Target::Chromecast(_)
+    ) {
+        return false;
+    }
     let fired = FiredGesture { button, trigger };
     let suspended = {
         let mut state = lock_state(state);

@@ -1,0 +1,12 @@
+{
+  "identifier": "app.getsayall.remote-mic.windows.chromecast-test",
+  "bundle": {
+    "resources": [],
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

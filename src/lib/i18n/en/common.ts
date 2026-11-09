@@ -5,7 +5,7 @@ export default {
   "谷歌遥控器：同时按住返回和主页键，指示灯闪烁后在 Windows 蓝牙列表中选择 Chromecast Remote。以下 TV / 菜单键步骤仅适用于小米遥控器。": "Google remote: hold Back and Home until the light flashes, then select Chromecast Remote in Windows Bluetooth settings. The TV / Menu steps below apply only to Xiaomi remotes.",
   "Google Chromecast 语音遥控器": "Google Chromecast Voice Remote",
   "信源": "Input",
-  "谷歌遥控器为实验支持；基础按键可能同时触发原生动作，全按键支持暂不可用。": "Google remote support is experimental. Basic mappings may also trigger native actions; full-key support is not available yet.",
+  "谷歌遥控器为实验支持。普通按键仅供查看，可能仍会触发 Windows 的原有操作。": "Google remote support is experimental. You can observe button presses. Windows may still perform its usual button actions.",
   // 产品名
   "无线麦 SayAll": "SayAll",
   "设置页面": "Page navigation",

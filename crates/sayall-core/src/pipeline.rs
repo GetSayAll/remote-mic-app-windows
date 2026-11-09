@@ -85,7 +85,12 @@ impl AtvvVoicePipeline {
     }
 
     pub fn handle_control(&mut self, bytes: &[u8]) -> Result<PipelineOutput, PipelineError> {
-        match AtvvControlEvent::parse(bytes)? {
+        let event = if self.streaming_packets && bytes.first() == Some(&0x0B) {
+            AtvvControlEvent::Capabilities(AtvvCapabilities::parse_chromecast(bytes)?)
+        } else {
+            AtvvControlEvent::parse(bytes)?
+        };
+        match event {
             AtvvControlEvent::Capabilities(capabilities) => {
                 if !capabilities.supports_sayall_audio()
                     && !(self.streaming_packets && capabilities.selected_codec == 1)
@@ -112,6 +117,22 @@ impl AtvvVoicePipeline {
             } => {
                 let streaming_packets = self.streaming_packets;
                 let capabilities = self.require_capabilities_mut()?;
+                let (interaction, codec) = if !streaming_packets {
+                    (interaction, codec)
+                } else if capabilities.version == 0x0004 {
+                    // v0.4 has no codec or interaction fields in START.
+                    (None, None)
+                } else {
+                    if bytes.len() < 4 {
+                        return Err(AtvvError::PacketTooShort.into());
+                    }
+                    let codec = bytes[2];
+                    if !capabilities.supports_chromecast_codec(codec) {
+                        return Err(PipelineError::UnsupportedChromecastCodec(codec));
+                    }
+                    // START byte 1 is the reason, not the negotiated interaction.
+                    (None, Some(codec))
+                };
                 if let Some(interaction) = interaction {
                     capabilities.interaction = interaction;
                 }
@@ -158,7 +179,16 @@ impl AtvvVoicePipeline {
                 predictor,
                 step_index,
             } => {
-                self.require_capabilities()?;
+                let capabilities = self.require_capabilities()?;
+                if self.streaming_packets && capabilities.version == 0x0100 {
+                    let codec = bytes[1];
+                    if !capabilities.supports_chromecast_codec(codec) {
+                        return Err(PipelineError::UnsupportedChromecastCodec(codec));
+                    }
+                    if step_index > 88 {
+                        return Err(PipelineError::InvalidAudioPacket);
+                    }
+                }
                 if self.session.state() != VoiceSessionState::Streaming
                     && !(self.streaming_packets && self.session.state() == VoiceSessionState::Idle)
                 {
@@ -281,6 +311,8 @@ pub enum PipelineError {
     CapabilitiesNotConfirmed,
     #[error("ATVV sample rate {0} Hz is unsupported")]
     UnsupportedSampleRate(u32),
+    #[error("Chromecast selected an unsupported ATVV codec 0x{0:02X}")]
+    UnsupportedChromecastCodec(u8),
     #[error("audio arrived outside an active ATVV stream")]
     AudioOutsideStream,
     #[error("decoder synchronization arrived outside an active stream")]
@@ -323,6 +355,42 @@ mod tests {
             panic!("expected partial notification");
         };
         assert_eq!(samples.len(), 2);
+    }
+
+    #[test]
+    fn chromecast_rejects_unknown_protocol_and_unadvertised_codecs() {
+        let mut pipeline = AtvvVoicePipeline::default();
+        pipeline.set_streaming_packets(true);
+        assert_eq!(
+            pipeline.handle_control(&[0x0B, 0x01, 0x01, 0x02, 0x03, 0, 4]),
+            Err(AtvvError::UnsupportedVersion(0x0101).into())
+        );
+        // A nonzero interaction field is not a codec mask.
+        assert_eq!(
+            pipeline.handle_control(&[0x0B, 0x01, 0x00, 0, 0x03, 0, 4, 0, 0]),
+            Err(AtvvError::UnsupportedCodecMask(0).into())
+        );
+        assert_eq!(
+            pipeline.handle_control(&[0x0B, 0x00, 0x04, 0, 0x80, 0, 8, 0, 0]),
+            Err(AtvvError::UnsupportedCodecMask(0x80).into())
+        );
+        assert_eq!(
+            pipeline.handle_control(&[0x0B, 0x00, 0x04, 0, 0x01, 0, 5, 0, 0]),
+            Err(AtvvError::InvalidChromecastFrameSize(5).into())
+        );
+        pipeline.handle_control(&CAPS).unwrap();
+        assert_eq!(
+            pipeline.handle_control(&[0x04, 0, 1, 7]),
+            Err(PipelineError::UnsupportedChromecastCodec(1))
+        );
+        assert_eq!(
+            pipeline.handle_control(&[0x0A, 1, 0, 0, 0, 0, 0]),
+            Err(PipelineError::UnsupportedChromecastCodec(1))
+        );
+        assert_eq!(pipeline.state(), VoiceSessionState::Idle);
+        assert_eq!(pipeline.capabilities().unwrap().selected_codec, 2);
+        pipeline.handle_control(&[0x04, 1, 2, 7]).unwrap();
+        assert_eq!(pipeline.capabilities().unwrap().interaction, 3);
     }
 
     #[test]

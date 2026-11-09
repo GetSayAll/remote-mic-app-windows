@@ -7,9 +7,9 @@
 //! 版本坏了（2026-10-13 报障原话）。
 //!
 //! 但应用**自己明确知道**正在用哪一支（BLE 会话持有的 `BluetoothLEDevice`），
-//! 所以歧义是可消解的：把它的蓝牙地址发布给两个消费者——
+//! 所以歧义是可消解的：把已确认的设备地址发布给相应的消费者——
 //! 1. 进程内：Raw Input 绑定与审计按地址过滤候选（[`matches_address`]）；
-//! 2. 进程外：提权助手读 [`TARGET_FILE_NAME`] 指向的文件，在多个候选宿主之间
+//! 2. 进程外：仅小米目标写入 [`TARGET_FILE_NAME`]，提权助手在多个候选宿主之间
 //!    选出属于这支遥控器的那一个（助手侧同源实现，格式见 [`file_body`]）。
 //!
 //! 隐私：地址**不进日志**（日志只记"有没有值"与结果），文件落在
@@ -17,31 +17,81 @@
 //! 不进用户可见文案、不进诊断摘要。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// 目标文件：与桥接描述文件同目录（`%LOCALAPPDATA%\SayAll`）。
 pub const TARGET_FILE_NAME: &str = "rc003-target.ini";
 
-/// 0 = 未知（没有过滤条件，保持旧行为：唯一候选才绑定、多候选仍拒绝）。
-static TARGET_ADDRESS: AtomicU64 = AtomicU64::new(0);
+const ADDRESS_MASK: u64 = 0xFFFF_FFFF_FFFF;
+static TARGET: Mutex<(Target, u64)> = Mutex::new((Target::XiaomiOrUnselected(None), 0));
+// The outer option stays empty until this process has checked the on-disk file.
+static PUBLISHED_HELPER_ADDRESS: Mutex<Option<Option<u64>>> = Mutex::new(None);
 
-/// 发布/清除「正在用的遥控器」。`None` 或 0 = 未知。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    XiaomiOrUnselected(Option<u64>),
+    Chromecast(Option<u64>),
+}
+
+/// 发布已辨认的小米遥控器，或清除选择。
 pub fn set(address: Option<u64>) {
-    let next = address.filter(|value| *value != 0).unwrap_or(0);
-    let previous = TARGET_ADDRESS.swap(next, Ordering::Relaxed);
-    if previous == next {
+    let address = valid_address(address);
+    publish(Target::XiaomiOrUnselected(address), address);
+}
+
+/// The selected device has an address, but its model is still unknown.
+/// Raw Input can use the address to narrow Xiaomi candidates immediately.
+pub(crate) fn set_candidate(address: Option<u64>) {
+    publish(Target::XiaomiOrUnselected(valid_address(address)), None);
+}
+
+/// Observe Chromecast only after its ATVV capabilities have been confirmed.
+/// The Xiaomi helper must never receive the Chromecast address.
+pub(crate) fn set_chromecast(address: Option<u64>) {
+    publish(Target::Chromecast(valid_address(address)), None);
+}
+
+fn valid_address(address: Option<u64>) -> Option<u64> {
+    address.filter(|value| (1..=ADDRESS_MASK).contains(value))
+}
+
+fn publish(next: Target, helper_address: Option<u64>) {
+    let mut published = PUBLISHED_HELPER_ADDRESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let changed = {
+        let mut target = TARGET
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if target.0 == next {
+            false
+        } else {
+            *target = (next, target.1.wrapping_add(1));
+            true
+        }
+    };
+    if !changed && *published == Some(helper_address) {
         return;
     }
     // 只记"有没有值"——地址本身是设备身份，不进日志（LOGGING.md 隐私红线）。
     note(format!(
         "remote_target action={} source=ble_session",
-        if next == 0 { "cleared" } else { "published" }
+        if matches!(
+            next,
+            Target::XiaomiOrUnselected(None) | Target::Chromecast(None)
+        ) {
+            "cleared"
+        } else {
+            "published"
+        }
     ));
-    match write_file(next) {
-        Ok(()) => {}
-        Err(error) => note(format!(
-            "remote_target action=write phase=completed terminal_result=failed reason={error}"
-        )),
+    if *published != Some(helper_address) {
+        match write_file(helper_address.unwrap_or(0)) {
+            Ok(()) => *published = Some(helper_address),
+            Err(error) => note(format!(
+                "remote_target action=write phase=completed terminal_result=failed reason={error}"
+            )),
+        }
     }
 }
 
@@ -53,11 +103,17 @@ fn note(message: String) {
     let _ = message;
 }
 
-/// 当前目标（`None` = 未知）。
+pub(crate) fn current() -> (Target, u64) {
+    *TARGET
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Current in-process address, if any. Hardware-specific consumers should use
+/// the typed target so the Chromecast and Xiaomi input paths stay separate.
 pub fn get() -> Option<u64> {
-    match TARGET_ADDRESS.load(Ordering::Relaxed) {
-        0 => None,
-        value => Some(value),
+    match current().0 {
+        Target::XiaomiOrUnselected(address) | Target::Chromecast(address) => address,
     }
 }
 
