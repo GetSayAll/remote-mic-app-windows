@@ -12,6 +12,7 @@ import lib from "./en/lib";
 import membership from "./en/membership";
 import commonPhrases from "./en/common-phrases";
 import buttonProfiles from "./en/button-profiles";
+import apps from "./en/apps";
 
 /**
  * 英文文案总表。每个页面/模块一个 fragment，避免多人/多 agent 同时改同一文件。
@@ -32,4 +33,5 @@ export const en: Record<string, string> = {
   ...membership,
   ...commonPhrases,
   ...buttonProfiles,
+  ...apps,
 };

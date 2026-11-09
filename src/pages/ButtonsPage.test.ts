@@ -270,7 +270,10 @@ const runtime: RuntimeSnapshot = {
   },
 };
 
-async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promise<VueWrapper> {
+async function mountPage(
+  model: "rc001" | "rc003" | "unknown" = "rc003",
+  initialEditor: { button: "ok"; trigger: "single" | "double" | "long" } | null = null,
+): Promise<VueWrapper> {
   const snapshot =
     model === "rc003"
       ? runtime
@@ -281,7 +284,7 @@ async function mountPage(model: "rc001" | "rc003" | "unknown" = "rc003"): Promis
             connection: { ...runtime.platform.connection, remoteModel: model },
           },
         };
-  const wrapper = mount(ButtonsPage, { props: { runtime: snapshot } });
+  const wrapper = mount(ButtonsPage, { props: { runtime: snapshot, initialEditor } });
   await vi.waitFor(() => {
     if (!edgeHandler || !gestureHandler) throw new Error("事件订阅未完成");
   });
@@ -1446,84 +1449,67 @@ describe("buttons mapping page", () => {
     });
   });
 
-  it("预设与自定义应用都显示聚焦方式，预设默认选中对应策略（2026-10-23）", async () => {
+  it("打开应用后只显示只读聚焦摘要，并把可写配置交给 APP 适配页（2026-11-09）", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
     const editor = wrapper.find(".mapping-editor");
-    const selectedLabel = () =>
-      editor
-        .findAll(".focus-strategy-option")
-        .find((option) => option.attributes("aria-pressed") === "true")
-        ?.text();
-    const clickPreset = async (label: string) => {
-      const chip = editor.findAll(".chip").find((item) => item.text() === label);
-      expect(chip, `预设「${label}」`).toBeTruthy();
-      await chip!.trigger("click");
-      await flushPromises();
-    };
 
-    // 记事本等普通预设：默认自动选择输入框。
-    await clickPreset("打开记事本");
-    expect(editor.find(".focus-profile").exists()).toBe(true);
-    expect(selectedLabel()).toBe("自动选择输入框");
-
-    // Chrome / 网易云：默认选中各自的 APP 快捷键。
-    await clickPreset("打开 Chrome 浏览器");
-    expect(selectedLabel()).toBe("使用 APP 快捷键聚焦");
-    expect(editor.find(".focus-shortcut-value").text()).toContain("左 Ctrl + L");
-
-    await clickPreset("打开网易云音乐");
-    expect(selectedLabel()).toBe("使用 APP 快捷键聚焦");
-    expect(editor.find(".focus-shortcut-value").text()).toContain("左 Ctrl + F");
-
-    // 预设默认快捷键也能清除，并可用「恢复默认」找回产品默认值。
-    const clearShortcut = editor.findAll("button").find((item) => item.text() === "清除")!;
-    await clearShortcut.trigger("click");
+    // 预设应用：摘要显示实际会执行的默认策略。
+    await editor.findAll(".chip").find((item) => item.text() === "打开记事本")!.trigger("click");
     await flushPromises();
-    expect(editor.find(".focus-shortcut-value").text()).toContain("尚未录入");
-    const resetDefault = editor.findAll("button").find((item) => item.text() === "恢复默认")!;
-    expect(resetDefault).toBeTruthy();
-    await resetDefault.trigger("click");
-    await flushPromises();
-    expect(editor.find(".focus-shortcut-value").text()).toContain("左 Ctrl + F");
+    expect(editor.find(".focus-profile-summary").text()).toContain("自动选择输入框");
+    // 可写控件不得再出现在按键页。
+    expect(editor.find(".focus-strategy-option").exists()).toBe(false);
+    expect(editor.find(".focus-shortcut-value").exists()).toBe(false);
 
-    // 自定义应用同样显示面板，未配置时默认「只打开 APP」。
-    await addScannedApp(wrapper);
-    const customChip = editor
-      .findAll(".chip")
-      .find((chip) => chip.text() === "打开 Registered Example");
-    expect(customChip).toBeDefined();
-    await customChip!.trigger("click");
-    await flushPromises();
-
-    const panel = editor.find(".focus-profile");
-    expect(panel.exists()).toBe(true);
-    expect(panel.findAll(".focus-strategy-option")).toHaveLength(5);
-    expect(panel.find(".focus-point-chip").exists()).toBe(true);
-    expect(panel.find(".focus-test-button").exists()).toBe(false);
-    const labels = panel.findAll(".chip").map((chip) => chip.text());
-    for (const label of [
-      "只打开 APP",
-      "自动选择输入框",
-      "使用 APP 快捷键聚焦",
-      "聚焦已记录的输入框",
-      "记录点击位置",
-    ]) {
-      expect(labels, `策略选项：${labels.join(" / ")}`).toContain(label);
-    }
-    expect(selectedLabel()).toBe("只打开 APP");
-    await vi.waitFor(() => {
-      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-        actions: Record<string, { single: { type: string; target?: string } }>;
-      };
-      if (saved?.actions.ok?.single?.target !== "shell:AppsFolder\\Example!App") {
-        throw new Error("选中自定义应用后未写入映射");
-      }
-    });
+    // 「去配置」带目标跳到 APP 适配页。
+    await editor.find(".focus-profile-summary .link-button").trigger("click");
+    expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
+      { page: "apps", params: { appTarget: "notepad" } },
+    ]);
   });
 
-  it("聚焦方式沿用 chip 风格：策略选项与快捷键展示", async () => {
+  it("keeps the last focus failure visible beside the read-only summary", async () => {
+    const target = "C:\\Tools\\Example.exe";
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      applications: [{ path: target, name: "Example" }],
+      focusProfiles: { [target]: { strategy: "recorded_element" } },
+    });
+    vi.mocked(getButtonMappingSnapshot).mockResolvedValueOnce({
+      enabled: true,
+      gateActive: true,
+      listenerActive: true,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      lastFired: null,
+      lastError: null,
+      lastFocus: { focused: false, reason: "no_candidate" },
+    } as never);
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("上次聚焦失败：没有找到可用的输入框");
+  });
+
+  it("opens the requested button editor from a navigation request", async () => {
+    const wrapper = await mountPage("rc003", { button: "ok", trigger: "long" });
+    await flushPromises();
+    expect(wrapper.find(".mapping-editor").text()).toContain("确定 · 长按");
+  });
+
+  it("自定义应用的聚焦摘要显示已保存的策略", async () => {
     const target = "C:\\Tools\\Example.exe";
     vi.mocked(getButtonMappings).mockResolvedValueOnce({
       enabled: true,
@@ -1543,253 +1529,16 @@ describe("buttons mapping page", () => {
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
     await flushPromises();
-    const panel = wrapper.find(".focus-profile");
 
-    const options = panel.findAll(".focus-strategy-option");
-    expect(options.map((option) => option.text())).toEqual([
-      "只打开 APP",
-      "自动选择输入框",
-      "使用 APP 快捷键聚焦",
-      "聚焦已记录的输入框",
-      "记录点击位置",
-    ]);
-    const selected = options.find((option) => option.text() === "使用 APP 快捷键聚焦")!;
-    expect(selected.classes()).toContain("selected");
-    expect(selected.attributes("aria-pressed")).toBe("true");
-    expect(panel.find(".focus-shortcut-value").text()).toContain("左 Ctrl + K");
-
-    expect(panel.find(".focus-test-button").exists()).toBe(false);
-    const clear = panel.findAll("button").find((button) => button.text() === "清除")!;
-    expect(clear.attributes("disabled")).toBeUndefined();
-    await clear.trigger("click");
-    await flushPromises();
-
-    expect(panel.find(".focus-shortcut-value").text()).toContain("尚未录入");
-    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-      focusProfiles?: Record<string, { strategy: string; shortcut?: unknown }>;
-    };
-    expect(saved.focusProfiles?.[target]?.strategy).toBe("app_shortcut");
-    expect(saved.focusProfiles?.[target]?.shortcut).toBeUndefined();
+    expect(wrapper.find(".focus-profile-summary").text()).toContain("使用 APP 快捷键聚焦");
+    expect(wrapper.find(".focus-profile-summary .link-button").text()).toBe("去配置");
   });
 
-  it("聚焦已记录的输入框：状态与清除", async () => {
-    const target = "C:\\Tools\\Example.exe";
-    vi.mocked(getButtonMappings).mockResolvedValueOnce({
-      enabled: true,
-      actions: {
-        ok: {
-          single: { type: "open_app", target },
-          double: { type: "disabled" },
-          long: { type: "disabled" },
-        },
-      },
-      applications: [{ path: target, name: "Example" }],
-      focusProfiles: {
-        [target]: {
-          strategy: "recorded_element",
-          recorded: {
-            controlType: "Edit",
-            automationId: "chat-input",
-            className: "RichEdit",
-          },
-        },
-      },
-    });
-    const wrapper = await mountPage();
-    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
-    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
-    await flushPromises();
-    const panel = wrapper.find(".focus-profile");
 
-    const status = panel.find(".focus-record-status");
-    expect(status.text()).toBe("已记录目标输入框");
-    expect(status.classes()).toContain("is-done");
-    expect(panel.findAll("button").some((button) => button.text() === "测试输入框")).toBe(false);
-    expect(panel.find(".focus-test-button").exists()).toBe(false);
-    expect(panel.findAll("button").some((button) => button.text() === "清除")).toBe(true);
-  });
 
-  it("只显示与当前策略相关的聚焦失败：记录点击位置下隐藏旧的聚焦服务结果", async () => {
-    const snapshotWithFailure = {
-      enabled: true,
-      gateActive: true,
-      listenerActive: true,
-      swallowedEdges: 0,
-      leakedDowns: 0,
-      firedGestures: 0,
-      lastFired: null,
-      lastError: null,
-      lastFocus: {
-        requestId: 1,
-        kind: "launch_then_focus",
-        focused: false,
-        reason: "timeout",
-        attempts: 1,
-        elapsedMs: 3000,
-      },
-    };
-    const target = "C:\\Tools\\Example.exe";
-    const mappingsFor = (strategy: "recorded_element" | "recorded_point") => ({
-      enabled: true,
-      actions: {
-        ok: {
-          single: { type: "open_app" as const, target },
-          double: { type: "disabled" as const },
-          long: { type: "disabled" as const },
-        },
-      },
-      focusProfiles: {
-        [target]:
-          strategy === "recorded_element"
-            ? {
-                strategy,
-                recorded: {
-                  controlType: "Edit",
-                  automationId: "chat-input",
-                  className: "RichEdit",
-                },
-              }
-            : {
-                strategy,
-                point: { xRatio: 0.5, yRatio: 0.8, windowWidth: 1000, windowHeight: 800 },
-              },
-      },
-    });
-    const openEditor = async (strategy: "recorded_element" | "recorded_point") => {
-      vi.mocked(getButtonMappings).mockResolvedValueOnce(mappingsFor(strategy));
-      vi.mocked(getButtonMappingSnapshot).mockResolvedValueOnce(snapshotWithFailure);
-      const wrapper = await mountPage();
-      const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
-      await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
-      await flushPromises();
-      return wrapper;
-    };
 
-    // 聚焦服务确实失败过：记录点击位置策略下旧结果与当前配置无关，必须隐藏。
-    const elementWrapper = await openEditor("recorded_element");
-    expect(elementWrapper.find(".focus-result-message").text()).toContain("等待超时");
 
-    const pointWrapper = await openEditor("recorded_point");
-    expect(pointWrapper.find(".focus-result-message").exists()).toBe(false);
-  });
 
-  it("配置自定义应用的聚焦方式并学习输入框（策略与字段自洽）", async () => {
-    const wrapper = await mountPage();
-    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
-    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
-    const editor = wrapper.find(".mapping-editor");
-    await addScannedApp(wrapper);
-    const target = "shell:AppsFolder\\Example!App";
-    const customChip = editor
-      .findAll(".chip")
-      .find((chip) => chip.text() === "打开 Registered Example");
-    expect(customChip).toBeDefined();
-    await customChip!.trigger("click");
-    await flushPromises();
-
-    // 选中自定义应用后出现聚焦方式面板，默认「只打开 APP」。
-    const panel = editor.find(".focus-profile");
-    expect(panel.exists()).toBe(true);
-    const recordedChip = panel
-      .findAll(".chip")
-      .find((chip) => chip.text() === "聚焦已记录的输入框");
-    await recordedChip!.trigger("click");
-    await vi.waitFor(() => {
-      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-        focusProfiles?: Record<string, { strategy: string }>;
-      };
-      if (saved?.focusProfiles?.[target]?.strategy !== "recorded_element") {
-        throw new Error("策略未写进聚焦档案");
-      }
-    });
-
-    // 切换策略时必须丢掉异策略字段（Rust 侧 normalized 会整条丢弃不自洽的档案）。
-    const shortcutChip = panel
-      .findAll(".chip")
-      .find((chip) => chip.text() === "使用 APP 快捷键聚焦");
-    await shortcutChip!.trigger("click");
-    await vi.waitFor(() => {
-      const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-        focusProfiles?: Record<string, { strategy: string; recorded?: unknown }>;
-      };
-      const profile = saved?.focusProfiles?.[target];
-      if (profile?.strategy !== "app_shortcut" || profile.recorded !== undefined) {
-        throw new Error("切换策略后仍带着旧策略字段");
-      }
-    });
-
-    // 学习输入框：写入 recorded 并置为 recorded_element。
-    await recordedChip!.trigger("click");
-    await flushPromises();
-    const learnChip = panel.findAll(".chip").find((chip) => chip.text() === "开始学习输入框");
-    expect(learnChip).toBeDefined();
-    await learnChip!.trigger("click");
-    await vi.waitFor(() => {
-      if (!wrapper.text().includes("输入框学习成功")) {
-        throw new Error("学习结果提示未出现");
-      }
-    });
-    expect(activateAppForLearning).toHaveBeenCalledWith(target);
-    expect(vi.mocked(activateAppForLearning).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(learnFocusTarget).mock.invocationCallOrder[0]!,
-    );
-    const learned = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-      focusProfiles?: Record<string, { strategy: string; recorded?: { automationId: string } }>;
-    };
-    expect(learned.focusProfiles?.[target]?.strategy).toBe("recorded_element");
-    expect(learned.focusProfiles?.[target]?.recorded?.automationId).toBe("chat-input");
-
-    // 学习失败时给可解释文案，不静默。
-    vi.mocked(learnFocusTarget).mockRejectedValueOnce(new Error("no_candidate"));
-    await learnChip!.trigger("click");
-    await vi.waitFor(() => {
-      if (!wrapper.text().includes("没有学习成功")) {
-        throw new Error("学习失败文案未出现");
-      }
-    });
-
-    // 记录点击位置（面向微信 4.x 这类没有 UIA 树的应用）：6 秒后采集鼠标位置。
-    vi.useFakeTimers();
-    await panel.findAll(".chip").find((chip) => chip.text() === "记录点击位置")!.trigger("click");
-    await flushPromises();
-    await panel.findAll(".chip").find((chip) => chip.text() === "开始记录位置")!.trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("正在等待你把鼠标停在目标输入框上");
-    expect(activateAppForLearning).toHaveBeenLastCalledWith(target);
-    await vi.advanceTimersByTimeAsync(6500);
-    await flushPromises();
-    vi.useRealTimers();
-    const recordedPoint = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-      focusProfiles?: Record<string, { strategy: string; point?: { yRatio: number } }>;
-    };
-    expect(recordedPoint.focusProfiles?.[target]?.strategy).toBe("recorded_point");
-    expect(recordedPoint.focusProfiles?.[target]?.point?.yRatio).toBeCloseTo(0.82);
-    expect(wrapper.text()).toContain("已记录点击位置");
-  });
-
-  it("记录点击位置失败时提示中文原因（光标不在目标窗口内）", async () => {
-    vi.useFakeTimers();
-    vi.mocked(learnFocusPoint).mockRejectedValueOnce(new Error("cursor_outside_target"));
-    const wrapper = await mountPage();
-    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
-    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
-    const editor = wrapper.find(".mapping-editor");
-    await addScannedApp(wrapper);
-    await editor
-      .findAll(".chip")
-      .find((chip) => chip.text() === "打开 Registered Example")!
-      .trigger("click");
-    await flushPromises();
-    const panel = editor.find(".focus-profile");
-    await panel.findAll(".chip").find((chip) => chip.text() === "记录点击位置")!.trigger("click");
-    await flushPromises();
-    await panel.findAll(".chip").find((chip) => chip.text() === "开始记录位置")!.trigger("click");
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(6500);
-    await flushPromises();
-    vi.useRealTimers();
-    expect(wrapper.text()).toContain("鼠标不在目标应用的窗口里");
-  });
 
   it("configures mouse actions; wheel and move accept 1–100 and save on Enter or blur", async () => {
     const wrapper = await mountPage();

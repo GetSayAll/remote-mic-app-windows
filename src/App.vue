@@ -28,8 +28,10 @@ import {
   loadPersistedPage,
   persistActivePage,
   touchLiveness,
+  type NavigationRequest,
 } from "./navigation";
 import SettingsPage from "./pages/SettingsPage.vue";
+import AppsPage from "./pages/AppsPage.vue";
 import ButtonsPage from "./pages/ButtonsPage.vue";
 import ConnectionPage from "./pages/ConnectionPage.vue";
 import MacrosPage from "./pages/MacrosPage.vue";
@@ -39,6 +41,20 @@ import ReflectionsPage from "./pages/ReflectionsPage.vue";
 import ProfilePage from "./pages/ProfilePage.vue";
 
 const activePage = ref<string>(loadPersistedPage() ?? "buttons");
+/** 页面间带参数的导航（APP 适配 ↔ 按键页）；侧栏切换会清空。 */
+const pendingNavigation = ref<NavigationRequest | null>(null);
+function selectPage(page: string): void {
+  pendingNavigation.value = null;
+  activePage.value = page;
+}
+function onNavigate(request: string | NavigationRequest): void {
+  if (typeof request === "string") {
+    selectPage(request);
+    return;
+  }
+  pendingNavigation.value = request;
+  activePage.value = request.page;
+}
 watch(activePage, (page) => {
   persistActivePage(page);
   void refreshAppIcon();
@@ -139,6 +155,7 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 /** 公开页面 + 私有页面（通常为空）的组件表。私有页面缺席时保持原行为。 */
 const pageComponents: Record<string, Component> = {
   buttons: ButtonsPage,
+  apps: AppsPage,
   recommendations: RecommendationsPage,
   macros: MacrosPage,
   connection: ConnectionPage,
@@ -149,6 +166,19 @@ const pageComponents: Record<string, Component> = {
 };
 
 const activeComponent = computed(() => pageComponents[activePage.value] ?? ButtonsPage);
+const activePageProps = computed(() => {
+  const params = pendingNavigation.value?.params;
+  if (activePage.value === "apps") {
+    return { runtime: runtime.value, initialTarget: params?.appTarget ?? null };
+  }
+  if (activePage.value === "buttons" && params?.button && params?.trigger) {
+    return {
+      runtime: runtime.value,
+      initialEditor: { button: params.button, trigger: params.trigger },
+    };
+  }
+  return { runtime: runtime.value };
+});
 
 /**
  * 只有「我的（个人中心）」常驻（2026-11-06）：它是侧栏里唯一没有录入 / 捕获流程的
@@ -284,7 +314,7 @@ onUnmounted(() => {
         :profile-label="profileLabel"
         :app-icon="appIcon"
         :app-version="runtime?.appVersion ?? ''"
-        @select="activePage = $event"
+        @select="selectPage"
       />
       <main class="content">
         <div v-if="loadError" class="error-banner">{{ t(loadError) }}</div>
@@ -298,9 +328,9 @@ onUnmounted(() => {
         <KeepAlive :include="cachedPageNames">
           <component
             :is="activeComponent"
-            :runtime="runtime"
+            v-bind="activePageProps"
             @restart-onboarding="onRestartOnboarding"
-            @navigate="activePage = $event"
+            @navigate="onNavigate"
           />
         </KeepAlive>
       </main>
