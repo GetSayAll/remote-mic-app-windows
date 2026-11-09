@@ -159,7 +159,7 @@ export function focusStrategyLabel(strategy: FocusStrategy): string {
     case "app_shortcut":
       return "使用 APP 快捷键聚焦";
     case "recorded_element":
-      return "聚焦已记录的输入框";
+      return "打开后自动聚焦";
     case "recorded_point":
       return "记录点击位置";
     default:

@@ -8,7 +8,6 @@ import {
   getApplicationIcon,
   getButtonMappings,
   getCombinedActions,
-  learnFocusPoint,
   learnFocusTarget,
   listPresetApps,
   saveButtonMappings,
@@ -57,12 +56,6 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       controlType: "Edit",
       automationId: "chat-input",
       className: "RichEdit",
-    })),
-    learnFocusPoint: vi.fn(async () => ({
-      xRatio: 0.5,
-      yRatio: 0.82,
-      windowWidth: 1200,
-      windowHeight: 800,
     })),
     testAppFocus: vi.fn(async () => undefined),
     scanRegisteredApps: vi.fn(async () => []),
@@ -159,6 +152,7 @@ describe("APP adaptation page", () => {
       "微信",
       "网易云音乐",
     ]);
+    expect(rows[0].find(".app-row-status").text()).toBe("只打开 · 需学习");
     expect(rows[2].text()).not.toContain("内置");
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
     await rows[2].trigger("click");
@@ -197,7 +191,7 @@ describe("APP adaptation page", () => {
 
     const option = wrapper
       .findAll(".focus-option")
-      .find((button) => button.text().includes("聚焦已记录的输入框"))!;
+      .find((button) => button.text().includes("打开后自动聚焦"))!;
     await option.trigger("click");
     await flushPromises();
 
@@ -215,7 +209,7 @@ describe("APP adaptation page", () => {
       applications: [{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }],
     });
     const wrapper = await mountPage();
-    await wrapper.findAll(".focus-option").find((button) => button.text().includes("聚焦已记录的输入框"))!.trigger("click");
+    await wrapper.findAll(".focus-option").find((button) => button.text().includes("打开后自动聚焦"))!.trigger("click");
     await flushPromises();
 
     const learn = wrapper.findAll("button").find((button) => button.text() === "开始学习输入框")!;
@@ -250,7 +244,7 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
     await wrapper
       .findAll(".focus-option")
-      .find((button) => button.text().includes("聚焦已记录的输入框"))!
+      .find((button) => button.text().includes("打开后自动聚焦"))!
       .trigger("click");
     await flushPromises();
     await wrapper.findAll("button").find((button) => button.text() === "开始学习输入框")!.trigger("click");
@@ -258,7 +252,7 @@ describe("APP adaptation page", () => {
 
     await wrapper
       .findAll(".focus-option")
-      .find((button) => button.text().includes("自动选择输入框"))!
+      .find((button) => button.text().includes("只打开 APP"))!
       .trigger("click");
     await flushPromises();
 
@@ -272,31 +266,27 @@ describe("APP adaptation page", () => {
     const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
       focusProfiles: Record<string, { strategy: string; recorded?: { automationId: string } }>;
     };
-    expect(saved.focusProfiles["C:\\Apps\\Cursor.exe"]?.strategy).toBe("auto_composer");
+    expect(saved.focusProfiles["C:\\Apps\\Cursor.exe"]?.strategy).toBe("open_only");
     expect(saved.focusProfiles["C:\\Apps\\Cursor.exe"]?.recorded?.automationId).toBeUndefined();
   });
 
-  it("records a click position after the six-second window", async () => {
-    vi.useFakeTimers();
+  it("hides the removed auto and click options but keeps legacy profiles visible", async () => {
     configureMappings({
       applications: [{ name: "微信", path: "C:\\Apps\\Weixin.exe" }],
+      focusProfiles: {
+        "C:\\Apps\\Weixin.exe": { strategy: "recorded_point" },
+      },
     });
     const wrapper = await mountPage();
-    await wrapper.findAll(".focus-option").find((button) => button.text().includes("记录点击位置"))!.trigger("click");
-    await flushPromises();
-    await wrapper.findAll("button").find((button) => button.text() === "开始记录位置")!.trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("正在等待你把鼠标停在目标输入框上");
-    await vi.advanceTimersByTimeAsync(6500);
-    await flushPromises();
-    vi.useRealTimers();
 
-    expect(learnFocusPoint).toHaveBeenCalledWith("C:\\Apps\\Weixin.exe");
-    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
-      focusProfiles: Record<string, { strategy: string; point?: { yRatio: number } }>;
-    };
-    expect(saved.focusProfiles["C:\\Apps\\Weixin.exe"]?.strategy).toBe("recorded_point");
-    expect(saved.focusProfiles["C:\\Apps\\Weixin.exe"]?.point?.yRatio).toBeCloseTo(0.82);
+    expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
+      "只打开 APP",
+      "打开后自动聚焦",
+    ]);
+    expect(wrapper.find(".detail-panel").text()).toContain("点击位置");
+    expect(wrapper.find(".focus-editor").text()).toContain(
+      "当前为旧版聚焦方式：记录点击位置",
+    );
   });
 
   it("blocks deletion while a button still opens the app", async () => {

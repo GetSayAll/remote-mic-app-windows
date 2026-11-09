@@ -776,7 +776,7 @@ describe("组合动作页 · 编辑向导", () => {
       .trigger("click");
     await flushPromises();
     const body = wrapper.find(".step-card-body");
-    expect(body.find(".focus-profile-summary").text()).toContain("聚焦已记录的输入框");
+    expect(body.find(".focus-profile-summary").text()).toContain("打开后自动聚焦");
     expect(body.find(".focus-strategy-option").exists()).toBe(false);
   });
 

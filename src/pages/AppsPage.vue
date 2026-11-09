@@ -118,6 +118,12 @@ function selectRow(target: string): void {
   selectedTarget.value = target;
 }
 
+/** 列表摘要对齐 Mac：短聚焦名 + 翻页状态；Windows 尚无滚动引擎，统一显示需学习。 */
+function rowStatus(row: AppAdaptationRow): string {
+  const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
+  return `${focus} · ${t("需学习")}`;
+}
+
 async function loadIcons(): Promise<void> {
   for (const row of rows.value) {
     if (!row.path || appIcons.value[row.target] !== undefined || iconRequests.has(row.target)) {
@@ -305,7 +311,7 @@ onUnmounted(() => {
             <span class="app-row-text">
               <span class="app-row-name">{{ row.name }}</span>
               <span class="app-row-status">
-                {{ t(compactFocusLabel(effectiveAppProfile(row, mappings.focusProfiles))) }}
+                {{ rowStatus(row) }}
                 <template v-if="!row.installed"> · {{ t("应用未找到") }}</template>
               </span>
             </span>
@@ -531,11 +537,8 @@ onUnmounted(() => {
   flex: 0 0 26px;
   display: grid;
   place-items: center;
-  overflow: hidden;
-  border-radius: 7px;
   color: var(--muted);
-  background: var(--surface-subtle);
-  box-shadow: inset 0 0 0 1px var(--border);
+  background: transparent;
 }
 .app-tile img {
   width: 100%;
@@ -550,7 +553,6 @@ onUnmounted(() => {
   width: 36px;
   height: 36px;
   flex-basis: 36px;
-  border-radius: 9px;
 }
 .app-tile.large svg {
   width: 22px;

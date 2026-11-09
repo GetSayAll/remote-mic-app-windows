@@ -563,7 +563,7 @@ function focusFailureLabel(reason: string): string {
 
 /** 最近一次聚焦结果（失败时给用户可解释的原因）。 */
 const lastFocusNotice = computed<string | null>(() => {
-  // 聚焦服务只服务「聚焦已记录的输入框」；「记录点击位置」不走这个服务，
+  // 聚焦服务只服务「打开后自动聚焦」；旧版「记录点击位置」不走这个服务，
   // 继续显示旧的失败会让用户以为新配置仍然失败（2026-10-19 现场）。
   if (focusProfile.value?.strategy !== "recorded_element") return null;
   const report = mappingSnapshot.value?.lastFocus;
