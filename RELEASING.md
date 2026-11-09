@@ -89,6 +89,12 @@
 
 ## Stable 与 updater 资产
 
+- 正式候选应启用仓库变量 `SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE=1`。生成清单前，
+  `generate-updater-manifest.ps1 -RequireWindowsCodeSignature` 分别校验主程序和安装器的
+  Authenticode 状态为 `Valid`，再用 Tauri 配置的公钥验证最终安装器的更新签名。
+  失败时不准备资产。本地使用同一开关。该门禁需要已配置的签名服务、受信任的
+  Windows 证书链和 PATH 上可信的 [minisign.exe](https://jedisct1.github.io/minisign/)。
+  先完成 Authenticode 再生成更新签名，并另外执行应用内更新、安装、升级和回退验收。
 - 正式 Release workflow 必须从精确 Tag/Commit 构建，缺少 `TAURI_SIGNING_PRIVATE_KEY` 或 Authenticode 发布凭据时 fail closed；CI 临时 updater key 只允许测试构建。
 - `scripts/generate-updater-manifest.ps1` 生成 `latest.json`、ASCII 安装器名、`.sig` 和 `SHA256SUMS.txt`。清单中的签名是 `.sig` 内容，不是路径；下载地址必须为 HTTPS。
 - 发布前打印并核对待上传资产清单、大小和 SHA-256；删除或覆盖远端资产不属于正常重试流程。

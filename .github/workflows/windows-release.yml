@@ -78,7 +78,18 @@ jobs:
 
       - name: Generate updater manifest and stage release assets
         shell: pwsh
-        run: ./scripts/generate-updater-manifest.ps1 -Tag $env:GITHUB_REF_NAME
+        # 正式候选启用仓库变量后，在有可信代码签名的 Windows 构建上校验主程序和安装器。
+        # 校验位于上传前，失败则不创建发布草稿。构建负责人修复签名后重跑同一候选，
+        # 保留已经发布的资产。未启用时仍走受限 Preview，结果见此步骤的 CI 日志。
+        # Enable the repository variable for a production candidate after configuring trusted
+        # Windows code signing. Check both binaries before upload, so failure creates no
+        # draft. Rebuild the candidate after fixing signing and preserve published assets.
+        # With the variable disabled this remains the preview path. See this step's CI log.
+        env:
+          SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE: ${{ vars.SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE }}
+        run: |
+          $requireSignature = $env:SAYALL_REQUIRE_WINDOWS_CODE_SIGNATURE -eq '1'
+          ./scripts/generate-updater-manifest.ps1 -Tag $env:GITHUB_REF_NAME -RequireWindowsCodeSignature:$requireSignature
 
       - name: Show staged assets before release (delete-free verification)
         shell: pwsh
