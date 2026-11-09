@@ -61,8 +61,8 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// 主窗口最小尺寸（逻辑像素），与 `tauri.conf.json` 的
 /// `width` / `height` / `minWidth` / `minHeight` 保持一致。
 const MAIN_WINDOW_MIN_WIDTH: f64 = 1066.67;
-const MAIN_WINDOW_MIN_HEIGHT: f64 = 640.0;
-const MAIN_WINDOW_DEFAULT_HEIGHT: f64 = 720.0;
+const MAIN_WINDOW_MIN_HEIGHT: f64 = 800.0;
+const MAIN_WINDOW_DEFAULT_HEIGHT: f64 = 800.0;
 
 /// 内容区最小尺寸换算到物理像素。`WM_GETMINMAXINFO` / `WM_WINDOWPOSCHANGING`
 /// 使用窗口外框尺寸，调用方再补上非客户区边框。
@@ -84,15 +84,15 @@ mod main_window_size_tests {
 
     #[test]
     fn converts_minimum_to_physical_pixels() {
-        assert_eq!(min_window_inner_size(1.0), (1067, 640));
-        assert_eq!(min_window_inner_size(2.0), (2133, 1280));
-        assert_eq!(min_window_inner_size(1.5), (1600, 960));
+        assert_eq!(min_window_inner_size(1.0), (1067, 800));
+        assert_eq!(min_window_inner_size(2.0), (2133, 1600));
+        assert_eq!(min_window_inner_size(1.5), (1600, 1200));
     }
 
     #[test]
     fn invalid_scale_falls_back_to_one_x() {
-        assert_eq!(min_window_inner_size(0.0), (1067, 640));
-        assert_eq!(min_window_inner_size(f64::NAN), (1067, 640));
+        assert_eq!(min_window_inner_size(0.0), (1067, 800));
+        assert_eq!(min_window_inner_size(f64::NAN), (1067, 800));
     }
 }
 
@@ -5585,7 +5585,7 @@ pub fn run() {
             );
             // tauri.conf 的窗口尺寸在部分高 DPI 会话里按创建时 DPI 解释，可能落到
             // 540×404 逻辑像素。这里显式按逻辑像素设一次默认尺寸与最小尺寸，
-            // 保证 1066×720 的设计窗口在各缩放比例下一致。
+            // 保证 1066×800 的设计窗口在各缩放比例下一致。
             if let Some(window) = main_window(app.handle()) {
                 let _ = window.set_min_size(Some(tauri::LogicalSize::new(
                     MAIN_WINDOW_MIN_WIDTH,
