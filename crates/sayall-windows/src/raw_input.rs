@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -68,6 +68,12 @@ pub const ENHANCED_CAPTURE_BUTTON_USAGES: [(RemoteButton, u16); 13] = [
 ];
 
 impl RemoteButton {
+    pub fn is_chromecast_mappable(self) -> bool {
+        // Chromecast has Back, Home, a direction pad, media and input buttons.
+        // Tv and Menu belong to Xiaomi; the voice key uses ATVV exclusively.
+        !matches!(self, Self::Tv | Self::Menu)
+    }
+
     /// 在 [`ALL_BUTTONS`] 中的序号（0..12），用于门控位掩码。
     pub fn ordinal(self) -> usize {
         ALL_BUTTONS
@@ -192,6 +198,45 @@ impl RawKeyboardEvent {
     pub fn button(self) -> Option<RemoteButton> {
         button_for_keyboard(self.virtual_key, self.make_code)
     }
+
+    pub(crate) fn chromecast_edge(self) -> Option<ButtonEdge> {
+        // Interpret only explicit Windows virtual keys on a Cast keyboard
+        // collection, never Xiaomi's VK=0xff scan-code or voice-key quirks.
+        let button = match self.virtual_key {
+            0x0D => RemoteButton::Ok,
+            0x24 | 0xAC => RemoteButton::Home,
+            0x25 => RemoteButton::Left,
+            0x26 => RemoteButton::Up,
+            0x27 => RemoteButton::Right,
+            0x28 => RemoteButton::Down,
+            0xA6 => RemoteButton::Back,
+            0xAD => RemoteButton::VolumeMute,
+            0xAE => RemoteButton::VolumeDown,
+            0xAF => RemoteButton::VolumeUp,
+            _ => return None,
+        };
+        Some(ButtonEdge {
+            button,
+            is_pressed: self.is_pressed(),
+        })
+    }
+}
+
+/// Input from an already identity-checked Chromecast HID collection.
+#[derive(Debug)]
+pub enum ChromecastInput {
+    Hid {
+        report_id: u8,
+        buttons: BTreeSet<RemoteButton>,
+    },
+    Keyboard(ButtonEdge),
+    CollectionRemoved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromecastSource {
+    Hid(u8),
+    Keyboard,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -327,7 +372,7 @@ pub fn report_path_accepted(bound_path: &str, target: Option<u64>, report_path: 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReportRoute {
     Xiaomi,
-    ObserveChromecast(u64),
+    Chromecast(u64),
 }
 
 pub(crate) fn report_route(
@@ -345,7 +390,7 @@ pub(crate) fn report_route(
         crate::remote_target::Target::Chromecast(Some(address))
             if chromecast_path_matches_target(path, address) =>
         {
-            Some(ReportRoute::ObserveChromecast(address))
+            Some(ReportRoute::Chromecast(address))
         }
         _ => None,
     }
@@ -506,6 +551,10 @@ pub fn button_for_keyboard(virtual_key: u16, make_code: u16) -> Option<RemoteBut
 pub struct ButtonStateMerger {
     keyboard: BTreeSet<RemoteButton>,
     hid: BTreeSet<RemoteButton>,
+    // Keep one source per button for this device session. Windows can deliver
+    // whole keyboard and HID tap sequences back-to-back; a simple union of the
+    // current down states would count sequential twins as a double click.
+    chromecast: BTreeMap<RemoteButton, (ChromecastSource, bool)>,
 }
 
 impl ButtonStateMerger {
@@ -562,10 +611,48 @@ impl ButtonStateMerger {
         edges_between(&before, &self.active_buttons())
     }
 
+    pub fn update_chromecast(&mut self, input: ChromecastInput) -> Vec<ButtonEdge> {
+        let before = self.active_buttons();
+        match input {
+            ChromecastInput::Keyboard(edge) if edge.button.is_chromecast_mappable() => {
+                self.apply_chromecast_edge(edge, ChromecastSource::Keyboard);
+            }
+            ChromecastInput::Hid { report_id, buttons } if matches!(report_id, 1 | 2) => {
+                let source = ChromecastSource::Hid(report_id);
+                for (button, (owner, pressed)) in &mut self.chromecast {
+                    if *owner == source {
+                        *pressed = buttons.contains(button);
+                    }
+                }
+                for button in buttons
+                    .into_iter()
+                    .filter(|button| button.is_chromecast_mappable())
+                {
+                    self.chromecast.entry(button).or_insert((source, true));
+                }
+            }
+            _ => {}
+        }
+        edges_between(&before, &self.active_buttons())
+    }
+
+    fn apply_chromecast_edge(&mut self, edge: ButtonEdge, source: ChromecastSource) {
+        if let Some((owner, pressed)) = self.chromecast.get_mut(&edge.button) {
+            if *owner == source {
+                *pressed = edge.is_pressed;
+            }
+        } else if edge.is_pressed {
+            self.chromecast.insert(edge.button, (source, true));
+        }
+    }
+
     pub fn release_all(&mut self) -> Vec<ButtonEdge> {
         let active = self.active_buttons();
         self.keyboard.clear();
         self.hid.clear();
+        for (_, pressed) in self.chromecast.values_mut() {
+            *pressed = false;
+        }
         active
             .into_iter()
             .map(|button| ButtonEdge {
@@ -575,8 +662,20 @@ impl ButtonStateMerger {
             .collect()
     }
 
+    pub fn forget_chromecast_sources(&mut self) {
+        self.chromecast.clear();
+    }
+
     fn active_buttons(&self) -> BTreeSet<RemoteButton> {
-        self.keyboard.union(&self.hid).copied().collect()
+        self.keyboard
+            .union(&self.hid)
+            .copied()
+            .chain(
+                self.chromecast
+                    .iter()
+                    .filter_map(|(button, (_, pressed))| (*pressed).then_some(*button)),
+            )
+            .collect()
     }
 }
 
@@ -599,6 +698,61 @@ fn edges_between(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromecast_hid_collections_keep_independent_releases() {
+        let mut merger = ButtonStateMerger::default();
+        let hid = |report_id, button: Option<RemoteButton>| ChromecastInput::Hid {
+            report_id,
+            buttons: button.into_iter().collect(),
+        };
+        let edge = |button, is_pressed| ButtonEdge { button, is_pressed };
+        assert_eq!(
+            merger.update_chromecast(hid(1, Some(RemoteButton::Home))),
+            [edge(RemoteButton::Home, true)]
+        );
+        assert!(merger
+            .update_chromecast(hid(2, Some(RemoteButton::Home)))
+            .is_empty());
+        assert_eq!(
+            merger.update_chromecast(hid(2, Some(RemoteButton::VolumeUp))),
+            [edge(RemoteButton::VolumeUp, true)]
+        );
+        assert_eq!(
+            merger.update_chromecast(hid(2, None)),
+            [edge(RemoteButton::VolumeUp, false)]
+        );
+        assert_eq!(
+            merger.active_button_set(),
+            BTreeSet::from([RemoteButton::Home])
+        );
+        assert_eq!(merger.release_all(), [edge(RemoteButton::Home, false)]);
+        merger.forget_chromecast_sources();
+        assert_eq!(
+            merger.update_chromecast(hid(2, Some(RemoteButton::Home))),
+            [edge(RemoteButton::Home, true)]
+        );
+    }
+
+    #[test]
+    fn chromecast_keyboard_fallback_ignores_voice_and_xiaomi_keys() {
+        let raw = |virtual_key| RawKeyboardEvent {
+            virtual_key,
+            make_code: 0,
+            flags: 0,
+            message: 0x0100,
+        };
+        assert_eq!(
+            raw(0x0D).chromecast_edge(),
+            Some(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: true,
+            })
+        );
+        for vk in [0x74, 0xC0, 0x5D, 0xFF] {
+            assert_eq!(raw(vk).chromecast_edge(), None);
+        }
+    }
 
     #[test]
     fn chromecast_identity_and_reports_are_separate_from_xiaomi() {
@@ -681,7 +835,7 @@ mod tests {
         let xiaomi = r"\\?\hid#profile_dev_vid&012717_pid&32b8_rev&0000_112233445566#slot";
         assert_eq!(
             report_route(xiaomi, Target::Chromecast(Some(address)), cast),
-            Some(ReportRoute::ObserveChromecast(address))
+            Some(ReportRoute::Chromecast(address))
         );
         assert_eq!(report_route(cast, Target::Chromecast(None), cast), None);
         assert_eq!(

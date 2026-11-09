@@ -44,12 +44,14 @@ import {
   type Rc003CaptureHealth,
   type Rc003TaskStatus,
   type RemoteButton,
+  type RemoteModel,
   type RuntimeSnapshot,
   type VoiceAudioHealth,
   type VoiceInputTool,
   type VokieInstallation,
 } from "../lib/bridge";
 import { captureFailureText, normalizeCaptureHealth } from "../lib/capture-switch";
+import { recognizedRemoteModel } from "../lib/remote-artwork";
 import { t } from "../lib/i18n";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
 import { voiceFailureText } from "../onboarding/voice-failure-text";
@@ -86,7 +88,7 @@ import { isWeTypeVoiceChord, WETYPE_VOICE_KEYS } from "../lib/wetype-voice";
 import WelcomeStep from "../onboarding/steps/WelcomeStep.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 
-const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+const props = defineProps<{ runtime: RuntimeSnapshot | null; remoteModelHint?: RemoteModel }>();
 const emit = defineEmits<{ completed: [] }>();
 
 const step = ref<OnboardingStep>("welcome");
@@ -208,6 +210,15 @@ const captureLoadFailed = ref(false);
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
 const isChromecast = computed(() => props.runtime?.platform.connection.remoteModel === "chromecast");
+const artworkModel = computed(() => {
+  const selected = devices.value.find((device) =>
+    device.id === (connectingDeviceId.value || connectedDeviceId.value),
+  );
+  const live = recognizedRemoteModel(props.runtime?.platform.connection);
+  if (connectingDeviceId.value && selected && selected.model !== "unknown") return selected.model;
+  if (live !== "unknown") return live;
+  return selected && selected.model !== "unknown" ? selected.model : props.remoteModelHint ?? "unknown";
+});
 const captureUnavailable = computed(() => isChromecast.value || captureSupport.value?.available === false);
 /** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
@@ -2409,7 +2420,7 @@ async function retryVoiceTest(): Promise<void> {
         </div>
       </div>
 
-      <StepSide :panel="sidePanel" />
+      <StepSide :panel="sidePanel" :remote-model="artworkModel" />
     </main>
 
     <p v-if="saveMessage" class="onboarding-error">{{ saveMessage }}</p>

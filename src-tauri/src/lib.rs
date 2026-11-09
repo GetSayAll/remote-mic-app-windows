@@ -7,11 +7,11 @@ use sayall_windows::send_input::{
     ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, KeyCode, SendInputSnapshot,
 };
 use sayall_windows::{
-    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, ImeStatus, PairedRemote, PlatformSnapshot,
-    WindowsPlatform,
+    AudioEndpoint, AudioSnapshot, ConnectionPhase, ConnectionSnapshot, ImeStatus, PairedRemote,
+    PlatformSnapshot, RemoteModel, WindowsPlatform,
 };
 use serde::{Deserialize, Serialize};
-use settings::SettingsStore;
+use settings::{ButtonMappingScope, SettingsStore};
 #[cfg(windows)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2954,14 +2954,42 @@ fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Opt
     count
 }
 
+fn button_mappings_for_scope(
+    platform: &dyn PlatformRuntime,
+    scope: ButtonMappingScope,
+) -> ButtonMappings {
+    match scope {
+        ButtonMappingScope::Xiaomi => platform.button_mappings(),
+        ButtonMappingScope::Chromecast => platform.chromecast_button_mappings(),
+    }
+}
+
+fn apply_button_mappings_for_scope(
+    platform: &dyn PlatformRuntime,
+    scope: ButtonMappingScope,
+    mappings: &ButtonMappings,
+) {
+    match scope {
+        ButtonMappingScope::Xiaomi => platform.set_button_mappings(mappings.clone()),
+        ButtonMappingScope::Chromecast => platform.set_chromecast_button_mappings(mappings.clone()),
+    }
+}
+
 #[tauri::command]
-fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
-    state.platform.button_mappings()
+fn get_button_mappings(
+    remote_model: Option<RemoteModel>,
+    state: tauri::State<'_, AppState>,
+) -> ButtonMappings {
+    button_mappings_for_scope(
+        state.platform.as_ref(),
+        ButtonMappingScope::from_remote_model(remote_model),
+    )
 }
 
 #[tauri::command]
 async fn save_button_mappings(
     mappings: ButtonMappings,
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
     let started = std::time::Instant::now();
@@ -2971,12 +2999,13 @@ async fn save_button_mappings(
     ));
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
     let result =
         match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-            let saved = settings.save_button_mappings(mappings)?;
             // 持久化成功后热加载到引擎与门控（保存即生效）。
-            platform.set_button_mappings(saved.clone());
-            Ok(saved)
+            settings.save_button_mappings_for_scope(scope, mappings, |saved| {
+                apply_button_mappings_for_scope(platform.as_ref(), scope, saved);
+            })
         })
         .await
         {
@@ -2999,6 +3028,7 @@ async fn save_button_mappings(
 
 #[tauri::command]
 async fn reset_button_mappings(
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
     let started = std::time::Instant::now();
@@ -3007,11 +3037,12 @@ async fn reset_button_mappings(
     );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
     let result =
         match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-            let saved = settings.save_button_mappings(ButtonMappings::default())?;
-            platform.set_button_mappings(saved.clone());
-            Ok(saved)
+            settings.save_button_mappings_for_scope(scope, ButtonMappings::default(), |saved| {
+                apply_button_mappings_for_scope(platform.as_ref(), scope, saved);
+            })
         })
         .await
         {
@@ -3034,6 +3065,7 @@ async fn reset_button_mappings(
 
 #[tauri::command]
 async fn export_button_mapping_configuration(
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
     let started = std::time::Instant::now();
@@ -3041,12 +3073,13 @@ async fn export_button_mapping_configuration(
         "shortcut_settings feature=button_mapping action=export phase=requested".to_owned(),
     );
     let settings = state.settings.clone();
-    let mappings = state.platform.button_mappings();
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let mappings = button_mappings_for_scope(state.platform.as_ref(), scope);
     let result = match tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let Some(path) = sayall_windows::file_dialog::pick_button_mapping_export_path()? else {
             return Ok(false);
         };
-        settings.export_button_mappings(&path, mappings)?;
+        settings.export_button_mappings_for_scope(scope, &path, mappings)?;
         Ok(true)
     })
     .await
@@ -3073,6 +3106,7 @@ async fn export_button_mapping_configuration(
 
 #[tauri::command]
 async fn import_button_mapping_configuration(
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<ButtonMappings>, String> {
     let started = std::time::Instant::now();
@@ -3081,14 +3115,16 @@ async fn import_button_mapping_configuration(
     );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
     let result = match tauri::async_runtime::spawn_blocking(
         move || -> Result<Option<ButtonMappings>, String> {
             let Some(path) = sayall_windows::file_dialog::pick_button_mapping_import_path()? else {
                 return Ok(None);
             };
-            let imported = settings.import_button_mappings(&path)?;
             // 文件完整校验并持久化成功后才热加载，失败时运行态保持原值。
-            platform.set_button_mappings(imported.clone());
+            let imported = settings.import_button_mappings_for_scope(scope, &path, |imported| {
+                apply_button_mappings_for_scope(platform.as_ref(), scope, imported);
+            })?;
             Ok(Some(imported))
         },
     )
@@ -3190,11 +3226,22 @@ async fn macro_references(
         move || -> Result<sayall_windows::send_input::MacroReferenceReport, String> {
             let library = settings.load_combined_actions()?;
             let mappings = settings.load_button_mappings()?;
-            Ok(sayall_windows::send_input::collect_macro_references(
+            let cast_mappings =
+                settings.load_button_mappings_for_scope(ButtonMappingScope::Chromecast)?;
+            let mut report = sayall_windows::send_input::collect_macro_references(
                 &macro_id,
                 &library.definitions,
                 &mappings,
-            ))
+            );
+            report.buttons.extend(
+                sayall_windows::send_input::collect_macro_references(
+                    &macro_id,
+                    &[],
+                    &cast_mappings,
+                )
+                .buttons,
+            );
+            Ok(report)
         },
     )
     .await
@@ -3225,15 +3272,13 @@ async fn delete_macro(
             let saved = settings.save_combined_actions(current)?;
             platform.set_macro_library(saved.clone());
             // 按键绑定联动：引用被删动作的槽位一律改成「未设置」（含级联删除的动作）。
-            let mut mappings = settings.load_button_mappings()?;
             let mut cleared = 0usize;
-            for removed in &outcome.removed_macro_ids {
-                cleared +=
-                    sayall_windows::send_input::clear_macro_references(&mut mappings, removed);
-            }
-            if cleared > 0 {
-                let saved_mappings = settings.save_button_mappings(mappings)?;
-                platform.set_button_mappings(saved_mappings);
+            for scope in [ButtonMappingScope::Xiaomi, ButtonMappingScope::Chromecast] {
+                cleared += settings.clear_button_mapping_macro_references(
+                    scope,
+                    &outcome.removed_macro_ids,
+                    |mappings| apply_button_mappings_for_scope(platform.as_ref(), scope, mappings),
+                )?;
             }
             let report = MacroDeleteResult {
                 library: saved,
@@ -3461,7 +3506,12 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut macro_count = 0_usize;
     let mut disabled_count = 0_usize;
     for actions in mappings.actions.values() {
-        for action in [&actions.single, &actions.double, &actions.long] {
+        for action in [
+            &actions.single,
+            &actions.double,
+            &actions.triple,
+            &actions.long,
+        ] {
             match action {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
@@ -3484,79 +3534,93 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     )
 }
 
+fn connected_chromecast_token(snapshot: &ConnectionSnapshot) -> Option<&str> {
+    if snapshot.remote_model != RemoteModel::Chromecast
+        || !matches!(
+            snapshot.phase,
+            ConnectionPhase::Ready | ConnectionPhase::Streaming | ConnectionPhase::Draining
+        )
+    {
+        return None;
+    }
+    snapshot.remote_token.as_deref()
+}
+
 #[tauri::command]
 async fn test_button_mapping(
     button: RemoteButton,
     trigger: ButtonTrigger,
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<SendInputSnapshot, String> {
-    if state.platform.connection_snapshot().remote_model == sayall_windows::RemoteModel::Chromecast
-    {
-        sayall_windows::gatt_note(
-            "mapping_settings action=test phase=completed terminal_result=failed error_domain=compatibility error_code=chromecast_observe_only reason=mapping_unavailable retryable=false".to_owned(),
-        );
-        return Err("当前遥控器的普通按键仅供查看。".to_owned());
-    }
-    let action = state.platform.button_mappings().action_for(button, trigger);
     let platform = Arc::clone(&state.platform);
-    match action {
-        ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
-            tauri::async_runtime::spawn_blocking(move || platform.test_mouse_action(action))
-                .await
-                .map_err(|error| format!("测试鼠标任务失败：{error}"))?
-                .map_err(|error| error.to_string())
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let snapshot = platform.connection_snapshot();
+    let expected_token = if scope == ButtonMappingScope::Chromecast {
+        if !button.is_chromecast_mappable() {
+            return Err("当前 Chromecast 遥控器没有这个按键。".to_owned());
         }
-        ButtonAction::Scroll { direction, steps } => {
-            tauri::async_runtime::spawn_blocking(move || platform.test_scroll(direction, steps))
-                .await
-                .map_err(|error| format!("测试滚轮任务失败：{error}"))?
-                .map_err(|error| error.to_string())
+        Some(
+            connected_chromecast_token(&snapshot)
+                .ok_or_else(|| "请连接当前 Chromecast 遥控器后再测试。".to_owned())?
+                .to_owned(),
+        )
+    } else {
+        if snapshot.remote_model == RemoteModel::Chromecast {
+            return Err("遥控器已切换，请重新打开对应型号的按键配置。".to_owned());
         }
-        ButtonAction::Shortcut { chord } => {
-            tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
-                .await
-                .map_err(|error| format!("测试快捷键任务失败：{error}"))?
-                .map_err(|error| error.to_string())
+        None
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = platform.connection_snapshot();
+        if let Some(token) = expected_token {
+            if connected_chromecast_token(&current) != Some(token.as_str()) {
+                return Err("遥控器已断开或切换，请重新测试。".to_owned());
+            }
+        } else if current.remote_model == RemoteModel::Chromecast {
+            return Err("遥控器已切换，请重新打开对应型号的按键配置。".to_owned());
         }
-        ButtonAction::OpenApp { target } => tauri::async_runtime::spawn_blocking(move || {
-            platform
+        let action = button_mappings_for_scope(platform.as_ref(), scope).action_for(button, trigger);
+        match action {
+            ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
+                platform.test_mouse_action(action).map_err(|error| error.to_string())
+            }
+            ButtonAction::Scroll { direction, steps } => {
+                platform.test_scroll(direction, steps).map_err(|error| error.to_string())
+            }
+            ButtonAction::Shortcut { chord } => {
+                platform.test_shortcut(chord).map_err(|error| error.to_string())
+            }
+            ButtonAction::OpenApp { target } if scope == ButtonMappingScope::Chromecast => {
+                platform.test_chromecast_app_focus(target)
+                    .map(|_| platform.send_input_snapshot())
+                    .map_err(|error| error.to_string())
+            }
+            ButtonAction::OpenApp { target } => platform
                 .launch_app(&target)
                 .map(|_| SendInputSnapshot::default())
-        })
-        .await
-        .map_err(|error| format!("测试打开应用任务失败：{error}"))?
-        .map_err(|error| error.to_string()),
-        ButtonAction::FocusInput => tauri::async_runtime::spawn_blocking(move || {
-            // 受理后返回平台的 SendInput 快照（与快捷键/滚轮测试同口径），
-            // 便于 UI 与仿真断言「动作确实走到了聚焦受理路径」。
-            platform
+                .map_err(|error| error.to_string()),
+            ButtonAction::FocusInput => platform
                 .test_focus_input()
                 .map(|_| platform.send_input_snapshot())
-        })
-        .await
-        .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
-        .map_err(|error| error.to_string()),
-        ButtonAction::RunMacro { macro_id, .. } => {
-            // 「测试」= 按最新已保存版本执行一次组合动作（异步受理，终态见
-            // 组合动作页的状态行与 `map_macro_*` 日志）。
-            tauri::async_runtime::spawn_blocking(move || {
+                .map_err(|error| error.to_string()),
+            ButtonAction::RunMacro { macro_id, .. } => {
                 platform
                     .start_macro(&macro_id)
                     .map(|_| platform.send_input_snapshot())
-            })
-            .await
-            .map_err(|error| format!("测试组合动作任务失败：{error}"))?
-            .map_err(|error| error.to_string())
+            }
+            ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
+            ButtonAction::OpenCommonPhrases => {
+                Err("「打开常用语」不在试一下范围内：请绑定按键后到目标应用里使用".to_owned())
+            }
+            ButtonAction::AppSwitcher => Err(
+                "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
+                    .to_owned(),
+            ),
         }
-        ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
-        ButtonAction::OpenCommonPhrases => {
-            Err("「打开常用语」不在试一下范围内：请绑定按键后到目标应用里使用".to_owned())
-        }
-        ButtonAction::AppSwitcher => Err(
-            "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
-                .to_owned(),
-        ),
-    }
+    })
+    .await
+    .map_err(|error| format!("测试按键映射任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -5962,6 +6026,15 @@ pub fn run() {
             };
             // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
             platform.set_button_mappings(button_mappings);
+            match settings.load_button_mappings_for_scope(ButtonMappingScope::Chromecast) {
+                Ok(mappings) => platform.set_chromecast_button_mappings(mappings),
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=button_mapping remote_model=chromecast action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                }
+            }
             // 组合动作库：与按键映射同一启动时序同步到执行器（RunMacro 引用
             // 在引擎点火前即可解析；缺失引用按 missing_dependency 处理）。
             let combined_actions = match settings.load_combined_actions() {

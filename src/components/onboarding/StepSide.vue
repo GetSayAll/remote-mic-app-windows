@@ -5,9 +5,12 @@
  * 窄栏/矮窗时由页面样式把本组件收进内容列（见 OnboardingPage.vue 的媒体查询）。
  */
 import type { SidePanel, StatusRowState } from "../../onboarding/panel";
-import { t } from "../../lib/i18n";
+import type { RemoteModel } from "../../lib/bridge";
+import { remoteArtwork } from "../../lib/remote-artwork";
+import { computed } from "vue";
 
-const props = defineProps<{ panel: SidePanel }>();
+const props = defineProps<{ panel: SidePanel; remoteModel?: RemoteModel }>();
+const artwork = computed(() => remoteArtwork(props.remoteModel ?? "unknown"));
 
 const GLYPH: Record<StatusRowState, string> = {
   pending: "○",
@@ -26,8 +29,8 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
       <img
         v-if="props.panel.visual === 'remote'"
         class="side-photo"
-        src="/RC003-remote-photo@2x.webp"
-        :alt="t('小米蓝牙语音遥控器示意图')"
+        :src="artwork.src"
+        :alt="artwork.alt"
         draggable="false"
       />
       <template v-else-if="props.panel.visual === 'app'">

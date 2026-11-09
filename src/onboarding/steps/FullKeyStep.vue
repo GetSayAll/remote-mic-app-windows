@@ -51,7 +51,7 @@ watch(
 <template>
   <section v-if="observeOnly" class="onboarding-step">
     <h1>{{ t("全按键支持") }}</h1>
-    <p class="onboarding-lede">{{ t("当前遥控器的普通按键仅供查看。你可以继续设置听写。") }}</p>
+    <p class="onboarding-lede">{{ t("Chromecast 可在「按键」页配置普通按键。这里可以直接继续设置听写。") }}</p>
   </section>
   <section v-else class="onboarding-step">
     <h1>{{ t("开启全按键支持") }}</h1>

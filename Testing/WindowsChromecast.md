@@ -32,11 +32,42 @@ input method listening, or text in the correct draft) and the failure phase.
 Use the tray to exit the preview before starting another build or regular
 SayAll. The portable preview does not perform an in-place update.
 
+## Configure and verify ordinary buttons
+
+1. Connect the Chromecast Voice Remote and open the button configuration page.
+   The image and selectable keys should match the selected remote, including
+   when returning from a temporary disconnect.
+2. Enable button mappings. Pick an ordinary key and a gesture, then select
+   the keyboard shortcut action. For example, set single click to
+   `Shift+Enter` and double click to a different shortcut. Test with a
+   disposable draft that can show the shortcut's effect without posting.
+3. For a key with triple click configured, verify one tap executes only its
+   single action, two taps execute only its double action, and three taps
+   execute only its triple action. Test a long hold and release separately,
+   including the hold-repeat option for a repeatable action.
+4. Test each physical key's down and release, plus any original Windows action.
+   A button that sends only infrared or produces no observable HID report
+   cannot run a SayAll mapping. Windows may also execute the native action for
+   a Bluetooth key. Record the key name, gesture, result and native effect
+   without including any device paths.
+5. Restart the preview, check the Cast mappings persist, and switch between
+   the Cast and Xiaomi remotes to confirm that their button settings stay
+   separate and that queued gestures are discarded on a device change.
+
 ## Implementation
 
 - The paired-device scan recognizes `Chromecast Remote`, exposes `chromecast` through IPC, and reuses SayAll's WinRT GATT subscription, generation filtering, reconnect, shutdown and WASAPI output paths.
 - Chromecast allows the documented ATVV 0.4 and 1.0 capability combinations. Version 1 notifications decode immediately; a sync before stream start survives until first audio. Version 0.4 validates each frame header before decoding, and 8 kHz PCM is duplicated to the existing 16 kHz output path. This simple rate conversion needs listening acceptance. Xiaomi retains its existing frame policy.
-- Raw Input observes Google reports only when the pinned VID/PID and the selected ready Bluetooth target agree. It recognizes report 1 button indices and report 2 little-endian consumer usages. Google observations do not trigger mappings or macros. Windows can still perform native actions on these keys.
+- Raw Input accepts Google events only when the pinned VID/PID and the selected
+  ready Bluetooth target agree. It recognizes report 1 button indices, report 2
+  consumer usages and supported keyboard events. A key uses one report source
+  per target session so duplicate delivery cannot turn one press into a multi-click.
+- Ordinary Google keys use the shared gesture and action engine with an empty,
+  independently persisted default mapping. Triple click adds a 300 ms interval
+  between clicks only for keys with that action configured. A disabled mapping
+  leaves the original event to Windows. Windows may
+  still perform the original action, such as Enter on the center button, so
+  check the native effect before relying on a mapping in a real draft.
 - Chromecast uses separate start and first-PCM deadlines. Recovery closes the failed session and invalidates its callback generation, so the next recording requires another press. Xiaomi F5 suppression is scoped to the Xiaomi path.
 - Xiaomi's optional enhanced capture helper is unavailable for Chromecast. The enable command rejects it, startup reconciliation excludes it, and the UI disables the control. Do not claim full-key support or transplant the Xiaomi helper's hardware selector into a Google device.
 - The diagram is an original SVG schematic; no vRemoter branding or pictures were copied.
@@ -56,7 +87,7 @@ Standard: LT-TEST-001 1.0.0. Native Rust protocol/unit tests and Vue component/c
 1. Pair manually with Windows Bluetooth settings; hold Back + Home to enter pairing mode. Record model/firmware and protocol version without logging device addresses.
 2. Select the remote explicitly; verify capabilities and connected model. Start/stop quickly, hold longer than 10 seconds, and verify PCM arrives at the selected CABLE endpoint and the input tool produces text in the intended draft.
 3. Test cold first press, 30 repeated dictations, disconnect while speaking, reconnect, sleep/wake, exit while held, and stale-generation notifications. Verify no stuck modifiers or lost draft.
-4. Test each physical button and release, including direct transitions and repeat. Record which report format reaches Windows Raw Input and whether native actions also occur. Check that Google observations never execute a SayAll mapping or macro and that physical keyboard F5 still reaches Chrome.
+4. Run the ordinary-button matrix above. Check that disabled Cast actions generate no synthetic key and that physical keyboard F5 still reaches Chrome.
 5. Verify unknown firmware/report IDs are rejected, two connected remotes remain isolated, and Xiaomi RC001 / RC003 regression still passes independently.
 6. Enhanced per-device capture requires a separately reviewed Google implementation and native acceptance; it is not implemented here.
 
@@ -76,3 +107,11 @@ Standard: LT-TEST-001 1.0.0. Native Rust protocol/unit tests and Vue component/c
   update lifecycle are deferred. Use an isolated session and exit gracefully.
 
 Current verdict: **development prototype; native functionality unverified**.
+
+## Later local device evidence (2026-11-09)
+
+The prior preview reached ATVV Ready on a reconnect, matched one HID
+interface, enqueued PCM on repeated presses, and passed the first-run wizard.
+The user reported voice input was available. This confirms the basic device
+path on this PC. The previous build had an observation-only button path,
+so these records do not establish that any ordinary key runs a mapping.

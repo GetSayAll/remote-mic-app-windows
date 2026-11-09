@@ -205,6 +205,7 @@ import {
   saveButtonMappings,
   startShortcutCapture,
   stopShortcutCapture,
+  testButtonMapping,
 } from "../lib/bridge";
 import type {
   ButtonMappings,
@@ -285,6 +286,7 @@ async function mountPage(model: "rc001" | "rc003" | "chromecast" | "unknown" = "
   await vi.waitFor(() => {
     if (!edgeHandler || !gestureHandler) throw new Error("事件订阅未完成");
   });
+  await flushPromises();
   mountedPages.push(wrapper);
   return wrapper;
 }
@@ -331,6 +333,7 @@ beforeEach(() => {
   vi.mocked(subscribeButtonGestures).mockClear();
   reportFrontendEventSpy.mockClear();
   vi.mocked(saveButtonMappings).mockClear();
+  vi.mocked(testButtonMapping).mockClear();
   // mockClear 只清调用记录，**不清实现**：学习输入框的默认实现要在每个用例里重置。
   vi.mocked(activateAppForLearning).mockClear();
   vi.mocked(activateAppForLearning).mockResolvedValue(undefined);
@@ -484,17 +487,72 @@ function confirmDialog(page: VueWrapper) {
 
 describe("buttons mapping page", () => {
   it("shows the Chromecast keys and keeps Xiaomi enhanced capture unavailable", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({ enabled: true, actions: {} });
     const page = await mountPage("chromecast");
     await flushPromises();
     expect(page.text()).toContain("Google Chromecast 语音遥控器");
     expect(page.findAll(".mapping-card").map((card) => card.text()).join(" ")).toContain("YouTube");
     expect(page.findAll(".mapping-card").map((card) => card.text()).join(" ")).toContain("Netflix");
     expect(page.text()).toContain("信源");
-    expect(page.text()).toContain("实验支持");
-    expect(page.findAll(".mapping-cell")).toHaveLength(0);
-    expect(page.text()).not.toContain("启用自定义按键功能");
+    expect(page.text()).toContain("部分按键可能同时触发 Windows 的原有操作");
+    expect(page.findAll(".mapping-cell")).toHaveLength(14 * 4);
+    expect(page.text()).toContain("启用自定义按键功能");
+    expect(page.text()).not.toContain("全按键支持");
+    expect(page.find(".voice-card .mapping-cell").exists()).toBe(false);
     expect(page.find('.remote-photo img').attributes('src')).toBe('/chromecast-remote.svg');
     expect(page.find('.remote-photo img').attributes('alt')).not.toContain('小米');
+    expect(getButtonMappings).toHaveBeenCalledWith("chromecast");
+  });
+
+  it("saves and tests distinct Chromecast gestures using the same shortcut and action editor", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({ enabled: true, actions: {} });
+    const page = await mountPage("chromecast");
+    const back = page.findAll(".mapping-card").find((card) => card.get("strong").text() === "返回")!;
+    const cell = (label: string) => back.findAll(".mapping-cell").find((item) => item.get("small").text() === label)!;
+    await cell("单击").trigger("click");
+    await page.get('.mapping-editor button[title="换行"]').trigger("click");
+    await flushPromises();
+    await cell("三击").trigger("click");
+    await page.get('.mapping-editor button[title="复制"]').trigger("click");
+    await flushPromises();
+    expect(saveButtonMappings).toHaveBeenLastCalledWith(expect.objectContaining({
+      actions: {
+        back: expect.objectContaining({
+          single: { type: "shortcut", chord: { keys: ["shift", "enter"] } },
+          triple: { type: "shortcut", chord: { keys: ["control", "c"] } },
+        }),
+      },
+    }), "chromecast");
+    expect(page.get(".mapping-editor").text()).toContain("打开应用");
+    expect(page.get(".mapping-editor").text()).toContain("组合动作");
+    await page.findAll(".mapping-editor button").find((button) => button.text() === "测试当前映射")!.trigger("click");
+    await flushPromises();
+    expect(testButtonMapping).toHaveBeenCalledWith("back", "triple", "chromecast");
+  });
+
+  it("keeps Cast artwork and mappings during reconnect and ignores a late save after switching models", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({ enabled: true, actions: {} });
+    const page = await mountPage("chromecast");
+    await page.setProps({
+      runtime: { ...runtime, platform: { ...runtime.platform, connection: {
+        ...runtime.platform.connection, remoteModel: "unknown", remoteName: null, phase: "reconnecting",
+      } } },
+    });
+    expect(page.get(".remote-photo img").attributes("src")).toBe("/chromecast-remote.svg");
+    expect(getButtonMappings).toHaveBeenCalledTimes(1);
+    let completeSave!: (value: ButtonMappings) => void;
+    vi.mocked(saveButtonMappings).mockImplementationOnce(() => new Promise((resolve) => { completeSave = resolve; }));
+    const back = page.findAll(".mapping-card").find((card) => card.get("strong").text() === "返回")!;
+    await back.findAll(".mapping-cell")[0]!.trigger("click");
+    await page.get('.mapping-editor button[title="换行"]').trigger("click");
+    await page.setProps({ runtime });
+    await flushPromises();
+    expect(page.get(".remote-photo img").attributes("src")).toBe("/RC003-remote-photo@2x.webp");
+    expect(page.find(".mapping-editor").exists()).toBe(false);
+    expect(getButtonMappings).toHaveBeenLastCalledWith(undefined);
+    completeSave({ enabled: false, actions: {} });
+    await flushPromises();
+    expect((page.get('.mapping-title-row input.toggle-input').element as HTMLInputElement).checked).toBe(true);
   });
   it("adds scanned apps to the library without changing button bindings", async () => {
     const wrapper = await mountPage();
@@ -900,6 +958,7 @@ describe("buttons mapping page", () => {
 
     await button("导入配置…").trigger("click");
     await vi.waitFor(() => expect(importButtonMappingConfiguration).toHaveBeenCalledOnce());
+    await flushPromises();
     expect(wrapper.text()).toContain("按键映射配置已导入并生效");
     const powerCard = wrapper
       .findAll(".mapping-card")

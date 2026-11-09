@@ -37,7 +37,7 @@ const distinctCount = computed(() => Math.min(3, observedButtons.value.size));
   <section class="onboarding-step">
     <h1>{{ observeOnly ? t("查看遥控器按键") : t("按一下遥控器的普通按键") }}</h1>
     <p v-if="observeOnly" class="onboarding-lede">
-      {{ t("普通按键仅供查看，可能仍会触发 Windows 的原有操作。你可以直接继续。") }}
+      {{ t("这一页只检查是否收到普通按键。你可以直接继续，之后到「按键」页配置单击、双击、三击和长按。") }}
     </p>
     <p v-else class="onboarding-lede">
       {{ t("请用遥控器上除语音键以外的按键，按 3 个不同的键（比如 主页 / OK / 方向键）。这一步只看按键能不能用，不会执行你以前配置的动作。") }}

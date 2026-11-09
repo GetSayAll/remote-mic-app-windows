@@ -1954,7 +1954,11 @@ fn gate_remote_connected(phase: ConnectionPhase) -> bool {
 /// 遥控器原生 F5、但 ATVV 会话尚未就绪的短暂建链窗口；稳定在线后继续由
 /// GATT 0x04 前置信号精确武装，失败/挂起/主动断开时不占用实体键盘 F5。
 fn apply_input_connection_phase(phase: ConnectionPhase, model: RemoteModel) {
-    crate::key_gate::set_remote_connected(gate_remote_connected(phase));
+    // The global gate is for Xiaomi. Cast actions are driven by identity-checked
+    // Raw Input and must never enable global phrase-panel or switcher swallowing.
+    crate::key_gate::set_remote_connected(
+        model != RemoteModel::Chromecast && gate_remote_connected(phase),
+    );
     if model == RemoteModel::Chromecast {
         crate::key_suppressor::clear_ble_guards();
     } else {

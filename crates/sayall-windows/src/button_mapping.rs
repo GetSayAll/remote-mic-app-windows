@@ -11,8 +11,8 @@
 //! 按住 = 长按动作（一次 tap）或连发 tap。注入失败记录到快照，不中断引擎。
 //!
 //! 护栏：
-//! - 注入只在门控存活时进行（key_gate 钩子线程未运行 → 不吞键 → 原始键照常
-//!   进系统；此时注入会造成双输入，因此引擎保持观察模式）；
+//! - 小米只在门控存活时注入。Chromecast 使用独立映射，只执行显式配置的动作，
+//!   不调用小米吞键或原生键回注；Windows 仍可能响应遥控器的原始事件。
 //! - 监听器停止/设备移除 → 释放全部按住状态并取消计时（不触发动作）；
 //! - 语音键不参与映射（RemoteButton 无语音键条目，保持 ATVV 实时生命周期）。
 //!
@@ -36,8 +36,10 @@ use crate::app_switcher::{self, AppSwitcherCommand, AppSwitcherIo, AppSwitcherSe
 use crate::button_gestures::GestureRecognizer;
 use crate::key_gate;
 use crate::raw_input::{
-    ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
+    ButtonEdge, ButtonStateMerger, ChromecastInput, RawInputSnapshot, RawKeyboardEvent,
+    RemoteButton,
 };
+use crate::remote_target::Target;
 use crate::send_input::{
     native_key, ButtonAction, ButtonActions, ButtonMappings, ButtonTrigger, KeyChord, KeyCode,
     MouseClickKind, MoveDirection, ScrollDirection,
@@ -100,10 +102,10 @@ pub enum EngineMessage {
     Keyboard(RawKeyboardEvent),
     /// 监听器观察到的一份 HID 报文 usage 集合（绝对状态）。
     HidUsages(BTreeSet<u16>),
-    ObserveChromecastButtons {
+    Chromecast {
         address: u64,
         target_generation: u64,
-        buttons: BTreeSet<RemoteButton>,
+        input: ChromecastInput,
     },
     /// 门控吞下的键盘边沿（已归因到遥控器）。
     GateEdge(ButtonEdge),
@@ -113,6 +115,7 @@ pub enum EngineMessage {
     DeviceRemoved,
     /// 按键映射已更新：重建手势配置。
     MappingsChanged,
+    ChromecastMappingsChanged,
     /// 键位方案覆盖层已更新：重建手势配置。
     ProfileOverlayChanged,
     /// 临时暂挂（向导第⑥步"只看不动"）：仍观察边沿与手势，但不执行任何动作。
@@ -683,14 +686,20 @@ fn effective_actions(
 }
 
 fn action_is_app_switcher(actions: &ButtonActions) -> bool {
-    [&actions.single, &actions.double, &actions.long]
-        .iter()
-        .any(|action| matches!(action, ButtonAction::AppSwitcher))
+    [
+        &actions.single,
+        &actions.double,
+        &actions.triple,
+        &actions.long,
+    ]
+    .iter()
+    .any(|action| matches!(action, ButtonAction::AppSwitcher))
 }
 
 /// 按键映射引擎运行时。持有句柄即运行；线程在 `Shutdown` 或通道关闭时退出。
 pub struct ButtonMappingRuntime {
     mappings: Arc<RwLock<ButtonMappings>>,
+    chromecast_mappings: Arc<RwLock<Arc<ButtonMappings>>>,
     /// 键位方案覆盖层：`None` = 无方案生效，完全走基础映射。
     /// 私有组件在前后台切换时更新；公开引擎只负责合并与执行。
     profile_overlay: Arc<RwLock<Option<ButtonMappings>>>,
@@ -713,6 +722,22 @@ impl ButtonMappingRuntime {
         snapshot: Arc<Mutex<RawInputSnapshot>>,
         macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
     ) -> Self {
+        Self::with_target_source(
+            injector,
+            usage,
+            snapshot,
+            macro_runtime,
+            crate::remote_target::current,
+        )
+    }
+
+    fn with_target_source(
+        injector: Arc<dyn MappingInjector>,
+        usage: Arc<UsageCounters>,
+        snapshot: Arc<Mutex<RawInputSnapshot>>,
+        macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
+        target_source: impl Fn() -> (Target, u64) + Send + 'static,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         // 门控把被吞键盘边沿直接投递到引擎通道（钩子线程闭包投递，无阻塞）。
         key_gate::set_edge_sink(Arc::new({
@@ -722,6 +747,7 @@ impl ButtonMappingRuntime {
             }
         }));
         let mappings = Arc::new(RwLock::new(ButtonMappings::default()));
+        let chromecast_mappings = Arc::new(RwLock::new(Arc::new(ButtonMappings::default())));
         let profile_overlay = Arc::new(RwLock::new(None));
         let state = Arc::new(Mutex::new(EngineState::default()));
         let edge_callbacks = Arc::new(RwLock::new(Vec::new()));
@@ -739,6 +765,7 @@ impl ButtonMappingRuntime {
 
         let runtime = Self {
             mappings: Arc::clone(&mappings),
+            chromecast_mappings: Arc::clone(&chromecast_mappings),
             profile_overlay: Arc::clone(&profile_overlay),
             sender,
             receiver: Mutex::new(Some(receiver)),
@@ -754,6 +781,7 @@ impl ButtonMappingRuntime {
             .name("sayall-button-mapping".to_owned())
             .spawn({
                 let mappings = Arc::clone(&mappings);
+                let chromecast_mappings = Arc::clone(&chromecast_mappings);
                 let profile_overlay = Arc::clone(&profile_overlay);
                 let state = Arc::clone(&state);
                 let snapshot = Arc::clone(&snapshot);
@@ -769,6 +797,7 @@ impl ButtonMappingRuntime {
                     engine_worker(
                         receiver,
                         mappings,
+                        chromecast_mappings,
                         profile_overlay,
                         state,
                         snapshot,
@@ -777,6 +806,7 @@ impl ButtonMappingRuntime {
                         injector,
                         usage,
                         macro_runtime,
+                        target_source,
                     )
                 }
             })
@@ -857,6 +887,21 @@ impl ButtonMappingRuntime {
         read_lock(&self.mappings).clone()
     }
 
+    pub fn set_chromecast_mappings(&self, mut mappings: ButtonMappings) {
+        mappings
+            .actions
+            .retain(|button, _| button.is_chromecast_mappable());
+        *self
+            .chromecast_mappings
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(mappings);
+        let _ = self.sender.send(EngineMessage::ChromecastMappingsChanged);
+    }
+
+    pub fn chromecast_mappings(&self) -> ButtonMappings {
+        (**read_lock(&self.chromecast_mappings)).clone()
+    }
+
     /// 组合动作运行时句柄（平台层在加载/保存组合动作后经它同步库快照）。
     pub fn macro_runtime(&self) -> Arc<crate::macro_runtime::MacroRuntime> {
         Arc::clone(&self.macro_runtime)
@@ -865,7 +910,11 @@ impl ButtonMappingRuntime {
     pub fn snapshot(&self) -> ButtonMappingSnapshot {
         let state = lock_state(&self.state);
         ButtonMappingSnapshot {
-            enabled: read_lock(&self.mappings).enabled,
+            enabled: if matches!(crate::remote_target::current().0, Target::Chromecast(_)) {
+                read_lock(&self.chromecast_mappings).enabled
+            } else {
+                read_lock(&self.mappings).enabled
+            },
             gate_active: key_gate::is_gate_thread_alive(),
             listener_active: key_gate::listener_active(),
             swallowed_edges: key_gate::swallowed_edge_count(),
@@ -886,6 +935,11 @@ impl ButtonMappingRuntime {
     pub fn launch_app_and_focus_now(&self, target: &str) -> Result<(), String> {
         let mappings = self.mappings();
         let profile = open_app_effective_profile(&mappings, target);
+        self.injector.launch_app_and_focus(target, profile.as_ref())
+    }
+
+    pub fn launch_chromecast_app_and_focus_now(&self, target: &str) -> Result<(), String> {
+        let profile = open_app_effective_profile(&self.chromecast_mappings(), target);
         self.injector.launch_app_and_focus(target, profile.as_ref())
     }
 
@@ -913,6 +967,18 @@ impl ButtonMappingRuntime {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(callback);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedButtonTarget<'a> {
+    value: (Target, u64),
+    source: &'a dyn Fn() -> (Target, u64),
+}
+
+impl ExpectedButtonTarget<'_> {
+    fn is_current(self) -> bool {
+        (self.source)() == self.value
     }
 }
 
@@ -955,6 +1021,7 @@ fn ok_context_click_applies(
     last_remote_move_at: Option<Instant>,
     now: Instant,
     injector: &Arc<dyn MappingInjector>,
+    chromecast: bool,
 ) -> bool {
     if !edge.is_pressed || edge.button != RemoteButton::Ok {
         return false;
@@ -989,7 +1056,7 @@ fn ok_context_click_applies(
         return false;
     }
     // 门控未运行时不注入：原始键可能未被吞（同 map_skip_inject 的理由）。
-    if !key_gate::is_gate_thread_alive() {
+    if !chromecast && !key_gate::is_gate_thread_alive() {
         crate::ble::gatt_note("map_ok_click action=skip reason=gate_not_alive".to_owned());
         return false;
     }
@@ -1126,6 +1193,7 @@ fn note_advance_ticks(repeat_runs: &mut RepeatRuns, ticks: Vec<(RemoteButton, Bu
 fn engine_worker(
     receiver: Receiver<EngineMessage>,
     mappings: Arc<RwLock<ButtonMappings>>,
+    published_cast_mappings: Arc<RwLock<Arc<ButtonMappings>>>,
     profile_overlay: Arc<RwLock<Option<ButtonMappings>>>,
     state: Arc<Mutex<EngineState>>,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
@@ -1134,16 +1202,13 @@ fn engine_worker(
     injector: Arc<dyn MappingInjector>,
     usage: Arc<UsageCounters>,
     macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
+    target_source: impl Fn() -> (Target, u64),
 ) {
     let mut merger = ButtonStateMerger::default();
-    let mut chromecast_observer = ButtonStateMerger::default();
-    let mut chromecast_key_held = false;
+    let no_overlay = Arc::new(RwLock::new(None));
+    let chromecast_mappings = Arc::new(RwLock::new(ButtonMappings::default()));
+    let mut applied_cast_mappings: Option<Arc<ButtonMappings>> = None;
     let mut recognizer = GestureRecognizer::new();
-    let initial_overlay = read_lock(&profile_overlay).clone();
-    recognizer.configure(&merged_mappings(
-        &read_lock(&mappings).clone(),
-        initial_overlay.as_ref(),
-    ));
     // 泄漏对冲标记：本次按住的原始键已泄漏进 OS（原生动作已交付）的按键。
     // 由 [`EngineMessage::Keyboard`]（泄漏路径）的按压边沿置位，Single 同键
     // 映射触发时消费并跳过注入；门控吞下的按压（[`EngineMessage::GateEdge`]）
@@ -1157,18 +1222,20 @@ fn engine_worker(
     let mut phrase_claimed: BTreeSet<RemoteButton> = BTreeSet::new();
     // OK 键上下文点击：最近一次由遥控器注入成功的鼠标移动时刻（5 秒窗口）。
     let mut last_remote_move_at: Option<Instant> = None;
-    let mut last_target_generation = crate::remote_target::current().1;
+    let mut last_target_generation = None;
+    let mut chromecast_active = false;
     // 应用切换器（Alt+Tab）临时会话：状态与计时都留在引擎线程，避免跨线程锁。
     let mut app_switcher = AppSwitcherSession::new();
 
     loop {
         let now = Instant::now();
-        // An observed Cast press must clear promptly on target loss, even if
+        // A Cast press must clear promptly on target loss, even if
         // Windows emits no device removal or key-up event.
         let timeout = [
             recognizer.next_deadline(),
             app_switcher.next_deadline(),
-            chromecast_key_held.then(|| now + Duration::from_millis(100)),
+            (chromecast_active && !merger.active_button_set().is_empty())
+                .then(|| now + Duration::from_millis(100)),
         ]
         .into_iter()
         .flatten()
@@ -1202,16 +1269,42 @@ fn engine_worker(
         };
 
         let now = Instant::now();
-        let (target, target_generation) = crate::remote_target::current();
-        if target_generation != last_target_generation {
-            // Cancel pending Xiaomi gestures and release Cast observations
-            // before either a gesture timer or the next HID report can run.
+        let target = ExpectedButtonTarget {
+            value: target_source(),
+            source: &target_source,
+        };
+        let target_generation = target.value.1;
+        chromecast_active = matches!(target.value.0, Target::Chromecast(_));
+        let (active_mappings, active_overlay) = if chromecast_active {
+            (&chromecast_mappings, &no_overlay)
+        } else {
+            (&mappings, &profile_overlay)
+        };
+        if chromecast_active {
+            let latest = Arc::clone(&read_lock(&published_cast_mappings));
+            if !applied_cast_mappings
+                .as_ref()
+                .is_some_and(|applied| Arc::ptr_eq(applied, &latest))
+            {
+                // Recognize and dispatch against the same revision. Observe
+                // edits before timers, even if the wakeup is an older input.
+                let io = InjectorAppSwitcherIo(injector.as_ref());
+                app_switcher.cancel(EndReason::MappingsChanged, now, &io);
+                drain_app_switcher_end(&mut app_switcher, &state);
+                recognizer.configure(&latest);
+                *chromecast_mappings
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = (*latest).clone();
+                finish_all_repeat_runs(&mut repeat_runs, "reconfigure");
+                applied_cast_mappings = Some(latest);
+            }
+        }
+        if Some(target_generation) != last_target_generation {
+            // Cancel pending gestures and held buttons before a timer or report
+            // can use the newly selected device's mappings.
             let io = InjectorAppSwitcherIo(injector.as_ref());
             app_switcher.cancel(EndReason::DeviceRemoved, now, &io);
             drain_app_switcher_end(&mut app_switcher, &state);
-            let releases = chromecast_observer.release_all();
-            publish_button_edges(&releases, &chromecast_observer, &snapshot, &edge_callbacks);
-            chromecast_key_held = false;
             reset_after_terminal_action(
                 "remote_target_changed",
                 &mut merger,
@@ -1221,10 +1314,57 @@ fn engine_worker(
                 &edge_callbacks,
                 &mut native_pending,
             );
+            merger.forget_chromecast_sources();
             injector.common_phrase_host().reset("remote_target_changed");
             phrase_claimed.clear();
             last_remote_move_at = None;
-            last_target_generation = target_generation;
+            recognizer.configure(&merged_mappings(
+                &read_lock(active_mappings),
+                read_lock(active_overlay).as_ref(),
+            ));
+            last_target_generation = Some(target_generation);
+        }
+        if matches!(
+            message.as_ref(),
+            Some(EngineMessage::Chromecast {
+                address,
+                target_generation,
+                input: ChromecastInput::CollectionRemoved,
+            }) if target.value == (Target::Chromecast(Some(*address)), *target_generation)
+        ) {
+            // A collection can disappear while ATVV remains connected. Cancel
+            // click/repeat timers before a pending action can use that source.
+            let io = InjectorAppSwitcherIo(injector.as_ref());
+            app_switcher.cancel(EndReason::DeviceRemoved, now, &io);
+            drain_app_switcher_end(&mut app_switcher, &state);
+            reset_after_terminal_action(
+                "chromecast_collection_removed",
+                &mut merger,
+                &mut recognizer,
+                &mut repeat_runs,
+                &snapshot,
+                &edge_callbacks,
+                &mut native_pending,
+            );
+            merger.forget_chromecast_sources();
+            injector
+                .common_phrase_host()
+                .reset("chromecast_collection_removed");
+            phrase_claimed.clear();
+            last_remote_move_at = None;
+            continue;
+        }
+        if chromecast_active {
+            match message.as_ref() {
+                Some(
+                    EngineMessage::ListenerStopped
+                    | EngineMessage::DeviceRemoved
+                    | EngineMessage::SetSuspended(_)
+                    | EngineMessage::ReleaseAppSwitcherForExit(_)
+                    | EngineMessage::Shutdown,
+                ) => recognizer.release_all(),
+                _ => {}
+            }
         }
 
         // Run due timers even while the queue stays busy. A target change above
@@ -1256,8 +1396,8 @@ fn engine_worker(
                     button,
                     trigger,
                     now,
-                    &mappings,
-                    &profile_overlay,
+                    active_mappings,
+                    active_overlay,
                     &state,
                     &gesture_callbacks,
                     &injector,
@@ -1265,6 +1405,7 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    target,
                 ) {
                     reset_after_terminal_action(
                         "lock_workstation",
@@ -1287,7 +1428,7 @@ fn engine_worker(
             EngineMessage::Keyboard(_)
             | EngineMessage::HidUsages(_)
             | EngineMessage::GateEdge(_)
-                if matches!(target, crate::remote_target::Target::Chromecast(_)) =>
+                if chromecast_active =>
             {
                 // Ignore queued Xiaomi inputs after switching to the Cast target.
             }
@@ -1319,6 +1460,7 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    target,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -1343,25 +1485,41 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    target,
                 );
             }
-            EngineMessage::ObserveChromecastButtons {
+            EngineMessage::Chromecast {
                 address,
                 target_generation,
-                buttons,
+                input,
             } => {
-                if crate::remote_target::current()
-                    != (
-                        crate::remote_target::Target::Chromecast(Some(address)),
-                        target_generation,
-                    )
+                if target.value != (Target::Chromecast(Some(address)), target_generation)
+                    || !target.is_current()
                 {
                     continue;
                 }
-                chromecast_key_held = !buttons.is_empty();
-                let edges = chromecast_observer.update_hid_buttons(buttons);
-                // The observation path cannot fire gestures or replay native keys.
-                publish_button_edges(&edges, &chromecast_observer, &snapshot, &edge_callbacks);
+                let edges = merger.update_chromecast(input);
+                handle_edges(
+                    edges,
+                    now,
+                    &mut merger,
+                    &mut recognizer,
+                    active_mappings,
+                    active_overlay,
+                    &state,
+                    &snapshot,
+                    &edge_callbacks,
+                    &gesture_callbacks,
+                    &injector,
+                    &usage,
+                    &mut native_pending,
+                    &mut repeat_runs,
+                    &mut phrase_claimed,
+                    &mut last_remote_move_at,
+                    &macro_runtime,
+                    &mut app_switcher,
+                    target,
+                );
             }
             EngineMessage::GateEdge(edge) => {
                 let now = Instant::now();
@@ -1389,17 +1547,10 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    target,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
-                let cast_releases = chromecast_observer.release_all();
-                publish_button_edges(
-                    &cast_releases,
-                    &chromecast_observer,
-                    &snapshot,
-                    &edge_callbacks,
-                );
-                chromecast_key_held = false;
                 let reason = match message {
                     EngineMessage::ListenerStopped => "listener_stopped",
                     _ => "device_removed",
@@ -1422,8 +1573,15 @@ fn engine_worker(
                 // 释放全部按住状态：取消所有手势计时，不触发动作。
                 recognizer.release_all();
                 let edges = merger.release_all();
+                merger.forget_chromecast_sources();
                 native_pending.clear();
                 finish_all_repeat_runs(&mut repeat_runs, "reset");
+                if chromecast_active {
+                    publish_button_edges(&edges, &merger, &snapshot, &edge_callbacks);
+                    phrase_claimed.clear();
+                    last_remote_move_at = None;
+                    continue;
+                }
                 let now = Instant::now();
                 handle_edges(
                     edges,
@@ -1444,11 +1602,14 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    target,
                 );
                 // 认领集合无需在此显式清理：被认领的按住都在上面 release_all
                 // 产生的释放边沿里配对消费并移出（见 handle_edges 释放分支）。
             }
-            EngineMessage::MappingsChanged | EngineMessage::ProfileOverlayChanged => {
+            EngineMessage::MappingsChanged | EngineMessage::ProfileOverlayChanged
+                if !chromecast_active =>
+            {
                 // 配置变化可能改变启动键的动作或总开关：先安全释放 Alt，
                 // 不让会话跨配置存活。
                 {
@@ -1478,6 +1639,9 @@ fn engine_worker(
                     overlay.is_some()
                 ));
             }
+            EngineMessage::ChromecastMappingsChanged
+            | EngineMessage::MappingsChanged
+            | EngineMessage::ProfileOverlayChanged => {}
             EngineMessage::SetSuspended(suspended) => {
                 if suspended {
                     // 暂挂（向导“只看不动”）不得遗留按住的 Alt。
@@ -1505,7 +1669,9 @@ fn engine_worker(
                     let io = InjectorAppSwitcherIo(injector.as_ref());
                     let was_active = app_switcher.is_active();
                     if !was_active {
-                        key_gate::set_app_switcher_mask(app_switcher::control_mask());
+                        if !chromecast_active {
+                            key_gate::set_app_switcher_mask(app_switcher::control_mask());
+                        }
                         injector.common_phrase_host().close("app_switcher");
                     }
                     let result = if was_active {
@@ -1576,8 +1742,9 @@ fn handle_edges(
     last_remote_move_at: &mut Option<Instant>,
     macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
     app_switcher: &mut AppSwitcherSession,
+    target: ExpectedButtonTarget<'_>,
 ) {
-    if edges.is_empty() {
+    if edges.is_empty() || !target.is_current() {
         return;
     }
     crate::ble::gatt_note(format!(
@@ -1596,7 +1763,13 @@ fn handle_edges(
     }
     publish_button_edges(&edges, merger, snapshot, edge_callbacks);
 
+    if matches!(target.value.0, Target::Chromecast(_)) && lock_state(state).suspended {
+        return;
+    }
     for edge in edges {
+        if !target.is_current() {
+            return;
+        }
         #[cfg(windows)]
         if edge.button == RemoteButton::Tv && edge.is_pressed {
             crate::lock_open_with_guard::note_tv_press();
@@ -1682,6 +1855,7 @@ fn handle_edges(
                     *last_remote_move_at,
                     now,
                     injector,
+                    matches!(target.value.0, Target::Chromecast(_)),
                 ) {
                     recognizer.swallow_press(edge.button);
                     Vec::new()
@@ -1734,6 +1908,7 @@ fn handle_edges(
                 last_remote_move_at,
                 macro_runtime,
                 app_switcher,
+                target,
             ) {
                 reset_after_terminal_action(
                     "lock_workstation",
@@ -1830,12 +2005,19 @@ fn fire_gesture(
     last_remote_move_at: &mut Option<Instant>,
     macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
     app_switcher: &mut AppSwitcherSession,
+    target: ExpectedButtonTarget<'_>,
 ) -> bool {
-    if matches!(
-        crate::remote_target::current().0,
-        crate::remote_target::Target::Chromecast(_)
-    ) {
+    if !target.is_current() {
         return false;
+    }
+    let chromecast = matches!(target.value.0, Target::Chromecast(Some(_)));
+    if matches!(target.value.0, Target::Chromecast(_)) && !chromecast {
+        return false;
+    }
+    if chromecast {
+        crate::ble::gatt_note(format!(
+            "map_gesture model=chromecast button={button:?} trigger={trigger:?}"
+        ));
     }
     let fired = FiredGesture { button, trigger };
     let suspended = {
@@ -1853,8 +2035,9 @@ fn fire_gesture(
     }
 
     let mappings = read_lock(mappings).clone();
-    // 门控未运行时不注入：原始键未被吞（或无法归因），注入会造成双输入。
-    if !mappings.enabled || !key_gate::is_gate_thread_alive() {
+    // 小米需要门控进程。Chromecast 从已归因的 Raw Input 触发显式映射，
+    // 不假定 Windows 原有按键动作已经被拦截。
+    if !mappings.enabled || (!chromecast && !key_gate::is_gate_thread_alive()) {
         if mappings.enabled {
             crate::ble::gatt_note(format!(
                 "map_skip_inject reason=gate_not_alive enabled={} gate_alive=false button={:?} trigger={:?}",
@@ -1866,12 +2049,18 @@ fn fire_gesture(
         }
         return false;
     }
-    crate::button_profiles::current_button_profile_host().sync_foreground();
+    if !chromecast {
+        crate::button_profiles::current_button_profile_host().sync_foreground();
+    }
     let overlay = read_lock(profile_overlay).clone();
     let overlay_actions = overlay
         .as_ref()
         .and_then(|overlay| overlay.actions.get(&button));
     let action = effective_action(&mappings, overlay.as_ref(), button, trigger);
+    if chromecast && action == ButtonAction::Disabled {
+        // Cast never suppresses the native event, so there is nothing to replay.
+        return false;
+    }
     if overlay_actions.is_some() && action == ButtonAction::Disabled {
         // 方案显式设为「不执行操作」：消费本次手势，不回注原生键。
         // 与基础映射的 Disabled 不同——后者需要回注原生键避免吞键。
@@ -2100,7 +2289,9 @@ fn fire_gesture(
             if !was_active {
                 // 会话期间 OK/返回/方向/TV 由门控直接吞下：这些键即使没有
                 // 映射，原生动作也会漏进系统切换器或目标应用。
-                key_gate::set_app_switcher_mask(app_switcher::control_mask());
+                if !chromecast {
+                    key_gate::set_app_switcher_mask(app_switcher::control_mask());
+                }
                 // 常用语面板也认领方向/OK；两个短时窗口不能同时存在。
                 injector.common_phrase_host().close("app_switcher");
             }
@@ -2418,6 +2609,115 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chromecast_scoped_taps_dispatch_shift_enter_and_deduplicate_twins() {
+        // The runtime's normal shutdown clears the process-wide switcher mask.
+        // Serialize with the Xiaomi tests that assert that mask while active.
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::with_target_source(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+            || (Target::Chromecast(Some(123)), 4),
+        );
+        let shortcut = |keys| ButtonAction::Shortcut {
+            chord: KeyChord { keys },
+        };
+        let mut xiaomi = ButtonMappings::default();
+        xiaomi.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: shortcut(vec![KeyCode::Escape]),
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(xiaomi);
+        let mut chromecast = ButtonMappings::default();
+        chromecast.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: shortcut(vec![KeyCode::LeftShift, KeyCode::Enter]),
+                double: shortcut(vec![KeyCode::LeftControl, KeyCode::Enter]),
+                triple: shortcut(vec![KeyCode::LeftAlt, KeyCode::Enter]),
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_chromecast_mappings(chromecast);
+
+        let sender = runtime.sender();
+        let send = |target_generation, input| {
+            sender
+                .send(EngineMessage::Chromecast {
+                    address: 123,
+                    target_generation,
+                    input,
+                })
+                .unwrap();
+        };
+        let hid = |button: Option<RemoteButton>| ChromecastInput::Hid {
+            report_id: 1,
+            buttons: button.into_iter().collect(),
+        };
+        let tap = || {
+            send(4, hid(Some(RemoteButton::Ok)));
+            send(4, hid(None));
+            // Windows may forward a complete keyboard twin after the HID tap.
+            // It must not become another tap in the click count.
+            for is_pressed in [true, false] {
+                send(
+                    4,
+                    ChromecastInput::Keyboard(ButtonEdge {
+                        button: RemoteButton::Ok,
+                        is_pressed,
+                    }),
+                );
+            }
+        };
+        send(3, hid(Some(RemoteButton::Ok)));
+        send(3, hid(None));
+        send(4, hid(Some(RemoteButton::Up)));
+        send(4, hid(None));
+        tap();
+        assert!(wait_until(
+            || !injector.taps.lock().unwrap().is_empty(),
+            Duration::from_secs(2),
+        ));
+        assert_eq!(
+            *injector.taps.lock().unwrap(),
+            vec![KeyChord {
+                keys: vec![KeyCode::LeftShift, KeyCode::Enter],
+            }]
+        );
+        tap();
+        tap();
+        assert!(wait_until(
+            || injector.taps.lock().unwrap().len() >= 2,
+            Duration::from_secs(2),
+        ));
+        tap();
+        tap();
+        tap();
+        assert!(wait_until(
+            || injector.taps.lock().unwrap().len() >= 3,
+            Duration::from_secs(2),
+        ));
+        assert_eq!(
+            injector.taps.lock().unwrap()[1..],
+            [
+                KeyChord {
+                    keys: vec![KeyCode::LeftControl, KeyCode::Enter],
+                },
+                KeyChord {
+                    keys: vec![KeyCode::LeftAlt, KeyCode::Enter],
+                },
+            ],
+        );
+    }
+
     fn mappings_with_single(button: RemoteButton, key: KeyCode) -> ButtonMappings {
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
@@ -2551,6 +2851,7 @@ mod tests {
             ButtonActions {
                 single: single(KeyCode::Enter),
                 double: single(KeyCode::Space),
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
@@ -3706,6 +4007,7 @@ mod tests {
                         keys: vec![KeyCode::Space],
                     },
                 },
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
@@ -3989,6 +4291,7 @@ mod tests {
                         keys: vec![KeyCode::Space],
                     },
                 },
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: Some(ButtonTrigger::Single),
                 ok_context_click: false,

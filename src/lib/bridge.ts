@@ -136,7 +136,7 @@ export type RemoteButton =
   | "netflix"
   | "input";
 
-export type ButtonTrigger = "single" | "double" | "long";
+export type ButtonTrigger = "single" | "double" | "triple" | "long";
 
 export interface ButtonEdge {
   button: RemoteButton;
@@ -438,10 +438,11 @@ export interface AppFocusProfile {
   point?: RecordedPoint;
 }
 
-/** 每键三列（单击/双击/长按），对齐 Mac 原版 ButtonTrigger。 */
+/** 普通按键的动作。早期配置没有三击槽位，读取时视为未配置。 */
 export interface ButtonActions {
   single: ButtonAction;
   double: ButtonAction;
+  triple?: ButtonAction;
   long: ButtonAction;
   /**
    * 「按住连续触发」指定的槽位（单击或长按；缺省 = 关闭）。
@@ -1518,41 +1519,43 @@ export async function stopRawInput(): Promise<RawInputSnapshot> {
   return invoke<RawInputSnapshot>("stop_raw_input");
 }
 
-export async function getButtonMappings(): Promise<ButtonMappings> {
+export type ButtonMappingModel = "chromecast";
+
+export async function getButtonMappings(remoteModel?: ButtonMappingModel): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
     return { enabled: true, actions: {} };
   }
-  return invoke<ButtonMappings>("get_button_mappings");
+  return invoke<ButtonMappings>("get_button_mappings", { remoteModel });
 }
 
-export async function saveButtonMappings(mappings: ButtonMappings): Promise<ButtonMappings> {
+export async function saveButtonMappings(mappings: ButtonMappings, remoteModel?: ButtonMappingModel): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法保存按键映射");
   }
-  return invoke<ButtonMappings>("save_button_mappings", { mappings });
+  return invoke<ButtonMappings>("save_button_mappings", { mappings, remoteModel });
 }
 
-export async function resetButtonMappings(): Promise<ButtonMappings> {
+export async function resetButtonMappings(remoteModel?: ButtonMappingModel): Promise<ButtonMappings> {
   if (!isTauriRuntime()) {
     return { enabled: true, actions: {} };
   }
-  return invoke<ButtonMappings>("reset_button_mappings");
+  return invoke<ButtonMappings>("reset_button_mappings", { remoteModel });
 }
 
 /** 返回 false 表示用户在系统文件选择器中取消。 */
-export async function exportButtonMappingConfiguration(): Promise<boolean> {
+export async function exportButtonMappingConfiguration(remoteModel?: ButtonMappingModel): Promise<boolean> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法导出按键映射配置");
   }
-  return invoke<boolean>("export_button_mapping_configuration");
+  return invoke<boolean>("export_button_mapping_configuration", { remoteModel });
 }
 
 /** 返回 null 表示用户在系统文件选择器中取消。 */
-export async function importButtonMappingConfiguration(): Promise<ButtonMappings | null> {
+export async function importButtonMappingConfiguration(remoteModel?: ButtonMappingModel): Promise<ButtonMappings | null> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法导入按键映射配置");
   }
-  return invoke<ButtonMappings | null>("import_button_mapping_configuration");
+  return invoke<ButtonMappings | null>("import_button_mapping_configuration", { remoteModel });
 }
 
 /**
@@ -1611,11 +1614,12 @@ export async function dispatchButtonProfilesCommand(
 export async function testButtonMapping(
   button: RemoteButton,
   trigger: ButtonTrigger,
+  remoteModel?: ButtonMappingModel,
 ): Promise<SendInputSnapshot> {
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法执行按键测试");
   }
-  return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger });
+  return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger, remoteModel });
 }
 
 export async function listPresetApps(): Promise<PresetAppInfo[]> {
@@ -2167,6 +2171,7 @@ export function buttonTriggerLabel(trigger: ButtonTrigger): string {
     {
       single: "单击",
       double: "双击",
+      triple: "三击",
       long: "长按",
     }[trigger],
   );
@@ -2210,8 +2215,9 @@ export type ShortcutCapability = "all" | "identity" | "none";
 export function shortcutCapability(
   button: RemoteButton,
   trigger: ButtonTrigger,
-  _model: RemoteModel,
+  model: RemoteModel,
 ): ShortcutCapability {
+  if (model === "chromecast") return "all";
   if (button === "power" || button === "menu") {
     return "all";
   }
