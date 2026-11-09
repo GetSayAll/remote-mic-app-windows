@@ -16,7 +16,7 @@ export interface AppAdaptationRow {
   /** `open_app` 的 target：自定义应用路径 / `shell:AppsFolder\...`，或预设应用 id。 */
   target: string;
   name: string;
-  /** 仅自定义应用有启动路径；预设应用为空。 */
+  /** 自定义应用的库路径，或内置预设探测到的真实可执行文件路径。 */
   path?: string;
   /** 内置预设：只允许清除显式档案，不删除应用库条目。 */
   preset: boolean;
@@ -97,6 +97,7 @@ export function buildAppRows(
     rows.push({
       target: preset.id,
       name: preset.name,
+      path: preset.path ?? undefined,
       preset: true,
       installed: preset.installed,
     });

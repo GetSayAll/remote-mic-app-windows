@@ -5,6 +5,7 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import {
   buttonLabel,
   buttonTriggerLabel,
+  getApplicationIcon,
   getButtonMappings,
   getCombinedActions,
   listPresetApps,
@@ -53,6 +54,8 @@ const addOpen = ref(false);
 const addError = ref<string | null>(null);
 const confirmDelete = ref(false);
 const notice = ref<{ text: string; tone: "success" | "error" } | null>(null);
+const appIcons = ref<Record<string, string>>({});
+const iconRequests = new Set<string>();
 let noticeTimer: number | null = null;
 
 const rows = computed(() =>
@@ -74,17 +77,21 @@ const fallbackProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
   return row?.preset ? presetFocusDefault(row.target, true) : null;
 });
+/** 没有真实路径的预设只剩产品默认值，用「恢复默认」语义；有路径的按普通 APP 展示。 */
+function isPresetPlaceholder(row: AppAdaptationRow | null): boolean {
+  return Boolean(row?.preset && !row.path);
+}
 const bindings = computed(() => {
   const row = selectedRow.value;
   return row ? findAppBindings(mappings.value.actions, row.target) : [];
 });
 const macroReferences = computed(() => {
   const row = selectedRow.value;
-  return row && !row.preset ? findMacroReferences(macroDefinitions.value, row.target) : [];
+  return row && row.path ? findMacroReferences(macroDefinitions.value, row.target) : [];
 });
 const deleteBlockedReason = computed<string | null>(() => {
   const row = selectedRow.value;
-  if (!row || row.preset) return null;
+  if (!row || isPresetPlaceholder(row)) return null;
   if (bindings.value.length) {
     return t("还有 {count} 处绑定在使用它，先解绑才能删除适配。", {
       count: bindings.value.length,
@@ -111,6 +118,21 @@ function selectRow(target: string): void {
   selectedTarget.value = target;
 }
 
+async function loadIcons(): Promise<void> {
+  for (const row of rows.value) {
+    if (!row.path || appIcons.value[row.target] !== undefined || iconRequests.has(row.target)) {
+      continue;
+    }
+    iconRequests.add(row.target);
+    try {
+      const icon = await getApplicationIcon(row.path);
+      if (icon) appIcons.value = { ...appIcons.value, [row.target]: icon };
+    } catch {
+      // 单个图标失败只回退到通用图标，不影响列表与配置。
+    }
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   loadError.value = null;
@@ -129,6 +151,7 @@ async function load(): Promise<void> {
       rows.value,
       props.initialTarget ?? lastSelectedTarget,
     );
+    void loadIcons();
   } catch (error) {
     console.warn("load app adaptation page failed", error);
     loadError.value = t("无法读取 APP 适配设置，请稍后重试。");
@@ -152,6 +175,7 @@ async function persist(next: ButtonMappings): Promise<boolean> {
   saving.value = true;
   try {
     mappings.value = await saveButtonMappings(mappingPayload(next));
+    void loadIcons();
     return true;
   } catch (error) {
     console.warn("save app adaptation failed", error);
@@ -204,26 +228,6 @@ function goToBinding(button: RemoteButton, trigger: ButtonTrigger): void {
     page: "buttons",
     params: { button, trigger },
   });
-}
-
-function tileInitial(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return "?";
-  const latin = /^[A-Za-z]/.exec(trimmed);
-  return (latin ? latin[0] : trimmed[0]).toLocaleUpperCase();
-}
-
-const TILE_COLORS = [
-  "linear-gradient(145deg, #3eb575, #16834b)",
-  "linear-gradient(145deg, #4d5565, #20242d)",
-  "linear-gradient(145deg, #4aa8e8, #1667a8)",
-  "linear-gradient(145deg, #e08a4a, #a84f16)",
-  "linear-gradient(145deg, #9a6ad6, #6236a8)",
-];
-function tileStyle(name: string): { background: string } {
-  let hash = 0;
-  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return { background: TILE_COLORS[hash % TILE_COLORS.length] };
 }
 
 watch(selectedTarget, (target) => {
@@ -291,12 +295,15 @@ onUnmounted(() => {
             :aria-current="selectedTarget === row.target ? 'true' : undefined"
             @click="selectRow(row.target)"
           >
-            <span class="app-tile" :style="tileStyle(row.name)" aria-hidden="true">{{ tileInitial(row.name) }}</span>
+            <span class="app-tile" aria-hidden="true">
+              <img v-if="appIcons[row.target]" :src="appIcons[row.target]" alt="" />
+              <svg v-else viewBox="0 0 24 24" fill="none">
+                <rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="1.6" />
+                <path d="M4 9h16" stroke="currentColor" stroke-width="1.6" />
+              </svg>
+            </span>
             <span class="app-row-text">
-              <span class="app-row-name">
-                {{ row.name }}
-                <span v-if="row.preset" class="inline-badge">{{ t("内置") }}</span>
-              </span>
+              <span class="app-row-name">{{ row.name }}</span>
               <span class="app-row-status">
                 {{ t(compactFocusLabel(effectiveAppProfile(row, mappings.focusProfiles))) }}
                 <template v-if="!row.installed"> · {{ t("应用未找到") }}</template>
@@ -311,13 +318,16 @@ onUnmounted(() => {
 
       <section v-if="selectedRow" class="panel detail-panel" :aria-label="t('{name} 的适配设置', { name: selectedRow.name })">
         <div class="app-head">
-          <span class="app-tile large" :style="tileStyle(selectedRow.name)" aria-hidden="true">{{ tileInitial(selectedRow.name) }}</span>
+          <span class="app-tile large" aria-hidden="true">
+            <img v-if="appIcons[selectedRow.target]" :src="appIcons[selectedRow.target]" alt="" />
+            <svg v-else viewBox="0 0 24 24" fill="none">
+              <rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="1.6" />
+              <path d="M4 9h16" stroke="currentColor" stroke-width="1.6" />
+            </svg>
+          </span>
           <div class="app-head-text">
-            <h2>
-              {{ selectedRow.name }}
-              <span v-if="selectedRow.preset" class="inline-badge">{{ t("内置预设") }}</span>
-            </h2>
-            <span class="app-path">{{ selectedRow.path ?? t("内置预设应用") }}</span>
+            <h2>{{ selectedRow.name }}</h2>
+            <span v-if="selectedRow.path" class="app-path">{{ selectedRow.path }}</span>
           </div>
         </div>
 
@@ -367,10 +377,10 @@ onUnmounted(() => {
           <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
           <template v-else>
             <button class="danger-button" type="button" :disabled="saving" @click="confirmDelete = true">
-              {{ selectedRow.preset ? t("恢复默认聚焦方式") : t("删除这个 APP 的适配") }}
+              {{ isPresetPlaceholder(selectedRow) ? t("恢复默认聚焦方式") : t("删除这个 APP 的适配") }}
             </button>
             <span class="hint">
-              {{ selectedRow.preset ? t("只清除 SayAll 保存的显式聚焦设置，不会修改 APP。") : t("只删除 SayAll 保存的适配，不会卸载 APP。") }}
+              {{ isPresetPlaceholder(selectedRow) ? t("只清除 SayAll 保存的显式聚焦设置，不会修改 APP。") : t("只删除 SayAll 保存的适配，不会卸载 APP。") }}
             </span>
           </template>
         </div>
@@ -389,11 +399,11 @@ onUnmounted(() => {
     <div v-if="confirmDelete && selectedRow" class="dialog-backdrop" @click.self="confirmDelete = false">
       <section class="confirm-dialog" role="dialog" aria-modal="true" :aria-labelledby="'delete-app-title'">
         <h2 id="delete-app-title">
-          {{ selectedRow.preset ? t("恢复「{name}」的默认聚焦？", { name: selectedRow.name }) : t("删除「{name}」的适配？", { name: selectedRow.name }) }}
+          {{ isPresetPlaceholder(selectedRow) ? t("恢复「{name}」的默认聚焦？", { name: selectedRow.name }) : t("删除「{name}」的适配？", { name: selectedRow.name }) }}
         </h2>
         <p class="muted">
           {{
-            selectedRow.preset
+            isPresetPlaceholder(selectedRow)
               ? t("只会清除 SayAll 保存的显式聚焦设置；APP 本身不会被修改或卸载。")
               : t("只会删除 SayAll 保存的适配设置（输入框学习记录、聚焦快捷键），不会卸载或改动 APP 本身。")
           }}
@@ -401,7 +411,7 @@ onUnmounted(() => {
         <div class="dialog-actions">
           <button class="secondary-button" type="button" :disabled="saving" @click="confirmDelete = false">{{ t("取消") }}</button>
           <button class="danger-button" type="button" :disabled="saving" @click="deleteAdaptation">
-            {{ selectedRow.preset ? t("恢复默认") : t("删除适配") }}
+            {{ isPresetPlaceholder(selectedRow) ? t("恢复默认") : t("删除适配") }}
           </button>
         </div>
       </section>
@@ -521,18 +531,30 @@ onUnmounted(() => {
   flex: 0 0 26px;
   display: grid;
   place-items: center;
+  overflow: hidden;
   border-radius: 7px;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  color: var(--muted);
+  background: var(--surface-subtle);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.app-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.app-tile svg {
+  width: 17px;
+  height: 17px;
 }
 .app-tile.large {
   width: 36px;
   height: 36px;
   flex-basis: 36px;
   border-radius: 9px;
-  font-size: 15px;
+}
+.app-tile.large svg {
+  width: 22px;
+  height: 22px;
 }
 .app-row-text {
   min-width: 0;
@@ -559,18 +581,6 @@ onUnmounted(() => {
 .app-row.selected .app-row-status {
   color: var(--accent-text);
   opacity: 0.78;
-}
-.inline-badge {
-  display: inline-flex;
-  margin-left: 4px;
-  padding: 0 5px;
-  border-radius: 999px;
-  color: var(--text-secondary);
-  background: rgba(31, 36, 48, 0.06);
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 15px;
-  vertical-align: 1px;
 }
 .add-app {
   min-height: 32px;

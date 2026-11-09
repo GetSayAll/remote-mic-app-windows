@@ -5,6 +5,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import AppsPage from "./AppsPage.vue";
 import {
   activateAppForLearning,
+  getApplicationIcon,
   getButtonMappings,
   getCombinedActions,
   learnFocusPoint,
@@ -37,10 +38,18 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       focusProfiles: {},
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    getApplicationIcon: vi.fn(async (path: string) =>
+      path.toLowerCase().endsWith("cursor.exe") ? "data:image/png;base64,AAAA" : null,
+    ),
     listPresetApps: vi.fn(async () => [
-      { id: "notepad", name: "记事本", installed: true },
-      { id: "chrome", name: "Chrome 浏览器", installed: true },
-      { id: "netease_music", name: "网易云音乐", installed: true },
+      { id: "notepad", name: "记事本", installed: true, path: "C:\\Windows\\System32\\notepad.exe" },
+      { id: "chrome", name: "Chrome 浏览器", installed: true, path: "C:\\Program Files\\Chrome\\chrome.exe" },
+      {
+        id: "netease_music",
+        name: "网易云音乐",
+        installed: true,
+        path: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
+      },
     ]),
     getCombinedActions: vi.fn(async () => ({ formatVersion: 1, definitions: [] })),
     activateAppForLearning: vi.fn(async () => undefined),
@@ -132,7 +141,7 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
   });
 
-  it("lists added apps first and configured presets after them", async () => {
+  it("lists added apps first and configured presets at their real paths", async () => {
     configureMappings({
       applications: [
         { name: "Cursor", path: "C:\\Apps\\Cursor.exe" },
@@ -148,14 +157,19 @@ describe("APP adaptation page", () => {
     expect(rows.map((row) => row.find(".app-row-name").text())).toEqual([
       "Cursor",
       "微信",
-      "网易云音乐 内置",
+      "网易云音乐",
     ]);
-    expect(rows[2].text()).toContain("内置");
+    expect(rows[2].text()).not.toContain("内置");
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
+    await rows[2].trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".detail-panel").text()).toContain(
+      "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
+    );
     expect(wrapper.find(".detail-panel").text()).toContain("只打开 APP");
   });
 
-  it("selects a preset and shows its built-in default focus", async () => {
+  it("selects a preset by its real path and keeps the explicit focus profile", async () => {
     configureMappings({
       focusProfiles: { chrome: { strategy: "open_only" } },
     });
@@ -164,8 +178,10 @@ describe("APP adaptation page", () => {
     await chromeRow!.trigger("click");
     await flushPromises();
 
-    expect(wrapper.find(".detail-panel").text()).toContain("内置预设");
-    expect(wrapper.find(".detail-panel").text()).toContain("只打开 APP");
+    const detail = wrapper.find(".detail-panel").text();
+    expect(detail).toContain("C:\\Program Files\\Chrome\\chrome.exe");
+    expect(detail).not.toContain("内置预设");
+    expect(detail).toContain("只打开 APP");
     // 显式档案覆盖内置快捷键默认值。
     expect(wrapper.find(".focus-editor").text()).toContain("只打开");
   });
@@ -333,20 +349,40 @@ describe("APP adaptation page", () => {
     expect(wrapper.text()).toContain("已删除这个 APP 的适配");
   });
 
-  it("keeps preset profile deletion safe: clear explicit profile only", async () => {
+  it("shows an installed preset at its real path and deletes only its profile", async () => {
     configureMappings({
       focusProfiles: { chrome: { strategy: "open_only" } },
     });
     const wrapper = await mountPage();
-    await wrapper.findAll("button").find((button) => button.text() === "恢复默认聚焦方式")!.trigger("click");
+    expect(wrapper.find(".detail-panel").text()).toContain(
+      "C:\\Program Files\\Chrome\\chrome.exe",
+    );
+    expect(wrapper.find(".detail-panel").text()).not.toContain("内置预设");
+    await wrapper.findAll("button").find((button) => button.text() === "删除这个 APP 的适配")!.trigger("click");
     await flushPromises();
-    await wrapper.findAll("button").find((button) => button.text() === "恢复默认")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "删除适配")!.trigger("click");
     await flushPromises();
 
     const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      applications?: unknown;
       focusProfiles?: Record<string, unknown>;
     };
     expect(saved.focusProfiles ?? {}).toEqual({});
+    expect(saved.applications).toEqual([]);
+  });
+
+  it("loads the real application icon instead of a letter tile", async () => {
+    configureMappings({
+      applications: [{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }],
+    });
+    const wrapper = await mountPage();
+    await flushPromises();
+
+    expect(getApplicationIcon).toHaveBeenCalledWith("C:\\Apps\\Cursor.exe");
+    expect(wrapper.find(".app-tile img").attributes("src")).toBe(
+      "data:image/png;base64,AAAA",
+    );
+    expect(wrapper.find(".app-tile").text()).toBe("");
   });
 
   it("navigates from a binding to the matching button editor", async () => {
@@ -427,7 +463,6 @@ describe("APP adaptation page", () => {
     await wrapper.findAll("button").find((button) => button.text() === "测试打开与聚焦")!.trigger("click");
     await flushPromises();
     expect(testAppFocus).toHaveBeenCalledWith("C:\\Apps\\Cursor.exe");
-    expect(wrapper.text()).toContain("已发送测试请求");
   });
 
   it("does not crash when optional sources fail", async () => {

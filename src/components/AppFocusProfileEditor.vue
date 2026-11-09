@@ -133,9 +133,7 @@ async function selectStrategy(next: FocusStrategy): Promise<void> {
   clearLearnState();
   busy.value = true;
   try {
-    if (await props.save(profileForStrategy(next))) {
-      notice(t("聚焦方式已更新"));
-    } else {
+    if (!(await props.save(profileForStrategy(next)))) {
       notice(t("更新聚焦方式失败，请重试。"), "error");
     }
   } finally {
@@ -164,7 +162,6 @@ async function startFocusLearning(): Promise<void> {
     if (saved) {
       learnState.value = "captured";
       learnMessage.value = t("输入框学习成功。");
-      notice(t("输入框学习成功。"));
     } else {
       learnState.value = "error";
       learnMessage.value = t("保存输入框记录失败，请重试。");
@@ -217,7 +214,6 @@ async function finishPointRecording(requestGeneration: number): Promise<void> {
     if (saved) {
       pointState.value = "recorded";
       pointMessage.value = t("已记录位置（窗口大小变化超过 25% 时会拒绝点击，需要重新记录）");
-      notice(t("已记录点击位置"));
     } else {
       pointState.value = "error";
       pointMessage.value = t("保存点击位置失败，请重试。");
@@ -241,15 +237,13 @@ async function clearRecorded(): Promise<void> {
     strategy.value === "recorded_point"
       ? { strategy: "recorded_point" }
       : { strategy: "recorded_element" };
-  if (await props.save(next)) notice(t("已清除记录"));
-  else notice(t("清除记录失败，请重试。"), "error");
+  if (!(await props.save(next))) notice(t("清除记录失败，请重试。"), "error");
 }
 
 async function testFocus(): Promise<void> {
   if (controlsDisabled.value) return;
   try {
     await testAppFocus(props.target);
-    notice(t("已发送测试请求"));
   } catch (error) {
     console.warn("test app focus failed", error);
     notice(t("测试请求发送失败，请重试。"), "error");
@@ -334,15 +328,12 @@ function acceptCapturedKey(code: KeyCode, isPressed: boolean): void {
 
 async function saveShortcut(keys: KeyCode[]): Promise<void> {
   const profile: AppFocusProfile = { strategy: "app_shortcut", shortcut: { keys } };
-  if (await props.save(profile)) notice(t("聚焦快捷键已录入"));
-  else notice(t("保存聚焦快捷键失败，请重试。"), "error");
+  if (!(await props.save(profile))) notice(t("保存聚焦快捷键失败，请重试。"), "error");
 }
 
 async function clearShortcut(): Promise<void> {
   if (controlsDisabled.value) return;
-  if (await props.save({ strategy: "app_shortcut" })) {
-    notice(t("已清除聚焦快捷键"));
-  } else {
+  if (!(await props.save({ strategy: "app_shortcut" }))) {
     notice(t("清除聚焦快捷键失败，请重试。"), "error");
   }
 }
@@ -359,8 +350,8 @@ async function backToPrimary(): Promise<void> {
   const next: FocusStrategy = effective.value.recorded
     ? "recorded_element"
     : "auto_composer";
-  if (await props.save(profileForStrategy(next))) {
-    notice(t("已改回主聚焦方式"));
+  if (!(await props.save(profileForStrategy(next)))) {
+    notice(t("更新聚焦方式失败，请重试。"), "error");
   }
 }
 

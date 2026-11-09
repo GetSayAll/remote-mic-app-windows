@@ -30,7 +30,7 @@
 ### 1.3 已确认决策
 
 1. 首版范围：只做界面与计划；用户在查看设计后要求「开始做吧」，因此继续实现聚焦首版。
-2. APP 列表：原定与 Mac 一致，只列用户主动添加的 APP。M0 审计发现本机已有 `netease_music` 显式档案（`open_only`）；为避免移除按键页编辑器后配置被隐藏，实现改为「用户添加的 APP + 有显式档案的内置预设」。这是基于审计结果的实现假设，需用户在验收时复核。
+2. APP 列表：只列用户主动添加的 APP。M0 审计发现本机已有 `netease_music` 显式档案（`open_only`）；为避免配置被隐藏，带显式档案的内置预设也会出现在列表，但使用探测到的真实可执行文件路径展示，不显示「内置」标签；识别仍复用预设 target，避免改写既有按键与组合动作引用（2026-11-09 用户反馈后调整）。
 
 ### 1.5 实现结果（2026-11-09）
 
@@ -38,9 +38,12 @@
 
 - 侧栏「APP 适配」页、左列列表、右侧详情、空态。
 - 用户添加 APP + 有显式档案的内置预设列表；添加 APP 复用现有扫描对话框。
-- 聚焦方式五种策略；学习输入框、记录点击位置、APP 快捷键录入、测试打开与聚焦。
+- 预设应用探测真实可执行文件路径（App Paths / System32 / 安装候选 / 开始菜单 / AppsFolder），列表显示真实路径而不是「内置预设」。
+- 应用图标改为 Shell 提取真实 logo（EXE / 可解析的 Store AUMID）；提取失败才显示通用应用图标，不再显示首字母色块。
+- 聚焦方式五种策略；学习输入框、记录点击位置、APP 快捷键录入、测试打开与聚焦。成功修改不再弹顶部提示，只保留内联状态与错误提示。
 - 按键页和组合动作页改为只读摘要 + 「去配置」；可写控件统一在 APP 适配页。
 - 绑定反查（基础按键配置）、删除/恢复默认适配、跨页导航。
+- 窗口默认高度从 800 降为 720、最小高度 640（2026-11-09 用户反馈高 DPI 屏幕下窗口占满全屏）；宽度保持 1066.67，内容区高度不足时滚动。启动时显式按逻辑像素重设默认/最小尺寸并居中，避免 Tauri 初始窗口在高 DPI 会话里落到错误尺寸。
 - 中英文文案与 1066×800 空态浏览器走查。
 - 收尾：组合动作页删除残留的可写聚焦编辑器死代码；编辑器在改选策略/切换目标时作废进行中的学习与迟到回调，录入启动与卸载均成对释放后端捕获。
 
@@ -85,7 +88,7 @@
 
 | 事实 | 位置 |
 | --- | --- |
-| 窗口默认与最小尺寸 `1066.67 × 800`，侧栏 130，内容宽约 861 | `src-tauri/tauri.conf.json`、`src/styles.css` |
+| 窗口默认 `1066.67 × 720`、最小 `1066.67 × 640`，侧栏 130，内容宽约 861 | `src-tauri/tauri.conf.json`、`src/styles.css` |
 | 当前无「APP 适配」页、无导航项 | `src/navigation.ts`、`src/App.vue` |
 | 按键页内嵌完整聚焦编辑器：策略、学习输入框、记录点击位置、APP 快捷键、测试 | `src/pages/ButtonsPage.vue:2744` 起 |
 | 组合动作页也复制了一套聚焦编辑器 | `src/pages/MacrosPage.vue:2030` 起 |
@@ -129,7 +132,7 @@ Windows 的 `focusProfiles` 和 `applications` 是两张表：
 
 ### 3.2 页面布局
 
-以最小窗口 1066 × 800 设计：
+内容布局按 1066 宽设计；窗口默认高度 720、最小高度 640，高度不足时内容区滚动：
 
 - 标题栏 32 px。
 - 侧栏 130 px。
@@ -443,7 +446,7 @@ cargo check --workspace
 cargo check -p sayall-windows-app --features runtime-simulation
 ```
 
-本轮已执行（2026-11-09）：前端 663 passed / 10 skipped、`pnpm build` 与 `vue-tsc --noEmit` 通过；`cargo test --workspace -j 1` 全通过（`sayall-windows` 525 passed / 16 ignored，`sayall-windows-app` 207 passed / 1 ignored）。默认并行的 `cargo test --workspace` 曾在本地因内存耗尽失败（`STATUS_STACK_BUFFER_OVERRUN` / `LNK1102`），串行运行即为上述通过结果，未发现代码失败。
+本轮已执行（2026-11-09）：前端 664 passed / 10 skipped、`pnpm build` 与 `vue-tsc --noEmit` 通过；`cargo test --workspace -j 1` 全通过（`sayall-windows` 525 passed / 16 ignored，`sayall-windows-app` 207 passed / 1 ignored）。默认并行的 `cargo test --workspace` 曾在本地因内存耗尽失败（`STATUS_STACK_BUFFER_OVERRUN` / `LNK1102`），串行运行即为上述通过结果，未发现代码失败。
 
 新增/更新的前端测试：
 

@@ -15,9 +15,9 @@
       {
         "title": "SayAll 1.8.3",
         "width": 1066.67,
-        "height": 800,
+        "height": 720,
         "minWidth": 1066.67,
-        "minHeight": 800,
+        "minHeight": 640,
         "decorations": false,
         "resizable": true,
         "center": true,

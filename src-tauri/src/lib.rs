@@ -61,7 +61,8 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// 主窗口最小尺寸（逻辑像素），与 `tauri.conf.json` 的
 /// `width` / `height` / `minWidth` / `minHeight` 保持一致。
 const MAIN_WINDOW_MIN_WIDTH: f64 = 1066.67;
-const MAIN_WINDOW_MIN_HEIGHT: f64 = 800.0;
+const MAIN_WINDOW_MIN_HEIGHT: f64 = 640.0;
+const MAIN_WINDOW_DEFAULT_HEIGHT: f64 = 720.0;
 
 /// 内容区最小尺寸换算到物理像素。`WM_GETMINMAXINFO` / `WM_WINDOWPOSCHANGING`
 /// 使用窗口外框尺寸，调用方再补上非客户区边框。
@@ -83,15 +84,15 @@ mod main_window_size_tests {
 
     #[test]
     fn converts_minimum_to_physical_pixels() {
-        assert_eq!(min_window_inner_size(1.0), (1067, 800));
-        assert_eq!(min_window_inner_size(2.0), (2133, 1600));
-        assert_eq!(min_window_inner_size(1.5), (1600, 1200));
+        assert_eq!(min_window_inner_size(1.0), (1067, 640));
+        assert_eq!(min_window_inner_size(2.0), (2133, 1280));
+        assert_eq!(min_window_inner_size(1.5), (1600, 960));
     }
 
     #[test]
     fn invalid_scale_falls_back_to_one_x() {
-        assert_eq!(min_window_inner_size(0.0), (1067, 800));
-        assert_eq!(min_window_inner_size(f64::NAN), (1067, 800));
+        assert_eq!(min_window_inner_size(0.0), (1067, 640));
+        assert_eq!(min_window_inner_size(f64::NAN), (1067, 640));
     }
 }
 
@@ -3548,6 +3549,27 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
+/// 从可执行文件提取真实应用图标（PNG data URL）。失败返回 None，由前端显示通用图标。
+#[tauri::command]
+fn get_application_icon(path: String) -> Option<String> {
+    let shell = path.to_ascii_lowercase().starts_with("shell:appsfolder");
+    let png = if shell {
+        sayall_windows::transcript_capture_windows::icon_png_for_shell_item(&path).or_else(|| {
+            sayall_windows::registered_apps::resolve_registered_executable_path(&path).and_then(
+                |executable| {
+                    sayall_windows::transcript_capture_windows::icon_png_for_executable(&executable)
+                },
+            )
+        })
+    } else {
+        sayall_windows::transcript_capture_windows::icon_png_for_executable(&path)
+    }?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png)
+    ))
+}
+
 /// 「学习输入框」第一步：先打开/激活目标应用，不改变它的输入焦点。
 ///
 /// 对齐 Mac `recordCustomApplicationInput`：打开完成后才开始学习窗口，
@@ -5518,6 +5540,20 @@ pub fn run() {
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
             );
+            // tauri.conf 的窗口尺寸在部分高 DPI 会话里按创建时 DPI 解释，可能落到
+            // 540×404 逻辑像素。这里显式按逻辑像素设一次默认尺寸与最小尺寸，
+            // 保证 1066×720 的设计窗口在各缩放比例下一致。
+            if let Some(window) = main_window(app.handle()) {
+                let _ = window.set_min_size(Some(tauri::LogicalSize::new(
+                    MAIN_WINDOW_MIN_WIDTH,
+                    MAIN_WINDOW_MIN_HEIGHT,
+                )));
+                let _ = window.set_size(tauri::LogicalSize::new(
+                    MAIN_WINDOW_MIN_WIDTH,
+                    MAIN_WINDOW_DEFAULT_HEIGHT,
+                ));
+                let _ = window.center();
+            }
             // 常用语浮层窗口（可选私有组件）：窗口先建好并隐藏；组件未注入时能力不可用。
             let common_phrases_available = common_phrase_panel::install(app.handle());
             sayall_windows::gatt_note(format!(
@@ -6365,6 +6401,7 @@ pub fn run() {
         test_app_focus,
         activate_app_for_learning,
         list_preset_apps,
+        get_application_icon,
         pick_custom_app,
         scan_registered_apps,
         get_button_mapping_snapshot,
@@ -6509,6 +6546,7 @@ pub fn run() {
         test_app_focus,
         activate_app_for_learning,
         list_preset_apps,
+        get_application_icon,
         pick_custom_app,
         scan_registered_apps,
         get_button_mapping_snapshot,

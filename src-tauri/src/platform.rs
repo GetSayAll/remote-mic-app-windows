@@ -981,6 +981,7 @@ mod simulation {
                     id: app.id.to_owned(),
                     name: app.name.to_owned(),
                     installed: true,
+                    path: None,
                 })
                 .collect()
         }

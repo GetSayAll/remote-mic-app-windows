@@ -385,6 +385,8 @@ export interface PresetAppInfo {
   id: string;
   name: string;
   installed: boolean;
+  /** 探测到的真实可执行文件路径；Store 应用或未安装时为 null/缺省。 */
+  path?: string | null;
 }
 
 /** 打开应用后的聚焦方式（对齐 Rust `FocusStrategy`）。 */
@@ -1613,6 +1615,12 @@ export async function testButtonMapping(
     throw new Error("当前是浏览器预览，无法执行按键测试");
   }
   return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger });
+}
+
+/** 读取可执行文件的真实图标（PNG data URL）；浏览器预览返回 null。 */
+export async function getApplicationIcon(path: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>("get_application_icon", { path });
 }
 
 export async function listPresetApps(): Promise<PresetAppInfo[]> {

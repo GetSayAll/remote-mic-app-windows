@@ -17,9 +17,19 @@ import {
 } from "./app-adaptation";
 
 const PRESETS: PresetAppInfo[] = [
-  { id: "wechat", name: "微信", installed: true },
-  { id: "netease_music", name: "网易云音乐", installed: true },
-  { id: "chrome", name: "Chrome 浏览器", installed: true },
+  { id: "wechat", name: "微信", installed: true, path: "C:\\Apps\\Weixin.exe" },
+  {
+    id: "netease_music",
+    name: "网易云音乐",
+    installed: true,
+    path: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
+  },
+  {
+    id: "chrome",
+    name: "Chrome 浏览器",
+    installed: true,
+    path: "C:\\Program Files\\Chrome\\chrome.exe",
+  },
 ];
 
 function mappings(overrides: Partial<ButtonMappings> = {}): ButtonMappings {
@@ -48,13 +58,23 @@ describe("app adaptation rows", () => {
     ]);
     // 没有显式档案的预设不进入列表。
     expect(rows.some((row) => row.target === "wechat")).toBe(false);
-    expect(rows[2]).toMatchObject({ preset: true, name: "网易云音乐" });
+    expect(rows[2]).toMatchObject({
+      preset: true,
+      name: "网易云音乐",
+      path: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
+    });
   });
 
   it("can expose one preset that the caller navigated to", () => {
     const rows = buildAppRows([], {}, PRESETS, ["chrome"]);
     expect(rows).toEqual([
-      { target: "chrome", name: "Chrome 浏览器", preset: true, installed: true },
+      {
+        target: "chrome",
+        name: "Chrome 浏览器",
+        path: "C:\\Program Files\\Chrome\\chrome.exe",
+        preset: true,
+        installed: true,
+      },
     ]);
   });
 
