@@ -56,7 +56,6 @@ import {
   mouseMoveLabels,
   openAppLabel,
   openCommonPhraseExample,
-  pickCustomApp,
   registerCommonPhraseAvailability,
   registerPresetAppNames,
   registerMacroNames,
@@ -609,10 +608,14 @@ watch([presetApps, () => mappings.value.applications], () => {
   registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
 }, { deep: true });
 
-async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
+async function addScannedApps(
+  apps: CustomAppPick[],
+  source?: "scan" | "file",
+): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   appPickerError.value = null;
+  let savedOk = false;
   try {
     const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
     for (const app of apps) unique.set(app.path.toLowerCase(), app);
@@ -620,7 +623,10 @@ async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     appPickerOpen.value = false;
-    statusMessage.value = t("已添加 {count} 个应用，按键绑定未改变", { count: apps.length });
+    savedOk = true;
+    if (source !== "file") {
+      statusMessage.value = t("已添加 {count} 个应用，按键绑定未改变", { count: apps.length });
+    }
   } catch (cause) {
     appPickerError.value = operationErrorText(
       "add scanned apps failed",
@@ -630,13 +636,11 @@ async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
   } finally {
     busy.value = false;
   }
-}
-
-/** 打开原生文件选择器添加自定义应用，并应用到当前编辑格。 */
-async function addCustomApp(): Promise<void> {
-  const pick = await pickCustomApp();
-  if (!pick || !editingTarget.value) return;
-  applyAction({ type: "open_app", target: pick.path });
+  // 与旧「＋ 添加应用」保持一致：手动选一个程序时直接绑定当前编辑格；
+  // 扫描多选仍只入应用库，不改按键绑定。
+  if (savedOk && source === "file" && apps.length === 1 && editingTarget.value) {
+    applyAction({ type: "open_app", target: apps[0]!.path });
+  }
 }
 
 function selectButton(button: RemoteButton): void {
@@ -2413,15 +2417,14 @@ onUnmounted(() => {
             <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ openAppLabel(app.name) }}</button>
-            <!-- 扫描 / 添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
-            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">{{ t("扫描本机应用") }}</button>
+            <!-- 唯一添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
             <button
               class="chip add-app"
               type="button"
-              :title="t('从本机选择任意程序或快捷方式')"
-              @click="addCustomApp"
+              :title="t('扫描本机应用，或选择任意程序或快捷方式')"
+              @click="appPickerError = null; appPickerOpen = true"
             >
-              {{ t("＋ 添加应用") }}
+              {{ t("添加应用") }}
             </button>
           </div>
           <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile-summary">

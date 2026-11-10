@@ -777,3 +777,12 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   回眸按「SayAll」分组，不再落到「未知应用」；与个人中心统计的既有口径一致。旧录音
   manifest 缺应用身份时仍显示「未知应用」，不改写磁盘。落点：
   `crates/sayall-windows/src/transcript_capture_windows.rs`。
+
+- 2026-11-10（应用添加入口合并与 AppsFolder 补全，用户要求）：按键页与组合动作页不再并列
+  「扫描本机应用 / ＋ 添加应用」两个 chip，统一为一个「添加应用」入口；弹窗保留本机应用扫描，
+  并在页脚增加「选择程序或快捷方式」文件兜底。扫描把 AppsFolder 解析名为绝对 `.exe`/`.lnk`
+  路径的条目，以及 `{已知文件夹 GUID}\...` 条目（`SHGetKnownFolderPath` 解析）转为文件 target；
+  过滤 URL、文档、卸载程序与 `WindowsApps/SystemApps` 内部路径；`shell:AppsFolder\<AUMID>`
+  条目保持原样。按键页手动选一个程序时仍直接绑定当前编辑格（与旧「＋ 添加应用」一致）；
+  扫描多选仍只入应用库、不改绑定。组合动作页与 APP 适配页复用同一弹窗。落点：
+  `registered_apps.rs`、`RegisteredAppsDialog.vue`、`ButtonsPage.vue`、`MacrosPage.vue`。

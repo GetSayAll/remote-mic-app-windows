@@ -50,6 +50,10 @@ export default {
   "已添加": "Added",
   "正在添加…": "Adding…",
   "添加所选": "Add Selected",
+  "选择程序或快捷方式": "Choose a program or shortcut",
+  "扫描本机应用，或选择任意程序或快捷方式":
+    "Scan installed apps, or choose any program or shortcut",
+  "这个应用已经在列表里。": "This app is already in the list.",
   "（{count}）": " ({count})",
   "无法读取本机应用列表，请稍后重试。": "Couldn't read the list of installed apps. Please try again later.",
 } as Record<string, string>;

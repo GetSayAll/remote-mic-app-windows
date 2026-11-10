@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { scanRegisteredApps, type CustomAppPick } from "../lib/bridge";
+import { pickCustomApp, scanRegisteredApps, type CustomAppPick } from "../lib/bridge";
 import { t } from "../lib/i18n";
 const props = defineProps<{ knownApps: CustomAppPick[]; saving: boolean; saveError: string | null }>();
-const emit = defineEmits<{ close: []; add: [apps: CustomAppPick[]] }>();
+const emit = defineEmits<{
+  close: [];
+  add: [apps: CustomAppPick[], source?: "scan" | "file"];
+}>();
 const dialog = ref<HTMLDialogElement | null>(null);
 const apps = ref<CustomAppPick[]>([]);
 const selected = ref(new Set<string>());
+const pickedFromFile = new Set<string>();
 const query = ref("");
 const scanning = ref(false);
 const error = ref<string | null>(null);
@@ -26,10 +30,43 @@ function toggleAll(event: Event): void {
   for (const app of candidates.value) { if (checked) next.add(app.path); else next.delete(app.path); }
   selected.value = next;
 }
+/** 文件选择兜底：加入列表并勾选；提交时标记来源，按键页据此保持直接绑定。 */
+async function pickProgram(): Promise<void> {
+  if (props.saving || scanning.value) return;
+  const pick = await pickCustomApp();
+  if (!pick) return;
+  const key = pick.path.toLowerCase();
+  if (known.value.has(key)) {
+    error.value = "这个应用已经在列表里。";
+    return;
+  }
+  error.value = null;
+  query.value = "";
+  let entry = apps.value.find(app => app.path.toLowerCase() === key);
+  if (!entry) {
+    entry = pick;
+    apps.value = [...apps.value, entry];
+  }
+  const next = new Set(selected.value);
+  next.add(entry.path);
+  selected.value = next;
+  pickedFromFile.add(entry.path.toLowerCase());
+}
+function submit(): void {
+  const appsToAdd = selectedApps.value;
+  const source = appsToAdd.length === 1 && pickedFromFile.has(appsToAdd[0]!.path.toLowerCase())
+    ? "file"
+    : "scan";
+  emit("add", appsToAdd, source);
+}
 async function scan(): Promise<void> {
   if (scanning.value) return;
   scanning.value = true; error.value = null;
-  try { apps.value = await scanRegisteredApps(); selected.value = new Set(); }
+  try {
+    apps.value = await scanRegisteredApps();
+    selected.value = new Set();
+    pickedFromFile.clear();
+  }
   catch (cause) {
     // 原始错误只进控制台；界面给固定文案，英文模式也能翻译。
     console.warn(`scan registered apps failed: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -69,8 +106,17 @@ onMounted(() => {
     </div>
     <p v-if="error || saveError" class="error-text" role="alert">{{ error ? t(error) : saveError }}</p>
     <footer class="picker-footer">
+      <button
+        type="button"
+        class="secondary-button picker-pick"
+        :disabled="scanning || saving"
+        :title="t('从本机选择任意程序或快捷方式')"
+        @click="pickProgram"
+      >
+        {{ t("选择程序或快捷方式") }}
+      </button>
       <button type="button" class="secondary-button" :disabled="saving" @click="emit('close')">{{ t("取消") }}</button>
-      <button type="button" class="primary-button" :disabled="scanning || saving || !selectedApps.length" @click="emit('add', selectedApps)">{{ saving ? t('正在添加…') : t('添加所选') }}{{ t("（{count}）", { count: selectedApps.length }) }}</button>
+      <button type="button" class="primary-button" :disabled="scanning || saving || !selectedApps.length" @click="submit">{{ saving ? t('正在添加…') : t('添加所选') }}{{ t("（{count}）", { count: selectedApps.length }) }}</button>
     </footer>
   </dialog>
 </template>
@@ -90,5 +136,6 @@ onMounted(() => {
 .picker-app span { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
 .picker-app small { flex-shrink: 0; opacity: .65; }
 .picker-footer { justify-content: flex-end; margin-top: 16px; }
+.picker-pick { margin-right: auto; }
 input[type="checkbox"] { flex-shrink: 0; width: 16px; height: 16px; }
 </style>
