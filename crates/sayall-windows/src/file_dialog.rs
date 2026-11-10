@@ -80,6 +80,24 @@ pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
+/// 本地 Whisper 转写的三个输入文件；选择本身不会启动转写。
+#[derive(Clone, Copy)]
+pub enum WhisperInputFile {
+    Executable,
+    Model,
+    Audio,
+}
+
+#[cfg(windows)]
+pub fn pick_whisper_input_path(file: WhisperInputFile) -> Result<Option<PathBuf>, String> {
+    pick_dialog(DialogKind::Open, DialogFlavor::WhisperInput(file))
+}
+
+#[cfg(not(windows))]
+pub fn pick_whisper_input_path(_file: WhisperInputFile) -> Result<Option<PathBuf>, String> {
+    Err("文件选择器仅在 Windows 上可用".to_owned())
+}
+
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 enum DialogKind {
@@ -95,6 +113,7 @@ enum DialogFlavor {
     ButtonProfile,
     ButtonProfileExport,
     Audio,
+    WhisperInput(WhisperInputFile),
 }
 
 #[cfg(windows)]
@@ -188,6 +207,29 @@ fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>,
                     "SayAll-原始录音.wav",
                     "wav",
                 ),
+                DialogFlavor::WhisperInput(file) => match file {
+                    WhisperInputFile::Executable => (
+                        "选择 Whisper 转写程序",
+                        "Whisper 程序 (*.exe)",
+                        "*.exe",
+                        "",
+                        "exe",
+                    ),
+                    WhisperInputFile::Model => (
+                        "选择 Whisper 模型",
+                        "Whisper 模型 (*.bin)",
+                        "*.bin",
+                        "",
+                        "bin",
+                    ),
+                    WhisperInputFile::Audio => (
+                        "选择要转写的 WAV 音频",
+                        "WAV 音频 (*.wav)",
+                        "*.wav",
+                        "",
+                        "wav",
+                    ),
+                },
             };
         let title = wide(title_text);
         let filter_name = wide(filter_name_text);

@@ -38,6 +38,43 @@ mod startup;
 mod transcripts;
 mod updater;
 mod usage;
+mod whisper;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LocalWhisperFile {
+    Executable,
+    Model,
+    Audio,
+}
+
+#[tauri::command]
+async fn pick_local_whisper_file(
+    window: tauri::WebviewWindow,
+    kind: LocalWhisperFile,
+) -> Result<Option<String>, String> {
+    use sayall_windows::file_dialog::{pick_whisper_input_path, WhisperInputFile};
+
+    if window.label() != "main" {
+        return Err("whisper_access_denied".to_owned());
+    }
+    let kind = match kind {
+        LocalWhisperFile::Executable => WhisperInputFile::Executable,
+        LocalWhisperFile::Model => WhisperInputFile::Model,
+        LocalWhisperFile::Audio => WhisperInputFile::Audio,
+    };
+    let selected = tauri::async_runtime::spawn_blocking(move || pick_whisper_input_path(kind))
+        .await
+        .map_err(|_| "whisper_picker_failed".to_owned())?
+        .map_err(|_| "whisper_picker_failed".to_owned())?;
+    selected
+        .map(|path| {
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| "whisper_invalid_path".to_owned())
+        })
+        .transpose()
+}
 
 use diagnostics::DiagnosticReport;
 use membership::{
@@ -5408,6 +5445,9 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     let started = std::time::Instant::now();
     // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
     sayall_windows::key_host::shutdown_global();
+    if let Some(whisper) = app.try_state::<whisper::WhisperRuntime>() {
+        whisper.cancel_for_exit();
+    }
     // 会员组件收尾（2026-10-15）：私有实现在这里释放网络与凭据刷新任务，
     // 公开实现是 no-op。
     app.state::<AppState>().membership.shutdown();
@@ -6340,6 +6380,7 @@ pub fn run() {
                 agent_access: agent_access_store,
             });
             app.manage(recommendations::RecommendationsState::default());
+            app.manage(whisper::WhisperRuntime::default());
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
@@ -6461,6 +6502,9 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        pick_local_whisper_file,
+        whisper::transcribe_local_whisper,
+        whisper::cancel_local_whisper,
         get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
@@ -6605,6 +6649,9 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        pick_local_whisper_file,
+        whisper::transcribe_local_whisper,
+        whisper::cancel_local_whisper,
         get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
